@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"phantom-lancer/internal/codex"
+	"phantom-lancer/internal/codexgateway"
 	"phantom-lancer/internal/config"
 	"phantom-lancer/internal/events"
 	"phantom-lancer/internal/httpapi"
@@ -76,10 +77,15 @@ func main() {
 	hub := events.NewHub()
 	codexSvc := codex.NewService(runtimeSettings.CodexBinary, runtimeSettings.CodexHome, store, hub)
 	defer codexSvc.Close()
+	codexGatewaySvc := codexgateway.NewService(store, logger)
 	v2raySvc := v2ray.NewService(store, hub, cfg.DataDir, logger)
 	defer v2raySvc.Close()
 	imagesSvc := images.NewService(store, hub, cfg.DataDir, logger)
 	logsSvc := logcenter.NewService(store, cfg)
+	if err := codexGatewaySvc.Ensure(ctx); err != nil {
+		logger.Error("initialize codex gateway failed", "error", err)
+		os.Exit(1)
+	}
 	if err := imagesSvc.Ensure(ctx); err != nil {
 		logger.Error("initialize images settings failed", "error", err)
 		os.Exit(1)
@@ -93,7 +99,7 @@ func main() {
 			logger.Error("start embedded v2ray failed", "error", err)
 		}
 	}
-	api, err := httpapi.New(cfg, store, hub, codexSvc, v2raySvc, imagesSvc, logsSvc, staticFS, logger)
+	api, err := httpapi.New(cfg, store, hub, codexSvc, codexGatewaySvc, v2raySvc, imagesSvc, logsSvc, staticFS, logger)
 	if err != nil {
 		logger.Error("create api failed", "error", err)
 		os.Exit(1)

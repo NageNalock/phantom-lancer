@@ -127,6 +127,7 @@ jobs:
       contents: write
     env:
       ARTIFACT_NAME: ${{ needs.linux-amd64.outputs.artifact_name }}
+      GH_REPO: ${{ github.repository }}
       GH_TOKEN: ${{ github.token }}
       TAG_NAME: ${{ github.ref_name }}
 

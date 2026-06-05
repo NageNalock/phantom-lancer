@@ -1,5 +1,5 @@
 export type MainTab = "dashboard" | "codex" | "logs" | "images" | "v2ray" | "settings";
-export type CodexTab = "sessions" | "projects" | "permissions" | "activity";
+export type CodexTab = "sessions" | "projects" | "permissions" | "gateway" | "activity";
 export type Tone = "neutral" | "good" | "warn" | "danger";
 
 export interface AuthSession {
@@ -29,6 +29,17 @@ export interface CodexStatus {
   error?: string;
   binaryPath?: string;
   codexHome?: string;
+}
+
+export interface CodexGatewayStatus {
+  enabled?: boolean;
+  publicApiKeys?: number;
+  activeAccounts?: number;
+  totalAccounts?: number;
+  models?: number;
+  recentRequestCount?: number;
+  recentFailureCount?: number;
+  lastError?: string;
 }
 
 export interface V2RayStatus {
@@ -61,6 +72,7 @@ export interface ImageStatus {
 export interface DashboardSummary {
   workspaces?: { total?: number; items?: Workspace[] };
   codex?: CodexStatus;
+  codexGateway?: CodexGatewayStatus;
   images?: ImageStatus;
   v2ray?: V2RayStatus;
   pendingApprovals?: number;
@@ -105,6 +117,83 @@ export interface FileSettings {
 export interface SettingsPayload {
   file?: FileSettings;
   runtime?: RuntimeSettings;
+}
+
+export interface CodexGatewaySettings {
+  id?: string;
+  enabled?: boolean;
+  baseUrl?: string;
+  oauthAuthUrl?: string;
+  oauthTokenUrl?: string;
+  oauthClientId?: string;
+  oauthRedirectUri?: string;
+  requestTimeoutSeconds?: number;
+  refreshMarginSeconds?: number;
+  defaultInstructions?: string;
+  installationId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CodexGatewayAPIKey {
+  id: string;
+  name?: string;
+  status?: string;
+  lastUsedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CodexGatewayAccount {
+  id: string;
+  label?: string;
+  status?: string;
+  hasAccessToken?: boolean;
+  hasRefreshToken?: boolean;
+  expiresAt?: string;
+  plan?: string;
+  lastError?: string;
+  lastUsedAt?: string;
+  checkedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CodexGatewayModel {
+  id: string;
+  displayName?: string;
+  ownedBy?: string;
+  source?: string;
+  plans?: string[];
+  lastSeenAt?: string;
+  updatedAt?: string;
+}
+
+export interface CodexGatewayRequestLog {
+  id?: string;
+  requestId?: string;
+  apiKind?: string;
+  model?: string;
+  accountId?: string;
+  sourceIp?: string;
+  statusCode?: number;
+  errorCode?: string;
+  errorSource?: string;
+  errorMessage?: string;
+  latencyMs?: number;
+  streamed?: boolean;
+  inputTokens?: number;
+  outputTokens?: number;
+  createdAt?: string;
+}
+
+export interface CodexGatewayPayload {
+  status?: CodexGatewayStatus;
+  settings?: CodexGatewaySettings;
+  apiKeys?: CodexGatewayAPIKey[];
+  accounts?: CodexGatewayAccount[];
+  models?: CodexGatewayModel[];
+  requestLogs?: CodexGatewayRequestLog[];
 }
 
 export interface LogSource {
@@ -370,6 +459,7 @@ export interface AppData {
   permissionProfiles: PermissionProfile[];
   codexStatus: CodexStatus;
   codexSessions: CodexSession[];
+  codexGateway: CodexGatewayPayload;
   settings: SettingsPayload;
   v2ray: V2RayPayload;
   images: ImagesPayload;

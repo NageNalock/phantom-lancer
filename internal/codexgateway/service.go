@@ -1,0 +1,782 @@
+package codexgateway
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"regexp"
+	"strings"
+	"time"
+
+	"phantom-lancer/internal/auth"
+	"phantom-lancer/internal/storage"
+)
+
+const (
+	ErrorSourceClient  = "client"
+	ErrorSourceAccount = "account"
+	ErrorSourceOpenAI  = "openai"
+	ErrorSourceService = "service"
+)
+
+var secretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(authorization\s*[:=]\s*bearer\s+)[^\s"',]+`),
+	regexp.MustCompile(`(?i)((?:access|refresh|id)[_-]?token\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`),
+	regexp.MustCompile(`(?i)((?:api[_-]?key|password|passwd|secret)\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`),
+}
+
+type Service struct {
+	Store *storage.Store
+	Log   *slog.Logger
+}
+
+func NewService(store *storage.Store, logger *slog.Logger) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Service{Store: store, Log: logger}
+}
+
+func (s *Service) Ensure(ctx context.Context) error {
+	if err := s.Store.EnsureCodexGatewaySettings(ctx); err != nil {
+		return err
+	}
+	return s.SeedStaticModels(ctx)
+}
+
+func (s *Service) SeedStaticModels(ctx context.Context) error {
+	inputs := []storage.CodexGatewayModelInput{}
+	for _, model := range StaticModelInputs() {
+		inputs = append(inputs, storage.CodexGatewayModelInput{
+			ID:          model.ID,
+			DisplayName: model.DisplayName,
+			OwnedBy:     model.OwnedBy,
+			Source:      model.Source,
+		})
+	}
+	return s.Store.UpsertCodexGatewayModels(ctx, inputs)
+}
+
+type Status struct {
+	Enabled            bool   `json:"enabled"`
+	PublicAPIKeys      int    `json:"publicApiKeys"`
+	ActiveAccounts     int    `json:"activeAccounts"`
+	TotalAccounts      int    `json:"totalAccounts"`
+	Models             int    `json:"models"`
+	RecentRequestCount int    `json:"recentRequestCount"`
+	RecentFailureCount int    `json:"recentFailureCount"`
+	LastError          string `json:"lastError,omitempty"`
+}
+
+func (s *Service) Status(ctx context.Context) (Status, error) {
+	settings, err := s.Store.GetCodexGatewaySettings(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	keys, err := s.Store.ListCodexGatewayAPIKeys(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	accounts, err := s.Store.ListCodexGatewayAccounts(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	models, err := s.ListModels(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	total, failed, err := s.Store.CodexGatewayRecentRequestSummary(ctx, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		return Status{}, err
+	}
+	status := Status{Enabled: settings.Enabled, Models: len(models), RecentRequestCount: total, RecentFailureCount: failed}
+	for _, key := range keys {
+		if key.Status == "active" {
+			status.PublicAPIKeys++
+		}
+	}
+	for _, account := range accounts {
+		status.TotalAccounts++
+		if account.Status == "active" {
+			status.ActiveAccounts++
+		}
+	}
+	return status, nil
+}
+
+func (s *Service) CreateAPIKey(ctx context.Context, name string) (storage.CodexGatewayAPIKey, string, error) {
+	token, hash, err := auth.NewToken()
+	if err != nil {
+		return storage.CodexGatewayAPIKey{}, "", err
+	}
+	key, err := s.Store.CreateCodexGatewayAPIKey(ctx, name, hash)
+	return key, token, err
+}
+
+func (s *Service) RotateAPIKey(ctx context.Context, id string) (storage.CodexGatewayAPIKey, string, error) {
+	token, hash, err := auth.NewToken()
+	if err != nil {
+		return storage.CodexGatewayAPIKey{}, "", err
+	}
+	key, err := s.Store.RotateCodexGatewayAPIKey(ctx, id, hash)
+	return key, token, err
+}
+
+func (s *Service) VerifyPublicToken(ctx context.Context, token string) (storage.CodexGatewayAPIKeySecret, bool, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return storage.CodexGatewayAPIKeySecret{}, false, nil
+	}
+	key, err := s.Store.GetActiveCodexGatewayAPIKeyByHash(ctx, auth.HashToken(token))
+	if errors.Is(err, storage.ErrNotFound) {
+		return storage.CodexGatewayAPIKeySecret{}, false, nil
+	}
+	if err != nil {
+		return storage.CodexGatewayAPIKeySecret{}, false, err
+	}
+	_ = s.Store.MarkCodexGatewayAPIKeyUsed(context.WithoutCancel(ctx), key.ID)
+	return key, true, nil
+}
+
+func (s *Service) ListModels(ctx context.Context) ([]storage.CodexGatewayModel, error) {
+	models, err := s.Store.ListCodexGatewayModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(models) > 0 {
+		return models, nil
+	}
+	if err := s.SeedStaticModels(ctx); err != nil {
+		return nil, err
+	}
+	return s.Store.ListCodexGatewayModels(ctx)
+}
+
+type ModelRefreshResult struct {
+	Success  bool                        `json:"success"`
+	Accounts int                         `json:"accounts"`
+	Plans    map[string]int              `json:"plans"`
+	Errors   map[string]string           `json:"errors"`
+	Data     []storage.CodexGatewayModel `json:"data"`
+}
+
+func (s *Service) RefreshModelCatalog(ctx context.Context) (ModelRefreshResult, error) {
+	accounts, err := s.Store.ListCodexGatewayAccounts(ctx)
+	if err != nil {
+		return ModelRefreshResult{}, err
+	}
+	result := ModelRefreshResult{Success: true, Plans: map[string]int{}, Errors: map[string]string{}}
+	for _, account := range accounts {
+		if account.Status != "active" {
+			continue
+		}
+		route, err := s.prepareRouteForAccount(ctx, "", account.ID)
+		if err != nil {
+			result.Success = false
+			result.Errors[account.ID] = SanitizeError(err)
+			continue
+		}
+		if route.Account.AccessToken == "" {
+			result.Success = false
+			result.Errors[account.ID] = "missing access token"
+			continue
+		}
+		count, err := s.fetchAndStoreModelsForAccount(ctx, route.Account, route.Runtime, route.Account.Plan)
+		if err != nil {
+			result.Success = false
+			result.Errors[account.ID] = SanitizeError(err)
+			continue
+		}
+		result.Accounts++
+		plan := route.Account.Plan
+		if strings.TrimSpace(plan) == "" {
+			plan = "unknown"
+		}
+		result.Plans[plan] = count
+	}
+	data, err := s.ListModels(ctx)
+	if err != nil {
+		return ModelRefreshResult{}, err
+	}
+	result.Data = data
+	return result, nil
+}
+
+type UpstreamRoute struct {
+	Account storage.CodexGatewayAccountSecret
+	Runtime Runtime
+}
+
+type RouteError struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+func (e RouteError) Error() string { return e.Message }
+
+type UpstreamFailure struct {
+	Status              int
+	Code                string
+	Message             string
+	RetryAcrossAccounts bool
+}
+
+func (s *Service) SendResponses(ctx context.Context, model, accountID string, payload map[string]any) (UpstreamRoute, *http.Response, *UpstreamFailure, error) {
+	explicitAccount := strings.TrimSpace(accountID) != ""
+	excluded := []string{}
+	var lastRoute UpstreamRoute
+	var lastFailure *UpstreamFailure
+	for attempt := 0; attempt < 12; attempt++ {
+		route, err := s.prepareRouteForAccountExcluding(ctx, model, accountID, excluded)
+		if err != nil {
+			if lastFailure != nil {
+				return lastRoute, nil, lastFailure, nil
+			}
+			return route, nil, nil, err
+		}
+		lastRoute = route
+		attemptCtx, cancel := context.WithTimeout(ctx, route.Runtime.Timeout)
+		route, resp, err := s.doResponsesWithRefresh(attemptCtx, route, payload)
+		if err != nil {
+			cancel()
+			return route, nil, nil, err
+		}
+		if resp.StatusCode < 400 {
+			resp.Body = cancelOnClose{ReadCloser: resp.Body, cancel: cancel}
+			return route, resp, nil, nil
+		}
+		message := readLimitedText(resp.Body, 4096)
+		_ = resp.Body.Close()
+		cancel()
+		failure := classifyUpstreamFailure(resp.StatusCode, message)
+		if strings.TrimSpace(failure.Message) == "" {
+			failure.Message = fmt.Sprintf("Codex upstream returned HTTP %d", resp.StatusCode)
+		}
+		lastFailure = &failure
+		s.recordUpstreamFailure(context.WithoutCancel(ctx), route.Account.ID, failure)
+		if !explicitAccount && failure.RetryAcrossAccounts {
+			excluded = append(excluded, route.Account.ID)
+			continue
+		}
+		return route, nil, &failure, nil
+	}
+	if lastFailure != nil {
+		return lastRoute, nil, lastFailure, nil
+	}
+	return lastRoute, nil, nil, RouteError{Status: http.StatusServiceUnavailable, Code: "no_available_accounts", Message: "没有可用 Codex Gateway 账号"}
+}
+
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c cancelOnClose) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
+}
+
+func (s *Service) doResponsesWithRefresh(ctx context.Context, route UpstreamRoute, payload map[string]any) (UpstreamRoute, *http.Response, error) {
+	resp, err := NewClient(route.Runtime).DoResponses(ctx, route.Account.AccessToken, payload)
+	if err != nil {
+		return route, nil, err
+	}
+	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
+		return route, resp, nil
+	}
+	if route.Account.RefreshToken == "" {
+		return route, resp, nil
+	}
+	drainAndClose(resp.Body)
+	refreshed, err := s.refreshAccountAccessToken(ctx, route.Account, route.Runtime)
+	if err != nil {
+		_, _ = s.markRefreshFailure(context.WithoutCancel(ctx), route.Account.ID, err)
+		return route, nil, RouteError{Status: http.StatusBadGateway, Code: "account_refresh_failed", Message: "Codex Gateway 账号刷新失败"}
+	}
+	route.Account = refreshed
+	resp, err = NewClient(route.Runtime).DoResponses(ctx, route.Account.AccessToken, payload)
+	return route, resp, err
+}
+
+func (s *Service) prepareRouteForAccount(ctx context.Context, model, accountID string) (UpstreamRoute, error) {
+	return s.prepareRouteForAccountExcluding(ctx, model, accountID, nil)
+}
+
+func (s *Service) prepareRouteForAccountExcluding(ctx context.Context, model, accountID string, excluded []string) (UpstreamRoute, error) {
+	account, err := s.routeAccount(ctx, model, accountID, excluded)
+	if err != nil {
+		return UpstreamRoute{}, err
+	}
+	settings, err := s.Store.GetCodexGatewaySettings(ctx)
+	if err != nil {
+		return UpstreamRoute{}, err
+	}
+	if !settings.Enabled {
+		return UpstreamRoute{}, RouteError{Status: http.StatusServiceUnavailable, Code: "gateway_disabled", Message: "Codex Gateway 未启用"}
+	}
+	runtime := runtimeFromSettings(settings)
+	if account.AccessToken == "" {
+		if account.RefreshToken == "" {
+			return UpstreamRoute{}, RouteError{Status: http.StatusServiceUnavailable, Code: "account_missing_token", Message: "账号没有可用 token"}
+		}
+		refreshed, err := s.refreshAccountAccessToken(ctx, account, runtime)
+		if err != nil {
+			_, _ = s.markRefreshFailure(context.WithoutCancel(ctx), account.ID, err)
+			return UpstreamRoute{}, RouteError{Status: http.StatusBadGateway, Code: "account_refresh_failed", Message: "Codex Gateway 账号刷新失败"}
+		}
+		account = refreshed
+	} else if due, expired := tokenRefreshDue(account, time.Duration(settings.RefreshMarginSeconds)*time.Second); due && account.RefreshToken != "" {
+		refreshed, err := s.refreshAccountAccessToken(ctx, account, runtime)
+		if err != nil {
+			if expired {
+				_, _ = s.markRefreshFailure(context.WithoutCancel(ctx), account.ID, err)
+				return UpstreamRoute{}, RouteError{Status: http.StatusBadGateway, Code: "account_refresh_failed", Message: "Codex Gateway 账号刷新失败"}
+			}
+		} else {
+			account = refreshed
+		}
+	}
+	return UpstreamRoute{Account: account, Runtime: runtime}, nil
+}
+
+func (s *Service) routeAccount(ctx context.Context, model, accountID string, excluded []string) (storage.CodexGatewayAccountSecret, error) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		account, err := s.Store.SelectCodexGatewayAccountForModel(ctx, model, excluded)
+		if errors.Is(err, storage.ErrNotFound) {
+			message := "没有可用 Codex Gateway 账号"
+			if strings.TrimSpace(model) != "" {
+				message = "没有可用 Codex Gateway 账号支持该模型"
+			}
+			return storage.CodexGatewayAccountSecret{}, RouteError{Status: http.StatusServiceUnavailable, Code: "no_available_accounts", Message: message}
+		}
+		return account, err
+	}
+	account, err := s.Store.GetCodexGatewayAccountSecret(ctx, accountID)
+	if errors.Is(err, storage.ErrNotFound) {
+		return storage.CodexGatewayAccountSecret{}, RouteError{Status: http.StatusNotFound, Code: "account_not_found", Message: "Codex Gateway 账号不存在"}
+	}
+	if err != nil {
+		return storage.CodexGatewayAccountSecret{}, err
+	}
+	if account.Status != "active" {
+		return storage.CodexGatewayAccountSecret{}, RouteError{Status: http.StatusBadRequest, Code: "account_inactive", Message: "Codex Gateway 账号不是 active 状态"}
+	}
+	ok, err := s.Store.CodexGatewayAccountCanUseModel(ctx, account.CodexGatewayAccount, model)
+	if err != nil {
+		return storage.CodexGatewayAccountSecret{}, err
+	}
+	if !ok {
+		return storage.CodexGatewayAccountSecret{}, RouteError{Status: http.StatusBadRequest, Code: "model_not_supported", Message: "该账号 plan 不支持所选模型"}
+	}
+	return account, nil
+}
+
+func runtimeFromSettings(settings storage.CodexGatewaySettings) Runtime {
+	return Runtime{
+		BaseURL:        settings.BaseURL,
+		OAuthAuthURL:   settings.OAuthAuthURL,
+		OAuthTokenURL:  settings.OAuthTokenURL,
+		OAuthClientID:  settings.OAuthClientID,
+		Timeout:        time.Duration(settings.RequestTimeoutSeconds) * time.Second,
+		InstallationID: settings.InstallationID,
+	}
+}
+
+func (s *Service) RefreshAccount(ctx context.Context, id string) (storage.CodexGatewayAccount, error) {
+	secret, err := s.Store.GetCodexGatewayAccountSecret(ctx, id)
+	if err != nil {
+		return storage.CodexGatewayAccount{}, err
+	}
+	if secret.RefreshToken == "" {
+		return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "invalid", "", "缺少 refresh token")
+	}
+	settings, err := s.Store.GetCodexGatewaySettings(ctx)
+	if err != nil {
+		return storage.CodexGatewayAccount{}, err
+	}
+	runtime := runtimeFromSettings(settings)
+	runtime.Timeout = minDuration(runtime.Timeout, 30*time.Second)
+	if _, err := s.refreshAccountAccessToken(ctx, secret, runtime); err != nil {
+		return s.markRefreshFailure(ctx, id, err)
+	}
+	return s.CheckAccount(ctx, id)
+}
+
+func (s *Service) CheckAccount(ctx context.Context, id string) (storage.CodexGatewayAccount, error) {
+	secret, err := s.Store.GetCodexGatewayAccountSecret(ctx, id)
+	if err != nil {
+		return storage.CodexGatewayAccount{}, err
+	}
+	settings, err := s.Store.GetCodexGatewaySettings(ctx)
+	if err != nil {
+		return storage.CodexGatewayAccount{}, err
+	}
+	runtime := runtimeFromSettings(settings)
+	runtime.Timeout = minDuration(runtime.Timeout, 20*time.Second)
+	if secret.AccessToken == "" {
+		if secret.RefreshToken == "" {
+			return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "invalid", "", "缺少 access token 和 refresh token")
+		}
+		refreshed, err := s.refreshAccountAccessToken(ctx, secret, runtime)
+		if err != nil {
+			return s.markRefreshFailure(ctx, id, err)
+		}
+		secret = refreshed
+	} else if due, expired := tokenRefreshDue(secret, time.Duration(settings.RefreshMarginSeconds)*time.Second); due && secret.RefreshToken != "" {
+		refreshed, err := s.refreshAccountAccessToken(ctx, secret, runtime)
+		if err != nil && expired {
+			return s.markRefreshFailure(ctx, id, err)
+		}
+		if err == nil {
+			secret = refreshed
+		}
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, runtime.Timeout)
+	defer cancel()
+	status, body, err := NewClient(runtime).CheckUsage(checkCtx, secret.AccessToken)
+	if err != nil {
+		return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "invalid", "", SanitizeError(err))
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		if secret.RefreshToken != "" {
+			refreshed, err := s.refreshAccountAccessToken(ctx, secret, runtime)
+			if err != nil {
+				return s.markRefreshFailure(ctx, id, err)
+			}
+			secret = refreshed
+			status, body, err = NewClient(runtime).CheckUsage(checkCtx, secret.AccessToken)
+			if err != nil {
+				return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "invalid", "", SanitizeError(err))
+			}
+			if status < 400 {
+				plan := extractPlan(body)
+				s.tryRefreshModels(ctx, secret, runtime, plan)
+				return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "active", plan, "")
+			}
+		}
+		return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "invalid", "", "上游拒绝账号凭证")
+	}
+	if status == http.StatusTooManyRequests {
+		return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "rate_limited", "", "上游返回限流")
+	}
+	if status >= 400 {
+		return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "invalid", "", fmt.Sprintf("上游检查失败: HTTP %d", status))
+	}
+	plan := extractPlan(body)
+	s.tryRefreshModels(ctx, secret, runtime, plan)
+	return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "active", plan, "")
+}
+
+func (s *Service) refreshAccountAccessToken(ctx context.Context, secret storage.CodexGatewayAccountSecret, runtime Runtime) (storage.CodexGatewayAccountSecret, error) {
+	if secret.RefreshToken == "" {
+		return storage.CodexGatewayAccountSecret{}, OAuthRefreshError{Code: "missing_refresh_token", Description: "missing refresh_token"}
+	}
+	refreshCtx, cancel := context.WithTimeout(ctx, minDuration(runtime.Timeout, 30*time.Second))
+	defer cancel()
+	tokens, err := NewClient(runtime).RefreshAccessToken(refreshCtx, secret.RefreshToken)
+	if err != nil {
+		return storage.CodexGatewayAccountSecret{}, err
+	}
+	nextRefresh := strings.TrimSpace(tokens.RefreshToken)
+	if nextRefresh == "" {
+		nextRefresh = secret.RefreshToken
+	}
+	return s.Store.UpdateCodexGatewayAccountTokens(ctx, secret.ID, strings.TrimSpace(tokens.AccessToken), nextRefresh, expiresAtFromSeconds(tokens.ExpiresIn))
+}
+
+func (s *Service) markRefreshFailure(ctx context.Context, id string, err error) (storage.CodexGatewayAccount, error) {
+	status := "invalid"
+	var oauthErr OAuthRefreshError
+	if errors.As(err, &oauthErr) && oauthErr.StatusCode == http.StatusTooManyRequests {
+		status = "rate_limited"
+	}
+	return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, status, "", SanitizeError(err))
+}
+
+func (s *Service) tryRefreshModels(ctx context.Context, secret storage.CodexGatewayAccountSecret, runtime Runtime, plan string) {
+	if secret.AccessToken == "" {
+		return
+	}
+	if _, err := s.fetchAndStoreModelsForAccount(ctx, secret, runtime, plan); err != nil {
+		s.Log.Warn("failed to refresh codex gateway models", "account_id", secret.ID, "error", SanitizeError(err))
+	}
+}
+
+func (s *Service) fetchAndStoreModelsForAccount(ctx context.Context, secret storage.CodexGatewayAccountSecret, runtime Runtime, plan string) (int, error) {
+	fetchCtx, cancel := context.WithTimeout(ctx, minDuration(runtime.Timeout, 30*time.Second))
+	defer cancel()
+	models, err := NewClient(runtime).FetchModels(fetchCtx, secret.AccessToken)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.SeedStaticModels(ctx); err != nil {
+		return 0, err
+	}
+	inputs := make([]storage.CodexGatewayModelInput, 0, len(models))
+	for _, model := range models {
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		display := strings.TrimSpace(model.DisplayName)
+		if display == "" {
+			display = id
+		}
+		inputs = append(inputs, storage.CodexGatewayModelInput{ID: id, DisplayName: display, OwnedBy: "codex", Source: "upstream"})
+	}
+	if strings.TrimSpace(plan) != "" {
+		return len(inputs), s.Store.UpsertCodexGatewayModelsForPlan(ctx, strings.TrimSpace(plan), inputs)
+	}
+	return len(inputs), s.Store.UpsertCodexGatewayModels(ctx, inputs)
+}
+
+func classifyUpstreamFailure(status int, message string) UpstreamFailure {
+	lower := strings.ToLower(message)
+	switch {
+	case status == http.StatusTooManyRequests:
+		return UpstreamFailure{Status: status, Code: "rate_limit_exceeded", Message: message, RetryAcrossAccounts: true}
+	case status == http.StatusPaymentRequired:
+		return UpstreamFailure{Status: status, Code: "quota_exhausted", Message: message, RetryAcrossAccounts: true}
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return UpstreamFailure{Status: status, Code: "authentication_error", Message: message, RetryAcrossAccounts: true}
+	case status == http.StatusNotFound && strings.TrimSpace(message) == "":
+		return UpstreamFailure{Status: http.StatusBadGateway, Code: "upstream_blocked", Message: "Codex 上游阻断了请求", RetryAcrossAccounts: true}
+	case status >= 400 && status < 500 && strings.Contains(lower, "model") &&
+		(strings.Contains(lower, "not supported") || strings.Contains(lower, "not_supported") || strings.Contains(lower, "not available") || strings.Contains(lower, "not_available")):
+		return UpstreamFailure{Status: status, Code: "model_not_supported", Message: message, RetryAcrossAccounts: true}
+	case status >= 500:
+		return UpstreamFailure{Status: status, Code: "upstream_error", Message: message, RetryAcrossAccounts: true}
+	default:
+		return UpstreamFailure{Status: status, Code: "invalid_request", Message: message}
+	}
+}
+
+func (s *Service) recordUpstreamFailure(ctx context.Context, accountID string, failure UpstreamFailure) {
+	msg := CleanErrorMessage(failure.Message, 300)
+	switch failure.Code {
+	case "rate_limit_exceeded", "quota_exhausted":
+		_, _ = s.Store.UpdateCodexGatewayAccountCheck(ctx, accountID, "rate_limited", "", msg)
+	case "authentication_error":
+		_, _ = s.Store.UpdateCodexGatewayAccountCheck(ctx, accountID, "invalid", "", msg)
+	case "model_not_supported":
+		_, _ = s.Store.UpdateCodexGatewayAccountCheck(ctx, accountID, "active", "", msg)
+	}
+}
+
+func tokenRefreshDue(account storage.CodexGatewayAccountSecret, margin time.Duration) (bool, bool) {
+	expires := strings.TrimSpace(account.ExpiresAt)
+	if expires == "" {
+		return false, false
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, expires)
+	if err != nil {
+		expiresAt, err = time.Parse(time.RFC3339, expires)
+		if err != nil {
+			return false, false
+		}
+	}
+	now := time.Now().UTC()
+	expired := !expiresAt.After(now)
+	return !expiresAt.After(now.Add(margin)), expired
+}
+
+func expiresAtFromSeconds(seconds int) string {
+	if seconds <= 0 {
+		return ""
+	}
+	return time.Now().UTC().Add(time.Duration(seconds) * time.Second).Format(time.RFC3339Nano)
+}
+
+func extractPlan(body []byte) string {
+	var payload map[string]any
+	if json.Unmarshal(body, &payload) != nil {
+		return ""
+	}
+	if plan := firstPlanString(payload); plan != "" {
+		return plan
+	}
+	for _, key := range []string{"account", "user", "quota", "usage", "organization"} {
+		if nested, ok := payload[key].(map[string]any); ok {
+			if plan := firstPlanString(nested); plan != "" {
+				return plan
+			}
+		}
+	}
+	return ""
+}
+
+func firstPlanString(payload map[string]any) string {
+	for _, key := range []string{"plan", "plan_type", "chatgpt_plan_type", "account_plan", "tier"} {
+		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func (s *Service) LogRequest(ctx context.Context, input storage.CodexGatewayRequestLogInput) {
+	if input.RequestID == "" {
+		input.RequestID = randomToken(8)
+	}
+	if input.APIKind == "" {
+		input.APIKind = "unknown"
+	}
+	if input.ErrorCode != "" && input.ErrorSource == "" {
+		input.ErrorSource = ClassifyErrorSource(input.ErrorCode)
+	}
+	if input.ErrorMessage != "" {
+		input.ErrorMessage = CleanErrorMessage(input.ErrorMessage, 600)
+	}
+	if err := s.Store.CreateCodexGatewayRequestLog(ctx, input); err != nil {
+		s.Log.Warn("failed to write codex gateway request log", "error", err)
+	}
+}
+
+func ClassifyErrorSource(code string) string {
+	switch strings.TrimSpace(code) {
+	case "invalid_json", "invalid_request":
+		return ErrorSourceClient
+	case "no_available_accounts", "account_not_found", "account_inactive", "account_missing_token", "account_refresh_failed", "model_not_supported":
+		return ErrorSourceAccount
+	case "rate_limit_exceeded", "quota_exhausted", "authentication_error", "upstream_blocked", "upstream_error":
+		return ErrorSourceOpenAI
+	case "internal_error", "store_error", "gateway_disabled":
+		return ErrorSourceService
+	default:
+		if strings.HasPrefix(code, "upstream_") || strings.Contains(code, "openai") {
+			return ErrorSourceOpenAI
+		}
+		return ErrorSourceService
+	}
+}
+
+func OpenAIErrorType(status int, code string) string {
+	switch {
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return "authentication_error"
+	case status == http.StatusTooManyRequests || code == "rate_limit_exceeded":
+		return "rate_limit_error"
+	case status >= 500:
+		return "server_error"
+	default:
+		return "invalid_request_error"
+	}
+}
+
+func SanitizeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return CleanErrorMessage(err.Error(), 300)
+}
+
+func CleanErrorMessage(message string, maxRunes int) string {
+	message = strings.TrimSpace(message)
+	if extracted := extractStructuredErrorMessage(message); extracted != "" {
+		message = extracted
+	}
+	for _, pattern := range secretPatterns {
+		message = pattern.ReplaceAllString(message, "${1}[redacted]")
+	}
+	message = strings.Join(strings.Fields(message), " ")
+	if maxRunes > 0 {
+		runes := []rune(message)
+		if len(runes) > maxRunes {
+			message = string(runes[:maxRunes])
+		}
+	}
+	return message
+}
+
+func extractStructuredErrorMessage(message string) string {
+	var payload map[string]any
+	if json.Unmarshal([]byte(message), &payload) != nil {
+		return ""
+	}
+	if nested, ok := payload["error"].(map[string]any); ok {
+		if value, ok := nested["message"].(string); ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	for _, key := range []string{"message", "detail", "error"} {
+		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func AccountOAuthLabel(tokens OAuthTokenResponse) string {
+	for _, token := range []string{tokens.IDToken, tokens.AccessToken} {
+		if label := jwtStringClaim(token, "email", "preferred_username", "name", "sub"); label != "" {
+			return label
+		}
+	}
+	return "Codex OAuth " + time.Now().UTC().Format("20060102-150405")
+}
+
+func jwtStringClaim(token string, keys ...string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	body, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		body, err = base64.URLEncoding.DecodeString(parts[1])
+		if err != nil {
+			return ""
+		}
+	}
+	var payload map[string]any
+	if json.Unmarshal(body, &payload) != nil {
+		return ""
+	}
+	for _, key := range keys {
+		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a <= 0 {
+		return b
+	}
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func readLimitedText(body io.Reader, limit int64) string {
+	data, _ := io.ReadAll(io.LimitReader(body, limit))
+	var payload map[string]any
+	if json.Unmarshal(data, &payload) == nil {
+		if errObj, ok := payload["error"].(map[string]any); ok {
+			if message, ok := errObj["message"].(string); ok {
+				return message
+			}
+		}
+		if message, ok := payload["message"].(string); ok {
+			return message
+		}
+		if detail, ok := payload["detail"].(string); ok {
+			return detail
+		}
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func drainAndClose(body io.ReadCloser) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, 64<<10))
+	_ = body.Close()
+}

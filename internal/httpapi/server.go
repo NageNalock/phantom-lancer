@@ -19,6 +19,7 @@ import (
 
 	"phantom-lancer/internal/auth"
 	"phantom-lancer/internal/codex"
+	"phantom-lancer/internal/codexgateway"
 	"phantom-lancer/internal/config"
 	"phantom-lancer/internal/events"
 	imagegen "phantom-lancer/internal/images"
@@ -39,12 +40,14 @@ type Server struct {
 	store          *storage.Store
 	hub            *events.Hub
 	codex          *codex.Service
+	codexGateway   *codexgateway.Service
 	v2ray          *v2ray.Service
 	images         *imagegen.Service
 	logs           *logcenter.Service
 	staticFS       fs.FS
 	log            *slog.Logger
 	logins         *loginBackoff
+	gatewayOAuth   *codexGatewayOAuthSessions
 	privateUnlocks *loginBackoff
 	privateImages  *privateImageAccess
 }
@@ -53,18 +56,20 @@ type sessionContext struct {
 	Session storage.Session
 }
 
-func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexSvc *codex.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, logsSvc *logcenter.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
+func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexSvc *codex.Service, codexGatewaySvc *codexgateway.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, logsSvc *logcenter.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
 	return &Server{
 		cfg:            cfg,
 		store:          store,
 		hub:            hub,
 		codex:          codexSvc,
+		codexGateway:   codexGatewaySvc,
 		v2ray:          v2raySvc,
 		images:         imagesSvc,
 		logs:           logsSvc,
 		staticFS:       staticFS,
 		log:            logger,
 		logins:         newLoginBackoff(cfg.LoginFailureThreshold),
+		gatewayOAuth:   newCodexGatewayOAuthSessions(10 * time.Minute),
 		privateUnlocks: newLoginBackoff(cfg.LoginFailureThreshold),
 		privateImages:  newPrivateImageAccess(),
 	}, nil
@@ -91,6 +96,26 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/codex/exec-jobs", s.handleCreateExecJob)
 	mux.HandleFunc("GET /api/codex/exec-jobs/", s.handleExecJobSubroutes)
 	mux.HandleFunc("POST /api/codex/exec-jobs/", s.handleExecJobSubroutes)
+	mux.HandleFunc("GET /api/codex-gateway/status", s.handleCodexGatewayStatus)
+	mux.HandleFunc("GET /api/codex-gateway/settings", s.handleGetCodexGatewaySettings)
+	mux.HandleFunc("PUT /api/codex-gateway/settings", s.handleUpdateCodexGatewaySettings)
+	mux.HandleFunc("GET /api/codex-gateway/api-keys", s.handleListCodexGatewayAPIKeys)
+	mux.HandleFunc("POST /api/codex-gateway/api-keys", s.handleCreateCodexGatewayAPIKey)
+	mux.HandleFunc("POST /api/codex-gateway/api-keys/", s.handleCodexGatewayAPIKeySubroutes)
+	mux.HandleFunc("PATCH /api/codex-gateway/api-keys/", s.handleCodexGatewayAPIKeySubroutes)
+	mux.HandleFunc("DELETE /api/codex-gateway/api-keys/", s.handleCodexGatewayAPIKeySubroutes)
+	mux.HandleFunc("GET /api/codex-gateway/accounts", s.handleListCodexGatewayAccounts)
+	mux.HandleFunc("POST /api/codex-gateway/accounts", s.handleCreateCodexGatewayAccount)
+	mux.HandleFunc("POST /api/codex-gateway/accounts/oauth/start", s.handleStartCodexGatewayOAuth)
+	mux.HandleFunc("POST /api/codex-gateway/accounts/oauth/relay", s.handleRelayCodexGatewayOAuth)
+	mux.HandleFunc("GET /api/codex-gateway/accounts/oauth/callback", s.handleCodexGatewayOAuthCallback)
+	mux.HandleFunc("PATCH /api/codex-gateway/accounts/", s.handleCodexGatewayAccountSubroutes)
+	mux.HandleFunc("DELETE /api/codex-gateway/accounts/", s.handleCodexGatewayAccountSubroutes)
+	mux.HandleFunc("POST /api/codex-gateway/accounts/", s.handleCodexGatewayAccountSubroutes)
+	mux.HandleFunc("GET /api/codex-gateway/models", s.handleCodexGatewayModels)
+	mux.HandleFunc("POST /api/codex-gateway/models/refresh", s.handleRefreshCodexGatewayModels)
+	mux.HandleFunc("GET /api/codex-gateway/request-logs", s.handleCodexGatewayRequestLogs)
+	mux.HandleFunc("POST /api/codex-gateway/chat-test", s.handleCodexGatewayChatTest)
 	mux.HandleFunc("GET /api/events/history", s.handleEventHistory)
 	mux.HandleFunc("GET /api/events/stream", s.handleEventStream)
 	mux.HandleFunc("GET /api/permissions/profiles", s.handlePermissionProfiles)
@@ -127,6 +152,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v2ray/clients/", s.handleV2RayClientSubroutes)
 	mux.HandleFunc("POST /api/v2ray/clients/", s.handleV2RayClientSubroutes)
 	mux.HandleFunc("DELETE /api/v2ray/clients/", s.handleV2RayClientSubroutes)
+	mux.HandleFunc("GET /v1/models", s.handleCodexGatewayPublicModels)
+	mux.HandleFunc("GET /v1/models/", s.handleCodexGatewayPublicModel)
+	mux.HandleFunc("POST /v1/chat/completions", s.handleCodexGatewayChatCompletions)
+	mux.HandleFunc("POST /v1/responses", s.handleCodexGatewayResponses)
 
 	mux.Handle("/", s.staticHandler())
 	return s.recover(mux)
@@ -277,12 +306,17 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	audit, _ := s.store.ListAudit(r.Context(), 8)
+	codexGatewayStatus, err := s.codexGateway.Status(r.Context())
+	if err != nil {
+		codexGatewayStatus = codexgateway.Status{LastError: err.Error()}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"workspaces": map[string]any{
 			"total": len(workspacesList),
 			"items": workspacesList,
 		},
 		"codex":            s.codex.Status(r.Context()),
+		"codexGateway":     codexGatewayStatus,
 		"images":           s.images.Status(r.Context()),
 		"v2ray":            s.v2ray.Status(r.Context()),
 		"pendingApprovals": 0,

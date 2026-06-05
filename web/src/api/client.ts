@@ -57,5 +57,10 @@ export function friendlyError(error: unknown): string {
   if (err.code?.startsWith("image_") || err.code?.startsWith("prompt_") || err.code === "source_count_invalid" || err.code === "mode_invalid") return `图片生成参数无效：${err.message}`;
   if (err.code === "v2ray_config_invalid") return `V2Ray 配置无效：${err.message}`;
   if (err.code === "v2ray_control_failed") return `V2Ray 服务控制失败：${err.message}`;
+  if (err.code === "gateway_disabled") return "Codex Gateway 尚未启用。";
+  if (err.code === "no_available_accounts") return "没有可用的 Codex Gateway 账号。";
+  if (err.code === "model_not_supported") return "当前账号 plan 不支持该模型。";
+  if (err.code === "oauth_settings_invalid") return `OAuth 设置无效：${err.message}`;
+  if (err.code === "model_refresh_failed") return `模型刷新失败：${err.message}`;
   return err.message || "请求失败";
 }

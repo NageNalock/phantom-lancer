@@ -1,10 +1,11 @@
 import type { AppActions } from "../app/App";
 import type { AppData } from "../app/types";
 import { Button, ContextList, Metric, Panel } from "../components/ui";
-import { auditLabel, auditSummary, formatDate, imageStatusLabel, v2rayStateLabel } from "../domain/labels";
+import { auditLabel, auditSummary, codexGatewayStatusLabel, formatDate, imageStatusLabel, v2rayStateLabel } from "../domain/labels";
 
 export function DashboardView({ actions, data }: { actions: AppActions; data: AppData }) {
   const codex = data.codexStatus;
+  const gateway = data.codexGateway.status || data.dashboard.codexGateway;
   const v2ray = data.v2ray.status || data.dashboard.v2ray;
   const images = data.images.status || data.dashboard.images;
   const activeSessions = data.codexSessions.filter((item) => item.status === "active").length;
@@ -13,8 +14,18 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
   return (
     <div className="grid min-h-[calc(100dvh-104px)] grid-cols-[minmax(0,1fr)_332px] max-xl:grid-cols-1">
       <div className="grid content-start gap-4 p-5">
-        <section className="grid grid-cols-5 gap-3 max-2xl:grid-cols-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
+        <section className="grid grid-cols-6 gap-3 max-2xl:grid-cols-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
           <Metric detail={codex.version || codex.error || "等待检测"} label="Codex" tone={codex.available ? "good" : "warn"} value={codex.available ? "可用" : "不可用"} />
+          <Metric
+            detail={`${gateway?.activeAccounts || 0} accounts / ${gateway?.publicApiKeys || 0} keys`}
+            label="Gateway"
+            onClick={() => {
+              actions.setMainTab("codex");
+              actions.setCodexTab("gateway");
+            }}
+            tone={gateway?.enabled && gateway?.activeAccounts && gateway?.publicApiKeys ? "good" : "warn"}
+            value={codexGatewayStatusLabel(gateway)}
+          />
           <Metric detail={`${activeSessions} 个正在运行`} label="会话" value={data.codexSessions.length} />
           <Metric
             detail={`${images?.historyCount || data.images.count || 0} 条历史`}
@@ -37,6 +48,14 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
           actions={
             <>
               <Button onClick={() => actions.setMainTab("images")}>打开 Images</Button>
+              <Button
+                onClick={() => {
+                  actions.setMainTab("codex");
+                  actions.setCodexTab("gateway");
+                }}
+              >
+                打开 Gateway
+              </Button>
               <Button onClick={() => actions.setMainTab("v2ray")}>配置 V2Ray</Button>
               <Button
                 disabled={!data.workspaces.length}
@@ -82,6 +101,7 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
             items={[
               ["Codex CLI", codex.available ? "available" : "missing"],
               ["app-server", codex.appServerAvailable ? "available" : "unavailable"],
+              ["Gateway", codexGatewayStatusLabel(gateway)],
               ["Images", imageStatusLabel(images)],
               ["V2Ray", v2rayStateLabel(v2ray)],
               ["最近审计", latestAudit ? `${auditLabel(latestAudit.eventType)} / ${formatDate(latestAudit.createdAt)}` : "暂无"],

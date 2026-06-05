@@ -1,9 +1,10 @@
-import type { AuditEvent, ImageProviderSettings, ImageStatus, ImageStorageSettings, PermissionProfile, V2RaySettings, V2RayStatus, Workspace } from "../app/types";
+import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, PermissionProfile, V2RaySettings, V2RayStatus, Workspace } from "../app/types";
 
 export const CODEX_TABS = [
   { id: "sessions", label: "会话", description: "长期会话、实时事件和任务上下文" },
   { id: "projects", label: "项目", description: "受控工作区、默认权限和路径边界" },
   { id: "permissions", label: "权限", description: "能力 profile、风险等级和审批边界" },
+  { id: "gateway", label: "Gateway", description: "Codex OAuth 账号、OpenAI 兼容端点和请求审计" },
   { id: "activity", label: "活动", description: "登录、配置和执行历史" },
 ] as const;
 
@@ -62,6 +63,19 @@ const auditLabels: Record<string, string> = {
   "codex.turn.send": "发送 Codex 对话",
   "codex.turn.interrupt": "中断 Codex 回合",
   "codex.session.archive": "归档 Codex 会话",
+  "codex_gateway.settings.updated": "更新 Codex Gateway 设置",
+  "codex_gateway.api_key.created": "创建 Codex Gateway API key",
+  "codex_gateway.api_key.rotated": "轮换 Codex Gateway API key",
+  "codex_gateway.api_key.updated": "更新 Codex Gateway API key",
+  "codex_gateway.api_key.deleted": "删除 Codex Gateway API key",
+  "codex_gateway.account.created": "添加 Codex Gateway 账号",
+  "codex_gateway.account.updated": "更新 Codex Gateway 账号",
+  "codex_gateway.account.deleted": "删除 Codex Gateway 账号",
+  "codex_gateway.account.refresh_requested": "刷新 Codex Gateway 账号",
+  "codex_gateway.account.check_requested": "检查 Codex Gateway 账号",
+  "codex_gateway.account.oauth_started": "开始 Codex Gateway OAuth",
+  "codex_gateway.account.oauth_imported": "导入 Codex Gateway OAuth 账号",
+  "codex_gateway.models.refresh_requested": "刷新 Codex Gateway 模型",
   "settings.update": "更新设置",
   "images.settings.update": "更新 Images 设置",
   "images.storage.update": "更新 Images 存储",
@@ -137,6 +151,28 @@ export function imageStatusLabel(status?: ImageStatus): string {
   if (status.lastJobStatus === "queued" || status.lastJobStatus === "running") return "调用中";
   if (status.lastJobStatus === "interrupted") return "已中断";
   return "就绪";
+}
+
+export function codexGatewayStatusLabel(status?: CodexGatewayStatus): string {
+  if (!status) return "未知";
+  if (!status.enabled) return "未启用";
+  if (!status.publicApiKeys) return "缺少 API key";
+  if (!status.activeAccounts) return "缺少账号";
+  if (status.recentFailureCount) return "最近失败";
+  return "就绪";
+}
+
+export function codexGatewayAccountStatusLabel(value?: string): string {
+  return (
+    {
+      active: "active",
+      disabled: "disabled",
+      invalid: "invalid",
+      rate_limited: "rate limited",
+    }[value || ""] ||
+    value ||
+    "unknown"
+  );
 }
 
 export function imageJobStatusLabel(value?: string): string {
@@ -252,6 +288,24 @@ export function defaultImageSettings(): Required<ImageProviderSettings> {
     defaultResolution: "",
     defaultAspectRatio: "",
     historyRetention: 500,
+    createdAt: "",
+    updatedAt: "",
+  };
+}
+
+export function defaultCodexGatewaySettings(): Required<CodexGatewaySettings> {
+  return {
+    id: "default",
+    enabled: false,
+    baseUrl: "https://chatgpt.com/backend-api",
+    oauthAuthUrl: "https://auth.openai.com/oauth/authorize",
+    oauthTokenUrl: "https://auth.openai.com/oauth/token",
+    oauthClientId: "",
+    oauthRedirectUri: "",
+    requestTimeoutSeconds: 600,
+    refreshMarginSeconds: 300,
+    defaultInstructions: "You are a helpful assistant.",
+    installationId: "",
     createdAt: "",
     updatedAt: "",
   };

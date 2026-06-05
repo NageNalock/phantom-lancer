@@ -17,6 +17,8 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
+var codexGatewayRequestLogRetention = 5000
+
 type Store struct {
 	db *sql.DB
 }
@@ -103,6 +105,129 @@ type RuntimeSettings struct {
 	CodexHome    string   `json:"codexHome"`
 	CookieSecure bool     `json:"cookieSecure"`
 	UpdatedAt    string   `json:"updatedAt,omitempty"`
+}
+
+type CodexGatewaySettings struct {
+	ID                    string `json:"id"`
+	Enabled               bool   `json:"enabled"`
+	BaseURL               string `json:"baseUrl"`
+	OAuthAuthURL          string `json:"oauthAuthUrl"`
+	OAuthTokenURL         string `json:"oauthTokenUrl"`
+	OAuthClientID         string `json:"oauthClientId"`
+	OAuthRedirectURI      string `json:"oauthRedirectUri"`
+	RequestTimeoutSeconds int    `json:"requestTimeoutSeconds"`
+	RefreshMarginSeconds  int    `json:"refreshMarginSeconds"`
+	DefaultInstructions   string `json:"defaultInstructions"`
+	InstallationID        string `json:"installationId"`
+	CreatedAt             string `json:"createdAt"`
+	UpdatedAt             string `json:"updatedAt"`
+}
+
+type CodexGatewayAccount struct {
+	ID              string `json:"id"`
+	Label           string `json:"label"`
+	Status          string `json:"status"`
+	ExpiresAt       string `json:"expiresAt,omitempty"`
+	Plan            string `json:"plan,omitempty"`
+	LastUsedAt      string `json:"lastUsedAt,omitempty"`
+	LastCheckedAt   string `json:"lastCheckedAt,omitempty"`
+	LastError       string `json:"lastError,omitempty"`
+	HasAccessToken  bool   `json:"hasAccessToken"`
+	HasRefreshToken bool   `json:"hasRefreshToken"`
+	CreatedAt       string `json:"createdAt"`
+	UpdatedAt       string `json:"updatedAt"`
+}
+
+type CodexGatewayAccountSecret struct {
+	CodexGatewayAccount
+	AccessToken  string `json:"-"`
+	RefreshToken string `json:"-"`
+}
+
+type CodexGatewayAccountInput struct {
+	Label        string
+	Status       string
+	AccessToken  string
+	RefreshToken string
+	ExpiresAt    string
+	Plan         string
+}
+
+type CodexGatewayAccountPatch struct {
+	Label        *string
+	Status       *string
+	AccessToken  *string
+	RefreshToken *string
+	ExpiresAt    *string
+	ClearExpires bool
+	Plan         *string
+	ClearPlan    bool
+}
+
+type CodexGatewayAPIKey struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	LastUsedAt string `json:"lastUsedAt,omitempty"`
+	CreatedAt  string `json:"createdAt"`
+	UpdatedAt  string `json:"updatedAt"`
+}
+
+type CodexGatewayAPIKeySecret struct {
+	CodexGatewayAPIKey
+	KeyHash string `json:"-"`
+}
+
+type CodexGatewayModel struct {
+	ID          string   `json:"id"`
+	Object      string   `json:"object"`
+	DisplayName string   `json:"displayName"`
+	OwnedBy     string   `json:"ownedBy"`
+	Source      string   `json:"source"`
+	Plans       []string `json:"plans,omitempty"`
+	LastSeenAt  string   `json:"lastSeenAt"`
+	UpdatedAt   string   `json:"updatedAt"`
+}
+
+type CodexGatewayModelInput struct {
+	ID          string
+	DisplayName string
+	OwnedBy     string
+	Source      string
+}
+
+type CodexGatewayRequestLog struct {
+	ID           string `json:"id"`
+	RequestID    string `json:"requestId"`
+	APIKind      string `json:"apiKind"`
+	Model        string `json:"model,omitempty"`
+	AccountID    string `json:"accountId,omitempty"`
+	SourceIP     string `json:"sourceIp,omitempty"`
+	StatusCode   int    `json:"statusCode"`
+	ErrorCode    string `json:"errorCode,omitempty"`
+	ErrorSource  string `json:"errorSource,omitempty"`
+	ErrorMessage string `json:"errorMessage,omitempty"`
+	LatencyMS    int    `json:"latencyMs"`
+	Streamed     bool   `json:"streamed"`
+	InputTokens  int    `json:"inputTokens,omitempty"`
+	OutputTokens int    `json:"outputTokens,omitempty"`
+	CreatedAt    string `json:"createdAt"`
+}
+
+type CodexGatewayRequestLogInput struct {
+	RequestID    string
+	APIKind      string
+	Model        string
+	AccountID    string
+	SourceIP     string
+	StatusCode   int
+	ErrorCode    string
+	ErrorSource  string
+	ErrorMessage string
+	LatencyMS    int
+	Streamed     bool
+	InputTokens  int
+	OutputTokens int
 }
 
 type V2RaySettings struct {
@@ -392,6 +517,80 @@ CREATE TABLE IF NOT EXISTS codex_turns (
   error_message TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_codex_turns_session ON codex_turns(session_id, started_at);
+CREATE TABLE IF NOT EXISTS codex_gateway_settings (
+  id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  base_url TEXT NOT NULL DEFAULT 'https://chatgpt.com/backend-api',
+  oauth_auth_url TEXT NOT NULL DEFAULT 'https://auth.openai.com/oauth/authorize',
+  oauth_token_url TEXT NOT NULL DEFAULT 'https://auth.openai.com/oauth/token',
+  oauth_client_id TEXT NOT NULL DEFAULT '',
+  oauth_redirect_uri TEXT NOT NULL DEFAULT '',
+  request_timeout_seconds INTEGER NOT NULL DEFAULT 600,
+  refresh_margin_seconds INTEGER NOT NULL DEFAULT 300,
+  default_instructions TEXT NOT NULL DEFAULT 'You are a helpful assistant.',
+  installation_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS codex_gateway_accounts (
+  id TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('active', 'disabled', 'invalid', 'rate_limited')),
+  access_token_secret TEXT NOT NULL DEFAULT '',
+  refresh_token_secret TEXT NOT NULL DEFAULT '',
+  expires_at TEXT NOT NULL DEFAULT '',
+  plan TEXT NOT NULL DEFAULT '',
+  last_used_at TEXT NOT NULL DEFAULT '',
+  last_checked_at TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_codex_gateway_accounts_status ON codex_gateway_accounts(status, last_used_at, created_at);
+CREATE TABLE IF NOT EXISTS codex_gateway_api_keys (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  key_hash TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
+  last_used_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_codex_gateway_api_keys_status ON codex_gateway_api_keys(status);
+CREATE TABLE IF NOT EXISTS codex_gateway_models (
+  id TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  owned_by TEXT NOT NULL DEFAULT 'codex',
+  source TEXT NOT NULL CHECK (source IN ('static', 'upstream')),
+  last_seen_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS codex_gateway_model_plans (
+  plan TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  PRIMARY KEY (plan, model_id)
+);
+CREATE INDEX IF NOT EXISTS idx_codex_gateway_model_plans_model ON codex_gateway_model_plans(model_id);
+CREATE TABLE IF NOT EXISTS codex_gateway_request_logs (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL,
+  api_kind TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '',
+  account_id TEXT NOT NULL DEFAULT '',
+  source_ip TEXT NOT NULL DEFAULT '',
+  status_code INTEGER NOT NULL,
+  error_code TEXT NOT NULL DEFAULT '',
+  error_source TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  latency_ms INTEGER NOT NULL,
+  streamed INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_codex_gateway_request_logs_created ON codex_gateway_request_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_codex_gateway_request_logs_status ON codex_gateway_request_logs(status_code, created_at DESC);
 CREATE TABLE IF NOT EXISTS v2ray_settings (
   id TEXT PRIMARY KEY,
   enabled INTEGER NOT NULL DEFAULT 0,
@@ -703,6 +902,694 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.upd
 		}
 	}
 	return tx.Commit()
+}
+
+func DefaultCodexGatewaySettings() CodexGatewaySettings {
+	return CodexGatewaySettings{
+		ID:                    "default",
+		BaseURL:               "https://chatgpt.com/backend-api",
+		OAuthAuthURL:          "https://auth.openai.com/oauth/authorize",
+		OAuthTokenURL:         "https://auth.openai.com/oauth/token",
+		RequestTimeoutSeconds: 600,
+		RefreshMarginSeconds:  300,
+		DefaultInstructions:   "You are a helpful assistant.",
+	}
+}
+
+func NormalizeCodexGatewaySettings(settings CodexGatewaySettings) CodexGatewaySettings {
+	defaults := DefaultCodexGatewaySettings()
+	if strings.TrimSpace(settings.ID) == "" {
+		settings.ID = "default"
+	}
+	settings.BaseURL = strings.TrimRight(strings.TrimSpace(settings.BaseURL), "/")
+	if settings.BaseURL == "" {
+		settings.BaseURL = defaults.BaseURL
+	}
+	settings.OAuthAuthURL = strings.TrimSpace(settings.OAuthAuthURL)
+	if settings.OAuthAuthURL == "" {
+		settings.OAuthAuthURL = defaults.OAuthAuthURL
+	}
+	settings.OAuthTokenURL = strings.TrimSpace(settings.OAuthTokenURL)
+	if settings.OAuthTokenURL == "" {
+		settings.OAuthTokenURL = defaults.OAuthTokenURL
+	}
+	settings.OAuthClientID = strings.TrimSpace(settings.OAuthClientID)
+	settings.OAuthRedirectURI = strings.TrimSpace(settings.OAuthRedirectURI)
+	if settings.RequestTimeoutSeconds <= 0 {
+		settings.RequestTimeoutSeconds = defaults.RequestTimeoutSeconds
+	}
+	if settings.RefreshMarginSeconds < 0 {
+		settings.RefreshMarginSeconds = defaults.RefreshMarginSeconds
+	}
+	settings.DefaultInstructions = strings.TrimSpace(settings.DefaultInstructions)
+	if settings.DefaultInstructions == "" {
+		settings.DefaultInstructions = defaults.DefaultInstructions
+	}
+	settings.InstallationID = strings.TrimSpace(settings.InstallationID)
+	return settings
+}
+
+func (s *Store) EnsureCodexGatewaySettings(ctx context.Context) error {
+	defaults := DefaultCodexGatewaySettings()
+	now := now()
+	_, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO codex_gateway_settings (
+  id, enabled, base_url, oauth_auth_url, oauth_token_url, oauth_client_id, oauth_redirect_uri, request_timeout_seconds, refresh_margin_seconds, default_instructions, installation_id, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		defaults.ID, boolInt(defaults.Enabled), defaults.BaseURL, defaults.OAuthAuthURL, defaults.OAuthTokenURL, defaults.OAuthClientID, defaults.OAuthRedirectURI, defaults.RequestTimeoutSeconds, defaults.RefreshMarginSeconds, defaults.DefaultInstructions, defaults.InstallationID, now, now)
+	return err
+}
+
+func (s *Store) GetCodexGatewaySettings(ctx context.Context) (CodexGatewaySettings, error) {
+	if err := s.EnsureCodexGatewaySettings(ctx); err != nil {
+		return CodexGatewaySettings{}, err
+	}
+	row := s.db.QueryRowContext(ctx, `SELECT id, enabled, base_url, oauth_auth_url, oauth_token_url, oauth_client_id, oauth_redirect_uri, request_timeout_seconds, refresh_margin_seconds, default_instructions, installation_id, created_at, updated_at FROM codex_gateway_settings WHERE id = 'default'`)
+	settings, err := scanCodexGatewaySettings(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DefaultCodexGatewaySettings(), nil
+	}
+	return NormalizeCodexGatewaySettings(settings), err
+}
+
+func (s *Store) UpdateCodexGatewaySettings(ctx context.Context, settings CodexGatewaySettings) (CodexGatewaySettings, error) {
+	existing, err := s.GetCodexGatewaySettings(ctx)
+	if err != nil {
+		return CodexGatewaySettings{}, err
+	}
+	settings = NormalizeCodexGatewaySettings(settings)
+	settings.ID = "default"
+	settings.CreatedAt = existing.CreatedAt
+	if settings.CreatedAt == "" {
+		settings.CreatedAt = now()
+	}
+	settings.UpdatedAt = now()
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO codex_gateway_settings (
+  id, enabled, base_url, oauth_auth_url, oauth_token_url, oauth_client_id, oauth_redirect_uri, request_timeout_seconds, refresh_margin_seconds, default_instructions, installation_id, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+  enabled = excluded.enabled,
+  base_url = excluded.base_url,
+  oauth_auth_url = excluded.oauth_auth_url,
+  oauth_token_url = excluded.oauth_token_url,
+  oauth_client_id = excluded.oauth_client_id,
+  oauth_redirect_uri = excluded.oauth_redirect_uri,
+  request_timeout_seconds = excluded.request_timeout_seconds,
+  refresh_margin_seconds = excluded.refresh_margin_seconds,
+  default_instructions = excluded.default_instructions,
+  installation_id = excluded.installation_id,
+  updated_at = excluded.updated_at`,
+		settings.ID, boolInt(settings.Enabled), settings.BaseURL, settings.OAuthAuthURL, settings.OAuthTokenURL, settings.OAuthClientID, settings.OAuthRedirectURI, settings.RequestTimeoutSeconds, settings.RefreshMarginSeconds, settings.DefaultInstructions, settings.InstallationID, settings.CreatedAt, settings.UpdatedAt)
+	if err != nil {
+		return CodexGatewaySettings{}, err
+	}
+	return s.GetCodexGatewaySettings(ctx)
+}
+
+func (s *Store) ListCodexGatewayAPIKeys(ctx context.Context) ([]CodexGatewayAPIKey, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, status, last_used_at, created_at, updated_at FROM codex_gateway_api_keys ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CodexGatewayAPIKey{}
+	for rows.Next() {
+		key, err := scanCodexGatewayAPIKey(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, key)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CreateCodexGatewayAPIKey(ctx context.Context, name, keyHash string) (CodexGatewayAPIKey, error) {
+	id, err := ids.New("cgkey")
+	if err != nil {
+		return CodexGatewayAPIKey{}, err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "Codex Gateway key"
+	}
+	now := now()
+	_, err = s.db.ExecContext(ctx, `INSERT INTO codex_gateway_api_keys (id, name, key_hash, status, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?)`, id, name, keyHash, now, now)
+	if err != nil {
+		return CodexGatewayAPIKey{}, err
+	}
+	return s.GetCodexGatewayAPIKey(ctx, id)
+}
+
+func (s *Store) GetCodexGatewayAPIKey(ctx context.Context, id string) (CodexGatewayAPIKey, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, status, last_used_at, created_at, updated_at FROM codex_gateway_api_keys WHERE id = ?`, id)
+	key, err := scanCodexGatewayAPIKey(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CodexGatewayAPIKey{}, ErrNotFound
+	}
+	return key, err
+}
+
+func (s *Store) GetActiveCodexGatewayAPIKeyByHash(ctx context.Context, keyHash string) (CodexGatewayAPIKeySecret, error) {
+	var key CodexGatewayAPIKeySecret
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, key_hash, status, last_used_at, created_at, updated_at FROM codex_gateway_api_keys WHERE key_hash = ? AND status = 'active'`, keyHash).Scan(&key.ID, &key.Name, &key.KeyHash, &key.Status, &key.LastUsedAt, &key.CreatedAt, &key.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CodexGatewayAPIKeySecret{}, ErrNotFound
+	}
+	return key, err
+}
+
+func (s *Store) MarkCodexGatewayAPIKeyUsed(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE codex_gateway_api_keys SET last_used_at = ?, updated_at = ? WHERE id = ?`, now(), now(), id)
+	return err
+}
+
+func (s *Store) UpdateCodexGatewayAPIKeyStatus(ctx context.Context, id, status string) (CodexGatewayAPIKey, error) {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		status = "active"
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE codex_gateway_api_keys SET status = ?, updated_at = ? WHERE id = ?`, status, now(), id)
+	if err != nil {
+		return CodexGatewayAPIKey{}, err
+	}
+	return s.GetCodexGatewayAPIKey(ctx, id)
+}
+
+func (s *Store) RotateCodexGatewayAPIKey(ctx context.Context, id, keyHash string) (CodexGatewayAPIKey, error) {
+	_, err := s.db.ExecContext(ctx, `UPDATE codex_gateway_api_keys SET key_hash = ?, status = 'active', updated_at = ? WHERE id = ?`, keyHash, now(), id)
+	if err != nil {
+		return CodexGatewayAPIKey{}, err
+	}
+	return s.GetCodexGatewayAPIKey(ctx, id)
+}
+
+func (s *Store) DeleteCodexGatewayAPIKey(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM codex_gateway_api_keys WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func NormalizeCodexGatewayAccountInput(input CodexGatewayAccountInput) CodexGatewayAccountInput {
+	input.Label = strings.TrimSpace(input.Label)
+	if input.Label == "" {
+		input.Label = "Codex account"
+	}
+	input.Status = strings.TrimSpace(input.Status)
+	if input.Status == "" {
+		input.Status = "active"
+	}
+	input.AccessToken = strings.TrimSpace(input.AccessToken)
+	input.RefreshToken = strings.TrimSpace(input.RefreshToken)
+	input.ExpiresAt = strings.TrimSpace(input.ExpiresAt)
+	input.Plan = strings.TrimSpace(input.Plan)
+	return input
+}
+
+func (s *Store) ListCodexGatewayAccounts(ctx context.Context) ([]CodexGatewayAccount, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, label, status, expires_at, plan, last_used_at, last_checked_at, last_error,
+  CASE WHEN access_token_secret != '' THEN 1 ELSE 0 END,
+  CASE WHEN refresh_token_secret != '' THEN 1 ELSE 0 END,
+  created_at, updated_at
+FROM codex_gateway_accounts
+ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CodexGatewayAccount{}
+	for rows.Next() {
+		account, err := scanCodexGatewayAccount(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, account)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CreateCodexGatewayAccount(ctx context.Context, input CodexGatewayAccountInput) (CodexGatewayAccount, error) {
+	input = NormalizeCodexGatewayAccountInput(input)
+	id, err := ids.New("cgacct")
+	if err != nil {
+		return CodexGatewayAccount{}, err
+	}
+	now := now()
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO codex_gateway_accounts (id, label, status, access_token_secret, refresh_token_secret, expires_at, plan, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, input.Label, input.Status, input.AccessToken, input.RefreshToken, input.ExpiresAt, input.Plan, now, now)
+	if err != nil {
+		return CodexGatewayAccount{}, err
+	}
+	return s.GetCodexGatewayAccount(ctx, id)
+}
+
+func (s *Store) GetCodexGatewayAccount(ctx context.Context, id string) (CodexGatewayAccount, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, label, status, expires_at, plan, last_used_at, last_checked_at, last_error,
+  CASE WHEN access_token_secret != '' THEN 1 ELSE 0 END,
+  CASE WHEN refresh_token_secret != '' THEN 1 ELSE 0 END,
+  created_at, updated_at
+FROM codex_gateway_accounts
+WHERE id = ?`, id)
+	account, err := scanCodexGatewayAccount(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CodexGatewayAccount{}, ErrNotFound
+	}
+	return account, err
+}
+
+func (s *Store) GetCodexGatewayAccountSecret(ctx context.Context, id string) (CodexGatewayAccountSecret, error) {
+	var secret CodexGatewayAccountSecret
+	var hasAccess, hasRefresh int
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, label, status, expires_at, plan, last_used_at, last_checked_at, last_error,
+  CASE WHEN access_token_secret != '' THEN 1 ELSE 0 END,
+  CASE WHEN refresh_token_secret != '' THEN 1 ELSE 0 END,
+  created_at, updated_at, access_token_secret, refresh_token_secret
+FROM codex_gateway_accounts
+WHERE id = ?`, id).Scan(&secret.ID, &secret.Label, &secret.Status, &secret.ExpiresAt, &secret.Plan, &secret.LastUsedAt, &secret.LastCheckedAt, &secret.LastError, &hasAccess, &hasRefresh, &secret.CreatedAt, &secret.UpdatedAt, &secret.AccessToken, &secret.RefreshToken)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CodexGatewayAccountSecret{}, ErrNotFound
+	}
+	if err != nil {
+		return CodexGatewayAccountSecret{}, err
+	}
+	secret.HasAccessToken = hasAccess == 1
+	secret.HasRefreshToken = hasRefresh == 1
+	return secret, nil
+}
+
+func (s *Store) UpdateCodexGatewayAccount(ctx context.Context, id string, patch CodexGatewayAccountPatch) (CodexGatewayAccount, error) {
+	current, err := s.GetCodexGatewayAccountSecret(ctx, id)
+	if err != nil {
+		return CodexGatewayAccount{}, err
+	}
+	label := current.Label
+	status := current.Status
+	accessToken := current.AccessToken
+	refreshToken := current.RefreshToken
+	expiresAt := current.ExpiresAt
+	plan := current.Plan
+	if patch.Label != nil {
+		label = strings.TrimSpace(*patch.Label)
+	}
+	if strings.TrimSpace(label) == "" {
+		label = current.Label
+	}
+	if patch.Status != nil {
+		status = strings.TrimSpace(*patch.Status)
+	}
+	if patch.AccessToken != nil {
+		accessToken = strings.TrimSpace(*patch.AccessToken)
+	}
+	if patch.RefreshToken != nil {
+		refreshToken = strings.TrimSpace(*patch.RefreshToken)
+	}
+	if patch.ClearExpires {
+		expiresAt = ""
+	} else if patch.ExpiresAt != nil {
+		expiresAt = strings.TrimSpace(*patch.ExpiresAt)
+	}
+	if patch.ClearPlan {
+		plan = ""
+	} else if patch.Plan != nil {
+		plan = strings.TrimSpace(*patch.Plan)
+	}
+	_, err = s.db.ExecContext(ctx, `
+UPDATE codex_gateway_accounts
+SET label = ?, status = ?, access_token_secret = ?, refresh_token_secret = ?, expires_at = ?, plan = ?, updated_at = ?
+WHERE id = ?`, label, status, accessToken, refreshToken, expiresAt, plan, now(), id)
+	if err != nil {
+		return CodexGatewayAccount{}, err
+	}
+	return s.GetCodexGatewayAccount(ctx, id)
+}
+
+func (s *Store) DeleteCodexGatewayAccount(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM codex_gateway_accounts WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) UpdateCodexGatewayAccountTokens(ctx context.Context, id, accessToken, refreshToken, expiresAt string) (CodexGatewayAccountSecret, error) {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE codex_gateway_accounts
+SET status = 'active', access_token_secret = ?, refresh_token_secret = ?, expires_at = ?, last_checked_at = ?, last_error = '', updated_at = ?
+WHERE id = ?`, strings.TrimSpace(accessToken), strings.TrimSpace(refreshToken), strings.TrimSpace(expiresAt), now(), now(), id)
+	if err != nil {
+		return CodexGatewayAccountSecret{}, err
+	}
+	return s.GetCodexGatewayAccountSecret(ctx, id)
+}
+
+func (s *Store) MarkCodexGatewayAccountUsed(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE codex_gateway_accounts SET last_used_at = ?, updated_at = ? WHERE id = ?`, now(), now(), id)
+	return err
+}
+
+func (s *Store) UpdateCodexGatewayAccountCheck(ctx context.Context, id, status, plan, lastError string) (CodexGatewayAccount, error) {
+	if strings.TrimSpace(status) == "" {
+		status = "active"
+	}
+	if strings.TrimSpace(plan) == "" {
+		_, err := s.db.ExecContext(ctx, `
+UPDATE codex_gateway_accounts
+SET status = ?, last_checked_at = ?, last_error = ?, updated_at = ?
+WHERE id = ?`, status, now(), lastError, now(), id)
+		if err != nil {
+			return CodexGatewayAccount{}, err
+		}
+		return s.GetCodexGatewayAccount(ctx, id)
+	}
+	_, err := s.db.ExecContext(ctx, `
+UPDATE codex_gateway_accounts
+SET status = ?, plan = ?, last_checked_at = ?, last_error = ?, updated_at = ?
+WHERE id = ?`, status, strings.TrimSpace(plan), now(), lastError, now(), id)
+	if err != nil {
+		return CodexGatewayAccount{}, err
+	}
+	return s.GetCodexGatewayAccount(ctx, id)
+}
+
+func (s *Store) SelectCodexGatewayAccountForModel(ctx context.Context, model string, excludeIDs []string) (CodexGatewayAccountSecret, error) {
+	excluded := make(map[string]bool, len(excludeIDs))
+	for _, id := range excludeIDs {
+		excluded[strings.TrimSpace(id)] = true
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id
+FROM codex_gateway_accounts
+WHERE status = 'active' AND (access_token_secret != '' OR refresh_token_secret != '')
+ORDER BY
+  CASE WHEN last_used_at = '' THEN 0 ELSE 1 END,
+  last_used_at ASC,
+  created_at ASC`)
+	if err != nil {
+		return CodexGatewayAccountSecret{}, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return CodexGatewayAccountSecret{}, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return CodexGatewayAccountSecret{}, err
+	}
+	rows.Close()
+	for _, id := range ids {
+		if excluded[id] {
+			continue
+		}
+		secret, err := s.GetCodexGatewayAccountSecret(ctx, id)
+		if err != nil {
+			return CodexGatewayAccountSecret{}, err
+		}
+		ok, err := s.CodexGatewayAccountCanUseModel(ctx, secret.CodexGatewayAccount, model)
+		if err != nil {
+			return CodexGatewayAccountSecret{}, err
+		}
+		if ok {
+			return secret, nil
+		}
+	}
+	return CodexGatewayAccountSecret{}, ErrNotFound
+}
+
+func (s *Store) UpsertCodexGatewayModels(ctx context.Context, models []CodexGatewayModelInput) error {
+	now := now()
+	for _, model := range models {
+		model = normalizeCodexGatewayModelInput(model)
+		if model.ID == "" {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `
+INSERT INTO codex_gateway_models (id, display_name, owned_by, source, last_seen_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+  display_name = excluded.display_name,
+  owned_by = excluded.owned_by,
+  source = excluded.source,
+  last_seen_at = excluded.last_seen_at,
+  updated_at = excluded.updated_at`, model.ID, model.DisplayName, model.OwnedBy, model.Source, now, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) UpsertCodexGatewayModelsForPlan(ctx context.Context, plan string, models []CodexGatewayModelInput) error {
+	plan = strings.TrimSpace(plan)
+	if plan == "" {
+		return s.UpsertCodexGatewayModels(ctx, models)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := now()
+	seen := map[string]bool{}
+	for _, model := range models {
+		model = normalizeCodexGatewayModelInput(model)
+		if model.ID == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO codex_gateway_models (id, display_name, owned_by, source, last_seen_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+  display_name = excluded.display_name,
+  owned_by = excluded.owned_by,
+  source = excluded.source,
+  last_seen_at = excluded.last_seen_at,
+  updated_at = excluded.updated_at`, model.ID, model.DisplayName, model.OwnedBy, model.Source, now, now); err != nil {
+			return err
+		}
+		seen[model.ID] = true
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM codex_gateway_model_plans WHERE plan = ?`, plan); err != nil {
+		return err
+	}
+	for id := range seen {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO codex_gateway_model_plans (plan, model_id, last_seen_at) VALUES (?, ?, ?)`, plan, id, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func normalizeCodexGatewayModelInput(model CodexGatewayModelInput) CodexGatewayModelInput {
+	model.ID = strings.TrimSpace(model.ID)
+	model.DisplayName = strings.TrimSpace(model.DisplayName)
+	if model.DisplayName == "" {
+		model.DisplayName = model.ID
+	}
+	model.OwnedBy = strings.TrimSpace(model.OwnedBy)
+	if model.OwnedBy == "" {
+		model.OwnedBy = "codex"
+	}
+	model.Source = strings.TrimSpace(model.Source)
+	if model.Source == "" {
+		model.Source = "upstream"
+	}
+	return model
+}
+
+func (s *Store) ListCodexGatewayModels(ctx context.Context) ([]CodexGatewayModel, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, display_name, owned_by, source, last_seen_at, updated_at FROM codex_gateway_models ORDER BY CASE WHEN source = 'static' THEN 0 ELSE 1 END, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CodexGatewayModel{}
+	for rows.Next() {
+		model, err := scanCodexGatewayModel(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, model)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	plans, err := s.codexGatewayModelPlans(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Plans = plans[out[i].ID]
+	}
+	return out, nil
+}
+
+func (s *Store) GetCodexGatewayModel(ctx context.Context, id string) (CodexGatewayModel, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, display_name, owned_by, source, last_seen_at, updated_at FROM codex_gateway_models WHERE id = ?`, strings.TrimSpace(id))
+	model, err := scanCodexGatewayModel(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CodexGatewayModel{}, ErrNotFound
+	}
+	if err != nil {
+		return CodexGatewayModel{}, err
+	}
+	model.Plans, err = s.CodexGatewayModelPlans(ctx, model.ID)
+	return model, err
+}
+
+func (s *Store) CodexGatewayModelPlans(ctx context.Context, modelID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT plan FROM codex_gateway_model_plans WHERE model_id = ? ORDER BY plan ASC`, strings.TrimSpace(modelID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	plans := []string{}
+	for rows.Next() {
+		var plan string
+		if err := rows.Scan(&plan); err != nil {
+			return nil, err
+		}
+		plans = append(plans, plan)
+	}
+	return plans, rows.Err()
+}
+
+func (s *Store) codexGatewayModelPlans(ctx context.Context) (map[string][]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT model_id, plan FROM codex_gateway_model_plans ORDER BY model_id ASC, plan ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	plans := map[string][]string{}
+	for rows.Next() {
+		var modelID, plan string
+		if err := rows.Scan(&modelID, &plan); err != nil {
+			return nil, err
+		}
+		plans[modelID] = append(plans[modelID], plan)
+	}
+	return plans, rows.Err()
+}
+
+func (s *Store) CodexGatewayPlanModelCount(ctx context.Context, plan string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM codex_gateway_model_plans WHERE plan = ?`, strings.TrimSpace(plan)).Scan(&count)
+	return count, err
+}
+
+func (s *Store) CodexGatewayPlanSupportsModel(ctx context.Context, plan, modelID string) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM codex_gateway_model_plans WHERE plan = ? AND model_id = ? LIMIT 1`, strings.TrimSpace(plan), strings.TrimSpace(modelID)).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return exists == 1, err
+}
+
+func (s *Store) CodexGatewayAccountCanUseModel(ctx context.Context, account CodexGatewayAccount, modelID string) (bool, error) {
+	plan := strings.TrimSpace(account.Plan)
+	if strings.TrimSpace(modelID) == "" || plan == "" {
+		return true, nil
+	}
+	count, err := s.CodexGatewayPlanModelCount(ctx, plan)
+	if err != nil {
+		return false, err
+	}
+	if count == 0 {
+		return true, nil
+	}
+	return s.CodexGatewayPlanSupportsModel(ctx, plan, modelID)
+}
+
+func (s *Store) CreateCodexGatewayRequestLog(ctx context.Context, input CodexGatewayRequestLogInput) error {
+	id, err := ids.New("cgreq")
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
+	INSERT INTO codex_gateway_request_logs (
+	  id, request_id, api_kind, model, account_id, source_ip, status_code, error_code, error_source, error_message, latency_ms, streamed, input_tokens, output_tokens, created_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, input.RequestID, input.APIKind, input.Model, input.AccountID, input.SourceIP, input.StatusCode, input.ErrorCode, input.ErrorSource, input.ErrorMessage, input.LatencyMS, boolInt(input.Streamed), input.InputTokens, input.OutputTokens, now())
+	if err != nil {
+		return err
+	}
+	if err := pruneCodexGatewayRequestLogs(ctx, tx, codexGatewayRequestLogRetention); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) PruneCodexGatewayRequestLogs(ctx context.Context, retention int) error {
+	if retention <= 0 {
+		retention = codexGatewayRequestLogRetention
+	}
+	return pruneCodexGatewayRequestLogs(ctx, s.db, retention)
+}
+
+type codexGatewayRequestLogPruner interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func pruneCodexGatewayRequestLogs(ctx context.Context, execer codexGatewayRequestLogPruner, retention int) error {
+	if retention <= 0 {
+		return nil
+	}
+	_, err := execer.ExecContext(ctx, `
+	DELETE FROM codex_gateway_request_logs
+	WHERE id IN (
+	  SELECT id FROM codex_gateway_request_logs
+	  ORDER BY created_at DESC, id DESC
+	  LIMIT -1 OFFSET ?
+	)`, retention)
+	return err
+}
+
+func (s *Store) ListCodexGatewayRequestLogs(ctx context.Context, limit int) ([]CodexGatewayRequestLog, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, request_id, api_kind, model, account_id, source_ip, status_code, error_code, error_source, error_message, latency_ms, streamed, input_tokens, output_tokens, created_at FROM codex_gateway_request_logs ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CodexGatewayRequestLog{}
+	for rows.Next() {
+		log, err := scanCodexGatewayRequestLog(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, log)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CodexGatewayRecentRequestSummary(ctx context.Context, since time.Time) (int, int, error) {
+	var total, failed int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) FROM codex_gateway_request_logs WHERE created_at >= ?`, formatTime(since)).Scan(&total, &failed)
+	return total, failed, err
 }
 
 func DefaultV2RaySettings() V2RaySettings {
@@ -2088,6 +2975,59 @@ func scanCodexTurn(row workspaceScanner) (CodexTurn, error) {
 		return CodexTurn{}, err
 	}
 	return turn, nil
+}
+
+func scanCodexGatewaySettings(row workspaceScanner) (CodexGatewaySettings, error) {
+	var settings CodexGatewaySettings
+	var enabled int
+	err := row.Scan(&settings.ID, &enabled, &settings.BaseURL, &settings.OAuthAuthURL, &settings.OAuthTokenURL, &settings.OAuthClientID, &settings.OAuthRedirectURI, &settings.RequestTimeoutSeconds, &settings.RefreshMarginSeconds, &settings.DefaultInstructions, &settings.InstallationID, &settings.CreatedAt, &settings.UpdatedAt)
+	if err != nil {
+		return CodexGatewaySettings{}, err
+	}
+	settings.Enabled = enabled == 1
+	return settings, nil
+}
+
+func scanCodexGatewayAPIKey(row workspaceScanner) (CodexGatewayAPIKey, error) {
+	var key CodexGatewayAPIKey
+	err := row.Scan(&key.ID, &key.Name, &key.Status, &key.LastUsedAt, &key.CreatedAt, &key.UpdatedAt)
+	if err != nil {
+		return CodexGatewayAPIKey{}, err
+	}
+	return key, nil
+}
+
+func scanCodexGatewayAccount(row workspaceScanner) (CodexGatewayAccount, error) {
+	var account CodexGatewayAccount
+	var hasAccess, hasRefresh int
+	err := row.Scan(&account.ID, &account.Label, &account.Status, &account.ExpiresAt, &account.Plan, &account.LastUsedAt, &account.LastCheckedAt, &account.LastError, &hasAccess, &hasRefresh, &account.CreatedAt, &account.UpdatedAt)
+	if err != nil {
+		return CodexGatewayAccount{}, err
+	}
+	account.HasAccessToken = hasAccess == 1
+	account.HasRefreshToken = hasRefresh == 1
+	return account, nil
+}
+
+func scanCodexGatewayModel(row workspaceScanner) (CodexGatewayModel, error) {
+	var model CodexGatewayModel
+	err := row.Scan(&model.ID, &model.DisplayName, &model.OwnedBy, &model.Source, &model.LastSeenAt, &model.UpdatedAt)
+	if err != nil {
+		return CodexGatewayModel{}, err
+	}
+	model.Object = "model"
+	return model, nil
+}
+
+func scanCodexGatewayRequestLog(row workspaceScanner) (CodexGatewayRequestLog, error) {
+	var log CodexGatewayRequestLog
+	var streamed int
+	err := row.Scan(&log.ID, &log.RequestID, &log.APIKind, &log.Model, &log.AccountID, &log.SourceIP, &log.StatusCode, &log.ErrorCode, &log.ErrorSource, &log.ErrorMessage, &log.LatencyMS, &streamed, &log.InputTokens, &log.OutputTokens, &log.CreatedAt)
+	if err != nil {
+		return CodexGatewayRequestLog{}, err
+	}
+	log.Streamed = streamed == 1
+	return log, nil
 }
 
 func scanV2RaySettings(row workspaceScanner) (V2RaySettings, error) {

@@ -3,6 +3,7 @@ import type { AppData, CodexSession, CodexTab, EventRecord, MainTab, V2RayExport
 import { Button, Pill } from "../components/ui";
 import { CODEX_TABS, NAV_ITEMS, v2rayStateLabel } from "../domain/labels";
 import { ActivityView } from "./ActivityView";
+import { CodexGatewayView } from "./CodexGatewayView";
 import { CodexView } from "./CodexView";
 import { DashboardView } from "./DashboardView";
 import { ImagesView } from "./ImagesView";
@@ -117,6 +118,7 @@ export function AppShell({
         ) : null}
         {activeTab === "codex" && activeCodexTab === "projects" ? <ProjectsView actions={actions} data={data} selectedWorkspaceId={selectedWorkspaceId} /> : null}
         {activeTab === "codex" && activeCodexTab === "permissions" ? <PermissionsView data={data} /> : null}
+        {activeTab === "codex" && activeCodexTab === "gateway" ? <CodexGatewayView actions={actions} data={data} /> : null}
         {activeTab === "codex" && activeCodexTab === "activity" ? <ActivityView audit={data.audit} /> : null}
         {activeTab === "logs" ? <LogsView actions={actions} /> : null}
         {activeTab === "images" ? <ImagesView actions={actions} data={data} /> : null}

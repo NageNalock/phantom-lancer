@@ -4,6 +4,7 @@ import { Toast } from "../components/ui";
 import type {
   AppData,
   AuthSession,
+  CodexGatewayPayload,
   CodexSession,
   CodexSessionDetail,
   CodexStatus,
@@ -33,6 +34,7 @@ export interface AppActions {
   setSessionEvents: (events: EventRecord[] | ((events: EventRecord[]) => EventRecord[])) => void;
   patchActiveSession: (patch: Partial<CodexSession>) => void;
   refreshSessions: () => Promise<void>;
+  refreshCodexGateway: () => Promise<void>;
   refreshV2Ray: () => Promise<void>;
   refreshImages: () => Promise<void>;
   setV2RayExportOpen: (open: boolean) => void;
@@ -47,6 +49,7 @@ const emptyData: AppData = {
   permissionProfiles: [],
   codexStatus: {},
   codexSessions: [],
+  codexGateway: {},
   settings: {},
   v2ray: {},
   images: {},
@@ -89,12 +92,32 @@ export function App() {
     setSessionEvents(history.items || []);
   }, []);
 
+  const loadCodexGatewayData = useCallback(async (): Promise<CodexGatewayPayload> => {
+    const [status, settings, apiKeys, accounts, models, requestLogs] = await Promise.all([
+      api<CodexGatewayPayload["status"]>("/api/codex-gateway/status"),
+      api<{ settings?: CodexGatewayPayload["settings"] }>("/api/codex-gateway/settings"),
+      api<{ items?: CodexGatewayPayload["apiKeys"] }>("/api/codex-gateway/api-keys"),
+      api<{ items?: CodexGatewayPayload["accounts"] }>("/api/codex-gateway/accounts"),
+      api<{ items?: CodexGatewayPayload["models"] }>("/api/codex-gateway/models"),
+      api<{ items?: CodexGatewayPayload["requestLogs"] }>("/api/codex-gateway/request-logs?limit=40"),
+    ]);
+    return {
+      status,
+      settings: settings.settings,
+      apiKeys: apiKeys.items || [],
+      accounts: accounts.items || [],
+      models: models.items || [],
+      requestLogs: requestLogs.items || [],
+    };
+  }, []);
+
   const loadAppData = useCallback(async () => {
-    const [dashboard, workspaces, audit, codexStatus, approvals, profiles, sessions, settings, v2ray, imagesSettings, imageStorageSettings, imageJobs, imageAssets] = await Promise.all([
+    const [dashboard, workspaces, audit, codexStatus, codexGateway, approvals, profiles, sessions, settings, v2ray, imagesSettings, imageStorageSettings, imageJobs, imageAssets] = await Promise.all([
       api<AppData["dashboard"]>("/api/dashboard/summary"),
       api<{ items?: Workspace[] }>("/api/workspaces"),
       api<{ items?: AppData["audit"] }>("/api/audit/events"),
       api<CodexStatus>("/api/codex/status"),
+      loadCodexGatewayData(),
       api<{ items?: unknown[] }>("/api/approvals/pending"),
       api<{ items?: AppData["permissionProfiles"] }>("/api/permissions/profiles"),
       api<{ items?: CodexSession[] }>("/api/codex/sessions"),
@@ -115,6 +138,7 @@ export function App() {
       permissionProfiles: profiles.items || [],
       codexStatus,
       codexSessions: nextSessions,
+      codexGateway,
       settings,
       v2ray,
       images: { ...imagesSettings, storageSettings: imageStorageSettings.settings, jobs: imageJobs.items || [], assets: imageAssets.items || [], count: imageJobs.count || 0 },
@@ -130,7 +154,7 @@ export function App() {
       setActiveSessionWorkspace(null);
       setSessionEvents([]);
     }
-  }, [loadActiveSession]);
+  }, [loadActiveSession, loadCodexGatewayData]);
 
   useEffect(() => {
     let active = true;
@@ -184,6 +208,10 @@ export function App() {
         const sessions = await api<{ items?: CodexSession[] }>("/api/codex/sessions");
         setData((current) => ({ ...current, codexSessions: sessions.items || [] }));
       },
+      refreshCodexGateway: async () => {
+        const codexGateway = await loadCodexGatewayData();
+        setData((current) => ({ ...current, codexGateway, dashboard: { ...current.dashboard, codexGateway: codexGateway.status } }));
+      },
       refreshV2Ray: async () => {
         const next = await api<V2RayPayload>("/api/v2ray/settings");
         setData((current) => ({ ...current, v2ray: next, dashboard: { ...current.dashboard, v2ray: next.status } }));
@@ -204,7 +232,7 @@ export function App() {
       setV2RayExportOpen,
       setV2RayExport,
     }),
-    [csrf, loadActiveSession, loadAppData, setToast],
+    [csrf, loadActiveSession, loadAppData, loadCodexGatewayData, setToast],
   );
 
   async function handleAuth(mode: "bootstrap" | "login", username: string, password: string) {
