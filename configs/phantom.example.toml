@@ -1,0 +1,28 @@
+# Copy this file to configs/phantom.toml or set PL_CONFIG=/path/to/phantom.toml.
+# Keep this file small: most runtime settings are stored in SQLite and can be
+# changed from the web console Settings page.
+
+[server]
+addr = "127.0.0.1:8080"
+
+[storage]
+data_dir = "/var/lib/phantom-lancer"
+# sqlite_path is optional. Defaults to "<data_dir>/phantom.db".
+# sqlite_path = "/var/lib/phantom-lancer/phantom.db"
+
+[logging]
+# Structured service logs are written by Phantom Lancer itself and rotated by
+# size/count/age. stdout capture from scripts/manage.sh is kept separate.
+file_path = "/var/lib/phantom-lancer/logs/phantom-lancer.jsonl"
+max_size_mb = 32
+max_files = 5
+max_age_days = 14
+stdout = false
+
+# These values are only used to seed SQLite settings on first startup.
+# Later changes should be made from the Settings page.
+[bootstrap]
+allowed_roots = ["/srv/apps"]
+codex_binary = "codex"
+codex_home = ""
+cookie_secure = false

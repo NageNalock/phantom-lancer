@@ -1,0 +1,38 @@
+# Phantom Lancer local runtime
+.phantom-data/
+configs/phantom.toml
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+*.pid
+
+# Build outputs
+bin/
+dist/
+release/
+web/dist/
+
+# Go
+coverage.out
+*.test
+
+# Node / Vite
+web/node_modules/
+web/.vite/
+web/.cache/
+web/.turbo/
+web/coverage/
+
+# Environment and local overrides
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
