@@ -26,6 +26,19 @@ type Config struct {
 	CodexHome             string
 	CookieSecure          bool
 	LoginFailureThreshold int
+	Updates               UpdateConfig
+}
+
+type UpdateConfig struct {
+	Enabled                bool
+	Repository             string
+	Channel                string
+	AssetName              string
+	RestartMode            string
+	InstallBinaryPath      string
+	BackupRetention        int
+	DownloadTimeoutSeconds int
+	RestartTimeoutSeconds  int
 }
 
 func Load(args []string) (Config, error) {
@@ -60,6 +73,7 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.CodexBinary, "codex", cfg.CodexBinary, "default codex CLI binary path")
 	fs.StringVar(&cfg.CodexHome, "codex-home", cfg.CodexHome, "default CODEX_HOME")
 	fs.IntVar(&cfg.LoginFailureThreshold, "login-failure-threshold", cfg.LoginFailureThreshold, "failed login attempts before account/IP backoff")
+	fs.BoolVar(&cfg.Updates.Enabled, "updates-enabled", cfg.Updates.Enabled, "enable manual update checks and installs")
 	allowedRoots := fs.String("allowed-roots", strings.Join(cfg.AllowedRoots, ","), "comma-separated default workspace roots")
 	cookieSecure := fs.Bool("cookie-secure", cfg.CookieSecure, "default Secure flag for session cookies")
 	if err := fs.Parse(args); err != nil {
@@ -87,6 +101,7 @@ func Load(args []string) (Config, error) {
 		cfg.LogFile = resolvePath(baseDir, cfg.LogFile)
 	}
 	cfg.CodexHome = resolvePath(baseDir, cfg.CodexHome)
+	cfg.Updates.InstallBinaryPath = resolvePath(baseDir, cfg.Updates.InstallBinaryPath)
 	for index, root := range cfg.AllowedRoots {
 		cfg.AllowedRoots[index] = resolvePath(baseDir, root)
 	}
@@ -109,6 +124,24 @@ func Load(args []string) (Config, error) {
 	if cfg.LogMaxAgeDays < 0 {
 		return Config{}, errors.New("log max age days cannot be negative")
 	}
+	if cfg.Updates.Repository == "" {
+		return Config{}, errors.New("updates repository is required")
+	}
+	if cfg.Updates.AssetName == "" {
+		return Config{}, errors.New("updates asset name is required")
+	}
+	if cfg.Updates.RestartMode != "exit" && cfg.Updates.RestartMode != "none" {
+		return Config{}, errors.New("updates restart mode must be exit or none")
+	}
+	if cfg.Updates.BackupRetention < 0 {
+		return Config{}, errors.New("updates backup retention cannot be negative")
+	}
+	if cfg.Updates.DownloadTimeoutSeconds <= 0 {
+		return Config{}, errors.New("updates download timeout must be positive")
+	}
+	if cfg.Updates.RestartTimeoutSeconds <= 0 {
+		return Config{}, errors.New("updates restart timeout must be positive")
+	}
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return Config{}, err
 	}
@@ -125,6 +158,16 @@ func defaults(cwd string) Config {
 		LogMaxFiles:           5,
 		LogMaxAgeDays:         14,
 		LoginFailureThreshold: 5,
+		Updates: UpdateConfig{
+			Enabled:                true,
+			Repository:             "NageNalock/phantom-lancer",
+			Channel:                "stable",
+			AssetName:              "phantom-lancer-linux-amd64.tar.gz",
+			RestartMode:            "exit",
+			BackupRetention:        3,
+			DownloadTimeoutSeconds: 300,
+			RestartTimeoutSeconds:  120,
+		},
 	}
 }
 
@@ -189,6 +232,30 @@ func applyEnv(cfg *Config) {
 	if value := os.Getenv("PL_LOGIN_FAILURE_THRESHOLD"); value != "" {
 		cfg.LoginFailureThreshold = parseInt(value, cfg.LoginFailureThreshold)
 	}
+	if value := os.Getenv("PL_UPDATES_ENABLED"); value != "" {
+		cfg.Updates.Enabled = parseBool(value)
+	}
+	if value := os.Getenv("PL_UPDATES_REPOSITORY"); value != "" {
+		cfg.Updates.Repository = value
+	}
+	if value := os.Getenv("PL_UPDATES_ASSET_NAME"); value != "" {
+		cfg.Updates.AssetName = value
+	}
+	if value := os.Getenv("PL_UPDATES_RESTART_MODE"); value != "" {
+		cfg.Updates.RestartMode = value
+	}
+	if value := os.Getenv("PL_UPDATES_INSTALL_BINARY"); value != "" {
+		cfg.Updates.InstallBinaryPath = value
+	}
+	if value := os.Getenv("PL_UPDATES_BACKUP_RETENTION"); value != "" {
+		cfg.Updates.BackupRetention = parseInt(value, cfg.Updates.BackupRetention)
+	}
+	if value := os.Getenv("PL_UPDATES_DOWNLOAD_TIMEOUT_SECONDS"); value != "" {
+		cfg.Updates.DownloadTimeoutSeconds = parseInt(value, cfg.Updates.DownloadTimeoutSeconds)
+	}
+	if value := os.Getenv("PL_UPDATES_RESTART_TIMEOUT_SECONDS"); value != "" {
+		cfg.Updates.RestartTimeoutSeconds = parseInt(value, cfg.Updates.RestartTimeoutSeconds)
+	}
 }
 
 func applyConfigFile(cfg *Config, path string) error {
@@ -246,6 +313,24 @@ func applyConfigFile(cfg *Config, path string) error {
 			cfg.CookieSecure = parseBool(value)
 		case "auth.login_failure_threshold", "security.login_failure_threshold":
 			cfg.LoginFailureThreshold = parseInt(value, cfg.LoginFailureThreshold)
+		case "updates.enabled":
+			cfg.Updates.Enabled = parseBool(value)
+		case "updates.repository":
+			cfg.Updates.Repository = parseString(value)
+		case "updates.channel":
+			cfg.Updates.Channel = parseString(value)
+		case "updates.asset_name":
+			cfg.Updates.AssetName = parseString(value)
+		case "updates.restart_mode":
+			cfg.Updates.RestartMode = parseString(value)
+		case "updates.install_binary_path":
+			cfg.Updates.InstallBinaryPath = parseString(value)
+		case "updates.backup_retention":
+			cfg.Updates.BackupRetention = parseInt(value, cfg.Updates.BackupRetention)
+		case "updates.download_timeout_seconds":
+			cfg.Updates.DownloadTimeoutSeconds = parseInt(value, cfg.Updates.DownloadTimeoutSeconds)
+		case "updates.restart_timeout_seconds":
+			cfg.Updates.RestartTimeoutSeconds = parseInt(value, cfg.Updates.RestartTimeoutSeconds)
 		}
 	}
 	return scanner.Err()

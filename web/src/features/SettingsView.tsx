@@ -4,6 +4,7 @@ import type { AppData, RuntimeSettings } from "../app/types";
 import { friendlyError } from "../api/client";
 import { Button, ContextList, Panel } from "../components/ui";
 import { defaultRuntime, formatDate } from "../domain/labels";
+import { SystemUpdatePanel } from "./settings/SystemUpdatePanel";
 
 export function SettingsView({ actions, data }: { actions: AppActions; data: AppData }) {
   const [runtime, setRuntime] = useState<RuntimeSettings>(data.settings.runtime || defaultRuntime());
@@ -80,6 +81,8 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
           />
         </Panel>
       </div>
+
+      <SystemUpdatePanel actions={actions} />
 
     </div>
   );

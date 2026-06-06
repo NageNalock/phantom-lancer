@@ -49,6 +49,34 @@ find_go() {
 
 GO_BIN="$(find_go)"
 
+detect_version() {
+  if [[ -n "${PL_VERSION:-}" ]]; then
+    printf '%s\n' "$PL_VERSION"
+    return
+  fi
+  if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if tag="$(git describe --tags --exact-match HEAD 2>/dev/null)"; then
+      printf '%s\n' "$tag"
+      return
+    fi
+    if sha="$(git rev-parse --short=12 HEAD 2>/dev/null)"; then
+      printf '0.0.0-dev+%s\n' "$sha"
+      return
+    fi
+  fi
+  printf 'dev\n'
+}
+
+detect_commit() {
+  if [[ -n "${PL_COMMIT:-}" ]]; then
+    printf '%s\n' "$PL_COMMIT"
+    return
+  fi
+  if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git rev-parse --short=12 HEAD 2>/dev/null || true
+  fi
+}
+
 if [[ -n "${PL_GOROOT:-}" ]]; then
   export GOROOT="$PL_GOROOT"
 elif [[ "$GO_BIN" == "/opt/homebrew/bin/go" && -d /opt/homebrew/opt/go/libexec ]]; then
@@ -67,5 +95,9 @@ if [[ "${PL_SKIP_WEB_BUILD:-0}" != "1" && -f "$ROOT_DIR/web/package.json" ]]; th
 fi
 
 echo "Building phantom-lancer -> $OUT"
-"$GO_BIN" build -trimpath -o "$OUT" ./cmd/phantom-lancer
+VERSION="$(detect_version)"
+COMMIT="$(detect_commit)"
+BUILD_DATE="${PL_BUILD_DATE:-"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}"
+LDFLAGS="-X phantom-lancer/internal/buildinfo.Version=$VERSION -X phantom-lancer/internal/buildinfo.Commit=$COMMIT -X phantom-lancer/internal/buildinfo.Date=$BUILD_DATE"
+"$GO_BIN" build -trimpath -ldflags "$LDFLAGS" -o "$OUT" ./cmd/phantom-lancer
 echo "Build complete: $OUT"

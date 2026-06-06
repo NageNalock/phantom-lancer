@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
+	"phantom-lancer/internal/buildinfo"
 	"phantom-lancer/internal/codex"
 	"phantom-lancer/internal/codexgateway"
 	"phantom-lancer/internal/config"
@@ -18,12 +21,18 @@ import (
 	"phantom-lancer/internal/images"
 	"phantom-lancer/internal/logging"
 	logcenter "phantom-lancer/internal/logs"
+	"phantom-lancer/internal/selfupdate"
 	"phantom-lancer/internal/storage"
 	"phantom-lancer/internal/v2ray"
 	"phantom-lancer/web"
 )
 
 func main() {
+	if wantsVersion(os.Args[1:]) {
+		fmt.Printf("phantom-lancer %s commit=%s date=%s %s/%s\n", buildinfo.Version, buildinfo.Commit, buildinfo.Date, runtime.GOOS, runtime.GOARCH)
+		return
+	}
+
 	bootstrapLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	cfg, err := config.Load(os.Args[1:])
@@ -82,6 +91,26 @@ func main() {
 	defer v2raySvc.Close()
 	imagesSvc := images.NewService(store, hub, cfg.DataDir, logger)
 	logsSvc := logcenter.NewService(store, cfg)
+	restartRequested := make(chan struct{}, 1)
+	updateSvc := selfupdate.NewService(store, hub, logger, selfupdate.Config{
+		Enabled:           cfg.Updates.Enabled,
+		Repository:        cfg.Updates.Repository,
+		AssetName:         cfg.Updates.AssetName,
+		RestartMode:       cfg.Updates.RestartMode,
+		InstallBinaryPath: cfg.Updates.InstallBinaryPath,
+		DataDir:           cfg.DataDir,
+		BackupRetention:   cfg.Updates.BackupRetention,
+		DownloadTimeout:   time.Duration(cfg.Updates.DownloadTimeoutSeconds) * time.Second,
+		RestartTimeout:    time.Duration(cfg.Updates.RestartTimeoutSeconds) * time.Second,
+		Build:             buildinfo.Current(),
+		RequestRestart: func() {
+			select {
+			case restartRequested <- struct{}{}:
+			default:
+			}
+		},
+	})
+	updateSvc.ConfirmBoot(ctx)
 	if err := codexGatewaySvc.Ensure(ctx); err != nil {
 		logger.Error("initialize codex gateway failed", "error", err)
 		os.Exit(1)
@@ -99,7 +128,7 @@ func main() {
 			logger.Error("start embedded v2ray failed", "error", err)
 		}
 	}
-	api, err := httpapi.New(cfg, store, hub, codexSvc, codexGatewaySvc, v2raySvc, imagesSvc, logsSvc, staticFS, logger)
+	api, err := httpapi.New(cfg, store, hub, codexSvc, codexGatewaySvc, v2raySvc, imagesSvc, logsSvc, updateSvc, staticFS, logger)
 	if err != nil {
 		logger.Error("create api failed", "error", err)
 		os.Exit(1)
@@ -121,11 +150,24 @@ func main() {
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
+	select {
+	case <-stop:
+	case <-restartRequested:
+		logger.Info("phantom lancer restart requested")
+	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("shutdown failed", "error", err)
 	}
+}
+
+func wantsVersion(args []string) bool {
+	for _, arg := range args {
+		if arg == "--version" || arg == "-version" || arg == "version" {
+			return true
+		}
+	}
+	return false
 }

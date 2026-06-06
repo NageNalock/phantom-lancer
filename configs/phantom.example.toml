@@ -19,6 +19,19 @@ max_files = 5
 max_age_days = 14
 stdout = false
 
+[updates]
+# Manual self-update checks use public GitHub Releases only. Keep restart_mode
+# as "exit" when the service is supervised by systemd with Restart=always.
+enabled = true
+repository = "NageNalock/phantom-lancer"
+channel = "stable"
+asset_name = "phantom-lancer-linux-amd64.tar.gz"
+restart_mode = "exit"
+install_binary_path = ""
+backup_retention = 3
+download_timeout_seconds = 300
+restart_timeout_seconds = 120
+
 # These values are only used to seed SQLite settings on first startup.
 # Later changes should be made from the Settings page.
 [bootstrap]

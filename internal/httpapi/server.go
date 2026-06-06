@@ -24,6 +24,7 @@ import (
 	"phantom-lancer/internal/events"
 	imagegen "phantom-lancer/internal/images"
 	logcenter "phantom-lancer/internal/logs"
+	"phantom-lancer/internal/selfupdate"
 	"phantom-lancer/internal/storage"
 	"phantom-lancer/internal/v2ray"
 	"phantom-lancer/internal/workspaces"
@@ -44,11 +45,13 @@ type Server struct {
 	v2ray          *v2ray.Service
 	images         *imagegen.Service
 	logs           *logcenter.Service
+	updates        *selfupdate.Service
 	staticFS       fs.FS
 	log            *slog.Logger
 	logins         *loginBackoff
 	gatewayOAuth   *codexGatewayOAuthSessions
 	privateUnlocks *loginBackoff
+	updateConfirms *loginBackoff
 	privateImages  *privateImageAccess
 }
 
@@ -56,7 +59,7 @@ type sessionContext struct {
 	Session storage.Session
 }
 
-func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexSvc *codex.Service, codexGatewaySvc *codexgateway.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, logsSvc *logcenter.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
+func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexSvc *codex.Service, codexGatewaySvc *codexgateway.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
 	return &Server{
 		cfg:            cfg,
 		store:          store,
@@ -66,11 +69,13 @@ func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexSvc *cod
 		v2ray:          v2raySvc,
 		images:         imagesSvc,
 		logs:           logsSvc,
+		updates:        updateSvc,
 		staticFS:       staticFS,
 		log:            logger,
 		logins:         newLoginBackoff(cfg.LoginFailureThreshold),
 		gatewayOAuth:   newCodexGatewayOAuthSessions(10 * time.Minute),
 		privateUnlocks: newLoginBackoff(cfg.LoginFailureThreshold),
+		updateConfirms: newLoginBackoff(cfg.LoginFailureThreshold),
 		privateImages:  newPrivateImageAccess(),
 	}, nil
 }
@@ -121,6 +126,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/permissions/profiles", s.handlePermissionProfiles)
 	mux.HandleFunc("GET /api/approvals/pending", s.handlePendingApprovals)
 	mux.HandleFunc("GET /api/audit/events", s.handleAuditEvents)
+	mux.HandleFunc("GET /api/system/version", s.handleSystemVersion)
+	mux.HandleFunc("GET /api/system/update/status", s.handleSystemUpdateStatus)
+	mux.HandleFunc("POST /api/system/update/check", s.handleSystemUpdateCheck)
+	mux.HandleFunc("POST /api/system/update/apply", s.handleSystemUpdateApply)
+	mux.HandleFunc("GET /api/system/update/jobs/", s.handleSystemUpdateJobSubroutes)
+	mux.HandleFunc("POST /api/system/update/jobs/", s.handleSystemUpdateJobSubroutes)
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handleUpdateSettings)
 	mux.HandleFunc("GET /api/logs/sources", s.handleListLogSources)

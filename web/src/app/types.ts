@@ -119,6 +119,62 @@ export interface SettingsPayload {
   runtime?: RuntimeSettings;
 }
 
+export interface BuildInfo {
+  version?: string;
+  commit?: string;
+  date?: string;
+  os?: string;
+  arch?: string;
+}
+
+export interface SystemUpdateCheck {
+  id?: string;
+  currentVersion?: string;
+  latestVersion?: string;
+  updateAvailable?: boolean;
+  comparable?: boolean;
+  canApply?: boolean;
+  reason?: string;
+  releaseId?: string;
+  releaseUrl?: string;
+  publishedAt?: string;
+  assetName?: string;
+  assetSizeBytes?: number;
+  checksumAvailable?: boolean;
+  platformSupported?: boolean;
+  errorMessage?: string;
+  checkedAt?: string;
+}
+
+export interface SystemUpdateJob {
+  id: string;
+  currentVersion?: string;
+  targetVersion?: string;
+  releaseId?: string;
+  assetName?: string;
+  status?: string;
+  phase?: string;
+  bytesDownloaded?: number;
+  totalBytes?: number;
+  checksumSha256?: string;
+  installBinaryPath?: string;
+  backupBinaryPath?: string;
+  errorMessage?: string;
+  createdAt?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export interface SystemUpdateStatus {
+  enabled?: boolean;
+  version?: BuildInfo;
+  latestCheck?: SystemUpdateCheck;
+  activeJob?: SystemUpdateJob;
+  latestJob?: SystemUpdateJob;
+  restartTimeoutSeconds?: number;
+  supportedPlatform?: boolean;
+}
+
 export interface CodexGatewaySettings {
   id?: string;
   enabled?: boolean;

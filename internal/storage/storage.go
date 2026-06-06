@@ -107,6 +107,47 @@ type RuntimeSettings struct {
 	UpdatedAt    string   `json:"updatedAt,omitempty"`
 }
 
+type SystemUpdateCheck struct {
+	ID                string `json:"id"`
+	CurrentVersion    string `json:"currentVersion"`
+	LatestVersion     string `json:"latestVersion,omitempty"`
+	UpdateAvailable   bool   `json:"updateAvailable"`
+	Comparable        bool   `json:"comparable"`
+	CanApply          bool   `json:"canApply"`
+	Reason            string `json:"reason,omitempty"`
+	ReleaseID         string `json:"releaseId,omitempty"`
+	ReleaseURL        string `json:"releaseUrl,omitempty"`
+	PublishedAt       string `json:"publishedAt,omitempty"`
+	AssetName         string `json:"assetName,omitempty"`
+	AssetURL          string `json:"-"`
+	AssetSizeBytes    int64  `json:"assetSizeBytes,omitempty"`
+	ChecksumAssetURL  string `json:"-"`
+	ChecksumAvailable bool   `json:"checksumAvailable"`
+	PlatformSupported bool   `json:"platformSupported"`
+	ETag              string `json:"-"`
+	ErrorMessage      string `json:"errorMessage,omitempty"`
+	CheckedAt         string `json:"checkedAt"`
+}
+
+type SystemUpdateJob struct {
+	ID                string `json:"id"`
+	CurrentVersion    string `json:"currentVersion"`
+	TargetVersion     string `json:"targetVersion"`
+	ReleaseID         string `json:"releaseId"`
+	AssetName         string `json:"assetName"`
+	Status            string `json:"status"`
+	Phase             string `json:"phase"`
+	BytesDownloaded   int64  `json:"bytesDownloaded"`
+	TotalBytes        int64  `json:"totalBytes"`
+	ChecksumSHA256    string `json:"checksumSha256,omitempty"`
+	InstallBinaryPath string `json:"installBinaryPath,omitempty"`
+	BackupBinaryPath  string `json:"backupBinaryPath,omitempty"`
+	ErrorMessage      string `json:"errorMessage,omitempty"`
+	CreatedAt         string `json:"createdAt"`
+	StartedAt         string `json:"startedAt,omitempty"`
+	CompletedAt       string `json:"completedAt,omitempty"`
+}
+
 type CodexGatewaySettings struct {
 	ID                    string `json:"id"`
 	Enabled               bool   `json:"enabled"`
@@ -472,6 +513,47 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS system_update_checks (
+  id TEXT PRIMARY KEY,
+  current_version TEXT NOT NULL,
+  latest_version TEXT NOT NULL DEFAULT '',
+  update_available INTEGER NOT NULL DEFAULT 0,
+  comparable INTEGER NOT NULL DEFAULT 0,
+  can_apply INTEGER NOT NULL DEFAULT 0,
+  reason TEXT NOT NULL DEFAULT '',
+  release_id TEXT NOT NULL DEFAULT '',
+  release_url TEXT NOT NULL DEFAULT '',
+  published_at TEXT NOT NULL DEFAULT '',
+  asset_name TEXT NOT NULL DEFAULT '',
+  asset_url TEXT NOT NULL DEFAULT '',
+  asset_size_bytes INTEGER NOT NULL DEFAULT 0,
+  checksum_asset_url TEXT NOT NULL DEFAULT '',
+  checksum_available INTEGER NOT NULL DEFAULT 0,
+  platform_supported INTEGER NOT NULL DEFAULT 0,
+  etag TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  checked_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_system_update_checks_checked ON system_update_checks(checked_at DESC);
+CREATE TABLE IF NOT EXISTS system_update_jobs (
+  id TEXT PRIMARY KEY,
+  current_version TEXT NOT NULL,
+  target_version TEXT NOT NULL,
+  release_id TEXT NOT NULL,
+  asset_name TEXT NOT NULL,
+  status TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  bytes_downloaded INTEGER NOT NULL DEFAULT 0,
+  total_bytes INTEGER NOT NULL DEFAULT 0,
+  checksum_sha256 TEXT NOT NULL DEFAULT '',
+  install_binary_path TEXT NOT NULL DEFAULT '',
+  backup_binary_path TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  started_at TEXT NOT NULL DEFAULT '',
+  completed_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_system_update_jobs_status ON system_update_jobs(status, created_at DESC);
 CREATE TABLE IF NOT EXISTS codex_exec_jobs (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL,
@@ -902,6 +984,105 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.upd
 		}
 	}
 	return tx.Commit()
+}
+
+func (s *Store) AddSystemUpdateCheck(ctx context.Context, check SystemUpdateCheck) (SystemUpdateCheck, error) {
+	id, err := ids.New("updc")
+	if err != nil {
+		return SystemUpdateCheck{}, err
+	}
+	check.ID = id
+	check.CheckedAt = now()
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO system_update_checks (
+  id, current_version, latest_version, update_available, comparable, can_apply, reason, release_id, release_url, published_at,
+  asset_name, asset_url, asset_size_bytes, checksum_asset_url, checksum_available, platform_supported, etag, error_message, checked_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		check.ID, check.CurrentVersion, check.LatestVersion, boolInt(check.UpdateAvailable), boolInt(check.Comparable), boolInt(check.CanApply), check.Reason,
+		check.ReleaseID, check.ReleaseURL, check.PublishedAt, check.AssetName, check.AssetURL, check.AssetSizeBytes, check.ChecksumAssetURL,
+		boolInt(check.ChecksumAvailable), boolInt(check.PlatformSupported), check.ETag, check.ErrorMessage, check.CheckedAt)
+	if err != nil {
+		return SystemUpdateCheck{}, err
+	}
+	return check, nil
+}
+
+func (s *Store) LatestSystemUpdateCheck(ctx context.Context) (SystemUpdateCheck, error) {
+	check, err := scanSystemUpdateCheck(s.db.QueryRowContext(ctx, `SELECT id, current_version, latest_version, update_available, comparable, can_apply, reason, release_id, release_url, published_at, asset_name, asset_url, asset_size_bytes, checksum_asset_url, checksum_available, platform_supported, etag, error_message, checked_at FROM system_update_checks ORDER BY checked_at DESC LIMIT 1`))
+	if errors.Is(err, sql.ErrNoRows) {
+		return SystemUpdateCheck{}, ErrNotFound
+	}
+	return check, err
+}
+
+func (s *Store) CreateSystemUpdateJob(ctx context.Context, job SystemUpdateJob) (SystemUpdateJob, error) {
+	id, err := ids.New("upd")
+	if err != nil {
+		return SystemUpdateJob{}, err
+	}
+	now := now()
+	job.ID = id
+	job.Status = strings.TrimSpace(job.Status)
+	if job.Status == "" {
+		job.Status = "running"
+	}
+	job.Phase = strings.TrimSpace(job.Phase)
+	if job.Phase == "" {
+		job.Phase = "created"
+	}
+	job.CreatedAt = now
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO system_update_jobs (
+  id, current_version, target_version, release_id, asset_name, status, phase, bytes_downloaded, total_bytes,
+  checksum_sha256, install_binary_path, backup_binary_path, error_message, created_at, started_at, completed_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, job.CurrentVersion, job.TargetVersion, job.ReleaseID, job.AssetName, job.Status, job.Phase, job.BytesDownloaded, job.TotalBytes,
+		job.ChecksumSHA256, job.InstallBinaryPath, job.BackupBinaryPath, job.ErrorMessage, job.CreatedAt, job.StartedAt, job.CompletedAt)
+	if err != nil {
+		return SystemUpdateJob{}, err
+	}
+	return job, nil
+}
+
+func (s *Store) GetSystemUpdateJob(ctx context.Context, id string) (SystemUpdateJob, error) {
+	job, err := scanSystemUpdateJob(s.db.QueryRowContext(ctx, `SELECT id, current_version, target_version, release_id, asset_name, status, phase, bytes_downloaded, total_bytes, checksum_sha256, install_binary_path, backup_binary_path, error_message, created_at, started_at, completed_at FROM system_update_jobs WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return SystemUpdateJob{}, ErrNotFound
+	}
+	return job, err
+}
+
+func (s *Store) LatestSystemUpdateJob(ctx context.Context) (SystemUpdateJob, error) {
+	job, err := scanSystemUpdateJob(s.db.QueryRowContext(ctx, `SELECT id, current_version, target_version, release_id, asset_name, status, phase, bytes_downloaded, total_bytes, checksum_sha256, install_binary_path, backup_binary_path, error_message, created_at, started_at, completed_at FROM system_update_jobs ORDER BY created_at DESC LIMIT 1`))
+	if errors.Is(err, sql.ErrNoRows) {
+		return SystemUpdateJob{}, ErrNotFound
+	}
+	return job, err
+}
+
+func (s *Store) ActiveSystemUpdateJob(ctx context.Context) (SystemUpdateJob, error) {
+	job, err := scanSystemUpdateJob(s.db.QueryRowContext(ctx, `SELECT id, current_version, target_version, release_id, asset_name, status, phase, bytes_downloaded, total_bytes, checksum_sha256, install_binary_path, backup_binary_path, error_message, created_at, started_at, completed_at FROM system_update_jobs WHERE status IN ('queued', 'running', 'restarting') ORDER BY created_at DESC LIMIT 1`))
+	if errors.Is(err, sql.ErrNoRows) {
+		return SystemUpdateJob{}, ErrNotFound
+	}
+	return job, err
+}
+
+func (s *Store) SaveSystemUpdateJob(ctx context.Context, job SystemUpdateJob) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE system_update_jobs
+SET status = ?, phase = ?, bytes_downloaded = ?, total_bytes = ?, checksum_sha256 = ?, install_binary_path = ?, backup_binary_path = ?, error_message = ?, started_at = ?, completed_at = ?
+WHERE id = ?`,
+		job.Status, job.Phase, job.BytesDownloaded, job.TotalBytes, job.ChecksumSHA256, job.InstallBinaryPath, job.BackupBinaryPath, job.ErrorMessage, job.StartedAt, job.CompletedAt, job.ID)
+	return err
+}
+
+func (s *Store) BackupDatabase(ctx context.Context, path string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("backup path is required")
+	}
+	_, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, path)
+	return err
 }
 
 func DefaultCodexGatewaySettings() CodexGatewaySettings {
@@ -2955,6 +3136,67 @@ func scanWorkspace(row workspaceScanner) (Workspace, error) {
 	workspace.AllowNonGit = allowNonGit == 1
 	workspace.Enabled = enabled == 1
 	return workspace, nil
+}
+
+func scanSystemUpdateCheck(row workspaceScanner) (SystemUpdateCheck, error) {
+	var check SystemUpdateCheck
+	var updateAvailable, comparable, canApply, checksumAvailable, platformSupported int
+	err := row.Scan(
+		&check.ID,
+		&check.CurrentVersion,
+		&check.LatestVersion,
+		&updateAvailable,
+		&comparable,
+		&canApply,
+		&check.Reason,
+		&check.ReleaseID,
+		&check.ReleaseURL,
+		&check.PublishedAt,
+		&check.AssetName,
+		&check.AssetURL,
+		&check.AssetSizeBytes,
+		&check.ChecksumAssetURL,
+		&checksumAvailable,
+		&platformSupported,
+		&check.ETag,
+		&check.ErrorMessage,
+		&check.CheckedAt,
+	)
+	if err != nil {
+		return SystemUpdateCheck{}, err
+	}
+	check.UpdateAvailable = updateAvailable == 1
+	check.Comparable = comparable == 1
+	check.CanApply = canApply == 1
+	check.ChecksumAvailable = checksumAvailable == 1
+	check.PlatformSupported = platformSupported == 1
+	return check, nil
+}
+
+func scanSystemUpdateJob(row workspaceScanner) (SystemUpdateJob, error) {
+	var job SystemUpdateJob
+	err := row.Scan(
+		&job.ID,
+		&job.CurrentVersion,
+		&job.TargetVersion,
+		&job.ReleaseID,
+		&job.AssetName,
+		&job.Status,
+		&job.Phase,
+		&job.BytesDownloaded,
+		&job.TotalBytes,
+		&job.ChecksumSHA256,
+		&job.InstallBinaryPath,
+		&job.BackupBinaryPath,
+		&job.ErrorMessage,
+		&job.CreatedAt,
+		&job.StartedAt,
+		&job.CompletedAt,
+	)
+	if err != nil {
+		return SystemUpdateJob{}, err
+	}
+	return job, nil
 }
 
 func scanCodexSession(row workspaceScanner) (CodexSession, error) {

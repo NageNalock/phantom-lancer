@@ -3,10 +3,35 @@ package storage
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestBackupDatabaseCreatesCopy(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.CreateOwner(ctx, "owner", "hash"); err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	backup := filepath.Join(dir, "backup.db")
+	if err := store.BackupDatabase(ctx, backup); err != nil {
+		t.Fatalf("backup database: %v", err)
+	}
+	info, err := os.Stat(backup)
+	if err != nil {
+		t.Fatalf("stat backup: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("backup database is empty")
+	}
+}
 
 func TestPruneImageGenerationJobsKeepsLibraryAssets(t *testing.T) {
 	ctx := context.Background()
