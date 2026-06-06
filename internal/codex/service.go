@@ -235,12 +235,7 @@ func (s *Service) startThread(ctx context.Context, session storage.CodexSession,
 	var response struct {
 		Thread map[string]any `json:"thread"`
 	}
-	if err := app.Call(callCtx, "thread/start", map[string]any{
-		"cwd":                   workspace.RootPath,
-		"runtimeWorkspaceRoots": []string{workspace.RootPath},
-		"sandbox":               session.Sandbox,
-		"approvalPolicy":        "never",
-	}, &response); err != nil {
+	if err := app.Call(callCtx, "thread/start", threadParams(session, workspace), &response); err != nil {
 		return session, err
 	}
 	threadID := stringFromMap(response.Thread, "id")
@@ -274,14 +269,10 @@ func (s *Service) ensureThread(ctx context.Context, session storage.CodexSession
 	var response struct {
 		Thread map[string]any `json:"thread"`
 	}
-	if err := app.Call(callCtx, "thread/resume", map[string]any{
-		"threadId":              session.CodexThreadID,
-		"cwd":                   workspace.RootPath,
-		"runtimeWorkspaceRoots": []string{workspace.RootPath},
-		"sandbox":               session.Sandbox,
-		"approvalPolicy":        "never",
-		"excludeTurns":          true,
-	}, &response); err != nil {
+	params := threadParams(session, workspace)
+	params["threadId"] = session.CodexThreadID
+	params["excludeTurns"] = true
+	if err := app.Call(callCtx, "thread/resume", params, &response); err != nil {
 		return session, err
 	}
 	s.markThreadActive(session.CodexThreadID)
@@ -299,14 +290,8 @@ func (s *Service) startTurn(ctx context.Context, session storage.CodexSession, w
 	var response struct {
 		Turn map[string]any `json:"turn"`
 	}
-	if err := app.Call(callCtx, "turn/start", map[string]any{
-		"threadId":              session.CodexThreadID,
-		"input":                 []map[string]any{{"type": "text", "text": prompt, "text_elements": []any{}}},
-		"cwd":                   workspace.RootPath,
-		"runtimeWorkspaceRoots": []string{workspace.RootPath},
-		"sandboxPolicy":         sandboxPolicy(session.Sandbox, workspace.RootPath),
-		"approvalPolicy":        "never",
-	}, &response); err != nil {
+	params := turnParams(session, workspace, prompt)
+	if err := app.Call(callCtx, "turn/start", params, &response); err != nil {
 		return storage.CodexTurn{}, err
 	}
 	turnID := stringFromMap(response.Turn, "id")
@@ -568,8 +553,34 @@ func runShort(ctx context.Context, binary string, args ...string) string {
 	return string(out)
 }
 
+func threadParams(session storage.CodexSession, workspace storage.Workspace) map[string]any {
+	params := map[string]any{
+		"sandbox":        session.Sandbox,
+		"approvalPolicy": "never",
+	}
+	if workspace.RootPath != "" {
+		params["cwd"] = workspace.RootPath
+		params["runtimeWorkspaceRoots"] = []string{workspace.RootPath}
+	}
+	return params
+}
+
+func turnParams(session storage.CodexSession, workspace storage.Workspace, prompt string) map[string]any {
+	params := map[string]any{
+		"threadId":       session.CodexThreadID,
+		"input":          []map[string]any{{"type": "text", "text": prompt, "text_elements": []any{}}},
+		"sandboxPolicy":  sandboxPolicy(session.Sandbox, workspace.RootPath),
+		"approvalPolicy": "never",
+	}
+	if workspace.RootPath != "" {
+		params["cwd"] = workspace.RootPath
+		params["runtimeWorkspaceRoots"] = []string{workspace.RootPath}
+	}
+	return params
+}
+
 func sandboxPolicy(sandbox, root string) map[string]any {
-	if sandbox == "workspace-write" {
+	if sandbox == "workspace-write" && root != "" {
 		return map[string]any{
 			"type":                "workspaceWrite",
 			"writableRoots":       []string{root},

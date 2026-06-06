@@ -56,7 +56,7 @@ Go 后端是系统唯一的执行入口和权限边界，负责：
 
 - 用户登录和 session 管理。
 - 应用目录登记和路径边界校验。
-- 权限 profile、命令策略和审批流程。
+- 路径边界、Codex sandbox、命令策略和审批流程。
 - Codex CLI 状态检测、会话执行和任务中断。
 - 实时事件推送。
 - 审计日志和操作历史。
@@ -131,6 +131,7 @@ flowchart TD
 负责：
 
 - 应用目录登记。
+- 用户明确选择时，在允许根目录内创建缺失的应用目录。
 - 应用启用/禁用。
 - 路径合法性校验。
 - Git 状态读取。
@@ -140,9 +141,9 @@ flowchart TD
 
 负责：
 
-- 权限 profile。
-- 命令策略。
 - 路径边界。
+- Codex sandbox 与项目写入开关。
+- 命令策略。
 - 策略匹配。
 - allow / prompt / deny 决策。
 
@@ -162,11 +163,15 @@ flowchart TD
 负责：
 
 - 检测 Codex CLI 状态。
-- 管理 Codex app-server 子进程。
-- 发起 Codex 会话。
+- 管理 Codex app-server 子进程和 app-server JSON-RPC 协议连接。
+- 发起、恢复和管理 Codex 会话。
+- 发起不绑定项目的只读 Codex 会话。
 - 发起一次性 Codex 任务。
 - 处理中断。
 - 把 Codex 原始事件转换成本系统统一事件。
+- 桥接 Codex server request、审批、模型、usage、review、MCP、plugins、skills、hooks 和账号状态等客户端能力。
+
+如果目标是实现完整 Codex Web 客户端，Codex Module 需要拆分为 protocol adapter、session store、approval bridge、event normalizer 和 capability registry。详细设计见 [codex-client-architecture-design.md](./codex-client-architecture-design.md)。
 
 ### 3.6 Event Module
 
@@ -286,7 +291,7 @@ Images 图片库的详细产品交互和对象存储设计见 [images-library-fe
 
 - 登录。
 - 应用管理。
-- 权限 profile。
+- 路径边界和 Codex sandbox 控制。
 - 审批。
 - 审计。
 - Codex 状态检测。
@@ -309,7 +314,7 @@ Images 图片库的详细产品交互和对象存储设计见 [images-library-fe
 1. Go 服务骨架、配置、SQLite、路由。
 2. 登录、session、CSRF。
 3. 应用目录管理和路径边界。
-4. 权限 profile、命令策略、审批模型。
+4. Codex sandbox、命令策略、审批模型。
 5. 事件存储和 SSE。
 6. Codex CLI 状态检测。
 7. `codex exec --json` 一次性任务。

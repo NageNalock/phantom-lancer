@@ -24,24 +24,28 @@ export function CodexView({
   data: AppData;
   sessionEvents: EventRecord[];
 }) {
-  const firstWorkspace = data.workspaces[0];
-  const [workspaceId, setWorkspaceId] = useState(activeSessionWorkspace?.id || firstWorkspace?.id || "");
+  const [workspaceId, setWorkspaceId] = useState(activeSessionWorkspace?.id || "");
   const [title, setTitle] = useState("");
   const [sandbox, setSandbox] = useState<SandboxMode>("read-only");
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState("");
 
-  const selectedWorkspace = data.workspaces.find((item) => item.id === workspaceId) || firstWorkspace || null;
+  const selectedWorkspace = data.workspaces.find((item) => item.id === workspaceId) || null;
   const events = useMemo(() => [...sessionEvents].sort((a, b) => (a.sequence || 0) - (b.sequence || 0)), [sessionEvents]);
   const blocks = useMemo(() => buildConversationBlocks(events), [events]);
   const lastSequence = events.at(-1)?.sequence || 0;
   const canWrite = selectedWorkspace?.allowCodexWrite;
   const sessionBusy = activeSession?.status === "active" || activeSession?.status === "starting";
+  const contextWorkspace = activeSession ? activeSessionWorkspace : selectedWorkspace;
 
   useEffect(() => {
     if (activeSessionWorkspace?.id) setWorkspaceId(activeSessionWorkspace.id);
-    else if (!workspaceId && firstWorkspace?.id) setWorkspaceId(firstWorkspace.id);
-  }, [activeSessionWorkspace?.id, firstWorkspace?.id, workspaceId]);
+    else if (activeSession && !activeSession.workspaceId) setWorkspaceId("");
+  }, [activeSession, activeSessionWorkspace?.id]);
+
+  useEffect(() => {
+    if (!canWrite && sandbox === "workspace-write") setSandbox("read-only");
+  }, [canWrite, sandbox]);
 
   useEffect(() => {
     if (!activeSessionId) return;
@@ -70,10 +74,6 @@ export function CodexView({
   }, [actions, activeSessionId]);
 
   async function createSession() {
-    if (!workspaceId) {
-      actions.setToast("请先添加项目", "warn");
-      return;
-    }
     setBusy("create");
     try {
       const session = await actions.api<CodexSession>("/api/codex/sessions", {
@@ -181,7 +181,7 @@ export function CodexView({
         </div>
         <div className="border-t border-[var(--line)] p-4">
           <div className="grid gap-3">
-            <Field label="项目">
+            <Field help="选择无项目时，Codex 不绑定工作目录，只能使用只读沙箱。" label="项目">
               <select
                 className="select"
                 onChange={(event) => {
@@ -190,6 +190,7 @@ export function CodexView({
                 }}
                 value={workspaceId}
               >
+                <option value="">无项目</option>
                 {data.workspaces.map((workspace) => (
                   <option key={workspace.id} value={workspace.id}>
                     {workspace.name}
@@ -209,7 +210,7 @@ export function CodexView({
               </select>
             </Field>
             {!canWrite && sandbox === "workspace-write" ? <Notice>当前项目未允许 Codex 写入。</Notice> : null}
-            <Button disabled={!workspaceId || busy === "create"} onClick={() => void createSession()} tone="primary">
+            <Button disabled={busy === "create"} onClick={() => void createSession()} tone="primary">
               新建会话
             </Button>
           </div>
@@ -220,7 +221,7 @@ export function CodexView({
         <div className="flex items-start justify-between gap-3 border-b border-[var(--line)] p-4 max-md:grid">
           <div>
             <h2 className="m-0 text-base font-semibold">{activeSession?.title || "Codex 会话"}</h2>
-            <p className="muted mt-1 mb-0 text-sm">{activeSessionWorkspace ? activeSessionWorkspace.rootPath : "选择或创建一个会话"}</p>
+            <p className="muted mt-1 mb-0 text-sm">{activeSession ? activeSessionWorkspace?.rootPath || "无项目会话" : "选择或创建一个会话"}</p>
           </div>
           <div className="flex flex-wrap gap-2">
             {activeSession ? <Pill tone={sessionBusy ? "good" : activeSession.archived ? "warn" : "neutral"}>{sessionStatusLabel(activeSession.status)}</Pill> : null}
@@ -269,7 +270,7 @@ export function CodexView({
               <EmptyState title="等待第一条消息" body="这个会话已经就绪，可以直接发送任务或追问。" />
             )
           ) : (
-            <EmptyState title="没有选中的会话" body="从左侧选择会话，或基于项目创建一个新会话。" />
+            <EmptyState title="没有选中的会话" body="从左侧选择会话，或创建一个无项目 / 项目会话。" />
           )}
         </div>
 
@@ -303,8 +304,8 @@ export function CodexView({
           <Panel title="上下文">
             <ContextList
               items={[
-                ["项目", workspaceName(activeSessionWorkspace || selectedWorkspace || undefined)],
-                ["根目录", activeSessionWorkspace?.rootPath || selectedWorkspace?.rootPath || "-"],
+                ["项目", workspaceName(contextWorkspace)],
+                ["根目录", contextWorkspace?.rootPath || "未绑定工作目录"],
                 ["Thread", activeSession?.codexThreadId || "-"],
                 ["最近回合", activeSession?.lastTurnId || "-"],
                 ["事件序号", lastSequence || "-"],

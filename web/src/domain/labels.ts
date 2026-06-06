@@ -1,9 +1,8 @@
-import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, PermissionProfile, V2RaySettings, V2RayStatus, Workspace } from "../app/types";
+import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, V2RaySettings, V2RayStatus, Workspace } from "../app/types";
 
 export const CODEX_TABS = [
   { id: "sessions", label: "会话", description: "长期会话、实时事件和任务上下文" },
-  { id: "projects", label: "项目", description: "受控工作区、默认权限和路径边界" },
-  { id: "permissions", label: "权限", description: "能力 profile、风险等级和审批边界" },
+  { id: "projects", label: "项目", description: "受控工作区和路径边界" },
   { id: "gateway", label: "Gateway", description: "Codex OAuth 账号、OpenAI 兼容端点和请求审计" },
   { id: "activity", label: "活动", description: "登录、配置和执行历史" },
 ] as const;
@@ -16,14 +15,6 @@ export const NAV_ITEMS = [
   { id: "v2ray", label: "V2Ray", short: "05", description: "内嵌 V2Ray 服务端、远程设备接入和运行控制" },
   { id: "settings", label: "设置", short: "06", description: "运行期配置、允许根目录和 CLI 探针" },
 ] as const;
-
-const profileLabels: Record<string, string> = {
-  Observe: "观察",
-  Maintain: "维护",
-  Deploy: "部署",
-  Admin: "管理",
-  Emergency: "紧急",
-};
 
 const eventLabels: Record<string, string> = {
   "session.created": "会话已创建",
@@ -114,10 +105,6 @@ const auditLabels: Record<string, string> = {
   "v2ray.client.rotate": "轮换 V2Ray UUID",
   "v2ray.client.revoke": "撤销 V2Ray 远程设备",
 };
-
-export function profileLabel(value?: string): string {
-  return profileLabels[value || ""] || value || "观察";
-}
 
 export function eventLabel(type?: string): string {
   return eventLabels[type || ""] || type || "事件";
@@ -254,8 +241,8 @@ export function formatDate(value?: string): string {
   }).format(date);
 }
 
-export function workspaceName(workspace?: Workspace): string {
-  return workspace?.name || "未知项目";
+export function workspaceName(workspace?: Workspace | null): string {
+  return workspace?.name || "无项目";
 }
 
 export function defaultRuntime() {
@@ -337,14 +324,6 @@ export function defaultImageStorageSettings(): Required<ImageStorageSettings> {
     createdAt: "",
     updatedAt: "",
   };
-}
-
-export function defaultProfiles(): PermissionProfile[] {
-  return ["Observe", "Maintain", "Deploy", "Admin"].map((name) => ({
-    name,
-    risk: name === "Observe" ? "low" : name === "Maintain" ? "medium" : "high",
-    description: "该权限模式待接入策略编辑。",
-  }));
 }
 
 export function auditSummary(event: AuditEvent): string {

@@ -8,7 +8,6 @@ import { CodexView } from "./CodexView";
 import { DashboardView } from "./DashboardView";
 import { ImagesView } from "./ImagesView";
 import { LogsView } from "./LogsView";
-import { PermissionsView } from "./PermissionsView";
 import { ProjectsView } from "./ProjectsView";
 import { SettingsView } from "./SettingsView";
 import { V2RayView } from "./V2RayView";
@@ -117,7 +116,6 @@ export function AppShell({
           <CodexView actions={actions} activeSession={activeSession} activeSessionId={activeSessionId} activeSessionWorkspace={activeSessionWorkspace} data={data} sessionEvents={sessionEvents} />
         ) : null}
         {activeTab === "codex" && activeCodexTab === "projects" ? <ProjectsView actions={actions} data={data} selectedWorkspaceId={selectedWorkspaceId} /> : null}
-        {activeTab === "codex" && activeCodexTab === "permissions" ? <PermissionsView data={data} /> : null}
         {activeTab === "codex" && activeCodexTab === "gateway" ? <CodexGatewayView actions={actions} data={data} /> : null}
         {activeTab === "codex" && activeCodexTab === "activity" ? <ActivityView audit={data.audit} /> : null}
         {activeTab === "logs" ? <LogsView actions={actions} /> : null}

@@ -60,3 +60,35 @@ func TestNormalizeWorkspacePathRejectsOutsideAllowedRoots(t *testing.T) {
 		t.Fatalf("NormalizeWorkspacePath() error = %v, want ErrPathOutOfBoundary", err)
 	}
 }
+
+func TestNormalizeWorkspacePathForCreateAllowsMissingChild(t *testing.T) {
+	root := t.TempDir()
+	allowedRoots, err := NormalizeAllowedRoots([]string{root})
+	if err != nil {
+		t.Fatalf("NormalizeAllowedRoots() error = %v", err)
+	}
+	target := filepath.Join(root, "new", "project")
+
+	got, err := NormalizeWorkspacePathForCreate(allowedRoots, target)
+	if err != nil {
+		t.Fatalf("NormalizeWorkspacePathForCreate() error = %v", err)
+	}
+	expected := filepath.Join(allowedRoots[0], "new", "project")
+	if got != expected {
+		t.Fatalf("NormalizeWorkspacePathForCreate() = %q, want %q", got, expected)
+	}
+}
+
+func TestNormalizeWorkspacePathForCreateRejectsOutsideAllowedRoots(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "new-project")
+	allowedRoots, err := NormalizeAllowedRoots([]string{root})
+	if err != nil {
+		t.Fatalf("NormalizeAllowedRoots() error = %v", err)
+	}
+
+	_, err = NormalizeWorkspacePathForCreate(allowedRoots, outside)
+	if !errors.Is(err, ErrPathOutOfBoundary) {
+		t.Fatalf("NormalizeWorkspacePathForCreate() error = %v, want ErrPathOutOfBoundary", err)
+	}
+}

@@ -612,7 +612,7 @@ CREATE TABLE IF NOT EXISTS image_generation_outputs (
 - 本地图片迁移到 S3。
 - 本地缩略图缓存和清理策略。
 - Prompt 模板和最近参数 preset。
-- 更细的权限 profile 和高成本调用确认。
+- 高成本调用确认和审计摘要。
 
 ## 15. 验收标准
 

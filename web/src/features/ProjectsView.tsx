@@ -3,7 +3,6 @@ import type { AppActions } from "../app/App";
 import type { AppData, Workspace } from "../app/types";
 import { friendlyError } from "../api/client";
 import { Button, ContextList, EmptyState, Field, Metric, Panel, Pill } from "../components/ui";
-import { profileLabel } from "../domain/labels";
 
 export function ProjectsView({ actions, data, selectedWorkspaceId }: { actions: AppActions; data: AppData; selectedWorkspaceId: string }) {
   const selected = useMemo(() => data.workspaces.find((item) => item.id === selectedWorkspaceId) || data.workspaces[0], [data.workspaces, selectedWorkspaceId]);
@@ -29,10 +28,9 @@ export function ProjectsView({ actions, data, selectedWorkspaceId }: { actions: 
         <Panel subtitle="项目是 Codex、日志、服务和审计的主上下文。" title={selected ? selected.name : "项目"}>
           {selected ? (
             <div className="grid gap-4">
-              <div className="grid grid-cols-3 gap-3 max-lg:grid-cols-1">
-                <Metric label="默认 Profile" value={profileLabel(selected.defaultProfile)} />
+              <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
                 <Metric detail={selected.allowCodexWrite ? "workspace-write 可用" : "默认只读"} label="Codex 写入" tone={selected.allowCodexWrite ? "warn" : "good"} value={selected.allowCodexWrite ? "允许" : "关闭"} />
-                <Metric label="目录类型" value={selected.appType || "app"} />
+                <Metric detail={selected.allowNonGit ? "可添加非 Git 目录" : "添加时要求 .git"} label="Git 边界" tone={selected.allowNonGit ? "warn" : "good"} value={selected.allowNonGit ? "宽松" : "严格"} />
               </div>
               <ContextList
                 items={[
@@ -49,7 +47,7 @@ export function ProjectsView({ actions, data, selectedWorkspaceId }: { actions: 
       </div>
 
       <aside className="border-l border-[var(--line)] bg-[var(--surface-soft)] p-5 max-2xl:col-span-2 max-2xl:border-l-0 max-2xl:border-t max-xl:col-span-1">
-        <WorkspaceForm actions={actions} />
+        <WorkspaceForm actions={actions} allowedRoots={data.settings.runtime?.allowedRoots || []} />
       </aside>
     </div>
   );
@@ -67,9 +65,11 @@ function WorkspaceButton({ active, workspace, onClick }: { active: boolean; work
   );
 }
 
-function WorkspaceForm({ actions }: { actions: AppActions }) {
+function WorkspaceForm({ actions, allowedRoots }: { actions: AppActions; allowedRoots: string[] }) {
   const [error, setError] = useState("");
+  const [rootPath, setRootPath] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const rootHint = pathBoundaryHint(rootPath, allowedRoots);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -84,15 +84,15 @@ function WorkspaceForm({ actions }: { actions: AppActions }) {
         body: {
           name: data.get("name"),
           rootPath: data.get("rootPath"),
-          appType: data.get("appType"),
-          defaultProfile: data.get("defaultProfile") || "Observe",
           allowCodexWrite: data.get("allowCodexWrite") === "on",
           allowNonGit: data.get("allowNonGit") === "on",
+          createMissing: data.get("createMissing") === "on",
         },
       });
       actions.setSelectedWorkspaceId(workspace.id);
       await actions.reloadData();
       form.reset();
+      setRootPath("");
       actions.setToast("项目已添加", "good");
     } catch (err) {
       setError(friendlyError(err));
@@ -105,26 +105,53 @@ function WorkspaceForm({ actions }: { actions: AppActions }) {
     <Panel subtitle="路径必须落在允许根目录内。" title="添加项目">
       <form className="grid gap-3" onSubmit={submit}>
         {error ? <div className="rounded-lg border border-[rgba(207,31,50,0.22)] bg-[var(--danger-soft)] p-3 text-sm text-[var(--danger)]">{error}</div> : null}
+        <div className="rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3">
+          <span className="muted block text-xs">允许根目录</span>
+          <div className="mt-2 grid gap-1">
+            {allowedRoots.length ? (
+              allowedRoots.map((root) => (
+                <code className="mono block break-all rounded-md bg-[var(--surface-soft)] px-2 py-1 text-xs" key={root}>
+                  {root}
+                </code>
+              ))
+            ) : (
+              <span className="muted text-xs">尚未配置允许根目录。</span>
+            )}
+          </div>
+        </div>
         <Field label="名称">
           <input className="input" name="name" placeholder="phantom-lancer" />
         </Field>
-        <Field label="工作目录">
-          <input className="input mono" name="rootPath" placeholder="/srv/apps/my-app" required />
+        <Field help={rootHint} label="工作目录">
+          <input
+            className="input mono"
+            name="rootPath"
+            onChange={(event) => setRootPath(event.target.value)}
+            placeholder={allowedRoots[0] ? `${allowedRoots[0]}/my-app` : "/srv/apps/my-app"}
+            required
+            value={rootPath}
+          />
         </Field>
-        <Field label="类型">
-          <input className="input" name="appType" placeholder="web" />
-        </Field>
-        <Field label="默认 Profile">
-          <select className="select" name="defaultProfile" defaultValue="Observe">
-            {["Observe", "Maintain", "Deploy", "Admin"].map((item) => (
-              <option key={item} value={item}>{profileLabel(item)}</option>
-            ))}
-          </select>
-        </Field>
+        <label className="flex items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface)] p-2 text-sm"><input name="createMissing" type="checkbox" /> 目录不存在时创建</label>
         <label className="flex items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface)] p-2 text-sm"><input name="allowCodexWrite" type="checkbox" /> 允许 Codex workspace-write</label>
         <label className="flex items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface)] p-2 text-sm"><input name="allowNonGit" type="checkbox" /> 允许非 Git 目录</label>
         <Button disabled={submitting} tone="primary" type="submit">{submitting ? "处理中" : "添加项目"}</Button>
       </form>
     </Panel>
   );
+}
+
+function pathBoundaryHint(value: string, allowedRoots: string[]): string {
+  if (!allowedRoots.length) return "请先在设置页配置允许根目录。";
+  const trimmed = value.trim();
+  if (!trimmed) return `必须等于允许根目录，或以 ${allowedRoots[0]}/... 开头。`;
+  const matched = allowedRoots.find((root) => isInsideRoot(root, trimmed));
+  if (matched) return `已匹配允许根目录：${matched}`;
+  return `路径必须以允许根目录开头，例如 ${allowedRoots[0]}/my-app。`;
+}
+
+function isInsideRoot(root: string, value: string): boolean {
+  const normalizedRoot = root.replace(/\/+$/, "");
+  const normalizedValue = value.replace(/\/+$/, "");
+  return normalizedValue === normalizedRoot || normalizedValue.startsWith(`${normalizedRoot}/`);
 }

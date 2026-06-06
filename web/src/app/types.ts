@@ -1,5 +1,5 @@
 export type MainTab = "dashboard" | "codex" | "logs" | "images" | "v2ray" | "settings";
-export type CodexTab = "sessions" | "projects" | "permissions" | "gateway" | "activity";
+export type CodexTab = "sessions" | "projects" | "gateway" | "activity";
 export type Tone = "neutral" | "good" | "warn" | "danger";
 
 export interface AuthSession {
@@ -13,9 +13,7 @@ export interface Workspace {
   name: string;
   rootPath: string;
   description?: string;
-  appType?: string;
   tags?: string[];
-  defaultProfile?: string;
   allowCodexWrite?: boolean;
   allowNonGit?: boolean;
   createdAt?: string;
@@ -77,12 +75,6 @@ export interface DashboardSummary {
   v2ray?: V2RayStatus;
   pendingApprovals?: number;
   recentActivity?: AuditEvent[];
-}
-
-export interface PermissionProfile {
-  name: string;
-  risk?: "low" | "medium" | "high" | "critical" | string;
-  description?: string;
 }
 
 export interface AuditEvent {
@@ -493,7 +485,7 @@ export interface CodexTurn {
 
 export interface CodexSessionDetail {
   session: CodexSession;
-  workspace: Workspace;
+  workspace?: Workspace | null;
   turns?: CodexTurn[];
 }
 
@@ -512,7 +504,6 @@ export interface AppData {
   workspaces: Workspace[];
   audit: AuditEvent[];
   pendingApprovals: unknown[];
-  permissionProfiles: PermissionProfile[];
   codexStatus: CodexStatus;
   codexSessions: CodexSession[];
   codexGateway: CodexGatewayPayload;

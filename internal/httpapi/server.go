@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"os"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -123,7 +124,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/codex-gateway/chat-test", s.handleCodexGatewayChatTest)
 	mux.HandleFunc("GET /api/events/history", s.handleEventHistory)
 	mux.HandleFunc("GET /api/events/stream", s.handleEventStream)
-	mux.HandleFunc("GET /api/permissions/profiles", s.handlePermissionProfiles)
 	mux.HandleFunc("GET /api/approvals/pending", s.handlePendingApprovals)
 	mux.HandleFunc("GET /api/audit/events", s.handleAuditEvents)
 	mux.HandleFunc("GET /api/system/version", s.handleSystemVersion)
@@ -356,11 +356,10 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		Name            string   `json:"name"`
 		RootPath        string   `json:"rootPath"`
 		Description     string   `json:"description"`
-		AppType         string   `json:"appType"`
 		Tags            []string `json:"tags"`
-		DefaultProfile  string   `json:"defaultProfile"`
 		AllowCodexWrite bool     `json:"allowCodexWrite"`
 		AllowNonGit     bool     `json:"allowNonGit"`
+		CreateMissing   bool     `json:"createMissing"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -376,8 +375,20 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	normalized, err := workspaces.NormalizeWorkspacePath(allowedRoots, req.RootPath)
+	createdDirectory := false
+	if err != nil && req.CreateMissing && errors.Is(err, workspaces.ErrPathNotFound) {
+		normalized, err = workspaces.NormalizeWorkspacePathForCreate(allowedRoots, req.RootPath)
+		if err == nil {
+			if mkdirErr := os.MkdirAll(normalized, 0o755); mkdirErr != nil {
+				writeError(w, http.StatusBadRequest, "workspace_create_failed", mkdirErr.Error())
+				return
+			}
+			createdDirectory = true
+			normalized, err = workspaces.NormalizeWorkspacePath(allowedRoots, normalized)
+		}
+	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "path_out_of_boundary", err.Error())
+		writeWorkspacePathError(w, err)
 		return
 	}
 	existing, err := s.store.GetWorkspaceByRootPath(r.Context(), normalized)
@@ -401,9 +412,7 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		Name:            req.Name,
 		RootPath:        normalized,
 		Description:     req.Description,
-		AppType:         req.AppType,
 		Tags:            req.Tags,
-		DefaultProfile:  req.DefaultProfile,
 		AllowCodexWrite: req.AllowCodexWrite,
 		AllowNonGit:     req.AllowNonGit,
 	})
@@ -415,7 +424,7 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		EventType:   "workspace.create",
 		WorkspaceID: workspace.ID,
 		Summary:     "已添加项目",
-		Payload:     map[string]any{"name": workspace.Name, "rootPath": workspace.RootPath},
+		Payload:     map[string]any{"name": workspace.Name, "rootPath": workspace.RootPath, "directoryCreated": createdDirectory},
 	})
 	writeJSON(w, http.StatusCreated, workspace)
 }
@@ -489,13 +498,19 @@ func (s *Server) handleCreateCodexSession(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid_sandbox", "只支持只读和工作区可写两种沙箱")
 		return
 	}
-	workspace, err := s.store.GetWorkspace(r.Context(), req.WorkspaceID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "workspace_not_found", "未找到项目")
-		return
+	req.WorkspaceID = strings.TrimSpace(req.WorkspaceID)
+	workspace := storage.Workspace{}
+	hasWorkspace := req.WorkspaceID != ""
+	if hasWorkspace {
+		var err error
+		workspace, err = s.store.GetWorkspace(r.Context(), req.WorkspaceID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "workspace_not_found", "未找到项目")
+			return
+		}
 	}
-	if req.Sandbox == "workspace-write" && !workspace.AllowCodexWrite {
-		writeError(w, http.StatusForbidden, "permission_denied", "该项目未允许 Codex 写入会话")
+	if req.Sandbox == "workspace-write" && (!hasWorkspace || !workspace.AllowCodexWrite) {
+		writeError(w, http.StatusForbidden, "permission_denied", "workspace-write 需要选择已允许写入的项目")
 		return
 	}
 	session, err := s.codex.CreateSession(r.Context(), workspace, strings.TrimSpace(req.Title), req.Sandbox)
@@ -508,7 +523,7 @@ func (s *Server) handleCreateCodexSession(w http.ResponseWriter, r *http.Request
 		WorkspaceID: workspace.ID,
 		RiskLevel:   riskForSandbox(req.Sandbox),
 		Summary:     "已创建 Codex 会话",
-		Payload:     map[string]any{"sessionId": session.ID, "threadId": session.CodexThreadID, "sandbox": session.Sandbox},
+		Payload:     map[string]any{"sessionId": session.ID, "threadId": session.CodexThreadID, "sandbox": session.Sandbox, "hasWorkspace": hasWorkspace},
 	})
 	writeJSON(w, http.StatusCreated, session)
 }
@@ -529,16 +544,20 @@ func (s *Server) handleCodexSessionSubroutes(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusNotFound, "session_not_found", "未找到 Codex 会话")
 		return
 	}
-	workspace, err := s.store.GetWorkspace(r.Context(), session.WorkspaceID)
+	workspace, hasWorkspace, err := s.sessionWorkspace(r.Context(), session)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace_not_found", "未找到项目")
 		return
 	}
 	if len(parts) == 1 && r.Method == http.MethodGet {
 		turns, _ := s.store.ListCodexTurns(r.Context(), session.ID, 200)
+		var workspacePayload any
+		if hasWorkspace {
+			workspacePayload = workspace
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"session":   session,
-			"workspace": workspace,
+			"workspace": workspacePayload,
 			"turns":     turns,
 		})
 		return
@@ -551,7 +570,7 @@ func (s *Server) handleCodexSessionSubroutes(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if len(parts) == 2 && parts[1] == "turns" {
-		s.handleCreateCodexTurn(w, r, session, workspace)
+		s.handleCreateCodexTurn(w, r, session, workspace, hasWorkspace)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "interrupt" {
@@ -586,13 +605,21 @@ func (s *Server) handleCodexSessionSubroutes(w http.ResponseWriter, r *http.Requ
 	writeError(w, http.StatusNotFound, "not_found", "未找到会话路由")
 }
 
-func (s *Server) handleCreateCodexTurn(w http.ResponseWriter, r *http.Request, session storage.CodexSession, workspace storage.Workspace) {
+func (s *Server) sessionWorkspace(ctx context.Context, session storage.CodexSession) (storage.Workspace, bool, error) {
+	if strings.TrimSpace(session.WorkspaceID) == "" {
+		return storage.Workspace{}, false, nil
+	}
+	workspace, err := s.store.GetWorkspace(ctx, session.WorkspaceID)
+	return workspace, true, err
+}
+
+func (s *Server) handleCreateCodexTurn(w http.ResponseWriter, r *http.Request, session storage.CodexSession, workspace storage.Workspace, hasWorkspace bool) {
 	if session.Archived {
 		writeError(w, http.StatusConflict, "session_archived", "该会话已归档")
 		return
 	}
-	if session.Sandbox == "workspace-write" && !workspace.AllowCodexWrite {
-		writeError(w, http.StatusForbidden, "permission_denied", "该项目未允许 Codex 写入会话")
+	if session.Sandbox == "workspace-write" && (!hasWorkspace || !workspace.AllowCodexWrite) {
+		writeError(w, http.StatusForbidden, "permission_denied", "workspace-write 需要选择已允许写入的项目")
 		return
 	}
 	var req struct {
@@ -766,19 +793,6 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
-}
-
-func (s *Server) handlePermissionProfiles(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAuth(w, r); !ok {
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": []map[string]any{
-		{"name": "Observe", "risk": "low", "description": "只读观察，适合状态检查和 Codex 只读任务"},
-		{"name": "Maintain", "risk": "medium", "description": "项目范围内维护，需要工作区授权"},
-		{"name": "Deploy", "risk": "high", "description": "部署操作预留，MVP 默认需要审批"},
-		{"name": "Admin", "risk": "high", "description": "系统设置和权限策略"},
-		{"name": "Emergency", "risk": "critical", "description": "紧急模式预留，MVP 默认关闭"},
-	}})
 }
 
 func (s *Server) handlePendingApprovals(w http.ResponseWriter, r *http.Request) {
@@ -1865,6 +1879,19 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 			"message": message,
 		},
 	})
+}
+
+func writeWorkspacePathError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, workspaces.ErrPathNotFound):
+		writeError(w, http.StatusBadRequest, "workspace_path_missing", "目录不存在；如需由 Phantom Lancer 创建，请勾选“目录不存在时创建”")
+	case errors.Is(err, workspaces.ErrPathNotDirectory):
+		writeError(w, http.StatusBadRequest, "workspace_path_invalid", "路径必须是目录")
+	case errors.Is(err, workspaces.ErrPathOutOfBoundary):
+		writeError(w, http.StatusBadRequest, "path_out_of_boundary", "路径必须落在允许根目录内")
+	default:
+		writeError(w, http.StatusBadRequest, "workspace_path_invalid", err.Error())
+	}
 }
 
 func writeSSE(w http.ResponseWriter, event events.Event) {

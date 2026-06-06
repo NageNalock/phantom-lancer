@@ -46,7 +46,6 @@ const emptyData: AppData = {
   workspaces: [],
   audit: [],
   pendingApprovals: [],
-  permissionProfiles: [],
   codexStatus: {},
   codexSessions: [],
   codexGateway: {},
@@ -88,7 +87,7 @@ export function App() {
       api<{ items?: EventRecord[] }>(`/api/events/history?scope=codex_session&id=${encodeURIComponent(id)}`),
     ]);
     setActiveSession(detail.session);
-    setActiveSessionWorkspace(detail.workspace);
+    setActiveSessionWorkspace(detail.workspace || null);
     setSessionEvents(history.items || []);
   }, []);
 
@@ -112,14 +111,13 @@ export function App() {
   }, []);
 
   const loadAppData = useCallback(async () => {
-    const [dashboard, workspaces, audit, codexStatus, codexGateway, approvals, profiles, sessions, settings, v2ray, imagesSettings, imageStorageSettings, imageJobs, imageAssets] = await Promise.all([
+    const [dashboard, workspaces, audit, codexStatus, codexGateway, approvals, sessions, settings, v2ray, imagesSettings, imageStorageSettings, imageJobs, imageAssets] = await Promise.all([
       api<AppData["dashboard"]>("/api/dashboard/summary"),
       api<{ items?: Workspace[] }>("/api/workspaces"),
       api<{ items?: AppData["audit"] }>("/api/audit/events"),
       api<CodexStatus>("/api/codex/status"),
       loadCodexGatewayData(),
       api<{ items?: unknown[] }>("/api/approvals/pending"),
-      api<{ items?: AppData["permissionProfiles"] }>("/api/permissions/profiles"),
       api<{ items?: CodexSession[] }>("/api/codex/sessions"),
       api<SettingsPayload>("/api/settings"),
       api<V2RayPayload>("/api/v2ray/settings"),
@@ -135,7 +133,6 @@ export function App() {
       workspaces: workspaces.items || [],
       audit: audit.items || [],
       pendingApprovals: approvals.items || [],
-      permissionProfiles: profiles.items || [],
       codexStatus,
       codexSessions: nextSessions,
       codexGateway,

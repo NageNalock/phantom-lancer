@@ -44,9 +44,7 @@ type Workspace struct {
 	Name            string   `json:"name"`
 	RootPath        string   `json:"rootPath"`
 	Description     string   `json:"description"`
-	AppType         string   `json:"appType"`
 	Tags            []string `json:"tags"`
-	DefaultProfile  string   `json:"defaultProfile"`
 	AllowCodexWrite bool     `json:"allowCodexWrite"`
 	AllowNonGit     bool     `json:"allowNonGit"`
 	Enabled         bool     `json:"enabled"`
@@ -490,9 +488,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
   name TEXT NOT NULL,
   root_path TEXT NOT NULL UNIQUE,
   description TEXT NOT NULL DEFAULT '',
-  app_type TEXT NOT NULL DEFAULT 'Other',
   tags_json TEXT NOT NULL DEFAULT '[]',
-  default_profile TEXT NOT NULL DEFAULT 'Observe',
   allow_codex_write INTEGER NOT NULL DEFAULT 0,
   allow_non_git INTEGER NOT NULL DEFAULT 0,
   enabled INTEGER NOT NULL DEFAULT 1,
@@ -2797,18 +2793,12 @@ func (s *Store) CreateWorkspace(ctx context.Context, workspace Workspace) (Works
 	workspace.ID = id
 	workspace.CreatedAt = now
 	workspace.UpdatedAt = now
-	if workspace.AppType == "" {
-		workspace.AppType = "Other"
-	}
-	if workspace.DefaultProfile == "" {
-		workspace.DefaultProfile = "Observe"
-	}
 	workspace.Enabled = true
 	tags, _ := json.Marshal(workspace.Tags)
 	_, err = s.db.ExecContext(ctx, `
-INSERT INTO workspaces (id, name, root_path, description, app_type, tags_json, default_profile, allow_codex_write, allow_non_git, enabled, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		workspace.ID, workspace.Name, workspace.RootPath, workspace.Description, workspace.AppType, string(tags), workspace.DefaultProfile, boolInt(workspace.AllowCodexWrite), boolInt(workspace.AllowNonGit), boolInt(workspace.Enabled), workspace.CreatedAt, workspace.UpdatedAt)
+INSERT INTO workspaces (id, name, root_path, description, tags_json, allow_codex_write, allow_non_git, enabled, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		workspace.ID, workspace.Name, workspace.RootPath, workspace.Description, string(tags), boolInt(workspace.AllowCodexWrite), boolInt(workspace.AllowNonGit), boolInt(workspace.Enabled), workspace.CreatedAt, workspace.UpdatedAt)
 	if err != nil {
 		return Workspace{}, err
 	}
@@ -2816,7 +2806,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 }
 
 func (s *Store) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, root_path, description, app_type, tags_json, default_profile, allow_codex_write, allow_non_git, enabled, created_at, updated_at FROM workspaces ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, root_path, description, tags_json, allow_codex_write, allow_non_git, enabled, created_at, updated_at FROM workspaces ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -2833,7 +2823,7 @@ func (s *Store) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 }
 
 func (s *Store) GetWorkspace(ctx context.Context, id string) (Workspace, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, root_path, description, app_type, tags_json, default_profile, allow_codex_write, allow_non_git, enabled, created_at, updated_at FROM workspaces WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, root_path, description, tags_json, allow_codex_write, allow_non_git, enabled, created_at, updated_at FROM workspaces WHERE id = ?`, id)
 	workspace, err := scanWorkspace(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Workspace{}, ErrNotFound
@@ -2842,7 +2832,7 @@ func (s *Store) GetWorkspace(ctx context.Context, id string) (Workspace, error) 
 }
 
 func (s *Store) GetWorkspaceByRootPath(ctx context.Context, rootPath string) (Workspace, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, root_path, description, app_type, tags_json, default_profile, allow_codex_write, allow_non_git, enabled, created_at, updated_at FROM workspaces WHERE root_path = ?`, rootPath)
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, root_path, description, tags_json, allow_codex_write, allow_non_git, enabled, created_at, updated_at FROM workspaces WHERE root_path = ?`, rootPath)
 	workspace, err := scanWorkspace(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Workspace{}, ErrNotFound
@@ -3127,7 +3117,7 @@ func scanWorkspace(row workspaceScanner) (Workspace, error) {
 	var workspace Workspace
 	var tags string
 	var allowCodexWrite, allowNonGit, enabled int
-	err := row.Scan(&workspace.ID, &workspace.Name, &workspace.RootPath, &workspace.Description, &workspace.AppType, &tags, &workspace.DefaultProfile, &allowCodexWrite, &allowNonGit, &enabled, &workspace.CreatedAt, &workspace.UpdatedAt)
+	err := row.Scan(&workspace.ID, &workspace.Name, &workspace.RootPath, &workspace.Description, &tags, &allowCodexWrite, &allowNonGit, &enabled, &workspace.CreatedAt, &workspace.UpdatedAt)
 	if err != nil {
 		return Workspace{}, err
 	}
