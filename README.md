@@ -14,6 +14,53 @@ By default, the service stores data in `.phantom-data` and seeds the allowed wor
 
 The config file is intentionally small: listen address, data directory, optional database path, and first-run defaults. Runtime settings such as allowed roots, Codex binary, CODEX_HOME, and secure cookies are stored in SQLite and can be changed from the web Settings page without restarting.
 
+## Run From a Release Package
+
+The published release package is currently built for Linux amd64. On a new server, download the release archive and checksum from GitHub Releases:
+
+```bash
+VERSION=v0.1.0
+curl -L -o phantom-lancer-linux-amd64.tar.gz \
+  "https://github.com/NageNalock/phantom-lancer/releases/download/${VERSION}/phantom-lancer-linux-amd64.tar.gz"
+curl -L -o phantom-lancer-linux-amd64.tar.gz.sha256 \
+  "https://github.com/NageNalock/phantom-lancer/releases/download/${VERSION}/phantom-lancer-linux-amd64.tar.gz.sha256"
+sha256sum -c phantom-lancer-linux-amd64.tar.gz.sha256
+```
+
+Extract it and create the first config file:
+
+```bash
+tar -xzf phantom-lancer-linux-amd64.tar.gz
+cd phantom-lancer
+cp configs/phantom.example.toml configs/phantom.toml
+```
+
+Edit `configs/phantom.toml` for the new machine before starting:
+
+- `server.addr`: the listen address, for example `127.0.0.1:8080` for local-only access.
+- `storage.data_dir`: where Phantom Lancer stores SQLite data, logs, update backups, and runtime assets.
+- `bootstrap.allowed_roots`: first-run workspace roots that the web console may register.
+- `bootstrap.codex_binary` and `bootstrap.codex_home`: optional Codex CLI defaults.
+- `updates.restart_mode`: keep `exit` when the service is supervised by systemd with restart enabled.
+
+Start it in the foreground:
+
+```bash
+scripts/start.sh
+```
+
+Or run it as a managed background process with the bundled script:
+
+```bash
+scripts/manage.sh start
+scripts/manage.sh status
+scripts/manage.sh logs
+```
+
+Open the configured address in a browser, create the owner account, then register the first workspace under an allowed root. Codex CLI installation and login still need to be completed separately on the server.
+
+For long-running deployment, run Phantom Lancer under a supervisor such as systemd and configure automatic restart. This is recommended for the web self-update flow because updates replace the binary and then request a short service restart.
+
 ## Scripts
 
 ```bash
