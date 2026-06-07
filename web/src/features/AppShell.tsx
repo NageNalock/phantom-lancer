@@ -3,6 +3,7 @@ import type { AppData, MainTab, V2RayExport } from "../app/types";
 import { Button, Pill } from "../components/ui";
 import { NAV_ITEMS, v2rayStateLabel } from "../domain/labels";
 import { CodexGatewayView } from "./CodexGatewayView";
+import { CodexView } from "./CodexView";
 import { DashboardView } from "./DashboardView";
 import { ImagesView } from "./ImagesView";
 import { LogsView } from "./LogsView";
@@ -77,6 +78,7 @@ export function AppShell({
         </header>
 
         {activeTab === "dashboard" ? <DashboardView actions={actions} data={data} /> : null}
+        {activeTab === "codex" ? <CodexView actions={actions} data={data} /> : null}
         {activeTab === "codex-gateway" ? <CodexGatewayView actions={actions} data={data} /> : null}
         {activeTab === "logs" ? <LogsView actions={actions} /> : null}
         {activeTab === "images" ? <ImagesView actions={actions} data={data} /> : null}

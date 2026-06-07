@@ -403,8 +403,8 @@ func (s *Service) prepareConfig(settings storage.V2RaySettings, clients []storag
 }
 
 func validateSettings(settings storage.V2RaySettings) error {
-	if settings.Port < 1024 || settings.Port > 65535 {
-		return errors.New("V2Ray 端口必须在 1024-65535 之间")
+	if settings.Port < 1 || settings.Port > 65535 {
+		return errors.New("V2Ray 端口必须在 1-65535 之间")
 	}
 	if settings.Protocol != "vmess" {
 		return errors.New("MVP 仅支持 VMess")

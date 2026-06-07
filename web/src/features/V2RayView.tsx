@@ -181,7 +181,7 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
                 <input className="input mono" onChange={(event) => updateV2Ray("listen", event.target.value)} value={v2ray.listen || ""} />
               </Field>
               <Field label="端口">
-                <input className="input mono" min={1024} max={65535} onChange={(event) => updateV2Ray("port", Number(event.target.value || 0))} type="number" value={v2ray.port || 0} />
+                <input className="input mono" min={1} max={65535} onChange={(event) => updateV2Ray("port", Number(event.target.value || 0))} type="number" value={v2ray.port || 0} />
               </Field>
               <Field label="传输">
                 <select className="select" onChange={(event) => updateV2Ray("transport", event.target.value)} value={v2ray.transport || "tcp"}>
@@ -229,6 +229,9 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
             </div>
 
             {!v2ray.blockPrivateNetwork ? <Notice>关闭私网阻断会提高远程接入风险，建议只在明确需要时使用。</Notice> : null}
+            {(v2ray.port || 0) > 0 && (v2ray.port || 0) < 1024 ? (
+              <Notice>低于 1024 的端口需要 Phantom Lancer 进程具备系统绑定权限；如果启动失败，请使用 root、cap_net_bind_service、端口转发或反向代理处理。</Notice>
+            ) : null}
             {validation ? (
               <Notice>
                 {validation.ok ? validation.message || "配置校验通过" : validation.message || "配置校验失败"}

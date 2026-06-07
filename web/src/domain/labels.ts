@@ -1,12 +1,13 @@
-import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, V2RaySettings, V2RayStatus } from "../app/types";
+import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, CodexStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, V2RaySettings, V2RayStatus } from "../app/types";
 
 export const NAV_ITEMS = [
   { id: "dashboard", label: "控制台", short: "01", description: "服务器状态、执行边界和下一步入口" },
-  { id: "codex-gateway", label: "Codex Gateway", short: "02", description: "Codex OAuth 账号、OpenAI 兼容端点和请求审计" },
-  { id: "logs", label: "日志", short: "03", description: "服务日志、运行事件和在线排障视图" },
-  { id: "images", label: "Images", short: "04", description: "xAI Grok Imagine 生成、编辑、图片库、历史和存储设置" },
-  { id: "v2ray", label: "V2Ray", short: "05", description: "内嵌 V2Ray 服务端、远程设备接入和运行控制" },
-  { id: "settings", label: "设置", short: "06", description: "运行期配置、允许根目录和全局安全策略" },
+  { id: "codex", label: "Codex", short: "02", description: "本机 codex CLI 会话、工作区、审批和运行诊断" },
+  { id: "codex-gateway", label: "Codex Gateway", short: "03", description: "Codex OAuth 账号、OpenAI 兼容端点和请求审计" },
+  { id: "logs", label: "日志", short: "04", description: "服务日志、运行事件和在线排障视图" },
+  { id: "images", label: "Images", short: "05", description: "xAI Grok Imagine 生成、编辑、图片库、历史和存储设置" },
+  { id: "v2ray", label: "V2Ray", short: "06", description: "内嵌 V2Ray 服务端、远程设备接入和运行控制" },
+  { id: "settings", label: "设置", short: "07", description: "运行期配置、允许根目录和全局安全策略" },
 ] as const;
 
 const auditLabels: Record<string, string> = {
@@ -62,6 +63,22 @@ const auditLabels: Record<string, string> = {
   "v2ray.client.update": "更新 V2Ray 远程设备",
   "v2ray.client.rotate": "轮换 V2Ray UUID",
   "v2ray.client.revoke": "撤销 V2Ray 远程设备",
+  "codex_cli.workspace.created": "登记 Codex 工作区",
+  "codex_cli.workspace.updated": "更新 Codex 工作区",
+  "codex_cli.thread.created": "创建 Codex 会话",
+  "codex_cli.thread.archived": "归档 Codex 会话",
+  "codex_cli.turn.started": "开始 Codex turn",
+  "codex_cli.turn.interrupted": "中断 Codex turn",
+  "codex_cli.app_server.start_requested": "请求启动 Codex app-server",
+  "codex_cli.app_server.started": "Codex app-server 已启动",
+  "codex_cli.app_server.start_failed": "Codex app-server 启动失败",
+  "codex_cli.app_server.stopped": "Codex app-server 已停止",
+  "codex_cli.approval.requested": "Codex 请求审批",
+  "codex_cli.approval.approved": "允许 Codex 审批",
+  "codex_cli.approval.denied": "拒绝 Codex 审批",
+  "codex_cli.settings.updated": "更新 Codex 设置",
+  "codex_cli.probe.failed": "Codex CLI 探测失败",
+  "codex_cli.legacy_data.detected": "检测到旧版 Codex 数据",
 };
 
 export function auditLabel(type?: string): string {
@@ -265,4 +282,98 @@ export function maskSecret(value?: string): string {
   const text = value || "";
   if (!text) return "-";
   return text.length <= 12 ? "****" : `${text.slice(0, 8)}...${text.slice(-6)}`;
+}
+
+export function codexInstallStatusLabel(value?: string): string {
+  return (
+    {
+      ready: "就绪",
+      degraded: "降级（仅 exec/只读）",
+      needs_setup: "需要配置",
+      unavailable: "不可用",
+    }[value || ""] ||
+    value ||
+    "未知"
+  );
+}
+
+export function codexModuleStatusLabel(status?: CodexStatus): string {
+  if (!status) return "未知";
+  if (!status.enabled) return "未启用";
+  const install = status.installation?.status;
+  if (install === "needs_setup") return "需要配置";
+  if (install === "unavailable") return "不可用";
+  if (status.appServer?.state === "running") return "app-server 运行中";
+  if (status.appServer?.state === "failed") return "app-server 失败";
+  if (install === "degraded") return "降级（exec 兜底）";
+  if (install === "ready") return "就绪（未启动）";
+  return "就绪";
+}
+
+export function codexAppServerStateLabel(value?: string): string {
+  return (
+    {
+      stopped: "已停止",
+      starting: "启动中",
+      running: "运行中",
+      failed: "失败",
+      degraded: "降级",
+    }[value || ""] ||
+    value ||
+    "未知"
+  );
+}
+
+export function codexThreadStatusLabel(value?: string): string {
+  return (
+    {
+      idle: "空闲",
+      running: "运行中",
+      needs_approval: "待审批",
+      failed: "失败",
+      archived: "已归档",
+    }[value || ""] ||
+    value ||
+    "未知"
+  );
+}
+
+export function codexSandboxLabel(value?: string): string {
+  return (
+    {
+      "read-only": "只读咨询",
+      "workspace-write": "工作区写入",
+    }[value || ""] ||
+    value ||
+    "只读咨询"
+  );
+}
+
+export function codexEventTitle(type?: string): string {
+  return (
+    {
+      "thread.started": "会话已开始",
+      "thread.resumed": "会话已恢复",
+      "thread.archived": "会话已归档",
+      "turn.started": "开始处理",
+      "turn.completed": "处理完成",
+      "turn.failed": "处理失败",
+      "turn.cancelled": "已中断",
+      "message.user": "你",
+      "message.agent": "Codex",
+      "message.reasoning": "推理",
+      "command.started": "执行命令",
+      "command.completed": "命令完成",
+      "file_change.started": "开始修改文件",
+      "file_change.completed": "文件修改完成",
+      "approval.requested": "请求审批",
+      "approval.resolved": "审批已处理",
+      "tool.started": "调用工具",
+      "tool.completed": "工具完成",
+      "diagnostic.warning": "警告",
+      "diagnostic.error": "错误",
+    }[type || ""] ||
+    type ||
+    "事件"
+  );
 }

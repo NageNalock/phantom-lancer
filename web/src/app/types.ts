@@ -1,4 +1,4 @@
-export type MainTab = "dashboard" | "codex-gateway" | "logs" | "images" | "v2ray" | "settings";
+export type MainTab = "dashboard" | "codex-gateway" | "codex" | "logs" | "images" | "v2ray" | "settings";
 export type Tone = "neutral" | "good" | "warn" | "danger";
 
 export interface AuthSession {
@@ -47,6 +47,7 @@ export interface ImageStatus {
 
 export interface DashboardSummary {
   codexGateway?: CodexGatewayStatus;
+  codex?: CodexStatus;
   images?: ImageStatus;
   v2ray?: V2RayStatus;
   recentActivity?: AuditEvent[];
@@ -439,6 +440,141 @@ export interface EventRecord {
   type: string;
   payload?: Record<string, unknown>;
   createdAt?: string;
+}
+
+export interface CodexInstallation {
+  id?: string;
+  binaryPath?: string;
+  version?: string;
+  status?: string;
+  capabilities?: Record<string, unknown>;
+  doctorSummary?: Record<string, unknown>;
+  lastProbeError?: string;
+  detectedAt?: string;
+}
+
+export interface CodexAppServerStatus {
+  state?: string;
+  pid?: number;
+  startedAt?: string;
+  uptimeSeconds?: number;
+  lastProbeAt?: string;
+  lastError?: string;
+  enabled?: boolean;
+}
+
+export interface CodexStatus {
+  enabled?: boolean;
+  installation?: CodexInstallation;
+  appServer?: CodexAppServerStatus;
+  workspaceCount?: number;
+  threadCount?: number;
+  pendingApprovals?: number;
+  legacyTables?: string[];
+}
+
+export interface CodexSettings {
+  enabled?: boolean;
+  binaryPath?: string;
+  codexHome?: string;
+  defaultModel?: string;
+  defaultSandbox?: string;
+  defaultApprovalPolicy?: string;
+  appServerEnabled?: boolean;
+  appServerProbeIntervalSeconds?: number;
+  appServerStartOnLaunch?: boolean;
+  execFallbackEnabled?: boolean;
+  eventRetentionDays?: number;
+  maxEventsPerThread?: number;
+  maxEventPayloadBytes?: number;
+}
+
+export interface CodexWorkspace {
+  id: string;
+  label?: string;
+  pathSummary?: string;
+  trustState?: string;
+  defaultModel?: string;
+  defaultSandbox?: string;
+  defaultApprovalPolicy?: string;
+  networkPolicy?: Record<string, unknown>;
+  lastOpenedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CodexThread {
+  id: string;
+  codexThreadId?: string;
+  workspaceId?: string;
+  title?: string;
+  status?: string;
+  sourceMode?: string;
+  model?: string;
+  sandboxMode?: string;
+  approvalPolicy?: string;
+  pinned?: boolean;
+  archivedAt?: string;
+  lastTurnId?: string;
+  lastError?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CodexTurn {
+  id: string;
+  threadId?: string;
+  codexTurnId?: string;
+  status?: string;
+  promptSummary?: string;
+  model?: string;
+  sandboxMode?: string;
+  approvalPolicy?: string;
+  startedAt?: string;
+  completedAt?: string;
+  errorSummary?: string;
+  createdAt?: string;
+}
+
+export interface CodexEvent {
+  id?: string;
+  threadId?: string;
+  turnId?: string;
+  sequence?: number;
+  eventType?: string;
+  codexMethod?: string;
+  itemType?: string;
+  textPreview?: string;
+  payload?: Record<string, unknown>;
+  createdAt?: string;
+}
+
+export interface CodexApproval {
+  id: string;
+  threadId?: string;
+  turnId?: string;
+  status?: string;
+  actionKind?: string;
+  commandPreview?: string;
+  cwdSummary?: string;
+  riskLevel?: string;
+  decision?: string;
+  decidedAt?: string;
+  expiresAt?: string;
+  createdAt?: string;
+}
+
+export interface CodexAttachment {
+  id: string;
+  filename?: string;
+  contentType?: string;
+  sizeBytes?: number;
+}
+
+export interface CodexModel {
+  id: string;
+  displayName?: string;
+  isDefault?: boolean;
 }
 
 export interface AppData {

@@ -122,7 +122,7 @@ Reading this as: 个人服务器控制台里的网络服务控制面，面向单
 入站字段：
 
 - `listen`：默认 `0.0.0.0`，可选 `127.0.0.1`、具体网卡 IP。
-- `port`：默认使用 1024 以上端口，MVP 不支持 privileged ports。
+- `port`：允许 1-65535；默认仍使用 1024 以上端口。低于 1024 的 privileged ports 需要 Phantom Lancer 进程具备系统绑定权限，启动阶段必须用真实端口绑定检查暴露权限或占用错误。
 - `protocol`：MVP 默认 `vmess`。
 - `transport`：`tcp`，后续支持 `ws`。
 - `wsPath`：WebSocket path，启用 `ws` 时必填。
@@ -408,7 +408,7 @@ MVP 可以先绑定到 owner session，但代码结构应保留 capability 检�
 - V2Ray core 与 Phantom Lancer 在同一 Go 进程内运行，不要求 root。
 - 同进程集成降低部署复杂度，但也意味着 V2Ray panic、资源占用或死锁可能影响控制台本身；实现时必须控制配置面、加 recover 边界、限制日志量，并避免在请求 goroutine 中直接执行长时间阻塞启动。
 - Phantom Lancer 仍应以专用低权限用户运行；内嵌 V2Ray 获得的系统权限不应高于主控制台进程。
-- MVP 只允许 1024-65535 端口。
+- 允许 1-65535 端口；低于 1024 的端口必须依赖系统权限、capability、端口转发或反向代理，页面应显示 warning，后端启动前仍要检查端口占用和绑定权限。
 - 配置文件写入 `data_dir/v2ray/`，权限 `0600`；目录权限 `0700`。
 - 不自动开放防火墙。页面只显示需要用户自行确认的端口和监听地址。
 - 启动前检查端口占用。

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"phantom-lancer/internal/buildinfo"
+	"phantom-lancer/internal/codexclient"
 	"phantom-lancer/internal/codexgateway"
 	"phantom-lancer/internal/config"
 	"phantom-lancer/internal/events"
@@ -85,6 +86,14 @@ func main() {
 
 	hub := events.NewHub()
 	codexGatewaySvc := codexgateway.NewService(store, logger)
+	codexSvc := codexclient.NewService(store, hub, cfg.DataDir, func() ([]string, error) {
+		settings, err := store.GetRuntimeSettings(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return settings.AllowedRoots, nil
+	}, logger)
+	defer codexSvc.Close()
 	v2raySvc := v2ray.NewService(store, hub, cfg.DataDir, logger)
 	defer v2raySvc.Close()
 	imagesSvc := images.NewService(store, hub, cfg.DataDir, logger)
@@ -121,12 +130,17 @@ func main() {
 		logger.Error("initialize v2ray settings failed", "error", err)
 		os.Exit(1)
 	}
+	if err := codexSvc.Ensure(ctx); err != nil {
+		logger.Error("initialize codex client failed", "error", err)
+		os.Exit(1)
+	}
+	codexSvc.StartBackground(ctx)
 	if v2raySettings, err := store.GetV2RaySettings(ctx); err == nil && v2raySettings.Enabled && v2raySettings.StartOnPhantomLaunch {
 		if _, err := v2raySvc.Start(ctx); err != nil {
 			logger.Error("start embedded v2ray failed", "error", err)
 		}
 	}
-	api, err := httpapi.New(cfg, store, hub, codexGatewaySvc, v2raySvc, imagesSvc, logsSvc, updateSvc, staticFS, logger)
+	api, err := httpapi.New(cfg, store, hub, codexGatewaySvc, codexSvc, v2raySvc, imagesSvc, logsSvc, updateSvc, staticFS, logger)
 	if err != nil {
 		logger.Error("create api failed", "error", err)
 		os.Exit(1)

@@ -755,7 +755,168 @@ CREATE TABLE IF NOT EXISTS image_storage_settings (
 			return err
 		}
 	}
-	return nil
+	return s.migrateCodexCli(ctx)
+}
+
+// migrateCodexCli creates the additive codex_cli_* schema for the rebuilt Codex
+// CLI client module. It never drops or mutates legacy codex_* tables; those are
+// handled separately by PurgeLegacyCodexData.
+func (s *Store) migrateCodexCli(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS codex_cli_installations (
+  id TEXT PRIMARY KEY,
+  binary_path TEXT NOT NULL DEFAULT '',
+  version TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'unavailable',
+  capabilities_json TEXT NOT NULL DEFAULT '{}',
+  doctor_summary_json TEXT NOT NULL DEFAULT '{}',
+  last_probe_error TEXT NOT NULL DEFAULT '',
+  detected_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS codex_cli_workspaces (
+  id TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  path TEXT NOT NULL,
+  path_summary TEXT NOT NULL DEFAULT '',
+  trust_state TEXT NOT NULL DEFAULT 'untrusted',
+  default_model TEXT NOT NULL DEFAULT '',
+  default_sandbox TEXT NOT NULL DEFAULT 'read-only',
+  default_approval_policy TEXT NOT NULL DEFAULT 'on-request',
+  network_policy_json TEXT NOT NULL DEFAULT '{}',
+  last_opened_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_workspaces_opened ON codex_cli_workspaces(last_opened_at DESC);
+CREATE TABLE IF NOT EXISTS codex_cli_threads (
+  id TEXT PRIMARY KEY,
+  codex_thread_id TEXT NOT NULL DEFAULT '',
+  workspace_id TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'idle',
+  source_mode TEXT NOT NULL DEFAULT 'app_server',
+  model TEXT NOT NULL DEFAULT '',
+  sandbox_mode TEXT NOT NULL DEFAULT 'read-only',
+  approval_policy TEXT NOT NULL DEFAULT 'on-request',
+  pinned INTEGER NOT NULL DEFAULT 0,
+  archived_at TEXT NOT NULL DEFAULT '',
+  last_turn_id TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_threads_updated ON codex_cli_threads(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_threads_workspace ON codex_cli_threads(workspace_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS codex_cli_turns (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  codex_turn_id TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'running',
+  prompt_summary TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  sandbox_mode TEXT NOT NULL DEFAULT '',
+  approval_policy TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL DEFAULT '',
+  completed_at TEXT NOT NULL DEFAULT '',
+  error_summary TEXT NOT NULL DEFAULT '',
+  usage_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_turns_thread ON codex_cli_turns(thread_id, created_at);
+CREATE TABLE IF NOT EXISTS codex_cli_events (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL DEFAULT '',
+  sequence INTEGER NOT NULL,
+  event_type TEXT NOT NULL,
+  codex_method TEXT NOT NULL DEFAULT '',
+  item_type TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  text_preview TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE(thread_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_events_thread ON codex_cli_events(thread_id, sequence);
+CREATE TABLE IF NOT EXISTS codex_cli_approvals (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL DEFAULT '',
+  codex_request_id TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  action_kind TEXT NOT NULL DEFAULT '',
+  command_preview TEXT NOT NULL DEFAULT '',
+  cwd_summary TEXT NOT NULL DEFAULT '',
+  risk_level TEXT NOT NULL DEFAULT 'medium',
+  request_payload_json TEXT NOT NULL DEFAULT '{}',
+  decision TEXT NOT NULL DEFAULT '',
+  decided_at TEXT NOT NULL DEFAULT '',
+  expires_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_approvals_status ON codex_cli_approvals(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_approvals_thread ON codex_cli_approvals(thread_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS codex_cli_runs (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL DEFAULT '',
+  turn_id TEXT NOT NULL DEFAULT '',
+  mode TEXT NOT NULL DEFAULT 'exec',
+  pid INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'running',
+  started_at TEXT NOT NULL DEFAULT '',
+  last_heartbeat_at TEXT NOT NULL DEFAULT '',
+  exited_at TEXT NOT NULL DEFAULT '',
+  exit_code INTEGER NOT NULL DEFAULT 0,
+  error_summary TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_runs_mode ON codex_cli_runs(mode, status);
+CREATE TABLE IF NOT EXISTS codex_cli_attachments (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL DEFAULT '',
+  turn_id TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'image',
+  filename TEXT NOT NULL DEFAULT '',
+  content_type TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  storage_path TEXT NOT NULL DEFAULT '',
+  expires_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_attachments_thread ON codex_cli_attachments(thread_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_attachments_expires ON codex_cli_attachments(expires_at);
+`)
+	return err
+}
+
+// CodexCliLegacyTablesDetected reports whether any retired Codex client tables
+// from the previous implementation still exist in the SQLite file. This is only
+// surfaced as a diagnostic; it never blocks startup.
+func (s *Store) CodexCliLegacyTablesDetected(ctx context.Context) ([]string, error) {
+	legacy := []string{
+		"codex_approvals",
+		"codex_items",
+		"codex_turns",
+		"codex_sessions",
+		"codex_capability_cache",
+		"codex_exec_jobs",
+		"workspaces",
+	}
+	found := []string{}
+	for _, table := range legacy {
+		var name string
+		err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		found = append(found, name)
+	}
+	return found, nil
 }
 
 func (s *Store) ensureColumn(ctx context.Context, table, name, def string) error {

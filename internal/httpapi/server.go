@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"phantom-lancer/internal/auth"
+	"phantom-lancer/internal/codexclient"
 	"phantom-lancer/internal/codexgateway"
 	"phantom-lancer/internal/config"
 	"phantom-lancer/internal/events"
@@ -39,6 +40,7 @@ type Server struct {
 	store          *storage.Store
 	hub            *events.Hub
 	codexGateway   *codexgateway.Service
+	codex          *codexclient.Service
 	v2ray          *v2ray.Service
 	images         *imagegen.Service
 	logs           *logcenter.Service
@@ -56,12 +58,13 @@ type sessionContext struct {
 	Session storage.Session
 }
 
-func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewaySvc *codexgateway.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
+func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
 	return &Server{
 		cfg:            cfg,
 		store:          store,
 		hub:            hub,
 		codexGateway:   codexGatewaySvc,
+		codex:          codexSvc,
 		v2ray:          v2raySvc,
 		images:         imagesSvc,
 		logs:           logsSvc,
@@ -106,6 +109,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/codex-gateway/models/refresh", s.handleRefreshCodexGatewayModels)
 	mux.HandleFunc("GET /api/codex-gateway/request-logs", s.handleCodexGatewayRequestLogs)
 	mux.HandleFunc("POST /api/codex-gateway/chat-test", s.handleCodexGatewayChatTest)
+	s.registerCodexRoutes(mux)
 	mux.HandleFunc("GET /api/events/history", s.handleEventHistory)
 	mux.HandleFunc("GET /api/events/stream", s.handleEventStream)
 	mux.HandleFunc("GET /api/audit/events", s.handleAuditEvents)
@@ -299,8 +303,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		codexGatewayStatus = codexgateway.Status{LastError: err.Error()}
 	}
+	codexStatus, _ := s.codex.Status(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"codexGateway":   codexGatewayStatus,
+		"codex":          codexStatus,
 		"images":         s.images.Status(r.Context()),
 		"v2ray":          s.v2ray.Status(r.Context()),
 		"recentActivity": audit,
