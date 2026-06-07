@@ -1,4 +1,4 @@
-# Codex OpenAI 兼容网关模块功能设计
+# OpenAI 兼容 Gateway 模块功能设计
 
 文档日期：2026-06-05  
 来源服务：本地 `codex-proxyv2` 参考实现  
@@ -13,6 +13,8 @@
 Reading this as: 个人服务器控制台里的 Codex API gateway，面向单 owner 技术用户，采用 Quiet Agent Workbench / Quiet DevOps Control Plane 语言，强调账号状态、公开 API key、模型目录、请求路由、错误归因和低噪音请求日志。
 
 本模块不是营销页，也不是把 `codex-proxyv2` 作为 sidecar 服务嵌入。迁移方式是功能搬迁和架构重构，不做源码拷贝，不保留原服务的独立登录页、独立前端、独立配置文件、打包脚本或 V2Ray 代理能力。
+
+本模块是独立能力域。原 Codex CLI / Codex Client 客户端方案已废弃，本控制台不再内置 Codex 会话、sandbox、approval、usage 或 transcript 能力；Gateway 不依赖也不共享这些已移除的模型。
 
 ## 2. 迁移目标
 
@@ -296,7 +298,7 @@ token 刷新策略：
 
 ### 4.1 模块定位
 
-本能力建议命名为 `Codex Gateway` 或 `OpenAI Gateway`，中文可显示为 `Codex 网关`。
+本能力建议命名为 `OpenAI Gateway` 或 `Codex Gateway`，中文可显示为 `OpenAI 网关` 或 `Codex 网关`。产品信息架构中它是独立能力域，不再放在 Codex CLI / Codex Client 下。
 
 它与现有 `Codex` 会话能力的区别：
 
@@ -305,19 +307,19 @@ token 刷新策略：
 
 信息架构建议：
 
-- MVP 放在一级 `Codex` 下的二级视图 `Gateway`。
+- MVP 放在独立一级导航 `Gateway` 或 `OpenAI Gateway`。
 - Dashboard 只展示摘要：enabled、public API key 状态、active accounts、最近失败、今日请求数。
-- 不把账号、模型、日志、API key 拆成多个一级导航。
-- 如果未来扩展为多 provider API gateway，再评估提升为独立一级 `API Gateway`。
+- Gateway 内部使用二级视图管理账号、模型、日志、API key 和测试，不把这些对象拆成多个全局一级导航。
+- 如果未来扩展为多 provider API gateway，可以将显示名调整为 `API Gateway`，但仍保持独立能力域。
 
 ### 4.2 MVP 范围
 
-- `Codex > Gateway > Overview`：状态摘要、base URL、公开 API key 状态、最近失败。
-- `Codex > Gateway > Accounts`：账号列表、添加、编辑、禁用、删除、刷新、检查、OAuth 导入。
-- `Codex > Gateway > Models`：模型列表、source、plan 映射、手动刷新。
-- `Codex > Gateway > API Keys`：公开 API key 创建、轮换、禁用、最近使用。
-- `Codex > Gateway > Logs`：最近请求日志、错误分类、usage 摘要。
-- `Codex > Gateway > Test`：使用指定账号和模型发起 streaming chat test。
+- `Gateway > Overview`：状态摘要、base URL、公开 API key 状态、最近失败。
+- `Gateway > Accounts`：账号列表、添加、编辑、禁用、删除、刷新、检查、OAuth 导入。
+- `Gateway > Models`：模型列表、source、plan 映射、手动刷新。
+- `Gateway > API Keys`：公开 API key 创建、轮换、禁用、最近使用。
+- `Gateway > Logs`：最近请求日志、错误分类、usage 摘要。
+- `Gateway > Test`：使用指定账号和模型发起 streaming chat test。
 - 公开 `/v1/*` OpenAI 兼容 API。
 - 管理操作进入 audit。
 
@@ -334,7 +336,7 @@ token 刷新策略：
 
 ### 5.1 首次启用
 
-1. Owner 打开 `Codex > Gateway`。
+1. Owner 打开 `Gateway`。
 2. 页面显示模块未启用、public API key 未配置、没有 active Codex 账号。
 3. Owner 创建或轮换 public API key。
 4. Owner 通过 OAuth 或手动 token 导入 Codex 账号。
@@ -364,7 +366,7 @@ token 刷新策略：
 
 ### 5.4 排查失败请求
 
-1. Owner 打开 `Codex > Gateway > Logs`。
+1. Owner 打开 `Gateway > Logs`。
 2. 按模型、账号、状态码或错误来源过滤。
 3. 选中请求后右侧 inspector 展示错误摘要、耗时、是否 streamed、usage、账号状态变化。
 4. Owner 可以直接跳到账号详情执行 refresh/check。
@@ -393,7 +395,7 @@ CSRF：
 
 ### 6.2 管理 API
 
-建议管理 API 放在 `/api/codex-gateway/*` 下，避免与现有 `/api/codex/*` 会话接口混淆。
+建议管理 API 放在 `/api/codex-gateway/*` 下，避免与现有 `/api/codex/*` 会话接口混淆。该路径前缀是实现兼容命名，不表示 Gateway 是 Codex Client 的下属模块。
 
 状态和设置：
 
@@ -464,7 +466,7 @@ flowchart TD
   PublicClient["OpenAI compatible client"] --> PublicAPI["/v1/*"]
   OwnerUI["Phantom Lancer UI"] --> AdminAPI["/api/codex-gateway/*"]
 
-  PublicAPI --> Gateway["Codex Gateway Service"]
+  PublicAPI --> Gateway["OpenAI Gateway Service"]
   AdminAPI --> Gateway
   Gateway --> Store["SQLite Store"]
   Gateway --> Audit["Audit Events"]
@@ -683,7 +685,7 @@ Codex Gateway UI 应保持 Quiet Agent Workbench 风格：
 6. 新增账号路由、token refresh、跨账号 retry。
 7. 新增 request logs 和错误归因。
 8. 新增管理 API。
-9. 新增 Codex 页面下的 Gateway 二级 UI。
+9. 新增独立 Gateway 页面和二级视图 UI。
 10. 补齐审计事件和服务日志红线。
 11. 回归测试，确保没有引入 V2Ray outbound 或源服务源码拷贝。
 

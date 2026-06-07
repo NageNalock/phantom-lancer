@@ -32,7 +32,11 @@ func NewService(store *storage.Store, hub *events.Hub, logger *slog.Logger, cfg 
 		cfg.APIBaseURL = defaultAPIBaseURL
 	}
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{Timeout: 20 * time.Second}
+		timeout := cfg.DownloadTimeout
+		if timeout <= 0 {
+			timeout = 20 * time.Second
+		}
+		cfg.HTTPClient = &http.Client{Timeout: timeout}
 	}
 	return &Service{store: store, hub: hub, log: logger, cfg: cfg, cancels: make(map[string]context.CancelFunc)}
 }
@@ -178,7 +182,30 @@ func (s *Service) ConfirmBoot(ctx context.Context) {
 	if err != nil || job.TargetVersion == "" {
 		return
 	}
-	if (job.Status != jobStatusRestarting && job.Phase != phaseRestarting) || job.TargetVersion != s.cfg.Build.Version {
+	if job.Status != jobStatusRestarting && job.Phase != phaseRestarting {
+		return
+	}
+	if job.TargetVersion != s.cfg.Build.Version {
+		currentVersion := strings.TrimSpace(s.cfg.Build.Version)
+		if currentVersion == "" {
+			currentVersion = "unknown"
+		}
+		job.Status = jobStatusFailed
+		job.ErrorMessage = fmt.Sprintf("service restarted with version %s instead of target %s", currentVersion, job.TargetVersion)
+		job.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		if err := s.store.SaveSystemUpdateJob(ctx, job); err != nil {
+			if s.log != nil {
+				s.log.Warn("mark update boot mismatch failed", "error", err)
+			}
+			return
+		}
+		s.append(ctx, job.ID, "update.failed", map[string]any{"phase": job.Phase, "message": job.ErrorMessage})
+		_, _ = s.store.AddAudit(ctx, storage.AuditEvent{
+			EventType: "system.update.boot_mismatch",
+			RiskLevel: "high",
+			Summary:   "系统更新重启后版本不匹配",
+			Payload:   map[string]any{"jobId": job.ID, "currentVersion": currentVersion, "targetVersion": job.TargetVersion},
+		})
 		return
 	}
 	job.Status = jobStatusCompleted

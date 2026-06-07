@@ -88,26 +88,6 @@ func (s *Service) ListSources(ctx context.Context) ([]Source, error) {
 		sources = append(sources, source)
 	}
 
-	jobs, err := s.Store.ListExecJobs(ctx, 20)
-	if err != nil {
-		return sources, nil
-	}
-	for _, job := range jobs {
-		source := Source{
-			ID:          codexExecSourceID(job.ID),
-			Kind:        "event",
-			Module:      "codex",
-			Name:        "Codex exec " + shortID(job.ID),
-			Description: preview(job.PromptPreview, 92),
-			Status:      statusFromJob(job),
-			Managed:     true,
-			UpdatedAt:   firstNonEmpty(job.CompletedAt, job.StartedAt),
-		}
-		if job.Status == "failed" || strings.TrimSpace(job.ErrorMessage) != "" {
-			source.ErrorCount = 1
-		}
-		sources = append(sources, source)
-	}
 	return sources, nil
 }
 
@@ -133,29 +113,6 @@ func (s *Service) Tail(ctx context.Context, sourceID string, opts TailOptions) (
 		}
 		lines := eventLines(sourceID, events, opts)
 		source := eventSource(v2raySourceID, "v2ray", "V2Ray runtime", "内嵌 V2Ray 运行事件", events)
-		return TailResponse{Source: source, Lines: lines, Limit: opts.Limit, MaxBytes: opts.MaxBytes}, nil
-	}
-	if strings.HasPrefix(sourceID, "event.codex-exec.") {
-		jobID := strings.TrimPrefix(sourceID, "event.codex-exec.")
-		job, err := s.Store.GetExecJob(ctx, jobID)
-		if err != nil {
-			return TailResponse{}, ErrSourceNotFound
-		}
-		events, err := s.Store.ListEvents(ctx, "exec_job", jobID, 0, 500)
-		if err != nil {
-			return TailResponse{}, err
-		}
-		lines := eventLines(sourceID, events, opts)
-		source := withCounts(Source{
-			ID:          sourceID,
-			Kind:        "event",
-			Module:      "codex",
-			Name:        "Codex exec " + shortID(job.ID),
-			Description: preview(job.PromptPreview, 92),
-			Status:      statusFromJob(job),
-			Managed:     true,
-			UpdatedAt:   firstNonEmpty(job.CompletedAt, job.StartedAt),
-		}, lines)
 		return TailResponse{Source: source, Lines: lines, Limit: opts.Limit, MaxBytes: opts.MaxBytes}, nil
 	}
 	return TailResponse{}, ErrSourceNotFound
@@ -365,25 +322,6 @@ func withCounts(source Source, lines []LogLine) Source {
 		}
 	}
 	return source
-}
-
-func codexExecSourceID(jobID string) string {
-	return "event.codex-exec." + jobID
-}
-
-func statusFromJob(job storage.ExecJob) string {
-	switch job.Status {
-	case "failed":
-		return "failed"
-	case "running":
-		return "active"
-	case "interrupted":
-		return "stale"
-	case "completed":
-		return "available"
-	default:
-		return firstNonEmpty(job.Status, "available")
-	}
 }
 
 func levelFromEvent(eventType, message string) string {

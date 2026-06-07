@@ -99,5 +99,8 @@ VERSION="$(detect_version)"
 COMMIT="$(detect_commit)"
 BUILD_DATE="${PL_BUILD_DATE:-"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}"
 LDFLAGS="-X phantom-lancer/internal/buildinfo.Version=$VERSION -X phantom-lancer/internal/buildinfo.Commit=$COMMIT -X phantom-lancer/internal/buildinfo.Date=$BUILD_DATE"
+if [[ -n "${PL_EXTRA_LDFLAGS:-}" ]]; then
+  LDFLAGS="$LDFLAGS $PL_EXTRA_LDFLAGS"
+fi
 "$GO_BIN" build -trimpath -ldflags "$LDFLAGS" -o "$OUT" ./cmd/phantom-lancer
 echo "Build complete: $OUT"

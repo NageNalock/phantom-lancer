@@ -22,8 +22,6 @@ type Config struct {
 	LogMaxAgeDays         int
 	LogStdout             bool
 	AllowedRoots          []string
-	CodexBinary           string
-	CodexHome             string
 	CookieSecure          bool
 	LoginFailureThreshold int
 	Updates               UpdateConfig
@@ -70,8 +68,6 @@ func Load(args []string) (Config, error) {
 	fs.IntVar(&cfg.LogMaxFiles, "log-max-files", cfg.LogMaxFiles, "managed service log rotated file count to retain")
 	fs.IntVar(&cfg.LogMaxAgeDays, "log-max-age-days", cfg.LogMaxAgeDays, "managed service log max age in days")
 	fs.BoolVar(&cfg.LogStdout, "log-stdout", cfg.LogStdout, "also write structured service logs to stdout")
-	fs.StringVar(&cfg.CodexBinary, "codex", cfg.CodexBinary, "default codex CLI binary path")
-	fs.StringVar(&cfg.CodexHome, "codex-home", cfg.CodexHome, "default CODEX_HOME")
 	fs.IntVar(&cfg.LoginFailureThreshold, "login-failure-threshold", cfg.LoginFailureThreshold, "failed login attempts before account/IP backoff")
 	fs.BoolVar(&cfg.Updates.Enabled, "updates-enabled", cfg.Updates.Enabled, "enable manual update checks and installs")
 	allowedRoots := fs.String("allowed-roots", strings.Join(cfg.AllowedRoots, ","), "comma-separated default workspace roots")
@@ -100,7 +96,6 @@ func Load(args []string) (Config, error) {
 	} else {
 		cfg.LogFile = resolvePath(baseDir, cfg.LogFile)
 	}
-	cfg.CodexHome = resolvePath(baseDir, cfg.CodexHome)
 	cfg.Updates.InstallBinaryPath = resolvePath(baseDir, cfg.Updates.InstallBinaryPath)
 	for index, root := range cfg.AllowedRoots {
 		cfg.AllowedRoots[index] = resolvePath(baseDir, root)
@@ -153,7 +148,6 @@ func defaults(cwd string) Config {
 		Addr:                  "127.0.0.1:8080",
 		DataDir:               filepath.Join(cwd, ".phantom-data"),
 		AllowedRoots:          []string{cwd},
-		CodexBinary:           "codex",
 		LogMaxSizeMB:          32,
 		LogMaxFiles:           5,
 		LogMaxAgeDays:         14,
@@ -217,14 +211,6 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("PL_ALLOWED_ROOTS"); value != "" {
 		cfg.AllowedRoots = splitList(value)
-	}
-	if value := os.Getenv("PL_CODEX_BINARY"); value != "" {
-		cfg.CodexBinary = value
-	}
-	if value := os.Getenv("PL_CODEX_HOME"); value != "" {
-		cfg.CodexHome = value
-	} else if value := os.Getenv("CODEX_HOME"); value != "" {
-		cfg.CodexHome = value
 	}
 	if value := os.Getenv("PL_COOKIE_SECURE"); value != "" {
 		cfg.CookieSecure = parseBool(value)
@@ -305,10 +291,6 @@ func applyConfigFile(cfg *Config, path string) error {
 			cfg.LogStdout = parseBool(value)
 		case "bootstrap.allowed_roots", "runtime.allowed_roots", "paths.allowed_roots":
 			cfg.AllowedRoots = parseStringArray(value)
-		case "bootstrap.codex_binary", "runtime.codex_binary", "codex.binary_path":
-			cfg.CodexBinary = parseString(value)
-		case "bootstrap.codex_home", "runtime.codex_home", "codex.codex_home":
-			cfg.CodexHome = parseString(value)
 		case "bootstrap.cookie_secure", "runtime.cookie_secure", "security.cookie_secure":
 			cfg.CookieSecure = parseBool(value)
 		case "auth.login_failure_threshold", "security.login_failure_threshold":

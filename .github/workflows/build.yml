@@ -40,6 +40,7 @@ jobs:
       CGO_ENABLED: "1"
       GOOS: linux
       GOARCH: amd64
+      CC: musl-gcc
       GOPROXY: https://proxy.golang.org,direct
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
       ARTIFACT_NAME: ${{ inputs.artifact_name || 'phantom-lancer-linux-amd64' }}
@@ -68,6 +69,11 @@ jobs:
           node --version
           npm --version
 
+      - name: Install portable Linux linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
       - name: Install frontend dependencies
         working-directory: web
         run: npm ci
@@ -90,7 +96,18 @@ jobs:
           PL_BIN_DIR: ${{ github.workspace }}/release/bin
           PL_OUT: ${{ github.workspace }}/release/bin/phantom-lancer
           PL_SKIP_WEB_BUILD: "1"
+          PL_EXTRA_LDFLAGS: '-linkmode external -extldflags "-static"'
         run: scripts/build.sh
+
+      - name: Verify release binary is static
+        run: |
+          set -Eeuo pipefail
+          file release/bin/phantom-lancer
+          if ! file release/bin/phantom-lancer | grep -q "statically linked"; then
+            echo "release binary must be statically linked for portable self-updates" >&2
+            ldd release/bin/phantom-lancer || true
+            exit 1
+          fi
 
       - name: Assemble release archive
         id: package

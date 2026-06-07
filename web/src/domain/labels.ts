@@ -1,83 +1,17 @@
-import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, V2RaySettings, V2RayStatus, Workspace } from "../app/types";
-
-export const CODEX_TABS = [
-  { id: "sessions", label: "会话", description: "长期会话、实时事件和任务上下文" },
-  { id: "projects", label: "项目", description: "受控工作区和路径边界" },
-  { id: "reviews", label: "Reviews", description: "会话内 review、历史入口和本地 diff 检查" },
-  { id: "capabilities", label: "能力", description: "模型、MCP、plugins、skills、hooks 和账号状态" },
-  { id: "gateway", label: "Gateway", description: "Codex OAuth 账号、OpenAI 兼容端点和请求审计" },
-  { id: "activity", label: "活动", description: "登录、配置和执行历史" },
-] as const;
+import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, V2RaySettings, V2RayStatus } from "../app/types";
 
 export const NAV_ITEMS = [
   { id: "dashboard", label: "控制台", short: "01", description: "服务器状态、执行边界和下一步入口" },
-  { id: "codex", label: "Codex", short: "02", description: "会话、项目、权限和活动统一收敛在 Codex 工作区" },
+  { id: "codex-gateway", label: "Codex Gateway", short: "02", description: "Codex OAuth 账号、OpenAI 兼容端点和请求审计" },
   { id: "logs", label: "日志", short: "03", description: "服务日志、运行事件和在线排障视图" },
   { id: "images", label: "Images", short: "04", description: "xAI Grok Imagine 生成、编辑、图片库、历史和存储设置" },
   { id: "v2ray", label: "V2Ray", short: "05", description: "内嵌 V2Ray 服务端、远程设备接入和运行控制" },
-  { id: "settings", label: "设置", short: "06", description: "运行期配置、允许根目录和 CLI 探针" },
+  { id: "settings", label: "设置", short: "06", description: "运行期配置、允许根目录和全局安全策略" },
 ] as const;
-
-const eventLabels: Record<string, string> = {
-  "session.created": "会话已创建",
-  "session.failed": "会话启动失败",
-  "thread.attached": "已连接 Codex thread",
-  "thread.resumed": "已恢复 Codex thread",
-  "thread/started": "Codex thread 已启动",
-  "thread/status/changed": "会话状态变化",
-  "thread/archived": "会话已归档",
-  "thread.archived.local": "会话已归档",
-  "thread.settings.updated.local": "会话设置已更新",
-  "thread/settings/updated": "会话设置已更新",
-  "thread/tokenUsage/updated": "上下文用量更新",
-  "thread.forked.local": "会话已 fork",
-  "thread.rollback.requested": "已请求回滚",
-  "thread.compact.requested": "已请求压缩上下文",
-  "thread/compacted": "上下文已压缩",
-  "review.started.local": "Review 已启动",
-  "codex.approval.requested": "Codex 请求审批",
-  "codex.approval.resolved": "Codex 审批已处理",
-  "codex.approval.expired": "Codex 审批已过期",
-  "codex.approval.interrupted": "Codex 审批已中断",
-  "codex.approval.unsupported": "Codex 审批不支持",
-  "git.action.completed": "Git 操作已完成",
-  "composer.status": "会话状态",
-  "turn.submitted": "已发送提示词",
-  "turn.steered": "已追加引导",
-  "turn.start.failed": "回合启动失败",
-  "turn.steer.failed": "追加引导失败",
-  "turn.interrupt.requested": "已请求中断",
-  "turn/started": "回合已开始",
-  "turn/completed": "回合已结束",
-  "turn/diff/updated": "文件差异更新",
-  "turn/plan/updated": "计划更新",
-  "item/started": "条目开始",
-  "item/completed": "条目完成",
-  "item/agentMessage/delta": "回复增量",
-  "item/commandExecution/outputDelta": "命令输出",
-  "item/fileChange/outputDelta": "文件变更输出",
-  "item/fileChange/patchUpdated": "补丁更新",
-  "item/reasoning/summaryTextDelta": "推理摘要",
-  error: "Codex 错误",
-  warning: "Codex 警告",
-};
 
 const auditLabels: Record<string, string> = {
   "owner.bootstrap": "初始化管理员",
   "auth.login": "登录",
-  "workspace.create": "添加项目",
-  "codex.exec.start": "启动 Codex 任务",
-  "codex.session.create": "创建 Codex 会话",
-  "codex.turn.send": "发送 Codex 对话",
-  "codex.turn.interrupt": "中断 Codex 回合",
-  "codex.session.archive": "归档 Codex 会话",
-  "codex.session.settings.update": "更新 Codex 会话设置",
-  "codex.session.fork": "Fork Codex 会话",
-  "codex.session.rollback": "回滚 Codex 会话",
-  "codex.session.compact": "压缩 Codex 会话",
-  "codex.review.start": "启动 Codex review",
-  "codex.git.action": "执行 Codex Git 操作",
-  "codex.approval.resolve": "处理 Codex 审批",
   "codex_gateway.settings.updated": "更新 Codex Gateway 设置",
   "codex_gateway.api_key.created": "创建 Codex Gateway API key",
   "codex_gateway.api_key.rotated": "轮换 Codex Gateway API key",
@@ -130,31 +64,8 @@ const auditLabels: Record<string, string> = {
   "v2ray.client.revoke": "撤销 V2Ray 远程设备",
 };
 
-export function eventLabel(type?: string): string {
-  return eventLabels[type || ""] || type || "事件";
-}
-
 export function auditLabel(type?: string): string {
   return auditLabels[type || ""] || type || "审计事件";
-}
-
-export function sandboxLabel(value?: string): string {
-  return value === "workspace-write" ? "工作区可写" : "只读";
-}
-
-export function sessionStatusLabel(value?: string): string {
-  return (
-    {
-      starting: "启动中",
-      idle: "空闲",
-      active: "运行中",
-      failed: "失败",
-      archived: "已归档",
-      closed: "已关闭",
-    }[value || ""] ||
-    value ||
-    "未知"
-  );
 }
 
 export function v2rayStateLabel(status?: V2RayStatus): string {
@@ -265,12 +176,8 @@ export function formatDate(value?: string): string {
   }).format(date);
 }
 
-export function workspaceName(workspace?: Workspace | null): string {
-  return workspace?.name || "无项目";
-}
-
 export function defaultRuntime() {
-  return { allowedRoots: [], codexBinary: "codex", codexHome: "", cookieSecure: false, updatedAt: "" };
+  return { allowedRoots: [], cookieSecure: false, updatedAt: "" };
 }
 
 export function defaultV2RaySettings(): Required<V2RaySettings> {

@@ -25,7 +25,7 @@ The workflow:
 4. Type-checks the frontend when tests are enabled.
 5. Builds `web/dist`, which is embedded by `web/static.go`.
 6. Runs Go tests when tests are enabled.
-7. Builds `bin/phantom-lancer` with CGO enabled.
+7. Builds `bin/phantom-lancer` with CGO enabled and musl static linking for portable Linux self-updates.
 8. Creates a tarball containing:
    - `bin/phantom-lancer`
    - `scripts/start.sh`
@@ -102,6 +102,6 @@ scripts/manage.sh logs
 
 ## Platform Notes
 
-The current workflow intentionally builds only `linux-amd64`. The backend uses `github.com/mattn/go-sqlite3`, so CGO must be enabled and a native C compiler must be available. GitHub's Ubuntu hosted runner provides the required toolchain for Linux amd64.
+The current workflow intentionally builds only `linux-amd64`. The backend uses `github.com/mattn/go-sqlite3`, so CGO must be enabled. Release binaries are linked statically with musl to avoid depending on the GitHub runner's glibc version; this is important for self-updates on older Linux distributions.
 
 For an ARM server, prefer adding a native ARM64 runner or a separate CGO-aware build job instead of assuming simple Go cross-compilation will work.

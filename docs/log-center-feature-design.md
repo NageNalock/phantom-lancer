@@ -1,7 +1,7 @@
 # 日志中心查看模块与日志治理设计
 
 文档日期：2026-06-05
-适用范围：Phantom Lancer 的服务运行日志、应用日志查看、Codex/Images/V2Ray 相关排障日志，以及后续新增功能的日志打印约束。
+适用范围：Phantom Lancer 的服务运行日志、应用日志查看、Codex Gateway/Images/V2Ray 相关排障日志，以及后续新增功能的日志打印约束。
 
 ## 1. 当前实现 review
 
@@ -19,8 +19,8 @@
 ### 1.2 现有日志与事件边界
 
 - 服务日志：`slog` 只覆盖启动、初始化失败、HTTP server 失败、shutdown 失败、panic recovery、少量 Images/V2Ray 内部失败。
-- 审计事件：登录、工作区、Codex、Images、V2Ray 配置和控制操作已进入 `audit_events`，用于操作追踪，不应替代运行日志。
-- 持久事件：Codex exec stdout/stderr、Codex session event、Images job event、V2Ray service event 进入 `events` 表，并通过 SSE 补拉或实时推送。
+- 审计事件：登录、Codex Gateway、Images、V2Ray 配置和控制操作已进入 `audit_events`，用于操作追踪，不应替代运行日志。
+- 持久事件：Images job event、V2Ray service event 进入 `events` 表，并通过 SSE 补拉或实时推送。
 - 外部应用日志：产品文档已设计“日志中心”，但当前没有日志源登记、日志文件白名单、tail API 或前端日志页面。
 
 ### 1.3 关键报错日志覆盖评估
@@ -28,7 +28,6 @@
 已有覆盖较好的部分：
 
 - 配置加载、SQLite 打开、runtime settings 初始化、静态资源加载等启动失败会写 error。
-- Codex exec job 的失败会写入 job 状态和 `job.failed` 事件，stderr 会作为 `process.stderr` 事件保存。
 - Images provider 调用失败会进入 job error、事件和 audit。
 - V2Ray 启停控制会进入 audit，运行状态保留 `lastError`。
 - 登录退避和限流会写 audit，且不记录密码明文。
@@ -37,8 +36,6 @@
 
 - HTTP 5xx 当前大多只返回 `writeError`，不写服务日志；需要仅对 5xx、panic、慢请求和安全异常写结构化日志，不记录所有正常 2xx/4xx。
 - panic recovery 只记录 panic 值，缺少 method、path、request id、remote ip 摘要。
-- Codex app-server stderr 目前被完全丢弃；应保留最近 N 行 ring buffer，并只在启动失败、RPC 失败或进程退出时写摘要事件/日志。
-- Codex app-server stdout 的非法 JSON 当前直接忽略；应按计数聚合为 warning，避免逐行刷屏。
 - `Store.AppendEvent`、`AddAudit`、SSE backlog 读取等失败多处被忽略；应在调用边界写 warn，但不递归写 audit。
 - V2Ray 已配置 console log，当前没有 `LogBridge`；应只桥接 warning/error，access log 默认关闭。
 - `v2ray.append` 每个成功事件都写 `Info("v2ray event")`，后续若接入高频日志桥接必须去掉成功路径逐条 info，改为错误或聚合摘要。
@@ -46,9 +43,9 @@
 
 ## 2. 设计目标
 
-- 在 Web 上集中查看多个日志源，包括 Phantom Lancer 服务日志、工作区关联日志、V2Ray 运行日志、Codex/Images 的事件型日志。
+- 在 Web 上集中查看多个日志源，包括 Phantom Lancer 服务日志、应用关联日志、V2Ray 运行日志、Images 的事件型日志。
 - 每个日志默认折叠，只展示摘要；点击某个日志后才加载和展示内容，避免首屏读大文件。
-- 兼容多个日志同时存在：按来源、工作区、模块、更新时间、大小、错误计数和状态组织。
+- 兼容多个日志同时存在：按来源、模块、更新时间、大小、错误计数和状态组织。
 - 日志内容尽量富文本化：时间、级别、组件、错误、堆栈、路径、URL、请求 id、JSON 字段、ANSI 颜色、搜索命中都可高亮。
 - 保持个人单机部署、Go 后端、SQLite、SSE、受控权限边界，不引入复杂外部 observability 平台。
 - 日志数量可控：只记录排障必要信息，不把高频正常路径、完整 stdout/stderr、大 prompt、图片 base64、secret 写入服务日志。
@@ -79,7 +76,7 @@
 
 日志页布局：
 
-- 左侧 `Log Sources`：按模块和工作区列出日志源。
+- 左侧 `Log Sources`：按模块列出日志源。
 - 中间 `Log Workspace`：日志摘要列表 + 点击后的内容查看器。
 - 右侧 `Inspector`：当前日志源元数据、读取范围、轮转状态、错误摘要、关联操作。
 
@@ -93,11 +90,11 @@
 
 每个日志源以折叠摘要行展示，默认不打开内容：
 
-- 名称：`phantom-lancer.log`、`app.log`、`codex exec events`、`v2ray runtime`。
-- 来源：`service`、`workspace`、`codex`、`images`、`v2ray`。
+- 名称：`phantom-lancer.log`、`app.log`、`v2ray runtime`、`images job events`。
+- 来源：`service`、`application`、`images`、`v2ray`。
 - 状态：available / stale / unreadable / rotated / too_large。
 - 最近更新时间、文件大小、最近 error/warn 数量。
-- 关联对象：工作区名、服务名、job id 或 module。
+- 关联对象：应用名、服务名、job id 或 module。
 
 点击日志源后：
 
@@ -126,7 +123,6 @@
 - 时间范围：latest / 15m / 1h / custom，MVP 可先只支持 latest。
 - 行数上限：200 / 500 / 1000，默认 200，最大 1000。
 - 换行开关、JSON 展开/收起、复制选中内容。
-- `发送给 Codex 分析`：只发送当前选中的日志片段或当前过滤结果摘要，不发送整文件。
 
 ## 4. 后端接口设计
 
@@ -136,8 +132,7 @@
 type LogSource struct {
     ID          string
     Kind        string // file, event, service
-    Module      string // phantom, workspace, codex, images, v2ray
-    WorkspaceID string
+    Module      string // phantom, application, images, v2ray
     Name        string
     Path        string // file source only, response 中可按权限显示
     Glob        string // rotated family, optional
@@ -151,8 +146,8 @@ type LogSource struct {
 MVP 日志源：
 
 - `phantom-service`：默认读取 `data_dir/logs/phantom-lancer.log` 或配置的 `PL_LOG_FILE`。
-- `workspace-log`：工作区中显式登记的日志文件，必须通过路径白名单。
-- `codex-exec-events`：从 `events` 表读取 `exec_job` 的 stderr/output 事件，作为事件型日志。
+- `application-log`：应用中显式登记的日志文件，必须通过路径白名单。
+- `images-events`：从 `events` 表读取 Images job 的事件，作为事件型日志。
 - `v2ray-runtime`：从 V2Ray warning/error log bridge 读取，MVP 可先使用 `v2ray_service` 事件。
 
 ### 4.2 API
@@ -165,13 +160,11 @@ MVP 日志源：
   - SSE live tail，仅在用户打开日志并启用 live 后连接。
 - `GET /api/logs/sources/{id}/search?q=&limit=200&maxBytes=4194304`
   - MVP 只扫描最近有限字节，超限返回 `truncated=true`。
-- `POST /api/logs/sources/{id}/codex-analysis`
-  - 后续能力，只允许发送用户选中片段或后端压缩摘要。
 
 安全要求：
 
 - 所有接口必须登录。
-- 写操作或触发 Codex 分析必须 CSRF。
+- 写操作必须 CSRF。
 - 文件路径必须规范化，并落在允许根目录或日志文件白名单内。
 - 不允许读取 secret 文件、SQLite DB 文件、私钥文件、任意 `/var/log`。
 - 每次读取设置 timeout、最大行数、最大字节数。
@@ -254,7 +247,7 @@ type LogLine struct {
 
 需要单独增加 retention：
 
-- `events_retention_days`：默认 30 天，Codex session/event 可按 session 归档策略保留。
+- `events_retention_days`：默认 30 天，可按归档策略保留更久。
 - `audit_retention_days`：默认 180 天，安全相关 audit 不随普通事件一起清。
 - `max_events_per_scope`：默认 5000，防止单个 job/session 无限增长。
 
@@ -291,10 +284,10 @@ type LogLine struct {
 
 日志字段建议：
 
-- `component`：httpapi、codex、images、v2ray、storage、logs。
-- `operation`：start_server、create_session、tail_log、prune_events。
+- `component`：httpapi、gateway、images、v2ray、storage、logs。
+- `operation`：start_server、tail_log、prune_events。
 - `request_id`：后续添加 middleware 后统一注入。
-- `workspace_id`、`job_id`、`session_id`、`source_id`：只记录稳定 ID。
+- `job_id`、`source_id`：只记录稳定 ID。
 - `status`、`duration_ms`、`error`：错误和慢路径记录。
 
 数量控制：
@@ -312,13 +305,10 @@ HTTP：
 - 仅记录 5xx、panic、慢请求和安全异常；字段包含 method、path pattern、status、duration、request id。
 - `writeError` 不直接负责日志，避免所有 4xx 刷屏；由 handler 或 middleware 判断是否记录。
 
-Codex：
+Gateway：
 
-- app-server stderr 改为 bounded ring buffer。
-- app-server 启动失败、RPC 失败、进程退出时写 error/warn，并把 stderr 摘要写入 session event。
-- 非法 stdout JSON 采用计数聚合 warning。
-- exec job scanner error 需要进入 job event 和服务 warn。
-- stdout/stderr 事件需要单 job 最大事件数或最大字节数。
+- provider/上游调用失败写 request log + 服务日志摘要，不记录完整请求体或 API key。
+- 进程退出、连通性测试失败时写 warn/error，包含状态和错误摘要。
 
 Images：
 
@@ -344,7 +334,7 @@ Storage/Event：
 2. 增加服务日志配置、轮转 writer、redactor。
 3. 增加日志源 registry 和只读 tail API。
 4. 增加日志中心前端一级导航、源列表、富文本查看器和 inspector。
-5. 补齐 HTTP/Codex/Images/V2Ray 的关键错误日志。
+5. 补齐 HTTP/Gateway/Images/V2Ray 的关键错误日志。
 6. 增加 events/audit retention prune。
 7. 增加测试：路径边界、tail 读取、轮转识别、脱敏、输出上限、富文本解析。
 
@@ -354,7 +344,6 @@ Storage/Event：
 - 日志中心能列出多个日志源，每个源默认折叠，点击后才加载内容。
 - 大日志文件不会被一次性读入内存；API 有最大行数和最大字节数。
 - error/warn、JSON 字段、堆栈、路径、URL、搜索命中可被高亮。
-- Codex app-server stderr 不再完全丢失，但也不会逐行刷服务日志。
 - API Key、token、cookie、私钥、图片 base64 不出现在服务日志、audit、events 或前端日志响应明文中。
 - HTTP 正常请求不会造成大量日志；5xx、panic、慢请求和安全异常可定位。
 - events/audit 有独立 retention，不与服务日志轮转混淆。

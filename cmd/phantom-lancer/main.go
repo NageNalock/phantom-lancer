@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"phantom-lancer/internal/buildinfo"
-	"phantom-lancer/internal/codex"
 	"phantom-lancer/internal/codexgateway"
 	"phantom-lancer/internal/config"
 	"phantom-lancer/internal/events"
@@ -64,15 +63,16 @@ func main() {
 
 	if err := store.EnsureRuntimeSettings(ctx, storage.RuntimeSettings{
 		AllowedRoots: cfg.AllowedRoots,
-		CodexBinary:  cfg.CodexBinary,
-		CodexHome:    cfg.CodexHome,
 		CookieSecure: cfg.CookieSecure,
 	}); err != nil {
 		logger.Error("initialize runtime settings failed", "error", err)
 		os.Exit(1)
 	}
-	runtimeSettings, err := store.GetRuntimeSettings(ctx)
-	if err != nil {
+	if err := store.PurgeLegacyCodexData(ctx); err != nil {
+		logger.Error("purge legacy codex data failed", "error", err)
+		os.Exit(1)
+	}
+	if _, err := store.GetRuntimeSettings(ctx); err != nil {
 		logger.Error("load runtime settings failed", "error", err)
 		os.Exit(1)
 	}
@@ -84,8 +84,6 @@ func main() {
 	}
 
 	hub := events.NewHub()
-	codexSvc := codex.NewService(runtimeSettings.CodexBinary, runtimeSettings.CodexHome, store, hub)
-	defer codexSvc.Close()
 	codexGatewaySvc := codexgateway.NewService(store, logger)
 	v2raySvc := v2ray.NewService(store, hub, cfg.DataDir, logger)
 	defer v2raySvc.Close()
@@ -128,7 +126,7 @@ func main() {
 			logger.Error("start embedded v2ray failed", "error", err)
 		}
 	}
-	api, err := httpapi.New(cfg, store, hub, codexSvc, codexGatewaySvc, v2raySvc, imagesSvc, logsSvc, updateSvc, staticFS, logger)
+	api, err := httpapi.New(cfg, store, hub, codexGatewaySvc, v2raySvc, imagesSvc, logsSvc, updateSvc, staticFS, logger)
 	if err != nil {
 		logger.Error("create api failed", "error", err)
 		os.Exit(1)
@@ -150,9 +148,11 @@ func main() {
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	restartForUpdate := false
 	select {
 	case <-stop:
 	case <-restartRequested:
+		restartForUpdate = true
 		logger.Info("phantom lancer restart requested")
 	}
 
@@ -160,6 +160,14 @@ func main() {
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("shutdown failed", "error", err)
+		if closeErr := server.Close(); closeErr != nil {
+			logger.Error("force close server failed", "error", closeErr)
+		}
+	}
+	if restartForUpdate {
+		logger.Info("phantom lancer exiting for update restart")
+		_ = logHandle.Close()
+		os.Exit(0)
 	}
 }
 

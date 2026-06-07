@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -65,6 +66,10 @@ func (s *Service) install(ctx context.Context, jobID, stagedBinary, currentVersi
 	if err := copyFile(stagedBinary, tempPath, currentInfo.Mode().Perm()); err != nil {
 		_ = os.Remove(tempPath)
 		return installResult{}, fmt.Errorf("copy staged binary failed: %w", err)
+	}
+	if err := preserveOwnership(tempPath, currentInfo); err != nil {
+		_ = os.Remove(tempPath)
+		return installResult{}, fmt.Errorf("preserve binary ownership failed: %w", err)
 	}
 	if err := os.Rename(tempPath, installPath); err != nil {
 		_ = os.Remove(tempPath)
@@ -126,6 +131,17 @@ func copyFile(from, to string, mode os.FileMode) error {
 		return err
 	}
 	return target.Sync()
+}
+
+func preserveOwnership(path string, reference os.FileInfo) error {
+	if os.Geteuid() != 0 {
+		return nil
+	}
+	stat, ok := reference.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil
+	}
+	return os.Chown(path, int(stat.Uid), int(stat.Gid))
 }
 
 func fsyncDir(dir string) error {

@@ -1,22 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, friendlyError, readCookie } from "../api/client";
 import { Toast } from "../components/ui";
 import type {
   AppData,
   AuthSession,
   CodexGatewayPayload,
-  CodexItem,
-  CodexSession,
-  CodexSessionDetail,
-  CodexStatus,
-  CodexTab,
-  EventRecord,
   ImagesPayload,
   MainTab,
   SettingsPayload,
   Tone,
   V2RayPayload,
-  Workspace,
 } from "./types";
 import { AuthView } from "../features/AuthView";
 import { AppShell } from "../features/AppShell";
@@ -29,12 +22,6 @@ export interface AppActions {
   setToast: (message: string, tone?: Tone) => void;
   reloadData: () => Promise<void>;
   setMainTab: (tab: MainTab) => void;
-  setCodexTab: (tab: CodexTab) => void;
-  setSelectedWorkspaceId: (id: string) => void;
-  setActiveSessionId: (id: string) => Promise<void>;
-  setSessionEvents: (events: EventRecord[] | ((events: EventRecord[]) => EventRecord[])) => void;
-  patchActiveSession: (patch: Partial<CodexSession>) => void;
-  refreshSessions: () => Promise<void>;
   refreshCodexGateway: () => Promise<void>;
   refreshV2Ray: () => Promise<void>;
   refreshImages: () => Promise<void>;
@@ -44,11 +31,7 @@ export interface AppActions {
 
 const emptyData: AppData = {
   dashboard: {},
-  workspaces: [],
   audit: [],
-  pendingApprovals: [],
-  codexStatus: {},
-  codexSessions: [],
   codexGateway: {},
   settings: {},
   v2ray: {},
@@ -62,36 +45,13 @@ export function App() {
   const [session, setSession] = useState<AuthSession | null>(null);
   const [data, setData] = useState<AppData>(emptyData);
   const [activeTab, setActiveTab] = useState<MainTab>("dashboard");
-  const [activeCodexTab, setActiveCodexTab] = useState<CodexTab>("sessions");
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState("");
-  const [activeSessionId, setActiveSessionIdValue] = useState("");
-  const activeSessionIdRef = useRef("");
-  const [activeSession, setActiveSession] = useState<CodexSession | null>(null);
-  const [activeSessionWorkspace, setActiveSessionWorkspace] = useState<Workspace | null>(null);
-  const [sessionItems, setSessionItems] = useState<CodexItem[]>([]);
-  const [sessionEvents, setSessionEvents] = useState<EventRecord[]>([]);
   const [toast, setToastState] = useState<{ message: string; tone: Tone } | null>(null);
   const [v2rayExport, setV2RayExport] = useState<unknown>(null);
   const [v2rayExportOpen, setV2RayExportOpen] = useState(false);
 
-  useEffect(() => {
-    activeSessionIdRef.current = activeSessionId;
-  }, [activeSessionId]);
-
   const setToast = useCallback((message: string, tone: Tone = "warn") => {
     setToastState({ message, tone });
     window.setTimeout(() => setToastState(null), 5200);
-  }, []);
-
-  const loadActiveSession = useCallback(async (id: string) => {
-    const [detail, history] = await Promise.all([
-      api<CodexSessionDetail>(`/api/codex/sessions/${encodeURIComponent(id)}`),
-      api<{ items?: EventRecord[] }>(`/api/events/history?scope=codex_session&id=${encodeURIComponent(id)}&limit=1000`),
-    ]);
-    setActiveSession(detail.session);
-    setActiveSessionWorkspace(detail.workspace || null);
-    setSessionItems(detail.items || []);
-    setSessionEvents(history.items || []);
   }, []);
 
   const loadCodexGatewayData = useCallback(async (): Promise<CodexGatewayPayload> => {
@@ -114,14 +74,10 @@ export function App() {
   }, []);
 
   const loadAppData = useCallback(async () => {
-    const [dashboard, workspaces, audit, codexStatus, codexGateway, approvals, sessions, settings, v2ray, imagesSettings, imageStorageSettings, imageJobs, imageAssets] = await Promise.all([
+    const [dashboard, audit, codexGateway, settings, v2ray, imagesSettings, imageStorageSettings, imageJobs, imageAssets] = await Promise.all([
       api<AppData["dashboard"]>("/api/dashboard/summary"),
-      api<{ items?: Workspace[] }>("/api/workspaces"),
       api<{ items?: AppData["audit"] }>("/api/audit/events"),
-      api<CodexStatus>("/api/codex/status"),
       loadCodexGatewayData(),
-      api<{ items?: AppData["pendingApprovals"] }>("/api/approvals/pending"),
-      api<{ items?: CodexSession[] }>("/api/codex/sessions"),
       api<SettingsPayload>("/api/settings"),
       api<V2RayPayload>("/api/v2ray/settings"),
       api<ImagesPayload>("/api/images/settings"),
@@ -130,32 +86,15 @@ export function App() {
       api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=80"),
     ]);
 
-    const nextSessions = sessions.items || [];
     setData({
       dashboard,
-      workspaces: workspaces.items || [],
       audit: audit.items || [],
-      pendingApprovals: approvals.items || [],
-      codexStatus,
-      codexSessions: nextSessions,
       codexGateway,
       settings,
       v2ray,
       images: { ...imagesSettings, storageSettings: imageStorageSettings.settings, jobs: imageJobs.items || [], assets: imageAssets.items || [], count: imageJobs.count || 0 },
     });
-
-    const currentSessionId = activeSessionIdRef.current;
-    const selected = currentSessionId && nextSessions.some((item) => item.id === currentSessionId) ? currentSessionId : nextSessions[0]?.id || "";
-    activeSessionIdRef.current = selected;
-    setActiveSessionIdValue(selected);
-    if (selected) await loadActiveSession(selected);
-    else {
-      setActiveSession(null);
-      setActiveSessionWorkspace(null);
-      setSessionItems([]);
-      setSessionEvents([]);
-    }
-  }, [loadActiveSession, loadCodexGatewayData]);
+  }, [loadCodexGatewayData]);
 
   useEffect(() => {
     let active = true;
@@ -196,19 +135,6 @@ export function App() {
       setToast,
       reloadData: loadAppData,
       setMainTab: setActiveTab,
-      setCodexTab: setActiveCodexTab,
-      setSelectedWorkspaceId,
-      setActiveSessionId: async (id: string) => {
-        activeSessionIdRef.current = id;
-        setActiveSessionIdValue(id);
-        await loadActiveSession(id);
-      },
-      setSessionEvents,
-      patchActiveSession: (patch) => setActiveSession((current) => (current ? { ...current, ...patch } : current)),
-      refreshSessions: async () => {
-        const sessions = await api<{ items?: CodexSession[] }>("/api/codex/sessions");
-        setData((current) => ({ ...current, codexSessions: sessions.items || [] }));
-      },
       refreshCodexGateway: async () => {
         const codexGateway = await loadCodexGatewayData();
         setData((current) => ({ ...current, codexGateway, dashboard: { ...current.dashboard, codexGateway: codexGateway.status } }));
@@ -233,7 +159,7 @@ export function App() {
       setV2RayExportOpen,
       setV2RayExport,
     }),
-    [csrf, loadActiveSession, loadAppData, loadCodexGatewayData, setToast],
+    [csrf, loadAppData, loadCodexGatewayData, setToast],
   );
 
   async function handleAuth(mode: "bootstrap" | "login", username: string, password: string) {
@@ -270,16 +196,9 @@ export function App() {
     <>
       <AppShell
         actions={actions}
-        activeCodexTab={activeCodexTab}
-        activeSession={activeSession}
-        activeSessionId={activeSessionId}
-        activeSessionWorkspace={activeSessionWorkspace}
         activeTab={activeTab}
         data={data}
         logout={logout}
-        selectedWorkspaceId={selectedWorkspaceId}
-        sessionEvents={sessionEvents}
-        sessionItems={sessionItems}
         v2rayExport={v2rayExport}
         v2rayExportOpen={v2rayExportOpen}
       />

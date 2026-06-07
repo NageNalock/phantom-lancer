@@ -1,32 +1,10 @@
-export type MainTab = "dashboard" | "codex" | "logs" | "images" | "v2ray" | "settings";
-export type CodexTab = "sessions" | "projects" | "reviews" | "capabilities" | "gateway" | "activity";
+export type MainTab = "dashboard" | "codex-gateway" | "logs" | "images" | "v2ray" | "settings";
 export type Tone = "neutral" | "good" | "warn" | "danger";
 
 export interface AuthSession {
   id: string;
   trusted?: boolean;
   expiresAt?: string;
-}
-
-export interface Workspace {
-  id: string;
-  name: string;
-  rootPath: string;
-  description?: string;
-  tags?: string[];
-  allowCodexWrite?: boolean;
-  allowNonGit?: boolean;
-  createdAt?: string;
-  updatedAt?: string;
-}
-
-export interface CodexStatus {
-  available?: boolean;
-  appServerAvailable?: boolean;
-  version?: string;
-  error?: string;
-  binaryPath?: string;
-  codexHome?: string;
 }
 
 export interface CodexGatewayStatus {
@@ -68,12 +46,9 @@ export interface ImageStatus {
 }
 
 export interface DashboardSummary {
-  workspaces?: { total?: number; items?: Workspace[] };
-  codex?: CodexStatus;
   codexGateway?: CodexGatewayStatus;
   images?: ImageStatus;
   v2ray?: V2RayStatus;
-  pendingApprovals?: number;
   recentActivity?: AuditEvent[];
 }
 
@@ -89,8 +64,6 @@ export interface AuditEvent {
 
 export interface RuntimeSettings {
   allowedRoots: string[];
-  codexBinary?: string;
-  codexHome?: string;
   cookieSecure?: boolean;
   updatedAt?: string;
 }
@@ -458,150 +431,6 @@ export interface V2RayExport {
   clientConfig?: unknown;
 }
 
-export interface CodexSession {
-  id: string;
-  workspaceId: string;
-  title: string;
-  sandbox: "read-only" | "workspace-write" | string;
-  status?: string;
-  archived?: boolean;
-  codexThreadId?: string;
-  lastTurnId?: string;
-  lastPrompt?: string;
-  promptPreview?: string;
-  model?: string;
-  modelProvider?: string;
-  serviceTier?: string;
-  approvalPolicy?: string;
-  approvalsReviewer?: string;
-  permissionProfile?: string;
-  reasoningEffort?: string;
-  reasoningSummary?: string;
-  cwd?: string;
-  runtimeRoots?: string[];
-  instructionSources?: string[];
-  tokenUsage?: CodexTokenUsage;
-  appserverSource?: string;
-  runMode?: string;
-  worktreeId?: string;
-  createdAt?: string;
-  updatedAt?: string;
-}
-
-export interface CodexTokenUsageBreakdown {
-  totalTokens?: number;
-  inputTokens?: number;
-  cachedInputTokens?: number;
-  outputTokens?: number;
-  reasoningOutputTokens?: number;
-}
-
-export interface CodexTokenUsage {
-  total?: CodexTokenUsageBreakdown;
-  last?: CodexTokenUsageBreakdown;
-  modelContextWindow?: number | null;
-  [key: string]: unknown;
-}
-
-export interface CodexApproval {
-  id: string;
-  sessionId?: string;
-  turnId?: string;
-  requestId?: string;
-  requestType?: string;
-  status?: string;
-  riskLevel?: string;
-  summary?: string;
-  request?: Record<string, unknown>;
-  decision?: Record<string, unknown>;
-  createdAt?: string;
-  resolvedAt?: string;
-  expiresAt?: string;
-}
-
-export interface CodexModel {
-  id?: string;
-  model?: string;
-  displayName?: string;
-  description?: string;
-  hidden?: boolean;
-  defaultReasoningEffort?: string;
-  defaultServiceTier?: string | null;
-  serviceTiers?: Array<{ id?: string; displayName?: string } | string>;
-  isDefault?: boolean;
-}
-
-export interface CodexModelsPayload {
-  data?: CodexModel[];
-  nextCursor?: string | null;
-}
-
-export interface CodexCapabilitiesPayload {
-  sections?: Record<string, unknown>;
-  errors?: Record<string, string>;
-}
-
-export interface CodexTurn {
-  id?: string;
-  sessionId?: string;
-  codexTurnId?: string;
-  promptPreview?: string;
-  status?: string;
-  createdAt?: string;
-  completedAt?: string;
-}
-
-export interface CodexItem {
-  id?: string;
-  sessionId?: string;
-  turnId?: string;
-  codexItemId?: string;
-  itemType?: string;
-  status?: string;
-  title?: string;
-  summary?: string;
-  payload?: Record<string, unknown>;
-  createdAt?: string;
-  updatedAt?: string;
-  completedAt?: string;
-}
-
-export interface CodexGitStatus {
-  isGit?: boolean;
-  output?: string;
-  truncated?: boolean;
-  error?: string;
-}
-
-export interface CodexGitDiff {
-  isGit?: boolean;
-  staged?: boolean;
-  output?: string;
-  truncated?: boolean;
-  error?: string;
-}
-
-export interface CodexGitPayload {
-  status?: CodexGitStatus;
-  diff?: CodexGitDiff;
-  stagedDiff?: CodexGitDiff;
-}
-
-export interface CodexGitActionResult {
-  action?: string;
-  output?: string;
-  truncated?: boolean;
-  error?: string;
-  status?: CodexGitStatus;
-}
-
-export interface CodexSessionDetail {
-  session: CodexSession;
-  workspace?: Workspace | null;
-  turns?: CodexTurn[];
-  items?: CodexItem[];
-}
-
 export interface EventRecord {
   id?: string;
   scope?: string;
@@ -614,11 +443,7 @@ export interface EventRecord {
 
 export interface AppData {
   dashboard: DashboardSummary;
-  workspaces: Workspace[];
   audit: AuditEvent[];
-  pendingApprovals: CodexApproval[];
-  codexStatus: CodexStatus;
-  codexSessions: CodexSession[];
   codexGateway: CodexGatewayPayload;
   settings: SettingsPayload;
   v2ray: V2RayPayload;

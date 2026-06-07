@@ -36,6 +36,4 @@ restart_timeout_seconds = 120
 # Later changes should be made from the Settings page.
 [bootstrap]
 allowed_roots = ["/srv/apps"]
-codex_binary = "codex"
-codex_home = ""
 cookie_secure = false

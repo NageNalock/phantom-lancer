@@ -40,18 +40,8 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
   return (
     <div className="grid gap-4 p-4">
       <div className="grid grid-cols-[minmax(0,1.05fr)_minmax(300px,0.95fr)] gap-4 max-xl:grid-cols-1">
-        <Panel title="运行设置" subtitle="影响允许工作目录、Codex CLI 探测和 Cookie 安全策略">
+        <Panel title="运行设置" subtitle="影响允许工作目录和 Cookie 安全策略">
           <div className="grid gap-4">
-            <div className="grid grid-cols-2 gap-3 max-md:grid-cols-1">
-              <label className="field">
-                <span>Codex binary</span>
-                <input className="input mono" onChange={(event) => setRuntime((current) => ({ ...current, codexBinary: event.target.value }))} value={runtime.codexBinary || ""} />
-              </label>
-              <label className="field">
-                <span>CODEX_HOME</span>
-                <input className="input mono" onChange={(event) => setRuntime((current) => ({ ...current, codexHome: event.target.value }))} placeholder="默认使用进程环境" value={runtime.codexHome || ""} />
-              </label>
-            </div>
             <label className="field">
               <span>允许根目录</span>
               <textarea className="textarea mono min-h-36" onChange={(event) => setAllowedRootsText(event.target.value)} value={allowedRootsText} />
