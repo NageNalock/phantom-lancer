@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -21,11 +22,19 @@ type Service struct {
 	Store     *storage.Store
 	Hub       *events.Hub
 
-	mu             sync.Mutex
-	cancels        map[string]context.CancelFunc
-	app            *appServerClient
-	threadSessions map[string]string
-	activeThreads  map[string]bool
+	mu              sync.Mutex
+	cancels         map[string]context.CancelFunc
+	app             *appServerClient
+	threadSessions  map[string]string
+	activeThreads   map[string]bool
+	pendingRequests map[string]*pendingServerRequest
+}
+
+type pendingServerRequest struct {
+	App       *appServerClient
+	Request   appServerRequest
+	SessionID string
+	CreatedAt time.Time
 }
 
 type Status struct {
@@ -38,19 +47,40 @@ type Status struct {
 	Error              string `json:"error,omitempty"`
 }
 
+type SessionOptions struct {
+	Model             string
+	ServiceTier       string
+	ApprovalPolicy    string
+	ApprovalsReviewer string
+}
+
+type threadResponse struct {
+	Thread                map[string]any `json:"thread"`
+	Model                 string         `json:"model"`
+	ModelProvider         string         `json:"modelProvider"`
+	ServiceTier           string         `json:"serviceTier"`
+	Cwd                   string         `json:"cwd"`
+	RuntimeWorkspaceRoots []string       `json:"runtimeWorkspaceRoots"`
+	InstructionSources    []string       `json:"instructionSources"`
+	ApprovalPolicy        any            `json:"approvalPolicy"`
+	ApprovalsReviewer     string         `json:"approvalsReviewer"`
+	ReasoningEffort       any            `json:"reasoningEffort"`
+}
+
 func NewService(binary, codexHome string, store *storage.Store, hub *events.Hub) *Service {
 	binary = strings.TrimSpace(binary)
 	if binary == "" {
 		binary = "codex"
 	}
 	return &Service{
-		Binary:         binary,
-		CodexHome:      strings.TrimSpace(codexHome),
-		Store:          store,
-		Hub:            hub,
-		cancels:        make(map[string]context.CancelFunc),
-		threadSessions: make(map[string]string),
-		activeThreads:  make(map[string]bool),
+		Binary:          binary,
+		CodexHome:       strings.TrimSpace(codexHome),
+		Store:           store,
+		Hub:             hub,
+		cancels:         make(map[string]context.CancelFunc),
+		threadSessions:  make(map[string]string),
+		activeThreads:   make(map[string]bool),
+		pendingRequests: make(map[string]*pendingServerRequest),
 	}
 }
 
@@ -69,6 +99,7 @@ func (s *Service) Configure(binary, codexHome string) {
 	app := s.app
 	s.app = nil
 	s.activeThreads = make(map[string]bool)
+	s.pendingRequests = make(map[string]*pendingServerRequest)
 	s.Binary = binary
 	s.CodexHome = codexHome
 	s.mu.Unlock()
@@ -76,6 +107,7 @@ func (s *Service) Configure(binary, codexHome string) {
 	if app != nil {
 		app.Close()
 	}
+	s.interruptPendingApprovals("Codex app-server 配置已变更")
 }
 
 func (s *Service) Status(ctx context.Context) Status {
@@ -128,13 +160,15 @@ func (s *Service) Close() {
 	s.mu.Lock()
 	app := s.app
 	s.app = nil
+	s.pendingRequests = make(map[string]*pendingServerRequest)
 	s.mu.Unlock()
 	if app != nil {
 		app.Close()
 	}
+	s.interruptPendingApprovals("Codex app-server 已关闭")
 }
 
-func (s *Service) CreateSession(ctx context.Context, workspace storage.Workspace, title, sandbox string) (storage.CodexSession, error) {
+func (s *Service) CreateSession(ctx context.Context, workspace storage.Workspace, title, sandbox string, options SessionOptions) (storage.CodexSession, error) {
 	if title == "" {
 		title = "新的 Codex 会话"
 	}
@@ -142,10 +176,30 @@ func (s *Service) CreateSession(ctx context.Context, workspace storage.Workspace
 	if err != nil {
 		return storage.CodexSession{}, err
 	}
+	if options.ApprovalPolicy == "" {
+		options.ApprovalPolicy = session.ApprovalPolicy
+	}
+	if options.ApprovalsReviewer == "" {
+		options.ApprovalsReviewer = session.ApprovalsReviewer
+	}
+	runtimeRoots := []string{}
+	if workspace.RootPath != "" {
+		runtimeRoots = []string{workspace.RootPath}
+	}
+	_ = s.Store.UpdateCodexSessionSettings(ctx, session.ID, storage.CodexSessionSettings{
+		Model:             &options.Model,
+		ServiceTier:       &options.ServiceTier,
+		ApprovalPolicy:    &options.ApprovalPolicy,
+		ApprovalsReviewer: &options.ApprovalsReviewer,
+		Cwd:               &workspace.RootPath,
+		RuntimeRoots:      &runtimeRoots,
+	})
+	session, _ = s.Store.GetCodexSession(ctx, session.ID)
 	s.appendSession(ctx, session.ID, "session.created", map[string]any{
 		"workspaceId": workspace.ID,
 		"title":       session.Title,
 		"sandbox":     session.Sandbox,
+		"model":       session.Model,
 	})
 	session, err = s.startThread(ctx, session, workspace)
 	if err != nil {
@@ -225,6 +279,239 @@ func (s *Service) ArchiveSession(ctx context.Context, session storage.CodexSessi
 	return nil
 }
 
+func (s *Service) UpdateSessionSettings(ctx context.Context, session storage.CodexSession, workspace storage.Workspace, model, serviceTier, approvalPolicy, approvalsReviewer, sandbox string) (storage.CodexSession, error) {
+	if session.CodexThreadID == "" {
+		return session, errors.New("会话还没有 Codex thread")
+	}
+	if model == "" {
+		model = session.Model
+	}
+	if serviceTier == "" {
+		serviceTier = session.ServiceTier
+	}
+	if approvalPolicy == "" {
+		approvalPolicy = session.ApprovalPolicy
+	}
+	if approvalsReviewer == "" {
+		approvalsReviewer = session.ApprovalsReviewer
+	}
+	if sandbox == "" {
+		sandbox = session.Sandbox
+	}
+	app, err := s.ensureAppServer(ctx)
+	if err != nil {
+		return session, err
+	}
+	params := map[string]any{
+		"threadId":          session.CodexThreadID,
+		"approvalPolicy":    approvalPolicy,
+		"approvalsReviewer": approvalsReviewer,
+		"sandboxPolicy":     sandboxPolicy(sandbox, workspace.RootPath),
+	}
+	if model != "" {
+		params["model"] = model
+	}
+	if serviceTier != "" {
+		params["serviceTier"] = serviceTier
+	}
+	if workspace.RootPath != "" {
+		params["cwd"] = workspace.RootPath
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	if err := app.Call(callCtx, "thread/settings/update", params, nil); err != nil {
+		return session, err
+	}
+	runtimeRoots := []string{}
+	if workspace.RootPath != "" {
+		runtimeRoots = []string{workspace.RootPath}
+	}
+	update := storage.CodexSessionSettings{
+		Model:             &model,
+		ServiceTier:       &serviceTier,
+		ApprovalPolicy:    &approvalPolicy,
+		ApprovalsReviewer: &approvalsReviewer,
+		Sandbox:           &sandbox,
+		Cwd:               &workspace.RootPath,
+		RuntimeRoots:      &runtimeRoots,
+	}
+	if err := s.Store.UpdateCodexSessionSettings(ctx, session.ID, update); err != nil {
+		return session, err
+	}
+	s.appendSession(context.Background(), session.ID, "thread.settings.updated.local", map[string]any{
+		"threadId":          session.CodexThreadID,
+		"model":             model,
+		"serviceTier":       serviceTier,
+		"approvalPolicy":    approvalPolicy,
+		"approvalsReviewer": approvalsReviewer,
+		"sandbox":           sandbox,
+	})
+	return s.Store.GetCodexSession(ctx, session.ID)
+}
+
+func (s *Service) ListModels(ctx context.Context, includeHidden bool) (map[string]any, error) {
+	app, err := s.ensureAppServer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	var response map[string]any
+	err = app.Call(callCtx, "model/list", map[string]any{"includeHidden": includeHidden, "limit": 200}, &response)
+	return response, err
+}
+
+func (s *Service) Capability(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
+	app, err := s.ensureAppServer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	var response map[string]any
+	err = app.Call(callCtx, method, params, &response)
+	return response, err
+}
+
+func (s *Service) ForkSession(ctx context.Context, session storage.CodexSession, workspace storage.Workspace) (storage.CodexSession, error) {
+	if session.CodexThreadID == "" {
+		return storage.CodexSession{}, errors.New("会话还没有 Codex thread")
+	}
+	app, err := s.ensureAppServer(ctx)
+	if err != nil {
+		return storage.CodexSession{}, err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	params := threadParams(session, workspace)
+	params["threadId"] = session.CodexThreadID
+	params["excludeTurns"] = true
+	var response threadResponse
+	if err := app.Call(callCtx, "thread/fork", params, &response); err != nil {
+		return storage.CodexSession{}, err
+	}
+	threadID := stringFromMap(response.Thread, "id")
+	if threadID == "" {
+		return storage.CodexSession{}, errors.New("Codex app-server 未返回 fork thread id")
+	}
+	title := strings.TrimSpace(session.Title)
+	if title == "" {
+		title = "Forked Codex 会话"
+	} else {
+		title += " fork"
+	}
+	forked, err := s.Store.CreateCodexSession(ctx, session.WorkspaceID, title, session.Sandbox)
+	if err != nil {
+		return storage.CodexSession{}, err
+	}
+	if err := s.Store.AttachCodexThread(ctx, forked.ID, threadID, "idle"); err != nil {
+		return storage.CodexSession{}, err
+	}
+	_ = s.Store.UpdateCodexSessionSettings(ctx, forked.ID, storage.CodexSessionSettings{
+		Model:             &session.Model,
+		ModelProvider:     &session.ModelProvider,
+		ServiceTier:       &session.ServiceTier,
+		ApprovalPolicy:    &session.ApprovalPolicy,
+		ApprovalsReviewer: &session.ApprovalsReviewer,
+		PermissionProfile: &session.PermissionProfile,
+		ReasoningEffort:   &session.ReasoningEffort,
+		ReasoningSummary:  &session.ReasoningSummary,
+		Sandbox:           &session.Sandbox,
+		Cwd:               &workspace.RootPath,
+	})
+	s.applyThreadResponseSettings(context.Background(), forked.ID, response, workspace)
+	s.registerThread(threadID, forked.ID)
+	s.appendSession(context.Background(), forked.ID, "thread.forked.local", map[string]any{"threadId": threadID, "sourceSessionId": session.ID})
+	return s.Store.GetCodexSession(ctx, forked.ID)
+}
+
+func (s *Service) RollbackSession(ctx context.Context, session storage.CodexSession, numTurns int) error {
+	if session.CodexThreadID == "" {
+		return errors.New("会话还没有 Codex thread")
+	}
+	if numTurns <= 0 {
+		numTurns = 1
+	}
+	app, err := s.ensureAppServer(ctx)
+	if err != nil {
+		return err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	if err := app.Call(callCtx, "thread/rollback", map[string]any{"threadId": session.CodexThreadID, "numTurns": numTurns}, nil); err != nil {
+		return err
+	}
+	s.appendSession(context.Background(), session.ID, "thread.rollback.requested", map[string]any{"threadId": session.CodexThreadID, "numTurns": numTurns})
+	return nil
+}
+
+func (s *Service) CompactSession(ctx context.Context, session storage.CodexSession) error {
+	if session.CodexThreadID == "" {
+		return errors.New("会话还没有 Codex thread")
+	}
+	app, err := s.ensureAppServer(ctx)
+	if err != nil {
+		return err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	if err := app.Call(callCtx, "thread/compact/start", map[string]any{"threadId": session.CodexThreadID}, nil); err != nil {
+		return err
+	}
+	s.appendSession(context.Background(), session.ID, "thread.compact.requested", map[string]any{"threadId": session.CodexThreadID})
+	return nil
+}
+
+func (s *Service) StartReview(ctx context.Context, session storage.CodexSession, target string) error {
+	if session.CodexThreadID == "" {
+		return errors.New("会话还没有 Codex thread")
+	}
+	if strings.TrimSpace(target) == "" {
+		target = "uncommittedChanges"
+	}
+	app, err := s.ensureAppServer(ctx)
+	if err != nil {
+		return err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	params := map[string]any{
+		"threadId": session.CodexThreadID,
+		"target":   map[string]any{"type": target},
+		"delivery": "inline",
+	}
+	if err := app.Call(callCtx, "review/start", params, nil); err != nil {
+		return err
+	}
+	s.appendSession(context.Background(), session.ID, "review.started.local", map[string]any{"threadId": session.CodexThreadID, "target": target})
+	return nil
+}
+
+func (s *Service) ResolveApproval(ctx context.Context, approval storage.CodexApproval, action string, payload map[string]any) error {
+	action = normalizeApprovalAction(action)
+	s.mu.Lock()
+	pending := s.pendingRequests[approval.RequestID]
+	s.mu.Unlock()
+	if pending == nil || pending.App == nil || !pending.App.Running() {
+		return errors.New("Codex app-server approval request 已不可用")
+	}
+	result, responseErr := approvalResponse(approval.RequestType, action, payload, approval.Request)
+	if err := pending.App.Respond(approval.RequestID, result, responseErr); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if s.pendingRequests[approval.RequestID] == pending {
+		delete(s.pendingRequests, approval.RequestID)
+	}
+	s.mu.Unlock()
+	s.appendSession(context.Background(), approval.SessionID, "codex.approval.resolved", map[string]any{
+		"requestId":   approval.RequestID,
+		"requestType": approval.RequestType,
+		"action":      action,
+	})
+	return nil
+}
+
 func (s *Service) startThread(ctx context.Context, session storage.CodexSession, workspace storage.Workspace) (storage.CodexSession, error) {
 	app, err := s.ensureAppServer(ctx)
 	if err != nil {
@@ -232,9 +519,7 @@ func (s *Service) startThread(ctx context.Context, session storage.CodexSession,
 	}
 	callCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	var response struct {
-		Thread map[string]any `json:"thread"`
-	}
+	var response threadResponse
 	if err := app.Call(callCtx, "thread/start", threadParams(session, workspace), &response); err != nil {
 		return session, err
 	}
@@ -247,6 +532,7 @@ func (s *Service) startThread(ctx context.Context, session storage.CodexSession,
 	}
 	session.CodexThreadID = threadID
 	session.Status = "idle"
+	s.applyThreadResponseSettings(context.Background(), session.ID, response, workspace)
 	s.registerThread(threadID, session.ID)
 	s.appendSession(context.Background(), session.ID, "thread.attached", map[string]any{"threadId": threadID})
 	return session, nil
@@ -266,15 +552,14 @@ func (s *Service) ensureThread(ctx context.Context, session storage.CodexSession
 	}
 	callCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	var response struct {
-		Thread map[string]any `json:"thread"`
-	}
+	var response threadResponse
 	params := threadParams(session, workspace)
 	params["threadId"] = session.CodexThreadID
 	params["excludeTurns"] = true
 	if err := app.Call(callCtx, "thread/resume", params, &response); err != nil {
 		return session, err
 	}
+	s.applyThreadResponseSettings(context.Background(), session.ID, response, workspace)
 	s.markThreadActive(session.CodexThreadID)
 	s.appendSession(context.Background(), session.ID, "thread.resumed", map[string]any{"threadId": session.CodexThreadID})
 	return session, nil
@@ -336,7 +621,9 @@ func (s *Service) ensureAppServer(ctx context.Context) (*appServerClient, error)
 	}
 	s.app = nil
 	s.activeThreads = make(map[string]bool)
+	s.pendingRequests = make(map[string]*pendingServerRequest)
 	s.mu.Unlock()
+	s.interruptPendingApprovals("Codex app-server 已重启")
 
 	binary, codexHome := s.configSnapshot()
 	app, err := startAppServer(ctx, binary, envWithCodexHome(codexHome))
@@ -352,12 +639,19 @@ func (s *Service) ensureAppServer(ctx context.Context) (*appServerClient, error)
 	s.app = app
 	s.mu.Unlock()
 	go s.consumeAppServerNotifications(app)
+	go s.consumeAppServerRequests(app)
 	return app, nil
 }
 
 func (s *Service) consumeAppServerNotifications(app *appServerClient) {
 	for notification := range app.Notifications() {
 		s.handleAppServerNotification(notification)
+	}
+}
+
+func (s *Service) consumeAppServerRequests(app *appServerClient) {
+	for request := range app.ServerRequests() {
+		s.handleAppServerRequest(app, request)
 	}
 }
 
@@ -376,6 +670,7 @@ func (s *Service) handleAppServerNotification(notification appServerNotification
 		s.registerThread(threadID, sessionID)
 	}
 	s.appendSession(context.Background(), sessionID, notification.Method, notification.Params)
+	s.persistItemFromNotification(context.Background(), sessionID, notification.Method, notification.Params)
 	switch notification.Method {
 	case "thread/started":
 		s.markThreadActive(threadID)
@@ -397,11 +692,219 @@ func (s *Service) handleAppServerNotification(notification appServerNotification
 			_ = s.Store.UpdateCodexTurn(context.Background(), sessionID, turnID, status, "")
 		}
 		_ = s.Store.UpdateCodexSessionStatus(context.Background(), sessionID, "idle")
+	case "thread/settings/updated":
+		s.updateSettingsFromNotification(sessionID, notification.Params)
+	case "thread/tokenUsage/updated":
+		_ = s.Store.UpdateCodexSessionTokenUsage(context.Background(), sessionID, mapFromAny(notification.Params["tokenUsage"]))
+	}
+}
+
+func (s *Service) persistItemFromNotification(ctx context.Context, sessionID, method string, params map[string]any) {
+	input, ok := itemInputFromNotification(sessionID, method, params)
+	if !ok {
+		return
+	}
+	_, _ = s.Store.UpsertCodexItem(ctx, input)
+}
+
+func (s *Service) handleAppServerRequest(app *appServerClient, request appServerRequest) {
+	threadID := threadIDFromParams(request.Params)
+	if threadID == "" {
+		_ = app.Respond(request.ID, nil, &rpcError{Code: -32000, Message: "Phantom Lancer does not support this global Codex request yet"})
+		return
+	}
+	sessionID := s.sessionIDForThread(threadID)
+	if sessionID == "" {
+		session, err := s.Store.GetCodexSessionByThreadID(context.Background(), threadID)
+		if err != nil {
+			_ = app.Respond(request.ID, nil, &rpcError{Code: -32000, Message: "Phantom Lancer could not map Codex request to a session"})
+			return
+		}
+		sessionID = session.ID
+		s.registerThread(threadID, sessionID)
+	}
+	if !supportedAppServerRequest(request.Method) {
+		_ = app.Respond(request.ID, nil, &rpcError{Code: -32000, Message: "Unsupported Codex client request"})
+		s.appendSession(context.Background(), sessionID, "codex.approval.unsupported", map[string]any{
+			"requestId":   request.ID,
+			"requestType": request.Method,
+		})
+		return
+	}
+	input := storage.CodexApprovalInput{
+		SessionID:   sessionID,
+		TurnID:      turnIDFromParams(request.Params),
+		RequestID:   request.ID,
+		RequestType: request.Method,
+		Status:      "pending",
+		RiskLevel:   approvalRisk(request.Method),
+		Summary:     approvalSummary(request.Method, request.Params),
+		Request: sanitizePayload(map[string]any{
+			"method": request.Method,
+			"params": request.Params,
+		}),
+		ExpiresAt: time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339),
+	}
+	approval, err := s.Store.CreateCodexApproval(context.Background(), input)
+	if err != nil {
+		_ = app.Respond(request.ID, nil, &rpcError{Code: -32000, Message: "Phantom Lancer failed to persist Codex approval"})
+		return
+	}
+	s.mu.Lock()
+	s.pendingRequests[request.ID] = &pendingServerRequest{App: app, Request: request, SessionID: sessionID, CreatedAt: time.Now().UTC()}
+	s.mu.Unlock()
+	s.appendSession(context.Background(), sessionID, "codex.approval.requested", map[string]any{
+		"approvalId":  approval.ID,
+		"requestId":   approval.RequestID,
+		"requestType": approval.RequestType,
+		"riskLevel":   approval.RiskLevel,
+		"summary":     approval.Summary,
+	})
+	go s.expireApproval(app, approval)
+}
+
+func (s *Service) expireApproval(app *appServerClient, approval storage.CodexApproval) {
+	timer := time.NewTimer(30 * time.Minute)
+	defer timer.Stop()
+	<-timer.C
+	s.mu.Lock()
+	pending := s.pendingRequests[approval.RequestID]
+	if pending == nil {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.pendingRequests, approval.RequestID)
+	s.mu.Unlock()
+	_, _ = s.Store.ResolveCodexApproval(context.Background(), approval.ID, "expired", map[string]any{"action": "cancel"})
+	if app != nil && app.Running() {
+		result, responseErr := approvalResponse(approval.RequestType, "cancel", map[string]any{}, map[string]any{})
+		_ = app.Respond(approval.RequestID, result, responseErr)
+	}
+	s.appendSession(context.Background(), approval.SessionID, "codex.approval.expired", map[string]any{"approvalId": approval.ID, "requestId": approval.RequestID})
+}
+
+func (s *Service) interruptPendingApprovals(reason string) {
+	if s.Store == nil {
+		return
+	}
+	approvals, err := s.Store.InterruptPendingCodexApprovals(context.Background(), reason)
+	if err != nil {
+		return
+	}
+	for _, approval := range approvals {
+		s.appendSession(context.Background(), approval.SessionID, "codex.approval.interrupted", map[string]any{
+			"approvalId":  approval.ID,
+			"requestId":   approval.RequestID,
+			"requestType": approval.RequestType,
+			"reason":      reason,
+		})
+	}
+}
+
+func (s *Service) updateSettingsFromNotification(sessionID string, params map[string]any) {
+	settings := mapFromAny(params["threadSettings"])
+	if len(settings) == 0 {
+		return
+	}
+	update := storage.CodexSessionSettings{}
+	hasUpdate := false
+	if value, ok := settings["model"]; ok {
+		model := stringFromAny(value)
+		update.Model = &model
+		hasUpdate = true
+	}
+	if value, ok := settings["modelProvider"]; ok {
+		modelProvider := stringFromAny(value)
+		update.ModelProvider = &modelProvider
+		hasUpdate = true
+	}
+	if value, ok := settings["serviceTier"]; ok {
+		serviceTier := stringFromAny(value)
+		update.ServiceTier = &serviceTier
+		hasUpdate = true
+	}
+	if value, ok := settings["approvalPolicy"]; ok {
+		approvalPolicy := approvalPolicyString(value)
+		update.ApprovalPolicy = &approvalPolicy
+		hasUpdate = true
+	}
+	if value, ok := settings["approvalsReviewer"]; ok {
+		approvalsReviewer := stringFromAny(value)
+		update.ApprovalsReviewer = &approvalsReviewer
+		hasUpdate = true
+	}
+	if value, ok := settings["reasoningEffort"]; ok {
+		reasoningEffort := stringFromAny(value)
+		update.ReasoningEffort = &reasoningEffort
+		hasUpdate = true
+	} else if value, ok := settings["effort"]; ok {
+		reasoningEffort := stringFromAny(value)
+		update.ReasoningEffort = &reasoningEffort
+		hasUpdate = true
+	}
+	if value, ok := settings["reasoningSummary"]; ok {
+		reasoningSummary := stringFromAny(value)
+		update.ReasoningSummary = &reasoningSummary
+		hasUpdate = true
+	} else if value, ok := settings["summary"]; ok {
+		reasoningSummary := stringFromAny(value)
+		update.ReasoningSummary = &reasoningSummary
+		hasUpdate = true
+	}
+	if value, ok := settings["cwd"]; ok {
+		cwd := stringFromAny(value)
+		update.Cwd = &cwd
+		hasUpdate = true
+	}
+	if hasUpdate {
+		_ = s.Store.UpdateCodexSessionSettings(context.Background(), sessionID, update)
+	}
+}
+
+func (s *Service) applyThreadResponseSettings(ctx context.Context, sessionID string, response threadResponse, workspace storage.Workspace) {
+	cwd := response.Cwd
+	if cwd == "" {
+		cwd = workspace.RootPath
+	}
+	runtimeRoots := response.RuntimeWorkspaceRoots
+	if len(runtimeRoots) == 0 && workspace.RootPath != "" {
+		runtimeRoots = []string{workspace.RootPath}
+	}
+	update := storage.CodexSessionSettings{}
+	if response.Model != "" {
+		update.Model = &response.Model
+	}
+	if response.ModelProvider != "" {
+		update.ModelProvider = &response.ModelProvider
+	}
+	if response.ServiceTier != "" {
+		update.ServiceTier = &response.ServiceTier
+	}
+	if response.ApprovalPolicy != nil {
+		approvalPolicy := approvalPolicyString(response.ApprovalPolicy)
+		update.ApprovalPolicy = &approvalPolicy
+	}
+	if response.ApprovalsReviewer != "" {
+		update.ApprovalsReviewer = &response.ApprovalsReviewer
+	}
+	if response.ReasoningEffort != nil {
+		reasoningEffort := stringFromAny(response.ReasoningEffort)
+		update.ReasoningEffort = &reasoningEffort
+	}
+	if cwd != "" {
+		update.Cwd = &cwd
+	}
+	if len(runtimeRoots) > 0 {
+		update.RuntimeRoots = &runtimeRoots
+	}
+	_ = s.Store.UpdateCodexSessionSettings(ctx, sessionID, update)
+	if len(response.InstructionSources) > 0 {
+		_ = s.Store.UpdateCodexSessionInstructionSources(ctx, sessionID, response.InstructionSources)
 	}
 }
 
 func (s *Service) appendSession(ctx context.Context, sessionID, eventType string, payload map[string]any) {
-	event, err := s.Store.AppendEvent(ctx, "codex_session", sessionID, eventType, payload)
+	event, err := s.Store.AppendEvent(ctx, "codex_session", sessionID, eventType, sanitizePayload(payload))
 	if err == nil {
 		s.Hub.Publish(event)
 	}
@@ -523,7 +1026,7 @@ func (s *Service) fail(ctx context.Context, jobID, code string, err error) {
 }
 
 func (s *Service) append(ctx context.Context, jobID, eventType string, payload map[string]any) {
-	event, err := s.Store.AppendEvent(ctx, "exec_job", jobID, eventType, payload)
+	event, err := s.Store.AppendEvent(ctx, "exec_job", jobID, eventType, sanitizePayload(payload))
 	if err == nil {
 		s.Hub.Publish(event)
 	}
@@ -554,9 +1057,27 @@ func runShort(ctx context.Context, binary string, args ...string) string {
 }
 
 func threadParams(session storage.CodexSession, workspace storage.Workspace) map[string]any {
+	approvalPolicy := session.ApprovalPolicy
+	if approvalPolicy == "" {
+		approvalPolicy = "on-request"
+	}
+	approvalsReviewer := session.ApprovalsReviewer
+	if approvalsReviewer == "" {
+		approvalsReviewer = "user"
+	}
 	params := map[string]any{
-		"sandbox":        session.Sandbox,
-		"approvalPolicy": "never",
+		"sandbox":           session.Sandbox,
+		"approvalPolicy":    approvalPolicy,
+		"approvalsReviewer": approvalsReviewer,
+	}
+	if session.Model != "" {
+		params["model"] = session.Model
+	}
+	if session.ModelProvider != "" {
+		params["modelProvider"] = session.ModelProvider
+	}
+	if session.ServiceTier != "" {
+		params["serviceTier"] = session.ServiceTier
 	}
 	if workspace.RootPath != "" {
 		params["cwd"] = workspace.RootPath
@@ -566,11 +1087,21 @@ func threadParams(session storage.CodexSession, workspace storage.Workspace) map
 }
 
 func turnParams(session storage.CodexSession, workspace storage.Workspace, prompt string) map[string]any {
+	approvalPolicy := session.ApprovalPolicy
+	if approvalPolicy == "" {
+		approvalPolicy = "on-request"
+	}
 	params := map[string]any{
 		"threadId":       session.CodexThreadID,
 		"input":          []map[string]any{{"type": "text", "text": prompt, "text_elements": []any{}}},
 		"sandboxPolicy":  sandboxPolicy(session.Sandbox, workspace.RootPath),
-		"approvalPolicy": "never",
+		"approvalPolicy": approvalPolicy,
+	}
+	if session.Model != "" {
+		params["model"] = session.Model
+	}
+	if session.ServiceTier != "" {
+		params["serviceTier"] = session.ServiceTier
 	}
 	if workspace.RootPath != "" {
 		params["cwd"] = workspace.RootPath
@@ -648,4 +1179,383 @@ func previewText(value string, max int) string {
 		return value
 	}
 	return value[:max] + "..."
+}
+
+func mapFromAny(value any) map[string]any {
+	if typed, ok := value.(map[string]any); ok {
+		return typed
+	}
+	return map[string]any{}
+}
+
+func stringFromAny(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case map[string]any:
+		if value := stringFromMap(typed, "type"); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func approvalPolicyString(value any) string {
+	if text := stringFromAny(value); text != "" {
+		return text
+	}
+	if _, ok := value.(map[string]any); ok {
+		return "granular"
+	}
+	return "on-request"
+}
+
+func itemInputFromNotification(sessionID, method string, params map[string]any) (storage.CodexItemInput, bool) {
+	switch method {
+	case "item/started", "item/completed", "rawResponseItem/completed", "turn/diff/updated", "turn/plan/updated", "item/fileChange/patchUpdated":
+	default:
+		return storage.CodexItemInput{}, false
+	}
+	item := mapFromAny(params["item"])
+	if len(item) == 0 {
+		item = mapFromAny(params["rawResponseItem"])
+	}
+	turnID := turnIDFromParams(params)
+	itemID := stringFromAny(params["itemId"])
+	if itemID == "" {
+		itemID = stringFromAny(item["id"])
+	}
+	if itemID == "" && turnID != "" && (method == "turn/diff/updated" || method == "turn/plan/updated") {
+		itemID = turnID + ":" + method
+	}
+	if itemID == "" && method == "item/fileChange/patchUpdated" {
+		itemID = stringFromAny(params["changeId"])
+	}
+	itemType := codexItemType(method, item)
+	payload := map[string]any{"method": method}
+	if turnID != "" {
+		payload["turnId"] = turnID
+	}
+	if len(item) > 0 {
+		payload["item"] = item
+	} else {
+		payload["params"] = params
+	}
+	return storage.CodexItemInput{
+		SessionID:   sessionID,
+		TurnID:      turnID,
+		CodexItemID: itemID,
+		ItemType:    itemType,
+		Status:      codexItemStatus(method, item),
+		Title:       codexItemTitle(method, itemType, item, params),
+		Summary:     codexItemSummary(item, params),
+		Payload:     sanitizePayload(payload),
+	}, true
+}
+
+func codexItemType(method string, item map[string]any) string {
+	if value := stringFromAny(item["type"]); value != "" {
+		return value
+	}
+	switch method {
+	case "turn/diff/updated":
+		return "diff"
+	case "turn/plan/updated":
+		return "plan"
+	case "item/fileChange/patchUpdated":
+		return "fileChange"
+	case "rawResponseItem/completed":
+		return "rawResponseItem"
+	default:
+		return "event"
+	}
+}
+
+func codexItemStatus(method string, item map[string]any) string {
+	if status := stringFromAny(item["status"]); status != "" {
+		return status
+	}
+	if strings.Contains(method, "completed") {
+		return "completed"
+	}
+	if strings.Contains(method, "failed") {
+		return "failed"
+	}
+	return "running"
+}
+
+func codexItemTitle(method, itemType string, item, params map[string]any) string {
+	switch itemType {
+	case "userMessage":
+		return "User message"
+	case "agentMessage":
+		return "Assistant message"
+	case "commandExecution":
+		if command := stringFromAny(item["command"]); command != "" {
+			return "Command: " + previewText(redactText(command), 120)
+		}
+		return "Command execution"
+	case "fileChange":
+		if path := stringFromAny(item["path"]); path != "" {
+			return "File change: " + previewText(path, 120)
+		}
+		if path := stringFromAny(params["path"]); path != "" {
+			return "File change: " + previewText(path, 120)
+		}
+		return "File change"
+	case "reasoning":
+		return "Reasoning"
+	case "diff":
+		return "Workspace diff"
+	case "plan":
+		return "Plan"
+	default:
+		if itemType != "" && itemType != "event" {
+			return itemType
+		}
+		return method
+	}
+}
+
+func codexItemSummary(item, params map[string]any) string {
+	for _, key := range []string{"text", "summary", "aggregatedOutput", "command", "path"} {
+		if value := stringFromAny(item[key]); value != "" {
+			return previewText(redactText(value), 1200)
+		}
+		if value := stringFromAny(params[key]); value != "" {
+			return previewText(redactText(value), 1200)
+		}
+	}
+	if content := contentSummary(item["content"]); content != "" {
+		return content
+	}
+	if plan := contentSummary(params["plan"]); plan != "" {
+		return plan
+	}
+	return ""
+}
+
+func contentSummary(value any) string {
+	items, ok := value.([]any)
+	if !ok {
+		return ""
+	}
+	parts := []string{}
+	for _, entry := range items {
+		item := mapFromAny(entry)
+		for _, key := range []string{"text", "path", "url", "title"} {
+			if text := stringFromAny(item[key]); text != "" {
+				parts = append(parts, redactText(text))
+				break
+			}
+		}
+		if len(parts) >= 8 {
+			break
+		}
+	}
+	return previewText(strings.Join(parts, "\n"), 1200)
+}
+
+func approvalRisk(method string) string {
+	switch method {
+	case "item/commandExecution/requestApproval", "execCommandApproval", "item/permissions/requestApproval":
+		return "high"
+	case "item/fileChange/requestApproval", "applyPatchApproval", "mcpServer/elicitation/request", "item/tool/requestUserInput":
+		return "medium"
+	default:
+		return "medium"
+	}
+}
+
+func supportedAppServerRequest(method string) bool {
+	switch method {
+	case "item/commandExecution/requestApproval",
+		"item/fileChange/requestApproval",
+		"item/tool/requestUserInput",
+		"mcpServer/elicitation/request",
+		"item/permissions/requestApproval":
+		return true
+	default:
+		return false
+	}
+}
+
+func approvalSummary(method string, params map[string]any) string {
+	switch method {
+	case "item/commandExecution/requestApproval", "execCommandApproval":
+		command := stringFromAny(params["command"])
+		if command == "" {
+			return "Codex 请求执行命令"
+		}
+		return "Codex 请求执行命令：" + previewText(redactText(command), 120)
+	case "item/fileChange/requestApproval", "applyPatchApproval":
+		if root := stringFromAny(params["grantRoot"]); root != "" {
+			return "Codex 请求写入目录：" + previewText(root, 120)
+		}
+		return "Codex 请求应用文件变更"
+	case "item/permissions/requestApproval":
+		if reason := stringFromAny(params["reason"]); reason != "" {
+			return "Codex 请求权限提升：" + previewText(redactText(reason), 120)
+		}
+		return "Codex 请求权限提升"
+	case "item/tool/requestUserInput":
+		return "Codex 请求用户输入"
+	case "mcpServer/elicitation/request":
+		serverName := stringFromAny(params["serverName"])
+		if serverName != "" {
+			return "MCP server 请求确认：" + serverName
+		}
+		return "MCP server 请求确认"
+	case "item/tool/call":
+		return "Codex 请求调用动态工具"
+	default:
+		return "Codex 请求客户端确认：" + method
+	}
+}
+
+func normalizeApprovalAction(action string) string {
+	switch strings.TrimSpace(action) {
+	case "allow", "accept":
+		return "accept"
+	case "allow_session", "allowForSession", "acceptForSession":
+		return "acceptForSession"
+	case "deny", "decline":
+		return "decline"
+	case "cancel":
+		return "cancel"
+	default:
+		return "decline"
+	}
+}
+
+func approvalResponse(requestType, action string, payload, request map[string]any) (any, *rpcError) {
+	switch requestType {
+	case "item/commandExecution/requestApproval", "execCommandApproval":
+		return map[string]any{"decision": commandDecision(action, payload)}, nil
+	case "item/fileChange/requestApproval", "applyPatchApproval":
+		return map[string]any{"decision": fileDecision(action)}, nil
+	case "mcpServer/elicitation/request":
+		return map[string]any{"action": mcpAction(action), "content": payload["content"], "_meta": payload["_meta"]}, nil
+	case "item/tool/requestUserInput":
+		answers := payload["answers"]
+		if answers == nil {
+			answers = map[string]any{}
+		}
+		return map[string]any{"answers": answers}, nil
+	case "item/permissions/requestApproval":
+		if action == "accept" || action == "acceptForSession" {
+			params := mapFromAny(request["params"])
+			permissions := mapFromAny(params["permissions"])
+			return map[string]any{
+				"permissions": permissionGrant(permissions),
+				"scope":       map[string]string{"accept": "turn", "acceptForSession": "session"}[action],
+			}, nil
+		}
+		return nil, &rpcError{Code: -32000, Message: "Permission request declined"}
+	default:
+		return nil, &rpcError{Code: -32000, Message: "Unsupported Codex client request"}
+	}
+}
+
+func commandDecision(action string, payload map[string]any) any {
+	if action == "accept" || action == "acceptForSession" || action == "decline" || action == "cancel" {
+		return action
+	}
+	if value := payload["decision"]; value != nil {
+		return value
+	}
+	return "decline"
+}
+
+func fileDecision(action string) string {
+	if action == "accept" || action == "acceptForSession" || action == "decline" || action == "cancel" {
+		return action
+	}
+	return "decline"
+}
+
+func mcpAction(action string) string {
+	switch action {
+	case "accept", "acceptForSession":
+		return "accept"
+	case "decline", "cancel":
+		return action
+	}
+	return "decline"
+}
+
+func permissionGrant(request map[string]any) map[string]any {
+	grant := map[string]any{}
+	if network, ok := request["network"]; ok && network != nil {
+		grant["network"] = network
+	}
+	if fileSystem, ok := request["fileSystem"]; ok && fileSystem != nil {
+		grant["fileSystem"] = fileSystem
+	}
+	return grant
+}
+
+func sanitizePayload(payload map[string]any) map[string]any {
+	sanitized := redactValue(payload).(map[string]any)
+	return sanitized
+}
+
+func redactValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			if sensitiveKey(key) {
+				out[key] = "[redacted]"
+				continue
+			}
+			out[key] = redactValue(item)
+		}
+		return out
+	case []any:
+		limit := len(typed)
+		if limit > 100 {
+			limit = 100
+		}
+		out := make([]any, 0, limit)
+		for i := 0; i < limit; i++ {
+			out = append(out, redactValue(typed[i]))
+		}
+		return out
+	case string:
+		redacted := redactText(typed)
+		if len(redacted) > 4000 {
+			return redacted[:4000] + "...[truncated]"
+		}
+		return redacted
+	default:
+		return typed
+	}
+}
+
+var secretTextPatterns = []struct {
+	pattern     *regexp.Regexp
+	replacement string
+}{
+	{regexp.MustCompile(`(?i)(authorization:\s*bearer\s+)[^\s]+`), `${1}[redacted]`},
+	{regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}`), `${1}[redacted]`},
+	{regexp.MustCompile(`(?i)((?:password|token|secret|api[_-]?key)=)[^\s&]+`), `${1}[redacted]`},
+	{regexp.MustCompile(`sk-[A-Za-z0-9_-]{8,}`), `[redacted]`},
+}
+
+func redactText(value string) string {
+	for _, item := range secretTextPatterns {
+		value = item.pattern.ReplaceAllString(value, item.replacement)
+	}
+	return value
+}
+
+func sensitiveKey(key string) bool {
+	normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
+	for _, marker := range []string{"apikey", "authorization", "cookie", "csrftoken", "sessiontoken", "password", "secret", "accesstoken", "refreshtoken", "privatekey", "presigned"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }

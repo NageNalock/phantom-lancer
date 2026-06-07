@@ -87,8 +87,8 @@ func NormalizeWorkspacePathForCreate(allowedRoots []string, value string) (strin
 }
 
 func IsGitRepository(path string) bool {
-	info, err := os.Stat(filepath.Join(path, ".git"))
-	return err == nil && info.IsDir()
+	_, err := os.Stat(filepath.Join(path, ".git"))
+	return err == nil
 }
 
 func normalizeExistingDir(value string) (string, error) {

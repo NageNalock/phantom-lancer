@@ -73,17 +73,32 @@ type ExecJob struct {
 }
 
 type CodexSession struct {
-	ID            string `json:"id"`
-	WorkspaceID   string `json:"workspaceId"`
-	CodexThreadID string `json:"codexThreadId,omitempty"`
-	Title         string `json:"title"`
-	Sandbox       string `json:"sandbox"`
-	Status        string `json:"status"`
-	LastTurnID    string `json:"lastTurnId,omitempty"`
-	LastPrompt    string `json:"lastPrompt,omitempty"`
-	Archived      bool   `json:"archived"`
-	CreatedAt     string `json:"createdAt"`
-	UpdatedAt     string `json:"updatedAt"`
+	ID                 string         `json:"id"`
+	WorkspaceID        string         `json:"workspaceId"`
+	CodexThreadID      string         `json:"codexThreadId,omitempty"`
+	Title              string         `json:"title"`
+	Sandbox            string         `json:"sandbox"`
+	Status             string         `json:"status"`
+	LastTurnID         string         `json:"lastTurnId,omitempty"`
+	LastPrompt         string         `json:"lastPrompt,omitempty"`
+	Model              string         `json:"model,omitempty"`
+	ModelProvider      string         `json:"modelProvider,omitempty"`
+	ServiceTier        string         `json:"serviceTier,omitempty"`
+	ApprovalPolicy     string         `json:"approvalPolicy,omitempty"`
+	ApprovalsReviewer  string         `json:"approvalsReviewer,omitempty"`
+	PermissionProfile  string         `json:"permissionProfile,omitempty"`
+	ReasoningEffort    string         `json:"reasoningEffort,omitempty"`
+	ReasoningSummary   string         `json:"reasoningSummary,omitempty"`
+	Cwd                string         `json:"cwd,omitempty"`
+	RuntimeRoots       []string       `json:"runtimeRoots,omitempty"`
+	InstructionSources []string       `json:"instructionSources,omitempty"`
+	TokenUsage         map[string]any `json:"tokenUsage,omitempty"`
+	AppserverSource    string         `json:"appserverSource,omitempty"`
+	RunMode            string         `json:"runMode"`
+	WorktreeID         string         `json:"worktreeId,omitempty"`
+	Archived           bool           `json:"archived"`
+	CreatedAt          string         `json:"createdAt"`
+	UpdatedAt          string         `json:"updatedAt"`
 }
 
 type CodexTurn struct {
@@ -95,6 +110,75 @@ type CodexTurn struct {
 	StartedAt     string `json:"startedAt"`
 	CompletedAt   string `json:"completedAt,omitempty"`
 	ErrorMessage  string `json:"errorMessage,omitempty"`
+}
+
+type CodexItem struct {
+	ID          string         `json:"id"`
+	SessionID   string         `json:"sessionId"`
+	TurnID      string         `json:"turnId,omitempty"`
+	CodexItemID string         `json:"codexItemId,omitempty"`
+	ItemType    string         `json:"itemType"`
+	Status      string         `json:"status"`
+	Title       string         `json:"title"`
+	Summary     string         `json:"summary,omitempty"`
+	Payload     map[string]any `json:"payload,omitempty"`
+	CreatedAt   string         `json:"createdAt"`
+	UpdatedAt   string         `json:"updatedAt"`
+	CompletedAt string         `json:"completedAt,omitempty"`
+}
+
+type CodexItemInput struct {
+	SessionID   string
+	TurnID      string
+	CodexItemID string
+	ItemType    string
+	Status      string
+	Title       string
+	Summary     string
+	Payload     map[string]any
+}
+
+type CodexApproval struct {
+	ID          string         `json:"id"`
+	SessionID   string         `json:"sessionId"`
+	TurnID      string         `json:"turnId,omitempty"`
+	RequestID   string         `json:"requestId"`
+	RequestType string         `json:"requestType"`
+	Status      string         `json:"status"`
+	RiskLevel   string         `json:"riskLevel,omitempty"`
+	Summary     string         `json:"summary"`
+	Request     map[string]any `json:"request"`
+	Decision    map[string]any `json:"decision,omitempty"`
+	CreatedAt   string         `json:"createdAt"`
+	ResolvedAt  string         `json:"resolvedAt,omitempty"`
+	ExpiresAt   string         `json:"expiresAt,omitempty"`
+}
+
+type CodexApprovalInput struct {
+	SessionID   string
+	TurnID      string
+	RequestID   string
+	RequestType string
+	Status      string
+	RiskLevel   string
+	Summary     string
+	Request     map[string]any
+	ExpiresAt   string
+}
+
+type CodexSessionSettings struct {
+	Model             *string
+	ModelProvider     *string
+	ServiceTier       *string
+	ApprovalPolicy    *string
+	ApprovalsReviewer *string
+	PermissionProfile *string
+	ReasoningEffort   *string
+	ReasoningSummary  *string
+	Sandbox           *string
+	Cwd               *string
+	RuntimeRoots      *[]string
+	TokenUsage        *map[string]any
 }
 
 type RuntimeSettings struct {
@@ -578,6 +662,21 @@ CREATE TABLE IF NOT EXISTS codex_sessions (
   status TEXT NOT NULL DEFAULT 'idle',
   last_turn_id TEXT NOT NULL DEFAULT '',
   last_prompt TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  model_provider TEXT NOT NULL DEFAULT '',
+  service_tier TEXT NOT NULL DEFAULT '',
+  approval_policy TEXT NOT NULL DEFAULT 'on-request',
+  approvals_reviewer TEXT NOT NULL DEFAULT 'user',
+  permission_profile TEXT NOT NULL DEFAULT '',
+  reasoning_effort TEXT NOT NULL DEFAULT '',
+  reasoning_summary TEXT NOT NULL DEFAULT '',
+  cwd TEXT NOT NULL DEFAULT '',
+  runtime_roots_json TEXT NOT NULL DEFAULT '[]',
+  instruction_sources_json TEXT NOT NULL DEFAULT '[]',
+  token_usage_json TEXT NOT NULL DEFAULT '{}',
+  appserver_source TEXT NOT NULL DEFAULT '',
+  run_mode TEXT NOT NULL DEFAULT 'local',
+  worktree_id TEXT NOT NULL DEFAULT '',
   archived INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -595,6 +694,44 @@ CREATE TABLE IF NOT EXISTS codex_turns (
   error_message TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_codex_turns_session ON codex_turns(session_id, started_at);
+CREATE TABLE IF NOT EXISTS codex_items (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL DEFAULT '',
+  codex_item_id TEXT NOT NULL DEFAULT '',
+  item_type TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  title TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_items_session_item ON codex_items(session_id, codex_item_id) WHERE codex_item_id != '';
+CREATE INDEX IF NOT EXISTS idx_codex_items_session_created ON codex_items(session_id, created_at);
+CREATE TABLE IF NOT EXISTS codex_approvals (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL DEFAULT '',
+  request_id TEXT NOT NULL UNIQUE,
+  request_type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  risk_level TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL,
+  request_json TEXT NOT NULL DEFAULT '{}',
+  decision_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  resolved_at TEXT NOT NULL DEFAULT '',
+  expires_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_codex_approvals_session ON codex_approvals(session_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_codex_approvals_pending ON codex_approvals(status, created_at);
+CREATE TABLE IF NOT EXISTS codex_capability_cache (
+  key TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS codex_gateway_settings (
   id TEXT PRIMARY KEY,
   enabled INTEGER NOT NULL DEFAULT 0,
@@ -847,6 +984,28 @@ CREATE TABLE IF NOT EXISTS image_storage_settings (
 		{"image_generation_outputs", "asset_id", "TEXT NOT NULL DEFAULT ''"},
 		{"image_assets", "private", "INTEGER NOT NULL DEFAULT 0"},
 		{"image_assets", "private_at", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_sessions", "model", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_sessions", "model_provider", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_sessions", "service_tier", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_sessions", "approval_policy", "TEXT NOT NULL DEFAULT 'on-request'"},
+		{"codex_sessions", "approvals_reviewer", "TEXT NOT NULL DEFAULT 'user'"},
+		{"codex_sessions", "permission_profile", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_sessions", "reasoning_effort", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_sessions", "reasoning_summary", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_sessions", "cwd", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_sessions", "runtime_roots_json", "TEXT NOT NULL DEFAULT '[]'"},
+		{"codex_sessions", "instruction_sources_json", "TEXT NOT NULL DEFAULT '[]'"},
+		{"codex_sessions", "token_usage_json", "TEXT NOT NULL DEFAULT '{}'"},
+		{"codex_sessions", "appserver_source", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_sessions", "run_mode", "TEXT NOT NULL DEFAULT 'local'"},
+		{"codex_sessions", "worktree_id", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_items", "turn_id", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_items", "codex_item_id", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_items", "status", "TEXT NOT NULL DEFAULT 'running'"},
+		{"codex_items", "title", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_items", "summary", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_items", "payload_json", "TEXT NOT NULL DEFAULT '{}'"},
+		{"codex_items", "completed_at", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.ensureColumn(ctx, column.table, column.name, column.def); err != nil {
 			return err
@@ -2924,6 +3083,8 @@ func (s *Store) ListExecJobs(ctx context.Context, limit int) ([]ExecJob, error) 
 	return out, rows.Err()
 }
 
+const codexSessionColumns = `id, workspace_id, codex_thread_id, title, sandbox, status, last_turn_id, last_prompt, model, model_provider, service_tier, approval_policy, approvals_reviewer, permission_profile, reasoning_effort, reasoning_summary, cwd, runtime_roots_json, instruction_sources_json, token_usage_json, appserver_source, run_mode, worktree_id, archived, created_at, updated_at`
+
 func (s *Store) CreateCodexSession(ctx context.Context, workspaceID, title, sandbox string) (CodexSession, error) {
 	id, err := ids.New("codex")
 	if err != nil {
@@ -2937,17 +3098,22 @@ func (s *Store) CreateCodexSession(ctx context.Context, workspaceID, title, sand
 	}
 	now := now()
 	session := CodexSession{
-		ID:          id,
-		WorkspaceID: workspaceID,
-		Title:       title,
-		Sandbox:     sandbox,
-		Status:      "starting",
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:                id,
+		WorkspaceID:       workspaceID,
+		Title:             title,
+		Sandbox:           sandbox,
+		Status:            "starting",
+		ApprovalPolicy:    "on-request",
+		ApprovalsReviewer: "user",
+		RuntimeRoots:      []string{},
+		TokenUsage:        map[string]any{},
+		RunMode:           "local",
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	_, err = s.db.ExecContext(ctx, `
-INSERT INTO codex_sessions (id, workspace_id, title, sandbox, status, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)`, session.ID, session.WorkspaceID, session.Title, session.Sandbox, session.Status, session.CreatedAt, session.UpdatedAt)
+INSERT INTO codex_sessions (id, workspace_id, title, sandbox, status, approval_policy, approvals_reviewer, runtime_roots_json, token_usage_json, run_mode, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, session.ID, session.WorkspaceID, session.Title, session.Sandbox, session.Status, session.ApprovalPolicy, session.ApprovalsReviewer, "[]", "{}", session.RunMode, session.CreatedAt, session.UpdatedAt)
 	return session, err
 }
 
@@ -2974,8 +3140,71 @@ func (s *Store) ArchiveCodexSession(ctx context.Context, sessionID string, archi
 	return err
 }
 
+func (s *Store) UpdateCodexSessionSettings(ctx context.Context, sessionID string, settings CodexSessionSettings) error {
+	session, err := s.GetCodexSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if settings.Model != nil {
+		session.Model = *settings.Model
+	}
+	if settings.ModelProvider != nil {
+		session.ModelProvider = *settings.ModelProvider
+	}
+	if settings.ServiceTier != nil {
+		session.ServiceTier = *settings.ServiceTier
+	}
+	if settings.ApprovalPolicy != nil {
+		session.ApprovalPolicy = *settings.ApprovalPolicy
+	}
+	if settings.ApprovalsReviewer != nil {
+		session.ApprovalsReviewer = *settings.ApprovalsReviewer
+	}
+	if settings.PermissionProfile != nil {
+		session.PermissionProfile = *settings.PermissionProfile
+	}
+	if settings.ReasoningEffort != nil {
+		session.ReasoningEffort = *settings.ReasoningEffort
+	}
+	if settings.ReasoningSummary != nil {
+		session.ReasoningSummary = *settings.ReasoningSummary
+	}
+	if settings.Sandbox != nil {
+		session.Sandbox = *settings.Sandbox
+	}
+	if settings.Cwd != nil {
+		session.Cwd = *settings.Cwd
+	}
+	if settings.RuntimeRoots != nil {
+		session.RuntimeRoots = *settings.RuntimeRoots
+	}
+	if settings.TokenUsage != nil {
+		session.TokenUsage = *settings.TokenUsage
+	}
+	runtimeRoots, _ := json.Marshal(session.RuntimeRoots)
+	tokenUsage, _ := json.Marshal(session.TokenUsage)
+	_, err = s.db.ExecContext(ctx, `
+UPDATE codex_sessions
+SET model = ?, model_provider = ?, service_tier = ?, approval_policy = ?, approvals_reviewer = ?, permission_profile = ?, reasoning_effort = ?, reasoning_summary = ?, sandbox = ?, cwd = ?, runtime_roots_json = ?, token_usage_json = ?, updated_at = ?
+WHERE id = ?`,
+		session.Model, session.ModelProvider, session.ServiceTier, session.ApprovalPolicy, session.ApprovalsReviewer, session.PermissionProfile, session.ReasoningEffort, session.ReasoningSummary, session.Sandbox, session.Cwd, string(runtimeRoots), string(tokenUsage), now(), sessionID)
+	return err
+}
+
+func (s *Store) UpdateCodexSessionInstructionSources(ctx context.Context, sessionID string, sources []string) error {
+	data, _ := json.Marshal(sources)
+	_, err := s.db.ExecContext(ctx, `UPDATE codex_sessions SET instruction_sources_json = ?, updated_at = ? WHERE id = ?`, string(data), now(), sessionID)
+	return err
+}
+
+func (s *Store) UpdateCodexSessionTokenUsage(ctx context.Context, sessionID string, usage map[string]any) error {
+	data, _ := json.Marshal(usage)
+	_, err := s.db.ExecContext(ctx, `UPDATE codex_sessions SET token_usage_json = ?, updated_at = ? WHERE id = ?`, string(data), now(), sessionID)
+	return err
+}
+
 func (s *Store) GetCodexSession(ctx context.Context, id string) (CodexSession, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, codex_thread_id, title, sandbox, status, last_turn_id, last_prompt, archived, created_at, updated_at FROM codex_sessions WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT `+codexSessionColumns+` FROM codex_sessions WHERE id = ?`, id)
 	session, err := scanCodexSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CodexSession{}, ErrNotFound
@@ -2984,7 +3213,7 @@ func (s *Store) GetCodexSession(ctx context.Context, id string) (CodexSession, e
 }
 
 func (s *Store) GetCodexSessionByThreadID(ctx context.Context, threadID string) (CodexSession, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, codex_thread_id, title, sandbox, status, last_turn_id, last_prompt, archived, created_at, updated_at FROM codex_sessions WHERE codex_thread_id = ?`, threadID)
+	row := s.db.QueryRowContext(ctx, `SELECT `+codexSessionColumns+` FROM codex_sessions WHERE codex_thread_id = ?`, threadID)
 	session, err := scanCodexSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CodexSession{}, ErrNotFound
@@ -2996,7 +3225,7 @@ func (s *Store) ListCodexSessions(ctx context.Context, workspaceID string, inclu
 	if limit <= 0 || limit > 200 {
 		limit = 80
 	}
-	query := `SELECT id, workspace_id, codex_thread_id, title, sandbox, status, last_turn_id, last_prompt, archived, created_at, updated_at FROM codex_sessions`
+	query := `SELECT ` + codexSessionColumns + ` FROM codex_sessions`
 	var args []any
 	var clauses []string
 	if workspaceID != "" {
@@ -3069,6 +3298,252 @@ func (s *Store) ListCodexTurns(ctx context.Context, sessionID string, limit int)
 	return out, rows.Err()
 }
 
+func (s *Store) UpsertCodexItem(ctx context.Context, input CodexItemInput) (CodexItem, error) {
+	input.SessionID = strings.TrimSpace(input.SessionID)
+	if input.SessionID == "" {
+		return CodexItem{}, errors.New("session id is required")
+	}
+	input.ItemType = strings.TrimSpace(input.ItemType)
+	if input.ItemType == "" {
+		input.ItemType = "event"
+	}
+	input.Status = strings.TrimSpace(input.Status)
+	if input.Status == "" {
+		input.Status = "running"
+	}
+	input.Title = truncateStorageText(input.Title, 200)
+	input.Summary = truncateStorageText(input.Summary, 2000)
+	if input.Payload == nil {
+		input.Payload = map[string]any{}
+	}
+	if input.CodexItemID != "" {
+		existing, err := s.GetCodexItemByCodexID(ctx, input.SessionID, input.CodexItemID)
+		if err == nil {
+			return s.updateCodexItem(ctx, existing.ID, input)
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return CodexItem{}, err
+		}
+	}
+
+	id, err := ids.New("citem")
+	if err != nil {
+		return CodexItem{}, err
+	}
+	now := now()
+	completedAt := ""
+	if isTerminalCodexItemStatus(input.Status) {
+		completedAt = now
+	}
+	payload, _ := json.Marshal(input.Payload)
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO codex_items (id, session_id, turn_id, codex_item_id, item_type, status, title, summary, payload_json, created_at, updated_at, completed_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, input.SessionID, input.TurnID, input.CodexItemID, input.ItemType, input.Status, input.Title, input.Summary, string(payload), now, now, completedAt)
+	if err != nil {
+		if input.CodexItemID != "" {
+			if existing, getErr := s.GetCodexItemByCodexID(ctx, input.SessionID, input.CodexItemID); getErr == nil {
+				return s.updateCodexItem(ctx, existing.ID, input)
+			}
+		}
+		return CodexItem{}, err
+	}
+	return s.GetCodexItem(ctx, id)
+}
+
+func (s *Store) updateCodexItem(ctx context.Context, id string, input CodexItemInput) (CodexItem, error) {
+	existing, err := s.GetCodexItem(ctx, id)
+	if err != nil {
+		return CodexItem{}, err
+	}
+	if input.TurnID == "" {
+		input.TurnID = existing.TurnID
+	}
+	if input.CodexItemID == "" {
+		input.CodexItemID = existing.CodexItemID
+	}
+	if input.Title == "" {
+		input.Title = existing.Title
+	}
+	if input.Summary == "" {
+		input.Summary = existing.Summary
+	}
+	if input.Payload == nil || len(input.Payload) == 0 {
+		input.Payload = existing.Payload
+	}
+	completedAt := existing.CompletedAt
+	if completedAt == "" && isTerminalCodexItemStatus(input.Status) {
+		completedAt = now()
+	}
+	payload, _ := json.Marshal(input.Payload)
+	_, err = s.db.ExecContext(ctx, `
+UPDATE codex_items
+SET turn_id = ?, codex_item_id = ?, item_type = ?, status = ?, title = ?, summary = ?, payload_json = ?, updated_at = ?, completed_at = ?
+WHERE id = ?`,
+		input.TurnID, input.CodexItemID, input.ItemType, input.Status, input.Title, input.Summary, string(payload), now(), completedAt, id)
+	if err != nil {
+		return CodexItem{}, err
+	}
+	return s.GetCodexItem(ctx, id)
+}
+
+func (s *Store) GetCodexItem(ctx context.Context, id string) (CodexItem, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, session_id, turn_id, codex_item_id, item_type, status, title, summary, payload_json, created_at, updated_at, completed_at FROM codex_items WHERE id = ?`, id)
+	item, err := scanCodexItem(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CodexItem{}, ErrNotFound
+	}
+	return item, err
+}
+
+func (s *Store) GetCodexItemByCodexID(ctx context.Context, sessionID, codexItemID string) (CodexItem, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, session_id, turn_id, codex_item_id, item_type, status, title, summary, payload_json, created_at, updated_at, completed_at FROM codex_items WHERE session_id = ? AND codex_item_id = ?`, sessionID, codexItemID)
+	item, err := scanCodexItem(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CodexItem{}, ErrNotFound
+	}
+	return item, err
+}
+
+func (s *Store) ListCodexItems(ctx context.Context, sessionID string, limit int) ([]CodexItem, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, session_id, turn_id, codex_item_id, item_type, status, title, summary, payload_json, created_at, updated_at, completed_at FROM codex_items WHERE session_id = ? ORDER BY created_at ASC LIMIT ?`, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CodexItem{}
+	for rows.Next() {
+		item, err := scanCodexItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CreateCodexApproval(ctx context.Context, input CodexApprovalInput) (CodexApproval, error) {
+	if existing, err := s.GetCodexApprovalByRequestID(ctx, input.RequestID); err == nil {
+		return existing, nil
+	}
+	id, err := ids.New("capr")
+	if err != nil {
+		return CodexApproval{}, err
+	}
+	if input.Status == "" {
+		input.Status = "pending"
+	}
+	request, _ := json.Marshal(input.Request)
+	approval := CodexApproval{
+		ID:          id,
+		SessionID:   input.SessionID,
+		TurnID:      input.TurnID,
+		RequestID:   input.RequestID,
+		RequestType: input.RequestType,
+		Status:      input.Status,
+		RiskLevel:   input.RiskLevel,
+		Summary:     input.Summary,
+		Request:     input.Request,
+		CreatedAt:   now(),
+		ExpiresAt:   input.ExpiresAt,
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO codex_approvals (id, session_id, turn_id, request_id, request_type, status, risk_level, summary, request_json, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		approval.ID, approval.SessionID, approval.TurnID, approval.RequestID, approval.RequestType, approval.Status, approval.RiskLevel, approval.Summary, string(request), approval.CreatedAt, approval.ExpiresAt)
+	if err != nil {
+		if existing, getErr := s.GetCodexApprovalByRequestID(ctx, input.RequestID); getErr == nil {
+			return existing, nil
+		}
+		return CodexApproval{}, err
+	}
+	return approval, nil
+}
+
+func (s *Store) GetCodexApproval(ctx context.Context, id string) (CodexApproval, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, session_id, turn_id, request_id, request_type, status, risk_level, summary, request_json, decision_json, created_at, resolved_at, expires_at FROM codex_approvals WHERE id = ?`, id)
+	approval, err := scanCodexApproval(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CodexApproval{}, ErrNotFound
+	}
+	return approval, err
+}
+
+func (s *Store) GetCodexApprovalByRequestID(ctx context.Context, requestID string) (CodexApproval, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, session_id, turn_id, request_id, request_type, status, risk_level, summary, request_json, decision_json, created_at, resolved_at, expires_at FROM codex_approvals WHERE request_id = ?`, requestID)
+	approval, err := scanCodexApproval(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CodexApproval{}, ErrNotFound
+	}
+	return approval, err
+}
+
+func (s *Store) ListCodexApprovals(ctx context.Context, status string, limit int) ([]CodexApproval, error) {
+	if limit <= 0 {
+		limit = 80
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	query := `SELECT id, session_id, turn_id, request_id, request_type, status, risk_level, summary, request_json, decision_json, created_at, resolved_at, expires_at FROM codex_approvals`
+	args := []any{}
+	if strings.TrimSpace(status) != "" {
+		query += ` WHERE status = ?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CodexApproval{}
+	for rows.Next() {
+		approval, err := scanCodexApproval(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, approval)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ResolveCodexApproval(ctx context.Context, id, status string, decision map[string]any) (CodexApproval, error) {
+	data, _ := json.Marshal(decision)
+	resolvedAt := now()
+	_, err := s.db.ExecContext(ctx, `UPDATE codex_approvals SET status = ?, decision_json = ?, resolved_at = ? WHERE id = ? AND status = 'pending'`, status, string(data), resolvedAt, id)
+	if err != nil {
+		return CodexApproval{}, err
+	}
+	return s.GetCodexApproval(ctx, id)
+}
+
+func (s *Store) InterruptPendingCodexApprovals(ctx context.Context, reason string) ([]CodexApproval, error) {
+	pending, err := s.ListCodexApprovals(ctx, "pending", 1000)
+	if err != nil {
+		return nil, err
+	}
+	out := []CodexApproval{}
+	decision := map[string]any{
+		"action": "interrupted",
+		"reason": truncateStorageText(reason, 240),
+	}
+	for _, approval := range pending {
+		updated, err := s.ResolveCodexApproval(ctx, approval.ID, "interrupted", decision)
+		if err != nil {
+			return out, err
+		}
+		if updated.Status == "interrupted" {
+			out = append(out, updated)
+		}
+	}
+	return out, nil
+}
+
 func (s *Store) AppendEvent(ctx context.Context, scope, scopeID, eventType string, payload map[string]any) (events.Event, error) {
 	id, err := ids.New("evt")
 	if err != nil {
@@ -3088,8 +3563,11 @@ func (s *Store) AppendEvent(ctx context.Context, scope, scopeID, eventType strin
 }
 
 func (s *Store) ListEvents(ctx context.Context, scope, scopeID string, after int64, limit int) ([]events.Event, error) {
-	if limit <= 0 || limit > 500 {
+	if limit <= 0 {
 		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, scope, scope_id, sequence, event_type, payload_json, created_at FROM events WHERE scope = ? AND scope_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?`, scope, scopeID, after, limit)
 	if err != nil {
@@ -3192,9 +3670,58 @@ func scanSystemUpdateJob(row workspaceScanner) (SystemUpdateJob, error) {
 func scanCodexSession(row workspaceScanner) (CodexSession, error) {
 	var session CodexSession
 	var archived int
-	err := row.Scan(&session.ID, &session.WorkspaceID, &session.CodexThreadID, &session.Title, &session.Sandbox, &session.Status, &session.LastTurnID, &session.LastPrompt, &archived, &session.CreatedAt, &session.UpdatedAt)
+	var runtimeRoots, instructionSources, tokenUsage string
+	err := row.Scan(
+		&session.ID,
+		&session.WorkspaceID,
+		&session.CodexThreadID,
+		&session.Title,
+		&session.Sandbox,
+		&session.Status,
+		&session.LastTurnID,
+		&session.LastPrompt,
+		&session.Model,
+		&session.ModelProvider,
+		&session.ServiceTier,
+		&session.ApprovalPolicy,
+		&session.ApprovalsReviewer,
+		&session.PermissionProfile,
+		&session.ReasoningEffort,
+		&session.ReasoningSummary,
+		&session.Cwd,
+		&runtimeRoots,
+		&instructionSources,
+		&tokenUsage,
+		&session.AppserverSource,
+		&session.RunMode,
+		&session.WorktreeID,
+		&archived,
+		&session.CreatedAt,
+		&session.UpdatedAt,
+	)
 	if err != nil {
 		return CodexSession{}, err
+	}
+	_ = json.Unmarshal([]byte(runtimeRoots), &session.RuntimeRoots)
+	_ = json.Unmarshal([]byte(instructionSources), &session.InstructionSources)
+	_ = json.Unmarshal([]byte(tokenUsage), &session.TokenUsage)
+	if session.RuntimeRoots == nil {
+		session.RuntimeRoots = []string{}
+	}
+	if session.InstructionSources == nil {
+		session.InstructionSources = []string{}
+	}
+	if session.TokenUsage == nil {
+		session.TokenUsage = map[string]any{}
+	}
+	if session.ApprovalPolicy == "" {
+		session.ApprovalPolicy = "on-request"
+	}
+	if session.ApprovalsReviewer == "" {
+		session.ApprovalsReviewer = "user"
+	}
+	if session.RunMode == "" {
+		session.RunMode = "local"
 	}
 	session.Archived = archived == 1
 	return session, nil
@@ -3207,6 +3734,55 @@ func scanCodexTurn(row workspaceScanner) (CodexTurn, error) {
 		return CodexTurn{}, err
 	}
 	return turn, nil
+}
+
+func scanCodexItem(row workspaceScanner) (CodexItem, error) {
+	var item CodexItem
+	var payloadJSON string
+	err := row.Scan(&item.ID, &item.SessionID, &item.TurnID, &item.CodexItemID, &item.ItemType, &item.Status, &item.Title, &item.Summary, &payloadJSON, &item.CreatedAt, &item.UpdatedAt, &item.CompletedAt)
+	if err != nil {
+		return CodexItem{}, err
+	}
+	_ = json.Unmarshal([]byte(payloadJSON), &item.Payload)
+	if item.Payload == nil {
+		item.Payload = map[string]any{}
+	}
+	return item, nil
+}
+
+func scanCodexApproval(row workspaceScanner) (CodexApproval, error) {
+	var approval CodexApproval
+	var requestJSON, decisionJSON string
+	err := row.Scan(&approval.ID, &approval.SessionID, &approval.TurnID, &approval.RequestID, &approval.RequestType, &approval.Status, &approval.RiskLevel, &approval.Summary, &requestJSON, &decisionJSON, &approval.CreatedAt, &approval.ResolvedAt, &approval.ExpiresAt)
+	if err != nil {
+		return CodexApproval{}, err
+	}
+	_ = json.Unmarshal([]byte(requestJSON), &approval.Request)
+	_ = json.Unmarshal([]byte(decisionJSON), &approval.Decision)
+	if approval.Request == nil {
+		approval.Request = map[string]any{}
+	}
+	if approval.Decision == nil {
+		approval.Decision = map[string]any{}
+	}
+	return approval, nil
+}
+
+func isTerminalCodexItemStatus(status string) bool {
+	switch status {
+	case "completed", "failed", "interrupted", "cancelled", "canceled":
+		return true
+	default:
+		return false
+	}
+}
+
+func truncateStorageText(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	return value[:max] + "..."
 }
 
 func scanCodexGatewaySettings(row workspaceScanner) (CodexGatewaySettings, error) {

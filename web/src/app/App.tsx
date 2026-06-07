@@ -5,6 +5,7 @@ import type {
   AppData,
   AuthSession,
   CodexGatewayPayload,
+  CodexItem,
   CodexSession,
   CodexSessionDetail,
   CodexStatus,
@@ -67,6 +68,7 @@ export function App() {
   const activeSessionIdRef = useRef("");
   const [activeSession, setActiveSession] = useState<CodexSession | null>(null);
   const [activeSessionWorkspace, setActiveSessionWorkspace] = useState<Workspace | null>(null);
+  const [sessionItems, setSessionItems] = useState<CodexItem[]>([]);
   const [sessionEvents, setSessionEvents] = useState<EventRecord[]>([]);
   const [toast, setToastState] = useState<{ message: string; tone: Tone } | null>(null);
   const [v2rayExport, setV2RayExport] = useState<unknown>(null);
@@ -84,10 +86,11 @@ export function App() {
   const loadActiveSession = useCallback(async (id: string) => {
     const [detail, history] = await Promise.all([
       api<CodexSessionDetail>(`/api/codex/sessions/${encodeURIComponent(id)}`),
-      api<{ items?: EventRecord[] }>(`/api/events/history?scope=codex_session&id=${encodeURIComponent(id)}`),
+      api<{ items?: EventRecord[] }>(`/api/events/history?scope=codex_session&id=${encodeURIComponent(id)}&limit=1000`),
     ]);
     setActiveSession(detail.session);
     setActiveSessionWorkspace(detail.workspace || null);
+    setSessionItems(detail.items || []);
     setSessionEvents(history.items || []);
   }, []);
 
@@ -117,7 +120,7 @@ export function App() {
       api<{ items?: AppData["audit"] }>("/api/audit/events"),
       api<CodexStatus>("/api/codex/status"),
       loadCodexGatewayData(),
-      api<{ items?: unknown[] }>("/api/approvals/pending"),
+      api<{ items?: AppData["pendingApprovals"] }>("/api/approvals/pending"),
       api<{ items?: CodexSession[] }>("/api/codex/sessions"),
       api<SettingsPayload>("/api/settings"),
       api<V2RayPayload>("/api/v2ray/settings"),
@@ -149,6 +152,7 @@ export function App() {
     else {
       setActiveSession(null);
       setActiveSessionWorkspace(null);
+      setSessionItems([]);
       setSessionEvents([]);
     }
   }, [loadActiveSession, loadCodexGatewayData]);
@@ -275,6 +279,7 @@ export function App() {
         logout={logout}
         selectedWorkspaceId={selectedWorkspaceId}
         sessionEvents={sessionEvents}
+        sessionItems={sessionItems}
         v2rayExport={v2rayExport}
         v2rayExportOpen={v2rayExportOpen}
       />

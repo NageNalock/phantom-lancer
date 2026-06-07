@@ -84,8 +84,9 @@ export function Field({ label, children, help }: { label: string; children: Reac
   );
 }
 
-export function Notice({ children }: { children: ReactNode }) {
-  return <div className="notice-warn">{children}</div>;
+export function Notice({ children, tone = "warn" }: { children: ReactNode; tone?: "warn" | "danger" }) {
+  const toneClass = tone === "danger" ? "border-[rgba(207,31,50,0.22)] bg-[var(--danger-soft)] text-[var(--danger)]" : "border-[rgba(199,85,8,0.22)] bg-[var(--warn-soft)] text-[var(--warn)]";
+  return <div className={`rounded-lg border p-3 text-sm ${toneClass}`}>{children}</div>;
 }
 
 export function ContextList({ items }: { items: Array<[string, ReactNode]> }) {

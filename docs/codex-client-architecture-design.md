@@ -50,15 +50,16 @@ Phantom Lancer 的第一阶段目标是把 Codex CLI Web 化。随着目标升�
 
 | 能力面 | 当前实现 | 偏差 |
 | --- | --- | --- |
-| app-server 通信 | 支持 `initialize`、`thread/start`、`thread/resume`、`turn/start`、`turn/steer`、`turn/interrupt` | 只处理 client request/response 和 notification，未处理 server request |
-| 审批 | 创建会话和 turn 时固定 `approvalPolicy = never` | 无法支持 Codex 原生 Auto / Read-only / on-request 审批体验 |
-| 会话状态 | 保存 `workspace_id`、`codex_thread_id`、`sandbox`、`status`、`last_turn_id` | 缺少 model、provider、permission profile、reasoning、token usage、instruction sources 等 |
-| 事件 | 原始 notification 基本按 session 写入 events | 未做稳定语义归一化，前端需要追随 Codex 原始协议变化 |
-| 历史恢复 | 事件历史接口默认拉固定数量 | 长会话 UI 历史可能截断，不能等同 Codex thread 完整 transcript |
-| 模型切换 | 不支持 | app-server 支持 thread/turn 级 model 和 `thread/settings/update` |
-| Token usage | 不支持 | app-server 有 `thread/tokenUsage/updated` |
-| Review | 不支持 | CLI 和 app-server 均有 review 能力 |
-| MCP / Plugins / Skills / Hooks | 不支持或仅通过用户本机配置间接生效 | app-server 已暴露 list/read/install/status/oauth 等能力，但需要产品层权限约束 |
+| app-server 通信 | 已支持 `initialize`、`initialized`、client request/response、notification、server request、`Respond` 和 server request 白名单 | 仍需保存 app-server schema/version 摘要并做更细的 feature detection |
+| 审批 | 已支持会话 approval policy、pending approval 落库、allow once / allow for session / deny / timeout、未知 server request 默认拒绝、服务重启 pending request 标记 interrupted | `item/tool/requestUserInput` 仍缺少结构化答复 UI；Full Access / `never` 不进入普通交互式 session 表单 |
+| 会话状态 | 已保存 model、provider、service tier、approval、reasoning、cwd、runtime roots、instruction sources、token usage 等 | permission profile、reasoning summary 和上游设置字段仍需按新 schema 持续校准 |
+| 事件 | 原始 notification 和服务端生成的 Codex session event 都按 session 写入 events，payload 做长度上限和 secret redaction | normalized event 层仍不完整，前端仍消费部分原始 Codex method |
+| Items / transcript | 已新增 `codex_items`，前端会话切换后能恢复 item 摘要和最近事件 | 长历史分页、item 搜索、diff/plan 的稳定结构化渲染仍需补齐 |
+| 模型切换 | 已支持 `model/list` 和 `thread/settings/update` | turn 级 model override 和 provider 能力提示仍需增强 |
+| Token usage | 已接入 `thread/tokenUsage/updated` 并在 inspector 展示 context usage | usage 字段随 app-server schema 演进，需要兼容空值和缺失字段 |
+| Review | 已支持 session 内 `review/start`、`/review` 和 Reviews 汇总入口 | review 结果追踪、commit review、base branch review 仍需补齐 |
+| Git | 已支持 session scoped status、staged/unstaged diff、stage、unstage、commit 和 audit | revert、push、PR handoff、冲突处理和 worktree scoped Git 仍需后置实现 |
+| MCP / Plugins / Skills / Hooks | 已通过 capabilities 页面读取 models、MCP、plugins、skills、hooks、account/rate limit 摘要 | 安装、OAuth、config 写入等高风险写操作仍需独立确认和回滚提示 |
 | Gateway | 已有 Codex Gateway 能力 | Gateway 是代理服务，不应与 Codex Client thread 状态混用 |
 
 ## 4. 目标与非目标
@@ -76,6 +77,7 @@ Phantom Lancer 的第一阶段目标是把 Codex CLI Web 化。随着目标升�
 - 不直接暴露 Codex app-server 到公网。
 - 不让前端直接访问 app-server WebSocket 或 stdio。
 - 不逐像素复刻 Codex 桌面版客户端的原生窗口、快捷键、主题、浮窗、系统通知和 OS 级交互。
+- 不把 `computer use`、`voice`、`floating pop-out` 作为 Phantom Lancer 的主线复刻目标。这些能力依赖桌面 OS、原生窗口管理、音频设备、屏幕/鼠标权限或全局快捷键；Web 控制台只能提供有限等价入口，不应为复刻这些体验牺牲个人服务器控制台的安全边界和架构简洁性。
 - 不把 Codex Gateway 的账号池、代理请求日志当作 Codex Client 会话状态。
 - 不默认开放 `danger-full-access` 或无审计的 Full Access。
 - 不把私有 token、真实服务器地址、个人本机路径、内部代理或私有源写进配置和文档。
@@ -92,7 +94,7 @@ Codex 桌面版客户端是本能力域的产品基准。Phantom Lancer 的实�
 | Worktree 模式 | 为 Git workspace 创建受控 worktree，隔离改动和并行任务 | 中高 |
 | Cloud 模式 | 不作为本地 Web 客户端首期目标，可后续包装 `codex cloud` | 低 |
 | Diff panel | 作为 session 主工作区或右侧 inspector 的核心面板，不只展示 raw event | 高 |
-| Git 工具 | 支持 status、diff、stage、revert、commit、push、PR 入口；危险操作审批 | 中高 |
+| Git 工具 | 支持 status、diff、stage、unstage、commit；revert、push、PR 入口后置并要求危险操作审批 | 中高 |
 | Integrated terminal | 支持 project/worktree scoped terminal，输出可被 Codex 引用；权限和输出上限由后端控制 | 中 |
 | Review | 支持 `/review` 式 session 内启动，同时提供 Reviews 汇总页 | 高 |
 | Approvals and sandboxing | 实现 approve once / approve for session / deny 等审批桥，默认最小权限 | 高 |
@@ -107,6 +109,16 @@ Codex 桌面版客户端是本能力域的产品基准。Phantom Lancer 的实�
 | Browser use / in-app browser | 可后续实现为本地预览和评论能力，不作为首期主线 | 低 |
 | Computer use / voice / floating pop-out | 属于桌面 OS 体验，Web 控制台后置或不实现 | 低 |
 
+### 5.1 桌面 OS 体验边界
+
+以下能力在 Codex 桌面版客户端中有合理价值，但不适合作为 Phantom Lancer 的主线复刻目标：
+
+- `computer use`：需要屏幕、鼠标、键盘、窗口焦点和系统权限，风险边界远高于个人服务器 Web 控制台的受控 API / 审批模型。Phantom Lancer 后续最多提供受控浏览器预览、截图、日志、文件和命令能力，不提供默认的整机屏幕控制。
+- `voice`：依赖本地麦克风、音频流、实时转写和浏览器权限。Web 端可以后续支持输入框语音转文字或简单 dictation，但不把桌面版实时语音会话作为核心路径。
+- `floating pop-out`：依赖原生窗口管理、悬浮置顶、全局唤起和窗口状态记忆。Web 等价物只考虑浏览器内 mini composer、可拖拽浮层、新窗口打开当前 session 或 PWA 独立窗口，不承诺 OS 级悬浮体验。
+
+这些能力如果未来进入路线，应作为独立探索项处理，并先评估权限、审计、浏览器兼容性和实际收益。它们不影响 Local / Worktree、审批、review、diff、Git、MCP、skills、plugins、usage 和 thread 恢复这些主线能力的优先级。
+
 ## 6. 能力可实现性评估
 
 | 能力 | 依托 Codex CLI / app-server 可实现性 | 推荐实现路径 |
@@ -117,7 +129,7 @@ Codex 桌面版客户端是本能力域的产品基准。Phantom Lancer 的实�
 | model list、model switch、provider capability | 高 | app-server `model/list`、`thread/settings/update`、turn override |
 | context window 和 token usage | 高 | app-server `thread/tokenUsage/updated`，同时落库 |
 | diff、patch、file change 展示 | 高 | app-server notifications，Phantom Lancer 归一化 |
-| Git stage/revert/commit/push/PR | 中高 | 后端 Git executor + Codex approval/audit；PR 可后续接 GitHub 能力 |
+| Git stage/unstage/commit/revert/push/PR | 中高 | 后端 Git executor + audit；首期开放 status/diff/stage/unstage/commit，revert/push/PR 后置并要求更强确认 |
 | rollback / compact | 高 | app-server thread APIs |
 | review | 高 | 优先 app-server `review/start`，必要时包装 `codex review` |
 | 审批 | 高，但需要重构 | app-server server request -> Phantom Lancer approval -> JSON-RPC response |
@@ -211,15 +223,15 @@ type Client interface {
 
 负责 app-server server request 到 Phantom Lancer 审批实体的桥接。
 
+当前本地 app-server schema 显示 server request 只包含以下五类；其他 `id + method` 入站请求必须默认拒绝并记录 session event，不能挂起为 pending approval。
+
 支持的审批类型：
 
-- command execution approval。
-- file change approval。
-- permissions request approval。
-- tool user input。
-- MCP elicitation。
-- dynamic tool call。
-- token refresh 或账号相关交互。
+- `item/commandExecution/requestApproval`。
+- `item/fileChange/requestApproval`。
+- `item/permissions/requestApproval`。
+- `item/tool/requestUserInput`。
+- `mcpServer/elicitation/request`。
 
 默认策略：
 
@@ -264,7 +276,7 @@ type Client interface {
 - hooks：list 和 trust 状态展示。
 - config：read、value write、batch write、requirements。
 - review：review start 和 result tracking。
-- git：status、diff、stage、revert、commit、push、PR handoff。
+- git：status、diff、stage、unstage、commit；revert、push、PR handoff 后置。
 - automation：thread automation 和 project automation 摘要。
 
 所有写操作必须进 audit。涉及配置、插件安装、OAuth、外部工具调用和文件写入时，必须经过高风险确认。
@@ -311,17 +323,19 @@ ALTER TABLE codex_sessions ADD COLUMN worktree_id TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS codex_items (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
-  turn_id TEXT NOT NULL,
-  codex_item_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL DEFAULT '',
+  codex_item_id TEXT NOT NULL DEFAULT '',
   item_type TEXT NOT NULL,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
   title TEXT NOT NULL DEFAULT '',
   summary TEXT NOT NULL DEFAULT '',
   payload_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  completed_at TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_codex_items_turn ON codex_items(session_id, turn_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_items_session_item ON codex_items(session_id, codex_item_id) WHERE codex_item_id != '';
+CREATE INDEX IF NOT EXISTS idx_codex_items_session_created ON codex_items(session_id, created_at);
 ```
 
 ### 9.3 新增 `codex_approvals`
@@ -388,6 +402,8 @@ CREATE TABLE IF NOT EXISTS codex_capability_cache (
 
 ## 10. API 设计
 
+当前代码沿用既有 `/api/codex/*` 路由，本文中的 `/api/codex/client/*` 表示未来如果需要进一步区分 Client 和 Gateway 时的命名空间方向；不是必须立即迁移的路径。
+
 ### 10.1 会话 API
 
 | 方法 | 路径 | 说明 |
@@ -438,8 +454,8 @@ CREATE TABLE IF NOT EXISTS codex_capability_cache (
 | `GET` | `/api/codex/client/hooks` | hook list |
 | `GET` | `/api/codex/client/config` | 安全配置摘要 |
 | `POST` | `/api/codex/client/reviews` | 启动 review |
-| `GET` | `/api/codex/client/git/status` | 当前 project/worktree Git 状态 |
-| `POST` | `/api/codex/client/git/actions` | stage / revert / commit / push 等受控操作 |
+| `GET` | `/api/codex/sessions/{id}/git` | 当前 session workspace/worktree Git 状态和 staged/unstaged diff |
+| `POST` | `/api/codex/sessions/{id}/git/actions` | stage / unstage / commit；revert / push / PR 后置 |
 | `GET` | `/api/codex/client/automations` | thread/project automations 摘要 |
 
 ### 10.5 Gateway API 保持独立
@@ -503,10 +519,13 @@ Codex 自身 sandbox 不能替代 Phantom Lancer 权限。所有操作仍需先�
 
 | UI 模式 | Codex 参数 | Phantom Lancer 行为 |
 | --- | --- | --- |
-| 只读 | read-only / conservative approval | 文件写入和命令执行默认进入审批或拒绝 |
-| 自动 | workspace-write + on-request | 工作区内低风险操作可放行，高风险进入审批 |
-| 受限写入 | permission profile | 使用预设 profile 限制文件和网络 |
-| Full Access | danger-full-access | 支持作为高级模式，但默认禁用；启用、进入和每次 session 使用都必须二次确认和强审计 |
+| 只读 | read-only + on-request | 文件写入不可用，命令和权限升级进入 Phantom Lancer 审批 |
+| 工作区写入 | workspace-write + on-request | 只允许已授权 workspace root，命令、文件写入和权限请求仍走审批桥 |
+| 不信任模式 | untrusted | 更保守的 Codex 侧审批策略，仍叠加 Phantom Lancer workspace/audit 边界 |
+| 受限写入 | permission profile | 后续能力；使用预设 profile 限制文件和网络 |
+| Full Access | danger-full-access / never | 后续高级模式，普通 session 表单不暴露；启用、进入和每次 session 使用都必须二次确认和强审计 |
+
+`on-failure` 在当前 Codex 文档中已属于旧策略，不作为 Phantom Lancer Web 客户端选项。`never` 只可作为未来 Full Access gated 能力的一部分，不能作为默认或普通交互式客户端策略。
 
 ### 13.3 脱敏
 
@@ -539,9 +558,9 @@ Codex 自身 sandbox 不能替代 Phantom Lancer 权限。所有操作仍需先�
 | 无项目 session 是否允许 web search 和 MCP | 允许，但只能作为无文件工作区的咨询 thread。web search/MCP 按 Codex 配置和 Phantom Lancer capability policy 控制；无项目 session 不允许 workspace-write。 |
 | 是否从已有 Codex CLI 本地历史导入 | 支持显式导入，不自动全量导入。通过 app-server `thread/list/read/search` 发现本地 thread，仅允许导入 cwd 落在 allowed roots 内的 thread，并保留 imported/source 标记。 |
 | Local / Worktree / Cloud 如何处理 | Local 和 Worktree 对齐桌面版作为核心模式；Cloud 后置，只作为 CLI 包装或外部入口，不影响本地客户端主线。 |
-| Git stage/revert/commit/push 是否进入范围 | 进入范围。它们是桌面版核心工作流，但必须走受控 Git executor、审批和 audit。 |
+| Git stage/revert/commit/push 是否进入范围 | 进入范围。它们是桌面版核心工作流，但必须走受控 Git executor、确认和 audit；当前先开放 status、diff、stage、unstage、commit，revert、push、PR 后置。 |
 | Automations 是否进入范围 | 进入范围，但后置。优先 thread automation，因为它能保持同一 thread context。 |
-| Browser use / computer use / voice 是否进入范围 | Browser preview/comment 可后置实现；computer use、voice、floating pop-out 属于桌面 OS 体验，不作为 Web 控制台主线。 |
+| Browser use / computer use / voice / floating pop-out 是否进入范围 | Browser preview/comment 可后置实现；computer use、voice、floating pop-out 属于桌面 OS 体验，不作为 Web 控制台主线。Web 端只保留 mini composer、独立浏览器窗口、PWA 窗口、语音转文字等有限等价探索。 |
 
 ## 15. 实施路线
 
@@ -555,11 +574,12 @@ Codex 自身 sandbox 不能替代 Phantom Lancer 权限。所有操作仍需先�
 
 ### Phase 1：Protocol Adapter 和审批桥
 
-- 重构 app-server client，支持 server request。
-- 建立 `codex_approvals`。
-- 接入 command/file/permission/tool/MCP 审批。
-- 前端实现 pending approvals 和 session 内审批卡片。
-- 移除默认固定 `approvalPolicy = never` 的限制，改为受 UI/策略控制。
+- 已重构 app-server client，支持 server request、`Respond` 和 notification 持久化。
+- 已建立 `codex_approvals`。
+- 已接入 command/file/permission/tool user input/MCP elicitation 审批，并对未知 server request 默认拒绝。
+- 已在服务重启、关闭或配置切换时把 pending approvals 标记为 interrupted。
+- 已实现 pending approvals 和 session 内审批卡片。
+- 已移除普通交互式 session 对 `never` / `on-failure` 的暴露，首期只开放 `on-request` 和 `untrusted`。
 
 ### Phase 2：Session Settings、Model 和 Usage
 
@@ -572,12 +592,11 @@ Codex 自身 sandbox 不能替代 Phantom Lancer 权限。所有操作仍需先�
 
 ### Phase 3：Transcript、Items、Diff、Git 和 Review
 
-- 保存 codex items。
-- 支持 plan、diff、file change、command output 的稳定渲染。
-- 支持 review/start、本地 diff review、commit review。
-- 支持 rollback、fork、compact。
-- 支持 Git status、stage、revert、commit 和 push 的受控入口。
-- 支持 Local / Worktree 模式。
+- 已保存 codex items，并在 session detail 与右侧 inspector 中恢复 item 摘要。
+- 已支持 command output、file change、plan、diff 的事件渲染；稳定结构化 diff/plan 面板仍需继续完善。
+- 已支持 review/start、`/review`、rollback、fork、compact。
+- 已支持 Git status、staged/unstaged diff、stage、unstage、commit 的受控入口和 audit。
+- 待补齐：revert、push、PR handoff、commit review、base branch review、Local / Worktree 模式完整管理。
 
 ### Phase 4：Capabilities
 
@@ -595,7 +614,7 @@ Codex 自身 sandbox 不能替代 Phantom Lancer 权限。所有操作仍需先�
 - Thread automations。
 - Browser preview/comment。
 - remote-control。
-- realtime audio。
+- `computer use`、`voice`、`floating pop-out` 仅作为探索项，不纳入主线复刻。
 - Codex cloud CLI 包装。
 
 ## 16. 风险

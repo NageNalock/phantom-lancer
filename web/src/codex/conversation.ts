@@ -17,6 +17,21 @@ export const SESSION_EVENT_NAMES = [
   "thread/status/changed",
   "thread/archived",
   "thread.archived.local",
+  "thread.settings.updated.local",
+  "thread/settings/updated",
+  "thread/tokenUsage/updated",
+  "thread.forked.local",
+  "thread.rollback.requested",
+  "thread.compact.requested",
+  "thread/compacted",
+  "review.started.local",
+  "codex.approval.requested",
+  "codex.approval.resolved",
+  "codex.approval.expired",
+  "codex.approval.interrupted",
+  "codex.approval.unsupported",
+  "git.action.completed",
+  "composer.status",
   "turn.submitted",
   "turn.steered",
   "turn.start.failed",
@@ -28,6 +43,7 @@ export const SESSION_EVENT_NAMES = [
   "turn/plan/updated",
   "item/started",
   "item/completed",
+  "rawResponseItem/completed",
   "item/agentMessage/delta",
   "item/commandExecution/outputDelta",
   "item/fileChange/outputDelta",
@@ -119,7 +135,32 @@ export function buildConversationBlocks(events: EventRecord[]): ConversationBloc
       continue;
     }
 
-    if (["turn/started", "turn/completed", "thread/status/changed", "turn.submitted", "turn.steered", "thread.resumed", "thread.attached"].includes(event.type)) {
+    if (
+      [
+        "turn/started",
+        "turn/completed",
+        "thread/status/changed",
+        "turn.submitted",
+        "turn.steered",
+        "thread.resumed",
+        "thread.attached",
+        "thread.settings.updated.local",
+        "thread/settings/updated",
+        "thread/tokenUsage/updated",
+        "thread.forked.local",
+        "thread.rollback.requested",
+        "thread.compact.requested",
+        "thread/compacted",
+        "review.started.local",
+        "codex.approval.requested",
+        "codex.approval.resolved",
+        "codex.approval.expired",
+        "codex.approval.interrupted",
+        "codex.approval.unsupported",
+        "git.action.completed",
+        "composer.status",
+      ].includes(event.type)
+    ) {
       blocks.push({ kind: "status", title: eventLabel(event.type), text: statusText(event.type, payload), at: event.createdAt });
       continue;
     }
@@ -155,6 +196,14 @@ function errorText(payload: Record<string, unknown>): string {
 
 function statusText(type: string, payload: Record<string, unknown>): string {
   if (typeof payload.promptPreview === "string") return payload.promptPreview;
+  if (typeof payload.summary === "string") return payload.summary;
+  if (typeof payload.model === "string") return `模型：${payload.model || "-"} / 审批：${payload.approvalPolicy || "-"}`;
+  if (payload.tokenUsage && typeof payload.tokenUsage === "object") {
+    const usage = payload.tokenUsage as { total?: { totalTokens?: number }; modelContextWindow?: number | null };
+    const total = usage.total?.totalTokens || 0;
+    const windowSize = usage.modelContextWindow || 0;
+    return windowSize ? `Context：${total.toLocaleString()} / ${windowSize.toLocaleString()}` : `Tokens：${total.toLocaleString()}`;
+  }
   if (typeof payload.turnId === "string") return `回合：${payload.turnId}`;
   if (typeof payload.threadId === "string") return `Thread：${payload.threadId}`;
   if (payload.status) return sessionStatusLabel(statusLabelValue(payload.status));

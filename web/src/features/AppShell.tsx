@@ -1,9 +1,11 @@
 import type { AppActions } from "../app/App";
-import type { AppData, CodexSession, CodexTab, EventRecord, MainTab, V2RayExport, Workspace } from "../app/types";
+import type { AppData, CodexItem, CodexSession, CodexTab, EventRecord, MainTab, V2RayExport, Workspace } from "../app/types";
 import { Button, Pill } from "../components/ui";
 import { CODEX_TABS, NAV_ITEMS, v2rayStateLabel } from "../domain/labels";
 import { ActivityView } from "./ActivityView";
+import { CodexCapabilitiesView } from "./CodexCapabilitiesView";
 import { CodexGatewayView } from "./CodexGatewayView";
+import { CodexReviewsView } from "./CodexReviewsView";
 import { CodexView } from "./CodexView";
 import { DashboardView } from "./DashboardView";
 import { ImagesView } from "./ImagesView";
@@ -23,6 +25,7 @@ export function AppShell({
   logout,
   selectedWorkspaceId,
   sessionEvents,
+  sessionItems,
   v2rayExport,
   v2rayExportOpen,
 }: {
@@ -36,6 +39,7 @@ export function AppShell({
   logout: () => Promise<void>;
   selectedWorkspaceId: string;
   sessionEvents: EventRecord[];
+  sessionItems: CodexItem[];
   v2rayExport: unknown;
   v2rayExportOpen: boolean;
 }) {
@@ -113,9 +117,11 @@ export function AppShell({
 
         {activeTab === "dashboard" ? <DashboardView actions={actions} data={data} /> : null}
         {activeTab === "codex" && activeCodexTab === "sessions" ? (
-          <CodexView actions={actions} activeSession={activeSession} activeSessionId={activeSessionId} activeSessionWorkspace={activeSessionWorkspace} data={data} sessionEvents={sessionEvents} />
+          <CodexView actions={actions} activeSession={activeSession} activeSessionId={activeSessionId} activeSessionWorkspace={activeSessionWorkspace} data={data} sessionEvents={sessionEvents} sessionItems={sessionItems} />
         ) : null}
         {activeTab === "codex" && activeCodexTab === "projects" ? <ProjectsView actions={actions} data={data} selectedWorkspaceId={selectedWorkspaceId} /> : null}
+        {activeTab === "codex" && activeCodexTab === "reviews" ? <CodexReviewsView actions={actions} data={data} /> : null}
+        {activeTab === "codex" && activeCodexTab === "capabilities" ? <CodexCapabilitiesView actions={actions} /> : null}
         {activeTab === "codex" && activeCodexTab === "gateway" ? <CodexGatewayView actions={actions} data={data} /> : null}
         {activeTab === "codex" && activeCodexTab === "activity" ? <ActivityView audit={data.audit} /> : null}
         {activeTab === "logs" ? <LogsView actions={actions} /> : null}

@@ -1,5 +1,5 @@
 export type MainTab = "dashboard" | "codex" | "logs" | "images" | "v2ray" | "settings";
-export type CodexTab = "sessions" | "projects" | "gateway" | "activity";
+export type CodexTab = "sessions" | "projects" | "reviews" | "capabilities" | "gateway" | "activity";
 export type Tone = "neutral" | "good" | "warn" | "danger";
 
 export interface AuthSession {
@@ -469,8 +469,76 @@ export interface CodexSession {
   lastTurnId?: string;
   lastPrompt?: string;
   promptPreview?: string;
+  model?: string;
+  modelProvider?: string;
+  serviceTier?: string;
+  approvalPolicy?: string;
+  approvalsReviewer?: string;
+  permissionProfile?: string;
+  reasoningEffort?: string;
+  reasoningSummary?: string;
+  cwd?: string;
+  runtimeRoots?: string[];
+  instructionSources?: string[];
+  tokenUsage?: CodexTokenUsage;
+  appserverSource?: string;
+  runMode?: string;
+  worktreeId?: string;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface CodexTokenUsageBreakdown {
+  totalTokens?: number;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningOutputTokens?: number;
+}
+
+export interface CodexTokenUsage {
+  total?: CodexTokenUsageBreakdown;
+  last?: CodexTokenUsageBreakdown;
+  modelContextWindow?: number | null;
+  [key: string]: unknown;
+}
+
+export interface CodexApproval {
+  id: string;
+  sessionId?: string;
+  turnId?: string;
+  requestId?: string;
+  requestType?: string;
+  status?: string;
+  riskLevel?: string;
+  summary?: string;
+  request?: Record<string, unknown>;
+  decision?: Record<string, unknown>;
+  createdAt?: string;
+  resolvedAt?: string;
+  expiresAt?: string;
+}
+
+export interface CodexModel {
+  id?: string;
+  model?: string;
+  displayName?: string;
+  description?: string;
+  hidden?: boolean;
+  defaultReasoningEffort?: string;
+  defaultServiceTier?: string | null;
+  serviceTiers?: Array<{ id?: string; displayName?: string } | string>;
+  isDefault?: boolean;
+}
+
+export interface CodexModelsPayload {
+  data?: CodexModel[];
+  nextCursor?: string | null;
+}
+
+export interface CodexCapabilitiesPayload {
+  sections?: Record<string, unknown>;
+  errors?: Record<string, string>;
 }
 
 export interface CodexTurn {
@@ -483,10 +551,55 @@ export interface CodexTurn {
   completedAt?: string;
 }
 
+export interface CodexItem {
+  id?: string;
+  sessionId?: string;
+  turnId?: string;
+  codexItemId?: string;
+  itemType?: string;
+  status?: string;
+  title?: string;
+  summary?: string;
+  payload?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+  completedAt?: string;
+}
+
+export interface CodexGitStatus {
+  isGit?: boolean;
+  output?: string;
+  truncated?: boolean;
+  error?: string;
+}
+
+export interface CodexGitDiff {
+  isGit?: boolean;
+  staged?: boolean;
+  output?: string;
+  truncated?: boolean;
+  error?: string;
+}
+
+export interface CodexGitPayload {
+  status?: CodexGitStatus;
+  diff?: CodexGitDiff;
+  stagedDiff?: CodexGitDiff;
+}
+
+export interface CodexGitActionResult {
+  action?: string;
+  output?: string;
+  truncated?: boolean;
+  error?: string;
+  status?: CodexGitStatus;
+}
+
 export interface CodexSessionDetail {
   session: CodexSession;
   workspace?: Workspace | null;
   turns?: CodexTurn[];
+  items?: CodexItem[];
 }
 
 export interface EventRecord {
@@ -503,7 +616,7 @@ export interface AppData {
   dashboard: DashboardSummary;
   workspaces: Workspace[];
   audit: AuditEvent[];
-  pendingApprovals: unknown[];
+  pendingApprovals: CodexApproval[];
   codexStatus: CodexStatus;
   codexSessions: CodexSession[];
   codexGateway: CodexGatewayPayload;

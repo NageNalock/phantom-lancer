@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -95,10 +96,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/workspaces", s.handleCreateWorkspace)
 	mux.HandleFunc("GET /api/workspaces/", s.handleWorkspaceSubroutes)
 	mux.HandleFunc("GET /api/codex/status", s.handleCodexStatus)
+	mux.HandleFunc("GET /api/codex/models", s.handleCodexModels)
+	mux.HandleFunc("GET /api/codex/capabilities", s.handleCodexCapabilities)
 	mux.HandleFunc("GET /api/codex/sessions", s.handleListCodexSessions)
 	mux.HandleFunc("POST /api/codex/sessions", s.handleCreateCodexSession)
 	mux.HandleFunc("GET /api/codex/sessions/", s.handleCodexSessionSubroutes)
 	mux.HandleFunc("POST /api/codex/sessions/", s.handleCodexSessionSubroutes)
+	mux.HandleFunc("PATCH /api/codex/sessions/", s.handleCodexSessionSubroutes)
 	mux.HandleFunc("POST /api/codex/exec-jobs", s.handleCreateExecJob)
 	mux.HandleFunc("GET /api/codex/exec-jobs/", s.handleExecJobSubroutes)
 	mux.HandleFunc("POST /api/codex/exec-jobs/", s.handleExecJobSubroutes)
@@ -125,6 +129,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/events/history", s.handleEventHistory)
 	mux.HandleFunc("GET /api/events/stream", s.handleEventStream)
 	mux.HandleFunc("GET /api/approvals/pending", s.handlePendingApprovals)
+	mux.HandleFunc("POST /api/approvals/", s.handleApprovalSubroutes)
 	mux.HandleFunc("GET /api/audit/events", s.handleAuditEvents)
 	mux.HandleFunc("GET /api/system/version", s.handleSystemVersion)
 	mux.HandleFunc("GET /api/system/update/status", s.handleSystemUpdateStatus)
@@ -465,6 +470,49 @@ func (s *Server) handleCodexStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.codex.Status(r.Context()))
 }
 
+func (s *Server) handleCodexModels(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAuth(w, r); !ok {
+		return
+	}
+	models, err := s.codex.ListModels(r.Context(), r.URL.Query().Get("includeHidden") == "true")
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "codex_app_server_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, models)
+}
+
+func (s *Server) handleCodexCapabilities(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAuth(w, r); !ok {
+		return
+	}
+	sections := map[string]any{}
+	errors := map[string]string{}
+	for _, item := range []struct {
+		key    string
+		method string
+		params map[string]any
+	}{
+		{key: "models", method: "model/list", params: map[string]any{"limit": 80}},
+		{key: "permissionProfiles", method: "permissionProfile/list", params: map[string]any{"limit": 80}},
+		{key: "account", method: "account/read"},
+		{key: "rateLimits", method: "account/rateLimits/read"},
+		{key: "mcp", method: "mcpServerStatus/list", params: map[string]any{"limit": 80}},
+		{key: "plugins", method: "plugin/list", params: map[string]any{}},
+		{key: "skills", method: "skills/list", params: map[string]any{"cwds": []string{}}},
+		{key: "hooks", method: "hooks/list", params: map[string]any{"cwds": []string{}}},
+	} {
+		result, err := s.codex.Capability(r.Context(), item.method, item.params)
+		if err != nil {
+			errors[item.key] = err.Error()
+			continue
+		}
+		sections[item.key] = result
+	}
+	sections["config"] = map[string]any{"status": "deferred", "summary": "原始 Codex config 读取和写入需要单独的受控接口"}
+	writeJSON(w, http.StatusOK, map[string]any{"sections": sections, "errors": errors})
+}
+
 func (s *Server) handleListCodexSessions(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAuth(w, r); !ok {
 		return
@@ -484,9 +532,13 @@ func (s *Server) handleCreateCodexSession(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req struct {
-		WorkspaceID string `json:"workspaceId"`
-		Title       string `json:"title"`
-		Sandbox     string `json:"sandbox"`
+		WorkspaceID       string `json:"workspaceId"`
+		Title             string `json:"title"`
+		Sandbox           string `json:"sandbox"`
+		Model             string `json:"model"`
+		ServiceTier       string `json:"serviceTier"`
+		ApprovalPolicy    string `json:"approvalPolicy"`
+		ApprovalsReviewer string `json:"approvalsReviewer"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -498,6 +550,8 @@ func (s *Server) handleCreateCodexSession(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid_sandbox", "只支持只读和工作区可写两种沙箱")
 		return
 	}
+	req.ApprovalPolicy = normalizeApprovalPolicy(req.ApprovalPolicy)
+	req.ApprovalsReviewer = normalizeApprovalsReviewer(req.ApprovalsReviewer)
 	req.WorkspaceID = strings.TrimSpace(req.WorkspaceID)
 	workspace := storage.Workspace{}
 	hasWorkspace := req.WorkspaceID != ""
@@ -513,7 +567,12 @@ func (s *Server) handleCreateCodexSession(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusForbidden, "permission_denied", "workspace-write 需要选择已允许写入的项目")
 		return
 	}
-	session, err := s.codex.CreateSession(r.Context(), workspace, strings.TrimSpace(req.Title), req.Sandbox)
+	session, err := s.codex.CreateSession(r.Context(), workspace, strings.TrimSpace(req.Title), req.Sandbox, codex.SessionOptions{
+		Model:             strings.TrimSpace(req.Model),
+		ServiceTier:       strings.TrimSpace(req.ServiceTier),
+		ApprovalPolicy:    req.ApprovalPolicy,
+		ApprovalsReviewer: req.ApprovalsReviewer,
+	})
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "codex_app_server_failed", err.Error())
 		return
@@ -551,6 +610,7 @@ func (s *Server) handleCodexSessionSubroutes(w http.ResponseWriter, r *http.Requ
 	}
 	if len(parts) == 1 && r.Method == http.MethodGet {
 		turns, _ := s.store.ListCodexTurns(r.Context(), session.ID, 200)
+		items, _ := s.store.ListCodexItems(r.Context(), session.ID, 200)
 		var workspacePayload any
 		if hasWorkspace {
 			workspacePayload = workspace
@@ -559,7 +619,27 @@ func (s *Server) handleCodexSessionSubroutes(w http.ResponseWriter, r *http.Requ
 			"session":   session,
 			"workspace": workspacePayload,
 			"turns":     turns,
+			"items":     items,
 		})
+		return
+	}
+	if r.Method == http.MethodGet && len(parts) == 2 && parts[1] == "git" {
+		if !hasWorkspace || workspace.RootPath == "" {
+			writeError(w, http.StatusBadRequest, "workspace_required", "该会话没有绑定项目")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":     workspaces.ReadGitStatus(r.Context(), workspace.RootPath),
+			"diff":       workspaces.ReadGitDiff(r.Context(), workspace.RootPath, false),
+			"stagedDiff": workspaces.ReadGitDiff(r.Context(), workspace.RootPath, true),
+		})
+		return
+	}
+	if r.Method == http.MethodPatch && len(parts) == 2 && parts[1] == "settings" {
+		if !s.requireCSRF(w, r, ctx.Session) {
+			return
+		}
+		s.handleUpdateCodexSessionSettings(w, r, session, workspace, hasWorkspace)
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -571,6 +651,10 @@ func (s *Server) handleCodexSessionSubroutes(w http.ResponseWriter, r *http.Requ
 	}
 	if len(parts) == 2 && parts[1] == "turns" {
 		s.handleCreateCodexTurn(w, r, session, workspace, hasWorkspace)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "git" && parts[2] == "actions" {
+		s.handleCodexGitAction(w, r, session, workspace, hasWorkspace)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "interrupt" {
@@ -602,7 +686,130 @@ func (s *Server) handleCodexSessionSubroutes(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusOK, map[string]any{"archived": true})
 		return
 	}
+	if len(parts) == 2 && parts[1] == "fork" {
+		forked, err := s.codex.ForkSession(r.Context(), session, workspace)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "codex_app_server_failed", err.Error())
+			return
+		}
+		_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+			EventType:   "codex.session.fork",
+			WorkspaceID: workspace.ID,
+			RiskLevel:   riskForSandbox(forked.Sandbox),
+			Summary:     "已 fork Codex 会话",
+			Payload:     map[string]any{"sessionId": session.ID, "forkedSessionId": forked.ID, "threadId": forked.CodexThreadID},
+		})
+		writeJSON(w, http.StatusCreated, forked)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "rollback" {
+		var req struct {
+			NumTurns int `json:"numTurns"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if err := s.codex.RollbackSession(r.Context(), session, req.NumTurns); err != nil {
+			writeError(w, http.StatusBadGateway, "codex_app_server_failed", err.Error())
+			return
+		}
+		_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+			EventType:   "codex.session.rollback",
+			WorkspaceID: workspace.ID,
+			RiskLevel:   "medium",
+			Summary:     "已请求回滚 Codex 会话历史",
+			Payload:     map[string]any{"sessionId": session.ID, "threadId": session.CodexThreadID, "numTurns": req.NumTurns},
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "compact" {
+		if err := s.codex.CompactSession(r.Context(), session); err != nil {
+			writeError(w, http.StatusBadGateway, "codex_app_server_failed", err.Error())
+			return
+		}
+		_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+			EventType:   "codex.session.compact",
+			WorkspaceID: workspace.ID,
+			RiskLevel:   "low",
+			Summary:     "已请求压缩 Codex 会话上下文",
+			Payload:     map[string]any{"sessionId": session.ID, "threadId": session.CodexThreadID},
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "review" {
+		var req struct {
+			Target string `json:"target"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if err := s.codex.StartReview(r.Context(), session, strings.TrimSpace(req.Target)); err != nil {
+			writeError(w, http.StatusBadGateway, "codex_app_server_failed", err.Error())
+			return
+		}
+		_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+			EventType:   "codex.review.start",
+			WorkspaceID: workspace.ID,
+			RiskLevel:   "low",
+			Summary:     "已启动 Codex review",
+			Payload:     map[string]any{"sessionId": session.ID, "threadId": session.CodexThreadID, "target": strings.TrimSpace(req.Target)},
+		})
+		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+		return
+	}
 	writeError(w, http.StatusNotFound, "not_found", "未找到会话路由")
+}
+
+func (s *Server) handleUpdateCodexSessionSettings(w http.ResponseWriter, r *http.Request, session storage.CodexSession, workspace storage.Workspace, hasWorkspace bool) {
+	if session.Archived {
+		writeError(w, http.StatusConflict, "session_archived", "该会话已归档")
+		return
+	}
+	var req struct {
+		Model             string `json:"model"`
+		ServiceTier       string `json:"serviceTier"`
+		ApprovalPolicy    string `json:"approvalPolicy"`
+		ApprovalsReviewer string `json:"approvalsReviewer"`
+		Sandbox           string `json:"sandbox"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	req.Sandbox = strings.TrimSpace(req.Sandbox)
+	if req.Sandbox == "" {
+		req.Sandbox = session.Sandbox
+	}
+	if !validSandbox(req.Sandbox) {
+		writeError(w, http.StatusBadRequest, "invalid_sandbox", "只支持只读和工作区可写两种沙箱")
+		return
+	}
+	if req.Sandbox == "workspace-write" && (!hasWorkspace || !workspace.AllowCodexWrite) {
+		writeError(w, http.StatusForbidden, "permission_denied", "workspace-write 需要选择已允许写入的项目")
+		return
+	}
+	updated, err := s.codex.UpdateSessionSettings(r.Context(), session, workspace, strings.TrimSpace(req.Model), strings.TrimSpace(req.ServiceTier), normalizeApprovalPolicy(req.ApprovalPolicy), normalizeApprovalsReviewer(req.ApprovalsReviewer), req.Sandbox)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "codex_app_server_failed", err.Error())
+		return
+	}
+	_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+		EventType:   "codex.session.settings.update",
+		WorkspaceID: workspace.ID,
+		RiskLevel:   riskForSandbox(updated.Sandbox),
+		Summary:     "已更新 Codex 会话设置",
+		Payload: map[string]any{
+			"sessionId":         updated.ID,
+			"threadId":          updated.CodexThreadID,
+			"model":             updated.Model,
+			"serviceTier":       updated.ServiceTier,
+			"approvalPolicy":    updated.ApprovalPolicy,
+			"approvalsReviewer": updated.ApprovalsReviewer,
+			"sandbox":           updated.Sandbox,
+		},
+	})
+	writeJSON(w, http.StatusOK, updated)
 }
 
 func (s *Server) sessionWorkspace(ctx context.Context, session storage.CodexSession) (storage.Workspace, bool, error) {
@@ -634,6 +841,9 @@ func (s *Server) handleCreateCodexTurn(w http.ResponseWriter, r *http.Request, s
 		writeError(w, http.StatusBadRequest, "invalid_request", "提示词不能为空")
 		return
 	}
+	if s.handleCodexComposerCommand(w, r, session, workspace, req.Prompt) {
+		return
+	}
 	turn, action, err := s.codex.SendTurn(r.Context(), session, workspace, req.Prompt, req.Mode)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "codex_app_server_failed", err.Error())
@@ -647,6 +857,140 @@ func (s *Server) handleCreateCodexTurn(w http.ResponseWriter, r *http.Request, s
 		Payload:     map[string]any{"sessionId": session.ID, "turnId": turn.CodexTurnID, "action": action, "promptPreview": preview(req.Prompt, 120)},
 	})
 	writeJSON(w, http.StatusAccepted, map[string]any{"turn": turn, "action": action})
+}
+
+func (s *Server) handleCodexGitAction(w http.ResponseWriter, r *http.Request, session storage.CodexSession, workspace storage.Workspace, hasWorkspace bool) {
+	if session.Archived {
+		writeError(w, http.StatusConflict, "session_archived", "该会话已归档")
+		return
+	}
+	if !hasWorkspace || workspace.RootPath == "" {
+		writeError(w, http.StatusBadRequest, "workspace_required", "该会话没有绑定项目")
+		return
+	}
+	if !workspace.AllowCodexWrite {
+		writeError(w, http.StatusForbidden, "permission_denied", "该项目未允许 Codex/Git 写入")
+		return
+	}
+	var req struct {
+		Action  string   `json:"action"`
+		Paths   []string `json:"paths"`
+		Message string   `json:"message"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := workspaces.RunGitAction(r.Context(), workspace.RootPath, strings.TrimSpace(req.Action), req.Paths, req.Message)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_git_action", err.Error())
+		return
+	}
+	risk := "low"
+	if result.Action == "commit" {
+		risk = "medium"
+	}
+	_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+		EventType:   "codex.git.action",
+		WorkspaceID: workspace.ID,
+		RiskLevel:   risk,
+		Summary:     "已执行会话 Git 操作",
+		Payload: map[string]any{
+			"sessionId":      session.ID,
+			"threadId":       session.CodexThreadID,
+			"action":         result.Action,
+			"pathCount":      len(req.Paths),
+			"messagePreview": preview(req.Message, 120),
+			"failed":         result.Error != "",
+		},
+	})
+	s.appendCodexSessionEvent(r.Context(), session.ID, "git.action.completed", map[string]any{
+		"action":    result.Action,
+		"pathCount": len(req.Paths),
+		"failed":    result.Error != "",
+		"error":     result.Error,
+	})
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleCodexComposerCommand(w http.ResponseWriter, r *http.Request, session storage.CodexSession, workspace storage.Workspace, prompt string) bool {
+	parts := strings.Fields(prompt)
+	if len(parts) == 0 || !strings.HasPrefix(parts[0], "/") {
+		return false
+	}
+	command := strings.ToLower(parts[0])
+	switch command {
+	case "/status":
+		pending, _ := s.store.ListCodexApprovals(r.Context(), "pending", 100)
+		count := 0
+		for _, item := range pending {
+			if item.SessionID == session.ID {
+				count++
+			}
+		}
+		s.appendCodexSessionEvent(r.Context(), session.ID, "composer.status", map[string]any{
+			"threadId":          session.CodexThreadID,
+			"status":            session.Status,
+			"model":             session.Model,
+			"serviceTier":       session.ServiceTier,
+			"approvalPolicy":    session.ApprovalPolicy,
+			"approvalsReviewer": session.ApprovalsReviewer,
+			"sandbox":           session.Sandbox,
+			"tokenUsage":        session.TokenUsage,
+			"pendingApprovals":  count,
+		})
+		writeJSON(w, http.StatusAccepted, map[string]any{"action": "status"})
+		return true
+	case "/review":
+		if err := s.codex.StartReview(r.Context(), session, "uncommittedChanges"); err != nil {
+			writeError(w, http.StatusBadGateway, "codex_app_server_failed", err.Error())
+			return true
+		}
+		_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+			EventType:   "codex.review.start",
+			WorkspaceID: workspace.ID,
+			RiskLevel:   "low",
+			Summary:     "已通过 slash command 启动 Codex review",
+			Payload:     map[string]any{"sessionId": session.ID, "threadId": session.CodexThreadID, "source": "slash"},
+		})
+		writeJSON(w, http.StatusAccepted, map[string]any{"action": "review"})
+		return true
+	case "/mcp":
+		result, err := s.codex.Capability(r.Context(), "mcpServerStatus/list", map[string]any{"limit": 80})
+		payload := map[string]any{"threadId": session.CodexThreadID}
+		if err != nil {
+			payload["summary"] = "MCP 状态读取失败：" + err.Error()
+		} else {
+			payload["summary"] = "MCP 状态已读取"
+			if data, ok := result["data"].([]any); ok {
+				payload["count"] = len(data)
+			}
+		}
+		s.appendCodexSessionEvent(r.Context(), session.ID, "composer.status", payload)
+		writeJSON(w, http.StatusAccepted, map[string]any{"action": "mcp"})
+		return true
+	case "/goal":
+		if session.CodexThreadID == "" {
+			writeError(w, http.StatusConflict, "thread_missing", "会话还没有 Codex thread")
+			return true
+		}
+		objective := strings.TrimSpace(strings.TrimPrefix(prompt, parts[0]))
+		method := "thread/goal/get"
+		params := map[string]any{"threadId": session.CodexThreadID}
+		if objective != "" {
+			method = "thread/goal/set"
+			params["objective"] = objective
+		}
+		result, err := s.codex.Capability(r.Context(), method, params)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "codex_app_server_failed", err.Error())
+			return true
+		}
+		s.appendCodexSessionEvent(r.Context(), session.ID, "composer.status", map[string]any{"threadId": session.CodexThreadID, "summary": "Goal 已处理", "goal": result})
+		writeJSON(w, http.StatusAccepted, map[string]any{"action": "goal"})
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) handleCreateExecJob(w http.ResponseWriter, r *http.Request) {
@@ -737,7 +1081,11 @@ func (s *Server) handleEventHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "scope 和 id 不能为空")
 		return
 	}
-	items, err := s.store.ListEvents(r.Context(), scope, scopeID, after, 300)
+	limit := parseInt(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+	items, err := s.store.ListEvents(r.Context(), scope, scopeID, after, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -795,11 +1143,77 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) appendCodexSessionEvent(ctx context.Context, sessionID, eventType string, payload map[string]any) {
+	event, err := s.store.AppendEvent(ctx, "codex_session", sessionID, eventType, sanitizeEventPayload(payload))
+	if err == nil {
+		s.hub.Publish(event)
+	}
+}
+
 func (s *Server) handlePendingApprovals(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAuth(w, r); !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
+	items, err := s.store.ListCodexApprovals(r.Context(), "pending", 100)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleApprovalSubroutes(w http.ResponseWriter, r *http.Request) {
+	ctx, ok := s.requireAuth(w, r)
+	if !ok || !s.requireCSRF(w, r, ctx.Session) {
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/approvals/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] != "resolve" {
+		writeError(w, http.StatusNotFound, "not_found", "未找到审批路由")
+		return
+	}
+	approval, err := s.store.GetCodexApproval(r.Context(), parts[0])
+	if err != nil {
+		writeError(w, http.StatusNotFound, "approval_not_found", "未找到审批请求")
+		return
+	}
+	if approval.Status != "pending" {
+		writeError(w, http.StatusConflict, "approval_resolved", "审批请求已处理")
+		return
+	}
+	var req struct {
+		Action  string         `json:"action"`
+		Payload map[string]any `json:"payload"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Payload == nil {
+		req.Payload = map[string]any{}
+	}
+	if err := s.codex.ResolveApproval(r.Context(), approval, req.Action, req.Payload); err != nil {
+		writeError(w, http.StatusBadGateway, "codex_app_server_failed", err.Error())
+		return
+	}
+	status := approvalStatusFromAction(req.Action)
+	decision := map[string]any{"action": req.Action}
+	for key, value := range req.Payload {
+		decision[key] = value
+	}
+	updated, err := s.store.ResolveCodexApproval(r.Context(), approval.ID, status, decision)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+		EventType:   "codex.approval.resolve",
+		WorkspaceID: "",
+		RiskLevel:   approval.RiskLevel,
+		Summary:     "已处理 Codex 审批请求",
+		Payload:     map[string]any{"approvalId": approval.ID, "sessionId": approval.SessionID, "requestType": approval.RequestType, "status": status},
+	})
+	writeJSON(w, http.StatusOK, updated)
 }
 
 func (s *Server) handleAuditEvents(w http.ResponseWriter, r *http.Request) {
@@ -1918,12 +2332,87 @@ func parseInt64(value string) int64 {
 	return parsed
 }
 
+func parseInt(value string) int {
+	parsed, _ := strconv.Atoi(value)
+	return parsed
+}
+
 func preview(value string, max int) string {
-	value = strings.TrimSpace(value)
+	value = redactPreviewText(strings.TrimSpace(value))
 	if len(value) <= max {
 		return value
 	}
 	return value[:max] + "..."
+}
+
+var previewSecretPatterns = []struct {
+	pattern     *regexp.Regexp
+	replacement string
+}{
+	{regexp.MustCompile(`(?i)(authorization:\s*bearer\s+)[^\s]+`), `${1}[redacted]`},
+	{regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}`), `${1}[redacted]`},
+	{regexp.MustCompile(`(?i)((?:password|token|secret|api[_-]?key)=)[^\s&]+`), `${1}[redacted]`},
+	{regexp.MustCompile(`sk-[A-Za-z0-9_-]{8,}`), `[redacted]`},
+}
+
+func redactPreviewText(value string) string {
+	for _, item := range previewSecretPatterns {
+		value = item.pattern.ReplaceAllString(value, item.replacement)
+	}
+	return value
+}
+
+func sanitizeEventPayload(payload map[string]any) map[string]any {
+	if payload == nil {
+		return map[string]any{}
+	}
+	if sanitized, ok := redactEventValue(payload).(map[string]any); ok {
+		return sanitized
+	}
+	return map[string]any{}
+}
+
+func redactEventValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			if sensitiveEventKey(key) {
+				out[key] = "[redacted]"
+				continue
+			}
+			out[key] = redactEventValue(item)
+		}
+		return out
+	case []any:
+		limit := len(typed)
+		if limit > 100 {
+			limit = 100
+		}
+		out := make([]any, 0, limit)
+		for i := 0; i < limit; i++ {
+			out = append(out, redactEventValue(typed[i]))
+		}
+		return out
+	case string:
+		redacted := redactPreviewText(typed)
+		if len(redacted) > 4000 {
+			return redacted[:4000] + "...[truncated]"
+		}
+		return redacted
+	default:
+		return typed
+	}
+}
+
+func sensitiveEventKey(key string) bool {
+	normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
+	for _, marker := range []string{"apikey", "authorization", "cookie", "csrftoken", "sessiontoken", "password", "secret", "accesstoken", "refreshtoken", "privatekey", "presigned"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func workspaceNameFromPath(rootPath string) string {
@@ -2010,6 +2499,35 @@ func imageExtensionFromMime(mimeType string) string {
 
 func validSandbox(sandbox string) bool {
 	return sandbox == "read-only" || sandbox == "workspace-write"
+}
+
+func normalizeApprovalPolicy(value string) string {
+	switch strings.TrimSpace(value) {
+	case "untrusted", "on-request":
+		return strings.TrimSpace(value)
+	default:
+		return "on-request"
+	}
+}
+
+func normalizeApprovalsReviewer(value string) string {
+	switch strings.TrimSpace(value) {
+	case "user", "auto_review":
+		return strings.TrimSpace(value)
+	default:
+		return "user"
+	}
+}
+
+func approvalStatusFromAction(action string) string {
+	switch strings.TrimSpace(action) {
+	case "allow", "accept", "allow_session", "allowForSession", "acceptForSession":
+		return "approved"
+	case "cancel":
+		return "cancelled"
+	default:
+		return "declined"
+	}
 }
 
 func isNotFound(err error) bool {

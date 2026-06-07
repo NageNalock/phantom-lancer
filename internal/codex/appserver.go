@@ -16,9 +16,10 @@ import (
 )
 
 type appServerClient struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	notify chan appServerNotification
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	notify   chan appServerNotification
+	requests chan appServerRequest
 
 	nextID int64
 
@@ -32,6 +33,12 @@ type appServerClient struct {
 }
 
 type appServerNotification struct {
+	Method string         `json:"method"`
+	Params map[string]any `json:"params"`
+}
+
+type appServerRequest struct {
+	ID     string         `json:"id"`
 	Method string         `json:"method"`
 	Params map[string]any `json:"params"`
 }
@@ -72,11 +79,12 @@ func startAppServer(ctx context.Context, binary string, env []string) (*appServe
 	}
 
 	client := &appServerClient{
-		cmd:     cmd,
-		stdin:   stdin,
-		notify:  make(chan appServerNotification, 128),
-		pending: make(map[string]chan rpcResult),
-		done:    make(chan struct{}),
+		cmd:      cmd,
+		stdin:    stdin,
+		notify:   make(chan appServerNotification, 128),
+		requests: make(chan appServerRequest, 64),
+		pending:  make(map[string]chan rpcResult),
+		done:     make(chan struct{}),
 	}
 	go client.readStdout(stdout)
 	go client.discardStderr(stderr)
@@ -105,6 +113,10 @@ func startAppServer(ctx context.Context, binary string, env []string) (*appServe
 			"requestAttestation": false,
 		},
 	}, &initialized); err != nil {
+		client.Close()
+		return nil, err
+	}
+	if err := client.Notify("initialized", nil); err != nil {
 		client.Close()
 		return nil, err
 	}
@@ -171,6 +183,55 @@ func (c *appServerClient) Notifications() <-chan appServerNotification {
 	return c.notify
 }
 
+func (c *appServerClient) ServerRequests() <-chan appServerRequest {
+	return c.requests
+}
+
+func (c *appServerClient) Notify(method string, params any) error {
+	payload := map[string]any{"method": method}
+	if params != nil {
+		payload["params"] = params
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	select {
+	case <-c.done:
+		return errors.New("codex app-server 未运行")
+	default:
+	}
+	_, err = c.stdin.Write(append(data, '\n'))
+	return err
+}
+
+func (c *appServerClient) Respond(id string, result any, responseErr *rpcError) error {
+	if strings.TrimSpace(id) == "" {
+		return errors.New("codex app-server request id 不能为空")
+	}
+	payload := map[string]any{"id": id}
+	if responseErr != nil {
+		payload["error"] = responseErr
+	} else {
+		payload["result"] = result
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	select {
+	case <-c.done:
+		return errors.New("codex app-server 未运行")
+	default:
+	}
+	_, err = c.stdin.Write(append(data, '\n'))
+	return err
+}
+
 func (c *appServerClient) Running() bool {
 	select {
 	case <-c.done:
@@ -197,21 +258,41 @@ func (c *appServerClient) readStdout(stdout io.Reader) {
 		if err := json.Unmarshal([]byte(line), &raw); err != nil {
 			continue
 		}
+		methodRaw, ok := raw["method"]
 		if idRaw, ok := raw["id"]; ok {
-			c.resolveResponse(idRaw, raw)
+			id := requestIDString(idRaw)
+			if methodRaw == nil && c.resolveResponse(id, raw) {
+				continue
+			}
+			if methodRaw != nil && c.isPending(id) {
+				if c.resolveResponse(id, raw) {
+					continue
+				}
+			}
+		}
+		if methodRaw == nil {
 			continue
 		}
-		methodRaw, ok := raw["method"]
+		method, params, ok := decodeMethodParams(methodRaw, raw["params"])
 		if !ok {
 			continue
 		}
-		var method string
-		if err := json.Unmarshal(methodRaw, &method); err != nil || method == "" {
+		if idRaw, ok := raw["id"]; ok {
+			request := appServerRequest{ID: requestIDString(idRaw), Method: method, Params: params}
+			if request.ID == "" {
+				continue
+			}
+			select {
+			case <-c.done:
+				return
+			default:
+			}
+			select {
+			case c.requests <- request:
+			case <-c.done:
+				return
+			}
 			continue
-		}
-		params := map[string]any{}
-		if paramsRaw, ok := raw["params"]; ok && len(paramsRaw) > 0 {
-			_ = json.Unmarshal(paramsRaw, &params)
 		}
 		notification := appServerNotification{Method: method, Params: params}
 		select {
@@ -223,7 +304,6 @@ func (c *appServerClient) readStdout(stdout io.Reader) {
 		case c.notify <- notification:
 		case <-c.done:
 			return
-		default:
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -239,17 +319,25 @@ func (c *appServerClient) discardStderr(stderr io.Reader) {
 	}
 }
 
-func (c *appServerClient) resolveResponse(idRaw json.RawMessage, raw map[string]json.RawMessage) {
-	id := requestIDString(idRaw)
+func (c *appServerClient) isPending(id string) bool {
 	if id == "" {
-		return
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pending[id] != nil
+}
+
+func (c *appServerClient) resolveResponse(id string, raw map[string]json.RawMessage) bool {
+	if id == "" {
+		return false
 	}
 	c.mu.Lock()
 	ch := c.pending[id]
 	delete(c.pending, id)
 	c.mu.Unlock()
 	if ch == nil {
-		return
+		return false
 	}
 	if errorRaw, ok := raw["error"]; ok {
 		var rpcErr rpcError
@@ -258,9 +346,10 @@ func (c *appServerClient) resolveResponse(idRaw json.RawMessage, raw map[string]
 			rpcErr.Message = "Codex app-server 请求失败"
 		}
 		ch <- rpcResult{Err: fmt.Errorf("%s", rpcErr.Message)}
-		return
+		return true
 	}
 	ch <- rpcResult{Result: raw["result"]}
+	return true
 }
 
 func (c *appServerClient) dropPending(id string) {
@@ -288,6 +377,7 @@ func (c *appServerClient) closeWithError(err error) {
 func (c *appServerClient) closeNotify() {
 	c.notifyOnce.Do(func() {
 		close(c.notify)
+		close(c.requests)
 	})
 }
 
@@ -301,4 +391,16 @@ func requestIDString(raw json.RawMessage) string {
 		return strconv.FormatInt(number, 10)
 	}
 	return ""
+}
+
+func decodeMethodParams(methodRaw json.RawMessage, paramsRaw json.RawMessage) (string, map[string]any, bool) {
+	var method string
+	if err := json.Unmarshal(methodRaw, &method); err != nil || method == "" {
+		return "", nil, false
+	}
+	params := map[string]any{}
+	if len(paramsRaw) > 0 {
+		_ = json.Unmarshal(paramsRaw, &params)
+	}
+	return method, params, true
 }
