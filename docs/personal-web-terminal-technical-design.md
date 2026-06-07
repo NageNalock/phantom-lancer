@@ -1,14 +1,19 @@
 # 个人全面 Web 终端技术方案
 
-文档日期：2026-06-04  
-关联产品文档：[personal-web-terminal-product-features.md](./personal-web-terminal-product-features.md)  
+文档日期：2026-06-07
+关联产品文档：[personal-web-terminal-product-features.md](./personal-web-terminal-product-features.md)
 后端要求：Go
 
-Codex Gateway / OpenAI Gateway 是独立能力域，其详细设计见 [codex-openai-gateway-feature-design.md](./codex-openai-gateway-feature-design.md)。原 Codex CLI / Codex Client 客户端方案已废弃，本控制台不再内置 Codex 会话、审批、sandbox 或工作区写入能力。
+Codex CLI Client 和 Codex Gateway / OpenAI Gateway 是并列独立能力域：
+
+- Codex CLI Client 依赖部署机本地安装的 `codex` CLI，提供受控 Web 会话客户端能力，详细设计见 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md)。
+- Codex Gateway / OpenAI Gateway 暴露 OpenAI-compatible `/v1/*` API，详细设计见 [codex-openai-gateway-feature-design.md](./codex-openai-gateway-feature-design.md)。
+
+旧版 Codex 客户端代码已移除，但数据库中可能仍有残留旧表或旧事件。新版 Codex CLI Client 必须使用新的表名前缀和 additive migration，不复用旧 schema 假设。
 
 ## 1. 技术定位
 
-本项目是一个面向个人使用的服务器 Web 控制台。当前已落地的能力域包括控制台总览、Codex Gateway、日志中心、Images 图片生成、V2Ray 和全局设置；后续可继续扩展应用管理、文件、服务、任务自动化等服务器管理模块。
+本项目是一个面向个人使用的服务器 Web 控制台。当前能力域包括控制台总览、Codex、Codex Gateway、日志中心、Images 图片生成、V2Ray 和全局设置；后续可继续扩展应用管理、文件、服务、任务自动化等服务器管理模块。
 
 技术方案保持单机、轻量、可扩展：
 
@@ -26,12 +31,15 @@ flowchart LR
   Browser["Web Frontend"] -->|REST API| Backend["Go Backend"]
   Browser -->|SSE Event Stream| Backend
   Backend --> Auth["Auth / Session"]
+  Backend --> CodexClient["Codex CLI Client"]
   Backend --> Gateway["Codex Gateway"]
   Backend --> Images["Images Manager"]
   Backend --> V2Ray["V2Ray Manager"]
   Backend --> Logs["Log Center"]
   Backend --> Audit["Audit Logger"]
   Backend --> Store["SQLite"]
+  CodexClient -->|stdio JSON-RPC| CodexAppServer["codex app-server"]
+  CodexClient -->|JSONL fallback| CodexExec["codex exec --json"]
   Images --> ObjectStore["S3-compatible Object Storage"]
   Gateway -->|HTTPS| OpenAIUpstream["Codex/OpenAI Upstream"]
 ```
@@ -41,6 +49,7 @@ flowchart LR
 前端负责提供个人 Web 终端界面：
 
 - 登录页。
+- Codex 会话客户端页。
 - 总览页。
 - Codex Gateway 管理页。
 - 日志中心。
@@ -56,6 +65,7 @@ Go 后端是系统唯一的执行入口和权限边界，负责：
 
 - 用户登录和 session 管理。
 - 允许根目录和路径边界校验。
+- Codex CLI 安装探测、app-server runtime supervisor、workspace policy、exec runner、审批和事件归一化。
 - Gateway public API、账号凭据摘要、模型目录和请求日志管理。
 - Images 生成 job、图片资产和对象存储管理。
 - V2Ray 配置与运行控制。
@@ -68,6 +78,8 @@ Go 后端是系统唯一的执行入口和权限边界，负责：
 执行层由 Go 后端通过受控子进程或外部调用完成：
 
 - Gateway 上游 `/v1/*` 请求转发。
+- Codex CLI app-server 定时探测和 stdio JSON-RPC 调用。
+- Codex exec JSONL fallback。
 - Images provider HTTPS 调用。
 - V2Ray 进程启停。
 - 日志文件只读 tail 与搜索。
@@ -82,6 +94,7 @@ Go 后端是系统唯一的执行入口和权限边界，负责：
 - owner 账号和 session。
 - 允许根目录和全局运行设置。
 - Gateway settings、public API keys、账号摘要、模型目录和请求日志。
+- Codex CLI installation、workspace、thread、turn、event、approval、run 和 attachment metadata。
 - 活动审计。
 - 持久事件。
 - Images generation jobs、图片资产、provider 设置和图片存储设置。
@@ -94,6 +107,7 @@ SQLite 足够支撑个人单机使用，后续如需要多服务器或更强并�
 ```mermaid
 flowchart TD
   API["HTTP API"] --> Auth["Auth Module"]
+  API --> CodexClient["Codex CLI Client Module"]
   API --> Gateway["Gateway Module"]
   API --> Images["Images Module"]
   API --> V2Ray["V2Ray Module"]
@@ -101,6 +115,7 @@ flowchart TD
   API --> Audit["Audit Module"]
   API --> Event["Event Module"]
 
+  CodexClient --> Event
   Gateway --> Event
   Images --> Event
   V2Ray --> Event
@@ -137,7 +152,25 @@ flowchart TD
 
 Gateway Module 不绑定工作目录，不执行 shell，不修改文件。详细设计见 [codex-openai-gateway-feature-design.md](./codex-openai-gateway-feature-design.md)。
 
-### 3.3 Event Module
+### 3.3 Codex CLI Client Module
+
+负责：
+
+- 探测 `codex` binary、version、auth、sandbox、app-server 和 exec fallback。
+- 维护 managed app-server runtime 状态，主程序定时检查 running/stopped/failed/degraded。
+- 在 app-server 未启动时，通过受控 API 支持页面一键启动。
+- 管理 Codex workspace，校验允许根目录、信任状态和默认权限模式。
+- 通过 `codex app-server --listen stdio://` 创建、恢复、继续、中断和归档 thread。
+- 在 app-server 不可用时，通过 `codex exec --json` 提供一次性任务 fallback。
+- 将 Codex JSON-RPC notification 或 exec JSONL event 转换为 Phantom Lancer 稳定事件。
+- 持久化 thread、turn、event、approval 和 run 状态，支持刷新后恢复。
+- 将审批请求写入可恢复状态，等待 owner 决策后回传 Codex。
+- 对 prompt 摘要、stderr、URL、token、secret、附件和事件 payload 做 redaction 和大小限制。
+- 将关键操作写入 audit，服务 `slog` 只记录异常摘要。
+
+Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*` API、不默认 full access。详细设计见 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md)。
+
+### 3.4 Event Module
 
 负责：
 
@@ -146,17 +179,18 @@ Gateway Module 不绑定工作目录，不执行 shell，不修改文件。详�
 - SSE 实时推送。
 - 浏览器刷新后的事件恢复。
 
-### 3.4 Audit Module
+### 3.5 Audit Module
 
 负责：
 
 - 登录审计。
+- Codex workspace、thread、turn、审批、设置和诊断审计。
 - Gateway 配置和账号变更审计。
 - Images 生成和资产变更审计。
 - V2Ray 配置和控制审计。
 - 全局设置变更审计。
 
-### 3.5 Logs Module
+### 3.6 Logs Module
 
 负责：
 
@@ -166,7 +200,7 @@ Gateway Module 不绑定工作目录，不执行 shell，不修改文件。详�
 
 详细设计见 [log-center-feature-design.md](./log-center-feature-design.md)。
 
-### 3.6 Images Module
+### 3.7 Images Module
 
 负责：
 
@@ -181,7 +215,7 @@ Gateway Module 不绑定工作目录，不执行 shell，不修改文件。详�
 
 Images 图片库的详细产品交互和对象存储设计见 [images-library-feature-design.md](./images-library-feature-design.md)。
 
-### 3.7 V2Ray Module
+### 3.8 V2Ray Module
 
 负责：
 
@@ -212,12 +246,24 @@ Images 图片库的详细产品交互和对象存储设计见 [images-library-fe
 | --- | --- | --- |
 | 框架 | React + Vite | 开发快，适合控制台产品 |
 | 语言 | TypeScript | 保证 API 和事件类型稳定 |
-| 样式 | Tailwind CSS | 便于实现现代、年轻、彩色的界面 |
+| 样式 | Tailwind CSS | 便于实现 Quiet Agent Workbench 风格的浅色中性工作台 |
 | 实时事件 | EventSource / SSE client | 对接后端事件流 |
 | 状态管理 | Zustand 或 React Query | 轻量管理接口状态和 UI 状态 |
 | 图标 | 单一图标库 | 保持视觉一致 |
 
-### 4.3 Gateway 集成
+### 4.3 Codex CLI 集成
+
+| 场景 | 方式 | 说明 |
+| --- | --- | --- |
+| 安装探测 | `codex --version` / 诊断命令 | 只记录版本和能力摘要，不记录 token |
+| app-server runtime | 定时 probe + 一键启动 | 主程序维护 running/stopped/failed/degraded 状态，页面通过受控 API 启动 |
+| 长会话 | `codex app-server --listen stdio://` | Go 后端通过 stdio JSON-RPC 连接，不暴露给浏览器 |
+| 一次性任务 fallback | `codex exec --json` | app-server 不可用时使用，默认低权限 |
+| 权限模式 | CLI `--sandbox` / `--ask-for-approval` | 由 workspace trust state 和 owner 选择共同决定 |
+| 事件接入 | JSON-RPC notification / JSONL | 后端归一化后写入 Event Module 和 SSE |
+| 子进程管理 | `os/exec` + context | 受控 env allowlist、timeout、interrupt、stderr size limit |
+
+### 4.4 Gateway 集成
 
 | 场景 | 方式 | 说明 |
 | --- | --- | --- |
@@ -226,7 +272,7 @@ Images 图片库的详细产品交互和对象存储设计见 [images-library-fe
 | 账号管理 | OAuth / token 导入 | 仅保存摘要，不在前端回显明文 |
 | 连通性测试 | 上游探测 | 在管理 UI 提供测试入口 |
 
-### 4.4 部署
+### 4.5 部署
 
 | 类型 | 选型 | 说明 |
 | --- | --- | --- |
@@ -241,6 +287,7 @@ Images 图片库的详细产品交互和对象存储设计见 [images-library-fe
 - Go 服务直接监听配置端口，例如 `0.0.0.0:8080` 或内网 IP。
 - 前端构建产物由 Go embed 打进 binary，避免单独部署静态站点。
 - API、SSE、静态资源由同一个 Go 进程提供。
+- Codex CLI 由 owner 预先安装在部署机，Phantom Lancer 只通过配置的 binary path 或 PATH 探测使用。
 - HTTPS 不作为 MVP 默认要求；如果后续公网暴露，再考虑 Go 内置 TLS、VPN 或反向代理增强。
 - 即使是裸部署，也必须保留登录、session、CSRF 和后端权限校验。
 
@@ -250,6 +297,11 @@ Images 图片库的详细产品交互和对象存储设计见 [images-library-fe
 
 - Web 前端不能直接执行命令。
 - 所有执行请求必须经过 Go 后端。
+- Codex CLI 子进程不能继承完整服务环境，必须使用 env allowlist。
+- Codex workspace 必须落在允许根目录内。
+- Codex 默认不启用 network 和 full access；需要越界时必须通过审批或显式策略。
+- Codex app-server 启动必须由 Go 后端执行，写操作 API 必须校验 owner session + CSRF。
+- app-server 定时 probe 的成功路径不写服务日志或 audit，失败只记录脱敏摘要。
 - Gateway 公开 API 通过 public API key 鉴权，上游凭据只保存摘要。
 - 允许操作的目录必须在允许的根目录内。
 - secret 默认不可明文展示。
@@ -264,11 +316,36 @@ Images 图片库的详细产品交互和对象存储设计见 [images-library-fe
 - 上游账号登录由 OAuth / token 导入完成，不在前端回显明文。
 - Gateway 详细边界见 [codex-openai-gateway-feature-design.md](./codex-openai-gateway-feature-design.md)。
 
-### 5.3 MVP 边界
+### 5.3 Codex CLI Client 边界
+
+- Codex CLI Client 绑定 workspace、thread、turn、sandbox、approval 和事件流。
+- Codex CLI Client 不读取或展示 `auth.json`、access token、refresh token、cookie。
+- Codex CLI Client 不安装、升级或替换 `codex` CLI。
+- Codex CLI Client 不通过浏览器直连 app-server，不暴露 non-loopback WebSocket listener。
+- Codex CLI Client 页面的一键启动只触发后端受控 `codex app-server --listen stdio://`，不能拼接任意命令。
+- Codex CLI Client 不默认使用 `--yolo`、`danger-full-access` 或 `--ask-for-approval never`。
+- Codex CLI Client 的新表使用 `codex_cli_` 前缀；旧版残留 Codex 表不自动删除、不自动迁移。
+- Codex CLI Client 详细边界见 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md)。
+
+### 5.4 数据库兼容边界
+
+旧版 Codex 代码已经移除，但生产 SQLite 可能留有旧表、旧索引、旧 settings key 或旧 event scope。
+
+兼容要求：
+
+- 所有 Codex CLI Client 新表使用 `codex_cli_` 前缀。
+- Gateway 表继续使用 `codex_gateway_` 前缀。
+- migration 必须 additive 和 idempotent，不得 `DROP` 旧 Codex 表。
+- 启动时允许探测旧表存在，并在诊断 UI 显示 legacy data 状态。
+- MVP 不自动导入旧数据；如后续需要导入，必须显式设计 legacy import。
+- 旧表存在不能影响新模块启动，除非数据库本身损坏。
+
+### 5.5 MVP 边界
 
 第一版做：
 
 - 登录。
+- Codex CLI Client，包括 app-server 定时检查和页面一键启动。
 - Codex Gateway。
 - 日志中心。
 - Images 图片生成和图片库。
@@ -279,7 +356,9 @@ Images 图片库的详细产品交互和对象存储设计见 [images-library-fe
 第一版不做：
 
 - 任意 shell。
-- 内置 Codex CLI 会话客户端。
+- Codex CLI 安装器。
+- Codex Desktop 启动器。
+- Codex Cloud 任务编排。
 - 文件编辑。
 - 服务重启。
 - 多服务器。
@@ -290,9 +369,11 @@ Images 图片库的详细产品交互和对象存储设计见 [images-library-fe
 1. Go 服务骨架、配置、SQLite、路由。
 2. 登录、session、CSRF。
 3. 事件存储和 SSE。
-4. Codex Gateway public API、账号、模型和请求日志。
-5. Images 生成、图片库和对象存储。
-6. V2Ray 配置与运行控制。
-7. 日志中心源登记与 tail。
-8. 审计和活动记录。
-9. 前端控制台对接。
+4. Codex CLI Client SQLite schema、旧表探测、binary detector。
+5. Codex CLI Client AppServerSupervisor、定时 probe、一键启动 API、workspace、event mapping、approval broker。
+6. Codex Gateway public API、账号、模型和请求日志。
+7. Images 生成、图片库和对象存储。
+8. V2Ray 配置与运行控制。
+9. 日志中心源登记与 tail。
+10. 审计和活动记录。
+11. 前端控制台对接。
