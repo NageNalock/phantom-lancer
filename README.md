@@ -1,6 +1,6 @@
 # Phantom Lancer
 
-Personal all-in-one web terminal for managing self-hosted applications. The first implementation slice focuses on a Go backend, naked deployment, workspace registration, authentication, audit history, and Codex CLI task execution through the web UI.
+Personal all-in-one web terminal for managing self-hosted applications. The first implementation slice focuses on a Go backend, naked deployment, workspace registration, authentication, audit history, and the Codex Gateway (OpenAI-compatible API) managed through the web UI.
 
 ## Run Locally
 
@@ -12,7 +12,7 @@ Open `http://127.0.0.1:8080`, create the owner account, then register a workspac
 
 By default, the service stores data in `.phantom-data` and seeds the allowed workspace root with the repo directory. For deployment, copy `configs/phantom.example.toml` to `configs/phantom.toml` or set `PL_CONFIG=/path/to/phantom.toml`.
 
-The config file is intentionally small: listen address, data directory, optional database path, and first-run defaults. Runtime settings such as allowed roots, Codex binary, CODEX_HOME, and secure cookies are stored in SQLite and can be changed from the web Settings page without restarting.
+The config file is intentionally small: listen address, data directory, optional database path, and first-run defaults. Runtime settings such as allowed roots and secure cookies are stored in SQLite and can be changed from the web Settings page without restarting.
 
 ## Run From a Release Package
 
@@ -40,7 +40,6 @@ Edit `configs/phantom.toml` for the new machine before starting:
 - `server.addr`: the listen address, for example `127.0.0.1:8080` for local-only access.
 - `storage.data_dir`: where Phantom Lancer stores SQLite data, logs, update backups, and runtime assets.
 - `bootstrap.allowed_roots`: first-run workspace roots that the web console may register.
-- `bootstrap.codex_binary` and `bootstrap.codex_home`: optional Codex CLI defaults.
 - `updates.restart_mode`: keep `exit` when the service is supervised by systemd with restart enabled.
 
 Start it in the foreground:
@@ -57,7 +56,7 @@ scripts/manage.sh status
 scripts/manage.sh logs
 ```
 
-Open the configured address in a browser, create the owner account, then register the first workspace under an allowed root. Codex CLI installation and login still need to be completed separately on the server.
+Open the configured address in a browser, create the owner account, then register the first workspace under an allowed root.
 
 For long-running deployment, run Phantom Lancer under a supervisor such as systemd and configure automatic restart. This is recommended for the web self-update flow because updates replace the binary and then request a short service restart.
 
@@ -80,8 +79,6 @@ Useful environment variables:
 - `PL_DATA_DIR`: data directory, default `.phantom-data`
 - `PL_ALLOWED_ROOTS`: initial comma-separated workspace roots when no DB setting exists
 - `PL_BIN`: binary path, default `bin/phantom-lancer`
-- `PL_CODEX_BINARY`: initial Codex binary when no DB setting exists
-- `PL_CODEX_HOME`: initial Codex home directory when no DB setting exists
 - `PL_SERVICE_LOG_FILE`: managed JSONL service log path, default `<data_dir>/logs/phantom-lancer.jsonl`
 - `PL_LOG_FILE`: nohup stdout/stderr capture path for `manage.sh`
 - `PL_LOG_MAX_SIZE_MB`, `PL_LOG_MAX_FILES`, `PL_LOG_MAX_AGE_DAYS`: service log rotation and cleanup limits
@@ -111,12 +108,9 @@ The current source is a behavior-preserving TypeScript migration of the existing
 - Embedded static web console.
 - Owner bootstrap, login, session cookie, CSRF token.
 - Workspace registration with path boundary checks.
-- Codex CLI status detection.
-- `codex exec --json` one-shot jobs with SSE events.
+- Codex Gateway: OpenAI-compatible endpoint, upstream account/credential management, public API keys, model catalog, and request logs.
 - Log center for managed service logs and runtime event logs, with bounded online tail.
 - Basic audit trail.
-
-Codex CLI installation and login are intentionally left to the server owner.
 
 ## License
 

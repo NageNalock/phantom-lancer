@@ -26,8 +26,6 @@ Environment:
   PL_ADDR            Listen address, default 127.0.0.1:8080
   PL_DATA_DIR        Data directory, default ./.phantom-data
   PL_ALLOWED_ROOTS   Initial workspace roots when no config file exists
-  PL_CODEX_BINARY    Initial Codex binary when no DB setting exists
-  PL_CODEX_HOME      Initial CODEX_HOME when no DB setting exists
   PL_DB_PATH         Optional SQLite DB path
   PL_COOKIE_SECURE   Initial true/false cookie default
   PL_SERVICE_LOG_FILE Structured service log, default ./.phantom-data/logs/phantom-lancer.jsonl
