@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"phantom-lancer/internal/events"
+	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/storage"
 )
 
@@ -68,8 +69,8 @@ func (s *Service) Status(ctx context.Context) Status {
 	if err != nil {
 		return Status{Available: true, Provider: "xai", LastError: err.Error()}
 	}
-	count, _ := s.Store.CountImageGenerationJobs(ctx)
-	jobs, _ := s.Store.ListImageGenerationJobs(ctx, 1, "", "")
+	count, countErr := s.Store.CountImageGenerationJobs(ctx)
+	jobs, jobsErr := s.Store.ListImageGenerationJobs(ctx, 1, "", "")
 	status := Status{
 		Available:    true,
 		Provider:     settings.Provider,
@@ -78,13 +79,34 @@ func (s *Service) Status(ctx context.Context) Status {
 		DefaultModel: settings.DefaultModel,
 		HistoryCount: count,
 	}
+	if countErr != nil {
+		status.LastError = statusError(countErr)
+	}
+	if jobsErr != nil {
+		status.LastError = statusError(jobsErr)
+		return status
+	}
 	if len(jobs) > 0 {
 		status.LastJobID = jobs[0].ID
 		status.LastJobStatus = jobs[0].Status
-		status.LastError = jobs[0].ErrorMessage
+		if status.LastError == "" {
+			status.LastError = jobs[0].ErrorMessage
+		}
 		status.LastCompletedAt = jobs[0].CompletedAt
 	}
 	return status
+}
+
+func statusError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.TrimSpace(err.Error())
+	runes := []rune(message)
+	if len(runes) > 240 {
+		return string(runes[:240]) + "..."
+	}
+	return message
 }
 
 func (s *Service) UpdateSettings(ctx context.Context, settings storage.ImageProviderSettings, updateAPIKey bool, clearAPIKey bool) (storage.ImageProviderSettings, error) {
@@ -159,10 +181,20 @@ func (s *Service) runJob(ctx context.Context, job storage.ImageGenerationJob, re
 
 	callCtx, cancel := context.WithTimeout(ctx, 145*time.Second)
 	defer cancel()
+	callStarted := time.Now()
+	if s.Log != nil {
+		s.Log.Info("image provider request started", "job_id", job.ID, "provider", settings.Provider, "model", request.Model, "mode", request.Mode, "endpoint", job.Endpoint)
+	}
 	result, err := s.XAI.Imagine(callCtx, settings.XAIAPIKey, request)
 	if err != nil {
+		if s.Log != nil {
+			s.Log.Warn("image provider request failed", "job_id", job.ID, "provider", settings.Provider, "model", request.Model, "mode", request.Mode, "endpoint", job.Endpoint, "latency_ms", time.Since(callStarted).Milliseconds(), "error", safelog.Error(err, 240))
+		}
 		_, _ = s.failJob(ctx, job.ID, job.Endpoint, err.Error())
 		return
+	}
+	if s.Log != nil {
+		s.Log.Info("image provider request completed", "job_id", job.ID, "provider", settings.Provider, "model", request.Model, "mode", request.Mode, "endpoint", result.Endpoint, "image_count", len(result.Images), "latency_ms", time.Since(callStarted).Milliseconds())
 	}
 
 	stored, storeFailures := s.storeGeneratedAssets(ctx, job, request, result)
@@ -219,9 +251,26 @@ func (s *Service) UpdateStorageSettings(ctx context.Context, settings storage.Im
 func (s *Service) TestStorage(ctx context.Context, settings storage.ImageStorageSettings) error {
 	client, err := NewS3ObjectStore(settings)
 	if err != nil {
+		if s.Log != nil {
+			s.Log.Warn("image storage test setup failed", "backend", settings.Backend, "endpoint", safelog.URLLabel(settings.S3Endpoint), "bucket", settings.S3Bucket, "error", safelog.Error(err, 200))
+		}
 		return err
 	}
-	return client.Test(ctx)
+	started := time.Now()
+	if s.Log != nil {
+		s.Log.Info("image storage test started", "backend", settings.Backend, "endpoint", safelog.URLLabel(settings.S3Endpoint), "bucket", settings.S3Bucket)
+	}
+	err = client.Test(ctx)
+	if err != nil {
+		if s.Log != nil {
+			s.Log.Warn("image storage test failed", "backend", settings.Backend, "endpoint", safelog.URLLabel(settings.S3Endpoint), "bucket", settings.S3Bucket, "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
+		}
+		return err
+	}
+	if s.Log != nil {
+		s.Log.Info("image storage test completed", "backend", settings.Backend, "endpoint", safelog.URLLabel(settings.S3Endpoint), "bucket", settings.S3Bucket, "latency_ms", time.Since(started).Milliseconds())
+	}
+	return nil
 }
 
 func (s *Service) ReadAsset(ctx context.Context, asset storage.ImageAsset) (string, []byte, error) {
@@ -257,10 +306,17 @@ func (s *Service) DeleteAsset(ctx context.Context, id string) (storage.ImageAsse
 			return storage.ImageAsset{}, err
 		}
 		if asset.S3Key != "" {
+			started := time.Now()
 			if err := client.Delete(ctx, asset.S3Key); err != nil {
 				asset.LastError = err.Error()
 				_, _ = s.Store.UpdateImageAsset(ctx, asset)
+				if s.Log != nil {
+					s.Log.Warn("image asset s3 delete failed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", asset.S3Key, "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
+				}
 				return storage.ImageAsset{}, err
+			}
+			if s.Log != nil {
+				s.Log.Info("image asset s3 delete completed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", asset.S3Key, "latency_ms", time.Since(started).Milliseconds())
 			}
 		}
 	default:
@@ -297,10 +353,17 @@ func (s *Service) ArchiveAssetToS3(ctx context.Context, id string) (storage.Imag
 		return storage.ImageAsset{}, err
 	}
 	key := objectKey(settings, asset, asset.Extension)
+	started := time.Now()
+	if s.Log != nil {
+		s.Log.Info("image asset s3 archive started", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", key, "bytes", len(data))
+	}
 	etag, err := client.Put(ctx, key, data, mimeType)
 	if err != nil {
 		asset.LastError = err.Error()
 		_, _ = s.Store.UpdateImageAsset(ctx, asset)
+		if s.Log != nil {
+			s.Log.Warn("image asset s3 archive failed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", key, "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
+		}
 		return storage.ImageAsset{}, err
 	}
 	localName := asset.LocalName
@@ -319,6 +382,9 @@ func (s *Service) ArchiveAssetToS3(ctx context.Context, id string) (storage.Imag
 	}
 	s.Assets.Remove([]string{localName})
 	s.append(ctx, asset.JobID, "images.asset.archived.s3", map[string]any{"assetId": asset.ID, "key": key})
+	if s.Log != nil {
+		s.Log.Info("image asset s3 archive completed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", key, "latency_ms", time.Since(started).Milliseconds())
+	}
 	return updated, nil
 }
 
@@ -378,6 +444,9 @@ func (s *Service) storeGeneratedAssets(ctx context.Context, job storage.ImageGen
 		data, mimeType, err := s.Assets.ImageBytes(ctx, image)
 		if err != nil {
 			failures++
+			if s.Log != nil {
+				s.Log.Warn("image output fetch failed", "job_id", job.ID, "slot", index+1, "source_host", safelog.HostLabel(image.URL), "error", safelog.Error(err, 200))
+			}
 			outputs = append(outputs, output)
 			continue
 		}
@@ -434,6 +503,7 @@ func (s *Service) storeBytes(ctx context.Context, asset storage.ImageAsset, data
 	if settings.Backend == "s3" {
 		if client, err := NewS3ObjectStore(settings); err == nil {
 			key := objectKey(settings, asset, asset.Extension)
+			started := time.Now()
 			if etag, err := client.Put(ctx, key, data, info.MimeType); err == nil {
 				asset.StorageBackend = "s3"
 				asset.S3Bucket = settings.S3Bucket
@@ -442,12 +512,25 @@ func (s *Service) storeBytes(ctx context.Context, asset storage.ImageAsset, data
 				asset.S3Key = key
 				asset.S3ETag = etag
 				asset.LastError = ""
+				if s.Log != nil {
+					s.Log.Info("image asset s3 put completed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", key, "bytes", len(data), "latency_ms", time.Since(started).Milliseconds())
+				}
 				return s.Store.UpdateImageAsset(ctx, asset)
 			} else if !settings.FallbackToLocal {
+				if s.Log != nil {
+					s.Log.Warn("image asset s3 put failed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", key, "bytes", len(data), "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
+				}
 				return storage.ImageAsset{}, err
+			} else if s.Log != nil {
+				s.Log.Warn("image asset s3 put failed; falling back to local storage", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", key, "bytes", len(data), "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
 			}
 		} else if !settings.FallbackToLocal {
+			if s.Log != nil {
+				s.Log.Warn("image s3 client setup failed", "asset_id", asset.ID, "job_id", asset.JobID, "backend", settings.Backend, "endpoint", safelog.URLLabel(settings.S3Endpoint), "bucket", settings.S3Bucket, "error", safelog.Error(err, 200))
+			}
 			return storage.ImageAsset{}, err
+		} else if s.Log != nil {
+			s.Log.Warn("image s3 client setup failed; falling back to local storage", "asset_id", asset.ID, "job_id", asset.JobID, "backend", settings.Backend, "endpoint", safelog.URLLabel(settings.S3Endpoint), "bucket", settings.S3Bucket, "error", safelog.Error(err, 200))
 		}
 	}
 	local, err := s.Assets.StoreBytes(asset.ID, data, info.MimeType)
@@ -480,16 +563,17 @@ func objectKey(settings storage.ImageStorageSettings, asset storage.ImageAsset, 
 }
 
 func (s *Service) failJob(ctx context.Context, jobID, endpoint, message string) (storage.ImageGenerationJob, error) {
-	failed, err := s.Store.FailImageGenerationJob(ctx, jobID, endpoint, message)
+	safeMessage := safelog.Text(message, 300)
+	failed, err := s.Store.FailImageGenerationJob(ctx, jobID, endpoint, safeMessage)
 	if err != nil {
 		return storage.ImageGenerationJob{}, err
 	}
-	s.append(ctx, jobID, "images.job.failed", map[string]any{"message": message, "mode": failed.Mode, "model": failed.Model})
+	s.append(ctx, jobID, "images.job.failed", map[string]any{"message": safeMessage, "mode": failed.Mode, "model": failed.Model})
 	_, _ = s.Store.AddAudit(ctx, storage.AuditEvent{
 		EventType: "images.job.failed",
 		RiskLevel: "medium",
 		Summary:   "Images 生成调用失败",
-		Payload:   map[string]any{"jobId": failed.ID, "mode": failed.Mode, "model": failed.Model, "error": message},
+		Payload:   map[string]any{"jobId": failed.ID, "mode": failed.Mode, "model": failed.Model, "error": safeMessage},
 	})
 	settings, _ := s.Store.GetImageProviderSettings(ctx)
 	s.prune(ctx, settings.HistoryRetention)

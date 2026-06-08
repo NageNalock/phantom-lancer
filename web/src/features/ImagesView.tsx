@@ -23,8 +23,12 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   const assets = data.images.assets || [];
   const libraryAssets = libraryScope === "private" ? privateAssets : assets;
   const selectedAsset = libraryAssets.find((asset) => asset.id === selectedAssetId) || libraryAssets[0];
+  const historyJobs = useMemo(() => {
+    if (!currentJob || jobs.some((job) => job.id === currentJob.id)) return jobs;
+    return [currentJob, ...jobs];
+  }, [currentJob, jobs]);
   const latestJob = currentJob || jobs[0];
-  const hasActiveJob = jobs.some(isActiveImageJob) || Boolean(currentJob && isActiveImageJob(currentJob));
+  const hasActiveJob = historyJobs.some(isActiveImageJob);
 
   useEffect(() => {
     if (!currentJob?.id) return;
@@ -302,7 +306,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
             storageSettings={storageSettings}
           />
         ) : null}
-        {activeTab === "history" ? <HistoryPanel jobs={jobs} onRefresh={actions.refreshImages} /> : null}
+        {activeTab === "history" ? <HistoryPanel jobs={historyJobs} onRefresh={actions.refreshImages} /> : null}
         {activeTab === "settings" ? (
           <div className="grid gap-4">
             <ProviderSettingsPanel busy={busy === "settings"} onSave={saveSettings} settings={settings} />
@@ -310,7 +314,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
           </div>
         ) : null}
       </div>
-      <ImagesInspector asset={selectedAsset} assets={libraryAssets} jobs={jobs} libraryScope={libraryScope} onArchive={(asset) => void archiveAsset(asset)} onDelete={(asset) => void deleteAsset(asset)} onMarkPrivate={(asset, nextPrivate) => void setAssetPrivate(asset, nextPrivate)} status={status} storageSettings={storageSettings} />
+      <ImagesInspector asset={selectedAsset} assets={libraryAssets} jobs={historyJobs} libraryScope={libraryScope} onArchive={(asset) => void archiveAsset(asset)} onDelete={(asset) => void deleteAsset(asset)} onMarkPrivate={(asset, nextPrivate) => void setAssetPrivate(asset, nextPrivate)} status={status} storageSettings={storageSettings} />
     </div>
   );
 }

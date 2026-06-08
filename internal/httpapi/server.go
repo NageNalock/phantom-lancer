@@ -23,6 +23,7 @@ import (
 	"phantom-lancer/internal/events"
 	imagegen "phantom-lancer/internal/images"
 	logcenter "phantom-lancer/internal/logs"
+	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/selfupdate"
 	"phantom-lancer/internal/storage"
 	"phantom-lancer/internal/v2ray"
@@ -301,19 +302,25 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAuth(w, r); !ok {
 		return
 	}
-	audit, _ := s.store.ListAudit(r.Context(), 8)
-	codexGatewayStatus, err := s.codexGateway.Status(r.Context())
+	started := time.Now()
+	statusCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	audit, _ := s.store.ListAudit(statusCtx, 8)
+	codexGatewayStatus, err := s.codexGateway.Status(statusCtx)
 	if err != nil {
 		codexGatewayStatus = codexgateway.Status{LastError: err.Error()}
 	}
-	codexStatus, _ := s.codex.Status(r.Context())
+	codexStatus, _ := s.codex.Status(statusCtx)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"codexGateway":   codexGatewayStatus,
 		"codex":          codexStatus,
-		"images":         s.images.Status(r.Context()),
-		"v2ray":          s.v2ray.Status(r.Context()),
+		"images":         s.images.Status(statusCtx),
+		"v2ray":          s.v2ray.Status(statusCtx),
 		"recentActivity": audit,
 	})
+	if err := statusCtx.Err(); errors.Is(err, context.DeadlineExceeded) {
+		s.log.Warn("dashboard summary status timeout", "summary", codexclient.Redact(err.Error(), 120), "durationMs", time.Since(started).Milliseconds())
+	}
 }
 
 func (s *Server) handleEventHistory(w http.ResponseWriter, r *http.Request) {
@@ -639,7 +646,7 @@ func (s *Server) handleUpdateImageStorageSettings(w http.ResponseWriter, r *http
 			"backend":       updated.Backend,
 			"providerLabel": updated.S3ProviderLabel,
 			"bucket":        updated.S3Bucket,
-			"endpoint":      updated.S3Endpoint,
+			"endpoint":      safelog.URLLabel(updated.S3Endpoint),
 			"updatedSecret": updateSecret,
 			"clearedSecret": req.ClearSecret,
 		},
@@ -662,7 +669,7 @@ func (s *Server) handleTestImageStorageSettings(w http.ResponseWriter, r *http.R
 			EventType: "images.storage.tested",
 			RiskLevel: "medium",
 			Summary:   "Images 对象存储连接测试失败",
-			Payload:   map[string]any{"backend": settings.Backend, "bucket": settings.S3Bucket, "endpoint": settings.S3Endpoint, "error": err.Error()},
+			Payload:   map[string]any{"backend": settings.Backend, "bucket": settings.S3Bucket, "endpoint": safelog.URLLabel(settings.S3Endpoint), "error": safelog.Error(err, 240)},
 		})
 		writeError(w, http.StatusBadGateway, "images_storage_test_failed", err.Error())
 		return
@@ -671,7 +678,7 @@ func (s *Server) handleTestImageStorageSettings(w http.ResponseWriter, r *http.R
 		EventType: "images.storage.tested",
 		RiskLevel: "low",
 		Summary:   "Images 对象存储连接测试通过",
-		Payload:   map[string]any{"backend": settings.Backend, "bucket": settings.S3Bucket, "endpoint": settings.S3Endpoint},
+		Payload:   map[string]any{"backend": settings.Backend, "bucket": settings.S3Bucket, "endpoint": safelog.URLLabel(settings.S3Endpoint)},
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -815,7 +822,7 @@ func (s *Server) handleCreateImageJob(w http.ResponseWriter, r *http.Request) {
 			"imageCount":  job.ImageCount,
 		},
 	})
-	writeJSON(w, http.StatusAccepted, map[string]any{"job": job, "status": s.images.Status(r.Context())})
+	writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
 }
 
 func (s *Server) handleImageJobSubroutes(w http.ResponseWriter, r *http.Request) {
@@ -983,7 +990,7 @@ func (s *Server) handleImageLibraryAssetSubroutes(w http.ResponseWriter, r *http
 				EventType: "images.asset.archive_failed",
 				RiskLevel: "medium",
 				Summary:   "Images 图片资产归档到 S3 失败",
-				Payload:   map[string]any{"assetId": asset.ID, "jobId": asset.JobID, "error": err.Error()},
+				Payload:   map[string]any{"assetId": asset.ID, "jobId": asset.JobID, "error": safelog.Error(err, 240)},
 			})
 			writeError(w, http.StatusBadGateway, "image_asset_archive_failed", err.Error())
 			return

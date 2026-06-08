@@ -237,6 +237,58 @@ func TestPruneImageGenerationJobsKeepsLibraryAssets(t *testing.T) {
 	}
 }
 
+func TestListImageGenerationJobsDoesNotNestQueriesWhileRowsOpen(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateImageGenerationJob(ctx, ImageGenerationJob{
+		Mode:       "text_to_image",
+		ModeLabel:  "文生图",
+		Model:      "grok-imagine-image-quality",
+		Prompt:     "quiet workbench",
+		ImageCount: 1,
+	}, nil)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	asset, err := store.CreateImageAsset(ctx, ImageAsset{
+		AssetType:      "generated",
+		Status:         "available",
+		JobID:          job.ID,
+		SourceRole:     "output",
+		Slot:           1,
+		MimeType:       "image/png",
+		LocalName:      "quiet.png",
+		StorageBackend: "local",
+	})
+	if err != nil {
+		t.Fatalf("create asset: %v", err)
+	}
+	if _, err := store.CompleteImageGenerationJob(ctx, job.ID, "/images/generations", map[string]any{}, []ImageGenerationOutput{{
+		AssetID:   asset.ID,
+		Slot:      1,
+		LocalName: "quiet.png",
+		MimeType:  "image/png",
+		Storage:   "local",
+	}}); err != nil {
+		t.Fatalf("complete job: %v", err)
+	}
+
+	listCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	jobs, err := store.ListImageGenerationJobs(listCtx, 10, "", "")
+	if err != nil {
+		t.Fatalf("list image jobs should not wait on the single SQLite connection: %v", err)
+	}
+	if len(jobs) != 1 || len(jobs[0].Outputs) != 1 || jobs[0].Outputs[0].AssetID != asset.ID {
+		t.Fatalf("unexpected jobs with outputs: %#v", jobs)
+	}
+}
+
 func TestImageAssetPrivateFiltering(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))

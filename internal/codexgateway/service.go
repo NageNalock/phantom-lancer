@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"phantom-lancer/internal/auth"
+	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/storage"
 )
 
@@ -238,13 +239,16 @@ func (s *Service) SendResponses(ctx context.Context, model, accountID string, pa
 			if lastFailure != nil {
 				return lastRoute, nil, lastFailure, nil
 			}
+			s.Log.Warn("codex gateway route selection failed", "model", strings.TrimSpace(model), "explicit_account", explicitAccount, "error", safelog.Error(err, 200))
 			return route, nil, nil, err
 		}
 		lastRoute = route
 		attemptCtx, cancel := context.WithTimeout(ctx, route.Runtime.Timeout)
+		started := time.Now()
 		route, resp, err := s.doResponsesWithRefresh(attemptCtx, route, payload)
 		if err != nil {
 			cancel()
+			s.Log.Warn("codex gateway upstream request failed", "account_id", route.Account.ID, "model", strings.TrimSpace(model), "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
 			return route, nil, nil, err
 		}
 		if resp.StatusCode < 400 {
@@ -259,6 +263,7 @@ func (s *Service) SendResponses(ctx context.Context, model, accountID string, pa
 			failure.Message = fmt.Sprintf("Codex upstream returned HTTP %d", resp.StatusCode)
 		}
 		lastFailure = &failure
+		s.Log.Warn("codex gateway upstream returned failure", "account_id", route.Account.ID, "model", strings.TrimSpace(model), "status", resp.StatusCode, "code", failure.Code, "retry_across_accounts", failure.RetryAcrossAccounts, "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Text(failure.Message, 200))
 		s.recordUpstreamFailure(context.WithoutCancel(ctx), route.Account.ID, failure)
 		if !explicitAccount && failure.RetryAcrossAccounts {
 			excluded = append(excluded, route.Account.ID)
@@ -404,9 +409,13 @@ func (s *Service) RefreshAccount(ctx context.Context, id string) (storage.CodexG
 	}
 	runtime := runtimeFromSettings(settings)
 	runtime.Timeout = minDuration(runtime.Timeout, 30*time.Second)
+	started := time.Now()
+	s.Log.Info("codex gateway account refresh started", "account_id", id, "token_endpoint", safelog.URLLabel(runtime.OAuthTokenURL))
 	if _, err := s.refreshAccountAccessToken(ctx, secret, runtime); err != nil {
+		s.Log.Warn("codex gateway account refresh failed", "account_id", id, "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
 		return s.markRefreshFailure(ctx, id, err)
 	}
+	s.Log.Info("codex gateway account refresh completed", "account_id", id, "latency_ms", time.Since(started).Milliseconds())
 	return s.CheckAccount(ctx, id)
 }
 
@@ -421,18 +430,23 @@ func (s *Service) CheckAccount(ctx context.Context, id string) (storage.CodexGat
 	}
 	runtime := runtimeFromSettings(settings)
 	runtime.Timeout = minDuration(runtime.Timeout, 20*time.Second)
+	started := time.Now()
+	s.Log.Info("codex gateway account check started", "account_id", id, "usage_endpoint", safelog.URLLabel(usageEndpoint(runtime.BaseURL)))
 	if secret.AccessToken == "" {
 		if secret.RefreshToken == "" {
+			s.Log.Warn("codex gateway account check failed", "account_id", id, "reason", "missing_tokens")
 			return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "invalid", "", "缺少 access token 和 refresh token")
 		}
 		refreshed, err := s.refreshAccountAccessToken(ctx, secret, runtime)
 		if err != nil {
+			s.Log.Warn("codex gateway account check refresh failed", "account_id", id, "error", safelog.Error(err, 200))
 			return s.markRefreshFailure(ctx, id, err)
 		}
 		secret = refreshed
 	} else if due, expired := tokenRefreshDue(secret, time.Duration(settings.RefreshMarginSeconds)*time.Second); due && secret.RefreshToken != "" {
 		refreshed, err := s.refreshAccountAccessToken(ctx, secret, runtime)
 		if err != nil && expired {
+			s.Log.Warn("codex gateway account check refresh failed", "account_id", id, "expired", true, "error", safelog.Error(err, 200))
 			return s.markRefreshFailure(ctx, id, err)
 		}
 		if err == nil {
@@ -443,6 +457,7 @@ func (s *Service) CheckAccount(ctx context.Context, id string) (storage.CodexGat
 	defer cancel()
 	status, body, err := NewClient(runtime).CheckUsage(checkCtx, secret.AccessToken)
 	if err != nil {
+		s.Log.Warn("codex gateway account check failed", "account_id", id, "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
 		return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "invalid", "", SanitizeError(err))
 	}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
@@ -454,24 +469,30 @@ func (s *Service) CheckAccount(ctx context.Context, id string) (storage.CodexGat
 			secret = refreshed
 			status, body, err = NewClient(runtime).CheckUsage(checkCtx, secret.AccessToken)
 			if err != nil {
+				s.Log.Warn("codex gateway account recheck failed", "account_id", id, "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
 				return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "invalid", "", SanitizeError(err))
 			}
 			if status < 400 {
 				plan := extractPlan(body)
 				s.tryRefreshModels(ctx, secret, runtime, plan)
+				s.Log.Info("codex gateway account check completed", "account_id", id, "status", "active", "plan", plan, "latency_ms", time.Since(started).Milliseconds())
 				return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "active", plan, "")
 			}
 		}
+		s.Log.Warn("codex gateway account check rejected", "account_id", id, "status", status, "latency_ms", time.Since(started).Milliseconds())
 		return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "invalid", "", "上游拒绝账号凭证")
 	}
 	if status == http.StatusTooManyRequests {
+		s.Log.Warn("codex gateway account check rate limited", "account_id", id, "status", status, "latency_ms", time.Since(started).Milliseconds())
 		return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "rate_limited", "", "上游返回限流")
 	}
 	if status >= 400 {
+		s.Log.Warn("codex gateway account check returned failure", "account_id", id, "status", status, "latency_ms", time.Since(started).Milliseconds())
 		return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "invalid", "", fmt.Sprintf("上游检查失败: HTTP %d", status))
 	}
 	plan := extractPlan(body)
 	s.tryRefreshModels(ctx, secret, runtime, plan)
+	s.Log.Info("codex gateway account check completed", "account_id", id, "status", "active", "plan", plan, "latency_ms", time.Since(started).Milliseconds())
 	return s.Store.UpdateCodexGatewayAccountCheck(ctx, id, "active", plan, "")
 }
 
@@ -506,15 +527,17 @@ func (s *Service) tryRefreshModels(ctx context.Context, secret storage.CodexGate
 		return
 	}
 	if _, err := s.fetchAndStoreModelsForAccount(ctx, secret, runtime, plan); err != nil {
-		s.Log.Warn("failed to refresh codex gateway models", "account_id", secret.ID, "error", SanitizeError(err))
+		s.Log.Warn("failed to refresh codex gateway models", "account_id", secret.ID, "base_host", safelog.HostLabel(runtime.BaseURL), "error", safelog.Error(err, 200))
 	}
 }
 
 func (s *Service) fetchAndStoreModelsForAccount(ctx context.Context, secret storage.CodexGatewayAccountSecret, runtime Runtime, plan string) (int, error) {
 	fetchCtx, cancel := context.WithTimeout(ctx, minDuration(runtime.Timeout, 30*time.Second))
 	defer cancel()
+	started := time.Now()
 	models, err := NewClient(runtime).FetchModels(fetchCtx, secret.AccessToken)
 	if err != nil {
+		s.Log.Warn("codex gateway model fetch failed", "account_id", secret.ID, "base_host", safelog.HostLabel(runtime.BaseURL), "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
 		return 0, err
 	}
 	if err := s.SeedStaticModels(ctx); err != nil {
@@ -533,9 +556,17 @@ func (s *Service) fetchAndStoreModelsForAccount(ctx context.Context, secret stor
 		inputs = append(inputs, storage.CodexGatewayModelInput{ID: id, DisplayName: display, OwnedBy: "codex", Source: "upstream"})
 	}
 	if strings.TrimSpace(plan) != "" {
-		return len(inputs), s.Store.UpsertCodexGatewayModelsForPlan(ctx, strings.TrimSpace(plan), inputs)
+		err := s.Store.UpsertCodexGatewayModelsForPlan(ctx, strings.TrimSpace(plan), inputs)
+		if err == nil {
+			s.Log.Info("codex gateway model fetch completed", "account_id", secret.ID, "plan", strings.TrimSpace(plan), "models", len(inputs), "latency_ms", time.Since(started).Milliseconds())
+		}
+		return len(inputs), err
 	}
-	return len(inputs), s.Store.UpsertCodexGatewayModels(ctx, inputs)
+	err = s.Store.UpsertCodexGatewayModels(ctx, inputs)
+	if err == nil {
+		s.Log.Info("codex gateway model fetch completed", "account_id", secret.ID, "models", len(inputs), "latency_ms", time.Since(started).Milliseconds())
+	}
+	return len(inputs), err
 }
 
 func classifyUpstreamFailure(status int, message string) UpstreamFailure {

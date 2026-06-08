@@ -16,6 +16,7 @@ import (
 
 	"phantom-lancer/internal/auth"
 	"phantom-lancer/internal/codexgateway"
+	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/storage"
 )
 
@@ -99,7 +100,7 @@ func (s *Server) handleUpdateCodexGatewaySettings(w http.ResponseWriter, r *http
 		Summary:   "已更新 Codex Gateway 设置",
 		Payload: map[string]any{
 			"enabled": updated.Enabled,
-			"baseURL": updated.BaseURL,
+			"baseURL": safelog.URLLabel(updated.BaseURL),
 		},
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"settings": updated})

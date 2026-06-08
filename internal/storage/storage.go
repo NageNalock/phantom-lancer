@@ -2810,19 +2810,28 @@ func (s *Store) ListImageGenerationJobs(ctx context.Context, limit int, status, 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []ImageGenerationJob{}
 	for rows.Next() {
 		job, err := scanImageGenerationJob(rows)
 		if err != nil {
-			return nil, err
-		}
-		if err := s.attachImageJobRelations(ctx, &job); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
 		out = append(out, job)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if err := s.attachImageJobRelations(ctx, &out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (s *Store) CountImageGenerationJobs(ctx context.Context) (int, error) {
