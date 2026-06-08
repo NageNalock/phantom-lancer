@@ -96,6 +96,7 @@ type ThreadListOptions struct {
 	Query           string
 	WorkspaceID     string
 	Status          string
+	Kind            string
 }
 
 type RuntimeSummary struct {
@@ -432,6 +433,7 @@ func (s *Service) ListThreadsFiltered(ctx context.Context, opts ThreadListOption
 		Query:           opts.Query,
 		WorkspaceID:     opts.WorkspaceID,
 		Status:          opts.Status,
+		Kind:            opts.Kind,
 	})
 }
 

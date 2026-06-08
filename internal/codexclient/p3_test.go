@@ -74,6 +74,23 @@ func TestCreateChatIsReadOnlyAndChatKind(t *testing.T) {
 	if chats[0].ID == codeThread.ID {
 		t.Fatal("code thread leaked into chat list")
 	}
+
+	// The default Threads view filters to code kind, so chats must not appear.
+	codeThreads, err := svc.ListThreadsFiltered(ctx, ThreadListOptions{Kind: "code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, thread := range codeThreads {
+		if thread.Kind == "chat" {
+			t.Fatalf("chat thread %s leaked into code Threads view", thread.ID)
+		}
+		if thread.ID == chat.ID {
+			t.Fatalf("chat %s leaked into code Threads view", chat.ID)
+		}
+	}
+	if len(codeThreads) != 1 || codeThreads[0].ID != codeThread.ID {
+		t.Fatalf("expected only the code thread in Threads view, got %d items", len(codeThreads))
+	}
 }
 
 func TestChatTurnForcedReadOnlyEvenIfWorkspaceWriteRequested(t *testing.T) {

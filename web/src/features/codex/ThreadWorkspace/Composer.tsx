@@ -21,6 +21,9 @@ export interface ComposerProps {
   skills: string[];
   onInsertSkill: (name: string) => void;
   workspaceWriteAllowed: boolean;
+  // sandboxLocked fixes the sandbox to read-only (chat threads). The selector is
+  // shown disabled so the constraint is visible but cannot be changed.
+  sandboxLocked: boolean;
   attachments: ComposerAttachment[];
   onUpload: (file: File) => void;
   onRemoveAttachment: (id: string) => void;
@@ -36,7 +39,7 @@ export interface ComposerProps {
 }
 
 export function Composer(props: ComposerProps) {
-  const { prompt, attachments, models, skills, workspaceWriteAllowed, busy, interactive, hasActiveTurn, sending, steering } = props;
+  const { prompt, attachments, models, skills, workspaceWriteAllowed, sandboxLocked, busy, interactive, hasActiveTurn, sending, steering } = props;
   const promptEmpty = !prompt.trim();
   return (
     <form className="grid gap-2" onSubmit={props.onSend}>
@@ -60,11 +63,13 @@ export function Composer(props: ComposerProps) {
         </div>
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
-        <select className="select" onChange={(event) => props.onSandbox(event.target.value)} value={props.sandbox}>
+        <select className="select" disabled={sandboxLocked} onChange={(event) => props.onSandbox(event.target.value)} value={sandboxLocked ? "read-only" : props.sandbox}>
           <option value="read-only">只读咨询</option>
-          <option disabled={!workspaceWriteAllowed} value="workspace-write">
-            工作区写入
-          </option>
+          {sandboxLocked ? null : (
+            <option disabled={!workspaceWriteAllowed} value="workspace-write">
+              工作区写入
+            </option>
+          )}
         </select>
         <select className="select" onChange={(event) => props.onApproval(event.target.value)} value={props.approval}>
           <option value="on-request">on-request</option>

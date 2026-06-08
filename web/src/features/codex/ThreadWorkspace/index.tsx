@@ -83,7 +83,10 @@ export function ThreadWorkspace({
   const busy = thread.status === "running" || thread.status === "needs_approval" || thread.status === "queued";
   const interactive = thread.status === "running" || thread.status === "needs_approval";
   const activeTurn = turns.find((turn) => turn.status === "running" || turn.status === "waiting_approval");
-  const workspaceWriteAllowed = workspace?.trustState === "trusted";
+  // Chat threads are fixed read-only research/planning; never offer workspace-write
+  // even on a trusted workspace, matching the server-side enforcement.
+  const isChat = thread.kind === "chat";
+  const workspaceWriteAllowed = !isChat && workspace?.trustState === "trusted";
 
   const loadEvents = useCallback(async () => {
     try {
@@ -314,6 +317,7 @@ export function ThreadWorkspace({
           skills={skills}
           onInsertSkill={insertSkill}
           workspaceWriteAllowed={Boolean(workspaceWriteAllowed)}
+          sandboxLocked={isChat}
           attachments={attachments}
           onUpload={(file) => void uploadAttachment(file)}
           onRemoveAttachment={(id) => void removeAttachment(id)}
