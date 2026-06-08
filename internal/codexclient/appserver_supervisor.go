@@ -45,6 +45,7 @@ type AppServerSupervisor struct {
 	log       *slog.Logger
 	onNotify  NotificationHandler
 	onRequest RequestHandler
+	onFailure func(string)
 
 	mu          sync.Mutex
 	client      *AppServerClient
@@ -53,6 +54,12 @@ type AppServerSupervisor struct {
 	lastProbeAt time.Time
 	lastError   string
 	stopProbe   chan struct{}
+}
+
+func (s *AppServerSupervisor) SetFailureHandler(handler func(string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onFailure = handler
 }
 
 func NewAppServerSupervisor(detector *Detector, settings func() Settings, onNotify NotificationHandler, onRequest RequestHandler, logger *slog.Logger) *AppServerSupervisor {
@@ -259,7 +266,7 @@ func (s *AppServerSupervisor) statusLocked() AppServerStatus {
 
 func (s *AppServerSupervisor) setFailed(message string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	notify := s.state != RuntimeFailed || s.lastError != message
 	if s.client != nil {
 		_ = s.client.Close()
 		s.client = nil
@@ -271,5 +278,10 @@ func (s *AppServerSupervisor) setFailed(message string) {
 	s.startedAt = time.Time{}
 	if s.log != nil {
 		s.log.Warn("codex app-server failure", "summary", message)
+	}
+	handler := s.onFailure
+	s.mu.Unlock()
+	if notify && handler != nil {
+		handler(message)
 	}
 }

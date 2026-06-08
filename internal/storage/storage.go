@@ -799,6 +799,9 @@ CREATE TABLE IF NOT EXISTS codex_cli_threads (
   title TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'idle',
   source_mode TEXT NOT NULL DEFAULT 'app_server',
+  kind TEXT NOT NULL DEFAULT 'code',
+  background INTEGER NOT NULL DEFAULT 0,
+  background_source TEXT NOT NULL DEFAULT '',
   model TEXT NOT NULL DEFAULT '',
   sandbox_mode TEXT NOT NULL DEFAULT 'read-only',
   approval_policy TEXT NOT NULL DEFAULT 'on-request',
@@ -931,11 +934,90 @@ CREATE TABLE IF NOT EXISTS codex_cli_browser_sessions (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_codex_cli_browser_sessions_thread ON codex_cli_browser_sessions(thread_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS codex_cli_automations (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL DEFAULT 'thread_wakeup',
+  thread_id TEXT NOT NULL DEFAULT '',
+  workspace_id TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL DEFAULT '',
+  prompt_summary TEXT NOT NULL DEFAULT '',
+  schedule_json TEXT NOT NULL DEFAULT '{}',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  default_sandbox TEXT NOT NULL DEFAULT 'read-only',
+  default_approval_policy TEXT NOT NULL DEFAULT 'on-request',
+  last_run_at TEXT NOT NULL DEFAULT '',
+  next_run_at TEXT NOT NULL DEFAULT '',
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  failure_backoff_until TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_automations_next ON codex_cli_automations(enabled, next_run_at);
+CREATE TABLE IF NOT EXISTS codex_cli_automation_runs (
+  id TEXT PRIMARY KEY,
+  automation_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL DEFAULT '',
+  turn_id TEXT NOT NULL DEFAULT '',
+  client_request_id TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'queued',
+  started_at TEXT NOT NULL DEFAULT '',
+  last_heartbeat_at TEXT NOT NULL DEFAULT '',
+  completed_at TEXT NOT NULL DEFAULT '',
+  finding_summary TEXT NOT NULL DEFAULT '',
+  error_summary TEXT NOT NULL DEFAULT '',
+  triage_state TEXT NOT NULL DEFAULT 'open',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(automation_id, client_request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_automation_runs_triage ON codex_cli_automation_runs(triage_state, created_at DESC);
+CREATE TABLE IF NOT EXISTS codex_cli_capability_cache (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'unknown',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  last_error TEXT NOT NULL DEFAULT '',
+  probed_at TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_capability_cache_kind ON codex_cli_capability_cache(kind, updated_at DESC);
+CREATE TABLE IF NOT EXISTS codex_cli_notifications (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL DEFAULT 'codex',
+  scope_id TEXT NOT NULL DEFAULT '',
+  event_type TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'unread',
+  severity TEXT NOT NULL DEFAULT 'neutral',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_notifications_scope ON codex_cli_notifications(scope, status, created_at DESC);
 `)
 	if err != nil {
 		return err
 	}
-	return s.ensureColumn(ctx, "codex_cli_workspaces", "pinned", "INTEGER NOT NULL DEFAULT 0")
+	for _, column := range []struct {
+		table string
+		name  string
+		def   string
+	}{
+		{"codex_cli_workspaces", "pinned", "INTEGER NOT NULL DEFAULT 0"},
+		{"codex_cli_threads", "background", "INTEGER NOT NULL DEFAULT 0"},
+		{"codex_cli_threads", "background_source", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_cli_threads", "kind", "TEXT NOT NULL DEFAULT 'code'"},
+		{"codex_cli_automations", "retry_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"codex_cli_automations", "failure_backoff_until", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_cli_automation_runs", "turn_id", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_cli_automation_runs", "last_heartbeat_at", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := s.ensureColumn(ctx, column.table, column.name, column.def); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // CodexCliLegacyTablesDetected reports whether any retired Codex client tables

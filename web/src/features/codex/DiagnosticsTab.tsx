@@ -1,15 +1,25 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { AppActions } from "../../app/App";
-import type { CodexAppServerStatus, CodexStatus } from "../../app/types";
+import type { CodexAppServerStatus, CodexMemoryDiagnostics, CodexStatus } from "../../app/types";
 import { Button, ContextList, Notice, Panel, Pill } from "../../components/ui";
 import { friendlyError } from "../../api/client";
 import { codexAppServerStateLabel, codexInstallStatusLabel, formatDate } from "../../domain/labels";
 
 export function DiagnosticsTab({ actions, status, onChange }: { actions: AppActions; status?: CodexStatus; onChange: () => void }) {
   const [busy, setBusy] = useState(false);
+  const [memory, setMemory] = useState<CodexMemoryDiagnostics | undefined>();
   const install = status?.installation;
   const caps = (install?.capabilities || {}) as Record<string, unknown>;
   const appServer = status?.appServer;
+
+  useEffect(() => {
+    void actions
+      .api<{ memory?: CodexMemoryDiagnostics }>("/api/codex/memory")
+      .then((response) => setMemory(response.memory))
+      .catch(() => {
+        // memory diagnostics are best-effort; keep the panel quiet on failure
+      });
+  }, [actions]);
 
   const probe = useCallback(async () => {
     setBusy(true);
@@ -89,6 +99,20 @@ export function DiagnosticsTab({ actions, status, onChange }: { actions: AppActi
             <Notice tone="warn">检测到旧版 Codex 数据残留表：{status.legacyTables.join(", ")}。新模块使用独立 codex_cli_ 表，不受影响。</Notice>
           </div>
         ) : null}
+      </Panel>
+
+      <Panel subtitle="只展示 Codex 是否可能使用全局 memory/config/AGENTS.md；不读取或展示其内容。" title="Memories">
+        <ContextList
+          items={[
+            ["CODEX_HOME", memory?.codexHomeSummary ? <span className="mono">{memory.codexHomeSummary}</span> : "不可定位"],
+            ["config.toml", <Pill tone={memory?.configPresent ? "good" : "neutral"}>{memory?.configPresent ? "存在" : "无"}</Pill>],
+            ["全局 AGENTS.md", <Pill tone={memory?.globalAgentsMd ? "good" : "neutral"}>{memory?.globalAgentsMd ? "存在" : "无"}</Pill>],
+            ["会话/历史记录", <Pill tone={memory?.sessionsPresent ? "good" : "neutral"}>{memory?.sessionsPresent ? "存在" : "无"}</Pill>],
+            ["scratch workspace", <Pill tone={memory?.scratchConfigured ? "good" : "warn"}>{memory?.scratchConfigured ? "已配置" : "未配置"}</Pill>],
+            ["scratch AGENTS.md", <Pill tone={memory?.scratchAgentsMd ? "good" : "neutral"}>{memory?.scratchAgentsMd ? "存在" : "无"}</Pill>],
+          ]}
+        />
+        {memory?.note ? <p className="muted mt-3 mb-0 text-xs">{memory.note}</p> : null}
       </Panel>
     </div>
   );

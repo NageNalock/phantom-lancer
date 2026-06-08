@@ -190,7 +190,7 @@ function ThreadRow({
         <div className="flex items-center justify-between gap-2">
           <strong className="truncate text-sm">{thread.title || "新对话"}</strong>
           <span className="flex shrink-0 items-center gap-1">
-            {!active && isBackgroundThread(thread.status) ? <span className="rounded border border-[var(--line)] px-1.5 py-0.5 text-[10px] text-[var(--muted-strong)]">后台</span> : null}
+            {!active && thread.background ? <span className="rounded border border-[var(--line)] px-1.5 py-0.5 text-[10px] text-[var(--muted-strong)]">后台</span> : null}
             <Pill tone={threadTone(thread.status)}>{codexThreadStatusLabel(thread.status)}</Pill>
           </span>
         </div>
@@ -237,8 +237,4 @@ function threadTone(status?: string) {
   if (status === "needs_approval" || status === "queued") return "warn" as const;
   if (status === "failed") return "danger" as const;
   return "neutral" as const;
-}
-
-function isBackgroundThread(status?: string) {
-  return status === "running" || status === "queued" || status === "needs_approval";
 }

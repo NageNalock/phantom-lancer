@@ -5,8 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"phantom-lancer/internal/events"
 	"phantom-lancer/internal/storage"
@@ -212,15 +215,40 @@ func TestNormalizeSettingsBounds(t *testing.T) {
 }
 
 func TestOwnerCommandAssessmentIsControlled(t *testing.T) {
-	if assessment, err := assessOwnerCommand([]string{"git", "status", "--short"}); err != nil || assessment.RequiresConfirmation {
+	if assessment, err := assessOwnerCommand([]string{"git", "status", "--short"}); err != nil || assessment.RequiresConfirmation || assessment.NeedsSandbox {
 		t.Fatalf("expected read-only git status without confirmation, assessment=%+v err=%v", assessment, err)
 	}
-	if assessment, err := assessOwnerCommand([]string{"npm", "run", "build"}); err != nil || !assessment.RequiresConfirmation {
+	if assessment, err := assessOwnerCommand([]string{"npm", "run", "build"}); err != nil || !assessment.RequiresConfirmation || !assessment.NeedsSandbox {
 		t.Fatalf("expected npm build to require confirmation, assessment=%+v err=%v", assessment, err)
 	}
-	for _, argv := range [][]string{{"curl", "https://example.com"}, {"bash", "-lc", "echo hi"}, {"git", "push"}, {"python3", "-c", "print(1)"}} {
+	if assessment, err := assessOwnerCommand([]string{"go", "test", "./..."}); err != nil || !assessment.RequiresConfirmation || !assessment.NeedsSandbox {
+		t.Fatalf("expected go test to require sandboxed confirmation, assessment=%+v err=%v", assessment, err)
+	}
+	if _, err := assessOwnerCommand([]string{"git", "branch", "--show-current"}); err != nil {
+		t.Fatalf("expected git branch query to be allowed: %v", err)
+	}
+	for _, argv := range [][]string{{"curl", "https://example.com"}, {"bash", "-lc", "echo hi"}, {"git", "push"}, {"git", "branch", "new-branch"}, {"git", "branch", "-d", "old-branch"}, {"git", "diff", "--no-index", "/etc/passwd", "README.md"}, {"git", "status", "--git-dir=/tmp/repo/.git"}, {"python3", "-c", "print(1)"}} {
 		if _, err := assessOwnerCommand(argv); err == nil {
 			t.Fatalf("expected command to be blocked: %v", argv)
+		}
+	}
+}
+
+func TestPreviewRewriteProxiesRelativeResources(t *testing.T) {
+	body := `<!doctype html><html><head><base href="http://127.0.0.1:5173/"><link rel="stylesheet" href="/assets/app.css"><style>.hero{background:url("./hero.png")}</style></head><body><img src="img/logo.png" srcset="small.png 1x, /big.png 2x"><script src="./app.js"></script></body></html>`
+	rewritten := rewritePreviewHTML(body, "http://127.0.0.1:5173/nested/index.html", "/api/codex/browser/sessions/session-1/proxy")
+	for _, forbidden := range []string{"<base", `href="/assets/app.css"`, `src="img/logo.png"`, `src="./app.js"`} {
+		if strings.Contains(rewritten, forbidden) {
+			t.Fatalf("expected %q to be rewritten or removed: %s", forbidden, rewritten)
+		}
+	}
+	for _, required := range []string{
+		`/api/codex/browser/sessions/session-1/proxy?url=http%3A%2F%2F127.0.0.1%3A5173%2Fassets%2Fapp.css`,
+		`/api/codex/browser/sessions/session-1/proxy?url=http%3A%2F%2F127.0.0.1%3A5173%2Fnested%2Fimg%2Flogo.png`,
+		`/api/codex/browser/sessions/session-1/proxy?url=http%3A%2F%2F127.0.0.1%3A5173%2Fnested%2Fapp.js`,
+	} {
+		if !strings.Contains(rewritten, required) {
+			t.Fatalf("expected rewritten preview to contain %q: %s", required, rewritten)
 		}
 	}
 }
@@ -261,6 +289,164 @@ func TestNormalizePreviewURLRequiresExplicitPublicAllow(t *testing.T) {
 	}
 	if _, err := svc.normalizePreviewURL(ctx, "https://example.com?access_token=placeholder", ws, true); err == nil {
 		t.Fatal("expected sensitive query URL to be rejected")
+	}
+}
+
+func TestPreviewResourceTransitionBlocksPublicToLocal(t *testing.T) {
+	if err := validatePreviewResourceTransition("https://example.com/app", "http://127.0.0.1:5173/assets/app.js"); err == nil {
+		t.Fatal("expected public preview to local resource to be blocked")
+	}
+	if err := validatePreviewResourceTransition("https://example.com/app", "file:///workspace/index.html"); err == nil {
+		t.Fatal("expected public preview to file resource to be blocked")
+	}
+	if err := validatePreviewResourceTransition("https://example.com/app", "https://cdn.example.net/app.js"); err != nil {
+		t.Fatalf("expected public preview to public resource to be allowed: %v", err)
+	}
+	if err := validatePreviewResourceTransition("http://127.0.0.1:5173/app", "http://127.0.0.1:5173/assets/app.js"); err != nil {
+		t.Fatalf("expected local preview to local resource to be allowed: %v", err)
+	}
+}
+
+func TestWorkspaceQueuedTurnBlocksNewStartButNotDispatch(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	workspacePath := filepath.Join(dir, "repo")
+	if err := os.Mkdir(workspacePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	ws, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockingThread, err := store.CreateCodexCliThread(ctx, storage.CodexCliThread{WorkspaceID: ws.ID, Status: "queued", SandboxMode: "read-only", ApprovalPolicy: "on-request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateCodexCliTurn(ctx, storage.CodexCliTurn{ThreadID: blockingThread.ID, Status: "queued", SandboxMode: "read-only", ApprovalPolicy: "on-request"}); err != nil {
+		t.Fatal(err)
+	}
+	if !workspaceHasQueuedOrActiveTurn(ctx, store, ws.ID) {
+		t.Fatal("expected queued turn to block a new immediate turn")
+	}
+	if workspaceHasActiveTurn(ctx, store, ws.ID) {
+		t.Fatal("queued turn should not block queue dispatcher as an active turn")
+	}
+	thread, err := svc.CreateThread(ctx, ws.ID, "next", "", "read-only", "on-request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := svc.StartTurn(ctx, thread.ID, TurnInput{Prompt: "next"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Status != "queued" {
+		t.Fatalf("expected new turn to queue behind existing workspace turn, got %s", turn.Status)
+	}
+}
+
+func TestConcurrentStartTurnSerializesWorkspace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a POSIX shell stub")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	workspacePath := filepath.Join(dir, "repo")
+	if err := os.Mkdir(workspacePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binaryPath := filepath.Join(dir, "codex-stub")
+	releasePath := filepath.Join(dir, "release-stub")
+	script := "#!/bin/sh\nwhile [ ! -f \"" + releasePath + "\" ]; do sleep 0.05; done\n"
+	if err := os.WriteFile(binaryPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	svc.mu.Lock()
+	svc.settings.BinaryPath = binaryPath
+	svc.settings.MaxConcurrentTurns = 4
+	svc.settings.ExecFallbackEnabled = true
+	svc.mu.Unlock()
+	ws, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadIDs := []string{}
+	for i := 0; i < 6; i++ {
+		thread, err := svc.CreateThread(ctx, ws.ID, "concurrent", "", "read-only", "on-request")
+		if err != nil {
+			t.Fatal(err)
+		}
+		threadIDs = append(threadIDs, thread.ID)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, len(threadIDs))
+	var wg sync.WaitGroup
+	for _, threadID := range threadIDs {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			<-start
+			_, err := svc.StartTurn(ctx, id, TurnInput{Prompt: "hello"})
+			errs <- err
+		}(threadID)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	running := 0
+	queued := 0
+	for _, threadID := range threadIDs {
+		turns, err := store.ListCodexCliTurns(ctx, threadID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(turns) != 1 {
+			t.Fatalf("expected one turn for thread %s, got %d", threadID, len(turns))
+		}
+		switch turns[0].Status {
+		case "running":
+			running++
+		case "queued":
+			queued++
+		default:
+			t.Fatalf("unexpected turn status %q for thread %s", turns[0].Status, threadID)
+		}
+	}
+	if running != 1 || queued != len(threadIDs)-1 {
+		t.Fatalf("expected one running turn and the rest queued, got running=%d queued=%d", running, queued)
+	}
+	if err := os.WriteFile(releasePath, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		counts, err := store.CountCodexCliTurnsByStatus(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if counts["running"] == 0 && counts["queued"] == 0 && counts["waiting_approval"] == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for stub turns to drain: %+v", counts)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 
@@ -382,5 +568,57 @@ func TestTerminalTurnCleansAttachmentsAndDerivesTitle(t *testing.T) {
 	}
 	if got := titleFromPrompt("  第一行 prompt\n第二行  "); got != "第一行 prompt 第二行" {
 		t.Fatalf("unexpected derived title %q", got)
+	}
+}
+
+// TestQueuedCommandInterruptedBeforeStartDoesNotRun guards the race where an
+// owner interrupts a command while it is still queued: the runner must observe
+// the cancelled state and refuse to execute instead of forcing it to running.
+func TestQueuedCommandInterruptedBeforeStartDoesNotRun(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	workspacePath := filepath.Join(dir, "repo")
+	if err := os.Mkdir(workspacePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	ws, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread, err := svc.CreateThread(ctx, ws.ID, "cmd", "", "read-only", "on-request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command, err := store.CreateCodexCliCommand(ctx, storage.CodexCliCommand{ThreadID: thread.ID, WorkspaceID: ws.ID, CommandPreview: "git status", Status: "queued"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Interrupt before the runner starts.
+	if _, err := svc.InterruptCommand(ctx, command.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The atomic start must refuse to transition a non-queued command.
+	if _, transitioned, err := store.StartCodexCliCommand(ctx, command.ID); err != nil || transitioned {
+		t.Fatalf("expected cancelled command to not transition to running, transitioned=%v err=%v", transitioned, err)
+	}
+
+	// Running the command body now must be a no-op that leaves it cancelled.
+	svc.runOwnerCommand(ctx, command, ws, []string{"git", "status"})
+	final, err := store.GetCodexCliCommand(ctx, command.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Status != "cancelled" {
+		t.Fatalf("expected command to stay cancelled, got %q", final.Status)
+	}
+	if final.StartedAt != "" {
+		t.Fatalf("expected cancelled command to never start, started_at=%q", final.StartedAt)
 	}
 }

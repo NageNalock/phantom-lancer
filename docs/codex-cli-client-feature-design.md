@@ -451,6 +451,8 @@ turn：
 - `title`
 - `status`
 - `source_mode`
+- `background`
+- `background_source`
 - `model`
 - `sandbox_mode`
 - `approval_policy`
@@ -836,6 +838,8 @@ audit payload 只记录：
 - 实现并发前必须先移除全局 `activeTurn` 假设，所有 app-server notification、server request、approval 和 event append 都必须按上游 `threadId` / `turnId` / `itemId` 路由。
 - 并发单元以 workspace 为边界：同一 workspace 默认串行，不同 workspace 可在 owner 显式开启后并行。
 - 增加轻量队列状态：`queued`、`running`、`waiting_approval`、`completed`、`failed`、`cancelled`。
+- 同一 workspace 已存在 `queued`、`running` 或 `waiting_approval` turn 时，新的普通发送必须进入队列；调度某个 queued turn 时只用 `running` / `waiting_approval` 阻塞，避免被后续 queued turn 卡死。
+- 容量检查、同 workspace live turn 检查、turn 插入和 thread 状态更新必须在同一调度临界区或 SQLite transaction 内完成，不能用分离查询和插入实现。
 - 队列只调度已通过 workspace policy 的 turn；不在持久化队列表、audit 或服务日志中保存完整 prompt，只保存摘要和事件引用。当前进程内为了调度可以短期持有待执行输入；服务重启后无法恢复的 queued turn 必须失败关闭。
 
 建议 API：
@@ -925,9 +929,13 @@ audit payload 只记录：
 
 - 新增 `codex_cli_commands` 或复用 `codex_cli_runs` 记录 owner-triggered command。
 - 使用 env allowlist，不继承 Phantom Lancer secret。
-- 默认禁止网络和写出允许根目录外的文件。
+- `git status/diff/log/show/branch/rev-parse/ls-files` 只作为只读 inspection 命令运行，禁止 `--git-dir`、`--work-tree`、`--no-index`、外部 diff/textconv、绝对路径和父目录逃逸参数。
+- 会执行项目代码的 `go test/vet` 和 `npm/pnpm/yarn check/typecheck/lint/test/build` 必须通过本机 OS 沙箱运行：
+  - macOS 使用 `sandbox-exec` profile 禁止 network，并只允许写 workspace 与 Phantom command cache。
+  - Linux 使用 `bwrap --unshare-net`，只 bind workspace 与 Phantom command cache 为可写，其它系统目录只读。
+  - 目标平台没有可用沙箱时，项目代码命令必须失败，不能退化成裸 `exec`。
 - 命令执行前做风险摘要：命令、cwd、sandbox、超时、是否可能写入。
-- 长输出进入 `codex.thread.{thread_id}` 事件，服务 `slog` 只记录失败摘要。
+- stdout/stderr 按受控上限进入 `codex.thread.{thread_id}` 事件流，例如 `command.owner.output`；服务 `slog` 只记录失败摘要。
 
 建议 API：
 
@@ -939,7 +947,7 @@ audit payload 只记录：
 安全边界：
 
 - 默认只允许 owner 显式触发，不允许 Codex 自行通过该面运行命令。
-- 命令输出默认只展示给 owner；只有 owner 显式点击“附加到 Codex 上下文”后，才把脱敏摘要写入可被模型读取的 thread event。
+- 命令实时输出默认是 owner UI 可见的受控事件；只有 owner 显式点击“附加到 Codex 上下文”后，才把脱敏摘要标记为可供 Codex 使用。
 - 危险命令需要二次确认；破坏性命令不提供持久 allowlist。
 - 不记录完整 stdout/stderr 到服务日志。
 - 如果后续接入真正 PTY，必须有 idle timeout、max bytes、session owner 校验和窗口关闭清理。
@@ -954,7 +962,7 @@ audit payload 只记录：
   - 打开 localhost、127.0.0.1、已登记 workspace 内生成的静态 HTML，以及 owner 显式允许的公共 URL。
   - 展示嵌入预览；如果后端没有可靠 headless browser，不强行伪造截图。
   - 支持在页面区域添加视觉 comment，comment 写回当前 thread。
-- `P2` 第二阶段：`Browser Verify`
+- `P3 / 延后：Browser Verify`
   - 后端使用 Playwright 打开允许 URL。
   - 支持截图、DOM 摘要、console error 摘要、可访问性 tree 摘要。
   - Codex 可根据这些摘要继续修复。
@@ -966,6 +974,8 @@ audit payload 只记录：
 后端设计：
 
 - 新增 browser session manager，session 绑定 thread 和 owner。
+- Preview HTML/CSS 由 Phantom Lancer 后端代理和重写资源 URL；远程浏览器不能直接请求自己设备上的 `localhost` 来加载部署机资源。
+- 公共 URL session 的被代理资源不能跳转到 `localhost`、workspace `file://`、private/link-local/metadata 地址；只允许 same-origin 或其它通过 public URL policy 校验的公共资源。
 - URL policy：
   - 默认允许 `http://127.0.0.1:*`、`http://localhost:*`。
   - file preview 必须位于 workspace 或受控 artifact 目录。
@@ -979,8 +989,9 @@ audit payload 只记录：
 - `POST /api/codex/browser/sessions/{id}/navigate`
 - `POST /api/codex/browser/sessions/{id}/comments`
 - `DELETE /api/codex/browser/sessions/{id}`
+- `GET /api/codex/browser/sessions/{id}/proxy` 用于代理当前 session 主文档；`GET /api/codex/browser/sessions/{id}/proxy?url=...` 用于代理被重写后的页面资源，`url` 必须重新经过 preview URL policy 校验。
 
-`POST /api/codex/browser/sessions/{id}/screenshot` 属于 P2 Browser Verify。实现前必须先引入受控 headless browser 生命周期、并发上限、截图大小上限和 secret redaction。
+`POST /api/codex/browser/sessions/{id}/screenshot` 不属于当前 P2 交付范围。实现前必须先引入受控 headless browser 生命周期、并发上限、截图大小上限和 secret redaction；在这些边界完成前，不暴露 screenshot API。
 
 安全边界：
 
@@ -1001,7 +1012,7 @@ audit payload 只记录：
   - 默认 read-only，生成诊断摘要或提醒事件。
   - 需要修改文件时只生成建议，不自动写入。
 - 第二阶段做 `Project Automation`：
-  - 绑定一个或多个 workspace。
+  - 当前 P2 实现只绑定单个 workspace；multi-workspace automation 后续单独设计。
   - 每次运行创建新的后台 thread。
   - 结果进入 `Triage` 列表，owner 决定继续、归档或转为普通 thread。
 
@@ -1035,6 +1046,7 @@ audit payload 只记录：
   - `thread_id`
   - `status`
   - `started_at`
+  - `last_heartbeat_at`
   - `completed_at`
   - `finding_summary`
   - `error_summary`
@@ -1045,6 +1057,7 @@ audit payload 只记录：
 - `GET /api/codex/automations`
 - `POST /api/codex/automations`
 - `PATCH /api/codex/automations/{id}`
+- `DELETE /api/codex/automations/{id}`
 - `POST /api/codex/automations/{id}/run-now`，必须支持 `client_request_id` 幂等键，避免浏览器刷新或重试重复创建 run。
 - `GET /api/codex/automation-runs?triage=`
 - `POST /api/codex/automation-runs/{id}/archive`
@@ -1084,6 +1097,7 @@ audit payload 只记录：
 
 - `GET /api/codex/capabilities/skills`
 - `GET /api/codex/capabilities/mcp`
+- `GET /api/codex/capabilities/plugins`
 - `POST /api/codex/capabilities/probe`
 
 安全边界：
@@ -1106,7 +1120,7 @@ audit payload 只记录：
   - command runner 超时或失败。
 - `Triage Inbox`：
   - 聚合 automation runs、后台 thread、review comments 和 failed turns。
-  - 支持 mark read、archive、jump to thread。
+  - P2 闭环：automation runs 支持归档；后台 thread 支持归档、转普通 thread 和 jump to thread；review comments 支持 resolve 和 jump to thread；failed turns 支持归档关联会话和 jump to thread。通知的 mark read 由 Notification Center 承担。
 - `Keep-awake 等价能力`：
   - 服务器侧不需要阻止笔记本睡眠；只记录 long-running run 的 heartbeat。
   - 如果部署在 systemd 等常驻服务中，Phantom Lancer 只展示服务健康，不管理 OS 电源策略。
@@ -1119,7 +1133,9 @@ audit payload 只记录：
 
 建议 API：
 
-- `GET /api/notifications?scope=codex`
+- `GET /api/notifications?scope=codex.thread`
+- `GET /api/notifications?scope=codex.automation`
+- `GET /api/notifications?scope=codex.app_server`
 - `PATCH /api/notifications/{id}`
 - `POST /api/notifications/archive-read`
 

@@ -494,6 +494,17 @@ export interface CodexSettings {
   maxEventsPerThread?: number;
   maxEventPayloadBytes?: number;
   maxConcurrentTurns?: number;
+  scratchWorkspaceId?: string;
+}
+
+export interface CodexMemoryDiagnostics {
+  codexHomeSummary?: string;
+  configPresent?: boolean;
+  globalAgentsMd?: boolean;
+  sessionsPresent?: boolean;
+  scratchAgentsMd?: boolean;
+  scratchConfigured?: boolean;
+  note?: string;
 }
 
 export interface CodexWorkspace {
@@ -520,6 +531,9 @@ export interface CodexThread {
   title?: string;
   status?: string;
   sourceMode?: string;
+  kind?: string;
+  background?: boolean;
+  backgroundSource?: string;
   model?: string;
   sandboxMode?: string;
   approvalPolicy?: string;
@@ -629,6 +643,7 @@ export interface CodexCommandAssessment {
   class?: string;
   riskSummary?: string;
   requiresConfirmation?: boolean;
+  sandboxSummary?: string;
   cwdSummary?: string;
   commandPreview?: string;
 }
@@ -641,6 +656,91 @@ export interface CodexBrowserSession {
   lastError?: string;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface CodexAutomation {
+  id: string;
+  kind?: string;
+  threadId?: string;
+  workspaceId?: string;
+  title?: string;
+  promptSummary?: string;
+  schedule?: Record<string, unknown>;
+  enabled?: boolean;
+  defaultSandbox?: string;
+  defaultApprovalPolicy?: string;
+  lastRunAt?: string;
+  nextRunAt?: string;
+  retryCount?: number;
+  failureBackoffUntil?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CodexAutomationRun {
+  id: string;
+  automationId?: string;
+  threadId?: string;
+  turnId?: string;
+  clientRequestId?: string;
+  status?: string;
+  startedAt?: string;
+  lastHeartbeatAt?: string;
+  findingSummary?: string;
+  errorSummary?: string;
+  triageState?: string;
+  createdAt?: string;
+  completedAt?: string;
+}
+
+export interface CodexTriageFailedTurn {
+  turnId: string;
+  threadId: string;
+  errorSummary?: string;
+  completedAt?: string;
+}
+
+export interface CodexReviewComment {
+  id: string;
+  threadId?: string;
+  turnId?: string;
+  workspaceId?: string;
+  filePath?: string;
+  oldLine?: number;
+  newLine?: number;
+  hunkHeader?: string;
+  body?: string;
+  status?: string;
+  createdAt?: string;
+  resolvedAt?: string;
+}
+
+export interface CodexTriageInbox {
+  automationRuns?: CodexAutomationRun[];
+  backgroundThreads?: CodexThread[];
+  failedTurns?: CodexTriageFailedTurn[];
+  reviewComments?: CodexReviewComment[];
+}
+
+export interface CodexCapabilitySummary {
+  kind?: string;
+  status?: string;
+  items?: Array<Record<string, unknown>>;
+  lastError?: string;
+  probedAt?: string;
+}
+
+export interface CodexNotification {
+  id: string;
+  scope?: string;
+  scopeId?: string;
+  eventType?: string;
+  title?: string;
+  summary?: string;
+  status?: string;
+  severity?: string;
+  payload?: Record<string, unknown>;
+  createdAt?: string;
 }
 
 export interface AppData {

@@ -1,20 +1,25 @@
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import type { AppActions } from "../../app/App";
-import type { CodexSettings } from "../../app/types";
+import type { CodexSettings, CodexWorkspace } from "../../app/types";
 import { Button, Field, Panel } from "../../components/ui";
 import { friendlyError } from "../../api/client";
 
 export function CodexSettingsTab({ actions, onChange }: { actions: AppActions; onChange: () => void }) {
   const [settings, setSettings] = useState<CodexSettings>({});
+  const [workspaces, setWorkspaces] = useState<CodexWorkspace[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await actions.api<{ settings?: CodexSettings }>("/api/codex/settings");
-      setSettings(response.settings || {});
+      const [settingsResp, workspaceResp] = await Promise.all([
+        actions.api<{ settings?: CodexSettings }>("/api/codex/settings"),
+        actions.api<{ items?: CodexWorkspace[] }>("/api/codex/workspaces"),
+      ]);
+      setSettings(settingsResp.settings || {});
+      setWorkspaces(workspaceResp.items || []);
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");
     } finally {
@@ -106,6 +111,16 @@ export function CodexSettingsTab({ actions, onChange }: { actions: AppActions; o
         </Field>
         <Field label="最大并发 turn" help="默认 1；同一 workspace 仍会串行，避免并发写入同一目录。">
           <input className="input" type="number" min={1} max={4} onChange={(event) => update("maxConcurrentTurns", Number(event.target.value))} value={settings.maxConcurrentTurns ?? 1} />
+        </Field>
+        <Field label="Chats scratch workspace" help="Chats 为只读 research/planning 会话，绑定该受控 workspace；留空则无法新建 Chat。">
+          <select className="select" onChange={(event) => update("scratchWorkspaceId", event.target.value)} value={settings.scratchWorkspaceId || ""}>
+            <option value="">未选择</option>
+            {workspaces.map((workspace) => (
+              <option key={workspace.id} value={workspace.id}>
+                {workspace.label || workspace.pathSummary || workspace.id}
+              </option>
+            ))}
+          </select>
         </Field>
         <div className="col-span-2 max-lg:col-span-1">
           <Button disabled={saving} tone="primary" type="submit">

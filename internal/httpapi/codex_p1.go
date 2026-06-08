@@ -205,7 +205,15 @@ func (s *Server) handleCodexBrowserSessionSubroutes(w http.ResponseWriter, r *ht
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"ok": true})
 	case "proxy":
-		preview, err := s.codex.FetchBrowserPreview(r.Context(), id)
+		var (
+			preview codexclient.BrowserPreview
+			err     error
+		)
+		if resourceURL := r.URL.Query().Get("url"); resourceURL != "" {
+			preview, err = s.codex.FetchBrowserResource(r.Context(), id, resourceURL)
+		} else {
+			preview, err = s.codex.FetchBrowserPreview(r.Context(), id)
+		}
 		if err != nil {
 			status := http.StatusBadGateway
 			if errors.Is(err, storage.ErrNotFound) {
@@ -218,9 +226,9 @@ func (s *Server) handleCodexBrowserSessionSubroutes(w http.ResponseWriter, r *ht
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
 		if preview.ScriptPolicy == "blocked" {
-			w.Header().Set("Content-Security-Policy", "default-src 'none'; img-src data: blob: http: https:; style-src 'unsafe-inline' http: https:; font-src data: http: https:; form-action 'none'; base-uri 'none'")
+			w.Header().Set("Content-Security-Policy", "default-src 'none'; img-src 'self' data: blob: http: https:; style-src 'self' 'unsafe-inline' http: https:; font-src 'self' data: http: https:; form-action 'none'; base-uri 'none'")
 		}
-		_, _ = w.Write([]byte(preview.Body))
+		_, _ = w.Write(preview.Body)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "未找到 browser session 路由")
 	}

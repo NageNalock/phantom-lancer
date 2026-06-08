@@ -2,16 +2,19 @@ package codexclient
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
-	"html"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,13 +22,20 @@ import (
 	"time"
 
 	"phantom-lancer/internal/storage"
+
+	xhtml "golang.org/x/net/html"
 )
 
 const (
-	commandTimeout      = 10 * time.Minute
-	commandPreviewRunes = 4000
-	reviewMaxBytes      = 256 * 1024
+	commandTimeout          = 10 * time.Minute
+	commandPreviewRunes     = 4000
+	commandOutputEventLimit = 120
+	reviewMaxBytes          = 256 * 1024
+	browserPreviewMaxBytes  = 512 * 1024
+	browserResourceMaxBytes = 2 * 1024 * 1024
 )
+
+var cssURLPattern = regexp.MustCompile(`(?i)url\(\s*(['"]?)([^'")\s][^'")]*)['"]?\s*\)`)
 
 type queuedTurnInput struct {
 	prompt string
@@ -70,6 +80,7 @@ type CommandAssessment struct {
 	Class                string `json:"class"`
 	RiskSummary          string `json:"riskSummary"`
 	RequiresConfirmation bool   `json:"requiresConfirmation"`
+	SandboxSummary       string `json:"sandboxSummary"`
 	CwdSummary           string `json:"cwdSummary"`
 	CommandPreview       string `json:"commandPreview"`
 }
@@ -87,7 +98,7 @@ type BrowserCommentInput struct {
 
 type BrowserPreview struct {
 	ContentType  string
-	Body         string
+	Body         []byte
 	ScriptPolicy string
 }
 
@@ -190,6 +201,8 @@ func (s *Service) QueueStatus(ctx context.Context) (QueueStatus, error) {
 }
 
 func (s *Service) drainTurnQueue(ctx context.Context) {
+	s.turnScheduleMu.Lock()
+	defer s.turnScheduleMu.Unlock()
 	for {
 		running, err := s.store.CountRunningCodexCliTurns(ctx)
 		if err != nil || running >= s.currentSettings().MaxConcurrentTurns {
@@ -270,14 +283,31 @@ func (s *Service) takeQueuedInput(turnID string) (queuedTurnInput, bool) {
 	return input, ok
 }
 
+func workspaceHasQueuedOrActiveTurn(ctx context.Context, store *storage.Store, workspaceID string) bool {
+	return workspaceHasLiveTurn(ctx, store, workspaceID, true)
+}
+
 func workspaceHasActiveTurn(ctx context.Context, store *storage.Store, workspaceID string) bool {
+	return workspaceHasLiveTurn(ctx, store, workspaceID, false)
+}
+
+func workspaceHasLiveTurn(ctx context.Context, store *storage.Store, workspaceID string, includeQueued bool) bool {
 	threads, err := store.ListCodexCliThreads(ctx, false, "")
 	if err != nil {
 		return true
 	}
 	for _, thread := range threads {
-		if thread.WorkspaceID == workspaceID && (thread.Status == "running" || thread.Status == "needs_approval") {
+		if thread.WorkspaceID != workspaceID {
+			continue
+		}
+		turns, err := store.ListCodexCliTurns(ctx, thread.ID)
+		if err != nil {
 			return true
+		}
+		for _, turn := range turns {
+			if turn.Status == "running" || turn.Status == "waiting_approval" || (includeQueued && turn.Status == "queued") {
+				return true
+			}
 		}
 	}
 	return false
@@ -580,6 +610,7 @@ func (s *Service) AssessCommand(ctx context.Context, threadID string, input Comm
 		Class:                assessment.Class,
 		RiskSummary:          assessment.RiskSummary,
 		RequiresConfirmation: assessment.RequiresConfirmation,
+		SandboxSummary:       commandSandboxSummary(assessment),
 		CwdSummary:           ws.PathSummary,
 		CommandPreview:       Preview(strings.Join(argv, " "), 500),
 	}, nil
@@ -612,8 +643,8 @@ func (s *Service) RunCommand(ctx context.Context, threadID string, input Command
 	if err != nil {
 		return storage.CodexCliCommand{}, err
 	}
-	s.appendThreadEvent(ctx, thread.ID, thread.LastTurnID, "command.owner.queued", "owner", "command", commandPreview, map[string]any{"commandId": command.ID, "riskSummary": assessment.RiskSummary, "outputAttached": false})
-	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.command.queued", WorkspaceID: ws.ID, RiskLevel: commandRiskLevel(assessment), Summary: "Owner queued Codex command", Payload: map[string]any{"threadId": thread.ID, "commandId": command.ID, "class": assessment.Class}})
+	s.appendThreadEvent(ctx, thread.ID, thread.LastTurnID, "command.owner.queued", "owner", "command", commandPreview, map[string]any{"commandId": command.ID, "riskSummary": assessment.RiskSummary, "sandbox": commandSandboxSummary(assessment), "outputAttached": false})
+	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.command.queued", WorkspaceID: ws.ID, RiskLevel: commandRiskLevel(assessment), Summary: "Owner queued Codex command", Payload: map[string]any{"threadId": thread.ID, "commandId": command.ID, "class": assessment.Class, "sandbox": commandSandboxSummary(assessment)}})
 	go s.runOwnerCommand(context.Background(), command, ws, argv)
 	return command, nil
 }
@@ -650,8 +681,9 @@ func (s *Service) AttachCommandOutput(ctx context.Context, id string) (storage.C
 }
 
 func (s *Service) runOwnerCommand(ctx context.Context, command storage.CodexCliCommand, ws storage.CodexCliWorkspace, argv []string) {
-	command, _ = s.store.StartCodexCliCommand(ctx, command.ID)
-	s.appendThreadEvent(ctx, command.ThreadID, "", "command.owner.started", "owner", "command", command.CommandPreview, map[string]any{"commandId": command.ID})
+	// Register the cancel handle before transitioning out of queued so an
+	// interrupt that lands while the runner is starting always reaches a live
+	// cancel func instead of a nil one.
 	runCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	s.mu.Lock()
 	s.commandCancels[command.ID] = cancel
@@ -663,37 +695,87 @@ func (s *Service) runOwnerCommand(ctx context.Context, command storage.CodexCliC
 		s.mu.Unlock()
 	}()
 
-	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
-	cmd.Dir = ws.Path
-	cmd.Env = s.commandEnv(command.ID)
+	started, transitioned, err := s.store.StartCodexCliCommand(ctx, command.ID)
+	if err != nil {
+		s.log.Warn("codex owner command start failed", "summary", Redact(err.Error(), 120), "commandId", command.ID)
+		return
+	}
+	// The command was cancelled or otherwise resolved before the runner could
+	// start it (for example an interrupt that landed while it was still queued).
+	// Leave it in its terminal state and do not execute.
+	if !transitioned {
+		return
+	}
+	command = started
+	assessment, err := assessOwnerCommand(argv)
+	if err != nil {
+		s.finishOwnerCommand(ctx, command, "failed", 1, "", Redact(err.Error(), 200))
+		return
+	}
+	spec, err := s.ownerCommandRunSpec(command.ID, ws, argv, assessment)
+	if err != nil {
+		s.finishOwnerCommand(ctx, command, "failed", 1, "", Redact(err.Error(), 200))
+		return
+	}
+	s.appendThreadEvent(ctx, command.ThreadID, "", "command.owner.started", "owner", "command", command.CommandPreview, map[string]any{"commandId": command.ID, "sandbox": spec.SandboxSummary})
+
+	cmd := exec.CommandContext(runCtx, spec.Argv[0], spec.Argv[1:]...)
+	cmd.Dir = spec.Dir
+	cmd.Env = spec.Env
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		_, _ = s.store.FinishCodexCliCommand(ctx, command.ID, "failed", 1, "", Redact(err.Error(), 200))
+		s.finishOwnerCommand(ctx, command, "failed", 1, "", Redact(err.Error(), 200))
 		return
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		_, _ = s.store.FinishCodexCliCommand(ctx, command.ID, "failed", 1, "", Redact(err.Error(), 200))
+		s.finishOwnerCommand(ctx, command, "failed", 1, "", Redact(err.Error(), 200))
 		return
 	}
 	if err := cmd.Start(); err != nil {
-		_, _ = s.store.FinishCodexCliCommand(ctx, command.ID, "failed", 1, "", Redact(err.Error(), 200))
+		s.finishOwnerCommand(ctx, command, "failed", 1, "", Redact(err.Error(), 200))
 		return
 	}
 	output := &strings.Builder{}
 	var outputMu sync.Mutex
+	eventMu := sync.Mutex{}
+	emittedOutputEvents := 0
+	truncationNotified := false
 	done := make(chan struct{}, 2)
 	stream := func(name string, r io.Reader) {
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, 0, 64*1024), 512*1024)
 		for scanner.Scan() {
-			text := Preview(scanner.Text(), 2000)
+			text := Preview(Redact(scanner.Text(), 2000), 2000)
 			outputMu.Lock()
 			if output.Len() < commandPreviewRunes {
 				output.WriteString(text)
 				output.WriteByte('\n')
 			}
 			outputMu.Unlock()
+			eventMu.Lock()
+			switch {
+			case emittedOutputEvents < commandOutputEventLimit:
+				emittedOutputEvents++
+				eventMu.Unlock()
+				s.appendThreadEvent(ctx, command.ThreadID, "", "command.owner.output", "owner", "command", text, map[string]any{"commandId": command.ID, "stream": name, "outputAttached": false})
+			case !truncationNotified:
+				truncationNotified = true
+				eventMu.Unlock()
+				s.appendThreadEvent(ctx, command.ThreadID, "", "command.owner.output", "owner", "command", "command output event limit reached; remaining output kept only in bounded preview", map[string]any{"commandId": command.ID, "stream": name, "truncated": true, "outputAttached": false})
+			default:
+				eventMu.Unlock()
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			text := Preview(Redact(name+" stream read stopped: "+err.Error(), 300), 300)
+			outputMu.Lock()
+			if output.Len() < commandPreviewRunes {
+				output.WriteString(text)
+				output.WriteByte('\n')
+			}
+			outputMu.Unlock()
+			s.appendThreadEvent(ctx, command.ThreadID, "", "command.owner.output", "owner", "command", text, map[string]any{"commandId": command.ID, "stream": name, "truncated": true, "outputAttached": false})
 		}
 		done <- struct{}{}
 	}
@@ -720,8 +802,129 @@ func (s *Service) runOwnerCommand(ctx context.Context, command storage.CodexCliC
 			errorSummary = "interrupted by owner"
 		}
 	}
-	saved, _ := s.store.FinishCodexCliCommand(ctx, command.ID, status, exitCode, Preview(output.String(), commandPreviewRunes), errorSummary)
+	s.finishOwnerCommand(ctx, command, status, exitCode, Preview(output.String(), commandPreviewRunes), errorSummary)
+}
+
+func (s *Service) finishOwnerCommand(ctx context.Context, command storage.CodexCliCommand, status string, exitCode int, outputPreview string, errorSummary string) {
+	saved, _ := s.store.FinishCodexCliCommand(ctx, command.ID, status, exitCode, outputPreview, errorSummary)
 	s.appendThreadEvent(ctx, command.ThreadID, "", "command.owner.completed", "owner", "command", commandCompletionPreview(status, exitCode, saved.ErrorSummary), map[string]any{"commandId": command.ID, "status": status, "exitCode": exitCode, "outputAttached": false})
+}
+
+type ownerCommandRunSpec struct {
+	Argv           []string
+	Dir            string
+	Env            []string
+	SandboxSummary string
+}
+
+func (s *Service) ownerCommandRunSpec(commandID string, ws storage.CodexCliWorkspace, argv []string, assessment ownerCommandAssessment) (ownerCommandRunSpec, error) {
+	cacheRoot := s.commandCacheRoot(commandID)
+	env := s.commandEnv(cacheRoot)
+	runArgv := argv
+	if assessment.Class == "git-read" {
+		runArgv = controlledGitArgv(argv)
+	}
+	spec := ownerCommandRunSpec{
+		Argv:           runArgv,
+		Dir:            ws.Path,
+		Env:            env,
+		SandboxSummary: commandSandboxSummary(assessment),
+	}
+	if !assessment.NeedsSandbox {
+		return spec, nil
+	}
+	sandboxArgv, err := buildOwnerCommandSandboxArgv(runArgv, ws.Path, cacheRoot)
+	if err != nil {
+		return ownerCommandRunSpec{}, err
+	}
+	spec.Argv = sandboxArgv
+	return spec, nil
+}
+
+func commandSandboxSummary(assessment ownerCommandAssessment) string {
+	if assessment.NeedsSandbox {
+		return "OS sandbox: network disabled; writes limited to workspace and Phantom command cache"
+	}
+	return "read-only allowlisted command surface"
+}
+
+func buildOwnerCommandSandboxArgv(argv []string, workspacePath, cacheRoot string) ([]string, error) {
+	switch runtime.GOOS {
+	case "darwin":
+		return buildDarwinCommandSandboxArgv(argv, workspacePath, cacheRoot)
+	case "linux":
+		return buildLinuxCommandSandboxArgv(argv, workspacePath, cacheRoot)
+	default:
+		return nil, errors.New("project commands require an OS sandbox; unsupported platform " + runtime.GOOS)
+	}
+}
+
+func buildDarwinCommandSandboxArgv(argv []string, workspacePath, cacheRoot string) ([]string, error) {
+	exe, err := exec.LookPath("sandbox-exec")
+	if err != nil {
+		return nil, errors.New("project commands require sandbox-exec on macOS")
+	}
+	profile := darwinCommandSandboxProfile(workspacePath, cacheRoot)
+	out := []string{exe, "-p", profile, "--"}
+	out = append(out, argv...)
+	return out, nil
+}
+
+func darwinCommandSandboxProfile(workspacePath, cacheRoot string) string {
+	readPaths := []string{"/bin", "/sbin", "/usr", "/System", "/Library", "/opt", "/private/var", workspacePath, cacheRoot}
+	writePaths := []string{workspacePath, cacheRoot}
+	var b strings.Builder
+	b.WriteString("(version 1)\n")
+	b.WriteString("(deny default)\n")
+	b.WriteString("(allow process*)\n")
+	b.WriteString("(allow signal (target self))\n")
+	b.WriteString("(allow sysctl-read)\n")
+	b.WriteString("(allow mach-lookup)\n")
+	b.WriteString("(allow file-read-metadata)\n")
+	for _, path := range readPaths {
+		if path == "" {
+			continue
+		}
+		b.WriteString("(allow file-read* (subpath \"")
+		b.WriteString(escapeSandboxPath(path))
+		b.WriteString("\"))\n")
+	}
+	for _, path := range writePaths {
+		if path == "" {
+			continue
+		}
+		b.WriteString("(allow file-write* (subpath \"")
+		b.WriteString(escapeSandboxPath(path))
+		b.WriteString("\"))\n")
+	}
+	for _, path := range []string{"/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"} {
+		b.WriteString("(allow file-read* file-write* (literal \"")
+		b.WriteString(path)
+		b.WriteString("\"))\n")
+	}
+	b.WriteString("(deny network*)\n")
+	return b.String()
+}
+
+func buildLinuxCommandSandboxArgv(argv []string, workspacePath, cacheRoot string) ([]string, error) {
+	exe, err := exec.LookPath("bwrap")
+	if err != nil {
+		return nil, errors.New("project commands require bwrap on Linux")
+	}
+	args := []string{exe, "--die-with-parent", "--unshare-net", "--proc", "/proc", "--dev", "/dev"}
+	for _, path := range []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/etc"} {
+		if _, err := os.Stat(path); err == nil {
+			args = append(args, "--ro-bind", path, path)
+		}
+	}
+	args = append(args, "--bind", workspacePath, workspacePath, "--bind", cacheRoot, cacheRoot, "--tmpfs", "/tmp", "--chdir", workspacePath)
+	args = append(args, argv...)
+	return args, nil
+}
+
+func escapeSandboxPath(path string) string {
+	path = strings.ReplaceAll(path, `\`, `\\`)
+	return strings.ReplaceAll(path, `"`, `\"`)
 }
 
 func normalizeCommand(input CommandInput) ([]string, error) {
@@ -786,6 +989,7 @@ type ownerCommandAssessment struct {
 	Class                string
 	RiskSummary          string
 	RequiresConfirmation bool
+	NeedsSandbox         bool
 }
 
 func assessOwnerCommand(argv []string) (ownerCommandAssessment, error) {
@@ -806,7 +1010,7 @@ func assessOwnerCommand(argv []string) (ownerCommandAssessment, error) {
 		if len(argv) >= 2 {
 			switch argv[1] {
 			case "test", "vet":
-				return ownerCommandAssessment{Class: "project-code", RiskSummary: "executes project Go code with Phantom-managed cache, network-oriented Go module fetch disabled", RequiresConfirmation: true}, nil
+				return ownerCommandAssessment{Class: "project-code", RiskSummary: "executes project Go code inside an OS sandbox with network disabled and writes limited to workspace/cache", RequiresConfirmation: true, NeedsSandbox: true}, nil
 			}
 		}
 		return ownerCommandAssessment{}, errors.New("only go test and go vet are allowed")
@@ -822,11 +1026,8 @@ func assessGitCommand(argv []string) (ownerCommandAssessment, error) {
 		return ownerCommandAssessment{}, errors.New("git subcommand is required")
 	}
 	sub := strings.ToLower(argv[1])
-	for _, arg := range argv[1:] {
-		lower := strings.ToLower(arg)
-		if strings.HasPrefix(lower, "--exec-path") || strings.HasPrefix(lower, "-c") || strings.Contains(lower, "external") {
-			return ownerCommandAssessment{}, errors.New("git command option is not allowed")
-		}
+	if err := validateGitInspectionArgs(argv); err != nil {
+		return ownerCommandAssessment{}, err
 	}
 	switch sub {
 	case "status", "diff", "log", "show", "branch", "rev-parse", "ls-files":
@@ -834,6 +1035,65 @@ func assessGitCommand(argv []string) (ownerCommandAssessment, error) {
 	default:
 		return ownerCommandAssessment{}, errors.New("only read-only git inspection commands are allowed")
 	}
+}
+
+func validateGitInspectionArgs(argv []string) error {
+	sub := ""
+	if len(argv) > 1 {
+		sub = strings.ToLower(argv[1])
+	}
+	for _, arg := range argv[1:] {
+		lower := strings.ToLower(arg)
+		if strings.HasPrefix(lower, "--exec-path") || strings.HasPrefix(lower, "-c") || strings.HasPrefix(lower, "--git-dir") || strings.HasPrefix(lower, "--work-tree") || strings.HasPrefix(lower, "--namespace") || strings.HasPrefix(lower, "--config-env") || strings.HasPrefix(lower, "--upload-pack") || strings.HasPrefix(lower, "--output") || lower == "--no-index" || lower == "--ext-diff" || lower == "--textconv" || strings.Contains(lower, "external") {
+			return errors.New("git command option is not allowed")
+		}
+		if filepath.IsAbs(arg) || strings.HasPrefix(arg, "../") || strings.HasPrefix(arg, `..\`) || strings.Contains(arg, "/../") || strings.Contains(arg, `\..\`) {
+			return errors.New("git command path must stay inside the registered workspace")
+		}
+	}
+	if sub == "branch" {
+		return validateGitBranchInspectionArgs(argv[2:])
+	}
+	return nil
+}
+
+func validateGitBranchInspectionArgs(args []string) error {
+	for _, arg := range args {
+		lower := strings.ToLower(arg)
+		if strings.HasPrefix(lower, "-d") || strings.HasPrefix(lower, "-m") || strings.HasPrefix(lower, "--delete") || strings.HasPrefix(lower, "--move") || strings.HasPrefix(lower, "--copy") || strings.HasPrefix(lower, "--force") || strings.HasPrefix(lower, "--set-upstream") || strings.HasPrefix(lower, "--unset-upstream") || strings.HasPrefix(lower, "--edit-description") {
+			return errors.New("git branch mutation option is not allowed")
+		}
+		if !strings.HasPrefix(arg, "-") {
+			return errors.New("git branch positional arguments are not allowed")
+		}
+		if branchOptionRequiresValue(lower) {
+			return errors.New("git branch options that require separate values are not allowed; use --option=value form")
+		}
+	}
+	return nil
+}
+
+func branchOptionRequiresValue(arg string) bool {
+	switch arg {
+	case "--points-at", "--sort", "--format":
+		return true
+	default:
+		return false
+	}
+}
+
+func controlledGitArgv(argv []string) []string {
+	if len(argv) < 2 || strings.ToLower(filepath.Base(argv[0])) != "git" {
+		return argv
+	}
+	out := []string{"git", "-c", "core.pager=cat", "-c", "diff.external=", "-c", "pager.diff=false", "-c", "pager.show=false"}
+	sub := strings.ToLower(argv[1])
+	out = append(out, argv[1])
+	if sub == "diff" || sub == "show" || sub == "log" {
+		out = append(out, "--no-ext-diff", "--no-textconv")
+	}
+	out = append(out, argv[2:]...)
+	return out
 }
 
 func assessPackageScriptCommand(exe string, argv []string) (ownerCommandAssessment, error) {
@@ -851,7 +1111,7 @@ func assessPackageScriptCommand(exe string, argv []string) (ownerCommandAssessme
 	}
 	switch script {
 	case "check", "typecheck", "lint", "test", "build":
-		return ownerCommandAssessment{Class: "project-script", RiskSummary: "executes an allowlisted local project script; package installation and network tools remain blocked by command policy", RequiresConfirmation: true}, nil
+		return ownerCommandAssessment{Class: "project-script", RiskSummary: "executes an allowlisted local project script inside an OS sandbox with network disabled and writes limited to workspace/cache", RequiresConfirmation: true, NeedsSandbox: true}, nil
 	default:
 		return ownerCommandAssessment{}, errors.New("only check, typecheck, lint, test and build package scripts are allowed")
 	}
@@ -880,9 +1140,12 @@ func commandCompletionPreview(status string, exitCode int, errorSummary string) 
 	return Preview(status+" exit "+strconv.Itoa(exitCode), 120)
 }
 
-func (s *Service) commandEnv(commandID string) []string {
+func (s *Service) commandCacheRoot(commandID string) string {
+	return filepath.Join(s.dataDir, "command-cache", commandID)
+}
+
+func (s *Service) commandEnv(cacheRoot string) []string {
 	env := BuildChildEnv("")
-	cacheRoot := filepath.Join(s.dataDir, "command-cache", commandID)
 	_ = os.MkdirAll(cacheRoot, 0o700)
 	pairs := []string{
 		"CI=1",
@@ -890,6 +1153,10 @@ func (s *Service) commandEnv(commandID string) []string {
 		"PAGER=cat",
 		"GIT_PAGER=cat",
 		"GIT_EXTERNAL_DIFF=",
+		"GIT_OPTIONAL_LOCKS=0",
+		"HOME=" + filepath.Join(cacheRoot, "home"),
+		"XDG_CACHE_HOME=" + filepath.Join(cacheRoot, "xdg-cache"),
+		"XDG_CONFIG_HOME=" + filepath.Join(cacheRoot, "xdg-config"),
 		"TMPDIR=" + filepath.Join(cacheRoot, "tmp"),
 		"GOCACHE=" + filepath.Join(cacheRoot, "go-build"),
 		"GOMODCACHE=" + filepath.Join(cacheRoot, "go-mod"),
@@ -900,7 +1167,7 @@ func (s *Service) commandEnv(commandID string) []string {
 		"npm_config_offline=true",
 	}
 	for _, pair := range pairs {
-		if strings.Contains(pair, "TMPDIR=") || strings.Contains(pair, "GOCACHE=") || strings.Contains(pair, "GOMODCACHE=") || strings.Contains(pair, "npm_config_cache=") {
+		if strings.Contains(pair, "HOME=") || strings.Contains(pair, "XDG_CACHE_HOME=") || strings.Contains(pair, "XDG_CONFIG_HOME=") || strings.Contains(pair, "TMPDIR=") || strings.Contains(pair, "GOCACHE=") || strings.Contains(pair, "GOMODCACHE=") || strings.Contains(pair, "npm_config_cache=") {
 			parts := strings.SplitN(pair, "=", 2)
 			_ = os.MkdirAll(parts[1], 0o700)
 		}
@@ -1043,14 +1310,19 @@ func (s *Service) FetchBrowserPreview(ctx context.Context, id string) (BrowserPr
 	if _, err := s.normalizePreviewURL(ctx, session.URL, ws, true); err != nil {
 		return BrowserPreview{}, err
 	}
+	proxyPath := browserProxyPath(session.ID)
 	if strings.HasPrefix(session.URL, "file://") {
 		u, err := url.Parse(session.URL)
 		if err != nil {
 			return BrowserPreview{}, err
 		}
-		data, err := readPreviewFile(u.Path, 512*1024)
-		body := injectPreviewBase(string(data), session.URL)
-		return BrowserPreview{ContentType: "text/html; charset=utf-8", Body: body, ScriptPolicy: "allowed"}, err
+		data, err := readPreviewFile(u.Path, browserPreviewMaxBytes)
+		if err != nil {
+			return BrowserPreview{}, err
+		}
+		contentType := previewFileContentType(u.Path, "text/html; charset=utf-8")
+		body := rewritePreviewBody(data, contentType, session.URL, proxyPath)
+		return BrowserPreview{ContentType: contentType, Body: body, ScriptPolicy: "allowed"}, nil
 	}
 	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
@@ -1064,7 +1336,7 @@ func (s *Service) FetchBrowserPreview(ctx context.Context, id string) (BrowserPr
 		return BrowserPreview{}, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, browserPreviewMaxBytes))
 	if err != nil {
 		return BrowserPreview{}, err
 	}
@@ -1076,27 +1348,241 @@ func (s *Service) FetchBrowserPreview(ctx context.Context, id string) (BrowserPr
 	if previewURLIsLocal(session.URL) {
 		policy = "allowed"
 	}
-	body := string(data)
-	if strings.Contains(strings.ToLower(contentType), "html") {
-		body = injectPreviewBase(body, session.URL)
-	}
+	body := rewritePreviewBody(data, contentType, session.URL, proxyPath)
 	return BrowserPreview{ContentType: contentType, Body: body, ScriptPolicy: policy}, nil
 }
 
-func injectPreviewBase(body, rawURL string) string {
-	if strings.TrimSpace(body) == "" || strings.Contains(strings.ToLower(body), "<base ") {
+func (s *Service) FetchBrowserResource(ctx context.Context, id string, rawResourceURL string) (BrowserPreview, error) {
+	session, err := s.store.GetCodexCliBrowserSession(ctx, id)
+	if err != nil {
+		return BrowserPreview{}, err
+	}
+	_, ws, err := s.threadWorkspace(ctx, session.ThreadID)
+	if err != nil {
+		return BrowserPreview{}, err
+	}
+	resourceURL, err := resolvePreviewResourceURL(session.URL, rawResourceURL)
+	if err != nil {
+		return BrowserPreview{}, err
+	}
+	normalized, err := s.normalizePreviewURL(ctx, resourceURL, ws, true)
+	if err != nil {
+		return BrowserPreview{}, err
+	}
+	if err := validatePreviewResourceTransition(session.URL, normalized); err != nil {
+		return BrowserPreview{}, err
+	}
+	if strings.HasPrefix(normalized, "file://") {
+		u, err := url.Parse(normalized)
+		if err != nil {
+			return BrowserPreview{}, err
+		}
+		data, err := readPreviewFile(u.Path, browserResourceMaxBytes)
+		if err != nil {
+			return BrowserPreview{}, err
+		}
+		contentType := previewFileContentType(u.Path, "application/octet-stream")
+		return BrowserPreview{ContentType: contentType, Body: rewritePreviewBody(data, contentType, normalized, browserProxyPath(session.ID)), ScriptPolicy: "allowed"}, nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, normalized, nil)
+	if err != nil {
+		return BrowserPreview{}, err
+	}
+	resp, err := s.previewHTTPClient(ws).Do(req)
+	if err != nil {
+		return BrowserPreview{}, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, browserResourceMaxBytes))
+	if err != nil {
+		return BrowserPreview{}, err
+	}
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	policy := "blocked"
+	if previewURLIsLocal(normalized) {
+		policy = "allowed"
+	}
+	return BrowserPreview{ContentType: contentType, Body: rewritePreviewBody(data, contentType, normalized, browserProxyPath(session.ID)), ScriptPolicy: policy}, nil
+}
+
+func browserProxyPath(sessionID string) string {
+	return "/api/codex/browser/sessions/" + url.PathEscape(sessionID) + "/proxy"
+}
+
+func rewritePreviewBody(data []byte, contentType string, rawBaseURL string, proxyPath string) []byte {
+	lower := strings.ToLower(contentType)
+	switch {
+	case strings.Contains(lower, "html"):
+		return []byte(rewritePreviewHTML(string(data), rawBaseURL, proxyPath))
+	case strings.Contains(lower, "css"):
+		baseURL, err := url.Parse(rawBaseURL)
+		if err != nil {
+			return data
+		}
+		return []byte(rewritePreviewCSS(string(data), baseURL, proxyPath))
+	default:
+		return data
+	}
+}
+
+func rewritePreviewHTML(body string, rawBaseURL string, proxyPath string) string {
+	if strings.TrimSpace(body) == "" {
 		return body
 	}
-	base := `<base href="` + html.EscapeString(rawURL) + `">`
-	lower := strings.ToLower(body)
-	head := strings.Index(lower, "<head")
-	if head >= 0 {
-		if end := strings.Index(body[head:], ">"); end >= 0 {
-			pos := head + end + 1
-			return body[:pos] + base + body[pos:]
+	baseURL, err := url.Parse(rawBaseURL)
+	if err != nil {
+		return body
+	}
+	doc, err := xhtml.Parse(strings.NewReader(body))
+	if err != nil {
+		return body
+	}
+	var walk func(*xhtml.Node)
+	walk = func(node *xhtml.Node) {
+		if node.Type == xhtml.ElementNode && strings.EqualFold(node.Data, "base") && node.Parent != nil {
+			node.Parent.RemoveChild(node)
+			return
+		}
+		if node.Type == xhtml.ElementNode {
+			for i := range node.Attr {
+				key := strings.ToLower(node.Attr[i].Key)
+				switch key {
+				case "src", "href", "action", "poster":
+					if next, ok := proxiedPreviewResourceURL(baseURL, node.Attr[i].Val, proxyPath); ok {
+						node.Attr[i].Val = next
+					}
+				case "srcset":
+					node.Attr[i].Val = rewritePreviewSrcset(node.Attr[i].Val, baseURL, proxyPath)
+				case "style":
+					node.Attr[i].Val = rewritePreviewCSS(node.Attr[i].Val, baseURL, proxyPath)
+				}
+			}
+		}
+		if node.Type == xhtml.TextNode && node.Parent != nil && strings.EqualFold(node.Parent.Data, "style") {
+			node.Data = rewritePreviewCSS(node.Data, baseURL, proxyPath)
+		}
+		for child := node.FirstChild; child != nil; {
+			next := child.NextSibling
+			walk(child)
+			child = next
 		}
 	}
-	return base + body
+	walk(doc)
+	var out bytes.Buffer
+	if err := xhtml.Render(&out, doc); err != nil {
+		return body
+	}
+	return out.String()
+}
+
+func rewritePreviewSrcset(value string, baseURL *url.URL, proxyPath string) string {
+	parts := strings.Split(value, ",")
+	for i, part := range parts {
+		fields := strings.Fields(strings.TrimSpace(part))
+		if len(fields) == 0 {
+			continue
+		}
+		if next, ok := proxiedPreviewResourceURL(baseURL, fields[0], proxyPath); ok {
+			fields[0] = next
+			parts[i] = strings.Join(fields, " ")
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func rewritePreviewCSS(css string, baseURL *url.URL, proxyPath string) string {
+	return cssURLPattern.ReplaceAllStringFunc(css, func(match string) string {
+		groups := cssURLPattern.FindStringSubmatch(match)
+		if len(groups) < 3 {
+			return match
+		}
+		quote := groups[1]
+		if quote == "" {
+			quote = `"`
+		}
+		if next, ok := proxiedPreviewResourceURL(baseURL, strings.TrimSpace(groups[2]), proxyPath); ok {
+			return "url(" + quote + next + quote + ")"
+		}
+		return match
+	})
+}
+
+func proxiedPreviewResourceURL(baseURL *url.URL, raw string, proxyPath string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", false
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		return "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	switch scheme {
+	case "data", "blob", "javascript", "mailto", "tel", "about":
+		return "", false
+	}
+	absolute := baseURL.ResolveReference(u)
+	if absolute == nil {
+		return "", false
+	}
+	switch strings.ToLower(absolute.Scheme) {
+	case "http", "https", "file":
+		return proxyPath + "?url=" + url.QueryEscape(absolute.String()), true
+	default:
+		return "", false
+	}
+}
+
+func resolvePreviewResourceURL(baseRaw string, resourceRaw string) (string, error) {
+	if strings.TrimSpace(resourceRaw) == "" {
+		return "", errors.New("resource url is required")
+	}
+	baseURL, err := url.Parse(baseRaw)
+	if err != nil {
+		return "", err
+	}
+	resourceURL, err := url.Parse(strings.TrimSpace(resourceRaw))
+	if err != nil {
+		return "", err
+	}
+	absolute := baseURL.ResolveReference(resourceURL)
+	if absolute == nil {
+		return "", errors.New("invalid resource url")
+	}
+	return absolute.String(), nil
+}
+
+func validatePreviewResourceTransition(sessionURL string, resourceURL string) error {
+	if !previewURLIsPublic(sessionURL) {
+		return nil
+	}
+	if previewURLIsPublic(resourceURL) {
+		return nil
+	}
+	return errors.New("public preview resources must not target localhost, private network, or workspace file URLs")
+}
+
+func previewURLIsPublic(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	return !isLocalPreviewHost(u.Hostname())
+}
+
+func previewFileContentType(path string, fallback string) string {
+	if value := mime.TypeByExtension(filepath.Ext(path)); value != "" {
+		return value
+	}
+	return fallback
 }
 
 func readPreviewFile(path string, maxBytes int64) ([]byte, error) {

@@ -156,3 +156,67 @@ func parseModelList(raw json.RawMessage) []CodexModel {
 	}
 	return out
 }
+
+// parseCapabilityList extracts a redacted summary list from a skills or MCP
+// list response. It accepts either {data:[...]}, {items:[...]}, {servers:[...]},
+// {skills:[...]} or a bare array, and only surfaces non-secret descriptive
+// fields. Tokens, headers, env, args, command lines and URLs are never copied.
+func parseCapabilityList(raw json.RawMessage, kind string) []any {
+	entries := capabilityEntries(raw)
+	out := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		item, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		summary := map[string]any{}
+		if name := firstString(item, "name", "id", "slug"); name != "" {
+			summary["name"] = Preview(name, 120)
+		}
+		if desc := firstString(item, "description", "summary"); desc != "" {
+			summary["description"] = Preview(desc, 300)
+		}
+		if source := firstString(item, "source", "origin", "scope"); source != "" {
+			summary["source"] = Preview(source, 120)
+		}
+		if kind == "mcp" {
+			if transport := firstString(item, "transport", "type"); transport != "" {
+				summary["transport"] = Preview(transport, 60)
+			}
+			if enabled, ok := item["enabled"].(bool); ok {
+				summary["enabled"] = enabled
+			}
+			if health := firstString(item, "health", "status", "state"); health != "" {
+				summary["health"] = Preview(health, 60)
+			}
+			if lastError := firstString(item, "lastError", "error"); lastError != "" {
+				summary["lastError"] = Redact(lastError, 200)
+			}
+		}
+		if len(summary) == 0 {
+			continue
+		}
+		out = append(out, summary)
+	}
+	return out
+}
+
+func capabilityEntries(raw json.RawMessage) []any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var asArray []any
+	if err := json.Unmarshal(raw, &asArray); err == nil {
+		return asArray
+	}
+	payload := map[string]any{}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil
+	}
+	for _, key := range []string{"data", "items", "servers", "skills", "mcpServers"} {
+		if list, ok := payload[key].([]any); ok {
+			return list
+		}
+	}
+	return nil
+}

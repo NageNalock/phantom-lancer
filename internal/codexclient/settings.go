@@ -27,6 +27,7 @@ const (
 	keyMaxEventsPerThread   = settingsPrefix + "max_events_per_thread"
 	keyMaxEventPayloadBytes = settingsPrefix + "max_event_payload_bytes"
 	keyMaxConcurrentTurns   = settingsPrefix + "max_concurrent_turns"
+	keyScratchWorkspaceID   = settingsPrefix + "scratch_workspace_id"
 )
 
 // Settings is the persisted module configuration for the Codex CLI client.
@@ -45,6 +46,7 @@ type Settings struct {
 	MaxEventsPerThread     int    `json:"maxEventsPerThread"`
 	MaxEventPayloadBytes   int    `json:"maxEventPayloadBytes"`
 	MaxConcurrentTurns     int    `json:"maxConcurrentTurns"`
+	ScratchWorkspaceID     string `json:"scratchWorkspaceId"`
 }
 
 func DefaultSettings() Settings {
@@ -71,6 +73,7 @@ func normalizeSettings(s Settings) Settings {
 	s.BinaryPath = strings.TrimSpace(s.BinaryPath)
 	s.CodexHome = strings.TrimSpace(s.CodexHome)
 	s.DefaultModel = strings.TrimSpace(s.DefaultModel)
+	s.ScratchWorkspaceID = strings.TrimSpace(s.ScratchWorkspaceID)
 	s.DefaultSandbox = strings.TrimSpace(s.DefaultSandbox)
 	switch s.DefaultSandbox {
 	case "read-only", "workspace-write":
@@ -153,6 +156,9 @@ func loadSettings(ctx context.Context, store *storage.Store) (Settings, error) {
 	if v, ok := values[keyMaxConcurrentTurns]; ok {
 		s.MaxConcurrentTurns = parseInt(v, s.MaxConcurrentTurns)
 	}
+	if v, ok := values[keyScratchWorkspaceID]; ok {
+		s.ScratchWorkspaceID = v
+	}
 	return normalizeSettings(s), nil
 }
 
@@ -173,6 +179,7 @@ func saveSettings(ctx context.Context, store *storage.Store, s Settings) error {
 		keyMaxEventsPerThread:   strconv.Itoa(s.MaxEventsPerThread),
 		keyMaxEventPayloadBytes: strconv.Itoa(s.MaxEventPayloadBytes),
 		keyMaxConcurrentTurns:   strconv.Itoa(s.MaxConcurrentTurns),
+		keyScratchWorkspaceID:   s.ScratchWorkspaceID,
 	})
 }
 

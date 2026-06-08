@@ -41,6 +41,21 @@ func (s *Server) registerCodexRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/codex/browser/sessions/", s.handleCodexBrowserSessionSubroutes)
 	mux.HandleFunc("GET /api/codex/browser/sessions/", s.handleCodexBrowserSessionSubroutes)
 	mux.HandleFunc("DELETE /api/codex/browser/sessions/", s.handleCodexBrowserSessionSubroutes)
+	mux.HandleFunc("GET /api/codex/automations", s.handleListCodexAutomations)
+	mux.HandleFunc("POST /api/codex/automations", s.handleCreateCodexAutomation)
+	mux.HandleFunc("PATCH /api/codex/automations/", s.handleCodexAutomationSubroutes)
+	mux.HandleFunc("POST /api/codex/automations/", s.handleCodexAutomationSubroutes)
+	mux.HandleFunc("DELETE /api/codex/automations/", s.handleCodexAutomationSubroutes)
+	mux.HandleFunc("GET /api/codex/automation-runs", s.handleListCodexAutomationRuns)
+	mux.HandleFunc("POST /api/codex/automation-runs/", s.handleCodexAutomationRunSubroutes)
+	mux.HandleFunc("GET /api/codex/triage", s.handleCodexTriageInbox)
+	mux.HandleFunc("GET /api/codex/chats", s.handleListCodexChats)
+	mux.HandleFunc("POST /api/codex/chats", s.handleCreateCodexChat)
+	mux.HandleFunc("GET /api/codex/memory", s.handleCodexMemoryDiagnostics)
+	mux.HandleFunc("GET /api/codex/capabilities/skills", s.handleCodexCapability)
+	mux.HandleFunc("GET /api/codex/capabilities/mcp", s.handleCodexCapability)
+	mux.HandleFunc("GET /api/codex/capabilities/plugins", s.handleCodexCapability)
+	mux.HandleFunc("POST /api/codex/capabilities/probe", s.handleProbeCodexCapabilities)
 
 	mux.HandleFunc("GET /api/codex/approvals", s.handleListCodexApprovals)
 	mux.HandleFunc("POST /api/codex/approvals/", s.handleCodexApprovalSubroutes)
@@ -370,13 +385,14 @@ func (s *Server) handleCodexThreadSubroutes(w http.ResponseWriter, r *http.Reque
 
 	if r.Method == http.MethodPatch && len(parts) == 1 {
 		var req struct {
-			Title  *string `json:"title"`
-			Pinned *bool   `json:"pinned"`
+			Title      *string `json:"title"`
+			Pinned     *bool   `json:"pinned"`
+			Background *bool   `json:"background"`
 		}
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		thread, err := s.codex.PatchThread(r.Context(), threadID, req.Title, req.Pinned)
+		thread, err := s.codex.PatchThread(r.Context(), threadID, req.Title, req.Pinned, req.Background)
 		if err != nil {
 			writeError(w, http.StatusNotFound, "codex_thread_not_found", "未找到会话")
 			return

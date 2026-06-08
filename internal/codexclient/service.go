@@ -57,6 +57,8 @@ type Service struct {
 	mapper     *EventMapper
 	execClient *ExecClient
 
+	turnScheduleMu     sync.Mutex
+	automationRunMu    sync.Mutex
 	mu                 sync.RWMutex
 	settings           Settings
 	activeTurns        map[string]*appTurnContext
@@ -136,6 +138,9 @@ func NewService(store *storage.Store, hub *events.Hub, dataDir string, allowedRo
 	svc.detector = NewDetector(svc.binaryPath, svc.codexHome)
 	svc.mapper = NewEventMapper(2000)
 	svc.supervisor = NewAppServerSupervisor(svc.detector, svc.currentSettings, svc.handleNotification, svc.handleServerRequest, logger)
+	svc.supervisor.SetFailureHandler(func(message string) {
+		svc.notify(context.Background(), storage.CodexCliNotification{Scope: "codex.app_server", ScopeID: "default", EventType: "codex.app_server.failed", Title: "Codex app-server failed", Summary: Redact(message, 200), Severity: "danger"})
+	})
 	return svc
 }
 
@@ -197,6 +202,19 @@ func (s *Service) StartBackground(ctx context.Context) {
 				s.cleanupAttachments(ctx)
 				s.expireApprovals(ctx)
 				s.drainTurnQueue(ctx)
+			}
+		}
+	}()
+	go func() {
+		s.processDueAutomations(ctx)
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.processDueAutomations(ctx)
 			}
 		}
 	}()
@@ -458,6 +476,16 @@ func (s *Service) CreateThread(ctx context.Context, workspaceID, title, model, s
 	return thread, nil
 }
 
+func (s *Service) CreateBackgroundThread(ctx context.Context, workspaceID, title, model, sandbox, approval, source string) (storage.CodexCliThread, error) {
+	thread, err := s.CreateThread(ctx, workspaceID, title, model, sandbox, approval)
+	if err != nil {
+		return storage.CodexCliThread{}, err
+	}
+	thread.Background = true
+	thread.BackgroundSource = Preview(source, 120)
+	return s.store.SaveCodexCliThread(ctx, thread)
+}
+
 func (s *Service) GetThread(ctx context.Context, id string) (storage.CodexCliThread, error) {
 	return s.store.GetCodexCliThread(ctx, id)
 }
@@ -466,7 +494,7 @@ func (s *Service) ListTurns(ctx context.Context, threadID string) ([]storage.Cod
 	return s.store.ListCodexCliTurns(ctx, threadID)
 }
 
-func (s *Service) PatchThread(ctx context.Context, id string, title *string, pinned *bool) (storage.CodexCliThread, error) {
+func (s *Service) PatchThread(ctx context.Context, id string, title *string, pinned *bool, background *bool) (storage.CodexCliThread, error) {
 	thread, err := s.store.GetCodexCliThread(ctx, id)
 	if err != nil {
 		return storage.CodexCliThread{}, err
@@ -476,6 +504,12 @@ func (s *Service) PatchThread(ctx context.Context, id string, title *string, pin
 	}
 	if pinned != nil {
 		thread.Pinned = *pinned
+	}
+	if background != nil {
+		thread.Background = *background
+		if !*background {
+			thread.BackgroundSource = ""
+		}
 	}
 	return s.store.SaveCodexCliThread(ctx, thread)
 }
@@ -603,7 +637,13 @@ func (s *Service) startTurn(ctx context.Context, threadID string, input TurnInpu
 	if err != nil {
 		return storage.CodexCliTurn{}, err
 	}
-	policy, err := s.policy.ResolveRunPolicy(ws, firstNonEmpty(input.Sandbox, thread.SandboxMode), firstNonEmpty(input.ApprovalPolicy, thread.ApprovalPolicy))
+	requestedSandbox := firstNonEmpty(input.Sandbox, thread.SandboxMode)
+	// Chat threads are research/planning only: they stay read-only regardless of
+	// any requested or stored sandbox, so they can never write files.
+	if thread.Kind == "chat" {
+		requestedSandbox = "read-only"
+	}
+	policy, err := s.policy.ResolveRunPolicy(ws, requestedSandbox, firstNonEmpty(input.ApprovalPolicy, thread.ApprovalPolicy))
 	if err != nil {
 		return storage.CodexCliTurn{}, err
 	}
@@ -614,12 +654,20 @@ func (s *Service) startTurn(ctx context.Context, threadID string, input TurnInpu
 		return storage.CodexCliTurn{}, err
 	}
 
+	s.turnScheduleMu.Lock()
+	scheduleLocked := true
+	defer func() {
+		if scheduleLocked {
+			s.turnScheduleMu.Unlock()
+		}
+	}()
+
 	status := "running"
 	if forceQueue {
 		status = "queued"
 	} else if running, err := s.store.CountRunningCodexCliTurns(ctx); err != nil {
 		return storage.CodexCliTurn{}, err
-	} else if running >= s.currentSettings().MaxConcurrentTurns || workspaceHasActiveTurn(ctx, s.store, thread.WorkspaceID) {
+	} else if running >= s.currentSettings().MaxConcurrentTurns || workspaceHasQueuedOrActiveTurn(ctx, s.store, thread.WorkspaceID) {
 		status = "queued"
 	}
 
@@ -654,12 +702,16 @@ func (s *Service) startTurn(ctx context.Context, threadID string, input TurnInpu
 		s.mu.Lock()
 		s.queuedInputs[turn.ID] = queuedTurnInput{prompt: input.Prompt, model: model, policy: policy, images: images}
 		s.mu.Unlock()
+		scheduleLocked = false
+		s.turnScheduleMu.Unlock()
 		s.appendThreadEvent(ctx, threadID, turn.ID, EventTurnQueued, "codex", "", "", map[string]any{"model": model, "sandbox": policy.Sandbox, "approval": policy.ApprovalPolicy})
 		s.appendThreadEvent(ctx, threadID, turn.ID, EventMessageUser, "codex", "", Preview(input.Prompt, s.currentSettings().MaxEventPayloadBytes/16), nil)
 		_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.turn.queued", WorkspaceID: thread.WorkspaceID, RiskLevel: turnRisk(policy), Summary: "Codex turn 已进入队列", Payload: map[string]any{"threadId": threadID, "turnId": turn.ID, "sandbox": policy.Sandbox, "approval": policy.ApprovalPolicy}})
 		return turn, nil
 	}
 
+	scheduleLocked = false
+	s.turnScheduleMu.Unlock()
 	s.appendThreadEvent(ctx, threadID, turn.ID, EventTurnStarted, "codex", "", "", map[string]any{"model": model, "sandbox": policy.Sandbox, "approval": policy.ApprovalPolicy})
 	s.appendThreadEvent(ctx, threadID, turn.ID, EventMessageUser, "codex", "", Preview(input.Prompt, s.currentSettings().MaxEventPayloadBytes/16), nil)
 	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.turn.started", WorkspaceID: thread.WorkspaceID, RiskLevel: turnRisk(policy), Summary: "已开始 Codex turn", Payload: map[string]any{"threadId": threadID, "turnId": turn.ID, "sandbox": policy.Sandbox, "approval": policy.ApprovalPolicy}})
@@ -761,6 +813,10 @@ func (s *Service) runAppServerTurn(ctx context.Context, client *AppServerClient,
 }
 
 func (s *Service) InterruptTurn(ctx context.Context, turnID string) (storage.CodexCliTurn, error) {
+	return s.interruptTurn(ctx, turnID, true, "interrupted by owner")
+}
+
+func (s *Service) interruptTurn(ctx context.Context, turnID string, completeAutomation bool, runSummary string) (storage.CodexCliTurn, error) {
 	turn, err := s.store.GetCodexCliTurn(ctx, turnID)
 	if err != nil {
 		return storage.CodexCliTurn{}, err
@@ -786,9 +842,12 @@ func (s *Service) InterruptTurn(ctx context.Context, turnID string) (storage.Cod
 	thread.Status = s.threadStatusFromTurns(ctx, thread.ID)
 	_, _ = s.store.SaveCodexCliThread(ctx, thread)
 	s.appendThreadEvent(ctx, thread.ID, turnID, EventTurnCancelled, "codex", "", "", nil)
+	if completeAutomation {
+		s.completeAutomationRunForTurn(ctx, turn, false, "Codex turn cancelled")
+	}
 	s.cleanupTurnAttachments(ctx, turnID)
 	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.turn.interrupted", RiskLevel: "low", Summary: "已中断 Codex turn", Payload: map[string]any{"threadId": thread.ID, "turnId": turnID}})
-	s.finishActiveRun(ctx, &appTurnContext{turnID: turnID}, "cancelled", 130, "interrupted by owner")
+	s.finishActiveRun(ctx, &appTurnContext{turnID: turnID}, "cancelled", 130, runSummary)
 	s.clearActiveTurn(turnID)
 	return saved, nil
 }
@@ -879,6 +938,7 @@ func (s *Service) appendThreadEvent(ctx context.Context, threadID, turnID, event
 	} else {
 		s.hub.Publish(general)
 	}
+	s.notifyForThreadEvent(ctx, threadID, turnID, eventType, preview)
 	_ = s.store.PruneCodexCliEvents(ctx, threadID, s.currentSettings().MaxEventsPerThread)
 }
 
@@ -922,6 +982,7 @@ func (s *Service) handleNotification(notif Notification) {
 			_, _ = s.store.SaveCodexCliTurn(ctx, turn)
 			thread.Status = "idle"
 			_, _ = s.store.SaveCodexCliThread(ctx, thread)
+			s.completeAutomationRunForTurn(ctx, turn, false, "Codex turn cancelled")
 			s.cleanupTurnAttachments(ctx, turn.ID)
 		}
 		s.clearActiveTurn(active.turnID)
@@ -1233,6 +1294,7 @@ func (s *Service) completeTurn(ctx context.Context, thread storage.CodexCliThrea
 	thread.Status = "idle"
 	_, _ = s.store.SaveCodexCliThread(ctx, thread)
 	s.appendThreadEvent(ctx, thread.ID, turn.ID, EventTurnCompleted, "codex", "", "", nil)
+	s.completeAutomationRunForTurn(ctx, turn, true, "")
 	s.cleanupTurnAttachments(ctx, turn.ID)
 	go s.drainTurnQueue(context.Background())
 }
@@ -1246,6 +1308,7 @@ func (s *Service) failTurn(ctx context.Context, thread storage.CodexCliThread, t
 	thread.LastError = message
 	_, _ = s.store.SaveCodexCliThread(ctx, thread)
 	s.appendThreadEvent(ctx, thread.ID, turn.ID, EventTurnFailed, "codex", "", message, nil)
+	s.completeAutomationRunForTurn(ctx, turn, false, message)
 	s.cleanupTurnAttachments(ctx, turn.ID)
 	go s.drainTurnQueue(context.Background())
 }

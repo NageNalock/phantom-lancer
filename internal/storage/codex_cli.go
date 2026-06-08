@@ -45,21 +45,24 @@ type CodexCliWorkspace struct {
 }
 
 type CodexCliThread struct {
-	ID             string `json:"id"`
-	CodexThreadID  string `json:"codexThreadId,omitempty"`
-	WorkspaceID    string `json:"workspaceId"`
-	Title          string `json:"title"`
-	Status         string `json:"status"`
-	SourceMode     string `json:"sourceMode"`
-	Model          string `json:"model,omitempty"`
-	SandboxMode    string `json:"sandboxMode"`
-	ApprovalPolicy string `json:"approvalPolicy"`
-	Pinned         bool   `json:"pinned"`
-	ArchivedAt     string `json:"archivedAt,omitempty"`
-	LastTurnID     string `json:"lastTurnId,omitempty"`
-	LastError      string `json:"lastError,omitempty"`
-	CreatedAt      string `json:"createdAt"`
-	UpdatedAt      string `json:"updatedAt"`
+	ID               string `json:"id"`
+	CodexThreadID    string `json:"codexThreadId,omitempty"`
+	WorkspaceID      string `json:"workspaceId"`
+	Title            string `json:"title"`
+	Status           string `json:"status"`
+	SourceMode       string `json:"sourceMode"`
+	Kind             string `json:"kind,omitempty"`
+	Background       bool   `json:"background"`
+	BackgroundSource string `json:"backgroundSource,omitempty"`
+	Model            string `json:"model,omitempty"`
+	SandboxMode      string `json:"sandboxMode"`
+	ApprovalPolicy   string `json:"approvalPolicy"`
+	Pinned           bool   `json:"pinned"`
+	ArchivedAt       string `json:"archivedAt,omitempty"`
+	LastTurnID       string `json:"lastTurnId,omitempty"`
+	LastError        string `json:"lastError,omitempty"`
+	CreatedAt        string `json:"createdAt"`
+	UpdatedAt        string `json:"updatedAt"`
 }
 
 type CodexCliThreadFilters struct {
@@ -67,6 +70,7 @@ type CodexCliThreadFilters struct {
 	Query           string
 	WorkspaceID     string
 	Status          string
+	Kind            string
 }
 
 type CodexCliTurn struct {
@@ -184,6 +188,66 @@ type CodexCliBrowserSession struct {
 	LastError   string `json:"lastError,omitempty"`
 	CreatedAt   string `json:"createdAt"`
 	UpdatedAt   string `json:"updatedAt"`
+}
+
+type CodexCliAutomation struct {
+	ID                    string         `json:"id"`
+	Kind                  string         `json:"kind"`
+	ThreadID              string         `json:"threadId,omitempty"`
+	WorkspaceID           string         `json:"workspaceId,omitempty"`
+	Title                 string         `json:"title"`
+	PromptSummary         string         `json:"promptSummary"`
+	Schedule              map[string]any `json:"schedule"`
+	Enabled               bool           `json:"enabled"`
+	DefaultSandbox        string         `json:"defaultSandbox"`
+	DefaultApprovalPolicy string         `json:"defaultApprovalPolicy"`
+	LastRunAt             string         `json:"lastRunAt,omitempty"`
+	NextRunAt             string         `json:"nextRunAt,omitempty"`
+	RetryCount            int            `json:"retryCount"`
+	FailureBackoffUntil   string         `json:"failureBackoffUntil,omitempty"`
+	CreatedAt             string         `json:"createdAt"`
+	UpdatedAt             string         `json:"updatedAt"`
+}
+
+type CodexCliAutomationRun struct {
+	ID              string `json:"id"`
+	AutomationID    string `json:"automationId"`
+	ThreadID        string `json:"threadId,omitempty"`
+	TurnID          string `json:"turnId,omitempty"`
+	ClientRequestID string `json:"clientRequestId,omitempty"`
+	Status          string `json:"status"`
+	StartedAt       string `json:"startedAt,omitempty"`
+	LastHeartbeatAt string `json:"lastHeartbeatAt,omitempty"`
+	CompletedAt     string `json:"completedAt,omitempty"`
+	FindingSummary  string `json:"findingSummary,omitempty"`
+	ErrorSummary    string `json:"errorSummary,omitempty"`
+	TriageState     string `json:"triageState"`
+	CreatedAt       string `json:"createdAt"`
+	UpdatedAt       string `json:"updatedAt"`
+}
+
+type CodexCliCapabilityCache struct {
+	ID        string         `json:"id"`
+	Kind      string         `json:"kind"`
+	Status    string         `json:"status"`
+	Payload   map[string]any `json:"payload"`
+	LastError string         `json:"lastError,omitempty"`
+	ProbedAt  string         `json:"probedAt,omitempty"`
+	UpdatedAt string         `json:"updatedAt"`
+}
+
+type CodexCliNotification struct {
+	ID        string         `json:"id"`
+	Scope     string         `json:"scope"`
+	ScopeID   string         `json:"scopeId,omitempty"`
+	EventType string         `json:"eventType"`
+	Title     string         `json:"title"`
+	Summary   string         `json:"summary"`
+	Status    string         `json:"status"`
+	Severity  string         `json:"severity"`
+	Payload   map[string]any `json:"payload,omitempty"`
+	CreatedAt string         `json:"createdAt"`
+	UpdatedAt string         `json:"updatedAt"`
 }
 
 // ---- generic settings (codex_cli.* keys) ----
@@ -406,7 +470,7 @@ func (s *Store) DeleteCodexCliWorkspace(ctx context.Context, id string) error {
 
 // ---- threads ----
 
-const codexCliThreadColumns = `id, codex_thread_id, workspace_id, title, status, source_mode, model, sandbox_mode, approval_policy, pinned, archived_at, last_turn_id, last_error, created_at, updated_at`
+const codexCliThreadColumns = `id, codex_thread_id, workspace_id, title, status, source_mode, kind, background, background_source, model, sandbox_mode, approval_policy, pinned, archived_at, last_turn_id, last_error, created_at, updated_at`
 
 func (s *Store) CreateCodexCliThread(ctx context.Context, thread CodexCliThread) (CodexCliThread, error) {
 	id, err := ids.New("cxth")
@@ -426,10 +490,13 @@ func (s *Store) CreateCodexCliThread(ctx context.Context, thread CodexCliThread)
 	if strings.TrimSpace(thread.Title) == "" {
 		thread.Title = "新对话"
 	}
+	if strings.TrimSpace(thread.Kind) == "" {
+		thread.Kind = "code"
+	}
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO codex_cli_threads (`+codexCliThreadColumns+`)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		thread.ID, thread.CodexThreadID, thread.WorkspaceID, thread.Title, thread.Status, thread.SourceMode, thread.Model, thread.SandboxMode, thread.ApprovalPolicy, boolInt(thread.Pinned), thread.ArchivedAt, thread.LastTurnID, thread.LastError, thread.CreatedAt, thread.UpdatedAt)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		thread.ID, thread.CodexThreadID, thread.WorkspaceID, thread.Title, thread.Status, thread.SourceMode, thread.Kind, boolInt(thread.Background), thread.BackgroundSource, thread.Model, thread.SandboxMode, thread.ApprovalPolicy, boolInt(thread.Pinned), thread.ArchivedAt, thread.LastTurnID, thread.LastError, thread.CreatedAt, thread.UpdatedAt)
 	if err != nil {
 		return CodexCliThread{}, err
 	}
@@ -464,6 +531,10 @@ func (s *Store) ListCodexCliThreadsFiltered(ctx context.Context, filters CodexCl
 		clauses = append(clauses, "status = ?")
 		args = append(args, status)
 	}
+	if kind := strings.TrimSpace(filters.Kind); kind != "" {
+		clauses = append(clauses, "kind = ?")
+		args = append(args, kind)
+	}
 	if q := strings.TrimSpace(filters.Query); q != "" {
 		like := "%" + q + "%"
 		clauses = append(clauses, `(
@@ -479,6 +550,26 @@ func (s *Store) ListCodexCliThreadsFiltered(ctx context.Context, filters CodexCl
 	}
 	query += " ORDER BY pinned DESC, updated_at DESC"
 	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CodexCliThread{}
+	for rows.Next() {
+		thread, err := scanCodexCliThread(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, thread)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListBackgroundCodexCliThreads(ctx context.Context, limit int) ([]CodexCliThread, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+codexCliThreadColumns+` FROM codex_cli_threads WHERE background = 1 AND archived_at = '' ORDER BY updated_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -651,13 +742,27 @@ func (s *Store) ListCodexCliCommands(ctx context.Context, threadID string) ([]Co
 	return out, rows.Err()
 }
 
-func (s *Store) StartCodexCliCommand(ctx context.Context, id string) (CodexCliCommand, error) {
+// StartCodexCliCommand transitions a command from queued to running atomically.
+// The returned bool reports whether the row actually transitioned; if it is
+// false the command was already cancelled or finished (for example by an
+// interrupt that landed before the runner started) and the caller must not run
+// it. This closes the race where a queued command is cancelled but the runner
+// would otherwise force it back to running.
+func (s *Store) StartCodexCliCommand(ctx context.Context, id string) (CodexCliCommand, bool, error) {
 	now := now()
-	_, err := s.db.ExecContext(ctx, `UPDATE codex_cli_commands SET status = 'running', started_at = ?, updated_at = ? WHERE id = ?`, now, now, id)
+	res, err := s.db.ExecContext(ctx, `UPDATE codex_cli_commands SET status = 'running', started_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'`, now, now, id)
 	if err != nil {
-		return CodexCliCommand{}, err
+		return CodexCliCommand{}, false, err
 	}
-	return s.GetCodexCliCommand(ctx, id)
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return CodexCliCommand{}, false, err
+	}
+	command, err := s.GetCodexCliCommand(ctx, id)
+	if err != nil {
+		return CodexCliCommand{}, false, err
+	}
+	return command, affected > 0, nil
 }
 
 func (s *Store) FinishCodexCliCommand(ctx context.Context, id, status string, exitCode int, outputPreview, errorSummary string) (CodexCliCommand, error) {
@@ -750,10 +855,411 @@ func (s *Store) DeleteCodexCliBrowserSession(ctx context.Context, id string) err
 	return nil
 }
 
+// ---- P2 automations ----
+
+func (s *Store) CreateCodexCliAutomation(ctx context.Context, automation CodexCliAutomation) (CodexCliAutomation, error) {
+	if strings.TrimSpace(automation.ID) == "" {
+		id, err := ids.New("cxauto")
+		if err != nil {
+			return CodexCliAutomation{}, err
+		}
+		automation.ID = id
+	}
+	automation = normalizeCodexCliAutomation(automation)
+	now := now()
+	automation.CreatedAt = now
+	automation.UpdatedAt = now
+	schedule, _ := json.Marshal(automation.Schedule)
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO codex_cli_automations (id, kind, thread_id, workspace_id, title, prompt_summary, schedule_json, enabled, default_sandbox, default_approval_policy, last_run_at, next_run_at, retry_count, failure_backoff_until, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		automation.ID, automation.Kind, automation.ThreadID, automation.WorkspaceID, automation.Title, automation.PromptSummary, string(schedule), boolInt(automation.Enabled), automation.DefaultSandbox, automation.DefaultApprovalPolicy, automation.LastRunAt, automation.NextRunAt, automation.RetryCount, automation.FailureBackoffUntil, automation.CreatedAt, automation.UpdatedAt)
+	if err != nil {
+		return CodexCliAutomation{}, err
+	}
+	return s.GetCodexCliAutomation(ctx, automation.ID)
+}
+
+func (s *Store) GetCodexCliAutomation(ctx context.Context, id string) (CodexCliAutomation, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, kind, thread_id, workspace_id, title, prompt_summary, schedule_json, enabled, default_sandbox, default_approval_policy, last_run_at, next_run_at, retry_count, failure_backoff_until, created_at, updated_at FROM codex_cli_automations WHERE id = ?`, id)
+	return scanCodexCliAutomation(row)
+}
+
+func (s *Store) ListCodexCliAutomations(ctx context.Context) ([]CodexCliAutomation, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, kind, thread_id, workspace_id, title, prompt_summary, schedule_json, enabled, default_sandbox, default_approval_policy, last_run_at, next_run_at, retry_count, failure_backoff_until, created_at, updated_at FROM codex_cli_automations ORDER BY enabled DESC, next_run_at ASC, created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CodexCliAutomation{}
+	for rows.Next() {
+		item, err := scanCodexCliAutomation(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListDueCodexCliAutomations(ctx context.Context, nowTime string, limit int) ([]CodexCliAutomation, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, kind, thread_id, workspace_id, title, prompt_summary, schedule_json, enabled, default_sandbox, default_approval_policy, last_run_at, next_run_at, retry_count, failure_backoff_until, created_at, updated_at FROM codex_cli_automations WHERE enabled = 1 AND next_run_at != '' AND next_run_at <= ? AND (failure_backoff_until = '' OR failure_backoff_until <= ?) ORDER BY next_run_at ASC LIMIT ?`, nowTime, nowTime, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CodexCliAutomation{}
+	for rows.Next() {
+		item, err := scanCodexCliAutomation(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpdateCodexCliAutomation(ctx context.Context, automation CodexCliAutomation) (CodexCliAutomation, error) {
+	automation = normalizeCodexCliAutomation(automation)
+	schedule, _ := json.Marshal(automation.Schedule)
+	_, err := s.db.ExecContext(ctx, `
+UPDATE codex_cli_automations
+SET kind = ?, thread_id = ?, workspace_id = ?, title = ?, prompt_summary = ?, schedule_json = ?, enabled = ?, default_sandbox = ?, default_approval_policy = ?, last_run_at = ?, next_run_at = ?, retry_count = ?, failure_backoff_until = ?, updated_at = ?
+WHERE id = ?`,
+		automation.Kind, automation.ThreadID, automation.WorkspaceID, automation.Title, automation.PromptSummary, string(schedule), boolInt(automation.Enabled), automation.DefaultSandbox, automation.DefaultApprovalPolicy, automation.LastRunAt, automation.NextRunAt, automation.RetryCount, automation.FailureBackoffUntil, now(), automation.ID)
+	if err != nil {
+		return CodexCliAutomation{}, err
+	}
+	return s.GetCodexCliAutomation(ctx, automation.ID)
+}
+
+func (s *Store) DeleteCodexCliAutomation(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM codex_cli_automation_runs WHERE automation_id = ?`, id); err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM codex_cli_automations WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) CreateCodexCliAutomationRun(ctx context.Context, run CodexCliAutomationRun) (CodexCliAutomationRun, error) {
+	if strings.TrimSpace(run.ID) == "" {
+		id, err := ids.New("cxarun")
+		if err != nil {
+			return CodexCliAutomationRun{}, err
+		}
+		run.ID = id
+	}
+	if strings.TrimSpace(run.Status) == "" {
+		run.Status = "queued"
+	}
+	if strings.TrimSpace(run.TriageState) == "" {
+		run.TriageState = "open"
+	}
+	now := now()
+	run.CreatedAt = now
+	run.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO codex_cli_automation_runs (id, automation_id, thread_id, turn_id, client_request_id, status, started_at, last_heartbeat_at, completed_at, finding_summary, error_summary, triage_state, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(automation_id, client_request_id) DO UPDATE SET updated_at = updated_at`,
+		run.ID, run.AutomationID, run.ThreadID, run.TurnID, run.ClientRequestID, run.Status, run.StartedAt, run.LastHeartbeatAt, run.CompletedAt, run.FindingSummary, run.ErrorSummary, run.TriageState, run.CreatedAt, run.UpdatedAt)
+	if err != nil {
+		return CodexCliAutomationRun{}, err
+	}
+	if run.ClientRequestID != "" {
+		return s.GetCodexCliAutomationRunByClientRequest(ctx, run.AutomationID, run.ClientRequestID)
+	}
+	return s.GetCodexCliAutomationRun(ctx, run.ID)
+}
+
+func (s *Store) GetCodexCliAutomationRun(ctx context.Context, id string) (CodexCliAutomationRun, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, automation_id, thread_id, turn_id, client_request_id, status, started_at, last_heartbeat_at, completed_at, finding_summary, error_summary, triage_state, created_at, updated_at FROM codex_cli_automation_runs WHERE id = ?`, id)
+	return scanCodexCliAutomationRun(row)
+}
+
+func (s *Store) GetCodexCliAutomationRunByClientRequest(ctx context.Context, automationID, requestID string) (CodexCliAutomationRun, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, automation_id, thread_id, turn_id, client_request_id, status, started_at, last_heartbeat_at, completed_at, finding_summary, error_summary, triage_state, created_at, updated_at FROM codex_cli_automation_runs WHERE automation_id = ? AND client_request_id = ?`, automationID, requestID)
+	return scanCodexCliAutomationRun(row)
+}
+
+func (s *Store) GetCodexCliAutomationRunByTurn(ctx context.Context, turnID string) (CodexCliAutomationRun, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, automation_id, thread_id, turn_id, client_request_id, status, started_at, last_heartbeat_at, completed_at, finding_summary, error_summary, triage_state, created_at, updated_at FROM codex_cli_automation_runs WHERE turn_id = ? ORDER BY created_at DESC LIMIT 1`, turnID)
+	return scanCodexCliAutomationRun(row)
+}
+
+func (s *Store) ListCodexCliAutomationRuns(ctx context.Context, triage string) ([]CodexCliAutomationRun, error) {
+	query := `SELECT id, automation_id, thread_id, turn_id, client_request_id, status, started_at, last_heartbeat_at, completed_at, finding_summary, error_summary, triage_state, created_at, updated_at FROM codex_cli_automation_runs`
+	args := []any{}
+	if triage = strings.TrimSpace(triage); triage != "" && triage != "all" {
+		query += ` WHERE triage_state = ?`
+		args = append(args, triage)
+	}
+	query += ` ORDER BY created_at DESC LIMIT 200`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CodexCliAutomationRun{}
+	for rows.Next() {
+		run, err := scanCodexCliAutomationRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListActiveCodexCliAutomationRuns(ctx context.Context) ([]CodexCliAutomationRun, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, automation_id, thread_id, turn_id, client_request_id, status, started_at, last_heartbeat_at, completed_at, finding_summary, error_summary, triage_state, created_at, updated_at FROM codex_cli_automation_runs WHERE status IN ('queued', 'running') ORDER BY created_at ASC LIMIT 200`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CodexCliAutomationRun{}
+	for rows.Next() {
+		run, err := scanCodexCliAutomationRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpdateCodexCliAutomationRun(ctx context.Context, run CodexCliAutomationRun) (CodexCliAutomationRun, error) {
+	_, err := s.db.ExecContext(ctx, `UPDATE codex_cli_automation_runs SET thread_id = ?, turn_id = ?, status = ?, started_at = ?, last_heartbeat_at = ?, completed_at = ?, finding_summary = ?, error_summary = ?, triage_state = ?, updated_at = ? WHERE id = ?`, run.ThreadID, run.TurnID, run.Status, run.StartedAt, run.LastHeartbeatAt, run.CompletedAt, run.FindingSummary, run.ErrorSummary, run.TriageState, now(), run.ID)
+	if err != nil {
+		return CodexCliAutomationRun{}, err
+	}
+	return s.GetCodexCliAutomationRun(ctx, run.ID)
+}
+
+func (s *Store) ArchiveCodexCliAutomationRun(ctx context.Context, id string) (CodexCliAutomationRun, error) {
+	_, err := s.db.ExecContext(ctx, `UPDATE codex_cli_automation_runs SET triage_state = 'archived', updated_at = ? WHERE id = ?`, now(), id)
+	if err != nil {
+		return CodexCliAutomationRun{}, err
+	}
+	return s.GetCodexCliAutomationRun(ctx, id)
+}
+
+func scanCodexCliAutomation(row workspaceScanner) (CodexCliAutomation, error) {
+	var item CodexCliAutomation
+	var schedule string
+	var enabled int
+	err := row.Scan(&item.ID, &item.Kind, &item.ThreadID, &item.WorkspaceID, &item.Title, &item.PromptSummary, &schedule, &enabled, &item.DefaultSandbox, &item.DefaultApprovalPolicy, &item.LastRunAt, &item.NextRunAt, &item.RetryCount, &item.FailureBackoffUntil, &item.CreatedAt, &item.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CodexCliAutomation{}, ErrNotFound
+	}
+	if err != nil {
+		return CodexCliAutomation{}, err
+	}
+	_ = json.Unmarshal([]byte(schedule), &item.Schedule)
+	if item.Schedule == nil {
+		item.Schedule = map[string]any{}
+	}
+	item.Enabled = enabled != 0
+	return item, nil
+}
+
+func scanCodexCliAutomationRun(row workspaceScanner) (CodexCliAutomationRun, error) {
+	var run CodexCliAutomationRun
+	err := row.Scan(&run.ID, &run.AutomationID, &run.ThreadID, &run.TurnID, &run.ClientRequestID, &run.Status, &run.StartedAt, &run.LastHeartbeatAt, &run.CompletedAt, &run.FindingSummary, &run.ErrorSummary, &run.TriageState, &run.CreatedAt, &run.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CodexCliAutomationRun{}, ErrNotFound
+	}
+	return run, err
+}
+
+func normalizeCodexCliAutomation(item CodexCliAutomation) CodexCliAutomation {
+	item.Kind = strings.TrimSpace(item.Kind)
+	if item.Kind != "project" {
+		item.Kind = "thread_wakeup"
+	}
+	item.Title = strings.TrimSpace(item.Title)
+	if item.Title == "" {
+		item.Title = "Codex automation"
+	}
+	item.PromptSummary = strings.TrimSpace(item.PromptSummary)
+	item.DefaultSandbox = strings.TrimSpace(item.DefaultSandbox)
+	if item.DefaultSandbox != "read-only" {
+		item.DefaultSandbox = "read-only"
+	}
+	item.DefaultApprovalPolicy = strings.TrimSpace(item.DefaultApprovalPolicy)
+	if item.DefaultApprovalPolicy != "on-request" {
+		item.DefaultApprovalPolicy = "on-request"
+	}
+	if item.Schedule == nil {
+		item.Schedule = map[string]any{}
+	}
+	return item
+}
+
+// ---- P2 capability cache and notifications ----
+
+func (s *Store) UpsertCodexCliCapabilityCache(ctx context.Context, item CodexCliCapabilityCache) (CodexCliCapabilityCache, error) {
+	if strings.TrimSpace(item.ID) == "" {
+		item.ID = strings.TrimSpace(item.Kind)
+	}
+	if strings.TrimSpace(item.Status) == "" {
+		item.Status = "unknown"
+	}
+	if item.Payload == nil {
+		item.Payload = map[string]any{}
+	}
+	data, _ := json.Marshal(item.Payload)
+	now := now()
+	if item.ProbedAt == "" {
+		item.ProbedAt = now
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO codex_cli_capability_cache (id, kind, status, payload_json, last_error, probed_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, status = excluded.status, payload_json = excluded.payload_json, last_error = excluded.last_error, probed_at = excluded.probed_at, updated_at = excluded.updated_at`,
+		item.ID, item.Kind, item.Status, string(data), item.LastError, item.ProbedAt, now)
+	if err != nil {
+		return CodexCliCapabilityCache{}, err
+	}
+	return s.GetCodexCliCapabilityCache(ctx, item.ID)
+}
+
+func (s *Store) GetCodexCliCapabilityCache(ctx context.Context, id string) (CodexCliCapabilityCache, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, kind, status, payload_json, last_error, probed_at, updated_at FROM codex_cli_capability_cache WHERE id = ?`, id)
+	var item CodexCliCapabilityCache
+	var payload string
+	err := row.Scan(&item.ID, &item.Kind, &item.Status, &payload, &item.LastError, &item.ProbedAt, &item.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CodexCliCapabilityCache{}, ErrNotFound
+	}
+	if err != nil {
+		return CodexCliCapabilityCache{}, err
+	}
+	_ = json.Unmarshal([]byte(payload), &item.Payload)
+	if item.Payload == nil {
+		item.Payload = map[string]any{}
+	}
+	return item, nil
+}
+
+func (s *Store) CreateCodexCliNotification(ctx context.Context, item CodexCliNotification) (CodexCliNotification, error) {
+	if strings.TrimSpace(item.ID) == "" {
+		id, err := ids.New("cxnot")
+		if err != nil {
+			return CodexCliNotification{}, err
+		}
+		item.ID = id
+	}
+	if item.Payload == nil {
+		item.Payload = map[string]any{}
+	}
+	if strings.TrimSpace(item.Scope) == "" {
+		item.Scope = "codex"
+	}
+	if strings.TrimSpace(item.Status) == "" {
+		item.Status = "unread"
+	}
+	if strings.TrimSpace(item.Severity) == "" {
+		item.Severity = "neutral"
+	}
+	data, _ := json.Marshal(item.Payload)
+	now := now()
+	item.CreatedAt = now
+	item.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO codex_cli_notifications (id, scope, scope_id, event_type, title, summary, status, severity, payload_json, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		item.ID, item.Scope, item.ScopeID, item.EventType, item.Title, item.Summary, item.Status, item.Severity, string(data), item.CreatedAt, item.UpdatedAt)
+	if err != nil {
+		return CodexCliNotification{}, err
+	}
+	return s.GetCodexCliNotification(ctx, item.ID)
+}
+
+func (s *Store) GetCodexCliNotification(ctx context.Context, id string) (CodexCliNotification, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, scope, scope_id, event_type, title, summary, status, severity, payload_json, created_at, updated_at FROM codex_cli_notifications WHERE id = ?`, id)
+	return scanCodexCliNotification(row)
+}
+
+func (s *Store) ListCodexCliNotifications(ctx context.Context, scope, status string) ([]CodexCliNotification, error) {
+	query := `SELECT id, scope, scope_id, event_type, title, summary, status, severity, payload_json, created_at, updated_at FROM codex_cli_notifications`
+	clauses := []string{}
+	args := []any{}
+	if scope = strings.TrimSpace(scope); scope != "" {
+		clauses = append(clauses, "scope = ?")
+		args = append(args, scope)
+	}
+	if status = strings.TrimSpace(status); status != "" && status != "all" {
+		clauses = append(clauses, "status = ?")
+		args = append(args, status)
+	}
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	query += " ORDER BY created_at DESC LIMIT 200"
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CodexCliNotification{}
+	for rows.Next() {
+		item, err := scanCodexCliNotification(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpdateCodexCliNotificationStatus(ctx context.Context, id, status string) (CodexCliNotification, error) {
+	_, err := s.db.ExecContext(ctx, `UPDATE codex_cli_notifications SET status = ?, updated_at = ? WHERE id = ?`, status, now(), id)
+	if err != nil {
+		return CodexCliNotification{}, err
+	}
+	return s.GetCodexCliNotification(ctx, id)
+}
+
+func (s *Store) ArchiveReadCodexCliNotifications(ctx context.Context, scope string) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE codex_cli_notifications SET status = 'archived', updated_at = ? WHERE scope = ? AND status = 'read'`, now(), scope)
+	if err != nil {
+		return 0, err
+	}
+	affected, _ := res.RowsAffected()
+	return affected, nil
+}
+
+func scanCodexCliNotification(row workspaceScanner) (CodexCliNotification, error) {
+	var item CodexCliNotification
+	var payload string
+	err := row.Scan(&item.ID, &item.Scope, &item.ScopeID, &item.EventType, &item.Title, &item.Summary, &item.Status, &item.Severity, &payload, &item.CreatedAt, &item.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CodexCliNotification{}, ErrNotFound
+	}
+	if err != nil {
+		return CodexCliNotification{}, err
+	}
+	_ = json.Unmarshal([]byte(payload), &item.Payload)
+	if item.Payload == nil {
+		item.Payload = map[string]any{}
+	}
+	return item, nil
+}
+
 func (s *Store) SaveCodexCliThread(ctx context.Context, thread CodexCliThread) (CodexCliThread, error) {
 	_, err := s.db.ExecContext(ctx, `
-UPDATE codex_cli_threads SET codex_thread_id = ?, title = ?, status = ?, source_mode = ?, model = ?, sandbox_mode = ?, approval_policy = ?, pinned = ?, archived_at = ?, last_turn_id = ?, last_error = ?, updated_at = ? WHERE id = ?`,
-		thread.CodexThreadID, thread.Title, thread.Status, thread.SourceMode, thread.Model, thread.SandboxMode, thread.ApprovalPolicy, boolInt(thread.Pinned), thread.ArchivedAt, thread.LastTurnID, thread.LastError, now(), thread.ID)
+UPDATE codex_cli_threads SET codex_thread_id = ?, title = ?, status = ?, source_mode = ?, kind = ?, background = ?, background_source = ?, model = ?, sandbox_mode = ?, approval_policy = ?, pinned = ?, archived_at = ?, last_turn_id = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+		thread.CodexThreadID, thread.Title, thread.Status, thread.SourceMode, thread.Kind, boolInt(thread.Background), thread.BackgroundSource, thread.Model, thread.SandboxMode, thread.ApprovalPolicy, boolInt(thread.Pinned), thread.ArchivedAt, thread.LastTurnID, thread.LastError, now(), thread.ID)
 	if err != nil {
 		return CodexCliThread{}, err
 	}
@@ -836,6 +1342,50 @@ func (s *Store) ListCodexCliTurns(ctx context.Context, threadID string) ([]Codex
 	return out, rows.Err()
 }
 
+// ListRecentFailedCodexCliTurns returns the most recent failed turns across all
+// threads, newest first, for the triage inbox.
+func (s *Store) ListRecentFailedCodexCliTurns(ctx context.Context, limit int) ([]CodexCliTurn, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT t.`+strings.ReplaceAll(codexCliTurnColumns, ", ", ", t.")+` FROM codex_cli_turns t JOIN codex_cli_threads th ON th.id = t.thread_id WHERE t.status = 'failed' AND th.archived_at = '' ORDER BY t.updated_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CodexCliTurn{}
+	for rows.Next() {
+		turn, err := scanCodexCliTurn(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, turn)
+	}
+	return out, rows.Err()
+}
+
+// ListOpenCodexCliReviewComments returns unresolved review comments across all
+// threads, newest first, for the triage inbox.
+func (s *Store) ListOpenCodexCliReviewComments(ctx context.Context, limit int) ([]CodexCliReviewComment, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT c.id, c.thread_id, c.turn_id, c.workspace_id, c.file_path, c.old_line, c.new_line, c.hunk_header, c.body, c.status, c.created_at, c.resolved_at FROM codex_cli_review_comments c JOIN codex_cli_threads th ON th.id = c.thread_id WHERE c.status != 'resolved' AND th.archived_at = '' ORDER BY c.created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CodexCliReviewComment{}
+	for rows.Next() {
+		var comment CodexCliReviewComment
+		if err := rows.Scan(&comment.ID, &comment.ThreadID, &comment.TurnID, &comment.WorkspaceID, &comment.FilePath, &comment.OldLine, &comment.NewLine, &comment.HunkHeader, &comment.Body, &comment.Status, &comment.CreatedAt, &comment.ResolvedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, comment)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) SaveCodexCliTurn(ctx context.Context, turn CodexCliTurn) (CodexCliTurn, error) {
 	usage := "{}"
 	if len(turn.Usage) > 0 {
@@ -884,6 +1434,28 @@ func (s *Store) ListCodexCliEvents(ctx context.Context, threadID string, after i
 		limit = 500
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, thread_id, turn_id, sequence, event_type, codex_method, item_type, payload_json, text_preview, created_at FROM codex_cli_events WHERE thread_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?`, threadID, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CodexCliEvent{}
+	for rows.Next() {
+		var event CodexCliEvent
+		var payload string
+		if err := rows.Scan(&event.ID, &event.ThreadID, &event.TurnID, &event.Sequence, &event.EventType, &event.CodexMethod, &event.ItemType, &payload, &event.TextPreview, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(payload), &event.Payload)
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListRecentCodexCliEventsForTurn(ctx context.Context, threadID, turnID string, limit int) ([]CodexCliEvent, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, thread_id, turn_id, sequence, event_type, codex_method, item_type, payload_json, text_preview, created_at FROM codex_cli_events WHERE thread_id = ? AND turn_id = ? ORDER BY sequence DESC LIMIT ?`, threadID, turnID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1207,10 +1779,12 @@ func scanCodexCliWorkspace(row workspaceScanner) (CodexCliWorkspace, error) {
 func scanCodexCliThread(row workspaceScanner) (CodexCliThread, error) {
 	var thread CodexCliThread
 	var pinned int
-	err := row.Scan(&thread.ID, &thread.CodexThreadID, &thread.WorkspaceID, &thread.Title, &thread.Status, &thread.SourceMode, &thread.Model, &thread.SandboxMode, &thread.ApprovalPolicy, &pinned, &thread.ArchivedAt, &thread.LastTurnID, &thread.LastError, &thread.CreatedAt, &thread.UpdatedAt)
+	var background int
+	err := row.Scan(&thread.ID, &thread.CodexThreadID, &thread.WorkspaceID, &thread.Title, &thread.Status, &thread.SourceMode, &thread.Kind, &background, &thread.BackgroundSource, &thread.Model, &thread.SandboxMode, &thread.ApprovalPolicy, &pinned, &thread.ArchivedAt, &thread.LastTurnID, &thread.LastError, &thread.CreatedAt, &thread.UpdatedAt)
 	if err != nil {
 		return CodexCliThread{}, err
 	}
+	thread.Background = background == 1
 	thread.Pinned = pinned == 1
 	return thread, nil
 }
