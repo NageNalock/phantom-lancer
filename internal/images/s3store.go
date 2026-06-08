@@ -38,10 +38,11 @@ func NewS3ObjectStore(settings storage.ImageStorageSettings) (*S3ObjectStore, er
 		return nil, errors.New("S3 credentials are required")
 	}
 	options := s3.Options{
-		Region:       settings.S3Region,
-		Credentials:  aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(settings.S3AccessKeyID, settings.S3SecretAccessKey, settings.S3SessionToken)),
-		BaseEndpoint: aws.String(settings.S3Endpoint),
-		UsePathStyle: settings.S3ForcePathStyle,
+		Region:                     settings.S3Region,
+		Credentials:                aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(settings.S3AccessKeyID, settings.S3SecretAccessKey, settings.S3SessionToken)),
+		BaseEndpoint:               aws.String(settings.S3Endpoint),
+		UsePathStyle:               settings.S3ForcePathStyle,
+		RequestChecksumCalculation: aws.RequestChecksumCalculationWhenRequired,
 	}
 	return &S3ObjectStore{settings: settings, client: s3.New(options)}, nil
 }

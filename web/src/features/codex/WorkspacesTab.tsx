@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import type { AppActions } from "../../app/App";
-import type { CodexWorkspace } from "../../app/types";
-import { Button, EmptyState, Field, Panel, Pill } from "../../components/ui";
+import type { ApiError, CodexWorkspace } from "../../app/types";
+import { Button, EmptyState, Field, Notice, Panel, Pill } from "../../components/ui";
 import { friendlyError } from "../../api/client";
 import { codexSandboxLabel, formatDate } from "../../domain/labels";
 
@@ -22,6 +22,7 @@ export function WorkspacesTab({ actions, onChange }: { actions: AppActions; onCh
   const [defaultSandbox, setDefaultSandbox] = useState("read-only");
   const [defaultApproval, setDefaultApproval] = useState("on-request");
   const [networkEnabled, setNetworkEnabled] = useState(false);
+  const [missingPath, setMissingPath] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -41,22 +42,28 @@ export function WorkspacesTab({ actions, onChange }: { actions: AppActions; onCh
 
   async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    await submitCreate(false);
+  }
+
+  async function submitCreate(createIfMissing: boolean) {
     if (!path.trim()) {
       actions.setToast("请填写工作区路径", "warn");
       return;
     }
+    const workspacePath = path.trim();
     try {
       await actions.api("/api/codex/workspaces", {
         method: "POST",
         csrf: actions.csrf,
         body: {
-          path: path.trim(),
+          path: workspacePath,
           label: label.trim(),
           trustState: trust,
           defaultModel: defaultModel.trim(),
           defaultSandbox,
           defaultApprovalPolicy: defaultApproval,
           networkPolicy: { enabled: networkEnabled },
+          createIfMissing,
         },
       });
       setPath("");
@@ -66,10 +73,16 @@ export function WorkspacesTab({ actions, onChange }: { actions: AppActions; onCh
       setDefaultSandbox("read-only");
       setDefaultApproval("on-request");
       setNetworkEnabled(false);
+      setMissingPath("");
       await load();
       onChange();
-      actions.setToast("已登记工作区", "good");
+      actions.setToast(createIfMissing ? "已创建目录并登记工作区" : "已登记工作区", "good");
     } catch (error) {
+      if ((error as ApiError).code === "workspace_path_missing" && !createIfMissing) {
+        setMissingPath(workspacePath);
+        actions.setToast("工作区路径不存在，请确认后创建目录。", "warn");
+        return;
+      }
       actions.setToast(friendlyError(error), "danger");
     }
   }
@@ -166,8 +179,33 @@ export function WorkspacesTab({ actions, onChange }: { actions: AppActions; onCh
       <Panel subtitle="路径必须位于全局允许根目录内。" title="登记工作区">
         <form className="grid gap-3" onSubmit={create}>
           <Field label="工作区路径" help="例如 /srv/projects/my-app，需在允许根目录内。">
-            <input className="input" onChange={(event) => setPath(event.target.value)} placeholder="/path/to/workspace" value={path} />
+            <input
+              className="input"
+              onChange={(event) => {
+                setPath(event.target.value);
+                setMissingPath("");
+              }}
+              placeholder="/path/to/workspace"
+              value={path}
+            />
           </Field>
+          {missingPath ? (
+            <Notice tone="warn">
+              <div className="grid gap-2">
+                <div>
+                  <strong className="block text-sm">工作区路径不存在</strong>
+                  <span className="mono mt-1 block break-all text-xs">{missingPath}</span>
+                </div>
+                <p className="m-0 text-xs">确认后会在允许根目录内创建该目录，然后登记为 Codex 工作区。</p>
+                <div className="flex flex-wrap gap-2">
+                  <Button tone="primary" onClick={() => void submitCreate(true)}>
+                    创建目录并登记
+                  </Button>
+                  <Button onClick={() => setMissingPath("")}>取消</Button>
+                </div>
+              </div>
+            </Notice>
+          ) : null}
           <Field label="标签（可选）">
             <input className="input" onChange={(event) => setLabel(event.target.value)} placeholder="默认取目录名" value={label} />
           </Field>

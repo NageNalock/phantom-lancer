@@ -207,7 +207,9 @@ Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*`
 - xAI Grok Imagine provider 设置和 API Key masked 状态。
 - 图片生成 job 创建、后台执行、状态恢复和失败记录。
 - 图片库资产查询、放大查看、下载、删除和归档到 S3。
-- 生成输出图和用户上传参考图的统一资产管理。
+- 生成输出图、用户上传参考图和 Library 手动上传图的统一资产管理。
+- 图片资产按内容 checksum 去重；普通上传和生成结果只复用未删除、非私密的公开资产，避免泄露私密收藏夹存在性。
+- Library 图片可作为图生图参考图；后端按 asset id 读取受控图片 bytes 并转换为 provider payload，不把需要登录态的本地 API URL 直接传给外部 provider。
 - 图片资产私密收藏夹标记、owner 密码解锁、短期 session 解锁状态和失败 backoff。
 - 本地图片资产保存与安全读取。
 - S3 兼容对象存储设置、连接测试、上传、后端代理读取和删除。

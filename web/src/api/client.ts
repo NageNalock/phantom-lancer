@@ -47,7 +47,7 @@ export function friendlyError(error: unknown): string {
   if (err.code === "path_out_of_boundary") {
     return "该路径不在允许根目录内。请使用允许根目录作为路径开头，或先在设置页更新允许根目录。";
   }
-  if (err.code === "workspace_path_missing") return err.message || "目录不存在。如需创建，请勾选目录不存在时创建。";
+  if (err.code === "workspace_path_missing") return "目录不存在。请确认后创建目录，或改用已有目录。";
   if (err.code === "workspace_path_invalid") return `工作目录无效：${err.message}`;
   if (err.code === "workspace_create_failed") return `创建目录失败：${err.message}`;
   if (err.code === "invalid_allowed_roots") return `允许根目录无效：${err.message}`;

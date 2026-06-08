@@ -2,9 +2,11 @@ package images
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -153,6 +155,7 @@ func (s *Service) CreateJob(ctx context.Context, request ImagineRequest) (storag
 		return storage.ImageGenerationJob{}, err
 	}
 	s.storeSourceAssets(ctx, &job, request)
+	s.linkLibrarySourceAssets(ctx, &job, request)
 	s.append(ctx, job.ID, "images.job.created", map[string]any{"mode": job.Mode, "model": job.Model, "sourceCount": job.SourceCount, "imageCount": job.ImageCount})
 	s.append(ctx, job.ID, "images.job.queued", map[string]any{"mode": job.Mode, "model": job.Model})
 
@@ -176,6 +179,12 @@ func (s *Service) runJob(ctx context.Context, job storage.ImageGenerationJob, re
 	}
 	if strings.TrimSpace(settings.XAIAPIKey) == "" {
 		_, _ = s.failJob(ctx, job.ID, job.Endpoint, ErrAPIKeyMissing.Error())
+		return
+	}
+
+	request, err = s.resolveLibraryImageInputs(ctx, request)
+	if err != nil {
+		_, _ = s.failJob(ctx, job.ID, job.Endpoint, err.Error())
 		return
 	}
 
@@ -285,6 +294,21 @@ func (s *Service) ReadAsset(ctx context.Context, asset storage.ImageAsset) (stri
 			return "", nil, err
 		}
 		return client.Get(ctx, asset.S3Key)
+	case "remote":
+		job, err := s.Store.GetImageGenerationJob(ctx, asset.JobID)
+		if err != nil {
+			return "", nil, err
+		}
+		for _, output := range job.Outputs {
+			if output.AssetID == asset.ID || (output.AssetID == "" && output.Slot == asset.Slot) {
+				if output.RemoteURL == "" {
+					break
+				}
+				data, mimeType, err := s.Assets.ImageBytes(ctx, ResultImage{URL: output.RemoteURL, MimeType: asset.MimeType})
+				return mimeType, data, err
+			}
+		}
+		return "", nil, errors.New("remote image url is missing")
 	default:
 		return s.Assets.ReadLocal(asset.LocalName)
 	}
@@ -388,6 +412,42 @@ func (s *Service) ArchiveAssetToS3(ctx context.Context, id string) (storage.Imag
 	return updated, nil
 }
 
+func (s *Service) UploadLibraryAsset(ctx context.Context, filename string, data []byte, mimeType string) (LibraryUploadResult, error) {
+	if len(data) == 0 {
+		return LibraryUploadResult{}, errors.New("image file is empty")
+	}
+	if len(data) > MaxImageBytes {
+		return LibraryUploadResult{}, fmt.Errorf("image file is larger than %d MB", MaxImageBytes>>20)
+	}
+	if mimeType == "" {
+		mimeType = http.DetectContentType(data)
+	}
+	if !AllowedImageMime(mimeType) {
+		return LibraryUploadResult{}, errors.New("image file must be jpeg, png, gif, or webp")
+	}
+	if existing, ok := s.publicDuplicateAsset(ctx, data, mimeType); ok {
+		return LibraryUploadResult{Asset: existing, Duplicate: true}, nil
+	}
+	created, err := s.Store.CreateImageAsset(ctx, storage.ImageAsset{
+		AssetType:        "manual_upload",
+		Status:           "available",
+		SourceRole:       "library_upload",
+		OriginalFilename: filename,
+		MimeType:         mimeType,
+	})
+	if err != nil {
+		return LibraryUploadResult{}, err
+	}
+	settings, _ := s.Store.GetImageStorageSettings(ctx)
+	stored, err := s.storeBytes(ctx, created, data, mimeType, settings)
+	if err != nil {
+		created.LastError = err.Error()
+		_, _ = s.Store.UpdateImageAsset(ctx, created)
+		return LibraryUploadResult{}, err
+	}
+	return LibraryUploadResult{Asset: stored}, nil
+}
+
 func (s *Service) storeSourceAssets(ctx context.Context, job *storage.ImageGenerationJob, request ImagineRequest) {
 	settings, _ := s.Store.GetImageStorageSettings(ctx)
 	for index, image := range request.Images {
@@ -397,6 +457,12 @@ func (s *Service) storeSourceAssets(ctx context.Context, job *storage.ImageGener
 		data, mimeType, err := s.Assets.DecodeDataURL(image.URL)
 		if err != nil {
 			s.append(ctx, job.ID, "images.asset.store_failed", map[string]any{"source": index + 1, "message": err.Error()})
+			continue
+		}
+		if duplicate, ok := s.publicDuplicateAsset(ctx, data, mimeType); ok {
+			_ = s.Store.LinkImageSourceAsset(ctx, job.Sources[index].ID, duplicate.ID)
+			job.Sources[index].AssetID = duplicate.ID
+			s.append(ctx, job.ID, "images.asset.deduplicated", map[string]any{"assetId": duplicate.ID, "slot": index + 1, "source": true})
 			continue
 		}
 		asset := storage.ImageAsset{
@@ -429,6 +495,50 @@ func (s *Service) storeSourceAssets(ctx context.Context, job *storage.ImageGener
 	}
 }
 
+func (s *Service) linkLibrarySourceAssets(ctx context.Context, job *storage.ImageGenerationJob, request ImagineRequest) {
+	for index, image := range request.Images {
+		if image.SourceType != "library_asset" || index >= len(job.Sources) {
+			continue
+		}
+		assetID := strings.TrimPrefix(image.URL, "asset:")
+		if assetID == "" {
+			continue
+		}
+		_ = s.Store.LinkImageSourceAsset(ctx, job.Sources[index].ID, assetID)
+		job.Sources[index].AssetID = assetID
+	}
+}
+
+func (s *Service) resolveLibraryImageInputs(ctx context.Context, request ImagineRequest) (ImagineRequest, error) {
+	for index, image := range request.Images {
+		if image.SourceType != "library_asset" {
+			continue
+		}
+		assetID := strings.TrimPrefix(image.URL, "asset:")
+		asset, err := s.Store.GetImageAsset(ctx, assetID)
+		if err != nil {
+			return ImagineRequest{}, err
+		}
+		mimeType, data, err := s.ReadAsset(ctx, asset)
+		if err != nil {
+			return ImagineRequest{}, err
+		}
+		if mimeType == "" {
+			mimeType = http.DetectContentType(data)
+		}
+		if !AllowedImageMime(mimeType) {
+			return ImagineRequest{}, errors.New("library image mime type is unsupported")
+		}
+		request.Images[index].URL = "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
+		request.Images[index].MimeType = mimeType
+		request.Images[index].SizeBytes = int64(len(data))
+		if request.Images[index].SourceLabel == "" {
+			request.Images[index].SourceLabel = asset.OriginalFilename
+		}
+	}
+	return request, nil
+}
+
 func (s *Service) storeGeneratedAssets(ctx context.Context, job storage.ImageGenerationJob, request ImagineRequest, result *ImagineResult) ([]storage.ImageGenerationOutput, int) {
 	settings, _ := s.Store.GetImageStorageSettings(ctx)
 	outputs := make([]storage.ImageGenerationOutput, 0, len(result.Images))
@@ -447,23 +557,22 @@ func (s *Service) storeGeneratedAssets(ctx context.Context, job storage.ImageGen
 			if s.Log != nil {
 				s.Log.Warn("image output fetch failed", "job_id", job.ID, "slot", index+1, "source_host", safelog.HostLabel(image.URL), "error", safelog.Error(err, 200))
 			}
+			asset, createErr := s.createGeneratedAsset(ctx, job, request, image, index+1, image.MimeType, "remote")
+			if createErr == nil {
+				output.AssetID = asset.ID
+				output.URL = "/api/images/library/assets/" + asset.ID + "/content"
+			} else if s.Log != nil {
+				s.Log.Warn("image remote asset create failed", "job_id", job.ID, "slot", index+1, "error", safelog.Error(createErr, 200))
+			}
 			outputs = append(outputs, output)
 			continue
 		}
-		asset := storage.ImageAsset{
-			AssetType:              "generated",
-			Status:                 "available",
-			Provider:               job.Provider,
-			Model:                  job.Model,
-			JobID:                  job.ID,
-			SourceRole:             "output",
-			Slot:                   index + 1,
-			PromptPreview:          request.Prompt,
-			RevisedPromptPreview:   image.RevisedPrompt,
-			OriginalSourceRedacted: image.URL,
-			MimeType:               mimeType,
+		if duplicate, ok := s.publicDuplicateAsset(ctx, data, mimeType); ok {
+			outputs = append(outputs, imageOutputForAsset(output, duplicate))
+			s.append(ctx, job.ID, "images.asset.deduplicated", map[string]any{"assetId": duplicate.ID, "slot": index + 1})
+			continue
 		}
-		created, err := s.Store.CreateImageAsset(ctx, asset)
+		created, err := s.createGeneratedAsset(ctx, job, request, image, index+1, mimeType, "local")
 		if err != nil {
 			failures++
 			outputs = append(outputs, output)
@@ -487,6 +596,43 @@ func (s *Service) storeGeneratedAssets(ctx context.Context, job storage.ImageGen
 		s.append(ctx, job.ID, "images.asset.stored."+stored.StorageBackend, map[string]any{"assetId": stored.ID, "slot": index + 1})
 	}
 	return outputs, failures
+}
+
+func (s *Service) publicDuplicateAsset(ctx context.Context, data []byte, mimeType string) (storage.ImageAsset, bool) {
+	info := ImageInfo(data, mimeType)
+	asset, err := s.Store.GetPublicImageAssetByChecksum(ctx, info.Checksum)
+	return asset, err == nil
+}
+
+func imageOutputForAsset(output storage.ImageGenerationOutput, asset storage.ImageAsset) storage.ImageGenerationOutput {
+	output.AssetID = asset.ID
+	output.LocalName = asset.LocalName
+	output.MimeType = asset.MimeType
+	output.Storage = asset.StorageBackend
+	output.SizeBytes = asset.SizeBytes
+	if asset.StorageBackend == "remote" && asset.URL != "" {
+		output.URL = asset.URL
+	} else {
+		output.URL = "/api/images/library/assets/" + asset.ID + "/content"
+	}
+	return output
+}
+
+func (s *Service) createGeneratedAsset(ctx context.Context, job storage.ImageGenerationJob, request ImagineRequest, image ResultImage, slot int, mimeType string, storageBackend string) (storage.ImageAsset, error) {
+	return s.Store.CreateImageAsset(ctx, storage.ImageAsset{
+		AssetType:              "generated",
+		Status:                 "available",
+		Provider:               job.Provider,
+		Model:                  job.Model,
+		JobID:                  job.ID,
+		SourceRole:             "output",
+		Slot:                   slot,
+		PromptPreview:          request.Prompt,
+		RevisedPromptPreview:   image.RevisedPrompt,
+		OriginalSourceRedacted: redactedURL(image.URL),
+		MimeType:               mimeType,
+		StorageBackend:         storageBackend,
+	})
 }
 
 func (s *Service) storeBytes(ctx context.Context, asset storage.ImageAsset, data []byte, mimeType string, settings storage.ImageStorageSettings) (storage.ImageAsset, error) {

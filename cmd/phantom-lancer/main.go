@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -166,10 +167,18 @@ func main() {
 		logger.Info("phantom lancer restart requested")
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownTimeout := 10 * time.Second
+	if restartForUpdate {
+		shutdownTimeout = 2 * time.Second
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("shutdown failed", "error", err)
+		if restartForUpdate && errors.Is(err, context.DeadlineExceeded) {
+			logger.Warn("graceful shutdown timed out during update restart; forcing server close", "timeout", shutdownTimeout.String())
+		} else {
+			logger.Error("shutdown failed", "error", err)
+		}
 		if closeErr := server.Close(); closeErr != nil {
 			logger.Error("force close server failed", "error", closeErr)
 		}

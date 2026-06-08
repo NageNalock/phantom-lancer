@@ -154,6 +154,7 @@ export function imageAssetTypeLabel(value?: string): string {
     {
       generated: "生成结果",
       source_upload: "用户上传",
+      manual_upload: "手动上传",
       source_url: "URL 参考",
     }[value || ""] ||
     value ||

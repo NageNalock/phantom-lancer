@@ -383,6 +383,10 @@ func (s *Service) ListModels(ctx context.Context) ([]CodexModel, error) {
 
 // ---- workspaces ----
 
+type CreateWorkspaceOptions struct {
+	CreateIfMissing bool
+}
+
 func (s *Service) ListWorkspaces(ctx context.Context) ([]storage.CodexCliWorkspace, error) {
 	items, err := s.store.ListCodexCliWorkspaces(ctx)
 	if err != nil {
@@ -395,7 +399,16 @@ func (s *Service) ListWorkspaces(ctx context.Context) ([]storage.CodexCliWorkspa
 }
 
 func (s *Service) CreateWorkspace(ctx context.Context, ws storage.CodexCliWorkspace) (storage.CodexCliWorkspace, error) {
+	return s.CreateWorkspaceWithOptions(ctx, ws, CreateWorkspaceOptions{})
+}
+
+func (s *Service) CreateWorkspaceWithOptions(ctx context.Context, ws storage.CodexCliWorkspace, opts CreateWorkspaceOptions) (storage.CodexCliWorkspace, error) {
 	normalized, err := s.policy.NormalizeWorkspacePath(ws.Path)
+	createdDirectory := false
+	if err != nil && errors.Is(err, ErrPathNotFound) && opts.CreateIfMissing {
+		normalized, err = s.policy.CreateWorkspacePath(ws.Path)
+		createdDirectory = err == nil
+	}
 	if err != nil {
 		return storage.CodexCliWorkspace{}, err
 	}
@@ -404,7 +417,15 @@ func (s *Service) CreateWorkspace(ctx context.Context, ws storage.CodexCliWorksp
 	if err != nil {
 		return storage.CodexCliWorkspace{}, err
 	}
-	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.workspace.created", WorkspaceID: created.ID, RiskLevel: "low", Summary: "已登记 Codex 工作区", Payload: map[string]any{"trustState": created.TrustState}})
+	payload := map[string]any{"trustState": created.TrustState}
+	risk := "low"
+	summary := "已登记 Codex 工作区"
+	if createdDirectory {
+		payload["createdDirectory"] = true
+		risk = "medium"
+		summary = "已创建目录并登记 Codex 工作区"
+	}
+	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.workspace.created", WorkspaceID: created.ID, RiskLevel: risk, Summary: summary, Payload: payload})
 	return enrichWorkspaceGitSummary(created), nil
 }
 

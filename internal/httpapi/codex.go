@@ -193,11 +193,14 @@ func (s *Server) handleCreateCodexWorkspace(w http.ResponseWriter, r *http.Reque
 	if !ok || !s.requireCSRF(w, r, ctx.Session) {
 		return
 	}
-	var req storage.CodexCliWorkspace
+	var req struct {
+		storage.CodexCliWorkspace
+		CreateIfMissing bool `json:"createIfMissing"`
+	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	created, err := s.codex.CreateWorkspace(r.Context(), req)
+	created, err := s.codex.CreateWorkspaceWithOptions(r.Context(), req.CodexCliWorkspace, codexclient.CreateWorkspaceOptions{CreateIfMissing: req.CreateIfMissing})
 	if err != nil {
 		writeError(w, codexWorkspaceErrorStatus(err), codexWorkspaceErrorCode(err), err.Error())
 		return
@@ -676,6 +679,8 @@ func codexWorkspaceErrorStatus(err error) int {
 	switch {
 	case errors.Is(err, codexclient.ErrPathOutOfBoundary), errors.Is(err, codexclient.ErrPathNotFound), errors.Is(err, codexclient.ErrPathNotDirectory):
 		return http.StatusBadRequest
+	case errors.Is(err, codexclient.ErrWorkspaceCreateFailed):
+		return http.StatusInternalServerError
 	default:
 		return http.StatusBadRequest
 	}
@@ -689,6 +694,8 @@ func codexWorkspaceErrorCode(err error) string {
 		return "workspace_path_missing"
 	case errors.Is(err, codexclient.ErrPathNotDirectory):
 		return "workspace_path_invalid"
+	case errors.Is(err, codexclient.ErrWorkspaceCreateFailed):
+		return "workspace_create_failed"
 	default:
 		return "codex_workspace_invalid"
 	}

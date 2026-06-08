@@ -17,6 +17,8 @@ var (
 	ErrPathNotFound = errors.New("path does not exist")
 	// ErrPathNotDirectory indicates the workspace path is not a directory.
 	ErrPathNotDirectory = errors.New("path is not a directory")
+	// ErrWorkspaceCreateFailed indicates the confirmed directory creation failed.
+	ErrWorkspaceCreateFailed = errors.New("workspace path create failed")
 	// ErrPolicyViolation indicates the requested sandbox/approval combination is
 	// not permitted for the workspace trust state.
 	ErrPolicyViolation = errors.New("requested policy not allowed for workspace trust state")
@@ -65,6 +67,73 @@ func (p *WorkspacePolicy) NormalizeWorkspacePath(path string) (string, error) {
 		return "", err
 	}
 	return cleaned, nil
+}
+
+// CreateWorkspacePath creates a missing workspace directory after validating the
+// target stays inside an allowed root. Existing paths still go through the
+// regular normalization path and must be directories.
+func (p *WorkspacePolicy) CreateWorkspacePath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", ErrPathNotFound
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	abs = filepath.Clean(abs)
+	if normalized, err := p.NormalizeWorkspacePath(abs); err == nil {
+		return normalized, nil
+	} else if !errors.Is(err, ErrPathNotFound) {
+		return "", err
+	}
+
+	parent, err := deepestExistingWorkspaceParent(abs)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(parent)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("%w: %s", ErrPathNotFound, path)
+		}
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%w: %s", ErrPathNotDirectory, parent)
+	}
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(parent, abs)
+	if err != nil {
+		return "", err
+	}
+	resolvedTarget := filepath.Clean(filepath.Join(resolvedParent, rel))
+	if err := p.ensureInsideAllowedRoots(resolvedTarget); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(abs, 0o700); err != nil {
+		return "", fmt.Errorf("%w: %w", ErrWorkspaceCreateFailed, err)
+	}
+	return p.NormalizeWorkspacePath(abs)
+}
+
+func deepestExistingWorkspaceParent(path string) (string, error) {
+	path = filepath.Clean(path)
+	for {
+		if _, err := os.Lstat(path); err == nil {
+			return path, nil
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return "", fmt.Errorf("%w: %s", ErrPathNotFound, path)
+		}
+		path = parent
+	}
 }
 
 func (p *WorkspacePolicy) ensureInsideAllowedRoots(path string) error {

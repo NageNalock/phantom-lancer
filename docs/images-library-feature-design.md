@@ -43,6 +43,8 @@ Reading this as: 个人服务器控制台里的 Images 图片资产管理工作�
 - 私密图片默认不出现在普通图片库；查看、下载、删除、归档和移出私密收藏夹都必须先解锁。
 - 支持右侧 inspector 展示当前选中图片的核心元数据。
 - 支持从图片跳转到所属 generation job / History 详情。
+- 支持在 Library 中手动上传图片资产，上传前按图片内容 checksum 去重，命中已存在公开资产时复用，不重复写本地或 S3。
+- 支持将 Library 中的图片快捷用于 `Generate` 的图生图参考图；后端负责把受控 Library asset 转换为 provider 可用的图片 payload，不把需要登录态的本地 API URL 直接交给 provider。
 - 支持本地图片资产手动归档到 S3。
 - Images Settings 内新增存储设置，默认 `local`。
 - 支持 S3 兼容对象存储配置：bucket、region、endpoint、prefix、path style、access key、secret key。
@@ -103,6 +105,8 @@ Toolbar 放在图片网格上方，保持低噪音和可扫描：
 - 筛选：状态 `Available / Missing / Deleted`，MVP 默认只展示 `Available`。
 - 排序：`Newest first`、`Oldest first`、后续可加 `Size`。
 - 操作：刷新、下载选中、删除选中、归档到 S3。MVP 可以先只支持单选操作。
+- 操作：手动上传图片。上传控件应保持低噪音，放在 Library toolbar 或图片网格上方，不做独立一级入口。
+- 操作：将选中图片用于图生图。该操作应切换到 `Generate` 并把图片填入第一个参考图槽位，用户仍需确认 prompt 和参数后再提交。
 - 视图切换：普通图片库 / 私密收藏夹。私密收藏夹切换后先展示解锁面板，解锁成功才加载图片。
 
 按钮规则：
@@ -334,6 +338,7 @@ tile 信息密度：
 - 删除。
 - 归档到 S3。
 - 设为私密 / 移出私密。
+- 用于图生图。
 - 打开 job。
 - 复制 asset id。
 - 复制 prompt。
@@ -349,11 +354,11 @@ Inspector 不应一次性展开所有字段。建议默认显示三组高频信�
 
 列表中每个技术字段都要支持复制，但复制按钮只在 hover 或 focus 时出现，避免常驻噪音。
 
-## 8. 用户上传参考图入库
+## 8. 上传、去重与复用
 
-用户上传的参考图应进入图片库。它们不是生成输出，但同样是 Images 工作流中的图片资产。
+用户上传的参考图和 Library 手动上传图都应进入图片库。它们不是生成输出，但同样是 Images 工作流中的图片资产。
 
-### 8.1 入库时机
+### 8.1 Generate 参考图入库
 
 当 Owner 在 `Generate` 中上传参考图时：
 
@@ -366,16 +371,69 @@ Inspector 不应一次性展开所有字段。建议默认显示三组高频信�
 
 如果 job 创建校验失败，不应保存上传图资产，避免无效输入污染图片库。
 
-### 8.2 上传图展示
+### 8.2 Library 手动上传
+
+Owner 可以在 `Library` 中直接上传图片，用于把已有图片纳入 Images 资产管理。
+
+行为要求：
+
+1. 后端必须完成 MIME、大小、文件名 basename 和图片内容校验。
+2. 上传前计算图片内容 checksum，优先查找未删除、非私密的公开 Library 资产。
+3. 如果 checksum 命中已有公开资产，直接返回已有 asset，并在响应中标记 duplicate；不得再次上传到 S3 或写入本地文件。
+4. 如果未命中，则创建 `asset_type = 'manual_upload'` 的 image asset，并按当前 storage backend 保存 bytes。
+5. S3 enabled 时仍遵循对象存储优先策略；但去重命中优先于任何新写入，避免重复占用对象存储。
+6. 手动上传、去重命中和失败摘要应写入 audit；payload 只记录 asset id、是否 duplicate、storage、bytes 等摘要，不记录完整文件路径或敏感 URL。
+
+MVP 中手动上传默认进入普通图片库，不直接创建私密资产。Owner 可以上传后再通过 `设为私密` 移入私密收藏夹。
+
+### 8.3 去重语义
+
+去重使用图片内容 checksum，目标是避免相同二进制图片重复写入本地磁盘或 S3。
+
+适用范围：
+
+- Library 手动上传。
+- Generate 中上传的参考图。
+- xAI 生成结果落库前的图片 bytes。
+
+隐私边界：
+
+- 普通上传和生成结果只复用未删除、非私密的公开资产。
+- 私密收藏夹中的资产不参与普通去重复用，避免通过 duplicate 结果或普通 Library 视图暴露私密图片存在性。
+- 后续如果需要私密范围内去重，应只在私密收藏夹已解锁的上下文中执行，并且响应不能泄露未授权资产信息。
+
+去重只覆盖完全相同的图片 bytes。近似重复、缩放后相似图、不同编码但视觉相同的图片属于 perceptual hash 后续能力，不在 MVP 中实现。
+
+### 8.4 上传图展示
 
 Library 中上传图与生成图同列展示，但必须有低噪音类型标识：
 
 - `Generated`：模型输出。
 - `Uploaded`：用户上传参考图。
+- `Manual upload`：Library 手动上传图。
 
 上传图 tile 默认不显示 prompt；选中后 inspector 显示其关联 job、source slot、原始文件名摘要、MIME、大小、存储位置和引用关系。
 
-### 8.3 URL 参考图
+### 8.5 Library 图片作为图生图参考
+
+Library 中的图片可以快捷用于 `Generate` 的图生图场景。
+
+交互要求：
+
+- 图片 tile、查看器或 inspector 可提供 `用于图生图` 操作。
+- 触发后切换到 `Generate`，自动选择 `image_to_image`，并把该 asset 填入第一个参考图槽位。
+- 用户仍需填写 prompt 并显式提交生成任务；快捷操作本身不自动调用 provider。
+- 已选择的 Library 图片应在参考图槽位中显示缩略图、名称和清除操作。
+
+后端语义：
+
+- 前端只提交 asset id，不提交本地文件路径。
+- 后端必须校验 owner session；如果 asset 是私密图片，必须先校验当前 session 已解锁私密收藏夹。
+- 后端读取 asset bytes 后转换为 provider 所需 payload，例如 data URL 或 multipart 内容。
+- 不允许把需要 Phantom Lancer 登录态的 `/api/images/library/assets/<id>/content` URL 直接传给外部 provider。
+- generation source 应记录该 asset id，便于 History 恢复输入引用。
+
+### 8.6 URL 参考图
 
 如果用户使用 URL 作为参考图，MVP 可以只记录 redacted URL，不默认把远程图下载入库。原因是 URL 可能是临时链接、带签名 query 或用户不希望持久化的远程资源。
 
@@ -385,7 +443,7 @@ Library 中上传图与生成图同列展示，但必须有低噪音类型标识
 - 下载必须遵守图片大小、MIME、timeout 和 redaction 规则。
 - inspector 显示 `source URL snapshot` 状态和 redacted origin。
 
-### 8.4 删除上传图
+### 8.7 删除上传图
 
 删除上传图只删除对应 image asset，不删除 job 历史。
 

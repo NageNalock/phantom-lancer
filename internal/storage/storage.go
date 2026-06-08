@@ -2465,6 +2465,9 @@ func (s *Store) GetImageAsset(ctx context.Context, id string) (ImageAsset, error
 	if errors.Is(err, sql.ErrNoRows) {
 		return ImageAsset{}, ErrNotFound
 	}
+	if err == nil {
+		s.hydrateRemoteImageAssetURL(ctx, &asset)
+	}
 	return asset, err
 }
 
@@ -2473,6 +2476,22 @@ func (s *Store) GetImageAssetByLocalName(ctx context.Context, name string) (Imag
 	asset, err := scanImageAsset(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ImageAsset{}, ErrNotFound
+	}
+	return asset, err
+}
+
+func (s *Store) GetPublicImageAssetByChecksum(ctx context.Context, checksum string) (ImageAsset, error) {
+	checksum = strings.TrimSpace(checksum)
+	if checksum == "" {
+		return ImageAsset{}, ErrNotFound
+	}
+	row := s.db.QueryRowContext(ctx, `SELECT `+imageAssetColumns+` FROM image_assets WHERE checksum_sha256 = ? AND status = 'available' AND private = 0 ORDER BY created_at ASC LIMIT 1`, checksum)
+	asset, err := scanImageAsset(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ImageAsset{}, ErrNotFound
+	}
+	if err == nil {
+		s.hydrateRemoteImageAssetURL(ctx, &asset)
 	}
 	return asset, err
 }
@@ -2528,7 +2547,27 @@ func (s *Store) ListImageAssets(ctx context.Context, limit int, assetType, stora
 		}
 		out = append(out, asset)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for index := range out {
+		s.hydrateRemoteImageAssetURL(ctx, &out[index])
+	}
+	return out, nil
+}
+
+func (s *Store) hydrateRemoteImageAssetURL(ctx context.Context, asset *ImageAsset) {
+	if asset == nil || asset.StorageBackend != "remote" {
+		return
+	}
+	var remoteURL string
+	_ = s.db.QueryRowContext(ctx, `
+SELECT remote_url FROM image_generation_outputs
+WHERE asset_id = ? OR (asset_id = '' AND job_id = ? AND slot = ?)
+ORDER BY created_at DESC LIMIT 1`, asset.ID, asset.JobID, asset.Slot).Scan(&remoteURL)
+	if strings.TrimSpace(remoteURL) != "" {
+		asset.URL = remoteURL
+	}
 }
 
 func (s *Store) UpdateImageAsset(ctx context.Context, asset ImageAsset) (ImageAsset, error) {
@@ -3269,7 +3308,9 @@ func scanImageGenerationOutput(row workspaceScanner) (ImageGenerationOutput, err
 	if err != nil {
 		return ImageGenerationOutput{}, err
 	}
-	if output.AssetID != "" {
+	if output.Storage == "remote" && output.RemoteURL != "" {
+		output.URL = output.RemoteURL
+	} else if output.AssetID != "" {
 		output.URL = "/api/images/library/assets/" + output.AssetID + "/content"
 	} else if output.LocalName != "" {
 		output.URL = "/api/images/assets/" + output.LocalName

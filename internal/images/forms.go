@@ -58,6 +58,19 @@ func parseImageInputs(r *http.Request, maxSlots int) ([]ImageInput, error) {
 			images = append(images, uploadInput)
 			continue
 		}
+		rawAssetID := strings.TrimSpace(r.FormValue(fmt.Sprintf("image_asset_%d", i)))
+		if rawAssetID != "" {
+			if !assetIDPattern.MatchString(rawAssetID) {
+				return nil, fmt.Errorf("image asset %d is invalid", i)
+			}
+			images = append(images, ImageInput{
+				URL:         "asset:" + rawAssetID,
+				SourceType:  "library_asset",
+				SourceLabel: rawAssetID,
+				URLRedacted: rawAssetID,
+			})
+			continue
+		}
 		rawURL := strings.TrimSpace(r.FormValue(fmt.Sprintf("image_url_%d", i)))
 		if rawURL == "" {
 			continue

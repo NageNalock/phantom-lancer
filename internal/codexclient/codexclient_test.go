@@ -81,6 +81,43 @@ func TestResolveRunPolicyTrustEnforced(t *testing.T) {
 	}
 }
 
+func TestCreateWorkspaceWithOptionsCreatesMissingDirectoryInsideAllowedRoot(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	workspacePath := filepath.Join(dir, "projects", "new-app")
+
+	if _, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"}); !errors.Is(err, ErrPathNotFound) {
+		t.Fatalf("CreateWorkspace without create option error = %v, want ErrPathNotFound", err)
+	}
+	if _, err := os.Stat(workspacePath); !os.IsNotExist(err) {
+		t.Fatalf("workspace path should not be created without confirmation, stat err=%v", err)
+	}
+
+	ws, err := svc.CreateWorkspaceWithOptions(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"}, CreateWorkspaceOptions{CreateIfMissing: true})
+	if err != nil {
+		t.Fatalf("CreateWorkspaceWithOptions: %v", err)
+	}
+	expectedPath, err := filepath.EvalSymlinks(workspacePath)
+	if err != nil {
+		t.Fatalf("resolve created workspace: %v", err)
+	}
+	if ws.Path != expectedPath {
+		t.Fatalf("workspace path = %q, want %q", ws.Path, expectedPath)
+	}
+	info, err := os.Stat(workspacePath)
+	if err != nil {
+		t.Fatalf("stat created workspace: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatal("created workspace path is not a directory")
+	}
+}
+
 func TestExecBuildArgsNeverYolo(t *testing.T) {
 	client := NewExecClient()
 	args := client.BuildArgs(ExecOptions{Sandbox: "read-only", Approval: "on-request", Model: "gpt-x", Prompt: "hi", Images: []string{"/tmp/a.png"}})

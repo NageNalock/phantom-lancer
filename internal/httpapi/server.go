@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"mime"
@@ -140,6 +141,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/images/jobs", s.handleCreateImageJob)
 	mux.HandleFunc("GET /api/images/jobs/", s.handleImageJobSubroutes)
 	mux.HandleFunc("GET /api/images/library/assets", s.handleListImageLibraryAssets)
+	mux.HandleFunc("POST /api/images/library/assets", s.handleUploadImageLibraryAsset)
 	mux.HandleFunc("GET /api/images/library/assets/", s.handleImageLibraryAssetSubroutes)
 	mux.HandleFunc("DELETE /api/images/library/assets/", s.handleImageLibraryAssetSubroutes)
 	mux.HandleFunc("POST /api/images/library/assets/", s.handleImageLibraryAssetSubroutes)
@@ -805,6 +807,9 @@ func (s *Server) handleCreateImageJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, imageErrorCode(err), err.Error())
 		return
 	}
+	if !s.requireUnlockedForPrivateImageSources(w, r, ctx, request) {
+		return
+	}
 	job, err := s.images.CreateJob(r.Context(), request)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, imageErrorCode(err), err.Error())
@@ -823,6 +828,24 @@ func (s *Server) handleCreateImageJob(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
+}
+
+func (s *Server) requireUnlockedForPrivateImageSources(w http.ResponseWriter, r *http.Request, ctx sessionContext, request imagegen.ImagineRequest) bool {
+	for _, image := range request.Images {
+		if image.SourceType != "library_asset" {
+			continue
+		}
+		assetID := strings.TrimPrefix(image.URL, "asset:")
+		asset, err := s.store.GetImageAsset(r.Context(), assetID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "image_asset_not_found", "未找到图片资产")
+			return false
+		}
+		if asset.Private && !s.requireImagePrivateUnlocked(w, ctx) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handleImageJobSubroutes(w http.ResponseWriter, r *http.Request) {
@@ -864,6 +887,62 @@ func (s *Server) handleListImageLibraryAssets(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleUploadImageLibraryAsset(w http.ResponseWriter, r *http.Request) {
+	ctx, ok := s.requireAuth(w, r)
+	if !ok || !s.requireCSRF(w, r, ctx.Session) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, imagegen.MaxFormBytes)
+	if err := r.ParseMultipartForm(imagegen.MaxFormBytes); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_multipart", "图片上传表单无效或过大")
+		return
+	}
+	file, header, err := r.FormFile("image")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "image_file_missing", "请选择要上传的图片")
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, imagegen.MaxImageBytes+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "image_file_invalid", err.Error())
+		return
+	}
+	filename := ""
+	if header != nil {
+		filename = header.Filename
+	}
+	result, err := s.images.UploadLibraryAsset(r.Context(), filename, data, "")
+	if err != nil {
+		_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+			EventType: "images.asset.upload_failed",
+			RiskLevel: "medium",
+			Summary:   "Images 图片手动上传失败",
+			Payload:   map[string]any{"error": safelog.Error(err, 240)},
+		})
+		writeError(w, http.StatusBadRequest, imageErrorCode(err), err.Error())
+		return
+	}
+	eventType := "images.asset.uploaded"
+	summary := "已上传 Images 图片资产"
+	if result.Duplicate {
+		eventType = "images.asset.deduplicated"
+		summary = "Images 图片上传命中去重"
+	}
+	_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+		EventType: eventType,
+		RiskLevel: "low",
+		Summary:   summary,
+		Payload: map[string]any{
+			"assetId":   result.Asset.ID,
+			"duplicate": result.Duplicate,
+			"storage":   result.Asset.StorageBackend,
+			"bytes":     result.Asset.SizeBytes,
+		},
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"asset": result.Asset, "duplicate": result.Duplicate})
 }
 
 func (s *Server) handleImageLibraryAssetSubroutes(w http.ResponseWriter, r *http.Request) {

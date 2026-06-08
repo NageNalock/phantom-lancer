@@ -261,7 +261,8 @@ Linux 允许替换正在运行的 binary 文件；当前进程继续运行旧 in
 
 安装完成后触发重启：
 
-- 推荐模式：后端向 main goroutine 发送 restart request，HTTP handler 返回 `202` 后，服务延迟 300ms 进入 graceful shutdown，然后退出。
+- 推荐模式：后端向 main goroutine 发送 restart request，HTTP handler 返回 `202` 后，服务延迟 300ms 进入有界 graceful shutdown，然后退出。
+- 更新重启不能被 SSE、长轮询或其他长连接无限阻塞；graceful shutdown 超过短窗口后必须强制关闭 HTTP server，并以 0 退出，让 systemd 尽快拉起新 binary。此类更新重启超时应作为可恢复 warning 记录，不应把进程退出标记为失败。
 - systemd `Restart=always` 拉起新 binary。
 - 前端在收到 `update.restart.requested` 后进入 reconnect 状态，轮询 `/api/health`。
 - 服务恢复后前端调用 `/api/system/version` 和 `/api/system/update/jobs/<id>`。
