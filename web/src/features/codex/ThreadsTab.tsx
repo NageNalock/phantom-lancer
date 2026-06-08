@@ -8,25 +8,70 @@ import { codexThreadStatusLabel } from "../../domain/labels";
 import { ComposerEmptyState, ThreadList } from "./ThreadSidebar";
 import { EventRow } from "./ThreadEventRow";
 import { ThreadInspector } from "./ThreadInspector";
+import { ThreadP1Panels } from "./ThreadP1Panels";
+
+const CODEX_STREAM_EVENTS = [
+  "thread.started",
+  "thread.resumed",
+  "thread.archived",
+  "thread.status.changed",
+  "turn.queued",
+  "turn.started",
+  "turn.completed",
+  "turn.failed",
+  "turn.cancelled",
+  "message.user",
+  "message.agent",
+  "message.reasoning",
+  "command.started",
+  "command.completed",
+  "command.owner.queued",
+  "command.owner.started",
+  "command.owner.output.attached",
+  "command.owner.completed",
+  "file_change.started",
+  "file_change.completed",
+  "approval.requested",
+  "approval.resolved",
+  "tool.started",
+  "tool.completed",
+  "plan.updated",
+  "diff.updated",
+  "review.comment.created",
+  "browser.preview.opened",
+  "browser.preview.comment",
+  "usage.updated",
+  "diagnostic.warning",
+  "diagnostic.error",
+];
 
 export function ThreadsTab({ actions, status, onStatusChange }: { actions: AppActions; status?: CodexStatus; onStatusChange: () => void }) {
   const [threads, setThreads] = useState<CodexThread[]>([]);
   const [workspaces, setWorkspaces] = useState<CodexWorkspace[]>([]);
   const [activeId, setActiveId] = useState("");
   const [query, setQuery] = useState("");
+  const [workspaceFilter, setWorkspaceFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [includeArchived, setIncludeArchived] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const loadThreads = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await actions.api<{ items?: CodexThread[] }>(`/api/codex/threads${query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ""}`);
+      const params = new URLSearchParams();
+      if (query.trim()) params.set("q", query.trim());
+      if (workspaceFilter !== "all") params.set("workspace_id", workspaceFilter);
+      if (statusFilter !== "all") params.set("status", statusFilter);
+      if (includeArchived || statusFilter === "archived") params.set("archived", "1");
+      const suffix = params.toString() ? `?${params.toString()}` : "";
+      const response = await actions.api<{ items?: CodexThread[] }>(`/api/codex/threads${suffix}`);
       setThreads(response.items || []);
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");
     } finally {
       setLoading(false);
     }
-  }, [actions, query]);
+  }, [actions, includeArchived, query, statusFilter, workspaceFilter]);
 
   const loadWorkspaces = useCallback(async () => {
     try {
@@ -88,6 +133,17 @@ export function ThreadsTab({ actions, status, onStatusChange }: { actions: AppAc
     }
   }
 
+  async function resume(thread: CodexThread) {
+    try {
+      const response = await actions.api<{ thread: CodexThread }>(`/api/codex/threads/${thread.id}/resume`, { method: "POST", csrf: actions.csrf });
+      await loadThreads();
+      setActiveId(response.thread.id);
+      onStatusChange();
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    }
+  }
+
   return (
     <div className="grid grid-cols-[280px_minmax(0,1fr)_300px] gap-4 max-xl:grid-cols-[260px_minmax(0,1fr)] max-lg:grid-cols-1">
       <ThreadList
@@ -96,16 +152,23 @@ export function ThreadsTab({ actions, status, onStatusChange }: { actions: AppAc
         workspaces={workspaces}
         activeId={activeId}
         query={query}
+        workspaceFilter={workspaceFilter}
+        statusFilter={statusFilter}
+        includeArchived={includeArchived}
         onQuery={setQuery}
+        onWorkspaceFilter={setWorkspaceFilter}
+        onStatusFilter={setStatusFilter}
+        onIncludeArchived={setIncludeArchived}
         onSearch={() => void loadThreads()}
         onSelect={setActiveId}
         onCreate={createThread}
         onTogglePin={togglePin}
         onArchive={archive}
+        onResume={resume}
         onFork={fork}
       />
       {activeThread ? (
-        <ThreadWorkspace key={activeThread.id} actions={actions} thread={activeThread} workspaces={workspaces} onStatusChange={onStatusChange} onThreadChange={loadThreads} />
+        <ThreadWorkspace key={activeThread.id} actions={actions} status={status} thread={activeThread} workspaces={workspaces} onStatusChange={onStatusChange} onThreadChange={loadThreads} />
       ) : (
         <ComposerEmptyState workspaces={workspaces} onCreate={createThread} />
       )}
@@ -116,12 +179,14 @@ export function ThreadsTab({ actions, status, onStatusChange }: { actions: AppAc
 
 function ThreadWorkspace({
   actions,
+  status,
   thread,
   workspaces,
   onStatusChange,
   onThreadChange,
 }: {
   actions: AppActions;
+  status?: CodexStatus;
   thread: CodexThread;
   workspaces: CodexWorkspace[];
   onStatusChange: () => void;
@@ -131,10 +196,12 @@ function ThreadWorkspace({
   const [turns, setTurns] = useState<CodexTurn[]>([]);
   const [prompt, setPrompt] = useState("");
   const [sandbox, setSandbox] = useState(thread.sandboxMode || "read-only");
-  const [approval, setApproval] = useState(thread.approvalPolicy || "on-request");
+  const [approval, setApproval] = useState(safeApprovalPolicy(thread.approvalPolicy));
   const [model, setModel] = useState(thread.model || "");
   const [models, setModels] = useState<CodexModel[]>([]);
+  const [titleDraft, setTitleDraft] = useState(thread.title || "");
   const [sending, setSending] = useState(false);
+  const [savingTitle, setSavingTitle] = useState(false);
   const [steering, setSteering] = useState(false);
   const [attachments, setAttachments] = useState<Array<{ id: string; filename?: string }>>([]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -142,6 +209,7 @@ function ThreadWorkspace({
   const workspace = workspaces.find((item) => item.id === thread.workspaceId);
   const running = thread.status === "running" || thread.status === "needs_approval";
   const activeTurn = turns.find((turn) => turn.status === "running" || turn.status === "waiting_approval");
+  const workspaceWriteAllowed = workspace?.trustState === "trusted";
 
   const loadEvents = useCallback(async () => {
     try {
@@ -175,15 +243,25 @@ function ThreadWorkspace({
     void loadThread();
     void loadModels();
   }, [loadEvents, loadThread, loadModels]);
-
-  // Live updates via SSE when a turn is active, fall back to a slow poll.
   useEffect(() => {
-    const url = `/api/codex/threads/${thread.id}/events?stream=1`;
+    setTitleDraft(thread.title || "");
+  }, [thread.title]);
+  useEffect(() => {
+    if (!workspaceWriteAllowed && sandbox === "workspace-write") setSandbox("read-only");
+  }, [sandbox, workspaceWriteAllowed]);
+
+  // Live updates reuse the shared Event API; the Codex history endpoint remains
+  // the source for structured transcript rows.
+  useEffect(() => {
+    const params = new URLSearchParams({ scope: "codex.thread", id: thread.id });
+    const url = `/api/events/stream?${params.toString()}`;
     const source = new EventSource(url);
-    source.onmessage = () => {
+    const refresh = () => {
       void loadEvents();
       void loadThread();
     };
+    source.onmessage = refresh;
+    CODEX_STREAM_EVENTS.forEach((eventType) => source.addEventListener(eventType, refresh));
     source.onerror = () => {
       source.close();
     };
@@ -238,6 +316,28 @@ function ThreadWorkspace({
     }
   }
 
+  async function queueTurn() {
+    if (!prompt.trim()) return;
+    setSending(true);
+    try {
+      await actions.api(`/api/codex/threads/${thread.id}/queue`, {
+        method: "POST",
+        csrf: actions.csrf,
+        body: { prompt: prompt.trim(), sandbox, approvalPolicy: approval, model: model.trim(), attachmentIds: attachments.map((item) => item.id) },
+      });
+      setPrompt("");
+      setAttachments([]);
+      await loadEvents();
+      await loadThread();
+      onThreadChange();
+      onStatusChange();
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setSending(false);
+    }
+  }
+
   async function interrupt() {
     if (!activeTurn) return;
     try {
@@ -264,19 +364,57 @@ function ThreadWorkspace({
     }
   }
 
+  async function saveTitle() {
+    const nextTitle = titleDraft.trim();
+    if (nextTitle === (thread.title || "")) return;
+    setSavingTitle(true);
+    try {
+      await actions.api(`/api/codex/threads/${thread.id}`, { method: "PATCH", csrf: actions.csrf, body: { title: nextTitle } });
+      onThreadChange();
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setSavingTitle(false);
+    }
+  }
+
+  async function startAppServer() {
+    try {
+      await actions.api("/api/codex/app-server/start", { method: "POST", csrf: actions.csrf });
+      onStatusChange();
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    }
+  }
+
   return (
     <section className="panel flex min-h-0 flex-col">
       <div className="panel-header">
         <div className="min-w-0">
-          <h2 className="m-0 truncate text-sm font-semibold">{thread.title || "新对话"}</h2>
+          <input
+            aria-label="会话标题"
+            className="input h-8 w-full max-w-md text-sm font-semibold"
+            disabled={savingTitle}
+            onBlur={() => void saveTitle()}
+            onChange={(event) => setTitleDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.currentTarget.blur();
+              }
+            }}
+            placeholder="新对话"
+            value={titleDraft}
+          />
           <p className="muted mt-1 mb-0 truncate text-xs">{workspace?.label || workspace?.pathSummary}</p>
         </div>
         <Pill tone={threadTone(thread.status)}>{codexThreadStatusLabel(thread.status)}</Pill>
       </div>
       <div className="panel-body flex min-h-0 flex-1 flex-col gap-3">
+        <AppServerStrip status={status} onStart={startAppServer} />
         <div className="grid max-h-[52vh] gap-2 overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3" ref={scrollRef}>
           {events.length ? events.map((event) => <EventRow key={event.id || event.sequence} event={event} />) : <EmptyState body="发送第一条 prompt 后会在此显示消息、命令、diff 和审批。" title="空会话" />}
         </div>
+        <ThreadP1Panels actions={actions} thread={thread} onRefresh={loadEvents} />
 
         {thread.lastError ? <Notice tone="danger">{thread.lastError}</Notice> : null}
 
@@ -302,12 +440,12 @@ function ThreadWorkspace({
           <div className="flex flex-wrap items-center gap-2">
             <select className="select" onChange={(event) => setSandbox(event.target.value)} value={sandbox}>
               <option value="read-only">只读咨询</option>
-              <option value="workspace-write">工作区写入</option>
+              <option disabled={!workspaceWriteAllowed} value="workspace-write">
+                工作区写入
+              </option>
             </select>
             <select className="select" onChange={(event) => setApproval(event.target.value)} value={approval}>
               <option value="on-request">on-request</option>
-              <option value="on-failure">on-failure</option>
-              <option value="never">never</option>
             </select>
             {models.length ? (
               <select className="select" onChange={(event) => setModel(event.target.value)} value={model}>
@@ -346,6 +484,11 @@ function ThreadWorkspace({
                   </Button>
                 </>
               ) : null}
+              {running ? (
+                <Button disabled={sending || !prompt.trim()} onClick={() => void queueTurn()}>
+                  排队
+                </Button>
+              ) : null}
               <Button disabled={sending || running || !prompt.trim()} tone="primary" type="submit">
                 {sending ? "发送中" : "发送"}
               </Button>
@@ -357,9 +500,29 @@ function ThreadWorkspace({
   );
 }
 
+function AppServerStrip({ status, onStart }: { status?: CodexStatus; onStart: () => Promise<void> }) {
+  const state = status?.appServer?.state || "unknown";
+  const canStart = state === "stopped" || state === "failed" || state === "degraded" || state === "unknown";
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] px-3 py-2 text-xs text-[var(--muted)]">
+      <span className={`h-2 w-2 rounded-full ${state === "running" ? "bg-[var(--success)]" : state === "failed" || state === "degraded" ? "bg-[var(--warning)]" : "bg-[var(--muted)]"}`} />
+      <span>app-server {state}</span>
+      {status?.appServer?.pid ? <span className="mono">pid {status.appServer.pid}</span> : null}
+      {status?.appServer?.lastError ? <span className="truncate text-[var(--warning)]">{status.appServer.lastError}</span> : null}
+      {canStart ? (
+        <Button onClick={() => void onStart()}>{state === "failed" ? "重试启动" : "启动 app-server"}</Button>
+      ) : null}
+    </div>
+  );
+}
+
+function safeApprovalPolicy(value?: string): string {
+  return value === "on-request" ? value : "on-request";
+}
+
 function threadTone(status?: string) {
   if (status === "running") return "good" as const;
-  if (status === "needs_approval") return "warn" as const;
+  if (status === "needs_approval" || status === "queued") return "warn" as const;
   if (status === "failed") return "danger" as const;
   return "neutral" as const;
 }

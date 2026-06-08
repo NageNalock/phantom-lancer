@@ -73,7 +73,7 @@ func (p *WorkspacePolicy) ensureInsideAllowedRoots(path string) error {
 		return err
 	}
 	for _, root := range roots {
-		root = filepath.Clean(strings.TrimSpace(root))
+		root = normalizeAllowedRoot(root)
 		if root == "" {
 			continue
 		}
@@ -82,6 +82,21 @@ func (p *WorkspacePolicy) ensureInsideAllowedRoots(path string) error {
 		}
 	}
 	return fmt.Errorf("%w: %s", ErrPathOutOfBoundary, path)
+}
+
+func normalizeAllowedRoot(root string) string {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return filepath.Clean(root)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(abs)
 }
 
 // RunPolicy describes the resolved sandbox/approval/network combination for a turn.
@@ -98,9 +113,15 @@ func (p *WorkspacePolicy) ResolveRunPolicy(ws storage.CodexCliWorkspace, sandbox
 	if sandbox == "" {
 		sandbox = ws.DefaultSandbox
 	}
+	if sandbox == "" {
+		sandbox = "read-only"
+	}
 	approval = strings.TrimSpace(approval)
 	if approval == "" {
 		approval = ws.DefaultApprovalPolicy
+	}
+	if approval == "" {
+		approval = "on-request"
 	}
 	switch sandbox {
 	case "read-only", "workspace-write":
@@ -108,9 +129,9 @@ func (p *WorkspacePolicy) ResolveRunPolicy(ws storage.CodexCliWorkspace, sandbox
 		return RunPolicy{}, fmt.Errorf("%w: unsupported sandbox %q", ErrPolicyViolation, sandbox)
 	}
 	switch approval {
-	case "on-request", "never", "on-failure":
+	case "on-request":
 	default:
-		return RunPolicy{}, fmt.Errorf("%w: unsupported approval policy %q", ErrPolicyViolation, approval)
+		return RunPolicy{}, fmt.Errorf("%w: unsupported approval policy %q; this console only supports on-request", ErrPolicyViolation, approval)
 	}
 	switch ws.TrustState {
 	case "restricted", "untrusted":
@@ -121,8 +142,10 @@ func (p *WorkspacePolicy) ResolveRunPolicy(ws storage.CodexCliWorkspace, sandbox
 		// trusted workspaces may use workspace-write + on-request.
 	}
 	network := false
-	if enabled, ok := ws.NetworkPolicy["enabled"].(bool); ok {
-		network = enabled
+	if ws.TrustState == "trusted" {
+		if enabled, ok := ws.NetworkPolicy["enabled"].(bool); ok {
+			network = enabled
+		}
 	}
 	return RunPolicy{Sandbox: sandbox, ApprovalPolicy: approval, NetworkEnabled: network}, nil
 }

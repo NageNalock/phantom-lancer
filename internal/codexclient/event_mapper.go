@@ -12,6 +12,7 @@ const (
 	EventThreadResumed   = "thread.resumed"
 	EventThreadArchived  = "thread.archived"
 	EventTurnStarted     = "turn.started"
+	EventTurnQueued      = "turn.queued"
 	EventTurnCompleted   = "turn.completed"
 	EventTurnFailed      = "turn.failed"
 	EventTurnCancelled   = "turn.cancelled"
@@ -26,6 +27,10 @@ const (
 	EventApprovalResolve = "approval.resolved"
 	EventToolStarted     = "tool.started"
 	EventToolCompleted   = "tool.completed"
+	EventPlanUpdated     = "plan.updated"
+	EventDiffUpdated     = "diff.updated"
+	EventStatusChanged   = "thread.status.changed"
+	EventUsageUpdated    = "usage.updated"
 	EventDiagWarning     = "diagnostic.warning"
 	EventDiagError       = "diagnostic.error"
 )
@@ -84,6 +89,11 @@ func (m *EventMapper) MapAppServerNotification(method string, params json.RawMes
 		event.EventType = EventThreadStarted
 	case "thread/archived":
 		event.EventType = EventThreadArchived
+	case "thread/unarchived":
+		event.EventType = EventThreadResumed
+	case "thread/status/changed":
+		event.EventType = EventStatusChanged
+		event.TextPreview = Preview(extractStatusText(payload), m.maxPreview)
 	case "turn/started":
 		event.EventType = EventTurnStarted
 	case "turn/completed":
@@ -100,6 +110,34 @@ func (m *EventMapper) MapAppServerNotification(method string, params json.RawMes
 			event.EventType = EventTurnCompleted
 			event.TurnStatus = "completed"
 		}
+	case "turn/plan/updated":
+		event.EventType = EventPlanUpdated
+		event.TextPreview = Preview(extractPlanText(payload), m.maxPreview)
+	case "turn/diff/updated":
+		event.EventType = EventDiffUpdated
+		event.TextPreview = Preview(firstString(payload, "diff"), m.maxPreview)
+	case "thread/tokenUsage/updated":
+		event.EventType = EventUsageUpdated
+		event.TextPreview = Preview(extractUsageText(payload), m.maxPreview)
+	case "serverRequest/resolved":
+		event.EventType = EventApprovalResolve
+		event.TextPreview = "server request resolved"
+	case "item/agentMessage/delta":
+		event.EventType = EventMessageAgent
+		event.ItemType = "agentMessage"
+		event.TextPreview = Preview(extractText(payload), m.maxPreview)
+	case "item/plan/delta":
+		event.EventType = EventPlanUpdated
+		event.ItemType = "plan"
+		event.TextPreview = Preview(extractText(payload), m.maxPreview)
+	case "item/reasoning/summaryTextDelta", "item/reasoning/textDelta":
+		event.EventType = EventMessageReason
+		event.ItemType = "reasoning"
+		event.TextPreview = Preview(extractText(payload), m.maxPreview)
+	case "item/commandExecution/outputDelta":
+		event.EventType = EventCommandDone
+		event.ItemType = "commandExecution"
+		event.TextPreview = Preview(extractText(payload), m.maxPreview)
 	case "item/started":
 		return m.mapV2Item(method, payload, false)
 	case "item/completed":
@@ -136,9 +174,16 @@ func (m *EventMapper) mapV2Item(method string, payload map[string]any, completed
 		}
 		event.EventType = EventMessageReason
 		event.TextPreview = Preview(extractReasoningText(item), m.maxPreview)
+	case "plan":
+		event.EventType = EventPlanUpdated
+		event.TextPreview = Preview(extractPlanItemText(item), m.maxPreview)
+		if !completed && event.TextPreview == "" {
+			return MappedEvent{}, false
+		}
 	case "commandExecution":
 		if completed {
 			event.EventType = EventCommandDone
+			event.TextPreview = Preview(firstString(item, "aggregatedOutput", "output", "command"), m.maxPreview)
 		} else {
 			event.EventType = EventCommandStarted
 			event.TextPreview = Preview(firstString(item, "command"), m.maxPreview)
@@ -146,10 +191,12 @@ func (m *EventMapper) mapV2Item(method string, payload map[string]any, completed
 	case "fileChange":
 		if completed {
 			event.EventType = EventFileChangeDone
+			event.TextPreview = Preview(extractFileChangeText(item), m.maxPreview)
 		} else {
 			event.EventType = EventFileChangeStart
+			event.TextPreview = Preview(extractFileChangeText(item), m.maxPreview)
 		}
-	case "mcpToolCall", "dynamicToolCall", "webSearch":
+	case "mcpToolCall", "dynamicToolCall", "collabToolCall", "webSearch", "imageView", "enteredReviewMode", "exitedReviewMode", "contextCompaction":
 		if completed {
 			event.EventType = EventToolCompleted
 		} else {
@@ -225,8 +272,10 @@ func (m *EventMapper) mapExecItem(eventType string, payload map[string]any) (Map
 	case "file_change":
 		if completed {
 			event.EventType = EventFileChangeDone
+			event.TextPreview = Preview(extractFileChangeText(item), m.maxPreview)
 		} else {
 			event.EventType = EventFileChangeStart
+			event.TextPreview = Preview(extractFileChangeText(item), m.maxPreview)
 		}
 	case "mcp_tool_call", "web_search":
 		if completed {
@@ -291,6 +340,82 @@ func turnErrorFromV2(payload map[string]any) string {
 		}
 	}
 	return ""
+}
+
+func extractStatusText(payload map[string]any) string {
+	if status, ok := payload["status"].(map[string]any); ok {
+		if typ := firstString(status, "type"); typ != "" {
+			return typ
+		}
+	}
+	return firstString(payload, "status", "type")
+}
+
+func extractPlanText(payload map[string]any) string {
+	if plan, ok := payload["plan"].([]any); ok {
+		parts := make([]string, 0, len(plan))
+		for _, raw := range plan {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			step := firstString(item, "step", "text")
+			status := firstString(item, "status")
+			if step == "" {
+				continue
+			}
+			if status != "" {
+				parts = append(parts, status+": "+step)
+			} else {
+				parts = append(parts, step)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return firstString(payload, "plan", "text", "delta")
+}
+
+func extractUsageText(payload map[string]any) string {
+	data, err := json.Marshal(redactPayload(payload))
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func extractPlanItemText(item map[string]any) string {
+	return firstString(item, "text", "summary", "content")
+}
+
+func extractFileChangeText(item map[string]any) string {
+	if text := firstString(item, "diff", "text", "summary"); text != "" {
+		return text
+	}
+	changes, ok := item["changes"].([]any)
+	if !ok {
+		return ""
+	}
+	parts := make([]string, 0, len(changes))
+	for _, raw := range changes {
+		change, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		path := firstString(change, "path")
+		kind := firstString(change, "kind")
+		diff := firstString(change, "diff")
+		header := strings.TrimSpace(strings.Join([]string{kind, path}, " "))
+		if diff != "" {
+			if header != "" {
+				parts = append(parts, header+"\n"+diff)
+			} else {
+				parts = append(parts, diff)
+			}
+		} else if header != "" {
+			parts = append(parts, header)
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func redactPayload(payload map[string]any) map[string]any {

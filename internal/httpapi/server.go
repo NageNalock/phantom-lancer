@@ -1491,6 +1491,15 @@ func parseInt(value string) int {
 	return parsed
 }
 
+func firstQuery(r *http.Request, keys ...string) string {
+	for _, key := range keys {
+		if value := r.URL.Query().Get(key); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func v2rayRisk(settings storage.V2RaySettings) string {
 	if settings.Listen == "0.0.0.0" || settings.Security == "none" || !settings.BlockPrivateNetwork {
 		return "high"

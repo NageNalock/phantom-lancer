@@ -5,11 +5,12 @@ export function EventRow({ event }: { event: CodexEvent }) {
   const type = event.eventType || "";
   const isUser = type === "message.user";
   const isAgent = type === "message.agent" || type === "message.reasoning";
-  const isCommand = type === "command.started" || type === "command.completed";
+  const isCommand = type === "command.started" || type === "command.completed" || type.startsWith("command.owner.");
   const isFileChange = type === "file_change.started" || type === "file_change.completed";
+  const isStructured = type === "plan.updated" || type === "diff.updated" || type === "thread.status.changed" || type === "usage.updated";
   const tone = type === "diagnostic.error" || type === "turn.failed" ? "danger" : type === "diagnostic.warning" ? "warn" : type === "approval.requested" ? "warn" : "neutral";
 
-  if ((isCommand || isFileChange) && event.textPreview) {
+  if ((isCommand || isFileChange || isStructured) && event.textPreview) {
     return (
       <details className={`rounded-md border px-3 py-2 text-sm ${rowClass(tone, false, false)}`}>
         <summary className="flex cursor-pointer items-center justify-between gap-2">
@@ -19,7 +20,7 @@ export function EventRow({ event }: { event: CodexEvent }) {
           </span>
           <span className="muted shrink-0 text-xs">{formatDate(event.createdAt)}</span>
         </summary>
-        <pre className="mono mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-[var(--surface-soft)] p-2 text-xs leading-relaxed">{event.textPreview}</pre>
+        <pre className={`mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-[var(--surface-soft)] p-2 text-xs leading-relaxed ${type === "plan.updated" ? "" : "mono"}`}>{event.textPreview}</pre>
       </details>
     );
   }

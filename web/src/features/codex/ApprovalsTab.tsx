@@ -26,9 +26,9 @@ export function ApprovalsTab({ actions, onChange }: { actions: AppActions; onCha
     void load();
   }, [load]);
 
-  async function resolve(approval: CodexApproval, approve: boolean) {
+  async function resolve(approval: CodexApproval, action: "approve" | "deny" | "cancel") {
     try {
-      await actions.api(`/api/codex/approvals/${approval.id}/${approve ? "approve" : "deny"}`, { method: "POST", csrf: actions.csrf });
+      await actions.api(`/api/codex/approvals/${approval.id}/${action}`, { method: "POST", csrf: actions.csrf });
       await load();
       onChange();
     } catch (error) {
@@ -70,10 +70,13 @@ export function ApprovalsTab({ actions, onChange }: { actions: AppActions; onCha
               </div>
               {approval.status === "pending" ? (
                 <div className="mt-2 flex flex-wrap gap-2">
-                  <Button tone="primary" onClick={() => void resolve(approval, true)}>
-                    允许一次
+	                  <Button tone="primary" onClick={() => void resolve(approval, "approve")}>
+	                    允许一次
+	                  </Button>
+	                  <Button onClick={() => void resolve(approval, "cancel")}>
+	                    取消操作
                   </Button>
-                  <Button tone="danger" onClick={() => void resolve(approval, false)}>
+                  <Button tone="danger" onClick={() => void resolve(approval, "deny")}>
                     拒绝
                   </Button>
                 </div>
@@ -94,7 +97,9 @@ function statusLabel(value?: string): string {
       pending: "待审批",
       approved: "已允许",
       denied: "已拒绝",
+      cancelled: "已取消",
       failed: "已失败",
+      expired: "已过期",
     }[value || ""] ||
     value ||
     "未知"

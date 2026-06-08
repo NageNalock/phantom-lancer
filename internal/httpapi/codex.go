@@ -35,6 +35,12 @@ func (s *Server) registerCodexRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /api/codex/threads/", s.handleCodexThreadSubroutes)
 
 	mux.HandleFunc("POST /api/codex/turns/", s.handleCodexTurnSubroutes)
+	mux.HandleFunc("GET /api/codex/runtime/queue", s.handleCodexQueueStatus)
+	mux.HandleFunc("POST /api/codex/commands/", s.handleCodexCommandSubroutes)
+	mux.HandleFunc("DELETE /api/codex/review/comments/", s.handleCodexReviewCommentSubroutes)
+	mux.HandleFunc("POST /api/codex/browser/sessions/", s.handleCodexBrowserSessionSubroutes)
+	mux.HandleFunc("GET /api/codex/browser/sessions/", s.handleCodexBrowserSessionSubroutes)
+	mux.HandleFunc("DELETE /api/codex/browser/sessions/", s.handleCodexBrowserSessionSubroutes)
 
 	mux.HandleFunc("GET /api/codex/approvals", s.handleListCodexApprovals)
 	mux.HandleFunc("POST /api/codex/approvals/", s.handleCodexApprovalSubroutes)
@@ -225,7 +231,12 @@ func (s *Server) handleListCodexThreads(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	includeArchived := r.URL.Query().Get("archived") == "1"
-	items, err := s.codex.ListThreads(r.Context(), includeArchived, r.URL.Query().Get("q"))
+	items, err := s.codex.ListThreadsFiltered(r.Context(), codexclient.ThreadListOptions{
+		IncludeArchived: includeArchived,
+		Query:           r.URL.Query().Get("q"),
+		WorkspaceID:     firstQuery(r, "workspace_id", "workspaceId"),
+		Status:          r.URL.Query().Get("status"),
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -285,6 +296,18 @@ func (s *Server) handleCodexThreadSubroutes(w http.ResponseWriter, r *http.Reque
 			s.handleCodexThreadEvents(w, r, threadID)
 			return
 		}
+		if len(parts) == 2 && parts[1] == "review" {
+			s.handleCodexReviewSnapshot(w, r, threadID)
+			return
+		}
+		if len(parts) == 2 && parts[1] == "commands" {
+			s.handleListCodexCommands(w, r, threadID)
+			return
+		}
+		if len(parts) == 3 && parts[1] == "browser" && parts[2] == "sessions" {
+			s.handleListCodexBrowserSessions(w, r, threadID)
+			return
+		}
 		writeError(w, http.StatusNotFound, "not_found", "未找到会话路由")
 		return
 	}
@@ -293,10 +316,27 @@ func (s *Server) handleCodexThreadSubroutes(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	if len(parts) == 3 {
+		switch {
+		case parts[1] == "review" && parts[2] == "comments":
+			s.handleCreateCodexReviewComment(w, r, threadID)
+			return
+		case parts[1] == "browser" && parts[2] == "sessions":
+			s.handleCreateCodexBrowserSession(w, r, threadID)
+			return
+		case parts[1] == "commands" && parts[2] == "assess":
+			s.handleAssessCodexCommand(w, r, threadID)
+			return
+		}
+	}
+
 	if len(parts) == 2 {
 		switch parts[1] {
 		case "turns":
 			s.handleCreateCodexTurn(w, r, threadID)
+			return
+		case "queue":
+			s.handleQueueCodexTurn(w, r, threadID)
 			return
 		case "archive":
 			thread, err := s.codex.ArchiveThread(r.Context(), threadID)
@@ -322,6 +362,9 @@ func (s *Server) handleCodexThreadSubroutes(w http.ResponseWriter, r *http.Reque
 			}
 			writeJSON(w, http.StatusCreated, map[string]any{"thread": thread})
 			return
+		case "commands":
+			s.handleCreateCodexCommand(w, r, threadID)
+			return
 		}
 	}
 
@@ -345,6 +388,14 @@ func (s *Server) handleCodexThreadSubroutes(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleCreateCodexTurn(w http.ResponseWriter, r *http.Request, threadID string) {
+	s.handleStartOrQueueCodexTurn(w, r, threadID, false)
+}
+
+func (s *Server) handleQueueCodexTurn(w http.ResponseWriter, r *http.Request, threadID string) {
+	s.handleStartOrQueueCodexTurn(w, r, threadID, true)
+}
+
+func (s *Server) handleStartOrQueueCodexTurn(w http.ResponseWriter, r *http.Request, threadID string, forceQueue bool) {
 	var req struct {
 		Prompt         string   `json:"prompt"`
 		Sandbox        string   `json:"sandbox"`
@@ -359,13 +410,22 @@ func (s *Server) handleCreateCodexTurn(w http.ResponseWriter, r *http.Request, t
 		writeError(w, http.StatusBadRequest, "codex_prompt_required", "prompt 不能为空")
 		return
 	}
-	turn, err := s.codex.StartTurn(r.Context(), threadID, codexclient.TurnInput{
+	input := codexclient.TurnInput{
 		Prompt:         req.Prompt,
 		Sandbox:        req.Sandbox,
 		ApprovalPolicy: req.ApprovalPolicy,
 		Model:          req.Model,
 		AttachmentIDs:  req.AttachmentIDs,
-	})
+	}
+	var (
+		turn storage.CodexCliTurn
+		err  error
+	)
+	if forceQueue {
+		turn, err = s.codex.QueueTurn(r.Context(), threadID, input)
+	} else {
+		turn, err = s.codex.StartTurn(r.Context(), threadID, input)
+	}
 	if err != nil {
 		writeError(w, codexTurnErrorStatus(err), codexTurnErrorCode(err), codexclient.Redact(err.Error(), 200))
 		return
@@ -446,7 +506,7 @@ func (s *Server) handleCodexTurnSubroutes(w http.ResponseWriter, r *http.Request
 	}
 	turnID := parts[0]
 	switch parts[1] {
-	case "interrupt":
+	case "interrupt", "cancel":
 		turn, err := s.codex.InterruptTurn(r.Context(), turnID)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "codex_turn_interrupt_failed", codexclient.Redact(err.Error(), 200))
@@ -500,18 +560,24 @@ func (s *Server) handleCodexApprovalSubroutes(w http.ResponseWriter, r *http.Req
 		return
 	}
 	id := parts[0]
-	var approve bool
+	decision := "decline"
 	switch parts[1] {
 	case "approve":
-		approve = true
+		decision = "accept"
 	case "deny":
-		approve = false
+		decision = "decline"
+	case "cancel":
+		decision = "cancel"
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "未找到审批路由")
 		return
 	}
-	resolved, err := s.codex.ResolveApproval(r.Context(), id, approve)
+	resolved, err := s.codex.ResolveApprovalDecision(r.Context(), id, decision)
 	if err != nil {
+		if errors.Is(err, codexclient.ErrApprovalNotLive) {
+			writeError(w, http.StatusConflict, "codex_approval_stale", "审批请求已失效")
+			return
+		}
 		writeError(w, http.StatusNotFound, "codex_approval_not_found", "未找到审批")
 		return
 	}

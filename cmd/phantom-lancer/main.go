@@ -69,10 +69,6 @@ func main() {
 		logger.Error("initialize runtime settings failed", "error", err)
 		os.Exit(1)
 	}
-	if err := store.PurgeLegacyCodexData(ctx); err != nil {
-		logger.Error("purge legacy codex data failed", "error", err)
-		os.Exit(1)
-	}
 	if _, err := store.GetRuntimeSettings(ctx); err != nil {
 		logger.Error("load runtime settings failed", "error", err)
 		os.Exit(1)

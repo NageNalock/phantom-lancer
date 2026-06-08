@@ -35,7 +35,7 @@ export function AppShell({
       <a className="fixed left-4 top-4 z-40 -translate-y-24 rounded-lg border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-sm focus:translate-y-0" href="#mainContent">
         跳到主要内容
       </a>
-      <aside className="rounded-xl border border-[var(--line)] bg-[var(--rail)] p-3 max-lg:static">
+      <aside className="rounded-lg border border-[var(--line)] bg-[var(--rail)] p-3 max-lg:static">
         <div className="mb-5 flex items-center gap-3 px-1">
           <div className="grid h-10 w-10 place-items-center rounded-lg border border-[var(--line-strong)] bg-[var(--surface)] font-mono text-xs font-bold text-[var(--accent)]">PL</div>
           <div>
@@ -62,7 +62,7 @@ export function AppShell({
         </nav>
       </aside>
 
-      <main className="min-w-0 overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--surface)]" id="mainContent">
+      <main className="min-w-0 overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--surface)]" id="mainContent">
         <header className="flex items-start justify-between gap-3 border-b border-[var(--line)] bg-[var(--surface-soft)] px-5 py-4 max-md:grid">
           <div>
             <h1 className="m-0 text-lg font-semibold">{activeMeta?.label}</h1>

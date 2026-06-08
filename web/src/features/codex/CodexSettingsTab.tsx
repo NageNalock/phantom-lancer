@@ -72,8 +72,6 @@ export function CodexSettingsTab({ actions, onChange }: { actions: AppActions; o
         <Field label="默认审批策略">
           <select className="select" onChange={(event) => update("defaultApprovalPolicy", event.target.value)} value={settings.defaultApprovalPolicy || "on-request"}>
             <option value="on-request">on-request</option>
-            <option value="on-failure">on-failure</option>
-            <option value="never">never</option>
           </select>
         </Field>
         <Field label="启用 app-server">
@@ -105,6 +103,9 @@ export function CodexSettingsTab({ actions, onChange }: { actions: AppActions; o
         </Field>
         <Field label="单事件最大载荷字节" help="超过后事件载荷会被裁剪，避免长输出占满存储。">
           <input className="input" type="number" min={1024} step={1024} onChange={(event) => update("maxEventPayloadBytes", Number(event.target.value))} value={settings.maxEventPayloadBytes ?? 65536} />
+        </Field>
+        <Field label="最大并发 turn" help="默认 1；同一 workspace 仍会串行，避免并发写入同一目录。">
+          <input className="input" type="number" min={1} max={4} onChange={(event) => update("maxConcurrentTurns", Number(event.target.value))} value={settings.maxConcurrentTurns ?? 1} />
         </Field>
         <div className="col-span-2 max-lg:col-span-1">
           <Button disabled={saving} tone="primary" type="submit">

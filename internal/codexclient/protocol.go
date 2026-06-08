@@ -10,19 +10,15 @@ import (
 // against the upstream source.
 
 // appServerApprovalPolicy maps the internal approval policy to the AskForApproval
-// string the app-server expects. Per the v2 schema (AskForApproval), the values
-// are kebab-case: untrusted/on-failure/on-request/never. It never emits the
-// granular object form.
+// string the app-server expects. The web console currently permits only
+// on-request for owner-mediated runs; legacy or unexpected values fall back to
+// on-request instead of disabling approvals.
 func appServerApprovalPolicy(policy string) string {
 	switch strings.TrimSpace(policy) {
 	case "on-request", "onRequest":
 		return "on-request"
-	case "on-failure", "onFailure":
-		return "on-failure"
 	case "untrusted", "unless-trusted", "unlessTrusted":
 		return "untrusted"
-	case "never":
-		return "never"
 	default:
 		return "on-request"
 	}

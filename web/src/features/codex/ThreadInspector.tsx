@@ -12,6 +12,7 @@ export function ThreadInspector({ status, thread, workspaces }: { status?: Codex
           <>
             <InspectorRow label="工作区" value={workspace?.label || workspace?.pathSummary || "-"} />
             <InspectorRow label="路径" mono value={workspace?.pathSummary || "-"} />
+            <InspectorRow label="Git" mono value={workspace?.gitBranch || "-"} />
             <InspectorRow label="信任" value={workspace?.trustState || "-"} />
             <InspectorRow label="模型" mono value={thread.model || "运行时探测"} />
             <InspectorRow label="沙箱" value={thread.sandboxMode || "-"} />
@@ -26,6 +27,9 @@ export function ThreadInspector({ status, thread, workspaces }: { status?: Codex
           <InspectorRow label="CLI" value={status?.installation?.status || "-"} />
           <InspectorRow label="app-server" value={status?.appServer?.state || "-"} />
           <InspectorRow label="待审批" value={String(status?.pendingApprovals || 0)} />
+          <InspectorRow label="运行" value={String(status?.runtime?.running || 0)} />
+          <InspectorRow label="队列" value={String(status?.runtime?.queued || 0)} />
+          <InspectorRow label="失败" value={String(status?.runtime?.failed || 0)} />
         </div>
       </div>
     </section>

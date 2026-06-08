@@ -39,6 +39,7 @@ export function CodexView({ actions, data }: { actions: AppActions; data: AppDat
   const appServer = status?.appServer;
   const appServerTone = appServer?.state === "running" ? "good" : appServer?.state === "failed" ? "danger" : appServer?.state === "starting" ? "warn" : "neutral";
   const pending = status?.pendingApprovals || 0;
+  const runtime = status?.runtime;
 
   return (
     <section className="grid gap-4 p-4">
@@ -58,7 +59,11 @@ export function CodexView({ actions, data }: { actions: AppActions; data: AppDat
             </button>
           );
         })}
-        <span className="ml-auto flex items-center gap-2 text-xs text-[var(--muted)]">
+        <span className="ml-auto flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted)]">
+          {runtime?.running ? <Pill tone="good">running {runtime.running}</Pill> : null}
+          {runtime?.waitingApproval ? <Pill tone="warn">approval {runtime.waitingApproval}</Pill> : null}
+          {runtime?.queued ? <Pill tone="warn">queued {runtime.queued}</Pill> : null}
+          {runtime?.failed ? <Pill tone="danger">failed {runtime.failed}</Pill> : null}
           <Pill tone={appServerTone}>app-server {codexAppServerStateLabel(appServer?.state)}</Pill>
         </span>
       </div>

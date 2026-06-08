@@ -470,6 +470,12 @@ export interface CodexStatus {
   workspaceCount?: number;
   threadCount?: number;
   pendingApprovals?: number;
+  runtime?: {
+    running?: number;
+    waitingApproval?: number;
+    queued?: number;
+    failed?: number;
+  };
   legacyTables?: string[];
 }
 
@@ -487,6 +493,7 @@ export interface CodexSettings {
   eventRetentionDays?: number;
   maxEventsPerThread?: number;
   maxEventPayloadBytes?: number;
+  maxConcurrentTurns?: number;
 }
 
 export interface CodexWorkspace {
@@ -498,7 +505,10 @@ export interface CodexWorkspace {
   defaultSandbox?: string;
   defaultApprovalPolicy?: string;
   networkPolicy?: Record<string, unknown>;
+  pinned?: boolean;
   lastOpenedAt?: string;
+  gitBranch?: string;
+  gitState?: string;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -575,6 +585,62 @@ export interface CodexModel {
   id: string;
   displayName?: string;
   isDefault?: boolean;
+}
+
+export interface CodexReviewComment {
+  id: string;
+  threadId?: string;
+  turnId?: string;
+  workspaceId?: string;
+  filePath?: string;
+  oldLine?: number;
+  newLine?: number;
+  hunkHeader?: string;
+  body?: string;
+  status?: string;
+  createdAt?: string;
+  resolvedAt?: string;
+}
+
+export interface CodexReviewSnapshot {
+  scope?: string;
+  summary?: string;
+  diff?: string;
+  truncated?: boolean;
+  comments?: CodexReviewComment[];
+  generatedAt?: string;
+}
+
+export interface CodexCommand {
+  id: string;
+  threadId?: string;
+  commandPreview?: string;
+  cwdSummary?: string;
+  status?: string;
+  exitCode?: number;
+  outputPreview?: string;
+  errorSummary?: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt?: string;
+}
+
+export interface CodexCommandAssessment {
+  class?: string;
+  riskSummary?: string;
+  requiresConfirmation?: boolean;
+  cwdSummary?: string;
+  commandPreview?: string;
+}
+
+export interface CodexBrowserSession {
+  id: string;
+  threadId?: string;
+  url?: string;
+  status?: string;
+  lastError?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface AppData {

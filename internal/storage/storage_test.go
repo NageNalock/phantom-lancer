@@ -33,6 +33,139 @@ func TestBackupDatabaseCreatesCopy(t *testing.T) {
 	}
 }
 
+func TestLegacyCodexTablesAreDetectedButNotPurged(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	if _, err := store.db.ExecContext(ctx, `CREATE TABLE codex_sessions (id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	found, err := store.CodexCliLegacyTablesDetected(ctx)
+	if err != nil {
+		t.Fatalf("detect legacy tables: %v", err)
+	}
+	if len(found) != 1 || found[0] != "codex_sessions" {
+		t.Fatalf("legacy tables = %#v, want codex_sessions", found)
+	}
+	if err := store.PurgeLegacyCodexData(ctx); err != nil {
+		t.Fatalf("legacy purge no-op: %v", err)
+	}
+	found, err = store.CodexCliLegacyTablesDetected(ctx)
+	if err != nil {
+		t.Fatalf("detect legacy tables after no-op purge: %v", err)
+	}
+	if len(found) != 1 || found[0] != "codex_sessions" {
+		t.Fatalf("legacy table was removed: %#v", found)
+	}
+}
+
+func TestCodexCliWorkspacePinnedSortAndNetworkNormalization(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	regularDir := filepath.Join(dir, "regular")
+	pinnedDir := filepath.Join(dir, "pinned")
+	if err := os.Mkdir(regularDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(pinnedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	regular, err := store.CreateCodexCliWorkspace(ctx, CodexCliWorkspace{Path: regularDir, TrustState: "trusted"})
+	if err != nil {
+		t.Fatalf("create regular workspace: %v", err)
+	}
+	pinned, err := store.CreateCodexCliWorkspace(ctx, CodexCliWorkspace{Path: pinnedDir, TrustState: "untrusted", NetworkPolicy: map[string]any{"enabled": true}, Pinned: true})
+	if err != nil {
+		t.Fatalf("create pinned workspace: %v", err)
+	}
+	if pinned.NetworkPolicy["enabled"] == true {
+		t.Fatal("untrusted workspace should force network off")
+	}
+	if err := store.TouchCodexCliWorkspace(ctx, regular.ID); err != nil {
+		t.Fatalf("touch workspace: %v", err)
+	}
+	items, err := store.ListCodexCliWorkspaces(ctx)
+	if err != nil {
+		t.Fatalf("list workspaces: %v", err)
+	}
+	if len(items) < 2 || items[0].ID != pinned.ID {
+		t.Fatalf("pinned workspace should sort first, got %#v", items)
+	}
+}
+
+func TestCodexCliAttachmentAssignmentToTurn(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	att, err := store.CreateCodexCliAttachment(ctx, CodexCliAttachment{ThreadID: "thread-1", Filename: "input.png"})
+	if err != nil {
+		t.Fatalf("create attachment: %v", err)
+	}
+	if err := store.AssignCodexCliAttachmentsToTurn(ctx, "thread-1", "turn-1", []string{att.ID}); err != nil {
+		t.Fatalf("assign attachment: %v", err)
+	}
+	items, err := store.ListCodexCliAttachmentsForTurn(ctx, "turn-1")
+	if err != nil {
+		t.Fatalf("list turn attachments: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != att.ID || items[0].TurnID != "turn-1" {
+		t.Fatalf("unexpected turn attachments: %#v", items)
+	}
+}
+
+func TestMarkCodexCliRunningThreadsInterruptedFailsQueuedTurns(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	ws, err := store.CreateCodexCliWorkspace(ctx, CodexCliWorkspace{Path: t.TempDir(), TrustState: "trusted"})
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	thread, err := store.CreateCodexCliThread(ctx, CodexCliThread{WorkspaceID: ws.ID, Status: "queued"})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	turn, err := store.CreateCodexCliTurn(ctx, CodexCliTurn{ThreadID: thread.ID, Status: "queued"})
+	if err != nil {
+		t.Fatalf("create turn: %v", err)
+	}
+	if err := store.MarkCodexCliRunningThreadsInterrupted(ctx, "interrupted_by_server_restart"); err != nil {
+		t.Fatalf("mark interrupted: %v", err)
+	}
+	savedTurn, err := store.GetCodexCliTurn(ctx, turn.ID)
+	if err != nil {
+		t.Fatalf("get turn: %v", err)
+	}
+	if savedTurn.Status != "failed" || savedTurn.ErrorSummary == "" {
+		t.Fatalf("queued turn should fail closed, got %+v", savedTurn)
+	}
+	savedThread, err := store.GetCodexCliThread(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("get thread: %v", err)
+	}
+	if savedThread.Status != "failed" || savedThread.LastError == "" {
+		t.Fatalf("queued thread should fail closed, got %+v", savedThread)
+	}
+}
+
 func TestPruneImageGenerationJobsKeepsLibraryAssets(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))

@@ -1,10 +1,14 @@
 package codexclient
 
 import (
+	"context"
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"phantom-lancer/internal/events"
 	"phantom-lancer/internal/storage"
 )
 
@@ -38,9 +42,16 @@ func TestBuildChildEnvForwardsCodexHome(t *testing.T) {
 func TestResolveRunPolicyTrustEnforced(t *testing.T) {
 	policy := NewWorkspacePolicy(func() ([]string, error) { return []string{"/srv"}, nil })
 
-	untrusted := storage.CodexCliWorkspace{TrustState: "untrusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"}
+	untrusted := storage.CodexCliWorkspace{TrustState: "untrusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request", NetworkPolicy: map[string]any{"enabled": true}}
 	if _, err := policy.ResolveRunPolicy(untrusted, "workspace-write", "on-request"); err == nil {
 		t.Fatal("expected untrusted workspace to reject workspace-write")
+	}
+	readOnly, err := policy.ResolveRunPolicy(untrusted, "read-only", "on-request")
+	if err != nil {
+		t.Fatalf("expected untrusted read-only to be allowed: %v", err)
+	}
+	if readOnly.NetworkEnabled {
+		t.Fatal("expected untrusted workspace to force network off")
 	}
 
 	trusted := storage.CodexCliWorkspace{TrustState: "trusted", DefaultSandbox: "workspace-write", DefaultApprovalPolicy: "on-request", NetworkPolicy: map[string]any{"enabled": false}}
@@ -50,6 +61,20 @@ func TestResolveRunPolicyTrustEnforced(t *testing.T) {
 	}
 	if resolved.Sandbox != "workspace-write" || resolved.NetworkEnabled {
 		t.Fatalf("unexpected resolved policy: %+v", resolved)
+	}
+	if _, err := policy.ResolveRunPolicy(trusted, "workspace-write", "never"); err == nil {
+		t.Fatal("expected never approval policy to be rejected")
+	}
+	if _, err := policy.ResolveRunPolicy(trusted, "workspace-write", "on-failure"); err == nil {
+		t.Fatal("expected on-failure approval policy to be rejected")
+	}
+	restricted := storage.CodexCliWorkspace{TrustState: "restricted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request", NetworkPolicy: map[string]any{"enabled": true}}
+	resolved, err = policy.ResolveRunPolicy(restricted, "read-only", "on-request")
+	if err != nil {
+		t.Fatalf("expected restricted read-only to be allowed: %v", err)
+	}
+	if resolved.NetworkEnabled {
+		t.Fatal("expected restricted workspace to force network off")
 	}
 }
 
@@ -171,7 +196,7 @@ func TestRedactStripsTokens(t *testing.T) {
 }
 
 func TestNormalizeSettingsBounds(t *testing.T) {
-	s := normalizeSettings(Settings{AppServerProbeSeconds: 1, MaxEventsPerThread: 0, DefaultSandbox: "bogus"})
+	s := normalizeSettings(Settings{AppServerProbeSeconds: 1, MaxEventsPerThread: 0, DefaultSandbox: "bogus", DefaultApprovalPolicy: "never"})
 	if s.AppServerProbeSeconds < 5 {
 		t.Fatalf("probe interval not clamped: %d", s.AppServerProbeSeconds)
 	}
@@ -180,5 +205,182 @@ func TestNormalizeSettingsBounds(t *testing.T) {
 	}
 	if s.DefaultSandbox != "read-only" {
 		t.Fatalf("invalid sandbox not reset: %s", s.DefaultSandbox)
+	}
+	if s.DefaultApprovalPolicy != "on-request" {
+		t.Fatalf("invalid approval policy not reset: %s", s.DefaultApprovalPolicy)
+	}
+}
+
+func TestOwnerCommandAssessmentIsControlled(t *testing.T) {
+	if assessment, err := assessOwnerCommand([]string{"git", "status", "--short"}); err != nil || assessment.RequiresConfirmation {
+		t.Fatalf("expected read-only git status without confirmation, assessment=%+v err=%v", assessment, err)
+	}
+	if assessment, err := assessOwnerCommand([]string{"npm", "run", "build"}); err != nil || !assessment.RequiresConfirmation {
+		t.Fatalf("expected npm build to require confirmation, assessment=%+v err=%v", assessment, err)
+	}
+	for _, argv := range [][]string{{"curl", "https://example.com"}, {"bash", "-lc", "echo hi"}, {"git", "push"}, {"python3", "-c", "print(1)"}} {
+		if _, err := assessOwnerCommand(argv); err == nil {
+			t.Fatalf("expected command to be blocked: %v", argv)
+		}
+	}
+}
+
+func TestActiveForPayloadDoesNotFallbackAcrossConcurrentTurns(t *testing.T) {
+	svc := &Service{
+		activeTurns:     map[string]*appTurnContext{"turn-1": {threadID: "thread-1", turnID: "turn-1"}, "turn-2": {threadID: "thread-2", turnID: "turn-2"}},
+		activeItemTurns: map[string]string{"item-2": "turn-2"},
+	}
+	if active := svc.activeForPayload(map[string]any{}); active != nil {
+		t.Fatalf("expected ambiguous payload to fail closed, got %+v", active)
+	}
+	if active := svc.activeForPayload(map[string]any{"threadId": "thread-1"}); active == nil || active.turnID != "turn-1" {
+		t.Fatalf("expected thread route to turn-1, got %+v", active)
+	}
+	if active := svc.activeForPayload(map[string]any{"itemId": "item-2"}); active == nil || active.turnID != "turn-2" {
+		t.Fatalf("expected item route to turn-2, got %+v", active)
+	}
+}
+
+func TestNormalizePreviewURLRequiresExplicitPublicAllow(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	indexPath := filepath.Join(dir, "index.html")
+	if err := os.WriteFile(indexPath, []byte("<html></html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(nil, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	ws := storage.CodexCliWorkspace{Path: dir}
+	if _, err := svc.normalizePreviewURL(ctx, "https://example.com", ws, false); err == nil {
+		t.Fatal("expected public URL without allowPublic to be rejected")
+	}
+	if _, err := svc.normalizePreviewURL(ctx, "http://127.0.0.1:5173", ws, false); err != nil {
+		t.Fatalf("expected localhost preview to be allowed: %v", err)
+	}
+	if _, err := svc.normalizePreviewURL(ctx, "file://"+indexPath, ws, false); err != nil {
+		t.Fatalf("expected workspace file preview to be allowed: %v", err)
+	}
+	if _, err := svc.normalizePreviewURL(ctx, "https://example.com?access_token=placeholder", ws, true); err == nil {
+		t.Fatal("expected sensitive query URL to be rejected")
+	}
+}
+
+func TestStartTurnInvalidAttachmentDoesNotLeaveRunningTurn(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	workspacePath := filepath.Join(dir, "repo")
+	if err := os.Mkdir(workspacePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	ws, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "workspace-write", DefaultApprovalPolicy: "on-request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread, err := svc.CreateThread(ctx, ws.ID, "test", "", "read-only", "on-request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.StartTurn(ctx, thread.ID, TurnInput{Prompt: "hello", AttachmentIDs: []string{"missing"}}); err == nil {
+		t.Fatal("expected invalid attachment to fail")
+	}
+	running, err := store.HasRunningCodexCliTurn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if running {
+		t.Fatal("invalid attachment left a running turn")
+	}
+	turns, err := store.ListCodexCliTurns(ctx, thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 0 {
+		t.Fatalf("expected no turn to be created, got %d", len(turns))
+	}
+}
+
+func TestResolveApprovalWithoutLiveRequestFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	ws, err := store.CreateCodexCliWorkspace(ctx, storage.CodexCliWorkspace{Path: dir, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread, err := store.CreateCodexCliThread(ctx, storage.CodexCliThread{WorkspaceID: ws.ID, Status: "needs_approval", SourceMode: "app_server", SandboxMode: "read-only", ApprovalPolicy: "on-request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := store.CreateCodexCliTurn(ctx, storage.CodexCliTurn{ThreadID: thread.ID, Status: "waiting_approval", SandboxMode: "read-only", ApprovalPolicy: "on-request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval, err := store.CreateCodexCliApproval(ctx, storage.CodexCliApproval{ThreadID: thread.ID, TurnID: turn.ID, Status: "pending", ActionKind: "command", RiskLevel: "medium"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ResolveApprovalDecision(ctx, approval.ID, "accept"); !errors.Is(err, ErrApprovalNotLive) {
+		t.Fatalf("expected stale approval error, got %v", err)
+	}
+	resolved, err := store.GetCodexCliApproval(ctx, approval.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Status != "failed" || resolved.Decision != "stale" {
+		t.Fatalf("expected failed stale approval, got %+v", resolved)
+	}
+	savedTurn, err := store.GetCodexCliTurn(ctx, turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if savedTurn.Status != "failed" {
+		t.Fatalf("expected waiting turn to fail closed, got %s", savedTurn.Status)
+	}
+}
+
+func TestTerminalTurnCleansAttachmentsAndDerivesTitle(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	thread, err := store.CreateCodexCliThread(ctx, storage.CodexCliThread{WorkspaceID: "ws-1", Title: "新对话", Status: "running", SourceMode: "exec", SandboxMode: "read-only", ApprovalPolicy: "on-request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := store.CreateCodexCliTurn(ctx, storage.CodexCliTurn{ThreadID: thread.ID, Status: "running"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	filePath := filepath.Join(dir, "input.png")
+	if err := os.WriteFile(filePath, []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	att, err := store.CreateCodexCliAttachment(ctx, storage.CodexCliAttachment{ThreadID: thread.ID, TurnID: turn.ID, Filename: "input.png", StoragePath: filePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.completeTurn(ctx, thread, turn, nil)
+	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
+		t.Fatalf("expected attachment file removed, stat err=%v", err)
+	}
+	if _, err := store.GetCodexCliAttachment(ctx, att.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected attachment row removed, err=%v", err)
+	}
+	if !shouldDeriveThreadTitle("") || !shouldDeriveThreadTitle("新对话") || shouldDeriveThreadTitle("自定义标题") {
+		t.Fatal("unexpected title derivation predicate")
+	}
+	if got := titleFromPrompt("  第一行 prompt\n第二行  "); got != "第一行 prompt 第二行" {
+		t.Fatalf("unexpected derived title %q", got)
 	}
 }

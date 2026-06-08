@@ -1,6 +1,7 @@
 # Codex CLI Client 模块功能设计
 
 文档日期：2026-06-07
+最近更新：2026-06-08
 关联文档：
 
 - [personal-web-terminal-product-features.md](./personal-web-terminal-product-features.md)
@@ -16,6 +17,14 @@
 - [Codex non-interactive mode](https://developers.openai.com/codex/noninteractive)
 - [Agent approvals and security](https://developers.openai.com/codex/agent-approvals-security)
 - [AGENTS.md instructions](https://developers.openai.com/codex/guides/agents-md)
+- [Codex app features](https://developers.openai.com/codex/app/features)
+- [Codex app automations](https://developers.openai.com/codex/app/automations)
+- [Codex app in-app browser](https://developers.openai.com/codex/app/browser)
+- [Codex app review](https://developers.openai.com/codex/app/review)
+- [Codex app worktrees](https://developers.openai.com/codex/app/worktrees)
+- [Codex app local environments](https://developers.openai.com/codex/app/local-environments)
+- [Codex app computer use](https://developers.openai.com/codex/app/computer-use)
+- [Codex app Appshots](https://developers.openai.com/codex/appshots)
 
 ## 1. Design Read
 
@@ -370,6 +379,9 @@ turn：
 - `GET /api/codex/approvals`
 - `POST /api/codex/approvals/{id}/approve`
 - `POST /api/codex/approvals/{id}/deny`
+- `POST /api/codex/approvals/{id}/cancel`
+
+不提供 `approve-session` 这类 session 级长期放行接口。所有审批默认按单次 request 处理，避免 Web 控制台引入比 Codex 原生审批更宽的长期授权面。
 
 附件：
 
@@ -766,3 +778,378 @@ audit payload 只记录：
 - 是否允许 owner 配置 `codex_cli.codex_home` 为专用目录，还是始终复用运行用户默认 Codex home。
 - 是否在第一版提供图片输入，还是先只支持文本 prompt。
 - 是否需要支持 Codex custom slash commands 的可视化入口，还是让用户在 prompt 中直接输入 slash command。
+
+## 13. 桌面级能力规划
+
+本节记录 Codex 桌面客户端中较完整的产品能力如何映射到 Phantom Lancer。它不是 MVP 范围，也不要求一次性实现桌面端 parity。优先级遵循个人服务器 Web 控制台边界：先补可审计、可恢复、低权限、低噪音的工作台能力；涉及远程平台、桌面 GUI 控制、任意 Git 远端写操作或系统级截图的能力默认延后。
+
+优先级定义：
+
+- `P1`：下一阶段可进入实现设计，和当前 Codex 模块的会话、事件、审批、工作区强相关。
+- `P2`：需要较多新数据模型或后台调度，但仍适合个人服务器控制台。
+- `P3`：可做轻量入口或诊断视图，但不应阻塞核心会话体验。
+- `P4 / 超低优先级`：先只记录，不进入近期实现计划；除非后续有明确使用场景、风险边界和验证方案。
+
+### 13.1 P4 / 超低优先级：暂不进入近期实现
+
+以下能力先作为长期参考记录，不纳入当前 Codex 模块近期开发队列：
+
+1. `Local / Worktree / Cloud 运行模式`
+   - 桌面端语义：Local 直接在当前项目目录运行，Worktree 为任务创建隔离 Git worktree，Cloud 在远端环境运行。
+   - Phantom Lancer 处理：近期仍只支持已登记 workspace + `app-server` / `exec fallback`。不做 mode selector，不创建/清理 Git worktree，不接入 Cloud environment。
+   - 延后原因：Worktree 生命周期、冲突处理、清理策略、后台任务隔离和 Cloud 账号/环境模型都会显著扩大权限面。
+
+2. `Commit / Push / PR 工作流`
+   - 桌面端语义：在 app 内生成 commit、push 到远端、创建 PR，并读取 PR review context。
+   - Phantom Lancer 处理：近期不在 Web 控制台执行 `commit`、`push`、`gh pr create` 或远端 PR 写操作。Git Review Pane 可先只做本地 diff 查看、评论、stage/unstage/revert 设计，不包含远端发布。
+   - 延后原因：远端认证、作者身份、签名、分支保护、push 权限和 PR 信息都容易触及个人或组织私有边界。
+
+3. `Local Environment：setup scripts / actions`
+   - 桌面端语义：项目配置 setup scripts 和 actions，worktree 创建后自动安装依赖或运行测试。
+   - Phantom Lancer 处理：近期不自动执行 setup scripts，也不做项目级 action shortcut。集成终端如果实现，先作为 owner 显式触发的受控命令面。
+   - 延后原因：自动 setup/action 容易变成任意命令执行面，必须先有命令策略、审计、超时、输出裁剪和权限审批基础。
+
+4. `Computer Use`
+   - 桌面端语义：Codex 操作 macOS/Windows app，能看屏幕、点击和输入。
+   - Phantom Lancer 处理：个人服务器部署默认没有桌面 GUI，不做 OS 屏幕控制、鼠标键盘注入或远程桌面桥接。
+   - 延后原因：风险边界跨出 workspace，可能影响系统状态、其他应用和私有数据，不符合当前单机 Web 控制台最小权限方向。
+
+5. `Appshots`
+   - 桌面端语义：把当前前台 app 的截图和可访问文本附加到 Codex thread。
+   - Phantom Lancer 处理：近期不截取系统窗口、不采集桌面可访问性文本。图片输入仅保留受控上传路径。
+   - 延后原因：系统截图和可访问性文本容易包含私密信息，且服务器环境通常没有可见桌面。
+
+### 13.2 P1：多项目 / 多线程并行工作
+
+目标：让 Codex 页面从“单线程会话列表”升级为“多 workspace 的任务工作台”，但不突破个人单 owner 边界。
+
+产品范围：
+
+- 左侧上下文列按 workspace 分组展示 thread，保留置顶、最近、归档和搜索。
+- 支持 `background thread` 标记，用于长任务和自动化结果，不等同于无限并发执行。
+- Inspector 展示当前 workspace 的 trust、Git branch、运行队列、最近错误和待审批数。
+- 顶部状态条显示全局 `running / waiting_approval / queued / failed` 摘要。
+
+后端设计：
+
+- 现有全局单 active turn 可逐步改为 `max_concurrent_turns` 配置，默认仍为 `1`。
+- 实现并发前必须先移除全局 `activeTurn` 假设，所有 app-server notification、server request、approval 和 event append 都必须按上游 `threadId` / `turnId` / `itemId` 路由。
+- 并发单元以 workspace 为边界：同一 workspace 默认串行，不同 workspace 可在 owner 显式开启后并行。
+- 增加轻量队列状态：`queued`、`running`、`waiting_approval`、`completed`、`failed`、`cancelled`。
+- 队列只调度已通过 workspace policy 的 turn；不在持久化队列表、audit 或服务日志中保存完整 prompt，只保存摘要和事件引用。当前进程内为了调度可以短期持有待执行输入；服务重启后无法恢复的 queued turn 必须失败关闭。
+
+建议 API：
+
+- `GET /api/codex/threads?workspace_id=&status=&q=`
+- `POST /api/codex/threads/{id}/queue`
+- `POST /api/codex/turns/{id}/cancel`
+- `GET /api/codex/runtime/queue`
+
+安全边界：
+
+- 默认并发仍保守，避免多个 Codex 子进程同时改同一个目录。
+- workspace-write turn 与同 workspace 的其他 turn 互斥。
+- waiting approval 的 turn 不应阻塞只读历史浏览，但默认阻塞同 workspace 后续写任务。
+
+### 13.3 P1：Git Review Pane（不含 commit / push / PR）
+
+目标：给 owner 一个可审计的本地 diff 面板，用来理解 Codex 和 owner 的未提交变更，并给 Codex 提供行级反馈。
+
+产品范围：
+
+- 仅支持 Git 仓库 workspace。
+- Review scope：
+  - `Uncommitted changes`：默认视图，展示 worktree 当前未提交差异。
+  - `Last turn changes`：按 turn 关联的文件变更事件估算最近一次 Codex 改动。
+  - `Branch changes`：只做只读 diff 摘要；不进入 push/PR。
+- 支持文件级展开/折叠、语法高亮、diff hunk 定位。
+- 支持 inline review comment，评论进入当前 thread 的事件流，下一条 prompt 可引用这些评论。
+- 第一版优先只读 diff + inline comment；stage/unstage/revert 可作为第二阶段。
+
+后端设计：
+
+- 使用 `exec.CommandContext` 调用固定 Git 子命令，不通过 shell 拼接字符串。
+- 所有 Git 命令 cwd 必须是已登记 workspace，且路径位于允许根目录。
+- 输出限制：最大文件数、最大 diff 字节数、最大单 hunk 行数、超时。
+- 文件路径只允许仓库相对路径，禁止 `..`、绝对路径和 symlink escape。
+
+建议 API：
+
+- `GET /api/codex/threads/{id}/review?scope=uncommitted|last_turn|branch`
+- `POST /api/codex/threads/{id}/review/comments`
+- `DELETE /api/codex/review/comments/{id}`
+- `POST /api/codex/review/actions/stage`（第二阶段）
+- `POST /api/codex/review/actions/unstage`（第二阶段）
+- `POST /api/codex/review/actions/revert`（第二阶段，必须二次确认）
+
+建议数据表：
+
+- `codex_cli_review_comments`
+  - `id`
+  - `thread_id`
+  - `turn_id`
+  - `workspace_id`
+  - `file_path`
+  - `old_line`
+  - `new_line`
+  - `hunk_header`
+  - `body`
+  - `status`
+  - `created_at`
+  - `resolved_at`
+
+安全边界：
+
+- 不记录完整 diff 到 audit；audit 只记录文件数、action、thread id、comment id。
+- Revert 属于危险操作，必须 owner CSRF + 二次确认。
+- Stage、unstage 和 revert 必须带 expected diff hash / file revision / index state 校验；如果 owner 或 Codex 在确认后又修改了同一文件，操作必须失败并提示重新加载 diff。
+- 不执行 commit、push、PR 操作；这些保持 P4。
+
+### 13.4 P1：集成终端 / 受控命令面
+
+目标：让 owner 在 Codex thread 内验证构建、测试和本地服务状态，同时不把 Phantom Lancer 变成无限制 Web shell。
+
+产品范围：
+
+- 第一阶段不是任意交互式 shell，而是 `Command Runner`：
+  - owner 输入或选择命令。
+  - 绑定当前 workspace cwd。
+  - 输出进入受控事件流，支持中断、超时和折叠。
+  - Codex 可以读取最近命令输出摘要作为 thread context。
+- 第二阶段再评估 PTY 终端：
+  - 仍必须绑定 workspace。
+  - 默认不持久化完整输出。
+  - 敏感输出脱敏并限制 buffer。
+
+后端设计：
+
+- 新增 `codex_cli_commands` 或复用 `codex_cli_runs` 记录 owner-triggered command。
+- 使用 env allowlist，不继承 Phantom Lancer secret。
+- 默认禁止网络和写出允许根目录外的文件。
+- 命令执行前做风险摘要：命令、cwd、sandbox、超时、是否可能写入。
+- 长输出进入 `codex.thread.{thread_id}` 事件，服务 `slog` 只记录失败摘要。
+
+建议 API：
+
+- `POST /api/codex/threads/{id}/commands`
+- `POST /api/codex/commands/{id}/interrupt`
+- `GET /api/codex/threads/{id}/commands`
+- `POST /api/codex/threads/{id}/commands/assess`
+
+安全边界：
+
+- 默认只允许 owner 显式触发，不允许 Codex 自行通过该面运行命令。
+- 命令输出默认只展示给 owner；只有 owner 显式点击“附加到 Codex 上下文”后，才把脱敏摘要写入可被模型读取的 thread event。
+- 危险命令需要二次确认；破坏性命令不提供持久 allowlist。
+- 不记录完整 stdout/stderr 到服务日志。
+- 如果后续接入真正 PTY，必须有 idle timeout、max bytes、session owner 校验和窗口关闭清理。
+
+### 13.5 分阶段：In-app Browser / Browser Use 的服务器版映射
+
+目标：为前端开发提供可视化预览、截图和评论闭环，但不复刻桌面浏览器 profile、登录态或扩展能力。
+
+产品范围：
+
+- `P1` 第一阶段：`Preview Browser`
+  - 打开 localhost、127.0.0.1、已登记 workspace 内生成的静态 HTML，以及 owner 显式允许的公共 URL。
+  - 展示嵌入预览；如果后端没有可靠 headless browser，不强行伪造截图。
+  - 支持在页面区域添加视觉 comment，comment 写回当前 thread。
+- `P2` 第二阶段：`Browser Verify`
+  - 后端使用 Playwright 打开允许 URL。
+  - 支持截图、DOM 摘要、console error 摘要、可访问性 tree 摘要。
+  - Codex 可根据这些摘要继续修复。
+- `P3 / P4` 第三阶段才考虑有限 browser-use：
+  - 只允许本地开发服务器和 file-backed preview。
+  - 支持点击、输入、截图、只读 JS inspect。
+  - 不支持登录态、cookie、扩展或用户浏览器 profile。
+
+后端设计：
+
+- 新增 browser session manager，session 绑定 thread 和 owner。
+- URL policy：
+  - 默认允许 `http://127.0.0.1:*`、`http://localhost:*`。
+  - file preview 必须位于 workspace 或受控 artifact 目录。
+  - 公共 URL 需要 owner 显式 allowlist。
+  - 禁止内网探测型 URL、metadata service、任意私有网段，除非 owner 在全局允许策略中明确配置。
+- 截图、DOM 和 console 输出必须有大小上限和 secret redaction。
+
+建议 API：
+
+- `POST /api/codex/threads/{id}/browser/sessions`
+- `POST /api/codex/browser/sessions/{id}/navigate`
+- `POST /api/codex/browser/sessions/{id}/comments`
+- `DELETE /api/codex/browser/sessions/{id}`
+
+`POST /api/codex/browser/sessions/{id}/screenshot` 属于 P2 Browser Verify。实现前必须先引入受控 headless browser 生命周期、并发上限、截图大小上限和 secret redaction。
+
+安全边界：
+
+- 不复用 owner 常规浏览器 cookie。
+- 不支持认证网站自动操作。
+- 不把完整网页正文、截图 base64 或带 token 的 URL 写入服务日志/audit。
+- 浏览器进程必须有生命周期清理和并发上限。
+
+### 13.6 P2：Automations / Thread Wakeups
+
+目标：把“定时检查、长任务跟进、周期性诊断”变成 Codex 模块内的受控后台能力，而不是任意后台 agent。
+
+产品范围：
+
+- 第一阶段只做 `Thread Wakeup`：
+  - 绑定已有 thread。
+  - 按 interval 或 cron 唤醒。
+  - 默认 read-only，生成诊断摘要或提醒事件。
+  - 需要修改文件时只生成建议，不自动写入。
+- 第二阶段做 `Project Automation`：
+  - 绑定一个或多个 workspace。
+  - 每次运行创建新的后台 thread。
+  - 结果进入 `Triage` 列表，owner 决定继续、归档或转为普通 thread。
+
+后端设计：
+
+- Scheduler 在 Phantom Lancer 进程内运行即可；单机部署不需要分布式调度。
+- 所有 automation run 写入数据库，服务重启后可恢复下一次计划。
+- 运行前重新校验 workspace policy、module enabled、app-server 状态和并发限制。
+- 未经 owner 明确配置，不使用 `approval_policy=never`，不做 unattended 写操作。
+
+建议数据表：
+
+- `codex_cli_automations`
+  - `id`
+  - `kind`：`thread_wakeup` / `project`
+  - `thread_id`
+  - `workspace_id`
+  - `title`
+  - `prompt_summary`
+  - `schedule_json`
+  - `enabled`
+  - `default_sandbox`
+  - `default_approval_policy`
+  - `last_run_at`
+  - `next_run_at`
+  - `created_at`
+  - `updated_at`
+- `codex_cli_automation_runs`
+  - `id`
+  - `automation_id`
+  - `thread_id`
+  - `status`
+  - `started_at`
+  - `completed_at`
+  - `finding_summary`
+  - `error_summary`
+  - `triage_state`
+
+建议 API：
+
+- `GET /api/codex/automations`
+- `POST /api/codex/automations`
+- `PATCH /api/codex/automations/{id}`
+- `POST /api/codex/automations/{id}/run-now`，必须支持 `client_request_id` 幂等键，避免浏览器刷新或重试重复创建 run。
+- `GET /api/codex/automation-runs?triage=`
+- `POST /api/codex/automation-runs/{id}/archive`
+
+安全边界：
+
+- 默认只读。
+- 后台任务必须有最大运行时长、重试上限和失败退避。
+- 自动化结果进入 Triage，不自动提交、不 push、不改远端状态。
+- prompt、输出和错误摘要都按 Codex event redaction 规则处理。
+
+### 13.7 P2：Skills / MCP / Plugins 管理面
+
+目标：让 owner 在 Phantom Lancer 里看清 Codex 当前可用的扩展能力，但不托管 secret、不绕过 Codex 自身配置机制。
+
+产品范围：
+
+- `Skills`：
+  - 展示本机 Codex 能探测到的技能名称、来源、描述和适用范围。
+  - 支持在 composer 中插入 `$skill-name`。
+  - 不在第一阶段实现 skill 安装器。
+- `MCP`：
+  - 展示 MCP server 配置摘要：name、transport、enabled、health、last error。
+  - 不展示 token、headers、env secret。
+  - 提供“重新探测”按钮。
+- `Plugins`：
+  - 第一阶段只做只读展示和诊断。
+  - 安装、升级、卸载插件需要单独设计供应链校验和审计，不进入近期 MVP。
+
+后端设计：
+
+- 优先通过 app-server / `codex` CLI 的只读 RPC 或官方安全摘要能力探测；没有稳定接口时，只展示“不可探测”。
+- 不直接解析含 secret 的完整 config 并回传前端。
+- 探测结果写入 `codex_cli_installations.capabilities_json` 或新增轻量 cache 表。
+
+建议 API：
+
+- `GET /api/codex/capabilities/skills`
+- `GET /api/codex/capabilities/mcp`
+- `POST /api/codex/capabilities/probe`
+
+安全边界：
+
+- 不在 Web UI 展示 MCP env、headers、tokens、cookies。
+- 不从文档或 prompt 自动生成 MCP secret。
+- 修改 Codex config 前必须 owner 确认，并写 audit；第一阶段不提供写配置能力。
+
+### 13.8 P2：Notifications / Triage / Keep-awake 等价能力
+
+目标：把桌面端的任务提醒和后台状态转成服务器控制台里的通知中心，而不是依赖操作系统桌面通知。
+
+产品范围：
+
+- `Notification Center`：
+  - 待审批。
+  - turn 完成/失败。
+  - automation finding。
+  - app-server failed/degraded。
+  - command runner 超时或失败。
+- `Triage Inbox`：
+  - 聚合 automation runs、后台 thread、review comments 和 failed turns。
+  - 支持 mark read、archive、jump to thread。
+- `Keep-awake 等价能力`：
+  - 服务器侧不需要阻止笔记本睡眠；只记录 long-running run 的 heartbeat。
+  - 如果部署在 systemd 等常驻服务中，Phantom Lancer 只展示服务健康，不管理 OS 电源策略。
+
+后端设计：
+
+- 可复用现有 `events` 和 `audit`，另建 `notifications` 表做已读/归档状态。
+- 所有通知都绑定 scope：`codex.thread`、`codex.automation`、`codex.app_server`。
+- SSE 推送只传摘要，详情仍从对应 API 拉取。
+
+建议 API：
+
+- `GET /api/notifications?scope=codex`
+- `PATCH /api/notifications/{id}`
+- `POST /api/notifications/archive-read`
+
+安全边界：
+
+- 通知中不放完整 prompt、diff、stdout/stderr 或 secret。
+- 浏览器通知默认关闭，由 owner 在本地浏览器授权。
+
+### 13.9 P3：Chats / Memories
+
+目标：提供轻量的非代码问答和偏好提示，但不让 Codex 脱离 workspace 权限边界。
+
+产品范围：
+
+- `Chats`：
+  - 不绑定真实代码仓库的 research/planning thread。
+  - 仍必须绑定一个受控 scratch workspace，默认 read-only，无文件写入。
+  - 适合整理计划、解释错误、写命令草案，不用于执行生产变更。
+- `Memories`：
+  - 第一阶段只展示 Codex 是否可能使用全局 memory/config/AGENTS.md。
+  - 不在 Phantom Lancer 内编辑 Codex memory。
+  - 如果需要项目长期规则，优先写入仓库 `AGENTS.md`，并遵守公开仓库信息边界。
+
+后端设计：
+
+- 为 Codex settings 增加 `scratch_workspace_id` 或由 owner 从允许根目录内选择。
+- Chat thread 的 `source_mode` 仍使用 app-server 或 exec fallback，sandbox 固定 read-only。
+- Memory 只作为诊断说明，不读取或展示私有 memory 全文。
+
+安全边界：
+
+- 不在 scratch chat 中默认启用网络、workspace-write 或 provider secret。
+- 不把个人偏好、真实服务器地址、私有账号写进公开文档或仓库配置。

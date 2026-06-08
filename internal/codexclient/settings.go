@@ -26,23 +26,25 @@ const (
 	keyEventRetentionDays   = settingsPrefix + "event_retention_days"
 	keyMaxEventsPerThread   = settingsPrefix + "max_events_per_thread"
 	keyMaxEventPayloadBytes = settingsPrefix + "max_event_payload_bytes"
+	keyMaxConcurrentTurns   = settingsPrefix + "max_concurrent_turns"
 )
 
 // Settings is the persisted module configuration for the Codex CLI client.
 type Settings struct {
-	Enabled                 bool   `json:"enabled"`
-	BinaryPath              string `json:"binaryPath"`
-	CodexHome               string `json:"codexHome"`
-	DefaultModel            string `json:"defaultModel"`
-	DefaultSandbox          string `json:"defaultSandbox"`
-	DefaultApprovalPolicy   string `json:"defaultApprovalPolicy"`
-	AppServerEnabled        bool   `json:"appServerEnabled"`
-	AppServerProbeSeconds   int    `json:"appServerProbeIntervalSeconds"`
-	AppServerStartOnLaunch  bool   `json:"appServerStartOnLaunch"`
-	ExecFallbackEnabled     bool   `json:"execFallbackEnabled"`
-	EventRetentionDays      int    `json:"eventRetentionDays"`
-	MaxEventsPerThread      int    `json:"maxEventsPerThread"`
-	MaxEventPayloadBytes    int    `json:"maxEventPayloadBytes"`
+	Enabled                bool   `json:"enabled"`
+	BinaryPath             string `json:"binaryPath"`
+	CodexHome              string `json:"codexHome"`
+	DefaultModel           string `json:"defaultModel"`
+	DefaultSandbox         string `json:"defaultSandbox"`
+	DefaultApprovalPolicy  string `json:"defaultApprovalPolicy"`
+	AppServerEnabled       bool   `json:"appServerEnabled"`
+	AppServerProbeSeconds  int    `json:"appServerProbeIntervalSeconds"`
+	AppServerStartOnLaunch bool   `json:"appServerStartOnLaunch"`
+	ExecFallbackEnabled    bool   `json:"execFallbackEnabled"`
+	EventRetentionDays     int    `json:"eventRetentionDays"`
+	MaxEventsPerThread     int    `json:"maxEventsPerThread"`
+	MaxEventPayloadBytes   int    `json:"maxEventPayloadBytes"`
+	MaxConcurrentTurns     int    `json:"maxConcurrentTurns"`
 }
 
 func DefaultSettings() Settings {
@@ -60,6 +62,7 @@ func DefaultSettings() Settings {
 		EventRetentionDays:     14,
 		MaxEventsPerThread:     2000,
 		MaxEventPayloadBytes:   64 * 1024,
+		MaxConcurrentTurns:     1,
 	}
 }
 
@@ -75,7 +78,7 @@ func normalizeSettings(s Settings) Settings {
 		s.DefaultSandbox = defaults.DefaultSandbox
 	}
 	s.DefaultApprovalPolicy = strings.TrimSpace(s.DefaultApprovalPolicy)
-	if s.DefaultApprovalPolicy == "" {
+	if s.DefaultApprovalPolicy != "on-request" {
 		s.DefaultApprovalPolicy = defaults.DefaultApprovalPolicy
 	}
 	if s.AppServerProbeSeconds < 5 {
@@ -92,6 +95,12 @@ func normalizeSettings(s Settings) Settings {
 	}
 	if s.MaxEventPayloadBytes <= 0 {
 		s.MaxEventPayloadBytes = defaults.MaxEventPayloadBytes
+	}
+	if s.MaxConcurrentTurns <= 0 {
+		s.MaxConcurrentTurns = defaults.MaxConcurrentTurns
+	}
+	if s.MaxConcurrentTurns > 4 {
+		s.MaxConcurrentTurns = 4
 	}
 	return s
 }
@@ -141,6 +150,9 @@ func loadSettings(ctx context.Context, store *storage.Store) (Settings, error) {
 	if v, ok := values[keyMaxEventPayloadBytes]; ok {
 		s.MaxEventPayloadBytes = parseInt(v, s.MaxEventPayloadBytes)
 	}
+	if v, ok := values[keyMaxConcurrentTurns]; ok {
+		s.MaxConcurrentTurns = parseInt(v, s.MaxConcurrentTurns)
+	}
 	return normalizeSettings(s), nil
 }
 
@@ -160,6 +172,7 @@ func saveSettings(ctx context.Context, store *storage.Store, s Settings) error {
 		keyEventRetentionDays:   strconv.Itoa(s.EventRetentionDays),
 		keyMaxEventsPerThread:   strconv.Itoa(s.MaxEventsPerThread),
 		keyMaxEventPayloadBytes: strconv.Itoa(s.MaxEventPayloadBytes),
+		keyMaxConcurrentTurns:   strconv.Itoa(s.MaxConcurrentTurns),
 	})
 }
 

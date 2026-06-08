@@ -18,6 +18,10 @@ export function WorkspacesTab({ actions, onChange }: { actions: AppActions; onCh
   const [path, setPath] = useState("");
   const [label, setLabel] = useState("");
   const [trust, setTrust] = useState("untrusted");
+  const [defaultModel, setDefaultModel] = useState("");
+  const [defaultSandbox, setDefaultSandbox] = useState("read-only");
+  const [defaultApproval, setDefaultApproval] = useState("on-request");
+  const [networkEnabled, setNetworkEnabled] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -45,11 +49,23 @@ export function WorkspacesTab({ actions, onChange }: { actions: AppActions; onCh
       await actions.api("/api/codex/workspaces", {
         method: "POST",
         csrf: actions.csrf,
-        body: { path: path.trim(), label: label.trim(), trustState: trust },
+        body: {
+          path: path.trim(),
+          label: label.trim(),
+          trustState: trust,
+          defaultModel: defaultModel.trim(),
+          defaultSandbox,
+          defaultApprovalPolicy: defaultApproval,
+          networkPolicy: { enabled: networkEnabled },
+        },
       });
       setPath("");
       setLabel("");
       setTrust("untrusted");
+      setDefaultModel("");
+      setDefaultSandbox("read-only");
+      setDefaultApproval("on-request");
+      setNetworkEnabled(false);
       await load();
       onChange();
       actions.setToast("已登记工作区", "good");
@@ -58,12 +74,21 @@ export function WorkspacesTab({ actions, onChange }: { actions: AppActions; onCh
     }
   }
 
-  async function updateTrust(workspace: CodexWorkspace, trustState: string) {
+  async function updateWorkspace(workspace: CodexWorkspace, patch: Partial<CodexWorkspace>) {
+    const next = { ...workspace, ...patch };
     try {
       await actions.api(`/api/codex/workspaces/${workspace.id}`, {
         method: "PATCH",
         csrf: actions.csrf,
-        body: { trustState, label: workspace.label },
+        body: {
+          label: next.label,
+          trustState: next.trustState,
+          defaultModel: next.defaultModel,
+          defaultSandbox: next.defaultSandbox,
+          defaultApprovalPolicy: next.defaultApprovalPolicy,
+          networkPolicy: next.networkPolicy,
+          pinned: next.pinned,
+        },
       });
       await load();
       onChange();
@@ -98,16 +123,34 @@ export function WorkspacesTab({ actions, onChange }: { actions: AppActions; onCh
                 </div>
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
                   <span>沙箱 {codexSandboxLabel(workspace.defaultSandbox)}</span>
+                  <span>审批 {workspace.defaultApprovalPolicy || "on-request"}</span>
+                  {workspace.gitBranch ? <span className="mono">Git {workspace.gitBranch}</span> : null}
+                  {workspace.defaultModel ? <span className="mono">模型 {workspace.defaultModel}</span> : null}
+                  {workspace.networkPolicy?.enabled ? <span>网络 enabled</span> : null}
+                  {workspace.pinned ? <span>已置顶</span> : null}
                   {workspace.lastOpenedAt ? <span>最近 {formatDate(workspace.lastOpenedAt)}</span> : null}
                 </div>
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <select className="select" onChange={(event) => void updateTrust(workspace, event.target.value)} value={workspace.trustState}>
+                <div className="mt-2 grid grid-cols-2 gap-2 max-md:grid-cols-1">
+                  <select className="select" onChange={(event) => void updateWorkspace(workspace, { trustState: event.target.value })} value={workspace.trustState}>
                     {TRUST_OPTIONS.map((item) => (
                       <option key={item.value} value={item.value}>
                         {item.label}
                       </option>
                     ))}
                   </select>
+                  <input className="input" onBlur={(event) => void updateWorkspace(workspace, { defaultModel: event.target.value.trim() })} placeholder="默认模型" defaultValue={workspace.defaultModel || ""} />
+                  <select className="select" onChange={(event) => void updateWorkspace(workspace, { defaultSandbox: event.target.value })} value={workspace.defaultSandbox || "read-only"}>
+                    <option value="read-only">read-only</option>
+                    <option value="workspace-write">workspace-write</option>
+                  </select>
+                  <select className="select" onChange={(event) => void updateWorkspace(workspace, { defaultApprovalPolicy: event.target.value })} value={workspace.defaultApprovalPolicy || "on-request"}>
+                    <option value="on-request">on-request</option>
+                  </select>
+                  <select className="select" onChange={(event) => void updateWorkspace(workspace, { networkPolicy: { ...(workspace.networkPolicy || {}), enabled: event.target.value === "true" } })} value={String(Boolean(workspace.networkPolicy?.enabled))}>
+                    <option value="false">网络关闭</option>
+                    <option value="true">网络启用</option>
+                  </select>
+                  <Button onClick={() => void updateWorkspace(workspace, { pinned: !workspace.pinned })}>{workspace.pinned ? "取消置顶" : "置顶"}</Button>
                   <Button tone="danger" onClick={() => void remove(workspace)}>
                     移除
                   </Button>
@@ -135,6 +178,26 @@ export function WorkspacesTab({ actions, onChange }: { actions: AppActions; onCh
                   {item.label}
                 </option>
               ))}
+            </select>
+          </Field>
+          <Field label="默认模型">
+            <input className="input" onChange={(event) => setDefaultModel(event.target.value)} placeholder="运行时默认" value={defaultModel} />
+          </Field>
+          <Field label="默认沙箱">
+            <select className="select" onChange={(event) => setDefaultSandbox(event.target.value)} value={defaultSandbox}>
+              <option value="read-only">read-only</option>
+              <option value="workspace-write">workspace-write</option>
+            </select>
+          </Field>
+          <Field label="默认审批策略">
+            <select className="select" onChange={(event) => setDefaultApproval(event.target.value)} value={defaultApproval}>
+              <option value="on-request">on-request</option>
+            </select>
+          </Field>
+          <Field label="网络策略">
+            <select className="select" onChange={(event) => setNetworkEnabled(event.target.value === "true")} value={String(networkEnabled)}>
+              <option value="false">默认关闭</option>
+              <option value="true">显式启用</option>
             </select>
           </Field>
           <Button tone="primary" type="submit">

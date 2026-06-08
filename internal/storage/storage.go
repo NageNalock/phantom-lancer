@@ -759,8 +759,8 @@ CREATE TABLE IF NOT EXISTS image_storage_settings (
 }
 
 // migrateCodexCli creates the additive codex_cli_* schema for the rebuilt Codex
-// CLI client module. It never drops or mutates legacy codex_* tables; those are
-// handled separately by PurgeLegacyCodexData.
+// CLI client module. It never drops or mutates legacy codex_* tables; legacy
+// data is detected separately and surfaced as a diagnostic.
 func (s *Store) migrateCodexCli(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS codex_cli_installations (
@@ -785,11 +785,13 @@ CREATE TABLE IF NOT EXISTS codex_cli_workspaces (
   default_sandbox TEXT NOT NULL DEFAULT 'read-only',
   default_approval_policy TEXT NOT NULL DEFAULT 'on-request',
   network_policy_json TEXT NOT NULL DEFAULT '{}',
+  pinned INTEGER NOT NULL DEFAULT 0,
   last_opened_at TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_codex_cli_workspaces_opened ON codex_cli_workspaces(last_opened_at DESC);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_workspaces_pinned ON codex_cli_workspaces(pinned DESC, last_opened_at DESC);
 CREATE TABLE IF NOT EXISTS codex_cli_threads (
   id TEXT PRIMARY KEY,
   codex_thread_id TEXT NOT NULL DEFAULT '',
@@ -887,8 +889,53 @@ CREATE TABLE IF NOT EXISTS codex_cli_attachments (
 );
 CREATE INDEX IF NOT EXISTS idx_codex_cli_attachments_thread ON codex_cli_attachments(thread_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_codex_cli_attachments_expires ON codex_cli_attachments(expires_at);
+CREATE TABLE IF NOT EXISTS codex_cli_review_comments (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL DEFAULT '',
+  workspace_id TEXT NOT NULL DEFAULT '',
+  file_path TEXT NOT NULL DEFAULT '',
+  old_line INTEGER NOT NULL DEFAULT 0,
+  new_line INTEGER NOT NULL DEFAULT 0,
+  hunk_header TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at TEXT NOT NULL,
+  resolved_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_review_comments_thread ON codex_cli_review_comments(thread_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS codex_cli_commands (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT '',
+  command_preview TEXT NOT NULL DEFAULT '',
+  cwd_summary TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'queued',
+  exit_code INTEGER NOT NULL DEFAULT 0,
+  output_preview TEXT NOT NULL DEFAULT '',
+  error_summary TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL DEFAULT '',
+  completed_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_commands_thread ON codex_cli_commands(thread_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS codex_cli_browser_sessions (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL DEFAULT '',
+  url TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open',
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_codex_cli_browser_sessions_thread ON codex_cli_browser_sessions(thread_id, created_at DESC);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.ensureColumn(ctx, "codex_cli_workspaces", "pinned", "INTEGER NOT NULL DEFAULT 0")
 }
 
 // CodexCliLegacyTablesDetected reports whether any retired Codex client tables
@@ -2912,24 +2959,10 @@ func (s *Store) ListEvents(ctx context.Context, scope, scopeID string, after int
 	return out, rows.Err()
 }
 
-// PurgeLegacyCodexData removes tables left behind by the retired Codex client
-// feature. Only codex-gateway data is kept; everything else is dropped so the
-// SQLite file does not carry dead schema and orphaned rows.
+// PurgeLegacyCodexData is intentionally a no-op. The rebuilt Codex CLI client
+// must not delete retired codex_* tables automatically; callers should use
+// CodexCliLegacyTablesDetected and surface a diagnostic instead.
 func (s *Store) PurgeLegacyCodexData(ctx context.Context) error {
-	legacyTables := []string{
-		"codex_approvals",
-		"codex_items",
-		"codex_turns",
-		"codex_sessions",
-		"codex_capability_cache",
-		"codex_exec_jobs",
-		"workspaces",
-	}
-	for _, table := range legacyTables {
-		if _, err := s.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+table); err != nil {
-			return fmt.Errorf("drop legacy table %s: %w", table, err)
-		}
-	}
 	return nil
 }
 

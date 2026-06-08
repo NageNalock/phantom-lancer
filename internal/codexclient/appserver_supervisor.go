@@ -154,6 +154,10 @@ func (s *AppServerSupervisor) Start(ctx context.Context) (AppServerStatus, error
 		s.setFailed("codex CLI is not authenticated")
 		return s.Status(), errors.New("codex CLI is not authenticated")
 	}
+	if detection.Capabilities.SandboxState == "unavailable" {
+		s.setFailed("codex CLI sandbox is unavailable")
+		return s.Status(), errors.New("codex CLI sandbox is unavailable")
+	}
 
 	client, err := StartAppServer(ctx, detection.BinaryPath, settings.CodexHome)
 	if err != nil {

@@ -9,12 +9,19 @@ export function ThreadList({
   workspaces,
   activeId,
   query,
+  workspaceFilter,
+  statusFilter,
+  includeArchived,
   onQuery,
+  onWorkspaceFilter,
+  onStatusFilter,
+  onIncludeArchived,
   onSearch,
   onSelect,
   onCreate,
   onTogglePin,
   onArchive,
+  onResume,
   onFork,
 }: {
   loading: boolean;
@@ -22,12 +29,19 @@ export function ThreadList({
   workspaces: CodexWorkspace[];
   activeId: string;
   query: string;
+  workspaceFilter: string;
+  statusFilter: string;
+  includeArchived: boolean;
   onQuery: (value: string) => void;
+  onWorkspaceFilter: (value: string) => void;
+  onStatusFilter: (value: string) => void;
+  onIncludeArchived: (value: boolean) => void;
   onSearch: () => void;
   onSelect: (id: string) => void;
   onCreate: (workspaceId: string) => void;
   onTogglePin: (thread: CodexThread) => void;
   onArchive: (thread: CodexThread) => void;
+  onResume: (thread: CodexThread) => void;
   onFork: (thread: CodexThread) => void;
 }) {
   const [newWorkspace, setNewWorkspace] = useState("");
@@ -36,7 +50,7 @@ export function ThreadList({
   }, [workspaces, newWorkspace]);
 
   const pinned = threads.filter((thread) => thread.pinned);
-  const rest = threads.filter((thread) => !thread.pinned);
+  const restGroups = groupThreadsByWorkspace(threads.filter((thread) => !thread.pinned), workspaces);
 
   return (
     <section className="panel">
@@ -70,15 +84,42 @@ export function ThreadList({
           <input className="input" onChange={(event) => onQuery(event.target.value)} placeholder="搜索会话" value={query} />
           <Button type="submit">{loading ? "搜索中" : "搜索"}</Button>
         </form>
+        <div className="grid grid-cols-2 gap-2">
+          <select className="select" onChange={(event) => onWorkspaceFilter(event.target.value)} value={workspaceFilter}>
+            <option value="all">全部工作区</option>
+            {workspaces.map((workspace) => (
+              <option key={workspace.id} value={workspace.id}>
+                {workspace.label || workspace.pathSummary || workspace.id}
+              </option>
+            ))}
+          </select>
+          <select className="select" onChange={(event) => onStatusFilter(event.target.value)} value={statusFilter}>
+            <option value="all">全部状态</option>
+            <option value="idle">Idle</option>
+            <option value="running">Running</option>
+            <option value="needs_approval">Approval</option>
+            <option value="queued">Queued</option>
+            <option value="failed">Failed</option>
+            <option value="archived">Archived</option>
+          </select>
+        </div>
+        <label className="flex items-center gap-2 text-xs text-[var(--muted-strong)]">
+          <input checked={includeArchived} onChange={(event) => onIncludeArchived(event.target.checked)} type="checkbox" />
+          显示已归档会话
+        </label>
         {threads.length ? (
           <div className="grid gap-1">
             {pinned.length ? <span className="muted px-1 text-xs">置顶</span> : null}
             {pinned.map((thread) => (
-              <ThreadRow key={thread.id} active={thread.id === activeId} thread={thread} workspaces={workspaces} onSelect={onSelect} onTogglePin={onTogglePin} onArchive={onArchive} onFork={onFork} />
+              <ThreadRow key={thread.id} active={thread.id === activeId} thread={thread} workspaces={workspaces} onSelect={onSelect} onTogglePin={onTogglePin} onArchive={onArchive} onResume={onResume} onFork={onFork} />
             ))}
-            {pinned.length ? <span className="muted mt-1 px-1 text-xs">最近</span> : null}
-            {rest.map((thread) => (
-              <ThreadRow key={thread.id} active={thread.id === activeId} thread={thread} workspaces={workspaces} onSelect={onSelect} onTogglePin={onTogglePin} onArchive={onArchive} onFork={onFork} />
+            {restGroups.map((group) => (
+              <div className="grid gap-1" key={group.id}>
+                <span className="muted mt-1 px-1 text-xs">{group.label}</span>
+                {group.threads.map((thread) => (
+                  <ThreadRow key={thread.id} active={thread.id === activeId} thread={thread} workspaces={workspaces} onSelect={onSelect} onTogglePin={onTogglePin} onArchive={onArchive} onResume={onResume} onFork={onFork} />
+                ))}
+              </div>
             ))}
           </div>
         ) : (
@@ -129,6 +170,7 @@ function ThreadRow({
   onSelect,
   onTogglePin,
   onArchive,
+  onResume,
   onFork,
 }: {
   active: boolean;
@@ -137,36 +179,66 @@ function ThreadRow({
   onSelect: (id: string) => void;
   onTogglePin: (thread: CodexThread) => void;
   onArchive: (thread: CodexThread) => void;
+  onResume: (thread: CodexThread) => void;
   onFork: (thread: CodexThread) => void;
 }) {
   const workspace = workspaces.find((item) => item.id === thread.workspaceId);
+  const archived = thread.status === "archived" || Boolean(thread.archivedAt);
   return (
     <div className={`rounded-lg border px-2 py-2 text-left transition ${active ? "border-[var(--line-strong)] bg-[var(--surface-strong)]" : "border-transparent hover:bg-[var(--surface-soft)]"}`}>
       <button className="w-full text-left" onClick={() => onSelect(thread.id)} type="button">
         <div className="flex items-center justify-between gap-2">
           <strong className="truncate text-sm">{thread.title || "新对话"}</strong>
-          <Pill tone={threadTone(thread.status)}>{codexThreadStatusLabel(thread.status)}</Pill>
+          <span className="flex shrink-0 items-center gap-1">
+            {!active && isBackgroundThread(thread.status) ? <span className="rounded border border-[var(--line)] px-1.5 py-0.5 text-[10px] text-[var(--muted-strong)]">后台</span> : null}
+            <Pill tone={threadTone(thread.status)}>{codexThreadStatusLabel(thread.status)}</Pill>
+          </span>
         </div>
         <span className="muted mt-1 block truncate text-xs">{workspace?.label || workspace?.pathSummary || "工作区"}</span>
       </button>
       <div className="mt-1 flex items-center gap-2 text-xs">
-        <button className="text-[var(--muted-strong)] hover:text-[var(--text)]" onClick={() => onTogglePin(thread)} type="button">
-          {thread.pinned ? "取消置顶" : "置顶"}
-        </button>
-        <button className="text-[var(--muted-strong)] hover:text-[var(--text)]" onClick={() => onFork(thread)} type="button">
-          复制
-        </button>
-        <button className="text-[var(--muted-strong)] hover:text-[var(--danger)]" onClick={() => onArchive(thread)} type="button">
-          归档
-        </button>
+        {archived ? (
+          <button className="text-[var(--muted-strong)] hover:text-[var(--text)]" onClick={() => onResume(thread)} type="button">
+            恢复
+          </button>
+        ) : (
+          <>
+            <button className="text-[var(--muted-strong)] hover:text-[var(--text)]" onClick={() => onTogglePin(thread)} type="button">
+              {thread.pinned ? "取消置顶" : "置顶"}
+            </button>
+            <button className="text-[var(--muted-strong)] hover:text-[var(--text)]" onClick={() => onFork(thread)} type="button">
+              复制
+            </button>
+            <button className="text-[var(--muted-strong)] hover:text-[var(--danger)]" onClick={() => onArchive(thread)} type="button">
+              归档
+            </button>
+          </>
+        )}
       </div>
     </div>
   );
 }
 
+function groupThreadsByWorkspace(threads: CodexThread[], workspaces: CodexWorkspace[]) {
+  const labels = new Map(workspaces.map((workspace) => [workspace.id, workspace.label || workspace.pathSummary || workspace.id]));
+  const groups = new Map<string, { id: string; label: string; threads: CodexThread[] }>();
+  for (const thread of threads) {
+    const id = thread.workspaceId || "unknown";
+    const label = labels.get(id) || "未关联工作区";
+    const group = groups.get(id) || { id, label, threads: [] };
+    group.threads.push(thread);
+    groups.set(id, group);
+  }
+  return Array.from(groups.values());
+}
+
 function threadTone(status?: string) {
   if (status === "running") return "good" as const;
-  if (status === "needs_approval") return "warn" as const;
+  if (status === "needs_approval" || status === "queued") return "warn" as const;
   if (status === "failed") return "danger" as const;
   return "neutral" as const;
+}
+
+function isBackgroundThread(status?: string) {
+  return status === "running" || status === "queued" || status === "needs_approval";
 }
