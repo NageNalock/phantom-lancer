@@ -254,30 +254,40 @@ func (s *Service) UpdateStorageSettings(ctx context.Context, settings storage.Im
 			return storage.ImageStorageSettings{}, errors.New("S3 bucket is required")
 		}
 	}
+	if settings.Backend == "object_storage" {
+		if settings.ObjectStorageProfileID == "" {
+			return storage.ImageStorageSettings{}, errors.New("object storage profile is required")
+		}
+		if _, err := s.Store.GetObjectStorageProfile(ctx, settings.ObjectStorageProfileID); err != nil {
+			return storage.ImageStorageSettings{}, errors.New("selected object storage profile does not exist")
+		}
+	}
 	return s.Store.UpdateImageStorageSettings(ctx, settings, updateSecret, clearSecret)
 }
 
 func (s *Service) TestStorage(ctx context.Context, settings storage.ImageStorageSettings) error {
-	client, err := NewS3ObjectStore(settings)
+	endpointLabel := objectStorageEndpointLabel(ctx, s.Store, settings)
+	bucket := objectStorageBucket(ctx, s.Store, settings)
+	client, err := newObjectClient(ctx, s.Store, settings)
 	if err != nil {
 		if s.Log != nil {
-			s.Log.Warn("image storage test setup failed", "backend", settings.Backend, "endpoint", safelog.URLLabel(settings.S3Endpoint), "bucket", settings.S3Bucket, "error", safelog.Error(err, 200))
+			s.Log.Warn("image storage test setup failed", "backend", settings.Backend, "endpoint", endpointLabel, "bucket", bucket, "error", safelog.Error(err, 200))
 		}
 		return err
 	}
 	started := time.Now()
 	if s.Log != nil {
-		s.Log.Info("image storage test started", "backend", settings.Backend, "endpoint", safelog.URLLabel(settings.S3Endpoint), "bucket", settings.S3Bucket)
+		s.Log.Info("image storage test started", "backend", settings.Backend, "endpoint", endpointLabel, "bucket", bucket)
 	}
-	err = client.Test(ctx)
+	err = client.Test(ctx, settings.S3Prefix)
 	if err != nil {
 		if s.Log != nil {
-			s.Log.Warn("image storage test failed", "backend", settings.Backend, "endpoint", safelog.URLLabel(settings.S3Endpoint), "bucket", settings.S3Bucket, "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
+			s.Log.Warn("image storage test failed", "backend", settings.Backend, "endpoint", endpointLabel, "bucket", bucket, "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
 		}
 		return err
 	}
 	if s.Log != nil {
-		s.Log.Info("image storage test completed", "backend", settings.Backend, "endpoint", safelog.URLLabel(settings.S3Endpoint), "bucket", settings.S3Bucket, "latency_ms", time.Since(started).Milliseconds())
+		s.Log.Info("image storage test completed", "backend", settings.Backend, "endpoint", endpointLabel, "bucket", bucket, "latency_ms", time.Since(started).Milliseconds())
 	}
 	return nil
 }
@@ -289,11 +299,11 @@ func (s *Service) ReadAsset(ctx context.Context, asset storage.ImageAsset) (stri
 		if err != nil {
 			return "", nil, err
 		}
-		client, err := NewS3ObjectStore(settings)
+		client, err := newObjectClientForAsset(ctx, s.Store, asset, settings)
 		if err != nil {
 			return "", nil, err
 		}
-		return client.Get(ctx, asset.S3Key)
+		return client.Get(ctx, asset.S3Key, maxStoredImageBytes)
 	case "remote":
 		job, err := s.Store.GetImageGenerationJob(ctx, asset.JobID)
 		if err != nil {
@@ -325,7 +335,7 @@ func (s *Service) DeleteAsset(ctx context.Context, id string) (storage.ImageAsse
 		if err != nil {
 			return storage.ImageAsset{}, err
 		}
-		client, err := NewS3ObjectStore(settings)
+		client, err := newObjectClientForAsset(ctx, s.Store, asset, settings)
 		if err != nil {
 			return storage.ImageAsset{}, err
 		}
@@ -335,12 +345,12 @@ func (s *Service) DeleteAsset(ctx context.Context, id string) (storage.ImageAsse
 				asset.LastError = err.Error()
 				_, _ = s.Store.UpdateImageAsset(ctx, asset)
 				if s.Log != nil {
-					s.Log.Warn("image asset s3 delete failed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", asset.S3Key, "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
+					s.Log.Warn("image asset s3 delete failed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", asset.S3Bucket, "key", asset.S3Key, "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
 				}
 				return storage.ImageAsset{}, err
 			}
 			if s.Log != nil {
-				s.Log.Info("image asset s3 delete completed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", asset.S3Key, "latency_ms", time.Since(started).Milliseconds())
+				s.Log.Info("image asset s3 delete completed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", asset.S3Bucket, "key", asset.S3Key, "latency_ms", time.Since(started).Milliseconds())
 			}
 		}
 	default:
@@ -368,10 +378,13 @@ func (s *Service) ArchiveAssetToS3(ctx context.Context, id string) (storage.Imag
 	if err != nil {
 		return storage.ImageAsset{}, err
 	}
-	client, err := NewS3ObjectStore(settings)
+	client, err := newObjectClient(ctx, s.Store, settings)
 	if err != nil {
 		return storage.ImageAsset{}, err
 	}
+	bucket := objectStorageBucket(ctx, s.Store, settings)
+	region := objectStorageRegion(ctx, s.Store, settings)
+	endpointLabel := objectStorageEndpointLabel(ctx, s.Store, settings)
 	mimeType, data, err := s.Assets.ReadLocal(asset.LocalName)
 	if err != nil {
 		return storage.ImageAsset{}, err
@@ -379,23 +392,24 @@ func (s *Service) ArchiveAssetToS3(ctx context.Context, id string) (storage.Imag
 	key := objectKey(settings, asset, asset.Extension)
 	started := time.Now()
 	if s.Log != nil {
-		s.Log.Info("image asset s3 archive started", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", key, "bytes", len(data))
+		s.Log.Info("image asset s3 archive started", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", bucket, "key", key, "bytes", len(data))
 	}
 	etag, err := client.Put(ctx, key, data, mimeType)
 	if err != nil {
 		asset.LastError = err.Error()
 		_, _ = s.Store.UpdateImageAsset(ctx, asset)
 		if s.Log != nil {
-			s.Log.Warn("image asset s3 archive failed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", key, "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
+			s.Log.Warn("image asset s3 archive failed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", bucket, "key", key, "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
 		}
 		return storage.ImageAsset{}, err
 	}
 	localName := asset.LocalName
 	asset.StorageBackend = "s3"
+	asset.ObjectStorageProfileID = settings.ObjectStorageProfileID
 	asset.LocalName = ""
-	asset.S3Bucket = settings.S3Bucket
-	asset.S3Region = settings.S3Region
-	asset.S3EndpointLabel = settings.S3Endpoint
+	asset.S3Bucket = bucket
+	asset.S3Region = region
+	asset.S3EndpointLabel = endpointLabel
 	asset.S3Key = key
 	asset.S3ETag = etag
 	asset.ArchivedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -407,7 +421,7 @@ func (s *Service) ArchiveAssetToS3(ctx context.Context, id string) (storage.Imag
 	s.Assets.Remove([]string{localName})
 	s.append(ctx, asset.JobID, "images.asset.archived.s3", map[string]any{"assetId": asset.ID, "key": key})
 	if s.Log != nil {
-		s.Log.Info("image asset s3 archive completed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", key, "latency_ms", time.Since(started).Milliseconds())
+		s.Log.Info("image asset s3 archive completed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", bucket, "key", key, "latency_ms", time.Since(started).Milliseconds())
 	}
 	return updated, nil
 }
@@ -646,37 +660,41 @@ func (s *Service) storeBytes(ctx context.Context, asset storage.ImageAsset, data
 	asset.Width = info.Width
 	asset.Height = info.Height
 	asset.ChecksumSHA256 = info.Checksum
-	if settings.Backend == "s3" {
-		if client, err := NewS3ObjectStore(settings); err == nil {
+	if settings.Backend == "s3" || settings.Backend == "object_storage" {
+		bucket := objectStorageBucket(ctx, s.Store, settings)
+		region := objectStorageRegion(ctx, s.Store, settings)
+		endpointLabel := objectStorageEndpointLabel(ctx, s.Store, settings)
+		if client, err := newObjectClient(ctx, s.Store, settings); err == nil {
 			key := objectKey(settings, asset, asset.Extension)
 			started := time.Now()
 			if etag, err := client.Put(ctx, key, data, info.MimeType); err == nil {
 				asset.StorageBackend = "s3"
-				asset.S3Bucket = settings.S3Bucket
-				asset.S3Region = settings.S3Region
-				asset.S3EndpointLabel = settings.S3Endpoint
+				asset.ObjectStorageProfileID = settings.ObjectStorageProfileID
+				asset.S3Bucket = bucket
+				asset.S3Region = region
+				asset.S3EndpointLabel = endpointLabel
 				asset.S3Key = key
 				asset.S3ETag = etag
 				asset.LastError = ""
 				if s.Log != nil {
-					s.Log.Info("image asset s3 put completed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", key, "bytes", len(data), "latency_ms", time.Since(started).Milliseconds())
+					s.Log.Info("image asset s3 put completed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", bucket, "key", key, "bytes", len(data), "latency_ms", time.Since(started).Milliseconds())
 				}
 				return s.Store.UpdateImageAsset(ctx, asset)
 			} else if !settings.FallbackToLocal {
 				if s.Log != nil {
-					s.Log.Warn("image asset s3 put failed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", key, "bytes", len(data), "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
+					s.Log.Warn("image asset s3 put failed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", bucket, "key", key, "bytes", len(data), "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
 				}
 				return storage.ImageAsset{}, err
 			} else if s.Log != nil {
-				s.Log.Warn("image asset s3 put failed; falling back to local storage", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", settings.S3Bucket, "key", key, "bytes", len(data), "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
+				s.Log.Warn("image asset s3 put failed; falling back to local storage", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", bucket, "key", key, "bytes", len(data), "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
 			}
 		} else if !settings.FallbackToLocal {
 			if s.Log != nil {
-				s.Log.Warn("image s3 client setup failed", "asset_id", asset.ID, "job_id", asset.JobID, "backend", settings.Backend, "endpoint", safelog.URLLabel(settings.S3Endpoint), "bucket", settings.S3Bucket, "error", safelog.Error(err, 200))
+				s.Log.Warn("image s3 client setup failed", "asset_id", asset.ID, "job_id", asset.JobID, "backend", settings.Backend, "endpoint", endpointLabel, "bucket", bucket, "error", safelog.Error(err, 200))
 			}
 			return storage.ImageAsset{}, err
 		} else if s.Log != nil {
-			s.Log.Warn("image s3 client setup failed; falling back to local storage", "asset_id", asset.ID, "job_id", asset.JobID, "backend", settings.Backend, "endpoint", safelog.URLLabel(settings.S3Endpoint), "bucket", settings.S3Bucket, "error", safelog.Error(err, 200))
+			s.Log.Warn("image s3 client setup failed; falling back to local storage", "asset_id", asset.ID, "job_id", asset.JobID, "backend", settings.Backend, "endpoint", endpointLabel, "bucket", bucket, "error", safelog.Error(err, 200))
 		}
 	}
 	local, err := s.Assets.StoreBytes(asset.ID, data, info.MimeType)

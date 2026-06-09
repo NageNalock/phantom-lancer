@@ -1,7 +1,7 @@
 import type { FormEvent, ReactNode } from "react";
 import { useEffect, useState } from "react";
 import type { ImageAsset, ImageGenerationJob, ImageProviderSettings, ImageStatus, ImageStorageSettings, Tone } from "../../app/types";
-import { Button, ContextList, EmptyState, Field, Notice, Panel, Pill } from "../../components/ui";
+import { Button, ContextList, EmptyState, Field, ImageDropInput, Notice, Panel, Pill } from "../../components/ui";
 import { defaultImageSettings, defaultImageStorageSettings, formatDate, imageAssetTypeLabel, imageJobStatusLabel, imageModeLabel, imageStatusLabel, imageStorageBackendLabel } from "../../domain/labels";
 import type { ImageLibraryScope, ImageMode, ImageSettingsDraft, ImagesTab, ImageStorageSettingsDraft } from "../types";
 import { ASPECT_OPTIONS, IMAGE_MODES, MODEL_OPTIONS, RESOLUTION_OPTIONS } from "../types";
@@ -173,7 +173,7 @@ function ReferenceSlot({ index, libraryImage, onClearLibraryImage }: { index: nu
         <input className="input mono" disabled={Boolean(libraryImage)} name={`image_url_${index}`} placeholder="https://..." type="url" />
       </Field>
       <Field label="上传">
-        <input className="input h-auto py-2 text-xs" accept="image/png,image/jpeg,image/webp,image/gif" disabled={Boolean(libraryImage)} name={`image_file_${index}`} type="file" />
+        <ImageDropInput disabled={Boolean(libraryImage)} label="上传参考图" name={`image_file_${index}`} />
       </Field>
     </div>
   );
@@ -368,7 +368,7 @@ function LibraryUploadPanel({
   return (
     <form className="flex items-end justify-between gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 max-md:grid" onSubmit={onSubmit}>
       <Field label="手动上传" help="支持 jpeg、png、gif、webp；上传前会按内容 hash 去重。">
-        <input className="input h-auto py-2 text-xs" accept="image/png,image/jpeg,image/webp,image/gif" key={file ? "selected" : "empty"} onChange={(event) => onFileChange(event.target.files?.[0] || null)} type="file" />
+        <ImageDropInput key={file ? "selected" : "empty"} label="上传到 Library" onFiles={(files) => onFileChange(files[0] || null)} />
       </Field>
       <div className="flex items-center gap-3">
         {file ? <span className="muted max-w-64 truncate text-xs">{file.name}</span> : null}

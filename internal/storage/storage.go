@@ -283,21 +283,46 @@ type ImageProviderSettings struct {
 }
 
 type ImageStorageSettings struct {
+	ID                     string `json:"id"`
+	Backend                string `json:"backend"`
+	ObjectStorageProfileID string `json:"objectStorageProfileId,omitempty"`
+	S3ProviderLabel        string `json:"s3ProviderLabel"`
+	S3Bucket               string `json:"s3Bucket"`
+	S3Region               string `json:"s3Region"`
+	S3Endpoint             string `json:"s3Endpoint,omitempty"`
+	S3Prefix               string `json:"s3Prefix"`
+	S3ForcePathStyle       bool   `json:"s3ForcePathStyle"`
+	S3AccessKeyID          string `json:"-"`
+	S3SecretAccessKey      string `json:"-"`
+	S3SessionToken         string `json:"-"`
+	HasS3Credentials       bool   `json:"hasS3Credentials"`
+	MaskedAccessKeyID      string `json:"maskedAccessKeyId"`
+	S3AccessMode           string `json:"s3AccessMode"`
+	FallbackToLocal        bool   `json:"fallbackToLocal"`
+	CreatedAt              string `json:"createdAt"`
+	UpdatedAt              string `json:"updatedAt"`
+}
+
+// ObjectStorageProfile is a reusable S3-compatible connection profile shared
+// across modules (Images, Docker Registry). It only holds connection and
+// credential material; module-level prefix/policy lives in each module's own
+// settings. Secrets are never serialized to JSON responses.
+type ObjectStorageProfile struct {
 	ID                string `json:"id"`
-	Backend           string `json:"backend"`
-	S3ProviderLabel   string `json:"s3ProviderLabel"`
-	S3Bucket          string `json:"s3Bucket"`
-	S3Region          string `json:"s3Region"`
-	S3Endpoint        string `json:"s3Endpoint,omitempty"`
-	S3Prefix          string `json:"s3Prefix"`
-	S3ForcePathStyle  bool   `json:"s3ForcePathStyle"`
-	S3AccessKeyID     string `json:"-"`
-	S3SecretAccessKey string `json:"-"`
-	S3SessionToken    string `json:"-"`
-	HasS3Credentials  bool   `json:"hasS3Credentials"`
+	Name              string `json:"name"`
+	ProviderLabel     string `json:"providerLabel"`
+	Bucket            string `json:"bucket"`
+	Region            string `json:"region"`
+	Endpoint          string `json:"endpoint"`
+	ForcePathStyle    bool   `json:"forcePathStyle"`
+	AccessKeyID       string `json:"-"`
+	SecretAccessKey   string `json:"-"`
+	SessionToken      string `json:"-"`
+	HasCredentials    bool   `json:"hasCredentials"`
 	MaskedAccessKeyID string `json:"maskedAccessKeyId"`
-	S3AccessMode      string `json:"s3AccessMode"`
-	FallbackToLocal   bool   `json:"fallbackToLocal"`
+	Status            string `json:"status"`
+	LastTestedAt      string `json:"lastTestedAt,omitempty"`
+	LastError         string `json:"lastError,omitempty"`
 	CreatedAt         string `json:"createdAt"`
 	UpdatedAt         string `json:"updatedAt"`
 }
@@ -326,6 +351,7 @@ type ImageAsset struct {
 	URL                    string `json:"url,omitempty"`
 	DownloadURL            string `json:"downloadUrl,omitempty"`
 	StorageBackend         string `json:"storageBackend"`
+	ObjectStorageProfileID string `json:"objectStorageProfileId,omitempty"`
 	S3Bucket               string `json:"s3Bucket,omitempty"`
 	S3Region               string `json:"s3Region,omitempty"`
 	S3EndpointLabel        string `json:"s3EndpointLabel,omitempty"`
@@ -497,6 +523,49 @@ CREATE TABLE IF NOT EXISTS events (
   payload_json TEXT NOT NULL,
   created_at TEXT NOT NULL,
   UNIQUE(scope, scope_id, sequence)
+);
+CREATE TABLE IF NOT EXISTS docker_registry_credentials (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  secret_hash TEXT NOT NULL,
+  scopes TEXT NOT NULL DEFAULT '',
+  repository_prefix TEXT NOT NULL DEFAULT 'personal/',
+  last_used_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  rotated_at TEXT NOT NULL DEFAULT '',
+  revoked_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_docker_registry_credentials_status ON docker_registry_credentials(status, created_at DESC);
+CREATE TABLE IF NOT EXISTS docker_registry_repositories (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  tag_count INTEGER NOT NULL DEFAULT 0,
+  last_pushed_at TEXT NOT NULL DEFAULT '',
+  last_pulled_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS docker_registry_manifests (
+  digest TEXT PRIMARY KEY,
+  repository TEXT NOT NULL,
+  media_type TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  content_path TEXT NOT NULL DEFAULT '',
+  pushed_by TEXT NOT NULL DEFAULT '',
+  pushed_at TEXT NOT NULL,
+  deleted_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_docker_registry_manifests_repo ON docker_registry_manifests(repository, pushed_at DESC);
+CREATE TABLE IF NOT EXISTS docker_registry_tags (
+  repository TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  digest TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(repository, tag)
 );
 CREATE TABLE IF NOT EXISTS codex_gateway_settings (
   id TEXT PRIMARY KEY,
@@ -737,6 +806,24 @@ CREATE TABLE IF NOT EXISTS image_storage_settings (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS object_storage_profiles (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  provider_label TEXT NOT NULL DEFAULT 'custom-s3',
+  bucket TEXT NOT NULL DEFAULT '',
+  region TEXT NOT NULL DEFAULT '',
+  endpoint TEXT NOT NULL DEFAULT '',
+  force_path_style INTEGER NOT NULL DEFAULT 0,
+  access_key_id TEXT NOT NULL DEFAULT '',
+  secret_access_key TEXT NOT NULL DEFAULT '',
+  session_token TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'unconfigured',
+  last_tested_at TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_object_storage_profiles_created ON object_storage_profiles(created_at DESC);
 `)
 	if err != nil {
 		return err
@@ -750,12 +837,58 @@ CREATE TABLE IF NOT EXISTS image_storage_settings (
 		{"image_generation_outputs", "asset_id", "TEXT NOT NULL DEFAULT ''"},
 		{"image_assets", "private", "INTEGER NOT NULL DEFAULT 0"},
 		{"image_assets", "private_at", "TEXT NOT NULL DEFAULT ''"},
+		{"image_assets", "object_storage_profile_id", "TEXT NOT NULL DEFAULT ''"},
+		{"image_storage_settings", "object_storage_profile_id", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.ensureColumn(ctx, column.table, column.name, column.def); err != nil {
 			return err
 		}
 	}
+	if err := s.migrateImageStorageToObjectProfile(ctx); err != nil {
+		return err
+	}
 	return s.migrateCodexCli(ctx)
+}
+
+// migrateImageStorageToObjectProfile is an additive, idempotent migration. When
+// the legacy Images storage uses inline "s3" backend with credentials and has
+// not yet been linked to an object storage profile, it creates a default
+// profile from those values and re-points Images at it via "object_storage".
+// Legacy inline columns are left intact for backward compatible reads.
+func (s *Store) migrateImageStorageToObjectProfile(ctx context.Context) error {
+	if err := s.EnsureImageStorageSettings(ctx); err != nil {
+		return err
+	}
+	settings, err := s.GetImageStorageSettings(ctx)
+	if err != nil {
+		return err
+	}
+	if settings.Backend != "s3" || settings.ObjectStorageProfileID != "" {
+		return nil
+	}
+	if settings.S3Bucket == "" || settings.S3Endpoint == "" || settings.S3AccessKeyID == "" || settings.S3SecretAccessKey == "" {
+		// Incomplete legacy config; nothing safe to migrate.
+		return nil
+	}
+	profile, err := s.CreateObjectStorageProfile(ctx, ObjectStorageProfile{
+		Name:            "Images default object storage",
+		ProviderLabel:   settings.S3ProviderLabel,
+		Bucket:          settings.S3Bucket,
+		Region:          settings.S3Region,
+		Endpoint:        settings.S3Endpoint,
+		ForcePathStyle:  settings.S3ForcePathStyle,
+		AccessKeyID:     settings.S3AccessKeyID,
+		SecretAccessKey: settings.S3SecretAccessKey,
+		SessionToken:    settings.S3SessionToken,
+		Status:          "untested",
+	})
+	if err != nil {
+		return err
+	}
+	settings.Backend = "object_storage"
+	settings.ObjectStorageProfileID = profile.ID
+	_, err = s.UpdateImageStorageSettings(ctx, settings, false, false)
+	return err
 }
 
 // migrateCodexCli creates the additive codex_cli_* schema for the rebuilt Codex
@@ -2302,7 +2435,9 @@ func NormalizeImageStorageSettings(settings ImageStorageSettings) ImageStorageSe
 	if settings.Backend == "" {
 		settings.Backend = "local"
 	}
-	if settings.Backend != "local" && settings.Backend != "s3" {
+	// "s3" is the legacy inline backend kept for backward compatible reads;
+	// "object_storage" references a shared object storage profile.
+	if settings.Backend != "local" && settings.Backend != "s3" && settings.Backend != "object_storage" {
 		settings.Backend = "local"
 	}
 	settings.S3ProviderLabel = strings.TrimSpace(settings.S3ProviderLabel)
@@ -2325,6 +2460,7 @@ func NormalizeImageStorageSettings(settings ImageStorageSettings) ImageStorageSe
 	}
 	settings.HasS3Credentials = settings.S3AccessKeyID != "" && settings.S3SecretAccessKey != ""
 	settings.MaskedAccessKeyID = maskStoredSecret(settings.S3AccessKeyID)
+	settings.ObjectStorageProfileID = strings.TrimSpace(settings.ObjectStorageProfileID)
 	return settings
 }
 
@@ -2333,9 +2469,9 @@ func (s *Store) EnsureImageStorageSettings(ctx context.Context) error {
 	now := now()
 	_, err := s.db.ExecContext(ctx, `
 INSERT OR IGNORE INTO image_storage_settings (
-  id, backend, s3_provider_label, s3_bucket, s3_region, s3_endpoint, s3_prefix, s3_force_path_style, s3_access_key_id, s3_secret_access_key, s3_session_token, s3_access_mode, fallback_to_local, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		defaults.ID, defaults.Backend, defaults.S3ProviderLabel, defaults.S3Bucket, defaults.S3Region, defaults.S3Endpoint, defaults.S3Prefix, boolInt(defaults.S3ForcePathStyle), defaults.S3AccessKeyID, defaults.S3SecretAccessKey, defaults.S3SessionToken, defaults.S3AccessMode, boolInt(defaults.FallbackToLocal), now, now)
+  id, backend, object_storage_profile_id, s3_provider_label, s3_bucket, s3_region, s3_endpoint, s3_prefix, s3_force_path_style, s3_access_key_id, s3_secret_access_key, s3_session_token, s3_access_mode, fallback_to_local, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		defaults.ID, defaults.Backend, defaults.ObjectStorageProfileID, defaults.S3ProviderLabel, defaults.S3Bucket, defaults.S3Region, defaults.S3Endpoint, defaults.S3Prefix, boolInt(defaults.S3ForcePathStyle), defaults.S3AccessKeyID, defaults.S3SecretAccessKey, defaults.S3SessionToken, defaults.S3AccessMode, boolInt(defaults.FallbackToLocal), now, now)
 	return err
 }
 
@@ -2344,7 +2480,7 @@ func (s *Store) GetImageStorageSettings(ctx context.Context) (ImageStorageSettin
 		return ImageStorageSettings{}, err
 	}
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, backend, s3_provider_label, s3_bucket, s3_region, s3_endpoint, s3_prefix, s3_force_path_style, s3_access_key_id, s3_secret_access_key, s3_session_token, s3_access_mode, fallback_to_local, created_at, updated_at
+SELECT id, backend, object_storage_profile_id, s3_provider_label, s3_bucket, s3_region, s3_endpoint, s3_prefix, s3_force_path_style, s3_access_key_id, s3_secret_access_key, s3_session_token, s3_access_mode, fallback_to_local, created_at, updated_at
 FROM image_storage_settings WHERE id = 'default'`)
 	settings, err := scanImageStorageSettings(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -2377,10 +2513,11 @@ func (s *Store) UpdateImageStorageSettings(ctx context.Context, settings ImageSt
 	settings.UpdatedAt = now
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO image_storage_settings (
-  id, backend, s3_provider_label, s3_bucket, s3_region, s3_endpoint, s3_prefix, s3_force_path_style, s3_access_key_id, s3_secret_access_key, s3_session_token, s3_access_mode, fallback_to_local, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  id, backend, object_storage_profile_id, s3_provider_label, s3_bucket, s3_region, s3_endpoint, s3_prefix, s3_force_path_style, s3_access_key_id, s3_secret_access_key, s3_session_token, s3_access_mode, fallback_to_local, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   backend = excluded.backend,
+  object_storage_profile_id = excluded.object_storage_profile_id,
   s3_provider_label = excluded.s3_provider_label,
   s3_bucket = excluded.s3_bucket,
   s3_region = excluded.s3_region,
@@ -2393,14 +2530,213 @@ ON CONFLICT(id) DO UPDATE SET
   s3_access_mode = excluded.s3_access_mode,
   fallback_to_local = excluded.fallback_to_local,
   updated_at = excluded.updated_at`,
-		settings.ID, settings.Backend, settings.S3ProviderLabel, settings.S3Bucket, settings.S3Region, settings.S3Endpoint, settings.S3Prefix, boolInt(settings.S3ForcePathStyle), settings.S3AccessKeyID, settings.S3SecretAccessKey, settings.S3SessionToken, settings.S3AccessMode, boolInt(settings.FallbackToLocal), settings.CreatedAt, settings.UpdatedAt)
+		settings.ID, settings.Backend, settings.ObjectStorageProfileID, settings.S3ProviderLabel, settings.S3Bucket, settings.S3Region, settings.S3Endpoint, settings.S3Prefix, boolInt(settings.S3ForcePathStyle), settings.S3AccessKeyID, settings.S3SecretAccessKey, settings.S3SessionToken, settings.S3AccessMode, boolInt(settings.FallbackToLocal), settings.CreatedAt, settings.UpdatedAt)
 	if err != nil {
 		return ImageStorageSettings{}, err
 	}
 	return s.GetImageStorageSettings(ctx)
 }
 
-const imageAssetColumns = `id, asset_type, status, private, provider, model, job_id, source_role, slot, prompt_preview, revised_prompt_preview, original_filename, original_source_redacted, mime_type, extension, size_bytes, width, height, checksum_sha256, local_name, storage_backend, s3_bucket, s3_region, s3_endpoint_label, s3_key, s3_etag, private_at, archived_at, deleted_at, deleted_reason, last_error, created_at, updated_at`
+// ---- object storage profiles ----
+
+const objectStorageProfileColumns = `id, name, provider_label, bucket, region, endpoint, force_path_style, access_key_id, secret_access_key, session_token, status, last_tested_at, last_error, created_at, updated_at`
+
+func NormalizeObjectStorageProfile(profile ObjectStorageProfile) ObjectStorageProfile {
+	profile.Name = strings.TrimSpace(profile.Name)
+	profile.ProviderLabel = strings.TrimSpace(profile.ProviderLabel)
+	if profile.ProviderLabel == "" {
+		profile.ProviderLabel = "custom-s3"
+	}
+	profile.Bucket = strings.TrimSpace(profile.Bucket)
+	profile.Region = strings.TrimSpace(profile.Region)
+	profile.Endpoint = strings.TrimSpace(profile.Endpoint)
+	profile.AccessKeyID = strings.TrimSpace(profile.AccessKeyID)
+	profile.SecretAccessKey = strings.TrimSpace(profile.SecretAccessKey)
+	profile.SessionToken = strings.TrimSpace(profile.SessionToken)
+	profile.Status = strings.TrimSpace(strings.ToLower(profile.Status))
+	switch profile.Status {
+	case "ok", "error", "untested", "unconfigured":
+	default:
+		profile.Status = "untested"
+	}
+	profile.HasCredentials = profile.AccessKeyID != "" && profile.SecretAccessKey != ""
+	profile.MaskedAccessKeyID = maskStoredSecret(profile.AccessKeyID)
+	return profile
+}
+
+func (s *Store) ListObjectStorageProfiles(ctx context.Context) ([]ObjectStorageProfile, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+objectStorageProfileColumns+` FROM object_storage_profiles ORDER BY created_at DESC, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ObjectStorageProfile{}
+	for rows.Next() {
+		profile, err := scanObjectStorageProfile(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, profile)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetObjectStorageProfile(ctx context.Context, id string) (ObjectStorageProfile, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ObjectStorageProfile{}, ErrNotFound
+	}
+	row := s.db.QueryRowContext(ctx, `SELECT `+objectStorageProfileColumns+` FROM object_storage_profiles WHERE id = ?`, id)
+	profile, err := scanObjectStorageProfile(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ObjectStorageProfile{}, ErrNotFound
+	}
+	return profile, err
+}
+
+func (s *Store) CreateObjectStorageProfile(ctx context.Context, profile ObjectStorageProfile) (ObjectStorageProfile, error) {
+	if profile.ID == "" {
+		id, err := ids.New("ossprofile")
+		if err != nil {
+			return ObjectStorageProfile{}, err
+		}
+		profile.ID = id
+	}
+	profile = NormalizeObjectStorageProfile(profile)
+	if profile.Status == "" {
+		profile.Status = "untested"
+	}
+	now := now()
+	profile.CreatedAt = now
+	profile.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO object_storage_profiles (`+objectStorageProfileColumns+`)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		profile.ID, profile.Name, profile.ProviderLabel, profile.Bucket, profile.Region, profile.Endpoint, boolInt(profile.ForcePathStyle), profile.AccessKeyID, profile.SecretAccessKey, profile.SessionToken, profile.Status, profile.LastTestedAt, profile.LastError, profile.CreatedAt, profile.UpdatedAt)
+	if err != nil {
+		return ObjectStorageProfile{}, err
+	}
+	return s.GetObjectStorageProfile(ctx, profile.ID)
+}
+
+// UpdateObjectStorageProfile updates a profile's connection fields. Secrets are
+// only replaced when updateSecret is true; clearSecret wipes them.
+func (s *Store) UpdateObjectStorageProfile(ctx context.Context, profile ObjectStorageProfile, updateSecret bool, clearSecret bool) (ObjectStorageProfile, error) {
+	existing, err := s.GetObjectStorageProfile(ctx, profile.ID)
+	if err != nil {
+		return ObjectStorageProfile{}, err
+	}
+	profile = NormalizeObjectStorageProfile(profile)
+	profile.ID = existing.ID
+	if clearSecret {
+		profile.AccessKeyID = ""
+		profile.SecretAccessKey = ""
+		profile.SessionToken = ""
+	} else if !updateSecret {
+		profile.AccessKeyID = existing.AccessKeyID
+		profile.SecretAccessKey = existing.SecretAccessKey
+		profile.SessionToken = existing.SessionToken
+	}
+	profile.HasCredentials = profile.AccessKeyID != "" && profile.SecretAccessKey != ""
+	profile.CreatedAt = existing.CreatedAt
+	profile.UpdatedAt = now()
+	// When any connection-relevant field changes, the previous test result no
+	// longer reflects the new target, so reset to untested and clear the stale
+	// last_tested_at/last_error to avoid misleading "ok" status.
+	connectionChanged := profile.Bucket != existing.Bucket ||
+		profile.Region != existing.Region ||
+		profile.Endpoint != existing.Endpoint ||
+		profile.ForcePathStyle != existing.ForcePathStyle ||
+		profile.AccessKeyID != existing.AccessKeyID ||
+		profile.SecretAccessKey != existing.SecretAccessKey ||
+		profile.SessionToken != existing.SessionToken
+	if connectionChanged {
+		profile.Status = "untested"
+		profile.LastTestedAt = ""
+		profile.LastError = ""
+	} else {
+		profile.Status = existing.Status
+		profile.LastTestedAt = existing.LastTestedAt
+		profile.LastError = existing.LastError
+	}
+	_, err = s.db.ExecContext(ctx, `
+UPDATE object_storage_profiles SET
+  name = ?, provider_label = ?, bucket = ?, region = ?, endpoint = ?, force_path_style = ?,
+  access_key_id = ?, secret_access_key = ?, session_token = ?, status = ?, last_tested_at = ?, last_error = ?, updated_at = ?
+WHERE id = ?`,
+		profile.Name, profile.ProviderLabel, profile.Bucket, profile.Region, profile.Endpoint, boolInt(profile.ForcePathStyle),
+		profile.AccessKeyID, profile.SecretAccessKey, profile.SessionToken, profile.Status, profile.LastTestedAt, profile.LastError, profile.UpdatedAt, profile.ID)
+	if err != nil {
+		return ObjectStorageProfile{}, err
+	}
+	return s.GetObjectStorageProfile(ctx, profile.ID)
+}
+
+// SetObjectStorageProfileTestResult records the outcome of a connection test.
+func (s *Store) SetObjectStorageProfileTestResult(ctx context.Context, id string, ok bool, errorSummary string) error {
+	status := "ok"
+	if !ok {
+		status = "error"
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE object_storage_profiles SET status = ?, last_tested_at = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+		status, now(), errorSummary, now(), strings.TrimSpace(id))
+	return err
+}
+
+// DeleteObjectStorageProfile removes a profile. Callers must verify there are no
+// referencing modules first (see ObjectStorageProfileReferencedBy).
+func (s *Store) DeleteObjectStorageProfile(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM object_storage_profiles WHERE id = ?`, strings.TrimSpace(id))
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ObjectStorageProfileReferencedBy returns the list of module identifiers that
+// currently reference the given profile, so deletion can be blocked safely.
+func (s *Store) ObjectStorageProfileReferencedBy(ctx context.Context, id string) ([]string, error) {
+	id = strings.TrimSpace(id)
+	refs := []string{}
+	if id == "" {
+		return refs, nil
+	}
+	imageSettings, err := s.GetImageStorageSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if imageSettings.Backend == "object_storage" && imageSettings.ObjectStorageProfileID == id {
+		refs = append(refs, "images")
+	}
+	dockerSettings, err := s.GetDockerRegistrySettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if dockerSettings.StorageBackend == "object_storage" && dockerSettings.ObjectStorageProfileID == id {
+		refs = append(refs, "docker_registry")
+	}
+	return refs, nil
+}
+
+func scanObjectStorageProfile(row workspaceScanner) (ObjectStorageProfile, error) {
+	var profile ObjectStorageProfile
+	var forcePath int
+	err := row.Scan(&profile.ID, &profile.Name, &profile.ProviderLabel, &profile.Bucket, &profile.Region, &profile.Endpoint, &forcePath, &profile.AccessKeyID, &profile.SecretAccessKey, &profile.SessionToken, &profile.Status, &profile.LastTestedAt, &profile.LastError, &profile.CreatedAt, &profile.UpdatedAt)
+	if err != nil {
+		return ObjectStorageProfile{}, err
+	}
+	profile.ForcePathStyle = forcePath == 1
+	return NormalizeObjectStorageProfile(profile), nil
+}
+
+const imageAssetColumns = `id, asset_type, status, private, provider, model, job_id, source_role, slot, prompt_preview, revised_prompt_preview, original_filename, original_source_redacted, mime_type, extension, size_bytes, width, height, checksum_sha256, local_name, storage_backend, object_storage_profile_id, s3_bucket, s3_region, s3_endpoint_label, s3_key, s3_etag, private_at, archived_at, deleted_at, deleted_reason, last_error, created_at, updated_at`
 
 func (s *Store) CreateImageAsset(ctx context.Context, asset ImageAsset) (ImageAsset, error) {
 	if asset.ID == "" {
@@ -2418,9 +2754,9 @@ func (s *Store) CreateImageAsset(ctx context.Context, asset ImageAsset) (ImageAs
 	asset.UpdatedAt = now
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO image_assets (
-  id, asset_type, status, private, provider, model, job_id, source_role, slot, prompt_preview, revised_prompt_preview, original_filename, original_source_redacted, mime_type, extension, size_bytes, width, height, checksum_sha256, local_name, storage_backend, s3_bucket, s3_region, s3_endpoint_label, s3_key, s3_etag, private_at, archived_at, deleted_at, deleted_reason, last_error, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		asset.ID, asset.AssetType, asset.Status, boolInt(asset.Private), asset.Provider, asset.Model, asset.JobID, asset.SourceRole, asset.Slot, asset.PromptPreview, asset.RevisedPromptPreview, asset.OriginalFilename, asset.OriginalSourceRedacted, asset.MimeType, asset.Extension, asset.SizeBytes, asset.Width, asset.Height, asset.ChecksumSHA256, asset.LocalName, asset.StorageBackend, asset.S3Bucket, asset.S3Region, asset.S3EndpointLabel, asset.S3Key, asset.S3ETag, asset.PrivateAt, asset.ArchivedAt, asset.DeletedAt, asset.DeletedReason, asset.LastError, asset.CreatedAt, asset.UpdatedAt)
+  id, asset_type, status, private, provider, model, job_id, source_role, slot, prompt_preview, revised_prompt_preview, original_filename, original_source_redacted, mime_type, extension, size_bytes, width, height, checksum_sha256, local_name, storage_backend, object_storage_profile_id, s3_bucket, s3_region, s3_endpoint_label, s3_key, s3_etag, private_at, archived_at, deleted_at, deleted_reason, last_error, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		asset.ID, asset.AssetType, asset.Status, boolInt(asset.Private), asset.Provider, asset.Model, asset.JobID, asset.SourceRole, asset.Slot, asset.PromptPreview, asset.RevisedPromptPreview, asset.OriginalFilename, asset.OriginalSourceRedacted, asset.MimeType, asset.Extension, asset.SizeBytes, asset.Width, asset.Height, asset.ChecksumSHA256, asset.LocalName, asset.StorageBackend, asset.ObjectStorageProfileID, asset.S3Bucket, asset.S3Region, asset.S3EndpointLabel, asset.S3Key, asset.S3ETag, asset.PrivateAt, asset.ArchivedAt, asset.DeletedAt, asset.DeletedReason, asset.LastError, asset.CreatedAt, asset.UpdatedAt)
 	if err != nil {
 		return ImageAsset{}, err
 	}
@@ -2575,9 +2911,9 @@ func (s *Store) UpdateImageAsset(ctx context.Context, asset ImageAsset) (ImageAs
 	asset.UpdatedAt = now()
 	_, err := s.db.ExecContext(ctx, `
 UPDATE image_assets SET
-  status = ?, private = ?, private_at = ?, mime_type = ?, extension = ?, size_bytes = ?, width = ?, height = ?, checksum_sha256 = ?, local_name = ?, storage_backend = ?, s3_bucket = ?, s3_region = ?, s3_endpoint_label = ?, s3_key = ?, s3_etag = ?, archived_at = ?, deleted_at = ?, deleted_reason = ?, last_error = ?, updated_at = ?
+  status = ?, private = ?, private_at = ?, mime_type = ?, extension = ?, size_bytes = ?, width = ?, height = ?, checksum_sha256 = ?, local_name = ?, storage_backend = ?, object_storage_profile_id = ?, s3_bucket = ?, s3_region = ?, s3_endpoint_label = ?, s3_key = ?, s3_etag = ?, archived_at = ?, deleted_at = ?, deleted_reason = ?, last_error = ?, updated_at = ?
 WHERE id = ?`,
-		asset.Status, boolInt(asset.Private), asset.PrivateAt, asset.MimeType, asset.Extension, asset.SizeBytes, asset.Width, asset.Height, asset.ChecksumSHA256, asset.LocalName, asset.StorageBackend, asset.S3Bucket, asset.S3Region, asset.S3EndpointLabel, asset.S3Key, asset.S3ETag, asset.ArchivedAt, asset.DeletedAt, asset.DeletedReason, asset.LastError, asset.UpdatedAt, asset.ID)
+		asset.Status, boolInt(asset.Private), asset.PrivateAt, asset.MimeType, asset.Extension, asset.SizeBytes, asset.Width, asset.Height, asset.ChecksumSHA256, asset.LocalName, asset.StorageBackend, asset.ObjectStorageProfileID, asset.S3Bucket, asset.S3Region, asset.S3EndpointLabel, asset.S3Key, asset.S3ETag, asset.ArchivedAt, asset.DeletedAt, asset.DeletedReason, asset.LastError, asset.UpdatedAt, asset.ID)
 	if err != nil {
 		return ImageAsset{}, err
 	}
@@ -3251,7 +3587,7 @@ func scanImageProviderSettings(row workspaceScanner) (ImageProviderSettings, err
 func scanImageStorageSettings(row workspaceScanner) (ImageStorageSettings, error) {
 	var settings ImageStorageSettings
 	var forcePath, fallback int
-	err := row.Scan(&settings.ID, &settings.Backend, &settings.S3ProviderLabel, &settings.S3Bucket, &settings.S3Region, &settings.S3Endpoint, &settings.S3Prefix, &forcePath, &settings.S3AccessKeyID, &settings.S3SecretAccessKey, &settings.S3SessionToken, &settings.S3AccessMode, &fallback, &settings.CreatedAt, &settings.UpdatedAt)
+	err := row.Scan(&settings.ID, &settings.Backend, &settings.ObjectStorageProfileID, &settings.S3ProviderLabel, &settings.S3Bucket, &settings.S3Region, &settings.S3Endpoint, &settings.S3Prefix, &forcePath, &settings.S3AccessKeyID, &settings.S3SecretAccessKey, &settings.S3SessionToken, &settings.S3AccessMode, &fallback, &settings.CreatedAt, &settings.UpdatedAt)
 	if err != nil {
 		return ImageStorageSettings{}, err
 	}
@@ -3263,7 +3599,7 @@ func scanImageStorageSettings(row workspaceScanner) (ImageStorageSettings, error
 func scanImageAsset(row workspaceScanner) (ImageAsset, error) {
 	var asset ImageAsset
 	var private int
-	err := row.Scan(&asset.ID, &asset.AssetType, &asset.Status, &private, &asset.Provider, &asset.Model, &asset.JobID, &asset.SourceRole, &asset.Slot, &asset.PromptPreview, &asset.RevisedPromptPreview, &asset.OriginalFilename, &asset.OriginalSourceRedacted, &asset.MimeType, &asset.Extension, &asset.SizeBytes, &asset.Width, &asset.Height, &asset.ChecksumSHA256, &asset.LocalName, &asset.StorageBackend, &asset.S3Bucket, &asset.S3Region, &asset.S3EndpointLabel, &asset.S3Key, &asset.S3ETag, &asset.PrivateAt, &asset.ArchivedAt, &asset.DeletedAt, &asset.DeletedReason, &asset.LastError, &asset.CreatedAt, &asset.UpdatedAt)
+	err := row.Scan(&asset.ID, &asset.AssetType, &asset.Status, &private, &asset.Provider, &asset.Model, &asset.JobID, &asset.SourceRole, &asset.Slot, &asset.PromptPreview, &asset.RevisedPromptPreview, &asset.OriginalFilename, &asset.OriginalSourceRedacted, &asset.MimeType, &asset.Extension, &asset.SizeBytes, &asset.Width, &asset.Height, &asset.ChecksumSHA256, &asset.LocalName, &asset.StorageBackend, &asset.ObjectStorageProfileID, &asset.S3Bucket, &asset.S3Region, &asset.S3EndpointLabel, &asset.S3Key, &asset.S3ETag, &asset.PrivateAt, &asset.ArchivedAt, &asset.DeletedAt, &asset.DeletedReason, &asset.LastError, &asset.CreatedAt, &asset.UpdatedAt)
 	if err != nil {
 		return ImageAsset{}, err
 	}

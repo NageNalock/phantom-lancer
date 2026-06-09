@@ -1,6 +1,6 @@
 import type { FormEvent, RefObject } from "react";
 import type { CodexModel } from "../../../app/types";
-import { Button } from "../../../components/ui";
+import { Button, ImageDropInput } from "../../../components/ui";
 
 export interface ComposerAttachment {
   id: string;
@@ -105,19 +105,9 @@ export function Composer(props: ComposerProps) {
         ) : (
           <input className="input w-40" onChange={(event) => props.onModel(event.target.value)} placeholder="模型（运行时探测）" value={props.model} />
         )}
-        <label className="button cursor-pointer">
-          附件
-          <input
-            accept="image/png,image/jpeg,image/webp,image/gif"
-            className="hidden"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) props.onUpload(file);
-              event.target.value = "";
-            }}
-            type="file"
-          />
-        </label>
+        <div className="w-56 max-sm:w-full">
+          <ImageDropInput hint="点击或拖拽图片附件" label="附件" onFiles={(files) => files[0] && props.onUpload(files[0])} resetAfterSelect />
+        </div>
         <div className="ml-auto flex gap-2">
           {interactive && hasActiveTurn ? (
             <>

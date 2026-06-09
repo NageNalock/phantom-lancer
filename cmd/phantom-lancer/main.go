@@ -17,6 +17,7 @@ import (
 	"phantom-lancer/internal/codexclient"
 	"phantom-lancer/internal/codexgateway"
 	"phantom-lancer/internal/config"
+	"phantom-lancer/internal/dockercontrol"
 	"phantom-lancer/internal/events"
 	"phantom-lancer/internal/httpapi"
 	"phantom-lancer/internal/images"
@@ -94,6 +95,8 @@ func main() {
 	v2raySvc := v2ray.NewService(store, hub, cfg.DataDir, logger)
 	defer v2raySvc.Close()
 	imagesSvc := images.NewService(store, hub, cfg.DataDir, logger)
+	dockerSvc := dockercontrol.NewService(store, hub, cfg.DataDir, logger)
+	defer dockerSvc.Close()
 	logsSvc := logcenter.NewService(store, cfg)
 	restartRequested := make(chan struct{}, 1)
 	updateSvc := selfupdate.NewService(store, hub, logger, selfupdate.Config{
@@ -137,7 +140,7 @@ func main() {
 			logger.Error("start embedded v2ray failed", "error", err)
 		}
 	}
-	api, err := httpapi.New(cfg, store, hub, codexGatewaySvc, codexSvc, v2raySvc, imagesSvc, logsSvc, updateSvc, staticFS, logger)
+	api, err := httpapi.New(cfg, store, hub, codexGatewaySvc, codexSvc, v2raySvc, imagesSvc, dockerSvc, logsSvc, updateSvc, staticFS, logger)
 	if err != nil {
 		logger.Error("create api failed", "error", err)
 		os.Exit(1)

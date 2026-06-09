@@ -5,6 +5,7 @@ import { NAV_ITEMS, v2rayStateLabel } from "../domain/labels";
 import { CodexGatewayView } from "./CodexGatewayView";
 import { CodexView } from "./CodexView";
 import { DashboardView } from "./DashboardView";
+import { DockerView } from "./DockerView";
 import { ImagesView } from "./ImagesView";
 import { LogsView } from "./LogsView";
 import { SettingsView } from "./SettingsView";
@@ -82,6 +83,7 @@ export function AppShell({
         {activeTab === "codex-gateway" ? <CodexGatewayView actions={actions} data={data} /> : null}
         {activeTab === "logs" ? <LogsView actions={actions} /> : null}
         {activeTab === "images" ? <ImagesView actions={actions} data={data} /> : null}
+        {activeTab === "docker" ? <DockerView actions={actions} /> : null}
         {activeTab === "v2ray" ? <V2RayView actions={actions} data={data} exportOpen={v2rayExportOpen} exported={v2rayExport as V2RayExport | null} /> : null}
         {activeTab === "settings" ? <SettingsView actions={actions} data={data} /> : null}
       </main>

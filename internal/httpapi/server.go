@@ -21,6 +21,7 @@ import (
 	"phantom-lancer/internal/codexclient"
 	"phantom-lancer/internal/codexgateway"
 	"phantom-lancer/internal/config"
+	"phantom-lancer/internal/dockercontrol"
 	"phantom-lancer/internal/events"
 	imagegen "phantom-lancer/internal/images"
 	logcenter "phantom-lancer/internal/logs"
@@ -45,6 +46,7 @@ type Server struct {
 	codex          *codexclient.Service
 	v2ray          *v2ray.Service
 	images         *imagegen.Service
+	docker         *dockercontrol.Service
 	logs           *logcenter.Service
 	updates        *selfupdate.Service
 	staticFS       fs.FS
@@ -60,7 +62,7 @@ type sessionContext struct {
 	Session storage.Session
 }
 
-func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
+func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, dockerSvc *dockercontrol.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
 	return &Server{
 		cfg:            cfg,
 		store:          store,
@@ -69,6 +71,7 @@ func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewayS
 		codex:          codexSvc,
 		v2ray:          v2raySvc,
 		images:         imagesSvc,
+		docker:         dockerSvc,
 		logs:           logsSvc,
 		updates:        updateSvc,
 		staticFS:       staticFS,
@@ -134,6 +137,42 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/images/storage-settings", s.handleGetImageStorageSettings)
 	mux.HandleFunc("PUT /api/images/storage-settings", s.handleUpdateImageStorageSettings)
 	mux.HandleFunc("POST /api/images/storage-settings/test", s.handleTestImageStorageSettings)
+	mux.HandleFunc("GET /api/object-storage/profiles", s.handleListObjectStorageProfiles)
+	mux.HandleFunc("POST /api/object-storage/profiles", s.handleCreateObjectStorageProfile)
+	mux.HandleFunc("GET /api/object-storage/profiles/", s.handleObjectStorageProfileSubroutes)
+	mux.HandleFunc("PATCH /api/object-storage/profiles/", s.handleObjectStorageProfileSubroutes)
+	mux.HandleFunc("POST /api/object-storage/profiles/", s.handleObjectStorageProfileSubroutes)
+	mux.HandleFunc("DELETE /api/object-storage/profiles/", s.handleObjectStorageProfileSubroutes)
+	mux.HandleFunc("GET /api/docker/status", s.handleDockerStatus)
+	mux.HandleFunc("GET /api/docker/overview", s.handleDockerOverview)
+	mux.HandleFunc("POST /api/docker/probe", s.handleDockerProbe)
+	mux.HandleFunc("GET /api/docker/host/events", s.handleDockerHostEvents)
+	mux.HandleFunc("GET /api/docker/control-status", s.handleDockerControlStatus)
+	mux.HandleFunc("PATCH /api/docker/settings", s.handleDockerUpdateSettings)
+	mux.HandleFunc("POST /api/docker/install", s.handleDockerInstall)
+	mux.HandleFunc("POST /api/docker/daemon/", s.handleDockerDaemonControl)
+	mux.HandleFunc("GET /api/docker/registry/status", s.handleDockerRegistryStatus)
+	mux.HandleFunc("GET /api/docker/registry/settings", s.handleDockerRegistrySettings)
+	mux.HandleFunc("PUT /api/docker/registry/settings", s.handleDockerRegistrySettings)
+	mux.HandleFunc("GET /api/docker/registry/repositories", s.handleDockerRegistryRepositories)
+	mux.HandleFunc("GET /api/docker/registry/repositories/", s.handleDockerRegistryRepositorySubroutes)
+	mux.HandleFunc("DELETE /api/docker/registry/repositories/", s.handleDockerRegistryRepositorySubroutes)
+	mux.HandleFunc("GET /api/docker/registry/credentials", s.handleDockerRegistryCredentials)
+	mux.HandleFunc("POST /api/docker/registry/credentials", s.handleDockerRegistryCredentials)
+	mux.HandleFunc("PATCH /api/docker/registry/credentials/", s.handleDockerRegistryCredentialSubroutes)
+	mux.HandleFunc("POST /api/docker/registry/credentials/", s.handleDockerRegistryCredentialSubroutes)
+	mux.HandleFunc("DELETE /api/docker/registry/credentials/", s.handleDockerRegistryCredentialSubroutes)
+	mux.HandleFunc("POST /api/docker/registry/gc", s.handleDockerRegistryGC)
+	mux.HandleFunc("GET /api/docker/containers", s.handleDockerListContainers)
+	mux.HandleFunc("POST /api/docker/containers", s.handleDockerCreateContainer)
+	mux.HandleFunc("POST /api/docker/containers/", s.handleDockerContainerSubroutes)
+	mux.HandleFunc("GET /api/docker/containers/", s.handleDockerContainerSubroutes)
+	mux.HandleFunc("DELETE /api/docker/containers/", s.handleDockerContainerSubroutes)
+	mux.HandleFunc("GET /api/docker/images", s.handleDockerListImages)
+	mux.HandleFunc("POST /api/docker/images/pull", s.handleDockerPullImage)
+	mux.HandleFunc("DELETE /api/docker/images/", s.handleDockerRemoveImage)
+	mux.HandleFunc("GET /api/docker/volumes", s.handleDockerListVolumes)
+	mux.HandleFunc("GET /api/docker/networks", s.handleDockerListNetworks)
 	mux.HandleFunc("GET /api/images/library/private/status", s.handleImagePrivateStatus)
 	mux.HandleFunc("POST /api/images/library/private/unlock", s.handleUnlockImagePrivate)
 	mux.HandleFunc("POST /api/images/library/private/lock", s.handleLockImagePrivate)
@@ -160,6 +199,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models/", s.handleCodexGatewayPublicModel)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleCodexGatewayChatCompletions)
 	mux.HandleFunc("POST /v1/responses", s.handleCodexGatewayResponses)
+	mux.HandleFunc("GET /v2/", s.handleDockerRegistryNative)
+	mux.HandleFunc("HEAD /v2/", s.handleDockerRegistryNative)
+	mux.HandleFunc("POST /v2/", s.handleDockerRegistryNative)
+	mux.HandleFunc("PATCH /v2/", s.handleDockerRegistryNative)
+	mux.HandleFunc("PUT /v2/", s.handleDockerRegistryNative)
+	mux.HandleFunc("DELETE /v2/", s.handleDockerRegistryNative)
 
 	mux.Handle("/", s.staticHandler())
 	return s.recover(mux)

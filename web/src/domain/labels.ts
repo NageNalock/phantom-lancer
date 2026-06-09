@@ -6,8 +6,9 @@ export const NAV_ITEMS = [
   { id: "codex-gateway", label: "Codex Gateway", short: "03", description: "Codex OAuth 账号、OpenAI 兼容端点和请求审计" },
   { id: "logs", label: "日志", short: "04", description: "服务日志、运行事件和在线排障视图" },
   { id: "images", label: "Images", short: "05", description: "xAI Grok Imagine 生成、编辑、图片库、历史和存储设置" },
-  { id: "v2ray", label: "V2Ray", short: "06", description: "内嵌 V2Ray 服务端、远程设备接入和运行控制" },
-  { id: "settings", label: "设置", short: "07", description: "运行期配置、允许根目录和全局安全策略" },
+  { id: "docker", label: "Docker", short: "06", description: "Docker 守护进程、镜像与容器生命周期、daemon 安装与控制、内嵌 Registry" },
+  { id: "v2ray", label: "V2Ray", short: "07", description: "内嵌 V2Ray 服务端、远程设备接入和运行控制" },
+  { id: "settings", label: "设置", short: "08", description: "运行期配置、允许根目录和全局安全策略" },
 ] as const;
 
 const auditLabels: Record<string, string> = {
@@ -260,6 +261,7 @@ export function defaultImageStorageSettings(): Required<ImageStorageSettings> {
   return {
     id: "default",
     backend: "local",
+    objectStorageProfileId: "",
     s3ProviderLabel: "",
     s3Bucket: "",
     s3Region: "",

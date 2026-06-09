@@ -1,4 +1,4 @@
-export type MainTab = "dashboard" | "codex-gateway" | "codex" | "logs" | "images" | "v2ray" | "settings";
+export type MainTab = "dashboard" | "codex-gateway" | "codex" | "logs" | "images" | "docker" | "v2ray" | "settings";
 export type Tone = "neutral" | "good" | "warn" | "danger";
 
 export interface AuthSession {
@@ -312,6 +312,7 @@ export interface ImageProviderSettings {
 export interface ImageStorageSettings {
   id?: string;
   backend?: string;
+  objectStorageProfileId?: string;
   s3ProviderLabel?: string;
   s3Bucket?: string;
   s3Region?: string;
@@ -324,6 +325,23 @@ export interface ImageStorageSettings {
   fallbackToLocal?: boolean;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface ObjectStorageProfile {
+  id: string;
+  name: string;
+  providerLabel: string;
+  bucket: string;
+  region: string;
+  endpoint: string;
+  forcePathStyle: boolean;
+  hasCredentials: boolean;
+  maskedAccessKeyId: string;
+  status: string;
+  lastTestedAt?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ImageAsset {
@@ -756,4 +774,190 @@ export interface ApiError extends Error {
   code?: string;
   status?: number;
   payload?: unknown;
+}
+
+export interface DockerStatus {
+  state: string;
+  available: boolean;
+  serverVersion?: string;
+  apiVersion?: string;
+  os?: string;
+  architecture?: string;
+  storageDriver?: string;
+  rootless: boolean;
+  containers: number;
+  containersRunning: number;
+  images: number;
+  lastError?: string;
+  lastCheckedAt: string;
+}
+
+export interface DockerSettings {
+  installEnabled?: boolean;
+  daemonControlEnabled?: boolean;
+  containerCreateEnabled?: boolean;
+  updatedAt?: string;
+}
+
+export interface DockerJob {
+  id: string;
+  type: string;
+  title: string;
+  status: string;
+  riskLevel?: string;
+  target?: string;
+  error?: string;
+  eventScope: string;
+  eventScopeId: string;
+  createdAt?: string;
+  startedAt?: string;
+  completedAt?: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface DockerInstallStatus {
+  supported?: boolean;
+  installed?: boolean;
+  canInstall?: boolean;
+  distroId?: string;
+  distroName?: string;
+  family?: string;
+  reason?: string;
+  commandPreview?: string[];
+  dockerVersion?: string;
+  installEnabled?: boolean;
+  privilegeMethod?: string;
+}
+
+export interface DockerSystemdStatus {
+  available?: boolean;
+  canControl?: boolean;
+  activeState?: string;
+  reason?: string;
+  controlEnabled?: boolean;
+  privilegeMethod?: string;
+}
+
+export interface DockerControlStatus {
+  settings?: DockerSettings;
+  install?: DockerInstallStatus;
+  systemd?: DockerSystemdStatus;
+  privilegeMethod?: string;
+  activeJob?: DockerJob;
+  latestJob?: DockerJob;
+}
+
+export interface DockerRegistrySettings {
+  enabled?: boolean;
+  publicUrl?: string;
+  storageBackend?: string;
+  objectStorageProfileId?: string;
+  objectPrefix?: string;
+  storageDir?: string;
+  quotaBytes?: number;
+  requireTls?: boolean;
+  allowAnonymousPull?: boolean;
+  allowInsecureLocal?: boolean;
+}
+
+export interface DockerRegistryStatus {
+  enabled?: boolean;
+  ready?: boolean;
+  publicUrl?: string;
+  storageBackend?: string;
+  storageDir?: string;
+  objectPrefix?: string;
+  quotaBytes?: number;
+  usageBytes?: number;
+  repositoryCount?: number;
+  credentialCount?: number;
+  requireTls?: boolean;
+  allowAnonymousPull?: boolean;
+  lastError?: string;
+}
+
+export interface DockerRegistryCredential {
+  id: string;
+  name: string;
+  status: string;
+  scopes?: string[];
+  repositoryPrefix?: string;
+  lastUsedAt?: string;
+  createdAt?: string;
+  rotatedAt?: string;
+  revokedAt?: string;
+}
+
+export interface DockerRegistryRepository {
+  id: string;
+  name: string;
+  sizeBytes: number;
+  tagCount: number;
+  lastPushedAt?: string;
+  lastPulledAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface DockerRegistryManifest {
+  digest: string;
+  repository: string;
+  mediaType?: string;
+  sizeBytes?: number;
+  pushedBy?: string;
+  pushedAt?: string;
+  deletedAt?: string;
+}
+
+export interface DockerRegistryTag {
+  repository: string;
+  tag: string;
+  digest: string;
+  createdAt?: string;
+  updatedAt?: string;
+  deletedAt?: string;
+  manifest?: DockerRegistryManifest;
+}
+
+export interface DockerContainerSummary {
+  id: string;
+  names: string[];
+  image: string;
+  state: string;
+  status: string;
+  created: number;
+  ports?: string[];
+}
+
+export interface DockerImageSummary {
+  id: string;
+  tags?: string[];
+  created: number;
+  sizeBytes: number;
+}
+
+export interface DockerVolumeSummary {
+  name: string;
+  driver: string;
+  mountpoint?: string;
+  createdAt?: string;
+}
+
+export interface DockerNetworkSummary {
+  id: string;
+  name: string;
+  driver: string;
+  scope: string;
+}
+
+export interface DockerLogLine {
+  stream: string;
+  text: string;
+}
+
+export interface DockerStats {
+  cpuPercent: number;
+  memoryUsageBytes: number;
+  memoryLimitBytes: number;
+  memoryPercent: number;
 }
