@@ -198,10 +198,10 @@ export function WorkspacesTab({ actions, onChange }: { actions: AppActions; onCh
                 </div>
                 <p className="m-0 text-xs">确认后会在允许根目录内创建该目录，然后登记为 Codex 工作区。</p>
                 <div className="flex flex-wrap gap-2">
-                  <Button tone="primary" onClick={() => void submitCreate(true)}>
+                  <Button tone="primary" onClick={() => void submitCreate(true)} type="button">
                     创建目录并登记
                   </Button>
-                  <Button onClick={() => setMissingPath("")}>取消</Button>
+                  <Button onClick={() => setMissingPath("")} type="button">取消</Button>
                 </div>
               </div>
             </Notice>

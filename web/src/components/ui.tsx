@@ -7,7 +7,7 @@ export function Button({
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & { tone?: "neutral" | "primary" | "danger" }) {
   const toneClass = tone === "primary" ? "button-primary" : tone === "danger" ? "button-danger" : "";
-  return <button className={`button ${toneClass} ${className}`} type={props.type || "button"} {...props} />;
+  return <button {...props} className={`button ${toneClass} ${className}`} type={props.type || "button"} />;
 }
 
 export function Panel({ title, subtitle, actions, children, className = "" }: { title?: string; subtitle?: string; actions?: ReactNode; children: ReactNode; className?: string }) {

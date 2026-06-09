@@ -202,6 +202,10 @@ func (s *Server) handleCreateCodexWorkspace(w http.ResponseWriter, r *http.Reque
 	}
 	created, err := s.codex.CreateWorkspaceWithOptions(r.Context(), req.CodexCliWorkspace, codexclient.CreateWorkspaceOptions{CreateIfMissing: req.CreateIfMissing})
 	if err != nil {
+		s.auditCodexWorkspaceFailure(r, "", "codex_cli.workspace.create_failed", "Codex 工作区登记失败", err, map[string]any{
+			"createIfMissing": req.CreateIfMissing,
+			"trustState":      req.TrustState,
+		})
 		writeError(w, codexWorkspaceErrorStatus(err), codexWorkspaceErrorCode(err), err.Error())
 		return
 	}
@@ -227,12 +231,14 @@ func (s *Server) handleCodexWorkspaceSubroutes(w http.ResponseWriter, r *http.Re
 		req.ID = id
 		updated, err := s.codex.UpdateWorkspace(r.Context(), req)
 		if err != nil {
+			s.auditCodexWorkspaceFailure(r, id, "codex_cli.workspace.update_failed", "Codex 工作区更新失败", err, nil)
 			writeError(w, codexWorkspaceErrorStatus(err), codexWorkspaceErrorCode(err), err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"workspace": updated})
 	case http.MethodDelete:
 		if err := s.codex.DeleteWorkspace(r.Context(), id); err != nil {
+			s.auditCodexWorkspaceFailure(r, id, "codex_cli.workspace.delete_failed", "Codex 工作区移除失败", err, nil)
 			writeError(w, http.StatusNotFound, "not_found", "未找到工作区")
 			return
 		}
@@ -240,6 +246,21 @@ func (s *Server) handleCodexWorkspaceSubroutes(w http.ResponseWriter, r *http.Re
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "方法不允许")
 	}
+}
+
+func (s *Server) auditCodexWorkspaceFailure(r *http.Request, workspaceID, eventType, summary string, err error, payload map[string]any) {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload["errorCode"] = codexWorkspaceErrorCode(err)
+	payload["status"] = codexWorkspaceErrorStatus(err)
+	_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+		EventType:   eventType,
+		WorkspaceID: workspaceID,
+		RiskLevel:   "medium",
+		Summary:     summary,
+		Payload:     payload,
+	})
 }
 
 // ---- threads ----
