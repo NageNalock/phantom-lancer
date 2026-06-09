@@ -1,6 +1,10 @@
 package images
 
-import "errors"
+import (
+	"errors"
+
+	"phantom-lancer/internal/storage"
+)
 
 const (
 	ModeTextToImage    = "text_to_image"
@@ -61,6 +65,11 @@ type Status struct {
 	LastJobID       string `json:"lastJobId,omitempty"`
 	LastError       string `json:"lastError,omitempty"`
 	LastCompletedAt string `json:"lastCompletedAt,omitempty"`
+}
+
+type LibraryUploadResult struct {
+	Asset     storage.ImageAsset `json:"asset"`
+	Duplicate bool               `json:"duplicate"`
 }
 
 func ModeLabel(mode string) string {

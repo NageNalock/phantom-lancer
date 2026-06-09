@@ -1,4 +1,4 @@
-import type { ImageGenerationJob, ImageProviderSettings, ImageStorageSettings } from "../app/types";
+import type { ImageAsset, ImageGenerationJob, ImageProviderSettings, ImageStorageSettings } from "../app/types";
 
 export type ImageMode = "text_to_image" | "image_to_image" | "multi_image_edit";
 export type ImagesTab = "generate" | "library" | "history" | "settings";
@@ -12,6 +12,11 @@ export interface ImageJobResponse {
 export interface ImagePrivateStatus {
   unlocked?: boolean;
   expiresAt?: string;
+}
+
+export interface ImageUploadResponse {
+  asset?: ImageAsset;
+  duplicate?: boolean;
 }
 
 export interface ImageSettingsDraft extends Required<ImageProviderSettings> {

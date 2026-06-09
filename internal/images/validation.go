@@ -14,6 +14,7 @@ var (
 	allowedResolutions  = map[string]bool{"": true, "1k": true, "2k": true}
 	allowedFormats      = map[string]bool{"url": true, "b64_json": true}
 	modelNamePattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$`)
+	assetIDPattern      = regexp.MustCompile(`^imgasset_[A-Za-z0-9_-]{8,80}$`)
 )
 
 func NormalizeRequest(request ImagineRequest) ImagineRequest {

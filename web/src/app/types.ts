@@ -1,4 +1,4 @@
-export type MainTab = "dashboard" | "codex-gateway" | "logs" | "images" | "v2ray" | "settings";
+export type MainTab = "dashboard" | "codex-gateway" | "codex" | "logs" | "images" | "docker" | "v2ray" | "settings";
 export type Tone = "neutral" | "good" | "warn" | "danger";
 
 export interface AuthSession {
@@ -47,6 +47,7 @@ export interface ImageStatus {
 
 export interface DashboardSummary {
   codexGateway?: CodexGatewayStatus;
+  codex?: CodexStatus;
   images?: ImageStatus;
   v2ray?: V2RayStatus;
   recentActivity?: AuditEvent[];
@@ -311,6 +312,7 @@ export interface ImageProviderSettings {
 export interface ImageStorageSettings {
   id?: string;
   backend?: string;
+  objectStorageProfileId?: string;
   s3ProviderLabel?: string;
   s3Bucket?: string;
   s3Region?: string;
@@ -323,6 +325,23 @@ export interface ImageStorageSettings {
   fallbackToLocal?: boolean;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface ObjectStorageProfile {
+  id: string;
+  name: string;
+  providerLabel: string;
+  bucket: string;
+  region: string;
+  endpoint: string;
+  forcePathStyle: boolean;
+  hasCredentials: boolean;
+  maskedAccessKeyId: string;
+  status: string;
+  lastTestedAt?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ImageAsset {
@@ -441,6 +460,307 @@ export interface EventRecord {
   createdAt?: string;
 }
 
+export interface CodexInstallation {
+  id?: string;
+  binaryPath?: string;
+  version?: string;
+  status?: string;
+  capabilities?: Record<string, unknown>;
+  doctorSummary?: Record<string, unknown>;
+  lastProbeError?: string;
+  detectedAt?: string;
+}
+
+export interface CodexAppServerStatus {
+  state?: string;
+  pid?: number;
+  startedAt?: string;
+  uptimeSeconds?: number;
+  lastProbeAt?: string;
+  lastError?: string;
+  enabled?: boolean;
+}
+
+export interface CodexStatus {
+  enabled?: boolean;
+  installation?: CodexInstallation;
+  appServer?: CodexAppServerStatus;
+  workspaceCount?: number;
+  threadCount?: number;
+  pendingApprovals?: number;
+  runtime?: {
+    running?: number;
+    waitingApproval?: number;
+    queued?: number;
+    failed?: number;
+  };
+  legacyTables?: string[];
+}
+
+export interface CodexSettings {
+  enabled?: boolean;
+  binaryPath?: string;
+  codexHome?: string;
+  defaultModel?: string;
+  defaultSandbox?: string;
+  defaultApprovalPolicy?: string;
+  appServerEnabled?: boolean;
+  appServerProbeIntervalSeconds?: number;
+  appServerStartOnLaunch?: boolean;
+  execFallbackEnabled?: boolean;
+  eventRetentionDays?: number;
+  maxEventsPerThread?: number;
+  maxEventPayloadBytes?: number;
+  maxConcurrentTurns?: number;
+  scratchWorkspaceId?: string;
+}
+
+export interface CodexMemoryDiagnostics {
+  codexHomeSummary?: string;
+  configPresent?: boolean;
+  globalAgentsMd?: boolean;
+  sessionsPresent?: boolean;
+  scratchAgentsMd?: boolean;
+  scratchConfigured?: boolean;
+  note?: string;
+}
+
+export interface CodexWorkspace {
+  id: string;
+  label?: string;
+  pathSummary?: string;
+  trustState?: string;
+  defaultModel?: string;
+  defaultSandbox?: string;
+  defaultApprovalPolicy?: string;
+  networkPolicy?: Record<string, unknown>;
+  pinned?: boolean;
+  lastOpenedAt?: string;
+  gitBranch?: string;
+  gitState?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CodexThread {
+  id: string;
+  codexThreadId?: string;
+  workspaceId?: string;
+  title?: string;
+  status?: string;
+  sourceMode?: string;
+  kind?: string;
+  background?: boolean;
+  backgroundSource?: string;
+  model?: string;
+  sandboxMode?: string;
+  approvalPolicy?: string;
+  pinned?: boolean;
+  archivedAt?: string;
+  lastTurnId?: string;
+  lastError?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CodexTurn {
+  id: string;
+  threadId?: string;
+  codexTurnId?: string;
+  status?: string;
+  promptSummary?: string;
+  model?: string;
+  sandboxMode?: string;
+  approvalPolicy?: string;
+  startedAt?: string;
+  completedAt?: string;
+  errorSummary?: string;
+  createdAt?: string;
+}
+
+export interface CodexEvent {
+  id?: string;
+  threadId?: string;
+  turnId?: string;
+  sequence?: number;
+  eventType?: string;
+  codexMethod?: string;
+  itemType?: string;
+  textPreview?: string;
+  payload?: Record<string, unknown>;
+  createdAt?: string;
+}
+
+export interface CodexApproval {
+  id: string;
+  threadId?: string;
+  turnId?: string;
+  status?: string;
+  actionKind?: string;
+  commandPreview?: string;
+  cwdSummary?: string;
+  riskLevel?: string;
+  decision?: string;
+  decidedAt?: string;
+  expiresAt?: string;
+  createdAt?: string;
+}
+
+export interface CodexAttachment {
+  id: string;
+  filename?: string;
+  contentType?: string;
+  sizeBytes?: number;
+}
+
+export interface CodexModel {
+  id: string;
+  displayName?: string;
+  isDefault?: boolean;
+}
+
+export interface CodexReviewComment {
+  id: string;
+  threadId?: string;
+  turnId?: string;
+  workspaceId?: string;
+  filePath?: string;
+  oldLine?: number;
+  newLine?: number;
+  hunkHeader?: string;
+  body?: string;
+  status?: string;
+  createdAt?: string;
+  resolvedAt?: string;
+}
+
+export interface CodexReviewSnapshot {
+  scope?: string;
+  summary?: string;
+  diff?: string;
+  truncated?: boolean;
+  comments?: CodexReviewComment[];
+  generatedAt?: string;
+}
+
+export interface CodexCommand {
+  id: string;
+  threadId?: string;
+  commandPreview?: string;
+  cwdSummary?: string;
+  status?: string;
+  exitCode?: number;
+  outputPreview?: string;
+  errorSummary?: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt?: string;
+}
+
+export interface CodexCommandAssessment {
+  class?: string;
+  riskSummary?: string;
+  requiresConfirmation?: boolean;
+  sandboxSummary?: string;
+  cwdSummary?: string;
+  commandPreview?: string;
+}
+
+export interface CodexBrowserSession {
+  id: string;
+  threadId?: string;
+  url?: string;
+  status?: string;
+  lastError?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CodexAutomation {
+  id: string;
+  kind?: string;
+  threadId?: string;
+  workspaceId?: string;
+  title?: string;
+  promptSummary?: string;
+  schedule?: Record<string, unknown>;
+  enabled?: boolean;
+  defaultSandbox?: string;
+  defaultApprovalPolicy?: string;
+  lastRunAt?: string;
+  nextRunAt?: string;
+  retryCount?: number;
+  failureBackoffUntil?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CodexAutomationRun {
+  id: string;
+  automationId?: string;
+  threadId?: string;
+  turnId?: string;
+  clientRequestId?: string;
+  status?: string;
+  startedAt?: string;
+  lastHeartbeatAt?: string;
+  findingSummary?: string;
+  errorSummary?: string;
+  triageState?: string;
+  createdAt?: string;
+  completedAt?: string;
+}
+
+export interface CodexTriageFailedTurn {
+  turnId: string;
+  threadId: string;
+  errorSummary?: string;
+  completedAt?: string;
+}
+
+export interface CodexReviewComment {
+  id: string;
+  threadId?: string;
+  turnId?: string;
+  workspaceId?: string;
+  filePath?: string;
+  oldLine?: number;
+  newLine?: number;
+  hunkHeader?: string;
+  body?: string;
+  status?: string;
+  createdAt?: string;
+  resolvedAt?: string;
+}
+
+export interface CodexTriageInbox {
+  automationRuns?: CodexAutomationRun[];
+  backgroundThreads?: CodexThread[];
+  failedTurns?: CodexTriageFailedTurn[];
+  reviewComments?: CodexReviewComment[];
+}
+
+export interface CodexCapabilitySummary {
+  kind?: string;
+  status?: string;
+  items?: Array<Record<string, unknown>>;
+  lastError?: string;
+  probedAt?: string;
+}
+
+export interface CodexNotification {
+  id: string;
+  scope?: string;
+  scopeId?: string;
+  eventType?: string;
+  title?: string;
+  summary?: string;
+  status?: string;
+  severity?: string;
+  payload?: Record<string, unknown>;
+  createdAt?: string;
+}
+
 export interface AppData {
   dashboard: DashboardSummary;
   audit: AuditEvent[];
@@ -454,4 +774,190 @@ export interface ApiError extends Error {
   code?: string;
   status?: number;
   payload?: unknown;
+}
+
+export interface DockerStatus {
+  state: string;
+  available: boolean;
+  serverVersion?: string;
+  apiVersion?: string;
+  os?: string;
+  architecture?: string;
+  storageDriver?: string;
+  rootless: boolean;
+  containers: number;
+  containersRunning: number;
+  images: number;
+  lastError?: string;
+  lastCheckedAt: string;
+}
+
+export interface DockerSettings {
+  installEnabled?: boolean;
+  daemonControlEnabled?: boolean;
+  containerCreateEnabled?: boolean;
+  updatedAt?: string;
+}
+
+export interface DockerJob {
+  id: string;
+  type: string;
+  title: string;
+  status: string;
+  riskLevel?: string;
+  target?: string;
+  error?: string;
+  eventScope: string;
+  eventScopeId: string;
+  createdAt?: string;
+  startedAt?: string;
+  completedAt?: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface DockerInstallStatus {
+  supported?: boolean;
+  installed?: boolean;
+  canInstall?: boolean;
+  distroId?: string;
+  distroName?: string;
+  family?: string;
+  reason?: string;
+  commandPreview?: string[];
+  dockerVersion?: string;
+  installEnabled?: boolean;
+  privilegeMethod?: string;
+}
+
+export interface DockerSystemdStatus {
+  available?: boolean;
+  canControl?: boolean;
+  activeState?: string;
+  reason?: string;
+  controlEnabled?: boolean;
+  privilegeMethod?: string;
+}
+
+export interface DockerControlStatus {
+  settings?: DockerSettings;
+  install?: DockerInstallStatus;
+  systemd?: DockerSystemdStatus;
+  privilegeMethod?: string;
+  activeJob?: DockerJob;
+  latestJob?: DockerJob;
+}
+
+export interface DockerRegistrySettings {
+  enabled?: boolean;
+  publicUrl?: string;
+  storageBackend?: string;
+  objectStorageProfileId?: string;
+  objectPrefix?: string;
+  storageDir?: string;
+  quotaBytes?: number;
+  requireTls?: boolean;
+  allowAnonymousPull?: boolean;
+  allowInsecureLocal?: boolean;
+}
+
+export interface DockerRegistryStatus {
+  enabled?: boolean;
+  ready?: boolean;
+  publicUrl?: string;
+  storageBackend?: string;
+  storageDir?: string;
+  objectPrefix?: string;
+  quotaBytes?: number;
+  usageBytes?: number;
+  repositoryCount?: number;
+  credentialCount?: number;
+  requireTls?: boolean;
+  allowAnonymousPull?: boolean;
+  lastError?: string;
+}
+
+export interface DockerRegistryCredential {
+  id: string;
+  name: string;
+  status: string;
+  scopes?: string[];
+  repositoryPrefix?: string;
+  lastUsedAt?: string;
+  createdAt?: string;
+  rotatedAt?: string;
+  revokedAt?: string;
+}
+
+export interface DockerRegistryRepository {
+  id: string;
+  name: string;
+  sizeBytes: number;
+  tagCount: number;
+  lastPushedAt?: string;
+  lastPulledAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface DockerRegistryManifest {
+  digest: string;
+  repository: string;
+  mediaType?: string;
+  sizeBytes?: number;
+  pushedBy?: string;
+  pushedAt?: string;
+  deletedAt?: string;
+}
+
+export interface DockerRegistryTag {
+  repository: string;
+  tag: string;
+  digest: string;
+  createdAt?: string;
+  updatedAt?: string;
+  deletedAt?: string;
+  manifest?: DockerRegistryManifest;
+}
+
+export interface DockerContainerSummary {
+  id: string;
+  names: string[];
+  image: string;
+  state: string;
+  status: string;
+  created: number;
+  ports?: string[];
+}
+
+export interface DockerImageSummary {
+  id: string;
+  tags?: string[];
+  created: number;
+  sizeBytes: number;
+}
+
+export interface DockerVolumeSummary {
+  name: string;
+  driver: string;
+  mountpoint?: string;
+  createdAt?: string;
+}
+
+export interface DockerNetworkSummary {
+  id: string;
+  name: string;
+  driver: string;
+  scope: string;
+}
+
+export interface DockerLogLine {
+  stream: string;
+  text: string;
+}
+
+export interface DockerStats {
+  cpuPercent: number;
+  memoryUsageBytes: number;
+  memoryLimitBytes: number;
+  memoryPercent: number;
 }

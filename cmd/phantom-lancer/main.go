@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -13,8 +14,10 @@ import (
 	"time"
 
 	"phantom-lancer/internal/buildinfo"
+	"phantom-lancer/internal/codexclient"
 	"phantom-lancer/internal/codexgateway"
 	"phantom-lancer/internal/config"
+	"phantom-lancer/internal/dockercontrol"
 	"phantom-lancer/internal/events"
 	"phantom-lancer/internal/httpapi"
 	"phantom-lancer/internal/images"
@@ -68,10 +71,6 @@ func main() {
 		logger.Error("initialize runtime settings failed", "error", err)
 		os.Exit(1)
 	}
-	if err := store.PurgeLegacyCodexData(ctx); err != nil {
-		logger.Error("purge legacy codex data failed", "error", err)
-		os.Exit(1)
-	}
 	if _, err := store.GetRuntimeSettings(ctx); err != nil {
 		logger.Error("load runtime settings failed", "error", err)
 		os.Exit(1)
@@ -85,9 +84,19 @@ func main() {
 
 	hub := events.NewHub()
 	codexGatewaySvc := codexgateway.NewService(store, logger)
+	codexSvc := codexclient.NewService(store, hub, cfg.DataDir, func() ([]string, error) {
+		settings, err := store.GetRuntimeSettings(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return settings.AllowedRoots, nil
+	}, logger)
+	defer codexSvc.Close()
 	v2raySvc := v2ray.NewService(store, hub, cfg.DataDir, logger)
 	defer v2raySvc.Close()
 	imagesSvc := images.NewService(store, hub, cfg.DataDir, logger)
+	dockerSvc := dockercontrol.NewService(store, hub, cfg.DataDir, logger)
+	defer dockerSvc.Close()
 	logsSvc := logcenter.NewService(store, cfg)
 	restartRequested := make(chan struct{}, 1)
 	updateSvc := selfupdate.NewService(store, hub, logger, selfupdate.Config{
@@ -121,12 +130,17 @@ func main() {
 		logger.Error("initialize v2ray settings failed", "error", err)
 		os.Exit(1)
 	}
+	if err := codexSvc.Ensure(ctx); err != nil {
+		logger.Error("initialize codex client failed", "error", err)
+		os.Exit(1)
+	}
+	codexSvc.StartBackground(ctx)
 	if v2raySettings, err := store.GetV2RaySettings(ctx); err == nil && v2raySettings.Enabled && v2raySettings.StartOnPhantomLaunch {
 		if _, err := v2raySvc.Start(ctx); err != nil {
 			logger.Error("start embedded v2ray failed", "error", err)
 		}
 	}
-	api, err := httpapi.New(cfg, store, hub, codexGatewaySvc, v2raySvc, imagesSvc, logsSvc, updateSvc, staticFS, logger)
+	api, err := httpapi.New(cfg, store, hub, codexGatewaySvc, codexSvc, v2raySvc, imagesSvc, dockerSvc, logsSvc, updateSvc, staticFS, logger)
 	if err != nil {
 		logger.Error("create api failed", "error", err)
 		os.Exit(1)
@@ -156,10 +170,18 @@ func main() {
 		logger.Info("phantom lancer restart requested")
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownTimeout := 10 * time.Second
+	if restartForUpdate {
+		shutdownTimeout = 2 * time.Second
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("shutdown failed", "error", err)
+		if restartForUpdate && errors.Is(err, context.DeadlineExceeded) {
+			logger.Warn("graceful shutdown timed out during update restart; forcing server close", "timeout", shutdownTimeout.String())
+		} else {
+			logger.Error("shutdown failed", "error", err)
+		}
 		if closeErr := server.Close(); closeErr != nil {
 			logger.Error("force close server failed", "error", closeErr)
 		}

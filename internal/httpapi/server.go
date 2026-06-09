@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"mime"
@@ -17,11 +18,14 @@ import (
 	"time"
 
 	"phantom-lancer/internal/auth"
+	"phantom-lancer/internal/codexclient"
 	"phantom-lancer/internal/codexgateway"
 	"phantom-lancer/internal/config"
+	"phantom-lancer/internal/dockercontrol"
 	"phantom-lancer/internal/events"
 	imagegen "phantom-lancer/internal/images"
 	logcenter "phantom-lancer/internal/logs"
+	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/selfupdate"
 	"phantom-lancer/internal/storage"
 	"phantom-lancer/internal/v2ray"
@@ -39,8 +43,10 @@ type Server struct {
 	store          *storage.Store
 	hub            *events.Hub
 	codexGateway   *codexgateway.Service
+	codex          *codexclient.Service
 	v2ray          *v2ray.Service
 	images         *imagegen.Service
+	docker         *dockercontrol.Service
 	logs           *logcenter.Service
 	updates        *selfupdate.Service
 	staticFS       fs.FS
@@ -56,14 +62,16 @@ type sessionContext struct {
 	Session storage.Session
 }
 
-func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewaySvc *codexgateway.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
+func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, dockerSvc *dockercontrol.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
 	return &Server{
 		cfg:            cfg,
 		store:          store,
 		hub:            hub,
 		codexGateway:   codexGatewaySvc,
+		codex:          codexSvc,
 		v2ray:          v2raySvc,
 		images:         imagesSvc,
+		docker:         dockerSvc,
 		logs:           logsSvc,
 		updates:        updateSvc,
 		staticFS:       staticFS,
@@ -106,6 +114,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/codex-gateway/models/refresh", s.handleRefreshCodexGatewayModels)
 	mux.HandleFunc("GET /api/codex-gateway/request-logs", s.handleCodexGatewayRequestLogs)
 	mux.HandleFunc("POST /api/codex-gateway/chat-test", s.handleCodexGatewayChatTest)
+	s.registerCodexRoutes(mux)
+	mux.HandleFunc("GET /api/notifications", s.handleListNotifications)
+	mux.HandleFunc("PATCH /api/notifications/", s.handleNotificationSubroutes)
+	mux.HandleFunc("POST /api/notifications/archive-read", s.handleArchiveReadNotifications)
 	mux.HandleFunc("GET /api/events/history", s.handleEventHistory)
 	mux.HandleFunc("GET /api/events/stream", s.handleEventStream)
 	mux.HandleFunc("GET /api/audit/events", s.handleAuditEvents)
@@ -125,6 +137,42 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/images/storage-settings", s.handleGetImageStorageSettings)
 	mux.HandleFunc("PUT /api/images/storage-settings", s.handleUpdateImageStorageSettings)
 	mux.HandleFunc("POST /api/images/storage-settings/test", s.handleTestImageStorageSettings)
+	mux.HandleFunc("GET /api/object-storage/profiles", s.handleListObjectStorageProfiles)
+	mux.HandleFunc("POST /api/object-storage/profiles", s.handleCreateObjectStorageProfile)
+	mux.HandleFunc("GET /api/object-storage/profiles/", s.handleObjectStorageProfileSubroutes)
+	mux.HandleFunc("PATCH /api/object-storage/profiles/", s.handleObjectStorageProfileSubroutes)
+	mux.HandleFunc("POST /api/object-storage/profiles/", s.handleObjectStorageProfileSubroutes)
+	mux.HandleFunc("DELETE /api/object-storage/profiles/", s.handleObjectStorageProfileSubroutes)
+	mux.HandleFunc("GET /api/docker/status", s.handleDockerStatus)
+	mux.HandleFunc("GET /api/docker/overview", s.handleDockerOverview)
+	mux.HandleFunc("POST /api/docker/probe", s.handleDockerProbe)
+	mux.HandleFunc("GET /api/docker/host/events", s.handleDockerHostEvents)
+	mux.HandleFunc("GET /api/docker/control-status", s.handleDockerControlStatus)
+	mux.HandleFunc("PATCH /api/docker/settings", s.handleDockerUpdateSettings)
+	mux.HandleFunc("POST /api/docker/install", s.handleDockerInstall)
+	mux.HandleFunc("POST /api/docker/daemon/", s.handleDockerDaemonControl)
+	mux.HandleFunc("GET /api/docker/registry/status", s.handleDockerRegistryStatus)
+	mux.HandleFunc("GET /api/docker/registry/settings", s.handleDockerRegistrySettings)
+	mux.HandleFunc("PUT /api/docker/registry/settings", s.handleDockerRegistrySettings)
+	mux.HandleFunc("GET /api/docker/registry/repositories", s.handleDockerRegistryRepositories)
+	mux.HandleFunc("GET /api/docker/registry/repositories/", s.handleDockerRegistryRepositorySubroutes)
+	mux.HandleFunc("DELETE /api/docker/registry/repositories/", s.handleDockerRegistryRepositorySubroutes)
+	mux.HandleFunc("GET /api/docker/registry/credentials", s.handleDockerRegistryCredentials)
+	mux.HandleFunc("POST /api/docker/registry/credentials", s.handleDockerRegistryCredentials)
+	mux.HandleFunc("PATCH /api/docker/registry/credentials/", s.handleDockerRegistryCredentialSubroutes)
+	mux.HandleFunc("POST /api/docker/registry/credentials/", s.handleDockerRegistryCredentialSubroutes)
+	mux.HandleFunc("DELETE /api/docker/registry/credentials/", s.handleDockerRegistryCredentialSubroutes)
+	mux.HandleFunc("POST /api/docker/registry/gc", s.handleDockerRegistryGC)
+	mux.HandleFunc("GET /api/docker/containers", s.handleDockerListContainers)
+	mux.HandleFunc("POST /api/docker/containers", s.handleDockerCreateContainer)
+	mux.HandleFunc("POST /api/docker/containers/", s.handleDockerContainerSubroutes)
+	mux.HandleFunc("GET /api/docker/containers/", s.handleDockerContainerSubroutes)
+	mux.HandleFunc("DELETE /api/docker/containers/", s.handleDockerContainerSubroutes)
+	mux.HandleFunc("GET /api/docker/images", s.handleDockerListImages)
+	mux.HandleFunc("POST /api/docker/images/pull", s.handleDockerPullImage)
+	mux.HandleFunc("DELETE /api/docker/images/", s.handleDockerRemoveImage)
+	mux.HandleFunc("GET /api/docker/volumes", s.handleDockerListVolumes)
+	mux.HandleFunc("GET /api/docker/networks", s.handleDockerListNetworks)
 	mux.HandleFunc("GET /api/images/library/private/status", s.handleImagePrivateStatus)
 	mux.HandleFunc("POST /api/images/library/private/unlock", s.handleUnlockImagePrivate)
 	mux.HandleFunc("POST /api/images/library/private/lock", s.handleLockImagePrivate)
@@ -132,6 +180,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/images/jobs", s.handleCreateImageJob)
 	mux.HandleFunc("GET /api/images/jobs/", s.handleImageJobSubroutes)
 	mux.HandleFunc("GET /api/images/library/assets", s.handleListImageLibraryAssets)
+	mux.HandleFunc("POST /api/images/library/assets", s.handleUploadImageLibraryAsset)
 	mux.HandleFunc("GET /api/images/library/assets/", s.handleImageLibraryAssetSubroutes)
 	mux.HandleFunc("DELETE /api/images/library/assets/", s.handleImageLibraryAssetSubroutes)
 	mux.HandleFunc("POST /api/images/library/assets/", s.handleImageLibraryAssetSubroutes)
@@ -150,6 +199,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models/", s.handleCodexGatewayPublicModel)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleCodexGatewayChatCompletions)
 	mux.HandleFunc("POST /v1/responses", s.handleCodexGatewayResponses)
+	mux.HandleFunc("GET /v2/", s.handleDockerRegistryNative)
+	mux.HandleFunc("HEAD /v2/", s.handleDockerRegistryNative)
+	mux.HandleFunc("POST /v2/", s.handleDockerRegistryNative)
+	mux.HandleFunc("PATCH /v2/", s.handleDockerRegistryNative)
+	mux.HandleFunc("PUT /v2/", s.handleDockerRegistryNative)
+	mux.HandleFunc("DELETE /v2/", s.handleDockerRegistryNative)
 
 	mux.Handle("/", s.staticHandler())
 	return s.recover(mux)
@@ -294,17 +349,25 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAuth(w, r); !ok {
 		return
 	}
-	audit, _ := s.store.ListAudit(r.Context(), 8)
-	codexGatewayStatus, err := s.codexGateway.Status(r.Context())
+	started := time.Now()
+	statusCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	audit, _ := s.store.ListAudit(statusCtx, 8)
+	codexGatewayStatus, err := s.codexGateway.Status(statusCtx)
 	if err != nil {
 		codexGatewayStatus = codexgateway.Status{LastError: err.Error()}
 	}
+	codexStatus, _ := s.codex.Status(statusCtx)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"codexGateway":   codexGatewayStatus,
-		"images":         s.images.Status(r.Context()),
-		"v2ray":          s.v2ray.Status(r.Context()),
+		"codex":          codexStatus,
+		"images":         s.images.Status(statusCtx),
+		"v2ray":          s.v2ray.Status(statusCtx),
 		"recentActivity": audit,
 	})
+	if err := statusCtx.Err(); errors.Is(err, context.DeadlineExceeded) {
+		s.log.Warn("dashboard summary status timeout", "summary", codexclient.Redact(err.Error(), 120), "durationMs", time.Since(started).Milliseconds())
+	}
 }
 
 func (s *Server) handleEventHistory(w http.ResponseWriter, r *http.Request) {
@@ -630,7 +693,7 @@ func (s *Server) handleUpdateImageStorageSettings(w http.ResponseWriter, r *http
 			"backend":       updated.Backend,
 			"providerLabel": updated.S3ProviderLabel,
 			"bucket":        updated.S3Bucket,
-			"endpoint":      updated.S3Endpoint,
+			"endpoint":      safelog.URLLabel(updated.S3Endpoint),
 			"updatedSecret": updateSecret,
 			"clearedSecret": req.ClearSecret,
 		},
@@ -653,7 +716,7 @@ func (s *Server) handleTestImageStorageSettings(w http.ResponseWriter, r *http.R
 			EventType: "images.storage.tested",
 			RiskLevel: "medium",
 			Summary:   "Images 对象存储连接测试失败",
-			Payload:   map[string]any{"backend": settings.Backend, "bucket": settings.S3Bucket, "endpoint": settings.S3Endpoint, "error": err.Error()},
+			Payload:   map[string]any{"backend": settings.Backend, "bucket": settings.S3Bucket, "endpoint": safelog.URLLabel(settings.S3Endpoint), "error": safelog.Error(err, 240)},
 		})
 		writeError(w, http.StatusBadGateway, "images_storage_test_failed", err.Error())
 		return
@@ -662,7 +725,7 @@ func (s *Server) handleTestImageStorageSettings(w http.ResponseWriter, r *http.R
 		EventType: "images.storage.tested",
 		RiskLevel: "low",
 		Summary:   "Images 对象存储连接测试通过",
-		Payload:   map[string]any{"backend": settings.Backend, "bucket": settings.S3Bucket, "endpoint": settings.S3Endpoint},
+		Payload:   map[string]any{"backend": settings.Backend, "bucket": settings.S3Bucket, "endpoint": safelog.URLLabel(settings.S3Endpoint)},
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -789,6 +852,9 @@ func (s *Server) handleCreateImageJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, imageErrorCode(err), err.Error())
 		return
 	}
+	if !s.requireUnlockedForPrivateImageSources(w, r, ctx, request) {
+		return
+	}
 	job, err := s.images.CreateJob(r.Context(), request)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, imageErrorCode(err), err.Error())
@@ -806,7 +872,25 @@ func (s *Server) handleCreateImageJob(w http.ResponseWriter, r *http.Request) {
 			"imageCount":  job.ImageCount,
 		},
 	})
-	writeJSON(w, http.StatusAccepted, map[string]any{"job": job, "status": s.images.Status(r.Context())})
+	writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
+}
+
+func (s *Server) requireUnlockedForPrivateImageSources(w http.ResponseWriter, r *http.Request, ctx sessionContext, request imagegen.ImagineRequest) bool {
+	for _, image := range request.Images {
+		if image.SourceType != "library_asset" {
+			continue
+		}
+		assetID := strings.TrimPrefix(image.URL, "asset:")
+		asset, err := s.store.GetImageAsset(r.Context(), assetID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "image_asset_not_found", "未找到图片资产")
+			return false
+		}
+		if asset.Private && !s.requireImagePrivateUnlocked(w, ctx) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handleImageJobSubroutes(w http.ResponseWriter, r *http.Request) {
@@ -848,6 +932,62 @@ func (s *Server) handleListImageLibraryAssets(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleUploadImageLibraryAsset(w http.ResponseWriter, r *http.Request) {
+	ctx, ok := s.requireAuth(w, r)
+	if !ok || !s.requireCSRF(w, r, ctx.Session) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, imagegen.MaxFormBytes)
+	if err := r.ParseMultipartForm(imagegen.MaxFormBytes); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_multipart", "图片上传表单无效或过大")
+		return
+	}
+	file, header, err := r.FormFile("image")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "image_file_missing", "请选择要上传的图片")
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, imagegen.MaxImageBytes+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "image_file_invalid", err.Error())
+		return
+	}
+	filename := ""
+	if header != nil {
+		filename = header.Filename
+	}
+	result, err := s.images.UploadLibraryAsset(r.Context(), filename, data, "")
+	if err != nil {
+		_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+			EventType: "images.asset.upload_failed",
+			RiskLevel: "medium",
+			Summary:   "Images 图片手动上传失败",
+			Payload:   map[string]any{"error": safelog.Error(err, 240)},
+		})
+		writeError(w, http.StatusBadRequest, imageErrorCode(err), err.Error())
+		return
+	}
+	eventType := "images.asset.uploaded"
+	summary := "已上传 Images 图片资产"
+	if result.Duplicate {
+		eventType = "images.asset.deduplicated"
+		summary = "Images 图片上传命中去重"
+	}
+	_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+		EventType: eventType,
+		RiskLevel: "low",
+		Summary:   summary,
+		Payload: map[string]any{
+			"assetId":   result.Asset.ID,
+			"duplicate": result.Duplicate,
+			"storage":   result.Asset.StorageBackend,
+			"bytes":     result.Asset.SizeBytes,
+		},
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"asset": result.Asset, "duplicate": result.Duplicate})
 }
 
 func (s *Server) handleImageLibraryAssetSubroutes(w http.ResponseWriter, r *http.Request) {
@@ -974,7 +1114,7 @@ func (s *Server) handleImageLibraryAssetSubroutes(w http.ResponseWriter, r *http
 				EventType: "images.asset.archive_failed",
 				RiskLevel: "medium",
 				Summary:   "Images 图片资产归档到 S3 失败",
-				Payload:   map[string]any{"assetId": asset.ID, "jobId": asset.JobID, "error": err.Error()},
+				Payload:   map[string]any{"assetId": asset.ID, "jobId": asset.JobID, "error": safelog.Error(err, 240)},
 			})
 			writeError(w, http.StatusBadGateway, "image_asset_archive_failed", err.Error())
 			return
@@ -1483,6 +1623,15 @@ func parseInt64(value string) int64 {
 func parseInt(value string) int {
 	parsed, _ := strconv.Atoi(value)
 	return parsed
+}
+
+func firstQuery(r *http.Request, keys ...string) string {
+	for _, key := range keys {
+		if value := r.URL.Query().Get(key); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func v2rayRisk(settings storage.V2RaySettings) string {

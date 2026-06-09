@@ -1,12 +1,13 @@
 # OpenAI 兼容 Gateway 模块功能设计
 
-文档日期：2026-06-05  
-来源服务：本地 `codex-proxyv2` 参考实现  
+文档日期：2026-06-05
+来源服务：本地 `codex-proxyv2` 参考实现
 关联文档：
 
 - [personal-web-terminal-product-features.md](./personal-web-terminal-product-features.md)
 - [personal-web-terminal-technical-design.md](./personal-web-terminal-technical-design.md)
 - [happy-technical-reference.md](./happy-technical-reference.md)
+- [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md)
 
 ## 1. Design Read
 
@@ -14,7 +15,7 @@ Reading this as: 个人服务器控制台里的 Codex API gateway，面向单 ow
 
 本模块不是营销页，也不是把 `codex-proxyv2` 作为 sidecar 服务嵌入。迁移方式是功能搬迁和架构重构，不做源码拷贝，不保留原服务的独立登录页、独立前端、独立配置文件、打包脚本或 V2Ray 代理能力。
 
-本模块是独立能力域。原 Codex CLI / Codex Client 客户端方案已废弃，本控制台不再内置 Codex 会话、sandbox、approval、usage 或 transcript 能力；Gateway 不依赖也不共享这些已移除的模型。
+本模块是独立能力域，并与新版 Codex CLI Client 并列。Codex CLI Client 负责 Web 会话、workspace、sandbox、approval 和 transcript；Gateway 只负责 OpenAI-compatible `/v1/*` API、上游账号、模型目录、public API key 和请求日志。两者不共享数据库表、HTTP API 前缀或执行链路。
 
 ## 2. 迁移目标
 
@@ -298,11 +299,11 @@ token 刷新策略：
 
 ### 4.1 模块定位
 
-本能力建议命名为 `OpenAI Gateway` 或 `Codex Gateway`，中文可显示为 `OpenAI 网关` 或 `Codex 网关`。产品信息架构中它是独立能力域，不再放在 Codex CLI / Codex Client 下。
+本能力建议命名为 `OpenAI Gateway` 或 `Codex Gateway`，中文可显示为 `OpenAI 网关` 或 `Codex 网关`。产品信息架构中它是独立能力域，不放在 Codex CLI Client 下。
 
-它与现有 `Codex` 会话能力的区别：
+它与新版 `Codex` 会话能力的区别：
 
-- 现有 Codex 模块：面向 owner 在 Web 控制台内运行 Codex CLI，会话绑定 workspace、sandbox、事件和审批。
+- Codex CLI Client 模块：面向 owner 在 Web 控制台内运行本机 `codex` CLI，会话绑定 workspace、sandbox、事件和审批。
 - Codex Gateway 模块：面向外部 OpenAI 兼容客户端，通过 HTTP API 调用 Codex 订阅能力，不绑定 workspace，不执行 shell，不修改文件。
 
 信息架构建议：
@@ -395,7 +396,7 @@ CSRF：
 
 ### 6.2 管理 API
 
-建议管理 API 放在 `/api/codex-gateway/*` 下，避免与现有 `/api/codex/*` 会话接口混淆。该路径前缀是实现兼容命名，不表示 Gateway 是 Codex Client 的下属模块。
+建议管理 API 放在 `/api/codex-gateway/*` 下，避免与 Codex CLI Client 的 `/api/codex/*` 会话接口混淆。该路径前缀是实现兼容命名，不表示 Gateway 是 Codex Client 的下属模块。
 
 状态和设置：
 
@@ -447,7 +448,7 @@ API key：
 
 ## 7. 后端模块设计
 
-建议新增 `internal/codexgateway`，与现有 `internal/codex` CLI 会话模块隔离。
+建议继续使用 `internal/codexgateway`，并与后续 `internal/codexclient` CLI 会话模块隔离。
 
 模块职责：
 
@@ -485,7 +486,7 @@ flowchart TD
 
 ## 8. 数据模型
 
-建议新增表名使用 `codex_gateway_` 前缀，避免与现有 Codex CLI 会话表混淆。
+建议新增表名使用 `codex_gateway_` 前缀，避免与新版 `codex_cli_` 表和旧版 Codex 残留表混淆。
 
 ### 8.1 `codex_gateway_accounts`
 

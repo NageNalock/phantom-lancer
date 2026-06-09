@@ -1,18 +1,26 @@
 import type { AppActions } from "../app/App";
 import type { AppData } from "../app/types";
 import { Button, ContextList, Metric, Panel } from "../components/ui";
-import { auditLabel, auditSummary, codexGatewayStatusLabel, formatDate, imageStatusLabel, v2rayStateLabel } from "../domain/labels";
+import { auditLabel, auditSummary, codexGatewayStatusLabel, codexModuleStatusLabel, formatDate, imageStatusLabel, v2rayStateLabel } from "../domain/labels";
 
 export function DashboardView({ actions, data }: { actions: AppActions; data: AppData }) {
   const gateway = data.codexGateway.status || data.dashboard.codexGateway;
   const v2ray = data.v2ray.status || data.dashboard.v2ray;
   const images = data.images.status || data.dashboard.images;
+  const codex = data.dashboard.codex;
   const latestAudit = data.audit[0];
 
   return (
     <div className="grid min-h-[calc(100dvh-104px)] grid-cols-[minmax(0,1fr)_332px] max-xl:grid-cols-1">
       <div className="grid content-start gap-4 p-5">
         <section className="grid grid-cols-3 gap-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
+          <Metric
+            detail={codexCardDetail(codex)}
+            label="Codex"
+            onClick={() => actions.setMainTab("codex")}
+            tone={codexCardTone(codex)}
+            value={codexModuleStatusLabel(codex)}
+          />
           <Metric
             detail={`${gateway?.activeAccounts || 0} accounts / ${gateway?.publicApiKeys || 0} keys`}
             label="Codex Gateway"
@@ -41,8 +49,8 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
             <>
               <Button onClick={() => actions.setMainTab("images")}>打开 Images</Button>
               <Button onClick={() => actions.setMainTab("v2ray")}>配置 V2Ray</Button>
-              <Button onClick={() => actions.setMainTab("codex-gateway")} tone="primary">
-                打开 Codex Gateway
+              <Button onClick={() => actions.setMainTab("codex")} tone="primary">
+                打开 Codex
               </Button>
             </>
           }
@@ -52,6 +60,7 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
           <div className="grid gap-3">
             <ContextList
               items={[
+                ["Codex", codexModuleStatusLabel(codex)],
                 ["Codex Gateway", codexGatewayStatusLabel(gateway)],
                 ["Images", imageStatusLabel(images)],
                 ["V2Ray", v2rayStateLabel(v2ray)],
@@ -65,6 +74,7 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
         <Panel title="Runtime">
           <ContextList
             items={[
+              ["Codex", codexModuleStatusLabel(codex)],
               ["Gateway", codexGatewayStatusLabel(gateway)],
               ["Images", imageStatusLabel(images)],
               ["V2Ray", v2rayStateLabel(v2ray)],
@@ -88,4 +98,21 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
       </aside>
     </div>
   );
+}
+
+function codexCardDetail(codex?: AppData["dashboard"]["codex"]): string {
+  if (!codex) return "未探测";
+  const parts = [`${codex.threadCount || 0} 会话`, `${codex.workspaceCount || 0} 工作区`];
+  if (codex.pendingApprovals) parts.push(`${codex.pendingApprovals} 待审批`);
+  return parts.join(" / ");
+}
+
+function codexCardTone(codex?: AppData["dashboard"]["codex"]) {
+  if (!codex || !codex.enabled) return "warn" as const;
+  if (codex.pendingApprovals) return "warn" as const;
+  const install = codex.installation?.status;
+  if (install === "needs_setup" || install === "unavailable") return "warn" as const;
+  if (codex.appServer?.state === "failed") return "danger" as const;
+  if (codex.appServer?.state === "running" || install === "ready") return "good" as const;
+  return "neutral" as const;
 }

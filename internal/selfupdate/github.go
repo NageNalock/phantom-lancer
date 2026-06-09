@@ -10,7 +10,9 @@ import (
 	"net/url"
 	"runtime"
 	"strings"
+	"time"
 
+	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/storage"
 )
 
@@ -46,15 +48,28 @@ func (s *Service) fetchLatestRelease(ctx context.Context, etag string) (storage.
 		req.Header.Set("If-None-Match", etag)
 	}
 
+	started := time.Now()
+	if s.log != nil {
+		s.log.Info("github release check started", "repository", strings.Trim(s.cfg.Repository, "/"), "api_host", safelog.HostLabel(requestURL), "has_etag", etag != "")
+	}
 	resp, err := s.httpClient().Do(req)
 	if err != nil {
+		if s.log != nil {
+			s.log.Warn("github release check failed", "repository", strings.Trim(s.cfg.Repository, "/"), "api_host", safelog.HostLabel(requestURL), "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
+		}
 		return storage.SystemUpdateCheck{}, false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotModified {
+		if s.log != nil {
+			s.log.Info("github release check completed", "repository", strings.Trim(s.cfg.Repository, "/"), "status", resp.StatusCode, "not_modified", true, "latency_ms", time.Since(started).Milliseconds())
+		}
 		return storage.SystemUpdateCheck{}, true, nil
 	}
 	if resp.StatusCode != http.StatusOK {
+		if s.log != nil {
+			s.log.Warn("github release check returned failure", "repository", strings.Trim(s.cfg.Repository, "/"), "status", resp.StatusCode, "latency_ms", time.Since(started).Milliseconds())
+		}
 		return storage.SystemUpdateCheck{}, false, fmt.Errorf("github release check failed: status %d", resp.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxReleaseResponseBytes+1))
@@ -70,9 +85,15 @@ func (s *Service) fetchLatestRelease(ctx context.Context, etag string) (storage.
 	}
 	check, err := s.checkFromRelease(release)
 	if err != nil {
+		if s.log != nil {
+			s.log.Warn("github release check parse failed", "repository", strings.Trim(s.cfg.Repository, "/"), "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
+		}
 		return storage.SystemUpdateCheck{}, false, err
 	}
 	check.ETag = resp.Header.Get("ETag")
+	if s.log != nil {
+		s.log.Info("github release check completed", "repository", strings.Trim(s.cfg.Repository, "/"), "status", resp.StatusCode, "latest_version", check.LatestVersion, "can_apply", check.CanApply, "latency_ms", time.Since(started).Milliseconds())
+	}
 	return check, false, nil
 }
 

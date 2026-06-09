@@ -1,7 +1,7 @@
 import type { FormEvent, ReactNode } from "react";
 import { useEffect, useState } from "react";
 import type { ImageAsset, ImageGenerationJob, ImageProviderSettings, ImageStatus, ImageStorageSettings, Tone } from "../../app/types";
-import { Button, ContextList, EmptyState, Field, Notice, Panel, Pill } from "../../components/ui";
+import { Button, ContextList, EmptyState, Field, ImageDropInput, Notice, Panel, Pill } from "../../components/ui";
 import { defaultImageSettings, defaultImageStorageSettings, formatDate, imageAssetTypeLabel, imageJobStatusLabel, imageModeLabel, imageStatusLabel, imageStorageBackendLabel } from "../../domain/labels";
 import type { ImageLibraryScope, ImageMode, ImageSettingsDraft, ImagesTab, ImageStorageSettingsDraft } from "../types";
 import { ASPECT_OPTIONS, IMAGE_MODES, MODEL_OPTIONS, RESOLUTION_OPTIONS } from "../types";
@@ -33,19 +33,27 @@ export function ImagesTabs({ active, onChange }: { active: ImagesTab; onChange: 
 export function GeneratePanel({
   busy,
   hasApiKey,
+  libraryImage,
   latestJob,
+  onClearLibraryImage,
   settings,
   onSubmit,
 }: {
   busy: boolean;
   hasApiKey: boolean;
+  libraryImage?: ImageAsset;
   latestJob?: ImageGenerationJob;
+  onClearLibraryImage?: () => void;
   settings: ImageProviderSettings;
   onSubmit: (data: FormData) => Promise<void>;
 }) {
   const [mode, setMode] = useState<ImageMode>("text_to_image");
   const defaults = { ...defaultImageSettings(), ...settings };
   const referenceSlots = mode === "text_to_image" ? 0 : mode === "image_to_image" ? 1 : 3;
+
+  useEffect(() => {
+    if (libraryImage) setMode("image_to_image");
+  }, [libraryImage]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -128,7 +136,7 @@ export function GeneratePanel({
               </div>
               <div className="grid grid-cols-1 gap-3 2xl:grid-cols-3">
                 {Array.from({ length: referenceSlots }, (_, index) => (
-                  <ReferenceSlot index={index + 1} key={index} />
+                  <ReferenceSlot index={index + 1} key={`${index}-${libraryImage?.id || "empty"}`} libraryImage={mode === "image_to_image" && index === 0 ? libraryImage : undefined} onClearLibraryImage={index === 0 ? onClearLibraryImage : undefined} />
                 ))}
               </div>
             </section>
@@ -145,15 +153,27 @@ export function GeneratePanel({
   );
 }
 
-function ReferenceSlot({ index }: { index: number }) {
+function ReferenceSlot({ index, libraryImage, onClearLibraryImage }: { index: number; libraryImage?: ImageAsset; onClearLibraryImage?: () => void }) {
   return (
     <div className="grid min-h-44 content-start gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3">
       <strong className="mono text-xs text-[var(--muted-strong)]">source {String(index).padStart(2, "0")}</strong>
+      {libraryImage ? (
+        <div className="grid gap-2 rounded-md border border-[var(--line)] bg-[var(--surface-soft)] p-2">
+          {libraryImage.url ? <img alt={assetTitle(libraryImage)} className="aspect-video w-full rounded border border-[var(--line)] object-cover" src={libraryImage.url} /> : null}
+          <input name={`image_asset_${index}`} type="hidden" value={libraryImage.id} />
+          <div className="flex items-center justify-between gap-2">
+            <span className="min-w-0 truncate text-xs font-medium">{assetTitle(libraryImage)}</span>
+            <Button className="min-h-7 px-2 text-xs" onClick={onClearLibraryImage} type="button">
+              清除
+            </Button>
+          </div>
+        </div>
+      ) : null}
       <Field label="URL">
-        <input className="input mono" name={`image_url_${index}`} placeholder="https://..." type="url" />
+        <input className="input mono" disabled={Boolean(libraryImage)} name={`image_url_${index}`} placeholder="https://..." type="url" />
       </Field>
       <Field label="上传">
-        <input className="input h-auto py-2 text-xs" accept="image/png,image/jpeg,image/webp,image/gif" name={`image_file_${index}`} type="file" />
+        <ImageDropInput disabled={Boolean(libraryImage)} label="上传参考图" name={`image_file_${index}`} />
       </Field>
     </div>
   );
@@ -186,6 +206,8 @@ export function LibraryPanel({
   onRefresh,
   onSelect,
   onScopeChange,
+  onUpload,
+  onUseForImage,
   onUnlockPrivate,
   privateExpiresAt,
   privateUnlocked,
@@ -202,6 +224,8 @@ export function LibraryPanel({
   onRefresh: () => Promise<void>;
   onSelect: (asset: ImageAsset) => void;
   onScopeChange: (scope: ImageLibraryScope) => void;
+  onUpload: (data: FormData) => Promise<boolean>;
+  onUseForImage: (asset: ImageAsset) => void;
   onUnlockPrivate: (password: string) => Promise<void>;
   privateExpiresAt?: string;
   privateUnlocked: boolean;
@@ -209,10 +233,20 @@ export function LibraryPanel({
   storageSettings: ImageStorageSettings;
 }) {
   const [viewer, setViewer] = useState<ImageAsset | null>(null);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
   const privateScope = libraryScope === "private";
   const generated = assets.filter((asset) => asset.assetType === "generated").length;
-  const uploaded = assets.filter((asset) => asset.assetType === "source_upload").length;
+  const uploaded = assets.filter((asset) => asset.assetType === "source_upload" || asset.assetType === "manual_upload").length;
   const s3Count = assets.filter((asset) => asset.storageBackend === "s3").length;
+
+  async function submitUpload(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!uploadFile) return;
+    const formData = new FormData();
+    formData.append("image", uploadFile);
+    const ok = await onUpload(formData);
+    if (ok) setUploadFile(null);
+  }
 
   useEffect(() => {
     if (!viewer) return;
@@ -244,6 +278,7 @@ export function LibraryPanel({
           <PrivateUnlockPanel busy={busy === "private-unlock"} onUnlock={onUnlockPrivate} />
         ) : assets.length ? (
           <div className="grid gap-4">
+            {!privateScope ? <LibraryUploadPanel busy={busy === "upload"} file={uploadFile} onFileChange={setUploadFile} onSubmit={submitUpload} /> : null}
             <div className="grid grid-cols-4 gap-2 max-lg:grid-cols-2 max-sm:grid-cols-1">
               <LibraryMetric label="全部" value={assets.length} />
               <LibraryMetric label="生成结果" value={generated} />
@@ -291,6 +326,9 @@ export function LibraryPanel({
                       <Button className="min-h-8 px-2 text-xs" disabled={!archiveEnabled || archiveBusy} onClick={() => onArchive(asset)}>
                         {archiveBusy ? "归档中" : "归档"}
                       </Button>
+                      <Button className="min-h-8 px-2 text-xs" onClick={() => onUseForImage(asset)}>
+                        用于图生图
+                      </Button>
                       <Button className="min-h-8 px-2 text-xs" disabled={busy === `private:${asset.id}`} onClick={() => onMarkPrivate(asset, !asset.private)}>
                         {asset.private ? "移出私密" : "设为私密"}
                       </Button>
@@ -304,12 +342,41 @@ export function LibraryPanel({
             </div>
           </div>
         ) : (
-          <EmptyState title={privateScope ? "暂无私密图片" : "暂无图片"} body={privateScope ? "在普通图片库中将图片设为私密后，这里会展示。" : "生成图片或上传参考图后，图片会自动进入这里。"} />
+          <div className="grid gap-4">
+            {!privateScope ? <LibraryUploadPanel busy={busy === "upload"} file={uploadFile} onFileChange={setUploadFile} onSubmit={submitUpload} /> : null}
+            <EmptyState title={privateScope ? "暂无私密图片" : "暂无图片"} body={privateScope ? "在普通图片库中将图片设为私密后，这里会展示。" : "生成图片或手动上传后，图片会自动进入这里。"} />
+          </div>
         )}
         {privateScope && privateUnlocked && privateExpiresAt ? <p className="muted mt-3 mb-0 text-xs">解锁有效至 {formatDate(privateExpiresAt)}</p> : null}
       </Panel>
       {viewer ? <ImageViewer asset={viewer} onArchive={onArchive} onClose={() => setViewer(null)} onDelete={onDelete} onMarkPrivate={onMarkPrivate} storageSettings={storageSettings} /> : null}
     </>
+  );
+}
+
+function LibraryUploadPanel({
+  busy,
+  file,
+  onFileChange,
+  onSubmit,
+}: {
+  busy: boolean;
+  file: File | null;
+  onFileChange: (file: File | null) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <form className="flex items-end justify-between gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 max-md:grid" onSubmit={onSubmit}>
+      <Field label="手动上传" help="支持 jpeg、png、gif、webp；上传前会按内容 hash 去重。">
+        <ImageDropInput key={file ? "selected" : "empty"} label="上传到 Library" onFiles={(files) => onFileChange(files[0] || null)} />
+      </Field>
+      <div className="flex items-center gap-3">
+        {file ? <span className="muted max-w-64 truncate text-xs">{file.name}</span> : null}
+        <Button disabled={busy || !file} tone="primary" type="submit">
+          {busy ? "上传中" : "上传"}
+        </Button>
+      </div>
+    </form>
   );
 }
 

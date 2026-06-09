@@ -1,115 +1,108 @@
 package images
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"io"
-	"net/http"
-	"strings"
 
+	"phantom-lancer/internal/objectstore"
 	"phantom-lancer/internal/storage"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-type S3ObjectStore struct {
-	settings storage.ImageStorageSettings
-	client   *s3.Client
+// objectClientResolver resolves an object storage client for the Images module
+// from either the legacy inline "s3" settings or a shared object storage
+// profile referenced by "object_storage" backend.
+type objectClientResolver interface {
+	GetObjectStorageProfile(ctx context.Context, id string) (storage.ObjectStorageProfile, error)
 }
 
-func NewS3ObjectStore(settings storage.ImageStorageSettings) (*S3ObjectStore, error) {
+// newObjectClient builds an objectstore client for the given Images storage
+// settings. It supports both the legacy inline s3 backend and the shared
+// object storage profile backend. The resolver may be nil for the legacy path.
+func newObjectClient(ctx context.Context, resolver objectClientResolver, settings storage.ImageStorageSettings) (*objectstore.Client, error) {
 	settings = storage.NormalizeImageStorageSettings(settings)
-	if settings.Backend != "s3" {
-		return nil, errors.New("S3 storage is not enabled")
+	switch settings.Backend {
+	case "object_storage":
+		if resolver == nil {
+			return nil, errors.New("object storage profile resolver is unavailable")
+		}
+		if settings.ObjectStorageProfileID == "" {
+			return nil, errors.New("object storage profile is not selected")
+		}
+		profile, err := resolver.GetObjectStorageProfile(ctx, settings.ObjectStorageProfileID)
+		if err != nil {
+			return nil, err
+		}
+		return objectstore.New(profile)
+	case "s3":
+		return objectstore.New(storage.ObjectStorageProfile{
+			ProviderLabel:   settings.S3ProviderLabel,
+			Bucket:          settings.S3Bucket,
+			Region:          settings.S3Region,
+			Endpoint:        settings.S3Endpoint,
+			ForcePathStyle:  settings.S3ForcePathStyle,
+			AccessKeyID:     settings.S3AccessKeyID,
+			SecretAccessKey: settings.S3SecretAccessKey,
+			SessionToken:    settings.S3SessionToken,
+		})
+	default:
+		return nil, errors.New("object storage is not enabled")
 	}
-	if settings.S3Bucket == "" {
-		return nil, errors.New("S3 bucket is required")
-	}
-	if settings.S3Endpoint == "" {
-		return nil, errors.New("S3 compatible endpoint is required")
-	}
-	if settings.S3Region == "" {
-		settings.S3Region = "auto"
-	}
-	if settings.S3AccessKeyID == "" || settings.S3SecretAccessKey == "" {
-		return nil, errors.New("S3 credentials are required")
-	}
-	options := s3.Options{
-		Region:       settings.S3Region,
-		Credentials:  aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(settings.S3AccessKeyID, settings.S3SecretAccessKey, settings.S3SessionToken)),
-		BaseEndpoint: aws.String(settings.S3Endpoint),
-		UsePathStyle: settings.S3ForcePathStyle,
-	}
-	return &S3ObjectStore{settings: settings, client: s3.New(options)}, nil
 }
 
-func (s *S3ObjectStore) Put(ctx context.Context, key string, data []byte, mimeType string) (string, error) {
-	if key = strings.TrimSpace(key); key == "" {
-		return "", errors.New("S3 object key is required")
+// newObjectClientForAsset builds an objectstore client for reading or deleting
+// an existing asset. When the asset records the object storage profile it was
+// written with, the client is built from that profile so historical assets stay
+// reachable after the current image storage settings switch to another profile.
+// Legacy assets without a recorded profile fall back to the current settings.
+func newObjectClientForAsset(ctx context.Context, resolver objectClientResolver, asset storage.ImageAsset, settings storage.ImageStorageSettings) (*objectstore.Client, error) {
+	if asset.ObjectStorageProfileID != "" {
+		if resolver == nil {
+			return nil, errors.New("object storage profile resolver is unavailable")
+		}
+		profile, err := resolver.GetObjectStorageProfile(ctx, asset.ObjectStorageProfileID)
+		if err != nil {
+			return nil, err
+		}
+		return objectstore.New(profile)
 	}
-	if mimeType == "" {
-		mimeType = http.DetectContentType(data)
-	}
-	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String(s.settings.S3Bucket),
-		Key:         aws.String(key),
-		Body:        bytes.NewReader(data),
-		ContentType: aws.String(mimeType),
-	})
-	if err != nil {
-		return "", err
-	}
-	if out.ETag == nil {
-		return "", nil
-	}
-	return strings.Trim(*out.ETag, `"`), nil
+	return newObjectClient(ctx, resolver, settings)
 }
 
-func (s *S3ObjectStore) Get(ctx context.Context, key string) (string, []byte, error) {
-	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.settings.S3Bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return "", nil, err
+// objectStorageEndpointLabel returns a safe endpoint label for persistence,
+// resolving the effective endpoint for either backend.
+func objectStorageEndpointLabel(ctx context.Context, resolver objectClientResolver, settings storage.ImageStorageSettings) string {
+	settings = storage.NormalizeImageStorageSettings(settings)
+	if settings.Backend == "object_storage" && resolver != nil && settings.ObjectStorageProfileID != "" {
+		if profile, err := resolver.GetObjectStorageProfile(ctx, settings.ObjectStorageProfileID); err == nil {
+			return objectstore.EndpointLabel(profile.Endpoint)
+		}
+		return ""
 	}
-	defer out.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(out.Body, maxStoredImageBytes+1))
-	if err != nil {
-		return "", nil, err
-	}
-	if len(data) > maxStoredImageBytes {
-		return "", nil, errors.New("S3 object is too large")
-	}
-	mimeType := ""
-	if out.ContentType != nil {
-		mimeType = strings.TrimSpace(*out.ContentType)
-	}
-	if mimeType == "" {
-		mimeType = http.DetectContentType(data)
-	}
-	return mimeType, data, nil
+	return objectstore.EndpointLabel(settings.S3Endpoint)
 }
 
-func (s *S3ObjectStore) Delete(ctx context.Context, key string) error {
-	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(s.settings.S3Bucket),
-		Key:    aws.String(key),
-	})
-	return err
+// objectStorageBucket returns the effective bucket for persistence on the asset
+// record, resolving the profile when needed.
+func objectStorageBucket(ctx context.Context, resolver objectClientResolver, settings storage.ImageStorageSettings) string {
+	settings = storage.NormalizeImageStorageSettings(settings)
+	if settings.Backend == "object_storage" && resolver != nil && settings.ObjectStorageProfileID != "" {
+		if profile, err := resolver.GetObjectStorageProfile(ctx, settings.ObjectStorageProfileID); err == nil {
+			return profile.Bucket
+		}
+		return ""
+	}
+	return settings.S3Bucket
 }
 
-func (s *S3ObjectStore) Test(ctx context.Context) error {
-	key := strings.Trim(s.settings.S3Prefix, "/") + "/.phantom-lancer-test"
-	if key == "/.phantom-lancer-test" || key == "" {
-		key = ".phantom-lancer-test"
+// objectStorageRegion returns the effective region for persistence on the asset
+// record, resolving the profile when needed.
+func objectStorageRegion(ctx context.Context, resolver objectClientResolver, settings storage.ImageStorageSettings) string {
+	settings = storage.NormalizeImageStorageSettings(settings)
+	if settings.Backend == "object_storage" && resolver != nil && settings.ObjectStorageProfileID != "" {
+		if profile, err := resolver.GetObjectStorageProfile(ctx, settings.ObjectStorageProfileID); err == nil {
+			return profile.Region
+		}
+		return ""
 	}
-	if _, err := s.Put(ctx, key, []byte("ok"), "text/plain"); err != nil {
-		return err
-	}
-	_ = s.Delete(ctx, key)
-	return nil
+	return settings.S3Region
 }

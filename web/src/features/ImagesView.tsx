@@ -4,7 +4,7 @@ import type { ApiError, AppData, ImageAsset, ImageGenerationJob } from "../app/t
 import { friendlyError } from "../api/client";
 import { defaultImageSettings, defaultImageStorageSettings } from "../domain/labels";
 import { GeneratePanel, HistoryPanel, ImageStorageSettingsPanel, ImagesInspector, ImagesTabs, LibraryPanel, ProviderSettingsPanel } from "../images/components";
-import type { ImageJobResponse, ImageLibraryScope, ImagePrivateStatus, ImageSettingsDraft, ImageStorageSettingsDraft, ImagesTab } from "../images/types";
+import type { ImageJobResponse, ImageLibraryScope, ImagePrivateStatus, ImageSettingsDraft, ImageStorageSettingsDraft, ImageUploadResponse, ImagesTab } from "../images/types";
 
 export function ImagesView({ actions, data }: { actions: AppActions; data: AppData }) {
   const [activeTab, setActiveTab] = useState<ImagesTab>("generate");
@@ -15,6 +15,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   const [privateUnlocked, setPrivateUnlocked] = useState(false);
   const [privateExpiresAt, setPrivateExpiresAt] = useState("");
   const [privateAssets, setPrivateAssets] = useState<ImageAsset[]>([]);
+  const [imageToImageAsset, setImageToImageAsset] = useState<ImageAsset | undefined>(undefined);
 
   const settings = useMemo(() => ({ ...defaultImageSettings(), ...(data.images.settings || {}) }), [data.images.settings]);
   const storageSettings = useMemo(() => ({ ...defaultImageStorageSettings(), ...(data.images.storageSettings || {}) }), [data.images.storageSettings]);
@@ -23,8 +24,12 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   const assets = data.images.assets || [];
   const libraryAssets = libraryScope === "private" ? privateAssets : assets;
   const selectedAsset = libraryAssets.find((asset) => asset.id === selectedAssetId) || libraryAssets[0];
+  const historyJobs = useMemo(() => {
+    if (!currentJob || jobs.some((job) => job.id === currentJob.id)) return jobs;
+    return [currentJob, ...jobs];
+  }, [currentJob, jobs]);
   const latestJob = currentJob || jobs[0];
-  const hasActiveJob = jobs.some(isActiveImageJob) || Boolean(currentJob && isActiveImageJob(currentJob));
+  const hasActiveJob = historyJobs.some(isActiveImageJob);
 
   useEffect(() => {
     if (!currentJob?.id) return;
@@ -182,6 +187,32 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     }
   }
 
+  async function uploadAsset(formData: FormData): Promise<boolean> {
+    setBusy("upload");
+    try {
+      const result = await actions.api<ImageUploadResponse>("/api/images/library/assets", {
+        method: "POST",
+        csrf: actions.csrf,
+        body: formData,
+      });
+      await actions.refreshImages();
+      if (result.asset?.id) setSelectedAssetId(result.asset.id);
+      actions.setToast(result.duplicate ? "图片已存在，已复用 Library 资产" : "图片已上传", "good");
+      return true;
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+      return false;
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function useAssetForImageToImage(asset: ImageAsset) {
+    setImageToImageAsset(asset);
+    setActiveTab("generate");
+    actions.setToast("已选择 Library 图片作为图生图参考", "good");
+  }
+
   async function refreshPrivateStatus(loadAssets = false) {
     try {
       const status = await actions.api<ImagePrivateStatus>("/api/images/library/private/status");
@@ -279,7 +310,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     <div className="grid min-h-[calc(100dvh-105px)] grid-cols-[minmax(0,1fr)_320px] max-xl:grid-cols-1">
       <div className="grid content-start gap-4 p-4">
         <ImagesTabs active={activeTab} onChange={setActiveTab} />
-        {activeTab === "generate" ? <GeneratePanel busy={busy === "job"} hasApiKey={Boolean(settings.hasApiKey)} latestJob={latestJob} onSubmit={submitJob} settings={settings} /> : null}
+        {activeTab === "generate" ? <GeneratePanel busy={busy === "job"} hasApiKey={Boolean(settings.hasApiKey)} latestJob={latestJob} libraryImage={imageToImageAsset} onClearLibraryImage={() => setImageToImageAsset(undefined)} onSubmit={submitJob} settings={settings} /> : null}
         {activeTab === "library" ? (
           <LibraryPanel
             assets={libraryAssets}
@@ -295,6 +326,8 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
               setLibraryScope(scope);
               setSelectedAssetId("");
             }}
+            onUpload={uploadAsset}
+            onUseForImage={useAssetForImageToImage}
             onUnlockPrivate={unlockPrivateCollection}
             privateExpiresAt={privateExpiresAt}
             privateUnlocked={privateUnlocked}
@@ -302,7 +335,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
             storageSettings={storageSettings}
           />
         ) : null}
-        {activeTab === "history" ? <HistoryPanel jobs={jobs} onRefresh={actions.refreshImages} /> : null}
+        {activeTab === "history" ? <HistoryPanel jobs={historyJobs} onRefresh={actions.refreshImages} /> : null}
         {activeTab === "settings" ? (
           <div className="grid gap-4">
             <ProviderSettingsPanel busy={busy === "settings"} onSave={saveSettings} settings={settings} />
@@ -310,7 +343,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
           </div>
         ) : null}
       </div>
-      <ImagesInspector asset={selectedAsset} assets={libraryAssets} jobs={jobs} libraryScope={libraryScope} onArchive={(asset) => void archiveAsset(asset)} onDelete={(asset) => void deleteAsset(asset)} onMarkPrivate={(asset, nextPrivate) => void setAssetPrivate(asset, nextPrivate)} status={status} storageSettings={storageSettings} />
+      <ImagesInspector asset={selectedAsset} assets={libraryAssets} jobs={historyJobs} libraryScope={libraryScope} onArchive={(asset) => void archiveAsset(asset)} onDelete={(asset) => void deleteAsset(asset)} onMarkPrivate={(asset, nextPrivate) => void setAssetPrivate(asset, nextPrivate)} status={status} storageSettings={storageSettings} />
     </div>
   );
 }

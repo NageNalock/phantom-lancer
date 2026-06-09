@@ -2,9 +2,15 @@ package images
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"phantom-lancer/internal/events"
+	"phantom-lancer/internal/storage"
 )
 
 const onePixelPNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
@@ -101,4 +107,157 @@ func TestAssetStoreStoresDataURL(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "generated", result.Outputs[0].LocalName)); err != nil {
 		t.Fatalf("stored image missing: %v", err)
 	}
+}
+
+func TestGeneratedRemoteAssetCreatedWhenFetchFails(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "expired", http.StatusForbidden)
+	}))
+	defer remote.Close()
+
+	job, err := db.CreateImageGenerationJob(ctx, storage.ImageGenerationJob{
+		Provider:   "xai",
+		Status:     "running",
+		Mode:       ModeTextToImage,
+		ModeLabel:  ModeLabel(ModeTextToImage),
+		Model:      "grok-imagine-image-quality",
+		Prompt:     "quiet generated image",
+		ImageCount: 1,
+	}, nil)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	service := &Service{
+		Store:  db,
+		Hub:    events.NewHub(),
+		Assets: NewAssetStore(filepath.Join(t.TempDir(), "images"), nil),
+	}
+	remoteURL := remote.URL + "/image.png?signature=secret"
+	outputs, failures := service.storeGeneratedAssets(ctx, job, ImagineRequest{Prompt: job.Prompt}, &ImagineResult{
+		Images: []ResultImage{{
+			URL:      remoteURL,
+			MimeType: "image/png",
+		}},
+	})
+	if failures != 1 {
+		t.Fatalf("failures = %d, want 1", failures)
+	}
+	if len(outputs) != 1 || outputs[0].AssetID == "" || outputs[0].Storage != "remote" {
+		t.Fatalf("output should be linked to a remote asset: %#v", outputs)
+	}
+	if _, err := db.CompleteImageGenerationJob(ctx, job.ID, "/images/generations", map[string]any{}, outputs); err != nil {
+		t.Fatalf("complete job: %v", err)
+	}
+
+	assets, err := db.ListImageAssets(ctx, 20, "", "", "", "", "")
+	if err != nil {
+		t.Fatalf("list assets: %v", err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("assets count = %d, want 1: %#v", len(assets), assets)
+	}
+	if assets[0].ID != outputs[0].AssetID || assets[0].StorageBackend != "remote" {
+		t.Fatalf("unexpected library asset: %#v", assets[0])
+	}
+	if assets[0].URL != remoteURL {
+		t.Fatalf("remote library asset URL = %q, want %q", assets[0].URL, remoteURL)
+	}
+	gotJob, err := db.GetImageGenerationJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if len(gotJob.Outputs) != 1 || gotJob.Outputs[0].AssetID != assets[0].ID {
+		t.Fatalf("history output should reference library asset: %#v", gotJob.Outputs)
+	}
+	if gotJob.Outputs[0].URL != remoteURL {
+		t.Fatalf("remote history output URL = %q, want %q", gotJob.Outputs[0].URL, remoteURL)
+	}
+}
+
+func TestUploadLibraryAssetDeduplicatesByChecksum(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	data, mimeType, err := DecodeTestDataURL(onePixelPNG)
+	if err != nil {
+		t.Fatalf("decode test image: %v", err)
+	}
+	service := &Service{
+		Store:  db,
+		Hub:    events.NewHub(),
+		Assets: NewAssetStore(filepath.Join(t.TempDir(), "images"), nil),
+	}
+	first, err := service.UploadLibraryAsset(ctx, "first.png", data, mimeType)
+	if err != nil {
+		t.Fatalf("first upload: %v", err)
+	}
+	if first.Duplicate {
+		t.Fatal("first upload should not be duplicate")
+	}
+	second, err := service.UploadLibraryAsset(ctx, "second.png", data, mimeType)
+	if err != nil {
+		t.Fatalf("second upload: %v", err)
+	}
+	if !second.Duplicate || second.Asset.ID != first.Asset.ID {
+		t.Fatalf("second upload should reuse first asset: first=%#v second=%#v", first, second)
+	}
+	assets, err := db.ListImageAssets(ctx, 20, "", "", "", "", "")
+	if err != nil {
+		t.Fatalf("list assets: %v", err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("asset count = %d, want 1", len(assets))
+	}
+}
+
+func TestResolveLibraryImageInputForImageToImage(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	data, mimeType, err := DecodeTestDataURL(onePixelPNG)
+	if err != nil {
+		t.Fatalf("decode test image: %v", err)
+	}
+	service := &Service{
+		Store:  db,
+		Hub:    events.NewHub(),
+		Assets: NewAssetStore(filepath.Join(t.TempDir(), "images"), nil),
+	}
+	uploaded, err := service.UploadLibraryAsset(ctx, "source.png", data, mimeType)
+	if err != nil {
+		t.Fatalf("upload source: %v", err)
+	}
+	resolved, err := service.resolveLibraryImageInputs(ctx, ImagineRequest{
+		Mode:   ModeImageToImage,
+		Prompt: "edit",
+		Images: []ImageInput{{
+			URL:        "asset:" + uploaded.Asset.ID,
+			SourceType: "library_asset",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("resolve library input: %v", err)
+	}
+	if len(resolved.Images) != 1 || !strings.HasPrefix(resolved.Images[0].URL, "data:image/png;base64,") {
+		t.Fatalf("library image should resolve to data URL: %#v", resolved.Images)
+	}
+}
+
+func DecodeTestDataURL(dataURL string) ([]byte, string, error) {
+	return NewAssetStore("", nil).DecodeDataURL(dataURL)
 }

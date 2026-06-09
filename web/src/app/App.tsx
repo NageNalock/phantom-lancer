@@ -144,7 +144,7 @@ export function App() {
         setData((current) => ({ ...current, v2ray: next, dashboard: { ...current.dashboard, v2ray: next.status } }));
       },
       refreshImages: async () => {
-        const [settings, storageSettings, jobs, assets] = await Promise.all([
+        const [settings, storageSettings, jobs, assets] = await Promise.allSettled([
           api<ImagesPayload>("/api/images/settings"),
           api<{ settings?: ImagesPayload["storageSettings"] }>("/api/images/storage-settings"),
           api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=40"),
@@ -152,8 +152,15 @@ export function App() {
         ]);
         setData((current) => ({
           ...current,
-          images: { ...settings, storageSettings: storageSettings.settings, jobs: jobs.items || [], assets: assets.items || [], count: jobs.count || 0 },
-          dashboard: { ...current.dashboard, images: settings.status },
+          images: {
+            ...current.images,
+            ...(settings.status === "fulfilled" ? settings.value : {}),
+            storageSettings: storageSettings.status === "fulfilled" ? storageSettings.value.settings : current.images.storageSettings,
+            jobs: jobs.status === "fulfilled" ? jobs.value.items || [] : current.images.jobs,
+            assets: assets.status === "fulfilled" ? assets.value.items || [] : current.images.assets,
+            count: jobs.status === "fulfilled" ? jobs.value.count || 0 : current.images.count,
+          },
+          dashboard: { ...current.dashboard, images: settings.status === "fulfilled" ? settings.value.status : current.dashboard.images },
         }));
       },
       setV2RayExportOpen,

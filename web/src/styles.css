@@ -137,7 +137,7 @@
   .panel {
     border: 1px solid var(--line);
     background: var(--surface);
-    @apply min-w-0 rounded-xl;
+    @apply min-w-0 rounded-lg;
   }
 
   .panel-header {

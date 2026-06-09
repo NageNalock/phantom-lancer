@@ -1,4 +1,5 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { useRef, useState } from "react";
+import type { ButtonHTMLAttributes, DragEvent, ReactNode } from "react";
 import type { Tone } from "../app/types";
 
 export function Button({
@@ -7,7 +8,7 @@ export function Button({
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & { tone?: "neutral" | "primary" | "danger" }) {
   const toneClass = tone === "primary" ? "button-primary" : tone === "danger" ? "button-danger" : "";
-  return <button className={`button ${toneClass} ${className}`} type={props.type || "button"} {...props} />;
+  return <button {...props} className={`button ${toneClass} ${className}`} type={props.type || "button"} />;
 }
 
 export function Panel({ title, subtitle, actions, children, className = "" }: { title?: string; subtitle?: string; actions?: ReactNode; children: ReactNode; className?: string }) {
@@ -81,6 +82,87 @@ export function Field({ label, children, help }: { label: string; children: Reac
       {children}
       {help ? <small className="muted text-xs">{help}</small> : null}
     </label>
+  );
+}
+
+export function ImageDropInput({
+  accept = "image/png,image/jpeg,image/webp,image/gif",
+  disabled = false,
+  hint = "点击选择，或拖拽图片到这里",
+  label = "上传图片",
+  name,
+  onFiles,
+  resetAfterSelect = false,
+}: {
+  accept?: string;
+  disabled?: boolean;
+  hint?: string;
+  label?: string;
+  name?: string;
+  onFiles?: (files: File[]) => void;
+  resetAfterSelect?: boolean;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const [fileName, setFileName] = useState("");
+
+  function setFiles(files: FileList | File[]) {
+    const items = Array.from(files).filter((file) => file.type.startsWith("image/"));
+    const file = items[0];
+    if (!file) return;
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    if (inputRef.current) inputRef.current.files = transfer.files;
+    setFileName(file.name);
+    onFiles?.([file]);
+    if (resetAfterSelect && inputRef.current) inputRef.current.value = "";
+  }
+
+  function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setDragging(false);
+    if (disabled) return;
+    setFiles(event.dataTransfer.files);
+  }
+
+  return (
+    <div
+      aria-disabled={disabled}
+      className={`grid gap-1.5 rounded-lg border border-dashed p-3 text-left transition ${disabled ? "border-[var(--line)] bg-[var(--surface-soft)] opacity-60" : dragging ? "border-[var(--accent)] bg-[var(--accent-soft)]" : "border-[var(--line-strong)] bg-[var(--surface-soft)] hover:bg-[var(--surface-strong)]"}`}
+      onClick={() => {
+        if (!disabled) inputRef.current?.click();
+      }}
+      onDragEnter={(event) => {
+        event.preventDefault();
+        if (!disabled) setDragging(true);
+      }}
+      onDragLeave={() => setDragging(false)}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={handleDrop}
+      onKeyDown={(event) => {
+        if (!disabled && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          inputRef.current?.click();
+        }
+      }}
+      role="button"
+      tabIndex={disabled ? -1 : 0}
+    >
+      <input
+        accept={accept}
+        className="hidden"
+        disabled={disabled}
+        name={name}
+        onChange={(event) => {
+          if (event.target.files) setFiles(event.target.files);
+        }}
+        ref={inputRef}
+        type="file"
+      />
+      <span className="text-xs font-semibold text-[var(--muted-strong)]">{label}</span>
+      <span className="text-xs text-[var(--muted)]">{fileName || hint}</span>
+    </div>
   );
 }
 
