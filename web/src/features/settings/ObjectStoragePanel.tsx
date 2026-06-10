@@ -119,7 +119,7 @@ export function ObjectStoragePanel({ actions }: { actions: AppActions }) {
       actions={<Button onClick={() => void load()}>{loading ? "加载中" : "刷新"}</Button>}
     >
       <div className="grid grid-cols-[minmax(0,1fr)_320px] gap-4 max-lg:grid-cols-1">
-        <div className="grid gap-2">
+        <div className="grid content-start gap-2">
           {items.length ? (
             items.map((profile) => (
               <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3" key={profile.id}>

@@ -104,6 +104,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/codex-gateway/api-keys/", s.handleCodexGatewayAPIKeySubroutes)
 	mux.HandleFunc("GET /api/codex-gateway/accounts", s.handleListCodexGatewayAccounts)
 	mux.HandleFunc("POST /api/codex-gateway/accounts", s.handleCreateCodexGatewayAccount)
+	mux.HandleFunc("GET /api/codex-gateway/accounts/export", s.handleExportCodexGatewayAccounts)
+	mux.HandleFunc("POST /api/codex-gateway/accounts/import", s.handleImportCodexGatewayAccounts)
 	mux.HandleFunc("POST /api/codex-gateway/accounts/oauth/start", s.handleStartCodexGatewayOAuth)
 	mux.HandleFunc("POST /api/codex-gateway/accounts/oauth/relay", s.handleRelayCodexGatewayOAuth)
 	mux.HandleFunc("GET /api/codex-gateway/accounts/oauth/callback", s.handleCodexGatewayOAuthCallback)

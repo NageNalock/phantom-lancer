@@ -17,6 +17,16 @@ import (
 	"time"
 )
 
+// DefaultOAuthClientID is the public Codex CLI OAuth client. OpenAI only allows
+// this client to redirect to http://localhost:1455/auth/callback, so remote
+// deployments must relay the callback URL back to the server manually.
+const (
+	DefaultOAuthClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
+	DefaultOAuthAuthURL     = "https://auth.openai.com/oauth/authorize"
+	DefaultOAuthTokenURL    = "https://auth.openai.com/oauth/token"
+	DefaultOAuthRedirectURI = "http://localhost:1455/auth/callback"
+)
+
 type Runtime struct {
 	BaseURL        string
 	OAuthAuthURL   string
@@ -109,15 +119,15 @@ type OAuthAuthorizationOptions struct {
 func BuildAuthorizationURL(options OAuthAuthorizationOptions) (string, error) {
 	authURL := strings.TrimSpace(options.AuthURL)
 	if authURL == "" {
-		return "", errors.New("oauth authorization url is required")
+		authURL = DefaultOAuthAuthURL
 	}
 	clientID := strings.TrimSpace(options.ClientID)
 	if clientID == "" {
-		return "", errors.New("oauth client id is required")
+		clientID = DefaultOAuthClientID
 	}
 	redirectURI := strings.TrimSpace(options.RedirectURI)
 	if redirectURI == "" {
-		return "", errors.New("oauth redirect uri is required")
+		redirectURI = DefaultOAuthRedirectURI
 	}
 	if strings.TrimSpace(options.State) == "" || strings.TrimSpace(options.CodeChallenge) == "" {
 		return "", errors.New("state and code_challenge are required")
@@ -144,11 +154,11 @@ func BuildAuthorizationURL(options OAuthAuthorizationOptions) (string, error) {
 func (c Client) ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI string) (OAuthTokenResponse, error) {
 	tokenURL := strings.TrimSpace(c.runtime.OAuthTokenURL)
 	if tokenURL == "" {
-		return OAuthTokenResponse{}, errors.New("oauth token url is required")
+		tokenURL = DefaultOAuthTokenURL
 	}
 	clientID := strings.TrimSpace(c.runtime.OAuthClientID)
 	if clientID == "" {
-		return OAuthTokenResponse{}, errors.New("oauth client id is required")
+		clientID = DefaultOAuthClientID
 	}
 	values := url.Values{}
 	values.Set("grant_type", "authorization_code")
@@ -168,11 +178,11 @@ func (c Client) ExchangeCode(ctx context.Context, code, codeVerifier, redirectUR
 func (c Client) RefreshAccessToken(ctx context.Context, refreshToken string) (OAuthTokenResponse, error) {
 	tokenURL := strings.TrimSpace(c.runtime.OAuthTokenURL)
 	if tokenURL == "" {
-		return OAuthTokenResponse{}, errors.New("oauth token url is required")
+		tokenURL = DefaultOAuthTokenURL
 	}
 	clientID := strings.TrimSpace(c.runtime.OAuthClientID)
 	if clientID == "" {
-		return OAuthTokenResponse{}, errors.New("oauth client id is required")
+		clientID = DefaultOAuthClientID
 	}
 	values := url.Values{}
 	values.Set("grant_type", "refresh_token")

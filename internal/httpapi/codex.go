@@ -195,11 +195,13 @@ func (s *Server) handleCreateCodexWorkspace(w http.ResponseWriter, r *http.Reque
 	}
 	var req struct {
 		storage.CodexCliWorkspace
-		CreateIfMissing bool `json:"createIfMissing"`
+		Path            string `json:"path"`
+		CreateIfMissing bool   `json:"createIfMissing"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	req.CodexCliWorkspace.Path = req.Path
 	created, err := s.codex.CreateWorkspaceWithOptions(r.Context(), req.CodexCliWorkspace, codexclient.CreateWorkspaceOptions{CreateIfMissing: req.CreateIfMissing})
 	if err != nil {
 		s.auditCodexWorkspaceFailure(r, "", "codex_cli.workspace.create_failed", "Codex 工作区登记失败", err, map[string]any{

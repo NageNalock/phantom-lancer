@@ -1400,6 +1400,8 @@ func DefaultCodexGatewaySettings() CodexGatewaySettings {
 		BaseURL:               "https://chatgpt.com/backend-api",
 		OAuthAuthURL:          "https://auth.openai.com/oauth/authorize",
 		OAuthTokenURL:         "https://auth.openai.com/oauth/token",
+		OAuthClientID:         "app_EMoamEEZ73f0CkXaXp7hrann",
+		OAuthRedirectURI:      "http://localhost:1455/auth/callback",
 		RequestTimeoutSeconds: 600,
 		RefreshMarginSeconds:  300,
 		DefaultInstructions:   "You are a helpful assistant.",
@@ -1424,7 +1426,13 @@ func NormalizeCodexGatewaySettings(settings CodexGatewaySettings) CodexGatewaySe
 		settings.OAuthTokenURL = defaults.OAuthTokenURL
 	}
 	settings.OAuthClientID = strings.TrimSpace(settings.OAuthClientID)
+	if settings.OAuthClientID == "" {
+		settings.OAuthClientID = defaults.OAuthClientID
+	}
 	settings.OAuthRedirectURI = strings.TrimSpace(settings.OAuthRedirectURI)
+	if settings.OAuthRedirectURI == "" {
+		settings.OAuthRedirectURI = defaults.OAuthRedirectURI
+	}
 	if settings.RequestTimeoutSeconds <= 0 {
 		settings.RequestTimeoutSeconds = defaults.RequestTimeoutSeconds
 	}

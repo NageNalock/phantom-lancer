@@ -529,7 +529,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
           ))}
         </div>
 
-        {tab === "registry" || tab === "settings" ? (
+        {tab === "registry" ? (
           <RegistryPanel
             busy={busy}
             createCredential={() => void createCredential()}
@@ -554,6 +554,21 @@ export function DockerView({ actions }: { actions: AppActions }) {
             setCredentialName={setCredentialName}
             setCredentialPrefix={setCredentialPrefix}
             setRegistrySettings={setRegistrySettings}
+          />
+        ) : tab === "settings" ? (
+          <HostOperationsPanel
+            busy={busy}
+            control={control}
+            createContainer={() => void createContainer()}
+            createImage={createImage}
+            createName={createName}
+            daemonAction={(action) => void daemonAction(action)}
+            installDocker={() => void installDocker()}
+            loadControl={() => void loadControl()}
+            registryPublicUrl={registrySettings.publicUrl}
+            saveDockerSettings={(next) => void saveDockerSettings(next)}
+            setCreateImage={setCreateImage}
+            setCreateName={setCreateName}
           />
         ) : !available ? (
           <EmptyState
@@ -664,21 +679,6 @@ export function DockerView({ actions }: { actions: AppActions }) {
           />
         )}
       </Panel>
-
-      <HostOperationsPanel
-        busy={busy}
-        control={control}
-        createContainer={() => void createContainer()}
-        createImage={createImage}
-        createName={createName}
-        daemonAction={(action) => void daemonAction(action)}
-        installDocker={() => void installDocker()}
-        loadControl={() => void loadControl()}
-        registryPublicUrl={registrySettings.publicUrl}
-        saveDockerSettings={(next) => void saveDockerSettings(next)}
-        setCreateImage={setCreateImage}
-        setCreateName={setCreateName}
-      />
 
       {job ? (
         <Panel

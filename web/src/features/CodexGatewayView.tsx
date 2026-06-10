@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent } from "react";
 import type { AppActions } from "../app/App";
 import type { AppData, CodexGatewayAPIKey, CodexGatewayAccount, CodexGatewayRequestLog, CodexGatewaySettings, Tone } from "../app/types";
-import { friendlyError } from "../api/client";
+import { friendlyError, readCookie } from "../api/client";
 import { Button, ContextList, EmptyState, Field, Metric, Notice, Panel, Pill } from "../components/ui";
 import { codexGatewayAccountStatusLabel, codexGatewayStatusLabel, defaultCodexGatewaySettings, formatDate } from "../domain/labels";
 
@@ -32,6 +33,10 @@ export function CodexGatewayView({ actions, data }: { actions: AppActions; data:
   const [oneTimeToken, setOneTimeToken] = useState("");
   const [accountDraft, setAccountDraft] = useState<GatewayAccountDraft>(emptyAccountDraft);
   const [busy, setBusy] = useState("");
+  const [oauthStarted, setOauthStarted] = useState(false);
+  const [oauthRedirectUri, setOauthRedirectUri] = useState("");
+  const [oauthCallbackUrl, setOauthCallbackUrl] = useState("");
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeAccounts = gateway.accounts?.filter((account) => account.status === "active").length || 0;
   const activeKeys = gateway.apiKeys?.filter((key) => key.status === "active").length || 0;
@@ -147,21 +152,102 @@ export function CodexGatewayView({ actions, data }: { actions: AppActions; data:
   async function startOAuth() {
     setBusy("oauth");
     try {
-      const result = await actions.api<{ authUrl?: string }>("/api/codex-gateway/accounts/oauth/start", {
+      const result = await actions.api<{ authUrl?: string; redirectUri?: string }>("/api/codex-gateway/accounts/oauth/start", {
         method: "POST",
         csrf: actions.csrf,
         body: {},
       });
       if (result.authUrl) {
         window.open(result.authUrl, "codex_gateway_oauth", "popup=yes,width=520,height=720");
+        setOauthRedirectUri(result.redirectUri || "");
+        setOauthStarted(true);
       }
-      actions.setToast("OAuth 登录窗口已打开", "good");
+      actions.setToast("OAuth 登录窗口已打开，登录后粘贴回调 URL 完成导入", "good");
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");
     } finally {
       setBusy("");
     }
   }
+
+  async function relayOAuth() {
+    const callbackUrl = oauthCallbackUrl.trim();
+    if (!callbackUrl) {
+      actions.setToast("请粘贴登录后浏览器跳转到的回调 URL", "warn");
+      return;
+    }
+    setBusy("oauth-relay");
+    try {
+      await actions.api("/api/codex-gateway/accounts/oauth/relay", {
+        method: "POST",
+        csrf: actions.csrf,
+        body: { callbackUrl },
+      });
+      setOauthCallbackUrl("");
+      setOauthStarted(false);
+      setOauthRedirectUri("");
+      await actions.refreshCodexGateway();
+      actions.setToast("OAuth 账号已导入", "good");
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function exportAccounts() {
+    setBusy("account-export");
+    try {
+      const response = await fetch("/api/codex-gateway/accounts/export", { headers: { Accept: "application/json" } });
+      if (!response.ok) {
+        throw new Error(`导出失败：${response.status}`);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `codex-gateway-accounts-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      actions.setToast("账号配置已导出", "good");
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function importAccounts(file: File) {
+    setBusy("account-import");
+    try {
+      const text = await file.text();
+      const response = await fetch("/api/codex-gateway/accounts/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": actions.csrf || readCookie("pl_csrf") },
+        body: text,
+      });
+      const result = (await response.json().catch(() => ({}))) as {
+        added?: number;
+        updated?: number;
+        failed?: number;
+        error?: { message?: string };
+      };
+      if (!response.ok) {
+        throw new Error(result.error?.message || `导入失败：${response.status}`);
+      }
+      await actions.refreshCodexGateway();
+      const failed = result.failed || 0;
+      const summary = `导入完成：新增 ${result.added || 0}，更新 ${result.updated || 0}${failed ? `，失败 ${failed}` : ""}`;
+      actions.setToast(summary, failed ? "warn" : "good");
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setBusy("");
+    }
+  }
+
 
   async function createAccount() {
     if (!accountDraft.accessToken.trim() && !accountDraft.refreshToken.trim()) {
@@ -369,14 +455,56 @@ export function CodexGatewayView({ actions, data }: { actions: AppActions; data:
 
         <Panel
           actions={
-            <Button disabled={busy === "oauth"} onClick={() => void startOAuth()}>
-              OAuth 登录
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                accept="application/json,.json,.txt,text/plain"
+                className="hidden"
+                onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (file) void importAccounts(file);
+                }}
+                ref={importInputRef}
+                type="file"
+              />
+              <Button disabled={busy === "account-import"} onClick={() => importInputRef.current?.click()}>
+                导入
+              </Button>
+              <Button disabled={busy === "account-export"} onClick={() => void exportAccounts()}>
+                导出
+              </Button>
+              <Button disabled={busy === "oauth"} onClick={() => void startOAuth()}>
+                OAuth 登录
+              </Button>
+            </div>
           }
           subtitle="账号凭据保存在本地 SQLite；列表只展示凭据是否存在，不回显 token。"
           title="Codex OAuth 账号"
         >
           <div className="grid gap-4">
+            {oauthStarted ? (
+              <Notice>
+                <div className="grid gap-2">
+                  <strong className="text-sm">完成 OAuth 登录导入</strong>
+                  <p className="muted m-0 text-xs">
+                    在弹出窗口完成登录后，浏览器会跳转到回调地址
+                    {oauthRedirectUri ? <code className="mono mx-1 break-all">{oauthRedirectUri}</code> : " "}
+                    （可能因本机未监听而打不开）。复制该地址栏的完整 URL 粘贴到下方，点击「完成导入」。
+                  </p>
+                  <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 max-sm:grid-cols-1">
+                    <input
+                      className="input mono"
+                      onChange={(event) => setOauthCallbackUrl(event.target.value)}
+                      placeholder="http://localhost:1455/auth/callback?code=...&state=..."
+                      value={oauthCallbackUrl}
+                    />
+                    <Button disabled={busy === "oauth-relay"} onClick={() => void relayOAuth()} tone="primary">
+                      完成导入
+                    </Button>
+                  </div>
+                </div>
+              </Notice>
+            ) : null}
             <div className="grid grid-cols-3 gap-3 max-xl:grid-cols-2 max-md:grid-cols-1">
               <Field label="标签">
                 <input className="input" onChange={(event) => setAccountDraft((current) => ({ ...current, label: event.target.value }))} value={accountDraft.label} />
