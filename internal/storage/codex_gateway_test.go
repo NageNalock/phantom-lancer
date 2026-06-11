@@ -97,6 +97,39 @@ func TestCodexGatewayAPIKeyLifecycle(t *testing.T) {
 	}
 }
 
+func TestCodexGatewayAccountPatchWithoutTokensPreservesStoredTokens(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	account, err := store.CreateCodexGatewayAccount(ctx, CodexGatewayAccountInput{
+		Label:        "primary",
+		Status:       "active",
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+	})
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if _, err := store.UpdateCodexGatewayAccountTokens(ctx, account.ID, "new-access", "new-refresh", "2030-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("refresh tokens: %v", err)
+	}
+	label := "renamed"
+	if _, err := store.UpdateCodexGatewayAccount(ctx, account.ID, CodexGatewayAccountPatch{Label: &label}); err != nil {
+		t.Fatalf("patch account: %v", err)
+	}
+	secret, err := store.GetCodexGatewayAccountSecret(ctx, account.ID)
+	if err != nil {
+		t.Fatalf("get account secret: %v", err)
+	}
+	if secret.AccessToken != "new-access" || secret.RefreshToken != "new-refresh" {
+		t.Fatalf("tokens were overwritten: access=%q refresh=%q", secret.AccessToken, secret.RefreshToken)
+	}
+}
+
 func TestCodexGatewayRequestLogCreatePrunesOverRetention(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)

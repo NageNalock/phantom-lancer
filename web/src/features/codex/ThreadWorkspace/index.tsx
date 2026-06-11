@@ -158,6 +158,14 @@ export function ThreadWorkspace({
   useEffect(() => {
     if (!workspaceWriteAllowed && sandbox === "workspace-write") setSandbox("read-only");
   }, [sandbox, workspaceWriteAllowed]);
+  useEffect(() => {
+    if (!models.length) return;
+    setModel((current) => {
+      const trimmed = current.trim();
+      if (trimmed && models.some((item) => item.id === trimmed)) return trimmed;
+      return models.find((item) => item.isDefault)?.id || models[0]?.id || trimmed;
+    });
+  }, [models]);
 
   // Live updates reuse the shared Event API; the Codex history endpoint remains
   // the source for structured transcript rows.
@@ -200,6 +208,10 @@ export function ThreadWorkspace({
 
   async function submitTurn(path: string) {
     if (!prompt.trim()) return;
+    if (status?.appServer?.state === "running" && !model.trim()) {
+      actions.setToast("请选择一个可用模型后再发送。", "danger");
+      return;
+    }
     setSending(true);
     try {
       await actions.api(`/api/codex/threads/${thread.id}/${path}`, {
@@ -294,43 +306,47 @@ export function ThreadWorkspace({
           />
           <p className="muted mt-1 mb-0 truncate text-xs">{workspace?.label || workspace?.pathSummary}</p>
         </div>
-        <Pill tone={threadTone(thread.status)}>{codexThreadStatusLabel(thread.status)}</Pill>
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <Pill tone={threadTone(thread.status)}>{codexThreadStatusLabel(thread.status)}</Pill>
+          <ThreadP1Panels actions={actions} thread={thread} onRefresh={loadEvents} />
+        </div>
       </div>
       <div className="panel-body flex min-h-0 flex-1 flex-col gap-3">
         <AppServerStrip status={status} onStart={startAppServer} />
         <EventStream events={events} />
-        <ThreadP1Panels actions={actions} thread={thread} onRefresh={loadEvents} />
 
-        {thread.lastError ? <Notice tone="danger">{thread.lastError}</Notice> : null}
-
-        <Composer
-          prompt={prompt}
-          onPrompt={setPrompt}
-          promptRef={promptRef}
-          sandbox={sandbox}
-          onSandbox={setSandbox}
-          approval={approval}
-          onApproval={setApproval}
-          model={model}
-          onModel={setModel}
-          models={models}
-          skills={skills}
-          onInsertSkill={insertSkill}
-          workspaceWriteAllowed={Boolean(workspaceWriteAllowed)}
-          sandboxLocked={isChat}
-          attachments={attachments}
-          onUpload={(file) => void uploadAttachment(file)}
-          onRemoveAttachment={(id) => void removeAttachment(id)}
-          busy={busy}
-          interactive={interactive}
-          hasActiveTurn={Boolean(activeTurn)}
-          sending={sending}
-          steering={steering}
-          onSend={(event) => void send(event)}
-          onQueue={() => void submitTurn("queue")}
-          onInterrupt={() => void interrupt()}
-          onSteer={() => void steer()}
-        />
+        <div className="sticky bottom-0 z-10 grid gap-3 border-t border-[var(--line)] bg-[var(--surface)] pt-3">
+          {thread.lastError ? <Notice tone="danger">{thread.lastError}</Notice> : null}
+          <Composer
+            prompt={prompt}
+            onPrompt={setPrompt}
+            promptRef={promptRef}
+            sandbox={sandbox}
+            onSandbox={setSandbox}
+            approval={approval}
+            onApproval={setApproval}
+            model={model}
+            onModel={setModel}
+            modelRequired={status?.appServer?.state === "running"}
+            models={models}
+            skills={skills}
+            onInsertSkill={insertSkill}
+            workspaceWriteAllowed={Boolean(workspaceWriteAllowed)}
+            sandboxLocked={isChat}
+            attachments={attachments}
+            onUpload={(file) => void uploadAttachment(file)}
+            onRemoveAttachment={(id) => void removeAttachment(id)}
+            busy={busy}
+            interactive={interactive}
+            hasActiveTurn={Boolean(activeTurn)}
+            sending={sending}
+            steering={steering}
+            onSend={(event) => void send(event)}
+            onQueue={() => void submitTurn("queue")}
+            onInterrupt={() => void interrupt()}
+            onSteer={() => void steer()}
+          />
+        </div>
       </div>
     </section>
   );

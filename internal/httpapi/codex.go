@@ -730,6 +730,8 @@ func codexTurnErrorStatus(err error) int {
 		return http.StatusForbidden
 	case errors.Is(err, codexclient.ErrModuleDisabled):
 		return http.StatusServiceUnavailable
+	case errors.Is(err, codexclient.ErrModelRequired):
+		return http.StatusBadRequest
 	case errors.Is(err, codexclient.ErrNoRunner):
 		return http.StatusServiceUnavailable
 	case errors.Is(err, codexclient.ErrTurnInProgress):
@@ -745,6 +747,8 @@ func codexTurnErrorCode(err error) string {
 		return "permission_denied"
 	case errors.Is(err, codexclient.ErrModuleDisabled):
 		return "codex_disabled"
+	case errors.Is(err, codexclient.ErrModelRequired):
+		return "codex_model_required"
 	case errors.Is(err, codexclient.ErrNoRunner):
 		return "codex_no_runner"
 	case errors.Is(err, codexclient.ErrTurnInProgress):

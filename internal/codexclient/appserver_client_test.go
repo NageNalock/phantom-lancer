@@ -14,6 +14,7 @@ func TestDispatchRoutesMessageKinds(t *testing.T) {
 		pending:   make(map[int64]chan jsonRPCMessage),
 		notifyCh:  make(chan Notification, 4),
 		requestCh: make(chan ServerRequest, 4),
+		closeCh:   make(chan struct{}),
 		doneCh:    make(chan struct{}),
 	}
 

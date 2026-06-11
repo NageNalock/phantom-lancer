@@ -38,6 +38,10 @@ var ErrModuleDisabled = errors.New("codex module disabled")
 // ErrNoRunner is returned when neither app-server nor exec fallback is available.
 var ErrNoRunner = errors.New("no available codex runner")
 
+// ErrModelRequired is returned when the app-server path needs an explicit model
+// but neither settings nor the live catalog provide one.
+var ErrModelRequired = errors.New("codex model is required")
+
 // ErrTurnInProgress is returned when another Codex turn is already active.
 var ErrTurnInProgress = errors.New("codex turn already in progress")
 
@@ -684,7 +688,10 @@ func (s *Service) startTurn(ctx context.Context, threadID string, input TurnInpu
 	if err != nil {
 		return storage.CodexCliTurn{}, err
 	}
-	model := firstNonEmpty(input.Model, thread.Model, s.currentSettings().DefaultModel)
+	model, err := s.resolveTurnModel(ctx, input.Model, thread.Model, ws.DefaultModel, s.currentSettings().DefaultModel)
+	if err != nil {
+		return storage.CodexCliTurn{}, err
+	}
 
 	images, err := s.attachmentPaths(ctx, threadID, input.AttachmentIDs)
 	if err != nil {
@@ -791,17 +798,53 @@ func (s *Service) runExecTurn(ctx context.Context, thread storage.CodexCliThread
 	s.completeTurn(ctx, thread, turn, nil)
 }
 
+func (s *Service) resolveTurnModel(ctx context.Context, candidates ...string) (string, error) {
+	for _, candidate := range candidates {
+		if model := strings.TrimSpace(candidate); model != "" {
+			return model, nil
+		}
+	}
+	if s.supervisor.Client() == nil {
+		return "", nil
+	}
+	models, err := s.ListModels(ctx)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrModelRequired, err)
+	}
+	if model := defaultModelFromCatalog(models); model != "" {
+		return model, nil
+	}
+	return "", ErrModelRequired
+}
+
+func defaultModelFromCatalog(models []CodexModel) string {
+	for _, model := range models {
+		if model.IsDefault && strings.TrimSpace(model.ID) != "" {
+			return strings.TrimSpace(model.ID)
+		}
+	}
+	for _, model := range models {
+		if strings.TrimSpace(model.ID) != "" {
+			return strings.TrimSpace(model.ID)
+		}
+	}
+	return ""
+}
+
 func (s *Service) runAppServerTurn(ctx context.Context, client *AppServerClient, thread storage.CodexCliThread, ws storage.CodexCliWorkspace, turn storage.CodexCliTurn, prompt, model string, policy RunPolicy, images []string) {
 	run, _ := s.store.CreateCodexCliRun(ctx, storage.CodexCliRun{ThreadID: thread.ID, TurnID: turn.ID, Mode: "app_server", PID: client.PID(), Status: "running"})
 	codexThreadID := thread.CodexThreadID
 	if codexThreadID == "" {
 		startCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		raw, err := client.Call(startCtx, "thread/start", map[string]any{
+		params := map[string]any{
 			"cwd":            ws.Path,
 			"approvalPolicy": appServerApprovalPolicy(policy.ApprovalPolicy),
 			"sandbox":        appServerSandboxMode(policy.Sandbox),
-			"model":          model,
-		})
+		}
+		if strings.TrimSpace(model) != "" {
+			params["model"] = strings.TrimSpace(model)
+		}
+		raw, err := client.Call(startCtx, "thread/start", params)
 		cancel()
 		if err != nil {
 			_ = s.store.FinishCodexCliRun(ctx, run.ID, "failed", 1, Redact(err.Error(), 200))
@@ -824,7 +867,9 @@ func (s *Service) runAppServerTurn(ctx context.Context, client *AppServerClient,
 		"input":          buildTurnInput(prompt, images),
 		"approvalPolicy": appServerApprovalPolicy(policy.ApprovalPolicy),
 		"sandboxPolicy":  appServerSandboxPolicy(policy, ws.Path),
-		"model":          model,
+	}
+	if strings.TrimSpace(model) != "" {
+		params["model"] = strings.TrimSpace(model)
 	}
 	raw, err := client.Call(turnCtx, "turn/start", params)
 	if err != nil {
@@ -862,6 +907,9 @@ func (s *Service) interruptTurn(ctx context.Context, turnID string, completeAuto
 	if err != nil {
 		return storage.CodexCliTurn{}, err
 	}
+	if turn.Status != "queued" && turn.Status != "running" && turn.Status != "waiting_approval" {
+		return turn, nil
+	}
 	if turn.Status == "queued" {
 		_, _ = s.takeQueuedInput(turnID)
 	} else if client := s.supervisor.Client(); client != nil && thread.CodexThreadID != "" {
@@ -873,16 +921,11 @@ func (s *Service) interruptTurn(ctx context.Context, turnID string, completeAuto
 		_, _ = client.Call(cctx, "turn/interrupt", params)
 		cancel()
 	}
-	turn.Status = "cancelled"
-	turn.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	saved, _ := s.store.SaveCodexCliTurn(ctx, turn)
-	thread.Status = s.threadStatusFromTurns(ctx, thread.ID)
-	_, _ = s.store.SaveCodexCliThread(ctx, thread)
-	s.appendThreadEvent(ctx, thread.ID, turnID, EventTurnCancelled, "codex", "", "", nil)
-	if completeAutomation {
-		s.completeAutomationRunForTurn(ctx, turn, false, "Codex turn cancelled")
+	saved, ok := s.cancelTurn(ctx, thread.ID, turn, "Codex turn cancelled", completeAutomation)
+	if !ok {
+		return saved, nil
 	}
-	s.cleanupTurnAttachments(ctx, turnID)
+	s.appendThreadEvent(ctx, thread.ID, turnID, EventTurnCancelled, "codex", "", "", nil)
 	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.turn.interrupted", RiskLevel: "low", Summary: "已中断 Codex turn", Payload: map[string]any{"threadId": thread.ID, "turnId": turnID}})
 	s.finishActiveRun(ctx, &appTurnContext{turnID: turnID}, "cancelled", 130, runSummary)
 	s.clearActiveTurn(turnID)
@@ -1000,31 +1043,24 @@ func (s *Service) handleNotification(notif Notification) {
 	s.appendThreadEvent(ctx, active.threadID, active.turnID, mapped.EventType, mapped.CodexMethod, mapped.ItemType, mapped.TextPreview, mapped.Payload)
 
 	if mapped.TurnStatus != "" {
-		thread, err := s.store.GetCodexCliThread(ctx, active.threadID)
-		if err != nil {
-			return
-		}
 		turn, err := s.store.GetCodexCliTurn(ctx, active.turnID)
 		if err != nil {
 			return
 		}
 		switch mapped.TurnStatus {
 		case "completed":
-			s.finishActiveRun(ctx, active, "exited", 0, "")
-			s.completeTurn(ctx, thread, turn, nil)
+			if _, ok := s.completeTurn(ctx, storage.CodexCliThread{ID: active.threadID}, turn, nil); ok {
+				s.finishActiveRun(ctx, active, "exited", 0, "")
+			}
 		case "failed":
 			message := Preview(mapped.TextPreview, 200)
-			s.finishActiveRun(ctx, active, "failed", 1, message)
-			s.failTurn(ctx, thread, turn, message)
+			if _, ok := s.failTurn(ctx, storage.CodexCliThread{ID: active.threadID}, turn, message); ok {
+				s.finishActiveRun(ctx, active, "failed", 1, message)
+			}
 		case "cancelled":
-			s.finishActiveRun(ctx, active, "cancelled", 130, "")
-			turn.Status = "cancelled"
-			turn.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
-			_, _ = s.store.SaveCodexCliTurn(ctx, turn)
-			thread.Status = "idle"
-			_, _ = s.store.SaveCodexCliThread(ctx, thread)
-			s.completeAutomationRunForTurn(ctx, turn, false, "Codex turn cancelled")
-			s.cleanupTurnAttachments(ctx, turn.ID)
+			if _, ok := s.cancelTurn(ctx, active.threadID, turn, "Codex turn cancelled", true); ok {
+				s.finishActiveRun(ctx, active, "cancelled", 130, "")
+			}
 		}
 		s.clearActiveTurn(active.turnID)
 	}
@@ -1395,33 +1431,67 @@ func (s *Service) LegacyTables(ctx context.Context) ([]string, error) {
 
 // ---- helpers ----
 
-func (s *Service) completeTurn(ctx context.Context, thread storage.CodexCliThread, turn storage.CodexCliTurn, usage map[string]any) {
-	turn.Status = "completed"
+func (s *Service) completeTurn(ctx context.Context, thread storage.CodexCliThread, turn storage.CodexCliTurn, usage map[string]any) (storage.CodexCliTurn, bool) {
+	saved, ok := s.finishTurnStatus(ctx, thread.ID, turn, "completed", "", usage, "running", "waiting_approval")
+	if !ok {
+		return saved, false
+	}
+	s.appendThreadEvent(ctx, thread.ID, turn.ID, EventTurnCompleted, "codex", "", "", nil)
+	s.completeAutomationRunForTurn(ctx, saved, true, "")
+	s.cleanupTurnAttachments(ctx, turn.ID)
+	go s.drainTurnQueue(context.Background())
+	return saved, true
+}
+
+func (s *Service) failTurn(ctx context.Context, thread storage.CodexCliThread, turn storage.CodexCliTurn, message string) (storage.CodexCliTurn, bool) {
+	saved, ok := s.finishTurnStatus(ctx, thread.ID, turn, "failed", message, nil, "queued", "running", "waiting_approval")
+	if !ok {
+		return saved, false
+	}
+	s.appendThreadEvent(ctx, thread.ID, turn.ID, EventTurnFailed, "codex", "", message, nil)
+	s.completeAutomationRunForTurn(ctx, saved, false, message)
+	s.cleanupTurnAttachments(ctx, turn.ID)
+	go s.drainTurnQueue(context.Background())
+	return saved, true
+}
+
+func (s *Service) cancelTurn(ctx context.Context, threadID string, turn storage.CodexCliTurn, summary string, completeAutomation bool) (storage.CodexCliTurn, bool) {
+	saved, ok := s.finishTurnStatus(ctx, threadID, turn, "cancelled", "", nil, "queued", "running", "waiting_approval")
+	if !ok {
+		return saved, false
+	}
+	if completeAutomation {
+		s.completeAutomationRunForTurn(ctx, saved, false, summary)
+	}
+	s.cleanupTurnAttachments(ctx, turn.ID)
+	return saved, true
+}
+
+func (s *Service) finishTurnStatus(ctx context.Context, threadID string, turn storage.CodexCliTurn, status, message string, usage map[string]any, allowedStatuses ...string) (storage.CodexCliTurn, bool) {
+	turn.Status = status
+	turn.ErrorSummary = message
 	turn.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if usage != nil {
 		turn.Usage = usage
 	}
-	_, _ = s.store.SaveCodexCliTurn(ctx, turn)
-	thread.Status = "idle"
-	_, _ = s.store.SaveCodexCliThread(ctx, thread)
-	s.appendThreadEvent(ctx, thread.ID, turn.ID, EventTurnCompleted, "codex", "", "", nil)
-	s.completeAutomationRunForTurn(ctx, turn, true, "")
-	s.cleanupTurnAttachments(ctx, turn.ID)
-	go s.drainTurnQueue(context.Background())
-}
-
-func (s *Service) failTurn(ctx context.Context, thread storage.CodexCliThread, turn storage.CodexCliTurn, message string) {
-	turn.Status = "failed"
-	turn.ErrorSummary = message
-	turn.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	_, _ = s.store.SaveCodexCliTurn(ctx, turn)
-	thread.Status = "failed"
-	thread.LastError = message
-	_, _ = s.store.SaveCodexCliThread(ctx, thread)
-	s.appendThreadEvent(ctx, thread.ID, turn.ID, EventTurnFailed, "codex", "", message, nil)
-	s.completeAutomationRunForTurn(ctx, turn, false, message)
-	s.cleanupTurnAttachments(ctx, turn.ID)
-	go s.drainTurnQueue(context.Background())
+	saved, ok, err := s.store.SaveCodexCliTurnIfStatus(ctx, turn, allowedStatuses...)
+	if err != nil {
+		s.log.Warn("codex cli finish turn failed", "summary", Redact(err.Error(), 120))
+		return storage.CodexCliTurn{}, false
+	}
+	if !ok {
+		return saved, false
+	}
+	threadStatus := s.threadStatusFromTurns(ctx, threadID)
+	lastError := ""
+	if status == "failed" {
+		threadStatus = "failed"
+		lastError = message
+	}
+	if _, _, err := s.store.UpdateCodexCliThreadStatusForTurn(ctx, threadID, turn.ID, threadStatus, lastError, "queued", "running", "needs_approval", "failed"); err != nil {
+		s.log.Warn("codex cli finish thread status failed", "summary", Redact(err.Error(), 120))
+	}
+	return saved, true
 }
 
 func (s *Service) cleanupTurnAttachments(ctx context.Context, turnID string) {
@@ -1450,9 +1520,10 @@ func (s *Service) failWaitingApprovalTurn(ctx context.Context, threadID, turnID,
 	if err != nil {
 		return
 	}
-	s.finishActiveRun(ctx, &appTurnContext{turnID: turnID}, "failed", 1, message)
-	s.failTurn(ctx, thread, turn, message)
-	s.clearActiveTurn(turnID)
+	if _, ok := s.failTurn(ctx, thread, turn, message); ok {
+		s.finishActiveRun(ctx, &appTurnContext{turnID: turnID}, "failed", 1, message)
+		s.clearActiveTurn(turnID)
+	}
 }
 
 func (s *Service) clearActiveTurn(turnID string) {
@@ -1508,9 +1579,10 @@ func (s *Service) watchAppServerTurn(ctx context.Context, threadID, turnID, runI
 		return
 	}
 	message := "app-server turn timed out waiting for terminal notification"
-	s.finishActiveRun(ctx, active, "failed", 1, message)
-	s.failTurn(ctx, thread, turn, message)
-	s.clearActiveTurn(turnID)
+	if _, ok := s.failTurn(ctx, thread, turn, message); ok {
+		s.finishActiveRun(ctx, active, "failed", 1, message)
+		s.clearActiveTurn(turnID)
+	}
 }
 
 func enrichWorkspaceGitSummary(ws storage.CodexCliWorkspace) storage.CodexCliWorkspace {

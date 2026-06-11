@@ -17,6 +17,7 @@ export interface ComposerProps {
   onApproval: (value: string) => void;
   model: string;
   onModel: (value: string) => void;
+  modelRequired: boolean;
   models: CodexModel[];
   skills: string[];
   onInsertSkill: (name: string) => void;
@@ -39,8 +40,9 @@ export interface ComposerProps {
 }
 
 export function Composer(props: ComposerProps) {
-  const { prompt, attachments, models, skills, workspaceWriteAllowed, sandboxLocked, busy, interactive, hasActiveTurn, sending, steering } = props;
+  const { prompt, attachments, modelRequired, models, skills, workspaceWriteAllowed, sandboxLocked, busy, interactive, hasActiveTurn, sending, steering } = props;
   const promptEmpty = !prompt.trim();
+  const modelMissing = modelRequired && !props.model.trim();
   return (
     <form className="grid gap-2" onSubmit={props.onSend}>
       <textarea
@@ -94,7 +96,7 @@ export function Composer(props: ComposerProps) {
         ) : null}
         {models.length ? (
           <select className="select" onChange={(event) => props.onModel(event.target.value)} value={props.model}>
-            <option value="">默认模型</option>
+            {!props.model ? <option disabled value="">选择模型</option> : null}
             {models.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.displayName || item.id}
@@ -103,8 +105,9 @@ export function Composer(props: ComposerProps) {
             ))}
           </select>
         ) : (
-          <input className="input w-40" onChange={(event) => props.onModel(event.target.value)} placeholder="模型（运行时探测）" value={props.model} />
+          <input className="input w-40" onChange={(event) => props.onModel(event.target.value)} placeholder={modelRequired ? "模型（必填）" : "模型（可选）"} value={props.model} />
         )}
+        {modelMissing ? <span className="text-xs text-[var(--danger)]">请选择一个可用模型</span> : null}
         <div className="w-56 max-sm:w-full">
           <ImageDropInput hint="点击或拖拽图片附件" label="附件" onFiles={(files) => files[0] && props.onUpload(files[0])} resetAfterSelect />
         </div>
@@ -120,11 +123,11 @@ export function Composer(props: ComposerProps) {
             </>
           ) : null}
           {busy ? (
-            <Button disabled={sending || promptEmpty} onClick={() => props.onQueue()}>
+            <Button disabled={sending || promptEmpty || modelMissing} onClick={() => props.onQueue()}>
               排队
             </Button>
           ) : null}
-          <Button disabled={sending || busy || promptEmpty} tone="primary" type="submit">
+          <Button disabled={sending || busy || promptEmpty || modelMissing} tone="primary" type="submit">
             {sending ? "发送中" : "发送"}
           </Button>
         </div>

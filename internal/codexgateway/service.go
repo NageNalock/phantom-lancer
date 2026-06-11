@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"phantom-lancer/internal/auth"
@@ -25,15 +26,23 @@ const (
 )
 
 type Service struct {
-	Store *storage.Store
-	Log   *slog.Logger
+	Store     *storage.Store
+	Log       *slog.Logger
+	refreshMu sync.Mutex
+	refreshes map[string]*refreshCall
+}
+
+type refreshCall struct {
+	done   chan struct{}
+	secret storage.CodexGatewayAccountSecret
+	err    error
 }
 
 func NewService(store *storage.Store, logger *slog.Logger) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{Store: store, Log: logger}
+	return &Service{Store: store, Log: logger, refreshes: map[string]*refreshCall{}}
 }
 
 func (s *Service) Ensure(ctx context.Context) error {
@@ -492,6 +501,41 @@ func (s *Service) CheckAccount(ctx context.Context, id string) (storage.CodexGat
 func (s *Service) refreshAccountAccessToken(ctx context.Context, secret storage.CodexGatewayAccountSecret, runtime Runtime) (storage.CodexGatewayAccountSecret, error) {
 	if secret.RefreshToken == "" {
 		return storage.CodexGatewayAccountSecret{}, OAuthRefreshError{Code: "missing_refresh_token", Description: "missing refresh_token"}
+	}
+	if strings.TrimSpace(secret.ID) == "" {
+		return s.refreshAccountAccessTokenOnce(ctx, secret, runtime)
+	}
+	s.refreshMu.Lock()
+	if s.refreshes == nil {
+		s.refreshes = map[string]*refreshCall{}
+	}
+	if call := s.refreshes[secret.ID]; call != nil {
+		s.refreshMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return storage.CodexGatewayAccountSecret{}, ctx.Err()
+		case <-call.done:
+			return call.secret, call.err
+		}
+	}
+	call := &refreshCall{done: make(chan struct{})}
+	s.refreshes[secret.ID] = call
+	s.refreshMu.Unlock()
+
+	call.secret, call.err = s.refreshAccountAccessTokenOnce(ctx, secret, runtime)
+	s.refreshMu.Lock()
+	delete(s.refreshes, secret.ID)
+	s.refreshMu.Unlock()
+	close(call.done)
+	return call.secret, call.err
+}
+
+func (s *Service) refreshAccountAccessTokenOnce(ctx context.Context, secret storage.CodexGatewayAccountSecret, runtime Runtime) (storage.CodexGatewayAccountSecret, error) {
+	if latest, err := s.Store.GetCodexGatewayAccountSecret(ctx, secret.ID); err == nil && latest.RefreshToken != "" && latest.RefreshToken != secret.RefreshToken {
+		if latest.AccessToken != "" {
+			return latest, nil
+		}
+		secret.RefreshToken = latest.RefreshToken
 	}
 	refreshCtx, cancel := context.WithTimeout(ctx, minDuration(runtime.Timeout, 30*time.Second))
 	defer cancel()

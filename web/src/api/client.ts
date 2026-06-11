@@ -54,6 +54,7 @@ export function friendlyError(error: unknown): string {
   if (err.code === "git_required") return "该目录不是 Git 仓库。如确认要添加，请勾选允许非 Git 目录。";
   if (err.code === "permission_denied") return "workspace-write 需要选择已允许写入的项目。请改用只读沙箱，或在项目配置中允许写入。";
   if (err.code === "codex_app_server_failed") return `Codex app-server 请求失败：${err.message}`;
+  if (err.code === "codex_model_required") return "Codex app-server 需要明确模型。请选择一个可用模型后重试。";
   if (err.code === "api_key_missing") return "Images 模块尚未配置 xAI API Key。";
   if (err.code === "provider_failed") return `图片模型调用失败：${err.message}`;
   if (err.code === "images_settings_invalid") return `Images 设置无效：${err.message}`;

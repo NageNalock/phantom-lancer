@@ -55,32 +55,51 @@ func (s *Server) handleUpdateCodexGatewaySettings(w http.ResponseWriter, r *http
 		return
 	}
 	var req struct {
-		Enabled               bool   `json:"enabled"`
-		BaseURL               string `json:"baseUrl"`
-		OAuthAuthURL          string `json:"oauthAuthUrl"`
-		OAuthTokenURL         string `json:"oauthTokenUrl"`
-		OAuthClientID         string `json:"oauthClientId"`
-		OAuthRedirectURI      string `json:"oauthRedirectUri"`
-		RequestTimeoutSeconds int    `json:"requestTimeoutSeconds"`
-		RefreshMarginSeconds  int    `json:"refreshMarginSeconds"`
-		DefaultInstructions   string `json:"defaultInstructions"`
-		InstallationID        string `json:"installationId"`
+		Enabled               *bool   `json:"enabled"`
+		BaseURL               *string `json:"baseUrl"`
+		OAuthAuthURL          *string `json:"oauthAuthUrl"`
+		OAuthTokenURL         *string `json:"oauthTokenUrl"`
+		OAuthClientID         *string `json:"oauthClientId"`
+		OAuthRedirectURI      *string `json:"oauthRedirectUri"`
+		RequestTimeoutSeconds *int    `json:"requestTimeoutSeconds"`
+		RefreshMarginSeconds  *int    `json:"refreshMarginSeconds"`
+		DefaultInstructions   *string `json:"defaultInstructions"`
+		InstallationID        *string `json:"installationId"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	settings := storage.CodexGatewaySettings{
-		ID:                    "default",
-		Enabled:               req.Enabled,
-		BaseURL:               req.BaseURL,
-		OAuthAuthURL:          req.OAuthAuthURL,
-		OAuthTokenURL:         req.OAuthTokenURL,
-		OAuthClientID:         req.OAuthClientID,
-		OAuthRedirectURI:      req.OAuthRedirectURI,
-		RequestTimeoutSeconds: req.RequestTimeoutSeconds,
-		RefreshMarginSeconds:  req.RefreshMarginSeconds,
-		DefaultInstructions:   req.DefaultInstructions,
-		InstallationID:        req.InstallationID,
+	settings := current
+	settings.ID = "default"
+	if req.Enabled != nil {
+		settings.Enabled = *req.Enabled
+	}
+	if req.BaseURL != nil {
+		settings.BaseURL = strings.TrimSpace(*req.BaseURL)
+	}
+	if req.OAuthAuthURL != nil {
+		settings.OAuthAuthURL = strings.TrimSpace(*req.OAuthAuthURL)
+	}
+	if req.OAuthTokenURL != nil {
+		settings.OAuthTokenURL = strings.TrimSpace(*req.OAuthTokenURL)
+	}
+	if req.OAuthClientID != nil {
+		settings.OAuthClientID = strings.TrimSpace(*req.OAuthClientID)
+	}
+	if req.OAuthRedirectURI != nil {
+		settings.OAuthRedirectURI = strings.TrimSpace(*req.OAuthRedirectURI)
+	}
+	if req.RequestTimeoutSeconds != nil {
+		settings.RequestTimeoutSeconds = *req.RequestTimeoutSeconds
+	}
+	if req.RefreshMarginSeconds != nil {
+		settings.RefreshMarginSeconds = *req.RefreshMarginSeconds
+	}
+	if req.DefaultInstructions != nil {
+		settings.DefaultInstructions = strings.TrimSpace(*req.DefaultInstructions)
+	}
+	if req.InstallationID != nil {
+		settings.InstallationID = strings.TrimSpace(*req.InstallationID)
 	}
 	if strings.TrimSpace(settings.BaseURL) == "" {
 		settings.BaseURL = current.BaseURL

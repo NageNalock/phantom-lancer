@@ -82,6 +82,8 @@ type AppServerClient struct {
 	notifyCh  chan Notification
 	requestCh chan ServerRequest
 	closed    bool
+	closeOnce sync.Once
+	closeCh   chan struct{}
 	exitErr   error
 	doneCh    chan struct{}
 }
@@ -112,6 +114,7 @@ func StartAppServer(ctx context.Context, binary, codexHome string) (*AppServerCl
 		pending:   make(map[int64]chan jsonRPCMessage),
 		notifyCh:  make(chan Notification, 64),
 		requestCh: make(chan ServerRequest, 32),
+		closeCh:   make(chan struct{}),
 		doneCh:    make(chan struct{}),
 	}
 	go client.readLoop()
@@ -137,7 +140,11 @@ func (c *AppServerClient) Requests() <-chan ServerRequest { return c.requestCh }
 func (c *AppServerClient) Done() <-chan struct{} { return c.doneCh }
 
 func (c *AppServerClient) readLoop() {
-	defer close(c.doneCh)
+	defer func() {
+		close(c.notifyCh)
+		close(c.requestCh)
+		close(c.doneCh)
+	}()
 	for {
 		line, err := c.stdout.ReadBytes('\n')
 		if len(line) > 0 {
@@ -161,7 +168,7 @@ func (c *AppServerClient) dispatch(line []byte) {
 		// Server-initiated request: client must reply with the same id.
 		select {
 		case c.requestCh <- ServerRequest{ID: msg.ID, Method: msg.Method, Params: msg.Params}:
-		default:
+		case <-c.closeCh:
 		}
 	case hasID:
 		// Response to one of our requests. Our outbound ids are always integers.
@@ -182,7 +189,7 @@ func (c *AppServerClient) dispatch(line []byte) {
 		// Notification.
 		select {
 		case c.notifyCh <- Notification{Method: msg.Method, Params: msg.Params}:
-		default:
+		case <-c.closeCh:
 		}
 	}
 }
@@ -195,6 +202,12 @@ func (c *AppServerClient) failPending(err error) {
 		close(ch)
 		delete(c.pending, id)
 	}
+}
+
+func (c *AppServerClient) removePending(id int64) {
+	c.mu.Lock()
+	delete(c.pending, id)
+	c.mu.Unlock()
 }
 
 // Call performs a JSON-RPC request/response round trip with a timeout.
@@ -213,18 +226,21 @@ func (c *AppServerClient) Call(ctx context.Context, method string, params any) (
 	req := jsonRPCRequest{ID: id, Method: method, Params: params}
 	data, err := json.Marshal(req)
 	if err != nil {
+		c.removePending(id)
 		return nil, err
 	}
 	data = append(data, '\n')
 	if _, err := c.stdin.Write(data); err != nil {
+		c.removePending(id)
 		return nil, err
 	}
 	select {
 	case <-ctx.Done():
-		c.mu.Lock()
-		delete(c.pending, id)
-		c.mu.Unlock()
+		c.removePending(id)
 		return nil, ctx.Err()
+	case <-c.closeCh:
+		c.removePending(id)
+		return nil, errors.New("app-server client closed")
 	case resp, ok := <-ch:
 		if !ok {
 			return nil, errors.New("app-server connection lost")
@@ -292,6 +308,7 @@ func (c *AppServerClient) Close() error {
 		return nil
 	}
 	c.closed = true
+	c.closeOnce.Do(func() { close(c.closeCh) })
 	c.mu.Unlock()
 	_ = c.stdin.Close()
 	if c.cmd != nil && c.cmd.Process != nil {

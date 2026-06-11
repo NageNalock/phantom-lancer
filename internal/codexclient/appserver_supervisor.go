@@ -171,6 +171,7 @@ func (s *AppServerSupervisor) Start(ctx context.Context) (AppServerStatus, error
 		s.setFailed(Redact("start failed: "+err.Error(), 160))
 		return s.Status(), err
 	}
+	s.attachClientPumps(client)
 	if err := client.Initialize(ctx); err != nil {
 		_ = client.Close()
 		s.setFailed(Redact("initialize failed: "+err.Error(), 160))
@@ -185,6 +186,10 @@ func (s *AppServerSupervisor) Start(ctx context.Context) (AppServerStatus, error
 	s.lastError = ""
 	s.mu.Unlock()
 
+	return s.Status(), nil
+}
+
+func (s *AppServerSupervisor) attachClientPumps(client *AppServerClient) {
 	go func() {
 		for notif := range client.Notifications() {
 			if s.onNotify != nil {
@@ -203,8 +208,6 @@ func (s *AppServerSupervisor) Start(ctx context.Context) (AppServerStatus, error
 		<-client.Done()
 		s.setFailed("app-server process exited")
 	}()
-
-	return s.Status(), nil
 }
 
 // Stop terminates the managed runtime.

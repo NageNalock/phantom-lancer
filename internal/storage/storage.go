@@ -2094,6 +2094,17 @@ func (s *Store) UpdateCodexGatewayAccount(ctx context.Context, id string, patch 
 	} else if patch.Plan != nil {
 		plan = strings.TrimSpace(*patch.Plan)
 	}
+	tokensChanged := patch.AccessToken != nil || patch.RefreshToken != nil
+	if !tokensChanged {
+		_, err = s.db.ExecContext(ctx, `
+UPDATE codex_gateway_accounts
+SET label = ?, status = ?, expires_at = ?, plan = ?, updated_at = ?
+WHERE id = ?`, label, status, expiresAt, plan, now(), id)
+		if err != nil {
+			return CodexGatewayAccount{}, err
+		}
+		return s.GetCodexGatewayAccount(ctx, id)
+	}
 	accessBlob, werr := s.wrapGWToken(accessToken)
 	if werr != nil {
 		return CodexGatewayAccount{}, fmt.Errorf("wrap access token: %w", werr)

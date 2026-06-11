@@ -135,6 +135,21 @@ func TestExecBuildArgsNeverYolo(t *testing.T) {
 	}
 }
 
+func TestDefaultModelFromCatalogPrefersLiveDefault(t *testing.T) {
+	model := defaultModelFromCatalog([]CodexModel{
+		{ID: "gpt-5"},
+		{ID: "gpt-5-codex", IsDefault: true},
+	})
+	if model != "gpt-5-codex" {
+		t.Fatalf("model = %q, want live default", model)
+	}
+
+	model = defaultModelFromCatalog([]CodexModel{{ID: "gpt-5"}, {ID: "gpt-5-codex"}})
+	if model != "gpt-5" {
+		t.Fatalf("model = %q, want first available", model)
+	}
+}
+
 func TestEventMapperMapsApprovalRequest(t *testing.T) {
 	mapper := NewEventMapper(200)
 	req := ServerRequest{ID: []byte(`7`), Method: MethodCommandApproval, Params: []byte(`{"itemId":"item-1","command":"rm -rf /tmp/x","cwd":"/srv/app"}`)}

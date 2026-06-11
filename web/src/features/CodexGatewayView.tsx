@@ -67,10 +67,11 @@ export function CodexGatewayView({ actions, data }: { actions: AppActions; data:
   async function saveSettings() {
     setBusy("settings");
     try {
+      const normalized = normalizeGatewaySettings(draft);
       await actions.api("/api/codex-gateway/settings", {
         method: "PUT",
         csrf: actions.csrf,
-        body: normalizeGatewaySettings(draft),
+        body: changedGatewaySettings(normalized, settings),
       });
       await actions.refreshCodexGateway();
       actions.setToast("Gateway 设置已保存", "good");
@@ -733,6 +734,28 @@ function normalizeGatewaySettings(draft: Required<CodexGatewaySettings>): CodexG
     defaultInstructions: draft.defaultInstructions.trim(),
     installationId: draft.installationId.trim(),
   };
+}
+
+function changedGatewaySettings(next: CodexGatewaySettings, current: Required<CodexGatewaySettings>): CodexGatewaySettings {
+  const patch: CodexGatewaySettings = {};
+  const keys: Array<keyof CodexGatewaySettings> = [
+    "enabled",
+    "baseUrl",
+    "oauthAuthUrl",
+    "oauthTokenUrl",
+    "oauthClientId",
+    "oauthRedirectUri",
+    "requestTimeoutSeconds",
+    "refreshMarginSeconds",
+    "defaultInstructions",
+    "installationId",
+  ];
+  for (const key of keys) {
+    if (next[key] !== current[key]) {
+      (patch as Record<keyof CodexGatewaySettings, string | number | boolean | undefined>)[key] = next[key];
+    }
+  }
+  return patch;
 }
 
 function accountTone(status?: string): Tone {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -163,6 +164,96 @@ func TestMarkCodexCliRunningThreadsInterruptedFailsQueuedTurns(t *testing.T) {
 	}
 	if savedThread.Status != "failed" || savedThread.LastError == "" {
 		t.Fatalf("queued thread should fail closed, got %+v", savedThread)
+	}
+}
+
+func TestSaveCodexCliTurnIfStatusDoesNotOverwriteTerminalTurn(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	ws, err := store.CreateCodexCliWorkspace(ctx, CodexCliWorkspace{Path: t.TempDir(), TrustState: "trusted"})
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	thread, err := store.CreateCodexCliThread(ctx, CodexCliThread{WorkspaceID: ws.ID, Status: "running"})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	turn, err := store.CreateCodexCliTurn(ctx, CodexCliTurn{ThreadID: thread.ID, Status: "running"})
+	if err != nil {
+		t.Fatalf("create turn: %v", err)
+	}
+	turn.Status = "completed"
+	if _, err := store.SaveCodexCliTurn(ctx, turn); err != nil {
+		t.Fatalf("save completed turn: %v", err)
+	}
+
+	stale := turn
+	stale.Status = "failed"
+	stale.ErrorSummary = "late watchdog"
+	saved, ok, err := store.SaveCodexCliTurnIfStatus(ctx, stale, "running", "waiting_approval")
+	if err != nil {
+		t.Fatalf("conditional save: %v", err)
+	}
+	if ok {
+		t.Fatal("conditional save should not update a terminal turn")
+	}
+	if saved.Status != "completed" || saved.ErrorSummary != "" {
+		t.Fatalf("terminal turn was overwritten: %+v", saved)
+	}
+}
+
+func TestAppendCodexCliEventConcurrentSequenceDoesNotDropEvents(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	ws, err := store.CreateCodexCliWorkspace(ctx, CodexCliWorkspace{Path: t.TempDir(), TrustState: "trusted"})
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	thread, err := store.CreateCodexCliThread(ctx, CodexCliThread{WorkspaceID: ws.ID, Status: "running"})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+
+	const total = 24
+	var wg sync.WaitGroup
+	errs := make(chan error, total)
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := store.AppendCodexCliEvent(ctx, CodexCliEvent{ThreadID: thread.ID, EventType: "test.event", Payload: map[string]any{"ok": true}})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("append event: %v", err)
+		}
+	}
+	events, err := store.ListCodexCliEvents(ctx, thread.ID, 0, total+1)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(events) != total {
+		t.Fatalf("events len = %d, want %d", len(events), total)
+	}
+	for i, event := range events {
+		want := int64(i + 1)
+		if event.Sequence != want {
+			t.Fatalf("event[%d].Sequence = %d, want %d", i, event.Sequence, want)
+		}
 	}
 }
 
