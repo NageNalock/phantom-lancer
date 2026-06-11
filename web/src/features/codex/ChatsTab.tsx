@@ -4,7 +4,7 @@ import type { CodexSettings, CodexStatus, CodexThread, CodexWorkspace } from "..
 import { Button, EmptyState, Notice, Panel, Pill } from "../../components/ui";
 import { friendlyError } from "../../api/client";
 import { codexThreadStatusLabel, formatDate } from "../../domain/labels";
-import { ThreadWorkspace } from "./ThreadWorkspace";
+import { ChatWorkspace } from "./ChatWorkspace";
 
 export function ChatsTab({ actions, status, onStatusChange }: { actions: AppActions; status?: CodexStatus; onStatusChange: () => void }) {
   const [chats, setChats] = useState<CodexThread[]>([]);
@@ -20,7 +20,9 @@ export function ChatsTab({ actions, status, onStatusChange }: { actions: AppActi
         actions.api<{ items?: CodexWorkspace[] }>("/api/codex/workspaces"),
         actions.api<{ settings?: CodexSettings }>("/api/codex/settings"),
       ]);
-      setChats(chatResp.items || []);
+      const nextChats = chatResp.items || [];
+      setChats(nextChats);
+      setActiveId((current) => (current && nextChats.some((chat) => chat.id === current) ? current : nextChats[0]?.id || ""));
       setWorkspaces(workspaceResp.items || []);
       setScratchWorkspaceId(settingsResp.settings?.scratchWorkspaceId || "");
     } catch (error) {
@@ -50,21 +52,21 @@ export function ChatsTab({ actions, status, onStatusChange }: { actions: AppActi
   }
 
   return (
-    <div className="grid grid-cols-[280px_minmax(0,1fr)] gap-4 max-lg:grid-cols-1">
+    <div className="chat-tab-layout">
       <Panel
-        actions={<Button disabled={!scratchReady || creating} onClick={() => void createChat()}>{creating ? "创建中" : "新建 Chat"}</Button>}
-        subtitle="只读 research/planning 会话，绑定受控 scratch workspace，不写文件、不联网。"
+        actions={<Button disabled={!scratchReady || creating} onClick={() => void createChat()} tone="primary">{creating ? "创建中" : "新建 Chat"}</Button>}
+        subtitle="只读 scratch 对话：解释、计划、命令草案。代码执行与审查留在 Threads。"
         title="Chats"
       >
         {!scratchReady ? (
           <Notice tone="warn">尚未配置 scratch workspace。请到 Codex Settings 选择一个受控 workspace 后再新建 Chat。</Notice>
         ) : null}
         {chats.length ? (
-          <div className="mt-3 grid gap-2">
+          <div className="mt-3 grid gap-1.5">
             {chats.map((chat) => (
               <button
                 aria-pressed={chat.id === activeId}
-                className={`rounded-lg border px-3 py-2 text-left text-sm transition ${chat.id === activeId ? "border-[var(--accent)] bg-[var(--surface-strong)]" : "border-[var(--line)] bg-[var(--surface-soft)] hover:border-[var(--muted)]"}`}
+                className={`chat-list-item ${chat.id === activeId ? "chat-list-item-active" : ""}`}
                 key={chat.id}
                 onClick={() => setActiveId(chat.id)}
                 type="button"
@@ -83,7 +85,7 @@ export function ChatsTab({ actions, status, onStatusChange }: { actions: AppActi
       </Panel>
 
       {activeChat ? (
-        <ThreadWorkspace key={activeChat.id} actions={actions} status={status} thread={activeChat} workspaces={workspaces} onStatusChange={onStatusChange} onThreadChange={load} />
+        <ChatWorkspace key={activeChat.id} actions={actions} status={status} thread={activeChat} workspaces={workspaces} onStatusChange={onStatusChange} onThreadChange={load} />
       ) : (
         <Panel subtitle="Chats 适合整理计划、解释错误、写命令草案，不用于执行生产变更。" title="选择或新建 Chat">
           <EmptyState title="未选择 Chat" body={scratchReady ? "从左侧选择一个 Chat，或新建一个只读会话。" : "请先在 Codex Settings 配置 scratch workspace。"} />

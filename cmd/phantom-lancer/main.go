@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,6 +20,7 @@ import (
 	"phantom-lancer/internal/dockercontrol"
 	"phantom-lancer/internal/events"
 	"phantom-lancer/internal/httpapi"
+	"phantom-lancer/internal/httpserver"
 	"phantom-lancer/internal/images"
 	"phantom-lancer/internal/logging"
 	logcenter "phantom-lancer/internal/logs"
@@ -81,13 +81,17 @@ func main() {
 	if err := store.EnsureRuntimeSettings(ctx, storage.RuntimeSettings{
 		AllowedRoots: cfg.AllowedRoots,
 		CookieSecure: cfg.CookieSecure,
+		Addr:         cfg.Addr,
 	}); err != nil {
 		logger.Error("initialize runtime settings failed", "error", err)
 		os.Exit(1)
 	}
-	if _, err := store.GetRuntimeSettings(ctx); err != nil {
+	effectiveAddr := cfg.Addr
+	if initialRuntime, err := store.GetRuntimeSettings(ctx); err != nil {
 		logger.Error("load runtime settings failed", "error", err)
 		os.Exit(1)
+	} else if initialRuntime.Addr != "" {
+		effectiveAddr = initialRuntime.Addr
 	}
 
 	staticFS, err := fs.Sub(web.Files, "dist")
@@ -180,19 +184,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	server := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           api.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
+	httpSrv := httpserver.New(effectiveAddr, api.Handler(), logger)
+	api.SetHTTPServerManager(httpSrv)
+	if err := httpSrv.Start(); err != nil {
+		logger.Error("http server initial bind failed", "error", err, "addr", effectiveAddr)
+		os.Exit(1)
 	}
-
-	go func() {
-		logger.Info("phantom lancer listening", "addr", cfg.Addr, "db", cfg.DBPath, "logFile", cfg.LogFile)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("http server failed", "error", err)
-			os.Exit(1)
-		}
-	}()
+	logger.Info("phantom lancer listening", "addr", httpSrv.Addr(), "db", cfg.DBPath, "logFile", cfg.LogFile)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -212,14 +210,11 @@ func main() {
 	logger.Info("phantom lancer shutdown starting", "restart_for_update", restartForUpdate, "timeout", shutdownTimeout.String())
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		if restartForUpdate && errors.Is(err, context.DeadlineExceeded) {
-			logger.Warn("graceful shutdown timed out during update restart; forcing server close", "timeout", shutdownTimeout.String())
+			logger.Warn("graceful shutdown timed out during update restart; forcing close", "timeout", shutdownTimeout.String())
 		} else {
 			logger.Error("shutdown failed", "error", err)
-		}
-		if closeErr := server.Close(); closeErr != nil {
-			logger.Error("force close server failed", "error", closeErr)
 		}
 	}
 	logger.Info("phantom lancer http server stopped", "restart_for_update", restartForUpdate)

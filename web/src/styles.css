@@ -193,6 +193,118 @@
     @apply rounded-lg p-3 text-sm;
   }
 
+  .chat-list-item {
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text);
+    @apply min-w-0 rounded-lg px-3 py-2 text-left text-sm transition;
+  }
+
+  .chat-list-item:hover {
+    background: var(--surface-soft);
+    border-color: var(--line);
+  }
+
+  .chat-list-item-active {
+    background: var(--surface-strong);
+    border-color: var(--line-strong);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+
+  .chat-tab-layout {
+    display: grid;
+    grid-template-columns: 300px minmax(0, 1fr);
+    gap: 1rem;
+  }
+
+  .chat-workspace {
+    background: var(--surface);
+    width: 100%;
+    @apply flex min-w-0 flex-col;
+  }
+
+  .chat-workspace-header {
+    border-bottom: 1px solid var(--line);
+    @apply flex items-start justify-between gap-3 px-5 py-4;
+  }
+
+  .chat-title-input {
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    @apply block w-full min-w-0 p-0 text-base font-semibold outline-none;
+  }
+
+  .chat-transcript {
+    @apply min-h-0 flex-1 overflow-y-auto px-5 py-6;
+  }
+
+  .chat-entry {
+    animation: chat-entry-in 180ms ease-out both;
+    @apply mx-auto mb-5 w-full max-w-4xl;
+  }
+
+  .chat-user-message {
+    background: var(--surface-strong);
+    color: var(--text);
+    @apply max-w-[72%] rounded-xl px-4 py-3 text-sm shadow-[0_1px_1px_rgba(16,24,40,0.04)];
+  }
+
+  .chat-assistant-message {
+    color: var(--text);
+    @apply max-w-[760px] px-1 py-1 text-[15px] leading-7;
+  }
+
+  .chat-status-row {
+    @apply flex items-center gap-3 text-xs;
+  }
+
+  .chat-thinking-dot {
+    background: currentColor;
+    animation: chat-dot-pulse 1.2s ease-in-out infinite;
+    @apply h-1.5 w-1.5 rounded-full;
+  }
+
+  .chat-streaming-text::after {
+    content: "";
+    display: inline-block;
+    width: 6px;
+    height: 1.1em;
+    margin-left: 2px;
+    vertical-align: -0.18em;
+    border-radius: 999px;
+    background: var(--accent);
+    animation: chat-caret 900ms ease-in-out infinite;
+  }
+
+  .chat-composer {
+    border-top: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.82), var(--surface) 34%);
+    @apply grid gap-3 px-5 pt-3 pb-5;
+  }
+
+  .chat-composer-input {
+    min-height: 88px;
+    max-height: 220px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: 0 14px 34px rgba(16, 24, 40, 0.08);
+    @apply w-full resize-y rounded-xl px-4 py-3 text-sm leading-relaxed outline-none transition;
+  }
+
+  .chat-composer-input:focus {
+    border-color: rgba(207, 77, 16, 0.38);
+    box-shadow: 0 0 0 3px rgba(207, 77, 16, 0.08), 0 16px 36px rgba(16, 24, 40, 0.09);
+  }
+
+  .chat-model-select {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--muted-strong);
+    @apply h-9 max-w-[220px] rounded-lg px-2 text-xs outline-none;
+  }
+
   .message-rich {
     @apply grid gap-2 break-words leading-relaxed;
   }
@@ -354,4 +466,65 @@
     border-color: var(--line);
     background: var(--surface-soft);
   }
+}
+
+@media (max-width: 1023.98px) {
+  .chat-tab-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .chat-user-message {
+    max-width: 88%;
+  }
+
+  .chat-workspace-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+@keyframes chat-entry-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes chat-dot-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.82);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes chat-caret {
+  0%,
+  100% {
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 0.95;
+  }
+}
+
+/* Rotate the CollapsibleSection caret chevron when its <details> is open.
+   We use a regular CSS rule instead of a Tailwind arbitrary variant so the
+   transition animates consistently across all browsers. */
+details[open] summary .collapsible-caret {
+  transform: rotate(180deg);
+}
+
+/* Hide the default <summary> list marker on browsers that still render it
+   even when `list-none` is set. */
+summary::-webkit-details-marker {
+  display: none;
 }

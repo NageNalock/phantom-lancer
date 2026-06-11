@@ -51,7 +51,7 @@ export function CodexView({ actions, data }: { actions: AppActions; data: AppDat
   const runtime = status?.runtime;
 
   return (
-    <section className="grid gap-4 p-4">
+    <section className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4 p-4">
       <SubTabs
         activeId={tab}
         onChange={(id) => setTab(id as CodexTab)}

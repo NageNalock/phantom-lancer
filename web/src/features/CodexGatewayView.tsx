@@ -3,7 +3,7 @@ import type { ChangeEvent } from "react";
 import type { AppActions } from "../app/App";
 import type { AppData, CodexGatewayAPIKey, CodexGatewayAccount, CodexGatewayRequestLog, CodexGatewaySettings, Tone } from "../app/types";
 import { friendlyError, readCookie } from "../api/client";
-import { Button, ContextList, EmptyState, Field, Metric, Notice, Panel, Pill, Toggle } from "../components/ui";
+import { Button, CollapsibleSection, ContextList, EmptyState, Field, Metric, Notice, Panel, Pill, Toggle } from "../components/ui";
 import { codexGatewayAccountStatusLabel, codexGatewayStatusLabel, defaultCodexGatewaySettings, formatDate } from "../domain/labels";
 
 type GatewayAccountDraft = {
@@ -68,10 +68,15 @@ export function CodexGatewayView({ actions, data }: { actions: AppActions; data:
     setBusy("settings");
     try {
       const normalized = normalizeGatewaySettings(draft);
+      const patch = changedGatewaySettings(normalized, settings);
+      if (Object.keys(patch).length === 0) {
+        actions.setToast("没有需要保存的修改", "warn");
+        return;
+      }
       await actions.api("/api/codex-gateway/settings", {
         method: "PUT",
         csrf: actions.csrf,
-        body: changedGatewaySettings(normalized, settings),
+        body: patch,
       });
       await actions.refreshCodexGateway();
       actions.setToast("Gateway 设置已保存", "good");
@@ -376,42 +381,69 @@ export function CodexGatewayView({ actions, data }: { actions: AppActions; data:
           title="Gateway 设置"
         >
           <div className="grid gap-4">
-            <div className="grid grid-cols-3 gap-3 max-xl:grid-cols-2 max-md:grid-cols-1">
-              <Toggle variant="row" checked={Boolean(draft.enabled)} label="启用公开 /v1 端点" onChange={(checked) => updateSetting("enabled", checked)} />
-              <Field label="请求超时秒数">
-                <input className="input mono" min={10} onChange={(event) => updateSetting("requestTimeoutSeconds", Number(event.target.value || 0))} type="number" value={draft.requestTimeoutSeconds || 600} />
-              </Field>
-              <Field label="刷新提前量秒数">
-                <input className="input mono" min={30} onChange={(event) => updateSetting("refreshMarginSeconds", Number(event.target.value || 0))} type="number" value={draft.refreshMarginSeconds || 300} />
-              </Field>
-            </div>
-
-            <Field label="Codex API Base URL">
-              <input className="input mono" onChange={(event) => updateSetting("baseUrl", event.target.value)} value={draft.baseUrl || ""} />
-            </Field>
-
-            <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
-              <Field label="OAuth Auth URL">
-                <input className="input mono" onChange={(event) => updateSetting("oauthAuthUrl", event.target.value)} value={draft.oauthAuthUrl || ""} />
-              </Field>
-              <Field label="OAuth Token URL">
-                <input className="input mono" onChange={(event) => updateSetting("oauthTokenUrl", event.target.value)} value={draft.oauthTokenUrl || ""} />
-              </Field>
-              <Field label="OAuth Client ID">
-                <input className="input mono" onChange={(event) => updateSetting("oauthClientId", event.target.value)} value={draft.oauthClientId || ""} />
-              </Field>
-              <Field label="OAuth Redirect URI">
-                <input className="input mono" onChange={(event) => updateSetting("oauthRedirectUri", event.target.value)} value={draft.oauthRedirectUri || ""} />
-              </Field>
-            </div>
-
-            <Field label="Installation ID">
-              <input className="input mono" onChange={(event) => updateSetting("installationId", event.target.value)} value={draft.installationId || ""} />
-            </Field>
+            <Toggle
+              variant="row"
+              checked={Boolean(draft.enabled)}
+              label="启用公开 /v1 端点"
+              onChange={(checked) => updateSetting("enabled", checked)}
+            />
 
             <Field label="Default Instructions">
-              <textarea className="textarea" onChange={(event) => updateSetting("defaultInstructions", event.target.value)} value={draft.defaultInstructions || ""} />
+              <textarea
+                className="textarea"
+                onChange={(event) => updateSetting("defaultInstructions", event.target.value)}
+                value={draft.defaultInstructions || ""}
+              />
             </Field>
+
+            <CollapsibleSection
+              subtitle="一般无需修改；如需调整请使用管理接口或数据库。"
+              title="高级设置"
+            >
+              <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
+                <Field label="请求超时秒数">
+                  <input
+                    className="input mono"
+                    disabled
+                    readOnly
+                    type="number"
+                    value={settings.requestTimeoutSeconds || 600}
+                  />
+                </Field>
+                <Field label="刷新提前量秒数">
+                  <input
+                    className="input mono"
+                    disabled
+                    readOnly
+                    type="number"
+                    value={settings.refreshMarginSeconds || 300}
+                  />
+                </Field>
+              </div>
+
+              <Field label="Codex API Base URL">
+                <input className="input mono" disabled readOnly value={settings.baseUrl || ""} />
+              </Field>
+
+              <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
+                <Field label="OAuth Auth URL">
+                  <input className="input mono" disabled readOnly value={settings.oauthAuthUrl || ""} />
+                </Field>
+                <Field label="OAuth Token URL">
+                  <input className="input mono" disabled readOnly value={settings.oauthTokenUrl || ""} />
+                </Field>
+                <Field label="OAuth Client ID">
+                  <input className="input mono" disabled readOnly value={settings.oauthClientId || ""} />
+                </Field>
+                <Field label="OAuth Redirect URI">
+                  <input className="input mono" disabled readOnly value={settings.oauthRedirectUri || ""} />
+                </Field>
+              </div>
+
+              <Field label="Installation ID">
+                <input className="input mono" disabled readOnly value={settings.installationId || ""} />
+              </Field>
+            </CollapsibleSection>
           </div>
         </Panel>
 
@@ -722,17 +754,12 @@ function RequestLogRow({ log }: { log: CodexGatewayRequestLog }) {
 
 
 function normalizeGatewaySettings(draft: Required<CodexGatewaySettings>): CodexGatewaySettings {
+  // Only the two user-facing knobs are persisted from the web UI; advanced
+  // fields are rendered as read-only in the CollapsibleSection and must be
+  // changed via an admin endpoint or the database directly.
   return {
     enabled: Boolean(draft.enabled),
-    baseUrl: draft.baseUrl.trim(),
-    oauthAuthUrl: draft.oauthAuthUrl.trim(),
-    oauthTokenUrl: draft.oauthTokenUrl.trim(),
-    oauthClientId: draft.oauthClientId.trim(),
-    oauthRedirectUri: draft.oauthRedirectUri.trim(),
-    requestTimeoutSeconds: Number(draft.requestTimeoutSeconds || 600),
-    refreshMarginSeconds: Number(draft.refreshMarginSeconds || 300),
     defaultInstructions: draft.defaultInstructions.trim(),
-    installationId: draft.installationId.trim(),
   };
 }
 
@@ -740,15 +767,7 @@ function changedGatewaySettings(next: CodexGatewaySettings, current: Required<Co
   const patch: CodexGatewaySettings = {};
   const keys: Array<keyof CodexGatewaySettings> = [
     "enabled",
-    "baseUrl",
-    "oauthAuthUrl",
-    "oauthTokenUrl",
-    "oauthClientId",
-    "oauthRedirectUri",
-    "requestTimeoutSeconds",
-    "refreshMarginSeconds",
     "defaultInstructions",
-    "installationId",
   ];
   for (const key of keys) {
     if (next[key] !== current[key]) {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"phantom-lancer/internal/codexclient"
+	"phantom-lancer/internal/events"
 	"phantom-lancer/internal/storage"
 )
 
@@ -527,7 +528,8 @@ func (s *Server) streamCodexThreadEvents(w http.ResponseWriter, r *http.Request,
 			if !ok {
 				return
 			}
-			writeCodexSSE(w, event.Sequence, event.Type, event)
+			codexEvent := codexEventFromGeneral(threadID, event)
+			writeCodexSSE(w, codexEvent.Sequence, codexEvent.EventType, codexEvent)
 			flusher.Flush()
 		case <-ticker.C:
 			fmt.Fprint(w, ": heartbeat\n\n")
@@ -696,6 +698,52 @@ func writeCodexSSE(w http.ResponseWriter, sequence int64, eventType string, payl
 	fmt.Fprintf(w, "id: %d\n", sequence)
 	fmt.Fprintf(w, "event: %s\n", eventType)
 	fmt.Fprintf(w, "data: %s\n\n", data)
+}
+
+func codexEventFromGeneral(threadID string, event events.Event) storage.CodexCliEvent {
+	payload := event.Payload
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	sequence := anyInt64(payload["sequence"])
+	if sequence == 0 {
+		sequence = event.Sequence
+	}
+	return storage.CodexCliEvent{
+		ID:          anyString(payload["codexEventId"]),
+		ThreadID:    threadID,
+		TurnID:      anyString(payload["turnId"]),
+		Sequence:    sequence,
+		EventType:   event.Type,
+		CodexMethod: anyString(payload["codexMethod"]),
+		ItemType:    anyString(payload["itemType"]),
+		Payload:     payload,
+		TextPreview: anyString(payload["textPreview"]),
+		CreatedAt:   event.CreatedAt,
+	}
+}
+
+func anyString(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return ""
+}
+
+func anyInt64(value any) int64 {
+	switch typed := value.(type) {
+	case int64:
+		return typed
+	case int:
+		return int64(typed)
+	case float64:
+		return int64(typed)
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return parsed
+	default:
+		return 0
+	}
 }
 
 func codexWorkspaceErrorStatus(err error) int {

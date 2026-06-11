@@ -93,11 +93,21 @@ type Server struct {
 	privateUnlocks *loginBackoff
 	updateConfirms *loginBackoff
 	privateImages  *privateImageAccess
+	httpSrv        httpServerManager
 
 	// telemetrySampler gates hot-path WARN/ERROR telemetry from the
 	// requestTelemetry middleware so repeated 5xx bursts, scanner-driven
 	// 4xx floods, or slow SSE stream endpoints never drown service logs.
 	telemetrySampler *logsampler.Sampler
+}
+
+// httpServerManager is the minimum interface the httpapi handlers need from
+// the server lifecycle manager.  It is satisfied by *httpserver.Manager and
+// keeps the circular-dependency-free wiring between main and httpapi simple
+// (main creates api then injects the manager via SetHTTPServerManager).
+type httpServerManager interface {
+	Addr() string
+	SwapAddr(newAddr string) error
 }
 
 type sessionContext struct {
@@ -125,6 +135,14 @@ func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewayS
 		privateImages:    newPrivateImageAccess(),
 		telemetrySampler: logsampler.New(2 * time.Second),
 	}, nil
+}
+
+// SetHTTPServerManager wires in the lifecycle manager that owns the HTTP
+// listener.  Called once from main() after both the API server and the
+// manager have been constructed (they have a circular dependency – the
+// manager needs the Handler, handlers need the manager for hot-swap).
+func (s *Server) SetHTTPServerManager(m httpServerManager) {
+	s.httpSrv = m
 }
 
 func (s *Server) Handler() http.Handler {
@@ -174,6 +192,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/system/update/jobs/", s.handleSystemUpdateJobSubroutes)
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handleUpdateSettings)
+	mux.HandleFunc("POST /api/settings/listen-addr", s.handleSwapListenAddr)
 	mux.HandleFunc("GET /api/logs/sources", s.handleListLogSources)
 	mux.HandleFunc("GET /api/logs/sources/", s.handleLogSourceSubroutes)
 	mux.HandleFunc("GET /api/images/status", s.handleImagesStatus)
@@ -683,7 +702,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"file": map[string]any{
 			"configPath":    s.cfg.ConfigPath,
-			"addr":          s.cfg.Addr,
+			"addr":          s.currentListenAddr(),
 			"dataDir":       s.cfg.DataDir,
 			"dbPath":        s.cfg.DBPath,
 			"logFile":       s.cfg.LogFile,
@@ -705,6 +724,10 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	settings := storage.NormalizeRuntimeSettings(req)
+	if settings.Addr != "" {
+		writeError(w, http.StatusBadRequest, "use_listen_addr_endpoint", "修改监听地址请使用 POST /api/settings/listen-addr 接口")
+		return
+	}
 	allowedRoots, err := workspaces.NormalizeAllowedRoots(settings.AllowedRoots)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_allowed_roots", err.Error())
@@ -730,6 +753,95 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"runtime": updated})
+}
+
+// handleSwapListenAddr persists a new listen address to the database and then
+// hot-swaps the running HTTP listener without a process restart.
+//
+// Sequence:
+//  1. Validate addr (non-empty, host:port format)
+//  2. Persist to DB FIRST – if the swap succeeds but the process later
+//     crashes, a real restart must use the new address.
+//  3. Call httpSrv.SwapAddr() – pre-binds new listener, atomically swaps,
+//     drains old server.
+//  4. If swap FAILS, roll back the DB write so the effective address
+//     matches what is actually serving.
+//  5. Audit-log the change.
+func (s *Server) handleSwapListenAddr(w http.ResponseWriter, r *http.Request) {
+	ctx, ok := s.requireAuth(w, r)
+	if !ok || !s.requireCSRF(w, r, ctx.Session) {
+		return
+	}
+	if s.httpSrv == nil {
+		writeError(w, http.StatusServiceUnavailable, "manager_not_ready", "服务管理器未就绪")
+		return
+	}
+	var body struct {
+		Addr string `json:"addr"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	body.Addr = strings.TrimSpace(body.Addr)
+	if body.Addr == "" {
+		writeError(w, http.StatusBadRequest, "invalid_addr", "监听地址不能为空")
+		return
+	}
+
+	// ---- Step 1: Persist the new address to the DB ----------------------
+	settings, err := s.store.GetRuntimeSettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	previousAddr := settings.Addr
+	settings.Addr = body.Addr
+	if err := s.store.UpdateRuntimeSettings(r.Context(), settings); err != nil {
+		writeError(w, http.StatusBadRequest, "persist_failed", err.Error())
+		return
+	}
+
+	// ---- Step 2: Perform the synchronous hot-swap -----------------------
+	if swapErr := s.httpSrv.SwapAddr(body.Addr); swapErr != nil {
+		// Roll back: restore the DB value to the previous address.
+		settings.Addr = previousAddr
+		_ = s.store.UpdateRuntimeSettings(r.Context(), settings)
+		writeError(w, http.StatusBadRequest, "swap_failed", swapErr.Error())
+		return
+	}
+
+	// ---- Step 3: Audit log & response -----------------------------------
+	_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+		EventType: "settings.listen_addr_changed",
+		RiskLevel: "high",
+		Summary:   "已更改 HTTP 监听地址",
+		Payload: map[string]any{
+			"old_addr": previousAddr,
+			"new_addr": body.Addr,
+		},
+	})
+
+	updated, err := s.store.GetRuntimeSettings(r.Context())
+	if err != nil {
+		updated = settings
+	}
+	// NOTE: this response travels back to the caller on the OLD connection,
+	// which Shutdown() waits to drain.  The *next* request from the client
+	// will arrive on the freshly-bound listener at body.Addr.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"addr":    body.Addr,
+		"runtime": updated,
+	})
+}
+
+// currentListenAddr reports the address on which the server is currently
+// listening.  Falls back to the startup config value when the lifecycle
+// manager has not been wired in yet (e.g. during unit tests).
+func (s *Server) currentListenAddr() string {
+	if s.httpSrv != nil {
+		return s.httpSrv.Addr()
+	}
+	return s.cfg.Addr
 }
 
 func (s *Server) handleImagesStatus(w http.ResponseWriter, r *http.Request) {

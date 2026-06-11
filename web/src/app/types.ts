@@ -66,6 +66,7 @@ export interface AuditEvent {
 export interface RuntimeSettings {
   allowedRoots: string[];
   cookieSecure?: boolean;
+  addr?: string;
   updatedAt?: string;
 }
 

@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../app/App";
 import type { AppData, RuntimeSettings } from "../app/types";
 import { friendlyError } from "../api/client";
-import { Button, ContextList, Panel, Toggle } from "../components/ui";
+import { Button, ContextList, Field, Panel, Toggle } from "../components/ui";
 import { defaultRuntime, formatDate } from "../domain/labels";
 import { SystemUpdatePanel } from "./settings/SystemUpdatePanel";
 import { ObjectStoragePanel } from "./settings/ObjectStoragePanel";
@@ -11,12 +11,23 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
   const [runtime, setRuntime] = useState<RuntimeSettings>(data.settings.runtime || defaultRuntime());
   const [allowedRootsText, setAllowedRootsText] = useState((data.settings.runtime?.allowedRoots || []).join("\n"));
   const [busy, setBusy] = useState("");
+  const [listenAddr, setListenAddr] = useState<string>(data.settings.file?.addr || "");
+  const [swapBusy, setSwapBusy] = useState(false);
+
+  const listenAddrDirty = useMemo(() => {
+    const current = data.settings.file?.addr || "";
+    return listenAddr.trim() !== current.trim() && listenAddr.trim() !== "";
+  }, [listenAddr, data.settings.file?.addr]);
 
   useEffect(() => {
     const next = data.settings.runtime || defaultRuntime();
     setRuntime(next);
     setAllowedRootsText((next.allowedRoots || []).join("\n"));
   }, [data.settings.runtime]);
+
+  useEffect(() => {
+    setListenAddr(data.settings.file?.addr || "");
+  }, [data.settings.file?.addr]);
 
   async function saveRuntime() {
     const payload: RuntimeSettings = {
@@ -35,6 +46,74 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
       actions.setToast(friendlyError(error), "danger");
     } finally {
       setBusy("");
+    }
+  }
+
+  async function applyListenAddr() {
+    const addr = listenAddr.trim();
+    // Client-side validation — server's net.Listen call is the ground truth;
+    // these checks just give fast feedback for obviously-wrong input.
+    const m = /^([^\s:]+):(\d{1,5})$/.exec(addr);
+    if (!m) {
+      actions.setToast("地址格式应为 host:port（例如 127.0.0.1:8080 或 0.0.0.0:9090）", "danger");
+      return;
+    }
+    const port = Number(m[2]);
+    if (port < 1 || port > 65535) {
+      actions.setToast("端口必须在 1-65535 之间", "danger");
+      return;
+    }
+    setSwapBusy(true);
+    try {
+      await actions.api("/api/settings/listen-addr", {
+        method: "POST",
+        csrf: actions.csrf,
+        body: { addr },
+      });
+      await actions.reloadData();
+      actions.setToast(`监听地址已切换到 ${addr}`, "good");
+      // If the bind address is specific enough, offer to navigate the browser
+      // to the new host:port.  For wildcard binds (0.0.0.0, ::) we only
+      // change the port portion of the current URL.
+      try {
+        const current = new URL(window.location.href);
+        const [host, portStr] = [m[1], m[2]];
+        let navigateTo: string | null = null;
+        if (host === "0.0.0.0" || host === "::" || host === "[::]") {
+          if (current.port !== portStr) {
+            current.port = portStr;
+            navigateTo = current.toString();
+          }
+        } else if (host.toLowerCase() !== "localhost" && !host.startsWith("127.")) {
+          // Explicit bind to a non-localhost host/IP — attempt navigation if
+          // the hostname or port actually differs from what the browser has.
+          if (current.hostname !== host || current.port !== portStr) {
+            current.hostname = host;
+            current.port = portStr;
+            navigateTo = current.toString();
+          }
+        } else {
+          // localhost / 127.x.x.x bind: change port if it differs.
+          if (current.port !== portStr) {
+            current.port = portStr;
+            navigateTo = current.toString();
+          }
+        }
+        if (navigateTo) {
+          const target = navigateTo;
+          setTimeout(() => {
+            window.location.href = target;
+          }, 600);
+        }
+      } catch {
+        /* ignore malformed location.href (e.g. inside test harness) */
+      }
+    } catch (error) {
+      // Reset the input to the real (unchanged) effective address.
+      void actions.reloadData();
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setSwapBusy(false);
     }
   }
 
@@ -62,15 +141,33 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
           </div>
         </Panel>
 
-        <Panel title="配置文件" subtitle="只读展示当前服务启动参数">
-          <ContextList
-            items={[
-              ["监听", data.settings.file?.addr || "-"],
-              ["配置文件", data.settings.file?.configPath || "-"],
-              ["数据目录", data.settings.file?.dataDir || "-"],
-              ["数据库", data.settings.file?.dbPath || "-"],
-            ]}
-          />
+        <Panel title="服务配置" subtitle="修改监听地址无需重启；其他启动参数为只读">
+          <div className="grid gap-4">
+            <Field label="监听地址" help="切换后旧连接将在 2 秒内强制断开，新地址在进程重启后仍然生效。">
+              <div className="flex gap-2">
+                <input
+                  className="input mono flex-1"
+                  onChange={(event) => setListenAddr(event.target.value)}
+                  placeholder="host:port，例如 0.0.0.0:8080"
+                  value={listenAddr}
+                />
+                <Button
+                  disabled={swapBusy || !listenAddrDirty}
+                  onClick={() => void applyListenAddr()}
+                  tone="primary"
+                >
+                  应用
+                </Button>
+              </div>
+            </Field>
+            <ContextList
+              items={[
+                ["配置文件", data.settings.file?.configPath || "-"],
+                ["数据目录", data.settings.file?.dataDir || "-"],
+                ["数据库", data.settings.file?.dbPath || "-"],
+              ]}
+            />
+          </div>
         </Panel>
       </div>
 

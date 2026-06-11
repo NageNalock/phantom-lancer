@@ -351,3 +351,61 @@ export function CheckLabel({
     </label>
   );
 }
+
+/**
+ * CollapsibleSection wraps arbitrary children in a native <details> container
+ * so a group of rarely-touched advanced fields can live under a clickable
+ * header without the caller managing any state.
+ *
+ * Defaults to collapsed (do not overwhelm the user with knobs they do not
+ * need).  The disclosure triangle rotates 180° on open via a CSS rule in
+ * styles.css so we do not depend on arbitrary Tailwind variants.
+ */
+export function CollapsibleSection({
+  title,
+  subtitle,
+  children,
+  defaultOpen = false,
+  className = "",
+}: {
+  title: ReactNode;
+  subtitle?: ReactNode;
+  children: ReactNode;
+  defaultOpen?: boolean;
+  className?: string;
+}) {
+  return (
+    <details
+      className={`rounded-lg border border-[var(--border)] bg-[var(--surface-soft)] overflow-hidden ${className}`}
+      open={defaultOpen}
+    >
+      <summary
+        className="flex items-center justify-between gap-3 px-3 py-3 cursor-pointer select-none list-none hover:bg-[var(--surface-hover)] transition"
+      >
+        <div className="flex flex-col gap-0.5">
+          <span className="font-medium text-sm">{title}</span>
+          {subtitle ? <span className="text-xs text-[var(--muted)]">{subtitle}</span> : null}
+        </div>
+        <svg
+          className="collapsible-caret text-[var(--muted)] shrink-0 transition-transform duration-200"
+          height="16"
+          viewBox="0 0 24 24"
+          width="16"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M6 9l6 6 6-6"
+            fill="none"
+            stroke="currentColor"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth="2"
+          />
+        </svg>
+      </summary>
+      <div className="grid gap-4 border-t border-[var(--border)] px-3 py-3">
+        {children}
+      </div>
+    </details>
+  );
+}

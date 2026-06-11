@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -95,6 +96,7 @@ type AuditEvent struct {
 type RuntimeSettings struct {
 	AllowedRoots []string `json:"allowedRoots"`
 	CookieSecure bool     `json:"cookieSecure"`
+	Addr         string   `json:"addr"`
 	UpdatedAt    string   `json:"updatedAt,omitempty"`
 }
 
@@ -1507,6 +1509,7 @@ func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 		roots = append(roots, root)
 	}
 	settings.AllowedRoots = roots
+	settings.Addr = strings.TrimSpace(settings.Addr)
 	return settings
 }
 
@@ -1521,6 +1524,9 @@ func (s *Store) EnsureRuntimeSettings(ctx context.Context, defaults RuntimeSetti
 		"allowed_roots": string(roots),
 		"cookie_secure": boolString(defaults.CookieSecure),
 	}
+	if defaults.Addr != "" {
+		values["http_addr"] = defaults.Addr
+	}
 	for key, value := range values {
 		if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)`, key, value, now); err != nil {
 			return err
@@ -1531,7 +1537,7 @@ func (s *Store) EnsureRuntimeSettings(ctx context.Context, defaults RuntimeSetti
 
 func (s *Store) GetRuntimeSettings(ctx context.Context) (RuntimeSettings, error) {
 	settings := RuntimeSettings{}
-	rows, err := s.db.QueryContext(ctx, `SELECT key, value, updated_at FROM settings WHERE key IN ('allowed_roots', 'cookie_secure')`)
+	rows, err := s.db.QueryContext(ctx, `SELECT key, value, updated_at FROM settings WHERE key IN ('allowed_roots', 'cookie_secure', 'http_addr')`)
 	if err != nil {
 		return RuntimeSettings{}, err
 	}
@@ -1549,6 +1555,8 @@ func (s *Store) GetRuntimeSettings(ctx context.Context) (RuntimeSettings, error)
 			_ = json.Unmarshal([]byte(value), &settings.AllowedRoots)
 		case "cookie_secure":
 			settings.CookieSecure = value == "true" || value == "1"
+		case "http_addr":
+			settings.Addr = value
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -1562,11 +1570,24 @@ func (s *Store) UpdateRuntimeSettings(ctx context.Context, settings RuntimeSetti
 	if len(settings.AllowedRoots) == 0 {
 		return errors.New("at least one allowed root is required")
 	}
+	if settings.Addr != "" {
+		_, portStr, err := net.SplitHostPort(settings.Addr)
+		if err != nil {
+			return fmt.Errorf("invalid listen address %q: %w", settings.Addr, err)
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("invalid listen port %q: must be 1-65535", portStr)
+		}
+	}
 	roots, _ := json.Marshal(settings.AllowedRoots)
 	now := now()
 	values := map[string]string{
 		"allowed_roots": string(roots),
 		"cookie_secure": boolString(settings.CookieSecure),
+	}
+	if settings.Addr != "" {
+		values["http_addr"] = settings.Addr
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
