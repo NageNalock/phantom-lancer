@@ -168,6 +168,7 @@ export function imageStorageBackendLabel(value?: string): string {
     {
       local: "本地",
       s3: "S3 兼容对象存储",
+      object_storage: "共享对象存储",
       remote: "远端 URL",
     }[value || ""] ||
     value ||

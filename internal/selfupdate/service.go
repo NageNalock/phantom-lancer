@@ -70,6 +70,7 @@ func (s *Service) Status(ctx context.Context) Status {
 			status.BackupBinaryPath = job.BackupBinaryPath
 		}
 	}
+	status.resolveSupervisorInfo()
 	return status
 }
 
@@ -310,7 +311,7 @@ func (s *Service) ConfirmBoot(ctx context.Context) (rollbackExecPath string) {
 					if s.log != nil {
 						s.log.Warn("watchdog rollback install path lookup failed", "job_id", job.ID, "error", safelog.Error(ipErr, 200))
 					}
-				} else if rbErr := restoreBackup(installP, job.BackupBinaryPath); rbErr == nil {
+				} else if rbErr := RestoreBackup(installP, job.BackupBinaryPath); rbErr == nil {
 					rollbackExecPath = installP
 					triggeredRollback = true
 					_, _ = s.store.AddAudit(ctx, storage.AuditEvent{
@@ -478,19 +479,21 @@ func (s *Service) execute(ctx context.Context, job *storage.SystemUpdateJob, che
 	if err := s.save(ctx, *job); err != nil {
 		return err
 	}
-	if err := extractBinary(stage.archive, stage.stagedBinary); err != nil {
+	extractResult, err := extractBinaries(stage.archive, stage.stagedBinary)
+	if err != nil {
 		return err
 	}
+	stage.stagedSupervisor = extractResult.SupervisorBinary
 	if err := verifyStagedVersion(ctx, stage.stagedBinary, job.TargetVersion); err != nil {
 		return err
 	}
-	s.append(ctx, job.ID, "update.extract.completed", map[string]any{"targetVersion": job.TargetVersion})
+	s.append(ctx, job.ID, "update.extract.completed", map[string]any{"targetVersion": job.TargetVersion, "hasSupervisorBinary": stage.stagedSupervisor != ""})
 
 	job.Phase = phaseInstalling
 	if err := s.save(ctx, *job); err != nil {
 		return err
 	}
-	installResult, err := s.install(ctx, job.ID, stage.stagedBinary, job.CurrentVersion)
+	installResult, err := s.install(ctx, job.ID, stage.stagedBinary, stage.stagedSupervisor, job.CurrentVersion)
 	if err != nil {
 		return err
 	}
@@ -581,7 +584,7 @@ func (s *Service) Rollback(ctx context.Context, jobID string) (storage.SystemUpd
 	if ierr != nil {
 		return storage.SystemUpdateJob{}, "", ierr
 	}
-	if err := restoreBackup(installPath, job.BackupBinaryPath); err != nil {
+	if err := RestoreBackup(installPath, job.BackupBinaryPath); err != nil {
 		return storage.SystemUpdateJob{}, "", err
 	}
 	suffix := " + rollback applied"
@@ -622,6 +625,7 @@ func (s *Service) Rollback(ctx context.Context, jobID string) (storage.SystemUpd
 			Summary:   "系统回滚已请求服务重启",
 			Payload:   map[string]any{"jobId": job.ID, "targetVersion": job.CurrentVersion, "source": "rollback"},
 		})
+		s.writeHandoff(job.ID, "rollback", job.TargetVersion, job.CurrentVersion, installPath, job.BackupBinaryPath)
 		s.dispatchRestart(job.ID, job.CurrentVersion, installPath, job.BackupBinaryPath, "rollback")
 	}
 	return job, installPath, nil

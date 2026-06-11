@@ -1,6 +1,6 @@
 import type { FormEvent, ReactNode } from "react";
 import { useEffect, useState } from "react";
-import type { ImageAsset, ImageGenerationJob, ImageProviderSettings, ImageStatus, ImageStorageSettings, Tone } from "../../app/types";
+import type { ImageAsset, ImageGenerationJob, ImageProviderSettings, ImageStatus, ImageStorageSettings, ObjectStorageProfile, Tone } from "../../app/types";
 import { Button, CheckLabel, ContextList, EmptyState, Field, ImageDropInput, Notice, Panel, Pill, SubTabs } from "../../components/ui";
 import { formatBytes } from "../../utils/format";
 import { defaultImageSettings, defaultImageStorageSettings, formatDate, imageAssetTypeLabel, imageJobStatusLabel, imageModeLabel, imageStatusLabel, imageStorageBackendLabel } from "../../domain/labels";
@@ -24,6 +24,7 @@ export function GeneratePanel({
   latestJob,
   onClearLibraryImage,
   settings,
+  storageSettings,
   onSubmit,
 }: {
   busy: boolean;
@@ -32,10 +33,12 @@ export function GeneratePanel({
   latestJob?: ImageGenerationJob;
   onClearLibraryImage?: () => void;
   settings: ImageProviderSettings;
+  storageSettings: ImageStorageSettings;
   onSubmit: (data: FormData) => Promise<void>;
 }) {
   const [mode, setMode] = useState<ImageMode>("text_to_image");
   const defaults = { ...defaultImageSettings(), ...settings };
+  const responseFormatDefault = objectStorageEnabled(storageSettings) ? "b64_json" : defaults.defaultResponseFormat;
   const referenceSlots = mode === "text_to_image" ? 0 : mode === "image_to_image" ? 1 : 3;
 
   useEffect(() => {
@@ -108,7 +111,7 @@ export function GeneratePanel({
               <input className="input mono" defaultValue={1} max={10} min={1} name="n" type="number" />
             </Field>
             <Field label="响应">
-              <select className="select mono" defaultValue={defaults.defaultResponseFormat} name="response_format">
+              <select className="select mono" defaultValue={responseFormatDefault} name="response_format">
                 <option value="url">url</option>
                 <option value="b64_json">b64_json</option>
               </select>
@@ -555,17 +558,22 @@ export function ProviderSettingsPanel({
 
 export function ImageStorageSettingsPanel({
   busy,
+  objectProfiles,
   settings,
   onSave,
   onTest,
 }: {
   busy: boolean;
+  objectProfiles: ObjectStorageProfile[];
   settings: ImageStorageSettings;
   onSave: (settings: ImageStorageSettingsDraft) => Promise<void>;
   onTest: () => Promise<void>;
 }) {
   const [draft, setDraft] = useState<ImageStorageSettingsDraft>({ ...defaultImageStorageSettings(), ...settings, s3AccessKeyId: "", s3SecretAccessKey: "", s3SessionToken: "", clearSecret: false });
   const s3Enabled = draft.backend === "s3";
+  const objectStorageEnabled = draft.backend === "object_storage";
+  const canTest = s3Enabled || (objectStorageEnabled && Boolean(draft.objectStorageProfileId));
+  const selectedProfile = objectProfiles.find((profile) => profile.id === draft.objectStorageProfileId);
 
   useEffect(() => {
     setDraft((current) => ({ ...current, ...defaultImageStorageSettings(), ...settings, s3AccessKeyId: "", s3SecretAccessKey: "", s3SessionToken: "", clearSecret: false }));
@@ -575,7 +583,7 @@ export function ImageStorageSettingsPanel({
     <Panel
       actions={
         <>
-          <Button disabled={busy || !s3Enabled} onClick={() => void onTest()}>
+          <Button disabled={busy || !canTest} onClick={() => void onTest()}>
             测试连接
           </Button>
           <Button disabled={busy} onClick={() => void onSave(draft)} tone="primary">
@@ -589,75 +597,114 @@ export function ImageStorageSettingsPanel({
       <div className="grid gap-4">
         <div className="grid grid-cols-3 gap-3 max-lg:grid-cols-1">
           <Field label="Backend">
-            <select className="select mono" onChange={(event) => updateDraft("backend", event.target.value)} value={draft.backend}>
+            <select className="select mono" onChange={(event) => updateBackend(event.target.value)} value={draft.backend}>
               <option value="local">local</option>
+              <option value="object_storage">object_storage profile</option>
               <option value="s3">s3 compatible</option>
             </select>
           </Field>
-          <Field label="S3 Access Key">
-            <input className="input mono" disabled value={draft.hasS3Credentials ? draft.maskedAccessKeyId || "configured" : "未配置"} />
+          <Field label={objectStorageEnabled ? "Object Profile" : "S3 Access Key"}>
+            <input className="input mono" disabled value={objectStorageEnabled ? selectedProfileLabel(selectedProfile, draft.objectStorageProfileId) : draft.hasS3Credentials ? draft.maskedAccessKeyId || "configured" : "未配置"} />
           </Field>
           <Field label="读取方式">
             <input className="input mono" disabled value="private bucket / backend proxy" />
           </Field>
         </div>
 
-        <fieldset className="m-0 grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3" disabled={!s3Enabled}>
-          <legend className="px-1 text-xs font-medium text-[var(--muted-strong)]">S3 兼容对象存储</legend>
-          <div className="grid grid-cols-3 gap-3 max-lg:grid-cols-1">
-            <Field label="Provider Label" help="用于展示和审计，例如 aliyun、tencent、minio。">
-              <input className="input mono" onChange={(event) => updateDraft("s3ProviderLabel", event.target.value)} placeholder="aliyun" value={draft.s3ProviderLabel} />
-            </Field>
-            <Field label="Bucket">
-              <input className="input mono" onChange={(event) => updateDraft("s3Bucket", event.target.value)} value={draft.s3Bucket} />
-            </Field>
-            <Field label="Region">
-              <input className="input mono" onChange={(event) => updateDraft("s3Region", event.target.value)} placeholder="auto / oss-cn-hangzhou" value={draft.s3Region} />
-            </Field>
-          </div>
-          <div className="grid grid-cols-[minmax(0,1fr)_minmax(220px,0.5fr)] gap-3 max-lg:grid-cols-1">
-            <Field label="Endpoint" help="填写服务商的 S3 兼容 endpoint，bucket 不需要公网读。">
-              <input className="input mono" onChange={(event) => updateDraft("s3Endpoint", event.target.value)} placeholder="https://oss-cn-hangzhou.aliyuncs.com" value={draft.s3Endpoint} />
-            </Field>
-            <Field label="Prefix">
-              <input className="input mono" onChange={(event) => updateDraft("s3Prefix", event.target.value)} value={draft.s3Prefix} />
-            </Field>
-          </div>
-          <div className="grid grid-cols-3 gap-3 max-lg:grid-cols-1">
-            <Field label="Access Key ID">
-              <input className="input mono" onChange={(event) => updateDraft("s3AccessKeyId", event.target.value)} type="password" value={draft.s3AccessKeyId} />
-            </Field>
-            <Field label="Secret Access Key">
-              <input className="input mono" onChange={(event) => updateDraft("s3SecretAccessKey", event.target.value)} type="password" value={draft.s3SecretAccessKey} />
-            </Field>
-            <Field label="Session Token">
-              <input className="input mono" onChange={(event) => updateDraft("s3SessionToken", event.target.value)} type="password" value={draft.s3SessionToken} />
-            </Field>
-          </div>
-          <div className="flex flex-wrap gap-4 text-sm">
-            <CheckLabel
-              checked={draft.s3ForcePathStyle}
-              onChange={(checked) => updateDraft("s3ForcePathStyle", checked)}
-            >
-              Force path style
-            </CheckLabel>
+        {objectStorageEnabled ? (
+          <fieldset className="m-0 grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+            <legend className="px-1 text-xs font-medium text-[var(--muted-strong)]">共享对象存储</legend>
+            {objectProfiles.length ? null : <Notice>先在全局 Settings / Object Storage 创建并测试一个 profile。</Notice>}
+            <div className="grid grid-cols-[minmax(0,1fr)_minmax(220px,0.5fr)] gap-3 max-lg:grid-cols-1">
+              <Field label="Object Storage Profile" help="profile 在全局 Settings / Object Storage 中维护，密钥不会回显。">
+                <select className="select mono" onChange={(event) => updateDraft("objectStorageProfileId", event.target.value)} value={draft.objectStorageProfileId || ""}>
+                  <option value="">选择 profile</option>
+                  {objectProfiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {(profile.name || profile.id) + " · " + profile.bucket}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Prefix">
+                <input className="input mono" onChange={(event) => updateDraft("s3Prefix", event.target.value)} value={draft.s3Prefix} />
+              </Field>
+            </div>
             <CheckLabel
               checked={draft.fallbackToLocal}
               onChange={(checked) => updateDraft("fallbackToLocal", checked)}
             >
               写入失败回退本地
             </CheckLabel>
-            <CheckLabel
-              checked={draft.clearSecret}
-              onChange={(checked) => updateDraft("clearSecret", checked)}
-            >
-              清除 S3 密钥
-            </CheckLabel>
-          </div>
-        </fieldset>
+          </fieldset>
+        ) : null}
+
+        {!objectStorageEnabled ? (
+          <fieldset className="m-0 grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3" disabled={!s3Enabled}>
+            <legend className="px-1 text-xs font-medium text-[var(--muted-strong)]">S3 兼容对象存储</legend>
+            <div className="grid grid-cols-3 gap-3 max-lg:grid-cols-1">
+              <Field label="Provider Label" help="用于展示和审计，例如 aliyun、tencent、minio。">
+                <input className="input mono" onChange={(event) => updateDraft("s3ProviderLabel", event.target.value)} placeholder="aliyun" value={draft.s3ProviderLabel} />
+              </Field>
+              <Field label="Bucket">
+                <input className="input mono" onChange={(event) => updateDraft("s3Bucket", event.target.value)} value={draft.s3Bucket} />
+              </Field>
+              <Field label="Region">
+                <input className="input mono" onChange={(event) => updateDraft("s3Region", event.target.value)} placeholder="auto / oss-cn-hangzhou" value={draft.s3Region} />
+              </Field>
+            </div>
+            <div className="grid grid-cols-[minmax(0,1fr)_minmax(220px,0.5fr)] gap-3 max-lg:grid-cols-1">
+              <Field label="Endpoint" help="填写服务商的 S3 兼容 endpoint，bucket 不需要公网读。">
+                <input className="input mono" onChange={(event) => updateDraft("s3Endpoint", event.target.value)} placeholder="https://oss-cn-hangzhou.aliyuncs.com" value={draft.s3Endpoint} />
+              </Field>
+              <Field label="Prefix">
+                <input className="input mono" onChange={(event) => updateDraft("s3Prefix", event.target.value)} value={draft.s3Prefix} />
+              </Field>
+            </div>
+            <div className="grid grid-cols-3 gap-3 max-lg:grid-cols-1">
+              <Field label="Access Key ID">
+                <input className="input mono" onChange={(event) => updateDraft("s3AccessKeyId", event.target.value)} type="password" value={draft.s3AccessKeyId} />
+              </Field>
+              <Field label="Secret Access Key">
+                <input className="input mono" onChange={(event) => updateDraft("s3SecretAccessKey", event.target.value)} type="password" value={draft.s3SecretAccessKey} />
+              </Field>
+              <Field label="Session Token">
+                <input className="input mono" onChange={(event) => updateDraft("s3SessionToken", event.target.value)} type="password" value={draft.s3SessionToken} />
+              </Field>
+            </div>
+            <div className="flex flex-wrap gap-4 text-sm">
+              <CheckLabel
+                checked={draft.s3ForcePathStyle}
+                onChange={(checked) => updateDraft("s3ForcePathStyle", checked)}
+              >
+                Force path style
+              </CheckLabel>
+              <CheckLabel
+                checked={draft.fallbackToLocal}
+                onChange={(checked) => updateDraft("fallbackToLocal", checked)}
+              >
+                写入失败回退本地
+              </CheckLabel>
+              <CheckLabel
+                checked={draft.clearSecret}
+                onChange={(checked) => updateDraft("clearSecret", checked)}
+              >
+                清除 S3 密钥
+              </CheckLabel>
+            </div>
+          </fieldset>
+        ) : null}
       </div>
     </Panel>
   );
+
+  function updateBackend(backend: string) {
+    setDraft((current) => ({
+      ...current,
+      backend,
+      objectStorageProfileId: backend === "object_storage" ? current.objectStorageProfileId : "",
+    }));
+  }
 
   function updateDraft<Key extends keyof ImageStorageSettingsDraft>(key: Key, value: ImageStorageSettingsDraft[Key]) {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -746,6 +793,12 @@ export function ImagesInspector({
   );
 }
 
+function selectedProfileLabel(profile?: ObjectStorageProfile, id?: string): string {
+  if (profile) return `${profile.name || profile.id} / ${profile.bucket}`;
+  if (id) return "profile missing";
+  return "未选择";
+}
+
 function JobCard({ job }: { job: ImageGenerationJob }) {
   const statusTone: Tone = job.status === "success" ? "good" : job.status === "failed" ? "danger" : "warn";
   return (
@@ -800,8 +853,13 @@ function assetDownloadURL(asset: ImageAsset): string {
   return asset.downloadUrl || `/api/images/library/assets/${encodeURIComponent(asset.id)}/download`;
 }
 
+function objectStorageEnabled(settings?: ImageStorageSettings): boolean {
+  const backend = settings?.backend;
+  return backend === "s3" || (backend === "object_storage" && Boolean(settings?.objectStorageProfileId));
+}
+
 function canArchiveAsset(asset?: ImageAsset, settings?: ImageStorageSettings): boolean {
-  return Boolean(asset?.id && asset.storageBackend === "local" && settings?.backend === "s3" && !asset.deletedAt);
+  return Boolean(asset?.id && asset.storageBackend === "local" && objectStorageEnabled(settings) && !asset.deletedAt);
 }
 
 function confirmDelete(asset: ImageAsset, onDelete: (asset: ImageAsset) => void) {

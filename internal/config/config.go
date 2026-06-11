@@ -157,7 +157,7 @@ func defaults(cwd string) Config {
 			Repository:             "NageNalock/phantom-lancer",
 			Channel:                "stable",
 			AssetName:              "phantom-lancer-linux-amd64.tar.gz",
-			RestartMode:            "self-exec",
+			RestartMode:            "exit",
 			BackupRetention:        3,
 			DownloadTimeoutSeconds: 300,
 			RestartTimeoutSeconds:  120,

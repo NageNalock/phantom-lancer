@@ -2,6 +2,8 @@ package selfupdate
 
 import (
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"phantom-lancer/internal/buildinfo"
@@ -73,6 +75,19 @@ type Status struct {
 	RestartMode           string                     `json:"restartMode"`
 	InstallBinaryPath     string                     `json:"installBinaryPath,omitempty"`
 	BackupBinaryPath      string                     `json:"backupBinaryPath,omitempty"`
+	UnderSupervisor       bool                       `json:"underSupervisor"`
+	SupervisorPID         int                        `json:"supervisorPID,omitempty"`
+}
+
+// resolveSupervisorInfo populates the UnderSupervisor and SupervisorPID
+// fields from the environment variables injected by phantom-supervisor.
+func (s *Status) resolveSupervisorInfo() {
+	s.UnderSupervisor = os.Getenv("PL_UNDER_SUPERVISOR") == "1"
+	if raw := os.Getenv("PL_SUPERVISOR_PID"); raw != "" {
+		if pid, err := strconv.Atoi(raw); err == nil && pid > 0 {
+			s.SupervisorPID = pid
+		}
+	}
 }
 
 type ApplyRequest struct {

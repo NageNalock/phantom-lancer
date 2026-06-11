@@ -188,20 +188,23 @@ jobs:
         env:
           PL_BIN_DIR: ${{ github.workspace }}/release/bin
           PL_OUT: ${{ github.workspace }}/release/bin/phantom-lancer
+          PL_SUPERVISOR_OUT: ${{ github.workspace }}/release/bin/phantom-supervisor
           PL_SKIP_WEB_BUILD: "1"
           PL_VERSION: ${{ steps.version.outputs.build_version }}
           PL_EXTRA_LDFLAGS: '-linkmode external -extldflags "-static"'
         run: scripts/build.sh
 
-      - name: Verify release binary is static
+      - name: Verify release binaries are static
         run: |
           set -Eeuo pipefail
-          file release/bin/phantom-lancer
-          if ! file release/bin/phantom-lancer | grep -q "statically linked"; then
-            echo "release binary must be statically linked for portable self-updates" >&2
-            ldd release/bin/phantom-lancer || true
-            exit 1
-          fi
+          for bin in phantom-lancer phantom-supervisor; do
+            file "release/bin/$bin"
+            if ! file "release/bin/$bin" | grep -q "statically linked"; then
+              echo "release/$bin must be statically linked for portable self-updates" >&2
+              ldd "release/bin/$bin" || true
+              exit 1
+            fi
+          done
 
       - name: Assemble release archive
         id: package
@@ -213,6 +216,8 @@ jobs:
 
           cp release/bin/phantom-lancer "$package_root/bin/phantom-lancer"
           chmod 0755 "$package_root/bin/phantom-lancer"
+          cp release/bin/phantom-supervisor "$package_root/bin/phantom-supervisor"
+          chmod 0755 "$package_root/bin/phantom-supervisor"
 
           cp configs/phantom.example.toml "$package_root/configs/phantom.example.toml"
           cp README.md LICENSE "$package_root/"

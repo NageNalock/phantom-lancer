@@ -13,7 +13,18 @@ import (
 	"strings"
 )
 
-const releaseBinaryPath = "phantom-lancer/bin/phantom-lancer"
+const (
+	releaseBinaryPath     = "phantom-lancer/bin/phantom-lancer"
+	releaseSupervisorPath = "phantom-lancer/bin/phantom-supervisor"
+)
+
+// ExtractResult holds the staged paths of binaries extracted from a release
+// archive. SupervisorBinary may be empty when extracting older archives that
+// did not ship the supervisor binary.
+type ExtractResult struct {
+	MainBinary       string
+	SupervisorBinary string
+}
 
 func verifyChecksum(archivePath, checksumPath string) (string, error) {
 	data, err := os.ReadFile(checksumPath)
@@ -57,19 +68,28 @@ func parseSHA256(value string) (string, error) {
 	return sum, nil
 }
 
-func extractBinary(archivePath, outputPath string) error {
+// extractBinaries extracts the release binaries from the archive into
+// sibling output paths. stagedMainPath is the destination for phantom-lancer;
+// the supervisor is written to stagedMainPath + ".supervisor" (and present in
+// the result only when the archive contains one).
+func extractBinaries(archivePath, stagedMainPath string) (ExtractResult, error) {
+	result := ExtractResult{MainBinary: stagedMainPath}
+	stagedSuperPath := stagedMainPath + ".supervisor"
+
 	file, err := os.Open(archivePath)
 	if err != nil {
-		return err
+		return result, err
 	}
 	defer file.Close()
 	gzipReader, err := gzip.NewReader(file)
 	if err != nil {
-		return err
+		return result, err
 	}
 	defer gzipReader.Close()
 	reader := tar.NewReader(gzipReader)
-	var found bool
+
+	mainFound := false
+	supervisorFound := false
 	var files int
 	var total int64
 	for {
@@ -78,15 +98,15 @@ func extractBinary(archivePath, outputPath string) error {
 			break
 		}
 		if err != nil {
-			return err
+			return result, err
 		}
 		files++
 		if files > 200 {
-			return errors.New("release archive contains too many files")
+			return result, errors.New("release archive contains too many files")
 		}
 		clean, err := safeTarName(header.Name)
 		if err != nil {
-			return err
+			return result, err
 		}
 		switch header.Typeflag {
 		case tar.TypeDir:
@@ -94,23 +114,41 @@ func extractBinary(archivePath, outputPath string) error {
 		case tar.TypeReg, tar.TypeRegA:
 			total += header.Size
 			if total > maxArchiveBytes {
-				return errors.New("release archive expands beyond the allowed maximum")
+				return result, errors.New("release archive expands beyond the allowed maximum")
 			}
-			if clean != releaseBinaryPath {
-				continue
+			switch clean {
+			case releaseBinaryPath:
+				if err := writeExtractedBinary(reader, stagedMainPath); err != nil {
+					return result, err
+				}
+				mainFound = true
+			case releaseSupervisorPath:
+				if err := writeExtractedBinary(reader, stagedSuperPath); err != nil {
+					return result, err
+				}
+				supervisorFound = true
+				result.SupervisorBinary = stagedSuperPath
+			default:
+				// Other release assets (scripts, configs, README) are not
+				// touched by the self-updater. Drain the entry.
+				_, _ = io.Copy(io.Discard, reader)
 			}
-			if err := writeExtractedBinary(reader, outputPath); err != nil {
-				return err
-			}
-			found = true
 		default:
-			return fmt.Errorf("release archive contains unsupported file type at %s", clean)
+			return result, fmt.Errorf("release archive contains unsupported file type at %s", clean)
 		}
 	}
-	if !found {
-		return errors.New("release archive does not contain phantom-lancer binary")
+	if !mainFound {
+		return result, errors.New("release archive does not contain phantom-lancer binary")
 	}
-	return nil
+	_ = supervisorFound
+	return result, nil
+}
+
+// extractBinary is a thin compatibility wrapper around extractBinaries for
+// existing callers/tests that only need the main binary.
+func extractBinary(archivePath, outputPath string) error {
+	_, err := extractBinaries(archivePath, outputPath)
+	return err
 }
 
 func safeTarName(name string) (string, error) {

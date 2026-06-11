@@ -143,6 +143,11 @@ func (s *Service) UpdateSettings(ctx context.Context, settings storage.ImageProv
 
 func (s *Service) CreateJob(ctx context.Context, request ImagineRequest) (storage.ImageGenerationJob, error) {
 	request = NormalizeRequest(request)
+	storageSettings, err := s.Store.GetImageStorageSettings(ctx)
+	if err != nil {
+		return storage.ImageGenerationJob{}, err
+	}
+	request.ResponseFormat = responseFormatForStorage(request.ResponseFormat, storageSettings)
 	if err := ValidateRequest(request); err != nil {
 		return storage.ImageGenerationJob{}, err
 	}
@@ -171,6 +176,14 @@ func (s *Service) CreateJob(ctx context.Context, request ImagineRequest) (storag
 
 	go s.runJob(context.Background(), job, request)
 	return job, nil
+}
+
+func responseFormatForStorage(format string, settings storage.ImageStorageSettings) string {
+	settings = storage.NormalizeImageStorageSettings(settings)
+	if settings.Backend == "s3" || settings.Backend == "object_storage" {
+		return "b64_json"
+	}
+	return strings.TrimSpace(format)
 }
 
 func (s *Service) runJob(ctx context.Context, job storage.ImageGenerationJob, request ImagineRequest) {

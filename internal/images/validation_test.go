@@ -109,6 +109,18 @@ func TestAssetStoreStoresDataURL(t *testing.T) {
 	}
 }
 
+func TestResponseFormatForStorageForcesBytesWhenObjectStorageEnabled(t *testing.T) {
+	if got := responseFormatForStorage("url", storage.ImageStorageSettings{Backend: "s3"}); got != "b64_json" {
+		t.Fatalf("s3 response format = %q, want b64_json", got)
+	}
+	if got := responseFormatForStorage("url", storage.ImageStorageSettings{Backend: "object_storage", ObjectStorageProfileID: "obj_123"}); got != "b64_json" {
+		t.Fatalf("object_storage response format = %q, want b64_json", got)
+	}
+	if got := responseFormatForStorage("url", storage.ImageStorageSettings{Backend: "local"}); got != "url" {
+		t.Fatalf("local response format = %q, want url", got)
+	}
+}
+
 func TestGeneratedRemoteAssetCreatedWhenFetchFails(t *testing.T) {
 	ctx := context.Background()
 	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)

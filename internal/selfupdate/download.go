@@ -15,11 +15,12 @@ import (
 )
 
 type stagingPaths struct {
-	dir          string
-	archivePart  string
-	archive      string
-	checksum     string
-	stagedBinary string
+	dir                string
+	archivePart        string
+	archive            string
+	checksum           string
+	stagedBinary       string
+	stagedSupervisor   string
 }
 
 func (s *Service) prepareStaging(jobID string) (stagingPaths, error) {
@@ -28,11 +29,12 @@ func (s *Service) prepareStaging(jobID string) (stagingPaths, error) {
 		return stagingPaths{}, err
 	}
 	return stagingPaths{
-		dir:          dir,
-		archivePart:  filepath.Join(dir, "archive.tar.gz.part"),
-		archive:      filepath.Join(dir, "archive.tar.gz"),
-		checksum:     filepath.Join(dir, "archive.tar.gz.sha256"),
-		stagedBinary: filepath.Join(dir, "phantom-lancer"),
+		dir:              dir,
+		archivePart:      filepath.Join(dir, "archive.tar.gz.part"),
+		archive:          filepath.Join(dir, "archive.tar.gz"),
+		checksum:         filepath.Join(dir, "archive.tar.gz.sha256"),
+		stagedBinary:     filepath.Join(dir, "phantom-lancer"),
+		stagedSupervisor: filepath.Join(dir, "phantom-lancer.supervisor"),
 	}, nil
 }
 

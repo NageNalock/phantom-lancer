@@ -35,6 +35,7 @@ export function ObjectStoragePanel({ actions }: { actions: AppActions }) {
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState("");
   const [draft, setDraft] = useState<ProfileDraft>(emptyDraft());
+  const [createOpen, setCreateOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -75,6 +76,7 @@ export function ObjectStoragePanel({ actions }: { actions: AppActions }) {
         },
       });
       setDraft(emptyDraft());
+      setCreateOpen(false);
       await load();
       actions.setToast("已创建对象存储 profile", "good");
     } catch (error) {
@@ -116,9 +118,18 @@ export function ObjectStoragePanel({ actions }: { actions: AppActions }) {
     <Panel
       title="Object Storage"
       subtitle="S3 兼容对象存储连接，供 Images、Docker Registry 等模块共用。各模块自行决定 prefix 与读写策略。"
-      actions={<Button onClick={() => void load()}>{loading ? "加载中" : "刷新"}</Button>}
+      actions={
+        <>
+          {items.length ? (
+            <Button onClick={() => setCreateOpen((open) => !open)}>
+              {createOpen ? "收起" : "新建 profile"}
+            </Button>
+          ) : null}
+          <Button onClick={() => void load()}>{loading ? "加载中" : "刷新"}</Button>
+        </>
+      }
     >
-      <div className="grid grid-cols-[minmax(0,1fr)_320px] gap-4 max-lg:grid-cols-1">
+      <div className="grid gap-3">
         <div className="grid content-start gap-2">
           {items.length ? (
             items.map((profile) => (
@@ -153,38 +164,57 @@ export function ObjectStoragePanel({ actions }: { actions: AppActions }) {
           )}
         </div>
 
-        <form className="grid gap-3" onSubmit={create}>
-          <Field label="名称（可选）">
-            <input className="input" onChange={(event) => setDraft((d) => ({ ...d, name: event.target.value }))} placeholder="例如 default object storage" value={draft.name} />
-          </Field>
-          <Field label="Endpoint" help="S3 兼容服务地址，仅保存 scheme 和 host。">
-            <input className="input" onChange={(event) => setDraft((d) => ({ ...d, endpoint: event.target.value }))} placeholder="https://s3.example.com" value={draft.endpoint} />
-          </Field>
-          <Field label="Bucket">
-            <input className="input" onChange={(event) => setDraft((d) => ({ ...d, bucket: event.target.value }))} placeholder="my-bucket" value={draft.bucket} />
-          </Field>
-          <Field label="Region">
-            <input className="input" onChange={(event) => setDraft((d) => ({ ...d, region: event.target.value }))} placeholder="auto" value={draft.region} />
-          </Field>
-          <Field label="Access Key ID">
-            <input className="input" autoComplete="off" onChange={(event) => setDraft((d) => ({ ...d, accessKeyId: event.target.value }))} value={draft.accessKeyId} />
-          </Field>
-          <Field label="Secret Access Key">
-            <input className="input" autoComplete="off" type="password" onChange={(event) => setDraft((d) => ({ ...d, secretAccessKey: event.target.value }))} value={draft.secretAccessKey} />
-          </Field>
-          <Field label="Session Token（可选）">
-            <input className="input" autoComplete="off" type="password" onChange={(event) => setDraft((d) => ({ ...d, sessionToken: event.target.value }))} value={draft.sessionToken} />
-          </Field>
-          <CheckLabel
-            checked={draft.forcePathStyle}
-            onChange={(checked) => setDraft((d) => ({ ...d, forcePathStyle: checked }))}
-          >
-            使用 path-style 寻址
-          </CheckLabel>
-          <Button disabled={busy === "create"} tone="primary" type="submit">
-            {busy === "create" ? "创建中" : "创建 profile"}
-          </Button>
-        </form>
+        {createOpen || !items.length ? (
+          <form className="grid gap-3 card-soft" onSubmit={create}>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <strong className="block text-sm">创建 profile</strong>
+                <p className="muted mt-1 mb-0 text-xs">连接信息只作为全局 profile 保存，模块各自配置 prefix 和策略。</p>
+              </div>
+              {items.length ? (
+                <Button onClick={() => setCreateOpen(false)}>
+                  取消
+                </Button>
+              ) : null}
+            </div>
+            <div className="grid grid-cols-3 gap-3 max-lg:grid-cols-1">
+              <Field label="名称（可选）">
+                <input className="input" onChange={(event) => setDraft((d) => ({ ...d, name: event.target.value }))} placeholder="例如 default object storage" value={draft.name} />
+              </Field>
+              <Field label="Endpoint" help="S3 兼容服务地址，仅保存 scheme 和 host。">
+                <input className="input" onChange={(event) => setDraft((d) => ({ ...d, endpoint: event.target.value }))} placeholder="https://s3.example.com" value={draft.endpoint} />
+              </Field>
+              <Field label="Bucket">
+                <input className="input" onChange={(event) => setDraft((d) => ({ ...d, bucket: event.target.value }))} placeholder="my-bucket" value={draft.bucket} />
+              </Field>
+            </div>
+            <div className="grid grid-cols-4 gap-3 max-xl:grid-cols-2 max-lg:grid-cols-1">
+              <Field label="Region">
+                <input className="input" onChange={(event) => setDraft((d) => ({ ...d, region: event.target.value }))} placeholder="auto" value={draft.region} />
+              </Field>
+              <Field label="Access Key ID">
+                <input className="input" autoComplete="off" onChange={(event) => setDraft((d) => ({ ...d, accessKeyId: event.target.value }))} value={draft.accessKeyId} />
+              </Field>
+              <Field label="Secret Access Key">
+                <input className="input" autoComplete="off" type="password" onChange={(event) => setDraft((d) => ({ ...d, secretAccessKey: event.target.value }))} value={draft.secretAccessKey} />
+              </Field>
+              <Field label="Session Token（可选）">
+                <input className="input" autoComplete="off" type="password" onChange={(event) => setDraft((d) => ({ ...d, sessionToken: event.target.value }))} value={draft.sessionToken} />
+              </Field>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <CheckLabel
+                checked={draft.forcePathStyle}
+                onChange={(checked) => setDraft((d) => ({ ...d, forcePathStyle: checked }))}
+              >
+                使用 path-style 寻址
+              </CheckLabel>
+              <Button disabled={busy === "create"} tone="primary" type="submit">
+                {busy === "create" ? "创建中" : "创建 profile"}
+              </Button>
+            </div>
+          </form>
+        ) : null}
       </div>
     </Panel>
   );

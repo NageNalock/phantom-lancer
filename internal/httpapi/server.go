@@ -932,36 +932,38 @@ func (s *Server) handleUpdateImageStorageSettings(w http.ResponseWriter, r *http
 		return
 	}
 	var req struct {
-		Backend           string `json:"backend"`
-		S3ProviderLabel   string `json:"s3ProviderLabel"`
-		S3Bucket          string `json:"s3Bucket"`
-		S3Region          string `json:"s3Region"`
-		S3Endpoint        string `json:"s3Endpoint"`
-		S3Prefix          string `json:"s3Prefix"`
-		S3ForcePathStyle  bool   `json:"s3ForcePathStyle"`
-		S3AccessKeyID     string `json:"s3AccessKeyId"`
-		S3SecretAccessKey string `json:"s3SecretAccessKey"`
-		S3SessionToken    string `json:"s3SessionToken"`
-		S3AccessMode      string `json:"s3AccessMode"`
-		FallbackToLocal   bool   `json:"fallbackToLocal"`
-		ClearSecret       bool   `json:"clearSecret"`
+		Backend                string `json:"backend"`
+		ObjectStorageProfileID string `json:"objectStorageProfileId"`
+		S3ProviderLabel        string `json:"s3ProviderLabel"`
+		S3Bucket               string `json:"s3Bucket"`
+		S3Region               string `json:"s3Region"`
+		S3Endpoint             string `json:"s3Endpoint"`
+		S3Prefix               string `json:"s3Prefix"`
+		S3ForcePathStyle       bool   `json:"s3ForcePathStyle"`
+		S3AccessKeyID          string `json:"s3AccessKeyId"`
+		S3SecretAccessKey      string `json:"s3SecretAccessKey"`
+		S3SessionToken         string `json:"s3SessionToken"`
+		S3AccessMode           string `json:"s3AccessMode"`
+		FallbackToLocal        bool   `json:"fallbackToLocal"`
+		ClearSecret            bool   `json:"clearSecret"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
 	settings := storage.ImageStorageSettings{
-		Backend:           req.Backend,
-		S3ProviderLabel:   req.S3ProviderLabel,
-		S3Bucket:          req.S3Bucket,
-		S3Region:          req.S3Region,
-		S3Endpoint:        req.S3Endpoint,
-		S3Prefix:          req.S3Prefix,
-		S3ForcePathStyle:  req.S3ForcePathStyle,
-		S3AccessKeyID:     req.S3AccessKeyID,
-		S3SecretAccessKey: req.S3SecretAccessKey,
-		S3SessionToken:    req.S3SessionToken,
-		S3AccessMode:      req.S3AccessMode,
-		FallbackToLocal:   req.FallbackToLocal,
+		Backend:                req.Backend,
+		ObjectStorageProfileID: req.ObjectStorageProfileID,
+		S3ProviderLabel:        req.S3ProviderLabel,
+		S3Bucket:               req.S3Bucket,
+		S3Region:               req.S3Region,
+		S3Endpoint:             req.S3Endpoint,
+		S3Prefix:               req.S3Prefix,
+		S3ForcePathStyle:       req.S3ForcePathStyle,
+		S3AccessKeyID:          req.S3AccessKeyID,
+		S3SecretAccessKey:      req.S3SecretAccessKey,
+		S3SessionToken:         req.S3SessionToken,
+		S3AccessMode:           req.S3AccessMode,
+		FallbackToLocal:        req.FallbackToLocal,
 	}
 	updateSecret := strings.TrimSpace(req.S3AccessKeyID) != "" || strings.TrimSpace(req.S3SecretAccessKey) != "" || strings.TrimSpace(req.S3SessionToken) != ""
 	updated, err := s.images.UpdateStorageSettings(r.Context(), settings, updateSecret, req.ClearSecret)
@@ -975,6 +977,7 @@ func (s *Server) handleUpdateImageStorageSettings(w http.ResponseWriter, r *http
 		Summary:   "已更新 Images 存储设置",
 		Payload: map[string]any{
 			"backend":       updated.Backend,
+			"profileId":     updated.ObjectStorageProfileID,
 			"providerLabel": updated.S3ProviderLabel,
 			"bucket":        updated.S3Bucket,
 			"endpoint":      safelog.URLLabel(updated.S3Endpoint),

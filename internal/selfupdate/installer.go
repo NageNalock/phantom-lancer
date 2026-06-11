@@ -36,7 +36,7 @@ func verifyStagedVersion(ctx context.Context, binaryPath, targetVersion string) 
 	return nil
 }
 
-func (s *Service) install(ctx context.Context, jobID, stagedBinary, currentVersion string) (installResult, error) {
+func (s *Service) install(ctx context.Context, jobID, stagedBinary, stagedSupervisor, currentVersion string) (installResult, error) {
 	installPath, err := s.installPath()
 	if err != nil {
 		return installResult{}, err
@@ -96,8 +96,54 @@ func (s *Service) install(ctx context.Context, jobID, stagedBinary, currentVersi
 	if s.log != nil {
 		s.log.Info("system update binary replaced", "job_id", jobID, "install_path", installPath, "backup_path", backupPath)
 	}
+	// Install supervisor binary if present (Phase 1: in-place replacement;
+	// the running supervisor process keeps the old fd, so no crash).
+	// Supervisor install failure is deliberately non-fatal: the old binary
+	// can still restart the new main program.
+	if strings.TrimSpace(stagedSupervisor) != "" {
+		if sErr := s.installSupervisor(jobID, stagedSupervisor, currentInfo); sErr != nil && s.log != nil {
+			s.log.Warn("system update supervisor install skipped", "job_id", jobID, "error", safelog.Error(sErr, 200))
+		}
+	}
 	s.pruneBackups(backupDir)
 	return installResult{installPath: installPath, backupPath: backupPath}, nil
+}
+
+// installSupervisor atomically replaces the supervisor binary that lives in
+// the same directory as the main install path. currentInfo provides the
+// reference ownership/permissions (the main and supervisor binaries are
+// expected to share those).
+func (s *Service) installSupervisor(jobID, stagedSupervisor string, currentInfo os.FileInfo) error {
+	installPath, err := s.installPath()
+	if err != nil {
+		return err
+	}
+	supervisorInstallPath := filepath.Join(filepath.Dir(installPath), "phantom-supervisor")
+	supervisorTmp := filepath.Join(filepath.Dir(supervisorInstallPath), ".phantom-supervisor."+jobID+".tmp")
+	_ = os.Remove(supervisorTmp)
+	mode := currentInfo.Mode().Perm()
+	if mode&0o111 == 0 {
+		mode = mode | 0o755
+	}
+	if err := copyFile(stagedSupervisor, supervisorTmp, mode); err != nil {
+		_ = os.Remove(supervisorTmp)
+		return fmt.Errorf("copy staged supervisor failed: %w", err)
+	}
+	if err := preserveOwnership(supervisorTmp, currentInfo); err != nil {
+		_ = os.Remove(supervisorTmp)
+		return fmt.Errorf("preserve supervisor ownership failed: %w", err)
+	}
+	if err := os.Rename(supervisorTmp, supervisorInstallPath); err != nil {
+		_ = os.Remove(supervisorTmp)
+		return fmt.Errorf("replace supervisor binary failed: %w", err)
+	}
+	if err := fsyncDir(filepath.Dir(supervisorInstallPath)); err != nil {
+		return err
+	}
+	if s.log != nil {
+		s.log.Info("system update supervisor binary replaced", "job_id", jobID, "install_path", supervisorInstallPath)
+	}
+	return nil
 }
 
 func (s *Service) installPath() (string, error) {
@@ -242,13 +288,13 @@ func validateBackupBinary(path string) (os.FileInfo, error) {
 	return info, nil
 }
 
-// restoreBackup atomically overwrites installPath with the contents of
+// RestoreBackup atomically overwrites installPath with the contents of
 // backupPath, preserving the backup's ownership/permissions and fsync'ing
 // the install directory afterwards. The behaviour mirrors install() so
 // rollback has the same durability guarantees.
-func restoreBackup(installPath, backupPath string) error {
+func RestoreBackup(installPath, backupPath string) error {
 	if strings.TrimSpace(installPath) == "" || strings.TrimSpace(backupPath) == "" {
-		return errors.New("restoreBackup: both paths must be provided")
+		return errors.New("RestoreBackup: both paths must be provided")
 	}
 	backupInfo, err := validateBackupBinary(backupPath)
 	if err != nil {

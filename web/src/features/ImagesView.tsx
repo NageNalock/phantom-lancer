@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../app/App";
-import type { ApiError, AppData, ImageAsset, ImageGenerationJob } from "../app/types";
+import type { ApiError, AppData, ImageAsset, ImageGenerationJob, ObjectStorageProfile } from "../app/types";
 import { friendlyError } from "../api/client";
 import { defaultImageSettings, defaultImageStorageSettings } from "../domain/labels";
 import { GeneratePanel, HistoryPanel, ImageStorageSettingsPanel, ImagesInspector, ImagesTabs, LibraryPanel, ProviderSettingsPanel } from "../images/components";
@@ -16,6 +16,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   const [privateExpiresAt, setPrivateExpiresAt] = useState("");
   const [privateAssets, setPrivateAssets] = useState<ImageAsset[]>([]);
   const [imageToImageAsset, setImageToImageAsset] = useState<ImageAsset | undefined>(undefined);
+  const [objectProfiles, setObjectProfiles] = useState<ObjectStorageProfile[]>([]);
 
   const settings = useMemo(() => ({ ...defaultImageSettings(), ...(data.images.settings || {}) }), [data.images.settings]);
   const storageSettings = useMemo(() => ({ ...defaultImageStorageSettings(), ...(data.images.storageSettings || {}) }), [data.images.storageSettings]);
@@ -54,6 +55,12 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     if (activeTab !== "library" || libraryScope !== "private") return;
     void refreshPrivateStatus(true);
   }, [activeTab, libraryScope]);
+
+  useEffect(() => {
+    if (activeTab !== "settings") return;
+    void refreshObjectProfiles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   async function submitJob(formData: FormData) {
     setBusy("job");
@@ -113,6 +120,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
         csrf: actions.csrf,
         body: {
           backend: draft.backend,
+          objectStorageProfileId: draft.objectStorageProfileId,
           s3ProviderLabel: draft.s3ProviderLabel,
           s3Bucket: draft.s3Bucket,
           s3Region: draft.s3Region,
@@ -148,6 +156,15 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
       actions.setToast(friendlyError(error), "danger");
     } finally {
       setBusy("");
+    }
+  }
+
+  async function refreshObjectProfiles() {
+    try {
+      const result = await actions.api<{ items?: ObjectStorageProfile[] }>("/api/object-storage/profiles");
+      setObjectProfiles(result.items || []);
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
     }
   }
 
@@ -310,7 +327,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     <div className="grid min-h-[calc(100dvh-105px)] grid-cols-[minmax(0,1fr)_320px] max-xl:grid-cols-1">
       <div className="grid content-start gap-4 p-4">
         <ImagesTabs active={activeTab} onChange={setActiveTab} />
-        {activeTab === "generate" ? <GeneratePanel busy={busy === "job"} hasApiKey={Boolean(settings.hasApiKey)} latestJob={latestJob} libraryImage={imageToImageAsset} onClearLibraryImage={() => setImageToImageAsset(undefined)} onSubmit={submitJob} settings={settings} /> : null}
+        {activeTab === "generate" ? <GeneratePanel busy={busy === "job"} hasApiKey={Boolean(settings.hasApiKey)} latestJob={latestJob} libraryImage={imageToImageAsset} onClearLibraryImage={() => setImageToImageAsset(undefined)} onSubmit={submitJob} settings={settings} storageSettings={storageSettings} /> : null}
         {activeTab === "library" ? (
           <LibraryPanel
             assets={libraryAssets}
@@ -339,7 +356,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
         {activeTab === "settings" ? (
           <div className="grid gap-4">
             <ProviderSettingsPanel busy={busy === "settings"} onSave={saveSettings} settings={settings} />
-            <ImageStorageSettingsPanel busy={busy === "storage" || busy === "storage-test"} onSave={saveStorageSettings} onTest={testStorageSettings} settings={storageSettings} />
+            <ImageStorageSettingsPanel busy={busy === "storage" || busy === "storage-test"} objectProfiles={objectProfiles} onSave={saveStorageSettings} onTest={testStorageSettings} settings={storageSettings} />
           </div>
         ) : null}
       </div>

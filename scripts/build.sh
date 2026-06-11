@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="${PL_BIN_DIR:-"$ROOT_DIR/bin"}"
 OUT="${PL_OUT:-"$BIN_DIR/phantom-lancer"}"
+SUPERVISOR_OUT="${PL_SUPERVISOR_OUT:-"$BIN_DIR/phantom-supervisor"}"
 
 find_npm() {
   if [[ -n "${PL_NPM_BIN:-}" ]]; then
@@ -104,3 +105,8 @@ if [[ -n "${PL_EXTRA_LDFLAGS:-}" ]]; then
 fi
 "$GO_BIN" build -trimpath -ldflags "$LDFLAGS" -o "$OUT" ./cmd/phantom-lancer
 echo "Build complete: $OUT"
+
+echo "Building phantom-supervisor -> $SUPERVISOR_OUT"
+"$GO_BIN" build -trimpath -ldflags "$LDFLAGS" -o "$SUPERVISOR_OUT" ./cmd/phantom-supervisor
+chmod +x "$SUPERVISOR_OUT"
+echo "Build complete: $SUPERVISOR_OUT"
