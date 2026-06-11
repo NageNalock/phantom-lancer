@@ -1674,12 +1674,14 @@ WHERE id = ?`,
 	return err
 }
 
-// InterruptStaleSystemUpdateJobs marks any in-flight update job as failed
-// with the supplied message. It is called at startup so a process crash
-// during run() cannot leave a "queued"/"running"/"restarting" job that blocks
-// all future Apply() calls indefinitely.
+// InterruptStaleSystemUpdateJobs marks any pre-restart in-flight update job as
+// failed with the supplied message. It is called at startup so a process crash
+// during download/verify/install cannot leave a "queued"/"running" job that
+// blocks all future Apply() calls indefinitely. "restarting" jobs are left for
+// selfupdate.ConfirmBoot so the boot-confirmation path can record exact
+// version-mismatch / rollback diagnostics.
 func (s *Store) InterruptStaleSystemUpdateJobs(ctx context.Context, message string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM system_update_jobs WHERE status IN ('queued', 'running', 'restarting') ORDER BY created_at ASC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM system_update_jobs WHERE status IN ('queued', 'running') ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1701,7 +1703,7 @@ func (s *Store) InterruptStaleSystemUpdateJobs(ctx context.Context, message stri
 	if strings.TrimSpace(message) == "" {
 		message = "服务启动时发现遗留更新任务，已置为失败"
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE system_update_jobs SET status = 'failed', error_message = ?, completed_at = ? WHERE status IN ('queued', 'running', 'restarting')`, message, now())
+	_, err = s.db.ExecContext(ctx, `UPDATE system_update_jobs SET status = 'failed', error_message = ?, completed_at = ? WHERE status IN ('queued', 'running')`, message, now())
 	if err != nil {
 		return nil, err
 	}

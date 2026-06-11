@@ -56,6 +56,19 @@ func main() {
 	}
 	defer logHandle.Close()
 	logger := logHandle.Logger
+	logger.Info(
+		"phantom lancer boot starting",
+		"version", buildinfo.Version,
+		"commit", buildinfo.Commit,
+		"addr", cfg.Addr,
+		"config", cfg.ConfigPath,
+		"data_dir", cfg.DataDir,
+		"db", cfg.DBPath,
+		"log_file", cfg.LogFile,
+		"updates_enabled", cfg.Updates.Enabled,
+		"updates_restart_mode", cfg.Updates.RestartMode,
+		"updates_install_binary_path", cfg.Updates.InstallBinaryPath,
+	)
 
 	ctx := context.Background()
 	store, err := storage.Open(ctx, cfg.DBPath, logger)
@@ -113,23 +126,27 @@ func main() {
 		RestartTimeout:    time.Duration(cfg.Updates.RestartTimeoutSeconds) * time.Second,
 		Build:             buildinfo.Current(),
 		RequestRestart: func() {
+			logger.Info("self-update restart signal received", "restart_mode", cfg.Updates.RestartMode)
 			select {
 			case restartRequested <- struct{}{}:
 			default:
+				logger.Warn("self-update restart signal dropped because restart is already pending", "restart_mode", cfg.Updates.RestartMode)
 			}
 		},
 		PrepareSelfExec: func(p string) {
 			selfExecPath = filepath.Clean(p)
+			logger.Info("self-update prepared self-exec path", "path", selfExecPath)
 		},
 	})
 	rollbackPath := updateSvc.ConfirmBoot(ctx)
 	if rollbackPath != "" {
 		logger.Info("self-update watchdog triggered, rolling back to backup binary", "path", rollbackPath)
+		logger.Info("phantom lancer preparing rollback self-exec", "path", rollbackPath)
 		orderlyClose(logger, dockerSvc, v2raySvc, codexSvc, store, logHandle)
 		if err := syscall.Exec(rollbackPath, os.Args, os.Environ()); err != nil {
-			logger.Error("rollback syscall.Exec failed, falling through to normal startup", "error", err, "path", rollbackPath)
+			logger.Error("rollback syscall.Exec failed", "error", err, "path", rollbackPath)
+			os.Exit(1)
 		}
-		// If we reach here Exec failed (unusual); continue with normal boot as a best-effort fallback.
 	}
 	if err := codexGatewaySvc.Ensure(ctx); err != nil {
 		logger.Error("initialize codex gateway failed", "error", err)
@@ -181,7 +198,8 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	restartForUpdate := false
 	select {
-	case <-stop:
+	case sig := <-stop:
+		logger.Info("phantom lancer shutdown signal received", "signal", sig.String())
 	case <-restartRequested:
 		restartForUpdate = true
 		logger.Info("phantom lancer restart requested")
@@ -191,6 +209,7 @@ func main() {
 	if restartForUpdate {
 		shutdownTimeout = 2 * time.Second
 	}
+	logger.Info("phantom lancer shutdown starting", "restart_for_update", restartForUpdate, "timeout", shutdownTimeout.String())
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
@@ -203,15 +222,19 @@ func main() {
 			logger.Error("force close server failed", "error", closeErr)
 		}
 	}
+	logger.Info("phantom lancer http server stopped", "restart_for_update", restartForUpdate)
 	if restartForUpdate {
+		if selfExecPath != "" {
+			logger.Info("phantom lancer preparing self-exec for update", "path", selfExecPath)
+		} else {
+			logger.Info("phantom lancer exiting for update restart", "restart_mode", cfg.Updates.RestartMode, "requires_external_supervisor", cfg.Updates.RestartMode == selfupdate.RestartModeExit)
+		}
 		orderlyClose(logger, dockerSvc, v2raySvc, codexSvc, store, logHandle)
 		if selfExecPath != "" {
-			logger.Info("phantom-lancer self-exec for update", "path", selfExecPath)
 			if err := syscall.Exec(selfExecPath, os.Args, os.Environ()); err != nil {
 				logger.Error("self-exec syscall.Exec failed, falling back to plain exit", "error", err, "path", selfExecPath)
 			}
 		}
-		logger.Info("phantom lancer exiting for update restart")
 		os.Exit(0)
 	}
 }

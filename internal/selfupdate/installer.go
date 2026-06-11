@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"phantom-lancer/internal/safelog"
 )
 
 type installResult struct {
@@ -20,12 +22,16 @@ type installResult struct {
 
 func verifyStagedVersion(ctx context.Context, binaryPath, targetVersion string) error {
 	cmd := exec.CommandContext(ctx, binaryPath, "--version")
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("staged binary version check failed: %w", err)
+		detail := safelog.Text(string(output), 300)
+		if detail == "" {
+			return fmt.Errorf("staged binary version check failed: %w", err)
+		}
+		return fmt.Errorf("staged binary version check failed: %w; output=%s", err, detail)
 	}
 	if !strings.Contains(string(output), targetVersion) {
-		return fmt.Errorf("staged binary version does not match target %s", targetVersion)
+		return fmt.Errorf("staged binary version does not match target %s; output=%s", targetVersion, safelog.Text(string(output), 300))
 	}
 	return nil
 }
@@ -34,6 +40,9 @@ func (s *Service) install(ctx context.Context, jobID, stagedBinary, currentVersi
 	installPath, err := s.installPath()
 	if err != nil {
 		return installResult{}, err
+	}
+	if s.log != nil {
+		s.log.Info("system update install started", "job_id", jobID, "install_path", installPath, "current_version", currentVersion)
 	}
 	if err := ensureWritableDir(filepath.Dir(installPath)); err != nil {
 		return installResult{}, err
@@ -44,6 +53,9 @@ func (s *Service) install(ctx context.Context, jobID, stagedBinary, currentVersi
 	dbBackup := filepath.Join(s.cfg.DataDir, "backups", "pre-update-"+jobID+".db")
 	if err := s.store.BackupDatabase(ctx, dbBackup); err != nil {
 		return installResult{}, fmt.Errorf("database backup failed: %w", err)
+	}
+	if s.log != nil {
+		s.log.Info("system update database backup completed", "job_id", jobID, "db_backup_path", dbBackup)
 	}
 
 	backupDir := filepath.Join(s.cfg.DataDir, "updates", "backups")
@@ -61,6 +73,9 @@ func (s *Service) install(ctx context.Context, jobID, stagedBinary, currentVersi
 	if err := copyFile(installPath, backupPath, currentInfo.Mode().Perm()); err != nil {
 		return installResult{}, fmt.Errorf("backup current binary failed: %w", err)
 	}
+	if s.log != nil {
+		s.log.Info("system update current binary backed up", "job_id", jobID, "backup_path", backupPath, "mode", currentInfo.Mode().Perm().String())
+	}
 
 	tempPath := filepath.Join(filepath.Dir(installPath), ".phantom-lancer."+jobID+".tmp")
 	if err := copyFile(stagedBinary, tempPath, currentInfo.Mode().Perm()); err != nil {
@@ -77,6 +92,9 @@ func (s *Service) install(ctx context.Context, jobID, stagedBinary, currentVersi
 	}
 	if err := fsyncDir(filepath.Dir(installPath)); err != nil {
 		return installResult{}, err
+	}
+	if s.log != nil {
+		s.log.Info("system update binary replaced", "job_id", jobID, "install_path", installPath, "backup_path", backupPath)
 	}
 	s.pruneBackups(backupDir)
 	return installResult{installPath: installPath, backupPath: backupPath}, nil

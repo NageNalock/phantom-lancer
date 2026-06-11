@@ -38,6 +38,7 @@ func TestConfirmBootMarksRestartVersionMismatchFailed(t *testing.T) {
 		TargetVersion:  "v0.2.0",
 		Status:         jobStatusRestarting,
 		Phase:          phaseRestarting,
+		CompletedAt:    time.Now().UTC().Format(time.RFC3339Nano),
 	})
 	if err != nil {
 		t.Fatalf("create update job: %v", err)
@@ -62,6 +63,9 @@ func TestConfirmBootMarksRestartVersionMismatchFailed(t *testing.T) {
 	if got.ErrorMessage == "" {
 		t.Fatal("expected version mismatch error message")
 	}
+	if !strings.Contains(got.ErrorMessage, "version mismatch") && !strings.Contains(got.ErrorMessage, "instead of target") {
+		t.Fatalf("error_message = %q, want version mismatch detail", got.ErrorMessage)
+	}
 	if _, err := store.ActiveSystemUpdateJob(ctx); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("active job err = %v, want ErrNotFound", err)
 	}
@@ -80,6 +84,7 @@ func TestConfirmBootMarksRestartVersionMatchCompleted(t *testing.T) {
 		TargetVersion:  "v0.2.0",
 		Status:         jobStatusRestarting,
 		Phase:          phaseRestarting,
+		CompletedAt:    time.Now().UTC().Format(time.RFC3339Nano),
 	})
 	if err != nil {
 		t.Fatalf("create update job: %v", err)
@@ -195,7 +200,8 @@ func TestConfirmBootTimeoutTriggersRollback(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test #3: Ensure() marks queued/running/restarting jobs as failed.
+// Test #3: Ensure() marks queued/running jobs as failed and leaves restarting
+// jobs for ConfirmBoot().
 // ---------------------------------------------------------------------------
 
 func TestEnsureInterruptsStaleJobs(t *testing.T) {
@@ -219,6 +225,7 @@ func TestEnsureInterruptsStaleJobs(t *testing.T) {
 	restarting, err := store.CreateSystemUpdateJob(ctx, storage.SystemUpdateJob{
 		CurrentVersion: "v0.1.0", TargetVersion: "v0.2.0",
 		Status: jobStatusRestarting, Phase: phaseRestarting,
+		CompletedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
 	if err != nil {
 		t.Fatalf("create restarting job: %v", err)
@@ -240,7 +247,7 @@ func TestEnsureInterruptsStaleJobs(t *testing.T) {
 		t.Fatalf("Ensure: %v", err)
 	}
 
-	for _, id := range []string{queued.ID, running.ID, restarting.ID} {
+	for _, id := range []string{queued.ID, running.ID} {
 		j, err := store.GetSystemUpdateJob(ctx, id)
 		if err != nil {
 			t.Fatalf("get job %s: %v", id, err)
@@ -253,10 +260,54 @@ func TestEnsureInterruptsStaleJobs(t *testing.T) {
 		}
 	}
 
+	if j, err := store.GetSystemUpdateJob(ctx, restarting.ID); err != nil {
+		t.Fatalf("get restarting job: %v", err)
+	} else if j.Status != jobStatusRestarting {
+		t.Errorf("restarting job was mutated by Ensure: status = %q", j.Status)
+	}
+
 	if j, err := store.GetSystemUpdateJob(ctx, done.ID); err != nil {
 		t.Fatalf("get completed job: %v", err)
 	} else if j.Status != jobStatusCompleted {
 		t.Errorf("completed job was mutated by Ensure: status = %q", j.Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test #3b: ConfirmBoot ignores terminal jobs even when the phase still says
+// restarting from an older failure/rollback flow.
+// ---------------------------------------------------------------------------
+
+func TestConfirmBootIgnoresFailedRestartingPhase(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+
+	job, err := store.CreateSystemUpdateJob(ctx, storage.SystemUpdateJob{
+		CurrentVersion: "v0.1.0",
+		TargetVersion:  "v0.2.0",
+		Status:         jobStatusFailed,
+		Phase:          phaseRestarting,
+		ErrorMessage:   "previous failure",
+		CompletedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatalf("create update job: %v", err)
+	}
+
+	service := NewService(store, nil, nil, Config{
+		Build:           buildinfo.Info{Version: "v0.1.0"},
+		DownloadTimeout: time.Second,
+		RestartTimeout:  time.Second,
+	})
+	if got := service.ConfirmBoot(ctx); got != "" {
+		t.Fatalf("ConfirmBoot() rollback path = %q, want empty", got)
+	}
+	got, err := store.GetSystemUpdateJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get update job: %v", err)
+	}
+	if got.ErrorMessage != "previous failure" {
+		t.Fatalf("error_message = %q, want original message preserved", got.ErrorMessage)
 	}
 }
 
@@ -311,8 +362,8 @@ func TestExecuteCleansStagingDirOnFailure(t *testing.T) {
 	defer store.Close()
 
 	job, err := store.CreateSystemUpdateJob(ctx, storage.SystemUpdateJob{
-		CurrentVersion: "v0.1.0", TargetVersion:  "v0.2.0",
-		ReleaseID: "none", AssetName:  "bogus.tar.gz",
+		CurrentVersion: "v0.1.0", TargetVersion: "v0.2.0",
+		ReleaseID: "none", AssetName: "bogus.tar.gz",
 		Status:    jobStatusRunning,
 		Phase:     phaseDownloading,
 		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
@@ -488,7 +539,79 @@ func TestRollbackRestoresBinary(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test #8: Status() surfaces the restart mode + install/backup paths.
+// Test #8: Rollback reuses the restart dispatch path in self-exec mode.
+// ---------------------------------------------------------------------------
+
+func TestRollbackDispatchesRestartForSelfExec(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	store, err := storage.Open(ctx, filepath.Join(tmpDir, "db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	installPath := filepath.Join(tmpDir, "bin", "phantom-lancer")
+	if err := os.MkdirAll(filepath.Dir(installPath), 0o700); err != nil {
+		t.Fatalf("mkdir install dir: %v", err)
+	}
+	if err := os.WriteFile(installPath, []byte("NEW-VERSION\n"), 0o755); err != nil {
+		t.Fatalf("write install binary: %v", err)
+	}
+	backupPath := filepath.Join(tmpDir, "backups", "phantom-lancer-v0.1.0")
+	if err := os.MkdirAll(filepath.Dir(backupPath), 0o700); err != nil {
+		t.Fatalf("mkdir backup dir: %v", err)
+	}
+	if err := os.WriteFile(backupPath, []byte("OLD-VERSION\n"), 0o755); err != nil {
+		t.Fatalf("write backup binary: %v", err)
+	}
+
+	job, err := store.CreateSystemUpdateJob(ctx, storage.SystemUpdateJob{
+		CurrentVersion:    "v0.1.0",
+		TargetVersion:     "v0.2.0",
+		Status:            jobStatusFailed,
+		Phase:             phaseRestarting,
+		InstallBinaryPath: installPath,
+		BackupBinaryPath:  backupPath,
+		ErrorMessage:      "new version failed",
+	})
+	if err != nil {
+		t.Fatalf("create update job: %v", err)
+	}
+
+	restarted := make(chan struct{}, 1)
+	var preparedPath string
+	service := NewService(store, nil, nil, Config{
+		Build:             buildinfo.Info{Version: "v0.2.0"},
+		InstallBinaryPath: installPath,
+		DataDir:           tmpDir,
+		DownloadTimeout:   time.Second,
+		RestartMode:       RestartModeSelfExec,
+		PrepareSelfExec: func(path string) {
+			preparedPath = path
+		},
+		RequestRestart: func() {
+			restarted <- struct{}{}
+		},
+	})
+
+	if _, execPath, err := service.Rollback(ctx, job.ID); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	} else if execPath != installPath {
+		t.Fatalf("execPath = %q, want %q", execPath, installPath)
+	}
+	if preparedPath != installPath {
+		t.Fatalf("preparedPath = %q, want %q", preparedPath, installPath)
+	}
+	select {
+	case <-restarted:
+	case <-time.After(time.Second):
+		t.Fatal("rollback did not request restart")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test #9: Status() surfaces the restart mode + install/backup paths.
 // (Replaces the "self-exec callback invoked" plan item with a test that
 // exercises the same public surface, because reaching the install path end
 // requires a full round-trip of download→verify→extract.)
