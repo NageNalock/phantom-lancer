@@ -125,8 +125,8 @@ func Load(args []string) (Config, error) {
 	if cfg.Updates.AssetName == "" {
 		return Config{}, errors.New("updates asset name is required")
 	}
-	if cfg.Updates.RestartMode != "exit" && cfg.Updates.RestartMode != "none" {
-		return Config{}, errors.New("updates restart mode must be exit or none")
+	if cfg.Updates.RestartMode != "exit" && cfg.Updates.RestartMode != "none" && cfg.Updates.RestartMode != "self-exec" {
+		return Config{}, errors.New("updates restart mode must be exit, none, or self-exec")
 	}
 	if cfg.Updates.BackupRetention < 0 {
 		return Config{}, errors.New("updates backup retention cannot be negative")
@@ -157,7 +157,7 @@ func defaults(cwd string) Config {
 			Repository:             "NageNalock/phantom-lancer",
 			Channel:                "stable",
 			AssetName:              "phantom-lancer-linux-amd64.tar.gz",
-			RestartMode:            "exit",
+			RestartMode:            "self-exec",
 			BackupRetention:        3,
 			DownloadTimeoutSeconds: 300,
 			RestartTimeoutSeconds:  120,

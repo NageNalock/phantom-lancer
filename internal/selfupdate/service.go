@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -47,15 +49,25 @@ func (s *Service) Status(ctx context.Context) Status {
 		Version:               s.cfg.Build,
 		RestartTimeoutSeconds: int(s.cfg.RestartTimeout.Seconds()),
 		SupportedPlatform:     supportedPlatform(),
+		RestartMode:           s.cfg.RestartMode,
+	}
+	if p, err := s.installPath(); err == nil {
+		status.InstallBinaryPath = p
 	}
 	if check, err := s.store.LatestSystemUpdateCheck(ctx); err == nil {
 		status.LatestCheck = &check
 	}
 	if job, err := s.store.ActiveSystemUpdateJob(ctx); err == nil {
 		status.ActiveJob = &job
+		if job.BackupBinaryPath != "" {
+			status.BackupBinaryPath = job.BackupBinaryPath
+		}
 	}
 	if job, err := s.store.LatestSystemUpdateJob(ctx); err == nil {
 		status.LatestJob = &job
+		if status.BackupBinaryPath == "" && job.BackupBinaryPath != "" {
+			status.BackupBinaryPath = job.BackupBinaryPath
+		}
 	}
 	return status
 }
@@ -153,6 +165,29 @@ func (s *Service) Apply(ctx context.Context, req ApplyRequest) (ApplyResult, err
 	return ApplyResult{Job: job, EventScope: eventScope, EventScopeID: job.ID}, nil
 }
 
+// Ensure reconciles any leftover state from an interrupted previous run.
+// It mirrors images.Service.Ensure — every in-flight job that was left
+// behind after a hard crash is marked failed + recorded in audit so Apply()
+// can be retried.
+func (s *Service) Ensure(ctx context.Context) error {
+	ids, err := s.store.InterruptStaleSystemUpdateJobs(ctx, "服务重启，遗留的更新任务已被自动置为失败")
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		s.append(ctx, id, "update.job.interrupted", map[string]any{"cleanup": "startup"})
+	}
+	if len(ids) > 0 {
+		_, _ = s.store.AddAudit(ctx, storage.AuditEvent{
+			EventType: "system.update.interrupted",
+			RiskLevel: "medium",
+			Summary:   fmt.Sprintf("启动时发现 %d 条遗留更新任务已被置为失败", len(ids)),
+			Payload:   map[string]any{"jobIds": ids},
+		})
+	}
+	return nil
+}
+
 func (s *Service) Cancel(ctx context.Context, id string) (storage.SystemUpdateJob, error) {
 	job, err := s.store.GetSystemUpdateJob(ctx, id)
 	if err != nil {
@@ -177,52 +212,115 @@ func (s *Service) Cancel(ctx context.Context, id string) (storage.SystemUpdateJo
 	return job, nil
 }
 
-func (s *Service) ConfirmBoot(ctx context.Context) {
+// ConfirmBoot is called by main() early on startup. It reconciles the latest
+// pending restarting job against the currently running build, performs a
+// watchdog timeout check, and returns a rollback binary path when the
+// service should immediately self-exec back to the previous known-good
+// version. The returned string is empty when no automatic rollback is
+// required.
+func (s *Service) ConfirmBoot(ctx context.Context) (rollbackExecPath string) {
 	job, err := s.store.LatestSystemUpdateJob(ctx)
 	if err != nil || job.TargetVersion == "" {
-		return
+		return ""
 	}
 	if job.Status != jobStatusRestarting && job.Phase != phaseRestarting {
-		return
+		return ""
 	}
-	if job.TargetVersion != s.cfg.Build.Version {
-		currentVersion := strings.TrimSpace(s.cfg.Build.Version)
-		if currentVersion == "" {
-			currentVersion = "unknown"
-		}
-		job.Status = jobStatusFailed
-		job.ErrorMessage = fmt.Sprintf("service restarted with version %s instead of target %s", currentVersion, job.TargetVersion)
+	// Happy path: we're running the version the job was targeting — the
+	// restart completed successfully.
+	if job.TargetVersion == s.cfg.Build.Version {
+		job.Status = jobStatusCompleted
+		job.Phase = phaseCompleted
 		job.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		if err := s.store.SaveSystemUpdateJob(ctx, job); err != nil {
 			if s.log != nil {
-				s.log.Warn("mark update boot mismatch failed", "error", err)
+				s.log.Warn("confirm update boot failed", "error", err)
 			}
-			return
+			return ""
 		}
-		s.append(ctx, job.ID, "update.failed", map[string]any{"phase": job.Phase, "message": job.ErrorMessage})
 		_, _ = s.store.AddAudit(ctx, storage.AuditEvent{
-			EventType: "system.update.boot_mismatch",
-			RiskLevel: "high",
-			Summary:   "系统更新重启后版本不匹配",
-			Payload:   map[string]any{"jobId": job.ID, "currentVersion": currentVersion, "targetVersion": job.TargetVersion},
+			EventType: "system.update.completed",
+			RiskLevel: "medium",
+			Summary:   "系统更新已完成",
+			Payload:   map[string]any{"jobId": job.ID, "targetVersion": job.TargetVersion},
 		})
-		return
+		s.append(ctx, job.ID, "update.completed", map[string]any{"targetVersion": job.TargetVersion})
+		return ""
 	}
-	job.Status = jobStatusCompleted
-	job.Phase = phaseCompleted
+
+	currentVersion := strings.TrimSpace(s.cfg.Build.Version)
+	if currentVersion == "" {
+		currentVersion = "unknown"
+	}
+
+	// Watchdog path: the job was left in restarting state long enough that
+	// the restart window has elapsed, and the running binary is NOT the
+	// target version. This typically means the newly installed binary
+	// crashed on startup and (for self-exec mode) the outer supervisor
+	// respawned the original binary, or (for exit mode) the user manually
+	// restarted the old one. When a valid backup exists we offer an
+	// automatic rollback path.
+	triggeredRollback := false
+	timeout := s.cfg.RestartTimeout
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	if started, pErr := time.Parse(time.RFC3339Nano, job.CompletedAt); pErr == nil {
+		if time.Since(started) > timeout {
+			if job.BackupBinaryPath != "" {
+				if _, vbErr := validateBackupBinary(job.BackupBinaryPath); vbErr == nil {
+					installP, ipErr := s.installPath()
+					if ipErr == nil {
+						if rbErr := restoreBackup(installP, job.BackupBinaryPath); rbErr == nil {
+							rollbackExecPath = installP
+							triggeredRollback = true
+							_, _ = s.store.AddAudit(ctx, storage.AuditEvent{
+								EventType: "system.update.rollback_auto",
+								RiskLevel: "high",
+								Summary:   "系统更新启动超时,已自动回滚到备份 binary",
+								Payload: map[string]any{
+									"jobId":          job.ID,
+									"currentVersion": currentVersion,
+									"targetVersion":  job.TargetVersion,
+									"timeoutSeconds": int(timeout.Seconds()),
+									"backupPath":     job.BackupBinaryPath,
+								},
+							})
+							s.append(ctx, job.ID, "update.rollback.applied", map[string]any{"path": installP, "timeout": int(timeout.Seconds())})
+						} else if s.log != nil {
+							s.log.Warn("watchdog rollback restore failed", "error", rbErr)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Always finalise the job; even if rollback failed we should not leave
+	// it in restarting state forever.
+	job.Status = jobStatusFailed
+	msg := fmt.Sprintf("service restarted with version %s instead of target %s", currentVersion, job.TargetVersion)
+	if triggeredRollback {
+		msg += "; restart watchdog timed out, backup binary restored automatically"
+	} else if rollbackExecPath == "" && job.BackupBinaryPath == "" {
+		msg += "; no backup binary available for auto-rollback"
+	}
+	job.ErrorMessage = msg
 	job.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if err := s.store.SaveSystemUpdateJob(ctx, job); err != nil {
 		if s.log != nil {
-			s.log.Warn("confirm update boot failed", "error", err)
+			s.log.Warn("mark update boot mismatch failed", "error", err)
 		}
-		return
+		return rollbackExecPath
 	}
+	s.append(ctx, job.ID, "update.failed", map[string]any{"phase": job.Phase, "message": msg, "rollback": triggeredRollback})
 	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{
-		EventType: "system.update.completed",
-		RiskLevel: "medium",
-		Summary:   "系统更新已完成",
-		Payload:   map[string]any{"jobId": job.ID, "targetVersion": job.TargetVersion},
+		EventType: "system.update.boot_mismatch",
+		RiskLevel: "high",
+		Summary:   "系统更新重启后版本不匹配",
+		Payload:   map[string]any{"jobId": job.ID, "currentVersion": currentVersion, "targetVersion": job.TargetVersion, "autoRollback": triggeredRollback},
 	})
+	return rollbackExecPath
 }
 
 func (s *Service) run(ctx context.Context, jobID string, check storage.SystemUpdateCheck) {
@@ -230,6 +328,22 @@ func (s *Service) run(ctx context.Context, jobID string, check storage.SystemUpd
 		s.mu.Lock()
 		delete(s.cancels, jobID)
 		s.mu.Unlock()
+	}()
+	// Panic fence: any bug in download/verify/extract/install that causes a
+	// panic inside the goroutine MUST not leak a running-status job into the
+	// database (which would block Apply forever).
+	defer func() {
+		if r := recover(); r != nil {
+			stack := debug.Stack()
+			if s.log != nil {
+				s.log.Error("update run panicked", "panic", fmt.Sprintf("%v", r), "stack", string(stack))
+			}
+			job, getErr := s.store.GetSystemUpdateJob(context.Background(), jobID)
+			if getErr != nil {
+				return
+			}
+			_ = s.failJob(context.Background(), job.ID, fmt.Sprintf("panic: %v\n\n%s", r, string(stack)))
+		}
 	}()
 	job, err := s.store.GetSystemUpdateJob(context.Background(), jobID)
 	if err != nil {
@@ -255,11 +369,32 @@ func (s *Service) run(ctx context.Context, jobID string, check storage.SystemUpd
 	}
 }
 
+// failJob writes the final failed state + audits it. Unlike the private
+// fail(job, err) method which is meant to be called from inside run() while
+// the job struct is in scope, failJob accepts a jobID and reloads so it can
+// be called from the panic fence or other detached call sites.
+func (s *Service) failJob(ctx context.Context, jobID, message string) error {
+	job, err := s.store.GetSystemUpdateJob(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	s.fail(ctx, &job, errors.New(truncate(message, 500)))
+	return nil
+}
+
 func (s *Service) execute(ctx context.Context, job *storage.SystemUpdateJob, check storage.SystemUpdateCheck) error {
 	stage, err := s.prepareStaging(job.ID)
 	if err != nil {
 		return err
 	}
+	// Clean up the per-job staging tree unconditionally when execute
+	// returns. A cancelled, failed, or successful run all leave behind
+	// ~MBs of archive otherwise.
+	defer func() {
+		if stage.dir != "" {
+			_ = os.RemoveAll(stage.dir)
+		}
+	}()
 	job.Phase = phaseDownloading
 	if err := s.save(ctx, *job); err != nil {
 		return err
@@ -341,11 +476,31 @@ func (s *Service) execute(ctx context.Context, job *storage.SystemUpdateJob, che
 		Summary:   "系统更新已请求服务重启",
 		Payload:   map[string]any{"jobId": job.ID, "targetVersion": job.TargetVersion},
 	})
-	if s.cfg.RestartMode == "exit" && s.cfg.RequestRestart != nil {
-		go func() {
-			time.Sleep(300 * time.Millisecond)
-			s.cfg.RequestRestart()
-		}()
+	// Restart dispatch per RestartMode. Every mode is allowed to invoke
+	// RequestRestart; main() decides whether to syscall.Exec or just exit.
+	switch s.cfg.RestartMode {
+	case RestartModeExit:
+		if s.cfg.RequestRestart != nil {
+			go func() {
+				time.Sleep(300 * time.Millisecond)
+				s.cfg.RequestRestart()
+			}()
+		}
+	case RestartModeSelfExec:
+		if s.cfg.PrepareSelfExec != nil {
+			s.cfg.PrepareSelfExec(installResult.installPath)
+		}
+		if s.cfg.RequestRestart != nil {
+			go func() {
+				time.Sleep(300 * time.Millisecond)
+				s.cfg.RequestRestart()
+			}()
+		}
+	case RestartModeNone:
+		// Operator handles restart; UI shows a manual-restart CTA when
+		// it sees phase=restarting combined with mode=none.
+	default:
+		// Unknown mode: behave like "none" rather than silently exiting.
 	}
 	return nil
 }
@@ -365,6 +520,58 @@ func (s *Service) fail(ctx context.Context, job *storage.SystemUpdateJob, err er
 	if s.log != nil {
 		s.log.Warn("system update failed", "jobId", job.ID, "phase", job.Phase, "error", job.ErrorMessage)
 	}
+}
+
+// Rollback atomically restores the backup binary referenced by the given
+// (completed or failed) update job, updates the job row, and returns both
+// the refreshed job record and the absolute path of the binary that has
+// just been restored to (the caller may wish to syscall.Exec that path).
+//
+// Only jobs with a validated backup binary on disk can be rolled back.
+func (s *Service) Rollback(ctx context.Context, jobID string) (storage.SystemUpdateJob, string, error) {
+	job, err := s.store.GetSystemUpdateJob(ctx, jobID)
+	if err != nil {
+		return storage.SystemUpdateJob{}, "", err
+	}
+	if job.Status == jobStatusQueued || job.Status == jobStatusRunning || job.Status == jobStatusRestarting {
+		return storage.SystemUpdateJob{}, "", errors.New("cannot rollback a job that is still in progress; cancel it first")
+	}
+	if _, verr := validateBackupBinary(job.BackupBinaryPath); verr != nil {
+		return storage.SystemUpdateJob{}, "", fmt.Errorf("rollback: backup binary invalid or missing: %w", verr)
+	}
+	installPath, ierr := s.installPath()
+	if ierr != nil {
+		return storage.SystemUpdateJob{}, "", ierr
+	}
+	if err := restoreBackup(installPath, job.BackupBinaryPath); err != nil {
+		return storage.SystemUpdateJob{}, "", err
+	}
+	suffix := " + rollback applied"
+	if strings.Contains(job.ErrorMessage, "rollback applied") {
+		// Idempotent: the rollback note is already on the job, don't double-append.
+	} else if strings.TrimSpace(job.ErrorMessage) == "" {
+		job.ErrorMessage = "rollback applied"
+	} else {
+		job.ErrorMessage = job.ErrorMessage + suffix
+	}
+	job.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	if err := s.store.SaveSystemUpdateJob(ctx, job); err != nil {
+		return storage.SystemUpdateJob{}, "", err
+	}
+	s.append(ctx, job.ID, "update.rollback.applied", map[string]any{"path": installPath, "source": "manual"})
+	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{
+		EventType: "system.update.rollback",
+		RiskLevel: "high",
+		Summary:   "已手动回滚到更新前的 binary",
+		Payload: map[string]any{
+			"jobId":          job.ID,
+			"currentVersion": job.TargetVersion,
+			"rollbackVersion": job.CurrentVersion,
+			"backupPath":     job.BackupBinaryPath,
+			"installPath":    installPath,
+		},
+	})
+	return job, installPath, nil
 }
 
 func (s *Service) save(ctx context.Context, job storage.SystemUpdateJob) error {

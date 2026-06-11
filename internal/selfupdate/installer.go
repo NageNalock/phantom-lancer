@@ -203,3 +203,64 @@ func (s *Service) pruneBackups(dir string) {
 		items = append(items[:oldest], items[oldest+1:]...)
 	}
 }
+
+// validateBackupBinary confirms a candidate backup path points at a regular,
+// executable file. It returns the stat record so callers can preserve
+// ownership/mode during restore.
+func validateBackupBinary(path string) (os.FileInfo, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("backup binary path is empty")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("backup binary is not readable: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("backup binary path is not a regular file")
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		return nil, fmt.Errorf("backup binary %q is not executable", path)
+	}
+	return info, nil
+}
+
+// restoreBackup atomically overwrites installPath with the contents of
+// backupPath, preserving the backup's ownership/permissions and fsync'ing
+// the install directory afterwards. The behaviour mirrors install() so
+// rollback has the same durability guarantees.
+func restoreBackup(installPath, backupPath string) error {
+	if strings.TrimSpace(installPath) == "" || strings.TrimSpace(backupPath) == "" {
+		return errors.New("restoreBackup: both paths must be provided")
+	}
+	backupInfo, err := validateBackupBinary(backupPath)
+	if err != nil {
+		return err
+	}
+	if err := ensureWritableDir(filepath.Dir(installPath)); err != nil {
+		return err
+	}
+	installInfo, err := os.Stat(installPath)
+	if err != nil {
+		// Allow installing into a path that doesn't yet exist (rare, but
+		// possible after a partial failure); fall back to backup mode.
+		installInfo = backupInfo
+	}
+	tempPath := filepath.Join(filepath.Dir(installPath), ".phantom-lancer.rollback.tmp")
+	_ = os.Remove(tempPath)
+	if err := copyFile(backupPath, tempPath, installInfo.Mode().Perm()|0o111); err != nil {
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("copy backup binary failed: %w", err)
+	}
+	// Preserve ownership the way the original install path had it.
+	if installInfo != nil {
+		if err := preserveOwnership(tempPath, installInfo); err != nil {
+			_ = os.Remove(tempPath)
+			return fmt.Errorf("preserve restored binary ownership failed: %w", err)
+		}
+	}
+	if err := os.Rename(tempPath, installPath); err != nil {
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("replace binary from backup failed: %w", err)
+	}
+	return fsyncDir(filepath.Dir(installPath))
+}

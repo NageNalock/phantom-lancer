@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
@@ -99,6 +100,7 @@ func main() {
 	defer dockerSvc.Close()
 	logsSvc := logcenter.NewService(store, cfg)
 	restartRequested := make(chan struct{}, 1)
+	var selfExecPath string
 	updateSvc := selfupdate.NewService(store, hub, logger, selfupdate.Config{
 		Enabled:           cfg.Updates.Enabled,
 		Repository:        cfg.Updates.Repository,
@@ -116,8 +118,19 @@ func main() {
 			default:
 			}
 		},
+		PrepareSelfExec: func(p string) {
+			selfExecPath = filepath.Clean(p)
+		},
 	})
-	updateSvc.ConfirmBoot(ctx)
+	rollbackPath := updateSvc.ConfirmBoot(ctx)
+	if rollbackPath != "" {
+		logger.Info("self-update watchdog triggered, rolling back to backup binary", "path", rollbackPath)
+		orderlyClose(logger, dockerSvc, v2raySvc, codexSvc, store, logHandle)
+		if err := syscall.Exec(rollbackPath, os.Args, os.Environ()); err != nil {
+			logger.Error("rollback syscall.Exec failed, falling through to normal startup", "error", err, "path", rollbackPath)
+		}
+		// If we reach here Exec failed (unusual); continue with normal boot as a best-effort fallback.
+	}
 	if err := codexGatewaySvc.Ensure(ctx); err != nil {
 		logger.Error("initialize codex gateway failed", "error", err)
 		os.Exit(1)
@@ -132,6 +145,10 @@ func main() {
 	}
 	if err := codexSvc.Ensure(ctx); err != nil {
 		logger.Error("initialize codex client failed", "error", err)
+		os.Exit(1)
+	}
+	if err := updateSvc.Ensure(ctx); err != nil {
+		logger.Error("initialize self-update stale-job cleanup failed", "error", err)
 		os.Exit(1)
 	}
 	codexSvc.StartBackground(ctx)
@@ -187,9 +204,42 @@ func main() {
 		}
 	}
 	if restartForUpdate {
+		orderlyClose(logger, dockerSvc, v2raySvc, codexSvc, store, logHandle)
+		if selfExecPath != "" {
+			logger.Info("phantom-lancer self-exec for update", "path", selfExecPath)
+			if err := syscall.Exec(selfExecPath, os.Args, os.Environ()); err != nil {
+				logger.Error("self-exec syscall.Exec failed, falling back to plain exit", "error", err, "path", selfExecPath)
+			}
+		}
 		logger.Info("phantom lancer exiting for update restart")
-		_ = logHandle.Close()
 		os.Exit(0)
+	}
+}
+
+// orderlyClose shuts down the long-lived subsystems in the exact reverse
+// order the defers were registered in main() so an explicit exit path (e.g.
+// for self-update) releases resources correctly before os.Exit() /
+// syscall.Exec() would otherwise skip the deferred calls.
+func orderlyClose(logger *slog.Logger, dockerSvc *dockercontrol.Service, v2raySvc *v2ray.Service, codexSvc *codexclient.Service, store *storage.Store, logHandle *logging.LoggerHandle) {
+	warn := func(name string, err error) {
+		if err != nil && logger != nil {
+			logger.Warn(name+" close returned error", "error", err)
+		}
+	}
+	if dockerSvc != nil {
+		dockerSvc.Close()
+	}
+	if v2raySvc != nil {
+		v2raySvc.Close()
+	}
+	if codexSvc != nil {
+		codexSvc.Close()
+	}
+	if store != nil {
+		warn("storage", store.Close())
+	}
+	if logHandle != nil {
+		warn("logger", logHandle.Close())
 	}
 }
 

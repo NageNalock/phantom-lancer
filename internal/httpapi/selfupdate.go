@@ -159,6 +159,35 @@ func (s *Server) handleSystemUpdateJobSubroutes(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusOK, map[string]any{"job": job})
 		return
 	}
+	if len(parts) == 2 && parts[1] == "rollback" {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "方法不允许")
+			return
+		}
+		if !s.requireCSRF(w, r, ctx.Session) {
+			return
+		}
+		var req struct {
+			OwnerPassword string `json:"ownerPassword"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if !s.verifyUpdatePassword(w, r, ctx, req.OwnerPassword) {
+			return
+		}
+		job, execPath, err := s.updates.Rollback(r.Context(), parts[0])
+		if err != nil {
+			code := http.StatusBadRequest
+			if errors.Is(err, storage.ErrNotFound) {
+				code = http.StatusNotFound
+			}
+			writeError(w, code, "update_rollback_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"job": job, "execPath": execPath})
+		return
+	}
 	writeError(w, http.StatusNotFound, "update_job_not_found", "未找到更新任务")
 }
 

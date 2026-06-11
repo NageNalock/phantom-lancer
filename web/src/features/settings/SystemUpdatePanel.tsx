@@ -9,6 +9,7 @@ import { formatDate } from "../../domain/labels";
 const updateEventNames = [
   "update.job.created",
   "update.job.updated",
+  "update.job.interrupted",
   "update.download.started",
   "update.download.progress",
   "update.download.completed",
@@ -18,6 +19,8 @@ const updateEventNames = [
   "update.restart.requested",
   "update.failed",
   "update.cancelled",
+  "update.rollback.applied",
+  "update.completed",
 ];
 
 export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
@@ -29,6 +32,9 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
   const [confirmTasks, setConfirmTasks] = useState(false);
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [reconnecting, setReconnecting] = useState(false);
+  const [reconnectTimedOut, setReconnectTimedOut] = useState(false);
+  const [rollbackOpen, setRollbackOpen] = useState(false);
+  const [rollbackPassword, setRollbackPassword] = useState("");
 
   const activeJob = status.activeJob;
   const latestJob = status.latestJob;
@@ -89,11 +95,15 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
         .then((next) => {
           if (next.version?.version && next.latestJob?.targetVersion === next.version.version) {
             setReconnecting(false);
+            setReconnectTimedOut(false);
             actions.setToast("系统更新已完成", "good");
           }
         })
         .catch(() => {
-          if (Date.now() - started > timeout) setReconnecting(false);
+          if (Date.now() - started > timeout) {
+            setReconnecting(false);
+            setReconnectTimedOut(true);
+          }
         });
     }, 1800);
     return () => window.clearInterval(timer);
@@ -153,6 +163,29 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
       await actions.api(`/api/system/update/jobs/${encodeURIComponent(job.id)}/cancel`, { method: "POST", csrf: actions.csrf });
       await loadStatus();
       actions.setToast("更新任务已取消", "good");
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function rollbackLatest(job: SystemUpdateJob) {
+    setBusy("rollback");
+    try {
+      const result = await actions.api<{ execPath?: string; job?: SystemUpdateJob }>(`/api/system/update/jobs/${encodeURIComponent(job.id)}/rollback`, {
+        method: "POST",
+        csrf: actions.csrf,
+        body: { ownerPassword: rollbackPassword },
+      });
+      setRollbackPassword("");
+      setRollbackOpen(false);
+      await loadStatus();
+      if (result.execPath && status.restartMode === "self-exec") {
+        setReconnectTimedOut(false);
+        setReconnecting(true);
+      }
+      actions.setToast("已回滚到更新前的 binary" + (result.execPath ? `（${result.execPath}）` : ""), "good");
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");
     } finally {
@@ -247,11 +280,18 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
                 <strong className="text-sm">更新任务 <span className="mono">{visibleJob.id}</span></strong>
                 <p className="muted mt-1 mb-0 text-xs">{jobPhaseLabel(visibleJob.phase)} · {jobStatusLabel(visibleJob.status)}</p>
               </div>
-              {activeJob && activeJob.phase !== "installing" && activeJob.phase !== "restarting" ? (
-                <Button disabled={busy === "cancel"} onClick={() => void cancelUpdate(activeJob)}>
-                  取消下载
-                </Button>
-              ) : null}
+              <div className="flex flex-wrap justify-end gap-2">
+                {activeJob && activeJob.phase !== "installing" && activeJob.phase !== "restarting" ? (
+                  <Button disabled={busy === "cancel"} onClick={() => void cancelUpdate(activeJob)}>
+                    取消下载
+                  </Button>
+                ) : null}
+                {visibleJob && (visibleJob.status === "failed" || visibleJob.status === "completed") && status.backupBinaryPath ? (
+                  <Button disabled={busy === "rollback"} onClick={() => { setRollbackPassword(""); setRollbackOpen(true); }} tone="danger">
+                    回滚
+                  </Button>
+                ) : null}
+              </div>
             </div>
             <div className="grid gap-2">
               <div className="h-2 overflow-hidden rounded-md bg-[var(--line)]">
@@ -264,6 +304,38 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
             </div>
             {visibleJob.errorMessage ? <Notice>{visibleJob.errorMessage}</Notice> : null}
             {reconnecting ? <Notice>服务正在重启。页面会自动尝试重新连接并确认版本。</Notice> : null}
+            {reconnectTimedOut ? (
+              <Notice tone="danger">
+                服务重启超时,新版本可能无法启动。如果备份 binary 可用,请使用「回滚」按钮回到上一稳定版本,或手动检查 binary 运行状态。
+              </Notice>
+            ) : null}
+            {activeJob?.phase === "restarting" && status.restartMode === "none" ? (
+              <Notice tone="warn">
+                更新已完成,当前 restart_mode = none,请手动重启 binary 使新版本生效。
+              </Notice>
+            ) : null}
+            {rollbackOpen && visibleJob ? (
+              <div className="grid gap-3 card-soft">
+                <div className="grid gap-1">
+                  <strong className="text-sm">确认回滚到上一版本 <span className="mono">{visibleJob.currentVersion || "备份"}</span></strong>
+                  <span className="muted text-xs">会用保存的备份 binary 原子覆盖当前 binary,回滚成功后会自动重启服务。</span>
+                </div>
+                <label className="field">
+                  <span>管理员密码</span>
+                  <input className="input" onChange={(event) => setRollbackPassword(event.target.value)} type="password" value={rollbackPassword} />
+                </label>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button onClick={() => { setRollbackOpen(false); setRollbackPassword(""); }}>取消</Button>
+                  <Button
+                    disabled={busy === "rollback" || !rollbackPassword.trim()}
+                    onClick={() => void rollbackLatest(visibleJob)}
+                    tone="danger"
+                  >
+                    确认回滚
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             {events.length ? (
               <div className="grid gap-1 border-t border-[var(--line)] pt-2">
                 {events.slice(-6).map((event) => (
@@ -272,6 +344,12 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
                     <span>{eventLabel(event)}</span>
                   </div>
                 ))}
+              </div>
+            ) : null}
+            {(status.installBinaryPath || status.backupBinaryPath) ? (
+              <div className="grid gap-1 text-xs muted mono border-t border-[var(--line)] pt-2">
+                <span>安装路径: {status.installBinaryPath || "—"}</span>
+                <span>备份路径: {status.backupBinaryPath || "—"}</span>
               </div>
             ) : null}
           </div>
@@ -339,6 +417,7 @@ function eventLabel(event: EventRecord): string {
   const labels: Record<string, string> = {
     "update.job.created": "更新任务已创建",
     "update.job.updated": "更新任务状态已更新",
+    "update.job.interrupted": "更新任务在服务重启时被自动置为失败",
     "update.download.started": "开始下载 release 包",
     "update.download.progress": "下载进度已更新",
     "update.download.completed": "下载完成",
@@ -348,6 +427,10 @@ function eventLabel(event: EventRecord): string {
     "update.restart.requested": "已请求服务重启",
     "update.failed": "更新失败",
     "update.cancelled": "更新已取消",
+    "update.completed": "更新已完成并确认生效",
+    "update.rollback.applied": "已回滚到备份 binary",
+    "system.update.rollback": "手动回滚已执行",
+    "system.update.rollback_auto": "自动回滚已执行",
   };
   return labels[event.type] || event.type;
 }

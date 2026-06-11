@@ -139,6 +139,9 @@ export interface SystemUpdateStatus {
   latestJob?: SystemUpdateJob;
   restartTimeoutSeconds?: number;
   supportedPlatform?: boolean;
+  restartMode?: string;
+  installBinaryPath?: string;
+  backupBinaryPath?: string;
 }
 
 export interface CodexGatewaySettings {

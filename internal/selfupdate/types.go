@@ -25,6 +25,14 @@ const (
 	phaseCompleted   = "completed"
 )
 
+// RestartMode enumerates how the service transitions into a freshly
+// installed binary.
+const (
+	RestartModeExit     = "exit"      // exit cleanly and rely on an external supervisor to re-launch
+	RestartModeNone     = "none"      // leave the old process running; operator restarts manually
+	RestartModeSelfExec = "self-exec" // in-place syscall.Exec — works without any supervisor
+)
+
 const (
 	defaultAPIBaseURL       = "https://api.github.com"
 	maxReleaseResponseBytes = 1 << 20
@@ -47,6 +55,11 @@ type Config struct {
 	HTTPClient             *http.Client
 	Build                  buildinfo.Info
 	RequestRestart         func()
+	// PrepareSelfExec is invoked once a fresh binary has been atomically
+	// installed and RestartMode is RestartModeSelfExec. The callee typically
+	// stashes the absolute path so main() can hand it to syscall.Exec after
+	// orderly resource shutdown.
+	PrepareSelfExec func(newExecPath string)
 }
 
 type Status struct {
@@ -57,6 +70,9 @@ type Status struct {
 	LatestJob             *storage.SystemUpdateJob   `json:"latestJob,omitempty"`
 	RestartTimeoutSeconds int                        `json:"restartTimeoutSeconds"`
 	SupportedPlatform     bool                       `json:"supportedPlatform"`
+	RestartMode           string                     `json:"restartMode"`
+	InstallBinaryPath     string                     `json:"installBinaryPath,omitempty"`
+	BackupBinaryPath      string                     `json:"backupBinaryPath,omitempty"`
 }
 
 type ApplyRequest struct {
