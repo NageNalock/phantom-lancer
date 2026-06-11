@@ -148,7 +148,7 @@ func (s *Service) append(ctx context.Context, scopeID, eventType string, payload
 	}
 	event, err := s.store.AppendEvent(ctx, eventScopeDockerJob, scopeID, eventType, payload)
 	if err != nil {
-		if s.log != nil {
+		if s.log != nil && s.logSampler.Allow("docker:job-append:"+scopeID) {
 			s.log.Warn("docker job event append failed", "type", eventType, "error", safelog.Error(err, 160))
 		}
 		return

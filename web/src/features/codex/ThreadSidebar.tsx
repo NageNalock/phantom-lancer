@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { CodexThread, CodexWorkspace } from "../../app/types";
-import { Button, EmptyState, Pill } from "../../components/ui";
+import { Button, CheckLabel, EmptyState, Pill } from "../../components/ui";
 import { codexThreadStatusLabel } from "../../domain/labels";
 
 export function ThreadList({
@@ -103,10 +103,13 @@ export function ThreadList({
             <option value="archived">Archived</option>
           </select>
         </div>
-        <label className="flex items-center gap-2 text-xs text-[var(--muted-strong)]">
-          <input checked={includeArchived} onChange={(event) => onIncludeArchived(event.target.checked)} type="checkbox" />
+        <CheckLabel
+          checked={includeArchived}
+          onChange={(checked) => onIncludeArchived(checked)}
+          size="xs"
+        >
           显示已归档会话
-        </label>
+        </CheckLabel>
         {threads.length ? (
           <div className="grid gap-1">
             {pinned.length ? <span className="muted px-1 text-xs">置顶</span> : null}

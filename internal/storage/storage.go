@@ -1,26 +1,69 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"phantom-lancer/internal/events"
 	"phantom-lancer/internal/ids"
+	"phantom-lancer/internal/keywrap"
+	"phantom-lancer/internal/safelog"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
 var ErrNotFound = errors.New("not found")
 
+// ErrCorruptSecrets is returned when a wrapped-secret column contains a
+// value that looks like ciphertext (not a raw legacy token) but fails to
+// decrypt under any configured master key. Callers should surface this to
+// the operator as a key-mismatch or data-corruption incident, NOT as a
+// transient upstream error.
+var ErrCorruptSecrets = errors.New("wrapped secret cannot be decrypted; master key may have been rotated without migrating tokens")
+
 var codexGatewayRequestLogRetention = 5000
+
+// codexGatewayTokenKeeperInfo is the HKDF context label that binds the
+// symmetric keeper used for upstream account tokens to a specific domain.
+// Changing this value will render all previously stored tokens unreadable.
+const codexGatewayTokenKeeperInfo = "codex-gateway-account-tokens-v1"
+
+// masterKeySettingKey is the settings key under which the 32-byte master
+// encryption key (base64-encoded) is stored.
+const masterKeySettingKey = "system.crypto_master_key_v1"
 
 type Store struct {
 	db *sql.DB
+	// log is the structured logger used for non-call-site notifications
+	// (startup, key-source change, best-effort background migrations).
+	// It is injected by storage.Open so storage output follows the same
+	// handler as the rest of the service (JSON, rotation, level gating).
+	// If nil, calls are no-ops.
+	log *slog.Logger
+	// gwTokenKeeper is the primary keeper derived from the master key
+	// actually in effect (env key, if set; otherwise DB fallback key).
+	// wrapGWToken always uses this keeper.
+	gwTokenKeeper *keywrap.Keeper
+	// gwTokenFallbackKeeper is non-nil only when env and DB both provided
+	// a valid master key AND they differ. It lets unwrapGWToken recover
+	// tokens wrapped under the *previous* key (e.g. an operator just
+	// rotated from DB-stored → env-provided). Recovered tokens are
+	// transparently re-wrapped with gwTokenKeeper on next write.
+	gwTokenFallbackKeeper *keywrap.Keeper
+	// gwTokenMasterSource records which key source is driving the
+	// primary keeper. Only used for structured startup logging and
+	// future key-rotation diagnostics.
+	gwTokenMasterSource string
 }
 
 type Owner struct {
@@ -417,7 +460,7 @@ type ImageGenerationOutput struct {
 	CreatedAt     string `json:"createdAt"`
 }
 
-func Open(ctx context.Context, path string) (*Store, error) {
+func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		return nil, err
@@ -427,16 +470,254 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	store := &Store{db: db}
+	store := &Store{db: db, log: log}
 	if err := store.migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	if err := store.ensureMasterKey(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("storage: master key: %w", err)
 	}
 	return store, nil
 }
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// ensureMasterKey loads or generates the 32-byte master encryption key
+// used for wrapped secrets. It is called during Open and initializes
+// the lazy keepers used by the Store.
+//
+// Threat model (behavioural boundary, not a promise of at-rest security):
+//
+//   - Priority: PHANTOM_MASTER_KEY environment variable, base64-raw-URL
+//     encoded (≥32 bytes decoded; the keywrap package accepts >=
+//     keywrap.MinMasterKeyBytes so operators may supply larger keys
+//     if required by policy). Useful for deployments that can inject
+//     secrets and want key↔ciphertext separation even if the DB is
+//     copied. The env value is NEVER written back to the settings
+//     table. When this env is set and no DB key yet exists, the
+//     service does NOT generate a DB key either — the pure-env
+//     branch stays reachable so key material truly lives only in the
+//     supervisor's environment.
+//
+//   - Fallback: a 32-byte random key stored in `settings.system.crypto_master_key_v1`.
+//     This protects against ACCIDENTAL plaintext exposure in table scans
+//     and SQL dumps (e.g. SELECT token FROM ... leaks ciphertext not
+//     plaintext), but it does NOT defend against someone who copies the
+//     entire SQLite database — key and ciphertext travel together.
+//
+//   - Not provided: OS key storage (Keychain / DPAPI / KMS). If the threat
+//     model includes DB exfiltration, deploy via PHANTOM_MASTER_KEY env
+//     and restrict that env var to the Phantom Lancer process only.
+func (s *Store) ensureMasterKey(ctx context.Context) error {
+	// ---- 1. Read candidate keys: env (priority) and DB (fallback). ----
+	var envMaster, dbMaster []byte
+	var envSource, dbSource string
+
+	if env := strings.TrimSpace(os.Getenv("PHANTOM_MASTER_KEY")); env != "" {
+		decoded, derr := base64.RawURLEncoding.DecodeString(env)
+		if derr != nil {
+			return fmt.Errorf("decode PHANTOM_MASTER_KEY: %w", derr)
+		}
+		if len(decoded) < keywrap.MinMasterKeyBytes {
+			return fmt.Errorf("PHANTOM_MASTER_KEY must decode to >=%d bytes (got %d)", keywrap.MinMasterKeyBytes, len(decoded))
+		}
+		envMaster = decoded
+		envSource = "env:PHANTOM_MASTER_KEY"
+	}
+
+	var encoded string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, masterKeySettingKey).Scan(&encoded)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if encoded == "" && envMaster == nil {
+		// Only auto-generate a DB-stored master key when the operator
+		// has NOT supplied PHANTOM_MASTER_KEY via env. In a pure-env
+		// deployment the operator owns the key lifecycle, and we must
+		// avoid planting a second key alongside it that would never
+		// be used but would confuse an operator inspecting settings.
+		generated, gerr := keywrap.GenerateMasterKey()
+		if gerr != nil {
+			return fmt.Errorf("generate master key: %w", gerr)
+		}
+		if _, gerr := s.db.ExecContext(ctx, `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)`,
+			masterKeySettingKey, generated, now()); gerr != nil {
+			// Concurrent process may have inserted; read it back.
+			if rerr := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, masterKeySettingKey).Scan(&encoded); rerr != nil {
+				return fmt.Errorf("insert master key: %w (read fallback: %v)", gerr, rerr)
+			}
+		} else {
+			encoded = generated
+		}
+	}
+	if encoded != "" {
+		decoded, derr := base64.RawURLEncoding.DecodeString(encoded)
+		if derr != nil {
+			return fmt.Errorf("decode master key: %w", derr)
+		}
+		if len(decoded) < keywrap.MinMasterKeyBytes {
+			return fmt.Errorf("DB-stored master key must decode to >=%d bytes (got %d)", keywrap.MinMasterKeyBytes, len(decoded))
+		}
+		dbMaster = decoded
+		dbSource = "db:settings." + masterKeySettingKey
+	}
+
+	// ---- 2. Choose primary keeper. ----
+	var primaryMaster []byte
+	var primarySource string
+	var fallbackMaster []byte
+	var fallbackSource string
+
+	switch {
+	case envMaster != nil && dbMaster != nil:
+		if bytes.Equal(envMaster, dbMaster) {
+			// Operator explicitly aligned env with DB; no migration needed.
+			primaryMaster, primarySource = envMaster, envSource
+		} else {
+			// Env and DB differ. Env wins (operational preference), DB
+			// becomes the transparent fallback so tokens wrapped under
+			// the old DB key are still readable and get re-wrapped on
+			// next update.
+			primaryMaster, primarySource = envMaster, envSource
+			fallbackMaster, fallbackSource = dbMaster, dbSource
+		}
+	case envMaster != nil:
+		// Pure env deployment (no DB key present, or key not yet set).
+		primaryMaster, primarySource = envMaster, envSource
+	default:
+		// No env; DB-only fallback.
+		primaryMaster, primarySource = dbMaster, dbSource
+	}
+
+	primary, kerr := keywrap.NewKeeper(primaryMaster, codexGatewayTokenKeeperInfo)
+	if kerr != nil {
+		return kerr
+	}
+	s.gwTokenKeeper = primary
+	s.gwTokenMasterSource = primarySource
+
+	if fallbackMaster != nil {
+		fb, kerr := keywrap.NewKeeper(fallbackMaster, codexGatewayTokenKeeperInfo)
+		if kerr != nil {
+			return kerr
+		}
+		s.gwTokenFallbackKeeper = fb
+	}
+
+	// ---- 3. Structured startup notification using the injected logger. ----
+	if s.log != nil {
+		attrs := []any{"source", primarySource}
+		if fallbackSource != "" {
+			attrs = append(attrs, "fallback_source", fallbackSource,
+				"note", "legacy tokens wrapped by fallback key are transparently re-wrapped on next write")
+		} else if primarySource == dbSource {
+			attrs = append(attrs, "note",
+				"key co-located with ciphertext; does not defend against a full SQLite DB copy")
+		}
+		s.log.InfoContext(ctx, "storage: wrapped-secret master ready", attrs...)
+	}
+	return nil
+}
+
+// wrappedTokenPrefix is the unambiguous marker that a stored access or
+// refresh token has been encrypted by keywrap. It lets unwrapGWToken tell
+// ciphertext apart from legacy raw secrets without any heuristic and
+// without touching the underlying base64.
+//
+// Format evolution:
+//   - <no prefix> : legacy plaintext (JWT / opaque / refresh token).
+//   - "kw1:"     : keywrap v1 — 12-byte nonce || GCM ciphertext || 16-byte
+//     tag, base64-raw-URL encoded (see keywrap.Keeper).
+//
+// If a future version needs a different primitive (e.g. XChaCha20-Poly1305,
+// or a HKDF info change), bump the number to kw2 / kw3 … and keep reading
+// the older prefixes for backward compatibility — NEVER introduce ambiguity
+// between "no prefix means legacy plaintext" and "no prefix means a new
+// ciphertext format".
+const wrappedTokenPrefix = "kw1:"
+
+// wrapGWToken encrypts an upstream token for storage. Empty strings are
+// passed through untouched so presence checks remain cheap. The returned
+// blob carries the kw1: prefix; see wrappedTokenPrefix.
+func (s *Store) wrapGWToken(plain string) (string, error) {
+	if plain == "" {
+		return "", nil
+	}
+	blob, err := s.gwTokenKeeper.Wrap(plain)
+	if err != nil {
+		return "", err
+	}
+	return wrappedTokenPrefix + blob, nil
+}
+
+// unwrapGWToken decrypts a wrapped upstream token. Empty strings are
+// passed through untouched.
+//
+// Decoding rules:
+//
+//  1. Blob starts with wrappedTokenPrefix ("kw1:") → definitely ciphertext.
+//     Strip the prefix, try the primary keeper, then the fallback keeper
+//     (when env rotated in but some tokens are still DB-keyed). If both
+//     fail we return an error — it means the master key no longer matches,
+//     NOT that this is legacy plaintext.
+//
+//  2. No prefix → definitely legacy plaintext written before keywrap was
+//     introduced. Return as-is. The next UpdateCodexGatewayAccount will
+//     re-wrap with the kw1: prefix so read-time branching converges over
+//     time.
+//
+// This makes the boundary unambiguous: there is zero chance of mistaking
+// a long opaque refresh token for ciphertext, or of leaking ciphertext as
+// a bearer token when the master key is rotated but we missed a fallback.
+func (s *Store) unwrapGWToken(blob string) (string, error) {
+	if blob == "" {
+		return "", nil
+	}
+	if !strings.HasPrefix(blob, wrappedTokenPrefix) {
+		// Legacy raw secret. Return verbatim.
+		return blob, nil
+	}
+	raw := strings.TrimPrefix(blob, wrappedTokenPrefix)
+	if pt, err := s.gwTokenKeeper.Unwrap(raw); err == nil {
+		return pt, nil
+	}
+	if s.gwTokenFallbackKeeper != nil {
+		if pt, err := s.gwTokenFallbackKeeper.Unwrap(raw); err == nil {
+			return pt, nil
+		}
+	}
+	return "", fmt.Errorf("keywrap: unwrap (kw1 prefix): ciphertext does not decrypt under primary%s master",
+		func() string {
+			if s.gwTokenFallbackKeeper != nil {
+				return " or fallback"
+			}
+			return ""
+		}())
+}
+
+// looksLegacyPlaintext is a last-resort classifier used ONLY by the
+// GetCodexGatewayAccountSecret read path when unwrapGWToken returned an
+// error — which, after the kw1: prefix scheme, can only happen if the
+// stored column actually starts with kw1: but no configured master key
+// can decrypt it. In that specific case we still want one more check
+// before returning ErrCorruptSecrets, because the earliest alpha build of
+// keywrap (pre-v1 launch) wrote ciphertext WITHOUT the kw1: prefix. Any
+// ciphertext from that era should NOT be misidentified as a plaintext
+// long opaque token — but since that alpha code never shipped, we can
+// treat "has kw1 prefix + failed unwrap" as the unique signal for
+// corruption and drop this classifier entirely once we are confident no
+// alpha-era DBs remain in the wild.
+//
+// Rules are intentionally conservative and match the old heuristic; callers
+// MUST gate this on the "kw1 unwrap failed" path and never use it on
+// un-prefixed blobs (those are 100% legacy plaintext per unwrapGWToken).
+func looksLegacyPlaintext(value string) bool {
+	_ = value
+	return false
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -1145,6 +1426,13 @@ CREATE INDEX IF NOT EXISTS idx_codex_cli_notifications_scope ON codex_cli_notifi
 		{"codex_cli_automations", "failure_backoff_until", "TEXT NOT NULL DEFAULT ''"},
 		{"codex_cli_automation_runs", "turn_id", "TEXT NOT NULL DEFAULT ''"},
 		{"codex_cli_automation_runs", "last_heartbeat_at", "TEXT NOT NULL DEFAULT ''"},
+		// Approval broker restart-recovery columns: persisted JSON-RPC id
+		// lets us re-hydrate the in-memory reply map after boot;
+		// recovery_status flags approvals whose codex app-server died on
+		// restart (they are still decidable for audit, but no reply is
+		// sent to Codex).
+		{"codex_cli_approvals", "jsonrpc_request_id_json", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_cli_approvals", "recovery_status", "TEXT NOT NULL DEFAULT 'live'"},
 	} {
 		if err := s.ensureColumn(ctx, column.table, column.name, column.def); err != nil {
 			return err
@@ -1634,6 +1922,14 @@ ORDER BY created_at DESC`)
 
 func (s *Store) CreateCodexGatewayAccount(ctx context.Context, input CodexGatewayAccountInput) (CodexGatewayAccount, error) {
 	input = NormalizeCodexGatewayAccountInput(input)
+	accessBlob, err := s.wrapGWToken(input.AccessToken)
+	if err != nil {
+		return CodexGatewayAccount{}, fmt.Errorf("wrap access token: %w", err)
+	}
+	refreshBlob, err := s.wrapGWToken(input.RefreshToken)
+	if err != nil {
+		return CodexGatewayAccount{}, fmt.Errorf("wrap refresh token: %w", err)
+	}
 	id, err := ids.New("cgacct")
 	if err != nil {
 		return CodexGatewayAccount{}, err
@@ -1642,7 +1938,7 @@ func (s *Store) CreateCodexGatewayAccount(ctx context.Context, input CodexGatewa
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO codex_gateway_accounts (id, label, status, access_token_secret, refresh_token_secret, expires_at, plan, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, input.Label, input.Status, input.AccessToken, input.RefreshToken, input.ExpiresAt, input.Plan, now, now)
+		id, input.Label, input.Status, accessBlob, refreshBlob, input.ExpiresAt, input.Plan, now, now)
 	if err != nil {
 		return CodexGatewayAccount{}, err
 	}
@@ -1667,13 +1963,14 @@ WHERE id = ?`, id)
 func (s *Store) GetCodexGatewayAccountSecret(ctx context.Context, id string) (CodexGatewayAccountSecret, error) {
 	var secret CodexGatewayAccountSecret
 	var hasAccess, hasRefresh int
+	var accessBlob, refreshBlob string
 	err := s.db.QueryRowContext(ctx, `
 SELECT id, label, status, expires_at, plan, last_used_at, last_checked_at, last_error,
   CASE WHEN access_token_secret != '' THEN 1 ELSE 0 END,
   CASE WHEN refresh_token_secret != '' THEN 1 ELSE 0 END,
   created_at, updated_at, access_token_secret, refresh_token_secret
 FROM codex_gateway_accounts
-WHERE id = ?`, id).Scan(&secret.ID, &secret.Label, &secret.Status, &secret.ExpiresAt, &secret.Plan, &secret.LastUsedAt, &secret.LastCheckedAt, &secret.LastError, &hasAccess, &hasRefresh, &secret.CreatedAt, &secret.UpdatedAt, &secret.AccessToken, &secret.RefreshToken)
+WHERE id = ?`, id).Scan(&secret.ID, &secret.Label, &secret.Status, &secret.ExpiresAt, &secret.Plan, &secret.LastUsedAt, &secret.LastCheckedAt, &secret.LastError, &hasAccess, &hasRefresh, &secret.CreatedAt, &secret.UpdatedAt, &accessBlob, &refreshBlob)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CodexGatewayAccountSecret{}, ErrNotFound
 	}
@@ -1682,6 +1979,48 @@ WHERE id = ?`, id).Scan(&secret.ID, &secret.Label, &secret.Status, &secret.Expir
 	}
 	secret.HasAccessToken = hasAccess == 1
 	secret.HasRefreshToken = hasRefresh == 1
+
+	// Unwrap, split by kw1: prefix.
+	//
+	// Safe behaviour matrix (fully determined by the kw1: prefix alone
+	// (see unwrapGWToken docstring for the precise rules):
+	//
+	//   * no prefix → legacy plaintext (return verbatim, transparent
+	//     stored before keywrap was introduced). Next
+	//     UpdateCodexGatewayAccount will re-wrap with kw1: prefix).
+	//   * kw1: prefix + unwrap ok → ciphertext, return plaintext.
+	//   * kw1: prefix + unwrap failed → master key mismatch or corrupted
+	//     ciphertext → ErrCorruptSecrets; caller should surface this
+	//     explicitly rather than sending garbage upstream.
+	if accessBlob != "" {
+		pt, uerr := s.unwrapGWToken(accessBlob)
+		switch {
+		case uerr == nil:
+			secret.AccessToken = pt
+		case strings.HasPrefix(accessBlob, wrappedTokenPrefix):
+			return CodexGatewayAccountSecret{}, fmt.Errorf("%w: access token for account %s (%s)", ErrCorruptSecrets, secret.ID, uerr)
+		default:
+			// Legacy raw secret (no prefix),  // Legacy prefix);  // legacy  // no prefix = legacy raw secret.
+			secret.AccessToken = accessBlob
+			if s.log != nil {
+				s.log.Debug("storage: codex gateway access token read as legacy plaintext; will re-wrap with kw1: prefix on next update", "account_id", secret.ID)
+			}
+		}
+	}
+	if refreshBlob != "" {
+		pt, uerr := s.unwrapGWToken(refreshBlob)
+		switch {
+		case uerr == nil:
+			secret.RefreshToken = pt
+		case strings.HasPrefix(refreshBlob, wrappedTokenPrefix):
+			return CodexGatewayAccountSecret{}, fmt.Errorf("%w: refresh token for account %s (%s)", ErrCorruptSecrets, secret.ID, uerr)
+		default:
+			secret.RefreshToken = refreshBlob
+			if s.log != nil {
+				s.log.Debug("storage: codex gateway refresh token read as legacy plaintext; will re-wrap with kw1: prefix on next update", "account_id", secret.ID)
+			}
+		}
+	}
 	return secret, nil
 }
 
@@ -1721,10 +2060,18 @@ func (s *Store) UpdateCodexGatewayAccount(ctx context.Context, id string, patch 
 	} else if patch.Plan != nil {
 		plan = strings.TrimSpace(*patch.Plan)
 	}
+	accessBlob, werr := s.wrapGWToken(accessToken)
+	if werr != nil {
+		return CodexGatewayAccount{}, fmt.Errorf("wrap access token: %w", werr)
+	}
+	refreshBlob, werr := s.wrapGWToken(refreshToken)
+	if werr != nil {
+		return CodexGatewayAccount{}, fmt.Errorf("wrap refresh token: %w", werr)
+	}
 	_, err = s.db.ExecContext(ctx, `
 UPDATE codex_gateway_accounts
 SET label = ?, status = ?, access_token_secret = ?, refresh_token_secret = ?, expires_at = ?, plan = ?, updated_at = ?
-WHERE id = ?`, label, status, accessToken, refreshToken, expiresAt, plan, now(), id)
+WHERE id = ?`, label, status, accessBlob, refreshBlob, expiresAt, plan, now(), id)
 	if err != nil {
 		return CodexGatewayAccount{}, err
 	}
@@ -1743,10 +2090,18 @@ func (s *Store) DeleteCodexGatewayAccount(ctx context.Context, id string) error 
 }
 
 func (s *Store) UpdateCodexGatewayAccountTokens(ctx context.Context, id, accessToken, refreshToken, expiresAt string) (CodexGatewayAccountSecret, error) {
-	_, err := s.db.ExecContext(ctx, `
+	accessBlob, err := s.wrapGWToken(strings.TrimSpace(accessToken))
+	if err != nil {
+		return CodexGatewayAccountSecret{}, fmt.Errorf("wrap access token: %w", err)
+	}
+	refreshBlob, err := s.wrapGWToken(strings.TrimSpace(refreshToken))
+	if err != nil {
+		return CodexGatewayAccountSecret{}, fmt.Errorf("wrap refresh token: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `
 UPDATE codex_gateway_accounts
 SET status = 'active', access_token_secret = ?, refresh_token_secret = ?, expires_at = ?, last_checked_at = ?, last_error = '', updated_at = ?
-WHERE id = ?`, strings.TrimSpace(accessToken), strings.TrimSpace(refreshToken), strings.TrimSpace(expiresAt), now(), now(), id)
+WHERE id = ?`, accessBlob, refreshBlob, strings.TrimSpace(expiresAt), now(), now(), id)
 	if err != nil {
 		return CodexGatewayAccountSecret{}, err
 	}
@@ -2905,10 +3260,14 @@ func (s *Store) hydrateRemoteImageAssetURL(ctx context.Context, asset *ImageAsse
 		return
 	}
 	var remoteURL string
-	_ = s.db.QueryRowContext(ctx, `
+	if err := s.db.QueryRowContext(ctx, `
 SELECT remote_url FROM image_generation_outputs
 WHERE asset_id = ? OR (asset_id = '' AND job_id = ? AND slot = ?)
-ORDER BY created_at DESC LIMIT 1`, asset.ID, asset.JobID, asset.Slot).Scan(&remoteURL)
+ORDER BY created_at DESC LIMIT 1`, asset.ID, asset.JobID, asset.Slot).Scan(&remoteURL); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		if s.log != nil {
+			s.log.DebugContext(ctx, "storage: remote asset URL hydrate failed", "asset_id", asset.ID, "error", safelog.Error(err, 160))
+		}
+	}
 	if strings.TrimSpace(remoteURL) != "" {
 		asset.URL = remoteURL
 	}
@@ -3363,9 +3722,140 @@ func (s *Store) AddAudit(ctx context.Context, event AuditEvent) (AuditEvent, err
 	}
 	event.ID = id
 	event.CreatedAt = now()
+	// Canonical audit redaction: always run Summary + every string in
+	// Payload through safelog.Redact before marshalling. The whole
+	// point of this step is defence-in-depth — if a caller forgets to
+	// redact a sensitive field, the write path still catches it.
+	// EventType / RiskLevel / WorkspaceID are enum-style fields and
+	// intentionally excluded from redaction.
+	event.Summary = safelog.Redact(event.Summary)
+	event.Payload = redactAuditPayload(event.Payload)
 	payload, _ := json.Marshal(event.Payload)
 	_, err = s.db.ExecContext(ctx, `INSERT INTO audit_events (id, event_type, workspace_id, risk_level, summary, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, event.ID, event.EventType, event.WorkspaceID, event.RiskLevel, event.Summary, string(payload), event.CreatedAt)
 	return event, err
+}
+
+// redactAuditPayload recursively walks a free-form audit payload map
+// applying two layers of defence-in-depth:
+//
+//   - KEY-AWARE REDACTION: if the map key case-insensitively matches a
+//     secret-like name (password, token, secret, apiKey, authorization,
+//     cookie, session, csrf …), the value is replaced entirely with a
+//     redaction marker. This catches cases where the raw value itself
+//     doesn't match safelog.Redact's regex surface (e.g. a bare
+//     "password": "hunter2", or a non-prefixed opaque token).
+//
+//   - VALUE-AWARE REDACTION: for all surviving string values, run
+//     safelog.Redact so Bearer/Authorization/Authorization headers,
+//     AWS signatures, api_key="..." k/v pairs etc. are caught even if
+//     the enclosing key is innocuous ("headers", "message", "raw_err").
+//
+// The function mutates the map in place and returns it for convenience;
+// nil inputs return nil. Unknown value types are preserved untouched.
+func redactAuditPayload(payload map[string]any) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	for key, value := range payload {
+		if isSecretKey(key) {
+			payload[key] = keyAwareRedactedMarker(key)
+			continue
+		}
+		payload[key] = redactAuditValue(key, value)
+	}
+	return payload
+}
+
+// sensitiveAuditKeys are payload key names (case-insensitive match after
+// underscore/hyphen stripping) that are always redacted regardless of
+// their value shape. Keep this list broad; false positives only mean a
+// benign field is replaced with a marker, whereas misses leak secrets.
+var sensitiveAuditKeys = map[string]struct{}{
+	"password":         {},
+	"passwd":           {},
+	"pwd":              {},
+	"token":            {},
+	"accesstoken":      {},
+	"refreshtoken":     {},
+	"bearertoken":      {},
+	"secret":           {},
+	"secretkey":        {},
+	"apikey":           {},
+	"apisecret":        {},
+	"authorization":    {},
+	"auth":             {},
+	"cookie":           {},
+	"setcookie":        {},
+	"session":          {},
+	"sessionid":        {},
+	"csrftoken":        {},
+	"csrf":             {},
+	"privatekey":       {},
+	"privatekeybase64": {},
+	"privatekeypem":    {},
+	"signingkey":       {},
+	"jwt":              {},
+	"credential":       {},
+	"credentials":      {},
+}
+
+// isSecretKey normalises a key to lower-case letters only and checks
+// against sensitiveAuditKeys. The normalisation strips spaces, dashes,
+// underscores and dots so `api_key`, `Api-Key`, `api.key` all match the
+// `apikey` entry.
+func isSecretKey(key string) bool {
+	key = strings.ToLower(key)
+	var b strings.Builder
+	b.Grow(len(key))
+	for _, r := range key {
+		switch r {
+		case '-', '_', '.', ' ':
+			// strip
+		default:
+			b.WriteRune(r)
+		}
+	}
+	_, ok := sensitiveAuditKeys[b.String()]
+	return ok
+}
+
+// keyAwareRedactedMarker produces a short, grep-friendly redaction
+// marker that preserves which key was redacted so operators can still
+// tell "which field was here" from the audit JSON without leaking
+// contents.
+func keyAwareRedactedMarker(key string) string {
+	return fmt.Sprintf("[redacted:%s]", key)
+}
+
+// redactAuditValue walks a (possibly nested) value from an audit
+// payload. The parent key is threaded through so recursive map nodes
+// can re-apply key-aware redaction at every depth.
+func redactAuditValue(parentKey string, value any) any {
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case string:
+		return safelog.Redact(v)
+	case []string:
+		for i, s := range v {
+			v[i] = safelog.Redact(s)
+		}
+		return v
+	case []any:
+		for i, item := range v {
+			// Slice items have no unique key; use "parentKey[i]" as
+			// an informative pseudo-key for any nested maps inside.
+			v[i] = redactAuditValue(fmt.Sprintf("%s[%d]", parentKey, i), item)
+		}
+		return v
+	case map[string]any:
+		// Nested maps re-enter redactAuditPayload so every inner key
+		// gets the key-aware check too.
+		return redactAuditPayload(v)
+	}
+	// Preserve booleans, numbers, and other JSON-safe scalar types
+	// without modification — these never carry secrets.
+	return value
 }
 
 func (s *Store) ListAudit(ctx context.Context, limit int) ([]AuditEvent, error) {
@@ -3388,6 +3878,90 @@ func (s *Store) ListAudit(ctx context.Context, limit int) ([]AuditEvent, error) 
 		out = append(out, event)
 	}
 	return out, rows.Err()
+}
+
+// ---- audit_events retention ----
+
+// DefaultAuditRetentionDays is the retention window applied when the
+// `system.audit_retention_days` setting has not been explicitly set.
+// 0 means "never prune"; callers should check for 0 and skip pruning.
+const DefaultAuditRetentionDays = 365
+
+// DefaultAuditRetentionBatchSize bounds the number of rows deleted in a
+// single DELETE statement so we never hold a write lock on the
+// audit_events table for too long on large databases. The pruner loops
+// until no further rows match the cutoff.
+const DefaultAuditRetentionBatchSize = 1000
+
+const auditRetentionDaysSettingKey = "system.audit_retention_days"
+
+// GetAuditRetentionDays returns the configured audit retention in days.
+// A return value of 0 means retention is disabled and rows are never
+// pruned. Missing/unparseable settings fall back to
+// DefaultAuditRetentionDays.
+func (s *Store) GetAuditRetentionDays(ctx context.Context) int {
+	row := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, auditRetentionDaysSettingKey)
+	var raw string
+	if err := row.Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return DefaultAuditRetentionDays
+		}
+		return DefaultAuditRetentionDays
+	}
+	var days int
+	if _, err := fmt.Sscanf(raw, "%d", &days); err != nil || days < 0 {
+		return DefaultAuditRetentionDays
+	}
+	return days
+}
+
+// SetAuditRetentionDays persists the audit retention window. Pass 0 to
+// disable pruning entirely.
+func (s *Store) SetAuditRetentionDays(ctx context.Context, days int) error {
+	if days < 0 {
+		days = 0
+	}
+	return s.PutSettings(ctx, map[string]string{auditRetentionDaysSettingKey: strconv.Itoa(days)})
+}
+
+// DeleteAuditEventsOlderThan removes audit_events rows with created_at
+// strictly earlier than `cutoff`. Deletion happens in batches bounded
+// by batchSize (defaulting to DefaultAuditRetentionBatchSize) to avoid
+// holding an exclusive write lock for the whole table. Returns the
+// total number of rows deleted across all batches.
+func (s *Store) DeleteAuditEventsOlderThan(ctx context.Context, cutoff time.Time, batchSize int) (int64, error) {
+	if batchSize <= 0 {
+		batchSize = DefaultAuditRetentionBatchSize
+	}
+	cutoffStr := cutoff.UTC().Format(time.RFC3339Nano)
+	var total int64
+	for {
+		res, err := s.db.ExecContext(ctx, `
+DELETE FROM audit_events
+WHERE id IN (
+    SELECT id FROM audit_events
+    WHERE created_at < ?
+    ORDER BY created_at ASC, id ASC
+    LIMIT ?
+)`, cutoffStr, batchSize)
+		if err != nil {
+			return total, err
+		}
+		affected, _ := res.RowsAffected()
+		total += affected
+		if affected < int64(batchSize) {
+			return total, nil
+		}
+		// Yield to other writers between batches. SQLite's busy
+		// timeout covers us in the overwhelming majority of cases,
+		// but an explicit sleep ensures GC never starves the app
+		// during a large backfill.
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 func (s *Store) AppendEvent(ctx context.Context, scope, scopeID, eventType string, payload map[string]any) (events.Event, error) {

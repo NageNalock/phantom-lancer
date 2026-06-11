@@ -3,7 +3,7 @@ import type { ChangeEvent } from "react";
 import type { AppActions } from "../app/App";
 import type { AppData, CodexGatewayAPIKey, CodexGatewayAccount, CodexGatewayRequestLog, CodexGatewaySettings, Tone } from "../app/types";
 import { friendlyError, readCookie } from "../api/client";
-import { Button, ContextList, EmptyState, Field, Metric, Notice, Panel, Pill } from "../components/ui";
+import { Button, ContextList, EmptyState, Field, Metric, Notice, Panel, Pill, Toggle } from "../components/ui";
 import { codexGatewayAccountStatusLabel, codexGatewayStatusLabel, defaultCodexGatewaySettings, formatDate } from "../domain/labels";
 
 type GatewayAccountDraft = {
@@ -376,7 +376,7 @@ export function CodexGatewayView({ actions, data }: { actions: AppActions; data:
         >
           <div className="grid gap-4">
             <div className="grid grid-cols-3 gap-3 max-xl:grid-cols-2 max-md:grid-cols-1">
-              <Toggle checked={Boolean(draft.enabled)} label="启用公开 /v1 端点" onChange={(checked) => updateSetting("enabled", checked)} />
+              <Toggle variant="row" checked={Boolean(draft.enabled)} label="启用公开 /v1 端点" onChange={(checked) => updateSetting("enabled", checked)} />
               <Field label="请求超时秒数">
                 <input className="input mono" min={10} onChange={(event) => updateSetting("requestTimeoutSeconds", Number(event.target.value || 0))} type="number" value={draft.requestTimeoutSeconds || 600} />
               </Field>
@@ -719,14 +719,6 @@ function RequestLogRow({ log }: { log: CodexGatewayRequestLog }) {
   );
 }
 
-function Toggle({ checked, label, onChange }: { checked: boolean; label: string; onChange: (checked: boolean) => void }) {
-  return (
-    <label className={`grid min-h-9 grid-cols-[auto_minmax(0,1fr)] items-center gap-3 rounded-lg border px-3 py-2 text-sm ${checked ? "border-[rgba(18,132,79,0.22)] bg-[var(--good-soft)]" : "border-[var(--line)] bg-[var(--surface)]"}`}>
-      <input checked={checked} className="h-4 w-4 accent-[var(--accent)]" onChange={(event) => onChange(event.target.checked)} type="checkbox" />
-      <span className="min-w-0">{label}</span>
-    </label>
-  );
-}
 
 function normalizeGatewaySettings(draft: Required<CodexGatewaySettings>): CodexGatewaySettings {
   return {

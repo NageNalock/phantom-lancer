@@ -84,10 +84,26 @@ Useful environment variables:
 - `PL_LOG_MAX_SIZE_MB`, `PL_LOG_MAX_FILES`, `PL_LOG_MAX_AGE_DAYS`: service log rotation and cleanup limits
 - `PL_PID_FILE`: pid file path for `manage.sh`
 - `PL_SKIP_WEB_BUILD`: set to `1` to reuse existing `web/dist` during Go builds
+- `PHANTOM_MASTER_KEY`: master key for wrapped credentials stored in the DB,
+  encoded as unpadded base64-raw-URL and decoding to **at least 32 bytes**
+  (the implementation accepts `>=keywrap.MinMasterKeyBytes` so operators
+  may supply larger keys if required by policy).
+  When set, this value takes priority over the per-install key generated
+  into `settings.system.crypto_master_key_v1` and is **never** written
+  back to the SQLite database. If the env is set and no DB key has been
+  generated yet, the service skips generating one, so a "pure env"
+  deployment has no copy of the master key anywhere in the SQLite file.
+  Use this in deployments where the threat model calls for
+  key↔ciphertext separation — it prevents an attacker who copies only
+  the SQLite file (e.g. an unauthorised backup restore, a leaked DB
+  snapshot) from decrypting stored credential tokens. If the env var
+  is unset the service falls back to the key stored in the `settings`
+  table, which still guards against accidental plaintext exposure in
+  `SELECT` output but offers no defence against full-DB exfiltration.
 
 ## GitHub Actions
 
-Pushes to `main` automatically build a Linux amd64 release archive. The same build can be started manually from GitHub Actions with the `Build` workflow. Pushing a `v*` tag, such as `v0.1.0`, also publishes the archive to GitHub Releases. See [docs/github-actions.md](docs/github-actions.md) for setup, release, and artifact deployment notes.
+Pushes to `main` automatically build and publish a Linux amd64 GitHub Release. The workflow increments the latest `vX.Y.Z` tag by one patch version, then builds the binary with that version. The same build can be started manually from GitHub Actions, and manually pushed `v*` tags are still supported. See [docs/github-actions.md](docs/github-actions.md) for setup, release, and artifact deployment notes.
 
 ## Frontend
 

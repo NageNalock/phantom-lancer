@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import type { AppActions } from "../app/App";
 import type { LogLine, LogSource, LogTailPayload, Tone } from "../app/types";
-import { Button, ContextList, EmptyState, Panel, Pill } from "../components/ui";
+import { Button, CheckLabel, ContextList, EmptyState, Panel, Pill } from "../components/ui";
+import { formatBytesZero } from "../utils/format";
 import { formatDate } from "../domain/labels";
 
 const LEVEL_OPTIONS = [
@@ -112,7 +113,7 @@ export function LogsView({ actions }: { actions: AppActions }) {
                     <span className="muted mt-1 block truncate text-xs">{source.description || source.path || source.module}</span>
                     <span className="mt-2 flex flex-wrap items-center gap-2 text-xs">
                       <span className="mono text-[var(--muted-strong)]">{source.module || "log"}</span>
-                      {source.sizeBytes !== undefined ? <span className="muted">{formatBytes(source.sizeBytes)}</span> : null}
+                      {source.sizeBytes !== undefined ? <span className="muted">{formatBytesZero(source.sizeBytes)}</span> : null}
                       {source.errorCount ? <span className="text-[var(--danger)]">{source.errorCount} error</span> : null}
                       {source.warningCount ? <span className="text-[var(--warn)]">{source.warningCount} warn</span> : null}
                       {opened ? <span className="muted">已打开</span> : null}
@@ -162,11 +163,14 @@ export function LogsView({ actions }: { actions: AppActions }) {
                 </select>
                 <Button type="submit">搜索</Button>
               </form>
-              <label className="flex items-center gap-2 text-xs text-[var(--muted-strong)]">
-                <input checked={wrapLines} onChange={(event) => setWrapLines(event.target.checked)} type="checkbox" />
+              <CheckLabel
+                checked={wrapLines}
+                onChange={(checked) => setWrapLines(checked)}
+                size="xs"
+              >
                 自动换行
-              </label>
-              {tail?.truncated ? <div className="notice-warn">日志已按读取上限截断，仅展示最近 {formatBytes(tail.maxBytes || 0)}。</div> : null}
+              </CheckLabel>
+              {tail?.truncated ? <div className="notice-warn">日志已按读取上限截断，仅展示最近 {formatBytesZero(tail.maxBytes || 0)}。</div> : null}
               <div className="log-lines" role="log">
                 {activeLines.length ? (
                   activeLines.map((line) => <LogLineRow key={`${line.sourceId}-${line.offset}-${line.time || ""}`} line={line} query={query} wrap={wrapLines} />)
@@ -188,7 +192,7 @@ export function LogsView({ actions }: { actions: AppActions }) {
                 ["模块", <span className="mono">{activeSource.module || "-"}</span>],
                 ["状态", statusLabel(activeSource.status)],
                 ["路径", activeSource.path ? <span className="mono">{activeSource.path}</span> : "-"],
-                ["大小", activeSource.sizeBytes !== undefined ? formatBytes(activeSource.sizeBytes) : "-"],
+                ["大小", activeSource.sizeBytes !== undefined ? formatBytesZero(activeSource.sizeBytes) : "-"],
                 ["更新", formatDate(activeSource.updatedAt) || "-"],
                 ["轮转", activeSource.rotationSummary || (activeSource.managed ? "事件源由系统管理" : "外部管理")],
                 ["读取", `${activeLines.length} / ${tail?.limit || limit} 行`],
@@ -277,16 +281,4 @@ function normalizeLevel(value?: string): "info" | "warn" | "error" {
   if (value === "error") return "error";
   if (value === "warn" || value === "warning") return "warn";
   return "info";
-}
-
-function formatBytes(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  let size = value;
-  let index = 0;
-  while (size >= 1024 && index < units.length - 1) {
-    size /= 1024;
-    index++;
-  }
-  return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
 }

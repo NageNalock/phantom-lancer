@@ -3,7 +3,7 @@ import type { FormEvent } from "react";
 import type { AppActions } from "../../app/App";
 import type { ObjectStorageProfile } from "../../app/types";
 import { friendlyError } from "../../api/client";
-import { Button, EmptyState, Field, Panel, Pill } from "../../components/ui";
+import { Button, CheckLabel, EmptyState, Field, Panel, Pill } from "../../components/ui";
 import { formatDate } from "../../domain/labels";
 
 interface ProfileDraft {
@@ -122,7 +122,7 @@ export function ObjectStoragePanel({ actions }: { actions: AppActions }) {
         <div className="grid content-start gap-2">
           {items.length ? (
             items.map((profile) => (
-              <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3" key={profile.id}>
+              <div className="card-soft" key={profile.id}>
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <strong className="block truncate text-sm">{profile.name || profile.id}</strong>
@@ -175,10 +175,12 @@ export function ObjectStoragePanel({ actions }: { actions: AppActions }) {
           <Field label="Session Token（可选）">
             <input className="input" autoComplete="off" type="password" onChange={(event) => setDraft((d) => ({ ...d, sessionToken: event.target.value }))} value={draft.sessionToken} />
           </Field>
-          <label className="flex items-center gap-2 text-sm">
-            <input checked={draft.forcePathStyle} onChange={(event) => setDraft((d) => ({ ...d, forcePathStyle: event.target.checked }))} type="checkbox" />
+          <CheckLabel
+            checked={draft.forcePathStyle}
+            onChange={(checked) => setDraft((d) => ({ ...d, forcePathStyle: checked }))}
+          >
             使用 path-style 寻址
-          </label>
+          </CheckLabel>
           <Button disabled={busy === "create"} tone="primary" type="submit">
             {busy === "create" ? "创建中" : "创建 profile"}
           </Button>

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { AppActions } from "../app/App";
 import type { AppData, RuntimeSettings } from "../app/types";
 import { friendlyError } from "../api/client";
-import { Button, ContextList, Panel } from "../components/ui";
+import { Button, ContextList, Panel, Toggle } from "../components/ui";
 import { defaultRuntime, formatDate } from "../domain/labels";
 import { SystemUpdatePanel } from "./settings/SystemUpdatePanel";
 import { ObjectStoragePanel } from "./settings/ObjectStoragePanel";
@@ -48,10 +48,11 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
               <textarea className="textarea mono min-h-36" onChange={(event) => setAllowedRootsText(event.target.value)} value={allowedRootsText} />
               <small className="muted text-xs">每行一个绝对路径；后端会归一化并拒绝无效目录。</small>
             </label>
-            <label className="flex items-center gap-2 text-sm">
-              <input checked={Boolean(runtime.cookieSecure)} onChange={(event) => setRuntime((current) => ({ ...current, cookieSecure: event.target.checked }))} type="checkbox" />
-              HTTPS 部署时启用 Secure Cookie
-            </label>
+            <Toggle
+              checked={Boolean(runtime.cookieSecure)}
+              label="HTTPS 部署时启用 Secure Cookie"
+              onChange={(checked) => setRuntime((current) => ({ ...current, cookieSecure: checked }))}
+            />
             <div className="flex flex-wrap justify-between gap-2">
               <span className="muted text-xs">最后更新：{formatDate(runtime.updatedAt) || "-"}</span>
               <Button disabled={busy === "runtime"} onClick={() => void saveRuntime()} tone="primary">

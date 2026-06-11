@@ -111,7 +111,7 @@ func TestAssetStoreStoresDataURL(t *testing.T) {
 
 func TestGeneratedRemoteAssetCreatedWhenFetchFails(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestGeneratedRemoteAssetCreatedWhenFetchFails(t *testing.T) {
 
 func TestUploadLibraryAssetDeduplicatesByChecksum(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestUploadLibraryAssetDeduplicatesByChecksum(t *testing.T) {
 
 func TestResolveLibraryImageInputForImageToImage(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

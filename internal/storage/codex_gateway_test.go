@@ -10,7 +10,7 @@ import (
 
 func TestCodexGatewayAccountRoutingUsesPlanModels(t *testing.T) {
 	ctx := context.Background()
-	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestCodexGatewayAccountRoutingUsesPlanModels(t *testing.T) {
 
 func TestCodexGatewayAPIKeyLifecycle(t *testing.T) {
 	ctx := context.Background()
-	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestCodexGatewayAPIKeyLifecycle(t *testing.T) {
 
 func TestCodexGatewayRequestLogCreatePrunesOverRetention(t *testing.T) {
 	ctx := context.Background()
-	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestCodexGatewayRequestLogCreatePrunesOverRetention(t *testing.T) {
 
 func TestPruneCodexGatewayRequestLogsKeepsNewestRows(t *testing.T) {
 	ctx := context.Background()
-	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

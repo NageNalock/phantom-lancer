@@ -102,7 +102,7 @@ func newP2TestService(t *testing.T) (*Service, *storage.Store, string) {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

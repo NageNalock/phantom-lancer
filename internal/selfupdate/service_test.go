@@ -13,7 +13,7 @@ import (
 
 func TestConfirmBootMarksRestartVersionMismatchFailed(t *testing.T) {
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

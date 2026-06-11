@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../../app/App";
 import type { EventRecord, SystemUpdateJob, SystemUpdateStatus } from "../../app/types";
 import { friendlyError } from "../../api/client";
-import { Button, ContextList, Notice, Panel, Pill } from "../../components/ui";
+import { Button, CheckLabel, ContextList, Notice, Panel, Pill } from "../../components/ui";
+import { formatBytesIEC } from "../../utils/format";
 import { formatDate } from "../../domain/labels";
 
 const updateEventNames = [
@@ -207,7 +208,7 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
         {check?.errorMessage ? <Notice>{check.errorMessage}</Notice> : null}
 
         {confirmOpen ? (
-          <div className="grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+          <div className="grid gap-3 card-soft">
             <div className="grid gap-1">
               <strong className="text-sm">确认更新到 <span className="mono">{check?.latestVersion}</span></strong>
               <span className="muted text-xs">更新会短暂中断服务，当前运行中的异步任务可能停止。数据目录、SQLite 和配置文件不会被覆盖。</span>
@@ -216,14 +217,20 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
               <span>管理员密码</span>
               <input className="input" onChange={(event) => setOwnerPassword(event.target.value)} type="password" value={ownerPassword} />
             </label>
-            <label className="flex items-start gap-2 text-sm">
-              <input checked={confirmService} onChange={(event) => setConfirmService(event.target.checked)} type="checkbox" />
-              <span>我确认服务会短暂不可用，并由 supervisor 或手动方式重新启动。</span>
-            </label>
-            <label className="flex items-start gap-2 text-sm">
-              <input checked={confirmTasks} onChange={(event) => setConfirmTasks(event.target.checked)} type="checkbox" />
-              <span>我确认正在执行的异步任务可能被中断。</span>
-            </label>
+            <CheckLabel
+              align="start"
+              checked={confirmService}
+              onChange={(checked) => setConfirmService(checked)}
+            >
+              我确认服务会短暂不可用，并由 supervisor 或手动方式重新启动。
+            </CheckLabel>
+            <CheckLabel
+              align="start"
+              checked={confirmTasks}
+              onChange={(checked) => setConfirmTasks(checked)}
+            >
+              我确认正在执行的异步任务可能被中断。
+            </CheckLabel>
             <div className="flex flex-wrap justify-end gap-2">
               <Button onClick={() => setConfirmOpen(false)}>取消</Button>
               <Button disabled={!canSubmit || busy === "apply"} onClick={() => void applyUpdate()} tone="primary">
@@ -234,7 +241,7 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
         ) : null}
 
         {visibleJob ? (
-          <div className="grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+          <div className="grid gap-3 card-soft">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div>
                 <strong className="text-sm">更新任务 <span className="mono">{visibleJob.id}</span></strong>
@@ -251,7 +258,7 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
                 <div className="h-full bg-[var(--accent)] transition-[width]" style={{ width: `${progress}%` }} />
               </div>
               <div className="flex flex-wrap justify-between gap-2 text-xs">
-                <span className="mono">{formatBytes(visibleJob.bytesDownloaded)} / {formatBytes(visibleJob.totalBytes)}</span>
+                <span className="mono">{formatBytesIEC(visibleJob.bytesDownloaded)} / {formatBytesIEC(visibleJob.totalBytes)}</span>
                 <span className="mono">{progress}%</span>
               </div>
             </div>
@@ -343,11 +350,4 @@ function eventLabel(event: EventRecord): string {
     "update.cancelled": "更新已取消",
   };
   return labels[event.type] || event.type;
-}
-
-function formatBytes(value?: number): string {
-  const bytes = value || 0;
-  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${bytes} B`;
 }

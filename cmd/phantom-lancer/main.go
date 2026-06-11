@@ -57,7 +57,7 @@ func main() {
 	logger := logHandle.Logger
 
 	ctx := context.Background()
-	store, err := storage.Open(ctx, cfg.DBPath)
+	store, err := storage.Open(ctx, cfg.DBPath, logger)
 	if err != nil {
 		logger.Error("open storage failed", "error", err)
 		os.Exit(1)

@@ -82,7 +82,7 @@ func TestCodexGatewayChatCompletionsAuthenticatesBeforeJSON(t *testing.T) {
 func newCodexGatewayHTTPTest(t *testing.T) (*Server, *storage.Store, string) {
 	t.Helper()
 	ctx := context.Background()
-	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

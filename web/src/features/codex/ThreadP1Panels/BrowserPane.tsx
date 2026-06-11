@@ -3,7 +3,7 @@ import type { FormEvent } from "react";
 import type { AppActions } from "../../../app/App";
 import type { CodexBrowserSession, CodexThread } from "../../../app/types";
 import { friendlyError } from "../../../api/client";
-import { Button, EmptyState } from "../../../components/ui";
+import { Button, CheckLabel, EmptyState } from "../../../components/ui";
 
 export function BrowserPane({ actions, thread, onRefresh }: { actions: AppActions; thread: CodexThread; onRefresh: () => void }) {
   const [items, setItems] = useState<CodexBrowserSession[]>([]);
@@ -89,10 +89,13 @@ function PreviewOpenForm({ allowPublic, url, onAllowPublicChange, onSubmit, onUR
     <form className="grid grid-cols-[minmax(0,1fr)_auto] gap-2" onSubmit={onSubmit}>
       <input className="input mono" onChange={(event) => onURLChange(event.target.value)} placeholder="http://127.0.0.1:5173" value={url} />
       <Button type="submit">打开预览</Button>
-      <label className="col-span-full flex items-center gap-2 text-xs text-[var(--muted-strong)]">
-        <input checked={allowPublic} onChange={(event) => onAllowPublicChange(event.target.checked)} type="checkbox" />
+      <CheckLabel
+        checked={allowPublic}
+        onChange={(checked) => onAllowPublicChange(checked)}
+        size="xs"
+      >
         允许打开公共 URL；localhost 和 workspace file URL 不需要勾选
-      </label>
+      </CheckLabel>
     </form>
   );
 }

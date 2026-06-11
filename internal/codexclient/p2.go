@@ -224,7 +224,9 @@ func (s *Service) processDueAutomations(ctx context.Context) {
 			continue
 		}
 		if _, err := s.executeAutomationRun(ctx, automation, run); err != nil {
-			s.log.Warn("codex automation run failed", "summary", Redact(err.Error(), 120), "automation", automation.ID)
+			if s.logSampler.Allow("codex:automation-run:" + automation.ID) {
+				s.log.Warn("codex automation run failed", "summary", Redact(err.Error(), 120), "automation", automation.ID)
+			}
 		}
 	}
 }
@@ -605,7 +607,9 @@ func (s *Service) notify(ctx context.Context, item storage.CodexCliNotification)
 	}
 	created, err := s.store.CreateCodexCliNotification(ctx, item)
 	if err != nil {
-		s.log.Warn("codex notification create failed", "summary", Redact(err.Error(), 120))
+		if s.logSampler.Allow("codex:notification-create") {
+			s.log.Warn("codex notification create failed", "summary", Redact(err.Error(), 120))
+		}
 		return
 	}
 	// Push a summary-only event so the notification center can update live without
@@ -619,7 +623,9 @@ func (s *Service) notify(ctx context.Context, item storage.CodexCliNotification)
 			"severity":       created.Severity,
 		})
 		if appendErr != nil {
-			s.log.Warn("codex notification event append failed", "summary", Redact(appendErr.Error(), 120))
+			if s.logSampler.Allow("codex:notification-append") {
+				s.log.Warn("codex notification event append failed", "summary", Redact(appendErr.Error(), 120))
+			}
 			return
 		}
 		s.hub.Publish(event)

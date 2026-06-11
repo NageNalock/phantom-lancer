@@ -6,10 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,6 +15,7 @@ import (
 
 	"phantom-lancer/internal/config"
 	"phantom-lancer/internal/events"
+	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/storage"
 )
 
@@ -418,37 +417,13 @@ func sensitiveKey(key string) bool {
 	return false
 }
 
-var (
-	bearerPattern   = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]{8,}`)
-	keyValuePattern = regexp.MustCompile(`(?i)\b(api[_-]?key|token|secret|password|authorization|cookie|csrf|session)\b(\s*[=:]\s*)("[^"]+"|'[^']+'|[^\s,;]+)`)
-	dataURLPattern  = regexp.MustCompile(`data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]+`)
-	uuidPattern     = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b`)
-	urlPattern      = regexp.MustCompile(`https?://[^\s"'<>]+`)
-)
-
+// RedactString is the log-center wrapper around safelog.Redact with an
+// upper bound of 4096 runes. Everything in this package uses it; nothing
+// compiles its own regex.
 func RedactString(value string) string {
-	if value == "" {
-		return value
-	}
-	redacted := bearerPattern.ReplaceAllString(value, "Bearer [redacted]")
-	redacted = keyValuePattern.ReplaceAllString(redacted, "$1$2[redacted]")
-	redacted = dataURLPattern.ReplaceAllString(redacted, "[redacted-image-data]")
-	redacted = uuidPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		if len(match) <= 8 {
-			return "****"
-		}
-		return match[:4] + "..." + match[len(match)-4:]
-	})
-	redacted = urlPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		parsed, err := url.Parse(match)
-		if err != nil || parsed.RawQuery == "" {
-			return match
-		}
-		parsed.RawQuery = "redacted"
-		return parsed.String()
-	})
+	redacted := safelog.Redact(value)
 	if len(redacted) > 4096 {
-		redacted = redacted[:4096] + "...[truncated]"
+		return redacted[:4096] + "...[truncated]"
 	}
 	return redacted
 }

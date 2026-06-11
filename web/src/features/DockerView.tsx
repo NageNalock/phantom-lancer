@@ -17,7 +17,8 @@ import type {
   EventRecord,
   ObjectStorageProfile,
 } from "../app/types";
-import { Button, ContextList, EmptyState, Field, Panel, Pill } from "../components/ui";
+import { Button, ContextList, EmptyState, Field, Panel, Pill, SubTabs } from "../components/ui";
+import { formatBytesZero } from "../utils/format";
 import { friendlyError } from "../api/client";
 import { DockerTable } from "./docker/DockerTable";
 import { HostOperationsPanel } from "./docker/HostOperationsPanel";
@@ -36,17 +37,6 @@ const TABS: { id: DockerTab; label: string }[] = [
   { id: "settings", label: "Settings" },
 ];
 
-function formatBytes(bytes: number): string {
-  if (!bytes || bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
-}
 
 function formatUnix(seconds: number): string {
   if (!seconds) return "-";
@@ -505,30 +495,22 @@ export function DockerView({ actions }: { actions: AppActions }) {
 
   return (
     <div className="grid gap-4 p-4">
-      <Panel
-        title="Docker Host"
-        subtitle="本机 Docker 守护进程控制面。容器生命周期由 dockerd 管理，独立于 Phantom Lancer。"
-        actions={
-          <div className="flex items-center gap-2">
-            <Pill tone={available ? "good" : "warn"}>{available ? "daemon 可用" : "daemon 不可用"}</Pill>
-            <Button onClick={() => void refresh()}>{loading ? "加载中" : "刷新"}</Button>
-          </div>
-        }
-      >
-        <div className="mb-3 flex flex-wrap gap-1 overflow-x-auto border-b border-[var(--line)] pb-2">
-          {TABS.map((item) => (
-            <button
-              aria-pressed={item.id === tab}
-              className={`rounded-md px-3 py-1 text-xs transition ${item.id === tab ? "bg-[var(--surface-strong)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[var(--surface-soft)]"}`}
-              key={item.id}
-              onClick={() => setTab(item.id)}
-              type="button"
-            >
-              {item.label}
-            </button>
-          ))}
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="m-0 text-sm font-semibold">Docker Host</h2>
+          <p className="muted mt-1 mb-0 text-xs">本机 Docker 守护进程控制面。容器生命周期由 dockerd 管理，独立于 Phantom Lancer。</p>
         </div>
-
+        <div className="flex items-center gap-2">
+          <Pill tone={available ? "good" : "warn"}>{available ? "daemon 可用" : "daemon 不可用"}</Pill>
+          <Button onClick={() => void refresh()}>{loading ? "加载中" : "刷新"}</Button>
+        </div>
+      </div>
+      <SubTabs
+        activeId={tab}
+        onChange={(id) => setTab(id as DockerTab)}
+        tabs={TABS}
+      />
+      <Panel>
         {tab === "registry" ? (
           <RegistryPanel
             busy={busy}
@@ -538,7 +520,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
             credentials={credentials}
             deleteCredential={(item) => void deleteCredential(item)}
             deleteTag={(item) => void deleteTag(item)}
-            formatBytes={formatBytes}
+            formatBytes={formatBytesZero}
             loading={loading}
             newCredentialSecret={newCredentialSecret}
             objectProfiles={objectProfiles}
@@ -641,7 +623,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
                 cells: [
                   <span className="mono text-xs">{item.tags && item.tags.length ? item.tags.join(", ") : item.id}</span>,
                   <span className="mono text-xs">{item.id}</span>,
-                  <span className="text-xs">{formatBytes(item.sizeBytes)}</span>,
+                  <span className="text-xs">{formatBytesZero(item.sizeBytes)}</span>,
                   <span className="text-xs">{formatUnix(item.created)}</span>,
                   <Button disabled={busy === `rmi-${item.id}`} tone="danger" onClick={() => void removeImage(item)}>删除</Button>,
                 ],

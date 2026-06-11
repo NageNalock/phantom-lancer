@@ -51,7 +51,7 @@ export function HostOperationsPanel({
     >
       <div className="grid gap-4">
         <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
-          <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+          <div className="card-soft">
             <div className="mb-3 flex items-start justify-between gap-3">
               <div>
                 <h3 className="m-0 text-sm font-medium">一键安装 Docker daemon</h3>

@@ -3,7 +3,7 @@ import type { FormEvent } from "react";
 import type { AppActions } from "../../../app/App";
 import type { CodexCommand, CodexCommandAssessment, CodexThread } from "../../../app/types";
 import { friendlyError } from "../../../api/client";
-import { Button, EmptyState, Notice, Pill } from "../../../components/ui";
+import { Button, CheckLabel, EmptyState, Notice, Pill } from "../../../components/ui";
 import { formatDate } from "../../../domain/labels";
 
 export function CommandPane({ actions, thread, onRefresh }: { actions: AppActions; thread: CodexThread; onRefresh: () => void }) {
@@ -78,10 +78,13 @@ export function CommandPane({ actions, thread, onRefresh }: { actions: AppAction
       <form className="grid gap-2" onSubmit={run}>
         <input className="input mono" onChange={(event) => setCommand(event.target.value)} placeholder="npm test -- --runInBand" value={command} />
         <Notice tone="warn">只允许只读 Git 查询，以及经确认的本地 check/test/build 脚本；项目代码命令必须通过本机 OS sandbox，沙箱不可用时会拒绝执行。</Notice>
-        <label className="flex items-center gap-2 text-xs text-[var(--muted-strong)]">
-          <input checked={confirmDanger} onChange={(event) => setConfirmDanger(event.target.checked)} type="checkbox" />
+        <CheckLabel
+          checked={confirmDanger}
+          onChange={(checked) => setConfirmDanger(checked)}
+          size="xs"
+        >
           我确认要执行本地项目代码或构建脚本
-        </label>
+        </CheckLabel>
         {assessment ? <CommandAssessmentNotice assessment={assessment} /> : null}
         <div className="flex flex-wrap gap-2">
           <Button disabled={!command.trim() || assessing} onClick={() => void assess()}>

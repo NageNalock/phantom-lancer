@@ -6,7 +6,7 @@ import type {
   DockerRegistryTag,
   ObjectStorageProfile,
 } from "../../app/types";
-import { Button, ContextList, Field, Panel, Pill } from "../../components/ui";
+import { Button, CheckLabel, ContextList, Field, Metric, Panel, Pill, Toggle } from "../../components/ui";
 import { DockerTable } from "./DockerTable";
 
 // registryHost derives a valid image-reference host (host[:port][/path]) from
@@ -73,13 +73,23 @@ export function RegistryPanel({
   return (
     <div className="grid gap-4">
       <div className="grid grid-cols-4 gap-2 max-lg:grid-cols-2">
-        <ContextList
-          items={[
-            ["Registry", registryStatus?.enabled ? <Pill tone={registryStatus.ready ? "good" : "warn"}>{registryStatus.ready ? "ready" : "enabled"}</Pill> : <Pill tone="neutral">disabled</Pill>],
-            ["Public URL", <span className="mono text-xs">{registryStatus?.publicUrl || "未配置"}</span>],
-            ["Storage", registryStatus?.storageBackend || "local"],
-            ["Usage", `${formatBytes(registryStatus?.usageBytes || 0)} / ${formatBytes(registryStatus?.quotaBytes || 0)}`],
-          ]}
+        <Metric
+          label="Registry"
+          tone={registryStatus?.enabled ? (registryStatus.ready ? "good" : "warn") : "neutral"}
+          value={registryStatus?.enabled ? (registryStatus.ready ? "Ready" : "Enabled") : "Disabled"}
+        />
+        <Metric
+          label="Public URL"
+          value={<span className="mono text-xs">{registryStatus?.publicUrl || "未配置"}</span>}
+        />
+        <Metric
+          label="Storage"
+          value={registryStatus?.storageBackend || "local"}
+        />
+        <Metric
+          label="Usage"
+          value={formatBytes(registryStatus?.usageBytes || 0)}
+          detail={formatBytes(registryStatus?.quotaBytes || 0) + " quota"}
         />
       </div>
       {newCredentialSecret ? (
@@ -106,14 +116,18 @@ export function RegistryPanel({
         />
         <div className="grid gap-3">
           <Panel title="Push Instructions" subtitle="使用 Registry 凭据登录后推送镜像。">
-            <pre className="mono overflow-auto rounded-md border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs">{`docker login ${registryHost(registrySettings.publicUrl)}
+            <pre className="code-block">{`docker login ${registryHost(registrySettings.publicUrl)}
 docker tag my-app:latest ${registryHost(registrySettings.publicUrl)}/personal/my-app:latest
 docker push ${registryHost(registrySettings.publicUrl)}/personal/my-app:latest`}</pre>
           </Panel>
           <Panel title="Credentials" subtitle="secret 只在创建或轮换后显示一次。">
             <div className="grid gap-2">
-              <input className="input mono" onChange={(event) => setCredentialName(event.target.value)} value={credentialName} />
-              <input className="input mono" onChange={(event) => setCredentialPrefix(event.target.value)} value={credentialPrefix} />
+              <Field label="凭据名称">
+                <input className="input mono" onChange={(event) => setCredentialName(event.target.value)} value={credentialName} />
+              </Field>
+              <Field label="命名空间前缀" help="例如 personal/ 或 team-a/；留空则无命名空间限制。">
+                <input className="input mono" onChange={(event) => setCredentialPrefix(event.target.value)} value={credentialPrefix} />
+              </Field>
               <Button disabled={busy === "credential-create"} onClick={() => createCredential()} tone="primary">创建凭据</Button>
               {credentials.map((item) => (
                 <div className="flex items-center justify-between gap-2 border-t border-[var(--line)] pt-2" key={item.id}>
@@ -177,10 +191,11 @@ function RegistrySettingsPanel({
   return (
     <Panel title="Registry Settings" subtitle="Registry 存储、TLS 与匿名 pull 策略。">
       <div className="grid max-w-3xl gap-3">
-        <label className="flex items-center gap-2 text-sm">
-          <input checked={Boolean(registrySettings.enabled)} onChange={(event) => setRegistrySettings((current) => ({ ...current, enabled: event.target.checked }))} type="checkbox" />
-          启用内嵌 Registry
-        </label>
+        <Toggle
+          checked={Boolean(registrySettings.enabled)}
+          label="启用内嵌 Registry"
+          onChange={(checked) => setRegistrySettings((current) => ({ ...current, enabled: checked }))}
+        />
         <Field label="Public URL" help="示例：https://registry.example.com；不能包含 token/query。">
           <input className="input mono" onChange={(event) => setRegistrySettings((current) => ({ ...current, publicUrl: event.target.value }))} value={registrySettings.publicUrl || ""} />
         </Field>
@@ -209,14 +224,18 @@ function RegistrySettingsPanel({
           <input className="input mono" onChange={(event) => setRegistrySettings((current) => ({ ...current, objectPrefix: event.target.value }))} value={registrySettings.objectPrefix || "phantom-lancer/docker-registry"} />
         </Field>
         <div className="flex flex-wrap gap-3">
-          <label className="flex items-center gap-2 text-sm">
-            <input checked={Boolean(registrySettings.requireTls)} onChange={(event) => setRegistrySettings((current) => ({ ...current, requireTls: event.target.checked }))} type="checkbox" />
+          <CheckLabel
+            checked={Boolean(registrySettings.requireTls)}
+            onChange={(checked) => setRegistrySettings((current) => ({ ...current, requireTls: checked }))}
+          >
             Require TLS
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input checked={Boolean(registrySettings.allowAnonymousPull)} onChange={(event) => setRegistrySettings((current) => ({ ...current, allowAnonymousPull: event.target.checked }))} type="checkbox" />
+          </CheckLabel>
+          <CheckLabel
+            checked={Boolean(registrySettings.allowAnonymousPull)}
+            onChange={(checked) => setRegistrySettings((current) => ({ ...current, allowAnonymousPull: checked }))}
+          >
             Anonymous pull
-          </label>
+          </CheckLabel>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button disabled={busy === "registry-settings"} onClick={() => saveRegistrySettings(registrySettings)} tone="primary">保存 Registry 设置</Button>

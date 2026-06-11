@@ -6,9 +6,9 @@ This repository includes a GitHub Actions workflow that builds and packages the 
 
 The workflow lives at `.github/workflows/build.yml` and runs in three ways:
 
-- Automatically after every push to `main`.
+- Automatically after every push to `main`. Main branch pushes publish a GitHub Release by incrementing the latest `vX.Y.Z` tag by one patch version.
 - Manually from GitHub: `Actions` -> `Build` -> `Run workflow`.
-- Automatically after pushing a version tag that matches `v*`, such as `v0.1.0`. Tag builds also publish a GitHub Release.
+- Automatically after pushing a version tag that matches `v*`, such as `v0.1.0`. Tag builds also publish or update the matching GitHub Release.
 
 Manual runs expose two inputs:
 
@@ -34,7 +34,7 @@ The workflow:
    - `README.md`
    - `LICENSE`
 9. Uploads the tarball and a `.sha256` checksum as a workflow artifact.
-10. For `v*` tags only, creates or updates the matching GitHub Release and uploads the same files as release assets.
+10. For main pushes and `v*` tags, creates or updates the matching GitHub Release and uploads the same files as release assets.
 
 ## GitHub Setup
 
@@ -42,22 +42,24 @@ The workflow:
 2. Open the GitHub repository settings.
 3. Go to `Actions` -> `General`.
 4. Make sure actions are enabled for the repository.
-5. Keep the workflow file's permissions as defined. The build job uses read-only repository access; the tag release job requests `contents: write` only when publishing a GitHub Release.
+5. Keep the workflow file's permissions as defined. The build job uses read-only repository access; the release job requests `contents: write` only when creating tags and publishing a GitHub Release.
 
 No repository secret is required for the current build workflow.
 
-If the tag release job fails with `Resource not accessible by integration`, open `Settings` -> `Actions` -> `General` and set `Workflow permissions` to allow read and write permissions for the repository.
+If the release job fails with `Resource not accessible by integration`, open `Settings` -> `Actions` -> `General` and set `Workflow permissions` to allow read and write permissions for the repository.
 
 ## Publish a Release
 
-Release publishing is tag-driven. Use semantic version style tags with a `v` prefix:
+Release publishing is automatic for `main`. On each push to `main`, the workflow finds the latest semantic release tag matching `vX.Y.Z`, increments the patch number, creates that tag at the pushed commit, and publishes a GitHub Release. For example, if the latest tag is `v0.1.4`, the next main push publishes `v0.1.5`.
+
+Manual tag publishing is still supported. Use semantic version style tags with a `v` prefix:
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The tag push triggers the same Linux amd64 build and then creates a GitHub Release named `Phantom Lancer v0.1.0`. The Release contains:
+The tag push triggers the same Linux amd64 build and then creates or updates a GitHub Release named `Phantom Lancer v0.1.0`. The Release contains:
 
 - `phantom-lancer-linux-amd64.tar.gz`
 - `phantom-lancer-linux-amd64.tar.gz.sha256`

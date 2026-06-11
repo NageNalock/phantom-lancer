@@ -119,6 +119,16 @@ type CodexCliApproval struct {
 	ExpiresAt      string         `json:"expiresAt,omitempty"`
 	CreatedAt      string         `json:"createdAt"`
 	UpdatedAt      string         `json:"updatedAt"`
+	// JSONRPCRequestID stores the raw JSON-RPC request id that must be echoed
+	// back when replying to the codex app-server. It is persisted so the
+	// broker map can be re-hydrated after service restart. Empty for
+	// approvals created before the recovery column was added.
+	JSONRPCRequestID string `json:"-"`
+	// RecoveryStatus is "live" when the approval is attached to a live codex
+	// app-server; "orphaned" after a service restart where the owning
+	// subprocess died and no reply can be delivered. Orphaned approvals are still
+	// decidable by the owner for audit, but resolve as decision="stale".
+	RecoveryStatus string `json:"recoveryStatus"`
 }
 
 type CodexCliRun struct {
@@ -1267,7 +1277,9 @@ UPDATE codex_cli_threads SET codex_thread_id = ?, title = ?, status = ?, source_
 }
 
 // MarkCodexCliThreadsUnknown is invoked after a server restart so queued,
-// running and approval-blocked turns are not shown as live.
+// running and approval-blocked turns are not shown as live. Pending approvals
+// are preserved but marked "orphaned": owner decisions after restart still
+// land in audit, but no reply is sent to the (now-dead) codex app-server.
 func (s *Store) MarkCodexCliRunningThreadsInterrupted(ctx context.Context, message string) error {
 	now := now()
 	if _, err := s.db.ExecContext(ctx, `UPDATE codex_cli_turns SET status = 'failed', error_summary = ?, completed_at = ?, updated_at = ? WHERE status IN ('queued', 'running', 'waiting_approval')`, message, now, now); err != nil {
@@ -1276,7 +1288,7 @@ func (s *Store) MarkCodexCliRunningThreadsInterrupted(ctx context.Context, messa
 	if _, err := s.db.ExecContext(ctx, `UPDATE codex_cli_threads SET status = 'failed', last_error = ?, updated_at = ? WHERE status IN ('queued', 'running', 'needs_approval')`, message, now); err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE codex_cli_approvals SET status = 'failed', decision = 'expired', decided_at = ?, updated_at = ? WHERE status = 'pending'`, now, now); err != nil {
+	if _, err := s.db.ExecContext(ctx, `UPDATE codex_cli_approvals SET recovery_status = 'orphaned', updated_at = ? WHERE status = 'pending' AND recovery_status != 'orphaned'`, now); err != nil {
 		return err
 	}
 	return nil
@@ -1502,7 +1514,7 @@ func (s *Store) DeleteCodexCliEventsOlderThan(ctx context.Context, cutoff string
 
 // ---- approvals ----
 
-const codexCliApprovalColumns = `id, thread_id, turn_id, codex_request_id, status, action_kind, command_preview, cwd_summary, risk_level, request_payload_json, decision, decided_at, expires_at, created_at, updated_at`
+const codexCliApprovalColumns = `id, thread_id, turn_id, codex_request_id, status, action_kind, command_preview, cwd_summary, risk_level, request_payload_json, decision, decided_at, expires_at, created_at, updated_at, jsonrpc_request_id_json, recovery_status`
 
 func (s *Store) CreateCodexCliApproval(ctx context.Context, approval CodexCliApproval) (CodexCliApproval, error) {
 	id, err := ids.New("cxap")
@@ -1522,11 +1534,14 @@ func (s *Store) CreateCodexCliApproval(ctx context.Context, approval CodexCliApp
 	if approval.RequestPayload == nil {
 		approval.RequestPayload = map[string]any{}
 	}
+	if approval.RecoveryStatus == "" {
+		approval.RecoveryStatus = "live"
+	}
 	payload, _ := json.Marshal(approval.RequestPayload)
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO codex_cli_approvals (`+codexCliApprovalColumns+`)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		approval.ID, approval.ThreadID, approval.TurnID, approval.CodexRequestID, approval.Status, approval.ActionKind, approval.CommandPreview, approval.CwdSummary, approval.RiskLevel, string(payload), approval.Decision, approval.DecidedAt, approval.ExpiresAt, approval.CreatedAt, approval.UpdatedAt)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		approval.ID, approval.ThreadID, approval.TurnID, approval.CodexRequestID, approval.Status, approval.ActionKind, approval.CommandPreview, approval.CwdSummary, approval.RiskLevel, string(payload), approval.Decision, approval.DecidedAt, approval.ExpiresAt, approval.CreatedAt, approval.UpdatedAt, approval.JSONRPCRequestID, approval.RecoveryStatus)
 	if err != nil {
 		return CodexCliApproval{}, err
 	}
@@ -1803,9 +1818,15 @@ func scanCodexCliTurn(row workspaceScanner) (CodexCliTurn, error) {
 func scanCodexCliApproval(row workspaceScanner) (CodexCliApproval, error) {
 	var approval CodexCliApproval
 	var payload string
-	err := row.Scan(&approval.ID, &approval.ThreadID, &approval.TurnID, &approval.CodexRequestID, &approval.Status, &approval.ActionKind, &approval.CommandPreview, &approval.CwdSummary, &approval.RiskLevel, &payload, &approval.Decision, &approval.DecidedAt, &approval.ExpiresAt, &approval.CreatedAt, &approval.UpdatedAt)
+	var recoveryStatus sql.NullString
+	err := row.Scan(&approval.ID, &approval.ThreadID, &approval.TurnID, &approval.CodexRequestID, &approval.Status, &approval.ActionKind, &approval.CommandPreview, &approval.CwdSummary, &approval.RiskLevel, &payload, &approval.Decision, &approval.DecidedAt, &approval.ExpiresAt, &approval.CreatedAt, &approval.UpdatedAt, &approval.JSONRPCRequestID, &recoveryStatus)
 	if err != nil {
 		return CodexCliApproval{}, err
+	}
+	if recoveryStatus.Valid && recoveryStatus.String != "" {
+		approval.RecoveryStatus = recoveryStatus.String
+	} else {
+		approval.RecoveryStatus = "live"
 	}
 	_ = json.Unmarshal([]byte(payload), &approval.RequestPayload)
 	return approval, nil

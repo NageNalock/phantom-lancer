@@ -47,7 +47,7 @@ func (s *Service) download(ctx context.Context, rawURL, path string, job *storag
 	req.Header.Set("User-Agent", "phantom-lancer-self-update")
 	started := time.Now()
 	if s.log != nil {
-		s.log.Info("system update artifact download started", "job_id", job.ID, "asset_name", job.AssetName, "url_host", safelog.HostLabel(rawURL), "max_bytes", maxBytes)
+		s.log.Debug("system update artifact download started", "job_id", job.ID, "asset_name", job.AssetName, "url_host", safelog.HostLabel(rawURL), "max_bytes", maxBytes)
 	}
 	resp, err := s.httpClient().Do(req)
 	if err != nil {
@@ -115,7 +115,7 @@ func (s *Service) download(ctx context.Context, rawURL, path string, job *storag
 	}
 	job.BytesDownloaded = downloaded
 	if s.log != nil {
-		s.log.Info("system update artifact download completed", "job_id", job.ID, "asset_name", job.AssetName, "bytes", downloaded, "latency_ms", time.Since(started).Milliseconds())
+		s.log.Debug("system update artifact download completed", "job_id", job.ID, "asset_name", job.AssetName, "bytes", downloaded, "latency_ms", time.Since(started).Milliseconds())
 	}
 	return s.store.SaveSystemUpdateJob(ctx, *job)
 }
@@ -131,7 +131,7 @@ func (s *Service) downloadChecksum(ctx context.Context, rawURL, path string) err
 	req.Header.Set("User-Agent", "phantom-lancer-self-update")
 	started := time.Now()
 	if s.log != nil {
-		s.log.Info("system update checksum download started", "url_host", safelog.HostLabel(rawURL))
+		s.log.Debug("system update checksum download started", "url_host", safelog.HostLabel(rawURL))
 	}
 	resp, err := s.httpClient().Do(req)
 	if err != nil {
@@ -158,7 +158,7 @@ func (s *Service) downloadChecksum(ctx context.Context, rawURL, path string) err
 		return errors.New("checksum file is too large")
 	}
 	if s.log != nil {
-		s.log.Info("system update checksum download completed", "url_host", safelog.HostLabel(rawURL), "bytes", len(data), "latency_ms", time.Since(started).Milliseconds())
+		s.log.Debug("system update checksum download completed", "url_host", safelog.HostLabel(rawURL), "bytes", len(data), "latency_ms", time.Since(started).Milliseconds())
 	}
 	return os.WriteFile(path, data, 0o600)
 }

@@ -50,7 +50,7 @@ func (s *Service) fetchLatestRelease(ctx context.Context, etag string) (storage.
 
 	started := time.Now()
 	if s.log != nil {
-		s.log.Info("github release check started", "repository", strings.Trim(s.cfg.Repository, "/"), "api_host", safelog.HostLabel(requestURL), "has_etag", etag != "")
+		s.log.Debug("github release check started", "repository", strings.Trim(s.cfg.Repository, "/"), "api_host", safelog.HostLabel(requestURL), "has_etag", etag != "")
 	}
 	resp, err := s.httpClient().Do(req)
 	if err != nil {
@@ -62,7 +62,7 @@ func (s *Service) fetchLatestRelease(ctx context.Context, etag string) (storage.
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotModified {
 		if s.log != nil {
-			s.log.Info("github release check completed", "repository", strings.Trim(s.cfg.Repository, "/"), "status", resp.StatusCode, "not_modified", true, "latency_ms", time.Since(started).Milliseconds())
+			s.log.Debug("github release check completed", "repository", strings.Trim(s.cfg.Repository, "/"), "status", resp.StatusCode, "not_modified", true, "latency_ms", time.Since(started).Milliseconds())
 		}
 		return storage.SystemUpdateCheck{}, true, nil
 	}
@@ -92,7 +92,7 @@ func (s *Service) fetchLatestRelease(ctx context.Context, etag string) (storage.
 	}
 	check.ETag = resp.Header.Get("ETag")
 	if s.log != nil {
-		s.log.Info("github release check completed", "repository", strings.Trim(s.cfg.Repository, "/"), "status", resp.StatusCode, "latest_version", check.LatestVersion, "can_apply", check.CanApply, "latency_ms", time.Since(started).Milliseconds())
+		s.log.Debug("github release check completed", "repository", strings.Trim(s.cfg.Repository, "/"), "status", resp.StatusCode, "latest_version", check.LatestVersion, "can_apply", check.CanApply, "latency_ms", time.Since(started).Milliseconds())
 	}
 	return check, false, nil
 }

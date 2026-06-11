@@ -11,8 +11,10 @@ import (
 	"io/fs"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"path"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +27,7 @@ import (
 	"phantom-lancer/internal/events"
 	imagegen "phantom-lancer/internal/images"
 	logcenter "phantom-lancer/internal/logs"
+	"phantom-lancer/internal/logsampler"
 	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/selfupdate"
 	"phantom-lancer/internal/storage"
@@ -36,7 +39,41 @@ const (
 	sessionCookie = "pl_session"
 	csrfCookie    = "pl_csrf"
 	sessionTTL    = 7 * 24 * time.Hour
+
+	// slowRequestThreshold is the wall-time duration after which a request is
+	// logged at WARN level with latency included. The default is deliberately
+	// higher than the typical 1s "slow" bar because the UI makes heavy use
+	// of long-lived handlers: SSE streams (/api/events/stream), large image
+	// asset downloads, codex thread event long-polls, and system-update
+	// streaming downloads. Treating those as WARN would make normal
+	// operation look like incidents.
+	slowRequestThreshold = 15 * time.Second
 )
+
+// isSlowExemptPath reports whether a request path should be ignored by the
+// slow-request WARN detector. It covers handlers that are legitimately
+// long-lived by design and whose latency has no operational meaning.
+// The list is intentionally small and literal; if a new streaming endpoint
+// is added, add it here explicitly rather than broad prefix matching.
+func isSlowExemptPath(path string) bool {
+	switch {
+	case path == "/api/events/stream":
+		return true
+	case strings.HasPrefix(path, "/api/images/library/assets/") && strings.HasSuffix(path, "/content"):
+		return true
+	// Legacy image asset download route predates the /library/assets
+	// hierarchy; it dispatches through the same serveImageAssetContent
+	// backend and can legitimately serve multi-gigabyte S3 blobs, so it
+	// must be exempt too.
+	case strings.HasPrefix(path, "/api/images/assets/"):
+		return true
+	case strings.HasPrefix(path, "/api/codex/threads/") && strings.HasSuffix(path, "/events"):
+		return true
+	case strings.HasPrefix(path, "/api/system/update/jobs/") && strings.HasSuffix(path, "/stream"):
+		return true
+	}
+	return false
+}
 
 type Server struct {
 	cfg            config.Config
@@ -56,6 +93,11 @@ type Server struct {
 	privateUnlocks *loginBackoff
 	updateConfirms *loginBackoff
 	privateImages  *privateImageAccess
+
+	// telemetrySampler gates hot-path WARN/ERROR telemetry from the
+	// requestTelemetry middleware so repeated 5xx bursts, scanner-driven
+	// 4xx floods, or slow SSE stream endpoints never drown service logs.
+	telemetrySampler *logsampler.Sampler
 }
 
 type sessionContext struct {
@@ -64,23 +106,24 @@ type sessionContext struct {
 
 func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, dockerSvc *dockercontrol.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
 	return &Server{
-		cfg:            cfg,
-		store:          store,
-		hub:            hub,
-		codexGateway:   codexGatewaySvc,
-		codex:          codexSvc,
-		v2ray:          v2raySvc,
-		images:         imagesSvc,
-		docker:         dockerSvc,
-		logs:           logsSvc,
-		updates:        updateSvc,
-		staticFS:       staticFS,
-		log:            logger,
-		logins:         newLoginBackoff(cfg.LoginFailureThreshold),
-		gatewayOAuth:   newCodexGatewayOAuthSessions(10 * time.Minute),
-		privateUnlocks: newLoginBackoff(cfg.LoginFailureThreshold),
-		updateConfirms: newLoginBackoff(cfg.LoginFailureThreshold),
-		privateImages:  newPrivateImageAccess(),
+		cfg:              cfg,
+		store:            store,
+		hub:              hub,
+		codexGateway:     codexGatewaySvc,
+		codex:            codexSvc,
+		v2ray:            v2raySvc,
+		images:           imagesSvc,
+		docker:           dockerSvc,
+		logs:             logsSvc,
+		updates:          updateSvc,
+		staticFS:         staticFS,
+		log:              logger,
+		logins:           newLoginBackoff(cfg.LoginFailureThreshold),
+		gatewayOAuth:     newCodexGatewayOAuthSessions(10 * time.Minute),
+		privateUnlocks:   newLoginBackoff(cfg.LoginFailureThreshold),
+		updateConfirms:   newLoginBackoff(cfg.LoginFailureThreshold),
+		privateImages:    newPrivateImageAccess(),
+		telemetrySampler: logsampler.New(2 * time.Second),
 	}, nil
 }
 
@@ -209,7 +252,134 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v2/", s.handleDockerRegistryNative)
 
 	mux.Handle("/", s.staticHandler())
-	return s.recover(mux)
+	return s.requestTelemetry(s.recover(mux))
+}
+
+// requestTelemetry records access telemetry for anomalies and
+// additionally records slow requests and server errors (5xx).
+//
+// Per AGENTS, successful HTTP requests (2xx/3xx/1xx) emit no service
+// log — they exist only in the structured request metric counters
+// kept by logsampler / the middleware sampler.
+//
+// Logging matrix:
+//   - 5xx → ERROR, with status + latency + method + path + ip + user_agent
+//   - 4xx (except 404/401/403/429 noise at DEBUG) → WARN, sampled
+//   - slow request (any status, non-exempt path) → WARN, sampled
+//
+// The URL path recorded is from safelog.RequestPathLabel, which uses
+// url.URL.EscapedPath() and unconditionally drops query and fragment so
+// query-string secrets never reach the service log.
+func (s *Server) requestTelemetry(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: 200}
+		defer func() {
+			latency := time.Since(start)
+			attrs := []any{
+				"method", r.Method,
+				"path", safelog.RequestPathLabel(r.URL),
+				"status", rec.status,
+				"bytes", rec.bytes,
+				"latency_ms", latency.Milliseconds(),
+				"ip", remoteIP(r),
+				"ua", shortUA(r.UserAgent()),
+			}
+			switch {
+			case rec.status >= 500:
+				if s.telemetrySampler.Allow(fmt.Sprintf("%s|%s|%d", r.Method, safelog.RequestPathLabel(r.URL), rec.status)) {
+					s.log.ErrorContext(r.Context(), "http server error", attrs...)
+
+				}
+			case rec.status == 404 || rec.status == 401 || rec.status == 403 || rec.status == 429:
+				s.log.DebugContext(r.Context(), "http client noise", attrs...)
+			case rec.status >= 400:
+				if s.telemetrySampler.Allow(fmt.Sprintf("%s|%s|%d", r.Method, safelog.RequestPathLabel(r.URL), rec.status)) {
+					s.log.WarnContext(r.Context(), "http client error", attrs...)
+
+				}
+			case latency >= slowRequestThreshold && !isSlowExemptPath(r.URL.Path):
+				// Exempt known long-lived handlers (SSE event streams,
+				// large binary asset downloads, codex thread event
+				// long-poll, and system update job progress streams)
+				// from the slow-request WARN: steady-state streaming
+				// is not an incident. See isSlowExemptPath for the
+				// list of exempt patterns.
+				if s.telemetrySampler.Allow(fmt.Sprintf("%s|%s|%d", r.Method, safelog.RequestPathLabel(r.URL), rec.status)) {
+					s.log.WarnContext(r.Context(), "http slow request", attrs...)
+
+				}
+			}
+		}()
+		next.ServeHTTP(rec, r)
+	})
+}
+
+// statusRecorder wraps an http.ResponseWriter to capture the response status
+// code and number of bytes written. Flush / Hijack are forwarded when the
+// underlying writer supports them.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Write(p []byte) (int, error) {
+	n, err := r.ResponseWriter.Write(p)
+	r.bytes += n
+	return n, err
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// remoteIP returns the client IP, preferring X-Forwarded-For (first entry)
+// and X-Real-IP over the connection's RemoteAddr. The result is always safe
+// to log: valid IPs are returned verbatim (naturally bounded in length),
+// while malformed / injected header values are passed through safelog.Text
+// with a 64-rune cap per AGENTS.md "长度做上限裁剪" constraint.
+func remoteIP(r *http.Request) string {
+	if xff := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); xff != "" {
+		if net.ParseIP(xff) != nil {
+			return xff
+		}
+		return safelog.Text(xff, 64)
+	}
+	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
+		if net.ParseIP(xr) != nil {
+			return xr
+		}
+		return safelog.Text(xr, 64)
+	}
+	if r.RemoteAddr == "" {
+		return "-"
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return safelog.Text(r.RemoteAddr, 64)
+	}
+	return host
+}
+
+// shortUA truncates User-Agent strings to 120 runes for logging.
+func shortUA(ua string) string {
+	ua = strings.TrimSpace(ua)
+	if ua == "" {
+		return "-"
+	}
+	runes := []rune(ua)
+	if len(runes) > 120 {
+		return string(runes[:120]) + "..."
+	}
+	return ua
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -1175,17 +1345,35 @@ func (s *Server) handleImageAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimPrefix(r.URL.Path, "/api/images/assets/")
-	fullPath, ok := s.images.Assets.AssetPath(name)
-	if !ok {
+	// Lookup order:
+	//  1. By asset ID — this is the canonical lookup and covers every
+	//     asset regardless of storage backend (local, S3, or remote).
+	//     S3-archived assets have an empty LocalName, so lookup #2
+	//     would otherwise miss them.
+	//  2. By LocalName — preserved for historical URLs that referenced
+	//     the on-disk file name of pre-archival assets.
+	var asset storage.ImageAsset
+	var found bool
+	if a, err := s.store.GetImageAsset(r.Context(), name); err == nil {
+		asset = a
+		found = true
+	} else if a, err := s.store.GetImageAssetByLocalName(r.Context(), name); err == nil {
+		asset = a
+		found = true
+	}
+	if !found {
 		writeError(w, http.StatusNotFound, "image_asset_not_found", "未找到图片资产")
 		return
 	}
-	asset, err := s.store.GetImageAssetByLocalName(r.Context(), name)
-	if err == nil && asset.Private && !s.requireImagePrivateUnlocked(w, ctx) {
+	if asset.Private && !s.requireImagePrivateUnlocked(w, ctx) {
 		return
 	}
-	w.Header().Set("Cache-Control", "private, max-age=3600")
-	http.ServeFile(w, r, fullPath)
+	// serveImageAssetContent is backend-aware: it dispatches through
+	// s.images.ReadAsset which handles S3, remote HTTP, and local disk
+	// uniformly. Using it here (instead of http.ServeFile + AssetPath)
+	// closes the backend coverage gap for the legacy `/api/images/assets/*`
+	// route so S3-archived assets are reachable.
+	s.serveImageAssetContent(w, r, asset, false)
 }
 
 func (s *Server) handleV2RayStatus(w http.ResponseWriter, r *http.Request) {
@@ -1566,7 +1754,19 @@ func (s *Server) recover(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				s.log.Error("panic recovered", "panic", recovered)
+				// Best-effort stack capture — 12 deep frames is enough to
+				// identify the source of most handler panics.
+				buf := make([]byte, 4096)
+				n := runtime.Stack(buf, false)
+				stack := string(buf[:n])
+				s.log.Error("panic recovered",
+					"panic", recovered,
+					"method", r.Method,
+					"path", safelog.RequestPathLabel(r.URL),
+					"ip", remoteIP(r),
+					"ua", shortUA(r.UserAgent()),
+					"stack", stack,
+				)
 				writeError(w, http.StatusInternalServerError, "internal_error", "服务内部错误")
 			}
 		}()

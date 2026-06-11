@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AppActions } from "../app/App";
 import type { AppData, CodexStatus } from "../app/types";
-import { Pill } from "../components/ui";
+import { Pill, SubTabs } from "../components/ui";
 import { codexAppServerStateLabel } from "../domain/labels";
 import { ThreadsTab } from "./codex/ThreadsTab";
 import { WorkspacesTab } from "./codex/WorkspacesTab";
@@ -52,30 +52,25 @@ export function CodexView({ actions, data }: { actions: AppActions; data: AppDat
 
   return (
     <section className="grid gap-4 p-4">
-      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--line)] pb-2">
-        {TABS.map((item) => {
-          const active = item.id === tab;
-          return (
-            <button
-              aria-pressed={active}
-              className={`rounded-md px-3 py-1.5 text-sm transition ${active ? "bg-[var(--surface-strong)] text-[var(--text)] shadow-[inset_0_-2px_0_var(--accent)]" : "text-[var(--muted-strong)] hover:bg-[var(--surface-soft)]"}`}
-              key={item.id}
-              onClick={() => setTab(item.id)}
-              type="button"
-            >
-              {item.label}
-              {item.id === "approvals" && pending > 0 ? <span className="ml-1.5 rounded-full bg-[var(--warn-soft)] px-1.5 text-xs text-[var(--warn)]">{pending}</span> : null}
-            </button>
-          );
-        })}
-        <span className="ml-auto flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted)]">
-          {runtime?.running ? <Pill tone="good">running {runtime.running}</Pill> : null}
-          {runtime?.waitingApproval ? <Pill tone="warn">approval {runtime.waitingApproval}</Pill> : null}
-          {runtime?.queued ? <Pill tone="warn">queued {runtime.queued}</Pill> : null}
-          {runtime?.failed ? <Pill tone="danger">failed {runtime.failed}</Pill> : null}
-          <Pill tone={appServerTone}>app-server {codexAppServerStateLabel(appServer?.state)}</Pill>
-        </span>
-      </div>
+      <SubTabs
+        activeId={tab}
+        onChange={(id) => setTab(id as CodexTab)}
+        rightSlot={
+          <span className="flex flex-wrap items-center justify-end gap-2 text-xs text-[var(--muted)]">
+            {runtime?.running ? <Pill tone="good">running {runtime.running}</Pill> : null}
+            {runtime?.waitingApproval ? <Pill tone="warn">approval {runtime.waitingApproval}</Pill> : null}
+            {runtime?.queued ? <Pill tone="warn">queued {runtime.queued}</Pill> : null}
+            {runtime?.failed ? <Pill tone="danger">failed {runtime.failed}</Pill> : null}
+            <Pill tone={appServerTone}>app-server {codexAppServerStateLabel(appServer?.state)}</Pill>
+          </span>
+        }
+        tabs={TABS.map((t) => ({
+          ...t,
+          badge: t.id === "approvals" && pending > 0 ? (
+            <span className="rounded-full bg-[var(--warn-soft)] px-1.5 text-xs text-[var(--warn)]">{pending}</span>
+          ) : undefined,
+        }))}
+      />
 
       {tab === "threads" ? <ThreadsTab actions={actions} focusThreadId={focusThreadId} status={status} onStatusChange={refreshStatus} /> : null}
       {tab === "chats" ? <ChatsTab actions={actions} status={status} onStatusChange={refreshStatus} /> : null}

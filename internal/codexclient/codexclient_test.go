@@ -84,7 +84,7 @@ func TestResolveRunPolicyTrustEnforced(t *testing.T) {
 func TestCreateWorkspaceWithOptionsCreatesMissingDirectoryInsideAllowedRoot(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +351,7 @@ func TestWorkspaceQueuedTurnBlocksNewStartButNotDispatch(t *testing.T) {
 	if err := os.Mkdir(workspacePath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestConcurrentStartTurnSerializesWorkspace(t *testing.T) {
 	if err := os.WriteFile(binaryPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +494,7 @@ func TestStartTurnInvalidAttachmentDoesNotLeaveRunningTurn(t *testing.T) {
 	if err := os.Mkdir(workspacePath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,7 +529,7 @@ func TestStartTurnInvalidAttachmentDoesNotLeaveRunningTurn(t *testing.T) {
 func TestResolveApprovalWithoutLiveRequestFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +572,7 @@ func TestResolveApprovalWithoutLiveRequestFailsClosed(t *testing.T) {
 func TestTerminalTurnCleansAttachmentsAndDerivesTitle(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +618,7 @@ func TestQueuedCommandInterruptedBeforeStartDoesNotRun(t *testing.T) {
 	if err := os.Mkdir(workspacePath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

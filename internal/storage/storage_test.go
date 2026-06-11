@@ -12,7 +12,7 @@ import (
 func TestBackupDatabaseCreatesCopy(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	store, err := Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestBackupDatabaseCreatesCopy(t *testing.T) {
 
 func TestLegacyCodexTablesAreDetectedButNotPurged(t *testing.T) {
 	ctx := context.Background()
-	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestLegacyCodexTablesAreDetectedButNotPurged(t *testing.T) {
 func TestCodexCliWorkspacePinnedSortAndNetworkNormalization(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	store, err := Open(ctx, filepath.Join(dir, "phantom-lancer.db"))
+	store, err := Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestCodexCliWorkspacePinnedSortAndNetworkNormalization(t *testing.T) {
 
 func TestCodexCliAttachmentAssignmentToTurn(t *testing.T) {
 	ctx := context.Background()
-	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestCodexCliAttachmentAssignmentToTurn(t *testing.T) {
 
 func TestMarkCodexCliRunningThreadsInterruptedFailsQueuedTurns(t *testing.T) {
 	ctx := context.Background()
-	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestMarkCodexCliRunningThreadsInterruptedFailsQueuedTurns(t *testing.T) {
 
 func TestPruneImageGenerationJobsKeepsLibraryAssets(t *testing.T) {
 	ctx := context.Background()
-	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestPruneImageGenerationJobsKeepsLibraryAssets(t *testing.T) {
 
 func TestListImageGenerationJobsDoesNotNestQueriesWhileRowsOpen(t *testing.T) {
 	ctx := context.Background()
-	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestListImageGenerationJobsDoesNotNestQueriesWhileRowsOpen(t *testing.T) {
 
 func TestImageAssetPrivateFiltering(t *testing.T) {
 	ctx := context.Background()
-	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

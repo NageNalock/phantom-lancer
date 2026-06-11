@@ -2,6 +2,63 @@ import { useRef, useState } from "react";
 import type { ButtonHTMLAttributes, DragEvent, ReactNode } from "react";
 import type { Tone } from "../app/types";
 
+export interface SubTabItem {
+  id: string;
+  label: ReactNode;
+  badge?: ReactNode;
+}
+
+/**
+ * SubTabs is the canonical secondary navigation bar used across all feature
+ * views (Codex, Images, Docker, etc.). It unifies three previously divergent
+ * styles (underline tabs, segmented controls, in-panel mini-tabs) into one
+ * consistent Quiet Workbench pattern.
+ *
+ * Visual rules:
+ *   - Horizontally scrollable on overflow
+ *   - Selected: surface-strong background + 2px bottom accent bar
+ *   - Inactive: muted-strong text, soft hover background
+ *   - Right slot for status pills / actions (aligned right)
+ */
+export function SubTabs({
+  tabs,
+  activeId,
+  onChange,
+  rightSlot,
+  className = "",
+}: {
+  tabs: SubTabItem[];
+  activeId: string;
+  onChange: (id: string) => void;
+  rightSlot?: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={`flex flex-wrap items-center gap-2 border-b border-[var(--line)] pb-2 ${className}`}>
+      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+        {tabs.map((tab) => {
+          const active = tab.id === activeId;
+          return (
+            <button
+              aria-pressed={active}
+              className={`flex shrink-0 items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition ${active ? "bg-[var(--surface-strong)] text-[var(--text)] shadow-[inset_0_-2px_0_var(--accent)]" : "text-[var(--muted-strong)] hover:bg-[var(--surface-soft)]"}`}
+              key={tab.id}
+              onClick={() => onChange(tab.id)}
+              type="button"
+            >
+              {tab.label}
+              {tab.badge !== undefined && tab.badge !== null && tab.badge !== "" ? (
+                <span className="ml-0.5 inline-flex items-center">{tab.badge}</span>
+              ) : null}
+            </button>
+          );
+        })}
+      </div>
+      {rightSlot ? <div className="flex flex-wrap items-center justify-end gap-2">{rightSlot}</div> : null}
+    </div>
+  );
+}
+
 export function Button({
   tone = "neutral",
   className = "",
@@ -190,5 +247,107 @@ export function Toast({ message, tone }: { message: string; tone: Tone }) {
     <div className={`fixed right-5 bottom-5 z-50 max-w-sm rounded-lg border px-3 py-2 text-sm shadow-[var(--shadow)] ${toneClass}`} role="status">
       {message}
     </div>
+  );
+}
+
+/**
+ * Toggle is the canonical checkbox row used by settings panels. It renders as
+ * a full-width bordered row — use it for primary settings that stand on their
+ * own line.
+ *
+ * For compact inline checkboxes (filters, secondary options, confirmations),
+ * use CheckLabel instead. Never write a bare `<input type="checkbox">` in
+ * business components — always go through Toggle or CheckLabel.
+ *
+ * Variants:
+ *   - `variant="default"` — label on the left, checkbox on the right.
+ *                            Standard form setting row.
+ *   - `variant="row"`     — checkbox on the left, label on the right.
+ *                            Checked rows take the good/soft tone. Use for
+ *                            list/grid rows where the toggle IS the row
+ *                            (e.g. account enablement grids).
+ */
+export function Toggle({
+  checked,
+  label,
+  onChange,
+  variant = "default",
+  className = "",
+  inputClassName = "",
+}: {
+  checked: boolean;
+  label: ReactNode;
+  onChange: (checked: boolean) => void;
+  variant?: "default" | "row";
+  className?: string;
+  inputClassName?: string;
+}) {
+  if (variant === "row") {
+    const tone = checked ? "border-[rgba(18,132,79,0.22)] bg-[var(--good-soft)]" : "border-[var(--line)] bg-[var(--surface)]";
+    return (
+      <label className={`grid min-h-9 grid-cols-[auto_minmax(0,1fr)] items-center gap-3 rounded-lg border px-3 py-2 text-sm ${tone} ${className}`}>
+        <input
+          checked={checked}
+          className={`h-4 w-4 accent-[var(--accent)] ${inputClassName}`}
+          onChange={(event) => onChange(event.target.checked)}
+          type="checkbox"
+        />
+        <span className="min-w-0">{label}</span>
+      </label>
+    );
+  }
+  return (
+    <label className={`flex min-h-10 items-center justify-between gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] px-3 text-sm ${className}`}>
+      <span>{label}</span>
+      <input
+        checked={checked}
+        className={inputClassName}
+        onChange={(event) => onChange(event.target.checked)}
+        type="checkbox"
+      />
+    </label>
+  );
+}
+
+/**
+ * CheckLabel is a compact inline checkbox + label for secondary settings,
+ * filters, and confirmation checks where the full-width Toggle row is too heavy.
+ *
+ * Use when:
+ *   - The checkbox is an inline option next to other controls
+ *   - It's a confirmation before a destructive action
+ *   - It's a minor filter/option in a sidebar or toolbar
+ *
+ * Do NOT use for primary settings in settings panels — use Toggle instead.
+ */
+export function CheckLabel({
+  checked,
+  children,
+  onChange,
+  className = "",
+  inputClassName = "",
+  size = "sm",
+  align = "center",
+}: {
+  checked: boolean;
+  children: ReactNode;
+  onChange: (checked: boolean) => void;
+  className?: string;
+  inputClassName?: string;
+  size?: "sm" | "xs";
+  align?: "center" | "start";
+}) {
+  const sizeClass = size === "xs" ? "text-xs text-[var(--muted-strong)]" : "text-sm";
+  const alignClass = align === "start" ? "items-start" : "items-center";
+  return (
+    <label className={`inline-flex ${alignClass} gap-2 ${sizeClass} ${className}`}>
+      <input
+        checked={checked}
+        className={`accent-[var(--accent)] mt-0.5 ${inputClassName}`}
+        onChange={(event) => onChange(event.target.checked)}
+        type="checkbox"
+      />
+      <span>{children}</span>
+    </label>
   );
 }

@@ -9,7 +9,7 @@ import (
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "phantom-lancer.db"))
+	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

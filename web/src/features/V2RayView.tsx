@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Toggle } from "../components/ui";
 import type { AppActions } from "../app/App";
 import type { AppData, V2RayExport, V2RayRemoteClient, V2RaySettings, V2RayStatus } from "../app/types";
 import { friendlyError } from "../api/client";
@@ -353,14 +354,6 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
   }
 }
 
-function Toggle({ checked, label, onChange }: { checked: boolean; label: string; onChange: (checked: boolean) => void }) {
-  return (
-    <label className="flex min-h-10 items-center justify-between gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] px-3 text-sm">
-      <span>{label}</span>
-      <input checked={checked} onChange={(event) => onChange(event.target.checked)} type="checkbox" />
-    </label>
-  );
-}
 
 function normalizedV2Ray(settings: V2RaySettings): V2RaySettings {
   return {

@@ -79,6 +79,17 @@
 - 可以记录稳定 ID、模块名、操作名、状态、duration、错误摘要、文件路径摘要、workspace id、job id、session id、source id。
 - 错误信息来自外部 provider、子进程 stderr 或用户输入时，写入前必须裁剪长度并做 secret redaction。
 
+**个人自用部署的请求遥测豁免（与严格 SaaS 安全的差异）：**
+
+本项目的定位是 owner 独占的个人服务，而不是面向多租户的 SaaS。为了在线排障优先级高于"最小数据采集"原则，
+请求遥测的 path、remote IP、User-Agent 允许进入服务日志的异常/慢请求分支，但仍需遵守以下约束：
+
+1. `path` 必须走 `safelog.RequestPathLabel`：只保留 URL path（`EscapedPath()`），无条件丢弃 query 与 fragment，避免 `?token=`、`?session_id=` 等敏感参数进入日志。`RequestPathLabel` 内部再经 `safelog.Text` 做长度裁剪和全局 redaction（Bearer、api_key=、AWS 签名等）二次防御。
+   - 历史上曾用 `safelog.URLLabel` 处理相对 URL，但相对 URL 会回退到 `Text(raw)` 不剥离 query，因此**不要**在请求遥测场景复用 URLLabel。
+2. `ip` / `User-Agent` 可以直出（均为异常排障的核心字段），但长度做上限裁剪，**永远不允许**作为 Git 仓库中的测试 fixture、示例配置或文档样例提交真实值。
+3. 成功路径仍保持静默（不记录每个成功 HTTP 请求），仅 5xx、采样后的异常 4xx、非豁免慢请求会落到 service log — 保证排障可用性和日志量可控并存。
+4. 如果未来接入公网代理或面向非 owner 用户暴露，该豁免必须移除并回退到"仅记录稳定 ID"的严格模式。
+
 新增日志功能时还必须定义生命周期：
 
 - 如果项目自己写日志文件，必须同时设计自动轮转和自动清理策略，包括最大文件大小、保留份数、保留天数和是否压缩。

@@ -19,7 +19,9 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 
+	"phantom-lancer/internal/authlimiter"
 	"phantom-lancer/internal/events"
+	"phantom-lancer/internal/logsampler"
 	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/storage"
 )
@@ -47,6 +49,25 @@ type Service struct {
 	// while GC takes the write lock to run exclusively and avoid reclaiming a
 	// blob that an in-flight push has just committed but not yet referenced.
 	registryGC sync.RWMutex
+
+	// registryAuthBackoff rate-limits repeated Basic Auth failures on the
+	// `/v2/` native registry endpoint. It is keyed by username (for the
+	// targeted credential) and by remote IP (for blanket spray attacks).
+	// Successes clear the per-credential counter so a legitimate user
+	// never backoff after one bad password.
+	registryAuthBackoff *authlimiter.Backoff
+
+	// registryAuthSuccessSampler rate-limits the low-severity
+	// docker.registry.auth.succeeded audit row. Docker daemon + pullers
+	// call /v2/ on every layer fetch; recording every successful auth
+	// blows past the interesting (failed/backoff/forbidden) events on the
+	// Audit page. Key = credential ID, allow once per hour.
+	registryAuthSuccessSampler *logsampler.Sampler
+
+	// logSampler gates hot-path warnings (job event append failures,
+	// repeated daemon probe / List* errors) so transient DB or daemon
+	// outages never flood the logs with per-iteration Warn entries.
+	logSampler *logsampler.Sampler
 }
 
 // NewService builds the Docker control service. The Docker client is not
@@ -55,7 +76,7 @@ func NewService(store *storage.Store, hub *events.Hub, dataDir string, logger *s
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{store: store, hub: hub, log: logger, registryDataDir: dataDir, jobs: make(map[string]Job)}
+	return &Service{store: store, hub: hub, log: logger, registryDataDir: dataDir, jobs: make(map[string]Job), registryAuthBackoff: authlimiter.NewBackoff(0), registryAuthSuccessSampler: logsampler.New(1 * time.Hour), logSampler: logsampler.New(2 * time.Second)}
 }
 
 // Close releases the cached Docker client.
@@ -114,7 +135,9 @@ func (s *Service) Status(ctx context.Context) Status {
 	info, err := cli.Info(probeCtx)
 	if err != nil {
 		status.LastError = safelog.Error(err, 200)
-		s.log.Warn("docker daemon probe failed", "error", safelog.Error(err, 160))
+		if s.logSampler.Allow("docker:daemon-probe") {
+			s.log.Warn("docker daemon probe failed", "error", safelog.Error(err, 160))
+		}
 		return status
 	}
 	status.State = StateAvailable
@@ -156,7 +179,9 @@ func (s *Service) ListContainers(ctx context.Context) ([]ContainerSummary, error
 	defer cancel()
 	items, err := cli.ContainerList(listCtx, container.ListOptions{All: true})
 	if err != nil {
-		s.log.Warn("docker container list failed", "error", safelog.Error(err, 160))
+		if s.logSampler.Allow("docker:list-containers") {
+			s.log.Warn("docker container list failed", "error", safelog.Error(err, 160))
+		}
 		return nil, err
 	}
 	out := make([]ContainerSummary, 0, len(items))
@@ -195,7 +220,9 @@ func (s *Service) ListImages(ctx context.Context) ([]ImageSummary, error) {
 	defer cancel()
 	items, err := cli.ImageList(listCtx, image.ListOptions{})
 	if err != nil {
-		s.log.Warn("docker image list failed", "error", safelog.Error(err, 160))
+		if s.logSampler.Allow("docker:list-images") {
+			s.log.Warn("docker image list failed", "error", safelog.Error(err, 160))
+		}
 		return nil, err
 	}
 	out := make([]ImageSummary, 0, len(items))
@@ -228,7 +255,9 @@ func (s *Service) ListVolumes(ctx context.Context) ([]VolumeSummary, error) {
 	defer cancel()
 	resp, err := cli.VolumeList(listCtx, volume.ListOptions{})
 	if err != nil {
-		s.log.Warn("docker volume list failed", "error", safelog.Error(err, 160))
+		if s.logSampler.Allow("docker:list-volumes") {
+			s.log.Warn("docker volume list failed", "error", safelog.Error(err, 160))
+		}
 		return nil, err
 	}
 	out := make([]VolumeSummary, 0, len(resp.Volumes))
@@ -264,7 +293,9 @@ func (s *Service) ListNetworks(ctx context.Context) ([]NetworkSummary, error) {
 	defer cancel()
 	items, err := cli.NetworkList(listCtx, network.ListOptions{})
 	if err != nil {
-		s.log.Warn("docker network list failed", "error", safelog.Error(err, 160))
+		if s.logSampler.Allow("docker:list-networks") {
+			s.log.Warn("docker network list failed", "error", safelog.Error(err, 160))
+		}
 		return nil, err
 	}
 	out := make([]NetworkSummary, 0, len(items))

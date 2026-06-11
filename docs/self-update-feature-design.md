@@ -1,12 +1,18 @@
 # Phantom Lancer 自更新功能方案
 
-文档日期：2026-06-06  
-关联发布地址：<https://github.com/NageNalock/phantom-lancer/releases>  
+文档日期：2026-06-06（2026-06-11 更新：Release 产生机制同步为 main-push 自动 patch）
+关联发布地址：<https://github.com/NageNalock/phantom-lancer/releases>
 适用范围：个人服务器 Web 控制台的手动检查更新、下载 release 包、校验、安装和重启。
 
 ## 1. 背景与目标
 
-Phantom Lancer 当前采用 Go 单进程后端、SQLite、本地数据目录、SSE 和嵌入式前端静态资源。GitHub Actions 已经在 `v*` tag 上发布 Linux amd64 release 包：
+Phantom Lancer 当前采用 Go 单进程后端、SQLite、本地数据目录、SSE 和嵌入式前端静态资源。GitHub Actions 以如下机制发布 Linux amd64 release 包（两个入口均产出相同格式的制品）：
+
+- **主路径：push 到 `main` 分支** → workflow 读取最近一次 semver tag，自动将 patch +1 并打新的 `vX.Y.Z` tag，再用该 tag 构建并发布 release。同一 commit 上已存在精确 tag 时复用该 tag，不会重复 bump。
+- **兼容路径：手动推送 `v*` semver tag** → workflow 直接以该 tag 构建并发布 release，支持临时 hotfix / 手动版本跳跃。
+- 手动触发 workflow（workflow_dispatch）时行为与 push-to-main 一致。
+
+每次 release 固定产出：
 
 - `phantom-lancer-linux-amd64.tar.gz`
 - `phantom-lancer-linux-amd64.tar.gz.sha256`
@@ -58,17 +64,19 @@ var (
 
 构建时通过 `-ldflags` 写入：
 
-- tag 构建：`Version=v0.1.0`
-- main 构建：`Version=0.0.0-dev+<short-sha>`
-- 本地未注入：`dev`
+- **正式 release**（CI 自动 bump patch 或手动推送 tag 触发）：`Version=vX.Y.Z`，值来源于 workflow 内部生成的 `release_tag`，由 `build.sh` 注入。
+- **本地直接 `go build` / `go run`**：未注入时默认 `dev`。
+- （预留）**非 tag 的 CI 实验构建**：`Version=dev+<short-sha>`，目前不会被发布到 GitHub Releases，仅用于本地分支验证。
 
-新增 CLI 行为：
+注意：由于 main 分支推送会被 workflow 打一个递增的 semver tag 再构建，因此 **所有正式发布的 binary 都以 `vX.Y.Z` 作为 `Version`**，不存在"main=xxx-dev+sha 的官方 release"。只有开发机本地构建才会出现 `dev` 或自注入的 dev 版本。
+
+同时新增 CLI 行为：
 
 ```bash
 phantom-lancer --version
 ```
 
-输出简短可解析文本或 JSON。更新安装前必须执行 staged binary 的 `--version`，确认目标版本与 release tag 一致。
+输出简短可解析文本或 JSON。更新安装前必须执行 staged binary 的 `--version`，确认目标版本与 release tag 一致。因为 CI 自动 bump patch 也是"打 tag → 构建"的模式，这里的"release tag 一致"校验对两种发布入口都成立。
 
 ## 5. Release 检查策略
 
@@ -80,7 +88,7 @@ phantom-lancer --version
 默认规则：
 
 - 只接受非 draft、非 prerelease release。
-- release tag 必须是 `v` 前缀 semver，例如 `v0.1.0`。
+- release tag 必须是 `v` 前缀 semver，例如 `v0.1.0`（main push 自动产生的 tag 以及手动 tag 均符合该格式）。
 - 当前平台只匹配 `phantom-lancer-linux-amd64.tar.gz`。
 - 必须同时存在 `.sha256` asset，否则判定该 release 不可安装。
 - 使用 `ETag` / `If-None-Match` 缓存最近一次检查结果，减少 GitHub API rate limit 风险。

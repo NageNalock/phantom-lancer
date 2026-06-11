@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -24,12 +23,6 @@ const (
 	ErrorSourceOpenAI  = "openai"
 	ErrorSourceService = "service"
 )
-
-var secretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)(authorization\s*[:=]\s*bearer\s+)[^\s"',]+`),
-	regexp.MustCompile(`(?i)((?:access|refresh|id)[_-]?token\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`),
-	regexp.MustCompile(`(?i)((?:api[_-]?key|password|passwd|secret)\s*["']?\s*[:=]\s*["']?)[^"',\s&}]+`),
-}
 
 type Service struct {
 	Store *storage.Store
@@ -714,9 +707,7 @@ func CleanErrorMessage(message string, maxRunes int) string {
 	if extracted := extractStructuredErrorMessage(message); extracted != "" {
 		message = extracted
 	}
-	for _, pattern := range secretPatterns {
-		message = pattern.ReplaceAllString(message, "${1}[redacted]")
-	}
+	message = safelog.Redact(message)
 	message = strings.Join(strings.Fields(message), " ")
 	if maxRunes > 0 {
 		runes := []rune(message)

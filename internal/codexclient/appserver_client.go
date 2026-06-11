@@ -17,7 +17,7 @@ import (
 // codex-app-server), the transport is newline-delimited JSON over stdio and the
 // "jsonrpc":"2.0" header is omitted on the wire, so we do not emit it.
 type jsonRPCRequest struct {
-	ID     int64 `json:"id,omitempty"`
+	ID     int64  `json:"id,omitempty"`
 	Method string `json:"method"`
 	Params any    `json:"params,omitempty"`
 }

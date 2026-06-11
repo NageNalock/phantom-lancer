@@ -14,6 +14,7 @@ import (
 
 	"phantom-lancer/internal/events"
 	"phantom-lancer/internal/ids"
+	"phantom-lancer/internal/logsampler"
 	"phantom-lancer/internal/storage"
 )
 
@@ -68,10 +69,16 @@ type Service struct {
 	legacyAuditEmitted bool
 	// pendingApprovalReqID maps an approval record id to the live JSON-RPC
 	// request id (raw, since the upstream RequestId may be a string or integer)
-	// so a decision can be returned to app-server via Respond. It is only
-	// populated for the in-process app-server runtime; after a restart the map
-	// is empty and pending approvals fail closed.
+	// so a decision can be returned to app-server via Respond. The map is
+	// re-hydrated at boot from DB; entries marked "orphaned" cannot reply to
+	// Codex (the subprocess died on restart) but remain decidable for audit.
 	pendingApprovalReqID map[string]json.RawMessage
+
+	// logSampler gates warnings on per-notification hot paths (event
+	// append, notification create, automation run) so a transient DB
+	// outage does not spam the logs with one Warn per app-server
+	// notification.
+	logSampler *logsampler.Sampler
 }
 
 type appTurnContext struct {
@@ -135,6 +142,7 @@ func NewService(store *storage.Store, hub *events.Hub, dataDir string, allowedRo
 		queuedInputs:         make(map[string]queuedTurnInput),
 		commandCancels:       make(map[string]context.CancelFunc),
 		pendingApprovalReqID: make(map[string]json.RawMessage),
+		logSampler:           logsampler.New(1 * time.Second),
 	}
 	svc.detector = NewDetector(svc.binaryPath, svc.codexHome)
 	svc.mapper = NewEventMapper(2000)
@@ -176,6 +184,11 @@ func (s *Service) Ensure(ctx context.Context) error {
 	} else if affected > 0 {
 		s.log.Warn("codex cli marked orphan runs", "count", affected)
 	}
+	// Re-hydrate pending approvals into the reply map. Any approval whose
+	// recovery_status was flipped to orphaned above is still decidable by the
+	// owner (for audit), but ResolveApproval will skip the Respond step and
+	// record decision=stale.
+	s.restorePendingApprovals(ctx)
 	if err := os.MkdirAll(filepath.Join(s.dataDir, "attachments"), 0o700); err != nil {
 		return err
 	}
@@ -229,6 +242,7 @@ func (s *Service) StartBackground(ctx context.Context) {
 				return
 			case <-timer.C:
 				s.cleanupExpiredEvents(ctx)
+				s.cleanupExpiredAuditEvents(ctx)
 				timer.Reset(24 * time.Hour)
 			}
 		}
@@ -945,7 +959,9 @@ func (s *Service) appendThreadEvent(ctx context.Context, threadID, turnID, event
 		TextPreview: preview,
 	})
 	if err != nil {
-		s.log.Warn("codex cli append event failed", "summary", Redact(err.Error(), 120))
+		if s.logSampler.Allow("codex:append-event:" + threadID) {
+			s.log.Warn("codex cli append event failed", "summary", Redact(err.Error(), 120))
+		}
 		return
 	}
 	general, err := s.store.AppendEvent(ctx, "codex.thread", threadID, eventType, map[string]any{
@@ -957,7 +973,9 @@ func (s *Service) appendThreadEvent(ctx context.Context, threadID, turnID, event
 		"sequence":     stored.Sequence,
 	})
 	if err != nil {
-		s.log.Warn("codex cli append general event failed", "summary", Redact(err.Error(), 120))
+		if s.logSampler.Allow("codex:append-general:" + threadID) {
+			s.log.Warn("codex cli append general event failed", "summary", Redact(err.Error(), 120))
+		}
 	} else {
 		s.hub.Publish(general)
 	}
@@ -1039,14 +1057,16 @@ func (s *Service) handleServerRequest(req ServerRequest) {
 
 func (s *Service) recordApproval(ctx context.Context, active *appTurnContext, req *ApprovalRequest, jsonRPCID json.RawMessage) {
 	approval, err := s.store.CreateCodexCliApproval(ctx, storage.CodexCliApproval{
-		ThreadID:       active.threadID,
-		TurnID:         active.turnID,
-		CodexRequestID: req.CodexRequestID,
-		ActionKind:     req.ActionKind,
-		CommandPreview: req.CommandPreview,
-		CwdSummary:     req.CwdSummary,
-		RiskLevel:      req.RiskLevel,
-		ExpiresAt:      time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano),
+		ThreadID:         active.threadID,
+		TurnID:           active.turnID,
+		CodexRequestID:   req.CodexRequestID,
+		ActionKind:       req.ActionKind,
+		CommandPreview:   req.CommandPreview,
+		CwdSummary:       req.CwdSummary,
+		RiskLevel:        req.RiskLevel,
+		ExpiresAt:        time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano),
+		JSONRPCRequestID: string(jsonRPCID),
+		RecoveryStatus:   "live",
 	})
 	if err != nil {
 		s.log.Warn("codex cli record approval failed", "summary", Redact(err.Error(), 120))
@@ -1064,6 +1084,38 @@ func (s *Service) recordApproval(ctx context.Context, active *appTurnContext, re
 		_, _ = s.store.SaveCodexCliThread(ctx, thread)
 	}
 	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.approval.requested", RiskLevel: req.RiskLevel, Summary: "Codex 请求审批", Payload: map[string]any{"approvalId": approval.ID, "threadId": active.threadID, "actionKind": req.ActionKind, "riskLevel": req.RiskLevel}})
+}
+
+// restorePendingApprovals re-hydrates the in-memory reply map from all
+// approvals that survived restart. Orphaned approvals (recovery_status !=
+// "live") are also loaded into the map so the decision path's presence
+// check can distinguish "no map entry = never persisted JSON-RPC id" from
+// "orphaned after restart = skip Respond, audit only".
+func (s *Service) restorePendingApprovals(ctx context.Context) {
+	apprs, err := s.store.ListCodexCliApprovals(ctx, "pending", "")
+	if err != nil {
+		s.log.Warn("codex restore pending approvals failed", "error", err)
+		return
+	}
+	orphaned := 0
+	live := 0
+	loaded := 0
+	for _, a := range apprs {
+		if a.JSONRPCRequestID != "" {
+			s.mu.Lock()
+			s.pendingApprovalReqID[a.ID] = json.RawMessage(a.JSONRPCRequestID)
+			s.mu.Unlock()
+			loaded++
+		}
+		if a.RecoveryStatus == "orphaned" {
+			orphaned++
+		} else {
+			live++
+		}
+	}
+	if len(apprs) > 0 {
+		s.log.Info("codex restored pending approvals", "total", len(apprs), "live", live, "orphaned", orphaned, "loaded", loaded)
+	}
 }
 
 // ---- approvals ----
@@ -1110,6 +1162,20 @@ func (s *Service) ResolveApprovalDecision(ctx context.Context, id string, decisi
 		delete(s.pendingApprovalReqID, id)
 	}
 	s.mu.Unlock()
+	if approval.RecoveryStatus == "orphaned" {
+		// Approver made a decision for audit, but the original codex
+		// app-server died on restart. Persist the decision without
+		// trying to deliver the JSON-RPC reply. Decision "stale"
+		// surfaces the restart reason clearly to the UI.
+		resolved, err := s.store.ResolveCodexCliApproval(ctx, id, "failed", "stale")
+		if err != nil {
+			return storage.CodexCliApproval{}, err
+		}
+		s.appendThreadEvent(ctx, approval.ThreadID, approval.TurnID, EventApprovalResolve, "codex", "", "", map[string]any{"approvalId": id, "decision": "stale", "orphaned": true})
+		_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.approval.orphaned", RiskLevel: approval.RiskLevel, Summary: "Codex 审批在重启后成为孤立项", Payload: map[string]any{"approvalId": id, "threadId": approval.ThreadID, "decision": decision}})
+		s.failWaitingApprovalTurn(ctx, approval.ThreadID, approval.TurnID, "approval was orphaned by broker restart")
+		return resolved, ErrApprovalNotLive
+	}
 	client := s.supervisor.Client()
 	if !hasReqID || client == nil {
 		resolved, err := s.store.ResolveCodexCliApproval(ctx, id, "failed", "stale")
@@ -1296,6 +1362,28 @@ func (s *Service) cleanupExpiredEvents(ctx context.Context) {
 	}
 	if removed > 0 {
 		s.log.Info("codex cli event retention cleanup", "removed", removed, "retentionDays", days)
+	}
+}
+
+// cleanupExpiredAuditEvents removes audit_events rows older than the
+// configured `system.audit_retention_days` window. A retention of 0
+// disables pruning entirely. The storage layer performs batched DELETEs
+// with short yields between batches so a long backlog never starves the
+// app's normal audit writes.
+func (s *Service) cleanupExpiredAuditEvents(ctx context.Context) {
+	days := s.store.GetAuditRetentionDays(ctx)
+	if days <= 0 {
+		return
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
+	removed, err := s.store.DeleteAuditEventsOlderThan(ctx, cutoff, 0)
+	if err != nil {
+		s.log.Warn("audit retention cleanup failed", "error", err, "retentionDays", days)
+		return
+	}
+	if removed > 0 {
+		s.log.Info("audit retention cleanup", "removed", removed, "retentionDays", days)
+		_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "audit.retention.pruned", RiskLevel: "low", Summary: "审计日志按保留期清理完成", Payload: map[string]any{"removed": removed, "retentionDays": days, "cutoff": cutoff.Format(time.RFC3339Nano)}})
 	}
 }
 

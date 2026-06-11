@@ -1,7 +1,8 @@
 import type { FormEvent, ReactNode } from "react";
 import { useEffect, useState } from "react";
 import type { ImageAsset, ImageGenerationJob, ImageProviderSettings, ImageStatus, ImageStorageSettings, Tone } from "../../app/types";
-import { Button, ContextList, EmptyState, Field, ImageDropInput, Notice, Panel, Pill } from "../../components/ui";
+import { Button, CheckLabel, ContextList, EmptyState, Field, ImageDropInput, Notice, Panel, Pill, SubTabs } from "../../components/ui";
+import { formatBytes } from "../../utils/format";
 import { defaultImageSettings, defaultImageStorageSettings, formatDate, imageAssetTypeLabel, imageJobStatusLabel, imageModeLabel, imageStatusLabel, imageStorageBackendLabel } from "../../domain/labels";
 import type { ImageLibraryScope, ImageMode, ImageSettingsDraft, ImagesTab, ImageStorageSettingsDraft } from "../types";
 import { ASPECT_OPTIONS, IMAGE_MODES, MODEL_OPTIONS, RESOLUTION_OPTIONS } from "../types";
@@ -13,21 +14,7 @@ export function ImagesTabs({ active, onChange }: { active: ImagesTab; onChange: 
     { id: "history", label: "History" },
     { id: "settings", label: "Settings" },
   ];
-  return (
-    <div className="flex overflow-x-auto rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-1">
-      {tabs.map((tab) => (
-        <button
-          aria-pressed={active === tab.id}
-          className={`min-h-8 whitespace-nowrap rounded-md px-3 text-sm transition ${active === tab.id ? "bg-[var(--surface)] text-[var(--text)] shadow-sm" : "text-[var(--muted-strong)] hover:bg-[var(--surface)]"}`}
-          key={tab.id}
-          onClick={() => onChange(tab.id)}
-          type="button"
-        >
-          {tab.label}
-        </button>
-      ))}
-    </div>
-  );
+  return <SubTabs activeId={active} onChange={(id) => onChange(id as ImagesTab)} tabs={tabs} />;
 }
 
 export function GeneratePanel({
@@ -129,7 +116,7 @@ export function GeneratePanel({
           </div>
 
           {referenceSlots > 0 ? (
-            <section className="grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+            <section className="grid gap-3 card-soft">
               <div className="flex items-center justify-between gap-3">
                 <strong className="text-sm">参考图</strong>
                 <span className="muted text-xs">{mode === "image_to_image" ? "需要 1 张" : "需要 2-3 张"}</span>
@@ -518,10 +505,14 @@ export function ProviderSettingsPanel({
           <Field label="xAI API Key" help="留空表示不修改现有 key；清除时不会在审计中写入明文。">
             <input className="input mono" onChange={(event) => updateDraft("xaiApiKey", event.target.value)} type="password" value={draft.xaiApiKey} />
           </Field>
-          <label className="flex min-h-9 items-end gap-2 pb-2 text-sm">
-            <input checked={draft.clearApiKey} onChange={(event) => updateDraft("clearApiKey", event.target.checked)} type="checkbox" />
-            清除 API Key
-          </label>
+          <div className="flex min-h-9 items-end pb-2">
+            <CheckLabel
+              checked={draft.clearApiKey}
+              onChange={(checked) => updateDraft("clearApiKey", checked)}
+            >
+              清除 API Key
+            </CheckLabel>
+          </div>
         </div>
 
         <div className="grid grid-cols-4 gap-3 max-lg:grid-cols-2 max-md:grid-cols-1">
@@ -644,18 +635,24 @@ export function ImageStorageSettingsPanel({
             </Field>
           </div>
           <div className="flex flex-wrap gap-4 text-sm">
-            <label className="inline-flex items-center gap-2">
-              <input checked={draft.s3ForcePathStyle} onChange={(event) => updateDraft("s3ForcePathStyle", event.target.checked)} type="checkbox" />
+            <CheckLabel
+              checked={draft.s3ForcePathStyle}
+              onChange={(checked) => updateDraft("s3ForcePathStyle", checked)}
+            >
               Force path style
-            </label>
-            <label className="inline-flex items-center gap-2">
-              <input checked={draft.fallbackToLocal} onChange={(event) => updateDraft("fallbackToLocal", event.target.checked)} type="checkbox" />
+            </CheckLabel>
+            <CheckLabel
+              checked={draft.fallbackToLocal}
+              onChange={(checked) => updateDraft("fallbackToLocal", checked)}
+            >
               写入失败回退本地
-            </label>
-            <label className="inline-flex items-center gap-2">
-              <input checked={draft.clearSecret} onChange={(event) => updateDraft("clearSecret", event.target.checked)} type="checkbox" />
+            </CheckLabel>
+            <CheckLabel
+              checked={draft.clearSecret}
+              onChange={(checked) => updateDraft("clearSecret", checked)}
+            >
               清除 S3 密钥
-            </label>
+            </CheckLabel>
           </div>
         </fieldset>
       </div>
@@ -834,11 +831,4 @@ function assetMetadata(asset: ImageAsset): Array<[string, ReactNode]> {
 function shortHash(value?: string): string {
   if (!value) return "-";
   return value.length <= 16 ? value : `${value.slice(0, 12)}...${value.slice(-6)}`;
-}
-
-function formatBytes(value?: number): string {
-  if (!value || value <= 0) return "-";
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
