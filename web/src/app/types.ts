@@ -868,6 +868,8 @@ export interface DockerSettings {
   installEnabled?: boolean;
   daemonControlEnabled?: boolean;
   containerCreateEnabled?: boolean;
+  pullConcurrency?: number;
+  daemonPullConcurrency?: number;
   updatedAt?: string;
 }
 
@@ -917,6 +919,7 @@ export interface DockerControlStatus {
   privilegeMethod?: string;
   activeJob?: DockerJob;
   latestJob?: DockerJob;
+  daemonPullConcurrency?: number;
 }
 
 export interface DockerRegistrySettings {

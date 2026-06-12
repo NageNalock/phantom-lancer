@@ -281,10 +281,6 @@ func (s *Service) CreateAndStartContainer(ctx context.Context, req CreateContain
 			if len(value) > 4096 {
 				return "", errors.New("env value is too long")
 			}
-			lower := strings.ToLower(name)
-			if strings.Contains(lower, "secret") || strings.Contains(lower, "token") || strings.Contains(lower, "password") || strings.Contains(lower, "key") {
-				return "", errors.New("env name is restricted: secrets must not be passed via template env")
-			}
 			environ = append(environ, name+"="+value)
 		}
 		cfg.Env = environ

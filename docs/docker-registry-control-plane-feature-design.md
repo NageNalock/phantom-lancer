@@ -328,6 +328,8 @@ Docker socket 风险很高。拥有 Docker socket 控制权通常等价于可以
 
 - 通过 Engine API 创建/启动容器，但参数必须经过 allowlist 校验后再下发。
 - 禁止任意 host path mount、privileged、host network、`--pid/ipc/uts=host`（详见 §7.3）。
+- 端口映射支持 `hostPort:containerPort[/proto]`、`containerPort[/proto]` 和 `bindIp:hostPort:containerPort[/proto]`。例如 `8080:80`、`5432/tcp`、`0.0.0.0:8080:80/tcp`；IPv6 全网卡绑定使用 `[::]:8080:80/tcp`。
+- `0.0.0.0` / `::` 表示绑定宿主机所有网卡，UI 必须在提交前提示公网暴露风险；未显式填写 bind IP 时应走后端安全默认值。
 - 配错单个参数即可能交出宿主机，因此该能力默认关闭，审计 risk level 为 `critical`，强制二次确认。
 
 ## 7. 安全模型
@@ -389,9 +391,12 @@ MVP 禁止：
 - 只允许当前受控 Registry 主机下的镜像，或显式配置的 image repository prefix。
 - 只允许指定 network。
 - 只允许命名 volume，不允许任意 host path。
+- 端口映射只允许受控字段：container port、host port、protocol 和 bind IP。bind IP 可为空、`127.0.0.1`、`0.0.0.0` 或 `::`；不暴露任意 Docker port binding 参数。
 - 不允许 privileged。
 - 不允许 `--pid=host`、`--ipc=host`、`--uts=host`。
-- 环境变量中 secret 默认 masked，UI 不回显。
+- 允许传入普通环境变量和 secret-looking 环境变量（例如 `API_KEY`、`PASSWORD`、`TOKEN`），因为很多个人服务必须通过 env 注入凭据。
+- 环境变量值只作为本次模板化 create/run 请求透传给 Docker daemon；提交成功后 UI 不在容器详情、事件流或历史记录中回显完整 env。
+- audit、events 和服务日志只记录 env 条数、是否包含 sensitive-looking key 等摘要，不记录 env 明文值。
 
 ### 7.4 日志与脱敏
 

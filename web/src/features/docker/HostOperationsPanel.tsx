@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { DockerControlStatus } from "../../app/types";
 import { Button, ContextList, Field, Panel, Pill } from "../../components/ui";
 
@@ -17,6 +18,7 @@ export function HostOperationsPanel({
   loadControl,
   registryPublicUrl,
   saveDockerSettings,
+  applyDaemonPullConcurrency,
 }: {
   busy: string;
   control: DockerControlStatus | null;
@@ -24,12 +26,25 @@ export function HostOperationsPanel({
   installDocker: () => void;
   loadControl: () => void;
   registryPublicUrl?: string;
-  saveDockerSettings: (next: { installEnabled?: boolean; daemonControlEnabled?: boolean; containerCreateEnabled?: boolean }) => void;
+  saveDockerSettings: (next: { installEnabled?: boolean; daemonControlEnabled?: boolean; containerCreateEnabled?: boolean; pullConcurrency?: number; daemonPullConcurrency?: number }) => void;
+  applyDaemonPullConcurrency?: (value: number) => void;
 }) {
   const install = control?.install;
   const systemd = control?.systemd;
   const settings = control?.settings || {};
   const host = registryHost(registryPublicUrl);
+  const [pullConcurrencyInput, setPullConcurrencyInput] = useState<string>(String(settings.pullConcurrency ?? 1));
+  const [daemonPullInput, setDaemonPullInput] = useState<string>(String(settings.daemonPullConcurrency ?? 3));
+
+  useEffect(() => {
+    setPullConcurrencyInput(String(settings.pullConcurrency ?? 1));
+    setDaemonPullInput(String(settings.daemonPullConcurrency ?? 3));
+  }, [settings.pullConcurrency, settings.daemonPullConcurrency]);
+
+  const pullConcurrencyNum = Number(pullConcurrencyInput);
+  const daemonPullNum = Number(daemonPullInput);
+  const pullConcurrencyValid = !isNaN(pullConcurrencyNum) && pullConcurrencyNum >= 1 && pullConcurrencyNum <= 10;
+  const daemonPullValid = !isNaN(daemonPullNum) && daemonPullNum >= 1 && daemonPullNum <= 10;
 
   return (
     <div className="grid gap-4">
@@ -104,16 +119,51 @@ export function HostOperationsPanel({
               </div>
               <Pill tone="neutral">{settings.containerCreateEnabled ? "已开启" : "已关闭"}</Pill>
             </div>
-            <ContextList
-              items={[
-                ["允许的镜像来源", <span className="mono text-xs">{host}/*</span>],
-                ["不允许的参数", "host path、privileged、host network、自由任意参数"],
-                ["创建位置", "『容器』页 或 从 Registry / Images 唤起创建 drawer"],
-              ]}
-            />
+             <ContextList
+               items={[
+                 ["允许的镜像来源", registryPublicUrl ? <span className="mono text-xs">{host}/*</span> : "未启用 Registry 来源限制"],
+                 ["不允许的参数", "host path、privileged、host network、自由任意参数"],
+                 ["创建位置", "『容器』页 或 从 Registry / Images 唤起创建 drawer"],
+               ]}
+             />
             <div className="mt-3">
               <Button disabled={busy === "docker-settings"} onClick={() => saveDockerSettings({ containerCreateEnabled: !settings.containerCreateEnabled })}>
                 {settings.containerCreateEnabled ? "关闭容器创建总开关" : "开启容器创建总开关"}
+              </Button>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="m-0 text-sm font-medium">镜像拉取并发限制</h3>
+                <p className="muted mt-1 mb-0 text-xs">限制同时进行的镜像拉取数量，避免 containerd 解压 layer 时占满 CPU。</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
+              <Field label="应用层并发数" help="控制台内部排队，立即生效，范围 1–10。">
+                <input
+                  className="input mono"
+                  onChange={(event) => setPullConcurrencyInput(event.target.value)}
+                  type="number"
+                  value={pullConcurrencyInput}
+                />
+              </Field>
+              <Field label="Daemon 层并发数" help={`修改 daemon.json 的 max-concurrent-downloads，需重启 Docker。当前实际值：${control?.daemonPullConcurrency ?? "-"}`}>
+                <input
+                  className="input mono"
+                  onChange={(event) => setDaemonPullInput(event.target.value)}
+                  type="number"
+                  value={daemonPullInput}
+                />
+              </Field>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button disabled={busy === "docker-settings" || !pullConcurrencyValid} onClick={() => saveDockerSettings({ pullConcurrency: pullConcurrencyNum })}>
+                保存应用层设置
+              </Button>
+              <Button disabled={!systemd?.canControl || !daemonPullValid || busy === "daemon-pull-concurrency" || !applyDaemonPullConcurrency} tone="primary" onClick={() => applyDaemonPullConcurrency?.(daemonPullNum)}>
+                应用到 daemon 并重启
               </Button>
             </div>
           </div>

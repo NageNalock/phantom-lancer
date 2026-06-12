@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +23,8 @@ const (
 	settingInstallEnabled         = "docker.install_enabled"
 	settingDaemonControlEnabled   = "docker.daemon_control_enabled"
 	settingContainerCreateEnabled = "docker.container_create_enabled"
+	settingPullConcurrency        = "docker.pull_concurrency"
+	settingDaemonPullConcurrency  = "docker.daemon_pull_concurrency"
 
 	maxCommandEventLines = 300
 )
@@ -28,19 +32,22 @@ const (
 // Settings are Docker-domain safety switches. These high-privilege extensions
 // default to disabled and can only be toggled from the Docker capability page.
 type Settings struct {
-	InstallEnabled         bool   `json:"installEnabled"`
-	DaemonControlEnabled   bool   `json:"daemonControlEnabled"`
-	ContainerCreateEnabled bool   `json:"containerCreateEnabled"`
-	UpdatedAt              string `json:"updatedAt,omitempty"`
+	InstallEnabled           bool   `json:"installEnabled"`
+	DaemonControlEnabled     bool   `json:"daemonControlEnabled"`
+	ContainerCreateEnabled   bool   `json:"containerCreateEnabled"`
+	PullConcurrency          int    `json:"pullConcurrency"`
+	DaemonPullConcurrency    int    `json:"daemonPullConcurrency"`
+	UpdatedAt                string `json:"updatedAt,omitempty"`
 }
 
 type ControlStatus struct {
-	Settings        Settings      `json:"settings"`
-	Install         InstallStatus `json:"install"`
-	Systemd         SystemdStatus `json:"systemd"`
-	PrivilegeMethod string        `json:"privilegeMethod,omitempty"`
-	ActiveJob       *Job          `json:"activeJob,omitempty"`
-	LatestJob       *Job          `json:"latestJob,omitempty"`
+	Settings              Settings      `json:"settings"`
+	Install               InstallStatus `json:"install"`
+	Systemd               SystemdStatus `json:"systemd"`
+	PrivilegeMethod       string        `json:"privilegeMethod,omitempty"`
+	ActiveJob             *Job          `json:"activeJob,omitempty"`
+	LatestJob             *Job          `json:"latestJob,omitempty"`
+	DaemonPullConcurrency int           `json:"daemonPullConcurrency"`
 }
 
 type InstallStatus struct {
@@ -76,15 +83,31 @@ type osRelease struct {
 func (s *Service) Settings(ctx context.Context) Settings {
 	settings := Settings{}
 	if s.store == nil {
+		settings.PullConcurrency = DefaultMaxConcurrentPulls
+		settings.DaemonPullConcurrency = defaultMaxConcurrentDownloads
 		return settings
 	}
 	values, err := s.store.GetSettingsByPrefix(ctx, "docker.")
 	if err != nil {
+		settings.PullConcurrency = DefaultMaxConcurrentPulls
+		settings.DaemonPullConcurrency = defaultMaxConcurrentDownloads
 		return settings
 	}
 	settings.InstallEnabled = truthy(values[settingInstallEnabled])
 	settings.DaemonControlEnabled = truthy(values[settingDaemonControlEnabled])
 	settings.ContainerCreateEnabled = truthy(values[settingContainerCreateEnabled])
+	settings.PullConcurrency = DefaultMaxConcurrentPulls
+	if v := strings.TrimSpace(values[settingPullConcurrency]); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 10 {
+			settings.PullConcurrency = n
+		}
+	}
+	settings.DaemonPullConcurrency = defaultMaxConcurrentDownloads
+	if v := strings.TrimSpace(values[settingDaemonPullConcurrency]); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 10 {
+			settings.DaemonPullConcurrency = n
+		}
+	}
 	return settings
 }
 
@@ -92,10 +115,26 @@ func (s *Service) UpdateSettings(ctx context.Context, settings Settings) (Settin
 	if s.store == nil {
 		return Settings{}, errors.New("storage is unavailable")
 	}
+	pullConcurrency := settings.PullConcurrency
+	if pullConcurrency < 1 {
+		pullConcurrency = 1
+	}
+	if pullConcurrency > 10 {
+		pullConcurrency = 10
+	}
+	daemonPullConcurrency := settings.DaemonPullConcurrency
+	if daemonPullConcurrency < 1 {
+		daemonPullConcurrency = 1
+	}
+	if daemonPullConcurrency > 10 {
+		daemonPullConcurrency = 10
+	}
 	if err := s.store.PutSettings(ctx, map[string]string{
 		settingInstallEnabled:         boolText(settings.InstallEnabled),
 		settingDaemonControlEnabled:   boolText(settings.DaemonControlEnabled),
 		settingContainerCreateEnabled: boolText(settings.ContainerCreateEnabled),
+		settingPullConcurrency:        strconv.Itoa(pullConcurrency),
+		settingDaemonPullConcurrency:  strconv.Itoa(daemonPullConcurrency),
 	}); err != nil {
 		return Settings{}, err
 	}
@@ -107,13 +146,18 @@ func (s *Service) ControlStatus(ctx context.Context) ControlStatus {
 	privilege := detectPrivilege(ctx)
 	install := detectInstall(ctx, settings, privilege)
 	systemd := detectSystemd(ctx, settings, privilege)
+	daemonPullConcurrency := defaultMaxConcurrentDownloads
+	if v, err := DaemonPullConcurrency(ctx); err == nil {
+		daemonPullConcurrency = v
+	}
 	return ControlStatus{
-		Settings:        settings,
-		Install:         install,
-		Systemd:         systemd,
-		PrivilegeMethod: privilege,
-		ActiveJob:       s.ActiveJob(),
-		LatestJob:       s.LatestJob(),
+		Settings:              settings,
+		Install:               install,
+		Systemd:               systemd,
+		PrivilegeMethod:       privilege,
+		ActiveJob:             s.ActiveJob(),
+		LatestJob:             s.LatestJob(),
+		DaemonPullConcurrency: daemonPullConcurrency,
 	}
 }
 
@@ -167,6 +211,67 @@ func (s *Service) DaemonControlJob(ctx context.Context, action string) (Operatio
 		cmd, args := privilegedCommand(privilege, "systemctl", action, "docker")
 		emit("docker.job.output", map[string]any{"stream": "stdout", "message": title + "：影响本机所有 Docker 容器"})
 		return runCommand(runCtx, cmd, args, emit)
+	})
+}
+
+func (s *Service) SetDaemonPullConcurrencyJob(ctx context.Context, maxConcurrent int) (OperationResult, error) {
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
+	if maxConcurrent > 10 {
+		maxConcurrent = 10
+	}
+	settings := s.Settings(ctx)
+	privilege := detectPrivilege(ctx)
+	systemd := detectSystemd(ctx, settings, privilege)
+	if !settings.DaemonControlEnabled {
+		return OperationResult{}, errors.New("docker daemon control is disabled")
+	}
+	if !systemd.CanControl {
+		if systemd.Reason != "" {
+			return OperationResult{}, errors.New(systemd.Reason)
+		}
+		return OperationResult{}, errors.New("docker daemon control is not available")
+	}
+	if privilege == "" {
+		return OperationResult{}, errors.New("root or sudo privilege is required to write daemon.json")
+	}
+	return s.StartJob(ctx, "docker.daemon.pull_concurrency", "设置 daemon pull 并发数", "high", "daemon.json", map[string]any{"maxConcurrentDownloads": maxConcurrent}, func(runCtx context.Context, emit func(string, map[string]any)) error {
+		emit("docker.job.output", map[string]any{"stream": "stdout", "message": "读取当前 daemon.json 配置"})
+		readCmd, readArgs := privilegedCommand(privilege, "cat", daemonJSONPath)
+		var existing bytes.Buffer
+		readOut, readErr := exec.CommandContext(runCtx, readCmd, readArgs...).Output()
+		if readErr == nil {
+			existing.Write(readOut)
+		}
+
+		cfg := map[string]any{}
+		if existing.Len() > 0 {
+			if err := json.Unmarshal(existing.Bytes(), &cfg); err != nil {
+				emit("docker.job.output", map[string]any{"stream": "stderr", "message": "daemon.json 解析失败，将被覆盖：" + safelog.Error(readErr, 200)})
+				cfg = map[string]any{}
+			}
+		}
+		cfg["max-concurrent-downloads"] = maxConcurrent
+
+		patchJSON, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			return err
+		}
+		tmpPath := "/tmp/phantom-daemon.json.tmp"
+		if err := os.WriteFile(tmpPath, append(patchJSON, '\n'), 0644); err != nil {
+			return err
+		}
+		defer os.Remove(tmpPath)
+
+		emit("docker.job.output", map[string]any{"stream": "stdout", "message": "写入 daemon.json 并重启 Docker daemon"})
+		script := fmt.Sprintf(`set -e
+mkdir -p /etc/docker
+cp %s %s
+systemctl restart docker
+`, tmpPath, daemonJSONPath)
+		cmdName, cmdArgs := privilegedCommand(privilege, "sh", "-c", script)
+		return runCommand(runCtx, cmdName, cmdArgs, emit)
 	})
 }
 
@@ -406,6 +511,33 @@ func shortCommand(ctx context.Context, name string, args ...string) (string, err
 		return "", err
 	}
 	return string(bytes.TrimSpace(out)), nil
+}
+
+const daemonJSONPath = "/etc/docker/daemon.json"
+
+const defaultMaxConcurrentDownloads = 3
+
+func DaemonPullConcurrency(ctx context.Context) (int, error) {
+	data, err := os.ReadFile(daemonJSONPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return defaultMaxConcurrentDownloads, nil
+		}
+		return 0, err
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return defaultMaxConcurrentDownloads, nil
+	}
+	var cfg struct {
+		MaxConcurrentDownloads int `json:"max-concurrent-downloads"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return 0, fmt.Errorf("parse daemon.json: %w", err)
+	}
+	if cfg.MaxConcurrentDownloads <= 0 {
+		return defaultMaxConcurrentDownloads, nil
+	}
+	return cfg.MaxConcurrentDownloads, nil
 }
 
 func truthy(value string) bool {

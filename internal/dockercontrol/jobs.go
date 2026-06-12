@@ -174,6 +174,21 @@ func (s *Service) clearJobCancel(id string) {
 
 func (s *Service) runJob(ctx context.Context, job Job, run jobRunner) {
 	defer s.clearJobCancel(job.ID)
+
+	if job.Type == "docker.image.pull" {
+		select {
+		case s.pullSem <- struct{}{}:
+		case <-ctx.Done():
+			job.Status = jobStatusCancelled
+			job.Error = "cancelled by owner"
+			job.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			s.saveJob(job)
+			s.append(context.Background(), job.ID, "docker.job.cancelled", map[string]any{"type": job.Type, "title": job.Title})
+			return
+		}
+		defer func() { <-s.pullSem }()
+	}
+
 	job.Status = jobStatusRunning
 	job.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	s.saveJob(job)

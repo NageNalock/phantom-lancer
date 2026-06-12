@@ -69,7 +69,17 @@ type Service struct {
 	// repeated daemon probe / List* errors) so transient DB or daemon
 	// outages never flood the logs with per-iteration Warn entries.
 	logSampler *logsampler.Sampler
+
+	// pullSem limits concurrent image pull jobs to avoid starving the
+	// host CPU / containerd during layer decompression. Jobs beyond the
+	// limit stay in "queued" state until a slot frees up.
+	pullSem chan struct{}
 }
+
+// DefaultMaxConcurrentPulls is the default maximum number of image pull
+// jobs allowed to run simultaneously. Pulling is CPU-intensive due to
+// layer decompression in containerd, so a low default protects small hosts.
+const DefaultMaxConcurrentPulls = 1
 
 // NewService builds the Docker control service. The Docker client is not
 // created until first use so startup never blocks on a missing daemon.
@@ -77,7 +87,28 @@ func NewService(store *storage.Store, hub *events.Hub, dataDir string, logger *s
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{store: store, hub: hub, log: logger, registryDataDir: dataDir, jobs: make(map[string]Job), cancels: make(map[string]context.CancelFunc), registryAuthBackoff: authlimiter.NewBackoff(0), registryAuthSuccessSampler: logsampler.New(1 * time.Hour), logSampler: logsampler.New(2 * time.Second)}
+	svc := &Service{
+		store:                      store,
+		hub:                        hub,
+		log:                        logger,
+		registryDataDir:            dataDir,
+		jobs:                       make(map[string]Job),
+		cancels:                    make(map[string]context.CancelFunc),
+		registryAuthBackoff:        authlimiter.NewBackoff(0),
+		registryAuthSuccessSampler: logsampler.New(1 * time.Hour),
+		logSampler:                 logsampler.New(2 * time.Second),
+		pullSem:                    make(chan struct{}, DefaultMaxConcurrentPulls),
+	}
+	if store != nil {
+		if values, err := store.GetSettingsByPrefix(context.Background(), "docker."); err == nil {
+			if v := strings.TrimSpace(values["docker.pull_concurrency"]); v != "" {
+				if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 10 {
+					svc.pullSem = make(chan struct{}, n)
+				}
+			}
+		}
+	}
+	return svc
 }
 
 // Close releases the cached Docker client.

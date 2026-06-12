@@ -188,6 +188,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
   const [credentialPrefix, setCredentialPrefix] = useState("personal/");
   const [createName, setCreateName] = useState("managed-app");
   const [createImage, setCreateImage] = useState("");
+  const [createSource, setCreateSource] = useState("");
   const [createRestart, setCreateRestart] = useState("unless-stopped");
   const [createPorts, setCreatePorts] = useState("");
   const [createVolumes, setCreateVolumes] = useState("");
@@ -210,6 +211,11 @@ export function DockerView({ actions }: { actions: AppActions }) {
   const [containerStats, setContainerStats] = useState<DockerStats | null>(null);
   const [containerDetailsLoading, setContainerDetailsLoading] = useState(false);
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
+
+  const pullProgress = useMemo<PullProgressSummary | null>(() => {
+    if (!job || job.type !== "docker.image.pull") return null;
+    return buildPullProgress(jobEvents);
+  }, [job, jobEvents]);
 
   useEffect(() => {
     selectedRepoRef.current = selectedRepo;
@@ -650,6 +656,31 @@ export function DockerView({ actions }: { actions: AppActions }) {
     }
   }
 
+  async function applyDaemonPullConcurrency(value: number) {
+    const confirmed = await confirmDanger({
+      title: "应用 daemon pull 并发设置",
+      body: "写入 daemon.json 并重启 Docker daemon，会影响本机所有 Docker 容器。",
+      confirmLabel: "应用并重启",
+      impact: ["本机所有 Docker 容器都会短暂受影响。", "max-concurrent-downloads 会被修改。"],
+      recovery: "如果操作失败，daemon 状态保留原样；可在 Events tab 查看详细日志。",
+    });
+    if (!confirmed) return;
+    setBusy("daemon-pull-concurrency");
+    try {
+      const result = await actions.api<DockerOperationResult>("/api/docker/daemon/pull-concurrency", {
+        method: "POST",
+        csrf: actions.csrf,
+        body: { maxConcurrentDownloads: value },
+      });
+      attachJob(result, "daemon pull 并发设置已提交");
+      await loadControl();
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function saveRegistrySettings(next: DockerRegistrySettings) {
     setBusy("registry-settings");
     try {
@@ -795,6 +826,10 @@ export function DockerView({ actions }: { actions: AppActions }) {
     }
     const ref = `${host}/${item.repository}:${item.tag}`;
     setCreateImage(ref);
+    setCreateSource(`Registry · ${item.repository}:${item.tag}`);
+    setCreatePorts("");
+    setCreateVolumes("");
+    setCreateEnv("");
     setPullRef(ref);
     setSelectedTag(`${item.repository}:${item.tag}`);
     setTab("containers");
@@ -838,6 +873,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
       actions.setToast("请填写容器名和镜像", "warn");
       return;
     }
+    const publicBindCount = template.ports?.filter((port) => port.hostIp === "0.0.0.0" || port.hostIp === "::").length || 0;
     const confirmed = await confirmDanger({
       title: "创建并启动容器",
       objectName: template.name,
@@ -845,12 +881,13 @@ export function DockerView({ actions }: { actions: AppActions }) {
       confirmLabel: "创建容器",
       impact: [
         `Image: ${template.image}`,
-        template.ports?.length ? `端口映射: ${template.ports.length} 条` : "端口: 无",
+        template.ports?.length ? `端口映射: ${template.ports.length} 条${publicBindCount ? `，其中 ${publicBindCount} 条绑定所有网卡` : ""}` : "端口: 无",
         template.volumes?.length ? `命名卷: ${template.volumes.length} 个` : "卷: 无",
         template.env?.length ? `环境变量: ${template.env.length} 条` : "环境变量: 无",
         `Restart: ${template.restartPolicy || "no"}`,
+        publicBindCount ? "0.0.0.0 或 :: 绑定会暴露到宿主机所有网卡，请确认防火墙和上游代理策略。" : "",
         "当前模板不允许 host path、privileged、host network 或自由参数。",
-      ],
+      ].filter(Boolean),
       recovery: "如果创建成功但启动失败，可能留下已创建但未运行的容器，请到容器列表确认或删除；运行成功后可在容器列表中停止或删除。",
     });
     if (!confirmed) return;
@@ -869,6 +906,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
         },
       });
       attachJob(result, "容器创建已提交");
+      if (createFormOpen) setCreateFormOpen(false);
       setTab("containers");
       await loadTab("containers", true);
     } catch (error) {
@@ -995,6 +1033,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
           loadControl={() => void loadControl()}
           registryPublicUrl={registrySettings.publicUrl}
           saveDockerSettings={(next) => void saveDockerSettings(next)}
+          applyDaemonPullConcurrency={(value) => void applyDaemonPullConcurrency(value)}
         />
 	      ) : tab === "overview" ? (
 	        <DockerOverview
@@ -1025,7 +1064,14 @@ export function DockerView({ actions }: { actions: AppActions }) {
             subtitle="选中容器后在右侧查看状态、stats、端口、挂载、网络、labels 和最近日志。"
             actions={
               <span className="flex gap-2">
-                <Button onClick={() => { if (!createFormOpen) toggleCreateForm(); }} tone="primary">
+                <Button onClick={() => {
+                  setCreateImage("");
+                  setCreateSource("");
+                  setCreatePorts("");
+                  setCreateVolumes("");
+                  setCreateEnv("");
+                  if (!createFormOpen) toggleCreateForm();
+                }} tone="primary">
                   创建容器
                 </Button>
                 {!images.length ? <Button onClick={() => setTab("images")}>先拉取镜像</Button> : null}
@@ -1046,6 +1092,11 @@ export function DockerView({ actions }: { actions: AppActions }) {
                       <Button
                         tone="primary"
                         onClick={() => {
+                          setCreateImage("");
+                          setCreateSource("");
+                          setCreatePorts("");
+                          setCreateVolumes("");
+                          setCreateEnv("");
                           if (!createFormOpen) toggleCreateForm();
                         }}
                       >
@@ -1083,6 +1134,10 @@ export function DockerView({ actions }: { actions: AppActions }) {
                       onClone={() => {
                         setCreateName(`${item.names[0] || item.id}-copy`.slice(0, 63));
                         setCreateImage(item.image);
+                        setCreateSource(`以此镜像创建 · ${item.names[0] || item.id}`);
+                        setCreatePorts("");
+                        setCreateVolumes("");
+                        setCreateEnv("");
                         if (!createFormOpen) toggleCreateForm();
                       }}
                       onDetails={() => void openContainerDetails(item)}
@@ -1126,12 +1181,22 @@ export function DockerView({ actions }: { actions: AppActions }) {
           loading={loading}
           onCloseImage={() => setSelectedImageId("")}
           onCreateFromImage={(item) => {
-            if (item.tags?.[0]) setCreateImage(item.tags[0]); else setCreateImage(item.id);
+            if (item.tags?.[0]) {
+              setCreateImage(item.tags[0]);
+              setCreateSource(`镜像 · ${item.tags[0]}`);
+            } else {
+              setCreateImage(item.id);
+              setCreateSource(`镜像 · ${item.id}`);
+            }
+            setCreatePorts("");
+            setCreateVolumes("");
+            setCreateEnv("");
             setTab("containers");
             if (!createFormOpen) toggleCreateForm();
           }}
           onPull={() => void pullImage()}
           onRemoveImage={(item) => void removeImage(item)}
+          pullProgress={pullProgress}
           pullRef={pullRef}
           selectedImageId={selectedImageId}
           setImageSearch={setImageSearch}
@@ -1199,14 +1264,16 @@ export function DockerView({ actions }: { actions: AppActions }) {
         createName={createName}
         createPorts={createPorts}
         createRestart={createRestart}
+        createSource={createSource}
         createVolumes={createVolumes}
-        onClose={() => setCreateFormOpen(false)}
+        onClose={() => {
+          setCreateFormOpen(false);
+          setCreateSource("");
+        }}
         onSubmit={(template: CreateContainerTemplate) => void createContainer(template)}
         open={createFormOpen}
-        prefillImageLabel={createImage || undefined}
         registryEnabled={Boolean(registrySettings.publicUrl || registryStatus?.publicUrl)}
         registryHost={registryHostFromPublicUrl(registrySettings.publicUrl || registryStatus?.publicUrl)}
-        registryRepositories={repositories}
         setCreateEnv={setCreateEnv}
         setCreateImage={setCreateImage}
         setCreateName={setCreateName}
@@ -1752,6 +1819,7 @@ function ImageListPanel({
   onCreateFromImage,
   onPull,
   onRemoveImage,
+  pullProgress,
   pullRef,
   selectedImageId,
   setImageSearch,
@@ -1767,6 +1835,7 @@ function ImageListPanel({
   onCreateFromImage: (item: DockerImageSummary) => void;
   onPull: () => void;
   onRemoveImage: (item: DockerImageSummary) => void;
+  pullProgress: PullProgressSummary | null;
   pullRef: string;
   selectedImageId: string;
   setImageSearch: (value: string) => void;
@@ -1809,6 +1878,7 @@ function ImageListPanel({
               {busy === "pull" ? "拉取中" : "拉取"}
             </Button>
           </div>
+          {pullProgress ? <DockerPullProgress progress={pullProgress} /> : null}
           {filtered.length === 0 && !loading ? (
             <div className="grid min-h-48 place-items-center rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-6">
               <div className="grid max-w-md gap-4 text-center">

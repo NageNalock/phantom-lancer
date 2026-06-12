@@ -1,7 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import type { DockerContainerSummary } from "../../app/types";
-import type { DockerImageSummary } from "../../app/types";
-import type { DockerRegistryRepository } from "../../app/types";
 import { Button, Field, Panel, Pill } from "../../components/ui";
 
 type CreatePort = { containerPort: number; hostPort?: number; protocol?: string; hostIp?: string };
@@ -22,28 +19,61 @@ type ParsePortsResult = {
   errors: { line: string; reason: string }[];
 };
 
+function splitPortProtocol(line: string): { body: string; protocol: string } | null {
+  const m = line.match(/^(.*?)(?:\/([A-Za-z]+))?$/);
+  if (!m) return null;
+  const protocol = (m[2] || "tcp").toLowerCase();
+  if (protocol !== "tcp" && protocol !== "udp" && protocol !== "sctp") return null;
+  return { body: m[1].trim(), protocol };
+}
+
+function splitBindIp(body: string): { bindIp?: string; mapping: string } {
+  if (body.startsWith("0.0.0.0:")) {
+    return { bindIp: "0.0.0.0", mapping: body.slice("0.0.0.0:".length) };
+  }
+  if (body.startsWith("127.0.0.1:")) {
+    return { bindIp: "127.0.0.1", mapping: body.slice("127.0.0.1:".length) };
+  }
+  if (body.startsWith("[::]:")) {
+    return { bindIp: "::", mapping: body.slice("[::]:".length) };
+  }
+  return { mapping: body };
+}
+
+function parsePortNumber(raw: string): number | null {
+  if (!/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  return value > 0 && value <= 65535 ? value : null;
+}
+
 function parsePortsStrict(raw: string): ParsePortsResult {
   const lines = raw.split(/[\n,;]/).map((l) => l.trim()).filter(Boolean);
   const ports: CreatePort[] = [];
   const errors: { line: string; reason: string }[] = [];
   for (const line of lines) {
-    const m = line.match(/^(?:(\d+)(?:[.:](\d+))?)(?:\/(tcp|udp|sctp))?$/);
-    if (!m) {
+    const parsed = splitPortProtocol(line);
+    if (!parsed) {
       errors.push({ line, reason: "格式不匹配" });
       continue;
     }
-    const [, host, container, proto] = m;
-    const hostPort = Number(host);
-    if (!hostPort || hostPort > 65535) {
-      errors.push({ line, reason: `主机端口 ${host} 超出范围 (1-65535)` });
+    const { bindIp, mapping } = splitBindIp(parsed.body);
+    const separator = mapping.includes(":") ? ":" : ".";
+    const parts = mapping.split(separator);
+    if (parts.length < 1 || parts.length > 2 || parts.some((part) => !part)) {
+      errors.push({ line, reason: "格式不匹配" });
       continue;
     }
-    const containerPort = container ? Number(container) : hostPort;
-    if (!containerPort || containerPort > 65535) {
-      errors.push({ line, reason: `容器端口 ${container} 超出范围 (1-65535)` });
+    const hostPort = parsePortNumber(parts[0]);
+    if (!hostPort) {
+      errors.push({ line, reason: `主机端口 ${parts[0]} 超出范围 (1-65535)` });
       continue;
     }
-    ports.push({ containerPort, hostPort, protocol: proto || "tcp", hostIp: "127.0.0.1" });
+    const containerPort = parts[1] ? parsePortNumber(parts[1]) : hostPort;
+    if (!containerPort) {
+      errors.push({ line, reason: `容器端口 ${parts[1]} 超出范围 (1-65535)` });
+      continue;
+    }
+    ports.push({ containerPort, hostPort, protocol: parsed.protocol, ...(bindIp ? { hostIp: bindIp } : {}) });
   }
   return { ports, errors };
 }
@@ -101,11 +131,6 @@ function parseEnvStrict(raw: string): ParseEnvResult {
       errors.push({ line, reason: "VALUE 超过 4KB 上限" });
       continue;
     }
-    const lower = name.toLowerCase();
-    if (lower.includes("secret") || lower.includes("token") || lower.includes("password") || lower.includes("key")) {
-      errors.push({ line, reason: `变量名 "${name}" 属于敏感字段，不允许` });
-      continue;
-    }
     env.push({ name, value });
   }
   return { env, errors };
@@ -122,6 +147,7 @@ export function CreateContainerDrawer({
   createPorts,
   createVolumes,
   createEnv,
+  createSource,
   setCreateName,
   setCreateImage,
   setCreateRestart,
@@ -130,11 +156,7 @@ export function CreateContainerDrawer({
   setCreateEnv,
   registryHost: host,
   registryEnabled,
-  registryRepositories,
   onSubmit,
-  prefillImageLabel,
-  sourceContainer,
-  sourceImage,
 }: {
   open: boolean;
   onClose: () => void;
@@ -146,6 +168,7 @@ export function CreateContainerDrawer({
   createPorts: string;
   createVolumes: string;
   createEnv: string;
+  createSource: string;
   setCreateName: (value: string) => void;
   setCreateImage: (value: string) => void;
   setCreateRestart: (value: string) => void;
@@ -154,11 +177,7 @@ export function CreateContainerDrawer({
   setCreateEnv: (value: string) => void;
   registryHost: string;
   registryEnabled: boolean;
-  registryRepositories: DockerRegistryRepository[];
   onSubmit: (template: CreateContainerTemplate) => void;
-  prefillImageLabel?: string;
-  sourceContainer?: DockerContainerSummary | null;
-  sourceImage?: DockerImageSummary | null;
 }) {
   const firstFieldRef = useRef<HTMLInputElement>(null);
   const previousActiveRef = useRef<HTMLElement | null>(null);
@@ -166,6 +185,7 @@ export function CreateContainerDrawer({
   const portResult = useMemo(() => parsePortsStrict(createPorts), [createPorts]);
   const volumeResult = useMemo(() => parseVolumesStrict(createVolumes), [createVolumes]);
   const envResult = useMemo(() => parseEnvStrict(createEnv), [createEnv]);
+  const publicBindCount = portResult.ports.filter((port) => port.hostIp === "0.0.0.0" || port.hostIp === "::").length;
 
   const template = useMemo<CreateContainerTemplate>(() => {
     return {
@@ -225,10 +245,8 @@ export function CreateContainerDrawer({
 
   if (!open) return null;
 
-  const registryExampleRepo = registryRepositories[0]?.name || "repository/app";
-  const registryExampleRef = `${host || "registry.example.com"}/${registryExampleRepo}:tag`;
   const allowedHint = registryEnabled
-    ? `镜像必须来自当前受控 Registry 主机，不要求 personal/ 前缀。`
+    ? `镜像必须位于 ${host}/* 下（Registry 受控来源）。`
     : `允许本机已有的任意镜像（未启用 Registry 前缀校验）。`;
 
   return (
@@ -251,10 +269,10 @@ export function CreateContainerDrawer({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h3 className="m-0 text-sm font-semibold">创建容器</h3>
-              {prefillImageLabel ? <Pill tone="good">预填镜像</Pill> : null}
+              {createSource ? <Pill tone="good">{createSource}</Pill> : null}
             </div>
             <p className="muted mt-1 mb-0 min-w-0 text-xs" id="create-container-subtitle">
-              {prefillImageLabel ? `来源: ${prefillImageLabel}` : allowedHint}
+              {allowedHint}
             </p>
           </div>
           <Button onClick={onClose}>关闭</Button>
@@ -269,26 +287,6 @@ export function CreateContainerDrawer({
               </div>
             ) : null}
 
-            {(sourceContainer || sourceImage) ? (
-              <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <strong className="block text-xs">来源上下文</strong>
-                    {sourceContainer ? (
-                      <p className="muted mt-1 mb-0 text-xs">
-                        从容器复制: <code className="mono">{sourceContainer.names[0] || sourceContainer.id}</code>，镜像 <code className="mono">{sourceContainer.image}</code>
-                      </p>
-                    ) : null}
-                    {sourceImage ? (
-                      <p className="muted mt-1 mb-0 text-xs">
-                        从镜像: <code className="mono">{sourceImage.tags?.[0] || sourceImage.id}</code>
-                      </p>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-            ) : null}
-
             <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
               <Field label="容器名称" help="字母、数字、下划线、点、短横，最长 64 字符。">
                 <input
@@ -299,7 +297,7 @@ export function CreateContainerDrawer({
                 />
               </Field>
               <Field label="镜像引用" help={allowedHint}>
-                <input className="input mono" onChange={(event) => setCreateImage(event.target.value)} placeholder={registryEnabled ? registryExampleRef : "repository:tag 或 image ID"} value={createImage} />
+                <input className="input mono" onChange={(event) => setCreateImage(event.target.value)} placeholder={registryEnabled ? `${host}/repository:tag` : "repository:tag 或 image ID"} value={createImage} />
               </Field>
             </div>
 
@@ -318,12 +316,13 @@ export function CreateContainerDrawer({
             <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
               <Field
                 label="端口映射"
-                help="每行一条。格式: hostPort:containerPort[/proto] 或 containerPort[/proto]。示例: 8080:80 表示主机 8080 -> 容器 80。默认绑定 127.0.0.1。"
+                help="每行一条。格式: hostPort:containerPort[/proto]、containerPort[/proto] 或 bindIp:hostPort:containerPort[/proto]。示例: 8080:80、5432/tcp、0.0.0.0:8080:80/tcp。"
               >
                 <textarea
                   className="input mono min-h-[72px]"
                   onChange={(event) => setCreatePorts(event.target.value)}
                   placeholder={`8080:80
+0.0.0.0:8080:80/tcp
 5432/tcp`}
                   value={createPorts}
                 />
@@ -336,7 +335,9 @@ export function CreateContainerDrawer({
                     ))}
                   </div>
                 ) : portResult.ports.length > 0 ? (
-                  <p className="muted mt-1 mb-0 text-xs">解析为 {portResult.ports.length} 条端口规则。</p>
+                  <p className="muted mt-1 mb-0 text-xs">
+                    解析为 {portResult.ports.length} 条端口规则{publicBindCount ? `，${publicBindCount} 条绑定所有网卡。` : "。"}
+                  </p>
                 ) : null}
               </Field>
 
@@ -367,7 +368,7 @@ app-logs:/var/log:ro`}
 
             <Field
               label="环境变量"
-              help="每行一条 KEY=VALUE。不允许包含 secret/token/password/key 的变量名；单条 VALUE 最长 4KB，最多 64 条。"
+              help="每行一条 KEY=VALUE。单条 VALUE 最长 4KB，最多 64 条。"
             >
               <textarea
                 className="input mono min-h-[72px]"

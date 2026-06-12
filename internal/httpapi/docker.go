@@ -134,6 +134,8 @@ func (s *Server) handleDockerUpdateSettings(w http.ResponseWriter, r *http.Reque
 		InstallEnabled         bool `json:"installEnabled"`
 		DaemonControlEnabled   bool `json:"daemonControlEnabled"`
 		ContainerCreateEnabled bool `json:"containerCreateEnabled"`
+		PullConcurrency        int  `json:"pullConcurrency"`
+		DaemonPullConcurrency  int  `json:"daemonPullConcurrency"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -142,6 +144,8 @@ func (s *Server) handleDockerUpdateSettings(w http.ResponseWriter, r *http.Reque
 		InstallEnabled:         req.InstallEnabled,
 		DaemonControlEnabled:   req.DaemonControlEnabled,
 		ContainerCreateEnabled: req.ContainerCreateEnabled,
+		PullConcurrency:        req.PullConcurrency,
+		DaemonPullConcurrency:  req.DaemonPullConcurrency,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "docker_settings_invalid", err.Error())
@@ -150,11 +154,13 @@ func (s *Server) handleDockerUpdateSettings(w http.ResponseWriter, r *http.Reque
 	_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
 		EventType: "docker.settings.updated",
 		RiskLevel: "high",
-		Summary:   "已更新 Docker 高权限开关",
+		Summary:   "已更新 Docker 设置",
 		Payload: map[string]any{
 			"installEnabled":         settings.InstallEnabled,
 			"daemonControlEnabled":   settings.DaemonControlEnabled,
 			"containerCreateEnabled": settings.ContainerCreateEnabled,
+			"pullConcurrency":        settings.PullConcurrency,
+			"daemonPullConcurrency":  settings.DaemonPullConcurrency,
 		},
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"settings": settings, "control": s.docker.ControlStatus(r.Context())})
@@ -188,6 +194,27 @@ func (s *Server) handleDockerDaemonControl(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.auditDockerHost(r, "docker.daemon."+action+".requested", "critical", "已请求 Docker daemon "+action, result.Job.ID, true, nil)
+	writeJSON(w, http.StatusAccepted, result)
+}
+
+func (s *Server) handleDockerDaemonPullConcurrency(w http.ResponseWriter, r *http.Request) {
+	ctx, ok := s.requireAuth(w, r)
+	if !ok || !s.requireCSRF(w, r, ctx.Session) {
+		return
+	}
+	var req struct {
+		MaxConcurrentDownloads int `json:"maxConcurrentDownloads"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.docker.SetDaemonPullConcurrencyJob(r.Context(), req.MaxConcurrentDownloads)
+	if err != nil {
+		s.auditDockerHost(r, "docker.daemon.pull_concurrency.requested", "high", "daemon pull 并发数设置未启动", "pull_concurrency", false, err)
+		writeError(w, http.StatusBadRequest, "docker_daemon_pull_concurrency_unavailable", err.Error())
+		return
+	}
+	s.auditDockerHost(r, "docker.daemon.pull_concurrency.requested", "high", "已请求设置 daemon pull 并发数", result.Job.ID, true, nil)
 	writeJSON(w, http.StatusAccepted, result)
 }
 
