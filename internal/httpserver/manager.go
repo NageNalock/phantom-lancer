@@ -247,8 +247,10 @@ func (m *Manager) SwapAddr(newAddr string) error {
 //   - Pre-bind and TLS pre-load run OUTSIDE the lock so that slow syscalls
 //     never block reads of Endpoint().
 //   - Only the atomic state replacement runs under the lock.
-//   - If any step fails the old listener is untouched and an error is
-//     returned (no partial state).
+//   - Cross-address bind failures leave the old listener untouched.
+//   - Same-address TLS/cert changes must briefly close the current listening
+//     socket before rebinding the same port; if that rebind fails, state is not
+//     advanced and the failure is logged at critical level.
 //   - Long-lived streams (SSE etc.) are force-dropped after a 2 s timeout.
 func (m *Manager) SwapEndpoint(newCfg EndpointConfig) (Endpoint, error) {
 	// ---- Step 1: validate -------------------------------------------------
@@ -269,22 +271,28 @@ func (m *Manager) SwapEndpoint(newCfg EndpointConfig) (Endpoint, error) {
 		}
 	}
 
-	// ---- Step 2: fast-path: same addr + same TLS config → just reload -----
+	// ---- Step 2: fast-path: same addr + same TLS transport → just reload ---
 	curEp := m.Endpoint()
 	if curEp.Addr == newCfg.Addr && curEp.TLSEnabled == newCfg.TLSEnabled {
 		m.mu.Lock()
-		sameCert := m.certFile == cleanCert && m.keyFile == cleanKey &&
-			m.hstsEnabled == newCfg.HSTSEnabled && m.hstsMaxAgeSeconds == newCfg.HSTSMaxAgeSeconds
+		sameTransport := m.certFile == cleanCert && m.keyFile == cleanKey
 		m.mu.Unlock()
-		if sameCert {
+		if sameTransport {
 			if m.reloader != nil {
 				if rerr := m.reloader.LoadNow(); rerr != nil {
 					// 证书文件损坏：保留当前 listener，错误向上返回（不做 eager swap）
 					return curEp, fmt.Errorf("tls reload: %w", rerr)
 				}
 			}
+			m.mu.Lock()
+			m.hstsEnabled = newCfg.HSTSEnabled
+			m.hstsMaxAgeSeconds = newCfg.HSTSMaxAgeSeconds
+			m.mu.Unlock()
 			return m.Endpoint(), nil
 		}
+	}
+	if curEp.Addr == newCfg.Addr {
+		return m.swapEndpointSameAddr(newCfg, cleanCert, cleanKey, curEp)
 	}
 
 	// ---- Step 3: pre-bind + optional TLS pre-load OUTSIDE the lock --------
@@ -381,6 +389,131 @@ func (m *Manager) SwapEndpoint(newCfg EndpointConfig) (Endpoint, error) {
 	return m.Endpoint(), nil
 }
 
+// swapEndpointSameAddr changes TLS/HSTS/cert settings while keeping the same
+// host:port. Unlike cross-address swaps, this cannot pre-bind a second
+// listener: the current listener already owns the port. The implementation
+// therefore preloads TLS first, closes only the listening socket to free the
+// port, immediately re-binds it, then drains old accepted connections in the
+// background so the request that triggered the change can still return.
+func (m *Manager) swapEndpointSameAddr(newCfg EndpointConfig, cleanCert, cleanKey string, curEp Endpoint) (Endpoint, error) {
+	var newReloader *CertReloader
+	if newCfg.TLSEnabled {
+		r, rerr := NewCertReloader(cleanCert, cleanKey, m.log)
+		if rerr != nil {
+			return curEp, fmt.Errorf("tls preload: %w", rerr)
+		}
+		newReloader = r
+	}
+
+	m.mu.Lock()
+	if m.addr != newCfg.Addr {
+		m.mu.Unlock()
+		if newReloader != nil {
+			newReloader.Close()
+		}
+		return m.SwapEndpoint(newCfg)
+	}
+	oldServer := m.server
+	oldListener := m.listener
+	oldReloader := m.reloader
+	oldTLSEnabled := m.tlsEnabled
+
+	if oldListener != nil {
+		_ = oldListener.Close()
+	}
+	newLn, err := listenSameAddrWithRetry(newCfg.Addr, 750*time.Millisecond)
+	if err != nil {
+		m.mu.Unlock()
+		if newReloader != nil {
+			newReloader.Close()
+		}
+		m.log.Log(context.Background(), LevelCritical,
+			"HTTP_SERVER_SAME_ADDR_REBIND_FAILED",
+			slog.String("addr", newCfg.Addr),
+			slog.String("error", err.Error()),
+		)
+		return curEp, fmt.Errorf("cannot rebind %s after closing current listener: %w", newCfg.Addr, err)
+	}
+
+	if newCfg.TLSEnabled {
+		m.certFile = cleanCert
+		m.keyFile = cleanKey
+	} else {
+		m.certFile = ""
+		m.keyFile = ""
+	}
+	m.reloader = newReloader
+	m.tlsEnabled = newCfg.TLSEnabled
+	m.hstsEnabled = newCfg.HSTSEnabled
+	m.hstsMaxAgeSeconds = newCfg.HSTSMaxAgeSeconds
+
+	newServer := m.buildServerForConfig(EndpointConfig{
+		Addr:              newCfg.Addr,
+		TLSEnabled:        newCfg.TLSEnabled,
+		HSTSEnabled:       newCfg.HSTSEnabled,
+		HSTSMaxAgeSeconds: newCfg.HSTSMaxAgeSeconds,
+	})
+	actualLn := net.Listener(newLn)
+	if newCfg.TLSEnabled && newReloader != nil {
+		actualLn = tls.NewListener(newLn, newServer.TLSConfig)
+		newReloader.Start(context.Background())
+	}
+	m.server = newServer
+	m.listener = actualLn
+	m.mu.Unlock()
+
+	m.log.Info("http server swapping endpoint on same address",
+		slog.String("addr", newCfg.Addr),
+		slog.Bool("old_tls", oldTLSEnabled),
+		slog.Bool("new_tls", newCfg.TLSEnabled),
+	)
+
+	m.serveWG.Add(1)
+	go m.launchServe(newServer, actualLn)
+	go m.drainOldServer(oldServer, nil, oldReloader)
+
+	return m.Endpoint(), nil
+}
+
+func listenSameAddrWithRetry(addr string, timeout time.Duration) (net.Listener, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			return ln, nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return nil, lastErr
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func (m *Manager) drainOldServer(oldServer *http.Server, oldListener net.Listener, oldReloader *CertReloader) {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if oldServer != nil {
+		if sErr := oldServer.Shutdown(shutdownCtx); sErr != nil {
+			if errors.Is(sErr, context.DeadlineExceeded) {
+				m.log.Warn("http server graceful shutdown timed out during swap; forcing close", "timeout", "2s")
+			} else {
+				m.log.Warn("http server shutdown during swap returned error", "error", sErr)
+			}
+			if cErr := oldServer.Close(); cErr != nil {
+				m.log.Warn("http server force close during swap failed", "error", cErr)
+			}
+			if oldListener != nil {
+				_ = oldListener.Close()
+			}
+		}
+	}
+	if oldReloader != nil {
+		oldReloader.Close()
+	}
+}
+
 // Shutdown gracefully terminates the current server on process exit.
 // Intended to be called from the main goroutine's signal/exit path.  It
 // waits for serve goroutine(s) to return so the caller can be sure no
@@ -455,7 +588,7 @@ func (m *Manager) buildServerForConfig(cfg EndpointConfig) *http.Server {
 // while Manager.mu is held – Serve() blocks until the listener is closed.
 func (m *Manager) launchServe(srv *http.Server, ln net.Listener) {
 	defer m.serveWG.Done()
-	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed && !errors.Is(err, net.ErrClosed) {
 		m.log.Error("http server failed", "error", err, "addr", srv.Addr)
 	}
 }
