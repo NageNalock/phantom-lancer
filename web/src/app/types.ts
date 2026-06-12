@@ -132,6 +132,15 @@ export interface SystemUpdateJob {
   completedAt?: string;
 }
 
+export interface SupervisorStatus {
+  underSupervisor?: boolean;
+  alive?: boolean;
+  pid?: number;
+  pidSource?: "env" | "pidfile" | string;
+  childPID?: number;
+  lastError?: string;
+}
+
 export interface SystemUpdateStatus {
   enabled?: boolean;
   version?: BuildInfo;
@@ -143,6 +152,19 @@ export interface SystemUpdateStatus {
   restartMode?: string;
   installBinaryPath?: string;
   backupBinaryPath?: string;
+  supervisor?: SupervisorStatus;
+  /** @deprecated Use `supervisor?.underSupervisor` instead. */
+  underSupervisor?: boolean;
+  /** @deprecated Use `supervisor?.pid` instead. */
+  supervisorPID?: number;
+}
+
+export interface SystemStatusPayload {
+  version?: BuildInfo;
+  supervisor?: SupervisorStatus;
+  dataDir?: string;
+  startedAt?: string;
+  uptimeMs?: number;
 }
 
 export interface CodexGatewaySettings {

@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../../app/App";
-import type { EventRecord, SystemUpdateJob, SystemUpdateStatus } from "../../app/types";
+import type { EventRecord, SupervisorStatus, SystemUpdateJob, SystemUpdateStatus } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, CheckLabel, ContextList, Notice, Panel, Pill } from "../../components/ui";
 import { formatBytesIEC } from "../../utils/format";
 import { formatDate } from "../../domain/labels";
+
+const supervisorReasonHints: Record<string, string> = {
+  manual_upgrade_detected: "当前 binary 检测到手动替换,已按实际版本同步。",
+};
 
 const updateEventNames = [
   "update.job.created",
@@ -231,6 +235,8 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
           />
         </div>
 
+        <SupervisorCard status={status} />
+
         {check?.releaseUrl ? (
           <a className="mono text-xs text-[var(--accent)] underline decoration-[rgba(207,77,16,0.34)] underline-offset-2" href={check.releaseUrl} rel="noreferrer" target="_blank">
             {check.releaseUrl}
@@ -370,7 +376,88 @@ function UpdateStatePill({ status }: { status: SystemUpdateStatus }) {
   return <Pill tone="good">已是最新</Pill>;
 }
 
+// SupervisorCard renders a health panel for the phantom-supervisor process.
+// It reports whether the supervisor is actually alive (via real PID+kill-0),
+// shows the supervisor and child PIDs, and surfaces any diagnostic error so
+// operators can debug "why was the process not restarted" right from the UI.
+function SupervisorCard({ status }: { status: SystemUpdateStatus }) {
+  const sup = status.supervisor;
+  const underSupervisor = sup?.underSupervisor ?? status.underSupervisor ?? false;
+  const alive = sup?.alive ?? false;
+  const pid = sup?.pid ?? status.supervisorPID ?? 0;
+  const childPID = sup?.childPID ?? 0;
+  const lastError = sup?.lastError;
+  const pidSource = sup?.pidSource;
+
+  // When no supervisor is present we render a gentle "not configured" card
+  // instead of hiding the section — the card acts as a discoverability hint.
+  const configured = underSupervisor || pid > 0;
+
+  const pill = (() => {
+    if (!configured) return <Pill tone="neutral">未启用</Pill>;
+    if (alive) return <Pill tone="good">运行中</Pill>;
+    if (underSupervisor) return <Pill tone="danger">存活检查失败</Pill>;
+    return <Pill tone="warn">PID 存在但不可达</Pill>;
+  })();
+
+  return (
+    <div className="card-soft grid gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="grid gap-0.5">
+          <strong className="text-sm">Supervisor 守护进程</strong>
+          <span className="muted text-xs">
+            由 <span className="mono">scripts/start.sh</span> 启动的外部保活进程，负责退出重启与版本回滚。
+          </span>
+        </div>
+        {pill}
+      </div>
+      <ContextList
+        items={[
+          [
+            "保活模式",
+            configured
+              ? <span className="mono">supervisor / {status.restartMode || "-"}</span>
+              : <span className="mono">{status.restartMode || "未配置"}</span>,
+          ],
+          ["Supervisor PID", pid ? <span className="mono">{pid}{pidSource ? `（${pidSourceLabel(pidSource)}）` : ""}</span> : "-"],
+          ["主进程 PID", childPID ? <span className="mono">{childPID}</span> : "-"],
+          ["自动重启", configured && alive ? <Pill tone="good">是</Pill> : configured ? <Pill tone="warn">不可达</Pill> : <Pill tone="neutral">否</Pill>],
+        ]}
+      />
+      {!configured ? (
+        <Notice tone="warn">
+          当前部署未启用 Supervisor。裸部署场景请改用 <span className="mono">scripts/manage.sh start</span> 启动服务，以便新版升级后能够被自动拉起。
+        </Notice>
+      ) : null}
+      {configured && !alive ? (
+        <Notice tone="danger">
+          {lastError ? (
+            <>Supervisor 存活检查失败: <span className="mono">{lastError}</span>。请使用 <span className="mono">scripts/manage.sh status</span> 确认守护进程状态。</>
+          ) : (
+            <>Supervisor 响应异常，请使用 <span className="mono">scripts/manage.sh status</span> 确认守护进程状态。</>
+          )}
+        </Notice>
+      ) : null}
+    </div>
+  );
+}
+
+function pidSourceLabel(value?: string): string {
+  switch (value) {
+    case "env":
+      return "环境变量";
+    case "pidfile":
+      return "PID 文件";
+    default:
+      return value || "";
+  }
+}
+
 function updateReasonLabel(reason: string): string {
+  // supervisorReasonHints covers reconciler-injected reasons such as
+  // "manual_upgrade_detected" — they are not produced by the upstream
+  // checker, so they live in a separate lookup table.
+  if (supervisorReasonHints[reason]) return supervisorReasonHints[reason];
   const labels: Record<string, string> = {
     "current version is up to date": "当前版本已是最新。",
     "current platform is not supported by the release asset": "当前平台没有匹配的 release 包。",

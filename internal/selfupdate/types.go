@@ -2,8 +2,6 @@ package selfupdate
 
 import (
 	"net/http"
-	"os"
-	"strconv"
 	"time"
 
 	"phantom-lancer/internal/buildinfo"
@@ -75,19 +73,27 @@ type Status struct {
 	RestartMode           string                     `json:"restartMode"`
 	InstallBinaryPath     string                     `json:"installBinaryPath,omitempty"`
 	BackupBinaryPath      string                     `json:"backupBinaryPath,omitempty"`
-	UnderSupervisor       bool                       `json:"underSupervisor"`
-	SupervisorPID         int                        `json:"supervisorPID,omitempty"`
+
+	// Supervisor contains the real-time liveness information of the outer
+	// phantom-supervisor process. Populated by the status endpoint via
+	// ResolveSupervisorStatus; always present (non-nil) so the UI can
+	// render a supervisor card without nil-checking each field.
+	Supervisor *SupervisorStatus `json:"supervisor,omitempty"`
+
+	// Legacy flat fields kept for older UI code that still reads them
+	// directly. They are populated from Supervisor above and kept in sync.
+	UnderSupervisor bool `json:"underSupervisor"`
+	SupervisorPID   int  `json:"supervisorPID,omitempty"`
 }
 
-// resolveSupervisorInfo populates the UnderSupervisor and SupervisorPID
-// fields from the environment variables injected by phantom-supervisor.
-func (s *Status) resolveSupervisorInfo() {
-	s.UnderSupervisor = os.Getenv("PL_UNDER_SUPERVISOR") == "1"
-	if raw := os.Getenv("PL_SUPERVISOR_PID"); raw != "" {
-		if pid, err := strconv.Atoi(raw); err == nil && pid > 0 {
-			s.SupervisorPID = pid
-		}
-	}
+// resolveSupervisorInfo populates Status.Supervisor (and the
+// backward-compatible UnderSupervisor/SupervisorPID fields) by performing
+// a real liveness check against the supervisor PID.
+func (s *Status) resolveSupervisorInfo(dataDir string) {
+	live := ResolveSupervisorStatus(dataDir)
+	s.Supervisor = &live
+	s.UnderSupervisor = live.UnderSupervisor
+	s.SupervisorPID = live.PID
 }
 
 type ApplyRequest struct {

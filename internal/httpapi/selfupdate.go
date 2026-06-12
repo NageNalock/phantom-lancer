@@ -12,11 +12,43 @@ import (
 	"phantom-lancer/internal/storage"
 )
 
+// SystemStatusPayload is the response shape for GET /api/system/status. It
+// aggregates lightweight runtime signals (build info, supervisor liveness,
+// data-dir path) that the UI polls periodically to render the health panel.
+// It is intentionally narrower than /api/system/update/status — it never
+// touches the DB, so it can be served very frequently without cost.
+type SystemStatusPayload struct {
+	Version    buildinfo.Info               `json:"version"`
+	Supervisor *selfupdate.SupervisorStatus `json:"supervisor,omitempty"`
+	DataDir    string                       `json:"dataDir,omitempty"`
+	StartedAt  string                       `json:"startedAt,omitempty"`
+	UptimeMs   int64                        `json:"uptimeMs,omitempty"`
+}
+
 func (s *Server) handleSystemVersion(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAuth(w, r); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, buildinfo.Current())
+}
+
+func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAuth(w, r); !ok {
+		return
+	}
+	status := SystemStatusPayload{
+		Version:   buildinfo.Current(),
+		DataDir:   s.dataDir,
+		StartedAt: s.startedAt,
+	}
+	if s.startedAt != "" {
+		if t, err := time.Parse(time.RFC3339Nano, s.startedAt); err == nil {
+			status.UptimeMs = time.Since(t).Milliseconds()
+		}
+	}
+	live := selfupdate.ResolveSupervisorStatus(s.dataDir)
+	status.Supervisor = &live
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *Server) handleSystemUpdateStatus(w http.ResponseWriter, r *http.Request) {

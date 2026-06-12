@@ -71,7 +71,7 @@ func (s *Service) Status(ctx context.Context) Status {
 			status.BackupBinaryPath = job.BackupBinaryPath
 		}
 	}
-	status.resolveSupervisorInfo()
+	status.resolveSupervisorInfo(s.cfg.DataDir)
 	return status
 }
 
@@ -230,6 +230,16 @@ func (s *Service) Cancel(ctx context.Context, id string) (storage.SystemUpdateJo
 // version. The returned string is empty when no automatic rollback is
 // required.
 func (s *Service) ConfirmBoot(ctx context.Context) (rollbackExecPath string) {
+	// Reconcile persisted version metadata with the actual running binary.
+	// When the binary was replaced manually (not via Apply()), the stored
+	// LatestSystemUpdateCheck still carries an older `currentVersion` so the
+	// UI shows "当前版本 = 旧版" even though the new binary is running. We
+	// also bump `latestVersion` and clear stale update flags when the new
+	// binary has already advanced past what we last saw upstream, so the
+	// panel doesn't keep offering a non-existent update.
+	s.reconcileManualUpgradeMetadata(ctx)
+	defer s.deleteHandoff()
+
 	job, err := s.store.LatestSystemUpdateJob(ctx)
 	if err != nil || job.TargetVersion == "" {
 		return ""
@@ -237,6 +247,7 @@ func (s *Service) ConfirmBoot(ctx context.Context) (rollbackExecPath string) {
 	if job.Status != jobStatusRestarting {
 		return ""
 	}
+
 	currentVersion := strings.TrimSpace(s.cfg.Build.Version)
 	if currentVersion == "" {
 		currentVersion = "unknown"
@@ -386,6 +397,88 @@ func (s *Service) ConfirmBoot(ctx context.Context) (rollbackExecPath string) {
 		s.log.Warn("system update boot mismatch finalized", "job_id", job.ID, "current_version", currentVersion, "target_version", job.TargetVersion, "rollback", triggeredRollback, "message", safelog.Text(msg, 300))
 	}
 	return rollbackExecPath
+}
+
+// reconcileManualUpgradeMetadata bridges the most common manual-upgrade
+// version-metadata "bug": when the binary is replaced out of band (not via
+// the Apply flow), /api/system/update/status.latestCheck.currentVersion
+// still reports the previous build's version (stored in SQLite), even
+// though buildinfo.Current() (and /api/system/version) are correct. This
+// confuses the operator ("UI says I'm still on 1.2.3 but I replaced with
+// 1.3.0").
+//
+// The reconcile is a NOOP unless ALL of the following are true:
+//   - no restarting/pending update job exists (so we're not mid Apply)
+//   - the stored latestCheck.currentVersion differs from build.Version
+//
+// When that happens we:
+//   1. clone the latest check (or create a minimal one if absent)
+//   2. set currentVersion = build.Version
+//   3. if build.Version is strictly newer than stored latestVersion, we
+//      also set latestVersion = build.Version and clear update_available
+//      / can_apply flags — the operator has obviously already obtained a
+//      build newer than the last release scan, so showing "update to
+//      older-than-me v1.2.0" would be worse than showing nothing.
+//
+// We never OVERWRITE a newer latestVersion, and we never touch release
+// metadata (asset url, checksum) if latestVersion is preserved — that way
+// the next Check() still short-circuits via ETag correctly.
+func (s *Service) reconcileManualUpgradeMetadata(ctx context.Context) {
+	buildVersion := strings.TrimSpace(s.cfg.Build.Version)
+	if buildVersion == "" || buildVersion == "dev" || strings.Contains(buildVersion, "-dev") {
+		return
+	}
+	if active, err := s.store.ActiveSystemUpdateJob(ctx); err == nil && active.ID != "" {
+		return
+	}
+	latest, err := s.store.LatestSystemUpdateCheck(ctx)
+	if err == nil && strings.TrimSpace(latest.CurrentVersion) == buildVersion {
+		return
+	}
+	var next storage.SystemUpdateCheck
+	if err == nil && latest.ID != "" {
+		next = latest
+	} else {
+		next = storage.SystemUpdateCheck{
+			PlatformSupported: supportedPlatform(),
+		}
+	}
+	next.CurrentVersion = buildVersion
+	// If the operator already advanced to a build newer than our last
+	// upstream scan, treat the running version as the new baseline. This
+	// avoids showing "有更新 (可降级到旧版本)" which is never useful.
+	cmpBuildLatest, cmpOK := compareVersions(buildVersion, next.LatestVersion)
+	if cmpOK && cmpBuildLatest > 0 {
+		next.LatestVersion = buildVersion
+		next.UpdateAvailable = false
+		next.CanApply = false
+		next.Comparable = true
+		next.Reason = "manual_upgrade_detected"
+		next.ReleaseID = ""
+		next.ReleaseURL = ""
+		next.PublishedAt = ""
+		next.AssetName = ""
+		next.AssetSizeBytes = 0
+		next.AssetURL = ""
+		next.ChecksumAssetURL = ""
+		next.ChecksumAvailable = false
+		next.ETag = ""
+		next.ErrorMessage = ""
+	} else if !cmpOK {
+		next.Comparable = false
+	}
+	if _, addErr := s.store.AddSystemUpdateCheck(ctx, next); addErr != nil && s.log != nil {
+		s.log.Warn("manual upgrade metadata reconcile failed",
+			"current_version", next.CurrentVersion,
+			"latest_version", next.LatestVersion,
+			"error", safelog.Error(addErr, 200),
+		)
+	} else if s.log != nil {
+		s.log.Info("manual upgrade metadata reconciled",
+			"current_version", next.CurrentVersion,
+			"latest_version", next.LatestVersion,
+		)
+	}
 }
 
 func (s *Service) run(ctx context.Context, jobID string, check storage.SystemUpdateCheck) {

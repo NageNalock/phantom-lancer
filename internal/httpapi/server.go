@@ -99,6 +99,15 @@ type Server struct {
 	// requestTelemetry middleware so repeated 5xx bursts, scanner-driven
 	// 4xx floods, or slow SSE stream endpoints never drown service logs.
 	telemetrySampler *logsampler.Sampler
+
+	// startedAt is recorded once at New() time so /api/system/status can
+	// report uptime without touching any global. Stored as RFC3339Nano so
+	// the string also round-trips back through time.Parse.
+	startedAt string
+	// dataDir is the snapshot of cfg.DataDir used by status handlers; we
+	// cache the string on the struct to avoid a cfg pointer chase from the
+	// hot-path poll endpoint.
+	dataDir string
 }
 
 // httpServerManager is the minimum interface the httpapi handlers need from
@@ -134,6 +143,8 @@ func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewayS
 		updateConfirms:   newLoginBackoff(cfg.LoginFailureThreshold),
 		privateImages:    newPrivateImageAccess(),
 		telemetrySampler: logsampler.New(2 * time.Second),
+		startedAt:        time.Now().UTC().Format(time.RFC3339Nano),
+		dataDir:          cfg.DataDir,
 	}, nil
 }
 
@@ -185,6 +196,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/events/stream", s.handleEventStream)
 	mux.HandleFunc("GET /api/audit/events", s.handleAuditEvents)
 	mux.HandleFunc("GET /api/system/version", s.handleSystemVersion)
+	mux.HandleFunc("GET /api/system/status", s.handleSystemStatus)
 	mux.HandleFunc("GET /api/system/update/status", s.handleSystemUpdateStatus)
 	mux.HandleFunc("POST /api/system/update/check", s.handleSystemUpdateCheck)
 	mux.HandleFunc("POST /api/system/update/apply", s.handleSystemUpdateApply)
