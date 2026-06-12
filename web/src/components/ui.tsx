@@ -254,12 +254,20 @@ export function ImageDropInput({
     setFiles(event.dataTransfer.files);
   }
 
+  function openFilePicker() {
+    if (!disabled) inputRef.current?.click();
+  }
+
   return (
     <div
       aria-disabled={disabled}
+      aria-label={label}
       className={`grid gap-1.5 rounded-lg border border-dashed p-3 text-left transition ${disabled ? "border-[var(--line)] bg-[var(--surface-soft)] opacity-60" : dragging ? "border-[var(--accent)] bg-[var(--accent-soft)]" : "border-[var(--line-strong)] bg-[var(--surface-soft)] hover:bg-[var(--surface-strong)]"}`}
-      onClick={() => {
-        if (!disabled) inputRef.current?.click();
+      onClick={(event) => {
+        if (disabled) return;
+        event.preventDefault();
+        event.stopPropagation();
+        openFilePicker();
       }}
       onDragEnter={(event) => {
         event.preventDefault();
@@ -271,7 +279,8 @@ export function ImageDropInput({
       onKeyDown={(event) => {
         if (!disabled && (event.key === "Enter" || event.key === " ")) {
           event.preventDefault();
-          inputRef.current?.click();
+          event.stopPropagation();
+          openFilePicker();
         }
       }}
       role="button"
@@ -285,6 +294,7 @@ export function ImageDropInput({
         onChange={(event) => {
           if (event.target.files) setFiles(event.target.files);
         }}
+        onClick={(event) => event.stopPropagation()}
         ref={inputRef}
         type="file"
       />
