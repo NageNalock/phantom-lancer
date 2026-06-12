@@ -5,7 +5,6 @@
 
 - [personal-web-terminal-product-features.md](./personal-web-terminal-product-features.md)
 - [personal-web-terminal-technical-design.md](./personal-web-terminal-technical-design.md)
-- [happy-technical-reference.md](./happy-technical-reference.md)
 
 ## 1. Design Read
 

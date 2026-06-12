@@ -24,12 +24,12 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
 	"phantom-lancer/internal/auth"
 	"phantom-lancer/internal/config"
 	"phantom-lancer/internal/events"
 	"phantom-lancer/internal/httpserver"
 	"phantom-lancer/internal/storage"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // ---------------------------------------------------------------------------
@@ -139,15 +139,15 @@ func newListenerTest(t *testing.T, startHTTPS bool) (
 		DBPath:  filepath.Join(t.TempDir(), "phantom-lancer.db"),
 	}
 	srv := &Server{
-		cfg:   cfg,
-		store: store,
-		hub:   events.NewHub(),
-		log:   log,
-		httpSrv: manager,
-		startedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		dataDir:   cfg.DataDir,
-		logins:    newLoginBackoff(5),
-		gatewayOAuth: newCodexGatewayOAuthSessions(10 * time.Minute),
+		cfg:            cfg,
+		store:          store,
+		hub:            events.NewHub(),
+		log:            log,
+		httpSrv:        manager,
+		startedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+		dataDir:        cfg.DataDir,
+		logins:         newLoginBackoff(5),
+		gatewayOAuth:   newCodexGatewayOAuthSessions(10 * time.Minute),
 		privateUnlocks: newLoginBackoff(5),
 		updateConfirms: newLoginBackoff(5),
 		privateImages:  newPrivateImageAccess(),
@@ -385,6 +385,65 @@ func TestHandleSwapEndpoint_HTTPToHTTPS(t *testing.T) {
 	}
 }
 
+func TestHandleSwapEndpoint_SameAddrHTTPToHTTPS(t *testing.T) {
+	srv, mgr, store, sess, csrf, _ := newListenerTest(t, false)
+	addr := mgr.Endpoint().Addr
+	cert, key := generateSelfSignedForTest(t, t.TempDir(), "localhost")
+
+	r := newJSONRequest(t, http.MethodPost, "/api/settings/listener", map[string]any{
+		"addr":             addr,
+		"tlsEnabled":       true,
+		"tlsCertFile":      cert,
+		"tlsKeyFile":       key,
+		"tlsOwnerUidCheck": false,
+	}, sess, csrf)
+	w, resp := doReq(t, srv.Handler(), r)
+	if w.Code != 200 {
+		t.Fatalf("same-address HTTP->HTTPS should not fail: code=%d err=%+v body=%s", w.Code, resp["error"], w.Body.String())
+	}
+
+	ep, _ := resp["endpoint"].(map[string]any)
+	if ep["tlsEnabled"] != true || ep["scheme"] != "https" || ep["addr"] != addr {
+		t.Fatalf("unexpected endpoint after same-address swap: %+v", resp)
+	}
+	if resp["upgradeScheme"] != "https" {
+		t.Errorf("upgradeScheme expected https: %+v", resp)
+	}
+
+	cur, err := store.GetRuntimeSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cur.TLSEnabled || !cur.CookieSecure || cur.Addr != addr {
+		t.Errorf("runtime settings not persisted correctly: %+v", cur)
+	}
+
+	manEp := mgr.Endpoint()
+	if !manEp.TLSEnabled || manEp.Scheme != "https" || manEp.Addr != addr {
+		t.Fatalf("manager endpoint not swapped correctly: %+v", manEp)
+	}
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
+		},
+	}
+	var lastErr error
+	for i := 0; i < 30; i++ {
+		resp, err := client.Get("https://" + addr + "/api/health")
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("HTTPS health returned %d", resp.StatusCode)
+			}
+			return
+		}
+		lastErr = err
+		time.Sleep(80 * time.Millisecond)
+	}
+	t.Fatalf("HTTPS health not reachable on same address after swap: %v", lastErr)
+}
+
 // ---------------------------------------------------------------------------
 // 3. Swap failure rolls back DB
 // ---------------------------------------------------------------------------
@@ -435,8 +494,8 @@ func TestHandleSwapEndpoint_DowngradeRequiresConfirm(t *testing.T) {
 
 	// WITHOUT confirm → 400
 	r := newJSONRequest(t, http.MethodPost, "/api/settings/listener", map[string]any{
-		"addr":         newAddr,
-		"tlsEnabled":   false,
+		"addr":       newAddr,
+		"tlsEnabled": false,
 	}, sess, csrf)
 	w, resp := doReq(t, srv.Handler(), r)
 	if w.Code != 400 {
@@ -517,7 +576,10 @@ func TestHandleSwapEndpoint_DowngradeRevokesSessionsAndClearsCookies(t *testing.
 			t.Errorf("cookie should be expired (Max-Age<0 or Expires set): %s", c)
 		}
 	}
-	for _, k := range []struct{ have bool; name string }{
+	for _, k := range []struct {
+		have bool
+		name string
+	}{
 		{gotSecure, "session Secure"},
 		{gotInsecure, "session non-Secure"},
 		{gotCSRFSecure, "csrf Secure"},
@@ -566,10 +628,10 @@ func TestHandleSwapEndpoint_HSTSRequiresConfirm(t *testing.T) {
 
 	// Turn HSTS on without confirm → 400 confirm_hsts_required
 	r := newJSONRequest(t, http.MethodPost, "/api/settings/listener", map[string]any{
-		"addr":               newAddr,
-		"tlsEnabled":         false,
-		"hstsEnabled":        true,
-		"hstsMaxAgeSeconds":  3600,
+		"addr":              newAddr,
+		"tlsEnabled":        false,
+		"hstsEnabled":       true,
+		"hstsMaxAgeSeconds": 3600,
 	}, sess, csrf)
 	w, resp := doReq(t, srv.Handler(), r)
 	if w.Code != 400 {
@@ -581,11 +643,11 @@ func TestHandleSwapEndpoint_HSTSRequiresConfirm(t *testing.T) {
 
 	// With confirm → 200
 	r = newJSONRequest(t, http.MethodPost, "/api/settings/listener", map[string]any{
-		"addr":               newAddr,
-		"tlsEnabled":         false,
-		"hstsEnabled":        true,
-		"hstsMaxAgeSeconds":  3600,
-		"confirm_hsts":       true,
+		"addr":              newAddr,
+		"tlsEnabled":        false,
+		"hstsEnabled":       true,
+		"hstsMaxAgeSeconds": 3600,
+		"confirm_hsts":      true,
 	}, sess, csrf)
 	w, resp = doReq(t, srv.Handler(), r)
 	if w.Code != 200 {
@@ -778,8 +840,8 @@ func TestHandleSwapEndpoint_SplitStateDetected(t *testing.T) {
 	// just verify splitStateWarning=false on the happy path.
 	newAddr := pickEphemeralAddr(t)
 	r := newJSONRequest(t, http.MethodPost, "/api/settings/listener", map[string]any{
-		"addr":        newAddr,
-		"tlsEnabled":  false,
+		"addr":       newAddr,
+		"tlsEnabled": false,
 	}, sess, csrf)
 	w, resp := doReq(t, srv.Handler(), r)
 	if w.Code != 200 {

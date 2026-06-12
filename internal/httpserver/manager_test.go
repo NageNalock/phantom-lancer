@@ -114,12 +114,12 @@ func TestNewWithEndpoint_HTTPSHappy(t *testing.T) {
 	cert, key := generateSelfSigned(t, t.TempDir(), "localhost")
 	addr := pickEphemeralAddr(t)
 	cfg := EndpointConfig{
-		Addr:             addr,
-		TLSEnabled:       true,
-		TLSCertFile:      cert,
-		TLSKeyFile:       key,
-		TLSOwnerUIDCheck: false,
-		HSTSEnabled:      true,
+		Addr:              addr,
+		TLSEnabled:        true,
+		TLSCertFile:       cert,
+		TLSKeyFile:        key,
+		TLSOwnerUIDCheck:  false,
+		HSTSEnabled:       true,
 		HSTSMaxAgeSeconds: 15724800,
 	}
 	m, ep, err := NewWithEndpoint(cfg, echoHandler, log, false)
@@ -322,6 +322,45 @@ func TestSwapEndpoint_FastPathCertReload(t *testing.T) {
 	}
 }
 
+func TestSwapEndpoint_SameAddrHTTPToHTTPS(t *testing.T) {
+	log, _ := newTestLogger(t)
+	addr := pickEphemeralAddr(t)
+	m, _, err := NewWithEndpoint(EndpointConfig{Addr: addr}, echoHandler, log, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startThenCleanup(t, m)
+	if c, _ := httpGet(t, "http://"+addr+"/", nil); c != 200 {
+		t.Fatalf("initial HTTP failed: %d", c)
+	}
+
+	cert, key := generateSelfSigned(t, t.TempDir(), "localhost")
+	ep, err := m.SwapEndpoint(EndpointConfig{
+		Addr:             addr,
+		TLSEnabled:       true,
+		TLSCertFile:      cert,
+		TLSKeyFile:       key,
+		TLSOwnerUIDCheck: false,
+	})
+	if err != nil {
+		t.Fatalf("same-address HTTP->HTTPS swap should not report port in use: %v", err)
+	}
+	if !ep.TLSEnabled || ep.Scheme != "https" || ep.Addr != addr {
+		t.Fatalf("unexpected endpoint after same-address swap: %+v", ep)
+	}
+
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
+		},
+	}
+	code, body := httpGetRetried(t, "https://"+addr+"/", client, 200, 30)
+	if code != 200 {
+		t.Fatalf("HTTPS not reachable on same address after swap: %d %q", code, body)
+	}
+}
+
 func TestSwapEndpoint_BindFailNoSideEffect(t *testing.T) {
 	log, _ := newTestLogger(t)
 	addr1 := pickEphemeralAddr(t)
@@ -334,8 +373,8 @@ func TestSwapEndpoint_BindFailNoSideEffect(t *testing.T) {
 		t.Fatalf("initial HTTP failed: %d", c)
 	}
 
-	// Bind to an address that is already bound → must fail and keep old listener.
-	// Reuse addr1 (already bound by m) — cannot bind twice on same port.
+	// Same-address no-op may succeed via the fast path; then use a privileged
+	// port we generally cannot bind as a non-root process.
 	_, err = m.SwapEndpoint(EndpointConfig{Addr: addr1})
 	// With SO_REUSEADDR sometimes this succeeds on macOS. Use a
 	// definitely-invalid numeric port (0 is invalid per SwapEndpoint validation
@@ -452,16 +491,16 @@ func TestCertReloader_BadNewCertPreservesOld(t *testing.T) {
 
 func TestEndpoint_JSONFieldsMatchFrontend(t *testing.T) {
 	ep := Endpoint{
-		Addr:               "127.0.0.1:8443",
-		TLSEnabled:         true,
-		Scheme:             "https",
-		CertFile:           "/etc/pl/tls/cert.pem",
-		CertDNSNames:       []string{"localhost", "example.com"},
-		CertNotBefore:      "2026-06-01T00:00:00Z",
-		CertNotAfter:       "2026-12-01T00:00:00Z",
-		CertReloadErr:      "", // exercises json ",omitempty"
-		HSTSEnabled:        true,
-		HSTSMaxAgeSeconds:  15724800,
+		Addr:              "127.0.0.1:8443",
+		TLSEnabled:        true,
+		Scheme:            "https",
+		CertFile:          "/etc/pl/tls/cert.pem",
+		CertDNSNames:      []string{"localhost", "example.com"},
+		CertNotBefore:     "2026-06-01T00:00:00Z",
+		CertNotAfter:      "2026-12-01T00:00:00Z",
+		CertReloadErr:     "", // exercises json ",omitempty"
+		HSTSEnabled:       true,
+		HSTSMaxAgeSeconds: 15724800,
 	}
 	b, err := json.Marshal(ep)
 	if err != nil {

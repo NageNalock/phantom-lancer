@@ -6,7 +6,6 @@
 
 - [personal-web-terminal-product-features.md](./personal-web-terminal-product-features.md)
 - [personal-web-terminal-technical-design.md](./personal-web-terminal-technical-design.md)
-- [happy-technical-reference.md](./happy-technical-reference.md)
 - [codex-openai-gateway-feature-design.md](./codex-openai-gateway-feature-design.md)
 
 参考来源：

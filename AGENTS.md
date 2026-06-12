@@ -4,9 +4,6 @@
 
 - `docs/personal-web-terminal-product-features.md`
 - `docs/personal-web-terminal-technical-design.md`
-- `docs/happy-technical-reference.md`
-
-其中 `docs/happy-technical-reference.md` 是对 `slopus/happy` 的技术参考建议。它只作为设计参考，不是强制实现规范；开发时仍应优先遵循本项目的 Go 后端、SQLite、SSE、个人单机部署和受控权限边界。
 
 ## 变更兼容性与完整性
 
