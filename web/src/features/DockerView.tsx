@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppActions } from "../app/App";
 import type {
   DockerControlStatus,
@@ -99,6 +99,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
   const [selectedRepo, setSelectedRepo] = useStringQueryParamState("drrepo", "", { clearKeys: ["drtag"] });
   const [selectedTag, setSelectedTag] = useStringQueryParamState("drtag", "");
   const [createFocus, , toggleCreateFocus] = useBoolQueryParamState("dcreate", false);
+  const selectedRepoRef = useRef(selectedRepo);
   const [status, setStatus] = useState<DockerStatus | null>(null);
   const [control, setControl] = useState<DockerControlStatus | null>(null);
   const [containers, setContainers] = useState<DockerContainerSummary[]>([]);
@@ -138,6 +139,10 @@ export function DockerView({ actions }: { actions: AppActions }) {
   const [containerDetailsLoading, setContainerDetailsLoading] = useState(false);
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
+  useEffect(() => {
+    selectedRepoRef.current = selectedRepo;
+  }, [selectedRepo]);
+
   const loadStatus = useCallback(async () => {
     try {
       const response = await actions.api<{ status: DockerStatus; control?: DockerControlStatus }>("/api/docker/status");
@@ -154,6 +159,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
   }, [actions]);
 
   const loadRegistry = useCallback(async (preferredRepo?: string) => {
+    const currentSelectedRepo = selectedRepoRef.current;
     const [statusRes, settingsRes, reposRes, credsRes, profilesRes] = await Promise.all([
       actions.api<{ status?: DockerRegistryStatus }>("/api/docker/registry/status"),
       actions.api<{ settings?: DockerRegistrySettings }>("/api/docker/registry/settings"),
@@ -167,16 +173,22 @@ export function DockerView({ actions }: { actions: AppActions }) {
     setRepositories(nextRepos);
     setCredentials(credsRes.items || []);
     setObjectProfiles(profilesRes.items || []);
-    const urlRepo = preferredRepo || selectedRepo;
+    const urlRepo = preferredRepo || currentSelectedRepo;
     const nextRepo = nextRepos.some((item) => item.name === urlRepo)
       ? urlRepo
       : nextRepos[0]?.name || "";
     if (!nextRepo) {
-      if (selectedRepo) setSelectedRepo("");
+      if (currentSelectedRepo) {
+        selectedRepoRef.current = "";
+        setSelectedRepo("");
+      }
       setRepoTags([]);
       return;
     }
-    if (nextRepo !== selectedRepo) setSelectedRepo(nextRepo);
+    if (nextRepo !== currentSelectedRepo) {
+      selectedRepoRef.current = nextRepo;
+      setSelectedRepo(nextRepo);
+    }
     try {
       const tagsRes = await actions.api<{ items?: DockerRegistryTag[] }>(`/api/docker/registry/repositories/${nextRepo}/tags`);
       setRepoTags(tagsRes.items || []);
@@ -184,7 +196,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
       setRepoTags([]);
       actions.setToast(friendlyError(error), "danger");
     }
-  }, [actions, selectedRepo, setSelectedRepo]);
+  }, [actions, setSelectedRepo]);
 
   const loadJobsAndEvents = useCallback(async () => {
     const [jobsRes, eventsRes] = await Promise.all([
@@ -202,6 +214,8 @@ export function DockerView({ actions }: { actions: AppActions }) {
         try {
           await loadRegistry();
           if (active === "settings") await loadJobsAndEvents();
+        } catch (error) {
+          actions.setToast(friendlyError(error), "danger");
         } finally {
           setLoading(false);
         }
@@ -211,6 +225,8 @@ export function DockerView({ actions }: { actions: AppActions }) {
         setLoading(true);
         try {
           await Promise.all([loadRegistry(), loadJobsAndEvents()]);
+        } catch (error) {
+          actions.setToast(friendlyError(error), "danger");
         } finally {
           setLoading(false);
         }
@@ -263,11 +279,13 @@ export function DockerView({ actions }: { actions: AppActions }) {
     void loadStatus();
   }, [loadStatus]);
 
-  useEffect(() => {
-    if (status) void loadTab(tab, status.available);
-  }, [tab, status, loadTab]);
+  const dockerAvailable = status?.available;
 
-  const available = Boolean(status?.available);
+  useEffect(() => {
+    if (dockerAvailable !== undefined) void loadTab(tab, dockerAvailable);
+  }, [tab, dockerAvailable, loadTab]);
+
+  const available = Boolean(dockerAvailable);
 
   async function refresh() {
     const next = await loadStatus();
@@ -658,6 +676,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
   }
 
   async function openRepository(repo: string) {
+    selectedRepoRef.current = repo;
     setSelectedRepo(repo);
     try {
       const response = await actions.api<{ items?: DockerRegistryTag[] }>(`/api/docker/registry/repositories/${repo}/tags`);
@@ -681,7 +700,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
     try {
       await actions.api(`/api/docker/registry/repositories/${item.repository}/tags/${item.tag}`, { method: "DELETE", csrf: actions.csrf });
       await openRepository(item.repository);
-      await loadRegistry();
+      await loadRegistry(item.repository);
       actions.setToast("Registry tag 已删除", "good");
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");

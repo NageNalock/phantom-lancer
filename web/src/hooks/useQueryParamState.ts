@@ -1,10 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 
 type QueryValue = string | null | undefined;
+const EMPTY_CLEAR_KEYS: readonly string[] = [];
 
 interface QueryParamStateOptions {
   clearKeys?: readonly string[];
+}
+
+function useStableClearKeys(options: QueryParamStateOptions): readonly string[] {
+  const signature = (options.clearKeys || EMPTY_CLEAR_KEYS).join("\0");
+  return useMemo(() => {
+    if (!options.clearKeys || options.clearKeys.length === 0) return EMPTY_CLEAR_KEYS;
+    return [...options.clearKeys];
+  }, [signature]);
 }
 
 export function useQueryParamState<T extends string>(
@@ -16,7 +25,7 @@ export function useQueryParamState<T extends string>(
   const read = useCallback(() => readQueryParam(key, values, fallback), [fallback, key, values]);
   const [state, setState] = useState<T>(read);
   const stateRef = useRef(state);
-  const clearKeys = options.clearKeys || [];
+  const clearKeys = useStableClearKeys(options);
 
   useEffect(() => {
     stateRef.current = state;
@@ -87,7 +96,7 @@ export function useStringQueryParamState(
   }, [fallback, key]);
   const [state, setState] = useState<string>(read);
   const stateRef = useRef(state);
-  const clearKeys = options.clearKeys || [];
+  const clearKeys = useStableClearKeys(options);
 
   useEffect(() => {
     stateRef.current = state;
@@ -124,7 +133,7 @@ export function useBoolQueryParamState(
   }, [fallback, key]);
   const [state, setState] = useState<boolean>(read);
   const stateRef = useRef(state);
-  const clearKeys = options.clearKeys || [];
+  const clearKeys = useStableClearKeys(options);
 
   useEffect(() => {
     stateRef.current = state;
