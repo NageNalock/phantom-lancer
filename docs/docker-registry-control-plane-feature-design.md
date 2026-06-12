@@ -147,8 +147,8 @@ docker login registry.example.com
 7. 登录成功后，Owner 可以推送镜像：
 
 ```bash
-docker tag my-app:latest registry.example.com/personal/my-app:latest
-docker push registry.example.com/personal/my-app:latest
+docker tag my-app:latest registry.example.com/project/app:latest
+docker push registry.example.com/project/app:latest
 ```
 
 8. Registry 模块记录 repository/tag/manifest 元数据和 audit。
@@ -164,7 +164,7 @@ Docker client 对 registry 的访问不是浏览器 API，而是标准 Registry 
 5. Registry 写入底层 blob store。
 6. 后端记录 manifest digest、tag、size、created_at、pushed_by credential id 摘要。
 
-注意：Docker image reference 只支持 registry host 加 repository path，不支持把 registry 放在普通 Web path 下。例如 `registry.example.com/personal/my-app:latest` 中的 `personal/my-app` 是 repository name，不是 `/personal` 反向代理前缀。服务端必须能处理 registry 根路径下的 `/v2/*`。
+注意：Docker image reference 只支持 registry host 加 repository path，不支持把 registry 放在普通 Web path 下。例如 `registry.example.com/project/app:latest` 中的 `project/app` 是 repository name，不是 `/project` 反向代理前缀。服务端必须能处理 registry 根路径下的 `/v2/*`。
 
 ### 5.4 管理本机容器
 
@@ -241,8 +241,8 @@ Scope 建议：
 
 Repository scope：
 
-- MVP 默认允许 `personal/*`。
-- 后续支持 credential 绑定到 repository prefix，例如 `apps/*`、`base/*`。
+- Credential 可以绑定到 repository prefix，例如 `personal/*`、`apps/*`、`base/*`。
+- Web 控制面创建容器时不强制固定 `personal/*` 命名空间；只要镜像引用来自当前 Registry public URL 的同一 registry host，即视为受控来源。实际拉取鉴权仍按 credential repository prefix 匹配。
 - 禁止空 prefix 的匿名 push。
 
 Auth 策略：
@@ -386,7 +386,7 @@ MVP 禁止：
 
 后续如果加入 `run` 或 compose，必须先设计 allowlist：
 
-- 只允许指定 image repository prefix。
+- 只允许当前受控 Registry 主机下的镜像，或显式配置的 image repository prefix。
 - 只允许指定 network。
 - 只允许命名 volume，不允许任意 host path。
 - 不允许 privileged。
@@ -958,6 +958,7 @@ Object Storage Profiles 不建议放入 TOML 明文配置，尤其不在配置�
 - Container env 明文。
 
 容器日志、pull progress、GC progress 应进入受控 events/job output，并设置上限。
+Docker pull progress 只持久化脱敏后的 layer/status/current/total 摘要，不保存 Docker daemon 原始 JSON line。
 
 ## 15. 实现阶段
 

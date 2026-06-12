@@ -24,6 +24,8 @@ import { formatBytesZero } from "../utils/format";
 import { friendlyError } from "../api/client";
 import { useQueryParamState, useStringQueryParamState, useBoolQueryParamState } from "../hooks/useQueryParamState";
 import { DockerTable, DockerValue } from "./docker/DockerTable";
+import { CreateContainerDrawer } from "./docker/CreateContainerDrawer";
+import type { CreateContainerTemplate } from "./docker/CreateContainerDrawer";
 import { HostOperationsPanel } from "./docker/HostOperationsPanel";
 import { RegistryPanel } from "./docker/RegistryPanel";
 
@@ -45,6 +47,19 @@ const TABS: { id: DockerTab; label: string }[] = [
 ];
 const DOCKER_TAB_IDS: DockerTab[] = TABS.map((item) => item.id);
 const DOCKER_CLEAR_KEYS = ["codex", "codexInbox", "codexRuntime", "gateway", "images", "settings"];
+const DOCKER_JOB_EVENT_TYPES = [
+  "docker.job.created",
+  "docker.job.started",
+  "docker.job.output",
+  "docker.image.pull.progress",
+  "docker.job.completed",
+  "docker.job.failed",
+  "docker.job.cancel.requested",
+  "docker.job.cancelled",
+];
+const DOCKER_REGISTRY_KEYS = ["drv", "drrepo", "drtag"] as const;
+const DOCKER_CONTAINER_KEYS = ["dcform", "dselc"] as const;
+const DOCKER_IMAGE_KEYS = ["dseli"] as const;
 
 
 function formatUnix(seconds: number): string {
@@ -71,6 +86,7 @@ function eventMessage(event: EventRecord): string {
   if (event.type === "docker.job.failed") return "任务失败";
   if (event.type === "docker.job.cancel.requested") return "已请求取消任务";
   if (event.type === "docker.job.cancelled") return "任务已取消";
+  if (event.type === "docker.image.pull.progress") return pullProgressEventLabel(event);
   return event.type;
 }
 
@@ -79,6 +95,42 @@ function streamTone(event: EventRecord): string {
   if (event.type === "docker.job.failed" || stream === "stderr") return "text-[var(--danger)]";
   if (event.type === "docker.job.cancelled" || event.type === "docker.job.cancel.requested") return "text-[var(--warn)]";
   return "";
+}
+
+function payloadString(event: EventRecord, key: string): string {
+  const value = event.payload?.[key];
+  return typeof value === "string" ? value : "";
+}
+
+function payloadNumber(event: EventRecord, key: string): number {
+  const value = event.payload?.[key];
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function isPullProgressEvent(event: EventRecord): boolean {
+  return event.type === "docker.image.pull.progress";
+}
+
+function pullProgressEventLabel(event: EventRecord): string {
+  const layer = payloadString(event, "layer");
+  const status = payloadString(event, "status") || "更新";
+  const percent = payloadNumber(event, "percent");
+  const suffix = percent > 0 ? ` ${Math.round(percent)}%` : "";
+  return layer ? `${layer}: ${status}${suffix}` : `拉取进度：${status}${suffix}`;
+}
+
+function pullStatusComplete(status: string): boolean {
+  const normalized = status.trim().toLowerCase();
+  return normalized === "already exists" ||
+    normalized === "download complete" ||
+    normalized === "pull complete" ||
+    normalized === "complete" ||
+    normalized.endsWith(" complete");
 }
 
 function containerName(container: DockerContainerSummary): string {
@@ -94,11 +146,30 @@ function registryTagPullBusyKey(tag: DockerRegistryTag): string {
 }
 
 export function DockerView({ actions }: { actions: AppActions }) {
-  const [tab, setTab, tabHref] = useQueryParamState<DockerTab>("docker", DOCKER_TAB_IDS, "overview", { clearKeys: DOCKER_CLEAR_KEYS });
+  const [tab, _setTab, tabHref] = useQueryParamState<DockerTab>("docker", DOCKER_TAB_IDS, "overview", { clearKeys: DOCKER_CLEAR_KEYS });
+  const setTab = useCallback((next: DockerTab) => {
+    const clears: string[] = [];
+    if (next !== "registry") clears.push(...DOCKER_REGISTRY_KEYS);
+    if (next !== "containers") clears.push(...DOCKER_CONTAINER_KEYS);
+    if (next !== "images") clears.push(...DOCKER_IMAGE_KEYS);
+    if (next !== "settings") clears.push("dcreate");
+    const params = new URLSearchParams(window.location.search);
+    for (const key of clears) params.delete(key);
+    if (next !== "overview") params.set("docker", next); else params.delete("docker");
+    const href = `${window.location.pathname}${params.toString() ? "?" + params.toString() : ""}${window.location.hash}`;
+    if (href !== `${window.location.pathname}${window.location.search}${window.location.hash}`) {
+      window.history.pushState(null, "", href);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    } else {
+      _setTab(next);
+    }
+  }, [_setTab]);
   const [registryView, setRegistryView] = useQueryParamState<RegistryView>("drv", REGISTRY_VIEW_IDS, "repositories", { clearKeys: ["drtag"] });
   const [selectedRepo, setSelectedRepo] = useStringQueryParamState("drrepo", "", { clearKeys: ["drtag"] });
   const [selectedTag, setSelectedTag] = useStringQueryParamState("drtag", "");
-  const [createFocus, , toggleCreateFocus] = useBoolQueryParamState("dcreate", false);
+  const [createFormOpen, setCreateFormOpen, toggleCreateForm] = useBoolQueryParamState("dcform", false, { clearKeys: [] });
+  const [selectedContainerId, setSelectedContainerId] = useStringQueryParamState("dselc", "");
+  const [selectedImageId, setSelectedImageId] = useStringQueryParamState("dseli", "");
   const selectedRepoRef = useRef(selectedRepo);
   const [status, setStatus] = useState<DockerStatus | null>(null);
   const [control, setControl] = useState<DockerControlStatus | null>(null);
@@ -124,6 +195,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState("");
   const [pullRef, setPullRef] = useState("");
+  const [imageSearch, setImageSearch] = useState("");
   const [logsFor, setLogsFor] = useState<DockerContainerSummary | null>(null);
   const [logLines, setLogLines] = useState<DockerLogLine[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
@@ -284,6 +356,12 @@ export function DockerView({ actions }: { actions: AppActions }) {
   useEffect(() => {
     if (dockerAvailable !== undefined) void loadTab(tab, dockerAvailable);
   }, [tab, dockerAvailable, loadTab]);
+
+  useEffect(() => {
+    if (!createFormOpen) return;
+    if (registryStatus !== null || registrySettings.publicUrl || repositories.length > 0) return;
+    void loadRegistry().catch((error) => actions.setToast(friendlyError(error), "danger"));
+  }, [actions, createFormOpen, loadRegistry, registrySettings.publicUrl, registryStatus, repositories.length]);
 
   const available = Boolean(dockerAvailable);
 
@@ -719,8 +797,8 @@ export function DockerView({ actions }: { actions: AppActions }) {
     setCreateImage(ref);
     setPullRef(ref);
     setSelectedTag(`${item.repository}:${item.tag}`);
-    setTab("settings");
-    if (!createFocus) toggleCreateFocus();
+    setTab("containers");
+    if (!createFormOpen) toggleCreateForm();
     actions.setToast("已带入容器创建表单", "good");
   }
 
@@ -773,7 +851,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
         `Restart: ${template.restartPolicy || "no"}`,
         "当前模板不允许 host path、privileged、host network 或自由参数。",
       ],
-      recovery: "创建失败不会保留半成品；创建成功后可在容器列表中停止或删除。",
+      recovery: "如果创建成功但启动失败，可能留下已创建但未运行的容器，请到容器列表确认或删除；运行成功后可在容器列表中停止或删除。",
     });
     if (!confirmed) return;
     setBusy("container-create");
@@ -846,13 +924,13 @@ export function DockerView({ actions }: { actions: AppActions }) {
         // 下一次状态刷新会对齐任务状态。
       }
     };
-    ["docker.job.created", "docker.job.started", "docker.job.output", "docker.job.completed", "docker.job.failed", "docker.job.cancel.requested", "docker.job.cancelled"].forEach((name) => source.addEventListener(name, handle));
+    DOCKER_JOB_EVENT_TYPES.forEach((name) => source.addEventListener(name, handle));
     source.onerror = () => {
       if (!closed) source.close();
     };
     return () => {
       closed = true;
-      ["docker.job.created", "docker.job.started", "docker.job.output", "docker.job.completed", "docker.job.failed", "docker.job.cancel.requested", "docker.job.cancelled"].forEach((name) => source.removeEventListener(name, handle));
+      DOCKER_JOB_EVENT_TYPES.forEach((name) => source.removeEventListener(name, handle));
       source.close();
     };
   }, [actions, job?.eventScope, job?.eventScopeId, loadControl, loadJobsAndEvents]);
@@ -912,26 +990,11 @@ export function DockerView({ actions }: { actions: AppActions }) {
         <HostOperationsPanel
           busy={busy}
           control={control}
-          createContainer={(template) => void createContainer(template)}
-          createEnv={createEnv}
-          createFocus={createFocus}
-          createImage={createImage}
-          createName={createName}
-          createPorts={createPorts}
-          createRestart={createRestart}
-          createVolumes={createVolumes}
           daemonAction={(action) => void daemonAction(action)}
           installDocker={() => void installDocker()}
           loadControl={() => void loadControl()}
           registryPublicUrl={registrySettings.publicUrl}
           saveDockerSettings={(next) => void saveDockerSettings(next)}
-          setCreateEnv={setCreateEnv}
-          setCreateImage={setCreateImage}
-          setCreateName={setCreateName}
-          setCreatePorts={setCreatePorts}
-          setCreateRestart={setCreateRestart}
-          setCreateVolumes={setCreateVolumes}
-          toggleCreateFocus={toggleCreateFocus}
         />
 	      ) : tab === "overview" ? (
 	        <DockerOverview
@@ -955,40 +1018,81 @@ export function DockerView({ actions }: { actions: AppActions }) {
 	        />
 	      ) : !available ? (
 	        <DockerUnavailablePanel control={control} lastError={status?.lastError} setTab={setTab} />
-	      ) : tab === "containers" ? (
-	        <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-4 max-xl:grid-cols-1">
-	          <Panel title="容器" subtitle="选中容器后在右侧查看状态、stats、端口、挂载、网络、labels 和最近日志。">
-	            <DockerTable
-	              columns={[
-	                { header: "名称", width: "20%" },
-	                { header: "状态", width: "16%" },
-	                { header: "镜像", width: "30%" },
-	                { header: "端口", width: "18%" },
-	                { header: "操作", width: "250px" },
-	              ]}
-	              empty="暂无容器"
-	              loading={loading}
-	              rows={containers.map((item) => ({
-	                key: item.id,
-	                cells: [
-	                  <DockerValue value={item.names[0] || item.id} />,
-	                  <span className="flex flex-col gap-1">
-	                    <Pill tone={containerTone(item.state)}>{item.state}</Pill>
-	                    <span className="muted truncate text-xs" title={item.status}>{item.status}</span>
-	                  </span>,
-	                  <DockerValue value={item.image} />,
-	                  <DockerValue value={(item.ports || []).join(", ") || "-"} />,
-	                  <ContainerActions
-	                    busy={busy}
-	                    item={item}
-	                    onAction={(action) => void containerAction(item, action)}
-	                    onDetails={() => void openContainerDetails(item)}
-	                    onRemove={() => void removeContainer(item)}
-	                  />,
-	                ],
-	              }))}
-	            />
-	          </Panel>
+      ) : tab === "containers" ? (
+        <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-4 max-xl:grid-cols-1">
+          <Panel
+            title="容器"
+            subtitle="选中容器后在右侧查看状态、stats、端口、挂载、网络、labels 和最近日志。"
+            actions={
+              <span className="flex gap-2">
+                <Button onClick={() => { if (!createFormOpen) toggleCreateForm(); }} tone="primary">
+                  创建容器
+                </Button>
+                {!images.length ? <Button onClick={() => setTab("images")}>先拉取镜像</Button> : null}
+              </span>
+            }
+          >
+            {containers.length === 0 && !loading ? (
+              <div className="grid min-h-48 place-items-center rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-6">
+                <div className="grid max-w-md gap-4 text-center">
+                  <div>
+                    <strong className="block text-sm">还没有容器</strong>
+                    <p className="muted mt-1 mb-0 text-xs">先从 Registry 或本机镜像创建第一个容器。</p>
+                  </div>
+                  <div className="flex flex-wrap justify-center gap-2">
+                    <Button onClick={() => setTab("registry")}>打开 Registry</Button>
+                    <Button onClick={() => setTab("images")}>查看镜像</Button>
+                    {images.length ? (
+                      <Button
+                        tone="primary"
+                        onClick={() => {
+                          if (!createFormOpen) toggleCreateForm();
+                        }}
+                      >
+                        创建第一个容器
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <DockerTable
+                columns={[
+                  { header: "名称", width: "20%" },
+                  { header: "状态", width: "16%" },
+                  { header: "镜像", width: "30%" },
+                  { header: "端口", width: "18%" },
+                  { header: "操作" },
+                ]}
+                empty=""
+                loading={loading}
+                rows={containers.map((item) => ({
+                  key: item.id,
+                  cells: [
+                    <DockerValue value={item.names[0] || item.id} />,
+                    <span className="flex flex-col gap-1">
+                      <Pill tone={containerTone(item.state)}>{item.state}</Pill>
+                      <span className="muted truncate text-xs" title={item.status}>{item.status}</span>
+                    </span>,
+                    <DockerValue value={item.image} />,
+                    <DockerValue value={(item.ports || []).join(", ") || "-"} />,
+                    <ContainerActions
+                      busy={busy}
+                      item={item}
+                      onAction={(action) => void containerAction(item, action)}
+                      onClone={() => {
+                        setCreateName(`${item.names[0] || item.id}-copy`.slice(0, 63));
+                        setCreateImage(item.image);
+                        if (!createFormOpen) toggleCreateForm();
+                      }}
+                      onDetails={() => void openContainerDetails(item)}
+                      onRemove={() => void removeContainer(item)}
+                    />,
+                  ],
+                }))}
+              />
+            )}
+          </Panel>
           <ContainerInspector
             allJobEvents={recentDockerEvents}
             details={containerDetails}
@@ -1014,50 +1118,26 @@ export function DockerView({ actions }: { actions: AppActions }) {
           />
 	        </div>
       ) : tab === "images" ? (
-        <Panel title="镜像">
-          <div className="grid gap-3">
-            <div className="flex flex-wrap items-end gap-2">
-              <div className="min-w-60 flex-1">
-                <Field label="拉取镜像" help="例如 nginx:latest 或 registry.example.com/app:tag。">
-                  <input className="input mono" onChange={(event) => setPullRef(event.target.value)} placeholder="repository:tag" value={pullRef} />
-                </Field>
-              </div>
-              <Button disabled={busy === "pull"} tone="primary" onClick={() => void pullImage()}>
-                {busy === "pull" ? "拉取中" : "拉取"}
-              </Button>
-            </div>
-            <DockerTable
-              columns={[
-                { header: "标签", width: "30%" },
-                { header: "被使用", width: "18%" },
-                { header: "ID", width: "18%" },
-                { header: "大小", width: "110px" },
-                { header: "创建时间", width: "160px" },
-                { header: "操作", width: "90px" },
-              ]}
-              empty="暂无镜像"
-              loading={loading}
-              rows={images.map((item) => ({
-                key: item.id,
-                cells: [
-                  <DockerValue value={item.tags && item.tags.length ? item.tags.join(", ") : item.id} />,
-                  item.usedBy?.length ? (
-                    <span className="flex flex-wrap gap-1">
-                      {item.usedBy.slice(0, 4).map((name) => (
-                      <Pill key={name} tone="neutral">{name}</Pill>
-                    ))}
-                      {item.usedBy.length > 4 ? <Pill tone="neutral">+{item.usedBy.length - 4}</Pill> : null}
-                    </span>
-                  ) : <span className="muted text-xs">未使用</span>,
-                  <DockerValue value={item.id} />,
-                  <span className="text-xs">{formatBytesZero(item.sizeBytes)}</span>,
-                  <span className="text-xs">{formatUnix(item.created)}</span>,
-                  <Button disabled={busy === `rmi-${item.id}`} tone="danger" onClick={() => void removeImage(item)}>删除</Button>,
-                ],
-              }))}
-            />
-          </div>
-        </Panel>
+        <ImageListPanel
+          busy={busy}
+          createEnabled={Boolean(control?.settings?.containerCreateEnabled)}
+          imageSearch={imageSearch}
+          images={images}
+          loading={loading}
+          onCloseImage={() => setSelectedImageId("")}
+          onCreateFromImage={(item) => {
+            if (item.tags?.[0]) setCreateImage(item.tags[0]); else setCreateImage(item.id);
+            setTab("containers");
+            if (!createFormOpen) toggleCreateForm();
+          }}
+          onPull={() => void pullImage()}
+          onRemoveImage={(item) => void removeImage(item)}
+          pullRef={pullRef}
+          selectedImageId={selectedImageId}
+          setImageSearch={setImageSearch}
+          setPullRef={setPullRef}
+          setSelectedImageId={setSelectedImageId}
+        />
       ) : tab === "volumes" ? (
         <Panel title="卷">
           <DockerTable
@@ -1111,6 +1191,29 @@ export function DockerView({ actions }: { actions: AppActions }) {
         </Panel>
       )}
       </div>
+      <CreateContainerDrawer
+        busy={busy}
+        containerCreateEnabled={Boolean(control?.settings?.containerCreateEnabled)}
+        createEnv={createEnv}
+        createImage={createImage}
+        createName={createName}
+        createPorts={createPorts}
+        createRestart={createRestart}
+        createVolumes={createVolumes}
+        onClose={() => setCreateFormOpen(false)}
+        onSubmit={(template: CreateContainerTemplate) => void createContainer(template)}
+        open={createFormOpen}
+        prefillImageLabel={createImage || undefined}
+        registryEnabled={Boolean(registrySettings.publicUrl || registryStatus?.publicUrl)}
+        registryHost={registryHostFromPublicUrl(registrySettings.publicUrl || registryStatus?.publicUrl)}
+        registryRepositories={repositories}
+        setCreateEnv={setCreateEnv}
+        setCreateImage={setCreateImage}
+        setCreateName={setCreateName}
+        setCreatePorts={setCreatePorts}
+        setCreateRestart={setCreateRestart}
+        setCreateVolumes={setCreateVolumes}
+      />
       {dangerConfirmDialog}
     </>
   );
@@ -1296,6 +1399,8 @@ function DockerJobPanel({ job, jobEvents, onCancelJob, busy }: { job: DockerJob 
     );
   }
   const canCancel = job.status === "queued" || job.status === "running";
+  const pullProgress = buildPullProgress(jobEvents);
+  const visibleEvents = jobEvents.filter((item) => !isPullProgressEvent(item));
   return (
     <Panel
       title={`Docker Job · ${job.title}`}
@@ -1309,28 +1414,134 @@ function DockerJobPanel({ job, jobEvents, onCancelJob, busy }: { job: DockerJob 
         </span>
       }
     >
-      {jobEvents.length ? (
+      {pullProgress ? <DockerPullProgress progress={pullProgress} /> : null}
+      {visibleEvents.length ? (
         <pre className="mono max-h-80 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs leading-relaxed">
-          {jobEvents.map((item) => (
+          {visibleEvents.map((item) => (
             <div className={streamTone(item)} key={item.id || `${item.type}-${item.sequence}`}>
               {eventMessage(item)}
             </div>
           ))}
         </pre>
-      ) : (
+      ) : pullProgress ? null : (
         <EmptyState title="等待任务事件" body="任务事件会通过 SSE 实时追加；刷新后也会从历史事件恢复。" />
       )}
     </Panel>
   );
 }
 
+type PullProgressLayer = {
+  key: string;
+  layer: string;
+  status: string;
+  current: number;
+  total: number;
+  percent: number | null;
+  complete: boolean;
+  updatedAt?: string;
+};
+
+type PullProgressSummary = {
+  layers: PullProgressLayer[];
+  overallPercent: number | null;
+  completedLayers: number;
+  activeLayers: number;
+};
+
+function buildPullProgress(events: EventRecord[]): PullProgressSummary | null {
+  const layers = new Map<string, PullProgressLayer>();
+  for (const event of events) {
+    if (!isPullProgressEvent(event)) continue;
+    const layer = payloadString(event, "layer") || "image";
+    const status = payloadString(event, "status") || "更新";
+    const current = payloadNumber(event, "current");
+    const total = payloadNumber(event, "total");
+    const payloadPercent = payloadNumber(event, "percent");
+    const percent = total > 0
+      ? Math.max(0, Math.min(100, Math.round((current / total) * 100)))
+      : payloadPercent > 0
+        ? Math.max(0, Math.min(100, Math.round(payloadPercent)))
+        : null;
+    const complete = pullStatusComplete(status) || percent === 100;
+    layers.set(layer, {
+      key: layer,
+      layer,
+      status,
+      current,
+      total,
+      percent,
+      complete,
+      updatedAt: event.createdAt,
+    });
+  }
+  const list = Array.from(layers.values());
+  if (!list.length) return null;
+  const completedLayers = list.filter((item) => item.complete).length;
+  const activeLayers = list.length - completedLayers;
+  const measurable = list
+    .map((item) => item.percent ?? (item.complete ? 100 : null))
+    .filter((value): value is number => value !== null);
+  const overallPercent = measurable.length
+    ? Math.round(measurable.reduce((sum, value) => sum + value, 0) / measurable.length)
+    : null;
+  return { layers: list, overallPercent, completedLayers, activeLayers };
+}
+
+function DockerPullProgress({ progress }: { progress: PullProgressSummary }) {
+  const visibleLayers = progress.layers.slice(0, 8);
+  return (
+    <div className="mb-3 grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <strong className="block text-xs">拉取进度</strong>
+          <p className="muted mt-1 mb-0 text-xs">
+            {progress.completedLayers}/{progress.layers.length} 个 layer 已完成
+            {progress.activeLayers ? ` · ${progress.activeLayers} 个进行中` : ""}
+          </p>
+        </div>
+        {progress.overallPercent !== null ? <span className="mono text-xs">{progress.overallPercent}%</span> : <span className="muted text-xs">同步中</span>}
+      </div>
+      {progress.overallPercent !== null ? (
+        <div className="h-1.5 overflow-hidden rounded-full bg-[var(--line)]">
+          <div className="h-full bg-[var(--accent)] transition-[width]" style={{ width: `${progress.overallPercent}%` }} />
+        </div>
+      ) : null}
+      <div className="grid gap-2">
+        {visibleLayers.map((layer) => (
+          <div className="grid gap-1" key={layer.key}>
+            <div className="flex min-w-0 items-center justify-between gap-2 text-xs">
+              <span className="mono truncate">{layer.layer}</span>
+              <span className={layer.complete ? "text-[var(--good)]" : "muted"}>
+                {layer.status}
+                {layer.percent !== null ? ` · ${layer.percent}%` : ""}
+              </span>
+            </div>
+            {layer.percent !== null ? (
+              <div className="h-1 overflow-hidden rounded-full bg-[var(--line)]">
+                <div className="h-full bg-[var(--accent)] transition-[width]" style={{ width: `${layer.percent}%` }} />
+              </div>
+            ) : null}
+            {layer.total > 0 ? (
+              <span className="muted mono text-[11px]">{formatBytesZero(layer.current)} / {formatBytesZero(layer.total)}</span>
+            ) : null}
+          </div>
+        ))}
+        {progress.layers.length > visibleLayers.length ? (
+          <span className="muted text-xs">还有 {progress.layers.length - visibleLayers.length} 个 layer 正在后台更新。</span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function EventList({ events }: { events: EventRecord[] }) {
-  if (!events.length) {
+  const visibleEvents = events.filter((event) => !isPullProgressEvent(event));
+  if (!visibleEvents.length) {
     return <EmptyState title="暂无事件" body="Docker job 运行后会在这里显示近期事件。" />;
   }
   return (
     <div className="grid max-h-96 gap-2 overflow-auto">
-      {events.map((event) => (
+      {visibleEvents.map((event) => (
         <div className="grid gap-1 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-2 text-xs" key={event.id || `${event.scopeId}-${event.sequence}-${event.type}`}>
           <div className="flex min-w-0 items-center justify-between gap-2">
             <DockerValue className={streamTone(event)} value={eventMessage(event)} />
@@ -1489,12 +1700,14 @@ function ContainerActions({
   busy,
   item,
   onAction,
+  onClone,
   onDetails,
   onRemove,
 }: {
   busy: string;
   item: DockerContainerSummary;
   onAction: (action: "start" | "stop" | "restart" | "kill") => void;
+  onClone?: () => void;
   onDetails: () => void;
   onRemove: () => void;
 }) {
@@ -1511,6 +1724,7 @@ function ContainerActions({
         </Button>
       )}
       <Button onClick={onDetails}>详情</Button>
+      {onClone ? <Button onClick={onClone}>以此镜像创建</Button> : null}
       {running ? (
         <Button disabled={busy === `restart-${item.id}`} onClick={() => onAction("restart")}>
           重启
@@ -1525,5 +1739,206 @@ function ContainerActions({
         删除
       </Button>
     </span>
+  );
+}
+
+function ImageListPanel({
+  busy,
+  createEnabled,
+  imageSearch,
+  images,
+  loading,
+  onCloseImage,
+  onCreateFromImage,
+  onPull,
+  onRemoveImage,
+  pullRef,
+  selectedImageId,
+  setImageSearch,
+  setPullRef,
+  setSelectedImageId,
+}: {
+  busy: string;
+  createEnabled: boolean;
+  imageSearch: string;
+  images: DockerImageSummary[];
+  loading: boolean;
+  onCloseImage: () => void;
+  onCreateFromImage: (item: DockerImageSummary) => void;
+  onPull: () => void;
+  onRemoveImage: (item: DockerImageSummary) => void;
+  pullRef: string;
+  selectedImageId: string;
+  setImageSearch: (value: string) => void;
+  setPullRef: (value: string) => void;
+  setSelectedImageId: (id: string) => void;
+}) {
+  const filtered = useMemo(() => {
+    if (!imageSearch.trim()) return images;
+    const q = imageSearch.toLowerCase();
+    return images.filter((item) => {
+      if (item.id.toLowerCase().includes(q)) return true;
+      return item.tags?.some((t) => t.toLowerCase().includes(q));
+    });
+  }, [images, imageSearch]);
+
+  const selectedImage = useMemo(() => images.find((item) => item.id === selectedImageId) || null, [images, selectedImageId]);
+
+  const danglingCount = useMemo(() => images.filter((item) => !item.tags?.length).length, [images]);
+  const unusedCount = useMemo(() => images.filter((item) => !item.usedBy?.length).length, [images]);
+
+  return (
+    <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-4 max-xl:grid-cols-1">
+      <Panel
+        title="镜像"
+        subtitle={`本机 Docker image store。共 ${images.length} 个，${danglingCount} 个 dangling，${unusedCount} 个未被容器使用。`}
+      >
+        <div className="grid gap-3">
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-60 flex-1">
+              <Field label="拉取镜像" help="例如 nginx:latest 或 registry.example.com/app:tag。">
+                <input className="input mono" onChange={(event) => setPullRef(event.target.value)} placeholder="repository:tag" value={pullRef} />
+              </Field>
+            </div>
+            <div className="min-w-48">
+              <Field label="搜索" help="按 tag 或 ID 前缀过滤。">
+                <input className="input" onChange={(event) => setImageSearch(event.target.value)} placeholder="搜索 tag / ID" value={imageSearch} />
+              </Field>
+            </div>
+            <Button disabled={busy === "pull"} tone="primary" onClick={onPull}>
+              {busy === "pull" ? "拉取中" : "拉取"}
+            </Button>
+          </div>
+          {filtered.length === 0 && !loading ? (
+            <div className="grid min-h-48 place-items-center rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-6">
+              <div className="grid max-w-md gap-4 text-center">
+                <div>
+                  <strong className="block text-sm">{imageSearch ? "没有匹配的镜像" : "还没有镜像"}</strong>
+                  <p className="muted mt-1 mb-0 text-xs">
+                    {imageSearch ? "尝试其他搜索词或清空过滤。" : "从 Registry 推送后在这里看到，或直接拉取公开镜像。"}
+                  </p>
+                </div>
+                <div className="flex flex-wrap justify-center gap-2">
+                  {imageSearch ? (
+                    <Button onClick={() => setImageSearch("")}>清空搜索</Button>
+                  ) : (
+                    <Button onClick={() => setPullRef("nginx:latest")}>填入 nginx:latest</Button>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <DockerTable
+              columns={[
+                { header: "标签", width: "26%" },
+                { header: "状态", width: "80px" },
+                { header: "被使用", width: "14%" },
+                { header: "ID", width: "14%" },
+                { header: "大小", width: "90px" },
+                { header: "创建时间", width: "140px" },
+                { header: "操作" },
+              ]}
+              empty=""
+              loading={loading}
+              rows={filtered.map((item) => {
+                const dangling = !item.tags?.length;
+                const unused = !item.usedBy?.length;
+                const isSelected = selectedImageId === item.id;
+                return {
+                  key: item.id,
+                  cells: [
+                    <span className="flex flex-wrap gap-1">
+                      {item.tags?.length ? (
+                        item.tags.slice(0, 3).map((tag) => (
+                          <Pill key={tag} tone={isSelected ? "good" : "neutral"}>{tag.split("/").slice(-1)[0]}</Pill>
+                        ))
+                      ) : (
+                        <Pill tone="danger">dangling</Pill>
+                      )}
+                      {(item.tags?.length ?? 0) > 3 ? <Pill tone="neutral">+{(item.tags?.length ?? 0) - 3}</Pill> : null}
+                    </span>,
+                    dangling ? (
+                      <Pill tone="warn">dangling</Pill>
+                    ) : unused ? (
+                      <Pill tone="neutral">unused</Pill>
+                    ) : (
+                      <Pill tone="good">active</Pill>
+                    ),
+                    item.usedBy?.length ? (
+                      <span className="flex flex-wrap gap-1">
+                        {item.usedBy.slice(0, 3).map((name) => (
+                          <Pill key={name} tone="neutral">{name}</Pill>
+                        ))}
+                        {item.usedBy.length > 3 ? <Pill tone="neutral">+{item.usedBy.length - 3}</Pill> : null}
+                      </span>
+                    ) : <span className="muted text-xs">-</span>,
+                    <DockerValue value={item.id} />,
+                    <span className="text-xs">{formatBytesZero(item.sizeBytes)}</span>,
+                    <span className="text-xs">{formatUnix(item.created)}</span>,
+                    <span className="flex flex-wrap gap-1">
+                      <Button disabled={busy === `rmi-${item.id}` || !createEnabled} onClick={() => onCreateFromImage(item)}>
+                        创建容器
+                      </Button>
+                      <Button disabled={busy === `rmi-${item.id}`} tone="danger" onClick={() => onRemoveImage(item)}>删除</Button>
+                    </span>,
+                  ],
+                };
+              })}
+              onSelectRow={(row) => setSelectedImageId(row.key)}
+              selectedKey={selectedImageId}
+            />
+          )}
+        </div>
+      </Panel>
+
+      <Panel
+        title="镜像 Inspector"
+        subtitle={selectedImage ? `ID ${selectedImage.id}` : "从左侧表格选择一个镜像查看完整 tag 列表和使用关系。"}
+        actions={selectedImage ? <Button onClick={onCloseImage}>关闭</Button> : null}
+      >
+        {!selectedImage ? (
+          <EmptyState title="未选择镜像" body="点击镜像行或从 Registry 拉取后在这里查看详情。" />
+        ) : (
+          <div className="grid gap-4 text-xs">
+            <ContextList
+              items={[
+                ["ID", <DockerValue value={selectedImage.id} />],
+                ["大小", formatBytesZero(selectedImage.sizeBytes)],
+                ["创建时间", formatUnix(selectedImage.created)],
+                ["状态", !selectedImage.tags?.length ? <Pill tone="danger">dangling</Pill> : !selectedImage.usedBy?.length ? <Pill tone="neutral">unused</Pill> : <Pill tone="good">active</Pill>],
+              ]}
+            />
+            <div className="border-t border-[var(--line)] pt-3">
+              <strong className="mb-2 block text-xs text-[var(--muted-strong)]">完整 Tags ({selectedImage.tags?.length || 0})</strong>
+              {selectedImage.tags?.length ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {selectedImage.tags.map((tag) => (
+                    <DockerValue copyValue={tag} key={tag} value={tag} />
+                  ))}
+                </div>
+              ) : (
+                <span className="muted text-xs">无 tag（dangling image）</span>
+              )}
+            </div>
+            <div className="border-t border-[var(--line)] pt-3">
+              <strong className="mb-2 block text-xs text-[var(--muted-strong)]">被以下容器使用</strong>
+              {selectedImage.usedBy?.length ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {selectedImage.usedBy.map((name) => (
+                    <Pill key={name} tone="neutral">{name}</Pill>
+                  ))}
+                </div>
+              ) : (
+                <span className="muted text-xs">未被任何容器使用，可以安全删除。</span>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-2 border-t border-[var(--line)] pt-3">
+              <Button disabled={!createEnabled} tone="primary" onClick={() => onCreateFromImage(selectedImage)}>用此镜像创建容器</Button>
+              <Button disabled={busy === `rmi-${selectedImage.id}`} tone="danger" onClick={() => onRemoveImage(selectedImage)}>删除镜像</Button>
+            </div>
+          </div>
+        )}
+      </Panel>
+    </div>
   );
 }

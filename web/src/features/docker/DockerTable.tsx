@@ -19,14 +19,21 @@ export function DockerTable({
   rows,
   empty,
   loading,
+  onSelectRow,
+  selectedKey,
 }: {
   columns?: DockerTableColumn[];
   headers?: ReactNode[];
   rows: DockerTableRow[];
   empty: string;
   loading: boolean;
+  onSelectRow?: (row: DockerTableRow) => void;
+  selectedKey?: string;
 }) {
   if (!rows.length) {
+    if (!empty) {
+      return null;
+    }
     return <EmptyState title={empty} body={loading ? "正在加载。" : "当前没有可显示的条目。"} />;
   }
   const resolvedColumns: DockerTableColumn[] = columns || (headers || []).map((header) => ({ header }));
@@ -44,7 +51,11 @@ export function DockerTable({
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr className="border-b border-[var(--line)] last:border-b-0" key={row.key}>
+            <tr
+              className={`border-b border-[var(--line)] last:border-b-0 ${onSelectRow ? "cursor-pointer transition hover:bg-[var(--surface-soft)]" : ""} ${selectedKey === row.key ? "bg-[rgba(59,130,246,0.06)]" : ""}`}
+              key={row.key}
+              onClick={onSelectRow ? () => onSelectRow(row) : undefined}
+            >
               {row.cells.map((cell, index) => (
                 <td className={`min-w-0 px-2 py-2 align-top ${resolvedColumns[index]?.cellClassName || ""}`} key={index}>
                   <div className="min-w-0">{cell}</div>

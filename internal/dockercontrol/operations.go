@@ -24,11 +24,14 @@ import (
 // Bounds for read-only log/stat retrieval. These cap how much data we ever pull
 // from the daemon in a single request so a huge log can never exhaust memory.
 const (
-	maxLogTailLines   = 1000
-	maxLogBytes       = 256 * 1024
-	defaultLogTail    = 200
-	maxLogStreamLines = 5000
-	maxLogStreamBytes = 4 * 1024 * 1024
+	maxLogTailLines         = 1000
+	maxLogBytes             = 256 * 1024
+	defaultLogTail          = 200
+	maxLogStreamLines       = 5000
+	maxLogStreamBytes       = 4 * 1024 * 1024
+	maxPullStreamBytes      = 32 * 1024 * 1024
+	pullProgressStepBytes   = 1024 * 1024
+	pullProgressMinInterval = 750 * time.Millisecond
 )
 
 // ErrInvalidContainerID guards write operations against empty identifiers.
@@ -408,9 +411,40 @@ func (s *Service) RemoveContainer(ctx context.Context, id string, force bool) er
 	return nil
 }
 
+// PullProgressUpdate is a redacted, bounded Docker pull progress sample.
+// It intentionally omits Docker's raw progress string so credentials, URLs, or
+// daemon-specific details cannot be persisted through job events.
+type PullProgressUpdate struct {
+	LayerID string
+	Status  string
+	Current int64
+	Total   int64
+}
+
+type dockerPullProgressMessage struct {
+	ID          string `json:"id"`
+	Status      string `json:"status"`
+	Error       string `json:"error"`
+	ErrorDetail *struct {
+		Message string `json:"message"`
+	} `json:"errorDetail"`
+	ProgressDetail struct {
+		Current int64 `json:"current"`
+		Total   int64 `json:"total"`
+	} `json:"progressDetail"`
+}
+
 // PullImage pulls an image reference and drains the progress stream. The raw
-// progress JSON is never persisted; only a completion/failure summary is logged.
+// progress JSON is never persisted; callers that need UI progress should use
+// PullImageWithProgress and emit only redacted PullProgressUpdate samples.
 func (s *Service) PullImage(ctx context.Context, ref string) error {
+	return s.PullImageWithProgress(ctx, ref, nil)
+}
+
+// PullImageWithProgress pulls an image reference and reports throttled layer
+// progress. Progress callbacks are best-effort UI events; pull completion is
+// determined solely by the Docker Engine stream finishing without error.
+func (s *Service) PullImageWithProgress(ctx context.Context, ref string, onProgress func(PullProgressUpdate)) error {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return errors.New("image reference is required")
@@ -436,13 +470,116 @@ func (s *Service) PullImage(ctx context.Context, ref string) error {
 		return err
 	}
 	defer reader.Close()
-	// Drain the progress stream so the pull runs to completion, but cap the
-	// total bytes read so a misbehaving daemon cannot stream unbounded output.
-	if _, err := io.Copy(io.Discard, io.LimitReader(reader, 32*1024*1024)); err != nil {
+	if err := drainImagePullProgress(opCtx, reader, onProgress); err != nil {
 		s.log.Warn("docker image pull stream failed", "ref", safelog.Text(ref, 120), "error", safelog.Error(err, 160))
 		return err
 	}
 	return nil
+}
+
+func drainImagePullProgress(ctx context.Context, reader io.Reader, onProgress func(PullProgressUpdate)) error {
+	limited := &io.LimitedReader{R: reader, N: maxPullStreamBytes + 1}
+	decoder := json.NewDecoder(limited)
+	emitter := newPullProgressEmitter(onProgress)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		var msg dockerPullProgressMessage
+		if err := decoder.Decode(&msg); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return err
+		}
+		if limited.N <= 0 {
+			return errors.New("docker image pull progress stream exceeded size limit")
+		}
+		if msg.Error != "" || msg.ErrorDetail != nil {
+			message := msg.Error
+			if msg.ErrorDetail != nil && msg.ErrorDetail.Message != "" {
+				message = msg.ErrorDetail.Message
+			}
+			return errors.New(safelog.Text(message, 240))
+		}
+		emitter.Emit(msg)
+	}
+	emitter.Flush()
+	return nil
+}
+
+type pullProgressEmitter struct {
+	onProgress func(PullProgressUpdate)
+	last       map[string]PullProgressUpdate
+	lastAt     map[string]time.Time
+}
+
+func newPullProgressEmitter(onProgress func(PullProgressUpdate)) *pullProgressEmitter {
+	return &pullProgressEmitter{onProgress: onProgress, last: make(map[string]PullProgressUpdate), lastAt: make(map[string]time.Time)}
+}
+
+func (e *pullProgressEmitter) Emit(msg dockerPullProgressMessage) {
+	if e.onProgress == nil {
+		return
+	}
+	update := PullProgressUpdate{
+		LayerID: safelog.Text(msg.ID, 80),
+		Status:  safelog.Text(msg.Status, 80),
+		Current: msg.ProgressDetail.Current,
+		Total:   msg.ProgressDetail.Total,
+	}
+	if update.Current < 0 {
+		update.Current = 0
+	}
+	if update.Total < 0 {
+		update.Total = 0
+	}
+	if update.LayerID == "" && update.Status == "" {
+		return
+	}
+	key := update.LayerID
+	if key == "" {
+		key = "image"
+	}
+	previous, seen := e.last[key]
+	now := time.Now()
+	shouldEmit := !seen ||
+		previous.Status != update.Status ||
+		update.Total != previous.Total ||
+		pullStatusTerminal(update.Status) ||
+		(update.Total > 0 && update.Current >= update.Total) ||
+		update.Current-previous.Current >= pullProgressStepBytes ||
+		now.Sub(e.lastAt[key]) >= pullProgressMinInterval
+	if !shouldEmit {
+		return
+	}
+	e.last[key] = update
+	e.lastAt[key] = now
+	e.onProgress(update)
+}
+
+func (e *pullProgressEmitter) Flush() {
+	if e.onProgress == nil {
+		return
+	}
+	for key, update := range e.last {
+		if update.Total > 0 && update.Current < update.Total && pullStatusTerminal(update.Status) {
+			update.Current = update.Total
+		}
+		e.onProgress(update)
+		e.lastAt[key] = time.Now()
+	}
+}
+
+func pullStatusTerminal(status string) bool {
+	status = strings.ToLower(strings.TrimSpace(status))
+	return status == "already exists" ||
+		status == "download complete" ||
+		status == "pull complete" ||
+		status == "complete" ||
+		strings.HasSuffix(status, " complete")
 }
 
 // RemoveImage removes a local image by id or reference. Dangerous operation.

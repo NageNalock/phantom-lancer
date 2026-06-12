@@ -148,6 +148,7 @@ export function RegistryPanel({
   const [credentialScopes, setCredentialScopes] = useState<string[]>(["registry.pull", "registry.push"]);
   const [copiedSecret, setCopiedSecret] = useState(false);
   const host = registryHost(registrySettings.publicUrl || registryStatus?.publicUrl);
+  const exampleRepository = repositories[0]?.name || "project/app";
   const [expandedDigest, setExpandedDigest] = useState<string>("");
 
   const selectedTagDetails = useMemo(() => {
@@ -197,9 +198,12 @@ export function RegistryPanel({
             </div>
             <Pill tone="warn">一次性</Pill>
           </div>
-          <code className="mono block break-all rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3 text-xs">
-            {newCredentialSecret}
-          </code>
+          <div className="flex items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3">
+            <code className="mono min-w-0 flex-1 break-all text-xs">
+              {newCredentialSecret}
+            </code>
+            <CommandCopyButton command={newCredentialSecret} />
+          </div>
           <div className="mt-3 flex flex-wrap gap-2">
             <Button tone="primary" onClick={() => void copySecret()}>
               {copiedSecret ? "已复制到剪贴板" : "复制 Secret"}
@@ -329,15 +333,17 @@ export function RegistryPanel({
           ) : null}
         </div>
       ) : registryView === "credentials" ? (
-        <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-4 max-xl:grid-cols-1">
+        <div className="grid gap-4">
           <Panel title="凭据" subtitle="secret 只在创建或轮换后显示一次；停用会立即阻止该凭据继续访问 Registry。">
             <div className="grid gap-3">
-              <Field label="凭据名称">
-                <input className="input mono" onChange={(event) => setCredentialName(event.target.value)} value={credentialName} />
-              </Field>
-              <Field label="仓库前缀" help="例如 personal/ 或 team-a/；留空时后端会回退到 personal/。">
-                <input className="input mono" onChange={(event) => setCredentialPrefix(event.target.value)} value={credentialPrefix} />
-              </Field>
+              <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
+                <Field label="凭据名称">
+                  <input className="input mono" onChange={(event) => setCredentialName(event.target.value)} value={credentialName} />
+                </Field>
+                <Field label="仓库前缀" help="例如 personal/ 或 team-a/；留空时后端会回退到 personal/。">
+                  <input className="input mono" onChange={(event) => setCredentialPrefix(event.target.value)} value={credentialPrefix} />
+                </Field>
+              </div>
               <div className="grid grid-cols-2 gap-2">
                 {REGISTRY_SCOPES.map((scope) => (
                   <CheckLabel
@@ -352,9 +358,11 @@ export function RegistryPanel({
                   </CheckLabel>
                 ))}
               </div>
-              <Button disabled={busy === "credential-create"} onClick={() => createCredential(credentialScopes)} tone="primary">
-                创建凭据
-              </Button>
+              <div>
+                <Button disabled={busy === "credential-create"} onClick={() => createCredential(credentialScopes)} tone="primary">
+                  创建凭据
+                </Button>
+              </div>
               <div className="grid gap-3">
                 {credentials.map((item) => (
                   <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3" key={item.id}>
@@ -400,19 +408,40 @@ export function RegistryPanel({
               </div>
             </div>
           </Panel>
-          <Panel title="推送指令" subtitle="Docker 术语保留英文，命令值使用等宽展示。">
-            <pre className="code-block">{`docker login ${host}
-docker tag my-app:latest ${host}/personal/my-app:latest
-docker push ${host}/personal/my-app:latest`}</pre>
+
+          <Panel title="推送与拉取指令" subtitle="三条完整命令：登录、打 tag、推送。拉取命令同样适用于其他节点。">
+            <div className="grid gap-3">
+              {[
+                { label: "登录 Registry", cmd: `docker login ${host}`, help: "交互输入用户名和刚创建的凭据密码。" },
+                { label: "打 Tag", cmd: `docker tag my-app:latest ${host}/${exampleRepository}:latest`, help: "把本地镜像打上当前 Registry 路径。" },
+                { label: "推送到 Registry", cmd: `docker push ${host}/${exampleRepository}:latest`, help: "上传到当前 Registry 的仓库路径下。" },
+                { label: "从 Registry 拉取", cmd: `docker pull ${host}/${exampleRepository}:latest`, help: "在其他节点或本机拉取。" },
+              ].map((row) => (
+                <div className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3" key={row.label}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <strong className="text-xs">{row.label}</strong>
+                      <p className="muted mt-0.5 mb-0 text-xs">{row.help}</p>
+                    </div>
+                    <CommandCopyButton command={row.cmd} />
+                  </div>
+                  <code className="mono break-all rounded-md border border-[var(--line)] bg-[var(--surface)] p-2 text-xs">
+                    {row.cmd}
+                  </code>
+                </div>
+              ))}
+            </div>
           </Panel>
         </div>
       ) : (
         <RegistrySettingsPanel
           busy={busy}
+          credentials={credentials}
           formatBytes={formatBytes}
           objectProfiles={objectProfiles}
           registrySettings={registrySettings}
           registryStatus={registryStatus}
+          repositories={repositories}
           runRegistryGC={runRegistryGC}
           saveRegistrySettings={saveRegistrySettings}
         />
@@ -423,18 +452,22 @@ docker push ${host}/personal/my-app:latest`}</pre>
 
 function RegistrySettingsPanel({
   busy,
+  credentials,
   formatBytes,
   objectProfiles,
   registrySettings,
   registryStatus,
+  repositories,
   runRegistryGC,
   saveRegistrySettings,
 }: {
   busy: string;
+  credentials: DockerRegistryCredential[];
   formatBytes: (bytes: number) => string;
   objectProfiles: ObjectStorageProfile[];
   registrySettings: DockerRegistrySettings;
   registryStatus: DockerRegistryStatus | null;
+  repositories: DockerRegistryRepository[];
   runRegistryGC: () => void;
   saveRegistrySettings: (settings: DockerRegistrySettings) => void;
 }) {
@@ -460,6 +493,7 @@ function RegistrySettingsPanel({
   }, [dirty]);
 
   return (
+    <>
     <Panel
       title="Registry 设置"
       subtitle="配置修改会先停留在本页草稿中，保存后才写入后端。"
@@ -541,11 +575,80 @@ function RegistrySettingsPanel({
           <Button disabled={!dirty || busy === "registry-settings"} onClick={() => setDraft(registrySettings)}>
             重置
           </Button>
-          <Button disabled={busy === "registry-gc"} onClick={() => runRegistryGC()} tone="danger">
-            执行 Registry GC
+        </div>
+      </div>
+    </Panel>
+
+    <Panel
+      title="维护与危险操作"
+      subtitle="Registry GC、blob 回收和清理动作。这些操作有数据风险，请确认没有并发 push 依赖待回收对象。"
+    >
+      <div className="grid max-w-3xl gap-4">
+        <div className="grid grid-cols-3 gap-3 max-lg:grid-cols-1">
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+            <strong className="block text-xs">当前用量</strong>
+            <p className="mono mt-1 mb-0 text-sm">{formatBytes(registryStatus?.usageBytes || 0)}</p>
+            <p className="muted mt-0.5 mb-0 text-xs">Quota: {formatBytes(registryStatus?.quotaBytes || registrySettings.quotaBytes || 0)}</p>
+          </div>
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+            <strong className="block text-xs">仓库 / Tag</strong>
+            <p className="mono mt-1 mb-0 text-sm">{registryStatus?.repositoryCount || repositories.length || 0} 仓库</p>
+            <p className="muted mt-0.5 mb-0 text-xs">{registryStatus?.credentialCount || credentials.length || 0} 个凭据</p>
+          </div>
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+            <strong className="block text-xs">最近 GC</strong>
+            <p className="mono mt-1 mb-0 text-sm">{"-"}</p>
+            <p className="muted mt-0.5 mb-0 text-xs">Job 事件可在 Events 页回看</p>
+          </div>
+        </div>
+
+        <div className="rounded-lg border-2 border-[rgba(207,31,50,0.2)] bg-[var(--danger-soft)] p-3">
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div>
+              <strong className="block text-sm">Registry Garbage Collection</strong>
+              <p className="muted mt-1 mb-0 text-xs">
+                清理过期 upload 临时文件，并回收未被任何 manifest 引用的 layer/config blob。运行期间读写可能短暂受影响。
+              </p>
+            </div>
+            <Pill tone="danger">高风险</Pill>
+          </div>
+          <ul className="muted mb-3 pl-5 text-xs leading-relaxed">
+            <li>只清理未被 manifest 引用的 blob；正在 push 的 manifest 不会被触及。</li>
+            <li>Blob 回收不可恢复；删除 tag 后通常需要 GC 才能释放底层存储。</li>
+            <li>GC 任务会进入 Docker Job 事件流，可在 Events / Jobs 页观察进度。</li>
+          </ul>
+          <Button disabled={busy === "registry-gc"} tone="danger" onClick={() => runRegistryGC()}>
+            {busy === "registry-gc" ? "GC 提交中" : "执行 Registry GC"}
           </Button>
         </div>
       </div>
     </Panel>
+    </>
+  );
+}
+
+function CommandCopyButton({ command }: { command: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard?.writeText(command);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      // ignore
+    }
+  }
+  return (
+    <button
+      className={`shrink-0 rounded-md border px-2.5 py-1 text-[11px] transition ${
+        copied
+          ? "border-[rgba(18,132,79,0.3)] bg-[var(--good-soft)] text-[var(--good)]"
+          : "border-[var(--line)] bg-[var(--surface)] hover:bg-[var(--surface-strong)]"
+      }`}
+      onClick={() => void copy()}
+      type="button"
+    >
+      {copied ? "已复制" : "复制"}
+    </button>
   );
 }

@@ -280,6 +280,60 @@ func TestRegistryCredentialCanPullMatchesRepositorySegments(t *testing.T) {
 	}
 }
 
+func TestValidateContainerImageSourceUsesRegistryHostNotPersonalPrefix(t *testing.T) {
+	if err := validateContainerImageSource("https://registry.example.com:10443", "registry.example.com:10443/stock-pulse/stockpulse:latest"); err != nil {
+		t.Fatalf("expected first-party registry image to be allowed: %v", err)
+	}
+	if err := validateContainerImageSource("https://registry.example.com:10443", "registry.example.com:10443/personal/app:latest"); err != nil {
+		t.Fatalf("expected personal namespace to remain allowed: %v", err)
+	}
+	err := validateContainerImageSource("https://registry.example.com:10443", "docker.io/library/nginx:latest")
+	if !errors.Is(err, ErrContainerImageDenied) {
+		t.Fatalf("error = %v, want ErrContainerImageDenied", err)
+	}
+}
+
+func TestDrainImagePullProgressEmitsLayerUpdates(t *testing.T) {
+	stream := strings.NewReader(strings.Join([]string{
+		`{"status":"Pulling fs layer","id":"abc123"}`,
+		`{"status":"Downloading","id":"abc123","progressDetail":{"current":1048576,"total":2097152}}`,
+		`{"status":"Download complete","id":"abc123"}`,
+		`{"status":"Pull complete","id":"abc123"}`,
+	}, "\n"))
+	var updates []PullProgressUpdate
+	if err := drainImagePullProgress(context.Background(), stream, func(update PullProgressUpdate) {
+		updates = append(updates, update)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) < 3 {
+		t.Fatalf("updates = %+v, want at least 3 progress updates", updates)
+	}
+	foundDownloading := false
+	foundComplete := false
+	for _, update := range updates {
+		if update.LayerID != "abc123" {
+			t.Fatalf("layer id = %q, want abc123", update.LayerID)
+		}
+		if update.Status == "Downloading" && update.Current == 1048576 && update.Total == 2097152 {
+			foundDownloading = true
+		}
+		if update.Status == "Pull complete" {
+			foundComplete = true
+		}
+	}
+	if !foundDownloading || !foundComplete {
+		t.Fatalf("updates = %+v, want downloading and pull complete updates", updates)
+	}
+}
+
+func TestDrainImagePullProgressReturnsDaemonError(t *testing.T) {
+	err := drainImagePullProgress(context.Background(), strings.NewReader(`{"error":"no basic auth credentials","errorDetail":{"message":"no basic auth credentials"}}`), nil)
+	if err == nil || !strings.Contains(err.Error(), "no basic auth credentials") {
+		t.Fatalf("error = %v, want daemon error message", err)
+	}
+}
+
 func TestParseByteRange(t *testing.T) {
 	start, length, ok := parseByteRange("bytes=10-19", 100)
 	if !ok || start != 10 || length != 10 {

@@ -3,9 +3,9 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -212,22 +212,16 @@ func (s *Server) handleDockerCreateContainer(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusForbidden, "docker_container_create_disabled", "模板化容器创建未开启")
 		return
 	}
-	settings, err := s.docker.RegistrySettings(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "docker_registry_settings_invalid", err.Error())
-		return
-	}
 	var req dockercontrol.CreateContainerRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if settings.PublicURL != "" {
-		parsed, _ := url.Parse(settings.PublicURL)
-		allowed := strings.Trim(parsed.Host+"/personal", "/")
-		if !strings.HasPrefix(strings.TrimSpace(req.Image), allowed+"/") {
-			writeError(w, http.StatusForbidden, "docker_container_image_denied", "镜像不在允许的 Registry prefix 内")
-			return
-		}
+	if err := s.docker.ValidateContainerImageSource(r.Context(), req.Image); errors.Is(err, dockercontrol.ErrContainerImageDenied) {
+		writeError(w, http.StatusForbidden, "docker_container_image_denied", "镜像必须来自当前受控 Registry 主机")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "docker_registry_settings_invalid", err.Error())
+		return
 	}
 	result, err := s.docker.StartJob(r.Context(), "docker.container.create", "创建并启动容器", "critical", dockerShortID(req.Image), map[string]any{"image": safelog.Text(req.Image, 120), "name": safelog.Text(req.Name, 80)}, func(ctx context.Context, emit func(string, map[string]any)) error {
 		emit("docker.job.output", map[string]any{"stream": "stdout", "message": "开始创建受限容器"})
@@ -430,7 +424,27 @@ func (s *Server) handleDockerPullImage(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.docker.StartJob(r.Context(), "docker.image.pull", "拉取镜像", "medium", ref, map[string]any{"image": safelog.Text(ref, 120)}, func(ctx context.Context, emit func(string, map[string]any)) error {
 		emit("docker.job.output", map[string]any{"stream": "stdout", "message": "开始拉取镜像 " + safelog.Text(ref, 120)})
-		return s.docker.PullImage(ctx, ref)
+		return s.docker.PullImageWithProgress(ctx, ref, func(update dockercontrol.PullProgressUpdate) {
+			payload := map[string]any{"status": safelog.Text(update.Status, 80)}
+			if update.LayerID != "" {
+				payload["layer"] = safelog.Text(update.LayerID, 80)
+			}
+			if update.Current > 0 {
+				payload["current"] = update.Current
+			}
+			if update.Total > 0 {
+				payload["total"] = update.Total
+				percent := int(float64(update.Current) / float64(update.Total) * 100)
+				if percent < 0 {
+					percent = 0
+				}
+				if percent > 100 {
+					percent = 100
+				}
+				payload["percent"] = percent
+			}
+			emit("docker.image.pull.progress", payload)
+		})
 	})
 	if err != nil {
 		s.auditDockerImage(r, "docker.image.pull.requested", "medium", "镜像拉取任务创建失败", ref, false, err)
