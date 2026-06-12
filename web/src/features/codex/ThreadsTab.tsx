@@ -169,7 +169,9 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
       ) : (
         <ComposerEmptyState workspaces={workspaces} onCreate={createThread} />
       )}
-      <ThreadInspector status={status} thread={activeThread} workspaces={workspaces} />
+      <div className="max-xl:col-span-2 max-lg:col-span-1">
+        <ThreadInspector status={status} thread={activeThread} workspaces={workspaces} />
+      </div>
     </div>
   );
 }

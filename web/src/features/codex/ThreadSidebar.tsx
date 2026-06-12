@@ -65,13 +65,13 @@ export function ThreadList({
       </div>
       <div className="panel-body grid min-w-0 gap-3">
         <div className="grid gap-2">
-          <select className="select" onChange={(event) => setNewMode(event.target.value as CreateConversationMode)} value={newMode}>
+          <select aria-label="新会话类型" className="select" name="codex_thread_create_mode" onChange={(event) => setNewMode(event.target.value as CreateConversationMode)} value={newMode}>
             <option value="code">代码任务</option>
             <option disabled={!scratchReady} value="chat">只读问答</option>
           </select>
           <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
             {newMode === "code" ? (
-              <select className="select" disabled={!workspaces.length} onChange={(event) => setNewWorkspace(event.target.value)} value={newWorkspace}>
+	              <select aria-label="新会话工作区" className="select" disabled={!workspaces.length} name="codex_thread_workspace" onChange={(event) => setNewWorkspace(event.target.value)} value={newWorkspace}>
                 {workspaces.length ? (
                   workspaces.map((workspace) => (
                     <option key={workspace.id} value={workspace.id}>
@@ -91,7 +91,7 @@ export function ThreadList({
               新对话
             </Button>
           </div>
-          {newMode === "chat" && !scratchReady ? <p className="muted m-0 text-xs">请先在 Settings 里选择 scratch workspace。</p> : null}
+          {newMode === "chat" && !scratchReady ? <p className="muted m-0 text-xs">请先在运行时设置里选择 scratch workspace。</p> : null}
         </div>
         <form
           className="grid grid-cols-[minmax(0,1fr)_auto] gap-2"
@@ -100,11 +100,11 @@ export function ThreadList({
             onSearch();
           }}
         >
-          <input className="input" onChange={(event) => onQuery(event.target.value)} placeholder="搜索会话" value={query} />
+	          <input aria-label="搜索会话" autoComplete="off" className="input" name="codex_thread_search" onChange={(event) => onQuery(event.target.value)} placeholder="搜索会话…" value={query} />
           <Button type="submit">{loading ? "搜索中" : "搜索"}</Button>
         </form>
         <div className="grid grid-cols-2 gap-2">
-          <select className="select" onChange={(event) => onWorkspaceFilter(event.target.value)} value={workspaceFilter}>
+	          <select aria-label="工作区筛选" className="select" name="codex_thread_workspace_filter" onChange={(event) => onWorkspaceFilter(event.target.value)} value={workspaceFilter}>
             <option value="all">全部工作区</option>
             {workspaces.map((workspace) => (
               <option key={workspace.id} value={workspace.id}>
@@ -112,7 +112,7 @@ export function ThreadList({
               </option>
             ))}
           </select>
-          <select className="select" onChange={(event) => onStatusFilter(event.target.value)} value={statusFilter}>
+	          <select aria-label="状态筛选" className="select" name="codex_thread_status_filter" onChange={(event) => onStatusFilter(event.target.value)} value={statusFilter}>
             <option value="all">全部状态</option>
             <option value="idle">Idle</option>
             <option value="running">Running</option>
@@ -165,7 +165,7 @@ export function ComposerEmptyState({ workspaces, onCreate }: { workspaces: Codex
           <p className="muted mt-1 text-sm">选择工作区后创建会话，使用本机 codex CLI 在受控边界内执行。</p>
           {workspaces.length ? (
             <div className="mt-4 grid grid-cols-[minmax(0,1fr)_auto] gap-2">
-              <select className="select" onChange={(event) => setWorkspaceId(event.target.value)} value={workspaceId}>
+	              <select aria-label="新会话工作区" className="select" name="codex_empty_workspace" onChange={(event) => setWorkspaceId(event.target.value)} value={workspaceId}>
                 {workspaces.map((workspace) => (
                   <option key={workspace.id} value={workspace.id}>
                     {workspace.label || workspace.id}
@@ -177,7 +177,7 @@ export function ComposerEmptyState({ workspaces, onCreate }: { workspaces: Codex
               </Button>
             </div>
           ) : (
-            <p className="muted mt-4 text-sm">请先在 Workspaces 标签登记一个工作区。</p>
+            <p className="muted mt-4 text-sm">请先在工作区标签登记一个工作区。</p>
           )}
         </div>
       </div>

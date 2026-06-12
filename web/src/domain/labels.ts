@@ -1,14 +1,14 @@
 import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, CodexStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, V2RaySettings, V2RayStatus } from "../app/types";
 
 export const NAV_ITEMS = [
-  { id: "dashboard", label: "控制台", short: "01", description: "服务器状态、执行边界和下一步入口" },
-  { id: "codex", label: "Codex", short: "02", description: "本机 codex CLI 会话、工作区、审批和运行诊断" },
-  { id: "codex-gateway", label: "Codex Gateway", short: "03", description: "Codex OAuth 账号、OpenAI 兼容端点和请求审计" },
-  { id: "logs", label: "日志", short: "04", description: "服务日志、运行事件和在线排障视图" },
-  { id: "images", label: "Images", short: "05", description: "xAI Grok Imagine 生成、编辑、图片库、历史和存储设置" },
-  { id: "docker", label: "Docker", short: "06", description: "Docker 守护进程、镜像与容器生命周期、daemon 安装与控制、内嵌 Registry" },
-  { id: "v2ray", label: "V2Ray", short: "07", description: "内嵌 V2Ray 服务端、远程设备接入和运行控制" },
-  { id: "settings", label: "设置", short: "08", description: "运行期配置、允许根目录和全局安全策略" },
+  { id: "dashboard", label: "控制台", description: "服务器状态、执行边界和下一步入口" },
+  { id: "codex", label: "Codex", description: "本机 codex CLI 会话、工作区、审批和运行诊断" },
+  { id: "codex-gateway", label: "Codex Gateway", description: "Codex OAuth 账号、OpenAI 兼容端点和请求审计" },
+  { id: "logs", label: "日志", description: "服务日志、运行事件和在线排障视图" },
+  { id: "images", label: "Images", description: "xAI Grok Imagine 生成、编辑、图片库、历史和存储设置" },
+  { id: "docker", label: "Docker", description: "Docker 守护进程、镜像与容器生命周期、daemon 安装与控制、内嵌 Registry" },
+  { id: "v2ray", label: "V2Ray", description: "内嵌 V2Ray 服务端、远程设备接入和运行控制" },
+  { id: "settings", label: "设置", description: "运行期配置、允许根目录和全局安全策略" },
 ] as const;
 
 const auditLabels: Record<string, string> = {

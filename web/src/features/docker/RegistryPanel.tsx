@@ -79,15 +79,15 @@ export function RegistryPanel({
           value={registryStatus?.enabled ? (registryStatus.ready ? "Ready" : "Enabled") : "Disabled"}
         />
         <Metric
-          label="Public URL"
+          label="公开 URL"
           value={<span className="mono text-xs">{registryStatus?.publicUrl || "未配置"}</span>}
         />
         <Metric
-          label="Storage"
+          label="存储"
           value={registryStatus?.storageBackend || "local"}
         />
         <Metric
-          label="Usage"
+          label="用量"
           value={formatBytes(registryStatus?.usageBytes || 0)}
           detail={formatBytes(registryStatus?.quotaBytes || 0) + " quota"}
         />
@@ -115,12 +115,12 @@ export function RegistryPanel({
           }))}
         />
         <div className="grid gap-3">
-          <Panel title="Push Instructions" subtitle="使用 Registry 凭据登录后推送镜像。">
+          <Panel title="推送指令" subtitle="使用 Registry 凭据登录后推送镜像。">
             <pre className="code-block">{`docker login ${registryHost(registrySettings.publicUrl)}
 docker tag my-app:latest ${registryHost(registrySettings.publicUrl)}/personal/my-app:latest
 docker push ${registryHost(registrySettings.publicUrl)}/personal/my-app:latest`}</pre>
           </Panel>
-          <Panel title="Credentials" subtitle="secret 只在创建或轮换后显示一次。">
+          <Panel title="凭据" subtitle="secret 只在创建或轮换后显示一次。">
             <div className="grid gap-2">
               <Field label="凭据名称">
                 <input className="input mono" onChange={(event) => setCredentialName(event.target.value)} value={credentialName} />
@@ -189,20 +189,20 @@ function RegistrySettingsPanel({
   setRegistrySettings: (updater: (current: DockerRegistrySettings) => DockerRegistrySettings) => void;
 }) {
   return (
-    <Panel title="Registry Settings" subtitle="Registry 存储、TLS 与匿名 pull 策略。">
+    <Panel title="Registry 设置" subtitle="Registry 存储、TLS 与匿名 pull 策略。">
       <div className="grid max-w-3xl gap-3">
         <Toggle
           checked={Boolean(registrySettings.enabled)}
           label="启用内嵌 Registry"
           onChange={(checked) => setRegistrySettings((current) => ({ ...current, enabled: checked }))}
         />
-        <Field label="Public URL" help="示例：https://registry.example.com；不能包含 token/query。">
+        <Field label="公开 URL" help="示例：https://registry.example.com；不能包含 token/query。">
           <input className="input mono" onChange={(event) => setRegistrySettings((current) => ({ ...current, publicUrl: event.target.value }))} value={registrySettings.publicUrl || ""} />
         </Field>
-        <Field label="Storage Dir" help="为空时使用 data_dir/docker/registry；非空路径必须落在 data_dir/docker 下。">
+        <Field label="存储目录" help="为空时使用 data_dir/docker/registry；非空路径必须落在 data_dir/docker 下。">
           <input className="input mono" onChange={(event) => setRegistrySettings((current) => ({ ...current, storageDir: event.target.value }))} value={registrySettings.storageDir || ""} />
         </Field>
-        <Field label="Storage Backend" help="object_storage 会把最终 blob/manifest 写入所选对象存储 profile；临时 upload 仍使用受控本地目录。">
+        <Field label="存储后端" help="object_storage 会把最终 blob/manifest 写入所选对象存储 profile；临时 upload 仍使用受控本地目录。">
           <select className="select mono" onChange={(event) => setRegistrySettings((current) => ({ ...current, storageBackend: event.target.value }))} value={registrySettings.storageBackend || "local"}>
             <option value="local">local</option>
             <option value="object_storage">object_storage</option>

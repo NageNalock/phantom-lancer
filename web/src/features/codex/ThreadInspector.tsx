@@ -5,7 +5,7 @@ export function ThreadInspector({ status, thread, workspaces }: { status?: Codex
   return (
     <section className="panel max-xl:col-span-2 max-lg:col-span-1">
       <div className="panel-header">
-        <h2 className="m-0 text-sm font-semibold">Inspector</h2>
+        <h2 className="m-0 text-sm font-semibold">检查器</h2>
       </div>
       <div className="panel-body grid gap-3 text-sm">
         {thread ? (

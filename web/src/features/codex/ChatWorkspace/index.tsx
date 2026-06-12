@@ -196,11 +196,13 @@ export function ChatWorkspace({
     <section className="chat-workspace panel h-[calc(100dvh-172px)] max-h-[calc(100dvh-172px)] overflow-hidden max-lg:h-[calc(100dvh-204px)] max-lg:max-h-none">
       <div className="chat-workspace-header">
         <div className="min-w-0">
-          <input
-            aria-label="只读问答标题"
-            className="chat-title-input"
-            disabled={savingTitle}
-            onBlur={() => void saveTitle()}
+	          <input
+	            aria-label="只读问答标题"
+	            autoComplete="off"
+	            className="chat-title-input"
+	            disabled={savingTitle}
+	            name="codex_chat_title"
+	            onBlur={() => void saveTitle()}
             onChange={(event) => setTitleDraft(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter") event.currentTarget.blur();
@@ -280,8 +282,11 @@ function ChatComposer({
   return (
     <form className="chat-composer" onSubmit={onSubmit}>
       <textarea
+        aria-label="Codex 消息"
+        autoComplete="off"
         className="chat-composer-input"
         disabled={disabled}
+        name="codex_chat_message"
         onChange={(event) => onPrompt(event.target.value)}
         onKeyDown={(event) => {
           if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -289,7 +294,7 @@ function ChatComposer({
             event.currentTarget.form?.requestSubmit();
           }
         }}
-        placeholder={activeTurn ? "补充要求，Codex 会继续这一轮..." : "输入消息，适合解释、计划、命令草案..."}
+        placeholder={activeTurn ? "补充要求，Codex 会继续这一轮…" : "输入消息，适合解释、计划、命令草案…"}
         ref={promptRef}
         rows={3}
         value={prompt}
@@ -301,13 +306,13 @@ function ChatComposer({
         </div>
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
           {models.length ? (
-            <select aria-label="模型" className="chat-model-select" onChange={(event) => onModel(event.target.value)} value={model}>
+	            <select aria-label="模型" className="chat-model-select" name="codex_chat_model" onChange={(event) => onModel(event.target.value)} value={model}>
               {models.map((item) => (
                 <option key={item.id} value={item.id}>{item.displayName || item.id}</option>
               ))}
             </select>
           ) : model ? (
-            <input aria-label="模型" className="chat-model-select" onChange={(event) => onModel(event.target.value)} value={model} />
+	            <input aria-label="模型" autoComplete="off" className="chat-model-select" name="codex_chat_model" onChange={(event) => onModel(event.target.value)} spellCheck={false} value={model} />
           ) : null}
           {activeTurn ? <Button className="rounded-full" onClick={onInterrupt} tone="danger">停止</Button> : null}
           <Button className="rounded-full px-4" disabled={disabled || !prompt.trim()} tone="primary" type="submit">

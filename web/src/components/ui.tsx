@@ -1,11 +1,13 @@
-import { useRef, useState } from "react";
-import type { ButtonHTMLAttributes, DragEvent, ReactNode } from "react";
+import { Children, cloneElement, forwardRef, isValidElement, useEffect, useId, useRef, useState } from "react";
+import type { ButtonHTMLAttributes, DragEvent, KeyboardEvent, MouseEvent as ReactMouseEvent, ReactElement, ReactNode } from "react";
 import type { Tone } from "../app/types";
+import { shouldHandleQueryLinkClick } from "../hooks/useQueryParamState";
 
 interface SubTabItem {
   id: string;
   label: ReactNode;
   badge?: ReactNode;
+  href?: string;
 }
 
 /**
@@ -26,47 +28,69 @@ export function SubTabs({
   onChange,
   rightSlot,
   className = "",
+  ariaLabel = "二级导航",
 }: {
   tabs: SubTabItem[];
   activeId: string;
   onChange: (id: string) => void;
   rightSlot?: ReactNode;
   className?: string;
+  ariaLabel?: string;
 }) {
   return (
     <div className={`flex flex-wrap items-center gap-2 border-b border-[var(--line)] pb-2 ${className}`}>
-      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+      <nav aria-label={ariaLabel} className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
         {tabs.map((tab) => {
           const active = tab.id === activeId;
-          return (
-            <button
-              aria-pressed={active}
-              className={`flex shrink-0 items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition ${active ? "bg-[var(--surface-strong)] text-[var(--text)] shadow-[inset_0_-2px_0_var(--accent)]" : "text-[var(--muted-strong)] hover:bg-[var(--surface-soft)]"}`}
-              key={tab.id}
-              onClick={() => onChange(tab.id)}
-              type="button"
-            >
+          const tabClass = `flex shrink-0 items-center gap-1.5 rounded-md px-3 py-1.5 text-sm no-underline transition ${active ? "bg-[var(--surface-strong)] text-[var(--text)] shadow-[inset_0_-2px_0_var(--accent)]" : "text-[var(--muted-strong)] hover:bg-[var(--surface-soft)]"}`;
+          const content = (
+            <>
               {tab.label}
               {tab.badge !== undefined && tab.badge !== null && tab.badge !== "" ? (
                 <span className="ml-0.5 inline-flex items-center">{tab.badge}</span>
               ) : null}
+            </>
+          );
+          return tab.href ? (
+            <a
+              aria-current={active ? "page" : undefined}
+              className={tabClass}
+              href={tab.href}
+              key={tab.id}
+              onClick={(event) => {
+                if (!shouldHandleQueryLinkClick(event)) return;
+                event.preventDefault();
+                onChange(tab.id);
+              }}
+            >
+              {content}
+            </a>
+          ) : (
+            <button
+              aria-pressed={active}
+              className={tabClass}
+              key={tab.id}
+              onClick={() => onChange(tab.id)}
+              type="button"
+            >
+              {content}
             </button>
           );
         })}
-      </div>
+      </nav>
       {rightSlot ? <div className="flex flex-wrap items-center justify-end gap-2">{rightSlot}</div> : null}
     </div>
   );
 }
 
-export function Button({
+export const Button = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HTMLButtonElement> & { tone?: "neutral" | "primary" | "danger" }>(function Button({
   tone = "neutral",
   className = "",
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & { tone?: "neutral" | "primary" | "danger" }) {
+}, ref) {
   const toneClass = tone === "primary" ? "button-primary" : tone === "danger" ? "button-danger" : "";
-  return <button {...props} className={`button ${toneClass} ${className}`} type={props.type || "button"} />;
-}
+  return <button {...props} className={`button ${toneClass} ${className}`} ref={ref} type={props.type || "button"} />;
+});
 
 export function Panel({ title, subtitle, actions, children, className = "" }: { title?: string; subtitle?: string; actions?: ReactNode; children: ReactNode; className?: string }) {
   return (
@@ -90,7 +114,21 @@ export function Pill({ children, tone = "neutral" }: { children: ReactNode; tone
   return <span className={`pill ${toneClass}`}>{children}</span>;
 }
 
-export function Metric({ label, value, detail, tone = "neutral", onClick }: { label: string; value: ReactNode; detail?: ReactNode; tone?: Tone; onClick?: () => void }) {
+export function Metric({
+  label,
+  value,
+  detail,
+  tone = "neutral",
+  href,
+  onClick,
+}: {
+  label: string;
+  value: ReactNode;
+  detail?: ReactNode;
+  tone?: Tone;
+  href?: string;
+  onClick?: (event: ReactMouseEvent<HTMLAnchorElement | HTMLButtonElement>) => void;
+}) {
   const toneClass =
     tone === "good"
       ? "border-[rgba(18,132,79,0.2)] bg-[var(--good-soft)]"
@@ -99,7 +137,8 @@ export function Metric({ label, value, detail, tone = "neutral", onClick }: { la
         : tone === "danger"
           ? "border-[rgba(207,31,50,0.22)] bg-[var(--danger-soft)]"
           : "border-[var(--line)] bg-[var(--surface-soft)]";
-  const className = `min-h-24 rounded-lg border p-3 text-left ${toneClass} ${onClick ? "w-full transition hover:border-[var(--line-strong)]" : ""}`;
+  const interactive = Boolean(href || onClick);
+  const className = `min-h-24 rounded-lg border p-3 text-left ${toneClass} ${interactive ? "w-full no-underline transition hover:border-[var(--line-strong)]" : ""}`;
   const content = (
     <>
       <span className="muted text-xs">{label}</span>
@@ -107,6 +146,13 @@ export function Metric({ label, value, detail, tone = "neutral", onClick }: { la
       {detail ? <small className="muted mt-1 block break-words text-xs leading-relaxed">{detail}</small> : null}
     </>
   );
+  if (href) {
+    return (
+      <a className={className} href={href} onClick={onClick}>
+        {content}
+      </a>
+    );
+  }
   if (onClick) {
     return (
       <button className={className} onClick={onClick} type="button">
@@ -136,10 +182,35 @@ export function Field({ label, children, help }: { label: string; children: Reac
   return (
     <label className="field">
       <span>{label}</span>
-      {children}
+      {withFieldControlDefaults(children, label)}
       {help ? <small className="muted text-xs">{help}</small> : null}
     </label>
   );
+}
+
+function withFieldControlDefaults(children: ReactNode, label: string): ReactNode {
+  if (Children.count(children) !== 1) return children;
+  const child = Children.only(children);
+  if (!isValidElement(child) || typeof child.type !== "string") return children;
+  if (child.type !== "input" && child.type !== "select" && child.type !== "textarea") return children;
+  const control = child as ReactElement<Record<string, unknown>>;
+  const extra: Record<string, unknown> = {};
+  if (control.props.name === undefined) {
+    extra.name = fieldNameFromLabel(label);
+  }
+  if (child.type === "input" && control.props.autoComplete === undefined && control.props.type !== "file" && control.props.type !== "checkbox" && control.props.type !== "radio") {
+    extra.autoComplete = "off";
+  }
+  return Object.keys(extra).length ? cloneElement(control, extra) : children;
+}
+
+function fieldNameFromLabel(label: string): string {
+  const normalized = label
+    .trim()
+    .replace(/[()（）/]+/g, " ")
+    .replace(/\s+/g, "_")
+    .toLowerCase();
+  return normalized || "field";
 }
 
 export function ImageDropInput({
@@ -210,7 +281,7 @@ export function ImageDropInput({
         accept={accept}
         className="hidden"
         disabled={disabled}
-        name={name}
+        name={name || "file"}
         onChange={(event) => {
           if (event.target.files) setFiles(event.target.files);
         }}
@@ -244,10 +315,151 @@ export function ContextList({ items }: { items: Array<[string, ReactNode]> }) {
 export function Toast({ message, tone }: { message: string; tone: Tone }) {
   const toneClass = tone === "danger" ? "border-[rgba(207,31,50,0.22)] bg-[var(--danger-soft)] text-[var(--danger)]" : "border-[var(--line)] bg-[var(--surface)] text-[var(--text)]";
   return (
-    <div className={`fixed right-5 bottom-5 z-50 max-w-sm rounded-lg border px-3 py-2 text-sm shadow-[var(--shadow)] ${toneClass}`} role="status">
+    <div aria-live="polite" className={`fixed right-5 bottom-5 z-50 max-w-sm rounded-lg border px-3 py-2 text-sm shadow-[var(--shadow)] ${toneClass}`} role="status">
       {message}
     </div>
   );
+}
+
+export interface DangerConfirmOptions {
+  title: string;
+  body: ReactNode;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  objectName?: ReactNode;
+  impact?: ReactNode[];
+  recovery?: ReactNode;
+  confirmationText?: string;
+  confirmationLabel?: string;
+  confirmationPlaceholder?: string;
+}
+
+export function useDangerConfirm() {
+  const [options, setOptions] = useState<DangerConfirmOptions | null>(null);
+  const [typedConfirmation, setTypedConfirmation] = useState("");
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const resolverRef = useRef<((confirmed: boolean) => void) | null>(null);
+  const titleId = useId();
+  const bodyId = useId();
+
+  function close(confirmed: boolean) {
+    const resolver = resolverRef.current;
+    resolverRef.current = null;
+    setOptions(null);
+    setTypedConfirmation("");
+    previousFocusRef.current?.focus?.();
+    previousFocusRef.current = null;
+    resolver?.(confirmed);
+  }
+
+  function confirmDanger(nextOptions: DangerConfirmOptions): Promise<boolean> {
+    resolverRef.current?.(false);
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setTypedConfirmation("");
+    setOptions(nextOptions);
+    return new Promise((resolve) => {
+      resolverRef.current = resolve;
+    });
+  }
+
+  useEffect(() => {
+    if (!options) return;
+    const id = window.setTimeout(() => {
+      const first = dialogRef.current?.querySelector<HTMLElement>("[data-dialog-initial-focus]");
+      first?.focus();
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [options]);
+
+  function handleDialogKeyDown(event: KeyboardEvent<HTMLElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close(false);
+      return;
+    }
+    if (event.key !== "Tab") return;
+
+    const focusable = Array.from(
+      dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+      ) || [],
+    );
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  const confirmationMatches = !options?.confirmationText || typedConfirmation === options.confirmationText;
+  const dialog = options ? (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center overscroll-contain bg-[rgba(16,18,22,0.56)] p-4"
+      onClick={() => close(false)}
+    >
+      <section
+        aria-describedby={bodyId}
+        aria-labelledby={titleId}
+        aria-modal="true"
+        className="w-full max-w-md overflow-hidden rounded-lg border border-[rgba(207,31,50,0.22)] bg-[var(--surface)] shadow-[var(--shadow)]"
+        onKeyDown={handleDialogKeyDown}
+        onClick={(event) => event.stopPropagation()}
+        ref={dialogRef}
+        role="dialog"
+      >
+        <div className="border-b border-[var(--line)] bg-[var(--danger-soft)] px-4 py-3">
+          <h2 className="m-0 text-sm font-semibold text-[var(--danger)]" id={titleId}>{options.title}</h2>
+          {options.objectName ? <p className="mono mt-1 mb-0 break-words text-xs text-[var(--muted-strong)]">{options.objectName}</p> : null}
+        </div>
+        <div className="grid gap-3 p-4 text-sm" id={bodyId}>
+          <p className="m-0 leading-relaxed">{options.body}</p>
+          {options.impact?.length ? (
+            <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+              <strong className="block text-xs text-[var(--muted-strong)]">影响范围</strong>
+              <ul className="mt-2 mb-0 grid gap-1 pl-4 text-xs leading-relaxed text-[var(--muted-strong)]">
+                {options.impact.map((item, index) => (
+                  <li key={index}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {options.recovery ? (
+            <p className="m-0 rounded-lg border border-[rgba(199,85,8,0.22)] bg-[var(--warn-soft)] p-3 text-xs leading-relaxed text-[var(--warn)]">
+              {options.recovery}
+            </p>
+          ) : null}
+          {options.confirmationText ? (
+            <label className="field">
+              <span>{options.confirmationLabel || "输入确认文本"}</span>
+              <input
+                autoComplete="off"
+                className="input mono"
+                name="danger_confirmation"
+                onChange={(event) => setTypedConfirmation(event.target.value)}
+                placeholder={options.confirmationPlaceholder || options.confirmationText}
+                value={typedConfirmation}
+              />
+              <small className="muted text-xs">请输入 <span className="mono">{options.confirmationText}</span> 以继续。</small>
+            </label>
+          ) : null}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-[var(--line)] px-4 py-3">
+          <Button data-dialog-initial-focus onClick={() => close(false)}>{options.cancelLabel || "取消"}</Button>
+          <Button disabled={!confirmationMatches} onClick={() => close(true)} tone="danger">
+            {options.confirmLabel || "确认执行"}
+          </Button>
+        </div>
+      </section>
+    </div>
+  ) : null;
+
+  return { confirmDanger, dangerConfirmDialog: dialog };
 }
 
 /**
@@ -274,6 +486,7 @@ export function Toggle({
   variant = "default",
   className = "",
   inputClassName = "",
+  name,
 }: {
   checked: boolean;
   label: ReactNode;
@@ -281,6 +494,7 @@ export function Toggle({
   variant?: "default" | "row";
   className?: string;
   inputClassName?: string;
+  name?: string;
 }) {
   if (variant === "row") {
     const tone = checked ? "border-[rgba(18,132,79,0.22)] bg-[var(--good-soft)]" : "border-[var(--line)] bg-[var(--surface)]";
@@ -289,6 +503,7 @@ export function Toggle({
         <input
           checked={checked}
           className={`h-4 w-4 accent-[var(--accent)] ${inputClassName}`}
+          name={name}
           onChange={(event) => onChange(event.target.checked)}
           type="checkbox"
         />
@@ -302,6 +517,7 @@ export function Toggle({
       <input
         checked={checked}
         className={inputClassName}
+        name={name}
         onChange={(event) => onChange(event.target.checked)}
         type="checkbox"
       />
@@ -328,6 +544,7 @@ export function CheckLabel({
   inputClassName = "",
   size = "sm",
   align = "center",
+  name,
 }: {
   checked: boolean;
   children: ReactNode;
@@ -336,6 +553,7 @@ export function CheckLabel({
   inputClassName?: string;
   size?: "sm" | "xs";
   align?: "center" | "start";
+  name?: string;
 }) {
   const sizeClass = size === "xs" ? "text-xs text-[var(--muted-strong)]" : "text-sm";
   const alignClass = align === "start" ? "items-start" : "items-center";
@@ -344,6 +562,7 @@ export function CheckLabel({
       <input
         checked={checked}
         className={`accent-[var(--accent)] mt-0.5 ${inputClassName}`}
+        name={name}
         onChange={(event) => onChange(event.target.checked)}
         type="checkbox"
       />
@@ -376,11 +595,11 @@ export function CollapsibleSection({
 }) {
   return (
     <details
-      className={`rounded-lg border border-[var(--border)] bg-[var(--surface-soft)] overflow-hidden ${className}`}
+      className={`overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] ${className}`}
       open={defaultOpen}
     >
       <summary
-        className="flex items-center justify-between gap-3 px-3 py-3 cursor-pointer select-none list-none hover:bg-[var(--surface-hover)] transition"
+        className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3 select-none transition hover:bg-[var(--surface-strong)]"
       >
         <div className="flex flex-col gap-0.5">
           <span className="font-medium text-sm">{title}</span>
@@ -403,7 +622,7 @@ export function CollapsibleSection({
           />
         </svg>
       </summary>
-      <div className="grid gap-4 border-t border-[var(--border)] px-3 py-3">
+      <div className="grid gap-4 border-t border-[var(--line)] px-3 py-3">
         {children}
       </div>
     </details>

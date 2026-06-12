@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AppActions } from "../../app/App";
 import type { CodexAppServerStatus, CodexMemoryDiagnostics, CodexStatus } from "../../app/types";
-import { Button, ContextList, Notice, Panel, Pill } from "../../components/ui";
+import { Button, ContextList, Notice, Panel, Pill, useDangerConfirm } from "../../components/ui";
 import { friendlyError } from "../../api/client";
 import { codexAppServerStateLabel, codexInstallStatusLabel, formatDate } from "../../domain/labels";
 
@@ -11,6 +11,7 @@ export function DiagnosticsTab({ actions, status, onChange }: { actions: AppActi
   const install = status?.installation;
   const caps = (install?.capabilities || {}) as Record<string, unknown>;
   const appServer = status?.appServer;
+  const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
   useEffect(() => {
     void actions
@@ -36,6 +37,17 @@ export function DiagnosticsTab({ actions, status, onChange }: { actions: AppActi
 
   const control = useCallback(
     async (action: "start" | "stop" | "restart") => {
+      if (action === "stop") {
+        const confirmed = await confirmDanger({
+          title: "停止 app-server runtime",
+          objectName: appServer?.pid ? `PID ${appServer.pid}` : "app-server",
+          body: "该操作会停止 Codex 内部 app-server，正在依赖 app-server 的会话路径会暂时不可用。",
+          confirmLabel: "停止 runtime",
+          impact: ["不会删除 Codex 会话、工作区或审计记录。", "后续会话可能回退到 exec 路径或需要重新启动 app-server。"],
+          recovery: "需要恢复时，可在本页重新启动 app-server。",
+        });
+        if (!confirmed) return;
+      }
       setBusy(true);
       try {
         await actions.api(`/api/codex/app-server/${action}`, { method: "POST", csrf: actions.csrf });
@@ -46,10 +58,11 @@ export function DiagnosticsTab({ actions, status, onChange }: { actions: AppActi
         setBusy(false);
       }
     },
-    [actions, onChange],
+    [actions, appServer?.pid, confirmDanger, onChange],
   );
 
   return (
+    <>
     <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-4 max-lg:grid-cols-1">
       <Panel actions={<Button disabled={busy} onClick={() => void probe()}>{busy ? "处理中" : "重新探测"}</Button>} subtitle="本机 codex CLI 安装、版本、认证与沙箱能力。" title="CLI 安装">
         <ContextList
@@ -115,6 +128,8 @@ export function DiagnosticsTab({ actions, status, onChange }: { actions: AppActi
         {memory?.note ? <p className="muted mt-3 mb-0 text-xs">{memory.note}</p> : null}
       </Panel>
     </div>
+    {dangerConfirmDialog}
+    </>
   );
 }
 

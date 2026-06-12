@@ -1,7 +1,9 @@
+import { useEffect, useId, useRef, useState } from "react";
 import type { AppActions } from "../app/App";
 import type { AppData, MainTab, V2RayExport } from "../app/types";
 import { Button, Pill } from "../components/ui";
 import { NAV_ITEMS, v2rayStateLabel } from "../domain/labels";
+import { shouldHandleQueryLinkClick } from "../hooks/useQueryParamState";
 import { CodexGatewayView } from "./CodexGatewayView";
 import { CodexView } from "./CodexView";
 import { DashboardView } from "./DashboardView";
@@ -30,6 +32,33 @@ export function AppShell({
   const gateway = data.codexGateway.status || data.dashboard.codexGateway;
   const v2ray = data.v2ray.status || data.dashboard.v2ray;
   const images = data.images.status || data.dashboard.images;
+  const [statusOpen, setStatusOpen] = useState(false);
+  const statusPanelId = useId();
+  const statusButtonId = useId();
+  const statusPanelRef = useRef<HTMLDivElement | null>(null);
+  const activeStatus = activeStatusPill(activeTab, data);
+
+  useEffect(() => {
+    if (!statusOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      const trigger = document.getElementById(statusButtonId);
+      if (statusPanelRef.current?.contains(target) || trigger?.contains(target)) return;
+      setStatusOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setStatusOpen(false);
+      document.getElementById(statusButtonId)?.focus();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [statusButtonId, statusOpen]);
 
   return (
     <div className="grid min-h-dvh grid-cols-[232px_minmax(0,1fr)] gap-3 p-3 max-lg:grid-cols-1">
@@ -48,16 +77,19 @@ export function AppShell({
           {NAV_ITEMS.map((item) => {
             const active = item.id === activeTab;
             return (
-              <button
-                aria-pressed={active}
-                className={`w-full rounded-lg px-3 py-2 text-left text-sm transition ${active ? "bg-[var(--surface)] shadow-[inset_2px_0_0_var(--accent)]" : "hover:bg-[var(--surface-strong)]"}`}
+              <a
+                aria-current={active ? "page" : undefined}
+                className={`block w-full rounded-lg px-3 py-2 text-left text-sm no-underline transition ${active ? "bg-[var(--surface)] text-[var(--text)] shadow-[inset_2px_0_0_var(--accent)]" : "text-[var(--text)] hover:bg-[var(--surface-strong)]"}`}
+                href={actions.mainTabHref(item.id)}
                 key={item.id}
-                onClick={() => actions.setMainTab(item.id)}
-                type="button"
+                onClick={(event) => {
+                  if (!shouldHandleQueryLinkClick(event)) return;
+                  event.preventDefault();
+                  actions.setMainTab(item.id);
+                }}
               >
-                <span className="mr-2 font-mono text-xs text-[var(--muted)]">{item.short}</span>
                 {item.label}
-              </button>
+              </a>
             );
           })}
         </nav>
@@ -69,11 +101,25 @@ export function AppShell({
             <h1 className="m-0 text-lg font-semibold">{activeMeta?.label}</h1>
             <p className="muted mt-1 mb-0 text-sm">{activeMeta?.description}</p>
           </div>
-          <div className="flex flex-wrap justify-end gap-2 max-md:justify-start">
-            <Pill tone={gateway?.enabled ? "good" : "warn"}>Gateway {gateway?.enabled ? "已启用" : "未启用"}</Pill>
-            <Pill tone={images?.hasApiKey ? "good" : "warn"}>Images {images?.hasApiKey ? "已配置" : "未配置"}</Pill>
-            <Pill tone={v2ray?.running ? "good" : "warn"}>V2Ray {v2rayStateLabel(v2ray)}</Pill>
-            <Button onClick={() => void actions.reloadData()}>刷新</Button>
+          <div className="relative flex flex-wrap justify-end gap-2 max-md:justify-start">
+            {activeStatus}
+            <Button aria-controls={statusOpen ? statusPanelId : undefined} aria-expanded={statusOpen} aria-haspopup="dialog" id={statusButtonId} onClick={() => setStatusOpen((open) => !open)}>
+              状态摘要
+            </Button>
+            {statusOpen ? (
+              <div
+                aria-labelledby={statusButtonId}
+                className="absolute top-full right-0 z-30 mt-2 grid w-72 gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3 text-xs shadow-[var(--shadow)] max-md:right-auto max-md:left-0"
+                id={statusPanelId}
+                ref={statusPanelRef}
+                role="dialog"
+              >
+                <StatusSummaryRow label="Gateway" tone={gateway?.enabled ? "good" : "warn"} value={gateway?.enabled ? "已启用" : "未启用"} />
+                <StatusSummaryRow label="Images" tone={images?.hasApiKey ? "good" : "warn"} value={images?.hasApiKey ? "已配置" : "未配置"} />
+                <StatusSummaryRow label="V2Ray" tone={v2ray?.running ? "good" : "warn"} value={v2rayStateLabel(v2ray)} />
+              </div>
+            ) : null}
+            <Button onClick={() => void actions.reloadData()}>刷新全部</Button>
             <Button onClick={() => void logout()}>退出</Button>
           </div>
         </header>
@@ -87,6 +133,35 @@ export function AppShell({
         {activeTab === "v2ray" ? <V2RayView actions={actions} data={data} exportOpen={v2rayExportOpen} exported={v2rayExport as V2RayExport | null} /> : null}
         {activeTab === "settings" ? <SettingsView actions={actions} data={data} /> : null}
       </main>
+    </div>
+  );
+}
+
+function activeStatusPill(activeTab: MainTab, data: AppData) {
+  if (activeTab === "codex-gateway") {
+    const gateway = data.codexGateway.status || data.dashboard.codexGateway;
+    return <Pill tone={gateway?.enabled ? "good" : "warn"}>Gateway {gateway?.enabled ? "已启用" : "未启用"}</Pill>;
+  }
+  if (activeTab === "images") {
+    const images = data.images.status || data.dashboard.images;
+    return <Pill tone={images?.hasApiKey ? "good" : "warn"}>Images {images?.hasApiKey ? "已配置" : "未配置"}</Pill>;
+  }
+  if (activeTab === "v2ray") {
+    const v2ray = data.v2ray.status || data.dashboard.v2ray;
+    return <Pill tone={v2ray?.running ? "good" : "warn"}>V2Ray {v2rayStateLabel(v2ray)}</Pill>;
+  }
+  if (activeTab === "codex") {
+    const codex = data.dashboard.codex;
+    return <Pill tone={codex?.pendingApprovals ? "warn" : codex?.enabled ? "good" : "warn"}>Codex {codex?.pendingApprovals ? `${codex.pendingApprovals} 待审批` : codex?.enabled ? "可用" : "需检查"}</Pill>;
+  }
+  return null;
+}
+
+function StatusSummaryRow({ label, tone, value }: { label: string; tone: "good" | "warn" | "danger" | "neutral"; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-[var(--muted-strong)]">{label}</span>
+      <Pill tone={tone}>{value}</Pill>
     </div>
   );
 }

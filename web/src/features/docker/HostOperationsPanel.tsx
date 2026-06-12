@@ -45,7 +45,7 @@ export function HostOperationsPanel({
 
   return (
     <Panel
-      title="Host Operations"
+      title="主机操作"
       subtitle="安装 Docker daemon 与控制 systemd docker 服务。默认关闭；开启后仍需每次危险操作确认。"
       actions={<Button onClick={() => loadControl()}>刷新控制状态</Button>}
     >
@@ -116,10 +116,10 @@ export function HostOperationsPanel({
             <Pill tone={settings.containerCreateEnabled ? "warn" : "neutral"}>{settings.containerCreateEnabled ? "已开启" : "已关闭"}</Pill>
           </div>
           <div className="grid gap-3">
-            <Field label="Container name">
+            <Field label="容器名称">
               <input className="input mono" onChange={(event) => setCreateName(event.target.value)} value={createName} />
             </Field>
-            <Field label="Image reference" help={`必须位于 ${host}/personal/ 前缀下。`}>
+            <Field label="镜像引用" help={`必须位于 ${host}/personal/ 前缀下。`}>
               <input className="input mono" onChange={(event) => setCreateImage(event.target.value)} placeholder={`${host}/personal/app:tag`} value={createImage} />
             </Field>
             <div className="flex flex-wrap gap-2">

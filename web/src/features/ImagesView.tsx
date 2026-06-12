@@ -2,12 +2,17 @@ import { useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../app/App";
 import type { ApiError, AppData, ImageAsset, ImageGenerationJob, ObjectStorageProfile } from "../app/types";
 import { friendlyError } from "../api/client";
+import { useDangerConfirm } from "../components/ui";
 import { defaultImageSettings, defaultImageStorageSettings } from "../domain/labels";
+import { useQueryParamState } from "../hooks/useQueryParamState";
 import { GeneratePanel, HistoryPanel, ImageStorageSettingsPanel, ImagesInspector, ImagesTabs, LibraryPanel, ProviderSettingsPanel } from "../images/components";
 import type { ImageJobResponse, ImageLibraryScope, ImagePrivateStatus, ImageSettingsDraft, ImageStorageSettingsDraft, ImageUploadResponse, ImagesTab } from "../images/types";
 
+const IMAGE_TAB_IDS: ImagesTab[] = ["generate", "library", "history", "settings"];
+const IMAGE_CLEAR_KEYS = ["codex", "codexInbox", "codexRuntime", "gateway", "docker", "settings"];
+
 export function ImagesView({ actions, data }: { actions: AppActions; data: AppData }) {
-  const [activeTab, setActiveTab] = useState<ImagesTab>("generate");
+  const [activeTab, setActiveTab, tabHref] = useQueryParamState<ImagesTab>("images", IMAGE_TAB_IDS, "generate", { clearKeys: IMAGE_CLEAR_KEYS });
   const [busy, setBusy] = useState("");
   const [currentJob, setCurrentJob] = useState<ImageGenerationJob | undefined>(undefined);
   const [selectedAssetId, setSelectedAssetId] = useState("");
@@ -17,6 +22,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   const [privateAssets, setPrivateAssets] = useState<ImageAsset[]>([]);
   const [imageToImageAsset, setImageToImageAsset] = useState<ImageAsset | undefined>(undefined);
   const [objectProfiles, setObjectProfiles] = useState<ObjectStorageProfile[]>([]);
+  const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
   const settings = useMemo(() => ({ ...defaultImageSettings(), ...(data.images.settings || {}) }), [data.images.settings]);
   const storageSettings = useMemo(() => ({ ...defaultImageStorageSettings(), ...(data.images.storageSettings || {}) }), [data.images.storageSettings]);
@@ -169,6 +175,18 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   }
 
   async function deleteAsset(asset: ImageAsset) {
+    const confirmed = await confirmDanger({
+      title: "删除图片资产",
+      objectName: imageAssetTitle(asset),
+      body: "该操作会删除图片库中的图片资产记录，并按后端策略清理对应存储对象。",
+      confirmLabel: "删除图片",
+      impact: [
+        asset.private ? "图片会从私密收藏夹移除。" : "图片会从普通图片库移除。",
+        "相关生成历史仍保留参数和状态摘要。",
+      ],
+      recovery: "删除通常不可恢复；如果对象存储清理失败，后端会返回错误并保持当前状态。",
+    });
+    if (!confirmed) return;
     setBusy(`delete:${asset.id}`);
     try {
       await actions.api(`/api/images/library/assets/${encodeURIComponent(asset.id)}`, {
@@ -214,7 +232,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
       });
       await actions.refreshImages();
       if (result.asset?.id) setSelectedAssetId(result.asset.id);
-      actions.setToast(result.duplicate ? "图片已存在，已复用 Library 资产" : "图片已上传", "good");
+      actions.setToast(result.duplicate ? "图片已存在，已复用图片库资产" : "图片已上传", "good");
       return true;
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");
@@ -227,7 +245,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   function useAssetForImageToImage(asset: ImageAsset) {
     setImageToImageAsset(asset);
     setActiveTab("generate");
-    actions.setToast("已选择 Library 图片作为图生图参考", "good");
+    actions.setToast("已选择图片库图片作为图生图参考", "good");
   }
 
   async function refreshPrivateStatus(loadAssets = false) {
@@ -324,47 +342,54 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   }
 
   return (
-    <div className="grid min-h-[calc(100dvh-105px)] grid-cols-[minmax(0,1fr)_320px] max-xl:grid-cols-1">
-      <div className="grid content-start gap-4 p-4">
-        <ImagesTabs active={activeTab} onChange={setActiveTab} />
-        {activeTab === "generate" ? <GeneratePanel busy={busy === "job"} hasApiKey={Boolean(settings.hasApiKey)} latestJob={latestJob} libraryImage={imageToImageAsset} onClearLibraryImage={() => setImageToImageAsset(undefined)} onSubmit={submitJob} settings={settings} storageSettings={storageSettings} /> : null}
-        {activeTab === "library" ? (
-          <LibraryPanel
-            assets={libraryAssets}
-            busy={busy}
-            libraryScope={libraryScope}
-            onArchive={(asset) => void archiveAsset(asset)}
-            onDelete={(asset) => void deleteAsset(asset)}
-            onLockPrivate={() => void lockPrivateCollection()}
-            onMarkPrivate={(asset, nextPrivate) => void setAssetPrivate(asset, nextPrivate)}
-            onRefresh={libraryScope === "private" ? refreshPrivateAssets : actions.refreshImages}
-            onSelect={(asset) => setSelectedAssetId(asset.id)}
-            onScopeChange={(scope) => {
-              setLibraryScope(scope);
-              setSelectedAssetId("");
-            }}
-            onUpload={uploadAsset}
-            onUseForImage={useAssetForImageToImage}
-            onUnlockPrivate={unlockPrivateCollection}
-            privateExpiresAt={privateExpiresAt}
-            privateUnlocked={privateUnlocked}
-            selectedId={selectedAsset?.id || ""}
-            storageSettings={storageSettings}
-          />
-        ) : null}
-        {activeTab === "history" ? <HistoryPanel jobs={historyJobs} onRefresh={actions.refreshImages} /> : null}
-        {activeTab === "settings" ? (
-          <div className="grid gap-4">
-            <ProviderSettingsPanel busy={busy === "settings"} onSave={saveSettings} settings={settings} />
-            <ImageStorageSettingsPanel busy={busy === "storage" || busy === "storage-test"} objectProfiles={objectProfiles} onSave={saveStorageSettings} onTest={testStorageSettings} settings={storageSettings} />
-          </div>
-        ) : null}
+    <>
+      <div className="grid min-h-[calc(100dvh-105px)] grid-cols-[minmax(0,1fr)_320px] max-xl:grid-cols-1">
+        <div className="grid content-start gap-4 p-4">
+          <ImagesTabs active={activeTab} hrefFor={tabHref} onChange={setActiveTab} />
+          {activeTab === "generate" ? <GeneratePanel busy={busy === "job"} hasApiKey={Boolean(settings.hasApiKey)} latestJob={latestJob} libraryImage={imageToImageAsset} onClearLibraryImage={() => setImageToImageAsset(undefined)} onSubmit={submitJob} settings={settings} storageSettings={storageSettings} /> : null}
+          {activeTab === "library" ? (
+            <LibraryPanel
+              assets={libraryAssets}
+              busy={busy}
+              libraryScope={libraryScope}
+              onArchive={(asset) => void archiveAsset(asset)}
+              onDelete={(asset) => void deleteAsset(asset)}
+              onLockPrivate={() => void lockPrivateCollection()}
+              onMarkPrivate={(asset, nextPrivate) => void setAssetPrivate(asset, nextPrivate)}
+              onRefresh={libraryScope === "private" ? refreshPrivateAssets : actions.refreshImages}
+              onSelect={(asset) => setSelectedAssetId(asset.id)}
+              onScopeChange={(scope) => {
+                setLibraryScope(scope);
+                setSelectedAssetId("");
+              }}
+              onUpload={uploadAsset}
+              onUseForImage={useAssetForImageToImage}
+              onUnlockPrivate={unlockPrivateCollection}
+              privateExpiresAt={privateExpiresAt}
+              privateUnlocked={privateUnlocked}
+              selectedId={selectedAsset?.id || ""}
+              storageSettings={storageSettings}
+            />
+          ) : null}
+          {activeTab === "history" ? <HistoryPanel jobs={historyJobs} onRefresh={actions.refreshImages} /> : null}
+          {activeTab === "settings" ? (
+            <div className="grid gap-4">
+              <ProviderSettingsPanel busy={busy === "settings"} onSave={saveSettings} settings={settings} />
+              <ImageStorageSettingsPanel busy={busy === "storage" || busy === "storage-test"} objectProfiles={objectProfiles} onSave={saveStorageSettings} onTest={testStorageSettings} settings={storageSettings} />
+            </div>
+          ) : null}
+        </div>
+        <ImagesInspector activeTab={activeTab} asset={selectedAsset} assets={libraryAssets} jobs={historyJobs} libraryScope={libraryScope} onArchive={(asset) => void archiveAsset(asset)} onDelete={(asset) => void deleteAsset(asset)} onMarkPrivate={(asset, nextPrivate) => void setAssetPrivate(asset, nextPrivate)} status={status} storageSettings={storageSettings} />
       </div>
-      <ImagesInspector asset={selectedAsset} assets={libraryAssets} jobs={historyJobs} libraryScope={libraryScope} onArchive={(asset) => void archiveAsset(asset)} onDelete={(asset) => void deleteAsset(asset)} onMarkPrivate={(asset, nextPrivate) => void setAssetPrivate(asset, nextPrivate)} status={status} storageSettings={storageSettings} />
-    </div>
+      {dangerConfirmDialog}
+    </>
   );
 }
 
 function isActiveImageJob(job: ImageGenerationJob): boolean {
   return job.status === "queued" || job.status === "running";
+}
+
+function imageAssetTitle(asset: ImageAsset): string {
+  return asset.originalFilename || asset.revisedPromptPreview || asset.promptPreview || asset.id;
 }

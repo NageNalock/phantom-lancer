@@ -97,7 +97,7 @@ export function LogsView({ actions }: { actions: AppActions }) {
         <Panel
           actions={<Button onClick={() => void loadSources()}>{sourcesLoading ? "加载中" : "刷新"}</Button>}
           subtitle="默认只显示摘要，点击后读取最近日志内容。"
-          title="Log Sources"
+          title="日志源"
         >
           <div className="grid gap-2">
             {sources.length ? (
@@ -135,26 +135,26 @@ export function LogsView({ actions }: { actions: AppActions }) {
                   {loading ? "读取中" : "刷新"}
                 </Button>
                 <Button className={live ? "button-primary" : ""} onClick={() => setLive((value) => !value)}>
-                  {live ? "停止 Live" : "Live tail"}
+                  {live ? "停止实时跟随" : "实时跟随"}
                 </Button>
               </>
             ) : null
           }
           subtitle={activeSource ? `${activeSource.name || activeSource.id} / ${activeSource.kind || "log"}` : "选择左侧日志源后加载内容。"}
-          title="Log Workspace"
+          title="日志工作区"
         >
           {activeSource ? (
             <div className="grid gap-3">
               <form className="grid grid-cols-[minmax(0,1fr)_120px_100px_auto] gap-2 max-lg:grid-cols-1" onSubmit={submitSearch}>
-                <input className="input" onChange={(event) => setQuery(event.target.value)} placeholder="搜索当前加载范围" value={query} />
-                <select className="select" onChange={(event) => setLevel(event.target.value)} value={level}>
+                <input aria-label="搜索日志" autoComplete="off" className="input" name="logs_query" onChange={(event) => setQuery(event.target.value)} placeholder="搜索当前加载范围…" value={query} />
+                <select aria-label="日志等级" className="select" name="logs_level" onChange={(event) => setLevel(event.target.value)} value={level}>
                   {LEVEL_OPTIONS.map((item) => (
                     <option key={item.value} value={item.value}>
                       {item.label}
                     </option>
                   ))}
                 </select>
-                <select className="select" onChange={(event) => setLimit(Number(event.target.value))} value={limit}>
+                <select aria-label="日志行数" className="select" name="logs_limit" onChange={(event) => setLimit(Number(event.target.value))} value={limit}>
                   {[200, 500, 1000].map((value) => (
                     <option key={value} value={value}>
                       {value} 行
@@ -184,7 +184,7 @@ export function LogsView({ actions }: { actions: AppActions }) {
           )}
         </Panel>
 
-        <Panel className="max-xl:col-span-2 max-lg:col-span-1" subtitle="读取范围、轮转和风险摘要。" title="Inspector">
+        <Panel className="max-xl:col-span-2 max-lg:col-span-1" subtitle="读取范围、轮转和风险摘要。" title="检查器">
           {activeSource ? (
             <ContextList
               items={[

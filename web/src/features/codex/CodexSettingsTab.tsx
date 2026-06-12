@@ -51,7 +51,7 @@ export function CodexSettingsTab({ actions, onChange }: { actions: AppActions; o
   }
 
   return (
-    <Panel actions={<Button onClick={() => void load()}>{loading ? "加载中" : "刷新"}</Button>} subtitle="仅 Codex 模块自身配置；全局允许根目录等仍在通用设置。" title="Codex Settings">
+    <Panel actions={<Button onClick={() => void load()}>{loading ? "加载中" : "刷新"}</Button>} subtitle="仅 Codex 模块自身配置；全局允许根目录等仍在通用设置。" title="Codex 设置">
       <form className="grid grid-cols-2 gap-3 max-lg:grid-cols-1" onSubmit={save}>
         <Field label="启用 Codex 模块">
           <select className="select" onChange={(event) => update("enabled", event.target.value === "true")} value={String(settings.enabled ?? true)}>

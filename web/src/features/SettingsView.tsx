@@ -2,12 +2,24 @@ import { useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../app/App";
 import type { AppData, RuntimeSettings } from "../app/types";
 import { friendlyError } from "../api/client";
-import { Button, ContextList, Field, Panel, Toggle } from "../components/ui";
+import { Button, ContextList, Field, Panel, SubTabs, Toggle } from "../components/ui";
 import { defaultRuntime, formatDate } from "../domain/labels";
+import { useQueryParamState } from "../hooks/useQueryParamState";
 import { SystemUpdatePanel } from "./settings/SystemUpdatePanel";
 import { ObjectStoragePanel } from "./settings/ObjectStoragePanel";
 
+type SettingsTab = "runtime" | "storage" | "updates";
+
+const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
+  { id: "runtime", label: "运行与服务" },
+  { id: "storage", label: "对象存储" },
+  { id: "updates", label: "系统更新" },
+];
+const SETTINGS_TAB_IDS: SettingsTab[] = SETTINGS_TABS.map((item) => item.id);
+const SETTINGS_CLEAR_KEYS = ["codex", "codexInbox", "codexRuntime", "gateway", "images", "docker"];
+
 export function SettingsView({ actions, data }: { actions: AppActions; data: AppData }) {
+  const [tab, setTab, tabHref] = useQueryParamState<SettingsTab>("settings", SETTINGS_TAB_IDS, "runtime", { clearKeys: SETTINGS_CLEAR_KEYS });
   const [runtime, setRuntime] = useState<RuntimeSettings>(data.settings.runtime || defaultRuntime());
   const [allowedRootsText, setAllowedRootsText] = useState((data.settings.runtime?.allowedRoots || []).join("\n"));
   const [busy, setBusy] = useState("");
@@ -119,61 +131,75 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
 
   return (
     <div className="grid gap-4 p-4">
-      <div className="grid grid-cols-[minmax(0,1.05fr)_minmax(300px,0.95fr)] gap-4 max-xl:grid-cols-1">
-        <Panel title="运行设置" subtitle="影响允许工作目录和 Cookie 安全策略">
-          <div className="grid gap-4">
-            <label className="field">
-              <span>允许根目录</span>
-              <textarea className="textarea mono min-h-36" onChange={(event) => setAllowedRootsText(event.target.value)} value={allowedRootsText} />
-              <small className="muted text-xs">每行一个绝对路径；后端会归一化并拒绝无效目录。</small>
-            </label>
-            <Toggle
-              checked={Boolean(runtime.cookieSecure)}
-              label="HTTPS 部署时启用 Secure Cookie"
-              onChange={(checked) => setRuntime((current) => ({ ...current, cookieSecure: checked }))}
-            />
-            <div className="flex flex-wrap justify-between gap-2">
-              <span className="muted text-xs">最后更新：{formatDate(runtime.updatedAt) || "-"}</span>
-              <Button disabled={busy === "runtime"} onClick={() => void saveRuntime()} tone="primary">
-                保存运行设置
-              </Button>
-            </div>
-          </div>
-        </Panel>
+      <SubTabs activeId={tab} onChange={(id) => setTab(id as SettingsTab)} tabs={SETTINGS_TABS.map((item) => ({ ...item, href: tabHref(item.id) }))} />
 
-        <Panel title="服务配置" subtitle="修改监听地址无需重启；其他启动参数为只读">
-          <div className="grid gap-4">
-            <Field label="监听地址" help="切换后旧连接将在 2 秒内强制断开，新地址在进程重启后仍然生效。">
-              <div className="flex gap-2">
-                <input
-                  className="input mono flex-1"
-                  onChange={(event) => setListenAddr(event.target.value)}
-                  placeholder="host:port，例如 0.0.0.0:8080"
-                  value={listenAddr}
+      {tab === "runtime" ? (
+        <div className="grid grid-cols-[minmax(0,1.05fr)_minmax(300px,0.95fr)] gap-4 max-xl:grid-cols-1">
+          <Panel title="运行设置" subtitle="影响允许工作目录和 Cookie 安全策略">
+            <div className="grid gap-4">
+              <label className="field">
+                <span>允许根目录</span>
+                <textarea
+                  autoComplete="off"
+                  className="textarea mono min-h-36"
+                  name="allowed_roots"
+                  onChange={(event) => setAllowedRootsText(event.target.value)}
+                  spellCheck={false}
+                  value={allowedRootsText}
                 />
-                <Button
-                  disabled={swapBusy || !listenAddrDirty}
-                  onClick={() => void applyListenAddr()}
-                  tone="primary"
-                >
-                  应用
+                <small className="muted text-xs">每行一个绝对路径；后端会归一化并拒绝无效目录。</small>
+              </label>
+              <Toggle
+                checked={Boolean(runtime.cookieSecure)}
+                label="HTTPS 部署时启用 Secure Cookie"
+                onChange={(checked) => setRuntime((current) => ({ ...current, cookieSecure: checked }))}
+              />
+              <div className="flex flex-wrap justify-between gap-2">
+                <span className="muted text-xs">最后更新：{formatDate(runtime.updatedAt) || "-"}</span>
+                <Button disabled={busy === "runtime"} onClick={() => void saveRuntime()} tone="primary">
+                  保存运行设置
                 </Button>
               </div>
-            </Field>
-            <ContextList
-              items={[
-                ["配置文件", data.settings.file?.configPath || "-"],
-                ["数据目录", data.settings.file?.dataDir || "-"],
-                ["数据库", data.settings.file?.dbPath || "-"],
-              ]}
-            />
-          </div>
-        </Panel>
-      </div>
+            </div>
+          </Panel>
 
-      <ObjectStoragePanel actions={actions} />
+          <Panel title="服务配置" subtitle="修改监听地址无需重启；其他启动参数为只读">
+            <div className="grid gap-4">
+              <Field label="监听地址" help="切换后旧连接将在 2 秒内强制断开，新地址在进程重启后仍然生效。">
+                <div className="flex gap-2">
+                  <input
+                    autoComplete="off"
+                    className="input mono flex-1"
+                    name="listen_addr"
+                    onChange={(event) => setListenAddr(event.target.value)}
+                    placeholder="host:port，例如 0.0.0.0:8080"
+                    spellCheck={false}
+                    value={listenAddr}
+                  />
+                  <Button
+                    disabled={swapBusy || !listenAddrDirty}
+                    onClick={() => void applyListenAddr()}
+                    tone="primary"
+                  >
+                    应用
+                  </Button>
+                </div>
+              </Field>
+              <ContextList
+                items={[
+                  ["配置文件", data.settings.file?.configPath || "-"],
+                  ["数据目录", data.settings.file?.dataDir || "-"],
+                  ["数据库", data.settings.file?.dbPath || "-"],
+                ]}
+              />
+            </div>
+          </Panel>
+        </div>
+      ) : null}
 
-      <SystemUpdatePanel actions={actions} />
+      {tab === "storage" ? <ObjectStoragePanel actions={actions} /> : null}
+
+      {tab === "updates" ? <SystemUpdatePanel actions={actions} /> : null}
 
     </div>
   );

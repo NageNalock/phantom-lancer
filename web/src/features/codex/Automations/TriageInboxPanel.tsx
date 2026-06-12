@@ -22,10 +22,9 @@ export function TriageInboxPanel({
   const reviewComments = triage.reviewComments || [];
 
   return (
-    <div className="mt-4 border-t border-[var(--line)] pt-3">
-      <strong className="text-sm">Triage</strong>
+    <div className="grid gap-3">
       {automationRuns.length ? (
-        <div className="mt-2 grid gap-2">
+        <div className="grid gap-2">
           {automationRuns.map((run) => (
             <div className="rounded border border-[var(--line)] bg-[var(--surface-soft)] p-2 text-xs" key={run.id}>
               <div className="flex justify-between gap-2">
@@ -42,7 +41,7 @@ export function TriageInboxPanel({
           ))}
         </div>
       ) : (
-        <p className="muted mb-0 text-xs">当前没有待处理自动化结果。</p>
+        <p className="muted m-0 text-xs">当前没有待处理自动化结果。</p>
       )}
 
       {backgroundThreads.length ? (

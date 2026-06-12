@@ -46,7 +46,10 @@ export function Composer(props: ComposerProps) {
   return (
     <form className="grid gap-2" onSubmit={props.onSend}>
       <textarea
+        aria-label="Codex prompt"
+        autoComplete="off"
         className="input min-h-20 resize-y"
+        name="codex_prompt"
         onChange={(event) => props.onPrompt(event.target.value)}
         placeholder="输入 prompt，Codex 将在受控沙箱内执行；可用 $skill 引用技能"
         ref={props.promptRef}
@@ -65,7 +68,7 @@ export function Composer(props: ComposerProps) {
         </div>
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
-        <select className="select" disabled={sandboxLocked} onChange={(event) => props.onSandbox(event.target.value)} value={sandboxLocked ? "read-only" : props.sandbox}>
+        <select aria-label="沙箱模式" className="select" disabled={sandboxLocked} name="codex_sandbox" onChange={(event) => props.onSandbox(event.target.value)} value={sandboxLocked ? "read-only" : props.sandbox}>
           <option value="read-only">只读咨询</option>
           {sandboxLocked ? null : (
             <option disabled={!workspaceWriteAllowed} value="workspace-write">
@@ -73,13 +76,14 @@ export function Composer(props: ComposerProps) {
             </option>
           )}
         </select>
-        <select className="select" onChange={(event) => props.onApproval(event.target.value)} value={props.approval}>
+        <select aria-label="审批策略" className="select" name="codex_approval_policy" onChange={(event) => props.onApproval(event.target.value)} value={props.approval}>
           <option value="on-request">on-request</option>
         </select>
         {skills.length ? (
-          <select
-            aria-label="插入技能"
-            className="select"
+	          <select
+	            aria-label="插入技能"
+	            className="select"
+	            name="codex_insert_skill"
             onChange={(event) => {
               props.onInsertSkill(event.target.value);
               event.target.value = "";
@@ -95,7 +99,7 @@ export function Composer(props: ComposerProps) {
           </select>
         ) : null}
         {models.length ? (
-          <select className="select" onChange={(event) => props.onModel(event.target.value)} value={props.model}>
+	          <select aria-label="模型" className="select" name="codex_model" onChange={(event) => props.onModel(event.target.value)} value={props.model}>
             {!props.model ? <option disabled value="">选择模型</option> : null}
             {models.map((item) => (
               <option key={item.id} value={item.id}>
@@ -105,7 +109,7 @@ export function Composer(props: ComposerProps) {
             ))}
           </select>
         ) : (
-          <input className="input w-40" onChange={(event) => props.onModel(event.target.value)} placeholder={modelRequired ? "模型（必填）" : "模型（可选）"} value={props.model} />
+	          <input aria-label="模型" autoComplete="off" className="input w-40" name="codex_model" onChange={(event) => props.onModel(event.target.value)} placeholder={modelRequired ? "模型（必填）" : "模型（可选）"} spellCheck={false} value={props.model} />
         )}
         {modelMissing ? <span className="text-xs text-[var(--danger)]">请选择一个可用模型</span> : null}
         <div className="w-56 max-sm:w-full">

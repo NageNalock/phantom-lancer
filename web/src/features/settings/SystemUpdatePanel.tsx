@@ -254,7 +254,7 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
             </div>
             <label className="field">
               <span>管理员密码</span>
-              <input className="input" onChange={(event) => setOwnerPassword(event.target.value)} type="password" value={ownerPassword} />
+              <input autoComplete="current-password" className="input" name="system_update_owner_password" onChange={(event) => setOwnerPassword(event.target.value)} type="password" value={ownerPassword} />
             </label>
             <CheckLabel
               align="start"
@@ -328,7 +328,7 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
                 </div>
                 <label className="field">
                   <span>管理员密码</span>
-                  <input className="input" onChange={(event) => setRollbackPassword(event.target.value)} type="password" value={rollbackPassword} />
+                  <input autoComplete="current-password" className="input" name="system_update_rollback_password" onChange={(event) => setRollbackPassword(event.target.value)} type="password" value={rollbackPassword} />
                 </label>
                 <div className="flex flex-wrap justify-end gap-2">
                   <Button onClick={() => { setRollbackOpen(false); setRollbackPassword(""); }}>取消</Button>
@@ -354,8 +354,8 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
             ) : null}
             {(status.installBinaryPath || status.backupBinaryPath) ? (
               <div className="grid gap-1 text-xs muted mono border-t border-[var(--line)] pt-2">
-                <span>安装路径: {status.installBinaryPath || "—"}</span>
-                <span>备份路径: {status.backupBinaryPath || "—"}</span>
+                <span>安装路径: {status.installBinaryPath || "未配置"}</span>
+                <span>备份路径: {status.backupBinaryPath || "未配置"}</span>
               </div>
             ) : null}
           </div>

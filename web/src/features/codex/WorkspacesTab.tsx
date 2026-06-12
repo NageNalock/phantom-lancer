@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import type { AppActions } from "../../app/App";
 import type { ApiError, CodexWorkspace } from "../../app/types";
-import { Button, EmptyState, Field, Notice, Panel, Pill } from "../../components/ui";
+import { Button, EmptyState, Field, Notice, Panel, Pill, useDangerConfirm } from "../../components/ui";
 import { friendlyError } from "../../api/client";
 import { codexSandboxLabel, formatDate } from "../../domain/labels";
 
@@ -23,6 +23,7 @@ export function WorkspacesTab({ actions, onChange }: { actions: AppActions; onCh
   const [defaultApproval, setDefaultApproval] = useState("on-request");
   const [networkEnabled, setNetworkEnabled] = useState(false);
   const [missingPath, setMissingPath] = useState("");
+  const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -111,6 +112,15 @@ export function WorkspacesTab({ actions, onChange }: { actions: AppActions; onCh
   }
 
   async function remove(workspace: CodexWorkspace) {
+    const confirmed = await confirmDanger({
+      title: "移除 Codex 工作区",
+      objectName: workspace.label || workspace.pathSummary || workspace.id,
+      body: "该操作会从 Codex 模块移除工作区登记，不会删除磁盘目录。",
+      confirmLabel: "移除工作区",
+      impact: ["已存在会话可能失去清晰的工作区上下文。", "磁盘文件、Git 仓库和审计记录不会被删除。"],
+      recovery: "如需恢复，可重新登记同一路径。",
+    });
+    if (!confirmed) return;
     try {
       await actions.api(`/api/codex/workspaces/${workspace.id}`, { method: "DELETE", csrf: actions.csrf });
       await load();
@@ -121,8 +131,9 @@ export function WorkspacesTab({ actions, onChange }: { actions: AppActions; onCh
   }
 
   return (
+    <>
     <div className="grid grid-cols-[minmax(0,1fr)_320px] gap-4 max-lg:grid-cols-1">
-      <Panel actions={<Button onClick={() => void load()}>{loading ? "加载中" : "刷新"}</Button>} subtitle="Codex 会话只能绑定允许根目录内的工作区。" title="Workspaces">
+      <Panel actions={<Button onClick={() => void load()}>{loading ? "加载中" : "刷新"}</Button>} subtitle="Codex 会话只能绑定允许根目录内的工作区。" title="工作区">
         {items.length ? (
           <div className="grid gap-2">
             {items.map((workspace) => (
@@ -244,6 +255,8 @@ export function WorkspacesTab({ actions, onChange }: { actions: AppActions; onCh
         </form>
       </Panel>
     </div>
+    {dangerConfirmDialog}
+    </>
   );
 }
 

@@ -1,5 +1,5 @@
 import type { FormEvent, ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { ImageAsset, ImageGenerationJob, ImageProviderSettings, ImageStatus, ImageStorageSettings, ObjectStorageProfile, Tone } from "../../app/types";
 import { Button, CheckLabel, ContextList, EmptyState, Field, ImageDropInput, Notice, Panel, Pill, SubTabs } from "../../components/ui";
 import { formatBytes } from "../../utils/format";
@@ -7,14 +7,14 @@ import { defaultImageSettings, defaultImageStorageSettings, formatDate, imageAss
 import type { ImageLibraryScope, ImageMode, ImageSettingsDraft, ImagesTab, ImageStorageSettingsDraft } from "../types";
 import { ASPECT_OPTIONS, IMAGE_MODES, MODEL_OPTIONS, RESOLUTION_OPTIONS } from "../types";
 
-export function ImagesTabs({ active, onChange }: { active: ImagesTab; onChange: (tab: ImagesTab) => void }) {
+export function ImagesTabs({ active, hrefFor, onChange }: { active: ImagesTab; hrefFor?: (tab: ImagesTab) => string; onChange: (tab: ImagesTab) => void }) {
   const tabs: Array<{ id: ImagesTab; label: string }> = [
-    { id: "generate", label: "Generate" },
-    { id: "library", label: "Library" },
-    { id: "history", label: "History" },
-    { id: "settings", label: "Settings" },
+    { id: "generate", label: "生成" },
+    { id: "library", label: "图片库" },
+    { id: "history", label: "历史" },
+    { id: "settings", label: "设置" },
   ];
-  return <SubTabs activeId={active} onChange={(id) => onChange(id as ImagesTab)} tabs={tabs} />;
+  return <SubTabs activeId={active} onChange={(id) => onChange(id as ImagesTab)} tabs={tabs.map((tab) => ({ ...tab, href: hrefFor?.(tab.id) }))} />;
 }
 
 export function GeneratePanel({
@@ -110,12 +110,7 @@ export function GeneratePanel({
             <Field label="数量">
               <input className="input mono" defaultValue={1} max={10} min={1} name="n" type="number" />
             </Field>
-            <Field label="响应">
-              <select className="select mono" defaultValue={responseFormatDefault} name="response_format">
-                <option value="url">url</option>
-                <option value="b64_json">b64_json</option>
-              </select>
-            </Field>
+            <input name="response_format" readOnly type="hidden" value={responseFormatDefault} />
           </div>
 
           {referenceSlots > 0 ? (
@@ -132,11 +127,11 @@ export function GeneratePanel({
             </section>
           ) : null}
 
-          {!hasApiKey ? <Notice>需要先在本模块 Settings 中配置 xAI API Key，才能发起模型调用。</Notice> : null}
+          {!hasApiKey ? <Notice>需要先在本模块设置中配置 xAI API Key，才能发起模型调用。</Notice> : null}
         </form>
       </Panel>
 
-      <Panel title="本次结果" subtitle="最近一次生成结果会保留在这里；完整记录见 History。">
+      <Panel title="本次结果" subtitle="最近一次生成结果会保留在这里；完整记录见历史。">
         {latestJob ? <JobCard job={latestJob} /> : <EmptyState title="等待生成" body="填写 prompt 后创建一次 Images job。" />}
       </Panel>
     </div>
@@ -149,7 +144,7 @@ function ReferenceSlot({ index, libraryImage, onClearLibraryImage }: { index: nu
       <strong className="mono text-xs text-[var(--muted-strong)]">source {String(index).padStart(2, "0")}</strong>
       {libraryImage ? (
         <div className="grid gap-2 rounded-md border border-[var(--line)] bg-[var(--surface-soft)] p-2">
-          {libraryImage.url ? <img alt={assetTitle(libraryImage)} className="aspect-video w-full rounded border border-[var(--line)] object-cover" src={libraryImage.url} /> : null}
+          {libraryImage.url ? <img alt={assetTitle(libraryImage)} className="aspect-video w-full rounded border border-[var(--line)] object-cover" decoding="async" height={libraryImage.height || 512} src={libraryImage.url} width={libraryImage.width || 512} /> : null}
           <input name={`image_asset_${index}`} type="hidden" value={libraryImage.id} />
           <div className="flex items-center justify-between gap-2">
             <span className="min-w-0 truncate text-xs font-medium">{assetTitle(libraryImage)}</span>
@@ -160,7 +155,7 @@ function ReferenceSlot({ index, libraryImage, onClearLibraryImage }: { index: nu
         </div>
       ) : null}
       <Field label="URL">
-        <input className="input mono" disabled={Boolean(libraryImage)} name={`image_url_${index}`} placeholder="https://..." type="url" />
+        <input autoComplete="off" className="input mono" disabled={Boolean(libraryImage)} name={`image_url_${index}`} placeholder="https://example.com/image.png" spellCheck={false} type="url" />
       </Field>
       <Field label="上传">
         <ImageDropInput disabled={Boolean(libraryImage)} label="上传参考图" name={`image_file_${index}`} />
@@ -278,9 +273,6 @@ export function LibraryPanel({
             <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
               {assets.map((asset) => {
                 const selected = asset.id === selectedId;
-                const archiveEnabled = canArchiveAsset(asset, storageSettings);
-                const deleteBusy = busy === `delete:${asset.id}`;
-                const archiveBusy = busy === `archive:${asset.id}`;
                 return (
                   <article className={`grid min-w-0 gap-2 rounded-lg border bg-[var(--surface)] p-2 transition ${selected ? "border-[var(--accent)] shadow-[inset_2px_0_0_var(--accent)]" : "border-[var(--line)] hover:border-[var(--line-strong)]"}`} key={asset.id}>
                     <button
@@ -291,7 +283,7 @@ export function LibraryPanel({
                       }}
                       type="button"
                     >
-                      {asset.url ? <img alt={assetTitle(asset)} className="h-full w-full object-cover transition group-hover:scale-[1.01]" src={asset.url} /> : <div className="grid h-full place-items-center text-xs text-[var(--muted)]">no image</div>}
+                      {asset.url ? <img alt={assetTitle(asset)} className="h-full w-full object-cover transition group-hover:scale-[1.01]" decoding="async" height={asset.height || 512} loading="lazy" src={asset.url} width={asset.width || 512} /> : <div className="grid h-full place-items-center text-xs text-[var(--muted)]">no image</div>}
                       <span className="absolute top-2 left-2">
                         <Pill tone={asset.storageBackend === "s3" ? "good" : "neutral"}>{imageStorageBackendLabel(asset.storageBackend)}</Pill>
                       </span>
@@ -301,29 +293,23 @@ export function LibraryPanel({
                         </span>
                       ) : null}
                     </button>
-                    <button className="min-w-0 text-left" onClick={() => onSelect(asset)} type="button">
+                    <div className="min-w-0">
                       <strong className="line-clamp-2 text-sm leading-snug">{assetTitle(asset)}</strong>
                       <span className="muted mt-1 block truncate text-xs">{imageAssetTypeLabel(asset.assetType)} · {formatDate(asset.createdAt) || "-"}</span>
-                    </button>
+                    </div>
                     <div className="muted mono flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs">
                       <span>{asset.width && asset.height ? `${asset.width}x${asset.height}` : "unknown"}</span>
                       <span>{formatBytes(asset.sizeBytes)}</span>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <a className="button min-h-8 px-2 text-xs" href={assetDownloadURL(asset)}>
-                        下载
-                      </a>
-                      <Button className="min-h-8 px-2 text-xs" disabled={!archiveEnabled || archiveBusy} onClick={() => onArchive(asset)}>
-                        {archiveBusy ? "归档中" : "归档"}
+                      <Button className="min-h-8 px-2 text-xs" disabled={selected} onClick={() => onSelect(asset)}>
+                        {selected ? "已选择" : "选择"}
                       </Button>
-                      <Button className="min-h-8 px-2 text-xs" onClick={() => onUseForImage(asset)}>
+                      <Button className="min-h-8 px-2 text-xs" onClick={() => {
+                        onSelect(asset);
+                        onUseForImage(asset);
+                      }}>
                         用于图生图
-                      </Button>
-                      <Button className="min-h-8 px-2 text-xs" disabled={busy === `private:${asset.id}`} onClick={() => onMarkPrivate(asset, !asset.private)}>
-                        {asset.private ? "移出私密" : "设为私密"}
-                      </Button>
-                      <Button className="min-h-8 px-2 text-xs" disabled={deleteBusy} onClick={() => confirmDelete(asset, onDelete)} tone="danger">
-                        {deleteBusy ? "删除中" : "删除"}
                       </Button>
                     </div>
                   </article>
@@ -339,7 +325,7 @@ export function LibraryPanel({
         )}
         {privateScope && privateUnlocked && privateExpiresAt ? <p className="muted mt-3 mb-0 text-xs">解锁有效至 {formatDate(privateExpiresAt)}</p> : null}
       </Panel>
-      {viewer ? <ImageViewer asset={viewer} onArchive={onArchive} onClose={() => setViewer(null)} onDelete={onDelete} onMarkPrivate={onMarkPrivate} storageSettings={storageSettings} /> : null}
+      {viewer ? <ImageViewer asset={viewer} onClose={() => setViewer(null)} /> : null}
     </>
   );
 }
@@ -358,7 +344,7 @@ function LibraryUploadPanel({
   return (
     <form className="flex items-end justify-between gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 max-md:grid" onSubmit={onSubmit}>
       <Field label="手动上传" help="支持 jpeg、png、gif、webp；上传前会按内容 hash 去重。">
-        <ImageDropInput key={file ? "selected" : "empty"} label="上传到 Library" onFiles={(files) => onFileChange(files[0] || null)} />
+        <ImageDropInput key={file ? "selected" : "empty"} label="上传到图片库" onFiles={(files) => onFileChange(files[0] || null)} />
       </Field>
       <div className="flex items-center gap-3">
         {file ? <span className="muted max-w-64 truncate text-xs">{file.name}</span> : null}
@@ -398,7 +384,7 @@ function PrivateUnlockPanel({ busy, onUnlock }: { busy: boolean; onUnlock: (pass
   return (
     <form className="grid max-w-md gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-4" onSubmit={(event) => void submit(event)}>
       <Field label="Owner 密码" help="使用当前控制台 owner 登录密码解锁。">
-        <input className="input mono" onChange={(event) => setPassword(event.target.value)} required type="password" value={password} />
+        <input autoComplete="current-password" className="input mono" name="images_private_owner_password" onChange={(event) => setPassword(event.target.value)} required type="password" value={password} />
       </Field>
       <div>
         <Button disabled={busy || password.length < 1} tone="primary" type="submit">
@@ -420,50 +406,62 @@ function LibraryMetric({ label, value }: { label: string; value: number }) {
 
 function ImageViewer({
   asset,
-  onArchive,
   onClose,
-  onDelete,
-  onMarkPrivate,
-  storageSettings,
 }: {
   asset: ImageAsset;
-  onArchive: (asset: ImageAsset) => void;
   onClose: () => void;
-  onDelete: (asset: ImageAsset) => void;
-  onMarkPrivate: (asset: ImageAsset, nextPrivate: boolean) => void;
-  storageSettings: ImageStorageSettings;
 }) {
+  const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    closeButtonRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = Array.from(
+        dialogRef.current.querySelectorAll<HTMLElement>("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])"),
+      ).filter((element) => !element.hasAttribute("disabled"));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      if (previousFocus instanceof HTMLElement) previousFocus.focus();
+    };
+  }, [onClose]);
+
   return (
-    <div className="fixed inset-0 z-40 grid place-items-center bg-[rgba(16,18,22,0.62)] p-4" onClick={onClose} role="dialog" aria-modal="true">
-      <div className="grid max-h-[92dvh] w-full max-w-6xl grid-cols-[minmax(0,1fr)_320px] overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--surface)] shadow-[var(--shadow)] max-lg:grid-cols-1" onClick={(event) => event.stopPropagation()}>
+    <div className="fixed inset-0 z-40 grid place-items-center overscroll-contain bg-[rgba(16,18,22,0.62)] p-4" onClick={onClose}>
+      <div aria-labelledby={titleId} aria-modal="true" className="grid max-h-[92dvh] w-full max-w-6xl grid-cols-[minmax(0,1fr)_320px] overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--surface)] shadow-[var(--shadow)] max-lg:grid-cols-1" onClick={(event) => event.stopPropagation()} ref={dialogRef} role="dialog">
         <div className="grid min-h-[320px] place-items-center overflow-auto bg-[var(--surface-soft)] p-4">
-          {asset.url ? <img alt={assetTitle(asset)} className="max-h-[76dvh] max-w-full rounded-lg border border-[var(--line)] object-contain" src={asset.url} /> : <div className="text-sm text-[var(--muted)]">no image</div>}
+          {asset.url ? <img alt={assetTitle(asset)} className="max-h-[76dvh] max-w-full rounded-lg border border-[var(--line)] object-contain" decoding="async" height={asset.height || 1024} src={asset.url} width={asset.width || 1024} /> : <div className="text-sm text-[var(--muted)]">no image</div>}
         </div>
         <aside className="grid content-start gap-3 border-l border-[var(--line)] p-4 max-lg:border-l-0 max-lg:border-t">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <h3 className="m-0 break-words text-sm font-semibold">{assetTitle(asset)}</h3>
+              <h3 className="m-0 break-words text-sm font-semibold" id={titleId}>{assetTitle(asset)}</h3>
               <p className="muted mt-1 mb-0 text-xs">{imageAssetTypeLabel(asset.assetType)}</p>
             </div>
-            <Button className="min-h-8 px-2 text-xs" onClick={onClose}>
+            <Button aria-label="关闭图片预览" className="min-h-8 px-2 text-xs" onClick={onClose} ref={closeButtonRef}>
               关闭
             </Button>
           </div>
           <ContextList items={assetMetadata(asset)} />
-          <div className="flex flex-wrap gap-2">
-            <a className="button min-h-8 px-2 text-xs" href={assetDownloadURL(asset)}>
-              下载
-            </a>
-            <Button className="min-h-8 px-2 text-xs" disabled={!canArchiveAsset(asset, storageSettings)} onClick={() => onArchive(asset)}>
-              归档到 S3
-            </Button>
-            <Button className="min-h-8 px-2 text-xs" onClick={() => onMarkPrivate(asset, !asset.private)}>
-              {asset.private ? "移出私密" : "设为私密"}
-            </Button>
-            <Button className="min-h-8 px-2 text-xs" onClick={() => confirmDelete(asset, onDelete)} tone="danger">
-              删除
-            </Button>
-          </div>
         </aside>
       </div>
     </div>
@@ -506,7 +504,7 @@ export function ProviderSettingsPanel({
         </div>
         <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 max-md:grid-cols-1">
           <Field label="xAI API Key" help="留空表示不修改现有 key；清除时不会在审计中写入明文。">
-            <input className="input mono" onChange={(event) => updateDraft("xaiApiKey", event.target.value)} type="password" value={draft.xaiApiKey} />
+            <input autoComplete="new-password" className="input mono" name="images_xai_api_key" onChange={(event) => updateDraft("xaiApiKey", event.target.value)} spellCheck={false} type="password" value={draft.xaiApiKey} />
           </Field>
           <div className="flex min-h-9 items-end pb-2">
             <CheckLabel
@@ -528,7 +526,7 @@ export function ProviderSettingsPanel({
               ))}
             </select>
           </Field>
-          <Field label="默认响应">
+          <Field label="默认响应格式">
             <select className="select mono" onChange={(event) => updateDraft("defaultResponseFormat", event.target.value)} value={draft.defaultResponseFormat}>
               <option value="url">url</option>
               <option value="b64_json">b64_json</option>
@@ -570,9 +568,9 @@ export function ImageStorageSettingsPanel({
   onTest: () => Promise<void>;
 }) {
   const [draft, setDraft] = useState<ImageStorageSettingsDraft>({ ...defaultImageStorageSettings(), ...settings, s3AccessKeyId: "", s3SecretAccessKey: "", s3SessionToken: "", clearSecret: false });
-  const s3Enabled = draft.backend === "s3";
+  const legacyS3Enabled = draft.backend === "s3";
   const objectStorageEnabled = draft.backend === "object_storage";
-  const canTest = s3Enabled || (objectStorageEnabled && Boolean(draft.objectStorageProfileId));
+  const canTest = legacyS3Enabled || (objectStorageEnabled && Boolean(draft.objectStorageProfileId));
   const selectedProfile = objectProfiles.find((profile) => profile.id === draft.objectStorageProfileId);
 
   useEffect(() => {
@@ -596,15 +594,15 @@ export function ImageStorageSettingsPanel({
     >
       <div className="grid gap-4">
         <div className="grid grid-cols-3 gap-3 max-lg:grid-cols-1">
-          <Field label="Backend">
+          <Field label="存储后端">
             <select className="select mono" onChange={(event) => updateBackend(event.target.value)} value={draft.backend}>
               <option value="local">local</option>
               <option value="object_storage">object_storage profile</option>
-              <option value="s3">s3 compatible</option>
+              {legacyS3Enabled || settings.backend === "s3" ? <option value="s3">legacy direct s3</option> : null}
             </select>
           </Field>
-          <Field label={objectStorageEnabled ? "Object Profile" : "S3 Access Key"}>
-            <input className="input mono" disabled value={objectStorageEnabled ? selectedProfileLabel(selectedProfile, draft.objectStorageProfileId) : draft.hasS3Credentials ? draft.maskedAccessKeyId || "configured" : "未配置"} />
+          <Field label={objectStorageEnabled ? "对象存储 Profile" : legacyS3Enabled ? "旧版 S3" : "存储位置"}>
+            <input className="input mono" disabled value={objectStorageEnabled ? selectedProfileLabel(selectedProfile, draft.objectStorageProfileId) : legacyS3Enabled ? legacyS3Label(draft) : "本地保存"} />
           </Field>
           <Field label="读取方式">
             <input className="input mono" disabled value="private bucket / backend proxy" />
@@ -614,9 +612,9 @@ export function ImageStorageSettingsPanel({
         {objectStorageEnabled ? (
           <fieldset className="m-0 grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
             <legend className="px-1 text-xs font-medium text-[var(--muted-strong)]">共享对象存储</legend>
-            {objectProfiles.length ? null : <Notice>先在全局 Settings / Object Storage 创建并测试一个 profile。</Notice>}
+            {objectProfiles.length ? null : <Notice>先在全局设置 / Object Storage 创建并测试一个 profile。</Notice>}
             <div className="grid grid-cols-[minmax(0,1fr)_minmax(220px,0.5fr)] gap-3 max-lg:grid-cols-1">
-              <Field label="Object Storage Profile" help="profile 在全局 Settings / Object Storage 中维护，密钥不会回显。">
+              <Field label="Object Storage Profile" help="profile 在全局设置 / Object Storage 中维护，密钥不会回显。">
                 <select className="select mono" onChange={(event) => updateDraft("objectStorageProfileId", event.target.value)} value={draft.objectStorageProfileId || ""}>
                   <option value="">选择 profile</option>
                   {objectProfiles.map((profile) => (
@@ -639,59 +637,21 @@ export function ImageStorageSettingsPanel({
           </fieldset>
         ) : null}
 
-        {!objectStorageEnabled ? (
-          <fieldset className="m-0 grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3" disabled={!s3Enabled}>
-            <legend className="px-1 text-xs font-medium text-[var(--muted-strong)]">S3 兼容对象存储</legend>
-            <div className="grid grid-cols-3 gap-3 max-lg:grid-cols-1">
-              <Field label="Provider Label" help="用于展示和审计，例如 aliyun、tencent、minio。">
-                <input className="input mono" onChange={(event) => updateDraft("s3ProviderLabel", event.target.value)} placeholder="aliyun" value={draft.s3ProviderLabel} />
-              </Field>
-              <Field label="Bucket">
-                <input className="input mono" onChange={(event) => updateDraft("s3Bucket", event.target.value)} value={draft.s3Bucket} />
-              </Field>
-              <Field label="Region">
-                <input className="input mono" onChange={(event) => updateDraft("s3Region", event.target.value)} placeholder="auto / oss-cn-hangzhou" value={draft.s3Region} />
-              </Field>
-            </div>
-            <div className="grid grid-cols-[minmax(0,1fr)_minmax(220px,0.5fr)] gap-3 max-lg:grid-cols-1">
-              <Field label="Endpoint" help="填写服务商的 S3 兼容 endpoint，bucket 不需要公网读。">
-                <input className="input mono" onChange={(event) => updateDraft("s3Endpoint", event.target.value)} placeholder="https://oss-cn-hangzhou.aliyuncs.com" value={draft.s3Endpoint} />
-              </Field>
-              <Field label="Prefix">
-                <input className="input mono" onChange={(event) => updateDraft("s3Prefix", event.target.value)} value={draft.s3Prefix} />
-              </Field>
-            </div>
-            <div className="grid grid-cols-3 gap-3 max-lg:grid-cols-1">
-              <Field label="Access Key ID">
-                <input className="input mono" onChange={(event) => updateDraft("s3AccessKeyId", event.target.value)} type="password" value={draft.s3AccessKeyId} />
-              </Field>
-              <Field label="Secret Access Key">
-                <input className="input mono" onChange={(event) => updateDraft("s3SecretAccessKey", event.target.value)} type="password" value={draft.s3SecretAccessKey} />
-              </Field>
-              <Field label="Session Token">
-                <input className="input mono" onChange={(event) => updateDraft("s3SessionToken", event.target.value)} type="password" value={draft.s3SessionToken} />
-              </Field>
-            </div>
-            <div className="flex flex-wrap gap-4 text-sm">
-              <CheckLabel
-                checked={draft.s3ForcePathStyle}
-                onChange={(checked) => updateDraft("s3ForcePathStyle", checked)}
-              >
-                Force path style
-              </CheckLabel>
-              <CheckLabel
-                checked={draft.fallbackToLocal}
-                onChange={(checked) => updateDraft("fallbackToLocal", checked)}
-              >
-                写入失败回退本地
-              </CheckLabel>
-              <CheckLabel
-                checked={draft.clearSecret}
-                onChange={(checked) => updateDraft("clearSecret", checked)}
-              >
-                清除 S3 密钥
-              </CheckLabel>
-            </div>
+        {legacyS3Enabled ? (
+          <fieldset className="m-0 grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+            <legend className="px-1 text-xs font-medium text-[var(--muted-strong)]">旧版直连 S3</legend>
+            <Notice>检测到历史 direct S3 配置。现有资产继续兼容读取；新凭据请在全局设置 / Object Storage 维护，然后切换到 object_storage profile。</Notice>
+            <ContextList
+              items={[
+                ["Provider", draft.s3ProviderLabel || "-"],
+                ["Bucket", draft.s3Bucket || "-"],
+                ["Region", draft.s3Region || "auto"],
+                ["Endpoint", draft.s3Endpoint || "-"],
+                ["Prefix", draft.s3Prefix || "-"],
+                ["凭据", draft.hasS3Credentials ? draft.maskedAccessKeyId || "configured" : "未配置"],
+                ["Fallback", draft.fallbackToLocal ? "写入失败回退本地" : "关闭"],
+              ]}
+            />
           </fieldset>
         ) : null}
       </div>
@@ -712,6 +672,7 @@ export function ImageStorageSettingsPanel({
 }
 
 export function ImagesInspector({
+  activeTab,
   asset,
   assets = [],
   jobs,
@@ -722,6 +683,7 @@ export function ImagesInspector({
   status,
   storageSettings,
 }: {
+  activeTab: ImagesTab;
   asset?: ImageAsset;
   assets?: ImageAsset[];
   jobs: ImageGenerationJob[];
@@ -752,43 +714,73 @@ export function ImagesInspector({
           ]}
         />
       </Panel>
-      <Panel title="选中图片">
-        {asset ? (
-          <div className="grid gap-3">
-            {asset.url ? <img alt={assetTitle(asset)} className="aspect-square w-full rounded-lg border border-[var(--line)] object-cover" src={asset.url} /> : null}
-            <ContextList items={assetMetadata(asset)} />
-            <div className="flex flex-wrap gap-2">
-              <a className="button min-h-8 px-2 text-xs" href={assetDownloadURL(asset)}>
-                下载
-              </a>
-              <Button className="min-h-8 px-2 text-xs" disabled={!canArchiveAsset(asset, storageSettings)} onClick={() => onArchive?.(asset)}>
-                归档
-              </Button>
-              <Button className="min-h-8 px-2 text-xs" onClick={() => onMarkPrivate?.(asset, !asset.private)}>
-                {asset.private ? "移出私密" : "设为私密"}
-              </Button>
-              <Button className="min-h-8 px-2 text-xs" onClick={() => confirmDelete(asset, (next) => onDelete?.(next))} tone="danger">
-                删除
-              </Button>
+      {activeTab === "library" ? (
+        <Panel title="选中图片">
+          {asset ? (
+            <div className="grid gap-3">
+              {asset.url ? <img alt={assetTitle(asset)} className="aspect-square w-full rounded-lg border border-[var(--line)] object-cover" decoding="async" height={asset.height || 512} src={asset.url} width={asset.width || 512} /> : null}
+              <ContextList items={assetMetadata(asset)} />
+              <div className="flex flex-wrap gap-2">
+                <a className="button min-h-8 px-2 text-xs" href={assetDownloadURL(asset)}>
+                  下载
+                </a>
+                <Button className="min-h-8 px-2 text-xs" disabled={!canArchiveAsset(asset, storageSettings)} onClick={() => onArchive?.(asset)}>
+                  归档
+                </Button>
+                <Button className="min-h-8 px-2 text-xs" onClick={() => onMarkPrivate?.(asset, !asset.private)}>
+                  {asset.private ? "移出私密" : "设为私密"}
+                </Button>
+                <Button className="min-h-8 px-2 text-xs" onClick={() => onDelete?.(asset)} tone="danger">
+                  删除
+                </Button>
+              </div>
             </div>
-          </div>
-        ) : (
-          <EmptyState title="未选择图片" body="在 Library 中选择一张图片查看元数据。" />
-        )}
-      </Panel>
-      <Panel title="参数边界">
-        <ContextList
-          items={[
-            ["数量", "1-10"],
-            ["上传", "jpeg/png/gif/webp, <=12 MB"],
-            ["模式", "文生图 / 图生图 / 多图编辑"],
-            ["本地资产", localAssets],
-            ["S3 资产", s3Assets],
-            ["当前视图", libraryScope === "private" ? "私密收藏夹" : "图片库"],
-            ["读取", "登录后经后端代理"],
-          ]}
-        />
-      </Panel>
+          ) : (
+            <EmptyState title="未选择图片" body="在图片库中选择一张图片查看元数据。" />
+          )}
+        </Panel>
+      ) : null}
+      {activeTab === "generate" ? (
+        <Panel title="生成边界">
+          <ContextList
+            items={[
+              ["最近任务", last ? `${imageModeLabel(last.mode)} / ${imageJobStatusLabel(last.status)}` : "-"],
+              ["数量", "1-10"],
+              ["上传", "jpeg/png/gif/webp, <=12 MB"],
+              ["模式", "文生图 / 图生图 / 多图编辑"],
+              ["写入", imageStorageBackendLabel(storageSettings?.backend)],
+              ["读取", "登录后经后端代理"],
+            ]}
+          />
+        </Panel>
+      ) : null}
+      {activeTab === "history" ? (
+        <Panel title="任务摘要">
+          <ContextList
+            items={[
+              ["记录数", status?.historyCount ?? jobs.length],
+              ["最近模式", last ? imageModeLabel(last.mode) : "-"],
+              ["最近状态", last ? imageJobStatusLabel(last.status) : "-"],
+              ["最近模型", last?.model || "-"],
+              ["最近错误", status?.lastError || last?.errorMessage || "-"],
+            ]}
+          />
+        </Panel>
+      ) : null}
+      {activeTab === "settings" ? (
+        <Panel title="设置边界">
+          <ContextList
+            items={[
+              ["Provider", status?.provider || "xai"],
+              ["API Key", status?.hasApiKey ? status.maskedApiKey || "configured" : "未配置"],
+              ["存储", imageStorageBackendLabel(storageSettings?.backend)],
+              ["本地资产", localAssets],
+              ["S3 资产", s3Assets],
+              ["读取策略", "private bucket / backend proxy"],
+            ]}
+          />
+        </Panel>
+      ) : null}
     </aside>
   );
 }
@@ -797,6 +789,12 @@ function selectedProfileLabel(profile?: ObjectStorageProfile, id?: string): stri
   if (profile) return `${profile.name || profile.id} / ${profile.bucket}`;
   if (id) return "profile missing";
   return "未选择";
+}
+
+function legacyS3Label(settings: ImageStorageSettingsDraft): string {
+  const provider = settings.s3ProviderLabel || "s3";
+  const bucket = settings.s3Bucket || "bucket missing";
+  return `${provider} / ${bucket}`;
 }
 
 function JobCard({ job }: { job: ImageGenerationJob }) {
@@ -816,7 +814,7 @@ function JobCard({ job }: { job: ImageGenerationJob }) {
         <div className="grid grid-cols-3 gap-2 max-lg:grid-cols-2 max-sm:grid-cols-1">
           {job.outputs.map((output) => (
             <div className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-2" key={output.id || `${job.id}-${output.slot}`}>
-              {output.url ? <img alt={job.modeLabel || "generated image"} className="aspect-square w-full rounded-md border border-[var(--line)] object-cover" src={output.url} /> : <div className="grid aspect-square place-items-center rounded-md border border-[var(--line)] text-xs text-[var(--muted)]">no image</div>}
+              {output.url ? <img alt={job.modeLabel || "generated image"} className="aspect-square w-full rounded-md border border-[var(--line)] object-cover" decoding="async" height={512} loading="lazy" src={output.url} width={512} /> : <div className="grid aspect-square place-items-center rounded-md border border-[var(--line)] text-xs text-[var(--muted)]">no image</div>}
               <div className="flex flex-wrap gap-2 text-xs">
                 {output.url ? (
                   <a className="text-[var(--accent)] underline decoration-[rgba(207,77,16,0.35)] underline-offset-2" href={output.url} rel="noreferrer" target="_blank">
@@ -861,10 +859,6 @@ function objectStorageEnabled(settings?: ImageStorageSettings): boolean {
 function canArchiveAsset(asset?: ImageAsset, settings?: ImageStorageSettings): boolean {
   const archivableStorage = asset?.storageBackend === "local" || asset?.storageBackend === "remote";
   return Boolean(asset?.id && archivableStorage && objectStorageEnabled(settings) && !asset.deletedAt);
-}
-
-function confirmDelete(asset: ImageAsset, onDelete: (asset: ImageAsset) => void) {
-  if (window.confirm(`删除图片 ${assetTitle(asset)}？`)) onDelete(asset);
 }
 
 function assetMetadata(asset: ImageAsset): Array<[string, ReactNode]> {

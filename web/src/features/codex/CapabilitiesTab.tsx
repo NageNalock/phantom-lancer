@@ -32,7 +32,7 @@ export function CapabilitiesTab({ actions }: { actions: AppActions }) {
   }
 
   return (
-    <Panel actions={<Button onClick={() => void probe()}>重新探测</Button>} subtitle="只展示 Codex 可安全探测到的扩展摘要；不读取或展示 secret/env/header。" title="Capabilities">
+    <Panel actions={<Button onClick={() => void probe()}>重新探测</Button>} subtitle="只展示 Codex 可安全探测到的扩展摘要；不读取或展示 secret/env/header。" title="能力">
       <div className="grid gap-2">
         {items.map((item) => (
           <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3" key={item.kind}>

@@ -3,7 +3,7 @@ import { Toggle } from "../components/ui";
 import type { AppActions } from "../app/App";
 import type { AppData, V2RayExport, V2RayRemoteClient, V2RaySettings, V2RayStatus } from "../app/types";
 import { friendlyError } from "../api/client";
-import { Button, ContextList, EmptyState, Field, Notice, Panel, Pill } from "../components/ui";
+import { Button, ContextList, EmptyState, Field, Notice, Panel, Pill, useDangerConfirm } from "../components/ui";
 import { defaultV2RaySettings, formatDate, maskSecret, v2raySecurityLabel, v2rayStateLabel, v2rayTransportLabel } from "../domain/labels";
 
 type V2RayControlAction = "start" | "stop" | "restart";
@@ -27,11 +27,15 @@ const emptyClient = {
 export function V2RayView({ actions, data, exportOpen, exported }: { actions: AppActions; data: AppData; exportOpen: boolean; exported: V2RayExport | null }) {
   const [v2ray, setV2Ray] = useState<V2RaySettings>({ ...defaultV2RaySettings(), ...(data.v2ray.settings || {}) });
   const [clientDraft, setClientDraft] = useState(emptyClient);
+  const [clientCreateOpen, setClientCreateOpen] = useState(false);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [busy, setBusy] = useState("");
+  const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
   const status = data.v2ray.status;
   const clients = data.v2ray.clients || [];
+  const settingsDirty = !sameV2RaySettings(v2ray, { ...defaultV2RaySettings(), ...(data.v2ray.settings || {}) });
+  const clientFormOpen = clientCreateOpen || !clients.length;
 
   useEffect(() => {
     setV2Ray({ ...defaultV2RaySettings(), ...(data.v2ray.settings || {}) });
@@ -43,6 +47,21 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
       await actions.api("/api/v2ray/settings", { method: "PUT", csrf: actions.csrf, body: normalizedV2Ray(v2ray) });
       await actions.refreshV2Ray();
       actions.setToast("V2Ray 设置已保存", "good");
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function saveAndControlV2Ray() {
+    const action: V2RayControlAction = status?.running ? "restart" : "start";
+    setBusy("save-control");
+    try {
+      await actions.api("/api/v2ray/settings", { method: "PUT", csrf: actions.csrf, body: normalizedV2Ray(v2ray) });
+      await actions.api<V2RayStatus>("/api/v2ray/control", { method: "POST", csrf: actions.csrf, body: { action } });
+      await actions.refreshV2Ray();
+      actions.setToast(status?.running ? "V2Ray 设置已保存并重启" : "V2Ray 设置已保存并启动", "good");
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");
     } finally {
@@ -65,6 +84,17 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
   }
 
   async function controlV2Ray(action: V2RayControlAction) {
+    if (action === "stop") {
+      const confirmed = await confirmDanger({
+        title: "停止 V2Ray 服务",
+        objectName: status?.endpoint || "V2Ray",
+        body: "该操作会停止当前 V2Ray 进程，远程设备连接会中断。",
+        confirmLabel: "停止服务",
+        impact: ["现有远程连接会断开。", "已保存配置和远程设备不会被删除。"],
+        recovery: "需要恢复接入时，可以从服务状态重新启动。",
+      });
+      if (!confirmed) return;
+    }
     setBusy(action);
     try {
       await actions.api<V2RayStatus>("/api/v2ray/control", { method: "POST", csrf: actions.csrf, body: { action } });
@@ -86,6 +116,7 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
     try {
       await actions.api<V2RayRemoteClient>("/api/v2ray/clients", { method: "POST", csrf: actions.csrf, body: clientDraft });
       setClientDraft(emptyClient);
+      setClientCreateOpen(false);
       await actions.refreshV2Ray();
       actions.setToast("已添加远程设备", "good");
     } catch (error) {
@@ -112,6 +143,15 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
   }
 
   async function rotateClient(client: V2RayRemoteClient) {
+    const confirmed = await confirmDanger({
+      title: "轮换远程设备 UUID",
+      objectName: client.label || client.email || client.id,
+      body: "该操作会替换该设备的接入凭据，旧配置将无法继续连接。",
+      confirmLabel: "轮换 UUID",
+      impact: ["需要重新导出并更新远程设备配置。", "其他设备不受影响。"],
+      recovery: "如果远程设备还未更新，请暂缓轮换。",
+    });
+    if (!confirmed) return;
     setBusy(`rotate-${client.id}`);
     try {
       await actions.api<V2RayRemoteClient>(`/api/v2ray/clients/${encodeURIComponent(client.id)}/rotate`, { method: "POST", csrf: actions.csrf });
@@ -138,6 +178,15 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
   }
 
   async function revokeClient(client: V2RayRemoteClient) {
+    const confirmed = await confirmDanger({
+      title: "撤销远程设备",
+      objectName: client.label || client.email || client.id,
+      body: "该操作会撤销设备接入凭据，设备将不能继续连接 V2Ray。",
+      confirmLabel: "撤销设备",
+      impact: ["设备配置会失效。", "服务端配置和其他设备不受影响。"],
+      recovery: "撤销不可恢复；需要重新添加设备并导出新配置。",
+    });
+    if (!confirmed) return;
     setBusy(`revoke-${client.id}`);
     try {
       await actions.api(`/api/v2ray/clients/${encodeURIComponent(client.id)}`, { method: "DELETE", csrf: actions.csrf });
@@ -151,53 +200,43 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
   }
 
   return (
+    <>
     <div className="grid gap-4 p-4">
       <div className="grid grid-cols-[minmax(0,1fr)_320px] gap-4 max-xl:grid-cols-1">
         <Panel
           actions={
-            <>
-              <Button disabled={busy === "validate"} onClick={() => void validateV2Ray()}>
-                校验
-              </Button>
-              <Button disabled={busy === "start"} onClick={() => void controlV2Ray("start")}>
-                启动
-              </Button>
-              <Button disabled={busy === "restart"} onClick={() => void controlV2Ray("restart")}>
-                重启
-              </Button>
-              <Button disabled={busy === "stop"} onClick={() => void controlV2Ray("stop")} tone="danger">
-                停止
-              </Button>
-            </>
+            <Button disabled={busy === "validate"} onClick={() => void validateV2Ray()}>
+              校验
+            </Button>
           }
-          subtitle="Phantom Lancer 内嵌 V2Ray core，保存后可先校验，再启动或重启服务。"
+          subtitle="Phantom Lancer 内嵌 V2Ray core；配置面只负责校验和保存。"
           title="服务端配置"
         >
           <div className="grid gap-4">
             <div className="grid grid-cols-3 gap-3 max-lg:grid-cols-2 max-md:grid-cols-1">
               <Field label="公网主机名或 IP">
-                <input className="input mono" onChange={(event) => updateV2Ray("publicHost", event.target.value)} placeholder="example.com" value={v2ray.publicHost || ""} />
+                <input autoComplete="off" className="input mono" name="v2ray_public_host" onChange={(event) => updateV2Ray("publicHost", event.target.value)} placeholder="example.com" spellCheck={false} value={v2ray.publicHost || ""} />
               </Field>
               <Field label="监听地址">
-                <input className="input mono" onChange={(event) => updateV2Ray("listen", event.target.value)} value={v2ray.listen || ""} />
+                <input autoComplete="off" className="input mono" name="v2ray_listen_addr" onChange={(event) => updateV2Ray("listen", event.target.value)} spellCheck={false} value={v2ray.listen || ""} />
               </Field>
               <Field label="端口">
-                <input className="input mono" min={1} max={65535} onChange={(event) => updateV2Ray("port", Number(event.target.value || 0))} type="number" value={v2ray.port || 0} />
+                <input className="input mono" inputMode="numeric" min={1} max={65535} name="v2ray_port" onChange={(event) => updateV2Ray("port", Number(event.target.value || 0))} type="number" value={v2ray.port || 0} />
               </Field>
               <Field label="传输">
-                <select className="select" onChange={(event) => updateV2Ray("transport", event.target.value)} value={v2ray.transport || "tcp"}>
+                <select className="select" name="v2ray_transport" onChange={(event) => updateV2Ray("transport", event.target.value)} value={v2ray.transport || "tcp"}>
                   <option value="tcp">TCP</option>
                   <option value="ws">WebSocket</option>
                 </select>
               </Field>
               <Field label="安全层">
-                <select className="select" onChange={(event) => updateV2Ray("security", event.target.value)} value={v2ray.security || "none"}>
+                <select className="select" name="v2ray_security" onChange={(event) => updateV2Ray("security", event.target.value)} value={v2ray.security || "none"}>
                   <option value="none">None</option>
                   <option value="tls">TLS</option>
                 </select>
               </Field>
               <Field label="日志等级">
-                <select className="select" onChange={(event) => updateV2Ray("logLevel", event.target.value)} value={v2ray.logLevel || "warning"}>
+                <select className="select" name="v2ray_log_level" onChange={(event) => updateV2Ray("logLevel", event.target.value)} value={v2ray.logLevel || "warning"}>
                   <option value="debug">debug</option>
                   <option value="info">info</option>
                   <option value="warning">warning</option>
@@ -208,25 +247,25 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
 
             {v2ray.transport === "ws" ? (
               <Field label="WebSocket Path">
-                <input className="input mono" onChange={(event) => updateV2Ray("wsPath", event.target.value)} value={v2ray.wsPath || ""} />
+                <input autoComplete="off" className="input mono" name="v2ray_ws_path" onChange={(event) => updateV2Ray("wsPath", event.target.value)} spellCheck={false} value={v2ray.wsPath || ""} />
               </Field>
             ) : null}
 
             {v2ray.security === "tls" ? (
               <div className="grid grid-cols-2 gap-3 max-md:grid-cols-1">
                 <Field label="TLS 证书路径">
-                  <input className="input mono" onChange={(event) => updateV2Ray("tlsCertFile", event.target.value)} value={v2ray.tlsCertFile || ""} />
+                  <input autoComplete="off" className="input mono" name="v2ray_tls_cert_file" onChange={(event) => updateV2Ray("tlsCertFile", event.target.value)} spellCheck={false} value={v2ray.tlsCertFile || ""} />
                 </Field>
                 <Field label="TLS 私钥路径">
-                  <input className="input mono" onChange={(event) => updateV2Ray("tlsKeyFile", event.target.value)} value={v2ray.tlsKeyFile || ""} />
+                  <input autoComplete="off" className="input mono" name="v2ray_tls_key_file" onChange={(event) => updateV2Ray("tlsKeyFile", event.target.value)} spellCheck={false} value={v2ray.tlsKeyFile || ""} />
                 </Field>
               </div>
             ) : null}
 
-            <div className="grid grid-cols-3 gap-2 max-md:grid-cols-1">
-              <Toggle checked={Boolean(v2ray.startOnPhantomLaunch)} label="随 Phantom Lancer 启动" onChange={(checked) => updateV2Ray("startOnPhantomLaunch", checked)} />
-              <Toggle checked={Boolean(v2ray.sniffingEnabled)} label="启用 sniffing" onChange={(checked) => updateV2Ray("sniffingEnabled", checked)} />
-              <Toggle checked={Boolean(v2ray.blockPrivateNetwork)} label="阻断远程设备访问私网" onChange={(checked) => updateV2Ray("blockPrivateNetwork", checked)} />
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-2">
+              <Toggle checked={Boolean(v2ray.startOnPhantomLaunch)} label="随服务启动" name="v2ray_start_on_launch" onChange={(checked) => updateV2Ray("startOnPhantomLaunch", checked)} />
+              <Toggle checked={Boolean(v2ray.sniffingEnabled)} label="启用 sniffing" name="v2ray_sniffing_enabled" onChange={(checked) => updateV2Ray("sniffingEnabled", checked)} />
+              <Toggle checked={Boolean(v2ray.blockPrivateNetwork)} label="阻断远程设备访问私网" name="v2ray_block_private_network" onChange={(checked) => updateV2Ray("blockPrivateNetwork", checked)} />
             </div>
 
             {!v2ray.blockPrivateNetwork ? <Notice>关闭私网阻断会提高远程接入风险，建议只在明确需要时使用。</Notice> : null}
@@ -244,41 +283,75 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
               <span className="muted text-xs">
                 {v2rayTransportLabel(v2ray.transport)} / {v2raySecurityLabel(v2ray.security)}
               </span>
-              <Button disabled={busy === "v2ray"} onClick={() => void saveV2Ray()} tone="primary">
-                保存 V2Ray 设置
-              </Button>
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button disabled={busy === "v2ray"} onClick={() => void saveV2Ray()}>
+                  保存设置
+                </Button>
+                <Button disabled={busy === "save-control"} onClick={() => void saveAndControlV2Ray()} tone="primary">
+                  {status?.running ? "保存并重启" : "保存并启动"}
+                </Button>
+              </div>
             </div>
           </div>
         </Panel>
 
         <Panel title="服务状态">
-          <ContextList
-            items={[
-              ["状态", <Pill tone={status?.running ? "good" : "warn"}>{v2rayStateLabel(status)}</Pill>],
-              ["端点", status?.endpoint || "-"],
-              ["配置", status?.configPath || "-"],
-              ["版本", status?.coreVersion || "-"],
-              ["远程设备", `${status?.enabledRemoteClients || 0}/${status?.remoteClientCount || 0}`],
-              ["错误", status?.lastError || "-"],
-            ]}
-          />
+          <div className="grid gap-3">
+            {settingsDirty ? <Notice>当前表单有未保存配置；请先保存，或使用配置面板的“保存并启动/重启”。</Notice> : null}
+            <ContextList
+              items={[
+                ["状态", <Pill tone={status?.running ? "good" : "warn"}>{v2rayStateLabel(status)}</Pill>],
+                ["端点", status?.endpoint || "-"],
+                ["配置", status?.configPath || "-"],
+                ["版本", status?.coreVersion || "-"],
+                ["远程设备", `${status?.enabledRemoteClients || 0}/${status?.remoteClientCount || 0}`],
+                ["错误", status?.lastError || "-"],
+              ]}
+            />
+            <div className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+              <div className="flex items-center justify-between gap-3">
+                <strong className="text-xs text-[var(--muted-strong)]">已保存配置操作</strong>
+                <span className="muted text-xs">{settingsDirty ? "等待保存" : "可直接执行"}</span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button className="min-h-8 px-2 text-xs" disabled={settingsDirty || status?.running || busy === "start"} onClick={() => void controlV2Ray("start")}>
+                  启动
+                </Button>
+                <Button className="min-h-8 px-2 text-xs" disabled={settingsDirty || !status?.running || busy === "restart"} onClick={() => void controlV2Ray("restart")}>
+                  重启
+                </Button>
+                <Button className="min-h-8 px-2 text-xs" disabled={!status?.running || busy === "stop"} onClick={() => void controlV2Ray("stop")} tone="danger">
+                  停止
+                </Button>
+              </div>
+            </div>
+          </div>
         </Panel>
       </div>
 
-      <Panel title="远程设备" subtitle="为手机或其他远程设备生成 VMess 接入配置；UUID 默认由后端生成。">
+      <Panel
+        title="远程设备"
+        subtitle="为手机或其他远程设备生成 VMess 接入配置；UUID 默认由后端生成。"
+        actions={clients.length ? (
+          <Button onClick={() => setClientCreateOpen((open) => !open)}>
+            {clientFormOpen ? "收起添加" : "添加设备"}
+          </Button>
+        ) : null}
+      >
         <div className="grid gap-4">
-          <div className="grid grid-cols-[1fr_1fr_96px_96px_auto] gap-3 max-lg:grid-cols-2 max-sm:grid-cols-1">
+          {clientFormOpen ? (
+          <div className="grid grid-cols-[1fr_1fr_96px_96px_auto] gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 max-lg:grid-cols-2 max-sm:grid-cols-1">
             <Field label="名称">
-              <input className="input" onChange={(event) => setClientDraft((current) => ({ ...current, label: event.target.value }))} value={clientDraft.label} />
+              <input autoComplete="off" className="input" name="v2ray_client_label" onChange={(event) => setClientDraft((current) => ({ ...current, label: event.target.value }))} value={clientDraft.label} />
             </Field>
             <Field label="Email">
-              <input className="input" onChange={(event) => setClientDraft((current) => ({ ...current, email: event.target.value }))} value={clientDraft.email} />
+              <input autoComplete="off" className="input" name="v2ray_client_email" onChange={(event) => setClientDraft((current) => ({ ...current, email: event.target.value }))} spellCheck={false} type="email" value={clientDraft.email} />
             </Field>
             <Field label="Level">
-              <input className="input mono" onChange={(event) => setClientDraft((current) => ({ ...current, level: Number(event.target.value || 0) }))} type="number" value={clientDraft.level} />
+              <input className="input mono" inputMode="numeric" name="v2ray_client_level" onChange={(event) => setClientDraft((current) => ({ ...current, level: Number(event.target.value || 0) }))} type="number" value={clientDraft.level} />
             </Field>
             <Field label="Alter ID">
-              <input className="input mono" onChange={(event) => setClientDraft((current) => ({ ...current, alterId: Number(event.target.value || 0) }))} type="number" value={clientDraft.alterId} />
+              <input className="input mono" inputMode="numeric" name="v2ray_client_alter_id" onChange={(event) => setClientDraft((current) => ({ ...current, alterId: Number(event.target.value || 0) }))} type="number" value={clientDraft.alterId} />
             </Field>
             <div className="flex items-end">
               <Button className="w-full" disabled={busy === "client"} onClick={() => void createClient()} tone="primary">
@@ -286,6 +359,7 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
               </Button>
             </div>
           </div>
+          ) : null}
 
           {clients.length ? (
             <div className="grid gap-2">
@@ -294,13 +368,13 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <strong className="truncate text-sm">{client.label || client.email || client.id}</strong>
-                      <Pill tone={client.enabled ? "good" : "warn"}>{client.enabled ? "enabled" : "disabled"}</Pill>
-                      {client.revokedAt ? <Pill tone="danger">revoked</Pill> : null}
+                      <Pill tone={client.enabled ? "good" : "warn"}>{client.enabled ? "已启用" : "已禁用"}</Pill>
+                      {client.revokedAt ? <Pill tone="danger">已撤销</Pill> : null}
                     </div>
                     <div className="muted mono mt-2 grid gap-1 text-xs">
                       <span>id: {client.id}</span>
                       <span>uuid: {maskSecret(client.uuid)}</span>
-                      <span>updated: {formatDate(client.updatedAt) || "-"}</span>
+                      <span>更新: {formatDate(client.updatedAt) || "-"}</span>
                     </div>
                   </div>
                   <div className="flex flex-wrap items-start justify-end gap-2 max-lg:justify-start">
@@ -347,6 +421,8 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
         </Panel>
       ) : null}
     </div>
+    {dangerConfirmDialog}
+    </>
   );
 
   function updateV2Ray<Key extends keyof V2RaySettings>(key: Key, value: V2RaySettings[Key]) {
@@ -368,4 +444,8 @@ function normalizedV2Ray(settings: V2RaySettings): V2RaySettings {
     port: Number(settings.port || 10086),
     logLevel: settings.logLevel || "warning",
   };
+}
+
+function sameV2RaySettings(a: V2RaySettings, b: V2RaySettings): boolean {
+  return JSON.stringify(normalizedV2Ray(a)) === JSON.stringify(normalizedV2Ray(b));
 }

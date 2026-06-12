@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AppActions } from "../../../app/App";
 import type { CodexThread } from "../../../app/types";
 import { Button } from "../../../components/ui";
@@ -17,14 +17,38 @@ const PANELS: Array<[PanelId, string]> = [
 export function ThreadP1Panels({ actions, thread, onRefresh }: { actions: AppActions; thread: CodexThread; onRefresh: () => void }) {
   const [panel, setPanel] = useState<PanelId>("review");
   const [open, setOpen] = useState(false);
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
+    const previousFocus = document.activeElement;
+    closeButtonRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") {
+        setOpen(false);
+        return;
+      }
+      if (event.key !== "Tab" || !drawerRef.current) return;
+      const focusable = Array.from(
+        drawerRef.current.querySelectorAll<HTMLElement>("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])"),
+      ).filter((element) => !element.hasAttribute("disabled"));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      if (previousFocus instanceof HTMLElement) previousFocus.focus();
+    };
   }, [open]);
 
   return (
@@ -33,15 +57,15 @@ export function ThreadP1Panels({ actions, thread, onRefresh }: { actions: AppAct
         Tools
       </Button>
       {open ? (
-        <div className="fixed inset-0 z-40">
+        <div className="fixed inset-0 z-40 overscroll-contain">
           <button aria-label="关闭 Codex tools 抽屉" className="absolute inset-0 h-full w-full bg-black/[0.04]" onClick={() => setOpen(false)} type="button" />
-          <aside aria-labelledby="codexToolsTitle" aria-modal="true" className="absolute top-4 right-4 bottom-4 flex w-[min(720px,calc(100vw-2rem))] flex-col overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--surface)] shadow-[var(--shadow)]" role="dialog">
+          <aside aria-labelledby="codexToolsTitle" aria-modal="true" className="absolute top-4 right-4 bottom-4 flex w-[min(720px,calc(100vw-2rem))] flex-col overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--surface)] shadow-[var(--shadow)]" ref={drawerRef} role="dialog">
             <div className="flex items-start justify-between gap-3 border-b border-[var(--line)] px-4 py-3">
               <div className="min-w-0">
                 <h2 className="m-0 text-sm font-semibold" id="codexToolsTitle">Codex tools</h2>
                 <p className="muted mt-1 mb-0 text-xs">低频 review、命令和预览工具</p>
               </div>
-              <Button className="h-8 min-h-8 px-2 text-xs" onClick={() => setOpen(false)}>
+              <Button className="h-8 min-h-8 px-2 text-xs" onClick={() => setOpen(false)} ref={closeButtonRef}>
                 关闭
               </Button>
             </div>

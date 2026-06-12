@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, friendlyError, readCookie } from "../api/client";
 import { Toast } from "../components/ui";
+import { useQueryParamState } from "../hooks/useQueryParamState";
 import type {
   AppData,
   AuthSession,
@@ -15,6 +16,8 @@ import { AuthView } from "../features/AuthView";
 import { AppShell } from "../features/AppShell";
 
 type AuthMode = "checking" | "bootstrap" | "login" | "ready" | "failed";
+const MAIN_TAB_IDS: MainTab[] = ["dashboard", "codex", "codex-gateway", "logs", "images", "docker", "v2ray", "settings"];
+const MAIN_TAB_CHILD_KEYS = ["codex", "codexInbox", "codexRuntime", "gateway", "images", "docker", "settings"];
 
 export interface AppActions {
   api: typeof api;
@@ -22,6 +25,7 @@ export interface AppActions {
   setToast: (message: string, tone?: Tone) => void;
   reloadData: () => Promise<void>;
   setMainTab: (tab: MainTab) => void;
+  mainTabHref: (tab: MainTab) => string;
   refreshCodexGateway: () => Promise<void>;
   refreshV2Ray: () => Promise<void>;
   refreshImages: () => Promise<void>;
@@ -44,7 +48,7 @@ export function App() {
   const [csrf, setCsrf] = useState(readCookie("pl_csrf"));
   const [, setSession] = useState<AuthSession | null>(null);
   const [data, setData] = useState<AppData>(emptyData);
-  const [activeTab, setActiveTab] = useState<MainTab>("dashboard");
+  const [activeTab, setActiveTab, mainTabHref] = useQueryParamState<MainTab>("tab", MAIN_TAB_IDS, "dashboard", { clearKeys: MAIN_TAB_CHILD_KEYS });
   const [toast, setToastState] = useState<{ message: string; tone: Tone } | null>(null);
   const [v2rayExport, setV2RayExport] = useState<unknown>(null);
   const [v2rayExportOpen, setV2RayExportOpen] = useState(false);
@@ -135,6 +139,7 @@ export function App() {
       setToast,
       reloadData: loadAppData,
       setMainTab: setActiveTab,
+      mainTabHref,
       refreshCodexGateway: async () => {
         const codexGateway = await loadCodexGatewayData();
         setData((current) => ({ ...current, codexGateway, dashboard: { ...current.dashboard, codexGateway: codexGateway.status } }));
@@ -166,7 +171,7 @@ export function App() {
       setV2RayExportOpen,
       setV2RayExport,
     }),
-    [csrf, loadAppData, loadCodexGatewayData, setToast],
+    [csrf, loadAppData, loadCodexGatewayData, mainTabHref, setActiveTab, setToast],
   );
 
   async function handleAuth(mode: "bootstrap" | "login", username: string, password: string) {

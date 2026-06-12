@@ -211,6 +211,12 @@
     @apply block w-full min-w-0 p-0 text-base font-semibold outline-none;
   }
 
+  .chat-title-input:focus-visible {
+    border-radius: 6px;
+    outline: 2px solid rgba(207, 77, 16, 0.45);
+    outline-offset: 3px;
+  }
+
   .chat-transcript {
     @apply min-h-0 flex-1 overflow-y-auto px-5 py-6;
   }
@@ -274,11 +280,21 @@
     box-shadow: 0 0 0 3px rgba(207, 77, 16, 0.08), 0 16px 36px rgba(16, 24, 40, 0.09);
   }
 
+  .chat-composer-input:focus-visible {
+    outline: 2px solid rgba(207, 77, 16, 0.45);
+    outline-offset: 2px;
+  }
+
   .chat-model-select {
     border: 1px solid var(--line);
     background: var(--surface);
     color: var(--muted-strong);
     @apply h-9 max-w-[220px] rounded-lg px-2 text-xs outline-none;
+  }
+
+  .chat-model-select:focus-visible {
+    outline: 2px solid rgba(207, 77, 16, 0.45);
+    outline-offset: 2px;
   }
 
   .message-rich {
@@ -660,6 +676,17 @@
   .chat-workspace-header {
     align-items: stretch;
     flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
   }
 }
 
