@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // Unified redaction patterns. Order matters: bearer → key-value → structured
@@ -30,7 +31,7 @@ var (
 		`(?i)\b(access[_-]?token|refresh[_-]?token|id[_-]?token|` +
 			`api[_-]?key|apikey|token|secret|password|passwd|` +
 			`authorization|cookie|csrf|session)\b(\s*["']?\s*[=:]\s*["']?)` +
-			`("[^"]+"|'[^']+'|[^\s,;&}\])]+)`,
+			`("[^"]+"|'[^']+'|[^\s,;&}\)\[\]]+)`,
 	)
 
 	// pemPrivate matches the start of a PEM private key block and its
@@ -63,6 +64,46 @@ var (
 	httpURL = regexp.MustCompile(`https?://[^\s"'<>]+`)
 )
 
+// registeredRegex holds a user-supplied regex + replacement pair for the
+// optional tail pass of Redact().  Stored compiled so repeated Redact calls
+// don't recompile the pattern.
+type registeredRegex struct {
+	re          *regexp.Regexp
+	replacement string
+}
+
+var (
+	registeredRedactions []registeredRegex
+	registeredMu         sync.Mutex
+)
+
+// RegisterRegex compiles pattern and appends it to the tail redaction pass.
+// The replacement string uses the same syntax as regexp.ReplaceAllString
+// ($1, $2, … refer to capture groups).  Returns a non-nil error if the
+// pattern fails to compile.  The global registry is mutex-protected; safe
+// to call from any goroutine.
+func RegisterRegex(pattern, replacement string) error {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return err
+	}
+	registeredMu.Lock()
+	defer registeredMu.Unlock()
+	registeredRedactions = append(registeredRedactions, registeredRegex{
+		re:          re,
+		replacement: replacement,
+	})
+	return nil
+}
+
+// ResetRegistered clears every pattern previously added via RegisterRegex.
+// Used by tests and by callers that want to replace the whole tail set.
+func ResetRegistered() {
+	registeredMu.Lock()
+	defer registeredMu.Unlock()
+	registeredRedactions = registeredRedactions[:0]
+}
+
 // Redact applies every redaction rule to value and returns the sanitised
 // string. It is safe to call on empty input. Redact is the single entry
 // point used by every other helper in this package and by callers that
@@ -90,6 +131,16 @@ func Redact(value string) string {
 		parsed.RawQuery = "redacted"
 		return parsed.String()
 	})
+	// Tail pass: user-registered redactions (applied in registration
+	// order).  Snapshot the slice under the mutex so the hot path of
+	// Redact() doesn't hold the lock while running regex substitutions.
+	registeredMu.Lock()
+	tail := make([]registeredRegex, len(registeredRedactions))
+	copy(tail, registeredRedactions)
+	registeredMu.Unlock()
+	for _, rr := range tail {
+		v = rr.re.ReplaceAllString(v, rr.replacement)
+	}
 	return v
 }
 

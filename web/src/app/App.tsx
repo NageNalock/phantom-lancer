@@ -7,6 +7,7 @@ import type {
   AuthSession,
   CodexGatewayPayload,
   ImagesPayload,
+  MailPayload,
   MainTab,
   SettingsPayload,
   Tone,
@@ -16,8 +17,8 @@ import { AuthView } from "../features/AuthView";
 import { AppShell } from "../features/AppShell";
 
 type AuthMode = "checking" | "bootstrap" | "login" | "ready" | "failed";
-const MAIN_TAB_IDS: MainTab[] = ["dashboard", "codex", "codex-gateway", "logs", "images", "docker", "v2ray", "settings"];
-const MAIN_TAB_CHILD_KEYS = ["codex", "codexInbox", "codexRuntime", "gateway", "images", "docker", "settings"];
+const MAIN_TAB_IDS: MainTab[] = ["dashboard", "codex", "codex-gateway", "logs", "images", "docker", "v2ray", "mail", "settings"];
+const MAIN_TAB_CHILD_KEYS = ["codex", "codexInbox", "codexRuntime", "gateway", "images", "docker", "mail", "settings"];
 
 export interface AppActions {
   api: typeof api;
@@ -40,7 +41,59 @@ const emptyData: AppData = {
   settings: {},
   v2ray: {},
   images: {},
+  mail: emptyMailPayload(),
 };
+
+function emptyMailPayload(): MailPayload {
+  return {
+    status: {
+      ok: false,
+      service_ready: false,
+      config_mode: "",
+      desired_state: "",
+      phantom_instance_id: "",
+      import_mode: false,
+      mox_root: "",
+      domain_count: 0,
+      account_count: 0,
+    },
+    settings: {
+      id: 0,
+      phantom_instance_id: "",
+      import_mode: false,
+      import_label: "",
+      config_mode: "",
+      desired_state: "",
+      mox_binary_path: "",
+      mox_data_dir: "",
+      mox_config_path: "",
+      webapi_endpoint: "",
+      admin_email: "",
+      hostname: "",
+      smtp_port: 25,
+      smtp_submission_port: 587,
+      smtps_port: 465,
+      imap_port: 143,
+      imaps_port: 993,
+      webmail_addr: "",
+      webapi_addr: "",
+      acme_default_provider_id: "",
+      queue_max_size_bytes: 0,
+      queue_max_age_seconds: 0,
+      outbound_rate_limit_per_hour: 0,
+      retention_delivery_events_days: 90,
+      retention_health_checks_per_type: 100,
+      search_index_max_size_gb: 10,
+      dnsbl_enabled: false,
+      created_at: "",
+      updated_at: "",
+    },
+    domains: [],
+    accounts: [],
+    aliases: [],
+    certificates: [],
+  };
+}
 
 export function App() {
   const [authMode, setAuthMode] = useState<AuthMode>("checking");
@@ -78,7 +131,7 @@ export function App() {
   }, []);
 
   const loadAppData = useCallback(async () => {
-    const [dashboard, audit, codexGateway, settings, v2ray, imagesSettings, imageStorageSettings, imageJobs, imageAssets] = await Promise.all([
+    const [dashboard, audit, codexGateway, settings, v2ray, imagesSettings, imageStorageSettings, imageJobs, imageAssets, mailStatus] = await Promise.all([
       api<AppData["dashboard"]>("/api/dashboard/summary"),
       api<{ items?: AppData["audit"] }>("/api/audit/events"),
       loadCodexGatewayData(),
@@ -88,6 +141,7 @@ export function App() {
       api<{ settings?: ImagesPayload["storageSettings"] }>("/api/images/storage-settings"),
       api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=40"),
       api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=80"),
+      api<MailPayload["status"]>("/api/mail/status"),
     ]);
 
     setData({
@@ -97,6 +151,10 @@ export function App() {
       settings,
       v2ray,
       images: { ...imagesSettings, storageSettings: imageStorageSettings.settings, jobs: imageJobs.items || [], assets: imageAssets.items || [], count: imageJobs.count || 0 },
+      mail: {
+        ...emptyMailPayload(),
+        status: mailStatus,
+      },
     });
   }, [loadCodexGatewayData]);
 

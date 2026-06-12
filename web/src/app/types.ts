@@ -1,4 +1,4 @@
-export type MainTab = "dashboard" | "codex-gateway" | "codex" | "logs" | "images" | "docker" | "v2ray" | "settings";
+export type MainTab = "dashboard" | "codex-gateway" | "codex" | "logs" | "images" | "docker" | "v2ray" | "mail" | "settings";
 export type Tone = "neutral" | "good" | "warn" | "danger";
 
 export interface AuthSession {
@@ -820,6 +820,7 @@ export interface AppData {
   settings: SettingsPayload;
   v2ray: V2RayPayload;
   images: ImagesPayload;
+  mail: MailPayload;
 }
 
 export interface ApiError extends Error {
@@ -1012,4 +1013,245 @@ interface DockerStats {
   memoryUsageBytes: number;
   memoryLimitBytes: number;
   memoryPercent: number;
+}
+
+// --- Mail / Mox control-plane types (Phase 1 skeletons) ---------------
+// These shapes mirror the Go structs in internal/storage/storage_mail.go
+// and the payloads served from internal/httpapi/mail.go.  They are
+// deliberately populated in Phase 1 even though most fields will sit
+// empty until Phase 2+ — doing so keeps the UI layout stable and lets
+// TypeScript catch wiring bugs ahead of time.
+
+export interface MailStatus {
+  ok: boolean;
+  service_ready: boolean;
+  config_mode: "managed" | "import" | "";
+  desired_state: "running" | "stopped" | "";
+  phantom_instance_id: string;
+  import_mode: boolean;
+  mox_root: string;
+  domain_count: number;
+  account_count: number;
+}
+
+export interface MailDomain {
+  id: string;
+  domain: string;
+  enabled: boolean;
+  dkim_selector: string;
+  dmarc_policy: string;
+  dmarc_rua: string;
+  spf_include: string;
+  dns_provider_id: string;
+  cert_id: string;
+  synced: boolean;
+  last_synced_at?: string;
+  last_sync_error?: string;
+  last_dns_check_at?: string;
+  dns_check_json?: unknown;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MailAccount {
+  id: string;
+  // Phase 1 legacy fields (may still be referenced by older views / stubs).
+  email?: string;
+  display_name: string;
+  recovery_email?: string;
+  storage_limit_mb?: number;
+  enabled?: boolean;
+  role?: "user" | "admin" | "catch-all" | "";
+  import_mode_read_only?: boolean;
+  synced?: boolean;
+  last_synced_at?: string;
+  last_sync_error?: string;
+  last_password_changed_at?: string;
+  sync_state?: "idle" | "syncing" | "error" | "paused" | "";
+  // Phase 5 canonical fields.
+  domain_id?: string;
+  local_part?: string;
+  address?: string;
+  password_mode?: "generated" | "external" | "disabled";
+  status?: "active" | "disabled";
+  quota_mb?: number;
+  is_admin?: boolean;
+  imap_sync_enabled?: boolean;
+  imap_sync_state?: "idle" | "syncing" | "error" | "paused";
+  imap_error?: string;
+  last_login_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MailAlias {
+  id: string;
+  // Phase 1 legacy fields.
+  domain_id: string;
+  alias_addr?: string;
+  mode?: "forward" | "list" | "catch-all" | "";
+  enabled?: boolean;
+  recipient_ids?: string[];
+  synced?: boolean;
+  // Phase 5 canonical fields.
+  source?: string;
+  recipients?: string[];
+  alias_mode?: "alias" | "catchall" | "list" | "drop";
+  list_name?: string;
+  list_reply_to?: string;
+  description?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MailCertificate {
+  id: string;
+  domain_id: string;
+  provider: "dns01" | "manual" | "external" | "";
+  dns_provider_id: string;
+  subject: string;
+  san_domains: string[];
+  not_before?: string;
+  not_after?: string;
+  last_renewed_at?: string;
+  last_attempt_at?: string;
+  last_error?: string;
+  tlsa_rr_3_1_1?: string;
+  status: "valid" | "expiring" | "expired" | "pending" | "failed" | "";
+  created_at: string;
+}
+
+export interface MailMessage {
+  id: string;
+  account_id: string;
+  folder: string;
+  uid: number;
+  message_id: string;
+  subject: string;
+  from_addr: string;
+  from_name: string;
+  to_addrs: string[];
+  cc_addrs: string[];
+  replied_at?: string;
+  forwarded_at?: string;
+  flags: string[];
+  size_bytes: number;
+  internaldate: string;
+  preview_text: string;
+  has_attachments: boolean;
+  attachment_count: number;
+  synced: boolean;
+  created_at: string;
+}
+
+export interface MailSettings {
+  id: number;
+  phantom_instance_id: string;
+  import_mode: boolean;
+  import_label: string;
+  config_mode: string;
+  desired_state: string;
+  mox_binary_path: string;
+  mox_data_dir: string;
+  mox_config_path: string;
+  webapi_endpoint: string;
+  admin_email: string;
+  hostname: string;
+  smtp_port: number;
+  smtp_submission_port: number;
+  smtps_port: number;
+  imap_port: number;
+  imaps_port: number;
+  webmail_addr: string;
+  webapi_addr: string;
+  acme_default_provider_id: string;
+  queue_max_size_bytes: number;
+  queue_max_age_seconds: number;
+  outbound_rate_limit_per_hour: number;
+  retention_delivery_events_days: number;
+  retention_health_checks_per_type: number;
+  search_index_max_size_gb: number;
+  dnsbl_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MailPayload {
+  status: MailStatus;
+  settings: MailSettings;
+  domains: MailDomain[];
+  accounts: MailAccount[];
+  aliases: MailAlias[];
+  certificates: MailCertificate[];
+  // Phase 6: Delivery / Queue / Suppression / Webhook / Outbound
+  queueSummary?: {
+    hold: number;
+    active: number;
+    schedule: number;
+    deferred: number;
+    fail: number;
+    drop: number;
+  };
+  deliverySummary?: {
+    sent_24h: number;
+    bounced_24h: number;
+    deferred_count: number;
+    pending_count: number;
+  };
+  suppressionSummary?: {
+    active_count: number;
+    added_7d: number;
+    expiring_soon: number;
+  };
+  webhookSummary?: {
+    registration_count: number;
+    recent_events: number;
+  };
+  outboundSummary?: {
+    send_1m: number;
+    send_1h: number;
+    send_24h: number;
+    bounce_rate_pct: number;
+  };
+  // Phase 8: Logs / Backup / Retention / Danger Zone
+  logFiles?: Array<{
+    path: string;
+    size_bytes: number;
+    modified_at: string;
+    lines_estimated: number;
+  }>;
+  backups?: Array<{
+    id: string;
+    scope: "config" | "data_full";
+    file_path: string;
+    file_size_bytes: number;
+    checksum_sha256?: string;
+    contains_config: boolean;
+    contains_data: boolean;
+    note?: string;
+    created_at: string;
+    expires_at?: string;
+  }>;
+  backupSchedules?: Array<{
+    id: string;
+    scope: string;
+    enabled: boolean;
+    cron_expr: string;
+    retention_days: number;
+    max_copies: number;
+    last_run_at?: string;
+    last_run_ok: boolean;
+    last_error?: string;
+    next_run_at?: string;
+    created_at: string;
+    updated_at: string;
+  }>;
+  retentionRules?: Array<{
+    id: string;
+    scope: "delivery_events" | "health_checks" | "webhook_events" | "mail_index_messages";
+    retain_days?: number;
+    retain_max_rows?: number;
+    created_at: string;
+    updated_at: string;
+  }>;
 }

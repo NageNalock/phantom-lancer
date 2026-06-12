@@ -34,6 +34,7 @@ import (
 	imagegen "phantom-lancer/internal/images"
 	logcenter "phantom-lancer/internal/logs"
 	"phantom-lancer/internal/logsampler"
+	"phantom-lancer/internal/mail"
 	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/selfupdate"
 	"phantom-lancer/internal/storage"
@@ -93,6 +94,7 @@ type Server struct {
 	docker         *dockercontrol.Service
 	logs           *logcenter.Service
 	updates        *selfupdate.Service
+	mail           *mail.Service
 	staticFS       fs.FS
 	log            *slog.Logger
 	logins         *loginBackoff
@@ -132,7 +134,7 @@ type sessionContext struct {
 	Session storage.Session
 }
 
-func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, dockerSvc *dockercontrol.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
+func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, dockerSvc *dockercontrol.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, mailSvc *mail.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
 	return &Server{
 		cfg:              cfg,
 		store:            store,
@@ -144,6 +146,7 @@ func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewayS
 		docker:           dockerSvc,
 		logs:             logsSvc,
 		updates:          updateSvc,
+		mail:             mailSvc,
 		staticFS:         staticFS,
 		log:              logger,
 		logins:           newLoginBackoff(cfg.LoginFailureThreshold),
@@ -299,6 +302,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v2ray/clients/", s.handleV2RayClientSubroutes)
 	mux.HandleFunc("POST /api/v2ray/clients/", s.handleV2RayClientSubroutes)
 	mux.HandleFunc("DELETE /api/v2ray/clients/", s.handleV2RayClientSubroutes)
+	s.registerMailRoutes(mux)
 	mux.HandleFunc("GET /v1/models", s.handleCodexGatewayPublicModels)
 	mux.HandleFunc("GET /v1/models/", s.handleCodexGatewayPublicModel)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleCodexGatewayChatCompletions)
