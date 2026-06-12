@@ -260,10 +260,14 @@ func TestExitCodeZeroTriggersRestart(t *testing.T) {
 set -eu
 f=%q
 while ! ln -s x "$f.lock" 2>/dev/null; do sleep 0.02; done
+tmp="$f.tmp.$$"
+trap 'rm -f "$f.lock" "$tmp"' EXIT
 n=$(cat "$f" 2>/dev/null || echo 0)
 n=$((n + 1))
-printf '%%s' "$n" > "$f"
+printf '%%s' "$n" > "$tmp"
+mv "$tmp" "$f"
 rm -f "$f.lock"
+trap - EXIT
 exit 0
 `, counter)
 	scriptPath := filepath.Join(dir, "child.sh")
@@ -289,20 +293,65 @@ exit 0
 	if err := svc.Bootstrap(); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	_ = svc.Run(ctx)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- svc.Run(ctx) }()
+	stopped := false
+	defer func() {
+		if stopped {
+			return
+		}
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("Run returned non-nil: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("Run did not return after ctx cancel")
+		}
+	}()
 
-	data, err := os.ReadFile(counter)
-	if err != nil {
-		t.Fatalf("read counter: %v", err)
+	readCounter := func() (int, string, error) {
+		data, err := os.ReadFile(counter)
+		if err != nil {
+			return 0, "", err
+		}
+		raw := string(data)
+		n, err := strconv.Atoi(string(bytes.TrimSpace(data)))
+		return n, raw, err
 	}
-	n, err := strconv.Atoi(string(bytes.TrimSpace(data)))
-	if err != nil {
-		t.Fatalf("parse counter %q: %v", string(data), err)
-	}
-	if n < 2 {
-		t.Fatalf("expected >= 2 child restarts, got %d counter increments", n)
+
+	var lastRaw string
+	var lastErr error
+	deadline := time.After(5 * time.Second)
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for >= 2 child runs; last counter=%q err=%v", lastRaw, lastErr)
+		case <-ticker.C:
+			n, raw, err := readCounter()
+			lastRaw = raw
+			lastErr = err
+			if err != nil {
+				t.Fatalf("read counter %q: %v", raw, err)
+			}
+			if n >= 2 {
+				cancel()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatalf("Run returned non-nil: %v", err)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("Run did not return after ctx cancel")
+				}
+				stopped = true
+				return
+			}
+		}
 	}
 }
 
@@ -505,6 +554,7 @@ func TestStopChildEscalation(t *testing.T) {
 	if err := svc.Bootstrap(); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
+	t.Cleanup(func() { _ = svc.cleanupFinal() })
 	cmd, err := svc.startChild()
 	if err != nil {
 		t.Fatalf("startChild: %v", err)
