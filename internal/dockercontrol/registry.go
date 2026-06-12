@@ -781,8 +781,8 @@ func (s *Service) handleBlob(w http.ResponseWriter, r *http.Request, settings st
 }
 
 func (s *Service) handleBlobUpload(w http.ResponseWriter, r *http.Request, settings storage.DockerRegistrySettings, cred storage.DockerRegistryCredential, path string) {
-	repo, uploadID, ok := splitRegistryPath(path, "/blobs/uploads/")
-	if !ok || validateRepositoryName(repo) != nil {
+	repo, uploadID, ok := splitRegistryUploadPath(path)
+	if !ok || validateRepositoryName(repo) != nil || (r.Method != http.MethodPost && uploadID == "") {
 		http.NotFound(w, r)
 		return
 	}
@@ -1272,6 +1272,14 @@ func splitRegistryPath(path, marker string) (string, string, bool) {
 		return "", "", false
 	}
 	return left, right, true
+}
+
+func splitRegistryUploadPath(path string) (string, string, bool) {
+	repo, uploadID, ok := strings.Cut(path, "/blobs/uploads/")
+	if !ok || repo == "" {
+		return "", "", false
+	}
+	return repo, uploadID, true
 }
 
 func registryRepoFromPath(path string) string {

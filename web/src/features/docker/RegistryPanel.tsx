@@ -6,7 +6,8 @@ import type {
   DockerRegistryTag,
   ObjectStorageProfile,
 } from "../../app/types";
-import { Button, CheckLabel, Field, Metric, Panel, Toggle } from "../../components/ui";
+import type { Tone } from "../../app/types";
+import { Button, CheckLabel, Field, Metric, Panel, Pill, Toggle } from "../../components/ui";
 import { DockerTable } from "./DockerTable";
 
 // registryHost derives a valid image-reference host (host[:port][/path]) from
@@ -19,6 +20,31 @@ function registryHost(publicUrl: string | undefined): string {
     return "registry.example.com";
   }
   return raw.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "").replace(/\/+$/, "") || "registry.example.com";
+}
+
+function scopeLabel(scope: string): string {
+  switch (scope) {
+    case "registry.pull":
+      return "pull";
+    case "registry.push":
+      return "push";
+    case "registry.delete":
+      return "delete";
+    case "registry.admin":
+      return "admin";
+    default:
+      return scope.replace(/^registry\./, "");
+  }
+}
+
+function scopeTone(scope: string): Tone {
+  if (scope === "registry.push") return "good";
+  if (scope === "registry.delete" || scope === "registry.admin") return "warn";
+  return "neutral";
+}
+
+function statusTone(status: string | undefined): Tone {
+  return status === "active" ? "good" : status === "disabled" || status === "revoked" ? "danger" : "neutral";
 }
 
 export function RegistryPanel({
@@ -130,12 +156,32 @@ docker push ${registryHost(registrySettings.publicUrl)}/personal/my-app:latest`}
               </Field>
               <Button disabled={busy === "credential-create"} onClick={() => createCredential()} tone="primary">创建凭据</Button>
               {credentials.map((item) => (
-                <div className="flex items-center justify-between gap-2 border-t border-[var(--line)] pt-2" key={item.id}>
-                  <span className="mono text-xs">{item.name}</span>
-                  <span className="flex gap-1">
+                <div className="grid gap-2 border-t border-[var(--line)] pt-3" key={item.id}>
+                  <div className="flex min-w-0 items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="mono truncate text-xs">{item.name}</span>
+                        <Pill tone={statusTone(item.status)}>{item.status || "unknown"}</Pill>
+                      </div>
+                      <div className="muted mt-1 grid gap-1 text-xs">
+                        <span>
+                          前缀：<code className="mono">{item.repositoryPrefix || "无限制"}</code>
+                        </span>
+                        <span>
+                          最近使用：<code className="mono">{item.lastUsedAt || "从未使用"}</code>
+                        </span>
+                      </div>
+                    </div>
+                    <span className="flex shrink-0 gap-1">
+                      {item.scopes?.map((scope) => (
+                        <Pill key={scope} tone={scopeTone(scope)}>{scopeLabel(scope)}</Pill>
+                      ))}
+                    </span>
+                  </div>
+                  <div className="flex gap-1">
                     <Button disabled={busy === `cred-rotate-${item.id}`} onClick={() => rotateCredential(item)}>轮换</Button>
                     <Button disabled={busy === `cred-delete-${item.id}`} onClick={() => deleteCredential(item)} tone="danger">删除</Button>
-                  </span>
+                  </div>
                 </div>
               ))}
             </div>

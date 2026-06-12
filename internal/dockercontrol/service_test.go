@@ -2,6 +2,8 @@ package dockercontrol
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
@@ -161,6 +163,31 @@ func TestRegistryObjectKeysUseDockerPrefix(t *testing.T) {
 	got := blobKey(settings, "sha256:abcdef")
 	if got != "phantom-lancer/docker-registry/blobs/sha256/ab/abcdef" {
 		t.Fatalf("blob key = %q", got)
+	}
+}
+
+func TestHandleBlobUploadStartsDockerUpload(t *testing.T) {
+	svc := NewService(nil, nil, t.TempDir(), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v2/stock-pulse/stockpulse/blobs/uploads/", nil)
+	rr := httptest.NewRecorder()
+
+	svc.handleBlobUpload(
+		rr,
+		req,
+		storage.DockerRegistrySettings{StorageDir: t.TempDir()},
+		storage.DockerRegistryCredential{Scopes: []string{"registry.push"}},
+		"stock-pulse/stockpulse/blobs/uploads/",
+	)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%q", rr.Code, http.StatusAccepted, rr.Body.String())
+	}
+	if got := rr.Header().Get("Docker-Upload-UUID"); got == "" {
+		t.Fatal("Docker-Upload-UUID header is empty")
+	}
+	location := rr.Header().Get("Location")
+	if !strings.HasPrefix(location, "/v2/stock-pulse/stockpulse/blobs/uploads/") {
+		t.Fatalf("Location = %q", location)
 	}
 }
 
