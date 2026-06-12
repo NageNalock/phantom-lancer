@@ -64,6 +64,7 @@ type Service struct {
 
 	turnScheduleMu     sync.Mutex
 	automationRunMu    sync.Mutex
+	asyncWg            sync.WaitGroup
 	mu                 sync.RWMutex
 	settings           Settings
 	activeTurns        map[string]*appTurnContext
@@ -265,6 +266,28 @@ func (s *Service) StartBackground(ctx context.Context) {
 // Close stops the managed app-server.
 func (s *Service) Close() {
 	s.supervisor.Stop(context.Background())
+}
+
+func (s *Service) runAsync(fn func()) {
+	s.asyncWg.Add(1)
+	go func() {
+		defer s.asyncWg.Done()
+		fn()
+	}()
+}
+
+func (s *Service) waitForAsync(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.asyncWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+		return nil
+	}
 }
 
 // ---- settings ----
@@ -1439,7 +1462,9 @@ func (s *Service) completeTurn(ctx context.Context, thread storage.CodexCliThrea
 	s.appendThreadEvent(ctx, thread.ID, turn.ID, EventTurnCompleted, "codex", "", "", nil)
 	s.completeAutomationRunForTurn(ctx, saved, true, "")
 	s.cleanupTurnAttachments(ctx, turn.ID)
-	go s.drainTurnQueue(context.Background())
+	s.runAsync(func() {
+		s.drainTurnQueue(context.Background())
+	})
 	return saved, true
 }
 
@@ -1451,7 +1476,9 @@ func (s *Service) failTurn(ctx context.Context, thread storage.CodexCliThread, t
 	s.appendThreadEvent(ctx, thread.ID, turn.ID, EventTurnFailed, "codex", "", message, nil)
 	s.completeAutomationRunForTurn(ctx, saved, false, message)
 	s.cleanupTurnAttachments(ctx, turn.ID)
-	go s.drainTurnQueue(context.Background())
+	s.runAsync(func() {
+		s.drainTurnQueue(context.Background())
+	})
 	return saved, true
 }
 

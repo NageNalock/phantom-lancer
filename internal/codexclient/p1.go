@@ -167,7 +167,9 @@ func (s *Service) rememberActiveItem(turnID string, payload map[string]any) {
 func (s *Service) dispatchPreparedTurn(ctx context.Context, thread storage.CodexCliThread, ws storage.CodexCliWorkspace, turn storage.CodexCliTurn, prompt, model string, policy RunPolicy, images []string) (storage.CodexCliTurn, error) {
 	client := s.supervisor.Client()
 	if client != nil && thread.SourceMode == "app_server" {
-		go s.runAppServerTurn(context.WithoutCancel(ctx), client, thread, ws, turn, prompt, model, policy, images)
+		s.runAsync(func() {
+			s.runAppServerTurn(context.WithoutCancel(ctx), client, thread, ws, turn, prompt, model, policy, images)
+		})
 		return turn, nil
 	}
 	if !s.currentSettings().ExecFallbackEnabled {
@@ -178,7 +180,9 @@ func (s *Service) dispatchPreparedTurn(ctx context.Context, thread storage.Codex
 		s.failTurn(ctx, thread, turn, "exec fallback requires read-only sandbox")
 		return turn, errors.New("exec fallback requires read-only sandbox")
 	}
-	go s.runExecTurn(context.WithoutCancel(ctx), thread, ws, turn, prompt, model, policy, images)
+	s.runAsync(func() {
+		s.runExecTurn(context.WithoutCancel(ctx), thread, ws, turn, prompt, model, policy, images)
+	})
 	return turn, nil
 }
 

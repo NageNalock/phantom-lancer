@@ -20,6 +20,7 @@ func newP3TestService(t *testing.T) (*Service, *storage.Store, string) {
 		t.Fatal(err)
 	}
 	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	cleanupCodexTestService(t, svc, store)
 	return svc, store, dir
 }
 

@@ -15,6 +15,21 @@ import (
 	"phantom-lancer/internal/storage"
 )
 
+func cleanupCodexTestService(t *testing.T, svc *Service, store *storage.Store) {
+	t.Helper()
+	t.Cleanup(func() {
+		waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := svc.waitForAsync(waitCtx); err != nil {
+			t.Errorf("wait for codex test background tasks: %v", err)
+		}
+		svc.Close()
+		if err := store.Close(); err != nil {
+			t.Errorf("close test store: %v", err)
+		}
+	})
+}
+
 func TestBuildChildEnvDropsSecrets(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin")
 	t.Setenv("HOME", "/home/owner")
@@ -89,6 +104,7 @@ func TestCreateWorkspaceWithOptionsCreatesMissingDirectoryInsideAllowedRoot(t *t
 		t.Fatal(err)
 	}
 	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	cleanupCodexTestService(t, svc, store)
 	workspacePath := filepath.Join(dir, "projects", "new-app")
 
 	if _, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"}); !errors.Is(err, ErrPathNotFound) {
@@ -371,6 +387,7 @@ func TestWorkspaceQueuedTurnBlocksNewStartButNotDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	cleanupCodexTestService(t, svc, store)
 	ws, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"})
 	if err != nil {
 		t.Fatal(err)
@@ -422,6 +439,7 @@ func TestConcurrentStartTurnSerializesWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	cleanupCodexTestService(t, svc, store)
 	svc.mu.Lock()
 	svc.settings.BinaryPath = binaryPath
 	svc.settings.MaxConcurrentTurns = 4
@@ -514,6 +532,7 @@ func TestStartTurnInvalidAttachmentDoesNotLeaveRunningTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	cleanupCodexTestService(t, svc, store)
 	ws, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "workspace-write", DefaultApprovalPolicy: "on-request"})
 	if err != nil {
 		t.Fatal(err)
@@ -549,6 +568,7 @@ func TestResolveApprovalWithoutLiveRequestFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	cleanupCodexTestService(t, svc, store)
 	ws, err := store.CreateCodexCliWorkspace(ctx, storage.CodexCliWorkspace{Path: dir, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"})
 	if err != nil {
 		t.Fatal(err)
@@ -592,6 +612,7 @@ func TestTerminalTurnCleansAttachmentsAndDerivesTitle(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	cleanupCodexTestService(t, svc, store)
 	thread, err := store.CreateCodexCliThread(ctx, storage.CodexCliThread{WorkspaceID: "ws-1", Title: "新对话", Status: "running", SourceMode: "exec", SandboxMode: "read-only", ApprovalPolicy: "on-request"})
 	if err != nil {
 		t.Fatal(err)
@@ -638,6 +659,7 @@ func TestQueuedCommandInterruptedBeforeStartDoesNotRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	cleanupCodexTestService(t, svc, store)
 	ws, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"})
 	if err != nil {
 		t.Fatal(err)
