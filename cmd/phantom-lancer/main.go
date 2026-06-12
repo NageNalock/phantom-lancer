@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -186,13 +187,69 @@ func main() {
 		os.Exit(1)
 	}
 
-	httpSrv := httpserver.New(effectiveAddr, api.Handler(), logger)
-	api.SetHTTPServerManager(httpSrv)
-	if err := httpSrv.Start(); err != nil {
-		logger.Error("http server initial bind failed", "error", err, "addr", effectiveAddr)
+	// PL_TLS_BOOT_STRICT=true/false controls boot-fallback behaviour when TLS
+	// is configured in the DB but certs/key cannot be loaded.  Default (false)
+	// = fall back to HTTP on the same address and reconcile the DB.
+	tlsBootStrict := strings.EqualFold(os.Getenv("PL_TLS_BOOT_STRICT"), "true") || os.Getenv("PL_TLS_BOOT_STRICT") == "1"
+	api.SetTLSEnvironmentInfo(tlsBootStrict)
+
+	initialRuntime, err := store.GetRuntimeSettings(ctx)
+	if err != nil {
+		logger.Error("load runtime settings failed", "error", err)
 		os.Exit(1)
 	}
-	logger.Info("phantom lancer listening", "addr", httpSrv.Addr(), "db", cfg.DBPath, "logFile", cfg.LogFile)
+	initialEpCfg := httpserver.EndpointConfig{
+		Addr:              effectiveAddr,
+		TLSEnabled:        initialRuntime.TLSEnabled,
+		TLSCertFile:       initialRuntime.TLSCertFile,
+		TLSKeyFile:        initialRuntime.TLSKeyFile,
+		TLSOwnerUIDCheck:  initialRuntime.TLSOwnerUIDCheck,
+		HSTSEnabled:       initialRuntime.HSTSEnabled,
+		HSTSMaxAgeSeconds: initialRuntime.HSTSMaxAgeSeconds,
+	}
+	httpSrv, actualEp, bootErr := httpserver.NewWithEndpoint(initialEpCfg, api.Handler(), logger, tlsBootStrict)
+	if bootErr != nil {
+		logger.Error("http server boot failed",
+			"error", bootErr.Error(),
+			"addr", effectiveAddr,
+			"tls_requested", initialRuntime.TLSEnabled,
+			"tls_boot_strict", tlsBootStrict,
+		)
+		os.Exit(1)
+	}
+	api.SetHTTPServerManager(httpSrv)
+
+	// M2 split-state recovery: if the DB says TLS should be enabled but the
+	// runtime had to fall back to HTTP, reconcile DB back so they agree.
+	if initialRuntime.TLSEnabled && !actualEp.TLSEnabled {
+		logger.Log(ctx, httpserver.LevelCritical,
+			"TLS_BOOT_FALLBACK_DB_RECONCILIATION",
+			slog.String("addr", effectiveAddr),
+			slog.String("db_tls_cert_file", initialRuntime.TLSCertFile),
+			slog.String("db_tls_key_file", initialRuntime.TLSKeyFile),
+		)
+		reconciled := initialRuntime
+		reconciled.TLSEnabled = false
+		reconciled.TLSCertFile = ""
+		reconciled.TLSKeyFile = ""
+		reconciled.CookieSecure = false
+		reconciled.HSTSEnabled = false
+		if rerr := store.UpdateRuntimeSettings(ctx, reconciled); rerr != nil {
+			logger.Error("failed to reconcile DB after TLS boot fallback", "error", rerr)
+		}
+	}
+
+	if err := httpSrv.Start(); err != nil {
+		logger.Error("http server initial bind failed", "error", err, "addr", actualEp.Addr)
+		os.Exit(1)
+	}
+	logger.Info("phantom lancer listening",
+		"addr", httpSrv.Addr(),
+		"db", cfg.DBPath,
+		"logFile", cfg.LogFile,
+		"endpoint", actualEp,
+		"tls_boot_strict", tlsBootStrict,
+	)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)

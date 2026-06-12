@@ -94,10 +94,16 @@ type AuditEvent struct {
 }
 
 type RuntimeSettings struct {
-	AllowedRoots []string `json:"allowedRoots"`
-	CookieSecure bool     `json:"cookieSecure"`
-	Addr         string   `json:"addr"`
-	UpdatedAt    string   `json:"updatedAt,omitempty"`
+	AllowedRoots       []string `json:"allowedRoots"`
+	CookieSecure       bool     `json:"cookieSecure"`
+	Addr               string   `json:"addr"`
+	TLSEnabled         bool     `json:"tlsEnabled"`
+	TLSCertFile        string   `json:"tlsCertFile"`
+	TLSKeyFile         string   `json:"tlsKeyFile"`
+	TLSOwnerUIDCheck   bool     `json:"tlsOwnerUidCheck"`
+	HSTSEnabled        bool     `json:"hstsEnabled"`
+	HSTSMaxAgeSeconds  int      `json:"hstsMaxAgeSeconds"`
+	UpdatedAt          string   `json:"updatedAt,omitempty"`
 }
 
 type SystemUpdateCheck struct {
@@ -1513,6 +1519,8 @@ func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	}
 	settings.AllowedRoots = roots
 	settings.Addr = strings.TrimSpace(settings.Addr)
+	settings.TLSCertFile = strings.TrimSpace(settings.TLSCertFile)
+	settings.TLSKeyFile = strings.TrimSpace(settings.TLSKeyFile)
 	return settings
 }
 
@@ -1524,8 +1532,14 @@ func (s *Store) EnsureRuntimeSettings(ctx context.Context, defaults RuntimeSetti
 	roots, _ := json.Marshal(defaults.AllowedRoots)
 	now := now()
 	values := map[string]string{
-		"allowed_roots": string(roots),
-		"cookie_secure": boolString(defaults.CookieSecure),
+		"allowed_roots":           string(roots),
+		"cookie_secure":           boolString(defaults.CookieSecure),
+		"http_tls_enabled":        boolString(defaults.TLSEnabled),
+		"http_tls_cert_file":      defaults.TLSCertFile,
+		"http_tls_key_file":       defaults.TLSKeyFile,
+		"http_tls_owner_uid_check": boolString(defaults.TLSOwnerUIDCheck || true),
+		"http_hsts_enabled":       boolString(defaults.HSTSEnabled),
+		"http_hsts_max_age_seconds": strconv.Itoa(defaults.HSTSMaxAgeSeconds),
 	}
 	if defaults.Addr != "" {
 		values["http_addr"] = defaults.Addr
@@ -1540,7 +1554,11 @@ func (s *Store) EnsureRuntimeSettings(ctx context.Context, defaults RuntimeSetti
 
 func (s *Store) GetRuntimeSettings(ctx context.Context) (RuntimeSettings, error) {
 	settings := RuntimeSettings{}
-	rows, err := s.db.QueryContext(ctx, `SELECT key, value, updated_at FROM settings WHERE key IN ('allowed_roots', 'cookie_secure', 'http_addr')`)
+	rows, err := s.db.QueryContext(ctx, `SELECT key, value, updated_at FROM settings WHERE key IN (
+		'allowed_roots', 'cookie_secure', 'http_addr',
+		'http_tls_enabled', 'http_tls_cert_file', 'http_tls_key_file',
+		'http_tls_owner_uid_check', 'http_hsts_enabled', 'http_hsts_max_age_seconds'
+	)`)
 	if err != nil {
 		return RuntimeSettings{}, err
 	}
@@ -1560,6 +1578,20 @@ func (s *Store) GetRuntimeSettings(ctx context.Context) (RuntimeSettings, error)
 			settings.CookieSecure = value == "true" || value == "1"
 		case "http_addr":
 			settings.Addr = value
+		case "http_tls_enabled":
+			settings.TLSEnabled = value == "true" || value == "1"
+		case "http_tls_cert_file":
+			settings.TLSCertFile = value
+		case "http_tls_key_file":
+			settings.TLSKeyFile = value
+		case "http_tls_owner_uid_check":
+			settings.TLSOwnerUIDCheck = !(value == "false" || value == "0")
+		case "http_hsts_enabled":
+			settings.HSTSEnabled = value == "true" || value == "1"
+		case "http_hsts_max_age_seconds":
+			if n, e := strconv.Atoi(value); e == nil {
+				settings.HSTSMaxAgeSeconds = n
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -1583,11 +1615,25 @@ func (s *Store) UpdateRuntimeSettings(ctx context.Context, settings RuntimeSetti
 			return fmt.Errorf("invalid listen port %q: must be 1-65535", portStr)
 		}
 	}
+	if settings.TLSEnabled {
+		if settings.TLSCertFile == "" || settings.TLSKeyFile == "" {
+			return errors.New("tls enabled but cert file or key file is empty")
+		}
+	}
+	if settings.HSTSEnabled && settings.HSTSMaxAgeSeconds < 0 {
+		return errors.New("hsts max age must be >= 0")
+	}
 	roots, _ := json.Marshal(settings.AllowedRoots)
 	now := now()
 	values := map[string]string{
-		"allowed_roots": string(roots),
-		"cookie_secure": boolString(settings.CookieSecure),
+		"allowed_roots":            string(roots),
+		"cookie_secure":              boolString(settings.CookieSecure),
+		"http_tls_enabled":         boolString(settings.TLSEnabled),
+		"http_tls_cert_file":       settings.TLSCertFile,
+		"http_tls_key_file":        settings.TLSKeyFile,
+		"http_tls_owner_uid_check":  boolString(settings.TLSOwnerUIDCheck),
+		"http_hsts_enabled":          boolString(settings.HSTSEnabled),
+		"http_hsts_max_age_seconds": strconv.Itoa(settings.HSTSMaxAgeSeconds),
 	}
 	if settings.Addr != "" {
 		values["http_addr"] = settings.Addr
@@ -3818,6 +3864,16 @@ func (s *Store) TouchSession(ctx context.Context, id string) error {
 func (s *Store) RevokeSession(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE web_sessions SET revoked_at = ? WHERE id = ?`, now(), id)
 	return err
+}
+
+// RevokeAllSessions 标记所有未撤销的会话为已撤销。
+// 兼容历史数据中 revoked_at 为空字符串或 NULL 两种情况。
+func (s *Store) RevokeAllSessions(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE web_sessions SET revoked_at = ? WHERE revoked_at IS NULL OR revoked_at = ''`, now())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) AddAudit(ctx context.Context, event AuditEvent) (AuditEvent, error) {

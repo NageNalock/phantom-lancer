@@ -67,7 +67,44 @@ export interface RuntimeSettings {
   allowedRoots: string[];
   cookieSecure?: boolean;
   addr?: string;
+  tlsEnabled?: boolean;
+  tlsCertFile?: string;
+  tlsKeyFile?: string;
+  tlsOwnerUidCheck?: boolean;
+  hstsEnabled?: boolean;
+  hstsMaxAgeSeconds?: number;
   updatedAt?: string;
+}
+
+export interface ListenerEndpoint {
+  addr: string;
+  tlsEnabled: boolean;
+  scheme: "http" | "https";
+  certFile?: string;
+  certDnsNames?: string[];
+  certNotBefore?: string;
+  certNotAfter?: string;
+  certReloadErr?: string;
+  hstsEnabled?: boolean;
+  hstsMaxAgeSeconds?: number;
+}
+
+export interface TLSProbeResult {
+  ok: boolean;
+  error?: string;
+  subject?: string;
+  issuer?: string;
+  dnsNames?: string[];
+  serialNumber?: string;
+  notBefore?: string;
+  notAfter?: string;
+  sigAlg?: string;
+  pubKeyBits?: number;
+  fileOwnerUid?: number;
+  fileOwnerName?: string;
+  fileWritableByOthers?: boolean;
+  fileHasSymlink?: boolean;
+  daysRemaining?: number;
 }
 
 interface FileSettings {
@@ -79,11 +116,14 @@ interface FileSettings {
   logMaxSizeMB?: number;
   logMaxFiles?: number;
   logMaxAgeDays?: number;
+  tlsBootStrict?: boolean;
+  hstsDefaultsApplied?: boolean;
 }
 
 export interface SettingsPayload {
   file?: FileSettings;
   runtime?: RuntimeSettings;
+  listener?: ListenerEndpoint;
 }
 
 interface BuildInfo {

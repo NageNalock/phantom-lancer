@@ -496,3 +496,186 @@ func TestImageAssetPrivateFiltering(t *testing.T) {
 		t.Fatalf("public list count after unset = %d, want 2", len(publicItems))
 	}
 }
+
+// ---- TLS + session tests (Phase 5) ----
+
+func TestRuntimeSettingsTLSFieldsRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	defaults := RuntimeSettings{
+		AllowedRoots:      []string{"/tmp"},
+		Addr:              "127.0.0.1:8080",
+		TLSEnabled:        false,
+		TLSOwnerUIDCheck:  true,
+		HSTSEnabled:       false,
+		HSTSMaxAgeSeconds: 0,
+	}
+	if err := store.EnsureRuntimeSettings(ctx, defaults); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+
+	updated := defaults
+	updated.TLSEnabled = true
+	updated.TLSCertFile = "  /etc/pl/tls/cert.pem  "
+	updated.TLSKeyFile = "/etc/pl/tls/key.pem"
+	updated.TLSOwnerUIDCheck = false
+	updated.HSTSEnabled = true
+	updated.HSTSMaxAgeSeconds = 15724800
+	updated.Addr = "0.0.0.0:8443"
+	if err := store.UpdateRuntimeSettings(ctx, updated); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	got, err := store.GetRuntimeSettings(ctx)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !got.TLSEnabled {
+		t.Error("TLSEnabled not persisted")
+	}
+	if got.TLSCertFile != "/etc/pl/tls/cert.pem" {
+		t.Errorf("TLSCertFile = %q", got.TLSCertFile)
+	}
+	if got.TLSKeyFile != "/etc/pl/tls/key.pem" {
+		t.Errorf("TLSKeyFile = %q", got.TLSKeyFile)
+	}
+	if got.TLSOwnerUIDCheck {
+		t.Error("TLSOwnerUIDCheck not saved as false")
+	}
+	if !got.HSTSEnabled {
+		t.Error("HSTSEnabled not persisted")
+	}
+	if got.HSTSMaxAgeSeconds != 15724800 {
+		t.Errorf("HSTSMaxAgeSeconds = %d", got.HSTSMaxAgeSeconds)
+	}
+	if got.Addr != "0.0.0.0:8443" {
+		t.Errorf("Addr = %q", got.Addr)
+	}
+}
+
+func TestRuntimeSettingsTLSIncompleteRejected(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	defaults := RuntimeSettings{AllowedRoots: []string{"/tmp"}, Addr: "127.0.0.1:8080"}
+	if err := store.EnsureRuntimeSettings(ctx, defaults); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+
+	bad := defaults
+	bad.TLSEnabled = true
+	bad.TLSCertFile = "/etc/pl/cert.pem"
+	if err := store.UpdateRuntimeSettings(ctx, bad); err == nil {
+		t.Error("expected error when TLSEnabled without key file")
+	}
+
+	bad.TLSKeyFile = "  "
+	bad.TLSCertFile = "/etc/pl/cert.pem"
+	if err := store.UpdateRuntimeSettings(ctx, bad); err == nil {
+		t.Error("expected error when key file is whitespace")
+	}
+
+	bad.TLSCertFile = ""
+	bad.TLSKeyFile = "/etc/pl/key.pem"
+	if err := store.UpdateRuntimeSettings(ctx, bad); err == nil {
+		t.Error("expected error when cert file empty")
+	}
+}
+
+func TestRuntimeSettingsHSTSValidation(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	defaults := RuntimeSettings{AllowedRoots: []string{"/tmp"}, Addr: "127.0.0.1:8080"}
+	if err := store.EnsureRuntimeSettings(ctx, defaults); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+
+	bad := defaults
+	bad.HSTSEnabled = true
+	bad.HSTSMaxAgeSeconds = -1
+	if err := store.UpdateRuntimeSettings(ctx, bad); err == nil {
+		t.Error("expected error for HSTS max age negative")
+	}
+
+	good := defaults
+	good.HSTSEnabled = true
+	good.HSTSMaxAgeSeconds = 0
+	if err := store.UpdateRuntimeSettings(ctx, good); err != nil {
+		t.Errorf("HSTS max-age=0 should be valid: %v", err)
+	}
+	got, _ := store.GetRuntimeSettings(ctx)
+	if got.HSTSMaxAgeSeconds != 0 || !got.HSTSEnabled {
+		t.Errorf("HSTS zero max-age not saved: %+v", got)
+	}
+}
+
+func TestRevokeAllSessions(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+
+	owner, err := store.CreateOwner(ctx, "admin", "hash")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	exp := time.Now().Add(24 * time.Hour)
+	s1, err := store.CreateSession(ctx, owner.ID, "hash1", "csrf1", true, exp)
+	if err != nil {
+		t.Fatalf("create session 1: %v", err)
+	}
+	s2, err := store.CreateSession(ctx, owner.ID, "hash2", "csrf2", false, exp)
+	if err != nil {
+		t.Fatalf("create session 2: %v", err)
+	}
+	s3, err := store.CreateSession(ctx, owner.ID, "hash3", "csrf3", false, exp)
+	if err != nil {
+		t.Fatalf("create session 3: %v", err)
+	}
+
+	if err := store.RevokeSession(ctx, s1.ID); err != nil {
+		t.Fatalf("revoke individual: %v", err)
+	}
+
+	n, err := store.RevokeAllSessions(ctx)
+	if err != nil {
+		t.Fatalf("revoke all: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("RevokeAll affected %d rows, want 2", n)
+	}
+
+	n, err = store.RevokeAllSessions(ctx)
+	if err != nil {
+		t.Fatalf("revoke all 2nd: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("second RevokeAll affected %d rows, want 0", n)
+	}
+
+	for _, sh := range []string{"hash1", "hash2", "hash3"} {
+		sess, err := store.GetSessionByHash(ctx, sh)
+		if err != nil {
+			t.Fatalf("get session by %s: %v", sh, err)
+		}
+		if !sess.RevokedAt.Valid {
+			t.Errorf("session %q should be revoked, got RevokedAt=%+v", sh, sess.RevokedAt)
+		}
+	}
+	_, _, _ = s1, s2, s3
+}
