@@ -18,6 +18,8 @@ type DockerRegistrySettings struct {
 	ObjectPrefix           string `json:"objectPrefix"`
 	StorageDir             string `json:"storageDir"`
 	QuotaBytes             int64  `json:"quotaBytes"`
+	MaxRepositories        int    `json:"maxRepositories"`
+	MaxTagsPerRepository   int    `json:"maxTagsPerRepository"`
 	RequireTLS             bool   `json:"requireTls"`
 	AllowAnonymousPull     bool   `json:"allowAnonymousPull"`
 	AllowInsecureLocal     bool   `json:"allowInsecureLocal"`
@@ -97,6 +99,12 @@ func NormalizeDockerRegistrySettings(settings DockerRegistrySettings) DockerRegi
 	if settings.QuotaBytes <= 0 {
 		settings.QuotaBytes = defaults.QuotaBytes
 	}
+	if settings.MaxRepositories < 0 {
+		settings.MaxRepositories = 0
+	}
+	if settings.MaxTagsPerRepository < 0 {
+		settings.MaxTagsPerRepository = 0
+	}
 	return settings
 }
 
@@ -122,6 +130,10 @@ func (s *Store) GetDockerRegistrySettings(ctx context.Context) (DockerRegistrySe
 			settings.StorageDir = value
 		case "docker.registry.quota_bytes":
 			settings.QuotaBytes = parseInt64Setting(value, settings.QuotaBytes)
+		case "docker.registry.max_repositories":
+			settings.MaxRepositories = int(parseInt64Setting(value, int64(settings.MaxRepositories)))
+		case "docker.registry.max_tags_per_repository":
+			settings.MaxTagsPerRepository = int(parseInt64Setting(value, int64(settings.MaxTagsPerRepository)))
 		case "docker.registry.require_tls":
 			settings.RequireTLS = truthySetting(value)
 		case "docker.registry.allow_anonymous_pull":
@@ -143,6 +155,8 @@ func (s *Store) UpdateDockerRegistrySettings(ctx context.Context, settings Docke
 		"docker.registry.object_prefix":             settings.ObjectPrefix,
 		"docker.registry.storage_dir":               settings.StorageDir,
 		"docker.registry.quota_bytes":               int64String(settings.QuotaBytes),
+		"docker.registry.max_repositories":          strconv.Itoa(settings.MaxRepositories),
+		"docker.registry.max_tags_per_repository":   strconv.Itoa(settings.MaxTagsPerRepository),
 		"docker.registry.require_tls":               boolString(settings.RequireTLS),
 		"docker.registry.allow_anonymous_pull":      boolString(settings.AllowAnonymousPull),
 		"docker.registry.allow_insecure_local":      boolString(settings.AllowInsecureLocal),

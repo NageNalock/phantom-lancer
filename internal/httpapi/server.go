@@ -258,6 +258,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/docker/probe", s.handleDockerProbe)
 	mux.HandleFunc("GET /api/docker/host/events", s.handleDockerHostEvents)
 	mux.HandleFunc("GET /api/docker/control-status", s.handleDockerControlStatus)
+	mux.HandleFunc("GET /api/docker/jobs", s.handleDockerJobs)
+	mux.HandleFunc("POST /api/docker/jobs/", s.handleDockerJobs)
 	mux.HandleFunc("PATCH /api/docker/settings", s.handleDockerUpdateSettings)
 	mux.HandleFunc("POST /api/docker/install", s.handleDockerInstall)
 	mux.HandleFunc("POST /api/docker/daemon/", s.handleDockerDaemonControl)

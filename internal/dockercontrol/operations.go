@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,119 @@ type CreateContainerRequest struct {
 	Image string `json:"image"`
 }
 
+type ContainerPortSummary struct {
+	PrivatePort string `json:"privatePort"`
+	Public      string `json:"public,omitempty"`
+}
+
+type ContainerMountSummary struct {
+	Type        string `json:"type"`
+	Name        string `json:"name,omitempty"`
+	Source      string `json:"source,omitempty"`
+	Destination string `json:"destination"`
+	Mode        string `json:"mode,omitempty"`
+	RW          bool   `json:"rw"`
+}
+
+type ContainerNetworkSummary struct {
+	Name      string `json:"name"`
+	IPAddress string `json:"ipAddress,omitempty"`
+}
+
+type ContainerLabelSummary struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+type ContainerInspectSummary struct {
+	ID           string                    `json:"id"`
+	Name         string                    `json:"name"`
+	Image        string                    `json:"image"`
+	Created      string                    `json:"created,omitempty"`
+	State        string                    `json:"state,omitempty"`
+	Status       string                    `json:"status,omitempty"`
+	Running      bool                      `json:"running"`
+	Restarting   bool                      `json:"restarting"`
+	ExitCode     int                       `json:"exitCode"`
+	StartedAt    string                    `json:"startedAt,omitempty"`
+	FinishedAt   string                    `json:"finishedAt,omitempty"`
+	Ports        []ContainerPortSummary    `json:"ports,omitempty"`
+	Mounts       []ContainerMountSummary   `json:"mounts,omitempty"`
+	Networks     []ContainerNetworkSummary `json:"networks,omitempty"`
+	Labels       []ContainerLabelSummary   `json:"labels,omitempty"`
+	RestartCount int                       `json:"restartCount"`
+}
+
+func (s *Service) ContainerInspectSummary(ctx context.Context, id string) (ContainerInspectSummary, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ContainerInspectSummary{}, ErrInvalidContainerID
+	}
+	cli, err := s.engine()
+	if err != nil {
+		return ContainerInspectSummary{}, err
+	}
+	opCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	raw, err := cli.ContainerInspect(opCtx, id)
+	if err != nil {
+		s.log.Warn("docker container inspect failed", "container", shortID(id), "error", safelog.Error(err, 160))
+		return ContainerInspectSummary{}, err
+	}
+	out := ContainerInspectSummary{
+		ID:           shortID(raw.ID),
+		Name:         strings.TrimPrefix(raw.Name, "/"),
+		Image:        shortID(raw.Image),
+		Created:      raw.Created,
+		RestartCount: raw.RestartCount,
+	}
+	if raw.State != nil {
+		out.State = raw.State.Status
+		out.Status = raw.State.Status
+		out.Running = raw.State.Running
+		out.Restarting = raw.State.Restarting
+		out.ExitCode = raw.State.ExitCode
+		out.StartedAt = raw.State.StartedAt
+		out.FinishedAt = raw.State.FinishedAt
+	}
+	if raw.NetworkSettings != nil {
+		for port, bindings := range raw.NetworkSettings.Ports {
+			row := ContainerPortSummary{PrivatePort: string(port)}
+			if len(bindings) > 0 {
+				host := strings.TrimSpace(bindings[0].HostIP)
+				if host == "" {
+					host = "0.0.0.0"
+				}
+				row.Public = host + ":" + bindings[0].HostPort
+			}
+			out.Ports = append(out.Ports, row)
+		}
+		for name, network := range raw.NetworkSettings.Networks {
+			out.Networks = append(out.Networks, ContainerNetworkSummary{Name: safelog.Text(name, 80), IPAddress: safelog.Text(network.IPAddress, 80)})
+		}
+	}
+	for _, mount := range raw.Mounts {
+		out.Mounts = append(out.Mounts, ContainerMountSummary{
+			Type:        string(mount.Type),
+			Name:        safelog.Text(mount.Name, 120),
+			Source:      safelog.Text(mount.Source, 240),
+			Destination: safelog.Text(mount.Destination, 160),
+			Mode:        safelog.Text(mount.Mode, 80),
+			RW:          mount.RW,
+		})
+	}
+	if raw.Config != nil {
+		for key, value := range raw.Config.Labels {
+			out.Labels = append(out.Labels, ContainerLabelSummary{Key: safelog.Text(key, 120), Value: redactedLabelValue(key, value)})
+		}
+	}
+	sort.Slice(out.Ports, func(i, j int) bool { return out.Ports[i].PrivatePort < out.Ports[j].PrivatePort })
+	sort.Slice(out.Mounts, func(i, j int) bool { return out.Mounts[i].Destination < out.Mounts[j].Destination })
+	sort.Slice(out.Networks, func(i, j int) bool { return out.Networks[i].Name < out.Networks[j].Name })
+	sort.Slice(out.Labels, func(i, j int) bool { return out.Labels[i].Key < out.Labels[j].Key })
+	return out, nil
+}
+
 func (s *Service) CreateAndStartContainer(ctx context.Context, req CreateContainerRequest) (string, error) {
 	name := strings.TrimSpace(req.Name)
 	ref := strings.TrimSpace(req.Image)
@@ -60,6 +174,14 @@ func (s *Service) CreateAndStartContainer(ctx context.Context, req CreateContain
 		return shortID(created.ID), err
 	}
 	return shortID(created.ID), nil
+}
+
+func redactedLabelValue(key, value string) string {
+	lower := strings.ToLower(key)
+	if strings.Contains(lower, "secret") || strings.Contains(lower, "token") || strings.Contains(lower, "password") || strings.Contains(lower, "key") {
+		return "[redacted]"
+	}
+	return safelog.Text(value, 180)
 }
 
 // StartContainer starts an existing container.

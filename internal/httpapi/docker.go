@@ -54,12 +54,65 @@ func (s *Server) handleDockerHostEvents(w http.ResponseWriter, r *http.Request) 
 	if _, ok := s.requireAuth(w, r); !ok {
 		return
 	}
-	items, err := s.store.ListEvents(r.Context(), "docker.job", r.URL.Query().Get("id"), parseInt64(r.URL.Query().Get("after")), 200)
+	scopeID := r.URL.Query().Get("id")
+	limit := parseInt(r.URL.Query().Get("limit"))
+	var (
+		items any
+		err   error
+	)
+	if scopeID == "" {
+		if limit <= 0 || limit > 500 {
+			limit = 200
+		}
+		items, err = s.store.ListRecentEventsByScope(r.Context(), "docker.job", limit)
+	} else {
+		if limit <= 0 || limit > 1000 {
+			limit = 200
+		}
+		items, err = s.store.ListEvents(r.Context(), "docker.job", scopeID, parseInt64(r.URL.Query().Get("after")), limit)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", safelog.Error(err, 200))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleDockerJobs(w http.ResponseWriter, r *http.Request) {
+	ctx, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/docker/jobs"), "/")
+	if path == "" && r.Method == http.MethodGet {
+		limit := parseInt(r.URL.Query().Get("limit"))
+		writeJSON(w, http.StatusOK, map[string]any{"items": s.docker.ListJobs(limit)})
+		return
+	}
+	parts := strings.Split(path, "/")
+	if len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost {
+		if !s.requireCSRF(w, r, ctx.Session) {
+			return
+		}
+		job, err := s.docker.CancelJob(r.Context(), parts[0])
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "docker_job_cancel_failed", err.Error())
+			return
+		}
+		risk := job.RiskLevel
+		if risk == "" {
+			risk = "medium"
+		}
+		_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+			EventType: "docker.job.cancel.requested",
+			RiskLevel: risk,
+			Summary:   "已请求取消 Docker job",
+			Payload:   map[string]any{"job": safelog.Text(job.ID, 80), "type": safelog.Text(job.Type, 120), "target": safelog.Text(job.Target, 120)},
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"job": job})
+		return
+	}
+	writeError(w, http.StatusNotFound, "not_found", "未找到 Docker job")
 }
 
 func (s *Server) handleDockerControlStatus(w http.ResponseWriter, r *http.Request) {
@@ -248,6 +301,13 @@ func (s *Server) handleDockerContainerSubroutes(w http.ResponseWriter, r *http.R
 	// Read-only subroutes: logs and stats (GET, no CSRF).
 	if len(parts) == 2 && r.Method == http.MethodGet {
 		switch parts[1] {
+		case "inspect":
+			summary, err := s.docker.ContainerInspectSummary(r.Context(), id)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, "docker_unavailable", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"container": summary})
 		case "logs":
 			tail := 0
 			if raw := strings.TrimSpace(r.URL.Query().Get("tail")); raw != "" {

@@ -40,9 +40,10 @@ type Service struct {
 	log             *slog.Logger
 	registryDataDir string
 
-	mu     sync.Mutex
-	client *client.Client
-	jobs   map[string]Job
+	mu      sync.Mutex
+	client  *client.Client
+	jobs    map[string]Job
+	cancels map[string]context.CancelFunc
 
 	// registryGC serializes registry writes against garbage collection.
 	// Blob/manifest writes take a read lock (so concurrent pushes are allowed),
@@ -76,7 +77,7 @@ func NewService(store *storage.Store, hub *events.Hub, dataDir string, logger *s
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{store: store, hub: hub, log: logger, registryDataDir: dataDir, jobs: make(map[string]Job), registryAuthBackoff: authlimiter.NewBackoff(0), registryAuthSuccessSampler: logsampler.New(1 * time.Hour), logSampler: logsampler.New(2 * time.Second)}
+	return &Service{store: store, hub: hub, log: logger, registryDataDir: dataDir, jobs: make(map[string]Job), cancels: make(map[string]context.CancelFunc), registryAuthBackoff: authlimiter.NewBackoff(0), registryAuthSuccessSampler: logsampler.New(1 * time.Hour), logSampler: logsampler.New(2 * time.Second)}
 }
 
 // Close releases the cached Docker client.

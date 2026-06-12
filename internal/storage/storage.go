@@ -4377,6 +4377,31 @@ func (s *Store) ListEvents(ctx context.Context, scope, scopeID string, after int
 	return out, rows.Err()
 }
 
+func (s *Store) ListRecentEventsByScope(ctx context.Context, scope string, limit int) ([]events.Event, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, scope, scope_id, sequence, event_type, payload_json, created_at FROM events WHERE scope = ? ORDER BY created_at DESC, scope_id DESC, sequence DESC LIMIT ?`, scope, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []events.Event{}
+	for rows.Next() {
+		var event events.Event
+		var payload string
+		if err := rows.Scan(&event.ID, &event.Scope, &event.ScopeID, &event.Sequence, &event.Type, &payload, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(payload), &event.Payload)
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
 type workspaceScanner interface {
 	Scan(dest ...any) error
 }

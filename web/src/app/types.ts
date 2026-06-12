@@ -930,6 +930,8 @@ export interface DockerRegistrySettings {
   requireTls?: boolean;
   allowAnonymousPull?: boolean;
   allowInsecureLocal?: boolean;
+  maxRepositories?: number;
+  maxTagsPerRepository?: number;
 }
 
 export interface DockerRegistryStatus {
@@ -941,6 +943,8 @@ export interface DockerRegistryStatus {
   objectPrefix?: string;
   quotaBytes?: number;
   usageBytes?: number;
+  maxRepositories?: number;
+  maxTagsPerRepository?: number;
   repositoryCount?: number;
   credentialCount?: number;
   requireTls?: boolean;
@@ -1001,6 +1005,49 @@ export interface DockerContainerSummary {
   ports?: string[];
 }
 
+export interface DockerContainerPortSummary {
+  privatePort: string;
+  public?: string;
+}
+
+export interface DockerContainerMountSummary {
+  type: string;
+  name?: string;
+  source?: string;
+  destination: string;
+  mode?: string;
+  rw: boolean;
+}
+
+export interface DockerContainerNetworkSummary {
+  name: string;
+  ipAddress?: string;
+}
+
+export interface DockerContainerLabelSummary {
+  key: string;
+  value: string;
+}
+
+export interface DockerContainerInspectSummary {
+  id: string;
+  name: string;
+  image: string;
+  created?: string;
+  state?: string;
+  status?: string;
+  running: boolean;
+  restarting: boolean;
+  exitCode: number;
+  startedAt?: string;
+  finishedAt?: string;
+  ports?: DockerContainerPortSummary[];
+  mounts?: DockerContainerMountSummary[];
+  networks?: DockerContainerNetworkSummary[];
+  labels?: DockerContainerLabelSummary[];
+  restartCount: number;
+}
+
 export interface DockerImageSummary {
   id: string;
   tags?: string[];
@@ -1027,7 +1074,7 @@ export interface DockerLogLine {
   text: string;
 }
 
-interface DockerStats {
+export interface DockerStats {
   cpuPercent: number;
   memoryUsageBytes: number;
   memoryLimitBytes: number;

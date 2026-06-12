@@ -57,7 +57,7 @@ export function HostOperationsPanel({
                 <h3 className="m-0 text-sm font-medium">一键安装 Docker daemon</h3>
                 <p className="muted mt-1 mb-0 text-xs">使用 Docker 官方公开源；不提供一键卸载。</p>
               </div>
-              <Pill tone={settings.installEnabled ? "warn" : "neutral"}>{settings.installEnabled ? "已开启" : "已关闭"}</Pill>
+	              <Pill tone="neutral">{settings.installEnabled ? "已开启" : "已关闭"}</Pill>
             </div>
             <ContextList
               items={[
@@ -86,7 +86,7 @@ export function HostOperationsPanel({
                 <h3 className="m-0 text-sm font-medium">Docker daemon 控制</h3>
                 <p className="muted mt-1 mb-0 text-xs">通过 systemctl 控制 docker 服务，会影响本机所有容器。</p>
               </div>
-              <Pill tone={settings.daemonControlEnabled ? "warn" : "neutral"}>{settings.daemonControlEnabled ? "已开启" : "已关闭"}</Pill>
+	              <Pill tone="neutral">{settings.daemonControlEnabled ? "已开启" : "已关闭"}</Pill>
             </div>
             <ContextList
               items={[
@@ -113,7 +113,7 @@ export function HostOperationsPanel({
               <h3 className="m-0 text-sm font-medium">模板化容器创建</h3>
               <p className="muted mt-1 mb-0 text-xs">高权限扩展：仅允许从本机 Registry 的 personal/ 前缀拉起容器，不支持 host path、privileged、host network 或自由参数。</p>
             </div>
-            <Pill tone={settings.containerCreateEnabled ? "warn" : "neutral"}>{settings.containerCreateEnabled ? "已开启" : "已关闭"}</Pill>
+	            <Pill tone="neutral">{settings.containerCreateEnabled ? "已开启" : "已关闭"}</Pill>
           </div>
           <div className="grid gap-3">
             <Field label="容器名称">
@@ -126,7 +126,7 @@ export function HostOperationsPanel({
               <Button disabled={busy === "docker-settings"} onClick={() => saveDockerSettings({ containerCreateEnabled: !settings.containerCreateEnabled })}>
                 {settings.containerCreateEnabled ? "关闭创建开关" : "开启创建开关"}
               </Button>
-              <Button disabled={!settings.containerCreateEnabled || busy === "container-create"} tone="danger" onClick={() => createContainer()}>
+	              <Button disabled={!settings.containerCreateEnabled || busy === "container-create"} tone="primary" onClick={() => createContainer()}>
                 创建并启动容器
               </Button>
             </div>
