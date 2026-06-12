@@ -3,7 +3,10 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,10 +16,13 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"os"
+	"os/user"
 	"path"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"phantom-lancer/internal/auth"
@@ -31,6 +37,7 @@ import (
 	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/selfupdate"
 	"phantom-lancer/internal/storage"
+	"phantom-lancer/internal/httpserver"
 	"phantom-lancer/internal/v2ray"
 	"phantom-lancer/internal/workspaces"
 )
@@ -94,6 +101,7 @@ type Server struct {
 	updateConfirms *loginBackoff
 	privateImages  *privateImageAccess
 	httpSrv        httpServerManager
+	tlsBootStrict  bool
 
 	// telemetrySampler gates hot-path WARN/ERROR telemetry from the
 	// requestTelemetry middleware so repeated 5xx bursts, scanner-driven
@@ -116,7 +124,8 @@ type Server struct {
 // (main creates api then injects the manager via SetHTTPServerManager).
 type httpServerManager interface {
 	Addr() string
-	SwapAddr(newAddr string) error
+	Endpoint() httpserver.Endpoint
+	SwapEndpoint(httpserver.EndpointConfig) (httpserver.Endpoint, error)
 }
 
 type sessionContext struct {
@@ -154,6 +163,24 @@ func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewayS
 // manager needs the Handler, handlers need the manager for hot-swap).
 func (s *Server) SetHTTPServerManager(m httpServerManager) {
 	s.httpSrv = m
+}
+
+// SetTLSEnvironmentInfo records environment-level TLS flags so handlers can
+// surface them to the UI and enforce their semantics.
+func (s *Server) SetTLSEnvironmentInfo(bootStrict bool) {
+	s.tlsBootStrict = bootStrict
+}
+
+// listenerEndpoint returns a snapshot of the currently effective endpoint or
+// a cfg-derived fallback when the manager is not wired in yet (tests).
+func (s *Server) listenerEndpoint() httpserver.Endpoint {
+	if s.httpSrv != nil {
+		return s.httpSrv.Endpoint()
+	}
+	return httpserver.Endpoint{
+		Addr:   s.cfg.Addr,
+		Scheme: "http",
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -204,7 +231,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/system/update/jobs/", s.handleSystemUpdateJobSubroutes)
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handleUpdateSettings)
-	mux.HandleFunc("POST /api/settings/listen-addr", s.handleSwapListenAddr)
+	mux.HandleFunc("POST /api/settings/tls-probe", s.handleProbeTLS)
+	mux.HandleFunc("POST /api/settings/listener", s.handleSwapEndpoint)
 	mux.HandleFunc("GET /api/logs/sources", s.handleListLogSources)
 	mux.HandleFunc("GET /api/logs/sources/", s.handleLogSourceSubroutes)
 	mux.HandleFunc("GET /api/images/status", s.handleImagesStatus)
@@ -283,7 +311,25 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v2/", s.handleDockerRegistryNative)
 
 	mux.Handle("/", s.staticHandler())
-	return s.requestTelemetry(s.recover(mux))
+	return s.requestTelemetry(s.recover(s.securityHeaders(mux)))
+}
+
+// securityHeaders adds a baseline set of hardening response headers.  HSTS is
+// added conditionally: only when the currently-effective listener is HTTPS
+// AND HSTS is enabled in runtime settings (so downgrades from HTTPS to HTTP
+// immediately stop telling browsers to enforce HTTPS).
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		if ep := s.listenerEndpoint(); ep.TLSEnabled && ep.HSTSEnabled && ep.HSTSMaxAgeSeconds > 0 {
+			w.Header().Set("Strict-Transport-Security",
+				fmt.Sprintf("max-age=%d; includeSubDomains", ep.HSTSMaxAgeSeconds))
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // requestTelemetry records access telemetry for anomalies and
@@ -713,16 +759,18 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"file": map[string]any{
-			"configPath":    s.cfg.ConfigPath,
-			"addr":          s.currentListenAddr(),
-			"dataDir":       s.cfg.DataDir,
-			"dbPath":        s.cfg.DBPath,
-			"logFile":       s.cfg.LogFile,
-			"logMaxSizeMB":  s.cfg.LogMaxSizeMB,
-			"logMaxFiles":   s.cfg.LogMaxFiles,
-			"logMaxAgeDays": s.cfg.LogMaxAgeDays,
+			"configPath":      s.cfg.ConfigPath,
+			"addr":            s.currentListenAddr(),
+			"dataDir":         s.cfg.DataDir,
+			"dbPath":          s.cfg.DBPath,
+			"logFile":         s.cfg.LogFile,
+			"logMaxSizeMB":    s.cfg.LogMaxSizeMB,
+			"logMaxFiles":     s.cfg.LogMaxFiles,
+			"logMaxAgeDays":   s.cfg.LogMaxAgeDays,
+			"tlsBootStrict":   s.tlsBootStrict,
 		},
-		"runtime": settings,
+		"runtime":  settings,
+		"listener": s.listenerEndpoint(),
 	})
 }
 
@@ -737,7 +785,13 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	settings := storage.NormalizeRuntimeSettings(req)
 	if settings.Addr != "" {
-		writeError(w, http.StatusBadRequest, "use_listen_addr_endpoint", "修改监听地址请使用 POST /api/settings/listen-addr 接口")
+		writeError(w, http.StatusBadRequest, "use_listener_endpoint", "修改监听地址请使用 POST /api/settings/listener 接口")
+		return
+	}
+	// TLS/HSTS 必须走新 listener 接口，PUT /api/settings 不接受这些字段。
+	if settings.TLSEnabled || settings.TLSCertFile != "" || settings.TLSKeyFile != "" ||
+		settings.HSTSEnabled || settings.HSTSMaxAgeSeconds != 0 {
+		writeError(w, http.StatusBadRequest, "use_listener_endpoint", "TLS/HSTS 相关字段必须通过 POST /api/settings/listener 修改")
 		return
 	}
 	allowedRoots, err := workspaces.NormalizeAllowedRoots(settings.AllowedRoots)
@@ -767,19 +821,125 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"runtime": updated})
 }
 
-// handleSwapListenAddr persists a new listen address to the database and then
-// hot-swaps the running HTTP listener without a process restart.
-//
-// Sequence:
-//  1. Validate addr (non-empty, host:port format)
-//  2. Persist to DB FIRST – if the swap succeeds but the process later
-//     crashes, a real restart must use the new address.
-//  3. Call httpSrv.SwapAddr() – pre-binds new listener, atomically swaps,
-//     drains old server.
-//  4. If swap FAILS, roll back the DB write so the effective address
-//     matches what is actually serving.
-//  5. Audit-log the change.
-func (s *Server) handleSwapListenAddr(w http.ResponseWriter, r *http.Request) {
+// handleProbeTLS validates TLS certificate/key paths WITHOUT touching the
+// running listener or the DB.  It is called from the UI "Test certificate"
+// button to give the operator a quick preview before Apply.
+func (s *Server) handleProbeTLS(w http.ResponseWriter, r *http.Request) {
+	ctx, ok := s.requireAuth(w, r)
+	if !ok || !s.requireCSRF(w, r, ctx.Session) {
+		return
+	}
+	var body struct {
+		CertFile      string `json:"certFile"`
+		KeyFile       string `json:"keyFile"`
+		OwnerUIDCheck bool   `json:"ownerUidCheck"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	cleanCert, cleanKey, leaf, err := httpserver.ValidateTLSPaths(
+		strings.TrimSpace(body.CertFile),
+		strings.TrimSpace(body.KeyFile),
+		body.OwnerUIDCheck,
+	)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":    false,
+			"error": err.Error(),
+		})
+		return
+	}
+	// 再做一次 LoadX509KeyPair，确保能真正握手
+	pair, kperr := tls.LoadX509KeyPair(cleanCert, cleanKey)
+	if kperr != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":    false,
+			"error": "load_key_pair_failed: " + kperr.Error(),
+		})
+		return
+	}
+	if leaf == nil && len(pair.Certificate) > 0 {
+		if parsed, perr := x509.ParseCertificate(pair.Certificate[0]); perr == nil {
+			leaf = parsed
+		}
+	}
+	// 文件所有者信息（可选，Unix 系统）
+	var (
+		ownerUID  int
+		ownerName string
+		worldW    bool
+		hasSym    bool
+		pubBits   int
+	)
+	if st, err := os.Stat(cleanKey); err == nil {
+		worldW = st.Mode().Perm()&0o002 != 0
+		if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+			ownerUID = int(sys.Uid)
+			if u, lerr := user.LookupId(strconv.Itoa(ownerUID)); lerr == nil {
+				ownerName = u.Username
+			}
+		}
+	}
+	if lst, err := os.Lstat(cleanKey); err == nil && lst.Mode()&os.ModeSymlink != 0 {
+		hasSym = true
+	}
+	if lst, err := os.Lstat(cleanCert); err == nil && lst.Mode()&os.ModeSymlink != 0 {
+		hasSym = true
+	}
+	if leaf != nil {
+		switch pub := leaf.PublicKey.(type) {
+		case *ecdsa.PublicKey:
+			pubBits = pub.Curve.Params().BitSize
+		default:
+			if leaf.PublicKeyAlgorithm.String() == "" {
+				pubBits = 0
+			} else {
+				pubBits = -1
+			}
+		}
+	}
+	result := map[string]any{
+		"ok":                 true,
+		"error":              nil,
+		"subject":            "",
+		"issuer":             "",
+		"dnsNames":           []string{},
+		"serialNumber":       "",
+		"notBefore":          "",
+		"notAfter":           "",
+		"sigAlg":             "",
+		"pubKeyBits":         pubBits,
+		"fileOwnerUid":       ownerUID,
+		"fileOwnerName":      ownerName,
+		"fileWritableByOthers": worldW,
+		"fileHasSymlink":    hasSym,
+		"daysRemaining":     nil,
+	}
+	if leaf != nil {
+		result["subject"] = leaf.Subject.String()
+		result["issuer"] = leaf.Issuer.String()
+		result["dnsNames"] = append([]string(nil), leaf.DNSNames...)
+		result["serialNumber"] = leaf.SerialNumber.String()
+		result["notBefore"] = leaf.NotBefore.UTC().Format(time.RFC3339)
+		result["notAfter"] = leaf.NotAfter.UTC().Format(time.RFC3339)
+		result["sigAlg"] = leaf.SignatureAlgorithm.String()
+		result["daysRemaining"] = int(time.Until(leaf.NotAfter).Hours() / 24)
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// downgradeConfirmPhrase is the exact phrase the operator must type to
+// authorise an HTTPS→HTTP downgrade (M7).  It's a literal constant so that
+// tests can assert on it and so searching the codebase for it is obvious.
+const downgradeConfirmPhrase = "I understand disabling HTTPS will revoke all sessions"
+
+// handleSwapEndpoint replaces the old listen-addr handler.  It:
+//   1. Persists the new endpoint to the DB FIRST (swap failure → DB rollback).
+//   2. Performs the atomic hot-swap via Manager.SwapEndpoint.
+//   3. On HTTPS→HTTP downgrade, revokes ALL sessions and emits 4 Set-Cookie
+//      clear headers (session + csrf × Secure=true/false).
+//   4. On success, audits the change and returns the new endpoint snapshot.
+func (s *Server) handleSwapEndpoint(w http.ResponseWriter, r *http.Request) {
 	ctx, ok := s.requireAuth(w, r)
 	if !ok || !s.requireCSRF(w, r, ctx.Session) {
 		return
@@ -788,62 +948,202 @@ func (s *Server) handleSwapListenAddr(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "manager_not_ready", "服务管理器未就绪")
 		return
 	}
+
 	var body struct {
-		Addr string `json:"addr"`
+		Addr              string `json:"addr"`
+		TLSEnabled        bool   `json:"tlsEnabled"`
+		TLSCertFile       string `json:"tlsCertFile"`
+		TLSKeyFile        string `json:"tlsKeyFile"`
+		TLSOwnerUIDCheck  bool   `json:"tlsOwnerUidCheck"`
+		HSTSEnabled       bool   `json:"hstsEnabled"`
+		HSTSMaxAgeSeconds int    `json:"hstsMaxAgeSeconds"`
+
+		// Confirmation gates
+		ConfirmDowngrade bool   `json:"confirm_downgrade"`
+		ConfirmPhrase    string `json:"confirm_phrase"`
+		ConfirmHSTS      bool   `json:"confirm_hsts"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
 	body.Addr = strings.TrimSpace(body.Addr)
-	if body.Addr == "" {
-		writeError(w, http.StatusBadRequest, "invalid_addr", "监听地址不能为空")
-		return
-	}
+	body.TLSCertFile = strings.TrimSpace(body.TLSCertFile)
+	body.TLSKeyFile = strings.TrimSpace(body.TLSKeyFile)
 
-	// ---- Step 1: Persist the new address to the DB ----------------------
-	settings, err := s.store.GetRuntimeSettings(r.Context())
+	// ---- Step 0: snapshot the current state for rollback & comparisons ---
+	prevSettings, err := s.store.GetRuntimeSettings(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
-	previousAddr := settings.Addr
-	settings.Addr = body.Addr
-	if err := s.store.UpdateRuntimeSettings(r.Context(), settings); err != nil {
+	curEp := s.httpSrv.Endpoint()
+
+	// ---- Step 0a: dangerous-action confirmation gates --------------------
+	performingDowngrade := (prevSettings.TLSEnabled || curEp.TLSEnabled) && !body.TLSEnabled
+	if performingDowngrade {
+		if !body.ConfirmDowngrade || strings.TrimSpace(body.ConfirmPhrase) != downgradeConfirmPhrase {
+			writeError(w, http.StatusBadRequest, "confirm_required",
+				"关闭 HTTPS 为高危操作：需勾选 confirm_downgrade 并输入确认短语")
+			return
+		}
+	}
+	hstsJustTurnedOn := !prevSettings.HSTSEnabled && body.HSTSEnabled
+	if hstsJustTurnedOn && !body.ConfirmHSTS {
+		writeError(w, http.StatusBadRequest, "confirm_hsts_required", "启用 HSTS 为高危操作，需勾选 confirm_hsts")
+		return
+	}
+
+	// ---- Step 0b: validate endpoint fields ------------------------------
+	if _, _, err := net.SplitHostPort(body.Addr); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_addr",
+			"监听地址格式必须为 host:port："+err.Error())
+		return
+	}
+	// Pre-bind probe for a new address (fail fast, give friendly error)
+	if body.Addr != curEp.Addr {
+		probe, perr := net.Listen("tcp", body.Addr)
+		if perr != nil {
+			writeError(w, http.StatusBadRequest, "bind_failed",
+				fmt.Sprintf("无法绑定 %s：%v", body.Addr, perr))
+			return
+		}
+		_ = probe.Close()
+	}
+
+	var cleanCert, cleanKey string
+	if body.TLSEnabled {
+		var cerr error
+		cleanCert, cleanKey, _, cerr = httpserver.ValidateTLSPaths(
+			body.TLSCertFile, body.TLSKeyFile, body.TLSOwnerUIDCheck)
+		if cerr != nil {
+			writeError(w, http.StatusBadRequest, "tls_invalid", cerr.Error())
+			return
+		}
+	}
+	if body.HSTSEnabled && body.HSTSMaxAgeSeconds < 0 {
+		writeError(w, http.StatusBadRequest, "invalid_hsts_maxage", "HSTS max-age 不能为负数")
+		return
+	}
+
+	// ---- Step 1: persist to DB FIRST (we roll back if swap fails) --------
+	newSettings := storage.RuntimeSettings{
+		// Copy all untouched fields from prev so we don't lose them.
+		AllowedRoots:      prevSettings.AllowedRoots,
+		CookieSecure:      prevSettings.CookieSecure,
+		// Set the new fields
+		Addr:              body.Addr,
+		TLSEnabled:        body.TLSEnabled,
+		TLSCertFile:       cleanCert,
+		TLSKeyFile:        cleanKey,
+		TLSOwnerUIDCheck:  body.TLSOwnerUIDCheck,
+		HSTSEnabled:       body.HSTSEnabled,
+		HSTSMaxAgeSeconds: body.HSTSMaxAgeSeconds,
+	}
+	// CookieSecure must mirror TLSEnabled: if we just turned TLS on, secure
+	// cookies; if we just downgraded, immediately clear the Secure flag so
+	// the new session set after re-login works over plain HTTP.
+	if newSettings.TLSEnabled {
+		newSettings.CookieSecure = true
+	} else if performingDowngrade {
+		newSettings.CookieSecure = false
+	}
+	if err := s.store.UpdateRuntimeSettings(r.Context(), newSettings); err != nil {
 		writeError(w, http.StatusBadRequest, "persist_failed", err.Error())
 		return
 	}
 
-	// ---- Step 2: Perform the synchronous hot-swap -----------------------
-	if swapErr := s.httpSrv.SwapAddr(body.Addr); swapErr != nil {
-		// Roll back: restore the DB value to the previous address.
-		settings.Addr = previousAddr
-		_ = s.store.UpdateRuntimeSettings(r.Context(), settings)
+	// ---- Step 2: perform the synchronous hot-swap ------------------------
+	epc := httpserver.EndpointConfig{
+		Addr:              body.Addr,
+		TLSEnabled:        body.TLSEnabled,
+		TLSCertFile:       cleanCert,
+		TLSKeyFile:        cleanKey,
+		TLSOwnerUIDCheck:  body.TLSOwnerUIDCheck,
+		HSTSEnabled:       body.HSTSEnabled,
+		HSTSMaxAgeSeconds: body.HSTSMaxAgeSeconds,
+	}
+	newEp, swapErr := s.httpSrv.SwapEndpoint(epc)
+	if swapErr != nil {
+		// Roll back DB – use the ORIGINAL snapshot of prevSettings verbatim.
+		_ = s.store.UpdateRuntimeSettings(r.Context(), prevSettings)
+		s.log.Warn("listener endpoint swap failed, DB rolled back",
+			"error", swapErr.Error(),
+			"addr", body.Addr,
+		)
 		writeError(w, http.StatusBadRequest, "swap_failed", swapErr.Error())
 		return
 	}
 
-	// ---- Step 3: Audit log & response -----------------------------------
+	// ---- Step 3: downgrade side effects (M7) -----------------------------
+	var revokedCount int64
+	if performingDowngrade {
+		if n, rerr := s.store.RevokeAllSessions(r.Context()); rerr != nil {
+			s.log.Warn("revoke_all_sessions_failed", "error", rerr.Error())
+		} else {
+			revokedCount = n
+		}
+		// 4 Set-Cookie clear headers: session+csrf × Secure=true/false.
+		// Covers the case where the browser holds cookies with Secure=true
+		// from a previous HTTPS visit AND cookies without Secure from a
+		// mixed visit, so both are evicted.
+		clearCookie(w, sessionCookie, true)
+		clearCookie(w, sessionCookie, false)
+		clearCookie(w, csrfCookie, true)
+		clearCookie(w, csrfCookie, false)
+	}
+
+	// ---- Step 4: fetch updated settings & detect split state -------------
+	updatedSettings, err := s.store.GetRuntimeSettings(r.Context())
+	if err != nil {
+		updatedSettings = newSettings
+	}
+	// M2: DB ↔ runtime split detection.  Triggers if DB says TLS but
+	// actual listener says the opposite, or the addresses disagree.
+	splitWarning :=
+		updatedSettings.TLSEnabled != newEp.TLSEnabled ||
+			updatedSettings.Addr != newEp.Addr ||
+			updatedSettings.HSTSEnabled != newEp.HSTSEnabled ||
+			updatedSettings.HSTSMaxAgeSeconds != newEp.HSTSMaxAgeSeconds
+	if splitWarning {
+		s.log.Log(r.Context(), httpserver.LevelCritical, "LISTENER_SPLIT_STATE_DETECTED",
+			slog.Bool("db_tls", updatedSettings.TLSEnabled),
+			slog.Bool("rt_tls", newEp.TLSEnabled),
+			slog.String("db_addr", updatedSettings.Addr),
+			slog.String("rt_addr", newEp.Addr),
+		)
+	}
+
+	// ---- Step 5: audit log -----------------------------------------------
 	_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
-		EventType: "settings.listen_addr_changed",
+		EventType: "settings.listener_changed",
 		RiskLevel: "high",
-		Summary:   "已更改 HTTP 监听地址",
+		Summary:   "已更改监听端点",
 		Payload: map[string]any{
-			"old_addr": previousAddr,
-			"new_addr": body.Addr,
+			"old_endpoint":           curEp,
+			"new_endpoint":           newEp,
+			"downgrade_performed":    performingDowngrade,
+			"revoked_sessions_count": revokedCount,
+			"hsts_enabled":           body.HSTSEnabled,
 		},
 	})
-
-	updated, err := s.store.GetRuntimeSettings(r.Context())
-	if err != nil {
-		updated = settings
+	wasHTTP := !curEp.TLSEnabled
+	nowHTTPS := newEp.TLSEnabled
+	response := map[string]any{
+		"addr":              newEp.Addr,
+		"endpoint":          newEp,
+		"runtime":           updatedSettings,
+		"splitStateWarning": splitWarning,
+	}
+	if performingDowngrade {
+		response["downgradeRedirect"] = "/login"
+	}
+	if wasHTTP && nowHTTPS {
+		response["upgradeScheme"] = "https"
 	}
 	// NOTE: this response travels back to the caller on the OLD connection,
 	// which Shutdown() waits to drain.  The *next* request from the client
-	// will arrive on the freshly-bound listener at body.Addr.
-	writeJSON(w, http.StatusOK, map[string]any{
-		"addr":    body.Addr,
-		"runtime": updated,
-	})
+	// will arrive on the freshly-bound listener at newEp.Addr.
+	writeJSON(w, http.StatusOK, response)
 }
 
 // currentListenAddr reports the address on which the server is currently

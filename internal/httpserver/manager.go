@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,33 +13,141 @@ import (
 	"time"
 )
 
-// Manager owns the lifecycle of the HTTP server and listener so the listen
-// address can be hot-swapped at runtime without a process restart.
+// EndpointConfig 是 Manager 在启动或热切时所需的端点配置。
+type EndpointConfig struct {
+	Addr              string // host:port
+	TLSEnabled        bool
+	TLSCertFile       string
+	TLSKeyFile        string
+	TLSOwnerUIDCheck  bool
+	HSTSEnabled       bool
+	HSTSMaxAgeSeconds int
+}
+
+// Endpoint 是 Manager 当前实际生效端点的只读快照，返回给前端用。
+type Endpoint struct {
+	Addr              string   `json:"addr"`
+	TLSEnabled        bool     `json:"tlsEnabled"`
+	Scheme            string   `json:"scheme"`
+	CertFile          string   `json:"certFile,omitempty"`
+	CertDNSNames      []string `json:"certDnsNames,omitempty"`
+	CertNotBefore     string   `json:"certNotBefore,omitempty"`
+	CertNotAfter      string   `json:"certNotAfter,omitempty"`
+	CertReloadErr     string   `json:"certReloadErr,omitempty"`
+	HSTSEnabled       bool     `json:"hstsEnabled"`
+	HSTSMaxAgeSeconds int      `json:"hstsMaxAgeSeconds"`
+}
+
+// Manager owns the lifecycle of the HTTP/HTTPS server and listener so the
+// endpoint can be hot-swapped at runtime without a process restart.
 //
-// All state mutations are guarded by a mutex.  The pre-bind step of a swap is
-// intentionally performed OUTSIDE the lock so that a slow net.Listen on the
-// new address (e.g. while the kernel negotiates a port) never blocks callers
-// from reading the current Addr(), and never races with process-wide
-// Shutdown().
+// All state mutations are guarded by a mutex.  The pre-bind + TLS pre-load
+// step of a swap is intentionally performed OUTSIDE the lock so that a slow
+// net.Listen or a slow cert-file I/O never blocks callers reading the current
+// Endpoint(), and never races with process-wide Shutdown().
 type Manager struct {
 	mu       sync.Mutex
 	server   *http.Server
 	listener net.Listener
 	addr     string
-	handler  http.Handler
-	log      *slog.Logger
-	serveWG  sync.WaitGroup
+
+	tlsEnabled bool
+	certFile   string
+	keyFile    string
+	reloader   *CertReloader
+
+	hstsEnabled       bool
+	hstsMaxAgeSeconds int
+
+	handler http.Handler
+	log     *slog.Logger
+	serveWG sync.WaitGroup
 }
 
-// New constructs a Manager for the given initial address and handler.
-// The server is NOT started – call Start() to bind the initial listener.
+// New constructs an HTTP-only Manager.  Preserved as a backward-compatible
+// constructor – the new code should prefer NewWithEndpoint.
 func New(initialAddr string, handler http.Handler, log *slog.Logger) *Manager {
-	return &Manager{
-		addr:    initialAddr,
-		handler: handler,
-		log:     log,
-	}
+	m, _, _ := newWithEndpointImpl(EndpointConfig{Addr: initialAddr}, handler, log, false)
+	return m
 }
+
+// NewWithEndpoint is the recommended constructor.
+//
+//   - bootStrict=true:  if TLS is requested but cannot be initialised the
+//     function returns an error and a nil Manager.
+//   - bootStrict=false: if TLS is requested but cannot be initialised the
+//     service falls back to HTTP on the same address.  The returned Endpoint
+//     will reflect the actual effective mode (scheme="http").
+func NewWithEndpoint(cfg EndpointConfig, handler http.Handler, log *slog.Logger, bootStrict bool) (*Manager, Endpoint, error) {
+	return newWithEndpointImpl(cfg, handler, log, bootStrict)
+}
+
+// newWithEndpointImpl is the single internal constructor used by both New()
+// and NewWithEndpoint().  It does NOT Start() – callers must Start().
+func newWithEndpointImpl(cfg EndpointConfig, handler http.Handler, log *slog.Logger, bootStrict bool) (*Manager, Endpoint, error) {
+	m := &Manager{
+		handler:           handler,
+		log:               log,
+		addr:              cfg.Addr,
+		hstsEnabled:       cfg.HSTSEnabled,
+		hstsMaxAgeSeconds: cfg.HSTSMaxAgeSeconds,
+	}
+	ep := Endpoint{
+		Addr:              cfg.Addr,
+		Scheme:            "http",
+		HSTSEnabled:       cfg.HSTSEnabled,
+		HSTSMaxAgeSeconds: cfg.HSTSMaxAgeSeconds,
+	}
+	if !cfg.TLSEnabled {
+		return m, ep, nil
+	}
+	cleanCert, cleanKey, _, err := ValidateTLSPaths(cfg.TLSCertFile, cfg.TLSKeyFile, cfg.TLSOwnerUIDCheck)
+	if err != nil {
+		if !bootStrict {
+			log.Log(context.Background(), LevelCritical,
+				"TLS_BOOT_FAILURE_HTTP_DOWNGRADE",
+				slog.String("addr", cfg.Addr),
+				slog.String("reason", truncateErr(err, 220)),
+			)
+			return m, ep, nil
+		}
+		return nil, ep, fmt.Errorf("tls boot failed (strict): %w", err)
+	}
+	reloader, rerr := NewCertReloader(cleanCert, cleanKey, log)
+	if rerr != nil {
+		if !bootStrict {
+			log.Log(context.Background(), LevelCritical,
+				"TLS_BOOT_FAILURE_HTTP_DOWNGRADE",
+				slog.String("addr", cfg.Addr),
+				slog.String("reason", truncateErr(rerr, 220)),
+			)
+			return m, ep, nil
+		}
+		return nil, ep, fmt.Errorf("tls boot failed (strict): %w", rerr)
+	}
+	m.tlsEnabled = true
+	m.certFile = cleanCert
+	m.keyFile = cleanKey
+	m.reloader = reloader
+	ep.TLSEnabled = true
+	ep.Scheme = "https"
+	ep.CertFile = cleanCert
+	if ss := reloader.Snapshot(); ss.LastError == "" {
+		ep.CertDNSNames = ss.DNSNames
+		if !ss.NotBefore.IsZero() {
+			ep.CertNotBefore = ss.NotBefore.UTC().Format(time.RFC3339)
+		}
+		if !ss.NotAfter.IsZero() {
+			ep.CertNotAfter = ss.NotAfter.UTC().Format(time.RFC3339)
+		}
+	}
+	return m, ep, nil
+}
+
+// LevelCritical is used instead of slog.LevelError for boot failures so that
+// they are visible above normal warnings but do not force the process to exit
+// (the caller decides on the exit path via bootStrict).
+var LevelCritical = slog.Level(12)
 
 // Start binds the initial listener and launches the serve goroutine.
 // Returns an error if the configured address cannot be bound.
@@ -49,11 +158,24 @@ func (m *Manager) Start() error {
 	}
 	m.mu.Lock()
 	m.listener = ln
-	m.server = m.buildServer(m.addr)
+	m.server = m.buildServerForConfig(EndpointConfig{
+		Addr:              m.addr,
+		TLSEnabled:        m.tlsEnabled,
+		HSTSEnabled:       m.hstsEnabled,
+		HSTSMaxAgeSeconds: m.hstsMaxAgeSeconds,
+	})
 	srv := m.server
+	actualLn := net.Listener(ln)
+	if m.tlsEnabled && m.reloader != nil {
+		// 启动 reloader ticker，使用与 Shutdown 解耦的包级内部 context（Manager 自己管理取消）。
+		// 这里用 context.Background()，由 Shutdown 显式 Close()。
+		m.reloader.Start(context.Background())
+		actualLn = tls.NewListener(ln, srv.TLSConfig)
+	}
+	m.listener = actualLn
 	m.mu.Unlock()
 	m.serveWG.Add(1)
-	go m.launchServe(srv, ln)
+	go m.launchServe(srv, actualLn)
 	return nil
 }
 
@@ -64,55 +186,176 @@ func (m *Manager) Addr() string {
 	return m.addr
 }
 
-// SwapAddr performs an atomic hot-swap to a new listen address.
+// Endpoint returns a snapshot of the currently-effective endpoint suitable
+// for serialising in API responses.
+func (m *Manager) Endpoint() Endpoint {
+	m.mu.Lock()
+	addr := m.addr
+	tlsOn := m.tlsEnabled
+	certFile := m.certFile
+	hsts := m.hstsEnabled
+	hstsMax := m.hstsMaxAgeSeconds
+	reloader := m.reloader
+	m.mu.Unlock()
+
+	ep := Endpoint{
+		Addr:              addr,
+		TLSEnabled:        tlsOn,
+		Scheme:            "http",
+		HSTSEnabled:       hsts,
+		HSTSMaxAgeSeconds: hstsMax,
+	}
+	if tlsOn {
+		ep.Scheme = "https"
+		ep.CertFile = certFile
+	}
+	if reloader != nil {
+		ss := reloader.Snapshot()
+		ep.CertDNSNames = ss.DNSNames
+		if !ss.NotBefore.IsZero() {
+			ep.CertNotBefore = ss.NotBefore.UTC().Format(time.RFC3339)
+		}
+		if !ss.NotAfter.IsZero() {
+			ep.CertNotAfter = ss.NotAfter.UTC().Format(time.RFC3339)
+		}
+		ep.CertReloadErr = ss.LastError
+	}
+	return ep
+}
+
+// SwapAddr is a backward-compatible wrapper around SwapEndpoint that keeps
+// the current TLS state.  The new API is SwapEndpoint.
+func (m *Manager) SwapAddr(newAddr string) error {
+	m.mu.Lock()
+	ep := EndpointConfig{
+		Addr:              newAddr,
+		TLSEnabled:        m.tlsEnabled,
+		TLSCertFile:       m.certFile,
+		TLSKeyFile:        m.keyFile,
+		TLSOwnerUIDCheck:  true,
+		HSTSEnabled:       m.hstsEnabled,
+		HSTSMaxAgeSeconds: m.hstsMaxAgeSeconds,
+	}
+	m.mu.Unlock()
+	_, err := m.SwapEndpoint(ep)
+	return err
+}
+
+// SwapEndpoint atomically swaps to a new endpoint configuration.
 //
 // Guarantees:
-//   - The old listener stays active until the new one is PROVEN to bind
-//     successfully.  If any step fails, the old listener is untouched.
-//   - The response for in-flight requests that arrived on the old listener
-//     is delivered before Shutdown() returns (standard-library behaviour).
-//   - Long-lived streams (SSE etc.) are force-dropped after a short timeout.
-func (m *Manager) SwapAddr(newAddr string) error {
+//   - Pre-bind and TLS pre-load run OUTSIDE the lock so that slow syscalls
+//     never block reads of Endpoint().
+//   - Only the atomic state replacement runs under the lock.
+//   - If any step fails the old listener is untouched and an error is
+//     returned (no partial state).
+//   - Long-lived streams (SSE etc.) are force-dropped after a 2 s timeout.
+func (m *Manager) SwapEndpoint(newCfg EndpointConfig) (Endpoint, error) {
 	// ---- Step 1: validate -------------------------------------------------
-	host, portStr, err := net.SplitHostPort(newAddr)
-	if err != nil {
-		return fmt.Errorf("invalid address format, expected host:port: %w", err)
+	if _, _, err := net.SplitHostPort(newCfg.Addr); err != nil {
+		return Endpoint{}, fmt.Errorf("invalid address format, expected host:port: %w", err)
 	}
+	_, portStr, _ := net.SplitHostPort(newCfg.Addr)
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 {
-		return fmt.Errorf("invalid port %q: must be 1-65535", portStr)
+		return Endpoint{}, fmt.Errorf("invalid port %q: must be 1-65535", portStr)
 	}
-	_ = host // host already validated by SplitHostPort
+	var cleanCert, cleanKey string
+	if newCfg.TLSEnabled {
+		var cerr error
+		cleanCert, cleanKey, _, cerr = ValidateTLSPaths(newCfg.TLSCertFile, newCfg.TLSKeyFile, newCfg.TLSOwnerUIDCheck)
+		if cerr != nil {
+			return Endpoint{}, fmt.Errorf("tls validate: %w", cerr)
+		}
+	}
 
-	// ---- Step 2: pre-bind OUTSIDE the lock (the slow/blocking step) ------
-	newLn, err := net.Listen("tcp", newAddr)
+	// ---- Step 2: fast-path: same addr + same TLS config → just reload -----
+	curEp := m.Endpoint()
+	if curEp.Addr == newCfg.Addr && curEp.TLSEnabled == newCfg.TLSEnabled {
+		m.mu.Lock()
+		sameCert := m.certFile == cleanCert && m.keyFile == cleanKey &&
+			m.hstsEnabled == newCfg.HSTSEnabled && m.hstsMaxAgeSeconds == newCfg.HSTSMaxAgeSeconds
+		m.mu.Unlock()
+		if sameCert {
+			if m.reloader != nil {
+				if rerr := m.reloader.LoadNow(); rerr != nil {
+					// 证书文件损坏：保留当前 listener，错误向上返回（不做 eager swap）
+					return curEp, fmt.Errorf("tls reload: %w", rerr)
+				}
+			}
+			return m.Endpoint(), nil
+		}
+	}
+
+	// ---- Step 3: pre-bind + optional TLS pre-load OUTSIDE the lock --------
+	newLn, err := net.Listen("tcp", newCfg.Addr)
 	if err != nil {
-		return fmt.Errorf("cannot bind %s: %w", newAddr, err)
+		return Endpoint{}, fmt.Errorf("cannot bind %s: %w", newCfg.Addr, err)
+	}
+	var newReloader *CertReloader
+	if newCfg.TLSEnabled {
+		r, rerr := NewCertReloader(cleanCert, cleanKey, m.log)
+		if rerr != nil {
+			_ = newLn.Close()
+			return Endpoint{}, fmt.Errorf("tls preload: %w", rerr)
+		}
+		newReloader = r
 	}
 
-	// ---- Step 3: atomically swap state under the lock --------------------
+	// ---- Step 4: atomically swap state + drain old server -----------------
 	m.mu.Lock()
 	oldServer := m.server
 	oldListener := m.listener
 	oldAddr := m.addr
+	oldReloader := m.reloader
+	oldTLSEnabled := m.tlsEnabled
 
-	newServer := m.buildServer(newAddr)
+	// Install the new reloader (if any) BEFORE buildServerForConfig so the
+	// helper sees the *new* m.reloader and attaches it as GetCertificate to
+	// the new server's TLSConfig.  Without this ordering newServer.TLSConfig
+	// ends up nil, causing tls.NewListener(nil config) → handshake crash.
+	if newCfg.TLSEnabled {
+		m.certFile = cleanCert
+		m.keyFile = cleanKey
+	} else {
+		m.certFile = ""
+		m.keyFile = ""
+	}
+	m.reloader = newReloader
+	m.tlsEnabled = newCfg.TLSEnabled
+
+	newCfgInternal := EndpointConfig{
+		Addr:              newCfg.Addr,
+		TLSEnabled:        newCfg.TLSEnabled,
+		HSTSEnabled:       newCfg.HSTSEnabled,
+		HSTSMaxAgeSeconds: newCfg.HSTSMaxAgeSeconds,
+	}
+	newServer := m.buildServerForConfig(newCfgInternal)
+	actualLn := net.Listener(newLn)
+	if newCfg.TLSEnabled && newReloader != nil {
+		actualLn = tls.NewListener(newLn, newServer.TLSConfig)
+		newReloader.Start(context.Background())
+	}
 	m.server = newServer
-	m.listener = newLn
-	m.addr = newAddr
+	m.listener = actualLn
+	m.addr = newCfg.Addr
+	m.hstsEnabled = newCfg.HSTSEnabled
+	m.hstsMaxAgeSeconds = newCfg.HSTSMaxAgeSeconds
 	m.mu.Unlock()
 
-	m.log.Info("http server swapping address", "old_addr", oldAddr, "new_addr", newAddr)
+	m.log.Info("http server swapping endpoint",
+		slog.String("old_addr", oldAddr),
+		slog.String("new_addr", newCfg.Addr),
+		slog.Bool("old_tls", oldTLSEnabled),
+		slog.Bool("new_tls", newCfg.TLSEnabled),
+	)
 
-	// Start the new serve goroutine immediately so new connections are
-	// accepted while we are still draining the old server.
+	// Launch new serve goroutine immediately so new connections are accepted
+	// while the old server is draining.
 	m.serveWG.Add(1)
-	go m.launchServe(newServer, newLn)
+	go m.launchServe(newServer, actualLn)
 
-	// ---- Step 4: gracefully drain the OLD server -------------------------
-	// Use a tight 2 s timeout (matching the self-update restart path) because
-	// SSE streams are long-lived and will always run to deadline; the browser
-	// client will auto-reconnect.
+	// Drain the OLD server with a tight timeout.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if oldServer != nil {
@@ -130,21 +373,27 @@ func (m *Manager) SwapAddr(newAddr string) error {
 			}
 		}
 	}
-	m.log.Info("http server address swap complete", "addr", newAddr)
-	return nil
+	// Close any old reloader now that the old listener is gone.
+	if oldReloader != nil && oldReloader != newReloader {
+		oldReloader.Close()
+	}
+	m.log.Info("http server endpoint swap complete", "addr", newCfg.Addr)
+	return m.Endpoint(), nil
 }
 
 // Shutdown gracefully terminates the current server on process exit.
-// Intended to be called from the main goroutine's signal/exit path.  It waits
-// for the serve goroutine(s) to return so the caller can be sure no goroutine
-// is touching resources that are about to be closed (e.g. during syscall.Exec
-// self-upgrade).
+// Intended to be called from the main goroutine's signal/exit path.  It
+// waits for serve goroutine(s) to return so the caller can be sure no
+// goroutine is touching resources that are about to be closed (e.g. during
+// syscall.Exec self-upgrade).
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	srv := m.server
 	ln := m.listener
+	reloader := m.reloader
 	m.server = nil
 	m.listener = nil
+	m.reloader = nil
 	m.mu.Unlock()
 
 	var err error
@@ -161,8 +410,10 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 			}
 		}
 	} else if ln != nil {
-		// Safeguard: Close listener even if server was already nil.
 		_ = ln.Close()
+	}
+	if reloader != nil {
+		reloader.Close()
 	}
 	m.serveWG.Wait()
 	return err
@@ -172,12 +423,32 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 // internal helpers
 // ---------------------------------------------------------------------------
 
-func (m *Manager) buildServer(addr string) *http.Server {
-	return &http.Server{
-		Addr:              addr,
+// buildServerForConfig builds a base *http.Server for an endpoint config,
+// optionally attaching the Manager's current reloader as GetCertificate.
+func (m *Manager) buildServerForConfig(cfg EndpointConfig) *http.Server {
+	srv := &http.Server{
+		Addr:              cfg.Addr,
 		Handler:           m.handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	if cfg.TLSEnabled && m.reloader != nil {
+		srv.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			// AEAD-only cipher suites (no RC4, no 3DES, no CBC, no non-PFS).
+			CipherSuites: []uint16{
+				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			},
+			CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384},
+			NextProtos:       []string{"h2", "http/1.1"},
+			GetCertificate:   m.reloader.GetCertificate,
+		}
+	}
+	return srv
 }
 
 // launchServe starts srv.Serve in the background.  It MUST NOT be called

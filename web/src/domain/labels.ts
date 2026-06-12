@@ -197,7 +197,17 @@ export function formatDate(value?: string): string {
 }
 
 export function defaultRuntime() {
-  return { allowedRoots: [], cookieSecure: false, updatedAt: "" };
+  return {
+    allowedRoots: [],
+    cookieSecure: false,
+    tlsEnabled: false,
+    tlsCertFile: "",
+    tlsKeyFile: "",
+    tlsOwnerUidCheck: true,
+    hstsEnabled: false,
+    hstsMaxAgeSeconds: 15724800,
+    updatedAt: "",
+  };
 }
 
 export function defaultV2RaySettings(): Required<V2RaySettings> {
