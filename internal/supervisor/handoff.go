@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"phantom-lancer/internal/selfupdate"
@@ -198,6 +199,29 @@ func (s *Supervisor) handleHandoffAfterExit(ce ChildExit) (rolledBack bool, err 
 		"install_path", h.MainBinaryPath,
 		"backup_path", h.MainBackupPath,
 	)
+	// Best-effort: also restore the supervisor binary itself if the handoff
+	// carries a non-empty supervisor backup. Both binaries ship together,
+	// so leaving a newer supervisor running with an older main binary can
+	// expose version-skew protocol bugs. Failure is logged only — the main
+	// binary rollback already took us back to safety.
+	if strings.TrimSpace(h.SupervisorBinaryPath) != "" && strings.TrimSpace(h.SupervisorBackupPath) != "" {
+		if info, statErr := os.Stat(h.SupervisorBackupPath); statErr == nil && info.Mode().IsRegular() {
+			if sErr := selfupdate.RestoreBackup(h.SupervisorBinaryPath, h.SupervisorBackupPath); sErr != nil {
+				s.warn("supervisor rollback supervisor-binary restore failed",
+					"job_id", h.JobID,
+					"install_path", h.SupervisorBinaryPath,
+					"backup_path", h.SupervisorBackupPath,
+					"error", sErr.Error(),
+				)
+			} else if s.log != nil {
+				s.info("supervisor rollback restored supervisor backup",
+					"job_id", h.JobID,
+					"install_path", h.SupervisorBinaryPath,
+					"backup_path", h.SupervisorBackupPath,
+				)
+			}
+		}
+	}
 	// Intentionally do NOT delete the handoff file: the restored old
 	// binary's ConfirmBoot() is the authority on the job's final state.
 	s.fastFailCount = 0

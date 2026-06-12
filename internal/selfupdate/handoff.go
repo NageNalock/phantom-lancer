@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -49,7 +50,9 @@ func (s *Service) handoffPath() string {
 // source is either "update" (forward update) or "rollback" (manual rollback).
 // For source=="rollback", currentVersion and targetVersion are swapped since
 // the newly installed binary is the "old" one from the job's perspective.
-func (s *Service) writeHandoff(jobID, source, currentVersion, targetVersion, installPath, backupPath string) {
+// supervisorBackupPath (and the sibling supervisor binary path) may be empty
+// on older installations that don't ship a separate supervisor binary.
+func (s *Service) writeHandoff(jobID, source, currentVersion, targetVersion, installPath, backupPath, supervisorBackupPath string) {
 	runDir := s.runDir()
 	if err := os.MkdirAll(runDir, 0o700); err != nil && s.log != nil {
 		s.log.Warn("system update handoff run dir create failed", "job_id", jobID, "error", err.Error())
@@ -82,6 +85,7 @@ func (s *Service) writeHandoff(jobID, source, currentVersion, targetVersion, ins
 		MainBinaryPath:       installPath,
 		MainBackupPath:       backupPath,
 		SupervisorBinaryPath: supervisorBinaryPath,
+		SupervisorBackupPath: strings.TrimSpace(supervisorBackupPath),
 		RequestedAt:          time.Now().UTC().Format(time.RFC3339),
 		RestartTimeoutSec:    timeoutSec,
 	}

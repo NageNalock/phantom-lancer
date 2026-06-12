@@ -61,6 +61,64 @@ func TestExtractBinaryOnlyWritesReleaseBinary(t *testing.T) {
 	}
 }
 
+func TestExtractBinariesExtractsBothBinaries(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "release.tar.gz")
+	if err := writeTestArchive(archive, map[string]string{
+		"phantom-lancer/bin/phantom-lancer":      "MAIN-V2",
+		"phantom-lancer/bin/phantom-supervisor":  "SUP-V2",
+		"phantom-lancer/README.md":               "ignored",
+	}); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+	stagedMain := filepath.Join(dir, "staged.main")
+	result, err := extractBinaries(archive, stagedMain)
+	if err != nil {
+		t.Fatalf("extractBinaries: %v", err)
+	}
+	if result.MainBinary != stagedMain {
+		t.Fatalf("MainBinary = %q want %q", result.MainBinary, stagedMain)
+	}
+	if result.SupervisorBinary == "" {
+		t.Fatal("SupervisorBinary is empty, expected staged path")
+	}
+	wantSupervisor := stagedMain + ".supervisor"
+	if result.SupervisorBinary != wantSupervisor {
+		t.Fatalf("SupervisorBinary = %q want %q", result.SupervisorBinary, wantSupervisor)
+	}
+	mainData, err := os.ReadFile(stagedMain)
+	if err != nil {
+		t.Fatalf("read main: %v", err)
+	}
+	if string(mainData) != "MAIN-V2" {
+		t.Fatalf("main content = %q want MAIN-V2", string(mainData))
+	}
+	superData, err := os.ReadFile(wantSupervisor)
+	if err != nil {
+		t.Fatalf("read supervisor: %v", err)
+	}
+	if string(superData) != "SUP-V2" {
+		t.Fatalf("supervisor content = %q want SUP-V2", string(superData))
+	}
+}
+
+func TestExtractBinariesOmitSupervisorWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "legacy.tar.gz")
+	if err := writeTestArchive(archive, map[string]string{
+		"phantom-lancer/bin/phantom-lancer": "MAIN-OLD",
+	}); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+	result, err := extractBinaries(archive, filepath.Join(dir, "out"))
+	if err != nil {
+		t.Fatalf("extractBinaries: %v", err)
+	}
+	if strings.TrimSpace(result.SupervisorBinary) != "" {
+		t.Fatalf("SupervisorBinary = %q, want empty on legacy archive", result.SupervisorBinary)
+	}
+}
+
 func writeTestArchive(path string, files map[string]string) error {
 	file, err := os.Create(path)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -314,6 +315,20 @@ func (s *Service) ConfirmBoot(ctx context.Context) (rollbackExecPath string) {
 				} else if rbErr := RestoreBackup(installP, job.BackupBinaryPath); rbErr == nil {
 					rollbackExecPath = installP
 					triggeredRollback = true
+					// Best-effort: also restore the sibling supervisor
+					// backup (written by install() next to the main
+					// backup at `<main>.supervisor`).
+					supervisorBackup := job.BackupBinaryPath + ".supervisor"
+					supervisorInstall := filepath.Join(filepath.Dir(installP), "phantom-supervisor")
+					if sbInfo, sbErr := os.Stat(supervisorBackup); sbErr == nil && sbInfo.Mode().IsRegular() {
+						if srbErr := RestoreBackup(supervisorInstall, supervisorBackup); srbErr != nil {
+							if s.log != nil {
+								s.log.Warn("watchdog rollback supervisor restore failed", "job_id", job.ID, "error", safelog.Error(srbErr, 200))
+							}
+						} else if s.log != nil {
+							s.log.Info("watchdog rollback supervisor restored", "job_id", job.ID, "install_path", supervisorInstall, "backup_path", supervisorBackup)
+						}
+					}
 					_, _ = s.store.AddAudit(ctx, storage.AuditEvent{
 						EventType: "system.update.rollback_auto",
 						RiskLevel: "high",
@@ -542,7 +557,7 @@ func (s *Service) execute(ctx context.Context, job *storage.SystemUpdateJob, che
 			"requires_external_supervisor", s.cfg.RestartMode == RestartModeExit,
 		)
 	}
-	s.dispatchRestart(job.ID, job.TargetVersion, installResult.installPath, installResult.backupPath, "update")
+	s.dispatchRestart(job.ID, job.TargetVersion, installResult.installPath, installResult.backupPath, installResult.supervisorBackupPath, "update")
 	return nil
 }
 
@@ -587,6 +602,23 @@ func (s *Service) Rollback(ctx context.Context, jobID string) (storage.SystemUpd
 	if err := RestoreBackup(installPath, job.BackupBinaryPath); err != nil {
 		return storage.SystemUpdateJob{}, "", err
 	}
+	// Also restore the supervisor binary if a sibling backup exists. The
+	// backup is laid down at the same time as the main binary backup (at
+	// `<mainBackup>.supervisor`), so its presence mirrors the main backup's
+	// validity. Failure is logged but non-fatal: the main binary is already
+	// restored; an old/new supervisor mismatch is recoverable via the next
+	// update or manual deploy.
+	supervisorBackupPath := job.BackupBinaryPath + ".supervisor"
+	supervisorInstallPath := filepath.Join(filepath.Dir(installPath), "phantom-supervisor")
+	if sInfo, sErr := os.Stat(supervisorBackupPath); sErr == nil && sInfo.Mode().IsRegular() {
+		if rErr := RestoreBackup(supervisorInstallPath, supervisorBackupPath); rErr != nil {
+			if s.log != nil {
+				s.log.Warn("system update rollback supervisor restore failed", "job_id", job.ID, "error", safelog.Error(rErr, 200))
+			}
+		} else if s.log != nil {
+			s.log.Info("system update rollback supervisor restored", "job_id", job.ID, "install_path", supervisorInstallPath, "backup_path", supervisorBackupPath)
+		}
+	}
 	suffix := " + rollback applied"
 	alreadyRolledBack := strings.Contains(job.ErrorMessage, "rollback applied")
 	if alreadyRolledBack {
@@ -625,13 +657,14 @@ func (s *Service) Rollback(ctx context.Context, jobID string) (storage.SystemUpd
 			Summary:   "系统回滚已请求服务重启",
 			Payload:   map[string]any{"jobId": job.ID, "targetVersion": job.CurrentVersion, "source": "rollback"},
 		})
-		s.writeHandoff(job.ID, "rollback", job.TargetVersion, job.CurrentVersion, installPath, job.BackupBinaryPath)
-		s.dispatchRestart(job.ID, job.CurrentVersion, installPath, job.BackupBinaryPath, "rollback")
+		rollbackSupervisorBackup := supervisorBackupPathFor(job.BackupBinaryPath)
+		s.writeHandoff(job.ID, "rollback", job.TargetVersion, job.CurrentVersion, installPath, job.BackupBinaryPath, rollbackSupervisorBackup)
+		s.dispatchRestart(job.ID, job.CurrentVersion, installPath, job.BackupBinaryPath, rollbackSupervisorBackup, "rollback")
 	}
 	return job, installPath, nil
 }
 
-func (s *Service) dispatchRestart(jobID, targetVersion, installPath, backupPath, source string) {
+func (s *Service) dispatchRestart(jobID, targetVersion, installPath, backupPath, supervisorBackupPath, source string) {
 	if s.log != nil {
 		s.log.Info(
 			"system update restart dispatch",
@@ -641,9 +674,14 @@ func (s *Service) dispatchRestart(jobID, targetVersion, installPath, backupPath,
 			"restart_mode", s.cfg.RestartMode,
 			"install_path", installPath,
 			"backup_path", backupPath,
+			"supervisor_backup_path", supervisorBackupPath,
 			"requires_external_supervisor", s.cfg.RestartMode == RestartModeExit,
 		)
 	}
+	// Write the handoff marker BEFORE dispatching the restart so even an
+	// immediate exit still leaves the marker on disk for the outer
+	// supervisor (or a manual restart) to pick up.
+	s.writeHandoff(jobID, source, "", targetVersion, installPath, backupPath, supervisorBackupPath)
 	switch s.cfg.RestartMode {
 	case RestartModeExit:
 		s.requestRestartAfterDelay()
@@ -736,6 +774,17 @@ func shortChecksum(value string) string {
 		return value
 	}
 	return value[:12]
+}
+
+// supervisorBackupPathFor returns the conventional sibling path where the
+// installer snapshots the supervisor binary next to the main binary backup.
+// It returns an empty string when the main backup path is empty (no backup
+// was taken, therefore a supervisor backup cannot exist either).
+func supervisorBackupPathFor(mainBackupPath string) string {
+	if strings.TrimSpace(mainBackupPath) == "" {
+		return ""
+	}
+	return mainBackupPath + ".supervisor"
 }
 
 func targetMismatch(check storage.SystemUpdateCheck, targetVersion, releaseID string) bool {

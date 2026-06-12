@@ -16,8 +16,10 @@ import (
 )
 
 type installResult struct {
-	installPath string
-	backupPath  string
+	installPath          string
+	backupPath           string
+	supervisorInstalled  bool
+	supervisorBackupPath string
 }
 
 func verifyStagedVersion(ctx context.Context, binaryPath, targetVersion string) error {
@@ -62,7 +64,9 @@ func (s *Service) install(ctx context.Context, jobID, stagedBinary, stagedSuperv
 	if err := os.MkdirAll(backupDir, 0o700); err != nil {
 		return installResult{}, err
 	}
-	backupPath := filepath.Join(backupDir, "phantom-lancer-"+safeName(currentVersion)+"-"+time.Now().UTC().Format("20060102T150405Z"))
+	ts := time.Now().UTC().Format("20060102T150405Z")
+	backupPath := filepath.Join(backupDir, "phantom-lancer-"+safeName(currentVersion)+"-"+ts)
+	supervisorBackupPath := backupPath + ".supervisor"
 	currentInfo, err := os.Stat(installPath)
 	if err != nil {
 		return installResult{}, fmt.Errorf("current binary is not readable: %w", err)
@@ -75,6 +79,22 @@ func (s *Service) install(ctx context.Context, jobID, stagedBinary, stagedSuperv
 	}
 	if s.log != nil {
 		s.log.Info("system update current binary backed up", "job_id", jobID, "backup_path", backupPath, "mode", currentInfo.Mode().Perm().String())
+	}
+
+	// Best-effort backup of the existing supervisor binary (if any) so that
+	// the supervisor's own rollback path can restore it atomically later.
+	// Failure is non-fatal: the main binary's update is the critical path.
+	currentSupervisorPath := filepath.Join(filepath.Dir(installPath), "phantom-supervisor")
+	supervisorBackupWritten := false
+	if sInfo, sErr := os.Stat(currentSupervisorPath); sErr == nil && sInfo.Mode().IsRegular() {
+		if bErr := copyFile(currentSupervisorPath, supervisorBackupPath, sInfo.Mode().Perm()); bErr == nil {
+			supervisorBackupWritten = true
+			if s.log != nil {
+				s.log.Info("system update current supervisor backed up", "job_id", jobID, "backup_path", supervisorBackupPath)
+			}
+		} else if s.log != nil {
+			s.log.Warn("system update supervisor backup skipped", "job_id", jobID, "error", safelog.Error(bErr, 200))
+		}
 	}
 
 	tempPath := filepath.Join(filepath.Dir(installPath), ".phantom-lancer."+jobID+".tmp")
@@ -100,13 +120,29 @@ func (s *Service) install(ctx context.Context, jobID, stagedBinary, stagedSuperv
 	// the running supervisor process keeps the old fd, so no crash).
 	// Supervisor install failure is deliberately non-fatal: the old binary
 	// can still restart the new main program.
+	result := installResult{
+		installPath: installPath,
+		backupPath:  backupPath,
+	}
 	if strings.TrimSpace(stagedSupervisor) != "" {
-		if sErr := s.installSupervisor(jobID, stagedSupervisor, currentInfo); sErr != nil && s.log != nil {
-			s.log.Warn("system update supervisor install skipped", "job_id", jobID, "error", safelog.Error(sErr, 200))
+		if sErr := s.installSupervisor(jobID, stagedSupervisor, currentInfo); sErr != nil {
+			if s.log != nil {
+				s.log.Warn("system update supervisor install skipped", "job_id", jobID, "error", safelog.Error(sErr, 200))
+			}
+		} else {
+			result.supervisorInstalled = true
+			if supervisorBackupWritten {
+				result.supervisorBackupPath = supervisorBackupPath
+			}
 		}
+	} else if supervisorBackupWritten {
+		// No new supervisor staged in this update, but an old one exists
+		// and we snapshotted it — expose the backup so handoff/rollback
+		// paths still have a known-good supervisor to fall back to.
+		result.supervisorBackupPath = supervisorBackupPath
 	}
 	s.pruneBackups(backupDir)
-	return installResult{installPath: installPath, backupPath: backupPath}, nil
+	return result, nil
 }
 
 // installSupervisor atomically replaces the supervisor binary that lives in
