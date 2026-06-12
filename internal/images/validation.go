@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"phantom-lancer/internal/storage"
 )
 
 var (
@@ -135,6 +137,40 @@ func SettingSupported(field, value string) error {
 		if !allowedAspectRatios[value] {
 			return fmt.Errorf("aspect ratio is not supported")
 		}
+	}
+	return nil
+}
+
+func ValidatePrompt(prompt storage.ImagePrompt) error {
+	prompt = storage.NormalizeImagePrompt(prompt)
+	if prompt.Title == "" {
+		return errors.New("prompt title is required")
+	}
+	if prompt.Prompt == "" {
+		return errors.New("prompt is required")
+	}
+	if len(prompt.Prompt) > 8000 {
+		return errors.New("prompt is too long")
+	}
+	switch prompt.Mode {
+	case ModeTextToImage, ModeImageToImage, ModeMultiImageEdit:
+	default:
+		return errors.New("prompt mode is invalid")
+	}
+	if prompt.Model != "" && !modelNamePattern.MatchString(prompt.Model) {
+		return errors.New("model name is invalid")
+	}
+	if !allowedAspectRatios[prompt.AspectRatio] {
+		return errors.New("aspect ratio is not supported")
+	}
+	if !allowedResolutions[prompt.Resolution] {
+		return errors.New("resolution is not supported")
+	}
+	if prompt.ImageCount < 1 || prompt.ImageCount > 10 {
+		return errors.New("image count must be between 1 and 10")
+	}
+	if len(prompt.Tags) > 12 {
+		return errors.New("prompt tags are too many")
 	}
 	return nil
 }

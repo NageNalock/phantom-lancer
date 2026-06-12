@@ -76,6 +76,14 @@ function containerName(container: DockerContainerSummary): string {
   return container.names[0] || container.id;
 }
 
+function registryHostFromPublicUrl(publicUrl: string | undefined): string {
+  return (publicUrl || "").trim().replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "").replace(/\/+$/, "");
+}
+
+function registryTagPullBusyKey(tag: DockerRegistryTag): string {
+  return `registry-pull-${tag.repository}:${tag.tag}`;
+}
+
 export function DockerView({ actions }: { actions: AppActions }) {
   const [tab, setTab, tabHref] = useQueryParamState<DockerTab>("docker", DOCKER_TAB_IDS, "overview", { clearKeys: DOCKER_CLEAR_KEYS });
   const [status, setStatus] = useState<DockerStatus | null>(null);
@@ -280,6 +288,25 @@ export function DockerView({ actions }: { actions: AppActions }) {
       const result = await actions.api<DockerOperationResult>("/api/docker/images/pull", { method: "POST", csrf: actions.csrf, body: { reference: ref } });
       setPullRef("");
       attachJob(result, "镜像拉取已提交");
+      await loadTab("images", true);
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function pullRegistryTag(tag: DockerRegistryTag) {
+    const host = registryHostFromPublicUrl(registrySettings.publicUrl || registryStatus?.publicUrl);
+    if (!host) {
+      actions.setToast("请先配置 Registry 公开 URL", "warn");
+      return;
+    }
+    const ref = `${host}/${tag.repository}:${tag.tag}`;
+    setBusy(registryTagPullBusyKey(tag));
+    try {
+      const result = await actions.api<DockerOperationResult>("/api/docker/images/pull", { method: "POST", csrf: actions.csrf, body: { reference: ref } });
+      attachJob(result, "Registry 镜像拉取已提交");
       await loadTab("images", true);
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");
@@ -610,6 +637,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
             newCredentialSecret={newCredentialSecret}
             objectProfiles={objectProfiles}
             openRepository={(repo) => void openRepository(repo)}
+            pullRegistryTag={(item) => void pullRegistryTag(item)}
             registrySettings={registrySettings}
             registryStatus={registryStatus}
             repoTags={repoTags}

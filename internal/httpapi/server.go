@@ -31,13 +31,13 @@ import (
 	"phantom-lancer/internal/config"
 	"phantom-lancer/internal/dockercontrol"
 	"phantom-lancer/internal/events"
+	"phantom-lancer/internal/httpserver"
 	imagegen "phantom-lancer/internal/images"
 	logcenter "phantom-lancer/internal/logs"
 	"phantom-lancer/internal/logsampler"
 	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/selfupdate"
 	"phantom-lancer/internal/storage"
-	"phantom-lancer/internal/httpserver"
 	"phantom-lancer/internal/v2ray"
 	"phantom-lancer/internal/workspaces"
 )
@@ -238,6 +238,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/images/status", s.handleImagesStatus)
 	mux.HandleFunc("GET /api/images/settings", s.handleGetImagesSettings)
 	mux.HandleFunc("PUT /api/images/settings", s.handleUpdateImagesSettings)
+	mux.HandleFunc("GET /api/images/prompts", s.handleListImagePrompts)
+	mux.HandleFunc("POST /api/images/prompts", s.handleCreateImagePrompt)
+	mux.HandleFunc("GET /api/images/prompts/", s.handleImagePromptSubroutes)
+	mux.HandleFunc("PATCH /api/images/prompts/", s.handleImagePromptSubroutes)
+	mux.HandleFunc("DELETE /api/images/prompts/", s.handleImagePromptSubroutes)
+	mux.HandleFunc("POST /api/images/prompts/", s.handleImagePromptSubroutes)
 	mux.HandleFunc("GET /api/images/storage-settings", s.handleGetImageStorageSettings)
 	mux.HandleFunc("PUT /api/images/storage-settings", s.handleUpdateImageStorageSettings)
 	mux.HandleFunc("POST /api/images/storage-settings/test", s.handleTestImageStorageSettings)
@@ -759,15 +765,15 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"file": map[string]any{
-			"configPath":      s.cfg.ConfigPath,
-			"addr":            s.currentListenAddr(),
-			"dataDir":         s.cfg.DataDir,
-			"dbPath":          s.cfg.DBPath,
-			"logFile":         s.cfg.LogFile,
-			"logMaxSizeMB":    s.cfg.LogMaxSizeMB,
-			"logMaxFiles":     s.cfg.LogMaxFiles,
-			"logMaxAgeDays":   s.cfg.LogMaxAgeDays,
-			"tlsBootStrict":   s.tlsBootStrict,
+			"configPath":    s.cfg.ConfigPath,
+			"addr":          s.currentListenAddr(),
+			"dataDir":       s.cfg.DataDir,
+			"dbPath":        s.cfg.DBPath,
+			"logFile":       s.cfg.LogFile,
+			"logMaxSizeMB":  s.cfg.LogMaxSizeMB,
+			"logMaxFiles":   s.cfg.LogMaxFiles,
+			"logMaxAgeDays": s.cfg.LogMaxAgeDays,
+			"tlsBootStrict": s.tlsBootStrict,
 		},
 		"runtime":  settings,
 		"listener": s.listenerEndpoint(),
@@ -899,21 +905,21 @@ func (s *Server) handleProbeTLS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	result := map[string]any{
-		"ok":                 true,
-		"error":              nil,
-		"subject":            "",
-		"issuer":             "",
-		"dnsNames":           []string{},
-		"serialNumber":       "",
-		"notBefore":          "",
-		"notAfter":           "",
-		"sigAlg":             "",
-		"pubKeyBits":         pubBits,
-		"fileOwnerUid":       ownerUID,
-		"fileOwnerName":      ownerName,
+		"ok":                   true,
+		"error":                nil,
+		"subject":              "",
+		"issuer":               "",
+		"dnsNames":             []string{},
+		"serialNumber":         "",
+		"notBefore":            "",
+		"notAfter":             "",
+		"sigAlg":               "",
+		"pubKeyBits":           pubBits,
+		"fileOwnerUid":         ownerUID,
+		"fileOwnerName":        ownerName,
 		"fileWritableByOthers": worldW,
-		"fileHasSymlink":    hasSym,
-		"daysRemaining":     nil,
+		"fileHasSymlink":       hasSym,
+		"daysRemaining":        nil,
 	}
 	if leaf != nil {
 		result["subject"] = leaf.Subject.String()
@@ -934,11 +940,11 @@ func (s *Server) handleProbeTLS(w http.ResponseWriter, r *http.Request) {
 const downgradeConfirmPhrase = "I understand disabling HTTPS will revoke all sessions"
 
 // handleSwapEndpoint replaces the old listen-addr handler.  It:
-//   1. Persists the new endpoint to the DB FIRST (swap failure → DB rollback).
-//   2. Performs the atomic hot-swap via Manager.SwapEndpoint.
-//   3. On HTTPS→HTTP downgrade, revokes ALL sessions and emits 4 Set-Cookie
-//      clear headers (session + csrf × Secure=true/false).
-//   4. On success, audits the change and returns the new endpoint snapshot.
+//  1. Persists the new endpoint to the DB FIRST (swap failure → DB rollback).
+//  2. Performs the atomic hot-swap via Manager.SwapEndpoint.
+//  3. On HTTPS→HTTP downgrade, revokes ALL sessions and emits 4 Set-Cookie
+//     clear headers (session + csrf × Secure=true/false).
+//  4. On success, audits the change and returns the new endpoint snapshot.
 func (s *Server) handleSwapEndpoint(w http.ResponseWriter, r *http.Request) {
 	ctx, ok := s.requireAuth(w, r)
 	if !ok || !s.requireCSRF(w, r, ctx.Session) {
@@ -1028,8 +1034,8 @@ func (s *Server) handleSwapEndpoint(w http.ResponseWriter, r *http.Request) {
 	// ---- Step 1: persist to DB FIRST (we roll back if swap fails) --------
 	newSettings := storage.RuntimeSettings{
 		// Copy all untouched fields from prev so we don't lose them.
-		AllowedRoots:      prevSettings.AllowedRoots,
-		CookieSecure:      prevSettings.CookieSecure,
+		AllowedRoots: prevSettings.AllowedRoots,
+		CookieSecure: prevSettings.CookieSecure,
 		// Set the new fields
 		Addr:              body.Addr,
 		TLSEnabled:        body.TLSEnabled,
@@ -1224,6 +1230,171 @@ func (s *Server) handleUpdateImagesSettings(w http.ResponseWriter, r *http.Reque
 		},
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"settings": updated, "status": s.images.Status(r.Context())})
+}
+
+type imagePromptRequest struct {
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Prompt      string   `json:"prompt"`
+	Mode        string   `json:"mode"`
+	Model       string   `json:"model"`
+	AspectRatio string   `json:"aspectRatio"`
+	Resolution  string   `json:"resolution"`
+	ImageCount  int      `json:"imageCount"`
+	Tags        []string `json:"tags"`
+}
+
+func imagePromptFromRequest(req imagePromptRequest) storage.ImagePrompt {
+	return storage.ImagePrompt{
+		Title:       req.Title,
+		Description: req.Description,
+		Prompt:      req.Prompt,
+		Mode:        req.Mode,
+		Model:       req.Model,
+		AspectRatio: req.AspectRatio,
+		Resolution:  req.Resolution,
+		ImageCount:  req.ImageCount,
+		Tags:        req.Tags,
+	}
+}
+
+func imagePromptAuditPayload(prompt storage.ImagePrompt) map[string]any {
+	return map[string]any{
+		"promptId":     prompt.ID,
+		"mode":         prompt.Mode,
+		"model":        prompt.Model,
+		"aspectRatio":  prompt.AspectRatio,
+		"resolution":   prompt.Resolution,
+		"imageCount":   prompt.ImageCount,
+		"tagsCount":    len(prompt.Tags),
+		"promptLength": len(prompt.Prompt),
+	}
+}
+
+func (s *Server) handleListImagePrompts(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAuth(w, r); !ok {
+		return
+	}
+	limit := 120
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			limit = parsed
+		}
+	}
+	items, err := s.images.ListPrompts(r.Context(), limit, r.URL.Query().Get("q"), r.URL.Query().Get("mode"), r.URL.Query().Get("status"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleCreateImagePrompt(w http.ResponseWriter, r *http.Request) {
+	ctx, ok := s.requireAuth(w, r)
+	if !ok || !s.requireCSRF(w, r, ctx.Session) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, imagegen.MaxSettingsBytes)
+	var req imagePromptRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	prompt, err := s.images.CreatePrompt(r.Context(), imagePromptFromRequest(req))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "image_prompt_invalid", err.Error())
+		return
+	}
+	_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+		EventType: "images.prompt.created",
+		RiskLevel: "low",
+		Summary:   "已创建 Images Prompt",
+		Payload:   imagePromptAuditPayload(prompt),
+	})
+	writeJSON(w, http.StatusCreated, map[string]any{"prompt": prompt})
+}
+
+func (s *Server) handleImagePromptSubroutes(w http.ResponseWriter, r *http.Request) {
+	ctx, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/images/prompts/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, http.StatusNotFound, "image_prompt_not_found", "未找到 Prompt")
+		return
+	}
+	id := parts[0]
+	if len(parts) == 1 {
+		switch r.Method {
+		case http.MethodGet:
+			prompt, err := s.store.GetImagePrompt(r.Context(), id)
+			if err != nil || prompt.Status == "deleted" {
+				writeError(w, http.StatusNotFound, "image_prompt_not_found", "未找到 Prompt")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"prompt": prompt})
+		case http.MethodPatch:
+			if !s.requireCSRF(w, r, ctx.Session) {
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, imagegen.MaxSettingsBytes)
+			var req imagePromptRequest
+			if !decodeJSON(w, r, &req) {
+				return
+			}
+			prompt, err := s.images.UpdatePrompt(r.Context(), id, imagePromptFromRequest(req))
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "image_prompt_invalid", err.Error())
+				return
+			}
+			_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+				EventType: "images.prompt.updated",
+				RiskLevel: "low",
+				Summary:   "已更新 Images Prompt",
+				Payload:   imagePromptAuditPayload(prompt),
+			})
+			writeJSON(w, http.StatusOK, map[string]any{"prompt": prompt})
+		case http.MethodDelete:
+			if !s.requireCSRF(w, r, ctx.Session) {
+				return
+			}
+			prompt, err := s.images.DeletePrompt(r.Context(), id)
+			if err != nil {
+				writeError(w, http.StatusNotFound, "image_prompt_not_found", "未找到 Prompt")
+				return
+			}
+			_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+				EventType: "images.prompt.deleted",
+				RiskLevel: "medium",
+				Summary:   "已删除 Images Prompt",
+				Payload:   imagePromptAuditPayload(prompt),
+			})
+			writeJSON(w, http.StatusOK, map[string]any{"prompt": prompt})
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "方法不允许")
+		}
+		return
+	}
+	if len(parts) == 2 && parts[1] == "use" && r.Method == http.MethodPost {
+		if !s.requireCSRF(w, r, ctx.Session) {
+			return
+		}
+		prompt, err := s.images.UsePrompt(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "image_prompt_not_found", "未找到 Prompt")
+			return
+		}
+		_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+			EventType: "images.prompt.used",
+			RiskLevel: "low",
+			Summary:   "已带入 Images Prompt",
+			Payload:   imagePromptAuditPayload(prompt),
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"prompt": prompt})
+		return
+	}
+	writeError(w, http.StatusNotFound, "image_prompt_not_found", "未找到 Prompt")
 }
 
 func (s *Server) handleGetImageStorageSettings(w http.ResponseWriter, r *http.Request) {

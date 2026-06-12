@@ -141,6 +141,34 @@ func (s *Service) UpdateSettings(ctx context.Context, settings storage.ImageProv
 	return s.Store.UpdateImageProviderSettings(ctx, settings, updateAPIKey, clearAPIKey)
 }
 
+func (s *Service) ListPrompts(ctx context.Context, limit int, q, mode, status string) ([]storage.ImagePrompt, error) {
+	return s.Store.ListImagePrompts(ctx, limit, q, mode, status)
+}
+
+func (s *Service) CreatePrompt(ctx context.Context, prompt storage.ImagePrompt) (storage.ImagePrompt, error) {
+	prompt = storage.NormalizeImagePrompt(prompt)
+	if err := ValidatePrompt(prompt); err != nil {
+		return storage.ImagePrompt{}, err
+	}
+	return s.Store.CreateImagePrompt(ctx, prompt)
+}
+
+func (s *Service) UpdatePrompt(ctx context.Context, id string, prompt storage.ImagePrompt) (storage.ImagePrompt, error) {
+	prompt = storage.NormalizeImagePrompt(prompt)
+	if err := ValidatePrompt(prompt); err != nil {
+		return storage.ImagePrompt{}, err
+	}
+	return s.Store.UpdateImagePrompt(ctx, id, prompt)
+}
+
+func (s *Service) DeletePrompt(ctx context.Context, id string) (storage.ImagePrompt, error) {
+	return s.Store.DeleteImagePrompt(ctx, id)
+}
+
+func (s *Service) UsePrompt(ctx context.Context, id string) (storage.ImagePrompt, error) {
+	return s.Store.UseImagePrompt(ctx, id)
+}
+
 func (s *Service) CreateJob(ctx context.Context, request ImagineRequest) (storage.ImageGenerationJob, error) {
 	request = NormalizeRequest(request)
 	storageSettings, err := s.Store.GetImageStorageSettings(ctx)

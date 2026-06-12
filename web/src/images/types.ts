@@ -1,8 +1,13 @@
-import type { ImageAsset, ImageGenerationJob, ImageProviderSettings, ImageStorageSettings } from "../app/types";
+import type { ImageAsset, ImageGenerationJob, ImagePrompt, ImageProviderSettings, ImageStorageSettings } from "../app/types";
 
 export type ImageMode = "text_to_image" | "image_to_image" | "multi_image_edit";
-export type ImagesTab = "generate" | "library" | "history" | "settings";
+export type ImagesTab = "generate" | "prompts" | "library" | "history" | "settings";
 export type ImageLibraryScope = "public" | "private";
+
+export interface AppliedImagePrompt {
+  prompt: ImagePrompt;
+  nonce: number;
+}
 
 export interface ImageJobResponse {
   job?: ImageGenerationJob;
@@ -17,6 +22,18 @@ export interface ImagePrivateStatus {
 export interface ImageUploadResponse {
   asset?: ImageAsset;
   duplicate?: boolean;
+}
+
+export interface ImagePromptDraft {
+  title: string;
+  description: string;
+  prompt: string;
+  mode: ImageMode;
+  model: string;
+  aspectRatio: string;
+  resolution: string;
+  imageCount: number;
+  tags: string[];
 }
 
 export interface ImageSettingsDraft extends Required<ImageProviderSettings> {

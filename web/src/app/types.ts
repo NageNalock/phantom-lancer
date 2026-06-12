@@ -449,6 +449,25 @@ export interface ImageAsset {
   updatedAt?: string;
 }
 
+export interface ImagePrompt {
+  id: string;
+  title: string;
+  description?: string;
+  prompt: string;
+  mode: string;
+  model?: string;
+  aspectRatio?: string;
+  resolution?: string;
+  imageCount?: number;
+  tags?: string[];
+  status?: string;
+  useCount?: number;
+  lastUsedAt?: string;
+  deletedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 interface ImageGenerationSource {
   id?: string;
   jobId?: string;
@@ -506,6 +525,7 @@ export interface ImagesPayload {
   status?: ImageStatus;
   jobs?: ImageGenerationJob[];
   assets?: ImageAsset[];
+  prompts?: ImagePrompt[];
   count?: number;
 }
 

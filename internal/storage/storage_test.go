@@ -497,6 +497,82 @@ func TestImageAssetPrivateFiltering(t *testing.T) {
 	}
 }
 
+func TestImagePromptLibraryCRUDUseAndSoftDelete(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	created, err := store.CreateImagePrompt(ctx, ImagePrompt{
+		Title:       "Workbench portrait",
+		Description: "图生图人物风格模板",
+		Prompt:      "Keep the input composition, refine lighting, and preserve identity.",
+		Mode:        "image_to_image",
+		Model:       "grok-imagine-image-quality",
+		AspectRatio: "1:1",
+		Resolution:  "1k",
+		ImageCount:  2,
+		Tags:        []string{"portrait", "reference", "portrait"},
+	})
+	if err != nil {
+		t.Fatalf("create prompt: %v", err)
+	}
+	if created.ID == "" || created.Status != "active" {
+		t.Fatalf("unexpected created prompt: %#v", created)
+	}
+	if len(created.Tags) != 2 {
+		t.Fatalf("tags should be deduplicated, got %#v", created.Tags)
+	}
+
+	listed, err := store.ListImagePrompts(ctx, 20, "portrait", "image_to_image", "")
+	if err != nil {
+		t.Fatalf("list prompts: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("listed prompts = %#v, want %s", listed, created.ID)
+	}
+
+	updated, err := store.UpdateImagePrompt(ctx, created.ID, ImagePrompt{
+		Title:      "Quiet product shot",
+		Prompt:     "Generate a quiet product shot on a neutral desk.",
+		Mode:       "text_to_image",
+		Model:      "grok-imagine-image",
+		ImageCount: 1,
+		Tags:       []string{"product"},
+	})
+	if err != nil {
+		t.Fatalf("update prompt: %v", err)
+	}
+	if updated.Title != "Quiet product shot" || updated.Mode != "text_to_image" || updated.UseCount != 0 {
+		t.Fatalf("unexpected updated prompt: %#v", updated)
+	}
+
+	used, err := store.UseImagePrompt(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("use prompt: %v", err)
+	}
+	if used.UseCount != 1 || used.LastUsedAt == "" {
+		t.Fatalf("use count or last used not updated: %#v", used)
+	}
+
+	deleted, err := store.DeleteImagePrompt(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("delete prompt: %v", err)
+	}
+	if deleted.Status != "deleted" || deleted.DeletedAt == "" {
+		t.Fatalf("prompt should be soft deleted: %#v", deleted)
+	}
+	active, err := store.ListImagePrompts(ctx, 20, "", "", "")
+	if err != nil {
+		t.Fatalf("list active prompts: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("soft deleted prompt should not be listed by default: %#v", active)
+	}
+}
+
 // ---- TLS + session tests (Phase 5) ----
 
 func TestRuntimeSettingsTLSFieldsRoundTrip(t *testing.T) {

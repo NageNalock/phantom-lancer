@@ -47,6 +47,10 @@ function statusTone(status: string | undefined): Tone {
   return status === "active" ? "good" : status === "disabled" || status === "revoked" ? "danger" : "neutral";
 }
 
+function registryTagPullBusyKey(tag: DockerRegistryTag): string {
+  return `registry-pull-${tag.repository}:${tag.tag}`;
+}
+
 export function RegistryPanel({
   busy,
   createCredential,
@@ -60,6 +64,7 @@ export function RegistryPanel({
   newCredentialSecret,
   objectProfiles,
   openRepository,
+  pullRegistryTag,
   registrySettings,
   registryStatus,
   repoTags,
@@ -84,6 +89,7 @@ export function RegistryPanel({
   newCredentialSecret: string;
   objectProfiles: ObjectStorageProfile[];
   openRepository: (repo: string) => void;
+  pullRegistryTag: (item: DockerRegistryTag) => void;
   registrySettings: DockerRegistrySettings;
   registryStatus: DockerRegistryStatus | null;
   repoTags: DockerRegistryTag[];
@@ -201,7 +207,10 @@ docker push ${registryHost(registrySettings.publicUrl)}/personal/my-app:latest`}
                 <span className="mono text-xs">{item.digest}</span>,
                 formatBytes(item.manifest?.sizeBytes || 0),
                 item.manifest?.pushedAt || item.updatedAt || "-",
-                <Button disabled={busy === `tag-delete-${item.repository}-${item.tag}`} onClick={() => deleteTag(item)} tone="danger">删除 tag</Button>,
+                <span className="flex gap-1">
+                  <Button disabled={busy === registryTagPullBusyKey(item)} onClick={() => pullRegistryTag(item)}>拉取到本机</Button>
+                  <Button disabled={busy === `tag-delete-${item.repository}-${item.tag}`} onClick={() => deleteTag(item)} tone="danger">删除 tag</Button>
+                </span>,
               ],
             }))}
           />

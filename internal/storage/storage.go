@@ -94,16 +94,16 @@ type AuditEvent struct {
 }
 
 type RuntimeSettings struct {
-	AllowedRoots       []string `json:"allowedRoots"`
-	CookieSecure       bool     `json:"cookieSecure"`
-	Addr               string   `json:"addr"`
-	TLSEnabled         bool     `json:"tlsEnabled"`
-	TLSCertFile        string   `json:"tlsCertFile"`
-	TLSKeyFile         string   `json:"tlsKeyFile"`
-	TLSOwnerUIDCheck   bool     `json:"tlsOwnerUidCheck"`
-	HSTSEnabled        bool     `json:"hstsEnabled"`
-	HSTSMaxAgeSeconds  int      `json:"hstsMaxAgeSeconds"`
-	UpdatedAt          string   `json:"updatedAt,omitempty"`
+	AllowedRoots      []string `json:"allowedRoots"`
+	CookieSecure      bool     `json:"cookieSecure"`
+	Addr              string   `json:"addr"`
+	TLSEnabled        bool     `json:"tlsEnabled"`
+	TLSCertFile       string   `json:"tlsCertFile"`
+	TLSKeyFile        string   `json:"tlsKeyFile"`
+	TLSOwnerUIDCheck  bool     `json:"tlsOwnerUidCheck"`
+	HSTSEnabled       bool     `json:"hstsEnabled"`
+	HSTSMaxAgeSeconds int      `json:"hstsMaxAgeSeconds"`
+	UpdatedAt         string   `json:"updatedAt,omitempty"`
 }
 
 type SystemUpdateCheck struct {
@@ -148,20 +148,20 @@ type SystemUpdateJob struct {
 }
 
 type CodexGatewaySettings struct {
-	ID                             string `json:"id"`
-	Enabled                        bool   `json:"enabled"`
-	BaseURL                        string `json:"baseUrl"`
-	OAuthAuthURL                   string `json:"oauthAuthUrl"`
-	OAuthTokenURL                  string `json:"oauthTokenUrl"`
-	OAuthClientID                  string `json:"oauthClientId"`
-	OAuthRedirectURI               string `json:"oauthRedirectUri"`
-	RequestTimeoutSeconds          int    `json:"requestTimeoutSeconds"`
-	RefreshMarginSeconds           int    `json:"refreshMarginSeconds"`
-	AccountHealthCheckIntervalSeconds int  `json:"accountHealthCheckIntervalSeconds"`
-	DefaultInstructions            string `json:"defaultInstructions"`
-	InstallationID                 string `json:"installationId"`
-	CreatedAt                      string `json:"createdAt"`
-	UpdatedAt                      string `json:"updatedAt"`
+	ID                                string `json:"id"`
+	Enabled                           bool   `json:"enabled"`
+	BaseURL                           string `json:"baseUrl"`
+	OAuthAuthURL                      string `json:"oauthAuthUrl"`
+	OAuthTokenURL                     string `json:"oauthTokenUrl"`
+	OAuthClientID                     string `json:"oauthClientId"`
+	OAuthRedirectURI                  string `json:"oauthRedirectUri"`
+	RequestTimeoutSeconds             int    `json:"requestTimeoutSeconds"`
+	RefreshMarginSeconds              int    `json:"refreshMarginSeconds"`
+	AccountHealthCheckIntervalSeconds int    `json:"accountHealthCheckIntervalSeconds"`
+	DefaultInstructions               string `json:"defaultInstructions"`
+	InstallationID                    string `json:"installationId"`
+	CreatedAt                         string `json:"createdAt"`
+	UpdatedAt                         string `json:"updatedAt"`
 }
 
 type CodexGatewayAccount struct {
@@ -377,6 +377,25 @@ type ObjectStorageProfile struct {
 	LastError         string `json:"lastError,omitempty"`
 	CreatedAt         string `json:"createdAt"`
 	UpdatedAt         string `json:"updatedAt"`
+}
+
+type ImagePrompt struct {
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Description string   `json:"description,omitempty"`
+	Prompt      string   `json:"prompt"`
+	Mode        string   `json:"mode"`
+	Model       string   `json:"model,omitempty"`
+	AspectRatio string   `json:"aspectRatio,omitempty"`
+	Resolution  string   `json:"resolution,omitempty"`
+	ImageCount  int      `json:"imageCount"`
+	Tags        []string `json:"tags,omitempty"`
+	Status      string   `json:"status"`
+	UseCount    int      `json:"useCount"`
+	LastUsedAt  string   `json:"lastUsedAt,omitempty"`
+	DeletedAt   string   `json:"deletedAt,omitempty"`
+	CreatedAt   string   `json:"createdAt"`
+	UpdatedAt   string   `json:"updatedAt"`
 }
 
 type ImageAsset struct {
@@ -1097,6 +1116,27 @@ CREATE TABLE IF NOT EXISTS image_storage_settings (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS image_prompt_library (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  prompt TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'text_to_image',
+  model TEXT NOT NULL DEFAULT '',
+  aspect_ratio TEXT NOT NULL DEFAULT '',
+  resolution TEXT NOT NULL DEFAULT '',
+  image_count INTEGER NOT NULL DEFAULT 1,
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'active',
+  use_count INTEGER NOT NULL DEFAULT 0,
+  last_used_at TEXT NOT NULL DEFAULT '',
+  deleted_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_image_prompt_library_status_updated ON image_prompt_library(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_image_prompt_library_mode_updated ON image_prompt_library(mode, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_image_prompt_library_last_used ON image_prompt_library(last_used_at DESC);
 CREATE TABLE IF NOT EXISTS object_storage_profiles (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL DEFAULT '',
@@ -1532,13 +1572,13 @@ func (s *Store) EnsureRuntimeSettings(ctx context.Context, defaults RuntimeSetti
 	roots, _ := json.Marshal(defaults.AllowedRoots)
 	now := now()
 	values := map[string]string{
-		"allowed_roots":           string(roots),
-		"cookie_secure":           boolString(defaults.CookieSecure),
-		"http_tls_enabled":        boolString(defaults.TLSEnabled),
-		"http_tls_cert_file":      defaults.TLSCertFile,
-		"http_tls_key_file":       defaults.TLSKeyFile,
-		"http_tls_owner_uid_check": boolString(defaults.TLSOwnerUIDCheck || true),
-		"http_hsts_enabled":       boolString(defaults.HSTSEnabled),
+		"allowed_roots":             string(roots),
+		"cookie_secure":             boolString(defaults.CookieSecure),
+		"http_tls_enabled":          boolString(defaults.TLSEnabled),
+		"http_tls_cert_file":        defaults.TLSCertFile,
+		"http_tls_key_file":         defaults.TLSKeyFile,
+		"http_tls_owner_uid_check":  boolString(defaults.TLSOwnerUIDCheck || true),
+		"http_hsts_enabled":         boolString(defaults.HSTSEnabled),
 		"http_hsts_max_age_seconds": strconv.Itoa(defaults.HSTSMaxAgeSeconds),
 	}
 	if defaults.Addr != "" {
@@ -1626,13 +1666,13 @@ func (s *Store) UpdateRuntimeSettings(ctx context.Context, settings RuntimeSetti
 	roots, _ := json.Marshal(settings.AllowedRoots)
 	now := now()
 	values := map[string]string{
-		"allowed_roots":            string(roots),
-		"cookie_secure":              boolString(settings.CookieSecure),
-		"http_tls_enabled":         boolString(settings.TLSEnabled),
-		"http_tls_cert_file":       settings.TLSCertFile,
-		"http_tls_key_file":        settings.TLSKeyFile,
+		"allowed_roots":             string(roots),
+		"cookie_secure":             boolString(settings.CookieSecure),
+		"http_tls_enabled":          boolString(settings.TLSEnabled),
+		"http_tls_cert_file":        settings.TLSCertFile,
+		"http_tls_key_file":         settings.TLSKeyFile,
 		"http_tls_owner_uid_check":  boolString(settings.TLSOwnerUIDCheck),
-		"http_hsts_enabled":          boolString(settings.HSTSEnabled),
+		"http_hsts_enabled":         boolString(settings.HSTSEnabled),
 		"http_hsts_max_age_seconds": strconv.Itoa(settings.HSTSMaxAgeSeconds),
 	}
 	if settings.Addr != "" {
@@ -1790,12 +1830,12 @@ func (s *Store) BackupDatabase(ctx context.Context, path string) error {
 
 func DefaultCodexGatewaySettings() CodexGatewaySettings {
 	return CodexGatewaySettings{
-		ID:                    "default",
-		BaseURL:               "https://chatgpt.com/backend-api",
-		OAuthAuthURL:          "https://auth.openai.com/oauth/authorize",
-		OAuthTokenURL:         "https://auth.openai.com/oauth/token",
-		OAuthClientID:         "app_EMoamEEZ73f0CkXaXp7hrann",
-		OAuthRedirectURI:      "http://localhost:1455/auth/callback",
+		ID:                                "default",
+		BaseURL:                           "https://chatgpt.com/backend-api",
+		OAuthAuthURL:                      "https://auth.openai.com/oauth/authorize",
+		OAuthTokenURL:                     "https://auth.openai.com/oauth/token",
+		OAuthClientID:                     "app_EMoamEEZ73f0CkXaXp7hrann",
+		OAuthRedirectURI:                  "http://localhost:1455/auth/callback",
 		RequestTimeoutSeconds:             600,
 		RefreshMarginSeconds:              300,
 		AccountHealthCheckIntervalSeconds: 43200,
@@ -3217,6 +3257,184 @@ func scanObjectStorageProfile(row workspaceScanner) (ObjectStorageProfile, error
 	return NormalizeObjectStorageProfile(profile), nil
 }
 
+const imagePromptColumns = `id, title, description, prompt, mode, model, aspect_ratio, resolution, image_count, tags_json, status, use_count, last_used_at, deleted_at, created_at, updated_at`
+
+func NormalizeImagePrompt(prompt ImagePrompt) ImagePrompt {
+	prompt.ID = strings.TrimSpace(prompt.ID)
+	prompt.Title = previewText(prompt.Title, 120)
+	prompt.Description = previewText(prompt.Description, 1000)
+	prompt.Prompt = strings.TrimSpace(prompt.Prompt)
+	prompt.Mode = strings.TrimSpace(prompt.Mode)
+	if prompt.Mode == "" {
+		prompt.Mode = "text_to_image"
+	}
+	prompt.Model = strings.TrimSpace(prompt.Model)
+	prompt.AspectRatio = strings.TrimSpace(prompt.AspectRatio)
+	prompt.Resolution = strings.TrimSpace(prompt.Resolution)
+	if prompt.ImageCount <= 0 {
+		prompt.ImageCount = 1
+	}
+	prompt.Tags = normalizeImagePromptTags(prompt.Tags)
+	prompt.Status = strings.TrimSpace(strings.ToLower(prompt.Status))
+	if prompt.Status == "" {
+		prompt.Status = "active"
+	}
+	if prompt.Status != "active" && prompt.Status != "deleted" {
+		prompt.Status = "active"
+	}
+	prompt.LastUsedAt = strings.TrimSpace(prompt.LastUsedAt)
+	prompt.DeletedAt = strings.TrimSpace(prompt.DeletedAt)
+	return prompt
+}
+
+func normalizeImagePromptTags(tags []string) []string {
+	out := make([]string, 0, len(tags))
+	seen := map[string]bool{}
+	for _, tag := range tags {
+		tag = previewText(tag, 32)
+		if tag == "" {
+			continue
+		}
+		key := strings.ToLower(tag)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, tag)
+		if len(out) >= 12 {
+			break
+		}
+	}
+	return out
+}
+
+func (s *Store) CreateImagePrompt(ctx context.Context, prompt ImagePrompt) (ImagePrompt, error) {
+	if prompt.ID == "" {
+		id, err := ids.New("imgprompt")
+		if err != nil {
+			return ImagePrompt{}, err
+		}
+		prompt.ID = id
+	}
+	prompt = NormalizeImagePrompt(prompt)
+	now := now()
+	if prompt.CreatedAt == "" {
+		prompt.CreatedAt = now
+	}
+	prompt.UpdatedAt = now
+	tagsJSON, _ := json.Marshal(prompt.Tags)
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO image_prompt_library (
+  id, title, description, prompt, mode, model, aspect_ratio, resolution, image_count, tags_json, status, use_count, last_used_at, deleted_at, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		prompt.ID, prompt.Title, prompt.Description, prompt.Prompt, prompt.Mode, prompt.Model, prompt.AspectRatio, prompt.Resolution, prompt.ImageCount, string(tagsJSON), prompt.Status, prompt.UseCount, prompt.LastUsedAt, prompt.DeletedAt, prompt.CreatedAt, prompt.UpdatedAt)
+	if err != nil {
+		return ImagePrompt{}, err
+	}
+	return s.GetImagePrompt(ctx, prompt.ID)
+}
+
+func (s *Store) GetImagePrompt(ctx context.Context, id string) (ImagePrompt, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+imagePromptColumns+` FROM image_prompt_library WHERE id = ?`, id)
+	prompt, err := scanImagePrompt(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ImagePrompt{}, ErrNotFound
+	}
+	return prompt, err
+}
+
+func (s *Store) ListImagePrompts(ctx context.Context, limit int, q, mode, status string) ([]ImagePrompt, error) {
+	if limit <= 0 || limit > 300 {
+		limit = 120
+	}
+	query := `SELECT ` + imagePromptColumns + ` FROM image_prompt_library`
+	args := []any{}
+	clauses := []string{}
+	if status = strings.TrimSpace(strings.ToLower(status)); status == "" {
+		clauses = append(clauses, "status = 'active'")
+	} else if status != "all" {
+		clauses = append(clauses, "status = ?")
+		args = append(args, status)
+	}
+	if mode = strings.TrimSpace(mode); mode != "" && mode != "all" {
+		clauses = append(clauses, "mode = ?")
+		args = append(args, mode)
+	}
+	if q = strings.TrimSpace(q); q != "" {
+		like := "%" + q + "%"
+		clauses = append(clauses, "(title LIKE ? OR description LIKE ? OR prompt LIKE ? OR tags_json LIKE ?)")
+		args = append(args, like, like, like, like)
+	}
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	query += " ORDER BY updated_at DESC LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ImagePrompt{}
+	for rows.Next() {
+		prompt, err := scanImagePrompt(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, prompt)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpdateImagePrompt(ctx context.Context, id string, prompt ImagePrompt) (ImagePrompt, error) {
+	existing, err := s.GetImagePrompt(ctx, id)
+	if err != nil {
+		return ImagePrompt{}, err
+	}
+	if existing.Status == "deleted" {
+		return ImagePrompt{}, ErrNotFound
+	}
+	prompt = NormalizeImagePrompt(prompt)
+	prompt.ID = existing.ID
+	prompt.Status = existing.Status
+	prompt.UseCount = existing.UseCount
+	prompt.LastUsedAt = existing.LastUsedAt
+	prompt.DeletedAt = existing.DeletedAt
+	prompt.CreatedAt = existing.CreatedAt
+	prompt.UpdatedAt = now()
+	tagsJSON, _ := json.Marshal(prompt.Tags)
+	_, err = s.db.ExecContext(ctx, `
+UPDATE image_prompt_library SET
+  title = ?, description = ?, prompt = ?, mode = ?, model = ?, aspect_ratio = ?, resolution = ?, image_count = ?, tags_json = ?, status = ?, use_count = ?, last_used_at = ?, deleted_at = ?, updated_at = ?
+WHERE id = ?`,
+		prompt.Title, prompt.Description, prompt.Prompt, prompt.Mode, prompt.Model, prompt.AspectRatio, prompt.Resolution, prompt.ImageCount, string(tagsJSON), prompt.Status, prompt.UseCount, prompt.LastUsedAt, prompt.DeletedAt, prompt.UpdatedAt, prompt.ID)
+	if err != nil {
+		return ImagePrompt{}, err
+	}
+	return s.GetImagePrompt(ctx, prompt.ID)
+}
+
+func (s *Store) DeleteImagePrompt(ctx context.Context, id string) (ImagePrompt, error) {
+	timestamp := now()
+	_, err := s.db.ExecContext(ctx, `UPDATE image_prompt_library SET status = 'deleted', deleted_at = ?, updated_at = ? WHERE id = ? AND status != 'deleted'`, timestamp, timestamp, id)
+	if err != nil {
+		return ImagePrompt{}, err
+	}
+	return s.GetImagePrompt(ctx, id)
+}
+
+func (s *Store) UseImagePrompt(ctx context.Context, id string) (ImagePrompt, error) {
+	timestamp := now()
+	result, err := s.db.ExecContext(ctx, `UPDATE image_prompt_library SET use_count = use_count + 1, last_used_at = ?, updated_at = ? WHERE id = ? AND status = 'active'`, timestamp, timestamp, id)
+	if err != nil {
+		return ImagePrompt{}, err
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return ImagePrompt{}, ErrNotFound
+	}
+	return s.GetImagePrompt(ctx, id)
+}
+
 const imageAssetColumns = `id, asset_type, status, private, provider, model, job_id, source_role, slot, prompt_preview, revised_prompt_preview, original_filename, original_source_redacted, mime_type, extension, size_bytes, width, height, checksum_sha256, local_name, storage_backend, object_storage_profile_id, s3_bucket, s3_region, s3_endpoint_label, s3_key, s3_etag, private_at, archived_at, deleted_at, deleted_reason, last_error, created_at, updated_at`
 
 func (s *Store) CreateImageAsset(ctx context.Context, asset ImageAsset) (ImageAsset, error) {
@@ -4321,6 +4539,17 @@ func scanImageStorageSettings(row workspaceScanner) (ImageStorageSettings, error
 	settings.S3ForcePathStyle = forcePath == 1
 	settings.FallbackToLocal = fallback == 1
 	return NormalizeImageStorageSettings(settings), nil
+}
+
+func scanImagePrompt(row workspaceScanner) (ImagePrompt, error) {
+	var prompt ImagePrompt
+	var tagsJSON string
+	err := row.Scan(&prompt.ID, &prompt.Title, &prompt.Description, &prompt.Prompt, &prompt.Mode, &prompt.Model, &prompt.AspectRatio, &prompt.Resolution, &prompt.ImageCount, &tagsJSON, &prompt.Status, &prompt.UseCount, &prompt.LastUsedAt, &prompt.DeletedAt, &prompt.CreatedAt, &prompt.UpdatedAt)
+	if err != nil {
+		return ImagePrompt{}, err
+	}
+	_ = json.Unmarshal([]byte(tagsJSON), &prompt.Tags)
+	return NormalizeImagePrompt(prompt), nil
 }
 
 func scanImageAsset(row workspaceScanner) (ImageAsset, error) {

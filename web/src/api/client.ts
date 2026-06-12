@@ -58,6 +58,8 @@ export function friendlyError(error: unknown): string {
   if (err.code === "api_key_missing") return "Images 模块尚未配置 xAI API Key。";
   if (err.code === "provider_failed") return `图片模型调用失败：${err.message}`;
   if (err.code === "images_settings_invalid") return `Images 设置无效：${err.message}`;
+  if (err.code === "image_prompt_invalid") return `Prompt 无效：${err.message}`;
+  if (err.code === "image_prompt_not_found") return "未找到该 Prompt，可能已被删除。";
   if (err.code === "object_storage_profile_invalid") return `对象存储 profile 无效：${err.message}`;
   if (err.code === "object_storage_profile_in_use") return err.message || "该对象存储 profile 仍被模块引用，无法删除。";
   if (err.code === "object_storage_test_failed") return `对象存储连接测试失败：${err.message}`;

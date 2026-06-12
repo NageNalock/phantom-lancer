@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../app/App";
-import type { ApiError, AppData, ImageAsset, ImageGenerationJob, ObjectStorageProfile } from "../app/types";
+import type { ApiError, AppData, ImageAsset, ImageGenerationJob, ImagePrompt, ObjectStorageProfile } from "../app/types";
 import { friendlyError } from "../api/client";
 import { useDangerConfirm } from "../components/ui";
 import { defaultImageSettings, defaultImageStorageSettings } from "../domain/labels";
 import { useQueryParamState } from "../hooks/useQueryParamState";
-import { GeneratePanel, HistoryPanel, ImageStorageSettingsPanel, ImagesInspector, ImagesTabs, LibraryPanel, ProviderSettingsPanel } from "../images/components";
-import type { ImageJobResponse, ImageLibraryScope, ImagePrivateStatus, ImageSettingsDraft, ImageStorageSettingsDraft, ImageUploadResponse, ImagesTab } from "../images/types";
+import { GeneratePanel, HistoryPanel, ImageStorageSettingsPanel, ImagesInspector, ImagesTabs, LibraryPanel, PromptLibraryPanel, ProviderSettingsPanel } from "../images/components";
+import type { AppliedImagePrompt, ImageJobResponse, ImageLibraryScope, ImagePrivateStatus, ImagePromptDraft, ImageSettingsDraft, ImageStorageSettingsDraft, ImageUploadResponse, ImagesTab } from "../images/types";
 
-const IMAGE_TAB_IDS: ImagesTab[] = ["generate", "library", "history", "settings"];
+const IMAGE_TAB_IDS: ImagesTab[] = ["generate", "prompts", "library", "history", "settings"];
 const IMAGE_CLEAR_KEYS = ["codex", "codexInbox", "codexRuntime", "gateway", "docker", "settings"];
 
 export function ImagesView({ actions, data }: { actions: AppActions; data: AppData }) {
@@ -21,6 +21,8 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   const [privateExpiresAt, setPrivateExpiresAt] = useState("");
   const [privateAssets, setPrivateAssets] = useState<ImageAsset[]>([]);
   const [imageToImageAsset, setImageToImageAsset] = useState<ImageAsset | undefined>(undefined);
+  const [appliedPrompt, setAppliedPrompt] = useState<AppliedImagePrompt | undefined>(undefined);
+  const [selectedPromptId, setSelectedPromptId] = useState("");
   const [objectProfiles, setObjectProfiles] = useState<ObjectStorageProfile[]>([]);
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
@@ -29,8 +31,10 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   const status = data.images.status || data.dashboard.images;
   const jobs = data.images.jobs || [];
   const assets = data.images.assets || [];
+  const prompts = data.images.prompts || [];
   const libraryAssets = libraryScope === "private" ? privateAssets : assets;
   const selectedAsset = libraryAssets.find((asset) => asset.id === selectedAssetId) || libraryAssets[0];
+  const selectedPrompt = prompts.find((prompt) => prompt.id === selectedPromptId) || prompts[0];
   const historyJobs = useMemo(() => {
     if (!currentJob || jobs.some((job) => job.id === currentJob.id)) return jobs;
     return [currentJob, ...jobs];
@@ -48,6 +52,11 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     if (!selectedAssetId || libraryAssets.some((asset) => asset.id === selectedAssetId)) return;
     setSelectedAssetId("");
   }, [libraryAssets, selectedAssetId]);
+
+  useEffect(() => {
+    if (!selectedPromptId || prompts.some((prompt) => prompt.id === selectedPromptId)) return;
+    setSelectedPromptId("");
+  }, [prompts, selectedPromptId]);
 
   useEffect(() => {
     if (!hasActiveJob) return;
@@ -248,6 +257,92 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     actions.setToast("已选择图片库图片作为图生图参考", "good");
   }
 
+  async function createPrompt(draft: ImagePromptDraft): Promise<ImagePrompt | undefined> {
+    setBusy("prompt-save");
+    try {
+      const result = await actions.api<{ prompt?: ImagePrompt }>("/api/images/prompts", {
+        method: "POST",
+        csrf: actions.csrf,
+        body: draft,
+      });
+      await actions.refreshImages();
+      if (result.prompt?.id) setSelectedPromptId(result.prompt.id);
+      actions.setToast("Prompt 已保存", "good");
+      return result.prompt;
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+      return undefined;
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function updatePrompt(id: string, draft: ImagePromptDraft): Promise<ImagePrompt | undefined> {
+    setBusy(`prompt:${id}`);
+    try {
+      const result = await actions.api<{ prompt?: ImagePrompt }>(`/api/images/prompts/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        csrf: actions.csrf,
+        body: draft,
+      });
+      await actions.refreshImages();
+      if (result.prompt?.id) setSelectedPromptId(result.prompt.id);
+      actions.setToast("Prompt 已更新", "good");
+      return result.prompt;
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+      return undefined;
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function deletePrompt(prompt: ImagePrompt) {
+    const confirmed = await confirmDanger({
+      title: "删除 Prompt",
+      objectName: prompt.title || prompt.id,
+      body: "该操作会将 Prompt 从库中移除，已经创建的 Images 任务不会被删除。",
+      confirmLabel: "删除 Prompt",
+      impact: ["Prompt 库默认不再展示该条目。", "已经复制到生成表单里的内容不会被自动清空。"],
+      recovery: "当前版本不提供前端恢复入口；后端会保留软删除记录。",
+    });
+    if (!confirmed) return;
+    setBusy(`prompt-delete:${prompt.id}`);
+    try {
+      await actions.api(`/api/images/prompts/${encodeURIComponent(prompt.id)}`, {
+        method: "DELETE",
+        csrf: actions.csrf,
+      });
+      await actions.refreshImages();
+      if (selectedPromptId === prompt.id) setSelectedPromptId("");
+      actions.setToast("Prompt 已删除", "good");
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function usePrompt(prompt: ImagePrompt) {
+    setBusy(`prompt-use:${prompt.id}`);
+    try {
+      const result = await actions.api<{ prompt?: ImagePrompt }>(`/api/images/prompts/${encodeURIComponent(prompt.id)}/use`, {
+        method: "POST",
+        csrf: actions.csrf,
+      });
+      const nextPrompt = result.prompt || prompt;
+      setAppliedPrompt({ prompt: nextPrompt, nonce: Date.now() });
+      setSelectedPromptId(nextPrompt.id);
+      setActiveTab("generate");
+      await actions.refreshImages();
+      actions.setToast("Prompt 已带入生成任务", "good");
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function refreshPrivateStatus(loadAssets = false) {
     try {
       const status = await actions.api<ImagePrivateStatus>("/api/images/library/private/status");
@@ -346,7 +441,36 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
       <div className="grid min-h-[calc(100dvh-105px)] grid-cols-[minmax(0,1fr)_320px] max-xl:grid-cols-1">
         <div className="grid content-start gap-4 p-4">
           <ImagesTabs active={activeTab} hrefFor={tabHref} onChange={setActiveTab} />
-          {activeTab === "generate" ? <GeneratePanel busy={busy === "job"} hasApiKey={Boolean(settings.hasApiKey)} latestJob={latestJob} libraryImage={imageToImageAsset} onClearLibraryImage={() => setImageToImageAsset(undefined)} onSubmit={submitJob} settings={settings} storageSettings={storageSettings} /> : null}
+          {activeTab === "generate" ? (
+            <GeneratePanel
+              appliedPrompt={appliedPrompt}
+              busy={busy === "job"}
+              hasApiKey={Boolean(settings.hasApiKey)}
+              latestJob={latestJob}
+              libraryImage={imageToImageAsset}
+              onApplyPrompt={(prompt) => void usePrompt(prompt)}
+              onClearLibraryImage={() => setImageToImageAsset(undefined)}
+              onOpenPromptLibrary={() => setActiveTab("prompts")}
+              onSubmit={submitJob}
+              prompts={prompts}
+              settings={settings}
+              storageSettings={storageSettings}
+            />
+          ) : null}
+          {activeTab === "prompts" ? (
+            <PromptLibraryPanel
+              busy={busy}
+              onCreate={createPrompt}
+              onDelete={(prompt) => void deletePrompt(prompt)}
+              onRefresh={actions.refreshImages}
+              onSelect={(prompt) => setSelectedPromptId(prompt.id)}
+              onUpdate={updatePrompt}
+              onUse={(prompt) => void usePrompt(prompt)}
+              prompts={prompts}
+              selectedId={selectedPrompt?.id || ""}
+              settings={settings}
+            />
+          ) : null}
           {activeTab === "library" ? (
             <LibraryPanel
               assets={libraryAssets}
@@ -379,7 +503,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
             </div>
           ) : null}
         </div>
-        <ImagesInspector activeTab={activeTab} asset={selectedAsset} assets={libraryAssets} jobs={historyJobs} libraryScope={libraryScope} onArchive={(asset) => void archiveAsset(asset)} onDelete={(asset) => void deleteAsset(asset)} onMarkPrivate={(asset, nextPrivate) => void setAssetPrivate(asset, nextPrivate)} status={status} storageSettings={storageSettings} />
+        <ImagesInspector activeTab={activeTab} asset={selectedAsset} assets={libraryAssets} jobs={historyJobs} libraryScope={libraryScope} onArchive={(asset) => void archiveAsset(asset)} onDelete={(asset) => void deleteAsset(asset)} onMarkPrivate={(asset, nextPrivate) => void setAssetPrivate(asset, nextPrivate)} prompt={selectedPrompt} prompts={prompts} status={status} storageSettings={storageSettings} />
       </div>
       {dangerConfirmDialog}
     </>

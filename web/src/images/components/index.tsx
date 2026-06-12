@@ -1,15 +1,16 @@
 import type { FormEvent, ReactNode } from "react";
-import { useEffect, useId, useRef, useState } from "react";
-import type { ImageAsset, ImageGenerationJob, ImageProviderSettings, ImageStatus, ImageStorageSettings, ObjectStorageProfile, Tone } from "../../app/types";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import type { ImageAsset, ImageGenerationJob, ImagePrompt, ImageProviderSettings, ImageStatus, ImageStorageSettings, ObjectStorageProfile, Tone } from "../../app/types";
 import { Button, CheckLabel, ContextList, EmptyState, Field, ImageDropInput, Notice, Panel, Pill, SubTabs } from "../../components/ui";
 import { formatBytes } from "../../utils/format";
 import { defaultImageSettings, defaultImageStorageSettings, formatDate, imageAssetTypeLabel, imageJobStatusLabel, imageModeLabel, imageStatusLabel, imageStorageBackendLabel } from "../../domain/labels";
-import type { ImageLibraryScope, ImageMode, ImageSettingsDraft, ImagesTab, ImageStorageSettingsDraft } from "../types";
+import type { AppliedImagePrompt, ImageLibraryScope, ImageMode, ImagePromptDraft, ImageSettingsDraft, ImagesTab, ImageStorageSettingsDraft } from "../types";
 import { ASPECT_OPTIONS, IMAGE_MODES, MODEL_OPTIONS, RESOLUTION_OPTIONS } from "../types";
 
 export function ImagesTabs({ active, hrefFor, onChange }: { active: ImagesTab; hrefFor?: (tab: ImagesTab) => string; onChange: (tab: ImagesTab) => void }) {
   const tabs: Array<{ id: ImagesTab; label: string }> = [
     { id: "generate", label: "生成" },
+    { id: "prompts", label: "Prompt 库" },
     { id: "library", label: "图片库" },
     { id: "history", label: "历史" },
     { id: "settings", label: "设置" },
@@ -18,32 +19,64 @@ export function ImagesTabs({ active, hrefFor, onChange }: { active: ImagesTab; h
 }
 
 export function GeneratePanel({
+  appliedPrompt,
   busy,
   hasApiKey,
   libraryImage,
   latestJob,
+  onApplyPrompt,
   onClearLibraryImage,
+  onOpenPromptLibrary,
   settings,
   storageSettings,
+  prompts,
   onSubmit,
 }: {
+  appliedPrompt?: AppliedImagePrompt;
   busy: boolean;
   hasApiKey: boolean;
   libraryImage?: ImageAsset;
   latestJob?: ImageGenerationJob;
+  onApplyPrompt?: (prompt: ImagePrompt) => void;
   onClearLibraryImage?: () => void;
+  onOpenPromptLibrary?: () => void;
   settings: ImageProviderSettings;
   storageSettings: ImageStorageSettings;
+  prompts?: ImagePrompt[];
   onSubmit: (data: FormData) => Promise<void>;
 }) {
   const [mode, setMode] = useState<ImageMode>("text_to_image");
   const defaults = { ...defaultImageSettings(), ...settings };
+  const [promptValue, setPromptValue] = useState("");
+  const [model, setModel] = useState(defaults.defaultModel);
+  const [aspectRatio, setAspectRatio] = useState(defaults.defaultAspectRatio);
+  const [resolution, setResolution] = useState(defaults.defaultResolution);
+  const [imageCount, setImageCount] = useState(1);
+  const [lastAppliedPromptTitle, setLastAppliedPromptTitle] = useState("");
   const responseFormatDefault = objectStorageEnabled(storageSettings) ? "b64_json" : defaults.defaultResponseFormat;
   const referenceSlots = mode === "text_to_image" ? 0 : mode === "image_to_image" ? 1 : 3;
 
   useEffect(() => {
     if (libraryImage) setMode("image_to_image");
   }, [libraryImage]);
+
+  useEffect(() => {
+    setModel((current) => current || defaults.defaultModel);
+    setAspectRatio((current) => current || defaults.defaultAspectRatio);
+    setResolution((current) => current || defaults.defaultResolution);
+  }, [defaults.defaultAspectRatio, defaults.defaultModel, defaults.defaultResolution]);
+
+  useEffect(() => {
+    if (!appliedPrompt) return;
+    const prompt = appliedPrompt.prompt;
+    setPromptValue(prompt.prompt || "");
+    setMode(normalizeImageMode(prompt.mode));
+    setModel(prompt.model || defaults.defaultModel);
+    setAspectRatio(prompt.aspectRatio || defaults.defaultAspectRatio);
+    setResolution(prompt.resolution || defaults.defaultResolution);
+    setImageCount(clampImageCount(prompt.imageCount || 1));
+    setLastAppliedPromptTitle(prompt.title || "");
+  }, [appliedPrompt, defaults.defaultAspectRatio, defaults.defaultModel, defaults.defaultResolution]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -73,14 +106,22 @@ export function GeneratePanel({
             ))}
           </fieldset>
 
+          <PromptInlinePicker
+            busy={busy}
+            lastAppliedTitle={lastAppliedPromptTitle}
+            onApply={onApplyPrompt}
+            onOpenLibrary={onOpenPromptLibrary}
+            prompts={prompts || []}
+          />
+
           <Field label="Prompt" help="最多 8000 字符；详细描述主体、风格、镜头和约束。">
-            <textarea className="textarea min-h-44" maxLength={8000} name="prompt" required />
+            <textarea className="textarea min-h-44" maxLength={8000} name="prompt" onChange={(event) => setPromptValue(event.target.value)} required value={promptValue} />
           </Field>
 
           <div className="grid grid-cols-2 gap-3 max-sm:grid-cols-1">
             <div className="col-span-2 max-sm:col-span-1">
               <Field label="模型">
-                <select className="select mono" defaultValue={defaults.defaultModel} name="model">
+                <select className="select mono" name="model" onChange={(event) => setModel(event.target.value)} value={model}>
                   {MODEL_OPTIONS.map((model) => (
                     <option key={model} value={model}>
                       {model}
@@ -90,7 +131,7 @@ export function GeneratePanel({
               </Field>
             </div>
             <Field label="比例">
-              <select className="select mono" defaultValue={defaults.defaultAspectRatio} name="aspect_ratio">
+              <select className="select mono" name="aspect_ratio" onChange={(event) => setAspectRatio(event.target.value)} value={aspectRatio}>
                 {ASPECT_OPTIONS.map((value) => (
                   <option key={value || "default"} value={value}>
                     {value || "默认"}
@@ -99,7 +140,7 @@ export function GeneratePanel({
               </select>
             </Field>
             <Field label="分辨率">
-              <select className="select mono" defaultValue={defaults.defaultResolution} name="resolution">
+              <select className="select mono" name="resolution" onChange={(event) => setResolution(event.target.value)} value={resolution}>
                 {RESOLUTION_OPTIONS.map((value) => (
                   <option key={value || "default"} value={value}>
                     {value || "默认"}
@@ -108,10 +149,14 @@ export function GeneratePanel({
               </select>
             </Field>
             <Field label="数量">
-              <input className="input mono" defaultValue={1} max={10} min={1} name="n" type="number" />
+              <input className="input mono" max={10} min={1} name="n" onChange={(event) => setImageCount(clampImageCount(Number(event.target.value || 1)))} type="number" value={imageCount} />
             </Field>
             <input name="response_format" readOnly type="hidden" value={responseFormatDefault} />
           </div>
+
+          {libraryImage && mode === "text_to_image" ? (
+            <Notice>图片库参考图已保留，但当前文生图模式不会提交参考图；切换到图生图后会继续使用这张图片。</Notice>
+          ) : null}
 
           {referenceSlots > 0 ? (
             <section className="grid gap-3 card-soft">
@@ -134,6 +179,70 @@ export function GeneratePanel({
       <Panel title="本次结果" subtitle="最近一次生成结果会保留在这里；完整记录见历史。">
         {latestJob ? <JobCard job={latestJob} /> : <EmptyState title="等待生成" body="填写 prompt 后创建一次 Images job。" />}
       </Panel>
+    </div>
+  );
+}
+
+function PromptInlinePicker({
+  busy,
+  lastAppliedTitle,
+  onApply,
+  onOpenLibrary,
+  prompts,
+}: {
+  busy: boolean;
+  lastAppliedTitle?: string;
+  onApply?: (prompt: ImagePrompt) => void;
+  onOpenLibrary?: () => void;
+  prompts: ImagePrompt[];
+}) {
+  const [selectedId, setSelectedId] = useState("");
+  const activePrompts = prompts.filter((prompt) => prompt.status !== "deleted");
+  const selected = activePrompts.find((prompt) => prompt.id === selectedId) || activePrompts[0];
+
+  useEffect(() => {
+    if (!selectedId && activePrompts[0]?.id) setSelectedId(activePrompts[0].id);
+    if (selectedId && !activePrompts.some((prompt) => prompt.id === selectedId)) setSelectedId(activePrompts[0]?.id || "");
+  }, [activePrompts, selectedId]);
+
+  if (!activePrompts.length) {
+    return (
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 max-sm:grid">
+        <div>
+          <strong className="text-sm">Prompt 库</strong>
+          <p className="muted mt-1 mb-0 text-xs">保存常用文生图和图生图 prompt 后，可在这里一键带入。</p>
+        </div>
+        <Button onClick={onOpenLibrary} type="button">
+          新建 Prompt
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-end gap-2 max-md:grid-cols-1">
+        <Field label="Prompt 库">
+          <select className="select" onChange={(event) => setSelectedId(event.target.value)} value={selected?.id || ""}>
+            {activePrompts.map((prompt) => (
+              <option key={prompt.id} value={prompt.id}>
+                {prompt.title}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Button disabled={busy || !selected} onClick={() => selected && onApply?.(selected)} type="button">
+          带入
+        </Button>
+        <Button onClick={onOpenLibrary} type="button">
+          管理
+        </Button>
+      </div>
+      <div className="muted flex flex-wrap gap-2 text-xs">
+        {selected ? <Pill>{imageModeLabel(selected.mode)}</Pill> : null}
+        {selected?.model ? <span className="mono">{selected.model}</span> : null}
+        {lastAppliedTitle ? <span>已带入：{lastAppliedTitle}</span> : null}
+      </div>
     </div>
   );
 }
@@ -178,6 +287,334 @@ export function HistoryPanel({ jobs, onRefresh }: { jobs: ImageGenerationJob[]; 
       )}
     </Panel>
   );
+}
+
+type ImagePromptFormState = Omit<ImagePromptDraft, "tags"> & { tagsText: string };
+
+export function PromptLibraryPanel({
+  busy,
+  onCreate,
+  onDelete,
+  onRefresh,
+  onSelect,
+  onUpdate,
+  onUse,
+  prompts,
+  selectedId,
+  settings,
+}: {
+  busy: string;
+  onCreate: (draft: ImagePromptDraft) => Promise<ImagePrompt | undefined>;
+  onDelete: (prompt: ImagePrompt) => void;
+  onRefresh: () => Promise<void>;
+  onSelect: (prompt: ImagePrompt) => void;
+  onUpdate: (id: string, draft: ImagePromptDraft) => Promise<ImagePrompt | undefined>;
+  onUse: (prompt: ImagePrompt) => void;
+  prompts: ImagePrompt[];
+  selectedId?: string;
+  settings: ImageProviderSettings;
+}) {
+  const [query, setQuery] = useState("");
+  const [modeFilter, setModeFilter] = useState("all");
+  const [editing, setEditing] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const selected = prompts.find((prompt) => prompt.id === selectedId) || prompts[0];
+  const [draft, setDraft] = useState<ImagePromptFormState>(() => promptFormFromPrompt(selected, settings));
+  const filtered = useMemo(() => filterPrompts(prompts, query, modeFilter), [prompts, query, modeFilter]);
+  const saving = busy === "prompt-save" || Boolean(selected && busy === `prompt:${selected.id}`);
+
+  useEffect(() => {
+    if (editing || creating) return;
+    setDraft(promptFormFromPrompt(selected, settings));
+  }, [creating, editing, selected, settings]);
+
+  function startCreate() {
+    setCreating(true);
+    setEditing(true);
+    setDraft(promptFormFromPrompt(undefined, settings));
+  }
+
+  function startEdit(prompt: ImagePrompt) {
+    onSelect(prompt);
+    setCreating(false);
+    setEditing(true);
+    setDraft(promptFormFromPrompt(prompt, settings));
+  }
+
+  function cancelEdit() {
+    setCreating(false);
+    setEditing(false);
+    setDraft(promptFormFromPrompt(selected, settings));
+  }
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const payload = promptDraftFromForm(draft);
+    const result = creating ? await onCreate(payload) : selected ? await onUpdate(selected.id, payload) : undefined;
+    if (!result) return;
+    setCreating(false);
+    setEditing(false);
+    onSelect(result);
+  }
+
+  return (
+    <Panel
+      actions={
+        <>
+          <Button onClick={() => void onRefresh()}>刷新</Button>
+          <Button onClick={startCreate} tone="primary">
+            新建 Prompt
+          </Button>
+        </>
+      }
+      subtitle="保存文生图、图生图和多图编辑常用 prompt；带入生成任务时不会自动覆盖图片库参考图。"
+      title="Prompt 库"
+    >
+      <div className="grid gap-4">
+        <div className="grid grid-cols-[minmax(0,1fr)_220px] gap-3 max-md:grid-cols-1">
+          <Field label="搜索">
+            <input className="input" onChange={(event) => setQuery(event.target.value)} value={query} />
+          </Field>
+          <Field label="模式">
+            <select className="select" onChange={(event) => setModeFilter(event.target.value)} value={modeFilter}>
+              <option value="all">全部</option>
+              {IMAGE_MODES.map((mode) => (
+                <option key={mode.id} value={mode.id}>
+                  {mode.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+
+        <div className="grid grid-cols-[minmax(280px,0.86fr)_minmax(0,1.35fr)] gap-4 max-xl:grid-cols-1">
+          <section className="min-w-0 overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--surface-soft)]">
+            <div className="flex items-center justify-between gap-3 border-b border-[var(--line)] px-3 py-2">
+              <strong className="text-sm">条目</strong>
+              <span className="muted mono text-xs">{filtered.length} / {prompts.length}</span>
+            </div>
+            {filtered.length ? (
+              <div className="max-h-[620px] overflow-y-auto">
+                {filtered.map((prompt) => {
+                  const selectedRow = prompt.id === selected?.id && !creating;
+                  return (
+                    <article className={`grid gap-2 border-b border-[var(--line)] p-3 last:border-b-0 ${selectedRow ? "bg-[var(--surface)] shadow-[inset_2px_0_0_var(--accent)]" : "hover:bg-[var(--surface)]"}`} key={prompt.id}>
+                      <button className="grid min-w-0 gap-2 text-left" onClick={() => {
+                        setCreating(false);
+                        setEditing(false);
+                        onSelect(prompt);
+                      }} type="button">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <strong className="min-w-0 truncate text-sm">{prompt.title}</strong>
+                          <Pill>{imageModeLabel(prompt.mode)}</Pill>
+                        </div>
+                        <p className="muted m-0 line-clamp-2 text-xs leading-relaxed">{prompt.description || prompt.prompt}</p>
+                        <div className="muted mono flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                          <span>used {prompt.useCount || 0}</span>
+                          {prompt.lastUsedAt ? <span>{formatDate(prompt.lastUsedAt)}</span> : null}
+                          {prompt.tags?.slice(0, 3).map((tag) => <span key={tag}>#{tag}</span>)}
+                        </div>
+                      </button>
+                      <div className="flex flex-wrap gap-2">
+                        <Button className="min-h-8 px-2 text-xs" disabled={busy === `prompt-use:${prompt.id}`} onClick={() => onUse(prompt)}>
+                          使用
+                        </Button>
+                        <Button className="min-h-8 px-2 text-xs" onClick={() => startEdit(prompt)}>
+                          编辑
+                        </Button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="p-3">
+                <EmptyState title="没有匹配 Prompt" body="调整搜索条件，或新建一个常用 Prompt。" />
+              </div>
+            )}
+          </section>
+
+          <section className="min-w-0 rounded-lg border border-[var(--line)] bg-[var(--surface)] p-4">
+            {editing ? (
+              <form className="grid gap-4" onSubmit={(event) => void save(event)}>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="m-0 text-sm font-semibold">{creating ? "新建 Prompt" : "编辑 Prompt"}</h3>
+                    <p className="muted mt-1 mb-0 text-xs">模板只保存文本和默认参数，参考图仍从生成表单或图片库选择。</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button onClick={cancelEdit} type="button">
+                      取消
+                    </Button>
+                    <Button disabled={saving} tone="primary" type="submit">
+                      {saving ? "保存中" : "保存"}
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-[minmax(0,1fr)_220px] gap-3 max-lg:grid-cols-1">
+                  <Field label="标题">
+                    <input className="input" maxLength={120} onChange={(event) => updateDraft("title", event.target.value)} required value={draft.title} />
+                  </Field>
+                  <Field label="适用模式">
+                    <select className="select" onChange={(event) => updateDraft("mode", event.target.value as ImageMode)} value={draft.mode}>
+                      {IMAGE_MODES.map((mode) => (
+                        <option key={mode.id} value={mode.id}>
+                          {mode.label}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                </div>
+
+                <Field label="Prompt" help="最多 8000 字符。图生图模板只保存文字意图，不绑定具体图片。">
+                  <textarea className="textarea min-h-48" maxLength={8000} onChange={(event) => updateDraft("prompt", event.target.value)} required value={draft.prompt} />
+                </Field>
+
+                <Field label="说明">
+                  <textarea className="textarea min-h-20" maxLength={1000} onChange={(event) => updateDraft("description", event.target.value)} value={draft.description} />
+                </Field>
+
+                <div className="grid grid-cols-4 gap-3 max-lg:grid-cols-2 max-sm:grid-cols-1">
+                  <Field label="模型">
+                    <select className="select mono" onChange={(event) => updateDraft("model", event.target.value)} value={draft.model}>
+                      {promptModelOptions(draft.model, settings).map((model) => (
+                        <option key={model || "default"} value={model}>
+                          {model || "模块默认"}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="比例">
+                    <select className="select mono" onChange={(event) => updateDraft("aspectRatio", event.target.value)} value={draft.aspectRatio}>
+                      {ASPECT_OPTIONS.map((value) => (
+                        <option key={value || "default"} value={value}>
+                          {value || "默认"}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="分辨率">
+                    <select className="select mono" onChange={(event) => updateDraft("resolution", event.target.value)} value={draft.resolution}>
+                      {RESOLUTION_OPTIONS.map((value) => (
+                        <option key={value || "default"} value={value}>
+                          {value || "默认"}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="数量">
+                    <input className="input mono" max={10} min={1} onChange={(event) => updateDraft("imageCount", clampImageCount(Number(event.target.value || 1)))} type="number" value={draft.imageCount} />
+                  </Field>
+                </div>
+
+                <Field label="标签" help="用逗号分隔，最多 12 个。">
+                  <input className="input" onChange={(event) => updateDraft("tagsText", event.target.value)} value={draft.tagsText} />
+                </Field>
+              </form>
+            ) : selected ? (
+              <PromptDetail onDelete={onDelete} onEdit={() => startEdit(selected)} onUse={onUse} prompt={selected} />
+            ) : (
+              <EmptyState title="暂无 Prompt" body="新建一个文生图或图生图 Prompt 后，可以一键带入生成任务。" />
+            )}
+          </section>
+        </div>
+      </div>
+    </Panel>
+  );
+
+  function updateDraft<Key extends keyof ImagePromptFormState>(key: Key, value: ImagePromptFormState[Key]) {
+    setDraft((current) => ({ ...current, [key]: value }));
+  }
+}
+
+function PromptDetail({ onDelete, onEdit, onUse, prompt }: { onDelete: (prompt: ImagePrompt) => void; onEdit: () => void; onUse: (prompt: ImagePrompt) => void; prompt: ImagePrompt }) {
+  return (
+    <div className="grid gap-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="m-0 break-words text-sm font-semibold">{prompt.title}</h3>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Pill>{imageModeLabel(prompt.mode)}</Pill>
+            {prompt.model ? <Pill>{prompt.model}</Pill> : null}
+            {prompt.aspectRatio ? <Pill>{prompt.aspectRatio}</Pill> : null}
+            {prompt.resolution ? <Pill>{prompt.resolution}</Pill> : null}
+          </div>
+        </div>
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button onClick={() => onUse(prompt)} tone="primary">
+            使用
+          </Button>
+          <Button onClick={onEdit}>编辑</Button>
+          <Button onClick={() => onDelete(prompt)} tone="danger">
+            删除
+          </Button>
+        </div>
+      </div>
+      {prompt.description ? <p className="muted m-0 text-sm leading-relaxed">{prompt.description}</p> : null}
+      <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+        <pre className="m-0 max-h-[360px] whitespace-pre-wrap break-words font-sans text-sm leading-6">{prompt.prompt}</pre>
+      </div>
+      <ContextList
+        items={[
+          ["数量", prompt.imageCount || 1],
+          ["使用次数", prompt.useCount || 0],
+          ["最近使用", formatDate(prompt.lastUsedAt) || "-"],
+          ["标签", prompt.tags?.length ? prompt.tags.map((tag) => `#${tag}`).join(" ") : "-"],
+          ["创建", formatDate(prompt.createdAt) || "-"],
+          ["更新", formatDate(prompt.updatedAt) || "-"],
+        ]}
+      />
+    </div>
+  );
+}
+
+function promptFormFromPrompt(prompt: ImagePrompt | undefined, settings: ImageProviderSettings): ImagePromptFormState {
+  const defaults = { ...defaultImageSettings(), ...settings };
+  return {
+    title: prompt?.title || "",
+    description: prompt?.description || "",
+    prompt: prompt?.prompt || "",
+    mode: normalizeImageMode(prompt?.mode),
+    model: prompt?.model || defaults.defaultModel || "",
+    aspectRatio: prompt?.aspectRatio || defaults.defaultAspectRatio || "",
+    resolution: prompt?.resolution || defaults.defaultResolution || "",
+    imageCount: clampImageCount(prompt?.imageCount || 1),
+    tagsText: (prompt?.tags || []).join(", "),
+  };
+}
+
+function promptDraftFromForm(form: ImagePromptFormState): ImagePromptDraft {
+  return {
+    title: form.title,
+    description: form.description,
+    prompt: form.prompt,
+    mode: form.mode,
+    model: form.model,
+    aspectRatio: form.aspectRatio,
+    resolution: form.resolution,
+    imageCount: clampImageCount(form.imageCount),
+    tags: form.tagsText.split(",").map((tag) => tag.trim()).filter(Boolean),
+  };
+}
+
+function filterPrompts(prompts: ImagePrompt[], query: string, mode: string): ImagePrompt[] {
+  const needle = query.trim().toLowerCase();
+  return prompts.filter((prompt) => {
+    if (prompt.status === "deleted") return false;
+    if (mode !== "all" && prompt.mode !== mode) return false;
+    if (!needle) return true;
+    const haystack = [prompt.title, prompt.description, prompt.prompt, ...(prompt.tags || [])].join(" ").toLowerCase();
+    return haystack.includes(needle);
+  });
+}
+
+function promptModelOptions(current: string, settings: ImageProviderSettings): string[] {
+  const values = ["", ...MODEL_OPTIONS];
+  const defaultModel = settings.defaultModel || "";
+  if (defaultModel && !values.includes(defaultModel)) values.push(defaultModel);
+  if (current && !values.includes(current)) values.push(current);
+  return values;
 }
 
 export function LibraryPanel({
@@ -680,6 +1117,8 @@ export function ImagesInspector({
   onArchive,
   onDelete,
   onMarkPrivate,
+  prompt,
+  prompts = [],
   status,
   storageSettings,
 }: {
@@ -691,6 +1130,8 @@ export function ImagesInspector({
   onArchive?: (asset: ImageAsset) => void;
   onDelete?: (asset: ImageAsset) => void;
   onMarkPrivate?: (asset: ImageAsset, nextPrivate: boolean) => void;
+  prompt?: ImagePrompt;
+  prompts?: ImagePrompt[];
   status?: ImageStatus;
   storageSettings?: ImageStorageSettings;
 }) {
@@ -707,6 +1148,7 @@ export function ImagesInspector({
             ["Provider", status?.provider || "xai"],
             ["API Key", status?.hasApiKey ? status.maskedApiKey || "configured" : "未配置"],
             ["历史", status?.historyCount ?? jobs.length],
+            ["Prompt", prompts.length],
             [libraryScope === "private" ? "私密图" : "图片库", assets.length],
             ["存储", imageStorageBackendLabel(storageSettings?.backend)],
             ["最近任务", last ? `${imageModeLabel(last.mode)} / ${imageJobStatusLabel(last.status)}` : "-"],
@@ -737,6 +1179,27 @@ export function ImagesInspector({
             </div>
           ) : (
             <EmptyState title="未选择图片" body="在图片库中选择一张图片查看元数据。" />
+          )}
+        </Panel>
+      ) : null}
+      {activeTab === "prompts" ? (
+        <Panel title="Prompt 上下文">
+          {prompt ? (
+            <ContextList
+              items={[
+                ["标题", prompt.title || "-"],
+                ["模式", <Pill>{imageModeLabel(prompt.mode)}</Pill>],
+                ["模型", prompt.model || "模块默认"],
+                ["比例", prompt.aspectRatio || "默认"],
+                ["分辨率", prompt.resolution || "默认"],
+                ["数量", prompt.imageCount || 1],
+                ["使用", prompt.useCount || 0],
+                ["最近使用", formatDate(prompt.lastUsedAt) || "-"],
+                ["标签", prompt.tags?.length ? prompt.tags.map((tag) => `#${tag}`).join(" ") : "-"],
+              ]}
+            />
+          ) : (
+            <EmptyState title="未选择 Prompt" body="选择或新建一个 Prompt 查看参数摘要。" />
           )}
         </Panel>
       ) : null}
@@ -854,6 +1317,16 @@ function assetDownloadURL(asset: ImageAsset): string {
 function objectStorageEnabled(settings?: ImageStorageSettings): boolean {
   const backend = settings?.backend;
   return backend === "s3" || (backend === "object_storage" && Boolean(settings?.objectStorageProfileId));
+}
+
+function normalizeImageMode(value?: string): ImageMode {
+  if (value === "image_to_image" || value === "multi_image_edit") return value;
+  return "text_to_image";
+}
+
+function clampImageCount(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(1, Math.min(10, Math.round(value)));
 }
 
 function canArchiveAsset(asset?: ImageAsset, settings?: ImageStorageSettings): boolean {

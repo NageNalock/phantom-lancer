@@ -78,7 +78,7 @@ export function App() {
   }, []);
 
   const loadAppData = useCallback(async () => {
-    const [dashboard, audit, codexGateway, settings, v2ray, imagesSettings, imageStorageSettings, imageJobs, imageAssets] = await Promise.all([
+    const [dashboard, audit, codexGateway, settings, v2ray, imagesSettings, imageStorageSettings, imageJobs, imageAssets, imagePrompts] = await Promise.all([
       api<AppData["dashboard"]>("/api/dashboard/summary"),
       api<{ items?: AppData["audit"] }>("/api/audit/events"),
       loadCodexGatewayData(),
@@ -88,6 +88,7 @@ export function App() {
       api<{ settings?: ImagesPayload["storageSettings"] }>("/api/images/storage-settings"),
       api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=40"),
       api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=80"),
+      api<{ items?: ImagesPayload["prompts"] }>("/api/images/prompts?limit=120"),
     ]);
 
     setData({
@@ -96,7 +97,7 @@ export function App() {
       codexGateway,
       settings,
       v2ray,
-      images: { ...imagesSettings, storageSettings: imageStorageSettings.settings, jobs: imageJobs.items || [], assets: imageAssets.items || [], count: imageJobs.count || 0 },
+      images: { ...imagesSettings, storageSettings: imageStorageSettings.settings, jobs: imageJobs.items || [], assets: imageAssets.items || [], prompts: imagePrompts.items || [], count: imageJobs.count || 0 },
     });
   }, [loadCodexGatewayData]);
 
@@ -149,11 +150,12 @@ export function App() {
         setData((current) => ({ ...current, v2ray: next, dashboard: { ...current.dashboard, v2ray: next.status } }));
       },
       refreshImages: async () => {
-        const [settings, storageSettings, jobs, assets] = await Promise.allSettled([
+        const [settings, storageSettings, jobs, assets, prompts] = await Promise.allSettled([
           api<ImagesPayload>("/api/images/settings"),
           api<{ settings?: ImagesPayload["storageSettings"] }>("/api/images/storage-settings"),
           api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=40"),
           api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=80"),
+          api<{ items?: ImagesPayload["prompts"] }>("/api/images/prompts?limit=120"),
         ]);
         setData((current) => ({
           ...current,
@@ -163,6 +165,7 @@ export function App() {
             storageSettings: storageSettings.status === "fulfilled" ? storageSettings.value.settings : current.images.storageSettings,
             jobs: jobs.status === "fulfilled" ? jobs.value.items || [] : current.images.jobs,
             assets: assets.status === "fulfilled" ? assets.value.items || [] : current.images.assets,
+            prompts: prompts.status === "fulfilled" ? prompts.value.items || [] : current.images.prompts,
             count: jobs.status === "fulfilled" ? jobs.value.count || 0 : current.images.count,
           },
           dashboard: { ...current.dashboard, images: settings.status === "fulfilled" ? settings.value.status : current.dashboard.images },
