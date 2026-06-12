@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import type { ButtonHTMLAttributes, DragEvent, ReactNode } from "react";
 import type { Tone } from "../app/types";
 
-export interface SubTabItem {
+interface SubTabItem {
   id: string;
   label: ReactNode;
   badge?: ReactNode;

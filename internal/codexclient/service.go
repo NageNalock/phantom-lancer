@@ -439,10 +439,6 @@ func (s *Service) ListWorkspaces(ctx context.Context) ([]storage.CodexCliWorkspa
 	return items, nil
 }
 
-func (s *Service) CreateWorkspace(ctx context.Context, ws storage.CodexCliWorkspace) (storage.CodexCliWorkspace, error) {
-	return s.CreateWorkspaceWithOptions(ctx, ws, CreateWorkspaceOptions{})
-}
-
 func (s *Service) CreateWorkspaceWithOptions(ctx context.Context, ws storage.CodexCliWorkspace, opts CreateWorkspaceOptions) (storage.CodexCliWorkspace, error) {
 	normalized, err := s.policy.NormalizeWorkspacePath(ws.Path)
 	createdDirectory := false
@@ -484,10 +480,6 @@ func (s *Service) DeleteWorkspace(ctx context.Context, id string) error {
 }
 
 // ---- threads ----
-
-func (s *Service) ListThreads(ctx context.Context, includeArchived bool, q string) ([]storage.CodexCliThread, error) {
-	return s.ListThreadsFiltered(ctx, ThreadListOptions{IncludeArchived: includeArchived, Query: q})
-}
 
 func (s *Service) ListThreadsFiltered(ctx context.Context, opts ThreadListOptions) ([]storage.CodexCliThread, error) {
 	return s.store.ListCodexCliThreadsFiltered(ctx, storage.CodexCliThreadFilters{
@@ -1183,14 +1175,6 @@ func (s *Service) ListApprovals(ctx context.Context, status, threadID string) ([
 	return s.store.ListCodexCliApprovals(ctx, status, threadID)
 }
 
-func (s *Service) ResolveApproval(ctx context.Context, id string, approve bool) (storage.CodexCliApproval, error) {
-	decision := "decline"
-	if approve {
-		decision = "accept"
-	}
-	return s.ResolveApprovalDecision(ctx, id, decision)
-}
-
 func (s *Service) ResolveApprovalDecision(ctx context.Context, id string, decision string) (storage.CodexCliApproval, error) {
 	approval, err := s.store.GetCodexCliApproval(ctx, id)
 	if err != nil {
@@ -1446,12 +1430,6 @@ func (s *Service) cleanupExpiredAuditEvents(ctx context.Context) {
 	}
 }
 
-// ---- diagnostics ----
-
-func (s *Service) LegacyTables(ctx context.Context) ([]string, error) {
-	return s.store.CodexCliLegacyTablesDetected(ctx)
-}
-
 // ---- helpers ----
 
 func (s *Service) completeTurn(ctx context.Context, thread storage.CodexCliThread, turn storage.CodexCliTurn, usage map[string]any) (storage.CodexCliTurn, bool) {
@@ -1685,7 +1663,7 @@ func turnRisk(policy RunPolicy) string {
 
 func shouldDeriveThreadTitle(title string) bool {
 	title = strings.TrimSpace(title)
-	return title == "" || title == "新对话"
+	return title == "" || title == "新对话" || title == "New conversation" || title == "Untitled"
 }
 
 func titleFromPrompt(prompt string) string {

@@ -63,11 +63,3 @@ func (l *LockFile) Release() error {
 	l.file = nil
 	return err
 }
-
-// Path returns the path of the locked file.
-func (l *LockFile) Path() string {
-	if l == nil {
-		return ""
-	}
-	return l.path
-}

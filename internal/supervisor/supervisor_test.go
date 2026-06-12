@@ -148,12 +148,12 @@ func TestPIDFileWriteReadRemove(t *testing.T) {
 		t.Errorf("parent dir mode=%v, want no group/other access", perm)
 	}
 
-	got, err := ReadPIDFile(path)
+	got, err := readPIDFile(path)
 	if err != nil {
-		t.Fatalf("ReadPIDFile failed: %v", err)
+		t.Fatalf("readPIDFile failed: %v", err)
 	}
 	if got != pid {
-		t.Fatalf("ReadPIDFile got %d want %d", got, pid)
+		t.Fatalf("readPIDFile got %d want %d", got, pid)
 	}
 
 	// PID file mode should be 0600.
@@ -169,12 +169,12 @@ func TestPIDFileWriteReadRemove(t *testing.T) {
 	if err := RemovePIDFile(path); err != nil {
 		t.Fatalf("RemovePIDFile failed: %v", err)
 	}
-	got2, err2 := ReadPIDFile(path)
+	got2, err2 := readPIDFile(path)
 	if err2 != nil {
-		t.Fatalf("ReadPIDFile on missing file returned error: %v", err2)
+		t.Fatalf("readPIDFile on missing file returned error: %v", err2)
 	}
 	if got2 != 0 {
-		t.Fatalf("ReadPIDFile on missing file got %d want 0", got2)
+		t.Fatalf("readPIDFile on missing file got %d want 0", got2)
 	}
 }
 
@@ -220,7 +220,7 @@ loop:
 		case <-deadline:
 			t.Fatal("child pid file never appeared")
 		case <-ticker.C:
-			p, err := ReadPIDFile(cfg.ChildPIDFile)
+			p, err := readPIDFile(cfg.ChildPIDFile)
 			if err == nil && p > 0 {
 				childUp = true
 				break loop
@@ -520,7 +520,7 @@ func TestStartChildWaitChildSmoke(t *testing.T) {
 		t.Fatalf("waitChild PID=%d should be positive", ce.PID)
 	}
 	// Child PID file should have been removed after wait.
-	pid, err := ReadPIDFile(cfg.ChildPIDFile)
+	pid, err := readPIDFile(cfg.ChildPIDFile)
 	if err != nil {
 		t.Fatalf("read child pid file after wait: %v", err)
 	}

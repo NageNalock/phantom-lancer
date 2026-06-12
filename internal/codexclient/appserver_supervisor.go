@@ -14,7 +14,6 @@ const (
 	RuntimeStarting = "starting"
 	RuntimeRunning  = "running"
 	RuntimeFailed   = "failed"
-	RuntimeDegraded = "degraded"
 )
 
 // AppServerStatus is the snapshot returned to the API / UI.

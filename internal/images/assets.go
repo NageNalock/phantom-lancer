@@ -25,6 +25,7 @@ import (
 )
 
 const maxStoredImageBytes = 32 << 20
+const remoteImageBrowserUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 var safeAssetNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
@@ -52,18 +53,6 @@ func NewAssetStore(dir string, httpClient *http.Client) *AssetStore {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	return &AssetStore{dir: dir, http: httpClient}
-}
-
-func (s *AssetStore) StoreResultImages(ctx context.Context, jobID string, images []ResultImage) StoredOutputs {
-	out := StoredOutputs{Outputs: make([]storage.ImageGenerationOutput, 0, len(images))}
-	for index, image := range images {
-		output, ok := s.storeImage(ctx, jobID, index, image)
-		if !ok {
-			out.StoreFailures++
-		}
-		out.Outputs = append(out.Outputs, output)
-	}
-	return out
 }
 
 func (s *AssetStore) ImageBytes(ctx context.Context, image ResultImage) ([]byte, string, error) {
@@ -204,30 +193,79 @@ func (s *AssetStore) imageBytes(ctx context.Context, image ResultImage) ([]byte,
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return nil, "", errors.New("remote image url is invalid")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, image.URL, nil)
-	if err != nil {
+	data, mimeType, statusCode, err := s.fetchRemoteImage(ctx, image.URL, parsed, false)
+	if err == nil {
+		return data, mimeType, nil
+	}
+	if !shouldRetryRemoteImageWithBrowserHeaders(statusCode) {
 		return nil, "", err
+	}
+	data, mimeType, _, retryErr := s.fetchRemoteImage(ctx, image.URL, parsed, true)
+	if retryErr != nil {
+		return nil, "", retryErr
+	}
+	return data, mimeType, nil
+}
+
+func (s *AssetStore) fetchRemoteImage(ctx context.Context, rawURL string, parsed *url.URL, browserHeaders bool) ([]byte, string, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, "", 0, err
+	}
+	if browserHeaders {
+		applyRemoteImageBrowserHeaders(req, parsed)
 	}
 	resp, err := s.http.Do(req)
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, "", fmt.Errorf("remote image returned %s", resp.Status)
+		return nil, "", resp.StatusCode, fmt.Errorf("remote image returned %s", resp.Status)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxStoredImageBytes+1))
 	if err != nil {
-		return nil, "", err
+		return nil, "", resp.StatusCode, err
 	}
 	if len(data) > maxStoredImageBytes {
-		return nil, "", errors.New("remote image is too large")
+		return nil, "", resp.StatusCode, errors.New("remote image is too large")
 	}
 	mimeType := strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0])
 	if mimeType == "" || !AllowedImageMime(mimeType) {
 		mimeType = http.DetectContentType(data)
 	}
-	return data, mimeType, nil
+	if !AllowedImageMime(mimeType) {
+		return nil, "", resp.StatusCode, errors.New("remote image mime type is unsupported")
+	}
+	return data, mimeType, resp.StatusCode, nil
+}
+
+func shouldRetryRemoteImageWithBrowserHeaders(statusCode int) bool {
+	switch statusCode {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotAcceptable:
+		return true
+	default:
+		return false
+	}
+}
+
+func applyRemoteImageBrowserHeaders(req *http.Request, parsed *url.URL) {
+	req.Header.Set("User-Agent", remoteImageBrowserUserAgent)
+	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/png,image/jpeg,image/*,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Sec-Fetch-Dest", "image")
+	req.Header.Set("Sec-Fetch-Mode", "no-cors")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	if referer := remoteImageOriginReferer(parsed); referer != "" {
+		req.Header.Set("Referer", referer)
+	}
+}
+
+func remoteImageOriginReferer(parsed *url.URL) string {
+	if parsed == nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host + "/"
 }
 
 func decodeImageDataURL(dataURL string) ([]byte, string, error) {

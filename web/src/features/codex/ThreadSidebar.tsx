@@ -59,11 +59,11 @@ export function ThreadList({
   const canCreate = newMode === "chat" ? Boolean(scratchReady) : Boolean(newWorkspace);
 
   return (
-    <section className="panel">
+    <section className="panel min-w-0 overflow-hidden">
       <div className="panel-header">
         <h2 className="m-0 text-sm font-semibold">会话</h2>
       </div>
-      <div className="panel-body grid gap-3">
+      <div className="panel-body grid min-w-0 gap-3">
         <div className="grid gap-2">
           <select className="select" onChange={(event) => setNewMode(event.target.value as CreateConversationMode)} value={newMode}>
             <option value="code">代码任务</option>
@@ -130,13 +130,13 @@ export function ThreadList({
           显示已归档会话
         </CheckLabel>
         {threads.length ? (
-          <div className="grid gap-1">
+          <div className="grid min-w-0 gap-1">
             {pinned.length ? <span className="muted px-1 text-xs">置顶</span> : null}
             {pinned.map((thread) => (
               <ThreadRow key={thread.id} active={thread.id === activeId} thread={thread} workspaces={workspaces} onSelect={onSelect} onTogglePin={onTogglePin} onArchive={onArchive} onResume={onResume} onFork={onFork} />
             ))}
             {restGroups.map((group) => (
-              <div className="grid gap-1" key={group.id}>
+              <div className="grid min-w-0 gap-1" key={group.id}>
                 <span className="muted mt-1 px-1 text-xs">{group.label}</span>
                 {group.threads.map((thread) => (
                   <ThreadRow key={thread.id} active={thread.id === activeId} thread={thread} workspaces={workspaces} onSelect={onSelect} onTogglePin={onTogglePin} onArchive={onArchive} onResume={onResume} onFork={onFork} />
@@ -208,11 +208,11 @@ function ThreadRow({
   const archived = thread.status === "archived" || Boolean(thread.archivedAt);
   const kindLabel = thread.kind === "chat" ? "只读问答" : "代码任务";
   return (
-    <div className={`rounded-lg border px-2 py-2 text-left transition ${active ? "border-[var(--line-strong)] bg-[var(--surface-strong)]" : "border-transparent hover:bg-[var(--surface-soft)]"}`}>
-      <button className="w-full text-left" onClick={() => onSelect(thread.id)} type="button">
-        <div className="flex items-center justify-between gap-2">
-          <strong className="truncate text-sm">{thread.title || "新对话"}</strong>
-          <span className="flex shrink-0 items-center gap-1">
+    <div className={`min-w-0 overflow-hidden rounded-lg border px-2 py-2 text-left transition ${active ? "border-[var(--line-strong)] bg-[var(--surface-strong)]" : "border-transparent hover:bg-[var(--surface-soft)]"}`}>
+      <button className="block w-full min-w-0 text-left" onClick={() => onSelect(thread.id)} type="button">
+        <div className="flex min-w-0 items-start justify-between gap-2">
+          <strong className="min-w-0 flex-1 truncate text-sm">{thread.title || "新对话"}</strong>
+          <span className="flex max-w-[52%] shrink-0 flex-wrap items-center justify-end gap-1 overflow-hidden">
             {thread.kind === "chat" ? <Pill tone="neutral">只读</Pill> : null}
             {!active && thread.background ? <span className="rounded border border-[var(--line)] px-1.5 py-0.5 text-[10px] text-[var(--muted-strong)]">后台</span> : null}
             <Pill tone={threadTone(thread.status)}>{codexThreadStatusLabel(thread.status)}</Pill>
@@ -220,7 +220,7 @@ function ThreadRow({
         </div>
         <span className="muted mt-1 block truncate text-xs">{workspace?.label || workspace?.pathSummary || "工作区"} / {kindLabel}</span>
       </button>
-      <div className="mt-1 flex items-center gap-2 text-xs">
+      <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2 overflow-hidden text-xs">
         {archived ? (
           <button className="text-[var(--muted-strong)] hover:text-[var(--text)]" onClick={() => onResume(thread)} type="button">
             恢复

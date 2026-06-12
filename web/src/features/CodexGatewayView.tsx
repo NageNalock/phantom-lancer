@@ -419,6 +419,15 @@ export function CodexGatewayView({ actions, data }: { actions: AppActions; data:
                     value={settings.refreshMarginSeconds || 300}
                   />
                 </Field>
+                <Field label="账号健康检查间隔 (秒, 0=禁用)">
+                  <input
+                    className="input mono"
+                    disabled
+                    readOnly
+                    type="number"
+                    value={settings.accountHealthCheckIntervalSeconds ?? 43200}
+                  />
+                </Field>
               </div>
 
               <Field label="Codex API Base URL">

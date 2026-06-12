@@ -6,9 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
-	"time"
 )
 
 // SupervisorStatus represents the real-time liveness information of the
@@ -157,46 +155,4 @@ func truncateError(err error, max int) string {
 		return out
 	}
 	return out[:max] + "…"
-}
-
-// SupervisorStatusSampler memoises the last expensive liveness probe so
-// repeated Status() calls within a short window do not hammer the kernel
-// with FindProcess/Signal syscalls. Callers that need a fresh probe can
-// ignore the sample and call ResolveSupervisorStatus directly, or reset
-// the sample via Reset().
-type SupervisorStatusSampler struct {
-	mu     sync.Mutex
-	last   SupervisorStatus
-	lastAt time.Time
-	ttl    time.Duration
-}
-
-// NewSupervisorStatusSampler returns a sampler with the provided TTL.
-// When ttl <= 0 a 3s default is used.
-func NewSupervisorStatusSampler(ttl time.Duration) *SupervisorStatusSampler {
-	if ttl <= 0 {
-		ttl = 3 * time.Second
-	}
-	return &SupervisorStatusSampler{ttl: ttl}
-}
-
-// Get returns a cached ResolveSupervisorStatus() result if one is younger
-// than TTL, otherwise performs a fresh probe.
-func (s *SupervisorStatusSampler) Get(dataDir string) SupervisorStatus {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.lastAt.IsZero() && time.Since(s.lastAt) < s.ttl {
-		return s.last
-	}
-	s.last = ResolveSupervisorStatus(dataDir)
-	s.lastAt = time.Now()
-	return s.last
-}
-
-// Reset clears the cached sample so the next Get() performs a fresh probe.
-func (s *SupervisorStatusSampler) Reset() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.lastAt = time.Time{}
-	s.last = SupervisorStatus{}
 }

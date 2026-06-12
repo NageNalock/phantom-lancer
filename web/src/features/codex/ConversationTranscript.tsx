@@ -1,8 +1,9 @@
-import { useEffect, useRef } from "react";
+import { lazy, Suspense, useEffect, useRef } from "react";
 import { EmptyState } from "../../components/ui";
 import { formatDate } from "../../domain/labels";
-import { RichMessage } from "./MessageFormat";
 import type { ChatEntry } from "./ChatWorkspace/transcript";
+
+const RichMessage = lazy(() => import("./MessageFormat").then((module) => ({ default: module.RichMessage })));
 
 export function ConversationTranscript({
   className = "",
@@ -40,11 +41,21 @@ function ConversationMessage({ entry }: { entry: Extract<ChatEntry, { kind: "mes
   return (
     <article className={`chat-entry flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div className={isUser ? "chat-user-message" : "chat-assistant-message"}>
-        {isUser ? <div className="whitespace-pre-wrap break-words leading-relaxed">{entry.text}</div> : <RichMessage streaming={entry.streaming} text={entry.text} />}
+        {isUser ? (
+          <div className="whitespace-pre-wrap break-words leading-relaxed">{entry.text}</div>
+        ) : (
+          <Suspense fallback={<PlainMessageFallback streaming={entry.streaming} text={entry.text} />}>
+            <RichMessage streaming={entry.streaming} text={entry.text} />
+          </Suspense>
+        )}
         <div className={`mt-2 text-xs ${isUser ? "text-right text-[var(--muted)]" : "text-[var(--muted)]"}`}>{formatDate(entry.createdAt)}</div>
       </div>
     </article>
   );
+}
+
+function PlainMessageFallback({ streaming, text }: { streaming?: boolean; text: string }) {
+  return <div className={`message-rich whitespace-pre-wrap ${streaming ? "chat-streaming-text" : ""}`}>{text}</div>;
 }
 
 function ConversationStatus({ entry }: { entry: Extract<ChatEntry, { kind: "status" }> }) {

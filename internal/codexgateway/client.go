@@ -84,15 +84,6 @@ func (e OAuthRefreshError) Error() string {
 	return "oauth token refresh failed"
 }
 
-func (e OAuthRefreshError) Permanent() bool {
-	switch e.Code {
-	case "invalid_grant", "invalid_token", "access_denied", "refresh_token_expired", "refresh_token_reused":
-		return true
-	default:
-		return false
-	}
-}
-
 type PKCEChallenge struct {
 	CodeVerifier  string
 	CodeChallenge string

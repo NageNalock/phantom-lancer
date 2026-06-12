@@ -24,6 +24,8 @@
 
 进行前端设计、UI 优化、视觉重构、交互体验调整或前端设计审查时，必须先使用 `design-taste-frontend`（Design Taste Frontend）skill 进行设计判断和 pre-flight 检查。由于本项目是个人服务器 Web 控制台，不是营销页或作品集页面，使用该 skill 时应优先采用其中关于审美校准、可访问性、响应式、色彩一致性、形状一致性、交互状态和反 AI-slop 的规则；不应机械套用 landing page、hero、logo wall、营销 CTA 等不适合控制台产品的规则。
 
+当前阶段前端按桌面端工作台优先设计和验收，暂不要求移动端适配。后续进行 UI review、布局调整或功能实现时，除非用户明确提出移动端/小屏/手机浏览器需求，否则不要把移动端导航、窄屏折叠、手机断点或触控专属体验作为主要约束或阻塞项；只需保证桌面端和常规笔记本宽度下的信息架构、布局稳定性、交互状态和可读性。
+
 ## 前端美术风格
 
 本项目前端应采用 **Quiet Agent Workbench / Quiet DevOps Control Plane** 风格：面向技术用户的安静、克制、工程化工作台，而不是营销页、传统后台模板或装饰型 dashboard。整体应接近 Linear、Raycast、Cursor、Cloudflare dashboard 这类 devtool / control plane 审美，但必须服务个人服务器 Web 控制台的任务流。

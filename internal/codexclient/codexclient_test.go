@@ -107,7 +107,7 @@ func TestCreateWorkspaceWithOptionsCreatesMissingDirectoryInsideAllowedRoot(t *t
 	cleanupCodexTestService(t, svc, store)
 	workspacePath := filepath.Join(dir, "projects", "new-app")
 
-	if _, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"}); !errors.Is(err, ErrPathNotFound) {
+	if _, err := svc.CreateWorkspaceWithOptions(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"}, CreateWorkspaceOptions{CreateIfMissing: false}); !errors.Is(err, ErrPathNotFound) {
 		t.Fatalf("CreateWorkspace without create option error = %v, want ErrPathNotFound", err)
 	}
 	if _, err := os.Stat(workspacePath); !os.IsNotExist(err) {
@@ -388,7 +388,7 @@ func TestWorkspaceQueuedTurnBlocksNewStartButNotDispatch(t *testing.T) {
 	}
 	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
 	cleanupCodexTestService(t, svc, store)
-	ws, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"})
+	ws, err := svc.CreateWorkspaceWithOptions(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"}, CreateWorkspaceOptions{CreateIfMissing: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +445,7 @@ func TestConcurrentStartTurnSerializesWorkspace(t *testing.T) {
 	svc.settings.MaxConcurrentTurns = 4
 	svc.settings.ExecFallbackEnabled = true
 	svc.mu.Unlock()
-	ws, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"})
+	ws, err := svc.CreateWorkspaceWithOptions(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"}, CreateWorkspaceOptions{CreateIfMissing: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +533,7 @@ func TestStartTurnInvalidAttachmentDoesNotLeaveRunningTurn(t *testing.T) {
 	}
 	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
 	cleanupCodexTestService(t, svc, store)
-	ws, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "workspace-write", DefaultApprovalPolicy: "on-request"})
+	ws, err := svc.CreateWorkspaceWithOptions(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "workspace-write", DefaultApprovalPolicy: "on-request"}, CreateWorkspaceOptions{CreateIfMissing: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,11 +544,11 @@ func TestStartTurnInvalidAttachmentDoesNotLeaveRunningTurn(t *testing.T) {
 	if _, err := svc.StartTurn(ctx, thread.ID, TurnInput{Prompt: "hello", AttachmentIDs: []string{"missing"}}); err == nil {
 		t.Fatal("expected invalid attachment to fail")
 	}
-	running, err := store.HasRunningCodexCliTurn(ctx)
+	runningCount, err := store.CountRunningCodexCliTurns(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if running {
+	if runningCount > 0 {
 		t.Fatal("invalid attachment left a running turn")
 	}
 	turns, err := store.ListCodexCliTurns(ctx, thread.ID)
@@ -636,7 +636,7 @@ func TestTerminalTurnCleansAttachmentsAndDerivesTitle(t *testing.T) {
 	if _, err := store.GetCodexCliAttachment(ctx, att.ID); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected attachment row removed, err=%v", err)
 	}
-	if !shouldDeriveThreadTitle("") || !shouldDeriveThreadTitle("新对话") || shouldDeriveThreadTitle("自定义标题") {
+	if !shouldDeriveThreadTitle("") || !shouldDeriveThreadTitle("新对话") || !shouldDeriveThreadTitle("Untitled") || shouldDeriveThreadTitle("自定义标题") {
 		t.Fatal("unexpected title derivation predicate")
 	}
 	if got := titleFromPrompt("  第一行 prompt\n第二行  "); got != "第一行 prompt 第二行" {
@@ -660,7 +660,7 @@ func TestQueuedCommandInterruptedBeforeStartDoesNotRun(t *testing.T) {
 	}
 	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
 	cleanupCodexTestService(t, svc, store)
-	ws, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"})
+	ws, err := svc.CreateWorkspaceWithOptions(ctx, storage.CodexCliWorkspace{Path: workspacePath, TrustState: "trusted", DefaultSandbox: "read-only", DefaultApprovalPolicy: "on-request"}, CreateWorkspaceOptions{CreateIfMissing: false})
 	if err != nil {
 		t.Fatal(err)
 	}

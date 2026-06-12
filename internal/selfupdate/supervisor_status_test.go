@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"syscall"
 	"testing"
-	"time"
 )
 
 func TestResolveSupervisorStatusNoEnvNoPidFile(t *testing.T) {
@@ -137,33 +136,6 @@ func TestResolveSupervisorStatusSignalZeroSameProcess(t *testing.T) {
 	}
 	if err := proc.Signal(syscall.Signal(0)); err != nil {
 		t.Fatalf("Signal(0) on self should succeed, got: %v", err)
-	}
-}
-
-func TestSupervisorStatusSamplerTTLWires(t *testing.T) {
-	dir := t.TempDir()
-	s := NewSupervisorStatusSampler(500 * time.Millisecond)
-
-	t.Setenv("PL_UNDER_SUPERVISOR", "0")
-	t.Setenv("PL_SUPERVISOR_PID", "")
-	first := s.Get(dir)
-
-	// Mutate env — the sampler should still return the cached value within TTL.
-	t.Setenv("PL_UNDER_SUPERVISOR", "1")
-	t.Setenv("PL_SUPERVISOR_PID", strconv.Itoa(os.Getpid()))
-	cached := s.Get(dir)
-	if cached.UnderSupervisor != first.UnderSupervisor {
-		t.Fatalf("cache should suppress re-read: first=%+v cached=%+v", first, cached)
-	}
-
-	// Reset forces a fresh probe — now UnderSupervisor should flip.
-	s.Reset()
-	fresh := s.Get(dir)
-	if !fresh.UnderSupervisor {
-		t.Fatalf("Reset did not force a fresh probe: %+v", fresh)
-	}
-	if !fresh.Alive {
-		t.Fatalf("fresh probe should see self PID alive")
 	}
 }
 

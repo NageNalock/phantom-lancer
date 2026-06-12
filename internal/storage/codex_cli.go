@@ -372,7 +372,7 @@ func (s *Store) GetCodexCliInstallation(ctx context.Context) (CodexCliInstallati
 
 // ---- workspaces ----
 
-func NormalizeCodexCliWorkspace(ws CodexCliWorkspace) CodexCliWorkspace {
+func normalizeCodexCliWorkspace(ws CodexCliWorkspace) CodexCliWorkspace {
 	ws.Label = strings.TrimSpace(ws.Label)
 	ws.Path = strings.TrimSpace(ws.Path)
 	ws.TrustState = strings.TrimSpace(strings.ToLower(ws.TrustState))
@@ -406,7 +406,7 @@ func NormalizeCodexCliWorkspace(ws CodexCliWorkspace) CodexCliWorkspace {
 }
 
 func (s *Store) CreateCodexCliWorkspace(ctx context.Context, ws CodexCliWorkspace) (CodexCliWorkspace, error) {
-	ws = NormalizeCodexCliWorkspace(ws)
+	ws = normalizeCodexCliWorkspace(ws)
 	id, err := ids.New("cxws")
 	if err != nil {
 		return CodexCliWorkspace{}, err
@@ -458,7 +458,7 @@ func (s *Store) UpdateCodexCliWorkspace(ctx context.Context, ws CodexCliWorkspac
 		return CodexCliWorkspace{}, err
 	}
 	ws.Path = existing.Path
-	ws = NormalizeCodexCliWorkspace(ws)
+	ws = normalizeCodexCliWorkspace(ws)
 	net, _ := json.Marshal(ws.NetworkPolicy)
 	_, err = s.db.ExecContext(ctx, `
 UPDATE codex_cli_workspaces SET label = ?, path_summary = ?, trust_state = ?, default_model = ?, default_sandbox = ?, default_approval_policy = ?, network_policy_json = ?, pinned = ?, updated_at = ? WHERE id = ?`,
@@ -602,12 +602,6 @@ func (s *Store) ListBackgroundCodexCliThreads(ctx context.Context, limit int) ([
 	return out, rows.Err()
 }
 
-func (s *Store) HasRunningCodexCliTurn(ctx context.Context) (bool, error) {
-	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM codex_cli_turns WHERE status IN ('running', 'waiting_approval')`).Scan(&count)
-	return count > 0, err
-}
-
 func (s *Store) CountRunningCodexCliTurns(ctx context.Context) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM codex_cli_turns WHERE status IN ('running', 'waiting_approval')`).Scan(&count)
@@ -673,10 +667,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	if err != nil {
 		return CodexCliReviewComment{}, err
 	}
-	return s.GetCodexCliReviewComment(ctx, comment.ID)
+	return s.getCodexCliReviewComment(ctx, comment.ID)
 }
 
-func (s *Store) GetCodexCliReviewComment(ctx context.Context, id string) (CodexCliReviewComment, error) {
+func (s *Store) getCodexCliReviewComment(ctx context.Context, id string) (CodexCliReviewComment, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, thread_id, turn_id, workspace_id, file_path, old_line, new_line, hunk_header, body, status, created_at, resolved_at FROM codex_cli_review_comments WHERE id = ?`, id)
 	var comment CodexCliReviewComment
 	err := row.Scan(&comment.ID, &comment.ThreadID, &comment.TurnID, &comment.WorkspaceID, &comment.FilePath, &comment.OldLine, &comment.NewLine, &comment.HunkHeader, &comment.Body, &comment.Status, &comment.CreatedAt, &comment.ResolvedAt)
@@ -708,7 +702,7 @@ func (s *Store) ResolveCodexCliReviewComment(ctx context.Context, id string) (Co
 	if err != nil {
 		return CodexCliReviewComment{}, err
 	}
-	return s.GetCodexCliReviewComment(ctx, id)
+	return s.getCodexCliReviewComment(ctx, id)
 }
 
 // ---- P1 command runner ----
@@ -995,10 +989,10 @@ ON CONFLICT(automation_id, client_request_id) DO UPDATE SET updated_at = updated
 	if run.ClientRequestID != "" {
 		return s.GetCodexCliAutomationRunByClientRequest(ctx, run.AutomationID, run.ClientRequestID)
 	}
-	return s.GetCodexCliAutomationRun(ctx, run.ID)
+	return s.getCodexCliAutomationRun(ctx, run.ID)
 }
 
-func (s *Store) GetCodexCliAutomationRun(ctx context.Context, id string) (CodexCliAutomationRun, error) {
+func (s *Store) getCodexCliAutomationRun(ctx context.Context, id string) (CodexCliAutomationRun, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, automation_id, thread_id, turn_id, client_request_id, status, started_at, last_heartbeat_at, completed_at, finding_summary, error_summary, triage_state, created_at, updated_at FROM codex_cli_automation_runs WHERE id = ?`, id)
 	return scanCodexCliAutomationRun(row)
 }
@@ -1055,7 +1049,7 @@ func (s *Store) ListActiveCodexCliAutomationRuns(ctx context.Context) ([]CodexCl
 }
 
 func (s *Store) UpdateCodexCliAutomationRun(ctx context.Context, run CodexCliAutomationRun) (CodexCliAutomationRun, error) {
-	current, err := s.GetCodexCliAutomationRun(ctx, run.ID)
+	current, err := s.getCodexCliAutomationRun(ctx, run.ID)
 	if err != nil {
 		return CodexCliAutomationRun{}, err
 	}
@@ -1091,7 +1085,7 @@ func (s *Store) UpdateCodexCliAutomationRun(ctx context.Context, run CodexCliAut
 	if err != nil {
 		return CodexCliAutomationRun{}, err
 	}
-	return s.GetCodexCliAutomationRun(ctx, merged.ID)
+	return s.getCodexCliAutomationRun(ctx, merged.ID)
 }
 
 func (s *Store) ArchiveCodexCliAutomationRun(ctx context.Context, id string) (CodexCliAutomationRun, error) {
@@ -1099,7 +1093,7 @@ func (s *Store) ArchiveCodexCliAutomationRun(ctx context.Context, id string) (Co
 	if err != nil {
 		return CodexCliAutomationRun{}, err
 	}
-	return s.GetCodexCliAutomationRun(ctx, id)
+	return s.getCodexCliAutomationRun(ctx, id)
 }
 
 func scanCodexCliAutomation(row workspaceScanner) (CodexCliAutomation, error) {
@@ -1231,10 +1225,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	if err != nil {
 		return CodexCliNotification{}, err
 	}
-	return s.GetCodexCliNotification(ctx, item.ID)
+	return s.getCodexCliNotification(ctx, item.ID)
 }
 
-func (s *Store) GetCodexCliNotification(ctx context.Context, id string) (CodexCliNotification, error) {
+func (s *Store) getCodexCliNotification(ctx context.Context, id string) (CodexCliNotification, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, scope, scope_id, event_type, title, summary, status, severity, payload_json, created_at, updated_at FROM codex_cli_notifications WHERE id = ?`, id)
 	return scanCodexCliNotification(row)
 }
@@ -1276,7 +1270,7 @@ func (s *Store) UpdateCodexCliNotificationStatus(ctx context.Context, id, status
 	if err != nil {
 		return CodexCliNotification{}, err
 	}
-	return s.GetCodexCliNotification(ctx, id)
+	return s.getCodexCliNotification(ctx, id)
 }
 
 func (s *Store) ArchiveReadCodexCliNotifications(ctx context.Context, scope string) (int64, error) {
@@ -1943,7 +1937,7 @@ func scanCodexCliWorkspace(row workspaceScanner) (CodexCliWorkspace, error) {
 	if ws.NetworkPolicy == nil {
 		ws.NetworkPolicy = map[string]any{"enabled": false}
 	}
-	ws = NormalizeCodexCliWorkspace(ws)
+	ws = normalizeCodexCliWorkspace(ws)
 	return ws, nil
 }
 

@@ -34,7 +34,7 @@ func TestBackupDatabaseCreatesCopy(t *testing.T) {
 	}
 }
 
-func TestLegacyCodexTablesAreDetectedButNotPurged(t *testing.T) {
+func TestLegacyCodexTablesAreDetected(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
 	if err != nil {
@@ -51,16 +51,6 @@ func TestLegacyCodexTablesAreDetectedButNotPurged(t *testing.T) {
 	}
 	if len(found) != 1 || found[0] != "codex_sessions" {
 		t.Fatalf("legacy tables = %#v, want codex_sessions", found)
-	}
-	if err := store.PurgeLegacyCodexData(ctx); err != nil {
-		t.Fatalf("legacy purge no-op: %v", err)
-	}
-	found, err = store.CodexCliLegacyTablesDetected(ctx)
-	if err != nil {
-		t.Fatalf("detect legacy tables after no-op purge: %v", err)
-	}
-	if len(found) != 1 || found[0] != "codex_sessions" {
-		t.Fatalf("legacy table was removed: %#v", found)
 	}
 }
 

@@ -185,7 +185,7 @@ INSERT INTO codex_gateway_request_logs (
 		}
 	}
 
-	if err := store.PruneCodexGatewayRequestLogs(ctx, 3); err != nil {
+	if err := pruneCodexGatewayRequestLogs(ctx, store.db, 3); err != nil {
 		t.Fatalf("prune request logs: %v", err)
 	}
 	logs, err := store.ListCodexGatewayRequestLogs(ctx, 10)
@@ -199,5 +199,69 @@ INSERT INTO codex_gateway_request_logs (
 	want := []string{"req-4", "req-3", "req-2"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("remaining request ids = %v, want %v", got, want)
+	}
+}
+
+func TestCodexGatewaySettingsHealthCheckDefaultsRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	defaults := DefaultCodexGatewaySettings()
+	if defaults.AccountHealthCheckIntervalSeconds != 43200 {
+		t.Fatalf("default health interval = %d, want 43200", defaults.AccountHealthCheckIntervalSeconds)
+	}
+
+	// Fresh DB: Ensure inserts row; Get should return the default value without
+	// Normalize clobbering anything.
+	got, err := store.GetCodexGatewaySettings(ctx)
+	if err != nil {
+		t.Fatalf("get settings: %v", err)
+	}
+	if got.AccountHealthCheckIntervalSeconds != 43200 {
+		t.Fatalf("fresh-DB health interval = %d, want 43200", got.AccountHealthCheckIntervalSeconds)
+	}
+
+	// 0 explicitly disables the loop; Normalize must NOT rewrite it to default.
+	got.AccountHealthCheckIntervalSeconds = 0
+	if _, err := store.UpdateCodexGatewaySettings(ctx, got); err != nil {
+		t.Fatalf("update disabled: %v", err)
+	}
+	gotAgain, err := store.GetCodexGatewaySettings(ctx)
+	if err != nil {
+		t.Fatalf("re-get disabled: %v", err)
+	}
+	if gotAgain.AccountHealthCheckIntervalSeconds != 0 {
+		t.Fatalf("disabled health interval = %d, want 0", gotAgain.AccountHealthCheckIntervalSeconds)
+	}
+
+	// Negative values must fall back to the default (per Normalize policy).
+	gotAgain.AccountHealthCheckIntervalSeconds = -5
+	if _, err := store.UpdateCodexGatewaySettings(ctx, gotAgain); err != nil {
+		t.Fatalf("update negative: %v", err)
+	}
+	normNeg, err := store.GetCodexGatewaySettings(ctx)
+	if err != nil {
+		t.Fatalf("re-get negative: %v", err)
+	}
+	if normNeg.AccountHealthCheckIntervalSeconds != 43200 {
+		t.Fatalf("negative-clamped health interval = %d, want 43200", normNeg.AccountHealthCheckIntervalSeconds)
+	}
+
+	// Massive positive value must be clamped to the 30-day ceiling.
+	const monthSeconds = 30 * 24 * 3600
+	normNeg.AccountHealthCheckIntervalSeconds = 100_000_000
+	if _, err := store.UpdateCodexGatewaySettings(ctx, normNeg); err != nil {
+		t.Fatalf("update huge: %v", err)
+	}
+	big, err := store.GetCodexGatewaySettings(ctx)
+	if err != nil {
+		t.Fatalf("re-get huge: %v", err)
+	}
+	if big.AccountHealthCheckIntervalSeconds > monthSeconds {
+		t.Fatalf("upper-clamped health interval = %d, want <= %d", big.AccountHealthCheckIntervalSeconds, monthSeconds)
 	}
 }

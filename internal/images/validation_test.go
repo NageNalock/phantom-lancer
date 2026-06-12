@@ -92,19 +92,20 @@ func TestRequestPayloadEndpoints(t *testing.T) {
 }
 
 func TestAssetStoreStoresDataURL(t *testing.T) {
+	ctx := context.Background()
 	dir := t.TempDir()
 	store := NewAssetStore(filepath.Join(dir, "generated"), nil)
-	result := store.StoreResultImages(context.Background(), "imgjob_test", []ResultImage{{
+	output, ok := store.storeImage(ctx, "imgjob_test", 0, ResultImage{
 		DataURL:  onePixelPNG,
 		MimeType: "image/png",
-	}})
-	if result.StoreFailures != 0 {
-		t.Fatalf("store failures = %d", result.StoreFailures)
+	})
+	if !ok {
+		t.Fatal("storeImage failed for data URL")
 	}
-	if len(result.Outputs) != 1 || result.Outputs[0].Storage != "local" {
-		t.Fatalf("unexpected outputs: %#v", result.Outputs)
+	if output.Storage != "local" {
+		t.Fatalf("unexpected output storage: %#v", output)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "generated", result.Outputs[0].LocalName)); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "generated", output.LocalName)); err != nil {
 		t.Fatalf("stored image missing: %v", err)
 	}
 }

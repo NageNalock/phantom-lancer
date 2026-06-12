@@ -251,6 +251,7 @@ export function defaultCodexGatewaySettings(): Required<CodexGatewaySettings> {
     oauthRedirectUri: "http://localhost:1455/auth/callback",
     requestTimeoutSeconds: 600,
     refreshMarginSeconds: 300,
+    accountHealthCheckIntervalSeconds: 43200,
     defaultInstructions: "You are a helpful assistant.",
     installationId: "",
     createdAt: "",

@@ -66,14 +66,6 @@ func ReadHandoff(path string) (*HandoffFile, error) {
 	return h, nil
 }
 
-// DeleteHandoff removes the handoff file. Not-exist is treated as success.
-func DeleteHandoff(path string) error {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove handoff file: %w", err)
-	}
-	return nil
-}
-
 // parsedRequestedAt is memoized on the struct after the first call so the
 // same timestamp parsing runs at most once per read.
 func (h *HandoffFile) parsedRequestedAt() (time.Time, error) {

@@ -1,6 +1,6 @@
 import type { ApiError } from "../app/types";
 
-export interface ApiOptions {
+interface ApiOptions {
   method?: string;
   body?: unknown | FormData;
   csrf?: string;

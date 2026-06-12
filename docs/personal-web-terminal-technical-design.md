@@ -290,7 +290,7 @@ Images 图片库的详细产品交互和对象存储设计见 [images-library-fe
 - 前端构建产物由 Go embed 打进 binary，避免单独部署静态站点。
 - API、SSE、静态资源由同一个 Go 进程提供。
 - Codex CLI 由 owner 预先安装在部署机，Phantom Lancer 只通过配置的 binary path 或 PATH 探测使用。
-- HTTPS 不作为 MVP 默认要求；如果后续公网暴露，再考虑 Go 内置 TLS、VPN 或反向代理增强。
+- HTTPS 不作为 MVP 默认要求；公网暴露时优先采用 Go 内置闭环 TLS，详见 [closed-loop-tls-feature-design.md](./closed-loop-tls-feature-design.md)。VPN 或反向代理仍可作为部署侧可选方案。
 - 即使是裸部署，也必须保留登录、session、CSRF 和后端权限校验。
 
 ## 5. 关键技术边界

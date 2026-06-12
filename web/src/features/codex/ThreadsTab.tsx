@@ -77,6 +77,12 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
   const activeThread = useMemo(() => threads.find((thread) => thread.id === activeId) || null, [threads, activeId]);
   const scratchReady = Boolean(scratchWorkspaceId);
 
+  const updateThreadInList = useCallback((nextThread: CodexThread) => {
+    setThreads((current) =>
+      current.map((thread) => (thread.id === nextThread.id ? { ...thread, ...nextThread } : thread)),
+    );
+  }, []);
+
   async function createThread(workspaceId: string, mode: CreateConversationMode = "code") {
     try {
       const response = mode === "chat"
@@ -133,7 +139,7 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
   }
 
   return (
-    <div className="grid grid-cols-[280px_minmax(0,1fr)_300px] gap-4 max-xl:grid-cols-[260px_minmax(0,1fr)] max-lg:grid-cols-1">
+    <div className="grid min-w-0 grid-cols-[280px_minmax(0,1fr)_300px] gap-4 max-xl:grid-cols-[260px_minmax(0,1fr)] max-lg:grid-cols-1">
       <ThreadList
         loading={loading}
         threads={threads}
@@ -157,9 +163,9 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
         onFork={fork}
       />
       {activeThread?.kind === "chat" ? (
-        <ChatWorkspace key={activeThread.id} actions={actions} status={status} thread={activeThread} workspaces={workspaces} onStatusChange={onStatusChange} onThreadChange={loadThreads} />
+        <ChatWorkspace key={activeThread.id} actions={actions} status={status} thread={activeThread} workspaces={workspaces} onStatusChange={onStatusChange} onThreadChange={loadThreads} onThreadUpdated={updateThreadInList} />
       ) : activeThread ? (
-        <ThreadWorkspace key={activeThread.id} actions={actions} status={status} thread={activeThread} workspaces={workspaces} onStatusChange={onStatusChange} onThreadChange={loadThreads} />
+        <ThreadWorkspace key={activeThread.id} actions={actions} status={status} thread={activeThread} workspaces={workspaces} onStatusChange={onStatusChange} onThreadChange={loadThreads} onThreadUpdated={updateThreadInList} />
       ) : (
         <ComposerEmptyState workspaces={workspaces} onCreate={createThread} />
       )}

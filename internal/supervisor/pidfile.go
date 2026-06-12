@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // WritePIDFile atomically writes pid to path with mode 0600. The parent
@@ -25,33 +26,29 @@ func WritePIDFile(path string, pid int) error {
 	return fsyncDir(filepath.Dir(path))
 }
 
-// ReadPIDFile reads a PID from a file. Returns 0 with no error if the file
-// does not exist.
-func ReadPIDFile(path string) (int, error) {
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, fmt.Errorf("read pid file: %w", err)
-	}
-	s := string(data)
-	for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == ' ' || s[len(s)-1] == '\r' || s[len(s)-1] == '\t') {
-		s = s[:len(s)-1]
-	}
-	pid, err := strconv.Atoi(s)
-	if err != nil {
-		return 0, fmt.Errorf("invalid pid file %s: %w", path, err)
-	}
-	return pid, nil
-}
-
 // RemovePIDFile removes the PID file, ignoring not-exist errors.
 func RemovePIDFile(path string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove pid file: %w", err)
 	}
 	return nil
+}
+
+// readPIDFile reads a PID from a file. Returns 0 with no error if the file
+// does not exist. Only package-internal + same-package tests use it.
+func readPIDFile(path string) (int, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read pid file: %w", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return 0, fmt.Errorf("parse pid file: %w", err)
+	}
+	return pid, nil
 }
 
 // fsyncDir flushes a directory entry so that rename/create operations are

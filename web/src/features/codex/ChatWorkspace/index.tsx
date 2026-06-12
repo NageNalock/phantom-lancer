@@ -8,6 +8,7 @@ import { codexAppServerStateLabel, codexThreadStatusLabel } from "../../../domai
 import { CODEX_STREAM_EVENTS, parseCodexStreamEvent, shouldRefreshThread, streamStateLabel } from "../codexStream";
 import type { CodexStreamState } from "../codexStream";
 import { ConversationTranscript } from "../ConversationTranscript";
+import { shouldDeriveConversationTitle, titleFromPrompt } from "../threadTitle";
 import { buildChatTranscript, mergeCodexEvent } from "./transcript";
 
 export function ChatWorkspace({
@@ -17,6 +18,7 @@ export function ChatWorkspace({
   workspaces,
   onStatusChange,
   onThreadChange,
+  onThreadUpdated,
 }: {
   actions: AppActions;
   status?: CodexStatus;
@@ -24,6 +26,7 @@ export function ChatWorkspace({
   workspaces: CodexWorkspace[];
   onStatusChange: () => void;
   onThreadChange: () => void;
+  onThreadUpdated: (thread: CodexThread) => void;
 }) {
   const [events, setEvents] = useState<CodexEvent[]>([]);
   const [turns, setTurns] = useState<CodexTurn[]>([]);
@@ -35,6 +38,7 @@ export function ChatWorkspace({
   const [titleDraft, setTitleDraft] = useState(thread.title || "");
   const [streamState, setStreamState] = useState<CodexStreamState>("connecting");
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
 
   const workspace = workspaces.find((item) => item.id === thread.workspaceId);
   const activeTurn = turns.find((turn) => turn.status === "running" || turn.status === "waiting_approval");
@@ -47,9 +51,13 @@ export function ChatWorkspace({
   }, [actions, thread.id]);
 
   const loadThread = useCallback(async () => {
-    const response = await actions.api<{ turns?: CodexTurn[] }>(`/api/codex/threads/${thread.id}`);
+    const response = await actions.api<{ thread?: CodexThread; turns?: CodexTurn[] }>(`/api/codex/threads/${thread.id}`);
     setTurns(response.turns || []);
-  }, [actions, thread.id]);
+    if (response.thread) {
+      onThreadUpdated(response.thread);
+      if (document.activeElement !== titleInputRef.current) setTitleDraft(response.thread.title || "");
+    }
+  }, [actions, onThreadUpdated, thread.id]);
 
   const loadModels = useCallback(async () => {
     try {
@@ -122,8 +130,13 @@ export function ChatWorkspace({
     if (nextTitle === (thread.title || "")) return;
     setSavingTitle(true);
     try {
-      await actions.api(`/api/codex/threads/${thread.id}`, { method: "PATCH", csrf: actions.csrf, body: { title: nextTitle } });
-      onThreadChange();
+      const response = await actions.api<{ thread?: CodexThread }>(`/api/codex/threads/${thread.id}`, { method: "PATCH", csrf: actions.csrf, body: { title: nextTitle } });
+      if (response.thread) {
+        setTitleDraft(response.thread.title || "");
+        onThreadUpdated(response.thread);
+      } else {
+        onThreadChange();
+      }
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");
     } finally {
@@ -141,14 +154,20 @@ export function ChatWorkspace({
     }
     setSending(true);
     try {
+      const nextTitle = shouldDeriveConversationTitle(titleDraft || thread.title) ? titleFromPrompt(text) : "";
+      if (nextTitle) {
+        setTitleDraft(nextTitle);
+        onThreadUpdated({ ...thread, title: nextTitle });
+      }
       if (activeTurn) {
         await actions.api(`/api/codex/turns/${activeTurn.id}/steer`, { method: "POST", csrf: actions.csrf, body: { prompt: text } });
       } else {
-        await actions.api(`/api/codex/threads/${thread.id}/turns`, {
+        const response = await actions.api<{ thread?: CodexThread }>(`/api/codex/threads/${thread.id}/turns`, {
           method: "POST",
           csrf: actions.csrf,
           body: { prompt: text, sandbox: "read-only", approvalPolicy: "on-request", model: model.trim() },
         });
+        if (response.thread) onThreadUpdated(response.thread);
       }
       setPrompt("");
       await loadThread();
@@ -187,6 +206,7 @@ export function ChatWorkspace({
               if (event.key === "Enter") event.currentTarget.blur();
             }}
             placeholder="新对话"
+            ref={titleInputRef}
             value={titleDraft}
           />
           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
@@ -232,7 +252,7 @@ export function ChatWorkspace({
 
 function ChatComposer({
   activeTurn,
-  busy,
+  busy: _busy,
   disabled,
   model,
   models,

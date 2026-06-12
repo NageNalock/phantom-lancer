@@ -6,7 +6,7 @@ import type {
   DockerRegistryTag,
   ObjectStorageProfile,
 } from "../../app/types";
-import { Button, CheckLabel, ContextList, Field, Metric, Panel, Pill, Toggle } from "../../components/ui";
+import { Button, CheckLabel, Field, Metric, Panel, Toggle } from "../../components/ui";
 import { DockerTable } from "./DockerTable";
 
 // registryHost derives a valid image-reference host (host[:port][/path]) from

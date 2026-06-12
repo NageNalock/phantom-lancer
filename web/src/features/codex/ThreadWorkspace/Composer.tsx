@@ -7,7 +7,7 @@ export interface ComposerAttachment {
   filename?: string;
 }
 
-export interface ComposerProps {
+interface ComposerProps {
   prompt: string;
   onPrompt: (value: string) => void;
   promptRef: RefObject<HTMLTextAreaElement | null>;

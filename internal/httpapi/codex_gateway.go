@@ -61,9 +61,10 @@ func (s *Server) handleUpdateCodexGatewaySettings(w http.ResponseWriter, r *http
 		OAuthTokenURL         *string `json:"oauthTokenUrl"`
 		OAuthClientID         *string `json:"oauthClientId"`
 		OAuthRedirectURI      *string `json:"oauthRedirectUri"`
-		RequestTimeoutSeconds *int    `json:"requestTimeoutSeconds"`
-		RefreshMarginSeconds  *int    `json:"refreshMarginSeconds"`
-		DefaultInstructions   *string `json:"defaultInstructions"`
+		RequestTimeoutSeconds               *int    `json:"requestTimeoutSeconds"`
+		RefreshMarginSeconds                *int    `json:"refreshMarginSeconds"`
+		AccountHealthCheckIntervalSeconds   *int    `json:"accountHealthCheckIntervalSeconds"`
+		DefaultInstructions                 *string `json:"defaultInstructions"`
 		InstallationID        *string `json:"installationId"`
 	}
 	if !decodeJSON(w, r, &req) {
@@ -94,6 +95,17 @@ func (s *Server) handleUpdateCodexGatewaySettings(w http.ResponseWriter, r *http
 	}
 	if req.RefreshMarginSeconds != nil {
 		settings.RefreshMarginSeconds = *req.RefreshMarginSeconds
+	}
+	if req.AccountHealthCheckIntervalSeconds != nil {
+		v := *req.AccountHealthCheckIntervalSeconds
+		const maxHCI = 30 * 24 * 3600
+		if v < 0 {
+			v = 0
+		}
+		if v > maxHCI {
+			v = maxHCI
+		}
+		settings.AccountHealthCheckIntervalSeconds = v
 	}
 	if req.DefaultInstructions != nil {
 		settings.DefaultInstructions = strings.TrimSpace(*req.DefaultInstructions)

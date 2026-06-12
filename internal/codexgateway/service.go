@@ -30,6 +30,9 @@ type Service struct {
 	Log       *slog.Logger
 	refreshMu sync.Mutex
 	refreshes map[string]*refreshCall
+	bgMu      sync.Mutex       // guards bgCancel
+	bgCancel  context.CancelFunc
+	bgWg      sync.WaitGroup
 }
 
 type refreshCall struct {
@@ -845,4 +848,131 @@ func readLimitedText(body io.Reader, limit int64) string {
 func drainAndClose(body io.ReadCloser) {
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, 64<<10))
 	_ = body.Close()
+}
+
+// StartBackground launches a periodic account health-check goroutine. The
+// first pass runs immediately (so boot reveals stale refresh tokens within
+// seconds) and subsequent passes are scheduled from the DB setting
+// account_health_check_interval_seconds, re-read each iteration so the
+// interval can be tuned without a restart. A value of 0 disables the loop
+// after the initial pass completes.
+func (s *Service) StartBackground(ctx context.Context) {
+	s.bgMu.Lock()
+	if s.bgCancel != nil {
+		s.bgMu.Unlock()
+		return
+	}
+	bgCtx, cancel := context.WithCancel(ctx)
+	s.bgCancel = cancel
+	s.bgWg.Add(1)
+	s.bgMu.Unlock()
+
+	go func() {
+		defer s.bgWg.Done()
+		defer cancel()
+
+		settings, err := s.Store.GetCodexGatewaySettings(bgCtx)
+		if err != nil {
+			s.Log.Info("codex gateway health-check settings unavailable, using defaults", "error", safelog.Error(err, 200))
+			settings = storage.DefaultCodexGatewaySettings()
+		}
+		s.runHealthCheckPass(bgCtx, settings)
+
+		for {
+			if bgCtx.Err() != nil {
+				return
+			}
+			settings, err := s.Store.GetCodexGatewaySettings(bgCtx)
+			if err != nil {
+				s.Log.Warn("codex gateway health-check settings read failed, retrying later", "error", safelog.Error(err, 200))
+				settings = storage.DefaultCodexGatewaySettings()
+			}
+			interval := time.Duration(settings.AccountHealthCheckIntervalSeconds) * time.Second
+			if interval <= 0 {
+				s.Log.Info("codex gateway health-check loop disabled (interval=0); exiting goroutine")
+				return
+			}
+			const minInterval = 10 * time.Second
+			if interval < minInterval {
+				s.Log.Warn("codex gateway health-check interval too small, clamping to minimum", "configured", interval.String(), "minimum", minInterval.String())
+				interval = minInterval
+			}
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-time.After(interval):
+			}
+			s.runHealthCheckPass(bgCtx, settings)
+		}
+	}()
+}
+
+// Close signals the background goroutine to exit and waits up to 2 seconds
+// for it to drain. Intended for orderlyClose before self-update exec.
+func (s *Service) Close() {
+	s.bgMu.Lock()
+	cancel := s.bgCancel
+	s.bgCancel = nil
+	s.bgMu.Unlock()
+	if cancel == nil {
+		return
+	}
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		s.bgWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		s.Log.Warn("codex gateway background goroutine did not exit within 2s shutdown window, continuing anyway")
+	}
+}
+
+// runHealthCheckPass performs one sequential pass over every non-disabled
+// account calling CheckAccount. Sequential (not concurrent) on purpose:
+// refresh + usage hits two upstream endpoints per account and we do not
+// want to burst against the OpenAI OAuth/codex rate limits. Disabled
+// accounts are skipped; invalid/rate_limited ones are included so the pass
+// can detect recovery (e.g. a rate-limit window rolling off).
+func (s *Service) runHealthCheckPass(ctx context.Context, settings storage.CodexGatewaySettings) {
+	startedAt := time.Now()
+	passLog := s.Log.With("phase", "account_health_check_pass")
+	passLog.Info("codex gateway account health-check pass started")
+	accounts, err := s.Store.ListCodexGatewayAccounts(ctx)
+	if err != nil {
+		passLog.Warn("codex gateway health-check failed to list accounts", "error", safelog.Error(err, 300))
+		return
+	}
+	total := len(accounts)
+	checked := 0
+	skippedDisabled := 0
+	for _, acct := range accounts {
+		if ctx.Err() != nil {
+			passLog.Warn("codex gateway health-check pass interrupted by shutdown", "checked", checked, "total", total)
+			return
+		}
+		if acct.Status == "disabled" {
+			skippedDisabled++
+			continue
+		}
+		acctCtx, acctCancel := context.WithTimeout(ctx, time.Duration(settings.RequestTimeoutSeconds)*time.Second)
+		_, aerr := s.CheckAccount(acctCtx, acct.ID)
+		acctCancel()
+		checked++
+		if aerr != nil && !errors.Is(aerr, context.Canceled) && !errors.Is(aerr, context.DeadlineExceeded) {
+			// CheckAccount already emitted per-account diagnostics; emit a
+			// pass-level summary line so noisy logs can be filtered without
+			// digging into per-account records.
+			passLog.Warn("codex gateway health-check account flagged", "account_id", acct.ID, "error", safelog.Error(aerr, 200))
+		}
+	}
+	passLog.Info("codex gateway account health-check pass completed",
+		"checked", checked,
+		"skipped_disabled", skippedDisabled,
+		"total", total,
+		"duration_ms", time.Since(startedAt).Milliseconds(),
+	)
 }

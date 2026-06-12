@@ -285,9 +285,102 @@
     @apply grid gap-2 break-words leading-relaxed;
   }
 
+  .message-rich :is(h1, h2, h3, h4, h5, h6) {
+    color: var(--text);
+    @apply m-0 font-semibold leading-snug;
+  }
+
+  .message-rich h1 {
+    @apply text-xl;
+  }
+
+  .message-rich h2 {
+    @apply text-lg;
+  }
+
+  .message-rich h3 {
+    @apply text-base;
+  }
+
+  .message-rich :is(h4, h5, h6) {
+    @apply text-sm;
+  }
+
   .message-rich p {
     white-space: pre-wrap;
     @apply m-0;
+  }
+
+  .message-rich :is(ul, ol) {
+    @apply m-0 grid gap-1 pl-5;
+  }
+
+  .message-rich ul {
+    list-style: disc;
+  }
+
+  .message-rich ol {
+    list-style: decimal;
+  }
+
+  .message-rich li {
+    @apply pl-1;
+  }
+
+  .message-rich li > input[type="checkbox"] {
+    accent-color: var(--accent);
+    @apply mr-2 align-[-1px];
+  }
+
+  .message-rich table {
+    display: block;
+    max-width: 100%;
+    border-collapse: collapse;
+    @apply overflow-auto rounded-lg border border-[var(--line)] text-sm;
+  }
+
+  .message-rich :is(th, td) {
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    @apply px-3 py-2 text-left align-top;
+  }
+
+  .message-rich :is(th, td):last-child {
+    border-right: 0;
+  }
+
+  .message-rich tr:last-child td {
+    border-bottom: 0;
+  }
+
+  .message-rich th {
+    background: var(--surface-soft);
+    color: var(--muted-strong);
+    @apply font-semibold;
+  }
+
+  .message-rich blockquote {
+    border-left: 2px solid var(--line-strong);
+    color: var(--muted-strong);
+    @apply m-0 py-0.5 pl-3;
+  }
+
+  .message-rich hr {
+    border: 0;
+    border-top: 1px solid var(--line);
+    @apply my-1;
+  }
+
+  .message-rich strong {
+    @apply font-semibold;
+  }
+
+  .message-rich em {
+    color: var(--muted-strong);
+  }
+
+  .message-rich del {
+    color: var(--muted);
   }
 
   .message-rich a {
@@ -308,6 +401,14 @@
     color: var(--text);
     font-family: var(--mono);
     @apply rounded-md px-1 py-0.5 text-xs;
+  }
+
+  .message-code-block code {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font-size: inherit;
+    @apply rounded-none p-0;
   }
 
   .message-code-block {
@@ -336,6 +437,54 @@
   .message-code-block.is-streaming {
     border-color: rgba(207, 77, 16, 0.26);
     box-shadow: inset 0 0 0 1px rgba(207, 77, 16, 0.04);
+  }
+
+  .message-code-block .hljs-keyword,
+  .message-code-block .hljs-literal,
+  .message-code-block .hljs-selector-tag,
+  .message-code-block .hljs-built_in,
+  .message-code-block .hljs-type {
+    color: #8b3fba;
+    font-weight: 600;
+  }
+
+  .message-code-block .hljs-string,
+  .message-code-block .hljs-regexp,
+  .message-code-block .hljs-template-variable {
+    color: #0f766e;
+  }
+
+  .message-code-block .hljs-number,
+  .message-code-block .hljs-symbol {
+    color: #b45309;
+  }
+
+  .message-code-block .hljs-comment,
+  .message-code-block .hljs-quote {
+    color: var(--muted);
+    font-style: italic;
+  }
+
+  .message-code-block .hljs-title,
+  .message-code-block .hljs-section,
+  .message-code-block .hljs-name {
+    color: #1d4ed8;
+    font-weight: 600;
+  }
+
+  .message-code-block .hljs-attr,
+  .message-code-block .hljs-attribute,
+  .message-code-block .hljs-variable,
+  .message-code-block .hljs-meta {
+    color: #475569;
+  }
+
+  .message-code-block .hljs-addition {
+    color: #047857;
+  }
+
+  .message-code-block .hljs-deletion {
+    color: #b91c1c;
   }
 
   .syntax-keyword {

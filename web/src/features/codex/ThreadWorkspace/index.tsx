@@ -10,6 +10,7 @@ import type { CodexStreamState } from "../codexStream";
 import { ConversationTranscript } from "../ConversationTranscript";
 import { buildChatTranscript, mergeCodexEvent } from "../ChatWorkspace/transcript";
 import { ThreadP1Panels } from "../ThreadP1Panels";
+import { shouldDeriveConversationTitle, titleFromPrompt } from "../threadTitle";
 import { AppServerStrip } from "./AppServerStrip";
 import { EventStream } from "./EventStream";
 import { Composer } from "./Composer";
@@ -22,6 +23,7 @@ export function ThreadWorkspace({
   workspaces,
   onStatusChange,
   onThreadChange,
+  onThreadUpdated,
 }: {
   actions: AppActions;
   status?: CodexStatus;
@@ -29,6 +31,7 @@ export function ThreadWorkspace({
   workspaces: CodexWorkspace[];
   onStatusChange: () => void;
   onThreadChange: () => void;
+  onThreadUpdated: (thread: CodexThread) => void;
 }) {
   const [events, setEvents] = useState<CodexEvent[]>([]);
   const [turns, setTurns] = useState<CodexTurn[]>([]);
@@ -45,6 +48,7 @@ export function ThreadWorkspace({
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [streamState, setStreamState] = useState<CodexStreamState>("connecting");
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
 
   const workspace = workspaces.find((item) => item.id === thread.workspaceId);
   const busy = thread.status === "running" || thread.status === "needs_approval" || thread.status === "queued";
@@ -67,12 +71,16 @@ export function ThreadWorkspace({
 
   const loadThread = useCallback(async () => {
     try {
-      const response = await actions.api<{ turns?: CodexTurn[] }>(`/api/codex/threads/${thread.id}`);
+      const response = await actions.api<{ thread?: CodexThread; turns?: CodexTurn[] }>(`/api/codex/threads/${thread.id}`);
       setTurns(response.turns || []);
+      if (response.thread) {
+        onThreadUpdated(response.thread);
+        if (document.activeElement !== titleInputRef.current) setTitleDraft(response.thread.title || "");
+      }
     } catch {
       // ignore
     }
-  }, [actions, thread.id]);
+  }, [actions, onThreadUpdated, thread.id]);
 
   const loadModels = useCallback(async () => {
     try {
@@ -193,11 +201,17 @@ export function ThreadWorkspace({
     }
     setSending(true);
     try {
-      await actions.api(`/api/codex/threads/${thread.id}/${path}`, {
+      const nextTitle = shouldDeriveConversationTitle(titleDraft || thread.title) ? titleFromPrompt(prompt) : "";
+      if (nextTitle) {
+        setTitleDraft(nextTitle);
+        onThreadUpdated({ ...thread, title: nextTitle });
+      }
+      const response = await actions.api<{ thread?: CodexThread }>(`/api/codex/threads/${thread.id}/${path}`, {
         method: "POST",
         csrf: actions.csrf,
         body: { prompt: prompt.trim(), sandbox, approvalPolicy: approval, model: model.trim(), attachmentIds: attachments.map((item) => item.id) },
       });
+      if (response.thread) onThreadUpdated(response.thread);
       setPrompt("");
       setAttachments([]);
       await loadEvents();
@@ -247,8 +261,13 @@ export function ThreadWorkspace({
     if (nextTitle === (thread.title || "")) return;
     setSavingTitle(true);
     try {
-      await actions.api(`/api/codex/threads/${thread.id}`, { method: "PATCH", csrf: actions.csrf, body: { title: nextTitle } });
-      onThreadChange();
+      const response = await actions.api<{ thread?: CodexThread }>(`/api/codex/threads/${thread.id}`, { method: "PATCH", csrf: actions.csrf, body: { title: nextTitle } });
+      if (response.thread) {
+        setTitleDraft(response.thread.title || "");
+        onThreadUpdated(response.thread);
+      } else {
+        onThreadChange();
+      }
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");
     } finally {
@@ -281,6 +300,7 @@ export function ThreadWorkspace({
               }
             }}
             placeholder="新对话"
+            ref={titleInputRef}
             value={titleDraft}
           />
           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2 text-xs text-[var(--muted)]">

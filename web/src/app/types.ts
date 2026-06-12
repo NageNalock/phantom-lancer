@@ -45,7 +45,7 @@ export interface ImageStatus {
   lastCompletedAt?: string;
 }
 
-export interface DashboardSummary {
+interface DashboardSummary {
   codexGateway?: CodexGatewayStatus;
   codex?: CodexStatus;
   images?: ImageStatus;
@@ -70,7 +70,7 @@ export interface RuntimeSettings {
   updatedAt?: string;
 }
 
-export interface FileSettings {
+interface FileSettings {
   configPath?: string;
   addr?: string;
   dataDir?: string;
@@ -86,7 +86,7 @@ export interface SettingsPayload {
   runtime?: RuntimeSettings;
 }
 
-export interface BuildInfo {
+interface BuildInfo {
   version?: string;
   commit?: string;
   date?: string;
@@ -94,7 +94,7 @@ export interface BuildInfo {
   arch?: string;
 }
 
-export interface SystemUpdateCheck {
+interface SystemUpdateCheck {
   id?: string;
   currentVersion?: string;
   latestVersion?: string;
@@ -159,7 +159,7 @@ export interface SystemUpdateStatus {
   supervisorPID?: number;
 }
 
-export interface SystemStatusPayload {
+interface SystemStatusPayload {
   version?: BuildInfo;
   supervisor?: SupervisorStatus;
   dataDir?: string;
@@ -177,6 +177,7 @@ export interface CodexGatewaySettings {
   oauthRedirectUri?: string;
   requestTimeoutSeconds?: number;
   refreshMarginSeconds?: number;
+  accountHealthCheckIntervalSeconds?: number;
   defaultInstructions?: string;
   installationId?: string;
   createdAt?: string;
@@ -207,7 +208,7 @@ export interface CodexGatewayAccount {
   updatedAt?: string;
 }
 
-export interface CodexGatewayModel {
+interface CodexGatewayModel {
   id: string;
   displayName?: string;
   ownedBy?: string;
@@ -408,7 +409,7 @@ export interface ImageAsset {
   updatedAt?: string;
 }
 
-export interface ImageGenerationSource {
+interface ImageGenerationSource {
   id?: string;
   jobId?: string;
   assetId?: string;
@@ -421,7 +422,7 @@ export interface ImageGenerationSource {
   createdAt?: string;
 }
 
-export interface ImageGenerationOutput {
+interface ImageGenerationOutput {
   id?: string;
   jobId?: string;
   assetId?: string;
@@ -486,7 +487,7 @@ export interface EventRecord {
   createdAt?: string;
 }
 
-export interface CodexInstallation {
+interface CodexInstallation {
   id?: string;
   binaryPath?: string;
   version?: string;
@@ -632,7 +633,7 @@ export interface CodexApproval {
   createdAt?: string;
 }
 
-export interface CodexAttachment {
+interface CodexAttachment {
   id: string;
   filename?: string;
   contentType?: string;
@@ -721,7 +722,7 @@ export interface CodexAutomation {
   updatedAt?: string;
 }
 
-export interface CodexAutomationRun {
+interface CodexAutomationRun {
   id: string;
   automationId?: string;
   threadId?: string;
@@ -737,26 +738,11 @@ export interface CodexAutomationRun {
   completedAt?: string;
 }
 
-export interface CodexTriageFailedTurn {
+interface CodexTriageFailedTurn {
   turnId: string;
   threadId: string;
   errorSummary?: string;
   completedAt?: string;
-}
-
-export interface CodexReviewComment {
-  id: string;
-  threadId?: string;
-  turnId?: string;
-  workspaceId?: string;
-  filePath?: string;
-  oldLine?: number;
-  newLine?: number;
-  hunkHeader?: string;
-  body?: string;
-  status?: string;
-  createdAt?: string;
-  resolvedAt?: string;
 }
 
 export interface CodexTriageInbox {
@@ -841,7 +827,7 @@ export interface DockerJob {
   payload?: Record<string, unknown>;
 }
 
-export interface DockerInstallStatus {
+interface DockerInstallStatus {
   supported?: boolean;
   installed?: boolean;
   canInstall?: boolean;
@@ -855,7 +841,7 @@ export interface DockerInstallStatus {
   privilegeMethod?: string;
 }
 
-export interface DockerSystemdStatus {
+interface DockerSystemdStatus {
   available?: boolean;
   canControl?: boolean;
   activeState?: string;
@@ -925,7 +911,7 @@ export interface DockerRegistryRepository {
   updatedAt?: string;
 }
 
-export interface DockerRegistryManifest {
+interface DockerRegistryManifest {
   digest: string;
   repository: string;
   mediaType?: string;
@@ -981,7 +967,7 @@ export interface DockerLogLine {
   text: string;
 }
 
-export interface DockerStats {
+interface DockerStats {
   cpuPercent: number;
   memoryUsageBytes: number;
   memoryLimitBytes: number;

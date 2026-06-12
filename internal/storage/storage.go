@@ -142,19 +142,20 @@ type SystemUpdateJob struct {
 }
 
 type CodexGatewaySettings struct {
-	ID                    string `json:"id"`
-	Enabled               bool   `json:"enabled"`
-	BaseURL               string `json:"baseUrl"`
-	OAuthAuthURL          string `json:"oauthAuthUrl"`
-	OAuthTokenURL         string `json:"oauthTokenUrl"`
-	OAuthClientID         string `json:"oauthClientId"`
-	OAuthRedirectURI      string `json:"oauthRedirectUri"`
-	RequestTimeoutSeconds int    `json:"requestTimeoutSeconds"`
-	RefreshMarginSeconds  int    `json:"refreshMarginSeconds"`
-	DefaultInstructions   string `json:"defaultInstructions"`
-	InstallationID        string `json:"installationId"`
-	CreatedAt             string `json:"createdAt"`
-	UpdatedAt             string `json:"updatedAt"`
+	ID                             string `json:"id"`
+	Enabled                        bool   `json:"enabled"`
+	BaseURL                        string `json:"baseUrl"`
+	OAuthAuthURL                   string `json:"oauthAuthUrl"`
+	OAuthTokenURL                  string `json:"oauthTokenUrl"`
+	OAuthClientID                  string `json:"oauthClientId"`
+	OAuthRedirectURI               string `json:"oauthRedirectUri"`
+	RequestTimeoutSeconds          int    `json:"requestTimeoutSeconds"`
+	RefreshMarginSeconds           int    `json:"refreshMarginSeconds"`
+	AccountHealthCheckIntervalSeconds int  `json:"accountHealthCheckIntervalSeconds"`
+	DefaultInstructions            string `json:"defaultInstructions"`
+	InstallationID                 string `json:"installationId"`
+	CreatedAt                      string `json:"createdAt"`
+	UpdatedAt                      string `json:"updatedAt"`
 }
 
 type CodexGatewayAccount struct {
@@ -860,6 +861,7 @@ CREATE TABLE IF NOT EXISTS codex_gateway_settings (
   oauth_redirect_uri TEXT NOT NULL DEFAULT '',
   request_timeout_seconds INTEGER NOT NULL DEFAULT 600,
   refresh_margin_seconds INTEGER NOT NULL DEFAULT 300,
+  account_health_check_interval_seconds INTEGER NOT NULL DEFAULT 43200,
   default_instructions TEXT NOT NULL DEFAULT 'You are a helpful assistant.',
   installation_id TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
@@ -1122,6 +1124,7 @@ CREATE INDEX IF NOT EXISTS idx_object_storage_profiles_created ON object_storage
 		{"image_assets", "private_at", "TEXT NOT NULL DEFAULT ''"},
 		{"image_assets", "object_storage_profile_id", "TEXT NOT NULL DEFAULT ''"},
 		{"image_storage_settings", "object_storage_profile_id", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_gateway_settings", "account_health_check_interval_seconds", "INTEGER NOT NULL DEFAULT 43200"},
 	} {
 		if err := s.ensureColumn(ctx, column.table, column.name, column.def); err != nil {
 			return err
@@ -1747,9 +1750,10 @@ func DefaultCodexGatewaySettings() CodexGatewaySettings {
 		OAuthTokenURL:         "https://auth.openai.com/oauth/token",
 		OAuthClientID:         "app_EMoamEEZ73f0CkXaXp7hrann",
 		OAuthRedirectURI:      "http://localhost:1455/auth/callback",
-		RequestTimeoutSeconds: 600,
-		RefreshMarginSeconds:  300,
-		DefaultInstructions:   "You are a helpful assistant.",
+		RequestTimeoutSeconds:             600,
+		RefreshMarginSeconds:              300,
+		AccountHealthCheckIntervalSeconds: 43200,
+		DefaultInstructions:               "You are a helpful assistant.",
 	}
 }
 
@@ -1784,6 +1788,12 @@ func NormalizeCodexGatewaySettings(settings CodexGatewaySettings) CodexGatewaySe
 	if settings.RefreshMarginSeconds < 0 {
 		settings.RefreshMarginSeconds = defaults.RefreshMarginSeconds
 	}
+	const maxHealthInterval = 30 * 24 * 3600
+	if settings.AccountHealthCheckIntervalSeconds < 0 {
+		settings.AccountHealthCheckIntervalSeconds = defaults.AccountHealthCheckIntervalSeconds
+	} else if settings.AccountHealthCheckIntervalSeconds > maxHealthInterval {
+		settings.AccountHealthCheckIntervalSeconds = maxHealthInterval
+	}
 	settings.DefaultInstructions = strings.TrimSpace(settings.DefaultInstructions)
 	if settings.DefaultInstructions == "" {
 		settings.DefaultInstructions = defaults.DefaultInstructions
@@ -1797,9 +1807,9 @@ func (s *Store) EnsureCodexGatewaySettings(ctx context.Context) error {
 	now := now()
 	_, err := s.db.ExecContext(ctx, `
 INSERT OR IGNORE INTO codex_gateway_settings (
-  id, enabled, base_url, oauth_auth_url, oauth_token_url, oauth_client_id, oauth_redirect_uri, request_timeout_seconds, refresh_margin_seconds, default_instructions, installation_id, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		defaults.ID, boolInt(defaults.Enabled), defaults.BaseURL, defaults.OAuthAuthURL, defaults.OAuthTokenURL, defaults.OAuthClientID, defaults.OAuthRedirectURI, defaults.RequestTimeoutSeconds, defaults.RefreshMarginSeconds, defaults.DefaultInstructions, defaults.InstallationID, now, now)
+  id, enabled, base_url, oauth_auth_url, oauth_token_url, oauth_client_id, oauth_redirect_uri, request_timeout_seconds, refresh_margin_seconds, account_health_check_interval_seconds, default_instructions, installation_id, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		defaults.ID, boolInt(defaults.Enabled), defaults.BaseURL, defaults.OAuthAuthURL, defaults.OAuthTokenURL, defaults.OAuthClientID, defaults.OAuthRedirectURI, defaults.RequestTimeoutSeconds, defaults.RefreshMarginSeconds, defaults.AccountHealthCheckIntervalSeconds, defaults.DefaultInstructions, defaults.InstallationID, now, now)
 	return err
 }
 
@@ -1807,7 +1817,7 @@ func (s *Store) GetCodexGatewaySettings(ctx context.Context) (CodexGatewaySettin
 	if err := s.EnsureCodexGatewaySettings(ctx); err != nil {
 		return CodexGatewaySettings{}, err
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT id, enabled, base_url, oauth_auth_url, oauth_token_url, oauth_client_id, oauth_redirect_uri, request_timeout_seconds, refresh_margin_seconds, default_instructions, installation_id, created_at, updated_at FROM codex_gateway_settings WHERE id = 'default'`)
+	row := s.db.QueryRowContext(ctx, `SELECT id, enabled, base_url, oauth_auth_url, oauth_token_url, oauth_client_id, oauth_redirect_uri, request_timeout_seconds, refresh_margin_seconds, account_health_check_interval_seconds, default_instructions, installation_id, created_at, updated_at FROM codex_gateway_settings WHERE id = 'default'`)
 	settings, err := scanCodexGatewaySettings(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DefaultCodexGatewaySettings(), nil
@@ -1829,8 +1839,8 @@ func (s *Store) UpdateCodexGatewaySettings(ctx context.Context, settings CodexGa
 	settings.UpdatedAt = now()
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO codex_gateway_settings (
-  id, enabled, base_url, oauth_auth_url, oauth_token_url, oauth_client_id, oauth_redirect_uri, request_timeout_seconds, refresh_margin_seconds, default_instructions, installation_id, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  id, enabled, base_url, oauth_auth_url, oauth_token_url, oauth_client_id, oauth_redirect_uri, request_timeout_seconds, refresh_margin_seconds, account_health_check_interval_seconds, default_instructions, installation_id, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   enabled = excluded.enabled,
   base_url = excluded.base_url,
@@ -1840,10 +1850,11 @@ ON CONFLICT(id) DO UPDATE SET
   oauth_redirect_uri = excluded.oauth_redirect_uri,
   request_timeout_seconds = excluded.request_timeout_seconds,
   refresh_margin_seconds = excluded.refresh_margin_seconds,
+  account_health_check_interval_seconds = excluded.account_health_check_interval_seconds,
   default_instructions = excluded.default_instructions,
   installation_id = excluded.installation_id,
   updated_at = excluded.updated_at`,
-		settings.ID, boolInt(settings.Enabled), settings.BaseURL, settings.OAuthAuthURL, settings.OAuthTokenURL, settings.OAuthClientID, settings.OAuthRedirectURI, settings.RequestTimeoutSeconds, settings.RefreshMarginSeconds, settings.DefaultInstructions, settings.InstallationID, settings.CreatedAt, settings.UpdatedAt)
+		settings.ID, boolInt(settings.Enabled), settings.BaseURL, settings.OAuthAuthURL, settings.OAuthTokenURL, settings.OAuthClientID, settings.OAuthRedirectURI, settings.RequestTimeoutSeconds, settings.RefreshMarginSeconds, settings.AccountHealthCheckIntervalSeconds, settings.DefaultInstructions, settings.InstallationID, settings.CreatedAt, settings.UpdatedAt)
 	if err != nil {
 		return CodexGatewaySettings{}, err
 	}
@@ -2460,13 +2471,6 @@ func (s *Store) CreateCodexGatewayRequestLog(ctx context.Context, input CodexGat
 		return err
 	}
 	return tx.Commit()
-}
-
-func (s *Store) PruneCodexGatewayRequestLogs(ctx context.Context, retention int) error {
-	if retention <= 0 {
-		retention = codexGatewayRequestLogRetention
-	}
-	return pruneCodexGatewayRequestLogs(ctx, s.db, retention)
 }
 
 type codexGatewayRequestLogPruner interface {
@@ -4016,15 +4020,6 @@ func (s *Store) GetAuditRetentionDays(ctx context.Context) int {
 	return days
 }
 
-// SetAuditRetentionDays persists the audit retention window. Pass 0 to
-// disable pruning entirely.
-func (s *Store) SetAuditRetentionDays(ctx context.Context, days int) error {
-	if days < 0 {
-		days = 0
-	}
-	return s.PutSettings(ctx, map[string]string{auditRetentionDaysSettingKey: strconv.Itoa(days)})
-}
-
 // DeleteAuditEventsOlderThan removes audit_events rows with created_at
 // strictly earlier than `cutoff`. Deletion happens in batches bounded
 // by batchSize (defaulting to DefaultAuditRetentionBatchSize) to avoid
@@ -4108,13 +4103,6 @@ func (s *Store) ListEvents(ctx context.Context, scope, scopeID string, after int
 	return out, rows.Err()
 }
 
-// PurgeLegacyCodexData is intentionally a no-op. The rebuilt Codex CLI client
-// must not delete retired codex_* tables automatically; callers should use
-// CodexCliLegacyTablesDetected and surface a diagnostic instead.
-func (s *Store) PurgeLegacyCodexData(ctx context.Context) error {
-	return nil
-}
-
 type workspaceScanner interface {
 	Scan(dest ...any) error
 }
@@ -4183,7 +4171,7 @@ func scanSystemUpdateJob(row workspaceScanner) (SystemUpdateJob, error) {
 func scanCodexGatewaySettings(row workspaceScanner) (CodexGatewaySettings, error) {
 	var settings CodexGatewaySettings
 	var enabled int
-	err := row.Scan(&settings.ID, &enabled, &settings.BaseURL, &settings.OAuthAuthURL, &settings.OAuthTokenURL, &settings.OAuthClientID, &settings.OAuthRedirectURI, &settings.RequestTimeoutSeconds, &settings.RefreshMarginSeconds, &settings.DefaultInstructions, &settings.InstallationID, &settings.CreatedAt, &settings.UpdatedAt)
+	err := row.Scan(&settings.ID, &enabled, &settings.BaseURL, &settings.OAuthAuthURL, &settings.OAuthTokenURL, &settings.OAuthClientID, &settings.OAuthRedirectURI, &settings.RequestTimeoutSeconds, &settings.RefreshMarginSeconds, &settings.AccountHealthCheckIntervalSeconds, &settings.DefaultInstructions, &settings.InstallationID, &settings.CreatedAt, &settings.UpdatedAt)
 	if err != nil {
 		return CodexGatewaySettings{}, err
 	}

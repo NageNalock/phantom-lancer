@@ -42,7 +42,7 @@ export function App() {
   const [authMode, setAuthMode] = useState<AuthMode>("checking");
   const [fatal, setFatal] = useState("");
   const [csrf, setCsrf] = useState(readCookie("pl_csrf"));
-  const [session, setSession] = useState<AuthSession | null>(null);
+  const [, setSession] = useState<AuthSession | null>(null);
   const [data, setData] = useState<AppData>(emptyData);
   const [activeTab, setActiveTab] = useState<MainTab>("dashboard");
   const [toast, setToastState] = useState<{ message: string; tone: Tone } | null>(null);

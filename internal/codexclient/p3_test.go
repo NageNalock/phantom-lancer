@@ -41,7 +41,7 @@ func TestCreateChatIsReadOnlyAndChatKind(t *testing.T) {
 	}
 	// A trusted workspace would normally allow workspace-write; chats must stay
 	// read-only regardless.
-	ws, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: wsPath, TrustState: "trusted", DefaultSandbox: "workspace-write", DefaultApprovalPolicy: "on-request"})
+	ws, err := svc.CreateWorkspaceWithOptions(ctx, storage.CodexCliWorkspace{Path: wsPath, TrustState: "trusted", DefaultSandbox: "workspace-write", DefaultApprovalPolicy: "on-request"}, CreateWorkspaceOptions{CreateIfMissing: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestChatTurnForcedReadOnlyEvenIfWorkspaceWriteRequested(t *testing.T) {
 	if err := os.Mkdir(wsPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ws, err := svc.CreateWorkspace(ctx, storage.CodexCliWorkspace{Path: wsPath, TrustState: "trusted", DefaultSandbox: "workspace-write", DefaultApprovalPolicy: "on-request"})
+	ws, err := svc.CreateWorkspaceWithOptions(ctx, storage.CodexCliWorkspace{Path: wsPath, TrustState: "trusted", DefaultSandbox: "workspace-write", DefaultApprovalPolicy: "on-request"}, CreateWorkspaceOptions{CreateIfMissing: false})
 	if err != nil {
 		t.Fatal(err)
 	}

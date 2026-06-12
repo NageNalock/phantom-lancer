@@ -474,7 +474,11 @@ func (s *Server) handleStartOrQueueCodexTurn(w http.ResponseWriter, r *http.Requ
 		writeError(w, codexTurnErrorStatus(err), codexTurnErrorCode(err), codexclient.Redact(err.Error(), 200))
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"turn": turn})
+	payload := map[string]any{"turn": turn}
+	if thread, err := s.codex.GetThread(r.Context(), threadID); err == nil {
+		payload["thread"] = thread
+	}
+	writeJSON(w, http.StatusAccepted, payload)
 }
 
 func (s *Server) handleCodexThreadEvents(w http.ResponseWriter, r *http.Request, threadID string) {

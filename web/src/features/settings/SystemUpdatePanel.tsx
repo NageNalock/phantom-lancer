@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../../app/App";
-import type { EventRecord, SupervisorStatus, SystemUpdateJob, SystemUpdateStatus } from "../../app/types";
+import type { EventRecord, SystemUpdateJob, SystemUpdateStatus } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, CheckLabel, ContextList, Notice, Panel, Pill } from "../../components/ui";
 import { formatBytesIEC } from "../../utils/format";

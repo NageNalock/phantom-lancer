@@ -1222,10 +1222,6 @@ func (s *Service) NavigateBrowserSession(ctx context.Context, id string, input B
 	return s.store.UpdateCodexCliBrowserSession(ctx, session)
 }
 
-func (s *Service) GetBrowserSession(ctx context.Context, id string) (storage.CodexCliBrowserSession, error) {
-	return s.store.GetCodexCliBrowserSession(ctx, id)
-}
-
 func (s *Service) DeleteBrowserSession(ctx context.Context, id string) error {
 	return s.store.DeleteCodexCliBrowserSession(ctx, id)
 }
