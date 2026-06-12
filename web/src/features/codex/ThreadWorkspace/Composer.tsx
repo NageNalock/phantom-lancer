@@ -22,8 +22,8 @@ export interface ComposerProps {
   skills: string[];
   onInsertSkill: (name: string) => void;
   workspaceWriteAllowed: boolean;
-  // sandboxLocked fixes the sandbox to read-only (chat threads). The selector is
-  // shown disabled so the constraint is visible but cannot be changed.
+  // sandboxLocked fixes kind=chat threads to read-only. The selector is shown
+  // disabled so the constraint is visible but cannot be changed.
   sandboxLocked: boolean;
   attachments: ComposerAttachment[];
   onUpload: (file: File) => void;

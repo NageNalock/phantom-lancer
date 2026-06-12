@@ -10,13 +10,15 @@ import (
 	"phantom-lancer/internal/storage"
 )
 
-// P3 Chats / Memories.
+// P3 scratch conversations / Memories.
 //
-// Chats are lightweight research/planning threads bound to a controlled scratch
-// workspace. They are always read-only: no file writes, no network, no
-// workspace-write. Memories is a read-only diagnostic that only reports whether
-// Codex may use global memory / config / AGENTS.md; it never reads or returns
-// the private contents of those files.
+// Scratch conversations are lightweight research/planning threads bound to a
+// controlled scratch workspace. They live in the same merged conversation list
+// as code threads, but keep kind=chat as a permission semantic. They are always
+// read-only: no file writes, no network, no workspace-write. Memories is a
+// read-only diagnostic that only reports whether Codex may use global memory /
+// config / AGENTS.md; it never reads or returns the private contents of those
+// files.
 
 // ErrScratchWorkspaceUnset is returned when a chat is requested before the owner
 // has chosen a scratch workspace in Codex settings.
@@ -28,9 +30,9 @@ type ChatThreadInput struct {
 	Title string `json:"title"`
 }
 
-// ListChats returns chat-kind threads, newest first, optionally including
-// archived ones. It reuses the shared thread store with a kind filter so chats
-// never mix into the code Threads view.
+// ListChats returns chat-kind threads for older clients and direct API callers.
+// The primary UI uses the merged threads endpoint and treats kind=chat as a
+// rendering and permission mode, not a separate navigation surface.
 func (s *Service) ListChats(ctx context.Context, includeArchived bool, query string) ([]storage.CodexCliThread, error) {
 	return s.store.ListCodexCliThreadsFiltered(ctx, storage.CodexCliThreadFilters{
 		IncludeArchived: includeArchived,

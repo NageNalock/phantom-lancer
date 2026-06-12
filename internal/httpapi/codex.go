@@ -278,9 +278,7 @@ func (s *Server) handleListCodexThreads(w http.ResponseWriter, r *http.Request) 
 		Query:           r.URL.Query().Get("q"),
 		WorkspaceID:     firstQuery(r, "workspace_id", "workspaceId"),
 		Status:          r.URL.Query().Get("status"),
-		// The Threads view shows code threads only; chat threads have their own
-		// Chats view and must not leak here.
-		Kind: "code",
+		Kind:            r.URL.Query().Get("kind"),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())

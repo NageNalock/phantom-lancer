@@ -3,6 +3,8 @@ import type { CodexThread, CodexWorkspace } from "../../app/types";
 import { Button, CheckLabel, EmptyState, Pill } from "../../components/ui";
 import { codexThreadStatusLabel } from "../../domain/labels";
 
+export type CreateConversationMode = "code" | "chat";
+
 export function ThreadList({
   loading,
   threads,
@@ -12,6 +14,7 @@ export function ThreadList({
   workspaceFilter,
   statusFilter,
   includeArchived,
+  scratchReady,
   onQuery,
   onWorkspaceFilter,
   onStatusFilter,
@@ -32,25 +35,28 @@ export function ThreadList({
   workspaceFilter: string;
   statusFilter: string;
   includeArchived: boolean;
+  scratchReady?: boolean;
   onQuery: (value: string) => void;
   onWorkspaceFilter: (value: string) => void;
   onStatusFilter: (value: string) => void;
   onIncludeArchived: (value: boolean) => void;
   onSearch: () => void;
   onSelect: (id: string) => void;
-  onCreate: (workspaceId: string) => void;
+  onCreate: (workspaceId: string, mode: CreateConversationMode) => void;
   onTogglePin: (thread: CodexThread) => void;
   onArchive: (thread: CodexThread) => void;
   onResume: (thread: CodexThread) => void;
   onFork: (thread: CodexThread) => void;
 }) {
   const [newWorkspace, setNewWorkspace] = useState("");
+  const [newMode, setNewMode] = useState<CreateConversationMode>("code");
   useEffect(() => {
     if (!newWorkspace && workspaces.length) setNewWorkspace(workspaces[0].id);
   }, [workspaces, newWorkspace]);
 
   const pinned = threads.filter((thread) => thread.pinned);
   const restGroups = groupThreadsByWorkspace(threads.filter((thread) => !thread.pinned), workspaces);
+  const canCreate = newMode === "chat" ? Boolean(scratchReady) : Boolean(newWorkspace);
 
   return (
     <section className="panel">
@@ -58,21 +64,34 @@ export function ThreadList({
         <h2 className="m-0 text-sm font-semibold">会话</h2>
       </div>
       <div className="panel-body grid gap-3">
-        <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
-          <select className="select" disabled={!workspaces.length} onChange={(event) => setNewWorkspace(event.target.value)} value={newWorkspace}>
-            {workspaces.length ? (
-              workspaces.map((workspace) => (
-                <option key={workspace.id} value={workspace.id}>
-                  {workspace.label || workspace.id}
-                </option>
-              ))
-            ) : (
-              <option value="">先登记工作区</option>
-            )}
+        <div className="grid gap-2">
+          <select className="select" onChange={(event) => setNewMode(event.target.value as CreateConversationMode)} value={newMode}>
+            <option value="code">代码任务</option>
+            <option disabled={!scratchReady} value="chat">只读问答</option>
           </select>
-          <Button disabled={!newWorkspace} tone="primary" onClick={() => newWorkspace && onCreate(newWorkspace)}>
-            新对话
-          </Button>
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+            {newMode === "code" ? (
+              <select className="select" disabled={!workspaces.length} onChange={(event) => setNewWorkspace(event.target.value)} value={newWorkspace}>
+                {workspaces.length ? (
+                  workspaces.map((workspace) => (
+                    <option key={workspace.id} value={workspace.id}>
+                      {workspace.label || workspace.id}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">先登记工作区</option>
+                )}
+              </select>
+            ) : (
+              <div className="flex min-h-9 items-center rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] px-3 text-xs text-[var(--muted-strong)]">
+                使用 scratch workspace
+              </div>
+            )}
+            <Button disabled={!canCreate} tone="primary" onClick={() => onCreate(newWorkspace, newMode)}>
+              新对话
+            </Button>
+          </div>
+          {newMode === "chat" && !scratchReady ? <p className="muted m-0 text-xs">请先在 Settings 里选择 scratch workspace。</p> : null}
         </div>
         <form
           className="grid grid-cols-[minmax(0,1fr)_auto] gap-2"
@@ -126,7 +145,7 @@ export function ThreadList({
             ))}
           </div>
         ) : (
-          <EmptyState body={loading ? "正在加载会话。" : "暂无会话，选择工作区后开始新对话。"} title="暂无会话" />
+          <EmptyState body={loading ? "正在加载会话。" : "暂无会话，可创建代码任务或只读问答。"} title="暂无会话" />
         )}
       </div>
     </section>
@@ -187,17 +206,19 @@ function ThreadRow({
 }) {
   const workspace = workspaces.find((item) => item.id === thread.workspaceId);
   const archived = thread.status === "archived" || Boolean(thread.archivedAt);
+  const kindLabel = thread.kind === "chat" ? "只读问答" : "代码任务";
   return (
     <div className={`rounded-lg border px-2 py-2 text-left transition ${active ? "border-[var(--line-strong)] bg-[var(--surface-strong)]" : "border-transparent hover:bg-[var(--surface-soft)]"}`}>
       <button className="w-full text-left" onClick={() => onSelect(thread.id)} type="button">
         <div className="flex items-center justify-between gap-2">
           <strong className="truncate text-sm">{thread.title || "新对话"}</strong>
           <span className="flex shrink-0 items-center gap-1">
+            {thread.kind === "chat" ? <Pill tone="neutral">只读</Pill> : null}
             {!active && thread.background ? <span className="rounded border border-[var(--line)] px-1.5 py-0.5 text-[10px] text-[var(--muted-strong)]">后台</span> : null}
             <Pill tone={threadTone(thread.status)}>{codexThreadStatusLabel(thread.status)}</Pill>
           </span>
         </div>
-        <span className="muted mt-1 block truncate text-xs">{workspace?.label || workspace?.pathSummary || "工作区"}</span>
+        <span className="muted mt-1 block truncate text-xs">{workspace?.label || workspace?.pathSummary || "工作区"} / {kindLabel}</span>
       </button>
       <div className="mt-1 flex items-center gap-2 text-xs">
         {archived ? (

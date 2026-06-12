@@ -60,7 +60,8 @@ func TestCreateChatIsReadOnlyAndChatKind(t *testing.T) {
 		t.Fatalf("expected read-only chat, got %q", chat.SandboxMode)
 	}
 
-	// ListChats must only return chat-kind threads, never code threads.
+	// ListChats remains a compatibility endpoint for older callers and must only
+	// return chat-kind threads, never code threads.
 	codeThread, err := svc.CreateThread(ctx, ws.ID, "code", "", "read-only", "on-request")
 	if err != nil {
 		t.Fatal(err)
@@ -76,21 +77,30 @@ func TestCreateChatIsReadOnlyAndChatKind(t *testing.T) {
 		t.Fatal("code thread leaked into chat list")
 	}
 
-	// The default Threads view filters to code kind, so chats must not appear.
+	allThreads, err := svc.ListThreadsFiltered(ctx, ThreadListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allThreads) != 2 {
+		t.Fatalf("expected merged thread list to include code and chat threads, got %d", len(allThreads))
+	}
+
+	// The optional kind filter still isolates code threads for compatibility and
+	// diagnostics, even though the default UI now shows a merged conversation list.
 	codeThreads, err := svc.ListThreadsFiltered(ctx, ThreadListOptions{Kind: "code"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, thread := range codeThreads {
 		if thread.Kind == "chat" {
-			t.Fatalf("chat thread %s leaked into code Threads view", thread.ID)
+			t.Fatalf("chat thread %s leaked into kind=code filter", thread.ID)
 		}
 		if thread.ID == chat.ID {
-			t.Fatalf("chat %s leaked into code Threads view", chat.ID)
+			t.Fatalf("chat %s leaked into kind=code filter", chat.ID)
 		}
 	}
 	if len(codeThreads) != 1 || codeThreads[0].ID != codeThread.ID {
-		t.Fatalf("expected only the code thread in Threads view, got %d items", len(codeThreads))
+		t.Fatalf("expected only the code thread in kind=code filter, got %d items", len(codeThreads))
 	}
 }
 

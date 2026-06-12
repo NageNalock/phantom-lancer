@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../../app/App";
-import type { CodexStatus, CodexThread, CodexWorkspace } from "../../app/types";
+import type { CodexSettings, CodexStatus, CodexThread, CodexWorkspace } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { ComposerEmptyState, ThreadList } from "./ThreadSidebar";
+import type { CreateConversationMode } from "./ThreadSidebar";
 import { ThreadInspector } from "./ThreadInspector";
+import { ChatWorkspace } from "./ChatWorkspace";
 import { ThreadWorkspace } from "./ThreadWorkspace";
 
 export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: { actions: AppActions; focusThreadId?: string; status?: CodexStatus; onStatusChange: () => void }) {
   const [threads, setThreads] = useState<CodexThread[]>([]);
   const [workspaces, setWorkspaces] = useState<CodexWorkspace[]>([]);
+  const [scratchWorkspaceId, setScratchWorkspaceId] = useState("");
   const [activeId, setActiveId] = useState("");
   const [query, setQuery] = useState("");
   const [workspaceFilter, setWorkspaceFilter] = useState("all");
@@ -26,7 +29,9 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
       if (includeArchived || statusFilter === "archived") params.set("archived", "1");
       const suffix = params.toString() ? `?${params.toString()}` : "";
       const response = await actions.api<{ items?: CodexThread[] }>(`/api/codex/threads${suffix}`);
-      setThreads(response.items || []);
+      const nextThreads = response.items || [];
+      setThreads(nextThreads);
+      setActiveId((current) => (current && nextThreads.some((thread) => thread.id === current) ? current : nextThreads[0]?.id || ""));
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");
     } finally {
@@ -43,12 +48,24 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
     }
   }, [actions]);
 
+  const loadSettings = useCallback(async () => {
+    try {
+      const response = await actions.api<{ settings?: CodexSettings }>("/api/codex/settings");
+      setScratchWorkspaceId(response.settings?.scratchWorkspaceId || "");
+    } catch {
+      // settings are only needed for the read-only conversation create preset.
+    }
+  }, [actions]);
+
   useEffect(() => {
     void loadThreads();
   }, [loadThreads]);
   useEffect(() => {
     void loadWorkspaces();
   }, [loadWorkspaces]);
+  useEffect(() => {
+    void loadSettings();
+  }, [loadSettings]);
   useEffect(() => {
     if (!focusThreadId) return;
     setWorkspaceFilter("all");
@@ -58,10 +75,13 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
   }, [focusThreadId]);
 
   const activeThread = useMemo(() => threads.find((thread) => thread.id === activeId) || null, [threads, activeId]);
+  const scratchReady = Boolean(scratchWorkspaceId);
 
-  async function createThread(workspaceId: string) {
+  async function createThread(workspaceId: string, mode: CreateConversationMode = "code") {
     try {
-      const response = await actions.api<{ thread: CodexThread }>("/api/codex/threads", { method: "POST", csrf: actions.csrf, body: { workspaceId } });
+      const response = mode === "chat"
+        ? await actions.api<{ thread: CodexThread }>("/api/codex/chats", { method: "POST", csrf: actions.csrf, body: { title: "" } })
+        : await actions.api<{ thread: CodexThread }>("/api/codex/threads", { method: "POST", csrf: actions.csrf, body: { workspaceId } });
       await loadThreads();
       setActiveId(response.thread.id);
       onStatusChange();
@@ -123,6 +143,7 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
         workspaceFilter={workspaceFilter}
         statusFilter={statusFilter}
         includeArchived={includeArchived}
+        scratchReady={scratchReady}
         onQuery={setQuery}
         onWorkspaceFilter={setWorkspaceFilter}
         onStatusFilter={setStatusFilter}
@@ -135,7 +156,9 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
         onResume={resume}
         onFork={fork}
       />
-      {activeThread ? (
+      {activeThread?.kind === "chat" ? (
+        <ChatWorkspace key={activeThread.id} actions={actions} status={status} thread={activeThread} workspaces={workspaces} onStatusChange={onStatusChange} onThreadChange={loadThreads} />
+      ) : activeThread ? (
         <ThreadWorkspace key={activeThread.id} actions={actions} status={status} thread={activeThread} workspaces={workspaces} onStatusChange={onStatusChange} onThreadChange={loadThreads} />
       ) : (
         <ComposerEmptyState workspaces={workspaces} onCreate={createThread} />

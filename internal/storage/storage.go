@@ -3355,6 +3355,39 @@ WHERE id = ?`,
 	return s.GetImageAsset(ctx, asset.ID)
 }
 
+func (s *Store) ArchiveImageAssetToS3(ctx context.Context, asset ImageAsset) (ImageAsset, error) {
+	asset = NormalizeImageAsset(asset)
+	asset.StorageBackend = "s3"
+	asset.LocalName = ""
+	asset.LastError = ""
+	asset.UpdatedAt = now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ImageAsset{}, err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
+UPDATE image_assets SET
+  status = ?, private = ?, private_at = ?, mime_type = ?, extension = ?, size_bytes = ?, width = ?, height = ?, checksum_sha256 = ?, local_name = ?, storage_backend = ?, object_storage_profile_id = ?, s3_bucket = ?, s3_region = ?, s3_endpoint_label = ?, s3_key = ?, s3_etag = ?, archived_at = ?, deleted_at = ?, deleted_reason = ?, last_error = ?, updated_at = ?
+WHERE id = ?`,
+		asset.Status, boolInt(asset.Private), asset.PrivateAt, asset.MimeType, asset.Extension, asset.SizeBytes, asset.Width, asset.Height, asset.ChecksumSHA256, asset.LocalName, asset.StorageBackend, asset.ObjectStorageProfileID, asset.S3Bucket, asset.S3Region, asset.S3EndpointLabel, asset.S3Key, asset.S3ETag, asset.ArchivedAt, asset.DeletedAt, asset.DeletedReason, asset.LastError, asset.UpdatedAt, asset.ID)
+	if err != nil {
+		return ImageAsset{}, err
+	}
+	_, err = tx.ExecContext(ctx, `
+UPDATE image_generation_outputs
+SET local_name = '', mime_type = ?, storage = 's3', size_bytes = ?
+WHERE asset_id = ? OR (asset_id = '' AND job_id = ? AND slot = ?)`,
+		asset.MimeType, asset.SizeBytes, asset.ID, asset.JobID, asset.Slot)
+	if err != nil {
+		return ImageAsset{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ImageAsset{}, err
+	}
+	return s.GetImageAsset(ctx, asset.ID)
+}
+
 func (s *Store) SetImageAssetPrivate(ctx context.Context, id string, private bool) (ImageAsset, error) {
 	privateAt := ""
 	if private {

@@ -859,7 +859,8 @@ function objectStorageEnabled(settings?: ImageStorageSettings): boolean {
 }
 
 function canArchiveAsset(asset?: ImageAsset, settings?: ImageStorageSettings): boolean {
-  return Boolean(asset?.id && asset.storageBackend === "local" && objectStorageEnabled(settings) && !asset.deletedAt);
+  const archivableStorage = asset?.storageBackend === "local" || asset?.storageBackend === "remote";
+  return Boolean(asset?.id && archivableStorage && objectStorageEnabled(settings) && !asset.deletedAt);
 }
 
 function confirmDelete(asset: ImageAsset, onDelete: (asset: ImageAsset) => void) {

@@ -193,30 +193,6 @@
     @apply rounded-lg p-3 text-sm;
   }
 
-  .chat-list-item {
-    border: 1px solid transparent;
-    background: transparent;
-    color: var(--text);
-    @apply min-w-0 rounded-lg px-3 py-2 text-left text-sm transition;
-  }
-
-  .chat-list-item:hover {
-    background: var(--surface-soft);
-    border-color: var(--line);
-  }
-
-  .chat-list-item-active {
-    background: var(--surface-strong);
-    border-color: var(--line-strong);
-    box-shadow: inset 2px 0 0 var(--accent);
-  }
-
-  .chat-tab-layout {
-    display: grid;
-    grid-template-columns: 300px minmax(0, 1fr);
-    gap: 1rem;
-  }
-
   .chat-workspace {
     background: var(--surface);
     width: 100%;
@@ -310,6 +286,7 @@
   }
 
   .message-rich p {
+    white-space: pre-wrap;
     @apply m-0;
   }
 
@@ -346,7 +323,7 @@
     background: var(--surface-soft);
     color: var(--muted);
     font-family: var(--mono);
-    @apply px-3 py-1.5 text-xs;
+    @apply flex items-center justify-between gap-3 px-3 py-1.5 text-xs;
   }
 
   .message-code-block pre {
@@ -354,6 +331,64 @@
     font-family: var(--mono);
     @apply m-0 overflow-auto p-3 text-xs leading-relaxed;
     white-space: pre;
+  }
+
+  .message-code-block.is-streaming {
+    border-color: rgba(207, 77, 16, 0.26);
+    box-shadow: inset 0 0 0 1px rgba(207, 77, 16, 0.04);
+  }
+
+  .syntax-keyword {
+    color: #8b3fba;
+    font-weight: 600;
+  }
+
+  .syntax-string {
+    color: #0f766e;
+  }
+
+  .syntax-number {
+    color: #b45309;
+  }
+
+  .syntax-comment {
+    color: var(--muted);
+    font-style: italic;
+  }
+
+  .syntax-add {
+    color: #047857;
+  }
+
+  .syntax-remove {
+    color: #b91c1c;
+  }
+
+  .syntax-meta {
+    color: #475569;
+    font-weight: 600;
+  }
+
+  .thread-conversation-transcript {
+    min-height: 360px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    @apply rounded-lg;
+  }
+
+  .thread-event-details {
+    border: 1px solid var(--line);
+    background: var(--surface-soft);
+    @apply overflow-hidden rounded-lg text-sm;
+  }
+
+  .thread-event-details summary {
+    color: var(--muted-strong);
+    @apply flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-xs font-medium;
+  }
+
+  .thread-event-details summary::-webkit-details-marker {
+    display: none;
   }
 
   .log-source-row {
@@ -469,10 +504,6 @@
 }
 
 @media (max-width: 1023.98px) {
-  .chat-tab-layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
   .chat-user-message {
     max-width: 88%;
   }

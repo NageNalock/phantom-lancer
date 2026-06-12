@@ -702,8 +702,8 @@ func (s *Service) startTurn(ctx context.Context, threadID string, input TurnInpu
 		return storage.CodexCliTurn{}, err
 	}
 	requestedSandbox := firstNonEmpty(input.Sandbox, thread.SandboxMode)
-	// Chat threads are research/planning only: they stay read-only regardless of
-	// any requested or stored sandbox, so they can never write files.
+	// kind=chat threads are the read-only conversation mode inside the merged
+	// list: they stay read-only regardless of any requested or stored sandbox.
 	if thread.Kind == "chat" {
 		requestedSandbox = "read-only"
 	}

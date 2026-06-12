@@ -11,13 +11,11 @@ import { CodexSettingsTab } from "./codex/CodexSettingsTab";
 import { AutomationsTab } from "./codex/AutomationsTab";
 import { CapabilitiesTab } from "./codex/CapabilitiesTab";
 import { NotificationsTab } from "./codex/NotificationsTab";
-import { ChatsTab } from "./codex/ChatsTab";
 
-type CodexTab = "threads" | "chats" | "workspaces" | "approvals" | "automations" | "capabilities" | "notifications" | "diagnostics" | "settings";
+type CodexTab = "threads" | "workspaces" | "approvals" | "automations" | "capabilities" | "notifications" | "diagnostics" | "settings";
 
 const TABS: Array<{ id: CodexTab; label: string }> = [
-  { id: "threads", label: "Threads" },
-  { id: "chats", label: "Chats" },
+  { id: "threads", label: "Conversations" },
   { id: "workspaces", label: "Workspaces" },
   { id: "approvals", label: "Approvals" },
   { id: "automations", label: "Automations" },
@@ -73,7 +71,6 @@ export function CodexView({ actions, data }: { actions: AppActions; data: AppDat
       />
 
       {tab === "threads" ? <ThreadsTab actions={actions} focusThreadId={focusThreadId} status={status} onStatusChange={refreshStatus} /> : null}
-      {tab === "chats" ? <ChatsTab actions={actions} status={status} onStatusChange={refreshStatus} /> : null}
       {tab === "workspaces" ? <WorkspacesTab actions={actions} onChange={refreshStatus} /> : null}
       {tab === "approvals" ? <ApprovalsTab actions={actions} onChange={refreshStatus} /> : null}
       {tab === "automations" ? <AutomationsTab actions={actions} onOpenThread={(threadId) => { setFocusThreadId(threadId); setTab("threads"); }} /> : null}

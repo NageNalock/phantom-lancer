@@ -112,7 +112,7 @@ export function CodexSettingsTab({ actions, onChange }: { actions: AppActions; o
         <Field label="最大并发 turn" help="默认 1；同一 workspace 仍会串行，避免并发写入同一目录。">
           <input className="input" type="number" min={1} max={4} onChange={(event) => update("maxConcurrentTurns", Number(event.target.value))} value={settings.maxConcurrentTurns ?? 1} />
         </Field>
-        <Field label="Chats scratch workspace" help="Chats 为只读 research/planning 会话，绑定该受控 workspace；留空则无法新建 Chat。">
+        <Field label="只读问答 scratch workspace" help="统一会话里的只读问答会绑定该受控 workspace；留空则不能使用只读问答创建模式。">
           <select className="select" onChange={(event) => update("scratchWorkspaceId", event.target.value)} value={settings.scratchWorkspaceId || ""}>
             <option value="">未选择</option>
             {workspaces.map((workspace) => (

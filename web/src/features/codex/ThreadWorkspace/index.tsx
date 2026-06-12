@@ -1,53 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { AppActions } from "../../../app/App";
 import type { CodexCapabilitySummary, CodexEvent, CodexModel, CodexStatus, CodexThread, CodexTurn, CodexWorkspace } from "../../../app/types";
 import { Notice, Pill } from "../../../components/ui";
 import { friendlyError } from "../../../api/client";
 import { codexThreadStatusLabel } from "../../../domain/labels";
+import { CODEX_STREAM_EVENTS, parseCodexStreamEvent, shouldRefreshThread, streamStateLabel } from "../codexStream";
+import type { CodexStreamState } from "../codexStream";
+import { ConversationTranscript } from "../ConversationTranscript";
+import { buildChatTranscript, mergeCodexEvent } from "../ChatWorkspace/transcript";
 import { ThreadP1Panels } from "../ThreadP1Panels";
 import { AppServerStrip } from "./AppServerStrip";
 import { EventStream } from "./EventStream";
 import { Composer } from "./Composer";
 import type { ComposerAttachment } from "./Composer";
-
-// Thread stream event names mirror the stable Phantom Lancer event vocabulary;
-// the SSE channel only triggers a refresh, structured rows come from history.
-const CODEX_STREAM_EVENTS = [
-  "thread.started",
-  "thread.resumed",
-  "thread.archived",
-  "thread.status.changed",
-  "turn.queued",
-  "turn.started",
-  "turn.completed",
-  "turn.failed",
-  "turn.cancelled",
-  "message.user",
-  "message.agent",
-  "message.reasoning",
-  "command.started",
-  "command.completed",
-  "command.owner.queued",
-  "command.owner.started",
-  "command.owner.output",
-  "command.owner.output.attached",
-  "command.owner.completed",
-  "file_change.started",
-  "file_change.completed",
-  "approval.requested",
-  "approval.resolved",
-  "tool.started",
-  "tool.completed",
-  "plan.updated",
-  "diff.updated",
-  "review.comment.created",
-  "browser.preview.opened",
-  "browser.preview.comment",
-  "usage.updated",
-  "diagnostic.warning",
-  "diagnostic.error",
-];
 
 export function ThreadWorkspace({
   actions,
@@ -77,16 +43,18 @@ export function ThreadWorkspace({
   const [savingTitle, setSavingTitle] = useState(false);
   const [steering, setSteering] = useState(false);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [streamState, setStreamState] = useState<CodexStreamState>("connecting");
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
 
   const workspace = workspaces.find((item) => item.id === thread.workspaceId);
   const busy = thread.status === "running" || thread.status === "needs_approval" || thread.status === "queued";
   const interactive = thread.status === "running" || thread.status === "needs_approval";
   const activeTurn = turns.find((turn) => turn.status === "running" || turn.status === "waiting_approval");
-  // Chat threads are fixed read-only research/planning; never offer workspace-write
-  // even on a trusted workspace, matching the server-side enforcement.
+  // kind=chat threads are fixed read-only even on a trusted workspace, matching
+  // the server-side enforcement. They normally render through ChatWorkspace.
   const isChat = thread.kind === "chat";
   const workspaceWriteAllowed = !isChat && workspace?.trustState === "trusted";
+  const entries = useMemo(() => buildChatTranscript(events, turns), [events, turns]);
 
   const loadEvents = useCallback(async () => {
     try {
@@ -167,23 +135,34 @@ export function ThreadWorkspace({
     });
   }, [models]);
 
-  // Live updates reuse the shared Event API; the Codex history endpoint remains
-  // the source for structured transcript rows.
+  // Match Codex app-server clients: consume the thread event stream directly
+  // and let item deltas update stable transcript entries.
   useEffect(() => {
-    const params = new URLSearchParams({ scope: "codex.thread", id: thread.id });
-    const url = `/api/events/stream?${params.toString()}`;
-    const source = new EventSource(url);
-    const refresh = () => {
-      void loadEvents();
-      void loadThread();
+    let closed = false;
+    setStreamState("connecting");
+    const source = new EventSource(`/api/codex/threads/${thread.id}/events?stream=1`);
+    const handleEvent = (message: MessageEvent<string>) => {
+      const next = parseCodexStreamEvent(message.data);
+      if (!next) return;
+      setEvents((current) => mergeCodexEvent(current, next));
+      if (shouldRefreshThread(next)) {
+        void loadThread();
+        onThreadChange();
+        onStatusChange();
+      }
     };
-    source.onmessage = refresh;
-    CODEX_STREAM_EVENTS.forEach((eventType) => source.addEventListener(eventType, refresh));
+    source.onopen = () => {
+      if (!closed) setStreamState("live");
+    };
     source.onerror = () => {
+      if (!closed) setStreamState("reconnecting");
+    };
+    CODEX_STREAM_EVENTS.forEach((eventType) => source.addEventListener(eventType, handleEvent as EventListener));
+    return () => {
+      closed = true;
       source.close();
     };
-    return () => source.close();
-  }, [thread.id, loadEvents, loadThread]);
+  }, [thread.id, loadThread, onThreadChange, onStatusChange]);
 
   async function uploadAttachment(file: File) {
     const form = new FormData();
@@ -304,7 +283,11 @@ export function ThreadWorkspace({
             placeholder="新对话"
             value={titleDraft}
           />
-          <p className="muted mt-1 mb-0 truncate text-xs">{workspace?.label || workspace?.pathSummary}</p>
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+            <span className="truncate">{workspace?.label || workspace?.pathSummary}</span>
+            <span>代码任务</span>
+            <span>SSE {streamStateLabel(streamState)}</span>
+          </div>
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
           <Pill tone={threadTone(thread.status)}>{codexThreadStatusLabel(thread.status)}</Pill>
@@ -313,7 +296,14 @@ export function ThreadWorkspace({
       </div>
       <div className="panel-body flex min-h-0 flex-1 flex-col gap-3">
         <AppServerStrip status={status} onStart={startAppServer} />
-        <EventStream events={events} />
+        <ConversationTranscript className="thread-conversation-transcript" entries={entries} emptyBody="发送第一条 prompt 后，这里会按 Codex Desktop 的 Thread / Turn / Item 模型展示对话和执行状态。" emptyTitle="开始一个代码任务" />
+        <details className="thread-event-details">
+          <summary>
+            <span>事件明细</span>
+            <span>{events.length}</span>
+          </summary>
+          <EventStream events={events} />
+        </details>
 
         <div className="sticky bottom-0 z-10 grid gap-3 border-t border-[var(--line)] bg-[var(--surface)] pt-3">
           {thread.lastError ? <Notice tone="danger">{thread.lastError}</Notice> : null}

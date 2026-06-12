@@ -1,7 +1,7 @@
 # Codex CLI Client 模块功能设计
 
 文档日期：2026-06-07
-最近更新：2026-06-08
+最近更新：2026-06-12
 关联文档：
 
 - [personal-web-terminal-product-features.md](./personal-web-terminal-product-features.md)
@@ -132,9 +132,11 @@ Codex 会话必须绑定 workspace。workspace 不是通用设置项，而是 Co
 主工作区围绕当前 thread 展开：
 
 - 空状态：居中的轻量 composer，不做大 hero 或营销式欢迎区。
-- 会话中：消息流、计划、命令、diff、审批、错误和最终响应。
+- 会话中：按 Codex app-server 的 `Thread / Turn / Item` 心智模型组织消息流、计划、命令、diff、审批、错误和最终响应。
 - 底部 composer：输入 prompt、选择 workspace、权限模式、模型和可选附件。
 - 右侧 inspector：当前 workspace、Git 状态摘要、CLI 状态、活动 turn、审批、最近错误和事件诊断。
+- 主对话区不把 `item/agentMessage/delta` 或 token delta 渲染成独立卡片；同一个 item 的 delta 必须合并更新同一条 assistant 消息，`item/completed` 再固化最终文本。
+- Assistant 消息支持 Markdown 代码 fence 渲染和轻量语法高亮；命令、diff、审批和工具调用优先作为低噪音状态行或折叠详情展示。
 
 消息与事件类型：
 
@@ -388,12 +390,12 @@ turn：
 - `POST /api/codex/attachments`
 - `DELETE /api/codex/attachments/{id}`
 
-事件实时推送复用现有 SSE：
+事件读取和实时推送：
 
-- `GET /api/events/history?scope=codex.thread.{thread_id}`
-- `GET /api/events/stream?scope=codex.thread.{thread_id}`
+- `GET /api/codex/threads/{id}/events`
+- `GET /api/codex/threads/{id}/events?stream=1`
 
-如果现有 Event API 不支持 scope 参数，应先扩展 Event Module，而不是为 Codex 单独引入 WebSocket。
+`stream=1` 使用浏览器 `EventSource` 语义，但 payload 必须是 Phantom Lancer 的稳定 Codex event shape，历史事件和 live 事件保持同一结构。通用 Event API 可继续作为跨模块事件基础设施，但 Codex 会话 UI 不应把通用事件 envelope 直接当成对话 UI。
 
 ## 7. 数据模型
 
@@ -675,7 +677,7 @@ audit payload 只记录：
 
 `Codex` 内部二级视图：
 
-- `Threads`：会话和新对话。
+- `Conversations`：统一会话入口，包含代码任务和只读问答。
 - `Workspaces`：项目路径、信任状态和默认权限。
 - `Approvals`：待审批和历史。
 - `Diagnostics`：CLI 安装、认证、sandbox 和 app-server 状态。
@@ -1144,14 +1146,14 @@ audit payload 只记录：
 - 通知中不放完整 prompt、diff、stdout/stderr 或 secret。
 - 浏览器通知默认关闭，由 owner 在本地浏览器授权。
 
-### 13.9 P3：Chats / Memories
+### 13.9 P3：Scratch Conversations / Memories
 
 目标：提供轻量的非代码问答和偏好提示，但不让 Codex 脱离 workspace 权限边界。
 
 产品范围：
 
-- `Chats`：
-  - 不绑定真实代码仓库的 research/planning thread。
+- 只读问答：
+  - 不绑定真实代码仓库的 research/planning thread，作为统一会话列表中的一种创建模式。
   - 仍必须绑定一个受控 scratch workspace，默认 read-only，无文件写入。
   - 适合整理计划、解释错误、写命令草案，不用于执行生产变更。
 - `Memories`：
@@ -1162,7 +1164,7 @@ audit payload 只记录：
 后端设计：
 
 - 为 Codex settings 增加 `scratch_workspace_id` 或由 owner 从允许根目录内选择。
-- Chat thread 的 `source_mode` 仍使用 app-server 或 exec fallback，sandbox 固定 read-only。
+- 只读问答 thread 的 `source_mode` 仍使用 app-server 或 exec fallback，sandbox 固定 read-only。
 - Memory 只作为诊断说明，不读取或展示私有 memory 全文。
 
 安全边界：

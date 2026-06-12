@@ -380,6 +380,72 @@ func TestListImageGenerationJobsDoesNotNestQueriesWhileRowsOpen(t *testing.T) {
 	}
 }
 
+func TestArchiveImageAssetToS3UpdatesGenerationOutputStorage(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateImageGenerationJob(ctx, ImageGenerationJob{
+		Mode:       "text_to_image",
+		ModeLabel:  "文生图",
+		Model:      "grok-imagine-image-quality",
+		Prompt:     "remote image",
+		ImageCount: 1,
+	}, nil)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	asset, err := store.CreateImageAsset(ctx, ImageAsset{
+		AssetType:      "generated",
+		Status:         "available",
+		JobID:          job.ID,
+		SourceRole:     "output",
+		Slot:           1,
+		MimeType:       "image/png",
+		StorageBackend: "remote",
+	})
+	if err != nil {
+		t.Fatalf("create asset: %v", err)
+	}
+	if _, err := store.CompleteImageGenerationJob(ctx, job.ID, "/images/generations", map[string]any{}, []ImageGenerationOutput{{
+		AssetID:   asset.ID,
+		Slot:      1,
+		RemoteURL: "https://example.com/image.png?token=secret",
+		MimeType:  "image/png",
+		Storage:   "remote",
+	}}); err != nil {
+		t.Fatalf("complete job: %v", err)
+	}
+
+	asset.StorageBackend = "s3"
+	asset.S3Bucket = "bucket"
+	asset.S3Key = "phantom-lancer/images/generated/2026/06/job/asset.png"
+	asset.S3ETag = "etag"
+	asset.SizeBytes = 67
+	asset.ArchivedAt = now()
+	archived, err := store.ArchiveImageAssetToS3(ctx, asset)
+	if err != nil {
+		t.Fatalf("archive asset: %v", err)
+	}
+	if archived.StorageBackend != "s3" || archived.S3Key == "" {
+		t.Fatalf("unexpected archived asset: %#v", archived)
+	}
+	gotJob, err := store.GetImageGenerationJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if len(gotJob.Outputs) != 1 {
+		t.Fatalf("outputs count = %d, want 1", len(gotJob.Outputs))
+	}
+	output := gotJob.Outputs[0]
+	if output.Storage != "s3" || output.URL != "/api/images/library/assets/"+asset.ID+"/content" || output.RemoteURL == "" {
+		t.Fatalf("generation output should point at archived asset while retaining remote provenance: %#v", output)
+	}
+}
+
 func TestImageAssetPrivateFiltering(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)

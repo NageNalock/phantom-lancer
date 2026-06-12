@@ -394,9 +394,13 @@ func (s *Service) ArchiveAssetToS3(ctx context.Context, id string) (storage.Imag
 	if err != nil {
 		return storage.ImageAsset{}, err
 	}
-	if asset.StorageBackend != "local" || asset.LocalName == "" {
-		return storage.ImageAsset{}, errors.New("asset is not stored locally")
+	if asset.StorageBackend == "s3" {
+		return storage.ImageAsset{}, errors.New("asset is already stored in object storage")
 	}
+	if asset.StorageBackend != "local" && asset.StorageBackend != "remote" {
+		return storage.ImageAsset{}, errors.New("asset cannot be archived to object storage")
+	}
+	sourceStorage := asset.StorageBackend
 	settings, err := s.Store.GetImageStorageSettings(ctx)
 	if err != nil {
 		return storage.ImageAsset{}, err
@@ -408,25 +412,33 @@ func (s *Service) ArchiveAssetToS3(ctx context.Context, id string) (storage.Imag
 	bucket := objectStorageBucket(ctx, s.Store, settings)
 	region := objectStorageRegion(ctx, s.Store, settings)
 	endpointLabel := objectStorageEndpointLabel(ctx, s.Store, settings)
-	mimeType, data, err := s.Assets.ReadLocal(asset.LocalName)
+	mimeType, data, localName, err := s.archiveAssetBytes(ctx, asset)
 	if err != nil {
+		asset.LastError = safelog.Error(err, 240)
+		_, _ = s.Store.UpdateImageAsset(ctx, asset)
 		return storage.ImageAsset{}, err
 	}
+	info := ImageInfo(data, mimeType)
+	asset.MimeType = info.MimeType
+	asset.Extension = imageExt(info.MimeType)
+	asset.SizeBytes = info.SizeBytes
+	asset.Width = info.Width
+	asset.Height = info.Height
+	asset.ChecksumSHA256 = info.Checksum
 	key := objectKey(settings, asset, asset.Extension)
 	started := time.Now()
 	if s.Log != nil {
-		s.Log.Debug("image asset s3 archive started", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", bucket, "key", key, "bytes", len(data))
+		s.Log.Debug("image asset s3 archive started", "asset_id", asset.ID, "job_id", asset.JobID, "source_storage", asset.StorageBackend, "bucket", bucket, "key", key, "bytes", len(data))
 	}
 	etag, err := client.Put(ctx, key, data, mimeType)
 	if err != nil {
-		asset.LastError = err.Error()
+		asset.LastError = safelog.Error(err, 240)
 		_, _ = s.Store.UpdateImageAsset(ctx, asset)
 		if s.Log != nil {
-			s.Log.Warn("image asset s3 archive failed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", bucket, "key", key, "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
+			s.Log.Warn("image asset s3 archive failed", "asset_id", asset.ID, "job_id", asset.JobID, "source_storage", asset.StorageBackend, "bucket", bucket, "key", key, "latency_ms", time.Since(started).Milliseconds(), "error", safelog.Error(err, 200))
 		}
 		return storage.ImageAsset{}, err
 	}
-	localName := asset.LocalName
 	asset.StorageBackend = "s3"
 	asset.ObjectStorageProfileID = settings.ObjectStorageProfileID
 	asset.LocalName = ""
@@ -437,16 +449,35 @@ func (s *Service) ArchiveAssetToS3(ctx context.Context, id string) (storage.Imag
 	asset.S3ETag = etag
 	asset.ArchivedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	asset.LastError = ""
-	updated, err := s.Store.UpdateImageAsset(ctx, asset)
+	updated, err := s.Store.ArchiveImageAssetToS3(ctx, asset)
 	if err != nil {
+		_ = client.Delete(ctx, key)
 		return storage.ImageAsset{}, err
 	}
-	s.Assets.Remove([]string{localName})
-	s.append(ctx, asset.JobID, "images.asset.archived.s3", map[string]any{"assetId": asset.ID, "key": key})
+	if localName != "" {
+		s.Assets.Remove([]string{localName})
+	}
+	s.append(ctx, asset.JobID, "images.asset.archived.s3", map[string]any{"assetId": asset.ID, "key": key, "sourceStorage": sourceStorage})
 	if s.Log != nil {
 		s.Log.Debug("image asset s3 archive completed", "asset_id", asset.ID, "job_id", asset.JobID, "bucket", bucket, "key", key, "latency_ms", time.Since(started).Milliseconds())
 	}
 	return updated, nil
+}
+
+func (s *Service) archiveAssetBytes(ctx context.Context, asset storage.ImageAsset) (string, []byte, string, error) {
+	switch asset.StorageBackend {
+	case "local":
+		if asset.LocalName == "" {
+			return "", nil, "", errors.New("local asset file is missing")
+		}
+		mimeType, data, err := s.Assets.ReadLocal(asset.LocalName)
+		return mimeType, data, asset.LocalName, err
+	case "remote":
+		mimeType, data, err := s.ReadAsset(ctx, asset)
+		return mimeType, data, "", err
+	default:
+		return "", nil, "", errors.New("asset cannot be archived to object storage")
+	}
 }
 
 func (s *Service) UploadLibraryAsset(ctx context.Context, filename string, data []byte, mimeType string) (LibraryUploadResult, error) {
