@@ -137,7 +137,7 @@ Dashboard 不展开 registry 设置表单，也不直接提供 destructive 操�
 2. 页面显示当前 registry disabled 状态、推荐 public URL 和存储目录。
 3. Owner 配置 registry public URL、storage dir、quota、storage backend 和 TLS 策略。
 4. Owner 创建一个 registry credential，例如 `personal-laptop`，选择 `pull,push` scope。
-5. 后端生成一次性显示的 secret，保存 hash，不保存明文。
+5. 后端生成一次性显示的 secret；保存 hash 用于 Registry Basic Auth 校验，同时保存 keywrap 加密后的 secret，供 owner 在 Web 控制面触发本机 Docker daemon 拉取本服务 Registry 镜像时生成 `RegistryAuth`。不保存明文。
 6. Owner 使用 Docker CLI 登录：
 
 ```bash
@@ -224,6 +224,7 @@ Registry client 认证不能复用 Phantom Lancer browser session。需要单独
   - `name`
   - `status`
   - `key_hash`
+  - `secret_ciphertext`
   - `scopes`
   - `repository_prefix`
   - `last_used_at`
@@ -248,6 +249,7 @@ Auth 策略：
 
 - 默认关闭 anonymous pull。
 - `docker login` 使用 credential secret。
+- Web 控制面执行 `image pull` 且目标属于本服务 Registry public URL 时，后端可使用 active、具备 `registry.pull` 或 `registry.admin`、repository prefix 匹配且有可解密 `secret_ciphertext` 的 credential，为 Docker Engine API 生成一次性 `RegistryAuth`；旧版只保存 hash 的 credential 仍可服务外部 `docker login/push/pull`，但需要轮换或新建后才能用于 Web 自动拉取。
 - 当前实现不签发 Registry token，使用 Basic auth；未来如启用 Bearer token service，token response 必须使用短 TTL 且 payload 不包含明文 secret。
 - 删除和 admin scope 必须单独授予。
 - Credential 创建、轮换、禁用、删除写 audit。

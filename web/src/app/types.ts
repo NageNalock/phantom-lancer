@@ -958,6 +958,7 @@ export interface DockerRegistryCredential {
   status: string;
   scopes?: string[];
   repositoryPrefix?: string;
+  hasStoredSecret?: boolean;
   lastUsedAt?: string;
   createdAt?: string;
   rotatedAt?: string;
@@ -980,6 +981,8 @@ interface DockerRegistryManifest {
   repository: string;
   mediaType?: string;
   sizeBytes?: number;
+  configSizeBytes?: number;
+  layerCount?: number;
   pushedBy?: string;
   pushedAt?: string;
   deletedAt?: string;
@@ -1053,6 +1056,7 @@ export interface DockerImageSummary {
   tags?: string[];
   created: number;
   sizeBytes: number;
+  usedBy?: string[];
 }
 
 export interface DockerVolumeSummary {
@@ -1067,6 +1071,7 @@ export interface DockerNetworkSummary {
   name: string;
   driver: string;
   scope: string;
+  usedBy?: string[];
 }
 
 export interface DockerLogLine {

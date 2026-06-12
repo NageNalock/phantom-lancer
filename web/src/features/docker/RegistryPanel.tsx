@@ -88,6 +88,7 @@ export function RegistryPanel({
   credentialName,
   credentialPrefix,
   credentials,
+  clearNewCredentialSecret,
   deleteCredential,
   deleteTag,
   formatBytes,
@@ -98,15 +99,19 @@ export function RegistryPanel({
   pullRegistryTag,
   registrySettings,
   registryStatus,
+  registryView,
   repoTags,
   repositories,
   rotateCredential,
   runRegistryGC,
   saveRegistrySettings,
   selectedRepo,
+  selectedTag,
   setCredentialName,
   setCredentialPrefix,
   setCredentialStatus,
+  setRegistryView,
+  setSelectedTag,
   useTagForContainer,
 }: {
   busy: string;
@@ -114,6 +119,7 @@ export function RegistryPanel({
   credentialName: string;
   credentialPrefix: string;
   credentials: DockerRegistryCredential[];
+  clearNewCredentialSecret: () => void;
   deleteCredential: (item: DockerRegistryCredential) => void;
   deleteTag: (item: DockerRegistryTag) => void;
   formatBytes: (bytes: number) => string;
@@ -124,26 +130,49 @@ export function RegistryPanel({
   pullRegistryTag: (item: DockerRegistryTag) => void;
   registrySettings: DockerRegistrySettings;
   registryStatus: DockerRegistryStatus | null;
+  registryView: RegistryView;
   repoTags: DockerRegistryTag[];
   repositories: DockerRegistryRepository[];
   rotateCredential: (item: DockerRegistryCredential) => void;
   runRegistryGC: () => void;
   saveRegistrySettings: (settings: DockerRegistrySettings) => void;
   selectedRepo: string;
+  selectedTag: string;
   setCredentialName: (value: string) => void;
   setCredentialPrefix: (value: string) => void;
   setCredentialStatus: (item: DockerRegistryCredential, status: "active" | "disabled") => void;
+  setRegistryView: (view: RegistryView) => void;
+  setSelectedTag: (tag: string) => void;
   useTagForContainer: (item: DockerRegistryTag) => void;
 }) {
-  const [view, setView] = useState<RegistryView>("repositories");
   const [credentialScopes, setCredentialScopes] = useState<string[]>(["registry.pull", "registry.push"]);
+  const [copiedSecret, setCopiedSecret] = useState(false);
   const host = registryHost(registrySettings.publicUrl || registryStatus?.publicUrl);
+  const [expandedDigest, setExpandedDigest] = useState<string>("");
+
+  const selectedTagDetails = useMemo(() => {
+    if (!selectedTag || !selectedRepo) return null;
+    const [repoName, tagName] = [selectedTag.split(":")[0], selectedTag.split(":").slice(1).join(":")];
+    if (repoName !== selectedRepo) return null;
+    return repoTags.find((t) => t.tag === tagName) || null;
+  }, [selectedTag, selectedRepo, repoTags]);
 
   function toggleScope(scope: string, checked: boolean) {
     setCredentialScopes((current) => {
       const next = checked ? [...current, scope] : current.filter((item) => item !== scope);
       return next.length ? Array.from(new Set(next)) : current;
     });
+  }
+
+  async function copySecret() {
+    if (!newCredentialSecret) return;
+    try {
+      await navigator.clipboard?.writeText(newCredentialSecret);
+      setCopiedSecret(true);
+      setTimeout(() => setCopiedSecret(false), 2000);
+    } catch {
+      // ignore
+    }
   }
 
   return (
@@ -160,15 +189,31 @@ export function RegistryPanel({
       </div>
 
       {newCredentialSecret ? (
-        <div className="rounded-lg border border-[var(--warn)] bg-[var(--warn-soft)] p-3">
-          <strong className="block text-sm">新 secret 只显示一次</strong>
-          <code className="mono mt-2 block break-all text-xs">{newCredentialSecret}</code>
+        <div className="rounded-lg border-2 border-[var(--warn)] bg-[var(--warn-soft)] p-4">
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div>
+              <strong className="block text-sm">新 secret 只显示一次</strong>
+              <p className="muted mt-1 mb-0 text-xs">请立即复制并保存到安全位置。关闭或切页后将无法再次查看。</p>
+            </div>
+            <Pill tone="warn">一次性</Pill>
+          </div>
+          <code className="mono block break-all rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3 text-xs">
+            {newCredentialSecret}
+          </code>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button tone="primary" onClick={() => void copySecret()}>
+              {copiedSecret ? "已复制到剪贴板" : "复制 Secret"}
+            </Button>
+            <Button onClick={clearNewCredentialSecret}>
+              我已保存，关闭
+            </Button>
+          </div>
         </div>
       ) : null}
 
-      <SubTabs activeId={view} ariaLabel="Registry 视图" onChange={(id) => setView(id as RegistryView)} tabs={REGISTRY_VIEWS} />
+      <SubTabs activeId={registryView} ariaLabel="Registry 视图" onChange={(id) => setRegistryView(id as RegistryView)} tabs={REGISTRY_VIEWS} />
 
-      {view === "repositories" ? (
+      {registryView === "repositories" ? (
         <div className="grid gap-4">
           <Panel title="仓库" subtitle="Registry 中已记录的 repository。选中仓库后查看 tag、digest 和本机拉取操作。">
             <DockerTable
@@ -188,47 +233,102 @@ export function RegistryPanel({
                   <span className="text-xs">{item.tagCount || 0}</span>,
                   <span className="text-xs">{formatBytes(item.sizeBytes || 0)}</span>,
                   <span className="text-xs">{item.lastPushedAt || "-"}</span>,
-                  <Button onClick={() => openRepository(item.name)}>查看并拉取</Button>,
+                  <Button onClick={() => openRepository(item.name)}>{selectedRepo === item.name ? "已选中" : "查看并拉取"}</Button>,
                 ],
               }))}
             />
           </Panel>
 
           {selectedRepo ? (
-            <Panel title={`Tags · ${selectedRepo}`} subtitle="拉取后会切到本机镜像；删除 tag 不会立即释放 blob，需执行 GC。">
-              <DockerTable
-                columns={[
-                  { header: "Tag", width: "18%" },
-                  { header: "Digest", width: "36%" },
-                  { header: "大小", width: "100px" },
-                  { header: "推送时间", width: "170px" },
-                  { header: "操作", width: "260px" },
-                ]}
-                empty="暂无 tag"
-                loading={loading}
-                rows={repoTags.map((item) => ({
-                  key: `${item.repository}:${item.tag}`,
-                  cells: [
-                    <DockerValue value={item.tag} />,
-                    <DockerValue clamp={false} value={item.digest} />,
-                    <span className="text-xs">{formatBytes(item.manifest?.sizeBytes || 0)}</span>,
-                    <span className="text-xs">{item.manifest?.pushedAt || item.updatedAt || "-"}</span>,
-                    <span className="flex flex-wrap gap-1">
-                      <Button disabled={busy === registryTagPullBusyKey(item)} onClick={() => pullRegistryTag(item)}>
-                        拉取到本机
-                      </Button>
-                      <Button onClick={() => useTagForContainer(item)}>用于创建</Button>
-                      <Button disabled={busy === `tag-delete-${item.repository}-${item.tag}`} onClick={() => deleteTag(item)} tone="danger">
-                        删除
-                      </Button>
-                    </span>,
-                  ],
-                }))}
-              />
-            </Panel>
+            <div className="grid gap-4">
+              <Panel title={`Tags · ${selectedRepo}`} subtitle="拉取后会切到本机镜像；删除 tag 不会立即释放 blob，需执行 GC。">
+                <DockerTable
+                  columns={[
+                    { header: "Tag", width: "16%" },
+                    { header: "Digest", width: "34%" },
+                    { header: "大小", width: "100px" },
+                    { header: "推送时间", width: "170px" },
+                    { header: "操作" },
+                  ]}
+                  empty="暂无 tag"
+                  loading={loading}
+                  rows={repoTags.map((item) => {
+                    const tagKey = `${item.repository}:${item.tag}`;
+                    const isSelected = selectedTag === tagKey;
+                    return {
+                      key: tagKey,
+                      cells: [
+                        <span className="flex items-center gap-1.5">
+                          {isSelected ? <Pill tone="good">当前</Pill> : null}
+                          <DockerValue value={item.tag} />
+                        </span>,
+                        <div className="grid gap-1">
+                          <div className="flex items-center gap-1">
+                            <DockerValue
+                              copyValue={item.digest}
+                              value={
+                                expandedDigest === tagKey
+                                  ? (item.digest || "")
+                                  : ((item.digest?.length ?? 0) > 24
+                                      ? item.digest?.slice(0, 10) + "…" + item.digest?.slice(-8)
+                                      : (item.digest || "-"))
+                              }
+                            />
+                            {(item.digest?.length ?? 0) > 24 ? (
+                              <button
+                                className="shrink-0 rounded border border-[var(--line)] px-1.5 py-0.5 text-[10px] text-[var(--muted-strong)] hover:bg-[var(--surface-strong)]"
+                                onClick={() => setExpandedDigest(expandedDigest === tagKey ? "" : tagKey)}
+                                type="button"
+                              >
+                                {expandedDigest === tagKey ? "收起" : "展开"}
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>,
+                        <span className="text-xs">{formatBytes(item.manifest?.sizeBytes || 0)}</span>,
+                        <span className="text-xs">{item.manifest?.pushedAt || item.updatedAt || "-"}</span>,
+                        <span className="flex flex-wrap gap-1">
+                          <Button disabled={busy === registryTagPullBusyKey(item)} onClick={() => pullRegistryTag(item)}>
+                            拉取到本机
+                          </Button>
+                          <Button onClick={() => { setSelectedTag(tagKey); useTagForContainer(item); }}>用于创建</Button>
+                          <Button disabled={busy === `tag-delete-${item.repository}-${item.tag}`} onClick={() => deleteTag(item)} tone="danger">
+                            删除
+                          </Button>
+                        </span>,
+                      ],
+                    };
+                  })}
+                />
+              </Panel>
+
+              {selectedTagDetails ? (
+                <Panel title={`Tag 详情 · ${selectedTagDetails.tag}`} subtitle="完整 digest 与推送信息；可直接从这里进入容器创建。" actions={<Button onClick={() => setSelectedTag("")}>关闭</Button>}>
+                  <div className="grid max-w-3xl gap-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <Field label="Repository"><DockerValue value={selectedTagDetails.repository} /></Field>
+                      <Field label="Tag"><DockerValue value={selectedTagDetails.tag} /></Field>
+                    </div>
+                    <Field label="Digest">
+                      <div className="flex items-center gap-2">
+                        <DockerValue clamp={false} copyValue={selectedTagDetails.digest} value={selectedTagDetails.digest || "-"} />
+                      </div>
+                    </Field>
+                    <div className="grid grid-cols-2 gap-3">
+                      <Field label="大小"><span className="text-xs">{formatBytes(selectedTagDetails.manifest?.sizeBytes || 0)}</span></Field>
+                      <Field label="推送时间"><span className="text-xs">{selectedTagDetails.manifest?.pushedAt || selectedTagDetails.updatedAt || "-"}</span></Field>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button onClick={() => useTagForContainer(selectedTagDetails)} tone="primary">用此镜像创建容器</Button>
+                      <Button disabled={busy === registryTagPullBusyKey(selectedTagDetails)} onClick={() => pullRegistryTag(selectedTagDetails)}>拉取到本机</Button>
+                    </div>
+                  </div>
+                </Panel>
+              ) : null}
+            </div>
           ) : null}
         </div>
-      ) : view === "credentials" ? (
+      ) : registryView === "credentials" ? (
         <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-4 max-xl:grid-cols-1">
           <Panel title="凭据" subtitle="secret 只在创建或轮换后显示一次；停用会立即阻止该凭据继续访问 Registry。">
             <div className="grid gap-3">

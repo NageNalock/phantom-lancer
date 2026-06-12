@@ -2,10 +2,13 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"phantom-lancer/internal/dockercontrol"
 	"phantom-lancer/internal/safelog"
@@ -315,7 +318,7 @@ func (s *Server) handleDockerContainerSubroutes(w http.ResponseWriter, r *http.R
 					tail = parsed
 				}
 			}
-			lines, err := s.docker.ContainerLogs(r.Context(), id, tail)
+			lines, err := s.docker.ContainerLogsOneShot(r.Context(), id, tail)
 			if err != nil {
 				writeError(w, http.StatusBadGateway, "docker_unavailable", err.Error())
 				return
@@ -503,4 +506,98 @@ func dockerShortID(id string) string {
 		return id[:12]
 	}
 	return id
+}
+
+// handleDockerContainerLogsStream exposes an SSE live tail for a container's
+// stdout/stderr. It shares the same upper bounds and redaction pipeline as the
+// one-shot endpoint, but pushes rows as they arrive until the client closes the
+// connection or ctx is cancelled.
+func (s *Server) handleDockerContainerLogsStream(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAuth(w, r); !ok {
+		return
+	}
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/docker/containers/"), "/")
+	id = strings.TrimSuffix(id, "/logs/stream")
+	id = strings.TrimSpace(id)
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "container id 不能为空")
+		return
+	}
+	tail := 200
+	if raw := strings.TrimSpace(r.URL.Query().Get("tail")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			tail = parsed
+		}
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "stream_unsupported", "当前环境不支持事件流")
+		return
+	}
+
+	seq := int64(0)
+	ping := time.NewTicker(20 * time.Second)
+	defer ping.Stop()
+	lines := make(chan dockercontrol.LogLine, 256)
+	errCh := make(chan error, 1)
+	go func() {
+		defer close(lines)
+		err := s.docker.ContainerLogs(r.Context(), id, tail, true, func(line dockercontrol.LogLine) error {
+			select {
+			case lines <- line:
+				return nil
+			case <-r.Context().Done():
+				return r.Context().Err()
+			}
+		})
+		errCh <- err
+	}()
+	done := false
+	for !done {
+		select {
+		case <-r.Context().Done():
+			done = true
+		case <-ping.C:
+			fmt.Fprint(w, ": heartbeat\n\n")
+			flusher.Flush()
+		case line, ok := <-lines:
+			if !ok {
+				err, _ := <-errCh
+				if err != nil && r.Context().Err() == nil {
+					if s.dockerLogSampler() == nil || s.dockerLogSampler().Allow("container-log-stream") {
+						s.log.Warn("docker container log stream read failed", "container", dockerShortID(id), "error", safelog.Error(err, 160))
+					}
+					seq++
+					fmt.Fprintf(w, "id: %d\n", seq)
+					fmt.Fprint(w, "event: docker.container.log.error\n")
+					fmt.Fprintf(w, "data: %s\n\n", safelog.Error(err, 240))
+				} else {
+					fmt.Fprint(w, "event: docker.container.log.closed\ndata: {}\n\n")
+				}
+				flusher.Flush()
+				done = true
+				break
+			}
+			seq++
+			payload, _ := json.Marshal(line)
+			fmt.Fprintf(w, "id: %d\n", seq)
+			fmt.Fprint(w, "event: docker.container.log.line\n")
+			fmt.Fprintf(w, "data: %s\n\n", payload)
+			flusher.Flush()
+		}
+	}
+}
+
+// dockerLogSampler returns the shared service log sampler so hot-path SSE
+// warnings never saturate the service log. Exposed as a lazy accessor because
+// the service initializer keeps the sampler private; this file already imports
+// dockercontrol for operations and reuses the same pattern via the server's
+// own sampler field when available.
+func (s *Server) dockerLogSampler() interface {
+	Allow(string) bool
+} {
+	return s.telemetrySampler
 }

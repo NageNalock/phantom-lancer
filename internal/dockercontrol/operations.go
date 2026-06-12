@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"regexp"
 	"sort"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/go-connections/nat"
 
 	"phantom-lancer/internal/safelog"
 )
@@ -21,9 +24,11 @@ import (
 // Bounds for read-only log/stat retrieval. These cap how much data we ever pull
 // from the daemon in a single request so a huge log can never exhaust memory.
 const (
-	maxLogTailLines = 1000
-	maxLogBytes     = 256 * 1024
-	defaultLogTail  = 200
+	maxLogTailLines   = 1000
+	maxLogBytes       = 256 * 1024
+	defaultLogTail    = 200
+	maxLogStreamLines = 5000
+	maxLogStreamBytes = 4 * 1024 * 1024
 )
 
 // ErrInvalidContainerID guards write operations against empty identifiers.
@@ -31,10 +36,35 @@ var ErrInvalidContainerID = errors.New("container id is required")
 
 var safeContainerNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
-type CreateContainerRequest struct {
-	Name  string `json:"name"`
-	Image string `json:"image"`
+type CreateContainerPortPublish struct {
+	ContainerPort int    `json:"containerPort"`
+	HostPort      int    `json:"hostPort,omitempty"`
+	Protocol      string `json:"protocol,omitempty"`
+	HostIP        string `json:"hostIp,omitempty"`
 }
+
+type CreateContainerVolumeMount struct {
+	VolumeName  string `json:"volumeName"`
+	Destination string `json:"destination"`
+	ReadOnly    bool   `json:"readOnly,omitempty"`
+}
+
+type CreateContainerEnvEntry struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type CreateContainerRequest struct {
+	Name          string                       `json:"name"`
+	Image         string                       `json:"image"`
+	RestartPolicy string                       `json:"restartPolicy,omitempty"`
+	Ports         []CreateContainerPortPublish `json:"ports,omitempty"`
+	Volumes       []CreateContainerVolumeMount `json:"volumes,omitempty"`
+	Env           []CreateContainerEnvEntry    `json:"env,omitempty"`
+}
+
+var safeEnvNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var safeVolumeNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 type ContainerPortSummary struct {
 	PrivatePort string `json:"privatePort"`
@@ -162,9 +192,104 @@ func (s *Service) CreateAndStartContainer(ctx context.Context, req CreateContain
 	if err != nil {
 		return "", err
 	}
+
+	cfg := &container.Config{Image: ref}
+	hostCfg := &container.HostConfig{}
+
+	switch strings.ToLower(strings.TrimSpace(req.RestartPolicy)) {
+	case "", "no", "none":
+		hostCfg.RestartPolicy = container.RestartPolicy{Name: container.RestartPolicyDisabled}
+	case "always":
+		hostCfg.RestartPolicy = container.RestartPolicy{Name: container.RestartPolicyAlways}
+	case "unless-stopped":
+		hostCfg.RestartPolicy = container.RestartPolicy{Name: container.RestartPolicyUnlessStopped}
+	case "on-failure":
+		hostCfg.RestartPolicy = container.RestartPolicy{Name: container.RestartPolicyOnFailure, MaximumRetryCount: 5}
+	default:
+		return "", errors.New("restart policy is invalid")
+	}
+
+	if len(req.Ports) > 0 {
+		exposed := make(map[nat.Port]struct{}, len(req.Ports))
+		bindings := make(map[nat.Port][]nat.PortBinding, len(req.Ports))
+		for _, port := range req.Ports {
+			if port.ContainerPort <= 0 || port.ContainerPort > 65535 {
+				return "", errors.New("container port is out of range")
+			}
+			if port.HostPort < 0 || port.HostPort > 65535 {
+				return "", errors.New("host port is out of range")
+			}
+			proto := strings.ToLower(strings.TrimSpace(port.Protocol))
+			if proto == "" {
+				proto = "tcp"
+			}
+			if proto != "tcp" && proto != "udp" && proto != "sctp" {
+				return "", errors.New("port protocol is invalid")
+			}
+			hostIP := strings.TrimSpace(port.HostIP)
+			if hostIP == "" {
+				hostIP = "127.0.0.1"
+			} else if hostIP != "0.0.0.0" && hostIP != "127.0.0.1" && hostIP != "::" {
+				return "", errors.New("host ip is restricted")
+			}
+			np := nat.Port(fmt.Sprintf("%d/%s", port.ContainerPort, proto))
+			exposed[np] = struct{}{}
+			bindings[np] = append(bindings[np], nat.PortBinding{
+				HostIP:   hostIP,
+				HostPort: strconv.Itoa(port.HostPort),
+			})
+		}
+		cfg.ExposedPorts = exposed
+		hostCfg.PortBindings = bindings
+	}
+
+	if len(req.Volumes) > 0 {
+		mounts := make([]mount.Mount, 0, len(req.Volumes))
+		for _, vol := range req.Volumes {
+			name := strings.TrimSpace(vol.VolumeName)
+			dest := strings.TrimSpace(vol.Destination)
+			if name == "" || !safeVolumeNamePattern.MatchString(name) {
+				return "", errors.New("volume name is invalid")
+			}
+			if dest == "" || !strings.HasPrefix(dest, "/") {
+				return "", errors.New("volume destination is invalid")
+			}
+			mounts = append(mounts, mount.Mount{
+				Type:     mount.TypeVolume,
+				Source:   name,
+				Target:   dest,
+				ReadOnly: vol.ReadOnly,
+			})
+		}
+		hostCfg.Mounts = mounts
+	}
+
+	if len(req.Env) > 0 {
+		if len(req.Env) > 64 {
+			return "", errors.New("too many environment variables")
+		}
+		environ := make([]string, 0, len(req.Env))
+		for _, item := range req.Env {
+			name := strings.TrimSpace(item.Name)
+			value := strings.TrimSpace(item.Value)
+			if name == "" || !safeEnvNamePattern.MatchString(name) {
+				return "", errors.New("env name is invalid")
+			}
+			if len(value) > 4096 {
+				return "", errors.New("env value is too long")
+			}
+			lower := strings.ToLower(name)
+			if strings.Contains(lower, "secret") || strings.Contains(lower, "token") || strings.Contains(lower, "password") || strings.Contains(lower, "key") {
+				return "", errors.New("env name is restricted: secrets must not be passed via template env")
+			}
+			environ = append(environ, name+"="+value)
+		}
+		cfg.Env = environ
+	}
+
 	opCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	created, err := cli.ContainerCreate(opCtx, &container.Config{Image: ref}, &container.HostConfig{}, nil, nil, name)
+	created, err := cli.ContainerCreate(opCtx, cfg, hostCfg, nil, nil, name)
 	if err != nil {
 		s.log.Warn("docker container create failed", "image", safelog.Text(ref, 120), "error", safelog.Error(err, 160))
 		return "", err
@@ -296,7 +421,16 @@ func (s *Service) PullImage(ctx context.Context, ref string) error {
 	}
 	opCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
-	reader, err := cli.ImagePull(opCtx, ref, image.PullOptions{})
+	pullOptions := image.PullOptions{}
+	registryAuth, err := s.registryAuthForPull(ctx, ref)
+	if err != nil {
+		s.log.Warn("docker image pull auth selection failed", "ref", safelog.Text(ref, 120), "error", safelog.Error(err, 160))
+		return err
+	}
+	if registryAuth != "" {
+		pullOptions.RegistryAuth = registryAuth
+	}
+	reader, err := cli.ImagePull(opCtx, ref, pullOptions)
 	if err != nil {
 		s.log.Warn("docker image pull failed", "ref", safelog.Text(ref, 120), "error", safelog.Error(err, 160))
 		return err
@@ -336,12 +470,13 @@ type LogLine struct {
 	Text   string `json:"text"`
 }
 
-// ContainerLogs returns a bounded, redacted tail of a container's logs. It never
-// follows the stream and never returns more than maxLogTailLines / maxLogBytes.
-func (s *Service) ContainerLogs(ctx context.Context, id string, tail int) ([]LogLine, error) {
+// ContainerLogs returns a bounded, redacted tail of a container's logs. When
+// follow is requested, the stream is kept open until ctx completes; otherwise
+// it returns a one-shot snapshot capped by maxLogTailLines / maxLogBytes.
+func (s *Service) ContainerLogs(ctx context.Context, id string, tail int, follow bool, sink func(LogLine) error) error {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return nil, ErrInvalidContainerID
+		return ErrInvalidContainerID
 	}
 	if tail <= 0 {
 		tail = defaultLogTail
@@ -351,22 +486,68 @@ func (s *Service) ContainerLogs(ctx context.Context, id string, tail int) ([]Log
 	}
 	cli, err := s.engine()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	opCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
+	opCtx := ctx
+	var cancel context.CancelFunc
+	if !follow {
+		opCtx, cancel = context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+	}
 	reader, err := cli.ContainerLogs(opCtx, id, container.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
+		Follow:     follow,
 		Tail:       itoaTail(tail),
 		Timestamps: false,
 	})
 	if err != nil {
 		s.log.Warn("docker container logs failed", "container", shortID(id), "error", safelog.Error(err, 160))
-		return nil, err
+		return err
 	}
 	defer reader.Close()
-	return readBoundedLogs(reader)
+
+	limitReader := io.Reader(reader)
+	lineCap := maxLogTailLines
+	if follow {
+		lineCap = maxLogStreamLines
+		limitReader = io.LimitReader(reader, maxLogStreamBytes)
+	} else {
+		limitReader = io.LimitReader(reader, maxLogBytes)
+	}
+	scanner := bufio.NewScanner(limitReader)
+	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
+	count := 0
+	for scanner.Scan() {
+		raw := scanner.Text()
+		stream, text := demuxLogLine(raw)
+		text = safelog.Text(text, 2000)
+		if err := sink(LogLine{Stream: stream, Text: text}); err != nil {
+			return err
+		}
+		count++
+		if count >= lineCap {
+			if err := sink(LogLine{Stream: "stdout", Text: "-- reached log read ceiling --"}); err != nil {
+				return err
+			}
+			break
+		}
+	}
+	if err := scanner.Err(); err != nil && !errors.Is(err, bufio.ErrTooLong) && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	return nil
+}
+
+// ContainerLogsOneShot preserves the historical slice-returning signature for
+// callers that want a bounded snapshot rather than a streaming sink.
+func (s *Service) ContainerLogsOneShot(ctx context.Context, id string, tail int) ([]LogLine, error) {
+	lines := make([]LogLine, 0, 64)
+	err := s.ContainerLogs(ctx, id, tail, false, func(line LogLine) error {
+		lines = append(lines, line)
+		return nil
+	})
+	return lines, err
 }
 
 // Stats is a redacted point-in-time resource snapshot for a container.
@@ -423,27 +604,6 @@ func computeStats(raw container.StatsResponse) Stats {
 		stats.MemoryPercent = roundTo(float64(stats.MemoryUsage)/float64(stats.MemoryLimit)*100, 2)
 	}
 	return stats
-}
-
-// readBoundedLogs decodes the multiplexed docker log stream into redacted,
-// length-capped lines, stopping at the byte/line ceiling.
-func readBoundedLogs(reader io.Reader) ([]LogLine, error) {
-	lines := make([]LogLine, 0, 64)
-	scanner := bufio.NewScanner(io.LimitReader(reader, maxLogBytes))
-	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
-	for scanner.Scan() {
-		raw := scanner.Text()
-		stream, text := demuxLogLine(raw)
-		text = safelog.Text(text, 2000)
-		lines = append(lines, LogLine{Stream: stream, Text: text})
-		if len(lines) >= maxLogTailLines {
-			break
-		}
-	}
-	if err := scanner.Err(); err != nil && !errors.Is(err, bufio.ErrTooLong) {
-		return lines, err
-	}
-	return lines, nil
 }
 
 // demuxLogLine strips the 8-byte docker multiplexing header when present and

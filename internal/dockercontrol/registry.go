@@ -154,6 +154,7 @@ func (s *Service) CreateRegistryCredential(ctx context.Context, name string, sco
 		Name:             strings.TrimSpace(name),
 		Status:           "active",
 		SecretHash:       hash,
+		Secret:           secret,
 		Scopes:           normalizeScopes(scopes),
 		RepositoryPrefix: normalizeRepoPrefix(prefix),
 	})
@@ -172,6 +173,7 @@ func (s *Service) RotateRegistryCredential(ctx context.Context, id string) (Regi
 	if err != nil {
 		return RegistryCredentialSecret{}, err
 	}
+	cred.Secret = secret
 	updated, err := s.store.UpdateDockerRegistryCredential(ctx, cred, hash)
 	if err != nil {
 		return RegistryCredentialSecret{}, err

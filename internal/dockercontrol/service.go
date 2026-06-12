@@ -209,9 +209,51 @@ type ImageSummary struct {
 	Tags      []string `json:"tags,omitempty"`
 	Created   int64    `json:"created"`
 	SizeBytes int64    `json:"sizeBytes"`
+	UsedBy    []string `json:"usedBy,omitempty"`
 }
 
-// ListImages returns local images as redacted rows.
+type containerRef struct {
+	ShortID string
+	Name    string
+	Image   string
+	ImageID string
+	State   string
+}
+
+func (s *Service) listContainerRefs(ctx context.Context) ([]containerRef, error) {
+	cli, err := s.engine()
+	if err != nil {
+		return nil, err
+	}
+	listCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	items, err := cli.ContainerList(listCtx, container.ListOptions{All: true})
+	if err != nil {
+		if s.logSampler.Allow("docker:list-containers") {
+			s.log.Warn("docker container list failed", "error", safelog.Error(err, 160))
+		}
+		return nil, err
+	}
+	out := make([]containerRef, 0, len(items))
+	for _, item := range items {
+		name := ""
+		if len(item.Names) > 0 {
+			name = strings.TrimPrefix(item.Names[0], "/")
+		}
+		out = append(out, containerRef{
+			ShortID: shortID(item.ID),
+			Name:    name,
+			Image:   item.Image,
+			ImageID: shortID(item.ImageID),
+			State:   item.State,
+		})
+	}
+	return out, nil
+}
+
+// ListImages returns local images as redacted rows, including references to
+// containers that reference each image (used for delete confirmation and
+// network-object relationships in the UI).
 func (s *Service) ListImages(ctx context.Context) ([]ImageSummary, error) {
 	cli, err := s.engine()
 	if err != nil {
@@ -226,14 +268,43 @@ func (s *Service) ListImages(ctx context.Context) ([]ImageSummary, error) {
 		}
 		return nil, err
 	}
+	containers, _ := s.listContainerRefs(ctx)
+	imageIDIndex := make(map[string][]string)
+	imageTagIndex := make(map[string][]string)
+	for _, c := range containers {
+		label := c.Name
+		if label == "" {
+			label = c.ShortID
+		}
+		if c.ImageID != "" {
+			imageIDIndex[c.ImageID] = append(imageIDIndex[c.ImageID], label)
+		}
+		if c.Image != "" {
+			imageTagIndex[c.Image] = append(imageTagIndex[c.Image], label)
+		}
+	}
 	out := make([]ImageSummary, 0, len(items))
 	for _, item := range items {
-		out = append(out, ImageSummary{
+		row := ImageSummary{
 			ID:        shortID(item.ID),
 			Tags:      item.RepoTags,
 			Created:   item.Created,
 			SizeBytes: item.Size,
-		})
+		}
+		seen := make(map[string]struct{})
+		for _, name := range imageIDIndex[shortID(item.ID)] {
+			seen[name] = struct{}{}
+		}
+		for _, tag := range item.RepoTags {
+			for _, name := range imageTagIndex[tag] {
+				seen[name] = struct{}{}
+			}
+		}
+		for name := range seen {
+			row.UsedBy = append(row.UsedBy, name)
+		}
+		sort.Strings(row.UsedBy)
+		out = append(out, row)
 	}
 	return out, nil
 }
@@ -278,13 +349,15 @@ func (s *Service) ListVolumes(ctx context.Context) ([]VolumeSummary, error) {
 
 // NetworkSummary is a redacted network list row.
 type NetworkSummary struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Driver string `json:"driver"`
-	Scope  string `json:"scope"`
+	ID     string   `json:"id"`
+	Name   string   `json:"name"`
+	Driver string   `json:"driver"`
+	Scope  string   `json:"scope"`
+	UsedBy []string `json:"usedBy,omitempty"`
 }
 
-// ListNetworks returns networks as redacted rows.
+// ListNetworks returns networks as redacted rows, including the list of
+// containers currently attached to each network.
 func (s *Service) ListNetworks(ctx context.Context) ([]NetworkSummary, error) {
 	cli, err := s.engine()
 	if err != nil {
@@ -299,14 +372,40 @@ func (s *Service) ListNetworks(ctx context.Context) ([]NetworkSummary, error) {
 		}
 		return nil, err
 	}
+	containers, _ := s.listContainerRefs(ctx)
+	networkToContainers := make(map[string]map[string]struct{})
+	for _, c := range containers {
+		label := c.Name
+		if label == "" {
+			label = c.ShortID
+		}
+		inspectCtx, inspectCancel := context.WithTimeout(ctx, 3*time.Second)
+		raw, inspectErr := cli.ContainerInspect(inspectCtx, c.ShortID)
+		inspectCancel()
+		if inspectErr != nil || raw.NetworkSettings == nil {
+			continue
+		}
+		for name := range raw.NetworkSettings.Networks {
+			if networkToContainers[name] == nil {
+				networkToContainers[name] = make(map[string]struct{})
+			}
+			networkToContainers[name][label] = struct{}{}
+		}
+	}
 	out := make([]NetworkSummary, 0, len(items))
 	for _, item := range items {
-		out = append(out, NetworkSummary{
+		row := NetworkSummary{
 			ID:     shortID(item.ID),
 			Name:   item.Name,
 			Driver: item.Driver,
 			Scope:  item.Scope,
-		})
+		}
+		seen := networkToContainers[item.Name]
+		for label := range seen {
+			row.UsedBy = append(row.UsedBy, label)
+		}
+		sort.Strings(row.UsedBy)
+		out = append(out, row)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil

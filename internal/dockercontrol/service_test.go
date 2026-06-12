@@ -1,12 +1,16 @@
 package dockercontrol
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
+	dockerregistry "github.com/docker/docker/api/types/registry"
 
 	"phantom-lancer/internal/storage"
 )
@@ -188,6 +192,91 @@ func TestHandleBlobUploadStartsDockerUpload(t *testing.T) {
 	location := rr.Header().Get("Location")
 	if !strings.HasPrefix(location, "/v2/stock-pulse/stockpulse/blobs/uploads/") {
 		t.Fatalf("Location = %q", location)
+	}
+}
+
+func TestRegistryAuthForPullUsesStoredCredential(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	svc := NewService(store, nil, dir, nil)
+	if _, err := store.UpdateDockerRegistrySettings(ctx, storage.DockerRegistrySettings{
+		Enabled:        true,
+		PublicURL:      "https://registry.example.com:10443",
+		StorageBackend: "local",
+		ObjectPrefix:   "phantom-lancer/docker-registry",
+		RequireTLS:     true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := svc.CreateRegistryCredential(ctx, "web-pull", []string{"registry.pull"}, "stock-pulse/")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	encoded, err := svc.registryAuthForPull(ctx, "registry.example.com:10443/stock-pulse/stockpulse:latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encoded == "" {
+		t.Fatal("expected encoded registry auth")
+	}
+	authConfig, err := dockerregistry.DecodeAuthConfig(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authConfig.Username != "web-pull" || authConfig.Password != created.Secret || authConfig.ServerAddress != "registry.example.com:10443" {
+		t.Fatalf("unexpected auth config: username=%q passwordMatches=%v server=%q", authConfig.Username, authConfig.Password == created.Secret, authConfig.ServerAddress)
+	}
+}
+
+func TestRegistryAuthForPullRequiresRetrievableSecret(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	svc := NewService(store, nil, dir, nil)
+	if _, err := store.UpdateDockerRegistrySettings(ctx, storage.DockerRegistrySettings{
+		Enabled:        true,
+		PublicURL:      "https://registry.example.com",
+		StorageBackend: "local",
+		ObjectPrefix:   "phantom-lancer/docker-registry",
+		RequireTLS:     true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateDockerRegistryCredential(ctx, storage.DockerRegistryCredential{
+		Name:             "legacy-pull",
+		Status:           "active",
+		SecretHash:       "legacy-hash-only",
+		Scopes:           []string{"registry.pull"},
+		RepositoryPrefix: "stock-pulse/",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = svc.registryAuthForPull(ctx, "registry.example.com/stock-pulse/stockpulse:latest")
+	if !errors.Is(err, ErrRegistryPullCredentialUnavailable) {
+		t.Fatalf("error = %v, want ErrRegistryPullCredentialUnavailable", err)
+	}
+}
+
+func TestRegistryCredentialCanPullMatchesRepositorySegments(t *testing.T) {
+	cred := storage.DockerRegistryCredential{Status: "active", Scopes: []string{"registry.pull"}, RepositoryPrefix: "stock-pulse"}
+	if !registryCredentialCanPull("stock-pulse/stockpulse", cred) {
+		t.Fatal("expected child repository to match prefix")
+	}
+	if registryCredentialCanPull("stock-pulse-sidecar/app", cred) {
+		t.Fatal("prefix must not match a neighbouring repository segment")
 	}
 }
 

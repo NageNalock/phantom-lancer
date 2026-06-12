@@ -39,6 +39,10 @@ var codexGatewayRequestLogRetention = 5000
 // Changing this value will render all previously stored tokens unreadable.
 const codexGatewayTokenKeeperInfo = "codex-gateway-account-tokens-v1"
 
+// dockerRegistryCredentialKeeperInfo binds retrievable Docker registry
+// credential secrets to a separate key domain from Gateway upstream tokens.
+const dockerRegistryCredentialKeeperInfo = "docker-registry-credential-secrets-v1"
+
 // masterKeySettingKey is the settings key under which the 32-byte master
 // encryption key (base64-encoded) is stored.
 const masterKeySettingKey = "system.crypto_master_key_v1"
@@ -61,6 +65,12 @@ type Store struct {
 	// rotated from DB-stored → env-provided). Recovered tokens are
 	// transparently re-wrapped with gwTokenKeeper on next write.
 	gwTokenFallbackKeeper *keywrap.Keeper
+	// dockerRegistrySecretKeeper wraps registry credential secrets used by
+	// server-side Docker Engine pull operations against the embedded registry.
+	dockerRegistrySecretKeeper *keywrap.Keeper
+	// dockerRegistrySecretFallbackKeeper mirrors gwTokenFallbackKeeper for
+	// registry secrets when operators rotate from a DB key to PHANTOM_MASTER_KEY.
+	dockerRegistrySecretFallbackKeeper *keywrap.Keeper
 	// gwTokenMasterSource records which key source is driving the
 	// primary keeper. Only used for structured startup logging and
 	// future key-rotation diagnostics.
@@ -626,6 +636,11 @@ func (s *Store) ensureMasterKey(ctx context.Context) error {
 		return kerr
 	}
 	s.gwTokenKeeper = primary
+	registryPrimary, kerr := keywrap.NewKeeper(primaryMaster, dockerRegistryCredentialKeeperInfo)
+	if kerr != nil {
+		return kerr
+	}
+	s.dockerRegistrySecretKeeper = registryPrimary
 	s.gwTokenMasterSource = primarySource
 
 	if fallbackMaster != nil {
@@ -634,6 +649,11 @@ func (s *Store) ensureMasterKey(ctx context.Context) error {
 			return kerr
 		}
 		s.gwTokenFallbackKeeper = fb
+		registryFB, kerr := keywrap.NewKeeper(fallbackMaster, dockerRegistryCredentialKeeperInfo)
+		if kerr != nil {
+			return kerr
+		}
+		s.dockerRegistrySecretFallbackKeeper = registryFB
 	}
 
 	// ---- 3. Structured startup notification using the injected logger. ----
@@ -721,6 +741,44 @@ func (s *Store) unwrapGWToken(blob string) (string, error) {
 	return "", fmt.Errorf("keywrap: unwrap (kw1 prefix): ciphertext does not decrypt under primary%s master",
 		func() string {
 			if s.gwTokenFallbackKeeper != nil {
+				return " or fallback"
+			}
+			return ""
+		}())
+}
+
+func (s *Store) wrapDockerRegistrySecret(plain string) (string, error) {
+	if plain == "" {
+		return "", nil
+	}
+	blob, err := s.dockerRegistrySecretKeeper.Wrap(plain)
+	if err != nil {
+		return "", err
+	}
+	return wrappedTokenPrefix + blob, nil
+}
+
+func (s *Store) unwrapDockerRegistrySecret(blob string) (string, error) {
+	if blob == "" {
+		return "", nil
+	}
+	if !strings.HasPrefix(blob, wrappedTokenPrefix) {
+		// Reserved for pre-keywrap alpha data. Current released builds
+		// never write plaintext registry secrets into this column.
+		return blob, nil
+	}
+	raw := strings.TrimPrefix(blob, wrappedTokenPrefix)
+	if pt, err := s.dockerRegistrySecretKeeper.Unwrap(raw); err == nil {
+		return pt, nil
+	}
+	if s.dockerRegistrySecretFallbackKeeper != nil {
+		if pt, err := s.dockerRegistrySecretFallbackKeeper.Unwrap(raw); err == nil {
+			return pt, nil
+		}
+	}
+	return "", fmt.Errorf("keywrap: unwrap (kw1 prefix): docker registry credential secret does not decrypt under primary%s master",
+		func() string {
+			if s.dockerRegistrySecretFallbackKeeper != nil {
 				return " or fallback"
 			}
 			return ""
@@ -838,6 +896,7 @@ CREATE TABLE IF NOT EXISTS docker_registry_credentials (
   name TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active',
   secret_hash TEXT NOT NULL,
+  secret_ciphertext TEXT NOT NULL DEFAULT '',
   scopes TEXT NOT NULL DEFAULT '',
   repository_prefix TEXT NOT NULL DEFAULT 'personal/',
   last_used_at TEXT NOT NULL DEFAULT '',
@@ -1171,6 +1230,7 @@ CREATE INDEX IF NOT EXISTS idx_object_storage_profiles_created ON object_storage
 		{"image_assets", "object_storage_profile_id", "TEXT NOT NULL DEFAULT ''"},
 		{"image_storage_settings", "object_storage_profile_id", "TEXT NOT NULL DEFAULT ''"},
 		{"codex_gateway_settings", "account_health_check_interval_seconds", "INTEGER NOT NULL DEFAULT 43200"},
+		{"docker_registry_credentials", "secret_ciphertext", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.ensureColumn(ctx, column.table, column.name, column.def); err != nil {
 			return err

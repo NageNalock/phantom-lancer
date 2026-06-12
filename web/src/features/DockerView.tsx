@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../app/App";
 import type {
   DockerControlStatus,
@@ -22,10 +22,13 @@ import type {
 import { Button, ContextList, EmptyState, Field, Metric, Panel, Pill, SubTabs, useDangerConfirm } from "../components/ui";
 import { formatBytesZero } from "../utils/format";
 import { friendlyError } from "../api/client";
-import { useQueryParamState } from "../hooks/useQueryParamState";
+import { useQueryParamState, useStringQueryParamState, useBoolQueryParamState } from "../hooks/useQueryParamState";
 import { DockerTable, DockerValue } from "./docker/DockerTable";
 import { HostOperationsPanel } from "./docker/HostOperationsPanel";
 import { RegistryPanel } from "./docker/RegistryPanel";
+
+type RegistryView = "repositories" | "credentials" | "settings";
+const REGISTRY_VIEW_IDS: RegistryView[] = ["repositories", "credentials", "settings"];
 
 type DockerTab = "overview" | "registry" | "containers" | "images" | "volumes" | "networks" | "events" | "settings";
 type DockerOperationResult = { job?: DockerJob; eventScope?: string; eventScopeId?: string };
@@ -92,6 +95,10 @@ function registryTagPullBusyKey(tag: DockerRegistryTag): string {
 
 export function DockerView({ actions }: { actions: AppActions }) {
   const [tab, setTab, tabHref] = useQueryParamState<DockerTab>("docker", DOCKER_TAB_IDS, "overview", { clearKeys: DOCKER_CLEAR_KEYS });
+  const [registryView, setRegistryView] = useQueryParamState<RegistryView>("drv", REGISTRY_VIEW_IDS, "repositories", { clearKeys: ["drtag"] });
+  const [selectedRepo, setSelectedRepo] = useStringQueryParamState("drrepo", "", { clearKeys: ["drtag"] });
+  const [selectedTag, setSelectedTag] = useStringQueryParamState("drtag", "");
+  const [createFocus, , toggleCreateFocus] = useBoolQueryParamState("dcreate", false);
   const [status, setStatus] = useState<DockerStatus | null>(null);
   const [control, setControl] = useState<DockerControlStatus | null>(null);
   const [containers, setContainers] = useState<DockerContainerSummary[]>([]);
@@ -103,19 +110,24 @@ export function DockerView({ actions }: { actions: AppActions }) {
   const [repositories, setRepositories] = useState<DockerRegistryRepository[]>([]);
   const [credentials, setCredentials] = useState<DockerRegistryCredential[]>([]);
   const [objectProfiles, setObjectProfiles] = useState<ObjectStorageProfile[]>([]);
-  const [selectedRepo, setSelectedRepo] = useState("");
   const [repoTags, setRepoTags] = useState<DockerRegistryTag[]>([]);
   const [newCredentialSecret, setNewCredentialSecret] = useState("");
   const [credentialName, setCredentialName] = useState("personal-laptop");
   const [credentialPrefix, setCredentialPrefix] = useState("personal/");
   const [createName, setCreateName] = useState("managed-app");
   const [createImage, setCreateImage] = useState("");
+  const [createRestart, setCreateRestart] = useState("unless-stopped");
+  const [createPorts, setCreatePorts] = useState("");
+  const [createVolumes, setCreateVolumes] = useState("");
+  const [createEnv, setCreateEnv] = useState("");
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState("");
   const [pullRef, setPullRef] = useState("");
   const [logsFor, setLogsFor] = useState<DockerContainerSummary | null>(null);
   const [logLines, setLogLines] = useState<DockerLogLine[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
+  const [logsLive, setLogsLive] = useState(false);
+  const [logLiveClosed, setLogLiveClosed] = useState<string>("");
   const [job, setJob] = useState<DockerJob | null>(null);
   const [jobs, setJobs] = useState<DockerJob[]>([]);
   const [jobEvents, setJobEvents] = useState<EventRecord[]>([]);
@@ -155,15 +167,16 @@ export function DockerView({ actions }: { actions: AppActions }) {
     setRepositories(nextRepos);
     setCredentials(credsRes.items || []);
     setObjectProfiles(profilesRes.items || []);
-    const nextRepo = nextRepos.some((item) => item.name === (preferredRepo || selectedRepo))
-      ? (preferredRepo || selectedRepo)
+    const urlRepo = preferredRepo || selectedRepo;
+    const nextRepo = nextRepos.some((item) => item.name === urlRepo)
+      ? urlRepo
       : nextRepos[0]?.name || "";
     if (!nextRepo) {
-      setSelectedRepo("");
+      if (selectedRepo) setSelectedRepo("");
       setRepoTags([]);
       return;
     }
-    setSelectedRepo(nextRepo);
+    if (nextRepo !== selectedRepo) setSelectedRepo(nextRepo);
     try {
       const tagsRes = await actions.api<{ items?: DockerRegistryTag[] }>(`/api/docker/registry/repositories/${nextRepo}/tags`);
       setRepoTags(tagsRes.items || []);
@@ -171,7 +184,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
       setRepoTags([]);
       actions.setToast(friendlyError(error), "danger");
     }
-  }, [actions, selectedRepo]);
+  }, [actions, selectedRepo, setSelectedRepo]);
 
   const loadJobsAndEvents = useCallback(async () => {
     const [jobsRes, eventsRes] = await Promise.all([
@@ -323,6 +336,19 @@ export function DockerView({ actions }: { actions: AppActions }) {
     }
   }
 
+  async function refreshLogs(container: DockerContainerSummary) {
+    setLogsLoading(true);
+    try {
+      const logsRes = await actions.api<{ lines?: DockerLogLine[] }>(`/api/docker/containers/${container.id}/logs?tail=200`);
+      setLogLines(logsRes.lines || []);
+      setLogLiveClosed("");
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setLogsLoading(false);
+    }
+  }
+
   async function openContainerDetails(container: DockerContainerSummary) {
     setSelectedContainer(container);
     setLogsFor(container);
@@ -330,6 +356,8 @@ export function DockerView({ actions }: { actions: AppActions }) {
     setContainerStats(null);
     setContainerDetailsLoading(true);
     setLogLines([]);
+    setLogsLive(false);
+    setLogLiveClosed("");
     setLogsLoading(true);
     try {
       const [detailsRes, statsRes, logsRes] = await Promise.all([
@@ -347,6 +375,58 @@ export function DockerView({ actions }: { actions: AppActions }) {
       setLogsLoading(false);
     }
   }
+
+  function toggleLogsLive(container: DockerContainerSummary, enabled: boolean) {
+    setLogsLive(enabled);
+    if (!enabled) {
+      setLogLiveClosed("用户已停止 live tail");
+    }
+  }
+
+  useEffect(() => {
+    if (!logsLive || !logsFor) return;
+    const params = new URLSearchParams({ tail: "50" });
+    const source = new EventSource(`/api/docker/containers/${logsFor.id}/logs/stream?${params.toString()}`);
+    let closed = false;
+    const handleLine = (event: MessageEvent<string>) => {
+      try {
+        const line = JSON.parse(event.data) as DockerLogLine;
+        setLogLines((current) => [...current.slice(-500), line]);
+      } catch {
+        // ignore parse error
+      }
+    };
+    const handleError = (event: MessageEvent<string>) => {
+      if (!closed) {
+        setLogLiveClosed(event.data || "连接已关闭");
+        source.close();
+        setLogsLive(false);
+      }
+    };
+    const handleClosed = () => {
+      if (!closed) {
+        setLogLiveClosed("流已结束");
+        source.close();
+        setLogsLive(false);
+      }
+    };
+    source.addEventListener("docker.container.log.line", handleLine);
+    source.addEventListener("docker.container.log.error", handleError);
+    source.addEventListener("docker.container.log.closed", handleClosed);
+    source.onerror = () => {
+      if (!closed) {
+        source.close();
+        setLogsLive(false);
+      }
+    };
+    return () => {
+      closed = true;
+      source.removeEventListener("docker.container.log.line", handleLine);
+      source.removeEventListener("docker.container.log.error", handleError);
+      source.removeEventListener("docker.container.log.closed", handleClosed);
+      source.close();
+    };
+  }, [logsLive, logsFor]);
 
   async function pullImage() {
     const ref = pullRef.trim();
@@ -619,7 +699,9 @@ export function DockerView({ actions }: { actions: AppActions }) {
     const ref = `${host}/${item.repository}:${item.tag}`;
     setCreateImage(ref);
     setPullRef(ref);
+    setSelectedTag(`${item.repository}:${item.tag}`);
     setTab("settings");
+    if (!createFocus) toggleCreateFocus();
     actions.setToast("已带入容器创建表单", "good");
   }
 
@@ -643,21 +725,35 @@ export function DockerView({ actions }: { actions: AppActions }) {
     }
   }
 
-  async function createContainer() {
+  async function createContainer(template: {
+    name: string;
+    image: string;
+    restartPolicy?: string;
+    ports?: { containerPort: number; hostPort?: number; protocol?: string; hostIp?: string }[];
+    volumes?: { volumeName: string; destination: string; readOnly?: boolean }[];
+    env?: { name: string; value: string }[];
+  }) {
     if (!control?.settings?.containerCreateEnabled) {
       actions.setToast("请先在主机操作中开启模板化容器创建", "warn");
       return;
     }
-    if (!createName.trim() || !createImage.trim()) {
+    if (!template.name.trim() || !template.image.trim()) {
       actions.setToast("请填写容器名和镜像", "warn");
       return;
     }
     const confirmed = await confirmDanger({
       title: "创建并启动容器",
-      objectName: createName,
+      objectName: template.name,
       body: "该操作会使用受控模板创建容器并立即启动。",
       confirmLabel: "创建容器",
-      impact: [`Image: ${createImage}`, "当前模板不允许 host path、privileged、host network 或自由参数。"],
+      impact: [
+        `Image: ${template.image}`,
+        template.ports?.length ? `端口映射: ${template.ports.length} 条` : "端口: 无",
+        template.volumes?.length ? `命名卷: ${template.volumes.length} 个` : "卷: 无",
+        template.env?.length ? `环境变量: ${template.env.length} 条` : "环境变量: 无",
+        `Restart: ${template.restartPolicy || "no"}`,
+        "当前模板不允许 host path、privileged、host network 或自由参数。",
+      ],
       recovery: "创建失败不会保留半成品；创建成功后可在容器列表中停止或删除。",
     });
     if (!confirmed) return;
@@ -666,7 +762,14 @@ export function DockerView({ actions }: { actions: AppActions }) {
       const result = await actions.api<DockerOperationResult>("/api/docker/containers", {
         method: "POST",
         csrf: actions.csrf,
-        body: { name: createName.trim(), image: createImage.trim() },
+        body: {
+          name: template.name.trim(),
+          image: template.image.trim(),
+          restartPolicy: template.restartPolicy,
+          ports: template.ports,
+          volumes: template.volumes,
+          env: template.env,
+        },
       });
       attachJob(result, "容器创建已提交");
       setTab("containers");
@@ -753,49 +856,64 @@ export function DockerView({ actions }: { actions: AppActions }) {
 	        onChange={(id) => setTab(id as DockerTab)}
 	        tabs={TABS.map((item) => ({ ...item, href: tabHref(item.id) }))}
 	      />
-	      {tab === "registry" ? (
-	        <RegistryPanel
-	          busy={busy}
-	          createCredential={(scopes) => void createCredential(scopes)}
-	          credentialName={credentialName}
-	          credentialPrefix={credentialPrefix}
-	          credentials={credentials}
-	          deleteCredential={(item) => void deleteCredential(item)}
-	          deleteTag={(item) => void deleteTag(item)}
-	          formatBytes={formatBytesZero}
-	          loading={loading}
-	          newCredentialSecret={newCredentialSecret}
-	          objectProfiles={objectProfiles}
-	          openRepository={(repo) => void openRepository(repo)}
-	          pullRegistryTag={(item) => void pullRegistryTag(item)}
-	          registrySettings={registrySettings}
-	          registryStatus={registryStatus}
-	          repoTags={repoTags}
-	          repositories={repositories}
-	          rotateCredential={(item) => void rotateCredential(item)}
-	          runRegistryGC={() => void runRegistryGC()}
-	          saveRegistrySettings={(settings) => void saveRegistrySettings(settings)}
-	          selectedRepo={selectedRepo}
-	          setCredentialName={setCredentialName}
-	          setCredentialPrefix={setCredentialPrefix}
-	          setCredentialStatus={(item, status) => void setCredentialStatus(item, status)}
-	          useTagForContainer={(item) => useTagForContainer(item)}
-	        />
-	      ) : tab === "settings" ? (
-	        <HostOperationsPanel
-	          busy={busy}
-	          control={control}
-	          createContainer={() => void createContainer()}
-	          createImage={createImage}
-	          createName={createName}
-	          daemonAction={(action) => void daemonAction(action)}
-	          installDocker={() => void installDocker()}
-	          loadControl={() => void loadControl()}
-	          registryPublicUrl={registrySettings.publicUrl}
-	          saveDockerSettings={(next) => void saveDockerSettings(next)}
-	          setCreateImage={setCreateImage}
-	          setCreateName={setCreateName}
-	        />
+      {tab === "registry" ? (
+        <RegistryPanel
+          busy={busy}
+          createCredential={(scopes) => void createCredential(scopes)}
+          credentialName={credentialName}
+          credentialPrefix={credentialPrefix}
+          credentials={credentials}
+          clearNewCredentialSecret={() => setNewCredentialSecret("")}
+          deleteCredential={(item) => void deleteCredential(item)}
+          deleteTag={(item) => void deleteTag(item)}
+          formatBytes={formatBytesZero}
+          loading={loading}
+          newCredentialSecret={newCredentialSecret}
+          objectProfiles={objectProfiles}
+          openRepository={(repo) => void openRepository(repo)}
+          pullRegistryTag={(item) => void pullRegistryTag(item)}
+          registrySettings={registrySettings}
+          registryStatus={registryStatus}
+          registryView={registryView}
+          repoTags={repoTags}
+          repositories={repositories}
+          rotateCredential={(item) => void rotateCredential(item)}
+          runRegistryGC={() => void runRegistryGC()}
+          saveRegistrySettings={(settings) => void saveRegistrySettings(settings)}
+          selectedRepo={selectedRepo}
+          selectedTag={selectedTag}
+          setCredentialName={setCredentialName}
+          setCredentialPrefix={setCredentialPrefix}
+          setCredentialStatus={(item, status) => void setCredentialStatus(item, status)}
+          setRegistryView={setRegistryView}
+          setSelectedTag={setSelectedTag}
+          useTagForContainer={(item) => useTagForContainer(item)}
+        />
+      ) : tab === "settings" ? (
+        <HostOperationsPanel
+          busy={busy}
+          control={control}
+          createContainer={(template) => void createContainer(template)}
+          createEnv={createEnv}
+          createFocus={createFocus}
+          createImage={createImage}
+          createName={createName}
+          createPorts={createPorts}
+          createRestart={createRestart}
+          createVolumes={createVolumes}
+          daemonAction={(action) => void daemonAction(action)}
+          installDocker={() => void installDocker()}
+          loadControl={() => void loadControl()}
+          registryPublicUrl={registrySettings.publicUrl}
+          saveDockerSettings={(next) => void saveDockerSettings(next)}
+          setCreateEnv={setCreateEnv}
+          setCreateImage={setCreateImage}
+          setCreateName={setCreateName}
+          setCreatePorts={setCreatePorts}
+          setCreateRestart={setCreateRestart}
+          setCreateVolumes={setCreateVolumes}
+          toggleCreateFocus={toggleCreateFocus}
+        />
 	      ) : tab === "overview" ? (
 	        <DockerOverview
 	          job={job}
@@ -852,104 +970,127 @@ export function DockerView({ actions }: { actions: AppActions }) {
 	              }))}
 	            />
 	          </Panel>
-	          <ContainerInspector
-	            details={containerDetails}
-	            detailsLoading={containerDetailsLoading}
-	            job={job}
-	            jobEvents={jobEvents}
-	            logLines={logLines}
-	            logsFor={logsFor}
-	            logsLoading={logsLoading}
-	            onClose={() => {
-	              setSelectedContainer(null);
-	              setLogsFor(null);
-	              setContainerDetails(null);
-	              setContainerStats(null);
-	              setLogLines([]);
-	            }}
-	            selected={selectedContainer}
-	            stats={containerStats}
-	          />
+          <ContainerInspector
+            allJobEvents={recentDockerEvents}
+            details={containerDetails}
+            detailsLoading={containerDetailsLoading}
+            logLines={logLines}
+            logLiveClosed={logLiveClosed}
+            logsFor={logsFor}
+            logsLive={logsLive}
+            logsLoading={logsLoading}
+            onClose={() => {
+              setSelectedContainer(null);
+              setLogsFor(null);
+              setContainerDetails(null);
+              setContainerStats(null);
+              setLogLines([]);
+              setLogsLive(false);
+              setLogLiveClosed("");
+            }}
+            onRefreshLogs={() => logsFor && void refreshLogs(logsFor)}
+            onToggleLogsLive={(enabled) => logsFor && toggleLogsLive(logsFor, enabled)}
+            selected={selectedContainer}
+            stats={containerStats}
+          />
 	        </div>
-	      ) : tab === "images" ? (
-	        <Panel title="镜像">
-	          <div className="grid gap-3">
-	            <div className="flex flex-wrap items-end gap-2">
-	              <div className="min-w-60 flex-1">
-	                <Field label="拉取镜像" help="例如 nginx:latest 或 registry.example.com/app:tag。">
-	                  <input className="input mono" onChange={(event) => setPullRef(event.target.value)} placeholder="repository:tag" value={pullRef} />
-	                </Field>
-	              </div>
-	              <Button disabled={busy === "pull"} tone="primary" onClick={() => void pullImage()}>
-	                {busy === "pull" ? "拉取中" : "拉取"}
-	              </Button>
-	            </div>
-	            <DockerTable
-	              columns={[
-	                { header: "标签", width: "42%" },
-	                { header: "ID", width: "22%" },
-	                { header: "大小", width: "110px" },
-	                { header: "创建时间", width: "160px" },
-	                { header: "操作", width: "90px" },
-	              ]}
-	              empty="暂无镜像"
-	              loading={loading}
-	              rows={images.map((item) => ({
-	                key: item.id,
-	                cells: [
-	                  <DockerValue clamp={false} value={item.tags && item.tags.length ? item.tags.join(", ") : item.id} />,
-	                  <DockerValue value={item.id} />,
-	                  <span className="text-xs">{formatBytesZero(item.sizeBytes)}</span>,
-	                  <span className="text-xs">{formatUnix(item.created)}</span>,
-	                  <Button disabled={busy === `rmi-${item.id}`} tone="danger" onClick={() => void removeImage(item)}>删除</Button>,
-	                ],
-	              }))}
-	            />
-	          </div>
-	        </Panel>
-	      ) : tab === "volumes" ? (
-	        <Panel title="卷">
-	          <DockerTable
-	            columns={[
-	              { header: "名称", width: "28%" },
-	              { header: "驱动", width: "120px" },
-	              { header: "挂载点", width: "52%" },
-	            ]}
-	            empty="暂无卷"
-	            loading={loading}
-	            rows={volumes.map((item) => ({
-	              key: item.name,
-	              cells: [
-	                <DockerValue value={item.name} />,
-	                <span className="text-xs">{item.driver}</span>,
-	                <DockerValue clamp={false} value={item.mountpoint || "-"} />,
-	              ],
-	            }))}
-	          />
-	        </Panel>
-	      ) : (
-	        <Panel title="网络">
-	          <DockerTable
-	            columns={[
-	              { header: "名称", width: "30%" },
-	              { header: "驱动", width: "120px" },
-	              { header: "范围", width: "120px" },
-	              { header: "ID", width: "32%" },
-	            ]}
-	            empty="暂无网络"
-	            loading={loading}
-	            rows={networks.map((item) => ({
-	              key: item.id,
-	              cells: [
-	                <DockerValue value={item.name} />,
-	                <span className="text-xs">{item.driver}</span>,
-	                <span className="text-xs">{item.scope}</span>,
-	                <DockerValue value={item.id} />,
-	              ],
-	            }))}
-	          />
-	        </Panel>
-	      )}
+      ) : tab === "images" ? (
+        <Panel title="镜像">
+          <div className="grid gap-3">
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="min-w-60 flex-1">
+                <Field label="拉取镜像" help="例如 nginx:latest 或 registry.example.com/app:tag。">
+                  <input className="input mono" onChange={(event) => setPullRef(event.target.value)} placeholder="repository:tag" value={pullRef} />
+                </Field>
+              </div>
+              <Button disabled={busy === "pull"} tone="primary" onClick={() => void pullImage()}>
+                {busy === "pull" ? "拉取中" : "拉取"}
+              </Button>
+            </div>
+            <DockerTable
+              columns={[
+                { header: "标签", width: "30%" },
+                { header: "被使用", width: "18%" },
+                { header: "ID", width: "18%" },
+                { header: "大小", width: "110px" },
+                { header: "创建时间", width: "160px" },
+                { header: "操作", width: "90px" },
+              ]}
+              empty="暂无镜像"
+              loading={loading}
+              rows={images.map((item) => ({
+                key: item.id,
+                cells: [
+                  <DockerValue value={item.tags && item.tags.length ? item.tags.join(", ") : item.id} />,
+                  item.usedBy?.length ? (
+                    <span className="flex flex-wrap gap-1">
+                      {item.usedBy.slice(0, 4).map((name) => (
+                      <Pill key={name} tone="neutral">{name}</Pill>
+                    ))}
+                      {item.usedBy.length > 4 ? <Pill tone="neutral">+{item.usedBy.length - 4}</Pill> : null}
+                    </span>
+                  ) : <span className="muted text-xs">未使用</span>,
+                  <DockerValue value={item.id} />,
+                  <span className="text-xs">{formatBytesZero(item.sizeBytes)}</span>,
+                  <span className="text-xs">{formatUnix(item.created)}</span>,
+                  <Button disabled={busy === `rmi-${item.id}`} tone="danger" onClick={() => void removeImage(item)}>删除</Button>,
+                ],
+              }))}
+            />
+          </div>
+        </Panel>
+      ) : tab === "volumes" ? (
+        <Panel title="卷">
+          <DockerTable
+            columns={[
+              { header: "名称", width: "28%" },
+              { header: "驱动", width: "120px" },
+              { header: "挂载点", width: "52%" },
+            ]}
+            empty="暂无卷"
+            loading={loading}
+            rows={volumes.map((item) => ({
+              key: item.name,
+              cells: [
+                <DockerValue value={item.name} />,
+                <span className="text-xs">{item.driver}</span>,
+                <DockerValue value={item.mountpoint || "-"} />,
+              ],
+            }))}
+          />
+        </Panel>
+      ) : (
+        <Panel title="网络">
+          <DockerTable
+            columns={[
+              { header: "名称", width: "24%" },
+              { header: "连接容器", width: "22%" },
+              { header: "驱动", width: "120px" },
+              { header: "范围", width: "120px" },
+              { header: "ID" },
+            ]}
+            empty="暂无网络"
+            loading={loading}
+            rows={networks.map((item) => ({
+              key: item.id,
+              cells: [
+                <DockerValue value={item.name} />,
+                item.usedBy?.length ? (
+                  <span className="flex flex-wrap gap-1">
+                    {item.usedBy.slice(0, 4).map((name) => (
+                      <Pill key={name} tone="neutral">{name}</Pill>
+                    ))}
+                    {item.usedBy.length > 4 ? <Pill tone="neutral">+{item.usedBy.length - 4}</Pill> : null}
+                  </span>
+                ) : <span className="muted text-xs">未连接</span>,
+                <span className="text-xs">{item.driver}</span>,
+                <span className="text-xs">{item.scope}</span>,
+                <DockerValue value={item.id} />,
+              ],
+            }))}
+          />
+        </Panel>
+      )}
       </div>
       {dangerConfirmDialog}
     </>
@@ -1191,9 +1332,12 @@ function ContainerInspector({
   logsFor,
   logLines,
   logsLoading,
-  job,
-  jobEvents,
+  logsLive,
+  logLiveClosed,
+  allJobEvents,
   onClose,
+  onRefreshLogs,
+  onToggleLogsLive,
 }: {
   selected: DockerContainerSummary | null;
   details: DockerContainerInspectSummary | null;
@@ -1202,10 +1346,31 @@ function ContainerInspector({
   logsFor: DockerContainerSummary | null;
   logLines: DockerLogLine[];
   logsLoading: boolean;
-  job: DockerJob | null;
-  jobEvents: EventRecord[];
+  logsLive: boolean;
+  logLiveClosed: string;
+  allJobEvents: EventRecord[];
   onClose: () => void;
+  onRefreshLogs: () => void;
+  onToggleLogsLive: (enabled: boolean) => void;
 }) {
+  const containerEvents = useMemo(() => {
+    if (!selected) return [];
+    const containerId = selected.id;
+    const containerName = selected.names[0] || "";
+    return allJobEvents.filter((event) => {
+      const scopeId = event.scopeId || "";
+      const target = typeof event.payload?.target === "string" ? event.payload.target : "";
+      const container = typeof event.payload?.container === "string" ? event.payload.container : "";
+      return (
+        scopeId.includes(containerId) ||
+        scopeId === containerName ||
+        target.includes(containerId) ||
+        target === containerName ||
+        container.includes(containerId) ||
+        container === containerName
+      );
+    }).slice(0, 30);
+  }, [allJobEvents, selected]);
   return (
     <div className="grid content-start gap-4">
       <Panel
@@ -1241,23 +1406,45 @@ function ContainerInspector({
         )}
       </Panel>
       {logsFor ? (
-        <Panel title={`日志 · ${logsFor.names[0] || logsFor.id}`} subtitle="最近 200 行，已脱敏并限制长度。">
+        <Panel
+          title={`日志 · ${logsFor.names[0] || logsFor.id}`}
+          subtitle={logsLive ? "Live tail 已开启，实时追加新输出。" : "最近 200 行，已脱敏并限制长度。"}
+          actions={
+            <span className="flex gap-2">
+              <Button onClick={onRefreshLogs} tone="neutral">刷新</Button>
+              {logsLive ? (
+                <Button onClick={() => onToggleLogsLive(false)}>停止 Live</Button>
+              ) : (
+                <Button onClick={() => onToggleLogsLive(true)} tone="primary">Live Tail</Button>
+              )}
+            </span>
+          }
+        >
           {logsLoading ? (
             <p className="muted text-sm">正在加载日志。</p>
           ) : logLines.length ? (
-            <pre className="mono max-h-80 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs leading-relaxed">
-              {logLines.map((line, index) => (
-                <div className={line.stream === "stderr" ? "text-[var(--danger)]" : ""} key={index}>
-                  {line.text}
-                </div>
-              ))}
-            </pre>
+            <>
+              {logLiveClosed ? (
+                <p className="muted mb-2 text-xs">{logLiveClosed}。</p>
+              ) : null}
+              <pre ref={(el) => { if (el && logsLive) el.scrollTop = el.scrollHeight; }} className="mono max-h-80 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs leading-relaxed">
+                {logLines.map((line, index) => (
+                  <div className={line.stream === "stderr" ? "text-[var(--danger)]" : ""} key={index}>
+                    {line.text}
+                  </div>
+                ))}
+              </pre>
+            </>
           ) : (
             <EmptyState title="暂无日志" body="该容器当前没有可显示的日志输出。" />
           )}
         </Panel>
       ) : null}
-      <DockerJobPanel job={job} jobEvents={jobEvents} />
+      {selected && containerEvents.length ? (
+        <Panel title="容器相关事件" subtitle="当前容器关联的最近操作事件。">
+          <EventList events={containerEvents} />
+        </Panel>
+      ) : null}
     </div>
   );
 }
