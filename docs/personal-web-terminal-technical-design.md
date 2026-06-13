@@ -6,7 +6,7 @@
 
 Codex CLI Client 和 Codex Gateway / OpenAI Gateway 是并列独立能力域：
 
-- Codex CLI Client 依赖部署机本地安装的 `codex` CLI，提供受控 Web 会话客户端能力，详细设计见 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md)。
+- Codex CLI Client 依赖部署机本地安装的 `codex` CLI，提供受控 Web 会话客户端能力，详细设计见 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md)；当前 UI/产品改造优先见 [codex-desktop-like-web-client-plan.md](./codex-desktop-like-web-client-plan.md)。
 - Codex Gateway / OpenAI Gateway 暴露 OpenAI-compatible `/v1/*` API，详细设计见 [codex-openai-gateway-feature-design.md](./codex-openai-gateway-feature-design.md)。
 
 旧版 Codex 客户端代码已移除，但数据库中可能仍有残留旧表或旧事件。新版 Codex CLI Client 必须使用新的表名前缀和 additive migration，不复用旧 schema 假设。
@@ -168,7 +168,7 @@ Gateway Module 不绑定工作目录，不执行 shell，不修改文件。详�
 - 对 prompt 摘要、stderr、URL、token、secret、附件和事件 payload 做 redaction 和大小限制。
 - 将关键操作写入 audit，服务 `slog` 只记录异常摘要。
 
-Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*` API、不默认 full access。详细设计见 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md)。
+Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*` API、不默认 full access。详细设计见 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md)，Desktop-like Web 工作台改造见 [codex-desktop-like-web-client-plan.md](./codex-desktop-like-web-client-plan.md)。
 
 ### 3.4 Event Module
 

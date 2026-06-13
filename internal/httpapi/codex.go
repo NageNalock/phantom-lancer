@@ -298,11 +298,12 @@ func (s *Server) handleCreateCodexThread(w http.ResponseWriter, r *http.Request)
 		Model          string `json:"model"`
 		Sandbox        string `json:"sandbox"`
 		ApprovalPolicy string `json:"approvalPolicy"`
+		ExecutionMode  string `json:"executionMode"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	thread, err := s.codex.CreateThread(r.Context(), req.WorkspaceID, req.Title, req.Model, req.Sandbox, req.ApprovalPolicy)
+	thread, err := s.codex.CreateThreadWithInput(r.Context(), codexclient.ThreadInput{WorkspaceID: req.WorkspaceID, Title: req.Title, Model: req.Model, Sandbox: req.Sandbox, ApprovalPolicy: req.ApprovalPolicy, ExecutionMode: req.ExecutionMode})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "codex_thread_invalid", err.Error())
 		return
@@ -345,6 +346,10 @@ func (s *Server) handleCodexThreadSubroutes(w http.ResponseWriter, r *http.Reque
 		}
 		if len(parts) == 2 && parts[1] == "commands" {
 			s.handleListCodexCommands(w, r, threadID)
+			return
+		}
+		if len(parts) == 2 && parts[1] == "worktree" {
+			s.handleCodexWorktreeStatus(w, r, threadID)
 			return
 		}
 		if len(parts) == 3 && parts[1] == "browser" && parts[2] == "sessions" {
@@ -407,6 +412,9 @@ func (s *Server) handleCodexThreadSubroutes(w http.ResponseWriter, r *http.Reque
 			return
 		case "commands":
 			s.handleCreateCodexCommand(w, r, threadID)
+			return
+		case "worktree":
+			s.handleCodexWorktreeAction(w, r, threadID)
 			return
 		}
 	}

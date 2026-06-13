@@ -1816,26 +1816,16 @@ func (s *Service) resolveLibraryImageInputs(ctx context.Context, request Imagine
 		if image.SourceType != "library_asset" {
 			continue
 		}
-		assetID := strings.TrimPrefix(image.URL, "asset:")
-		asset, err := s.Store.GetImageAsset(ctx, assetID)
+		kind, assetID := imageInputAssetID(image)
+		mimeType, data, label, err := s.readReferenceKindedAsset(ctx, kind, assetID)
 		if err != nil {
 			return ImagineRequest{}, err
-		}
-		mimeType, data, err := s.ReadAsset(ctx, asset)
-		if err != nil {
-			return ImagineRequest{}, err
-		}
-		if mimeType == "" {
-			mimeType = http.DetectContentType(data)
-		}
-		if !AllowedImageMime(mimeType) {
-			return ImagineRequest{}, errors.New("library image mime type is unsupported")
 		}
 		request.Images[index].URL = "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
 		request.Images[index].MimeType = mimeType
 		request.Images[index].SizeBytes = int64(len(data))
 		if request.Images[index].SourceLabel == "" {
-			request.Images[index].SourceLabel = asset.OriginalFilename
+			request.Images[index].SourceLabel = label
 		}
 	}
 	return request, nil

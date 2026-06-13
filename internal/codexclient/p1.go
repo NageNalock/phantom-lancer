@@ -102,6 +102,229 @@ type BrowserPreview struct {
 	ScriptPolicy string
 }
 
+type WorktreeStatus struct {
+	ThreadID        string `json:"threadId"`
+	ExecutionMode   string `json:"executionMode"`
+	WorktreeSummary string `json:"worktreeSummary,omitempty"`
+	BaseBranch      string `json:"baseBranch,omitempty"`
+	BranchName      string `json:"branchName,omitempty"`
+	WorktreeStatus  string `json:"worktreeStatus,omitempty"`
+	MergeStatus     string `json:"mergeStatus,omitempty"`
+	DirtyStatus     string `json:"dirtyStatus,omitempty"`
+	DiscardedAt     string `json:"discardedAt,omitempty"`
+	LastError        string `json:"lastError,omitempty"`
+}
+
+func (s *Service) createThreadWorktree(ctx context.Context, thread storage.CodexCliThread, ws storage.CodexCliWorkspace) (storage.CodexCliThread, error) {
+	base, _, err := runBoundedGit(ctx, ws.Path, []string{"rev-parse", "--abbrev-ref", "HEAD"}, 4096)
+	if err != nil {
+		return thread, err
+	}
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "HEAD"
+	}
+	branch := safeWorktreeBranch(thread.ID)
+	parent := filepath.Join(s.dataDir, "codex-worktrees")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return thread, err
+	}
+	worktreePath := filepath.Join(parent, thread.ID)
+	if _, err := os.Stat(worktreePath); err == nil {
+		return thread, errors.New("worktree path already exists")
+	} else if !os.IsNotExist(err) {
+		return thread, err
+	}
+	if _, _, err := runBoundedGit(ctx, ws.Path, []string{"worktree", "add", "-b", branch, worktreePath, "HEAD"}, 32*1024); err != nil {
+		return thread, err
+	}
+	thread.WorktreePath = worktreePath
+	thread.WorktreeSummary = summarizeRuntimePath(worktreePath)
+	thread.BaseBranch = base
+	thread.BranchName = branch
+	thread.WorktreeStatus = "ready"
+	thread.MergeStatus = "not_merged"
+	s.appendThreadEvent(ctx, thread.ID, "", "worktree.created", "codex", "worktree", thread.WorktreeSummary, map[string]any{"branch": branch, "baseBranch": base})
+	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.worktree.created", WorkspaceID: ws.ID, RiskLevel: "medium", Summary: "已创建 Codex worktree", Payload: map[string]any{"threadId": thread.ID, "branch": branch, "baseBranch": base}})
+	return s.store.SaveCodexCliThread(ctx, thread)
+}
+
+func (s *Service) ThreadWorktreeStatus(ctx context.Context, threadID string) (WorktreeStatus, error) {
+	thread, ws, err := s.threadWorkspace(ctx, threadID)
+	if err != nil {
+		return WorktreeStatus{}, err
+	}
+	status := WorktreeStatus{
+		ThreadID:        thread.ID,
+		ExecutionMode:   firstNonEmpty(thread.ExecutionMode, "workspace"),
+		WorktreeSummary: thread.WorktreeSummary,
+		BaseBranch:      thread.BaseBranch,
+		BranchName:      thread.BranchName,
+		WorktreeStatus:  thread.WorktreeStatus,
+		MergeStatus:     thread.MergeStatus,
+		DiscardedAt:     thread.DiscardedAt,
+		LastError:        thread.LastError,
+	}
+	if thread.ExecutionMode == "worktree" && thread.DiscardedAt == "" && thread.WorktreePath != "" {
+		wt := workspaceForThread(thread, ws)
+		if dirty, _, err := runBoundedGit(ctx, wt.Path, []string{"status", "--short"}, 64*1024); err == nil {
+			status.DirtyStatus = dirtyStatusLabel(dirty)
+		} else {
+			status.WorktreeStatus = "missing"
+			status.LastError = err.Error()
+		}
+	}
+	return status, nil
+}
+
+func (s *Service) DiscardThreadWorktree(ctx context.Context, threadID string) (WorktreeStatus, error) {
+	thread, err := s.store.GetCodexCliThread(ctx, threadID)
+	if err != nil {
+		return WorktreeStatus{}, err
+	}
+	ws, err := s.store.GetCodexCliWorkspace(ctx, thread.WorkspaceID)
+	if err != nil {
+		return WorktreeStatus{}, err
+	}
+	if thread.ExecutionMode != "worktree" || thread.WorktreePath == "" {
+		return WorktreeStatus{}, errors.New("thread has no worktree")
+	}
+	if thread.DiscardedAt != "" {
+		return s.ThreadWorktreeStatus(ctx, threadID)
+	}
+	if thread.Status == "running" || thread.Status == "needs_approval" || thread.Status == "queued" {
+		return WorktreeStatus{}, errors.New("cannot discard active thread worktree")
+	}
+	if _, _, err := runBoundedGit(ctx, ws.Path, []string{"worktree", "remove", "--force", thread.WorktreePath}, 32*1024); err != nil {
+		return WorktreeStatus{}, err
+	}
+	thread.WorktreeStatus = "discarded"
+	thread.MergeStatus = "discarded"
+	thread.DiscardedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	s.appendThreadEvent(ctx, thread.ID, "", "worktree.discarded", "codex", "worktree", thread.WorktreeSummary, nil)
+	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.worktree.discarded", WorkspaceID: ws.ID, RiskLevel: "medium", Summary: "已丢弃 Codex worktree", Payload: map[string]any{"threadId": thread.ID, "branch": thread.BranchName}})
+	if _, err := s.store.SaveCodexCliThread(ctx, thread); err != nil {
+		return WorktreeStatus{}, err
+	}
+	return s.ThreadWorktreeStatus(ctx, threadID)
+}
+
+func (s *Service) ApplyThreadWorktree(ctx context.Context, threadID string) (WorktreeStatus, error) {
+	thread, err := s.store.GetCodexCliThread(ctx, threadID)
+	if err != nil {
+		return WorktreeStatus{}, err
+	}
+	ws, err := s.store.GetCodexCliWorkspace(ctx, thread.WorkspaceID)
+	if err != nil {
+		return WorktreeStatus{}, err
+	}
+	if thread.ExecutionMode != "worktree" || thread.WorktreePath == "" {
+		return WorktreeStatus{}, errors.New("thread has no worktree")
+	}
+	if thread.DiscardedAt != "" {
+		return WorktreeStatus{}, errors.New("worktree has been discarded")
+	}
+	if thread.Status == "running" || thread.Status == "needs_approval" || thread.Status == "queued" {
+		return WorktreeStatus{}, errors.New("cannot apply active thread worktree")
+	}
+	if dirty, _, err := runBoundedGit(ctx, ws.Path, []string{"status", "--short"}, 64*1024); err != nil {
+		return WorktreeStatus{}, err
+	} else if strings.TrimSpace(dirty) != "" {
+		return WorktreeStatus{}, errors.New("original workspace has uncommitted changes; apply manually or clean the workspace first")
+	}
+	baseHead, _, err := runBoundedGit(ctx, ws.Path, []string{"rev-parse", "HEAD"}, 4096)
+	if err != nil {
+		return WorktreeStatus{}, err
+	}
+	worktreeHead, _, err := runBoundedGit(ctx, thread.WorktreePath, []string{"rev-parse", "HEAD"}, 4096)
+	if err != nil {
+		return WorktreeStatus{}, err
+	}
+	if strings.TrimSpace(baseHead) != strings.TrimSpace(worktreeHead) {
+		return WorktreeStatus{}, errors.New("original workspace HEAD changed since worktree was created; apply manually")
+	}
+	statusText, _, err := runBoundedGit(ctx, thread.WorktreePath, []string{"status", "--short"}, 64*1024)
+	if err != nil {
+		return WorktreeStatus{}, err
+	}
+	for _, line := range strings.Split(statusText, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "??") {
+			return WorktreeStatus{}, errors.New("worktree contains untracked files; add them to git or apply manually")
+		}
+	}
+	patch, truncated, err := runBoundedGit(ctx, thread.WorktreePath, []string{"diff", "--binary", "HEAD"}, 2*1024*1024)
+	if err != nil {
+		return WorktreeStatus{}, err
+	}
+	if truncated {
+		return WorktreeStatus{}, errors.New("worktree diff is too large to apply safely")
+	}
+	if strings.TrimSpace(patch) == "" {
+		thread.MergeStatus = "applied"
+		if _, err := s.store.SaveCodexCliThread(ctx, thread); err != nil {
+			return WorktreeStatus{}, err
+		}
+		return s.ThreadWorktreeStatus(ctx, threadID)
+	}
+	if err := runGitApply(ctx, ws.Path, []byte(patch)); err != nil {
+		return WorktreeStatus{}, err
+	}
+	thread.MergeStatus = "applied"
+	s.appendThreadEvent(ctx, thread.ID, "", "worktree.applied", "codex", "worktree", thread.WorktreeSummary, nil)
+	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.worktree.applied", WorkspaceID: ws.ID, RiskLevel: "medium", Summary: "已应用 Codex worktree diff", Payload: map[string]any{"threadId": thread.ID, "branch": thread.BranchName}})
+	if _, err := s.store.SaveCodexCliThread(ctx, thread); err != nil {
+		return WorktreeStatus{}, err
+	}
+	return s.ThreadWorktreeStatus(ctx, threadID)
+}
+
+func workspaceForThread(thread storage.CodexCliThread, ws storage.CodexCliWorkspace) storage.CodexCliWorkspace {
+	if thread.ExecutionMode == "worktree" && thread.DiscardedAt == "" && thread.WorktreePath != "" {
+		ws.Path = thread.WorktreePath
+		ws.PathSummary = thread.WorktreeSummary
+	}
+	return ws
+}
+
+func safeWorktreeBranch(threadID string) string {
+	clean := regexp.MustCompile(`[^A-Za-z0-9._/-]+`).ReplaceAllString(threadID, "-")
+	return "phantom/" + strings.Trim(clean, "-/.")
+}
+
+func summarizeRuntimePath(path string) string {
+	base := filepath.Base(path)
+	parent := filepath.Base(filepath.Dir(path))
+	if parent == "" || parent == "." {
+		return base
+	}
+	return ".../" + parent + "/" + base
+}
+
+func dirtyStatusLabel(status string) string {
+	if strings.TrimSpace(status) == "" {
+		return "clean"
+	}
+	return "dirty"
+}
+
+func runGitApply(ctx context.Context, cwd string, patch []byte) error {
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "git", "apply", "--binary", "--whitespace=nowarn")
+	cmd.Dir = cwd
+	cmd.Env = append(BuildChildEnv(""), "GIT_PAGER=cat", "PAGER=cat", "GIT_EXTERNAL_DIFF=")
+	cmd.Stdin = bytes.NewReader(patch)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return errors.New(Preview(msg, 300))
+	}
+	return nil
+}
+
 func (s *Service) activeForPayload(payload map[string]any) *appTurnContext {
 	turnID := firstString(payload, "turnId", "turn_id")
 	if turn, ok := payload["turn"].(map[string]any); ok && turnID == "" {
@@ -1731,5 +1954,6 @@ func (s *Service) threadWorkspace(ctx context.Context, threadID string) (storage
 	if err != nil {
 		return storage.CodexCliThread{}, storage.CodexCliWorkspace{}, err
 	}
+	ws = workspaceForThread(thread, ws)
 	return thread, ws, nil
 }

@@ -21,6 +21,44 @@ func (s *Server) handleCodexQueueStatus(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, status)
 }
 
+func (s *Server) handleCodexWorktreeStatus(w http.ResponseWriter, r *http.Request, threadID string) {
+	status, err := s.codex.ThreadWorktreeStatus(r.Context(), threadID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "codex_worktree_failed", codexclient.Redact(err.Error(), 200))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"worktree": status})
+}
+
+func (s *Server) handleCodexWorktreeAction(w http.ResponseWriter, r *http.Request, threadID string) {
+	var req struct {
+		Action string `json:"action"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	switch strings.TrimSpace(req.Action) {
+	case "discard":
+		status, err := s.codex.DiscardThreadWorktree(r.Context(), threadID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "codex_worktree_discard_failed", codexclient.Redact(err.Error(), 200))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"worktree": status})
+	case "apply":
+		status, err := s.codex.ApplyThreadWorktree(r.Context(), threadID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "codex_worktree_apply_failed", codexclient.Redact(err.Error(), 240))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"worktree": status})
+	case "merge":
+		writeError(w, http.StatusNotImplemented, "codex_worktree_merge_not_implemented", "merge commit 尚未开放；当前可使用 apply 将安全 diff 应用回原工作区")
+	default:
+		writeError(w, http.StatusBadRequest, "codex_worktree_action_invalid", "未知 worktree 操作")
+	}
+}
+
 func (s *Server) handleCodexReviewSnapshot(w http.ResponseWriter, r *http.Request, threadID string) {
 	snapshot, err := s.codex.ReviewSnapshot(r.Context(), threadID, r.URL.Query().Get("scope"))
 	if err != nil {

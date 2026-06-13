@@ -144,7 +144,7 @@ function activeStatusPill(activeTab: MainTab, data: AppData) {
   }
   if (activeTab === "images") {
     const images = data.images.status || data.dashboard.images;
-    return <Pill tone={images?.hasApiKey ? "good" : "warn"}>Images {images?.hasApiKey ? "已配置" : "未配置"}</Pill>;
+    return <Pill tone={images?.hasApiKey ? "good" : "warn"}>多媒体 {images?.hasApiKey ? "已配置" : "未配置"}</Pill>;
   }
   if (activeTab === "v2ray") {
     const v2ray = data.v2ray.status || data.dashboard.v2ray;

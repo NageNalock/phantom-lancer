@@ -3,12 +3,16 @@ import type { FormEvent } from "react";
 import type { AppActions } from "../../../app/App";
 import type { CodexReviewComment, CodexReviewSnapshot, CodexThread } from "../../../app/types";
 import { friendlyError } from "../../../api/client";
-import { Button, EmptyState, Pill } from "../../../components/ui";
+import { Button, EmptyState, Field, Pill } from "../../../components/ui";
+import { useQueryParamState } from "../../../hooks/useQueryParamState";
 import { diffLineClass, parseDiff } from "./diff";
 import type { DiffFile } from "./diff";
 
-export function ReviewPane({ actions, thread, onRefresh }: { actions: AppActions; thread: CodexThread; onRefresh: () => void }) {
-  const [scope, setScope] = useState("uncommitted");
+type ReviewScope = "uncommitted" | "last_turn" | "branch";
+const REVIEW_SCOPES: ReviewScope[] = ["uncommitted", "last_turn", "branch"];
+
+export function ReviewPane({ actions, thread, onDraft, onRefresh }: { actions: AppActions; thread: CodexThread; onDraft: (threadId: string, prompt: string) => void; onRefresh: () => void }) {
+  const [scope, setScope] = useQueryParamState<ReviewScope>("codexReviewScope", REVIEW_SCOPES, "uncommitted", { clearKeys: ["codex", "codexInbox", "codexRuntime"] });
   const [snapshot, setSnapshot] = useState<CodexReviewSnapshot | null>(null);
   const [filePath, setFilePath] = useState("");
   const [newLine, setNewLine] = useState("");
@@ -57,6 +61,13 @@ export function ReviewPane({ actions, thread, onRefresh }: { actions: AppActions
     }
   }
 
+  function askCodex(comment: CodexReviewComment) {
+    const prompt = reviewFollowUpPrompt(comment);
+    if (!prompt) return;
+    onDraft(thread.id, prompt);
+    actions.setToast("已填入 composer，可编辑后发送", "good");
+  }
+
   function selectDiffLine(file: string, line?: number, hunk?: string) {
     setFilePath(file);
     setNewLine(line ? String(line) : "");
@@ -71,7 +82,7 @@ export function ReviewPane({ actions, thread, onRefresh }: { actions: AppActions
           <pre className="mono max-h-32 overflow-auto rounded border border-[var(--line)] bg-[var(--surface-soft)] p-2 text-xs whitespace-pre-wrap">{snapshot.summary || "无 diff 摘要"}</pre>
           <DiffViewer files={diffFiles} onSelect={selectDiffLine} />
           <ReviewCommentForm body={body} filePath={filePath} hunkHeader={hunkHeader} newLine={newLine} onBodyChange={setBody} onFilePathChange={setFilePath} onHunkHeaderChange={setHunkHeader} onNewLineChange={setNewLine} onSubmit={createComment} />
-          <ReviewCommentList comments={snapshot.comments || []} onResolve={(id) => void resolve(id)} />
+          <ReviewCommentList comments={snapshot.comments || []} onAskCodex={askCodex} onResolve={(id) => void resolve(id)} />
         </>
       ) : (
         <EmptyState title="Review 不可用" body="当前工作区可能不是 Git 仓库，或 diff 暂时无法读取。" />
@@ -80,10 +91,10 @@ export function ReviewPane({ actions, thread, onRefresh }: { actions: AppActions
   );
 }
 
-function ReviewToolbar({ loading, scope, truncated, onLoad, onScopeChange }: { loading: boolean; scope: string; truncated?: boolean; onLoad: () => void; onScopeChange: (scope: string) => void }) {
+function ReviewToolbar({ loading, scope, truncated, onLoad, onScopeChange }: { loading: boolean; scope: ReviewScope; truncated?: boolean; onLoad: () => void; onScopeChange: (scope: ReviewScope) => void }) {
   return (
     <div className="flex flex-wrap gap-2">
-      <select className="select" onChange={(event) => onScopeChange(event.target.value)} value={scope}>
+      <select className="select" name="codex_review_scope" onChange={(event) => onScopeChange(event.target.value as ReviewScope)} value={scope}>
         <option value="uncommitted">Uncommitted</option>
         <option value="last_turn">Last turn</option>
         <option value="branch">Branch</option>
@@ -129,18 +140,26 @@ function DiffViewer({ files, onSelect }: { files: DiffFile[]; onSelect: (file: s
 function ReviewCommentForm({ body, filePath, hunkHeader, newLine, onBodyChange, onFilePathChange, onHunkHeaderChange, onNewLineChange, onSubmit }: { body: string; filePath: string; hunkHeader: string; newLine: string; onBodyChange: (value: string) => void; onFilePathChange: (value: string) => void; onHunkHeaderChange: (value: string) => void; onNewLineChange: (value: string) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
   return (
     <form className="grid gap-2" onSubmit={onSubmit}>
-      <input className="input" onChange={(event) => onFilePathChange(event.target.value)} placeholder="相对文件路径，例如 web/src/App.tsx" value={filePath} />
+      <Field label="文件路径">
+        <input className="input" name="codex_review_file_path" onChange={(event) => onFilePathChange(event.target.value)} placeholder="web/src/App.tsx" value={filePath} />
+      </Field>
       <div className="grid grid-cols-[8rem_minmax(0,1fr)] gap-2">
-        <input className="input mono" inputMode="numeric" onChange={(event) => onNewLineChange(event.target.value)} placeholder="new line" value={newLine} />
-        <input className="input mono" onChange={(event) => onHunkHeaderChange(event.target.value)} placeholder="@@ hunk header，可选" value={hunkHeader} />
+        <Field label="新行号">
+          <input className="input mono" inputMode="numeric" name="codex_review_new_line" onChange={(event) => onNewLineChange(event.target.value)} placeholder="42" value={newLine} />
+        </Field>
+        <Field label="Hunk">
+          <input className="input mono" name="codex_review_hunk" onChange={(event) => onHunkHeaderChange(event.target.value)} placeholder="@@ hunk header，可选" value={hunkHeader} />
+        </Field>
       </div>
-      <textarea className="input min-h-16" onChange={(event) => onBodyChange(event.target.value)} placeholder="给 Codex 的 review comment" value={body} />
+      <Field label="Review comment">
+        <textarea autoComplete="off" className="input min-h-16" name="codex_review_comment" onChange={(event) => onBodyChange(event.target.value)} placeholder="说明希望 Codex 修改的点" value={body} />
+      </Field>
       <Button disabled={!filePath.trim() || !body.trim()} type="submit">添加评论</Button>
     </form>
   );
 }
 
-function ReviewCommentList({ comments, onResolve }: { comments: CodexReviewComment[]; onResolve: (id: string) => void }) {
+function ReviewCommentList({ comments, onAskCodex, onResolve }: { comments: CodexReviewComment[]; onAskCodex: (comment: CodexReviewComment) => void; onResolve: (id: string) => void }) {
   if (!comments.length) return null;
   return (
     <div className="grid gap-2">
@@ -152,9 +171,23 @@ function ReviewCommentList({ comments, onResolve }: { comments: CodexReviewComme
           </div>
           {comment.hunkHeader ? <span className="mono mt-1 block text-[var(--muted)]">{comment.hunkHeader}</span> : null}
           <p className="mt-1 mb-0 whitespace-pre-wrap">{comment.body}</p>
-          {comment.status !== "resolved" ? <button className="mt-1 text-[var(--muted-strong)] hover:text-[var(--text)]" onClick={() => onResolve(comment.id)} type="button">标记已处理</button> : null}
+          {comment.status !== "resolved" ? (
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button className="text-[var(--muted-strong)] hover:text-[var(--text)]" onClick={() => onAskCodex(comment)} type="button">让 Codex 修复</button>
+              <button className="text-[var(--muted-strong)] hover:text-[var(--text)]" onClick={() => onResolve(comment.id)} type="button">标记已处理</button>
+            </div>
+          ) : null}
         </div>
       ))}
     </div>
   );
+}
+
+function reviewFollowUpPrompt(comment: CodexReviewComment): string {
+  const file = comment.filePath?.trim();
+  const body = comment.body?.trim();
+  if (!file || !body) return "";
+  const line = comment.newLine ? `:${comment.newLine}` : "";
+  const hunk = comment.hunkHeader ? `\nHunk: ${comment.hunkHeader}` : "";
+  return `Please address this review comment in ${file}${line}.${hunk}\n\nReview comment:\n${body}\n\nMake the smallest safe code change, then summarize what changed.`;
 }

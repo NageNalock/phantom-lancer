@@ -20,6 +20,7 @@ import type {
   MediaAsset,
   MediaGenerationJob,
   MediaJobResponse,
+  MediaMode,
   MediaProviderSettingsDraft,
   MediaType,
   ModelCapability,
@@ -125,6 +126,11 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     }
     return undefined;
   }, [imageToImageAsset, mediaImageToImageAsset]);
+  const libraryImageAssetRef = useMemo<AssetRef | undefined>(() => {
+    if (imageToImageAsset?.id) return { kind: "legacy", id: imageToImageAsset.id };
+    if (mediaImageToImageAsset?.id) return { kind: "media", id: mediaImageToImageAsset.id };
+    return undefined;
+  }, [imageToImageAsset?.id, mediaImageToImageAsset?.id]);
   const historyJobs = useMemo(() => {
     if (!currentJob || jobs.some((job) => job.id === currentJob.id)) return jobs;
     return [currentJob, ...jobs];
@@ -227,11 +233,12 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
 
   async function refreshMediaData() {
     const scopeParam = activeTab === "library" && libraryScope === "private" ? "&scope=private" : "";
-    const assetMediaType = activeTab === "library" ? "" : mediaType;
+    const assetMediaType = activeTab === "library" || activeTab === "generate" ? "" : mediaType;
+    const assetProvider = activeTab === "library" || activeTab === "generate" ? "" : currentProvider;
     try {
       const [jobsResult, assetsResult] = await Promise.all([
         actions.api<{ items?: MediaGenerationJob[]; legacyItems?: unknown[]; count?: number }>(`/api/images/generations?limit=80&mediaType=${mediaType}&provider=${currentProvider}`),
-        actions.api<{ items?: MediaAsset[]; count?: number }>(`/api/images/media-assets?limit=120&mediaType=${assetMediaType}&provider=${activeTab === "library" ? "" : currentProvider}${scopeParam}`),
+        actions.api<{ items?: MediaAsset[]; count?: number }>(`/api/images/media-assets?limit=120&mediaType=${assetMediaType}&provider=${assetProvider}${scopeParam}`),
       ]);
       setMediaJobs(jobsResult.items || []);
       if (libraryScope === "private" && activeTab === "library") {
@@ -283,9 +290,64 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     }
   }
 
-  function retryJob(kind: "legacy" | "media", rawJob: unknown) {
-    restoreJobToGenerate(kind, rawJob);
-    actions.setToast("参数已恢复到生成表单，不自动提交；确认后点击生成按钮创建任务", "good");
+  async function retryJob(kind: "legacy" | "media", rawJob: unknown) {
+    const jobId = kind === "legacy" ? (rawJob as ImageGenerationJob).id : (rawJob as MediaGenerationJob).id;
+    setBusy(`retry:${jobId}`);
+    try {
+      let result: MediaJobResponse | ImageJobResponse | undefined;
+      if (kind === "media") {
+        result = await actions.api<MediaJobResponse>(`/api/images/generations/${encodeURIComponent(jobId)}/retry`, {
+          method: "POST",
+          csrf: actions.csrf,
+        });
+      } else {
+        const job = rawJob as ImageGenerationJob;
+        const sourceRefs = sourceRefsFromJob(job.sources, "legacy");
+        if (Number(job.sourceCount || 0) > 0 && sourceRefs.length !== Number(job.sourceCount || 0)) {
+          restoreJobToGenerate(kind, rawJob);
+          actions.setToast("原任务参考图没有完整保存，已恢复参数；请重新选择参考图后生成", "warn");
+          return;
+        }
+        result = await actions.api<MediaJobResponse | ImageJobResponse>("/api/images/generations", {
+          method: "POST",
+          csrf: actions.csrf,
+          body: {
+            mediaType: "image",
+            provider: "xai",
+            mode: job.mode || "text_to_image",
+            model: job.model || "",
+            prompt: job.prompt || "",
+            n: job.imageCount || 1,
+            aspectRatio: job.aspectRatio || "",
+            parameters: {
+              aspectRatio: job.aspectRatio || "",
+              resolution: job.resolution || "",
+              responseFormat: job.responseFormat || "url",
+              n: job.imageCount || 1,
+            },
+            sources: sourceRefsForRetryPayload(sourceRefs),
+          },
+        });
+      }
+      if (result?.job) {
+        if ("mediaType" in result.job) {
+          setCurrentMediaJob(result.job);
+          setCurrentProvider(result.job.provider);
+          setMediaType(result.job.mediaType);
+        } else {
+          setCurrentJob(result.job as ImageGenerationJob);
+          setCurrentProvider("xai");
+          setMediaType("image");
+        }
+      }
+      await actions.refreshImages();
+      await refreshMediaData();
+      actions.setToast("历史任务已重新提交", "good");
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setBusy("");
+    }
   }
 
   async function copyJobParams(kind: "legacy" | "media", rawJob: unknown) {
@@ -307,10 +369,16 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
 
   function restoreJobToGenerate(kind: "legacy" | "media", rawJob: unknown) {
     setActiveTab("generate");
+    setImageToImageAsset(undefined);
+    setMediaImageToImageAsset(undefined);
+    setMultiEditRefs([]);
+    setKeyframeRefs([]);
+    setVideoReferenceRef(undefined);
     if (kind === "legacy") {
       const j = rawJob as ImageGenerationJob;
       setCurrentProvider("xai");
       setMediaType("image");
+      restoreSourceRefs("image", String(j.mode || "text_to_image"), sourceRefsFromJob(j.sources, "legacy"));
       setAppliedPrompt({
         nonce: Date.now(),
         prompt: {
@@ -333,6 +401,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
       const j = rawJob as MediaGenerationJob;
       setCurrentProvider(j.provider);
       setMediaType(j.mediaType);
+      restoreSourceRefs(j.mediaType, String(j.mode || ""), sourceRefsFromJob(j.sources, "media"));
       const params = j.parameters || {};
       const modeVal = j.mode || (j.mediaType === "image" ? "text_to_image" : "text_to_video");
       const videoParams = j.mediaType === "video" ? {
@@ -362,6 +431,55 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
         } as unknown as ImagePrompt,
       });
     }
+  }
+
+  function sourceRefsFromJob(sources: Array<{ assetId?: string; slot?: number }> | undefined, fallbackKind: AssetRef["kind"]): AssetRef[] {
+    return (sources || [])
+      .slice()
+      .sort((a, b) => Number(a.slot || 0) - Number(b.slot || 0))
+      .map((source) => assetRefFromStoredID(source.assetId || "", fallbackKind))
+      .filter(Boolean) as AssetRef[];
+  }
+
+  function assetRefFromStoredID(value: string, fallbackKind: AssetRef["kind"]): AssetRef | undefined {
+    let raw = value.trim();
+    if (!raw) return undefined;
+    if (raw.startsWith("asset:")) raw = raw.slice("asset:".length).trim();
+    const separator = raw.indexOf(":");
+    if (separator > 0) {
+      const prefix = raw.slice(0, separator);
+      const id = raw.slice(separator + 1).trim();
+      if ((prefix === "legacy" || prefix === "media") && id) return { kind: prefix, id };
+    }
+    if (raw.startsWith("medasset_")) return { kind: "media", id: raw };
+    if (raw.startsWith("imgasset_")) return { kind: "legacy", id: raw };
+    return { kind: fallbackKind, id: raw };
+  }
+
+  function restoreSourceRefs(nextMediaType: MediaType, mode: string, refs: AssetRef[]) {
+    if (!refs.length) return;
+    if (nextMediaType === "image") {
+      if (mode === "image_to_image") {
+        setMultiEditRefs(refs.slice(0, 1));
+      } else if (mode === "multi_image_edit") {
+        setMultiEditRefs(refs.slice(0, 3));
+      }
+      return;
+    }
+    if (mode === "image_to_video") {
+      setVideoReferenceRef(refs[0]);
+    } else if (mode === "keyframes") {
+      setKeyframeRefs(refs.slice(0, 6));
+    } else if (mode === "multi_image_video") {
+      setKeyframeRefs(refs.slice(0, 3));
+    }
+  }
+
+  function sourceRefsForRetryPayload(refs: AssetRef[]) {
+    return refs.map((ref) => ({
+      type: "library_asset",
+      assetId: `${ref.kind}:${ref.id}`,
+    }));
   }
 
   function openPresetDraft(draft: ImagePromptFormState) {
@@ -501,9 +619,11 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   }
 
   async function saveMediaProviderSettings(drafts: MediaProviderSettingsDraft[]) {
-    for (const draft of drafts) {
-      setBusy(`provider:${draft.provider}`);
-      try {
+    const savedProviders: string[] = [];
+    setBusy("provider:all");
+    try {
+      for (const draft of drafts) {
+        setBusy(`provider:${draft.provider}`);
         await actions.api(`/api/images/providers/${draft.provider}`, {
           method: "PUT",
           csrf: actions.csrf,
@@ -518,29 +638,32 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
             defaultVideoParams: draft.defaultVideoParams,
           },
         });
-         if (draft.provider === "xai") {
-           await actions.api("/api/images/settings", {
-             method: "PUT",
-             csrf: actions.csrf,
-             body: {
-               defaultModel: draft.defaultImageModel,
-               defaultResponseFormat: (draft.defaultImageParams?.defaultResponseFormat as string) || settings.defaultResponseFormat,
-               defaultResolution: (draft.defaultImageParams?.defaultResolution as string) || settings.defaultResolution,
-               defaultAspectRatio: (draft.defaultImageParams?.defaultAspectRatio as string) || settings.defaultAspectRatio,
-               historyRetention: Number((draft.defaultImageParams?.historyRetention as number) || settings.historyRetention || 500),
-               xaiApiKey: "",
-               clearApiKey: draft.clearApiKey,
-             },
-           });
-         }
-        actions.setToast(`${providerLabel(draft.provider)} 设置已保存`, "good");
-      } catch (error) {
-        actions.setToast(friendlyError(error), "danger");
-      } finally {
-        setBusy("");
+        if (draft.provider === "xai") {
+          await actions.api("/api/images/settings", {
+            method: "PUT",
+            csrf: actions.csrf,
+            body: {
+              defaultModel: draft.defaultImageModel,
+              defaultResponseFormat: (draft.defaultImageParams?.defaultResponseFormat as string) || settings.defaultResponseFormat,
+              defaultResolution: (draft.defaultImageParams?.defaultResolution as string) || settings.defaultResolution,
+              defaultAspectRatio: (draft.defaultImageParams?.defaultAspectRatio as string) || settings.defaultAspectRatio,
+              historyRetention: Number((draft.defaultImageParams?.historyRetention as number) || settings.historyRetention || 500),
+              xaiApiKey: "",
+              clearApiKey: draft.clearApiKey,
+            },
+          });
+        }
+        savedProviders.push(providerLabel(draft.provider));
       }
+      await actions.refreshImages();
+      await fetchProvidersStatus();
+      actions.setToast(`Provider 设置已保存：${savedProviders.join(" / ")}`, "good");
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+      await fetchProvidersStatus();
+    } finally {
+      setBusy("");
     }
-    await fetchProvidersStatus();
   }
 
   async function testMediaProvider(provider: ProviderID) {
@@ -777,11 +900,13 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   }
 
   function useMediaAssetForImageToImage(asset: MediaAsset) {
+    const provider = asset.provider === "xai" || asset.provider === "agnes" ? asset.provider : "agnes";
     setMediaImageToImageAsset(asset);
     setImageToImageAsset(undefined);
     setMultiEditRefs([]);
     setKeyframeRefs([]);
     setVideoReferenceRef(undefined);
+    setCurrentProvider(provider);
     setMediaType("image");
     setActiveTab("generate");
     actions.setToast("已选择资源库图片作为图生图参考", "good");
@@ -821,6 +946,42 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     setMediaType("video");
     setActiveTab("generate");
     actions.setToast("已选择图片作为视频参考图（Agnes · 图生视频模式）", "good");
+  }
+
+  function applyReferenceRefsFromGenerate(refs: AssetRef[], context: { mediaType: MediaType; mode: MediaMode }) {
+    const picked = refs.filter((ref) => ref.id);
+    if (!picked.length) return;
+
+    setImageToImageAsset(undefined);
+    setMediaImageToImageAsset(undefined);
+    setActiveTab("generate");
+
+    if (context.mediaType === "image") {
+      setMediaType("image");
+      setKeyframeRefs([]);
+      setVideoReferenceRef(undefined);
+      setMultiEditRefs(context.mode === "image_to_image" ? picked.slice(0, 1) : picked);
+      if (context.mode === "multi_image_edit") {
+        setCurrentProvider("agnes");
+        actions.setToast(`已选择 ${picked.length} 张图片用于多图编辑（Agnes · 多图编辑模式）`, "good");
+      } else {
+        actions.setToast("已选择图片库图片作为图生图参考", "good");
+      }
+      return;
+    }
+
+    setMediaType("video");
+    setCurrentProvider("agnes");
+    setMultiEditRefs([]);
+    if (context.mode === "image_to_video") {
+      setVideoReferenceRef(picked[0]);
+      setKeyframeRefs([]);
+      actions.setToast("已选择图片作为视频参考图（Agnes · 图生视频模式）", "good");
+      return;
+    }
+    setVideoReferenceRef(undefined);
+    setKeyframeRefs(picked);
+    actions.setToast(`已选择 ${picked.length} 张图片用于视频参考（Agnes · ${context.mode === "multi_image_video" ? "多图视频" : "关键帧模式"}）`, "good");
   }
 
   async function createPrompt(draft: ImagePromptDraft): Promise<ImagePrompt | undefined> {
@@ -1115,12 +1276,14 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
               keyframeRefs={keyframeRefs}
               latestJob={latestJob}
               libraryAssets={libraryAssets}
+              libraryImageAssetRef={libraryImageAssetRef}
               libraryImage={libraryImageRef}
               libraryMediaAssets={libraryMediaAssets}
               mediaJobs={allMediaJobs}
               mediaType={mediaType}
               multiEditRefs={multiEditRefs}
               onApplyPrompt={(prompt) => void usePrompt(prompt)}
+              onApplyReferenceRefs={applyReferenceRefsFromGenerate}
               onClearKeyframeRefs={() => setKeyframeRefs([])}
               onClearLibraryImage={() => {
                 setImageToImageAsset(undefined);
@@ -1137,6 +1300,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
               }}
               onOpenCurrentJobInHistory={openCurrentJobInHistory}
               onOpenPromptLibrary={() => setActiveTab("presets")}
+              onOpenResourceLibrary={() => setActiveTab("library")}
               onProviderChange={(p) => {
                 setCurrentProvider(p);
                 setCurrentMediaJob(undefined);
@@ -1256,19 +1420,18 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
                      <div className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
                        <div className="flex items-center justify-between gap-2">
                          <div className="muted text-xs">各 Provider 默认模型（详细配置见下方卡片）</div>
-                         <div className="flex gap-2 max-md:hidden">
-                           <span className="muted text-xs">当前：{PROVIDERS.find((p) => p.id === currentProvider)?.label || currentProvider}</span>
-                           <span className="muted text-xs">·</span>
-                           <span className="muted text-xs">{MEDIA_TYPES.find((t) => t.id === mediaType)?.label}</span>
+                         <div className="flex flex-wrap justify-end gap-2 max-md:hidden">
+                           <Pill>{PROVIDERS.find((p) => p.id === currentProvider)?.label || currentProvider}</Pill>
+                           <Pill>{MEDIA_TYPES.find((t) => t.id === mediaType)?.label}</Pill>
                          </div>
                        </div>
                        <div className="grid grid-cols-2 gap-2 max-md:grid-cols-1">
                          {(providersStatus?.providers || []).map((p) => (
-                           <div key={p.provider} className="flex items-center gap-2 rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5">
+                           <div key={p.provider} className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5">
                              <Pill>{PROVIDERS.find((pr) => pr.id === p.provider)?.label || p.provider}</Pill>
-                             <span className="mono text-xs truncate">图 {p.defaultImageModel || "—"}</span>
+                             <span className="mono truncate text-xs">图 {p.defaultImageModel || "-"}</span>
                              {p.defaultVideoModel ? (
-                               <span className="mono text-xs truncate">· 视 {p.defaultVideoModel}</span>
+                               <span className="mono col-start-2 truncate text-xs text-[var(--muted-strong)]">视 {p.defaultVideoModel}</span>
                              ) : null}
                            </div>
                          ))}

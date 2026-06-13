@@ -103,6 +103,15 @@ type TurnInput struct {
 	AttachmentIDs  []string
 }
 
+type ThreadInput struct {
+	WorkspaceID    string
+	Title          string
+	Model          string
+	Sandbox        string
+	ApprovalPolicy string
+	ExecutionMode  string
+}
+
 type ThreadListOptions struct {
 	IncludeArchived bool
 	Query           string
@@ -492,10 +501,19 @@ func (s *Service) ListThreadsFiltered(ctx context.Context, opts ThreadListOption
 }
 
 func (s *Service) CreateThread(ctx context.Context, workspaceID, title, model, sandbox, approval string) (storage.CodexCliThread, error) {
-	ws, err := s.store.GetCodexCliWorkspace(ctx, workspaceID)
+	return s.CreateThreadWithInput(ctx, ThreadInput{WorkspaceID: workspaceID, Title: title, Model: model, Sandbox: sandbox, ApprovalPolicy: approval, ExecutionMode: "workspace"})
+}
+
+func (s *Service) CreateThreadWithInput(ctx context.Context, input ThreadInput) (storage.CodexCliThread, error) {
+	ws, err := s.store.GetCodexCliWorkspace(ctx, input.WorkspaceID)
 	if err != nil {
 		return storage.CodexCliThread{}, err
 	}
+	workspaceID := input.WorkspaceID
+	title := input.Title
+	model := input.Model
+	sandbox := input.Sandbox
+	approval := input.ApprovalPolicy
 	if strings.TrimSpace(sandbox) == "" {
 		sandbox = ws.DefaultSandbox
 	}
@@ -516,19 +534,46 @@ func (s *Service) CreateThread(ctx context.Context, workspaceID, title, model, s
 	if s.supervisor.Client() == nil {
 		sourceMode = "exec"
 	}
+	executionMode := strings.TrimSpace(input.ExecutionMode)
+	if executionMode == "" {
+		executionMode = "workspace"
+	}
+	if executionMode != "workspace" && executionMode != "worktree" {
+		return storage.CodexCliThread{}, errors.New("invalid execution mode")
+	}
+	if executionMode == "worktree" {
+		if ws.TrustState != "trusted" {
+			return storage.CodexCliThread{}, errors.New("worktree requires trusted workspace")
+		}
+		if _, _, err := runBoundedGit(ctx, ws.Path, []string{"rev-parse", "--is-inside-work-tree"}, 1024); err != nil {
+			return storage.CodexCliThread{}, fmt.Errorf("worktree requires git workspace: %w", err)
+		}
+	}
 	thread, err := s.store.CreateCodexCliThread(ctx, storage.CodexCliThread{
-		WorkspaceID:    workspaceID,
-		Title:          title,
-		Model:          model,
-		SandboxMode:    runPolicy.Sandbox,
-		ApprovalPolicy: runPolicy.ApprovalPolicy,
-		SourceMode:     sourceMode,
+		WorkspaceID:     workspaceID,
+		Title:           title,
+		Model:           model,
+		SandboxMode:     runPolicy.Sandbox,
+		ApprovalPolicy:  runPolicy.ApprovalPolicy,
+		SourceMode:      sourceMode,
+		ExecutionMode:   executionMode,
+		WorktreeStatus:  map[bool]string{true: "creating", false: ""}[executionMode == "worktree"],
+		MergeStatus:     map[bool]string{true: "not_merged", false: ""}[executionMode == "worktree"],
 	})
 	if err != nil {
 		return storage.CodexCliThread{}, err
 	}
+	if executionMode == "worktree" {
+		thread, err = s.createThreadWorktree(ctx, thread, ws)
+		if err != nil {
+			thread.WorktreeStatus = "failed"
+			thread.LastError = Preview(err.Error(), 200)
+			_, _ = s.store.SaveCodexCliThread(ctx, thread)
+			return storage.CodexCliThread{}, err
+		}
+	}
 	_ = s.store.TouchCodexCliWorkspace(ctx, workspaceID)
-	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.thread.created", WorkspaceID: workspaceID, RiskLevel: "low", Summary: "已创建 Codex 会话", Payload: map[string]any{"threadId": thread.ID, "sandbox": runPolicy.Sandbox, "approval": runPolicy.ApprovalPolicy}})
+	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.thread.created", WorkspaceID: workspaceID, RiskLevel: "low", Summary: "已创建 Codex 会话", Payload: map[string]any{"threadId": thread.ID, "sandbox": runPolicy.Sandbox, "approval": runPolicy.ApprovalPolicy, "executionMode": executionMode}})
 	return thread, nil
 }
 
@@ -693,6 +738,7 @@ func (s *Service) startTurn(ctx context.Context, threadID string, input TurnInpu
 	if err != nil {
 		return storage.CodexCliTurn{}, err
 	}
+	ws = workspaceForThread(thread, ws)
 	requestedSandbox := firstNonEmpty(input.Sandbox, thread.SandboxMode)
 	// kind=chat threads are the read-only conversation mode inside the merged
 	// list: they stay read-only regardless of any requested or stored sandbox.

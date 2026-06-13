@@ -1,9 +1,16 @@
 import { useEffect, useState } from "react";
-import type { CodexThread, CodexWorkspace } from "../../app/types";
-import { Button, CheckLabel, EmptyState, Pill } from "../../components/ui";
+import type { CodexModel, CodexThread, CodexWorkspace } from "../../app/types";
+import { Button, CheckLabel, EmptyState, Field, Notice, Pill } from "../../components/ui";
 import { codexThreadStatusLabel } from "../../domain/labels";
 
 export type CreateConversationMode = "code" | "chat";
+export interface CreateThreadOptions {
+  initialPrompt?: string;
+  model?: string;
+  sandbox?: string;
+  approvalPolicy?: string;
+  executionMode?: string;
+}
 
 export function ThreadList({
   loading,
@@ -15,6 +22,7 @@ export function ThreadList({
   statusFilter,
   includeArchived,
   scratchReady,
+  models,
   onQuery,
   onWorkspaceFilter,
   onStatusFilter,
@@ -36,13 +44,14 @@ export function ThreadList({
   statusFilter: string;
   includeArchived: boolean;
   scratchReady?: boolean;
+  models: CodexModel[];
   onQuery: (value: string) => void;
   onWorkspaceFilter: (value: string) => void;
   onStatusFilter: (value: string) => void;
   onIncludeArchived: (value: boolean) => void;
   onSearch: () => void;
   onSelect: (id: string) => void;
-  onCreate: (workspaceId: string, mode: CreateConversationMode) => void;
+  onCreate: (workspaceId: string, mode: CreateConversationMode, options?: CreateThreadOptions) => void;
   onTogglePin: (thread: CodexThread) => void;
   onArchive: (thread: CodexThread) => void;
   onResume: (thread: CodexThread) => void;
@@ -50,6 +59,11 @@ export function ThreadList({
 }) {
   const [newWorkspace, setNewWorkspace] = useState("");
   const [newMode, setNewMode] = useState<CreateConversationMode>("code");
+  const [newPrompt, setNewPrompt] = useState("");
+  const [newModel, setNewModel] = useState("");
+  const [newSandbox, setNewSandbox] = useState("read-only");
+  const [newApproval, setNewApproval] = useState("on-request");
+  const [newExecution, setNewExecution] = useState("workspace");
   useEffect(() => {
     if (!newWorkspace && workspaces.length) setNewWorkspace(workspaces[0].id);
   }, [workspaces, newWorkspace]);
@@ -57,41 +71,131 @@ export function ThreadList({
   const pinned = threads.filter((thread) => thread.pinned);
   const restGroups = groupThreadsByWorkspace(threads.filter((thread) => !thread.pinned), workspaces);
   const canCreate = newMode === "chat" ? Boolean(scratchReady) : Boolean(newWorkspace);
+  const selectedWorkspace = workspaces.find((workspace) => workspace.id === newWorkspace);
+  const workspaceWriteAllowed = selectedWorkspace?.trustState === "trusted";
+  function create() {
+    if (!canCreate) return;
+    onCreate(newWorkspace, newMode, {
+      initialPrompt: newPrompt.trim(),
+      model: newModel.trim(),
+      sandbox: newMode === "chat" ? "read-only" : newSandbox,
+      approvalPolicy: newApproval,
+      executionMode: newMode === "chat" ? "workspace" : newExecution,
+    });
+    setNewPrompt("");
+  }
 
   return (
     <section className="panel min-w-0 overflow-hidden">
       <div className="panel-header">
-        <h2 className="m-0 text-sm font-semibold">会话</h2>
+        <div className="min-w-0">
+          <h2 className="m-0 text-sm font-semibold">项目 / 会话</h2>
+          <p className="muted mt-1 mb-0 text-xs">选择项目，创建或继续代码任务。</p>
+        </div>
       </div>
       <div className="panel-body grid min-w-0 gap-3">
         <div className="grid gap-2">
-          <select aria-label="新会话类型" className="select" name="codex_thread_create_mode" onChange={(event) => setNewMode(event.target.value as CreateConversationMode)} value={newMode}>
-            <option value="code">代码任务</option>
-            <option disabled={!scratchReady} value="chat">只读问答</option>
-          </select>
+          <Field label="任务类型">
+            <select className="select" name="codex_thread_create_mode" onChange={(event) => setNewMode(event.target.value as CreateConversationMode)} value={newMode}>
+              <option value="code">代码任务</option>
+              <option disabled={!scratchReady} value="chat">只读问答</option>
+            </select>
+          </Field>
+          <Field label="初始 prompt">
+            <textarea
+              autoComplete="off"
+              className="input min-h-20 resize-y py-2"
+              name="codex_thread_initial_prompt"
+              onChange={(event) => setNewPrompt(event.target.value)}
+              placeholder={newMode === "chat" ? "可选：创建后立即发送只读问题" : "可选：创建后立即发送任务 prompt"}
+              value={newPrompt}
+            />
+          </Field>
+          <details className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] px-2 py-1.5">
+            <summary className="cursor-pointer text-xs text-[var(--muted-strong)]">执行设置</summary>
+            <div className="mt-2 grid gap-2">
+              {newMode === "code" ? (
+                <Field label="执行位置">
+                  <select className="select" name="codex_thread_execution" onChange={(event) => setNewExecution(event.target.value)} value={newExecution}>
+                    <option value="workspace">当前工作区</option>
+                    <option disabled={!workspaceWriteAllowed} value="worktree">Worktree 隔离</option>
+                  </select>
+                </Field>
+              ) : null}
+              {models.length ? (
+                <Field label="模型">
+                  <select className="select" name="codex_thread_model" onChange={(event) => setNewModel(event.target.value)} value={newModel}>
+                    <option value="">模型（默认）</option>
+                    {models.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.displayName || item.id}
+                        {item.isDefault ? "（默认）" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              ) : (
+                <Field label="模型">
+                  <input
+                    autoComplete="off"
+                    className="input mono"
+                    name="codex_thread_model"
+                    onChange={(event) => setNewModel(event.target.value)}
+                    placeholder="模型（默认）"
+                    spellCheck={false}
+                    value={newModel}
+                  />
+                </Field>
+              )}
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="沙箱">
+                  <select
+                    className="select"
+                    disabled={newMode === "chat"}
+                    name="codex_thread_sandbox"
+                    onChange={(event) => setNewSandbox(event.target.value)}
+                    value={newMode === "chat" ? "read-only" : newSandbox}
+                  >
+                    <option value="read-only">只读</option>
+                    <option disabled={!workspaceWriteAllowed} value="workspace-write">工作区写入</option>
+                  </select>
+                </Field>
+                <Field label="审批">
+                  <select className="select" name="codex_thread_approval" onChange={(event) => setNewApproval(event.target.value)} value={newApproval}>
+                    <option value="on-request">on-request</option>
+                  </select>
+                </Field>
+              </div>
+              {newMode === "code" && newExecution === "worktree" ? <p className="muted m-0 text-xs">会创建 Git worktree；完成后可在右侧状态中将 diff 应用为原工作区未提交修改，或丢弃 worktree；merge commit 尚未开放。</p> : null}
+              {newMode === "code" && (newSandbox === "workspace-write" || newExecution === "worktree") && !workspaceWriteAllowed ? <p className="muted m-0 text-xs">仅 trusted workspace 可使用工作区写入或 Worktree。</p> : null}
+            </div>
+          </details>
           <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
             {newMode === "code" ? (
-	              <select aria-label="新会话工作区" className="select" disabled={!workspaces.length} name="codex_thread_workspace" onChange={(event) => setNewWorkspace(event.target.value)} value={newWorkspace}>
-                {workspaces.length ? (
-                  workspaces.map((workspace) => (
-                    <option key={workspace.id} value={workspace.id}>
-                      {workspace.label || workspace.id}
-                    </option>
-                  ))
-                ) : (
-                  <option value="">先登记工作区</option>
-                )}
-              </select>
+              <Field label="工作区">
+	              <select className="select" disabled={!workspaces.length} name="codex_thread_workspace" onChange={(event) => setNewWorkspace(event.target.value)} value={newWorkspace}>
+                  {workspaces.length ? (
+                    workspaces.map((workspace) => (
+                      <option key={workspace.id} value={workspace.id}>
+                        {workspace.label || workspace.id}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">先登记工作区</option>
+                  )}
+                </select>
+              </Field>
             ) : (
               <div className="flex min-h-9 items-center rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] px-3 text-xs text-[var(--muted-strong)]">
                 使用 scratch workspace
               </div>
             )}
-            <Button disabled={!canCreate} tone="primary" onClick={() => onCreate(newWorkspace, newMode)}>
-              新对话
+            <Button disabled={!canCreate} tone="primary" onClick={create}>
+              新建
             </Button>
           </div>
           {newMode === "chat" && !scratchReady ? <p className="muted m-0 text-xs">请先在运行时设置里选择 scratch workspace。</p> : null}
+          {newMode === "code" && !workspaces.length ? <Notice tone="warn">请先通过右上角“项目”登记一个 allowed roots 内的工作区。</Notice> : null}
         </div>
         <form
           className="grid grid-cols-[minmax(0,1fr)_auto] gap-2"
@@ -100,36 +204,49 @@ export function ThreadList({
             onSearch();
           }}
         >
-	          <input aria-label="搜索会话" autoComplete="off" className="input" name="codex_thread_search" onChange={(event) => onQuery(event.target.value)} placeholder="搜索会话…" value={query} />
+          <Field label="搜索会话">
+	          <input autoComplete="off" className="input" name="codex_thread_search" onChange={(event) => onQuery(event.target.value)} placeholder="标题、路径或输出摘要" value={query} />
+          </Field>
           <Button type="submit">{loading ? "搜索中" : "搜索"}</Button>
         </form>
         <div className="grid grid-cols-2 gap-2">
-	          <select aria-label="工作区筛选" className="select" name="codex_thread_workspace_filter" onChange={(event) => onWorkspaceFilter(event.target.value)} value={workspaceFilter}>
-            <option value="all">全部工作区</option>
-            {workspaces.map((workspace) => (
-              <option key={workspace.id} value={workspace.id}>
-                {workspace.label || workspace.pathSummary || workspace.id}
-              </option>
-            ))}
-          </select>
-	          <select aria-label="状态筛选" className="select" name="codex_thread_status_filter" onChange={(event) => onStatusFilter(event.target.value)} value={statusFilter}>
-            <option value="all">全部状态</option>
-            <option value="idle">Idle</option>
-            <option value="running">Running</option>
-            <option value="needs_approval">Approval</option>
-            <option value="queued">Queued</option>
-            <option value="failed">Failed</option>
-            <option value="archived">Archived</option>
-          </select>
+          <Field label="工作区筛选">
+	          <select className="select" name="codex_thread_workspace_filter" onChange={(event) => onWorkspaceFilter(event.target.value)} value={workspaceFilter}>
+              <option value="all">全部工作区</option>
+              {workspaces.map((workspace) => (
+                <option key={workspace.id} value={workspace.id}>
+                  {workspace.label || workspace.pathSummary || workspace.id}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="状态筛选">
+	          <select className="select" name="codex_thread_status_filter" onChange={(event) => onStatusFilter(event.target.value)} value={statusFilter}>
+              <option value="all">全部状态</option>
+              <option value="idle">Idle</option>
+              <option value="running">Running</option>
+              <option value="needs_approval">Approval</option>
+              <option value="queued">Queued</option>
+              <option value="failed">Failed</option>
+              <option value="archived">Archived</option>
+            </select>
+          </Field>
         </div>
-        <CheckLabel
-          checked={includeArchived}
-          onChange={(checked) => onIncludeArchived(checked)}
-          size="xs"
-        >
-          显示已归档会话
-        </CheckLabel>
-        {threads.length ? (
+        <details className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] px-2 py-1.5">
+          <summary className="cursor-pointer text-xs text-[var(--muted-strong)]">筛选和归档</summary>
+          <div className="mt-2 grid gap-2">
+            <CheckLabel
+              checked={includeArchived}
+              onChange={(checked) => onIncludeArchived(checked)}
+              size="xs"
+            >
+              显示已归档会话
+            </CheckLabel>
+          </div>
+        </details>
+        {loading ? (
+          <ThreadListSkeleton />
+        ) : threads.length ? (
           <div className="grid min-w-0 gap-1">
             {pinned.length ? <span className="muted px-1 text-xs">置顶</span> : null}
             {pinned.map((thread) => (
@@ -149,6 +266,23 @@ export function ThreadList({
         )}
       </div>
     </section>
+  );
+}
+
+function ThreadListSkeleton() {
+  return (
+    <div aria-label="正在加载会话列表" className="grid gap-2">
+      {Array.from({ length: 4 }).map((_, index) => (
+        <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-2" key={index}>
+          <div className="h-3 w-3/4 animate-pulse rounded bg-[var(--line)]" />
+          <div className="mt-2 h-2 w-1/2 animate-pulse rounded bg-[var(--line)]" />
+          <div className="mt-2 flex gap-2">
+            <span className="h-5 w-12 animate-pulse rounded bg-[var(--line)]" />
+            <span className="h-5 w-16 animate-pulse rounded bg-[var(--line)]" />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -173,11 +307,11 @@ export function ComposerEmptyState({ workspaces, onCreate }: { workspaces: Codex
                 ))}
               </select>
               <Button tone="primary" onClick={() => workspaceId && onCreate(workspaceId)}>
-                新对话
+                新建
               </Button>
             </div>
           ) : (
-            <p className="muted mt-4 text-sm">请先在工作区标签登记一个工作区。</p>
+            <p className="muted mt-4 text-sm">请先通过右上角“项目”登记一个工作区。</p>
           )}
         </div>
       </div>

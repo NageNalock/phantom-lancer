@@ -8,6 +8,42 @@ import { defaultImageSettings, defaultImageStorageSettings, formatDate, imageAss
 import type { AppliedImagePrompt, AssetKind, AssetRef, ImageLibraryScope, ImageMode, ImagePromptDraft, ImageSettingsDraft, ImagesTab, ImageStorageSettingsDraft, MediaAsset, MediaGenerationJob, MediaMode, MediaProviderSettingsDraft, MediaType, ModelCapability, ProviderID, VideoMode } from "../types";
 import { ASPECT_OPTIONS, DURATION_PRESETS, GROK_MODEL_OPTIONS, IMAGE_MODES, MEDIA_TYPES, PROVIDERS, RESOLUTION_OPTIONS, VIDEO_MODES } from "../types";
 
+function assetRefKey(ref: AssetRef): string {
+  return `${ref.kind}:${ref.id}`;
+}
+
+function sameAssetRef(a: AssetRef, b: AssetRef): boolean {
+  return a.kind === b.kind && a.id === b.id;
+}
+
+function imageFilesFromClipboard(data: DataTransfer | null): File[] {
+  if (!data) return [];
+  const directFiles = Array.from(data.files || []).filter((file) => file.type.startsWith("image/"));
+  if (directFiles.length) return directFiles.map((file, index) => normalizeClipboardImageFile(file, index));
+  const itemFiles = Array.from(data.items || [])
+    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+    .map((item) => item.getAsFile())
+    .filter(Boolean) as File[];
+  return itemFiles.map((file, index) => normalizeClipboardImageFile(file, index));
+}
+
+function normalizeClipboardImageFile(file: File, index: number): File {
+  const hasUsableName = Boolean(file.name && file.name !== "image.png" && file.name !== "image");
+  if (hasUsableName) return file;
+  const extension = imageExtensionFromMime(file.type);
+  return new File([file], `clipboard-reference-${Date.now()}-${index + 1}.${extension}`, {
+    type: file.type || "image/png",
+    lastModified: Date.now(),
+  });
+}
+
+function imageExtensionFromMime(type: string): string {
+  if (type.includes("jpeg") || type.includes("jpg")) return "jpg";
+  if (type.includes("webp")) return "webp";
+  if (type.includes("gif")) return "gif";
+  return "png";
+}
+
 export function ImagesTabs({ active, hrefFor, onChange }: { active: ImagesTab; hrefFor?: (tab: ImagesTab) => string; onChange: (tab: ImagesTab) => void }) {
   const tabs: Array<{ id: ImagesTab; label: string }> = [
     { id: "generate", label: "生成" },
@@ -29,6 +65,7 @@ export function GeneratePanel({
   keyframeRefs = [],
   latestJob,
   libraryAssets = [],
+  libraryImageAssetRef,
   libraryImage,
   libraryMediaAssets = [],
   mediaJobs,
@@ -44,6 +81,8 @@ export function GeneratePanel({
   onMediaTypeChange,
   onOpenCurrentJobInHistory,
   onOpenPromptLibrary,
+  onOpenResourceLibrary,
+  onApplyReferenceRefs,
   onProviderChange,
   onResubmit,
   onSaveAsPreset,
@@ -65,6 +104,7 @@ export function GeneratePanel({
   keyframeRefs?: AssetRef[];
   latestJob?: ImageGenerationJob;
   libraryAssets?: ImageAsset[];
+  libraryImageAssetRef?: AssetRef;
   libraryImage?: ImageAsset;
   libraryMediaAssets?: MediaAsset[];
   mediaJobs: MediaGenerationJob[];
@@ -80,6 +120,8 @@ export function GeneratePanel({
   onMediaTypeChange?: (t: MediaType) => void;
   onOpenCurrentJobInHistory?: () => void;
   onOpenPromptLibrary?: () => void;
+  onOpenResourceLibrary?: () => void;
+  onApplyReferenceRefs?: (refs: AssetRef[], context: { mediaType: MediaType; mode: MediaMode }) => void;
   onProviderChange?: (p: ProviderID) => void;
    onResubmit?: () => void;
    onSaveAsPreset?: (form: ImagePromptFormState) => void;
@@ -116,6 +158,9 @@ export function GeneratePanel({
   const [fps, setFps] = useState(24);
   const [seed, setSeed] = useState<number | "">("");
   const [lastAppliedPromptTitle, setLastAppliedPromptTitle] = useState("");
+  const [referencePickerOpen, setReferencePickerOpen] = useState(false);
+  const [referenceUploadFiles, setReferenceUploadFiles] = useState<Record<number, File>>({});
+  const [referencePasteMessage, setReferencePasteMessage] = useState("");
 
   function resolveAssetRef(ref: AssetRef): ImageAsset | MediaAsset | undefined {
     if (ref.kind === "legacy") return libraryAssets.find((a) => a.id === ref.id);
@@ -123,7 +168,8 @@ export function GeneratePanel({
   }
   function assetURL(asset: ImageAsset | MediaAsset | undefined): string {
     if (!asset) return "";
-    return "downloadUrl" in asset ? (asset.downloadUrl || asset.url || "") : (asset as ImageAsset).url || "";
+    if ("mediaType" in asset) return mediaContentURL(asset as MediaAsset);
+    return (asset as ImageAsset).downloadUrl || (asset as ImageAsset).url || "";
   }
   function assetTitleFromRef(ref: AssetRef): string {
     const a = resolveAssetRef(ref);
@@ -134,6 +180,7 @@ export function GeneratePanel({
     if (isImage) {
       if (imageMode === "image_to_image") {
         if (multiEditRefs.length > 0) return [multiEditRefs[0]];
+        if (libraryImageAssetRef) return [libraryImageAssetRef];
         return [];
       }
       if (imageMode === "multi_image_edit") return multiEditRefs;
@@ -143,19 +190,35 @@ export function GeneratePanel({
     if (videoMode === "keyframes") return keyframeRefs;
     if (videoMode === "multi_image_video") return keyframeRefs.length > 0 ? keyframeRefs : multiEditRefs;
     return [];
-  }, [isImage, imageMode, videoMode, multiEditRefs, keyframeRefs, videoReferenceRef]);
+  }, [isImage, imageMode, videoMode, multiEditRefs, libraryImageAssetRef, keyframeRefs, videoReferenceRef]);
 
   const selectedCapability = capabilities.find((c) => c.model === model && c.mediaType === mediaType);
   const maxImageCount = selectedCapability?.parameters.maxN || (isAgnes ? 1 : 10);
-  const referenceSlots = isImage
+  const baseReferenceSlots = isImage
     ? imageMode === "text_to_image" ? 0 : imageMode === "image_to_image" ? 1 : 3
     : videoMode === "text_to_video" ? 0 : videoMode === "image_to_video" ? 1 : videoMode === "keyframes" ? 6 : 3;
+  const capabilityMaxReferences = selectedCapability?.maxReferences && selectedCapability.maxReferences > 0
+    ? selectedCapability.maxReferences
+    : baseReferenceSlots;
+  const referenceSlots = baseReferenceSlots > 0 ? Math.min(baseReferenceSlots, capabilityMaxReferences) : 0;
   const slotMinCount = useMemo(() => {
     if (referenceSlots <= 1) return referenceSlots;
-    if (isImage && imageMode === "multi_image_edit") return 2;
-    if (isVideo && (videoMode === "keyframes" || videoMode === "multi_image_video")) return 2;
-    return 1;
-  }, [referenceSlots, isImage, imageMode, isVideo, videoMode]);
+    const modelMin = selectedCapability?.minReferences && selectedCapability.minReferences > 0
+      ? Math.min(selectedCapability.minReferences, referenceSlots)
+      : 0;
+    if (isImage && imageMode === "multi_image_edit") return Math.max(2, modelMin);
+    if (isVideo && (videoMode === "keyframes" || videoMode === "multi_image_video")) return Math.max(2, modelMin);
+    return Math.max(1, modelMin);
+  }, [referenceSlots, selectedCapability, isImage, imageMode, isVideo, videoMode]);
+  const effectiveSlotRefs = useMemo(() => slotRefs.slice(0, referenceSlots), [slotRefs, referenceSlots]);
+  const referenceMode = isImage ? imageMode : videoMode;
+  const referenceUploadEntries = useMemo(() => {
+    return Object.entries(referenceUploadFiles)
+      .map(([slot, file]) => ({ slot: Number(slot), file }))
+      .filter(({ slot, file }) => Boolean(file) && slot > effectiveSlotRefs.length && slot <= referenceSlots)
+      .sort((a, b) => a.slot - b.slot);
+  }, [referenceUploadFiles, effectiveSlotRefs.length, referenceSlots]);
+  const referenceFilledCount = effectiveSlotRefs.length + referenceUploadEntries.length;
   const selectedDurationPreset = DURATION_PRESETS.find((d) => Number(d.id.replace(/\D/g, "")) === videoDuration) || DURATION_PRESETS.find((d) => d.id === "5s");
   const videoFrameCount = selectedDurationPreset?.frames || 121;
   const videoSize = videoSizeForAspectRatio(aspectRatio);
@@ -185,8 +248,8 @@ export function GeneratePanel({
   }, [capabilities, currentProvider, mediaType]);
 
   useEffect(() => {
-    if (libraryImage && isImage) setImageMode("image_to_image");
-  }, [libraryImage, isImage]);
+    if ((libraryImage || libraryImageAssetRef) && isImage) setImageMode("image_to_image");
+  }, [libraryImage, libraryImageAssetRef, isImage]);
 
   useEffect(() => {
     if (isImage) {
@@ -208,6 +271,37 @@ export function GeneratePanel({
   useEffect(() => {
     if (imageCount > maxImageCount) setImageCount(maxImageCount);
   }, [imageCount, maxImageCount]);
+
+  useEffect(() => {
+    setReferenceUploadFiles((prev) => {
+      let changed = false;
+      const next: Record<number, File> = {};
+      for (const [slotRaw, file] of Object.entries(prev)) {
+        const slot = Number(slotRaw);
+        if (slot > effectiveSlotRefs.length && slot <= referenceSlots) {
+          next[slot] = file;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [effectiveSlotRefs.length, referenceSlots]);
+
+  useEffect(() => {
+    if (!referencePasteMessage) return;
+    const timeout = window.setTimeout(() => setReferencePasteMessage(""), 3200);
+    return () => window.clearTimeout(timeout);
+  }, [referencePasteMessage]);
+
+  useEffect(() => {
+    if (referenceSlots <= 0 || referencePickerOpen) return;
+    const handlePaste = (event: ClipboardEvent) => {
+      if (applyReferenceClipboardData(event.clipboardData)) event.preventDefault();
+    };
+    document.addEventListener("paste", handlePaste);
+    return () => document.removeEventListener("paste", handlePaste);
+  }, [referenceSlots, referencePickerOpen, effectiveSlotRefs.length, referenceUploadFiles]);
 
   useEffect(() => {
     if (!appliedPrompt) return;
@@ -238,7 +332,90 @@ export function GeneratePanel({
     await onSubmit(new FormData(event.currentTarget));
   }
 
+  function clearReferenceRefs() {
+    onClearMultiEditRefs?.();
+    onClearKeyframeRefs?.();
+    onClearVideoReferenceRef?.();
+    onClearLibraryImage?.();
+    setReferenceUploadFiles({});
+  }
+
+  function removeReferenceRefAtIndex(index: number, ref: AssetRef) {
+    if (isImage) {
+      if (imageMode === "multi_image_edit") {
+        onRemoveMultiEditRefAtIndex?.(index);
+        return;
+      }
+      const multiIndex = multiEditRefs.findIndex((item) => sameAssetRef(item, ref));
+      if (multiIndex >= 0) {
+        onRemoveMultiEditRefAtIndex?.(multiIndex);
+        return;
+      }
+      onClearLibraryImage?.();
+      return;
+    }
+
+    if (videoMode === "image_to_video") {
+      onClearVideoReferenceRef?.();
+      return;
+    }
+    const keyframeIndex = keyframeRefs.findIndex((item) => sameAssetRef(item, ref));
+    if (keyframeIndex >= 0) {
+      onRemoveKeyframeRefAtIndex?.(keyframeIndex);
+      return;
+    }
+    const multiIndex = multiEditRefs.findIndex((item) => sameAssetRef(item, ref));
+    if (multiIndex >= 0) onRemoveMultiEditRefAtIndex?.(multiIndex);
+  }
+
+  function setReferenceUploadFile(slot: number, file?: File) {
+    setReferenceUploadFiles((prev) => {
+      const next = { ...prev };
+      if (file) next[slot] = file;
+      else delete next[slot];
+      return next;
+    });
+  }
+
+  function availableReferenceUploadSlots(files = referenceUploadFiles): number[] {
+    const occupied = new Set(
+      Object.keys(files)
+        .map((slot) => Number(slot))
+        .filter((slot) => slot > effectiveSlotRefs.length && slot <= referenceSlots),
+    );
+    const slots: number[] = [];
+    for (let slot = effectiveSlotRefs.length + 1; slot <= referenceSlots; slot++) {
+      if (!occupied.has(slot)) slots.push(slot);
+    }
+    return slots;
+  }
+
+  function applyReferenceClipboardData(data: DataTransfer | null): boolean {
+    const files = imageFilesFromClipboard(data);
+    if (!files.length) return false;
+    const slots = availableReferenceUploadSlots();
+    if (!slots.length) {
+      setReferencePasteMessage("参考图槽位已满");
+      return true;
+    }
+    const accepted = files.slice(0, slots.length);
+    setReferenceUploadFiles((prev) => {
+      const next = { ...prev };
+      accepted.forEach((file, index) => {
+        next[slots[index]] = file;
+      });
+      return next;
+    });
+    setReferencePasteMessage(
+      accepted.length === files.length
+        ? `已加入 ${accepted.length} 张剪贴板图片`
+        : `已加入 ${accepted.length} 张剪贴板图片，剩余图片超过槽位上限`,
+    );
+    return true;
+  }
+
   return (
+    <>
     <div className="grid grid-cols-[minmax(0,1fr)_minmax(300px,0.85fr)] gap-4 max-xl:grid-cols-1">
       <Panel
         actions={
@@ -409,139 +586,101 @@ export function GeneratePanel({
           ) : null}
 
           {referenceSlots > 0 ? (
-            <section className="grid gap-3 card-soft">
-              <div className="flex items-center justify-between gap-3">
-                <strong className="text-sm">参考图</strong>
-                <div className="flex items-center gap-2">
-                  {slotRefs.length ? (
-                    <Button className="min-h-7 px-2 text-xs" onClick={() => {
-                      onClearMultiEditRefs?.();
-                      onClearKeyframeRefs?.();
-                      onClearVideoReferenceRef?.();
-                      onClearLibraryImage?.();
-                    }} type="button">
-                      清除所有参考
+            <section className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <strong className="text-sm">参考图</strong>
+                  <p className="muted mt-1 mb-0 text-xs">
+                    {referenceSlots === 1 ? "需要 1 张" : `需要 ${slotMinCount}-${referenceSlots} 张`} · 已选 {referenceFilledCount}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <Button className="min-h-7 px-2 text-xs" onClick={() => setReferencePickerOpen(true)} type="button">
+                    选择图片
+                  </Button>
+                  {referenceFilledCount ? (
+                    <Button className="min-h-7 px-2 text-xs" onClick={clearReferenceRefs} type="button">
+                      清除
                     </Button>
                   ) : null}
-                  <span className="muted text-xs">{referenceSlots === 1 ? "需要 1 张" : `需要 ${slotMinCount}-${referenceSlots} 张`} · 已选 {slotRefs.length}</span>
                 </div>
               </div>
 
-              {referenceSlots === 1 ? (
-                Array.from({ length: 1 }, (_, index) => {
-                  const ref = slotRefs[index];
-                  const resolvedAsset = ref ? resolveAssetRef(ref) : undefined;
-                  const fallbackImage = index === 0 && libraryImage && (
-                    (isImage && imageMode === "image_to_image") || (isVideo && videoMode === "image_to_video")
-                  );
-                  const displayAsset = resolvedAsset || (fallbackImage ? libraryImage : undefined) as ImageAsset | MediaAsset | undefined;
-                  const kind = ref ? ref.kind : (fallbackImage ? "legacy" : undefined);
-                  const bareId = ref ? ref.id : (index === 0 && fallbackImage ? libraryImage?.id : undefined);
-                  const assetIdWithKind = (kind && bareId) ? `${kind}:${bareId}` : bareId;
-                  const clearFn = ref ? (() => {
-                    if (isImage) {
-                      if (imageMode === "image_to_image" && multiEditRefs.length && multiEditRefs.some((r) => r.id === ref.id)) return () => onRemoveMultiEditRefAtIndex?.(0);
-                      return onClearLibraryImage;
-                    }
-                    return onClearVideoReferenceRef;
-                  })() : index === 0 ? onClearLibraryImage : undefined;
-                  return (
-                    <ReferenceSlot
-                      assetId={assetIdWithKind}
-                      displayAsset={displayAsset}
-                      index={index + 1}
-                      key={`slot-${index}`}
-                      onClear={clearFn}
-                    />
-                  );
-                })
-              ) : (
-                <div className="grid gap-3">
-                  {/* 已选参考缩略条 */}
-                  {slotRefs.length > 0 ? (
-                    <div className="flex flex-wrap gap-2 rounded-md border border-[var(--line)] bg-[var(--surface)] p-2">
-                      {Array.from({ length: referenceSlots }, (_, index) => {
-                        const ref = slotRefs[index];
-                        if (!ref) return null;
-                        const resolvedAsset = resolveAssetRef(ref);
-                        const thumb = assetURL(resolvedAsset);
-                        const title = assetTitleFromRef(ref);
-                        const clearFn = (() => {
-                          if (isImage) {
-                            if (imageMode === "multi_image_edit") return () => onRemoveMultiEditRefAtIndex?.(index);
-                            if (imageMode === "image_to_image" && multiEditRefs.some((r) => r.id === ref.id)) return () => onRemoveMultiEditRefAtIndex?.(0);
-                            return onClearLibraryImage;
-                          }
-                          if (videoMode === "keyframes") return () => onRemoveKeyframeRefAtIndex?.(index);
-                          if (keyframeRefs.some((r) => r.id === ref.id && r.kind === ref.kind)) return () => onRemoveKeyframeRefAtIndex?.(keyframeRefs.findIndex((r) => r.id === ref.id && r.kind === ref.kind));
-                          return () => onRemoveMultiEditRefAtIndex?.(multiEditRefs.findIndex((r) => r.id === ref.id && r.kind === ref.kind));
-                        })();
-                        const assetIdWithKind = `${ref.kind}:${ref.id}`;
-                        return (
-                          <div className="group flex items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--surface-soft)] p-1.5" key={`thumb-${index}-${ref.id}`}>
-                            <input name={`source_asset_${index + 1}`} type="hidden" value={assetIdWithKind} />
-                            {thumb ? (
-                              <img alt={title || ""} className="h-10 w-10 rounded border border-[var(--line)] object-cover" decoding="async" src={thumb} />
-                            ) : (
-                              <div className="grid h-10 w-10 place-items-center rounded border border-[var(--line)] text-[10px] text-[var(--muted)]">asset</div>
-                            )}
-                            <div className="grid min-w-0 max-w-[140px]">
-                              <span className="mono text-[11px] text-[var(--muted-strong)]">src {String(index + 1).padStart(2, "0")}</span>
-                              <span className="truncate text-xs">{title || ref.id.slice(0, 8)}</span>
-                            </div>
-                            {clearFn ? (
-                              <button className="rounded p-1 text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--danger)]" onClick={clearFn} title="移除" type="button">
-                                ×
-                              </button>
-                            ) : null}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : null}
+              {referencePasteMessage ? (
+                <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs text-[var(--muted-strong)]">
+                  {referencePasteMessage}
+                </div>
+              ) : null}
 
-                  {/* 空 slot 折叠区 */}
-                  <details className="rounded-md border border-[var(--line)] bg-[var(--surface)]">
-                    <summary className="flex cursor-pointer items-center justify-between gap-2 px-3 py-2 text-xs hover:bg-[var(--surface-soft)]">
-                      <span className="muted">
-                        {slotRefs.length < referenceSlots ? `还有 ${referenceSlots - slotRefs.length} 个空槽位 · 展开上传或粘贴 URL` : "所有槽位已填 · 展开调整"}
-                      </span>
-                      <span className="muted">▾</span>
-                    </summary>
-                    <div className="grid grid-cols-3 gap-1.5 border-t border-[var(--line)] p-2 max-lg:grid-cols-2 max-sm:grid-cols-1">
-                      {Array.from({ length: referenceSlots }, (_, index) => {
-                        const ref = slotRefs[index];
-                        const resolvedAsset = ref ? resolveAssetRef(ref) : undefined;
-                        const displayAsset = resolvedAsset;
-                        const kind = ref ? ref.kind : undefined;
-                        const bareId = ref ? ref.id : undefined;
-                        const assetIdWithKind = (kind && bareId) ? `${kind}:${bareId}` : bareId;
-                        const keyBase = ref ? `${ref.kind}-${ref.id}` : `slot-${index}`;
-                        const clearFn = ref ? (() => {
-                          if (isImage) {
-                            if (imageMode === "multi_image_edit") return () => onRemoveMultiEditRefAtIndex?.(index);
-                            if (imageMode === "image_to_image" && multiEditRefs.some((r) => r.id === ref.id)) return () => onRemoveMultiEditRefAtIndex?.(0);
-                            return onClearLibraryImage;
-                          }
-                          if (videoMode === "keyframes") return () => onRemoveKeyframeRefAtIndex?.(index);
-                          if (keyframeRefs.some((r) => r.id === ref.id && r.kind === ref.kind)) return () => onRemoveKeyframeRefAtIndex?.(keyframeRefs.findIndex((r) => r.id === ref.id && r.kind === ref.kind));
-                          return () => onRemoveMultiEditRefAtIndex?.(multiEditRefs.findIndex((r) => r.id === ref.id && r.kind === ref.kind));
-                        })() : undefined;
-                        return (
-                          <ReferenceSlot
-                            assetId={assetIdWithKind}
-                            compact
-                            displayAsset={displayAsset}
-                            index={index + 1}
-                            key={`expand-${index}-${keyBase}`}
-                            onClear={clearFn}
-                          />
-                        );
-                      })}
-                    </div>
-                  </details>
+              {referenceFilledCount > 0 ? (
+                <div className="flex flex-wrap gap-2 rounded-md border border-[var(--line)] bg-[var(--surface)] p-2">
+                  {effectiveSlotRefs.map((ref, index) => {
+                    const resolvedAsset = resolveAssetRef(ref);
+                    const thumb = assetURL(resolvedAsset);
+                    const title = assetTitleFromRef(ref);
+                    return (
+                      <div className="group flex min-w-0 items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--surface-soft)] p-1.5" key={`${ref.kind}-${ref.id}-${index}`}>
+                        <input name={`source_asset_${index + 1}`} type="hidden" value={assetRefKey(ref)} />
+                        {thumb ? (
+                          <img alt={title || ""} className="h-10 w-10 shrink-0 rounded border border-[var(--line)] object-cover" decoding="async" src={thumb} />
+                        ) : (
+                          <div className="grid h-10 w-10 shrink-0 place-items-center rounded border border-[var(--line)] text-[10px] text-[var(--muted)]">asset</div>
+                        )}
+                        <div className="grid min-w-0 max-w-[160px]">
+                          <span className="mono text-[11px] text-[var(--muted-strong)]">src {String(index + 1).padStart(2, "0")}</span>
+                          <span className="truncate text-xs">{title || ref.id.slice(0, 8)}</span>
+                        </div>
+                        <button className="rounded p-1 text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--danger)]" onClick={() => removeReferenceRefAtIndex(index, ref)} title="移除" type="button">
+                          ×
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {referenceUploadEntries.map(({ slot, file }) => (
+                    <ReferenceUploadChip
+                      file={file}
+                      key={`upload-${slot}-${file.name}-${file.lastModified}`}
+                      onClear={() => setReferenceUploadFile(slot)}
+                      slot={slot}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="grid min-h-16 place-items-center rounded-md border border-dashed border-[var(--line)] bg-[var(--surface)] px-3 py-4 text-center">
+                  <div>
+                    <strong className="block text-sm">还没有参考图</strong>
+                    <p className="muted mt-1 mb-0 text-xs">从图片库勾选，或展开手动上传 / URL。</p>
+                  </div>
                 </div>
               )}
+
+              <details className="rounded-md border border-[var(--line)] bg-[var(--surface)]">
+                <summary className="flex cursor-pointer items-center justify-between gap-2 px-3 py-2 text-xs hover:bg-[var(--surface-soft)]">
+                  <span className="muted">
+                    {effectiveSlotRefs.length < referenceSlots ? `手动上传或 URL · 剩余 ${Math.max(0, referenceSlots - referenceFilledCount)} 个槽位` : "手动上传或 URL · 当前槽位已满"}
+                  </span>
+                  <span className="muted">▾</span>
+                </summary>
+                <div className="grid grid-cols-3 gap-1.5 border-t border-[var(--line)] p-2 max-lg:grid-cols-2 max-sm:grid-cols-1">
+                  {effectiveSlotRefs.length < referenceSlots ? (
+                    Array.from({ length: referenceSlots - effectiveSlotRefs.length }, (_, offset) => {
+                      const slotIndex = effectiveSlotRefs.length + offset + 1;
+                      return (
+                        <ReferenceSlot
+                          compact
+                          index={slotIndex}
+                          key={`manual-slot-${slotIndex}`}
+                          onClearFile={referenceUploadFiles[slotIndex] ? () => setReferenceUploadFile(slotIndex) : undefined}
+                          onFiles={(files) => setReferenceUploadFile(slotIndex, files[0])}
+                          uploadFile={referenceUploadFiles[slotIndex]}
+                        />
+                      );
+                    })
+                  ) : (
+                    <p className="muted col-span-full m-0 px-1 py-2 text-xs">资源库参考图已占满当前模型槽位。移除一张后可手动补充 URL 或上传文件。</p>
+                  )}
+                </div>
+              </details>
             </section>
           ) : null}
 
@@ -568,7 +707,7 @@ export function GeneratePanel({
                 <span className="muted mr-1 text-xs">下一步：</span>
                 {onResubmit ? (
                   <Button className="min-h-7 px-2 text-xs" onClick={onResubmit} type="button">
-                    再次生成（同参数）
+                    恢复参数
                   </Button>
                 ) : null}
                 {currentMediaJob.mediaType === "image" && onUseCurrentAsReference ? (
@@ -595,7 +734,7 @@ export function GeneratePanel({
                 <span className="muted mr-1 text-xs">下一步：</span>
                 {onResubmit ? (
                   <Button className="min-h-7 px-2 text-xs" onClick={onResubmit} type="button">
-                    再次生成（同参数）
+                    恢复参数
                   </Button>
                 ) : null}
                 {onUseCurrentAsReference ? (
@@ -629,6 +768,24 @@ export function GeneratePanel({
         ) : null}
       </Panel>
     </div>
+    <ReferenceLibraryDrawer
+      assets={libraryAssets}
+      maxCount={referenceSlots}
+      mediaAssets={libraryMediaAssets}
+      mediaType={mediaType}
+      minCount={slotMinCount}
+      mode={referenceMode}
+      model={model}
+      onApply={(refs) => {
+        onApplyReferenceRefs?.(refs, { mediaType, mode: referenceMode });
+        setReferencePickerOpen(false);
+      }}
+      onClose={() => setReferencePickerOpen(false)}
+      onOpenLibrary={onOpenResourceLibrary}
+      open={referencePickerOpen}
+      selectedRefs={effectiveSlotRefs}
+    />
+    </>
   );
 }
 
@@ -707,8 +864,346 @@ function PromptInlinePicker({
   );
 }
 
-function ReferenceSlot({ compact, index, displayAsset, assetId, onClear }: { compact?: boolean; index: number; displayAsset?: ImageAsset | MediaAsset; assetId?: string; onClear?: () => void }) {
+function ReferenceLibraryDrawer({
+  assets,
+  maxCount,
+  mediaAssets,
+  mediaType,
+  minCount,
+  mode,
+  model,
+  onApply,
+  onClose,
+  onOpenLibrary,
+  open,
+  selectedRefs,
+}: {
+  assets: ImageAsset[];
+  maxCount: number;
+  mediaAssets: MediaAsset[];
+  mediaType: MediaType;
+  minCount: number;
+  mode: MediaMode;
+  model: string;
+  onApply: (refs: AssetRef[]) => void;
+  onClose: () => void;
+  onOpenLibrary?: () => void;
+  open: boolean;
+  selectedRefs: AssetRef[];
+}) {
+  const firstFieldRef = useRef<HTMLInputElement | null>(null);
+  const previousActiveRef = useRef<HTMLElement | null>(null);
+  const [query, setQuery] = useState("");
+  const [providerFilter, setProviderFilter] = useState<"all" | ProviderID>("all");
+  const [storageFilter, setStorageFilter] = useState<"all" | "local" | "s3" | "remote">("all");
+  const [sourceFilter, setSourceFilter] = useState<"all" | "generated" | "upload" | "source">("all");
+  const [privacyFilter, setPrivacyFilter] = useState<"all" | "private" | "public">("all");
+  const [sortOrder, setSortOrder] = useState<"newest" | "oldest" | "size">("newest");
+  const [draftRefs, setDraftRefs] = useState<AssetRef[]>([]);
+
+  useEffect(() => {
+    if (!open) return;
+    setDraftRefs(uniqueAssetRefs(selectedRefs).slice(0, maxCount));
+  }, [open, selectedRefs, maxCount]);
+
+  useEffect(() => {
+    if (!open) return;
+    previousActiveRef.current = document.activeElement as HTMLElement | null;
+    const raf = requestAnimationFrame(() => firstFieldRef.current?.focus());
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const drawer = document.querySelector<HTMLElement>("[data-drawer='reference-library']");
+      if (!drawer) return;
+      const focusables = drawer.querySelectorAll<HTMLElement>("a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])");
+      if (!focusables.length) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      cancelAnimationFrame(raf);
+      document.removeEventListener("keydown", handleKeyDown);
+      previousActiveRef.current?.focus?.();
+    };
+  }, [open, onClose]);
+
+  const imageItems = useMemo<AnyAsset[]>(() => {
+    const legacy: AnyAsset[] = (assets || [])
+      .filter((asset) => !asset.deletedAt)
+      .map((asset) => ({ kind: "legacy", data: asset }));
+    const media: AnyAsset[] = (mediaAssets || [])
+      .filter((asset) => asset.mediaType === "image" && !asset.deletedAt && asset.status !== "failed")
+      .map((asset) => ({ kind: "media", data: asset }));
+    return [...legacy, ...media];
+  }, [assets, mediaAssets]);
+
+  const filteredItems = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    const list = imageItems.filter((item) => {
+      if (needle && !anyAssetSearchText(item).includes(needle)) return false;
+      if (providerFilter !== "all" && anyAssetProvider(item) !== providerFilter) return false;
+      if (storageFilter !== "all") {
+        if (storageFilter === "local" && !anyAssetIsLocal(item)) return false;
+        if (storageFilter === "s3" && !anyAssetIsS3(item)) return false;
+        if (storageFilter === "remote" && !anyAssetIsRemote(item)) return false;
+      }
+      if (sourceFilter === "generated" && !anyAssetIsGenerated(item)) return false;
+      if (sourceFilter === "upload" && !anyAssetIsUpload(item)) return false;
+      if (sourceFilter === "source" && !anyAssetIsSource(item)) return false;
+      if (privacyFilter === "private" && !anyAssetIsPrivate(item)) return false;
+      if (privacyFilter === "public" && anyAssetIsPrivate(item)) return false;
+      return true;
+    });
+    return [...list].sort((a, b) => {
+      if (sortOrder === "oldest") return anyAssetCreatedAt(a).localeCompare(anyAssetCreatedAt(b));
+      if (sortOrder === "size") return anyAssetSizeBytes(b) - anyAssetSizeBytes(a);
+      return anyAssetCreatedAt(b).localeCompare(anyAssetCreatedAt(a));
+    });
+  }, [imageItems, query, providerFilter, storageFilter, sourceFilter, privacyFilter, sortOrder]);
+
+  const selectedKeys = useMemo(() => new Set(draftRefs.map(assetRefKey)), [draftRefs]);
+  const canApply = draftRefs.length >= minCount && draftRefs.length <= maxCount;
+  const selectionHint = draftRefs.length < minCount
+    ? `还需要 ${minCount - draftRefs.length} 张`
+    : draftRefs.length > maxCount
+      ? `超出 ${draftRefs.length - maxCount} 张`
+      : "可应用";
+
+  function toggleRef(ref: AssetRef) {
+    setDraftRefs((prev) => {
+      const exists = prev.some((item) => sameAssetRef(item, ref));
+      if (exists) return prev.filter((item) => !sameAssetRef(item, ref));
+      if (maxCount <= 1) return [ref];
+      if (prev.length >= maxCount) return prev;
+      return [...prev, ref];
+    });
+  }
+
+  if (!open) return null;
+
+  return (
+    <div aria-hidden={false} className="fixed inset-0 z-50">
+      <div aria-label="关闭参考图选择面板" className="absolute inset-0 bg-black/30" onClick={onClose} role="presentation" />
+      <aside
+        aria-describedby="reference-library-subtitle"
+        aria-label="选择参考图"
+        aria-modal="true"
+        className="absolute right-0 top-0 flex h-full w-full max-w-3xl flex-col border-l border-[var(--line)] bg-[var(--bg)] shadow-2xl"
+        data-drawer="reference-library"
+        role="dialog"
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-[var(--line)] p-4">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="m-0 text-sm font-semibold">选择参考图</h3>
+              <Pill>{mediaModeLabel(mode, mediaType)}</Pill>
+              <Pill>{draftRefs.length}/{maxCount}</Pill>
+            </div>
+            <p className="muted mt-1 mb-0 min-w-0 text-xs" id="reference-library-subtitle">
+              {model || "默认模型"} · {maxCount === 1 ? "单张参考图" : `模型允许 ${minCount}-${maxCount} 张参考图`}
+            </p>
+          </div>
+          <Button onClick={onClose}>关闭</Button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4">
+          <div className="grid gap-3">
+            <div className="grid grid-cols-[minmax(0,1fr)_160px_140px] gap-2 max-lg:grid-cols-1">
+              <Field label="过滤">
+                <input
+                  autoComplete="off"
+                  className="input"
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="搜索 prompt、文件名、模型或 job id"
+                  ref={firstFieldRef}
+                  value={query}
+                />
+              </Field>
+              <Field label="供应商">
+                <select className="select mono" onChange={(event) => setProviderFilter(event.target.value as "all" | ProviderID)} value={providerFilter}>
+                  <option value="all">全部</option>
+                  {PROVIDERS.map((provider) => (
+                    <option key={provider.id} value={provider.id}>{provider.label}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="排序">
+                <select className="select mono" onChange={(event) => setSortOrder(event.target.value as "newest" | "oldest" | "size")} value={sortOrder}>
+                  <option value="newest">最新</option>
+                  <option value="oldest">最早</option>
+                  <option value="size">大小</option>
+                </select>
+              </Field>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 max-lg:grid-cols-1">
+              <Field label="存储">
+                <select className="select mono" onChange={(event) => setStorageFilter(event.target.value as "all" | "local" | "s3" | "remote")} value={storageFilter}>
+                  <option value="all">全部</option>
+                  <option value="local">本地</option>
+                  <option value="s3">对象存储</option>
+                  <option value="remote">远程 URL</option>
+                </select>
+              </Field>
+              <Field label="来源">
+                <select className="select mono" onChange={(event) => setSourceFilter(event.target.value as "all" | "generated" | "upload" | "source")} value={sourceFilter}>
+                  <option value="all">全部</option>
+                  <option value="generated">生成结果</option>
+                  <option value="upload">上传</option>
+                  <option value="source">参考源图</option>
+                </select>
+              </Field>
+              <Field label="可见性">
+                <select className="select mono" onChange={(event) => setPrivacyFilter(event.target.value as "all" | "private" | "public")} value={privacyFilter}>
+                  <option value="all">全部</option>
+                  <option value="public">公开库</option>
+                  <option value="private">私密库</option>
+                </select>
+              </Field>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] px-3 py-2 text-xs">
+              <span className="muted">匹配 {filteredItems.length} 张图片</span>
+              <span className={canApply ? "text-[var(--good)]" : "text-[var(--warn)]"}>{selectionHint}</span>
+            </div>
+
+            {filteredItems.length ? (
+              <div className="grid gap-2">
+                {filteredItems.map((item) => {
+                  const ref: AssetRef = { kind: item.kind, id: anyAssetId(item) };
+                  const key = assetRefKey(ref);
+                  const checked = selectedKeys.has(key);
+                  const disabled = !checked && draftRefs.length >= maxCount;
+                  const title = referenceAnyAssetTitle(item);
+                  const thumb = referenceAnyAssetURL(item);
+                  const meta = [
+                    anyAssetProvider(item) || "unknown",
+                    imageStorageBackendLabel(anyAssetStorage(item)),
+                    anyAssetSizeBytes(item) ? formatBytes(anyAssetSizeBytes(item)) : "",
+                    anyAssetCreatedAt(item) ? formatDate(anyAssetCreatedAt(item)) : "",
+                  ].filter(Boolean).join(" · ");
+                  return (
+                    <label
+                      className={`grid cursor-pointer grid-cols-[auto_72px_minmax(0,1fr)] items-center gap-3 rounded-lg border p-2 text-left transition ${checked ? "border-[var(--accent)] bg-[var(--accent-soft)]" : "border-[var(--line)] bg-[var(--surface)] hover:bg-[var(--surface-soft)]"} ${disabled ? "opacity-55" : ""}`}
+                      key={key}
+                    >
+                      <input
+                        checked={checked}
+                        className="h-4 w-4 accent-[var(--accent)]"
+                        disabled={disabled}
+                        onChange={() => toggleRef(ref)}
+                        type="checkbox"
+                      />
+                      {thumb ? (
+                        <img alt={title || ""} className="aspect-square h-[72px] w-[72px] rounded-md border border-[var(--line)] object-cover" decoding="async" loading="lazy" src={thumb} />
+                      ) : (
+                        <div className="grid aspect-square h-[72px] w-[72px] place-items-center rounded-md border border-[var(--line)] text-xs text-[var(--muted)]">image</div>
+                      )}
+                      <div className="grid min-w-0 gap-1">
+                        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                          <span className="truncate text-sm font-medium">{title || anyAssetId(item)}</span>
+                          {anyAssetIsPrivate(item) ? <Pill tone="warn">私密</Pill> : null}
+                          <Pill>{referenceAnyAssetSourceLabel(item)}</Pill>
+                        </div>
+                        <p className="muted m-0 truncate text-xs">{meta || anyAssetId(item)}</p>
+                        <p className="mono muted m-0 truncate text-[11px]">{item.kind}:{anyAssetId(item)}</p>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+            ) : (
+              <EmptyState title="没有匹配图片" body="调整过滤条件，或进入资源库上传/管理图片资产。" />
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between gap-3 border-t border-[var(--line)] p-4">
+          <div className="grid gap-1 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] px-3 py-2 text-xs">
+            <div>已选 {draftRefs.length} / {maxCount}</div>
+            <div className="muted">{selectionHint}</div>
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            {onOpenLibrary ? (
+              <Button onClick={() => {
+                onClose();
+                onOpenLibrary();
+              }} type="button">
+                打开资源库
+              </Button>
+            ) : null}
+            <Button onClick={onClose} type="button">取消</Button>
+            <Button disabled={!canApply} onClick={() => onApply(draftRefs)} tone="primary" type="button">
+              应用参考图
+            </Button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function ReferenceUploadChip({ file, onClear, slot }: { file: File; onClear: () => void; slot: number }) {
+  const [previewURL, setPreviewURL] = useState("");
+
+  useEffect(() => {
+    const url = URL.createObjectURL(file);
+    setPreviewURL(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  return (
+    <div className="group flex min-w-0 items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--surface-soft)] p-1.5">
+      {previewURL ? (
+        <img alt={file.name || "upload"} className="h-10 w-10 shrink-0 rounded border border-[var(--line)] object-cover" decoding="async" src={previewURL} />
+      ) : (
+        <div className="grid h-10 w-10 shrink-0 place-items-center rounded border border-[var(--line)] text-[10px] text-[var(--muted)]">file</div>
+      )}
+      <div className="grid min-w-0 max-w-[160px]">
+        <span className="mono text-[11px] text-[var(--muted-strong)]">src {String(slot).padStart(2, "0")} · upload</span>
+        <span className="truncate text-xs">{file.name || "clipboard image"}</span>
+        <span className="muted text-[11px]">{formatBytes(file.size)}</span>
+      </div>
+      <button className="rounded p-1 text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--danger)]" onClick={onClear} title="移除" type="button">
+        ×
+      </button>
+    </div>
+  );
+}
+
+function ReferenceSlot({
+  compact,
+  index,
+  displayAsset,
+  assetId,
+  onClear,
+  onClearFile,
+  onFiles,
+  uploadFile,
+}: {
+  compact?: boolean;
+  index: number;
+  displayAsset?: ImageAsset | MediaAsset;
+  assetId?: string;
+  onClear?: () => void;
+  onClearFile?: () => void;
+  onFiles?: (files: File[]) => void;
+  uploadFile?: File;
+}) {
   const hasAsset = Boolean(displayAsset || assetId);
+  const hasUploadFile = Boolean(uploadFile);
   const asset = displayAsset;
   const assetUrl = asset ? ("downloadUrl" in asset ? (asset.downloadUrl || asset.url || "") : (asset as ImageAsset).url || "") : "";
   const assetH = asset ? ("height" in asset ? (asset as MediaAsset).height || (asset as ImageAsset).height || 512 : 512) : 512;
@@ -733,14 +1228,29 @@ function ReferenceSlot({ compact, index, displayAsset, assetId, onClear }: { com
           </div>
         </div>
       ) : null}
+      {hasUploadFile ? (
+        <div className="flex items-center justify-between gap-2 rounded-md border border-[var(--line)] bg-[var(--surface-soft)] px-2 py-1.5">
+          <span className="min-w-0 truncate text-xs">{uploadFile?.name || "clipboard image"}</span>
+          {onClearFile ? (
+            <Button className="min-h-6 px-1.5 text-[11px]" onClick={onClearFile} type="button">
+              移除
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
       <Field label="URL">
-        <input autoComplete="off" className="input mono" disabled={hasAsset} name={`image_url_${index}`} placeholder="https://example.com/image.png" spellCheck={false} type="url" />
+        <input autoComplete="off" className="input mono" disabled={hasAsset || hasUploadFile} name={`image_url_${index}`} placeholder="https://example.com/image.png" spellCheck={false} type="url" />
       </Field>
-      {compact ? null : (
-        <Field label="上传">
-          <ImageDropInput disabled={hasAsset} label="上传参考图" name={`image_file_${index}`} />
-        </Field>
-      )}
+      <Field label="上传">
+        <ImageDropInput
+          disabled={hasAsset}
+          file={uploadFile}
+          hint={compact ? "点击或拖拽图片" : "点击选择，或拖拽图片到这里"}
+          label="上传参考图"
+          name={`image_file_${index}`}
+          onFiles={onFiles}
+        />
+      </Field>
     </div>
   );
 }
@@ -1363,6 +1873,18 @@ function promptModelOptions(current: string, settings: ImageProviderSettings, me
 
 type AnyAsset = { kind: "legacy"; data: ImageAsset } | { kind: "media"; data: MediaAsset };
 
+function uniqueAssetRefs(refs: AssetRef[]): AssetRef[] {
+  const seen = new Set<string>();
+  const result: AssetRef[] = [];
+  for (const ref of refs) {
+    const key = assetRefKey(ref);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(ref);
+  }
+  return result;
+}
+
 function anyAssetId(a: AnyAsset): string {
   return a.kind === "legacy" ? (a.data.id ?? "") : (a.data.id ?? "");
 }
@@ -1434,6 +1956,24 @@ function anyAssetMode(a: AnyAsset, mediaJobs?: MediaGenerationJob[], legacyJobs?
     if (j) return j.mode || (a.data.mediaType === "video" ? "text_to_video" : "text_to_image");
   }
   return "";
+}
+
+function referenceAnyAssetTitle(a: AnyAsset): string {
+  if (a.kind === "legacy") return assetTitle(a.data);
+  return a.data.originalFilename || a.data.promptPreview || a.data.revisedPromptPreview || a.data.id;
+}
+
+function referenceAnyAssetURL(a: AnyAsset): string {
+  if (a.kind === "legacy") return a.data.downloadUrl || a.data.url || "";
+  return mediaContentURL(a.data);
+}
+
+function referenceAnyAssetSourceLabel(a: AnyAsset): string {
+  if (anyAssetIsGenerated(a)) return "生成";
+  if (anyAssetIsUpload(a)) return "上传";
+  if (anyAssetIsSource(a)) return "参考源";
+  const type = a.kind === "legacy" ? a.data.assetType : a.data.assetType;
+  return type || "图片";
 }
 
 export function LibraryPanel({
@@ -1631,7 +2171,7 @@ export function LibraryPanel({
       }
       const media = filteredMediaAssets.find((a) => a.id === id);
       if (media) {
-        urls.push(media.downloadUrl || media.url || "");
+        urls.push(mediaDownloadURL(media));
       }
     }
     const valid = urls.filter((u) => u.length > 0);
@@ -2414,7 +2954,7 @@ function ImageViewer({
             </Button>
             {showNav ? (
               <span className="muted mono min-w-0 truncate text-xs">{index + 1} / {assets.length}</span>
-            ) : <span className="muted mono text-xs">—</span>}
+            ) : <span className="muted mono text-xs">-</span>}
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
             <Button
@@ -2606,7 +3146,7 @@ function MediaAssetViewer({
             </Button>
             {showNav ? (
               <span className="muted mono min-w-0 truncate text-xs">{index + 1} / {assets.length}</span>
-            ) : <span className="muted mono text-xs">—</span>}
+            ) : <span className="muted mono text-xs">-</span>}
           </div>
            <div className="flex flex-wrap items-center justify-end gap-2">
               {!isVideo ? (
@@ -2804,15 +3344,67 @@ export function MediaProviderSettingsPanel({
   const [masked, setMasked] = useState(true);
   const busySaving = typeof busy === "string" && busy.startsWith("provider:");
   const busyTesting = typeof busy === "string" && busy.startsWith("provider-test:");
+  const [drafts, setDrafts] = useState<MediaProviderDraftMap>(() => buildMediaProviderDrafts(providers, legacyImageSettings));
+
+  useEffect(() => {
+    setDrafts(buildMediaProviderDrafts(providers, legacyImageSettings));
+  }, [
+    providers,
+    legacyImageSettings?.defaultModel,
+    legacyImageSettings?.defaultResponseFormat,
+    legacyImageSettings?.defaultResolution,
+    legacyImageSettings?.defaultAspectRatio,
+    legacyImageSettings?.historyRetention,
+  ]);
+
+  function updateDraft<Key extends keyof MediaProviderFormDraft>(provider: ProviderID, key: Key, value: MediaProviderFormDraft[Key]) {
+    setDrafts((current) => ({
+      ...current,
+      [provider]: {
+        ...current[provider],
+        [key]: value,
+      },
+    }));
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const nextDrafts = PROVIDERS.map((providerInfo): MediaProviderSettingsDraft => {
+      const draft = drafts[providerInfo.id];
+      const defaultImageParams =
+        providerInfo.id === "xai"
+          ? {
+              defaultResponseFormat: draft.defaultResponseFormat,
+              defaultResolution: draft.defaultResolution,
+              defaultAspectRatio: draft.defaultAspectRatio,
+              historyRetention: normalizeHistoryRetention(draft.historyRetention, legacyImageSettings?.historyRetention || 500),
+            }
+          : {};
+
+      return {
+        provider: providerInfo.id,
+        enabled: draft.enabled,
+        apiKey: draft.clearApiKey ? "" : draft.apiKey.trim(),
+        clearApiKey: draft.clearApiKey,
+        updateApiKey: draft.clearApiKey || draft.apiKey.trim().length > 0,
+        defaultImageModel: draft.defaultImageModel,
+        defaultVideoModel: draft.defaultVideoModel,
+        defaultImageParams,
+        defaultVideoParams: {},
+      };
+    });
+
+    await onSave(nextDrafts);
+  }
 
   return (
     <Panel
       actions={
         <div className="flex items-center gap-2">
-          <Button onClick={() => setMasked((m) => !m)} type="button">
+          <Button className="min-w-24" onClick={() => setMasked((m) => !m)} type="button">
             {masked ? "显示密钥" : "隐藏密钥"}
           </Button>
-          <Button disabled={busySaving} form="mediaProviderSettingsForm" tone="primary" type="submit">
+          <Button className="min-w-20" disabled={busySaving} form="mediaProviderSettingsForm" tone="primary" type="submit">
             {busySaving ? "保存中" : "保存"}
           </Button>
         </div>
@@ -2823,101 +3415,81 @@ export function MediaProviderSettingsPanel({
       <form
         className="grid gap-5"
         id="mediaProviderSettingsForm"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          const formData = new FormData(event.currentTarget);
-          const drafts: MediaProviderSettingsDraft[] = [];
-          for (const p of PROVIDERS) {
-            const apiKey = String(formData.get(`${p.id}:api_key`) || "");
-            const clearApiKey = String(formData.get(`${p.id}:clear_api_key`) || "") === "on";
-            const status = providers.find((s) => s.provider === p.id);
-             const defaultImageParams: Record<string, unknown> = {};
-             if (p.id === "xai") {
-               const fallbackFormat = legacyImageSettings?.defaultResponseFormat || "url";
-               const fallbackResolution = legacyImageSettings?.defaultResolution || "";
-               const fallbackAspect = legacyImageSettings?.defaultAspectRatio || "";
-               const fallbackRetention = legacyImageSettings?.historyRetention || 500;
-               const responseFormat = String(formData.get(`${p.id}:default_response_format`) || fallbackFormat);
-               const resolution = String(formData.get(`${p.id}:default_resolution`) || fallbackResolution);
-               const aspectRatio = String(formData.get(`${p.id}:default_aspect_ratio`) || fallbackAspect);
-               const retentionRaw = String(formData.get(`${p.id}:history_retention`) || String(fallbackRetention));
-               const retention = Number(retentionRaw);
-               defaultImageParams.defaultResponseFormat = responseFormat;
-               defaultImageParams.defaultResolution = resolution;
-               defaultImageParams.defaultAspectRatio = aspectRatio;
-               defaultImageParams.historyRetention = Number.isFinite(retention) && retention > 0 ? retention : fallbackRetention;
-             }
-            drafts.push({
-              provider: p.id,
-              enabled: status?.enabled ?? true,
-              apiKey,
-              clearApiKey,
-              updateApiKey: apiKey.length > 0 || clearApiKey,
-              defaultImageModel: String(formData.get(`${p.id}:default_image_model`) || status?.defaultImageModel || ""),
-              defaultVideoModel: String(formData.get(`${p.id}:default_video_model`) || status?.defaultVideoModel || ""),
-              defaultImageParams,
-              defaultVideoParams: {},
-            });
-          }
-          await onSave(drafts);
-        }}
+        onSubmit={(event) => void submit(event)}
       >
         {PROVIDERS.map((p) => {
           const status = providers.find((s) => s.provider === p.id);
           const caps = (models || []).filter((m) => m.provider === p.id);
-          const imageModels = caps.filter((m) => m.mediaType === "image").map((m) => m.model);
-          const videoModels = caps.filter((m) => m.mediaType === "video").map((m) => m.model);
+          const draft = drafts[p.id];
+          const imageModels = providerImageModelOptions(p.id, caps, draft.defaultImageModel);
+          const videoModels = providerVideoModelOptions(p.id, caps, draft.defaultVideoModel);
           const testingProvider = busyTesting ? busy.split(":")[1] : "";
           const isTesting = testingProvider === p.id;
           const configured = status?.hasApiKey;
           const hasError = status?.lastError;
 
           return (
-            <fieldset className="m-0 grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3" key={p.id}>
-              <legend className="flex items-center gap-2 px-1 text-sm">
-                <strong>{p.label}</strong>
-                <Pill tone={configured ? "good" : "neutral"}>
-                  {configured ? "已配置" : "未配置"}
-                </Pill>
-                <Pill>{p.id}</Pill>
-                <span className="ml-auto flex items-center gap-2">
-                  <span className="muted text-xs">会发起一次最小生成请求</span>
+            <fieldset className="m-0 grid min-w-0 gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3" key={p.id}>
+              <legend className="sr-only">{p.label}</legend>
+              <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-3">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <strong className="text-sm">{p.label}</strong>
+                  <Pill tone={configured ? "good" : "neutral"}>
+                    {configured ? "已配置" : "未配置"}
+                  </Pill>
+                  <Pill>{p.id}</Pill>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <span className="muted text-xs">最小生成请求</span>
                   <Button
-                    disabled={busySaving || isTesting || !configured}
+                    className="min-w-24"
+                    disabled={busySaving || isTesting || !configured || draft.clearApiKey}
                     onClick={() => void onTest?.(p.id)}
                     type="button"
                   >
-                    {isTesting ? "连接测试中" : "连接测试"}
+                    {isTesting ? "测试中" : "连接测试"}
                   </Button>
-                </span>
-              </legend>
+                </div>
+              </div>
 
               <input name={`${p.id}:provider`} readOnly type="hidden" value={p.id} />
 
-              <div className="grid grid-cols-2 gap-3 max-sm:grid-cols-1">
-                 <Field label="密钥" help={`${p.label} 的密钥；保存后始终以加密形式存储。`}>
-                  <div className="flex gap-2">
+              <div className="grid grid-cols-[minmax(0,1fr)_minmax(280px,0.7fr)] gap-3 max-lg:grid-cols-1">
+                <div className="grid gap-2">
+                  <label className="text-xs font-semibold text-[var(--muted-strong)]" htmlFor={`media-provider-${p.id}-api-key`}>密钥</label>
+                  <div className="grid grid-cols-[minmax(0,1fr)_112px] items-start gap-2 max-sm:grid-cols-1">
                     <input
                       autoComplete="off"
-                      className={`input mono flex-1 ${!configured ? "border-[rgba(237,141,21,0.45)]" : ""}`}
+                      className={`input mono ${!configured ? "border-[rgba(237,141,21,0.45)]" : ""}`}
+                      disabled={draft.clearApiKey}
+                      id={`media-provider-${p.id}-api-key`}
                       name={`${p.id}:api_key`}
+                      onChange={(event) => updateDraft(p.id, "apiKey", event.target.value)}
                       placeholder={configured && masked ? "••••••••••••" : `sk-${p.id}-...`}
+                      spellCheck={false}
                       type={masked ? "password" : "text"}
+                      value={draft.apiKey}
                     />
                     <CheckLabel
-                      checked={false}
+                      checked={draft.clearApiKey}
+                      className="min-h-9 rounded-lg border border-[var(--line)] bg-[var(--surface)] px-2"
                       onChange={(checked) => {
-                        const field = document.querySelector(`input[name="${p.id}:clear_api_key"][type="checkbox"]`) as HTMLInputElement | null;
-                        if (field) field.checked = checked;
+                        updateDraft(p.id, "clearApiKey", checked);
+                        if (checked) updateDraft(p.id, "apiKey", "");
                       }}
                     >
-                      清除
-                      <input name={`${p.id}:clear_api_key`} type="checkbox" />
+                      清除密钥
                     </CheckLabel>
                   </div>
-                </Field>
+                  <small className="muted text-xs">{p.label} 的密钥；留空表示不修改现有 key，保存后始终加密存储。</small>
+                </div>
                 <Field label="默认图片模型">
-                  <select className="select mono" defaultValue={status?.defaultImageModel || ""} name={`${p.id}:default_image_model`}>
+                  <select
+                    className="select mono"
+                    name={`${p.id}:default_image_model`}
+                    onChange={(event) => updateDraft(p.id, "defaultImageModel", event.target.value)}
+                    value={draft.defaultImageModel}
+                  >
                     {imageModels.length ? (
                       imageModels.map((m) => <option key={m} value={m}>{m}</option>)
                     ) : (
@@ -2926,7 +3498,13 @@ export function MediaProviderSettingsPanel({
                   </select>
                 </Field>
                 <Field label="默认视频模型">
-                  <select className="select mono" defaultValue={status?.defaultVideoModel || ""} name={`${p.id}:default_video_model`}>
+                  <select
+                    className="select mono"
+                    disabled={videoModels.length === 0}
+                    name={`${p.id}:default_video_model`}
+                    onChange={(event) => updateDraft(p.id, "defaultVideoModel", event.target.value)}
+                    value={draft.defaultVideoModel}
+                  >
                     {videoModels.length ? (
                       videoModels.map((m) => <option key={m} value={m}>{m}</option>)
                     ) : p.id === "agnes" ? (
@@ -2943,7 +3521,7 @@ export function MediaProviderSettingsPanel({
 
               {hasError ? (
                 <Notice tone="warn">
-                  上次连接测试：{status?.lastTestedAt ? `${formatDate(status.lastTestedAt)} ` : ""}{hasError}
+                  上次连接测试：{status?.lastTestedAt ? `${formatDate(status.lastTestedAt)} ` : ""}{compactProviderError(hasError)}
                 </Notice>
               ) : status?.lastTestedAt ? (
                 <Notice>
@@ -2951,42 +3529,66 @@ export function MediaProviderSettingsPanel({
                 </Notice>
               ) : null}
 
-               {p.id === "xai" ? (
-                 <div className="grid grid-cols-4 gap-3 border-t border-[var(--line)] pt-3 max-lg:grid-cols-2 max-md:grid-cols-1">
-                   <Field label="默认响应格式">
-                     <select className="select mono" defaultValue={legacyImageSettings?.defaultResponseFormat || "url"} name={`${p.id}:default_response_format`}>
-                       <option value="url">url</option>
-                       <option value="b64_json">b64_json</option>
-                     </select>
-                   </Field>
-                   <Field label="默认分辨率">
-                     <select className="select mono" defaultValue={legacyImageSettings?.defaultResolution || ""} name={`${p.id}:default_resolution`}>
-                       {RESOLUTION_OPTIONS.map((value) => (
-                         <option key={value || "default"} value={value}>
-                           {value || "默认"}
-                         </option>
-                       ))}
-                     </select>
-                   </Field>
-                   <Field label="默认比例">
-                     <select className="select mono" defaultValue={legacyImageSettings?.defaultAspectRatio || ""} name={`${p.id}:default_aspect_ratio`}>
-                       {ASPECT_OPTIONS.map((value) => (
-                         <option key={value || "default"} value={value}>
-                           {value || "默认"}
-                         </option>
-                       ))}
-                     </select>
-                   </Field>
-                   <Field label="历史保留条数">
-                     <input className="input mono" defaultValue={legacyImageSettings?.historyRetention || 500} max={2000} min={50} name={`${p.id}:history_retention`} type="number" />
-                   </Field>
-                 </div>
-               ) : null}
+              {p.id === "xai" ? (
+                <div className="grid grid-cols-4 gap-3 border-t border-[var(--line)] pt-3 max-lg:grid-cols-2 max-md:grid-cols-1">
+                  <Field label="默认响应格式">
+                    <select
+                      className="select mono"
+                      name={`${p.id}:default_response_format`}
+                      onChange={(event) => updateDraft(p.id, "defaultResponseFormat", event.target.value)}
+                      value={draft.defaultResponseFormat}
+                    >
+                      <option value="url">url</option>
+                      <option value="b64_json">b64_json</option>
+                    </select>
+                  </Field>
+                  <Field label="默认分辨率">
+                    <select
+                      className="select mono"
+                      name={`${p.id}:default_resolution`}
+                      onChange={(event) => updateDraft(p.id, "defaultResolution", event.target.value)}
+                      value={draft.defaultResolution}
+                    >
+                      {RESOLUTION_OPTIONS.map((value) => (
+                        <option key={value || "default"} value={value}>
+                          {value || "默认"}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="默认比例">
+                    <select
+                      className="select mono"
+                      name={`${p.id}:default_aspect_ratio`}
+                      onChange={(event) => updateDraft(p.id, "defaultAspectRatio", event.target.value)}
+                      value={draft.defaultAspectRatio}
+                    >
+                      {ASPECT_OPTIONS.map((value) => (
+                        <option key={value || "default"} value={value}>
+                          {value || "默认"}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="历史保留条数">
+                    <input
+                      className="input mono"
+                      max={2000}
+                      min={50}
+                      name={`${p.id}:history_retention`}
+                      onChange={(event) => updateDraft(p.id, "historyRetention", Number(event.target.value || 500))}
+                      type="number"
+                      value={draft.historyRetention}
+                    />
+                  </Field>
+                </div>
+              ) : null}
 
               {caps.length > 0 ? (
                 <details className="rounded-md border border-[var(--line)] bg-[var(--surface)]">
-                  <summary className="cursor-pointer px-3 py-2 text-xs text-[var(--muted-strong)]">
+                  <summary className="flex cursor-pointer items-center justify-between gap-2 px-3 py-2 text-xs text-[var(--muted-strong)]">
                     模型能力矩阵（{caps.length} 个）
+                    <span className="muted">展开</span>
                   </summary>
                   <ul className="grid max-h-40 gap-1 overflow-y-auto border-t border-[var(--line)] px-3 py-2 text-xs mono">
                     {caps.map((c) => (
@@ -3005,6 +3607,93 @@ export function MediaProviderSettingsPanel({
       </form>
     </Panel>
   );
+}
+
+type MediaProviderFormDraft = {
+  enabled: boolean;
+  apiKey: string;
+  clearApiKey: boolean;
+  defaultImageModel: string;
+  defaultVideoModel: string;
+  defaultResponseFormat: string;
+  defaultResolution: string;
+  defaultAspectRatio: string;
+  historyRetention: number;
+};
+
+type MediaProviderDraftMap = Record<ProviderID, MediaProviderFormDraft>;
+
+function buildMediaProviderDrafts(
+  providers: ProviderStatus[],
+  legacyImageSettings?: {
+    defaultModel?: string;
+    defaultResponseFormat?: string;
+    defaultResolution?: string;
+    defaultAspectRatio?: string;
+    historyRetention?: number;
+  },
+): MediaProviderDraftMap {
+  const next = {} as MediaProviderDraftMap;
+  for (const providerInfo of PROVIDERS) {
+    const status = providers.find((item) => item.provider === providerInfo.id);
+    const fallbackImageModel =
+      providerInfo.id === "xai"
+        ? legacyImageSettings?.defaultModel || GROK_MODEL_OPTIONS[0] || ""
+        : "";
+    next[providerInfo.id] = {
+      enabled: status?.enabled ?? true,
+      apiKey: "",
+      clearApiKey: false,
+      defaultImageModel: status?.defaultImageModel || fallbackImageModel,
+      defaultVideoModel: status?.defaultVideoModel || "",
+      defaultResponseFormat: legacyImageSettings?.defaultResponseFormat || "url",
+      defaultResolution: legacyImageSettings?.defaultResolution || "",
+      defaultAspectRatio: legacyImageSettings?.defaultAspectRatio || "",
+      historyRetention: normalizeHistoryRetention(legacyImageSettings?.historyRetention, 500),
+    };
+  }
+  return next;
+}
+
+function providerImageModelOptions(provider: ProviderID, capabilities: ModelCapability[], current: string): string[] {
+  const discovered = capabilities.filter((item) => item.mediaType === "image").map((item) => item.model);
+  const fallback = provider === "xai" ? GROK_MODEL_OPTIONS : [];
+  return uniqueModelOptions([current, ...discovered, ...fallback]);
+}
+
+function providerVideoModelOptions(provider: ProviderID, capabilities: ModelCapability[], current: string): string[] {
+  const discovered = capabilities.filter((item) => item.mediaType === "video").map((item) => item.model);
+  const fallback = provider === "agnes" ? ["agnes-video-v2.0", "agnes-video-v1.2"] : [];
+  return uniqueModelOptions([current, ...discovered, ...fallback]);
+}
+
+function uniqueModelOptions(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const normalized = String(value || "").trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function normalizeHistoryRetention(value: unknown, fallback: number): number {
+  const next = Number(value);
+  if (!Number.isFinite(next) || next <= 0) return fallback;
+  return Math.min(2000, Math.max(50, Math.round(next)));
+}
+
+function compactProviderError(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  const prefix = normalized.match(/^([^:{]+ failed):\s*/i)?.[0] || "";
+  const messageMatch = normalized.match(/"(?:error|message)"\s*:\s*"([^"]+)"/i);
+  if (messageMatch?.[1]) {
+    return `${prefix}${messageMatch[1]}`.trim();
+  }
+  if (normalized.length <= 96) return normalized;
+  return `${normalized.slice(0, 96)}...`;
 }
 
 export function ImageStorageSettingsPanel({
@@ -3189,7 +3878,7 @@ export function ImagesInspector({
             ["总资源", combinedCount],
             ["存储", imageStorageBackendLabel(storageSettings?.backend)],
             ["最近任务", last ? `${mediaModeLabel(last.mode, "image")} / ${imageJobStatusLabel(last.status)}` : "-"],
-            ["错误", status?.lastError || "-"],
+            ["错误", status?.lastError ? compactProviderError(status.lastError) : "-"],
           ]}
         />
       </Panel>
@@ -3230,11 +3919,11 @@ export function ImagesInspector({
                      <a
                        className="button min-h-8 px-2 text-xs"
                        download
-                       href={mediaAsset.downloadUrl || mediaAsset.url || ""}
+                       href={mediaDownloadURL(mediaAsset)}
                      >
                        下载
                      </a>
-                     <a className="button min-h-8 px-2 text-xs" href={mediaAsset.url || mediaAsset.downloadUrl || ""} rel="noreferrer" target="_blank">
+                     <a className="button min-h-8 px-2 text-xs" href={mediaContentURL(mediaAsset)} rel="noreferrer" target="_blank">
                        打开
                      </a>
                    </>
@@ -3321,7 +4010,7 @@ export function ImagesInspector({
               ["最近模式", last ? mediaModeLabel(last.mode, "image") : "-"],
               ["最近状态", last ? imageJobStatusLabel(last.status) : "-"],
               ["最近模型", last?.model || "-"],
-              ["最近错误", status?.lastError || last?.errorMessage || "-"],
+              ["最近错误", status?.lastError ? compactProviderError(status.lastError) : last?.errorMessage ? compactProviderError(last.errorMessage) : "-"],
             ]}
           />
         </Panel>
@@ -3506,8 +4195,13 @@ function MediaJobCard({ job, libraryMediaAssets = [], onCopyParams, onOpenAsset,
       ) : null}
       {(onRetry || onRestore || onCopyParams || onSaveAsPreset) ? (
         <div className="flex flex-wrap gap-2 border-t border-[var(--line)] pt-2">
-          {(onRetry || onRestore) && job.status !== "queued" && job.status !== "running" && job.status !== "provider_queued" ? (
-            <Button className="min-h-7 px-2 text-xs" onClick={() => (onRetry || onRestore)!(job)} type="button">
+          {onRetry && job.status !== "queued" && job.status !== "running" && job.status !== "provider_queued" ? (
+            <Button className="min-h-7 px-2 text-xs" onClick={() => onRetry(job)} type="button">
+              重试
+            </Button>
+          ) : null}
+          {onRestore && job.status !== "queued" && job.status !== "running" && job.status !== "provider_queued" ? (
+            <Button className="min-h-7 px-2 text-xs" onClick={() => onRestore(job)} type="button">
               恢复参数
             </Button>
           ) : null}
@@ -3628,8 +4322,13 @@ function JobCard({ job, onCopyParams, onRetry, onRestore, onSaveAsPreset, onUseO
        ) : null}
        {(onRetry || onRestore || onCopyParams || onSaveAsPreset) ? (
          <div className="flex flex-wrap gap-2 border-t border-[var(--line)] pt-2">
-           {(onRetry || onRestore) && job.status !== "queued" && job.status !== "running" ? (
-             <Button className="min-h-7 px-2 text-xs" onClick={() => (onRetry || onRestore)!(job)} type="button">
+           {onRetry && job.status !== "queued" && job.status !== "running" ? (
+             <Button className="min-h-7 px-2 text-xs" onClick={() => onRetry(job)} type="button">
+               重试
+             </Button>
+           ) : null}
+           {onRestore && job.status !== "queued" && job.status !== "running" ? (
+             <Button className="min-h-7 px-2 text-xs" onClick={() => onRestore(job)} type="button">
                恢复参数
              </Button>
            ) : null}
@@ -3662,6 +4361,14 @@ function assetTitle(asset: ImageAsset): string {
 
 function assetDownloadURL(asset: ImageAsset): string {
   return asset.downloadUrl || `/api/images/library/assets/${encodeURIComponent(asset.id)}/download`;
+}
+
+function mediaContentURL(asset: MediaAsset): string {
+  return `/api/images/media-assets/${encodeURIComponent(asset.id)}/content`;
+}
+
+function mediaDownloadURL(asset: MediaAsset): string {
+  return `/api/images/media-assets/${encodeURIComponent(asset.id)}/download`;
 }
 
 function objectStorageEnabled(settings?: ImageStorageSettings): boolean {

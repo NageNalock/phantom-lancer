@@ -639,6 +639,13 @@ export interface CodexThread {
   kind?: string;
   background?: boolean;
   backgroundSource?: string;
+  executionMode?: string;
+  worktreeSummary?: string;
+  baseBranch?: string;
+  branchName?: string;
+  worktreeStatus?: string;
+  mergeStatus?: string;
+  discardedAt?: string;
   model?: string;
   sandboxMode?: string;
   approvalPolicy?: string;
@@ -648,6 +655,19 @@ export interface CodexThread {
   lastError?: string;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface CodexWorktreeStatus {
+  threadId?: string;
+  executionMode?: string;
+  worktreeSummary?: string;
+  baseBranch?: string;
+  branchName?: string;
+  worktreeStatus?: string;
+  mergeStatus?: string;
+  dirtyStatus?: string;
+  discardedAt?: string;
+  lastError?: string;
 }
 
 export interface CodexTurn {
@@ -693,7 +713,7 @@ export interface CodexApproval {
   createdAt?: string;
 }
 
-interface CodexAttachment {
+export interface CodexAttachment {
   id: string;
   filename?: string;
   contentType?: string;

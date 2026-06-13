@@ -1,4 +1,5 @@
 import { Children, cloneElement, forwardRef, isValidElement, useEffect, useId, useRef, useState } from "react";
+import { CaretDown } from "@phosphor-icons/react";
 import type { ButtonHTMLAttributes, DragEvent, KeyboardEvent, MouseEvent as ReactMouseEvent, ReactElement, ReactNode } from "react";
 import type { Tone } from "../app/types";
 import { shouldHandleQueryLinkClick } from "../hooks/useQueryParamState";
@@ -216,6 +217,7 @@ function fieldNameFromLabel(label: string): string {
 export function ImageDropInput({
   accept = "image/png,image/jpeg,image/webp,image/gif",
   disabled = false,
+  file,
   hint = "点击选择，或拖拽图片到这里",
   label = "上传图片",
   name,
@@ -224,6 +226,7 @@ export function ImageDropInput({
 }: {
   accept?: string;
   disabled?: boolean;
+  file?: File;
   hint?: string;
   label?: string;
   name?: string;
@@ -257,6 +260,15 @@ export function ImageDropInput({
   function openFilePicker() {
     if (!disabled) inputRef.current?.click();
   }
+
+  useEffect(() => {
+    if (file) {
+      setFiles([file]);
+      return;
+    }
+    if (inputRef.current) inputRef.current.value = "";
+    setFileName("");
+  }, [file]);
 
   return (
     <div
@@ -615,22 +627,7 @@ export function CollapsibleSection({
           <span className="font-medium text-sm">{title}</span>
           {subtitle ? <span className="text-xs text-[var(--muted)]">{subtitle}</span> : null}
         </div>
-        <svg
-          className="collapsible-caret text-[var(--muted)] shrink-0 transition-transform duration-200"
-          height="16"
-          viewBox="0 0 24 24"
-          width="16"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          <path
-            d="M6 9l6 6 6-6"
-            fill="none"
-            stroke="currentColor"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth="2"
-          />
-        </svg>
+        <CaretDown aria-hidden className="collapsible-caret shrink-0 text-[var(--muted)] transition-transform duration-200" size={16} weight="regular" />
       </summary>
       <div className="grid gap-4 border-t border-[var(--line)] px-3 py-3">
         {children}

@@ -226,6 +226,14 @@ func (s *Server) handleCreateMediaGenerationMultipart(w http.ResponseWriter, r *
 		})
 	}
 	if provider == imagegen.ProviderXAI && mediaType == imagegen.MediaTypeImage {
+		if err := s.requireUnlockedForPrivateMediaSources(r, ctx, req.Sources); err != nil {
+			if strings.Contains(err.Error(), "锁定") {
+				writeError(w, http.StatusForbidden, "private_asset_locked", err.Error())
+			} else {
+				writeError(w, http.StatusBadRequest, "media_source_invalid", err.Error())
+			}
+			return
+		}
 		job, err := s.images.CreateJob(r.Context(), imagegen.ImagineRequest{
 			Provider:       provider,
 			Mode:           req.Mode,
@@ -832,64 +840,125 @@ func serveMediaAssetContent(w http.ResponseWriter, r *http.Request, asset storag
 func (s *Server) requireUnlockedForPrivateMediaSources(r *http.Request, ctx sessionContext, sources []mediaGenerationSource) error {
 	unlocked := false
 	unlockedChecked := false
-	for _, src := range sources {
-		assetID := mediaSourceAssetID(src)
-		if assetID == "" {
-			continue
+	requireUnlocked := func() error {
+		if !unlockedChecked {
+			unlocked, _ = s.privateImages.IsUnlocked(ctx.Session.ID, time.Now())
+			unlockedChecked = true
 		}
+		if !unlocked {
+			return errors.New("私密资产已锁定，请先解锁")
+		}
+		return nil
+	}
+	checkMedia := func(assetID string) (bool, error) {
 		mediaAsset, err := s.images.GetMediaAsset(r.Context(), assetID)
-		if err == nil {
-			if mediaAsset.MediaType != string(imagegen.MediaTypeImage) {
-				return errors.New("只能使用图片资产作为参考图")
+		if err != nil {
+			if isMediaAssetNotFound(err) {
+				return false, nil
 			}
-			if mediaAsset.Private {
-				if !unlockedChecked {
-					unlocked, _ = s.privateImages.IsUnlocked(ctx.Session.ID, time.Now())
-					unlockedChecked = true
-				}
-				if !unlocked {
-					return errors.New("私密资产已锁定，请先解锁")
-				}
+			return false, err
+		}
+		if mediaAsset.MediaType != string(imagegen.MediaTypeImage) {
+			return true, errors.New("只能使用图片资产作为参考图")
+		}
+		if mediaAsset.Private {
+			if err := requireUnlocked(); err != nil {
+				return true, err
 			}
-			continue
 		}
-		if !errors.Is(err, storage.ErrNotFound) {
-			return err
-		}
+		return true, nil
+	}
+	checkLegacy := func(assetID string) (bool, error) {
 		imageAsset, err := s.store.GetImageAsset(r.Context(), assetID)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
-				return errors.New("未找到图片资产")
+				return false, nil
 			}
-			return err
+			return false, err
 		}
 		if imageAsset.Status == "deleted" {
-			return errors.New("图片资产已删除")
+			return true, errors.New("图片资产已删除")
 		}
 		if imageAsset.Private {
-			if !unlockedChecked {
-				unlocked, _ = s.privateImages.IsUnlocked(ctx.Session.ID, time.Now())
-				unlockedChecked = true
+			if err := requireUnlocked(); err != nil {
+				return true, err
 			}
-			if !unlocked {
-				return errors.New("私密资产已锁定，请先解锁")
+		}
+		return true, nil
+	}
+	for _, src := range sources {
+		kind, assetID := mediaSourceAssetRef(src)
+		if assetID == "" {
+			continue
+		}
+		found := false
+		var err error
+		switch kind {
+		case "media":
+			found, err = checkMedia(assetID)
+			if err != nil {
+				return err
 			}
+			if !found {
+				found, err = checkLegacy(assetID)
+			}
+		case "legacy":
+			found, err = checkLegacy(assetID)
+			if err != nil {
+				return err
+			}
+			if !found {
+				found, err = checkMedia(assetID)
+			}
+		default:
+			found, err = checkMedia(assetID)
+			if err != nil {
+				return err
+			}
+			if !found {
+				found, err = checkLegacy(assetID)
+			}
+		}
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errors.New("未找到图片资产")
 		}
 	}
 	return nil
 }
 
-func mediaSourceAssetID(src mediaGenerationSource) string {
-	if src.AssetID != "" {
-		return strings.TrimSpace(src.AssetID)
+func mediaSourceAssetRef(src mediaGenerationSource) (string, string) {
+	raw := strings.TrimSpace(src.AssetID)
+	if raw == "" {
+		urlValue := strings.TrimSpace(src.URL)
+		if strings.HasPrefix(urlValue, "asset:") {
+			raw = strings.TrimSpace(strings.TrimPrefix(urlValue, "asset:"))
+		} else if src.Type == "asset" || src.Type == "library_asset" {
+			raw = urlValue
+		}
 	}
-	if strings.HasPrefix(src.URL, "asset:") {
-		return strings.TrimSpace(strings.TrimPrefix(src.URL, "asset:"))
+	if raw == "" {
+		return "", ""
 	}
-	if src.Type == "asset" || src.Type == "library_asset" {
-		return strings.TrimSpace(src.URL)
+	if strings.HasPrefix(raw, "asset:") {
+		raw = strings.TrimSpace(strings.TrimPrefix(raw, "asset:"))
 	}
-	return ""
+	if idx := strings.Index(raw, ":"); idx > 0 {
+		prefix := raw[:idx]
+		if prefix == "legacy" || prefix == "media" {
+			return prefix, strings.TrimSpace(raw[idx+1:])
+		}
+	}
+	return "", raw
+}
+
+func isMediaAssetNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, storage.ErrNotFound) || strings.Contains(err.Error(), "media_asset_not_found")
 }
 
 func intParam(raw string, def int) int {

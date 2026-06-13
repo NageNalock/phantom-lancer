@@ -9,7 +9,6 @@ import { CODEX_STREAM_EVENTS, parseCodexStreamEvent, shouldRefreshThread, stream
 import type { CodexStreamState } from "../codexStream";
 import { ConversationTranscript } from "../ConversationTranscript";
 import { buildChatTranscript, mergeCodexEvent } from "../ChatWorkspace/transcript";
-import { ThreadP1Panels } from "../ThreadP1Panels";
 import { shouldDeriveConversationTitle, titleFromPrompt } from "../threadTitle";
 import { AppServerStrip } from "./AppServerStrip";
 import { EventStream } from "./EventStream";
@@ -21,6 +20,8 @@ export function ThreadWorkspace({
   status,
   thread,
   workspaces,
+  draftPrompt,
+  onDraftConsumed,
   onStatusChange,
   onThreadChange,
   onThreadUpdated,
@@ -29,6 +30,8 @@ export function ThreadWorkspace({
   status?: CodexStatus;
   thread: CodexThread;
   workspaces: CodexWorkspace[];
+  draftPrompt?: string;
+  onDraftConsumed?: () => void;
   onStatusChange: () => void;
   onThreadChange: () => void;
   onThreadUpdated: (thread: CodexThread) => void;
@@ -47,8 +50,10 @@ export function ThreadWorkspace({
   const [steering, setSteering] = useState(false);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [streamState, setStreamState] = useState<CodexStreamState>("connecting");
+  const [draftNotice, setDraftNotice] = useState("");
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const attachmentsRef = useRef<ComposerAttachment[]>([]);
 
   const workspace = workspaces.find((item) => item.id === thread.workspaceId);
   const busy = thread.status === "running" || thread.status === "needs_approval" || thread.status === "queued";
@@ -59,6 +64,15 @@ export function ThreadWorkspace({
   const isChat = thread.kind === "chat";
   const workspaceWriteAllowed = !isChat && workspace?.trustState === "trusted";
   const entries = useMemo(() => buildChatTranscript(events, turns), [events, turns]);
+
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+  useEffect(() => () => {
+    attachmentsRef.current.forEach((item) => {
+      if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+    });
+  }, []);
 
   const loadEvents = useCallback(async () => {
     try {
@@ -142,6 +156,14 @@ export function ThreadWorkspace({
       return models.find((item) => item.isDefault)?.id || models[0]?.id || trimmed;
     });
   }, [models]);
+  useEffect(() => {
+    const nextDraft = draftPrompt?.trim() || "";
+    if (!nextDraft) return;
+    setPrompt((current) => current.trim() ? `${current.trimEnd()}\n\n${nextDraft}` : nextDraft);
+    setDraftNotice("来自 review / preview 的草稿已填入 composer，可编辑后发送。");
+    onDraftConsumed?.();
+    requestAnimationFrame(() => promptRef.current?.focus());
+  }, [draftPrompt, onDraftConsumed]);
 
   // Match Codex app-server clients: consume the thread event stream directly
   // and let item deltas update stable transcript entries.
@@ -173,19 +195,26 @@ export function ThreadWorkspace({
   }, [thread.id, loadThread, onThreadChange, onStatusChange]);
 
   async function uploadAttachment(file: File) {
+    const localId = `local-${crypto.randomUUID()}`;
+    const previewUrl = URL.createObjectURL(file);
+    setAttachments((current) => [...current, { id: localId, filename: file.name, sizeBytes: file.size, contentType: file.type, previewUrl, status: "uploading" }]);
     const form = new FormData();
     form.append("threadId", thread.id);
     form.append("file", file);
     try {
       const response = await actions.api<{ attachment: ComposerAttachment }>("/api/codex/attachments", { method: "POST", csrf: actions.csrf, body: form });
-      setAttachments((current) => [...current, { id: response.attachment.id, filename: response.attachment.filename }]);
+      setAttachments((current) => current.map((item) => item.id === localId ? { ...item, ...response.attachment, previewUrl, status: "ready", sizeBytes: response.attachment.sizeBytes || file.size, contentType: response.attachment.contentType || file.type } : item));
     } catch (error) {
+      setAttachments((current) => current.map((item) => item.id === localId ? { ...item, status: "failed", error: friendlyError(error) } : item));
       actions.setToast(friendlyError(error), "danger");
     }
   }
 
   async function removeAttachment(id: string) {
+    const target = attachments.find((item) => item.id === id);
+    if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
     setAttachments((current) => current.filter((item) => item.id !== id));
+    if (id.startsWith("local-")) return;
     try {
       await actions.api(`/api/codex/attachments/${id}`, { method: "DELETE", csrf: actions.csrf });
     } catch {
@@ -193,15 +222,24 @@ export function ThreadWorkspace({
     }
   }
 
+  function clearFailedAttachments() {
+    attachments.forEach((item) => {
+      if (item.status === "failed" && item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+    });
+    setAttachments((current) => current.filter((item) => item.status !== "failed"));
+  }
+
   async function submitTurn(path: string) {
-    if (!prompt.trim()) return;
+    const readyAttachmentIds = attachments.filter((item) => item.status !== "failed" && !item.id.startsWith("local-")).map((item) => item.id);
+    const turnPrompt = prompt.trim() || (readyAttachmentIds.length ? "Analyze this image." : "");
+    if (!turnPrompt) return;
     if (status?.appServer?.state === "running" && !model.trim()) {
       actions.setToast("请选择一个可用模型后再发送。", "danger");
       return;
     }
     setSending(true);
     try {
-      const nextTitle = shouldDeriveConversationTitle(titleDraft || thread.title) ? titleFromPrompt(prompt) : "";
+      const nextTitle = shouldDeriveConversationTitle(titleDraft || thread.title) ? titleFromPrompt(turnPrompt) : "";
       if (nextTitle) {
         setTitleDraft(nextTitle);
         onThreadUpdated({ ...thread, title: nextTitle });
@@ -209,10 +247,14 @@ export function ThreadWorkspace({
       const response = await actions.api<{ thread?: CodexThread }>(`/api/codex/threads/${thread.id}/${path}`, {
         method: "POST",
         csrf: actions.csrf,
-        body: { prompt: prompt.trim(), sandbox, approvalPolicy: approval, model: model.trim(), attachmentIds: attachments.map((item) => item.id) },
+        body: { prompt: turnPrompt, sandbox, approvalPolicy: approval, model: model.trim(), attachmentIds: readyAttachmentIds },
       });
       if (response.thread) onThreadUpdated(response.thread);
       setPrompt("");
+      setDraftNotice("");
+      attachments.forEach((item) => {
+        if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+      });
       setAttachments([]);
       await loadEvents();
       await loadThread();
@@ -248,6 +290,7 @@ export function ThreadWorkspace({
     try {
       await actions.api(`/api/codex/turns/${activeTurn.id}/steer`, { method: "POST", csrf: actions.csrf, body: { prompt: prompt.trim() } });
       setPrompt("");
+      setDraftNotice("");
       await loadEvents();
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");
@@ -311,7 +354,6 @@ export function ThreadWorkspace({
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
           <Pill tone={threadTone(thread.status)}>{codexThreadStatusLabel(thread.status)}</Pill>
-          <ThreadP1Panels actions={actions} thread={thread} onRefresh={loadEvents} />
         </div>
       </div>
       <div className="panel-body flex min-h-0 flex-1 flex-col gap-3">
@@ -327,6 +369,12 @@ export function ThreadWorkspace({
 
         <div className="sticky bottom-0 z-10 grid gap-3 border-t border-[var(--line)] bg-[var(--surface)] pt-3">
           {thread.lastError ? <Notice tone="danger">{thread.lastError}</Notice> : null}
+          {draftNotice ? (
+            <div className="flex items-center justify-between gap-2 rounded-lg border border-[rgba(207,77,16,0.22)] bg-[var(--accent-soft)] px-3 py-2 text-xs text-[var(--accent)]">
+              <span>{draftNotice}</span>
+              <button className="text-[var(--muted-strong)] hover:text-[var(--text)]" onClick={() => setDraftNotice("")} type="button">关闭</button>
+            </div>
+          ) : null}
           <Composer
             prompt={prompt}
             onPrompt={setPrompt}
@@ -346,6 +394,7 @@ export function ThreadWorkspace({
             attachments={attachments}
             onUpload={(file) => void uploadAttachment(file)}
             onRemoveAttachment={(id) => void removeAttachment(id)}
+            onClearFailedAttachments={clearFailedAttachments}
             busy={busy}
             interactive={interactive}
             hasActiveTurn={Boolean(activeTurn)}

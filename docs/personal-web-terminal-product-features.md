@@ -5,7 +5,7 @@
 
 Codex 和 Codex Gateway / OpenAI Gateway 是两个并列的独立能力域：
 
-- `Codex` 依赖部署机本地安装的 `codex` CLI，为 owner 提供接近 Codex 桌面客户端的会话、工作区、审批、事件恢复和诊断能力，详细范围以 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md) 为准。
+- `Codex` 依赖部署机本地安装的 `codex` CLI，为 owner 提供接近 Codex 桌面客户端的会话、工作区、审批、事件恢复和诊断能力，详细范围以 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md) 为准；当前 UI 改造优先遵循 [codex-desktop-like-web-client-plan.md](./codex-desktop-like-web-client-plan.md)，即默认进入像 Codex Desktop 一样写代码的三栏工作台，而不是管理台式多 tab 首页。
 - `Codex Gateway` 把 Codex/OpenAI 兼容能力暴露成远程 OpenAI 协议 API，详细范围以 [codex-openai-gateway-feature-design.md](./codex-openai-gateway-feature-design.md) 为准。
 
 旧版 Codex 客户端代码已移除，但 SQLite 中可能仍有残留旧表或旧事件。新版 Codex 模块必须使用新的表名前缀和兼容迁移策略，不复用旧实现假设。
@@ -366,7 +366,7 @@ flowchart TD
 
 目标：当部署机安装 `codex` CLI 时，为 owner 提供受控的 Web Codex 客户端能力。
 
-本模块是独立能力域，详细范围以 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md) 为准。
+本模块是独立能力域，详细范围以 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md) 为准；当前 Codex 页面体验以 [codex-desktop-like-web-client-plan.md](./codex-desktop-like-web-client-plan.md) 为实现优先级。
 
 功能：
 

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -68,10 +69,23 @@ export function RichMessage({ streaming, text }: { streaming?: boolean; text: st
 }
 
 function CodeBlock({ code, language }: { code: string; language: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copyCode() {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  }
   return (
     <div className="message-code-block">
       <div className="message-code-lang">
         <span>{language || "text"}</span>
+        <button className="message-code-copy" onClick={() => void copyCode()} type="button">
+          {copied ? "已复制" : "复制"}
+        </button>
       </div>
       <pre>
         <code dangerouslySetInnerHTML={{ __html: highlightedCode(code, language) }} />

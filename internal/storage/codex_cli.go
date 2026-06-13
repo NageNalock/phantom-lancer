@@ -61,6 +61,14 @@ type CodexCliThread struct {
 	Kind             string `json:"kind,omitempty"`
 	Background       bool   `json:"background"`
 	BackgroundSource string `json:"backgroundSource,omitempty"`
+	ExecutionMode    string `json:"executionMode,omitempty"`
+	WorktreePath     string `json:"-"`
+	WorktreeSummary  string `json:"worktreeSummary,omitempty"`
+	BaseBranch       string `json:"baseBranch,omitempty"`
+	BranchName       string `json:"branchName,omitempty"`
+	WorktreeStatus   string `json:"worktreeStatus,omitempty"`
+	MergeStatus      string `json:"mergeStatus,omitempty"`
+	DiscardedAt      string `json:"discardedAt,omitempty"`
 	Model            string `json:"model,omitempty"`
 	SandboxMode      string `json:"sandboxMode"`
 	ApprovalPolicy   string `json:"approvalPolicy"`
@@ -487,7 +495,7 @@ func (s *Store) DeleteCodexCliWorkspace(ctx context.Context, id string) error {
 
 // ---- threads ----
 
-const codexCliThreadColumns = `id, codex_thread_id, workspace_id, title, status, source_mode, kind, background, background_source, model, sandbox_mode, approval_policy, pinned, archived_at, last_turn_id, last_error, created_at, updated_at`
+const codexCliThreadColumns = `id, codex_thread_id, workspace_id, title, status, source_mode, kind, background, background_source, execution_mode, worktree_path, worktree_summary, base_branch, branch_name, worktree_status, merge_status, discarded_at, model, sandbox_mode, approval_policy, pinned, archived_at, last_turn_id, last_error, created_at, updated_at`
 
 func (s *Store) CreateCodexCliThread(ctx context.Context, thread CodexCliThread) (CodexCliThread, error) {
 	id, err := ids.New("cxth")
@@ -510,10 +518,13 @@ func (s *Store) CreateCodexCliThread(ctx context.Context, thread CodexCliThread)
 	if strings.TrimSpace(thread.Kind) == "" {
 		thread.Kind = "code"
 	}
+	if strings.TrimSpace(thread.ExecutionMode) == "" {
+		thread.ExecutionMode = "workspace"
+	}
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO codex_cli_threads (`+codexCliThreadColumns+`)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		thread.ID, thread.CodexThreadID, thread.WorkspaceID, thread.Title, thread.Status, thread.SourceMode, thread.Kind, boolInt(thread.Background), thread.BackgroundSource, thread.Model, thread.SandboxMode, thread.ApprovalPolicy, boolInt(thread.Pinned), thread.ArchivedAt, thread.LastTurnID, thread.LastError, thread.CreatedAt, thread.UpdatedAt)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		thread.ID, thread.CodexThreadID, thread.WorkspaceID, thread.Title, thread.Status, thread.SourceMode, thread.Kind, boolInt(thread.Background), thread.BackgroundSource, thread.ExecutionMode, thread.WorktreePath, thread.WorktreeSummary, thread.BaseBranch, thread.BranchName, thread.WorktreeStatus, thread.MergeStatus, thread.DiscardedAt, thread.Model, thread.SandboxMode, thread.ApprovalPolicy, boolInt(thread.Pinned), thread.ArchivedAt, thread.LastTurnID, thread.LastError, thread.CreatedAt, thread.UpdatedAt)
 	if err != nil {
 		return CodexCliThread{}, err
 	}
@@ -1301,8 +1312,8 @@ func scanCodexCliNotification(row workspaceScanner) (CodexCliNotification, error
 
 func (s *Store) SaveCodexCliThread(ctx context.Context, thread CodexCliThread) (CodexCliThread, error) {
 	_, err := s.db.ExecContext(ctx, `
-UPDATE codex_cli_threads SET codex_thread_id = ?, title = ?, status = ?, source_mode = ?, kind = ?, background = ?, background_source = ?, model = ?, sandbox_mode = ?, approval_policy = ?, pinned = ?, archived_at = ?, last_turn_id = ?, last_error = ?, updated_at = ? WHERE id = ?`,
-		thread.CodexThreadID, thread.Title, thread.Status, thread.SourceMode, thread.Kind, boolInt(thread.Background), thread.BackgroundSource, thread.Model, thread.SandboxMode, thread.ApprovalPolicy, boolInt(thread.Pinned), thread.ArchivedAt, thread.LastTurnID, thread.LastError, now(), thread.ID)
+UPDATE codex_cli_threads SET codex_thread_id = ?, title = ?, status = ?, source_mode = ?, kind = ?, background = ?, background_source = ?, execution_mode = ?, worktree_path = ?, worktree_summary = ?, base_branch = ?, branch_name = ?, worktree_status = ?, merge_status = ?, discarded_at = ?, model = ?, sandbox_mode = ?, approval_policy = ?, pinned = ?, archived_at = ?, last_turn_id = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+		thread.CodexThreadID, thread.Title, thread.Status, thread.SourceMode, thread.Kind, boolInt(thread.Background), thread.BackgroundSource, thread.ExecutionMode, thread.WorktreePath, thread.WorktreeSummary, thread.BaseBranch, thread.BranchName, thread.WorktreeStatus, thread.MergeStatus, thread.DiscardedAt, thread.Model, thread.SandboxMode, thread.ApprovalPolicy, boolInt(thread.Pinned), thread.ArchivedAt, thread.LastTurnID, thread.LastError, now(), thread.ID)
 	if err != nil {
 		return CodexCliThread{}, err
 	}
@@ -1945,12 +1956,15 @@ func scanCodexCliThread(row workspaceScanner) (CodexCliThread, error) {
 	var thread CodexCliThread
 	var pinned int
 	var background int
-	err := row.Scan(&thread.ID, &thread.CodexThreadID, &thread.WorkspaceID, &thread.Title, &thread.Status, &thread.SourceMode, &thread.Kind, &background, &thread.BackgroundSource, &thread.Model, &thread.SandboxMode, &thread.ApprovalPolicy, &pinned, &thread.ArchivedAt, &thread.LastTurnID, &thread.LastError, &thread.CreatedAt, &thread.UpdatedAt)
+	err := row.Scan(&thread.ID, &thread.CodexThreadID, &thread.WorkspaceID, &thread.Title, &thread.Status, &thread.SourceMode, &thread.Kind, &background, &thread.BackgroundSource, &thread.ExecutionMode, &thread.WorktreePath, &thread.WorktreeSummary, &thread.BaseBranch, &thread.BranchName, &thread.WorktreeStatus, &thread.MergeStatus, &thread.DiscardedAt, &thread.Model, &thread.SandboxMode, &thread.ApprovalPolicy, &pinned, &thread.ArchivedAt, &thread.LastTurnID, &thread.LastError, &thread.CreatedAt, &thread.UpdatedAt)
 	if err != nil {
 		return CodexCliThread{}, err
 	}
 	thread.Background = background == 1
 	thread.Pinned = pinned == 1
+	if thread.ExecutionMode == "" {
+		thread.ExecutionMode = "workspace"
+	}
 	return thread, nil
 }
 
