@@ -1,7 +1,7 @@
 # 个人全面 Web 终端产品功能文档
 
 文档日期：2026-06-07
-产品定位：面向个人使用的服务器 Web 控制台。它是一个长期演进的个人全面 Web 终端，用来在任何地方管理服务器上的自定义应用、命令执行、日志、文件、服务、自动化任务和 AI 代理能力。当前能力域包括控制台总览、Codex、Codex Gateway、日志中心、Images 图片生成、V2Ray 和全局设置。
+产品定位：面向个人使用的服务器 Web 控制台。它是一个长期演进的个人全面 Web 终端，用来在任何地方管理服务器上的自定义应用、命令执行、日志、文件、服务、自动化任务和 AI 代理能力。当前能力域包括控制台总览、Codex、Codex Gateway、日志中心、多媒体图片/视频生成、V2Ray 和全局设置。
 
 Codex 和 Codex Gateway / OpenAI Gateway 是两个并列的独立能力域：
 
@@ -26,7 +26,7 @@ Codex 和 Codex Gateway / OpenAI Gateway 是两个并列的独立能力域：
 - 提供个人服务器的统一 Web 操作入口。
 - 当部署机安装 `codex` CLI 时，通过 Codex 模块提供受控的 Web 会话客户端能力。
 - 通过 Codex Gateway 把本地 Codex/OpenAI 兼容能力暴露成可远程调用的 OpenAI 协议 API。
-- 集中查看服务和应用日志，提供 Images 图片生成和 V2Ray 管理能力。
+- 集中查看服务和应用日志，提供多媒体图片/视频生成和 V2Ray 管理能力。
 - 建立良好的权限管理系统，保护服务器路径、命令和密钥。
 - 提供 Quiet Agent Workbench / Quiet DevOps Control Plane 风格的前端体验：安静、克制、工程化、高效率。
 - 浏览器断开后，长任务仍可继续运行并恢复查看。
@@ -43,7 +43,7 @@ Codex 和 Codex Gateway / OpenAI Gateway 是两个并列的独立能力域：
 ## 3. 产品原则
 
 - **个人优先**：所有设计默认服务单个 owner，不引入组织、租户、团队、成员等复杂概念。
-- **能力可扩展**：Codex、Codex Gateway、Images、V2Ray、日志中心是独立模块，后续能力应作为独立模块或清晰子域加入。
+- **能力可扩展**：Codex、Codex Gateway、多媒体、V2Ray、日志中心是独立模块，后续能力应作为独立模块或清晰子域加入。
 - **默认安全**：任何能修改系统、删除数据、泄露密钥、访问外部网络的操作都必须经过明确的权限边界。
 - **上下文连续**：任务、日志、事件和配置变更都要可恢复。
 - **操作透明**：用户必须知道系统正在执行什么、影响什么资源。
@@ -65,7 +65,7 @@ Codex 和 Codex Gateway / OpenAI Gateway 是两个并列的独立能力域：
 6. 查看服务日志、应用日志和运行事件，定位异常。
 7. 浏览器刷新或断线后，重新进入同一个任务继续查看输出。
 8. 查看过去一段时间执行过哪些关键操作。
-9. 使用 Images 生成图片后，在图片库中查看、下载、删除之前生成的图片和上传参考图，并查看每张图片的模型、prompt、引用关系和存储位置。
+9. 使用多媒体模块生成图片或视频后，在资源库中查看、下载、删除之前生成的资源和上传参考图，并查看每个资源的模型、提示词、引用关系和存储位置。
 10. 配置并启停 V2Ray，查看运行状态和事件。
 
 ## 5. 产品模块地图
@@ -76,7 +76,7 @@ flowchart LR
   Console --> Codex["Codex CLI Client"]
   Console --> Gateway["Codex Gateway"]
   Console --> Logs["日志中心"]
-  Console --> Images["Images 图片生成/图片库"]
+  Console --> Media["多媒体 图片/视频生成/资源库"]
   Console --> V2Ray["V2Ray"]
   Console --> Settings["设置"]
   Console --> Apps["应用管理（预留）"]
@@ -87,7 +87,7 @@ flowchart LR
   Console --> Secrets["密钥/环境变量（预留）"]
 ```
 
-第一阶段完整落地 `Dashboard`、`Codex`、`Codex Gateway`、`Logs`、`Images`、`V2Ray`、`Settings`。`Codex` 和 `Codex Gateway` 是并列独立能力域，作为一级导航存在。其他模块先在产品文档中预留。
+第一阶段完整落地 `Dashboard`、`Codex`、`Codex Gateway`、`Logs`、`多媒体`、`V2Ray`、`Settings`。`Codex` 和 `Codex Gateway` 是并列独立能力域，作为一级导航存在。其他模块先在产品文档中预留。
 
 ## 6. 信息架构
 
@@ -98,7 +98,7 @@ flowchart LR
 - 当前服务器。
 - Codex CLI installed/auth/sandbox/app-server 摘要。
 - Gateway enabled / API key / active accounts 摘要。
-- Images 和 V2Ray 运行摘要。
+- 多媒体和 V2Ray 运行摘要。
 - 系统负载简要指标。
 
 ### 6.2 左侧主导航
@@ -107,7 +107,7 @@ flowchart LR
 - Codex。
 - Codex Gateway。
 - 日志。
-- Images。
+- 多媒体。
 - V2Ray。
 - 设置。
 
@@ -121,7 +121,7 @@ flowchart LR
 - Codex 会话、工作区、审批和诊断。
 - Gateway 账号、模型和请求日志。
 - 日志源列表和查看器。
-- Images 生成和图片库。
+- 多媒体生成和资源库。
 - V2Ray 配置和运行状态。
 
 ### 6.4 右侧上下文栏
@@ -134,20 +134,21 @@ flowchart LR
 - 资源消耗或运行指标。
 - Codex 当前会话的 workspace、权限、审批和运行诊断。
 
-### 6.5 Images 图片库
+### 6.5 多媒体生成与资源库
 
-Images 是独立能力域，不属于文件管理或通用设置。
+多媒体是独立能力域，不属于文件管理或通用设置。历史实现和 API/event 命名中可能仍保留 `images` 前缀，这是兼容旧数据、旧路由和旧事件的实现细节；面向用户的导航和文案使用“多媒体”。
 
 功能边界：
 
-- `Generate` 负责生成任务。
-- `Library` 负责管理图片资产，包含已生成图片、上传参考图和手动上传图片，支持内容去重、放大查看、下载、删除、归档到 S3、私密收藏夹、快捷用于图生图和右侧元数据 inspector。
-- `History` 负责按 generation job 查看调用记录、失败原因和参数摘要。
-- `Settings` 负责 xAI provider、默认参数和 Images 自己的图片存储设置。
+- `Generate` 负责图片、视频、多图编辑和关键帧生成任务。
+- `Library` 负责管理图片/视频资源资产，包含已生成资源、上传参考图和手动上传图片，支持内容去重、放大查看、播放、下载、删除、归档到对象存储、私密收藏夹、快捷用于图生图/图生视频/多图编辑/关键帧和右侧元数据 inspector。
+- `History` 负责按 generation job 查看调用记录、失败原因、参数摘要、输出资源和诊断入口。
+- `生成预设` 负责保存可复用的提示词、模型、模式和常用参数组合；默认不保存参考图引用，避免私密资源和历史资产被隐式复用。
+- `Settings` 负责 xAI / Agnes provider、默认参数和多媒体自己的资源存储设置。
 
-图片库默认使用本地保存；当 Images Settings 配置 S3 API 兼容对象存储后，生成结果、上传参考图和手动上传图应优先保存到对象存储，减少服务器本地磁盘长期占用。保存前应按内容 checksum 做去重，命中已有公开资产时复用，不重复写本地或对象存储。这里的 S3 表示协议兼容，可以是阿里云 OSS、腾讯云 COS、MinIO、R2 等兼容服务，不要求真实 AWS S3。已存在本地的图片资产应支持归档到 S3。S3 bucket 不要求公开读，读取和下载默认由后端代理完成。
+资源库默认使用本地保存；当多媒体 Settings 配置 S3 API 兼容对象存储或共享对象存储 profile 后，生成结果、上传参考图和手动上传图应优先保存到对象存储，减少服务器本地磁盘长期占用。保存前应按内容 checksum 做去重，命中已有公开资产时复用，不重复写本地或对象存储。这里的 S3 表示协议兼容，可以是阿里云 OSS、腾讯云 COS、MinIO、R2 等兼容服务，不要求真实 AWS S3。已存在本地的资源资产应支持归档到对象存储。bucket 不要求公开读，读取和下载默认由后端代理完成。
 
-图片库支持私密收藏夹：Owner 可以将任意图片资产设为私密，普通图片库默认隐藏私密图片；进入私密收藏夹必须重新输入 owner 登录密码，解锁只对当前 Web session 短期有效。详细设计见 [images-library-feature-design.md](./images-library-feature-design.md)。
+资源库支持私密收藏夹：Owner 可以将任意图片或视频资产设为私密，普通资源库默认隐藏私密资产；进入私密收藏夹必须重新输入 owner 登录密码，解锁只对当前 Web session 短期有效。详细设计见 [images-library-feature-design.md](./images-library-feature-design.md)。
 
 ## 7. 权限管理系统
 
@@ -306,7 +307,7 @@ flowchart TD
 - 登录和退出。
 - Codex workspace、thread、turn、审批和设置变更。
 - Gateway 配置和账号变更。
-- Images 生成和资产变更。
+- 多媒体生成和资产变更。
 - V2Ray 配置和控制。
 - 命令执行。
 - 审批决策。
@@ -705,7 +706,7 @@ flowchart TD
 - Codex CLI Client 基础：安装探测、app-server 定时检查和一键启动、workspace、thread、turn、事件恢复、审批和中断。
 - Codex Gateway public API、账号、模型和请求日志。
 - 日志中心源列表和只读 tail。
-- Images 图片生成和图片库。
+- 多媒体图片/视频生成和资源库。
 - V2Ray 配置和运行控制。
 - 实时事件展示。
 - 活动审计。
@@ -728,7 +729,7 @@ flowchart TD
 
 MVP 成功标准：
 
-- 不 SSH 到服务器，也能通过 Web 管理 Codex、Codex Gateway、日志、Images 和 V2Ray。
+- 不 SSH 到服务器，也能通过 Web 管理 Codex、Codex Gateway、日志、多媒体和 V2Ray。
 - 部署机安装并登录 `codex` CLI 后，owner 能在 Web 中创建、恢复和中断 Codex 会话，并处理审批。
 - 外部客户端能通过 Gateway 的 OpenAI 协议 API 调用本地能力。
 - 浏览器刷新后能恢复任务输出。
@@ -749,7 +750,7 @@ MVP 成功标准：
 
 - Codex CLI Client。
 - Codex Gateway。
-- Images 图片生成和图片库。
+- 多媒体图片/视频生成和资源库。
 - V2Ray 配置和运行控制。
 - 日志中心。
 

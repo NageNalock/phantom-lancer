@@ -154,17 +154,28 @@ func ValidatePrompt(prompt storage.ImagePrompt) error {
 	}
 	switch prompt.Mode {
 	case ModeTextToImage, ModeImageToImage, ModeMultiImageEdit:
+	case VideoModeTextToVideo, VideoModeImageToVideo, VideoModeMultiImageVideo, VideoModeKeyframes:
 	default:
 		return errors.New("prompt mode is invalid")
 	}
 	if prompt.Model != "" && !modelNamePattern.MatchString(prompt.Model) {
 		return errors.New("model name is invalid")
 	}
-	if !allowedAspectRatios[prompt.AspectRatio] {
-		return errors.New("aspect ratio is not supported")
-	}
-	if !allowedResolutions[prompt.Resolution] {
-		return errors.New("resolution is not supported")
+	switch prompt.Mode {
+	case VideoModeTextToVideo, VideoModeImageToVideo, VideoModeMultiImageVideo, VideoModeKeyframes:
+		if prompt.AspectRatio != "" && !allowedAspectRatios[prompt.AspectRatio] {
+			return errors.New("aspect ratio is not supported")
+		}
+		if prompt.Resolution != "" && !allowedResolutions[prompt.Resolution] {
+			return errors.New("resolution is not supported")
+		}
+	default:
+		if !allowedAspectRatios[prompt.AspectRatio] {
+			return errors.New("aspect ratio is not supported")
+		}
+		if !allowedResolutions[prompt.Resolution] {
+			return errors.New("resolution is not supported")
+		}
 	}
 	if prompt.ImageCount < 1 || prompt.ImageCount > 10 {
 		return errors.New("image count must be between 1 and 10")

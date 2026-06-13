@@ -20,21 +20,21 @@ Agnes 公开文档来源：
 
 ## 1. Design Read
 
-Reading this as: 个人服务器控制台里的 AI media generation 工作台扩展，面向单 owner 技术用户，必须延续现有 Images/Grok 的低噪音 job 流程、受控资产库、provider 设置和审计边界；视觉与交互采用 Quiet Agent Workbench / Quiet DevOps Control Plane 语言，而不是把 Agnes 文档站的品牌视觉、营销文案或模型 showcase 搬进控制台。
+Reading this as: 个人服务器控制台里的多媒体 AI generation 工作台扩展，面向单 owner 技术用户，必须延续现有 Images/Grok 的低噪音 job 流程、受控资产库、provider 设置和审计边界；视觉与交互采用 Quiet Agent Workbench / Quiet DevOps Control Plane 语言，而不是把 Agnes 文档站的品牌视觉、营销文案或模型 showcase 搬进控制台。
 
-本次接入不是重做 Images 模块，也不是新增一个脱离当前资产库的 Video App。正确方向是：保持现有 Grok 操作流程基本不变，把 Agnes 作为增量 provider 接入图片生成，并在同一个能力域下补齐视频生成、视频资产、视频历史和视频 provider 状态。UI 上应继续围绕 `Generate / Library / History / Settings` 展开，新增的图片/视频差异通过低噪音 segmented control、参数分组和 inspector 解释。
+本次接入不是新增一个脱离当前资产库的 Video App。正确方向是：保持现有 Grok 操作流程和旧 `images` API/event 兼容，把 Agnes 作为增量 provider 接入图片生成，并在同一个能力域下补齐视频生成、视频资产、视频历史和视频 provider 状态。用户可见能力域命名升级为“多媒体”，以准确覆盖图片、视频、多图编辑和关键帧；底层路由、表名和事件前缀可继续使用 `images` 以兼容旧数据、旧路由和旧集成。UI 上应继续围绕 `Generate / Library / History / Settings` 展开，新增的图片/视频差异通过低噪音 segmented control、参数分组和 inspector 解释。
 
 设计 pre-flight：
 
-- 保持 `Images` 一级导航，避免破坏旧入口、旧路由和用户肌肉记忆；视频能力作为 Images 能力域下的 media scope 扩展进入。
+- 用户可见一级导航使用“多媒体”；保留旧 `images` 路由/API/event 前缀作为兼容层，避免破坏旧入口、旧数据和用户已有链接。视频能力作为同一能力域下的 media scope 扩展进入。
 - 不做营销 hero、大插画、渐变背景、品牌色大面积铺陈或“模型广场”式卡片。
 - 主流程仍是：输入 prompt 和参数，选择参考图，创建异步 job，观察状态，保存结果到 Library，History 可追溯。
 - 所有新增状态、错误、资产、轮询和 provider 设置都必须可审计、可恢复、可清理。
-- Text 类 Agnes 模型本阶段明确不接入，不进入 Images provider catalog，也不暴露在 UI 模型选择里。
+- Text 类 Agnes 模型本阶段明确不接入，不进入多媒体 provider catalog，也不暴露在 UI 模型选择里。
 
 ## 2. 背景与目标
 
-当前 Images 模块以 xAI Grok Imagine 为 provider，已经支持：
+当前多媒体模块的历史实现以 xAI Grok Imagine 为 provider，已经支持：
 
 - 文生图、图生图、多图编辑。
 - URL、本地上传、Library asset 作为参考图。
@@ -52,7 +52,7 @@ Agnes 文档显示它不止有图片模型，还提供视频生成模型。接�
 目标：
 
 - 以 provider-aware 的方式接入 Agnes 图片模型，兼容当前 Grok 图片流程。
-- 在 Images 能力域内新增 Agnes 视频生成能力，交互尽量复用现有 job 流程。
+- 在多媒体能力域内新增 Agnes 视频生成能力，交互尽量复用现有 job 流程。
 - 保留已有 xAI/Grok 默认行为、旧 API、旧数据和旧资产访问路径。
 - 让后端从单 xAI client 逐步演进为 provider adapter/catalog，而不是一次性重构成过度抽象平台。
 - 新增数据结构必须可向后兼容，可迁移，可回退，不破坏旧 history/library。
@@ -89,12 +89,12 @@ Agnes 文档显示它不止有图片模型，还提供视频生成模型。接�
 ### 3.2 非目标
 
 - 本阶段不接入 Agnes Text 模型。
-- 不把 Images 改名为全新的全局 `Media` 一级导航。
+- 不新增脱离多媒体资源库的单独 `Video` 一级导航；图片、视频、生成预设、历史、资源库和设置必须保持在同一个多媒体能力域内。
 - 不新增公开视频分享页、视频作品集、社交相册或发布工作流。
 - 不支持视频编辑器、时间线剪辑、字幕轨、音频混合或转码工作台。
 - 不自动购买、检测或管理 Agnes 额度。
 - 不把 Agnes API Key、完整 prompt、完整远程 URL query、图片 base64、视频下载 URL query 写入日志或 audit。
-- 不把 Agnes provider 设置塞进通用 `Settings`；它仍属于 Images 模块。
+- 不把 Agnes provider 设置塞进通用 `Settings`；它属于多媒体模块自己的设置。
 
 ## 4. Agnes 模型与接口清单
 
@@ -173,13 +173,13 @@ Agnes 文档目录包含 Text、Image、Video 三组模型。当前阶段只纳�
 
 ### 5.3 视频不拆成孤岛
 
-视频能力应复用现有 Images 的概念：
+视频能力应复用现有多媒体/Images 兼容概念：
 
 - 同样是 generation job。
 - 同样有 sources 和 outputs。
 - 同样进入 Library。
 - 同样通过 events/SSE 或轮询展示进度。
-- 同样使用模块 Settings 管理 provider 和默认参数。
+- 同样使用多媒体模块 Settings 管理 provider 和默认参数。
 - 同样遵守本地/S3-compatible 存储策略。
 
 但视频资产和图片资产在物理处理上不同：
@@ -193,21 +193,21 @@ Agnes 文档目录包含 Text、Image、Video 三组模型。当前阶段只纳�
 
 ### 6.1 一级导航
 
-第一阶段保持一级导航为 `Images`。
+用户可见一级导航使用 `多媒体`，旧路由/API/event 前缀继续保留 `images`。
 
 理由：
 
-- 当前产品文档和实现已经把 Images 作为独立能力域。
-- 用户明确要求整体交互流程尽量与之前一致。
+- 当前能力已经覆盖图片、视频、多图编辑、关键帧、资源库、历史和生成预设，`多媒体` 比 `Images` 更准确。
+- 旧路由/API/event 前缀继续使用 `images`，可以保持旧入口、旧数据和旧集成兼容。
 - 直接新增 `Video` 一级导航会把 provider、prompt library、history、storage、asset library 拆散。
-- 直接改名 `Media` 会影响旧认知、文档和路由；可以后续在产品文案稳定后再评估。
+- 用户可见导航使用中文“多媒体”而不是营销化的 `AI Media Studio`，符合 Quiet Agent Workbench 风格。
 
 页面标题可以使用更包容但低噪音的表达，例如：
 
-- 导航：`Images`
-- 页面标题：`Images`
-- Generate 内 scope：`Image / Video`
-- Library 筛选：`Media type`
+- 导航：`多媒体`
+- 页面标题：`多媒体`
+- Generate 内 scope：`图片 / 视频`
+- Library 筛选：`媒体类型`
 
 不建议在主导航里写 `AI Media Studio`、`Creative Lab` 或类似营销化名称。
 
@@ -218,10 +218,10 @@ Agnes 文档目录包含 Text、Image、Video 三组模型。当前阶段只纳�
 - `Generate`：图片/视频生成入口。
 - `Library`：图片与视频资产库。
 - `History`：图片与视频 job 历史。
-- `Prompt Library`：继续保存 prompt 模板，后续可加 media/model tags。
+- `生成预设`：保存提示词、模型、模式、常用参数组合；默认不保存参考图引用。
 - `Settings`：xAI、Agnes、默认参数和存储设置。
 
-如果当前 UI 已经把 `Prompt Library` 作为 Generate 内部面板而非二级 tab，仍按现状保持，不为 Agnes 单独拆一级入口。
+不为 Agnes 或 Video 单独拆一级入口；复杂筛选、上传和批量操作应收敛到 popover、drawer 或 selection bar，避免挤占资源库主网格。
 
 ### 6.3 Generate 页面
 
@@ -335,7 +335,7 @@ History 详情：
 
 ### 6.6 Settings 页面
 
-Settings 仍属于 Images 模块。
+Settings 仍属于多媒体模块。
 
 建议分组：
 
@@ -347,7 +347,7 @@ Settings 仍属于 Images 模块。
   - image defaults。
   - video defaults。
 - `Storage`
-  - 当前 Images storage settings。
+  - 当前多媒体 storage settings。
   - 对象存储 profile 和 prefix。
   - fallback 策略。
 - `Retention`
@@ -1041,11 +1041,11 @@ Deprecated 模型处理：
 - 服务重启后未完成 video job 可恢复或安全 interrupted。
 - provider 失败、下载失败、存储失败都有可读错误和审计。
 
-### P2：Library 与 Prompt Library 打磨
+### P2：Library 与生成预设打磨
 
 - Library media type/provider/model 筛选。
 - 视频 viewer 体验完善。
-- Prompt Library 增加 media/model tags。
+- 生成预设增加 media/model tags。
 - 重试时自动带入原 provider/model/params。
 - Settings 默认视频参数。
 - Retention 和 cleanup 覆盖视频。
@@ -1103,10 +1103,9 @@ Deprecated 模型处理：
 
 建议从小而稳的路径开始：
 
-1. 保持 `Images` 一级域和旧 Grok flow 不变。
+1. 保持多媒体一级域和旧 Grok flow 兼容，旧 `images` 路由/API/event 前缀继续可用。
 2. 增加 provider/model capability catalog。
 3. 先接 Agnes Image，验证 payload 差异和 asset 保存链路。
 4. 再接 Agnes Video，使用同一 job/history/library 语言。
 5. 新数据结构 additive，旧数据只读兼容，不做破坏性迁移。
 6. UI 始终保持 Quiet Agent Workbench 风格，把复杂参数放进低噪音 advanced 区域。
-

@@ -1214,6 +1214,124 @@ CREATE TABLE IF NOT EXISTS object_storage_profiles (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_object_storage_profiles_created ON object_storage_profiles(created_at DESC);
+CREATE TABLE IF NOT EXISTS media_provider_settings (
+  provider TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  api_key TEXT NOT NULL DEFAULT '',
+  api_key_masked TEXT NOT NULL DEFAULT '',
+  default_image_model TEXT NOT NULL DEFAULT '',
+  default_video_model TEXT NOT NULL DEFAULT '',
+  default_image_params_json TEXT NOT NULL DEFAULT '{}',
+  default_video_params_json TEXT NOT NULL DEFAULT '{}',
+  last_tested_at TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS media_generation_jobs (
+  id TEXT PRIMARY KEY,
+  media_type TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  status TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  mode_label TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL,
+  endpoint TEXT NOT NULL DEFAULT '',
+  prompt TEXT NOT NULL,
+  parameters_json TEXT NOT NULL DEFAULT '{}',
+  source_count INTEGER NOT NULL DEFAULT 0,
+  output_count INTEGER NOT NULL DEFAULT 0,
+  provider_task_id TEXT NOT NULL DEFAULT '',
+  provider_video_id TEXT NOT NULL DEFAULT '',
+  provider_status TEXT NOT NULL DEFAULT '',
+  progress INTEGER NOT NULL DEFAULT 0,
+  usage_json TEXT NOT NULL DEFAULT '{}',
+  error_message TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  started_at TEXT NOT NULL DEFAULT '',
+  completed_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_media_generation_jobs_created ON media_generation_jobs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_generation_jobs_status ON media_generation_jobs(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_generation_jobs_media_type ON media_generation_jobs(media_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_generation_jobs_provider ON media_generation_jobs(provider, created_at DESC);
+CREATE TABLE IF NOT EXISTS media_generation_sources (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  asset_id TEXT NOT NULL DEFAULT '',
+  slot INTEGER NOT NULL,
+  source_type TEXT NOT NULL,
+  source_label TEXT NOT NULL DEFAULT '',
+  source_role TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  url_redacted TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_media_generation_sources_job ON media_generation_sources(job_id, slot);
+CREATE TABLE IF NOT EXISTS media_generation_outputs (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  asset_id TEXT NOT NULL DEFAULT '',
+  slot INTEGER NOT NULL,
+  media_type TEXT NOT NULL,
+  remote_url_redacted TEXT NOT NULL DEFAULT '',
+  local_name TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT '',
+  revised_prompt TEXT NOT NULL DEFAULT '',
+  storage TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_media_generation_outputs_job ON media_generation_outputs(job_id, slot);
+CREATE TABLE IF NOT EXISTS media_assets (
+  id TEXT PRIMARY KEY,
+  media_type TEXT NOT NULL,
+  asset_type TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'available',
+  private INTEGER NOT NULL DEFAULT 0,
+  provider TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  job_id TEXT NOT NULL DEFAULT '',
+  source_role TEXT NOT NULL DEFAULT '',
+  slot INTEGER NOT NULL DEFAULT 0,
+  prompt_preview TEXT NOT NULL DEFAULT '',
+  revised_prompt_preview TEXT NOT NULL DEFAULT '',
+  original_filename TEXT NOT NULL DEFAULT '',
+  original_source_redacted TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT '',
+  extension TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  width INTEGER NOT NULL DEFAULT 0,
+  height INTEGER NOT NULL DEFAULT 0,
+  duration_seconds REAL NOT NULL DEFAULT 0,
+  frame_rate INTEGER NOT NULL DEFAULT 0,
+  frame_count INTEGER NOT NULL DEFAULT 0,
+  checksum_sha256 TEXT NOT NULL DEFAULT '',
+  local_name TEXT NOT NULL DEFAULT '',
+  storage_backend TEXT NOT NULL DEFAULT 'local',
+  object_storage_profile_id TEXT NOT NULL DEFAULT '',
+  s3_bucket TEXT NOT NULL DEFAULT '',
+  s3_region TEXT NOT NULL DEFAULT '',
+  s3_endpoint_label TEXT NOT NULL DEFAULT '',
+  s3_key TEXT NOT NULL DEFAULT '',
+  s3_etag TEXT NOT NULL DEFAULT '',
+  private_at TEXT NOT NULL DEFAULT '',
+  archived_at TEXT NOT NULL DEFAULT '',
+  deleted_at TEXT NOT NULL DEFAULT '',
+  deleted_reason TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_media_assets_created ON media_assets(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_assets_media_type_created ON media_assets(media_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_assets_storage_created ON media_assets(storage_backend, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_assets_status_created ON media_assets(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_assets_private_created ON media_assets(private, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_assets_job ON media_assets(job_id, slot);
+CREATE INDEX IF NOT EXISTS idx_media_assets_checksum ON media_assets(checksum_sha256);
 `)
 	if err != nil {
 		return err

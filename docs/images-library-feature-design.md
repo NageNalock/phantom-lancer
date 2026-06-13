@@ -1,4 +1,4 @@
-# Images 图片库与对象存储功能设计
+# 多媒体资源库与对象存储功能设计
 
 文档日期：2026-06-05  
 关联文档：
@@ -9,22 +9,22 @@
 
 ## 1. Design Read
 
-Reading this as: 个人服务器控制台里的 Images 图片资产管理工作台，面向单 owner 技术用户，采用 Quiet Agent Workbench / Quiet DevOps Control Plane 语言，强调生成结果可检索、可恢复、可删除、可下载、存储位置可解释，以及低噪音的右侧元数据 inspector。
+Reading this as: 个人服务器控制台里的多媒体资源资产管理工作台，面向单 owner 技术用户，采用 Quiet Agent Workbench / Quiet DevOps Control Plane 语言，强调生成结果可检索、可恢复、可删除、可下载、存储位置可解释，以及低噪音的右侧元数据 inspector。
 
-图片库不是营销式作品集、社交相册或瀑布流灵感墙。它应服务 Images 模块的生成、排查、归档和清理任务：左侧保持全局导航，Images 内部使用二级 tab；主工作区展示可扫描的图片资产；右侧 inspector 展示当前选中图片的元数据、存储位置和风险状态。
+资源库不是营销式作品集、社交相册或瀑布流灵感墙。它应服务多媒体模块的生成、排查、归档和清理任务：左侧保持全局导航，多媒体内部使用二级 tab；主工作区展示可扫描的图片/视频资产；右侧 inspector 展示当前选中资源的元数据、存储位置和风险状态。底层 API、表名和事件前缀可以继续使用 `images` 以兼容历史实现。
 
 ## 2. 背景与目标
 
-当前 Images 模块已经支持 Grok Imagine generation job、历史记录和本地图片资产读取，但历史视图以 job 为中心，不能高效管理每次生成出来的图片，也不能复查用户上传过的参考图。随着生成次数增加，Owner 需要一个以图片资产为中心的图片库：
+当前多媒体模块已经支持 Grok Imagine generation job、Agnes 图片/视频任务、历史记录和本地/对象存储资产读取。历史视图以 job 为中心，不能高效管理每次生成出来的资源，也不能复查用户上传过的参考图。随着生成次数增加，Owner 需要一个以资源资产为中心的资源库：
 
-- 从所有历史 job 中查看已生成图片。
+- 从所有历史 job 中查看已生成图片和视频。
 - 查看用户上传过的参考图，并知道它们被哪些 job 使用过。
-- 点击图片放大查看，并在同一上下文里看到元数据。
-- 下载图片。
-- 删除不需要的图片，释放本地磁盘或对象存储空间。
-- 知道每张图片来自哪个 job、哪个 prompt、哪个模型、存储在哪里。
+- 点击图片放大查看或播放视频，并在同一上下文里看到元数据。
+- 下载图片或视频。
+- 删除不需要的资源，释放本地磁盘或对象存储空间。
+- 知道每个资源来自哪个 job、哪个提示词、哪个模型、存储在哪里。
 - 当配置对象存储后，生成结果优先保存到 S3 兼容对象存储，降低服务器本地磁盘长期占用。
-- 已存在本地的图片支持手动归档到 S3。
+- 已存在本地的资源支持手动归档到对象存储。
 
 本设计只覆盖单 owner 个人服务器场景，不做团队图库、公开分享页、评论协作或多租户权限。
 
@@ -32,101 +32,104 @@ Reading this as: 个人服务器控制台里的 Images 图片资产管理工作�
 
 ### 3.1 MVP 范围
 
-- Images 内新增 `Library` 二级 tab。
-- 图片库展示所有未删除的图片资产，包含生成输出图和用户上传参考图，默认按创建时间倒序。
+- 多媒体内新增 `Library` 二级 tab。
+- 资源库展示所有未删除的图片/视频资产，包含生成输出资源和用户上传参考图，默认按创建时间倒序。
 - 支持图片缩略图网格、列表密度切换可以后置。
 - 支持点击图片打开放大查看器。
-- 支持单图下载。
-- 支持单图删除。
-- 支持将图片加入或移出私密收藏夹。
+- 支持单资源下载。
+- 支持单资源删除。
+- 支持将图片或视频加入或移出私密收藏夹。
 - 进入私密收藏夹必须输入 owner 登录密码；解锁只在当前 Web session 内短期有效。
-- 私密图片默认不出现在普通图片库；查看、下载、删除、归档和移出私密收藏夹都必须先解锁。
-- 支持右侧 inspector 展示当前选中图片的核心元数据。
-- 支持从图片跳转到所属 generation job / History 详情。
+- 私密资源默认不出现在普通资源库；查看、下载、删除、归档和移出私密收藏夹都必须先解锁。
+- 支持右侧 inspector 展示当前选中资源的核心元数据。
+- 支持从资源跳转到所属 generation job / History 详情。
 - 支持在 Library 中手动上传图片资产，上传前按图片内容 checksum 去重，命中已存在公开资产时复用，不重复写本地或 S3。
-- 支持将 Library 中的图片快捷用于 `Generate` 的图生图参考图；后端负责把受控 Library asset 转换为 provider 可用的图片 payload，不把需要登录态的本地 API URL 直接交给 provider。
+- 支持将 Library 中的图片快捷用于 `Generate` 的图生图、图生视频、多图编辑和关键帧参考；后端负责把受控 Library asset 转换为 provider 可用的 payload，不把需要登录态的本地 API URL 直接交给 provider。
 - 支持本地图片资产手动归档到 S3。
-- Images Settings 内新增存储设置，默认 `local`。
+- 多媒体 Settings 内新增存储设置，默认 `local`。
 - 支持 S3 兼容对象存储配置：bucket、region、endpoint、prefix、path style、access key、secret key。
-- 生成 job 完成后优先通过 S3 SDK 上传图片；失败时按策略回退到本地保存并记录事件。
+- 生成 job 完成后优先通过 S3 SDK 或对象存储 profile 上传资源；失败时按策略回退到本地保存并记录事件。
 - S3 bucket 可以保持私有，不要求公开读。
-- 图片读取、下载、删除都需要 owner session；删除和存储设置变更必须校验 CSRF。
+- 资源读取、下载、删除都需要 owner session；删除和存储设置变更必须校验 CSRF。
 - 删除、对象存储配置变更、对象存储上传失败必须写 audit。
 
 ### 3.2 非目标
 
 - 不做公开图片分享链接。
 - 不做团队共享图库、多用户授权或图库协作。
-- 不做图片编辑器、裁剪、标注或二次绘图。
+- 不做图片编辑器、视频时间线、裁剪、标注或二次绘图。
 - 不做复杂 DAM 功能，例如版权流转、审核工作流、发布渠道管理。
-- 不把 Images 存储设置放进全局 Settings；它属于 Images 模块自己的能力域。
-- 不在 Dashboard 展开图片库完整配置；Dashboard 只显示摘要和跳转。
+- 不把多媒体存储设置放进全局 Settings；它属于多媒体模块自己的能力域。
+- 不在 Dashboard 展开资源库完整配置；Dashboard 只显示摘要和跳转。
 - 不在 S3 对象 metadata 中保存完整 prompt 或 API Key 等敏感信息。
 
 ## 4. 信息架构
 
-Images 仍作为一级导航能力存在。图片库是 Images 内部的二级视图，不能提升为全局一级导航。
+多媒体作为一级导航能力存在。资源库是多媒体内部的二级视图，不能提升为全局一级导航。旧 `images` 路由/API/event 前缀作为兼容层保留。
 
-Images 内部二级结构建议：
+多媒体内部二级结构建议：
 
 - `Generate`：生成任务、参数和当前结果。
-- `Library`：以图片为中心管理生成资产。
+- `Library`：以图片/视频资源为中心管理生成资产。
 - `History`：以 job 为中心查看调用记录、失败原因和参数摘要。
-- `Settings`：xAI provider 设置、默认生成参数、历史保留策略和存储设置。
+- `生成预设`：保存提示词、模型、模式和常用参数组合；默认不保存参考图引用。
+- `Settings`：xAI / Agnes provider 设置、默认生成参数、历史保留策略和存储设置。
 
 `Library` 与 `History` 的区别：
 
-- `Library` 管理图片资产，核心对象是 image asset。资产可以是生成输出图，也可以是用户上传参考图。
+- `Library` 管理资源资产，核心对象是 media/image asset。资产可以是生成输出图、视频，也可以是用户上传参考图。
 - `History` 管理一次调用记录，核心对象是 generation job。
-- 删除图片不应删除 job 历史；job 仍保留 prompt、参数、状态和 audit 上下文。
-- 删除 job 历史时可以选择级联删除图片资产，但这是另一个危险操作，不在图片库单图删除流程里默认触发。
-- 删除用户上传参考图不应破坏历史记录；History 中仍保留 source slot、文件摘要和 redacted 来源信息，但图片内容显示为 deleted。
+- 删除资源不应删除 job 历史；job 仍保留提示词、参数、状态和 audit 上下文。
+- 删除 job 历史时可以选择级联删除资源资产，但这是另一个危险操作，不在资源库单资源删除流程里默认触发。
+- 删除用户上传参考图不应破坏历史记录；History 中仍保留 source slot、文件摘要和 redacted 来源信息，但资源内容显示为 deleted。
 
-## 5. 图片库主界面交互
+## 5. 资源库主界面交互
 
 ### 5.1 桌面布局
 
 桌面端使用工作台布局：
 
 - 顶部：Images 二级 tab 和轻量状态条。
-- 主区域：图片库 toolbar + 图片资产网格。
-- 右侧：常驻 inspector，宽度约 320px，展示选中图片元数据。
+- 主区域：资源库 toolbar + 图片/视频资产网格。
+- 右侧：常驻 inspector，宽度约 320px，展示选中资源元数据。
 
-主区域不应使用大欢迎 hero、营销文案、装饰插画或彩色 dashboard 卡片。图片 tile 可以是独立卡片，但页面分区不要再包一层厚重卡片。
+主区域不应使用大欢迎 hero、营销文案、装饰插画或彩色 dashboard 卡片。资源 tile 可以是独立卡片，但页面分区不要再包一层厚重卡片。
 
 ### 5.2 Toolbar
 
-Toolbar 放在图片网格上方，保持低噪音和可扫描：
+Toolbar 放在资源网格上方，保持低噪音和可扫描：
 
 - 搜索：按 prompt、revised prompt、model、job id、asset id、原始文件名摘要查询。
+- 常驻筛选：媒体类型 `All / Images / Videos` 和排序。
+- 高级筛选：provider、存储位置、生成模式、私密状态等应优先收进 popover 或折叠区，并在折叠状态显示 active filter 摘要。
 - 筛选：资产类型 `All / Generated / Uploaded source`。
 - 筛选：存储位置 `All / Local / S3 / Remote fallback`。
 - 筛选：生成模式 `All / Text to image / Image to image / Multi image edit`。
 - 筛选：状态 `Available / Missing / Deleted`，MVP 默认只展示 `Available`。
 - 排序：`Newest first`、`Oldest first`、后续可加 `Size`。
-- 操作：刷新、下载选中、删除选中、归档到 S3。MVP 可以先只支持单选操作。
-- 操作：手动上传图片。上传控件应保持低噪音，放在 Library toolbar 或图片网格上方，不做独立一级入口。
-- 操作：将选中图片用于图生图。该操作应切换到 `Generate` 并把图片填入第一个参考图槽位，用户仍需确认 prompt 和参数后再提交。
-- 视图切换：普通图片库 / 私密收藏夹。私密收藏夹切换后先展示解锁面板，解锁成功才加载图片。
+- 操作：刷新、下载选中、删除选中、归档到对象存储。批量操作只在选择模式下显示，失败项应保留选中并展示失败摘要。
+- 操作：手动上传图片。上传入口应保持低噪音，优先使用 `上传资源` 按钮展开 inline panel 或 drawer，不做独立一级入口，不长期挤占资源网格首屏。
+- 操作：将选中图片作为参考使用，支持图生图、图生视频、多图编辑和关键帧。该操作应切换到 `Generate` 并把图片填入对应参考图槽位，用户仍需确认 prompt 和参数后再提交。
+- 视图切换：普通资源库 / 私密收藏夹。私密收藏夹切换后先展示解锁面板，解锁成功才加载资源。
 
 按钮规则：
 
 - 下载、删除、刷新使用图标按钮并提供 tooltip；危险删除使用红色语义态。
-- 归档到 S3 使用常规次级按钮或上传/云图标，只有 `local` 资产且 S3 已配置时可用。
+- 归档到对象存储使用常规次级按钮或上传/云图标，只有 `local` 资产且对象存储已配置时可用。
 - 不使用 emoji 表达状态。
 - 不使用彩色胶囊堆叠造成视觉噪音。
 - 搜索输入和筛选控件高度保持一致，避免 toolbar 换行后拥挤。
 - 私密收藏夹入口应使用低噪音 segmented control 或二级按钮，不提升为一级导航，不做大面积 warning 面板。
 
-### 5.3 图片网格
+### 5.3 资源网格
 
-网格是图片库的核心视图。
+网格是资源库的核心视图。
 
 布局要求：
 
 - 使用稳定的 CSS grid，tile 有固定 `aspect-ratio`，图片加载前后不能改变布局高度。
 - 默认 4 到 6 列随容器自适应，移动端降为 2 列或单列列表。
-- 图片使用 `object-fit: cover` 填充 tile；放大查看器中再显示完整比例。
+- 图片使用 `object-fit: cover` 填充 tile；视频使用稳定 `aspect-ratio`、poster 或首帧占位；查看器中再显示完整比例或视频播放器。
 - hover 显示轻量操作层：查看、下载、删除。
 - selected 状态使用细边框或低对比背景，不使用高饱和大片色块。
 - 缩略图加载中使用与 tile 尺寸一致的 skeleton。
@@ -842,8 +845,8 @@ CREATE TABLE IF NOT EXISTS image_storage_settings (
 
 必须遵守 AGENTS.md 中 Quiet Agent Workbench / Quiet DevOps Control Plane 约束：
 
-- `Library` 是 Images 下的二级 tab，不是一级导航。
-- 页面主对象是图片资产，右侧 inspector 是当前图片上下文，不是装饰区。
+- `Library` 是多媒体下的二级 tab，不是一级导航。
+- 页面主对象是图片/视频资源资产，右侧 inspector 是当前资源上下文，不是装饰区。
 - 使用浅色中性底、细边框、小圆角、低对比 hover/selected 状态。
 - 主色只做克制强调；红色只用于删除危险操作。
 - 不使用大 hero、大插画、营销 CTA、渐变背景、玻璃拟态或 AI 紫蓝光。
@@ -851,7 +854,7 @@ CREATE TABLE IF NOT EXISTS image_storage_settings (
 - 技术值如 asset id、job id、S3 key、checksum 使用 monospace。
 - 长 prompt、object key 和错误消息必须截断并支持复制，不能撑破布局。
 - 图标使用项目已有统一图标体系；不要手绘临时 SVG，不用 emoji 承担状态表达。
-- 移动端 inspector 改为 drawer 或折叠区，避免与图片网格重叠。
+- 移动端 inspector 改为 drawer 或折叠区，避免与资源网格重叠。
 
 建议前端模块结构：
 
@@ -865,7 +868,7 @@ web/src/images/libraryTypes.ts
 web/src/images/libraryApi.ts
 ```
 
-入口 `ImagesView.tsx` 只负责 tab 状态、数据装配和动作传递，不应继续堆叠图片库网格、查看器、删除确认和存储表单实现。
+入口 `ImagesView.tsx` 只负责 tab 状态、数据装配和动作传递，不应继续堆叠资源库网格、查看器、删除确认和存储表单实现。
 
 ## 15. 分阶段落地
 
