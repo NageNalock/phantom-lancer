@@ -1257,8 +1257,6 @@ function ReferenceSlot({
 
 export function HistoryPanel({
   jobs,
-  jobsMediaType,
-  jobsProvider,
   libraryMediaAssets,
   mediaJobs,
   mediaType,
@@ -1272,15 +1270,12 @@ export function HistoryPanel({
   onSaveJobAsPreset,
   onUseAssetAsReference,
   onUseLegacyOutputAsReference,
-  provider,
   targetJobId,
   targetJobKind,
-   onJobScrolled,
-   onOpenJobLogs,
- }: {
+  onJobScrolled,
+  onOpenJobLogs,
+}: {
   jobs: ImageGenerationJob[];
-  jobsMediaType?: MediaType;
-  jobsProvider?: ProviderID;
   libraryMediaAssets?: MediaAsset[];
   mediaJobs?: MediaGenerationJob[];
   mediaType?: MediaType;
@@ -1293,16 +1288,15 @@ export function HistoryPanel({
   onRestoreJob?: (kind: "legacy" | "media", job: unknown) => void;
   onSaveJobAsPreset?: (kind: "legacy" | "media", job: unknown) => void;
   onUseAssetAsReference?: (asset: MediaAsset) => void;
-   onUseLegacyOutputAsReference?: (assetId: string, url?: string) => void;
-   provider?: ProviderID;
-   targetJobId?: string;
-   targetJobKind?: "legacy" | "media";
-   onJobScrolled?: () => void;
-   onOpenJobLogs?: (kind: "legacy" | "media", job: unknown) => void;
- }) {
+  onUseLegacyOutputAsReference?: (assetId: string, url?: string) => void;
+  targetJobId?: string;
+  targetJobKind?: "legacy" | "media";
+  onJobScrolled?: () => void;
+  onOpenJobLogs?: (kind: "legacy" | "media", job: unknown) => void;
+}) {
   const scrolledRef = useRef(false);
-  const [showAllTypes, setShowAllTypes] = useState(!mediaType);
-  const [providerFilter, setProviderFilter] = useState<ProviderID | "all">(provider || "all");
+  const [showAllTypes, setShowAllTypes] = useState(true);
+  const [providerFilter, setProviderFilter] = useState<ProviderID | "all">("all");
   const [modeFilter, setModeFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const allJobs = useMemo(() => {
@@ -2116,7 +2110,7 @@ export function LibraryPanel({
         list.sort((a, b) => anyAssetSizeBytes(b) - anyAssetSizeBytes(a)); break;
     }
     return list;
-  }, [allAssets, searchQuery, filterMediaType, filterProvider, filterStorage, filterPrivate, sortOrder]);
+  }, [allAssets, searchQuery, filterMediaType, filterProvider, filterStorage, filterPrivate, filterMode, mediaJobs, legacyJobs, sortOrder]);
 
   const filteredLegacyIds = useMemo(() => new Set(filteredSorted.filter((a) => a.kind === "legacy").map((a) => a.data.id)), [filteredSorted]);
   const filteredMediaIds = useMemo(() => new Set(filteredSorted.filter((a) => a.kind === "media").map((a) => a.data.id)), [filteredSorted]);

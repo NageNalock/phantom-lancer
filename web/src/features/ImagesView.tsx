@@ -33,6 +33,12 @@ import { DURATION_PRESETS, MEDIA_TYPES, PROVIDERS, VIDEO_MODES } from "../images
 const IMAGE_TAB_IDS: ImagesTab[] = ["generate", "presets", "library", "history", "settings"];
 const IMAGE_CLEAR_KEYS = ["codex", "codexInbox", "codexRuntime", "gateway", "docker", "settings"];
 
+function mergeAssetsById<T extends { id: string }>(primary: T[], extra: T[]): T[] {
+  if (!extra.length) return primary;
+  const seen = new Set(primary.map((item) => item.id));
+  return [...primary, ...extra.filter((item) => !seen.has(item.id))];
+}
+
 export function ImagesView({ actions, data }: { actions: AppActions; data: AppData }) {
   const [activeTab, setActiveTab, tabHref] = useQueryParamState<ImagesTab>("images", IMAGE_TAB_IDS, "generate", { clearKeys: IMAGE_CLEAR_KEYS });
   const [busy, setBusy] = useState("");
@@ -94,15 +100,20 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     return ps.find((p: ProviderStatus) => p.provider === currentProvider);
   }, [providersStatus, currentProvider]);
 
-  const libraryAssets = libraryScope === "private" ? privateAssets : assets;
-  const libraryMediaAssets = libraryScope === "private" ? privateMediaAssets : mediaAssets;
+  const scopedLibraryAssets = libraryScope === "private" ? privateAssets : assets;
+  const scopedLibraryMediaAssets = libraryScope === "private" ? privateMediaAssets : mediaAssets;
+  const referenceAssets = privateUnlocked ? mergeAssetsById(assets, privateAssets) : assets;
+  const referenceMediaAssets = privateUnlocked ? mergeAssetsById(mediaAssets, privateMediaAssets) : mediaAssets;
+  const historyMediaAssets = referenceMediaAssets;
+  const inspectorAssets = activeTab === "library" ? scopedLibraryAssets : assets;
+  const inspectorMediaAssets = activeTab === "library" ? scopedLibraryMediaAssets : mediaAssets;
   const selectedAsset: ImageAsset | undefined =
     selectedResource?.kind === "legacy"
-      ? libraryAssets.find((a) => a.id === selectedResource.id)
+      ? scopedLibraryAssets.find((a) => a.id === selectedResource.id)
       : undefined;
   const selectedMediaAsset: MediaAsset | undefined =
     selectedResource?.kind === "media"
-      ? libraryMediaAssets.find((a) => a.id === selectedResource.id)
+      ? scopedLibraryMediaAssets.find((a) => a.id === selectedResource.id)
       : undefined;
   const selectedPrompt = prompts.find((prompt) => prompt.id === selectedPromptId) || prompts[0];
 
@@ -145,7 +156,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   useEffect(() => {
     if (activeTab !== "generate" && activeTab !== "history" && activeTab !== "library") return;
     void refreshMediaData();
-  }, [activeTab, mediaType, currentProvider]);
+  }, [activeTab, mediaType, currentProvider, libraryScope]);
 
   useEffect(() => {
     if (mediaType === "video" && currentProvider !== "agnes") {
@@ -168,12 +179,12 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   useEffect(() => {
     if (!selectedResource) return;
     if (selectedResource.kind === "legacy") {
-      if (libraryAssets.some((asset) => asset.id === selectedResource.id)) return;
+      if (scopedLibraryAssets.some((asset) => asset.id === selectedResource.id)) return;
     } else {
-      if (libraryMediaAssets.some((asset) => asset.id === selectedResource.id)) return;
+      if (scopedLibraryMediaAssets.some((asset) => asset.id === selectedResource.id)) return;
     }
     setSelectedResource(undefined);
-  }, [libraryAssets, libraryMediaAssets, selectedResource]);
+  }, [scopedLibraryAssets, scopedLibraryMediaAssets, selectedResource]);
 
   useEffect(() => {
     if (!selectedPromptId || prompts.some((prompt) => prompt.id === selectedPromptId)) return;
@@ -232,13 +243,19 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   }
 
   async function refreshMediaData() {
+    const needsFullMediaContext = activeTab === "library" || activeTab === "generate" || activeTab === "history";
+    const needsFullJobContext = activeTab === "library" || activeTab === "history";
     const scopeParam = activeTab === "library" && libraryScope === "private" ? "&scope=private" : "";
-    const assetMediaType = activeTab === "library" || activeTab === "generate" ? "" : mediaType;
-    const assetProvider = activeTab === "library" || activeTab === "generate" ? "" : currentProvider;
+    const jobsMediaType = needsFullJobContext ? "" : mediaType;
+    const jobsProvider = needsFullJobContext ? "" : currentProvider;
+    const assetMediaType = needsFullMediaContext ? "" : mediaType;
+    const assetProvider = needsFullMediaContext ? "" : currentProvider;
+    const jobsLimit = needsFullJobContext ? 200 : 80;
+    const assetsLimit = activeTab === "library" || activeTab === "history" ? 400 : 120;
     try {
       const [jobsResult, assetsResult] = await Promise.all([
-        actions.api<{ items?: MediaGenerationJob[]; legacyItems?: unknown[]; count?: number }>(`/api/images/generations?limit=80&mediaType=${mediaType}&provider=${currentProvider}`),
-        actions.api<{ items?: MediaAsset[]; count?: number }>(`/api/images/media-assets?limit=120&mediaType=${assetMediaType}&provider=${assetProvider}${scopeParam}`),
+        actions.api<{ items?: MediaGenerationJob[]; legacyItems?: unknown[]; count?: number }>(`/api/images/generations?limit=${jobsLimit}&mediaType=${jobsMediaType}&provider=${jobsProvider}`),
+        actions.api<{ items?: MediaAsset[]; count?: number }>(`/api/images/media-assets?limit=${assetsLimit}&mediaType=${assetMediaType}&provider=${assetProvider}${scopeParam}`),
       ]);
       setMediaJobs(jobsResult.items || []);
       if (libraryScope === "private" && activeTab === "library") {
@@ -544,7 +561,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   }
 
   function useLegacyOutputAsI2iFromHistory(assetId: string, url?: string) {
-    const found = libraryAssets.find((a) => a.id === assetId || a.id?.startsWith(assetId.slice(0, 8)));
+    const found = referenceAssets.find((a) => a.id === assetId || a.id?.startsWith(assetId.slice(0, 8)));
     if (found) {
       useAssetForImageToImage(found);
     } else if (url) {
@@ -570,13 +587,13 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     if (currentMediaJob?.id && currentMediaJob.mediaType === "image") {
       const firstAssetId = currentMediaJob.outputs?.[0]?.assetId;
       if (firstAssetId) {
-        const found = libraryMediaAssets.find((a) => a.id === firstAssetId);
+        const found = referenceMediaAssets.find((a) => a.id === firstAssetId);
         if (found) useMediaAssetForImageToImage(found);
       }
     } else if (latestJob?.id) {
       const firstOutputId = latestJob.outputs?.[0]?.id || latestJob.outputs?.[0]?.assetId;
       if (firstOutputId) {
-        const found = libraryAssets.find((a) => a.id === firstOutputId || a.id === latestJob.outputs?.[0]?.assetId);
+        const found = referenceAssets.find((a) => a.id === firstOutputId || a.id === latestJob.outputs?.[0]?.assetId);
         if (found) useAssetForImageToImage(found);
       }
     }
@@ -808,11 +825,11 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   async function bulkDeleteResources(resources: Array<{ kind: "legacy" | "media"; id: string }>): Promise<boolean> {
     const legacy = resources
       .filter((r) => r.kind === "legacy")
-      .map((r) => libraryAssets.find((a) => a.id === r.id))
+      .map((r) => scopedLibraryAssets.find((a) => a.id === r.id))
       .filter(Boolean) as ImageAsset[];
     const media = resources
       .filter((r) => r.kind === "media")
-      .map((r) => libraryMediaAssets.find((a) => a.id === r.id))
+      .map((r) => scopedLibraryMediaAssets.find((a) => a.id === r.id))
       .filter(Boolean) as MediaAsset[];
     const total = legacy.length + media.length;
     if (total === 0) return false;
@@ -1093,7 +1110,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
 
   async function refreshPrivateAssets() {
     try {
-      const result = await actions.api<{ items?: ImageAsset[] }>("/api/images/library/assets?limit=80&privacy=private");
+      const result = await actions.api<{ items?: ImageAsset[] }>("/api/images/library/assets?limit=200&privacy=private");
       setPrivateAssets(result.items || []);
       setPrivateUnlocked(true);
     } catch (error) {
@@ -1109,7 +1126,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
 
   async function refreshPrivateMediaAssets() {
     try {
-      const result = await actions.api<{ items?: MediaAsset[] }>("/api/images/media-assets?limit=120&scope=private");
+      const result = await actions.api<{ items?: MediaAsset[] }>("/api/images/media-assets?limit=400&scope=private");
       setPrivateMediaAssets(result.items || []);
       if (!privateUnlocked) {
         setPrivateUnlocked(true);
@@ -1275,10 +1292,10 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
               hasApiKey={hasApiKeyForProvider}
               keyframeRefs={keyframeRefs}
               latestJob={latestJob}
-              libraryAssets={libraryAssets}
+              libraryAssets={referenceAssets}
               libraryImageAssetRef={libraryImageAssetRef}
               libraryImage={libraryImageRef}
-              libraryMediaAssets={libraryMediaAssets}
+              libraryMediaAssets={referenceMediaAssets}
               mediaJobs={allMediaJobs}
               mediaType={mediaType}
               multiEditRefs={multiEditRefs}
@@ -1335,10 +1352,10 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
           ) : null}
           {activeTab === "library" ? (
              <LibraryPanel
-               assets={libraryAssets}
+               assets={scopedLibraryAssets}
                busy={busy}
                libraryScope={libraryScope}
-               mediaAssets={libraryMediaAssets}
+               mediaAssets={scopedLibraryMediaAssets}
                mediaJobs={allMediaJobs}
                legacyJobs={historyJobs}
                mediaType={mediaType}
@@ -1380,9 +1397,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
           {activeTab === "history" ? (
             <HistoryPanel
               jobs={historyJobs}
-              jobsMediaType={mediaType}
-              jobsProvider={currentProvider}
-              libraryMediaAssets={libraryMediaAssets}
+              libraryMediaAssets={historyMediaAssets}
               mediaJobs={allMediaJobs}
               mediaType={mediaType}
               onMediaTypeChange={setMediaType}
@@ -1397,7 +1412,6 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
               onSaveJobAsPreset={handleSaveJobAsPreset}
               onUseAssetAsReference={useMediaAssetAsI2iFromHistory}
               onUseLegacyOutputAsReference={useLegacyOutputAsI2iFromHistory}
-              provider={currentProvider}
               targetJobId={targetJobRef?.id}
               targetJobKind={targetJobRef?.kind}
                onJobScrolled={() => setTargetJobRef(undefined)}
@@ -1469,11 +1483,11 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
         <ImagesInspector
           activeTab={activeTab}
           asset={selectedAsset}
-          assets={libraryAssets}
+          assets={inspectorAssets}
           jobs={historyJobs}
-          libraryScope={libraryScope}
+          libraryScope={activeTab === "library" ? libraryScope : "public"}
           mediaAsset={selectedMediaAsset}
-          mediaAssets={libraryMediaAssets}
+          mediaAssets={inspectorMediaAssets}
           mediaType={mediaType}
           onArchive={(asset) => void archiveAsset(asset)}
           onArchiveMedia={(asset) => void archiveMediaAsset(asset)}

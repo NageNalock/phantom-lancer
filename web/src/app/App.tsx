@@ -86,8 +86,8 @@ export function App() {
       api<V2RayPayload>("/api/v2ray/settings"),
       api<ImagesPayload>("/api/images/settings"),
       api<{ settings?: ImagesPayload["storageSettings"] }>("/api/images/storage-settings"),
-      api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=40"),
-      api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=80"),
+      api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=200"),
+      api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=200"),
       api<{ items?: ImagesPayload["prompts"] }>("/api/images/prompts?limit=120"),
     ]);
 
@@ -153,8 +153,8 @@ export function App() {
         const [settings, storageSettings, jobs, assets, prompts] = await Promise.allSettled([
           api<ImagesPayload>("/api/images/settings"),
           api<{ settings?: ImagesPayload["storageSettings"] }>("/api/images/storage-settings"),
-          api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=40"),
-          api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=80"),
+          api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=200"),
+          api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=200"),
           api<{ items?: ImagesPayload["prompts"] }>("/api/images/prompts?limit=120"),
         ]);
         setData((current) => ({
