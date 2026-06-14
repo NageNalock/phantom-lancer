@@ -599,6 +599,11 @@ FROM media_generation_jobs`
 		return nil, err
 	}
 	_ = rows.Close()
+	for index := range out {
+		if err := s.attachMediaJobRelations(ctx, &out[index]); err != nil {
+			return nil, err
+		}
+	}
 	return out, nil
 }
 
@@ -771,7 +776,7 @@ INSERT INTO media_assets (
   checksum_sha256, local_name, storage_backend, object_storage_profile_id, s3_bucket, s3_region,
   s3_endpoint_label, s3_key, s3_etag, private_at, archived_at, deleted_at, deleted_reason,
   last_error, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		asset.ID, asset.MediaType, asset.AssetType, asset.Status, boolInt(asset.Private),
 		asset.Provider, asset.Model, asset.JobID, asset.SourceRole, asset.Slot,
 		asset.PromptPreview, asset.RevisedPromptPreview, asset.OriginalFilename,
@@ -795,7 +800,7 @@ SELECT id, media_type, asset_type, status, private, provider, model, job_id, sou
   checksum_sha256, local_name, storage_backend, object_storage_profile_id, s3_bucket, s3_region,
   s3_endpoint_label, s3_key, s3_etag, private_at, archived_at, deleted_at, deleted_reason,
   last_error, created_at, updated_at
-FROM media_assets WHERE id = $1 AND deleted_at IS NULL`, id)
+FROM media_assets WHERE id = $1 AND (deleted_at = '' OR deleted_at IS NULL)`, id)
 	asset, err := scanMediaAsset(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("media_asset_not_found")
@@ -811,7 +816,7 @@ func (s *Store) SetMediaAssetPrivate(ctx context.Context, id string, private boo
 UPDATE media_assets SET private = $1,
   private_at = (CASE WHEN $1 THEN NOW() ELSE NULL END),
   updated_at = NOW()
-WHERE id = $2 AND deleted_at IS NULL
+WHERE id = $2 AND (deleted_at = '' OR deleted_at IS NULL)
 RETURNING id, media_type, asset_type, status, private, provider, model, job_id, source_role, slot,
   prompt_preview, revised_prompt_preview, original_filename, original_source_redacted,
   mime_type, extension, size_bytes, width, height, duration_seconds, frame_rate, frame_count,
@@ -833,7 +838,7 @@ func (s *Store) UpdateMediaAssetStorage(ctx context.Context, id, backend, profil
 UPDATE media_assets SET storage_backend = $1, object_storage_profile_id = $2,
   s3_bucket = $3, s3_region = $4, s3_endpoint_label = $5, s3_key = $6, s3_etag = $7,
   archived_at = NOW(), updated_at = NOW()
-WHERE id = $8 AND deleted_at IS NULL
+WHERE id = $8 AND (deleted_at = '' OR deleted_at IS NULL)
 RETURNING id, media_type, asset_type, status, private, provider, model, job_id, source_role, slot,
   prompt_preview, revised_prompt_preview, original_filename, original_source_redacted,
   mime_type, extension, size_bytes, width, height, duration_seconds, frame_rate, frame_count,
@@ -922,6 +927,7 @@ SELECT id, media_type, asset_type, status, private, provider, model, job_id, sou
   last_error, created_at, updated_at
 FROM media_assets
 WHERE checksum_sha256 = ? AND private = 0 AND status = 'available'
+  AND ((storage_backend = 'local' AND local_name != '') OR (storage_backend = 's3' AND s3_key != ''))
 LIMIT 1`, checksum)
 	asset, err := scanMediaAsset(row)
 	return asset, err == nil
@@ -964,6 +970,9 @@ FROM media_assets`
 	if status = strings.TrimSpace(status); status != "" {
 		clauses = append(clauses, "status = ?")
 		args = append(args, status)
+	} else {
+		clauses = append(clauses, "status != 'failed'")
+		clauses = append(clauses, "((storage_backend = 'local' AND local_name != '') OR (storage_backend = 's3' AND s3_key != ''))")
 	}
 	query += " WHERE " + strings.Join(clauses, " AND ")
 	query += " ORDER BY created_at DESC LIMIT ?"

@@ -26,7 +26,13 @@ export function ConversationTranscript({
   return (
     <div className={`chat-transcript ${className}`} ref={scrollRef}>
       {entries.length ? (
-        entries.map((entry) => (entry.kind === "message" ? <ConversationMessage entry={entry} key={entry.key} /> : <ConversationStatus entry={entry} key={entry.key} />))
+        entries.map((entry) => (
+          entry.kind === "message"
+            ? <ConversationMessage entry={entry} key={entry.key} />
+            : entry.kind === "artifact"
+              ? <ConversationArtifact entry={entry} key={entry.key} />
+              : <ConversationStatus entry={entry} key={entry.key} />
+        ))
       ) : (
         <div className="mx-auto flex min-h-64 max-w-2xl items-center justify-center px-4">
           <EmptyState body={emptyBody} title={emptyTitle} />
@@ -36,10 +42,33 @@ export function ConversationTranscript({
   );
 }
 
+function ConversationArtifact({ entry }: { entry: Extract<ChatEntry, { kind: "artifact" }> }) {
+  return (
+    <article className="chat-entry chat-artifact-entry">
+      <div className="chat-assistant-rail" aria-hidden="true">C</div>
+      <div className="chat-artifact-card">
+        <div className="chat-artifact-meta">
+          <span>图片结果</span>
+          <span>{formatDate(entry.createdAt)}</span>
+        </div>
+        <div className="chat-artifact-grid">
+          {entry.artifacts.map((artifact) => (
+            <a className="chat-image-artifact" href={artifact.src} key={artifact.id} rel="noreferrer" target="_blank">
+              <img alt={artifact.label} loading="lazy" src={artifact.src} />
+              <span>{artifact.label}</span>
+            </a>
+          ))}
+        </div>
+      </div>
+    </article>
+  );
+}
+
 function ConversationMessage({ entry }: { entry: Extract<ChatEntry, { kind: "message" }> }) {
   const isUser = entry.role === "user";
   return (
     <article className={`chat-entry flex ${isUser ? "justify-end" : "justify-start"}`}>
+      {isUser ? null : <div className="chat-assistant-rail" aria-hidden="true">C</div>}
       <div className={isUser ? "chat-user-message" : "chat-assistant-message"}>
         {isUser ? (
           <div className="whitespace-pre-wrap break-words leading-relaxed">{entry.text}</div>
@@ -73,12 +102,13 @@ function ConversationStatus({ entry }: { entry: Extract<ChatEntry, { kind: "stat
         {entry.active ? <span className="chat-thinking-dot" /> : null}
         <span>{entry.label}</span>
       </div>
-      <div className="h-px min-w-8 flex-1 bg-[var(--line)]" />
       {entry.detail ? <div className="max-w-[52ch] truncate text-xs text-[var(--muted)]">{entry.detail}</div> : null}
     </div>
   );
 }
 
 function entryTextLength(entry: ChatEntry): number {
-  return entry.kind === "message" ? entry.text.length : entry.detail?.length || 0;
+  if (entry.kind === "message") return entry.text.length;
+  if (entry.kind === "artifact") return entry.artifacts.length;
+  return entry.detail?.length || 0;
 }

@@ -709,6 +709,14 @@ func (s *Service) runMediaImageJob(ctx context.Context, job storage.MediaGenerat
 		s.Log.Debug("media image provider request completed", "job_id", job.ID, "provider", job.Provider, "model", request.Model, "mode", request.Mode, "output_count", len(result.Images), "latency_ms", time.Since(callStarted).Milliseconds())
 	}
 	outputs, storeFailures := s.storeMediaGeneratedImages(ctx, job, request, result)
+	if len(result.Images) > 0 && !hasStoredMediaOutputs(outputs) {
+		message := "provider completed but generated image could not be stored; check image storage settings"
+		_, _ = s.failMediaJob(ctx, job.ID, result.Endpoint, message)
+		if storeFailures > 0 {
+			s.appendMedia(ctx, job.ID, "media.asset.store_failed", map[string]any{"count": storeFailures})
+		}
+		return
+	}
 	completed, err := s.Store.CompleteMediaGenerationJob(ctx, job.ID, result.Endpoint, result.Usage, outputs)
 	if err != nil {
 		if s.Log != nil {
@@ -905,6 +913,7 @@ func (s *Service) storeMediaSourceAssets(ctx context.Context, job *storage.Media
 		}
 		stored, err := s.storeMediaAssetBytes(ctx, created, data, mimeType, settings)
 		if err != nil {
+			created.Status = "failed"
 			created.LastError = err.Error()
 			_, _ = s.Store.UpdateMediaAsset(ctx, created)
 			s.appendMedia(ctx, job.ID, "media.asset.store_failed", map[string]any{"assetId": created.ID, "message": err.Error()})
@@ -1038,14 +1047,6 @@ func (s *Service) storeMediaGeneratedImages(ctx context.Context, job storage.Med
 			if s.Log != nil && s.LogSampler.Allow("media:output-fetch:"+job.ID) {
 				s.Log.Warn("media image output fetch failed", "job_id", job.ID, "slot", i+1, "source_host", safelog.HostLabel(image.URL), "error", safelog.Error(err, 200))
 			}
-			asset, createErr := s.createMediaGeneratedAsset(ctx, job, request, image, i+1, image.MimeType, "remote", string(MediaTypeImage))
-			if createErr == nil {
-				output.AssetID = asset.ID
-				output.RemoteURLRedacted = redactedURL(image.URL)
-			} else if s.Log != nil && s.LogSampler.Allow("media:remote-create:"+job.ID) {
-				s.Log.Warn("media remote asset create failed", "job_id", job.ID, "slot", i+1, "error", safelog.Error(createErr, 200))
-			}
-			outputs = append(outputs, output)
 			continue
 		}
 		if duplicate, ok := s.publicDuplicateMediaAsset(ctx, data, mimeType); ok {
@@ -1056,15 +1057,14 @@ func (s *Service) storeMediaGeneratedImages(ctx context.Context, job storage.Med
 		created, err := s.createMediaGeneratedAsset(ctx, job, request, image, i+1, mimeType, "local", string(MediaTypeImage))
 		if err != nil {
 			failures++
-			outputs = append(outputs, output)
 			continue
 		}
 		stored, err := s.storeMediaAssetBytes(ctx, created, data, mimeType, settings)
 		if err != nil {
 			failures++
+			created.Status = "failed"
 			created.LastError = err.Error()
 			_, _ = s.Store.UpdateMediaAsset(ctx, created)
-			outputs = append(outputs, output)
 			continue
 		}
 		output.AssetID = stored.ID
@@ -1083,6 +1083,15 @@ func (s *Service) storeMediaGeneratedImages(ctx context.Context, job storage.Med
 		s.appendMedia(ctx, job.ID, "media.asset.stored."+stored.StorageBackend, map[string]any{"assetId": stored.ID, "slot": i + 1})
 	}
 	return outputs, failures
+}
+
+func hasStoredMediaOutputs(outputs []storage.MediaGenerationOutput) bool {
+	for _, output := range outputs {
+		if output.AssetID != "" && output.Storage != "remote" {
+			return true
+		}
+	}
+	return false
 }
 
 func mediaOutputForAsset(output storage.MediaGenerationOutput, asset storage.MediaAsset) storage.MediaGenerationOutput {
@@ -1212,6 +1221,8 @@ func (s *Service) ReadMediaAsset(ctx context.Context, asset storage.MediaAsset) 
 			maxBytes = int64(MaxVideoDownloadBytes)
 		}
 		return client.Get(ctx, asset.S3Key, maxBytes)
+	case "remote":
+		return "", nil, errors.New("remote media asset URL is not persisted")
 	default:
 		if asset.MediaType == string(MediaTypeVideo) {
 			mimeType, data, err := s.Assets.ReadLocal(asset.LocalName)

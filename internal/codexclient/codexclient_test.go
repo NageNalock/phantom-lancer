@@ -208,6 +208,21 @@ func TestEventMapperAppServerAgentMessage(t *testing.T) {
 	}
 }
 
+func TestEventMapperIgnoresAppServerUserMessage(t *testing.T) {
+	mapper := NewEventMapper(200)
+	if event, ok := mapper.MapAppServerNotification("item/started", []byte(`{"item":{"type":"userMessage","id":"u1","content":[{"type":"text","text":"hello"}]}}`)); ok {
+		t.Fatalf("expected app-server user message to be ignored, got %+v", event)
+	}
+}
+
+func TestEventMapperAppServerImageViewPath(t *testing.T) {
+	mapper := NewEventMapper(200)
+	event, ok := mapper.MapAppServerNotification("item/completed", []byte(`{"item":{"type":"imageView","id":"img1","path":"/tmp/codex-out.png"}}`))
+	if !ok || event.EventType != EventToolCompleted || event.ItemType != "imageView" || event.TextPreview != "/tmp/codex-out.png" {
+		t.Fatalf("unexpected image view mapping: ok=%v %+v", ok, event)
+	}
+}
+
 func TestEventMapperExecItemSnakeCase(t *testing.T) {
 	mapper := NewEventMapper(200)
 	event, ok := mapper.MapExecLine([]byte(`{"type":"item.completed","item":{"type":"command_execution","command":"ls"}}`))
@@ -226,6 +241,48 @@ func TestExecTurnInputBuildsArray(t *testing.T) {
 	}
 	if input[1]["type"] != "localImage" || input[1]["path"] != "/tmp/a.png" {
 		t.Fatalf("unexpected image input: %+v", input[1])
+	}
+}
+
+func TestReadThreadArtifactRequiresReferencedImage(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, events.NewHub(), dir, func() ([]string, error) { return []string{dir}, nil }, nil)
+	cleanupCodexTestService(t, svc, store)
+	ws, err := svc.CreateWorkspaceWithOptions(ctx, storage.CodexCliWorkspace{
+		Path:                  dir,
+		TrustState:            "trusted",
+		DefaultSandbox:        "read-only",
+		DefaultApprovalPolicy: "on-request",
+	}, CreateWorkspaceOptions{})
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	thread, err := svc.CreateThread(ctx, ws.ID, "artifact test", "", "read-only", "on-request")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+
+	imagePath := filepath.Join(dir, "out.gif")
+	gif := []byte("GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;")
+	if err := os.WriteFile(imagePath, gif, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ReadThreadArtifact(ctx, thread.ID, imagePath); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected unreferenced artifact to be hidden, got %v", err)
+	}
+
+	svc.appendThreadEvent(ctx, thread.ID, "turn-1", EventToolCompleted, "item/completed", "imageView", imagePath, map[string]any{"item": map[string]any{"type": "imageView", "path": imagePath}})
+	content, err := svc.ReadThreadArtifact(ctx, thread.ID, "file://"+imagePath)
+	if err != nil {
+		t.Fatalf("read referenced artifact: %v", err)
+	}
+	if content.ContentType != "image/gif" || string(content.Data) != string(gif) {
+		t.Fatalf("unexpected artifact content: type=%s bytes=%d", content.ContentType, len(content.Data))
 	}
 }
 

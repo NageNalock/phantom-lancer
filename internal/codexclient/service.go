@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +25,7 @@ import (
 const (
 	MaxAttachmentBytes   = 8 * 1024 * 1024
 	MaxAttachmentsPerReq = 4
+	MaxArtifactBytes     = 20 * 1024 * 1024
 	attachmentTTL        = 24 * time.Hour
 )
 
@@ -101,6 +105,12 @@ type TurnInput struct {
 	ApprovalPolicy string
 	Model          string
 	AttachmentIDs  []string
+}
+
+type ArtifactContent struct {
+	ContentType string
+	Filename    string
+	Data        []byte
 }
 
 type ThreadInput struct {
@@ -550,15 +560,15 @@ func (s *Service) CreateThreadWithInput(ctx context.Context, input ThreadInput) 
 		}
 	}
 	thread, err := s.store.CreateCodexCliThread(ctx, storage.CodexCliThread{
-		WorkspaceID:     workspaceID,
-		Title:           title,
-		Model:           model,
-		SandboxMode:     runPolicy.Sandbox,
-		ApprovalPolicy:  runPolicy.ApprovalPolicy,
-		SourceMode:      sourceMode,
-		ExecutionMode:   executionMode,
-		WorktreeStatus:  map[bool]string{true: "creating", false: ""}[executionMode == "worktree"],
-		MergeStatus:     map[bool]string{true: "not_merged", false: ""}[executionMode == "worktree"],
+		WorkspaceID:    workspaceID,
+		Title:          title,
+		Model:          model,
+		SandboxMode:    runPolicy.Sandbox,
+		ApprovalPolicy: runPolicy.ApprovalPolicy,
+		SourceMode:     sourceMode,
+		ExecutionMode:  executionMode,
+		WorktreeStatus: map[bool]string{true: "creating", false: ""}[executionMode == "worktree"],
+		MergeStatus:    map[bool]string{true: "not_merged", false: ""}[executionMode == "worktree"],
 	})
 	if err != nil {
 		return storage.CodexCliThread{}, err
@@ -1085,6 +1095,141 @@ func (s *Service) appendThreadEvent(ctx context.Context, threadID, turnID, event
 	}
 	s.notifyForThreadEvent(ctx, threadID, turnID, eventType, preview)
 	_ = s.store.PruneCodexCliEvents(ctx, threadID, s.currentSettings().MaxEventsPerThread)
+}
+
+func (s *Service) ReadThreadArtifact(ctx context.Context, threadID, rawPath string) (ArtifactContent, error) {
+	if strings.TrimSpace(threadID) == "" {
+		return ArtifactContent{}, errors.New("thread id is required")
+	}
+	if _, err := s.store.GetCodexCliThread(ctx, threadID); err != nil {
+		return ArtifactContent{}, err
+	}
+	path, err := normalizeArtifactPath(rawPath)
+	if err != nil {
+		return ArtifactContent{}, err
+	}
+	referenced, err := s.threadReferencesArtifactPath(ctx, threadID, path)
+	if err != nil {
+		return ArtifactContent{}, err
+	}
+	if !referenced {
+		return ArtifactContent{}, storage.ErrNotFound
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ArtifactContent{}, storage.ErrNotFound
+		}
+		return ArtifactContent{}, err
+	}
+	if info.IsDir() {
+		return ArtifactContent{}, errors.New("artifact path is a directory")
+	}
+	if info.Size() <= 0 || info.Size() > MaxArtifactBytes {
+		return ArtifactContent{}, fmt.Errorf("artifact image must be 1-%d bytes", MaxArtifactBytes)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ArtifactContent{}, err
+	}
+	if int64(len(data)) > MaxArtifactBytes {
+		return ArtifactContent{}, fmt.Errorf("artifact image must be 1-%d bytes", MaxArtifactBytes)
+	}
+	contentType := artifactImageContentType(data, path)
+	if contentType == "" {
+		return ArtifactContent{}, errors.New("artifact is not a supported image")
+	}
+	return ArtifactContent{
+		ContentType: contentType,
+		Filename:    filepath.Base(path),
+		Data:        data,
+	}, nil
+}
+
+func (s *Service) threadReferencesArtifactPath(ctx context.Context, threadID, path string) (bool, error) {
+	after := int64(0)
+	scanned := 0
+	for scanned < 2000 {
+		events, err := s.store.ListCodexCliEvents(ctx, threadID, after, 500)
+		if err != nil {
+			return false, err
+		}
+		if len(events) == 0 {
+			return false, nil
+		}
+		for _, event := range events {
+			if pathStringMatches(event.TextPreview, path) || payloadReferencesPath(event.Payload, path) {
+				return true, nil
+			}
+		}
+		scanned += len(events)
+		after = events[len(events)-1].Sequence
+	}
+	return false, nil
+}
+
+func normalizeArtifactPath(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", errors.New("artifact path is required")
+	}
+	if parsed, err := url.Parse(value); err == nil && parsed.Scheme == "file" {
+		value = parsed.Path
+	}
+	if !filepath.IsAbs(value) {
+		return "", errors.New("artifact path must be absolute")
+	}
+	return filepath.Clean(value), nil
+}
+
+func payloadReferencesPath(value any, target string) bool {
+	switch typed := value.(type) {
+	case string:
+		return pathStringMatches(typed, target)
+	case map[string]any:
+		for _, nested := range typed {
+			if payloadReferencesPath(nested, target) {
+				return true
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if payloadReferencesPath(nested, target) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pathStringMatches(value, target string) bool {
+	normalized, err := normalizeArtifactPath(value)
+	return err == nil && normalized == target
+}
+
+func artifactImageContentType(data []byte, path string) string {
+	detected := http.DetectContentType(data)
+	if allowedArtifactImageType(detected) {
+		return detected
+	}
+	if len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
+		return "image/webp"
+	}
+	extType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+	if allowedArtifactImageType(extType) && strings.HasPrefix(detected, "image/") {
+		return extType
+	}
+	return ""
+}
+
+func allowedArtifactImageType(contentType string) bool {
+	contentType = strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	switch contentType {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return true
+	default:
+		return false
+	}
 }
 
 // handleNotification is invoked by the supervisor for every app-server

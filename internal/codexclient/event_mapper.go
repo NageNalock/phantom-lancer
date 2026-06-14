@@ -157,11 +157,7 @@ func (m *EventMapper) mapV2Item(method string, payload map[string]any, completed
 	event := MappedEvent{CodexMethod: method, ItemType: itemType, Payload: redactPayload(payload)}
 	switch itemType {
 	case "userMessage":
-		if completed {
-			return MappedEvent{}, false // user message already recorded locally on turn start
-		}
-		event.EventType = EventMessageUser
-		event.TextPreview = Preview(extractContentText(item), m.maxPreview)
+		return MappedEvent{}, false // user messages are recorded locally on turn start/steer
 	case "agentMessage":
 		event.EventType = EventMessageAgent
 		event.TextPreview = Preview(firstString(item, "text"), m.maxPreview)
@@ -201,6 +197,9 @@ func (m *EventMapper) mapV2Item(method string, payload map[string]any, completed
 			event.EventType = EventToolCompleted
 		} else {
 			event.EventType = EventToolStarted
+		}
+		if itemType == "imageView" {
+			event.TextPreview = Preview(firstString(item, "path", "url", "src", "filePath", "file"), m.maxPreview)
 		}
 	default:
 		return MappedEvent{}, false

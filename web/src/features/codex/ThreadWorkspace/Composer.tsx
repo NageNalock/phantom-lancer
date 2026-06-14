@@ -84,7 +84,7 @@ export function Composer(props: ComposerProps) {
   }, [attachFiles]);
   return (
     <form
-      className={`grid gap-2 rounded-lg border border-transparent p-1 transition ${dragging ? "border-[var(--accent)] bg-[var(--accent-soft)]" : ""}`}
+      className={`codex-composer ${dragging ? "codex-composer-dragging" : ""}`}
       onDragEnter={(event) => {
         event.preventDefault();
         setDragging(true);
@@ -99,7 +99,7 @@ export function Composer(props: ComposerProps) {
       <textarea
         aria-label="Codex prompt"
         autoComplete="off"
-        className="input min-h-20 resize-y"
+        className="chat-composer-input codex-composer-input"
         name="codex_prompt"
         onChange={(event) => props.onPrompt(event.target.value)}
         onKeyDown={(event) => {
@@ -155,9 +155,10 @@ export function Composer(props: ComposerProps) {
         ref={fileInputRef}
         type="file"
       />
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="codex-composer-footer">
+        <div className="codex-composer-controls">
         <Field label="沙箱">
-          <select className="select" disabled={sandboxLocked} name="codex_sandbox" onChange={(event) => props.onSandbox(event.target.value)} value={sandboxLocked ? "read-only" : props.sandbox}>
+          <select className="select codex-composer-select" disabled={sandboxLocked} name="codex_sandbox" onChange={(event) => props.onSandbox(event.target.value)} value={sandboxLocked ? "read-only" : props.sandbox}>
             <option value="read-only">只读咨询</option>
             {sandboxLocked ? null : (
               <option disabled={!workspaceWriteAllowed} value="workspace-write">
@@ -167,15 +168,15 @@ export function Composer(props: ComposerProps) {
           </select>
         </Field>
         <Field label="审批">
-          <select className="select" name="codex_approval_policy" onChange={(event) => props.onApproval(event.target.value)} value={props.approval}>
+          <select className="select codex-composer-select" name="codex_approval_policy" onChange={(event) => props.onApproval(event.target.value)} value={props.approval}>
             <option value="on-request">on-request</option>
           </select>
         </Field>
         {skills.length ? (
           <Field label="技能">
-	          <select
-	            className="select"
-	            name="codex_insert_skill"
+            <select
+              className="select codex-composer-select"
+              name="codex_insert_skill"
               onChange={(event) => {
                 props.onInsertSkill(event.target.value);
                 event.target.value = "";
@@ -193,7 +194,7 @@ export function Composer(props: ComposerProps) {
         ) : null}
         {models.length ? (
           <Field label="模型">
-	          <select className="select" name="codex_model" onChange={(event) => props.onModel(event.target.value)} value={props.model}>
+            <select className="select codex-composer-model" name="codex_model" onChange={(event) => props.onModel(event.target.value)} value={props.model}>
               {!props.model ? <option disabled value="">选择模型</option> : null}
               {models.map((item) => (
                 <option key={item.id} value={item.id}>
@@ -205,15 +206,19 @@ export function Composer(props: ComposerProps) {
           </Field>
         ) : (
           <Field label="模型">
-	          <input autoComplete="off" className="input w-40" name="codex_model" onChange={(event) => props.onModel(event.target.value)} placeholder={modelRequired ? "模型（必填）" : "模型（可选）"} spellCheck={false} value={props.model} />
+            <input autoComplete="off" className="input codex-composer-model" name="codex_model" onChange={(event) => props.onModel(event.target.value)} placeholder={modelRequired ? "模型（必填）" : "模型（可选）"} spellCheck={false} value={props.model} />
           </Field>
         )}
-        {modelMissing ? <span className="text-xs text-[var(--danger)]">请选择一个可用模型</span> : null}
-        <Button disabled={remaining <= 0} onClick={() => fileInputRef.current?.click()}>
-          添加图片{remaining > 0 ? ` ${activeAttachmentCount}/${MAX_ATTACHMENTS}` : ""}
-        </Button>
-        <span className="text-xs text-[var(--muted)]">可多选、拖拽或粘贴截图</span>
-        <div className="ml-auto flex gap-2">
+        <div className="codex-composer-control">
+          <span className="codex-composer-label">图片</span>
+          <Button className="codex-composer-button" disabled={remaining <= 0} onClick={() => fileInputRef.current?.click()}>
+            添加 {activeAttachmentCount}/{MAX_ATTACHMENTS}
+          </Button>
+        </div>
+        {modelMissing ? <span className="codex-composer-warning">请选择一个可用模型</span> : null}
+        <span className="codex-composer-help">支持多选、拖拽或粘贴截图</span>
+          </div>
+        <div className="codex-composer-actions">
           {interactive && hasActiveTurn ? (
             <>
               <Button disabled={steering || !sendable} onClick={() => props.onSteer()}>

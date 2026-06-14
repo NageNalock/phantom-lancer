@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -356,6 +357,10 @@ func (s *Server) handleCodexThreadSubroutes(w http.ResponseWriter, r *http.Reque
 			s.handleListCodexBrowserSessions(w, r, threadID)
 			return
 		}
+		if len(parts) == 3 && parts[1] == "artifacts" && parts[2] == "content" {
+			s.handleCodexArtifactContent(w, r, threadID)
+			return
+		}
 		writeError(w, http.StatusNotFound, "not_found", "未找到会话路由")
 		return
 	}
@@ -437,6 +442,25 @@ func (s *Server) handleCodexThreadSubroutes(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeError(w, http.StatusNotFound, "not_found", "未找到会话路由")
+}
+
+func (s *Server) handleCodexArtifactContent(w http.ResponseWriter, r *http.Request, threadID string) {
+	content, err := s.codex.ReadThreadArtifact(r.Context(), threadID, r.URL.Query().Get("path"))
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "codex_artifact_not_found", "未找到该会话引用的图片")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "codex_artifact_invalid", codexclient.Redact(err.Error(), 200))
+		return
+	}
+	w.Header().Set("Content-Type", content.ContentType)
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	if content.Filename != "" {
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": content.Filename}))
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(content.Data)
 }
 
 func (s *Server) handleCreateCodexTurn(w http.ResponseWriter, r *http.Request, threadID string) {

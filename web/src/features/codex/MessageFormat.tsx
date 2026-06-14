@@ -39,6 +39,11 @@ const markdownComponents: Components = {
       </a>
     );
   },
+  img({ alt, node: _node, src, ...props }) {
+    const safeSrc = safeImageSrc(src);
+    if (!safeSrc) return null;
+    return <img {...props} alt={alt || ""} className="message-image" loading="lazy" src={safeSrc} />;
+  },
   code({ children, className, node: _node, ...props }) {
     const source = String(children);
     const rawCode = source.replace(/\n$/, "");
@@ -166,6 +171,13 @@ function highlightLanguage(language: string): string {
 function safeLinkHref(href?: string): string {
   const value = href?.trim() || "";
   return /^(https?:|mailto:)/i.test(value) ? value : "";
+}
+
+function safeImageSrc(src?: string): string {
+  const value = src?.trim() || "";
+  if (/^https?:\/\//i.test(value)) return value;
+  if (/^\/api\/(codex|images)\//i.test(value)) return value;
+  return "";
 }
 
 function escapeHtml(value: string): string {

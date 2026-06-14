@@ -507,45 +507,8 @@ func (s *Service) finalizeVideoJob(ctx context.Context, job storage.MediaGenerat
 		if s.Log != nil {
 			s.Log.Warn("video download failed", "job_id", job.ID, "source_host", safelog.HostLabel(poll.VideoURL), "error", safelog.Error(err, 240))
 		}
-		outputs := []storage.MediaGenerationOutput{{
-			Slot:              1,
-			MediaType:         string(MediaTypeVideo),
-			RemoteURLRedacted: redactedURL(poll.VideoURL),
-			MimeType:          mimeType,
-			Storage:           "remote",
-			Metadata: map[string]any{
-				"providerVideoURL": "redacted",
-				"downloadError":    safelog.Error(err, 200),
-			},
-		}}
-		completed, dbErr := s.Store.CompleteMediaGenerationJob(ctx, job.ID, agnesVideosEndpoint, map[string]any{
-			"width":     poll.Width,
-			"height":    poll.Height,
-			"numFrames": poll.NumFrames,
-			"frameRate": poll.FrameRate,
-			"seconds":   poll.Seconds,
-		}, outputs)
-		if dbErr != nil {
-			_, _ = s.failMediaJob(ctx, job.ID, agnesVideosEndpoint, fmt.Sprintf("save outputs failed: %v", dbErr))
-			return
-		}
-		s.appendMedia(ctx, job.ID, "media.job.completed", map[string]any{
-			"mediaType":        string(MediaTypeVideo),
-			"provider":         completed.Provider,
-			"outputCount":      len(completed.Outputs),
-			"remoteDownloaded": false,
-			"warning":          "video saved as remote-only because download failed",
-		})
-		_, _ = s.Store.AddAudit(ctx, storage.AuditEvent{
-			EventType: "media.video.job.completed_degraded",
-			RiskLevel: "medium",
-			Summary:   "Video job completed with degraded storage",
-			Payload: map[string]any{
-				"jobId":   completed.ID,
-				"warning": "video download failed, stored remote URL only",
-				"error":   safelog.Error(err, 200),
-			},
-		})
+		s.appendMedia(ctx, job.ID, "media.asset.store_failed", map[string]any{"mediaType": string(MediaTypeVideo), "message": safelog.Error(err, 200)})
+		_, _ = s.failMediaJob(ctx, job.ID, agnesVideosEndpoint, "provider completed but generated video could not be stored; check media storage settings")
 		return
 	}
 	if s.Log != nil {
@@ -578,17 +541,24 @@ func (s *Service) finalizeVideoJob(ctx context.Context, job storage.MediaGenerat
 	}
 	storageSettings, _ := s.Store.GetImageStorageSettings(ctx)
 	createdAsset, createErr := s.Store.CreateMediaAsset(ctx, asset)
-	if createErr == nil {
-		stored, storeErr := s.storeMediaAssetBytes(ctx, createdAsset, data, mimeType, storageSettings)
-		if storeErr != nil {
-			createdAsset.LastError = storeErr.Error()
-			_, _ = s.Store.UpdateMediaAsset(ctx, createdAsset)
-		} else {
-			createdAsset = stored
+	if createErr != nil {
+		if s.Log != nil {
+			s.Log.Warn("video asset create failed", "job_id", job.ID, "error", safelog.Error(createErr, 200))
 		}
-	} else if s.Log != nil {
-		s.Log.Warn("video asset create failed", "job_id", job.ID, "error", safelog.Error(createErr, 200))
+		s.appendMedia(ctx, job.ID, "media.asset.store_failed", map[string]any{"mediaType": string(MediaTypeVideo), "message": safelog.Error(createErr, 200)})
+		_, _ = s.failMediaJob(ctx, job.ID, agnesVideosEndpoint, "provider completed but generated video asset record could not be created")
+		return
 	}
+	stored, storeErr := s.storeMediaAssetBytes(ctx, createdAsset, data, mimeType, storageSettings)
+	if storeErr != nil {
+		createdAsset.Status = "failed"
+		createdAsset.LastError = storeErr.Error()
+		_, _ = s.Store.UpdateMediaAsset(ctx, createdAsset)
+		s.appendMedia(ctx, job.ID, "media.asset.store_failed", map[string]any{"assetId": createdAsset.ID, "mediaType": string(MediaTypeVideo), "message": safelog.Error(storeErr, 200)})
+		_, _ = s.failMediaJob(ctx, job.ID, agnesVideosEndpoint, "provider completed but generated video could not be stored; check media storage settings")
+		return
+	}
+	createdAsset = stored
 	output := storage.MediaGenerationOutput{
 		Slot:              1,
 		MediaType:         string(MediaTypeVideo),
