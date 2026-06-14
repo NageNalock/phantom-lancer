@@ -1,4 +1,4 @@
-import type { ApiError } from "../app/types";
+import type { ApiError, AuditEvent, EventRecord } from "../app/types";
 
 interface ApiOptions {
   method?: string;
@@ -324,6 +324,7 @@ export interface MailRuntimeStatus {
   account_count: number;
   last_probe_at: string;
   last_change_at: string;
+  emergency_inbound_reject?: MailEmergencyInboundRejectState;
 }
 export interface MailRuntimeProbeRequest {
   layers?: number[];
@@ -369,6 +370,50 @@ export function mailRuntimeRestart(req: MailLifecycleRequest = {}, csrf?: string
 }
 export function mailRuntimeProbe(req: MailRuntimeProbeRequest = {}, csrf?: string) {
   return api<MailRuntimeProbeResponse>("/api/mail/runtime/probe", { method: "POST", csrf, body: req });
+}
+
+export interface MailEmergencyInboundRejectState {
+  enabled: boolean;
+  reason?: string;
+  mode: string;
+  applied_by?: string;
+  applied_at?: string;
+  auto_restore_at?: string;
+  last_auto_restore_attempt_at?: string;
+  auto_restore_blocked_at?: string;
+  last_normal_config_hash?: string;
+  last_config_hash?: string;
+  last_apply_summary?: string;
+  last_failure?: string;
+  last_failure_step?: number;
+  last_rollback_result?: string;
+  last_reload_result?: string;
+  last_probe_result?: string;
+  restore_conflict?: string;
+  restore_expected_hash?: string;
+  restore_disk_hash?: string;
+  apply_unknown?: boolean;
+  affected_domains: number;
+  affected_accounts: number;
+  actual_mox_strategy: string;
+  degraded_implementation?: boolean;
+  degraded_reason?: string;
+}
+
+export interface MailEmergencyInboundRejectRequest {
+  reason?: string;
+  confirmation: string;
+  auto_restore_at?: string;
+}
+
+export function mailEmergencyInboundRejectGet() {
+  return api<MailEmergencyInboundRejectState>("/api/mail/emergency/inbound-reject", { method: "GET" });
+}
+export function mailEmergencyInboundRejectEnable(req: MailEmergencyInboundRejectRequest, csrf?: string) {
+  return api<{ state: MailEmergencyInboundRejectState; pipeline?: MailPipelineResult }>("/api/mail/emergency/inbound-reject/enable", { method: "POST", csrf, body: req });
+}
+export function mailEmergencyInboundRejectDisable(req: MailEmergencyInboundRejectRequest, csrf?: string) {
+  return api<{ state: MailEmergencyInboundRejectState; pipeline?: MailPipelineResult }>("/api/mail/emergency/inbound-reject/disable", { method: "POST", csrf, body: req });
 }
 
 // --- Phase 3: Config application + drift + domains ---------------------------
@@ -737,6 +782,11 @@ export interface MailAccount {
   imap_sync_enabled: boolean;
   imap_sync_state: "idle" | "syncing" | "error" | "paused";
   imap_error?: string;
+  webapi_credential_present?: boolean;
+  webapi_endpoint_valid?: boolean;
+  webapi_runtime_available?: boolean;
+  send_disabled_reason?: string;
+  can_send?: boolean;
   last_login_at?: string;
   created_at: string;
   updated_at: string;
@@ -831,7 +881,7 @@ export function mailAccountList(q: { domain_id?: string; status?: string } = {})
   if (q.domain_id) params.set("domain_id", q.domain_id);
   if (q.status) params.set("status", q.status);
   const query = params.toString();
-  return api<MailAccount[]>(`/api/mail/accounts${query ? `?${query}` : ""}`, { method: "GET" });
+  return api<{ items?: MailAccount[]; count?: number; active_count?: number; admin_count?: number }>(`/api/mail/accounts${query ? `?${query}` : ""}`, { method: "GET" });
 }
 export function mailAccountGet(id: string) {
   return api<MailAccount>(`/api/mail/accounts/${encodeURIComponent(id)}`, { method: "GET" });
@@ -876,16 +926,25 @@ export function mailAliasDelete(id: string, csrf?: string) {
 
 // ---- Import Registration (4) ----
 export function mailImportRegister(r: ImportRegisterReq, csrf?: string) {
-  return api<ImportRegistration>("/api/mail/setup/import/register", { method: "POST", csrf, body: r });
+  return api<ImportRegistration>("/api/mail/imports", { method: "POST", csrf, body: r });
 }
 export function mailImportList() {
-  return api<ImportRegistration[]>("/api/mail/setup/import", { method: "GET" });
+  return api<ImportRegistration[]>("/api/mail/imports", { method: "GET" });
 }
 export function mailImportDelete(id: string, csrf?: string) {
-  return api<void>(`/api/mail/setup/import/${encodeURIComponent(id)}`, { method: "DELETE", csrf });
+  return api<void>(`/api/mail/imports/${encodeURIComponent(id)}`, { method: "DELETE", csrf });
 }
 export function mailImportProbe(id: string, csrf?: string) {
-  return api<ImportRegistration>(`/api/mail/setup/import/${encodeURIComponent(id)}/probe`, { method: "POST", csrf, body: {} });
+  return api<ImportRegistration>(`/api/mail/imports/${encodeURIComponent(id)}/probe`, { method: "POST", csrf, body: {} });
+}
+
+export function auditEvents() {
+  return api<{ items: AuditEvent[] }>("/api/audit/events", { method: "GET" });
+}
+
+export function eventHistory(scope: string, id: string, limit = 200) {
+  const params = new URLSearchParams({ scope, id, limit: String(limit) });
+  return api<{ items: EventRecord[] }>(`/api/events/history?${params.toString()}`, { method: "GET" });
 }
 
 // --- Phase 6: Delivery / Queue / Suppression / Webhook / Outbound -----------
@@ -908,6 +967,8 @@ export interface MailDeliveryEvent {
   last_attempt_at?: string;
   completed_at?: string;
   recipient_hash?: string;
+  queue_msg_id?: number;
+  from_id?: string;
   created_at: string;
 }
 export interface DeliveryListResp {
@@ -1237,7 +1298,7 @@ export interface MailMessageListResp {
 export interface MailSearchQuery {
   query: string;
   account_ids?: string[];
-  scope?: "one" | "all" | "attachments";
+  scope?: "one" | "all" | "attachments" | "has_attachment";
   limit?: number;
   offset?: number;
 }
@@ -1713,4 +1774,3 @@ export function mailDangerHardDelete(conf: DangerDeleteConfirmation, csrf?: stri
 export function mailDangerRequirements() {
   return api<DangerRequirementsResp>("/api/mail/danger/requirements", { method: "GET" });
 }
-

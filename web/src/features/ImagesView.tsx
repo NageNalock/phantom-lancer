@@ -379,7 +379,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
             </div>
           ) : null}
         </div>
-        <ImagesInspector activeTab={activeTab} asset={selectedAsset} assets={libraryAssets} jobs={historyJobs} libraryScope={libraryScope} onArchive={(asset) => void archiveAsset(asset)} onDelete={(asset) => void deleteAsset(asset)} onMarkPrivate={(asset, nextPrivate) => void setAssetPrivate(asset, nextPrivate)} status={status} storageSettings={storageSettings} />
+        <ImagesInspector activeTab={activeTab} asset={selectedAsset} assets={libraryAssets} jobs={historyJobs} libraryScope={libraryScope} onArchive={(asset) => void archiveAsset(asset)} onDelete={(asset) => void deleteAsset(asset)} onMarkPrivate={(asset, nextPrivate) => void setAssetPrivate(asset, nextPrivate)} onUseForImage={useAssetForImageToImage} status={status} storageSettings={storageSettings} />
       </div>
       {dangerConfirmDialog}
     </>

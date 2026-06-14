@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"phantom-lancer/internal/mail/certmanager"
+	"phantom-lancer/internal/mail/probes"
 	"phantom-lancer/internal/storage"
 )
 
@@ -106,9 +107,9 @@ type CertIssueRequest struct {
 
 // CertRenewResponse wraps the pipeline result for a renewal operation.
 type CertRenewResponse struct {
-	Renewed  bool                `json:"renewed"`
-	Msg      string              `json:"message"`
-	Pipeline *CertPipelineResult `json:"pipeline,omitempty"`
+	Renewed  bool                 `json:"renewed"`
+	Msg      string               `json:"message"`
+	Pipeline *CertPipelineResult  `json:"pipeline,omitempty"`
 	Cert     *CertificateResponse `json:"cert,omitempty"`
 }
 
@@ -133,8 +134,8 @@ type ManualChallenge struct {
 	ID        string `json:"id"`
 	CertID    string `json:"cert_id"`
 	Domain    string `json:"domain"`
-	FQDN      string `json:"fqdn"`     // _acme-challenge.<domain>.
-	Value     string `json:"value"`    // the TXT record value
+	FQDN      string `json:"fqdn"`  // _acme-challenge.<domain>.
+	Value     string `json:"value"` // the TXT record value
 	ExpiresAt string `json:"expires_at"`
 	CreatedAt string `json:"created_at"`
 }
@@ -170,13 +171,13 @@ type CertPipelineStep struct {
 
 // CertPipelineResult is the synchronous result of an issue / renew operation.
 type CertPipelineResult struct {
-	Success     bool             `json:"success"`
-	FailureStep int              `json:"failure_step"`
-	RolledBack  bool             `json:"rolled_back"`
-	RollbackErr string           `json:"rollback_err,omitempty"`
-	Summary     string           `json:"summary"`
+	Success     bool               `json:"success"`
+	FailureStep int                `json:"failure_step"`
+	RolledBack  bool               `json:"rolled_back"`
+	RollbackErr string             `json:"rollback_err,omitempty"`
+	Summary     string             `json:"summary"`
 	Steps       []CertPipelineStep `json:"steps,omitempty"`
-	CertID      string           `json:"cert_id,omitempty"`
+	CertID      string             `json:"cert_id,omitempty"`
 }
 
 // -----------------------------------------------------------------------------
@@ -305,9 +306,9 @@ func (s *Service) deriveWrapKey() []byte {
 // certmanager.DNSProvider interface so rows can be dropped directly into the
 // certmanager.Issue pipeline.
 //
-// For token-based providers (cloudflare/dnspod/route53) Phase 4 ships STUB
-// implementations that return success — a future PR vendors the real lego
-// adapters against the same interface without changing call sites.
+// For token-based providers (cloudflare/dnspod/route53), SetTXT/RemoveTXT call
+// the public provider APIs directly. Manual mode persists challenges for the
+// operator to create and confirm.
 // For the "manual" kind, SetTXT/RemoveTXT forward to a Persist callback that
 // writes rows into mail_manual_challenges via SQL.
 // -----------------------------------------------------------------------------
@@ -319,9 +320,7 @@ type serviceDNSProviderAdapter struct {
 	cfgOnce sync.Once
 	cfgMap  map[string]string
 	cfgErr  error
-	// inner is a real certmanager.DNSProvider built from (kind, id, label, config).
-	// For manual it's a *certmanager.ManualDNSProvider with Persist wired; for
-	// token kinds Phase 4 it's a certmanager-provider stub (NewDNSProviderFromConfig).
+	// inner is a certmanager.DNSProvider built from (kind, id, label, config).
 	inner     certmanager.DNSProvider
 	innerOnce sync.Once
 	innerErr  error
@@ -391,21 +390,11 @@ func (a *serviceDNSProviderAdapter) SetTXT(ctx context.Context, fqdn, value stri
 	if kind == "manual" {
 		return a.svc.persistManualChallenge(fqdn, value, "", "pending")
 	}
-	// Token-based: Phase 4 stub — always succeed.  The real vendor adapters
-	// will replace this body without changing the interface.
 	inner, err := a.getInner()
 	if err != nil {
-		// Fallback: succeed trivially so the pipeline keeps going for stubs.
-		_ = err
-		return nil
+		return err
 	}
 	if err := inner.SetTXT(ctx, fqdn, value); err != nil {
-		// If the inner provider returns a "not wired" descriptive error, we
-		// still return nil for Phase 4 so the skeleton pipeline can proceed.
-		// A future PR will surface these.
-		if strings.Contains(err.Error(), "not wired") {
-			return nil
-		}
 		return err
 	}
 	return nil
@@ -419,12 +408,9 @@ func (a *serviceDNSProviderAdapter) RemoveTXT(ctx context.Context, fqdn, value s
 	}
 	inner, err := a.getInner()
 	if err != nil {
-		return nil
+		return err
 	}
 	if err := inner.RemoveTXT(ctx, fqdn, value); err != nil {
-		if strings.Contains(err.Error(), "not wired") {
-			return nil
-		}
 		return err
 	}
 	return nil
@@ -490,9 +476,9 @@ func (s *Service) MailDNSProviderUpsert(ctx context.Context, req DNSProviderUpse
 
 	// Build storage row.
 	row := storage.MailDNSProvider{
-		ID:                   req.ID,
-		Kind:                 kind,
-		DisplayName:          req.DisplayName,
+		ID:                    req.ID,
+		Kind:                  kind,
+		DisplayName:           req.DisplayName,
 		APICredentialsWrapped: wrapped,
 	}
 
@@ -816,16 +802,17 @@ func (s *Service) MailCertificateIssue(ctx context.Context, req CertIssueRequest
 		return nil
 	}
 
-	// --- reloadFn (Phase 5 will wire mox reload; Phase 4 stub) ---
 	reloadFn := func(ctx2 context.Context) error {
-		_ = ctx2
-		return nil
+		_, err := s.Restart(ctx2, LifecycleRequest{Reason: "mail certificate issued"})
+		return err
 	}
 
-	// --- TLSProbe stub ---
 	tlsProbe := func(ctx2 context.Context) (string, error) {
-		_ = ctx2
-		return "good", nil
+		results, err := s.runAllProbes(ctx2, []int{4, 5})
+		if err != nil {
+			return "", err
+		}
+		return probes.Summary(results).String(), nil
 	}
 
 	// --- Run the pipeline ---
@@ -1124,8 +1111,17 @@ func (s *Service) renewalIssueWithAutoOnly(ctx context.Context, req CertIssueReq
 		return nil
 	}
 
-	reloadFn := func(ctx2 context.Context) error { _ = ctx2; return nil }
-	tlsProbe := func(ctx2 context.Context) (string, error) { _ = ctx2; return "good", nil }
+	reloadFn := func(ctx2 context.Context) error {
+		_, err := s.Restart(ctx2, LifecycleRequest{Reason: "mail certificate renewed"})
+		return err
+	}
+	tlsProbe := func(ctx2 context.Context) (string, error) {
+		results, err := s.runAllProbes(ctx2, []int{4, 5})
+		if err != nil {
+			return "", err
+		}
+		return probes.Summary(results).String(), nil
+	}
 	persistCallback := func(fqdn, value, domain string) error {
 		return s.persistManualChallenge(fqdn, value, domain, "pending")
 	}
@@ -1205,22 +1201,41 @@ func (s *Service) renewalIssueWithAutoOnly(ctx context.Context, req CertIssueReq
 	}, nil
 }
 
-// MailCertificateRollback restores a previous PEM if a backup exists.
-// (Certmanager's pipeline already does rollback for step 8-10 failures; this
-// is an operator-initiated best-effort path.  Phase 4 logs the intent.)
+// MailCertificateRollback restores previous PEM artifacts if .bak files exist.
 func (s *Service) MailCertificateRollback(ctx context.Context, id string) (*CertRollbackResponse, error) {
-	_, err := s.store.MailGetCertificate(ctx, id)
+	cert, err := s.store.MailGetCertificate(ctx, id)
 	if err != nil {
 		return nil, errors.New("certificate not found")
 	}
-	// Best-effort: certmanager's pipeline tier handles atomic rollback.
-	// The service-level rollback is a Phase 5 feature that restores .bak.
+	paths := []string{cert.PrivkeyPath, cert.ChainPath, cert.CertPath}
+	restored := 0
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			return nil, fmt.Errorf("certificate rollback: empty artifact path for %s", id)
+		}
+		if err := certmanager.CopyAtomic(p+".bak", p); err != nil {
+			return nil, fmt.Errorf("certificate rollback: restore %s: %w", p, err)
+		}
+		restored++
+	}
+	if _, err := s.Restart(ctx, LifecycleRequest{Reason: "mail certificate rollback"}); err != nil {
+		return nil, fmt.Errorf("certificate rollback: restored %d artifact(s), but Mox restart failed: %w", restored, err)
+	}
+	results, err := s.runAllProbes(ctx, []int{4, 5})
+	if err != nil {
+		return nil, fmt.Errorf("certificate rollback: restored %d artifact(s), but TLS probe failed: %w", restored, err)
+	}
+	overall := probes.Summary(results)
+	if overall.String() != "good" && overall.String() != "warn" {
+		return nil, fmt.Errorf("certificate rollback: restored %d artifact(s), but TLS probe state=%s", restored, overall.String())
+	}
 	s.addAudit(ctx, "mail.cert.rollback",
-		fmt.Sprintf("rollback requested for certificate %s (stub — no-op)", id),
-		map[string]any{"cert_id": id}, "high")
+		fmt.Sprintf("rolled back certificate %s from .bak artifacts", id),
+		map[string]any{"cert_id": id, "restored": restored, "probe": overall.String()}, "high")
+	s.publish(ctx, "mail.cert.rollback", map[string]any{"cert_id": id, "restored": restored, "probe": overall.String()})
 	return &CertRollbackResponse{
-		Restored: false,
-		Message:  "rollback not wired in Phase 4 — restore .bak files manually",
+		Restored: true,
+		Message:  fmt.Sprintf("restored %d PEM artifact(s); probe=%s", restored, overall.String()),
 	}, nil
 }
 

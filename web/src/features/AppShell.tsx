@@ -160,6 +160,9 @@ function activeStatusPill(activeTab: MainTab, data: AppData) {
   }
   if (activeTab === "mail") {
     const mail = data.mail.status;
+    if (mail?.emergency_inbound_reject?.enabled) {
+      return <Pill tone="danger">Mail 降级保护</Pill>;
+    }
     const tone: "good" | "warn" = mail?.service_ready ? "good" : "warn";
     return <Pill tone={tone}>Mail {mail?.service_ready ? "就绪" : mail?.ok ? "待启动" : "未初始化"}</Pill>;
   }

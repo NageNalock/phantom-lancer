@@ -2,13 +2,23 @@ package mail
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"phantom-lancer/internal/ids"
 	"phantom-lancer/internal/mail/imapsync"
 	"phantom-lancer/internal/storage"
+
+	"github.com/mjl-/mox/webapi"
 )
 
 // ---- Folders --------------------------------------------------------------
@@ -37,61 +47,13 @@ func (s *Service) MailFolderList(ctx context.Context, accountID string) ([]stora
 // by ID (if set) — if the row already exists we call UpdateFolder, otherwise
 // we insert a new one.
 func (s *Service) MailFolderUpsert(ctx context.Context, f storage.MailFolder) (*storage.MailFolder, error) {
-	if err := s.checkWriteGuard(ctx); err != nil {
-		return nil, err
-	}
-	if f.AccountID == "" {
-		return nil, errors.New("account_id is required")
-	}
-	if strings.TrimSpace(f.Name) == "" {
-		return nil, errors.New("folder name is required")
-	}
-	if f.ID != "" {
-		_, err := s.store.MailGetFolder(ctx, f.ID)
-		if err == nil {
-			updated, uerr := s.store.MailUpdateFolder(ctx, f)
-			if uerr != nil {
-				return nil, uerr
-			}
-			s.emit(ctx, EventTypeFolderUpdated, map[string]any{"folder_id": f.ID, "name": f.Name})
-			return updated, nil
-		}
-		if !errors.Is(err, storage.ErrNotFound) {
-			return nil, err
-		}
-		// Fall through to create if ID was supplied but row missing.
-	}
-	created, cerr := s.store.MailCreateFolder(ctx, f)
-	if cerr != nil {
-		return nil, cerr
-	}
-	s.emit(ctx, EventTypeFolderCreated, map[string]any{"folder_id": created.ID, "name": created.Name})
-	return created, nil
+	return nil, capabilityUnavailable("mail folder mutation requires a real Mox/IMAP adapter")
 }
 
 // MailFolderDelete removes a folder.  System folders (role = inbox|sent|drafts|trash|junk|archive)
 // cannot be deleted because IMAP expects them to always be present.
 func (s *Service) MailFolderDelete(ctx context.Context, folderID string) error {
-	if err := s.checkWriteGuard(ctx); err != nil {
-		return err
-	}
-	if folderID == "" {
-		return storage.ErrNotFound
-	}
-	existing, err := s.store.MailGetFolder(ctx, folderID)
-	if err != nil {
-		return err
-	}
-	if existing.Role != "" {
-		return fmt.Errorf("cannot delete system folder with role %q", existing.Role)
-	}
-	// Best-effort: remove parts owned by the folder before dropping the row.
-	_, _ = s.store.MailDeleteMessagePartsByFolder(ctx, folderID)
-	if err := s.store.MailDeleteFolder(ctx, folderID); err != nil {
-		return err
-	}
-	s.emit(ctx, EventTypeFolderDeleted, map[string]any{"folder_id": folderID, "name": existing.Name})
-	return nil
+	return capabilityUnavailable("mail folder deletion requires a real Mox/IMAP adapter")
 }
 
 // ---- Messages (MIME parts) -----------------------------------------------
@@ -210,7 +172,7 @@ func (s *Service) MailMessageGet(ctx context.Context, messageID string) (*MailMe
 		return nil, err
 	}
 	if len(parts) == 0 {
-		return nil, storage.ErrNotFound
+		return s.mailMessageGetP7(ctx, messageID)
 	}
 	var bodyText string
 	var attachmentCount int
@@ -225,20 +187,74 @@ func (s *Service) MailMessageGet(ctx context.Context, messageID string) (*MailMe
 	}
 	s.emit(ctx, EventTypeMessageViewed, map[string]any{"message_id": messageID, "parts": len(parts)})
 	return &MailMessageDetail{
-		MessageID:        messageID,
-		Parts:            parts,
-		BodyText:         bodyText,
-		AttachmentCount:  attachmentCount,
+		MessageID:       messageID,
+		Parts:           parts,
+		BodyText:        bodyText,
+		AttachmentCount: attachmentCount,
+	}, nil
+}
+
+func (s *Service) mailMessageGetP7(ctx context.Context, messageID string) (*MailMessageDetail, error) {
+	msg, err := s.store.MailMessageGet(ctx, messageID)
+	if err != nil {
+		return nil, err
+	}
+	parts := []storage.MailMessagePart{
+		{
+			ID:          msg.ID + ":headers",
+			FolderID:    msg.FolderID,
+			MessageID:   msg.ID,
+			PartID:      "HEADERS",
+			ContentType: "message/rfc822-headers",
+			SizeBytes:   int64(len(msg.Subject) + len(msg.FromListCSV) + len(msg.ToListCSV)),
+			DecodedText: fmt.Sprintf("Subject: %s\nFrom: %s\nTo: %s\nDate: %s\n", msg.Subject, msg.FromListCSV, msg.ToListCSV, msg.DateSent),
+			CreatedAt:   msg.CreatedAt,
+		},
+	}
+	if msg.BodyText != "" {
+		parts = append(parts, storage.MailMessagePart{
+			ID:          msg.ID + ":text",
+			FolderID:    msg.FolderID,
+			MessageID:   msg.ID,
+			PartID:      "TEXT",
+			ContentType: "text/plain",
+			SizeBytes:   int64(len(msg.BodyText)),
+			DecodedText: msg.BodyText,
+			CreatedAt:   msg.CreatedAt,
+		})
+	}
+	attachments := p7AttachmentInfos(msg.AttachmentsJSON)
+	for i := range attachments {
+		parts = append(parts, storage.MailMessagePart{
+			ID:           msg.ID + ":att:" + fmt.Sprint(i),
+			FolderID:     msg.FolderID,
+			MessageID:    msg.ID,
+			PartID:       fmt.Sprintf("ATTACHMENT-%d", i),
+			ContentType:  attachments[i].ContentType,
+			Filename:     attachments[i].Filename,
+			Disposition:  "attachment",
+			SizeBytes:    attachments[i].SizeBytes,
+			IsAttachment: true,
+			CreatedAt:    msg.CreatedAt,
+		})
+	}
+	s.emit(ctx, EventTypeMessageViewed, map[string]any{"message_id": messageID, "source": "p7", "parts": len(parts)})
+	return &MailMessageDetail{
+		MessageID:       msg.ID,
+		Parts:           parts,
+		BodyText:        msg.BodyText,
+		AttachmentCount: len(attachments),
+		Attachments:     attachments,
 	}, nil
 }
 
 // MailMessageDetail is the aggregate returned by MailMessageGet.
 type MailMessageDetail struct {
-	MessageID       string                     `json:"message_id"`
-	Parts           []storage.MailMessagePart  `json:"parts"`
-	BodyText        string                     `json:"body_text"`
-	AttachmentCount int                        `json:"attachment_count"`
-	Attachments     []AttachmentInfo           `json:"attachments"`
+	MessageID       string                    `json:"message_id"`
+	Parts           []storage.MailMessagePart `json:"parts"`
+	BodyText        string                    `json:"body_text"`
+	AttachmentCount int                       `json:"attachment_count"`
+	Attachments     []AttachmentInfo          `json:"attachments"`
 }
 
 // AttachmentInfo is a lightweight description of one attachment part.
@@ -249,60 +265,74 @@ type AttachmentInfo struct {
 	ContentType string `json:"content_type"`
 	SizeBytes   int64  `json:"size_bytes"`
 	Stored      bool   `json:"stored"`
+	CachePath   string `json:"-"`
+	MoxMsgID    int64  `json:"-"`
+	PartPath    []int  `json:"-"`
+}
+
+func p7AttachmentInfos(raw string) []AttachmentInfo {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var rows []struct {
+		Filename      string `json:"filename"`
+		Name          string `json:"name"`
+		ContentType   string `json:"content_type"`
+		MimeType      string `json:"mime_type"`
+		SizeBytes     int64  `json:"size_bytes"`
+		Size          int64  `json:"size"`
+		PartID        string `json:"part_id"`
+		Stored        bool   `json:"stored"`
+		CachePath     string `json:"cache_path"`
+		BodyCachePath string `json:"body_cache_path"`
+		MoxMsgID      int64  `json:"mox_msg_id"`
+		MsgID         int64  `json:"msg_id"`
+		PartPath      []int  `json:"part_path"`
+	}
+	if err := json.Unmarshal([]byte(raw), &rows); err != nil {
+		return nil
+	}
+	out := make([]AttachmentInfo, 0, len(rows))
+	for i, row := range rows {
+		name := row.Filename
+		if name == "" {
+			name = row.Name
+		}
+		typ := row.ContentType
+		if typ == "" {
+			typ = row.MimeType
+		}
+		size := row.SizeBytes
+		if size == 0 {
+			size = row.Size
+		}
+		cachePath := firstNonEmpty(row.CachePath, row.BodyCachePath)
+		msgID := row.MoxMsgID
+		if msgID == 0 {
+			msgID = row.MsgID
+		}
+		out = append(out, AttachmentInfo{Index: i, PartID: row.PartID, Filename: name, ContentType: typ, SizeBytes: size, Stored: cachePath != "", CachePath: cachePath, MoxMsgID: msgID, PartPath: row.PartPath})
+	}
+	return out
+}
+
+type CachedAttachmentFile struct {
+	AttachmentInfo
+	Path   string
+	Reader io.ReadCloser
 }
 
 // MailMessageDelete removes every part belonging to a message.  This is a
 // HIGH-risk destructive action because the rows are physically removed.
 func (s *Service) MailMessageDelete(ctx context.Context, messageID string) error {
-	if err := s.checkWriteGuard(ctx); err != nil {
-		return err
-	}
-	if messageID == "" {
-		return storage.ErrNotFound
-	}
-	n, err := s.store.MailDeleteMessagePartsByMessage(ctx, messageID)
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return storage.ErrNotFound
-	}
-	s.emitDanger(ctx, EventTypeMessageDeleted, map[string]any{
-		"message_id":      messageID,
-		"parts_removed":   n,
-	})
-	return nil
+	return capabilityUnavailable("mail message deletion requires a real Mox/IMAP adapter")
 }
 
 // MailMessageMove transfers every part of a message to a different folder.
 // Note: because Mox stores folder membership per UID, our sqlite-only table
 // keeps folder_id on each part; moving is a single UPDATE.
 func (s *Service) MailMessageMove(ctx context.Context, messageID, destFolderID string) error {
-	if err := s.checkWriteGuard(ctx); err != nil {
-		return err
-	}
-	if messageID == "" || destFolderID == "" {
-		return errors.New("message_id and destination folder_id are required")
-	}
-	if _, err := s.store.MailGetFolder(ctx, destFolderID); err != nil {
-		return err
-	}
-	res, err := s.store.DB().ExecContext(ctx,
-		`UPDATE mail_message_parts SET folder_id = $1 WHERE message_id = $2`,
-		destFolderID, messageID)
-	if err != nil {
-		return fmt.Errorf("MailMessageMove: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return storage.ErrNotFound
-	}
-	s.emit(ctx, EventTypeMessageMoved, map[string]any{
-		"message_id":       messageID,
-		"dest_folder_id":   destFolderID,
-		"parts_moved":      n,
-	})
-	return nil
+	return capabilityUnavailable("mail message move requires a real Mox/IMAP adapter")
 }
 
 // MailMessageFlagsUpdate applies an IMAP-style flag update to every part
@@ -310,21 +340,7 @@ func (s *Service) MailMessageMove(ctx context.Context, messageID, destFolderID s
 // JSON for now; to keep the operation simple we only toggle Seen on the
 // whole message by writing a synthetic flag on the HEADERS part.
 func (s *Service) MailMessageFlagsUpdate(ctx context.Context, messageID string, add, remove []string) error {
-	if err := s.checkWriteGuard(ctx); err != nil {
-		return err
-	}
-	if messageID == "" {
-		return storage.ErrNotFound
-	}
-	// No-op storage layer today; just emit the event so operators see the
-	// change in the audit trail.  A later phase will persist the flags to
-	// the HEADERS part JSON columns.
-	s.emit(ctx, EventTypeMessageFlagsUpd, map[string]any{
-		"message_id": messageID,
-		"add":        add,
-		"remove":     remove,
-	})
-	return nil
+	return capabilityUnavailable("mail flag mutation requires a real Mox/IMAP adapter")
 }
 
 // MailMessageRaw returns just the first text/plain body part of a message,
@@ -339,6 +355,14 @@ func (s *Service) MailMessageRaw(ctx context.Context, messageID string) (string,
 		return "", err
 	}
 	if len(parts) == 0 {
+		msg, gerr := s.store.MailMessageGet(ctx, messageID)
+		if gerr != nil {
+			return "", storage.ErrNotFound
+		}
+		if msg.BodyText != "" {
+			s.emit(ctx, EventTypeMessageRawFetched, map[string]any{"message_id": messageID, "source": "p7", "bytes": len(msg.BodyText)})
+			return msg.BodyText, nil
+		}
 		return "", storage.ErrNotFound
 	}
 	for _, p := range parts {
@@ -360,8 +384,9 @@ func (s *Service) MailMessageRaw(ctx context.Context, messageID string) (string,
 }
 
 // MailAttachment returns the metadata for a single attachment identified
-// by its zero-based index within the message.  Content streaming is not
-// implemented in Phase 7 (returns placeholder with stored=false).
+// by its zero-based index within the message. Cached attachment byte
+// streaming is implemented separately by MailAttachmentFile; uncached
+// Mox data/WebAPI part reads are still unavailable.
 func (s *Service) MailAttachment(ctx context.Context, messageID string, index int) (*AttachmentInfo, error) {
 	if s.store == nil {
 		return nil, errors.New("mail store is not wired")
@@ -392,29 +417,90 @@ func (s *Service) MailAttachment(ctx context.Context, messageID string, index in
 	return &attachments[index], nil
 }
 
+func (s *Service) MailAttachmentFile(ctx context.Context, messageID string, index int) (*CachedAttachmentFile, error) {
+	if s.store == nil {
+		return nil, errors.New("mail store is not wired")
+	}
+	cached, err := s.store.MailCachedAttachment(ctx, messageID, index)
+	if err == nil {
+		return s.cachedAttachmentFileFromPath(cached.BodyCachePath, index, cached.PartID, cached.Filename, cached.ContentType)
+	}
+	if !errors.Is(err, storage.ErrNotFound) {
+		return nil, err
+	}
+	detail, derr := s.mailMessageGetP7(ctx, messageID)
+	if derr != nil {
+		return nil, err
+	}
+	if index < 0 || index >= len(detail.Attachments) {
+		return nil, storage.ErrNotFound
+	}
+	att := detail.Attachments[index]
+	if att.CachePath != "" {
+		return s.cachedAttachmentFileFromPath(att.CachePath, index, att.PartID, att.Filename, att.ContentType)
+	}
+	return nil, storage.ErrNotFound
+}
+
+func (s *Service) cachedAttachmentFileFromPath(rawPath string, index int, partID, filename, contentType string) (*CachedAttachmentFile, error) {
+	path, err := filepath.Abs(rawPath)
+	if err != nil {
+		return nil, fmt.Errorf("attachment path invalid: %w", err)
+	}
+	dataDir, err := filepath.Abs(s.moxRoot)
+	if err != nil {
+		return nil, fmt.Errorf("mox root invalid: %w", err)
+	}
+	rel, err := filepath.Rel(dataDir, path)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return nil, errors.New("attachment cache path is outside Mail data root")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, storage.ErrNotFound
+	}
+	if info.IsDir() {
+		return nil, errors.New("attachment cache path is a directory")
+	}
+	return &CachedAttachmentFile{
+		AttachmentInfo: AttachmentInfo{
+			Index:       index,
+			PartID:      partID,
+			Filename:    filename,
+			ContentType: contentType,
+			SizeBytes:   info.Size(),
+			Stored:      true,
+		},
+		Path: path,
+	}, nil
+}
+
 // ---- Search ---------------------------------------------------------------
 
 type MailSearchQuery struct {
-	AccountIDs []string `json:"account_ids"`
-	Query      string   `json:"query"`
-	Scope      string   `json:"scope"` // subject | body | all  (default: all)
-	Limit      int      `json:"limit"`
-	Offset     int      `json:"offset"`
+	AccountIDs    []string `json:"account_ids"`
+	Query         string   `json:"query"`
+	Scope         string   `json:"scope"` // one | all | attachments | folder:<id>
+	FromDomain    string   `json:"from_domain"`
+	To            string   `json:"to"`
+	Since         string   `json:"since"`
+	Before        string   `json:"before"`
+	HasAttachment *bool    `json:"has_attachment,omitempty"`
+	UnreadOnly    bool     `json:"unread_only"`
+	Limit         int      `json:"limit"`
+	Offset        int      `json:"offset"`
 }
 
 type MailSearchResponse struct {
-	Query  string                  `json:"query"`
-	Total  int                     `json:"total"`
-	Items  []storage.MailSearchResult `json:"items"`
+	Query string                     `json:"query"`
+	Total int                        `json:"total"`
+	Items []storage.MailSearchResult `json:"items"`
 }
 
 // MailMessageSearch runs the FTS5 search over the supplied accounts.
 func (s *Service) MailMessageSearch(ctx context.Context, q MailSearchQuery) (*MailSearchResponse, error) {
 	if s.store == nil {
 		return nil, errors.New("mail store is not wired")
-	}
-	if strings.TrimSpace(q.Query) == "" {
-		return &MailSearchResponse{Query: q.Query, Items: []storage.MailSearchResult{}}, nil
 	}
 	if len(q.AccountIDs) == 0 {
 		return &MailSearchResponse{Query: q.Query, Items: []storage.MailSearchResult{}}, nil
@@ -430,20 +516,55 @@ func (s *Service) MailMessageSearch(ctx context.Context, q MailSearchQuery) (*Ma
 	if offset < 0 {
 		offset = 0
 	}
-	out, err := s.store.MailFTS5Search(ctx, q.AccountIDs, q.Query, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	if out == nil {
-		out = []storage.MailSearchResult{}
+	out := []storage.MailSearchResult{}
+	total := 0
+	for _, accountID := range q.AccountIDs {
+		p7 := storage.FTSQueryP7{
+			AccountID:     accountID,
+			Scope:         q.Scope,
+			Query:         strings.TrimSpace(q.Query),
+			FromDomain:    q.FromDomain,
+			To:            q.To,
+			Since:         q.Since,
+			Before:        q.Before,
+			HasAttachment: q.HasAttachment,
+			UnseenOnly:    q.UnreadOnly,
+			Limit:         limit,
+			Offset:        offset,
+		}
+		if q.Scope == "attachments" || q.Scope == "has_attachment" {
+			v := true
+			p7.HasAttachment = &v
+		}
+		results, n, err := s.store.MailMessageSearchP7(ctx, p7)
+		if err != nil {
+			return nil, err
+		}
+		total += n
+		for _, r := range results {
+			out = append(out, storage.MailSearchResult{
+				ID:            r.ID,
+				MessagePartID: r.ID,
+				MessageID:     r.ID,
+				FolderID:      r.FolderID,
+				AccountID:     r.AccountID,
+				Subject:       r.SubjectSnippet,
+				Snippet:       r.PreviewSnippet,
+				From:          r.FromList,
+				To:            r.ToList,
+				Date:          r.DateSent,
+				FromDisplay:   r.FromList,
+				ReceivedAt:    r.DateSent,
+			})
+		}
 	}
 	s.emit(ctx, EventTypeSearchExecuted, map[string]any{
-		"query":  q.Query,
-		"hits":   len(out),
-		"scope":  q.Scope,
-		"limit":  limit,
+		"query": q.Query,
+		"hits":  len(out),
+		"scope": q.Scope,
+		"limit": limit,
 	})
-	return &MailSearchResponse{Query: q.Query, Total: len(out), Items: out}, nil
+	return &MailSearchResponse{Query: q.Query, Total: total, Items: out}, nil
 }
 
 // ---- Index health --------------------------------------------------------
@@ -694,13 +815,18 @@ type ComposeSendRequest struct {
 	BCC          []string `json:"bcc"`
 	Subject      string   `json:"subject"`
 	Body         string   `json:"body"`
+	BodyText     string   `json:"body_text"`
+	BodyHTML     string   `json:"body_html"`
 	ReplyToMsgID string   `json:"reply_to_message_id"`
 }
 
 type ComposeSendResponse struct {
-	JobID    string `json:"job_id"`
-	QueuedAt string `json:"queued_at"`
-	Status   string `json:"status"`
+	JobID       string   `json:"job_id"`
+	From        string   `json:"from"`
+	To          []string `json:"to"`
+	QueuedAt    string   `json:"queued_at"`
+	Status      string   `json:"status"`
+	SavedToSent bool     `json:"saved_to_sent,omitempty"`
 }
 
 // isValidAddress rejects empty strings, anything without an @, or
@@ -720,9 +846,16 @@ func isValidAddress(a string) bool {
 	return true
 }
 
-// MailComposeSend validates addresses and enqueues a delivery job.  The
-// actual SMTP submission happens in Mox — this method just records the
-// intent and returns a job identifier the UI can poll.
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// MailComposeSend submits a composed message through Mox WebAPI.
 func (s *Service) MailComposeSend(ctx context.Context, req ComposeSendRequest) (*ComposeSendResponse, error) {
 	if err := s.checkWriteGuard(ctx); err != nil {
 		return nil, err
@@ -757,45 +890,159 @@ func (s *Service) MailComposeSend(ctx context.Context, req ComposeSendRequest) (
 	if strings.TrimSpace(req.Subject) == "" {
 		req.Subject = "(no subject)"
 	}
-
-	jobID, _ := ids.New("out")
-	// Persist the composed message into the Sent folder so the user can
-	// retrieve it later.  (Best-effort; ignore errors for now.)
-	folders, ferr := s.store.MailListFolders(ctx, req.AccountID)
-	if ferr == nil {
-		var sentFolderID string
-		for _, f := range folders {
-			if f.Role == "sent" {
-				sentFolderID = f.ID
-				break
-			}
-		}
-		if sentFolderID != "" {
-			_, _ = s.store.MailCreateMessagePart(ctx, storage.MailMessagePart{
-				FolderID:    sentFolderID,
-				MessageID:   jobID,
-				PartID:      "HEADERS",
-				ContentType: "text/plain",
-				Disposition: "",
-				SizeBytes:   int64(len(req.Body)),
-				DecodedText: fmt.Sprintf("Subject: %s\nFrom: %s\nTo: %s\n\n%s",
-					req.Subject, req.From, strings.Join(req.To, ", "), req.Body),
-			})
-		}
+	bodyText := req.Body
+	if bodyText == "" {
+		bodyText = req.BodyText
 	}
-
+	if strings.TrimSpace(bodyText) == "" && strings.TrimSpace(req.BodyHTML) == "" {
+		return nil, errors.New("message body is required")
+	}
+	password, err := s.webAPIPassword(ctx, acc)
+	if err != nil {
+		return nil, err
+	}
+	client, err := s.webAPIClient(ctx, acc.Address, password)
+	if err != nil {
+		return nil, err
+	}
+	sendReq := webapi.SendRequest{
+		Message: webapi.Message{
+			From:    []webapi.NameAddress{{Address: req.From}},
+			To:      toNameAddresses(req.To),
+			CC:      toNameAddresses(req.CC),
+			BCC:     toNameAddresses(req.BCC),
+			Subject: req.Subject,
+			Text:    bodyText,
+			HTML:    req.BodyHTML,
+		},
+		SaveSent: true,
+		Extra: map[string]string{
+			"Phantom-Lancer-Account": req.AccountID,
+		},
+	}
+	result, err := client.Send(ctx, sendReq)
+	if err != nil {
+		return nil, fmt.Errorf("mox webapi send: %w", err)
+	}
+	jobID := result.MessageID
+	if jobID == "" {
+		jobID, _ = ids.New("out")
+	}
 	resp := &ComposeSendResponse{
-		JobID:    jobID,
-		QueuedAt: timeNow(),
-		Status:   "queued",
+		JobID:       jobID,
+		From:        req.From,
+		To:          allRecipients,
+		QueuedAt:    timeNow(),
+		Status:      "queued",
+		SavedToSent: true,
+	}
+	for _, sub := range result.Submissions {
+		_, _ = s.store.MailDeliveryInsert(ctx, &storage.MailDeliveryEvent{
+			FromDomain:     domainFromAddr(req.From),
+			ToDomain:       domainFromAddr(sub.Address),
+			MessageIDHash:  sha256Hex(result.MessageID),
+			SubjectSnippet: truncate80(req.Subject),
+			Direction:      "out",
+			Status:         "queued",
+			AttemptCount:   0,
+			RecipientHash:  sha256Hex(sub.Address),
+			QueueMsgID:     sub.QueueMsgID,
+			FromID:         sub.FromID,
+			CreatedAt:      resp.QueuedAt,
+		})
 	}
 	s.emit(ctx, EventTypeComposeQueued, map[string]any{
-		"job_id":       jobID,
-		"from":         req.From,
-		"recipients":   len(allRecipients),
-		"subject_len":  len(req.Subject),
+		"job_id":         jobID,
+		"from":           req.From,
+		"recipients":     len(allRecipients),
+		"subject_len":    len(req.Subject),
+		"submissions":    len(result.Submissions),
+		"mox_message_id": result.MessageID,
 	})
 	return resp, nil
+}
+
+func toNameAddresses(items []string) []webapi.NameAddress {
+	out := make([]webapi.NameAddress, 0, len(items))
+	for _, item := range items {
+		if strings.TrimSpace(item) != "" {
+			out = append(out, webapi.NameAddress{Address: strings.TrimSpace(item)})
+		}
+	}
+	return out
+}
+
+func (s *Service) webAPIPassword(ctx context.Context, acc storage.MailAccount) (string, error) {
+	if strings.TrimSpace(acc.WebAPIPasswordWrapped) == "" {
+		return "", errors.New("webapi password not stored; reset the account password before sending")
+	}
+	password, err := s.store.UnwrapMailSecret(acc.WebAPIPasswordWrapped)
+	if err != nil {
+		return "", fmt.Errorf("unwrap webapi password: %w", err)
+	}
+	if password == "" {
+		return "", errors.New("webapi password is empty; reset the account password before sending")
+	}
+	return password, nil
+}
+
+func (s *Service) webAPIClient(ctx context.Context, username, password string) (webapi.Client, error) {
+	settings, err := s.store.MailGetSettings(ctx)
+	if err != nil {
+		return webapi.Client{}, err
+	}
+	svc, err := s.supervisor(ctx)
+	if err != nil {
+		return webapi.Client{}, err
+	}
+	baseURL, unixSocket, err := validatedWebAPIEndpoint(settings.WebAPIAddr, defaultMoxWebAPISocket(svc.MoxRoot))
+	if err != nil {
+		return webapi.Client{}, err
+	}
+	baseURL = strings.TrimRight(baseURL, "/") + "/webapi/v0/"
+	client := &http.Client{Timeout: 30 * time.Second}
+	if unixSocket != "" {
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		client.Transport = &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return dialer.DialContext(ctx, "unix", unixSocket)
+			},
+		}
+	}
+	return webapi.Client{BaseURL: baseURL, Username: username, Password: password, HTTPClient: client}, nil
+}
+
+func validatedWebAPIEndpoint(addr string, defaultSock string) (baseURL string, unixSocket string, err error) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		if strings.TrimSpace(defaultSock) == "" {
+			return "", "", errors.New("webapi endpoint is not configured")
+		}
+		return "http://mox.local/", defaultSock, nil
+	}
+	if strings.HasPrefix(addr, "/") {
+		return "http://mox.local/", addr, nil
+	}
+	host, portText, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		return "", "", fmt.Errorf("webapi_addr must be a unix socket path or loopback host:port: %w", splitErr)
+	}
+	port, portErr := strconv.Atoi(portText)
+	if portErr != nil || port <= 0 || port > 65535 {
+		return "", "", fmt.Errorf("webapi_addr has invalid port %q", portText)
+	}
+	if port < 1024 || port == 80 || port == 443 {
+		return "", "", fmt.Errorf("webapi_addr port %d is not allowed", port)
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil {
+		if !strings.EqualFold(host, "localhost") {
+			return "", "", fmt.Errorf("webapi_addr host must be loopback, got %q", host)
+		}
+	} else if ip.IsUnspecified() || !ip.IsLoopback() {
+		return "", "", fmt.Errorf("webapi_addr host must be loopback, got %q", host)
+	}
+	return "http://" + strings.Trim(addr, "/") + "/", "", nil
 }
 
 // DraftSaveRequest is stored verbatim into the Drafts folder so the user
@@ -809,103 +1056,24 @@ type DraftSaveRequest struct {
 	BCC       []string `json:"bcc"`
 	Subject   string   `json:"subject"`
 	Body      string   `json:"body"`
+	BodyText  string   `json:"body_text"`
 }
 
 type DraftSaveResponse struct {
-	DraftID   string `json:"draft_id"`
-	FolderID  string `json:"folder_id"`
-	SavedAt   string `json:"saved_at"`
+	DraftID  string `json:"draft_id"`
+	FolderID string `json:"folder_id"`
+	SavedAt  string `json:"saved_at"`
 }
 
 // MailDraftSave persists a draft into the Drafts folder.  When DraftID is
 // empty a new synthetic ID is generated and returned.
 func (s *Service) MailDraftSave(ctx context.Context, req DraftSaveRequest) (*DraftSaveResponse, error) {
-	if err := s.checkWriteGuard(ctx); err != nil {
-		return nil, err
-	}
-	if req.AccountID == "" {
-		return nil, errors.New("account_id is required")
-	}
-	folders, ferr := s.store.MailListFolders(ctx, req.AccountID)
-	if ferr != nil {
-		return nil, ferr
-	}
-	var draftFolderID string
-	for _, f := range folders {
-		if f.Role == "drafts" {
-			draftFolderID = f.ID
-			break
-		}
-	}
-	if draftFolderID == "" {
-		// No drafts folder yet — create one automatically so the user is
-		// never stuck unable to save.
-		created, cerr := s.store.MailCreateFolder(ctx, storage.MailFolder{
-			AccountID:  req.AccountID,
-			Name:       "Drafts",
-			Role:       "drafts",
-			Subscribed: true,
-			Selectable: true,
-			Delimiter:  "/",
-			SyncState:  "idle",
-		})
-		if cerr != nil {
-			return nil, cerr
-		}
-		draftFolderID = created.ID
-	}
-	draftID := req.DraftID
-	if draftID == "" {
-		draftID, _ = ids.New("dft")
-	}
-	serialized := fmt.Sprintf(
-		"Subject: %s\nFrom: %s\nTo: %s\nCc: %s\nBcc: %s\n\n%s",
-		req.Subject, req.From,
-		strings.Join(req.To, ", "),
-		strings.Join(req.CC, ", "),
-		strings.Join(req.BCC, ", "),
-		req.Body,
-	)
-	if _, err := s.store.MailCreateMessagePart(ctx, storage.MailMessagePart{
-		FolderID:    draftFolderID,
-		MessageID:   draftID,
-		PartID:      "HEADERS",
-		ContentType: "text/plain",
-		Disposition: "",
-		SizeBytes:   int64(len(serialized)),
-		DecodedText: serialized,
-	}); err != nil {
-		return nil, err
-	}
-	resp := &DraftSaveResponse{
-		DraftID:  draftID,
-		FolderID: draftFolderID,
-		SavedAt:  timeNow(),
-	}
-	s.emit(ctx, EventTypeDraftSaved, map[string]any{
-		"draft_id":   draftID,
-		"account_id": req.AccountID,
-	})
-	return resp, nil
+	return nil, capabilityUnavailable("draft save requires a real Mox/IMAP drafts adapter")
 }
 
 // MailDraftDelete removes every part associated with a draft message id.
 func (s *Service) MailDraftDelete(ctx context.Context, draftID string) error {
-	if err := s.checkWriteGuard(ctx); err != nil {
-		return err
-	}
-	if draftID == "" {
-		return storage.ErrNotFound
-	}
-	n, err := s.store.MailDeleteMessagePartsByMessage(ctx, draftID)
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return storage.ErrNotFound
-	}
-	s.emit(ctx, EventTypeDraftDeleted, map[string]any{"draft_id": draftID})
-	return nil
+	return capabilityUnavailable("draft deletion requires a real Mox/IMAP drafts adapter")
 }
 
 // ---- helpers -------------------------------------------------------------

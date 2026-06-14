@@ -8,7 +8,6 @@ import {
   mailAccountDelete,
   mailAccountResetPassword,
   mailAccountDisable,
-  mailAccountResyncImap,
   type MailAccount,
   type AccountCreateReq,
   type AccountCreateResp,
@@ -51,7 +50,7 @@ export function MailAccountsTab({
     try {
       setLoading(true);
       const list = await mailAccountList();
-      setAccounts(list || []);
+      setAccounts(list.items || []);
     } catch (e) {
       actions.setToast(friendlyError(e), "warn");
     } finally {
@@ -225,7 +224,7 @@ export function MailAccountsTab({
                         <Button tone="neutral" onClick={() => setEditId(a.id)} title="编辑显示名、配额、管理员等">
                           编辑
                         </Button>
-                        <Button tone="neutral" onClick={() => void handleResync(a)} title="强制 IMAP 双向同步重新对齐">
+                        <Button tone="neutral" disabled title="真实 IMAP 同步适配器接入后开放">
                           重新同步
                         </Button>
                         <Button tone="danger" onClick={() => void handleDelete(a)}>
@@ -289,6 +288,7 @@ export function MailAccountsTab({
       body: (
         <div className="grid gap-2">
           <p>系统将为该账户生成一个新的一次性密码。旧密码会立即失效。</p>
+          <p>重置成功后，Phantom 会更新加密保存的 Mox WebAPI 凭据，用于后端代该账户执行受控发送。</p>
           {a.password_mode === "external" ? (
             <Notice tone="warn">
               <strong>外部认证账户</strong>：该账户当前使用外部认证，重置本地密码可能不会生效，
@@ -317,16 +317,6 @@ export function MailAccountsTab({
       await reload();
     } catch (e) {
       actions.setToast(friendlyError(e), "danger");
-    }
-  }
-
-  async function handleResync(a: MailAccount) {
-    try {
-      await mailAccountResyncImap(a.id, actions.csrf);
-      actions.setToast(`已请求 IMAP 重新同步：${a.address || a.id}`, "good");
-      await load();
-    } catch (e) {
-      actions.setToast(friendlyError(e), "warn");
     }
   }
 
@@ -424,7 +414,7 @@ function CreateAccountModal({
       >
         <div className="panel-header flex items-center justify-between">
           <h3 className="m-0">创建邮箱账户</h3>
-          <button type="button" className="text-lg muted hover:text-neutral-12" onClick={onClose} aria-label="关闭">✕</button>
+          <button type="button" className="text-lg muted hover:text-neutral-12" onClick={onClose} aria-label="关闭">关闭</button>
         </div>
         <div className="panel-body grid gap-4">
           <div className="rounded-lg border p-3 text-sm bg-neutral-2 dark:bg-neutral-2-dark">
@@ -605,7 +595,7 @@ function EditAccountDrawer({
             <h3 className="m-0">编辑账户</h3>
             <p className="muted text-xs mt-1 mb-0">{account.address || `${account.local_part}@${domains.find((d) => d.id === account.domain_id)?.domain || ""}`}</p>
           </div>
-          <button type="button" className="text-lg muted hover:text-neutral-12" onClick={onClose} aria-label="关闭">✕</button>
+          <button type="button" className="text-lg muted hover:text-neutral-12" onClick={onClose} aria-label="关闭">关闭</button>
         </div>
         <div className="panel-body grid gap-4">
           <Field label="显示名称（可选）">
@@ -711,6 +701,9 @@ function AccountCreatedModal({
                 该密码<strong>仅展示一次</strong>，关闭后将无法再次查看。
                 若丢失，只能通过「重置密码」重新生成一次性密码。
               </p>
+              <p className="text-xs mb-0">
+                Phantom 会同时保存一份加密的 Mox WebAPI 凭据，用于 Mailbox 中的受控发送；不会在日志、审计或前端列表中展示明文。
+              </p>
             </div>
           </Notice>
 
@@ -726,7 +719,7 @@ function AccountCreatedModal({
                   {result.one_time_password}
                 </code>
                 <Button tone="primary" onClick={() => void copy()}>
-                  {copied ? "已复制 ✓" : "📋 复制密码"}
+                  {copied ? "已复制" : "复制密码"}
                 </Button>
               </div>
             </div>

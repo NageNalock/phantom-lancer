@@ -199,7 +199,7 @@ export function MailCertificatesTab({
                           className="ml-1 text-xs text-neutral-11 hover:text-neutral-12"
                           onClick={() => void navigator.clipboard?.writeText(c.fqdn)}
                         >
-                          📋
+                          复制
                         </button>
                       </td>
                       <td className="py-1 px-2">
@@ -211,7 +211,7 @@ export function MailCertificatesTab({
                           className="ml-1 text-xs text-neutral-11 hover:text-neutral-12"
                           onClick={() => void navigator.clipboard?.writeText(c.value)}
                         >
-                          📋
+                          复制
                         </button>
                       </td>
                       <td className="py-1 px-2 text-xs muted">{c.expires_at}</td>
@@ -361,7 +361,7 @@ export function MailCertificatesTab({
                               title="复制完整 TLSA 记录"
                               onClick={() => void navigator.clipboard?.writeText(c.tlsa_record || "")}
                             >
-                              📋
+                              复制
                             </button>
                           </div>
                         ) : (
@@ -754,9 +754,7 @@ function ProviderModal({
             className="text-lg muted hover:text-neutral-12"
             onClick={onClose}
             aria-label="关闭"
-          >
-            ✕
-          </button>
+          >关闭</button>
         </div>
         <div className="panel-body grid gap-4">
           <Field label="提供商类型（必填）">
@@ -904,7 +902,7 @@ function IssueModal({
       >
         <div className="panel-header flex items-center justify-between">
           <h3 className="m-0">签发新证书</h3>
-          <button type="button" className="text-lg muted hover:text-neutral-12" onClick={onClose} aria-label="关闭">✕</button>
+          <button type="button" className="text-lg muted hover:text-neutral-12" onClick={onClose} aria-label="关闭">关闭</button>
         </div>
         <div className="panel-body grid gap-4">
           <Field label="主域名 (CN)（必填）">
@@ -1062,7 +1060,7 @@ function PipelineOverlay({
         <div className="panel-header flex items-center justify-between">
           <div>
             <h3 className="m-0">
-              {result.success ? "✅ 签发完成" : result.rolled_back ? "⚠️ 签发失败（已回滚）" : "❌ 签发失败"}
+              {result.success ? "签发完成" : result.rolled_back ? "签发失败（已回滚）" : "签发失败"}
             </h3>
             <p className="muted text-xs mt-1 mb-0">
               {result.summary}
@@ -1071,7 +1069,7 @@ function PipelineOverlay({
               ) : null}
             </p>
           </div>
-          <button type="button" className="text-lg muted hover:text-neutral-12" onClick={onClose} aria-label="关闭">✕</button>
+          <button type="button" className="text-lg muted hover:text-neutral-12" onClick={onClose} aria-label="关闭">关闭</button>
         </div>
         <div className="panel-body">
           <StepProgress steps={steps} />
@@ -1111,7 +1109,7 @@ function StepProgress({ steps }: { steps: MailCertPipelineStep[] }) {
                 color: s.state === "failed" ? "var(--danger)" : s.state === "done" ? "var(--good)" : "var(--primary)",
               }}
             >
-              {s.state === "failed" ? "✕" : s.state === "done" ? "✓" : s.step}
+              {s.state === "failed" ? "失败" : s.state === "done" ? "完成" : s.step}
             </div>
             <div>
               <div className="flex items-baseline justify-between gap-2">
@@ -1159,7 +1157,7 @@ function TLSAExpandRow({ cert }: { cert: MailCertificate }) {
           className="text-xs muted hover:text-neutral-12"
           onClick={() => void navigator.clipboard?.writeText(full)}
         >
-          📋 复制完整记录
+          复制完整记录
         </button>
       </div>
 
@@ -1201,7 +1199,7 @@ function TLSAExpandRow({ cert }: { cert: MailCertificate }) {
                     className="text-xs muted hover:text-neutral-12"
                     onClick={() => void navigator.clipboard?.writeText(hash || "")}
                   >
-                    📋
+                    复制
                   </button>
                 </div>
               </td>

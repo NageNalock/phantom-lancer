@@ -277,10 +277,8 @@ export function LibraryPanel({
                   <article className={`grid min-w-0 gap-2 rounded-lg border bg-[var(--surface)] p-2 transition ${selected ? "border-[var(--accent)] shadow-[inset_2px_0_0_var(--accent)]" : "border-[var(--line)] hover:border-[var(--line-strong)]"}`} key={asset.id}>
                     <button
                       className="group relative block aspect-square overflow-hidden rounded-md border border-[var(--line)] bg-[var(--surface-soft)] text-left"
-                      onClick={() => {
-                        onSelect(asset);
-                        setViewer(asset);
-                      }}
+                      onClick={() => onSelect(asset)}
+                      onDoubleClick={() => setViewer(asset)}
                       type="button"
                     >
                       {asset.url ? <img alt={assetTitle(asset)} className="h-full w-full object-cover transition group-hover:scale-[1.01]" decoding="async" height={asset.height || 512} loading="lazy" src={asset.url} width={asset.width || 512} /> : <div className="grid h-full place-items-center text-xs text-[var(--muted)]">no image</div>}
@@ -307,9 +305,9 @@ export function LibraryPanel({
                       </Button>
                       <Button className="min-h-8 px-2 text-xs" onClick={() => {
                         onSelect(asset);
-                        onUseForImage(asset);
+                        setViewer(asset);
                       }}>
-                        用于图生图
+                        预览
                       </Button>
                     </div>
                   </article>
@@ -680,6 +678,7 @@ export function ImagesInspector({
   onArchive,
   onDelete,
   onMarkPrivate,
+  onUseForImage,
   status,
   storageSettings,
 }: {
@@ -691,6 +690,7 @@ export function ImagesInspector({
   onArchive?: (asset: ImageAsset) => void;
   onDelete?: (asset: ImageAsset) => void;
   onMarkPrivate?: (asset: ImageAsset, nextPrivate: boolean) => void;
+  onUseForImage?: (asset: ImageAsset) => void;
   status?: ImageStatus;
   storageSettings?: ImageStorageSettings;
 }) {
@@ -721,6 +721,9 @@ export function ImagesInspector({
               {asset.url ? <img alt={assetTitle(asset)} className="aspect-square w-full rounded-lg border border-[var(--line)] object-cover" decoding="async" height={asset.height || 512} src={asset.url} width={asset.width || 512} /> : null}
               <ContextList items={assetMetadata(asset)} />
               <div className="flex flex-wrap gap-2">
+                <Button className="min-h-8 px-2 text-xs" onClick={() => onUseForImage?.(asset)} tone="primary">
+                  用于图生图
+                </Button>
                 <a className="button min-h-8 px-2 text-xs" href={assetDownloadURL(asset)}>
                   下载
                 </a>

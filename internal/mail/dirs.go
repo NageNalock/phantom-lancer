@@ -20,6 +20,12 @@ var moxSubDirs = []string{
 	"backups", // phase 8: atomic tar.gz backups (exclude from data_full scope)
 }
 
+const defaultMoxWebAPISocketRel = "run/mox.webapi.sock"
+
+func defaultMoxWebAPISocket(moxRoot string) string {
+	return filepath.Join(moxRoot, defaultMoxWebAPISocketRel)
+}
+
 // ensureDirs creates moxRoot + moxSubDirs with 0700.  Existing directories
 // are untouched (including their permissions – if an operator explicitly
 // wants group-readable they can chmod themselves).

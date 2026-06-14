@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,25 +66,26 @@ func (s *Service) RuntimeStatus(ctx context.Context) (*RuntimeStatus, error) {
 	}
 
 	return &RuntimeStatus{
-		ConfigMode:       settings.ConfigMode,
-		DesiredState:     settings.DesiredState,
-		ImportMode:       settings.ImportMode,
-		Observed:         string(state),
-		PID:              pid,
-		BootID:           bootID,
-		CrashLoopState:   string(cls),
-		ConsecutiveFails: fails,
-		BackoffRemaining: backoff,
-		Uptime:           uptime,
-		BinaryControlled: det.Controlled,
-		BinaryPATH:       det.Path,
-		BinarySelected:   det.Selected,
-		Probes:           probesResult,
-		Overall:          overall,
-		DomainCount:      0, // Phase 3
-		AccountCount:     0, // Phase 3
-		LastProbeAt:      lastProbe,
-		LastChangeAt:     lastChange,
+		ConfigMode:             settings.ConfigMode,
+		DesiredState:           settings.DesiredState,
+		ImportMode:             settings.ImportMode,
+		Observed:               string(state),
+		PID:                    pid,
+		BootID:                 bootID,
+		CrashLoopState:         string(cls),
+		ConsecutiveFails:       fails,
+		BackoffRemaining:       backoff,
+		Uptime:                 uptime,
+		BinaryControlled:       det.Controlled,
+		BinaryPATH:             det.Path,
+		BinarySelected:         det.Selected,
+		Probes:                 probesResult,
+		Overall:                overall,
+		DomainCount:            0, // Phase 3
+		AccountCount:           0, // Phase 3
+		EmergencyInboundReject: emergencyStateFromSettings(settings),
+		LastProbeAt:            lastProbe,
+		LastChangeAt:           lastChange,
 	}, nil
 }
 
@@ -481,10 +484,10 @@ func (s *Service) Stop(ctx context.Context, req LifecycleRequest) (*LifecycleRes
 	s.touchLastChange()
 	_, _ = s.store.MailUpsertDesiredState(ctx, "stopped")
 	s.publish(ctx, EventTypeRuntimeStopped, map[string]any{
-		"observed":   string(obs),
-		"exit_code":  sr.ExitCode,
-		"signal":     int(sr.SignalUsed),
-		"killed":     sr.Killed,
+		"observed":  string(obs),
+		"exit_code": sr.ExitCode,
+		"signal":    int(sr.SignalUsed),
+		"killed":    sr.Killed,
 	})
 	s.addAudit(ctx, EventTypeRuntimeStopped, "已停止 Mox",
 		map[string]any{
@@ -528,10 +531,10 @@ func (s *Service) Restart(ctx context.Context, req LifecycleRequest) (*Lifecycle
 	s.touchLastChange()
 	_, _ = s.store.MailUpsertDesiredState(ctx, "running")
 	s.publish(ctx, EventTypeRuntimeRestarted, map[string]any{
-		"observed":   string(obs),
-		"exit_code":  sr.ExitCode,
-		"signal":     int(sr.SignalUsed),
-		"killed":     sr.Killed,
+		"observed":  string(obs),
+		"exit_code": sr.ExitCode,
+		"signal":    int(sr.SignalUsed),
+		"killed":    sr.Killed,
 	})
 	s.addAudit(ctx, EventTypeRuntimeRestarted, "已重启 Mox",
 		map[string]any{
@@ -639,6 +642,12 @@ func (s *Service) SetupInitialize(ctx context.Context, req SetupInitializeReques
 	if webapiAddr == "" {
 		webapiAddr = settings.WebAPIAddr
 	}
+	if err := validateMoxWebBindAddr("webmail_addr", webmailAddr, false); err != nil {
+		return nil, err
+	}
+	if err := validateMoxWebBindAddr("webapi_addr", webapiAddr, true); err != nil {
+		return nil, err
+	}
 	skeleton := fmt.Sprintf(defaultConfSkeleton, hostname, adminEmail, adminEmail, webmailAddr, webapiAddr)
 	if err := atomicWrite0600(svc.ConfigPath, []byte(skeleton)); err != nil {
 		return nil, fmt.Errorf("write mox.conf: %w", err)
@@ -646,8 +655,8 @@ func (s *Service) SetupInitialize(ctx context.Context, req SetupInitializeReques
 
 	// Persist resolved paths + hostnames to settings.
 	if _, uerr := s.store.MailUpsertSetup(ctx, storage.MailSetupUpdate{
-		AdminEmail: adminEmail,
-		Hostname:   hostname,
+		AdminEmail:  adminEmail,
+		Hostname:    hostname,
 		WebmailAddr: webmailAddr,
 		WebAPIAddr:  webapiAddr,
 		BinaryPath:  binPath,
@@ -687,6 +696,31 @@ func (s *Service) SetupInitialize(ctx context.Context, req SetupInitializeReques
 		PlaceholderNote: "已写入占位 mox.conf（含 hostname/admin/监听地址）",
 		NextSteps:       next,
 	}, nil
+}
+
+func validateMoxWebBindAddr(field, addr string, requireLoopback bool) error {
+	host, portText, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return fmt.Errorf("%s must be host:port: %w", field, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 || port > 65535 {
+		return fmt.Errorf("%s has invalid port %q", field, portText)
+	}
+	if port == 80 || port == 443 || port < 1024 {
+		return fmt.Errorf("%s port %d is not allowed; Mox Web/API listeners must not use 1-1023, 80, or 443", field, port)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("%s host must be an IP literal, got %q", field, host)
+	}
+	if ip.IsUnspecified() {
+		return fmt.Errorf("%s must not bind an unspecified address such as %s", field, host)
+	}
+	if requireLoopback && !ip.IsLoopback() {
+		return fmt.Errorf("%s must bind loopback only", field)
+	}
+	return nil
 }
 
 // SetupImport marks the service as "import mode" (read-only) and wires the

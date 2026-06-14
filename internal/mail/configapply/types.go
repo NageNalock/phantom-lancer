@@ -3,8 +3,8 @@ package configapply
 // StepStatus represents one step's status streamed through a progress channel
 // (used for SSE / UI step-by-step progress).
 type StepStatus struct {
-	Step    int    `json:"step"`    // 1..10
-	Total   int    `json:"total"`     // always 10
+	Step    int    `json:"step"`  // 1..10
+	Total   int    `json:"total"` // always 10
 	Name    string `json:"name"`
 	Percent int    `json:"percent"` // 0..100 cumulative
 	Message string `json:"message,omitempty"`
@@ -68,9 +68,11 @@ type SettingsSnapshot struct {
 	IMAPPort, IMAPSPort                           int
 	ConfigHost                                    string
 	MoxVersion                                    string
+	EmergencyInboundReject                        bool
 }
 type DomainSnapshot struct {
 	Domain, DKIMSelector, DMARCPolicy, DMARCRUA, SPFInclude string
+	Disabled                                                bool
 }
 type AccountSnapshot struct {
 	Email, DisplayName, Role string

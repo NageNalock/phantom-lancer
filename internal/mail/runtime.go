@@ -34,13 +34,13 @@ type RuntimeStatus struct {
 	ImportMode   bool   `json:"import_mode"`
 
 	// Supervisor / observed process state.
-	Observed          string        `json:"observed_state"`
-	PID               int           `json:"pid"`
-	BootID            string        `json:"boot_id"`
-	CrashLoopState    string        `json:"crash_loop_state"`
-	ConsecutiveFails  int           `json:"consecutive_failures"`
-	BackoffRemaining  time.Duration `json:"backoff_remaining_ms"`
-	Uptime            time.Duration `json:"uptime_ms"`
+	Observed         string        `json:"observed_state"`
+	PID              int           `json:"pid"`
+	BootID           string        `json:"boot_id"`
+	CrashLoopState   string        `json:"crash_loop_state"`
+	ConsecutiveFails int           `json:"consecutive_failures"`
+	BackoffRemaining time.Duration `json:"backoff_remaining_ms"`
+	Uptime           time.Duration `json:"uptime_ms"`
 
 	// Binary detection summary.
 	BinaryControlled *moxbinary.BinaryInfo `json:"binary_controlled,omitempty"`
@@ -55,6 +55,8 @@ type RuntimeStatus struct {
 	// Counts (placeholder in Phase 2 – filled by Phase 3+).
 	DomainCount  int `json:"domain_count"`
 	AccountCount int `json:"account_count"`
+
+	EmergencyInboundReject *EmergencyInboundRejectState `json:"emergency_inbound_reject,omitempty"`
 
 	// Last-touched timestamps.
 	LastProbeAt  string `json:"last_probe_at"`
@@ -87,12 +89,12 @@ type BinaryDetectResponse struct {
 // BinaryDownloadRequest requests a specific pinned version from the
 // approved-release whitelist.
 type BinaryDownloadRequest struct {
-	Version       string        `json:"version"`        // e.g. "0.8.11"; leading v is stripped
-	OverrideURL   string        `json:"override_url"`   // optional, must still pass whitelist
-	DestDir       string        `json:"dest_dir"`       // optional; defaults to <moxRoot>/bin
-	SizeMaxBytes  int64         `json:"size_max_bytes"` // optional; default 200 MiB
-	ReportPercent bool          `json:"report_percent"`
-	Progress      chan<- int    `json:"-"` // 0..100, closed on completion
+	Version       string     `json:"version"`        // e.g. "0.8.11"; leading v is stripped
+	OverrideURL   string     `json:"override_url"`   // optional, must still pass whitelist
+	DestDir       string     `json:"dest_dir"`       // optional; defaults to <moxRoot>/bin
+	SizeMaxBytes  int64      `json:"size_max_bytes"` // optional; default 200 MiB
+	ReportPercent bool       `json:"report_percent"`
+	Progress      chan<- int `json:"-"` // 0..100, closed on completion
 }
 
 // BinaryDownloadResponse carries the download outcome.
@@ -148,7 +150,7 @@ type LifecycleRequest struct {
 }
 
 type LifecycleResponse struct {
-	Requested   string `json:"requested"`    // "start" / "stop" / "restart"
+	Requested   string `json:"requested"` // "start" / "stop" / "restart"
 	Accepted    bool   `json:"accepted"`
 	ObservedNow string `json:"observed_now"` // immediate State() snapshot
 	Message     string `json:"message,omitempty"`
@@ -173,18 +175,18 @@ type RuntimeProbeResponse struct {
 type SetupInitializeRequest struct {
 	AdminEmail            string `json:"admin_email"`
 	Hostname              string `json:"hostname"`
-	WebAPIAddr            string `json:"webapi_addr"`              // e.g. "127.0.0.1:10445"
-	WebmailAddr           string `json:"webmail_addr"`             // e.g. "127.0.0.1:10444"
-	UseControlledBinary   bool   `json:"use_controlled_binary"`    // if true, force <moxRoot>/bin/mox
-	OverwriteExistingConf bool   `json:"overwrite_existing_conf"`  // dangerous; guarded by DangerConfirm
+	WebAPIAddr            string `json:"webapi_addr"`             // e.g. "127.0.0.1:10445"
+	WebmailAddr           string `json:"webmail_addr"`            // e.g. "127.0.0.1:10444"
+	UseControlledBinary   bool   `json:"use_controlled_binary"`   // if true, force <moxRoot>/bin/mox
+	OverwriteExistingConf bool   `json:"overwrite_existing_conf"` // dangerous; guarded by DangerConfirm
 }
 
 type SetupInitializeResponse struct {
-	ConfigPath       string   `json:"config_path"`
-	DataDir          string   `json:"data_dir"`
-	BinaryPath       string   `json:"binary_path"`
-	PlaceholderNote  string   `json:"placeholder_note"`
-	NextSteps        []string `json:"next_steps"`
+	ConfigPath      string   `json:"config_path"`
+	DataDir         string   `json:"data_dir"`
+	BinaryPath      string   `json:"binary_path"`
+	PlaceholderNote string   `json:"placeholder_note"`
+	NextSteps       []string `json:"next_steps"`
 }
 
 // SetupImportRequest records an existing external Mox install as "import
@@ -209,8 +211,8 @@ type SetupImportResponse struct {
 // tab "port checklist" panel.
 type PreflightPortsRequest struct{}
 type PreflightPortsResponse struct {
-	Ports  []PortCheck `json:"ports"`
-	AllOK  bool        `json:"all_ok"`
+	Ports []PortCheck `json:"ports"`
+	AllOK bool        `json:"all_ok"`
 }
 type PortCheck struct {
 	Name     string `json:"name"`
@@ -380,6 +382,8 @@ func (s *Service) startWorkers(ctx context.Context) {
 	// Runs applyRetention once per hour so expired logs, webhook events,
 	// delivery events, health-checks, and index-message rows are pruned.
 	retentionTicker := time.NewTicker(retentionApplyInterval())
+	// --- emergency auto-restore ticker -----------------------------------------
+	emergencyTicker := time.NewTicker(1 * time.Minute)
 
 	// --- process-exit observer goroutine ------------------------------------
 	// Supervisor.Wait() returns a channel that closes once (per Start/Adopt).
@@ -397,6 +401,7 @@ func (s *Service) startWorkers(ctx context.Context) {
 		defer certRenewalTicker.Stop()
 		defer imapSyncTicker.Stop()
 		defer retentionTicker.Stop()
+		defer emergencyTicker.Stop()
 
 		// --- Phase 7: start per-account IMAP sync goroutines -------------------
 		if s.imapSyncManager != nil {
@@ -412,6 +417,7 @@ func (s *Service) startWorkers(ctx context.Context) {
 			s.log.DebugContext(ctx, "mail: initial probe run failed (expected if Mox not yet installed)",
 				"error", err)
 		}
+		s.runEmergencyAutoRestoreTick(ctx)
 
 		for {
 			select {
@@ -458,6 +464,8 @@ func (s *Service) startWorkers(ctx context.Context) {
 				if _, rerr := s.MailRetentionApplyNow(ctx); rerr != nil {
 					s.log.DebugContext(ctx, "mail: retention tick failed", "error", rerr)
 				}
+			case <-emergencyTicker.C:
+				s.runEmergencyAutoRestoreTick(ctx)
 			}
 		}
 	}()
@@ -507,8 +515,8 @@ func (s *Service) bootAdopt(ctx context.Context) error {
 			"pid", res.ProcessID, "boot_id", res.Marker.BootID,
 			"issues", formatAdoptionIssues(res.Issues))
 		s.publish(ctx, EventTypeRuntimeAdopted, map[string]any{
-			"pid":     res.ProcessID,
-			"boot_id": res.Marker.BootID,
+			"pid":      res.ProcessID,
+			"boot_id":  res.Marker.BootID,
 			"warnings": formatAdoptionIssues(res.Issues),
 		})
 	}
@@ -601,8 +609,11 @@ func (s *Service) newProbes(ctx context.Context) (l1ToL5 []probes.Probe, perDoma
 		return nil, nil, err
 	}
 
-	baseURL, dialUnix := buildWebAPIEndpoint(settings.WebAPIAddr,
-		filepath.Join(svc.MoxRoot, "run", "mox.webapi.sock"))
+	baseURL, dialUnix, endpointErr := validatedWebAPIEndpoint(settings.WebAPIAddr,
+		defaultMoxWebAPISocket(svc.MoxRoot))
+	if endpointErr != nil {
+		baseURL, dialUnix = "http://mox.local/", ""
+	}
 
 	// L1 + L2 + L3
 	base := []probes.Probe{
@@ -737,8 +748,9 @@ func (s *Service) runAllProbes(ctx context.Context, layerFilter []int) ([]probes
 	s.mu.Unlock()
 
 	// Publish one aggregate event so the UI SSE stream can update without
-	// polling.  Individual probe results are not evented (too noisy).
-	s.publish(ctx, EventTypeRuntimeProbeResult, map[string]any{
+	// polling. This is intentionally not persisted: the fast probe ticker runs
+	// every few seconds and should not fill the durable events table.
+	s.publishEphemeral(ctx, EventTypeRuntimeProbeResult, map[string]any{
 		"overall": overall.String(),
 		"count":   len(results),
 		"at":      s.lastProbeAt,
@@ -785,6 +797,26 @@ func padProbeResults(rs []probes.Result) []probes.Result {
 // forget: a nil hub, full channel, or closed consumer must never block the
 // service layer.
 func (s *Service) publish(ctx context.Context, eventType string, payload map[string]any) {
+	s.publishWithOptions(ctx, eventType, payload, true)
+}
+
+func (s *Service) publishEphemeral(ctx context.Context, eventType string, payload map[string]any) {
+	s.publishWithOptions(ctx, eventType, payload, false)
+}
+
+func (s *Service) publishWithOptions(ctx context.Context, eventType string, payload map[string]any, persist bool) {
+	event := events.Event{
+		Scope:     EventScope,
+		ScopeID:   EventScope,
+		Type:      eventType,
+		Payload:   payload,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if persist && s.store != nil {
+		if stored, err := s.store.AppendEvent(ctx, EventScope, EventScope, eventType, payload); err == nil {
+			event = stored
+		}
+	}
 	if s.hub == nil {
 		return
 	}
@@ -793,14 +825,7 @@ func (s *Service) publish(ctx context.Context, eventType string, payload map[str
 		// than take down the mail worker.
 		_ = recover()
 	}()
-	s.hub.Publish(events.Event{
-		Scope:     EventScope,
-		ScopeID:   "",
-		Type:      eventType,
-		Payload:   payload,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-	})
-	_ = ctx
+	s.hub.Publish(event)
 }
 
 // addAudit writes a persistent audit row.  The helper exists so every

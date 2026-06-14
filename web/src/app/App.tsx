@@ -7,6 +7,7 @@ import type {
   AuthSession,
   CodexGatewayPayload,
   ImagesPayload,
+  MailAccount,
   MailPayload,
   MainTab,
   SettingsPayload,
@@ -131,7 +132,7 @@ export function App() {
   }, []);
 
   const loadAppData = useCallback(async () => {
-    const [dashboard, audit, codexGateway, settings, v2ray, imagesSettings, imageStorageSettings, imageJobs, imageAssets, mailStatus] = await Promise.all([
+    const [dashboard, audit, codexGateway, settings, v2ray, imagesSettings, imageStorageSettings, imageJobs, imageAssets, mailStatus, mailAccounts] = await Promise.all([
       api<AppData["dashboard"]>("/api/dashboard/summary"),
       api<{ items?: AppData["audit"] }>("/api/audit/events"),
       loadCodexGatewayData(),
@@ -142,6 +143,7 @@ export function App() {
       api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=40"),
       api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=80"),
       api<MailPayload["status"]>("/api/mail/status"),
+      api<{ items?: MailAccount[] }>("/api/mail/accounts"),
     ]);
 
     setData({
@@ -154,6 +156,7 @@ export function App() {
       mail: {
         ...emptyMailPayload(),
         status: mailStatus,
+        accounts: mailAccounts.items || [],
       },
     });
   }, [loadCodexGatewayData]);

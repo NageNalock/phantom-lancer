@@ -6,7 +6,7 @@
 // lifecycle (account passwords via stdin pipe – never argv, never persisted),
 // IMAP synchronisation, and full-text search over the local message index.
 //
-// Hard constraints – see docs/mail-mox-control-plane-wip.md §0:
+// Hard constraints:
 //
 //  1. Phantom never binds 80/443.
 //  2. No reverse proxy integration – plain-text guidance only.

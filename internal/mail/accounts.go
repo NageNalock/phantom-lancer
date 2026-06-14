@@ -38,8 +38,8 @@ type AccountCreateRequest struct {
 // The GeneratedPassword field is ONLY valid on create and ALWAYS empty for
 // any other response type.
 type AccountCreateResponse struct {
-	Account          storage.MailAccount `json:"account"`
-	GeneratedPassword string             `json:"generated_password,omitempty"` // write-once
+	Account           storage.MailAccount `json:"account"`
+	GeneratedPassword string              `json:"generated_password,omitempty"` // write-once
 }
 
 // AccountUpdateRequest carries mutable fields for an existing account.
@@ -55,7 +55,7 @@ type AccountUpdateRequest struct {
 
 // AccountResetResponse wraps a freshly-generated password after a reset.
 type AccountResetResponse struct {
-	AccountID        string `json:"account_id"`
+	AccountID         string `json:"account_id"`
 	GeneratedPassword string `json:"generated_password"` // write-once
 }
 
@@ -68,12 +68,12 @@ type AccountResponse struct {
 // AccountListResponse wraps the list plus summary counts so the UI top-card
 // can render badges without a second round-trip.
 type AccountListResponse struct {
-	Items     []storage.MailAccount `json:"items"`
-	Count     int                   `json:"count"`
-	Active    int                   `json:"active_count"`
-	Admins    int                   `json:"admin_count"`
-	Drifted   bool                  `json:"drifted"`
-	ImportRO  bool                  `json:"import_read_only"`
+	Items    []storage.MailAccount `json:"items"`
+	Count    int                   `json:"count"`
+	Active   int                   `json:"active_count"`
+	Admins   int                   `json:"admin_count"`
+	Drifted  bool                  `json:"drifted"`
+	ImportRO bool                  `json:"import_read_only"`
 }
 
 // looseEmail is used for UI-level validation only (the real RFC5321 grammar
@@ -115,6 +115,10 @@ func (e *errCoded) Error() string {
 		return e.code + ": " + e.msg
 	}
 	return e.msg
+}
+
+func capabilityUnavailable(msg string) error {
+	return &errCoded{code: "capability_unavailable", msg: msg}
 }
 
 // ErrorCode returns the stable machine-readable code for this error.
@@ -276,7 +280,13 @@ func (s *Service) MailAccountCreate(ctx context.Context, req AccountCreateReques
 		return nil, fmt.Errorf("mox setaccountpassword: %w", perr)
 	}
 
-	// Step 6: update timestamps + password_last_changed_at on success.
+	// Step 6: after Mox accepts the password, keep a wrapped copy for WebAPI
+	// calls such as Compose send. Older rows without this field require a reset.
+	wrapped, werr := s.store.WrapMailSecret(string(pwBuf))
+	if werr != nil {
+		return nil, fmt.Errorf("wrap webapi password: %w", werr)
+	}
+	saved.WebAPIPasswordWrapped = wrapped
 	saved.LastPasswordChangedAt = ts
 	saved.UpdatedAt = ts
 	if _, uerr := s.store.MailUpdateAccount(ctx, saved); uerr != nil {
@@ -334,6 +344,11 @@ func (s *Service) MailAccountUpdate(ctx context.Context, req AccountUpdateReques
 		if err := moxcli.SetAccountPassword(ctx, binPath, cur.Address, newPassword); err != nil {
 			return nil, fmt.Errorf("mox setaccountpassword: %w", err)
 		}
+		wrapped, werr := s.store.WrapMailSecret(string(newPassword))
+		if werr != nil {
+			return nil, fmt.Errorf("wrap webapi password: %w", werr)
+		}
+		cur.WebAPIPasswordWrapped = wrapped
 		cur.LastPasswordChangedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 
@@ -345,12 +360,12 @@ func (s *Service) MailAccountUpdate(ctx context.Context, req AccountUpdateReques
 	s.addAudit(ctx, EventTypeAccountUpdated,
 		fmt.Sprintf("updated account %s", saved.Address),
 		map[string]any{
-			"account_id":            saved.ID,
-			"domain_id":             saved.DomainID,
-			"password_changed":      len(newPassword) > 0,
-			"display_name_changed":  req.DisplayName != "",
-			"is_admin":              saved.IsAdmin,
-			"status":                saved.Status,
+			"account_id":           saved.ID,
+			"domain_id":            saved.DomainID,
+			"password_changed":     len(newPassword) > 0,
+			"display_name_changed": req.DisplayName != "",
+			"is_admin":             saved.IsAdmin,
+			"status":               saved.Status,
 		}, "medium")
 	s.publish(ctx, EventTypeAccountUpdated, map[string]any{
 		"id":       saved.ID,
@@ -425,6 +440,7 @@ func (s *Service) MailAccountList(ctx context.Context, domainID, status string) 
 	if err != nil {
 		return nil, fmt.Errorf("list accounts: %w", err)
 	}
+	s.attachAccountCapabilities(ctx, rows)
 	active := 0
 	admins := 0
 	for _, r := range rows {
@@ -461,7 +477,44 @@ func (s *Service) MailAccountGet(ctx context.Context, id string) (*AccountRespon
 	if cur.ID == "" {
 		return nil, storage.ErrNotFound
 	}
+	enriched := []storage.MailAccount{cur}
+	s.attachAccountCapabilities(ctx, enriched)
+	cur = enriched[0]
 	return &AccountResponse{MailAccount: cur, Drifted: s.Drifted()}, nil
+}
+
+func (s *Service) attachAccountCapabilities(ctx context.Context, rows []storage.MailAccount) {
+	endpointValid := false
+	runtimeAvailable := false
+	if settings, err := s.store.MailGetSettings(ctx); err == nil && settings != nil {
+		defaultSock := ""
+		if svc, serr := s.supervisor(ctx); serr == nil {
+			defaultSock = defaultMoxWebAPISocket(svc.MoxRoot)
+			runtimeAvailable = true
+		}
+		_, _, verr := validatedWebAPIEndpoint(settings.WebAPIAddr, defaultSock)
+		endpointValid = verr == nil
+	}
+	for i := range rows {
+		credentialPresent := strings.TrimSpace(rows[i].WebAPIPasswordWrapped) != ""
+		active := rows[i].Status == "" || rows[i].Status == "active"
+		rows[i].WebAPICredentialPresent = credentialPresent
+		rows[i].WebAPIEndpointValid = endpointValid
+		rows[i].WebAPIRuntimeAvailable = runtimeAvailable
+		rows[i].CanSend = credentialPresent && endpointValid && runtimeAvailable && active
+		switch {
+		case !credentialPresent:
+			rows[i].SendDisabledReason = "missing_webapi_credential"
+		case !endpointValid:
+			rows[i].SendDisabledReason = "invalid_webapi_endpoint"
+		case !runtimeAvailable:
+			rows[i].SendDisabledReason = "webapi_runtime_unavailable"
+		case !active:
+			rows[i].SendDisabledReason = "account_inactive"
+		default:
+			rows[i].SendDisabledReason = ""
+		}
+	}
 }
 
 // MailAccountResetPassword generates a new 18-byte CSPRNG password and
@@ -489,7 +542,12 @@ func (s *Service) MailAccountResetPassword(ctx context.Context, id string) (*Acc
 	if err := moxcli.SetAccountPassword(ctx, binPath, cur.Address, pwBuf); err != nil {
 		return nil, fmt.Errorf("mox setaccountpassword: %w", err)
 	}
+	wrapped, werr := s.store.WrapMailSecret(string(pwBuf))
+	if werr != nil {
+		return nil, fmt.Errorf("wrap webapi password: %w", werr)
+	}
 	ts := time.Now().UTC().Format(time.RFC3339)
+	cur.WebAPIPasswordWrapped = wrapped
 	cur.LastPasswordChangedAt = ts
 	cur.UpdatedAt = ts
 	if _, uerr := s.store.MailUpdateAccount(ctx, cur); uerr != nil {
@@ -560,33 +618,5 @@ func (s *Service) MailAccountDisable(ctx context.Context, id string) (*storage.M
 // is idempotent, so calling this repeatedly simply ensures a loop is running
 // and returns the refreshed account row.
 func (s *Service) MailAccountResyncIMAP(ctx context.Context, id string) (*storage.MailAccount, error) {
-	if err := s.checkWriteGuard(ctx); err != nil {
-		return nil, err
-	}
-	if id == "" {
-		return nil, errors.New("account id is required")
-	}
-	cur, gerr := s.store.MailGetAccount(ctx, id)
-	if gerr != nil || cur.ID == "" {
-		return nil, storage.ErrNotFound
-	}
-	if !cur.IMAPSyncEnabled && cur.ImapHost == "" {
-		return nil, errors.New("imap sync is not configured for this account")
-	}
-	if err := s.MailImapSyncStart(ctx, id); err != nil {
-		return nil, fmt.Errorf("start imap sync: %w", err)
-	}
-	refreshed, rerr := s.store.MailGetAccount(ctx, id)
-	if rerr != nil {
-		return nil, rerr
-	}
-	s.addAudit(ctx, "mail.sync.started",
-		fmt.Sprintf("started IMAP resync for %s", refreshed.Address),
-		map[string]any{"account_id": id, "address": refreshed.Address},
-		"low")
-	s.publish(ctx, EventTypeSyncStarted, map[string]any{
-		"id":      id,
-		"address": refreshed.Address,
-	})
-	return &refreshed, nil
+	return nil, capabilityUnavailable("imap resync requires the real IMAP sync adapter")
 }

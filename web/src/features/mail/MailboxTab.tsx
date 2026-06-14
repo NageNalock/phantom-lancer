@@ -8,18 +8,10 @@ import {
   mailFolderDelete,
   mailMessageList,
   mailMessageGet,
-  mailMessageDelete,
-  mailMessageMove,
-  mailMessageUpdateFlags,
   mailMessageSearch,
   mailIndexHealthList,
   mailIndexHealthReset,
-  mailImapSyncStart,
-  mailImapSyncPause,
-  mailImapSyncResume,
-  mailImapSyncReset,
   mailComposeSend,
-  mailDraftSave,
   mailDraftDelete,
   friendlyError,
   type MailFolder,
@@ -29,7 +21,6 @@ import {
   type MailSearchResp,
   type MailIndexHealth,
   type ComposeSendReq,
-  type DraftSaveReq,
   type AttachmentInfo,
 } from "../../api/client";
 import { Button, EmptyState, Field, Notice, Panel, Pill, useDangerConfirm } from "../../components/ui";
@@ -52,26 +43,8 @@ export interface MailboxTabProps {
 const SCOPE_OPTIONS = [
   { value: "one", label: "当前账户" },
   { value: "all", label: "全部账户" },
-  { value: "attachments", label: "附件内容" },
+  { value: "has_attachment", label: "含附件邮件" },
 ] as const;
-
-type SyncState = "idle" | "syncing" | "paused" | "error" | "reset";
-
-// Return a pill tone + label for a given IMAP sync state.
-function describeSyncState(state?: SyncState | string): { tone: "good" | "warn" | "danger" | "neutral"; label: string } {
-  switch (state) {
-    case "syncing":
-      return { tone: "good", label: "同步中" };
-    case "paused":
-      return { tone: "warn", label: "已暂停" };
-    case "error":
-      return { tone: "danger", label: "出错" };
-    case "reset":
-      return { tone: "warn", label: "已重置" };
-    default:
-      return { tone: "neutral", label: "待机" };
-  }
-}
 
 // Group flat part rows into headers (one per message_id) so the middle column
 // can render one list row per email rather than one per MIME part.
@@ -167,13 +140,14 @@ interface ComposeModalProps {
   state: ComposeState;
   setState: (s: ComposeState) => void;
   fromOptions: string[];
+  sendEnabled: boolean;
+  sendDisabledReason: string;
   loading: boolean;
   actions: AppActions;
   onSend: (s: ComposeState) => Promise<void>;
-  onDraft: (s: ComposeState) => Promise<void>;
 }
 
-function ComposeModal({ state, setState, fromOptions, loading, actions, onSend, onDraft }: ComposeModalProps) {
+function ComposeModal({ state, setState, fromOptions, sendEnabled, sendDisabledReason, loading, actions, onSend }: ComposeModalProps) {
   if (!state.open) return null;
   return (
     <div
@@ -246,14 +220,15 @@ function ComposeModal({ state, setState, fromOptions, loading, actions, onSend, 
         </div>
         <div className="flex items-center justify-between gap-2 border-t border-[var(--line)] bg-[var(--surface-soft)] px-4 py-3">
           <small className="muted">
-            {state.draftId ? <span>草稿 ID: <code className="mono">{state.draftId}</code></span> : <span>尚未保存草稿</span>}
+            {sendEnabled ? <span>Phantom 使用加密保存的 Mox WebAPI 凭据提交发送</span> : <span>{sendDisabledReason}</span>}
           </small>
           <div className="flex items-center gap-2">
             <Button disabled={loading} onClick={() => setState({ ...state, open: false })}>取消</Button>
-            <Button disabled={loading || !state.from} onClick={() => onDraft(state)}>保存草稿</Button>
+            <Button disabled title="Mox/IMAP 草稿写入接入后开放">保存草稿</Button>
             <Button
               tone="primary"
-              disabled={loading || !state.from || splitAddrs(state.to).length === 0}
+              disabled={loading || !sendEnabled || !state.from || splitAddrs(state.to).length === 0}
+              title={sendEnabled ? undefined : sendDisabledReason}
               onClick={() => onSend(state)}
             >
               {loading ? "发送中…" : "发送"}
@@ -342,16 +317,27 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
 
   // ---- Account selection (drives folders + search scope)
   const accounts = data.mail?.accounts ?? [];
+  const [accountId, setAccountId] = useState<string>(accounts[0]?.id ?? "");
+  const activeAccount = useMemo(() => accounts.find((a) => a.id === accountId), [accounts, accountId]);
+  const sendCapableAccounts = useMemo(() => accounts.filter((a) => a.can_send), [accounts]);
   const fromAddresses = useMemo(() => {
     const addrs = new Set<string>();
-    for (const a of accounts) {
+    for (const a of sendCapableAccounts) {
       if (a.address) addrs.add(a.address);
       if ((a as { email?: string }).email) addrs.add((a as { email: string }).email);
     }
     return Array.from(addrs).sort();
-  }, [accounts]);
+  }, [sendCapableAccounts]);
+  const sendDisabledReason = useMemo(() => {
+    if (accounts.length === 0) return "请先在邮箱账户页创建账户。";
+    if (!activeAccount) return "请先选择一个账户。";
+    if (!activeAccount.webapi_credential_present || activeAccount.send_disabled_reason === "missing_webapi_credential") return "该账户缺少加密 WebAPI 凭据，请先在邮箱账户页重置密码。";
+    if (!activeAccount.webapi_endpoint_valid || activeAccount.send_disabled_reason === "invalid_webapi_endpoint") return "当前 Mox WebAPI 端点非法；必须是 unix socket 或 loopback 地址。";
+    if (!activeAccount.webapi_runtime_available || activeAccount.send_disabled_reason === "webapi_runtime_unavailable") return "Mail runtime 尚未初始化，暂不能确认 Mox WebAPI 运行目录。";
+    if (activeAccount.send_disabled_reason === "account_inactive") return "当前账户未启用，不能发送邮件。";
+    return "";
+  }, [accounts.length, activeAccount]);
 
-  const [accountId, setAccountId] = useState<string>(accounts[0]?.id ?? "");
   useEffect(() => {
     if (!accountId && accounts[0]) setAccountId(accounts[0].id);
   }, [accounts, accountId]);
@@ -364,9 +350,6 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
   // ---- Index health summary (shown under folder list)
   const [indexHealth, setIndexHealth] = useState<MailIndexHealth[]>([]);
   const [indexLoading, setIndexLoading] = useState(false);
-
-  // ---- Sync state (drives the top sync pill)
-  const [syncState, setSyncState] = useState<SyncState>("idle");
 
   // ---- Middle column: message rows + selection + pagination
   const [messages, setMessages] = useState<MailMessagePart[]>([]);
@@ -395,7 +378,7 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
 
   // ---- Search
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchScope, setSearchScope] = useState<"one" | "all" | "attachments">("one");
+  const [searchScope, setSearchScope] = useState<"one" | "all" | "has_attachment">("one");
   const [searchResults, setSearchResults] = useState<MailSearchResp | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
 
@@ -506,11 +489,7 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
   // ===========================================================================
 
   function startCreateFolder() {
-    if (!accountId) {
-      actions.setToast("请先选择一个账户后再新建文件夹", "warn");
-      return;
-    }
-    setFolderForm({ open: true, mode: "create", name: "" });
+    showFolderMutationUnavailable();
   }
 
   function startRenameFolder(f: MailFolder) {
@@ -583,79 +562,8 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
     setSelectedIds(new Set(middleRows.map((r) => r.messageId)));
   }
 
-  async function bulkMark(asRead: boolean) {
-    if (selectedIds.size === 0) {
-      actions.setToast("请先选择至少一封邮件", "warn");
-      return;
-    }
-    const add = asRead ? ["\\Seen"] : [];
-    const remove = asRead ? [] : ["\\Seen"];
-    let ok = true;
-    for (const id of selectedIds) {
-      try {
-        await mailMessageUpdateFlags(id, { add, remove });
-      } catch (e) {
-        ok = false;
-        actions.setToast(friendlyError(e), "warn");
-      }
-    }
-    if (ok) actions.setToast(asRead ? "已标记为已读" : "已标记为未读", "good");
-    setSelectedIds(new Set());
-  }
-
-  async function bulkMove(destFolderId: string) {
-    if (selectedIds.size === 0) {
-      actions.setToast("请先选择至少一封邮件", "warn");
-      return;
-    }
-    if (!destFolderId) return;
-    let ok = true;
-    for (const id of selectedIds) {
-      try {
-        await mailMessageMove(id, destFolderId);
-      } catch (e) {
-        ok = false;
-        actions.setToast(friendlyError(e), "warn");
-      }
-    }
-    if (ok) actions.setToast("已移动", "good");
-    setSelectedIds(new Set());
-    setNextCursor("");
-    await loadMessages();
-  }
-
-  async function bulkDelete() {
-    if (selectedIds.size === 0) {
-      actions.setToast("请先选择至少一封邮件", "warn");
-      return;
-    }
-    const ok = await confirmDanger({
-      title: "删除所选邮件",
-      body: <>将永久删除 {selectedIds.size} 封邮件。该操作不可撤销，且会同步更新全文索引。</>,
-      impact: [
-        `删除 ${selectedIds.size} 封邮件及其附件索引`,
-        "全文搜索中将不再出现被删除邮件",
-        "IMAP 上游服务器中的原始邮件不会被触达（仅本地同步副本）",
-      ],
-      recovery: "备份保留策略允许在保留期内还原单封邮件（尚未实现）。",
-      confirmationText: "DELETE",
-      confirmationLabel: "请输入 DELETE 以确认永久删除",
-    });
-    if (!ok) return;
-    let done = 0;
-    for (const id of selectedIds) {
-      try {
-        await mailMessageDelete(id);
-        done++;
-      } catch (e) {
-        actions.setToast(friendlyError(e), "warn");
-      }
-    }
-    actions.setToast(`已删除 ${done} / ${selectedIds.size} 封邮件`, done === selectedIds.size ? "good" : "warn");
-    setSelectedIds(new Set());
-    setDetail(null);
-    setNextCursor("");
-    await loadMessages();
+  function showFolderMutationUnavailable() {
+    actions.setToast("邮箱文件夹以 Mox/IMAP 为事实来源；真实文件夹创建接入前不会创建 Phantom 本地文件夹。", "warn");
   }
 
   // ===========================================================================
@@ -663,17 +571,21 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
   // ===========================================================================
 
   async function runSearch() {
-    if (!searchQuery.trim()) {
+    const trimmedQuery = searchQuery.trim();
+    if (!trimmedQuery && searchScope !== "has_attachment") {
       setSearchResults(null);
       return;
     }
+    const searchAccountIDs = searchScope === "one" && accountId
+      ? [accountId]
+      : accounts.map((a) => a.id).filter(Boolean);
     const q: MailSearchQuery = {
-      query: searchQuery.trim(),
-      account_ids: searchScope === "one" && accountId ? [accountId] : undefined,
-      scope: searchScope,
+      query: trimmedQuery,
+      account_ids: searchAccountIDs,
+      scope: searchScope === "has_attachment" ? "attachments" : searchScope,
       limit: 50,
       offset: 0,
-    };
+    } as MailSearchQuery;
     setSearchLoading(true);
     try {
       const r = await mailMessageSearch(accountId || "all", q);
@@ -689,64 +601,6 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
   function clearSearch() {
     setSearchQuery("");
     setSearchResults(null);
-  }
-
-  // ===========================================================================
-  // Sync control
-  // ===========================================================================
-
-  async function doSyncStart() {
-    if (!accountId) return;
-    try {
-      await mailImapSyncStart(accountId);
-      setSyncState("syncing");
-      actions.setToast("已请求 IMAP 同步", "good");
-    } catch (e) {
-      actions.setToast(friendlyError(e), "warn");
-    }
-  }
-  async function doSyncPause() {
-    if (!accountId) return;
-    try {
-      await mailImapSyncPause(accountId);
-      setSyncState("paused");
-      actions.setToast("已暂停同步", "good");
-    } catch (e) {
-      actions.setToast(friendlyError(e), "warn");
-    }
-  }
-  async function doSyncResume() {
-    if (!accountId) return;
-    try {
-      await mailImapSyncResume(accountId);
-      setSyncState("syncing");
-      actions.setToast("已恢复同步", "good");
-    } catch (e) {
-      actions.setToast(friendlyError(e), "warn");
-    }
-  }
-  async function doSyncReset() {
-    if (!accountId) return;
-    const ok = await confirmDanger({
-      title: "重置 IMAP 同步状态",
-      objectName: `账户 ${accountId}`,
-      body: <>清空本地 UID / MODSEQ 水线并强制下一次启动进行全量重新同步。此操作不会删除已下载的邮件内容。</>,
-      impact: [
-        "下一次启动 IMAP 同步将按全量重新拉取",
-        "预计会消耗更多服务器带宽与本地磁盘写入",
-        "期间可能出现重复展示相同邮件的短暂窗口",
-      ],
-      recovery: "如需回滚，请联系管理员恢复上次备份的 mail_accounts 行。",
-      confirmationText: "RESET",
-    });
-    if (!ok) return;
-    try {
-      await mailImapSyncReset(accountId);
-      setSyncState("reset");
-      actions.setToast("已重置 IMAP 同步状态", "good");
-    } catch (e) {
-      actions.setToast(friendlyError(e), "warn");
-    }
   }
 
   async function doIndexReset(healthAccountId: string) {
@@ -777,7 +631,11 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
   // ===========================================================================
 
   function startCompose(prefill?: Partial<ComposeState>) {
-    const from = fromAddresses[0] ?? "";
+    if (!activeAccount?.can_send) {
+      actions.setToast(sendDisabledReason || "当前账户暂不可发送邮件", "warn");
+      return;
+    }
+    const from = activeAccount.address || (activeAccount as { email?: string }).email || fromAddresses[0] || "";
     setCompose({ ...EMPTY_COMPOSE, open: true, from, ...(prefill ?? {}) });
   }
 
@@ -823,6 +681,10 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
 
   async function handleComposeSend(s: ComposeState) {
     if (!accountId) return;
+    if (!activeAccount?.can_send) {
+      actions.setToast(sendDisabledReason || "当前账户暂不可发送邮件", "warn");
+      return;
+    }
     setComposeLoading(true);
     try {
       const req: ComposeSendReq = {
@@ -836,41 +698,15 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
         reply_to_message_id: s.replyToMessageId,
         forward_message_id: s.forwardMessageId,
       };
-      const resp = await mailComposeSend(req);
-      actions.setToast(`已入队发送，任务 ID：${resp.job_id}`, "good");
+      const resp = await mailComposeSend(req, actions.csrf);
+      actions.setToast(`已提交 Mox 队列：${resp.job_id || "queued"}`, "good");
       setCompose({ ...s, open: false });
       if (s.draftId) {
-        try { await mailDraftDelete(s.draftId); } catch { /* best-effort */ }
+        try { await mailDraftDelete(s.draftId, actions.csrf); } catch { /* best-effort */ }
       }
       await reload();
     } catch (e) {
-      actions.setToast(friendlyError(e), "warn");
-    } finally {
-      setComposeLoading(false);
-    }
-  }
-
-  async function handleComposeDraft(s: ComposeState) {
-    if (!accountId) return;
-    setComposeLoading(true);
-    try {
-      const req: DraftSaveReq = {
-        draft_id: s.draftId,
-        account_id: accountId,
-        from: s.from,
-        to: splitAddrs(s.to),
-        cc: splitAddrs(s.cc),
-        bcc: splitAddrs(s.bcc),
-        subject: s.subject,
-        body_text: s.body,
-        reply_to_message_id: s.replyToMessageId,
-        forward_message_id: s.forwardMessageId,
-      };
-      const resp = await mailDraftSave(req);
-      actions.setToast(`草稿已保存 (${resp.draft_id})`, "good");
-      setCompose({ ...s, draftId: resp.draft_id });
-    } catch (e) {
-      actions.setToast(friendlyError(e), "warn");
+      actions.setToast(friendlyError(e), "danger");
     } finally {
       setComposeLoading(false);
     }
@@ -901,7 +737,6 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
   // Render
   // ===========================================================================
 
-  const syncDesc = describeSyncState(syncState);
   const myIndex = accountId ? indexHealth.find((h) => h.account_id === accountId) : undefined;
 
   return (
@@ -927,7 +762,7 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <input
               className="input flex-1"
-              placeholder="全文搜索（主题 / 发件人 / 正文 / 附件文本）"
+              placeholder="搜索已有本地索引（真实 IMAP 同步尚未启用）"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") void runSearch(); }}
@@ -935,7 +770,7 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
             <select
               className="input w-[140px]"
               value={searchScope}
-              onChange={(e) => setSearchScope(e.target.value as "one" | "all" | "attachments")}
+              onChange={(e) => setSearchScope(e.target.value as "one" | "all" | "has_attachment")}
             >
               {SCOPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
@@ -945,64 +780,21 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
             {searchResults ? <Button onClick={clearSearch}>清空</Button> : null}
           </div>
 
-          <Pill tone={syncDesc.tone}>同步：{syncDesc.label}</Pill>
-          <Button disabled={!accountId || syncState === "syncing"} onClick={() => void doSyncStart()}>启动同步</Button>
-          <Button disabled={!accountId || syncState !== "syncing"} onClick={() => void doSyncPause()}>暂停</Button>
-          <Button disabled={!accountId || syncState !== "paused"} onClick={() => void doSyncResume()}>恢复</Button>
-          <Button tone="danger" disabled={!accountId} onClick={() => void doSyncReset()}>重置同步</Button>
-
-          <Button tone="primary" onClick={() => startCompose()} disabled={fromAddresses.length === 0}>
+          <Button tone="primary" onClick={() => startCompose()} disabled={!activeAccount?.can_send} title={activeAccount?.can_send ? undefined : sendDisabledReason}>
             撰写
           </Button>
         </div>
       </Panel>
 
-      {/* ==================== Search results overlay ======================= */}
-      {searchResults ? (
-        <Panel title="搜索结果" subtitle={`${searchResults.total} 条命中，耗时 ${searchResults.duration_ms}ms`}
-          actions={<small className="muted">查询：<code className="mono">{searchResults.query}</code></small>}>
-          {searchResults.items.length === 0 ? (
-            <EmptyState title="未找到匹配的邮件" body="请尝试更换关键词、放宽作用域，或在索引重建完成后重试。" />
-          ) : (
-            <ul className="m-0 list-none divide-y divide-[var(--line)] border border-[var(--line)] rounded-md">
-              {searchResults.items.map((r) => (
-                <li
-                  key={r.id}
-                  className={`flex items-start gap-3 px-3 py-2 cursor-pointer hover:bg-[var(--surface-soft)] ${activeMessageId === r.message_id ? "bg-[var(--surface-soft)]" : ""}`}
-                  onClick={() => void loadDetail(r.message_id)}
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <strong className="truncate">{r.subject || "（无主题）"}</strong>
-                      <small className="muted shrink-0">{r.date}</small>
-                    </div>
-                    <div className="flex items-center justify-between gap-2 text-xs">
-                      <span className="truncate muted">
-                        <span className="text-[var(--text)]">{r.from}</span>
-                        {" → "}
-                        <span>{r.to}</span>
-                      </span>
-                      <span className="mono muted shrink-0">{r.size_bytes} B</span>
-                    </div>
-                    <p className="m-0 mt-1 text-xs leading-relaxed" dangerouslySetInnerHTML={{ __html: r.snippet }} />
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Panel>
-      ) : null}
-
       {/* ====================== Three-column mail view ===================== */}
-      {!searchResults ? (
-        <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(180px, 1fr) minmax(260px, 2fr) minmax(380px, 5fr)" }}>
+      <div className="mailbox-workbench grid" style={{ gridTemplateColumns: "minmax(180px, 1fr) minmax(280px, 2fr) minmax(380px, 5fr)" }}>
           {/* ---------------- Column 1: Folders ------------------------------ */}
           <Panel
+            className="mailbox-pane"
             title="文件夹"
             subtitle={folderLoading ? "加载中…" : `${folders.length} 个文件夹`}
             actions={
               <div className="flex items-center gap-1">
-                <Button onClick={startCreateFolder} disabled={!accountId}>新建</Button>
                 <Button onClick={() => void loadFolders()} disabled={folderLoading || !accountId}>刷新</Button>
               </div>
             }
@@ -1010,9 +802,9 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
             {accounts.length === 0 ? (
               <EmptyState title="尚未配置邮箱账户" body="请在『邮箱账户』页面先创建至少一个账户，再回到此处浏览邮件。" />
             ) : folders.length === 0 && !folderLoading ? (
-              <EmptyState title="暂无文件夹" body="点击右上『新建』创建自定义文件夹，或点击『启动同步』以自动拉取上游 IMAP 文件夹结构。" />
+              <EmptyState title="暂无文件夹" body="当前只展示已有本地索引；真实 IMAP 文件夹同步接入后才会开放创建、重命名和删除。" />
             ) : (
-              <ul className="m-0 list-none border border-[var(--line)] rounded-md overflow-hidden">
+              <ul className="m-0 list-none divide-y divide-[var(--line)] overflow-hidden">
                 {[...systemFolders, ...customFolders].map((f) => {
                   const badge = folderBadge(f);
                   return (
@@ -1066,7 +858,7 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
             )}
 
             {/* ---- Index health summary ---- */}
-            <div className="mt-4 rounded-md border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs">
+            <div className="mt-4 bg-[var(--surface-soft)] p-3 text-xs">
               <div className="mb-1 flex items-center justify-between">
                 <strong>搜索索引健康</strong>
                 {inboxFolder ? null : null}
@@ -1105,13 +897,15 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
                   <strong>当前账户正在重建索引。</strong> 在此期间搜索结果可能不完整；完成后将自动切换为健康。
                 </Notice>
               ) : null}
+              <p className="muted m-0 mt-3">真实 IMAP 增量同步适配器尚未启用；Mailbox 当前只展示已有本地索引。文件夹创建、重命名、删除会在 Mox/IMAP 写入接入后开放。</p>
             </div>
           </Panel>
 
           {/* ----------------- Column 2: Messages ----------------------------- */}
           <Panel
-            title={activeFolderId ? (folders.find((f) => f.id === activeFolderId)?.name ?? "邮件") : "邮件"}
-            subtitle={messageLoading ? "加载中…" : `${middleRows.length} / ${totalCount} 封`}
+            className="mailbox-pane"
+            title={searchResults ? "搜索结果" : activeFolderId ? (folders.find((f) => f.id === activeFolderId)?.name ?? "邮件") : "邮件"}
+            subtitle={searchResults ? `${searchResults.total} 条命中` : messageLoading ? "加载中…" : `${middleRows.length} / ${totalCount} 封`}
             actions={
               <div className="flex items-center gap-1">
                 <span className="cursor-pointer select-none" onClick={() => setUnseenOnly((v) => (v === 1 ? 0 : 1))}>
@@ -1127,32 +921,48 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
               </div>
             }
           >
-            {/* ---- Bulk action bar ---- */}
-            {selectedIds.size > 0 ? (
-              <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--surface-soft)] p-2 text-xs">
-                <span>已选 {selectedIds.size} 封：</span>
-                <Button onClick={() => void bulkMark(true)}>标记已读</Button>
-                <Button onClick={() => void bulkMark(false)}>标记未读</Button>
-                <select
-                  className="input"
-                  defaultValue=""
-                  onChange={(e) => { const v = e.target.value; e.currentTarget.value = ""; void bulkMove(v); }}
-                >
-                  <option value="">移动到…</option>
-                  {folders.filter((f) => f.id !== activeFolderId).map((f) => (
-                    <option key={f.id} value={f.id}>{f.name}</option>
-                  ))}
-                </select>
-                <Button tone="danger" onClick={() => void bulkDelete()}>删除</Button>
-              </div>
+            {!searchResults && selectedIds.size > 0 ? (
+              <Notice tone="warn">
+                <strong>已选 {selectedIds.size} 封。</strong> flags、move 和 delete 写入尚未接入真实 IMAP/Mox，当前不会提供批量修改按钮。
+              </Notice>
             ) : null}
 
-            {!activeFolderId ? (
+            {searchResults ? (
+              searchResults.items.length === 0 ? (
+                <EmptyState title="未找到匹配的邮件" body="请尝试更换关键词、放宽作用域，或在索引重建完成后重试。" />
+              ) : (
+                <ul className="m-0 max-h-[520px] list-none divide-y divide-[var(--line)] overflow-auto">
+                  {searchResults.items.map((r) => (
+                    <li
+                      key={r.id}
+                      className={`flex cursor-pointer items-start gap-3 px-3 py-2 hover:bg-[var(--surface-soft)] ${activeMessageId === r.message_id ? "bg-[var(--surface-soft)]" : ""}`}
+                      onClick={() => void loadDetail(r.message_id)}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <strong className="truncate text-sm">{r.subject || "（无主题）"}</strong>
+                          <small className="muted shrink-0">{r.date}</small>
+                        </div>
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="truncate muted">
+                            <span className="text-[var(--text)]">{r.from}</span>
+                            {" → "}
+                            <span>{r.to}</span>
+                          </span>
+                          <span className="mono muted shrink-0">{r.size_bytes} B</span>
+                        </div>
+                        <p className="m-0 mt-1 text-xs leading-relaxed">{r.snippet}</p>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )
+            ) : !activeFolderId ? (
               <EmptyState title="选择一个文件夹" body="点击左侧任一文件夹以查看其中邮件。" />
             ) : middleRows.length === 0 && !messageLoading ? (
-              <EmptyState title="暂无邮件" body={unseenOnly || hasAttachmentOnly ? "当前筛选条件下无匹配邮件，请尝试切换筛选。" : "文件夹为空，点击右上『启动同步』拉取上游邮件。"} />
+              <EmptyState title="暂无邮件" body={unseenOnly || hasAttachmentOnly ? "当前筛选条件下无匹配邮件，请尝试切换筛选。" : "文件夹为空；真实 IMAP 邮件拉取需等待适配器启用。"} />
             ) : (
-              <ul className="m-0 list-none divide-y divide-[var(--line)] border border-[var(--line)] rounded-md max-h-[520px] overflow-auto">
+              <ul className="m-0 max-h-[520px] list-none divide-y divide-[var(--line)] overflow-auto">
                 {middleRows.map((r) => (
                   <li
                     key={r.messageId}
@@ -1188,18 +998,19 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
             )}
 
             {/* ---- Pagination ---- */}
-            <div className="mt-2 flex items-center justify-between text-xs">
+            {!searchResults ? <div className="mt-2 flex items-center justify-between text-xs">
               <small className="muted">
                 {messageLoading ? "加载中…" : nextCursor ? "滚动到底加载下一页" : "已到达末尾"}
               </small>
               {nextCursor ? (
                 <Button onClick={() => void loadMessages()} disabled={messageLoading}>加载更多</Button>
               ) : null}
-            </div>
+            </div> : null}
           </Panel>
 
           {/* ------------------ Column 3: Detail / Preview -------------------- */}
           <Panel
+            className="mailbox-pane mailbox-inspector"
             title={detail ? (detail.subject || "（无主题）") : "邮件预览"}
             subtitle={detailLoading ? "加载中…" : detail ? (detail.date ? detail.date.slice(0, 19) : "") : "选择左侧一封邮件以查看详情"}
             actions={
@@ -1208,26 +1019,6 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
                   <Button onClick={() => startReply(false)}>回复</Button>
                   <Button onClick={() => startReply(true)}>全部回复</Button>
                   <Button onClick={() => startForward()}>转发</Button>
-                  <Button tone="danger" onClick={async () => {
-                    const ok = await confirmDanger({
-                      title: "删除该邮件",
-                      body: <>将从本地同步副本中永久删除该邮件。</>,
-                      impact: ["全文索引将同步移除该邮件", "上游 IMAP 服务器中的原始邮件不会被触达"],
-                      recovery: "若误删，可通过备份恢复（尚未实现）。",
-                      confirmationText: "DELETE",
-                    });
-                    if (!ok) return;
-                    try {
-                      await mailMessageDelete(activeMessageId);
-                      actions.setToast("邮件已删除", "good");
-                      setDetail(null);
-                      setActiveMessageId("");
-                      setNextCursor("");
-                      await loadMessages();
-                    } catch (e) {
-                      actions.setToast(friendlyError(e), "warn");
-                    }
-                  }}>删除</Button>
                 </div>
               ) : undefined
             }
@@ -1236,7 +1027,7 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
               <EmptyState title="尚未选择邮件" body="从中间列表选择一封邮件以预览内容、下载附件或进行回复/转发。" />
             ) : (
               <div className="grid gap-3 text-sm">
-                <div className="grid gap-1 rounded-md border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+                <div className="grid gap-1 bg-[var(--surface-soft)] p-3">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div><span className="muted">From：</span><code className="mono">{detail.from ?? "—"}</code></div>
@@ -1262,7 +1053,7 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
                     </Notice>
                   ) : null
                 ) : null}
-                <pre className="m-0 max-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-md border border-[var(--line)] bg-[var(--surface)] p-3 text-xs leading-relaxed font-[inherit]">
+                <pre className="m-0 max-h-[420px] overflow-auto whitespace-pre-wrap break-words bg-[var(--surface)] p-3 text-xs leading-relaxed font-[inherit]">
                   {detail.message_body_text
                     ? detail.message_body_text.length > 10_000
                       ? detail.message_body_text.slice(0, 10_000) + "\n……（已截断）"
@@ -1273,8 +1064,8 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
                 {/* ---- Attachments ---- */}
                 {(detail.attachments ?? []).length > 0 ? (
                   <div>
-                    <div className="mb-2 text-xs muted">附件（下载尚未实现，按钮为占位）：</div>
-                    <ul className="m-0 list-none divide-y divide-[var(--line)] border border-[var(--line)] rounded-md">
+                    <div className="mb-2 text-xs muted">附件</div>
+                    <ul className="m-0 list-none divide-y divide-[var(--line)]">
                       {(detail.attachments as AttachmentInfo[]).map((a) => (
                         <li key={`${a.part_id ?? a.index}-${a.filename}`} className="flex items-center justify-between gap-2 px-3 py-2">
                           <div className="min-w-0">
@@ -1283,7 +1074,13 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
                           </div>
                           <div className="flex shrink-0 items-center gap-2">
                             <Pill tone={a.stored ? "good" : "warn"}>{a.stored ? "已缓存" : "未缓存"}</Pill>
-                            <Button disabled title="附件下载功能尚未启用">下载</Button>
+                            {a.stored ? (
+                              <a className="button min-h-8 px-2 text-xs" href={`/api/mail/messages/${encodeURIComponent(detail.id)}/attachments/${a.index}?download=1`}>
+                                下载
+                              </a>
+                            ) : (
+                              <Button disabled title="附件尚未缓存到本地索引">下载</Button>
+                            )}
                           </div>
                         </li>
                       ))}
@@ -1293,7 +1090,7 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
 
                 {/* ---- MIME parts debug (collapsed-ish style) ---- */}
                 {(detail.parts ?? []).length > 1 ? (
-                  <details className="rounded-md border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs">
+                  <details className="bg-[var(--surface-soft)] p-3 text-xs">
                     <summary className="cursor-pointer muted">MIME 结构（{detail.parts?.length ?? 0} 个部分）</summary>
                     <ul className="m-0 mt-2 list-none pl-4 grid gap-1">
                       {(detail.parts ?? []).map((p) => (
@@ -1309,7 +1106,6 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
             )}
           </Panel>
         </div>
-      ) : null}
 
       {/* ======================= Modal stack ================================== */}
       <FolderFormModal
@@ -1323,11 +1119,12 @@ export function MailboxTab({ actions, reload, data }: MailboxTabProps) {
       <ComposeModal
         state={compose}
         setState={setCompose}
-        fromOptions={fromAddresses}
+        fromOptions={activeAccount?.can_send ? [activeAccount.address || (activeAccount as { email?: string }).email || ""].filter(Boolean) : []}
+        sendEnabled={!!activeAccount?.can_send}
+        sendDisabledReason={sendDisabledReason}
         loading={composeLoading}
         actions={actions}
         onSend={handleComposeSend}
-        onDraft={handleComposeDraft}
       />
       {dangerConfirmDialog}
     </div>

@@ -5,13 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 	"time"
 
 	"phantom-lancer/internal/mail/configapply"
 	"phantom-lancer/internal/mail/moxcli"
 	"phantom-lancer/internal/mail/probes"
 	"phantom-lancer/internal/storage"
+
+	"github.com/miekg/dns"
 )
 
 // --- Domain service layer (Phase 3) -------------------------------------
@@ -26,6 +30,7 @@ func (s *Service) DomainCreate(ctx context.Context, d storage.MailDomain) (*stor
 	if err != nil {
 		return nil, fmt.Errorf("store create domain: %w", err)
 	}
+	attachDomainDNSStatus(created)
 	s.touchLastChange()
 	pr := s.applyFromDomains(ctx)
 	if pr != nil && !pr.Success {
@@ -43,6 +48,7 @@ func (s *Service) DomainUpdate(ctx context.Context, d storage.MailDomain) (*stor
 	if err != nil {
 		return nil, fmt.Errorf("store update domain: %w", err)
 	}
+	attachDomainDNSStatus(updated)
 	s.touchLastChange()
 	pr := s.applyFromDomains(ctx)
 	if pr != nil && !pr.Success {
@@ -82,7 +88,14 @@ func (s *Service) DomainEnable(ctx context.Context, id string, enable bool) (*st
 
 // DomainList returns all stored domains.
 func (s *Service) DomainList(ctx context.Context) ([]*storage.MailDomain, error) {
-	return s.store.MailListDomains(ctx)
+	items, err := s.store.MailListDomains(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		attachDomainDNSStatus(item)
+	}
+	return items, nil
 }
 
 // DomainDNSCheck runs an L6-equivalent check and stores the JSON outcome.
@@ -95,20 +108,22 @@ func (s *Service) DomainDNSCheck(ctx context.Context, id string) (*storage.MailD
 		return nil, storage.ErrNotFound
 	}
 	ts := time.Now().UTC().Format(time.RFC3339)
+	records := runDomainDNSChecks(ctx, cur.Domain, cur.DKIMSelector)
+	status := "ok"
+	for _, rec := range records {
+		if rec.Status == "missing" || rec.Status == "mismatch" || rec.Status == "error" {
+			status = "needs_attention"
+			break
+		}
+		if rec.Status == "unsupported" && status == "ok" {
+			status = "partial"
+		}
+	}
 	out := map[string]any{
 		"checked_at": ts,
 		"domain":     cur.Domain,
-		"status":     "skeleton",
-		"records": map[string]string{
-			"MX":     "not checked",
-			"SPF":    "not checked",
-			"DKIM":   "not checked",
-			"DMARC":  "not checked",
-			"TLSA":   "not checked",
-			"TLSRPT": "not checked",
-			"PTR":    "not checked",
-			"SRV":    "not checked",
-		},
+		"status":     status,
+		"records":    records,
 	}
 	buf, _ := json.Marshal(out)
 	cur.DNSCheckJSON = string(buf)
@@ -117,7 +132,64 @@ func (s *Service) DomainDNSCheck(ctx context.Context, id string) (*storage.MailD
 	if uerr != nil {
 		return nil, fmt.Errorf("persist dns check: %w", uerr)
 	}
+	attachDomainDNSStatus(updated)
 	return updated, nil
+}
+
+func attachDomainDNSStatus(d *storage.MailDomain) {
+	if d == nil {
+		return
+	}
+	d.DNSStatus = DomainDNSStatusFromCheckJSON(d.DNSCheckJSON)
+}
+
+func DomainDNSStatusFromCheckJSON(raw string) map[string]any {
+	status := map[string]any{"overall": "unknown"}
+	if strings.TrimSpace(raw) == "" {
+		return status
+	}
+	var payload struct {
+		CheckedAt string                 `json:"checked_at"`
+		Status    string                 `json:"status"`
+		Records   []domainDNSRecordCheck `json:"records"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return status
+	}
+	if payload.CheckedAt != "" {
+		status["last_check_at"] = payload.CheckedAt
+	}
+	switch payload.Status {
+	case "ok":
+		status["overall"] = "good"
+	case "partial", "needs_attention":
+		status["overall"] = "warn"
+	default:
+		status["overall"] = "unknown"
+	}
+	for _, rec := range payload.Records {
+		ok := rec.Status == "ok"
+		switch rec.Name {
+		case "MX":
+			status["mx_ok"] = ok
+		case "SPF":
+			status["spf_ok"] = ok
+		case "DKIM":
+			status["dkim_ok"] = ok
+		case "DMARC":
+			status["dmarc_ok"] = ok
+		case "TLSRPT":
+			status["tlsrpt_ok"] = ok
+		case "PTR":
+			status["ptr_ok"] = ok
+		case "TLSA":
+			status["tlsa_ok"] = ok
+		case "SRV_SUBMISSION", "SRV_IMAPS":
+			prev, seen := status["autoconfig_ok"].(bool)
+			status["autoconfig_ok"] = ok && (!seen || prev)
+		}
+	}
+	return status
 }
 
 // DomainDNSRecords returns the 8 recommended DNS record templates for a domain.
@@ -142,9 +214,136 @@ func (s *Service) DomainDNSRecords(ctx context.Context, id string) (map[string]s
 		"TLSA":   fmt.Sprintf("_25._tcp.mail.%s.  300 IN TLSA 3 1 1 <sha256-cert>", d),
 		"TLSRPT": fmt.Sprintf("_smtp._tls.%s.  300 IN TXT \"v=TLSRPTv1; rua=mailto:tlsrpt@%s\"", d, d),
 		"PTR":    fmt.Sprintf("<MX-IP>.in-addr.arpa.  300 IN PTR mail.%s.", d),
-		"SRV":    fmt.Sprintf("_autodiscover._tcp.%s.  300 IN SRV 0 0 443 mail.%s.", d, d),
+		"SRV":    fmt.Sprintf("_submission._tcp.%s. 300 IN SRV 0 1 587 mail.%s.\n_imaps._tcp.%s.      300 IN SRV 0 1 993 mail.%s.", d, d, d, d),
 	}
 	return recs, nil
+}
+
+type domainDNSRecordCheck struct {
+	Name    string   `json:"name"`
+	Status  string   `json:"status"`
+	Found   []string `json:"found,omitempty"`
+	Message string   `json:"message,omitempty"`
+}
+
+func runDomainDNSChecks(ctx context.Context, domain, selector string) []domainDNSRecordCheck {
+	d := strings.TrimSuffix(strings.TrimSpace(domain), ".")
+	if selector == "" {
+		selector = "default"
+	}
+	checks := []domainDNSRecordCheck{
+		checkMX(ctx, d),
+		checkTXTPrefix(ctx, "SPF", d, "v=spf1"),
+		checkTXTPrefix(ctx, "DKIM", selector+"._domainkey."+d, "v=DKIM1"),
+		checkTXTPrefix(ctx, "DMARC", "_dmarc."+d, "v=DMARC1"),
+		checkTXTPrefix(ctx, "TLSRPT", "_smtp._tls."+d, "v=TLSRPTv1"),
+		checkTLSA(ctx, "_25._tcp.mail."+d),
+		checkSRV(ctx, "SRV_SUBMISSION", "_submission", "tcp", d),
+		checkSRV(ctx, "SRV_IMAPS", "_imaps", "tcp", d),
+	}
+	checks = append(checks, checkPTR(ctx, d))
+	return checks
+}
+
+func checkMX(ctx context.Context, domain string) domainDNSRecordCheck {
+	mx, err := net.DefaultResolver.LookupMX(ctx, domain)
+	if err != nil {
+		return domainDNSRecordCheck{Name: "MX", Status: "missing", Message: err.Error()}
+	}
+	found := make([]string, 0, len(mx))
+	for _, m := range mx {
+		found = append(found, fmt.Sprintf("%d %s", m.Pref, m.Host))
+	}
+	return domainDNSRecordCheck{Name: "MX", Status: "ok", Found: found}
+}
+
+func checkTXTPrefix(ctx context.Context, name, fqdn, prefix string) domainDNSRecordCheck {
+	txt, err := net.DefaultResolver.LookupTXT(ctx, fqdn)
+	if err != nil {
+		return domainDNSRecordCheck{Name: name, Status: "missing", Message: err.Error()}
+	}
+	for _, v := range txt {
+		if strings.HasPrefix(strings.TrimSpace(v), prefix) {
+			return domainDNSRecordCheck{Name: name, Status: "ok", Found: txt}
+		}
+	}
+	return domainDNSRecordCheck{Name: name, Status: "mismatch", Found: txt, Message: "TXT record exists but expected prefix was not found"}
+}
+
+func checkTLSA(ctx context.Context, fqdn string) domainDNSRecordCheck {
+	resp, err := lookupTLSAWithSystemResolver(ctx, fqdn)
+	if err != nil {
+		return domainDNSRecordCheck{Name: "TLSA", Status: "error", Message: err.Error()}
+	}
+	found := []string{}
+	for _, tlsa := range resp {
+		found = append(found, fmt.Sprintf("%d %d %d %s", tlsa.Usage, tlsa.Selector, tlsa.MatchingType, tlsa.Certificate))
+	}
+	if len(found) == 0 {
+		return domainDNSRecordCheck{Name: "TLSA", Status: "missing", Message: "no TLSA records found"}
+	}
+	return domainDNSRecordCheck{Name: "TLSA", Status: "ok", Found: found}
+}
+
+func lookupTLSAWithSystemResolver(ctx context.Context, fqdn string) ([]*dns.TLSA, error) {
+	cfg, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+	if err != nil {
+		return nil, fmt.Errorf("load system resolver config: %w", err)
+	}
+	if len(cfg.Servers) == 0 {
+		return nil, errors.New("system resolver config has no nameservers")
+	}
+	msg := new(dns.Msg)
+	msg.SetQuestion(dns.Fqdn(fqdn), dns.TypeTLSA)
+	client := &dns.Client{Net: "udp", Timeout: 5 * time.Second}
+	var lastErr error
+	for _, server := range cfg.Servers {
+		addr := net.JoinHostPort(server, cfg.Port)
+		resp, _, err := client.ExchangeContext(ctx, msg, addr)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		out := []*dns.TLSA{}
+		for _, ans := range resp.Answer {
+			if tlsa, ok := ans.(*dns.TLSA); ok {
+				out = append(out, tlsa)
+			}
+		}
+		return out, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errors.New("TLSA lookup failed")
+}
+
+func checkSRV(ctx context.Context, name, service, proto, domain string) domainDNSRecordCheck {
+	_, addrs, err := net.DefaultResolver.LookupSRV(ctx, strings.TrimPrefix(service, "_"), proto, domain)
+	if err != nil {
+		return domainDNSRecordCheck{Name: name, Status: "missing", Message: err.Error()}
+	}
+	found := make([]string, 0, len(addrs))
+	for _, srv := range addrs {
+		found = append(found, fmt.Sprintf("%d %d %d %s", srv.Priority, srv.Weight, srv.Port, srv.Target))
+	}
+	return domainDNSRecordCheck{Name: name, Status: "ok", Found: found}
+}
+
+func checkPTR(ctx context.Context, domain string) domainDNSRecordCheck {
+	mx, err := net.DefaultResolver.LookupMX(ctx, domain)
+	if err != nil || len(mx) == 0 {
+		return domainDNSRecordCheck{Name: "PTR", Status: "missing", Message: "MX must resolve before PTR can be checked"}
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, strings.TrimSuffix(mx[0].Host, "."))
+	if err != nil || len(ips) == 0 {
+		return domainDNSRecordCheck{Name: "PTR", Status: "missing", Message: "MX host has no address record"}
+	}
+	names, err := net.DefaultResolver.LookupAddr(ctx, ips[0].IP.String())
+	if err != nil {
+		return domainDNSRecordCheck{Name: "PTR", Status: "missing", Message: err.Error()}
+	}
+	return domainDNSRecordCheck{Name: "PTR", Status: "ok", Found: names}
 }
 
 func dmarcDefault(p string) string {
@@ -176,20 +375,22 @@ func (s *Service) applyFromDomains(ctx context.Context) *configapply.PipelineRes
 	}
 	domains, derr := s.store.MailListDomains(ctx)
 	accounts, _ := s.store.MailListAccounts(ctx, "", "")
+	emergency := emergencyStateFromSettings(settings)
 
 	ss := configapply.SettingsSnapshot{
-		Hostname:           settings.Hostname,
-		AdminEmail:         settings.AdminEmail,
-		WebmailAddr:        settings.WebmailAddr,
-		WebAPIAddr:         settings.WebAPIAddr,
-		MoxBinaryPath:      settings.MoxBinaryPath,
-		MoxConfigPath:      settings.MoxConfigPath,
-		MoxDataDir:         settings.MoxDataDir,
-		SMTPPort:           settings.SMTPPort,
-		SMTPSubmissionPort: settings.SMTPSubmissionPort,
-		SMTPSPort:          settings.SMTPSPort,
-		IMAPPort:           settings.IMAPPort,
-		IMAPSPort:          settings.IMAPSPort,
+		Hostname:               settings.Hostname,
+		AdminEmail:             settings.AdminEmail,
+		WebmailAddr:            settings.WebmailAddr,
+		WebAPIAddr:             settings.WebAPIAddr,
+		MoxBinaryPath:          settings.MoxBinaryPath,
+		MoxConfigPath:          settings.MoxConfigPath,
+		MoxDataDir:             settings.MoxDataDir,
+		SMTPPort:               settings.SMTPPort,
+		SMTPSubmissionPort:     settings.SMTPSubmissionPort,
+		SMTPSPort:              settings.SMTPSPort,
+		IMAPPort:               settings.IMAPPort,
+		IMAPSPort:              settings.IMAPSPort,
+		EmergencyInboundReject: emergency.Enabled,
 	}
 	// Fallback to s.cli paths if settings row is empty (managed mode).
 	if ss.MoxBinaryPath == "" && s.cli != nil {
@@ -210,14 +411,19 @@ func (s *Service) applyFromDomains(ctx context.Context) *configapply.PipelineRes
 				DMARCPolicy:  d.DMARCPolicy,
 				DMARCRUA:     d.DMARCRUA,
 				SPFInclude:   d.SPFInclude,
+				Disabled:     emergency.Enabled,
 			})
 		}
 	}
 	as := make([]configapply.AccountSnapshot, 0, len(accounts))
 	for i := range accounts {
 		a := accounts[i]
+		email := a.Email
+		if email == "" {
+			email = a.Address
+		}
 		as = append(as, configapply.AccountSnapshot{
-			Email:       a.Email,
+			Email:       email,
 			DisplayName: a.DisplayName,
 			Role:        a.Role,
 			Enabled:     a.Enabled,
@@ -319,14 +525,14 @@ type ConfigApplyRequest struct {
 
 // ConfigApplyResponse wraps the pipeline result.
 type ConfigApplyResponse struct {
-	Success     bool                         `json:"success"`
-	FailureStep int                          `json:"failure_step"`
-	RolledBack  bool                         `json:"rolled_back"`
-	RollbackErr string                       `json:"rollback_err,omitempty"`
-	ConfigHash  string                       `json:"config_hash"`
-	Summary     string                       `json:"summary"`
-	Steps       []configapply.StepStatus     `json:"steps,omitempty"`
-	Drifted     bool                         `json:"drifted"`
+	Success     bool                     `json:"success"`
+	FailureStep int                      `json:"failure_step"`
+	RolledBack  bool                     `json:"rolled_back"`
+	RollbackErr string                   `json:"rollback_err,omitempty"`
+	ConfigHash  string                   `json:"config_hash"`
+	Summary     string                   `json:"summary"`
+	Steps       []configapply.StepStatus `json:"steps,omitempty"`
+	Drifted     bool                     `json:"drifted"`
 }
 
 // ConfigApply runs the 10-step pipeline and returns the result.  If a progress
@@ -363,20 +569,22 @@ func (s *Service) applyFromDomainsWithProgress(ctx context.Context, progress cha
 	}
 	domains, derr := s.store.MailListDomains(ctx)
 	accounts, _ := s.store.MailListAccounts(ctx, "", "")
+	emergency := emergencyStateFromSettings(settings)
 
 	ss := configapply.SettingsSnapshot{
-		Hostname:           settings.Hostname,
-		AdminEmail:         settings.AdminEmail,
-		WebmailAddr:        settings.WebmailAddr,
-		WebAPIAddr:         settings.WebAPIAddr,
-		MoxBinaryPath:      settings.MoxBinaryPath,
-		MoxConfigPath:      settings.MoxConfigPath,
-		MoxDataDir:         settings.MoxDataDir,
-		SMTPPort:           settings.SMTPPort,
-		SMTPSubmissionPort: settings.SMTPSubmissionPort,
-		SMTPSPort:          settings.SMTPSPort,
-		IMAPPort:           settings.IMAPPort,
-		IMAPSPort:          settings.IMAPSPort,
+		Hostname:               settings.Hostname,
+		AdminEmail:             settings.AdminEmail,
+		WebmailAddr:            settings.WebmailAddr,
+		WebAPIAddr:             settings.WebAPIAddr,
+		MoxBinaryPath:          settings.MoxBinaryPath,
+		MoxConfigPath:          settings.MoxConfigPath,
+		MoxDataDir:             settings.MoxDataDir,
+		SMTPPort:               settings.SMTPPort,
+		SMTPSubmissionPort:     settings.SMTPSubmissionPort,
+		SMTPSPort:              settings.SMTPSPort,
+		IMAPPort:               settings.IMAPPort,
+		IMAPSPort:              settings.IMAPSPort,
+		EmergencyInboundReject: emergency.Enabled,
 	}
 	if ss.MoxBinaryPath == "" && s.cli != nil {
 		ss.MoxBinaryPath = s.cli.BinaryPath
@@ -396,14 +604,19 @@ func (s *Service) applyFromDomainsWithProgress(ctx context.Context, progress cha
 				DMARCPolicy:  d.DMARCPolicy,
 				DMARCRUA:     d.DMARCRUA,
 				SPFInclude:   d.SPFInclude,
+				Disabled:     emergency.Enabled,
 			})
 		}
 	}
 	as := make([]configapply.AccountSnapshot, 0, len(accounts))
 	for i := range accounts {
 		a := accounts[i]
+		email := a.Email
+		if email == "" {
+			email = a.Address
+		}
 		as = append(as, configapply.AccountSnapshot{
-			Email:       a.Email,
+			Email:       email,
 			DisplayName: a.DisplayName,
 			Role:        a.Role,
 			Enabled:     a.Enabled,
@@ -475,10 +688,15 @@ func (s *Service) ConfigValidate(ctx context.Context, _ ConfigValidateRequest) (
 		}
 	}
 	return &ConfigValidateResponse{
-		OK:       len(errs) == 0 && (res == nil || res.OK),
-		Errors:   errs,
-		Warnings: func() []string { if res != nil { return res.Warnings } ; return nil }(),
-		Output:   out,
+		OK:     len(errs) == 0 && (res == nil || res.OK),
+		Errors: errs,
+		Warnings: func() []string {
+			if res != nil {
+				return res.Warnings
+			}
+			return nil
+		}(),
+		Output: out,
 	}, nil
 }
 
@@ -520,12 +738,12 @@ func (s *Service) ConfigRollback(ctx context.Context, _ ConfigRollbackRequest) (
 
 // ConfigSummary returns the current drift status + disk hash for the UI summary card.
 type ConfigSummaryResponse struct {
-	Drifted     bool   `json:"drifted"`
-	ConfigPath  string `json:"config_path"`
+	Drifted      bool   `json:"drifted"`
+	ConfigPath   string `json:"config_path"`
 	ExpectedHash string `json:"expected_hash"`
-	DiskHash    string `json:"disk_hash"`
-	LastCheck   string `json:"last_check"`
-	ConfigMode  string `json:"config_mode"`
+	DiskHash     string `json:"disk_hash"`
+	LastCheck    string `json:"last_check"`
+	ConfigMode   string `json:"config_mode"`
 }
 
 func (s *Service) ConfigSummary(ctx context.Context) (*ConfigSummaryResponse, error) {
@@ -561,10 +779,10 @@ type ResolveDriftRequest struct {
 	Action string `json:"action"` // "overwrite" or "reimport"
 }
 type ResolveDriftResponse struct {
-	Accepted bool   `json:"accepted"`
-	Action   string `json:"action"`
-	NewHash  string `json:"new_hash"`
-	Message  string `json:"message,omitempty"`
+	Accepted bool                 `json:"accepted"`
+	Action   string               `json:"action"`
+	NewHash  string               `json:"new_hash"`
+	Message  string               `json:"message,omitempty"`
 	Pipeline *ConfigApplyResponse `json:"pipeline,omitempty"`
 }
 

@@ -18,108 +18,115 @@ import (
 // every Phantom-owned default for the Mox sidecar: desired runtime state,
 // ports, ACME defaults, retention, etc.  It maps 1:1 to mail_mox_settings.
 type MailMoxSettings struct {
-	ID                                int64  `json:"id"`
-	PhantomInstanceID                 string `json:"phantom_instance_id"`
-	ImportMode                        bool   `json:"import_mode"`
-	ImportLabel                       string `json:"import_label"`
-	ConfigMode                        string `json:"config_mode"`
-	DesiredState                      string `json:"desired_state"`
-	MoxBinaryPath                     string `json:"mox_binary_path"`
-	MoxDataDir                        string `json:"mox_data_dir"`
-	MoxConfigPath                     string `json:"mox_config_path"`
-	WebAPIEndpoint                    string `json:"webapi_endpoint"`
-	AdminEmail                        string `json:"admin_email"`
-	Hostname                          string `json:"hostname"`
-	SMTPPort                          int    `json:"smtp_port"`
-	SMTPSubmissionPort                int    `json:"smtp_submission_port"`
-	SMTPSPort                         int    `json:"smtps_port"`
-	IMAPPort                          int    `json:"imap_port"`
-	IMAPSPort                         int    `json:"imaps_port"`
-	WebmailAddr                       string `json:"webmail_addr"`
-	WebAPIAddr                        string `json:"webapi_addr"`
-	ACMEDefaultProviderID             string `json:"acme_default_provider_id"`
-	QueueMaxSizeBytes                 int64  `json:"queue_max_size_bytes"`
-	QueueMaxAgeSeconds                int64  `json:"queue_max_age_seconds"`
-	OutboundRateLimitPerHour          int64  `json:"outbound_rate_limit_per_hour"`
-	RetentionDeliveryEventsDays       int    `json:"retention_delivery_events_days"`
-	RetentionHealthChecksPerType      int    `json:"retention_health_checks_per_type"`
-	SearchIndexMaxSizeGB              int    `json:"search_index_max_size_gb"`
-	DNSBLEnabled                      bool   `json:"dnsbl_enabled"`
-	DNSBLProvidersJSON                string `json:"dnsbl_providers_json"`
-	ExtraCapabilitiesJSON             string `json:"extra_capabilities_json"`
-	ImapSyncEnabled                   bool   `json:"imapsync_enabled"`
-	ImapSyncMaxSizeBytes              int64  `json:"imapsync_max_size_bytes"`
-	ImapSyncBigMessageSizeLimitBytes  int64  `json:"imapsync_big_message_size_limit_bytes"`
-	ImapSyncIntervalAttachmentCacheEnabled bool `json:"imapsync_interval_attachment_cache_enabled"`
-	RetentionAutoApplyEnabled              bool `json:"retention_auto_apply_enabled"`
+	ID                                     int64  `json:"id"`
+	PhantomInstanceID                      string `json:"phantom_instance_id"`
+	ImportMode                             bool   `json:"import_mode"`
+	ImportLabel                            string `json:"import_label"`
+	ConfigMode                             string `json:"config_mode"`
+	DesiredState                           string `json:"desired_state"`
+	MoxBinaryPath                          string `json:"mox_binary_path"`
+	MoxDataDir                             string `json:"mox_data_dir"`
+	MoxConfigPath                          string `json:"mox_config_path"`
+	WebAPIEndpoint                         string `json:"webapi_endpoint"`
+	AdminEmail                             string `json:"admin_email"`
+	Hostname                               string `json:"hostname"`
+	SMTPPort                               int    `json:"smtp_port"`
+	SMTPSubmissionPort                     int    `json:"smtp_submission_port"`
+	SMTPSPort                              int    `json:"smtps_port"`
+	IMAPPort                               int    `json:"imap_port"`
+	IMAPSPort                              int    `json:"imaps_port"`
+	WebmailAddr                            string `json:"webmail_addr"`
+	WebAPIAddr                             string `json:"webapi_addr"`
+	ACMEDefaultProviderID                  string `json:"acme_default_provider_id"`
+	QueueMaxSizeBytes                      int64  `json:"queue_max_size_bytes"`
+	QueueMaxAgeSeconds                     int64  `json:"queue_max_age_seconds"`
+	OutboundRateLimitPerHour               int64  `json:"outbound_rate_limit_per_hour"`
+	RetentionDeliveryEventsDays            int    `json:"retention_delivery_events_days"`
+	RetentionHealthChecksPerType           int    `json:"retention_health_checks_per_type"`
+	SearchIndexMaxSizeGB                   int    `json:"search_index_max_size_gb"`
+	DNSBLEnabled                           bool   `json:"dnsbl_enabled"`
+	DNSBLProvidersJSON                     string `json:"dnsbl_providers_json"`
+	ExtraCapabilitiesJSON                  string `json:"extra_capabilities_json"`
+	ImapSyncEnabled                        bool   `json:"imapsync_enabled"`
+	ImapSyncMaxSizeBytes                   int64  `json:"imapsync_max_size_bytes"`
+	ImapSyncBigMessageSizeLimitBytes       int64  `json:"imapsync_big_message_size_limit_bytes"`
+	ImapSyncIntervalAttachmentCacheEnabled bool   `json:"imapsync_interval_attachment_cache_enabled"`
+	RetentionAutoApplyEnabled              bool   `json:"retention_auto_apply_enabled"`
 	CreatedAt                              string `json:"created_at"`
 	UpdatedAt                              string `json:"updated_at"`
 }
 
 // MailDomain is a single sending/receiving domain registered with Mox.
 type MailDomain struct {
-	ID                    string `json:"id"`
-	Domain                string `json:"domain"`
-	Enabled               bool   `json:"enabled"`
-	DKIMSelector          string `json:"dkim_selector"`
-	DKIMPrivateKey        string `json:"-"` // never serialised
-	DMARCPolicy           string `json:"dmarc_policy"`
-	DMARCRUA              string `json:"dmarc_rua"`
-	SPFInclude            string `json:"spf_include"`
-	DNSProviderID         string `json:"dns_provider_id"`
-	CertID                string `json:"cert_id"`
-	TLSAEnabled           bool   `json:"tlsa_enabled"`
-	SANDomainsCSV         string `json:"san_domains_csv"`
-	TLSADomainsCSV        string `json:"tlsa_domains_csv"`
-	TLSADomainsWildcards  bool   `json:"tlsa_domains_wildcards"`
-	Synced                bool   `json:"synced"`
-	LastSyncedAt          string `json:"last_synced_at"`
-	LastSyncError         string `json:"last_sync_error"`
-	LastDNSCheckAt        string `json:"last_dns_check_at"`
-	DNSCheckJSON          string `json:"dns_check_json"`
-	CreatedAt             string `json:"created_at"`
-	UpdatedAt             string `json:"updated_at"`
+	ID                   string         `json:"id"`
+	Domain               string         `json:"domain"`
+	Enabled              bool           `json:"enabled"`
+	DKIMSelector         string         `json:"dkim_selector"`
+	DKIMPrivateKey       string         `json:"-"` // never serialised
+	DMARCPolicy          string         `json:"dmarc_policy"`
+	DMARCRUA             string         `json:"dmarc_rua"`
+	SPFInclude           string         `json:"spf_include"`
+	DNSProviderID        string         `json:"dns_provider_id"`
+	CertID               string         `json:"cert_id"`
+	TLSAEnabled          bool           `json:"tlsa_enabled"`
+	SANDomainsCSV        string         `json:"san_domains_csv"`
+	TLSADomainsCSV       string         `json:"tlsa_domains_csv"`
+	TLSADomainsWildcards bool           `json:"tlsa_domains_wildcards"`
+	Synced               bool           `json:"synced"`
+	LastSyncedAt         string         `json:"last_synced_at"`
+	LastSyncError        string         `json:"last_sync_error"`
+	LastDNSCheckAt       string         `json:"last_dns_check_at"`
+	DNSCheckJSON         string         `json:"dns_check_json"`
+	DNSStatus            map[string]any `json:"dns_status,omitempty"`
+	CreatedAt            string         `json:"created_at"`
+	UpdatedAt            string         `json:"updated_at"`
 }
 
 // MailAccount is one local mailbox (user@domain).
 type MailAccount struct {
-	ID                    string `json:"id"`
-	DomainID              string `json:"domain_id"`
-	LocalPart             string `json:"local_part"`
-	Address               string `json:"address"`
-	Email                 string `json:"email"`
-	DisplayName           string `json:"display_name"`
-	PasswordMode          string `json:"password_mode"` // set | unset | external | disabled
-	RecoveryEmail         string `json:"recovery_email"`
-	QuotaMB               int64  `json:"quota_mb"`
-	StorageLimitMB        int64  `json:"storage_limit_mb"`
-	IsAdmin               bool   `json:"is_admin"`
-	IMAPSyncEnabled       bool   `json:"imap_sync_enabled"`
-	IMAPSyncState         string `json:"imap_sync_state"`
-	ImapHost              string `json:"imap_host"`
-	ImapUsername          string `json:"imap_username"`
-	IMAPSyncMaxSizeBytes  int64  `json:"imap_sync_max_size_bytes"`
-	IMAPLastUIDValidity   string `json:"imap_last_uidvalidity"`
-	IMAPLastUID           string `json:"imap_last_uid"`
-	IMAPLastInternalDate  string `json:"imap_last_internaldate"`
-	IMAPError             string `json:"imap_error"`
-	Enabled               bool   `json:"enabled"`
-	Status                string `json:"status"` // active | suspended | disabled
-	Role                  string `json:"role"`
-	ImportModeReadOnly    bool   `json:"import_mode_read_only"`
-	Synced                bool   `json:"synced"`
-	LastSyncedAt          string `json:"last_synced_at"`
-	LastSyncError         string `json:"last_sync_error"`
-	LastPasswordChangedAt string `json:"last_password_changed_at"`
-	LastLoginAt           string `json:"last_login_at"`
-	SyncState             string `json:"sync_state"`
-	SyncFolderStatsJSON   string `json:"sync_folder_stats_json"`
-	SyncLastUIDJSON       string `json:"sync_last_uid_json"`
-	SyncLastRunAt         string `json:"sync_last_run_at"`
-	SyncNextRunAt         string `json:"sync_next_run_at"`
-	SyncError             string `json:"sync_error"`
-	CreatedAt             string `json:"created_at"`
-	UpdatedAt             string `json:"updated_at"`
+	ID                      string `json:"id"`
+	DomainID                string `json:"domain_id"`
+	LocalPart               string `json:"local_part"`
+	Address                 string `json:"address"`
+	Email                   string `json:"email"`
+	DisplayName             string `json:"display_name"`
+	PasswordMode            string `json:"password_mode"` // set | unset | external | disabled
+	RecoveryEmail           string `json:"recovery_email"`
+	QuotaMB                 int64  `json:"quota_mb"`
+	StorageLimitMB          int64  `json:"storage_limit_mb"`
+	IsAdmin                 bool   `json:"is_admin"`
+	IMAPSyncEnabled         bool   `json:"imap_sync_enabled"`
+	IMAPSyncState           string `json:"imap_sync_state"`
+	ImapHost                string `json:"imap_host"`
+	ImapUsername            string `json:"imap_username"`
+	IMAPSyncMaxSizeBytes    int64  `json:"imap_sync_max_size_bytes"`
+	WebAPIPasswordWrapped   string `json:"-"`
+	WebAPICredentialPresent bool   `json:"webapi_credential_present"`
+	WebAPIEndpointValid     bool   `json:"webapi_endpoint_valid"`
+	WebAPIRuntimeAvailable  bool   `json:"webapi_runtime_available"`
+	SendDisabledReason      string `json:"send_disabled_reason,omitempty"`
+	CanSend                 bool   `json:"can_send"`
+	IMAPLastUIDValidity     string `json:"imap_last_uidvalidity"`
+	IMAPLastUID             string `json:"imap_last_uid"`
+	IMAPLastInternalDate    string `json:"imap_last_internaldate"`
+	IMAPError               string `json:"imap_error"`
+	Enabled                 bool   `json:"enabled"`
+	Status                  string `json:"status"` // active | suspended | disabled
+	Role                    string `json:"role"`
+	ImportModeReadOnly      bool   `json:"import_mode_read_only"`
+	Synced                  bool   `json:"synced"`
+	LastSyncedAt            string `json:"last_synced_at"`
+	LastSyncError           string `json:"last_sync_error"`
+	LastPasswordChangedAt   string `json:"last_password_changed_at"`
+	LastLoginAt             string `json:"last_login_at"`
+	SyncState               string `json:"sync_state"`
+	SyncFolderStatsJSON     string `json:"sync_folder_stats_json"`
+	SyncLastUIDJSON         string `json:"sync_last_uid_json"`
+	SyncLastRunAt           string `json:"sync_last_run_at"`
+	SyncNextRunAt           string `json:"sync_next_run_at"`
+	SyncError               string `json:"sync_error"`
+	CreatedAt               string `json:"created_at"`
+	UpdatedAt               string `json:"updated_at"`
 }
 
 // MailAlias represents a forwarding alias, distribution list, or catch-all
@@ -242,7 +249,7 @@ FROM mail_mox_settings WHERE id = 1`)
 
 // MailUpdatePhantomInstanceID sets the phantom_instance_id column on the
 // singleton row and returns the updated row.  If a concurrent writer beat
-// us to it (id=1 already has phantom_instance_id != ''), returns the
+// us to it (id=1 already has phantom_instance_id != ”), returns the
 // winning row so callers converge.  The caller uses this once at boot.
 func (s *Store) MailUpdatePhantomInstanceID(ctx context.Context, id string) (*MailMoxSettings, error) {
 	res, err := s.db.ExecContext(ctx,
@@ -290,6 +297,19 @@ func (s *Store) MailUpsertDesiredState(ctx context.Context, state string) (*Mail
 		state, now(),
 	); err != nil {
 		return nil, fmt.Errorf("upsert desired_state: %w", err)
+	}
+	return s.MailGetSettings(ctx)
+}
+
+func (s *Store) MailUpdateExtraCapabilities(ctx context.Context, raw string) (*MailMoxSettings, error) {
+	if strings.TrimSpace(raw) == "" {
+		raw = "{}"
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE mail_mox_settings SET extra_capabilities_json = ?, updated_at = ? WHERE id = 1`,
+		raw, now(),
+	); err != nil {
+		return nil, fmt.Errorf("update extra_capabilities_json: %w", err)
 	}
 	return s.MailGetSettings(ctx)
 }
@@ -361,28 +381,134 @@ func (s *Store) MailUpsertImport(ctx context.Context, u MailImportUpdate) (*Mail
 // --- Domains ------------------------------------------------------------
 
 func (s *Store) MailCreateDomain(ctx context.Context, d MailDomain) (*MailDomain, error) {
-	_ = ctx
-	_ = d
-	return nil, fmt.Errorf("MailCreateDomain: %w", errNotImplemented)
+	now := now()
+	if d.ID == "" {
+		d.ID = NewID("dom")
+	}
+	if d.DKIMSelector == "" {
+		d.DKIMSelector = "default"
+	}
+	if d.DMARCPolicy == "" {
+		d.DMARCPolicy = "none"
+	}
+	if d.DNSCheckJSON == "" {
+		d.DNSCheckJSON = "{}"
+	}
+	if d.CreatedAt == "" {
+		d.CreatedAt = now
+	}
+	d.UpdatedAt = now
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO mail_domains (
+	  id, domain, enabled, dkim_selector, dkim_private_key_wrapped,
+	  dmarc_policy, dmarc_rua, spf_include, dns_provider_id, cert_id,
+	  tlsa_enabled, san_domains_csv, tlsa_domains_csv, tlsa_domains_wildcards,
+	  synced, last_synced_at, last_sync_error, last_dns_check_at, dns_check_json,
+	  created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		d.ID, d.Domain, boolInt(d.Enabled), d.DKIMSelector, d.DKIMPrivateKey,
+		d.DMARCPolicy, d.DMARCRUA, d.SPFInclude, d.DNSProviderID, d.CertID,
+		boolInt(d.TLSAEnabled), d.SANDomainsCSV, d.TLSADomainsCSV, boolInt(d.TLSADomainsWildcards),
+		boolInt(d.Synced), d.LastSyncedAt, d.LastSyncError, d.LastDNSCheckAt, d.DNSCheckJSON,
+		d.CreatedAt, d.UpdatedAt,
+	); err != nil {
+		return nil, fmt.Errorf("insert mail_domains: %w", err)
+	}
+	return s.MailGetDomain(ctx, d.ID)
 }
 func (s *Store) MailGetDomain(ctx context.Context, id string) (*MailDomain, error) {
-	_ = ctx
-	_ = id
-	return nil, fmt.Errorf("MailGetDomain: %w", errNotImplemented)
+	row := s.db.QueryRowContext(ctx, mailDomainSelectSQL+` WHERE id = ?`, id)
+	return scanMailDomain(row)
 }
 func (s *Store) MailListDomains(ctx context.Context) ([]*MailDomain, error) {
-	_ = ctx
-	return nil, fmt.Errorf("MailListDomains: %w", errNotImplemented)
+	rows, err := s.db.QueryContext(ctx, mailDomainSelectSQL+` ORDER BY enabled DESC, domain ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list mail_domains: %w", err)
+	}
+	defer rows.Close()
+	out := []*MailDomain{}
+	for rows.Next() {
+		d, err := scanMailDomain(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan mail_domains row: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
 func (s *Store) MailUpdateDomain(ctx context.Context, d MailDomain) (*MailDomain, error) {
-	_ = ctx
-	_ = d
-	return nil, fmt.Errorf("MailUpdateDomain: %w", errNotImplemented)
+	if d.ID == "" {
+		return nil, errors.New("mail domain id is required")
+	}
+	if d.DKIMSelector == "" {
+		d.DKIMSelector = "default"
+	}
+	if d.DMARCPolicy == "" {
+		d.DMARCPolicy = "none"
+	}
+	if d.DNSCheckJSON == "" {
+		d.DNSCheckJSON = "{}"
+	}
+	d.UpdatedAt = now()
+	res, err := s.db.ExecContext(ctx, `UPDATE mail_domains SET
+	  domain = ?, enabled = ?, dkim_selector = ?, dkim_private_key_wrapped = ?,
+	  dmarc_policy = ?, dmarc_rua = ?, spf_include = ?, dns_provider_id = ?, cert_id = ?,
+	  tlsa_enabled = ?, san_domains_csv = ?, tlsa_domains_csv = ?, tlsa_domains_wildcards = ?,
+	  synced = ?, last_synced_at = ?, last_sync_error = ?, last_dns_check_at = ?, dns_check_json = ?,
+	  updated_at = ? WHERE id = ?`,
+		d.Domain, boolInt(d.Enabled), d.DKIMSelector, d.DKIMPrivateKey,
+		d.DMARCPolicy, d.DMARCRUA, d.SPFInclude, d.DNSProviderID, d.CertID,
+		boolInt(d.TLSAEnabled), d.SANDomainsCSV, d.TLSADomainsCSV, boolInt(d.TLSADomainsWildcards),
+		boolInt(d.Synced), d.LastSyncedAt, d.LastSyncError, d.LastDNSCheckAt, d.DNSCheckJSON,
+		d.UpdatedAt, d.ID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update mail_domains: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
+	return s.MailGetDomain(ctx, d.ID)
 }
 func (s *Store) MailDeleteDomain(ctx context.Context, id string) error {
-	_ = ctx
-	_ = id
-	return fmt.Errorf("MailDeleteDomain: %w", errNotImplemented)
+	res, err := s.db.ExecContext(ctx, `DELETE FROM mail_domains WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete mail_domains: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+const mailDomainSelectSQL = `SELECT
+  id, domain, enabled, dkim_selector, dkim_private_key_wrapped,
+  dmarc_policy, dmarc_rua, spf_include, dns_provider_id, cert_id,
+  COALESCE(tlsa_enabled, 1), COALESCE(san_domains_csv, ''), COALESCE(tlsa_domains_csv, ''),
+  COALESCE(tlsa_domains_wildcards, 0), synced, last_synced_at, last_sync_error,
+  last_dns_check_at, dns_check_json, created_at, updated_at
+FROM mail_domains`
+
+func scanMailDomain(sc mailScanner) (*MailDomain, error) {
+	var d MailDomain
+	var enabled, tlsaEnabled, wildcard, synced int
+	err := sc.Scan(
+		&d.ID, &d.Domain, &enabled, &d.DKIMSelector, &d.DKIMPrivateKey,
+		&d.DMARCPolicy, &d.DMARCRUA, &d.SPFInclude, &d.DNSProviderID, &d.CertID,
+		&tlsaEnabled, &d.SANDomainsCSV, &d.TLSADomainsCSV,
+		&wildcard, &synced, &d.LastSyncedAt, &d.LastSyncError,
+		&d.LastDNSCheckAt, &d.DNSCheckJSON, &d.CreatedAt, &d.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	d.Enabled = enabled != 0
+	d.TLSAEnabled = tlsaEnabled != 0
+	d.TLSADomainsWildcards = wildcard != 0
+	d.Synced = synced != 0
+	return &d, nil
 }
 
 // --- Accounts -----------------------------------------------------------
@@ -415,10 +541,10 @@ func (s *Store) MailCreateAccount(ctx context.Context, a MailAccount) (MailAccou
 	  id, domain_id, local_part, address, display_name,
 	  password_mode, quota_mb, is_admin,
 	  imap_sync_enabled, imap_sync_state, imap_host, imap_username,
-	  imap_sync_max_size_bytes,
+	  imap_sync_max_size_bytes, webapi_password_wrapped,
 	  imap_last_uidvalidity, imap_last_uid, imap_last_internaldate, imap_error,
 	  status, last_login_at, created_at, updated_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`
 	var displayName, imapState, imapHost, imapUser, imapUidval, imapUid, imapDate, imapErr, lastLogin sql.NullString
 	var imapMaxSize sql.NullInt64
 	displayName.String = a.DisplayName
@@ -449,7 +575,7 @@ func (s *Store) MailCreateAccount(ctx context.Context, a MailAccount) (MailAccou
 		a.ID, a.DomainID, a.LocalPart, a.Address, displayName,
 		passwordMode, quota, isAdmin,
 		imapSync, imapState, imapHost, imapUser,
-		imapMaxSize,
+		imapMaxSize, a.WebAPIPasswordWrapped,
 		imapUidval, imapUid, imapDate, imapErr,
 		status, lastLogin, a.CreatedAt, a.UpdatedAt,
 	); err != nil {
@@ -473,15 +599,17 @@ func (s *Store) MailUpdateAccount(ctx context.Context, a MailAccount) (MailAccou
 	  password_mode = $5, quota_mb = $6, is_admin = $7,
 	  imap_sync_enabled = $8, imap_sync_state = $9,
 	  imap_host = $10, imap_username = $11, imap_sync_max_size_bytes = $12,
-	  imap_last_uidvalidity = $13, imap_last_uid = $14,
-	  imap_last_internaldate = $15, imap_error = $16,
-	  status = $17, last_login_at = $18, updated_at = $19
-	WHERE id = $20`
+	  webapi_password_wrapped = $13,
+	  imap_last_uidvalidity = $14, imap_last_uid = $15,
+	  imap_last_internaldate = $16, imap_error = $17,
+	  status = $18, last_login_at = $19, updated_at = $20
+	WHERE id = $21`
 	if _, err := s.db.ExecContext(ctx, q,
 		a.DomainID, a.LocalPart, a.Address, a.DisplayName,
 		passwordMode, a.QuotaMB, boolInt(a.IsAdmin),
 		boolInt(a.IMAPSyncEnabled), a.IMAPSyncState,
 		a.ImapHost, a.ImapUsername, a.IMAPSyncMaxSizeBytes,
+		a.WebAPIPasswordWrapped,
 		a.IMAPLastUIDValidity, a.IMAPLastUID,
 		a.IMAPLastInternalDate, a.IMAPError,
 		status, a.LastLoginAt, a.UpdatedAt, a.ID,
@@ -505,7 +633,7 @@ func (s *Store) MailGetAccount(ctx context.Context, id string) (MailAccount, err
 	  id, domain_id, local_part, address, display_name,
 	  password_mode, quota_mb, is_admin,
 	  imap_sync_enabled, imap_sync_state, imap_host, imap_username,
-	  imap_sync_max_size_bytes,
+	  imap_sync_max_size_bytes, COALESCE(webapi_password_wrapped, ''),
 	  imap_last_uidvalidity, imap_last_uid, imap_last_internaldate, imap_error,
 	  status, last_login_at, created_at, updated_at
 	FROM mail_accounts WHERE id = $1`, id)
@@ -523,7 +651,7 @@ func (s *Store) MailListAccounts(ctx context.Context, domainID string, status st
 		  id, domain_id, local_part, address, display_name,
 		  password_mode, quota_mb, is_admin,
 		  imap_sync_enabled, imap_sync_state, imap_host, imap_username,
-		  imap_sync_max_size_bytes,
+		  imap_sync_max_size_bytes, COALESCE(webapi_password_wrapped, ''),
 		  imap_last_uidvalidity, imap_last_uid, imap_last_internaldate, imap_error,
 		  status, last_login_at, created_at, updated_at
 		FROM mail_accounts
@@ -534,7 +662,7 @@ func (s *Store) MailListAccounts(ctx context.Context, domainID string, status st
 		  id, domain_id, local_part, address, display_name,
 		  password_mode, quota_mb, is_admin,
 		  imap_sync_enabled, imap_sync_state, imap_host, imap_username,
-		  imap_sync_max_size_bytes,
+		  imap_sync_max_size_bytes, COALESCE(webapi_password_wrapped, ''),
 		  imap_last_uidvalidity, imap_last_uid, imap_last_internaldate, imap_error,
 		  status, last_login_at, created_at, updated_at
 		FROM mail_accounts
@@ -545,7 +673,7 @@ func (s *Store) MailListAccounts(ctx context.Context, domainID string, status st
 		  id, domain_id, local_part, address, display_name,
 		  password_mode, quota_mb, is_admin,
 		  imap_sync_enabled, imap_sync_state, imap_host, imap_username,
-		  imap_sync_max_size_bytes,
+		  imap_sync_max_size_bytes, COALESCE(webapi_password_wrapped, ''),
 		  imap_last_uidvalidity, imap_last_uid, imap_last_internaldate, imap_error,
 		  status, last_login_at, created_at, updated_at
 		FROM mail_accounts
@@ -556,7 +684,7 @@ func (s *Store) MailListAccounts(ctx context.Context, domainID string, status st
 		  id, domain_id, local_part, address, display_name,
 		  password_mode, quota_mb, is_admin,
 		  imap_sync_enabled, imap_sync_state, imap_host, imap_username,
-		  imap_sync_max_size_bytes,
+		  imap_sync_max_size_bytes, COALESCE(webapi_password_wrapped, ''),
 		  imap_last_uidvalidity, imap_last_uid, imap_last_internaldate, imap_error,
 		  status, last_login_at, created_at, updated_at
 		FROM mail_accounts
@@ -588,14 +716,14 @@ type mailScanner interface {
 func scanMailAccount(sc mailScanner) (MailAccount, error) {
 	out := MailAccount{}
 	var (
-		displayName, imapState, imapHost, imapUser, imapUidval, imapUid, imapDate, imapErr, lastLogin, createdAt, updatedAt sql.NullString
-		quota, isAdmin, imapSync, imapMaxSize                                                                              sql.NullInt64
+		displayName, imapState, imapHost, imapUser, webapiPassword, imapUidval, imapUid, imapDate, imapErr, lastLogin, createdAt, updatedAt sql.NullString
+		quota, isAdmin, imapSync, imapMaxSize                                                                                               sql.NullInt64
 	)
 	err := sc.Scan(
 		&out.ID, &out.DomainID, &out.LocalPart, &out.Address, &displayName,
 		&out.PasswordMode, &quota, &isAdmin,
 		&imapSync, &imapState, &imapHost, &imapUser,
-		&imapMaxSize,
+		&imapMaxSize, &webapiPassword,
 		&imapUidval, &imapUid, &imapDate, &imapErr,
 		&out.Status, &lastLogin, &createdAt, &updatedAt,
 	)
@@ -616,6 +744,9 @@ func scanMailAccount(sc mailScanner) (MailAccount, error) {
 	}
 	if imapUser.Valid {
 		out.ImapUsername = imapUser.String
+	}
+	if webapiPassword.Valid {
+		out.WebAPIPasswordWrapped = webapiPassword.String
 	}
 	if imapMaxSize.Valid {
 		out.IMAPSyncMaxSizeBytes = imapMaxSize.Int64
@@ -1064,49 +1195,49 @@ func indexASCII(s, sub string) int {
 // MailDNSProvider maps 1:1 to the mail_dns_providers table defined in
 // storage.go.
 type MailDNSProvider struct {
-	ID                  string `json:"id"`
-	Label               string `json:"label"`
-	DisplayName         string `json:"display_name"`
-	Kind                string `json:"kind"` // cloudflare|dnspod|route53|manual
-	APIEndpoint         string `json:"api_endpoint,omitempty"`
-	ZoneID              string `json:"zone_id,omitempty"`
-	APICredentialsJSON  string `json:"-"`
+	ID                    string `json:"id"`
+	Label                 string `json:"label"`
+	DisplayName           string `json:"display_name"`
+	Kind                  string `json:"kind"` // cloudflare|dnspod|route53|manual
+	APIEndpoint           string `json:"api_endpoint,omitempty"`
+	ZoneID                string `json:"zone_id,omitempty"`
+	APICredentialsJSON    string `json:"-"`
 	APICredentialsWrapped string `json:"api_credentials_wrapped,omitempty"`
-	LastTestedAt        string `json:"last_tested_at,omitempty"`
-	LastError           string `json:"last_error,omitempty"`
-	CreatedAt           string `json:"created_at"`
-	UpdatedAt           string `json:"updated_at"`
+	LastTestedAt          string `json:"last_tested_at,omitempty"`
+	LastError             string `json:"last_error,omitempty"`
+	CreatedAt             string `json:"created_at"`
+	UpdatedAt             string `json:"updated_at"`
 }
 
 // MailCertificate maps 1:1 to the mail_certificates table in storage.go.
 type MailCertificate struct {
-	ID                   string   `json:"id"`
-	Domain               string   `json:"domain"`
-	PEMChain             string   `json:"pem_chain,omitempty"`
-	DNSProviderID        string   `json:"dns_provider_id,omitempty"`
-	DomainCoverageJSON   string   `json:"domain_coverage_json,omitempty"`
-	PrimaryDomain        string   `json:"primary_domain"`
-	SubjectAltNames      []string `json:"subject_alt_names,omitempty"`
-	Issuer               string   `json:"issuer,omitempty"`
-	Serial               string   `json:"serial,omitempty"`
-	NotBefore            string   `json:"not_before,omitempty"`
-	NotAfter             string   `json:"not_after,omitempty"`
-	Subject              string   `json:"subject,omitempty"`
-	SANCount             int      `json:"san_count"`
-	CertPath             string   `json:"cert_path,omitempty"`
-	ChainPath            string   `json:"chain_path,omitempty"`
-	PrivkeyPath          string   `json:"privkey_path,omitempty"`
-	ACMEProviderID       string   `json:"acme_provider_id,omitempty"`
-	ACMEAccountURL       string   `json:"acme_account_url,omitempty"`
-	SignatureHashSHA256  string   `json:"signature_hash_sha256,omitempty"`
-	TLSA311              string   `json:"tlsa_311,omitempty"`
-	RenewalAttemptedAt   string   `json:"renewal_attempted_at,omitempty"`
-	RenewalStatus        string   `json:"renewal_status,omitempty"`
-	RenewalError         string   `json:"renewal_error,omitempty"`
-	Applied              bool     `json:"applied"`
-	AppliedAt            string   `json:"applied_at,omitempty"`
-	CreatedAt            string   `json:"created_at"`
-	UpdatedAt            string   `json:"updated_at"`
+	ID                  string   `json:"id"`
+	Domain              string   `json:"domain"`
+	PEMChain            string   `json:"pem_chain,omitempty"`
+	DNSProviderID       string   `json:"dns_provider_id,omitempty"`
+	DomainCoverageJSON  string   `json:"domain_coverage_json,omitempty"`
+	PrimaryDomain       string   `json:"primary_domain"`
+	SubjectAltNames     []string `json:"subject_alt_names,omitempty"`
+	Issuer              string   `json:"issuer,omitempty"`
+	Serial              string   `json:"serial,omitempty"`
+	NotBefore           string   `json:"not_before,omitempty"`
+	NotAfter            string   `json:"not_after,omitempty"`
+	Subject             string   `json:"subject,omitempty"`
+	SANCount            int      `json:"san_count"`
+	CertPath            string   `json:"cert_path,omitempty"`
+	ChainPath           string   `json:"chain_path,omitempty"`
+	PrivkeyPath         string   `json:"privkey_path,omitempty"`
+	ACMEProviderID      string   `json:"acme_provider_id,omitempty"`
+	ACMEAccountURL      string   `json:"acme_account_url,omitempty"`
+	SignatureHashSHA256 string   `json:"signature_hash_sha256,omitempty"`
+	TLSA311             string   `json:"tlsa_311,omitempty"`
+	RenewalAttemptedAt  string   `json:"renewal_attempted_at,omitempty"`
+	RenewalStatus       string   `json:"renewal_status,omitempty"`
+	RenewalError        string   `json:"renewal_error,omitempty"`
+	Applied             bool     `json:"applied"`
+	AppliedAt           string   `json:"applied_at,omitempty"`
+	CreatedAt           string   `json:"created_at"`
+	UpdatedAt           string   `json:"updated_at"`
 }
 
 // MailManualChallenge maps 1:1 to the mail_manual_challenges table.
@@ -1448,22 +1579,24 @@ var _ = json.Marshal
 
 // MailDeliveryEvent records a single outbound or inbound delivery attempt.
 type MailDeliveryEvent struct {
-	ID               string `json:"id"`
-	FromDomain       string `json:"from_domain"`
-	ToDomain         string `json:"to_domain"`
-	MessageIDHash    string `json:"message_id_hash"`
-	SubjectSnippet   string `json:"subject_snippet"`
-	Direction        string `json:"direction"` // in/out/local
-	SMTPCode         int    `json:"smtp_code,omitempty"`
-	SMTPEnhanced     string `json:"smtp_enhanced,omitempty"`
-	RedactedError    string `json:"redacted_error,omitempty"`
-	Status           string `json:"status"` // pending/queued/sent/deferred/bounced/suppressed/dropped
-	AttemptCount     int    `json:"attempt_count"`
-	FirstAttemptAt   string `json:"first_attempt_at,omitempty"`
-	LastAttemptAt    string `json:"last_attempt_at,omitempty"`
-	CompletedAt      string `json:"completed_at,omitempty"`
-	RecipientHash    string `json:"recipient_hash,omitempty"`
-	CreatedAt        string `json:"created_at"`
+	ID             string `json:"id"`
+	FromDomain     string `json:"from_domain"`
+	ToDomain       string `json:"to_domain"`
+	MessageIDHash  string `json:"message_id_hash"`
+	SubjectSnippet string `json:"subject_snippet"`
+	Direction      string `json:"direction"` // in/out/local
+	SMTPCode       int    `json:"smtp_code,omitempty"`
+	SMTPEnhanced   string `json:"smtp_enhanced,omitempty"`
+	RedactedError  string `json:"redacted_error,omitempty"`
+	Status         string `json:"status"` // pending/queued/sent/deferred/bounced/suppressed/dropped
+	AttemptCount   int    `json:"attempt_count"`
+	FirstAttemptAt string `json:"first_attempt_at,omitempty"`
+	LastAttemptAt  string `json:"last_attempt_at,omitempty"`
+	CompletedAt    string `json:"completed_at,omitempty"`
+	RecipientHash  string `json:"recipient_hash,omitempty"`
+	QueueMsgID     int64  `json:"queue_msg_id,omitempty"`
+	FromID         string `json:"from_id,omitempty"`
+	CreatedAt      string `json:"created_at"`
 }
 
 // MailDeliveryListFilter is used by list endpoints.
@@ -1495,7 +1628,7 @@ func (s *Store) MailDeliveryList(ctx context.Context, f MailDeliveryListFilter) 
 	const base = `SELECT id, from_domain, to_domain, message_id_hash, subject_snippet,
   direction, COALESCE(smtp_code,0), COALESCE(smtp_enhanced,''), COALESCE(redacted_error,''),
   status, attempt_count, COALESCE(first_attempt_at,''), COALESCE(last_attempt_at,''),
-  COALESCE(completed_at,''), COALESCE(recipient_hash,''), created_at
+  COALESCE(completed_at,''), COALESCE(recipient_hash,''), COALESCE(queue_msg_id,0), COALESCE(from_id,''), created_at
 FROM mail_delivery_events WHERE 1=1`
 	var args []any
 	var wh []string
@@ -1540,7 +1673,7 @@ FROM mail_delivery_events WHERE 1=1`
 		e := &MailDeliveryEvent{}
 		if err := rows.Scan(&e.ID, &e.FromDomain, &e.ToDomain, &e.MessageIDHash, &e.SubjectSnippet,
 			&e.Direction, &e.SMTPCode, &e.SMTPEnhanced, &e.RedactedError, &e.Status, &e.AttemptCount,
-			&e.FirstAttemptAt, &e.LastAttemptAt, &e.CompletedAt, &e.RecipientHash, &e.CreatedAt); err != nil {
+			&e.FirstAttemptAt, &e.LastAttemptAt, &e.CompletedAt, &e.RecipientHash, &e.QueueMsgID, &e.FromID, &e.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan mail_delivery_events: %w", err)
 		}
 		items = append(items, e)
@@ -1564,13 +1697,13 @@ func (s *Store) MailDeliveryGet(ctx context.Context, id string) (*MailDeliveryEv
 	const q = `SELECT id, from_domain, to_domain, message_id_hash, subject_snippet,
   direction, COALESCE(smtp_code,0), COALESCE(smtp_enhanced,''), COALESCE(redacted_error,''),
   status, attempt_count, COALESCE(first_attempt_at,''), COALESCE(last_attempt_at,''),
-  COALESCE(completed_at,''), COALESCE(recipient_hash,''), created_at
+  COALESCE(completed_at,''), COALESCE(recipient_hash,''), COALESCE(queue_msg_id,0), COALESCE(from_id,''), created_at
 FROM mail_delivery_events WHERE id = $1`
 	row := s.db.QueryRowContext(ctx, q, id)
 	e := &MailDeliveryEvent{}
 	err := row.Scan(&e.ID, &e.FromDomain, &e.ToDomain, &e.MessageIDHash, &e.SubjectSnippet,
 		&e.Direction, &e.SMTPCode, &e.SMTPEnhanced, &e.RedactedError, &e.Status, &e.AttemptCount,
-		&e.FirstAttemptAt, &e.LastAttemptAt, &e.CompletedAt, &e.RecipientHash, &e.CreatedAt)
+		&e.FirstAttemptAt, &e.LastAttemptAt, &e.CompletedAt, &e.RecipientHash, &e.QueueMsgID, &e.FromID, &e.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -1611,15 +1744,15 @@ func (s *Store) MailDeliveryPrune(ctx context.Context, days int) (int64, error) 
 
 // MailQueueItem is a cached queue item (mirrors Mox queue state).
 type MailQueueItem struct {
-	ID                  string `json:"id"`
-	Bucket              string `json:"bucket"` // hold/active/schedule/deferred/fail/drop
-	Status              string `json:"status"`
-	EnvelopeFromDomain  string `json:"envelope_from_domain"`
-	EnvelopeToHash      string `json:"envelope_to_hash"`
-	ScheduledAt         string `json:"scheduled_at,omitempty"`
-	AttemptCount        int    `json:"attempt_count"`
-	CreatedAt           string `json:"created_at"`
-	UpdatedAt           string `json:"updated_at"`
+	ID                 string `json:"id"`
+	Bucket             string `json:"bucket"` // hold/active/schedule/deferred/fail/drop
+	Status             string `json:"status"`
+	EnvelopeFromDomain string `json:"envelope_from_domain"`
+	EnvelopeToHash     string `json:"envelope_to_hash"`
+	ScheduledAt        string `json:"scheduled_at,omitempty"`
+	AttemptCount       int    `json:"attempt_count"`
+	CreatedAt          string `json:"created_at"`
+	UpdatedAt          string `json:"updated_at"`
 }
 
 // MailQueueSummary counts per bucket.
@@ -1935,7 +2068,7 @@ type MailWebhookRegistration struct {
 	SourceCIDR    string `json:"source_cidr"`
 	MaxBodyBytes  int64  `json:"max_body_bytes"`
 	EventMask     string `json:"event_mask"` // JSON list
-	WrappedSecret string `json:"-"`           // never serialized
+	WrappedSecret string `json:"-"`          // never serialized
 	Enabled       bool   `json:"enabled"`
 	CreatedAt     string `json:"created_at"`
 	UpdatedAt     string `json:"updated_at"`
@@ -2143,14 +2276,14 @@ FROM mail_webhook_registrations WHERE direction = 'in' AND enabled = 1`)
 
 // MailOutboundThreshold is a per-scope rate threshold.
 type MailOutboundThreshold struct {
-	Scope              string  `json:"scope"` // global/domain:<name>/account:<addr>
-	Send1mWarn         int64   `json:"send_1m_warn"`
-	Send1mCrit         int64   `json:"send_1m_crit"`
-	Send1hWarn         int64   `json:"send_1h_warn"`
-	Send1hCrit         int64   `json:"send_1h_crit"`
-	BounceRatePctWarn  float64 `json:"bounce_rate_pct_warn"`
-	BounceRatePctCrit  float64 `json:"bounce_rate_pct_crit"`
-	UpdatedAt          string  `json:"updated_at"`
+	Scope             string  `json:"scope"` // global/domain:<name>/account:<addr>
+	Send1mWarn        int64   `json:"send_1m_warn"`
+	Send1mCrit        int64   `json:"send_1m_crit"`
+	Send1hWarn        int64   `json:"send_1h_warn"`
+	Send1hCrit        int64   `json:"send_1h_crit"`
+	BounceRatePctWarn float64 `json:"bounce_rate_pct_warn"`
+	BounceRatePctCrit float64 `json:"bounce_rate_pct_crit"`
+	UpdatedAt         string  `json:"updated_at"`
 }
 
 // MailOutboundThresholdList returns all configured thresholds.
@@ -2207,9 +2340,9 @@ type DNSBLResult struct {
 
 // DNSBLProbeResponse wraps probe results + summary.
 type DNSBLProbeResponse struct {
-	Results    []DNSBLResult `json:"results"`
-	LastRunAt  string        `json:"last_run_at"`
-	Summary    struct {
+	Results   []DNSBLResult `json:"results"`
+	LastRunAt string        `json:"last_run_at"`
+	Summary   struct {
 		TotalIPs      int `json:"total_ips"`
 		ListedCount   int `json:"listed_count"`
 		CriticalCount int `json:"critical_count"`
@@ -2278,6 +2411,10 @@ func nullInt(i int) sql.NullInt64 {
 	return sql.NullInt64{Int64: int64(i), Valid: i != 0}
 }
 
+func nullInt64(i int64) sql.NullInt64 {
+	return sql.NullInt64{Int64: i, Valid: i != 0}
+}
+
 // --- Phase 6: Missing delivery helpers (added by service layer wiring) -----
 
 // MailDeliveryInsert persists a new delivery event row.
@@ -2293,14 +2430,14 @@ func (s *Store) MailDeliveryInsert(ctx context.Context, e *MailDeliveryEvent) (*
 	  (id, from_domain, to_domain, message_id_hash, subject_snippet, direction,
 	   smtp_code, smtp_enhanced, redacted_error, status, attempt_count,
 	   first_attempt_at, last_attempt_at, completed_at, recipient_hash,
-	   created_at)
-	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`
+	   queue_msg_id, from_id, created_at)
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`
 	if e.SMTPCode == 0 {
 		_, err := s.db.ExecContext(ctx, q, e.ID, nullString(e.FromDomain), nullString(e.ToDomain),
 			nullString(e.MessageIDHash), nullString(e.SubjectSnippet), nullString(e.Direction),
 			nil, nullString(e.SMTPEnhanced), nullString(e.RedactedError), nullString(e.Status),
 			e.AttemptCount, nullString(e.FirstAttemptAt), nullString(e.LastAttemptAt),
-			nullString(e.CompletedAt), nullString(e.RecipientHash), e.CreatedAt)
+			nullString(e.CompletedAt), nullString(e.RecipientHash), nullInt64(e.QueueMsgID), nullString(e.FromID), e.CreatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("insert mail_delivery_event: %w", err)
 		}
@@ -2310,7 +2447,7 @@ func (s *Store) MailDeliveryInsert(ctx context.Context, e *MailDeliveryEvent) (*
 		nullString(e.MessageIDHash), nullString(e.SubjectSnippet), nullString(e.Direction),
 		e.SMTPCode, nullString(e.SMTPEnhanced), nullString(e.RedactedError), nullString(e.Status),
 		e.AttemptCount, nullString(e.FirstAttemptAt), nullString(e.LastAttemptAt),
-		nullString(e.CompletedAt), nullString(e.RecipientHash), e.CreatedAt)
+		nullString(e.CompletedAt), nullString(e.RecipientHash), nullInt64(e.QueueMsgID), nullString(e.FromID), e.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("insert mail_delivery_event: %w", err)
 	}
@@ -2352,26 +2489,26 @@ func (s *Store) MailDeliveryUpdateStatus(ctx context.Context, id, status, lastAt
 // account.  Folders form a tree via parent_id; the delimiter (typically
 // "/" or ".") is used when rendering path-style names in the UI.
 type MailFolder struct {
-	ID                string `json:"id"`
-	AccountID         string `json:"account_id"`
-	Name              string `json:"name"`
-	Delimiter         string `json:"delimiter"`
-	ParentID          string `json:"parent_id"`
-	Role              string `json:"role"` // inbox | sent | drafts | trash | archive | junk | ""
-	UIDNext           string `json:"uid_next"`
-	UIDValidity       string `json:"uid_validity"`
-	TotalMessages     int64  `json:"total_messages"`
-	UnreadMessages    int64  `json:"unread_messages"`
-	FlaggedMessages   int64  `json:"flagged_messages"`
-	DeletedMessages   int64  `json:"deleted_messages"`
-	Subscribed        bool   `json:"subscribed"`
-	Selectable        bool   `json:"selectable"`
-	LastSyncedAt      string `json:"last_synced_at"`
-	LastSyncError     string `json:"last_sync_error"`
-	SyncState         string `json:"sync_state"` // idle | syncing | error | paused
-	AttributesJSON    string `json:"attributes_json"`
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
+	ID              string `json:"id"`
+	AccountID       string `json:"account_id"`
+	Name            string `json:"name"`
+	Delimiter       string `json:"delimiter"`
+	ParentID        string `json:"parent_id"`
+	Role            string `json:"role"` // inbox | sent | drafts | trash | archive | junk | ""
+	UIDNext         string `json:"uid_next"`
+	UIDValidity     string `json:"uid_validity"`
+	TotalMessages   int64  `json:"total_messages"`
+	UnreadMessages  int64  `json:"unread_messages"`
+	FlaggedMessages int64  `json:"flagged_messages"`
+	DeletedMessages int64  `json:"deleted_messages"`
+	Subscribed      bool   `json:"subscribed"`
+	Selectable      bool   `json:"selectable"`
+	LastSyncedAt    string `json:"last_synced_at"`
+	LastSyncError   string `json:"last_sync_error"`
+	SyncState       string `json:"sync_state"` // idle | syncing | error | paused
+	AttributesJSON  string `json:"attributes_json"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
 // MailMessagePart captures one MIME part of a stored message.  Body text is
@@ -2401,6 +2538,7 @@ type MailMessagePart struct {
 // back to its message, folder and account so the UI can render a hit list
 // without a second round-trip.  Rank is the raw bm25 score from FTS5.
 type MailSearchResult struct {
+	ID            string  `json:"id"`
 	MessagePartID string  `json:"message_part_id"`
 	MessageID     string  `json:"message_id"`
 	FolderID      string  `json:"folder_id"`
@@ -2408,8 +2546,24 @@ type MailSearchResult struct {
 	Rank          float64 `json:"rank"`
 	Subject       string  `json:"subject"`
 	Snippet       string  `json:"snippet"`
+	From          string  `json:"from"`
+	To            string  `json:"to"`
+	Date          string  `json:"date"`
+	SizeBytes     int64   `json:"size_bytes"`
 	FromDisplay   string  `json:"from_display"`
 	ReceivedAt    string  `json:"received_at"`
+}
+
+// MailCachedAttachment is a read-only pointer to a cached attachment body.
+// Callers must still enforce path boundaries before serving BodyCachePath.
+type MailCachedAttachment struct {
+	MessageID      string
+	PartID         string
+	Filename       string
+	ContentType    string
+	SizeBytes      int64
+	BodyCachePath  string
+	BodyHashSHA256 string
 }
 
 // MailIndexHealth tracks per-account search-index integrity.  The IMAP sync
@@ -2665,6 +2819,40 @@ func (s *Store) MailListMessageParts(ctx context.Context, messageID string) ([]M
 		return nil, err
 	}
 	return out, nil
+}
+
+func (s *Store) MailCachedAttachment(ctx context.Context, messageID string, index int) (*MailCachedAttachment, error) {
+	if messageID == "" || index < 0 {
+		return nil, ErrNotFound
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT
+	  id, filename, content_type, size_bytes, body_cache_path, body_hash_sha256
+	FROM mail_message_parts
+	WHERE message_id = $1 AND is_attachment != 0
+	ORDER BY part_id`, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("MailCachedAttachment: %w", err)
+	}
+	defer rows.Close()
+	i := 0
+	for rows.Next() {
+		var out MailCachedAttachment
+		out.MessageID = messageID
+		if err := rows.Scan(&out.PartID, &out.Filename, &out.ContentType, &out.SizeBytes, &out.BodyCachePath, &out.BodyHashSHA256); err != nil {
+			return nil, fmt.Errorf("MailCachedAttachment scan: %w", err)
+		}
+		if i == index {
+			if strings.TrimSpace(out.BodyCachePath) == "" {
+				return nil, ErrNotFound
+			}
+			return &out, nil
+		}
+		i++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return nil, ErrNotFound
 }
 
 // MailDeleteMessagePartsByMessage removes every part belonging to a message.
@@ -2944,17 +3132,17 @@ type MailMessage struct {
 // filter is combined with AND semantics.  The raw Query string is passed
 // directly to the FTS5 MATCH operator (caller is responsible for escaping).
 type FTSQuery struct {
-	Query          string   `json:"query"`
-	FolderIDs      []string `json:"folder_ids,omitempty"`
-	FromAddress    string   `json:"from_address,omitempty"`
-	ToAddress      string   `json:"to_address,omitempty"`
-	DateFrom       string   `json:"date_from,omitempty"`
-	DateTo         string   `json:"date_to,omitempty"`
-	HasAttachment  *bool    `json:"has_attachment,omitempty"`
-	UnreadOnly     bool     `json:"unread_only,omitempty"`
-	FlaggedOnly    bool     `json:"flagged_only,omitempty"`
-	Limit          int      `json:"limit"`
-	Offset         int      `json:"offset"`
+	Query         string   `json:"query"`
+	FolderIDs     []string `json:"folder_ids,omitempty"`
+	FromAddress   string   `json:"from_address,omitempty"`
+	ToAddress     string   `json:"to_address,omitempty"`
+	DateFrom      string   `json:"date_from,omitempty"`
+	DateTo        string   `json:"date_to,omitempty"`
+	HasAttachment *bool    `json:"has_attachment,omitempty"`
+	UnreadOnly    bool     `json:"unread_only,omitempty"`
+	FlaggedOnly   bool     `json:"flagged_only,omitempty"`
+	Limit         int      `json:"limit"`
+	Offset        int      `json:"offset"`
 }
 
 // MailCreateMessage inserts a new MailMessage row.  Assigns NewID("msg") if
@@ -3246,7 +3434,7 @@ func (s *Store) MailMessageSearch(ctx context.Context, accountID string, q FTSQu
 func scanMailMessage(sc mailScanner) (*MailMessage, error) {
 	m := &MailMessage{}
 	var (
-		toAddr, ccAddr, bccAddr, rt sql.NullString
+		toAddr, ccAddr, bccAddr, rt                            sql.NullString
 		seen, flagged, answered, deleted, draft, hasAtt, rawAv sql.NullInt64
 	)
 	err := sc.Scan(
@@ -3289,13 +3477,12 @@ func scanMailMessage(sc mailScanner) (*MailMessage, error) {
 var _ = strings.Contains
 var _ = rand.Read
 
-
 // --- Phase 7 (revised schema): mailbox folders, messages, search, index health
 
 // MailFolderP7 represents a per-account IMAP folder (revised schema).
 type MailFolderP7 struct {
-	ID             string `json:"id"`
-	AccountID      string `json:"account_id"`
+	ID            string `json:"id"`
+	AccountID     string `json:"account_id"`
 	Name          string `json:"name"`
 	Path          string `json:"path"`
 	Delim         string `json:"delim"`
@@ -3305,7 +3492,7 @@ type MailFolderP7 struct {
 	TotalMessages int64  `json:"total_messages"`
 	UnseenCount   int64  `json:"unseen_count"`
 	Subscribed    bool   `json:"subscribed"`
-	LastSyncedAt   string `json:"last_synced_at"`
+	LastSyncedAt  string `json:"last_synced_at"`
 	IMAPError     string `json:"imap_error"`
 	CreatedAt     string `json:"created_at"`
 	UpdatedAt     string `json:"updated_at"`
@@ -3317,7 +3504,8 @@ type MailMessageP7 struct {
 	AccountID       string `json:"account_id"`
 	FolderID        string `json:"folder_id"`
 	UID             int64  `json:"uid"`
-	MessageIDHash  string `json:"message_id_hash"`
+	MoxMsgID        int64  `json:"mox_msg_id"`
+	MessageIDHash   string `json:"message_id_hash"`
 	Subject         string `json:"subject"`
 	FromListCSV     string `json:"from_list_csv"`
 	ToListCSV       string `json:"to_list_csv"`
@@ -3343,7 +3531,7 @@ type MailIndexHealthP7 struct {
 	TotalMessages  int64  `json:"total_messages"`
 	TotalSizeBytes int64  `json:"total_size_bytes"`
 	SyncState      string `json:"sync_state"`
-	LastFullSyncAt  string `json:"last_full_sync_at"`
+	LastFullSyncAt string `json:"last_full_sync_at"`
 	LastIncrSyncAt string `json:"last_incr_sync_at"`
 	LastError      string `json:"last_error"`
 	UpdatedAt      string `json:"updated_at"`
@@ -3351,16 +3539,16 @@ type MailIndexHealthP7 struct {
 
 // MailSearchResultP7 is a search result from MailMessageSearch.
 type MailSearchResultP7 struct {
-	ID              string `json:"id"`
-	AccountID       string `json:"account_id"`
-	SubjectSnippet  string `json:"subject_snippet"`
-	FromList        string `json:"from_list"`
-	ToList          string `json:"to_list"`
-	PreviewSnippet   string `json:"preview_snippet"`
-	DateSent        string `json:"date_sent"`
-	FolderID        string `json:"folder_id"`
-	UID             int64  `json:"uid"`
-	FlagsCSV        string `json:"flags_csv"`
+	ID             string `json:"id"`
+	AccountID      string `json:"account_id"`
+	SubjectSnippet string `json:"subject_snippet"`
+	FromList       string `json:"from_list"`
+	ToList         string `json:"to_list"`
+	PreviewSnippet string `json:"preview_snippet"`
+	DateSent       string `json:"date_sent"`
+	FolderID       string `json:"folder_id"`
+	UID            int64  `json:"uid"`
+	FlagsCSV       string `json:"flags_csv"`
 }
 
 // FTSQueryP7 holds a structured query parameters for full-text search.
@@ -3368,7 +3556,7 @@ type FTSQueryP7 struct {
 	AccountID     string
 	Scope         string // "all" | "folder:folder_id" | "" (default account-wide)
 	Query         string
-	FromDomain string
+	FromDomain    string
 	To            string
 	Since         string
 	Before        string
@@ -3557,14 +3745,15 @@ func (s *Store) MailMessageUpsert(ctx context.Context, m MailMessageP7) (MailMes
 	}
 
 	_, err := s.db.ExecContext(ctx, `INSERT INTO mail_messages_p7 (
-		id, account_id, folder_id, uid, message_id_hash,
+		id, account_id, folder_id, uid, mox_msg_id, message_id_hash,
 		subject, from_list_csv, to_list_csv, cc_list_csv, bcc_list_csv, reply_to_csv,
 		date_sent, internaldate, flags_csv, size_bytes,
 		has_attachment, attachments_json, preview_text, body_text, charset,
 		created_at, updated_at
-	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
 	ON CONFLICT(account_id, folder_id, uid) DO UPDATE SET
 		id=excluded.id,
+		mox_msg_id=excluded.mox_msg_id,
 		message_id_hash=excluded.message_id_hash,
 	subject=excluded.subject,
 	from_list_csv=excluded.from_list_csv,
@@ -3582,7 +3771,7 @@ func (s *Store) MailMessageUpsert(ctx context.Context, m MailMessageP7) (MailMes
 	body_text=excluded.body_text,
 	charset=excluded.charset,
 	updated_at=excluded.updated_at`,
-		m.ID, m.AccountID, m.FolderID, m.UID, m.MessageIDHash,
+		m.ID, m.AccountID, m.FolderID, m.UID, m.MoxMsgID, m.MessageIDHash,
 		m.Subject, m.FromListCSV, m.ToListCSV, m.CCListCSV, m.BCCListCSV, m.ReplyToCSV,
 		m.DateSent, m.Internaldate, m.FlagsCSV, m.SizeBytes,
 		boolInt(m.HasAttachment), m.AttachmentsJSON, m.PreviewText, m.BodyText, m.Charset,
@@ -3619,7 +3808,7 @@ func (s *Store) MailMessageList(ctx context.Context, accountID, folderID string,
 	}
 	// fetch limit+1 so we can determine whether there are more rows.
 	query := `SELECT
-		id, account_id, folder_id, uid, message_id_hash,
+		id, account_id, folder_id, uid, COALESCE(mox_msg_id,0), message_id_hash,
 		subject, from_list_csv, to_list_csv, cc_list_csv, bcc_list_csv, reply_to_csv,
 		date_sent, internaldate, flags_csv, size_bytes,
 		has_attachment, attachments_json, preview_text, body_text, charset,
@@ -3660,7 +3849,7 @@ func (s *Store) MailMessageGet(ctx context.Context, id string) (MailMessageP7, e
 		return MailMessageP7{}, ErrNotFound
 	}
 	row := s.db.QueryRowContext(ctx, `SELECT
-		id, account_id, folder_id, uid, message_id_hash,
+		id, account_id, folder_id, uid, COALESCE(mox_msg_id,0), message_id_hash,
 		subject, from_list_csv, to_list_csv, cc_list_csv, bcc_list_csv, reply_to_csv,
 		date_sent, internaldate, flags_csv, size_bytes,
 		has_attachment, attachments_json, preview_text, body_text, charset,
@@ -3679,7 +3868,7 @@ func (s *Store) MailMessageGetByUID(ctx context.Context, accountID, folderID str
 		return MailMessageP7{}, ErrNotFound
 	}
 	row := s.db.QueryRowContext(ctx, `SELECT
-		id, account_id, folder_id, uid, message_id_hash,
+		id, account_id, folder_id, uid, COALESCE(mox_msg_id,0), message_id_hash,
 		subject, from_list_csv, to_list_csv, cc_list_csv, bcc_list_csv, reply_to_csv,
 		date_sent, internaldate, flags_csv, size_bytes,
 		has_attachment, attachments_json, preview_text, body_text, charset,
@@ -3765,7 +3954,7 @@ func scanMailMessageP7(sc mailScanner) (MailMessageP7, error) {
 	m := MailMessageP7{}
 	var hasAtt int64
 	err := sc.Scan(
-		&m.ID, &m.AccountID, &m.FolderID, &m.UID, &m.MessageIDHash,
+		&m.ID, &m.AccountID, &m.FolderID, &m.UID, &m.MoxMsgID, &m.MessageIDHash,
 		&m.Subject, &m.FromListCSV, &m.ToListCSV, &m.CCListCSV, &m.BCCListCSV, &m.ReplyToCSV,
 		&m.DateSent, &m.Internaldate, &m.FlagsCSV, &m.SizeBytes,
 		&hasAtt, &m.AttachmentsJSON, &m.PreviewText, &m.BodyText, &m.Charset,
@@ -5315,4 +5504,3 @@ func (s *Store) MailCleanIndexMessagesOlderThan(ctx context.Context, days int) (
 	}
 	return total, nil
 }
-

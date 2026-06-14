@@ -14,7 +14,6 @@ import (
 	"time"
 )
 
-
 // writtenFile records a single cert file written by the pipeline so the
 // rollback path knows where the live and .bak copies live.
 type writtenFile struct {
@@ -44,15 +43,14 @@ type IssueConfig struct {
 	// the longest-matching suffix for each challenged domain.
 	DNSProviders map[string]DNSProvider
 
-	// LegoClient is the ACME client.  Callers may construct it via
-	// NewLegoClient (which returns a stub in Phase 4) or inject a real
-	// lego-wrapped implementation when that dependency is vendored.
+	// LegoClient is the ACME client. Callers may construct it via NewLegoClient
+	// or inject a fake/stub implementation for offline tests.
 	LegoClient LegoClient
 
 	// ACMEContactEmail is the Let's Encrypt account contact.  Required.
 	ACMEContactEmail string
-	// ACMEDirectoryURL selects staging vs production.  Empty = Let's
-	// Encrypt staging (safe for Phase 4 skeleton development).
+	// ACMEDirectoryURL selects staging vs production. Empty defaults to Let's
+	// Encrypt staging.
 	ACMEDirectoryURL string
 	// AcceptTOS is a signed acknowledgement that the operator has read
 	// and accepted the ACME terms of service.  MUST be true.
@@ -267,50 +265,30 @@ func Issue(ctx context.Context, cfg IssueConfig, progress chan<- StepStatus) Iss
 	// =====================================================================
 	// Step 4: PresentDNSChallenge
 	// =====================================================================
-	emit(4, "running", "presenting DNS-01 challenges", "")
-	// Build the full (fqdn, keyauth) list that step 6 will feed to lego.
+	emit(4, "running", "preparing DNS-01 challenge routes", "")
+	// Build the domain/provider routing table that step 6 will use when the
+	// ACME client provides the real dns-01 TXT values. Older skeleton code
+	// pre-presented deterministic fake values here; doing that with a real
+	// ACME client produces the wrong TXT record.
 	type pendingChallenge struct {
-		domain  string
-		fqdn    string
-		keyauth string
-		prov    DNSProvider
+		domain string
+		fqdn   string
+		prov   DNSProvider
 	}
 	pending := make([]pendingChallenge, 0, len(allDomains))
 	for _, d := range allDomains {
 		prov := providerFor[d]
 		fqdn := "_acme-challenge." + d + "."
-		keyauth := "lego-stub-" + d
-		if err := prov.SetTXT(ctx, fqdn, keyauth); err != nil {
-			// We're inside step 4's fail tier (<=4) — cleanup is up to
-			// the fail() helper per tier rules, but we should still
-			// record anything that was successfully presented so far.
-			for _, p := range pending {
-				challenges = append(challenges, challenge{p.prov, p.fqdn, p.keyauth})
-			}
-			return fail(4, fmt.Sprintf("SetTXT failed for %s: %v", d, err), "")
-		}
-		pending = append(pending, pendingChallenge{d, fqdn, keyauth, prov})
-		challenges = append(challenges, challenge{prov, fqdn, keyauth})
+		pending = append(pending, pendingChallenge{d, fqdn, prov})
 	}
-	emit(4, "done", fmt.Sprintf("presented %d TXT challenges", len(pending)), "")
+	emit(4, "done", fmt.Sprintf("prepared %d TXT challenge route(s)", len(pending)), "")
 
 	// =====================================================================
 	// Step 5: ManualModeWaitOrProbePropagation
 	// =====================================================================
 	emit(5, "running", "manual-mode wait or propagation probe", "")
 	if anyManual && cfg.ManualModeConfirmCallback != nil {
-		for _, ch := range pending {
-			if _, isManual := ch.prov.(*ManualDNSProvider); !isManual {
-				continue
-			}
-			if err := cfg.ManualModeConfirmCallback(ctx, ch.fqdn, ch.keyauth); err != nil {
-				if errors.Is(err, context.Canceled) {
-					return fail(5, fmt.Sprintf("manual confirm canceled for %s", ch.domain), "")
-				}
-				return fail(5, fmt.Sprintf("manual confirm failed for %s: %v", ch.domain, err), "")
-			}
-		}
-		emit(5, "done", "all manual challenges confirmed by operator", "")
+		emit(5, "done", "manual provider ready; confirmation will wait after ACME supplies TXT values", "")
 	} else if anyManual {
 		// Manual providers present but no confirm callback — this is a
 		// misconfiguration.  Surface it as step-5 failure so the UI can
@@ -336,18 +314,22 @@ func Issue(ctx context.Context, cfg IssueConfig, progress chan<- StepStatus) Iss
 	var pemKey, pemCert, pemChain []byte
 	var obtainErr error
 	cb := func(presentationFQDN, keyAuth string) (cleanup func() error, err error) {
-		// The stub invokes this callback with presentationFQDN =
-		// "_acme-challenge.<domain>." and keyAuth = "lego-stub-<domain>".
-		// The real lego library does the same but with real key-auths.
-		//
-		// We've ALREADY presented in step 4, so here we just return a
-		// no-op present + a proper RemoveTXT cleanup.  In a real
-		// integration we'd present here (lego manages the lifecycle)
-		// but for the 11-step spec we split it for human readability.
 		domain := extractDomainFromFQDN(presentationFQDN)
 		prov := providerFor[domain]
 		if prov == nil {
 			return nil, fmt.Errorf("acme: no DNS provider for domain %s (fqdn=%s)", domain, presentationFQDN)
+		}
+		if err := prov.SetTXT(ctx, presentationFQDN, keyAuth); err != nil {
+			return nil, err
+		}
+		challenges = append(challenges, challenge{prov, presentationFQDN, keyAuth})
+		if _, isManual := prov.(*ManualDNSProvider); isManual && cfg.ManualModeConfirmCallback != nil {
+			if err := cfg.ManualModeConfirmCallback(ctx, presentationFQDN, keyAuth); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return nil, fmt.Errorf("manual confirm canceled for %s", domain)
+				}
+				return nil, fmt.Errorf("manual confirm failed for %s: %w", domain, err)
+			}
 		}
 		cleanup = func() error {
 			return prov.RemoveTXT(context.Background(), presentationFQDN, keyAuth)

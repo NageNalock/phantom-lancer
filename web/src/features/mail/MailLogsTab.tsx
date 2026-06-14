@@ -308,7 +308,7 @@ export function MailLogsTab({ actions, reload, data }: { actions: AppActions; re
               {streaming ? "停止流式" : "实时流式"}
             </Button>
             <Button onClick={() => setAutoScroll((v) => !v)} tone={autoScroll ? "primary" : "neutral"}>
-              {autoScroll ? "自动滚动 ✓" : "固定顶部"}
+              {autoScroll ? "自动滚动" : "固定顶部"}
             </Button>
             {redaction ? (
               <button

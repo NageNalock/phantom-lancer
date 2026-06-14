@@ -57,7 +57,7 @@ type Store struct {
 	// It is injected by storage.Open so storage output follows the same
 	// handler as the rest of the service (JSON, rotation, level gating).
 	// If nil, calls are no-ops.
-	log *slog.Logger	// gwTokenKeeper is the primary keeper derived from the master key
+	log *slog.Logger // gwTokenKeeper is the primary keeper derived from the master key
 	// actually in effect (env key, if set; otherwise DB fallback key).
 	// wrapGWToken always uses this keeper.
 	gwTokenKeeper *keywrap.Keeper
@@ -110,16 +110,16 @@ type AuditEvent struct {
 }
 
 type RuntimeSettings struct {
-	AllowedRoots       []string `json:"allowedRoots"`
-	CookieSecure       bool     `json:"cookieSecure"`
-	Addr               string   `json:"addr"`
-	TLSEnabled         bool     `json:"tlsEnabled"`
-	TLSCertFile        string   `json:"tlsCertFile"`
-	TLSKeyFile         string   `json:"tlsKeyFile"`
-	TLSOwnerUIDCheck   bool     `json:"tlsOwnerUidCheck"`
-	HSTSEnabled        bool     `json:"hstsEnabled"`
-	HSTSMaxAgeSeconds  int      `json:"hstsMaxAgeSeconds"`
-	UpdatedAt          string   `json:"updatedAt,omitempty"`
+	AllowedRoots      []string `json:"allowedRoots"`
+	CookieSecure      bool     `json:"cookieSecure"`
+	Addr              string   `json:"addr"`
+	TLSEnabled        bool     `json:"tlsEnabled"`
+	TLSCertFile       string   `json:"tlsCertFile"`
+	TLSKeyFile        string   `json:"tlsKeyFile"`
+	TLSOwnerUIDCheck  bool     `json:"tlsOwnerUidCheck"`
+	HSTSEnabled       bool     `json:"hstsEnabled"`
+	HSTSMaxAgeSeconds int      `json:"hstsMaxAgeSeconds"`
+	UpdatedAt         string   `json:"updatedAt,omitempty"`
 }
 
 type SystemUpdateCheck struct {
@@ -164,20 +164,20 @@ type SystemUpdateJob struct {
 }
 
 type CodexGatewaySettings struct {
-	ID                             string `json:"id"`
-	Enabled                        bool   `json:"enabled"`
-	BaseURL                        string `json:"baseUrl"`
-	OAuthAuthURL                   string `json:"oauthAuthUrl"`
-	OAuthTokenURL                  string `json:"oauthTokenUrl"`
-	OAuthClientID                  string `json:"oauthClientId"`
-	OAuthRedirectURI               string `json:"oauthRedirectUri"`
-	RequestTimeoutSeconds          int    `json:"requestTimeoutSeconds"`
-	RefreshMarginSeconds           int    `json:"refreshMarginSeconds"`
-	AccountHealthCheckIntervalSeconds int  `json:"accountHealthCheckIntervalSeconds"`
-	DefaultInstructions            string `json:"defaultInstructions"`
-	InstallationID                 string `json:"installationId"`
-	CreatedAt                      string `json:"createdAt"`
-	UpdatedAt                      string `json:"updatedAt"`
+	ID                                string `json:"id"`
+	Enabled                           bool   `json:"enabled"`
+	BaseURL                           string `json:"baseUrl"`
+	OAuthAuthURL                      string `json:"oauthAuthUrl"`
+	OAuthTokenURL                     string `json:"oauthTokenUrl"`
+	OAuthClientID                     string `json:"oauthClientId"`
+	OAuthRedirectURI                  string `json:"oauthRedirectUri"`
+	RequestTimeoutSeconds             int    `json:"requestTimeoutSeconds"`
+	RefreshMarginSeconds              int    `json:"refreshMarginSeconds"`
+	AccountHealthCheckIntervalSeconds int    `json:"accountHealthCheckIntervalSeconds"`
+	DefaultInstructions               string `json:"defaultInstructions"`
+	InstallationID                    string `json:"installationId"`
+	CreatedAt                         string `json:"createdAt"`
+	UpdatedAt                         string `json:"updatedAt"`
 }
 
 type CodexGatewayAccount struct {
@@ -2122,6 +2122,8 @@ CREATE TABLE IF NOT EXISTS mail_import_registry (
 	  last_attempt_at TEXT NOT NULL DEFAULT '',
 	  completed_at TEXT NOT NULL DEFAULT '',
 	  recipient_hash TEXT NOT NULL DEFAULT '',
+	  queue_msg_id INTEGER NOT NULL DEFAULT 0,
+	  from_id TEXT NOT NULL DEFAULT '',
 	  created_at TEXT NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_mail_delivery_status ON mail_delivery_events(status);
@@ -2239,6 +2241,7 @@ CREATE TABLE IF NOT EXISTS mail_import_registry (
 	  account_id TEXT NOT NULL,
 	  folder_id TEXT NOT NULL,
 	  uid INTEGER NOT NULL,
+	  mox_msg_id INTEGER NOT NULL DEFAULT 0,
 	  message_id_hash TEXT NOT NULL DEFAULT '',
 	  subject TEXT NOT NULL DEFAULT '',
 	  from_list_csv TEXT NOT NULL DEFAULT '',
@@ -2464,120 +2467,124 @@ CREATE TABLE IF NOT EXISTS mail_import_registry (
 		}
 	}
 
-		// Additive-column evolution for mail_* tables.  Keep this list ordered
-		// by the phase that introduced the column so git blame + bisection
-		// stay readable.
-		for _, column := range []struct {
-			table string
-			name  string
-			def   string
-		}{
-			// ---- Phase 4 (certmanager) ------------------------------
-			// mail_certificates - Phase 4 spec columns added on top of
-			// any pre-existing schema from earlier phases.
-			{"mail_certificates", "domain", "TEXT NOT NULL DEFAULT ''"},
-			{"mail_certificates", "pem_chain", "TEXT NOT NULL DEFAULT ''"},
-			{"mail_certificates", "dns_provider_id", "TEXT NOT NULL DEFAULT ''"},
-			{"mail_certificates", "last_renewal_attempt", "TEXT NOT NULL DEFAULT ''"},
-			{"mail_certificates", "next_renewal", "TEXT NOT NULL DEFAULT ''"},
-			{"mail_certificates", "last_error", "TEXT NOT NULL DEFAULT ''"},
-			// mail_dns_providers - Phase 4 normalised schema fields.
-			{"mail_dns_providers", "display_name", "TEXT NOT NULL DEFAULT ''"},
-			{"mail_dns_providers", "config_json", "TEXT NOT NULL DEFAULT ''"},
-			// mail_domains - TLSA toggle, DNS provider FK, SAN CSV, DANE TLSA overrides.
-			{"mail_domains", "tlsa_enabled", "INTEGER NOT NULL DEFAULT 1"},
-			{"mail_domains", "san_domains_csv", "TEXT NOT NULL DEFAULT ''"},
-			{"mail_domains", "tlsa_domains_csv", "TEXT NOT NULL DEFAULT ''"},
-			{"mail_domains", "tlsa_domains_wildcards", "INTEGER NOT NULL DEFAULT 0"},
-				// ---- Phase 5 (accounts / aliases / import registrations) ----
-				// mail_mox_settings - Phase 5 import + quota defaults.
-				{"mail_mox_settings", "import_mode", "INTEGER DEFAULT 0"},
-				{"mail_mox_settings", "import_registration_id", "TEXT"},
-				{"mail_mox_settings", "import_read_only", "INTEGER DEFAULT 1"},
-				{"mail_mox_settings", "default_account_quota_mb", "INTEGER DEFAULT 0"},
-				{"mail_mox_settings", "max_accounts_per_domain", "INTEGER DEFAULT 0"},
-				// mail_accounts - Phase 5 normalised columns.
-				{"mail_accounts", "domain_id", "TEXT NOT NULL DEFAULT ''"},
-				{"mail_accounts", "local_part", "TEXT NOT NULL DEFAULT ''"},
-				{"mail_accounts", "address", "TEXT NOT NULL DEFAULT ''"},
-				{"mail_accounts", "password_mode", "TEXT NOT NULL DEFAULT 'set'"},
-				{"mail_accounts", "quota_mb", "INTEGER DEFAULT 0"},
-				{"mail_accounts", "is_admin", "INTEGER DEFAULT 0"},
-				{"mail_accounts", "imap_sync_enabled", "INTEGER DEFAULT 1"},
-				{"mail_accounts", "imap_sync_state", "TEXT DEFAULT 'idle'"},
-				{"mail_accounts", "imap_last_uidvalidity", "TEXT"},
-				{"mail_accounts", "imap_last_uid", "TEXT"},
-				{"mail_accounts", "imap_last_internaldate", "TEXT"},
-				{"mail_accounts", "imap_error", "TEXT"},
-				{"mail_accounts", "status", "TEXT NOT NULL DEFAULT 'active'"},
-				{"mail_accounts", "last_login_at", "TEXT"},
-				// mail_accounts - Phase 7 IMAP sync upstream connection details.
-				{"mail_accounts", "imap_host", "TEXT"},
-				{"mail_accounts", "imap_username", "TEXT"},
-				{"mail_accounts", "imap_sync_max_size_bytes", "INTEGER DEFAULT 0"},
-				// mail_aliases - Phase 5 normalised columns.
-				{"mail_aliases", "domain_id", "TEXT NOT NULL DEFAULT ''"},
-				{"mail_aliases", "source", "TEXT NOT NULL DEFAULT ''"},
-				{"mail_aliases", "recipients_csv", "TEXT NOT NULL DEFAULT ''"},
-				{"mail_aliases", "list_name", "TEXT"},
-				{"mail_aliases", "list_reply_to", "TEXT"},
-					// ---- Phase 6 (webhooks / delivery / rate / DNSBL) ----
-					// mail_mox_settings - Phase 6 webhook + delivery + DNSBL toggles.
-					{"mail_mox_settings", "webhook_inbound_enabled", "INTEGER DEFAULT 0"},
-					{"mail_mox_settings", "default_webhook_id", "TEXT"},
-					{"mail_mox_settings", "delivery_retention_days", "INTEGER DEFAULT 90"},
-					{"mail_mox_settings", "suppression_auto_prune_days", "INTEGER DEFAULT 180"},
-					{"mail_mox_settings", "outbound_rate_default_scope", "TEXT DEFAULT 'global'"},
-					{"mail_mox_settings", "dnsbl_check_enabled", "INTEGER DEFAULT 1"},
-					{"mail_mox_settings", "dnsbl_sources_csv", "TEXT DEFAULT 'zen.spamhaus.org,bl.spamcop.net,dbl.spamhaus.org,combined.mail-abuse.org,uribl.swinog.ch'"},
-						// ---- Phase 7 (IMAP sync / FTS5 search) ----
-						// mail_mox_settings - Phase 7 IMAP sync toggles + size limits.
-						{"mail_mox_settings", "imapsync_enabled", "INTEGER DEFAULT 1"},
-						{"mail_mox_settings", "imapsync_max_size_bytes", "INTEGER DEFAULT 10737418240"},
-						{"mail_mox_settings", "imapsync_big_message_size_limit_bytes", "INTEGER DEFAULT 52428800"},
-						{"mail_mox_settings", "imapsync_interval_attachment_cache_enabled", "INTEGER DEFAULT 1"},
-							// ---- Phase 7 (revised IMAP sync toggles + size limits + idle) ----
-							{"mail_mox_settings", "imapsync_max_total_bytes", "INTEGER DEFAULT 10737418240"},
-							{"mail_mox_settings", "imapsync_big_message_limit_bytes", "INTEGER DEFAULT 52428800"},
-							{"mail_mox_settings", "imapsync_attachment_cache_enabled", "INTEGER DEFAULT 1"},
-							{"mail_mox_settings", "imapsync_idle_timeout_seconds", "INTEGER DEFAULT 1800"},
-								// ---- Phase 8 (backups / retention / hard-delete) ----
-								// mail_backups - columns added on top of the legacy schema.
-								{"mail_backups", "schedule_id", "TEXT NOT NULL DEFAULT ''"},
-								{"mail_backups", "retention_days", "INTEGER DEFAULT 0"},
-								{"mail_backups", "expires_at", "TEXT NOT NULL DEFAULT ''"},
-								{"mail_backups", "note", "TEXT NOT NULL DEFAULT ''"},
-								// mail_mox_settings - Phase 8 backup + retention defaults.
-								{"mail_mox_settings", "backup_enabled", "INTEGER DEFAULT 0"},
-								{"mail_mox_settings", "backup_default_scope", "TEXT DEFAULT 'config'"},
-								{"mail_mox_settings", "backup_default_retention_days", "INTEGER DEFAULT 30"},
-								{"mail_mox_settings", "retention_auto_apply_enabled", "INTEGER DEFAULT 1"},
-								{"mail_mox_settings", "danger_hard_delete_enabled", "INTEGER DEFAULT 0"},
-									// ---- Phase 8 Part A: cross-grade mail_backup_schedules (P8B minimal -> full) ----
-									{"mail_backup_schedules", "scope_id", "TEXT NOT NULL DEFAULT ''"},
-									{"mail_backup_schedules", "schedule_kind", "TEXT NOT NULL DEFAULT 'full'"},
-									{"mail_backup_schedules", "cadence_cron", "TEXT NOT NULL DEFAULT '0 3 * * 0'"},
-									{"mail_backup_schedules", "timezone", "TEXT NOT NULL DEFAULT 'UTC'"},
-									{"mail_backup_schedules", "keep_revisions", "INTEGER NOT NULL DEFAULT 0"},
-									{"mail_backup_schedules", "contains_config", "INTEGER NOT NULL DEFAULT 1"},
-									{"mail_backup_schedules", "contains_data", "INTEGER NOT NULL DEFAULT 1"},
-									{"mail_backup_schedules", "encryption_mode", "TEXT NOT NULL DEFAULT 'none'"},
-									{"mail_backup_schedules", "encrypt_password_hash", "TEXT NOT NULL DEFAULT ''"},
-									{"mail_backup_schedules", "storage_target", "TEXT NOT NULL DEFAULT ''"},
-									{"mail_backup_schedules", "target_url", "TEXT NOT NULL DEFAULT ''"},
-									{"mail_backup_schedules", "target_credentials_json", "TEXT NOT NULL DEFAULT ''"},
-									{"mail_backup_schedules", "pre_run_hook", "TEXT NOT NULL DEFAULT ''"},
-									{"mail_backup_schedules", "post_run_hook", "TEXT NOT NULL DEFAULT ''"},
-									{"mail_backup_schedules", "last_status", "TEXT NOT NULL DEFAULT ''"},
-									{"mail_backup_schedules", "paused", "INTEGER NOT NULL DEFAULT 0"},
-									// ---- Phase 8 Part A: cross-grade mail_retention_rules scope/category fields ----
-									{"mail_retention_rules", "scope", "TEXT NOT NULL DEFAULT 'global'"},
-									{"mail_retention_rules", "scope_id", "TEXT NOT NULL DEFAULT ''"},
-									{"mail_retention_rules", "category", "TEXT NOT NULL DEFAULT 'all'"},
-									{"mail_retention_rules", "prune_empty_folders", "INTEGER NOT NULL DEFAULT 0"},
-									{"mail_retention_rules", "hard_delete", "INTEGER NOT NULL DEFAULT 0"},
-									{"mail_retention_rules", "last_pruned_at", "TEXT NOT NULL DEFAULT ''"},
-			} {
+	// Additive-column evolution for mail_* tables.  Keep this list ordered
+	// by the phase that introduced the column so git blame + bisection
+	// stay readable.
+	for _, column := range []struct {
+		table string
+		name  string
+		def   string
+	}{
+		// ---- Phase 4 (certmanager) ------------------------------
+		// mail_certificates - Phase 4 spec columns added on top of
+		// any pre-existing schema from earlier phases.
+		{"mail_certificates", "domain", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_certificates", "pem_chain", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_certificates", "dns_provider_id", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_certificates", "last_renewal_attempt", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_certificates", "next_renewal", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_certificates", "last_error", "TEXT NOT NULL DEFAULT ''"},
+		// mail_dns_providers - Phase 4 normalised schema fields.
+		{"mail_dns_providers", "display_name", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_dns_providers", "config_json", "TEXT NOT NULL DEFAULT ''"},
+		// mail_domains - TLSA toggle, DNS provider FK, SAN CSV, DANE TLSA overrides.
+		{"mail_domains", "tlsa_enabled", "INTEGER NOT NULL DEFAULT 1"},
+		{"mail_domains", "san_domains_csv", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_domains", "tlsa_domains_csv", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_domains", "tlsa_domains_wildcards", "INTEGER NOT NULL DEFAULT 0"},
+		// ---- Phase 5 (accounts / aliases / import registrations) ----
+		// mail_mox_settings - Phase 5 import + quota defaults.
+		{"mail_mox_settings", "import_mode", "INTEGER DEFAULT 0"},
+		{"mail_mox_settings", "import_registration_id", "TEXT"},
+		{"mail_mox_settings", "import_read_only", "INTEGER DEFAULT 1"},
+		{"mail_mox_settings", "default_account_quota_mb", "INTEGER DEFAULT 0"},
+		{"mail_mox_settings", "max_accounts_per_domain", "INTEGER DEFAULT 0"},
+		// mail_accounts - Phase 5 normalised columns.
+		{"mail_accounts", "domain_id", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_accounts", "local_part", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_accounts", "address", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_accounts", "password_mode", "TEXT NOT NULL DEFAULT 'set'"},
+		{"mail_accounts", "quota_mb", "INTEGER DEFAULT 0"},
+		{"mail_accounts", "is_admin", "INTEGER DEFAULT 0"},
+		{"mail_accounts", "imap_sync_enabled", "INTEGER DEFAULT 1"},
+		{"mail_accounts", "imap_sync_state", "TEXT DEFAULT 'idle'"},
+		{"mail_accounts", "imap_last_uidvalidity", "TEXT"},
+		{"mail_accounts", "imap_last_uid", "TEXT"},
+		{"mail_accounts", "imap_last_internaldate", "TEXT"},
+		{"mail_accounts", "imap_error", "TEXT"},
+		{"mail_accounts", "status", "TEXT NOT NULL DEFAULT 'active'"},
+		{"mail_accounts", "last_login_at", "TEXT"},
+		// mail_accounts - Phase 7 IMAP sync upstream connection details.
+		{"mail_accounts", "imap_host", "TEXT"},
+		{"mail_accounts", "imap_username", "TEXT"},
+		{"mail_accounts", "imap_sync_max_size_bytes", "INTEGER DEFAULT 0"},
+		{"mail_accounts", "webapi_password_wrapped", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_messages_p7", "mox_msg_id", "INTEGER NOT NULL DEFAULT 0"},
+		// mail_aliases - Phase 5 normalised columns.
+		{"mail_aliases", "domain_id", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_aliases", "source", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_aliases", "recipients_csv", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_aliases", "list_name", "TEXT"},
+		{"mail_aliases", "list_reply_to", "TEXT"},
+		// ---- Phase 6 (webhooks / delivery / rate / DNSBL) ----
+		// mail_mox_settings - Phase 6 webhook + delivery + DNSBL toggles.
+		{"mail_mox_settings", "webhook_inbound_enabled", "INTEGER DEFAULT 0"},
+		{"mail_mox_settings", "default_webhook_id", "TEXT"},
+		{"mail_mox_settings", "delivery_retention_days", "INTEGER DEFAULT 90"},
+		{"mail_mox_settings", "suppression_auto_prune_days", "INTEGER DEFAULT 180"},
+		{"mail_mox_settings", "outbound_rate_default_scope", "TEXT DEFAULT 'global'"},
+		{"mail_mox_settings", "dnsbl_check_enabled", "INTEGER DEFAULT 1"},
+		{"mail_mox_settings", "dnsbl_sources_csv", "TEXT DEFAULT 'zen.spamhaus.org,bl.spamcop.net,dbl.spamhaus.org,combined.mail-abuse.org,uribl.swinog.ch'"},
+		{"mail_delivery_events", "queue_msg_id", "INTEGER NOT NULL DEFAULT 0"},
+		{"mail_delivery_events", "from_id", "TEXT NOT NULL DEFAULT ''"},
+		// ---- Phase 7 (IMAP sync / FTS5 search) ----
+		// mail_mox_settings - Phase 7 IMAP sync toggles + size limits.
+		{"mail_mox_settings", "imapsync_enabled", "INTEGER DEFAULT 1"},
+		{"mail_mox_settings", "imapsync_max_size_bytes", "INTEGER DEFAULT 10737418240"},
+		{"mail_mox_settings", "imapsync_big_message_size_limit_bytes", "INTEGER DEFAULT 52428800"},
+		{"mail_mox_settings", "imapsync_interval_attachment_cache_enabled", "INTEGER DEFAULT 1"},
+		// ---- Phase 7 (revised IMAP sync toggles + size limits + idle) ----
+		{"mail_mox_settings", "imapsync_max_total_bytes", "INTEGER DEFAULT 10737418240"},
+		{"mail_mox_settings", "imapsync_big_message_limit_bytes", "INTEGER DEFAULT 52428800"},
+		{"mail_mox_settings", "imapsync_attachment_cache_enabled", "INTEGER DEFAULT 1"},
+		{"mail_mox_settings", "imapsync_idle_timeout_seconds", "INTEGER DEFAULT 1800"},
+		// ---- Phase 8 (backups / retention / hard-delete) ----
+		// mail_backups - columns added on top of the legacy schema.
+		{"mail_backups", "schedule_id", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_backups", "retention_days", "INTEGER DEFAULT 0"},
+		{"mail_backups", "expires_at", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_backups", "note", "TEXT NOT NULL DEFAULT ''"},
+		// mail_mox_settings - Phase 8 backup + retention defaults.
+		{"mail_mox_settings", "backup_enabled", "INTEGER DEFAULT 0"},
+		{"mail_mox_settings", "backup_default_scope", "TEXT DEFAULT 'config'"},
+		{"mail_mox_settings", "backup_default_retention_days", "INTEGER DEFAULT 30"},
+		{"mail_mox_settings", "retention_auto_apply_enabled", "INTEGER DEFAULT 1"},
+		{"mail_mox_settings", "danger_hard_delete_enabled", "INTEGER DEFAULT 0"},
+		// ---- Phase 8 Part A: cross-grade mail_backup_schedules (P8B minimal -> full) ----
+		{"mail_backup_schedules", "scope_id", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_backup_schedules", "schedule_kind", "TEXT NOT NULL DEFAULT 'full'"},
+		{"mail_backup_schedules", "cadence_cron", "TEXT NOT NULL DEFAULT '0 3 * * 0'"},
+		{"mail_backup_schedules", "timezone", "TEXT NOT NULL DEFAULT 'UTC'"},
+		{"mail_backup_schedules", "keep_revisions", "INTEGER NOT NULL DEFAULT 0"},
+		{"mail_backup_schedules", "contains_config", "INTEGER NOT NULL DEFAULT 1"},
+		{"mail_backup_schedules", "contains_data", "INTEGER NOT NULL DEFAULT 1"},
+		{"mail_backup_schedules", "encryption_mode", "TEXT NOT NULL DEFAULT 'none'"},
+		{"mail_backup_schedules", "encrypt_password_hash", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_backup_schedules", "storage_target", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_backup_schedules", "target_url", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_backup_schedules", "target_credentials_json", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_backup_schedules", "pre_run_hook", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_backup_schedules", "post_run_hook", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_backup_schedules", "last_status", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_backup_schedules", "paused", "INTEGER NOT NULL DEFAULT 0"},
+		// ---- Phase 8 Part A: cross-grade mail_retention_rules scope/category fields ----
+		{"mail_retention_rules", "scope", "TEXT NOT NULL DEFAULT 'global'"},
+		{"mail_retention_rules", "scope_id", "TEXT NOT NULL DEFAULT ''"},
+		{"mail_retention_rules", "category", "TEXT NOT NULL DEFAULT 'all'"},
+		{"mail_retention_rules", "prune_empty_folders", "INTEGER NOT NULL DEFAULT 0"},
+		{"mail_retention_rules", "hard_delete", "INTEGER NOT NULL DEFAULT 0"},
+		{"mail_retention_rules", "last_pruned_at", "TEXT NOT NULL DEFAULT ''"},
+	} {
 		if err := s.ensureColumn(ctx, column.table, column.name, column.def); err != nil {
 			return err
 		}
@@ -2638,13 +2645,13 @@ func (s *Store) EnsureRuntimeSettings(ctx context.Context, defaults RuntimeSetti
 	roots, _ := json.Marshal(defaults.AllowedRoots)
 	now := now()
 	values := map[string]string{
-		"allowed_roots":           string(roots),
-		"cookie_secure":           boolString(defaults.CookieSecure),
-		"http_tls_enabled":        boolString(defaults.TLSEnabled),
-		"http_tls_cert_file":      defaults.TLSCertFile,
-		"http_tls_key_file":       defaults.TLSKeyFile,
-		"http_tls_owner_uid_check": boolString(defaults.TLSOwnerUIDCheck || true),
-		"http_hsts_enabled":       boolString(defaults.HSTSEnabled),
+		"allowed_roots":             string(roots),
+		"cookie_secure":             boolString(defaults.CookieSecure),
+		"http_tls_enabled":          boolString(defaults.TLSEnabled),
+		"http_tls_cert_file":        defaults.TLSCertFile,
+		"http_tls_key_file":         defaults.TLSKeyFile,
+		"http_tls_owner_uid_check":  boolString(defaults.TLSOwnerUIDCheck || true),
+		"http_hsts_enabled":         boolString(defaults.HSTSEnabled),
 		"http_hsts_max_age_seconds": strconv.Itoa(defaults.HSTSMaxAgeSeconds),
 	}
 	if defaults.Addr != "" {
@@ -2732,13 +2739,13 @@ func (s *Store) UpdateRuntimeSettings(ctx context.Context, settings RuntimeSetti
 	roots, _ := json.Marshal(settings.AllowedRoots)
 	now := now()
 	values := map[string]string{
-		"allowed_roots":            string(roots),
-		"cookie_secure":              boolString(settings.CookieSecure),
-		"http_tls_enabled":         boolString(settings.TLSEnabled),
-		"http_tls_cert_file":       settings.TLSCertFile,
-		"http_tls_key_file":        settings.TLSKeyFile,
+		"allowed_roots":             string(roots),
+		"cookie_secure":             boolString(settings.CookieSecure),
+		"http_tls_enabled":          boolString(settings.TLSEnabled),
+		"http_tls_cert_file":        settings.TLSCertFile,
+		"http_tls_key_file":         settings.TLSKeyFile,
 		"http_tls_owner_uid_check":  boolString(settings.TLSOwnerUIDCheck),
-		"http_hsts_enabled":          boolString(settings.HSTSEnabled),
+		"http_hsts_enabled":         boolString(settings.HSTSEnabled),
 		"http_hsts_max_age_seconds": strconv.Itoa(settings.HSTSMaxAgeSeconds),
 	}
 	if settings.Addr != "" {
@@ -2896,12 +2903,12 @@ func (s *Store) BackupDatabase(ctx context.Context, path string) error {
 
 func DefaultCodexGatewaySettings() CodexGatewaySettings {
 	return CodexGatewaySettings{
-		ID:                    "default",
-		BaseURL:               "https://chatgpt.com/backend-api",
-		OAuthAuthURL:          "https://auth.openai.com/oauth/authorize",
-		OAuthTokenURL:         "https://auth.openai.com/oauth/token",
-		OAuthClientID:         "app_EMoamEEZ73f0CkXaXp7hrann",
-		OAuthRedirectURI:      "http://localhost:1455/auth/callback",
+		ID:                                "default",
+		BaseURL:                           "https://chatgpt.com/backend-api",
+		OAuthAuthURL:                      "https://auth.openai.com/oauth/authorize",
+		OAuthTokenURL:                     "https://auth.openai.com/oauth/token",
+		OAuthClientID:                     "app_EMoamEEZ73f0CkXaXp7hrann",
+		OAuthRedirectURI:                  "http://localhost:1455/auth/callback",
 		RequestTimeoutSeconds:             600,
 		RefreshMarginSeconds:              300,
 		AccountHealthCheckIntervalSeconds: 43200,

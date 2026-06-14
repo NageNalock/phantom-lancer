@@ -2,8 +2,17 @@ package certmanager
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"net/http"
 	"time"
+
+	"golang.org/x/crypto/acme"
 )
 
 // LegoClient abstracts the subset of github.com/go-acme/lego/v4 that the
@@ -36,6 +45,172 @@ type LegoClient interface {
 	RevokeCertificate(ctx context.Context, pem []byte) error
 }
 
+// ---- Real ACME implementation ----------------------------------------------
+
+type ACMEDNS01Client struct {
+	client         *acme.Client
+	accountKey     *ecdsa.PrivateKey
+	certificateKey *ecdsa.PrivateKey
+	Directory      string
+	ContactEmail   string
+	AcceptTOS      bool
+}
+
+// NewLegoClient constructs the default ACME DNS-01 client. The name is kept for
+// API compatibility with older certmanager call sites, but the implementation is
+// intentionally based on golang.org/x/crypto/acme and does not use HTTP-01,
+// TLS-ALPN-01, or any lego stub path.
+func NewLegoClient(dir string, email string, acmeURL string, acceptTOS bool) (LegoClient, error) {
+	_ = dir
+	if acmeURL == "" {
+		acmeURL = "https://acme-staging-v02.api.letsencrypt.org/directory"
+	}
+	if email == "" {
+		return nil, fmt.Errorf("acme: contact email is required")
+	}
+	if !acceptTOS {
+		return nil, fmt.Errorf("acme: AcceptTOS must be true before ACME account can be created (directory=%s)", acmeURL)
+	}
+	accountKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("acme: generate account key: %w", err)
+	}
+	certKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("acme: generate certificate key: %w", err)
+	}
+	return &ACMEDNS01Client{
+		client: &acme.Client{
+			Key:          accountKey,
+			DirectoryURL: acmeURL,
+			HTTPClient:   &http.Client{Timeout: 30 * time.Second},
+			UserAgent:    "phantom-lancer-mail-certmanager",
+		},
+		accountKey:     accountKey,
+		certificateKey: certKey,
+		Directory:      acmeURL,
+		ContactEmail:   email,
+		AcceptTOS:      acceptTOS,
+	}, nil
+}
+
+func (c *ACMEDNS01Client) ObtainCertificate(
+	ctx context.Context,
+	domains []string,
+	challengeCallback func(presentationFQDN, keyAuth string) (cleanup func() error, err error),
+) (pemPrivateKey, pemCertificate, pemIssuerChain []byte, err error) {
+	if len(domains) == 0 {
+		return nil, nil, nil, fmt.Errorf("acme: ObtainCertificate: empty domains list")
+	}
+	if challengeCallback == nil {
+		return nil, nil, nil, fmt.Errorf("acme: ObtainCertificate: nil DNS-01 challenge callback")
+	}
+	if _, err := c.client.Register(ctx, &acme.Account{Contact: []string{"mailto:" + c.ContactEmail}}, acme.AcceptTOS); err != nil {
+		return nil, nil, nil, fmt.Errorf("acme: register account: %w", err)
+	}
+	order, err := c.client.AuthorizeOrder(ctx, acme.DomainIDs(domains...))
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("acme: authorize order: %w", err)
+	}
+	cleanups := make([]func() error, 0, len(order.AuthzURLs))
+	defer func() {
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			if cleanups[i] != nil {
+				_ = cleanups[i]()
+			}
+		}
+	}()
+	for _, authzURL := range order.AuthzURLs {
+		authz, err := c.client.GetAuthorization(ctx, authzURL)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("acme: get authorization: %w", err)
+		}
+		if authz.Status != acme.StatusPending {
+			continue
+		}
+		identifier := authz.Identifier.Value
+		chal := pickDNS01Challenge(authz.Challenges)
+		if chal == nil {
+			return nil, nil, nil, fmt.Errorf("acme: no dns-01 challenge for %s", identifier)
+		}
+		txtValue, err := c.client.DNS01ChallengeRecord(chal.Token)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("acme: compute dns-01 record for %s: %w", identifier, err)
+		}
+		fqdn := "_acme-challenge." + identifier + "."
+		cleanup, err := challengeCallback(fqdn, txtValue)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("acme: present dns-01 for %s: %w", identifier, err)
+		}
+		if cleanup != nil {
+			cleanups = append(cleanups, cleanup)
+		}
+		if _, err := c.client.Accept(ctx, chal); err != nil {
+			return nil, nil, nil, fmt.Errorf("acme: accept dns-01 for %s: %w", identifier, err)
+		}
+		if _, err := c.client.WaitAuthorization(ctx, authz.URI); err != nil {
+			return nil, nil, nil, fmt.Errorf("acme: wait authorization for %s: %w", identifier, err)
+		}
+	}
+	order, err = c.client.WaitOrder(ctx, order.URI)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("acme: wait order: %w", err)
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:  pkix.Name{CommonName: domains[0]},
+		DNSNames: append([]string(nil), domains...),
+	}, c.certificateKey)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("acme: create csr: %w", err)
+	}
+	chainDER, _, err := c.client.CreateOrderCert(ctx, order.FinalizeURL, csrDER, true)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("acme: finalize order: %w", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(c.certificateKey)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("acme: marshal private key: %w", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	certPEM, chainPEM := encodeCertificateChain(chainDER)
+	if len(certPEM) == 0 {
+		return nil, nil, nil, fmt.Errorf("acme: CA returned empty certificate chain")
+	}
+	if len(chainPEM) == 0 {
+		chainPEM = certPEM
+	}
+	return keyPEM, certPEM, chainPEM, nil
+}
+
+func (c *ACMEDNS01Client) RevokeCertificate(ctx context.Context, pemBytes []byte) error {
+	block, _ := pem.Decode(pemBytes)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return fmt.Errorf("acme: revoke: PEM certificate is required")
+	}
+	return c.client.RevokeCert(ctx, c.accountKey, block.Bytes, acme.CRLReasonUnspecified)
+}
+
+func pickDNS01Challenge(challenges []*acme.Challenge) *acme.Challenge {
+	for _, ch := range challenges {
+		if ch != nil && ch.Type == "dns-01" {
+			return ch
+		}
+	}
+	return nil
+}
+
+func encodeCertificateChain(chainDER [][]byte) (certPEM, chainPEM []byte) {
+	for i, der := range chainDER {
+		block := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+		if i == 0 {
+			certPEM = append(certPEM, block...)
+			continue
+		}
+		chainPEM = append(chainPEM, block...)
+	}
+	return certPEM, chainPEM
+}
+
 // ---- Stub implementation ----------------------------------------------------
 
 // LegoStubClient returns deterministic PEM placeholders so downstream
@@ -55,27 +230,6 @@ type LegoStubClient struct {
 	// to a 90-day certificate beginning at the call time when zero.
 	NotBefore time.Time
 	NotAfter  time.Time
-}
-
-// NewLegoClient constructs a LegoClient.  When the caller has NOT
-// vendored the real lego library (Phase 4), a LegoStubClient is
-// returned.  The signature is deliberately compatible with a future
-// swap-in that returns the real client from the same factory.
-func NewLegoClient(dir string, email string, acmeURL string, acceptTOS bool) (LegoClient, error) {
-	if acmeURL == "" {
-		acmeURL = "https://acme-staging-v02.api.letsencrypt.org/directory"
-	}
-	if email == "" {
-		return nil, fmt.Errorf("lego: ACME contact email is required (stub: ACME terms require a valid contact)")
-	}
-	if !acceptTOS {
-		return nil, fmt.Errorf("lego: AcceptTOS must be true before ACME account can be created (directory=%s)", acmeURL)
-	}
-	return &LegoStubClient{
-		Directory:    acmeURL,
-		ContactEmail: email,
-		AcceptTOS:    acceptTOS,
-	}, nil
 }
 
 // stubPrivateKey is the PEM-encoded private-key placeholder.  The

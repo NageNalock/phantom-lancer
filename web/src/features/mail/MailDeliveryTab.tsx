@@ -43,6 +43,7 @@ import {
   type MailOutboundThreshold,
   type DNSBLProbeResp,
   type DNSBLResult,
+  type MailRuntimeStatus,
 } from "../../api/client";
 import {
   Button,
@@ -59,6 +60,7 @@ import {
   Toggle,
   useDangerConfirm,
 } from "../../components/ui";
+import { buildQueryHref } from "../../hooks/useQueryParamState";
 
 type OuterSubtab = "deliveries" | "queue" | "suppression" | "webhooks" | "outbound";
 
@@ -123,11 +125,13 @@ export function MailDeliveryTab({
   actions,
   reload,
   data,
+  status,
   defaultSub = "deliveries",
 }: {
   actions: AppActions;
   reload: () => Promise<void>;
   data: AppData;
+  status?: MailRuntimeStatus | null;
   defaultSub?: OuterSubtab;
 }) {
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
@@ -142,6 +146,21 @@ export function MailDeliveryTab({
   return (
     <div className="grid gap-4 pt-4">
       {dangerConfirmDialog}
+      {status?.emergency_inbound_reject?.enabled ? (
+        <Notice tone="danger">
+          <strong>域禁用降级保护已启用。</strong> 队列处置仍需在本页单独执行；完整状态和恢复操作集中在入站保护页。
+          <a className="button ml-3 min-h-8 px-2 text-xs" href={buildQueryHref({ mail: "emergency" }, ["codex", "codexInbox", "codexRuntime", "gateway", "images", "docker", "settings"])}>
+            打开入站保护
+          </a>
+        </Notice>
+      ) : (
+        <Notice tone="warn">
+          <strong>应急入口。</strong> 如果队列爆量或入站投递异常，可从入站保护页启用 Domain.Disabled 降级保护；正式 early SMTP reject 尚未完成。
+          <a className="button ml-3 min-h-8 px-2 text-xs" href={buildQueryHref({ mail: "emergency" }, ["codex", "codexInbox", "codexRuntime", "gateway", "images", "docker", "settings"])}>
+            查看入站保护
+          </a>
+        </Notice>
+      )}
       <SubTabs
         ariaLabel="投递与队列二级导航"
         activeId={outerTab}
@@ -229,7 +248,15 @@ function DeliveriesPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [direction, status, fromDomain, toDomain, subjectSearch, limit]);
 
+  function handleRetryUnavailable() {
+    actions.setToast("该投递事件缺少 Mox queue message id，无法自动重新排队。", "warn");
+  }
+
   async function handleRetry(d: MailDeliveryEvent) {
+    if (!d.queue_msg_id) {
+      handleRetryUnavailable();
+      return;
+    }
     try {
       const r = await mailDeliveryRetry(d.id, actions.csrf);
       actions.setToast(r.requeued ? `已重新排队：${d.id.slice(0, 8)}…` : "重试请求被忽略", r.requeued ? "good" : "warn");
@@ -404,7 +431,7 @@ function DeliveriesPanel({
                           <Button tone="neutral" onClick={() => setDetailId(d.id)}>
                             详情
                           </Button>
-                          <Button tone="neutral" onClick={() => void handleRetry(d)}>
+                          <Button disabled={!d.queue_msg_id} title={d.queue_msg_id ? "重新排入 Mox 队列" : "缺少 Mox queue message id"} tone="neutral" onClick={() => void handleRetry(d)}>
                             重试
                           </Button>
                           <Button tone="danger" onClick={() => void handleDelete(d)}>
@@ -444,6 +471,7 @@ function DeliveriesPanel({
                 ["发件域名", <code key="fd">{detailItem.from_domain || "-"}</code>],
                 ["收件域名", <code key="td">{detailItem.to_domain || "-"}</code>],
                 ["Message-ID 哈希", <code key="mid" className="break-all">{truncateMiddle(detailItem.message_id_hash, 48)}</code>],
+                ["Queue Msg ID", detailItem.queue_msg_id ? <code key="qid">{detailItem.queue_msg_id}</code> : "-"],
                 ["主题", <span key="sbj">{detailItem.subject_snippet || "(无主题)"}</span>],
                 ["收件人哈希", <code key="rh">{detailItem.recipient_hash ? truncateMiddle(detailItem.recipient_hash, 28) : "-"}</code>],
                 ["SMTP 代码", detailItem.smtp_code ? (
@@ -463,7 +491,7 @@ function DeliveriesPanel({
               </Notice>
             ) : null}
             <div className="flex justify-end gap-2 border-t pt-3">
-              <Button tone="neutral" onClick={() => void handleRetry(detailItem)}>
+              <Button disabled={!detailItem.queue_msg_id} title={detailItem.queue_msg_id ? "重新排入 Mox 队列" : "缺少 Mox queue message id"} tone="neutral" onClick={() => void handleRetry(detailItem)}>
                 重新投递
               </Button>
               <Button tone="danger" onClick={() => void handleDelete(detailItem)}>
@@ -1746,8 +1774,6 @@ function OutboundPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope]);
 
-  // Visual-only bars
-  const bars = useMemo(() => generateBars(snap), [snap]);
   const send1m = snap?.counts?.["1m"] ?? 0;
   const send1h = snap?.counts?.["1h"] ?? 0;
   const send24h = snap?.counts?.["24h"] ?? 0;
@@ -1780,9 +1806,9 @@ function OutboundPanel({
       </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Metric label="1 分钟发送" tone="neutral" value={send1m} detail="当前窗口累计" />
-        <Metric label="1 小时发送" tone="good" value={send1h} detail="当前窗口累计" />
-        <Metric label="24 小时发送" tone="good" value={send24h} detail="当前窗口累计" />
+        <Metric label="1 分钟发送" tone="neutral" value={send1m} detail="Phantom delivery_events 聚合快照" />
+        <Metric label="1 小时发送" tone="good" value={send1h} detail="Phantom delivery_events 聚合快照" />
+        <Metric label="24 小时发送" tone="good" value={send24h} detail="Phantom delivery_events 聚合快照" />
         <Metric
           label="退信率 (24h)"
           tone={bouncePct >= (patch.bounce_rate_pct_crit ?? 8) ? "danger" : bouncePct >= (patch.bounce_rate_pct_warn ?? 3) ? "warn" : "good"}
@@ -1795,31 +1821,12 @@ function OutboundPanel({
         />
       </div>
 
-      <Panel title="出站速率可视化（占位）" subtitle="Phase 7 接入真实发送流水线后会展示实时指标。">
-        <div className="grid gap-2">
-          <div className="flex items-end gap-1 h-[120px] rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
-            {bars.map((v, i) => (
-              <div
-                key={i}
-                className="flex-1 rounded-t transition-all"
-                style={{
-                  height: `${Math.max(2, v * 100)}%`,
-                  backgroundColor:
-                    v > 0.9 ? "var(--danger)" : v > 0.6 ? "var(--warn)" : "var(--accent)",
-                  opacity: 0.85,
-                }}
-                title={`桶 ${i + 1}: 约 ${Math.round(v * (send1h || 100))}`}
-              />
-            ))}
-          </div>
-          <div className="flex justify-between text-xs muted">
-            <span>-12h</span>
-            <span>-9h</span>
-            <span>-6h</span>
-            <span>-3h</span>
-            <span>现在</span>
-          </div>
-        </div>
+      <Notice tone="warn">
+        <strong>数据来源说明。</strong> 当前出站速率来自 Phantom 持久化 delivery_events 的窗口聚合，不代表完整 Mox 实时限流或时序监控链路。
+      </Notice>
+
+      <Panel title="出站速率时间序列" subtitle="真实发送流水线接入后展示按时间桶聚合的出站速率。">
+        <EmptyState title="暂无真实时间序列" body="当前只展示最新窗口快照和阈值配置；不会渲染 synthetic 曲线。" />
       </Panel>
 
       <CollapsibleSection
@@ -2013,9 +2020,7 @@ function ModalShell({
               onClick={onClose}
               className="text-lg muted hover:text-neutral-12"
               aria-label="关闭"
-            >
-              ✕
-            </button>
+            >关闭</button>
           ) : null}
         </div>
         <div className="grid gap-4 p-4 overflow-y-auto text-sm">{children}</div>
@@ -2051,9 +2056,7 @@ function DrawerModal({
             onClick={onClose}
             className="text-lg muted hover:text-neutral-12"
             aria-label="关闭"
-          >
-            ✕
-          </button>
+          >关闭</button>
         </div>
         <div className="grid gap-4 p-4 overflow-y-auto text-sm">{children}</div>
       </div>
@@ -2079,7 +2082,7 @@ function CopyButton({ value, label }: { value: string; label?: string }) {
       className="inline-flex items-center text-xs muted hover:text-neutral-12"
       onClick={() => void copy()}
     >
-      {copied ? "✓" : "📋"}
+      {copied ? "完成" : "复制"}
     </button>
   );
 }
@@ -2253,15 +2256,4 @@ function computeDeliveryAggs(items: MailDeliveryEvent[]) {
     if (d.status === "pending" || d.status === "queued") pending++;
   }
   return { sent24h, bounced24h, deferred, pending };
-}
-
-function generateBars(snap: OutboundRateSnapshot | null): number[] {
-  // 12 bars of synthetic normalized data; real data in Phase 7.
-  const baseline = (snap?.counts?.["1h"] || 100) / 100;
-  const bars = new Array(12).fill(0).map((_, i) => {
-    // Smooth-ish sine wave + trend
-    const v = 0.3 + 0.5 * Math.sin((i / 12) * Math.PI * 2) + 0.2 * Math.random();
-    return Math.max(0, Math.min(1, v * baseline / (baseline || 1)));
-  });
-  return bars;
 }

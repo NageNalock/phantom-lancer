@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import type { AppActions } from "../../app/App";
-import { Button, Panel, Pill, useDangerConfirm } from "../../components/ui";
+import { Button, Notice, Panel, Pill, useDangerConfirm } from "../../components/ui";
+import { buildQueryHref } from "../../hooks/useQueryParamState";
 import {
   friendlyError,
   mailRuntimeProbe,
@@ -144,6 +145,7 @@ export function MailOverviewTab({
   const pillTone = statusPillTone(status);
   const pillLabel = statusPillLabel(status);
   const isImport = !!status?.import_mode;
+  const emergency = status?.emergency_inbound_reject;
 
   const headerActions = (
     <div className="flex flex-wrap gap-2">
@@ -172,9 +174,27 @@ export function MailOverviewTab({
         actions={headerActions}
       >
         <div className="grid gap-4">
+          {emergency?.enabled ? (
+            <Notice tone="danger">
+              <strong>域禁用降级保护已启用。</strong> 当前通过 Mox Domain.Disabled 禁用域；已有队列和邮箱内容不会被删除。
+              <a className="button ml-3 min-h-8 px-2 text-xs" href={buildQueryHref({ mail: "emergency" }, ["codex", "codexInbox", "codexRuntime", "gateway", "images", "docker", "settings"])}>
+                打开入站保护
+              </a>
+            </Notice>
+          ) : (
+            <div className="flex items-center justify-between gap-3 rounded-md border border-[var(--line)] bg-[var(--surface-soft)] px-3 py-2 text-xs">
+              <span className="muted">
+                入站保护当前是 Domain.Disabled 降级实现；正式 early SMTP reject 尚未完成。
+              </span>
+              <a className="button ml-3 min-h-8 px-2 text-xs" href={buildQueryHref({ mail: "emergency" }, ["codex", "codexInbox", "codexRuntime", "gateway", "images", "docker", "settings"])}>
+                查看入站保护
+              </a>
+            </div>
+          )}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Pill tone={pillTone}>{pillLabel}</Pill>
+              {emergency?.enabled ? <Pill tone="danger">降级保护</Pill> : null}
               {isImport ? <Pill tone="warn">只读接入</Pill> : null}
             </div>
             <span className="muted text-xs">
@@ -221,6 +241,13 @@ export function MailOverviewTab({
 
             <span className="text-[var(--muted-strong)]">账户数</span>
             <span>{status?.account_count ?? 0}</span>
+
+            <span className="text-[var(--muted-strong)]">入站保护</span>
+            <span>
+              {emergency?.enabled
+                ? `域禁用降级保护 · ${emergency.affected_domains ?? 0} 个域 · ${emergency.actual_mox_strategy}`
+                : "未开启"}
+            </span>
           </div>
 
           <div>

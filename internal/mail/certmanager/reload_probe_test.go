@@ -18,30 +18,30 @@ import (
 // Callers override fields on the returned config before calling Issue.
 func minimalIssueConfig(t *testing.T, dir string) IssueConfig {
 	t.Helper()
-	lego, err := NewLegoClient(dir, "admin@example.com",
-		"https://stub.example.com/directory", true)
-	if err != nil {
-		t.Fatalf("NewLegoClient: %v", err)
+	lego := &LegoStubClient{
+		Directory:    "https://stub.example.com/directory",
+		ContactEmail: "admin@example.com",
+		AcceptTOS:    true,
 	}
 	manual := &ManualDNSProvider{
 		Persist: func(fqdn, value, domain, status string) error { return nil },
 	}
 	return IssueConfig{
-		Domain:       "example.com",
-		SANDomains:   []string{"mx.example.com", "mail.example.com"},
-		DataDir:      dir,
-		DNSProviders: map[string]DNSProvider{"example.com": manual},
-		LegoClient:   lego,
+		Domain:           "example.com",
+		SANDomains:       []string{"mx.example.com", "mail.example.com"},
+		DataDir:          dir,
+		DNSProviders:     map[string]DNSProvider{"example.com": manual},
+		LegoClient:       lego,
 		ACMEContactEmail: "admin@example.com",
 		ACMEDirectoryURL: "https://stub.example.com/directory",
-		AcceptTOS: true,
+		AcceptTOS:        true,
 		// Manual DNS mode needs a confirm callback — ours is a no-op (tokens
 		// are already "propagated" in tests because the Lego stub doesn't
 		// actually query DNS).
 		ManualModeConfirmCallback: func(_ context.Context, _, _ string) error { return nil },
-		ReloadOrRestartMox: func(_ context.Context) error { return nil },
-		TLSProbe:           func(_ context.Context) (string, error) { return "good", nil },
-		PersistCertificate: func(_ Certificate) error { return nil },
+		ReloadOrRestartMox:        func(_ context.Context) error { return nil },
+		TLSProbe:                  func(_ context.Context) (string, error) { return "good", nil },
+		PersistCertificate:        func(_ Certificate) error { return nil },
 	}
 }
 

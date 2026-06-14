@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +19,8 @@ import (
 	"phantom-lancer/internal/mail/configapply"
 	"phantom-lancer/internal/storage"
 )
+
+const maxMailAttachmentDownloadBytes int64 = 50 << 20
 
 // errMailNotWired is returned by mail helpers when the Server was built
 // without a mail.Service (unit test convenience).
@@ -57,6 +61,9 @@ func (s *Server) registerMailRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/mail/config/rollback", s.handleMailConfigRollback)
 	mux.HandleFunc("GET /api/mail/config/summary", s.handleMailConfigSummary)
 	mux.HandleFunc("POST /api/mail/runtime/resolve-drift", s.handleMailResolveDrift)
+	mux.HandleFunc("GET /api/mail/emergency/inbound-reject", s.handleMailEmergencyInboundRejectGet)
+	mux.HandleFunc("POST /api/mail/emergency/inbound-reject/enable", s.handleMailEmergencyInboundRejectEnable)
+	mux.HandleFunc("POST /api/mail/emergency/inbound-reject/disable", s.handleMailEmergencyInboundRejectDisable)
 	// --- Phase 3: Domains --------------------------------------------------
 	mux.HandleFunc("GET /api/mail/domains", s.handleMailDomainList)
 	mux.HandleFunc("POST /api/mail/domains", s.handleMailDomainCreate)
@@ -217,15 +224,16 @@ func (s *Server) registerMailRoutes(mux *http.ServeMux) {
 // (config_drifted flag).  Exposing `service_ready:bool` from day one means
 // the UI can branch on it without a schema change.
 type MailStatusPayload struct {
-	OK              bool   `json:"ok"`
-	ServiceReady    bool   `json:"service_ready"`
-	ConfigMode      string `json:"config_mode"`
-	DesiredState    string `json:"desired_state"`
-	PhantomInstance string `json:"phantom_instance_id"`
-	ImportMode      bool   `json:"import_mode"`
-	MoxRoot         string `json:"mox_root"`
-	DomainCount     int    `json:"domain_count"`
-	AccountCount    int    `json:"account_count"`
+	OK                     bool                              `json:"ok"`
+	ServiceReady           bool                              `json:"service_ready"`
+	ConfigMode             string                            `json:"config_mode"`
+	DesiredState           string                            `json:"desired_state"`
+	PhantomInstance        string                            `json:"phantom_instance_id"`
+	ImportMode             bool                              `json:"import_mode"`
+	MoxRoot                string                            `json:"mox_root"`
+	DomainCount            int                               `json:"domain_count"`
+	AccountCount           int                               `json:"account_count"`
+	EmergencyInboundReject *mail.EmergencyInboundRejectState `json:"emergency_inbound_reject,omitempty"`
 }
 
 // handleMailStatus returns the current Mail service status.  Phase 1: it
@@ -250,7 +258,7 @@ func (s *Server) handleMailStatus(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, MailStatusPayload{
+	payload := MailStatusPayload{
 		OK:              true,
 		ServiceReady:    ready,
 		ConfigMode:      settings.ConfigMode,
@@ -261,7 +269,13 @@ func (s *Server) handleMailStatus(w http.ResponseWriter, r *http.Request) {
 		// Phases 2+ wire real counts from the store.
 		DomainCount:  0,
 		AccountCount: 0,
-	})
+	}
+	if s.mail != nil {
+		if emergency, eerr := s.mail.EmergencyInboundRejectGet(ctx); eerr == nil {
+			payload.EmergencyInboundReject = emergency
+		}
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // getMailSettingsCached is a tiny helper so handlers that need the singleton
@@ -292,6 +306,14 @@ func safeMailMoxRoot(svc *mail.Service) string {
 func writeMailImportROErr(w http.ResponseWriter) {
 	writeError(w, http.StatusForbidden, "import_read_only",
 		"当前处于导入只读模式，操作被拒绝（如需变更请先退出导入模式）")
+}
+
+func writeMailCapabilityUnavailable(w http.ResponseWriter, err error) bool {
+	if mail.ErrorCode(err) != "capability_unavailable" {
+		return false
+	}
+	writeError(w, http.StatusNotImplemented, "capability_unavailable", err.Error())
+	return true
 }
 
 // checkMailImportRO returns true and writes the 403 error if the service is
@@ -883,8 +905,8 @@ func (s *Server) handleMailDomainList(w http.ResponseWriter, r *http.Request) {
 		list = []*storage.MailDomain{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items": list,
-		"count": len(list),
+		"items":   list,
+		"count":   len(list),
 		"drifted": s.mail.Drifted(),
 	})
 }
@@ -1072,7 +1094,118 @@ func (s *Server) handleMailDomainDNSCheck(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "domain_dns_check_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, updated)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"domain":     updated,
+		"dns_status": mail.DomainDNSStatusFromCheckJSON(updated.DNSCheckJSON),
+		"dns_check":  parseMailDNSCheckJSON(updated.DNSCheckJSON),
+	})
+}
+
+func parseMailDNSCheckJSON(raw string) any {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil
+	}
+	return payload
+}
+
+// handleMailEmergencyInboundRejectGet — GET /api/mail/emergency/inbound-reject
+func (s *Server) handleMailEmergencyInboundRejectGet(w http.ResponseWriter, r *http.Request) {
+	_, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+	if s.mail == nil {
+		writeError(w, http.StatusServiceUnavailable, "mail_not_wired", "Mail 服务未接入")
+		return
+	}
+	state, err := s.mail.EmergencyInboundRejectGet(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "emergency_get_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, state)
+}
+
+func (s *Server) handleMailEmergencyInboundRejectEnable(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.requireAuth(w, r)
+	if !ok || !s.requireCSRF(w, r, sess.Session) {
+		return
+	}
+	if s.mail == nil {
+		writeError(w, http.StatusServiceUnavailable, "mail_not_wired", "Mail 服务未接入")
+		return
+	}
+	if s.checkMailImportRO(w, r.Context()) {
+		return
+	}
+	var req mail.EmergencyInboundRejectRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	state, pipeline, err := s.mail.EmergencyInboundRejectEnable(r.Context(), req)
+	if err != nil {
+		if writeMailEmergencyCodedError(w, err, state, pipeline) {
+			return
+		}
+		writeMailEmergencyError(w, http.StatusBadRequest, "emergency_enable_failed", err.Error(), state, pipeline)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"state": state, "pipeline": pipeline})
+}
+
+func (s *Server) handleMailEmergencyInboundRejectDisable(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.requireAuth(w, r)
+	if !ok || !s.requireCSRF(w, r, sess.Session) {
+		return
+	}
+	if s.mail == nil {
+		writeError(w, http.StatusServiceUnavailable, "mail_not_wired", "Mail 服务未接入")
+		return
+	}
+	if s.checkMailImportRO(w, r.Context()) {
+		return
+	}
+	var req mail.EmergencyInboundRejectRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	state, pipeline, err := s.mail.EmergencyInboundRejectDisable(r.Context(), req)
+	if err != nil {
+		if writeMailEmergencyCodedError(w, err, state, pipeline) {
+			return
+		}
+		writeMailEmergencyError(w, http.StatusBadRequest, "emergency_disable_failed", err.Error(), state, pipeline)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"state": state, "pipeline": pipeline})
+}
+
+func writeMailEmergencyCodedError(w http.ResponseWriter, err error, state *mail.EmergencyInboundRejectState, pipeline *configapply.PipelineResult) bool {
+	switch code := mail.ErrorCode(err); code {
+	case "config_drifted":
+		writeMailEmergencyError(w, http.StatusConflict, code, err.Error(), state, pipeline)
+		return true
+	case "import_read_only":
+		writeMailEmergencyError(w, http.StatusForbidden, code, err.Error(), state, pipeline)
+		return true
+	default:
+		return false
+	}
+}
+
+func writeMailEmergencyError(w http.ResponseWriter, status int, code, message string, state *mail.EmergencyInboundRejectState, pipeline *configapply.PipelineResult) {
+	writeJSON(w, status, map[string]any{
+		"error": map[string]any{
+			"code":    code,
+			"message": message,
+		},
+		"state":    state,
+		"pipeline": pipeline,
+	})
 }
 
 // handleMailDomainDNSRecords — GET /api/mail/domains/{id}/dns-records
@@ -1455,7 +1588,13 @@ func (s *Server) handleMailAccountCreate(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "account_create_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, created)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":                created.Account.ID,
+		"address":           created.Account.Address,
+		"display_name":      created.Account.DisplayName,
+		"one_time_password": created.GeneratedPassword,
+		"created_at":        created.Account.CreatedAt,
+	})
 }
 
 // handleMailAccountList — GET /api/mail/accounts?domain_id=&status=
@@ -1640,6 +1779,9 @@ func (s *Server) handleMailAccountResyncIMAP(w http.ResponseWriter, r *http.Requ
 	id := r.PathValue("id")
 	updated, err := s.mail.MailAccountResyncIMAP(r.Context(), id)
 	if err != nil {
+		if writeMailCapabilityUnavailable(w, err) {
+			return
+		}
 		if errors.Is(err, storage.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "account_not_found", err.Error())
 			return
@@ -1999,9 +2141,9 @@ func (s *Server) handleMailDeliveryList(w http.ResponseWriter, r *http.Request) 
 		Direction:  r.URL.Query().Get("direction"),
 		FromDomain: r.URL.Query().Get("from_domain"),
 		ToDomain:   r.URL.Query().Get("to_domain"),
-		Search:    r.URL.Query().Get("search"),
-		Limit:     parseInt(r.URL.Query().Get("limit")),
-		Cursor:    r.URL.Query().Get("cursor"),
+		Search:     r.URL.Query().Get("search"),
+		Limit:      parseInt(r.URL.Query().Get("limit")),
+		Cursor:     r.URL.Query().Get("cursor"),
 	}
 	_ = f
 	resp, err := s.mail.DeliveryList(r.Context(), storage.MailDeliveryListFilter{
@@ -2009,9 +2151,9 @@ func (s *Server) handleMailDeliveryList(w http.ResponseWriter, r *http.Request) 
 		Direction:  r.URL.Query().Get("direction"),
 		FromDomain: r.URL.Query().Get("from_domain"),
 		ToDomain:   r.URL.Query().Get("to_domain"),
-		Search:    r.URL.Query().Get("search"),
-		Limit:     parseInt(r.URL.Query().Get("limit")),
-		Cursor:    r.URL.Query().Get("cursor"),
+		Search:     r.URL.Query().Get("search"),
+		Limit:      parseInt(r.URL.Query().Get("limit")),
+		Cursor:     r.URL.Query().Get("cursor"),
 	})
 	if err != nil {
 		code := mail.ErrorCode(err)
@@ -2431,10 +2573,10 @@ func (s *Server) handleMailSuppressionBulkImport(w http.ResponseWriter, r *http.
 	for _, e := range body.Entries {
 		entries = append(entries, storage.MailSuppression{
 			RecipientHash: e.RecipientHash,
-			Reason:      e.Reason,
-			Source:      e.Source,
-			SMTPCode:    e.SMTPCode,
-			ExpiresAt:   e.ExpiresAt,
+			Reason:        e.Reason,
+			Source:        e.Source,
+			SMTPCode:      e.SMTPCode,
+			ExpiresAt:     e.ExpiresAt,
 		})
 	}
 	n, err := s.mail.SuppressionBulkImport(r.Context(), entries)
@@ -2525,7 +2667,7 @@ func (s *Server) handleMailWebhookRegister(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"registration":     reg,
+		"registration":    reg,
 		"one_time_secret": secret,
 	})
 }
@@ -2898,6 +3040,9 @@ func (s *Server) handleMailFolderUpsert(w http.ResponseWriter, r *http.Request) 
 	req.AccountID = accountID
 	resp, err := s.mail.MailFolderUpsert(r.Context(), req)
 	if err != nil {
+		if writeMailCapabilityUnavailable(w, err) {
+			return
+		}
 		if errors.Is(err, storage.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "folder_not_found", err.Error())
 			return
@@ -2926,6 +3071,9 @@ func (s *Server) handleMailFolderDelete(w http.ResponseWriter, r *http.Request) 
 	}
 	folderID := r.PathValue("fid")
 	if err := s.mail.MailFolderDelete(r.Context(), folderID); err != nil {
+		if writeMailCapabilityUnavailable(w, err) {
+			return
+		}
 		if errors.Is(err, storage.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "folder_not_found", err.Error())
 			return
@@ -3003,7 +3151,9 @@ func (s *Server) handleMailMessageGet(w http.ResponseWriter, r *http.Request) {
 		})
 		idx++
 	}
-	detail.Attachments = atts
+	if len(detail.Attachments) == 0 {
+		detail.Attachments = atts
+	}
 	writeJSON(w, http.StatusOK, detail)
 }
 
@@ -3026,6 +3176,9 @@ func (s *Server) handleMailMessageDelete(w http.ResponseWriter, r *http.Request)
 	}
 	messageID := r.PathValue("mid")
 	if err := s.mail.MailMessageDelete(r.Context(), messageID); err != nil {
+		if writeMailCapabilityUnavailable(w, err) {
+			return
+		}
 		if errors.Is(err, storage.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "message_not_found", err.Error())
 			return
@@ -3060,6 +3213,9 @@ func (s *Server) handleMailMessageMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.mail.MailMessageMove(r.Context(), messageID, body.DestFolderID); err != nil {
+		if writeMailCapabilityUnavailable(w, err) {
+			return
+		}
 		if errors.Is(err, storage.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "message_not_found", err.Error())
 			return
@@ -3095,6 +3251,9 @@ func (s *Server) handleMailMessageUpdateFlags(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if err := s.mail.MailMessageFlagsUpdate(r.Context(), messageID, body.Add, body.Remove); err != nil {
+		if writeMailCapabilityUnavailable(w, err) {
+			return
+		}
 		if errors.Is(err, storage.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "message_not_found", err.Error())
 			return
@@ -3134,8 +3293,8 @@ func (s *Server) handleMailMessageRaw(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleMailMessageAttachment — GET /api/mail/messages/{mid}/attachments/{idx}
-// Placeholder: returns AttachmentInfo as JSON.  Content streaming will be
-// added in a later phase once attachment caching is wired.
+// By default returns AttachmentInfo JSON. With ?download=1, streams the cached
+// attachment body from the read-only Mail index cache.
 func (s *Server) handleMailMessageAttachment(w http.ResponseWriter, r *http.Request) {
 	_, ok := s.requireAuth(w, r)
 	if !ok {
@@ -3149,6 +3308,53 @@ func (s *Server) handleMailMessageAttachment(w http.ResponseWriter, r *http.Requ
 	idx := parseInt(r.PathValue("idx"))
 	if idx < 0 {
 		writeError(w, http.StatusBadRequest, "invalid_index", "attachment index must be >= 0")
+		return
+	}
+	if r.URL.Query().Get("download") == "1" {
+		file, err := s.mail.MailAttachmentFile(r.Context(), messageID, idx)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "attachment_not_stored", err.Error())
+				return
+			}
+			writeError(w, http.StatusBadRequest, "attachment_fetch_failed", err.Error())
+			return
+		}
+		if file.SizeBytes > maxMailAttachmentDownloadBytes {
+			writeError(w, http.StatusRequestEntityTooLarge, "attachment_too_large", "attachment exceeds maximum download size")
+			return
+		}
+		var rs io.ReadSeeker
+		var closer io.Closer
+		if file.Reader != nil {
+			defer file.Reader.Close()
+		} else {
+			f, err := os.Open(file.Path)
+			if err != nil {
+				writeError(w, http.StatusNotFound, "attachment_not_stored", "attachment cache file not found")
+				return
+			}
+			defer f.Close()
+			rs = f
+			closer = f
+		}
+		_ = closer
+		if file.ContentType != "" {
+			w.Header().Set("Content-Type", file.ContentType)
+		} else {
+			w.Header().Set("Content-Type", "application/octet-stream")
+		}
+		filename := file.Filename
+		if filename == "" {
+			filename = fmt.Sprintf("attachment-%d", idx)
+		}
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if file.Reader != nil {
+			_, _ = io.Copy(w, file.Reader)
+			return
+		}
+		http.ServeContent(w, r, filename, time.Now(), rs)
 		return
 	}
 	info, err := s.mail.MailAttachment(r.Context(), messageID, idx)
@@ -3176,11 +3382,17 @@ func (s *Server) handleMailMessageSearch(w http.ResponseWriter, r *http.Request)
 	}
 	accountID := r.PathValue("id")
 	var body struct {
-		Query      string   `json:"query"`
-		AccountIDs []string `json:"account_ids"`
-		Scope      string   `json:"scope"`
-		Limit      int      `json:"limit"`
-		Offset     int      `json:"offset"`
+		Query         string   `json:"query"`
+		AccountIDs    []string `json:"account_ids"`
+		Scope         string   `json:"scope"`
+		FromDomain    string   `json:"from_domain"`
+		To            string   `json:"to"`
+		Since         string   `json:"since"`
+		Before        string   `json:"before"`
+		HasAttachment *bool    `json:"has_attachment"`
+		UnreadOnly    bool     `json:"unread_only"`
+		Limit         int      `json:"limit"`
+		Offset        int      `json:"offset"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -3201,11 +3413,17 @@ func (s *Server) handleMailMessageSearch(w http.ResponseWriter, r *http.Request)
 		ids = []string{accountID}
 	}
 	resp, err := s.mail.MailMessageSearch(r.Context(), mail.MailSearchQuery{
-		AccountIDs: ids,
-		Query:      body.Query,
-		Scope:      body.Scope,
-		Limit:      body.Limit,
-		Offset:     body.Offset,
+		AccountIDs:    ids,
+		Query:         body.Query,
+		Scope:         body.Scope,
+		FromDomain:    body.FromDomain,
+		To:            body.To,
+		Since:         body.Since,
+		Before:        body.Before,
+		HasAttachment: body.HasAttachment,
+		UnreadOnly:    body.UnreadOnly,
+		Limit:         body.Limit,
+		Offset:        body.Offset,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "search_failed", err.Error())
@@ -3440,6 +3658,9 @@ func (s *Server) handleMailDraftSave(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := s.mail.MailDraftSave(r.Context(), req)
 	if err != nil {
+		if writeMailCapabilityUnavailable(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, "draft_failed", err.Error())
 		return
 	}
@@ -3464,6 +3685,9 @@ func (s *Server) handleMailDraftDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	draftID := r.PathValue("did")
 	if err := s.mail.MailDraftDelete(r.Context(), draftID); err != nil {
+		if writeMailCapabilityUnavailable(w, err) {
+			return
+		}
 		if errors.Is(err, storage.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "draft_not_found", err.Error())
 			return
@@ -3473,7 +3697,6 @@ func (s *Server) handleMailDraftDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
-
 
 // ---- Group 8: Logs + Backup + Retention + Danger Zone
 
@@ -3724,9 +3947,9 @@ func (s *Server) handleMailBackupList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items": list,
-		"total": total,
-		"limit": limit,
+		"items":  list,
+		"total":  total,
+		"limit":  limit,
 		"offset": offset,
 	})
 }

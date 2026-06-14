@@ -133,8 +133,6 @@ func (s *Service) DeliveryGet(ctx context.Context, id string) (*storage.MailDeli
 }
 
 // DeliveryRetry schedules a retry for a previously failed / deferred event.
-// Currently a stub: writes an audit entry and returns nil so the operator UX
-// can proceed.  Phase 7 wires real re-queue logic through Mox CLI.
 func (s *Service) DeliveryRetry(ctx context.Context, id string) error {
 	if err := s.checkWriteGuard(ctx); err != nil {
 		return err
@@ -142,16 +140,34 @@ func (s *Service) DeliveryRetry(ctx context.Context, id string) error {
 	if id == "" {
 		return errors.New("delivery retry: id is required")
 	}
-	_, gerr := s.store.MailDeliveryGet(ctx, id)
+	ev, gerr := s.store.MailDeliveryGet(ctx, id)
 	if gerr != nil {
 		return fmt.Errorf("delivery retry: %w", gerr)
 	}
-	// TODO(Phase 7): invoke Mox requeue CLI / API endpoint to actually
-	//   re-schedule the outbound attempt.  For now we only record intent.
+	if ev.QueueMsgID == 0 {
+		s.addAudit(ctx, EventTypeQueueAction,
+			fmt.Sprintf("rejected delivery retry id=%s because queue_msg_id is missing", id),
+			map[string]any{"id": id, "supported": false}, "medium")
+		return errors.New("delivery retry is not available: delivery event has no Mox queue message id")
+	}
+	if s.cli == nil {
+		return errors.New("delivery retry is not available: Mox CLI runner is not wired")
+	}
+	queueID := strconv.FormatInt(ev.QueueMsgID, 10)
+	ok, output, err := s.cli.QueueAction(ctx, "schedule", []string{queueID})
+	if err != nil {
+		return fmt.Errorf("delivery retry: mox queue schedule failed: %w", err)
+	}
+	if !ok {
+		if output == "" {
+			output = "mox queue schedule failed"
+		}
+		return fmt.Errorf("delivery retry: %s", output)
+	}
 	s.addAudit(ctx, EventTypeQueueAction,
-		fmt.Sprintf("retried delivery id=%s (stub; Phase 7 wires actual requeue)", id),
-		map[string]any{"id": id, "stub": true}, "medium")
-	s.log.WarnContext(ctx, "delivery retry: stub implementation", "id", id)
+		fmt.Sprintf("scheduled delivery retry id=%s queue_msg_id=%d", id, ev.QueueMsgID),
+		map[string]any{"id": id, "queue_msg_id": ev.QueueMsgID, "from_id": ev.FromID}, "medium")
+	s.publish(ctx, EventTypeQueueAction, map[string]any{"action": "schedule", "delivery_id": id, "queue_msg_id": ev.QueueMsgID})
 	return nil
 }
 
@@ -258,6 +274,8 @@ func (s *Service) DeliveryIngestEvent(ctx context.Context, eventType string, bod
 	first, _ := strVal(body, "first_attempt_at")
 	last, _ := strVal(body, "last_attempt_at")
 	completed, _ := strVal(body, "completed_at")
+	queueMsgID := firstIntVal(body, "queue_msg_id", "queue_msgid", "queuemsgid", "queue_id", "queue_message_id", "QueueMsgID", "submission.queue_msg_id", "submission.queue_msgid", "submission.QueueMsgID")
+	fromID, _ := firstStrVal(body, "from_id", "fromid", "FromID", "submission.from_id", "submission.fromid")
 	direction := "out"
 	if d, ok := strVal(body, "direction"); ok && d != "" {
 		direction = d
@@ -288,6 +306,8 @@ func (s *Service) DeliveryIngestEvent(ctx context.Context, eventType string, bod
 		LastAttemptAt:  last,
 		CompletedAt:    completed,
 		RecipientHash:  sha256Hex(recipient),
+		QueueMsgID:     int64(queueMsgID),
+		FromID:         fromID,
 		CreatedAt:      now,
 	}
 	saved, err := s.store.MailDeliveryInsert(ctx, ev)
@@ -441,6 +461,24 @@ func intVal(m map[string]any, key string) (int, bool) {
 	return 0, false
 }
 
+func firstIntVal(m map[string]any, keys ...string) int {
+	for _, key := range keys {
+		if v, ok := intVal(m, key); ok {
+			return v
+		}
+	}
+	return 0
+}
+
+func firstStrVal(m map[string]any, keys ...string) (string, bool) {
+	for _, key := range keys {
+		if v, ok := strVal(m, key); ok && v != "" {
+			return v, true
+		}
+	}
+	return "", false
+}
+
 // ensureBounceSuppression creates or updates a suppression row for a
 // known-bounced recipient.  Called as a best-effort side-effect of
 // DeliveryIngestEvent; errors are logged but not surfaced to the caller.
@@ -506,6 +544,19 @@ func (s *Service) QueueBulkAction(ctx context.Context, ids []string, action stri
 	if !ok {
 		return 0, fmt.Errorf("queue bulk action: unknown action %q", action)
 	}
+	if s.cli == nil {
+		return 0, errors.New("queue bulk action is not available: Mox CLI runner is not wired")
+	}
+	ok, output, err := s.cli.QueueAction(ctx, strings.ToLower(action), ids)
+	if err != nil {
+		return 0, fmt.Errorf("queue bulk action: mox queue %s failed: %w", action, err)
+	}
+	if !ok {
+		if output == "" {
+			output = "mox queue command failed"
+		}
+		return 0, fmt.Errorf("queue bulk action: %s", output)
+	}
 	n, err := s.store.MailQueueBulkUpdateBucket(ctx, ids, newBucket)
 	if err != nil {
 		return 0, fmt.Errorf("queue bulk action: %w", err)
@@ -518,10 +569,11 @@ func (s *Service) QueueBulkAction(ctx context.Context, ids []string, action stri
 	s.addAudit(ctx, EventTypeQueueAction,
 		fmt.Sprintf("queue bulk %s: %d items moved to bucket %q", action, n, newBucket),
 		map[string]any{
-			"action":      action,
-			"new_bucket":  newBucket,
-			"count":       n,
-			"ids_sample":  sampleIDs(ids, 10),
+			"action":     action,
+			"new_bucket": newBucket,
+			"count":      n,
+			"ids_sample": sampleIDs(ids, 10),
+			"mox_output": output,
 		}, risk)
 	s.publish(ctx, EventTypeQueueAction, map[string]any{
 		"action":     action,
@@ -585,11 +637,11 @@ func (s *Service) SuppressionUpsert(ctx context.Context, sup *storage.MailSuppre
 		fmt.Sprintf("upserted suppression id=%s active=%t reason=%s",
 			saved.ID, saved.Active, saved.Reason),
 		map[string]any{
-			"id":              saved.ID,
-			"recipient_hash":  saved.RecipientHash,
-			"active":          saved.Active,
-			"reason":          saved.Reason,
-			"smtp_code":       saved.SMTPCode,
+			"id":             saved.ID,
+			"recipient_hash": saved.RecipientHash,
+			"active":         saved.Active,
+			"reason":         saved.Reason,
+			"smtp_code":      saved.SMTPCode,
 		}, "medium")
 	s.publish(ctx, EventTypeSuppressionUpdated, map[string]any{
 		"id":             saved.ID,
@@ -695,13 +747,13 @@ func (s *Service) OutboundRateGetSnapshot(ctx context.Context, scope string) (Ou
 	// parent (domain → global) → global → defaults.
 	var match *storage.MailOutboundThreshold
 	fallback := &storage.MailOutboundThreshold{
-		Scope:              "global",
-		Send1mWarn:         600,
-		Send1mCrit:         1200,
-		Send1hWarn:         10_000,
-		Send1hCrit:         20_000,
-		BounceRatePctWarn:  5.0,
-		BounceRatePctCrit:  10.0,
+		Scope:             "global",
+		Send1mWarn:        600,
+		Send1mCrit:        1200,
+		Send1hWarn:        10_000,
+		Send1hCrit:        20_000,
+		BounceRatePctWarn: 5.0,
+		BounceRatePctCrit: 10.0,
 	}
 	// Iterate to find exact match first, then a broader scope.
 	var globalMatch *storage.MailOutboundThreshold
@@ -763,13 +815,13 @@ func (s *Service) OutboundThresholdUpsert(ctx context.Context, t *storage.MailOu
 	s.addAudit(ctx, EventTypeSettingsUpdated,
 		fmt.Sprintf("updated outbound threshold scope=%s", saved.Scope),
 		map[string]any{
-			"scope":             saved.Scope,
-			"send_1m_warn":      saved.Send1mWarn,
-			"send_1m_crit":      saved.Send1mCrit,
-			"send_1h_warn":      saved.Send1hWarn,
-			"send_1h_crit":      saved.Send1hCrit,
-			"bounce_rate_warn":  saved.BounceRatePctWarn,
-			"bounce_rate_crit":  saved.BounceRatePctCrit,
+			"scope":            saved.Scope,
+			"send_1m_warn":     saved.Send1mWarn,
+			"send_1m_crit":     saved.Send1mCrit,
+			"send_1h_warn":     saved.Send1hWarn,
+			"send_1h_crit":     saved.Send1hCrit,
+			"bounce_rate_warn": saved.BounceRatePctWarn,
+			"bounce_rate_crit": saved.BounceRatePctCrit,
 		}, "medium")
 	s.publish(ctx, EventTypeSettingsUpdated, map[string]any{
 		"scope": saved.Scope,

@@ -1032,6 +1032,35 @@ export interface MailStatus {
   mox_root: string;
   domain_count: number;
   account_count: number;
+  emergency_inbound_reject?: MailEmergencyInboundRejectState;
+}
+
+export interface MailEmergencyInboundRejectState {
+  enabled: boolean;
+  reason?: string;
+  mode: string;
+  applied_by?: string;
+  applied_at?: string;
+  auto_restore_at?: string;
+  last_auto_restore_attempt_at?: string;
+  auto_restore_blocked_at?: string;
+  last_normal_config_hash?: string;
+  last_config_hash?: string;
+  last_apply_summary?: string;
+  last_failure?: string;
+  last_failure_step?: number;
+  last_rollback_result?: string;
+  last_reload_result?: string;
+  last_probe_result?: string;
+  restore_conflict?: string;
+  restore_expected_hash?: string;
+  restore_disk_hash?: string;
+  apply_unknown?: boolean;
+  affected_domains: number;
+  affected_accounts: number;
+  actual_mox_strategy: string;
+  degraded_implementation?: boolean;
+  degraded_reason?: string;
 }
 
 export interface MailDomain {
@@ -1079,6 +1108,11 @@ export interface MailAccount {
   imap_sync_enabled?: boolean;
   imap_sync_state?: "idle" | "syncing" | "error" | "paused";
   imap_error?: string;
+  webapi_credential_present?: boolean;
+  webapi_endpoint_valid?: boolean;
+  webapi_runtime_available?: boolean;
+  send_disabled_reason?: string;
+  can_send?: boolean;
   last_login_at?: string;
   created_at: string;
   updated_at: string;

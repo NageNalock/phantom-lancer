@@ -401,7 +401,7 @@ function AliasUpsertModal({
       >
         <div className="panel-header flex items-center justify-between">
           <h3 className="m-0">{alias ? "编辑别名" : "创建别名"}</h3>
-          <button type="button" className="text-lg muted hover:text-neutral-12" onClick={onClose} aria-label="关闭">✕</button>
+          <button type="button" className="text-lg muted hover:text-neutral-12" onClick={onClose} aria-label="关闭">关闭</button>
         </div>
         <div className="panel-body grid gap-4">
           <div className="rounded-lg border p-3 text-sm bg-neutral-2 dark:bg-neutral-2-dark">

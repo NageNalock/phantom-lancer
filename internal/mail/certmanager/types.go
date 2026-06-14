@@ -57,9 +57,6 @@ type StepStatus struct {
 
 // DNSProvider abstracts a DNS hosting provider capable of creating and
 // deleting TXT records.  All implementations MUST honour ctx cancellation.
-// A stub layer (providers.go) is shipped in Phase 4; a later PR will
-// vendor github.com/go-acme/lego/v4/providers/dns/* adapters against the
-// same interface without changing any call sites.
 type DNSProvider interface {
 	// ProviderID returns the stable DB id (e.g. "dnsp-xxx").
 	ProviderID() string
@@ -119,8 +116,8 @@ type Certificate struct {
 // (SHA-256) — a.k.a. "3 1 1", the recommended form for self-hosted MX.
 type TLSAInfo struct {
 	Port         int    `json:"port"`
-	Usage        int    `json:"usage"`        // default 3
-	Selector     int    `json:"selector"`     // default 1
+	Usage        int    `json:"usage"`         // default 3
+	Selector     int    `json:"selector"`      // default 1
 	MatchingType int    `json:"matching_type"` // default 1
 	HexDigest    string `json:"hex_digest"`
 	FQDN         string `json:"fqdn"` // form: _<port>._tcp.<mx-host>.
@@ -131,15 +128,15 @@ type TLSAInfo struct {
 // probe failure AND could not restore the previous certificate state —
 // operators must treat this as a P1 incident.
 type IssueResult struct {
-	Success     bool        `json:"success"`
-	CertPath    string      `json:"cert_path"`
-	KeyPath     string      `json:"key_path"`
-	ChainPath   string      `json:"chain_path"`
-	NotBefore   time.Time   `json:"not_before"`
-	NotAfter    time.Time   `json:"not_after"`
-	TLSA        *TLSAInfo   `json:"tlsa,omitempty"`
-	RollbackErr string      `json:"rollback_err,omitempty"`
-	Message     string      `json:"message"`
-	Step        int         `json:"step"` // last completed step (1-based)
+	Success     bool         `json:"success"`
+	CertPath    string       `json:"cert_path"`
+	KeyPath     string       `json:"key_path"`
+	ChainPath   string       `json:"chain_path"`
+	NotBefore   time.Time    `json:"not_before"`
+	NotAfter    time.Time    `json:"not_after"`
+	TLSA        *TLSAInfo    `json:"tlsa,omitempty"`
+	RollbackErr string       `json:"rollback_err,omitempty"`
+	Message     string       `json:"message"`
+	Step        int          `json:"step"` // last completed step (1-based)
 	Steps       []StepStatus `json:"steps"`
 }

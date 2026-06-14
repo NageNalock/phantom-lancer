@@ -3,7 +3,9 @@ package configapply
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -14,10 +16,10 @@ import (
 // unset.  Set from a _test.go (or any file) inside the package to inject
 // per-step failures for ROLLBACK / drift-detector contract verification.
 var (
-	testOverrideMu    sync.Mutex
-	TestStepFnOverride map[int]func(ctx context.Context) error // step 1..10 → return error to fail that step
-	TestBeforeStepFn   func(step int) error                   // called before any step's real work
-	TestAfterRollbackFn func()                                // called after rollback completes (or fails)
+	testOverrideMu      sync.Mutex
+	TestStepFnOverride  map[int]func(ctx context.Context) error // step 1..10 → return error to fail that step
+	TestBeforeStepFn    func(step int) error                    // called before any step's real work
+	TestAfterRollbackFn func()                                  // called after rollback completes (or fails)
 )
 
 // -----------------------------------------------------------------------------
@@ -33,9 +35,10 @@ var (
 // `progress` (if non-nil, never closed here — caller owns lifecycle).
 //
 // Failure semantics:
-//   step ≤3 → return error, keep tmp file for operator inspection.
-//   step 4–6 → delete tmp if it exists, leave original intact.
-//   step ≥7 → ROLLBACK: rename .bak → .conf, call reloadFn, probeFn.
+//
+//	step ≤3 → return error, keep tmp file for operator inspection.
+//	step 4–6 → delete tmp if it exists, leave original intact.
+//	step ≥7 → ROLLBACK: rename .bak → .conf, call reloadFn, probeFn.
 //
 // reloadFn is expected to perform a "graceful reload or restart" (Mox
 // SIGHUP first; if unsupported → supervisor Restart).  probeFn returns
@@ -441,8 +444,8 @@ func buildCanonicalConfig(
 	fmt.Fprintf(&b, "Postmaster: %s\n", s.AdminEmail)
 	fmt.Fprintf(&b, "\n")
 	fmt.Fprintf(&b, "# Webmail / API bind addresses (loopback-only defaults).\n")
-	fmt.Fprintf(&b, "WebmailAddress: %s\n", def(s.WebmailAddr, "127.0.0.1:10444"))
-	fmt.Fprintf(&b, "WebAPIAddress: %s\n", def(s.WebAPIAddr, "127.0.0.1:10445"))
+	fmt.Fprintf(&b, "WebmailAddress: %s\n", safeWebBindAddr(s.WebmailAddr, "127.0.0.1:10444", false))
+	fmt.Fprintf(&b, "WebAPIAddress: %s\n", safeWebBindAddr(s.WebAPIAddr, "127.0.0.1:10445", true))
 	fmt.Fprintf(&b, "\n")
 	fmt.Fprintf(&b, "# Mail listener ports.\n")
 	fmt.Fprintf(&b, "SMTPPort: %d\n", defport(s.SMTPPort, 25))
@@ -457,6 +460,9 @@ func buildCanonicalConfig(
 	b.WriteString("\n# ---- Domains ----------------------------------------------------------\n")
 	for _, d := range domains {
 		fmt.Fprintf(&b, "\n[Domain.%s]\n", d.Domain)
+		if d.Disabled {
+			fmt.Fprintf(&b, "  Disabled: true\n")
+		}
 		if d.DKIMSelector != "" {
 			fmt.Fprintf(&b, "  DKIMSelector: %s\n", d.DKIMSelector)
 		}
@@ -497,6 +503,25 @@ func buildCanonicalConfig(
 
 	b.WriteString("\n# End of Phantom-generated config.\n")
 	return []byte(b.String())
+}
+
+func safeWebBindAddr(addr, fallback string, loopbackOnly bool) string {
+	host, portText, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return fallback
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 || port > 65535 || port < 1024 || port == 80 || port == 443 {
+		return fallback
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsUnspecified() {
+		return fallback
+	}
+	if loopbackOnly && !ip.IsLoopback() {
+		return fallback
+	}
+	return net.JoinHostPort(ip.String(), strconv.Itoa(port))
 }
 
 func def(v, fallback string) string {
