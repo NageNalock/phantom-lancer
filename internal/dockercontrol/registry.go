@@ -51,19 +51,21 @@ func validateDigest(digest string) error {
 }
 
 type RegistryStatus struct {
-	Enabled            bool   `json:"enabled"`
-	Ready              bool   `json:"ready"`
-	PublicURL          string `json:"publicUrl,omitempty"`
-	StorageBackend     string `json:"storageBackend"`
-	StorageDir         string `json:"storageDir,omitempty"`
-	ObjectPrefix       string `json:"objectPrefix,omitempty"`
-	QuotaBytes         int64  `json:"quotaBytes"`
-	UsageBytes         int64  `json:"usageBytes"`
-	RepositoryCount    int    `json:"repositoryCount"`
-	CredentialCount    int    `json:"credentialCount"`
-	RequireTLS         bool   `json:"requireTls"`
-	AllowAnonymousPull bool   `json:"allowAnonymousPull"`
-	LastError          string `json:"lastError,omitempty"`
+	Enabled              bool   `json:"enabled"`
+	Ready                bool   `json:"ready"`
+	PublicURL            string `json:"publicUrl,omitempty"`
+	StorageBackend       string `json:"storageBackend"`
+	StorageDir           string `json:"storageDir,omitempty"`
+	ObjectPrefix         string `json:"objectPrefix,omitempty"`
+	QuotaBytes           int64  `json:"quotaBytes"`
+	UsageBytes           int64  `json:"usageBytes"`
+	MaxRepositories      int    `json:"maxRepositories"`
+	MaxTagsPerRepository int    `json:"maxTagsPerRepository"`
+	RepositoryCount      int    `json:"repositoryCount"`
+	CredentialCount      int    `json:"credentialCount"`
+	RequireTLS           bool   `json:"requireTls"`
+	AllowAnonymousPull   bool   `json:"allowAnonymousPull"`
+	LastError            string `json:"lastError,omitempty"`
 }
 
 type RegistryCredentialSecret struct {
@@ -122,18 +124,20 @@ func (s *Service) RegistryStatus(ctx context.Context) RegistryStatus {
 		usage = backend.Usage(ctx)
 	}
 	return RegistryStatus{
-		Enabled:            settings.Enabled,
-		Ready:              settings.Enabled,
-		PublicURL:          settings.PublicURL,
-		StorageBackend:     settings.StorageBackend,
-		StorageDir:         settings.StorageDir,
-		ObjectPrefix:       settings.ObjectPrefix,
-		QuotaBytes:         settings.QuotaBytes,
-		UsageBytes:         usage,
-		RepositoryCount:    len(repos),
-		CredentialCount:    len(creds),
-		RequireTLS:         settings.RequireTLS,
-		AllowAnonymousPull: settings.AllowAnonymousPull,
+		Enabled:              settings.Enabled,
+		Ready:                settings.Enabled,
+		PublicURL:            settings.PublicURL,
+		StorageBackend:       settings.StorageBackend,
+		StorageDir:           settings.StorageDir,
+		ObjectPrefix:         settings.ObjectPrefix,
+		QuotaBytes:           settings.QuotaBytes,
+		UsageBytes:           usage,
+		MaxRepositories:      settings.MaxRepositories,
+		MaxTagsPerRepository: settings.MaxTagsPerRepository,
+		RepositoryCount:      len(repos),
+		CredentialCount:      len(creds),
+		RequireTLS:           settings.RequireTLS,
+		AllowAnonymousPull:   settings.AllowAnonymousPull,
 	}
 }
 
@@ -150,6 +154,7 @@ func (s *Service) CreateRegistryCredential(ctx context.Context, name string, sco
 		Name:             strings.TrimSpace(name),
 		Status:           "active",
 		SecretHash:       hash,
+		Secret:           secret,
 		Scopes:           normalizeScopes(scopes),
 		RepositoryPrefix: normalizeRepoPrefix(prefix),
 	})
@@ -168,6 +173,7 @@ func (s *Service) RotateRegistryCredential(ctx context.Context, id string) (Regi
 	if err != nil {
 		return RegistryCredentialSecret{}, err
 	}
+	cred.Secret = secret
 	updated, err := s.store.UpdateDockerRegistryCredential(ctx, cred, hash)
 	if err != nil {
 		return RegistryCredentialSecret{}, err
@@ -667,6 +673,14 @@ func (s *Service) handleManifest(w http.ResponseWriter, r *http.Request, setting
 			writeRegistryError(w, http.StatusBadRequest, "MANIFEST_BLOB_UNKNOWN", "manifest references an unknown blob", missing)
 			return
 		}
+		tag := ""
+		if !strings.HasPrefix(ref, "sha256:") && tagPattern.MatchString(ref) {
+			tag = ref
+		}
+		if err := s.enforceRegistryLimits(r.Context(), settings, repo, tag); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
 		if err := s.checkRegistryQuota(r.Context(), settings, int64(len(body))); err != nil {
 			http.Error(w, "registry quota exceeded", http.StatusInsufficientStorage)
 			return
@@ -675,10 +689,6 @@ func (s *Service) handleManifest(w http.ResponseWriter, r *http.Request, setting
 		if err := backend.PutBytes(r.Context(), contentPath, body, mediaType); err != nil {
 			http.Error(w, "storage unavailable", http.StatusInternalServerError)
 			return
-		}
-		tag := ""
-		if !strings.HasPrefix(ref, "sha256:") && tagPattern.MatchString(ref) {
-			tag = ref
 		}
 		_ = s.store.UpsertDockerRegistryManifest(r.Context(), storage.DockerRegistryManifest{Digest: digest, Repository: repo, MediaType: mediaType, SizeBytes: int64(len(body)), ContentPath: contentPath, PushedBy: cred.ID}, tag)
 		payload := registryPayload(repo, tag, digest, cred.ID, int64(len(body)))
@@ -781,8 +791,8 @@ func (s *Service) handleBlob(w http.ResponseWriter, r *http.Request, settings st
 }
 
 func (s *Service) handleBlobUpload(w http.ResponseWriter, r *http.Request, settings storage.DockerRegistrySettings, cred storage.DockerRegistryCredential, path string) {
-	repo, uploadID, ok := splitRegistryPath(path, "/blobs/uploads/")
-	if !ok || validateRepositoryName(repo) != nil {
+	repo, uploadID, ok := splitRegistryUploadPath(path)
+	if !ok || validateRepositoryName(repo) != nil || (r.Method != http.MethodPost && uploadID == "") {
 		http.NotFound(w, r)
 		return
 	}
@@ -1233,6 +1243,42 @@ func (s *Service) checkRegistryQuota(ctx context.Context, settings storage.Docke
 	return nil
 }
 
+func (s *Service) enforceRegistryLimits(ctx context.Context, settings storage.DockerRegistrySettings, repo, tag string) error {
+	if settings.MaxRepositories > 0 {
+		repos, err := s.store.ListDockerRegistryRepositories(ctx)
+		if err != nil {
+			return err
+		}
+		exists := false
+		for _, item := range repos {
+			if item.Name == repo {
+				exists = true
+				break
+			}
+		}
+		if !exists && len(repos) >= settings.MaxRepositories {
+			return fmt.Errorf("registry repository limit exceeded")
+		}
+	}
+	if tag != "" && settings.MaxTagsPerRepository > 0 {
+		tags, err := s.store.ListDockerRegistryTags(ctx, repo)
+		if err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return err
+		}
+		exists := false
+		for _, item := range tags {
+			if item.Tag == tag {
+				exists = true
+				break
+			}
+		}
+		if !exists && len(tags) >= settings.MaxTagsPerRepository {
+			return fmt.Errorf("registry tag limit exceeded")
+		}
+	}
+	return nil
+}
+
 func (s *Service) auditRegistry(ctx context.Context, event registryAudit) {
 	if s.store == nil {
 		return
@@ -1272,6 +1318,14 @@ func splitRegistryPath(path, marker string) (string, string, bool) {
 		return "", "", false
 	}
 	return left, right, true
+}
+
+func splitRegistryUploadPath(path string) (string, string, bool) {
+	repo, uploadID, ok := strings.Cut(path, "/blobs/uploads/")
+	if !ok || repo == "" {
+		return "", "", false
+	}
+	return repo, uploadID, true
 }
 
 func registryRepoFromPath(path string) string {

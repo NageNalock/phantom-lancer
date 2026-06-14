@@ -1,10 +1,16 @@
 package dockercontrol
 
 import (
+	"context"
+	"errors"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
+	dockerregistry "github.com/docker/docker/api/types/registry"
 
 	"phantom-lancer/internal/storage"
 )
@@ -161,6 +167,170 @@ func TestRegistryObjectKeysUseDockerPrefix(t *testing.T) {
 	got := blobKey(settings, "sha256:abcdef")
 	if got != "phantom-lancer/docker-registry/blobs/sha256/ab/abcdef" {
 		t.Fatalf("blob key = %q", got)
+	}
+}
+
+func TestHandleBlobUploadStartsDockerUpload(t *testing.T) {
+	svc := NewService(nil, nil, t.TempDir(), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v2/stock-pulse/stockpulse/blobs/uploads/", nil)
+	rr := httptest.NewRecorder()
+
+	svc.handleBlobUpload(
+		rr,
+		req,
+		storage.DockerRegistrySettings{StorageDir: t.TempDir()},
+		storage.DockerRegistryCredential{Scopes: []string{"registry.push"}},
+		"stock-pulse/stockpulse/blobs/uploads/",
+	)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%q", rr.Code, http.StatusAccepted, rr.Body.String())
+	}
+	if got := rr.Header().Get("Docker-Upload-UUID"); got == "" {
+		t.Fatal("Docker-Upload-UUID header is empty")
+	}
+	location := rr.Header().Get("Location")
+	if !strings.HasPrefix(location, "/v2/stock-pulse/stockpulse/blobs/uploads/") {
+		t.Fatalf("Location = %q", location)
+	}
+}
+
+func TestRegistryAuthForPullUsesStoredCredential(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	svc := NewService(store, nil, dir, nil)
+	if _, err := store.UpdateDockerRegistrySettings(ctx, storage.DockerRegistrySettings{
+		Enabled:        true,
+		PublicURL:      "https://registry.example.com:10443",
+		StorageBackend: "local",
+		ObjectPrefix:   "phantom-lancer/docker-registry",
+		RequireTLS:     true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := svc.CreateRegistryCredential(ctx, "web-pull", []string{"registry.pull"}, "stock-pulse/")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	encoded, err := svc.registryAuthForPull(ctx, "registry.example.com:10443/stock-pulse/stockpulse:latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encoded == "" {
+		t.Fatal("expected encoded registry auth")
+	}
+	authConfig, err := dockerregistry.DecodeAuthConfig(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authConfig.Username != "web-pull" || authConfig.Password != created.Secret || authConfig.ServerAddress != "registry.example.com:10443" {
+		t.Fatalf("unexpected auth config: username=%q passwordMatches=%v server=%q", authConfig.Username, authConfig.Password == created.Secret, authConfig.ServerAddress)
+	}
+}
+
+func TestRegistryAuthForPullRequiresRetrievableSecret(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := storage.Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	svc := NewService(store, nil, dir, nil)
+	if _, err := store.UpdateDockerRegistrySettings(ctx, storage.DockerRegistrySettings{
+		Enabled:        true,
+		PublicURL:      "https://registry.example.com",
+		StorageBackend: "local",
+		ObjectPrefix:   "phantom-lancer/docker-registry",
+		RequireTLS:     true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateDockerRegistryCredential(ctx, storage.DockerRegistryCredential{
+		Name:             "legacy-pull",
+		Status:           "active",
+		SecretHash:       "legacy-hash-only",
+		Scopes:           []string{"registry.pull"},
+		RepositoryPrefix: "stock-pulse/",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = svc.registryAuthForPull(ctx, "registry.example.com/stock-pulse/stockpulse:latest")
+	if !errors.Is(err, ErrRegistryPullCredentialUnavailable) {
+		t.Fatalf("error = %v, want ErrRegistryPullCredentialUnavailable", err)
+	}
+}
+
+func TestRegistryCredentialCanPullMatchesRepositorySegments(t *testing.T) {
+	cred := storage.DockerRegistryCredential{Status: "active", Scopes: []string{"registry.pull"}, RepositoryPrefix: "stock-pulse"}
+	if !registryCredentialCanPull("stock-pulse/stockpulse", cred) {
+		t.Fatal("expected child repository to match prefix")
+	}
+	if registryCredentialCanPull("stock-pulse-sidecar/app", cred) {
+		t.Fatal("prefix must not match a neighbouring repository segment")
+	}
+}
+
+func TestValidateContainerImageSourceUsesRegistryHostNotPersonalPrefix(t *testing.T) {
+	if err := validateContainerImageSource("https://registry.example.com:10443", "registry.example.com:10443/stock-pulse/stockpulse:latest"); err != nil {
+		t.Fatalf("expected first-party registry image to be allowed: %v", err)
+	}
+	if err := validateContainerImageSource("https://registry.example.com:10443", "registry.example.com:10443/personal/app:latest"); err != nil {
+		t.Fatalf("expected personal namespace to remain allowed: %v", err)
+	}
+	err := validateContainerImageSource("https://registry.example.com:10443", "docker.io/library/nginx:latest")
+	if !errors.Is(err, ErrContainerImageDenied) {
+		t.Fatalf("error = %v, want ErrContainerImageDenied", err)
+	}
+}
+
+func TestDrainImagePullProgressEmitsLayerUpdates(t *testing.T) {
+	stream := strings.NewReader(strings.Join([]string{
+		`{"status":"Pulling fs layer","id":"abc123"}`,
+		`{"status":"Downloading","id":"abc123","progressDetail":{"current":1048576,"total":2097152}}`,
+		`{"status":"Download complete","id":"abc123"}`,
+		`{"status":"Pull complete","id":"abc123"}`,
+	}, "\n"))
+	var updates []PullProgressUpdate
+	if err := drainImagePullProgress(context.Background(), stream, func(update PullProgressUpdate) {
+		updates = append(updates, update)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) < 3 {
+		t.Fatalf("updates = %+v, want at least 3 progress updates", updates)
+	}
+	foundDownloading := false
+	foundComplete := false
+	for _, update := range updates {
+		if update.LayerID != "abc123" {
+			t.Fatalf("layer id = %q, want abc123", update.LayerID)
+		}
+		if update.Status == "Downloading" && update.Current == 1048576 && update.Total == 2097152 {
+			foundDownloading = true
+		}
+		if update.Status == "Pull complete" {
+			foundComplete = true
+		}
+	}
+	if !foundDownloading || !foundComplete {
+		t.Fatalf("updates = %+v, want downloading and pull complete updates", updates)
+	}
+}
+
+func TestDrainImagePullProgressReturnsDaemonError(t *testing.T) {
+	err := drainImagePullProgress(context.Background(), strings.NewReader(`{"error":"no basic auth credentials","errorDetail":{"message":"no basic auth credentials"}}`), nil)
+	if err == nil || !strings.Contains(err.Error(), "no basic auth credentials") {
+		t.Fatalf("error = %v, want daemon error message", err)
 	}
 }
 

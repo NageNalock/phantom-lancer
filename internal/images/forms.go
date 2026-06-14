@@ -58,16 +58,24 @@ func parseImageInputs(r *http.Request, maxSlots int) ([]ImageInput, error) {
 			images = append(images, uploadInput)
 			continue
 		}
-		rawAssetID := strings.TrimSpace(r.FormValue(fmt.Sprintf("image_asset_%d", i)))
+		rawAssetID := strings.TrimSpace(r.FormValue(fmt.Sprintf("source_asset_%d", i)))
+		if rawAssetID == "" {
+			rawAssetID = strings.TrimSpace(r.FormValue(fmt.Sprintf("image_asset_%d", i)))
+		}
 		if rawAssetID != "" {
-			if !assetIDPattern.MatchString(rawAssetID) {
+			kind, bareID := splitKindedAssetID(rawAssetID)
+			if !assetIDPattern.MatchString(bareID) {
 				return nil, fmt.Errorf("image asset %d is invalid", i)
 			}
+			qualified := rawAssetID
+			if kind == "" {
+				qualified = "legacy:" + bareID
+			}
 			images = append(images, ImageInput{
-				URL:         "asset:" + rawAssetID,
+				URL:         "asset:" + qualified,
 				SourceType:  "library_asset",
-				SourceLabel: rawAssetID,
-				URLRedacted: rawAssetID,
+				SourceLabel: bareID,
+				URLRedacted: bareID,
 			})
 			continue
 		}
@@ -133,4 +141,72 @@ func redactedURL(rawURL string) string {
 		return rawURL
 	}
 	return rawURL[:100] + "..." + rawURL[len(rawURL)-24:]
+}
+
+func splitKindedAssetID(v string) (kind, bareID string) {
+	v = strings.TrimSpace(v)
+	if idx := strings.Index(v, ":"); idx > 0 {
+		prefix := v[:idx]
+		if prefix == "legacy" || prefix == "media" {
+			return prefix, strings.TrimSpace(v[idx+1:])
+		}
+	}
+	return "", v
+}
+
+func ParseMediaMultipartRequest(r *http.Request, mediaType, mode string) (ImagineRequest, error) {
+	model := strings.TrimSpace(r.FormValue("model"))
+	aspectRatio := strings.TrimSpace(r.FormValue("aspect_ratio"))
+	resolution := strings.TrimSpace(r.FormValue("resolution"))
+	responseFormat := strings.TrimSpace(r.FormValue("response_format"))
+	n, err := ParseCount(r.FormValue("n"))
+	if err != nil {
+		return ImagineRequest{}, err
+	}
+	mediaTypeNorm := NormalizeMediaType(mediaType)
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		if mediaTypeNorm == MediaTypeVideo {
+			mode = VideoModeTextToVideo
+		} else {
+			mode = ModeTextToImage
+		}
+	}
+	switch mediaTypeNorm {
+	case MediaTypeImage:
+		switch mode {
+		case ModeTextToImage, ModeImageToImage, ModeMultiImageEdit:
+		default:
+			return ImagineRequest{}, fmt.Errorf("mode %q is not valid for media_type image", mode)
+		}
+	case MediaTypeVideo:
+		switch mode {
+		case VideoModeTextToVideo, VideoModeImageToVideo, VideoModeMultiImageVideo, VideoModeKeyframes:
+		default:
+			return ImagineRequest{}, fmt.Errorf("mode %q is not valid for media_type video", mode)
+		}
+	}
+	imageSlots := 0
+	switch mode {
+	case ModeImageToImage, VideoModeImageToVideo:
+		imageSlots = 1
+	case ModeMultiImageEdit, VideoModeMultiImageVideo:
+		imageSlots = 3
+	case VideoModeKeyframes:
+		imageSlots = 6
+	}
+	inputs, err := parseImageInputs(r, imageSlots)
+	if err != nil {
+		return ImagineRequest{}, err
+	}
+	return NormalizeRequest(ImagineRequest{
+		Mode:           mode,
+		Prompt:         r.FormValue("prompt"),
+		Model:          model,
+		AspectRatio:    aspectRatio,
+		Resolution:     resolution,
+		ResponseFormat: responseFormat,
+		N:              n,
+		Images:         inputs,
+	}), nil
 }

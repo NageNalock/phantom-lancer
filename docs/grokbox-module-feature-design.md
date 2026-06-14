@@ -8,6 +8,18 @@
 - [personal-web-terminal-technical-design.md](./personal-web-terminal-technical-design.md)
 - [images-library-feature-design.md](./images-library-feature-design.md)
 
+## 0. 历史兼容说明
+
+本文是早期 Grokbox/xAI 图片生成迁移设计，描述的是多媒体能力域的图片生成子集。当前用户可见一级导航和产品文案已升级为“多媒体”，覆盖图片生成、视频生成、多图编辑、关键帧、资源库、历史和生成预设。
+
+为了兼容旧路由、旧 SQLite 表、旧事件和旧前端查询，代码和 API 中仍会保留 `images`、`image_*`、`/api/images/*`、`images.*` 等历史命名。后续参考本文时应遵守：
+
+- 用户可见导航和新文档优先使用“多媒体”。
+- 本文中的 `Images` 可理解为当前多媒体模块的历史图片生成子域。
+- 本文中的 `Prompt` 模板能力已演进为“生成预设”，可保存提示词、模型、模式和常用参数；默认不保存参考图引用。
+- 本文中的图片库能力已被 [多媒体资源库与对象存储功能设计](./images-library-feature-design.md) 扩展为图片/视频资源库。
+- 若本文与 [Agnes 图片与视频生成接入设计](./agnes-image-video-integration-design.md) 或产品/技术总文档冲突，以后者为准。
+
 ## 1. Design Read
 
 Reading this as: 个人服务器控制台里的 AI 图片生成工作台，面向单 owner 技术用户，采用 Quiet Agent Workbench / Quiet DevOps Control Plane 语言，强调受控调用、密钥边界、历史可追踪、低噪音参数面板和结果归档。

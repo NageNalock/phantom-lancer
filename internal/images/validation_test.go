@@ -194,6 +194,166 @@ func TestGeneratedRemoteAssetCreatedWhenFetchFails(t *testing.T) {
 	}
 }
 
+func TestStoreMediaGeneratedImagesCreatesMediaAsset(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	job, err := db.CreateMediaGenerationJob(ctx, storage.MediaGenerationJob{
+		MediaType:  string(MediaTypeImage),
+		Provider:   string(ProviderAgnes),
+		Status:     "running",
+		Mode:       ModeTextToImage,
+		ModeLabel:  ModeLabel(ModeTextToImage),
+		Model:      "agnes-image-2.1-flash",
+		Prompt:     "quiet media image",
+		Parameters: map[string]any{"n": 1},
+	}, nil)
+	if err != nil {
+		t.Fatalf("create media job: %v", err)
+	}
+	service := &Service{
+		Store:  db,
+		Hub:    events.NewHub(),
+		Assets: NewAssetStore(filepath.Join(t.TempDir(), "media"), nil),
+	}
+	outputs, failures := service.storeMediaGeneratedImages(ctx, job, ImagineRequest{Prompt: job.Prompt}, &ImagineResult{
+		Images: []ResultImage{{
+			DataURL:  onePixelPNG,
+			MimeType: "image/png",
+		}},
+	})
+	if failures != 0 {
+		t.Fatalf("failures = %d, want 0", failures)
+	}
+	if len(outputs) != 1 || outputs[0].AssetID == "" || outputs[0].Storage == "remote" {
+		t.Fatalf("output should reference a stored media asset: %#v", outputs)
+	}
+	assets, err := db.ListMediaAssets(ctx, 20, "", "", "", "", false)
+	if err != nil {
+		t.Fatalf("list media assets: %v", err)
+	}
+	if len(assets) != 1 || assets[0].ID != outputs[0].AssetID || assets[0].Provider != string(ProviderAgnes) {
+		t.Fatalf("unexpected media assets: %#v", assets)
+	}
+}
+
+func TestStoreMediaGeneratedImagesDoesNotExposeUnstoredOutput(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	job, err := db.CreateMediaGenerationJob(ctx, storage.MediaGenerationJob{
+		MediaType:  string(MediaTypeImage),
+		Provider:   string(ProviderAgnes),
+		Status:     "running",
+		Mode:       ModeTextToImage,
+		ModeLabel:  ModeLabel(ModeTextToImage),
+		Model:      "agnes-image-2.1-flash",
+		Prompt:     "quiet media image",
+		Parameters: map[string]any{"n": 1},
+	}, nil)
+	if err != nil {
+		t.Fatalf("create media job: %v", err)
+	}
+	blockedDir := filepath.Join(t.TempDir(), "media-file")
+	if err := os.WriteFile(blockedDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("create blocking file: %v", err)
+	}
+	service := &Service{
+		Store:  db,
+		Hub:    events.NewHub(),
+		Assets: NewAssetStore(blockedDir, nil),
+	}
+	outputs, failures := service.storeMediaGeneratedImages(ctx, job, ImagineRequest{Prompt: job.Prompt}, &ImagineResult{
+		Images: []ResultImage{{
+			DataURL:  onePixelPNG,
+			MimeType: "image/png",
+		}},
+	})
+	if failures != 1 {
+		t.Fatalf("failures = %d, want 1", failures)
+	}
+	if len(outputs) != 0 {
+		t.Fatalf("unstored outputs should not be exposed as success outputs: %#v", outputs)
+	}
+	assets, err := db.ListMediaAssets(ctx, 20, "", "", "", "", false)
+	if err != nil {
+		t.Fatalf("list media assets: %v", err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("default media assets should hide failed records: %#v", assets)
+	}
+	failedAssets, err := db.ListMediaAssets(ctx, 20, "", "", "", "failed", false)
+	if err != nil {
+		t.Fatalf("list failed media assets: %v", err)
+	}
+	if len(failedAssets) != 1 || failedAssets[0].Status != "failed" || failedAssets[0].LastError == "" {
+		t.Fatalf("failed media asset should retain diagnostics: %#v", failedAssets)
+	}
+	if hasStoredMediaOutputs(outputs) {
+		t.Fatalf("unstored outputs should not count as stored: %#v", outputs)
+	}
+}
+
+func TestFinalizeVideoJobFailsWithoutStoredAsset(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	job, err := db.CreateMediaGenerationJob(ctx, storage.MediaGenerationJob{
+		MediaType:  string(MediaTypeVideo),
+		Provider:   string(ProviderAgnes),
+		Status:     "running",
+		Mode:       VideoModeTextToVideo,
+		ModeLabel:  ModeLabel(VideoModeTextToVideo),
+		Model:      "agnes-video-v2.0",
+		Prompt:     "quiet media video",
+		Parameters: map[string]any{"seconds": 5},
+	}, nil)
+	if err != nil {
+		t.Fatalf("create media job: %v", err)
+	}
+	service := &Service{
+		Store:  db,
+		Hub:    events.NewHub(),
+		Assets: NewAssetStore(filepath.Join(t.TempDir(), "media"), nil),
+	}
+
+	service.finalizeVideoJob(ctx, job, &VideoPollResult{
+		Status:   "completed",
+		VideoURL: "://invalid-video-url",
+		Seconds:  5,
+	}, "")
+
+	got, err := db.GetMediaGenerationJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get media job: %v", err)
+	}
+	if got.Status != "failed" || got.ErrorMessage == "" {
+		t.Fatalf("video job should fail when no stored asset exists: %#v", got)
+	}
+	if len(got.Outputs) != 0 {
+		t.Fatalf("failed video job should not expose remote-only outputs: %#v", got.Outputs)
+	}
+	assets, err := db.ListMediaAssets(ctx, 20, string(MediaTypeVideo), "", "", "", false)
+	if err != nil {
+		t.Fatalf("list media assets: %v", err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("video library should stay empty without stored assets: %#v", assets)
+	}
+}
+
 func TestUploadLibraryAssetDeduplicatesByChecksum(t *testing.T) {
 	ctx := context.Background()
 	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)

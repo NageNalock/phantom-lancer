@@ -6,14 +6,14 @@
 
 Codex CLI Client 和 Codex Gateway / OpenAI Gateway 是并列独立能力域：
 
-- Codex CLI Client 依赖部署机本地安装的 `codex` CLI，提供受控 Web 会话客户端能力，详细设计见 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md)。
+- Codex CLI Client 依赖部署机本地安装的 `codex` CLI，提供受控 Web 会话客户端能力，详细设计见 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md)；当前 UI/产品改造优先见 [codex-desktop-like-web-client-plan.md](./codex-desktop-like-web-client-plan.md)。
 - Codex Gateway / OpenAI Gateway 暴露 OpenAI-compatible `/v1/*` API，详细设计见 [codex-openai-gateway-feature-design.md](./codex-openai-gateway-feature-design.md)。
 
 旧版 Codex 客户端代码已移除，但数据库中可能仍有残留旧表或旧事件。新版 Codex CLI Client 必须使用新的表名前缀和 additive migration，不复用旧 schema 假设。
 
 ## 1. 技术定位
 
-本项目是一个面向个人使用的服务器 Web 控制台。当前能力域包括控制台总览、Codex、Codex Gateway、日志中心、Images 图片生成、V2Ray 和全局设置；后续可继续扩展应用管理、文件、服务、任务自动化等服务器管理模块。
+本项目是一个面向个人使用的服务器 Web 控制台。当前能力域包括控制台总览、Codex、Codex Gateway、日志中心、多媒体图片/视频生成、V2Ray 和全局设置；后续可继续扩展应用管理、文件、服务、任务自动化等服务器管理模块。
 
 技术方案保持单机、轻量、可扩展：
 
@@ -33,14 +33,14 @@ flowchart LR
   Backend --> Auth["Auth / Session"]
   Backend --> CodexClient["Codex CLI Client"]
   Backend --> Gateway["Codex Gateway"]
-  Backend --> Images["Images Manager"]
+  Backend --> Media["Media Manager"]
   Backend --> V2Ray["V2Ray Manager"]
   Backend --> Logs["Log Center"]
   Backend --> Audit["Audit Logger"]
   Backend --> Store["SQLite"]
   CodexClient -->|stdio JSON-RPC| CodexAppServer["codex app-server"]
   CodexClient -->|JSONL fallback| CodexExec["codex exec --json"]
-  Images --> ObjectStore["S3-compatible Object Storage"]
+  Media --> ObjectStore["S3-compatible Object Storage"]
   Gateway -->|HTTPS| OpenAIUpstream["Codex/OpenAI Upstream"]
 ```
 
@@ -53,7 +53,7 @@ flowchart LR
 - 总览页。
 - Codex Gateway 管理页。
 - 日志中心。
-- Images 图片生成和图片库。
+- 多媒体图片/视频生成和资源库。
 - V2Ray 管理页。
 - 全局设置。
 
@@ -67,7 +67,7 @@ Go 后端是系统唯一的执行入口和权限边界，负责：
 - 允许根目录和路径边界校验。
 - Codex CLI 安装探测、app-server runtime supervisor、workspace policy、exec runner、审批和事件归一化。
 - Gateway public API、账号凭据摘要、模型目录和请求日志管理。
-- Images 生成 job、图片资产和对象存储管理。
+- 多媒体生成 job、图片/视频资产和对象存储管理。
 - V2Ray 配置与运行控制。
 - Mail / Mox sidecar 控制面，负责 Mox binary 生命周期、配置 apply、DNS check、ACME DNS-01 证书、队列/投递可见性、日志、事件和审计；SMTP/IMAP/Webmail/WebAPI 运行时由 Mox 独立进程承担。
 - 日志源登记和受控 tail。
@@ -81,7 +81,7 @@ Go 后端是系统唯一的执行入口和权限边界，负责：
 - Gateway 上游 `/v1/*` 请求转发。
 - Codex CLI app-server 定时探测和 stdio JSON-RPC 调用。
 - Codex exec JSONL fallback。
-- Images provider HTTPS 调用。
+- 多媒体 provider HTTPS 调用。
 - V2Ray 进程启停。
 - 日志文件只读 tail 与搜索。
 - Mox sidecar 通过独立 supervisor 启停；Phantom 只调用受控 `mox` CLI、Mox WebAPI/unix socket 或公网 DNS/ACME API，不在主进程内实现邮件协议。
@@ -99,7 +99,7 @@ Go 后端是系统唯一的执行入口和权限边界，负责：
 - Codex CLI installation、workspace、thread、turn、event、approval、run 和 attachment metadata。
 - 活动审计。
 - 持久事件。
-- Images generation jobs、图片资产、provider 设置和图片存储设置。
+- 多媒体 generation jobs、图片/视频资产、provider 设置和资源存储设置。
 - V2Ray 配置和运行状态。
 - Mail/Mox settings、domains、accounts、aliases、certificates、DNS provider、manual ACME challenges、queue/delivery cache、webhook events、mail events、audit、log/retention/backup metadata。
 
@@ -112,7 +112,7 @@ flowchart TD
   API["HTTP API"] --> Auth["Auth Module"]
   API --> CodexClient["Codex CLI Client Module"]
   API --> Gateway["Gateway Module"]
-  API --> Images["Images Module"]
+  API --> Media["Media Module"]
   API --> V2Ray["V2Ray Module"]
   API --> Logs["Logs Module"]
   API --> Mail["Mail / Mox Module"]
@@ -121,7 +121,7 @@ flowchart TD
 
   CodexClient --> Event
   Gateway --> Event
-  Images --> Event
+  Media --> Event
   V2Ray --> Event
   Mail --> Event
   Mail --> Mox["Mox Sidecar"]
@@ -224,7 +224,7 @@ Gateway Module 不绑定工作目录，不执行 shell，不修改文件。详�
 - 对 prompt 摘要、stderr、URL、token、secret、附件和事件 payload 做 redaction 和大小限制。
 - 将关键操作写入 audit，服务 `slog` 只记录异常摘要。
 
-Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*` API、不默认 full access。详细设计见 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md)。
+Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*` API、不默认 full access。详细设计见 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md)，Desktop-like Web 工作台改造见 [codex-desktop-like-web-client-plan.md](./codex-desktop-like-web-client-plan.md)。
 
 ### 3.4 Event Module
 
@@ -242,7 +242,7 @@ Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*`
 - 登录审计。
 - Codex workspace、thread、turn、审批、设置和诊断审计。
 - Gateway 配置和账号变更审计。
-- Images 生成和资产变更审计。
+- 多媒体生成和资产变更审计。
 - V2Ray 配置和控制审计。
 - 全局设置变更审计。
 
@@ -256,22 +256,22 @@ Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*`
 
 详细设计见 [log-center-feature-design.md](./log-center-feature-design.md)。
 
-### 3.7 Images Module
+### 3.7 Media Module
 
 负责：
 
-- xAI Grok Imagine provider 设置和 API Key masked 状态。
-- 图片生成 job 创建、后台执行、状态恢复和失败记录。
-- 图片库资产查询、放大查看、下载、删除和归档到 S3。
-- 生成输出图、用户上传参考图和 Library 手动上传图的统一资产管理。
-- 图片资产按内容 checksum 去重；普通上传和生成结果只复用未删除、非私密的公开资产，避免泄露私密收藏夹存在性。
-- Library 图片可作为图生图参考图；后端按 asset id 读取受控图片 bytes 并转换为 provider payload，不把需要登录态的本地 API URL 直接传给外部 provider。
-- 图片资产私密收藏夹标记、owner 密码解锁、短期 session 解锁状态和失败 backoff。
-- 本地图片资产保存与安全读取。
-- S3 兼容对象存储设置、连接测试、上传、后端代理读取和删除。
-- 将图片生成、图片资产变更和存储失败事件写入 Event / Audit。
+- xAI Grok Imagine、Agnes 等 provider 设置和 API Key masked 状态。
+- 图片/视频生成 job 创建、后台执行、状态恢复、轮询和失败记录。
+- 资源库资产查询、图片放大查看、视频播放、下载、删除和归档到对象存储。
+- 生成输出资源、用户上传参考图和 Library 手动上传图的统一资产管理。
+- 图片/视频资产按内容 checksum 去重；普通上传和生成结果只复用未删除、非私密的公开资产，避免泄露私密收藏夹存在性。
+- Library 图片可作为图生图、图生视频、多图编辑和关键帧参考；后端按 asset id 读取受控 bytes 并转换为 provider payload，不把需要登录态的本地 API URL 直接传给外部 provider。
+- 图片/视频资产私密收藏夹标记、owner 密码解锁、短期 session 解锁状态和失败 backoff。
+- 本地图片/视频资产保存与安全读取。
+- S3 兼容对象存储或共享对象存储 profile 设置、连接测试、上传、后端代理读取和删除。
+- 将图片/视频生成、资产变更和存储失败事件写入 Event / Audit。
 
-Images 图片库的详细产品交互和对象存储设计见 [images-library-feature-design.md](./images-library-feature-design.md)。
+多媒体资源库的详细产品交互和对象存储设计见 [images-library-feature-design.md](./images-library-feature-design.md)；Agnes 图片/视频接入设计见 [agnes-image-video-integration-design.md](./agnes-image-video-integration-design.md)。
 
 ### 3.8 V2Ray Module
 
@@ -296,7 +296,7 @@ Images 图片库的详细产品交互和对象存储设计见 [images-library-fe
 | 日志 | JSON structured logging | 方便审计和排查 |
 | 密码哈希 | Argon2id | 适合本地账号密码 |
 | 子进程管理 | `os/exec` | 调用 V2Ray 进程和后续执行器 |
-| 对象存储 | S3 API 兼容 SDK | 用于 Images 图片资产保存。Go 实现可用 AWS SDK for Go v2 S3 client + custom endpoint，但产品不绑定真实 AWS S3 |
+| 对象存储 | S3 API 兼容 SDK | 用于多媒体图片/视频资产保存。Go 实现可用 AWS SDK for Go v2 S3 client + custom endpoint，但产品不绑定真实 AWS S3 |
 
 ### 4.2 前端
 
@@ -363,9 +363,9 @@ Images 图片库的详细产品交互和对象存储设计见 [images-library-fe
 - Gateway 公开 API 通过 public API key 鉴权，上游凭据只保存摘要。
 - 允许操作的目录必须在允许的根目录内。
 - secret 默认不可明文展示。
-- Images S3 secret 不进入前端 response、audit 和日志明文。
-- Images 图片读取必须经过 owner session。S3 bucket 默认保持私有并由后端代理读取；短 TTL presigned URL 只作为可选优化。
-- Images 私密图片的列表、详情、内容读取、下载、删除、归档和旧本地 asset URL 必须额外校验当前 session 的私密解锁状态；解锁必须使用 owner 登录密码并受 IP 维度 backoff 限制。
+- 多媒体对象存储 secret 不进入前端 response、audit 和日志明文。
+- 多媒体资源读取必须经过 owner session。S3 bucket 默认保持私有并由后端代理读取；短 TTL presigned URL 只作为可选优化。
+- 多媒体私密资源的列表、详情、内容读取、下载、删除、归档和旧本地 asset URL 必须额外校验当前 session 的私密解锁状态；解锁必须使用 owner 登录密码并受 IP 维度 backoff 限制。
 
 ### 5.2 Gateway 边界
 
@@ -406,7 +406,7 @@ Images 图片库的详细产品交互和对象存储设计见 [images-library-fe
 - Codex CLI Client，包括 app-server 定时检查和页面一键启动。
 - Codex Gateway。
 - 日志中心。
-- Images 图片生成和图片库。
+- 多媒体图片/视频生成和资源库。
 - V2Ray。
 - 审计。
 - SSE 事件流。
@@ -430,7 +430,7 @@ Images 图片库的详细产品交互和对象存储设计见 [images-library-fe
 4. Codex CLI Client SQLite schema、旧表探测、binary detector。
 5. Codex CLI Client AppServerSupervisor、定时 probe、一键启动 API、workspace、event mapping、approval broker。
 6. Codex Gateway public API、账号、模型和请求日志。
-7. Images 生成、图片库和对象存储。
+7. 多媒体生成、资源库和对象存储。
 8. V2Ray 配置与运行控制。
 9. 日志中心源登记与 tail。
 10. 审计和活动记录。

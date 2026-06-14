@@ -5,7 +5,7 @@ export const NAV_ITEMS = [
   { id: "codex", label: "Codex", description: "本机 codex CLI 会话、工作区、审批和运行诊断" },
   { id: "codex-gateway", label: "Codex Gateway", description: "Codex OAuth 账号、OpenAI 兼容端点和请求审计" },
   { id: "logs", label: "日志", description: "服务日志、运行事件和在线排障视图" },
-  { id: "images", label: "Images", description: "xAI Grok Imagine 生成、编辑、图片库、历史和存储设置" },
+  { id: "images", label: "多媒体", description: "图片生成、视频生成、多图编辑、关键帧、资源库、历史和存储设置" },
   { id: "docker", label: "Docker", description: "Docker 守护进程、镜像与容器生命周期、daemon 安装与控制、内嵌 Registry" },
   { id: "v2ray", label: "V2Ray", description: "内嵌 V2Ray 服务端、远程设备接入和运行控制" },
   { id: "mail", label: "Mail", description: "Mox 邮件服务控制面：域名、邮箱、证书、投递与搜索" },
@@ -38,24 +38,28 @@ const auditLabels: Record<string, string> = {
   "system.update.cancel": "取消系统更新",
   "system.update.confirm.rate_limited": "系统更新确认限流",
   "system.update.confirm.backoff_started": "系统更新确认退避",
-  "images.settings.update": "更新 Images 设置",
-  "images.storage.update": "更新 Images 存储",
-  "images.storage.settings.updated": "更新 Images 存储设置",
-  "images.storage.tested": "测试 Images 对象存储",
-  "images.job.completed": "Images 调用完成",
-  "images.job.failed": "Images 调用失败",
+  "images.settings.update": "更新多媒体设置",
+  "images.storage.update": "更新多媒体存储",
+  "images.storage.settings.updated": "更新多媒体存储设置",
+  "images.storage.tested": "测试多媒体对象存储",
+  "images.prompt.created": "创建生成预设",
+  "images.prompt.updated": "更新生成预设",
+  "images.prompt.deleted": "删除生成预设",
+  "images.prompt.used": "带入生成预设",
+  "images.job.completed": "多媒体任务完成",
+  "images.job.failed": "多媒体任务失败",
   "images.asset.source_uploaded": "参考图已入库",
-  "images.asset.stored.local": "图片已保存到本地",
-  "images.asset.stored.s3": "图片已保存到对象存储",
-  "images.asset.deleted": "图片已删除",
-  "images.asset.archived.s3": "图片已归档到对象存储",
-  "images.asset.store_failed": "图片保存失败",
-  "images.asset.private.added": "加入私密收藏夹",
-  "images.asset.private.removed": "移出私密收藏夹",
-  "images.private.unlocked": "解锁 Images 私密收藏夹",
-  "images.private.locked": "锁定 Images 私密收藏夹",
-  "images.private.rate_limited": "Images 私密解锁限流",
-  "images.private.backoff_started": "Images 私密解锁退避",
+  "images.asset.stored.local": "资源已保存到本地",
+  "images.asset.stored.s3": "资源已保存到对象存储",
+  "images.asset.deleted": "资源已删除",
+  "images.asset.archived.s3": "资源已归档到对象存储",
+  "images.asset.store_failed": "资源保存失败",
+  "images.asset.private.added": "加入多媒体私密收藏夹",
+  "images.asset.private.removed": "移出多媒体私密收藏夹",
+  "images.private.unlocked": "解锁多媒体私密收藏夹",
+  "images.private.locked": "锁定多媒体私密收藏夹",
+  "images.private.rate_limited": "多媒体私密解锁限流",
+  "images.private.backoff_started": "多媒体私密解锁退避",
   "v2ray.settings.update": "更新 V2Ray 设置",
   "v2ray.config.validate": "校验 V2Ray 配置",
   "v2ray.service.start": "启动 V2Ray",
@@ -267,6 +271,22 @@ export function imageModeLabel(value?: string): string {
       text_to_image: "文生图",
       image_to_image: "图生图",
       multi_image_edit: "多图编辑",
+    }[value || ""] ||
+    value ||
+    "未知"
+  );
+}
+
+export function mediaModeLabel(value?: string): string {
+  return (
+    {
+      text_to_image: "文生图",
+      image_to_image: "图生图",
+      multi_image_edit: "多图编辑",
+      text_to_video: "文生视频",
+      image_to_video: "图生视频",
+      multi_image_video: "多图生视频",
+      keyframes: "关键帧视频",
     }[value || ""] ||
     value ||
     "未知"

@@ -46,6 +46,10 @@ const codexGatewayTokenKeeperInfo = "codex-gateway-account-tokens-v1"
 // the other.
 const mailKeeperInfo = "phantom-mail-v1"
 
+// dockerRegistryCredentialKeeperInfo binds retrievable Docker registry
+// credential secrets to a separate key domain from Gateway upstream tokens.
+const dockerRegistryCredentialKeeperInfo = "docker-registry-credential-secrets-v1"
+
 // masterKeySettingKey is the settings key under which the 32-byte master
 // encryption key (base64-encoded) is stored.
 const masterKeySettingKey = "system.crypto_master_key_v1"
@@ -67,6 +71,12 @@ type Store struct {
 	// rotated from DB-stored → env-provided). Recovered tokens are
 	// transparently re-wrapped with gwTokenKeeper on next write.
 	gwTokenFallbackKeeper *keywrap.Keeper
+	// dockerRegistrySecretKeeper wraps registry credential secrets used by
+	// server-side Docker Engine pull operations against the embedded registry.
+	dockerRegistrySecretKeeper *keywrap.Keeper
+	// dockerRegistrySecretFallbackKeeper mirrors gwTokenFallbackKeeper for
+	// registry secrets when operators rotate from a DB key to PHANTOM_MASTER_KEY.
+	dockerRegistrySecretFallbackKeeper *keywrap.Keeper
 	// gwTokenMasterSource records which key source is driving the
 	// primary keeper. Only used for structured startup logging and
 	// future key-rotation diagnostics.
@@ -395,6 +405,25 @@ type ObjectStorageProfile struct {
 	UpdatedAt         string `json:"updatedAt"`
 }
 
+type ImagePrompt struct {
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Description string   `json:"description,omitempty"`
+	Prompt      string   `json:"prompt"`
+	Mode        string   `json:"mode"`
+	Model       string   `json:"model,omitempty"`
+	AspectRatio string   `json:"aspectRatio,omitempty"`
+	Resolution  string   `json:"resolution,omitempty"`
+	ImageCount  int      `json:"imageCount"`
+	Tags        []string `json:"tags,omitempty"`
+	Status      string   `json:"status"`
+	UseCount    int      `json:"useCount"`
+	LastUsedAt  string   `json:"lastUsedAt,omitempty"`
+	DeletedAt   string   `json:"deletedAt,omitempty"`
+	CreatedAt   string   `json:"createdAt"`
+	UpdatedAt   string   `json:"updatedAt"`
+}
+
 type ImageAsset struct {
 	ID                     string `json:"id"`
 	AssetType              string `json:"assetType"`
@@ -623,6 +652,11 @@ func (s *Store) ensureMasterKey(ctx context.Context) error {
 		return kerr
 	}
 	s.gwTokenKeeper = primary
+	registryPrimary, kerr := keywrap.NewKeeper(primaryMaster, dockerRegistryCredentialKeeperInfo)
+	if kerr != nil {
+		return kerr
+	}
+	s.dockerRegistrySecretKeeper = registryPrimary
 	s.gwTokenMasterSource = primarySource
 
 	if fallbackMaster != nil {
@@ -631,6 +665,11 @@ func (s *Store) ensureMasterKey(ctx context.Context) error {
 			return kerr
 		}
 		s.gwTokenFallbackKeeper = fb
+		registryFB, kerr := keywrap.NewKeeper(fallbackMaster, dockerRegistryCredentialKeeperInfo)
+		if kerr != nil {
+			return kerr
+		}
+		s.dockerRegistrySecretFallbackKeeper = registryFB
 	}
 
 	// ---- 2b. Derive Mail module keepers. ----
@@ -760,6 +799,17 @@ func (s *Store) wrapMailSecret(plain string) (string, error) {
 	return wrappedTokenPrefix + blob, nil
 }
 
+func (s *Store) wrapDockerRegistrySecret(plain string) (string, error) {
+	if plain == "" {
+		return "", nil
+	}
+	blob, err := s.dockerRegistrySecretKeeper.Wrap(plain)
+	if err != nil {
+		return "", err
+	}
+	return wrappedTokenPrefix + blob, nil
+}
+
 // unwrapMailSecret is the inverse of wrapMailSecret.  Fallback semantics
 // mirror unwrapGWToken: kw1 prefix + primary → fallback → legacy
 // plaintext (unwrapped values written pre-keywrap, before Mail module
@@ -784,6 +834,33 @@ func (s *Store) unwrapMailSecret(blob string) (string, error) {
 		}
 	}
 	return "", ErrCorruptSecrets
+}
+
+func (s *Store) unwrapDockerRegistrySecret(blob string) (string, error) {
+	if blob == "" {
+		return "", nil
+	}
+	if !strings.HasPrefix(blob, wrappedTokenPrefix) {
+		// Reserved for pre-keywrap alpha data. Current released builds
+		// never write plaintext registry secrets into this column.
+		return blob, nil
+	}
+	raw := strings.TrimPrefix(blob, wrappedTokenPrefix)
+	if pt, err := s.dockerRegistrySecretKeeper.Unwrap(raw); err == nil {
+		return pt, nil
+	}
+	if s.dockerRegistrySecretFallbackKeeper != nil {
+		if pt, err := s.dockerRegistrySecretFallbackKeeper.Unwrap(raw); err == nil {
+			return pt, nil
+		}
+	}
+	return "", fmt.Errorf("keywrap: unwrap (kw1 prefix): docker registry credential secret does not decrypt under primary%s master",
+		func() string {
+			if s.dockerRegistrySecretFallbackKeeper != nil {
+				return " or fallback"
+			}
+			return ""
+		}())
 }
 
 // looksLegacyPlaintext is a last-resort classifier used ONLY by the
@@ -897,6 +974,7 @@ CREATE TABLE IF NOT EXISTS docker_registry_credentials (
   name TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active',
   secret_hash TEXT NOT NULL,
+  secret_ciphertext TEXT NOT NULL DEFAULT '',
   scopes TEXT NOT NULL DEFAULT '',
   repository_prefix TEXT NOT NULL DEFAULT 'personal/',
   last_used_at TEXT NOT NULL DEFAULT '',
@@ -1175,6 +1253,27 @@ CREATE TABLE IF NOT EXISTS image_storage_settings (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS image_prompt_library (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  prompt TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'text_to_image',
+  model TEXT NOT NULL DEFAULT '',
+  aspect_ratio TEXT NOT NULL DEFAULT '',
+  resolution TEXT NOT NULL DEFAULT '',
+  image_count INTEGER NOT NULL DEFAULT 1,
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'active',
+  use_count INTEGER NOT NULL DEFAULT 0,
+  last_used_at TEXT NOT NULL DEFAULT '',
+  deleted_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_image_prompt_library_status_updated ON image_prompt_library(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_image_prompt_library_mode_updated ON image_prompt_library(mode, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_image_prompt_library_last_used ON image_prompt_library(last_used_at DESC);
 CREATE TABLE IF NOT EXISTS object_storage_profiles (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL DEFAULT '',
@@ -1247,6 +1346,124 @@ CREATE TABLE IF NOT EXISTS mail_import_registrations (
   created_at TEXT,
   updated_at TEXT
 );
+CREATE TABLE IF NOT EXISTS media_provider_settings (
+  provider TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  api_key TEXT NOT NULL DEFAULT '',
+  api_key_masked TEXT NOT NULL DEFAULT '',
+  default_image_model TEXT NOT NULL DEFAULT '',
+  default_video_model TEXT NOT NULL DEFAULT '',
+  default_image_params_json TEXT NOT NULL DEFAULT '{}',
+  default_video_params_json TEXT NOT NULL DEFAULT '{}',
+  last_tested_at TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS media_generation_jobs (
+  id TEXT PRIMARY KEY,
+  media_type TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  status TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  mode_label TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL,
+  endpoint TEXT NOT NULL DEFAULT '',
+  prompt TEXT NOT NULL,
+  parameters_json TEXT NOT NULL DEFAULT '{}',
+  source_count INTEGER NOT NULL DEFAULT 0,
+  output_count INTEGER NOT NULL DEFAULT 0,
+  provider_task_id TEXT NOT NULL DEFAULT '',
+  provider_video_id TEXT NOT NULL DEFAULT '',
+  provider_status TEXT NOT NULL DEFAULT '',
+  progress INTEGER NOT NULL DEFAULT 0,
+  usage_json TEXT NOT NULL DEFAULT '{}',
+  error_message TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  started_at TEXT NOT NULL DEFAULT '',
+  completed_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_media_generation_jobs_created ON media_generation_jobs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_generation_jobs_status ON media_generation_jobs(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_generation_jobs_media_type ON media_generation_jobs(media_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_generation_jobs_provider ON media_generation_jobs(provider, created_at DESC);
+CREATE TABLE IF NOT EXISTS media_generation_sources (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  asset_id TEXT NOT NULL DEFAULT '',
+  slot INTEGER NOT NULL,
+  source_type TEXT NOT NULL,
+  source_label TEXT NOT NULL DEFAULT '',
+  source_role TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  url_redacted TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_media_generation_sources_job ON media_generation_sources(job_id, slot);
+CREATE TABLE IF NOT EXISTS media_generation_outputs (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  asset_id TEXT NOT NULL DEFAULT '',
+  slot INTEGER NOT NULL,
+  media_type TEXT NOT NULL,
+  remote_url_redacted TEXT NOT NULL DEFAULT '',
+  local_name TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT '',
+  revised_prompt TEXT NOT NULL DEFAULT '',
+  storage TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_media_generation_outputs_job ON media_generation_outputs(job_id, slot);
+CREATE TABLE IF NOT EXISTS media_assets (
+  id TEXT PRIMARY KEY,
+  media_type TEXT NOT NULL,
+  asset_type TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'available',
+  private INTEGER NOT NULL DEFAULT 0,
+  provider TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  job_id TEXT NOT NULL DEFAULT '',
+  source_role TEXT NOT NULL DEFAULT '',
+  slot INTEGER NOT NULL DEFAULT 0,
+  prompt_preview TEXT NOT NULL DEFAULT '',
+  revised_prompt_preview TEXT NOT NULL DEFAULT '',
+  original_filename TEXT NOT NULL DEFAULT '',
+  original_source_redacted TEXT NOT NULL DEFAULT '',
+  mime_type TEXT NOT NULL DEFAULT '',
+  extension TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  width INTEGER NOT NULL DEFAULT 0,
+  height INTEGER NOT NULL DEFAULT 0,
+  duration_seconds REAL NOT NULL DEFAULT 0,
+  frame_rate INTEGER NOT NULL DEFAULT 0,
+  frame_count INTEGER NOT NULL DEFAULT 0,
+  checksum_sha256 TEXT NOT NULL DEFAULT '',
+  local_name TEXT NOT NULL DEFAULT '',
+  storage_backend TEXT NOT NULL DEFAULT 'local',
+  object_storage_profile_id TEXT NOT NULL DEFAULT '',
+  s3_bucket TEXT NOT NULL DEFAULT '',
+  s3_region TEXT NOT NULL DEFAULT '',
+  s3_endpoint_label TEXT NOT NULL DEFAULT '',
+  s3_key TEXT NOT NULL DEFAULT '',
+  s3_etag TEXT NOT NULL DEFAULT '',
+  private_at TEXT NOT NULL DEFAULT '',
+  archived_at TEXT NOT NULL DEFAULT '',
+  deleted_at TEXT NOT NULL DEFAULT '',
+  deleted_reason TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_media_assets_created ON media_assets(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_assets_media_type_created ON media_assets(media_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_assets_storage_created ON media_assets(storage_backend, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_assets_status_created ON media_assets(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_assets_private_created ON media_assets(private, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_media_assets_job ON media_assets(job_id, slot);
+CREATE INDEX IF NOT EXISTS idx_media_assets_checksum ON media_assets(checksum_sha256);
 `)
 	if err != nil {
 		return err
@@ -1263,6 +1480,7 @@ CREATE TABLE IF NOT EXISTS mail_import_registrations (
 		{"image_assets", "object_storage_profile_id", "TEXT NOT NULL DEFAULT ''"},
 		{"image_storage_settings", "object_storage_profile_id", "TEXT NOT NULL DEFAULT ''"},
 		{"codex_gateway_settings", "account_health_check_interval_seconds", "INTEGER NOT NULL DEFAULT 43200"},
+		{"docker_registry_credentials", "secret_ciphertext", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.ensureColumn(ctx, column.table, column.name, column.def); err != nil {
 			return err
@@ -1568,6 +1786,14 @@ CREATE INDEX IF NOT EXISTS idx_codex_cli_notifications_scope ON codex_cli_notifi
 		{"codex_cli_threads", "background", "INTEGER NOT NULL DEFAULT 0"},
 		{"codex_cli_threads", "background_source", "TEXT NOT NULL DEFAULT ''"},
 		{"codex_cli_threads", "kind", "TEXT NOT NULL DEFAULT 'code'"},
+		{"codex_cli_threads", "execution_mode", "TEXT NOT NULL DEFAULT 'workspace'"},
+		{"codex_cli_threads", "worktree_path", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_cli_threads", "worktree_summary", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_cli_threads", "base_branch", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_cli_threads", "branch_name", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_cli_threads", "worktree_status", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_cli_threads", "merge_status", "TEXT NOT NULL DEFAULT ''"},
+		{"codex_cli_threads", "discarded_at", "TEXT NOT NULL DEFAULT ''"},
 		{"codex_cli_automations", "retry_count", "INTEGER NOT NULL DEFAULT 0"},
 		{"codex_cli_automations", "failure_backoff_until", "TEXT NOT NULL DEFAULT ''"},
 		{"codex_cli_automation_runs", "turn_id", "TEXT NOT NULL DEFAULT ''"},
@@ -4330,6 +4556,184 @@ func scanObjectStorageProfile(row workspaceScanner) (ObjectStorageProfile, error
 	return NormalizeObjectStorageProfile(profile), nil
 }
 
+const imagePromptColumns = `id, title, description, prompt, mode, model, aspect_ratio, resolution, image_count, tags_json, status, use_count, last_used_at, deleted_at, created_at, updated_at`
+
+func NormalizeImagePrompt(prompt ImagePrompt) ImagePrompt {
+	prompt.ID = strings.TrimSpace(prompt.ID)
+	prompt.Title = previewText(prompt.Title, 120)
+	prompt.Description = previewText(prompt.Description, 1000)
+	prompt.Prompt = strings.TrimSpace(prompt.Prompt)
+	prompt.Mode = strings.TrimSpace(prompt.Mode)
+	if prompt.Mode == "" {
+		prompt.Mode = "text_to_image"
+	}
+	prompt.Model = strings.TrimSpace(prompt.Model)
+	prompt.AspectRatio = strings.TrimSpace(prompt.AspectRatio)
+	prompt.Resolution = strings.TrimSpace(prompt.Resolution)
+	if prompt.ImageCount <= 0 {
+		prompt.ImageCount = 1
+	}
+	prompt.Tags = normalizeImagePromptTags(prompt.Tags)
+	prompt.Status = strings.TrimSpace(strings.ToLower(prompt.Status))
+	if prompt.Status == "" {
+		prompt.Status = "active"
+	}
+	if prompt.Status != "active" && prompt.Status != "deleted" {
+		prompt.Status = "active"
+	}
+	prompt.LastUsedAt = strings.TrimSpace(prompt.LastUsedAt)
+	prompt.DeletedAt = strings.TrimSpace(prompt.DeletedAt)
+	return prompt
+}
+
+func normalizeImagePromptTags(tags []string) []string {
+	out := make([]string, 0, len(tags))
+	seen := map[string]bool{}
+	for _, tag := range tags {
+		tag = previewText(tag, 32)
+		if tag == "" {
+			continue
+		}
+		key := strings.ToLower(tag)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, tag)
+		if len(out) >= 12 {
+			break
+		}
+	}
+	return out
+}
+
+func (s *Store) CreateImagePrompt(ctx context.Context, prompt ImagePrompt) (ImagePrompt, error) {
+	if prompt.ID == "" {
+		id, err := ids.New("imgprompt")
+		if err != nil {
+			return ImagePrompt{}, err
+		}
+		prompt.ID = id
+	}
+	prompt = NormalizeImagePrompt(prompt)
+	now := now()
+	if prompt.CreatedAt == "" {
+		prompt.CreatedAt = now
+	}
+	prompt.UpdatedAt = now
+	tagsJSON, _ := json.Marshal(prompt.Tags)
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO image_prompt_library (
+  id, title, description, prompt, mode, model, aspect_ratio, resolution, image_count, tags_json, status, use_count, last_used_at, deleted_at, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		prompt.ID, prompt.Title, prompt.Description, prompt.Prompt, prompt.Mode, prompt.Model, prompt.AspectRatio, prompt.Resolution, prompt.ImageCount, string(tagsJSON), prompt.Status, prompt.UseCount, prompt.LastUsedAt, prompt.DeletedAt, prompt.CreatedAt, prompt.UpdatedAt)
+	if err != nil {
+		return ImagePrompt{}, err
+	}
+	return s.GetImagePrompt(ctx, prompt.ID)
+}
+
+func (s *Store) GetImagePrompt(ctx context.Context, id string) (ImagePrompt, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+imagePromptColumns+` FROM image_prompt_library WHERE id = ?`, id)
+	prompt, err := scanImagePrompt(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ImagePrompt{}, ErrNotFound
+	}
+	return prompt, err
+}
+
+func (s *Store) ListImagePrompts(ctx context.Context, limit int, q, mode, status string) ([]ImagePrompt, error) {
+	if limit <= 0 || limit > 300 {
+		limit = 120
+	}
+	query := `SELECT ` + imagePromptColumns + ` FROM image_prompt_library`
+	args := []any{}
+	clauses := []string{}
+	if status = strings.TrimSpace(strings.ToLower(status)); status == "" {
+		clauses = append(clauses, "status = 'active'")
+	} else if status != "all" {
+		clauses = append(clauses, "status = ?")
+		args = append(args, status)
+	}
+	if mode = strings.TrimSpace(mode); mode != "" && mode != "all" {
+		clauses = append(clauses, "mode = ?")
+		args = append(args, mode)
+	}
+	if q = strings.TrimSpace(q); q != "" {
+		like := "%" + q + "%"
+		clauses = append(clauses, "(title LIKE ? OR description LIKE ? OR prompt LIKE ? OR tags_json LIKE ?)")
+		args = append(args, like, like, like, like)
+	}
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	query += " ORDER BY updated_at DESC LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ImagePrompt{}
+	for rows.Next() {
+		prompt, err := scanImagePrompt(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, prompt)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpdateImagePrompt(ctx context.Context, id string, prompt ImagePrompt) (ImagePrompt, error) {
+	existing, err := s.GetImagePrompt(ctx, id)
+	if err != nil {
+		return ImagePrompt{}, err
+	}
+	if existing.Status == "deleted" {
+		return ImagePrompt{}, ErrNotFound
+	}
+	prompt = NormalizeImagePrompt(prompt)
+	prompt.ID = existing.ID
+	prompt.Status = existing.Status
+	prompt.UseCount = existing.UseCount
+	prompt.LastUsedAt = existing.LastUsedAt
+	prompt.DeletedAt = existing.DeletedAt
+	prompt.CreatedAt = existing.CreatedAt
+	prompt.UpdatedAt = now()
+	tagsJSON, _ := json.Marshal(prompt.Tags)
+	_, err = s.db.ExecContext(ctx, `
+UPDATE image_prompt_library SET
+  title = ?, description = ?, prompt = ?, mode = ?, model = ?, aspect_ratio = ?, resolution = ?, image_count = ?, tags_json = ?, status = ?, use_count = ?, last_used_at = ?, deleted_at = ?, updated_at = ?
+WHERE id = ?`,
+		prompt.Title, prompt.Description, prompt.Prompt, prompt.Mode, prompt.Model, prompt.AspectRatio, prompt.Resolution, prompt.ImageCount, string(tagsJSON), prompt.Status, prompt.UseCount, prompt.LastUsedAt, prompt.DeletedAt, prompt.UpdatedAt, prompt.ID)
+	if err != nil {
+		return ImagePrompt{}, err
+	}
+	return s.GetImagePrompt(ctx, prompt.ID)
+}
+
+func (s *Store) DeleteImagePrompt(ctx context.Context, id string) (ImagePrompt, error) {
+	timestamp := now()
+	_, err := s.db.ExecContext(ctx, `UPDATE image_prompt_library SET status = 'deleted', deleted_at = ?, updated_at = ? WHERE id = ? AND status != 'deleted'`, timestamp, timestamp, id)
+	if err != nil {
+		return ImagePrompt{}, err
+	}
+	return s.GetImagePrompt(ctx, id)
+}
+
+func (s *Store) UseImagePrompt(ctx context.Context, id string) (ImagePrompt, error) {
+	timestamp := now()
+	result, err := s.db.ExecContext(ctx, `UPDATE image_prompt_library SET use_count = use_count + 1, last_used_at = ?, updated_at = ? WHERE id = ? AND status = 'active'`, timestamp, timestamp, id)
+	if err != nil {
+		return ImagePrompt{}, err
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return ImagePrompt{}, ErrNotFound
+	}
+	return s.GetImagePrompt(ctx, id)
+}
+
 const imageAssetColumns = `id, asset_type, status, private, provider, model, job_id, source_role, slot, prompt_preview, revised_prompt_preview, original_filename, original_source_redacted, mime_type, extension, size_bytes, width, height, checksum_sha256, local_name, storage_backend, object_storage_profile_id, s3_bucket, s3_region, s3_endpoint_label, s3_key, s3_etag, private_at, archived_at, deleted_at, deleted_reason, last_error, created_at, updated_at`
 
 func (s *Store) CreateImageAsset(ctx context.Context, asset ImageAsset) (ImageAsset, error) {
@@ -5272,6 +5676,31 @@ func (s *Store) ListEvents(ctx context.Context, scope, scopeID string, after int
 	return out, rows.Err()
 }
 
+func (s *Store) ListRecentEventsByScope(ctx context.Context, scope string, limit int) ([]events.Event, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, scope, scope_id, sequence, event_type, payload_json, created_at FROM events WHERE scope = ? ORDER BY created_at DESC, scope_id DESC, sequence DESC LIMIT ?`, scope, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []events.Event{}
+	for rows.Next() {
+		var event events.Event
+		var payload string
+		if err := rows.Scan(&event.ID, &event.Scope, &event.ScopeID, &event.Sequence, &event.Type, &payload, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(payload), &event.Payload)
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
 type workspaceScanner interface {
 	Scan(dest ...any) error
 }
@@ -5434,6 +5863,17 @@ func scanImageStorageSettings(row workspaceScanner) (ImageStorageSettings, error
 	settings.S3ForcePathStyle = forcePath == 1
 	settings.FallbackToLocal = fallback == 1
 	return NormalizeImageStorageSettings(settings), nil
+}
+
+func scanImagePrompt(row workspaceScanner) (ImagePrompt, error) {
+	var prompt ImagePrompt
+	var tagsJSON string
+	err := row.Scan(&prompt.ID, &prompt.Title, &prompt.Description, &prompt.Prompt, &prompt.Mode, &prompt.Model, &prompt.AspectRatio, &prompt.Resolution, &prompt.ImageCount, &tagsJSON, &prompt.Status, &prompt.UseCount, &prompt.LastUsedAt, &prompt.DeletedAt, &prompt.CreatedAt, &prompt.UpdatedAt)
+	if err != nil {
+		return ImagePrompt{}, err
+	}
+	_ = json.Unmarshal([]byte(tagsJSON), &prompt.Tags)
+	return NormalizeImagePrompt(prompt), nil
 }
 
 func scanImageAsset(row workspaceScanner) (ImageAsset, error) {

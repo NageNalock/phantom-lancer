@@ -1,3 +1,4 @@
+import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -38,6 +39,11 @@ const markdownComponents: Components = {
       </a>
     );
   },
+  img({ alt, node: _node, src, ...props }) {
+    const safeSrc = safeImageSrc(src);
+    if (!safeSrc) return null;
+    return <img {...props} alt={alt || ""} className="message-image" decoding="async" height={520} loading="lazy" src={safeSrc} width={820} />;
+  },
   code({ children, className, node: _node, ...props }) {
     const source = String(children);
     const rawCode = source.replace(/\n$/, "");
@@ -68,10 +74,23 @@ export function RichMessage({ streaming, text }: { streaming?: boolean; text: st
 }
 
 function CodeBlock({ code, language }: { code: string; language: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copyCode() {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  }
   return (
     <div className="message-code-block">
       <div className="message-code-lang">
         <span>{language || "text"}</span>
+        <button className="message-code-copy" onClick={() => void copyCode()} type="button">
+          {copied ? "已复制" : "复制"}
+        </button>
       </div>
       <pre>
         <code dangerouslySetInnerHTML={{ __html: highlightedCode(code, language) }} />
@@ -152,6 +171,13 @@ function highlightLanguage(language: string): string {
 function safeLinkHref(href?: string): string {
   const value = href?.trim() || "";
   return /^(https?:|mailto:)/i.test(value) ? value : "";
+}
+
+function safeImageSrc(src?: string): string {
+  const value = src?.trim() || "";
+  if (/^https?:\/\//i.test(value)) return value;
+  if (/^\/api\/(codex|images)\//i.test(value)) return value;
+  return "";
 }
 
 function escapeHtml(value: string): string {

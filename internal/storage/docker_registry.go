@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -18,6 +19,8 @@ type DockerRegistrySettings struct {
 	ObjectPrefix           string `json:"objectPrefix"`
 	StorageDir             string `json:"storageDir"`
 	QuotaBytes             int64  `json:"quotaBytes"`
+	MaxRepositories        int    `json:"maxRepositories"`
+	MaxTagsPerRepository   int    `json:"maxTagsPerRepository"`
 	RequireTLS             bool   `json:"requireTls"`
 	AllowAnonymousPull     bool   `json:"allowAnonymousPull"`
 	AllowInsecureLocal     bool   `json:"allowInsecureLocal"`
@@ -30,11 +33,14 @@ type DockerRegistryCredential struct {
 	Status           string   `json:"status"`
 	Scopes           []string `json:"scopes"`
 	RepositoryPrefix string   `json:"repositoryPrefix"`
+	HasStoredSecret  bool     `json:"hasStoredSecret"`
 	LastUsedAt       string   `json:"lastUsedAt,omitempty"`
 	CreatedAt        string   `json:"createdAt"`
 	RotatedAt        string   `json:"rotatedAt,omitempty"`
 	RevokedAt        string   `json:"revokedAt,omitempty"`
 	SecretHash       string   `json:"-"`
+	SecretCiphertext string   `json:"-"`
+	Secret           string   `json:"-"`
 }
 
 type DockerRegistryRepository struct {
@@ -97,6 +103,12 @@ func NormalizeDockerRegistrySettings(settings DockerRegistrySettings) DockerRegi
 	if settings.QuotaBytes <= 0 {
 		settings.QuotaBytes = defaults.QuotaBytes
 	}
+	if settings.MaxRepositories < 0 {
+		settings.MaxRepositories = 0
+	}
+	if settings.MaxTagsPerRepository < 0 {
+		settings.MaxTagsPerRepository = 0
+	}
 	return settings
 }
 
@@ -122,6 +134,10 @@ func (s *Store) GetDockerRegistrySettings(ctx context.Context) (DockerRegistrySe
 			settings.StorageDir = value
 		case "docker.registry.quota_bytes":
 			settings.QuotaBytes = parseInt64Setting(value, settings.QuotaBytes)
+		case "docker.registry.max_repositories":
+			settings.MaxRepositories = int(parseInt64Setting(value, int64(settings.MaxRepositories)))
+		case "docker.registry.max_tags_per_repository":
+			settings.MaxTagsPerRepository = int(parseInt64Setting(value, int64(settings.MaxTagsPerRepository)))
 		case "docker.registry.require_tls":
 			settings.RequireTLS = truthySetting(value)
 		case "docker.registry.allow_anonymous_pull":
@@ -143,6 +159,8 @@ func (s *Store) UpdateDockerRegistrySettings(ctx context.Context, settings Docke
 		"docker.registry.object_prefix":             settings.ObjectPrefix,
 		"docker.registry.storage_dir":               settings.StorageDir,
 		"docker.registry.quota_bytes":               int64String(settings.QuotaBytes),
+		"docker.registry.max_repositories":          strconv.Itoa(settings.MaxRepositories),
+		"docker.registry.max_tags_per_repository":   strconv.Itoa(settings.MaxTagsPerRepository),
 		"docker.registry.require_tls":               boolString(settings.RequireTLS),
 		"docker.registry.allow_anonymous_pull":      boolString(settings.AllowAnonymousPull),
 		"docker.registry.allow_insecure_local":      boolString(settings.AllowInsecureLocal),
@@ -157,21 +175,31 @@ func (s *Store) CreateDockerRegistryCredential(ctx context.Context, cred DockerR
 	if err != nil {
 		return DockerRegistryCredential{}, err
 	}
+	secretCiphertext := ""
+	if cred.Secret != "" {
+		secretCiphertext, err = s.wrapDockerRegistrySecret(cred.Secret)
+		if err != nil {
+			return DockerRegistryCredential{}, err
+		}
+	}
 	now := now()
 	cred.ID = id
 	cred.Status = defaultString(cred.Status, "active")
 	cred.RepositoryPrefix = defaultString(strings.TrimSpace(cred.RepositoryPrefix), "personal/")
 	cred.CreatedAt = now
-	_, err = s.db.ExecContext(ctx, `INSERT INTO docker_registry_credentials (id, name, status, secret_hash, scopes, repository_prefix, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, cred.ID, cred.Name, cred.Status, cred.SecretHash, strings.Join(cred.Scopes, ","), cred.RepositoryPrefix, cred.CreatedAt)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO docker_registry_credentials (id, name, status, secret_hash, secret_ciphertext, scopes, repository_prefix, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, cred.ID, cred.Name, cred.Status, cred.SecretHash, secretCiphertext, strings.Join(cred.Scopes, ","), cred.RepositoryPrefix, cred.CreatedAt)
 	if err != nil {
 		return DockerRegistryCredential{}, err
 	}
 	cred.SecretHash = ""
+	cred.SecretCiphertext = ""
+	cred.Secret = ""
+	cred.HasStoredSecret = secretCiphertext != ""
 	return cred, nil
 }
 
 func (s *Store) ListDockerRegistryCredentials(ctx context.Context) ([]DockerRegistryCredential, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, status, scopes, repository_prefix, last_used_at, created_at, rotated_at, revoked_at FROM docker_registry_credentials ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, status, scopes, repository_prefix, last_used_at, created_at, rotated_at, revoked_at, secret_ciphertext FROM docker_registry_credentials ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -180,23 +208,70 @@ func (s *Store) ListDockerRegistryCredentials(ctx context.Context) ([]DockerRegi
 	for rows.Next() {
 		var cred DockerRegistryCredential
 		var scopes string
-		if err := rows.Scan(&cred.ID, &cred.Name, &cred.Status, &scopes, &cred.RepositoryPrefix, &cred.LastUsedAt, &cred.CreatedAt, &cred.RotatedAt, &cred.RevokedAt); err != nil {
+		var secretCiphertext string
+		if err := rows.Scan(&cred.ID, &cred.Name, &cred.Status, &scopes, &cred.RepositoryPrefix, &cred.LastUsedAt, &cred.CreatedAt, &cred.RotatedAt, &cred.RevokedAt, &secretCiphertext); err != nil {
 			return nil, err
 		}
 		cred.Scopes = splitSettingList(scopes)
+		cred.HasStoredSecret = secretCiphertext != ""
 		out = append(out, cred)
 	}
 	return out, rows.Err()
 }
 
 func (s *Store) GetDockerRegistryCredentialByName(ctx context.Context, name string) (DockerRegistryCredential, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, status, secret_hash, scopes, repository_prefix, last_used_at, created_at, rotated_at, revoked_at FROM docker_registry_credentials WHERE name = ?`, name)
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, status, secret_hash, secret_ciphertext, scopes, repository_prefix, last_used_at, created_at, rotated_at, revoked_at FROM docker_registry_credentials WHERE name = ?`, name)
 	return scanDockerRegistryCredential(row)
 }
 
 func (s *Store) GetDockerRegistryCredential(ctx context.Context, id string) (DockerRegistryCredential, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, status, secret_hash, scopes, repository_prefix, last_used_at, created_at, rotated_at, revoked_at FROM docker_registry_credentials WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, status, secret_hash, secret_ciphertext, scopes, repository_prefix, last_used_at, created_at, rotated_at, revoked_at FROM docker_registry_credentials WHERE id = ?`, id)
 	return scanDockerRegistryCredential(row)
+}
+
+func (s *Store) GetDockerRegistryCredentialSecret(ctx context.Context, id string) (DockerRegistryCredential, error) {
+	cred, err := s.GetDockerRegistryCredential(ctx, id)
+	if err != nil {
+		return DockerRegistryCredential{}, err
+	}
+	if cred.SecretCiphertext != "" {
+		secret, err := s.unwrapDockerRegistrySecret(cred.SecretCiphertext)
+		if err != nil {
+			return DockerRegistryCredential{}, fmt.Errorf("%w: docker registry credential %s (%s)", ErrCorruptSecrets, cred.ID, err)
+		}
+		cred.Secret = secret
+	}
+	cred.SecretHash = ""
+	cred.SecretCiphertext = ""
+	return cred, nil
+}
+
+func (s *Store) ListDockerRegistryCredentialSecrets(ctx context.Context) ([]DockerRegistryCredential, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM docker_registry_credentials ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]DockerRegistryCredential, 0, len(ids))
+	for _, id := range ids {
+		cred, err := s.GetDockerRegistryCredentialSecret(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, cred)
+	}
+	return out, nil
 }
 
 func (s *Store) UpdateDockerRegistryCredential(ctx context.Context, cred DockerRegistryCredential, rotateHash string) (DockerRegistryCredential, error) {
@@ -217,7 +292,14 @@ func (s *Store) UpdateDockerRegistryCredential(ctx context.Context, cred DockerR
 		cred.RepositoryPrefix = existing.RepositoryPrefix
 	}
 	if rotateHash != "" {
-		_, err = s.db.ExecContext(ctx, `UPDATE docker_registry_credentials SET name = ?, status = ?, secret_hash = ?, scopes = ?, repository_prefix = ?, rotated_at = ? WHERE id = ?`, cred.Name, cred.Status, rotateHash, strings.Join(cred.Scopes, ","), cred.RepositoryPrefix, now(), cred.ID)
+		if cred.Secret == "" {
+			return DockerRegistryCredential{}, errors.New("registry credential secret is required for rotation")
+		}
+		secretCiphertext, err := s.wrapDockerRegistrySecret(cred.Secret)
+		if err != nil {
+			return DockerRegistryCredential{}, err
+		}
+		_, err = s.db.ExecContext(ctx, `UPDATE docker_registry_credentials SET name = ?, status = ?, secret_hash = ?, secret_ciphertext = ?, scopes = ?, repository_prefix = ?, rotated_at = ? WHERE id = ?`, cred.Name, cred.Status, rotateHash, secretCiphertext, strings.Join(cred.Scopes, ","), cred.RepositoryPrefix, now(), cred.ID)
 	} else {
 		_, err = s.db.ExecContext(ctx, `UPDATE docker_registry_credentials SET name = ?, status = ?, scopes = ?, repository_prefix = ?, revoked_at = CASE WHEN ? = 'revoked' THEN ? ELSE revoked_at END WHERE id = ?`, cred.Name, cred.Status, strings.Join(cred.Scopes, ","), cred.RepositoryPrefix, cred.Status, now(), cred.ID)
 	}
@@ -227,6 +309,8 @@ func (s *Store) UpdateDockerRegistryCredential(ctx context.Context, cred DockerR
 	updated, err := s.GetDockerRegistryCredential(ctx, cred.ID)
 	if err == nil {
 		updated.SecretHash = ""
+		updated.SecretCiphertext = ""
+		updated.Secret = ""
 	}
 	return updated, err
 }
@@ -419,13 +503,14 @@ func (s *Store) PurgeDeletedDockerRegistryManifests(ctx context.Context) ([]stri
 func scanDockerRegistryCredential(row *sql.Row) (DockerRegistryCredential, error) {
 	var cred DockerRegistryCredential
 	var scopes string
-	if err := row.Scan(&cred.ID, &cred.Name, &cred.Status, &cred.SecretHash, &scopes, &cred.RepositoryPrefix, &cred.LastUsedAt, &cred.CreatedAt, &cred.RotatedAt, &cred.RevokedAt); err != nil {
+	if err := row.Scan(&cred.ID, &cred.Name, &cred.Status, &cred.SecretHash, &cred.SecretCiphertext, &scopes, &cred.RepositoryPrefix, &cred.LastUsedAt, &cred.CreatedAt, &cred.RotatedAt, &cred.RevokedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return DockerRegistryCredential{}, ErrNotFound
 		}
 		return DockerRegistryCredential{}, err
 	}
 	cred.Scopes = splitSettingList(scopes)
+	cred.HasStoredSecret = cred.SecretCiphertext != ""
 	return cred, nil
 }
 

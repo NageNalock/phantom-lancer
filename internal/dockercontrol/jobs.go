@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"sort"
 	"time"
 
 	"phantom-lancer/internal/ids"
@@ -17,6 +18,7 @@ const (
 	jobStatusRunning   = "running"
 	jobStatusCompleted = "completed"
 	jobStatusFailed    = "failed"
+	jobStatusCancelled = "cancelled"
 )
 
 // Job is the redacted status surfaced to the UI for Docker host operations.
@@ -70,9 +72,51 @@ func (s *Service) StartJob(ctx context.Context, kind, title, risk, target string
 	s.saveJob(job)
 	s.append(ctx, id, "docker.job.created", map[string]any{"type": kind, "title": title, "riskLevel": risk, "target": job.Target})
 
-	runCtx := context.Background()
+	runCtx, cancel := context.WithCancel(context.Background())
+	s.saveJobCancel(id, cancel)
 	go s.runJob(runCtx, job, run)
 	return OperationResult{Job: job, EventScope: eventScopeDockerJob, EventScopeID: id}, nil
+}
+
+func (s *Service) ListJobs(limit int) []Job {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Job, 0, len(s.jobs))
+	for _, job := range s.jobs {
+		out = append(out, job)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt > out[j].CreatedAt
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func (s *Service) CancelJob(ctx context.Context, id string) (Job, error) {
+	s.mu.Lock()
+	job, ok := s.jobs[id]
+	cancel := s.cancels[id]
+	s.mu.Unlock()
+	if !ok {
+		return Job{}, errors.New("docker job not found")
+	}
+	if job.Status != jobStatusQueued && job.Status != jobStatusRunning {
+		return job, errors.New("docker job can no longer be cancelled")
+	}
+	if cancel == nil {
+		return job, errors.New("docker job has no active cancel handle")
+	}
+	cancel()
+	s.append(ctx, id, "docker.job.cancel.requested", map[string]any{"type": job.Type, "title": job.Title})
+	return job, nil
 }
 
 func (s *Service) ActiveJob() *Job {
@@ -113,7 +157,38 @@ func (s *Service) saveJob(job Job) {
 	s.jobs[job.ID] = job
 }
 
+func (s *Service) saveJobCancel(id string, cancel context.CancelFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancels == nil {
+		s.cancels = make(map[string]context.CancelFunc)
+	}
+	s.cancels[id] = cancel
+}
+
+func (s *Service) clearJobCancel(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.cancels, id)
+}
+
 func (s *Service) runJob(ctx context.Context, job Job, run jobRunner) {
+	defer s.clearJobCancel(job.ID)
+
+	if job.Type == "docker.image.pull" {
+		select {
+		case s.pullSem <- struct{}{}:
+		case <-ctx.Done():
+			job.Status = jobStatusCancelled
+			job.Error = "cancelled by owner"
+			job.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			s.saveJob(job)
+			s.append(context.Background(), job.ID, "docker.job.cancelled", map[string]any{"type": job.Type, "title": job.Title})
+			return
+		}
+		defer func() { <-s.pullSem }()
+	}
+
 	job.Status = jobStatusRunning
 	job.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	s.saveJob(job)
@@ -128,11 +203,20 @@ func (s *Service) runJob(ctx context.Context, job Job, run jobRunner) {
 	}
 
 	if err := run(ctx, emit); err != nil {
-		job.Status = jobStatusFailed
-		job.Error = safelog.Error(err, 240)
+		if errors.Is(err, context.Canceled) {
+			job.Status = jobStatusCancelled
+			job.Error = "cancelled by owner"
+		} else {
+			job.Status = jobStatusFailed
+			job.Error = safelog.Error(err, 240)
+		}
 		job.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		s.saveJob(job)
-		s.append(ctx, job.ID, "docker.job.failed", map[string]any{"type": job.Type, "error": job.Error})
+		if job.Status == jobStatusCancelled {
+			s.append(context.Background(), job.ID, "docker.job.cancelled", map[string]any{"type": job.Type, "title": job.Title})
+		} else {
+			s.append(ctx, job.ID, "docker.job.failed", map[string]any{"type": job.Type, "error": job.Error})
+		}
 		return
 	}
 

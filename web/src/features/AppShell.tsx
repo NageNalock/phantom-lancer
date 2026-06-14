@@ -117,7 +117,7 @@ export function AppShell({
                 role="dialog"
               >
                 <StatusSummaryRow label="Gateway" tone={gateway?.enabled ? "good" : "warn"} value={gateway?.enabled ? "已启用" : "未启用"} />
-                <StatusSummaryRow label="Images" tone={images?.hasApiKey ? "good" : "warn"} value={images?.hasApiKey ? "已配置" : "未配置"} />
+                <StatusSummaryRow label="多媒体" tone={images?.hasApiKey ? "good" : "warn"} value={images?.hasApiKey ? "已配置" : "未配置"} />
                 <StatusSummaryRow label="V2Ray" tone={v2ray?.running ? "good" : "warn"} value={v2rayStateLabel(v2ray)} />
                 <StatusSummaryRow label="Mail" tone={mail?.service_ready ? "good" : "warn"} value={mail?.service_ready ? "就绪" : "待配置"} />
               </div>
@@ -148,7 +148,7 @@ function activeStatusPill(activeTab: MainTab, data: AppData) {
   }
   if (activeTab === "images") {
     const images = data.images.status || data.dashboard.images;
-    return <Pill tone={images?.hasApiKey ? "good" : "warn"}>Images {images?.hasApiKey ? "已配置" : "未配置"}</Pill>;
+    return <Pill tone={images?.hasApiKey ? "good" : "warn"}>多媒体 {images?.hasApiKey ? "已配置" : "未配置"}</Pill>;
   }
   if (activeTab === "v2ray") {
     const v2ray = data.v2ray.status || data.dashboard.v2ray;

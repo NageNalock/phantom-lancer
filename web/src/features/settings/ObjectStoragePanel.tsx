@@ -109,7 +109,7 @@ export function ObjectStoragePanel({ actions }: { actions: AppActions }) {
       confirmLabel: "删除 profile",
       impact: [
         `Bucket: ${profile.bucket || "-"}`,
-        "Images、Docker Registry 等引用该 profile 的配置会失去有效凭据。",
+        "多媒体、Docker Registry 等引用该 profile 的配置会失去有效凭据。",
         "历史资产如果只存在于该对象存储中，可能无法继续通过控制台读取。",
       ],
       recovery: "删除不可恢复；如需恢复，需要重新创建 profile 并让各模块重新选择。",

@@ -6,8 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +26,7 @@ import (
 const (
 	MaxAttachmentBytes   = 8 * 1024 * 1024
 	MaxAttachmentsPerReq = 4
+	MaxArtifactBytes     = 20 * 1024 * 1024
 	attachmentTTL        = 24 * time.Hour
 )
 
@@ -31,6 +36,8 @@ var allowedAttachmentTypes = map[string]string{
 	"image/webp": ".webp",
 	"image/gif":  ".gif",
 }
+
+var artifactImagePathInTextRE = regexp.MustCompile(`(?:file://)?/[^\s<>"')\]]+\.(?i:png|jpe?g|gif|webp)(?:[?#][^\s<>"')\]]*)?`)
 
 // ErrModuleDisabled is returned when the Codex module is turned off.
 var ErrModuleDisabled = errors.New("codex module disabled")
@@ -101,6 +108,21 @@ type TurnInput struct {
 	ApprovalPolicy string
 	Model          string
 	AttachmentIDs  []string
+}
+
+type ArtifactContent struct {
+	ContentType string
+	Filename    string
+	Data        []byte
+}
+
+type ThreadInput struct {
+	WorkspaceID    string
+	Title          string
+	Model          string
+	Sandbox        string
+	ApprovalPolicy string
+	ExecutionMode  string
 }
 
 type ThreadListOptions struct {
@@ -492,10 +514,19 @@ func (s *Service) ListThreadsFiltered(ctx context.Context, opts ThreadListOption
 }
 
 func (s *Service) CreateThread(ctx context.Context, workspaceID, title, model, sandbox, approval string) (storage.CodexCliThread, error) {
-	ws, err := s.store.GetCodexCliWorkspace(ctx, workspaceID)
+	return s.CreateThreadWithInput(ctx, ThreadInput{WorkspaceID: workspaceID, Title: title, Model: model, Sandbox: sandbox, ApprovalPolicy: approval, ExecutionMode: "workspace"})
+}
+
+func (s *Service) CreateThreadWithInput(ctx context.Context, input ThreadInput) (storage.CodexCliThread, error) {
+	ws, err := s.store.GetCodexCliWorkspace(ctx, input.WorkspaceID)
 	if err != nil {
 		return storage.CodexCliThread{}, err
 	}
+	workspaceID := input.WorkspaceID
+	title := input.Title
+	model := input.Model
+	sandbox := input.Sandbox
+	approval := input.ApprovalPolicy
 	if strings.TrimSpace(sandbox) == "" {
 		sandbox = ws.DefaultSandbox
 	}
@@ -516,6 +547,21 @@ func (s *Service) CreateThread(ctx context.Context, workspaceID, title, model, s
 	if s.supervisor.Client() == nil {
 		sourceMode = "exec"
 	}
+	executionMode := strings.TrimSpace(input.ExecutionMode)
+	if executionMode == "" {
+		executionMode = "workspace"
+	}
+	if executionMode != "workspace" && executionMode != "worktree" {
+		return storage.CodexCliThread{}, errors.New("invalid execution mode")
+	}
+	if executionMode == "worktree" {
+		if ws.TrustState != "trusted" {
+			return storage.CodexCliThread{}, errors.New("worktree requires trusted workspace")
+		}
+		if _, _, err := runBoundedGit(ctx, ws.Path, []string{"rev-parse", "--is-inside-work-tree"}, 1024); err != nil {
+			return storage.CodexCliThread{}, fmt.Errorf("worktree requires git workspace: %w", err)
+		}
+	}
 	thread, err := s.store.CreateCodexCliThread(ctx, storage.CodexCliThread{
 		WorkspaceID:    workspaceID,
 		Title:          title,
@@ -523,12 +569,24 @@ func (s *Service) CreateThread(ctx context.Context, workspaceID, title, model, s
 		SandboxMode:    runPolicy.Sandbox,
 		ApprovalPolicy: runPolicy.ApprovalPolicy,
 		SourceMode:     sourceMode,
+		ExecutionMode:  executionMode,
+		WorktreeStatus: map[bool]string{true: "creating", false: ""}[executionMode == "worktree"],
+		MergeStatus:    map[bool]string{true: "not_merged", false: ""}[executionMode == "worktree"],
 	})
 	if err != nil {
 		return storage.CodexCliThread{}, err
 	}
+	if executionMode == "worktree" {
+		thread, err = s.createThreadWorktree(ctx, thread, ws)
+		if err != nil {
+			thread.WorktreeStatus = "failed"
+			thread.LastError = Preview(err.Error(), 200)
+			_, _ = s.store.SaveCodexCliThread(ctx, thread)
+			return storage.CodexCliThread{}, err
+		}
+	}
 	_ = s.store.TouchCodexCliWorkspace(ctx, workspaceID)
-	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.thread.created", WorkspaceID: workspaceID, RiskLevel: "low", Summary: "已创建 Codex 会话", Payload: map[string]any{"threadId": thread.ID, "sandbox": runPolicy.Sandbox, "approval": runPolicy.ApprovalPolicy}})
+	_, _ = s.store.AddAudit(ctx, storage.AuditEvent{EventType: "codex_cli.thread.created", WorkspaceID: workspaceID, RiskLevel: "low", Summary: "已创建 Codex 会话", Payload: map[string]any{"threadId": thread.ID, "sandbox": runPolicy.Sandbox, "approval": runPolicy.ApprovalPolicy, "executionMode": executionMode}})
 	return thread, nil
 }
 
@@ -693,6 +751,7 @@ func (s *Service) startTurn(ctx context.Context, threadID string, input TurnInpu
 	if err != nil {
 		return storage.CodexCliTurn{}, err
 	}
+	ws = workspaceForThread(thread, ws)
 	requestedSandbox := firstNonEmpty(input.Sandbox, thread.SandboxMode)
 	// kind=chat threads are the read-only conversation mode inside the merged
 	// list: they stay read-only regardless of any requested or stored sandbox.
@@ -1039,6 +1098,175 @@ func (s *Service) appendThreadEvent(ctx context.Context, threadID, turnID, event
 	}
 	s.notifyForThreadEvent(ctx, threadID, turnID, eventType, preview)
 	_ = s.store.PruneCodexCliEvents(ctx, threadID, s.currentSettings().MaxEventsPerThread)
+}
+
+func (s *Service) ReadThreadArtifact(ctx context.Context, threadID, rawPath string) (ArtifactContent, error) {
+	if strings.TrimSpace(threadID) == "" {
+		return ArtifactContent{}, errors.New("thread id is required")
+	}
+	if _, err := s.store.GetCodexCliThread(ctx, threadID); err != nil {
+		return ArtifactContent{}, err
+	}
+	path, err := normalizeArtifactPath(rawPath)
+	if err != nil {
+		return ArtifactContent{}, err
+	}
+	referenced, err := s.threadReferencesArtifactPath(ctx, threadID, path)
+	if err != nil {
+		return ArtifactContent{}, err
+	}
+	if !referenced {
+		return ArtifactContent{}, storage.ErrNotFound
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ArtifactContent{}, storage.ErrNotFound
+		}
+		return ArtifactContent{}, err
+	}
+	if info.IsDir() {
+		return ArtifactContent{}, errors.New("artifact path is a directory")
+	}
+	if info.Size() <= 0 || info.Size() > MaxArtifactBytes {
+		return ArtifactContent{}, fmt.Errorf("artifact image must be 1-%d bytes", MaxArtifactBytes)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ArtifactContent{}, err
+	}
+	if int64(len(data)) > MaxArtifactBytes {
+		return ArtifactContent{}, fmt.Errorf("artifact image must be 1-%d bytes", MaxArtifactBytes)
+	}
+	contentType := artifactImageContentType(data, path)
+	if contentType == "" {
+		return ArtifactContent{}, errors.New("artifact is not a supported image")
+	}
+	return ArtifactContent{
+		ContentType: contentType,
+		Filename:    filepath.Base(path),
+		Data:        data,
+	}, nil
+}
+
+func (s *Service) threadReferencesArtifactPath(ctx context.Context, threadID, path string) (bool, error) {
+	after := int64(0)
+	scanned := 0
+	for scanned < 2000 {
+		events, err := s.store.ListCodexCliEvents(ctx, threadID, after, 500)
+		if err != nil {
+			return false, err
+		}
+		if len(events) == 0 {
+			return false, nil
+		}
+		for _, event := range events {
+			if pathStringMatches(event.TextPreview, path) || payloadReferencesPath(event.Payload, path) {
+				return true, nil
+			}
+		}
+		scanned += len(events)
+		after = events[len(events)-1].Sequence
+	}
+	return false, nil
+}
+
+func normalizeArtifactPath(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", errors.New("artifact path is required")
+	}
+	if parsed, err := url.Parse(value); err == nil && parsed.Scheme == "file" {
+		value = parsed.Path
+	} else if strings.HasPrefix(value, "/") {
+		if idx := strings.IndexAny(value, "?#"); idx >= 0 {
+			value = value[:idx]
+		}
+	}
+	if !filepath.IsAbs(value) {
+		return "", errors.New("artifact path must be absolute")
+	}
+	return filepath.Clean(value), nil
+}
+
+func payloadReferencesPath(value any, target string) bool {
+	switch typed := value.(type) {
+	case string:
+		return pathStringMatches(typed, target)
+	case map[string]any:
+		for _, nested := range typed {
+			if payloadReferencesPath(nested, target) {
+				return true
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if payloadReferencesPath(nested, target) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pathStringMatches(value, target string) bool {
+	normalized, err := normalizeArtifactPath(value)
+	if err == nil && normalized == target {
+		return true
+	}
+	for _, ref := range artifactImagePathRefsInText(value) {
+		normalized, err := normalizeArtifactPath(ref)
+		if err == nil && normalized == target {
+			return true
+		}
+	}
+	return false
+}
+
+func artifactImagePathRefsInText(value string) []string {
+	matches := artifactImagePathInTextRE.FindAllString(value, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	refs := make([]string, 0, len(matches))
+	seen := map[string]struct{}{}
+	for _, match := range matches {
+		ref := strings.TrimRight(strings.TrimSpace(match), ".,;:!?")
+		if ref == "" {
+			continue
+		}
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
+func artifactImageContentType(data []byte, path string) string {
+	detected := http.DetectContentType(data)
+	if allowedArtifactImageType(detected) {
+		return detected
+	}
+	if len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
+		return "image/webp"
+	}
+	extType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+	if allowedArtifactImageType(extType) && strings.HasPrefix(detected, "image/") {
+		return extType
+	}
+	return ""
+}
+
+func allowedArtifactImageType(contentType string) bool {
+	contentType = strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	switch contentType {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return true
+	default:
+		return false
+	}
 }
 
 // handleNotification is invoked by the supervisor for every app-server

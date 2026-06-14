@@ -1,23 +1,34 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../../app/App";
-import type { CodexSettings, CodexStatus, CodexThread, CodexWorkspace } from "../../app/types";
+import type { CodexApproval, CodexModel, CodexSettings, CodexStatus, CodexThread, CodexWorkspace } from "../../app/types";
 import { friendlyError } from "../../api/client";
+import { useBoolQueryParamState, useQueryParamState, useStringQueryParamState } from "../../hooks/useQueryParamState";
+import { useDangerConfirm } from "../../components/ui";
 import { ComposerEmptyState, ThreadList } from "./ThreadSidebar";
-import type { CreateConversationMode } from "./ThreadSidebar";
+import type { CreateConversationMode, CreateThreadOptions } from "./ThreadSidebar";
 import { ThreadInspector } from "./ThreadInspector";
 import { ChatWorkspace } from "./ChatWorkspace";
 import { ThreadWorkspace } from "./ThreadWorkspace";
 
+type ThreadStatusFilter = "all" | "idle" | "running" | "needs_approval" | "queued" | "failed" | "archived";
+const THREAD_STATUS_FILTERS: ThreadStatusFilter[] = ["all", "idle", "running", "needs_approval", "queued", "failed", "archived"];
+const THREAD_CLEAR_KEYS = ["codexInbox", "codexRuntime"];
+
 export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: { actions: AppActions; focusThreadId?: string; status?: CodexStatus; onStatusChange: () => void }) {
   const [threads, setThreads] = useState<CodexThread[]>([]);
   const [workspaces, setWorkspaces] = useState<CodexWorkspace[]>([]);
+  const [approvals, setApprovals] = useState<CodexApproval[]>([]);
+  const [models, setModels] = useState<CodexModel[]>([]);
   const [scratchWorkspaceId, setScratchWorkspaceId] = useState("");
-  const [activeId, setActiveId] = useState("");
-  const [query, setQuery] = useState("");
-  const [workspaceFilter, setWorkspaceFilter] = useState("all");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [includeArchived, setIncludeArchived] = useState(false);
+  const [activeId, setActiveId] = useStringQueryParamState("codexThread", "", { clearKeys: THREAD_CLEAR_KEYS });
+  const [query, setQuery] = useStringQueryParamState("codexQ", "", { clearKeys: THREAD_CLEAR_KEYS });
+  const [workspaceFilter, setWorkspaceFilter] = useStringQueryParamState("codexWorkspace", "all", { clearKeys: THREAD_CLEAR_KEYS });
+  const [statusFilter, setStatusFilter] = useQueryParamState<ThreadStatusFilter>("codexThreadStatus", THREAD_STATUS_FILTERS, "all", { clearKeys: THREAD_CLEAR_KEYS });
+  const [includeArchived, setIncludeArchived] = useBoolQueryParamState("codexArchived", false, { clearKeys: THREAD_CLEAR_KEYS });
+  const [sidebarOpen, setSidebarOpen] = useBoolQueryParamState("codexSidebar", false);
   const [loading, setLoading] = useState(false);
+  const [composerDrafts, setComposerDrafts] = useState<Record<string, string>>({});
+  const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
   const loadThreads = useCallback(async () => {
     setLoading(true);
@@ -31,13 +42,13 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
       const response = await actions.api<{ items?: CodexThread[] }>(`/api/codex/threads${suffix}`);
       const nextThreads = response.items || [];
       setThreads(nextThreads);
-      setActiveId((current) => (current && nextThreads.some((thread) => thread.id === current) ? current : nextThreads[0]?.id || ""));
+      if (!activeId || !nextThreads.some((thread) => thread.id === activeId)) setActiveId(nextThreads[0]?.id || "");
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");
     } finally {
       setLoading(false);
     }
-  }, [actions, includeArchived, query, statusFilter, workspaceFilter]);
+  }, [actions, activeId, includeArchived, query, setActiveId, statusFilter, workspaceFilter]);
 
   const loadWorkspaces = useCallback(async () => {
     try {
@@ -57,6 +68,24 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
     }
   }, [actions]);
 
+  const loadModels = useCallback(async () => {
+    try {
+      const response = await actions.api<{ items?: CodexModel[] }>("/api/codex/models");
+      setModels(response.items || []);
+    } catch {
+      setModels([]);
+    }
+  }, [actions]);
+
+  const loadApprovals = useCallback(async () => {
+    try {
+      const response = await actions.api<{ items?: CodexApproval[] }>("/api/codex/approvals?status=pending");
+      setApprovals(response.items || []);
+    } catch {
+      // The inspector can still render without the cross-thread approval list.
+    }
+  }, [actions]);
+
   useEffect(() => {
     void loadThreads();
   }, [loadThreads]);
@@ -67,6 +96,12 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
     void loadSettings();
   }, [loadSettings]);
   useEffect(() => {
+    void loadModels();
+  }, [loadModels]);
+  useEffect(() => {
+    void loadApprovals();
+  }, [loadApprovals]);
+  useEffect(() => {
     if (!focusThreadId) return;
     setWorkspaceFilter("all");
     setStatusFilter("all");
@@ -76,6 +111,9 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
 
   const activeThread = useMemo(() => threads.find((thread) => thread.id === activeId) || null, [threads, activeId]);
   const scratchReady = Boolean(scratchWorkspaceId);
+  const layoutClass = sidebarOpen
+    ? "grid min-h-[calc(100dvh-8.5rem)] min-w-0 grid-cols-[280px_minmax(0,1fr)_360px] gap-3 max-xl:grid-cols-[260px_minmax(0,1fr)_320px] max-lg:grid-cols-1"
+    : "grid min-h-[calc(100dvh-8.5rem)] min-w-0 grid-cols-[44px_minmax(0,1fr)_360px] gap-3 max-xl:grid-cols-[44px_minmax(0,1fr)_320px] max-lg:grid-cols-1";
 
   const updateThreadInList = useCallback((nextThread: CodexThread) => {
     setThreads((current) =>
@@ -83,14 +121,24 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
     );
   }, []);
 
-  async function createThread(workspaceId: string, mode: CreateConversationMode = "code") {
+  async function createThread(workspaceId: string, mode: CreateConversationMode = "code", options: CreateThreadOptions = {}) {
     try {
+      const initialPrompt = options.initialPrompt?.trim() || "";
       const response = mode === "chat"
         ? await actions.api<{ thread: CodexThread }>("/api/codex/chats", { method: "POST", csrf: actions.csrf, body: { title: "" } })
-        : await actions.api<{ thread: CodexThread }>("/api/codex/threads", { method: "POST", csrf: actions.csrf, body: { workspaceId } });
+        : await actions.api<{ thread: CodexThread }>("/api/codex/threads", { method: "POST", csrf: actions.csrf, body: { workspaceId, model: options.model || "", sandbox: options.sandbox || "", approvalPolicy: options.approvalPolicy || "on-request", executionMode: options.executionMode || "workspace" } });
       await loadThreads();
       setActiveId(response.thread.id);
+      if (initialPrompt) {
+        await actions.api(`/api/codex/threads/${response.thread.id}/turns`, {
+          method: "POST",
+          csrf: actions.csrf,
+          body: { prompt: initialPrompt, sandbox: mode === "chat" ? "read-only" : (options.sandbox || response.thread.sandboxMode), approvalPolicy: options.approvalPolicy || response.thread.approvalPolicy || "on-request", model: options.model || response.thread.model || "" },
+        });
+        await loadThreads();
+      }
       onStatusChange();
+      await loadApprovals();
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");
     }
@@ -106,11 +154,21 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
   }
 
   async function archive(thread: CodexThread) {
+    const confirmed = await confirmDanger({
+      title: "归档会话",
+      body: "这会把该 Codex 会话移出默认列表。",
+      objectName: thread.title || thread.id,
+      impact: ["当前会话会从默认列表隐藏。", "运行中的任务不会因此自动停止。"],
+      recovery: "可以打开“显示已归档会话”后恢复该会话。",
+      confirmLabel: "归档",
+    });
+    if (!confirmed) return;
     try {
       await actions.api(`/api/codex/threads/${thread.id}/archive`, { method: "POST", csrf: actions.csrf });
       await loadThreads();
       if (activeId === thread.id) setActiveId("");
       onStatusChange();
+      await loadApprovals();
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");
     }
@@ -133,45 +191,125 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
       await loadThreads();
       setActiveId(response.thread.id);
       onStatusChange();
+      await loadApprovals();
     } catch (error) {
       actions.setToast(friendlyError(error), "danger");
     }
   }
 
   return (
-    <div className="grid min-w-0 grid-cols-[280px_minmax(0,1fr)_300px] gap-4 max-xl:grid-cols-[260px_minmax(0,1fr)] max-lg:grid-cols-1">
-      <ThreadList
-        loading={loading}
-        threads={threads}
-        workspaces={workspaces}
-        activeId={activeId}
-        query={query}
-        workspaceFilter={workspaceFilter}
-        statusFilter={statusFilter}
-        includeArchived={includeArchived}
-        scratchReady={scratchReady}
-        onQuery={setQuery}
-        onWorkspaceFilter={setWorkspaceFilter}
-        onStatusFilter={setStatusFilter}
-        onIncludeArchived={setIncludeArchived}
-        onSearch={() => void loadThreads()}
-        onSelect={setActiveId}
-        onCreate={createThread}
-        onTogglePin={togglePin}
-        onArchive={archive}
-        onResume={resume}
-        onFork={fork}
-      />
+    <>
+    {dangerConfirmDialog}
+    <div className={layoutClass}>
+      {sidebarOpen ? (
+        <ThreadList
+          loading={loading}
+          threads={threads}
+          workspaces={workspaces}
+          activeId={activeId}
+          query={query}
+          workspaceFilter={workspaceFilter}
+          statusFilter={statusFilter}
+          includeArchived={includeArchived}
+          scratchReady={scratchReady}
+          models={models}
+          onQuery={setQuery}
+          onWorkspaceFilter={setWorkspaceFilter}
+          onStatusFilter={(value) => setStatusFilter(value as ThreadStatusFilter)}
+          onIncludeArchived={setIncludeArchived}
+          onSearch={() => void loadThreads()}
+          onSelect={setActiveId}
+          onCreate={createThread}
+          onTogglePin={togglePin}
+          onArchive={archive}
+          onResume={resume}
+          onFork={fork}
+          onCollapse={() => setSidebarOpen(false)}
+        />
+      ) : (
+        <ThreadListRail
+          activeThread={activeThread}
+          loading={loading}
+          onExpand={() => setSidebarOpen(true)}
+          pendingCount={approvals.filter((approval) => !activeThread || approval.threadId === activeThread.id).length}
+          threadCount={threads.length}
+        />
+      )}
       {activeThread?.kind === "chat" ? (
         <ChatWorkspace key={activeThread.id} actions={actions} status={status} thread={activeThread} workspaces={workspaces} onStatusChange={onStatusChange} onThreadChange={loadThreads} onThreadUpdated={updateThreadInList} />
       ) : activeThread ? (
-        <ThreadWorkspace key={activeThread.id} actions={actions} status={status} thread={activeThread} workspaces={workspaces} onStatusChange={onStatusChange} onThreadChange={loadThreads} onThreadUpdated={updateThreadInList} />
+        <ThreadWorkspace
+          key={activeThread.id}
+          actions={actions}
+          status={status}
+          thread={activeThread}
+          workspaces={workspaces}
+          draftPrompt={composerDrafts[activeThread.id] || ""}
+          onDraftConsumed={() => setComposerDrafts((current) => {
+            const next = { ...current };
+            delete next[activeThread.id];
+            return next;
+          })}
+          onStatusChange={onStatusChange}
+          onThreadChange={loadThreads}
+          onThreadUpdated={updateThreadInList}
+        />
       ) : (
         <ComposerEmptyState workspaces={workspaces} onCreate={createThread} />
       )}
       <div className="max-xl:col-span-2 max-lg:col-span-1">
-        <ThreadInspector status={status} thread={activeThread} workspaces={workspaces} />
+        <ThreadInspector
+          actions={actions}
+          approvals={approvals.filter((approval) => !activeThread || approval.threadId === activeThread.id)}
+          status={status}
+          thread={activeThread}
+          workspaces={workspaces}
+          onApprovalsChange={() => { void loadApprovals(); onStatusChange(); }}
+          onDraft={(threadId, prompt) => {
+            setComposerDrafts((current) => ({ ...current, [threadId]: prompt }));
+            setActiveId(threadId);
+          }}
+        />
       </div>
     </div>
+    </>
+  );
+}
+
+function ThreadListRail({
+  activeThread,
+  loading,
+  onExpand,
+  pendingCount,
+  threadCount,
+}: {
+  activeThread: CodexThread | null;
+  loading: boolean;
+  onExpand: () => void;
+  pendingCount: number;
+  threadCount: number;
+}) {
+  const statusTone = activeThread?.status === "running" ? "good" : activeThread?.status === "needs_approval" || activeThread?.status === "queued" ? "warn" : activeThread?.status === "failed" ? "danger" : "neutral";
+  return (
+    <aside aria-label="项目和会话折叠栏" className="codex-thread-rail panel">
+      <button
+        aria-controls="codex-thread-sidebar"
+        aria-expanded="false"
+        aria-label="展开项目和会话"
+        className="codex-thread-rail-button"
+        onClick={onExpand}
+        title="展开项目和会话"
+        type="button"
+      >
+        <span className="codex-thread-rail-mark" aria-hidden="true" />
+        <span className="codex-thread-rail-label">项目</span>
+        <span className="codex-thread-rail-label">会话</span>
+      </button>
+      <div className="codex-thread-rail-meta" aria-hidden="true">
+        <span>{loading ? "…" : threadCount}</span>
+        {pendingCount ? <span className="codex-thread-rail-badge">{pendingCount}</span> : null}
+        {activeThread ? <span className={`codex-thread-rail-status codex-thread-rail-status-${statusTone}`} /> : null}
+      </div>
+    </aside>
   );
 }

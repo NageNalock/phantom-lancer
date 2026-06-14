@@ -3,7 +3,7 @@ import type { FormEvent, RefObject } from "react";
 import type { AppActions } from "../../../app/App";
 import type { CodexEvent, CodexModel, CodexStatus, CodexThread, CodexTurn, CodexWorkspace } from "../../../app/types";
 import { friendlyError } from "../../../api/client";
-import { Button, Notice, Pill } from "../../../components/ui";
+import { Button, Field, Notice, Pill } from "../../../components/ui";
 import { codexAppServerStateLabel, codexThreadStatusLabel } from "../../../domain/labels";
 import { CODEX_STREAM_EVENTS, parseCodexStreamEvent, shouldRefreshThread, streamStateLabel } from "../codexStream";
 import type { CodexStreamState } from "../codexStream";
@@ -281,24 +281,25 @@ function ChatComposer({
 }) {
   return (
     <form className="chat-composer" onSubmit={onSubmit}>
-      <textarea
-        aria-label="Codex 消息"
-        autoComplete="off"
-        className="chat-composer-input"
-        disabled={disabled}
-        name="codex_chat_message"
-        onChange={(event) => onPrompt(event.target.value)}
-        onKeyDown={(event) => {
-          if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-            event.preventDefault();
-            event.currentTarget.form?.requestSubmit();
-          }
-        }}
-        placeholder={activeTurn ? "补充要求，Codex 会继续这一轮…" : "输入消息，适合解释、计划、命令草案…"}
-        ref={promptRef}
-        rows={3}
-        value={prompt}
-      />
+      <Field label="消息">
+        <textarea
+          autoComplete="off"
+          className="chat-composer-input"
+          disabled={disabled}
+          name="codex_chat_message"
+          onChange={(event) => onPrompt(event.target.value)}
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
+          placeholder={activeTurn ? "补充要求，Codex 会继续这一轮…" : "输入消息，适合解释、计划、命令草案…"}
+          ref={promptRef}
+          rows={3}
+          value={prompt}
+        />
+      </Field>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
           <span className="rounded-md border border-[var(--line)] bg-[var(--surface-soft)] px-2 py-1">read-only</span>
@@ -306,16 +307,20 @@ function ChatComposer({
         </div>
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
           {models.length ? (
-	            <select aria-label="模型" className="chat-model-select" name="codex_chat_model" onChange={(event) => onModel(event.target.value)} value={model}>
-              {models.map((item) => (
-                <option key={item.id} value={item.id}>{item.displayName || item.id}</option>
-              ))}
-            </select>
+            <Field label="模型">
+	            <select className="chat-model-select" name="codex_chat_model" onChange={(event) => onModel(event.target.value)} value={model}>
+                {models.map((item) => (
+                  <option key={item.id} value={item.id}>{item.displayName || item.id}</option>
+                ))}
+              </select>
+            </Field>
           ) : model ? (
-	            <input aria-label="模型" autoComplete="off" className="chat-model-select" name="codex_chat_model" onChange={(event) => onModel(event.target.value)} spellCheck={false} value={model} />
+            <Field label="模型">
+	            <input autoComplete="off" className="chat-model-select" name="codex_chat_model" onChange={(event) => onModel(event.target.value)} spellCheck={false} value={model} />
+            </Field>
           ) : null}
-          {activeTurn ? <Button className="rounded-full" onClick={onInterrupt} tone="danger">停止</Button> : null}
-          <Button className="rounded-full px-4" disabled={disabled || !prompt.trim()} tone="primary" type="submit">
+          {activeTurn ? <Button onClick={onInterrupt} tone="danger">停止</Button> : null}
+          <Button className="px-4" disabled={disabled || !prompt.trim()} tone="primary" type="submit">
             {sending ? "发送中" : activeTurn ? "补充" : "发送"}
           </Button>
         </div>

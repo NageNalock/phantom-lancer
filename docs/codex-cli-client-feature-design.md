@@ -7,6 +7,7 @@
 - [personal-web-terminal-product-features.md](./personal-web-terminal-product-features.md)
 - [personal-web-terminal-technical-design.md](./personal-web-terminal-technical-design.md)
 - [codex-openai-gateway-feature-design.md](./codex-openai-gateway-feature-design.md)
+- [codex-desktop-like-web-client-plan.md](./codex-desktop-like-web-client-plan.md)
 
 参考来源：
 
@@ -176,13 +177,19 @@ MVP 支持：
 
 ### 4.6 附件和图片输入
 
-MVP 可支持上传图片作为 Codex 输入，但必须受控：
+MVP 可支持上传图片作为 Codex 输入，但必须受控。当前阶段要求 Codex 图片输入尽量贴近 Codex Desktop，并由 Codex composer 自己闭环，不接入多媒体资源库：
 
+- 支持点击选择图片。
+- 支持拖拽图片到 composer。
+- 支持从剪贴板粘贴图片，尤其是系统截图后直接 `Cmd/Ctrl+V`。
+- 支持一次选择、拖拽或粘贴多张图片，数量上限与后端 `MaxAttachmentsPerReq` 保持一致。
+- 已添加附件显示缩略图、文件名、大小、上传状态和移除入口。
 - 上传文件保存到 Phantom Lancer 受控临时目录。
 - 文件大小、类型和数量有限制。
 - 传给 CLI 时只传本地临时文件路径。
 - 不把图片 base64、data URL 或完整远程图片 URL 写入日志、audit 或服务日志。
 - turn 完成后按 retention 清理临时附件。
+- 不从多媒体 Library 选择图片发给 Codex，不把 Codex 附件写入多媒体 Library，不让图片输入依赖多媒体模块。
 
 ### 4.7 诊断和设置
 
@@ -674,13 +681,25 @@ audit payload 只记录：
 
 一级导航新增 `Codex`，与 `Codex Gateway`、`日志`、`Images`、`V2Ray`、`设置` 并列。
 
-`Codex` 内部二级视图：
+当前阶段的 Codex UI 以 [Codex Desktop-like Web Client 改造方案](./codex-desktop-like-web-client-plan.md) 为准：默认进入三栏写代码工作台，而不是先进入模块管理 tab。
 
-- `Conversations`：统一会话入口，包含代码任务和只读问答。
-- `Workspaces`：项目路径、信任状态和默认权限。
-- `Approvals`：待审批和历史。
-- `Diagnostics`：CLI 安装、认证、sandbox 和 app-server 状态。
-- `Settings`：Codex 模块设置。
+Codex 主视图：
+
+- 左栏：project/workspace selector、new coding thread、搜索、置顶、最近 thread、归档入口。
+- 中栏：当前 thread 的 conversation、事件摘要、底部 composer、interrupt/steer/continue。
+- 右栏：当前 workspace/worktree、app-server、active turn、pending approval、changed files、diff/review、preview 和最近错误。
+
+低频能力进入右上角 `More` / `Runtime` 抽屉或二级页：
+
+- Workspaces 管理。
+- Cross-thread approvals inbox。
+- Diagnostics。
+- Capabilities。
+- Settings。
+- Automations。
+- Notifications。
+
+Pending approval 不能只出现在跨 thread inbox；当前 thread 的审批必须在 conversation 和右侧 inspector 内联展示。
 
 不要把 `Workspaces`、`Approvals` 或 `Diagnostics` 提升为全局一级导航。
 
@@ -689,17 +708,13 @@ audit payload 只记录：
 桌面端：
 
 - 左侧全局导航。
-- Codex 内部上下文列：新对话、搜索、置顶、项目分组、最近会话。
-- 主工作区：当前 thread 或轻量空状态 composer。
-- 右侧 inspector：workspace、Git、CLI、审批、错误和事件诊断。
+- Codex 内部左栏：项目和 thread 列表。
+- 主工作区：当前 thread conversation、任务事件摘要和 composer。
+- 右侧 inspector：workspace/worktree、Git changed files、diff/review、preview、审批、错误和运行状态。
 
-移动端：
+当前阶段按桌面端工作台优先验收。常规笔记本宽度下三栏结构必须稳定；移动端不作为 Codex Desktop-like 改造的阻塞验收项。
 
-- 顶部显示当前 thread/workspace。
-- 会话列表进入抽屉。
-- composer 固定底部。
-- 权限、模型和 workspace 选择收进 bottom sheet。
-- 审批请求必须突出但不遮挡长输出阅读。
+Codex 的交互质量必须尽量靠拢 Codex Desktop。新建任务、发送 prompt、流式响应、审批、中断、继续、review diff、打开 preview 和 follow-up 都应是连续、低延迟、少跳转的任务流，不能退化成表单页、日志页和诊断页的拼接。
 
 ### 9.3 视觉语言
 
@@ -716,6 +731,8 @@ audit payload 只记录：
 ### 9.4 关键组件
 
 - Composer：多行输入、发送、中断、附件、workspace selector、model selector、permission selector。
+- Conversation transcript：支持富文本 Markdown，包括段落、列表、引用、表格、链接、代码块、inline code、任务列表和长内容折叠；assistant delta 必须合并到稳定消息，避免重复卡片或流式跳动。
+- Markdown code block：语法高亮、复制、横向滚动、文件名/语言标记；技术值使用 monospace。
 - Thread list item：标题、workspace、状态、最近活动、置顶、错误标记。
 - Event stream：按语义类型折叠/展开，命令和 diff 默认紧凑展示。
 - Approval panel：命令摘要、cwd、命中规则、风险、允许一次、拒绝、中断。
@@ -725,19 +742,17 @@ audit payload 只记录：
 
 ## 10. 实施顺序
 
-1. 确认本功能文档和总技术边界。
-2. 新增 SQLite migration，创建 `codex_cli_*` 表，并加入旧表探测。
-3. 新增 `internal/codexclient.Detector`，实现 binary/version/doctor 能力探测。
-4. 新增 AppServerSupervisor、定时 probe、一键启动 API 和 fake app-server 测试夹具。
-5. 新增 workspace store 和 path policy。
-6. 新增 app-server stdio JSON-RPC client，使用 fake app-server 覆盖协议解析。
-7. 新增 EventMapper 和 SSE 历史恢复。
-8. 新增 thread/turn API，先支持 read-only 创建和恢复。
-9. 新增 approval broker，保证 pending request 可恢复。
-10. 新增 exec fallback。
-11. 新增 Codex 页面、上下文列、composer、event stream、inspector 和 app-server start 状态条。
-12. 补齐 audit、redaction、retention 和诊断 UI。
-13. 用真实 `codex` CLI 做本机验收，但测试中使用 fake CLI，避免 CI 依赖 owner 账号。
+1. 保持既有 `codex_cli_*` schema、detector、app-server supervisor、event mapper、approval broker 和 exec fallback 的安全边界。
+2. 先按 `codex-desktop-like-web-client-plan.md` 改造 Codex 首页：让三栏 coding workbench 成为默认入口。
+3. 把当前 thread approval 内联到 conversation 和 inspector，跨 thread inbox 只做汇总。
+4. 把 changed files、diff/review 从 `Tools` 抽屉提升到右侧 inspector 默认视图。
+5. 把 preview 从 `Tools` 抽屉提升为右侧 inspector view 或主区域 split view。
+6. 将 Workspaces、Runtime、Diagnostics、Capabilities、Settings、Automations 和 Notifications 收进 `More` / `Runtime` 低频入口。
+7. 稳定 changed files / diff API，补齐截断、路径边界和 redaction。
+8. 增加 worktree metadata 和新建 thread execution mode。
+9. 增加 worktree merge/apply/discard 受控入口。
+10. 增加 preview 配置、preview comment 和 follow-up 链路。
+11. 最后整理 Automations/Notifications，避免主路径重新变成管理台形态。
 
 ## 11. 测试策略
 
@@ -767,7 +782,7 @@ audit payload 只记录：
 
 前端测试：
 
-- 空状态 composer 不像营销页，移动端不溢出。
+- 空状态 composer 不像营销页，桌面和常规笔记本宽度下三栏工作台稳定、不溢出。
 - Thread list 搜索、置顶、归档。
 - Event stream 长输出折叠和跳到底部。
 - Approval panel 刷新后仍可操作。
@@ -776,31 +791,35 @@ audit payload 只记录：
 
 ## 12. 待确认问题
 
-- MVP 是否必须支持 app-server thread fork，还是先只做 resume 和 archive。
+- P0 是否保留现有 app-server thread fork 入口，还是先弱化为高级操作，只突出 new/continue/archive。
 - 是否需要从 Codex 本地 session 清单导入已有 CLI/TUI 会话摘要。
 - 是否允许 owner 配置 `codex_cli.codex_home` 为专用目录，还是始终复用运行用户默认 Codex home。
-- 是否在第一版提供图片输入，还是先只支持文本 prompt。
+- Codex composer 图片输入保留在 Codex 自身闭环内；仍需确认首版是否必须支持剪贴板粘贴、多图附件和附件缩略图全部同时交付。
 - 是否需要支持 Codex custom slash commands 的可视化入口，还是让用户在 prompt 中直接输入 slash command。
+- P1 worktree 的默认存放位置使用 workspace sibling、受控 runtime root，还是二者都支持。
+- P1 merge/apply back 是直接操作 Git worktree，还是先只提供 patch export / manual apply。
+- P2 preview 的第一阶段是否只支持 owner 手动配置 URL，还是支持受控启动 dev server。
 
 ## 13. 桌面级能力规划
 
 本节记录 Codex 桌面客户端中较完整的产品能力如何映射到 Phantom Lancer。它不是 MVP 范围，也不要求一次性实现桌面端 parity。优先级遵循个人服务器 Web 控制台边界：先补可审计、可恢复、低权限、低噪音的工作台能力；涉及远程平台、桌面 GUI 控制、任意 Git 远端写操作或系统级截图的能力默认延后。
 
-优先级定义：
+优先级定义与 [Codex Desktop-like Web Client 改造方案](./codex-desktop-like-web-client-plan.md) 保持一致：
 
-- `P1`：下一阶段可进入实现设计，和当前 Codex 模块的会话、事件、审批、工作区强相关。
-- `P2`：需要较多新数据模型或后台调度，但仍适合个人服务器控制台。
-- `P3`：可做轻量入口或诊断视图，但不应阻塞核心会话体验。
+- `P0`：像 Codex Desktop 一样写代码的最短路径，必须优先于管理台能力。
+- `P1`：Worktree 和 Review 闭环，和当前 Codex 模块的会话、事件、审批、工作区强相关。
+- `P2`：Preview 和本地环境，需要较多新数据模型或受控命令/代理能力。
+- `P3`：自动化、通知和跨 thread 汇总，可做轻量入口或诊断视图，但不应阻塞核心会话体验。
 - `P4 / 超低优先级`：先只记录，不进入近期实现计划；除非后续有明确使用场景、风险边界和验证方案。
 
 ### 13.1 P4 / 超低优先级：暂不进入近期实现
 
 以下能力先作为长期参考记录，不纳入当前 Codex 模块近期开发队列：
 
-1. `Local / Worktree / Cloud 运行模式`
+1. `Cloud 运行模式`
    - 桌面端语义：Local 直接在当前项目目录运行，Worktree 为任务创建隔离 Git worktree，Cloud 在远端环境运行。
-   - Phantom Lancer 处理：近期仍只支持已登记 workspace + `app-server` / `exec fallback`。不做 mode selector，不创建/清理 Git worktree，不接入 Cloud environment。
-   - 延后原因：Worktree 生命周期、冲突处理、清理策略、后台任务隔离和 Cloud 账号/环境模型都会显著扩大权限面。
+   - Phantom Lancer 处理：Local/current workspace 和 Worktree 进入 P1 设计；Cloud environment 仍不接入。
+   - 延后原因：Cloud 账号、远端环境、远端文件系统和任务编排会显著扩大权限面，且不符合当前个人服务器本机 Codex CLI Client 边界。
 
 2. `Commit / Push / PR 工作流`
    - 桌面端语义：在 app 内生成 commit、push 到远端、创建 PR，并读取 PR review context。
@@ -1001,7 +1020,7 @@ audit payload 只记录：
 - 不把完整网页正文、截图 base64 或带 token 的 URL 写入服务日志/audit。
 - 浏览器进程必须有生命周期清理和并发上限。
 
-### 13.6 P2：Automations / Thread Wakeups
+### 13.6 P3：Automations / Thread Wakeups
 
 目标：把“定时检查、长任务跟进、周期性诊断”变成 Codex 模块内的受控后台能力，而不是任意后台 agent。
 

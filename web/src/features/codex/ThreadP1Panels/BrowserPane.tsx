@@ -3,16 +3,17 @@ import type { FormEvent } from "react";
 import type { AppActions } from "../../../app/App";
 import type { CodexBrowserSession, CodexThread } from "../../../app/types";
 import { friendlyError } from "../../../api/client";
-import { Button, CheckLabel, EmptyState } from "../../../components/ui";
+import { Button, CheckLabel, EmptyState, Field, useDangerConfirm } from "../../../components/ui";
 
-export function BrowserPane({ actions, thread, onRefresh }: { actions: AppActions; thread: CodexThread; onRefresh: () => void }) {
+export function BrowserPane({ actions, thread, onDraft, onRefresh }: { actions: AppActions; thread: CodexThread; onDraft: (threadId: string, prompt: string) => void; onRefresh: () => void }) {
   const [items, setItems] = useState<CodexBrowserSession[]>([]);
-  const [url, setUrl] = useState("http://127.0.0.1:5173");
+  const [url, setUrl] = useState("");
   const [active, setActive] = useState<CodexBrowserSession | null>(null);
   const [comment, setComment] = useState("");
   const [allowPublic, setAllowPublic] = useState(false);
   const [marking, setMarking] = useState(false);
   const [point, setPoint] = useState<{ x: number; y: number } | null>(null);
+  const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
   const load = useCallback(async () => {
     const response = await actions.api<{ items?: CodexBrowserSession[] }>(`/api/codex/threads/${thread.id}/browser/sessions`);
@@ -52,7 +53,26 @@ export function BrowserPane({ actions, thread, onRefresh }: { actions: AppAction
     }
   }
 
+  function sendCommentFollowUp() {
+    if (!active || !comment.trim()) return;
+    const prompt = previewFollowUpPrompt(active, comment.trim(), point);
+    onDraft(thread.id, prompt);
+    setComment("");
+    setPoint(null);
+    setMarking(false);
+    actions.setToast("已填入 composer，可编辑后发送", "good");
+  }
+
   async function deleteSession(id: string) {
+    const confirmed = await confirmDanger({
+      title: "删除预览会话",
+      body: "这会删除当前 thread 的预览会话记录。",
+      objectName: active?.url || id,
+      impact: ["预览 iframe 会关闭。", "已写入 thread 的评论和事件不会删除。"],
+      recovery: "需要时可以重新打开相同 URL 创建新的预览会话。",
+      confirmLabel: "删除预览",
+    });
+    if (!confirmed) return;
     try {
       await actions.api(`/api/codex/browser/sessions/${id}`, { method: "DELETE", csrf: actions.csrf });
       const next = items.filter((item) => item.id !== id);
@@ -66,16 +86,20 @@ export function BrowserPane({ actions, thread, onRefresh }: { actions: AppAction
 
   return (
     <div className="grid gap-3">
+      {dangerConfirmDialog}
       <PreviewOpenForm allowPublic={allowPublic} onAllowPublicChange={setAllowPublic} onSubmit={open} onURLChange={setUrl} url={url} />
       <PreviewSessionList activeId={active?.id} items={items} onSelect={setActive} />
       {active ? (
         <>
           <PreviewFrame active={active} marking={marking} onPoint={setPoint} onStopMarking={() => setMarking(false)} point={point} />
           <PreviewActions active={active} marking={marking} onDelete={(id) => void deleteSession(id)} onPointClear={() => setPoint(null)} onToggleMarking={() => setMarking((value) => !value)} point={point} />
-          <form className="grid grid-cols-[minmax(0,1fr)_auto] gap-2" onSubmit={addComment}>
-            <input className="input" onChange={(event) => setComment(event.target.value)} placeholder="给当前预览添加视觉反馈或验证结论" value={comment} />
-            <Button disabled={!comment.trim()} type="submit">写入评论</Button>
+          <form className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2" onSubmit={addComment}>
+            <Field label="预览反馈">
+              <input autoComplete="off" className="input" name="codex_preview_comment" onChange={(event) => setComment(event.target.value)} placeholder="描述视觉问题或验证结论" value={comment} />
+            </Field>
+            <Button disabled={!comment.trim()} type="submit">记录</Button>
           </form>
+          <Button disabled={!comment.trim()} onClick={sendCommentFollowUp} tone="primary">填入 composer</Button>
         </>
       ) : (
         <EmptyState title="暂无预览" body="支持 localhost/127.0.0.1、workspace file URL；公共 URL 需要显式允许，私网探测默认拒绝。" />
@@ -86,9 +110,11 @@ export function BrowserPane({ actions, thread, onRefresh }: { actions: AppAction
 
 function PreviewOpenForm({ allowPublic, url, onAllowPublicChange, onSubmit, onURLChange }: { allowPublic: boolean; url: string; onAllowPublicChange: (value: boolean) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onURLChange: (value: string) => void }) {
   return (
-    <form className="grid grid-cols-[minmax(0,1fr)_auto] gap-2" onSubmit={onSubmit}>
-      <input className="input mono" onChange={(event) => onURLChange(event.target.value)} placeholder="http://127.0.0.1:5173" value={url} />
-      <Button type="submit">打开预览</Button>
+    <form className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2" onSubmit={onSubmit}>
+      <Field label="Preview URL">
+        <input autoComplete="off" className="input mono" name="codex_preview_url" onChange={(event) => onURLChange(event.target.value)} placeholder="http://127.0.0.1:5173" value={url} />
+      </Field>
+      <Button disabled={!url.trim()} type="submit">打开预览</Button>
       <CheckLabel
         checked={allowPublic}
         onChange={(checked) => onAllowPublicChange(checked)}
@@ -141,7 +167,7 @@ function PreviewActions({ active, marking, point, onDelete, onPointClear, onTogg
         {marking ? "取消标注" : point ? `位置 ${point.x}, ${point.y}` : "标注区域"}
       </button>
       {point ? <button className="text-[var(--muted-strong)] hover:text-[var(--text)]" onClick={onPointClear} type="button">清除位置</button> : null}
-      <button className="text-[var(--muted-strong)] hover:text-[var(--danger)]" onClick={() => onDelete(active.id)} type="button">关闭预览</button>
+      <button className="text-[var(--muted-strong)] hover:text-[var(--danger)]" onClick={() => onDelete(active.id)} type="button">删除预览</button>
     </div>
   );
 }
@@ -154,4 +180,9 @@ function previewAllowsScripts(raw?: string): boolean {
   } catch {
     return false;
   }
+}
+
+function previewFollowUpPrompt(active: CodexBrowserSession, body: string, point: { x: number; y: number } | null): string {
+  const location = point ? ` at approximate preview coordinates x=${point.x}, y=${point.y}` : "";
+  return `Please fix this preview issue${location}.\n\nPreview URL: ${active.url || "current preview"}\nFeedback:\n${body}\n\nMake the smallest safe code change, then summarize what changed.`;
 }

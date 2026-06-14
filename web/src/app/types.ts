@@ -449,6 +449,25 @@ export interface ImageAsset {
   updatedAt?: string;
 }
 
+export interface ImagePrompt {
+  id: string;
+  title: string;
+  description?: string;
+  prompt: string;
+  mode: string;
+  model?: string;
+  aspectRatio?: string;
+  resolution?: string;
+  imageCount?: number;
+  tags?: string[];
+  status?: string;
+  useCount?: number;
+  lastUsedAt?: string;
+  deletedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 interface ImageGenerationSource {
   id?: string;
   jobId?: string;
@@ -506,6 +525,7 @@ export interface ImagesPayload {
   status?: ImageStatus;
   jobs?: ImageGenerationJob[];
   assets?: ImageAsset[];
+  prompts?: ImagePrompt[];
   count?: number;
 }
 
@@ -619,6 +639,13 @@ export interface CodexThread {
   kind?: string;
   background?: boolean;
   backgroundSource?: string;
+  executionMode?: string;
+  worktreeSummary?: string;
+  baseBranch?: string;
+  branchName?: string;
+  worktreeStatus?: string;
+  mergeStatus?: string;
+  discardedAt?: string;
   model?: string;
   sandboxMode?: string;
   approvalPolicy?: string;
@@ -628,6 +655,19 @@ export interface CodexThread {
   lastError?: string;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface CodexWorktreeStatus {
+  threadId?: string;
+  executionMode?: string;
+  worktreeSummary?: string;
+  baseBranch?: string;
+  branchName?: string;
+  worktreeStatus?: string;
+  mergeStatus?: string;
+  dirtyStatus?: string;
+  discardedAt?: string;
+  lastError?: string;
 }
 
 export interface CodexTurn {
@@ -673,7 +713,7 @@ export interface CodexApproval {
   createdAt?: string;
 }
 
-interface CodexAttachment {
+export interface CodexAttachment {
   id: string;
   filename?: string;
   contentType?: string;
@@ -849,6 +889,8 @@ export interface DockerSettings {
   installEnabled?: boolean;
   daemonControlEnabled?: boolean;
   containerCreateEnabled?: boolean;
+  pullConcurrency?: number;
+  daemonPullConcurrency?: number;
   updatedAt?: string;
 }
 
@@ -898,6 +940,7 @@ export interface DockerControlStatus {
   privilegeMethod?: string;
   activeJob?: DockerJob;
   latestJob?: DockerJob;
+  daemonPullConcurrency?: number;
 }
 
 export interface DockerRegistrySettings {
@@ -911,6 +954,8 @@ export interface DockerRegistrySettings {
   requireTls?: boolean;
   allowAnonymousPull?: boolean;
   allowInsecureLocal?: boolean;
+  maxRepositories?: number;
+  maxTagsPerRepository?: number;
 }
 
 export interface DockerRegistryStatus {
@@ -922,6 +967,8 @@ export interface DockerRegistryStatus {
   objectPrefix?: string;
   quotaBytes?: number;
   usageBytes?: number;
+  maxRepositories?: number;
+  maxTagsPerRepository?: number;
   repositoryCount?: number;
   credentialCount?: number;
   requireTls?: boolean;
@@ -935,6 +982,7 @@ export interface DockerRegistryCredential {
   status: string;
   scopes?: string[];
   repositoryPrefix?: string;
+  hasStoredSecret?: boolean;
   lastUsedAt?: string;
   createdAt?: string;
   rotatedAt?: string;
@@ -957,6 +1005,8 @@ interface DockerRegistryManifest {
   repository: string;
   mediaType?: string;
   sizeBytes?: number;
+  configSizeBytes?: number;
+  layerCount?: number;
   pushedBy?: string;
   pushedAt?: string;
   deletedAt?: string;
@@ -982,11 +1032,55 @@ export interface DockerContainerSummary {
   ports?: string[];
 }
 
+export interface DockerContainerPortSummary {
+  privatePort: string;
+  public?: string;
+}
+
+export interface DockerContainerMountSummary {
+  type: string;
+  name?: string;
+  source?: string;
+  destination: string;
+  mode?: string;
+  rw: boolean;
+}
+
+export interface DockerContainerNetworkSummary {
+  name: string;
+  ipAddress?: string;
+}
+
+export interface DockerContainerLabelSummary {
+  key: string;
+  value: string;
+}
+
+export interface DockerContainerInspectSummary {
+  id: string;
+  name: string;
+  image: string;
+  created?: string;
+  state?: string;
+  status?: string;
+  running: boolean;
+  restarting: boolean;
+  exitCode: number;
+  startedAt?: string;
+  finishedAt?: string;
+  ports?: DockerContainerPortSummary[];
+  mounts?: DockerContainerMountSummary[];
+  networks?: DockerContainerNetworkSummary[];
+  labels?: DockerContainerLabelSummary[];
+  restartCount: number;
+}
+
 export interface DockerImageSummary {
   id: string;
   tags?: string[];
   created: number;
   sizeBytes: number;
+  usedBy?: string[];
 }
 
 export interface DockerVolumeSummary {
@@ -1001,6 +1095,7 @@ export interface DockerNetworkSummary {
   name: string;
   driver: string;
   scope: string;
+  usedBy?: string[];
 }
 
 export interface DockerLogLine {
@@ -1008,7 +1103,7 @@ export interface DockerLogLine {
   text: string;
 }
 
-interface DockerStats {
+export interface DockerStats {
   cpuPercent: number;
   memoryUsageBytes: number;
   memoryLimitBytes: number;

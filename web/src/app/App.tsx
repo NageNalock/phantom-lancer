@@ -19,7 +19,7 @@ import { AppShell } from "../features/AppShell";
 
 type AuthMode = "checking" | "bootstrap" | "login" | "ready" | "failed";
 const MAIN_TAB_IDS: MainTab[] = ["dashboard", "codex", "codex-gateway", "logs", "images", "docker", "v2ray", "mail", "settings"];
-const MAIN_TAB_CHILD_KEYS = ["codex", "codexInbox", "codexRuntime", "gateway", "images", "docker", "mail", "settings"];
+const MAIN_TAB_CHILD_KEYS = ["codex", "codexInbox", "codexRuntime", "codexSidebar", "gateway", "images", "docker", "mail", "settings", "drv", "drrepo", "drtag", "dcreate", "dcform", "dselc", "dseli"];
 
 export interface AppActions {
   api: typeof api;
@@ -132,7 +132,7 @@ export function App() {
   }, []);
 
   const loadAppData = useCallback(async () => {
-    const [dashboard, audit, codexGateway, settings, v2ray, imagesSettings, imageStorageSettings, imageJobs, imageAssets, mailStatus, mailAccounts] = await Promise.all([
+    const [dashboard, audit, codexGateway, settings, v2ray, imagesSettings, imageStorageSettings, imageJobs, imageAssets, imagePrompts, mailStatus, mailAccounts] = await Promise.all([
       api<AppData["dashboard"]>("/api/dashboard/summary"),
       api<{ items?: AppData["audit"] }>("/api/audit/events"),
       loadCodexGatewayData(),
@@ -140,8 +140,9 @@ export function App() {
       api<V2RayPayload>("/api/v2ray/settings"),
       api<ImagesPayload>("/api/images/settings"),
       api<{ settings?: ImagesPayload["storageSettings"] }>("/api/images/storage-settings"),
-      api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=40"),
-      api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=80"),
+      api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=200"),
+      api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=200"),
+      api<{ items?: ImagesPayload["prompts"] }>("/api/images/prompts?limit=120"),
       api<MailPayload["status"]>("/api/mail/status"),
       api<{ items?: MailAccount[] }>("/api/mail/accounts"),
     ]);
@@ -152,7 +153,7 @@ export function App() {
       codexGateway,
       settings,
       v2ray,
-      images: { ...imagesSettings, storageSettings: imageStorageSettings.settings, jobs: imageJobs.items || [], assets: imageAssets.items || [], count: imageJobs.count || 0 },
+      images: { ...imagesSettings, storageSettings: imageStorageSettings.settings, jobs: imageJobs.items || [], assets: imageAssets.items || [], prompts: imagePrompts.items || [], count: imageJobs.count || 0 },
       mail: {
         ...emptyMailPayload(),
         status: mailStatus,
@@ -210,11 +211,12 @@ export function App() {
         setData((current) => ({ ...current, v2ray: next, dashboard: { ...current.dashboard, v2ray: next.status } }));
       },
       refreshImages: async () => {
-        const [settings, storageSettings, jobs, assets] = await Promise.allSettled([
+        const [settings, storageSettings, jobs, assets, prompts] = await Promise.allSettled([
           api<ImagesPayload>("/api/images/settings"),
           api<{ settings?: ImagesPayload["storageSettings"] }>("/api/images/storage-settings"),
-          api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=40"),
-          api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=80"),
+          api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=200"),
+          api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=200"),
+          api<{ items?: ImagesPayload["prompts"] }>("/api/images/prompts?limit=120"),
         ]);
         setData((current) => ({
           ...current,
@@ -224,6 +226,7 @@ export function App() {
             storageSettings: storageSettings.status === "fulfilled" ? storageSettings.value.settings : current.images.storageSettings,
             jobs: jobs.status === "fulfilled" ? jobs.value.items || [] : current.images.jobs,
             assets: assets.status === "fulfilled" ? assets.value.items || [] : current.images.assets,
+            prompts: prompts.status === "fulfilled" ? prompts.value.items || [] : current.images.prompts,
             count: jobs.status === "fulfilled" ? jobs.value.count || 0 : current.images.count,
           },
           dashboard: { ...current.dashboard, images: settings.status === "fulfilled" ? settings.value.status : current.dashboard.images },

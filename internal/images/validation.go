@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"phantom-lancer/internal/storage"
 )
 
 var (
@@ -14,7 +16,7 @@ var (
 	allowedResolutions  = map[string]bool{"": true, "1k": true, "2k": true}
 	allowedFormats      = map[string]bool{"url": true, "b64_json": true}
 	modelNamePattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$`)
-	assetIDPattern      = regexp.MustCompile(`^imgasset_[A-Za-z0-9_-]{8,80}$`)
+	assetIDPattern      = regexp.MustCompile(`^(imgasset|medasset)_[A-Za-z0-9_-]{8,80}$`)
 )
 
 func NormalizeRequest(request ImagineRequest) ImagineRequest {
@@ -135,6 +137,51 @@ func SettingSupported(field, value string) error {
 		if !allowedAspectRatios[value] {
 			return fmt.Errorf("aspect ratio is not supported")
 		}
+	}
+	return nil
+}
+
+func ValidatePrompt(prompt storage.ImagePrompt) error {
+	prompt = storage.NormalizeImagePrompt(prompt)
+	if prompt.Title == "" {
+		return errors.New("prompt title is required")
+	}
+	if prompt.Prompt == "" {
+		return errors.New("prompt is required")
+	}
+	if len(prompt.Prompt) > 8000 {
+		return errors.New("prompt is too long")
+	}
+	switch prompt.Mode {
+	case ModeTextToImage, ModeImageToImage, ModeMultiImageEdit:
+	case VideoModeTextToVideo, VideoModeImageToVideo, VideoModeMultiImageVideo, VideoModeKeyframes:
+	default:
+		return errors.New("prompt mode is invalid")
+	}
+	if prompt.Model != "" && !modelNamePattern.MatchString(prompt.Model) {
+		return errors.New("model name is invalid")
+	}
+	switch prompt.Mode {
+	case VideoModeTextToVideo, VideoModeImageToVideo, VideoModeMultiImageVideo, VideoModeKeyframes:
+		if prompt.AspectRatio != "" && !allowedAspectRatios[prompt.AspectRatio] {
+			return errors.New("aspect ratio is not supported")
+		}
+		if prompt.Resolution != "" && !allowedResolutions[prompt.Resolution] {
+			return errors.New("resolution is not supported")
+		}
+	default:
+		if !allowedAspectRatios[prompt.AspectRatio] {
+			return errors.New("aspect ratio is not supported")
+		}
+		if !allowedResolutions[prompt.Resolution] {
+			return errors.New("resolution is not supported")
+		}
+	}
+	if prompt.ImageCount < 1 || prompt.ImageCount > 10 {
+		return errors.New("image count must be between 1 and 10")
+	}
+	if len(prompt.Tags) > 12 {
+		return errors.New("prompt tags are too many")
 	}
 	return nil
 }

@@ -370,6 +370,64 @@ func TestListImageGenerationJobsDoesNotNestQueriesWhileRowsOpen(t *testing.T) {
 	}
 }
 
+func TestListMediaGenerationJobsIncludesRelations(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateMediaGenerationJob(ctx, MediaGenerationJob{
+		MediaType:   "image",
+		Provider:    "agnes",
+		Status:      "queued",
+		Mode:        "image_to_image",
+		ModeLabel:   "图生图",
+		Model:       "agnes-image-2.1-flash",
+		Prompt:      "quiet media relation",
+		Parameters:  map[string]any{"n": 1},
+		SourceCount: 1,
+	}, []MediaGenerationSource{{
+		AssetID:     "medasset_source",
+		Slot:        1,
+		SourceType:  "library_asset",
+		SourceLabel: "medasset_source",
+		SourceRole:  "reference",
+		MimeType:    "image/png",
+	}})
+	if err != nil {
+		t.Fatalf("create media job: %v", err)
+	}
+	if _, err := store.CompleteMediaGenerationJob(ctx, job.ID, "/v1/images/generations", map[string]any{"total_tokens": float64(1)}, []MediaGenerationOutput{{
+		AssetID:   "medasset_output",
+		Slot:      1,
+		MediaType: "image",
+		MimeType:  "image/png",
+		Storage:   "s3",
+		SizeBytes: 123,
+		Metadata:  map[string]any{"width": float64(512), "height": float64(512)},
+	}}); err != nil {
+		t.Fatalf("complete media job: %v", err)
+	}
+
+	listCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	jobs, err := store.ListMediaGenerationJobs(listCtx, 10, "", "", "", "", "")
+	if err != nil {
+		t.Fatalf("list media jobs should include relations without waiting on open rows: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("jobs len = %d, want 1: %#v", len(jobs), jobs)
+	}
+	if len(jobs[0].Sources) != 1 || jobs[0].Sources[0].AssetID != "medasset_source" {
+		t.Fatalf("unexpected media job sources: %#v", jobs[0].Sources)
+	}
+	if len(jobs[0].Outputs) != 1 || jobs[0].Outputs[0].AssetID != "medasset_output" {
+		t.Fatalf("unexpected media job outputs: %#v", jobs[0].Outputs)
+	}
+}
+
 func TestArchiveImageAssetToS3UpdatesGenerationOutputStorage(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
@@ -494,6 +552,82 @@ func TestImageAssetPrivateFiltering(t *testing.T) {
 	}
 	if len(publicItems) != 2 {
 		t.Fatalf("public list count after unset = %d, want 2", len(publicItems))
+	}
+}
+
+func TestImagePromptLibraryCRUDUseAndSoftDelete(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	created, err := store.CreateImagePrompt(ctx, ImagePrompt{
+		Title:       "Workbench portrait",
+		Description: "图生图人物风格模板",
+		Prompt:      "Keep the input composition, refine lighting, and preserve identity.",
+		Mode:        "image_to_image",
+		Model:       "grok-imagine-image-quality",
+		AspectRatio: "1:1",
+		Resolution:  "1k",
+		ImageCount:  2,
+		Tags:        []string{"portrait", "reference", "portrait"},
+	})
+	if err != nil {
+		t.Fatalf("create prompt: %v", err)
+	}
+	if created.ID == "" || created.Status != "active" {
+		t.Fatalf("unexpected created prompt: %#v", created)
+	}
+	if len(created.Tags) != 2 {
+		t.Fatalf("tags should be deduplicated, got %#v", created.Tags)
+	}
+
+	listed, err := store.ListImagePrompts(ctx, 20, "portrait", "image_to_image", "")
+	if err != nil {
+		t.Fatalf("list prompts: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("listed prompts = %#v, want %s", listed, created.ID)
+	}
+
+	updated, err := store.UpdateImagePrompt(ctx, created.ID, ImagePrompt{
+		Title:      "Quiet product shot",
+		Prompt:     "Generate a quiet product shot on a neutral desk.",
+		Mode:       "text_to_image",
+		Model:      "grok-imagine-image",
+		ImageCount: 1,
+		Tags:       []string{"product"},
+	})
+	if err != nil {
+		t.Fatalf("update prompt: %v", err)
+	}
+	if updated.Title != "Quiet product shot" || updated.Mode != "text_to_image" || updated.UseCount != 0 {
+		t.Fatalf("unexpected updated prompt: %#v", updated)
+	}
+
+	used, err := store.UseImagePrompt(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("use prompt: %v", err)
+	}
+	if used.UseCount != 1 || used.LastUsedAt == "" {
+		t.Fatalf("use count or last used not updated: %#v", used)
+	}
+
+	deleted, err := store.DeleteImagePrompt(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("delete prompt: %v", err)
+	}
+	if deleted.Status != "deleted" || deleted.DeletedAt == "" {
+		t.Fatalf("prompt should be soft deleted: %#v", deleted)
+	}
+	active, err := store.ListImagePrompts(ctx, 20, "", "", "")
+	if err != nil {
+		t.Fatalf("list active prompts: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("soft deleted prompt should not be listed by default: %#v", active)
 	}
 }
 

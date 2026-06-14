@@ -64,7 +64,7 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
           <Metric
             detail={`${images?.historyCount || data.images.count || 0} 条历史`}
             href={actions.mainTabHref("images")}
-            label="Images"
+            label="多媒体"
             onClick={(event) => handleMainTabLink(event, "images")}
             tone={images?.hasApiKey ? "good" : "warn"}
             value={imageStatusLabel(images)}
@@ -212,15 +212,15 @@ function dashboardNextActions(
 
   if (!images?.hasApiKey) {
     items.push({
-      title: "Images 缺少 provider key",
-      body: "生成任务需要先配置 Images 模块自己的 xAI provider 密钥。",
-      label: "配置 Images",
+      title: "多媒体缺少 provider key",
+      body: "生成任务需要先配置多媒体模块的 xAI / Agnes provider 密钥。",
+      label: "配置多媒体",
       tab: "images",
       tone: "warn",
     });
   } else if (images.lastJobStatus === "failed") {
     items.push({
-      title: "Images 最近任务失败",
+      title: "多媒体最近任务失败",
       body: "进入历史查看上游错误摘要，必要时检查对象存储写入策略。",
       label: "查看历史",
       tab: "images",

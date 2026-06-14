@@ -137,7 +137,7 @@ Dashboard 不展开 registry 设置表单，也不直接提供 destructive 操�
 2. 页面显示当前 registry disabled 状态、推荐 public URL 和存储目录。
 3. Owner 配置 registry public URL、storage dir、quota、storage backend 和 TLS 策略。
 4. Owner 创建一个 registry credential，例如 `personal-laptop`，选择 `pull,push` scope。
-5. 后端生成一次性显示的 secret，保存 hash，不保存明文。
+5. 后端生成一次性显示的 secret；保存 hash 用于 Registry Basic Auth 校验，同时保存 keywrap 加密后的 secret，供 owner 在 Web 控制面触发本机 Docker daemon 拉取本服务 Registry 镜像时生成 `RegistryAuth`。不保存明文。
 6. Owner 使用 Docker CLI 登录：
 
 ```bash
@@ -147,8 +147,8 @@ docker login registry.example.com
 7. 登录成功后，Owner 可以推送镜像：
 
 ```bash
-docker tag my-app:latest registry.example.com/personal/my-app:latest
-docker push registry.example.com/personal/my-app:latest
+docker tag my-app:latest registry.example.com/project/app:latest
+docker push registry.example.com/project/app:latest
 ```
 
 8. Registry 模块记录 repository/tag/manifest 元数据和 audit。
@@ -164,7 +164,7 @@ Docker client 对 registry 的访问不是浏览器 API，而是标准 Registry 
 5. Registry 写入底层 blob store。
 6. 后端记录 manifest digest、tag、size、created_at、pushed_by credential id 摘要。
 
-注意：Docker image reference 只支持 registry host 加 repository path，不支持把 registry 放在普通 Web path 下。例如 `registry.example.com/personal/my-app:latest` 中的 `personal/my-app` 是 repository name，不是 `/personal` 反向代理前缀。服务端必须能处理 registry 根路径下的 `/v2/*`。
+注意：Docker image reference 只支持 registry host 加 repository path，不支持把 registry 放在普通 Web path 下。例如 `registry.example.com/project/app:latest` 中的 `project/app` 是 repository name，不是 `/project` 反向代理前缀。服务端必须能处理 registry 根路径下的 `/v2/*`。
 
 ### 5.4 管理本机容器
 
@@ -224,6 +224,7 @@ Registry client 认证不能复用 Phantom Lancer browser session。需要单独
   - `name`
   - `status`
   - `key_hash`
+  - `secret_ciphertext`
   - `scopes`
   - `repository_prefix`
   - `last_used_at`
@@ -240,14 +241,15 @@ Scope 建议：
 
 Repository scope：
 
-- MVP 默认允许 `personal/*`。
-- 后续支持 credential 绑定到 repository prefix，例如 `apps/*`、`base/*`。
+- Credential 可以绑定到 repository prefix，例如 `personal/*`、`apps/*`、`base/*`。
+- Web 控制面创建容器时不强制固定 `personal/*` 命名空间；只要镜像引用来自当前 Registry public URL 的同一 registry host，即视为受控来源。实际拉取鉴权仍按 credential repository prefix 匹配。
 - 禁止空 prefix 的匿名 push。
 
 Auth 策略：
 
 - 默认关闭 anonymous pull。
 - `docker login` 使用 credential secret。
+- Web 控制面执行 `image pull` 且目标属于本服务 Registry public URL 时，后端可使用 active、具备 `registry.pull` 或 `registry.admin`、repository prefix 匹配且有可解密 `secret_ciphertext` 的 credential，为 Docker Engine API 生成一次性 `RegistryAuth`；旧版只保存 hash 的 credential 仍可服务外部 `docker login/push/pull`，但需要轮换或新建后才能用于 Web 自动拉取。
 - 当前实现不签发 Registry token，使用 Basic auth；未来如启用 Bearer token service，token response 必须使用短 TTL 且 payload 不包含明文 secret。
 - 删除和 admin scope 必须单独授予。
 - Credential 创建、轮换、禁用、删除写 audit。
@@ -326,6 +328,8 @@ Docker socket 风险很高。拥有 Docker socket 控制权通常等价于可以
 
 - 通过 Engine API 创建/启动容器，但参数必须经过 allowlist 校验后再下发。
 - 禁止任意 host path mount、privileged、host network、`--pid/ipc/uts=host`（详见 §7.3）。
+- 端口映射支持 `hostPort:containerPort[/proto]`、`containerPort[/proto]` 和 `bindIp:hostPort:containerPort[/proto]`。例如 `8080:80`、`5432/tcp`、`0.0.0.0:8080:80/tcp`；IPv6 全网卡绑定使用 `[::]:8080:80/tcp`。
+- `0.0.0.0` / `::` 表示绑定宿主机所有网卡，UI 必须在提交前提示公网暴露风险；未显式填写 bind IP 时应走后端安全默认值。
 - 配错单个参数即可能交出宿主机，因此该能力默认关闭，审计 risk level 为 `critical`，强制二次确认。
 
 ## 7. 安全模型
@@ -384,12 +388,15 @@ MVP 禁止：
 
 后续如果加入 `run` 或 compose，必须先设计 allowlist：
 
-- 只允许指定 image repository prefix。
+- 只允许当前受控 Registry 主机下的镜像，或显式配置的 image repository prefix。
 - 只允许指定 network。
 - 只允许命名 volume，不允许任意 host path。
+- 端口映射只允许受控字段：container port、host port、protocol 和 bind IP。bind IP 可为空、`127.0.0.1`、`0.0.0.0` 或 `::`；不暴露任意 Docker port binding 参数。
 - 不允许 privileged。
 - 不允许 `--pid=host`、`--ipc=host`、`--uts=host`。
-- 环境变量中 secret 默认 masked，UI 不回显。
+- 允许传入普通环境变量和 secret-looking 环境变量（例如 `API_KEY`、`PASSWORD`、`TOKEN`），因为很多个人服务必须通过 env 注入凭据。
+- 环境变量值只作为本次模板化 create/run 请求透传给 Docker daemon；提交成功后 UI 不在容器详情、事件流或历史记录中回显完整 env。
+- audit、events 和服务日志只记录 env 条数、是否包含 sensitive-looking key 等摘要，不记录 env 明文值。
 
 ### 7.4 日志与脱敏
 
@@ -956,6 +963,7 @@ Object Storage Profiles 不建议放入 TOML 明文配置，尤其不在配置�
 - Container env 明文。
 
 容器日志、pull progress、GC progress 应进入受控 events/job output，并设置上限。
+Docker pull progress 只持久化脱敏后的 layer/status/current/total 摘要，不保存 Docker daemon 原始 JSON line。
 
 ## 15. 实现阶段
 
