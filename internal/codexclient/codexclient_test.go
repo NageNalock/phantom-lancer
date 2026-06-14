@@ -276,6 +276,19 @@ func TestReadThreadArtifactRequiresReferencedImage(t *testing.T) {
 		t.Fatalf("expected unreferenced artifact to be hidden, got %v", err)
 	}
 
+	embeddedPath := filepath.Join(dir, "embedded.gif")
+	if err := os.WriteFile(embeddedPath, gif, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc.appendThreadEvent(ctx, thread.ID, "turn-1", EventMessageAgent, "item/completed", "agentMessage", "图片保存在 "+embeddedPath, map[string]any{"item": map[string]any{"type": "agentMessage", "text": "图片保存在 " + embeddedPath}})
+	embeddedContent, err := svc.ReadThreadArtifact(ctx, thread.ID, embeddedPath)
+	if err != nil {
+		t.Fatalf("read embedded referenced artifact: %v", err)
+	}
+	if embeddedContent.ContentType != "image/gif" || string(embeddedContent.Data) != string(gif) {
+		t.Fatalf("unexpected embedded artifact content: type=%s bytes=%d", embeddedContent.ContentType, len(embeddedContent.Data))
+	}
+
 	svc.appendThreadEvent(ctx, thread.ID, "turn-1", EventToolCompleted, "item/completed", "imageView", imagePath, map[string]any{"item": map[string]any{"type": "imageView", "path": imagePath}})
 	content, err := svc.ReadThreadArtifact(ctx, thread.ID, "file://"+imagePath)
 	if err != nil {

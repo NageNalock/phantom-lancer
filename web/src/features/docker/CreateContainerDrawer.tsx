@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { Button, Field, Panel, Pill } from "../../components/ui";
 
 type CreatePort = { containerPort: number; hostPort?: number; protocol?: string; hostIp?: string };
@@ -181,6 +181,8 @@ export function CreateContainerDrawer({
 }) {
   const firstFieldRef = useRef<HTMLInputElement>(null);
   const previousActiveRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   const portResult = useMemo(() => parsePortsStrict(createPorts), [createPorts]);
   const volumeResult = useMemo(() => parseVolumesStrict(createVolumes), [createVolumes]);
@@ -200,16 +202,15 @@ export function CreateContainerDrawer({
 
   const hasParseError = portResult.errors.length > 0 || volumeResult.errors.length > 0 || envResult.errors.length > 0;
 
-  const handleKeyDown = useCallback((event: KeyboardEvent) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      onClose();
-    }
-  }, [onClose]);
-
   useEffect(() => {
     if (!open) return;
     previousActiveRef.current = document.activeElement as HTMLElement | null;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+      }
+    };
     document.addEventListener("keydown", handleKeyDown);
     const raf = requestAnimationFrame(() => {
       firstFieldRef.current?.focus();
@@ -241,7 +242,7 @@ export function CreateContainerDrawer({
       document.removeEventListener("keydown", handleTabTrap);
       previousActiveRef.current?.focus?.();
     };
-  }, [open, handleKeyDown]);
+  }, [open]);
 
   if (!open) return null;
 

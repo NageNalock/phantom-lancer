@@ -17,7 +17,7 @@ import { AppShell } from "../features/AppShell";
 
 type AuthMode = "checking" | "bootstrap" | "login" | "ready" | "failed";
 const MAIN_TAB_IDS: MainTab[] = ["dashboard", "codex", "codex-gateway", "logs", "images", "docker", "v2ray", "settings"];
-const MAIN_TAB_CHILD_KEYS = ["codex", "codexInbox", "codexRuntime", "gateway", "images", "docker", "settings", "drv", "drrepo", "drtag", "dcreate", "dcform", "dselc", "dseli"];
+const MAIN_TAB_CHILD_KEYS = ["codex", "codexInbox", "codexRuntime", "codexSidebar", "gateway", "images", "docker", "settings", "drv", "drrepo", "drtag", "dcreate", "dcform", "dselc", "dseli"];
 
 export interface AppActions {
   api: typeof api;

@@ -22,6 +22,16 @@ export type ChatEntry =
       streaming?: boolean;
     }
   | {
+      kind: "reasoning";
+      key: string;
+      text: string;
+      turnId?: string;
+      createdAt?: string;
+      sequence: number;
+      active?: boolean;
+      duration?: string;
+    }
+  | {
       kind: "artifact";
       key: string;
       artifacts: ChatArtifact[];
@@ -60,6 +70,7 @@ export function buildChatTranscript(events: CodexEvent[], turns: CodexTurn[]): C
   const sorted = sortEvents(events);
   const entries: ChatEntry[] = [];
   const turnStartedAt = new Map<string, string>();
+  const turnFinishedAt = new Map<string, string>();
   const seenArtifactKeys = new Set<string>();
   const activeTurn = turns.find((turn) => turn.status === "running" || turn.status === "waiting_approval");
 
@@ -68,6 +79,9 @@ export function buildChatTranscript(events: CodexEvent[], turns: CodexTurn[]): C
     if (type === "turn.started" && event.turnId) {
       turnStartedAt.set(event.turnId, event.createdAt || "");
     }
+    if ((type === "turn.completed" || type === "turn.failed" || type === "turn.cancelled") && event.turnId) {
+      turnFinishedAt.set(event.turnId, event.createdAt || "");
+    }
     if (HIDDEN_TYPES.has(type)) continue;
     const artifacts = artifactsForEvent(event).filter((artifact) => {
       const key = artifact.path || artifact.src;
@@ -75,26 +89,27 @@ export function buildChatTranscript(events: CodexEvent[], turns: CodexTurn[]): C
       seenArtifactKeys.add(key);
       return true;
     });
-    if (artifacts.length) {
-      entries.push({
-        kind: "artifact",
-        key: `artifact-${eventKey(event)}`,
-        artifacts,
-        createdAt: event.createdAt,
-        sequence: event.sequence || 0,
-      });
-      if (event.itemType === "imageView") continue;
-    }
     if (CONVERSATION_TYPES.has(type)) {
       appendMessageEntry(entries, event);
+      if (artifacts.length) appendArtifactEntry(entries, event, artifacts);
       continue;
     }
     if (type === "message.reasoning") {
-      appendReasoningEntry(entries, event);
+      appendReasoningEntry(entries, event, activeTurn?.id);
       continue;
+    }
+    if (artifacts.length) {
+      appendArtifactEntry(entries, event, artifacts);
+      if (event.itemType === "imageView") continue;
     }
     const status = statusEntryForEvent(event, turnStartedAt);
     if (status) entries.push(status);
+  }
+
+  for (const entry of entries) {
+    if (entry.kind !== "reasoning" || !entry.turnId) continue;
+    const duration = durationLabel(turnStartedAt.get(entry.turnId), turnFinishedAt.get(entry.turnId));
+    if (duration) entry.duration = duration.trim();
   }
 
   const lastMessage = [...entries].reverse().find((entry) => entry.kind === "message");
@@ -113,6 +128,16 @@ export function buildChatTranscript(events: CodexEvent[], turns: CodexTurn[]): C
   }
 
   return entries;
+}
+
+function appendArtifactEntry(entries: ChatEntry[], event: CodexEvent, artifacts: ChatArtifact[]) {
+  entries.push({
+    kind: "artifact",
+    key: `artifact-${eventKey(event)}`,
+    artifacts,
+    createdAt: event.createdAt,
+    sequence: event.sequence || 0,
+  });
 }
 
 function appendMessageEntry(entries: ChatEntry[], event: CodexEvent) {
@@ -185,32 +210,32 @@ function statusEntryForEvent(event: CodexEvent, turnStartedAt: Map<string, strin
   return event.textPreview ? statusFromEvent(event, "neutral") : null;
 }
 
-function appendReasoningEntry(entries: ChatEntry[], event: CodexEvent) {
+function appendReasoningEntry(entries: ChatEntry[], event: CodexEvent, activeTurnId?: string) {
   const text = event.textPreview || "";
   const key = [event.turnId || "thread", "reasoning", payloadItemId(event) || "message"].join(":");
-  const existing = findLastStatus(entries, key) || (!payloadItemId(event) ? findLastStatusByPrefix(entries, `${event.turnId || "thread"}:reasoning:`) : null);
+  const active = Boolean(activeTurnId && event.turnId === activeTurnId);
+  const existing = findLastReasoning(entries, key) || (!payloadItemId(event) ? findLastReasoningByPrefix(entries, `${event.turnId || "thread"}:reasoning:`) : null);
   if (!existing) {
     entries.push({
-      kind: "status",
+      kind: "reasoning",
       key,
-      label: "正在思考",
-      detail: text,
-      tone: "neutral",
+      text,
+      turnId: event.turnId,
       createdAt: event.createdAt,
       sequence: event.sequence || 0,
-      active: isDeltaMessage(event),
+      active,
     });
     return;
   }
   existing.createdAt = event.createdAt || existing.createdAt;
   existing.sequence = event.sequence || existing.sequence;
-  existing.active = isDeltaMessage(event);
+  existing.active = active;
   if (isCompletedMessage(event)) {
-    existing.detail = chooseCompletedText(existing.detail || "", text);
+    existing.text = chooseCompletedText(existing.text || "", text);
   } else if (isDeltaMessage(event)) {
-    existing.detail = appendDelta(existing.detail || "", text);
-  } else if (text && !(existing.detail || "").includes(text)) {
-    existing.detail = text;
+    existing.text = appendDelta(existing.text || "", text);
+  } else if (text && !(existing.text || "").includes(text)) {
+    existing.text = text;
   }
 }
 
@@ -235,6 +260,7 @@ function artifactsForEvent(event: CodexEvent): ChatArtifact[] {
   if (itemType === "imageView") {
     addRef(refs, firstString(item?.path, item?.url, item?.src, item?.filePath, item?.file));
   }
+  collectImageRefsFromText(event.textPreview, refs);
   collectImageCollection(payload.images, refs);
   collectImageCollection(payload.artifacts, refs);
   collectImageCollection(payload.attachments, refs);
@@ -269,13 +295,31 @@ function collectImageCollection(value: unknown, refs: string[]) {
   }
   const record = recordValue(value);
   if (!record) {
-    if (typeof value === "string" && looksLikeImageRef(value)) addRef(refs, value);
+    if (typeof value === "string") collectImageRefsFromText(value, refs);
     return;
   }
   const type = firstString(record.type, record.kind, record.mediaType, record.contentType).toLowerCase();
   const likelyImage = type.includes("image") || looksLikeImageRef(firstString(record.path, record.url, record.src, record.filePath, record.file));
   if (!likelyImage) return;
   addRef(refs, firstString(record.path, record.url, record.src, record.filePath, record.file));
+}
+
+function collectImageRefsFromText(value: unknown, refs: string[]) {
+  if (typeof value !== "string" || !value.trim()) return;
+  const patterns = [
+    /\bhttps?:\/\/[^\s<>"')\]]+\.(?:png|jpe?g|gif|webp)(?:[?#][^\s<>"')\]]*)?/gi,
+    /\bfile:\/\/\/[^\s<>"')\]]+\.(?:png|jpe?g|gif|webp)(?:[?#][^\s<>"')\]]*)?/gi,
+    /(^|[\s(["'`])((?:\/[^\s<>"'`)\]]+)+\.(?:png|jpe?g|gif|webp)(?:[?#][^\s<>"'`)\]]*)?)/gi,
+  ];
+  for (const pattern of patterns) {
+    for (const match of value.matchAll(pattern)) {
+      addRef(refs, cleanImageRef(match[2] || match[0] || ""));
+    }
+  }
+}
+
+function cleanImageRef(value: string): string {
+  return value.trim().replace(/[.,;:!?]+$/g, "");
 }
 
 function addRef(refs: string[], value: string) {
@@ -293,18 +337,18 @@ function imageLabel(value: string): string {
   return name || "image";
 }
 
-function findLastStatus(entries: ChatEntry[], key: string) {
+function findLastReasoning(entries: ChatEntry[], key: string) {
   for (let index = entries.length - 1; index >= 0; index--) {
     const entry = entries[index];
-    if (entry.kind === "status" && entry.key === key) return entry;
+    if (entry.kind === "reasoning" && entry.key === key) return entry;
   }
   return null;
 }
 
-function findLastStatusByPrefix(entries: ChatEntry[], prefix: string) {
+function findLastReasoningByPrefix(entries: ChatEntry[], prefix: string) {
   for (let index = entries.length - 1; index >= 0; index--) {
     const entry = entries[index];
-    if (entry.kind === "status" && entry.key.startsWith(prefix)) return entry;
+    if (entry.kind === "reasoning" && entry.key.startsWith(prefix)) return entry;
   }
   return null;
 }

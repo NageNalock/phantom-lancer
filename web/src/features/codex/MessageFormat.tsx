@@ -42,7 +42,7 @@ const markdownComponents: Components = {
   img({ alt, node: _node, src, ...props }) {
     const safeSrc = safeImageSrc(src);
     if (!safeSrc) return null;
-    return <img {...props} alt={alt || ""} className="message-image" loading="lazy" src={safeSrc} />;
+    return <img {...props} alt={alt || ""} className="message-image" decoding="async" height={520} loading="lazy" src={safeSrc} width={820} />;
   },
   code({ children, className, node: _node, ...props }) {
     const source = String(children);

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { EmptyState } from "../../components/ui";
 import { formatDate } from "../../domain/labels";
 import type { ChatEntry } from "./ChatWorkspace/transcript";
@@ -29,6 +29,8 @@ export function ConversationTranscript({
         entries.map((entry) => (
           entry.kind === "message"
             ? <ConversationMessage entry={entry} key={entry.key} />
+            : entry.kind === "reasoning"
+              ? <ConversationReasoning entry={entry} key={entry.key} />
             : entry.kind === "artifact"
               ? <ConversationArtifact entry={entry} key={entry.key} />
               : <ConversationStatus entry={entry} key={entry.key} />
@@ -54,13 +56,54 @@ function ConversationArtifact({ entry }: { entry: Extract<ChatEntry, { kind: "ar
         <div className="chat-artifact-grid">
           {entry.artifacts.map((artifact) => (
             <a className="chat-image-artifact" href={artifact.src} key={artifact.id} rel="noreferrer" target="_blank">
-              <img alt={artifact.label} loading="lazy" src={artifact.src} />
+              <img alt={artifact.label} decoding="async" height={480} loading="lazy" src={artifact.src} width={720} />
               <span>{artifact.label}</span>
             </a>
           ))}
         </div>
       </div>
     </article>
+  );
+}
+
+function ConversationReasoning({ entry }: { entry: Extract<ChatEntry, { kind: "reasoning" }> }) {
+  return (
+    <article className="chat-entry chat-reasoning-entry">
+      <div className="chat-assistant-rail" aria-hidden="true">C</div>
+      <ReasoningDisclosure entry={entry} />
+    </article>
+  );
+}
+
+function ReasoningDisclosure({ entry }: { entry: Extract<ChatEntry, { kind: "reasoning" }> }) {
+  const [open, setOpen] = useState(Boolean(entry.active));
+  const wasActiveRef = useRef(Boolean(entry.active));
+
+  useEffect(() => {
+    if (entry.active) {
+      setOpen(true);
+      wasActiveRef.current = true;
+      return;
+    }
+    if (wasActiveRef.current) {
+      setOpen(false);
+      wasActiveRef.current = false;
+    }
+  }, [entry.active]);
+
+  return (
+    <details className={`chat-reasoning-card ${entry.active ? "chat-reasoning-card-active" : ""}`} onToggle={(event) => setOpen(event.currentTarget.open)} open={open}>
+      <summary>
+        <span className="chat-reasoning-summary-main">
+          {entry.active ? <span className="chat-thinking-dot" /> : null}
+          <span>{entry.active ? "正在思考" : "思考内容"}</span>
+        </span>
+        <span className="chat-reasoning-summary-meta">{entry.active ? "实时" : entry.duration ? `已处理 ${entry.duration}` : "已完成"}</span>
+      </summary>
+      <div className="chat-reasoning-body">
+        {entry.text ? entry.text : "正在整理推理内容。"}
+      </div>
+    </details>
   );
 }
 
@@ -109,6 +152,7 @@ function ConversationStatus({ entry }: { entry: Extract<ChatEntry, { kind: "stat
 
 function entryTextLength(entry: ChatEntry): number {
   if (entry.kind === "message") return entry.text.length;
+  if (entry.kind === "reasoning") return entry.text.length;
   if (entry.kind === "artifact") return entry.artifacts.length;
   return entry.detail?.length || 0;
 }

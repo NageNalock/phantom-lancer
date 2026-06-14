@@ -69,7 +69,7 @@ export function ThreadInspector({
           <p className="muted m-0 text-sm">选择会话后显示工作区、CLI 状态、审批和诊断信息。</p>
         )}
         <div className="min-h-0 overflow-auto pr-1">
-          {!thread ? <EmptyState title="未选择 thread" body="从左侧选择最近 thread，或创建新的代码任务。" /> : null}
+          {!thread ? <EmptyState title="未选择 thread" body="展开项目 / 会话后选择最近 thread，或创建新的代码任务。" /> : null}
           {thread && view === "changes" ? <ReviewPane actions={actions} thread={thread} onDraft={onDraft} onRefresh={onApprovalsChange} /> : null}
           {thread && view === "preview" ? <BrowserPane actions={actions} thread={thread} onDraft={onDraft} onRefresh={onApprovalsChange} /> : null}
           {thread && view === "run" ? <CommandPane actions={actions} thread={thread} onRefresh={onApprovalsChange} /> : null}

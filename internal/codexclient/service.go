@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,8 @@ var allowedAttachmentTypes = map[string]string{
 	"image/webp": ".webp",
 	"image/gif":  ".gif",
 }
+
+var artifactImagePathInTextRE = regexp.MustCompile(`(?:file://)?/[^\s<>"')\]]+\.(?i:png|jpe?g|gif|webp)(?:[?#][^\s<>"')\]]*)?`)
 
 // ErrModuleDisabled is returned when the Codex module is turned off.
 var ErrModuleDisabled = errors.New("codex module disabled")
@@ -1175,6 +1178,10 @@ func normalizeArtifactPath(raw string) (string, error) {
 	}
 	if parsed, err := url.Parse(value); err == nil && parsed.Scheme == "file" {
 		value = parsed.Path
+	} else if strings.HasPrefix(value, "/") {
+		if idx := strings.IndexAny(value, "?#"); idx >= 0 {
+			value = value[:idx]
+		}
 	}
 	if !filepath.IsAbs(value) {
 		return "", errors.New("artifact path must be absolute")
@@ -1204,7 +1211,37 @@ func payloadReferencesPath(value any, target string) bool {
 
 func pathStringMatches(value, target string) bool {
 	normalized, err := normalizeArtifactPath(value)
-	return err == nil && normalized == target
+	if err == nil && normalized == target {
+		return true
+	}
+	for _, ref := range artifactImagePathRefsInText(value) {
+		normalized, err := normalizeArtifactPath(ref)
+		if err == nil && normalized == target {
+			return true
+		}
+	}
+	return false
+}
+
+func artifactImagePathRefsInText(value string) []string {
+	matches := artifactImagePathInTextRE.FindAllString(value, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	refs := make([]string, 0, len(matches))
+	seen := map[string]struct{}{}
+	for _, match := range matches {
+		ref := strings.TrimRight(strings.TrimSpace(match), ".,;:!?")
+		if ref == "" {
+			continue
+		}
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+	return refs
 }
 
 func artifactImageContentType(data []byte, path string) string {

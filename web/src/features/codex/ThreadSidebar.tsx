@@ -34,6 +34,7 @@ export function ThreadList({
   onArchive,
   onResume,
   onFork,
+  onCollapse,
 }: {
   loading: boolean;
   threads: CodexThread[];
@@ -56,6 +57,7 @@ export function ThreadList({
   onArchive: (thread: CodexThread) => void;
   onResume: (thread: CodexThread) => void;
   onFork: (thread: CodexThread) => void;
+  onCollapse: () => void;
 }) {
   const filtersActive = workspaceFilter !== "all" || statusFilter !== "all" || includeArchived;
   const [newWorkspace, setNewWorkspace] = useState("");
@@ -95,12 +97,15 @@ export function ThreadList({
   }
 
   return (
-    <section className="panel min-w-0 overflow-hidden">
+    <section className="panel min-w-0 overflow-hidden" id="codex-thread-sidebar">
       <div className="panel-header">
         <div className="min-w-0">
           <h2 className="m-0 text-sm font-semibold">项目 / 会话</h2>
           <p className="muted mt-1 mb-0 text-xs">选择项目，创建或继续代码任务。</p>
         </div>
+        <Button aria-controls="codex-thread-sidebar" aria-expanded="true" className="h-8 min-h-8 px-2 text-xs" onClick={onCollapse}>
+          收起
+        </Button>
       </div>
       <div className="panel-body grid min-w-0 gap-3">
         <div className="codex-sidebar-create">

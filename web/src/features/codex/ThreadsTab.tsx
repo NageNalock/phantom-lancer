@@ -25,6 +25,7 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
   const [workspaceFilter, setWorkspaceFilter] = useStringQueryParamState("codexWorkspace", "all", { clearKeys: THREAD_CLEAR_KEYS });
   const [statusFilter, setStatusFilter] = useQueryParamState<ThreadStatusFilter>("codexThreadStatus", THREAD_STATUS_FILTERS, "all", { clearKeys: THREAD_CLEAR_KEYS });
   const [includeArchived, setIncludeArchived] = useBoolQueryParamState("codexArchived", false, { clearKeys: THREAD_CLEAR_KEYS });
+  const [sidebarOpen, setSidebarOpen] = useBoolQueryParamState("codexSidebar", false);
   const [loading, setLoading] = useState(false);
   const [composerDrafts, setComposerDrafts] = useState<Record<string, string>>({});
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
@@ -110,6 +111,9 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
 
   const activeThread = useMemo(() => threads.find((thread) => thread.id === activeId) || null, [threads, activeId]);
   const scratchReady = Boolean(scratchWorkspaceId);
+  const layoutClass = sidebarOpen
+    ? "grid min-h-[calc(100dvh-8.5rem)] min-w-0 grid-cols-[280px_minmax(0,1fr)_360px] gap-3 max-xl:grid-cols-[260px_minmax(0,1fr)_320px] max-lg:grid-cols-1"
+    : "grid min-h-[calc(100dvh-8.5rem)] min-w-0 grid-cols-[44px_minmax(0,1fr)_360px] gap-3 max-xl:grid-cols-[44px_minmax(0,1fr)_320px] max-lg:grid-cols-1";
 
   const updateThreadInList = useCallback((nextThread: CodexThread) => {
     setThreads((current) =>
@@ -196,30 +200,41 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
   return (
     <>
     {dangerConfirmDialog}
-    <div className="grid min-h-[calc(100dvh-8.5rem)] min-w-0 grid-cols-[280px_minmax(0,1fr)_360px] gap-3 max-xl:grid-cols-[260px_minmax(0,1fr)_320px] max-lg:grid-cols-1">
-      <ThreadList
-        loading={loading}
-        threads={threads}
-        workspaces={workspaces}
-        activeId={activeId}
-        query={query}
-        workspaceFilter={workspaceFilter}
-        statusFilter={statusFilter}
-        includeArchived={includeArchived}
-        scratchReady={scratchReady}
-        models={models}
-        onQuery={setQuery}
-        onWorkspaceFilter={setWorkspaceFilter}
-        onStatusFilter={(value) => setStatusFilter(value as ThreadStatusFilter)}
-        onIncludeArchived={setIncludeArchived}
-        onSearch={() => void loadThreads()}
-        onSelect={setActiveId}
-        onCreate={createThread}
-        onTogglePin={togglePin}
-        onArchive={archive}
-        onResume={resume}
-        onFork={fork}
-      />
+    <div className={layoutClass}>
+      {sidebarOpen ? (
+        <ThreadList
+          loading={loading}
+          threads={threads}
+          workspaces={workspaces}
+          activeId={activeId}
+          query={query}
+          workspaceFilter={workspaceFilter}
+          statusFilter={statusFilter}
+          includeArchived={includeArchived}
+          scratchReady={scratchReady}
+          models={models}
+          onQuery={setQuery}
+          onWorkspaceFilter={setWorkspaceFilter}
+          onStatusFilter={(value) => setStatusFilter(value as ThreadStatusFilter)}
+          onIncludeArchived={setIncludeArchived}
+          onSearch={() => void loadThreads()}
+          onSelect={setActiveId}
+          onCreate={createThread}
+          onTogglePin={togglePin}
+          onArchive={archive}
+          onResume={resume}
+          onFork={fork}
+          onCollapse={() => setSidebarOpen(false)}
+        />
+      ) : (
+        <ThreadListRail
+          activeThread={activeThread}
+          loading={loading}
+          onExpand={() => setSidebarOpen(true)}
+          pendingCount={approvals.filter((approval) => !activeThread || approval.threadId === activeThread.id).length}
+          threadCount={threads.length}
+        />
+      )}
       {activeThread?.kind === "chat" ? (
         <ChatWorkspace key={activeThread.id} actions={actions} status={status} thread={activeThread} workspaces={workspaces} onStatusChange={onStatusChange} onThreadChange={loadThreads} onThreadUpdated={updateThreadInList} />
       ) : activeThread ? (
@@ -258,5 +273,43 @@ export function ThreadsTab({ actions, focusThreadId, status, onStatusChange }: {
       </div>
     </div>
     </>
+  );
+}
+
+function ThreadListRail({
+  activeThread,
+  loading,
+  onExpand,
+  pendingCount,
+  threadCount,
+}: {
+  activeThread: CodexThread | null;
+  loading: boolean;
+  onExpand: () => void;
+  pendingCount: number;
+  threadCount: number;
+}) {
+  const statusTone = activeThread?.status === "running" ? "good" : activeThread?.status === "needs_approval" || activeThread?.status === "queued" ? "warn" : activeThread?.status === "failed" ? "danger" : "neutral";
+  return (
+    <aside aria-label="项目和会话折叠栏" className="codex-thread-rail panel">
+      <button
+        aria-controls="codex-thread-sidebar"
+        aria-expanded="false"
+        aria-label="展开项目和会话"
+        className="codex-thread-rail-button"
+        onClick={onExpand}
+        title="展开项目和会话"
+        type="button"
+      >
+        <span className="codex-thread-rail-mark" aria-hidden="true" />
+        <span className="codex-thread-rail-label">项目</span>
+        <span className="codex-thread-rail-label">会话</span>
+      </button>
+      <div className="codex-thread-rail-meta" aria-hidden="true">
+        <span>{loading ? "…" : threadCount}</span>
+        {pendingCount ? <span className="codex-thread-rail-badge">{pendingCount}</span> : null}
+        {activeThread ? <span className={`codex-thread-rail-status codex-thread-rail-status-${statusTone}`} /> : null}
+      </div>
+    </aside>
   );
 }

@@ -265,6 +265,48 @@
     @apply mb-3;
   }
 
+  .chat-reasoning-entry {
+    @apply flex items-start gap-3;
+  }
+
+  .chat-reasoning-card {
+    border-bottom: 1px solid var(--line);
+    color: var(--muted-strong);
+    @apply w-full max-w-[820px] py-2 text-sm;
+  }
+
+  .chat-reasoning-card summary {
+    @apply flex cursor-pointer list-none items-center justify-between gap-3 py-1 text-sm;
+  }
+
+  .chat-reasoning-card summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .chat-reasoning-summary-main {
+    @apply inline-flex min-w-0 items-center gap-2 font-medium;
+  }
+
+  .chat-reasoning-summary-meta {
+    color: var(--muted);
+    @apply shrink-0 text-xs;
+  }
+
+  .chat-reasoning-body {
+    border-left: 2px solid var(--line);
+    color: var(--muted-strong);
+    @apply mt-2 whitespace-pre-wrap break-words pl-3 text-xs leading-6;
+  }
+
+  .chat-reasoning-card-active {
+    border-bottom-color: rgba(207, 77, 16, 0.2);
+  }
+
+  .chat-reasoning-card-active .chat-reasoning-body {
+    border-left-color: rgba(207, 77, 16, 0.32);
+    color: var(--text);
+  }
+
   .chat-artifact-entry {
     @apply flex items-start gap-3;
   }
@@ -699,6 +741,69 @@
     border: 1px solid var(--line);
     background: var(--surface-soft);
     @apply rounded-lg p-3;
+  }
+
+  .codex-thread-rail {
+    @apply flex min-h-0 flex-col items-center justify-between overflow-hidden p-1.5;
+  }
+
+  .codex-thread-rail-button {
+    border: 1px solid transparent;
+    color: var(--muted-strong);
+    @apply flex min-h-28 w-full flex-col items-center justify-center gap-1 rounded-md px-1 text-xs font-medium transition-[background-color,border-color,color,transform];
+  }
+
+  .codex-thread-rail-button:hover {
+    border-color: var(--line);
+    background: var(--surface-soft);
+    color: var(--text);
+  }
+
+  .codex-thread-rail-button:active {
+    transform: translateY(1px);
+  }
+
+  .codex-thread-rail-mark {
+    background: var(--accent);
+    @apply mb-1 h-6 w-0.5 rounded-full;
+  }
+
+  .codex-thread-rail-label {
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    @apply leading-none;
+  }
+
+  .codex-thread-rail-meta {
+    @apply grid w-full justify-items-center gap-2 pb-1 font-mono text-[11px] text-[var(--muted)];
+  }
+
+  .codex-thread-rail-badge {
+    border: 1px solid rgba(199, 85, 8, 0.2);
+    background: var(--warn-soft);
+    color: var(--warn);
+    @apply grid h-6 min-w-6 place-items-center rounded-md px-1;
+  }
+
+  .codex-thread-rail-status {
+    border: 1px solid var(--line);
+    background: var(--surface-strong);
+    @apply block h-2.5 w-2.5 rounded-full;
+  }
+
+  .codex-thread-rail-status-good {
+    border-color: rgba(18, 132, 79, 0.22);
+    background: var(--good);
+  }
+
+  .codex-thread-rail-status-warn {
+    border-color: rgba(199, 85, 8, 0.24);
+    background: var(--warn);
+  }
+
+  .codex-thread-rail-status-danger {
+    border-color: rgba(207, 31, 50, 0.24);
+    background: var(--danger);
   }
 
   .thread-event-details {
