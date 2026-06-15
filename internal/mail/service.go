@@ -39,6 +39,7 @@ type Service struct {
 
 	mu              sync.Mutex
 	running         bool
+	backgroundStop  chan struct{}
 	backgroundDone  chan struct{}
 	phantomInstance string
 
@@ -201,10 +202,13 @@ func (s *Service) StartBackground(ctx context.Context) {
 		return
 	}
 	s.running = true
-	s.backgroundDone = make(chan struct{})
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	s.backgroundStop = stop
+	s.backgroundDone = done
 	s.mu.Unlock()
 
-	s.startWorkers(ctx)
+	s.startWorkers(ctx, stop, done)
 	s.log.InfoContext(ctx, "mail: background workers started (phase 2)",
 		"probe_fast", probeTickerFast, "probe_slow", probeTickerSlow,
 		"adopt", adoptionTickerInterval)
@@ -215,15 +219,24 @@ func (s *Service) StartBackground(ctx context.Context) {
 func (s *Service) Close() error {
 	s.mu.Lock()
 	running := s.running
+	stop := s.backgroundStop
 	done := s.backgroundDone
 	s.running = false
+	s.backgroundStop = nil
 	s.backgroundDone = nil
 	s.mu.Unlock()
+	if running && stop != nil {
+		close(stop)
+	}
 	if s.imapSyncManager != nil {
 		s.imapSyncManager.StopAll()
 	}
 	if running && done != nil {
-		<-done
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			return errors.New("mail: background workers did not stop within 3s")
+		}
 	}
 	return nil
 }
