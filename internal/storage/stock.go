@@ -29,6 +29,26 @@ type StockPortfolio struct {
 	UpdatedAt            string  `json:"updatedAt"`
 }
 
+type StockPortfolioPatch struct {
+	Name                 *string  `json:"name,omitempty"`
+	Description          *string  `json:"description,omitempty"`
+	Cash                 *float64 `json:"cash,omitempty"`
+	CashDelta            *float64 `json:"cashDelta,omitempty"`
+	RiskLevel            *string  `json:"riskLevel,omitempty"`
+	MaxSinglePositionPct *float64 `json:"maxSinglePositionPct,omitempty"`
+	MaxDrawdownPct       *float64 `json:"maxDrawdownPct,omitempty"`
+	AllowBuy             *bool    `json:"allowBuy,omitempty"`
+	AllowAdd             *bool    `json:"allowAdd,omitempty"`
+	AllowReduce          *bool    `json:"allowReduce,omitempty"`
+	AllowSell            *bool    `json:"allowSell,omitempty"`
+	Notes                *string  `json:"notes,omitempty"`
+}
+
+type StockPortfolioUpdateResult struct {
+	Before    StockPortfolio `json:"before"`
+	Portfolio StockPortfolio `json:"portfolio"`
+}
+
 type StockHolding struct {
 	ID                string  `json:"id"`
 	PortfolioID       string  `json:"portfolioId"`
@@ -611,6 +631,84 @@ func (s *Store) GetStockPortfolio(ctx context.Context, id string) (StockPortfoli
 		return StockPortfolio{}, ErrNotFound
 	}
 	return p, err
+}
+
+func (s *Store) UpdateStockPortfolio(ctx context.Context, id string, patch StockPortfolioPatch) (StockPortfolioUpdateResult, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return StockPortfolioUpdateResult{}, ErrNotFound
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return StockPortfolioUpdateResult{}, err
+	}
+	defer tx.Rollback()
+	before, err := scanStockPortfolio(tx.QueryRowContext(ctx, `SELECT id, name, description, cash, risk_level, max_single_position_pct, max_drawdown_pct, allow_buy, allow_add, allow_reduce, allow_sell, notes, created_at, updated_at FROM stock_portfolios WHERE id = ?`, id))
+	if err == sql.ErrNoRows {
+		return StockPortfolioUpdateResult{}, ErrNotFound
+	}
+	if err != nil {
+		return StockPortfolioUpdateResult{}, err
+	}
+	updated := before
+	if patch.Name != nil {
+		updated.Name = strings.TrimSpace(*patch.Name)
+		if updated.Name == "" {
+			return StockPortfolioUpdateResult{}, errors.New("portfolio name is required")
+		}
+	}
+	if patch.Description != nil {
+		updated.Description = *patch.Description
+	}
+	if patch.Cash != nil {
+		updated.Cash = *patch.Cash
+	}
+	if patch.CashDelta != nil {
+		updated.Cash += *patch.CashDelta
+	}
+	if updated.Cash < 0 {
+		return StockPortfolioUpdateResult{}, errors.New("cash cannot be negative")
+	}
+	if patch.RiskLevel != nil {
+		updated.RiskLevel = defaultString(strings.TrimSpace(*patch.RiskLevel), "balanced")
+	}
+	if patch.MaxSinglePositionPct != nil {
+		if *patch.MaxSinglePositionPct <= 0 {
+			return StockPortfolioUpdateResult{}, errors.New("max single position pct must be positive")
+		}
+		updated.MaxSinglePositionPct = *patch.MaxSinglePositionPct
+	}
+	if patch.MaxDrawdownPct != nil {
+		if *patch.MaxDrawdownPct <= 0 {
+			return StockPortfolioUpdateResult{}, errors.New("max drawdown pct must be positive")
+		}
+		updated.MaxDrawdownPct = *patch.MaxDrawdownPct
+	}
+	if patch.AllowBuy != nil {
+		updated.AllowBuy = *patch.AllowBuy
+	}
+	if patch.AllowAdd != nil {
+		updated.AllowAdd = *patch.AllowAdd
+	}
+	if patch.AllowReduce != nil {
+		updated.AllowReduce = *patch.AllowReduce
+	}
+	if patch.AllowSell != nil {
+		updated.AllowSell = *patch.AllowSell
+	}
+	if patch.Notes != nil {
+		updated.Notes = *patch.Notes
+	}
+	updated.UpdatedAt = now()
+	_, err = tx.ExecContext(ctx, `UPDATE stock_portfolios SET name = ?, description = ?, cash = ?, risk_level = ?, max_single_position_pct = ?, max_drawdown_pct = ?, allow_buy = ?, allow_add = ?, allow_reduce = ?, allow_sell = ?, notes = ?, updated_at = ? WHERE id = ?`,
+		updated.Name, updated.Description, updated.Cash, updated.RiskLevel, updated.MaxSinglePositionPct, updated.MaxDrawdownPct, boolInt(updated.AllowBuy), boolInt(updated.AllowAdd), boolInt(updated.AllowReduce), boolInt(updated.AllowSell), updated.Notes, updated.UpdatedAt, updated.ID)
+	if err != nil {
+		return StockPortfolioUpdateResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return StockPortfolioUpdateResult{}, err
+	}
+	return StockPortfolioUpdateResult{Before: before, Portfolio: updated}, nil
 }
 
 func (s *Store) DeleteStockPortfolio(ctx context.Context, id string) (StockPortfolioDeleteImpact, error) {

@@ -78,6 +78,46 @@ func (s *Server) handleStockPortfolioSubroutes(w http.ResponseWriter, r *http.Re
 	}
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/stock/portfolios/"), "/")
 	parts := strings.Split(path, "/")
+	if len(parts) == 1 && parts[0] != "" && r.Method == http.MethodPatch {
+		if !s.requireCSRF(w, r, ctx.Session) {
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxStockBodyBytes)
+		var req storage.StockPortfolioPatch
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		result, err := s.store.UpdateStockPortfolio(r.Context(), parts[0], req)
+		if err != nil {
+			switch {
+			case errors.Is(err, storage.ErrNotFound):
+				writeError(w, http.StatusNotFound, "stock_portfolio_not_found", "股票账户不存在")
+			default:
+				writeError(w, http.StatusBadRequest, "stock_portfolio_update_failed", err.Error())
+			}
+			return
+		}
+		cashDelta := result.Portfolio.Cash - result.Before.Cash
+		_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+			EventType: "stock.portfolio.updated",
+			RiskLevel: "medium",
+			Summary:   "已更新股票账户/仓位组合",
+			Payload: map[string]any{
+				"portfolioId":              result.Portfolio.ID,
+				"name":                     result.Portfolio.Name,
+				"cashBefore":               result.Before.Cash,
+				"cashAfter":                result.Portfolio.Cash,
+				"cashDelta":                cashDelta,
+				"riskLevel":                result.Portfolio.RiskLevel,
+				"maxSinglePositionPct":     result.Portfolio.MaxSinglePositionPct,
+				"maxDrawdownPct":           result.Portfolio.MaxDrawdownPct,
+				"operationPermissionsFrom": mapStockPortfolioPermissions(result.Before),
+				"operationPermissionsTo":   mapStockPortfolioPermissions(result.Portfolio),
+			},
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"portfolio": result.Portfolio})
+		return
+	}
 	if len(parts) == 1 && parts[0] != "" && r.Method == http.MethodDelete {
 		if !s.requireCSRF(w, r, ctx.Session) {
 			return
@@ -132,6 +172,15 @@ func (s *Server) handleStockPortfolioSubroutes(w http.ResponseWriter, r *http.Re
 		Payload:   map[string]any{"portfolioId": item.PortfolioID, "symbol": item.Symbol, "quantity": item.Quantity},
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"holding": item})
+}
+
+func mapStockPortfolioPermissions(portfolio storage.StockPortfolio) map[string]bool {
+	return map[string]bool{
+		"allowBuy":    portfolio.AllowBuy,
+		"allowAdd":    portfolio.AllowAdd,
+		"allowReduce": portfolio.AllowReduce,
+		"allowSell":   portfolio.AllowSell,
+	}
 }
 
 func (s *Server) handleStockQuotes(w http.ResponseWriter, r *http.Request) {

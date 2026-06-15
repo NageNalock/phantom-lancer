@@ -86,6 +86,54 @@ func TestStockPortfolioDeleteRouteDeletesEmptyAccount(t *testing.T) {
 	}
 }
 
+func TestStockPortfolioPatchRouteUpdatesConfigAndCash(t *testing.T) {
+	server, store, session, csrf := newStockHTTPTest(t)
+	ctx := context.Background()
+	portfolio, err := store.CreateStockPortfolio(ctx, storage.StockPortfolio{Name: "before", Cash: 1000})
+	if err != nil {
+		t.Fatalf("create portfolio: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	request := newStockRequest(http.MethodPatch, "/api/stock/portfolios/"+portfolio.ID, `{
+		"name": "after",
+		"cashDelta": -125.5,
+		"riskLevel": "aggressive",
+		"maxSinglePositionPct": 0.35,
+		"maxDrawdownPct": 0.22,
+		"allowBuy": false,
+		"allowAdd": false,
+		"allowReduce": true,
+		"allowSell": true
+	}`, session, csrf)
+	server.handleStockPortfolioSubroutes(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Portfolio storage.StockPortfolio `json:"portfolio"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Portfolio.Name != "after" || payload.Portfolio.Cash != 874.5 {
+		t.Fatalf("portfolio response = %+v, want updated name and cash", payload.Portfolio)
+	}
+	if payload.Portfolio.RiskLevel != "aggressive" || payload.Portfolio.MaxSinglePositionPct != 0.35 || payload.Portfolio.MaxDrawdownPct != 0.22 {
+		t.Fatalf("portfolio guardrails not updated: %+v", payload.Portfolio)
+	}
+	if payload.Portfolio.AllowBuy || payload.Portfolio.AllowAdd || !payload.Portfolio.AllowReduce || !payload.Portfolio.AllowSell {
+		t.Fatalf("portfolio permissions not updated: %+v", payload.Portfolio)
+	}
+	audits, err := store.ListAudit(ctx, 5)
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	if len(audits) == 0 || audits[0].EventType != "stock.portfolio.updated" {
+		t.Fatalf("latest audit = %+v, want stock.portfolio.updated", audits)
+	}
+}
+
 func newStockHTTPTest(t *testing.T) (*Server, *storage.Store, string, string) {
 	t.Helper()
 	ctx := context.Background()

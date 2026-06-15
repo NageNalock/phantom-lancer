@@ -1,7 +1,7 @@
-import { Plus, Trash } from "@phosphor-icons/react";
+import { Plus } from "@phosphor-icons/react";
 import type { FormEvent } from "react";
 import type { AppActions } from "../app/App";
-import type { AppData, StockPortfolio, StockStrategy } from "../app/types";
+import type { AppData, StockStrategy } from "../app/types";
 import { friendlyError } from "../api/client";
 import { Button, ContextList, EmptyState, Field, Notice, Panel, Pill, SubTabs } from "../components/ui";
 import { formatDate, stockAgentTraceLabel } from "../domain/labels";
@@ -10,9 +10,10 @@ import { StockDataWorkbench } from "./stock/StockDataWorkbench";
 import { StockMemory } from "./stock/StockMemory";
 import { StockOpportunities } from "./stock/StockOpportunities";
 import { StockOverview } from "./stock/StockOverview";
+import { StockPortfolios } from "./stock/StockPortfolios";
 import { StockSymbolDetail } from "./stock/StockSymbolDetail";
 import { StockWatchReview } from "./stock/StockWatchReview";
-import { directionLabel, marketSessionLabel, money, number, numberText, percent, percentInput, price, text } from "./stock/format";
+import { directionLabel, marketSessionLabel, money, number, percent, percentInput, price, text } from "./stock/format";
 
 type StockTab = "overview" | "portfolios" | "data" | "strategies" | "watch" | "memory";
 type StockRouteTab = StockTab | "detail" | "opportunities";
@@ -147,178 +148,6 @@ function StockStrategyWorkspace({ actions, data, runAction }: { actions: AppActi
     <div className="grid gap-4">
       <StockOpportunities actions={actions} data={data} runAction={runAction} />
       <StockStrategies actions={actions} data={data} runAction={runAction} />
-    </div>
-  );
-}
-
-function StockPortfolios({ actions, data, runAction }: { actions: AppActions; data: AppData; runAction: (label: string, fn: () => Promise<void>) => Promise<void> }) {
-  const portfolios = data.stock.portfolios || [];
-  const defaultPortfolio = portfolios[0];
-  async function createPortfolio(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const formElement = event.currentTarget;
-    const form = new FormData(formElement);
-    await runAction("已创建股票账户", async () => {
-      await actions.api("/api/stock/portfolios", {
-        method: "POST",
-        body: {
-          name: text(form, "name"),
-          cash: number(form, "cash"),
-          riskLevel: text(form, "riskLevel") || "balanced",
-          maxSinglePositionPct: percentInput(form, "maxSinglePositionPct", 20),
-          maxDrawdownPct: percentInput(form, "maxDrawdownPct", 15),
-          allowBuy: form.get("allowBuy") === "on",
-          allowAdd: form.get("allowAdd") === "on",
-          allowReduce: form.get("allowReduce") === "on",
-          allowSell: form.get("allowSell") === "on",
-          description: text(form, "description"),
-        },
-      });
-      formElement.reset();
-    });
-  }
-  async function saveHolding(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const formElement = event.currentTarget;
-    const form = new FormData(formElement);
-    const portfolioId = text(form, "portfolioId");
-    await runAction("已保存持仓", async () => {
-      await actions.api(`/api/stock/portfolios/${portfolioId}/holdings`, {
-        method: "POST",
-        body: {
-          symbol: text(form, "symbol"),
-          market: text(form, "market"),
-          name: text(form, "name"),
-          quantity: number(form, "quantity"),
-          availableQuantity: number(form, "availableQuantity"),
-          costPrice: number(form, "costPrice"),
-          lastPrice: number(form, "lastPrice"),
-          tradableStatus: text(form, "tradableStatus") || "tradable",
-        },
-      });
-      formElement.reset();
-    });
-  }
-  async function deletePortfolio(portfolio: StockPortfolio) {
-    const name = portfolio.name || "未命名账户";
-    const holdingCount = portfolio.holdings?.length || 0;
-    const holdingNote = holdingCount ? `\n\n将同时删除 ${holdingCount} 条当前持仓。` : "";
-    const confirmed = window.confirm(`删除账户「${name}」？${holdingNote}\n\n如果该账户已被策略、盯盘或历史操作引用，系统会阻止删除。`);
-    if (!confirmed) return;
-    await runAction("已删除股票账户", async () => {
-      await actions.api(`/api/stock/portfolios/${portfolio.id}`, { method: "DELETE" });
-    });
-  }
-  return (
-    <div className="grid gap-4">
-      <div className="grid grid-cols-2 gap-4 max-xl:grid-cols-1">
-        <Panel title="新建账户/仓位组合">
-          <form className="grid gap-3" onSubmit={(event) => void createPortfolio(event)}>
-            <Field label="名称"><input className="input" name="name" required /></Field>
-            <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(240px,1.25fr)] gap-3 max-lg:grid-cols-1">
-              <Field label="可用现金"><input className="input" min="0" name="cash" step="0.01" type="number" /></Field>
-              <Field label="单票上限(%)"><input className="input" defaultValue="20" min="1" name="maxSinglePositionPct" step="1" type="number" /></Field>
-              <Field label="最大回撤(%)"><input className="input" defaultValue="15" min="1" name="maxDrawdownPct" step="1" type="number" /></Field>
-            </div>
-            <Field label="风险偏好">
-              <select className="select" name="riskLevel" defaultValue="balanced">
-                <option value="conservative">保守</option>
-                <option value="balanced">均衡</option>
-                <option value="aggressive">进取</option>
-              </select>
-            </Field>
-            <div className="grid grid-cols-4 gap-2 text-xs text-[var(--muted)] max-md:grid-cols-2">
-              <label className="flex items-center gap-2"><input name="allowBuy" defaultChecked type="checkbox" />允许买入</label>
-              <label className="flex items-center gap-2"><input name="allowAdd" defaultChecked type="checkbox" />允许加仓</label>
-              <label className="flex items-center gap-2"><input name="allowReduce" defaultChecked type="checkbox" />允许减仓</label>
-              <label className="flex items-center gap-2"><input name="allowSell" defaultChecked type="checkbox" />允许卖出</label>
-            </div>
-            <Field label="说明"><textarea className="textarea" name="description" /></Field>
-            <div><Button tone="primary" type="submit"><Plus size={15} />创建账户</Button></div>
-          </form>
-        </Panel>
-        <Panel title="录入/更新持仓">
-          {portfolios.length ? (
-            <form className="grid gap-3" onSubmit={(event) => void saveHolding(event)}>
-              <Field label="账户">
-                <select className="select" name="portfolioId" defaultValue={defaultPortfolio?.id}>
-                  {portfolios.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                </select>
-              </Field>
-              <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
-                <Field label="代码"><input className="input mono" name="symbol" required /></Field>
-                <Field label="市场">
-                  <select className="select mono" name="market" defaultValue="SH">
-                    <option value="SH">沪市 (SH)</option>
-                    <option value="SZ">深市 (SZ)</option>
-                    <option value="BJ">北市 (BJ)</option>
-                  </select>
-                </Field>
-                <Field label="名称"><input className="input" name="name" /></Field>
-              </div>
-              <div className="grid grid-cols-4 gap-3 max-lg:grid-cols-2 max-sm:grid-cols-1">
-                <Field label="数量"><input className="input" min="0" name="quantity" step="1" type="number" /></Field>
-                <Field label="可卖数量"><input className="input" min="0" name="availableQuantity" step="1" type="number" /></Field>
-                <Field label="成本价"><input className="input" min="0" name="costPrice" step="0.001" type="number" /></Field>
-                <Field label="最新价"><input className="input" min="0" name="lastPrice" step="0.001" type="number" /></Field>
-              </div>
-              <Field label="可交易状态">
-                <select className="select" name="tradableStatus" defaultValue="tradable">
-                  <option value="tradable">正常可交易</option>
-                  <option value="halted">停牌</option>
-                  <option value="limit_up">涨停</option>
-                  <option value="limit_down">跌停</option>
-                  <option value="unknown">未知</option>
-                </select>
-              </Field>
-              <div><Button tone="primary" type="submit"><Plus size={15} />保存持仓</Button></div>
-            </form>
-          ) : <EmptyState body="先创建账户，再录入持仓。" title="还没有账户" />}
-        </Panel>
-      </div>
-      <div className="grid gap-3">
-        {portfolios.map((portfolio) => (
-          <Panel
-            actions={(
-              <Button aria-label={`删除账户 ${portfolio.name || "未命名账户"}`} onClick={() => void deletePortfolio(portfolio)} tone="danger">
-                <Trash size={15} />删除
-              </Button>
-            )}
-            key={portfolio.id}
-            title={portfolio.name || "未命名账户"}
-            subtitle={`现金 ${money(portfolio.cash)} / 总资产 ${money(portfolio.totalAssetValue)}`}
-          >
-            <div className="mb-3 flex flex-wrap gap-2">
-              <Pill tone={portfolio.allowBuy ? "good" : "neutral"}>买入 {portfolio.allowBuy ? "on" : "off"}</Pill>
-              <Pill tone={portfolio.allowAdd ? "good" : "neutral"}>加仓 {portfolio.allowAdd ? "on" : "off"}</Pill>
-              <Pill tone={portfolio.allowReduce ? "good" : "neutral"}>减仓 {portfolio.allowReduce ? "on" : "off"}</Pill>
-              <Pill tone={portfolio.allowSell ? "good" : "neutral"}>卖出 {portfolio.allowSell ? "on" : "off"}</Pill>
-            </div>
-            {portfolio.holdings?.length ? (
-              <div className="overflow-x-auto">
-                <table className="w-full border-collapse text-sm">
-                  <thead className="text-left text-xs text-[var(--muted)]">
-                    <tr><th className="py-2">股票</th><th>数量</th><th>成本</th><th>现价</th><th>市值</th><th>仓位</th><th>盈亏</th></tr>
-                  </thead>
-                  <tbody>
-                    {portfolio.holdings.map((holding) => (
-                      <tr className="border-t border-[var(--line)]" key={holding.id}>
-                        <td className="py-2"><span className="mono">{holding.symbol}</span> {holding.name}</td>
-                        <td>{numberText(holding.quantity)}</td>
-                        <td>{price(holding.costPrice)}</td>
-                        <td>{price(holding.lastPrice)}</td>
-                        <td>{money(holding.marketValue)}</td>
-                        <td>{percent(holding.positionPct)}</td>
-                        <td className={Number(holding.pnl || 0) >= 0 ? "text-[var(--good)]" : "text-[var(--danger)]"}>{money(holding.pnl)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : <EmptyState body="保存持仓后，资产和仓位会自动重算。" title="暂无持仓" />}
-          </Panel>
-        ))}
-      </div>
     </div>
   );
 }

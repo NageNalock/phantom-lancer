@@ -138,6 +138,87 @@ func TestStockPortfolioAndHoldingConstraintsArePreserved(t *testing.T) {
 	}
 }
 
+func TestUpdateStockPortfolioUpdatesConfigAndCash(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	portfolio, err := store.CreateStockPortfolio(ctx, StockPortfolio{Name: "draft account", Cash: 1000})
+	if err != nil {
+		t.Fatalf("create portfolio: %v", err)
+	}
+	name := "retirement sleeve"
+	description := "long horizon"
+	riskLevel := "conservative"
+	cashDelta := -250.0
+	maxSingle := 0.12
+	maxDrawdown := 0.08
+	allowBuy := false
+	allowAdd := false
+	allowReduce := false
+	allowSell := false
+	notes := "cash moved to broker"
+	result, err := store.UpdateStockPortfolio(ctx, portfolio.ID, StockPortfolioPatch{
+		Name:                 &name,
+		Description:          &description,
+		CashDelta:            &cashDelta,
+		RiskLevel:            &riskLevel,
+		MaxSinglePositionPct: &maxSingle,
+		MaxDrawdownPct:       &maxDrawdown,
+		AllowBuy:             &allowBuy,
+		AllowAdd:             &allowAdd,
+		AllowReduce:          &allowReduce,
+		AllowSell:            &allowSell,
+		Notes:                &notes,
+	})
+	if err != nil {
+		t.Fatalf("update portfolio: %v", err)
+	}
+	if result.Before.Cash != 1000 || result.Portfolio.Cash != 750 {
+		t.Fatalf("cash update = before %.2f after %.2f, want 1000 -> 750", result.Before.Cash, result.Portfolio.Cash)
+	}
+	if result.Portfolio.Name != name || result.Portfolio.Description != description || result.Portfolio.RiskLevel != riskLevel {
+		t.Fatalf("portfolio text fields not updated: %+v", result.Portfolio)
+	}
+	if result.Portfolio.MaxSinglePositionPct != maxSingle || result.Portfolio.MaxDrawdownPct != maxDrawdown {
+		t.Fatalf("portfolio guardrails not updated: %+v", result.Portfolio)
+	}
+	if result.Portfolio.AllowBuy || result.Portfolio.AllowAdd || result.Portfolio.AllowReduce || result.Portfolio.AllowSell {
+		t.Fatalf("portfolio permissions should allow all false for an explicitly frozen account: %+v", result.Portfolio)
+	}
+	if result.Portfolio.Notes != notes {
+		t.Fatalf("notes = %q, want %q", result.Portfolio.Notes, notes)
+	}
+}
+
+func TestUpdateStockPortfolioRejectsNegativeCash(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	portfolio, err := store.CreateStockPortfolio(ctx, StockPortfolio{Name: "cash guard", Cash: 100})
+	if err != nil {
+		t.Fatalf("create portfolio: %v", err)
+	}
+	cashDelta := -150.0
+	if _, err := store.UpdateStockPortfolio(ctx, portfolio.ID, StockPortfolioPatch{CashDelta: &cashDelta}); err == nil {
+		t.Fatal("expected negative cash update to fail")
+	}
+	current, err := store.GetStockPortfolio(ctx, portfolio.ID)
+	if err != nil {
+		t.Fatalf("get portfolio after rejected update: %v", err)
+	}
+	if current.Cash != 100 {
+		t.Fatalf("cash changed after rejected update: %.2f", current.Cash)
+	}
+}
+
 func TestDeleteStockPortfolioDeletesHoldings(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)

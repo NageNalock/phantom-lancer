@@ -87,6 +87,7 @@ const auditLabels: Record<string, string> = {
   "codex_cli.probe.failed": "Codex CLI 探测失败",
   "codex_cli.legacy_data.detected": "检测到旧版 Codex 数据",
   "stock.portfolio.created": "创建股票账户",
+  "stock.portfolio.updated": "更新股票账户",
   "stock.portfolio.deleted": "删除股票账户",
   "stock.holding.saved": "保存股票持仓",
   "stock.quote.saved": "保存股票行情",

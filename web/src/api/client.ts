@@ -82,6 +82,7 @@ export function friendlyError(error: unknown): string {
   if (err.code === "model_refresh_failed") return `模型刷新失败：${err.message}`;
   if (err.code === "stock_portfolio_in_use") return err.message || "该账户仍被策略、盯盘或历史记录引用，不能删除。";
   if (err.code === "stock_portfolio_not_found") return "该股票账户不存在，可能已被删除。";
+  if (err.code === "stock_portfolio_update_failed") return `股票账户更新失败：${err.message}`;
   // Mail / Mox control-plane error codes (Phase 2+ fill in the bodies).
   // These mirror the writeError() calls in internal/httpapi/mail.go.
   if (err.code === "config_drifted") return `检测到 Mox 配置漂移：${err.message || "请在「总览」中选择以 Phantom 或磁盘为准重新同步。"}`;
