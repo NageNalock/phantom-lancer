@@ -3823,6 +3823,7 @@ export function ImagesInspector({
   onMarkPrivate,
   onMarkPrivateMedia,
   onOpenJob,
+  onUseForImage,
   onUseMediaForImage,
   prompt,
   prompts = [],
@@ -3844,6 +3845,7 @@ export function ImagesInspector({
   onMarkPrivate?: (asset: ImageAsset, nextPrivate: boolean) => void;
   onMarkPrivateMedia?: (asset: MediaAsset, nextPrivate: boolean) => void;
   onOpenJob?: (jobId: string, kind: "legacy" | "media") => void;
+  onUseForImage?: (asset: ImageAsset) => void;
   onUseMediaForImage?: (asset: MediaAsset) => void;
   prompt?: ImagePrompt;
   prompts?: ImagePrompt[];
@@ -3883,6 +3885,9 @@ export function ImagesInspector({
               {asset.url ? <img alt={assetTitle(asset)} className="aspect-square w-full rounded-lg border border-[var(--line)] object-cover" decoding="async" height={asset.height || 512} src={asset.url} width={asset.width || 512} /> : null}
               <ContextList items={assetMetadata(asset)} />
                <div className="flex flex-wrap gap-2">
+                <Button className="min-h-8 px-2 text-xs" onClick={() => onUseForImage?.(asset)} tone="primary">
+                  用于图生图
+                </Button>
                  <a
                    className="button min-h-8 px-2 text-xs"
                    download

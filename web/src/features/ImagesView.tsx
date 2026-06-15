@@ -1496,6 +1496,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
           onMarkPrivate={(asset, nextPrivate) => void setAssetPrivate(asset, nextPrivate)}
           onMarkPrivateMedia={(asset, nextPrivate) => void setMediaAssetPrivate(asset, nextPrivate)}
           onOpenJob={(jobId, kind) => openJobFromAsset(jobId, kind)}
+          onUseForImage={useAssetForImageToImage}
           onUseMediaForImage={useMediaAssetForImageToImage}
           prompt={selectedPrompt}
           prompts={prompts}

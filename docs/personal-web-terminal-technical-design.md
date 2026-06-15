@@ -72,6 +72,7 @@ Go 后端是系统唯一的执行入口和权限边界，负责：
 - 多媒体生成 job、图片/视频资产和对象存储管理。
 - 股票机会、账户/仓位、数据底座、策略、盯盘、Alert、Review、操作建议和记忆管理。
 - V2Ray 配置与运行控制。
+- Mail / Mox sidecar 控制面，负责 Mox binary 生命周期、配置 apply、DNS check、ACME DNS-01 证书、队列/投递可见性、日志、事件和审计；SMTP/IMAP/Webmail/WebAPI 运行时由 Mox 独立进程承担。
 - 日志源登记和受控 tail。
 - 实时事件推送。
 - 审计日志和操作历史。
@@ -86,6 +87,7 @@ Go 后端是系统唯一的执行入口和权限边界，负责：
 - 多媒体 provider HTTPS 调用。
 - V2Ray 进程启停。
 - 日志文件只读 tail 与搜索。
+- Mox sidecar 通过独立 supervisor 启停；Phantom 只调用受控 `mox` CLI、Mox WebAPI/unix socket 或公网 DNS/ACME API，不在主进程内实现邮件协议。
 - 后续可扩展服务状态、任务脚本等执行器。
 
 所有执行请求都先经过后端权限校验，不允许前端直接拼接命令执行。
@@ -103,6 +105,7 @@ Go 后端是系统唯一的执行入口和权限边界，负责：
 - 多媒体 generation jobs、图片/视频资产、provider 设置和资源存储设置。
 - 股票机会、账户/仓位、行情快照、数据任务、消息、策略、盯盘、Alert、Review、信号、操作建议、人工操作、记忆和 Agent trace。
 - V2Ray 配置和运行状态。
+- Mail/Mox settings、domains、accounts、aliases、certificates、DNS provider、manual ACME challenges、queue/delivery cache、webhook events、mail events、audit、log/retention/backup metadata。
 
 SQLite 足够支撑个人单机使用，后续如需要多服务器或更强并发，可迁移到 PostgreSQL。
 
@@ -117,6 +120,7 @@ flowchart TD
   API --> Stock["Stock Agent Workbench Module"]
   API --> V2Ray["V2Ray Module"]
   API --> Logs["Logs Module"]
+  API --> Mail["Mail / Mox Module"]
   API --> Audit["Audit Module"]
   API --> Event["Event Module"]
 
@@ -125,9 +129,61 @@ flowchart TD
   Stock --> Event
   Media --> Event
   V2Ray --> Event
+  Mail --> Event
+  Mail --> Mox["Mox Sidecar"]
   Audit --> DB["SQLite"]
   Event --> DB
 ```
+
+### 3.x Mail / Mox Module
+
+Mail 是 Mox sidecar 的控制面。Phantom SQLite 保存系统级期望状态，Mox data/config 保存邮件运行时事实，二者边界如下：
+
+- 系统级配置以 Phantom 为入口：domains、accounts、aliases、certificates、queue 操作、运行期端口和 DNS provider 都必须通过 Mail API 修改。写入 Mox config 前走 configapply pipeline，包含 hash drift 检测、临时文件、config test、备份、atomic rename、失败回滚和 probe。
+- 邮件本体以 Mox/IMAP 为事实来源：MIME、附件、flags、UID 和 folder membership 不应由 Phantom SQLite 单独伪造。Phantom 可保存同步索引、纯文本摘要、附件 metadata 和 FTS5 索引，但必须能追溯到 Mox/IMAP 数据。
+- ACME 证书只走 DNS-01，不使用 HTTP-01/TLS-ALPN-01，不绑定 80/443。DNS provider 支持 Cloudflare、DNSPod、Route53 和手动模式；签发后 PEM 写入采用同目录临时文件、权限设置、rename，随后重启/重载 Mox 并跑 L4/L5 probe。主动 rollback 必须恢复 `.bak` PEM、重启 Mox 并 probe。
+- Mox WebAPI 必须是 unix socket 或 loopback-only 地址；不允许 `0.0.0.0`、80/443 或低端口。Phantom 不生成反向代理配置。
+- Compose send 走 Mox WebAPI。为了让 Phantom 在不再次询问 owner 的情况下代表本地账户调用 WebAPI，账户创建、密码更新和密码重置成功后，Phantom 会保存一份加密包装后的 `webapi_password_wrapped`。该字段禁止序列化给前端，服务日志、audit 和 events 不得记录明文；UI 必须明确说明“登录密码只展示一次，但 Phantom 会保存加密 WebAPI 凭据用于发送等本地控制面操作”。旧账户没有该字段时，发送能力必须提示先重置密码。
+- Emergency Inbound Reject 是 Mail 模块的全局入站拒收状态。Phantom 必须把它作为显式期望状态写入 SQLite，并通过 configapply pipeline 修改 Mox 配置或等价受控入口，使 Mox 尽可能早地拒绝新入站 SMTP 投递。它不能通过禁用账户、删除 alias、清空队列、写 suppression、停止 Mox 进程或只在 Phantom UI 隐藏入口来模拟。开启/关闭都必须经过 drift check、临时文件、config test、备份、atomic rename、Mox reload/restart、L4/L5 probe 和失败回滚。
+- Mail events 既发布到 SSE hub，也持久化到通用 `events` 表，`scope=mail`、`scope_id=mail`；审计事件仍写入 `audit_events`。UI 的 Events 页合并展示两类记录。
+- Mail 日志读取只做受控 tail/search：路径白名单、最大行数/字节数、超时和脱敏。Mox 自己管理日志文件生命周期时，Phantom 只读展示；Phantom 自己产生的 mail events/audit/retention metadata 才由 SQLite retention 规则清理。
+- 当前未完成适配器必须显式暴露为不可用，不得返回假成功：真实 IMAP sync、正文索引、未缓存附件内容流式下载、delivery retry/requeue 都需要接入 Mox WebAPI/Mox data/IMAP/CLI 后才可在 UI 中作为可执行能力开放。已部分接入的能力只能展示其真实支持范围，例如 Compose send 仅在账户存在加密 WebAPI 凭据且 Mox WebAPI 可用时启用，附件下载仅对已缓存到受控路径的附件启用。
+
+Mail 模块验收矩阵：
+
+| 能力 | 当前状态 | 验收条件 |
+|---|---|---|
+| Domain CRUD / DNS checklist | 已落 SQLite + 基础 DNS check | add/update/delete/enable/disable 后 configapply 可重放；DNS check 返回前端状态和详细 JSON。 |
+| ACME DNS-01 | 已接 ACME + DNS provider 基础 API | staging/production 可配置；Cloudflare/DNSPod/Route53/手动模式能完成 TXT present/cleanup；签发后 Mox reload/probe 成功。 |
+| Mail events / audit | 已持久化 | 普通事件写 `events(scope=mail, scope_id=mail)`；owner 操作写 `audit_events`；Events 页合并展示。 |
+| Queue bulk action | 已改为先调用 Mox CLI | `mox queue <action>` 成功后才更新 Phantom cache；失败不得改本地状态。 |
+| Emergency inbound reject | 未完成 | 一键开启后所有新入站 SMTP 投递被 Mox 早期拒收；已有队列和邮箱数据不删除；状态持久化；支持手动恢复和可选自动恢复；开启/关闭都走 configapply、reload/probe、audit/event 和失败回滚。 |
+| IMAP sync / mailbox index | 未完成 | 接入真实 IMAP adapter；UIDVALIDITY/UID 增量同步；提取正文纯文本；写入 FTS5；断线/重试/限流可观测。 |
+| Compose send | 部分完成 | 通过 Mox WebAPI 发送；仅在账户存在 `webapi_password_wrapped` 且 WebAPI endpoint 为 unix socket/loopback 时启用；失败不写 sent intent；成功写 mail event 和 delivery event；UI 必须提示加密 WebAPI 凭据保存边界。 |
+| Attachment/raw download | 部分完成 | 已缓存附件可从受控 `body_cache_path` 流式下载，必须校验路径在 Mail data root 内并设置 content-disposition；未缓存附件、raw/part 完整读取仍需通过 Mox data/WebAPI 补齐大小上限、权限和脱敏错误。 |
+| Delivery retry/requeue | 未完成 | 投递事件 retry 能映射到 Mox queue requeue 或等价命令；失败返回明确错误并写 audit。 |
+
+Emergency inbound reject 数据与执行规则：
+
+- 当前阶段只提供显式标注的 `Domain.Disabled` 降级保护入口，用于 owner 在入站爆量时手动降低风险；它会影响 submission、ACME 和域级配置行为，不能视为正式 Emergency Inbound Reject 验收完成项。正式能力仍必须接入 Mox 早期 SMTP reject 或等价受控能力后才能把验收矩阵状态从“未完成”改为“已完成”。
+
+- SQLite 需要保存当前拒收状态、开启原因、开启者、开启时间、可选自动恢复截止时间、期望拒收模式、最近一次 apply hash、最近 reload/probe 结果、失败摘要和上一次正常配置 hash。建议字段落在 `mail_mox_settings` 或独立 `mail_emergency_state`，但必须保证重启后恢复状态可见。
+- API 建议提供 `GET /api/mail/emergency/inbound-reject`、`POST /api/mail/emergency/inbound-reject/enable`、`POST /api/mail/emergency/inbound-reject/disable`。写接口必须 CSRF、防 drift、防 import read-only，要求确认短语和 reason。
+- 开启流程：读取当前 settings 和 config hash；生成带拒收策略的 Mox 配置；运行 config test；备份现有配置；atomic rename；reload/restart Mox；运行 L4/L5 probe；写入状态；写 audit 和 event。任一步失败必须回滚配置、reload/restart、probe，并在响应中返回 pipeline 步骤。
+- 关闭流程必须恢复开启前配置语义，而不是重新生成一份可能覆盖中间合法变更的旧文件。如果开启期间检测到 config drift，必须先要求 owner 选择以 Phantom 或磁盘为准，不允许静默覆盖。
+- 自动恢复由后台 ticker 或启动时恢复器检查 `auto_restore_at`。到期后按关闭流程执行；失败时保持 `enabled`，写 high risk audit/event，并在 Overview 常驻危险提示。
+- 拒收响应模式应优先选择临时拒收 4xx，以便攻击缓解后对端可重试；如果 Mox 只支持更粗粒度或永久拒收，UI 和 audit payload 必须记录实际模式。不得用删除收件人、删除域名、删除 alias、queue drop 或 suppression 伪造全局入站拒收。
+- 与队列/投递关系：开启只影响新入站。已有 queue item 的 hold/drop/fail 仍由 Queue 页面执行；Emergency 页面可以显示队列摘要和跳转，但不能自动清空队列。
+- 与监控关系：Overview、顶部 Mail 状态、Events、Audit、Logs 都必须能看出当前处于 emergency reject。服务日志只记录状态变化和失败摘要，不记录完整 SMTP payload。
+
+UI 对未完成能力必须统一降级：不得显示可点击的主操作按钮、synthetic 指标图或成功 toast。Mailbox IMAP sync、未缓存附件下载、delivery retry 和出站速率时间序列在真实适配器接入前只能展示禁用操作、空状态或诊断说明。部分完成能力必须按真实前置条件启用，例如 Compose send 缺少加密 WebAPI 凭据时必须提示重置密码，不能显示为可发送。
+
+Mailbox 数据源规则：
+
+- P7 搜索返回 `mail_messages_p7.id` 作为 `message_id`；详情接口必须先查旧 `mail_message_parts`，查不到时 fallback 到 `mail_messages_p7`，并把 P7 row 转成统一详情 DTO。
+- 旧 `mail_message_parts` 的 `message_id` 只在旧索引路径内当作 message key 使用；不要把它和 P7 message id 混为真实 MIME part id。
+- 附件下载优先使用旧 parts 的 `body_cache_path`。P7 `attachments_json` 可携带 `cache_path` / `body_cache_path` / `mox_msg_id` / `part_path`；只有存在本地 cache path 时才能走本地流式下载，存在 `mox_msg_id + part_path` 时才允许走 Mox WebAPI `MessagePartGet`。
+- 在 data indexer 真正写入 P7 附件字节路径或 Mox `MsgID` 之前，P7 附件只展示 metadata，不提供下载假入口。
 
 ### 3.1 Auth Module
 
