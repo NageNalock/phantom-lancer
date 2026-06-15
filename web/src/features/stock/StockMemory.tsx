@@ -25,7 +25,8 @@ export function StockMemory({ actions, data, runAction }: { actions: AppActions;
 
   async function saveAgentProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     await runAction("已保存 Agent 模型配置", async () => {
       await actions.api("/api/stock/agent/model-profiles", {
         method: "POST",
@@ -43,7 +44,7 @@ export function StockMemory({ actions, data, runAction }: { actions: AppActions;
           status: text(form, "status") || (form.get("enabled") === "on" ? "available" : "disabled"),
         },
       });
-      event.currentTarget.reset();
+      formElement.reset();
     });
   }
 

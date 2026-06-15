@@ -12,7 +12,8 @@ export function StockOpportunities({ actions, data, runAction }: { actions: AppA
 
   async function createOpportunity(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     await runAction("已创建候选机会", async () => {
       await actions.api("/api/stock/opportunities", {
         method: "POST",
@@ -30,7 +31,7 @@ export function StockOpportunities({ actions, data, runAction }: { actions: AppA
           status: "candidate",
         },
       });
-      event.currentTarget.reset();
+      formElement.reset();
     });
   }
 

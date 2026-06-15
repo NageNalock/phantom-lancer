@@ -14,7 +14,8 @@ export function StockWatchReview({ actions, data, openAlerts, pendingOperations,
 
   async function saveQuote(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     await runAction("已保存行情快照", async () => {
       await actions.api("/api/stock/quotes", {
         method: "POST",
@@ -31,7 +32,7 @@ export function StockWatchReview({ actions, data, openAlerts, pendingOperations,
           tradableStatus: text(form, "tradableStatus") || "tradable",
         },
       });
-      event.currentTarget.reset();
+      formElement.reset();
     });
   }
 

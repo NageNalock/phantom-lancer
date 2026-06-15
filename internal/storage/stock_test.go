@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -133,6 +135,70 @@ func TestStockPortfolioAndHoldingConstraintsArePreserved(t *testing.T) {
 	}
 	if holding.AvailableQuantity != 0 {
 		t.Fatalf("available quantity = %.2f, want 0", holding.AvailableQuantity)
+	}
+}
+
+func TestDeleteStockPortfolioDeletesHoldings(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	portfolio, err := store.CreateStockPortfolio(ctx, StockPortfolio{Name: "mistaken account", Cash: 1000})
+	if err != nil {
+		t.Fatalf("create portfolio: %v", err)
+	}
+	if _, err := store.UpsertStockHolding(ctx, StockHolding{PortfolioID: portfolio.ID, Symbol: "600519", Quantity: 100}); err != nil {
+		t.Fatalf("upsert holding: %v", err)
+	}
+	deleted, err := store.DeleteStockPortfolio(ctx, portfolio.ID)
+	if err != nil {
+		t.Fatalf("delete portfolio: %v", err)
+	}
+	if deleted.Portfolio.ID != portfolio.ID || deleted.HoldingsDeleted != 1 {
+		t.Fatalf("delete impact = %+v, want portfolio and one holding", deleted)
+	}
+	if _, err := store.GetStockPortfolio(ctx, portfolio.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("get deleted portfolio err = %v, want ErrNotFound", err)
+	}
+	holdings, err := store.ListStockHoldings(ctx, portfolio.ID)
+	if err != nil {
+		t.Fatalf("list holdings: %v", err)
+	}
+	if len(holdings) != 0 {
+		t.Fatalf("holdings remained after portfolio delete: %+v", holdings)
+	}
+}
+
+func TestDeleteStockPortfolioBlocksLedgerReferences(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	portfolio, err := store.CreateStockPortfolio(ctx, StockPortfolio{Name: "bound account", Cash: 1000})
+	if err != nil {
+		t.Fatalf("create portfolio: %v", err)
+	}
+	if _, err := store.CreateStockStrategy(ctx, StockStrategy{
+		Title:        "bound strategy",
+		StrategyType: "account_bound",
+		PortfolioID:  portfolio.ID,
+		Symbol:       "600519",
+	}); err != nil {
+		t.Fatalf("create strategy: %v", err)
+	}
+	if _, err := store.DeleteStockPortfolio(ctx, portfolio.ID); !errors.Is(err, ErrStockPortfolioInUse) {
+		t.Fatalf("delete bound portfolio err = %v, want ErrStockPortfolioInUse", err)
+	} else if !strings.Contains(err.Error(), "strategies=1") {
+		t.Fatalf("delete bound portfolio err = %v, want dependency summary", err)
+	}
+	if _, err := store.GetStockPortfolio(ctx, portfolio.ID); err != nil {
+		t.Fatalf("portfolio should remain after blocked delete: %v", err)
 	}
 }
 

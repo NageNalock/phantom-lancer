@@ -272,6 +272,57 @@ type StockDashboardSummary struct {
 	LastAlertAt           string  `json:"lastAlertAt,omitempty"`
 }
 
+var ErrStockPortfolioInUse = errors.New("stock portfolio is referenced by ledger records")
+
+type StockPortfolioDeleteImpact struct {
+	Portfolio       StockPortfolio `json:"portfolio"`
+	HoldingsDeleted int64          `json:"holdingsDeleted"`
+}
+
+type StockPortfolioReferenceCounts struct {
+	Strategies         int `json:"strategies"`
+	Watches            int `json:"watches"`
+	Alerts             int `json:"alerts"`
+	Reviews            int `json:"reviews"`
+	ProposedOperations int `json:"proposedOperations"`
+	Operations         int `json:"operations"`
+	Memories           int `json:"memories"`
+	AgentRuns          int `json:"agentRuns"`
+}
+
+func (r StockPortfolioReferenceCounts) Total() int {
+	return r.Strategies + r.Watches + r.Alerts + r.Reviews + r.ProposedOperations + r.Operations + r.Memories + r.AgentRuns
+}
+
+func (r StockPortfolioReferenceCounts) Summary() string {
+	parts := []string{}
+	if r.Strategies > 0 {
+		parts = append(parts, fmt.Sprintf("strategies=%d", r.Strategies))
+	}
+	if r.Watches > 0 {
+		parts = append(parts, fmt.Sprintf("watches=%d", r.Watches))
+	}
+	if r.Alerts > 0 {
+		parts = append(parts, fmt.Sprintf("alerts=%d", r.Alerts))
+	}
+	if r.Reviews > 0 {
+		parts = append(parts, fmt.Sprintf("reviews=%d", r.Reviews))
+	}
+	if r.ProposedOperations > 0 {
+		parts = append(parts, fmt.Sprintf("proposed_operations=%d", r.ProposedOperations))
+	}
+	if r.Operations > 0 {
+		parts = append(parts, fmt.Sprintf("operations=%d", r.Operations))
+	}
+	if r.Memories > 0 {
+		parts = append(parts, fmt.Sprintf("memories=%d", r.Memories))
+	}
+	if r.AgentRuns > 0 {
+		parts = append(parts, fmt.Sprintf("agent_runs=%d", r.AgentRuns))
+	}
+	return strings.Join(parts, ", ")
+}
+
 func (s *Store) migrateStock(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS stock_portfolios (
@@ -560,6 +611,65 @@ func (s *Store) GetStockPortfolio(ctx context.Context, id string) (StockPortfoli
 		return StockPortfolio{}, ErrNotFound
 	}
 	return p, err
+}
+
+func (s *Store) DeleteStockPortfolio(ctx context.Context, id string) (StockPortfolioDeleteImpact, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return StockPortfolioDeleteImpact{}, ErrNotFound
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return StockPortfolioDeleteImpact{}, err
+	}
+	defer tx.Rollback()
+	portfolio, err := scanStockPortfolio(tx.QueryRowContext(ctx, `SELECT id, name, description, cash, risk_level, max_single_position_pct, max_drawdown_pct, allow_buy, allow_add, allow_reduce, allow_sell, notes, created_at, updated_at FROM stock_portfolios WHERE id = ?`, id))
+	if err == sql.ErrNoRows {
+		return StockPortfolioDeleteImpact{}, ErrNotFound
+	}
+	if err != nil {
+		return StockPortfolioDeleteImpact{}, err
+	}
+	refs, err := countStockPortfolioReferencesTx(ctx, tx, id)
+	if err != nil {
+		return StockPortfolioDeleteImpact{}, err
+	}
+	if refs.Total() > 0 {
+		return StockPortfolioDeleteImpact{}, fmt.Errorf("%w: %s", ErrStockPortfolioInUse, refs.Summary())
+	}
+	holdingsRes, err := tx.ExecContext(ctx, `DELETE FROM stock_holdings WHERE portfolio_id = ?`, id)
+	if err != nil {
+		return StockPortfolioDeleteImpact{}, err
+	}
+	deletedRes, err := tx.ExecContext(ctx, `DELETE FROM stock_portfolios WHERE id = ?`, id)
+	if err != nil {
+		return StockPortfolioDeleteImpact{}, err
+	}
+	if affected, _ := deletedRes.RowsAffected(); affected == 0 {
+		return StockPortfolioDeleteImpact{}, ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return StockPortfolioDeleteImpact{}, err
+	}
+	holdingsDeleted, _ := holdingsRes.RowsAffected()
+	return StockPortfolioDeleteImpact{Portfolio: portfolio, HoldingsDeleted: holdingsDeleted}, nil
+}
+
+func countStockPortfolioReferencesTx(ctx context.Context, tx *sql.Tx, portfolioID string) (StockPortfolioReferenceCounts, error) {
+	var refs StockPortfolioReferenceCounts
+	err := tx.QueryRowContext(ctx, `
+SELECT
+  (SELECT COUNT(1) FROM stock_strategies WHERE portfolio_id = ?),
+  (SELECT COUNT(1) FROM stock_watches WHERE portfolio_id = ?),
+  (SELECT COUNT(1) FROM stock_alerts WHERE portfolio_id = ?),
+  (SELECT COUNT(1) FROM stock_reviews WHERE portfolio_id = ?),
+  (SELECT COUNT(1) FROM stock_proposed_operations WHERE portfolio_id = ?),
+  (SELECT COUNT(1) FROM stock_operations WHERE portfolio_id = ?),
+  (SELECT COUNT(1) FROM stock_memories WHERE portfolio_id = ?),
+  (SELECT COUNT(1) FROM stock_agent_runs WHERE portfolio_id = ?)
+`, portfolioID, portfolioID, portfolioID, portfolioID, portfolioID, portfolioID, portfolioID, portfolioID).
+		Scan(&refs.Strategies, &refs.Watches, &refs.Alerts, &refs.Reviews, &refs.ProposedOperations, &refs.Operations, &refs.Memories, &refs.AgentRuns)
+	return refs, err
 }
 
 func (s *Store) UpsertStockHolding(ctx context.Context, h StockHolding) (StockHolding, error) {

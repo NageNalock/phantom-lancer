@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -50,6 +52,37 @@ func TestStockWatchCheckRejectsInvalidJSONWithoutSideEffects(t *testing.T) {
 	}
 	if len(alerts) != 0 {
 		t.Fatalf("invalid JSON created alerts: %+v", alerts)
+	}
+}
+
+func TestStockPortfolioDeleteRouteDeletesEmptyAccount(t *testing.T) {
+	server, store, session, csrf := newStockHTTPTest(t)
+	ctx := context.Background()
+	portfolio, err := store.CreateStockPortfolio(ctx, storage.StockPortfolio{Name: "delete me", Cash: 1000})
+	if err != nil {
+		t.Fatalf("create portfolio: %v", err)
+	}
+	if _, err := store.UpsertStockHolding(ctx, storage.StockHolding{PortfolioID: portfolio.ID, Symbol: "600519", Quantity: 100}); err != nil {
+		t.Fatalf("upsert holding: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	request := newStockRequest(http.MethodDelete, "/api/stock/portfolios/"+portfolio.ID, "", session, csrf)
+	server.handleStockPortfolioSubroutes(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Deleted storage.StockPortfolioDeleteImpact `json:"deleted"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Deleted.Portfolio.ID != portfolio.ID || payload.Deleted.HoldingsDeleted != 1 {
+		t.Fatalf("deleted payload = %+v, want portfolio and holding count", payload.Deleted)
+	}
+	if _, err := store.GetStockPortfolio(ctx, portfolio.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("get deleted portfolio err = %v, want ErrNotFound", err)
 	}
 }
 

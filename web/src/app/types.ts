@@ -1027,6 +1027,17 @@ export interface StockStrategyPatch {
   acceptedAt?: string;
 }
 
+export interface StockDataMaintenanceResult {
+  tasks?: StockDataTask[];
+  sources?: StockDataSource[];
+  quotes?: StockQuote[];
+  marketData?: StockMarketDataPoint[];
+  newsItems?: StockNewsItem[];
+  opportunities?: StockOpportunity[];
+  alerts?: StockAlert[];
+  notes?: string[];
+}
+
 export interface StockPayload {
   summary?: StockSummary;
   dataHealth?: StockDataHealth;

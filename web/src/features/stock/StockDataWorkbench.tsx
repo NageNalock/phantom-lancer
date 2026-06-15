@@ -1,18 +1,21 @@
 import { ArrowsClockwise, Database, Plus, ShieldCheck } from "@phosphor-icons/react";
-import type { FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import type { AppActions } from "../../app/App";
-import type { AppData, StockDataSource } from "../../app/types";
+import type { AppData, StockDataMaintenanceResult, StockDataSource } from "../../app/types";
 import { Button, CollapsibleSection, EmptyState, Field, Metric, Notice, Panel, Pill } from "../../components/ui";
 import { formatDate } from "../../domain/labels";
+import { StockDataMaintenanceInspector } from "./StockDataMaintenanceInspector";
 import { number, text } from "./format";
 
 export function StockDataWorkbench({ actions, data, runAction }: { actions: AppActions; data: AppData; runAction: (label: string, fn: () => Promise<void>) => Promise<void> }) {
   const sources = data.stock.dataSources || [];
   const defaultSource = sources[0]?.source || "manual_seed";
+  const [lastMaintenanceRun, setLastMaintenanceRun] = useState<StockDataMaintenanceResult | null>(null);
 
   async function saveSource(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const authMode = text(form, "authMode") || "none";
     await runAction("已保存数据源", async () => {
       await actions.api("/api/stock/data-sources", {
@@ -26,7 +29,7 @@ export function StockDataWorkbench({ actions, data, runAction }: { actions: AppA
           rateLimitSeconds: number(form, "rateLimitSeconds") || 60,
         },
       });
-      event.currentTarget.reset();
+      formElement.reset();
     });
   }
 
@@ -44,13 +47,15 @@ export function StockDataWorkbench({ actions, data, runAction }: { actions: AppA
 
   async function runDataMaintenance() {
     await runAction("已执行数据维护任务", async () => {
-      await actions.api("/api/stock/data-tasks/run", { method: "POST", body: {} });
+      const result = await actions.api<StockDataMaintenanceResult>("/api/stock/data-tasks/run", { method: "POST", body: {} });
+      setLastMaintenanceRun(result);
     });
   }
 
   async function saveInstrument(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     await runAction("已刷新股票主数据", async () => {
       await actions.api("/api/stock/instruments", {
         method: "POST",
@@ -68,13 +73,14 @@ export function StockDataWorkbench({ actions, data, runAction }: { actions: AppA
           }],
         },
       });
-      event.currentTarget.reset();
+      formElement.reset();
     });
   }
 
   async function saveMarketData(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     await runAction("已写入历史/指标数据", async () => {
       await actions.api("/api/stock/market-data", {
         method: "POST",
@@ -99,13 +105,14 @@ export function StockDataWorkbench({ actions, data, runAction }: { actions: AppA
           }],
         },
       });
-      event.currentTarget.reset();
+      formElement.reset();
     });
   }
 
   async function ingestNews(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     await runAction("已采集消息面数据", async () => {
       await actions.api("/api/stock/news/ingest", {
         method: "POST",
@@ -125,7 +132,7 @@ export function StockDataWorkbench({ actions, data, runAction }: { actions: AppA
           }],
         },
       });
-      event.currentTarget.reset();
+      formElement.reset();
     });
   }
 
@@ -144,6 +151,8 @@ export function StockDataWorkbench({ actions, data, runAction }: { actions: AppA
           <Button onClick={() => void checkQuoteRefresh()}><ShieldCheck size={15} />检查行情刷新</Button>
         </div>
       </div>
+
+      <StockDataMaintenanceInspector data={data.stock} lastRun={lastMaintenanceRun} />
 
       <div className="grid grid-cols-2 gap-4 max-xl:grid-cols-1">
         <Panel title="数据源治理" subtitle="只登记授权模式和健康状态，不保存示例 token、cookie 或私有 endpoint。">

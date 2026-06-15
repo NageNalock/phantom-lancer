@@ -1,7 +1,7 @@
-import { Plus } from "@phosphor-icons/react";
+import { Plus, Trash } from "@phosphor-icons/react";
 import type { FormEvent } from "react";
 import type { AppActions } from "../app/App";
-import type { AppData, StockStrategy } from "../app/types";
+import type { AppData, StockPortfolio, StockStrategy } from "../app/types";
 import { friendlyError } from "../api/client";
 import { Button, ContextList, EmptyState, Field, Notice, Panel, Pill, SubTabs } from "../components/ui";
 import { formatDate, stockAgentTraceLabel } from "../domain/labels";
@@ -156,7 +156,8 @@ function StockPortfolios({ actions, data, runAction }: { actions: AppActions; da
   const defaultPortfolio = portfolios[0];
   async function createPortfolio(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     await runAction("已创建股票账户", async () => {
       await actions.api("/api/stock/portfolios", {
         method: "POST",
@@ -173,12 +174,13 @@ function StockPortfolios({ actions, data, runAction }: { actions: AppActions; da
           description: text(form, "description"),
         },
       });
-      event.currentTarget.reset();
+      formElement.reset();
     });
   }
   async function saveHolding(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const portfolioId = text(form, "portfolioId");
     await runAction("已保存持仓", async () => {
       await actions.api(`/api/stock/portfolios/${portfolioId}/holdings`, {
@@ -194,7 +196,17 @@ function StockPortfolios({ actions, data, runAction }: { actions: AppActions; da
           tradableStatus: text(form, "tradableStatus") || "tradable",
         },
       });
-      event.currentTarget.reset();
+      formElement.reset();
+    });
+  }
+  async function deletePortfolio(portfolio: StockPortfolio) {
+    const name = portfolio.name || "未命名账户";
+    const holdingCount = portfolio.holdings?.length || 0;
+    const holdingNote = holdingCount ? `\n\n将同时删除 ${holdingCount} 条当前持仓。` : "";
+    const confirmed = window.confirm(`删除账户「${name}」？${holdingNote}\n\n如果该账户已被策略、盯盘或历史操作引用，系统会阻止删除。`);
+    if (!confirmed) return;
+    await runAction("已删除股票账户", async () => {
+      await actions.api(`/api/stock/portfolios/${portfolio.id}`, { method: "DELETE" });
     });
   }
   return (
@@ -260,7 +272,16 @@ function StockPortfolios({ actions, data, runAction }: { actions: AppActions; da
       </div>
       <div className="grid gap-3">
         {portfolios.map((portfolio) => (
-          <Panel key={portfolio.id} title={portfolio.name || "未命名账户"} subtitle={`现金 ${money(portfolio.cash)} / 总资产 ${money(portfolio.totalAssetValue)}`}>
+          <Panel
+            actions={(
+              <Button aria-label={`删除账户 ${portfolio.name || "未命名账户"}`} onClick={() => void deletePortfolio(portfolio)} tone="danger">
+                <Trash size={15} />删除
+              </Button>
+            )}
+            key={portfolio.id}
+            title={portfolio.name || "未命名账户"}
+            subtitle={`现金 ${money(portfolio.cash)} / 总资产 ${money(portfolio.totalAssetValue)}`}
+          >
             <div className="mb-3 flex flex-wrap gap-2">
               <Pill tone={portfolio.allowBuy ? "good" : "neutral"}>买入 {portfolio.allowBuy ? "on" : "off"}</Pill>
               <Pill tone={portfolio.allowAdd ? "good" : "neutral"}>加仓 {portfolio.allowAdd ? "on" : "off"}</Pill>
@@ -301,7 +322,8 @@ function StockStrategies({ actions, data, runAction }: { actions: AppActions; da
   const strategies = data.stock.strategies || [];
   async function createStrategy(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const strategyType = text(form, "strategyType") || "account_agnostic";
     const portfolioId = text(form, "portfolioId");
     if (strategyType === "account_bound" && !portfolioId) {
@@ -330,7 +352,7 @@ function StockStrategies({ actions, data, runAction }: { actions: AppActions; da
           riskNotes: text(form, "riskNotes"),
         },
       });
-      event.currentTarget.reset();
+      formElement.reset();
     });
   }
   async function createWatch(strategy: StockStrategy) {

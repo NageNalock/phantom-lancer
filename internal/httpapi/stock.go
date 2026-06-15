@@ -78,6 +78,35 @@ func (s *Server) handleStockPortfolioSubroutes(w http.ResponseWriter, r *http.Re
 	}
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/stock/portfolios/"), "/")
 	parts := strings.Split(path, "/")
+	if len(parts) == 1 && parts[0] != "" && r.Method == http.MethodDelete {
+		if !s.requireCSRF(w, r, ctx.Session) {
+			return
+		}
+		deleted, err := s.store.DeleteStockPortfolio(r.Context(), parts[0])
+		if err != nil {
+			switch {
+			case errors.Is(err, storage.ErrNotFound):
+				writeError(w, http.StatusNotFound, "stock_portfolio_not_found", "股票账户不存在")
+			case errors.Is(err, storage.ErrStockPortfolioInUse):
+				detail := strings.TrimPrefix(err.Error(), storage.ErrStockPortfolioInUse.Error()+": ")
+				if detail != "" {
+					detail = "：" + detail
+				}
+				writeError(w, http.StatusConflict, "stock_portfolio_in_use", "账户仍被策略、盯盘或历史记录引用，不能删除"+detail)
+			default:
+				writeError(w, http.StatusInternalServerError, "stock_portfolio_delete_failed", err.Error())
+			}
+			return
+		}
+		_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+			EventType: "stock.portfolio.deleted",
+			RiskLevel: "high",
+			Summary:   "已删除股票账户/仓位组合",
+			Payload:   map[string]any{"portfolioId": deleted.Portfolio.ID, "name": deleted.Portfolio.Name, "holdingsDeleted": deleted.HoldingsDeleted},
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted})
+		return
+	}
 	if len(parts) != 2 || parts[1] != "holdings" || r.Method != http.MethodPost {
 		writeError(w, http.StatusNotFound, "stock_portfolio_route_not_found", "未找到股票账户路由")
 		return

@@ -296,6 +296,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stock/portfolios", s.handleStockPortfolios)
 	mux.HandleFunc("POST /api/stock/portfolios", s.handleStockPortfolios)
 	mux.HandleFunc("POST /api/stock/portfolios/", s.handleStockPortfolioSubroutes)
+	mux.HandleFunc("DELETE /api/stock/portfolios/", s.handleStockPortfolioSubroutes)
 	mux.HandleFunc("GET /api/stock/quotes", s.handleStockQuotes)
 	mux.HandleFunc("POST /api/stock/quotes", s.handleStockQuotes)
 	mux.HandleFunc("POST /api/stock/quotes/refresh", s.handleStockQuoteRefresh)
