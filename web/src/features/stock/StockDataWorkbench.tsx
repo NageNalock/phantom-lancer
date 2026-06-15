@@ -164,21 +164,21 @@ export function StockDataWorkbench({ actions, data, runAction }: { actions: AppA
             <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
               <Field label="类型">
                 <select className="select" name="sourceType" defaultValue="market_data">
-                  <option value="market_data">market_data</option>
-                  <option value="news">news</option>
-                  <option value="report">report</option>
-                  <option value="search">search</option>
-                  <option value="skill">skill</option>
-                  <option value="scheduler">scheduler</option>
+                  <option value="market_data">行情数据</option>
+                  <option value="news">新闻</option>
+                  <option value="report">研报</option>
+                  <option value="search">搜索</option>
+                  <option value="skill">技能</option>
+                  <option value="scheduler">调度器</option>
                 </select>
               </Field>
               <Field label="授权模式">
                 <select className="select" name="authMode" defaultValue="none">
-                  <option value="none">none</option>
-                  <option value="user_config">user_config</option>
-                  <option value="api_key">api_key</option>
-                  <option value="cookie">cookie</option>
-                  <option value="disabled">disabled</option>
+                  <option value="none">无</option>
+                  <option value="user_config">用户配置</option>
+                  <option value="api_key">API Key</option>
+                  <option value="cookie">Cookie</option>
+                  <option value="disabled">已禁用</option>
                 </select>
               </Field>
               <Field label="限流秒数"><input className="input" defaultValue="60" min="0" name="rateLimitSeconds" step="1" type="number" /></Field>
@@ -194,7 +194,7 @@ export function StockDataWorkbench({ actions, data, runAction }: { actions: AppA
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <strong>{adapter.label || adapter.source}</strong>
-                    <Pill tone={adapter.configured ? "good" : "warn"}>{adapter.configured ? "configured" : "missing"}</Pill>
+                    <Pill tone={adapter.configured ? "good" : "warn"}>{adapter.configured ? "已配置" : "缺失"}</Pill>
                     <Pill>{adapter.category || "-"}</Pill>
                   </div>
                   <span className="mono mt-2 block truncate text-xs text-[var(--muted-strong)]">{adapter.key}</span>
@@ -235,7 +235,13 @@ export function StockDataWorkbench({ actions, data, runAction }: { actions: AppA
             <SourceSelect defaultSource={defaultSource} sources={sources} />
             <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
               <Field label="代码"><input className="input mono" name="symbol" required /></Field>
-              <Field label="市场"><input className="input mono" name="market" defaultValue="SH" /></Field>
+              <Field label="市场">
+                <select className="select mono" name="market" defaultValue="SH">
+                  <option value="SH">沪市 (SH)</option>
+                  <option value="SZ">深市 (SZ)</option>
+                  <option value="BJ">北市 (BJ)</option>
+                </select>
+              </Field>
               <Field label="名称"><input className="input" name="name" required /></Field>
             </div>
             <div className="grid grid-cols-2 gap-3 max-md:grid-cols-1">
@@ -244,7 +250,13 @@ export function StockDataWorkbench({ actions, data, runAction }: { actions: AppA
             </div>
             <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
               <Field label="上市日期"><input className="input" name="listingDate" type="date" /></Field>
-              <Field label="状态"><select className="select" name="status" defaultValue="listed"><option value="listed">listed</option><option value="suspended">suspended</option><option value="delisted">delisted</option></select></Field>
+              <Field label="状态">
+                <select className="select" name="status" defaultValue="listed">
+                  <option value="listed">已上市</option>
+                  <option value="suspended">停牌</option>
+                  <option value="delisted">退市</option>
+                </select>
+              </Field>
               <Field label="质量"><QualitySelect /></Field>
             </div>
             <div><Button tone="primary" type="submit"><Plus size={15} />刷新主数据</Button></div>
@@ -256,14 +268,20 @@ export function StockDataWorkbench({ actions, data, runAction }: { actions: AppA
             <SourceSelect defaultSource={defaultSource} sources={sources} />
             <div className="grid grid-cols-4 gap-3 max-md:grid-cols-1">
               <Field label="代码"><input className="input mono" name="symbol" required /></Field>
-              <Field label="市场"><input className="input mono" name="market" defaultValue="SH" /></Field>
+              <Field label="市场">
+                <select className="select mono" name="market" defaultValue="SH">
+                  <option value="SH">沪市 (SH)</option>
+                  <option value="SZ">深市 (SZ)</option>
+                  <option value="BJ">北市 (BJ)</option>
+                </select>
+              </Field>
               <Field label="数据集">
                 <select className="select" name="dataset" defaultValue="daily_kline">
-                  <option value="daily_kline">daily_kline</option>
-                  <option value="quote_derived_kline">quote_derived_kline</option>
-                  <option value="valuation">valuation</option>
-                  <option value="fund_flow">fund_flow</option>
-                  <option value="quote_snapshot">quote_snapshot</option>
+                  <option value="daily_kline">日 K 线 (daily_kline)</option>
+                  <option value="quote_derived_kline">行情派生 K (quote_derived_kline)</option>
+                  <option value="valuation">估值 (valuation)</option>
+                  <option value="fund_flow">资金流 (fund_flow)</option>
+                  <option value="quote_snapshot">行情快照 (quote_snapshot)</option>
                 </select>
               </Field>
               <Field label="日期"><input className="input" name="dataDate" required type="date" /></Field>
@@ -293,7 +311,13 @@ export function StockDataWorkbench({ actions, data, runAction }: { actions: AppA
             <SourceSelect defaultSource={defaultSource} sources={sources} />
             <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
               <Field label="代码"><input className="input mono" name="symbol" /></Field>
-              <Field label="市场"><input className="input mono" name="market" defaultValue="SH" /></Field>
+              <Field label="市场">
+                <select className="select mono" name="market" defaultValue="SH">
+                  <option value="SH">沪市 (SH)</option>
+                  <option value="SZ">深市 (SZ)</option>
+                  <option value="BJ">北市 (BJ)</option>
+                </select>
+              </Field>
               <Field label="来源 ID"><input className="input mono" name="sourceItemId" /></Field>
             </div>
             <Field label="标题"><input className="input" name="title" required /></Field>
@@ -302,10 +326,10 @@ export function StockDataWorkbench({ actions, data, runAction }: { actions: AppA
               <Field label="类别"><input className="input" name="category" placeholder="policy / earnings" /></Field>
               <Field label="重要性">
                 <select className="select" name="importance" defaultValue="normal">
-                  <option value="low">low</option>
-                  <option value="normal">normal</option>
-                  <option value="high">high</option>
-                  <option value="urgent">urgent</option>
+                  <option value="low">低</option>
+                  <option value="normal">普通</option>
+                  <option value="high">高</option>
+                  <option value="urgent">紧急</option>
                 </select>
               </Field>
               <Field label="发布时间"><input className="input" name="publishedAt" type="datetime-local" /></Field>
@@ -383,11 +407,11 @@ function SourceSelect({ defaultSource, sources }: { defaultSource: string; sourc
 function QualitySelect() {
   return (
     <select className="select" name="quality" defaultValue="fresh">
-      <option value="fresh">fresh</option>
-      <option value="stale">stale</option>
-      <option value="partial">partial</option>
-      <option value="failed">failed</option>
-      <option value="unknown">unknown</option>
+      <option value="fresh">新鲜 (fresh)</option>
+      <option value="stale">过期 (stale)</option>
+      <option value="partial">部分 (partial)</option>
+      <option value="failed">失败 (failed)</option>
+      <option value="unknown">未知 (unknown)</option>
     </select>
   );
 }

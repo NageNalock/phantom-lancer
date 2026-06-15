@@ -81,13 +81,19 @@ export function StockOpportunities({ actions, data, runAction }: { actions: AppA
           </div>
           <div className="grid grid-cols-4 gap-3 max-lg:grid-cols-2 max-sm:grid-cols-1">
             <Field label="代码"><input className="input mono" name="symbol" required /></Field>
-            <Field label="市场"><input className="input mono" name="market" defaultValue="SH" /></Field>
+            <Field label="市场">
+              <select className="select mono" name="market" defaultValue="SH">
+                <option value="SH">沪市 (SH)</option>
+                <option value="SZ">深市 (SZ)</option>
+                <option value="BJ">北市 (BJ)</option>
+              </select>
+            </Field>
             <Field label="名称"><input className="input" name="name" /></Field>
             <Field label="信心">
               <select className="select" name="confidence" defaultValue="medium">
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
+                <option value="low">低</option>
+                <option value="medium">中</option>
+                <option value="high">高</option>
               </select>
             </Field>
           </div>

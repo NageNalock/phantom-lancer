@@ -247,7 +247,13 @@ function StockPortfolios({ actions, data, runAction }: { actions: AppActions; da
               </Field>
               <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
                 <Field label="代码"><input className="input mono" name="symbol" required /></Field>
-                <Field label="市场"><input className="input mono" name="market" defaultValue="SH" /></Field>
+                <Field label="市场">
+                  <select className="select mono" name="market" defaultValue="SH">
+                    <option value="SH">沪市 (SH)</option>
+                    <option value="SZ">深市 (SZ)</option>
+                    <option value="BJ">北市 (BJ)</option>
+                  </select>
+                </Field>
                 <Field label="名称"><input className="input" name="name" /></Field>
               </div>
               <div className="grid grid-cols-4 gap-3 max-lg:grid-cols-2 max-sm:grid-cols-1">
@@ -258,11 +264,11 @@ function StockPortfolios({ actions, data, runAction }: { actions: AppActions; da
               </div>
               <Field label="可交易状态">
                 <select className="select" name="tradableStatus" defaultValue="tradable">
-                  <option value="tradable">tradable</option>
-                  <option value="halted">halted</option>
-                  <option value="limit_up">limit_up</option>
-                  <option value="limit_down">limit_down</option>
-                  <option value="unknown">unknown</option>
+                  <option value="tradable">正常可交易</option>
+                  <option value="halted">停牌</option>
+                  <option value="limit_up">涨停</option>
+                  <option value="limit_down">跌停</option>
+                  <option value="unknown">未知</option>
                 </select>
               </Field>
               <div><Button tone="primary" type="submit"><Plus size={15} />保存持仓</Button></div>
@@ -382,7 +388,13 @@ function StockStrategies({ actions, data, runAction }: { actions: AppActions; da
               </select>
             </Field>
             <Field label="代码"><input className="input mono" name="symbol" required /></Field>
-            <Field label="市场"><input className="input mono" name="market" defaultValue="SH" /></Field>
+            <Field label="市场">
+              <select className="select mono" name="market" defaultValue="SH">
+                <option value="SH">沪市 (SH)</option>
+                <option value="SZ">深市 (SZ)</option>
+                <option value="BJ">北市 (BJ)</option>
+              </select>
+            </Field>
             <Field label="名称"><input className="input" name="name" /></Field>
           </div>
           <div className="grid grid-cols-5 gap-3 max-xl:grid-cols-3 max-md:grid-cols-1">
