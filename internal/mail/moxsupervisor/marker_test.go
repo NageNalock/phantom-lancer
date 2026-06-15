@@ -332,14 +332,39 @@ func TestMarkerValidate_Positive(t *testing.T) {
 	}
 
 	ok, issues := ValidateMarker(marker,
-		"our-instance",     // phantom
-		"bootid-supervisor-000", // boot (enabled)
+		"our-instance",            // phantom
+		"bootid-supervisor-000",   // boot (enabled)
 		filepath.Base(binaryPath)) // expected cmdline[0] basename
 	if !ok {
 		t.Errorf("expected ValidateMarker=true, got false; issues=%+v", issues)
 	}
 	if len(issues) != 0 {
 		t.Errorf("unexpected issues on positive validate: %+v", issues)
+	}
+}
+
+func TestProcessExists_TreatsProcZombieAsExited(t *testing.T) {
+	_ = saveRestoreProcRoot(t)
+
+	pid := os.Getpid()
+	root := t.TempDir()
+	pidDir := filepath.Join(root, strconv.Itoa(pid))
+	if err := os.MkdirAll(pidDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tokens := make([]string, 20)
+	tokens[0] = "Z"
+	for i := 1; i < len(tokens); i++ {
+		tokens[i] = strconv.Itoa(i)
+	}
+	statContent := strconv.Itoa(pid) + " (phantom test) " + strings.Join(tokens, " ")
+	if err := os.WriteFile(filepath.Join(pidDir, "stat"), []byte(statContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ProcRoot = root
+
+	if processExists(pid) {
+		t.Fatal("processExists returned true for a /proc zombie state")
 	}
 }
 

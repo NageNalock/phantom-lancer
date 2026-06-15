@@ -47,18 +47,18 @@ var BootIDPath = "/proc/sys/kernel/random/boot_id"
 //     process that happened to land on the recycled PID with the same
 //     starttime).
 type Marker struct {
-	Version          int    `json:"version"`           // schema version, always 1 today
+	Version          int    `json:"version"` // schema version, always 1 today
 	PhantomInstance  string `json:"phantom_instance_id"`
-	BootID           string `json:"boot_id"`             // regenerated per Start()
-	PID              int    `json:"pid"`                  // >=1 iff process is live
-	StartTimeNano    int64  `json:"start_time_ns"`        // monotonic clock at Start()
-	ProcessStartTime uint64 `json:"process_start_time"`   // kernel starttime from /proc
+	BootID           string `json:"boot_id"`            // regenerated per Start()
+	PID              int    `json:"pid"`                // >=1 iff process is live
+	StartTimeNano    int64  `json:"start_time_ns"`      // monotonic clock at Start()
+	ProcessStartTime uint64 `json:"process_start_time"` // kernel starttime from /proc
 	BinaryPath       string `json:"binary_path"`
 	BinaryChecksum   string `json:"binary_checksum_sha256,omitempty"`
 	ConfigPath       string `json:"config_path,omitempty"`
 	ConfigHash       string `json:"config_hash_sha256,omitempty"`
 	DataDir          string `json:"data_dir"`
-	LaunchedAt       string `json:"launched_at"`          // RFC3339Nano
+	LaunchedAt       string `json:"launched_at"` // RFC3339Nano
 	LogStdout        string `json:"log_stdout"`
 	LogStderr        string `json:"log_stderr"`
 }
@@ -147,19 +147,10 @@ func ReadMarker(path string) (*Marker, error) {
 // fake cmd helper and explicitly set ProcessStartTime, and production
 // deployments (Linux) always hit the real path.
 func readProcStartTime(pid int) (ticks uint64, source string, ok bool) {
-	data, err := os.ReadFile(fmt.Sprintf("%s/%d/stat", ProcRoot, pid))
-	if err != nil {
+	fields, ok := readProcStatTailFields(pid)
+	if !ok {
 		return 0, "", false
 	}
-	// The 2nd field is the comm wrapped in parens – it may contain
-	// whitespace and parens so we MUST split from the RIGHT side of the
-	// final ')' character instead of strings.Fields from the left.
-	closeIdx := strings.LastIndexByte(string(data), ')')
-	if closeIdx < 0 {
-		return 0, "", false
-	}
-	tail := string(data[closeIdx+1:])
-	fields := strings.Fields(tail)
 	// /proc/[pid]/stat fields after the closing paren of field 2 are
 	// numbered starting at 3.  starttime is field 22 overall, so 20
 	// fields into tail (zero-indexed: tail[19]).
@@ -171,6 +162,28 @@ func readProcStartTime(pid int) (ticks uint64, source string, ok bool) {
 		return 0, "", false
 	}
 	return n, "proc", true
+}
+
+func readProcStatTailFields(pid int) ([]string, bool) {
+	data, err := os.ReadFile(fmt.Sprintf("%s/%d/stat", ProcRoot, pid))
+	if err != nil {
+		return nil, false
+	}
+	// The 2nd field is the comm wrapped in parens; it may contain
+	// whitespace and parens, so split from the right side of the final ')'.
+	closeIdx := strings.LastIndexByte(string(data), ')')
+	if closeIdx < 0 {
+		return nil, false
+	}
+	return strings.Fields(string(data[closeIdx+1:])), true
+}
+
+func processIsZombie(pid int) bool {
+	fields, ok := readProcStatTailFields(pid)
+	if !ok || len(fields) == 0 {
+		return false
+	}
+	return fields[0] == "Z"
 }
 
 // readProcCmdlineToken0 returns argv[0] from /proc/<pid>/cmdline.  On a
@@ -202,9 +215,13 @@ func readProcCmdlineToken0(pid int) (string, bool) {
 // Signal 0 is the standard "permission check" signal – it does not
 // actually deliver anything but fails with ESRCH when the pid is gone and
 // EPERM when it exists but we cannot signal it (either case counts as
-// "exists" for adoption purposes).
+// "exists" for adoption purposes). Linux zombies are treated as exited even
+// though signal(0) can still see them before their parent reaps them.
 func processExists(pid int) bool {
 	if pid <= 0 {
+		return false
+	}
+	if processIsZombie(pid) {
 		return false
 	}
 	proc, err := os.FindProcess(pid)
@@ -213,10 +230,10 @@ func processExists(pid int) bool {
 	}
 	err = proc.Signal(syscall.Signal(0))
 	if err == nil {
-		return true
+		return !processIsZombie(pid)
 	}
 	// EPERM = process exists, we just can't signal it.
-	return errors.Is(err, syscall.EPERM)
+	return errors.Is(err, syscall.EPERM) && !processIsZombie(pid)
 }
 
 // --- ValidateMarker: the 4-layer adoption check ----------------------------
