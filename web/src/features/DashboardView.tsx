@@ -2,7 +2,7 @@ import type { AppActions } from "../app/App";
 import type { AppData, MainTab } from "../app/types";
 import type { MouseEvent } from "react";
 import { ContextList, Metric, Panel } from "../components/ui";
-import { auditLabel, auditSummary, codexGatewayStatusLabel, codexModuleStatusLabel, formatDate, imageStatusLabel, v2rayStateLabel } from "../domain/labels";
+import { auditLabel, auditSummary, codexGatewayStatusLabel, codexModuleStatusLabel, formatDate, imageStatusLabel, stockDataHealthLabel, stockStatusLabel, v2rayStateLabel } from "../domain/labels";
 import { shouldHandleQueryLinkClick } from "../hooks/useQueryParamState";
 
 interface DashboardAction {
@@ -18,8 +18,10 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
   const v2ray = data.v2ray.status || data.dashboard.v2ray;
   const images = data.images.status || data.dashboard.images;
   const codex = data.dashboard.codex;
+  const stock = data.stock.summary;
+  const stockData = data.stock.dataHealth;
   const latestAudit = data.audit[0];
-  const nextActions = dashboardNextActions(codex, gateway, images, v2ray);
+  const nextActions = dashboardNextActions(codex, gateway, images, v2ray, stock, stockData);
   const allowedRoots = data.settings.runtime?.allowedRoots || [];
   const handleMainTabLink = (event: MouseEvent<HTMLAnchorElement | HTMLButtonElement>, tab: MainTab) => {
     if (event.currentTarget instanceof HTMLAnchorElement) {
@@ -64,6 +66,14 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
             onClick={(event) => handleMainTabLink(event, "v2ray")}
             tone={v2ray?.running ? "good" : "warn"}
             value={v2rayStateLabel(v2ray)}
+          />
+          <Metric
+            detail={`${stock?.activeWatchCount || 0} 盯盘 / ${stockData?.sourceCount || 0} 数据源 / ${stockData?.newsItemCount || 0} 消息`}
+            href={actions.mainTabHref("stock")}
+            label="股票"
+            onClick={(event) => handleMainTabLink(event, "stock")}
+            tone={stock?.pendingOperationCount || stock?.openAlertCount || stockData?.failedSources || stockData?.failedTaskCount ? "warn" : stock?.portfolioCount || stockData?.sourceCount ? "good" : "neutral"}
+            value={`${stockStatusLabel(stock)} / ${stockDataHealthLabel(stockData)}`}
           />
         </section>
 
@@ -133,6 +143,8 @@ function dashboardNextActions(
   gateway: AppData["dashboard"]["codexGateway"] | undefined,
   images: AppData["dashboard"]["images"] | undefined,
   v2ray: AppData["dashboard"]["v2ray"] | undefined,
+  stock: AppData["stock"]["summary"] | undefined,
+  stockData: AppData["stock"]["dataHealth"] | undefined,
 ): DashboardAction[] {
   const items: DashboardAction[] = [];
   if (codex?.pendingApprovals) {
@@ -212,6 +224,33 @@ function dashboardNextActions(
       label: "打开 V2Ray",
       tab: "v2ray",
       tone: "neutral",
+    });
+  }
+
+  if (stock?.pendingOperationCount) {
+    items.push({
+      title: `${stock.pendingOperationCount} 个股票操作待确认`,
+      body: "操作建议必须人工确认后才会更新持仓和复盘记忆。",
+      label: "处理股票",
+      tab: "stock",
+      tone: "warn",
+    });
+  } else if (stock?.openAlertCount) {
+    items.push({
+      title: `${stock.openAlertCount} 个股票提醒待 Review`,
+      body: "从 Alert 进入 Review，系统会区分交易信号和账户绑定操作建议。",
+      label: "查看提醒",
+      tab: "stock",
+      tone: "warn",
+    });
+  }
+  if (stockData?.failedSources || stockData?.failedTaskCount) {
+    items.push({
+      title: "股票数据增强存在失败",
+      body: "进入股票/数据检查数据源健康、任务记录、消息采集和数据质量标签。",
+      label: "检查数据",
+      tab: "stock",
+      tone: "warn",
     });
   }
 

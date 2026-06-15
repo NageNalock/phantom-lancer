@@ -13,7 +13,7 @@ Codex CLI Client 和 Codex Gateway / OpenAI Gateway 是并列独立能力域：
 
 ## 1. 技术定位
 
-本项目是一个面向个人使用的服务器 Web 控制台。当前能力域包括控制台总览、Codex、Codex Gateway、日志中心、多媒体图片/视频生成、V2Ray 和全局设置；后续可继续扩展应用管理、文件、服务、任务自动化等服务器管理模块。
+本项目是一个面向个人使用的服务器 Web 控制台。当前能力域包括控制台总览、Codex、Codex Gateway、日志中心、多媒体图片/视频生成、股票 Agent 工作台、V2Ray 和全局设置；后续可继续扩展应用管理、文件、服务、任务自动化等服务器管理模块。
 
 技术方案保持单机、轻量、可扩展：
 
@@ -34,6 +34,7 @@ flowchart LR
   Backend --> CodexClient["Codex CLI Client"]
   Backend --> Gateway["Codex Gateway"]
   Backend --> Media["Media Manager"]
+  Backend --> Stock["Stock Agent Workbench"]
   Backend --> V2Ray["V2Ray Manager"]
   Backend --> Logs["Log Center"]
   Backend --> Audit["Audit Logger"]
@@ -54,6 +55,7 @@ flowchart LR
 - Codex Gateway 管理页。
 - 日志中心。
 - 多媒体图片/视频生成和资源库。
+- 股票 Agent 工作台。
 - V2Ray 管理页。
 - 全局设置。
 
@@ -68,6 +70,7 @@ Go 后端是系统唯一的执行入口和权限边界，负责：
 - Codex CLI 安装探测、app-server runtime supervisor、workspace policy、exec runner、审批和事件归一化。
 - Gateway public API、账号凭据摘要、模型目录和请求日志管理。
 - 多媒体生成 job、图片/视频资产和对象存储管理。
+- 股票机会、账户/仓位、数据底座、策略、盯盘、Alert、Review、操作建议和记忆管理。
 - V2Ray 配置与运行控制。
 - 日志源登记和受控 tail。
 - 实时事件推送。
@@ -98,6 +101,7 @@ Go 后端是系统唯一的执行入口和权限边界，负责：
 - 活动审计。
 - 持久事件。
 - 多媒体 generation jobs、图片/视频资产、provider 设置和资源存储设置。
+- 股票机会、账户/仓位、行情快照、数据任务、消息、策略、盯盘、Alert、Review、信号、操作建议、人工操作、记忆和 Agent trace。
 - V2Ray 配置和运行状态。
 
 SQLite 足够支撑个人单机使用，后续如需要多服务器或更强并发，可迁移到 PostgreSQL。
@@ -110,6 +114,7 @@ flowchart TD
   API --> CodexClient["Codex CLI Client Module"]
   API --> Gateway["Gateway Module"]
   API --> Media["Media Module"]
+  API --> Stock["Stock Agent Workbench Module"]
   API --> V2Ray["V2Ray Module"]
   API --> Logs["Logs Module"]
   API --> Audit["Audit Module"]
@@ -117,6 +122,7 @@ flowchart TD
 
   CodexClient --> Event
   Gateway --> Event
+  Stock --> Event
   Media --> Event
   V2Ray --> Event
   Audit --> DB["SQLite"]
@@ -187,6 +193,7 @@ Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*`
 - Codex workspace、thread、turn、审批、设置和诊断审计。
 - Gateway 配置和账号变更审计。
 - 多媒体生成和资产变更审计。
+- 股票机会、账户/仓位、策略、盯盘、Alert、Review、操作建议和人工操作审计。
 - V2Ray 配置和控制审计。
 - 全局设置变更审计。
 
@@ -217,7 +224,19 @@ Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*`
 
 多媒体资源库的详细产品交互和对象存储设计见 [images-library-feature-design.md](./images-library-feature-design.md)；Agnes 图片/视频接入设计见 [agnes-image-video-integration-design.md](./agnes-image-video-integration-design.md)。
 
-### 3.8 V2Ray Module
+### 3.8 Stock Agent Workbench Module
+
+负责：
+
+- 管理股票机会、账户/仓位、持仓、行情快照、数据源、消息面、策略、盯盘任务、Alert、Review、信号、操作建议、人工操作记录和复盘记忆。
+- 以 SQLite 保存完整对象网络，支持从机会生成策略、从策略创建盯盘、从 Alert 进入 Review、从 proposed operation 进入人工确认或作废。
+- 后台按 A 股交易日历和盯盘间隔执行检查；在真实行情 provider 未配置时明确记录 `quote_refresh` blocked task，并只消费手工或外部写入的快照。
+- Review 保留 deterministic system trace 作为 guardrails 和降级路径，同时支持 `codex_cli` profile 作为只读 Agent executor 执行 Review 辅助分析；每次运行记录 evidence、counter-evidence、guardrails、memory updates、next actions、executor step 和 Agent trace。
+- 所有确认、作废、策略补丁接受/拒绝和风险边界变化写入 audit；普通行情读取和轮询不写高频服务日志。
+
+详细设计见 [stock-agent-workbench-feature-design.md](./stock-agent-workbench-feature-design.md)。
+
+### 3.9 V2Ray Module
 
 负责：
 

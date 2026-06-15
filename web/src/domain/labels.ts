@@ -1,4 +1,4 @@
-import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, CodexStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, V2RaySettings, V2RayStatus } from "../app/types";
+import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, CodexStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, StockAgentTraceSummary, StockDataHealth, StockSummary, V2RaySettings, V2RayStatus } from "../app/types";
 
 export const NAV_ITEMS = [
   { id: "dashboard", label: "控制台", description: "服务器状态、执行边界和下一步入口" },
@@ -7,6 +7,7 @@ export const NAV_ITEMS = [
   { id: "logs", label: "日志", description: "服务日志、运行事件和在线排障视图" },
   { id: "images", label: "多媒体", description: "图片生成、视频生成、多图编辑、关键帧、资源库、历史和存储设置" },
   { id: "docker", label: "Docker", description: "Docker 守护进程、镜像与容器生命周期、daemon 安装与控制、内嵌 Registry" },
+  { id: "stock", label: "股票", description: "账户/仓位、数据资产、人工策略、系统盯盘、Review 和操作确认闭环" },
   { id: "v2ray", label: "V2Ray", description: "内嵌 V2Ray 服务端、远程设备接入和运行控制" },
   { id: "settings", label: "设置", description: "运行期配置、允许根目录和全局安全策略" },
 ] as const;
@@ -84,6 +85,28 @@ const auditLabels: Record<string, string> = {
   "codex_cli.settings.updated": "更新 Codex 设置",
   "codex_cli.probe.failed": "Codex CLI 探测失败",
   "codex_cli.legacy_data.detected": "检测到旧版 Codex 数据",
+  "stock.portfolio.created": "创建股票账户",
+  "stock.holding.saved": "保存股票持仓",
+  "stock.quote.saved": "保存股票行情",
+  "stock.data_source.saved": "保存股票数据源",
+  "stock.data_source.checked": "检查股票数据源",
+  "stock.instrument.refreshed": "刷新股票主数据",
+  "stock.market_data.backfilled": "写入股票历史数据",
+  "stock.news.ingested": "采集股票消息",
+  "stock.strategy.created": "创建股票策略",
+  "stock.opportunity.created": "创建股票机会",
+  "stock.opportunity.strategy_created": "从股票机会生成策略",
+  "stock.watch.created": "创建股票盯盘",
+  "stock.watch.updated": "更新股票盯盘",
+  "stock.watch.checked": "执行股票盯盘检查",
+  "stock.alert.updated": "更新股票提醒",
+  "stock.quote_refresh.checked": "检查股票行情刷新状态",
+  "stock.review.created": "生成股票 Review",
+  "stock.agent_profile.saved": "保存股票 Agent 模型配置",
+  "stock.strategy_patch.accepted": "接受股票策略补丁",
+  "stock.strategy_patch.rejected": "拒绝股票策略补丁",
+  "stock.operation.confirmed": "确认股票操作",
+  "stock.operation.cancelled": "作废股票操作建议",
 };
 
 export function auditLabel(type?: string): string {
@@ -113,6 +136,28 @@ export function codexGatewayStatusLabel(status?: CodexGatewayStatus): string {
   if (!status.activeAccounts) return "缺少账号";
   if (status.recentFailureCount) return "最近失败";
   return "就绪";
+}
+
+export function stockStatusLabel(summary?: StockSummary): string {
+  if (!summary?.portfolioCount) return "未建账户";
+  if (summary.pendingOperationCount) return `${summary.pendingOperationCount} 待确认`;
+  if (summary.openAlertCount) return `${summary.openAlertCount} 提醒`;
+  if (summary.activeWatchCount) return "盯盘中";
+  return "可用";
+}
+
+export function stockDataHealthLabel(health?: StockDataHealth): string {
+  if (!health?.sourceCount && !health?.instrumentCount && !health?.newsItemCount && !health?.marketPointCount) return "未初始化";
+  if (health.failedSources || health.failedTaskCount) return "存在失败";
+  if (health.degradedSources || health.staleQuoteCount) return "部分降级";
+  return "数据可用";
+}
+
+export function stockAgentTraceLabel(trace?: StockAgentTraceSummary): string {
+  if (!trace?.runCount) return "未运行";
+  if (trace.failedRunCount) return "存在失败";
+  if (trace.pendingPatchCount) return `${trace.pendingPatchCount} 待确认`;
+  return "可追溯";
 }
 
 export function codexGatewayAccountStatusLabel(value?: string): string {

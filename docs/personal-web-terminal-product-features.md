@@ -1,7 +1,7 @@
 # 个人全面 Web 终端产品功能文档
 
 文档日期：2026-06-07
-产品定位：面向个人使用的服务器 Web 控制台。它是一个长期演进的个人全面 Web 终端，用来在任何地方管理服务器上的自定义应用、命令执行、日志、文件、服务、自动化任务和 AI 代理能力。当前能力域包括控制台总览、Codex、Codex Gateway、日志中心、多媒体图片/视频生成、V2Ray 和全局设置。
+产品定位：面向个人使用的服务器 Web 控制台。它是一个长期演进的个人全面 Web 终端，用来在任何地方管理服务器上的自定义应用、命令执行、日志、文件、服务、自动化任务和 AI 代理能力。当前能力域包括控制台总览、Codex、Codex Gateway、日志中心、多媒体图片/视频生成、股票 Agent 工作台、V2Ray 和全局设置。
 
 Codex 和 Codex Gateway / OpenAI Gateway 是两个并列的独立能力域：
 
@@ -77,6 +77,7 @@ flowchart LR
   Console --> Gateway["Codex Gateway"]
   Console --> Logs["日志中心"]
   Console --> Media["多媒体 图片/视频生成/资源库"]
+  Console --> Stock["股票 Agent 工作台"]
   Console --> V2Ray["V2Ray"]
   Console --> Settings["设置"]
   Console --> Apps["应用管理（预留）"]
@@ -87,7 +88,7 @@ flowchart LR
   Console --> Secrets["密钥/环境变量（预留）"]
 ```
 
-第一阶段完整落地 `Dashboard`、`Codex`、`Codex Gateway`、`Logs`、`多媒体`、`V2Ray`、`Settings`。`Codex` 和 `Codex Gateway` 是并列独立能力域，作为一级导航存在。其他模块先在产品文档中预留。
+第一阶段完整落地 `Dashboard`、`Codex`、`Codex Gateway`、`Logs`、`多媒体`、`股票`、`V2Ray`、`Settings`。`Codex`、`Codex Gateway` 和 `股票` 是并列独立能力域，作为一级导航存在。其他模块先在产品文档中预留。
 
 ## 6. 信息架构
 
@@ -108,6 +109,7 @@ flowchart LR
 - Codex Gateway。
 - 日志。
 - 多媒体。
+- 股票。
 - V2Ray。
 - 设置。
 
@@ -122,6 +124,7 @@ flowchart LR
 - Gateway 账号、模型和请求日志。
 - 日志源列表和查看器。
 - 多媒体生成和资源库。
+- 股票机会、账户/仓位、数据底座、策略、盯盘、Review、操作确认和复盘记忆。
 - V2Ray 配置和运行状态。
 
 ### 6.4 右侧上下文栏
@@ -308,6 +311,7 @@ flowchart TD
 - Codex workspace、thread、turn、审批和设置变更。
 - Gateway 配置和账号变更。
 - 多媒体生成和资产变更。
+- 股票机会、账户/仓位、策略、盯盘、Review、提醒和人工操作变更。
 - V2Ray 配置和控制。
 - 命令执行。
 - 审批决策。
@@ -333,10 +337,10 @@ flowchart TD
 - CPU、内存、磁盘简要状态。
 - Codex 摘要：CLI installed/auth/sandbox、app-server running/stopped、活跃会话、待审批、最近失败。
 - Codex Gateway 摘要：enabled、API key、active accounts、最近请求。
-- Images 和 V2Ray 运行摘要。
+- Images、股票和 V2Ray 运行摘要。
 - 最近异常日志。
 - 最近活动。
-- 快速入口：Codex、Codex Gateway、Images、V2Ray、查看日志。
+- 快速入口：Codex、Codex Gateway、Images、股票、V2Ray、查看日志。
 
 ### 8.2 应用管理
 
@@ -751,6 +755,7 @@ MVP 成功标准：
 - Codex CLI Client。
 - Codex Gateway。
 - 多媒体图片/视频生成和资源库。
+- 股票 Agent 工作台。
 - V2Ray 配置和运行控制。
 - 日志中心。
 

@@ -1357,7 +1357,16 @@ CREATE INDEX IF NOT EXISTS idx_media_assets_checksum ON media_assets(checksum_sh
 	if err := s.migrateImageStorageToObjectProfile(ctx); err != nil {
 		return err
 	}
-	return s.migrateCodexCli(ctx)
+	if err := s.migrateCodexCli(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateStock(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateStockData(ctx); err != nil {
+		return err
+	}
+	return s.migrateStockAgent(ctx)
 }
 
 // migrateImageStorageToObjectProfile is an additive, idempotent migration. When
