@@ -352,7 +352,7 @@ const driftTickerInterval = 10 * time.Minute
 // renews certs with DaysLeft < 30 so the per-hour work is nearly always zero.
 const certRenewalInterval = 1 * time.Hour
 
-func (s *Service) startWorkers(ctx context.Context) {
+func (s *Service) startWorkers(ctx context.Context, stop <-chan struct{}, done chan<- struct{}) {
 	// --- adopt ASAP on boot --------------------------------------------------
 	if err := s.bootAdopt(ctx); err != nil {
 		s.log.WarnContext(ctx, "mail: boot adopt skipped", "error", err)
@@ -385,15 +385,21 @@ func (s *Service) startWorkers(ctx context.Context) {
 	// --- emergency auto-restore ticker -----------------------------------------
 	emergencyTicker := time.NewTicker(1 * time.Minute)
 
+	var wg sync.WaitGroup
+	wg.Add(2)
+
 	// --- process-exit observer goroutine ------------------------------------
 	// Supervisor.Wait() returns a channel that closes once (per Start/Adopt).
 	// We launch an observer that re-reads it on each tick and, when the
 	// channel fires, publishes a RuntimeStopped/Crashed event + triggers
 	// crash-loop backoff handling.
-	go s.observeSupervisorExits(ctx)
-
-	done := s.backgroundDone
 	go func() {
+		defer wg.Done()
+		s.observeSupervisorExits(ctx, stop)
+	}()
+
+	go func() {
+		defer wg.Done()
 		defer fast.Stop()
 		defer slow.Stop()
 		defer adoptTicker.Stop()
@@ -423,7 +429,7 @@ func (s *Service) startWorkers(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-done:
+			case <-stop:
 				return
 			case <-fast.C:
 				if _, err := s.runAllProbes(ctx, nil); err != nil {
@@ -468,6 +474,11 @@ func (s *Service) startWorkers(ctx context.Context) {
 				s.runEmergencyAutoRestoreTick(ctx)
 			}
 		}
+	}()
+
+	go func() {
+		wg.Wait()
+		close(done)
 	}()
 }
 
@@ -535,16 +546,24 @@ func formatAdoptionIssues(issues []moxsupervisor.AdoptionIssue) []string {
 // observeSupervisorExits spins on Supervisor.Wait() and publishes exit events.
 // A single observer goroutine is enough because Supervisor serialises lifecycle
 // internally.
-func (s *Service) observeSupervisorExits(ctx context.Context) {
+func (s *Service) observeSupervisorExits(ctx context.Context, stop <-chan struct{}) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-stop:
 			return
 		default:
 		}
 		svc, err := s.supervisor(ctx)
 		if err != nil {
-			time.Sleep(5 * time.Second)
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-time.After(5 * time.Second):
+			}
 			continue
 		}
 		// Wait blocks until Start/Adopt has happened (returns a non-closed
@@ -553,10 +572,18 @@ func (s *Service) observeSupervisorExits(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-stop:
+			return
 		case res, ok := <-ch:
 			if !ok {
 				// No process has ever been started – back off and retry.
-				time.Sleep(2 * time.Second)
+				select {
+				case <-ctx.Done():
+					return
+				case <-stop:
+					return
+				case <-time.After(2 * time.Second):
+				}
 				continue
 			}
 			evtType := EventTypeRuntimeStopped
