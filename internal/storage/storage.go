@@ -3132,6 +3132,25 @@ func (s *Store) InterruptStaleSystemUpdateJobs(ctx context.Context, message stri
 }
 
 func (s *Store) BackupDatabase(ctx context.Context, path string) error {
+	return s.BackupDatabaseWithProgress(ctx, path, nil, 0, 0)
+}
+
+func (s *Store) DBPath() string { return s.dbPath }
+
+func (s *Store) DatabaseSizeBytes() (int64, error) {
+	if s.dbPath == "" || s.dbPath == ":memory:" {
+		return 0, nil
+	}
+	info, err := os.Stat(s.dbPath)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
+type BackupProgress func(remaining, pageCount int)
+
+func (s *Store) BackupDatabaseWithProgress(ctx context.Context, path string, progress BackupProgress, stepsPerTick int, stepSleep time.Duration) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("backup path is required")
 	}
@@ -3150,7 +3169,7 @@ func (s *Store) BackupDatabase(ctx context.Context, path string) error {
 	}
 	tmpPath := path + ".tmp"
 	_ = os.Remove(tmpPath)
-	if err := s.backupDatabaseOnline(ctx, tmpPath); err != nil {
+	if err := s.backupDatabaseOnline(ctx, tmpPath, progress, stepsPerTick, stepSleep); err != nil {
 		_ = os.Remove(tmpPath)
 		return err
 	}
@@ -3161,7 +3180,10 @@ func (s *Store) BackupDatabase(ctx context.Context, path string) error {
 	return syncDir(filepath.Dir(path))
 }
 
-func (s *Store) backupDatabaseOnline(ctx context.Context, path string) error {
+func (s *Store) backupDatabaseOnline(ctx context.Context, path string, progress BackupProgress, stepsPerTick int, stepSleep time.Duration) error {
+	if stepsPerTick <= 0 {
+		stepsPerTick = 64
+	}
 	sourceDB, err := sql.Open("sqlite3", s.dbPath)
 	if err != nil {
 		return err
@@ -3211,19 +3233,31 @@ func (s *Store) backupDatabaseOnline(ctx context.Context, path string) error {
 					_ = backup.Finish()
 					return err
 				}
-				done, err := backup.Step(64)
-				if err != nil {
+				done, stepErr := backup.Step(stepsPerTick)
+				if progress != nil {
+					progress(backup.Remaining(), backup.PageCount())
+				}
+				if stepErr != nil {
 					_ = backup.Finish()
-					return err
+					return stepErr
 				}
 				if done {
 					return backup.Finish()
 				}
-				select {
-				case <-ctx.Done():
-					_ = backup.Finish()
-					return ctx.Err()
-				case <-time.After(10 * time.Millisecond):
+				if stepSleep > 0 {
+					select {
+					case <-ctx.Done():
+						_ = backup.Finish()
+						return ctx.Err()
+					case <-time.After(stepSleep):
+					}
+				} else {
+					select {
+					case <-ctx.Done():
+						_ = backup.Finish()
+						return ctx.Err()
+					case <-time.After(10 * time.Millisecond):
+					}
 				}
 			}
 		})

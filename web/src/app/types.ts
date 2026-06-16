@@ -112,6 +112,7 @@ interface FileSettings {
   addr?: string;
   dataDir?: string;
   dbPath?: string;
+  dbSizeBytes?: number;
   logFile?: string;
   logMaxSizeMB?: number;
   logMaxFiles?: number;
@@ -192,6 +193,7 @@ export interface SystemUpdateStatus {
   restartMode?: string;
   installBinaryPath?: string;
   backupBinaryPath?: string;
+  dbSizeBytes?: number;
   supervisor?: SupervisorStatus;
   /** @deprecated Use `supervisor?.underSupervisor` instead. */
   underSupervisor?: boolean;

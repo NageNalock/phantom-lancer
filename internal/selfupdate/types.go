@@ -73,6 +73,7 @@ type Status struct {
 	RestartMode           string                     `json:"restartMode"`
 	InstallBinaryPath     string                     `json:"installBinaryPath,omitempty"`
 	BackupBinaryPath      string                     `json:"backupBinaryPath,omitempty"`
+	DBSizeBytes           int64                      `json:"dbSizeBytes,omitempty"`
 
 	// Supervisor contains the real-time liveness information of the outer
 	// phantom-supervisor process. Populated by the status endpoint via

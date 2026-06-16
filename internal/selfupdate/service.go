@@ -56,6 +56,9 @@ func (s *Service) Status(ctx context.Context) Status {
 	if p, err := s.installPath(); err == nil {
 		status.InstallBinaryPath = p
 	}
+	if sz, err := s.store.DatabaseSizeBytes(); err == nil {
+		status.DBSizeBytes = sz
+	}
 	if check, err := s.store.LatestSystemUpdateCheck(ctx); err == nil {
 		status.LatestCheck = &check
 	}

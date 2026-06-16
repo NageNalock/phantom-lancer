@@ -9,13 +9,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"phantom-lancer/internal/safelog"
 )
 
-const installDatabaseBackupTimeout = 2 * time.Minute
+const (
+	installDatabaseBackupTimeout    = 5 * time.Minute
+	installDatabaseBackupStepsTick  = 256
+	installDatabaseBackupStepSleep  = 2 * time.Millisecond
+)
 
 type installResult struct {
 	installPath          string
@@ -61,7 +66,32 @@ func (s *Service) install(ctx context.Context, jobID, stagedBinary, stagedSuperv
 	s.append(ctx, jobID, "update.install.db_backup.started", map[string]any{"timeoutSeconds": int(installDatabaseBackupTimeout.Seconds())})
 	backupCtx, cancelBackup := context.WithTimeout(ctx, installDatabaseBackupTimeout)
 	defer cancelBackup()
-	if err := s.store.BackupDatabase(backupCtx, dbBackup); err != nil {
+	var lastProgressReport atomic.Int64
+	progressFn := func(remaining, pageCount int) {
+		if pageCount <= 0 {
+			return
+		}
+		now := time.Now().UnixMilli()
+		last := lastProgressReport.Load()
+		if now-last < 2000 && remaining > 0 {
+			return
+		}
+		if !lastProgressReport.CompareAndSwap(last, now) && remaining > 0 {
+			return
+		}
+		done := pageCount - remaining
+		pct := 0
+		if pageCount > 0 {
+			pct = int(float64(done) * 100.0 / float64(pageCount))
+		}
+		s.append(ctx, jobID, "update.install.db_backup.progress", map[string]any{
+			"donePages":      done,
+			"totalPages":     pageCount,
+			"percent":        pct,
+			"approxSizeMiB":  pageCount * 4 / 1024,
+		})
+	}
+	if err := s.store.BackupDatabaseWithProgress(backupCtx, dbBackup, progressFn, installDatabaseBackupStepsTick, installDatabaseBackupStepSleep); err != nil {
 		if s.log != nil {
 			s.log.Warn("system update database backup failed", "job_id", jobID, "db_backup_path", dbBackup, "error", safelog.Error(err, 200))
 		}
@@ -109,6 +139,10 @@ func (s *Service) install(ctx context.Context, jobID, stagedBinary, stagedSuperv
 			s.log.Warn("system update supervisor backup skipped", "job_id", jobID, "error", safelog.Error(bErr, 200))
 		}
 	}
+	s.append(ctx, jobID, "update.install.binary_backup.completed", map[string]any{
+		"binaryBackup":     backupPath,
+		"supervisorBackup": supervisorBackupWritten,
+	})
 
 	tempPath := filepath.Join(filepath.Dir(installPath), ".phantom-lancer."+jobID+".tmp")
 	if err := copyFile(stagedBinary, tempPath, currentInfo.Mode().Perm()); err != nil {
@@ -129,6 +163,9 @@ func (s *Service) install(ctx context.Context, jobID, stagedBinary, stagedSuperv
 	if s.log != nil {
 		s.log.Info("system update binary replaced", "job_id", jobID, "install_path", installPath, "backup_path", backupPath)
 	}
+	s.append(ctx, jobID, "update.install.binary_replace.completed", map[string]any{
+		"installPath": installPath,
+	})
 	// Install supervisor binary if present (Phase 1: in-place replacement;
 	// the running supervisor process keeps the old fd, so no crash).
 	// Supervisor install failure is deliberately non-fatal: the old binary

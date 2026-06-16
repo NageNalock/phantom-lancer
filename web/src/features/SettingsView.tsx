@@ -5,6 +5,7 @@ import type { AppData, ListenerEndpoint, RuntimeSettings, TLSProbeResult } from 
 import { friendlyError } from "../api/client";
 import { Button, ContextList, Field, Panel, Pill, SubTabs, Toggle } from "../components/ui";
 import { defaultRuntime, formatDate } from "../domain/labels";
+import { formatBytesIEC } from "../utils/format";
 import { useQueryParamState } from "../hooks/useQueryParamState";
 import { SystemUpdatePanel } from "./settings/SystemUpdatePanel";
 import { ObjectStoragePanel } from "./settings/ObjectStoragePanel";
@@ -461,7 +462,7 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
                 items={[
                   ["配置文件", data.settings.file?.configPath || "-"],
                   ["数据目录", data.settings.file?.dataDir || "-"],
-                  ["数据库", data.settings.file?.dbPath || "-"],
+                  ["数据库", <><div className="grid gap-0.5"><span className="mono">{data.settings.file?.dbPath || "-"}</span>{data.settings.file?.dbSizeBytes ? <span className="muted mono text-[11px]">{formatBytesIEC(data.settings.file.dbSizeBytes)}</span> : null}</div></>],
                 ]}
               />
             </div>

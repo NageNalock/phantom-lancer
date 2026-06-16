@@ -21,8 +21,11 @@ const updateEventNames = [
   "update.extract.completed",
   "update.install.started",
   "update.install.db_backup.started",
+  "update.install.db_backup.progress",
   "update.install.db_backup.failed",
   "update.install.db_backup.completed",
+  "update.install.binary_backup.completed",
+  "update.install.binary_replace.completed",
   "update.install.completed",
   "update.restart.requested",
   "update.failed",
@@ -83,7 +86,7 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
     };
     updateEventNames.forEach((name) => source.addEventListener(name, handle));
     source.onerror = () => {
-      if (!closed) source.close();
+      setReconnectingFlag((prev) => prev + 1);
     };
     return () => {
       closed = true;
@@ -91,6 +94,16 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
       source.close();
     };
   }, [actions, activeJob?.id, loadStatus]);
+
+  const [, setReconnectingFlag] = useState(0);
+
+  useEffect(() => {
+    if (!activeJob?.id || reconnecting) return;
+    const timer = window.setInterval(() => {
+      void loadStatus().catch(() => undefined);
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [activeJob?.id, loadStatus, reconnecting]);
 
   useEffect(() => {
     if (!reconnecting) return;
@@ -118,11 +131,56 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
   }, [actions, loadStatus, reconnecting, status.restartTimeoutSeconds]);
 
   const progress = useMemo(() => {
-    const total = visibleJob?.totalBytes || 0;
-    const done = visibleJob?.bytesDownloaded || 0;
-    if (!total) return 0;
-    return Math.max(0, Math.min(100, Math.round((done / total) * 100)));
-  }, [visibleJob?.bytesDownloaded, visibleJob?.totalBytes]);
+    if (!visibleJob) return 0;
+    const phase = visibleJob.phase || "created";
+    const status = visibleJob.status || "queued";
+
+    if (status === "completed") return 100;
+    if (status === "failed" || status === "cancelled") return 0;
+    if (status === "restarting" || phase === "restarting") return 95;
+
+    const totalBytes = visibleJob.totalBytes || 0;
+    const bytesDownloaded = visibleJob.bytesDownloaded || 0;
+
+    const downloadRatio = totalBytes > 0 ? Math.min(1, bytesDownloaded / totalBytes) : 0;
+
+    const phaseStart = {
+      created: 0,
+      downloading: 5,
+      verifying: 60,
+      extracting: 65,
+      installing: 70,
+    } as Record<string, number>;
+    const phaseRange = {
+      created: 0,
+      downloading: 55,
+      verifying: 5,
+      extracting: 5,
+      installing: 25,
+    } as Record<string, number>;
+
+    const start = phaseStart[phase] ?? 0;
+    const range = phaseRange[phase] ?? 0;
+    let phaseProgress = 0;
+    if (phase === "downloading") {
+      phaseProgress = downloadRatio;
+    } else if (phase === "verifying" || phase === "extracting") {
+      phaseProgress = bytesDownloaded > 0 ? 0.6 : 0.3;
+    } else if (phase === "installing") {
+      const lastDBProgress = [...events].reverse().find((e) => e.type === "update.install.db_backup.progress");
+      const latestTypes = events.slice(-15).map((e) => e.type);
+      const hasBinaryReplace = latestTypes.includes("update.install.binary_replace.completed");
+      const hasBinaryBackup = latestTypes.includes("update.install.binary_backup.completed");
+      const hasDBComplete = latestTypes.includes("update.install.db_backup.completed");
+      if (hasBinaryReplace) phaseProgress = 0.9;
+      else if (hasBinaryBackup) phaseProgress = 0.6;
+      else if (hasDBComplete) phaseProgress = 0.5;
+      else if (lastDBProgress?.payload?.percent != null) phaseProgress = 0.1 + 0.4 * (Number(lastDBProgress.payload.percent) / 100);
+      else phaseProgress = 0.1;
+    }
+
+    return Math.max(0, Math.min(100, Math.round(start + range * phaseProgress)));
+  }, [visibleJob, events]);
 
   async function checkUpdates() {
     setBusy("check");
@@ -241,6 +299,14 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
 
         <SupervisorCard status={status} />
 
+        {(status.dbSizeBytes ?? 0) > 0 ? (
+          <ContextList
+            items={[
+              ["数据库大小", <><span className="mono">{formatBytesIEC(status.dbSizeBytes)}</span><span className="muted ml-2 text-[11px]">（更新时会先备份完整数据库，越大需要的时间越长）</span></>],
+            ]}
+          />
+        ) : null}
+
         {check?.releaseUrl ? (
           <a className="mono text-xs text-[var(--accent)] underline decoration-[rgba(207,77,16,0.34)] underline-offset-2" href={check.releaseUrl} rel="noreferrer" target="_blank">
             {check.releaseUrl}
@@ -296,6 +362,9 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
                     取消下载
                   </Button>
                 ) : null}
+                {activeJob?.phase === "installing" ? (
+                  <span className="muted text-xs self-center pr-1">安装中不可取消</span>
+                ) : null}
                 {visibleJob && (visibleJob.status === "failed" || visibleJob.status === "completed") && status.backupBinaryPath ? (
                   <Button disabled={busy === "rollback"} onClick={() => { setRollbackPassword(""); setRollbackOpen(true); }} tone="danger">
                     回滚
@@ -308,7 +377,7 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
                 <div className="h-full bg-[var(--accent)] transition-[width]" style={{ width: `${progress}%` }} />
               </div>
               <div className="flex flex-wrap justify-between gap-2 text-xs">
-                <span className="mono">{formatBytesIEC(visibleJob.bytesDownloaded)} / {formatBytesIEC(visibleJob.totalBytes)}</span>
+                <ProgressLabel activeJob={visibleJob} events={events} />
                 <span className="mono">{progress}%</span>
               </div>
             </div>
@@ -505,27 +574,74 @@ function jobStatusLabel(value?: string): string {
 }
 
 function eventLabel(event: EventRecord): string {
-  const labels: Record<string, string> = {
-    "update.job.created": "更新任务已创建",
-    "update.job.updated": "更新任务状态已更新",
-    "update.job.interrupted": "更新任务在服务重启时被自动置为失败",
-    "update.download.started": "开始下载 release 包",
-    "update.download.progress": "下载进度已更新",
-    "update.download.completed": "下载完成",
-    "update.verify.completed": "checksum 校验完成",
-    "update.extract.completed": "安装包解包完成",
-    "update.install.started": "开始安装 binary",
-    "update.install.db_backup.started": "开始备份数据库",
-    "update.install.db_backup.failed": "数据库备份失败",
-    "update.install.db_backup.completed": "数据库备份完成",
-    "update.install.completed": "新版本 binary 已安装",
-    "update.restart.requested": "已请求服务重启",
-    "update.failed": "更新失败",
-    "update.cancelled": "更新已取消",
-    "update.completed": "更新已完成并确认生效",
-    "update.rollback.applied": "已回滚到备份 binary",
-    "system.update.rollback": "手动回滚已执行",
-    "system.update.rollback_auto": "自动回滚已执行",
+  const labels: Record<string, (e: EventRecord) => string> = {
+    "update.job.created": () => "更新任务已创建",
+    "update.job.updated": () => "更新任务状态已更新",
+    "update.job.interrupted": () => "更新任务在服务重启时被自动置为失败",
+    "update.download.started": () => "开始下载 release 包",
+    "update.download.progress": () => "下载进度已更新",
+    "update.download.completed": () => "下载完成",
+    "update.verify.completed": () => "checksum 校验完成",
+    "update.extract.completed": () => "安装包解包完成",
+    "update.install.started": () => "开始安装 binary",
+    "update.install.db_backup.started": () => "开始备份数据库",
+    "update.install.db_backup.progress": (e) => {
+      const pct = e.payload?.percent ?? 0;
+      const mib = e.payload?.approxSizeMiB ?? 0;
+      return `数据库备份进行中：${pct}%${mib ? `（约 ${mib} MiB）` : ""}`;
+    },
+    "update.install.db_backup.failed": () => "数据库备份失败",
+    "update.install.db_backup.completed": () => "数据库备份完成",
+    "update.install.binary_backup.completed": () => "主程序与守护进程备份完成",
+    "update.install.binary_replace.completed": () => "主程序 binary 替换完成",
+    "update.install.completed": () => "新版本 binary 已安装",
+    "update.restart.requested": () => "已请求服务重启",
+    "update.failed": () => "更新失败",
+    "update.cancelled": () => "更新已取消",
+    "update.completed": () => "更新已完成并确认生效",
+    "update.rollback.applied": () => "已回滚到备份 binary",
+    "system.update.rollback": () => "手动回滚已执行",
+    "system.update.rollback_auto": () => "自动回滚已执行",
   };
-  return labels[event.type] || event.type;
+  const fn = labels[event.type];
+  if (fn) return fn(event);
+  return event.type;
+}
+
+function ProgressLabel({ activeJob, events }: { activeJob: SystemUpdateJob; events: EventRecord[] }) {
+  const phase = activeJob.phase || "created";
+  const status = activeJob.status || "queued";
+  if (status === "completed") return <span>已完成</span>;
+  if (status === "failed") return <span className="text-[var(--danger)]">{activeJob.errorMessage || "执行失败"}</span>;
+  if (status === "cancelled") return <span>已取消</span>;
+  if (phase === "downloading") {
+    return (
+      <span className="mono">
+        下载 {formatBytesIEC(activeJob.bytesDownloaded)} / {formatBytesIEC(activeJob.totalBytes)}
+      </span>
+    );
+  }
+  if (phase === "verifying") return <span>校验 SHA-256 checksum…</span>;
+  if (phase === "extracting") return <span>解压 tar.gz 安装包…</span>;
+  if (phase === "installing") {
+    const lastProgress = [...events].reverse().find((e) => e.type === "update.install.db_backup.progress");
+    if (lastProgress?.payload?.percent != null) {
+      const mib = Number(lastProgress.payload.approxSizeMiB) || 0;
+      const pct = Number(lastProgress.payload.percent);
+      return (
+        <span>
+          备份 SQLite 数据库 {pct}%{mib > 0 ? `（约 ${mib} MiB）` : ""}…
+        </span>
+      );
+    }
+    const latest = events[events.length - 1]?.type;
+    if (latest === "update.install.db_backup.completed") return <span>备份主程序与守护进程 binary…</span>;
+    if (latest === "update.install.binary_backup.completed") return <span>写入新版本 binary…</span>;
+    if (latest === "update.install.binary_replace.completed") return <span>更新 supervisor 并清理旧备份…</span>;
+    if (latest === "update.install.db_backup.started") return <span>正在备份 SQLite 数据库（大数据库可能需要数十秒到数分钟）…</span>;
+    if (latest === "update.install.started") return <span>准备数据库备份…</span>;
+    return <span>执行安装步骤…</span>;
+  }
+  if (phase === "restarting") return <span>服务正在重启，等待新版本启动…</span>;
+  return <span>排队中…</span>;
 }

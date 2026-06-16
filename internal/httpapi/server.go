@@ -833,12 +833,19 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
+	var dbSizeBytes int64
+	if s.cfg.DBPath != "" && s.cfg.DBPath != ":memory:" {
+		if info, statErr := os.Stat(s.cfg.DBPath); statErr == nil {
+			dbSizeBytes = info.Size()
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"file": map[string]any{
 			"configPath":    s.cfg.ConfigPath,
 			"addr":          s.currentListenAddr(),
 			"dataDir":       s.cfg.DataDir,
 			"dbPath":        s.cfg.DBPath,
+			"dbSizeBytes":   dbSizeBytes,
 			"logFile":       s.cfg.LogFile,
 			"logMaxSizeMB":  s.cfg.LogMaxSizeMB,
 			"logMaxFiles":   s.cfg.LogMaxFiles,
