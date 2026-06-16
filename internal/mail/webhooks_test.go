@@ -460,7 +460,10 @@ func TestWebhookRotateSecret_ThenOldRejected(t *testing.T) {
 func TestWebhookIngest_ConcurrentHMACVerifies(t *testing.T) {
 	svc, ctx := newTestService(t)
 	_, secret := registerIngressWebhook(t, svc, ctx)
-	wrongSecret := "aa" + secret[2:]
+	wrongSecret := "00" + secret[2:]
+	if strings.HasPrefix(secret, "00") {
+		wrongSecret = "ff" + secret[2:]
+	}
 
 	const n = 100
 	var wg sync.WaitGroup
