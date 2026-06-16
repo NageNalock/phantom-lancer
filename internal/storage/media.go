@@ -546,14 +546,63 @@ FROM media_generation_jobs WHERE id = ?`, id)
 }
 
 func (s *Store) ListMediaGenerationJobs(ctx context.Context, limit int, mediaType, provider, status, mode, model string) ([]MediaGenerationJob, error) {
+	out, _, err := s.ListMediaGenerationJobsPage(ctx, limit, 0, mediaType, provider, status, mode, model)
+	return out, err
+}
+
+func (s *Store) ListMediaGenerationJobsPage(ctx context.Context, limit, offset int, mediaType, provider, status, mode, model string) ([]MediaGenerationJob, int, error) {
 	if limit <= 0 || limit > 400 {
 		limit = 120
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	query := `
 SELECT id, media_type, provider, status, mode, mode_label, model, endpoint, prompt,
        parameters_json, source_count, output_count, provider_task_id, provider_video_id,
        provider_status, progress, usage_json, error_message, created_at, started_at, completed_at
 FROM media_generation_jobs`
+	args, whereSQL := mediaGenerationJobFilterArgs(mediaType, provider, status, mode, model)
+	if whereSQL != "" {
+		query += " WHERE " + whereSQL
+	}
+	var total int
+	countQuery := `SELECT COUNT(*) FROM media_generation_jobs`
+	if whereSQL != "" {
+		countQuery += " WHERE " + whereSQL
+	}
+	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+	listArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := s.db.QueryContext(ctx, query, listArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	out := []MediaGenerationJob{}
+	for rows.Next() {
+		job, err := scanMediaGenerationJob(rows)
+		if err != nil {
+			_ = rows.Close()
+			return nil, 0, err
+		}
+		out = append(out, job)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, 0, err
+	}
+	_ = rows.Close()
+	for index := range out {
+		if err := s.attachMediaJobRelations(ctx, &out[index]); err != nil {
+			return nil, 0, err
+		}
+	}
+	return out, total, nil
+}
+
+func mediaGenerationJobFilterArgs(mediaType, provider, status, mode, model string) ([]any, string) {
 	args := []any{}
 	clauses := []string{}
 	if mediaType = strings.TrimSpace(mediaType); mediaType != "" {
@@ -576,35 +625,7 @@ FROM media_generation_jobs`
 		clauses = append(clauses, "model = ?")
 		args = append(args, model)
 	}
-	if len(clauses) > 0 {
-		query += " WHERE " + strings.Join(clauses, " AND ")
-	}
-	query += " ORDER BY created_at DESC LIMIT ?"
-	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	out := []MediaGenerationJob{}
-	for rows.Next() {
-		job, err := scanMediaGenerationJob(rows)
-		if err != nil {
-			_ = rows.Close()
-			return nil, err
-		}
-		out = append(out, job)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, err
-	}
-	_ = rows.Close()
-	for index := range out {
-		if err := s.attachMediaJobRelations(ctx, &out[index]); err != nil {
-			return nil, err
-		}
-	}
-	return out, nil
+	return args, strings.Join(clauses, " AND ")
 }
 
 func (s *Store) CountMediaGenerationJobs(ctx context.Context, mediaType, provider string) (int, error) {
@@ -939,8 +960,20 @@ func (s *Store) LinkMediaSourceAsset(ctx context.Context, sourceID, assetID stri
 }
 
 func (s *Store) ListMediaAssets(ctx context.Context, limit int, mediaType, provider, assetType, status string, includePrivate bool) ([]MediaAsset, error) {
+	privacy := "public"
+	if includePrivate {
+		privacy = "all"
+	}
+	out, _, err := s.ListMediaAssetsPage(ctx, limit, 0, mediaType, provider, assetType, status, privacy)
+	return out, err
+}
+
+func (s *Store) ListMediaAssetsPage(ctx context.Context, limit, offset int, mediaType, provider, assetType, status, privacy string) ([]MediaAsset, int, error) {
 	if limit <= 0 || limit > 400 {
 		limit = 120
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	query := `
 SELECT id, media_type, asset_type, status, private, provider, model, job_id, source_role, slot,
@@ -950,9 +983,42 @@ SELECT id, media_type, asset_type, status, private, provider, model, job_id, sou
   s3_endpoint_label, s3_key, s3_etag, private_at, archived_at, deleted_at, deleted_reason,
   last_error, created_at, updated_at
 FROM media_assets`
+	args, whereSQL := mediaAssetFilterArgs(mediaType, provider, assetType, status, privacy)
+	query += " WHERE " + whereSQL
+	countQuery := "SELECT COUNT(*) FROM media_assets WHERE " + whereSQL
+	var total int
+	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+	listArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := s.db.QueryContext(ctx, query, listArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []MediaAsset{}
+	for rows.Next() {
+		a, err := scanMediaAsset(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return out, total, nil
+}
+
+func mediaAssetFilterArgs(mediaType, provider, assetType, status, privacy string) ([]any, string) {
 	args := []any{}
 	clauses := []string{`status != 'deleted'`}
-	if !includePrivate {
+	switch strings.TrimSpace(strings.ToLower(privacy)) {
+	case "all":
+	case "private":
+		clauses = append(clauses, `private = 1`)
+	default:
 		clauses = append(clauses, `private = 0`)
 	}
 	if mediaType = strings.TrimSpace(mediaType); mediaType != "" {
@@ -974,23 +1040,7 @@ FROM media_assets`
 		clauses = append(clauses, "status != 'failed'")
 		clauses = append(clauses, "((storage_backend = 'local' AND local_name != '') OR (storage_backend = 's3' AND s3_key != ''))")
 	}
-	query += " WHERE " + strings.Join(clauses, " AND ")
-	query += " ORDER BY created_at DESC LIMIT ?"
-	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []MediaAsset{}
-	for rows.Next() {
-		a, err := scanMediaAsset(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
+	return args, strings.Join(clauses, " AND ")
 }
 
 func scanMediaAsset(row workspaceScanner) (MediaAsset, error) {

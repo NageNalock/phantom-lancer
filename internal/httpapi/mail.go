@@ -194,9 +194,11 @@ func (s *Server) registerMailRoutes(mux *http.ServeMux) {
 
 	// Logs — 4 routes (all read-only, no CSRF).
 	mux.HandleFunc("GET /api/mail/logs", s.handleMailLogsList)
+	mux.HandleFunc("GET /api/mail/logs/files", s.handleMailLogsList)
 	mux.HandleFunc("GET /api/mail/logs/tail", s.handleMailLogsTail)
 	mux.HandleFunc("GET /api/mail/logs/stream", s.handleMailLogsStream)
 	mux.HandleFunc("GET /api/mail/logs/redaction-summary", s.handleMailLogsRedactionSummary)
+	mux.HandleFunc("GET /api/mail/logs/redaction", s.handleMailLogsRedactionSummary)
 
 	// Backup — 7 routes (3 reads, 4 writes).
 	mux.HandleFunc("GET /api/mail/backups", s.handleMailBackupList)
@@ -206,6 +208,9 @@ func (s *Server) registerMailRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/mail/backup/schedules", s.handleMailBackupScheduleList)
 	mux.HandleFunc("POST /api/mail/backup/schedules", s.handleMailBackupScheduleUpsert)
 	mux.HandleFunc("DELETE /api/mail/backup/schedules/{sid}", s.handleMailBackupScheduleDelete)
+	mux.HandleFunc("GET /api/mail/backups/schedules", s.handleMailBackupScheduleList)
+	mux.HandleFunc("POST /api/mail/backups/schedules", s.handleMailBackupScheduleUpsert)
+	mux.HandleFunc("DELETE /api/mail/backups/schedules/{sid}", s.handleMailBackupScheduleDelete)
 
 	// Retention — 4 routes (1 read, 3 writes).
 	mux.HandleFunc("GET /api/mail/retention/rules", s.handleMailRetentionList)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"phantom-lancer/internal/ids"
 )
@@ -38,6 +39,8 @@ type StockInstrument struct {
 	ListingDate string `json:"listingDate,omitempty"`
 	Source      string `json:"source,omitempty"`
 	Quality     string `json:"quality"`
+	PY          string `json:"py,omitempty"`
+	PYFull      string `json:"pyFull,omitempty"`
 	CreatedAt   string `json:"createdAt"`
 	UpdatedAt   string `json:"updatedAt"`
 }
@@ -128,6 +131,29 @@ type StockDataHealthSummary struct {
 	StaleQuoteCount    int    `json:"staleQuoteCount"`
 	LastTaskAt         string `json:"lastTaskAt,omitempty"`
 	LastNewsAt         string `json:"lastNewsAt,omitempty"`
+}
+
+type StockInstrumentSearchParams struct {
+	Query           string
+	Markets         []string
+	Statuses        []string
+	Industry        string
+	Concepts        []string
+	MinListingDate  string
+	Quality         string
+	IncludeDelisted bool
+	Sort            string
+	Page            int
+	PageSize        int
+}
+
+type StockInstrumentSearchResult struct {
+	Total    int                          `json:"total"`
+	Page     int                          `json:"page"`
+	PageSize int                          `json:"pageSize"`
+	Items    []StockInstrument            `json:"items"`
+	Snippets map[string]map[string]string `json:"snippets,omitempty"`
+	FTS      bool                         `json:"fts"`
 }
 
 func (s *Store) migrateStockData(ctx context.Context) error {
@@ -234,8 +260,48 @@ CREATE INDEX IF NOT EXISTS idx_stock_data_tasks_status ON stock_data_tasks(statu
 	if err != nil {
 		return err
 	}
+	// —— v2 增量迁移：stock_instruments 加拼音列 + 普通索引 ——
+	// SQLite ALTER TABLE ... ADD COLUMN 如果列已存在会报错，忽略即可
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE stock_instruments ADD COLUMN py TEXT NOT NULL DEFAULT ''`); err != nil {
+		_ = err
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE stock_instruments ADD COLUMN py_full TEXT NOT NULL DEFAULT ''`); err != nil {
+		_ = err
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stock_instruments_symbol_name ON stock_instruments(symbol, name)`); err != nil {
+		return err
+	}
+	if FTS5Available() {
+		if _, err := s.db.ExecContext(ctx, stockInstrumentFTSSQL); err != nil {
+			return fmt.Errorf("stock migrate: create instrument fts5: %w", err)
+		}
+	}
 	return s.seedStockDataSources(ctx)
 }
+
+const stockInstrumentFTSSQL = `
+CREATE VIRTUAL TABLE IF NOT EXISTS stock_instruments_fts USING fts5(
+  symbol, name, py, py_full, industry, concept,
+  market UNINDEXED, status UNINDEXED, quality UNINDEXED,
+  tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS stock_instruments_ai AFTER INSERT ON stock_instruments BEGIN
+  INSERT INTO stock_instruments_fts(rowid, symbol, name, py, py_full, industry, concept, market, status, quality)
+  VALUES (new.rowid, new.symbol, new.name, new.py, new.py_full, new.industry, new.concept, new.market, new.status, new.quality);
+END;
+CREATE TRIGGER IF NOT EXISTS stock_instruments_au AFTER UPDATE ON stock_instruments BEGIN
+  DELETE FROM stock_instruments_fts WHERE rowid = old.rowid;
+  INSERT INTO stock_instruments_fts(rowid, symbol, name, py, py_full, industry, concept, market, status, quality)
+  VALUES (new.rowid, new.symbol, new.name, new.py, new.py_full, new.industry, new.concept, new.market, new.status, new.quality);
+END;
+CREATE TRIGGER IF NOT EXISTS stock_instruments_ad AFTER DELETE ON stock_instruments BEGIN
+  DELETE FROM stock_instruments_fts WHERE rowid = old.rowid;
+END;
+INSERT INTO stock_instruments_fts(rowid, symbol, name, py, py_full, industry, concept, market, status, quality)
+SELECT rowid, symbol, name, py, py_full, industry, concept, market, status, quality
+FROM stock_instruments
+WHERE rowid NOT IN (SELECT rowid FROM stock_instruments_fts);
+`
 
 func (s *Store) seedStockDataSources(ctx context.Context) error {
 	defaults := []StockDataSource{
@@ -290,6 +356,28 @@ func (s *Store) seedStockDataSources(ctx context.Context) error {
 			Quality:          "unknown",
 			FailureSummary:   "临时搜索适配器登记，不保存 endpoint、cookie 或 token",
 			RateLimitSeconds: 60,
+		},
+		{
+			Source:           "eastmoney_universe",
+			DisplayName:      "Eastmoney A-share Universe",
+			SourceType:       "market_data",
+			AuthMode:         "none",
+			Enabled:          true,
+			Status:           "available",
+			Quality:          "unknown",
+			FailureSummary:   "A 股全量主数据主源，后台维护任务按频率自动刷新",
+			RateLimitSeconds: 20 * 60 * 60,
+		},
+		{
+			Source:           "sina_universe",
+			DisplayName:      "Sina A-share Universe Fallback",
+			SourceType:       "market_data",
+			AuthMode:         "none",
+			Enabled:          true,
+			Status:           "unknown",
+			Quality:          "unknown",
+			FailureSummary:   "A 股主数据兜底源，仅在主源失败时使用，不执行退市软标",
+			RateLimitSeconds: 20 * 60 * 60,
 		},
 		{
 			Source:           "financial_report_feed",
@@ -466,6 +554,16 @@ func (s *Store) UpsertStockInstrument(ctx context.Context, item StockInstrument)
 	ts := now()
 	existing, err := s.GetStockInstrument(ctx, item.Symbol)
 	if err == nil {
+		// —— manual_override 保护：用户手工覆盖的 name/industry/concept 永不被自动刷新覆盖 ——
+		if existing.Source == "manual_override" && item.Source != "manual_override" {
+			item.Name = existing.Name
+			if existing.Industry != "" {
+				item.Industry = existing.Industry
+			}
+			if existing.Concept != "" {
+				item.Concept = existing.Concept
+			}
+		}
 		item.CreatedAt = existing.CreatedAt
 		item.UpdatedAt = ts
 	} else if err == ErrNotFound {
@@ -474,9 +572,9 @@ func (s *Store) UpsertStockInstrument(ctx context.Context, item StockInstrument)
 	} else {
 		return StockInstrument{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO stock_instruments (symbol, market, name, status, industry, concept, listing_date, source, quality, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(symbol) DO UPDATE SET market = excluded.market, name = excluded.name, status = excluded.status, industry = excluded.industry, concept = excluded.concept, listing_date = excluded.listing_date, source = excluded.source, quality = excluded.quality, updated_at = excluded.updated_at`,
-		item.Symbol, item.Market, item.Name, item.Status, item.Industry, item.Concept, item.ListingDate, item.Source, item.Quality, item.CreatedAt, item.UpdatedAt)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO stock_instruments (symbol, market, name, status, industry, concept, listing_date, source, quality, py, py_full, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(symbol) DO UPDATE SET market = excluded.market, name = excluded.name, status = excluded.status, industry = excluded.industry, concept = excluded.concept, listing_date = excluded.listing_date, source = excluded.source, quality = excluded.quality, py = excluded.py, py_full = excluded.py_full, updated_at = excluded.updated_at`,
+		item.Symbol, item.Market, item.Name, item.Status, item.Industry, item.Concept, item.ListingDate, item.Source, item.Quality, item.PY, item.PYFull, item.CreatedAt, item.UpdatedAt)
 	if err != nil {
 		return StockInstrument{}, err
 	}
@@ -484,7 +582,7 @@ ON CONFLICT(symbol) DO UPDATE SET market = excluded.market, name = excluded.name
 }
 
 func (s *Store) GetStockInstrument(ctx context.Context, symbol string) (StockInstrument, error) {
-	item, err := scanStockInstrument(s.db.QueryRowContext(ctx, `SELECT symbol, market, name, status, industry, concept, listing_date, source, quality, created_at, updated_at FROM stock_instruments WHERE symbol = ?`, normalizeStockSymbol(symbol)))
+	item, err := scanStockInstrument(s.db.QueryRowContext(ctx, `SELECT symbol, market, name, status, industry, concept, listing_date, source, quality, py, py_full, created_at, updated_at FROM stock_instruments WHERE symbol = ?`, normalizeStockSymbol(symbol)))
 	if err == sql.ErrNoRows {
 		return StockInstrument{}, ErrNotFound
 	}
@@ -492,10 +590,10 @@ func (s *Store) GetStockInstrument(ctx context.Context, symbol string) (StockIns
 }
 
 func (s *Store) ListStockInstruments(ctx context.Context, limit int) ([]StockInstrument, error) {
-	if limit <= 0 || limit > 1000 {
+	if limit <= 0 || limit > 10000 {
 		limit = 200
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT symbol, market, name, status, industry, concept, listing_date, source, quality, created_at, updated_at FROM stock_instruments ORDER BY updated_at DESC LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT symbol, market, name, status, industry, concept, listing_date, source, quality, py, py_full, created_at, updated_at FROM stock_instruments ORDER BY updated_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -509,6 +607,134 @@ func (s *Store) ListStockInstruments(ctx context.Context, limit int) ([]StockIns
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (s *Store) SearchStockInstruments(ctx context.Context, params StockInstrumentSearchParams) (StockInstrumentSearchResult, error) {
+	params = normalizeStockInstrumentSearchParams(params)
+	where, args, orderArgs, orderBy, useFTS := stockInstrumentSearchSQL(params)
+	countQuery := `SELECT COUNT(1) FROM stock_instruments` + where
+	var total int
+	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return StockInstrumentSearchResult{}, err
+	}
+	query := `SELECT symbol, market, name, status, industry, concept, listing_date, source, quality, py, py_full, created_at, updated_at FROM stock_instruments` + where + orderBy + ` LIMIT ? OFFSET ?`
+	queryArgs := append([]any{}, args...)
+	queryArgs = append(queryArgs, orderArgs...)
+	queryArgs = append(queryArgs, params.PageSize, (params.Page-1)*params.PageSize)
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return StockInstrumentSearchResult{}, err
+	}
+	defer rows.Close()
+	items := []StockInstrument{}
+	for rows.Next() {
+		item, err := scanStockInstrument(rows)
+		if err != nil {
+			return StockInstrumentSearchResult{}, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return StockInstrumentSearchResult{}, err
+	}
+	return StockInstrumentSearchResult{
+		Total:    total,
+		Page:     params.Page,
+		PageSize: params.PageSize,
+		Items:    items,
+		Snippets: stockInstrumentSnippets(items, params.Query),
+		FTS:      useFTS,
+	}, nil
+}
+
+// AllInstrumentSymbols 返回当前所有 instrument 的 symbol 集合，用于远端集合 diff。
+func (s *Store) AllInstrumentSymbols(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT symbol FROM stock_instruments`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	set := map[string]bool{}
+	for rows.Next() {
+		var sym string
+		if err := rows.Scan(&sym); err != nil {
+			return nil, err
+		}
+		set[sym] = true
+	}
+	return set, rows.Err()
+}
+
+// BatchUpsertInstruments 批量写入，返回实际 upsert 成功的行数和累计错误笔记。
+// 对于 5500 只量级不使用 1000-row batch，保持行级 upsert 以复用 manual_override 保护逻辑。
+func (s *Store) BatchUpsertInstruments(ctx context.Context, items []StockInstrument) (int, []string) {
+	saved := 0
+	notes := make([]string, 0, 4)
+	for i := range items {
+		if _, err := s.UpsertStockInstrument(ctx, items[i]); err != nil {
+			notes = append(notes, items[i].Symbol+": "+err.Error())
+			continue
+		}
+		saved++
+	}
+	return saved, notes
+}
+
+// MarkInstrumentsDelisted 把给定 symbols 的 status 改成 'delisted'（软删除，不删行）。
+// 只有当前 status 还不是 delisted 的行才会被写，返回受影响行数。
+func (s *Store) MarkInstrumentsDelisted(ctx context.Context, symbols []string) (int, error) {
+	if len(symbols) == 0 {
+		return 0, nil
+	}
+	ts := now()
+	count := 0
+	for _, sym := range symbols {
+		sym = normalizeStockSymbol(sym)
+		if sym == "" {
+			continue
+		}
+		res, err := s.db.ExecContext(ctx,
+			`UPDATE stock_instruments SET status = 'delisted', quality = 'stale', updated_at = ? WHERE symbol = ? AND status != 'delisted'`,
+			ts, sym)
+		if err != nil {
+			return count, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			count += int(n)
+		}
+	}
+	return count, nil
+}
+
+// LastTaskCompletedAt 返回指定 taskType 的最近一次 completed/degraded 任务完成时间；无则零值。
+func (s *Store) LastTaskCompletedAt(ctx context.Context, taskType string) time.Time {
+	var completedAt string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT completed_at FROM stock_data_tasks WHERE task_type = ? AND status IN ('completed','degraded') ORDER BY completed_at DESC LIMIT 1`,
+		taskType).Scan(&completedAt)
+	if err != nil || completedAt == "" {
+		return time.Time{}
+	}
+	t, _ := time.Parse(time.RFC3339Nano, completedAt)
+	return t
+}
+
+// DistinctStockIndustries 返回所有去重后的行业名（排除空串）。
+func (s *Store) DistinctStockIndustries(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT industry FROM stock_instruments WHERE industry != '' ORDER BY industry`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
 }
 
 func (s *Store) UpsertStockMarketDataPoint(ctx context.Context, point StockMarketDataPoint) (StockMarketDataPoint, bool, error) {
@@ -796,7 +1022,7 @@ func scanStockDataSource(row interface{ Scan(...any) error }) (StockDataSource, 
 
 func scanStockInstrument(row interface{ Scan(...any) error }) (StockInstrument, error) {
 	var item StockInstrument
-	err := row.Scan(&item.Symbol, &item.Market, &item.Name, &item.Status, &item.Industry, &item.Concept, &item.ListingDate, &item.Source, &item.Quality, &item.CreatedAt, &item.UpdatedAt)
+	err := row.Scan(&item.Symbol, &item.Market, &item.Name, &item.Status, &item.Industry, &item.Concept, &item.ListingDate, &item.Source, &item.Quality, &item.PY, &item.PYFull, &item.CreatedAt, &item.UpdatedAt)
 	return item, err
 }
 
@@ -823,6 +1049,206 @@ func normalizeStockSource(source string) string {
 	source = strings.ReplaceAll(source, " ", "_")
 	source = strings.ReplaceAll(source, "-", "_")
 	return source
+}
+
+func normalizeStockInstrumentSearchParams(params StockInstrumentSearchParams) StockInstrumentSearchParams {
+	params.Query = strings.TrimSpace(params.Query)
+	params.Industry = strings.TrimSpace(params.Industry)
+	params.MinListingDate = strings.TrimSpace(params.MinListingDate)
+	params.Quality = strings.TrimSpace(params.Quality)
+	params.Sort = strings.TrimSpace(params.Sort)
+	if params.Page <= 0 {
+		params.Page = 1
+	}
+	if params.PageSize <= 0 {
+		params.PageSize = 20
+	}
+	if params.PageSize < 10 {
+		params.PageSize = 10
+	}
+	if params.PageSize > 200 {
+		params.PageSize = 200
+	}
+	params.Markets = normalizeCSVList(params.Markets, strings.ToUpper)
+	params.Statuses = normalizeCSVList(params.Statuses, strings.ToLower)
+	params.Concepts = normalizeCSVList(params.Concepts, strings.TrimSpace)
+	return params
+}
+
+func stockInstrumentSearchSQL(params StockInstrumentSearchParams) (string, []any, []any, string, bool) {
+	clauses := []string{}
+	args := []any{}
+	useFTS := false
+	if !params.IncludeDelisted {
+		clauses = append(clauses, "status != 'delisted'")
+	}
+	if len(params.Markets) > 0 {
+		clauses = append(clauses, "market IN ("+placeholders(len(params.Markets))+")")
+		for _, v := range params.Markets {
+			args = append(args, v)
+		}
+	}
+	if len(params.Statuses) > 0 {
+		clauses = append(clauses, "status IN ("+placeholders(len(params.Statuses))+")")
+		for _, v := range params.Statuses {
+			args = append(args, v)
+		}
+	}
+	if params.Quality != "" {
+		clauses = append(clauses, "quality = ?")
+		args = append(args, params.Quality)
+	}
+	if params.Industry != "" {
+		clauses = append(clauses, "industry LIKE ?")
+		args = append(args, "%"+params.Industry+"%")
+	}
+	for _, concept := range params.Concepts {
+		clauses = append(clauses, "concept LIKE ?")
+		args = append(args, "%"+concept+"%")
+	}
+	if params.MinListingDate != "" {
+		clauses = append(clauses, "listing_date >= ?")
+		args = append(args, params.MinListingDate)
+	}
+	tokens := strings.Fields(params.Query)
+	if len(tokens) > 0 {
+		for _, token := range tokens {
+			like := "%" + token + "%"
+			clauses = append(clauses, "(symbol LIKE ? OR name LIKE ? OR py LIKE ? OR py_full LIKE ? OR industry LIKE ? OR concept LIKE ?)")
+			args = append(args, like, like, like, like, like, like)
+		}
+		if ftsQuery, ok := stockInstrumentFTSQuery(tokens); ok {
+			clauses = append(clauses, "rowid IN (SELECT rowid FROM stock_instruments_fts WHERE stock_instruments_fts MATCH ?)")
+			args = append(args, ftsQuery)
+			useFTS = true
+		}
+	}
+	where := ""
+	if len(clauses) > 0 {
+		where = " WHERE " + strings.Join(clauses, " AND ")
+	}
+	orderArgs := []any{}
+	orderBy := " ORDER BY updated_at DESC, symbol ASC"
+	switch params.Sort {
+	case "symbol_asc":
+		orderBy = " ORDER BY symbol ASC"
+	case "market_then_symbol":
+		orderBy = " ORDER BY market ASC, symbol ASC"
+	case "updated_desc":
+		orderBy = " ORDER BY updated_at DESC, symbol ASC"
+	case "relevance", "":
+		if params.Query != "" {
+			prefix := strings.Fields(params.Query)[0]
+			prefixLike := prefix + "%"
+			containsLike := "%" + prefix + "%"
+			orderBy = ` ORDER BY CASE
+  WHEN symbol LIKE ? THEN 0
+  WHEN py LIKE ? THEN 1
+  WHEN py_full LIKE ? THEN 2
+  WHEN symbol LIKE ? THEN 3
+  ELSE 4
+END, symbol ASC`
+			orderArgs = append(orderArgs, prefixLike, strings.ToUpper(prefixLike), strings.ToLower(prefixLike), containsLike)
+		}
+	default:
+		orderBy = " ORDER BY updated_at DESC, symbol ASC"
+	}
+	return where, args, orderArgs, orderBy, useFTS
+}
+
+func stockInstrumentFTSQuery(tokens []string) (string, bool) {
+	parts := []string{}
+	for _, token := range tokens {
+		token = strings.TrimSpace(token)
+		if token == "" || !asciiFTSToken(token) {
+			continue
+		}
+		parts = append(parts, strings.ToLower(token)+"*")
+	}
+	if len(parts) == 0 || !FTS5Available() {
+		return "", false
+	}
+	return strings.Join(parts, " AND "), true
+}
+
+func asciiFTSToken(token string) bool {
+	for _, r := range token {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func stockInstrumentSnippets(items []StockInstrument, query string) map[string]map[string]string {
+	tokens := strings.Fields(query)
+	if len(tokens) == 0 {
+		return nil
+	}
+	out := map[string]map[string]string{}
+	for _, item := range items {
+		fields := map[string]string{}
+		if highlighted := highlightFirstToken(item.Name, tokens); highlighted != item.Name {
+			fields["name"] = highlighted
+		}
+		if highlighted := highlightFirstToken(item.Industry, tokens); highlighted != item.Industry {
+			fields["industry"] = highlighted
+		}
+		if highlighted := highlightFirstToken(item.Concept, tokens); highlighted != item.Concept {
+			fields["concept"] = highlighted
+		}
+		if len(fields) > 0 {
+			out[item.Symbol] = fields
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func highlightFirstToken(value string, tokens []string) string {
+	if value == "" {
+		return value
+	}
+	lower := strings.ToLower(value)
+	for _, token := range tokens {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		idx := strings.Index(lower, strings.ToLower(token))
+		if idx < 0 {
+			continue
+		}
+		end := idx + len(token)
+		return value[:idx] + "[" + value[idx:end] + "]" + value[end:]
+	}
+	return value
+}
+
+func normalizeCSVList(values []string, normalize func(string) string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, raw := range values {
+		for _, part := range strings.Split(raw, ",") {
+			value := normalize(strings.TrimSpace(part))
+			if value == "" || seen[value] {
+				continue
+			}
+			seen[value] = true
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func placeholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.TrimRight(strings.Repeat("?,", n), ",")
 }
 
 func newsDedupeKey(item StockNewsItem) string {

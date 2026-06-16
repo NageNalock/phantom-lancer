@@ -597,8 +597,31 @@ export interface StockInstrument {
   listingDate?: string;
   source?: string;
   quality?: string;
+  py?: string;
+  pyFull?: string;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface StockInstrumentQueryParams {
+  q?: string;
+  market?: string;
+  status?: string;
+  industry?: string;
+  quality?: string;
+  sort?: "relevance" | "symbol_asc" | "market_then_symbol" | "updated_desc";
+  page?: number;
+  pageSize?: number;
+  includeDelisted?: boolean;
+}
+
+export interface StockInstrumentSearchResponse {
+  total: number;
+  page: number;
+  pageSize: number;
+  items: StockInstrument[];
+  snippets?: Record<string, Record<string, string>>;
+  fts?: boolean;
 }
 
 export interface StockMarketDataPoint {
@@ -1030,6 +1053,7 @@ export interface StockStrategyPatch {
 export interface StockDataMaintenanceResult {
   tasks?: StockDataTask[];
   sources?: StockDataSource[];
+  instruments?: StockInstrument[];
   quotes?: StockQuote[];
   marketData?: StockMarketDataPoint[];
   newsItems?: StockNewsItem[];

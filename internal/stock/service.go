@@ -108,6 +108,7 @@ type DataTaskResult struct {
 type DataMaintenanceResult struct {
 	Tasks         []storage.StockDataTask        `json:"tasks"`
 	Sources       []storage.StockDataSource      `json:"sources,omitempty"`
+	Instruments   []storage.StockInstrument      `json:"instruments,omitempty"`
 	Quotes        []storage.StockQuote           `json:"quotes,omitempty"`
 	MarketData    []storage.StockMarketDataPoint `json:"marketData,omitempty"`
 	NewsItems     []storage.StockNewsItem        `json:"newsItems,omitempty"`
@@ -1227,6 +1228,12 @@ func (s *Service) RefreshInstruments(ctx context.Context, source string, items [
 	failed := 0
 	for _, item := range items {
 		item.Source = src.Source
+		if item.PY == "" && item.Name != "" {
+			item.PY = pyInitials(item.Name)
+		}
+		if item.PYFull == "" && item.Name != "" {
+			item.PYFull = pyFull(item.Name)
+		}
 		created, err := s.store.UpsertStockInstrument(ctx, item)
 		if err != nil {
 			failed++

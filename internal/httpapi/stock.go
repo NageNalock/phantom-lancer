@@ -311,6 +311,46 @@ func (s *Server) handleStockDataSourceSubroutes(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (s *Server) handleStockInstrumentSearch(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAuth(w, r); !ok {
+		return
+	}
+	q := r.URL.Query()
+	pageSize := parseInt(q.Get("pageSize"))
+	if pageSize == 0 {
+		pageSize = parseInt(q.Get("page_size"))
+	}
+	result, err := s.store.SearchStockInstruments(r.Context(), storage.StockInstrumentSearchParams{
+		Query:           q.Get("q"),
+		Markets:         q["market"],
+		Statuses:        q["status"],
+		Industry:        q.Get("industry"),
+		Concepts:        q["concept"],
+		Quality:         q.Get("quality"),
+		IncludeDelisted: q.Get("include_delisted") == "true" || q.Get("includeDelisted") == "true",
+		Sort:            q.Get("sort"),
+		Page:            parseInt(q.Get("page")),
+		PageSize:        pageSize,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "stock_instrument_search_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleStockInstrumentIndustries(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAuth(w, r); !ok {
+		return
+	}
+	items, err := s.store.DistinctStockIndustries(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "stock_industries_read_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
 func (s *Server) handleStockInstruments(w http.ResponseWriter, r *http.Request) {
 	ctx, ok := s.requireAuth(w, r)
 	if !ok {
@@ -331,12 +371,19 @@ func (s *Server) handleStockInstruments(w http.ResponseWriter, r *http.Request) 
 		var req struct {
 			Source string                    `json:"source"`
 			Items  []storage.StockInstrument `json:"items"`
+			Auto   bool                      `json:"auto"`
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxStockBodyBytes)
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		result, err := s.stockService().RefreshInstruments(r.Context(), req.Source, req.Items)
+		var result stocksvc.DataTaskResult
+		var err error
+		if req.Auto && req.Source == "eastmoney_universe" {
+			result, err = s.stockService().RefreshAStockUniverse(r.Context(), stocksvc.MaintenanceModeManual, "manual")
+		} else {
+			result, err = s.stockService().RefreshInstruments(r.Context(), req.Source, req.Items)
+		}
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "stock_instruments_refresh_failed", err.Error())
 			return

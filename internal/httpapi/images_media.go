@@ -471,10 +471,7 @@ func (s *Server) handleListMediaGenerations(w http.ResponseWriter, r *http.Reque
 	}
 	_ = ctx
 	q := r.URL.Query()
-	limit := intParam(q.Get("limit"), 120)
-	if limit > 200 {
-		limit = 200
-	}
+	limit, page, offset := paginationParams(q, 120, 200)
 	mediaType := q.Get("mediaType")
 	provider := q.Get("provider")
 	status := q.Get("status")
@@ -484,28 +481,34 @@ func (s *Server) handleListMediaGenerations(w http.ResponseWriter, r *http.Reque
 
 	var jobs []storage.MediaGenerationJob
 	var legacyJobs []storage.ImageGenerationJob
+	var mediaTotal int
+	var legacyTotal int
 	var err error
-	jobs, err = s.images.ListMediaJobs(r.Context(), limit, mediaType, provider, status, mode, model)
+	jobs, mediaTotal, err = s.images.ListMediaJobsPage(r.Context(), limit, offset, mediaType, provider, status, mode, model)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "media_generations_list_failed", err.Error())
 		return
 	}
 	if includeLegacy && (mediaType == "" || mediaType == string(imagegen.MediaTypeImage)) {
-		legacyLimit := limit
-		if legacyLimit < 60 {
-			legacyLimit = 60
-		}
-		legacyJobs, err = s.store.ListImageGenerationJobs(r.Context(), legacyLimit, status, mode)
+		legacyJobs, legacyTotal, err = s.store.ListImageGenerationJobsPage(r.Context(), limit, offset, status, mode)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "legacy_image_jobs_list_failed", err.Error())
 			return
 		}
 	}
 	count := len(jobs) + len(legacyJobs)
+	total := mediaTotal + legacyTotal
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":       jobs,
 		"legacyItems": legacyJobs,
 		"count":       count,
+		"total":       total,
+		"mediaTotal":  mediaTotal,
+		"legacyTotal": legacyTotal,
+		"page":        page,
+		"pageSize":    limit,
+		"offset":      offset,
+		"hasNext":     offset+len(jobs) < mediaTotal || offset+len(legacyJobs) < legacyTotal,
 	})
 }
 
@@ -625,40 +628,36 @@ func (s *Server) handleListMediaAssets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	limit := intParam(q.Get("limit"), 120)
-	if limit > 400 {
-		limit = 400
-	}
+	limit, page, offset := paginationParams(q, 120, 400)
 	mediaType := q.Get("mediaType")
 	provider := q.Get("provider")
 	assetType := q.Get("assetType")
 	status := q.Get("status")
-	includePrivate := false
 	scope := q.Get("scope")
+	privacy := "public"
 	if scope == "private" || scope == "all" {
 		unlocked, _ := s.privateImages.IsUnlocked(ctx.Session.ID, time.Now())
 		if !unlocked {
 			writeError(w, http.StatusForbidden, "private_asset_locked", "私密资产已锁定，请先解锁")
 			return
 		}
-		includePrivate = true
+		privacy = scope
 	}
-	assets, err := s.images.ListMediaAssets(r.Context(), limit, mediaType, provider, assetType, status, includePrivate)
+	assets, total, err := s.images.ListMediaAssetsPage(r.Context(), limit, offset, mediaType, provider, assetType, status, privacy)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "media_assets_list_failed", err.Error())
 		return
 	}
-	if scope == "private" {
-		privateOnly := assets[:0]
-		for _, asset := range assets {
-			if asset.Private {
-				privateOnly = append(privateOnly, asset)
-			}
-		}
-		assets = privateOnly
-	}
 	count := len(assets)
-	writeJSON(w, http.StatusOK, map[string]any{"items": assets, "count": count})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":    assets,
+		"count":    count,
+		"total":    total,
+		"page":     page,
+		"pageSize": limit,
+		"offset":   offset,
+		"hasNext":  offset+count < total,
+	})
 }
 
 func (s *Server) handleMediaAssetSubroutes(w http.ResponseWriter, r *http.Request) {
@@ -971,6 +970,37 @@ func intParam(raw string, def int) int {
 		return def
 	}
 	return n
+}
+
+func paginationParams(q url.Values, def, max int) (int, int, int) {
+	limit := intParam(q.Get("pageSize"), 0)
+	if limit <= 0 {
+		limit = intParam(q.Get("page_size"), 0)
+	}
+	if limit <= 0 {
+		limit = intParam(q.Get("limit"), def)
+	}
+	if limit <= 0 {
+		limit = def
+	}
+	if max > 0 && limit > max {
+		limit = max
+	}
+	page := intParam(q.Get("page"), 1)
+	if page <= 0 {
+		page = 1
+	}
+	offset := (page - 1) * limit
+	if raw := strings.TrimSpace(q.Get("offset")); raw != "" {
+		offset = intParam(raw, 0)
+		if offset < 0 {
+			offset = 0
+		}
+		if q.Get("page") == "" && limit > 0 {
+			page = offset/limit + 1
+		}
+	}
+	return limit, page, offset
 }
 
 func redactURLLabel(raw string) string {

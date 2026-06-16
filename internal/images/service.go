@@ -1176,6 +1176,10 @@ func (s *Service) ListMediaJobs(ctx context.Context, limit int, mediaType, provi
 	return s.Store.ListMediaGenerationJobs(ctx, limit, mediaType, provider, status, mode, model)
 }
 
+func (s *Service) ListMediaJobsPage(ctx context.Context, limit, offset int, mediaType, provider, status, mode, model string) ([]storage.MediaGenerationJob, int, error) {
+	return s.Store.ListMediaGenerationJobsPage(ctx, limit, offset, mediaType, provider, status, mode, model)
+}
+
 func (s *Service) CancelMediaJob(ctx context.Context, id string) error {
 	if s.videoPoller != nil {
 		s.videoPoller.Cancel(id)
@@ -1195,6 +1199,10 @@ func (s *Service) CancelMediaJob(ctx context.Context, id string) error {
 
 func (s *Service) ListMediaAssets(ctx context.Context, limit int, mediaType, provider, assetType, status string, includePrivate bool) ([]storage.MediaAsset, error) {
 	return s.Store.ListMediaAssets(ctx, limit, mediaType, provider, assetType, status, includePrivate)
+}
+
+func (s *Service) ListMediaAssetsPage(ctx context.Context, limit, offset int, mediaType, provider, assetType, status, privacy string) ([]storage.MediaAsset, int, error) {
+	return s.Store.ListMediaAssetsPage(ctx, limit, offset, mediaType, provider, assetType, status, privacy)
 }
 
 func (s *Service) GetMediaAsset(ctx context.Context, id string) (storage.MediaAsset, error) {

@@ -12,6 +12,7 @@ import { StockOpportunities } from "./stock/StockOpportunities";
 import { StockOverview } from "./stock/StockOverview";
 import { StockPortfolios } from "./stock/StockPortfolios";
 import { StockSymbolDetail } from "./stock/StockSymbolDetail";
+import { StockSymbolCombobox } from "./stock/StockSymbolCombobox";
 import { StockWatchReview } from "./stock/StockWatchReview";
 import { directionLabel, marketSessionLabel, money, number, percent, percentInput, price, text } from "./stock/format";
 
@@ -155,6 +156,7 @@ function StockStrategyWorkspace({ actions, data, runAction }: { actions: AppActi
 function StockStrategies({ actions, data, runAction }: { actions: AppActions; data: AppData; runAction: (label: string, fn: () => Promise<void>) => Promise<void> }) {
   const portfolios = data.stock.portfolios || [];
   const strategies = data.stock.strategies || [];
+  const recentInstruments = data.stock.instruments || [];
   async function createStrategy(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formElement = event.currentTarget;
@@ -209,22 +211,14 @@ function StockStrategies({ actions, data, runAction }: { actions: AppActions; da
               </select>
             </Field>
           </div>
-          <div className="grid grid-cols-4 gap-3 max-lg:grid-cols-2 max-sm:grid-cols-1">
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(260px,1.4fr)] gap-3 max-lg:grid-cols-1">
             <Field label="账户">
               <select className="select" name="portfolioId" defaultValue={portfolios[0]?.id || ""}>
                 <option value="">不绑定</option>
                 {portfolios.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
               </select>
             </Field>
-            <Field label="代码"><input className="input mono" name="symbol" required /></Field>
-            <Field label="市场">
-              <select className="select mono" name="market" defaultValue="SH">
-                <option value="SH">沪市 (SH)</option>
-                <option value="SZ">深市 (SZ)</option>
-                <option value="BJ">北市 (BJ)</option>
-              </select>
-            </Field>
-            <Field label="名称"><input className="input" name="name" /></Field>
+            <StockSymbolCombobox actions={actions} label="股票" recent={recentInstruments} required />
           </div>
           <div className="grid grid-cols-5 gap-3 max-xl:grid-cols-3 max-md:grid-cols-1">
             <Field label="方向">

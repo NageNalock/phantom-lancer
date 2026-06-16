@@ -4840,10 +4840,55 @@ func (s *Store) GetPublicImageAssetByChecksum(ctx context.Context, checksum stri
 }
 
 func (s *Store) ListImageAssets(ctx context.Context, limit int, assetType, storageBackend, status, q, privacy string) ([]ImageAsset, error) {
+	out, _, err := s.ListImageAssetsPage(ctx, limit, 0, assetType, storageBackend, status, q, privacy)
+	return out, err
+}
+
+func (s *Store) ListImageAssetsPage(ctx context.Context, limit, offset int, assetType, storageBackend, status, q, privacy string) ([]ImageAsset, int, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 80
 	}
+	if offset < 0 {
+		offset = 0
+	}
 	query := `SELECT ` + imageAssetColumns + ` FROM image_assets`
+	args, whereSQL := imageAssetFilterArgs(assetType, storageBackend, status, q, privacy)
+	if whereSQL != "" {
+		query += " WHERE " + whereSQL
+	}
+	countQuery := `SELECT COUNT(*) FROM image_assets`
+	if whereSQL != "" {
+		countQuery += " WHERE " + whereSQL
+	}
+	var total int
+	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+	listArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := s.db.QueryContext(ctx, query, listArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []ImageAsset{}
+	for rows.Next() {
+		asset, err := scanImageAsset(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, asset)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	for index := range out {
+		s.hydrateRemoteImageAssetURL(ctx, &out[index])
+	}
+	return out, total, nil
+}
+
+func imageAssetFilterArgs(assetType, storageBackend, status, q, privacy string) ([]any, string) {
 	args := []any{}
 	clauses := []string{}
 	if assetType = strings.TrimSpace(assetType); assetType != "" && assetType != "all" {
@@ -4873,30 +4918,9 @@ func (s *Store) ListImageAssets(ctx context.Context, limit int, assetType, stora
 		args = append(args, like, like, like, like, like, like)
 	}
 	if len(clauses) > 0 {
-		query += " WHERE " + strings.Join(clauses, " AND ")
+		return args, strings.Join(clauses, " AND ")
 	}
-	query += " ORDER BY created_at DESC LIMIT ?"
-	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []ImageAsset{}
-	for rows.Next() {
-		asset, err := scanImageAsset(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, asset)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	for index := range out {
-		s.hydrateRemoteImageAssetURL(ctx, &out[index])
-	}
-	return out, nil
+	return args, ""
 }
 
 func (s *Store) hydrateRemoteImageAssetURL(ctx context.Context, asset *ImageAsset) {
@@ -5206,10 +5230,61 @@ func (s *Store) GetImageGenerationJob(ctx context.Context, id string) (ImageGene
 }
 
 func (s *Store) ListImageGenerationJobs(ctx context.Context, limit int, status, mode string) ([]ImageGenerationJob, error) {
+	out, _, err := s.ListImageGenerationJobsPage(ctx, limit, 0, status, mode)
+	return out, err
+}
+
+func (s *Store) ListImageGenerationJobsPage(ctx context.Context, limit, offset int, status, mode string) ([]ImageGenerationJob, int, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 80
 	}
+	if offset < 0 {
+		offset = 0
+	}
 	query := `SELECT id, provider, status, mode, mode_label, model, endpoint, prompt, aspect_ratio, resolution, response_format, image_count, source_count, usage_json, error_message, created_at, started_at, completed_at FROM image_generation_jobs`
+	args, whereSQL := imageGenerationJobFilterArgs(status, mode)
+	if whereSQL != "" {
+		query += " WHERE " + whereSQL
+	}
+	countQuery := `SELECT COUNT(*) FROM image_generation_jobs`
+	if whereSQL != "" {
+		countQuery += " WHERE " + whereSQL
+	}
+	var total int
+	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+	listArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := s.db.QueryContext(ctx, query, listArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	out := []ImageGenerationJob{}
+	for rows.Next() {
+		job, err := scanImageGenerationJob(rows)
+		if err != nil {
+			_ = rows.Close()
+			return nil, 0, err
+		}
+		out = append(out, job)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, 0, err
+	}
+	for i := range out {
+		if err := s.attachImageJobRelations(ctx, &out[i]); err != nil {
+			return nil, 0, err
+		}
+	}
+	return out, total, nil
+}
+
+func imageGenerationJobFilterArgs(status, mode string) ([]any, string) {
 	args := []any{}
 	clauses := []string{}
 	if status = strings.TrimSpace(status); status != "" {
@@ -5220,37 +5295,10 @@ func (s *Store) ListImageGenerationJobs(ctx context.Context, limit int, status, 
 		clauses = append(clauses, "mode = ?")
 		args = append(args, mode)
 	}
-	if len(clauses) > 0 {
-		query += " WHERE " + strings.Join(clauses, " AND ")
+	if len(clauses) == 0 {
+		return args, ""
 	}
-	query += " ORDER BY created_at DESC LIMIT ?"
-	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	out := []ImageGenerationJob{}
-	for rows.Next() {
-		job, err := scanImageGenerationJob(rows)
-		if err != nil {
-			_ = rows.Close()
-			return nil, err
-		}
-		out = append(out, job)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	for i := range out {
-		if err := s.attachImageJobRelations(ctx, &out[i]); err != nil {
-			return nil, err
-		}
-	}
-	return out, nil
+	return args, strings.Join(clauses, " AND ")
 }
 
 func (s *Store) CountImageGenerationJobs(ctx context.Context) (int, error) {

@@ -5,10 +5,12 @@ import type { AppData, StockOpportunity } from "../../app/types";
 import { Button, EmptyState, Field, Notice, Panel, Pill } from "../../components/ui";
 import { formatDate } from "../../domain/labels";
 import { number, percentInput, text } from "./format";
+import { StockSymbolCombobox } from "./StockSymbolCombobox";
 
 export function StockOpportunities({ actions, data, runAction }: { actions: AppActions; data: AppData; runAction: (label: string, fn: () => Promise<void>) => Promise<void> }) {
   const portfolios = data.stock.portfolios || [];
   const opportunities = data.stock.opportunities || [];
+  const recentInstruments = data.stock.instruments || [];
 
   async function createOpportunity(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -79,16 +81,8 @@ export function StockOpportunities({ actions, data, runAction }: { actions: AppA
             <Field label="机会标题"><input className="input" name="title" required /></Field>
             <Field label="主题"><input className="input" name="theme" placeholder="AI 算力 / 政策催化" /></Field>
           </div>
-          <div className="grid grid-cols-4 gap-3 max-lg:grid-cols-2 max-sm:grid-cols-1">
-            <Field label="代码"><input className="input mono" name="symbol" required /></Field>
-            <Field label="市场">
-              <select className="select mono" name="market" defaultValue="SH">
-                <option value="SH">沪市 (SH)</option>
-                <option value="SZ">深市 (SZ)</option>
-                <option value="BJ">北市 (BJ)</option>
-              </select>
-            </Field>
-            <Field label="名称"><input className="input" name="name" /></Field>
+          <div className="grid grid-cols-[minmax(260px,1.4fr)_minmax(0,1fr)] gap-3 max-lg:grid-cols-1">
+            <StockSymbolCombobox actions={actions} label="股票" recent={recentInstruments} required />
             <Field label="信心">
               <select className="select" name="confidence" defaultValue="medium">
                 <option value="low">低</option>

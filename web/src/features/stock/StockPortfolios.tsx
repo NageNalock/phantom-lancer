@@ -4,6 +4,7 @@ import type { AppActions } from "../../app/App";
 import type { AppData, StockPortfolio } from "../../app/types";
 import { Button, CheckLabel, ContextList, EmptyState, Field, Notice, Panel, Pill, useDangerConfirm } from "../../components/ui";
 import { money, number, numberText, percent, percentInput, price, text } from "./format";
+import { StockSymbolCombobox } from "./StockSymbolCombobox";
 
 type PortfolioPermissions = {
   allowBuy: boolean;
@@ -23,6 +24,7 @@ export function StockPortfolios({
 }) {
   const portfolios = data.stock.portfolios || [];
   const defaultPortfolio = portfolios[0];
+  const recentInstruments = data.stock.instruments || [];
   const [editingId, setEditingId] = useState("");
   const [createPermissions, setCreatePermissions] = useState<PortfolioPermissions>({
     allowBuy: true,
@@ -167,17 +169,7 @@ export function StockPortfolios({
                     {portfolios.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                   </select>
                 </Field>
-                <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
-                  <Field label="代码"><input className="input mono" name="symbol" required /></Field>
-                  <Field label="市场">
-                    <select className="select mono" name="market" defaultValue="SH">
-                      <option value="SH">沪市 (SH)</option>
-                      <option value="SZ">深市 (SZ)</option>
-                      <option value="BJ">北市 (BJ)</option>
-                    </select>
-                  </Field>
-                  <Field label="名称"><input className="input" name="name" /></Field>
-                </div>
+                <StockSymbolCombobox actions={actions} label="股票" recent={recentInstruments} required />
                 <div className="grid grid-cols-4 gap-3 max-lg:grid-cols-2 max-sm:grid-cols-1">
                   <Field label="数量"><input className="input" min="0" name="quantity" step="1" type="number" /></Field>
                   <Field label="可卖数量"><input className="input" min="0" name="availableQuantity" step="1" type="number" /></Field>

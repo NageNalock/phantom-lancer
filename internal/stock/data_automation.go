@@ -24,6 +24,16 @@ const (
 func (s *Service) RunDataMaintenance(ctx context.Context, requestedBy string) (DataMaintenanceResult, error) {
 	requestedBy = defaultString(requestedBy, "system")
 	result := DataMaintenanceResult{}
+	universe, err := s.RefreshAStockUniverse(ctx, MaintenanceModeDaily, requestedBy)
+	if err != nil {
+		result.Notes = append(result.Notes, "A 股主数据刷新失败: "+err.Error())
+	} else {
+		if universe.Task.ID != "" {
+			result.Tasks = append(result.Tasks, universe.Task)
+			result.Instruments = append(result.Instruments, universe.Instruments...)
+		}
+		result.Notes = append(result.Notes, universe.Notes...)
+	}
 	health, err := s.RunDataSourceHealthCheck(ctx, "")
 	if err != nil {
 		return result, err
@@ -429,7 +439,7 @@ func (s *Service) discoveryQueries(ctx context.Context) ([]discoveryQuery, error
 		add(quote.Symbol, quote.Market, quote.Name)
 	}
 	if len(queries) < 8 {
-		instruments, err := s.store.ListStockInstruments(ctx, 80)
+		instruments, _, err := s.QueryUniverse(ctx, UniverseQuery{PageSize: 80, SortBy: SortUpdatedDesc})
 		if err != nil {
 			return nil, err
 		}

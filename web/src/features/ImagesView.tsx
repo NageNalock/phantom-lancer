@@ -32,6 +32,20 @@ import { DURATION_PRESETS, MEDIA_TYPES, PROVIDERS, VIDEO_MODES } from "../images
 
 const IMAGE_TAB_IDS: ImagesTab[] = ["generate", "presets", "library", "history", "settings"];
 const IMAGE_CLEAR_KEYS = ["codex", "codexInbox", "codexRuntime", "gateway", "docker", "settings"];
+const MEDIA_HISTORY_PAGE_SIZE = 60;
+const MEDIA_LIBRARY_PAGE_SIZE = 72;
+
+type PagedItems<T> = {
+  items?: T[];
+  legacyItems?: ImageGenerationJob[];
+  count?: number;
+  total?: number;
+  mediaTotal?: number;
+  legacyTotal?: number;
+  page?: number;
+  pageSize?: number;
+  hasNext?: boolean;
+};
 
 function mergeAssetsById<T extends { id: string }>(primary: T[], extra: T[]): T[] {
   if (!extra.length) return primary;
@@ -65,6 +79,14 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   const [providersStatus, setProvidersStatus] = useState<ProvidersStatus | null>(null);
   const [mediaJobs, setMediaJobs] = useState<MediaGenerationJob[]>([]);
   const [mediaAssets, setMediaAssets] = useState<MediaAsset[]>([]);
+  const [libraryLegacyAssets, setLibraryLegacyAssets] = useState<ImageAsset[] | null>(null);
+  const [historyLegacyJobs, setHistoryLegacyJobs] = useState<ImageGenerationJob[] | null>(null);
+  const [libraryPage, setLibraryPage] = useState(1);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [libraryLegacyTotal, setLibraryLegacyTotal] = useState(0);
+  const [libraryMediaTotal, setLibraryMediaTotal] = useState(0);
+  const [historyLegacyTotal, setHistoryLegacyTotal] = useState(0);
+  const [historyMediaTotal, setHistoryMediaTotal] = useState(0);
   const [targetJobRef, setTargetJobRef] = useState<{ kind: "legacy" | "media"; id: string } | undefined>(undefined);
   const [pendingPresetDraft, setPendingPresetDraft] = useState<ImagePromptFormState | undefined>(undefined);
 
@@ -100,7 +122,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     return ps.find((p: ProviderStatus) => p.provider === currentProvider);
   }, [providersStatus, currentProvider]);
 
-  const scopedLibraryAssets = libraryScope === "private" ? privateAssets : assets;
+  const scopedLibraryAssets = libraryScope === "private" ? privateAssets : activeTab === "library" && libraryLegacyAssets ? libraryLegacyAssets : assets;
   const scopedLibraryMediaAssets = libraryScope === "private" ? privateMediaAssets : mediaAssets;
   const referenceAssets = privateUnlocked ? mergeAssetsById(assets, privateAssets) : assets;
   const referenceMediaAssets = privateUnlocked ? mergeAssetsById(mediaAssets, privateMediaAssets) : mediaAssets;
@@ -143,9 +165,28 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     return undefined;
   }, [imageToImageAsset?.id, mediaImageToImageAsset?.id]);
   const historyJobs = useMemo(() => {
-    if (!currentJob || jobs.some((job) => job.id === currentJob.id)) return jobs;
-    return [currentJob, ...jobs];
-  }, [currentJob, jobs]);
+    const base = activeTab === "history" && historyLegacyJobs ? historyLegacyJobs : jobs;
+    if (!currentJob || base.some((job) => job.id === currentJob.id)) return base;
+    return [currentJob, ...base];
+  }, [activeTab, currentJob, historyLegacyJobs, jobs]);
+  const libraryPagination = useMemo(() => {
+    const pageCount = Math.max(1, Math.ceil(libraryLegacyTotal / MEDIA_LIBRARY_PAGE_SIZE), Math.ceil(libraryMediaTotal / MEDIA_LIBRARY_PAGE_SIZE));
+    return {
+      page: libraryPage,
+      pageSize: MEDIA_LIBRARY_PAGE_SIZE,
+      total: libraryLegacyTotal + libraryMediaTotal,
+      pageCount,
+    };
+  }, [libraryLegacyTotal, libraryMediaTotal, libraryPage]);
+  const historyPagination = useMemo(() => {
+    const pageCount = Math.max(1, Math.ceil(historyLegacyTotal / MEDIA_HISTORY_PAGE_SIZE), Math.ceil(historyMediaTotal / MEDIA_HISTORY_PAGE_SIZE));
+    return {
+      page: historyPage,
+      pageSize: MEDIA_HISTORY_PAGE_SIZE,
+      total: historyLegacyTotal + historyMediaTotal,
+      pageCount,
+    };
+  }, [historyLegacyTotal, historyMediaTotal, historyPage]);
   const latestJob = currentJob || jobs[0];
   const hasActiveJob = historyJobs.some(isActiveImageJob) || allMediaJobs.some(isActiveMediaJob);
 
@@ -156,7 +197,17 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
   useEffect(() => {
     if (activeTab !== "generate" && activeTab !== "history" && activeTab !== "library") return;
     void refreshMediaData();
-  }, [activeTab, mediaType, currentProvider, libraryScope]);
+  }, [activeTab, mediaType, currentProvider, libraryScope, historyPage, libraryPage]);
+
+  useEffect(() => {
+    if (activeTab === "library") return;
+    setLibraryPage(1);
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTab === "history") return;
+    setHistoryPage(1);
+  }, [activeTab]);
 
   useEffect(() => {
     if (mediaType === "video" && currentProvider !== "agnes") {
@@ -252,16 +303,42 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     const assetProvider = needsFullMediaContext ? "" : currentProvider;
     const jobsLimit = needsFullJobContext ? 200 : 80;
     const assetsLimit = activeTab === "library" || activeTab === "history" ? 400 : 120;
+    const jobsQuery = activeTab === "history"
+      ? `page=${historyPage}&pageSize=${MEDIA_HISTORY_PAGE_SIZE}`
+      : `limit=${jobsLimit}`;
+    const assetsQuery = activeTab === "library"
+      ? `page=${libraryPage}&pageSize=${MEDIA_LIBRARY_PAGE_SIZE}`
+      : `limit=${assetsLimit}`;
     try {
-      const [jobsResult, assetsResult] = await Promise.all([
-        actions.api<{ items?: MediaGenerationJob[]; legacyItems?: unknown[]; count?: number }>(`/api/images/generations?limit=${jobsLimit}&mediaType=${jobsMediaType}&provider=${jobsProvider}`),
-        actions.api<{ items?: MediaAsset[]; count?: number }>(`/api/images/media-assets?limit=${assetsLimit}&mediaType=${assetMediaType}&provider=${assetProvider}${scopeParam}`),
+      const legacyLibraryPromise = activeTab === "library"
+        ? actions.api<PagedItems<ImageAsset>>(`/api/images/library/assets?page=${libraryPage}&pageSize=${MEDIA_LIBRARY_PAGE_SIZE}&privacy=${libraryScope === "private" ? "private" : "public"}`)
+        : Promise.resolve<PagedItems<ImageAsset> | null>(null);
+      const [jobsResult, assetsResult, legacyLibraryResult] = await Promise.all([
+        actions.api<PagedItems<MediaGenerationJob>>(`/api/images/generations?${jobsQuery}&mediaType=${jobsMediaType}&provider=${jobsProvider}`),
+        actions.api<PagedItems<MediaAsset>>(`/api/images/media-assets?${assetsQuery}&mediaType=${assetMediaType}&provider=${assetProvider}${scopeParam}`),
+        legacyLibraryPromise,
       ]);
       setMediaJobs(jobsResult.items || []);
+      if (activeTab === "history") {
+        setHistoryLegacyJobs(jobsResult.legacyItems || []);
+        setHistoryMediaTotal(jobsResult.mediaTotal ?? jobsResult.items?.length ?? 0);
+        setHistoryLegacyTotal(jobsResult.legacyTotal ?? jobsResult.legacyItems?.length ?? 0);
+      }
       if (libraryScope === "private" && activeTab === "library") {
         setPrivateMediaAssets(assetsResult.items || []);
       } else {
         setMediaAssets(assetsResult.items || []);
+      }
+      if (activeTab === "library") {
+        if (legacyLibraryResult) {
+          if (libraryScope === "private") {
+            setPrivateAssets(legacyLibraryResult.items || []);
+          } else {
+            setLibraryLegacyAssets(legacyLibraryResult.items || []);
+          }
+          setLibraryLegacyTotal(legacyLibraryResult.total ?? legacyLibraryResult.items?.length ?? 0);
+        }
+        setLibraryMediaTotal(assetsResult.total ?? assetsResult.items?.length ?? 0);
       }
     } catch (error) {
       if (activeTab !== "generate") {
@@ -1098,7 +1175,10 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
       const status = await actions.api<ImagePrivateStatus>("/api/images/library/private/status");
       setPrivateUnlocked(Boolean(status.unlocked));
       setPrivateExpiresAt(status.expiresAt || "");
-      if (status.unlocked && loadAssets) await refreshPrivateAssets();
+      if (status.unlocked && loadAssets) {
+        await refreshPrivateAssets();
+        await refreshPrivateMediaAssets();
+      }
       if (!status.unlocked) setPrivateAssets([]);
     } catch (error) {
       setPrivateUnlocked(false);
@@ -1110,8 +1190,9 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
 
   async function refreshPrivateAssets() {
     try {
-      const result = await actions.api<{ items?: ImageAsset[] }>("/api/images/library/assets?limit=200&privacy=private");
+      const result = await actions.api<PagedItems<ImageAsset>>(`/api/images/library/assets?page=${libraryPage}&pageSize=${MEDIA_LIBRARY_PAGE_SIZE}&privacy=private`);
       setPrivateAssets(result.items || []);
+      setLibraryLegacyTotal(result.total ?? result.items?.length ?? 0);
       setPrivateUnlocked(true);
     } catch (error) {
       const apiError = error as ApiError;
@@ -1126,8 +1207,9 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
 
   async function refreshPrivateMediaAssets() {
     try {
-      const result = await actions.api<{ items?: MediaAsset[] }>("/api/images/media-assets?limit=400&scope=private");
+      const result = await actions.api<PagedItems<MediaAsset>>(`/api/images/media-assets?page=${libraryPage}&pageSize=${MEDIA_LIBRARY_PAGE_SIZE}&scope=private`);
       setPrivateMediaAssets(result.items || []);
+      setLibraryMediaTotal(result.total ?? result.items?.length ?? 0);
       if (!privateUnlocked) {
         setPrivateUnlocked(true);
         void refreshPrivateStatus();
@@ -1372,6 +1454,10 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
               onMarkPrivateMedia={(asset, nextPrivate) => void setMediaAssetPrivate(asset, nextPrivate)}
               onMediaTypeChange={setMediaType}
               onOpenJob={(jobId, kind) => openJobFromAsset(jobId, kind)}
+              pagination={{
+                ...libraryPagination,
+                onPageChange: setLibraryPage,
+              }}
                onSetKeyframes={handleSetKeyframes}
                onSetMultiEditImages={handleSetMultiEditImages}
                onSetVideoReference={handleSetVideoReference}
@@ -1381,6 +1467,8 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
                onSelectMedia={(asset) => setSelectedResource({ kind: "media", id: asset.id })}
                onScopeChange={(scope) => {
                  setLibraryScope(scope);
+                 setLibraryPage(1);
+                 setLibraryLegacyAssets(null);
                  setSelectedResource(undefined);
                }}
               onUpload={uploadAsset}
@@ -1404,6 +1492,10 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
               onCopyJobParams={copyJobParams}
               onOpenAsset={openMediaAsset}
               onProviderChange={setCurrentProvider}
+              pagination={{
+                ...historyPagination,
+                onPageChange: setHistoryPage,
+              }}
               onRefresh={async () => {
                 await Promise.all([actions.refreshImages(), refreshMediaData()]);
               }}

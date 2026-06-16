@@ -304,6 +304,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stock/data-sources", s.handleStockDataSources)
 	mux.HandleFunc("POST /api/stock/data-sources", s.handleStockDataSources)
 	mux.HandleFunc("POST /api/stock/data-sources/", s.handleStockDataSourceSubroutes)
+	mux.HandleFunc("GET /api/stock/instruments/search", s.handleStockInstrumentSearch)
+	mux.HandleFunc("GET /api/stock/instruments/industries", s.handleStockInstrumentIndustries)
 	mux.HandleFunc("GET /api/stock/instruments", s.handleStockInstruments)
 	mux.HandleFunc("POST /api/stock/instruments", s.handleStockInstruments)
 	mux.HandleFunc("GET /api/stock/market-data", s.handleStockMarketData)
@@ -1660,19 +1662,22 @@ func (s *Server) handleListImageJobs(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAuth(w, r); !ok {
 		return
 	}
-	limit := 80
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil {
-			limit = parsed
-		}
-	}
-	items, err := s.store.ListImageGenerationJobs(r.Context(), limit, r.URL.Query().Get("status"), r.URL.Query().Get("mode"))
+	q := r.URL.Query()
+	limit, page, offset := paginationParams(q, 80, 200)
+	items, total, err := s.store.ListImageGenerationJobsPage(r.Context(), limit, offset, q.Get("status"), q.Get("mode"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
-	count, _ := s.store.CountImageGenerationJobs(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": count})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":    items,
+		"count":    len(items),
+		"total":    total,
+		"page":     page,
+		"pageSize": limit,
+		"offset":   offset,
+		"hasNext":  offset+len(items) < total,
+	})
 }
 
 func (s *Server) handleCreateImageJob(w http.ResponseWriter, r *http.Request) {
@@ -1754,22 +1759,26 @@ func (s *Server) handleListImageLibraryAssets(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	limit := 80
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil {
-			limit = parsed
-		}
-	}
-	privacy := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("privacy")))
+	q := r.URL.Query()
+	limit, page, offset := paginationParams(q, 80, 200)
+	privacy := strings.ToLower(strings.TrimSpace(q.Get("privacy")))
 	if (privacy == "private" || privacy == "all") && !s.requireImagePrivateUnlocked(w, ctx) {
 		return
 	}
-	items, err := s.store.ListImageAssets(r.Context(), limit, r.URL.Query().Get("type"), r.URL.Query().Get("storage"), r.URL.Query().Get("status"), r.URL.Query().Get("q"), privacy)
+	items, total, err := s.store.ListImageAssetsPage(r.Context(), limit, offset, q.Get("type"), q.Get("storage"), q.Get("status"), q.Get("q"), privacy)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":    items,
+		"count":    len(items),
+		"total":    total,
+		"page":     page,
+		"pageSize": limit,
+		"offset":   offset,
+		"hasNext":  offset+len(items) < total,
+	})
 }
 
 func (s *Server) handleUploadImageLibraryAsset(w http.ResponseWriter, r *http.Request) {

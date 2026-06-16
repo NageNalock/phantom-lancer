@@ -8,6 +8,14 @@ import { defaultImageSettings, defaultImageStorageSettings, formatDate, imageAss
 import type { AppliedImagePrompt, AssetKind, AssetRef, ImageLibraryScope, ImageMode, ImagePromptDraft, ImageSettingsDraft, ImagesTab, ImageStorageSettingsDraft, MediaAsset, MediaGenerationJob, MediaMode, MediaProviderSettingsDraft, MediaType, ModelCapability, ProviderID, VideoMode } from "../types";
 import { ASPECT_OPTIONS, DURATION_PRESETS, GROK_MODEL_OPTIONS, IMAGE_MODES, MEDIA_TYPES, PROVIDERS, RESOLUTION_OPTIONS, VIDEO_MODES } from "../types";
 
+type PaginationState = {
+  page: number;
+  pageSize: number;
+  total: number;
+  pageCount: number;
+  onPageChange: (page: number) => void;
+};
+
 function assetRefKey(ref: AssetRef): string {
   return `${ref.kind}:${ref.id}`;
 }
@@ -1255,6 +1263,31 @@ function ReferenceSlot({
   );
 }
 
+function PaginationFooter({ pagination, visibleCount }: { pagination?: PaginationState; visibleCount: number }) {
+  if (!pagination || pagination.total <= pagination.pageSize && pagination.page <= 1) return null;
+  const pageCount = Math.max(1, pagination.pageCount || Math.ceil(pagination.total / Math.max(1, pagination.pageSize)));
+  const page = Math.min(Math.max(1, pagination.page), pageCount);
+  return (
+    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--line)] pt-3 text-xs text-[var(--muted-strong)]">
+      <span>
+        第 <span className="mono">{page}</span> / <span className="mono">{pageCount}</span> 页
+        <span className="mx-2">·</span>
+        本页 <span className="mono">{visibleCount}</span> 项
+        <span className="mx-2">·</span>
+        总量 <span className="mono">{pagination.total}</span>
+      </span>
+      <div className="flex items-center gap-2">
+        <Button className="min-h-7 px-2 text-xs" disabled={page <= 1} onClick={() => pagination.onPageChange(page - 1)} type="button">
+          上一页
+        </Button>
+        <Button className="min-h-7 px-2 text-xs" disabled={page >= pageCount} onClick={() => pagination.onPageChange(page + 1)} type="button">
+          下一页
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function HistoryPanel({
   jobs,
   libraryMediaAssets,
@@ -1264,6 +1297,7 @@ export function HistoryPanel({
   onCopyJobParams,
   onOpenAsset,
   onProviderChange,
+  pagination,
   onRefresh,
   onRetryJob,
   onRestoreJob,
@@ -1283,6 +1317,7 @@ export function HistoryPanel({
   onCopyJobParams?: (kind: "legacy" | "media", job: unknown) => void;
   onOpenAsset?: (assetId: string) => void;
   onProviderChange?: (p: ProviderID) => void;
+  pagination?: PaginationState;
   onRefresh: () => Promise<void>;
   onRetryJob?: (kind: "legacy" | "media", job: unknown) => void;
   onRestoreJob?: (kind: "legacy" | "media", job: unknown) => void;
@@ -1418,6 +1453,7 @@ export function HistoryPanel({
       ) : (
         <EmptyState title="暂无历史" body="生成或编辑图片/视频后，这里会展示调用记录。" />
       )}
+      <PaginationFooter pagination={pagination} visibleCount={filteredJobs.length} />
     </Panel>
   );
 }
@@ -1991,6 +2027,7 @@ export function LibraryPanel({
   onMarkPrivateMedia,
   onMediaTypeChange,
   onOpenJob,
+  pagination,
   onRefresh,
   onRefreshMedia,
   onSelect,
@@ -2029,6 +2066,7 @@ export function LibraryPanel({
    onMarkPrivateMedia?: (asset: MediaAsset, nextPrivate: boolean) => void;
    onMediaTypeChange?: (t: MediaType) => void;
    onOpenJob?: (jobId: string, kind: AssetKind) => void;
+   pagination?: PaginationState;
    onRefresh: () => void | Promise<void>;
    onRefreshMedia?: () => void | Promise<void>;
    onSelect: (asset: ImageAsset) => void;
@@ -2696,6 +2734,7 @@ export function LibraryPanel({
               ) : (
                 <EmptyState title={privateScope ? "暂无私密资源" : "暂无资源"} body={privateScope ? "在资源库中将资产设为私密后，这里会展示。" : "生成图片/视频、或手动上传参考图后，资源会自动进入这里。"} />
               )}
+              <PaginationFooter pagination={pagination} visibleCount={filteredSorted.length} />
           </>
         )}
         {!privateScope && filteredSorted.length === 0 ? (
