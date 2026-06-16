@@ -412,13 +412,13 @@ func (s *Service) ConfirmBoot(ctx context.Context) (rollbackExecPath string) {
 //   - the stored latestCheck.currentVersion differs from build.Version
 //
 // When that happens we:
-//   1. clone the latest check (or create a minimal one if absent)
-//   2. set currentVersion = build.Version
-//   3. if build.Version is strictly newer than stored latestVersion, we
-//      also set latestVersion = build.Version and clear update_available
-//      / can_apply flags — the operator has obviously already obtained a
-//      build newer than the last release scan, so showing "update to
-//      older-than-me v1.2.0" would be worse than showing nothing.
+//  1. clone the latest check (or create a minimal one if absent)
+//  2. set currentVersion = build.Version
+//  3. if build.Version is strictly newer than stored latestVersion, we
+//     also set latestVersion = build.Version and clear update_available
+//     / can_apply flags — the operator has obviously already obtained a
+//     build newer than the last release scan, so showing "update to
+//     older-than-me v1.2.0" would be worse than showing nothing.
 //
 // We never OVERWRITE a newer latestVersion, and we never touch release
 // metadata (asset url, checksum) if latestVersion is preserved — that way
@@ -601,6 +601,7 @@ func (s *Service) execute(ctx context.Context, job *storage.SystemUpdateJob, che
 	if err := s.save(ctx, *job); err != nil {
 		return err
 	}
+	s.append(ctx, job.ID, "update.install.started", map[string]any{"targetVersion": job.TargetVersion})
 	installResult, err := s.install(ctx, job.ID, stage.stagedBinary, stage.stagedSupervisor, job.CurrentVersion)
 	if err != nil {
 		return err

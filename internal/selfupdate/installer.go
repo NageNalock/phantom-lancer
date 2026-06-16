@@ -62,6 +62,10 @@ func (s *Service) install(ctx context.Context, jobID, stagedBinary, stagedSuperv
 	backupCtx, cancelBackup := context.WithTimeout(ctx, installDatabaseBackupTimeout)
 	defer cancelBackup()
 	if err := s.store.BackupDatabase(backupCtx, dbBackup); err != nil {
+		if s.log != nil {
+			s.log.Warn("system update database backup failed", "job_id", jobID, "db_backup_path", dbBackup, "error", safelog.Error(err, 200))
+		}
+		s.append(ctx, jobID, "update.install.db_backup.failed", map[string]any{"error": safelog.Error(err, 200)})
 		return installResult{}, fmt.Errorf("database backup failed: %w", err)
 	}
 	if s.log != nil {

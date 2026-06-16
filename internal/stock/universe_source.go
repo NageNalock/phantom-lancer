@@ -66,6 +66,7 @@ func (s *Service) RefreshAStockUniverse(ctx context.Context, mode MaintenanceMod
 		source = "sina_universe"
 		fullSource = false
 	}
+	fetchDegraded := len(fetchNotes) > 0
 	src, err := s.ensureDataSource(ctx, source, "market_data")
 	if err != nil {
 		return DataTaskResult{}, err
@@ -116,7 +117,7 @@ func (s *Service) RefreshAStockUniverse(ctx context.Context, mode MaintenanceMod
 		}
 	}
 	delisted := 0
-	if fullSource && len(items) >= 1000 {
+	if fullSource && !fetchDegraded && failed == 0 && len(items) >= 1000 {
 		delisted, err = s.store.MarkInstrumentsDelisted(ctx, orphans)
 		if err != nil {
 			return DataTaskResult{}, err
@@ -617,6 +618,8 @@ func marketFromRemote(remote int, symbol string) string {
 	// 兜底：按代码前缀判断（symbol 没带 market 前缀的情况）
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
 	switch {
+	case strings.HasPrefix(symbol, "920"):
+		return "BJ"
 	case strings.HasPrefix(symbol, "6") || strings.HasPrefix(symbol, "9"):
 		return "SH"
 	case strings.HasPrefix(symbol, "0") || strings.HasPrefix(symbol, "3"):
@@ -627,7 +630,7 @@ func marketFromRemote(remote int, symbol string) string {
 	return "SH"
 }
 
-// convertInstruments 把中间结构 → StockInstrument，填入拼音 + 行业名映射 + tradable 状态。
+// convertInstruments 把中间结构 → StockInstrument，填入拼音 + 行业名映射 + 上市状态。
 // industryLookup 由东财 slist/get 返回的行业编码→中文名称映射表。
 func convertInstruments(raw []universeInstrument, industryLookup map[string]string) []storage.StockInstrument {
 	out := make([]storage.StockInstrument, 0, len(raw))
@@ -646,7 +649,7 @@ func convertInstruments(raw []universeInstrument, industryLookup map[string]stri
 			Symbol:      sym,
 			Market:      mkt,
 			Name:        name,
-			Status:      "tradable", // 东财 clist 是活跃代码快照；healthTicker 会在之后刷新停牌
+			Status:      "listed",
 			Industry:    industry,
 			ListingDate: r.ListingDate,
 			Source:      "eastmoney_universe",

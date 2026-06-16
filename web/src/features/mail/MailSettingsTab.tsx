@@ -33,7 +33,8 @@ const RETENTION_SCOPES = [
   { value: "delivery_events", label: "投递事件", help: "投递 / 队列 / 退信历史" },
   { value: "health_checks", label: "健康检查", help: "L1-L9 探针历史" },
   { value: "webhook_events", label: "Webhook 事件", help: "入站 Webhook 鉴权与处理记录" },
-  { value: "mail_index_messages", label: "索引消息元数据", help: "FTS5 搜索索引中的邮件元数据" },
+  { value: "index_messages", label: "索引消息元数据", help: "FTS5 搜索索引中的邮件元数据" },
+  { value: "expired_backups", label: "过期备份", help: "根据 expires_at 清理旧备份记录" },
 ] as const;
 
 type BackupSubTab = "manual" | "schedules";
@@ -59,11 +60,12 @@ function RetentionSection({ actions, reload }: { actions: AppActions; reload: ()
   const [applying, setApplying] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<MailRetentionRule | null>(null);
-  const [formScope, setFormScope] = useState<MailRetentionRule["scope"]>("delivery_events");
-  const [formRetainDays, setFormRetainDays] = useState<number | "">("");
-  const [formMaxRows, setFormMaxRows] = useState<number | "">("");
+  const [formTarget, setFormTarget] = useState<MailRetentionRule["target_kind"]>("delivery_events");
+  const [formDays, setFormDays] = useState<number | "">("");
+  const [formKeepMinCount, setFormKeepMinCount] = useState<number | "">("");
+  const [formEnabled, setFormEnabled] = useState(true);
   const [formError, setFormError] = useState("");
-  const [applyResult, setApplyResult] = useState<{ deleted_counts: Record<string, number>; duration_ms: number } | null>(null);
+  const [applyResult, setApplyResult] = useState<{ deleted_by_target: Record<string, number>; total_deleted: number; applied_at_iso: string } | null>(null);
 
   const loadRules = useCallback(async () => {
     setLoading(true);
@@ -81,46 +83,52 @@ function RetentionSection({ actions, reload }: { actions: AppActions; reload: ()
     void loadRules();
   }, [loadRules]);
 
-  const usedScopes = useMemo(() => new Set(rules.map((r) => r.scope)), [rules]);
-  const availableScopes = RETENTION_SCOPES.filter((s) => !usedScopes.has(s.value) || editing?.scope === s.value);
+  const usedTargets = useMemo(() => new Set(rules.map((r) => r.target_kind)), [rules]);
+  const availableTargets = RETENTION_SCOPES.filter((s) => !usedTargets.has(s.value) || editing?.target_kind === s.value);
 
   function resetForm() {
     setShowForm(false);
     setEditing(null);
-    setFormScope("delivery_events");
-    setFormRetainDays("");
-    setFormMaxRows("");
+    setFormTarget("delivery_events");
+    setFormDays("");
+    setFormKeepMinCount("");
+    setFormEnabled(true);
     setFormError("");
   }
 
   function startEdit(rule: MailRetentionRule) {
     setEditing(rule);
     setShowForm(true);
-    setFormScope(rule.scope);
-    setFormRetainDays(rule.retain_days ?? "");
-    setFormMaxRows(rule.retain_max_rows ?? "");
+    setFormTarget(rule.target_kind);
+    setFormDays(rule.days || "");
+    setFormKeepMinCount(rule.keep_min_count ?? "");
+    setFormEnabled(rule.enabled !== false);
     setFormError("");
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setFormError("");
-    const days = formRetainDays === "" ? undefined : Number(formRetainDays);
-    const rows = formMaxRows === "" ? undefined : Number(formMaxRows);
-    if ((days === undefined || days <= 0) && (rows === undefined || rows <= 0)) {
-      setFormError("至少需要填写一项：retain_days 或 retain_max_rows，且都必须大于 0");
+    const days = formDays === "" ? 0 : Number(formDays);
+    const keepMin = formKeepMinCount === "" ? 0 : Number(formKeepMinCount);
+    if (!Number.isFinite(days) || days <= 0) {
+      setFormError("保留天数必须大于 0");
+      return;
+    }
+    if (!Number.isFinite(keepMin) || keepMin < 0) {
+      setFormError("最少保留条数不能小于 0");
       return;
     }
     try {
       const payload = editing
-        ? { id: editing.id, scope: formScope, retain_days: days, retain_max_rows: rows }
-        : { scope: formScope, retain_days: days, retain_max_rows: rows };
+        ? { ...editing, target_kind: formTarget, days, keep_min_count: keepMin, enabled: formEnabled }
+        : { target_kind: formTarget, days, keep_min_count: keepMin, enabled: formEnabled, rule_kind: "custom" };
       const saved = await mailRetentionRuleUpsert(payload);
       setRules((prev) => {
         const filtered = prev.filter((r) => r.id !== saved.id);
         return [...filtered, saved];
       });
-      actions.setToast(`保留策略已保存：${scopeLabel(saved.scope)}`, "good");
+      actions.setToast(`保留策略已保存：${scopeLabel(saved.target_kind)}`, "good");
       resetForm();
       await reload();
     } catch (e) {
@@ -131,7 +139,7 @@ function RetentionSection({ actions, reload }: { actions: AppActions; reload: ()
   async function handleDelete(rule: MailRetentionRule) {
     const ok = await confirmDanger({
       title: "删除保留策略？",
-      body: `删除后 ${scopeLabel(rule.scope)} 将不再自动清理旧数据。是否继续？`,
+      body: `删除后 ${scopeLabel(rule.target_kind)} 将不再自动清理旧数据。是否继续？`,
       confirmLabel: "确认删除",
     });
     if (!ok) return;
@@ -155,8 +163,12 @@ function RetentionSection({ actions, reload }: { actions: AppActions; reload: ()
     setApplying(true);
     try {
       const result = await mailRetentionApplyNow();
-      setApplyResult({ deleted_counts: result.deleted_counts, duration_ms: result.duration_ms });
-      actions.setToast(`保留策略清理完成（${result.duration_ms} ms）`, "good");
+      setApplyResult({
+        deleted_by_target: result.deleted_by_target || {},
+        total_deleted: result.total_deleted || 0,
+        applied_at_iso: result.applied_at_iso,
+      });
+      actions.setToast(`保留策略清理完成：${result.total_deleted || 0} 条`, "good");
       await reload();
     } catch (e) {
       actions.setToast(friendlyError(e), "danger");
@@ -180,50 +192,51 @@ function RetentionSection({ actions, reload }: { actions: AppActions; reload: ()
           </Button>
         </div>
       }
-      subtitle="为投递事件、健康检查、Webhook 历史、索引元数据分别设置保留期或最大行数。"
+      subtitle="为投递事件、健康检查、Webhook 历史、索引元数据和过期备份设置保留天数。"
       title="保留策略"
     >
       {showForm ? (
         <form className="mb-3 grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3" onSubmit={handleSubmit}>
           <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto] gap-2 max-md:grid-cols-1">
-            <Field label="作用域" help="每个作用域仅允许一条规则">
+            <Field label="清理目标" help="每个目标建议只保留一条规则">
               <select
                 className="select"
                 disabled={!!editing}
                 name="retention_scope"
-                value={formScope}
-                onChange={(e) => setFormScope(e.target.value as MailRetentionRule["scope"])}
+                value={formTarget}
+                onChange={(e) => setFormTarget(e.target.value as MailRetentionRule["target_kind"])}
               >
-                {(editing ? RETENTION_SCOPES : availableScopes).map((s) => (
+                {(editing ? RETENTION_SCOPES : availableTargets).map((s) => (
                   <option key={s.value} value={s.value}>
                     {s.label} ({s.value})
                   </option>
                 ))}
               </select>
             </Field>
-            <Field label="保留天数" help="超过天数的记录将被清理，0 或空表示不限">
+            <Field label="保留天数" help="超过天数的记录将被清理">
               <input
                 className="input"
-                min={0}
+                min={1}
                 name="retention_days"
-                onChange={(e) => setFormRetainDays(e.target.value === "" ? "" : Number(e.target.value))}
+                onChange={(e) => setFormDays(e.target.value === "" ? "" : Number(e.target.value))}
                 placeholder="例如 90"
                 type="number"
-                value={formRetainDays}
+                value={formDays}
               />
             </Field>
-            <Field label="最大行数" help="超出条数将截断最旧记录，0 或空表示不限">
+            <Field label="最少保留条数" help="达到时间条件时仍保留的最小记录数，0 表示不设置保底">
               <input
                 className="input"
                 min={0}
                 name="retention_rows"
-                onChange={(e) => setFormMaxRows(e.target.value === "" ? "" : Number(e.target.value))}
-                placeholder="例如 100000"
+                onChange={(e) => setFormKeepMinCount(e.target.value === "" ? "" : Number(e.target.value))}
+                placeholder="例如 1000"
                 type="number"
-                value={formMaxRows}
+                value={formKeepMinCount}
               />
             </Field>
             <div className="flex items-end gap-2">
+              <CheckLabel checked={formEnabled} onChange={setFormEnabled}>启用</CheckLabel>
               <Button tone="primary" type="submit">{editing ? "保存修改" : "创建"}</Button>
               <Button onClick={resetForm} type="button">取消</Button>
             </div>
@@ -235,9 +248,8 @@ function RetentionSection({ actions, reload }: { actions: AppActions; reload: ()
       {applyResult ? (
         <Notice tone="warn">
           <strong>上次清理结果：</strong>
-          {Object.entries(applyResult.deleted_counts).map(([k, v]) => `${scopeLabel(k as MailRetentionRule["scope"])}=${v}`).join("，")}
-          {applyResult.deleted_counts && Object.keys(applyResult.deleted_counts).length === 0 ? "0 条记录被删除" : ""}
-          （耗时 {applyResult.duration_ms} ms）
+          {Object.entries(applyResult.deleted_by_target || {}).map(([k, v]) => `${scopeLabel(k)}=${v}`).join("，") || "0 条记录被删除"}
+          （合计 {applyResult.total_deleted} 条）
         </Notice>
       ) : null}
 
@@ -250,10 +262,11 @@ function RetentionSection({ actions, reload }: { actions: AppActions; reload: ()
           <table className="table">
             <thead>
               <tr>
-                <th>作用域</th>
+                <th>清理目标</th>
+                <th>状态</th>
                 <th>保留天数</th>
-                <th>最大行数</th>
-                <th>创建</th>
+                <th>最少保留</th>
+                <th>上次清理</th>
                 <th>更新</th>
                 <th>操作</th>
               </tr>
@@ -262,13 +275,18 @@ function RetentionSection({ actions, reload }: { actions: AppActions; reload: ()
               {rules.map((r) => (
                 <tr key={r.id}>
                   <td>
-                    <strong>{scopeLabel(r.scope)}</strong>
-                    <div className="muted text-xs">{r.scope}</div>
+                    <strong>{scopeLabel(r.target_kind)}</strong>
+                    <div className="muted text-xs">{r.target_kind}</div>
                   </td>
-                  <td>{r.retain_days != null ? `${r.retain_days} 天` : "—"}</td>
-                  <td>{r.retain_max_rows != null ? r.retain_max_rows.toLocaleString() : "—"}</td>
-                  <td className="mono text-xs">{formatDate(r.created_at)}</td>
-                  <td className="mono text-xs">{formatDate(r.updated_at)}</td>
+                  <td>{r.enabled ? <Pill tone="good">启用</Pill> : <Pill tone="neutral">停用</Pill>}</td>
+                  <td>{r.days > 0 ? `${r.days} 天` : "—"}</td>
+                  <td>{r.keep_min_count != null ? r.keep_min_count.toLocaleString() : "—"}</td>
+                  <td className="mono text-xs">
+                    {r.last_run_at_iso ? formatDate(r.last_run_at_iso) : "—"}
+                    {r.last_pruned_count ? <div className="muted">清理 {r.last_pruned_count} 条</div> : null}
+                    {r.last_error ? <div className="text-[var(--danger)]">{r.last_error}</div> : null}
+                  </td>
+                  <td className="mono text-xs">{formatDate(r.updated_at_iso || r.created_at_iso || "")}</td>
                   <td>
                     <div className="flex gap-1.5">
                       <Button onClick={() => startEdit(r)}>编辑</Button>
@@ -347,7 +365,7 @@ function BackupManual({ actions, reload }: { actions: AppActions; reload: () => 
     setCreating(true);
     try {
       const created = await mailBackupCreate({ scope, note: note.trim() || undefined });
-      actions.setToast(`备份创建成功：${created.id.slice(0, 8)}（${formatBytesZero(created.file_size_bytes)}）`, "good");
+      actions.setToast(`备份创建成功：${created.id.slice(0, 8)}（${formatBytesZero(created.size_bytes || 0)}）`, "good");
       setNote("");
       await loadBackups();
       await reload();
@@ -365,7 +383,7 @@ function BackupManual({ actions, reload }: { actions: AppActions; reload: () => 
   async function handleDelete(b: MailBackup) {
     const ok = await confirmDanger({
       title: "删除备份？",
-      body: `删除备份 ${b.id.slice(0, 12)}… （${formatBytesZero(b.file_size_bytes)}）。此操作不可恢复。`,
+      body: `删除备份 ${b.id.slice(0, 12)}… （${formatBytesZero(b.size_bytes || 0)}）。此操作不可恢复。`,
       confirmLabel: "确认删除备份",
     });
     if (!ok) return;
@@ -435,6 +453,7 @@ function BackupManual({ actions, reload }: { actions: AppActions; reload: () => 
               <tr>
                 <th>ID</th>
                 <th>范围</th>
+                <th>状态</th>
                 <th>大小</th>
                 <th>创建时间</th>
                 <th>SHA256</th>
@@ -452,10 +471,11 @@ function BackupManual({ actions, reload }: { actions: AppActions; reload: () => 
                       {b.scope === "config" ? "配置" : "完整数据"}
                     </Pill>
                   </td>
-                  <td>{formatBytesZero(b.file_size_bytes)}</td>
-                  <td className="mono text-xs">{formatDate(b.created_at)}</td>
+                  <td><Pill tone={b.state === "failed" ? "danger" : b.state === "pending" ? "warn" : "neutral"}>{b.state || "completed"}</Pill></td>
+                  <td>{formatBytesZero(b.size_bytes || 0)}</td>
+                  <td className="mono text-xs">{formatDate(b.created_at_iso)}</td>
                   <td className="mono text-xs">{b.checksum_sha256 ? b.checksum_sha256.slice(0, 8) + "…" : "—"}</td>
-                  <td className="mono text-xs">{b.expires_at ? formatDate(b.expires_at) : "永久"}</td>
+                  <td className="mono text-xs">{b.expires_at_iso ? formatDate(b.expires_at_iso) : "永久"}</td>
                   <td className="text-xs">{b.note || "—"}</td>
                   <td>
                     <div className="flex gap-1.5">
@@ -481,11 +501,11 @@ function BackupSchedules({ actions, reload }: { actions: AppActions; reload: () 
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<MailBackupSchedule | null>(null);
 
+  const [formName, setFormName] = useState("");
   const [formScope, setFormScope] = useState("config");
   const [formEnabled, setFormEnabled] = useState(true);
   const [formCron, setFormCron] = useState("0 2 * * *");
   const [formRetention, setFormRetention] = useState<number>(30);
-  const [formCopies, setFormCopies] = useState<number>(7);
   const [formError, setFormError] = useState("");
 
   const loadSchedules = useCallback(async () => {
@@ -507,22 +527,22 @@ function BackupSchedules({ actions, reload }: { actions: AppActions; reload: () 
   function resetForm() {
     setShowForm(false);
     setEditing(null);
+    setFormName("");
     setFormScope("config");
     setFormEnabled(true);
     setFormCron("0 2 * * *");
     setFormRetention(30);
-    setFormCopies(7);
     setFormError("");
   }
 
   function startEdit(s: MailBackupSchedule) {
     setEditing(s);
     setShowForm(true);
+    setFormName(s.name || "");
     setFormScope(s.scope);
     setFormEnabled(s.enabled);
     setFormCron(s.cron_expr);
     setFormRetention(s.retention_days);
-    setFormCopies(s.max_copies);
     setFormError("");
   }
 
@@ -533,14 +553,14 @@ function BackupSchedules({ actions, reload }: { actions: AppActions; reload: () 
       setFormError("Cron 表达式需要 5 段（minute hour dom month dow）");
       return;
     }
-    if (formRetention <= 0 || formCopies <= 0) {
-      setFormError("保留天数与最大份数都必须大于 0");
+    if (formRetention <= 0) {
+      setFormError("保留天数必须大于 0");
       return;
     }
     try {
       const payload = editing
-        ? { id: editing.id, scope: formScope, enabled: formEnabled, cron_expr: formCron.trim(), retention_days: formRetention, max_copies: formCopies }
-        : { scope: formScope, enabled: formEnabled, cron_expr: formCron.trim(), retention_days: formRetention, max_copies: formCopies };
+        ? { ...editing, name: formName.trim() || editing.name, scope: formScope, enabled: formEnabled, cron_expr: formCron.trim(), retention_days: formRetention }
+        : { name: formName.trim() || undefined, scope: formScope, enabled: formEnabled, cron_expr: formCron.trim(), retention_days: formRetention };
       const saved = await mailBackupScheduleUpsert(payload);
       setSchedules((prev) => {
         const filtered = prev.filter((s) => s.id !== saved.id);
@@ -578,6 +598,9 @@ function BackupSchedules({ actions, reload }: { actions: AppActions; reload: () 
       {showForm ? (
         <form className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3" onSubmit={handleSubmit}>
           <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto_auto] gap-2 max-lg:grid-cols-2 max-md:grid-cols-1">
+            <Field label="计划名称" help="可选；为空时后端按范围生成默认名称">
+              <input className="input" name="schedule_name" onChange={(e) => setFormName(e.target.value)} value={formName} />
+            </Field>
             <Field label="范围">
               <select className="select" name="schedule_scope" value={formScope} onChange={(e) => setFormScope(e.target.value)}>
                 <option value="config">仅配置 (config)</option>
@@ -595,16 +618,6 @@ function BackupSchedules({ actions, reload }: { actions: AppActions; reload: () 
                 onChange={(e) => setFormRetention(Number(e.target.value) || 0)}
                 type="number"
                 value={formRetention}
-              />
-            </Field>
-            <Field label="最大份数">
-              <input
-                className="input"
-                min={1}
-                name="schedule_copies"
-                onChange={(e) => setFormCopies(Number(e.target.value) || 0)}
-                type="number"
-                value={formCopies}
               />
             </Field>
             <div className="flex items-end">
@@ -628,11 +641,11 @@ function BackupSchedules({ actions, reload }: { actions: AppActions; reload: () 
           <table className="table">
             <thead>
               <tr>
+                <th>名称</th>
                 <th>范围</th>
                 <th>状态</th>
                 <th>Cron</th>
                 <th>保留天数</th>
-                <th>最大份数</th>
                 <th>上次执行</th>
                 <th>下次</th>
                 <th>操作</th>
@@ -641,21 +654,25 @@ function BackupSchedules({ actions, reload }: { actions: AppActions; reload: () 
             <tbody>
               {schedules.map((s) => (
                 <tr key={s.id}>
+                  <td>
+                    <strong>{s.name || s.id.slice(0, 8)}</strong>
+                    <div className="mono muted text-xs">{s.id.slice(0, 12)}…</div>
+                  </td>
                   <td>{s.scope === "config" ? "配置" : "完整数据"}</td>
                   <td>{s.enabled ? <Pill tone="good">启用</Pill> : <Pill tone="neutral">停用</Pill>}</td>
                   <td className="mono text-xs">{s.cron_expr}</td>
                   <td>{s.retention_days} 天</td>
-                  <td>{s.max_copies}</td>
                   <td className="text-xs">
-                    {s.last_run_at ? (
+                    {s.last_run_at_iso ? (
                       <>
-                        <span className="mono">{formatDate(s.last_run_at)}</span>
-                        {s.last_run_ok ? <Pill tone="good">OK</Pill> : <Pill tone="danger">失败</Pill>}
+                        <span className="mono">{formatDate(s.last_run_at_iso)}</span>
+                        {s.last_error ? <Pill tone="danger">失败</Pill> : <Pill tone="good">OK</Pill>}
                         {s.last_error ? <div className="muted text-xs">{s.last_error}</div> : null}
+                        {s.last_backup_id ? <div className="mono muted text-xs">{s.last_backup_id.slice(0, 12)}…</div> : null}
                       </>
                     ) : "—"}
                   </td>
-                  <td className="mono text-xs">{s.next_run_at ? formatDate(s.next_run_at) : "—"}</td>
+                  <td className="mono text-xs">{s.next_run_at_iso ? formatDate(s.next_run_at_iso) : "—"}</td>
                   <td>
                     <div className="flex gap-1.5">
                       <Button onClick={() => startEdit(s)}>编辑</Button>

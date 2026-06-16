@@ -134,6 +134,58 @@ func TestStockPortfolioPatchRouteUpdatesConfigAndCash(t *testing.T) {
 	}
 }
 
+func TestStockInstrumentSearchHonorsListingDateAlias(t *testing.T) {
+	server, store, session, _ := newStockHTTPTest(t)
+	ctx := context.Background()
+	if _, err := store.UpsertStockInstrument(ctx, storage.StockInstrument{Symbol: "600000", Market: "SH", Name: "浦发银行", Status: "listed", ListingDate: "1999-11-10"}); err != nil {
+		t.Fatalf("upsert old instrument: %v", err)
+	}
+	if _, err := store.UpsertStockInstrument(ctx, storage.StockInstrument{Symbol: "300750", Market: "SZ", Name: "宁德时代", Status: "listed", ListingDate: "2018-06-11"}); err != nil {
+		t.Fatalf("upsert new instrument: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	request := newStockRequest(http.MethodGet, "/api/stock/instruments/search?min_listing_date=2010-01-01&pageSize=50", "", session, "")
+	server.handleStockInstrumentSearch(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload storage.StockInstrumentSearchResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Total != 1 || len(payload.Items) != 1 || payload.Items[0].Symbol != "300750" {
+		t.Fatalf("payload = %+v, want only 300750", payload)
+	}
+}
+
+func TestStockInstrumentListCanExcludeDelisted(t *testing.T) {
+	server, store, session, _ := newStockHTTPTest(t)
+	ctx := context.Background()
+	if _, err := store.UpsertStockInstrument(ctx, storage.StockInstrument{Symbol: "600000", Market: "SH", Name: "浦发银行", Status: "listed"}); err != nil {
+		t.Fatalf("upsert listed instrument: %v", err)
+	}
+	if _, err := store.UpsertStockInstrument(ctx, storage.StockInstrument{Symbol: "000001", Market: "SZ", Name: "平安银行", Status: "delisted"}); err != nil {
+		t.Fatalf("upsert delisted instrument: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	request := newStockRequest(http.MethodGet, "/api/stock/instruments?include_delisted=false&limit=10", "", session, "")
+	server.handleStockInstruments(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Items []storage.StockInstrument `json:"items"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Symbol != "600000" {
+		t.Fatalf("items = %+v, want only listed instrument", payload.Items)
+	}
+}
+
 func newStockHTTPTest(t *testing.T) (*Server, *storage.Store, string, string) {
 	t.Helper()
 	ctx := context.Background()

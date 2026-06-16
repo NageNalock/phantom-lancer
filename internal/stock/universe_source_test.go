@@ -1,8 +1,17 @@
 package stock
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+
+	"phantom-lancer/internal/storage"
 )
 
 func TestFixSinaPseudoJSONHandlesUniverseVariants(t *testing.T) {
@@ -112,4 +121,103 @@ func TestNormalizeSinaUniverseSymbol(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConvertInstrumentsUsesListedLifecycleStatus(t *testing.T) {
+	items := convertInstruments([]universeInstrument{{
+		Symbol:       "600000",
+		RemoteMarket: 1,
+		Name:         "浦发银行",
+	}}, nil)
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	if items[0].Status != "listed" {
+		t.Fatalf("status = %q, want listed", items[0].Status)
+	}
+}
+
+func TestRefreshAStockUniverseSkipsDelistWhenEastmoneyPartial(t *testing.T) {
+	ctx := context.Background()
+	store, err := storage.Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.UpsertStockInstrument(ctx, storage.StockInstrument{
+		Symbol: "000001",
+		Market: "SZ",
+		Name:   "本地旧股票",
+		Status: "listed",
+	}); err != nil {
+		t.Fatalf("seed old instrument: %v", err)
+	}
+
+	svc := NewService(store)
+	svc.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "push2.eastmoney.com" {
+			return stringResponse(http.StatusNotFound, `{"error":"unexpected host"}`), nil
+		}
+		page, _ := strconv.Atoi(req.URL.Query().Get("pn"))
+		switch page {
+		case 1:
+			return stringResponse(http.StatusOK, eastmoneyUniversePage(1500, 600000, 500)), nil
+		case 2:
+			return stringResponse(http.StatusBadGateway, `bad gateway`), nil
+		case 3:
+			return stringResponse(http.StatusOK, eastmoneyUniversePage(1500, 601000, 500)), nil
+		default:
+			return stringResponse(http.StatusOK, `{"data":{"total":1500,"diff":[]}}`), nil
+		}
+	})}
+
+	result, err := svc.RefreshAStockUniverse(ctx, MaintenanceModeManual, "test")
+	if err != nil {
+		t.Fatalf("refresh universe: %v", err)
+	}
+	if result.Task.Status != "degraded" {
+		t.Fatalf("task status = %q, want degraded", result.Task.Status)
+	}
+	old, err := store.GetStockInstrument(ctx, "000001")
+	if err != nil {
+		t.Fatalf("get old instrument: %v", err)
+	}
+	if old.Status != "listed" {
+		t.Fatalf("old instrument status = %q, want listed because remote fetch was partial", old.Status)
+	}
+	if !containsNote(result.Notes, "page 2") {
+		t.Fatalf("notes = %#v, want page 2 fetch note", result.Notes)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func stringResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func eastmoneyUniversePage(total, start, count int) string {
+	rows := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		symbol := fmt.Sprintf("%06d", start+i)
+		rows = append(rows, fmt.Sprintf(`{"f12":"%s","f13":1,"f14":"测试%s","f18":"","f100":""}`, symbol, symbol))
+	}
+	return fmt.Sprintf(`{"data":{"total":%d,"diff":[%s]}}`, total, strings.Join(rows, ","))
+}
+
+func containsNote(notes []string, needle string) bool {
+	for _, note := range notes {
+		if strings.Contains(note, needle) {
+			return true
+		}
+	}
+	return false
 }

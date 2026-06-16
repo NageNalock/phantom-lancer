@@ -138,6 +138,138 @@ func TestStockPortfolioAndHoldingConstraintsArePreserved(t *testing.T) {
 	}
 }
 
+func TestStockInstrumentListedSearchHandlesLegacyTradableStatus(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "phantom-lancer.db")
+	store, err := Open(ctx, dbPath, nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	created, err := store.UpsertStockInstrument(ctx, StockInstrument{
+		Symbol:  "600000",
+		Market:  "SH",
+		Name:    "浦发银行",
+		Status:  "tradable",
+		Quality: "fresh",
+	})
+	if err != nil {
+		t.Fatalf("upsert instrument: %v", err)
+	}
+	if created.Status != "listed" {
+		t.Fatalf("created status = %q, want listed", created.Status)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE stock_instruments SET status = 'tradable' WHERE symbol = '600000'`); err != nil {
+		t.Fatalf("force legacy status: %v", err)
+	}
+	result, err := store.SearchStockInstruments(ctx, StockInstrumentSearchParams{
+		Statuses: []string{"listed"},
+		Sort:     "market_then_symbol",
+		Page:     1,
+		PageSize: 50,
+	})
+	if err != nil {
+		t.Fatalf("search instruments: %v", err)
+	}
+	if result.Total != 1 || len(result.Items) != 1 {
+		t.Fatalf("search result = total %d items %d, want 1/1", result.Total, len(result.Items))
+	}
+	if result.Items[0].Status != "listed" {
+		t.Fatalf("search item status = %q, want listed", result.Items[0].Status)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	reopened, err := Open(ctx, dbPath, nil)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer reopened.Close()
+	var legacyCount int
+	if err := reopened.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM stock_instruments WHERE status = 'tradable'`).Scan(&legacyCount); err != nil {
+		t.Fatalf("count legacy status: %v", err)
+	}
+	if legacyCount != 0 {
+		t.Fatalf("legacy tradable rows after migration = %d, want 0", legacyCount)
+	}
+	instrument, err := reopened.GetStockInstrument(ctx, "600000")
+	if err != nil {
+		t.Fatalf("get instrument: %v", err)
+	}
+	if instrument.Status != "listed" {
+		t.Fatalf("instrument status after migration = %q, want listed", instrument.Status)
+	}
+}
+
+func TestStockSymbolInputNormalizesExchangeAffixes(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	instrument, err := store.UpsertStockInstrument(ctx, StockInstrument{
+		Symbol: "sh600519",
+		Name:   "贵州茅台",
+	})
+	if err != nil {
+		t.Fatalf("upsert prefixed instrument: %v", err)
+	}
+	if instrument.Symbol != "600519" || instrument.Market != "SH" {
+		t.Fatalf("instrument = %+v, want normalized 600519/SH", instrument)
+	}
+	quote, err := store.UpsertStockQuote(ctx, StockQuote{
+		Symbol:        "000001.SZ",
+		LastPrice:     10,
+		DataTimestamp: time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatalf("upsert suffixed quote: %v", err)
+	}
+	if quote.Symbol != "000001" || quote.Market != "SZ" {
+		t.Fatalf("quote = %+v, want normalized 000001/SZ", quote)
+	}
+	bj, err := store.UpsertStockInstrument(ctx, StockInstrument{
+		Symbol: "920001",
+		Name:   "北交测试",
+	})
+	if err != nil {
+		t.Fatalf("upsert bj instrument: %v", err)
+	}
+	if bj.Symbol != "920001" || bj.Market != "BJ" {
+		t.Fatalf("bj instrument = %+v, want inferred BJ market", bj)
+	}
+}
+
+func TestStockInstrumentSearchAllStatusIncludesDelisted(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.UpsertStockInstrument(ctx, StockInstrument{Symbol: "600000", Name: "浦发银行", Status: "listed", Quality: "fresh"}); err != nil {
+		t.Fatalf("upsert listed instrument: %v", err)
+	}
+	if _, err := store.UpsertStockInstrument(ctx, StockInstrument{Symbol: "000001", Name: "平安银行", Status: "delisted", Quality: "stale"}); err != nil {
+		t.Fatalf("upsert delisted instrument: %v", err)
+	}
+	result, err := store.SearchStockInstruments(ctx, StockInstrumentSearchParams{
+		Statuses: []string{"all"},
+		Quality:  "all",
+		Page:     1,
+		PageSize: 50,
+	})
+	if err != nil {
+		t.Fatalf("search all status: %v", err)
+	}
+	if result.Total != 2 {
+		t.Fatalf("total = %d, want 2 including delisted", result.Total)
+	}
+}
+
 func TestUpdateStockPortfolioUpdatesConfigAndCash(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)

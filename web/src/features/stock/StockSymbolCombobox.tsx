@@ -172,6 +172,7 @@ function parseFreeStockInput(value: string, fallbackMarket: string): { symbol: s
 }
 
 function marketFromSymbol(symbol: string): string {
+  if (/^920/.test(symbol)) return "BJ";
   if (/^[69]/.test(symbol)) return "SH";
   if (/^[03]/.test(symbol)) return "SZ";
   if (/^[48]/.test(symbol)) return "BJ";

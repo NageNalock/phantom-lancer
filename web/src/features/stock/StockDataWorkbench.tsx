@@ -366,11 +366,10 @@ function StockInstrumentList({ actions, data, runAction }: { actions: AppActions
 
   async function refreshUniverse() {
     await runAction("已执行 A 股主数据初始化", async () => {
-      const run = await actions.api<StockDataMaintenanceResult>("/api/stock/instruments", {
+      await actions.api<StockDataMaintenanceResult>("/api/stock/instruments", {
         method: "POST",
         body: { source: "eastmoney_universe", auto: true },
       });
-      setResult((current) => current ? { ...current, items: run.instruments || current.items } : current);
       await actions.refreshStock();
       setPage(1);
       setRefreshToken((current) => current + 1);

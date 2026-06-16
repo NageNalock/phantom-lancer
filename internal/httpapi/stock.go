@@ -326,6 +326,7 @@ func (s *Server) handleStockInstrumentSearch(w http.ResponseWriter, r *http.Requ
 		Statuses:        q["status"],
 		Industry:        q.Get("industry"),
 		Concepts:        q["concept"],
+		MinListingDate:  firstNonEmptyQuery(q, "minListingDate", "min_listing_date"),
 		Quality:         q.Get("quality"),
 		IncludeDelisted: q.Get("include_delisted") == "true" || q.Get("includeDelisted") == "true",
 		Sort:            q.Get("sort"),
@@ -337,6 +338,17 @@ func (s *Server) handleStockInstrumentSearch(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func firstNonEmptyQuery(q map[string][]string, keys ...string) string {
+	for _, key := range keys {
+		for _, value := range q[key] {
+			if strings.TrimSpace(value) != "" {
+				return value
+			}
+		}
+	}
+	return ""
 }
 
 func (s *Server) handleStockInstrumentIndustries(w http.ResponseWriter, r *http.Request) {
@@ -358,7 +370,11 @@ func (s *Server) handleStockInstruments(w http.ResponseWriter, r *http.Request) 
 	}
 	switch r.Method {
 	case http.MethodGet:
-		items, err := s.store.ListStockInstruments(r.Context(), parseInt(r.URL.Query().Get("limit")))
+		includeDelisted := true
+		if raw := firstNonEmptyQuery(r.URL.Query(), "include_delisted", "includeDelisted"); raw != "" {
+			includeDelisted = strings.EqualFold(strings.TrimSpace(raw), "true")
+		}
+		items, err := s.store.ListStockInstrumentsFiltered(r.Context(), parseInt(r.URL.Query().Get("limit")), includeDelisted)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "stock_instruments_read_failed", err.Error())
 			return

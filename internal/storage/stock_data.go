@@ -276,7 +276,18 @@ CREATE INDEX IF NOT EXISTS idx_stock_data_tasks_status ON stock_data_tasks(statu
 			return fmt.Errorf("stock migrate: create instrument fts5: %w", err)
 		}
 	}
+	if err := s.repairLegacyStockInstrumentStatuses(ctx); err != nil {
+		return err
+	}
 	return s.seedStockDataSources(ctx)
+}
+
+func (s *Store) repairLegacyStockInstrumentStatuses(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE stock_instruments SET status = 'listed', updated_at = ? WHERE status = 'tradable'`, now())
+	if err != nil {
+		return fmt.Errorf("stock migrate: repair legacy instrument status: %w", err)
+	}
+	return nil
 }
 
 const stockInstrumentFTSSQL = `
@@ -540,15 +551,17 @@ func (s *Store) UpdateStockDataSourceHealth(ctx context.Context, src StockDataSo
 }
 
 func (s *Store) UpsertStockInstrument(ctx context.Context, item StockInstrument) (StockInstrument, error) {
-	item.Symbol = normalizeStockSymbol(item.Symbol)
+	var inferredMarket string
+	item.Symbol, inferredMarket = normalizeStockSymbolAndMarket(item.Symbol)
 	if item.Symbol == "" {
 		return StockInstrument{}, errors.New("symbol is required")
 	}
+	item.Market = normalizeStockMarket(defaultString(item.Market, inferredMarket))
 	item.Name = strings.TrimSpace(item.Name)
 	if item.Name == "" {
 		item.Name = item.Symbol
 	}
-	item.Status = defaultString(strings.TrimSpace(item.Status), "listed")
+	item.Status = normalizeStockInstrumentWriteStatus(item.Status)
 	item.Quality = defaultString(strings.TrimSpace(item.Quality), "fresh")
 	item.Source = normalizeStockSource(item.Source)
 	ts := now()
@@ -590,10 +603,21 @@ func (s *Store) GetStockInstrument(ctx context.Context, symbol string) (StockIns
 }
 
 func (s *Store) ListStockInstruments(ctx context.Context, limit int) ([]StockInstrument, error) {
+	return s.ListStockInstrumentsFiltered(ctx, limit, true)
+}
+
+func (s *Store) ListStockInstrumentsFiltered(ctx context.Context, limit int, includeDelisted bool) ([]StockInstrument, error) {
 	if limit <= 0 || limit > 10000 {
 		limit = 200
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT symbol, market, name, status, industry, concept, listing_date, source, quality, py, py_full, created_at, updated_at FROM stock_instruments ORDER BY updated_at DESC LIMIT ?`, limit)
+	query := `SELECT symbol, market, name, status, industry, concept, listing_date, source, quality, py, py_full, created_at, updated_at FROM stock_instruments`
+	args := []any{}
+	if !includeDelisted {
+		query += ` WHERE status != 'delisted'`
+	}
+	query += ` ORDER BY updated_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -738,10 +762,12 @@ func (s *Store) DistinctStockIndustries(ctx context.Context) ([]string, error) {
 }
 
 func (s *Store) UpsertStockMarketDataPoint(ctx context.Context, point StockMarketDataPoint) (StockMarketDataPoint, bool, error) {
-	point.Symbol = normalizeStockSymbol(point.Symbol)
+	var inferredMarket string
+	point.Symbol, inferredMarket = normalizeStockSymbolAndMarket(point.Symbol)
 	if point.Symbol == "" {
 		return StockMarketDataPoint{}, false, errors.New("symbol is required")
 	}
+	point.Market = normalizeStockMarket(defaultString(point.Market, inferredMarket))
 	point.Dataset = defaultString(strings.TrimSpace(point.Dataset), "daily_kline")
 	point.DataDate = strings.TrimSpace(point.DataDate)
 	if point.DataDate == "" {
@@ -855,7 +881,9 @@ func (s *Store) UpsertStockNewsItem(ctx context.Context, item StockNewsItem) (St
 	if item.Source == "" {
 		return StockNewsItem{}, false, errors.New("source is required")
 	}
-	item.Symbol = normalizeStockSymbol(item.Symbol)
+	var inferredMarket string
+	item.Symbol, inferredMarket = normalizeStockSymbolAndMarket(item.Symbol)
+	item.Market = normalizeStockMarket(defaultString(item.Market, inferredMarket))
 	item.Title = strings.TrimSpace(item.Title)
 	if item.Title == "" {
 		return StockNewsItem{}, false, errors.New("title is required")
@@ -1023,6 +1051,7 @@ func scanStockDataSource(row interface{ Scan(...any) error }) (StockDataSource, 
 func scanStockInstrument(row interface{ Scan(...any) error }) (StockInstrument, error) {
 	var item StockInstrument
 	err := row.Scan(&item.Symbol, &item.Market, &item.Name, &item.Status, &item.Industry, &item.Concept, &item.ListingDate, &item.Source, &item.Quality, &item.PY, &item.PYFull, &item.CreatedAt, &item.UpdatedAt)
+	item.Status = normalizeStockInstrumentStatus(item.Status)
 	return item, err
 }
 
@@ -1055,7 +1084,7 @@ func normalizeStockInstrumentSearchParams(params StockInstrumentSearchParams) St
 	params.Query = strings.TrimSpace(params.Query)
 	params.Industry = strings.TrimSpace(params.Industry)
 	params.MinListingDate = strings.TrimSpace(params.MinListingDate)
-	params.Quality = strings.TrimSpace(params.Quality)
+	params.Quality = normalizeStockInstrumentQuality(params.Quality)
 	params.Sort = strings.TrimSpace(params.Sort)
 	if params.Page <= 0 {
 		params.Page = 1
@@ -1069,8 +1098,8 @@ func normalizeStockInstrumentSearchParams(params StockInstrumentSearchParams) St
 	if params.PageSize > 200 {
 		params.PageSize = 200
 	}
-	params.Markets = normalizeCSVList(params.Markets, strings.ToUpper)
-	params.Statuses = normalizeCSVList(params.Statuses, strings.ToLower)
+	params.Markets = normalizeCSVList(params.Markets, normalizeStockMarketFilter)
+	params.Statuses, params.IncludeDelisted = normalizeStockInstrumentStatuses(params.Statuses, params.IncludeDelisted)
 	params.Concepts = normalizeCSVList(params.Concepts, strings.TrimSpace)
 	return params
 }
@@ -1089,8 +1118,9 @@ func stockInstrumentSearchSQL(params StockInstrumentSearchParams) (string, []any
 		}
 	}
 	if len(params.Statuses) > 0 {
-		clauses = append(clauses, "status IN ("+placeholders(len(params.Statuses))+")")
-		for _, v := range params.Statuses {
+		statuses := stockInstrumentStatusFilterValues(params.Statuses)
+		clauses = append(clauses, "status IN ("+placeholders(len(statuses))+")")
+		for _, v := range statuses {
 			args = append(args, v)
 		}
 	}
@@ -1154,6 +1184,85 @@ END, symbol ASC`
 		orderBy = " ORDER BY updated_at DESC, symbol ASC"
 	}
 	return where, args, orderArgs, orderBy, useFTS
+}
+
+func normalizeStockInstrumentStatus(status string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	switch status {
+	case "", "all":
+		return ""
+	case "tradable":
+		return "listed"
+	default:
+		return status
+	}
+}
+
+func normalizeStockInstrumentWriteStatus(status string) string {
+	status = normalizeStockInstrumentStatus(status)
+	if status == "" {
+		return "listed"
+	}
+	return status
+}
+
+func normalizeStockInstrumentStatuses(statuses []string, includeDelisted bool) ([]string, bool) {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, raw := range statuses {
+		for _, part := range strings.Split(raw, ",") {
+			part = strings.ToLower(strings.TrimSpace(part))
+			if part == "all" {
+				includeDelisted = true
+				continue
+			}
+			status := normalizeStockInstrumentStatus(part)
+			if status == "" || seen[status] {
+				continue
+			}
+			seen[status] = true
+			out = append(out, status)
+		}
+	}
+	return out, includeDelisted
+}
+
+func normalizeStockMarketFilter(market string) string {
+	market = strings.ToUpper(strings.TrimSpace(market))
+	if market == "ALL" {
+		return ""
+	}
+	return market
+}
+
+func normalizeStockInstrumentQuality(quality string) string {
+	quality = strings.ToLower(strings.TrimSpace(quality))
+	if quality == "all" {
+		return ""
+	}
+	return quality
+}
+
+func stockInstrumentStatusFilterValues(statuses []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(statuses)+1)
+	for _, status := range statuses {
+		status = normalizeStockInstrumentStatus(status)
+		if status == "" {
+			continue
+		}
+		if !seen[status] {
+			seen[status] = true
+			out = append(out, status)
+		}
+		// 兼容曾经把 instrument lifecycle status 写成 tradable 的历史数据；
+		// 数据迁移会修正存量行，这里保证旧进程/旧库查询仍不空。
+		if status == "listed" && !seen["tradable"] {
+			seen["tradable"] = true
+			out = append(out, "tradable")
+		}
+	}
+	return out
 }
 
 func stockInstrumentFTSQuery(tokens []string) (string, bool) {

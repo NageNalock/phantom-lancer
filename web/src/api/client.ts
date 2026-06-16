@@ -42,6 +42,10 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
   return payload as T;
 }
 
+function unwrapItems<T>(resp: T[] | { items?: T[] }): T[] {
+  return Array.isArray(resp) ? resp : resp.items || [];
+}
+
 export function friendlyError(error: unknown): string {
   const err = error as ApiError;
   if (err.code === "path_out_of_boundary") {
@@ -173,7 +177,8 @@ export function friendlyError(error: unknown): string {
   if (err.code === "path_not_allowed") return "访问被拒绝：日志路径超出允许的目录范围";
   if (err.code === "disk_space_insufficient") return "磁盘空间不足，无法完成备份";
   if (err.code === "backup_not_found") return "备份记录不存在";
-  if (err.code === "retention_rule_invalid") return "保留规则无效：retain_days 或 retain_max_rows 至少有一项必须大于 0";
+  if (err.code === "backup_list_failed") return `备份列表加载失败：${err.message || "数据库迁移未完成，请重启服务后重试。"}`;
+  if (err.code === "retention_rule_invalid") return `保留规则无效：${err.message || "目标和保留天数必须有效。"}`;
   if (err.code === "danger_code_mismatch") return "验证码不匹配";
   if (err.code === "danger_code_expired") return "验证码已过期（请在 120 秒内完成操作）";
   if (err.code === "danger_countdown_incomplete") return "60 秒倒计时尚未结束";
@@ -1185,7 +1190,7 @@ export function mailWebhookRegister(req: WebhookRegisterReq, csrf?: string) {
   return api<WebhookRegisterResp>("/api/mail/webhooks", { method: "POST", csrf, body: req });
 }
 export function mailWebhookList() {
-  return api<MailWebhookRegistration[]>("/api/mail/webhooks", { method: "GET" });
+  return api<MailWebhookRegistration[] | { items?: MailWebhookRegistration[] }>("/api/mail/webhooks", { method: "GET" }).then(unwrapItems);
 }
 export function mailWebhookDelete(id: string, csrf?: string) {
   return api<void>(`/api/mail/webhooks/${encodeURIComponent(id)}`, { method: "DELETE", csrf });
@@ -1194,7 +1199,7 @@ export function mailWebhookRotateSecret(id: string, csrf?: string) {
   return api<{ one_time_secret: string }>(`/api/mail/webhooks/${encodeURIComponent(id)}/rotate-secret`, { method: "POST", csrf, body: {} });
 }
 export function mailWebhookEvents(limit = 50) {
-  return api<MailWebhookEvent[]>(`/api/mail/webhooks/events?limit=${limit}`, { method: "GET" });
+  return api<MailWebhookEvent[] | { items?: MailWebhookEvent[] }>(`/api/mail/webhooks/events?limit=${limit}`, { method: "GET" }).then(unwrapItems);
 }
 
 // ---- Outbound (3) ----
@@ -1202,7 +1207,7 @@ export function mailOutboundRate(scope = "global") {
   return api<OutboundRateSnapshot>(`/api/mail/outbound/rate?scope=${encodeURIComponent(scope)}`, { method: "GET" });
 }
 export function mailOutboundThresholdsList() {
-  return api<MailOutboundThreshold[]>("/api/mail/outbound/thresholds", { method: "GET" });
+  return api<MailOutboundThreshold[] | { items?: MailOutboundThreshold[] }>("/api/mail/outbound/thresholds", { method: "GET" }).then(unwrapItems);
 }
 export function mailOutboundThresholdsUpdate(scope: string, patch: Partial<MailOutboundThreshold>, csrf?: string) {
   return api<MailOutboundThreshold>(`/api/mail/outbound/thresholds/${encodeURIComponent(scope)}`, { method: "PATCH", csrf, body: patch });
@@ -1532,14 +1537,20 @@ export interface RedactionSummaryResp {
 export interface MailBackup {
   id: string;
   scope: "config" | "data_full";
-  file_path: string;
-  file_size_bytes: number;
+  state?: string;
+  file_name?: string;
+  file_path?: string;
+  size_bytes: number;
   checksum_sha256?: string;
-  contains_config: boolean;
-  contains_data: boolean;
+  contains_config?: boolean;
+  contains_data?: boolean;
   note?: string;
-  created_at: string;
-  expires_at?: string;
+  created_at_iso: string;
+  done_at_iso?: string;
+  started_at_iso?: string;
+  retention_days?: number;
+  expires_at_iso?: string;
+  schedule_id?: string;
 }
 
 export interface MailBackupCreateReq {
@@ -1549,34 +1560,41 @@ export interface MailBackupCreateReq {
 
 export interface MailBackupSchedule {
   id: string;
+  name?: string;
   scope: string;
   enabled: boolean;
   cron_expr: string;
   retention_days: number;
-  max_copies: number;
-  last_run_at?: string;
-  last_run_ok: boolean;
+  last_run_at_iso?: string;
+  last_backup_id?: string;
   last_error?: string;
-  next_run_at?: string;
-  created_at: string;
-  updated_at: string;
+  next_run_at_iso?: string;
+  created_at_iso?: string;
+  updated_at_iso?: string;
 }
 
 // ---- Retention Types ----
 
 export interface MailRetentionRule {
   id: string;
-  scope: "delivery_events" | "health_checks" | "webhook_events" | "mail_index_messages";
-  retain_days?: number;
-  retain_max_rows?: number;
-  created_at: string;
-  updated_at: string;
+  name?: string;
+  rule_kind?: string;
+  target_kind: "delivery_events" | "health_checks" | "webhook_events" | "index_messages" | "expired_backups";
+  days: number;
+  keep_min_count?: number;
+  enabled: boolean;
+  description?: string;
+  last_run_at_iso?: string;
+  last_pruned_count?: number;
+  last_error?: string;
+  created_at_iso?: string;
+  updated_at_iso?: string;
 }
 
 export interface RetentionApplyResp {
-  deleted_counts: Record<string, number>;
-  started_at: string;
-  duration_ms: number;
+  applied_at_iso: string;
+  deleted_by_target: Record<string, number>;
+  total_deleted: number;
 }
 
 // ---- Danger Zone Types ----
@@ -1611,7 +1629,7 @@ export interface DangerRequirementsResp {
 // ---- Logs RPC wrappers ----
 
 export function mailLogsList() {
-  return api<LogFileInfo[]>("/api/mail/logs/files", { method: "GET" });
+  return api<LogFileInfo[] | { items?: LogFileInfo[] }>("/api/mail/logs/files", { method: "GET" }).then(unwrapItems);
 }
 
 export function mailLogsTail(req: LogsTailReq) {
@@ -1729,7 +1747,7 @@ export function mailBackupCreate(req: MailBackupCreateReq, csrf?: string) {
 }
 
 export function mailBackupDownloadUrl(id: string): string {
-  return `/api/mail/backups/${encodeURIComponent(id)}/download`;
+  return `/api/mail/backups/${encodeURIComponent(id)}`;
 }
 
 export function mailBackupDelete(id: string, csrf?: string) {
@@ -1737,7 +1755,7 @@ export function mailBackupDelete(id: string, csrf?: string) {
 }
 
 export function mailBackupScheduleList() {
-  return api<MailBackupSchedule[]>("/api/mail/backups/schedules", { method: "GET" });
+  return api<MailBackupSchedule[] | { items?: MailBackupSchedule[] }>("/api/mail/backups/schedules", { method: "GET" }).then(unwrapItems);
 }
 
 export function mailBackupScheduleUpsert(s: Partial<MailBackupSchedule>, csrf?: string) {
@@ -1751,7 +1769,7 @@ export function mailBackupScheduleDelete(id: string, csrf?: string) {
 // ---- Retention RPC wrappers ----
 
 export function mailRetentionRuleList() {
-  return api<MailRetentionRule[]>("/api/mail/retention/rules", { method: "GET" });
+  return api<MailRetentionRule[] | { items?: MailRetentionRule[] }>("/api/mail/retention/rules", { method: "GET" }).then(unwrapItems);
 }
 
 export function mailRetentionRuleUpsert(r: Partial<MailRetentionRule>, csrf?: string) {

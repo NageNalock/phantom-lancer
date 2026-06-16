@@ -774,10 +774,12 @@ func (s *Store) UpsertStockHolding(ctx context.Context, h StockHolding) (StockHo
 	if _, err := s.GetStockPortfolio(ctx, h.PortfolioID); err != nil {
 		return StockHolding{}, err
 	}
-	h.Symbol = normalizeStockSymbol(h.Symbol)
+	var inferredMarket string
+	h.Symbol, inferredMarket = normalizeStockSymbolAndMarket(h.Symbol)
 	if h.Symbol == "" {
 		return StockHolding{}, errors.New("symbol is required")
 	}
+	h.Market = normalizeStockMarket(defaultString(h.Market, inferredMarket))
 	if h.AvailableQuantity < 0 {
 		h.AvailableQuantity = h.Quantity
 	}
@@ -846,10 +848,12 @@ func (s *Store) getStockHoldingByPortfolioSymbol(ctx context.Context, portfolioI
 }
 
 func (s *Store) UpsertStockQuote(ctx context.Context, q StockQuote) (StockQuote, error) {
-	q.Symbol = normalizeStockSymbol(q.Symbol)
+	var inferredMarket string
+	q.Symbol, inferredMarket = normalizeStockSymbolAndMarket(q.Symbol)
 	if q.Symbol == "" {
 		return StockQuote{}, errors.New("symbol is required")
 	}
+	q.Market = normalizeStockMarket(defaultString(q.Market, inferredMarket))
 	if q.DataTimestamp == "" {
 		q.DataTimestamp = now()
 	}
@@ -919,10 +923,12 @@ func (s *Store) CreateStockOpportunity(ctx context.Context, op StockOpportunity)
 	if op.Title == "" {
 		return StockOpportunity{}, errors.New("opportunity title is required")
 	}
-	op.Symbol = normalizeStockSymbol(op.Symbol)
+	var inferredMarket string
+	op.Symbol, inferredMarket = normalizeStockSymbolAndMarket(op.Symbol)
 	if op.Symbol == "" {
 		return StockOpportunity{}, errors.New("symbol is required")
 	}
+	op.Market = normalizeStockMarket(defaultString(op.Market, inferredMarket))
 	op.SourceType = defaultString(op.SourceType, "manual")
 	op.Confidence = defaultString(op.Confidence, "medium")
 	op.Status = defaultString(op.Status, "candidate")
@@ -1005,10 +1011,12 @@ func (s *Store) CreateStockStrategy(ctx context.Context, st StockStrategy) (Stoc
 	if st.Title == "" {
 		return StockStrategy{}, errors.New("strategy title is required")
 	}
-	st.Symbol = normalizeStockSymbol(st.Symbol)
+	var inferredMarket string
+	st.Symbol, inferredMarket = normalizeStockSymbolAndMarket(st.Symbol)
 	if st.Symbol == "" {
 		return StockStrategy{}, errors.New("symbol is required")
 	}
+	st.Market = normalizeStockMarket(defaultString(st.Market, inferredMarket))
 	st.StrategyType = defaultString(st.StrategyType, "account_agnostic")
 	if st.StrategyType != "account_agnostic" && st.StrategyType != "account_bound" {
 		return StockStrategy{}, errors.New("strategy type must be account_agnostic or account_bound")
@@ -1925,7 +1933,54 @@ func scanStockOperation(row interface{ Scan(...any) error }) (StockOperation, er
 }
 
 func normalizeStockSymbol(value string) string {
-	return strings.ToUpper(strings.TrimSpace(value))
+	symbol, _ := normalizeStockSymbolAndMarket(value)
+	return symbol
+}
+
+func normalizeStockSymbolAndMarket(value string) (string, string) {
+	raw := strings.ToUpper(strings.TrimSpace(value))
+	raw = strings.TrimPrefix(raw, "$")
+	raw = strings.ReplaceAll(raw, " ", "")
+	if raw == "" {
+		return "", ""
+	}
+	for _, sep := range []string{".", ":", "-", "_"} {
+		if idx := strings.LastIndex(raw, sep); idx > 0 && idx < len(raw)-1 {
+			market := normalizeStockMarket(raw[idx+1:])
+			if market != "" {
+				return raw[:idx], market
+			}
+		}
+	}
+	for _, market := range []string{"SH", "SZ", "BJ"} {
+		if strings.HasPrefix(raw, market) && len(raw) > len(market) {
+			return raw[len(market):], market
+		}
+	}
+	return raw, inferStockMarket(raw)
+}
+
+func normalizeStockMarket(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "SH", "SZ", "BJ":
+		return strings.ToUpper(strings.TrimSpace(value))
+	default:
+		return ""
+	}
+}
+
+func inferStockMarket(symbol string) string {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	switch {
+	case strings.HasPrefix(symbol, "920") || strings.HasPrefix(symbol, "8") || strings.HasPrefix(symbol, "4"):
+		return "BJ"
+	case strings.HasPrefix(symbol, "6") || strings.HasPrefix(symbol, "9"):
+		return "SH"
+	case strings.HasPrefix(symbol, "0") || strings.HasPrefix(symbol, "3"):
+		return "SZ"
+	default:
+		return ""
+	}
 }
 
 func normalizeStockAction(value string) string {
