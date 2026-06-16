@@ -87,7 +87,7 @@ func (s *Service) RefreshAStockUniverse(ctx context.Context, mode MaintenanceMod
 		if taskErr != nil {
 			return DataTaskResult{}, taskErr
 		}
-		return DataTaskResult{Task: task, Notes: fetchNotes}, fetchErr
+		return DataTaskResult{Task: task, Notes: fetchNotes}, fmt.Errorf("%w; upstream notes: %s", fetchErr, summary)
 	}
 	industryMap, industryNotes := s.fetchIndustryMap(ctx)
 	fetchNotes = append(fetchNotes, industryNotes...)
@@ -339,21 +339,23 @@ func (s *Service) fetchSinaUniverse(ctx context.Context) ([]universeInstrument, 
 		// 新浪返回的是 JS 伪 JSON（字段不加引号），宽松解析的话先做键加引号：
 		fixed := fixSinaPseudoJSON(body)
 		var rows []struct {
-			Symbol      string `json:"code"`
-			Name        string `json:"name"`
-			TradeStatus string `json:"trade"` // 1=可交易 0=停牌（新浪接口）
+			Code         string `json:"code"`
+			MarketSymbol string `json:"symbol"`
+			Name         string `json:"name"`
+			TradeStatus  string `json:"trade"` // 1=可交易 0=停牌（新浪接口）
 		}
 		if err := json.Unmarshal(fixed, &rows); err != nil {
-			notes = append(notes, fmt.Sprintf("%s: unmarshal: %v", n.pageFlag, err))
+			notes = append(notes, fmt.Sprintf("%s: unmarshal: %v (normalized: %s)", n.pageFlag, err, truncateBytes(fixed, 200)))
 			continue
 		}
 		for _, r := range rows {
-			if r.Symbol == "" || r.Name == "" {
+			symbol, market := normalizeSinaUniverseSymbol(r.Code, r.MarketSymbol, n.market)
+			if symbol == "" || r.Name == "" {
 				continue
 			}
 			all = append(all, universeInstrument{
-				Symbol:       r.Symbol,
-				RemoteMarket: n.market,
+				Symbol:       symbol,
+				RemoteMarket: market,
 				Name:         r.Name,
 			})
 		}
@@ -370,11 +372,15 @@ func (s *Service) fetchSinaUniverse(ctx context.Context) ([]universeInstrument, 
 }
 
 // fixSinaPseudoJSON 把新浪接口返回的 "var x = [{code:\"a\",name:\"b\"}];" 风格伪 JSON 转成合法 JSON。
-// 只做必要的键名加引号 + 去除 var x = 前缀 + 尾分号。
+// 只做必要的 payload 提取、键名加引号和单引号字符串兼容，避免把尾部 JSONP/脚本文本交给 json.Unmarshal。
 func fixSinaPseudoJSON(body []byte) []byte {
 	s := strings.TrimSpace(string(body))
-	// 去除可能的 "var XXX=" 前缀（接口 2 种返回形式都要兼容）
-	if eq := strings.Index(s, "="); eq >= 0 && strings.HasPrefix(strings.TrimSpace(s[:eq]), "var ") {
+	s = strings.TrimPrefix(s, "\ufeff")
+	s = strings.TrimSpace(s)
+	if array := extractSinaUniverseArray(s); array != "" {
+		s = array
+	} else if eq := strings.Index(s, "="); eq >= 0 && !strings.ContainsAny(s[:eq], "[]{}") {
+		// 去除可能的 "var XXX=" / "XXX=" 前缀；部分 CDN 会返回 assignment 形式。
 		s = strings.TrimSpace(s[eq+1:])
 	}
 	s = strings.TrimSuffix(s, ";")
@@ -382,37 +388,220 @@ func fixSinaPseudoJSON(body []byte) []byte {
 	if s == "" || s == "null" {
 		return []byte("[]")
 	}
-	// 简单正则：把 { 和 , 后的 标识符: 形式加上双引号
-	var b strings.Builder
-	b.Grow(len(s) + 32)
-	sr := []rune(s)
-	for i := 0; i < len(sr); i++ {
-		c := sr[i]
-		switch c {
-		case '{', ',':
-			b.WriteRune(c)
-			// 跳过空白，找到标识符起点
-			j := i + 1
-			for j < len(sr) && (sr[j] == ' ' || sr[j] == '\t' || sr[j] == '\n' || sr[j] == '\r') {
-				b.WriteRune(sr[j])
-				j++
+	return quoteSinaPseudoJSONKeys(s)
+}
+
+func extractSinaUniverseArray(s string) string {
+	for start := strings.IndexByte(s, '['); start >= 0; {
+		if looksLikeSinaUniverseArray(s, start) {
+			if array := balancedJSONArrayCandidate(s, start); array != "" {
+				return array
 			}
-			// 若下一个非空白不是双引号，则是未加引号的标识符，一直读直到 ':'
-			if j < len(sr) && sr[j] != '"' {
-				start := j
-				for j < len(sr) && sr[j] != ':' {
-					j++
-				}
-				key := strings.TrimSpace(string(sr[start:j]))
-				b.WriteString(`"` + key + `":`)
-				i = j // 跳过 ':'
+		}
+		nextOffset := start + 1
+		next := strings.IndexByte(s[nextOffset:], '[')
+		if next < 0 {
+			break
+		}
+		start = nextOffset + next
+	}
+	return ""
+}
+
+func looksLikeSinaUniverseArray(s string, start int) bool {
+	for i := start + 1; i < len(s); i++ {
+		if isJSONSpace(s[i]) {
+			continue
+		}
+		return s[i] == '{' || s[i] == ']'
+	}
+	return false
+}
+
+func balancedJSONArrayCandidate(s string, start int) string {
+	depth := 0
+	inString := false
+	var quote byte
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			if escaped {
+				escaped = false
 				continue
 			}
+			if c == '\\' {
+				escaped = true
+				continue
+			}
+			if c == quote {
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			inString = true
+			quote = c
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return ""
+}
+
+func quoteSinaPseudoJSONKeys(s string) []byte {
+	var b strings.Builder
+	b.Grow(len(s) + 32)
+
+	inString := false
+	var quote byte
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			if escaped {
+				writeEscapedPseudoJSONStringByte(&b, quote, c)
+				escaped = false
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				continue
+			}
+			if c == quote {
+				if quote == '\'' {
+					b.WriteByte('"')
+				} else {
+					b.WriteByte(c)
+				}
+				inString = false
+				continue
+			}
+			if quote == '\'' && c == '"' {
+				b.WriteByte('\\')
+			}
+			b.WriteByte(c)
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			inString = true
+			quote = c
+			escaped = false
+			if c == '\'' {
+				b.WriteByte('"')
+			} else {
+				b.WriteByte(c)
+			}
+		case '{', ',':
+			b.WriteByte(c)
+			j := i + 1
+			for j < len(s) && isJSONSpace(s[j]) {
+				b.WriteByte(s[j])
+				j++
+			}
+			if j < len(s) && isSinaPseudoJSONKeyStart(s[j]) {
+				keyEnd := j + 1
+				for keyEnd < len(s) && isSinaPseudoJSONKeyChar(s[keyEnd]) {
+					keyEnd++
+				}
+				colon := keyEnd
+				for colon < len(s) && isJSONSpace(s[colon]) {
+					colon++
+				}
+				if colon < len(s) && s[colon] == ':' {
+					b.WriteByte('"')
+					b.WriteString(s[j:keyEnd])
+					b.WriteByte('"')
+					b.WriteString(s[keyEnd:colon])
+					b.WriteByte(':')
+					i = colon
+					continue
+				}
+			}
+			i = j - 1
 		default:
-			b.WriteRune(c)
+			b.WriteByte(c)
 		}
 	}
 	return []byte(b.String())
+}
+
+func writeEscapedPseudoJSONStringByte(b *strings.Builder, quote, c byte) {
+	if quote != '\'' {
+		b.WriteByte('\\')
+		b.WriteByte(c)
+		return
+	}
+	switch c {
+	case '\'':
+		b.WriteByte('\'')
+	case '"':
+		b.WriteByte('\\')
+		b.WriteByte('"')
+	case '\\':
+		b.WriteByte('\\')
+		b.WriteByte('\\')
+	case '/', 'b', 'f', 'n', 'r', 't', 'u':
+		b.WriteByte('\\')
+		b.WriteByte(c)
+	default:
+		b.WriteByte(c)
+	}
+}
+
+func isJSONSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+func isSinaPseudoJSONKeyStart(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c == '$'
+}
+
+func isSinaPseudoJSONKeyChar(c byte) bool {
+	return isSinaPseudoJSONKeyStart(c) || (c >= '0' && c <= '9')
+}
+
+func normalizeSinaUniverseSymbol(code, marketSymbol string, fallbackMarket int) (string, int) {
+	market := fallbackMarket
+	symbol := strings.TrimSpace(code)
+	prefixed := strings.TrimSpace(marketSymbol)
+	if prefixed != "" {
+		if stripped, remoteMarket, ok := splitSinaMarketSymbol(prefixed); ok {
+			market = remoteMarket
+			if symbol == "" || strings.EqualFold(symbol, prefixed) {
+				symbol = stripped
+			}
+		}
+	}
+	if symbol == "" {
+		symbol = prefixed
+	}
+	if stripped, remoteMarket, ok := splitSinaMarketSymbol(symbol); ok {
+		market = remoteMarket
+		symbol = stripped
+	}
+	return strings.ToUpper(strings.TrimSpace(symbol)), market
+}
+
+func splitSinaMarketSymbol(symbol string) (string, int, bool) {
+	raw := strings.ToLower(strings.TrimSpace(symbol))
+	switch {
+	case strings.HasPrefix(raw, "sh"):
+		return strings.TrimSpace(raw[2:]), 1, true
+	case strings.HasPrefix(raw, "sz"):
+		return strings.TrimSpace(raw[2:]), 0, true
+	case strings.HasPrefix(raw, "bj"):
+		return strings.TrimSpace(raw[2:]), 2, true
+	default:
+		return "", 0, false
+	}
 }
 
 // marketFromRemote 把东财 f13 市场码 / 新浪映射码 转成内部 SH/SZ/BJ。

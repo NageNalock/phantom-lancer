@@ -15,6 +15,8 @@ import (
 	"phantom-lancer/internal/safelog"
 )
 
+const installDatabaseBackupTimeout = 2 * time.Minute
+
 type installResult struct {
 	installPath          string
 	backupPath           string
@@ -53,12 +55,19 @@ func (s *Service) install(ctx context.Context, jobID, stagedBinary, stagedSuperv
 		return installResult{}, err
 	}
 	dbBackup := filepath.Join(s.cfg.DataDir, "backups", "pre-update-"+jobID+".db")
-	if err := s.store.BackupDatabase(ctx, dbBackup); err != nil {
+	if s.log != nil {
+		s.log.Info("system update database backup started", "job_id", jobID, "db_backup_path", dbBackup, "timeout_ms", installDatabaseBackupTimeout.Milliseconds())
+	}
+	s.append(ctx, jobID, "update.install.db_backup.started", map[string]any{"timeoutSeconds": int(installDatabaseBackupTimeout.Seconds())})
+	backupCtx, cancelBackup := context.WithTimeout(ctx, installDatabaseBackupTimeout)
+	defer cancelBackup()
+	if err := s.store.BackupDatabase(backupCtx, dbBackup); err != nil {
 		return installResult{}, fmt.Errorf("database backup failed: %w", err)
 	}
 	if s.log != nil {
 		s.log.Info("system update database backup completed", "job_id", jobID, "db_backup_path", dbBackup)
 	}
+	s.append(ctx, jobID, "update.install.db_backup.completed", map[string]any{"path": dbBackup})
 
 	backupDir := filepath.Join(s.cfg.DataDir, "updates", "backups")
 	if err := os.MkdirAll(backupDir, 0o700); err != nil {

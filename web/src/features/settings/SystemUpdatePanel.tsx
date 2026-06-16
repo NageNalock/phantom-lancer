@@ -510,6 +510,8 @@ function eventLabel(event: EventRecord): string {
     "update.download.completed": "下载完成",
     "update.verify.completed": "checksum 校验完成",
     "update.extract.completed": "安装包解包完成",
+    "update.install.db_backup.started": "开始备份数据库",
+    "update.install.db_backup.completed": "数据库备份完成",
     "update.install.completed": "新版本 binary 已安装",
     "update.restart.requested": "已请求服务重启",
     "update.failed": "更新失败",

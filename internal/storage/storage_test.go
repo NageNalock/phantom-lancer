@@ -34,6 +34,62 @@ func TestBackupDatabaseCreatesCopy(t *testing.T) {
 	}
 }
 
+func TestBackupDatabaseDoesNotWaitForMainPoolConnection(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.CreateOwner(ctx, "owner", "hash"); err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+
+	conn, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("get conn: %v", err)
+	}
+	defer conn.Close()
+	rows, err := conn.QueryContext(ctx, `SELECT id FROM owner_account`)
+	if err != nil {
+		t.Fatalf("hold query: %v", err)
+	}
+	defer rows.Close()
+
+	backupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- store.BackupDatabase(backupCtx, filepath.Join(dir, "backup-while-pool-busy.db"))
+	}()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("backup database: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("backup waited for the main database pool connection")
+	}
+}
+
+func TestBackupDatabaseHonorsCancelledContext(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	err = store.BackupDatabase(cancelled, filepath.Join(dir, "cancelled.db"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("BackupDatabase error = %v, want context.Canceled", err)
+	}
+}
+
 func TestLegacyCodexTablesAreDetected(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)

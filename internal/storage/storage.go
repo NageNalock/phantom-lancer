@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -20,7 +21,7 @@ import (
 	"phantom-lancer/internal/keywrap"
 	"phantom-lancer/internal/safelog"
 
-	_ "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -55,7 +56,8 @@ const dockerRegistryCredentialKeeperInfo = "docker-registry-credential-secrets-v
 const masterKeySettingKey = "system.crypto_master_key_v1"
 
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	dbPath string
 	// log is the structured logger used for non-call-site notifications
 	// (startup, key-source change, best-effort background migrations).
 	// It is injected by storage.Open so storage output follows the same
@@ -524,7 +526,7 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	store := &Store{db: db, log: log}
+	store := &Store{db: db, dbPath: path, log: log}
 	if err := store.migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -2785,6 +2787,7 @@ CREATE TABLE IF NOT EXISTS mail_import_registry (
 		{"mail_mox_settings", "imapsync_idle_timeout_seconds", "INTEGER DEFAULT 1800"},
 		// ---- Phase 8 (backups / retention / hard-delete) ----
 		// mail_backups - columns added on top of the legacy schema.
+		{"mail_backups", "scope", "TEXT NOT NULL DEFAULT ''"},
 		{"mail_backups", "schedule_id", "TEXT NOT NULL DEFAULT ''"},
 		{"mail_backups", "retention_days", "INTEGER DEFAULT 0"},
 		{"mail_backups", "expires_at", "TEXT NOT NULL DEFAULT ''"},
@@ -3132,8 +3135,112 @@ func (s *Store) BackupDatabase(ctx context.Context, path string) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("backup path is required")
 	}
-	_, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, path)
-	return err
+	path = filepath.Clean(path)
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("backup path already exists: %s", path)
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if s.dbPath == "" || s.dbPath == ":memory:" {
+		_, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, path)
+		return err
+	}
+	tmpPath := path + ".tmp"
+	_ = os.Remove(tmpPath)
+	if err := s.backupDatabaseOnline(ctx, tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+func (s *Store) backupDatabaseOnline(ctx context.Context, path string) error {
+	sourceDB, err := sql.Open("sqlite3", s.dbPath)
+	if err != nil {
+		return err
+	}
+	defer sourceDB.Close()
+	sourceDB.SetMaxOpenConns(1)
+	destDB, err := sql.Open("sqlite3", path)
+	if err != nil {
+		return err
+	}
+	defer destDB.Close()
+	destDB.SetMaxOpenConns(1)
+	if err := sourceDB.PingContext(ctx); err != nil {
+		return err
+	}
+	if err := destDB.PingContext(ctx); err != nil {
+		return err
+	}
+	_, _ = sourceDB.ExecContext(ctx, `PRAGMA busy_timeout = 1000`)
+	_, _ = destDB.ExecContext(ctx, `PRAGMA busy_timeout = 1000`)
+	sourceConn, err := sourceDB.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer sourceConn.Close()
+	destConn, err := destDB.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer destConn.Close()
+	err = destConn.Raw(func(dest any) error {
+		destSQLite, ok := dest.(*sqlite3.SQLiteConn)
+		if !ok {
+			return errors.New("backup destination is not a sqlite connection")
+		}
+		return sourceConn.Raw(func(source any) error {
+			sourceSQLite, ok := source.(*sqlite3.SQLiteConn)
+			if !ok {
+				return errors.New("backup source is not a sqlite connection")
+			}
+			backup, err := destSQLite.Backup("main", sourceSQLite, "main")
+			if err != nil {
+				return err
+			}
+			for {
+				if err := ctx.Err(); err != nil {
+					_ = backup.Finish()
+					return err
+				}
+				done, err := backup.Step(64)
+				if err != nil {
+					_ = backup.Finish()
+					return err
+				}
+				if done {
+					return backup.Finish()
+				}
+				select {
+				case <-ctx.Done():
+					_ = backup.Finish()
+					return ctx.Err()
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+		})
+	})
+	if err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+func syncDir(dir string) error {
+	file, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return file.Sync()
 }
 
 func DefaultCodexGatewaySettings() CodexGatewaySettings {
