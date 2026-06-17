@@ -192,6 +192,7 @@ func (s *Service) install(ctx context.Context, jobID, stagedBinary, stagedSuperv
 		result.supervisorBackupPath = supervisorBackupPath
 	}
 	s.pruneBackups(backupDir)
+	s.pruneDatabaseBackups()
 	return result, nil
 }
 
@@ -303,8 +304,7 @@ func fsyncDir(dir string) error {
 	return file.Sync()
 }
 
-func safeName(value string) string {
-	value = strings.TrimSpace(value)
+func safeName(value string) string {	value = strings.TrimSpace(value)
 	if value == "" {
 		return "unknown"
 	}
@@ -351,6 +351,69 @@ func (s *Service) pruneBackups(dir string) {
 		}
 		_ = os.Remove(filepath.Join(dir, items[oldest].name))
 		items = append(items[:oldest], items[oldest+1:]...)
+	}
+}
+
+// pruneDatabaseBackups removes old pre-update database backups from
+// DataDir/backups/, keeping the most recent BackupRetention files.
+// Only files matching the pre-update-*.db naming pattern are touched;
+// other files in the directory are left alone.
+//
+// This is best-effort: errors are logged but never returned, because a
+// backup-cleanup failure must not block an otherwise successful install.
+func (s *Service) pruneDatabaseBackups() {
+	if s.cfg.BackupRetention <= 0 {
+		return
+	}
+	dir := filepath.Join(s.cfg.DataDir, "backups")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if s.log != nil && !os.IsNotExist(err) {
+			s.log.Warn("database backup prune: cannot read backups dir", "dir", dir, "error", safelog.Error(err, 200))
+		}
+		return
+	}
+	type item struct {
+		name string
+		time time.Time
+	}
+	var items []item
+	for _, entry := range entries {
+		name := entry.Name()
+		// Only touch pre-update DB backups — never delete anything else
+		// that might be sitting in the backups directory.
+		if !strings.HasPrefix(name, "pre-update-") || !strings.HasSuffix(name, ".db") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		items = append(items, item{name: name, time: info.ModTime()})
+	}
+	if len(items) <= s.cfg.BackupRetention {
+		return
+	}
+	removed := 0
+	for len(items) > s.cfg.BackupRetention {
+		oldest := 0
+		for index := 1; index < len(items); index++ {
+			if items[index].time.Before(items[oldest].time) {
+				oldest = index
+			}
+		}
+		path := filepath.Join(dir, items[oldest].name)
+		if err := os.Remove(path); err != nil {
+			if s.log != nil {
+				s.log.Warn("database backup prune: remove failed", "path", path, "error", safelog.Error(err, 200))
+			}
+		} else {
+			removed++
+		}
+		items = append(items[:oldest], items[oldest+1:]...)
+	}
+	if removed > 0 && s.log != nil {
+		s.log.Info("database backup prune complete", "removed", removed, "remaining", s.cfg.BackupRetention)
 	}
 }
 

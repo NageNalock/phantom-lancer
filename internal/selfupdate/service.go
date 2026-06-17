@@ -199,6 +199,10 @@ func (s *Service) Ensure(ctx context.Context) error {
 			Payload:   map[string]any{"jobIds": ids},
 		})
 	}
+	// Best-effort: prune old database backups so they don't accumulate
+	// forever across restarts.  Runs at startup to catch any historical
+	// files left over from before this prune logic existed.
+	s.pruneDatabaseBackups()
 	return nil
 }
 
