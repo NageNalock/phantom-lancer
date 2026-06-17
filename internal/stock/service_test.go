@@ -42,7 +42,7 @@ func TestIngestNewsCreatesAlertForActiveWatch(t *testing.T) {
 		t.Fatalf("create watch: %v", err)
 	}
 
-	svc := NewService(store)
+	svc := NewService(store, nil)
 	result, err := svc.IngestNews(ctx, "jin10_manual", []storage.StockNewsItem{{
 		SourceItemID: "n-1",
 		Symbol:       "600519",
@@ -92,7 +92,7 @@ func TestCreateStrategyFromOpportunity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create opportunity: %v", err)
 	}
-	svc := NewService(store)
+	svc := NewService(store, nil)
 	linked, strategy, err := svc.CreateStrategyFromOpportunity(ctx, opportunity.ID, storage.StockStrategy{
 		StrategyType: "account_agnostic",
 		Direction:    "watch",
@@ -145,7 +145,7 @@ func TestDiscoverOpportunitiesFromNewsAndMarketData(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert market data: %v", err)
 	}
-	svc := NewService(store)
+	svc := NewService(store, nil)
 	result, err := svc.DiscoverOpportunities(ctx, "test")
 	if err != nil {
 		t.Fatalf("discover opportunities: %v", err)
@@ -186,7 +186,7 @@ func TestCollectMarketDataFromQuotesCreatesCollectionTask(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert quote: %v", err)
 	}
-	result, err := NewService(store).CollectMarketDataFromQuotes(ctx, "test")
+	result, err := NewService(store, nil).CollectMarketDataFromQuotes(ctx, "test")
 	if err != nil {
 		t.Fatalf("collect market data: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestQuoteRefreshRespectsProviderNextAllowedAt(t *testing.T) {
 		}
 	}
 
-	result, err := NewService(store).RecordQuoteRefreshStatus(ctx, "test")
+	result, err := NewService(store, nil).RecordQuoteRefreshStatus(ctx, "test")
 	if err != nil {
 		t.Fatalf("refresh status: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestConcentrationGuardrailBlocksIndustryOverLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("holdings: %v", err)
 	}
-	svc := NewService(store)
+	svc := NewService(store, nil)
 	result := svc.proposeOperation(ctx, strategy, portfolio, holdings, storage.StockQuote{
 		Symbol: "600000", LastPrice: 10, DataFreshness: "fresh", TradableStatus: "tradable", DataTimestamp: time.Now().UTC().Format(time.RFC3339Nano),
 	}, nil)
@@ -367,7 +367,7 @@ func TestReviewAlertCreatesAgentTraceWithoutPatchForCleanTradeSignal(t *testing.
 		t.Fatalf("create alert: %v", err)
 	}
 
-	svc := NewService(store)
+	svc := NewService(store, nil)
 	result, err := svc.ReviewAlert(ctx, alert.ID)
 	if err != nil {
 		t.Fatalf("review alert: %v", err)
@@ -488,7 +488,7 @@ func TestReviewAlertConfirmRequiredCreatesPendingAuthorization(t *testing.T) {
 		t.Fatalf("create alert: %v", err)
 	}
 	executor := &recordingAgentExecutor{}
-	result, err := NewService(store, WithAgentExecutor(executor)).ReviewAlert(ctx, alert.ID)
+	result, err := NewService(store, nil, WithAgentExecutor(executor)).ReviewAlert(ctx, alert.ID)
 	if err != nil {
 		t.Fatalf("review alert: %v", err)
 	}
@@ -591,7 +591,7 @@ func TestReviewAlertCreatesStrategyPatchForBlockedOperation(t *testing.T) {
 		t.Fatalf("create alert: %v", err)
 	}
 
-	svc := NewService(store)
+	svc := NewService(store, nil)
 	result, err := svc.ReviewAlert(ctx, alert.ID)
 	if err != nil {
 		t.Fatalf("review alert: %v", err)
@@ -652,7 +652,7 @@ func TestCheckWatchesDedupesByCooldownWindow(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert quote: %v", err)
 	}
-	svc := NewService(store)
+	svc := NewService(store, nil)
 	first, err := svc.CheckWatches(ctx, true)
 	if err != nil {
 		t.Fatalf("first check: %v", err)
@@ -708,7 +708,7 @@ func TestCheckWatchesSkipsStaleTimestampEvenWhenMarkedFresh(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert quote: %v", err)
 	}
-	svc := NewService(store)
+	svc := NewService(store, nil)
 	svc.now = func() time.Time { return now }
 	result, err := svc.CheckWatches(ctx, true)
 	if err != nil {
@@ -754,7 +754,7 @@ func TestCheckWatchesRespectsWatchInterval(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert quote: %v", err)
 	}
-	svc := NewService(store)
+	svc := NewService(store, nil)
 	loc, _ := time.LoadLocation("Asia/Shanghai")
 	svc.now = func() time.Time {
 		return time.Date(2026, 6, 15, 10, 0, 0, 0, loc)
@@ -774,7 +774,7 @@ func TestMarketClockUsesExchangeCalendar(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
-	svc := NewService(store)
+	svc := NewService(store, nil)
 	loc, _ := time.LoadLocation("Asia/Shanghai")
 	svc.now = func() time.Time {
 		return time.Date(2026, 2, 16, 10, 0, 0, 0, loc)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 
 type Service struct {
 	store         *storage.Store
+	log           *slog.Logger
 	client        *http.Client
 	agentExecutor AgentExecutor
 	now           func() time.Time
@@ -143,8 +145,16 @@ func WithAgentExecutor(executor AgentExecutor) ServiceOption {
 	}
 }
 
-func NewService(store *storage.Store, opts ...ServiceOption) *Service {
-	service := &Service{store: store, client: &http.Client{Timeout: 5 * time.Second}, now: time.Now}
+func NewService(store *storage.Store, logger *slog.Logger, opts ...ServiceOption) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	service := &Service{
+		store:  store,
+		log:    logger.With("module", "stock"),
+		client: &http.Client{Timeout: 5 * time.Second},
+		now:    time.Now,
+	}
 	if store != nil {
 		service.agentExecutor = NewCodexCLIExecutor(store)
 	}
@@ -167,6 +177,10 @@ func (s *Service) StartBackground(ctx context.Context) {
 
 	go func() {
 		defer s.bgWg.Done()
+		s.log.InfoContext(bgCtx, "stock: background workers started",
+			"maintenance_interval", 6*time.Hour,
+			"watch_interval", 30*time.Second,
+		)
 		s.runDataMaintenancePass(bgCtx)
 		healthTicker := time.NewTicker(6 * time.Hour)
 		defer healthTicker.Stop()
@@ -175,6 +189,7 @@ func (s *Service) StartBackground(ctx context.Context) {
 		for {
 			select {
 			case <-bgCtx.Done():
+				s.log.InfoContext(bgCtx, "stock: background workers stopped")
 				return
 			case <-healthTicker.C:
 				s.runDataMaintenancePass(bgCtx)
@@ -206,18 +221,27 @@ func (s *Service) Close() {
 }
 
 func (s *Service) runDataMaintenancePass(ctx context.Context) {
+	started := s.now()
+	s.log.DebugContext(ctx, "stock: data maintenance pass started")
 	passCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	_, _ = s.RunDataMaintenance(passCtx, "background_data_scheduler")
 	_, _ = s.CleanupAgentLedger(passCtx, 30, 500)
+	s.log.DebugContext(ctx, "stock: data maintenance pass finished",
+		"latency_ms", s.now().Sub(started).Milliseconds(),
+	)
 }
 
 func (s *Service) runWatchSchedulerPass(ctx context.Context) {
+	started := s.now()
 	passCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	_, _ = s.store.WakeSnoozedStockAlerts(passCtx, s.now().UTC())
 	_, _ = s.RecordQuoteRefreshStatus(passCtx, "background_watch_scheduler")
 	_, _ = s.CheckWatches(passCtx, false)
+	s.log.DebugContext(ctx, "stock: watch scheduler pass finished",
+		"latency_ms", s.now().Sub(started).Milliseconds(),
+	)
 }
 
 func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {
@@ -790,15 +814,32 @@ func (s *Service) RunDataSourceHealthCheck(ctx context.Context, source string) (
 	if err != nil {
 		return DataTaskResult{}, err
 	}
+	if status == "completed" {
+		s.log.DebugContext(ctx, "stock: data source health check completed",
+			"checked", len(checked),
+			"failed", failed,
+		)
+	} else {
+		s.log.WarnContext(ctx, "stock: data source health check degraded",
+			"checked", len(checked),
+			"failed", failed,
+			"status", status,
+		)
+	}
 	return DataTaskResult{Task: task, Sources: checked}, nil
 }
 
 func (s *Service) RecordQuoteRefreshStatus(ctx context.Context, requestedBy string) (DataTaskResult, error) {
+	started := s.now()
 	symbols, err := s.quoteRefreshSymbols(ctx)
 	if err != nil {
 		return DataTaskResult{}, err
 	}
 	if len(symbols) > 0 {
+		s.log.DebugContext(ctx, "stock: quote refresh started",
+			"symbols", len(symbols),
+			"requested_by", requestedBy,
+		)
 		quotes, source, notes, nextRunAt, err := s.fetchManagedPublicQuotes(ctx, symbols)
 		if err == nil && len(quotes) > 0 {
 			var saved []storage.StockQuote
@@ -832,12 +873,27 @@ func (s *Service) RecordQuoteRefreshStatus(ctx context.Context, requestedBy stri
 				return DataTaskResult{}, err
 			}
 			_, _ = s.recordQuoteProviderSuccess(ctx, source, task.CompletedAt, status, notes)
+			s.log.DebugContext(ctx, "stock: quote refresh completed",
+				"source", source,
+				"refreshed", len(saved),
+				"failed", failed,
+				"latency_ms", s.now().Sub(started).Milliseconds(),
+			)
 			return DataTaskResult{Task: task, Quotes: saved, Notes: notes}, nil
 		}
 		if err != nil {
+			s.log.WarnContext(ctx, "stock: quote refresh failed",
+				"source", source,
+				"symbols", len(symbols),
+				"error", err,
+				"latency_ms", s.now().Sub(started).Milliseconds(),
+			)
 			return s.recordBlockedQuoteRefreshWithSource(ctx, requestedBy, "public_quote_providers", "public quote refresh failed or rate limited: "+err.Error(), nextRunAt)
 		}
 	}
+	s.log.DebugContext(ctx, "stock: quote refresh skipped (no symbols to refresh)",
+		"requested_by", requestedBy,
+	)
 	return s.recordBlockedQuoteRefresh(ctx, requestedBy, "没有可刷新的盯盘股票；盯盘使用最近公开 provider 或手工/外部写入快照")
 }
 

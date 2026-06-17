@@ -50,8 +50,16 @@ type universeInstrument struct {
 
 func (s *Service) RefreshAStockUniverse(ctx context.Context, mode MaintenanceMode, requestedBy string) (DataTaskResult, error) {
 	requestedBy = defaultString(requestedBy, "system")
+	started := s.now()
+	s.log.InfoContext(ctx, "stock: universe refresh started",
+		"mode", mode,
+		"requested_by", requestedBy,
+	)
 	if mode == MaintenanceModeDaily {
 		if last := s.store.LastTaskCompletedAt(ctx, "universe_refresh"); !last.IsZero() && s.now().Sub(last) < 20*time.Hour {
+			s.log.DebugContext(ctx, "stock: universe refresh skipped (within 20h cooldown)",
+				"last_completed_at", last,
+			)
 			return DataTaskResult{Notes: []string{"A 股全量主数据刷新已在 20 小时内完成，本轮跳过"}}, nil
 		}
 	}
@@ -61,6 +69,9 @@ func (s *Service) RefreshAStockUniverse(ctx context.Context, mode MaintenanceMod
 	if fetchErr != nil {
 		fetchNotes = append(fetchNotes, "eastmoney_universe: "+fetchErr.Error())
 		eastmoneyNotes := append([]string{}, fetchNotes...)
+		s.log.WarnContext(ctx, "stock: eastmoney universe failed, falling back to sina",
+			"error", fetchErr.Error(),
+		)
 		raw, fetchNotes, fetchErr = s.fetchSinaUniverse(ctx)
 		fetchNotes = append(eastmoneyNotes, fetchNotes...)
 		source = "sina_universe"
@@ -88,6 +99,12 @@ func (s *Service) RefreshAStockUniverse(ctx context.Context, mode MaintenanceMod
 		if taskErr != nil {
 			return DataTaskResult{}, taskErr
 		}
+		s.log.WarnContext(ctx, "stock: universe refresh failed",
+			"source", src.Source,
+			"fetched", 0,
+			"error", summary,
+			"latency_ms", s.now().Sub(started).Milliseconds(),
+		)
 		return DataTaskResult{Task: task, Notes: fetchNotes}, fmt.Errorf("%w; upstream notes: %s", fetchErr, summary)
 	}
 	industryMap, industryNotes := s.fetchIndustryMap(ctx)
@@ -122,7 +139,20 @@ func (s *Service) RefreshAStockUniverse(ctx context.Context, mode MaintenanceMod
 		if err != nil {
 			return DataTaskResult{}, err
 		}
+		if delisted > 0 {
+			s.log.InfoContext(ctx, "stock: delisted instruments marked",
+				"delisted", delisted,
+				"orphans_total", len(orphans),
+			)
+		}
 	} else if len(orphans) > 0 {
+		s.log.DebugContext(ctx, "stock: delist marking skipped (partial or degraded refresh)",
+			"orphans", len(orphans),
+			"full_source", fullSource,
+			"fetch_degraded", fetchDegraded,
+			"failed", failed,
+			"items", len(items),
+		)
 		notes = append(notes, "兜底或部分主数据刷新未执行退市软标，避免误改历史主数据")
 	}
 	status := taskStatus(saved, failed)
@@ -154,6 +184,26 @@ func (s *Service) RefreshAStockUniverse(ctx context.Context, mode MaintenanceMod
 		ConsecutiveFailures: 0,
 		FailureSummary:      summary,
 	})
+	if status == "completed" {
+		s.log.InfoContext(ctx, "stock: universe refresh completed",
+			"source", src.Source,
+			"fetched", len(raw),
+			"saved", saved,
+			"delisted", delisted,
+			"failed", failed,
+			"latency_ms", s.now().Sub(started).Milliseconds(),
+		)
+	} else {
+		s.log.WarnContext(ctx, "stock: universe refresh degraded",
+			"source", src.Source,
+			"fetched", len(raw),
+			"saved", saved,
+			"delisted", delisted,
+			"failed", failed,
+			"status", status,
+			"latency_ms", s.now().Sub(started).Milliseconds(),
+		)
+	}
 	return DataTaskResult{Task: task, Instruments: items, Notes: notes}, nil
 }
 
@@ -190,9 +240,16 @@ func (s *Service) fetchEastmoneyUniverse(ctx context.Context) ([]universeInstrum
 	// 先拿第 1 页确定 total（东财接口 total 字段位于 data.total）
 	firstPage, total, err := s.fetchEastmoneyClistPage(ctx, 1, pageSize)
 	if err != nil {
+		s.log.WarnContext(ctx, "stock: eastmoney universe page 1 failed",
+			"error", err.Error(),
+		)
 		return nil, notes, fmt.Errorf("eastmoney clist page 1: %w", err)
 	}
 	all = append(all, firstPage...)
+	s.log.DebugContext(ctx, "stock: eastmoney universe page 1 fetched",
+		"page_size", len(firstPage),
+		"total", total,
+	)
 	if total <= pageSize {
 		return all, notes, nil
 	}
@@ -201,6 +258,10 @@ func (s *Service) fetchEastmoneyUniverse(ctx context.Context) ([]universeInstrum
 	if pages > 20 {
 		pages = 20
 	}
+	s.log.DebugContext(ctx, "stock: eastmoney universe multi-page fetch",
+		"pages", pages,
+		"page_size", pageSize,
+	)
 	for p := 2; p <= pages; p++ {
 		// 100ms sleep 防反爬
 		select {
@@ -210,6 +271,10 @@ func (s *Service) fetchEastmoneyUniverse(ctx context.Context) ([]universeInstrum
 		}
 		page, _, perr := s.fetchEastmoneyClistPage(ctx, p, pageSize)
 		if perr != nil {
+			s.log.DebugContext(ctx, "stock: eastmoney universe page fetch failed",
+				"page", p,
+				"error", perr.Error(),
+			)
 			notes = append(notes, fmt.Sprintf("page %d: %v", p, perr))
 			continue
 		}
@@ -321,6 +386,10 @@ func (s *Service) fetchSinaUniverse(ctx context.Context) ([]universeInstrument, 
 			"&symbol=&_s_r_a=page"
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
+			s.log.DebugContext(ctx, "stock: sina universe node request build failed",
+				"node", n.pageFlag,
+				"error", err.Error(),
+			)
 			notes = append(notes, fmt.Sprintf("%s: %v", n.pageFlag, err))
 			continue
 		}
@@ -328,12 +397,20 @@ func (s *Service) fetchSinaUniverse(ctx context.Context) ([]universeInstrument, 
 		req.Header.Set("User-Agent", stockQuoteUserAgent)
 		resp, err := s.client.Do(req)
 		if err != nil {
+			s.log.DebugContext(ctx, "stock: sina universe node fetch failed",
+				"node", n.pageFlag,
+				"error", err.Error(),
+			)
 			notes = append(notes, fmt.Sprintf("%s: %v", n.pageFlag, err))
 			continue
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
 		resp.Body.Close()
 		if err != nil {
+			s.log.DebugContext(ctx, "stock: sina universe node read failed",
+				"node", n.pageFlag,
+				"error", err.Error(),
+			)
 			notes = append(notes, fmt.Sprintf("%s: read: %v", n.pageFlag, err))
 			continue
 		}

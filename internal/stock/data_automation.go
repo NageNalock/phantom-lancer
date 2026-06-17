@@ -23,9 +23,16 @@ const (
 
 func (s *Service) RunDataMaintenance(ctx context.Context, requestedBy string) (DataMaintenanceResult, error) {
 	requestedBy = defaultString(requestedBy, "system")
+	started := s.now()
+	s.log.InfoContext(ctx, "stock: data maintenance started",
+		"requested_by", requestedBy,
+	)
 	result := DataMaintenanceResult{}
 	universe, err := s.RefreshAStockUniverse(ctx, MaintenanceModeDaily, requestedBy)
 	if err != nil {
+		s.log.WarnContext(ctx, "stock: data maintenance universe refresh failed",
+			"error", err.Error(),
+		)
 		result.Notes = append(result.Notes, "A 股主数据刷新失败: "+err.Error())
 	} else {
 		if universe.Task.ID != "" {
@@ -36,6 +43,9 @@ func (s *Service) RunDataMaintenance(ctx context.Context, requestedBy string) (D
 	}
 	health, err := s.RunDataSourceHealthCheck(ctx, "")
 	if err != nil {
+		s.log.WarnContext(ctx, "stock: data maintenance health check failed",
+			"error", err.Error(),
+		)
 		return result, err
 	}
 	result.Tasks = append(result.Tasks, health.Task)
@@ -47,11 +57,17 @@ func (s *Service) RunDataMaintenance(ctx context.Context, requestedBy string) (D
 		result.Quotes = append(result.Quotes, quotes.Quotes...)
 		result.Notes = append(result.Notes, quotes.Notes...)
 	} else {
+		s.log.WarnContext(ctx, "stock: data maintenance quote refresh failed",
+			"error", err.Error(),
+		)
 		result.Notes = append(result.Notes, "行情刷新失败: "+err.Error())
 	}
 
 	market, err := s.CollectMarketDataFromQuotes(ctx, requestedBy)
 	if err != nil {
+		s.log.WarnContext(ctx, "stock: data maintenance market data collection failed",
+			"error", err.Error(),
+		)
 		return result, err
 	}
 	result.Tasks = append(result.Tasks, market.Task)
@@ -65,6 +81,9 @@ func (s *Service) RunDataMaintenance(ctx context.Context, requestedBy string) (D
 	} {
 		collected, err := taskResult(ctx, requestedBy)
 		if err != nil {
+			s.log.WarnContext(ctx, "stock: data maintenance feed collection failed",
+				"error", err.Error(),
+			)
 			return result, err
 		}
 		result.Tasks = append(result.Tasks, collected.Task)
@@ -75,11 +94,21 @@ func (s *Service) RunDataMaintenance(ctx context.Context, requestedBy string) (D
 
 	discovered, err := s.DiscoverOpportunities(ctx, requestedBy)
 	if err != nil {
+		s.log.WarnContext(ctx, "stock: data maintenance opportunity discovery failed",
+			"error", err.Error(),
+		)
 		return result, err
 	}
 	result.Tasks = append(result.Tasks, discovered.Task)
 	result.Opportunities = append(result.Opportunities, discovered.Opportunities...)
 	result.Notes = append(result.Notes, discovered.Notes...)
+	s.log.InfoContext(ctx, "stock: data maintenance completed",
+		"tasks", len(result.Tasks),
+		"instruments", len(result.Instruments),
+		"quotes", len(result.Quotes),
+		"opportunities", len(result.Opportunities),
+		"latency_ms", s.now().Sub(started).Milliseconds(),
+	)
 	return result, nil
 }
 
@@ -183,6 +212,11 @@ func (s *Service) CollectResearchReports(ctx context.Context, requestedBy string
 func (s *Service) collectHTTPNewsLikeFeed(ctx context.Context, taskType, source, sourceType, envKey, category, requestedBy, missingAdapterReason string) (DataTaskResult, error) {
 	endpoint := strings.TrimSpace(os.Getenv(envKey))
 	if endpoint == "" {
+		s.log.DebugContext(ctx, "stock: feed adapter not configured",
+			"task_type", taskType,
+			"source", source,
+			"env_key", envKey,
+		)
 		return s.recordAdapterBackedCollection(ctx, taskType, source, sourceType, requestedBy, missingAdapterReason)
 	}
 	src, ready, reason, next, err := s.governedDataSourceReady(ctx, source, sourceType)
@@ -199,12 +233,23 @@ func (s *Service) collectHTTPNewsLikeFeed(ctx context.Context, taskType, source,
 	if len(queries) == 0 {
 		return s.recordBlockedDataTask(ctx, taskType, src.Source, "", requestedBy, "没有可用于周期抓取的股票代码或名称", time.Time{})
 	}
+	s.log.DebugContext(ctx, "stock: feed collection started",
+		"task_type", taskType,
+		"source", source,
+		"queries", len(queries),
+	)
 	var fetched []storage.StockNewsItem
 	var notes []string
 	failed := 0
 	for _, query := range queries {
 		items, err := s.fetchHTTPNewsLikeFeed(ctx, endpoint, query.Query, category, query)
 		if err != nil {
+			s.log.DebugContext(ctx, "stock: feed query failed",
+				"task_type", taskType,
+				"source", source,
+				"query", query.Symbol,
+				"error", err.Error(),
+			)
 			failed++
 			notes = append(notes, stockAdapterErrorSummary(err))
 			continue
@@ -212,7 +257,12 @@ func (s *Service) collectHTTPNewsLikeFeed(ctx context.Context, taskType, source,
 		fetched = append(fetched, items...)
 	}
 	if failed > 0 && len(fetched) == 0 {
-		_, _ = s.recordDataSourceFailure(ctx, src, strings.Join(notes, "; "))
+		s.log.WarnContext(ctx, "stock: feed collection all queries failed",
+			"task_type", taskType,
+			"source", source,
+			"queries", len(queries),
+			"error", strings.Join(notes, "; "),
+		)
 		task, err := s.store.CreateStockDataTask(ctx, storage.StockDataTask{
 			TaskType:       taskType,
 			Source:         src.Source,
@@ -379,6 +429,12 @@ func (s *Service) DiscoverOpportunities(ctx context.Context, requestedBy string)
 	if err != nil {
 		return DataTaskResult{}, err
 	}
+	s.log.DebugContext(ctx, "stock: opportunity discovery finished",
+		"created", len(created),
+		"news_items", len(newsItems),
+		"quotes", len(quotes),
+		"kline_points", len(points),
+	)
 	return DataTaskResult{Task: task, Opportunities: created, Notes: notes}, nil
 }
 
@@ -752,6 +808,10 @@ func (s *Service) governedDataSourceReady(ctx context.Context, source, sourceTyp
 		return src, false, defaultString(reason, "data source not ready"), time.Time{}, nil
 	}
 	if next, ok := parseStockTime(src.NextAllowedAt); ok && next.After(s.now().UTC()) {
+		s.log.DebugContext(ctx, "stock: data source rate limited",
+			"source", source,
+			"next_allowed_at", next.Format(time.RFC3339),
+		)
 		return src, false, "next allowed at " + next.Format(time.RFC3339Nano), next, nil
 	}
 	return src, true, "", time.Time{}, nil

@@ -15,7 +15,7 @@ const maxStockBodyBytes = 256 << 10
 
 func (s *Server) stockService() *stocksvc.Service {
 	if s.stock == nil {
-		s.stock = stocksvc.NewService(s.store)
+		s.stock = stocksvc.NewService(s.store, s.log)
 	}
 	return s.stock
 }

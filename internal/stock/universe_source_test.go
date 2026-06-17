@@ -153,7 +153,7 @@ func TestRefreshAStockUniverseSkipsDelistWhenEastmoneyPartial(t *testing.T) {
 		t.Fatalf("seed old instrument: %v", err)
 	}
 
-	svc := NewService(store)
+	svc := NewService(store, nil)
 	svc.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Host != "push2.eastmoney.com" {
 			return stringResponse(http.StatusNotFound, `{"error":"unexpected host"}`), nil

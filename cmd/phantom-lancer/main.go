@@ -117,7 +117,7 @@ func main() {
 	v2raySvc := v2ray.NewService(store, hub, cfg.DataDir, logger)
 	defer v2raySvc.Close()
 	imagesSvc := images.NewService(store, hub, cfg.DataDir, logger)
-	stockSvc := stocksvc.NewService(store)
+	stockSvc := stocksvc.NewService(store, logger)
 	defer stockSvc.Close()
 	dockerSvc := dockercontrol.NewService(store, hub, cfg.DataDir, logger)
 	defer dockerSvc.Close()
