@@ -188,6 +188,7 @@ func main() {
 	codexGatewaySvc.StartBackground(ctx)
 	stockSvc.StartBackground(ctx)
 	mailSvc.StartBackground(ctx)
+	store.StartStatsCollector(ctx)
 
 	// Events table retention pruner: deletes events older than the
 	// configured window. Runs once shortly after boot, then daily.

@@ -51,6 +51,21 @@ interface DashboardSummary {
   images?: ImageStatus;
   v2ray?: V2RayStatus;
   recentActivity?: AuditEvent[];
+  dbStats?: DatabaseStats;
+}
+
+export interface DatabaseTableStat {
+  name: string;
+  sizeBytes: number;
+  indexSizeBytes?: number;
+  pageCount?: number;
+  description?: string;
+}
+
+export interface DatabaseStats {
+  totalBytes: number;
+  tables: DatabaseTableStat[];
+  updatedAt: string;
 }
 
 export interface AuditEvent {

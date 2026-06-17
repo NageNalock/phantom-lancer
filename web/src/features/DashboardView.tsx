@@ -1,9 +1,11 @@
 import type { AppActions } from "../app/App";
 import type { AppData, MainTab } from "../app/types";
 import type { MouseEvent } from "react";
+import { useState } from "react";
 import { ContextList, Metric, Panel } from "../components/ui";
 import { auditLabel, auditSummary, codexGatewayStatusLabel, codexModuleStatusLabel, formatDate, imageStatusLabel, stockDataHealthLabel, stockStatusLabel, v2rayStateLabel } from "../domain/labels";
 import { buildQueryHref, shouldHandleQueryLinkClick } from "../hooks/useQueryParamState";
+import { formatBytesIEC } from "../utils/format";
 
 interface DashboardAction {
   kind?: "mail_emergency";
@@ -140,6 +142,9 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
             ]}
           />
         </Panel>
+        <div className="mt-4">
+          <DatabasePanel data={data} />
+        </div>
         <div className="mt-4">
           <Panel title="最近活动">
             <div className="grid gap-2">
@@ -310,4 +315,71 @@ function codexCardTone(codex?: AppData["dashboard"]["codex"]) {
   if (codex.appServer?.state === "failed") return "danger" as const;
   if (codex.appServer?.state === "running" || install === "ready") return "good" as const;
   return "neutral" as const;
+}
+
+const DB_TOP_TABLES_DEFAULT = 8;
+
+function DatabasePanel({ data }: { data: AppData }) {
+  const stats = data.dashboard.dbStats;
+  const [expanded, setExpanded] = useState(false);
+
+  if (!stats || !stats.tables?.length || stats.totalBytes === 0) {
+    return (
+      <Panel title="数据库">
+        <div className="muted text-xs">正在加载数据库统计…</div>
+      </Panel>
+    );
+  }
+
+  const visibleTables = expanded ? stats.tables : stats.tables.slice(0, DB_TOP_TABLES_DEFAULT);
+  const hiddenCount = stats.tables.length - DB_TOP_TABLES_DEFAULT;
+
+  return (
+    <Panel title="数据库">
+      <div className="mb-3 flex items-baseline justify-between">
+        <span className="text-xl font-semibold">{formatBytesIEC(stats.totalBytes)}</span>
+        <span className="muted text-[11px]">共 {stats.tables.length} 张表</span>
+      </div>
+      <div className="grid gap-1.5">
+        {visibleTables.map((table) => {
+          const totalTableBytes = (table.sizeBytes || 0) + (table.indexSizeBytes || 0);
+          const pct = stats.totalBytes > 0 ? (totalTableBytes / stats.totalBytes) * 100 : 0;
+          return (
+            <div
+              className="group relative grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--surface)]"
+              key={table.name}
+              title={table.description || table.name}
+            >
+              <div className="relative overflow-hidden">
+                <div
+                  className="absolute inset-y-0 left-0 bg-[var(--accent-soft)] opacity-40 group-hover:opacity-60"
+                  style={{ width: `${Math.max(pct, 0.5)}%` }}
+                />
+                <span className="relative mono text-[12px]">{table.name}</span>
+                {table.description ? (
+                  <span className="relative ml-2 hidden text-[10px] text-[var(--muted)] max-md:inline">
+                    {table.description}
+                  </span>
+                ) : null}
+              </div>
+              <span className="relative mono text-[11px] text-[var(--muted)]">
+                {formatBytesIEC(totalTableBytes)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {hiddenCount > 0 ? (
+        <button
+          className="mt-2 w-full text-center text-[11px] text-[var(--muted)] underline decoration-dotted underline-offset-2 hover:text-[var(--fg)]"
+          onClick={() => setExpanded(!expanded)}
+        >
+          {expanded ? "收起" : `展开剩余 ${hiddenCount} 张表`}
+        </button>
+      ) : null}
+      <div className="mt-2 text-center text-[10px] text-[var(--muted)]">
+        统计更新于 {formatDate(stats.updatedAt) || "-"}
+      </div>
+    </Panel>
+  );
 }
