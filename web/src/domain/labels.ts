@@ -1,4 +1,4 @@
-import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, CodexStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, StockAgentTraceSummary, StockDataHealth, StockSummary, V2RaySettings, V2RayStatus } from "../app/types";
+import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, CodexStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, StockAgentTraceSummary, StockDataHealth, StockSettings, StockSummary, V2RaySettings, V2RayStatus } from "../app/types";
 
 export const NAV_ITEMS = [
   { id: "dashboard", label: "控制台", description: "服务器状态、执行边界和下一步入口" },
@@ -474,6 +474,24 @@ export function defaultImageStorageSettings(): Required<ImageStorageSettings> {
     maskedAccessKeyId: "",
     s3AccessMode: "proxy",
     fallbackToLocal: true,
+    createdAt: "",
+    updatedAt: "",
+  };
+}
+
+export function defaultStockSettings(): Required<StockSettings> {
+  return {
+    id: "default",
+    proxyEnabled: false,
+    proxyType: "http",
+    proxyAddress: "",
+    proxyUseForEastmoney: false,
+    proxyUseForSina: false,
+    proxyUseForTencent: false,
+    quoteTtlSeconds: 60,
+    autoRefreshEnabled: true,
+    refreshIntervalSecs: 14400,
+    defaultDataSource: "eastmoney",
     createdAt: "",
     updatedAt: "",
   };

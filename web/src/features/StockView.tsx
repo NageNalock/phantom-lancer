@@ -11,12 +11,13 @@ import { StockMemory } from "./stock/StockMemory";
 import { StockOpportunities } from "./stock/StockOpportunities";
 import { StockOverview } from "./stock/StockOverview";
 import { StockPortfolios } from "./stock/StockPortfolios";
+import { StockSettingsPanel } from "./stock/StockSettingsPanel";
 import { StockSymbolDetail } from "./stock/StockSymbolDetail";
 import { StockSymbolCombobox } from "./stock/StockSymbolCombobox";
 import { StockWatchReview } from "./stock/StockWatchReview";
 import { directionLabel, marketSessionLabel, money, number, percent, percentInput, price, text } from "./stock/format";
 
-type StockTab = "overview" | "portfolios" | "data" | "strategies" | "watch" | "memory";
+type StockTab = "overview" | "portfolios" | "data" | "strategies" | "watch" | "memory" | "settings";
 type StockRouteTab = StockTab | "detail" | "opportunities";
 
 const stockTabs: Array<{ id: StockTab; label: string }> = [
@@ -26,6 +27,7 @@ const stockTabs: Array<{ id: StockTab; label: string }> = [
   { id: "strategies", label: "策略" },
   { id: "watch", label: "盯盘 / Review" },
   { id: "memory", label: "记忆 / 诊断" },
+  { id: "settings", label: "设置" },
 ];
 const stockTabIds = stockTabs.map((tab) => tab.id);
 const stockRouteTabIds: StockRouteTab[] = [...stockTabIds, "detail", "opportunities"];
@@ -68,6 +70,7 @@ export function StockView({ actions, data }: { actions: AppActions; data: AppDat
         {active === "strategies" ? <StockStrategyWorkspace actions={actions} data={data} runAction={runAction} /> : null}
         {active === "watch" ? <StockWatchReview actions={actions} data={data} openAlerts={openAlerts} pendingOperations={pendingOperations} runAction={runAction} /> : null}
         {active === "memory" ? <StockMemory actions={actions} data={data} runAction={runAction} /> : null}
+        {active === "settings" ? <StockSettingsPanel actions={actions} data={data} /> : null}
       </div>
 
       <aside className="border-l border-[var(--line)] bg-[var(--surface-soft)] p-5 max-xl:border-l-0 max-xl:border-t">

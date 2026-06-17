@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,6 +69,7 @@ type Snapshot struct {
 	AgentSteps          []storage.StockAgentRunStep       `json:"agentSteps"`
 	AgentClaims         []storage.StockAgentClaim         `json:"agentClaims"`
 	StrategyPatches     []storage.StockStrategyPatch      `json:"strategyPatches"`
+	Settings            storage.StockSettings             `json:"settings"`
 }
 
 type PortfolioWithHoldings struct {
@@ -162,6 +164,104 @@ func NewService(store *storage.Store, logger *slog.Logger, opts ...ServiceOption
 		opt(service)
 	}
 	return service
+}
+
+// GetSettings 读取股票模块配置。包装一层以方便将来加缓存/缓存失效（暂时直接透传。
+func (s *Service) GetSettings(ctx context.Context) (storage.StockSettings, error) {
+	if s.store == nil {
+		return storage.DefaultStockSettings(), nil
+	}
+	set, err := s.store.GetStockSettings(ctx)
+	if err != nil {
+		return storage.DefaultStockSettings(), err
+	}
+	return storage.NormalizeStockSettings(set), nil
+}
+
+// UpdateSettings 更新股票模块配置，返回新配置。
+func (s *Service) UpdateSettings(ctx context.Context, in storage.StockSettings) (storage.StockSettings, error) {
+	if s.store == nil {
+		return storage.DefaultStockSettings(), errors.New("stock store not configured")
+	}
+	return s.store.UpdateStockSettings(ctx, in)
+}
+
+// ValidateSettings 校验股票模块配置（保存前/测试连接前调用）。
+func (s *Service) ValidateSettings(in storage.StockSettings) error {
+	return storage.ValidateStockSettings(in)
+}
+
+// clientFor 根据股票模块配置和目标 source 返回适配好代理的 *http.Client。
+// source: "eastmoney" / "sina" / "tencent"（对应 settings 里的三个开关）。
+// 返回值 client 永不为 nil；proxyURL 非空表示本次实际使用的代理地址，供日志排查。
+//
+// 该方法仅在股票模块内使用，不会影响其他系统模块的 HTTP 能力。
+func (s *Service) clientFor(ctx context.Context, source string) (*http.Client, string) {
+	settings, _ := s.GetSettings(ctx)
+	proxyURL := settings.ProxyURLForSource(source)
+	timeout := 5 * time.Second
+	if proxyURL == "" {
+		// 直连：复用默认 client（没配代理）
+		return s.client, ""
+	}
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		s.log.WarnContext(ctx, "stock: invalid proxy url, fallthrough direct",
+			"source", source,
+			"proxy", proxyURL,
+			"error", err.Error(),
+		)
+		return s.client, ""
+	}
+	// 走代理：构造一次性 client（避免 Transport 配置与默认 client 混在一个连接池里）
+	transport := &http.Transport{
+		Proxy:               http.ProxyURL(parsed),
+		MaxIdleConns:        20,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 5 * time.Second,
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+	}, proxyURL
+}
+
+// TestProxyConnectivity 使用 settings 里配置的代理（source 是开关名 eastmoney/sina/tencent）
+// 实际发起一次最小化请求，返回真实 HTTP 状态、延迟和错误。前端据此判断代理是否可用。
+func (s *Service) TestProxyConnectivity(ctx context.Context, source string) (latencyMs int64, httpStatus int, err error) {
+	start := s.now()
+	hc, proxyURL := s.clientFor(ctx, source)
+	if proxyURL == "" {
+		return 0, 0, fmt.Errorf("proxy not enabled for source %q (check proxy master switch and per-source flag)", source)
+	}
+	var url string
+	switch source {
+	case "eastmoney":
+		// 最小化 clist 请求，pz=1 即可
+		url = "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=1&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:0+t:6&fields=f12"
+	case "sina":
+		url = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=1&sort=symbol&asc=1&node=sh_a"
+	case "tencent":
+		url = "https://qt.gtimg.cn/q=sh600000"
+	default:
+		return 0, 0, fmt.Errorf("unknown source %q (expected eastmoney/sina/tencent)", source)
+	}
+	// 小超时（用户在等测试结果）
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	req.Header.Set("Referer", "https://quote.eastmoney.com/")
+	req.Header.Set("User-Agent", stockQuoteUserAgent)
+	resp, err := hc.Do(req)
+	if err != nil {
+		return s.now().Sub(start).Milliseconds(), 0, fmt.Errorf("proxy request failed (%w); proxy=%q", err, proxyURL)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8*1024))
+	return s.now().Sub(start).Milliseconds(), resp.StatusCode, nil
 }
 
 func (s *Service) StartBackground(ctx context.Context) {
@@ -375,6 +475,10 @@ func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	settings, err := s.GetSettings(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
 	return Snapshot{
 		Summary:             summary,
 		DataHealth:          dataHealth,
@@ -404,6 +508,7 @@ func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {
 		AgentSteps:          agentSteps,
 		AgentClaims:         agentClaims,
 		StrategyPatches:     strategyPatches,
+		Settings:            settings,
 	}, nil
 }
 
@@ -1092,13 +1197,20 @@ func (s *Service) fetchEastmoneyQuotes(ctx context.Context, symbols []string) ([
 	}
 	req.Header.Set("Referer", "https://quote.eastmoney.com/")
 	req.Header.Set("User-Agent", stockQuoteUserAgent)
-	resp, err := s.client.Do(req)
+	hc, proxyURL := s.clientFor(ctx, "eastmoney")
+	if proxyURL != "" {
+		s.log.DebugContext(ctx, "stock: eastmoney quote using proxy",
+			"proxy", proxyURL,
+			"symbols", len(symbols),
+		)
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, nil, fmt.Errorf("eastmoney quote status %d", resp.StatusCode)
+		return nil, nil, fmt.Errorf("eastmoney quote status %d proxy=%q", resp.StatusCode, proxyURL)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	if err != nil {
@@ -1199,13 +1311,20 @@ func (s *Service) fetchSinaQuotes(ctx context.Context, symbols []string) ([]stor
 	}
 	req.Header.Set("Referer", "https://finance.sina.com.cn/")
 	req.Header.Set("User-Agent", stockQuoteUserAgent)
-	resp, err := s.client.Do(req)
+	hc, proxyURL := s.clientFor(ctx, "sina")
+	if proxyURL != "" {
+		s.log.DebugContext(ctx, "stock: sina quote using proxy",
+			"proxy", proxyURL,
+			"symbols", len(symbols),
+		)
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, nil, fmt.Errorf("sina quote status %d", resp.StatusCode)
+		return nil, nil, fmt.Errorf("sina quote status %d proxy=%q", resp.StatusCode, proxyURL)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	if err != nil {

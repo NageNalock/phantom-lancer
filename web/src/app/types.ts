@@ -1098,6 +1098,23 @@ export interface StockPayload {
   agentSteps?: StockAgentRunStep[];
   agentClaims?: StockAgentClaim[];
   strategyPatches?: StockStrategyPatch[];
+  settings?: StockSettings;
+}
+
+export interface StockSettings {
+  id?: string;
+  proxyEnabled?: boolean;
+  proxyType?: string;
+  proxyAddress?: string;
+  proxyUseForEastmoney?: boolean;
+  proxyUseForSina?: boolean;
+  proxyUseForTencent?: boolean;
+  quoteTtlSeconds?: number;
+  autoRefreshEnabled?: boolean;
+  refreshIntervalSecs?: number;
+  defaultDataSource?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface V2RayExport {

@@ -359,17 +359,23 @@ func (s *Service) fetchEastmoneyClistPage(ctx context.Context, pageNum, pageSize
 	}
 	req.Header.Set("Referer", "https://quote.eastmoney.com/")
 	req.Header.Set("User-Agent", universeUserAgents[(pageNum-1)%len(universeUserAgents)])
-	resp, err := s.client.Do(req)
+	hc, proxyURL := s.clientFor(ctx, "eastmoney")
+	if proxyURL != "" && pageNum == 1 {
+		s.log.InfoContext(ctx, "stock: eastmoney universe using proxy",
+			"proxy", proxyURL,
+		)
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("do: %w", err)
+		return nil, 0, fmt.Errorf("do proxy=%q: %w", proxyURL, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if err != nil {
-		return nil, 0, fmt.Errorf("read body: %w (status=%d)", err, resp.StatusCode)
+		return nil, 0, fmt.Errorf("read body: %w (status=%d proxy=%q)", err, resp.StatusCode, proxyURL)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, 0, fmt.Errorf("status %d body=%q", resp.StatusCode, truncateBytes(body, 400))
+		return nil, 0, fmt.Errorf("status %d proxy=%q body=%q", resp.StatusCode, proxyURL, truncateBytes(body, 400))
 	}
 	var payload struct {
 		Data struct {
@@ -436,6 +442,13 @@ func (s *Service) fetchSinaUniverse(ctx context.Context) ([]universeInstrument, 
 	const pageSize = 2000
 	var all []universeInstrument
 	var notes []string
+	// 一次性拿到针对 sina 源的 client（避免每个节点都查 settings）
+	hc, proxyURL := s.clientFor(ctx, "sina")
+	if proxyURL != "" {
+		s.log.InfoContext(ctx, "stock: sina universe using proxy",
+			"proxy", proxyURL,
+		)
+	}
 	for idx, n := range nodes {
 		// 非首个节点前加 jitter sleep；首个节点不加，降低整体延迟
 		if idx > 0 {
@@ -460,11 +473,12 @@ func (s *Service) fetchSinaUniverse(ctx context.Context) ([]universeInstrument, 
 		}
 		req.Header.Set("Referer", "https://finance.sina.com.cn/")
 		req.Header.Set("User-Agent", sinaUniverseUAs[(idx+rand.IntN(len(sinaUniverseUAs)))%len(sinaUniverseUAs)])
-		resp, err := s.client.Do(req)
+		resp, err := hc.Do(req)
 		if err != nil {
 			s.log.WarnContext(ctx, "stock: sina universe node fetch failed",
 				"node", n.pageFlag,
 				"error", err.Error(),
+				"proxy", proxyURL,
 				"url", url,
 			)
 			notes = append(notes, fmt.Sprintf("%s: %v", n.pageFlag, err))
@@ -476,6 +490,7 @@ func (s *Service) fetchSinaUniverse(ctx context.Context) ([]universeInstrument, 
 			s.log.WarnContext(ctx, "stock: sina universe node read failed",
 				"node", n.pageFlag,
 				"status", resp.StatusCode,
+				"proxy", proxyURL,
 				"error", err.Error(),
 			)
 			notes = append(notes, fmt.Sprintf("%s: read: %v", n.pageFlag, err))
@@ -485,6 +500,7 @@ func (s *Service) fetchSinaUniverse(ctx context.Context) ([]universeInstrument, 
 			s.log.WarnContext(ctx, "stock: sina universe node http error",
 				"node", n.pageFlag,
 				"status", resp.StatusCode,
+				"proxy", proxyURL,
 				"body_prefix", truncateBytes(body, 400),
 			)
 			notes = append(notes, fmt.Sprintf("%s: status %d", n.pageFlag, resp.StatusCode))

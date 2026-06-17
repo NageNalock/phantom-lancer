@@ -509,6 +509,7 @@ export function Toggle({
   className = "",
   inputClassName = "",
   name,
+  disabled = false,
 }: {
   checked: boolean;
   label: ReactNode;
@@ -517,14 +518,17 @@ export function Toggle({
   className?: string;
   inputClassName?: string;
   name?: string;
+  disabled?: boolean;
 }) {
+  const disabledClass = disabled ? "opacity-60 pointer-events-none" : "";
   if (variant === "row") {
     const tone = checked ? "border-[rgba(18,132,79,0.22)] bg-[var(--good-soft)]" : "border-[var(--line)] bg-[var(--surface)]";
     return (
-      <label className={`grid min-h-9 grid-cols-[auto_minmax(0,1fr)] items-center gap-3 rounded-lg border px-3 py-2 text-sm ${tone} ${className}`}>
+      <label className={`grid min-h-9 grid-cols-[auto_minmax(0,1fr)] items-center gap-3 rounded-lg border px-3 py-2 text-sm ${tone} ${disabledClass} ${className}`}>
         <input
           checked={checked}
           className={`h-4 w-4 accent-[var(--accent)] ${inputClassName}`}
+          disabled={disabled}
           name={name}
           onChange={(event) => onChange(event.target.checked)}
           type="checkbox"
@@ -534,11 +538,12 @@ export function Toggle({
     );
   }
   return (
-    <label className={`flex min-h-10 items-center justify-between gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] px-3 text-sm ${className}`}>
+    <label className={`flex min-h-10 items-center justify-between gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] px-3 text-sm ${disabledClass} ${className}`}>
       <span>{label}</span>
       <input
         checked={checked}
         className={inputClassName}
+        disabled={disabled}
         name={name}
         onChange={(event) => onChange(event.target.checked)}
         type="checkbox"

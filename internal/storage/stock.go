@@ -570,6 +570,21 @@ CREATE TABLE IF NOT EXISTS stock_memories (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_stock_memories_symbol ON stock_memories(symbol, created_at DESC);
+CREATE TABLE IF NOT EXISTS stock_settings (
+  id TEXT PRIMARY KEY,
+  proxy_enabled INTEGER NOT NULL DEFAULT 0,
+  proxy_type TEXT NOT NULL DEFAULT 'http',
+  proxy_address TEXT NOT NULL DEFAULT '',
+  proxy_use_for_eastmoney INTEGER NOT NULL DEFAULT 0,
+  proxy_use_for_sina INTEGER NOT NULL DEFAULT 0,
+  proxy_use_for_tencent INTEGER NOT NULL DEFAULT 0,
+  quote_ttl_seconds INTEGER NOT NULL DEFAULT 60,
+  auto_refresh_enabled INTEGER NOT NULL DEFAULT 1,
+  refresh_interval_seconds INTEGER NOT NULL DEFAULT 14400,
+  default_data_source TEXT NOT NULL DEFAULT 'eastmoney',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `)
 	return err
 }
