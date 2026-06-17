@@ -188,6 +188,7 @@ func main() {
 	codexGatewaySvc.StartBackground(ctx)
 	stockSvc.StartBackground(ctx)
 	mailSvc.StartBackground(ctx)
+	store.StartStatsCollector(ctx)
 	if v2raySettings, err := store.GetV2RaySettings(ctx); err == nil && v2raySettings.Enabled && v2raySettings.StartOnPhantomLaunch {
 		if _, err := v2raySvc.Start(ctx); err != nil {
 			logger.Error("start embedded v2ray failed", "error", err)

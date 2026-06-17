@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"phantom-lancer/internal/events"
@@ -93,6 +94,12 @@ type Store struct {
 	// mailFallbackKeeper mirrors gwTokenFallbackKeeper for mail secrets.
 	// Non-nil only when env+DB keys differ.
 	mailFallbackKeeper *keywrap.Keeper
+
+	// dbStatsCache holds the last computed database size / per-table stats.
+	// It is refreshed periodically by StartStatsCollector.
+	dbStatsCache  DatabaseStats
+	dbStatsAt      time.Time
+	dbStatsMu      sync.RWMutex
 }
 
 type Owner struct {
@@ -3146,6 +3153,499 @@ func (s *Store) DatabaseSizeBytes() (int64, error) {
 		return 0, err
 	}
 	return info.Size(), nil
+}
+
+// DatabaseStatsCacheTTL is how long cached stats are considered fresh
+// before a reader will trigger a refresh. The background collector
+// runs on its own cadence; this TTL only affects on-demand reads.
+const DatabaseStatsCacheTTL = 90 * time.Second
+
+// DatabaseStatsFreshnessGoal is the target interval for the background
+// stats collector. Stats are approximately this fresh.
+const DatabaseStatsFreshnessGoal = 60 * time.Second
+
+// DatabaseTableStat describes size and metadata for one table.
+type DatabaseTableStat struct {
+	Name            string `json:"name"`
+	SizeBytes       int64  `json:"sizeBytes"`
+	IndexSizeBytes  int64  `json:"indexSizeBytes,omitempty"`
+	PageCount       int    `json:"pageCount,omitempty"`
+	Description     string `json:"description,omitempty"`
+}
+
+// DatabaseStats is a point-in-time snapshot of database size distribution.
+type DatabaseStats struct {
+	TotalBytes int64               `json:"totalBytes"`
+	Tables     []DatabaseTableStat `json:"tables"`
+	UpdatedAt  string              `json:"updatedAt"`
+}
+
+// tableDescriptionMap maps well-known table names to human-readable
+// Chinese descriptions shown in the dashboard tooltip.
+//
+// Tables not listed here will get a module-level generic description
+// inferred from their prefix.
+var tableDescriptionMap = map[string]string{
+	// Core system
+	"owner_account": "管理员账户（登录认证）",
+	"web_sessions":  "Web 会话 / Cookie",
+	"audit_events":  "审计日志（操作记录）",
+	"settings":      "系统设置（KV 存储）",
+	"events":        "事件流（SSE 推送持久化）",
+
+	// System update
+	"system_update_checks": "系统更新检查记录",
+	"system_update_jobs":   "系统更新任务",
+
+	// Codex Gateway
+	"codex_gateway_settings":      "Codex Gateway 全局设置",
+	"codex_gateway_accounts":      "上游 LLM 账户",
+	"codex_gateway_api_keys":      "API Key（下游鉴权）",
+	"codex_gateway_models":        "模型配置",
+	"codex_gateway_model_plans":   "模型套餐 / 价格方案",
+	"codex_gateway_request_logs":  "API 请求日志",
+	"codex_gateway_usage_records": "用量计费记录",
+
+	// Codex CLI
+	"codex_cli_installations": "Codex CLI 安装信息",
+	"codex_cli_workspaces":    "工作区",
+	"codex_cli_threads":       "对话线程",
+	"codex_cli_turns":         "对话回合",
+	"codex_cli_events":        "事件记录",
+	"codex_cli_attachments":   "附件",
+	"codex_cli_approvals":     "工具调用审批",
+	"codex_cli_runs":          "代码执行运行",
+	"codex_cli_commands":      "命令历史",
+	"codex_cli_notifications": "通知",
+	"codex_cli_automations":   "自动化配置",
+	"codex_cli_automation_runs": "自动化运行记录",
+
+	// Images / Media
+	"image_provider_settings": "图片生成提供商设置",
+	"image_generation_jobs":   "图片生成任务",
+	"image_generation_sources": "图片生成源文件",
+	"image_generation_outputs": "图片生成输出",
+	"image_assets":            "图片素材库",
+	"image_storage_settings":  "图片存储设置",
+	"image_prompt_library":    "提示词库",
+	"media_provider_settings": "媒体 / 视频生成设置",
+	"media_generation_jobs":   "媒体生成任务",
+	"media_generation_outputs": "媒体生成输出",
+	"media_assets":            "媒体素材库",
+	"object_storage_profiles": "对象存储配置",
+
+	// Mail
+	"mail_mox_settings":   "Mox 邮件服务全局设置",
+	"mail_domains":        "邮件域名",
+	"mail_accounts":       "邮箱账户",
+	"mail_aliases":        "邮件别名",
+	"mail_addresses":      "地址簿 / 联系人",
+	"mail_certificates":   "TLS 证书",
+	"mail_dns_providers":  "DNS 提供商配置",
+	"mail_messages_p7":    "邮件消息（正文+元数据）",
+	"mail_message_parts":  "邮件内容片段",
+	"mail_folders_p7":     "邮件文件夹",
+	"mail_index_health_p7": "邮件索引健康状态",
+	"mail_fts5_p7":        "邮件全文搜索索引",
+	"mail_webhooks":       "Webhook 配置",
+	"mail_webhook_events": "Webhook 事件日志",
+	"mail_delivery_events": "投递事件",
+	"mail_queue_entries":  "投递队列条目",
+	"mail_drafts":         "邮件草稿",
+	"mail_backups":        "邮件备份记录",
+	"mail_backup_schedules": "邮件备份计划",
+	"mail_retention_rules": "邮件保留规则",
+	"mail_mox_health_checks": "Mox 健康检查记录",
+	"mail_runtime_state":  "运行时状态",
+
+	// V2Ray
+	"v2ray_settings":         "V2Ray 全局设置",
+	"v2ray_remote_clients":   "远程客户端",
+	"v2ray_config_versions":  "配置版本历史",
+
+	// Docker
+	"docker_registry_credentials": "Docker Registry 凭据",
+	"docker_registry_repositories": "Docker 仓库",
+	"docker_registry_manifests":   "Docker 镜像清单",
+	"docker_registry_tags":        "Docker 标签",
+
+	// Stock
+	"stock_portfolios":     "投资组合",
+	"stock_holdings":       "持仓",
+	"stock_quotes":         "股票报价",
+	"stock_opportunities":  "投资机会",
+	"stock_strategies":     "策略",
+	"stock_watches":        "监控 / 观察列表",
+	"stock_alerts":         "告警",
+	"stock_reviews":        "AI 评审",
+	"stock_trade_signals":  "交易信号",
+	"stock_operations":     "操作记录",
+	"stock_memories":       "笔记 / 记忆",
+	"stock_instruments":    "股票标的基础信息",
+	"stock_market_data_points": "行情数据点",
+	"stock_news_items":     "新闻条目",
+	"stock_data_sources":   "数据源",
+	"stock_data_tasks":     "数据任务",
+	"stock_agent_runs":     "AI 代理运行记录",
+	"stock_agent_run_steps": "AI 代理运行步骤",
+}
+
+// describeTable returns a human-readable description for a table,
+// or a module-level fallback if the table isn't in the map.
+func describeTable(name string) string {
+	if desc, ok := tableDescriptionMap[name]; ok {
+		return desc
+	}
+	switch {
+	case strings.HasPrefix(name, "codex_gateway_"):
+		return "Codex Gateway 模块表"
+	case strings.HasPrefix(name, "codex_cli_"):
+		return "Codex CLI 模块表"
+	case strings.HasPrefix(name, "mail_"):
+		return "邮件模块表"
+	case strings.HasPrefix(name, "stock_"):
+		return "股票模块表"
+	case strings.HasPrefix(name, "image_") || strings.HasPrefix(name, "media_") || strings.HasPrefix(name, "object_storage_"):
+		return "多媒体模块表"
+	case strings.HasPrefix(name, "v2ray_"):
+		return "V2Ray 模块表"
+	case strings.HasPrefix(name, "docker_"):
+		return "Docker 模块表"
+	case strings.HasPrefix(name, "system_"):
+		return "系统模块表"
+	case strings.HasPrefix(name, "__") || strings.HasPrefix(name, "sqlite_"):
+		return "SQLite 内部表"
+	}
+	return "数据表"
+}
+
+// DatabaseStats returns cached database statistics (total size + per-table
+// breakdown). If the cache is older than DatabaseStatsCacheTTL it triggers
+// a synchronous refresh.
+func (s *Store) DatabaseStats(ctx context.Context) (DatabaseStats, error) {
+	s.dbStatsMu.RLock()
+	cached := s.dbStatsCache
+	at := s.dbStatsAt
+	s.dbStatsMu.RUnlock()
+	if !at.IsZero() && time.Since(at) < DatabaseStatsCacheTTL {
+		return cached, nil
+	}
+	return s.refreshDatabaseStats(ctx)
+}
+
+// refreshDatabaseStats recomputes stats and updates the cache.
+func (s *Store) refreshDatabaseStats(ctx context.Context) (DatabaseStats, error) {
+	stats, err := s.computeDatabaseStats(ctx)
+	if err != nil {
+		return DatabaseStats{}, err
+	}
+	s.dbStatsMu.Lock()
+	s.dbStatsCache = stats
+	s.dbStatsAt = time.Now()
+	s.dbStatsMu.Unlock()
+	return stats, nil
+}
+
+// computeDatabaseStats calculates per-table sizes.
+//
+// Strategy:
+//   - Total size comes from the file system (os.Stat), which is accurate.
+//   - Per-table sizes are estimated by walking every user table, counting
+//     rows, and multiplying by an estimated row size derived from column
+//     types.  Index overhead is approximated with a per-table multiplier.
+//   - Estimated table sizes are then normalized so their sum equals the
+//     total database size (minus a small fixed overhead for SQLite
+//     internals).  This keeps the pie chart visually consistent with the
+//     file size the user sees elsewhere.
+//
+// This approach avoids requiring the dbstat virtual table (which isn't
+// compiled into the stock go-sqlite3 build) and stays fast enough to run
+// once per minute even on multi-hundred-MB databases.
+func (s *Store) computeDatabaseStats(ctx context.Context) (DatabaseStats, error) {
+	totalBytes, err := s.DatabaseSizeBytes()
+	if err != nil {
+		return DatabaseStats{}, fmt.Errorf("get db file size: %w", err)
+	}
+	if s.dbPath == ":memory:" || totalBytes == 0 {
+		return DatabaseStats{
+			TotalBytes: totalBytes,
+			Tables:     []DatabaseTableStat{},
+			UpdatedAt:  now(),
+		}, nil
+	}
+
+	// Use a separate, read-only connection so the stats query doesn't
+	// contend with the single main-pool connection during writes.
+	statDB, err := sql.Open("sqlite3", s.dbPath+"?mode=ro")
+	if err != nil {
+		// Fallback: just return total size with empty table list.
+		return DatabaseStats{
+			TotalBytes: totalBytes,
+			Tables:     []DatabaseTableStat{},
+			UpdatedAt:  now(),
+		}, nil
+	}
+	defer statDB.Close()
+	statDB.SetMaxOpenConns(1)
+	_, _ = statDB.ExecContext(ctx, `PRAGMA busy_timeout = 500`)
+
+	// 1. List all user tables (exclude internal / FTS / virtual tables).
+	// Note: underscore in LIKE is a single-char wildcard, so we must
+	// escape literal underscores.
+	rows, err := statDB.QueryContext(ctx, `
+		SELECT name FROM sqlite_master
+		WHERE type = 'table'
+		  AND name NOT LIKE 'sqlite\_%' ESCAPE '\'
+		  AND name NOT LIKE '%\_fts%' ESCAPE '\'
+		  AND name NOT LIKE 'sqlite\_stat%' ESCAPE '\'
+		  AND name NOT LIKE '\_\_%' ESCAPE '\'
+		ORDER BY name
+	`)
+	if err != nil {
+		return DatabaseStats{
+			TotalBytes: totalBytes,
+			Tables:     []DatabaseTableStat{},
+			UpdatedAt:  now(),
+		}, nil
+	}
+	var tableNames []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err == nil {
+			tableNames = append(tableNames, name)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return DatabaseStats{
+			TotalBytes: totalBytes,
+			Tables:     []DatabaseTableStat{},
+			UpdatedAt:  now(),
+		}, nil
+	}
+
+	// 2. For each table, estimate row size from column types + row count.
+	type tableEstimate struct {
+		name        string
+		rowCount    int64
+		estRowBytes int
+	}
+	estimates := make([]tableEstimate, 0, len(tableNames))
+	var totalEstimated int64
+
+	for _, name := range tableNames {
+		// Get column info to estimate row size.
+		colRows, err := statDB.QueryContext(ctx, "PRAGMA table_info("+quoteIdentifier(name)+")")
+		if err != nil {
+			continue
+		}
+		var rowSizeEst int
+		for colRows.Next() {
+			var (
+				cid       int
+				colName   string
+				colType   string
+				notNull   int
+				dfltValue sql.NullString
+				pk        int
+			)
+			if err := colRows.Scan(&cid, &colName, &colType, &notNull, &dfltValue, &pk); err != nil {
+				continue
+			}
+			rowSizeEst += estimateColumnBytes(colType, colName)
+		}
+		colRows.Close()
+		if rowSizeEst == 0 {
+			rowSizeEst = 64 // conservative fallback
+		}
+		// Minimum 4 bytes per row (page overhead is captured separately).
+		if rowSizeEst < 4 {
+			rowSizeEst = 4
+		}
+
+		// Count rows — best-effort, skip if too slow.
+		var count int64
+		countRow := statDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+quoteIdentifier(name))
+		if err := countRow.Scan(&count); err != nil {
+			count = 0
+		}
+		if count < 0 {
+			count = 0
+		}
+
+		estimates = append(estimates, tableEstimate{
+			name:        name,
+			rowCount:    count,
+			estRowBytes: rowSizeEst,
+		})
+		totalEstimated += count * int64(rowSizeEst)
+	}
+
+	// 3. Count indexes per table to estimate index overhead.
+	indexCount := make(map[string]int)
+	for _, name := range tableNames {
+		idxRows, err := statDB.QueryContext(ctx, "PRAGMA index_list("+quoteIdentifier(name)+")")
+		if err != nil {
+			continue
+		}
+		n := 0
+		for idxRows.Next() {
+			n++
+		}
+		idxRows.Close()
+		indexCount[name] = n
+	}
+
+	// 4. Allocate total bytes across tables proportional to estimated size.
+	//    Reserve ~8% for SQLite page overhead / internal tables / free pages.
+	const overheadFraction = 0.08
+	allocatable := int64(float64(totalBytes) * (1.0 - overheadFraction))
+	if allocatable <= 0 {
+		allocatable = totalBytes
+	}
+
+	tables := make([]DatabaseTableStat, 0, len(estimates))
+	for _, est := range estimates {
+		var sizeBytes int64
+		if totalEstimated > 0 && est.rowCount > 0 {
+			share := float64(est.rowCount*int64(est.estRowBytes)) / float64(totalEstimated)
+			sizeBytes = int64(share * float64(allocatable))
+		} else {
+			sizeBytes = 0
+		}
+		// Allocate ~30% of table size to indexes as a rough estimate,
+		// scaled by the number of indexes.
+		idxCount := indexCount[est.name]
+		var indexBytes int64
+		if idxCount > 0 && sizeBytes > 0 {
+			// 1 index ≈ 25% of table size; 2+ indexes ~45%.
+			if idxCount == 1 {
+				indexBytes = int64(float64(sizeBytes) * 0.25)
+			} else if idxCount == 2 {
+				indexBytes = int64(float64(sizeBytes) * 0.40)
+			} else {
+				indexBytes = int64(float64(sizeBytes) * 0.55)
+			}
+		}
+		pageCount := 0
+		if sizeBytes > 0 {
+			pageCount = int(sizeBytes / 4096) // assume default 4k page
+		}
+		tables = append(tables, DatabaseTableStat{
+			Name:           est.name,
+			SizeBytes:      sizeBytes,
+			IndexSizeBytes: indexBytes,
+			PageCount:      pageCount,
+			Description:    describeTable(est.name),
+		})
+	}
+
+	sortTableStats(tables)
+
+	return DatabaseStats{
+		TotalBytes: totalBytes,
+		Tables:     tables,
+		UpdatedAt:  now(),
+	}, nil
+}
+
+// estimateColumnBytes returns a rough estimate of bytes per row for a
+// column, based on its declared type and name.  These are intentionally
+// conservative — the results are normalized against the real file size
+// before display, so absolute accuracy doesn't matter, only relative
+// sizing between tables.
+func estimateColumnBytes(colType, colName string) int {
+	upper := strings.ToUpper(strings.TrimSpace(colType))
+	switch {
+	case strings.Contains(upper, "INT") || strings.Contains(upper, "INTEGER") || strings.Contains(upper, "BIGINT"):
+		return 8
+	case strings.Contains(upper, "REAL") || strings.Contains(upper, "FLOAT") || strings.Contains(upper, "DOUBLE"):
+		return 8
+	case strings.Contains(upper, "BOOL") || strings.Contains(upper, "BOOLEAN") || strings.Contains(upper, "TINYINT"):
+		return 1
+	case strings.Contains(upper, "BLOB") || strings.Contains(upper, "BINARY"):
+		return 256 // blobs vary wildly; assume moderate
+	case strings.Contains(upper, "TEXT") || strings.Contains(upper, "VARCHAR") || strings.Contains(upper, "CHAR"):
+		// Guesses based on common column names.
+		name := strings.ToLower(colName)
+		switch {
+		case strings.Contains(name, "payload") || strings.Contains(name, "body") || strings.Contains(name, "content") || strings.Contains(name, "summary"):
+			return 512
+		case strings.Contains(name, "token") || strings.Contains(name, "secret") || strings.Contains(name, "hash") || strings.Contains(name, "password"):
+			return 128
+		case strings.Contains(name, "id") || name == "key" || strings.Contains(name, "type") || strings.Contains(name, "status") || strings.Contains(name, "state"):
+			return 24
+		case strings.Contains(name, "url") || strings.Contains(name, "path") || strings.Contains(name, "email") || strings.Contains(name, "name") || strings.Contains(name, "title"):
+			return 64
+		case strings.Contains(name, "json") || strings.Contains(name, "data") || strings.Contains(name, "config") || strings.Contains(name, "settings"):
+			return 256
+		default:
+			return 32
+		}
+	case strings.Contains(upper, "DATETIME") || strings.Contains(upper, "DATE") || strings.Contains(upper, "TIME"):
+		return 24
+	case strings.Contains(upper, "DECIMAL") || strings.Contains(upper, "NUMERIC"):
+		return 12
+	default:
+		return 24
+	}
+}
+
+// quoteIdentifier wraps an identifier in double quotes for safe use in
+// dynamic SQL (table names etc.).  It doubles any embedded double quotes.
+func quoteIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+func sortTableStats(tables []DatabaseTableStat) {
+	for i := 1; i < len(tables); i++ {
+		key := tables[i]
+		keyTotal := key.SizeBytes + key.IndexSizeBytes
+		j := i - 1
+		for j >= 0 {
+			jTotal := tables[j].SizeBytes + tables[j].IndexSizeBytes
+			if jTotal >= keyTotal {
+				break
+			}
+			tables[j+1] = tables[j]
+			j--
+		}
+		tables[j+1] = key
+	}
+}
+
+// StartStatsCollector starts a background goroutine that periodically
+// refreshes the database size / table stats cache. It runs until ctx is
+// cancelled. The first refresh happens immediately.
+//
+// Stats are best-effort: if the DB is busy, the refresh is skipped and
+// retried on the next tick.
+func (s *Store) StartStatsCollector(ctx context.Context) {
+	go s.statsCollectorLoop(ctx)
+}
+
+func (s *Store) statsCollectorLoop(ctx context.Context) {
+	// First refresh shortly after startup.
+	select {
+	case <-time.After(2 * time.Second):
+	case <-ctx.Done():
+		return
+	}
+	s.refreshDatabaseStats(ctx)
+
+	ticker := time.NewTicker(DatabaseStatsFreshnessGoal)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Use a short timeout so we don't stack up if the DB is busy.
+			refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			_, _ = s.refreshDatabaseStats(refreshCtx)
+			cancel()
+		}
+	}
 }
 
 type BackupProgress func(remaining, pageCount int)

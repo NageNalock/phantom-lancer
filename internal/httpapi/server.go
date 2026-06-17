@@ -683,12 +683,14 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		codexGatewayStatus = codexgateway.Status{LastError: err.Error()}
 	}
 	codexStatus, _ := s.codex.Status(statusCtx)
+	dbStats, _ := s.store.DatabaseStats(statusCtx)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"codexGateway":   codexGatewayStatus,
 		"codex":          codexStatus,
 		"images":         s.images.Status(statusCtx),
 		"v2ray":          s.v2ray.Status(statusCtx),
 		"recentActivity": audit,
+		"dbStats":        dbStats,
 	})
 	if err := statusCtx.Err(); errors.Is(err, context.DeadlineExceeded) {
 		s.log.Warn("dashboard summary status timeout", "summary", codexclient.Redact(err.Error(), 120), "durationMs", time.Since(started).Milliseconds())
