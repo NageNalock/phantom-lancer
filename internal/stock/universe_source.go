@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"strings"
@@ -37,6 +38,14 @@ var universeUserAgents = []string{
 	"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6; rv:129.0) Gecko/20100101 Firefox/129.0",
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
 	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+}
+
+// sinaUniverseUAs 新浪兜底用的 UA 池，与东财池部分区分，降低特征重复率。
+var sinaUniverseUAs = []string{
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6; rv:129.0) Gecko/20100101 Firefox/129.0",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (iPad; CPU OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
 }
 
 // universeInstrument 内部中间结构，加上 remoteMarket（f13 原始值）便于后续处理。
@@ -71,6 +80,8 @@ func (s *Service) RefreshAStockUniverse(ctx context.Context, mode MaintenanceMod
 		eastmoneyNotes := append([]string{}, fetchNotes...)
 		s.log.WarnContext(ctx, "stock: eastmoney universe failed, falling back to sina",
 			"error", fetchErr.Error(),
+			"notes", strings.Join(eastmoneyNotes, " | "),
+			"fetched_from_eastmoney", len(raw),
 		)
 		raw, fetchNotes, fetchErr = s.fetchSinaUniverse(ctx)
 		fetchNotes = append(eastmoneyNotes, fetchNotes...)
@@ -201,6 +212,7 @@ func (s *Service) RefreshAStockUniverse(ctx context.Context, mode MaintenanceMod
 			"delisted", delisted,
 			"failed", failed,
 			"status", status,
+			"notes", strings.Join(notes, " | "),
 			"latency_ms", s.now().Sub(started).Milliseconds(),
 		)
 	}
@@ -242,6 +254,7 @@ func (s *Service) fetchEastmoneyUniverse(ctx context.Context) ([]universeInstrum
 	if err != nil {
 		s.log.WarnContext(ctx, "stock: eastmoney universe page 1 failed",
 			"error", err.Error(),
+			"url", eastmoneyClistURL(1, pageSize),
 		)
 		return nil, notes, fmt.Errorf("eastmoney clist page 1: %w", err)
 	}
@@ -263,22 +276,32 @@ func (s *Service) fetchEastmoneyUniverse(ctx context.Context) ([]universeInstrum
 		"page_size", pageSize,
 	)
 	for p := 2; p <= pages; p++ {
-		// 100ms sleep 防反爬
-		select {
-		case <-ctx.Done():
-			return all, notes, ctx.Err()
-		case <-time.After(100 * time.Millisecond):
+		// 基础 sleep + 随机抖动，防反爬；每 5 页后加一次较长的"喘气"间隔
+		base := 100 * time.Millisecond
+		jitter := 150 * time.Millisecond
+		if (p-1)%5 == 0 {
+			base = 600 * time.Millisecond
+			jitter = 800 * time.Millisecond
+		}
+		if err := sleepJitter(ctx, base, jitter); err != nil {
+			return all, notes, err
 		}
 		page, _, perr := s.fetchEastmoneyClistPage(ctx, p, pageSize)
 		if perr != nil {
-			s.log.DebugContext(ctx, "stock: eastmoney universe page fetch failed",
+			s.log.WarnContext(ctx, "stock: eastmoney universe page fetch failed",
 				"page", p,
 				"error", perr.Error(),
+				"url", eastmoneyClistURL(p, pageSize),
 			)
 			notes = append(notes, fmt.Sprintf("page %d: %v", p, perr))
 			continue
 		}
 		all = append(all, page...)
+		s.log.DebugContext(ctx, "stock: eastmoney universe page fetched",
+			"page", p,
+			"page_size", len(page),
+			"cumulative", len(all),
+		)
 		if len(page) < pageSize {
 			break
 		}
@@ -289,15 +312,47 @@ func (s *Service) fetchEastmoneyUniverse(ctx context.Context) ([]universeInstrum
 	return all, notes, nil
 }
 
-// fetchEastmoneyClistPage 拉单页，解析出 items 和东财返回的 total。
-func (s *Service) fetchEastmoneyClistPage(ctx context.Context, pageNum, pageSize int) ([]universeInstrument, int, error) {
-	url := "https://push2.eastmoney.com/api/qt/clist/get" +
+// eastmoneySortIDs 东财 clist 排序字段轮换（f3=涨跌幅,f12=代码,f14=名称,f2=最新价）。
+// 轮换 fid 可以降低被判定为批量爬虫的风险。
+var eastmoneySortIDs = []string{"f3", "f12", "f14", "f2"}
+
+// eastmoneyClistURL 构造东财 clist/get 请求 URL。
+// 每次构造带随机排序字段和时间戳 cache-buster，降低风控命中概率。
+func eastmoneyClistURL(pageNum, pageSize int) string {
+	fid := eastmoneySortIDs[rand.IntN(len(eastmoneySortIDs))]
+	return "https://push2.eastmoney.com/api/qt/clist/get" +
 		"?pn=" + strconv.Itoa(pageNum) +
 		"&pz=" + strconv.Itoa(pageSize) +
 		"&po=1&np=1&fltt=2&invt=2" +
-		"&fid=f3" +
+		"&fid=" + fid +
 		"&fs=" + eastmoneyUniverseFS +
-		"&fields=" + eastmoneyClistFields
+		"&fields=" + eastmoneyClistFields +
+		"&_=" + strconv.FormatInt(time.Now().UnixMilli(), 10)
+}
+
+// sleepJitter 在 [base, base+jitter) 的随机区间内 sleep。ctx 取消则提前返回。
+func sleepJitter(ctx context.Context, base, jitter time.Duration) error {
+	if jitter < 0 {
+		jitter = 0
+	}
+	d := base
+	if jitter > 0 {
+		d += time.Duration(rand.Int64N(int64(jitter)))
+	}
+	if d <= 0 {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
+}
+
+// fetchEastmoneyClistPage 拉单页，解析出 items 和东财返回的 total。
+func (s *Service) fetchEastmoneyClistPage(ctx context.Context, pageNum, pageSize int) ([]universeInstrument, int, error) {
+	url := eastmoneyClistURL(pageNum, pageSize)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, 0, err
@@ -306,15 +361,15 @@ func (s *Service) fetchEastmoneyClistPage(ctx context.Context, pageNum, pageSize
 	req.Header.Set("User-Agent", universeUserAgents[(pageNum-1)%len(universeUserAgents)])
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("do: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, 0, fmt.Errorf("status %d", resp.StatusCode)
-	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("read body: %w (status=%d)", err, resp.StatusCode)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, 0, fmt.Errorf("status %d body=%q", resp.StatusCode, truncateBytes(body, 400))
 	}
 	var payload struct {
 		Data struct {
@@ -376,30 +431,41 @@ func (s *Service) fetchSinaUniverse(ctx context.Context) ([]universeInstrument, 
 		{"sz_a", 0},
 		{"bj_a", 2},
 	}
+	// 节点顺序洗牌，避免每次都同样的请求节奏
+	rand.Shuffle(len(nodes), func(i, j int) { nodes[i], nodes[j] = nodes[j], nodes[i] })
+	const pageSize = 2000
 	var all []universeInstrument
 	var notes []string
-	for _, n := range nodes {
-		const pageSize = 2000
+	for idx, n := range nodes {
+		// 非首个节点前加 jitter sleep；首个节点不加，降低整体延迟
+		if idx > 0 {
+			if err := sleepJitter(ctx, 200*time.Millisecond, 500*time.Millisecond); err != nil {
+				return all, notes, err
+			}
+		}
 		url := "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData" +
 			"?page=1&num=" + strconv.Itoa(pageSize) +
 			"&sort=symbol&asc=1&node=" + n.pageFlag +
-			"&symbol=&_s_r_a=page"
+			"&symbol=&_s_r_a=page" +
+			"&_=" + strconv.FormatInt(time.Now().UnixMilli()+int64(idx)*137, 10)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
-			s.log.DebugContext(ctx, "stock: sina universe node request build failed",
+			s.log.WarnContext(ctx, "stock: sina universe node request build failed",
 				"node", n.pageFlag,
 				"error", err.Error(),
+				"url", url,
 			)
 			notes = append(notes, fmt.Sprintf("%s: %v", n.pageFlag, err))
 			continue
 		}
 		req.Header.Set("Referer", "https://finance.sina.com.cn/")
-		req.Header.Set("User-Agent", stockQuoteUserAgent)
+		req.Header.Set("User-Agent", sinaUniverseUAs[(idx+rand.IntN(len(sinaUniverseUAs)))%len(sinaUniverseUAs)])
 		resp, err := s.client.Do(req)
 		if err != nil {
-			s.log.DebugContext(ctx, "stock: sina universe node fetch failed",
+			s.log.WarnContext(ctx, "stock: sina universe node fetch failed",
 				"node", n.pageFlag,
 				"error", err.Error(),
+				"url", url,
 			)
 			notes = append(notes, fmt.Sprintf("%s: %v", n.pageFlag, err))
 			continue
@@ -407,11 +473,21 @@ func (s *Service) fetchSinaUniverse(ctx context.Context) ([]universeInstrument, 
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
 		resp.Body.Close()
 		if err != nil {
-			s.log.DebugContext(ctx, "stock: sina universe node read failed",
+			s.log.WarnContext(ctx, "stock: sina universe node read failed",
 				"node", n.pageFlag,
+				"status", resp.StatusCode,
 				"error", err.Error(),
 			)
 			notes = append(notes, fmt.Sprintf("%s: read: %v", n.pageFlag, err))
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			s.log.WarnContext(ctx, "stock: sina universe node http error",
+				"node", n.pageFlag,
+				"status", resp.StatusCode,
+				"body_prefix", truncateBytes(body, 400),
+			)
+			notes = append(notes, fmt.Sprintf("%s: status %d", n.pageFlag, resp.StatusCode))
 			continue
 		}
 		// 新浪返回的是 JS 伪 JSON（字段不加引号），宽松解析的话先做键加引号：
@@ -423,9 +499,16 @@ func (s *Service) fetchSinaUniverse(ctx context.Context) ([]universeInstrument, 
 			TradeStatus  string `json:"trade"` // 1=可交易 0=停牌（新浪接口）
 		}
 		if err := json.Unmarshal(fixed, &rows); err != nil {
+			s.log.WarnContext(ctx, "stock: sina universe node parse failed",
+				"node", n.pageFlag,
+				"error", err.Error(),
+				"raw_prefix", truncateBytes(body, 300),
+				"normalized_prefix", truncateBytes(fixed, 300),
+			)
 			notes = append(notes, fmt.Sprintf("%s: unmarshal: %v (normalized: %s)", n.pageFlag, err, truncateBytes(fixed, 200)))
 			continue
 		}
+		nodeCount := 0
 		for _, r := range rows {
 			symbol, market := normalizeSinaUniverseSymbol(r.Code, r.MarketSymbol, n.market)
 			if symbol == "" || r.Name == "" {
@@ -436,12 +519,13 @@ func (s *Service) fetchSinaUniverse(ctx context.Context) ([]universeInstrument, 
 				RemoteMarket: market,
 				Name:         r.Name,
 			})
+			nodeCount++
 		}
-		select {
-		case <-ctx.Done():
-			return all, notes, ctx.Err()
-		case <-time.After(200 * time.Millisecond):
-		}
+		s.log.InfoContext(ctx, "stock: sina universe node fetched",
+			"node", n.pageFlag,
+			"count", nodeCount,
+			"raw_rows", len(rows),
+		)
 	}
 	if len(all) == 0 {
 		return nil, notes, fmt.Errorf("sina universe 返回 0 条: %s", strings.Join(notes, "; "))
