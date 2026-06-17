@@ -5831,6 +5831,88 @@ WHERE id IN (
 	}
 }
 
+const DefaultEventRetentionDays = 30
+
+// DefaultEventRetentionBatchSize bounds the number of rows deleted in a
+// single DELETE statement so we never hold a write lock on the events
+// table for too long on large databases. The pruner loops until no
+// further rows match the cutoff.
+const DefaultEventRetentionBatchSize = 1000
+
+const eventRetentionDaysSettingKey = "system.event_retention_days"
+
+// GetEventRetentionDays returns the configured event retention in days.
+// A return value of 0 means retention is disabled and rows are never
+// pruned. Missing/unparseable settings fall back to
+// DefaultEventRetentionDays.
+func (s *Store) GetEventRetentionDays(ctx context.Context) int {
+	row := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, eventRetentionDaysSettingKey)
+	var raw string
+	if err := row.Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return DefaultEventRetentionDays
+		}
+		return DefaultEventRetentionDays
+	}
+	var days int
+	if _, err := fmt.Sscanf(raw, "%d", &days); err != nil || days < 0 {
+		return DefaultEventRetentionDays
+	}
+	return days
+}
+
+// SetEventRetentionDays updates the global event retention window.
+// Pass 0 to disable time-based pruning entirely.
+func (s *Store) SetEventRetentionDays(ctx context.Context, days int) error {
+	if days < 0 {
+		days = 0
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		eventRetentionDaysSettingKey, fmt.Sprintf("%d", days))
+	return err
+}
+
+// DeleteEventsOlderThan removes events rows with created_at strictly
+// earlier than `cutoff`. Deletion happens in batches bounded by
+// batchSize (defaulting to DefaultEventRetentionBatchSize) to avoid
+// holding an exclusive write lock for the whole table. Returns the
+// total number of rows deleted across all batches.
+func (s *Store) DeleteEventsOlderThan(ctx context.Context, cutoff time.Time, batchSize int) (int64, error) {
+	if batchSize <= 0 {
+		batchSize = DefaultEventRetentionBatchSize
+	}
+	cutoffStr := cutoff.UTC().Format(time.RFC3339Nano)
+	var total int64
+	for {
+		res, err := s.db.ExecContext(ctx, `
+DELETE FROM events
+WHERE id IN (
+    SELECT id FROM events
+    WHERE created_at < ?
+    ORDER BY created_at ASC, id ASC
+    LIMIT ?
+)`, cutoffStr, batchSize)
+		if err != nil {
+			return total, err
+		}
+		affected, _ := res.RowsAffected()
+		total += affected
+		if affected < int64(batchSize) {
+			return total, nil
+		}
+		// Yield to other writers between batches. SQLite's busy
+		// timeout covers us in the overwhelming majority of cases,
+		// but an explicit sleep ensures GC never starves the app
+		// during a large backfill.
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func (s *Store) AppendEvent(ctx context.Context, scope, scopeID, eventType string, payload map[string]any) (events.Event, error) {
 	id, err := ids.New("evt")
 	if err != nil {
