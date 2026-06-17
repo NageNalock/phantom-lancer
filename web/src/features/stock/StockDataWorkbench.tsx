@@ -1,5 +1,5 @@
 import { ArrowsClockwise, Database, MagnifyingGlass, Plus, ShieldCheck } from "@phosphor-icons/react";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useId, useState, type FormEvent } from "react";
 import type { AppActions } from "../../app/App";
 import type { AppData, StockDataMaintenanceResult, StockDataSource, StockInstrument, StockInstrumentSearchResponse } from "../../app/types";
 import { friendlyError } from "../../api/client";
@@ -301,6 +301,38 @@ export function StockDataWorkbench({ actions, data, runAction }: { actions: AppA
   );
 }
 
+function PageJumpInput({ page, pageCount, onJump }: { page: number; pageCount: number; onJump: (page: number) => void }) {
+  const [value, setValue] = useState(String(page));
+  const id = useId();
+  useEffect(() => {
+    setValue(String(page));
+  }, [page]);
+  function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    const n = parseInt(value, 10);
+    if (!isNaN(n) && n >= 1 && n <= pageCount) {
+      onJump(n);
+    } else {
+      setValue(String(page));
+    }
+  }
+  return (
+    <form onSubmit={handleSubmit} className="flex items-center gap-1">
+      <label htmlFor={id} className="sr-only">跳转到</label>
+      <input
+        id={id}
+        type="number"
+        min={1}
+        max={pageCount}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        className="input h-7 w-14 px-1.5 py-0 text-center text-xs"
+        aria-label="页码"
+      />
+    </form>
+  );
+}
+
 function StockInstrumentList({ actions, data, runAction }: { actions: AppActions; data: AppData; runAction: (label: string, fn: () => Promise<void>) => Promise<void> }) {
   const [query, setQuery] = useState("");
   const [market, setMarket] = useState("all");
@@ -308,7 +340,7 @@ function StockInstrumentList({ actions, data, runAction }: { actions: AppActions
   const [industry, setIndustry] = useState("");
   const [quality, setQuality] = useState("all");
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
+  const [pageSize, setPageSize] = useState(25);
   const [result, setResult] = useState<StockInstrumentSearchResponse | null>(null);
   const [industries, setIndustries] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -428,9 +460,11 @@ function StockInstrumentList({ actions, data, runAction }: { actions: AppActions
         </Field>
         <Field label="每页">
           <select className="select mono" onChange={(event) => resetPage(() => setPageSize(Number(event.target.value)))} value={pageSize}>
+            <option value={10}>10</option>
             <option value={25}>25</option>
             <option value={50}>50</option>
             <option value={100}>100</option>
+            <option value={200}>200</option>
           </select>
         </Field>
       </div>
@@ -488,9 +522,38 @@ function StockInstrumentList({ actions, data, runAction }: { actions: AppActions
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--muted-strong)]">
         <span>第 <span className="mono">{result?.page || page}</span> / <span className="mono">{pageCount}</span> 页 · 总量 <span className="mono">{total}</span>{result?.fts ? " · FTS" : ""}</span>
-        <div className="flex items-center gap-2">
-          <Button className="min-h-7 px-2 text-xs" disabled={loading || page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>上一页</Button>
-          <Button className="min-h-7 px-2 text-xs" disabled={loading || page >= pageCount} onClick={() => setPage((current) => current + 1)}>下一页</Button>
+        <div className="flex items-center gap-1.5">
+          <Button
+            className="min-h-7 px-2 text-xs"
+            disabled={loading || page <= 1}
+            onClick={() => setPage(1)}
+            title="首页"
+          >
+            «
+          </Button>
+          <Button
+            className="min-h-7 px-2 text-xs"
+            disabled={loading || page <= 1}
+            onClick={() => setPage((current) => Math.max(1, current - 1))}
+          >
+            上一页
+          </Button>
+          <PageJumpInput page={page} pageCount={pageCount} onJump={(n) => setPage(n)} />
+          <Button
+            className="min-h-7 px-2 text-xs"
+            disabled={loading || page >= pageCount}
+            onClick={() => setPage((current) => current + 1)}
+          >
+            下一页
+          </Button>
+          <Button
+            className="min-h-7 px-2 text-xs"
+            disabled={loading || page >= pageCount}
+            onClick={() => setPage(pageCount)}
+            title="末页"
+          >
+            »
+          </Button>
         </div>
       </div>
     </Panel>
