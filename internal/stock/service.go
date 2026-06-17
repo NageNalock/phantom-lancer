@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -238,7 +239,7 @@ func (s *Service) TestProxyConnectivity(ctx context.Context, source string) (lat
 	switch source {
 	case "eastmoney":
 		// 最小化 clist 请求，pz=1 即可
-		url = "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=1&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:0+t:6&fields=f12"
+		url = "https://push2his.eastmoney.com/api/qt/clist/get?pn=1&pz=1&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:0+t:6&fields=f12"
 	case "sina":
 		url = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=1&sort=symbol&asc=1&node=sh_a"
 	case "tencent":
@@ -1190,7 +1191,7 @@ func (s *Service) fetchEastmoneyQuotes(ctx context.Context, symbols []string) ([
 	for _, symbol := range symbols {
 		secids = append(secids, eastmoneySecID(symbol))
 	}
-	url := "https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f12,f13,f14,f2,f3,f4,f5,f6,f17,f18,f20,f21,f124,f297&secids=" + strings.Join(secids, ",")
+	url := "https://push2his.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f12,f13,f14,f2,f3,f4,f5,f6,f17,f18,f20,f21,f124,f297&secids=" + strings.Join(secids, ",")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, nil, err
@@ -1294,43 +1295,143 @@ func (s *Service) quoteRefreshSymbols(ctx context.Context) ([]string, error) {
 	return symbols, nil
 }
 
+// fetchSinaQuotes 通过 money.finance.sina.com.cn 的 K 线接口（最后一根 = 当日行情）批量拉取。
+// hq.sinajs.cn 对所有云厂商出口 IP 做 403，因此不再使用。
 func (s *Service) fetchSinaQuotes(ctx context.Context, symbols []string) ([]storage.StockQuote, []string, error) {
-	codes := make([]string, 0, len(symbols))
+	if len(symbols) == 0 {
+		return nil, nil, nil
+	}
+	type job struct {
+		symbol string
+		market string
+	}
+	jobs := make([]job, 0, len(symbols))
 	for _, symbol := range symbols {
-		market := "sh"
-		if strings.HasPrefix(symbol, "0") || strings.HasPrefix(symbol, "3") {
-			market = "sz"
-		} else if strings.HasPrefix(symbol, "8") || strings.HasPrefix(symbol, "4") {
-			market = "bj"
+		market := "SH"
+		switch {
+		case strings.HasPrefix(symbol, "0"), strings.HasPrefix(symbol, "3"):
+			market = "SZ"
+		case strings.HasPrefix(symbol, "8"), strings.HasPrefix(symbol, "4"):
+			market = "BJ"
 		}
-		codes = append(codes, market+strings.ToLower(symbol))
+		jobs = append(jobs, job{symbol: symbol, market: market})
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://hq.sinajs.cn/list="+strings.Join(codes, ","), nil)
-	if err != nil {
-		return nil, nil, err
+
+	type singleResult struct {
+		symbol, market string
+		quotes         []storage.StockQuote
+		err            error
 	}
-	req.Header.Set("Referer", "https://finance.sina.com.cn/")
-	req.Header.Set("User-Agent", stockQuoteUserAgent)
-	hc, proxyURL := s.clientFor(ctx, "sina")
-	if proxyURL != "" {
-		s.log.DebugContext(ctx, "stock: sina quote using proxy",
-			"proxy", proxyURL,
-			"symbols", len(symbols),
-		)
+
+	// 控制并发：K 线接口对 UA 轮换后基本不限流，8 并发比较稳
+	const batchSize = 50
+	const concurrency = 8
+	var notes []string
+	mu := sync.Mutex{}
+	quotes := make([]storage.StockQuote, 0, len(symbols))
+
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for _, j := range jobs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(j job) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			marketCode := strings.ToLower(j.market) + strings.ToLower(j.symbol)
+			// datalen=2 至少拿 1 天前 + 今天；非交易时段今天可能没数据，一定能拿到 yesterday
+			url := "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData" +
+				"?symbol=" + marketCode + "&scale=240&ma=no&datalen=3&_=" + strconv.FormatInt(time.Now().UnixMilli(), 10)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				mu.Lock()
+				notes = append(notes, fmt.Sprintf("%s new_req: %v", j.symbol, err))
+				mu.Unlock()
+				return
+			}
+			req.Header.Set("Referer", "https://finance.sina.com.cn/")
+			req.Header.Set("User-Agent", universeUserAgents[rand.IntN(len(universeUserAgents))])
+
+			hc, proxyURL := s.clientFor(ctx, "sina")
+			resp, err := hc.Do(req)
+			if err != nil {
+				mu.Lock()
+				notes = append(notes, fmt.Sprintf("%s fetch: %v (proxy=%q)", j.symbol, err, proxyURL))
+				mu.Unlock()
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				mu.Lock()
+				notes = append(notes, fmt.Sprintf("%s status=%d proxy=%q", j.symbol, resp.StatusCode, proxyURL))
+				mu.Unlock()
+				return
+			}
+			raw, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
+			if err != nil {
+				mu.Lock()
+				notes = append(notes, fmt.Sprintf("%s read: %v", j.symbol, err))
+				mu.Unlock()
+				return
+			}
+			type klineItem struct {
+				Day    string `json:"day"`
+				Open   string `json:"open"`
+				High   string `json:"high"`
+				Low    string `json:"low"`
+				Close  string `json:"close"`
+				Volume string `json:"volume"`
+			}
+			var items []klineItem
+			if err := json.Unmarshal(raw, &items); err != nil {
+				mu.Lock()
+				notes = append(notes, fmt.Sprintf("%s json: %v body=%q", j.symbol, err, limitText(string(raw), 120)))
+				mu.Unlock()
+				return
+			}
+			if len(items) == 0 {
+				return
+			}
+			// 取最新一根 K 线
+			last := items[len(items)-1]
+			closeP := parseFloat(last.Close)
+			if closeP <= 0 {
+				return
+			}
+			// 今日 open == close 非交易时段：若 len >=2 第二根是昨收
+			prevClose := 0.0
+			if len(items) >= 2 {
+				prevClose = parseFloat(items[len(items)-2].Close)
+			}
+			quoteTime := s.now()
+			if last.Day != "" {
+				if parsed, err := time.ParseInLocation("2006-01-02 15:04:05", last.Day+" 15:00:00", time.FixedZone("Asia/Shanghai", 8*3600)); err == nil {
+					quoteTime = parsed
+				}
+			}
+			q := storage.StockQuote{
+				Symbol:         j.symbol,
+				Market:         j.market,
+				Name:           "", // K 线接口不返回中文名，上游用 universe 表补齐
+				LastPrice:      closeP,
+				PreviousClose:  prevClose,
+				Volume:         parseFloat(last.Volume),
+				DataTimestamp:  quoteTime.Format(time.RFC3339Nano),
+				DataFreshness:  "fresh",
+				TradableStatus: "tradable",
+			}
+			mu.Lock()
+			quotes = append(quotes, q)
+			mu.Unlock()
+		}(j)
 	}
-	resp, err := hc.Do(req)
-	if err != nil {
-		return nil, nil, err
+	wg.Wait()
+
+	if len(quotes) == 0 {
+		return nil, notes, fmt.Errorf("sina kline 返回 0 条有效行情; notes=%s", strings.Join(notes, ";"))
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, nil, fmt.Errorf("sina quote status %d proxy=%q", resp.StatusCode, proxyURL)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
-	if err != nil {
-		return nil, nil, err
-	}
-	return parseSinaQuoteResponse(string(body), s.now()), nil, nil
+	return quotes, notes, nil
 }
 
 func parseSinaQuoteResponse(body string, now time.Time) []storage.StockQuote {

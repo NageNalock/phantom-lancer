@@ -72,20 +72,22 @@ func (s *Service) RefreshAStockUniverse(ctx context.Context, mode MaintenanceMod
 			return DataTaskResult{Notes: []string{"A 股全量主数据刷新已在 20 小时内完成，本轮跳过"}}, nil
 		}
 	}
-	raw, fetchNotes, fetchErr := s.fetchEastmoneyUniverse(ctx)
-	source := "eastmoney_universe"
+	// sina_universe 优先：money.finance.sina.com.cn 在云出口不 RST（push2.eastmoney.com 会）。
+	// sina 失败时才 fallback 到 eastmoney clist/get（家庭宽带/部分机房仍可用）。
+	raw, fetchNotes, fetchErr := s.fetchSinaUniverse(ctx)
+	source := "sina_universe"
 	fullSource := true
 	if fetchErr != nil {
-		fetchNotes = append(fetchNotes, "eastmoney_universe: "+fetchErr.Error())
-		eastmoneyNotes := append([]string{}, fetchNotes...)
-		s.log.WarnContext(ctx, "stock: eastmoney universe failed, falling back to sina",
+		fetchNotes = append(fetchNotes, "sina_universe: "+fetchErr.Error())
+		sinaNotes := append([]string{}, fetchNotes...)
+		s.log.WarnContext(ctx, "stock: sina universe failed, falling back to eastmoney",
 			"error", fetchErr.Error(),
-			"notes", strings.Join(eastmoneyNotes, " | "),
-			"fetched_from_eastmoney", len(raw),
+			"notes", strings.Join(sinaNotes, " | "),
+			"fetched_from_sina", len(raw),
 		)
-		raw, fetchNotes, fetchErr = s.fetchSinaUniverse(ctx)
-		fetchNotes = append(eastmoneyNotes, fetchNotes...)
-		source = "sina_universe"
+		raw, fetchNotes, fetchErr = s.fetchEastmoneyUniverse(ctx)
+		fetchNotes = append(sinaNotes, fetchNotes...)
+		source = "eastmoney_universe"
 		fullSource = false
 	}
 	fetchDegraded := len(fetchNotes) > 0
@@ -312,6 +314,22 @@ func (s *Service) fetchEastmoneyUniverse(ctx context.Context) ([]universeInstrum
 	return all, notes, nil
 }
 
+// eastmoneyClistHosts 东财 clist/get 接口节点池。
+// push2his 优先：push2 在国内部分云厂商出口 (Azure/TencentCloud) 应用层被 RST，
+// 而同后端的 push2his (流量管理器的另一条 CNAME) 拦截策略更宽松。
+var eastmoneyClistHosts = []string{
+	"push2his.eastmoney.com",
+	"push2.eastmoney.com",
+}
+
+// pickEastmoneyHost 随机返回节点池中的一个 (带洗牌)，降低命中风控/区域封禁。
+func pickEastmoneyHost() string {
+	cp := make([]string, len(eastmoneyClistHosts))
+	copy(cp, eastmoneyClistHosts)
+	rand.Shuffle(len(cp), func(i, j int) { cp[i], cp[j] = cp[j], cp[i] })
+	return cp[0]
+}
+
 // eastmoneySortIDs 东财 clist 排序字段轮换（f3=涨跌幅,f12=代码,f14=名称,f2=最新价）。
 // 轮换 fid 可以降低被判定为批量爬虫的风险。
 var eastmoneySortIDs = []string{"f3", "f12", "f14", "f2"}
@@ -320,7 +338,7 @@ var eastmoneySortIDs = []string{"f3", "f12", "f14", "f2"}
 // 每次构造带随机排序字段和时间戳 cache-buster，降低风控命中概率。
 func eastmoneyClistURL(pageNum, pageSize int) string {
 	fid := eastmoneySortIDs[rand.IntN(len(eastmoneySortIDs))]
-	return "https://push2.eastmoney.com/api/qt/clist/get" +
+	return "https://" + pickEastmoneyHost() + "/api/qt/clist/get" +
 		"?pn=" + strconv.Itoa(pageNum) +
 		"&pz=" + strconv.Itoa(pageSize) +
 		"&po=1&np=1&fltt=2&invt=2" +

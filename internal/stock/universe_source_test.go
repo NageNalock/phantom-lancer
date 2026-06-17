@@ -155,8 +155,15 @@ func TestRefreshAStockUniverseSkipsDelistWhenEastmoneyPartial(t *testing.T) {
 
 	svc := NewService(store, nil)
 	svc.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.Host != "push2.eastmoney.com" {
-			return stringResponse(http.StatusNotFound, `{"error":"unexpected host"}`), nil
+		host := req.URL.Host
+		// sina (sina 作为当前主源：此 UT 要测试 eastmoney 部分失败 → 先让 sina 全 404 降级到 eastmoney
+		if strings.HasPrefix(host, "money.finance.sina") || strings.HasPrefix(host, "hq.sinajs") {
+			return stringResponse(http.StatusNotFound, `{"error":"mock: fail sina on purpose"}`), nil
+		}
+		// eastmoney：同时接受 push2.eastmoney.com 以及节点池里的 push2his.eastmoney.com
+		// （pickEastmoneyHost 随机选两者之一，UT 都应走 push2 这条分支）
+		if host != "push2.eastmoney.com" && host != "push2his.eastmoney.com" {
+			return stringResponse(http.StatusNotFound, `{"error":"unexpected host "+host}`), nil
 		}
 		page, _ := strconv.Atoi(req.URL.Query().Get("pn"))
 		switch page {
@@ -170,6 +177,8 @@ func TestRefreshAStockUniverseSkipsDelistWhenEastmoneyPartial(t *testing.T) {
 			return stringResponse(http.StatusOK, `{"data":{"total":1500,"diff":[]}}`), nil
 		}
 	})}
+	// 让 eastmoney 节点池选择稳定走 push2（避免 shuffle 偶尔选到 push2his 但我们返回同样结构：push2his 对 clist 返回 404，
+	// 不会被选中的话，所以这里没问题）
 
 	result, err := svc.RefreshAStockUniverse(ctx, MaintenanceModeManual, "test")
 	if err != nil {
