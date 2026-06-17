@@ -237,6 +237,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/system/update/jobs/", s.handleSystemUpdateJobSubroutes)
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handleUpdateSettings)
+	mux.HandleFunc("PUT /api/settings/system", s.handleUpdateSystemSettings)
 	mux.HandleFunc("POST /api/settings/tls-probe", s.handleProbeTLS)
 	mux.HandleFunc("POST /api/settings/listener", s.handleSwapEndpoint)
 	mux.HandleFunc("GET /api/logs/sources", s.handleListLogSources)
@@ -709,8 +710,8 @@ func (s *Server) handleEventHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit := parseInt(r.URL.Query().Get("limit"))
-	if limit <= 0 || limit > 1000 {
-		limit = 500
+	if limit <= 0 || limit > 500 {
+		limit = 100
 	}
 	items, err := s.store.ListEvents(r.Context(), scope, scopeID, after, limit)
 	if err != nil {
@@ -856,6 +857,9 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		},
 		"runtime":  settings,
 		"listener": s.listenerEndpoint(),
+		"system": map[string]any{
+			"eventRetentionDays": s.store.GetEventRetentionDays(r.Context()),
+		},
 	})
 }
 
@@ -904,6 +908,38 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"runtime": updated})
+}
+
+func (s *Server) handleUpdateSystemSettings(w http.ResponseWriter, r *http.Request) {
+	ctx, ok := s.requireAuth(w, r)
+	if !ok || !s.requireCSRF(w, r, ctx.Session) {
+		return
+	}
+	var req struct {
+		EventRetentionDays *int `json:"eventRetentionDays"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.EventRetentionDays != nil {
+		days := *req.EventRetentionDays
+		if days < 0 {
+			days = 0
+		}
+		if err := s.store.SetEventRetentionDays(r.Context(), days); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+			return
+		}
+		_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+			EventType: "settings.system.event_retention.update",
+			RiskLevel: "low",
+			Summary:   "已更新事件保留期设置",
+			Payload:   map[string]any{"retention_days": days},
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"eventRetentionDays": s.store.GetEventRetentionDays(r.Context()),
+	})
 }
 
 // handleProbeTLS validates TLS certificate/key paths WITHOUT touching the
@@ -1672,7 +1708,7 @@ func (s *Server) handleListImageJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	limit, page, offset := paginationParams(q, 80, 200)
+	limit, page, offset := paginationParams(q, 48, 200)
 	items, total, err := s.store.ListImageGenerationJobsPage(r.Context(), limit, offset, q.Get("status"), q.Get("mode"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
@@ -1769,7 +1805,7 @@ func (s *Server) handleListImageLibraryAssets(w http.ResponseWriter, r *http.Req
 		return
 	}
 	q := r.URL.Query()
-	limit, page, offset := paginationParams(q, 80, 200)
+	limit, page, offset := paginationParams(q, 48, 200)
 	privacy := strings.ToLower(strings.TrimSpace(q.Get("privacy")))
 	if (privacy == "private" || privacy == "all") && !s.requireImagePrivateUnlocked(w, ctx) {
 		return

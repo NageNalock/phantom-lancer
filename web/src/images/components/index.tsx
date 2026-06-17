@@ -14,7 +14,39 @@ type PaginationState = {
   total: number;
   pageCount: number;
   onPageChange: (page: number) => void;
+  onPageSizeChange?: (pageSize: number) => void;
+  pageSizeOptions?: number[];
 };
+
+function PageJumpInput({ page, pageCount, onJump }: { page: number; pageCount: number; onJump: (page: number) => void }) {
+  const id = useId();
+  function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    const form = e.currentTarget as HTMLFormElement;
+    const input = form.elements.namedItem("page") as HTMLInputElement;
+    const val = parseInt(input.value, 10);
+    if (!isNaN(val) && val >= 1 && val <= pageCount && val !== page) {
+      onJump(val);
+    }
+  }
+  return (
+    <form onSubmit={handleSubmit} className="flex items-center gap-1">
+      <label htmlFor={id} className="text-xs text-[var(--muted-strong)]">
+        跳至
+      </label>
+      <input
+        id={id}
+        name="page"
+        type="number"
+        min={1}
+        max={pageCount}
+        defaultValue={page}
+        className="w-12 min-h-7 rounded border border-[var(--line)] bg-transparent px-1.5 py-0.5 text-center text-xs text-[var(--text)] focus:border-[var(--accent)] focus:outline-none"
+      />
+      <span className="text-xs text-[var(--muted-strong)]">页</span>
+    </form>
+  );
+}
 
 function assetRefKey(ref: AssetRef): string {
   return `${ref.kind}:${ref.id}`;
@@ -1267,6 +1299,7 @@ function PaginationFooter({ pagination, visibleCount }: { pagination?: Paginatio
   if (!pagination || pagination.total <= pagination.pageSize && pagination.page <= 1) return null;
   const pageCount = Math.max(1, pagination.pageCount || Math.ceil(pagination.total / Math.max(1, pagination.pageSize)));
   const page = Math.min(Math.max(1, pagination.page), pageCount);
+  const { pageSizeOptions, onPageSizeChange, pageSize } = pagination;
   return (
     <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--line)] pt-3 text-xs text-[var(--muted-strong)]">
       <span>
@@ -1276,13 +1309,33 @@ function PaginationFooter({ pagination, visibleCount }: { pagination?: Paginatio
         <span className="mx-2">·</span>
         总量 <span className="mono">{pagination.total}</span>
       </span>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button className="min-h-7 px-2 text-xs" disabled={page <= 1} onClick={() => pagination.onPageChange(1)} type="button">
+          « 首页
+        </Button>
         <Button className="min-h-7 px-2 text-xs" disabled={page <= 1} onClick={() => pagination.onPageChange(page - 1)} type="button">
           上一页
         </Button>
+        <PageJumpInput page={page} pageCount={pageCount} onJump={(p) => pagination.onPageChange(p)} />
         <Button className="min-h-7 px-2 text-xs" disabled={page >= pageCount} onClick={() => pagination.onPageChange(page + 1)} type="button">
           下一页
         </Button>
+        <Button className="min-h-7 px-2 text-xs" disabled={page >= pageCount} onClick={() => pagination.onPageChange(pageCount)} type="button">
+          末页 »
+        </Button>
+        {pageSizeOptions && onPageSizeChange && (
+          <select
+            value={pageSize}
+            onChange={(e) => onPageSizeChange(parseInt(e.target.value, 10))}
+            className="min-h-7 rounded border border-[var(--line)] bg-transparent px-1.5 text-xs text-[var(--text)] focus:border-[var(--accent)] focus:outline-none"
+          >
+            {pageSizeOptions.map((n) => (
+              <option key={n} value={n}>
+                {n} 条/页
+              </option>
+            ))}
+          </select>
+        )}
       </div>
     </div>
   );

@@ -64,13 +64,13 @@ func (s *Server) handleDockerHostEvents(w http.ResponseWriter, r *http.Request) 
 		err   error
 	)
 	if scopeID == "" {
-		if limit <= 0 || limit > 500 {
-			limit = 200
+		if limit <= 0 || limit > 200 {
+			limit = 100
 		}
 		items, err = s.store.ListRecentEventsByScope(r.Context(), "docker.job", limit)
 	} else {
-		if limit <= 0 || limit > 1000 {
-			limit = 200
+		if limit <= 0 || limit > 500 {
+			limit = 100
 		}
 		items, err = s.store.ListEvents(r.Context(), "docker.job", scopeID, parseInt64(r.URL.Query().Get("after")), limit)
 	}

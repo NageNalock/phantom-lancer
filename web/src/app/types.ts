@@ -136,10 +136,15 @@ interface FileSettings {
   hstsDefaultsApplied?: boolean;
 }
 
+export interface SystemSettings {
+  eventRetentionDays: number;
+}
+
 export interface SettingsPayload {
   file?: FileSettings;
   runtime?: RuntimeSettings;
   listener?: ListenerEndpoint;
+  system?: SystemSettings;
 }
 
 interface BuildInfo {

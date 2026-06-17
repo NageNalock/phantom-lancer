@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import type { AppActions } from "../app/App";
-import type { AppData, ListenerEndpoint, RuntimeSettings, TLSProbeResult } from "../app/types";
+import type { AppData, ListenerEndpoint, RuntimeSettings, SystemSettings, TLSProbeResult } from "../app/types";
 import { friendlyError } from "../api/client";
 import { Button, ContextList, Field, Panel, Pill, SubTabs, Toggle } from "../components/ui";
 import { defaultRuntime, formatDate } from "../domain/labels";
@@ -77,6 +77,14 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
   const [probeBusy, setProbeBusy] = useState(false);
   const [applyBusy, setApplyBusy] = useState(false);
   const [probeResult, setProbeResult] = useState<TLSProbeResult | null>(null);
+  const [eventRetentionDays, setEventRetentionDays] = useState<number>(data.settings.system?.eventRetentionDays ?? 30);
+  const [systemSaving, setSystemSaving] = useState(false);
+
+  useEffect(() => {
+    if (data.settings.system?.eventRetentionDays !== undefined) {
+      setEventRetentionDays(data.settings.system.eventRetentionDays);
+    }
+  }, [data.settings.system]);
 
   useEffect(() => {
     const next = data.settings.runtime || defaultRuntime();
@@ -127,6 +135,20 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
       actions.setToast(friendlyError(error), "danger");
     } finally {
       setBusy("");
+    }
+  }
+
+  async function saveSystemSettings() {
+    const days = Math.max(0, Math.floor(Number(eventRetentionDays) || 0));
+    setSystemSaving(true);
+    try {
+      await actions.api("/api/settings/system", { method: "PUT", csrf: actions.csrf, body: { eventRetentionDays: days } });
+      await actions.reloadData();
+      actions.setToast("系统设置已保存", "good");
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setSystemSaving(false);
     }
   }
 
@@ -335,32 +357,63 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
 
       {tab === "runtime" ? (
         <div className="grid grid-cols-[minmax(0,1.05fr)_minmax(300px,0.95fr)] gap-4 max-xl:grid-cols-1">
-          <Panel title="运行设置" subtitle="影响允许工作目录和 Cookie 安全策略">
-            <div className="grid gap-4">
-              <Field label="允许根目录" help="每行一个绝对路径；后端会归一化并拒绝无效目录。">
-                <textarea
-                  autoComplete="off"
-                  className="textarea mono min-h-36"
-                  name="allowed_roots"
-                  onChange={(event) => setAllowedRootsText(event.target.value)}
-                  spellCheck={false}
-                  value={allowedRootsText}
+          <div className="grid gap-4">
+            <Panel title="运行设置" subtitle="影响允许工作目录和 Cookie 安全策略">
+              <div className="grid gap-4">
+                <Field label="允许根目录" help="每行一个绝对路径；后端会归一化并拒绝无效目录。">
+                  <textarea
+                    autoComplete="off"
+                    className="textarea mono min-h-36"
+                    name="allowed_roots"
+                    onChange={(event) => setAllowedRootsText(event.target.value)}
+                    spellCheck={false}
+                    value={allowedRootsText}
+                  />
+                </Field>
+                <Toggle
+                  checked={Boolean(runtime.cookieSecure)}
+                  label="HTTPS 部署时启用 Secure Cookie"
+                  name="settings_cookie_secure"
+                  onChange={(checked) => setRuntime((current) => ({ ...current, cookieSecure: checked }))}
                 />
-              </Field>
-              <Toggle
-                checked={Boolean(runtime.cookieSecure)}
-                label="HTTPS 部署时启用 Secure Cookie"
-                name="settings_cookie_secure"
-                onChange={(checked) => setRuntime((current) => ({ ...current, cookieSecure: checked }))}
-              />
-              <div className="flex flex-wrap justify-between gap-2">
-                <span className="muted text-xs">最后更新：{formatDate(runtime.updatedAt) || "-"}</span>
-                <Button disabled={busy === "runtime"} onClick={() => void saveRuntime()} tone="primary">
-                  保存运行设置
-                </Button>
+                <div className="flex flex-wrap justify-between gap-2">
+                  <span className="muted text-xs">最后更新：{formatDate(runtime.updatedAt) || "-"}</span>
+                  <Button disabled={busy === "runtime"} onClick={() => void saveRuntime()} tone="primary">
+                    保存运行设置
+                  </Button>
+                </div>
               </div>
-            </div>
-          </Panel>
+            </Panel>
+
+            <Panel title="系统维护" subtitle="事件日志保留策略等全局配置">
+              <div className="grid gap-4">
+                <Field
+                  label="事件日志保留期（天）"
+                  help="系统事件表中超过保留期的记录将在后台自动清理。设为 0 表示永不清理（不推荐）。"
+                >
+                  <input
+                    className="input mono"
+                    inputMode="numeric"
+                    min={0}
+                    name="event_retention_days"
+                    onChange={(event) => setEventRetentionDays(Number(event.target.value))}
+                    type="number"
+                    value={eventRetentionDays}
+                  />
+                </Field>
+                <div className="flex flex-wrap justify-between gap-2">
+                  <span className="muted text-xs">
+                    {eventRetentionDays > 0
+                      ? `保留最近 ${eventRetentionDays} 天的事件记录`
+                      : "已禁用自动清理，事件数据会无限增长"}
+                  </span>
+                  <Button disabled={systemSaving} onClick={() => void saveSystemSettings()} tone="primary">
+                    {systemSaving ? "保存中…" : "保存系统设置"}
+                  </Button>
+                </div>
+              </div>
+            </Panel>
+          </div>
 
           <Panel title="服务配置" subtitle="切换监听地址、启用 HTTPS 无需重启进程">
             <div className="grid gap-4">

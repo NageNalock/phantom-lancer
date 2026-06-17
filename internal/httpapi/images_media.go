@@ -471,7 +471,7 @@ func (s *Server) handleListMediaGenerations(w http.ResponseWriter, r *http.Reque
 	}
 	_ = ctx
 	q := r.URL.Query()
-	limit, page, offset := paginationParams(q, 120, 200)
+	limit, page, offset := paginationParams(q, 48, 200)
 	mediaType := q.Get("mediaType")
 	provider := q.Get("provider")
 	status := q.Get("status")
@@ -628,7 +628,7 @@ func (s *Server) handleListMediaAssets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	limit, page, offset := paginationParams(q, 120, 400)
+	limit, page, offset := paginationParams(q, 48, 200)
 	mediaType := q.Get("mediaType")
 	provider := q.Get("provider")
 	assetType := q.Get("assetType")

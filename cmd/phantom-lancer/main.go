@@ -189,6 +189,36 @@ func main() {
 	stockSvc.StartBackground(ctx)
 	mailSvc.StartBackground(ctx)
 	store.StartStatsCollector(ctx)
+
+	// Events table retention pruner: deletes events older than the
+	// configured window. Runs once shortly after boot, then daily.
+	go func() {
+		timer := time.NewTimer(2 * time.Minute)
+		defer timer.Stop()
+		for {
+			select {
+			case <-timer.C:
+				days := store.GetEventRetentionDays(ctx)
+				if days <= 0 {
+					timer.Reset(24 * time.Hour)
+					continue
+				}
+				cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
+				removed, err := store.DeleteEventsOlderThan(ctx, cutoff, 0)
+				if err != nil {
+					logger.Warn("event retention cleanup failed",
+						"error", err, "retention_days", days)
+				} else if removed > 0 {
+					logger.Info("event retention cleanup completed",
+						"removed", removed, "retention_days", days,
+						"cutoff", cutoff.Format(time.RFC3339))
+				}
+				timer.Reset(24 * time.Hour)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 	if v2raySettings, err := store.GetV2RaySettings(ctx); err == nil && v2raySettings.Enabled && v2raySettings.StartOnPhantomLaunch {
 		if _, err := v2raySvc.Start(ctx); err != nil {
 			logger.Error("start embedded v2ray failed", "error", err)
