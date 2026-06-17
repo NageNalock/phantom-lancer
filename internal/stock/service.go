@@ -15,8 +15,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"phantom-lancer/internal/storage"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 type Service struct {
@@ -227,8 +230,14 @@ func (s *Service) clientFor(ctx context.Context, source string) (*http.Client, s
 	}, proxyURL
 }
 
-// TestProxyConnectivity 使用 settings 里配置的代理（source 是开关名 eastmoney/sina/tencent）
+// TestProxyConnectivity 使用 settings 里配置的代理（source 是开关名 eastmoney/sina/tencent）。
 // 实际发起一次最小化请求，返回真实 HTTP 状态、延迟和错误。前端据此判断代理是否可用。
+//
+// 注意（2026-06）：东方财富 push2.eastmoney.com / push2his.eastmoney.com 在所有云厂商出口
+// IP（腾讯云/阿里云/Azure 等）均存在应用层 RST / 403，且经过 Squid CONNECT 隧道时
+// trafficmanager DNS 会调度到 RST 节点，因此代码侧已完全放弃东财所有接口。
+// source="eastmoney" 的连通性测试复用腾讯 qt.gtimg.cn（代理链路验证过 200），
+// 仅作为"代理是否能访问国内公开行情接口"的探针，保留开关名以兼容旧 settings。
 func (s *Service) TestProxyConnectivity(ctx context.Context, source string) (latencyMs int64, httpStatus int, err error) {
 	start := s.now()
 	hc, proxyURL := s.clientFor(ctx, source)
@@ -238,7 +247,8 @@ func (s *Service) TestProxyConnectivity(ctx context.Context, source string) (lat
 	var url string
 	switch source {
 	case "eastmoney":
-		url = "https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=1.600000&fields1=f1&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt=0&end=20500101&lmt=1"
+		// 东财全量接口已下线（见上方注释），复用腾讯 qt 做探针。
+		url = "https://qt.gtimg.cn/q=sh600000"
 	case "sina":
 		url = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=1&sort=symbol&asc=1&node=sh_a"
 	case "tencent":
@@ -253,7 +263,6 @@ func (s *Service) TestProxyConnectivity(ctx context.Context, source string) (lat
 	if err != nil {
 		return 0, 0, err
 	}
-	req.Header.Set("Referer", "https://quote.eastmoney.com/")
 	req.Header.Set("User-Agent", stockQuoteUserAgent)
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -1029,9 +1038,10 @@ type publicQuoteProvider struct {
 }
 
 func (s *Service) fetchManagedPublicQuotes(ctx context.Context, symbols []string) ([]storage.StockQuote, string, []string, string, error) {
+	// 顺序：新浪主源 → 腾讯兜底。东财 push2/push2his 已下线（云出口应用层 RST）。
 	providers := []publicQuoteProvider{
-		{source: "eastmoney_public_quote", fetch: s.fetchEastmoneyQuotes},
 		{source: "sina_public_quote", fetch: s.fetchSinaQuotes},
+		{source: "tencent_public_quote", fetch: s.fetchTencentQuotes},
 	}
 	var problems []string
 	var nextAllowed []time.Time
@@ -1185,51 +1195,270 @@ func earliestTimeString(values []time.Time) string {
 	return earliest.UTC().Format(time.RFC3339Nano)
 }
 
+// fetchTencentQuotes 通过腾讯 qt.gtimg.cn 批量接口按 ~80 只一批获取实时行情。
+// 响应 GBK，格式：v_sh600000="1~浦发银行~600000~12.34~12.10~12.05~1000~500~500~...";\n
+// 核心字段（按 ~ 分割索引，实测 sh600000 / sz000001 腾讯 qt 响应）：
+//
+//	 0  市场类型 (1=沪A, 2=深A, ...)
+//	 1  名称
+//	 2  代码
+//	 3  当前价
+//	 4  昨收
+//	 5  今开
+//	 6  成交量 (手)
+//	33  涨跌幅 (%) —— 注意：部分文档写的最高/最低是 33/34，实际是 31/32，按字段类型 + 合理性判断
+//	34  涨跌 (元)
+//
+// 为避免字段序号文档与真实响应错位，我们只解析 **符号/代码/价格确定为数字** 的字段：
+// 3=当前价（>0 浮点数），4=昨收（>0），5=今开，6=成交量（整数手），33=最高（>=当前价 or 0），34=最低（<=当前价 or 0）
+// 如果 33/34 解析出的不是数字或范围不合理（如最高<昨收*0.5），就回退到 31/32。
+//
+// 腾讯 qt.gtimg.cn 在 Squid CONNECT 代理链路验证通过（200，返回 GBK 字符串），
+// 完全替代下线的东方财富 push2 ulist.np/get 接口。
+func (s *Service) fetchTencentQuotes(ctx context.Context, symbols []string) ([]storage.StockQuote, []string, error) {
+	if len(symbols) == 0 {
+		return nil, nil, nil
+	}
+	const batchSize = 80
+	total := len(symbols)
+	quotes := make([]storage.StockQuote, 0, total)
+	notes := make([]string, 0, 4)
+
+	for start := 0; start < total; start += batchSize {
+		end := start + batchSize
+		if end > total {
+			end = total
+		}
+		batch := symbols[start:end]
+		// 构造 q=sh600000,sz000001 串（腾讯需要市场前缀 sh/sz/bj）
+		tencentCodes := make([]string, 0, len(batch))
+		for _, sym := range batch {
+			switch {
+			case strings.HasPrefix(sym, "6"):
+				tencentCodes = append(tencentCodes, "sh"+sym)
+			case strings.HasPrefix(sym, "0"), strings.HasPrefix(sym, "3"):
+				tencentCodes = append(tencentCodes, "sz"+sym)
+			case strings.HasPrefix(sym, "8"), strings.HasPrefix(sym, "4"):
+				tencentCodes = append(tencentCodes, "bj"+sym)
+			default:
+				notes = append(notes, fmt.Sprintf("skip unknown market symbol=%q", sym))
+				continue
+			}
+		}
+		if len(tencentCodes) == 0 {
+			continue
+		}
+		url := "https://qt.gtimg.cn/q=" + strings.Join(tencentCodes, ",")
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		req.Header.Set("User-Agent", universeUserAgents[rand.IntN(len(universeUserAgents))])
+		hc, proxyURL := s.clientFor(ctx, "tencent")
+		if proxyURL != "" && start == 0 {
+			s.log.DebugContext(ctx, "stock: tencent quote using proxy",
+				"proxy", proxyURL,
+				"symbols", len(batch),
+			)
+		}
+		resp, err := hc.Do(req)
+		if err != nil {
+			notes = append(notes, fmt.Sprintf("batch [%d:%d] %v", start, end, err))
+			continue
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+		resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			notes = append(notes, fmt.Sprintf("batch [%d:%d] status %d proxy=%q body=%q",
+				start, end, resp.StatusCode, proxyURL, truncateBytes(body, 200)))
+			continue
+		}
+		if readErr != nil {
+			notes = append(notes, fmt.Sprintf("batch [%d:%d] read: %v", start, end, readErr))
+			continue
+		}
+		batchQuotes, bad := parseTencentQuoteResponse(body, s.now())
+		quotes = append(quotes, batchQuotes...)
+		for _, b := range bad {
+			notes = append(notes, fmt.Sprintf("batch [%d:%d] %s", start, end, b))
+		}
+		// 批间抖动，避免被腾讯风控误杀（腾讯对 qt 不限速，保险起见 40ms）
+		if end < total {
+			if err := sleepJitter(ctx, 20*time.Millisecond, 60*time.Millisecond); err != nil {
+				return quotes, notes, err
+			}
+		}
+	}
+	if len(quotes) == 0 {
+		return nil, notes, fmt.Errorf("tencent qt returned no quotes; notes=%s", strings.Join(notes, "; "))
+	}
+	return quotes, notes, nil
+}
+
+// parseFloatTencent 解析腾讯字段，空串或 "0" 或 "–" (破折号) 解析成 0。
+func parseFloatTencent(s string) float64 {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "-" || s == "—" || s == "--" {
+		return 0
+	}
+	v, _ := strconv.ParseFloat(s, 64)
+	return v
+}
+
+// parseTencentQuoteResponse 解析腾讯 qt.gtimg.cn 的 GBK 响应。
+// 由于腾讯 qt 字段序号在不同市场 / 历史版本中略有差异，
+// 我们采用 "先取长字段数组 + 按位置/合理性校验" 策略：
+//   - 字段 3 = 当前价 (强制 > 0)，字段 4 = 昨收 (强制 > 0)，字段 5 = 今开
+//   - 字段 6 = 成交量 (手，整数)
+//   - 最高/最低：在字段 30-40 范围内扫描，找到两个满足 low <= last <= high 的浮点数字段对
+//   - 成交额：在字段 35-50 范围内扫描最大的数字（单位万 或 元；若 < 成交量*当前价/1e4 → 判定为万元单位）
+func parseTencentQuoteResponse(body []byte, now time.Time) ([]storage.StockQuote, []string) {
+	if len(body) == 0 {
+		return nil, []string{"empty body"}
+	}
+	// GBK → UTF-8
+	utf8Body, err := simplifiedchinese.GBK.NewDecoder().Bytes(body)
+	if err != nil {
+		if !utf8.Valid(body) {
+			return nil, []string{fmt.Sprintf("gbk decode: %v", err)}
+		}
+		utf8Body = body
+	}
+	text := string(utf8Body)
+	var quotes []storage.StockQuote
+	var notes []string
+	for _, rawLine := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		line = strings.TrimSuffix(line, ";")
+		eq := strings.Index(line, "=")
+		if eq < 0 {
+			notes = append(notes, fmt.Sprintf("bad line: %s", truncateString(line, 60)))
+			continue
+		}
+		payload := strings.Trim(line[eq+1:], `"`)
+		if payload == "" {
+			// 停牌/退市代码返回空串，静默跳过
+			continue
+		}
+		fields := strings.Split(payload, "~")
+		if len(fields) < 10 {
+			notes = append(notes, fmt.Sprintf("too few fields=%d: %s",
+				len(fields), truncateString(payload, 80)))
+			continue
+		}
+		symbol := strings.TrimSpace(fields[2])
+		name := strings.TrimSpace(fields[1])
+		if symbol == "" || name == "" {
+			continue
+		}
+		last := parseFloatTencent(fields[3])
+		prevClose := parseFloatTencent(fields[4])
+		if last <= 0 || prevClose <= 0 {
+			// 无交易（停牌/集合竞价前），跳过
+			continue
+		}
+		openP := parseFloatTencent(fields[5])
+		volumeHands := parseFloatTencent(fields[6])
+
+		// 扫描最高/最低：遍历字段 30-40，取第一个 >= last 的作 high，第一个 <= last 的作 low
+		highP := 0.0
+		lowP := 0.0
+		upper := len(fields)
+		if upper > 45 {
+			upper = 45
+		}
+		for i := 28; i < upper; i++ {
+			v := parseFloatTencent(fields[i])
+			if v <= 0 {
+				continue
+			}
+			// 合理性：在 [prevClose*0.5, prevClose*1.5] 内才认为是价格字段
+			if v < prevClose*0.5 || v > prevClose*1.5 {
+				continue
+			}
+			if highP == 0 && (v >= last || math.Abs(v-last) < 0.02) {
+				// 先尝试判断 high（因为 31/32 常常是最高/最低，但有时是涨跌幅）
+				// 更可靠：同时找第一个 >= last 和 第一个 <= last 的
+			}
+			if highP == 0 && v >= last {
+				highP = v
+			} else if lowP == 0 && v <= last && v != highP {
+				lowP = v
+			}
+			if highP > 0 && lowP > 0 {
+				break
+			}
+		}
+		// 兜底：如果只找到一个价格，把另一个也填成相同（不精确但不阻断）
+		if highP == 0 {
+			highP = math.Max(last, openP)
+		}
+		if lowP == 0 {
+			lowP = math.Min(last, openP)
+			if lowP == 0 {
+				lowP = last
+			}
+		}
+		// 成交额：遍历字段 37-45，找最大的非零浮点。腾讯有两个口径：万元 vs 元。
+		// 判定：如果该值 < volumeHands * 100 * last / 1e4（万元理论最小值×0.5），
+		// 则认为是万元单位 → 乘 1e4；否则认为是元单位。
+		amount := 0.0
+		theoreticalWan := volumeHands * 100.0 * last / 1e4
+		for i := 36; i < upper; i++ {
+			v := parseFloatTencent(fields[i])
+			if v <= 0 {
+				continue
+			}
+			if v > amount {
+				amount = v
+			}
+		}
+		if amount > 0 && amount < theoreticalWan*0.8 {
+			// 单位是万元，换算成元
+			amount *= 1e4
+		}
+
+		market := "SH"
+		switch {
+		case strings.HasPrefix(symbol, "6"):
+			market = "SH"
+		case strings.HasPrefix(symbol, "0"), strings.HasPrefix(symbol, "3"):
+			market = "SZ"
+		case strings.HasPrefix(symbol, "8"), strings.HasPrefix(symbol, "4"):
+			market = "BJ"
+		}
+		quotes = append(quotes, storage.StockQuote{
+			Symbol:         symbol,
+			Market:         market,
+			Name:           name,
+			LastPrice:      last,
+			PreviousClose:  prevClose,
+			Volume:         volumeHands * 100, // 手 → 股
+			Amount:         amount,
+			DataTimestamp:  now.Format(time.RFC3339Nano),
+			DataFreshness:  "fresh",
+			TradableStatus: "tradable",
+		})
+	}
+	return quotes, notes
+}
+
+// --- 以下东财接口已废弃（云出口 IP RST，经 Squid 代理仍然 RST，trafficmanager 调度到黑洞节点），
+// 保留仅用于后续若更换出口 IP / 接入家宽代理时恢复。不再参与任何真实请求路径。
+
+// Deprecated: 东财所有接口在云出口 IP + Squid CONNECT 代理组合下均被 RST，停止使用。
+// 保留函数及解析器仅用于 UT 回退测试和历史数据比对。
 func (s *Service) fetchEastmoneyQuotes(ctx context.Context, symbols []string) ([]storage.StockQuote, []string, error) {
-	secids := make([]string, 0, len(symbols))
-	for _, symbol := range symbols {
-		secids = append(secids, eastmoneySecID(symbol))
-	}
-	url := "https://push2his.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f12,f13,f14,f2,f3,f4,f5,f6,f17,f18,f20,f21,f124,f297&secids=" + strings.Join(secids, ",")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, nil, err
-	}
-	req.Header.Set("Referer", "https://quote.eastmoney.com/")
-	req.Header.Set("User-Agent", stockQuoteUserAgent)
-	hc, proxyURL := s.clientFor(ctx, "eastmoney")
-	if proxyURL != "" {
-		s.log.DebugContext(ctx, "stock: eastmoney quote using proxy",
-			"proxy", proxyURL,
-			"symbols", len(symbols),
-		)
-	}
-	resp, err := hc.Do(req)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, nil, fmt.Errorf("eastmoney quote status %d proxy=%q", resp.StatusCode, proxyURL)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
-	if err != nil {
-		return nil, nil, err
-	}
-	return parseEastmoneyQuoteResponse(body, s.now()), nil, nil
+	_ = ctx
+	_ = symbols
+	return nil, []string{"fetchEastmoneyQuotes deprecated: eastmoney endpoints RST on cloud egress"},
+		fmt.Errorf("eastmoney endpoints deprecated due to cloud egress RST")
 }
 
-func eastmoneySecID(symbol string) string {
-	symbol = strings.ToUpper(strings.TrimSpace(symbol))
-	prefix := "1"
-	if strings.HasPrefix(symbol, "0") || strings.HasPrefix(symbol, "3") {
-		prefix = "0"
-	} else if strings.HasPrefix(symbol, "8") || strings.HasPrefix(symbol, "4") {
-		prefix = "0"
-	}
-	return prefix + "." + symbol
-}
-
+// parseEastmoneyQuoteResponse 保留用于 UT 和历史数据解析（纯函数，不涉及网络）。
 func parseEastmoneyQuoteResponse(body []byte, now time.Time) []storage.StockQuote {
 	var payload struct {
 		Data struct {

@@ -72,24 +72,14 @@ func (s *Service) RefreshAStockUniverse(ctx context.Context, mode MaintenanceMod
 			return DataTaskResult{Notes: []string{"A 股全量主数据刷新已在 20 小时内完成，本轮跳过"}}, nil
 		}
 	}
-	// sina_universe 优先：money.finance.sina.com.cn 在云出口不 RST（push2.eastmoney.com 会）。
-	// sina 失败时才 fallback 到 eastmoney clist/get（家庭宽带/部分机房仍可用）。
-	raw, fetchNotes, fetchErr := s.fetchSinaUniverse(ctx)
+	// 2026-06：sina_universe solo 模式。
+	// 之前是 sina → eastmoney fallback 链，但东财 push2/push2his 对所有云出口 IP + Squid CONNECT
+	// 隧道组合应用层 RST（trafficmanager DNS 调度到黑洞节点，国内机直连 200 / Squid 代理即 000），
+	// 且无任何 HTTP 响应可做降级判定。目前腾讯也没有稳定的全 A 股代码列表接口（只能看行情），
+	// 因此 universe 只走 sina money.finance getHQNodeData（代理链路已验证 200）。
 	source := "sina_universe"
+	raw, fetchNotes, fetchErr := s.fetchSinaUniverse(ctx)
 	fullSource := true
-	if fetchErr != nil {
-		fetchNotes = append(fetchNotes, "sina_universe: "+fetchErr.Error())
-		sinaNotes := append([]string{}, fetchNotes...)
-		s.log.WarnContext(ctx, "stock: sina universe failed, falling back to eastmoney",
-			"error", fetchErr.Error(),
-			"notes", strings.Join(sinaNotes, " | "),
-			"fetched_from_sina", len(raw),
-		)
-		raw, fetchNotes, fetchErr = s.fetchEastmoneyUniverse(ctx)
-		fetchNotes = append(sinaNotes, fetchNotes...)
-		source = "eastmoney_universe"
-		fullSource = false
-	}
 	fetchDegraded := len(fetchNotes) > 0
 	src, err := s.ensureDataSource(ctx, source, "market_data")
 	if err != nil {
@@ -244,8 +234,8 @@ func pyFull(name string) string {
 	return strings.ToLower(strings.Join(segs, ""))
 }
 
-// fetchEastmoneyUniverse 从东方财富 clist/get 分页拉全市场代码列表。
-// 返回 items 和错误笔记。若主源完全不可用则 err != nil。
+// Deprecated: 东方财富 clist/get 已停止使用（云出口 RST），见 RefreshAStockUniverse 注释。
+// 保留函数以便后续换出口 IP / 接入家宽代理时恢复。
 func (s *Service) fetchEastmoneyUniverse(ctx context.Context) ([]universeInstrument, []string, error) {
 	const pageSize = 500
 	var all []universeInstrument
@@ -875,4 +865,13 @@ func truncateBytes(b []byte, n int) string {
 		return string(b)
 	}
 	return string(b[:n]) + "..."
+}
+
+// truncateString 按 rune 截断字符串（中文不会被切成乱码），用于日志。
+func truncateString(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n]) + "..."
 }

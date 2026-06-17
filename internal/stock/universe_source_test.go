@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -156,36 +155,33 @@ func TestRefreshAStockUniverseSkipsDelistWhenEastmoneyPartial(t *testing.T) {
 	svc := NewService(store, nil)
 	svc.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		host := req.URL.Host
-		// sina (sina 作为当前主源：此 UT 要测试 eastmoney 部分失败 → 先让 sina 全 404 降级到 eastmoney
-		if strings.HasPrefix(host, "money.finance.sina") || strings.HasPrefix(host, "hq.sinajs") {
-			return stringResponse(http.StatusNotFound, `{"error":"mock: fail sina on purpose"}`), nil
-		}
-		// eastmoney：同时接受 push2.eastmoney.com 以及节点池里的 push2his.eastmoney.com
-		// （pickEastmoneyHost 随机选两者之一，UT 都应走 push2 这条分支）
-		if host != "push2.eastmoney.com" && host != "push2his.eastmoney.com" {
+		// sina money.finance 是当前唯一 universe 源
+		if !strings.HasPrefix(host, "money.finance.sina") {
 			return stringResponse(http.StatusNotFound, `{"error":"unexpected host "+host}`), nil
 		}
-		page, _ := strconv.Atoi(req.URL.Query().Get("pn"))
-		switch page {
-		case 1:
-			return stringResponse(http.StatusOK, eastmoneyUniversePage(1500, 600000, 500)), nil
-		case 2:
+		node := req.URL.Query().Get("node")
+		// 关键：sina universe 3 节点中 sz_a 返回 502（模拟部分失败 degraded）
+		if node == "sz_a" {
 			return stringResponse(http.StatusBadGateway, `bad gateway`), nil
-		case 3:
-			return stringResponse(http.StatusOK, eastmoneyUniversePage(1500, 601000, 500)), nil
+		}
+		// sh_a 返回 1500 条（从 600000 起），bj_a 返回 500 条（从 430001 起）
+		switch node {
+		case "sh_a":
+			return stringResponse(http.StatusOK, sinaUniverseNode(600000, 1500, "sh")), nil
+		case "bj_a":
+			return stringResponse(http.StatusOK, sinaUniverseNode(430001, 500, "bj")), nil
 		default:
-			return stringResponse(http.StatusOK, `{"data":{"total":1500,"diff":[]}}`), nil
+			return stringResponse(http.StatusOK, `[]`), nil
 		}
 	})}
-	// 让 eastmoney 节点池选择稳定走 push2（避免 shuffle 偶尔选到 push2his 但我们返回同样结构：push2his 对 clist 返回 404，
-	// 不会被选中的话，所以这里没问题）
 
 	result, err := svc.RefreshAStockUniverse(ctx, MaintenanceModeManual, "test")
 	if err != nil {
 		t.Fatalf("refresh universe: %v", err)
 	}
+	// sz_a 节点 502 → degraded（有 notes，且整体任务仍成功）
 	if result.Task.Status != "degraded" {
-		t.Fatalf("task status = %q, want degraded", result.Task.Status)
+		t.Fatalf("task status = %q, want degraded (sz_a node failed)", result.Task.Status)
 	}
 	old, err := store.GetStockInstrument(ctx, "000001")
 	if err != nil {
@@ -194,8 +190,8 @@ func TestRefreshAStockUniverseSkipsDelistWhenEastmoneyPartial(t *testing.T) {
 	if old.Status != "listed" {
 		t.Fatalf("old instrument status = %q, want listed because remote fetch was partial", old.Status)
 	}
-	if !containsNote(result.Notes, "page 2") {
-		t.Fatalf("notes = %#v, want page 2 fetch note", result.Notes)
+	if !containsNote(result.Notes, "sz_a") {
+		t.Fatalf("notes = %#v, want sz_a fetch note", result.Notes)
 	}
 }
 
@@ -220,6 +216,21 @@ func eastmoneyUniversePage(total, start, count int) string {
 		rows = append(rows, fmt.Sprintf(`{"f12":"%s","f13":1,"f14":"测试%s","f18":"","f100":""}`, symbol, symbol))
 	}
 	return fmt.Sprintf(`{"data":{"total":%d,"diff":[%s]}}`, total, strings.Join(rows, ","))
+}
+
+// sinaUniverseNode 生成新浪 money.finance getHQNodeData 风格的 node 响应（伪 JSON：键不加引号）。
+// market 是 "sh" / "sz" / "bj"，symbol 前缀依此生成。
+func sinaUniverseNode(startCode, count int, market string) string {
+	prefix := market
+	rows := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		code := fmt.Sprintf("%06d", startCode+i)
+		rows = append(rows, fmt.Sprintf(
+			`{code:"%s",symbol:"%s%s",name:"股票-%s",trade:"1"}`,
+			code, prefix, code, code,
+		))
+	}
+	return "[" + strings.Join(rows, ",") + "]"
 }
 
 func containsNote(notes []string, needle string) bool {

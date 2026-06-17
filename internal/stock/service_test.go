@@ -251,7 +251,8 @@ func TestQuoteRefreshRespectsProviderNextAllowedAt(t *testing.T) {
 	}
 
 	nextAllowed := time.Now().UTC().Add(5 * time.Minute).Format(time.RFC3339Nano)
-	for _, source := range []string{"eastmoney_public_quote", "sina_public_quote"} {
+	// 注意：东财接口已下线（云出口 RST），当前 provider 顺序是 sina → tencent
+	for _, source := range []string{"sina_public_quote", "tencent_public_quote"} {
 		if _, err := store.UpsertStockDataSource(ctx, storage.StockDataSource{
 			Source:           source,
 			DisplayName:      source,
