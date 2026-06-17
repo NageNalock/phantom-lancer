@@ -5,6 +5,29 @@
 - `docs/personal-web-terminal-product-features.md`
 - `docs/personal-web-terminal-technical-design.md`
 
+---
+
+## 🚧 重要：股票模块相关文档全部作废（2026-06-17 起）
+
+> **任何 Agent 在涉及股票（stock）模块的实现、评审、设计、重构时，一律不得参考以下文档的任何内容。**
+
+已作废文档清单：
+
+| 文档 | 状态 | 说明 |
+|---|---|---|
+| `docs/stock-agent-workbench-feature-design.md` | **全部 DEPRECATED** | 股票 Agent 工作台产品设计全文作废，包括对象网络、数据源、策略、盯盘、Review、Agent 协议、交付分期等全部 20 节。 |
+| `docs/stock-masterdata-self-closed-loop-design.md` | **全部 DEPRECATED** | A 股主数据自闭环方案全文作废，包括东财/新浪数据源选型、FTS5、Combobox、DuckDB 分层等全部 9 节。 |
+| `docs/personal-web-terminal-product-features.md` | **部分 DEPRECATED** | 其中所有涉及「股票 Agent 工作台」的章节（能力域、模块地图、导航、主工作区、审计、Dashboard、Phase 2 交付项等）作废，其余章节照常参考。 |
+| `docs/personal-web-terminal-technical-design.md` | **部分 DEPRECATED** | 其中所有涉及「股票 Agent 工作台 / Stock Agent Workbench Module」的章节（第 3.8 节全文、架构图/存储层/模块图中的股票节点、股票相关审计项等）作废，其余章节照常参考。 |
+
+补充要求：
+
+1. **不要**从上述文档中摘取模型、API、数据结构、字段名、任务清单、流程图或交付分期作为实现依据；
+2. 当不确定股票模块的正确设计时，优先向用户（owner）确认，或直接阅读 `internal/stock/` 下**当前最新代码**与 `docs/` 下重构过程中新产出的设计文档（以文件名中的日期和 `REPLACES:` 注释为准）；
+3. 用户显式声明"以用户本次指令为准"时，以上禁止参考规则仍然生效——本处是基础规则，不随单次指令覆盖。
+
+---
+
 ## 变更兼容性与完整性
 
 进行任何代码、配置、数据结构、API、UI 行为、脚本或文档修改时，除非用户显式说明不考虑兼容性，否则都必须主动考虑兼容性和完整性：兼容已有数据、旧配置、历史任务、旧资产、现有 API/UI 使用路径和部署方式；保证迁移、回退、失败分支、边界条件、关联记录同步、资源清理和审计/事件记录完整。不得只覆盖新路径或理想路径，涉及持久化状态、外部服务、文件/对象存储、任务执行和用户可见行为时，必须补齐旧数据兼容、失败不破坏原状态、必要的测试或验证说明。

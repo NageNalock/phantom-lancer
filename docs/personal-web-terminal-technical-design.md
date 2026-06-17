@@ -1,5 +1,15 @@
 # 个人全面 Web 终端技术方案
 
+> **⚠️ PARTIALLY DEPRECATED（部分章节已过期）⚠️**
+>
+> 标记日期：2026-06-17
+>
+> 本文档中所有与「股票 Agent 工作台 / Stock Agent Workbench Module」相关的章节
+> （第 1 节能力域清单、第 2 节架构/存储层中的股票部分、第 3 节后端模块架构中的 Stock 节点、
+> 第 3.5 节审计中的股票审计项、**第 3.8 节「Stock Agent Workbench Module」全文**等）
+> 均已作废。股票模块正处于全面重构阶段，任何实现、评审或 Agent 参考都**不得**
+> 以这些章节为准；非股票章节仍然有效。请以重构过程中产出的新设计文档 / 最新代码为准。
+
 文档日期：2026-06-07
 关联产品文档：[personal-web-terminal-product-features.md](./personal-web-terminal-product-features.md)
 后端要求：Go
