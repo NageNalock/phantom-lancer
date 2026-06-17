@@ -6367,9 +6367,11 @@ func (s *Store) SetEventRetentionDays(ctx context.Context, days int) error {
 	if days < 0 {
 		days = 0
 	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-		eventRetentionDaysSettingKey, fmt.Sprintf("%d", days))
+		`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		eventRetentionDaysSettingKey, fmt.Sprintf("%d", days), now)
 	return err
 }
 
