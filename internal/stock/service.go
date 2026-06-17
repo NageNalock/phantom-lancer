@@ -238,8 +238,7 @@ func (s *Service) TestProxyConnectivity(ctx context.Context, source string) (lat
 	var url string
 	switch source {
 	case "eastmoney":
-		// 最小化 clist 请求，pz=1 即可
-		url = "https://push2his.eastmoney.com/api/qt/clist/get?pn=1&pz=1&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:0+t:6&fields=f12"
+		url = "https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=1.600000&fields1=f1&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt=0&end=20500101&lmt=1"
 	case "sina":
 		url = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=1&sort=symbol&asc=1&node=sh_a"
 	case "tencent":
