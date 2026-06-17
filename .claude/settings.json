@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build *)",
+      "Bash(go test *)",
+      "Bash(go vet *)",
+      "Bash(gofmt *)",
+      "Bash(go env *)",
+      "Bash(npx tsc --noEmit *)",
+      "Bash(tsc --noEmit *)",
+      "Bash(npm run check)",
+      "Bash(npm run lint)",
+      "Bash(npm run typecheck)"
+    ]
+  }
+}
