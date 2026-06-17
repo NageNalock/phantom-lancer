@@ -586,6 +586,21 @@ func (s *Service) observeSupervisorExits(ctx context.Context, stop <-chan struct
 				}
 				continue
 			}
+			// ErrNotStarted means the supervisor has never been started
+			// (e.g. mail disabled or binary not installed).  Back off and
+			// retry – don't publish a spurious "crashed" event, and don't
+			// spin tightly (Wait() returns a fresh pre-filled channel each
+			// call when the supervisor is idle).
+			if errors.Is(res.ExitErr, moxsupervisor.ErrNotStarted) {
+				select {
+				case <-ctx.Done():
+					return
+				case <-stop:
+					return
+				case <-time.After(5 * time.Second):
+				}
+				continue
+			}
 			evtType := EventTypeRuntimeStopped
 			payload := map[string]any{
 				"exit_code":   res.ExitCode,
@@ -599,6 +614,16 @@ func (s *Service) observeSupervisorExits(ctx context.Context, stop <-chan struct
 				payload["error"] = res.ExitErr.Error()
 			}
 			s.publish(ctx, evtType, payload)
+			// Short backoff after an exit event to avoid flooding in case
+			// of a rapid crash-restart loop.  Supervisor-side backoff
+			// already limits restart rate; this is belt-and-suspenders.
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-time.After(time.Second):
+			}
 		}
 	}
 }
