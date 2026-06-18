@@ -1,4 +1,4 @@
-import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, CodexStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, StockAgentTraceSummary, StockDataHealth, StockSettings, StockSummary, V2RaySettings, V2RayStatus } from "../app/types";
+import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, CodexStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, StockAgentTraceSummary, StockDataHealth, StockSettings, StockSummary, StockV2Payload, StockV2Settings, StockV2UpdateJob, V2RaySettings, V2RayStatus } from "../app/types";
 
 export const NAV_ITEMS = [
   { id: "dashboard", label: "控制台", description: "服务器状态、执行边界和下一步入口" },
@@ -7,7 +7,8 @@ export const NAV_ITEMS = [
   { id: "logs", label: "日志", description: "服务日志、运行事件和在线排障视图" },
   { id: "images", label: "多媒体", description: "图片生成、视频生成、多图编辑、关键帧、资源库、历史和存储设置" },
   { id: "docker", label: "Docker", description: "Docker 守护进程、镜像与容器生命周期、daemon 安装与控制、内嵌 Registry" },
-  { id: "stock", label: "股票", description: "账户/仓位、数据资产、人工策略、系统盯盘、Review 和操作确认闭环" },
+  { id: "stock", label: "股票V1", description: "账户/仓位、数据资产、人工策略、系统盯盘、Review 和操作确认闭环" },
+  { id: "stockv2", label: "股票V2", description: "新一代股票系统：主数据管理、多组合仓位、智能更新与进度跟踪" },
   { id: "v2ray", label: "V2Ray", description: "内嵌 V2Ray 服务端、远程设备接入和运行控制" },
   { id: "mail", label: "Mail", description: "Mox 邮件服务控制面：域名、邮箱、证书、投递与搜索" },
   { id: "settings", label: "设置", description: "运行期配置、允许根目录和全局安全策略" },
@@ -613,4 +614,67 @@ export function codexEventTitle(type?: string): string {
     type ||
     "事件"
   );
+}
+
+// ==================== 股票 V2 标签 ====================
+
+export function stockV2StatusLabel(payload?: StockV2Payload): string {
+  if (!payload?.portfolios?.length && !payload?.instruments?.length) return "未初始化";
+  if (payload.updateJobs?.some(j => j.status === "running")) return "更新中";
+  if (payload.instruments?.length) return `${payload.instruments.length} 只标的`;
+  return "可用";
+}
+
+export function stockV2InstrumentCountLabel(payload?: StockV2Payload): string {
+  if (!payload?.instruments?.length) return "无数据";
+  return `${payload.instruments.length} 只`;
+}
+
+export function stockV2PortfolioCountLabel(payload?: StockV2Payload): string {
+  if (!payload?.portfolios?.length) return "无组合";
+  return `${payload.portfolios.length} 个组合`;
+}
+
+export function stockV2UpdateStatusLabel(job?: StockV2UpdateJob): string {
+  if (!job) return "无记录";
+  switch (job.status) {
+    case "running": return "进行中";
+    case "completed": return "已完成";
+    case "failed": return "失败";
+    case "cancelled": return "已取消";
+    default: return job.status;
+  }
+}
+
+export function stockV2UpdateStatusTone(job?: StockV2UpdateJob): "good" | "warn" | "danger" | "neutral" {
+  if (!job) return "neutral";
+  switch (job.status) {
+    case "completed": return "good";
+    case "running": return "warn";
+    case "failed": return "danger";
+    case "cancelled": return "neutral";
+    default: return "neutral";
+  }
+}
+
+export function stockV2TriggerTypeLabel(triggerType?: string): string {
+  if (triggerType === "manual") return "手动更新";
+  if (triggerType === "scheduled") return "定时更新";
+  return triggerType || "未知";
+}
+
+export function stockV2RiskLabel(riskLevel?: string): string {
+  if (riskLevel === "low") return "保守";
+  if (riskLevel === "medium") return "均衡";
+  if (riskLevel === "high") return "激进";
+  return riskLevel || "未设置";
+}
+
+export function stockV2SettingsSummary(settings?: StockV2Settings): string {
+  if (!settings) return "未配置";
+  if (settings.autoUpdateEnabled) {
+    const hours = Math.round(settings.updateIntervalSec / 3600 * 10) / 10;
+    return `自动更新 · ${hours}h`;
+  }
+  return "手动更新";
 }

@@ -1,4 +1,4 @@
-export type MainTab = "dashboard" | "codex-gateway" | "codex" | "logs" | "images" | "docker" | "stock" | "v2ray" | "mail" | "settings";
+export type MainTab = "dashboard" | "codex-gateway" | "codex" | "logs" | "images" | "docker" | "stock" | "stockv2" | "v2ray" | "mail" | "settings";
 export type Tone = "neutral" | "good" | "warn" | "danger";
 
 export interface AuthSession {
@@ -1464,6 +1464,7 @@ export interface AppData {
   v2ray: V2RayPayload;
   images: ImagesPayload;
   stock: StockPayload;
+  stockv2: StockV2Payload;
   mail: MailPayload;
 }
 
@@ -2001,3 +2002,131 @@ export interface MailPayload {
     updated_at_iso?: string;
   }>;
 }
+
+// ==================== 股票 V2 类型 ====================
+
+export interface StockV2Payload {
+  portfolios?: StockV2PortfolioWithHoldings[];
+  instruments?: StockV2Instrument[];
+  updateJobs?: StockV2UpdateJob[];
+  settings?: StockV2Settings;
+  lastUpdate?: string;
+}
+
+export interface StockV2Instrument {
+  id: string;
+  symbol: string;
+  market: string;
+  name: string;
+  industry: string;
+  sector: string;
+  concepts: string[];
+  listDate: string;
+  delistDate: string;
+  status: string; // active, delisted, suspended
+  lastUpdate: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockV2Portfolio {
+  id: string;
+  name: string;
+  description: string;
+  cash: number;
+  riskLevel: string; // low, medium, high
+  maxSinglePositionPct: number;
+  maxDrawdownPct: number;
+  allowBuy: boolean;
+  allowAdd: boolean;
+  allowReduce: boolean;
+  allowSell: boolean;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockV2PortfolioWithHoldings extends StockV2Portfolio {
+  totalValue: number;
+  totalAssetValue: number;
+  cashPct: number;
+  holdings: StockV2Holding[];
+}
+
+export interface StockV2Holding {
+  id: string;
+  portfolioId: string;
+  symbol: string;
+  market: string;
+  name: string;
+  quantity: number;
+  availableQuantity: number;
+  costPrice: number;
+  lastPrice: number;
+  lastPriceAt: string;
+  tradableStatus: string;
+  marketValue: number;
+  pnl: number;
+  positionPct: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockV2UpdateJob {
+  id: string;
+  triggerType: string; // manual, scheduled
+  triggerSource: string;
+  status: string; // running, completed, failed, cancelled
+  totalCount: number;
+  processedCount: number;
+  successCount: number;
+  failedCount: number;
+  failedItems?: UpdateFailure[];
+  startAt: string;
+  endAt: string;
+  errorMessage: string;
+  createdAt: string;
+}
+
+export interface UpdateFailure {
+  symbol: string;
+  reason: string;
+}
+
+export interface StockV2UpdateProgress {
+  updateJobId: string;
+  processedCount: number;
+  successCount: number;
+  currentBatch: number;
+  currentBatchProgress: number;
+  currentSymbol: string;
+  errorCount: number;
+  lastError: string;
+  updatedAt: string;
+}
+
+export interface StockV2Settings {
+  id: string;
+  autoUpdateEnabled: boolean;
+  updateIntervalSec: number;
+  proxyEnabled: boolean;
+  proxyType: string;
+  proxyHost: string;
+  proxyPort: number;
+  lastScheduledUpdate: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockV2UniverseUpdateRequest {
+  triggerType?: string;
+  triggerSource?: string;
+  symbols?: string[];
+}
+
+export interface StockV2UniverseUpdateResponse {
+  jobId: string;
+  message: string;
+}
+
+export type StockV2Tab = "overview" | "universe" | "portfolios" | "settings";

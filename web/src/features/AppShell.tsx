@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { AppActions } from "../app/App";
 import type { AppData, MainTab, V2RayExport } from "../app/types";
 import { Button, Pill } from "../components/ui";
-import { NAV_ITEMS, stockDataHealthLabel, stockStatusLabel, v2rayStateLabel } from "../domain/labels";
+import { NAV_ITEMS, stockDataHealthLabel, stockStatusLabel, stockV2StatusLabel, stockV2InstrumentCountLabel, v2rayStateLabel } from "../domain/labels";
 import { shouldHandleQueryLinkClick } from "../hooks/useQueryParamState";
 import { CodexGatewayView } from "./CodexGatewayView";
 import { CodexView } from "./CodexView";
@@ -13,6 +13,7 @@ import { LogsView } from "./LogsView";
 import { MailView } from "./mail/MailView";
 import { SettingsView } from "./SettingsView";
 import { StockView } from "./StockView";
+import { StockV2View } from "./stockv2/StockV2View";
 import { V2RayView } from "./V2RayView";
 
 export function AppShell({
@@ -123,6 +124,7 @@ export function AppShell({
                 <StatusSummaryRow label="多媒体" tone={images?.hasApiKey ? "good" : "warn"} value={images?.hasApiKey ? "已配置" : "未配置"} />
                 <StatusSummaryRow label="股票" tone={stock?.pendingOperationCount || stock?.openAlertCount ? "warn" : stock?.portfolioCount ? "good" : "neutral"} value={stockStatusLabel(stock)} />
                 <StatusSummaryRow label="股票数据" tone={stockData?.failedSources || stockData?.failedTaskCount ? "warn" : stockData?.sourceCount ? "good" : "neutral"} value={stockDataHealthLabel(stockData)} />
+                <StatusSummaryRow label="股票V2" tone={data.stockv2?.updateJobs?.some(j => j.status === "running") ? "warn" : data.stockv2?.instruments?.length ? "good" : "neutral"} value={stockV2StatusLabel(data.stockv2)} />
                 <StatusSummaryRow label="V2Ray" tone={v2ray?.running ? "good" : "warn"} value={v2rayStateLabel(v2ray)} />
                 <StatusSummaryRow label="Mail" tone={mail?.service_ready ? "good" : "warn"} value={mail?.service_ready ? "就绪" : "待配置"} />
               </div>
@@ -139,6 +141,7 @@ export function AppShell({
         {activeTab === "images" ? <ImagesView actions={actions} data={data} /> : null}
         {activeTab === "docker" ? <DockerView actions={actions} /> : null}
         {activeTab === "stock" ? <StockView actions={actions} data={data} /> : null}
+        {activeTab === "stockv2" ? <StockV2View actions={actions} data={data} /> : null}
         {activeTab === "v2ray" ? <V2RayView actions={actions} data={data} exportOpen={v2rayExportOpen} exported={v2rayExport as V2RayExport | null} /> : null}
         {activeTab === "mail" ? <MailView actions={actions} data={data} /> : null}
         {activeTab === "settings" ? <SettingsView actions={actions} data={data} /> : null}
@@ -163,7 +166,13 @@ function activeStatusPill(activeTab: MainTab, data: AppData) {
   if (activeTab === "stock") {
     const stock = data.stock.summary;
     const stockData = data.stock.dataHealth;
-    return <Pill tone={stock?.pendingOperationCount || stock?.openAlertCount || stockData?.failedSources || stockData?.failedTaskCount ? "warn" : stock?.portfolioCount || stockData?.sourceCount ? "good" : "neutral"}>股票 {stockStatusLabel(stock)} / {stockDataHealthLabel(stockData)}</Pill>;
+    return <Pill tone={stock?.pendingOperationCount || stock?.openAlertCount || stockData?.failedSources || stockData?.failedTaskCount ? "warn" : stock?.portfolioCount || stockData?.sourceCount ? "good" : "neutral"}>股票V1 {stockStatusLabel(stock)} / {stockDataHealthLabel(stockData)}</Pill>;
+  }
+  if (activeTab === "stockv2") {
+    const stockv2 = data.stockv2;
+    const running = stockv2?.updateJobs?.some(j => j.status === "running");
+    const tone: "good" | "warn" | "neutral" = running ? "warn" : stockv2?.instruments?.length ? "good" : "neutral";
+    return <Pill tone={tone}>股票V2 {stockV2InstrumentCountLabel(stockv2)}</Pill>;
   }
   if (activeTab === "codex") {
     const codex = data.dashboard.codex;

@@ -39,6 +39,7 @@ import (
 	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/selfupdate"
 	stocksvc "phantom-lancer/internal/stock"
+	stockv2svc "phantom-lancer/internal/stockv2"
 	"phantom-lancer/internal/storage"
 	"phantom-lancer/internal/v2ray"
 	"phantom-lancer/internal/workspaces"
@@ -93,6 +94,7 @@ type Server struct {
 	v2ray          *v2ray.Service
 	images         *imagegen.Service
 	stock          *stocksvc.Service
+	stockV2        *stockv2svc.Service
 	docker         *dockercontrol.Service
 	logs           *logcenter.Service
 	updates        *selfupdate.Service
@@ -136,7 +138,7 @@ type sessionContext struct {
 	Session storage.Session
 }
 
-func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, stockSvc *stocksvc.Service, dockerSvc *dockercontrol.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, mailSvc *mail.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
+func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, stockSvc *stocksvc.Service, stockV2Svc *stockv2svc.Service, dockerSvc *dockercontrol.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, mailSvc *mail.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
 	return &Server{
 		cfg:              cfg,
 		store:            store,
@@ -146,6 +148,7 @@ func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewayS
 		v2ray:            v2raySvc,
 		images:           imagesSvc,
 		stock:            stockSvc,
+		stockV2:          stockV2Svc,
 		docker:           dockerSvc,
 		logs:             logsSvc,
 		updates:          updateSvc,
@@ -293,6 +296,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/docker/images/", s.handleDockerRemoveImage)
 	mux.HandleFunc("GET /api/docker/volumes", s.handleDockerListVolumes)
 	mux.HandleFunc("GET /api/docker/networks", s.handleDockerListNetworks)
+	// V2 股票系统路由
+	s.RegisterStockV2Routes(mux)
 	mux.HandleFunc("GET /api/stock/snapshot", s.handleStockSnapshot)
 	mux.HandleFunc("GET /api/stock/settings", s.handleGetStockSettings)
 	mux.HandleFunc("PUT /api/stock/settings", s.handleUpdateStockSettings)

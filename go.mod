@@ -7,12 +7,18 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.22
 	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.2.8
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.103.2
+	github.com/distribution/reference v0.6.0
 	github.com/docker/docker v27.5.1+incompatible
+	github.com/docker/go-connections v0.5.0
+	github.com/go-chi/chi/v5 v5.2.5
 	github.com/mattn/go-sqlite3 v1.14.33
+	github.com/miekg/dns v1.1.72
 	github.com/mjl-/mox v0.0.15
 	github.com/mozillazg/go-pinyin v0.21.0
 	github.com/v2fly/v2ray-core/v5 v5.51.2
 	golang.org/x/crypto v0.51.0
+	golang.org/x/net v0.55.0
+	golang.org/x/text v0.37.0
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -29,9 +35,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.28 // indirect
 	github.com/aws/smithy-go v1.27.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/containerd/log v0.1.0 // indirect
 	github.com/dgryski/go-metro v0.0.0-20211217172704-adc40b04c140 // indirect
-	github.com/distribution/reference v0.6.0 // indirect
-	github.com/docker/go-connections v0.5.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
@@ -39,8 +44,9 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/miekg/dns v1.1.72 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
+	github.com/moby/term v0.5.2 // indirect
+	github.com/morikuni/aec v1.1.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pelletier/go-toml v1.9.5 // indirect
@@ -53,12 +59,16 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0 // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.44.0 // indirect
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	go.starlark.net v0.0.0-20230612165344-9532f5667272 // indirect
 	go4.org/netipx v0.0.0-20230303233057-f1b76eb4bb35 // indirect
-	golang.org/x/net v0.54.0 // indirect
+	golang.org/x/mod v0.35.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/tools v0.44.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace google.golang.org/genproto => google.golang.org/genproto v0.0.0-20260526163538-3dc84a4a5aaa

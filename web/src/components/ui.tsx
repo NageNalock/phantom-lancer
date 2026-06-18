@@ -110,9 +110,9 @@ export function Panel({ title, subtitle, actions, children, className = "" }: { 
   );
 }
 
-export function Pill({ children, tone = "neutral" }: { children: ReactNode; tone?: Tone }) {
+export function Pill({ children, tone = "neutral", className = "" }: { children: ReactNode; tone?: Tone; className?: string }) {
   const toneClass = tone === "good" ? "pill-good" : tone === "warn" ? "pill-warn" : tone === "danger" ? "pill-danger" : "";
-  return <span className={`pill ${toneClass}`}>{children}</span>;
+  return <span className={`pill ${toneClass} ${className}`}>{children}</span>;
 }
 
 export function Metric({

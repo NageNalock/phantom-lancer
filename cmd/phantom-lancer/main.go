@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -28,6 +29,8 @@ import (
 	"phantom-lancer/internal/mail"
 	"phantom-lancer/internal/selfupdate"
 	stocksvc "phantom-lancer/internal/stock"
+	stockv2 "phantom-lancer/internal/stockv2"
+	stockv2svc "phantom-lancer/internal/stockv2"
 	"phantom-lancer/internal/storage"
 	"phantom-lancer/internal/v2ray"
 	"phantom-lancer/web"
@@ -119,6 +122,20 @@ func main() {
 	imagesSvc := images.NewService(store, hub, cfg.DataDir, logger)
 	stockSvc := stocksvc.NewService(store, logger)
 	defer stockSvc.Close()
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+	stockV2Store, err := stockv2.NewStore(cfg.DBPath)
+	if err != nil {
+		logger.Error("open stockv2 store failed", "error", err)
+		os.Exit(1)
+	}
+	stockV2Svc := stockv2.NewService(stockV2Store, logger, httpClient)
+	defer stockV2Svc.Close()
+	if err := stockV2Svc.Initialize(ctx); err != nil {
+		logger.Error("initialize stock v2 service failed", "error", err)
+		os.Exit(1)
+	}
 	dockerSvc := dockercontrol.NewService(store, hub, cfg.DataDir, logger)
 	defer dockerSvc.Close()
 	logsSvc := logcenter.NewService(store, cfg)
@@ -154,7 +171,7 @@ func main() {
 	if rollbackPath != "" {
 		logger.Info("self-update watchdog triggered, rolling back to backup binary", "path", rollbackPath)
 		logger.Info("phantom lancer preparing rollback self-exec", "path", rollbackPath)
-		orderlyClose(logger, mailSvc, dockerSvc, stockSvc, v2raySvc, codexGatewaySvc, codexSvc, store, logHandle)
+		orderlyClose(logger, mailSvc, dockerSvc, stockSvc, stockV2Svc, v2raySvc, codexGatewaySvc, codexSvc, store, logHandle)
 		if err := syscall.Exec(rollbackPath, os.Args, os.Environ()); err != nil {
 			logger.Error("rollback syscall.Exec failed", "error", err, "path", rollbackPath)
 			os.Exit(1)
@@ -187,6 +204,7 @@ func main() {
 	codexSvc.StartBackground(ctx)
 	codexGatewaySvc.StartBackground(ctx)
 	stockSvc.StartBackground(ctx)
+	stockV2Svc.StartBackground(ctx)
 	mailSvc.StartBackground(ctx)
 	store.StartStatsCollector(ctx)
 
@@ -224,7 +242,7 @@ func main() {
 			logger.Error("start embedded v2ray failed", "error", err)
 		}
 	}
-	api, err := httpapi.New(cfg, store, hub, codexGatewaySvc, codexSvc, v2raySvc, imagesSvc, stockSvc, dockerSvc, logsSvc, updateSvc, mailSvc, staticFS, logger)
+	api, err := httpapi.New(cfg, store, hub, codexGatewaySvc, codexSvc, v2raySvc, imagesSvc, stockSvc, stockV2Svc, dockerSvc, logsSvc, updateSvc, mailSvc, staticFS, logger)
 	if err != nil {
 		logger.Error("create api failed", "error", err)
 		os.Exit(1)
@@ -326,7 +344,7 @@ func main() {
 		} else {
 			logger.Info("phantom lancer exiting for update restart", "restart_mode", cfg.Updates.RestartMode, "requires_external_supervisor", cfg.Updates.RestartMode == selfupdate.RestartModeExit)
 		}
-		orderlyClose(logger, mailSvc, dockerSvc, stockSvc, v2raySvc, codexGatewaySvc, codexSvc, store, logHandle)
+		orderlyClose(logger, mailSvc, dockerSvc, stockSvc, stockV2Svc, v2raySvc, codexGatewaySvc, codexSvc, store, logHandle)
 		if selfExecPath != "" {
 			if err := syscall.Exec(selfExecPath, os.Args, os.Environ()); err != nil {
 				logger.Error("self-exec syscall.Exec failed, falling back to plain exit", "error", err, "path", selfExecPath)
@@ -340,7 +358,7 @@ func main() {
 // order the defers were registered in main() so an explicit exit path (e.g.
 // for self-update) releases resources correctly before os.Exit() /
 // syscall.Exec() would otherwise skip the deferred calls.
-func orderlyClose(logger *slog.Logger, mailSvc *mail.Service, dockerSvc *dockercontrol.Service, stockSvc *stocksvc.Service, v2raySvc *v2ray.Service, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, store *storage.Store, logHandle *logging.LoggerHandle) {
+func orderlyClose(logger *slog.Logger, mailSvc *mail.Service, dockerSvc *dockercontrol.Service, stockSvc *stocksvc.Service, stockV2Svc *stockv2svc.Service, v2raySvc *v2ray.Service, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, store *storage.Store, logHandle *logging.LoggerHandle) {
 	warn := func(name string, err error) {
 		if err != nil && logger != nil {
 			logger.Warn(name+" close returned error", "error", err)
@@ -354,6 +372,9 @@ func orderlyClose(logger *slog.Logger, mailSvc *mail.Service, dockerSvc *dockerc
 	}
 	if stockSvc != nil {
 		stockSvc.Close()
+	}
+	if stockV2Svc != nil {
+		warn("stockv2", stockV2Svc.Close())
 	}
 	if v2raySvc != nil {
 		v2raySvc.Close()

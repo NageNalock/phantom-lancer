@@ -12,6 +12,7 @@ import type {
   MainTab,
   SettingsPayload,
   StockPayload,
+  StockV2Payload,
   Tone,
   V2RayPayload,
 } from "./types";
@@ -19,8 +20,8 @@ import { AuthView } from "../features/AuthView";
 import { AppShell } from "../features/AppShell";
 
 type AuthMode = "checking" | "bootstrap" | "login" | "ready" | "failed";
-const MAIN_TAB_IDS: MainTab[] = ["dashboard", "codex", "codex-gateway", "logs", "images", "docker", "stock", "v2ray", "mail", "settings"];
-const MAIN_TAB_CHILD_KEYS = ["codex", "codexInbox", "codexRuntime", "codexSidebar", "gateway", "images", "docker", "stock", "mail", "settings", "drv", "drrepo", "drtag", "dcreate", "dcform", "dselc", "dseli"];
+const MAIN_TAB_IDS: MainTab[] = ["dashboard", "codex", "codex-gateway", "logs", "images", "docker", "stock", "stockv2", "v2ray", "mail", "settings"];
+const MAIN_TAB_CHILD_KEYS = ["codex", "codexInbox", "codexRuntime", "codexSidebar", "gateway", "images", "docker", "stock", "stockv2", "mail", "settings", "drv", "drrepo", "drtag", "dcreate", "dcform", "dselc", "dseli"];
 
 export interface AppActions {
   api: typeof api;
@@ -33,6 +34,7 @@ export interface AppActions {
   refreshV2Ray: () => Promise<void>;
   refreshImages: () => Promise<void>;
   refreshStock: () => Promise<void>;
+  refreshStockV2: () => Promise<void>;
   setV2RayExportOpen: (open: boolean) => void;
   setV2RayExport: (value: unknown) => void;
 }
@@ -45,6 +47,7 @@ const emptyData: AppData = {
   v2ray: {},
   images: {},
   stock: {},
+  stockv2: {},
   mail: emptyMailPayload(),
 };
 
@@ -135,13 +138,14 @@ export function App() {
   }, []);
 
   const loadAppData = useCallback(async () => {
-    const [dashboard, audit, codexGateway, settings, v2ray, stock, imagesSettings, imageStorageSettings, imageJobs, imageAssets, imagePrompts, mailStatus, mailAccounts] = await Promise.all([
+    const [dashboard, audit, codexGateway, settings, v2ray, stock, stockv2, imagesSettings, imageStorageSettings, imageJobs, imageAssets, imagePrompts, mailStatus, mailAccounts] = await Promise.all([
       api<AppData["dashboard"]>("/api/dashboard/summary"),
       api<{ items?: AppData["audit"] }>("/api/audit/events"),
       loadCodexGatewayData(),
       api<SettingsPayload>("/api/settings"),
       api<V2RayPayload>("/api/v2ray/settings"),
       api<StockPayload>("/api/stock/snapshot"),
+      api<StockV2Payload>("/api/stockv2/snapshot"),
       api<ImagesPayload>("/api/images/settings"),
       api<{ settings?: ImagesPayload["storageSettings"] }>("/api/images/storage-settings"),
       api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=200"),
@@ -158,6 +162,7 @@ export function App() {
       settings,
       v2ray,
       stock,
+      stockv2,
       images: { ...imagesSettings, storageSettings: imageStorageSettings.settings, jobs: imageJobs.items || [], assets: imageAssets.items || [], prompts: imagePrompts.items || [], count: imageJobs.count || 0 },
       mail: {
         ...emptyMailPayload(),
@@ -240,6 +245,10 @@ export function App() {
       refreshStock: async () => {
         const stock = await api<StockPayload>("/api/stock/snapshot");
         setData((current) => ({ ...current, stock }));
+      },
+      refreshStockV2: async () => {
+        const stockv2 = await api<StockV2Payload>("/api/stockv2/snapshot");
+        setData((current) => ({ ...current, stockv2 }));
       },
       setV2RayExportOpen,
       setV2RayExport,
