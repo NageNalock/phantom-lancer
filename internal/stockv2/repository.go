@@ -156,6 +156,42 @@ CREATE TABLE IF NOT EXISTS stockv2_holdings (
     updated_at DATETIME NOT NULL,
     FOREIGN KEY (portfolio_id) REFERENCES stockv2_portfolios(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS stockv2_quotes_latest (
+    symbol TEXT PRIMARY KEY,
+    market TEXT NOT NULL,
+    name TEXT,
+    last_price REAL NOT NULL DEFAULT 0.0,
+    prev_close REAL NOT NULL DEFAULT 0.0,
+    open_price REAL NOT NULL DEFAULT 0.0,
+    high_price REAL NOT NULL DEFAULT 0.0,
+    low_price REAL NOT NULL DEFAULT 0.0,
+    volume REAL NOT NULL DEFAULT 0.0,
+    amount REAL NOT NULL DEFAULT 0.0,
+    pct_change REAL NOT NULL DEFAULT 0.0,
+    quote_at DATETIME NOT NULL,
+    fetched_at DATETIME NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_portfolio_snapshots (
+    id TEXT PRIMARY KEY,
+    portfolio_id TEXT NOT NULL,
+    valuation_at DATETIME NOT NULL,
+    cash REAL NOT NULL DEFAULT 0.0,
+    holding_market_value REAL NOT NULL DEFAULT 0.0,
+    total_asset_value REAL NOT NULL DEFAULT 0.0,
+    cash_pct REAL NOT NULL DEFAULT 0.0,
+    position_count INTEGER NOT NULL DEFAULT 0,
+    stale_quote_count INTEGER NOT NULL DEFAULT 0,
+    estimated_quote_count INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (portfolio_id) REFERENCES stockv2_portfolios(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS stockv2_update_jobs (
     id TEXT PRIMARY KEY,
     trigger_type TEXT NOT NULL,
@@ -202,6 +238,11 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_status ON stockv2_instruments
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolios_name ON stockv2_portfolios(name);
 CREATE INDEX IF NOT EXISTS idx_stockv2_holdings_portfolio_id ON stockv2_holdings(portfolio_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_holdings_symbol ON stockv2_holdings(symbol);
+CREATE INDEX IF NOT EXISTS idx_stockv2_quotes_latest_market ON stockv2_quotes_latest(market);
+CREATE INDEX IF NOT EXISTS idx_stockv2_quotes_latest_status ON stockv2_quotes_latest(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_quotes_latest_fetched_at ON stockv2_quotes_latest(fetched_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_snapshots_portfolio_id ON stockv2_portfolio_snapshots(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_snapshots_valuation_at ON stockv2_portfolio_snapshots(valuation_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_status ON stockv2_update_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_created_at ON stockv2_update_jobs(created_at);
 INSERT OR IGNORE INTO stockv2_settings (id, auto_update_enabled, update_interval_sec, created_at, updated_at)
@@ -611,7 +652,9 @@ func (s *Store) GetHolding(ctx context.Context, id string) (StockV2Holding, erro
 		return StockV2Holding{}, wrapError(err, "get holding")
 	}
 
-	holding.LastPriceAt = nullTimeDefault(lastPriceAt, holding.CreatedAt)
+	if lastPriceAt.Valid {
+		holding.LastPriceAt = lastPriceAt.Time
+	}
 
 	return holding, nil
 }
@@ -724,7 +767,9 @@ func (s *Store) ListHoldings(ctx context.Context, portfolioID string) ([]StockV2
 		if err != nil {
 			return nil, wrapError(err, "scan holding")
 		}
-		holding.LastPriceAt = nullTimeDefault(lastPriceAt, holding.CreatedAt)
+		if lastPriceAt.Valid {
+			holding.LastPriceAt = lastPriceAt.Time
+		}
 		holdings = append(holdings, holding)
 	}
 
@@ -854,7 +899,7 @@ func (s *Store) GetInstruments(ctx context.Context, limit int, offset int) ([]St
 	}
 	defer rows.Close()
 
-	var instruments []StockV2Instrument
+	instruments := make([]StockV2Instrument, 0)
 	for rows.Next() {
 		var instrument StockV2Instrument
 		var conceptsJSON []byte

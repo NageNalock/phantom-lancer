@@ -1,9 +1,9 @@
-import { Plus, Trash, Pencil, Wallet, X, Check, MagnifyingGlass } from "@phosphor-icons/react";
+import { ArrowClockwise, Plus, Trash, Pencil, Wallet, X, Check, MagnifyingGlass } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import type { AppActions } from "../../app/App";
-import type { AppData, StockV2Holding, StockV2Instrument, StockV2Portfolio, StockV2PortfolioWithHoldings } from "../../app/types";
+import type { AppData, StockV2Holding, StockV2Instrument, StockV2Portfolio, StockV2PortfolioRefreshResult, StockV2PortfolioSnapshot, StockV2PortfolioWithHoldings } from "../../app/types";
 import { Button, Field, Panel, Pill } from "../../components/ui";
-import { stockV2RiskLabel } from "../../domain/labels";
+import { stockV2RiskLabel, stockV2ValuationStatusLabel, stockV2ValuationStatusTone } from "../../domain/labels";
 
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
 
@@ -13,6 +13,9 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
   const [creating, setCreating] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(portfolios[0]?.id || null);
   const [holdingsDialog, setHoldingsDialog] = useState<{ portfolioId: string; mode: "add" | "edit"; holding?: StockV2Holding } | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshResult, setRefreshResult] = useState<StockV2PortfolioRefreshResult | null>(null);
+  const [snapshots, setSnapshots] = useState<StockV2PortfolioSnapshot[]>([]);
 
   // 选中第一个组合
   useEffect(() => {
@@ -22,6 +25,44 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
   }, [portfolios, selectedId]);
 
   const selected = portfolios.find((p) => p.id === selectedId) || null;
+  const selectedRefreshResult = refreshResult && refreshResult.portfolioId === selected?.id ? refreshResult : null;
+  const latestSnapshot = selectedRefreshResult?.snapshot || snapshots[0];
+  const displayedHoldings = selectedRefreshResult?.holdings || selected?.holdings || [];
+
+  useEffect(() => {
+    setRefreshResult(null);
+    setSnapshots([]);
+    if (!selectedId) return;
+    let cancelled = false;
+    actions.api<{ items: StockV2PortfolioSnapshot[] }>(`/api/stockv2/portfolios/${selectedId}/snapshots?limit=5`)
+      .then((data) => {
+        if (!cancelled) setSnapshots(data.items || []);
+      })
+      .catch(() => {
+        if (!cancelled) setSnapshots([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [actions, selectedId]);
+
+  async function refreshSelectedPortfolio() {
+    if (!selected) return;
+    setRefreshing(true);
+    try {
+      await runAction("刷新资产", async () => {
+        const result = await actions.api<StockV2PortfolioRefreshResult>(`/api/stockv2/portfolios/${selected.id}/refresh`, {
+          method: "POST",
+          body: { triggerSource: "web" },
+        });
+        setRefreshResult(result);
+        const history = await actions.api<{ items: StockV2PortfolioSnapshot[] }>(`/api/stockv2/portfolios/${selected.id}/snapshots?limit=5`);
+        setSnapshots(history.items || []);
+      });
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   return (
     <div className="grid gap-4">
@@ -61,18 +102,26 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
       {selected ? (
         <Panel
           title="持仓明细"
-          subtitle={`${selected.name} · ${selected.holdings?.length || 0} 只持仓`}
+          subtitle={`${selected.name} · ${displayedHoldings.length} 只持仓`}
           actions={
-            <Button tone="primary" onClick={() => setHoldingsDialog({ portfolioId: selected.id, mode: "add" })}>
-              <Plus size={14} className="mr-1.5" />
-              添加持仓
-            </Button>
+            <>
+              <Button onClick={() => void refreshSelectedPortfolio()} disabled={refreshing}>
+                <ArrowClockwise size={14} className="mr-1.5" />
+                {refreshing ? "刷新中" : "刷新资产"}
+              </Button>
+              <Button tone="primary" onClick={() => setHoldingsDialog({ portfolioId: selected.id, mode: "add" })}>
+                <Plus size={14} className="mr-1.5" />
+                添加持仓
+              </Button>
+            </>
           }
         >
-          {selected.holdings?.length === 0 ? (
+          <PortfolioValuationSummary portfolio={selected} refreshResult={selectedRefreshResult} snapshot={latestSnapshot} />
+
+          {displayedHoldings.length === 0 ? (
             <p className="text-sm text-[var(--muted)]">暂无持仓，点击右上角添加。</p>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="mt-4 overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-[var(--line)] text-left text-xs text-[var(--muted)]">
@@ -81,14 +130,16 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
                     <th className="py-2 pr-4 font-medium">数量</th>
                     <th className="py-2 pr-4 font-medium">成本价</th>
                     <th className="py-2 pr-4 font-medium">现价</th>
+                    <th className="py-2 pr-4 font-medium">价格时间</th>
                     <th className="py-2 pr-4 font-medium">市值</th>
                     <th className="py-2 pr-4 font-medium">盈亏</th>
                     <th className="py-2 pr-4 font-medium">占比</th>
+                    <th className="py-2 pr-4 font-medium">状态</th>
                     <th className="py-2 pr-4 font-medium">操作</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {selected.holdings?.map((h) => (
+                  {displayedHoldings.map((h) => (
                     <HoldingRow
                       key={h.id}
                       holding={h}
@@ -102,6 +153,7 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
               </table>
             </div>
           )}
+          {snapshots.length > 0 ? <SnapshotHistory snapshots={snapshots} /> : null}
         </Panel>
       ) : null}
 
@@ -222,6 +274,7 @@ function PortfolioRow({
 function HoldingRow({ holding, onEdit, onDelete }: { holding: StockV2Holding; onEdit: () => void; onDelete: () => void }) {
   const pnlPct = holding.costPrice && holding.quantity ? (holding.pnl || 0) / (holding.costPrice * holding.quantity) * 100 : 0;
   const pnlTone = (holding.pnl || 0) >= 0 ? "good" : "danger";
+  const status = holding.tradableStatus || "unknown";
 
   return (
     <tr className="border-b border-[var(--line-soft)] last:border-b-0 hover:bg-[var(--surface-soft)]">
@@ -230,11 +283,15 @@ function HoldingRow({ holding, onEdit, onDelete }: { holding: StockV2Holding; on
       <td className="py-2 pr-4">{holding.quantity.toLocaleString()}</td>
       <td className="py-2 pr-4 font-mono">{holding.costPrice?.toFixed(2) || "-"}</td>
       <td className="py-2 pr-4 font-mono">{holding.lastPrice?.toFixed(2) || "-"}</td>
+      <td className="py-2 pr-4 text-xs text-[var(--muted)]">{formatDateTime(holding.lastPriceAt)}</td>
       <td className="py-2 pr-4 font-mono">{formatMoney(holding.marketValue || 0)}</td>
       <td className={`py-2 pr-4 font-mono ${pnlTone === "good" ? "text-[var(--good)]" : "text-[var(--danger)]"}`}>
         {formatMoney(holding.pnl || 0)} ({pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}%)
       </td>
       <td className="py-2 pr-4">{holding.positionPct?.toFixed(2) || "-"}%</td>
+      <td className="py-2 pr-4">
+        <Pill tone={stockV2ValuationStatusTone(status)}>{stockV2ValuationStatusLabel(status)}</Pill>
+      </td>
       <td className="py-2 pr-4">
         <div className="flex gap-1">
           <Button onClick={onEdit}>
@@ -246,6 +303,76 @@ function HoldingRow({ holding, onEdit, onDelete }: { holding: StockV2Holding; on
         </div>
       </td>
     </tr>
+  );
+}
+
+function PortfolioValuationSummary({
+  portfolio,
+  refreshResult,
+  snapshot,
+}: {
+  portfolio: StockV2PortfolioWithHoldings;
+  refreshResult: StockV2PortfolioRefreshResult | null;
+  snapshot?: StockV2PortfolioSnapshot;
+}) {
+  const totalAssetValue = snapshot?.totalAssetValue ?? portfolio.totalAssetValue ?? portfolio.cash;
+  const holdingMarketValue = snapshot?.holdingMarketValue ?? portfolio.totalValue ?? 0;
+  const cashPct = snapshot?.cashPct ?? portfolio.cashPct ?? 0;
+  const status = snapshot?.status || "unknown";
+  return (
+    <div className="grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+      <div className="grid grid-cols-4 gap-3 text-xs max-lg:grid-cols-2">
+        <SummaryCell label="总资产" value={formatMoney(totalAssetValue)} />
+        <SummaryCell label="持仓市值" value={formatMoney(holdingMarketValue)} />
+        <SummaryCell label="现金比例" value={`${cashPct.toFixed(2)}%`} />
+        <SummaryCell label="估值时间" value={formatDateTime(snapshot?.valuationAt)} muted />
+      </div>
+      <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+        <Pill tone={stockV2ValuationStatusTone(status)}>{stockV2ValuationStatusLabel(status)}</Pill>
+        {refreshResult ? (
+          <>
+            <span>fresh {refreshResult.refreshedCount}</span>
+            <span>stale {refreshResult.staleCount}</span>
+            <span>estimated {refreshResult.estimatedCount}</span>
+            <span>failed {refreshResult.failedCount}</span>
+          </>
+        ) : snapshot ? (
+          <>
+            <span>stale {snapshot.staleQuoteCount}</span>
+            <span>estimated {snapshot.estimatedQuoteCount}</span>
+            <span>positions {snapshot.positionCount}</span>
+          </>
+        ) : (
+          <span>尚未生成 snapshot</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SummaryCell({ label, value, muted = false }: { label: string; value: string; muted?: boolean }) {
+  return (
+    <div>
+      <span className="block text-[var(--muted)]">{label}</span>
+      <strong className={`mt-1 block font-mono text-sm ${muted ? "font-normal text-[var(--muted-strong)]" : "text-[var(--text)]"}`}>{value || "-"}</strong>
+    </div>
+  );
+}
+
+function SnapshotHistory({ snapshots }: { snapshots: StockV2PortfolioSnapshot[] }) {
+  return (
+    <div className="mt-4 border-t border-[var(--line)] pt-3">
+      <div className="mb-2 text-xs font-medium text-[var(--muted)]">最近 snapshot</div>
+      <div className="grid gap-2">
+        {snapshots.slice(0, 5).map((snapshot) => (
+          <div key={snapshot.id} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 rounded-md border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
+            <span className="font-mono text-[var(--muted-strong)]">{formatDateTime(snapshot.valuationAt)}</span>
+            <span className="font-mono">{formatMoney(snapshot.totalAssetValue)}</span>
+            <Pill tone={stockV2ValuationStatusTone(snapshot.status)}>{stockV2ValuationStatusLabel(snapshot.status)}</Pill>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -603,4 +730,16 @@ function formatMoney(value: number): string {
     return `¥${(value / 10000).toFixed(2)} 万`;
   }
   return `¥${value.toFixed(2)}`;
+}
+
+function formatDateTime(value?: string): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime()) || date.getFullYear() < 2000) return "-";
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }

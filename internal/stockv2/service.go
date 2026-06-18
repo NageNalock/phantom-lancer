@@ -159,19 +159,10 @@ func (s *Service) GetPortfolio(ctx context.Context, id string) (PortfolioWithHol
 		return PortfolioWithHoldings{}, wrapError(err, "get holdings")
 	}
 
-	// 计算持仓总值和盈亏
+	// 计算当前库内持仓估值；显式刷新由 RefreshPortfolioValuation 负责。
 	totalValue := 0.0
-	totalPnL := 0.0
 	for i := range holdings {
 		totalValue += holdings[i].MarketValue
-		totalPnL += holdings[i].PnL
-	}
-
-	// 更新持仓的当前价格和市值
-	if len(holdings) > 0 {
-		if err := s.refreshHoldingsPrices(ctx, id); err != nil {
-			s.log.Warn("refresh holdings prices failed", "portfolio_id", id, "error", err)
-		}
 	}
 
 	// 计算总资产和现金比例
@@ -247,11 +238,6 @@ func (s *Service) CreateHolding(ctx context.Context, portfolioID string, req Req
 		return StockV2Holding{}, wrapError(err, "create holding")
 	}
 
-	// 更新持仓价格和市值
-	if err := s.refreshHoldingPrice(ctx, &holding); err != nil {
-		s.log.Warn("refresh holding price failed", "holding_id", holding.ID, "error", err)
-	}
-
 	return holding, nil
 }
 
@@ -309,13 +295,6 @@ func (s *Service) ListHoldings(ctx context.Context, portfolioID string) ([]Stock
 	holdings, err := s.store.ListHoldings(ctx, portfolioID)
 	if err != nil {
 		return nil, wrapError(err, "list holdings")
-	}
-
-	// 更新持仓价格（批量更新）
-	if len(holdings) > 0 {
-		if err := s.refreshHoldingsPrices(ctx, portfolioID); err != nil {
-			s.log.Warn("refresh holdings prices failed", "portfolio_id", portfolioID, "error", err)
-		}
 	}
 
 	return holdings, nil
@@ -700,53 +679,6 @@ func (s *Service) checkAndExecuteScheduledUpdate(ctx context.Context) {
 	settings.LastScheduledUpdate = now
 	s.store.CreateOrUpdateSettings(ctx, settings)
 	s.settings = settings
-}
-
-// refreshHoldingsPrices 批量更新持仓价格
-func (s *Service) refreshHoldingsPrices(ctx context.Context, portfolioID string) error {
-	holdings, err := s.store.ListHoldings(ctx, portfolioID)
-	if err != nil {
-		return err
-	}
-
-	// 收集需要更新的股票代码
-	symbolMap := make(map[string]StockV2Holding)
-	for _, holding := range holdings {
-		symbolMap[holding.Symbol] = holding
-	}
-
-	// 获取股票价格
-	symbols := make([]string, 0, len(symbolMap))
-	for symbol := range symbolMap {
-		symbols = append(symbols, symbol)
-	}
-
-	// 更新每个持仓的价格
-	for _, holding := range holdings {
-		if err := s.refreshHoldingPrice(ctx, &holding); err != nil {
-			s.log.Warn("refresh holding price failed", "holding_id", holding.ID, "error", err)
-		}
-	}
-
-	return nil
-}
-
-// refreshHoldingPrice 更新单个持仓价格
-func (s *Service) refreshHoldingPrice(ctx context.Context, holding *StockV2Holding) error {
-	// 这里应该调用腾讯接口获取最新价格
-	// 暂时使用模拟数据
-	lastPrice := holding.LastPrice // 实际应该从腾讯接口获取
-	if lastPrice <= 0 {
-		lastPrice = holding.CostPrice // 如果没有价格，使用成本价
-	}
-
-	// 更新持仓价格和市值
-	holding.LastPrice = lastPrice
-	holding.MarketValue = lastPrice * holding.Quantity
-	holding.PnL = (lastPrice - holding.CostPrice) * holding.Quantity
-
-	// 更新数据库
-	return s.store.UpdateHolding(ctx, *holding)
 }
 
 // Snapshot 获取 V2 工作台快照数据。

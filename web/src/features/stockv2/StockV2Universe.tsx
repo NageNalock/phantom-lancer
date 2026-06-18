@@ -54,7 +54,6 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   const jobs = stockv2.updateJobs || [];
   const runningJob = jobs.find(j => j.status === "running");
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [progressPct, setProgressPct] = useState(0);
   const [page, setPage] = useState(0);
   const [instrumentsPage, setInstrumentsPage] = useState<InstrumentsPage | null>(null);
   const [totalCount, setTotalCount] = useState(0);
@@ -66,6 +65,9 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   const portfolios = stockv2.portfolios || [];
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const progressPct = runningJob
+    ? Math.min(100, Math.round(((runningJob.processedCount || 0) / (runningJob.totalCount || runningJob.processedCount || 1)) * 100))
+    : 0;
 
   function handleJump() {
     const n = parseInt(jumpInput, 10);
@@ -82,7 +84,10 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
       const data = await actions.api<InstrumentsPage>(
         `/api/stockv2/instruments?limit=${PAGE_SIZE}&offset=${pageNum * PAGE_SIZE}`
       );
-      setInstrumentsPage(data);
+      setInstrumentsPage({
+        ...data,
+        items: Array.isArray(data.items) ? data.items : [],
+      });
       setPage(pageNum);
       if (data.total !== undefined) {
         setTotalCount(data.total);
@@ -113,12 +118,8 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   // 轮询进度
   useEffect(() => {
     if (!runningJob) {
-      setProgressPct(0);
       return;
     }
-    const total = runningJob.totalCount || 1;
-    setProgressPct(Math.min(100, Math.round((runningJob.processedCount / total) * 100)));
-
     const timer = setInterval(async () => {
       try {
         await actions.refreshStockV2();
@@ -171,10 +172,11 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         <div className="space-y-2">
           <div className="h-2 overflow-hidden rounded-full bg-[var(--line)]">
             <div
-              className={`h-full rounded-full transition-all duration-500 ${
-                runningJob ? "bg-[var(--accent)]" : progressPct >= 100 ? "bg-[var(--success)]" : "bg-[var(--muted)]"
-              }`}
-              style={{ width: `${progressPct}%` }}
+              className="h-full rounded-full transition-all duration-500"
+              style={{
+                width: `${progressPct}%`,
+                backgroundColor: runningJob ? "var(--accent)" : "var(--muted)",
+              }}
             />
           </div>
           <div className="flex justify-between text-xs text-[var(--muted)]">

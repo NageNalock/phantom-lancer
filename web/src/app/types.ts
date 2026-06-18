@@ -1779,6 +1779,33 @@ export interface StockV2PortfolioWithHoldings extends StockV2Portfolio {
   holdings: StockV2Holding[];
 }
 
+export interface StockV2PortfolioSnapshot {
+  id: string;
+  portfolioId: string;
+  valuationAt: string;
+  cash: number;
+  holdingMarketValue: number;
+  totalAssetValue: number;
+  cashPct: number;
+  positionCount: number;
+  staleQuoteCount: number;
+  estimatedQuoteCount: number;
+  source: string;
+  status: string;
+  createdAt: string;
+}
+
+export interface StockV2PortfolioRefreshResult {
+  portfolioId: string;
+  refreshedCount: number;
+  staleCount: number;
+  estimatedCount: number;
+  failedCount: number;
+  failedItems: UpdateFailure[];
+  snapshot: StockV2PortfolioSnapshot;
+  holdings: StockV2Holding[];
+}
+
 export interface StockV2Holding {
   id: string;
   portfolioId: string;

@@ -541,6 +541,26 @@ export function stockV2RiskLabel(riskLevel?: string): string {
   return riskLevel || "未设置";
 }
 
+export function stockV2ValuationStatusLabel(status?: string): string {
+  switch (status) {
+    case "fresh": return "fresh";
+    case "stale": return "stale";
+    case "estimated": return "estimated";
+    case "failed": return "failed";
+    default: return status || "unknown";
+  }
+}
+
+export function stockV2ValuationStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "fresh": return "good";
+    case "stale": return "warn";
+    case "estimated": return "warn";
+    case "failed": return "danger";
+    default: return "neutral";
+  }
+}
+
 export function stockV2SettingsSummary(settings?: StockV2Settings): string {
   if (!settings) return "未配置";
   const parts: string[] = [];
