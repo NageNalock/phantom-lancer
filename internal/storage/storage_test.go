@@ -960,7 +960,7 @@ func TestDescribeTable(t *testing.T) {
 		wantDesc string
 	}{
 		{"audit_events", "审计日志"},
-		{"mail_messages_p7", "邮件消息"},
+		{"image_assets", "图片素材库"},
 		{"codex_cli_threads", "Codex CLI 模块表"},
 		{"stock_market_data_points", "行情数据点"},
 		{"unknown_table", "数据表"},

@@ -10,7 +10,6 @@ import { DashboardView } from "./DashboardView";
 import { DockerView } from "./DockerView";
 import { ImagesView } from "./ImagesView";
 import { LogsView } from "./LogsView";
-import { MailView } from "./mail/MailView";
 import { SettingsView } from "./SettingsView";
 import { StockView } from "./StockView";
 import { V2RayView } from "./V2RayView";
@@ -36,7 +35,6 @@ export function AppShell({
   const images = data.images.status || data.dashboard.images;
   const stock = data.stock.summary;
   const stockData = data.stock.dataHealth;
-  const mail = data.mail.status;
   const [statusOpen, setStatusOpen] = useState(false);
   const statusPanelId = useId();
   const statusButtonId = useId();
@@ -124,7 +122,6 @@ export function AppShell({
                 <StatusSummaryRow label="股票" tone={stock?.pendingOperationCount || stock?.openAlertCount ? "warn" : stock?.portfolioCount ? "good" : "neutral"} value={stockStatusLabel(stock)} />
                 <StatusSummaryRow label="股票数据" tone={stockData?.failedSources || stockData?.failedTaskCount ? "warn" : stockData?.sourceCount ? "good" : "neutral"} value={stockDataHealthLabel(stockData)} />
                 <StatusSummaryRow label="V2Ray" tone={v2ray?.running ? "good" : "warn"} value={v2rayStateLabel(v2ray)} />
-                <StatusSummaryRow label="Mail" tone={mail?.service_ready ? "good" : "warn"} value={mail?.service_ready ? "就绪" : "待配置"} />
               </div>
             ) : null}
             <Button onClick={() => void actions.reloadData()}>刷新全部</Button>
@@ -140,7 +137,6 @@ export function AppShell({
         {activeTab === "docker" ? <DockerView actions={actions} /> : null}
         {activeTab === "stock" ? <StockView actions={actions} data={data} /> : null}
         {activeTab === "v2ray" ? <V2RayView actions={actions} data={data} exportOpen={v2rayExportOpen} exported={v2rayExport as V2RayExport | null} /> : null}
-        {activeTab === "mail" ? <MailView actions={actions} data={data} /> : null}
         {activeTab === "settings" ? <SettingsView actions={actions} data={data} /> : null}
       </main>
     </div>
@@ -168,14 +164,6 @@ function activeStatusPill(activeTab: MainTab, data: AppData) {
   if (activeTab === "codex") {
     const codex = data.dashboard.codex;
     return <Pill tone={codex?.pendingApprovals ? "warn" : codex?.enabled ? "good" : "warn"}>Codex {codex?.pendingApprovals ? `${codex.pendingApprovals} 待审批` : codex?.enabled ? "可用" : "需检查"}</Pill>;
-  }
-  if (activeTab === "mail") {
-    const mail = data.mail.status;
-    if (mail?.emergency_inbound_reject?.enabled) {
-      return <Pill tone="danger">Mail 降级保护</Pill>;
-    }
-    const tone: "good" | "warn" = mail?.service_ready ? "good" : "warn";
-    return <Pill tone={tone}>Mail {mail?.service_ready ? "就绪" : mail?.ok ? "待启动" : "未初始化"}</Pill>;
   }
   return null;
 }

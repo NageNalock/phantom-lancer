@@ -9,7 +9,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.103.2
 	github.com/docker/docker v27.5.1+incompatible
 	github.com/mattn/go-sqlite3 v1.14.33
-	github.com/mjl-/mox v0.0.15
 	github.com/mozillazg/go-pinyin v0.21.0
 	github.com/v2fly/v2ray-core/v5 v5.51.2
 	golang.org/x/crypto v0.51.0

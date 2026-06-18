@@ -42,7 +42,7 @@
 ### 2.2 为什么 instruments 不进 DuckDB
 1. DuckDB 的单写者 MVCC 对单行 UPSERT 会重写整列 parquet block，成本比 SQLite 高 10–100 倍。
 2. 每天 1 次全量刷新 + 每 6 小时增量 = UPSERT 写密集，SQLite B-Tree 更合适。
-3. FTS5 pattern 在 Mail 模块（`mail_fts5_p7` + `MailMessageSearchP7`）已生产验证，DuckDB 无等效功能。
+3. FTS5 可直接复用 SQLite 内建虚拟表和触发器模式，DuckDB 无等效成熟中文 tokenizer。
 
 ### 2.3 DuckDB 引入方式
 - **不拆分现有 Store**：现有 `storage.go:Store` 保持单一 `*sql.DB`。新增 `storage/duckdb.go` 的 `DuckDBStore` 独立 struct，由 `stock.Service` 同时持有两者。
@@ -128,7 +128,7 @@ func (s *Service) refreshAStockUniverse(ctx context.Context, mode MaintenanceMod
 
 ### 4.1 FTS5 虚拟表 DDL
 
-落位：`storage.go` 的 `baseSQL` 和 `fts5SQL` 末尾各追加一段，pattern 完全对齐 `mail_fts5_p7` 三张表 + 三个触发器。`stock_instruments` 表新增 `py` / `py_full` 两物理列。
+落位：`storage.go` 的 `baseSQL` 和 `fts5SQL` 末尾各追加一段，使用 SQLite FTS5 虚拟表、外部内容表和触发器。`stock_instruments` 表新增 `py` / `py_full` 两物理列。
 
 ```sql
 ALTER TABLE stock_instruments ADD COLUMN py TEXT DEFAULT '';
