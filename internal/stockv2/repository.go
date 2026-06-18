@@ -192,6 +192,39 @@ CREATE TABLE IF NOT EXISTS stockv2_portfolio_snapshots (
     created_at DATETIME NOT NULL,
     FOREIGN KEY (portfolio_id) REFERENCES stockv2_portfolios(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS stockv2_strategies (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    symbol TEXT,
+    market TEXT,
+    portfolio_id TEXT,
+    active_version_id TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    archived_at DATETIME,
+    FOREIGN KEY (portfolio_id) REFERENCES stockv2_portfolios(id) ON DELETE SET NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_strategy_versions (
+    id TEXT PRIMARY KEY,
+    strategy_id TEXT NOT NULL,
+    version_no INTEGER NOT NULL,
+    title TEXT,
+    direction TEXT,
+    thesis TEXT,
+    entry_conditions_json TEXT,
+    exit_conditions_json TEXT,
+    risk_notes TEXT,
+    evidence_refs_json TEXT,
+    generation_meta_json TEXT,
+    created_by TEXT,
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (strategy_id) REFERENCES stockv2_strategies(id) ON DELETE CASCADE,
+    UNIQUE(strategy_id, version_no)
+);
 CREATE TABLE IF NOT EXISTS stockv2_update_jobs (
     id TEXT PRIMARY KEY,
     trigger_type TEXT NOT NULL,
@@ -243,6 +276,12 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_quotes_latest_status ON stockv2_quotes_la
 CREATE INDEX IF NOT EXISTS idx_stockv2_quotes_latest_fetched_at ON stockv2_quotes_latest(fetched_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_snapshots_portfolio_id ON stockv2_portfolio_snapshots(portfolio_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_snapshots_valuation_at ON stockv2_portfolio_snapshots(valuation_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_strategies_kind ON stockv2_strategies(kind);
+CREATE INDEX IF NOT EXISTS idx_stockv2_strategies_status ON stockv2_strategies(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_strategies_scope ON stockv2_strategies(scope);
+CREATE INDEX IF NOT EXISTS idx_stockv2_strategies_symbol ON stockv2_strategies(symbol);
+CREATE INDEX IF NOT EXISTS idx_stockv2_strategies_portfolio_id ON stockv2_strategies(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_strategy_versions_strategy_id ON stockv2_strategy_versions(strategy_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_status ON stockv2_update_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_created_at ON stockv2_update_jobs(created_at);
 INSERT OR IGNORE INTO stockv2_settings (id, auto_update_enabled, update_interval_sec, created_at, updated_at)
