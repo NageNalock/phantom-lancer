@@ -40,7 +40,10 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/stockv2/settings", s.handleStockV2UpdateSettings)
 }
 
-// handleStockV2Snapshot 处理V2主数据快照请求
+// handleStockV2Snapshot 处理 V2 工作台快照请求。
+//
+// 该接口用于 UI 首屏聚合上下文，不是股票主数据全量查询。主数据完整性、
+// 总数和分页列表应使用 /api/stockv2/instruments。
 func (s *Server) handleStockV2Snapshot(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	snapshot, err := s.stockV2.Snapshot(ctx)

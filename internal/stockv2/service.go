@@ -733,7 +733,12 @@ func (s *Service) refreshHoldingPrice(ctx context.Context, holding *StockV2Holdi
 	return s.store.UpdateHolding(ctx, *holding)
 }
 
-// Snapshot 获取V2快照数据
+// Snapshot 获取 V2 工作台快照数据。
+//
+// Snapshot 服务于页面首屏恢复和侧栏概览，所以只带足够 UI 展示的轻量数据：
+// 组合/持仓、最近任务、设置，以及一小段主数据样本。不要把它当作全量主
+// 数据接口；判断股票主数据是否完整时，应调用 GetInstruments/CountInstruments
+// 或 HTTP 层的 /api/stockv2/instruments 分页接口。
 func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {
 	// 获取投资组合和持仓
 	portfolios, err := s.ListPortfolios(ctx)
@@ -741,8 +746,9 @@ func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, wrapError(err, "get portfolios")
 	}
 
-	// 获取股票主数据
-	instruments, err := s.GetInstruments(ctx, 1000, 0) // 限制为1000条
+	// 获取首屏主数据样本。这里刻意限制为 1000 条，避免 snapshot 变成
+	// 大响应；全量数量和分页内容由 /api/stockv2/instruments 提供。
+	instruments, err := s.GetInstruments(ctx, 1000, 0)
 	if err != nil {
 		return Snapshot{}, wrapError(err, "get instruments")
 	}

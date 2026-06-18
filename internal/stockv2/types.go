@@ -194,7 +194,13 @@ type PortfolioWithHoldings struct {
 	Holdings        []StockV2Holding   `json:"holdings"`
 }
 
-// Snapshot V2 快照数据
+// Snapshot V2 UI 快照数据。
+//
+// 这个结构用于前端首屏、右侧概览和轻量刷新：它聚合组合、少量主数据、
+// 最近更新任务和设置，便于页面一次请求恢复当前工作台上下文。它不是全量
+// 股票主数据导出，也不能用 Instruments 的长度判断主数据是否完整。需要
+// 全量或分页检查股票主数据时，应使用 /api/stockv2/instruments 返回的
+// items/total/limit/offset。
 type Snapshot struct {
 	Portfolios     []PortfolioWithHoldings `json:"portfolios"`
 	Instruments    []StockV2Instrument     `json:"instruments"`
@@ -278,4 +284,3 @@ func generateID() string {
 	rand.Read(buf)
 	return "id-" + time.Now().Format("20060102150405-") + hex.EncodeToString(buf)
 }
-
