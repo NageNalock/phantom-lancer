@@ -196,6 +196,11 @@ function withFieldControlDefaults(children: ReactNode, label: string): ReactNode
   if (child.type !== "input" && child.type !== "select" && child.type !== "textarea") return children;
   const control = child as ReactElement<Record<string, unknown>>;
   const extra: Record<string, unknown> = {};
+  const defaultClassName = defaultFieldControlClass(child.type, control.props.type);
+  const existingClassName = typeof control.props.className === "string" ? control.props.className : "";
+  if (defaultClassName && !existingClassName) {
+    extra.className = defaultClassName;
+  }
   if (control.props.name === undefined) {
     extra.name = fieldNameFromLabel(label);
   }
@@ -203,6 +208,15 @@ function withFieldControlDefaults(children: ReactNode, label: string): ReactNode
     extra.autoComplete = "off";
   }
   return Object.keys(extra).length ? cloneElement(control, extra) : children;
+}
+
+function defaultFieldControlClass(type: string, inputType: unknown): string {
+  if (type === "select") return "select";
+  if (type === "textarea") return "textarea";
+  if (type !== "input") return "";
+  const normalizedType = typeof inputType === "string" ? inputType : "text";
+  if (["checkbox", "radio", "file", "hidden"].includes(normalizedType)) return "";
+  return "input";
 }
 
 function fieldNameFromLabel(label: string): string {

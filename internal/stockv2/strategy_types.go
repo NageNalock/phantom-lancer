@@ -129,6 +129,7 @@ type StrategyListFilter struct {
 	Status      string
 	Symbol      string
 	PortfolioID string
+	Keyword     string
 	Limit       int
 	Offset      int
 }

@@ -425,6 +425,11 @@ func strategyFilterSQL(filter StrategyListFilter) (string, []any) {
 	add("status", filter.Status)
 	add("symbol", filter.Symbol)
 	add("portfolio_id", filter.PortfolioID)
+	if keyword := strings.ToLower(strings.TrimSpace(filter.Keyword)); keyword != "" {
+		pattern := "%" + keyword + "%"
+		where = append(where, "(LOWER(name) LIKE ? OR LOWER(symbol) LIKE ?)")
+		args = append(args, pattern, pattern)
+	}
 	return strings.Join(where, " AND "), args
 }
 

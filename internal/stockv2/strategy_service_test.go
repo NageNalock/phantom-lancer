@@ -205,12 +205,59 @@ func TestListGetAndCountStrategies(t *testing.T) {
 	if len(list) != 1 || list[0].ActiveVersion == nil {
 		t.Fatalf("list = %+v", list)
 	}
+	for _, item := range []RequestCreateStrategy{
+		{
+			Name:      "分页测试策略",
+			Kind:      StrategyKindSymbolStrategy,
+			Scope:     StrategyScopeResearch,
+			Source:    StrategySourceManual,
+			Status:    StrategyStatusDraft,
+			Symbol:    "000001",
+			Direction: StrategyDirectionWatch,
+			Thesis:    "分页用例",
+		},
+		{
+			Name:      "关键词目标策略",
+			Kind:      StrategyKindSymbolStrategy,
+			Scope:     StrategyScopeResearch,
+			Source:    StrategySourceManual,
+			Status:    StrategyStatusDraft,
+			Symbol:    "300750",
+			Direction: StrategyDirectionBuySignal,
+			Thesis:    "关键词用例",
+		},
+	} {
+		if _, err := svc.CreateStrategy(ctx, item); err != nil {
+			t.Fatalf("create extra strategy: %v", err)
+		}
+	}
+	page, err := svc.ListStrategies(ctx, StrategyListFilter{Kind: StrategyKindSymbolStrategy, Limit: 1, Offset: 1})
+	if err != nil {
+		t.Fatalf("list paged strategies: %v", err)
+	}
+	if len(page) != 1 {
+		t.Fatalf("paged list length = %d, want 1", len(page))
+	}
+	keywordList, err := svc.ListStrategies(ctx, StrategyListFilter{Keyword: "目标", Limit: 10})
+	if err != nil {
+		t.Fatalf("list keyword strategies: %v", err)
+	}
+	if len(keywordList) != 1 || keywordList[0].Strategy.Symbol != "300750" {
+		t.Fatalf("keyword list = %+v", keywordList)
+	}
+	keywordCount, err := svc.CountStrategies(ctx, StrategyListFilter{Keyword: "目标"})
+	if err != nil {
+		t.Fatalf("count keyword strategies: %v", err)
+	}
+	if keywordCount != 1 {
+		t.Fatalf("keyword count = %d, want 1", keywordCount)
+	}
 	count, err := svc.CountStrategies(ctx, StrategyListFilter{Kind: StrategyKindSymbolStrategy, Status: StrategyStatusDraft})
 	if err != nil {
 		t.Fatalf("count strategies: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("count = %d, want 1", count)
+	if count != 3 {
+		t.Fatalf("count = %d, want 3", count)
 	}
 }
 

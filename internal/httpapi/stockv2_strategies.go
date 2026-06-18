@@ -156,9 +156,19 @@ func stockV2StrategyFilterFromRequest(r *http.Request) (stockv2.StrategyListFilt
 		Scope:       query.Get("scope"),
 		PortfolioID: query.Get("portfolioId"),
 		Symbol:      query.Get("symbol"),
+		Keyword:     firstNonEmptyStrategyQuery(query.Get("q"), query.Get("keyword")),
 		Limit:       limit,
 		Offset:      offset,
 	}, nil
+}
+
+func firstNonEmptyStrategyQuery(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func stockV2StrategyHTTPStatus(err error) int {

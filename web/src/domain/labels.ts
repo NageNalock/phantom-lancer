@@ -543,10 +543,10 @@ export function stockV2RiskLabel(riskLevel?: string): string {
 
 export function stockV2ValuationStatusLabel(status?: string): string {
   switch (status) {
-    case "fresh": return "fresh";
-    case "stale": return "stale";
-    case "estimated": return "estimated";
-    case "failed": return "failed";
+    case "fresh": return "最新行情";
+    case "stale": return "旧价沿用";
+    case "estimated": return "成本估算";
+    case "failed": return "无价格";
     default: return status || "unknown";
   }
 }
@@ -700,10 +700,10 @@ export function stockV2StrategySourceLabel(source?: string): string {
 
 export function stockV2StrategyDirectionLabel(direction?: string): string {
   switch (direction) {
-    case "long": return "看多";
-    case "short": return "看空";
-    case "neutral": return "中性";
     case "watch": return "仅观察";
+    case "buy_signal": return "买入信号";
+    case "sell_signal": return "卖出信号";
+    case "hold": return "持有";
     default: return direction || "-";
   }
 }
@@ -711,8 +711,8 @@ export function stockV2StrategyDirectionLabel(direction?: string): string {
 export function stockV2StrategyVersionStatusLabel(status?: string): string {
   switch (status) {
     case "draft": return "草稿";
-    case "active": return "生效";
-    case "superseded": return "已归档版本";
+    case "active": return "当前版本";
+    case "superseded": return "历史版本";
     default: return status || "未知";
   }
 }

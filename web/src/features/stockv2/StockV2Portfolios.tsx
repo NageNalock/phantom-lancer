@@ -122,6 +122,9 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
             <p className="text-sm text-[var(--muted)]">暂无持仓，点击右上角添加。</p>
           ) : (
             <div className="mt-4 overflow-x-auto">
+              <p className="mb-2 text-xs text-[var(--muted)]">
+                行情状态用于说明当前持仓估值依据：最新行情、旧价沿用、成本价估算或无可用价格。后续操作建议会把它作为约束检查输入。
+              </p>
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-[var(--line)] text-left text-xs text-[var(--muted)]">
@@ -134,7 +137,7 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
                     <th className="py-2 pr-4 font-medium">市值</th>
                     <th className="py-2 pr-4 font-medium">盈亏</th>
                     <th className="py-2 pr-4 font-medium">占比</th>
-                    <th className="py-2 pr-4 font-medium">状态</th>
+                    <th className="py-2 pr-4 font-medium">行情状态</th>
                     <th className="py-2 pr-4 font-medium">操作</th>
                   </tr>
                 </thead>
@@ -441,6 +444,9 @@ function PortfolioDialog({
           <input
             type="number"
             value={form.cash}
+            min={0}
+            step="0.01"
+            placeholder="例如：100000"
             onChange={(e) => setForm({ ...form, cash: Number(e.target.value) })}
           />
         </Field>
@@ -460,6 +466,10 @@ function PortfolioDialog({
             <input
               type="number"
               value={form.maxSinglePositionPct}
+              min={1}
+              max={100}
+              step={1}
+              placeholder="例如：20"
               onChange={(e) => setForm({ ...form, maxSinglePositionPct: Number(e.target.value) })}
             />
           </Field>
@@ -467,6 +477,10 @@ function PortfolioDialog({
             <input
               type="number"
               value={form.maxDrawdownPct}
+              min={1}
+              max={100}
+              step={1}
+              placeholder="例如：30"
               onChange={(e) => setForm({ ...form, maxDrawdownPct: Number(e.target.value) })}
             />
           </Field>
@@ -476,6 +490,7 @@ function PortfolioDialog({
           <textarea
             rows={2}
             value={form.notes}
+            placeholder="记录资金来源、交易限制或需要记住的组合约束"
             onChange={(e) => setForm({ ...form, notes: e.target.value })}
           />
         </Field>
@@ -634,6 +649,7 @@ function HoldingDialog({
           <input
             type="text"
             value={form.name}
+            placeholder="选中股票后自动填入，也可手动修正"
             onChange={(e) => setForm({ ...form, name: e.target.value })}
           />
         </Field>

@@ -1988,32 +1988,28 @@ export type StockV2StrategyKind = "symbol_strategy" | "portfolio_monitor";
 export type StockV2StrategyStatus = "draft" | "active" | "paused" | "archived";
 export type StockV2StrategyScope = "research" | "portfolio_bound";
 export type StockV2StrategySource = "manual" | "system_template" | "agent";
-export type StockV2StrategyDirection = "long" | "short" | "neutral" | "watch";
+export type StockV2StrategyDirection = "watch" | "buy_signal" | "sell_signal" | "hold";
 export type StockV2StrategyVersionStatus = "draft" | "active" | "superseded";
 
 /** 单个策略版本的具体判断内容。旧版本必须保留。 */
 export interface StockV2StrategyVersion {
+  id?: string;
+  strategyId?: string;
   versionNo: number;
-  status: StockV2StrategyVersionStatus | string;
-  direction?: string;
+  status?: StockV2StrategyVersionStatus | string;
+  title?: string;
+  direction?: StockV2StrategyDirection | string;
   thesis?: string;
-  entryConditions?: string;
-  exitConditions?: string;
+  entryConditions?: string[];
+  exitConditions?: string[];
   riskNotes?: string;
-  entryPriceLow?: number;
-  entryPriceHigh?: number;
-  triggerPriceAbove?: number;
-  triggerPriceBelow?: number;
-  stopLoss?: number;
-  takeProfit?: number;
-  targetPositionPct?: number;
-  changeSummary?: string;
-  source?: string;
-  authoredBy?: string;
+  evidenceRefs?: string[];
+  generationMeta?: Record<string, unknown>;
+  createdBy?: string;
   createdAt?: string;
 }
 
-/** 策略对象。列表字段从 active version 镜像,避免列表页逐条展开版本。 */
+/** 策略对象。后端基础对象 + 前端从 activeVersion 派生出的展示字段。 */
 export interface StockV2Strategy {
   id: string;
   name: string;
@@ -2026,13 +2022,16 @@ export interface StockV2Strategy {
   instrumentName?: string;
   portfolioId?: string;
   portfolioName?: string;
-  direction?: string;
+  activeVersionId?: string;
+  direction?: StockV2StrategyDirection | string;
   activeVersionNo?: number;
   hasDraft?: boolean;
+  title?: string;
   thesis?: string;
   entryConditions?: string;
   exitConditions?: string;
   riskNotes?: string;
+  generationMeta?: Record<string, unknown>;
   entryPriceLow?: number;
   entryPriceHigh?: number;
   triggerPriceAbove?: number;
@@ -2044,14 +2043,16 @@ export interface StockV2Strategy {
   updatedAt?: string;
 }
 
-export interface StockV2StrategyWithVersion extends StockV2Strategy {
+export interface StockV2StrategyWithVersion {
+  strategy: StockV2Strategy;
   activeVersion?: StockV2StrategyVersion;
-  draftVersion?: StockV2StrategyVersion;
 }
 
 export interface StockV2StrategyListResponse {
-  items: StockV2Strategy[];
+  items: StockV2StrategyWithVersion[];
   total?: number;
+  limit?: number;
+  offset?: number;
 }
 
 export interface StockV2StrategyVersionListResponse {
@@ -2066,17 +2067,13 @@ export interface StockV2StrategyInput {
   symbol?: string;
   market?: string;
   portfolioId?: string;
-  direction?: string;
+  title?: string;
+  direction?: StockV2StrategyDirection | string;
   thesis?: string;
-  entryConditions?: string;
-  exitConditions?: string;
+  entryConditions?: string[];
+  exitConditions?: string[];
   riskNotes?: string;
-  entryPriceLow?: number;
-  entryPriceHigh?: number;
-  triggerPriceAbove?: number;
-  triggerPriceBelow?: number;
-  stopLoss?: number;
-  takeProfit?: number;
-  targetPositionPct?: number;
-  changeSummary?: string;
+  evidenceRefs?: string[];
+  generationMeta?: Record<string, unknown>;
+  createdBy?: string;
 }

@@ -12,6 +12,7 @@ import type {
   StockV2StrategyListResponse,
   StockV2StrategyVersion,
   StockV2StrategyVersionListResponse,
+  StockV2StrategyWithVersion,
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, ContextList, Drawer, Field, Notice, Panel, Pill, useDangerConfirm } from "../../components/ui";
@@ -29,7 +30,7 @@ import {
 
 // 策略是长期判断依据,与 Watch(何时检查)、Review(当次判断)分离。
 // 本页只做 Strategy 对象的 CRUD + 版本展示;不接 Agent、不接 Watch、不接 Review。
-// 后端策略 API 尚在落地中,任何 404/异常都不能让页面崩溃,只给轻量错误。
+// 后端 API 保持 strategy + activeVersion 分离,页面边界统一归一成扁平展示模型。
 
 type DrawerState =
   | { type: "closed" }
@@ -61,10 +62,16 @@ const EMPTY_PRICE_FORM: PriceForm = {
   takeProfit: "",
 };
 
+const PRICE_META_KEY = "priceTriggers";
+const STRATEGY_PAGE_SIZE = 12;
+
 export function StockV2Strategies({ actions, data }: { actions: AppActions; data: AppData }) {
   const portfolios = data.stockv2.portfolios || [];
+  const instruments = data.stockv2.instruments || [];
 
   const [strategies, setStrategies] = useState<StockV2Strategy[]>([]);
+  const [strategyTotal, setStrategyTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -80,25 +87,45 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
 
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
-  async function fetchStrategies() {
+  async function fetchStrategies(nextPage = page) {
     setLoading(true);
     setError(null);
     try {
-      const res = await actions.api<StockV2StrategyListResponse>("/api/stockv2/strategies");
-      setStrategies(res.items || []);
+      const safePage = Math.max(1, nextPage);
+      const offset = (safePage - 1) * STRATEGY_PAGE_SIZE;
+      const params = new URLSearchParams({
+        limit: String(STRATEGY_PAGE_SIZE),
+        offset: String(offset),
+      });
+      if (statusFilter !== "all") params.set("status", statusFilter);
+      if (kindFilter !== "all") params.set("kind", kindFilter);
+      if (portfolioFilter !== "all") params.set("portfolioId", portfolioFilter);
+      if (keyword.trim()) params.set("q", keyword.trim());
+
+      const res = await actions.api<StockV2StrategyListResponse>(`/api/stockv2/strategies?${params.toString()}`);
+      const total = res.total ?? res.items?.length ?? 0;
+      const limit = res.limit || STRATEGY_PAGE_SIZE;
+      const resolvedOffset = res.offset ?? offset;
+      if (total > 0 && resolvedOffset >= total) {
+        setPage(Math.max(1, Math.ceil(total / limit)));
+        return;
+      }
+      setStrategies((res.items || []).map((item) => normalizeStrategyItem(item, instruments)));
+      setStrategyTotal(total);
     } catch (err) {
-      // API 未就绪或失败:保留轻量错误,不抛崩溃。列表降级为空。
+      // API 失败时保留轻量错误,不抛崩溃。列表降级为空。
       setError(friendlyError(err));
       setStrategies([]);
+      setStrategyTotal(0);
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    void fetchStrategies();
+    void fetchStrategies(page);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [actions]);
+  }, [page, statusFilter, kindFilter, portfolioFilter, keyword]);
 
   // 详情 drawer 打开时拉取版本历史;失败静默(版本历史是辅助信息)。
   useEffect(() => {
@@ -123,24 +150,32 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
     };
   }, [actions, drawer]);
 
-  const filtered = useMemo(() => {
-    const q = keyword.trim().toLowerCase();
-    return strategies.filter((s) => {
-      if (statusFilter !== "all" && s.status !== statusFilter) return false;
-      if (kindFilter !== "all" && s.kind !== kindFilter) return false;
-      if (portfolioFilter !== "all" && s.portfolioId !== portfolioFilter) return false;
-      if (!q) return true;
-      return (
-        s.name?.toLowerCase().includes(q) ||
-        s.symbol?.toLowerCase().includes(q) ||
-        s.instrumentName?.toLowerCase().includes(q) ||
-        false
-      );
-    });
-  }, [strategies, statusFilter, kindFilter, portfolioFilter, keyword]);
+  const totalPages = Math.max(1, Math.ceil(strategyTotal / STRATEGY_PAGE_SIZE));
+  const pageNumbers = useMemo(() => paginationWindow(page, totalPages), [page, totalPages]);
+  const hasActiveFilter = statusFilter !== "all" || kindFilter !== "all" || portfolioFilter !== "all" || keyword.trim().length > 0;
 
   const detailStrategy =
     drawer.type === "detail" ? strategies.find((s) => s.id === drawer.id) || null : null;
+
+  function setStatusAndReset(value: string) {
+    setStatusFilter(value);
+    setPage(1);
+  }
+
+  function setKindAndReset(value: string) {
+    setKindFilter(value);
+    setPage(1);
+  }
+
+  function setPortfolioAndReset(value: string) {
+    setPortfolioFilter(value);
+    setPage(1);
+  }
+
+  function setKeywordAndReset(value: string) {
+    setKeyword(value);
+    setPage(1);
+  }
 
   // 统一的操作执行器:成功后刷新列表与详情版本,失败给 toast。返回是否成功,
   // 调用方据此决定是否关闭 drawer(失败时保留 drawer 方便用户重试)。
@@ -178,13 +213,40 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
     await actions.api(`/api/stockv2/strategies/${strategy.id}/${action}`, { method: "POST" });
   }
 
-  const hasAny = strategies.length > 0;
+  async function requestActivateStrategy(strategy: StockV2Strategy) {
+    await runStrategyAction("启用策略", () => changeStatus(strategy, "activate"));
+  }
+
+  async function requestPauseStrategy(strategy: StockV2Strategy) {
+    const ok = await confirmDanger({
+      title: "暂停策略",
+      body: "暂停后该策略不会被后续 Watch 触发,可随时重新启用。",
+      objectName: strategy.name,
+      confirmLabel: "暂停",
+    });
+    if (ok) await runStrategyAction("暂停策略", () => changeStatus(strategy, "pause"));
+  }
+
+  async function requestArchiveStrategy(strategy: StockV2Strategy): Promise<boolean> {
+    const ok = await confirmDanger({
+      title: "归档策略",
+      body: "归档后策略变为只读,不再参与任何 Watch/Review。归档不删除版本历史,仍可回看。",
+      objectName: strategy.name,
+      impact: ["相关 Watch(若存在)将不再被该策略触发", "策略进入只读,需重新创建才能恢复使用"],
+      confirmLabel: "归档",
+    });
+    if (!ok) return false;
+    return runStrategyAction("归档策略", () => changeStatus(strategy, "archive"));
+  }
+
+  const hasAny = strategyTotal > 0 || strategies.length > 0;
+  const subtitleCount = hasActiveFilter ? `筛选 ${strategyTotal} 个` : `${strategyTotal} 个`;
 
   return (
     <div className="grid gap-4">
       <Panel
         title="策略"
-        subtitle={`${strategies.length} 个 · 长期判断依据,编辑生效策略会生成新版本`}
+        subtitle={`${subtitleCount} · 长期判断依据,编辑生效策略会生成新版本`}
         actions={
           <>
             <Button onClick={() => void fetchStrategies()} disabled={loading}>
@@ -212,30 +274,60 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
               portfolioFilter={portfolioFilter}
               keyword={keyword}
               portfolios={portfolios}
-              onStatus={setStatusFilter}
-              onKind={setKindFilter}
-              onPortfolio={setPortfolioFilter}
-              onKeyword={setKeyword}
+              onStatus={setStatusAndReset}
+              onKind={setKindAndReset}
+              onPortfolio={setPortfolioAndReset}
+              onKeyword={setKeywordAndReset}
             />
 
-            {filtered.length === 0 ? (
+            {strategies.length === 0 ? (
               <p className="py-6 text-center text-sm text-[var(--muted)]">没有匹配的策略,调整筛选条件试试。</p>
             ) : (
               <div className="mt-3 grid gap-2">
-                {filtered.map((s) => (
+                {strategies.map((s) => (
                   <StrategyRow
                     key={s.id}
                     strategy={s}
                     portfolios={portfolios}
                     onSelect={() => setDrawer({ type: "detail", id: s.id })}
                     onEdit={() => setDrawer({ type: "edit", strategy: s })}
+                    onActivate={() => void requestActivateStrategy(s)}
+                    onPause={() => void requestPauseStrategy(s)}
+                    onArchive={() => void requestArchiveStrategy(s)}
                   />
                 ))}
               </div>
             )}
+
+            <StrategyPagination
+              loading={loading}
+              page={page}
+              pageNumbers={pageNumbers}
+              pageSize={STRATEGY_PAGE_SIZE}
+              total={strategyTotal}
+              totalPages={totalPages}
+              onPage={setPage}
+            />
           </>
-        ) : loading ? (
+        ) : loading && !hasActiveFilter ? (
           <p className="py-6 text-center text-sm text-[var(--muted)]">加载策略…</p>
+        ) : hasActiveFilter ? (
+          <>
+            <StrategyToolbar
+              statusFilter={statusFilter}
+              kindFilter={kindFilter}
+              portfolioFilter={portfolioFilter}
+              keyword={keyword}
+              portfolios={portfolios}
+              onStatus={setStatusAndReset}
+              onKind={setKindAndReset}
+              onPortfolio={setPortfolioAndReset}
+              onKeyword={setKeywordAndReset}
+            />
+            <p className="py-6 text-center text-sm text-[var(--muted)]">
+              {loading ? "加载策略…" : "没有匹配的策略,调整筛选条件试试。"}
+            </p>
+          </>
         ) : (
           <StrategyEmptyState
             hasPortfolio={portfolios.length > 0}
@@ -294,28 +386,11 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
           submitting={submitting}
           onClose={() => setDrawer({ type: "closed" })}
           onEdit={() => setDrawer({ type: "edit", strategy: detailStrategy })}
-          onActivate={() => void runStrategyAction("启用策略", () => changeStatus(detailStrategy, "activate"))}
-          onPause={async () => {
-            const ok = await confirmDanger({
-              title: "暂停策略",
-              body: "暂停后该策略不会被后续 Watch 触发,可随时重新启用。",
-              objectName: detailStrategy.name,
-              confirmLabel: "暂停",
-            });
-            if (ok) await runStrategyAction("暂停策略", () => changeStatus(detailStrategy, "pause"));
-          }}
+          onActivate={() => void requestActivateStrategy(detailStrategy)}
+          onPause={() => requestPauseStrategy(detailStrategy)}
           onArchive={async () => {
-            const ok = await confirmDanger({
-              title: "归档策略",
-              body: "归档后策略变为只读,不再参与任何 Watch/Review。归档不删除版本历史,仍可回看。",
-              objectName: detailStrategy.name,
-              impact: ["相关 Watch(若存在)将不再被该策略触发", "策略进入只读,需重新创建才能恢复使用"],
-              confirmLabel: "归档",
-            });
-            if (ok) {
-              const done = await runStrategyAction("归档策略", () => changeStatus(detailStrategy, "archive"));
-              if (done) setDrawer({ type: "closed" });
-            }
+            const done = await requestArchiveStrategy(detailStrategy);
+            if (done) setDrawer({ type: "closed" });
           }}
         />
       ) : null}
@@ -392,18 +467,89 @@ function StrategyToolbar({
   );
 }
 
+function StrategyPagination({
+  loading,
+  page,
+  pageNumbers,
+  pageSize,
+  total,
+  totalPages,
+  onPage,
+}: {
+  loading: boolean;
+  page: number;
+  pageNumbers: Array<number | "ellipsis">;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  onPage: (page: number) => void;
+}) {
+  if (total <= pageSize) return null;
+  const start = (page - 1) * pageSize + 1;
+  const end = Math.min(total, page * pageSize);
+  return (
+    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line)] pt-3 text-xs">
+      <span className="text-[var(--muted)]">
+        第 {page} / {totalPages} 页 · {start}-{end} / {total}
+      </span>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Button disabled={loading || page <= 1} onClick={() => onPage(Math.max(1, page - 1))}>
+          上一页
+        </Button>
+        {pageNumbers.map((item, index) =>
+          item === "ellipsis" ? (
+            <span className="px-2 text-[var(--muted)]" key={`strategy-page-gap-${index}`}>...</span>
+          ) : (
+            <Button
+              className={item === page ? "border-[var(--accent)] text-[var(--accent)]" : ""}
+              disabled={loading}
+              key={item}
+              onClick={() => onPage(item)}
+            >
+              {item}
+            </Button>
+          ),
+        )}
+        <Button disabled={loading || page >= totalPages} onClick={() => onPage(Math.min(totalPages, page + 1))}>
+          下一页
+        </Button>
+        <select
+          aria-label="选择策略页码"
+          className="select h-9 w-24 text-xs"
+          disabled={loading}
+          onChange={(event) => onPage(Number(event.target.value))}
+          value={page}
+        >
+          {Array.from({ length: totalPages }, (_, idx) => idx + 1).map((item) => (
+            <option key={item} value={item}>
+              第 {item} 页
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 function StrategyRow({
   strategy,
   portfolios,
   onSelect,
   onEdit,
+  onActivate,
+  onPause,
+  onArchive,
 }: {
   strategy: StockV2Strategy;
   portfolios: StockV2Portfolio[];
   onSelect: () => void;
   onEdit: () => void;
+  onActivate: () => void;
+  onPause: () => void;
+  onArchive: () => void;
 }) {
   const portfolio = strategy.portfolioId ? portfolios.find((p) => p.id === strategy.portfolioId) : null;
+  const archived = strategy.status === "archived";
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 transition hover:border-[var(--line-strong)]">
       <button type="button" onClick={onSelect} className="min-w-0 cursor-pointer text-left">
@@ -427,10 +573,31 @@ function StrategyRow({
           <span>更新 {formatDate(strategy.updatedAt) || "-"}</span>
         </div>
       </button>
-      <div className="flex items-start gap-1">
-        <Button onClick={onEdit} title="编辑">
-          <Pencil size={12} />
-        </Button>
+      <div className="flex flex-wrap items-start justify-end gap-1">
+        {!archived && (strategy.status === "paused" || strategy.status === "draft") ? (
+          <Button onClick={onActivate} title="启用策略">
+            <Play size={12} className="mr-1" />
+            启用
+          </Button>
+        ) : null}
+        {!archived && strategy.status === "active" ? (
+          <Button onClick={onPause} title="暂停策略">
+            <Pause size={12} className="mr-1" />
+            暂停
+          </Button>
+        ) : null}
+        {!archived ? (
+          <>
+            <Button onClick={onEdit} title="编辑策略">
+              <Pencil size={12} className="mr-1" />
+              编辑
+            </Button>
+            <Button tone="danger" onClick={onArchive} title="归档策略">
+              <Archive size={12} className="mr-1" />
+              归档
+            </Button>
+          </>
+        ) : null}
       </div>
     </div>
   );
@@ -603,7 +770,7 @@ function SymbolStrategyForm({
   });
   const [scope, setScope] = useState<string>(initial?.scope || "research");
   const [portfolioId, setPortfolioId] = useState<string>(initial?.portfolioId || "");
-  const [direction, setDirection] = useState<string>(initial?.direction || "long");
+  const [direction, setDirection] = useState<string>(initial?.direction || "buy_signal");
   const [thesis, setThesis] = useState(initial?.thesis || "");
   const [entryConditions, setEntryConditions] = useState(initial?.entryConditions || "");
   const [exitConditions, setExitConditions] = useState(initial?.exitConditions || "");
@@ -620,31 +787,32 @@ function SymbolStrategyForm({
 
   const boundScope = scope === "portfolio_bound";
   const canSubmit =
-    name.trim().length > 0 &&
     symbolRef.symbol.trim().length > 0 &&
     (!boundScope || portfolioId.length > 0) &&
     !submitting;
 
   function buildInput(): StockV2StrategyInput {
+    const generationMeta = mergeStrategyGenerationMeta(
+      initial?.generationMeta,
+      price,
+      mode === "edit" ? changeSummary : "",
+    );
+    const entryConditionList = multilineToList(entryConditions);
+    const exitConditionList = multilineToList(exitConditions);
+
     return {
-      name: name.trim(),
+      name: name.trim() || defaultStrategyName(symbolRef, direction),
       kind: "symbol_strategy",
       scope: boundScope ? "portfolio_bound" : "research",
       symbol: symbolRef.symbol.trim(),
       market: symbolRef.market,
       portfolioId: boundScope ? portfolioId : undefined,
       direction,
-      thesis: thesis.trim() || undefined,
-      entryConditions: entryConditions.trim() || undefined,
-      exitConditions: exitConditions.trim() || undefined,
-      riskNotes: riskNotes.trim() || undefined,
-      entryPriceLow: numOrUndef(price.entryPriceLow),
-      entryPriceHigh: numOrUndef(price.entryPriceHigh),
-      triggerPriceAbove: numOrUndef(price.triggerPriceAbove),
-      triggerPriceBelow: numOrUndef(price.triggerPriceBelow),
-      stopLoss: numOrUndef(price.stopLoss),
-      takeProfit: numOrUndef(price.takeProfit),
-      changeSummary: mode === "edit" ? changeSummary.trim() || undefined : undefined,
+      thesis: optionalStrategyText(thesis, mode),
+      entryConditions: entryConditionList || (mode === "edit" ? [] : undefined),
+      exitConditions: exitConditionList || (mode === "edit" ? [] : undefined),
+      riskNotes: optionalStrategyText(riskNotes, mode),
+      generationMeta: generationMeta || (mode === "edit" ? {} : undefined),
     };
   }
 
@@ -659,8 +827,13 @@ function SymbolStrategyForm({
         <Notice tone="warn">当前是草稿,保存会直接更新草稿内容,不生成新版本。</Notice>
       ) : null}
 
-      <Field label="策略名称">
-        <input type="text" value={name} placeholder="例如:302132 中期看多" onChange={(e) => setName(e.target.value)} />
+      <Field label="策略名称" help="可留空,保存时会按标的和方向自动生成。">
+        <input
+          type="text"
+          value={name}
+          placeholder={symbolRef.symbol ? defaultStrategyName(symbolRef, direction) : "例如:302132 中期看多"}
+          onChange={(e) => setName(e.target.value)}
+        />
       </Field>
 
       <Field label="标的股票">
@@ -676,9 +849,9 @@ function SymbolStrategyForm({
         </Field>
         <Field label="方向">
           <select value={direction} onChange={(e) => setDirection(e.target.value)}>
-            <option value="long">看多</option>
-            <option value="short">看空</option>
-            <option value="neutral">中性</option>
+            <option value="buy_signal">买入信号</option>
+            <option value="sell_signal">卖出信号</option>
+            <option value="hold">持有</option>
             <option value="watch">仅观察</option>
           </select>
         </Field>
@@ -717,22 +890,22 @@ function SymbolStrategyForm({
       <CollapsibleSection title="价格与触发(可选)" subtitle="结构化触发价,供后续 Watch 直接使用">
         <div className="grid grid-cols-2 gap-3">
           <Field label="入场价下限">
-            <input type="number" step="0.01" value={price.entryPriceLow} onChange={(e) => setPrice({ ...price, entryPriceLow: e.target.value })} />
+            <input type="number" step="0.01" value={price.entryPriceLow} placeholder="例如: 18.50" onChange={(e) => setPrice({ ...price, entryPriceLow: e.target.value })} />
           </Field>
           <Field label="入场价上限">
-            <input type="number" step="0.01" value={price.entryPriceHigh} onChange={(e) => setPrice({ ...price, entryPriceHigh: e.target.value })} />
+            <input type="number" step="0.01" value={price.entryPriceHigh} placeholder="例如: 20.00" onChange={(e) => setPrice({ ...price, entryPriceHigh: e.target.value })} />
           </Field>
           <Field label="突破触发价">
-            <input type="number" step="0.01" value={price.triggerPriceAbove} onChange={(e) => setPrice({ ...price, triggerPriceAbove: e.target.value })} />
+            <input type="number" step="0.01" value={price.triggerPriceAbove} placeholder="高于该价触发" onChange={(e) => setPrice({ ...price, triggerPriceAbove: e.target.value })} />
           </Field>
           <Field label="跌破触发价">
-            <input type="number" step="0.01" value={price.triggerPriceBelow} onChange={(e) => setPrice({ ...price, triggerPriceBelow: e.target.value })} />
+            <input type="number" step="0.01" value={price.triggerPriceBelow} placeholder="低于该价触发" onChange={(e) => setPrice({ ...price, triggerPriceBelow: e.target.value })} />
           </Field>
           <Field label="止损价">
-            <input type="number" step="0.01" value={price.stopLoss} onChange={(e) => setPrice({ ...price, stopLoss: e.target.value })} />
+            <input type="number" step="0.01" value={price.stopLoss} placeholder="例如: 16.80" onChange={(e) => setPrice({ ...price, stopLoss: e.target.value })} />
           </Field>
           <Field label="止盈价">
-            <input type="number" step="0.01" value={price.takeProfit} onChange={(e) => setPrice({ ...price, takeProfit: e.target.value })} />
+            <input type="number" step="0.01" value={price.takeProfit} placeholder="例如: 24.00" onChange={(e) => setPrice({ ...price, takeProfit: e.target.value })} />
           </Field>
         </div>
       </CollapsibleSection>
@@ -781,7 +954,7 @@ function PortfolioMonitorForm({
       kind: "portfolio_monitor",
       scope: "portfolio_bound",
       portfolioId,
-      riskNotes: riskNotes.trim() || undefined,
+      riskNotes: optionalStrategyText(riskNotes, mode),
     };
   }
 
@@ -925,10 +1098,12 @@ function StrategyDetailDrawer({
                 >
                   <span className="font-mono text-[var(--muted-strong)]">v{v.versionNo}</span>
                   <span className="min-w-0 truncate text-[var(--muted-strong)]">
-                    {v.changeSummary || stockV2StrategyDirectionLabel(v.direction) || "—"}
+                    {strategyVersionSummary(v)}
                   </span>
                   <div className="flex items-center gap-2">
-                    <Pill tone={stockV2StrategyVersionStatusTone(v.status)}>{stockV2StrategyVersionStatusLabel(v.status)}</Pill>
+                    <Pill tone={stockV2StrategyVersionStatusTone(strategyVersionStatus(strategy, v))}>
+                      {stockV2StrategyVersionStatusLabel(strategyVersionStatus(strategy, v))}
+                    </Pill>
                     <span className="text-[var(--muted)]">{formatDate(v.createdAt) || "-"}</span>
                   </div>
                 </div>
@@ -953,7 +1128,7 @@ function DetailField({ label, value }: { label: string; value: string }) {
 function PriceSummary({ strategy }: { strategy: StockV2Strategy }) {
   const rows: Array<[string, string]> = [];
   if (definedPrice(strategy.entryPriceLow) || definedPrice(strategy.entryPriceHigh)) {
-    rows.push(["入场区间", `${strategy.entryPriceLow ?? "—"} ~ ${strategy.entryPriceHigh ?? "—"}`]);
+    rows.push(["入场区间", `${strategy.entryPriceLow ?? "-"} ~ ${strategy.entryPriceHigh ?? "-"}`]);
   }
   if (definedPrice(strategy.triggerPriceAbove)) rows.push(["突破触发", String(strategy.triggerPriceAbove)]);
   if (definedPrice(strategy.triggerPriceBelow)) rows.push(["跌破触发", String(strategy.triggerPriceBelow)]);
@@ -1079,6 +1254,154 @@ function SymbolPicker({
 }
 
 // ============================ helpers ============================
+
+function normalizeStrategyItem(item: StockV2StrategyWithVersion | StockV2Strategy, instruments: StockV2Instrument[]): StockV2Strategy {
+  const wrapped = "strategy" in item && item.strategy ? item as StockV2StrategyWithVersion : null;
+  const strategy = wrapped ? wrapped.strategy : item as StockV2Strategy;
+  const activeVersion = wrapped?.activeVersion;
+  const price = priceFromGenerationMeta(activeVersion?.generationMeta || strategy.generationMeta);
+  const instrument = strategy.symbol
+    ? instruments.find((inst) => inst.symbol === strategy.symbol && (!strategy.market || inst.market === strategy.market))
+    : undefined;
+
+  return {
+    ...strategy,
+    instrumentName: strategy.instrumentName || instrument?.name,
+    portfolioName: strategy.portfolioName,
+    activeVersionNo: activeVersion?.versionNo ?? strategy.activeVersionNo,
+    title: activeVersion?.title || strategy.title,
+    direction: activeVersion?.direction || strategy.direction,
+    thesis: activeVersion?.thesis || strategy.thesis,
+    entryConditions: listToMultiline(activeVersion?.entryConditions) || strategy.entryConditions,
+    exitConditions: listToMultiline(activeVersion?.exitConditions) || strategy.exitConditions,
+    riskNotes: activeVersion?.riskNotes || strategy.riskNotes,
+    generationMeta: activeVersion?.generationMeta || strategy.generationMeta,
+    ...price,
+  };
+}
+
+function multilineToList(value: string): string[] | undefined {
+  const items = value
+    .split(/\r?\n/)
+    .map((item) => item.replace(/^[-*]\s+/, "").trim())
+    .filter(Boolean);
+  return items.length ? items : undefined;
+}
+
+function listToMultiline(value?: string[] | string): string {
+  if (Array.isArray(value)) return value.join("\n");
+  return value || "";
+}
+
+function optionalStrategyText(value: string, mode: "create" | "edit"): string | undefined {
+  const trimmed = value.trim();
+  return trimmed || (mode === "edit" ? "" : undefined);
+}
+
+function defaultStrategyName(symbolRef: SymbolRef, direction: string): string {
+  const symbol = symbolRef.symbol.trim() || "未选标的";
+  const name = symbolRef.name?.trim();
+  const label = stockV2StrategyDirectionLabel(direction);
+  return `${symbol}${name ? ` ${name}` : ""} ${label}`;
+}
+
+function mergeStrategyGenerationMeta(
+  base: Record<string, unknown> | undefined,
+  price: PriceForm,
+  changeSummary: string,
+): Record<string, unknown> | undefined {
+  const next: Record<string, unknown> = { ...(base || {}) };
+  const priceMeta = priceFormToMeta(price);
+  if (Object.keys(priceMeta).length > 0) {
+    next[PRICE_META_KEY] = priceMeta;
+  } else {
+    delete next[PRICE_META_KEY];
+  }
+
+  const summary = changeSummary.trim();
+  if (summary) {
+    next.changeSummary = summary;
+  } else {
+    delete next.changeSummary;
+  }
+
+  return Object.keys(next).length ? next : undefined;
+}
+
+function priceFormToMeta(price: PriceForm): Record<string, number> {
+  const result: Record<string, number> = {};
+  (Object.keys(EMPTY_PRICE_FORM) as Array<keyof PriceForm>).forEach((key) => {
+    const value = numOrUndef(price[key]);
+    if (value !== undefined) result[key] = value;
+  });
+  return result;
+}
+
+function priceFromGenerationMeta(meta?: Record<string, unknown>): Partial<Record<keyof PriceForm, number>> {
+  const raw = meta?.[PRICE_META_KEY];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const record = raw as Record<string, unknown>;
+  return {
+    entryPriceLow: numberFromUnknown(record.entryPriceLow),
+    entryPriceHigh: numberFromUnknown(record.entryPriceHigh),
+    triggerPriceAbove: numberFromUnknown(record.triggerPriceAbove),
+    triggerPriceBelow: numberFromUnknown(record.triggerPriceBelow),
+    stopLoss: numberFromUnknown(record.stopLoss),
+    takeProfit: numberFromUnknown(record.takeProfit),
+  };
+}
+
+function numberFromUnknown(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+function strategyVersionStatus(strategy: StockV2Strategy, version: StockV2StrategyVersion): "active" | "superseded" {
+  if (version.id && strategy.activeVersionId && version.id === strategy.activeVersionId) return "active";
+  if (strategy.activeVersionNo && version.versionNo === strategy.activeVersionNo) return "active";
+  return "superseded";
+}
+
+function strategyVersionSummary(version: StockV2StrategyVersion): string {
+  const changeSummary = version.generationMeta?.changeSummary;
+  if (typeof changeSummary === "string" && changeSummary.trim()) return changeSummary.trim();
+  if (version.title) return version.title;
+  if (version.direction) return stockV2StrategyDirectionLabel(version.direction);
+  return "-";
+}
+
+function paginationWindow(page: number, totalPages: number): Array<number | "ellipsis"> {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, idx) => idx + 1);
+  }
+  const pages = new Set<number>([1, totalPages, page, page - 1, page + 1]);
+  if (page <= 3) {
+    pages.add(2);
+    pages.add(3);
+    pages.add(4);
+  }
+  if (page >= totalPages - 2) {
+    pages.add(totalPages - 1);
+    pages.add(totalPages - 2);
+    pages.add(totalPages - 3);
+  }
+  const sorted = Array.from(pages)
+    .filter((item) => item >= 1 && item <= totalPages)
+    .sort((a, b) => a - b);
+  const result: Array<number | "ellipsis"> = [];
+  sorted.forEach((item) => {
+    const previous = result[result.length - 1];
+    if (typeof previous === "number" && item - previous > 1) {
+      result.push("ellipsis");
+    }
+    result.push(item);
+  });
+  return result;
+}
 
 function numOrUndef(value: string): number | undefined {
   if (value.trim() === "") return undefined;
