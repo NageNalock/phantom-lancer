@@ -650,3 +650,78 @@ export function stockV2RangeLabel(range?: string): string {
     default: return range || "1 年";
   }
 }
+
+// ========== Strategy ==========
+
+export function stockV2StrategyKindLabel(kind?: string): string {
+  switch (kind) {
+    case "symbol_strategy": return "单票策略";
+    case "portfolio_monitor": return "组合监控";
+    default: return kind || "策略";
+  }
+}
+
+export function stockV2StrategyStatusLabel(status?: string): string {
+  switch (status) {
+    case "draft": return "草稿";
+    case "active": return "生效中";
+    case "paused": return "已暂停";
+    case "archived": return "已归档";
+    default: return status || "未知";
+  }
+}
+
+export function stockV2StrategyStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "active": return "good";
+    case "draft": return "neutral";
+    case "paused": return "warn";
+    case "archived": return "neutral";
+    default: return "neutral";
+  }
+}
+
+export function stockV2StrategyScopeLabel(scope?: string): string {
+  switch (scope) {
+    case "research": return "账户无关";
+    case "portfolio_bound": return "绑定组合";
+    default: return scope || "-";
+  }
+}
+
+export function stockV2StrategySourceLabel(source?: string): string {
+  switch (source) {
+    case "manual": return "人工录入";
+    case "system_template": return "系统模板";
+    case "agent": return "Agent 生成";
+    default: return source || "-";
+  }
+}
+
+export function stockV2StrategyDirectionLabel(direction?: string): string {
+  switch (direction) {
+    case "long": return "看多";
+    case "short": return "看空";
+    case "neutral": return "中性";
+    case "watch": return "仅观察";
+    default: return direction || "-";
+  }
+}
+
+export function stockV2StrategyVersionStatusLabel(status?: string): string {
+  switch (status) {
+    case "draft": return "草稿";
+    case "active": return "生效";
+    case "superseded": return "已归档版本";
+    default: return status || "未知";
+  }
+}
+
+export function stockV2StrategyVersionStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "active": return "good";
+    case "draft": return "warn";
+    case "superseded": return "neutral";
+    default: return "neutral";
+  }
+}

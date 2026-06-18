@@ -1884,7 +1884,7 @@ export interface StockV2UniverseUpdateResponse {
   message: string;
 }
 
-export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "settings";
+export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "strategies" | "settings";
 
 // ===== Daily Bars (日级历史行情) =====
 
@@ -1978,3 +1978,105 @@ export interface StockV2DailyBarJob {
 
 export type DailyBarRange = "6m" | "1y" | "3y" | "5y";
 export type DailyBarAdjusted = "none" | "qfq" | "hfq";
+
+// ===== Strategy (策略对象基础层) =====
+//
+// 策略是长期判断依据,与 Watch(何时检查)、Review(当次判断)分离。
+// active 策略不可原地覆盖,编辑会生成新 strategy_version,旧版本保留供回看。
+
+export type StockV2StrategyKind = "symbol_strategy" | "portfolio_monitor";
+export type StockV2StrategyStatus = "draft" | "active" | "paused" | "archived";
+export type StockV2StrategyScope = "research" | "portfolio_bound";
+export type StockV2StrategySource = "manual" | "system_template" | "agent";
+export type StockV2StrategyDirection = "long" | "short" | "neutral" | "watch";
+export type StockV2StrategyVersionStatus = "draft" | "active" | "superseded";
+
+/** 单个策略版本的具体判断内容。旧版本必须保留。 */
+export interface StockV2StrategyVersion {
+  versionNo: number;
+  status: StockV2StrategyVersionStatus | string;
+  direction?: string;
+  thesis?: string;
+  entryConditions?: string;
+  exitConditions?: string;
+  riskNotes?: string;
+  entryPriceLow?: number;
+  entryPriceHigh?: number;
+  triggerPriceAbove?: number;
+  triggerPriceBelow?: number;
+  stopLoss?: number;
+  takeProfit?: number;
+  targetPositionPct?: number;
+  changeSummary?: string;
+  source?: string;
+  authoredBy?: string;
+  createdAt?: string;
+}
+
+/** 策略对象。列表字段从 active version 镜像,避免列表页逐条展开版本。 */
+export interface StockV2Strategy {
+  id: string;
+  name: string;
+  kind: StockV2StrategyKind | string;
+  status: StockV2StrategyStatus | string;
+  scope: StockV2StrategyScope | string;
+  source: StockV2StrategySource | string;
+  symbol?: string;
+  market?: string;
+  instrumentName?: string;
+  portfolioId?: string;
+  portfolioName?: string;
+  direction?: string;
+  activeVersionNo?: number;
+  hasDraft?: boolean;
+  thesis?: string;
+  entryConditions?: string;
+  exitConditions?: string;
+  riskNotes?: string;
+  entryPriceLow?: number;
+  entryPriceHigh?: number;
+  triggerPriceAbove?: number;
+  triggerPriceBelow?: number;
+  stopLoss?: number;
+  takeProfit?: number;
+  targetPositionPct?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface StockV2StrategyWithVersion extends StockV2Strategy {
+  activeVersion?: StockV2StrategyVersion;
+  draftVersion?: StockV2StrategyVersion;
+}
+
+export interface StockV2StrategyListResponse {
+  items: StockV2Strategy[];
+  total?: number;
+}
+
+export interface StockV2StrategyVersionListResponse {
+  items: StockV2StrategyVersion[];
+}
+
+/** 创建/编辑策略时提交的判断内容。后端据此创建 strategy 与首发版本。 */
+export interface StockV2StrategyInput {
+  name?: string;
+  kind?: StockV2StrategyKind | string;
+  scope?: StockV2StrategyScope | string;
+  symbol?: string;
+  market?: string;
+  portfolioId?: string;
+  direction?: string;
+  thesis?: string;
+  entryConditions?: string;
+  exitConditions?: string;
+  riskNotes?: string;
+  entryPriceLow?: number;
+  entryPriceHigh?: number;
+  triggerPriceAbove?: number;
+  triggerPriceBelow?: number;
+  stopLoss?: number;
+  takeProfit?: number;
+  targetPositionPct?: number;
+  changeSummary?: string;
+}
