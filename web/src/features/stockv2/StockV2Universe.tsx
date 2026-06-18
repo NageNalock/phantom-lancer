@@ -5,6 +5,7 @@ import type { AppData, StockV2Instrument, StockV2UpdateJob, StockV2UniverseUpdat
 import { friendlyError } from "../../api/client";
 import { Button, Field, Panel, Pill } from "../../components/ui";
 import { stockV2TriggerTypeLabel, stockV2UpdateStatusLabel, stockV2UpdateStatusTone } from "../../domain/labels";
+import { StockV2InstrumentDetail } from "./StockV2InstrumentDetail";
 
 const PAGE_SIZE = 50;
 
@@ -60,6 +61,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   const [loading, setLoading] = useState(false);
   const [jumpInput, setJumpInput] = useState("");
   const [addHolding, setAddHolding] = useState<{ inst: StockV2Instrument } | null>(null);
+  const [selectedInst, setSelectedInst] = useState<StockV2Instrument | null>(null);
 
   const portfolios = stockv2.portfolios || [];
 
@@ -225,6 +227,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
                       key={inst.id}
                       inst={inst}
                       onAdd={() => setAddHolding({ inst })}
+                      onClick={() => setSelectedInst(inst)}
                     />
                   ))}
                 </tbody>
@@ -336,16 +339,36 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
       {historyOpen ? (
         <UpdateHistoryDialog jobs={jobs} onClose={() => setHistoryOpen(false)} />
       ) : null}
+
+      {/* 标的详情 Drawer */}
+      {selectedInst ? (
+        <StockV2InstrumentDetail
+          inst={selectedInst}
+          actions={actions}
+          onClose={() => setSelectedInst(null)}
+        />
+      ) : null}
     </div>
   );
 }
 
-function StockRow({ inst, onAdd }: { inst: StockV2Instrument; onAdd: () => void }) {
+function StockRow({ inst, onAdd, onClick }: { inst: StockV2Instrument; onAdd: () => void; onClick?: () => void }) {
   const marketLabel = { SH: "沪市", SZ: "深市", BJ: "北市" }[inst.market] || inst.market;
   const statusTone = inst.status === "active" ? "good" : "neutral";
 
   return (
-    <tr className="border-b border-[var(--line-soft)] last:border-b-0 hover:bg-[var(--surface-soft)]">
+    <tr
+      className="border-b border-[var(--line-soft)] last:border-b-0 cursor-pointer hover:bg-[var(--surface-soft)] transition"
+      onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (onClick && (e.key === "Enter" || e.key === " ")) {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+    >
       <td className="py-2 pr-4 font-mono text-sm">{inst.symbol}</td>
       <td className="py-2 pr-4 font-medium">{inst.name || "-"}</td>
       <td className="py-2 pr-4">
@@ -360,7 +383,14 @@ function StockRow({ inst, onAdd }: { inst: StockV2Instrument; onAdd: () => void 
         {formatCompactTime(inst.lastUpdate)}
       </td>
       <td className="py-2 pl-2 text-right">
-        <Button onClick={onAdd} tone="primary">
+        <Button
+          onClick={(e) => {
+            e.stopPropagation();
+            onAdd();
+          }}
+          tone="primary"
+          type="button"
+        >
           <Plus size={12} />
         </Button>
       </td>

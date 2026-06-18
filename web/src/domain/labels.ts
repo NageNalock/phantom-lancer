@@ -1,4 +1,4 @@
-import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, CodexStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, StockAgentTraceSummary, StockDataHealth, StockSettings, StockSummary, StockV2Payload, StockV2Settings, StockV2UpdateJob, V2RaySettings, V2RayStatus } from "../app/types";
+import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, CodexStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, StockAgentTraceSummary, StockDataHealth, StockSettings, StockSummary, StockV2DailyBarsQuality, StockV2DailyBarJob, StockV2Payload, StockV2Settings, StockV2UpdateJob, V2RaySettings, V2RayStatus } from "../app/types";
 
 export const NAV_ITEMS = [
   { id: "dashboard", label: "控制台", description: "服务器状态、执行边界和下一步入口" },
@@ -496,15 +496,9 @@ export function codexEventTitle(type?: string): string {
 // ==================== 股票 V2 标签 ====================
 
 export function stockV2StatusLabel(payload?: StockV2Payload): string {
+  if (payload?.updateJobs?.some(j => j.status === "running")) return "更新中";
   if (!payload?.portfolios?.length && !payload?.instruments?.length) return "未初始化";
-  if (payload.updateJobs?.some(j => j.status === "running")) return "更新中";
-  if (payload.instruments?.length) return `${payload.instruments.length} 只标的`;
   return "可用";
-}
-
-export function stockV2InstrumentCountLabel(payload?: StockV2Payload): string {
-  if (!payload?.instruments?.length) return "无数据";
-  return `${payload.instruments.length} 只`;
 }
 
 export function stockV2PortfolioCountLabel(payload?: StockV2Payload): string {
@@ -549,9 +543,90 @@ export function stockV2RiskLabel(riskLevel?: string): string {
 
 export function stockV2SettingsSummary(settings?: StockV2Settings): string {
   if (!settings) return "未配置";
+  const parts: string[] = [];
   if (settings.autoUpdateEnabled) {
     const hours = Math.round(settings.updateIntervalSec / 3600 * 10) / 10;
-    return `自动更新 · ${hours}h`;
+    parts.push(`主数据 ${hours}h`);
+  } else {
+    parts.push("主数据手动");
   }
-  return "手动更新";
+  parts.push(settings.dailyBarsAutoEnabled ? "日K自动" : "日K手动");
+  return parts.join(" · ");
+}
+
+// ========== Daily Bars ==========
+
+export function stockV2DailyBarsQualityLabel(q?: StockV2DailyBarsQuality): string {
+  if (!q) return "未评估";
+  if (!q.hasData) return "无数据";
+  if (q.rowCount <= 0) return "空";
+  if (q.stale) return `陈旧 · ${q.latestDate || "?"}`;
+  if (!q.meets250) return `部分覆盖 · ${q.rowCount}根`;
+  return `正常 · ${q.rowCount}根`;
+}
+
+export function stockV2DailyBarsQualityTone(q?: StockV2DailyBarsQuality): "good" | "warn" | "danger" | "neutral" {
+  if (!q) return "neutral";
+  if (!q.hasData || q.rowCount <= 0) return "danger";
+  if (q.lastErrorMessage) return "danger";
+  if (q.stale) return "warn";
+  if (!q.meets250) return "warn";
+  return "good";
+}
+
+export function stockV2DailyBarJobStatusLabel(j?: { status?: string }): string {
+  if (!j?.status) return "无";
+  switch (j.status) {
+    case "running": return "进行中";
+    case "completed": return "已完成";
+    case "failed": return "失败";
+    case "cancelled": return "已取消";
+    default: return j.status;
+  }
+}
+
+export function stockV2DailyBarJobStatusTone(j?: { status?: string }): "good" | "warn" | "danger" | "neutral" {
+  if (!j?.status) return "neutral";
+  switch (j.status) {
+    case "completed": return "good";
+    case "running": return "warn";
+    case "failed": return "danger";
+    case "cancelled": return "neutral";
+    default: return "neutral";
+  }
+}
+
+export function stockV2DailyBarJobTypeLabel(j?: { jobType?: string; mode?: string }): string {
+  if (!j) return "";
+  switch (j.jobType) {
+    case "daily_bars_ensure": {
+      if (j.mode === "symbol") return "单只补拉";
+      return "按需补拉";
+    }
+    case "daily_bars_incremental": {
+      if (j.mode === "hot") return "热集合增量";
+      if (j.mode === "universe_incremental") return "全市场增量";
+      return "增量";
+    }
+    default: return j.jobType || "日K任务";
+  }
+}
+
+export function stockV2AdjustedLabel(adjusted?: string): string {
+  switch (adjusted) {
+    case "none": return "不复权";
+    case "qfq": return "前复权";
+    case "hfq": return "后复权";
+    default: return adjusted || "不复权";
+  }
+}
+
+export function stockV2RangeLabel(range?: string): string {
+  switch (range) {
+    case "6m": return "6 个月";
+    case "1y": return "1 年";
+    case "3y": return "3 年";
+    case "5y": return "5 年";
+    default: return range || "1 年";
+  }
 }

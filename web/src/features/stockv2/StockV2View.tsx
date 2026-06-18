@@ -1,18 +1,26 @@
-import { ArrowClockwise, Database, Faders, Plus, Wallet } from "@phosphor-icons/react";
+import { ArrowClockwise, ChartLine, Database, Faders, Plus, Wallet } from "@phosphor-icons/react";
 import type { AppActions } from "../../app/App";
 import type { AppData, StockV2Tab } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, Panel, Pill, SubTabs } from "../../components/ui";
-import { stockV2PortfolioCountLabel, stockV2InstrumentCountLabel, stockV2SettingsSummary, stockV2TriggerTypeLabel, stockV2UpdateStatusLabel, stockV2UpdateStatusTone } from "../../domain/labels";
+import {
+  stockV2PortfolioCountLabel,
+  stockV2SettingsSummary,
+  stockV2TriggerTypeLabel,
+  stockV2UpdateStatusLabel,
+  stockV2UpdateStatusTone,
+} from "../../domain/labels";
 import { useQueryParamState } from "../../hooks/useQueryParamState";
 import { StockV2Overview } from "./StockV2Overview";
 import { StockV2Universe } from "./StockV2Universe";
 import { StockV2Portfolios } from "./StockV2Portfolios";
 import { StockV2Settings } from "./StockV2Settings";
+import { StockV2DailyBars } from "./StockV2DailyBars";
 
 const v2Tabs: Array<{ id: StockV2Tab; label: string; icon?: typeof Plus }> = [
   { id: "overview", label: "总览", icon: Faders },
   { id: "universe", label: "主数据", icon: Database },
+  { id: "dailyBars", label: "行情", icon: ChartLine },
   { id: "portfolios", label: "仓位", icon: Wallet },
   { id: "settings", label: "设置", icon: Faders },
 ];
@@ -20,7 +28,7 @@ const v2Tabs: Array<{ id: StockV2Tab; label: string; icon?: typeof Plus }> = [
 export function StockV2View({ actions, data }: { actions: AppActions; data: AppData }) {
   const [activeTab, setActiveTab, tabHref] = useQueryParamState<StockV2Tab>(
     "stockv2",
-    ["overview", "universe", "portfolios", "settings"],
+    ["overview", "universe", "dailyBars", "portfolios", "settings"],
     "overview",
   );
   const stockv2 = data.stockv2;
@@ -56,6 +64,7 @@ export function StockV2View({ actions, data }: { actions: AppActions; data: AppD
 
         {activeTab === "overview" ? <StockV2Overview data={data} /> : null}
         {activeTab === "universe" ? <StockV2Universe actions={actions} data={data} runAction={runAction} /> : null}
+        {activeTab === "dailyBars" ? <StockV2DailyBars actions={actions} data={data} runAction={runAction} /> : null}
         {activeTab === "portfolios" ? <StockV2Portfolios actions={actions} data={data} runAction={runAction} /> : null}
         {activeTab === "settings" ? <StockV2Settings actions={actions} data={data} runAction={runAction} /> : null}
       </div>
@@ -67,12 +76,6 @@ export function StockV2View({ actions, data }: { actions: AppActions; data: AppD
               <span className="text-[var(--muted)]">投资组合</span>
               <Pill tone={stockv2.portfolios?.length ? "good" : "neutral"}>
                 {stockV2PortfolioCountLabel(stockv2)}
-              </Pill>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-[var(--muted)]">标的数量</span>
-              <Pill tone={stockv2.instruments?.length ? "good" : "warn"}>
-                {stockV2InstrumentCountLabel(stockv2)}
               </Pill>
             </div>
             <div className="flex items-center justify-between">
@@ -124,7 +127,7 @@ export function StockV2View({ actions, data }: { actions: AppActions; data: AppD
 }
 
 function formatCompactTime(iso?: string): string {
-  if (!iso) return "-";
+  if (!hasMeaningfulTime(iso)) return "-";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
   const now = new Date();
@@ -135,4 +138,8 @@ function formatCompactTime(iso?: string): string {
   const diffHr = Math.floor(diffMin / 60);
   if (diffHr < 24) return `${diffHr} 小时前`;
   return d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function hasMeaningfulTime(iso?: string): iso is string {
+  return !!iso && !iso.startsWith("0001-01-01");
 }

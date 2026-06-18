@@ -91,6 +91,49 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
         </div>
       </Panel>
 
+      {/* 日级 K 线自动增量 */}
+      <Panel
+        title="日级 K 线（Daily Bars）"
+        subtitle="收盘后自动为全市场最近交易日窗口补拉日级行情（周末跳过）"
+      >
+        <div className="grid gap-4">
+          <Toggle
+            checked={!!form.dailyBarsAutoEnabled}
+            label={
+              <div>
+                <div>启用自动增量</div>
+                <div className="muted mt-0.5 text-xs">
+                  工作日 16:30 (Asia/Shanghai) 之后触发一次全市场最近交易日增量；当日去重，周末不跑。
+                </div>
+              </div>
+            }
+            onChange={(checked) => update("dailyBarsAutoEnabled", checked)}
+          />
+
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-[var(--muted)]">调度状态</span>
+              <Pill tone={form.dailyBarsAutoEnabled ? "good" : "neutral"}>
+                {form.dailyBarsAutoEnabled ? "已开启" : "手动触发"}
+              </Pill>
+            </div>
+            {hasMeaningfulTime(settings.dailyBarsLastRun) ? (
+              <p className="muted mt-2 text-xs">
+                上次定时增量：{formatTime(settings.dailyBarsLastRun)}
+              </p>
+            ) : (
+              <p className="muted mt-2 text-xs">尚未执行定时增量。</p>
+            )}
+            <ul className="muted mt-2 list-inside list-disc text-xs">
+              <li>自动任务 = 全市场 active 主数据最近约 10 个自然日窗口</li>
+              <li>热集合 = 手动任务，当前全部持仓（去重 symbol）</li>
+              <li>交易日历简化：仅跳过周六日，当日不重复执行</li>
+              <li>单只间随机抖动 80±60ms，避免被数据源风控</li>
+            </ul>
+          </div>
+        </div>
+      </Panel>
+
       {/* 代理配置 */}
       <Panel
         title="代理配置"
@@ -197,7 +240,7 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
 }
 
 function formatTime(iso?: string): string {
-  if (!iso) return "-";
+  if (!hasMeaningfulTime(iso)) return "-";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
   return d.toLocaleString("zh-CN", {
@@ -207,4 +250,8 @@ function formatTime(iso?: string): string {
     minute: "2-digit",
     second: "2-digit",
   });
+}
+
+function hasMeaningfulTime(iso?: string): iso is string {
+  return !!iso && !iso.startsWith("0001-01-01");
 }

@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { AppActions } from "../app/App";
 import type { AppData, MainTab, V2RayExport } from "../app/types";
 import { Button, Pill } from "../components/ui";
-import { NAV_ITEMS, stockDataHealthLabel, stockStatusLabel, stockV2StatusLabel, stockV2InstrumentCountLabel, v2rayStateLabel } from "../domain/labels";
+import { NAV_ITEMS, stockDataHealthLabel, stockStatusLabel, stockV2StatusLabel, v2rayStateLabel } from "../domain/labels";
 import { shouldHandleQueryLinkClick } from "../hooks/useQueryParamState";
 import { CodexGatewayView } from "./CodexGatewayView";
 import { CodexView } from "./CodexView";
@@ -168,7 +168,7 @@ function activeStatusPill(activeTab: MainTab, data: AppData) {
     const stockv2 = data.stockv2;
     const running = stockv2?.updateJobs?.some(j => j.status === "running");
     const tone: "good" | "warn" | "neutral" = running ? "warn" : stockv2?.instruments?.length ? "good" : "neutral";
-    return <Pill tone={tone}>股票V2 {stockV2InstrumentCountLabel(stockv2)}</Pill>;
+    return <Pill tone={tone}>股票V2 {stockV2StatusLabel(stockv2)}</Pill>;
   }
   if (activeTab === "codex") {
     const codex = data.dashboard.codex;

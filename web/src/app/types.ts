@@ -136,12 +136,27 @@ interface FileSettings {
   hstsDefaultsApplied?: boolean;
 }
 
+export interface LocalDatabaseFileStat {
+  kind?: string;
+  label?: string;
+  path?: string;
+  exists?: boolean;
+  sizeBytes?: number;
+  updatedAt?: string;
+}
+
+export interface LocalStorageStats {
+  sqlite?: LocalDatabaseFileStat;
+  duckdb?: LocalDatabaseFileStat[];
+}
+
 export interface SystemSettings {
   eventRetentionDays: number;
 }
 
 export interface SettingsPayload {
   file?: FileSettings;
+  storage?: LocalStorageStats;
   runtime?: RuntimeSettings;
   listener?: ListenerEndpoint;
   system?: SystemSettings;
@@ -1819,12 +1834,14 @@ export interface StockV2UpdateProgress {
 export interface StockV2Settings {
   id: string;
   autoUpdateEnabled: boolean;
+  dailyBarsAutoEnabled: boolean;
   updateIntervalSec: number;
   proxyEnabled: boolean;
   proxyType: string;
   proxyHost: string;
   proxyPort: number;
   lastScheduledUpdate: string;
+  dailyBarsLastRun: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -1840,4 +1857,97 @@ export interface StockV2UniverseUpdateResponse {
   message: string;
 }
 
-export type StockV2Tab = "overview" | "universe" | "portfolios" | "settings";
+export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "settings";
+
+// ===== Daily Bars (日级历史行情) =====
+
+export interface StockV2DailyBar {
+  id: string;
+  symbol: string;
+  market?: string;
+  tradeDate: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  prevClose: number;
+  volume: number;
+  amount: number;
+  pctChange: number;
+  adjusted: string; // none | qfq | hfq
+  source: string;
+  fetchedAt: string;
+  quality: string; // ok | partial | stale | failed | empty
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockV2DailyBarsResponse {
+  items: StockV2DailyBar[];
+  total: number;
+  limit: number;
+}
+
+export interface StockV2DailyBarsQuality {
+  symbol: string;
+  adjusted: string;
+  hasData: boolean;
+  rowCount: number;
+  earliestDate: string;
+  latestDate: string;
+  stale: boolean;
+  meets250: boolean;
+  lastErrorMessage?: string;
+  source?: string;
+  checkedAt: string;
+}
+
+export interface StockV2DailyBarsEnsureResult {
+  symbol: string;
+  range: string;
+  adjusted: string;
+  fetched: number;
+  skipped: boolean;
+  earliestDate: string;
+  latestDate: string;
+  quality: StockV2DailyBarsQuality;
+  jobId?: string;
+  jobRunning: boolean;
+  errorMessage?: string;
+}
+
+export type DailyBarMode = "symbol" | "hot" | "universe_incremental";
+
+export interface StockV2DailyBarsJobRequest {
+  mode?: DailyBarMode | string;
+  symbol?: string;
+  range?: string;       // 6m | 1y | 3y | 5y
+  adjusted?: string;    // none | qfq | hfq
+  triggerType?: string; // manual | scheduled | system
+  triggerSource?: string; // web | auto-updater | agent
+}
+
+export interface StockV2DailyBarJob {
+  id: string;
+  jobType: string;      // daily_bars_ensure | daily_bars_incremental
+  mode: string;         // symbol | hot | universe_incremental
+  symbol?: string;
+  status: string;       // running | completed | failed | cancelled
+  totalCount: number;
+  processedCount: number;
+  successCount: number;
+  failedCount: number;
+  failedItems?: UpdateFailure[];
+  range?: string;
+  adjusted?: string;
+  triggerType?: string;
+  triggerSource?: string;
+  startAt: string;
+  endAt: string;
+  errorMessage?: string;
+  createdAt: string;
+}
+
+export type DailyBarRange = "6m" | "1y" | "3y" | "5y";
+export type DailyBarAdjusted = "none" | "qfq" | "hfq";

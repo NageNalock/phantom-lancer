@@ -123,7 +123,10 @@ func main() {
 	httpClient := &http.Client{
 		Timeout: 30 * time.Second,
 	}
-	stockV2Store, err := stockv2svc.NewStore(cfg.DBPath)
+	stockV2Store, err := stockv2svc.NewStoreWithMarketDB(
+		cfg.DBPath,
+		stockv2svc.DefaultMarketDBPath(cfg.DataDir, cfg.DBPath),
+	)
 	if err != nil {
 		logger.Error("open stockv2 store failed", "error", err)
 		os.Exit(1)

@@ -93,7 +93,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HTMLBut
   return <button {...props} className={`button ${toneClass} ${className}`} ref={ref} type={props.type || "button"} />;
 });
 
-export function Panel({ title, subtitle, actions, children, className = "" }: { title?: string; subtitle?: string; actions?: ReactNode; children: ReactNode; className?: string }) {
+export function Panel({ title, subtitle, actions, children, className = "" }: { title?: ReactNode; subtitle?: ReactNode; actions?: ReactNode; children: ReactNode; className?: string }) {
   return (
     <section className={`panel ${className}`}>
       {title || actions ? (

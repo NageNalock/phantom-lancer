@@ -6,14 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // Store 数据存储包装器
 type Store struct {
-	db     *sql.DB
-	dbPath string
+	db       *sql.DB
+	dbPath   string
+	marketDB *MarketDataStore
 }
 
 // wrapError 包装错误，err 为 nil 时返回 nil
@@ -24,18 +28,54 @@ func wrapError(err error, msg string) error {
 	return fmt.Errorf("%s: %w", msg, err)
 }
 
-// NewStore 创建新的存储实例。stockv2 使用独立的 DB 连接（带
-// _parse_time=true 以支持 time.Time 字段扫描），并自动初始化 V2 专用表，
-// 与 V1 数据完全隔离。
+// DefaultMarketDBPath 返回 Stock V2 市场数据资产库路径。
+// SQLite 只承载组合、持仓、任务和设置等操作状态；日 K 等历史行情明细
+// 进入 DuckDB，避免把高容量分析数据混入事务库。dataDir 为空时回退到
+// SQLite 文件所在目录，保证单测和旧构造路径也能得到稳定文件路径。
+func DefaultMarketDBPath(dataDir, sqliteDBPath string) string {
+	if strings.TrimSpace(dataDir) != "" {
+		return filepath.Join(dataDir, "stockv2", "stock_market.duckdb")
+	}
+	if sqliteDBPath != "" && sqliteDBPath != ":memory:" {
+		return filepath.Join(filepath.Dir(sqliteDBPath), "stockv2", "stock_market.duckdb")
+	}
+	if sqliteDBPath == ":memory:" {
+		return ":memory:"
+	}
+	return ""
+}
+
+// NewStore 创建新的存储实例。stockv2 使用独立的 SQLite 连接（带
+// _parse_time=true 以支持 time.Time 字段扫描），并自动初始化 V2 操作状态表。
+// 日 K 历史行情明细由同一个 Store 持有的 DuckDB marketDB 承载。
 func NewStore(dbPath string) (*Store, error) {
+	return NewStoreWithMarketDB(dbPath, DefaultMarketDBPath("", dbPath))
+}
+
+// NewStoreWithMarketDB 创建 Stock V2 存储，并显式指定 DuckDB 市场数据文件。
+func NewStoreWithMarketDB(dbPath, marketDBPath string) (*Store, error) {
 	dsn := fmt.Sprintf("%s?_parse_time=true&_loc=Local&_busy_timeout=5000", dbPath)
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open stockv2 db: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, dbPath: dbPath}
+	marketDB, err := NewMarketDataStore(marketDBPath)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open stockv2 market db: %w", err)
+	}
+
+	s := &Store{db: db, dbPath: dbPath, marketDB: marketDB}
+	// 旧版本曾把日 K 明细写入 SQLite；在任何 schema rebuild 发生前先迁入
+	// DuckDB，避免开发期旧表重建逻辑误删历史行情资产。
+	if err := s.migrateLegacyDailyBars(context.Background()); err != nil {
+		_ = marketDB.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate legacy daily bars: %w", err)
+	}
 	if err := s.init(context.Background()); err != nil {
+		_ = marketDB.Close()
 		_ = db.Close()
 		return nil, fmt.Errorf("init stockv2 schema: %w", err)
 	}
@@ -44,10 +84,23 @@ func NewStore(dbPath string) (*Store, error) {
 
 // Close 关闭底层 DB 连接
 func (s *Store) Close() error {
-	if s.db != nil {
-		return s.db.Close()
+	var err error
+	if s.marketDB != nil {
+		err = s.marketDB.Close()
 	}
-	return nil
+	if s.db != nil {
+		if closeErr := s.db.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+	return err
+}
+
+func (s *Store) MarketDBPath() string {
+	if s.marketDB == nil {
+		return ""
+	}
+	return s.marketDB.Path()
 }
 
 // initSchemaSQL 初始化 V2 表结构。只创建表、索引和默认配置行，不依赖
@@ -153,6 +206,30 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_status ON stockv2_update_jobs
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_created_at ON stockv2_update_jobs(created_at);
 INSERT OR IGNORE INTO stockv2_settings (id, auto_update_enabled, update_interval_sec, created_at, updated_at)
 VALUES ('1', 0, 3600, datetime('now'), datetime('now'));
+
+-- 日 K 任务记录（语义独立于主数据 update job）
+CREATE TABLE IF NOT EXISTS stockv2_daily_bar_jobs (
+    id TEXT PRIMARY KEY,
+    job_type TEXT NOT NULL,
+    mode TEXT,
+    symbol TEXT,
+    status TEXT NOT NULL,
+    total_count INTEGER DEFAULT 0,
+    processed_count INTEGER DEFAULT 0,
+    success_count INTEGER DEFAULT 0,
+    failed_count INTEGER DEFAULT 0,
+    failed_items TEXT,
+    range TEXT,
+    adjusted TEXT,
+    trigger_type TEXT,
+    trigger_source TEXT,
+    start_at DATETIME,
+    end_at DATETIME,
+    error_message TEXT,
+    created_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bar_jobs_created_at
+    ON stockv2_daily_bar_jobs(created_at);
 `
 
 // init 初始化 V2 表结构。如果检测到旧 schema（例如时间列是 TEXT 类型），
@@ -175,6 +252,23 @@ func (s *Store) init(ctx context.Context) error {
 	// 增量迁移：给 stockv2_update_jobs 加 failed_items 列
 	if err := s.ensureColumn(ctx, "stockv2_update_jobs", "failed_items", "TEXT"); err != nil {
 		return fmt.Errorf("add failed_items column: %w", err)
+	}
+
+	// 增量迁移：日 K 定时增量开关与上次执行时间
+	if err := s.ensureColumn(ctx, "stockv2_settings", "daily_bars_auto_enabled", "INTEGER DEFAULT 0"); err != nil {
+		return fmt.Errorf("add daily_bars_auto_enabled column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_settings", "daily_bars_last_run", "DATETIME"); err != nil {
+		return fmt.Errorf("add daily_bars_last_run column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_daily_bar_jobs", "symbol", "TEXT"); err != nil {
+		return fmt.Errorf("add daily bar job symbol column: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bar_jobs_running_scope
+		    ON stockv2_daily_bar_jobs(status, mode, symbol, range, adjusted)
+	`); err != nil {
+		return fmt.Errorf("create daily bar job running scope index: %w", err)
 	}
 
 	return nil
@@ -1195,8 +1289,9 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 	query := `
 		INSERT OR REPLACE INTO stockv2_settings (
 			id, auto_update_enabled, update_interval_sec, proxy_enabled,
-			proxy_type, proxy_host, proxy_port, last_scheduled_update, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			proxy_type, proxy_host, proxy_port, last_scheduled_update,
+			daily_bars_auto_enabled, daily_bars_last_run, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	now := time.Now()
@@ -1204,6 +1299,11 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		settings.CreatedAt = now
 	}
 	settings.UpdatedAt = now
+
+	var dailyBarsLastRun any
+	if !settings.DailyBarsLastRun.IsZero() {
+		dailyBarsLastRun = settings.DailyBarsLastRun
+	}
 
 	_, err := s.db.ExecContext(ctx, query,
 		settings.ID,
@@ -1214,6 +1314,8 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		settings.ProxyHost,
 		settings.ProxyPort,
 		settings.LastScheduledUpdate,
+		settings.DailyBarsAutoEnabled,
+		dailyBarsLastRun,
 		settings.CreatedAt,
 		settings.UpdatedAt,
 	)
@@ -1273,7 +1375,8 @@ func (s *Store) scanUpdateJob(row rowScanner) (StockV2UpdateJob, error) {
 func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	query := `
 		SELECT id, auto_update_enabled, update_interval_sec, proxy_enabled,
-		       COALESCE(proxy_type,''), COALESCE(proxy_host,''), COALESCE(proxy_port, 0), last_scheduled_update, created_at, updated_at
+		       COALESCE(proxy_type,''), COALESCE(proxy_host,''), COALESCE(proxy_port, 0), last_scheduled_update,
+		       COALESCE(daily_bars_auto_enabled, 0), daily_bars_last_run, created_at, updated_at
 		FROM stockv2_settings
 		LIMIT 1
 	`
@@ -1282,6 +1385,7 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 
 	var settings StockV2Settings
 	var lastScheduledUpdate sql.NullTime
+	var dailyBarsLastRun sql.NullTime
 	err := row.Scan(
 		&settings.ID,
 		&settings.AutoUpdateEnabled,
@@ -1291,6 +1395,8 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 		&settings.ProxyHost,
 		&settings.ProxyPort,
 		&lastScheduledUpdate,
+		&settings.DailyBarsAutoEnabled,
+		&dailyBarsLastRun,
 		&settings.CreatedAt,
 		&settings.UpdatedAt,
 	)
@@ -1314,6 +1420,9 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	}
 
 	settings.LastScheduledUpdate = nullTimeDefault(lastScheduledUpdate, settings.CreatedAt)
+	if dailyBarsLastRun.Valid {
+		settings.DailyBarsLastRun = dailyBarsLastRun.Time
+	}
 
 	return settings, nil
 }

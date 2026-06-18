@@ -20,16 +20,18 @@ type Service struct {
 	bgWg       sync.WaitGroup
 	settings   StockV2Settings
 
-	universeSource *UniverseDataSource
+	universeSource  *UniverseDataSource
+	dailyBarsSource *DailyBarsSource
 }
 
 // NewService 创建新的股票V2服务
 func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Service {
 	return &Service{
-		store:          store,
-		log:            log,
-		httpClient:     httpClient,
-		universeSource: NewUniverseDataSource(nil, httpClient),
+		store:           store,
+		log:             log,
+		httpClient:      httpClient,
+		universeSource:  NewUniverseDataSource(nil, httpClient),
+		dailyBarsSource: NewDailyBarsSource(nil, httpClient),
 	}
 }
 
@@ -44,6 +46,7 @@ func (s *Service) Initialize(ctx context.Context) error {
 
 	// 设置数据源的服务引用
 	s.universeSource.service = s
+	s.dailyBarsSource.service = s
 
 	return nil
 }
@@ -546,6 +549,9 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	if req.ProxyPort != nil {
 		settings.ProxyPort = *req.ProxyPort
 	}
+	if req.DailyBarsAutoEnabled != nil {
+		settings.DailyBarsAutoEnabled = *req.DailyBarsAutoEnabled
+	}
 
 	// 保存配置
 	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil {
@@ -553,15 +559,18 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	}
 
 	// 更新本地配置
-	prevEnabled := s.settings.AutoUpdateEnabled
+	prevAuto := s.settings.AutoUpdateEnabled
+	prevDaily := s.settings.DailyBarsAutoEnabled
 	prevInterval := s.settings.UpdateIntervalSec
 	s.settings = settings
 
-	// 自动更新开关或周期变更时，重启后台任务
-	if settings.AutoUpdateEnabled {
-		// 如果之前没开，或者周期变了，（重）启动
-		if !prevEnabled || prevInterval != settings.UpdateIntervalSec {
-			if prevEnabled {
+	// 主数据自动更新 或 日 K 定时增量 任一开启都需要后台调度。
+	// 任一开关从关→开，或主数据周期变化时重启后台，以拾取新 ticker。
+	needBG := settings.AutoUpdateEnabled || settings.DailyBarsAutoEnabled
+	prevNeedBG := prevAuto || prevDaily
+	if needBG {
+		if !prevNeedBG || (prevAuto && prevInterval != settings.UpdateIntervalSec) {
+			if prevNeedBG {
 				s.StopBackground()
 			}
 			// 后台任务用独立 context，不随请求结束而取消
@@ -621,6 +630,13 @@ func (s *Service) StartBackground(ctx context.Context) {
 	go func() {
 		defer s.bgWg.Done()
 		s.runScheduledUpdater(bgCtx)
+	}()
+
+	// 日 K 每日定时增量调度（独立 goroutine，受 DailyBarsAutoEnabled 开关控制）
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runDailyBarsScheduler(bgCtx)
 	}()
 }
 

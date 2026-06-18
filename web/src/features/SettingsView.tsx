@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import type { AppActions } from "../app/App";
-import type { AppData, ListenerEndpoint, RuntimeSettings, SystemSettings, TLSProbeResult } from "../app/types";
+import type { AppData, ListenerEndpoint, LocalDatabaseFileStat, RuntimeSettings, SystemSettings, TLSProbeResult } from "../app/types";
 import { friendlyError } from "../api/client";
 import { Button, ContextList, Field, Panel, Pill, SubTabs, Toggle } from "../components/ui";
 import { defaultRuntime, formatDate } from "../domain/labels";
@@ -67,6 +67,14 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
   const currentRuntime: RuntimeSettings = (data.settings.runtime || defaultRuntime()) as RuntimeSettings;
   const currentEndpoint: ListenerEndpoint = (data.settings.listener ?? {}) as ListenerEndpoint;
   const prevEndpoint: ListenerEndpoint | null = data.settings.listener || null;
+  const sqliteFile: LocalDatabaseFileStat = data.settings.storage?.sqlite || {
+    kind: "sqlite",
+    label: "SQLite 主库",
+    path: data.settings.file?.dbPath,
+    exists: Boolean(data.settings.file?.dbPath),
+    sizeBytes: data.settings.file?.dbSizeBytes || 0,
+  };
+  const duckDBFiles = data.settings.storage?.duckdb || [];
   const [listenAddr, setListenAddr] = useState<string>(currentEndpoint.addr || currentRuntime.addr || data.settings.file?.addr || "");
   const [tlsEnabled, setTlsEnabled] = useState<boolean>(Boolean(currentEndpoint.tlsEnabled || currentRuntime.tlsEnabled));
   const [tlsCertFile, setTlsCertFile] = useState<string>(currentRuntime.tlsCertFile || "");
@@ -413,6 +421,45 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
                 </div>
               </div>
             </Panel>
+
+            <Panel title="本地数据文件" subtitle="运行数据文件大小，独立于系统更新状态">
+              <div className="grid gap-3">
+                <StorageFileRow
+                  description="配置、审计、任务记录和当前股票 V2 表"
+                  file={sqliteFile}
+                  title="SQLite 主库"
+                />
+
+                <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium">DuckDB 数据文件</div>
+                      <p className="muted mt-1 mb-0 text-xs">用于后续股票行情分析库，当前仅统计已存在的 .duckdb 文件。</p>
+                    </div>
+                    <Pill tone={duckDBFiles.length ? "good" : "neutral"}>
+                      {duckDBFiles.length ? `${duckDBFiles.length} 个文件` : "未检测到"}
+                    </Pill>
+                  </div>
+                  {duckDBFiles.length ? (
+                    <div className="mt-3 grid gap-2">
+                      {duckDBFiles.map((file) => (
+                        <StorageFileRow
+                          description={file.kind === "duckdb-wal" ? "DuckDB 写入日志文件" : "DuckDB 主数据文件"}
+                          file={file}
+                          key={`${file.kind || "duckdb"}:${file.path || file.label || ""}`}
+                          title={file.label || "DuckDB"}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mt-3 rounded-lg border border-dashed border-[var(--line)] bg-[var(--surface)] p-3 text-xs leading-relaxed text-[var(--muted-strong)]">
+                      <div>未检测到 DuckDB 文件。</div>
+                      <div className="mt-1">当前股票 V2 数据仍在 SQLite 主库的 stockv2_* 表中。</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </Panel>
           </div>
 
           <Panel title="服务配置" subtitle="切换监听地址、启用 HTTPS 无需重启进程">
@@ -515,7 +562,6 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
                 items={[
                   ["配置文件", data.settings.file?.configPath || "-"],
                   ["数据目录", data.settings.file?.dataDir || "-"],
-                  ["数据库", <><div className="grid gap-0.5"><span className="mono">{data.settings.file?.dbPath || "-"}</span>{data.settings.file?.dbSizeBytes ? <span className="muted mono text-[11px]">{formatBytesIEC(data.settings.file.dbSizeBytes)}</span> : null}</div></>],
                 ]}
               />
             </div>
@@ -525,6 +571,26 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
 
       {tab === "storage" ? <ObjectStoragePanel actions={actions} /> : null}
       {tab === "updates" ? <SystemUpdatePanel actions={actions} /> : null}
+    </div>
+  );
+}
+
+function StorageFileRow({ description, file, title }: { description: string; file: LocalDatabaseFileStat; title: string }) {
+  const exists = Boolean(file.exists);
+  const sizeText = exists ? formatBytesIEC(file.sizeBytes || 0) : "未检测到";
+  return (
+    <div className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">{title}</div>
+          <p className="muted mt-1 mb-0 text-xs">{description}</p>
+        </div>
+        <Pill tone={exists ? "good" : "warn"}>{sizeText}</Pill>
+      </div>
+      <div className="grid gap-1 text-[11px]">
+        <span className="mono break-all text-[var(--muted-strong)]">{file.path || "-"}</span>
+        {file.updatedAt ? <span className="muted">更新时间：{formatDate(file.updatedAt)}</span> : null}
+      </div>
     </div>
   );
 }

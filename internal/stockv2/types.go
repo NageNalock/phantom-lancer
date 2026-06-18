@@ -10,19 +10,19 @@ import (
 
 // StockV2Instrument 股票主数据
 type StockV2Instrument struct {
-	ID          string    `json:"id"`
-	Symbol      string    `json:"symbol"`
-	Market      string    `json:"market"`
-	Name        string    `json:"name"`
-	Industry    string    `json:"industry"`
-	Sector      string    `json:"sector"`
-	Concepts    []string  `json:"concepts"` // 概念信息数组
-	ListDate    string    `json:"listDate"`
-	DelistDate  string    `json:"delistDate"`
-	Status      string    `json:"status"`    // active, delisted, suspended
-	LastUpdate  time.Time `json:"lastUpdate"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ID         string    `json:"id"`
+	Symbol     string    `json:"symbol"`
+	Market     string    `json:"market"`
+	Name       string    `json:"name"`
+	Industry   string    `json:"industry"`
+	Sector     string    `json:"sector"`
+	Concepts   []string  `json:"concepts"` // 概念信息数组
+	ListDate   string    `json:"listDate"`
+	DelistDate string    `json:"delistDate"`
+	Status     string    `json:"status"` // active, delisted, suspended
+	LastUpdate time.Time `json:"lastUpdate"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
 // StockV2Portfolio 投资组合/仓位
@@ -31,9 +31,9 @@ type StockV2Portfolio struct {
 	Name                 string    `json:"name"`
 	Description          string    `json:"description,omitempty"`
 	Cash                 float64   `json:"cash"`
-	RiskLevel            string    `json:"riskLevel"`          // low, medium, high
+	RiskLevel            string    `json:"riskLevel"`            // low, medium, high
 	MaxSinglePositionPct float64   `json:"maxSinglePositionPct"` // 单票最大持仓比例
-	MaxDrawdownPct       float64   `json:"maxDrawdownPct"`     // 最大回撤比例
+	MaxDrawdownPct       float64   `json:"maxDrawdownPct"`       // 最大回撤比例
 	AllowBuy             bool      `json:"allowBuy"`
 	AllowAdd             bool      `json:"allowAdd"`
 	AllowReduce          bool      `json:"allowReduce"`
@@ -88,19 +88,19 @@ type StockV2HoldingPatch struct {
 
 // StockV2UpdateJob 更新任务记录
 type StockV2UpdateJob struct {
-	ID             string            `json:"id"`
-	TriggerType    string            `json:"triggerType"`    // manual, scheduled
-	TriggerSource  string            `json:"triggerSource"`  // user, system
-	Status         string            `json:"status"`         // running, completed, failed, cancelled
-	TotalCount     int               `json:"totalCount"`
-	ProcessedCount int               `json:"processedCount"`
-	SuccessCount   int               `json:"successCount"`
-	FailedCount    int               `json:"failedCount"`
-	FailedItems    []UpdateFailure   `json:"failedItems,omitempty"` // 失败详情
-	StartAt        time.Time         `json:"startAt"`
-	EndAt          time.Time         `json:"endAt"`
-	ErrorMessage   string            `json:"errorMessage,omitempty"`
-	CreatedAt      time.Time         `json:"createdAt"`
+	ID             string          `json:"id"`
+	TriggerType    string          `json:"triggerType"`   // manual, scheduled
+	TriggerSource  string          `json:"triggerSource"` // user, system
+	Status         string          `json:"status"`        // running, completed, failed, cancelled
+	TotalCount     int             `json:"totalCount"`
+	ProcessedCount int             `json:"processedCount"`
+	SuccessCount   int             `json:"successCount"`
+	FailedCount    int             `json:"failedCount"`
+	FailedItems    []UpdateFailure `json:"failedItems,omitempty"` // 失败详情
+	StartAt        time.Time       `json:"startAt"`
+	EndAt          time.Time       `json:"endAt"`
+	ErrorMessage   string          `json:"errorMessage,omitempty"`
+	CreatedAt      time.Time       `json:"createdAt"`
 }
 
 // UpdateFailure 单只股票更新失败记录
@@ -125,27 +125,29 @@ type StockV2UpdateProgress struct {
 // StockV2Settings V2 配置
 type StockV2Settings struct {
 	ID                   string    `json:"id"`
-	AutoUpdateEnabled   bool      `json:"autoUpdateEnabled"`
-	UpdateIntervalSec   int       `json:"updateIntervalSec"`
-	ProxyEnabled        bool      `json:"proxyEnabled"`
-	ProxyType           string    `json:"proxyType"`
-	ProxyHost           string    `json:"proxyHost"`
-	ProxyPort           int       `json:"proxyPort"`
-	LastScheduledUpdate time.Time `json:"lastScheduledUpdate"`
+	AutoUpdateEnabled    bool      `json:"autoUpdateEnabled"`
+	UpdateIntervalSec    int       `json:"updateIntervalSec"`
+	ProxyEnabled         bool      `json:"proxyEnabled"`
+	ProxyType            string    `json:"proxyType"`
+	ProxyHost            string    `json:"proxyHost"`
+	ProxyPort            int       `json:"proxyPort"`
+	LastScheduledUpdate  time.Time `json:"lastScheduledUpdate"`
+	DailyBarsAutoEnabled bool      `json:"dailyBarsAutoEnabled"` // 日 K 每日定时增量开关
+	DailyBarsLastRun     time.Time `json:"dailyBarsLastRun"`     // 日 K 定时增量上次执行时间（当日去重）
 	CreatedAt            time.Time `json:"createdAt"`
 	UpdatedAt            time.Time `json:"updatedAt"`
 }
 
 // StockV2SettingsPatch 配置更新补丁
 type StockV2SettingsPatch struct {
-	AutoUpdateEnabled *bool  `json:"autoUpdateEnabled,omitempty"`
-	UpdateIntervalSec *int   `json:"updateIntervalSec,omitempty"`
-	ProxyEnabled      *bool  `json:"proxyEnabled,omitempty"`
-	ProxyType         *string `json:"proxyType,omitempty"`
-	ProxyHost         *string `json:"proxyHost,omitempty"`
-	ProxyPort         *int    `json:"proxyPort,omitempty"`
+	AutoUpdateEnabled    *bool   `json:"autoUpdateEnabled,omitempty"`
+	UpdateIntervalSec    *int    `json:"updateIntervalSec,omitempty"`
+	ProxyEnabled         *bool   `json:"proxyEnabled,omitempty"`
+	ProxyType            *string `json:"proxyType,omitempty"`
+	ProxyHost            *string `json:"proxyHost,omitempty"`
+	ProxyPort            *int    `json:"proxyPort,omitempty"`
+	DailyBarsAutoEnabled *bool   `json:"dailyBarsAutoEnabled,omitempty"`
 }
-
 
 // Repository 接口定义
 type Repository interface {
@@ -188,10 +190,10 @@ type Repository interface {
 // PortfolioWithHoldings 带持仓信息的投资组合
 type PortfolioWithHoldings struct {
 	StockV2Portfolio
-	TotalValue      float64            `json:"totalValue"`
-	TotalAssetValue float64            `json:"totalAssetValue"`
-	CashPct         float64            `json:"cashPct"`
-	Holdings        []StockV2Holding   `json:"holdings"`
+	TotalValue      float64          `json:"totalValue"`
+	TotalAssetValue float64          `json:"totalAssetValue"`
+	CashPct         float64          `json:"cashPct"`
+	Holdings        []StockV2Holding `json:"holdings"`
 }
 
 // Snapshot V2 UI 快照数据。
@@ -202,18 +204,18 @@ type PortfolioWithHoldings struct {
 // 全量或分页检查股票主数据时，应使用 /api/stockv2/instruments 返回的
 // items/total/limit/offset。
 type Snapshot struct {
-	Portfolios     []PortfolioWithHoldings `json:"portfolios"`
-	Instruments    []StockV2Instrument     `json:"instruments"`
-	UpdateJobs     []StockV2UpdateJob     `json:"updateJobs"`
-	Settings       StockV2Settings        `json:"settings"`
-	LastUpdate     time.Time              `json:"lastUpdate"`
+	Portfolios  []PortfolioWithHoldings `json:"portfolios"`
+	Instruments []StockV2Instrument     `json:"instruments"`
+	UpdateJobs  []StockV2UpdateJob      `json:"updateJobs"`
+	Settings    StockV2Settings         `json:"settings"`
+	LastUpdate  time.Time               `json:"lastUpdate"`
 }
 
 // UniverseUpdateRequest 股票主数据更新请求
 type UniverseUpdateRequest struct {
-	TriggerType    string `json:"triggerType"`  // manual, scheduled
-	TriggerSource  string `json:"triggerSource"` // user, system
-	Symbols        []string `json:"symbols"` // 可选，为空则更新全部
+	TriggerType   string   `json:"triggerType"`   // manual, scheduled
+	TriggerSource string   `json:"triggerSource"` // user, system
+	Symbols       []string `json:"symbols"`       // 可选，为空则更新全部
 }
 
 // UniverseUpdateResponse 更新响应
@@ -244,11 +246,11 @@ type RequestUpdatePortfolio struct {
 
 // RequestCreateHolding 创建持仓请求
 type RequestCreateHolding struct {
-	Symbol            string  `json:"symbol"`
-	Name              string  `json:"name,omitempty"`
-	Market            string  `json:"market,omitempty"`
-	Quantity          float64 `json:"quantity"`
-	CostPrice         float64 `json:"costPrice"`
+	Symbol    string  `json:"symbol"`
+	Name      string  `json:"name,omitempty"`
+	Market    string  `json:"market,omitempty"`
+	Quantity  float64 `json:"quantity"`
+	CostPrice float64 `json:"costPrice"`
 }
 
 // RequestUpdateHolding 更新持仓请求
@@ -258,23 +260,24 @@ type RequestUpdateHolding struct {
 
 // RequestCreateOrUpdateSettings 配置请求
 type RequestCreateOrUpdateSettings struct {
-	AutoUpdateEnabled *bool   `json:"autoUpdateEnabled,omitempty"`
-	UpdateIntervalSec *int    `json:"updateIntervalSec,omitempty"`
-	ProxyEnabled      *bool   `json:"proxyEnabled,omitempty"`
-	ProxyType         *string `json:"proxyType,omitempty"`
-	ProxyHost         *string `json:"proxyHost,omitempty"`
-	ProxyPort         *int    `json:"proxyPort,omitempty"`
+	AutoUpdateEnabled    *bool   `json:"autoUpdateEnabled,omitempty"`
+	UpdateIntervalSec    *int    `json:"updateIntervalSec,omitempty"`
+	ProxyEnabled         *bool   `json:"proxyEnabled,omitempty"`
+	ProxyType            *string `json:"proxyType,omitempty"`
+	ProxyHost            *string `json:"proxyHost,omitempty"`
+	ProxyPort            *int    `json:"proxyPort,omitempty"`
+	DailyBarsAutoEnabled *bool   `json:"dailyBarsAutoEnabled,omitempty"`
 }
 
 // 错误定义
 var (
-	ErrPortfolioNotFound      = errors.New("portfolio not found")
-	ErrHoldingNotFound        = errors.New("holding not found")
-	ErrInstrumentNotFound    = errors.New("instrument not found")
-	ErrUpdateJobNotFound      = errors.New("update job not found")
-	ErrInvalidRiskLevel       = errors.New("invalid risk level")
-	ErrPositionConstraint     = errors.New("position exceeds constraint")
-	InsufficientFunds         = errors.New("insufficient funds")
+	ErrPortfolioNotFound       = errors.New("portfolio not found")
+	ErrHoldingNotFound         = errors.New("holding not found")
+	ErrInstrumentNotFound      = errors.New("instrument not found")
+	ErrUpdateJobNotFound       = errors.New("update job not found")
+	ErrInvalidRiskLevel        = errors.New("invalid risk level")
+	ErrPositionConstraint      = errors.New("position exceeds constraint")
+	InsufficientFunds          = errors.New("insufficient funds")
 	ErrUpdateJobAlreadyRunning = errors.New("update job already running")
 )
 

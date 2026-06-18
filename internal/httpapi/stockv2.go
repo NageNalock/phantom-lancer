@@ -38,6 +38,14 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	// 配置管理
 	mux.HandleFunc("GET /api/stockv2/settings", s.handleStockV2GetSettings)
 	mux.HandleFunc("PUT /api/stockv2/settings", s.handleStockV2UpdateSettings)
+
+	// 日级历史行情（Daily Bars）
+	mux.HandleFunc("POST /api/stockv2/history/daily/ensure", s.handleEnsureDailyBars)
+	mux.HandleFunc("GET /api/stockv2/history/daily", s.handleGetDailyBars)
+	mux.HandleFunc("GET /api/stockv2/history/daily/quality", s.handleGetDailyBarsQuality)
+	mux.HandleFunc("POST /api/stockv2/history/daily/jobs/run", s.handleRunDailyBarsJob)
+	mux.HandleFunc("GET /api/stockv2/history/daily/jobs/{jobId}", s.handleGetDailyBarsJob)
+	mux.HandleFunc("GET /api/stockv2/history/daily/jobs", s.handleListDailyBarsJobs)
 }
 
 // handleStockV2Snapshot 处理 V2 工作台快照请求。
@@ -435,6 +443,177 @@ func (s *Server) handleStockV2UpdateSettings(w http.ResponseWriter, r *http.Requ
 	}
 
 	s.writeJSON(w, settings)
+}
+
+// Daily Bars.
+
+// handleEnsureDailyBars 按需补拉单只股票的日 K。
+// 若本地已覆盖且未过时则直接跳过；否则异步启动抓取并返回 job id 供前端轮询。
+func (s *Server) handleEnsureDailyBars(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Symbol   string `json:"symbol"`
+		Range    string `json:"range"`    // 6m | 1y | 3y | 5y
+		Adjusted string `json:"adjusted"` // none | qfq | hfq
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Symbol == "" {
+		http.Error(w, "symbol is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	result, err := s.stockV2.EnsureDailyBars(ctx, req.Symbol, req.Range, req.Adjusted)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.writeJSON(w, result)
+}
+
+// handleGetDailyBars 查询本地日 K（不触发抓取）。
+func (s *Server) handleGetDailyBars(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	symbol := q.Get("symbol")
+	if symbol == "" {
+		http.Error(w, "symbol is required", http.StatusBadRequest)
+		return
+	}
+	adjusted := q.Get("adjusted")
+	start := q.Get("start")
+	end := q.Get("end")
+	limit := 0
+	if ls := q.Get("limit"); ls != "" {
+		if l, err := strconv.Atoi(ls); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	ctx := r.Context()
+	bars, err := s.stockV2.GetDailyBars(ctx, symbol, limit, start, end, adjusted)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.writeJSON(w, map[string]interface{}{
+		"items": bars,
+		"total": len(bars),
+		"limit": limit,
+	})
+}
+
+// handleGetDailyBarsQuality 评估本地日 K 数据质量（行数、区间、陈旧度等）。
+func (s *Server) handleGetDailyBarsQuality(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	symbol := q.Get("symbol")
+	if symbol == "" {
+		http.Error(w, "symbol is required", http.StatusBadRequest)
+		return
+	}
+	adjusted := q.Get("adjusted")
+
+	ctx := r.Context()
+	quality, err := s.stockV2.GetDailyBarsQuality(ctx, symbol, adjusted)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.writeJSON(w, quality)
+}
+
+// handleRunDailyBarsJob 手动触发日 K 批量任务（symbol / hot / universe_incremental）。
+func (s *Server) handleRunDailyBarsJob(w http.ResponseWriter, r *http.Request) {
+	var req stockv2.DailyBarsJobRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Mode == "" {
+		req.Mode = stockv2.DailyBarJobModeHot
+	}
+	if req.TriggerType == "" {
+		req.TriggerType = "manual"
+	}
+	if req.TriggerSource == "" {
+		req.TriggerSource = "web"
+	}
+
+	ctx := r.Context()
+	job, err := s.stockV2.RunDailyBarsJob(ctx, req)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if err == stockv2.ErrDailyBarJobAlreadyRunning {
+			status = http.StatusConflict
+		} else if err.Error() == "symbol is required for symbol mode" {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	s.writeJSON(w, job)
+}
+
+// handleGetDailyBarsJob 获取单个日 K 任务，供单票详情抽屉按 jobId 可靠轮询。
+func (s *Server) handleGetDailyBarsJob(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("jobId")
+	if jobID == "" {
+		http.Error(w, "job ID is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	job, err := s.stockV2.GetDailyBarJob(ctx, jobID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if err == stockv2.ErrDailyBarJobNotFound {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	s.writeJSON(w, job)
+}
+
+// handleListDailyBarsJobs 列出最近的日 K 任务记录（供前端轮询进度）。
+func (s *Server) handleListDailyBarsJobs(w http.ResponseWriter, r *http.Request) {
+	limit := 20
+	if ls := r.URL.Query().Get("limit"); ls != "" {
+		if l, err := strconv.Atoi(ls); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+	offset := 0
+	if offsetText := r.URL.Query().Get("offset"); offsetText != "" {
+		if o, err := strconv.Atoi(offsetText); err == nil && o > 0 {
+			offset = o
+		}
+	}
+
+	ctx := r.Context()
+	jobs, err := s.stockV2.ListDailyBarJobs(ctx, limit, offset)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	total, err := s.stockV2.CountDailyBarJobs(ctx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	running, err := s.stockV2.ListRunningDailyBarJobs(ctx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.writeJSON(w, map[string]interface{}{
+		"items":   jobs,
+		"running": running,
+		"total":   total,
+		"limit":   limit,
+		"offset":  offset,
+	})
 }
 
 // writeJSON 辅助函数：写入JSON响应
