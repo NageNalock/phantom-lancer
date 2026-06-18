@@ -33,7 +33,9 @@ jobs:
   linux-amd64:
     name: Linux amd64 package
     if: ${{ github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v') }}
-    runs-on: ubuntu-latest
+    # 固定 ubuntu-22.04 (glibc 2.35):DuckDB 静态库要求 GLIBC_2.35,
+    # 在此基准上构建可让二进制兼容 glibc >= 2.35 的目标系统。
+    runs-on: ubuntu-22.04
     outputs:
       artifact_name: ${{ steps.package.outputs.artifact_name }}
       release_tag: ${{ steps.version.outputs.release_tag }}
@@ -42,7 +44,6 @@ jobs:
       CGO_ENABLED: "1"
       GOOS: linux
       GOARCH: amd64
-      CC: musl-gcc
       GOPROXY: https://proxy.golang.org,direct
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
       ARTIFACT_NAME: ${{ inputs.artifact_name || 'phantom-lancer-linux-amd64' }}
@@ -162,11 +163,6 @@ jobs:
           node --version
           npm --version
 
-      - name: Install portable Linux linker
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends musl-tools
-
       - name: Install frontend dependencies
         working-directory: web
         run: npm ci
@@ -191,17 +187,21 @@ jobs:
           PL_SUPERVISOR_OUT: ${{ github.workspace }}/release/bin/phantom-supervisor
           PL_SKIP_WEB_BUILD: "1"
           PL_VERSION: ${{ steps.version.outputs.build_version }}
-          PL_EXTRA_LDFLAGS: '-linkmode external -extldflags "-static"'
         run: scripts/build.sh
 
-      - name: Verify release binaries are static
+      - name: Verify release binaries
         run: |
           set -Eeuo pipefail
           for bin in phantom-lancer phantom-supervisor; do
             file "release/bin/$bin"
-            if ! file "release/bin/$bin" | grep -q "statically linked"; then
-              echo "release/$bin must be statically linked for portable self-updates" >&2
-              ldd "release/bin/$bin" || true
+            if ! file "release/bin/$bin" | grep -q "ELF 64-bit LSB executable, x86-64"; then
+              echo "release/$bin must be a linux/amd64 ELF executable" >&2
+              exit 1
+            fi
+            # glibc 动态链接:确保所有依赖库都能解析(不能有 not found)
+            if ldd "release/bin/$bin" | grep -q "not found"; then
+              echo "release/$bin has unresolved dynamic dependencies:" >&2
+              ldd "release/bin/$bin" >&2
               exit 1
             fi
           done
