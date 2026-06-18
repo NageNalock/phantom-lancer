@@ -1,5 +1,5 @@
 import { Children, cloneElement, forwardRef, isValidElement, useEffect, useId, useRef, useState } from "react";
-import { CaretDown } from "@phosphor-icons/react";
+import { CaretDown, X } from "@phosphor-icons/react";
 import type { ButtonHTMLAttributes, DragEvent, KeyboardEvent, MouseEvent as ReactMouseEvent, ReactElement, ReactNode } from "react";
 import type { Tone } from "../app/types";
 import { shouldHandleQueryLinkClick } from "../hooks/useQueryParamState";
@@ -638,5 +638,75 @@ export function CollapsibleSection({
         {children}
       </div>
     </details>
+  );
+}
+
+/**
+ * Drawer is a right-side slide-over panel for create/edit/inspect flows that
+ * are too dense for a centered modal but should not live permanently on the
+ * page (e.g. strategy editor, object inspector). It is the Quiet Workbench
+ * counterpart to the centered Dialog used by simpler forms.
+ *
+ * The caller renders it conditionally ({open && <Drawer/>}); the panel slides
+ * in on mount. Close on overlay click or Escape. Keep drawer content scoped to
+ * one object — list/table state stays in the page, the drawer only carries the
+ * currently edited or inspected object.
+ */
+export function Drawer({
+  title,
+  subtitle,
+  onClose,
+  children,
+  footer,
+  width = 480,
+}: {
+  title: ReactNode;
+  subtitle?: ReactNode;
+  onClose: () => void;
+  children: ReactNode;
+  footer?: ReactNode;
+  width?: number;
+}) {
+  const [shown, setShown] = useState(false);
+  const titleId = useId();
+
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => setShown(true));
+    function onKey(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-[rgba(16,18,22,0.45)]" onClick={onClose}>
+      <section
+        aria-labelledby={titleId}
+        aria-modal="true"
+        className={`flex h-full flex-col border-l border-[var(--line)] bg-[var(--surface)] shadow-[var(--shadow)] transition-transform duration-200 ease-out ${shown ? "translate-x-0" : "translate-x-full"}`}
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        style={{ width: `min(${width}px, 100vw)` }}
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-[var(--line)] px-5 py-3">
+          <div className="min-w-0">
+            <h2 className="m-0 text-sm font-semibold" id={titleId}>{title}</h2>
+            {subtitle ? <p className="muted mt-1 mb-0 text-xs">{subtitle}</p> : null}
+          </div>
+          <Button aria-label="关闭" onClick={onClose}>
+            <X size={14} />
+          </Button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-5">{children}</div>
+        {footer ? <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--line)] px-5 py-3">{footer}</div> : null}
+      </section>
+    </div>
   );
 }
