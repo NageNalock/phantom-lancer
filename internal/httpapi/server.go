@@ -35,11 +35,10 @@ import (
 	imagegen "phantom-lancer/internal/images"
 	logcenter "phantom-lancer/internal/logs"
 	"phantom-lancer/internal/logsampler"
-	"phantom-lancer/internal/mail"
 	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/selfupdate"
 	stocksvc "phantom-lancer/internal/stock"
-	stockv2svc "phantom-lancer/internal/stockv2"
+	stockv2 "phantom-lancer/internal/stockv2"
 	"phantom-lancer/internal/storage"
 	"phantom-lancer/internal/v2ray"
 	"phantom-lancer/internal/workspaces"
@@ -94,11 +93,10 @@ type Server struct {
 	v2ray          *v2ray.Service
 	images         *imagegen.Service
 	stock          *stocksvc.Service
-	stockV2        *stockv2svc.Service
+	stockV2        *stockv2.Service
 	docker         *dockercontrol.Service
 	logs           *logcenter.Service
 	updates        *selfupdate.Service
-	mail           *mail.Service
 	staticFS       fs.FS
 	log            *slog.Logger
 	logins         *loginBackoff
@@ -138,7 +136,7 @@ type sessionContext struct {
 	Session storage.Session
 }
 
-func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, stockSvc *stocksvc.Service, stockV2Svc *stockv2svc.Service, dockerSvc *dockercontrol.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, mailSvc *mail.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
+func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, stockSvc *stocksvc.Service, stockV2Svc *stockv2.Service, dockerSvc *dockercontrol.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
 	return &Server{
 		cfg:              cfg,
 		store:            store,
@@ -152,7 +150,6 @@ func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewayS
 		docker:           dockerSvc,
 		logs:             logsSvc,
 		updates:          updateSvc,
-		mail:             mailSvc,
 		staticFS:         staticFS,
 		log:              logger,
 		logins:           newLoginBackoff(cfg.LoginFailureThreshold),
@@ -296,8 +293,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/docker/images/", s.handleDockerRemoveImage)
 	mux.HandleFunc("GET /api/docker/volumes", s.handleDockerListVolumes)
 	mux.HandleFunc("GET /api/docker/networks", s.handleDockerListNetworks)
-	// V2 股票系统路由
-	s.RegisterStockV2Routes(mux)
 	mux.HandleFunc("GET /api/stock/snapshot", s.handleStockSnapshot)
 	mux.HandleFunc("GET /api/stock/settings", s.handleGetStockSettings)
 	mux.HandleFunc("PUT /api/stock/settings", s.handleUpdateStockSettings)
@@ -351,6 +346,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stock/proposed-operations", s.handleStockProposedOperations)
 	mux.HandleFunc("POST /api/stock/proposed-operations/", s.handleStockProposedOperationSubroutes)
 	mux.HandleFunc("GET /api/stock/operations", s.handleStockOperations)
+	// V2 股票系统路由
+	s.RegisterStockV2Routes(mux)
 	mux.HandleFunc("GET /api/images/library/private/status", s.handleImagePrivateStatus)
 	mux.HandleFunc("POST /api/images/library/private/unlock", s.handleUnlockImagePrivate)
 	mux.HandleFunc("POST /api/images/library/private/lock", s.handleLockImagePrivate)
@@ -384,7 +381,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v2ray/clients/", s.handleV2RayClientSubroutes)
 	mux.HandleFunc("POST /api/v2ray/clients/", s.handleV2RayClientSubroutes)
 	mux.HandleFunc("DELETE /api/v2ray/clients/", s.handleV2RayClientSubroutes)
-	s.registerMailRoutes(mux)
 	mux.HandleFunc("GET /v1/models", s.handleCodexGatewayPublicModels)
 	mux.HandleFunc("GET /v1/models/", s.handleCodexGatewayPublicModel)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleCodexGatewayChatCompletions)

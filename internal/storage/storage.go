@@ -41,13 +41,6 @@ var codexGatewayRequestLogRetention = 5000
 // Changing this value will render all previously stored tokens unreadable.
 const codexGatewayTokenKeeperInfo = "codex-gateway-account-tokens-v1"
 
-// mailKeeperInfo is the HKDF context label used for the Mail module's
-// wrapped secrets: DNS provider tokens, ACME account keys, webhook
-// secrets, and so on.  It is deliberately distinct from the gateway
-// keeper so a key-rotation event for one module does not cascade into
-// the other.
-const mailKeeperInfo = "phantom-mail-v1"
-
 // dockerRegistryCredentialKeeperInfo binds retrievable Docker registry
 // credential secrets to a separate key domain from Gateway upstream tokens.
 const dockerRegistryCredentialKeeperInfo = "docker-registry-credential-secrets-v1"
@@ -85,21 +78,11 @@ type Store struct {
 	// future key-rotation diagnostics.
 	gwTokenMasterSource string
 
-	// mailKeeper is the symmetric keeper used by the Mail module for
-	// DNS provider credentials, ACME account keys, webhook HMAC
-	// secrets, import-mode SMTP/IMAP passwords, etc.  It is derived
-	// from the same master key as gwTokenKeeper but with a distinct
-	// HKDF info label (see mailKeeperInfo).
-	mailKeeper *keywrap.Keeper
-	// mailFallbackKeeper mirrors gwTokenFallbackKeeper for mail secrets.
-	// Non-nil only when env+DB keys differ.
-	mailFallbackKeeper *keywrap.Keeper
-
 	// dbStatsCache holds the last computed database size / per-table stats.
 	// It is refreshed periodically by StartStatsCollector.
-	dbStatsCache  DatabaseStats
-	dbStatsAt      time.Time
-	dbStatsMu      sync.RWMutex
+	dbStatsCache DatabaseStats
+	dbStatsAt    time.Time
+	dbStatsMu    sync.RWMutex
 }
 
 type Owner struct {
@@ -681,23 +664,6 @@ func (s *Store) ensureMasterKey(ctx context.Context) error {
 		s.dockerRegistrySecretFallbackKeeper = registryFB
 	}
 
-	// ---- 2b. Derive Mail module keepers. ----
-	// We use a *different* HKDF info label than the gateway keeper so
-	// rotating one domain cannot be cross-probed against ciphertext from
-	// the other.  The fallback branch mirrors the gateway semantics.
-	mailPrimary, kerr := keywrap.NewKeeper(primaryMaster, mailKeeperInfo)
-	if kerr != nil {
-		return kerr
-	}
-	s.mailKeeper = mailPrimary
-	if fallbackMaster != nil {
-		mailFb, kerr := keywrap.NewKeeper(fallbackMaster, mailKeeperInfo)
-		if kerr != nil {
-			return kerr
-		}
-		s.mailFallbackKeeper = mailFb
-	}
-
 	// ---- 3. Structured startup notification using the injected logger. ----
 	if s.log != nil {
 		attrs := []any{"source", primarySource}
@@ -789,25 +755,6 @@ func (s *Store) unwrapGWToken(blob string) (string, error) {
 		}())
 }
 
-// wrapMailSecret encrypts a Mail-module secret (DNS provider token, ACME
-// account key, webhook HMAC secret, import-mode IMAP password, …) for
-// storage.  It uses the same kw1: prefix + base64-raw-URL encoding as
-// wrapGWToken so the redaction + DB-dump-safe story is shared across
-// modules; the underlying key material is different (see mailKeeperInfo).
-func (s *Store) wrapMailSecret(plain string) (string, error) {
-	if plain == "" {
-		return "", nil
-	}
-	if s.mailKeeper == nil {
-		return "", fmt.Errorf("mail keeper not initialised")
-	}
-	blob, err := s.mailKeeper.Wrap(plain)
-	if err != nil {
-		return "", err
-	}
-	return wrappedTokenPrefix + blob, nil
-}
-
 func (s *Store) wrapDockerRegistrySecret(plain string) (string, error) {
 	if plain == "" {
 		return "", nil
@@ -817,32 +764,6 @@ func (s *Store) wrapDockerRegistrySecret(plain string) (string, error) {
 		return "", err
 	}
 	return wrappedTokenPrefix + blob, nil
-}
-
-// unwrapMailSecret is the inverse of wrapMailSecret.  Fallback semantics
-// mirror unwrapGWToken: kw1 prefix + primary → fallback → legacy
-// plaintext (unwrapped values written pre-keywrap, before Mail module
-// existed – the branch is kept so a future schema change cannot be
-// ambiguous).
-func (s *Store) unwrapMailSecret(blob string) (string, error) {
-	if blob == "" {
-		return "", nil
-	}
-	if !strings.HasPrefix(blob, wrappedTokenPrefix) {
-		return blob, nil
-	}
-	raw := strings.TrimPrefix(blob, wrappedTokenPrefix)
-	if s.mailKeeper != nil {
-		if pt, err := s.mailKeeper.Unwrap(raw); err == nil {
-			return pt, nil
-		}
-	}
-	if s.mailFallbackKeeper != nil {
-		if pt, err := s.mailFallbackKeeper.Unwrap(raw); err == nil {
-			return pt, nil
-		}
-	}
-	return "", ErrCorruptSecrets
 }
 
 func (s *Store) unwrapDockerRegistrySecret(blob string) (string, error) {
@@ -1301,60 +1222,6 @@ CREATE TABLE IF NOT EXISTS object_storage_profiles (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_object_storage_profiles_created ON object_storage_profiles(created_at DESC);
-CREATE TABLE IF NOT EXISTS mail_accounts (
-  id TEXT PRIMARY KEY,
-  domain_id TEXT NOT NULL,
-  local_part TEXT NOT NULL,
-  address TEXT NOT NULL UNIQUE,
-  display_name TEXT,
-  password_mode TEXT NOT NULL DEFAULT 'set',
-  quota_mb INTEGER DEFAULT 0,
-  is_admin INTEGER DEFAULT 0,
-  imap_sync_enabled INTEGER DEFAULT 1,
-  imap_sync_state TEXT DEFAULT 'idle',
-  imap_last_uidvalidity TEXT,
-  imap_last_uid TEXT,
-  imap_last_internaldate TEXT,
-  imap_error TEXT,
-  status TEXT NOT NULL DEFAULT 'active',
-  enabled INTEGER NOT NULL DEFAULT 1,
-  last_login_at TEXT,
-  created_at TEXT,
-  updated_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_mail_accounts_domain_id ON mail_accounts(domain_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_accounts_address ON mail_accounts(address);
-CREATE TABLE IF NOT EXISTS mail_aliases (
-  id TEXT PRIMARY KEY,
-  domain_id TEXT NOT NULL,
-  source TEXT NOT NULL,
-  recipients_csv TEXT NOT NULL,
-  mode TEXT NOT NULL DEFAULT 'alias',
-  list_name TEXT,
-  list_reply_to TEXT,
-  description TEXT,
-  enabled INTEGER DEFAULT 1,
-  created_at TEXT,
-  updated_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_mail_aliases_domain_id ON mail_aliases(domain_id);
-CREATE INDEX IF NOT EXISTS idx_mail_aliases_source ON mail_aliases(source);
-CREATE TABLE IF NOT EXISTS mail_import_registrations (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  data_dir TEXT NOT NULL,
-  config_path TEXT,
-  supervisor_type TEXT DEFAULT 'external',
-  read_only INTEGER NOT NULL DEFAULT 1,
-  probe_url TEXT,
-  access_token_wrapped TEXT,
-  status TEXT DEFAULT 'registered',
-  last_probe_at TEXT,
-  last_error TEXT,
-  version TEXT,
-  created_at TEXT,
-  updated_at TEXT
-);
 CREATE TABLE IF NOT EXISTS media_provider_settings (
   provider TEXT PRIMARY KEY,
   enabled INTEGER NOT NULL DEFAULT 1,
@@ -1510,7 +1377,7 @@ CREATE INDEX IF NOT EXISTS idx_media_assets_checksum ON media_assets(checksum_sh
 	if err := s.migrateStockAgent(ctx); err != nil {
 		return err
 	}
-	return s.migrateMail(ctx)
+	return nil
 }
 
 // migrateImageStorageToObjectProfile is an additive, idempotent migration. When
@@ -1859,985 +1726,6 @@ func (s *Store) CodexCliLegacyTablesDetected(ctx context.Context) ([]string, err
 	return found, nil
 }
 
-// migrateMail creates the additive mail_* schema for the Mox sidecar
-// control plane.  All CREATE TABLE statements are idempotent (IF NOT
-// EXISTS) and additive columns are installed via the same ensureColumn
-// helper used by the rest of storage.
-//
-// Design boundary: the Mail module stores only Phantom-owned metadata
-// (domains, accounts, aliases, certificates, runtime state, delivery
-// events, probe results, IMAP sync indices).  Actual MIME messages,
-// queue bodies, and Mox auto-generated files live on disk under
-// <data>/mail/mox/data and are NOT row-stored here.  This keeps SQLite
-// bounded in size.
-//
-// FTS5 note: mail_fts is an *external* contentless FTS5 table.  Inserts
-// / deletes are written from storage_mail.go's MailInsertMessage /
-// MailDeleteMessage helpers (they MUST be the only writers), NOT via
-// triggers, because contentless tables require the caller to supply the
-// rowid themselves.
-// stripFTS5 removes from sql every statement or statement-group that depends
-// on the SQLite FTS5 virtual-table module.  The goal is to keep the rest of
-// the mail schema bootable even when the binary was not compiled with the
-// -tags sqlite_fts5 build tag.  Removed regions:
-//
-//  1. Any block starting with a line matching `CREATE VIRTUAL TABLE ... USING
-//     fts5(` and ending at the next line whose trimmed content is `);` (the
-//     closing of the virtual-table declaration).
-//  2. Any block starting with a line matching `CREATE TRIGGER ...
-//     mail_messages_p7_(ai|au|ad)` and ending at the next bare `END;` line.
-//
-// The function is intentionally lenient about leading whitespace on every
-// line because the additive schema sections in migrateMail mix 0-indent and
-// 1-tab-indent SQL depending on which phase introduced the section.
-func stripFTS5(sql string) string {
-	lines := strings.Split(sql, "\n")
-	out := make([]string, 0, len(lines))
-	for i := 0; i < len(lines); i++ {
-		trimmed := strings.TrimLeft(lines[i], " \t")
-		// Case (1): virtual table start.
-		if strings.Contains(trimmed, "CREATE VIRTUAL TABLE") && strings.Contains(trimmed, "USING fts5") {
-			// Consume lines until we find one whose trimmed body is exactly ");".
-			for i < len(lines) {
-				if strings.TrimSpace(lines[i]) == ");" {
-					break
-				}
-				i++
-			}
-			// Don't emit the ");" line either — leave it out entirely.
-			continue
-		}
-		// Case (2): FTS5 p7 triggers (3 in a row, each starts with CREATE TRIGGER
-		// with the mail_messages_p7 prefix).
-		if strings.Contains(trimmed, "CREATE TRIGGER") &&
-			(strings.Contains(trimmed, "mail_messages_p7_ai") ||
-				strings.Contains(trimmed, "mail_messages_p7_au") ||
-				strings.Contains(trimmed, "mail_messages_p7_ad")) {
-			for i < len(lines) {
-				if strings.TrimSpace(lines[i]) == "END;" {
-					break
-				}
-				i++
-			}
-			continue
-		}
-		out = append(out, lines[i])
-	}
-	return strings.Join(out, "\n")
-}
-
-func (s *Store) migrateMail(ctx context.Context) error {
-	// The mail schema contains CREATE VIRTUAL TABLE ... USING fts5() statements
-	// plus FTS5-backed triggers.  These require the SQLite driver to be built
-	// with the -tags sqlite_fts5 build tag; without it the statements fail at
-	// Exec time.  We therefore split the schema into (a) a BASE schema that is
-	// always applied and (b) an FTS5-only schema that is applied only when
-	// the driver reports FTS5 available.  This lets tests and production
-	// binaries that omit the build tag still boot and operate (search falls
-	// back to LIKE).
-	baseSQL := `
-CREATE TABLE IF NOT EXISTS mail_mox_settings (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  phantom_instance_id TEXT NOT NULL DEFAULT '',
-  import_mode INTEGER NOT NULL DEFAULT 0,
-  import_label TEXT NOT NULL DEFAULT '',
-  config_mode TEXT NOT NULL DEFAULT 'managed',
-  desired_state TEXT NOT NULL DEFAULT 'stopped',
-  mox_binary_path TEXT NOT NULL DEFAULT '',
-  mox_data_dir TEXT NOT NULL DEFAULT '',
-  mox_config_path TEXT NOT NULL DEFAULT '',
-  webapi_endpoint TEXT NOT NULL DEFAULT '',
-  admin_email TEXT NOT NULL DEFAULT '',
-  hostname TEXT NOT NULL DEFAULT '',
-  smtp_port INTEGER NOT NULL DEFAULT 25,
-  smtp_submission_port INTEGER NOT NULL DEFAULT 587,
-  smtps_port INTEGER NOT NULL DEFAULT 465,
-  imap_port INTEGER NOT NULL DEFAULT 143,
-  imaps_port INTEGER NOT NULL DEFAULT 993,
-  webmail_addr TEXT NOT NULL DEFAULT '127.0.0.1:10444',
-  webapi_addr TEXT NOT NULL DEFAULT '127.0.0.1:10445',
-  acme_default_provider_id TEXT NOT NULL DEFAULT '',
-  queue_max_size_bytes INTEGER NOT NULL DEFAULT 1073741824,
-  queue_max_age_seconds INTEGER NOT NULL DEFAULT 2592000,
-  outbound_rate_limit_per_hour INTEGER NOT NULL DEFAULT 0,
-  retention_delivery_events_days INTEGER NOT NULL DEFAULT 90,
-  retention_health_checks_per_type INTEGER NOT NULL DEFAULT 100,
-  search_index_max_size_gb INTEGER NOT NULL DEFAULT 10,
-  dnsbl_enabled INTEGER NOT NULL DEFAULT 1,
-  dnsbl_providers_json TEXT NOT NULL DEFAULT '{}',
-  extra_capabilities_json TEXT NOT NULL DEFAULT '{}',
-  imapsync_enabled INTEGER NOT NULL DEFAULT 1,
-  imapsync_max_size_bytes INTEGER NOT NULL DEFAULT 10737418240,
-  imapsync_big_message_size_limit_bytes INTEGER NOT NULL DEFAULT 52428800,
-  imapsync_interval_attachment_cache_enabled INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS mail_domains (
-  id TEXT PRIMARY KEY,
-  domain TEXT NOT NULL UNIQUE,
-  enabled INTEGER NOT NULL DEFAULT 1,
-  dkim_selector TEXT NOT NULL DEFAULT 'default',
-  dkim_private_key_wrapped TEXT NOT NULL DEFAULT '',
-  dmarc_policy TEXT NOT NULL DEFAULT 'p=none',
-  dmarc_rua TEXT NOT NULL DEFAULT '',
-  spf_include TEXT NOT NULL DEFAULT '',
-  dns_provider_id TEXT NOT NULL DEFAULT '',
-  cert_id TEXT NOT NULL DEFAULT '',
-  synced INTEGER NOT NULL DEFAULT 0,
-  last_synced_at TEXT NOT NULL DEFAULT '',
-  last_sync_error TEXT NOT NULL DEFAULT '',
-  last_dns_check_at TEXT NOT NULL DEFAULT '',
-  dns_check_json TEXT NOT NULL DEFAULT '{}',
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_mail_domains_enabled ON mail_domains(enabled, updated_at DESC);
-CREATE TABLE IF NOT EXISTS mail_accounts (
-  id TEXT PRIMARY KEY,
-  email TEXT NOT NULL UNIQUE,
-  display_name TEXT NOT NULL DEFAULT '',
-  recovery_email TEXT NOT NULL DEFAULT '',
-  storage_limit_mb INTEGER NOT NULL DEFAULT 0,
-  enabled INTEGER NOT NULL DEFAULT 1,
-  role TEXT NOT NULL DEFAULT 'user',
-  import_mode_read_only INTEGER NOT NULL DEFAULT 0,
-  synced INTEGER NOT NULL DEFAULT 0,
-  last_synced_at TEXT NOT NULL DEFAULT '',
-  last_sync_error TEXT NOT NULL DEFAULT '',
-  last_password_changed_at TEXT NOT NULL DEFAULT '',
-  sync_state TEXT NOT NULL DEFAULT 'idle',
-  sync_folder_stats_json TEXT NOT NULL DEFAULT '{}',
-  sync_last_uid_json TEXT NOT NULL DEFAULT '{}',
-  sync_last_run_at TEXT NOT NULL DEFAULT '',
-  sync_next_run_at TEXT NOT NULL DEFAULT '',
-  sync_error TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_mail_accounts_enabled ON mail_accounts(enabled, updated_at DESC);
-CREATE TABLE IF NOT EXISTS mail_addresses (
-  id TEXT PRIMARY KEY,
-  account_id TEXT NOT NULL,
-  localpart TEXT NOT NULL DEFAULT '',
-  domain TEXT NOT NULL,
-  address TEXT NOT NULL UNIQUE,
-  kind TEXT NOT NULL DEFAULT 'primary',
-  enabled INTEGER NOT NULL DEFAULT 1,
-  synced INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_mail_addresses_account ON mail_addresses(account_id, kind);
-CREATE INDEX IF NOT EXISTS idx_mail_addresses_domain ON mail_addresses(domain);
-CREATE TABLE IF NOT EXISTS mail_aliases (
-  id TEXT PRIMARY KEY,
-  alias_address TEXT NOT NULL UNIQUE,
-  description TEXT NOT NULL DEFAULT '',
-  mode TEXT NOT NULL DEFAULT 'standard',
-  enabled INTEGER NOT NULL DEFAULT 1,
-  synced INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_mail_aliases_enabled ON mail_aliases(enabled);
-CREATE TABLE IF NOT EXISTS mail_alias_recipients (
-  id TEXT PRIMARY KEY,
-  alias_id TEXT NOT NULL,
-  recipient_address TEXT NOT NULL,
-  position INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  UNIQUE (alias_id, recipient_address)
-);
-CREATE INDEX IF NOT EXISTS idx_mail_alias_recipients_alias ON mail_alias_recipients(alias_id, position);
-CREATE TABLE IF NOT EXISTS mail_certificates (
-  id TEXT PRIMARY KEY,
-  domain TEXT NOT NULL UNIQUE,
-  issuer TEXT NOT NULL DEFAULT '',
-  serial TEXT NOT NULL DEFAULT '',
-  not_before TEXT NOT NULL DEFAULT '',
-  not_after TEXT NOT NULL DEFAULT '',
-  pem_chain TEXT NOT NULL DEFAULT '',
-  dns_provider_id TEXT NOT NULL DEFAULT '',
-  last_renewal_attempt TEXT NOT NULL DEFAULT '',
-  next_renewal TEXT NOT NULL DEFAULT '',
-  last_error TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_mail_certificates_expiry ON mail_certificates(not_after);
-CREATE INDEX IF NOT EXISTS idx_mail_certificates_next_renewal ON mail_certificates(next_renewal);
-CREATE TABLE IF NOT EXISTS mail_dns_providers (
-  id TEXT PRIMARY KEY,
-  label TEXT NOT NULL,
-  kind TEXT NOT NULL DEFAULT 'manual',
-  api_endpoint TEXT NOT NULL DEFAULT '',
-  zone_id TEXT NOT NULL DEFAULT '',
-  api_credentials_wrapped TEXT NOT NULL DEFAULT '',
-  last_tested_at TEXT NOT NULL DEFAULT '',
-  last_error TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS mail_runtime_state (
-  id TEXT PRIMARY KEY,
-  pid INTEGER NOT NULL DEFAULT 0,
-  start_time_ns INTEGER NOT NULL DEFAULT 0,
-  boot_id TEXT NOT NULL DEFAULT '',
-  binary_path TEXT NOT NULL DEFAULT '',
-  binary_version TEXT NOT NULL DEFAULT '',
-  binary_checksum_sha256 TEXT NOT NULL DEFAULT '',
-  config_hash_sha256 TEXT NOT NULL DEFAULT '',
-  config_drifted INTEGER NOT NULL DEFAULT 0,
-  drift_detected_at TEXT NOT NULL DEFAULT '',
-  observed_state TEXT NOT NULL DEFAULT 'unknown',
-  observed_at TEXT NOT NULL DEFAULT '',
-  last_exit_code INTEGER NOT NULL DEFAULT 0,
-  last_exit_at TEXT NOT NULL DEFAULT '',
-  last_error TEXT NOT NULL DEFAULT '',
-  crash_loop_state TEXT NOT NULL DEFAULT 'stable',
-  crash_loop_backoff_until TEXT NOT NULL DEFAULT '',
-  crash_loop_stable_since TEXT NOT NULL DEFAULT '',
-  consecutive_crashes INTEGER NOT NULL DEFAULT 0,
-  probes_json TEXT NOT NULL DEFAULT '{}',
-  updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS mail_mox_health_checks (
-  id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,
-  scope TEXT NOT NULL DEFAULT '',
-  scope_id TEXT NOT NULL DEFAULT '',
-  level TEXT NOT NULL DEFAULT 'L1',
-  status TEXT NOT NULL DEFAULT 'unknown',
-  severity TEXT NOT NULL DEFAULT 'neutral',
-  summary TEXT NOT NULL DEFAULT '',
-  payload_json TEXT NOT NULL DEFAULT '{}',
-  error_message TEXT NOT NULL DEFAULT '',
-  started_at TEXT NOT NULL,
-  completed_at TEXT NOT NULL DEFAULT '',
-  duration_ms INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_mail_health_kind ON mail_mox_health_checks(kind, started_at DESC, severity);
-CREATE INDEX IF NOT EXISTS idx_mail_health_scope ON mail_mox_health_checks(scope, scope_id, started_at DESC);
-CREATE TABLE IF NOT EXISTS mail_delivery_events (
-  id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,
-  direction TEXT NOT NULL,
-  from_domain TEXT NOT NULL DEFAULT '',
-  to_domain TEXT NOT NULL DEFAULT '',
-  message_id_hash_sha256 TEXT NOT NULL DEFAULT '',
-  subject_snippet TEXT NOT NULL DEFAULT '',
-  smtp_code INTEGER NOT NULL DEFAULT 0,
-  smtp_enhanced_code TEXT NOT NULL DEFAULT '',
-  redacted_error TEXT NOT NULL DEFAULT '',
-  queue_id TEXT NOT NULL DEFAULT '',
-  remote_mx TEXT NOT NULL DEFAULT '',
-  attempt INTEGER NOT NULL DEFAULT 1,
-  status TEXT NOT NULL DEFAULT 'pending',
-  recipient_hash TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_mail_delivery_time ON mail_delivery_events(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_mail_delivery_kind ON mail_delivery_events(kind, created_at DESC);
-CREATE TABLE IF NOT EXISTS mail_queue_entries (
-  id TEXT PRIMARY KEY,
-  queue_id TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  from_domain TEXT NOT NULL DEFAULT '',
-  recipient TEXT NOT NULL DEFAULT '',
-  subject_snippet TEXT NOT NULL DEFAULT '',
-  size_bytes INTEGER NOT NULL DEFAULT 0,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  next_attempt_at TEXT NOT NULL DEFAULT '',
-  last_error_snippet TEXT NOT NULL DEFAULT '',
-  state TEXT NOT NULL DEFAULT 'hold',
-  synced INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_mail_queue_state ON mail_queue_entries(state, next_attempt_at);
-CREATE TABLE IF NOT EXISTS mail_suppressions (
-  id TEXT PRIMARY KEY,
-  address TEXT NOT NULL UNIQUE,
-  recipient_hash TEXT NOT NULL DEFAULT '',
-  reason TEXT NOT NULL DEFAULT '',
-  source TEXT NOT NULL DEFAULT 'manual',
-  expires_at TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS mail_webhooks (
-  id TEXT PRIMARY KEY,
-  direction TEXT NOT NULL,
-  name TEXT NOT NULL,
-  url TEXT NOT NULL,
-  hmac_secret_wrapped TEXT NOT NULL DEFAULT '',
-  events_json TEXT NOT NULL DEFAULT '[]',
-  enabled INTEGER NOT NULL DEFAULT 1,
-  last_delivery_at TEXT NOT NULL DEFAULT '',
-  last_error TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS mail_messages (
-  id TEXT PRIMARY KEY,
-  account_id TEXT NOT NULL,
-  folder_name TEXT NOT NULL,
-  imap_uidvalidity INTEGER NOT NULL DEFAULT 0,
-  imap_uid INTEGER NOT NULL DEFAULT 0,
-  message_id_header TEXT NOT NULL DEFAULT '',
-  in_reply_to TEXT NOT NULL DEFAULT '',
-  "references" TEXT NOT NULL DEFAULT '',
-  from_addresses_json TEXT NOT NULL DEFAULT '[]',
-  to_addresses_json TEXT NOT NULL DEFAULT '[]',
-  cc_addresses_json TEXT NOT NULL DEFAULT '[]',
-  bcc_addresses_json TEXT NOT NULL DEFAULT '[]',
-  reply_to_json TEXT NOT NULL DEFAULT '[]',
-  subject TEXT NOT NULL DEFAULT '',
-  internal_date TEXT NOT NULL DEFAULT '',
-  received_at TEXT NOT NULL DEFAULT '',
-  size_bytes INTEGER NOT NULL DEFAULT 0,
-  seen INTEGER NOT NULL DEFAULT 0,
-  flagged INTEGER NOT NULL DEFAULT 0,
-  answered INTEGER NOT NULL DEFAULT 0,
-  deleted INTEGER NOT NULL DEFAULT 0,
-  draft INTEGER NOT NULL DEFAULT 0,
-  extra_flags_json TEXT NOT NULL DEFAULT '[]',
-  preview_plain_text TEXT NOT NULL DEFAULT '',
-  attachments_json TEXT NOT NULL DEFAULT '[]',
-  raw_available INTEGER NOT NULL DEFAULT 1,
-  sync_checkpoint TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_mail_messages_folder ON mail_messages(account_id, folder_name, imap_uidvalidity, imap_uid);
-CREATE INDEX IF NOT EXISTS idx_mail_messages_date ON mail_messages(account_id, received_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_messages_imap_key ON mail_messages(account_id, folder_name, imap_uidvalidity, imap_uid);
-CREATE VIRTUAL TABLE IF NOT EXISTS mail_fts USING fts5(
-  subject,
-  body,
-  sender_name,
-  sender_addr,
-  recipient_addr,
-  content='',
-  tokenize='unicode61 remove_diacritics 2'
-);
-CREATE TABLE IF NOT EXISTS mail_folders (
-  id TEXT PRIMARY KEY,
-  account_id TEXT NOT NULL,
-  name TEXT NOT NULL,
-  delimiter TEXT NOT NULL DEFAULT '/',
-  parent_id TEXT NOT NULL DEFAULT '',
-  role TEXT NOT NULL DEFAULT '',
-  type TEXT NOT NULL DEFAULT 'custom',   -- inbox/sent/drafts/trash/archive/custom
-  uid_next TEXT NOT NULL DEFAULT '1',
-  uid_validity TEXT NOT NULL DEFAULT '1',
-  total_messages INTEGER NOT NULL DEFAULT 0,
-  unread_messages INTEGER NOT NULL DEFAULT 0,
-  flagged_messages INTEGER NOT NULL DEFAULT 0,
-  deleted_messages INTEGER NOT NULL DEFAULT 0,
-  subscribed INTEGER NOT NULL DEFAULT 1,
-  selectable INTEGER NOT NULL DEFAULT 1,
-  unread_count INTEGER NOT NULL DEFAULT 0,
-  total_count INTEGER NOT NULL DEFAULT 0,
-  highest_mod_seq INTEGER,
-  last_synced_at TEXT NOT NULL DEFAULT '',
-  last_sync_error TEXT NOT NULL DEFAULT '',
-  sync_checkpoint TEXT,
-  sync_state TEXT NOT NULL DEFAULT 'idle',
-  attributes_json TEXT NOT NULL DEFAULT '[]',
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  UNIQUE(account_id, name)
-);
-CREATE INDEX IF NOT EXISTS idx_mail_folders_account ON mail_folders(account_id);
-CREATE TABLE IF NOT EXISTS mail_drafts (
-  id TEXT PRIMARY KEY,
-  account_id TEXT NOT NULL,
-  subject TEXT,
-  from_addresses_json TEXT,
-  to_addresses_json TEXT,
-  cc_addresses_json TEXT,
-  bcc_addresses_json TEXT,
-  reply_to_addresses_json TEXT,
-  body_html TEXT,
-  body_text TEXT,
-  attachments_json TEXT,
-  in_reply_to TEXT,
-  message_id_header TEXT,
-  saved_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_mail_drafts_account ON mail_drafts(account_id);
-CREATE TABLE IF NOT EXISTS mail_backups (
-  id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,
-  archive_path TEXT NOT NULL DEFAULT '',
-  size_bytes INTEGER NOT NULL DEFAULT 0,
-  checksum_sha256 TEXT NOT NULL DEFAULT '',
-  include_data INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'pending',
-  error_message TEXT NOT NULL DEFAULT '',
-  started_at TEXT NOT NULL,
-  completed_at TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_mail_backups_created ON mail_backups(created_at DESC);
-CREATE TABLE IF NOT EXISTS mail_import_registry (
-  id TEXT PRIMARY KEY,
-  label TEXT NOT NULL DEFAULT '',
-  mox_data_dir TEXT NOT NULL,
-  mox_config_path TEXT NOT NULL,
-  mode TEXT NOT NULL DEFAULT 'read_only',
-  webapi_endpoint TEXT NOT NULL DEFAULT '',
-  last_connected_at TEXT NOT NULL DEFAULT '',
-  last_error TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-	-- Phase 4: certmanager tables.  mail_certificates and mail_dns_providers
-	-- are defined earlier in migrateMail() with the slim schema matching CRUD.
-	-- Missing columns on older installations are added via ensureColumn below.
-	CREATE TABLE IF NOT EXISTS mail_dns_providers (
-	  id TEXT PRIMARY KEY,
-	  kind TEXT NOT NULL DEFAULT 'manual',
-	  display_name TEXT NOT NULL DEFAULT '',
-	  config_json TEXT NOT NULL DEFAULT '',
-	  created_at TEXT NOT NULL,
-	  updated_at TEXT NOT NULL
-	);
-	CREATE TABLE IF NOT EXISTS mail_manual_challenges (
-	  id TEXT PRIMARY KEY,
-	  domain TEXT NOT NULL DEFAULT '',
-	  fqdn TEXT NOT NULL UNIQUE,
-	  value TEXT NOT NULL DEFAULT '',
-	  status TEXT NOT NULL DEFAULT 'pending',
-	  created_at TEXT NOT NULL DEFAULT '',
-	  expires_at TEXT NOT NULL DEFAULT ''
-	);
-	CREATE INDEX IF NOT EXISTS idx_mail_manual_challenges_status ON mail_manual_challenges(status, created_at);
-	-- Phase 6: webhook + delivery + queue + suppression + rate + DNSBL schema.
-	CREATE TABLE IF NOT EXISTS mail_webhook_registrations (
-	  id TEXT PRIMARY KEY,
-	  name TEXT NOT NULL,
-	  direction TEXT NOT NULL DEFAULT 'in',
-	  url TEXT NOT NULL DEFAULT '',
-	  wrapped_secret TEXT NOT NULL DEFAULT '',
-	  signing_alg TEXT NOT NULL DEFAULT 'hmac-sha256',
-	  source_cidr TEXT NOT NULL DEFAULT '127.0.0.1/32,::1/128',
-	  max_body_bytes INTEGER NOT NULL DEFAULT 1048576,
-	  timestamp_skew_seconds INTEGER NOT NULL DEFAULT 900,
-	  event_mask TEXT NOT NULL DEFAULT '*',
-	  enabled INTEGER NOT NULL DEFAULT 1,
-	  created_at TEXT NOT NULL,
-	  updated_at TEXT NOT NULL
-	);
-	CREATE TABLE IF NOT EXISTS mail_webhook_events (
-	  id TEXT PRIMARY KEY,
-	  registration_id TEXT NOT NULL DEFAULT '',
-	  direction TEXT NOT NULL DEFAULT 'in',
-	  event_type TEXT NOT NULL DEFAULT '',
-	  payload_hash TEXT NOT NULL DEFAULT '',
-	  payload_size INTEGER NOT NULL DEFAULT 0,
-	  source_addr TEXT NOT NULL DEFAULT '',
-	  hmac_valid INTEGER NOT NULL DEFAULT 0,
-	  timestamp_skew_ms INTEGER NOT NULL DEFAULT 0,
-	  status TEXT NOT NULL DEFAULT 'received',
-	  error_reason TEXT NOT NULL DEFAULT '',
-	  created_at TEXT NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_mail_webhook_events_registration ON mail_webhook_events(registration_id);
-	CREATE INDEX IF NOT EXISTS idx_mail_webhook_events_type ON mail_webhook_events(event_type);
-	CREATE INDEX IF NOT EXISTS idx_mail_webhook_events_created ON mail_webhook_events(created_at DESC);
-	CREATE TABLE IF NOT EXISTS mail_delivery_events (
-	  id TEXT PRIMARY KEY,
-	  from_domain TEXT NOT NULL DEFAULT '',
-	  to_domain TEXT NOT NULL DEFAULT '',
-	  message_id_hash TEXT NOT NULL DEFAULT '',
-	  subject_snippet TEXT NOT NULL DEFAULT '',
-	  direction TEXT NOT NULL DEFAULT 'out',
-	  smtp_code INTEGER NOT NULL DEFAULT 0,
-	  smtp_enhanced TEXT NOT NULL DEFAULT '',
-	  redacted_error TEXT NOT NULL DEFAULT '',
-	  status TEXT NOT NULL DEFAULT 'pending',
-	  attempt_count INTEGER NOT NULL DEFAULT 0,
-	  first_attempt_at TEXT NOT NULL DEFAULT '',
-	  last_attempt_at TEXT NOT NULL DEFAULT '',
-	  completed_at TEXT NOT NULL DEFAULT '',
-	  recipient_hash TEXT NOT NULL DEFAULT '',
-	  queue_msg_id INTEGER NOT NULL DEFAULT 0,
-	  from_id TEXT NOT NULL DEFAULT '',
-	  created_at TEXT NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_mail_delivery_status ON mail_delivery_events(status);
-	CREATE INDEX IF NOT EXISTS idx_mail_delivery_from_domain ON mail_delivery_events(from_domain);
-	CREATE INDEX IF NOT EXISTS idx_mail_delivery_to_domain ON mail_delivery_events(to_domain);
-	CREATE INDEX IF NOT EXISTS idx_mail_delivery_created ON mail_delivery_events(created_at DESC);
-	CREATE TABLE IF NOT EXISTS mail_queue_summary (
-	  bucket TEXT PRIMARY KEY,
-	  count INTEGER NOT NULL DEFAULT 0,
-	  last_updated TEXT NOT NULL
-	);
-	CREATE TABLE IF NOT EXISTS mail_suppressions (
-	  id TEXT PRIMARY KEY,
-	  recipient_hash TEXT NOT NULL UNIQUE,
-	  domain_id TEXT NOT NULL DEFAULT '',
-	  reason TEXT NOT NULL DEFAULT '',
-	  smtp_code INTEGER NOT NULL DEFAULT 0,
-	  source TEXT NOT NULL DEFAULT '',
-	  added_at TEXT NOT NULL DEFAULT '',
-	  expires_at TEXT NOT NULL DEFAULT '',
-	  active INTEGER NOT NULL DEFAULT 1,
-	  created_at TEXT NOT NULL
-	);
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_suppressions_recipient ON mail_suppressions(recipient_hash);
-	CREATE TABLE IF NOT EXISTS mail_outbound_rate_counters (
-	  scope TEXT NOT NULL,
-	  window TEXT NOT NULL,
-	  window_start TEXT NOT NULL,
-	  count INTEGER NOT NULL DEFAULT 0,
-	  bytes INTEGER NOT NULL DEFAULT 0,
-	  failed INTEGER NOT NULL DEFAULT 0,
-	  PRIMARY KEY (scope, window, window_start)
-	) WITHOUT ROWID;
-	CREATE TABLE IF NOT EXISTS mail_outbound_thresholds (
-	  scope TEXT PRIMARY KEY,
-	  send_1m_warn INTEGER NOT NULL DEFAULT 1000,
-	  send_1m_crit INTEGER NOT NULL DEFAULT 5000,
-	  send_1h_warn INTEGER NOT NULL DEFAULT 50000,
-	  send_1h_crit INTEGER NOT NULL DEFAULT 200000,
-	  bounce_rate_pct_warn REAL NOT NULL DEFAULT 5.0,
-	  bounce_rate_pct_crit REAL NOT NULL DEFAULT 20.0,
-	  updated_at TEXT NOT NULL
-	);
-	-- Phase 7: IMAP sync folders, messages, FTS5, search-index health.
-	-- mail_folders is defined earlier in migrateMail() with the union schema.
-	-- Indexes on upgraded columns are declared below (post-ensureColumn).
-	CREATE TABLE IF NOT EXISTS mail_message_parts (
-	  id TEXT PRIMARY KEY,
-	  folder_id TEXT NOT NULL,
-	  message_id TEXT NOT NULL,
-	  part_id TEXT NOT NULL DEFAULT '',
-	  content_type TEXT NOT NULL DEFAULT 'text/plain',
-	  content_transfer_encoding TEXT NOT NULL DEFAULT '',
-	  charset TEXT NOT NULL DEFAULT '',
-	  filename TEXT NOT NULL DEFAULT '',
-	  content_id TEXT NOT NULL DEFAULT '',
-	  disposition TEXT NOT NULL DEFAULT '',
-	  size_bytes INTEGER NOT NULL DEFAULT 0,
-	  body_cache_path TEXT NOT NULL DEFAULT '',
-	  body_hash_sha256 TEXT NOT NULL DEFAULT '',
-	  decoded_text TEXT NOT NULL DEFAULT '',
-	  is_attachment INTEGER NOT NULL DEFAULT 0,
-	  is_inline INTEGER NOT NULL DEFAULT 0,
-	  created_at TEXT NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_mail_message_parts_message ON mail_message_parts(message_id);
-	CREATE INDEX IF NOT EXISTS idx_mail_message_parts_folder ON mail_message_parts(folder_id);
-	CREATE VIRTUAL TABLE IF NOT EXISTS mail_fts5 USING fts5(
-	  subject,
-	  body,
-	  sender_name,
-	  sender_addr,
-	  recipient_addr,
-	  content='mail_message_parts',
-	  content_rowid='rowid',
-	  tokenize='unicode61 remove_diacritics 2'
-	);
-	CREATE TABLE IF NOT EXISTS mail_search_index_health (
-	  account_id TEXT PRIMARY KEY,
-	  messages_indexed INTEGER NOT NULL DEFAULT 0,
-	  messages_pending INTEGER NOT NULL DEFAULT 0,
-	  messages_missing INTEGER NOT NULL DEFAULT 0,
-	  attachments_indexed INTEGER NOT NULL DEFAULT 0,
-	  attachments_pending INTEGER NOT NULL DEFAULT 0,
-	  index_size_bytes INTEGER NOT NULL DEFAULT 0,
-	  last_rebuild_at TEXT NOT NULL DEFAULT '',
-	  last_optimize_at TEXT NOT NULL DEFAULT '',
-	  last_verify_at TEXT NOT NULL DEFAULT '',
-	  last_error TEXT NOT NULL DEFAULT '',
-	  status TEXT NOT NULL DEFAULT 'healthy',
-	  updated_at TEXT NOT NULL
-	);
-	-- ==== Phase 7 (revised IMAP sync + FTS5 search schema) ====
-	CREATE TABLE IF NOT EXISTS mail_folders_p7 (
-	  id TEXT PRIMARY KEY,
-	  account_id TEXT NOT NULL,
-	  name TEXT NOT NULL,
-	  path TEXT NOT NULL DEFAULT '',
-	  delim TEXT NOT NULL DEFAULT '/',
-	  attributes_csv TEXT NOT NULL DEFAULT '',
-	  uid_validity TEXT NOT NULL DEFAULT '',
-	  uid_next INTEGER NOT NULL DEFAULT 1,
-	  total_messages INTEGER NOT NULL DEFAULT 0,
-	  unseen_count INTEGER NOT NULL DEFAULT 0,
-	  subscribed INTEGER NOT NULL DEFAULT 1,
-	  last_synced_at TEXT NOT NULL DEFAULT '',
-	  imap_error TEXT NOT NULL DEFAULT '',
-	  created_at TEXT NOT NULL,
-	  updated_at TEXT NOT NULL,
-	  UNIQUE(account_id, path)
-	);
-	CREATE INDEX IF NOT EXISTS idx_mail_folders_p7_account_id ON mail_folders_p7(account_id);
-	CREATE TABLE IF NOT EXISTS mail_messages_p7 (
-	  id TEXT PRIMARY KEY,
-	  account_id TEXT NOT NULL,
-	  folder_id TEXT NOT NULL,
-	  uid INTEGER NOT NULL,
-	  mox_msg_id INTEGER NOT NULL DEFAULT 0,
-	  message_id_hash TEXT NOT NULL DEFAULT '',
-	  subject TEXT NOT NULL DEFAULT '',
-	  from_list_csv TEXT NOT NULL DEFAULT '',
-	  to_list_csv TEXT NOT NULL DEFAULT '',
-	  cc_list_csv TEXT NOT NULL DEFAULT '',
-	  bcc_list_csv TEXT NOT NULL DEFAULT '',
-	  reply_to_csv TEXT NOT NULL DEFAULT '',
-	  date_sent TEXT NOT NULL DEFAULT '',
-	  internaldate TEXT NOT NULL DEFAULT '',
-	  flags_csv TEXT NOT NULL DEFAULT '',
-	  size_bytes INTEGER NOT NULL DEFAULT 0,
-	  has_attachment INTEGER NOT NULL DEFAULT 0,
-	  attachments_json TEXT NOT NULL DEFAULT '[]',
-	  preview_text TEXT NOT NULL DEFAULT '',
-	  body_text TEXT NOT NULL DEFAULT '',
-	  charset TEXT NOT NULL DEFAULT 'utf-8',
-	  created_at TEXT NOT NULL,
-	  updated_at TEXT NOT NULL,
-	  UNIQUE(account_id, folder_id, uid)
-	);
-	CREATE INDEX IF NOT EXISTS idx_mail_messages_p7_account_date ON mail_messages_p7(account_id, date_sent);
-	CREATE INDEX IF NOT EXISTS idx_mail_messages_p7_folder_uid ON mail_messages_p7(folder_id, uid);
-	CREATE INDEX IF NOT EXISTS idx_mail_messages_p7_message_id_hash ON mail_messages_p7(message_id_hash);
-	CREATE INDEX IF NOT EXISTS idx_mail_messages_p7_folder_date ON mail_messages_p7(folder_id, date_sent);
-	CREATE VIRTUAL TABLE IF NOT EXISTS mail_fts5_p7 USING fts5(
-	  subject,
-	  from_list,
-	  to_list,
-	  body_text,
-	  preview_text,
-	  tokenize='unicode61 remove_diacritics 2'
-	);
-	CREATE TRIGGER IF NOT EXISTS mail_messages_p7_ai AFTER INSERT ON mail_messages_p7 BEGIN
-	  INSERT INTO mail_fts5_p7(rowid, subject, from_list, to_list, body_text, preview_text)
-	    VALUES (new.rowid, new.subject, new.from_list_csv, new.to_list_csv, new.body_text, new.preview_text);
-	END;
-	CREATE TRIGGER IF NOT EXISTS mail_messages_p7_au AFTER UPDATE ON mail_messages_p7 BEGIN
-	  DELETE FROM mail_fts5_p7 WHERE rowid = old.rowid;
-	  INSERT INTO mail_fts5_p7(rowid, subject, from_list, to_list, body_text, preview_text)
-	    VALUES (new.rowid, new.subject, new.from_list_csv, new.to_list_csv, new.body_text, new.preview_text);
-	END;
-	CREATE TRIGGER IF NOT EXISTS mail_messages_p7_ad AFTER DELETE ON mail_messages_p7 BEGIN
-	  DELETE FROM mail_fts5_p7 WHERE rowid = old.rowid;
-	END;
-	CREATE TABLE IF NOT EXISTS mail_index_health_p7 (
-	  account_id TEXT PRIMARY KEY,
-	  total_messages INTEGER NOT NULL DEFAULT 0,
-	  total_size_bytes INTEGER NOT NULL DEFAULT 0,
-	  sync_state TEXT NOT NULL DEFAULT 'idle',
-	  last_full_sync_at TEXT NOT NULL DEFAULT '',
-	  last_incr_sync_at TEXT NOT NULL DEFAULT '',
-	  last_error TEXT NOT NULL DEFAULT '',
-	  updated_at TEXT NOT NULL
-	);
-	-- ==== Phase 8: backup schedules, retention rules.
-	CREATE TABLE IF NOT EXISTS mail_backup_schedules (
-	  id TEXT PRIMARY KEY,
-	  name TEXT NOT NULL DEFAULT '',
-	  scope TEXT NOT NULL DEFAULT 'global',
-	  scope_id TEXT NOT NULL DEFAULT '',
-	  schedule_kind TEXT NOT NULL DEFAULT 'full',
-	  cadence_cron TEXT NOT NULL DEFAULT '0 3 * * 0',
-	  cron_expression TEXT NOT NULL DEFAULT '',
-	  timezone TEXT NOT NULL DEFAULT 'UTC',
-	  keep_revisions INTEGER NOT NULL DEFAULT 0,
-	  retention_days INTEGER NOT NULL DEFAULT 30,
-	  contains_config INTEGER NOT NULL DEFAULT 1,
-	  contains_data INTEGER NOT NULL DEFAULT 1,
-	  encryption_mode TEXT NOT NULL DEFAULT 'none',
-	  encrypt_password_hash TEXT NOT NULL DEFAULT '',
-	  storage_target TEXT NOT NULL DEFAULT '',
-	  target_url TEXT NOT NULL DEFAULT '',
-	  target_credentials_json TEXT NOT NULL DEFAULT '',
-	  pre_run_hook TEXT NOT NULL DEFAULT '',
-	  post_run_hook TEXT NOT NULL DEFAULT '',
-	  next_run_at TEXT NOT NULL DEFAULT '',
-	  last_run_at TEXT NOT NULL DEFAULT '',
-	  last_status TEXT NOT NULL DEFAULT '',
-	  last_backup_id TEXT NOT NULL DEFAULT '',
-	  last_error TEXT NOT NULL DEFAULT '',
-	  note TEXT NOT NULL DEFAULT '',
-	  enabled INTEGER NOT NULL DEFAULT 1,
-	  paused INTEGER NOT NULL DEFAULT 0,
-	  created_at TEXT NOT NULL,
-	  updated_at TEXT NOT NULL,
-	  UNIQUE(scope, scope_id, schedule_kind)
-	);
-	CREATE INDEX IF NOT EXISTS idx_mail_backup_schedules_enabled ON mail_backup_schedules(enabled);
-	CREATE INDEX IF NOT EXISTS idx_mail_backup_schedules_scope ON mail_backup_schedules(scope, scope_id);
-	CREATE INDEX IF NOT EXISTS idx_mail_backup_schedules_next ON mail_backup_schedules(next_run_at);
-	CREATE TABLE IF NOT EXISTS mail_retention_rules (
-	  id TEXT PRIMARY KEY,
-	  name TEXT NOT NULL DEFAULT '',
-	  rule_kind TEXT NOT NULL DEFAULT 'custom',
-	  target_kind TEXT NOT NULL DEFAULT 'delivery_events',
-	  scope TEXT NOT NULL DEFAULT 'global',
-	  scope_id TEXT NOT NULL DEFAULT '',
-	  category TEXT NOT NULL DEFAULT 'all',
-	  days INTEGER NOT NULL DEFAULT 90,
-	  keep_min_count INTEGER NOT NULL DEFAULT 0,
-	  prune_empty_folders INTEGER NOT NULL DEFAULT 0,
-	  hard_delete INTEGER NOT NULL DEFAULT 0,
-	  enabled INTEGER NOT NULL DEFAULT 1,
-	  description TEXT NOT NULL DEFAULT '',
-	  note TEXT NOT NULL DEFAULT '',
-	  last_run_at TEXT NOT NULL DEFAULT '',
-	  last_pruned_count INTEGER NOT NULL DEFAULT 0,
-	  last_pruned_at TEXT NOT NULL DEFAULT '',
-	  last_error TEXT NOT NULL DEFAULT '',
-	  created_at TEXT NOT NULL,
-	  updated_at TEXT NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_mail_retention_enabled ON mail_retention_rules(enabled);
-	-- ==== Phase 8 Part A: detailed retention rules, backup artifacts, schedules ====
-	CREATE TABLE IF NOT EXISTS mail_log_retention_rules (
-	  id TEXT PRIMARY KEY,
-	  scope TEXT NOT NULL DEFAULT 'global',
-	  scope_id TEXT NOT NULL DEFAULT '',
-	  category TEXT NOT NULL DEFAULT 'all',
-	  keep_days INTEGER NOT NULL DEFAULT 0,
-	  prune_empty_folders INTEGER NOT NULL DEFAULT 0,
-	  hard_delete INTEGER NOT NULL DEFAULT 0,
-	  note TEXT NOT NULL DEFAULT '',
-	  enabled INTEGER NOT NULL DEFAULT 1,
-	  last_pruned_at TEXT NOT NULL DEFAULT '',
-	  created_at TEXT NOT NULL,
-	  updated_at TEXT NOT NULL,
-	  UNIQUE(scope, scope_id, category)
-	);
-	CREATE INDEX IF NOT EXISTS idx_mail_log_retention_scope ON mail_log_retention_rules(scope, scope_id);
-	CREATE TABLE IF NOT EXISTS mail_backups_new (
-	  id TEXT PRIMARY KEY,
-	  scope TEXT NOT NULL DEFAULT 'global',
-	  scope_id TEXT NOT NULL DEFAULT '',
-	  kind TEXT NOT NULL DEFAULT 'full',
-	  display_name TEXT NOT NULL DEFAULT '',
-	  file_path TEXT NOT NULL DEFAULT '',
-	  file_size_bytes INTEGER NOT NULL DEFAULT 0,
-	  checksum_sha256 TEXT NOT NULL DEFAULT '',
-	  contains_config INTEGER NOT NULL DEFAULT 0,
-	  contains_data INTEGER NOT NULL DEFAULT 0,
-	  encryption_mode TEXT NOT NULL DEFAULT 'none',
-	  note TEXT NOT NULL DEFAULT '',
-	  status TEXT NOT NULL DEFAULT 'pending',
-	  error_message TEXT NOT NULL DEFAULT '',
-	  created_by TEXT NOT NULL DEFAULT '',
-	  expires_at TEXT NOT NULL DEFAULT '',
-	  started_at TEXT NOT NULL DEFAULT '',
-	  completed_at TEXT NOT NULL DEFAULT '',
-	  created_at TEXT NOT NULL,
-	  updated_at TEXT NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_mail_backups_new_scope ON mail_backups_new(scope, scope_id);
-	CREATE INDEX IF NOT EXISTS idx_mail_backups_new_created ON mail_backups_new(created_at);
-	CREATE INDEX IF NOT EXISTS idx_mail_backups_new_expires ON mail_backups_new(expires_at);
-	-- (mail_backup_schedules is defined earlier in this block with the union schema;
-	-- its indexes are also declared there to avoid ordering issues.)
-`
-	// stripFTS5 removes every CREATE VIRTUAL TABLE ... USING fts5() block and
-	// every trigger that references mail_fts5_p7 from the schema SQL.  These
-	// statements require the FTS5 compile-time module which is only present
-	// when the binary is built with -tags sqlite_fts5.  Stripping them is
-	// preferable to matching them exactly (which would be brittle against
-	// differing leading whitespace between Phase 1-5 and Phase 6-8 sections).
-	//
-	// NOTE: we probe availability FIRST, strip only when the probe reports
-	// false.  Modern builds of go-sqlite3 on macos ship the FTS5 loadable
-	// extension compiled-in without needing the -tags sqlite_fts5 build tag,
-	// so `FTS5Available()` can return true on an untagged binary.  Stripping
-	// in that case would leave us searching a non-existent table.
-	fts5OK := FTS5Available()
-	if !fts5OK {
-		baseSQL = stripFTS5(baseSQL)
-	}
-	_, err := s.db.ExecContext(ctx, baseSQL)
-	if err != nil {
-		return fmt.Errorf("mail migrate: create tables (base): %w", err)
-	}
-	if fts5OK {
-		fts5SQL := `
-	CREATE VIRTUAL TABLE IF NOT EXISTS mail_fts USING fts5(
-	  subject,
-	  body,
-	  sender_name,
-	  sender_addr,
-	  recipient_addr,
-	  content='',
-	  tokenize='unicode61 remove_diacritics 2'
-	);
-	CREATE VIRTUAL TABLE IF NOT EXISTS mail_fts5 USING fts5(
-	  subject,
-	  body,
-	  sender_name,
-	  sender_addr,
-	  recipient_addr,
-	  content='mail_message_parts',
-	  content_rowid='rowid',
-	  tokenize='unicode61 remove_diacritics 2'
-	);
-	CREATE VIRTUAL TABLE IF NOT EXISTS mail_fts5_p7 USING fts5(
-	  subject,
-	  from_list,
-	  to_list,
-	  body_text,
-	  preview_text,
-	  tokenize='unicode61 remove_diacritics 2'
-	);
-	CREATE TRIGGER IF NOT EXISTS mail_messages_p7_ai AFTER INSERT ON mail_messages_p7 BEGIN
-	  INSERT INTO mail_fts5_p7(rowid, subject, from_list, to_list, body_text, preview_text)
-	    VALUES (new.rowid, new.subject, new.from_list_csv, new.to_list_csv, new.body_text, new.preview_text);
-	END;
-	CREATE TRIGGER IF NOT EXISTS mail_messages_p7_au AFTER UPDATE ON mail_messages_p7 BEGIN
-	  DELETE FROM mail_fts5_p7 WHERE rowid = old.rowid;
-	  INSERT INTO mail_fts5_p7(rowid, subject, from_list, to_list, body_text, preview_text)
-	    VALUES (new.rowid, new.subject, new.from_list_csv, new.to_list_csv, new.body_text, new.preview_text);
-	END;
-	CREATE TRIGGER IF NOT EXISTS mail_messages_p7_ad AFTER DELETE ON mail_messages_p7 BEGIN
-	  DELETE FROM mail_fts5_p7 WHERE rowid = old.rowid;
-	END;
-	`
-		if _, err := s.db.ExecContext(ctx, fts5SQL); err != nil {
-			return fmt.Errorf("mail migrate: create fts5 tables/triggers: %w", err)
-		}
-	}
-
-	// Additive-column evolution for mail_* tables.  Keep this list ordered
-	// by the phase that introduced the column so git blame + bisection
-	// stay readable.
-	for _, column := range []struct {
-		table string
-		name  string
-		def   string
-	}{
-		// ---- Phase 4 (certmanager) ------------------------------
-		// mail_certificates - Phase 4 spec columns added on top of
-		// any pre-existing schema from earlier phases.
-		{"mail_certificates", "domain", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_certificates", "pem_chain", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_certificates", "dns_provider_id", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_certificates", "last_renewal_attempt", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_certificates", "next_renewal", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_certificates", "last_error", "TEXT NOT NULL DEFAULT ''"},
-		// mail_dns_providers - Phase 4 normalised schema fields.
-		{"mail_dns_providers", "display_name", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_dns_providers", "config_json", "TEXT NOT NULL DEFAULT ''"},
-		// mail_domains - TLSA toggle, DNS provider FK, SAN CSV, DANE TLSA overrides.
-		{"mail_domains", "tlsa_enabled", "INTEGER NOT NULL DEFAULT 1"},
-		{"mail_domains", "san_domains_csv", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_domains", "tlsa_domains_csv", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_domains", "tlsa_domains_wildcards", "INTEGER NOT NULL DEFAULT 0"},
-		// ---- Phase 5 (accounts / aliases / import registrations) ----
-		// mail_mox_settings - Phase 5 import + quota defaults.
-		{"mail_mox_settings", "import_mode", "INTEGER DEFAULT 0"},
-		{"mail_mox_settings", "import_registration_id", "TEXT"},
-		{"mail_mox_settings", "import_read_only", "INTEGER DEFAULT 1"},
-		{"mail_mox_settings", "default_account_quota_mb", "INTEGER DEFAULT 0"},
-		{"mail_mox_settings", "max_accounts_per_domain", "INTEGER DEFAULT 0"},
-		// mail_accounts - Phase 5 normalised columns.
-		{"mail_accounts", "domain_id", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_accounts", "local_part", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_accounts", "address", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_accounts", "password_mode", "TEXT NOT NULL DEFAULT 'set'"},
-		{"mail_accounts", "quota_mb", "INTEGER DEFAULT 0"},
-		{"mail_accounts", "is_admin", "INTEGER DEFAULT 0"},
-		{"mail_accounts", "imap_sync_enabled", "INTEGER DEFAULT 1"},
-		{"mail_accounts", "imap_sync_state", "TEXT DEFAULT 'idle'"},
-		{"mail_accounts", "imap_last_uidvalidity", "TEXT"},
-		{"mail_accounts", "imap_last_uid", "TEXT"},
-		{"mail_accounts", "imap_last_internaldate", "TEXT"},
-		{"mail_accounts", "imap_error", "TEXT"},
-		{"mail_accounts", "status", "TEXT NOT NULL DEFAULT 'active'"},
-		{"mail_accounts", "last_login_at", "TEXT"},
-		// mail_accounts - Phase 7 IMAP sync upstream connection details.
-		{"mail_accounts", "imap_host", "TEXT"},
-		{"mail_accounts", "imap_username", "TEXT"},
-		{"mail_accounts", "imap_sync_max_size_bytes", "INTEGER DEFAULT 0"},
-		{"mail_accounts", "webapi_password_wrapped", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_messages_p7", "mox_msg_id", "INTEGER NOT NULL DEFAULT 0"},
-		// mail_aliases - Phase 5 normalised columns.
-		{"mail_aliases", "domain_id", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_aliases", "source", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_aliases", "recipients_csv", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_aliases", "list_name", "TEXT"},
-		{"mail_aliases", "list_reply_to", "TEXT"},
-		// ---- Phase 6 (webhooks / delivery / rate / DNSBL) ----
-		// mail_mox_settings - Phase 6 webhook + delivery + DNSBL toggles.
-		{"mail_mox_settings", "webhook_inbound_enabled", "INTEGER DEFAULT 0"},
-		{"mail_mox_settings", "default_webhook_id", "TEXT"},
-		{"mail_mox_settings", "delivery_retention_days", "INTEGER DEFAULT 90"},
-		{"mail_mox_settings", "suppression_auto_prune_days", "INTEGER DEFAULT 180"},
-		{"mail_mox_settings", "outbound_rate_default_scope", "TEXT DEFAULT 'global'"},
-		{"mail_mox_settings", "dnsbl_check_enabled", "INTEGER DEFAULT 1"},
-		{"mail_mox_settings", "dnsbl_sources_csv", "TEXT DEFAULT 'zen.spamhaus.org,bl.spamcop.net,dbl.spamhaus.org,combined.mail-abuse.org,uribl.swinog.ch'"},
-		{"mail_delivery_events", "queue_msg_id", "INTEGER NOT NULL DEFAULT 0"},
-		{"mail_delivery_events", "from_id", "TEXT NOT NULL DEFAULT ''"},
-		// ---- Phase 7 (IMAP sync / FTS5 search) ----
-		// mail_mox_settings - Phase 7 IMAP sync toggles + size limits.
-		{"mail_mox_settings", "imapsync_enabled", "INTEGER DEFAULT 1"},
-		{"mail_mox_settings", "imapsync_max_size_bytes", "INTEGER DEFAULT 10737418240"},
-		{"mail_mox_settings", "imapsync_big_message_size_limit_bytes", "INTEGER DEFAULT 52428800"},
-		{"mail_mox_settings", "imapsync_interval_attachment_cache_enabled", "INTEGER DEFAULT 1"},
-		// ---- Phase 7 (revised IMAP sync toggles + size limits + idle) ----
-		{"mail_mox_settings", "imapsync_max_total_bytes", "INTEGER DEFAULT 10737418240"},
-		{"mail_mox_settings", "imapsync_big_message_limit_bytes", "INTEGER DEFAULT 52428800"},
-		{"mail_mox_settings", "imapsync_attachment_cache_enabled", "INTEGER DEFAULT 1"},
-		{"mail_mox_settings", "imapsync_idle_timeout_seconds", "INTEGER DEFAULT 1800"},
-		// ---- Phase 8 (backups / retention / hard-delete) ----
-		// mail_backups - columns added on top of the legacy schema.
-		{"mail_backups", "scope", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_backups", "schedule_id", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_backups", "retention_days", "INTEGER DEFAULT 0"},
-		{"mail_backups", "expires_at", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_backups", "note", "TEXT NOT NULL DEFAULT ''"},
-		// mail_mox_settings - Phase 8 backup + retention defaults.
-		{"mail_mox_settings", "backup_enabled", "INTEGER DEFAULT 0"},
-		{"mail_mox_settings", "backup_default_scope", "TEXT DEFAULT 'config'"},
-		{"mail_mox_settings", "backup_default_retention_days", "INTEGER DEFAULT 30"},
-		{"mail_mox_settings", "retention_auto_apply_enabled", "INTEGER DEFAULT 1"},
-		{"mail_mox_settings", "danger_hard_delete_enabled", "INTEGER DEFAULT 0"},
-		// ---- Phase 8 Part A: cross-grade mail_backup_schedules (P8B minimal -> full) ----
-		{"mail_backup_schedules", "scope_id", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_backup_schedules", "schedule_kind", "TEXT NOT NULL DEFAULT 'full'"},
-		{"mail_backup_schedules", "cadence_cron", "TEXT NOT NULL DEFAULT '0 3 * * 0'"},
-		{"mail_backup_schedules", "timezone", "TEXT NOT NULL DEFAULT 'UTC'"},
-		{"mail_backup_schedules", "keep_revisions", "INTEGER NOT NULL DEFAULT 0"},
-		{"mail_backup_schedules", "contains_config", "INTEGER NOT NULL DEFAULT 1"},
-		{"mail_backup_schedules", "contains_data", "INTEGER NOT NULL DEFAULT 1"},
-		{"mail_backup_schedules", "encryption_mode", "TEXT NOT NULL DEFAULT 'none'"},
-		{"mail_backup_schedules", "encrypt_password_hash", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_backup_schedules", "storage_target", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_backup_schedules", "target_url", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_backup_schedules", "target_credentials_json", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_backup_schedules", "pre_run_hook", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_backup_schedules", "post_run_hook", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_backup_schedules", "last_status", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_backup_schedules", "paused", "INTEGER NOT NULL DEFAULT 0"},
-		// ---- Phase 8 Part A: cross-grade mail_retention_rules scope/category fields ----
-		{"mail_retention_rules", "scope", "TEXT NOT NULL DEFAULT 'global'"},
-		{"mail_retention_rules", "scope_id", "TEXT NOT NULL DEFAULT ''"},
-		{"mail_retention_rules", "category", "TEXT NOT NULL DEFAULT 'all'"},
-		{"mail_retention_rules", "prune_empty_folders", "INTEGER NOT NULL DEFAULT 0"},
-		{"mail_retention_rules", "hard_delete", "INTEGER NOT NULL DEFAULT 0"},
-		{"mail_retention_rules", "last_pruned_at", "TEXT NOT NULL DEFAULT ''"},
-	} {
-		if err := s.ensureColumn(ctx, column.table, column.name, column.def); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
 func (s *Store) ensureColumn(ctx context.Context, table, name, def string) error {
 	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
 	if err != nil {
@@ -3166,11 +2054,11 @@ const DatabaseStatsFreshnessGoal = 60 * time.Second
 
 // DatabaseTableStat describes size and metadata for one table.
 type DatabaseTableStat struct {
-	Name            string `json:"name"`
-	SizeBytes       int64  `json:"sizeBytes"`
-	IndexSizeBytes  int64  `json:"indexSizeBytes,omitempty"`
-	PageCount       int    `json:"pageCount,omitempty"`
-	Description     string `json:"description,omitempty"`
+	Name           string `json:"name"`
+	SizeBytes      int64  `json:"sizeBytes"`
+	IndexSizeBytes int64  `json:"indexSizeBytes,omitempty"`
+	PageCount      int    `json:"pageCount,omitempty"`
+	Description    string `json:"description,omitempty"`
 }
 
 // DatabaseStats is a point-in-time snapshot of database size distribution.
@@ -3207,87 +2095,63 @@ var tableDescriptionMap = map[string]string{
 	"codex_gateway_usage_records": "用量计费记录",
 
 	// Codex CLI
-	"codex_cli_installations": "Codex CLI 安装信息",
-	"codex_cli_workspaces":    "工作区",
-	"codex_cli_threads":       "对话线程",
-	"codex_cli_turns":         "对话回合",
-	"codex_cli_events":        "事件记录",
-	"codex_cli_attachments":   "附件",
-	"codex_cli_approvals":     "工具调用审批",
-	"codex_cli_runs":          "代码执行运行",
-	"codex_cli_commands":      "命令历史",
-	"codex_cli_notifications": "通知",
-	"codex_cli_automations":   "自动化配置",
+	"codex_cli_installations":   "Codex CLI 安装信息",
+	"codex_cli_workspaces":      "工作区",
+	"codex_cli_threads":         "对话线程",
+	"codex_cli_turns":           "对话回合",
+	"codex_cli_events":          "事件记录",
+	"codex_cli_attachments":     "附件",
+	"codex_cli_approvals":       "工具调用审批",
+	"codex_cli_runs":            "代码执行运行",
+	"codex_cli_commands":        "命令历史",
+	"codex_cli_notifications":   "通知",
+	"codex_cli_automations":     "自动化配置",
 	"codex_cli_automation_runs": "自动化运行记录",
 
 	// Images / Media
-	"image_provider_settings": "图片生成提供商设置",
-	"image_generation_jobs":   "图片生成任务",
+	"image_provider_settings":  "图片生成提供商设置",
+	"image_generation_jobs":    "图片生成任务",
 	"image_generation_sources": "图片生成源文件",
 	"image_generation_outputs": "图片生成输出",
-	"image_assets":            "图片素材库",
-	"image_storage_settings":  "图片存储设置",
-	"image_prompt_library":    "提示词库",
-	"media_provider_settings": "媒体 / 视频生成设置",
-	"media_generation_jobs":   "媒体生成任务",
+	"image_assets":             "图片素材库",
+	"image_storage_settings":   "图片存储设置",
+	"image_prompt_library":     "提示词库",
+	"media_provider_settings":  "媒体 / 视频生成设置",
+	"media_generation_jobs":    "媒体生成任务",
 	"media_generation_outputs": "媒体生成输出",
-	"media_assets":            "媒体素材库",
-	"object_storage_profiles": "对象存储配置",
-
-	// Mail
-	"mail_mox_settings":   "Mox 邮件服务全局设置",
-	"mail_domains":        "邮件域名",
-	"mail_accounts":       "邮箱账户",
-	"mail_aliases":        "邮件别名",
-	"mail_addresses":      "地址簿 / 联系人",
-	"mail_certificates":   "TLS 证书",
-	"mail_dns_providers":  "DNS 提供商配置",
-	"mail_messages_p7":    "邮件消息（正文+元数据）",
-	"mail_message_parts":  "邮件内容片段",
-	"mail_folders_p7":     "邮件文件夹",
-	"mail_index_health_p7": "邮件索引健康状态",
-	"mail_fts5_p7":        "邮件全文搜索索引",
-	"mail_webhooks":       "Webhook 配置",
-	"mail_webhook_events": "Webhook 事件日志",
-	"mail_delivery_events": "投递事件",
-	"mail_queue_entries":  "投递队列条目",
-	"mail_drafts":         "邮件草稿",
-	"mail_backups":        "邮件备份记录",
-	"mail_backup_schedules": "邮件备份计划",
-	"mail_retention_rules": "邮件保留规则",
-	"mail_mox_health_checks": "Mox 健康检查记录",
-	"mail_runtime_state":  "运行时状态",
+	"media_assets":             "媒体素材库",
+	"object_storage_profiles":  "对象存储配置",
 
 	// V2Ray
-	"v2ray_settings":         "V2Ray 全局设置",
-	"v2ray_remote_clients":   "远程客户端",
-	"v2ray_config_versions":  "配置版本历史",
+	"v2ray_settings":        "V2Ray 全局设置",
+	"v2ray_remote_clients":  "远程客户端",
+	"v2ray_config_versions": "配置版本历史",
 
 	// Docker
-	"docker_registry_credentials": "Docker Registry 凭据",
+	"docker_registry_credentials":  "Docker Registry 凭据",
 	"docker_registry_repositories": "Docker 仓库",
-	"docker_registry_manifests":   "Docker 镜像清单",
-	"docker_registry_tags":        "Docker 标签",
+	"docker_registry_manifests":    "Docker 镜像清单",
+	"docker_registry_tags":         "Docker 标签",
 
 	// Stock
-	"stock_portfolios":     "投资组合",
-	"stock_holdings":       "持仓",
-	"stock_quotes":         "股票报价",
-	"stock_opportunities":  "投资机会",
-	"stock_strategies":     "策略",
-	"stock_watches":        "监控 / 观察列表",
-	"stock_alerts":         "告警",
-	"stock_reviews":        "AI 评审",
-	"stock_trade_signals":  "交易信号",
-	"stock_operations":     "操作记录",
-	"stock_memories":       "笔记 / 记忆",
-	"stock_instruments":    "股票标的基础信息",
+	"stock_portfolios":         "投资组合",
+	"stock_holdings":           "持仓",
+	"stock_quotes":             "股票报价",
+	"stock_opportunities":      "投资机会",
+	"stock_strategies":         "策略",
+	"stock_watches":            "监控 / 观察列表",
+	"stock_alerts":             "告警",
+	"stock_reviews":            "AI 评审",
+	"stock_trade_signals":      "交易信号",
+	"stock_operations":         "操作记录",
+	"stock_memories":           "笔记 / 记忆",
+	"stock_instruments":        "股票标的基础信息",
 	"stock_market_data_points": "行情数据点",
-	"stock_news_items":     "新闻条目",
-	"stock_data_sources":   "数据源",
-	"stock_data_tasks":     "数据任务",
-	"stock_agent_runs":     "AI 代理运行记录",
-	"stock_agent_run_steps": "AI 代理运行步骤",
+	"stock_news_items":         "新闻条目",
+	"stock_data_sources":       "数据源",
+	"stock_data_tasks":         "数据任务",
+	"stock_agent_runs":         "AI 代理运行记录",
+	"stock_agent_run_steps":    "AI 代理运行步骤",
 }
 
 // describeTable returns a human-readable description for a table,
@@ -3301,8 +2165,6 @@ func describeTable(name string) string {
 		return "Codex Gateway 模块表"
 	case strings.HasPrefix(name, "codex_cli_"):
 		return "Codex CLI 模块表"
-	case strings.HasPrefix(name, "mail_"):
-		return "邮件模块表"
 	case strings.HasPrefix(name, "stock_"):
 		return "股票模块表"
 	case strings.HasPrefix(name, "image_") || strings.HasPrefix(name, "media_") || strings.HasPrefix(name, "object_storage_"):
@@ -6822,23 +5684,11 @@ func now() string {
 // produce timestamps that compare equal to the DB columns.
 func NowISO() string { return now() }
 
-// DB exposes the underlying *sql.DB to callers that need raw query access
-// (e.g. the mail Service for ad-hoc folder scans).  Callers MUST close
-// returned rows and MUST not hold connections longer than one request.
+// DB exposes the underlying *sql.DB to callers that need raw query access.
+// Callers MUST close returned rows and MUST not hold connections longer than
+// one request.
 func (s *Store) DB() *sql.DB { return s.db }
 
 func formatTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
-}
-
-// WrapMailSecret is the exported counterpart of the unexported wrapMailSecret,
-// exposed for the mail.Service layer so it can wrap HMAC secrets and other
-// mail-module tokens without reaching into package-internal methods.
-func (s *Store) WrapMailSecret(plain string) (string, error) {
-	return s.wrapMailSecret(plain)
-}
-
-// UnwrapMailSecret is the exported counterpart of unwrapMailSecret.
-func (s *Store) UnwrapMailSecret(blob string) (string, error) {
-	return s.unwrapMailSecret(blob)
 }

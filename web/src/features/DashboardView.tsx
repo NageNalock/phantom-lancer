@@ -4,11 +4,10 @@ import type { MouseEvent } from "react";
 import { useState } from "react";
 import { ContextList, Metric, Panel } from "../components/ui";
 import { auditLabel, auditSummary, codexGatewayStatusLabel, codexModuleStatusLabel, formatDate, imageStatusLabel, stockDataHealthLabel, stockStatusLabel, v2rayStateLabel } from "../domain/labels";
-import { buildQueryHref, shouldHandleQueryLinkClick } from "../hooks/useQueryParamState";
+import { shouldHandleQueryLinkClick } from "../hooks/useQueryParamState";
 import { formatBytesIEC } from "../utils/format";
 
 interface DashboardAction {
-  kind?: "mail_emergency";
   title: string;
   body: string;
   label: string;
@@ -20,12 +19,11 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
   const gateway = data.codexGateway.status || data.dashboard.codexGateway;
   const v2ray = data.v2ray.status || data.dashboard.v2ray;
   const images = data.images.status || data.dashboard.images;
-  const mail = data.mail.status;
   const codex = data.dashboard.codex;
   const stock = data.stock.summary;
   const stockData = data.stock.dataHealth;
   const latestAudit = data.audit[0];
-  const nextActions = dashboardNextActions(codex, gateway, images, v2ray, stock, stockData, mail);
+  const nextActions = dashboardNextActions(codex, gateway, images, v2ray, stock, stockData);
   const allowedRoots = data.settings.runtime?.allowedRoots || [];
   const handleMainTabLink = (event: MouseEvent<HTMLAnchorElement | HTMLButtonElement>, tab: MainTab) => {
     if (event.currentTarget instanceof HTMLAnchorElement) {
@@ -33,16 +31,6 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
       event.preventDefault();
     }
     actions.setMainTab(tab);
-  };
-  const mailEmergencyHref = buildQueryHref({ tab: "mail", mail: "emergency" }, ["codex", "codexInbox", "codexRuntime", "gateway", "images", "docker", "settings"]);
-  const handleMailEmergencyLink = (event: MouseEvent<HTMLAnchorElement | HTMLButtonElement>) => {
-    if (event.currentTarget instanceof HTMLAnchorElement) {
-      if (!shouldHandleQueryLinkClick(event as MouseEvent<HTMLAnchorElement>)) return;
-      event.preventDefault();
-    }
-    actions.setMainTab("mail");
-    window.history.pushState(null, "", mailEmergencyHref);
-    window.dispatchEvent(new PopStateEvent("popstate"));
   };
 
   return (
@@ -89,14 +77,6 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
             tone={stock?.pendingOperationCount || stock?.openAlertCount || stockData?.failedSources || stockData?.failedTaskCount ? "warn" : stock?.portfolioCount || stockData?.sourceCount ? "good" : "neutral"}
             value={`${stockStatusLabel(stock)} / ${stockDataHealthLabel(stockData)}`}
           />
-          <Metric
-            detail={mail?.emergency_inbound_reject?.enabled ? "Domain.Disabled fallback 已启用" : "入站保护为降级实现"}
-            href={mailEmergencyHref}
-            label="Mail 入站保护"
-            onClick={handleMailEmergencyLink}
-            tone={mail?.emergency_inbound_reject?.enabled ? "danger" : "neutral"}
-            value={mail?.emergency_inbound_reject?.enabled ? "降级保护中" : "未开启"}
-          />
         </section>
 
         <Panel
@@ -113,8 +93,8 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
                   </div>
                   <a
                     className="button"
-                    href={item.kind === "mail_emergency" ? mailEmergencyHref : actions.mainTabHref(item.tab)}
-                    onClick={item.kind === "mail_emergency" ? handleMailEmergencyLink : (event) => handleMainTabLink(event, item.tab)}
+                    href={actions.mainTabHref(item.tab)}
+                    onClick={(event) => handleMainTabLink(event, item.tab)}
                   >
                     {item.label}
                   </a>
@@ -170,19 +150,8 @@ function dashboardNextActions(
   v2ray: AppData["dashboard"]["v2ray"] | undefined,
   stock: AppData["stock"]["summary"] | undefined,
   stockData: AppData["stock"]["dataHealth"] | undefined,
-  mail: AppData["mail"]["status"] | undefined,
 ): DashboardAction[] {
   const items: DashboardAction[] = [];
-  if (mail?.emergency_inbound_reject?.enabled) {
-    items.push({
-      kind: "mail_emergency",
-      title: "Mail 入站保护处于降级模式",
-      body: "当前通过 Domain.Disabled fallback 保护入站，可能影响 submission/ACME。进入 Mail 查看恢复、漂移和回滚状态。",
-      label: "打开入站保护",
-      tab: "mail",
-      tone: "danger",
-    });
-  }
   if (codex?.pendingApprovals) {
     items.push({
       title: `${codex.pendingApprovals} 个 Codex 审批待处理`,

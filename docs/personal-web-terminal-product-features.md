@@ -164,43 +164,6 @@ flowchart LR
 
 资源库支持私密收藏夹：Owner 可以将任意图片或视频资产设为私密，普通资源库默认隐藏私密资产；进入私密收藏夹必须重新输入 owner 登录密码，解锁只对当前 Web session 短期有效。详细设计见 [images-library-feature-design.md](./images-library-feature-design.md)。
 
-### 6.6 Mail / Mox 控制面
-
-Mail 是独立一级能力域，Phantom Lancer 只作为 Mox sidecar 的控制面，不在主进程内实现 SMTP、IMAP、DKIM、DMARC、DANE 或 spam filter。
-
-核心边界：
-
-- Phantom 永远不绑定 80/443，也不管理 nginx、Caddy、Apache 或云负载均衡。
-- Mox binary 不自动升级，只提供探测、下载、安装、卸载、启动、停止和重启。
-- 账户、域名、别名、证书、队列和运行期系统配置必须经 Phantom API 修改；检测到外部修改时进入 drift 处理。
-- Mox WebAPI 必须优先使用 unix socket 或 loopback-only 地址；Web/API 监听地址不能使用 `0.0.0.0`、80/443 或其他低端口。
-
-二级导航：
-
-- `Overview` 展示运行状态、DNS 健康、队列、证书和风险摘要。
-- `Setup` 管理 Mox binary、实例初始化、外部只读接入和端口预检。
-- `Domains` 管理域名与 DNS checklist：MX、SPF、DKIM、DMARC、TLS-RPT、PTR、TLSA、RFC 6186 `_submission._tcp` 和 `_imaps._tcp` SRV。MTA-STS 不支持，因为它要求 443 托管。
-- `Accounts`、`Aliases`、`Mailbox` 管理邮箱账户、地址、别名、转发、邮件浏览、草稿和全文搜索。
-- `Delivery` 和 `Queue` 展示投递事件、队列、hold/schedule/drop/fail、webhook、出站速率和 DNSBL 声誉。
-- `Emergency` 提供全局入站紧急拒收开关，用于遇到收信攻击、爆量投递、队列被打满或 Mox 资源接近耗尽时，一键让所有邮箱账户拒收新入站邮件，保护服务可恢复性。
-- `Logs` 展示受控 Mox 日志 tail 和 redaction 摘要。
-- `Events` 展示 Mail 模块事件与审计过滤视图。
-- `Certificates` 管理 ACME DNS-01 证书签发、续签、手动挑战确认、到期告警、原子替换、TLSA 和 Mox reload。
-- `Settings` 只承载 Mail 能力域自身的 Mox 路径、WebAPI、端口、DNS provider、备份、保留策略、全文索引和危险区配置。
-
-紧急拒收能力边界：
-
-- `Emergency Inbound Reject` 是 Mail 能力域自己的全局安全开关，不属于通用 `设置`，也不等同于账户禁用、alias drop、suppression、queue drop 或停止 Mox 进程。
-- 当前阶段 UI 中的“入站保护（降级实现）”只是一条 `Domain.Disabled` fallback 路径，可能影响 submission、ACME 和域级配置行为；它必须明确标注为降级实现，不能作为正式早期 SMTP 拒收能力对外承诺。
-- 开启后必须尽可能早地拒绝新入站 SMTP 投递，目标是降低 CPU、内存、磁盘、队列和后续扫描压力，而不是先接收再丢弃。已经建立的连接、已经进入队列的邮件和已保存的邮箱内容不应被删除；队列处置仍通过 `Queue` 页面单独操作。
-- 开关作用范围是所有已启用域名和所有邮箱账户的新入站邮件。出站发送、Webmail/IMAP 登录、证书续期、DNS 检查、日志查看和配置查看不应被该开关隐式禁用，除非 Mox 自身配置模型只能做到更粗粒度拒收，此时 UI 必须明确说明实际影响。
-- UI 入口应放在 Mail `Overview` 的风险摘要和 `Delivery/Queue` 的应急区域中，使用危险色、二次确认和明确回滚入口。确认文案必须包含影响范围、不会删除既有邮件、可能导致外部发件方收到临时或永久拒收响应、以及建议的恢复步骤。
-- 开启时必须要求 owner 输入确认短语，例如 `REJECT-INBOUND`；关闭时也必须有确认，但语气应偏恢复操作。开关状态必须常驻显示在 Mail 顶部状态和 Overview 风险摘要中。
-- 必须记录 audit 和 Mail event，包含操作者、开启/关闭、原因、预期拒收模式、影响域名数量、影响账户数量、Mox reload/probe 结果和回滚结果。不得记录真实攻击来源中的敏感 query、完整原始 SMTP 内容或邮件正文。
-- 必须支持可选自动恢复时间，例如 15 分钟、1 小时、4 小时或手动恢复。自动恢复触发前应再次写入事件；恢复失败必须保持当前拒收状态并显示危险告警。
-- 失败分支必须不破坏原配置：如果写入 Mox 配置、reload 或 probe 失败，必须回滚到开启前状态；如果回滚失败，UI 必须显示 drift/unknown 风险并给出手动处理指引。
-- Dashboard 可以展示该状态的摘要和跳转入口，但不能在首页直接展开完整应急配置。
-
 ## 7. 权限管理系统
 
 权限系统是产品的核心基础能力。虽然产品是个人使用，不需要多租户，但仍需要完整的访问控制、操作边界和审计。
