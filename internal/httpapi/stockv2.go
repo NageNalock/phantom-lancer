@@ -19,6 +19,8 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/portfolios/{id}", s.handleGetPortfolio)
 	mux.HandleFunc("PUT /api/stockv2/portfolios/{id}", s.handleUpdatePortfolio)
 	mux.HandleFunc("DELETE /api/stockv2/portfolios/{id}", s.handleDeletePortfolio)
+	mux.HandleFunc("POST /api/stockv2/portfolios/{id}/refresh", s.handleStockV2RefreshPortfolioValuation)
+	mux.HandleFunc("GET /api/stockv2/portfolios/{id}/snapshots", s.handleStockV2GetPortfolioSnapshots)
 	mux.HandleFunc("POST /api/stockv2/portfolios/{id}/holdings", s.handleCreateHolding)
 	mux.HandleFunc("GET /api/stockv2/portfolios/{id}/holdings", s.handleListHoldings)
 	mux.HandleFunc("PUT /api/stockv2/portfolios/{id}/holdings/{holdingId}", s.handleUpdateHolding)
@@ -28,6 +30,10 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/instruments", s.handleListInstruments)
 	mux.HandleFunc("GET /api/stockv2/instruments/market/{market}", s.handleGetInstrumentsByMarket)
 	mux.HandleFunc("GET /api/stockv2/instruments/search", s.handleSearchInstruments)
+
+	// 最新行情
+	mux.HandleFunc("GET /api/stockv2/quotes/latest", s.handleStockV2GetLatestQuotes)
+	mux.HandleFunc("POST /api/stockv2/quotes/refresh", s.handleStockV2RefreshLatestQuotes)
 
 	// 更新任务
 	mux.HandleFunc("POST /api/stockv2/update/trigger", s.handleTriggerUpdate)
