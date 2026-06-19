@@ -725,3 +725,119 @@ export function stockV2StrategyVersionStatusTone(status?: string): "good" | "war
     default: return "neutral";
   }
 }
+
+// ========== Watch / Alert ==========
+
+export function stockV2WatchStatusLabel(status?: string): string {
+  switch (status) {
+    case "active": return "盯盘中";
+    case "paused": return "已暂停";
+    case "archived": return "已归档";
+    default: return status || "未知";
+  }
+}
+
+export function stockV2WatchStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "active": return "good";
+    case "paused": return "warn";
+    case "archived": return "neutral";
+    default: return "neutral";
+  }
+}
+
+export function stockV2WatchSourceLabel(source?: string): string {
+  switch (source) {
+    case "manual": return "人工创建";
+    case "strategy": return "来自策略";
+    case "portfolio_monitor": return "组合监控";
+    default: return source || "-";
+  }
+}
+
+export function stockV2WatchTriggerLabel(kind?: string): string {
+  switch (kind) {
+    case "price_above": return "价格突破";
+    case "price_below": return "价格跌破";
+    case "pct_change_up": return "涨幅超限";
+    case "pct_change_down": return "跌幅超限";
+    case "data_stale": return "数据过期";
+    case "portfolio_weight_high": return "组合权重过高";
+    default: return kind || "-";
+  }
+}
+
+/** 是否为百分比类阈值(用于规则摘要加 % 后缀)。 */
+export function stockV2WatchTriggerIsPercent(kind?: string): boolean {
+  return kind === "pct_change_up" || kind === "pct_change_down" || kind === "portfolio_weight_high";
+}
+
+export function stockV2WatchScheduleLabel(schedule?: string): string {
+  switch (schedule) {
+    case "continuous": return "持续";
+    case "market_open": return "盘中";
+    case "daily": return "每日";
+    case "hourly": return "每小时";
+    default: return schedule || "-";
+  }
+}
+
+/** 规则摘要:后端 ruleSummary 优先,否则按 triggerKind + threshold 拼。 */
+export function stockV2WatchRuleSummary(watch?: { ruleSummary?: string; triggerKind?: string; threshold?: number } | null): string {
+  if (!watch) return "-";
+  if (watch.ruleSummary?.trim()) return watch.ruleSummary.trim();
+  const kind = stockV2WatchTriggerLabel(watch.triggerKind);
+  if (typeof watch.threshold === "number" && Number.isFinite(watch.threshold)) {
+    const suffix = stockV2WatchTriggerIsPercent(watch.triggerKind) ? "%" : "";
+    return `${kind} ${watch.threshold}${suffix}`;
+  }
+  return kind;
+}
+
+export function stockV2WatchRunStatusTone(status: "matched" | "not_matched" | "skipped" | "degraded" | string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "matched": return "warn";
+    case "degraded": return "danger";
+    case "skipped": return "neutral";
+    case "not_matched": return "good";
+    default: return "neutral";
+  }
+}
+
+export function stockV2AlertStatusLabel(status?: string): string {
+  switch (status) {
+    case "open": return "待处理";
+    case "acknowledged": return "已确认";
+    case "ignored": return "已忽略";
+    case "resolved": return "已解决";
+    default: return status || "未知";
+  }
+}
+
+export function stockV2AlertStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "open": return "warn";
+    case "acknowledged": return "neutral";
+    case "ignored": return "neutral";
+    case "resolved": return "good";
+    default: return "neutral";
+  }
+}
+
+export function stockV2AlertLevelLabel(level?: string): string {
+  switch (level) {
+    case "info": return "提示";
+    case "warn": return "警告";
+    case "danger": return "紧急";
+    default: return level || "提示";
+  }
+}
+
+export function stockV2AlertLevelTone(level?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (level) {
+    case "info": return "neutral";
+    case "warn": return "warn";
+    case "danger": return "danger";
+    default: return "neutral";
+  }
+}

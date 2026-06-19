@@ -1884,7 +1884,7 @@ export interface StockV2UniverseUpdateResponse {
   message: string;
 }
 
-export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "strategies" | "settings";
+export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "strategies" | "watches" | "settings";
 
 // ===== Daily Bars (日级历史行情) =====
 
@@ -2076,4 +2076,113 @@ export interface StockV2StrategyInput {
   evidenceRefs?: string[];
   generationMeta?: Record<string, unknown>;
   createdBy?: string;
+}
+
+// ===== Watch / Alert (盯盘与触发层) =====
+//
+// Watch 是长期盯盘对象,来自策略 / 组合监控 / 人工创建;Trigger 是 Watch 内的确定性
+// 规则(价格突破、涨跌幅、数据过期、组合权重过高等);Alert 是一次规则命中的提醒台账,
+// 需去重 / 冷却 / 确认 / 忽略 / 解决。
+// 后端 watch / alert 接口尚未合并,以下为约定形状,合并时按实际 API 对齐。
+
+export type StockV2WatchStatus = "active" | "paused" | "archived";
+export type StockV2WatchSource = "manual" | "strategy" | "portfolio_monitor";
+export type StockV2WatchTriggerKind =
+  | "price_above"
+  | "price_below"
+  | "pct_change_up"
+  | "pct_change_down"
+  | "data_stale"
+  | "portfolio_weight_high";
+export type StockV2WatchScheduleKind = "continuous" | "market_open" | "daily" | "hourly";
+
+export interface StockV2Watch {
+  id: string;
+  name?: string;
+  status?: StockV2WatchStatus | string;
+  source?: StockV2WatchSource | string;
+  symbol?: string;
+  market?: string;
+  instrumentName?: string;
+  portfolioId?: string;
+  portfolioName?: string;
+  strategyId?: string;
+  strategyName?: string;
+  triggerKind?: StockV2WatchTriggerKind | string;
+  threshold?: number;
+  comparator?: string;
+  cooldownSeconds?: number;
+  scheduleKind?: StockV2WatchScheduleKind | string;
+  /** 后端可预生成的规则摘要;缺失时前端按 triggerKind + threshold 拼。 */
+  ruleSummary?: string;
+  lastCheckedAt?: string;
+  lastTriggeredAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface StockV2WatchInput {
+  name?: string;
+  symbol?: string;
+  market?: string;
+  portfolioId?: string;
+  strategyId?: string;
+  triggerKind: StockV2WatchTriggerKind | string;
+  threshold?: number;
+  comparator?: string;
+  cooldownSeconds?: number;
+  scheduleKind?: StockV2WatchScheduleKind | string;
+}
+
+export interface StockV2WatchListResponse {
+  items: StockV2Watch[];
+  total?: number;
+  limit?: number;
+  offset?: number;
+}
+
+/** 单次运行 Watch 的结果汇总。matched / not_matched / skipped / degraded 为评估计数。 */
+export interface StockV2WatchRunResult {
+  watchId?: string;
+  totals?: {
+    matched?: number;
+    notMatched?: number;
+    skipped?: number;
+    degraded?: number;
+  };
+  /** 命中后产生的新 alert(若有)。 */
+  alerts?: StockV2Alert[];
+  checkedAt?: string;
+  note?: string;
+}
+
+export type StockV2AlertStatus = "open" | "acknowledged" | "ignored" | "resolved";
+export type StockV2AlertLevel = "info" | "warn" | "danger";
+
+export interface StockV2Alert {
+  id: string;
+  watchId?: string;
+  watchName?: string;
+  status?: StockV2AlertStatus | string;
+  level?: StockV2AlertLevel | string;
+  title?: string;
+  summary?: string;
+  symbol?: string;
+  portfolioId?: string;
+  portfolioName?: string;
+  triggerKind?: string;
+  threshold?: number;
+  observedValue?: number;
+  triggeredAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  acknowledgedAt?: string;
+  resolvedAt?: string;
+}
+
+export interface StockV2AlertListResponse {
+  items: StockV2Alert[];
+  total?: number;
+  limit?: number;
+  offset?: number;
 }
