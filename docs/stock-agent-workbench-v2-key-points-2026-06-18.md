@@ -30,12 +30,22 @@
 flowchart LR
   subgraph Data["数据资产层"]
     Instrument["股票标的"]
+    StockProfile["股票画像"]
+    EmbeddingAsset["向量资产"]
     Quote["实时行情"]
     MarketData["历史 K 线 / 成交量 / 估值 / 资金流"]
-    News["消息面 / 快讯 / 公告 / 财报 / 研报"]
+    RawNews["原始消息 / 金十推送"]
+    News["标准化消息"]
     DataSource["数据源 / Adapter"]
     DataTask["定时数据任务"]
     Calendar["交易日历 / 交易时段 / 数据新鲜度"]
+  end
+
+  subgraph InfoLink["信息面关联层"]
+    EntityMatch["硬匹配 / 关键词匹配"]
+    VectorMatch["向量召回 / 相似度过滤"]
+    NewsLinkCandidate["消息关联候选"]
+    UnlinkedNewsQueue["低置信消息池"]
   end
 
   subgraph Discovery["机会发现层"]
@@ -61,6 +71,8 @@ flowchart LR
   subgraph Watch["盯盘与触发层"]
     WatchObj["盯盘"]
     Trigger["触发条件"]
+    AgentContextPack["Agent Context Pack"]
+    TriggerDecision["Agent 触发判断"]
     Alert["提醒"]
     AlertLedger["提醒台账 / 去重 / 冷却"]
   end
@@ -92,15 +104,28 @@ flowchart LR
   DataSource --> DataTask
   DataTask --> Quote
   DataTask --> MarketData
-  DataTask --> News
+  DataTask --> RawNews
   Calendar --> WatchObj
   Quote --> Instrument
   MarketData --> Instrument
-  News --> Instrument
+  RawNews --> News
+  Instrument --> StockProfile
+  MarketData --> StockProfile
+  StockProfile --> EmbeddingAsset
+  News --> EmbeddingAsset
+
+  News --> EntityMatch
+  News --> VectorMatch
+  Instrument --> EntityMatch
+  StockProfile --> VectorMatch
+  EmbeddingAsset --> VectorMatch
+  EntityMatch --> NewsLinkCandidate
+  VectorMatch --> NewsLinkCandidate
+  NewsLinkCandidate -->|低置信| UnlinkedNewsQueue
 
   Quote --> Theme
   MarketData --> Theme
-  News --> Theme
+  NewsLinkCandidate --> Theme
   Theme --> Opportunity
 
   Opportunity --> GeneratedStrategy
@@ -119,9 +144,16 @@ flowchart LR
 
   WatchObj --> Trigger
   Quote --> Trigger
-  News --> Trigger
+  NewsLinkCandidate --> Trigger
   MarketData --> Trigger
-  Trigger --> Alert
+  Trigger --> AgentContextPack
+  News --> AgentContextPack
+  NewsLinkCandidate --> AgentContextPack
+  Quote --> AgentContextPack
+  MarketData --> AgentContextPack
+  PortfolioSnapshot --> AgentContextPack
+  StrategyObj --> AgentContextPack
+  TriggerDecision --> Alert
   Alert --> AlertLedger
   Alert --> OperationReview
 
@@ -140,11 +172,14 @@ flowchart LR
   ModelProfile --> AgentRun
   SkillRegistry --> AgentRun
   AuthBoundary --> AgentRun
+  AgentContextPack --> AgentRun
+  AgentRun --> TriggerDecision
   AgentRun --> OperationReview
   AgentRun --> GeneratedStrategy
   AgentRun --> DecisionLedger
   AgentRun --> RunSubgraph
 
+  TriggerDecision --> DecisionLedger
   OperationReview --> DecisionLedger
   GeneratedStrategy --> DecisionLedger
   StrategyPatch --> DecisionLedger
@@ -169,11 +204,21 @@ flowchart LR
 股票模块有两条并行数据链路：
 
 - 行情与基本面链路：股票主数据、实时行情、历史 K 线、成交量、估值、资金流。
-- 信息面链路：快讯、公告、财报、研报、政策、行业事件、主题事件。
+- 信息面链路：金十分钟级快讯、公告、财报、研报、政策、行业事件、主题事件。
 
 这些数据应优先由系统任务自闭环维护，包含调度、限流、失败退避、去重、质量标记和可用性状态。不要让所有定时采集都强依赖 Agent，否则会浪费 token，也会降低稳定性。
 
 Agent 可以临时检索补充证据，但长期数据资产应由股票数据模块自己落盘和治理。
+
+信息面链路不应由相似度直接决定触发。相似度、关键词和实体匹配只负责第一轮高召回过滤：过滤明显噪音，保留可能相关的股票、主题和事件候选。
+
+金十这类分钟级消息应由系统采集器持续拉取或接收，先落成原始消息，再标准化为 `NewsEvent`，做去重、质量标记和来源记录。后续再通过股票名、代码、关键词、主题词和向量召回生成 `NewsLinkCandidate`。
+
+`NewsLinkCandidate` 是候选关系，不是事实关系。为了避免漏掉关键信息，第一轮过滤应偏向高召回：阈值可以保守偏低，保留 topK 候选；显式命中的股票名、代码、持仓股票、活跃盯盘和活跃策略可以降低进入门槛。
+
+当候选消息达到 Watch 或机会发现的初筛条件后，系统应构造 `Agent Context Pack`，把消息、候选关联、实时行情、历史 K 线摘要、组合快照、策略、盯盘规则、数据新鲜度和近期同类记录一起交给 Agent。Agent 再输出结构化的 `TriggerDecision`，决定是否真的触发提醒、进入 Review、生成机会，或忽略本次消息。
+
+股票画像用于支撑信息面召回和机会发现。初始画像不需要追求完整知识图谱，可以先由股票主数据、行业/板块/概念标签、历史 K 线统计、成交量特征、近期已确认消息主题和人工补充信息拼成可向量化文本。组合持仓、成本、仓位和风险约束属于用户上下文，不应写入通用股票画像，而应在 `Agent Context Pack` 中动态附加。
 
 ## 5. 账户、仓位与策略
 
