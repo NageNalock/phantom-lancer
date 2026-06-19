@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,6 +56,24 @@ func (s *Server) handleStockV2RefreshLatestQuotes(w http.ResponseWriter, r *http
 		return
 	}
 	s.writeJSON(w, result)
+}
+
+func (s *Server) handleStockV2GetQuoteRefreshState(w http.ResponseWriter, r *http.Request) {
+	limit := 20
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 || value > 200 {
+			http.Error(w, "invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = value
+	}
+	state, items, err := s.stockV2.GetLatestQuoteRefreshState(r.Context(), limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.writeJSON(w, map[string]any{"state": state, "items": items})
 }
 
 func parseStockV2QuoteSymbols(raw string) []string {

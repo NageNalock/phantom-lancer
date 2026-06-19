@@ -14,15 +14,17 @@
 
 股票模块不是一条线性流水线，也不是一个单一 Agent 任务。
 
-它应建模为一个长期运行的对象网络：股票、组合、持仓、数据、消息、机会、策略、盯盘、Review、操作、记忆和 Agent 留痕都可以独立存在，也可以互相关联。
+它应建模为一个长期运行的对象网络：股票、组合、持仓、数据、消息、机会、策略、后台监控、命中、提醒、Review、操作、记忆和 Agent 留痕都可以独立存在，也可以互相关联。
 
 推荐链路是：
 
 ```text
-机会发现 -> 策略确定 -> 盯盘 -> 触发 -> Review -> 信号/操作提案 -> 人工确认 -> 操作记录 -> 记忆回流
+机会发现 -> 策略确定 -> 后台监控 -> 命中候选 -> Agent doublecheck -> Alert / Review -> 信号/操作提案 -> 人工确认 -> 操作记录 -> 记忆回流
 ```
 
-但这不是强制路径。人工写入策略、直接创建盯盘、外部消息命中、已有持仓进入 Review、手动记录操作，都应该能作为合法入口。
+但这不是强制路径。人工写入策略、手动触发一次监控、外部消息命中、已有持仓进入 Review、手动记录操作，都应该能作为合法入口。
+
+盯盘不是用户手动创建、编辑、删除的业务对象，而是系统固化的后台监控行为。用户可以暂停某类监控、调整周期、调整作用范围和 Agent 预算，但不应被要求逐个创建“单票 + 价格规则”的监控任务。
 
 ## 2. 对象网络图
 
@@ -68,9 +70,12 @@ flowchart LR
     StrategyPatch["策略补丁"]
   end
 
-  subgraph Watch["盯盘与触发层"]
-    WatchObj["盯盘"]
-    Trigger["触发条件"]
+  subgraph Monitor["后台监控与命中层"]
+    MonitorTaskDefinition["系统内置监控任务"]
+    MonitorTaskConfig["任务配置 / 开关 / 周期"]
+    MonitorRun["监控运行"]
+    MatchRule["内部预筛规则"]
+    MonitorHit["命中候选"]
     AgentContextPack["Agent Context Pack"]
     TriggerDecision["Agent 触发判断"]
     Alert["提醒"]
@@ -105,7 +110,7 @@ flowchart LR
   DataTask --> Quote
   DataTask --> MarketData
   DataTask --> RawNews
-  Calendar --> WatchObj
+  Calendar --> MonitorRun
   Quote --> Instrument
   MarketData --> Instrument
   RawNews --> News
@@ -133,20 +138,24 @@ flowchart LR
   GeneratedStrategy --> StrategyObj
   StrategyObj --> StrategyVersion
   StrategyPatch --> StrategyVersion
-  StrategyObj --> WatchObj
+  StrategyObj --> MonitorRun
 
   PortfolioObj --> Holding
   Holding --> PortfolioSnapshot
   RiskProfile --> PortfolioSnapshot
   PortfolioObj --> PortfolioSnapshot
+  PortfolioSnapshot --> MonitorRun
   PortfolioSnapshot --> OperationReview
   PortfolioSnapshot --> Guardrails
 
-  WatchObj --> Trigger
-  Quote --> Trigger
-  NewsLinkCandidate --> Trigger
-  MarketData --> Trigger
-  Trigger --> AgentContextPack
+  MonitorTaskDefinition --> MonitorTaskConfig
+  MonitorTaskConfig --> MonitorRun
+  Quote --> MonitorRun
+  NewsLinkCandidate --> MonitorRun
+  MarketData --> MonitorRun
+  MonitorRun --> MatchRule
+  MatchRule --> MonitorHit
+  MonitorHit --> AgentContextPack
   News --> AgentContextPack
   NewsLinkCandidate --> AgentContextPack
   Quote --> AgentContextPack
@@ -165,7 +174,6 @@ flowchart LR
   UserConfirm --> OperationRecord
   OperationRecord --> Holding
 
-  TradeSignal --> WatchObj
   TradeSignal --> MemoryObj
   StrategyPatch --> UserConfirm
 
@@ -214,13 +222,33 @@ Agent 可以临时检索补充证据，但长期数据资产应由股票数据�
 
 金十这类分钟级消息应由系统采集器持续拉取或接收，先落成原始消息，再标准化为 `NewsEvent`，做去重、质量标记和来源记录。后续再通过股票名、代码、关键词、主题词和向量召回生成 `NewsLinkCandidate`。
 
-`NewsLinkCandidate` 是候选关系，不是事实关系。为了避免漏掉关键信息，第一轮过滤应偏向高召回：阈值可以保守偏低，保留 topK 候选；显式命中的股票名、代码、持仓股票、活跃盯盘和活跃策略可以降低进入门槛。
+`NewsLinkCandidate` 是候选关系，不是事实关系。为了避免漏掉关键信息，第一轮过滤应偏向高召回：阈值可以保守偏低，保留 topK 候选；显式命中的股票名、代码、持仓股票、活跃监控任务和活跃策略可以降低进入门槛。
 
-当候选消息达到 Watch 或机会发现的初筛条件后，系统应构造 `Agent Context Pack`，把消息、候选关联、实时行情、历史 K 线摘要、组合快照、策略、盯盘规则、数据新鲜度和近期同类记录一起交给 Agent。Agent 再输出结构化的 `TriggerDecision`，决定是否真的触发提醒、进入 Review、生成机会，或忽略本次消息。
+当候选消息达到某类系统监控任务或机会发现的初筛条件后，系统应构造 `Agent Context Pack`，把消息、候选关联、实时行情、历史 K 线摘要、组合快照、策略、内部预筛结果、数据新鲜度和近期同类记录一起交给 Agent。Agent 再输出结构化的 `TriggerDecision`，决定是否真的触发提醒、进入 Review、生成机会，或忽略本次消息。
 
 股票画像用于支撑信息面召回和机会发现。初始画像不需要追求完整知识图谱，可以先由股票主数据、行业/板块/概念标签、历史 K 线统计、成交量特征、近期已确认消息主题和人工补充信息拼成可向量化文本。组合持仓、成本、仓位和风险约束属于用户上下文，不应写入通用股票画像，而应在 `Agent Context Pack` 中动态附加。
 
-## 5. 账户、仓位与策略
+## 5. 后台监控与命中
+
+后台监控是系统内置能力，不是用户逐条创建的业务对象。
+
+系统应内置多类监控任务，例如：
+
+- 数据面策略监控：扫描行情、日 K、成交量、数据新鲜度与策略条件的匹配情况。
+- 消息面策略监控：扫描金十、公告、财报、研报、政策消息与策略、持仓、主题的相关性。
+- 组合风险监控：扫描仓位集中度、持仓异动、浮盈亏、数据过期和风险暴露。
+- 每日基本面监控：按天汇总财报、公告、估值、行业变化，检查长期策略 thesis 是否变化。
+- 数据质量监控：检查行情源失败、K 线缺口、延迟和异常值。
+
+用户配置的是任务开关、周期、作用范围、敏感度、冷却时间、通知等级、Agent doublecheck 是否启用和 Agent 成本预算，而不是逐个配置单票价格突破规则。
+
+每次后台任务执行都应生成 `MonitorRun`，记录任务类型、扫描范围、输入数据窗口、扫描数量、命中数量、耗时、状态和失败原因。命中策略、组合、股票或消息时生成 `MonitorHit`，记录命中的对象、证据、预筛原因和后续处理结果。
+
+`MatchRule` 是内部预筛能力，不是用户主模型。价格、涨跌幅、日 K、数据新鲜度、消息相关性、组合权重等规则都只是为了发现值得进入 Agent doublecheck 的候选命中。
+
+监控页面的核心应是可观测性：任务配置、正在执行的任务、执行历史、命中记录、命中证据、是否进入 Agent doublecheck、Agent 结论、最终产生的 Alert 或 Review。
+
+## 6. 账户、仓位与策略
 
 账户/组合是操作建议的上下文核心。
 
@@ -230,7 +258,7 @@ Agent 可以临时检索补充证据，但长期数据资产应由股票数据�
 
 策略更新不应被 Agent 直接写入正式策略。Review 只能生成 `strategy_patch`，进入待确认状态；用户确认后才生成新策略版本。
 
-## 6. Review 是闭环枢纽
+## 7. Review 是闭环枢纽
 
 Review 负责把触发事件、策略、行情、消息、组合快照和记忆放在一起判断。
 
@@ -239,13 +267,14 @@ Review 的输出应分清：
 - `trade_signal`：账户无关信号。
 - `strategy_patch`：策略修订建议，等待用户确认。
 - `proposed_operation`：账户绑定操作提案，必须经过确定性约束检查。
-- `continue_watch`：继续盯盘。
-- `ignore`：忽略本次触发。
-- `close_watch`：关闭或归档盯盘。
+- `continue_monitoring`：继续监控，不调整策略。
+- `ignore`：忽略本次命中。
+- `suppress_hit`：压制本次或同类低价值命中。
+- `adjust_monitor_config`：建议调整监控配置，等待用户确认。
 
 Review 不等同于下单，也不直接改持仓。
 
-## 7. 确定性约束检查
+## 8. 确定性约束检查
 
 所有账户绑定操作提案都必须经过非 Agent 的 guardrails。
 
@@ -253,7 +282,7 @@ guardrails 至少负责检查现金、可卖数量、单票上限、禁止买卖
 
 Agent 可以解释和建议，但不能绕过 guardrails。
 
-## 8. Agent、Skill 与授权边界
+## 9. Agent、Skill 与授权边界
 
 股票模块需要自己的 Provider / Model 管理，不应耦合 Codex 页面。
 
@@ -263,7 +292,7 @@ Codex CLI 可以作为执行器之一，但股票模块的能力边界应独立�
 
 Skill 可以扩展数据获取、分析和检索能力。Skill 的可用性应定期探测，部分能力不可用时要在 Prompt 或任务说明中提前屏蔽。
 
-## 9. 决策留痕
+## 10. 决策留痕
 
 凡是涉及 Agent 的决策行为，都要进入股票模块自己的 Decision Ledger。
 
@@ -281,7 +310,7 @@ Skill 可以扩展数据获取、分析和检索能力。Skill 的可用性应�
 
 留痕要有脱敏、裁剪和保留策略，避免长期运行后膨胀或泄露敏感信息。
 
-## 10. 记忆回流
+## 11. 记忆回流
 
 记忆不是聊天记录，而是股票对象网络中的长期经验。
 
@@ -289,18 +318,18 @@ Skill 可以扩展数据获取、分析和检索能力。Skill 的可用性应�
 
 记忆应回流到机会发现、策略生成、Review 和风险约束中，但不能越过用户确认和 guardrails。
 
-## 11. 数据边界
+## 12. 数据边界
 
 股票模块建议保持独立领域边界。
 
 操作状态和市场数据资产应在逻辑上分开：
 
-- `stock_ops`：账户、持仓、策略、盯盘、Review、提醒、操作记录、Agent 配置、Decision Ledger。
+- `stock_ops`：账户、持仓、策略、监控任务配置、监控运行、命中记录、Review、提醒、操作记录、Agent 配置、Decision Ledger。
 - `stock_market`：股票主数据、行情、历史数据、估值、资金流、公告、新闻、研报和事件。
 
 即使物理存储暂时放在同一个库，也要保持 repo/service 边界，不让操作状态和行情资产互相穿透。
 
-## 12. V2 判断原则
+## 13. V2 判断原则
 
 V2 的目标不是复刻 V1，也不是给 V1 修补更多页面。
 
@@ -309,6 +338,7 @@ V2 应优先保证：
 - 对象网络正确。
 - 入口不是单线流程。
 - 数据任务能自闭环。
+- 后台监控是固化系统行为，用户只配置开关、周期、范围和预算。
 - 操作建议必须绑定账户上下文。
 - Review 有清晰输出。
 - guardrails 是确定性的。

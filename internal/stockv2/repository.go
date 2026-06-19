@@ -176,6 +176,33 @@ CREATE TABLE IF NOT EXISTS stockv2_quotes_latest (
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
 );
+CREATE TABLE IF NOT EXISTS stockv2_quote_refresh_statuses (
+    symbol TEXT PRIMARY KEY,
+    market TEXT,
+    source TEXT,
+    status TEXT NOT NULL,
+    last_attempt_at DATETIME NOT NULL,
+    last_success_at DATETIME,
+    last_failure_at DATETIME,
+    error_message TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_quote_refresh_statuses_status ON stockv2_quote_refresh_statuses(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_quote_refresh_statuses_updated_at ON stockv2_quote_refresh_statuses(updated_at);
+CREATE TABLE IF NOT EXISTS stockv2_quote_refresh_task_state (
+    task_type TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    trigger_type TEXT,
+    started_at DATETIME,
+    finished_at DATETIME,
+    scope_summary TEXT,
+    scanned_count INTEGER NOT NULL DEFAULT 0,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    updated_at DATETIME NOT NULL
+);
 CREATE TABLE IF NOT EXISTS stockv2_portfolio_snapshots (
     id TEXT PRIMARY KEY,
     portfolio_id TEXT NOT NULL,
@@ -360,6 +387,74 @@ CREATE TABLE IF NOT EXISTS stockv2_daily_bar_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bar_jobs_created_at
     ON stockv2_daily_bar_jobs(created_at);
+
+-- 监控与任务:系统固化的后台监控行为(非用户创建对象)。
+-- task_configs 存开关/周期/范围/敏感度/冷却/Agent 开关与预算;runs 记录每次执行;
+-- hits 记录规则命中候选(candidate→可选 doublecheck→alerted)。
+CREATE TABLE IF NOT EXISTS stockv2_monitor_task_configs (
+    task_type TEXT PRIMARY KEY,
+    enabled INTEGER DEFAULT 0,
+    interval_seconds INTEGER DEFAULT 3600,
+    scope TEXT,
+    sensitivity TEXT DEFAULT 'normal',
+    cooldown_seconds INTEGER DEFAULT 3600,
+    agent_doublecheck_enabled INTEGER DEFAULT 0,
+    agent_budget INTEGER DEFAULT 0,
+    updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_monitor_runs (
+    id TEXT PRIMARY KEY,
+    task_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    started_at DATETIME NOT NULL,
+    finished_at DATETIME,
+    scope_summary TEXT,
+    scanned_count INTEGER DEFAULT 0,
+    hit_count INTEGER DEFAULT 0,
+    alert_count INTEGER DEFAULT 0,
+    review_count INTEGER DEFAULT 0,
+    success_count INTEGER DEFAULT 0,
+    failed_count INTEGER DEFAULT 0,
+    error_message TEXT,
+    metadata_json TEXT,
+    created_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_monitor_runs_task_type ON stockv2_monitor_runs(task_type);
+CREATE INDEX IF NOT EXISTS idx_stockv2_monitor_runs_status ON stockv2_monitor_runs(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_monitor_runs_created_at ON stockv2_monitor_runs(created_at);
+CREATE TABLE IF NOT EXISTS stockv2_monitor_hits (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    strategy_id TEXT,
+    portfolio_id TEXT,
+    symbol TEXT,
+    market TEXT,
+    title TEXT NOT NULL,
+    summary TEXT,
+    evidence_json TEXT,
+    agent_decision_id TEXT,
+    alert_id TEXT,
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES stockv2_monitor_runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_monitor_hits_run_id ON stockv2_monitor_hits(run_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_monitor_hits_task_type ON stockv2_monitor_hits(task_type);
+CREATE INDEX IF NOT EXISTS idx_stockv2_monitor_hits_status ON stockv2_monitor_hits(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_monitor_hits_strategy_id ON stockv2_monitor_hits(strategy_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_monitor_hits_portfolio_id ON stockv2_monitor_hits(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_monitor_hits_symbol ON stockv2_monitor_hits(symbol);
+-- 内置监控任务默认配置(全部默认关闭,用户显式开启后才会周期执行)。
+INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('universe_update', 0, 3600, 'normal', 0, 0, 0, datetime('now'));
+INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('latest_quote_refresh', 0, 300, 'normal', 0, 0, 0, datetime('now'));
+INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('daily_bars_sync', 0, 86400, 'normal', 0, 0, 0, datetime('now'));
+INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('data_strategy_monitor', 0, 600, 'normal', 1800, 0, 0, datetime('now'));
+INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('portfolio_risk_monitor', 0, 600, 'normal', 1800, 0, 0, datetime('now'));
+INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('news_strategy_monitor', 0, 3600, 'normal', 3600, 0, 0, datetime('now'));
+INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('daily_fundamental_monitor', 0, 86400, 'normal', 3600, 0, 0, datetime('now'));
+INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('data_quality_monitor', 0, 3600, 'normal', 3600, 0, 0, datetime('now'));
 `
 
 // init 初始化 V2 表结构。如果检测到旧 schema（例如时间列是 TEXT 类型），
@@ -405,6 +500,37 @@ func (s *Store) init(ctx context.Context) error {
 		    ON stockv2_daily_bar_jobs(status, mode, symbol, range, adjusted)
 	`); err != nil {
 		return fmt.Errorf("create daily bar job running scope index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS stockv2_quote_refresh_statuses (
+		    symbol TEXT PRIMARY KEY,
+		    market TEXT,
+		    source TEXT,
+		    status TEXT NOT NULL,
+		    last_attempt_at DATETIME NOT NULL,
+		    last_success_at DATETIME,
+		    last_failure_at DATETIME,
+		    error_message TEXT,
+		    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+		    updated_at DATETIME NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_quote_refresh_statuses_status ON stockv2_quote_refresh_statuses(status);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_quote_refresh_statuses_updated_at ON stockv2_quote_refresh_statuses(updated_at);
+		CREATE TABLE IF NOT EXISTS stockv2_quote_refresh_task_state (
+		    task_type TEXT PRIMARY KEY,
+		    status TEXT NOT NULL,
+		    trigger_type TEXT,
+		    started_at DATETIME,
+		    finished_at DATETIME,
+		    scope_summary TEXT,
+		    scanned_count INTEGER NOT NULL DEFAULT 0,
+		    success_count INTEGER NOT NULL DEFAULT 0,
+		    failed_count INTEGER NOT NULL DEFAULT 0,
+		    error_message TEXT,
+		    updated_at DATETIME NOT NULL
+		)
+	`); err != nil {
+		return fmt.Errorf("ensure quote refresh status tables: %w", err)
 	}
 
 	return nil

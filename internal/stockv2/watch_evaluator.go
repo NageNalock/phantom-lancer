@@ -458,7 +458,7 @@ func alertTitleForRule(rule WatchRuleResult) string {
 	case WatchRuleQuoteStale:
 		return "行情数据过期"
 	default:
-		return "盯盘规则命中"
+		return "监控规则命中"
 	}
 }
 

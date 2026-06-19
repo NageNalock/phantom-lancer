@@ -1884,7 +1884,7 @@ export interface StockV2UniverseUpdateResponse {
   message: string;
 }
 
-export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "strategies" | "watches" | "settings";
+export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "strategies" | "settings";
 
 // ===== Daily Bars (日级历史行情) =====
 
@@ -1981,7 +1981,7 @@ export type DailyBarAdjusted = "none" | "qfq" | "hfq";
 
 // ===== Strategy (策略对象基础层) =====
 //
-// 策略是长期判断依据,与 Watch(何时检查)、Review(当次判断)分离。
+// 策略是长期判断依据,由系统内置监控任务扫描;Review 只负责当次判断。
 // active 策略不可原地覆盖,编辑会生成新 strategy_version,旧版本保留供回看。
 
 export type StockV2StrategyKind = "symbol_strategy" | "portfolio_monitor";
@@ -2078,11 +2078,10 @@ export interface StockV2StrategyInput {
   createdBy?: string;
 }
 
-// ===== Watch / Alert (盯盘与触发层) =====
+// ===== Legacy Watch / Alert compatibility =====
 //
-// Watch 是长期盯盘对象,来自策略 / 组合监控 / 人工创建;Trigger 是 Watch 内的确定性
-// 规则(价格突破、涨跌幅、数据过期、组合权重过高等);Alert 是一次规则命中的提醒台账,
-// 需去重 / 冷却 / 确认 / 忽略 / 解决。
+// Watch 不再是 V2 的用户主模型;保留这些类型是为了兼容旧路由、旧数据和底层规则评估。
+// 新 UI 只暴露系统内置 MonitorTask 的开关、周期、运行历史、命中记录和 Alert 台账。
 export type StockV2WatchStatus = "active" | "paused" | "archived";
 export type StockV2WatchSource = "manual" | "strategy" | "portfolio_monitor";
 export type StockV2WatchTriggerPolicy = "any" | "all";
@@ -2180,7 +2179,7 @@ export interface StockV2WatchRuleResult {
   dataTime?: string;
 }
 
-/** 单次运行 Watch 的结果。matched / not_matched / skipped / degraded 为规则评估状态。 */
+/** 旧 Watch 兼容运行结果。matched / not_matched / skipped / degraded 为规则评估状态。 */
 export interface StockV2WatchRunResult {
   watchId?: string;
   status?: "matched" | "not_matched" | "skipped" | "degraded" | string;
@@ -2228,4 +2227,133 @@ export interface StockV2AlertListResponse {
   total?: number;
   limit?: number;
   offset?: number;
+}
+
+// ===== Monitor(监控与任务:系统固化后台监控的可观测性)=====
+// Watch 不再是用户主模型;监控任务由系统内置,用户只配置开关/周期/范围/敏感度/冷却/Agent。
+
+export type StockV2MonitorRunStatus = "running" | "completed" | "failed" | "cancelled";
+export type StockV2MonitorTriggerType = "manual" | "scheduled" | "event";
+export type StockV2MonitorHitStatus = "candidate" | "doublechecked" | "alerted" | "reviewed" | "ignored";
+
+export interface StockV2MonitorTaskConfig {
+  enabled?: boolean;
+  intervalSeconds?: number;
+  scope?: string;
+  sensitivity?: string;
+  cooldownSeconds?: number;
+  agentDoublecheckEnabled?: boolean;
+  agentBudget?: number;
+}
+
+export interface StockV2MonitorTaskDefinition {
+  taskType: string;
+  label?: string;
+  description?: string;
+  category?: string;
+  runnable?: boolean;
+  configurable?: boolean;
+  defaultConfig?: StockV2MonitorTaskConfig;
+}
+
+export interface StockV2MonitorRun {
+  id: string;
+  taskType: string;
+  status?: StockV2MonitorRunStatus | string;
+  triggerType?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  scopeSummary?: string;
+  scannedCount?: number;
+  hitCount?: number;
+  alertCount?: number;
+  reviewCount?: number;
+  successCount?: number;
+  failedCount?: number;
+  errorMessage?: string;
+  metadata?: Record<string, unknown>;
+  createdAt?: string;
+}
+
+export interface StockV2MonitorHit {
+  id: string;
+  runId?: string;
+  taskType?: string;
+  status?: StockV2MonitorHitStatus | string;
+  strategyId?: string;
+  portfolioId?: string;
+  symbol?: string;
+  market?: string;
+  title?: string;
+  summary?: string;
+  evidence?: Record<string, unknown>;
+  agentDecisionId?: string;
+  alertId?: string;
+  createdAt?: string;
+}
+
+export interface StockV2MonitorTask {
+  definition: StockV2MonitorTaskDefinition;
+  config: StockV2MonitorTaskConfig;
+  latestRun?: StockV2MonitorRun;
+}
+
+export interface StockV2MonitorTaskConfigInput {
+  enabled?: boolean;
+  intervalSeconds?: number;
+  scope?: string;
+  sensitivity?: string;
+  cooldownSeconds?: number;
+  agentDoublecheckEnabled?: boolean;
+  agentBudget?: number;
+}
+
+export interface StockV2MonitorTaskListResponse {
+  items: StockV2MonitorTask[];
+}
+
+export interface StockV2MonitorRunListResponse {
+  items: StockV2MonitorRun[];
+  total?: number;
+  limit?: number;
+  offset?: number;
+}
+
+export interface StockV2MonitorHitListResponse {
+  items: StockV2MonitorHit[];
+  total?: number;
+  limit?: number;
+  offset?: number;
+}
+
+export interface StockV2QuoteRefreshStatus {
+  symbol: string;
+  market?: string;
+  source?: string;
+  status: string;
+  lastAttemptAt?: string;
+  lastSuccessAt?: string;
+  lastFailureAt?: string;
+  errorMessage?: string;
+  consecutiveFailures?: number;
+  updatedAt?: string;
+}
+
+export interface StockV2QuoteRefreshTaskState {
+  taskType: string;
+  status: string;
+  triggerType?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  scopeSummary?: string;
+  scannedCount?: number;
+  successCount?: number;
+  failedCount?: number;
+  errorMessage?: string;
+  updatedAt?: string;
+}
+
+export interface StockV2QuoteRefreshStateResponse {
+  state: StockV2QuoteRefreshTaskState;
+  items: StockV2QuoteRefreshStatus[];
 }

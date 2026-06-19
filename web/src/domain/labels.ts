@@ -881,3 +881,83 @@ export function stockV2AlertLevelTone(level?: string): "good" | "warn" | "danger
     default: return "neutral";
   }
 }
+
+// ========== Monitor(监控与任务)==========
+
+export function stockV2MonitorTaskTypeLabel(taskType?: string): string {
+  switch (taskType) {
+    case "universe_update": return "主数据更新";
+    case "latest_quote_refresh": return "最新行情刷新";
+    case "daily_bars_sync": return "日K抓取";
+    case "data_strategy_monitor": return "数据面策略监控";
+    case "portfolio_risk_monitor": return "组合风险监控";
+    case "news_strategy_monitor": return "消息面策略监控";
+    case "daily_fundamental_monitor": return "每日基本面监控";
+    case "data_quality_monitor": return "数据质量监控";
+    default: return taskType || "监控任务";
+  }
+}
+
+export function stockV2MonitorCategoryLabel(category?: string): string {
+  switch (category) {
+    case "data": return "数据任务";
+    case "strategy": return "策略监控";
+    case "portfolio": return "组合监控";
+    case "news": return "消息面";
+    case "fundamental": return "基本面";
+    case "quality": return "数据质量";
+    default: return category || "-";
+  }
+}
+
+export function stockV2MonitorRunStatusLabel(status?: string): string {
+  switch (status) {
+    case "running": return "运行中";
+    case "completed": return "已完成";
+    case "failed": return "失败";
+    case "cancelled": return "已取消";
+    default: return status || "未知";
+  }
+}
+
+export function stockV2MonitorRunStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "completed": return "good";
+    case "running": return "warn";
+    case "failed": return "danger";
+    case "cancelled": return "neutral";
+    default: return "neutral";
+  }
+}
+
+export function stockV2MonitorHitStatusLabel(status?: string): string {
+  switch (status) {
+    case "candidate": return "候选";
+    case "doublechecked": return "已复核";
+    case "alerted": return "已提醒";
+    case "reviewed": return "已Review";
+    case "ignored": return "已忽略";
+    default: return status || "未知";
+  }
+}
+
+export function stockV2MonitorHitStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "candidate": return "warn";
+    case "doublechecked": return "neutral";
+    case "alerted": return "danger";
+    case "reviewed": return "good";
+    case "ignored": return "neutral";
+    default: return "neutral";
+  }
+}
+
+export function stockV2MonitorAgentStateLabel(state?: string): string {
+  switch (state) {
+    case "not_enabled": return "未启用";
+    case "pending": return "待调用";
+    case "enabled_no_executor": return "已启用(未接执行器)";
+    case "skipped": return "已跳过";
+    default: return state || "-";
+  }
+}

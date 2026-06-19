@@ -1,4 +1,4 @@
-import { ArrowClockwise, CaretLeft, CaretRight, Clock, ClockCounterClockwise, Plus, X } from "@phosphor-icons/react";
+import { ArrowClockwise, CaretLeft, CaretRight, Clock, ClockCounterClockwise, MagnifyingGlass, Plus, X } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import type { AppActions } from "../../app/App";
 import type { AppData, StockV2Instrument, StockV2UpdateJob, StockV2UniverseUpdateRequest } from "../../app/types";
@@ -59,10 +59,12 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [jumpInput, setJumpInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [addHolding, setAddHolding] = useState<{ inst: StockV2Instrument } | null>(null);
   const [selectedInst, setSelectedInst] = useState<StockV2Instrument | null>(null);
 
   const portfolios = stockv2.portfolios || [];
+  const isSearching = searchQuery.trim().length > 0;
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
   const progressPct = runningJob
@@ -77,20 +79,36 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
     }
   }
 
-  // 拉取分页数据
-  async function loadPage(pageNum: number) {
+  // 拉取分页数据；输入搜索词时改走后端模糊搜索，避免一次性加载全市场后前端过滤。
+  async function loadPage(pageNum: number, query = searchQuery) {
+    const keyword = query.trim();
     setLoading(true);
     try {
-      const data = await actions.api<InstrumentsPage>(
-        `/api/stockv2/instruments?limit=${PAGE_SIZE}&offset=${pageNum * PAGE_SIZE}`
-      );
-      setInstrumentsPage({
-        ...data,
-        items: Array.isArray(data.items) ? data.items : [],
-      });
-      setPage(pageNum);
-      if (data.total !== undefined) {
-        setTotalCount(data.total);
+      if (keyword) {
+        const data = await actions.api<Partial<InstrumentsPage>>(
+          `/api/stockv2/instruments/search?q=${encodeURIComponent(keyword)}&limit=100`
+        );
+        const items = Array.isArray(data.items) ? data.items : [];
+        setInstrumentsPage({
+          items,
+          total: data.total ?? items.length,
+          limit: data.limit ?? 100,
+          offset: 0,
+        });
+        setPage(0);
+        setTotalCount(data.total ?? items.length);
+      } else {
+        const data = await actions.api<InstrumentsPage>(
+          `/api/stockv2/instruments?limit=${PAGE_SIZE}&offset=${pageNum * PAGE_SIZE}`
+        );
+        setInstrumentsPage({
+          ...data,
+          items: Array.isArray(data.items) ? data.items : [],
+        });
+        setPage(pageNum);
+        if (data.total !== undefined) {
+          setTotalCount(data.total);
+        }
       }
     } catch (e) {
       actions.setToast(`加载失败：${friendlyError(e)}`, "danger");
@@ -99,11 +117,14 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
     }
   }
 
-  // 初始加载 + 更新完成后刷新
+  // 初始加载 + 搜索防抖刷新
   useEffect(() => {
-    void loadPage(0);
+    const timer = window.setTimeout(() => {
+      void loadPage(0, searchQuery);
+    }, searchQuery.trim() ? 250 : 0);
+    return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [searchQuery]);
 
   // 当更新状态从 running 变为完成时，刷新第一页
   const wasRunningRef = useRef(false);
@@ -197,6 +218,21 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         title={`股票主数据 (${totalCount > 0 ? totalCount : "..."})`}
         subtitle="新浪列表源 + 腾讯行情源 · 全量 A 股"
       >
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div className="relative w-[340px] max-w-full">
+            <MagnifyingGlass size={15} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
+            <input
+              type="search"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="搜索代码或名称，例如 302132 / 中航成飞"
+              className="w-full rounded border border-[var(--line)] bg-[var(--surface)] py-2 pl-8 pr-3 text-sm text-[var(--text)] focus:border-[var(--accent)] focus:outline-none"
+            />
+          </div>
+          <span className="shrink-0 text-xs text-[var(--muted)]">
+            {isSearching ? `搜索结果 ${instrumentsPage?.items.length || 0} 条` : `每页 ${PAGE_SIZE} 条`}
+          </span>
+        </div>
         {loading && !instrumentsPage ? (
           <div className="py-8 text-center text-sm text-[var(--muted)]">
             <Clock size={24} className="mx-auto mb-2 opacity-50 animate-spin" />
@@ -205,7 +241,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         ) : !instrumentsPage || instrumentsPage.items.length === 0 ? (
           <div className="py-8 text-center text-sm text-[var(--muted)]">
             <Clock size={24} className="mx-auto mb-2 opacity-50" />
-            暂无股票数据，点击右上角「立即更新」开始首次同步。
+            {isSearching ? `未找到「${searchQuery.trim()}」匹配的股票。` : "暂无股票数据，点击右上角「立即更新」开始首次同步。"}
           </div>
         ) : (
           <>
@@ -237,6 +273,11 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
             </div>
 
             {/* 分页控件 */}
+            {isSearching ? (
+              <div className="mt-4 border-t border-[var(--line)] pt-3 text-xs text-[var(--muted)]">
+                搜索最多展示前 100 条结果，清空搜索词后恢复分页浏览。
+              </div>
+            ) : (
             <div className="mt-4 flex items-center justify-between border-t border-[var(--line)] pt-3">
               <div className="text-xs text-[var(--muted)]">
                 第 {page * PAGE_SIZE + 1} - {Math.min((page + 1) * PAGE_SIZE, totalCount || page * PAGE_SIZE + instrumentsPage.items.length)} 条
@@ -319,6 +360,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
                 </div>
               </div>
             </div>
+            )}
           </>
         )}
       </Panel>

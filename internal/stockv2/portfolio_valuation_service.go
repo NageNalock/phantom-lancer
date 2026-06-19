@@ -16,12 +16,12 @@ func (s *Service) RefreshPortfolioValuation(ctx context.Context, portfolioID str
 	}
 
 	symbols := uniqueHoldingSymbols(holdings)
-	quotes, err := s.store.GetLatestQuotes(ctx, symbols)
+	quoteRefresh, err := s.RefreshLatestQuotes(ctx, symbols, triggerSource)
 	if err != nil {
-		return PortfolioRefreshResult{}, wrapError(err, "get latest quotes")
+		return PortfolioRefreshResult{}, wrapError(err, "refresh latest quotes")
 	}
 
-	result := RecalculatePortfolioFromQuotes(portfolio, holdings, quotes, time.Now())
+	result := RecalculatePortfolioFromQuotes(portfolio, holdings, quoteRefresh.Items, time.Now())
 	if err := s.store.SavePortfolioValuation(ctx, result.Holdings, result.Snapshot); err != nil {
 		return result, err
 	}

@@ -142,6 +142,150 @@ func (s *Store) MarkLatestQuoteFailed(ctx context.Context, symbol, reason string
 	return quote, true, nil
 }
 
+func (s *Store) UpsertQuoteRefreshStatus(ctx context.Context, status QuoteRefreshStatus) error {
+	if strings.TrimSpace(status.Symbol) == "" {
+		return nil
+	}
+	now := time.Now()
+	if status.LastAttemptAt.IsZero() {
+		status.LastAttemptAt = now
+	}
+	if status.UpdatedAt.IsZero() {
+		status.UpdatedAt = now
+	}
+	if status.Source == "" {
+		status.Source = QuoteSourceTencent
+	}
+	status.ErrorMessage = safelog.Text(status.ErrorMessage, 240)
+	failures := 0
+	if status.Status == QuoteStatusFailed {
+		failures = 1
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO stockv2_quote_refresh_statuses
+			(symbol, market, source, status, last_attempt_at, last_success_at, last_failure_at,
+			 error_message, consecutive_failures, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(symbol) DO UPDATE SET
+			market = CASE WHEN excluded.market IS NULL OR excluded.market = '' THEN stockv2_quote_refresh_statuses.market ELSE excluded.market END,
+			source = CASE WHEN excluded.source IS NULL OR excluded.source = '' THEN stockv2_quote_refresh_statuses.source ELSE excluded.source END,
+			status = excluded.status,
+			last_attempt_at = excluded.last_attempt_at,
+			last_success_at = COALESCE(excluded.last_success_at, stockv2_quote_refresh_statuses.last_success_at),
+			last_failure_at = COALESCE(excluded.last_failure_at, stockv2_quote_refresh_statuses.last_failure_at),
+			error_message = excluded.error_message,
+			consecutive_failures = CASE
+				WHEN excluded.status = ? THEN stockv2_quote_refresh_statuses.consecutive_failures + 1
+				ELSE 0
+			END,
+			updated_at = excluded.updated_at
+	`,
+		status.Symbol,
+		nullableMonitorString(status.Market),
+		nullableMonitorString(status.Source),
+		status.Status,
+		status.LastAttemptAt,
+		nullableMonitorTime(status.LastSuccessAt),
+		nullableMonitorTime(status.LastFailureAt),
+		nullableMonitorString(status.ErrorMessage),
+		failures,
+		status.UpdatedAt,
+		QuoteStatusFailed,
+	)
+	return wrapError(err, "upsert quote refresh status")
+}
+
+func (s *Store) UpsertQuoteRefreshTaskState(ctx context.Context, state QuoteRefreshTaskState) error {
+	if strings.TrimSpace(state.TaskType) == "" {
+		return nil
+	}
+	now := time.Now()
+	if state.UpdatedAt.IsZero() {
+		state.UpdatedAt = now
+	}
+	state.ErrorMessage = safelog.Text(state.ErrorMessage, 240)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO stockv2_quote_refresh_task_state
+			(task_type, status, trigger_type, started_at, finished_at, scope_summary,
+			 scanned_count, success_count, failed_count, error_message, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(task_type) DO UPDATE SET
+			status = excluded.status,
+			trigger_type = excluded.trigger_type,
+			started_at = excluded.started_at,
+			finished_at = excluded.finished_at,
+			scope_summary = excluded.scope_summary,
+			scanned_count = excluded.scanned_count,
+			success_count = excluded.success_count,
+			failed_count = excluded.failed_count,
+			error_message = excluded.error_message,
+			updated_at = excluded.updated_at
+	`,
+		state.TaskType,
+		state.Status,
+		nullableMonitorString(state.TriggerType),
+		nullableMonitorTime(state.StartedAt),
+		nullableMonitorTime(state.FinishedAt),
+		nullableMonitorString(state.ScopeSummary),
+		state.ScannedCount,
+		state.SuccessCount,
+		state.FailedCount,
+		nullableMonitorString(state.ErrorMessage),
+		state.UpdatedAt,
+	)
+	return wrapError(err, "upsert quote refresh task state")
+}
+
+func (s *Store) GetQuoteRefreshTaskState(ctx context.Context, taskType string) (*QuoteRefreshTaskState, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT task_type, status, COALESCE(trigger_type,''), started_at, finished_at,
+		       COALESCE(scope_summary,''), scanned_count, success_count, failed_count,
+		       COALESCE(error_message,''), updated_at
+		FROM stockv2_quote_refresh_task_state
+		WHERE task_type = ?
+	`, taskType)
+	state, err := scanQuoteRefreshTaskState(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, wrapError(err, "get quote refresh task state")
+	}
+	return &state, nil
+}
+
+func (s *Store) ListQuoteRefreshStatuses(ctx context.Context, limit int) ([]QuoteRefreshStatus, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT symbol, COALESCE(market,''), COALESCE(source,''), status,
+		       last_attempt_at, last_success_at, last_failure_at,
+		       COALESCE(error_message,''), consecutive_failures, updated_at
+		FROM stockv2_quote_refresh_statuses
+		ORDER BY updated_at DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, wrapError(err, "list quote refresh statuses")
+	}
+	defer rows.Close()
+
+	items := make([]QuoteRefreshStatus, 0)
+	for rows.Next() {
+		item, err := scanQuoteRefreshStatus(rows)
+		if err != nil {
+			return nil, wrapError(err, "scan quote refresh status")
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(err, "iterate quote refresh statuses")
+	}
+	return items, nil
+}
+
 func (s *Store) getLatestQuote(ctx context.Context, symbol string) (StockV2QuoteLatest, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT symbol, market, COALESCE(name,''), last_price, prev_close, open_price,
@@ -151,6 +295,63 @@ func (s *Store) getLatestQuote(ctx context.Context, symbol string) (StockV2Quote
 		WHERE symbol = ?
 	`, symbol)
 	return scanLatestQuote(row)
+}
+
+func scanQuoteRefreshTaskState(row rowScanner) (QuoteRefreshTaskState, error) {
+	var state QuoteRefreshTaskState
+	var startedAt, finishedAt sql.NullTime
+	var triggerType, scopeSummary, errorMessage sql.NullString
+	if err := row.Scan(
+		&state.TaskType,
+		&state.Status,
+		&triggerType,
+		&startedAt,
+		&finishedAt,
+		&scopeSummary,
+		&state.ScannedCount,
+		&state.SuccessCount,
+		&state.FailedCount,
+		&errorMessage,
+		&state.UpdatedAt,
+	); err != nil {
+		return state, err
+	}
+	state.TriggerType = triggerType.String
+	if startedAt.Valid {
+		state.StartedAt = startedAt.Time
+	}
+	if finishedAt.Valid {
+		state.FinishedAt = finishedAt.Time
+	}
+	state.ScopeSummary = scopeSummary.String
+	state.ErrorMessage = errorMessage.String
+	return state, nil
+}
+
+func scanQuoteRefreshStatus(row rowScanner) (QuoteRefreshStatus, error) {
+	var status QuoteRefreshStatus
+	var lastSuccessAt, lastFailureAt sql.NullTime
+	if err := row.Scan(
+		&status.Symbol,
+		&status.Market,
+		&status.Source,
+		&status.Status,
+		&status.LastAttemptAt,
+		&lastSuccessAt,
+		&lastFailureAt,
+		&status.ErrorMessage,
+		&status.ConsecutiveFailures,
+		&status.UpdatedAt,
+	); err != nil {
+		return status, err
+	}
+	if lastSuccessAt.Valid {
+		status.LastSuccessAt = lastSuccessAt.Time
+	}
+	if lastFailureAt.Valid {
+		status.LastFailureAt = lastFailureAt.Time
+	}
+	return status, nil
 }
 
 func scanLatestQuote(row rowScanner) (StockV2QuoteLatest, error) {

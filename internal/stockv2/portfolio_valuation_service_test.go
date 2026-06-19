@@ -2,6 +2,7 @@ package stockv2
 
 import (
 	"context"
+	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
@@ -34,22 +35,9 @@ func TestRefreshPortfolioValuationUsesQuotesAndWritesSnapshot(t *testing.T) {
 			t.Fatalf("create holding %s: %v", holding.Symbol, err)
 		}
 	}
-	quoteAt := time.Date(2026, 6, 18, 14, 55, 3, 0, oldPriceAt.Location())
-	if err := store.UpsertLatestQuote(ctx, StockV2QuoteLatest{
-		Symbol:    "000001",
-		Market:    "SZ",
-		Name:      "平安银行",
-		LastPrice: 12,
-		PrevClose: 11,
-		QuoteAt:   quoteAt,
-		FetchedAt: quoteAt.Add(2 * time.Second),
-		Source:    QuoteSourceTencent,
-		Status:    QuoteStatusFresh,
-	}); err != nil {
-		t.Fatalf("upsert quote: %v", err)
-	}
-
-	svc := NewService(store, nil, nil)
+	svc := NewService(store, nil, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return stringResponse(http.StatusOK, tencentQuoteLine("sz000001", "平安银行", "000001", "12.00", "11.00")), nil
+	})})
 	result, err := svc.RefreshPortfolioValuation(ctx, portfolio.ID, "test")
 	if err != nil {
 		t.Fatalf("refresh valuation: %v", err)

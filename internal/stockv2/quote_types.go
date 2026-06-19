@@ -42,6 +42,36 @@ type QuoteRefreshResult struct {
 	FetchedAt      time.Time            `json:"fetchedAt"`
 }
 
+// QuoteRefreshStatus is the update-only refresh state for one symbol. It is
+// deliberately not a history table: high-frequency quote refresh should update
+// this row instead of appending monitor runs.
+type QuoteRefreshStatus struct {
+	Symbol              string    `json:"symbol"`
+	Market              string    `json:"market,omitempty"`
+	Source              string    `json:"source,omitempty"`
+	Status              string    `json:"status"`
+	LastAttemptAt       time.Time `json:"lastAttemptAt"`
+	LastSuccessAt       time.Time `json:"lastSuccessAt,omitempty"`
+	LastFailureAt       time.Time `json:"lastFailureAt,omitempty"`
+	ErrorMessage        string    `json:"errorMessage,omitempty"`
+	ConsecutiveFailures int       `json:"consecutiveFailures"`
+	UpdatedAt           time.Time `json:"updatedAt"`
+}
+
+type QuoteRefreshTaskState struct {
+	TaskType     string    `json:"taskType"`
+	Status       string    `json:"status"`
+	TriggerType  string    `json:"triggerType,omitempty"`
+	StartedAt    time.Time `json:"startedAt,omitempty"`
+	FinishedAt   time.Time `json:"finishedAt,omitempty"`
+	ScopeSummary string    `json:"scopeSummary,omitempty"`
+	ScannedCount int       `json:"scannedCount"`
+	SuccessCount int       `json:"successCount"`
+	FailedCount  int       `json:"failedCount"`
+	ErrorMessage string    `json:"errorMessage,omitempty"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
 type RequestRefreshLatestQuotes struct {
 	Symbols       []string `json:"symbols"`
 	TriggerSource string   `json:"triggerSource"`

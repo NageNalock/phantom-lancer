@@ -51,6 +51,9 @@ func (s *Service) RefreshLatestQuotes(ctx context.Context, symbols []string, tri
 		FailedItems: append([]UpdateFailure{}, failures...),
 		FetchedAt:   time.Now(),
 	}
+	for _, failure := range failures {
+		s.recordQuoteRefreshFailure(ctx, failure.Symbol, "", failure.Reason, result.FetchedAt)
+	}
 	if len(specs) == 0 {
 		result.FailedCount = len(result.FailedItems)
 		return result, nil
@@ -85,13 +88,20 @@ func (s *Service) RefreshLatestQuotes(ctx context.Context, symbols []string, tri
 			})
 			continue
 		}
+		s.recordQuoteRefreshSuccess(ctx, quote)
 		result.Items = append(result.Items, quote)
 		result.RefreshedCount++
 	}
 
+	specBySymbol := make(map[string]quoteSymbol, len(specs))
+	for _, spec := range specs {
+		specBySymbol[spec.Symbol] = spec
+	}
 	for _, failure := range fetchFailures {
 		failure.Reason = safelog.Text(failure.Reason, 240)
 		result.FailedItems = append(result.FailedItems, failure)
+		spec := specBySymbol[failure.Symbol]
+		s.recordQuoteRefreshFailure(ctx, failure.Symbol, spec.Market, failure.Reason, result.FetchedAt)
 		if oldQuote, ok, err := s.store.MarkLatestQuoteFailed(ctx, failure.Symbol, failure.Reason); err != nil {
 			return result, err
 		} else if ok {
@@ -101,6 +111,34 @@ func (s *Service) RefreshLatestQuotes(ctx context.Context, symbols []string, tri
 
 	result.FailedCount = len(result.FailedItems)
 	return result, nil
+}
+
+func (s *Service) recordQuoteRefreshSuccess(ctx context.Context, quote StockV2QuoteLatest) {
+	// ponytail: status rows are best-effort observability; quote persistence above is the source of truth.
+	_ = s.store.UpsertQuoteRefreshStatus(ctx, QuoteRefreshStatus{
+		Symbol:        quote.Symbol,
+		Market:        quote.Market,
+		Source:        quote.Source,
+		Status:        QuoteStatusFresh,
+		LastAttemptAt: quote.FetchedAt,
+		LastSuccessAt: quote.FetchedAt,
+	})
+}
+
+func (s *Service) recordQuoteRefreshFailure(ctx context.Context, symbol, market, reason string, attemptedAt time.Time) {
+	if attemptedAt.IsZero() {
+		attemptedAt = time.Now()
+	}
+	// ponytail: keep only latest failure state; add append-only audit only if a real debugging need appears.
+	_ = s.store.UpsertQuoteRefreshStatus(ctx, QuoteRefreshStatus{
+		Symbol:        strings.TrimSpace(symbol),
+		Market:        market,
+		Source:        QuoteSourceTencent,
+		Status:        QuoteStatusFailed,
+		LastAttemptAt: attemptedAt,
+		LastFailureAt: attemptedAt,
+		ErrorMessage:  reason,
+	})
 }
 
 func (s *Service) GetLatestQuotes(ctx context.Context, symbols []string) ([]StockV2QuoteLatest, error) {
@@ -116,6 +154,21 @@ func (s *Service) GetLatestQuotes(ctx context.Context, symbols []string) ([]Stoc
 		normalized = append(normalized, spec.Symbol)
 	}
 	return s.store.GetLatestQuotes(ctx, normalized)
+}
+
+func (s *Service) GetLatestQuoteRefreshState(ctx context.Context, limit int) (QuoteRefreshTaskState, []QuoteRefreshStatus, error) {
+	state, err := s.store.GetQuoteRefreshTaskState(ctx, MonitorTaskLatestQuoteRefresh)
+	if err != nil {
+		return QuoteRefreshTaskState{}, nil, err
+	}
+	if state == nil {
+		state = &QuoteRefreshTaskState{TaskType: MonitorTaskLatestQuoteRefresh, Status: "idle"}
+	}
+	items, err := s.store.ListQuoteRefreshStatuses(ctx, limit)
+	if err != nil {
+		return QuoteRefreshTaskState{}, nil, err
+	}
+	return *state, items, nil
 }
 
 func (s *Service) fetchLatestQuotesForSpecs(ctx context.Context, specs []quoteSymbol) ([]StockV2QuoteLatest, error) {

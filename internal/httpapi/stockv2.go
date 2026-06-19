@@ -33,6 +33,7 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 
 	// 最新行情
 	mux.HandleFunc("GET /api/stockv2/quotes/latest", s.handleStockV2GetLatestQuotes)
+	mux.HandleFunc("GET /api/stockv2/quotes/refresh-state", s.handleStockV2GetQuoteRefreshState)
 	mux.HandleFunc("POST /api/stockv2/quotes/refresh", s.handleStockV2RefreshLatestQuotes)
 
 	// 策略对象
@@ -61,6 +62,14 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/stockv2/alerts/{id}/ack", s.handleStockV2AckAlert)
 	mux.HandleFunc("POST /api/stockv2/alerts/{id}/ignore", s.handleStockV2IgnoreAlert)
 	mux.HandleFunc("POST /api/stockv2/alerts/{id}/resolve", s.handleStockV2ResolveAlert)
+
+	// 监控与任务(系统固化后台监控的可观测性;不暴露「新建盯盘」)
+	mux.HandleFunc("GET /api/stockv2/monitor/tasks", s.handleStockV2ListMonitorTasks)
+	mux.HandleFunc("PUT /api/stockv2/monitor/tasks/{taskType}/config", s.handleStockV2UpdateMonitorTaskConfig)
+	mux.HandleFunc("POST /api/stockv2/monitor/tasks/{taskType}/run", s.handleStockV2RunMonitorTask)
+	mux.HandleFunc("GET /api/stockv2/monitor/runs", s.handleStockV2ListMonitorRuns)
+	mux.HandleFunc("GET /api/stockv2/monitor/runs/{id}", s.handleStockV2GetMonitorRun)
+	mux.HandleFunc("GET /api/stockv2/monitor/hits", s.handleStockV2ListMonitorHits)
 
 	// 更新任务
 	mux.HandleFunc("POST /api/stockv2/update/trigger", s.handleTriggerUpdate)

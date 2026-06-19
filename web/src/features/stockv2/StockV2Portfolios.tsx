@@ -1,9 +1,10 @@
 import { ArrowClockwise, Eye, Plus, Trash, Pencil, Wallet, X, Check, MagnifyingGlass } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import type { AppActions } from "../../app/App";
-import type { AppData, StockV2Holding, StockV2Instrument, StockV2Portfolio, StockV2PortfolioRefreshResult, StockV2PortfolioSnapshot, StockV2PortfolioWithHoldings, StockV2Watch, StockV2WatchListResponse } from "../../app/types";
+import type { AppData, StockV2Holding, StockV2Instrument, StockV2Portfolio, StockV2PortfolioRefreshResult, StockV2PortfolioSnapshot, StockV2PortfolioWithHoldings } from "../../app/types";
 import { Button, Field, Panel, Pill } from "../../components/ui";
 import { stockV2RiskLabel, stockV2ValuationStatusLabel, stockV2ValuationStatusTone } from "../../domain/labels";
+import { StockV2InstrumentDetail } from "./StockV2InstrumentDetail";
 
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
 
@@ -16,7 +17,7 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
   const [refreshing, setRefreshing] = useState(false);
   const [refreshResult, setRefreshResult] = useState<StockV2PortfolioRefreshResult | null>(null);
   const [snapshots, setSnapshots] = useState<StockV2PortfolioSnapshot[]>([]);
-  const [portfolioWatchIds, setPortfolioWatchIds] = useState<Record<string, string>>({});
+  const [selectedInstrument, setSelectedInstrument] = useState<StockV2Instrument | null>(null);
 
   // 选中第一个组合
   useEffect(() => {
@@ -24,26 +25,6 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
       setSelectedId(portfolios[0].id);
     }
   }, [portfolios, selectedId]);
-
-  async function fetchLinkedPortfolioWatches() {
-    try {
-      const res = await actions.api<StockV2WatchListResponse>("/api/stockv2/watches?limit=200");
-      const next: Record<string, string> = {};
-      for (const watch of res.items || []) {
-        if (watch.source === "portfolio_monitor" && watch.status !== "archived" && watch.portfolioId) {
-          next[watch.portfolioId] = watch.id;
-        }
-      }
-      setPortfolioWatchIds(next);
-    } catch {
-      setPortfolioWatchIds({});
-    }
-  }
-
-  useEffect(() => {
-    void fetchLinkedPortfolioWatches();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [actions]);
 
   const selected = portfolios.find((p) => p.id === selectedId) || null;
   const selectedRefreshResult = refreshResult && refreshResult.portfolioId === selected?.id ? refreshResult : null;
@@ -85,18 +66,6 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
     }
   }
 
-  async function createMonitorWatch(portfolio: StockV2PortfolioWithHoldings) {
-    if (portfolioWatchIds[portfolio.id]) {
-      openStockV2WatchesTab();
-      return;
-    }
-    await runAction("已关联组合监控", async () => {
-      const watch = await actions.api<StockV2Watch>(`/api/stockv2/portfolios/${portfolio.id}/create-monitor-watch`, { method: "POST" });
-      setPortfolioWatchIds((current) => ({ ...current, [portfolio.id]: watch.id }));
-      openStockV2WatchesTab();
-    });
-  }
-
   return (
     <div className="grid gap-4">
       {/* 组合列表 */}
@@ -119,7 +88,6 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
                 key={p.id}
                 portfolio={p}
                 selected={p.id === selectedId}
-                hasWatch={Boolean(portfolioWatchIds[p.id])}
                 onSelect={() => setSelectedId(p.id)}
                 onEdit={() => setEditingId(p.id)}
                 onDelete={() => void runAction("删除组合", async () => {
@@ -143,9 +111,9 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
                 <ArrowClockwise size={14} className="mr-1.5" />
                 {refreshing ? "刷新中" : "刷新资产"}
               </Button>
-              <Button onClick={() => void createMonitorWatch(selected)}>
+              <Button onClick={openStockV2MonitorTab}>
                 <Eye size={14} className="mr-1.5" />
-                {portfolioWatchIds[selected.id] ? "已关联盯盘" : "创建组合监控"}
+                监控与任务
               </Button>
               <Button tone="primary" onClick={() => setHoldingsDialog({ portfolioId: selected.id, mode: "add" })}>
                 <Plus size={14} className="mr-1.5" />
@@ -184,6 +152,7 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
                     <HoldingRow
                       key={h.id}
                       holding={h}
+                      onOpen={() => setSelectedInstrument(instrumentFromHolding(h))}
                       onEdit={() => setHoldingsDialog({ portfolioId: selected.id, mode: "edit", holding: h })}
                       onDelete={() => void runAction("删除持仓", async () => {
                         await actions.api(`/api/stockv2/portfolios/${selected.id}/holdings/${h.id}`, { method: "DELETE" });
@@ -257,6 +226,14 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
           }}
         />
       ) : null}
+
+      {selectedInstrument ? (
+        <StockV2InstrumentDetail
+          inst={selectedInstrument}
+          actions={actions}
+          onClose={() => setSelectedInstrument(null)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -264,14 +241,12 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
 function PortfolioRow({
   portfolio,
   selected,
-  hasWatch,
   onSelect,
   onEdit,
   onDelete,
 }: {
   portfolio: StockV2PortfolioWithHoldings;
   selected: boolean;
-  hasWatch: boolean;
   onSelect: () => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -287,7 +262,6 @@ function PortfolioRow({
           <Wallet size={16} className="text-[var(--muted)]" />
           <strong className="text-sm">{portfolio.name}</strong>
           <Pill tone="neutral">{stockV2RiskLabel(portfolio.riskLevel)}</Pill>
-          {hasWatch ? <Pill tone="good">已关联盯盘</Pill> : null}
           <span className="text-xs text-[var(--muted)]">· {portfolio.holdings?.length || 0} 只持仓</span>
         </div>
         {portfolio.description ? <p className="muted mt-1 text-xs">{portfolio.description}</p> : null}
@@ -315,13 +289,35 @@ function PortfolioRow({
   );
 }
 
-function HoldingRow({ holding, onEdit, onDelete }: { holding: StockV2Holding; onEdit: () => void; onDelete: () => void }) {
+function HoldingRow({
+  holding,
+  onOpen,
+  onEdit,
+  onDelete,
+}: {
+  holding: StockV2Holding;
+  onOpen: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
   const pnlPct = holding.costPrice && holding.quantity ? (holding.pnl || 0) / (holding.costPrice * holding.quantity) * 100 : 0;
   const pnlTone = (holding.pnl || 0) >= 0 ? "good" : "danger";
   const status = holding.tradableStatus || "unknown";
 
   return (
-    <tr className="border-b border-[var(--line-soft)] last:border-b-0 hover:bg-[var(--surface-soft)]">
+    <tr
+      className="cursor-pointer border-b border-[var(--line-soft)] last:border-b-0 hover:bg-[var(--surface-soft)]"
+      onClick={onOpen}
+      role="button"
+      tabIndex={0}
+      title="点击查看 K 线"
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+    >
       <td className="py-2 pr-4 font-mono text-sm">{holding.symbol}</td>
       <td className="py-2 pr-4 font-medium">{holding.name || "-"}</td>
       <td className="py-2 pr-4">{holding.quantity.toLocaleString()}</td>
@@ -338,16 +334,40 @@ function HoldingRow({ holding, onEdit, onDelete }: { holding: StockV2Holding; on
       </td>
       <td className="py-2 pr-4">
         <div className="flex gap-1">
-          <Button onClick={onEdit}>
+          <Button onClick={(e) => {
+            e.stopPropagation();
+            onEdit();
+          }}>
             <Pencil size={12} />
           </Button>
-          <Button tone="danger" onClick={onDelete}>
+          <Button tone="danger" onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}>
             <Trash size={12} />
           </Button>
         </div>
       </td>
     </tr>
   );
+}
+
+function instrumentFromHolding(holding: StockV2Holding): StockV2Instrument {
+  return {
+    id: `holding-${holding.portfolioId}-${holding.symbol}`,
+    symbol: holding.symbol,
+    market: holding.market,
+    name: holding.name || holding.symbol,
+    industry: "",
+    sector: "",
+    concepts: [],
+    listDate: "",
+    delistDate: "",
+    status: "active",
+    lastUpdate: holding.lastPriceAt || "",
+    createdAt: "",
+    updatedAt: holding.updatedAt || "",
+  };
 }
 
 function PortfolioValuationSummary({
@@ -801,10 +821,10 @@ function formatDateTime(value?: string): string {
   });
 }
 
-function openStockV2WatchesTab() {
+function openStockV2MonitorTab() {
   const url = new URL(window.location.href);
   url.searchParams.set("tab", "stockv2");
-  url.searchParams.set("stockv2", "watches");
+  url.searchParams.set("stockv2", "dailyBars");
   const href = `${url.pathname}${url.search}${url.hash}`;
   window.history.pushState(null, "", href);
   window.dispatchEvent(new PopStateEvent("popstate"));

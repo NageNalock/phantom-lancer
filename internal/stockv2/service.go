@@ -617,6 +617,13 @@ func (s *Service) StartBackground(ctx context.Context) {
 		defer s.bgWg.Done()
 		s.runDailyBarsScheduler(bgCtx)
 	}()
+
+	// 监控任务周期调度（独立 goroutine，按各 monitor task 的 enabled/interval 触发）
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runScheduledMonitors(bgCtx)
+	}()
 }
 
 // StopBackground 停止后台任务
@@ -679,6 +686,61 @@ func (s *Service) checkAndExecuteScheduledUpdate(ctx context.Context) {
 	settings.LastScheduledUpdate = now
 	s.store.CreateOrUpdateSettings(ctx, settings)
 	s.settings = settings
+}
+
+// runScheduledMonitors 周期检查各监控任务的 enabled/interval，到点触发对应 scan。
+// 实际是否执行由各 task config 的 enabled 控制；未启用或未到周期则跳过。
+func (s *Service) runScheduledMonitors(ctx context.Context) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.tickScheduledMonitors(ctx)
+		}
+	}
+}
+
+func (s *Service) tickScheduledMonitors(ctx context.Context) {
+	configs, err := s.store.ListMonitorTaskConfigs(ctx)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for taskType, cfg := range configs {
+		if !cfg.Enabled || cfg.IntervalSeconds <= 0 {
+			continue
+		}
+		def, ok := monitorTaskDefinition(taskType)
+		if !ok || !def.Runnable {
+			continue
+		}
+		if taskType == MonitorTaskLatestQuoteRefresh {
+			state, _ := s.store.GetQuoteRefreshTaskState(ctx, taskType)
+			if state != nil && state.Status == MonitorRunStatusRunning {
+				continue
+			}
+			if state != nil && !state.StartedAt.IsZero() && now.Sub(state.StartedAt) < time.Duration(cfg.IntervalSeconds)*time.Second {
+				continue
+			}
+			if _, err := s.RunLatestQuoteRefreshTask(ctx, MonitorTriggerScheduled); err != nil {
+				s.log.Warn("scheduled quote refresh failed", "error", err)
+			}
+			continue
+		}
+		latest, _ := s.store.GetLatestMonitorRun(ctx, taskType)
+		if latest != nil && latest.Status == MonitorRunStatusRunning {
+			continue
+		}
+		if latest != nil && !latest.StartedAt.IsZero() && now.Sub(latest.StartedAt) < time.Duration(cfg.IntervalSeconds)*time.Second {
+			continue
+		}
+		if _, err := s.RunMonitorTask(ctx, taskType, MonitorTriggerScheduled); err != nil {
+			s.log.Warn("scheduled monitor run failed", "task_type", taskType, "error", err)
+		}
+	}
 }
 
 // Snapshot 获取 V2 工作台快照数据。

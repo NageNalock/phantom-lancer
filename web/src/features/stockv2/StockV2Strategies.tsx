@@ -13,8 +13,6 @@ import type {
   StockV2StrategyVersion,
   StockV2StrategyVersionListResponse,
   StockV2StrategyWithVersion,
-  StockV2Watch,
-  StockV2WatchListResponse,
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, ContextList, Drawer, Field, Notice, Panel, Pill, useDangerConfirm } from "../../components/ui";
@@ -30,8 +28,8 @@ import {
   stockV2StrategyVersionStatusTone,
 } from "../../domain/labels";
 
-// 策略是长期判断依据,与 Watch(何时检查)、Review(当次判断)分离。
-// 本页只做 Strategy 对象的 CRUD、版本展示与 Watch 关联;不接 Agent、不接 Review。
+// 策略是长期判断依据,由系统内置监控任务扫描并产生命中候选。
+// 本页只做 Strategy 对象的 CRUD 与版本展示;不让用户创建单独价格提醒。
 // 后端 API 保持 strategy + activeVersion 分离,页面边界统一归一成扁平展示模型。
 
 type DrawerState =
@@ -86,7 +84,6 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
   const [versions, setVersions] = useState<StockV2StrategyVersion[]>([]);
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [strategyWatchIds, setStrategyWatchIds] = useState<Record<string, string>>({});
 
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
@@ -129,26 +126,6 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
     void fetchStrategies(page);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, statusFilter, kindFilter, portfolioFilter, keyword]);
-
-  async function fetchLinkedStrategyWatches() {
-    try {
-      const res = await actions.api<StockV2WatchListResponse>("/api/stockv2/watches?limit=200");
-      const next: Record<string, string> = {};
-      for (const watch of res.items || []) {
-        if (watch.source === "strategy" && watch.status !== "archived" && watch.strategyId) {
-          next[watch.strategyId] = watch.id;
-        }
-      }
-      setStrategyWatchIds(next);
-    } catch {
-      setStrategyWatchIds({});
-    }
-  }
-
-  useEffect(() => {
-    void fetchLinkedStrategyWatches();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [actions]);
 
   // 详情 drawer 打开时拉取版本历史;失败静默(版本历史是辅助信息)。
   useEffect(() => {
@@ -236,28 +213,6 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
     await actions.api(`/api/stockv2/strategies/${strategy.id}/${action}`, { method: "POST" });
   }
 
-  async function createWatchForStrategy(strategy: StockV2Strategy) {
-    if (strategyWatchIds[strategy.id]) {
-      openStockV2WatchesTab();
-      return;
-    }
-    if (!strategy.activeVersionId) {
-      actions.setToast("策略没有当前版本,无法创建盯盘", "warn");
-      return;
-    }
-    setSubmitting(true);
-    try {
-      const watch = await actions.api<StockV2Watch>(`/api/stockv2/strategies/${strategy.id}/create-watch`, { method: "POST" });
-      setStrategyWatchIds((current) => ({ ...current, [strategy.id]: watch.id }));
-      actions.setToast("已关联盯盘", "good");
-      openStockV2WatchesTab();
-    } catch (err) {
-      actions.setToast(friendlyError(err), "danger");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
   async function requestActivateStrategy(strategy: StockV2Strategy) {
     await runStrategyAction("启用策略", () => changeStatus(strategy, "activate"));
   }
@@ -265,7 +220,7 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
   async function requestPauseStrategy(strategy: StockV2Strategy) {
     const ok = await confirmDanger({
       title: "暂停策略",
-      body: "暂停后该策略不会被后续 Watch 触发,可随时重新启用。",
+      body: "暂停后该策略不会被系统监控任务扫描,可随时重新启用。",
       objectName: strategy.name,
       confirmLabel: "暂停",
     });
@@ -275,9 +230,9 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
   async function requestArchiveStrategy(strategy: StockV2Strategy): Promise<boolean> {
     const ok = await confirmDanger({
       title: "归档策略",
-      body: "归档后策略变为只读,不再参与任何 Watch/Review。归档不删除版本历史,仍可回看。",
+      body: "归档后策略变为只读,不再参与监控与 Review。归档不删除版本历史,仍可回看。",
       objectName: strategy.name,
-      impact: ["相关 Watch(若存在)将不再被该策略触发", "策略进入只读,需重新创建才能恢复使用"],
+      impact: ["系统后台监控不会再扫描该策略", "策略进入只读,需重新创建才能恢复使用"],
       confirmLabel: "归档",
     });
     if (!ok) return false;
@@ -336,11 +291,10 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
                     portfolios={portfolios}
                     onSelect={() => setDrawer({ type: "detail", id: s.id })}
                     onEdit={() => setDrawer({ type: "edit", strategy: s })}
-                    hasWatch={Boolean(strategyWatchIds[s.id])}
                     onActivate={() => void requestActivateStrategy(s)}
                     onPause={() => void requestPauseStrategy(s)}
                     onArchive={() => void requestArchiveStrategy(s)}
-                    onCreateWatch={() => void createWatchForStrategy(s)}
+                    onOpenMonitor={openStockV2MonitorTab}
                   />
                 ))}
               </div>
@@ -433,8 +387,7 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
           submitting={submitting}
           onClose={() => setDrawer({ type: "closed" })}
           onEdit={() => setDrawer({ type: "edit", strategy: detailStrategy })}
-          hasWatch={Boolean(strategyWatchIds[detailStrategy.id])}
-          onCreateWatch={() => void createWatchForStrategy(detailStrategy)}
+          onOpenMonitor={openStockV2MonitorTab}
           onActivate={() => void requestActivateStrategy(detailStrategy)}
           onPause={() => requestPauseStrategy(detailStrategy)}
           onArchive={async () => {
@@ -585,25 +538,22 @@ function StrategyRow({
   portfolios,
   onSelect,
   onEdit,
-  hasWatch,
   onActivate,
   onPause,
   onArchive,
-  onCreateWatch,
+  onOpenMonitor,
 }: {
   strategy: StockV2Strategy;
   portfolios: StockV2Portfolio[];
   onSelect: () => void;
   onEdit: () => void;
-  hasWatch: boolean;
   onActivate: () => void;
   onPause: () => void;
   onArchive: () => void;
-  onCreateWatch: () => void;
+  onOpenMonitor: () => void;
 }) {
   const portfolio = strategy.portfolioId ? portfolios.find((p) => p.id === strategy.portfolioId) : null;
   const archived = strategy.status === "archived";
-  const canCreateWatch = !archived && Boolean(strategy.activeVersionId) && Boolean(strategy.symbol || strategy.portfolioId);
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 transition hover:border-[var(--line-strong)]">
       <button type="button" onClick={onSelect} className="min-w-0 cursor-pointer text-left">
@@ -642,9 +592,9 @@ function StrategyRow({
         ) : null}
         {!archived ? (
           <>
-            <Button onClick={hasWatch ? openStockV2WatchesTab : onCreateWatch} disabled={!hasWatch && !canCreateWatch} title={hasWatch ? "打开盯盘" : "创建盯盘"}>
+            <Button onClick={onOpenMonitor} title="打开监控与任务">
               <Eye size={12} className="mr-1" />
-              {hasWatch ? "已关联盯盘" : "创建盯盘"}
+              监控
             </Button>
             <Button onClick={onEdit} title="编辑策略">
               <Pencil size={12} className="mr-1" />
@@ -693,7 +643,7 @@ function StrategyEmptyState({
         <strong className="text-sm">为组合开启智能监控</strong>
         <span className="text-xs leading-relaxed text-[var(--muted)]">
           {hasPortfolio
-            ? "生成组合监控策略,作为定时监控仓位的长期判断依据。后续 Watch 才负责定时检查。"
+            ? "生成组合监控策略,作为后台监控任务扫描仓位风险的长期判断依据。"
             : "需要先在『仓位』创建一个投资组合。"}
         </span>
       </button>
@@ -945,7 +895,7 @@ function SymbolStrategyForm({
         <textarea rows={2} value={riskNotes} placeholder="仓位上限、最大可承受回撤、需关注的事件" onChange={(e) => setRiskNotes(e.target.value)} />
       </Field>
 
-      <CollapsibleSection title="价格与触发(可选)" subtitle="结构化触发价,供后续 Watch 直接使用">
+      <CollapsibleSection title="价格与触发(可选)" subtitle="结构化触发价,供后台监控任务预筛使用">
         <div className="grid grid-cols-2 gap-3">
           <Field label="入场价下限">
             <input type="number" step="0.01" value={price.entryPriceLow} placeholder="例如: 18.50" onChange={(e) => setPrice({ ...price, entryPriceLow: e.target.value })} />
@@ -1019,7 +969,7 @@ function PortfolioMonitorForm({
   return (
     <div className="grid gap-3">
       <Notice tone="warn">
-        组合监控策略只承载长期判断依据。创建后可关联 Watch,由盯盘规则负责检查和提醒。
+        组合监控策略只承载长期判断依据。系统后台监控会自动扫描启用策略与组合风险。
       </Notice>
 
       <Field label="目标组合" help="将为该组合生成一条 portfolio_monitor 策略">
@@ -1061,8 +1011,7 @@ function StrategyDetailDrawer({
   submitting,
   onClose,
   onEdit,
-  hasWatch,
-  onCreateWatch,
+  onOpenMonitor,
   onActivate,
   onPause,
   onArchive,
@@ -1074,15 +1023,13 @@ function StrategyDetailDrawer({
   submitting: boolean;
   onClose: () => void;
   onEdit: () => void;
-  hasWatch: boolean;
-  onCreateWatch: () => void;
+  onOpenMonitor: () => void;
   onActivate: () => void;
   onPause: () => Promise<void>;
   onArchive: () => Promise<void>;
 }) {
   const portfolio = strategy.portfolioId ? portfolios.find((p) => p.id === strategy.portfolioId) : null;
   const archived = strategy.status === "archived";
-  const canCreateWatch = !archived && Boolean(strategy.activeVersionId) && Boolean(strategy.symbol || strategy.portfolioId);
 
   const items: Array<[string, ReactNode]> = [
     ["类型", stockV2StrategyKindLabel(strategy.kind)],
@@ -1120,9 +1067,9 @@ function StrategyDetailDrawer({
                 暂停
               </Button>
             ) : null}
-            <Button onClick={hasWatch ? openStockV2WatchesTab : onCreateWatch} disabled={submitting || (!hasWatch && !canCreateWatch)}>
+            <Button onClick={onOpenMonitor} disabled={submitting}>
               <Eye size={14} className="mr-1.5" />
-              {hasWatch ? "已关联盯盘" : "创建盯盘"}
+              监控与任务
             </Button>
             <Button onClick={onEdit} disabled={submitting}>
               <Pencil size={14} className="mr-1.5" />
@@ -1470,10 +1417,10 @@ function paginationWindow(page: number, totalPages: number): Array<number | "ell
   return result;
 }
 
-function openStockV2WatchesTab() {
+function openStockV2MonitorTab() {
   const url = new URL(window.location.href);
   url.searchParams.set("tab", "stockv2");
-  url.searchParams.set("stockv2", "watches");
+  url.searchParams.set("stockv2", "dailyBars");
   const href = `${url.pathname}${url.search}${url.hash}`;
   window.history.pushState(null, "", href);
   window.dispatchEvent(new PopStateEvent("popstate"));

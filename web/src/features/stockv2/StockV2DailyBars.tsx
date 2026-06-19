@@ -10,7 +10,7 @@ import type {
   StockV2DailyBarsQuality,
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
-import { Button, Field, Notice, Panel, Pill } from "../../components/ui";
+import { Button, CollapsibleSection, Field, Notice, Pill } from "../../components/ui";
 import {
   stockV2AdjustedLabel,
   stockV2DailyBarJobStatusLabel,
@@ -18,6 +18,7 @@ import {
   stockV2DailyBarJobTypeLabel,
   stockV2RangeLabel,
 } from "../../domain/labels";
+import { StockV2Monitor } from "./StockV2Monitor";
 
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
 
@@ -156,39 +157,42 @@ export function StockV2DailyBars({ actions, data, runAction }: { actions: AppAct
   const totalPages = Math.max(1, Math.ceil(jobTotal / JOB_PAGE_SIZE));
   const pageNumbers = useMemo(() => paginationWindow(page, totalPages), [page, totalPages]);
   const visibleJobs = useMemo(() => mergeRunningIntoPage(runningJobs, jobs), [jobs, runningJobs]);
+  const historySubtitle = runningJob
+    ? `运行中 · 已处理 ${runningJob.processedCount}/${runningJob.totalCount || "-"} · 共 ${jobTotal} 条`
+    : `共 ${jobTotal} 条日 K 任务，运行中任务会固定显示在历史顶部`;
 
   return (
     <div className="grid gap-4">
-      <Panel
+      <StockV2Monitor actions={actions} />
+
+      <CollapsibleSection
         title={
           <span className="flex items-center gap-2">
             <ChartLine size={16} style={{ color: "var(--accent)" }} />
-            任务历史
+            数据抓取任务历史
           </span>
         }
-        subtitle={`共 ${jobTotal} 条日 K 任务，运行中任务会固定显示在历史顶部`}
-        actions={
-          <div className="flex flex-wrap gap-2">
-            <Button onClick={() => void loadJobs(page, true)} disabled={loading}>
-              {loading ? "刷新中" : "刷新"}
-            </Button>
-            <Button onClick={() => setDrawerOpen(true)} tone="primary">
-              <PlayCircle size={14} className="mr-1.5" />
-              手动抓取
-            </Button>
-          </div>
-        }
+        subtitle={`日 K 数据面的抓取任务记录 · ${historySubtitle}`}
+        defaultOpen={false}
       >
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button onClick={() => void loadJobs(page, true)} disabled={loading}>
+            {loading ? "刷新中" : "刷新"}
+          </Button>
+          <Button onClick={() => setDrawerOpen(true)} tone="primary">
+            <PlayCircle size={14} className="mr-1.5" />
+            手动抓取
+          </Button>
+        </div>
+
         {runningJob ? (
-          <div className="mb-3">
-            <Notice tone="warn">
-              <span className="text-xs">
-                当前有日 K 任务正在执行：{stockV2DailyBarJobTypeLabel(runningJob)}
-                {runningJob.totalCount ? `，已处理 ${runningJob.processedCount}/${runningJob.totalCount}` : "，正在初始化任务范围"}。
-                历史列表会自动刷新。
-              </span>
-            </Notice>
-          </div>
+          <Notice tone="warn">
+            <span className="text-xs">
+              当前有日 K 任务正在执行：{stockV2DailyBarJobTypeLabel(runningJob)}
+              {runningJob.totalCount ? `，已处理 ${runningJob.processedCount}/${runningJob.totalCount}` : "，正在初始化任务范围"}。
+              历史列表会自动刷新。
+            </span>
+          </Notice>
         ) : null}
 
         {visibleJobs.length === 0 ? (
@@ -249,7 +253,7 @@ export function StockV2DailyBars({ actions, data, runAction }: { actions: AppAct
             </div>
           </div>
         ) : null}
-      </Panel>
+      </CollapsibleSection>
 
       {drawerOpen ? (
         <DailyBarsTriggerDrawer
