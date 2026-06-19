@@ -11,8 +11,9 @@ import type {
   StockV2WatchInput,
   StockV2WatchListResponse,
   StockV2WatchRunResult,
+  StockV2WatchRuleConfig,
   StockV2WatchScheduleKind,
-  StockV2WatchTriggerKind,
+  StockV2WatchRuleType,
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, Drawer, Field, Notice, Panel, Pill, useDangerConfirm } from "../../components/ui";
@@ -35,7 +36,6 @@ import {
 // Watch = 长期盯盘对象;Trigger = Watch 内确定性规则;Alert = 规则命中提醒台账。
 // 本轮只跑通「盯住对象 → 规则命中 → 可追踪提醒 → 确认/忽略/解决」,
 // 不接 Agent、不接 Review、不生成买卖建议、不改持仓。
-// 后端 watch/alert 接口尚未合并:404/异常时页面降级为轻量错误,不崩溃。
 
 const WATCH_PAGE_SIZE = 10;
 const ALERT_PAGE_SIZE = 10;
@@ -581,7 +581,7 @@ function AlertRow({
 // ============================ 运行结果摘要 ============================
 
 function RunResultSummary({ result, onClose }: { result: StockV2WatchRunResult; onClose: () => void }) {
-  const totals = result.totals || {};
+  const totals = watchRunTotals(result);
   const cells: Array<{ key: string; label: string; value: number; tone: "good" | "warn" | "danger" | "neutral" }> = [
     { key: "matched", label: "命中", value: totals.matched ?? 0, tone: stockV2WatchRunStatusTone("matched") },
     { key: "not_matched", label: "未命中", value: totals.notMatched ?? 0, tone: stockV2WatchRunStatusTone("not_matched") },
@@ -603,10 +603,10 @@ function RunResultSummary({ result, onClose }: { result: StockV2WatchRunResult; 
           </Pill>
         ))}
       </div>
-      {result.alerts?.length ? (
-        <p className="mt-2 text-xs text-[var(--muted)]">产生 {result.alerts.length} 条新提醒,见下方台账。</p>
+      {watchRunAlertCount(result) > 0 ? (
+        <p className="mt-2 text-xs text-[var(--muted)]">产生 {watchRunAlertCount(result)} 条提醒,见下方台账。</p>
       ) : null}
-      {result.note ? <p className="mt-1 break-words text-xs text-[var(--muted)]">{result.note}</p> : null}
+      {result.reason || result.note ? <p className="mt-1 break-words text-xs text-[var(--muted)]">{result.reason || result.note}</p> : null}
     </div>
   );
 }
@@ -629,23 +629,31 @@ function CreateWatchDrawer({
   const [name, setName] = useState("");
   const [symbolRef, setSymbolRef] = useState<SymbolRef>({ symbol: "" });
   const [portfolioId, setPortfolioId] = useState("");
-  const [triggerKind, setTriggerKind] = useState<StockV2WatchTriggerKind | string>("price_above");
+  const [triggerKind, setTriggerKind] = useState<StockV2WatchRuleType | string>("price_above");
   const [threshold, setThreshold] = useState("");
   const [cooldown, setCooldown] = useState(String(DEFAULT_COOLDOWN));
-  const [scheduleKind, setScheduleKind] = useState<StockV2WatchScheduleKind | string>("continuous");
+  const [scheduleKind, setScheduleKind] = useState<StockV2WatchScheduleKind | string>("manual");
 
-  const needsPortfolio = triggerKind === "portfolio_weight_high";
-  const hasSubject = symbolRef.symbol.trim().length > 0 || portfolioId.length > 0;
-  const canSubmit = hasSubject && (!needsPortfolio || portfolioId.length > 0) && !submitting;
+  const needsPortfolio = triggerKind === "portfolio_symbol_weight_above";
+  const symbol = symbolRef.symbol.trim();
+  const needsThreshold = triggerKind !== "quote_stale";
+  const hasThreshold = !needsThreshold || numOrUndef(threshold) !== undefined;
+  const canSubmit = symbol.length > 0 && (!needsPortfolio || portfolioId.length > 0) && hasThreshold && !submitting;
 
   function buildInput(): StockV2WatchInput {
+    const rule = manualWatchRule(triggerKind, symbol, portfolioId, threshold);
     return {
-      name: name.trim() || undefined,
-      symbol: symbolRef.symbol.trim() || undefined,
+      name: name.trim() || defaultWatchName(triggerKind, symbol, portfolioId),
+      source: "manual",
+      symbol,
       market: symbolRef.market,
       portfolioId: portfolioId || undefined,
-      triggerKind,
-      threshold: numOrUndef(threshold),
+      triggerPolicy: "any",
+      triggerConfig: {
+        source: "manual",
+        template: "manual_watch_v1",
+        rules: [rule],
+      },
       cooldownSeconds: numOrUndef(cooldown),
       scheduleKind,
     };
@@ -658,7 +666,7 @@ function CreateWatchDrawer({
           <input type="text" value={name} placeholder="留空将按标的与规则自动生成" onChange={(e) => setName(e.target.value)} />
         </Field>
 
-        <Field label="标的股票" help={needsPortfolio ? "该规则作用于组合,标的可不填。" : "单票规则需选择标的。"}>
+        <Field label="标的股票" help={needsPortfolio ? "组合权重规则需要同时选择组合和标的。" : "单票规则需选择标的。"}>
           <SymbolPicker actions={actions} value={symbolRef} onChange={setSymbolRef} />
         </Field>
 
@@ -678,10 +686,12 @@ function CreateWatchDrawer({
             <select value={triggerKind} onChange={(e) => setTriggerKind(e.target.value)}>
               <option value="price_above">价格突破</option>
               <option value="price_below">价格跌破</option>
-              <option value="pct_change_up">涨幅超限</option>
-              <option value="pct_change_down">跌幅超限</option>
-              <option value="data_stale">数据过期</option>
-              <option value="portfolio_weight_high">组合权重过高</option>
+              <option value="pct_change_above">涨幅超限</option>
+              <option value="pct_change_below">跌幅超限</option>
+              <option value="quote_stale">行情过期</option>
+              <option value="daily_close_above">日收盘突破</option>
+              <option value="daily_close_below">日收盘跌破</option>
+              <option value="portfolio_symbol_weight_above">组合权重过高</option>
             </select>
           </Field>
           <Field label="阈值">
@@ -701,10 +711,9 @@ function CreateWatchDrawer({
           </Field>
           <Field label="检查节奏">
             <select value={scheduleKind} onChange={(e) => setScheduleKind(e.target.value)}>
-              <option value="continuous">持续</option>
-              <option value="market_open">盘中</option>
+              <option value="manual">手动</option>
+              <option value="market_session">盘中</option>
               <option value="daily">每日</option>
-              <option value="hourly">每小时</option>
             </select>
           </Field>
         </div>
@@ -932,10 +941,55 @@ function numOrUndef(value: string): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+function manualWatchRule(kind: string, symbol: string, portfolioId: string, thresholdRaw: string): StockV2WatchRuleConfig {
+  const threshold = numOrUndef(thresholdRaw);
+  const rule: StockV2WatchRuleConfig = {
+    key: `${kind}_${symbol}`,
+    type: kind,
+    symbol,
+  };
+  if (portfolioId) rule.portfolioId = portfolioId;
+  if (kind === "quote_stale") {
+    rule.maxAgeSeconds = threshold && threshold > 0 ? Math.round(threshold) : 1800;
+    return rule;
+  }
+  if (threshold !== undefined) {
+    rule.threshold = kind === "pct_change_below" ? -Math.abs(threshold) : threshold;
+  }
+  return rule;
+}
+
+function defaultWatchName(kind: string, symbol: string, portfolioId: string): string {
+  const subject = portfolioId ? `${portfolioId} / ${symbol}` : symbol;
+  return `${stockV2WatchTriggerLabel(kind)} - ${subject}`;
+}
+
+function watchRunTotals(result: StockV2WatchRunResult): NonNullable<StockV2WatchRunResult["totals"]> {
+  if (result.totals) return result.totals;
+  const totals = { matched: 0, notMatched: 0, skipped: 0, degraded: 0 };
+  for (const item of result.ruleResults || []) {
+    if (item.status === "matched") totals.matched += 1;
+    if (item.status === "not_matched") totals.notMatched += 1;
+    if (item.status === "skipped") totals.skipped += 1;
+    if (item.status === "degraded") totals.degraded += 1;
+  }
+  if (!result.ruleResults?.length) {
+    if (result.status === "matched") totals.matched = 1;
+    if (result.status === "not_matched") totals.notMatched = 1;
+    if (result.status === "skipped") totals.skipped = 1;
+    if (result.status === "degraded") totals.degraded = 1;
+  }
+  return totals;
+}
+
+function watchRunAlertCount(result: StockV2WatchRunResult): number {
+  return (result.alert ? 1 : 0) + (result.alerts?.length || 0);
+}
+
 function thresholdPlaceholder(kind: string): string {
   if (stockV2WatchTriggerIsPercent(kind)) return "例如 5 (%)";
-  if (kind === "price_above" || kind === "price_below") return "例如 20.00";
-  if (kind === "data_stale") return "留空使用默认";
+  if (kind === "price_above" || kind === "price_below" || kind === "daily_close_above" || kind === "daily_close_below") return "例如 20.00";
+  if (kind === "quote_stale") return "留空使用 1800 秒";
   return "";
 }
 

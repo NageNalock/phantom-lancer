@@ -759,9 +759,17 @@ export function stockV2WatchTriggerLabel(kind?: string): string {
   switch (kind) {
     case "price_above": return "价格突破";
     case "price_below": return "价格跌破";
+    case "price_between": return "价格区间";
+    case "pct_change_above": return "涨幅超限";
+    case "pct_change_below": return "跌幅超限";
+    case "quote_stale": return "行情过期";
+    case "daily_close_above": return "日收盘突破";
+    case "daily_close_below": return "日收盘跌破";
+    case "portfolio_symbol_weight_above": return "组合权重过高";
+    // 旧前端草稿字段,保留展示兼容。
     case "pct_change_up": return "涨幅超限";
     case "pct_change_down": return "跌幅超限";
-    case "data_stale": return "数据过期";
+    case "data_stale": return "行情过期";
     case "portfolio_weight_high": return "组合权重过高";
     default: return kind || "-";
   }
@@ -769,23 +777,50 @@ export function stockV2WatchTriggerLabel(kind?: string): string {
 
 /** 是否为百分比类阈值(用于规则摘要加 % 后缀)。 */
 export function stockV2WatchTriggerIsPercent(kind?: string): boolean {
-  return kind === "pct_change_up" || kind === "pct_change_down" || kind === "portfolio_weight_high";
+  return kind === "pct_change_above" ||
+    kind === "pct_change_below" ||
+    kind === "portfolio_symbol_weight_above" ||
+    kind === "pct_change_up" ||
+    kind === "pct_change_down" ||
+    kind === "portfolio_weight_high";
 }
 
 export function stockV2WatchScheduleLabel(schedule?: string): string {
   switch (schedule) {
+    case "manual": return "手动";
+    case "market_session": return "盘中";
+    case "daily": return "每日";
+    // 旧前端草稿字段,保留展示兼容。
     case "continuous": return "持续";
     case "market_open": return "盘中";
-    case "daily": return "每日";
     case "hourly": return "每小时";
     default: return schedule || "-";
   }
 }
 
 /** 规则摘要:后端 ruleSummary 优先,否则按 triggerKind + threshold 拼。 */
-export function stockV2WatchRuleSummary(watch?: { ruleSummary?: string; triggerKind?: string; threshold?: number } | null): string {
+export function stockV2WatchRuleSummary(watch?: {
+  ruleSummary?: string;
+  triggerKind?: string;
+  threshold?: number;
+  triggerConfig?: { rules?: Array<{ type?: string; ruleType?: string; threshold?: number; low?: number; high?: number; maxAgeSeconds?: number }> };
+} | null): string {
   if (!watch) return "-";
   if (watch.ruleSummary?.trim()) return watch.ruleSummary.trim();
+  const rules = Array.isArray(watch.triggerConfig?.rules) ? watch.triggerConfig.rules : [];
+  if (rules.length > 0) {
+    const labels = rules.slice(0, 3).map((rule) => {
+      const kind = rule.type || rule.ruleType || "";
+      const label = stockV2WatchTriggerLabel(kind);
+      if (kind === "price_between") return `${label} ${rule.low ?? "-"}~${rule.high ?? "-"}`;
+      if (kind === "quote_stale") return `${label} ${Math.round((rule.maxAgeSeconds || 1800) / 60)}min`;
+      if (typeof rule.threshold === "number" && Number.isFinite(rule.threshold)) {
+        return `${label} ${rule.threshold}${stockV2WatchTriggerIsPercent(kind) ? "%" : ""}`;
+      }
+      return label;
+    });
+    return `${labels.join(" / ")}${rules.length > 3 ? ` 等 ${rules.length} 条` : ""}`;
+  }
   const kind = stockV2WatchTriggerLabel(watch.triggerKind);
   if (typeof watch.threshold === "number" && Number.isFinite(watch.threshold)) {
     const suffix = stockV2WatchTriggerIsPercent(watch.triggerKind) ? "%" : "";
@@ -827,6 +862,9 @@ export function stockV2AlertStatusTone(status?: string): "good" | "warn" | "dang
 export function stockV2AlertLevelLabel(level?: string): string {
   switch (level) {
     case "info": return "提示";
+    case "warning": return "警告";
+    case "critical": return "紧急";
+    // 旧前端草稿字段,保留展示兼容。
     case "warn": return "警告";
     case "danger": return "紧急";
     default: return level || "提示";
@@ -836,6 +874,8 @@ export function stockV2AlertLevelLabel(level?: string): string {
 export function stockV2AlertLevelTone(level?: string): "good" | "warn" | "danger" | "neutral" {
   switch (level) {
     case "info": return "neutral";
+    case "warning": return "warn";
+    case "critical": return "danger";
     case "warn": return "warn";
     case "danger": return "danger";
     default: return "neutral";

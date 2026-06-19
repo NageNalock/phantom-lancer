@@ -225,6 +225,47 @@ CREATE TABLE IF NOT EXISTS stockv2_strategy_versions (
     FOREIGN KEY (strategy_id) REFERENCES stockv2_strategies(id) ON DELETE CASCADE,
     UNIQUE(strategy_id, version_no)
 );
+CREATE TABLE IF NOT EXISTS stockv2_watches (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    source TEXT NOT NULL,
+    symbol TEXT,
+    market TEXT,
+    portfolio_id TEXT,
+    strategy_id TEXT,
+    strategy_version_id TEXT,
+    trigger_policy TEXT NOT NULL,
+    trigger_config_json TEXT,
+    schedule_kind TEXT NOT NULL,
+    cooldown_seconds INTEGER NOT NULL DEFAULT 0,
+    last_checked_at DATETIME,
+    last_triggered_at DATETIME,
+    last_run_status TEXT,
+    last_run_reason TEXT,
+    archived_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    FOREIGN KEY (portfolio_id) REFERENCES stockv2_portfolios(id) ON DELETE SET NULL,
+    FOREIGN KEY (strategy_id) REFERENCES stockv2_strategies(id) ON DELETE SET NULL,
+    FOREIGN KEY (strategy_version_id) REFERENCES stockv2_strategy_versions(id) ON DELETE SET NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_alerts (
+    id TEXT PRIMARY KEY,
+    watch_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    level TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT,
+    dedupe_key TEXT,
+    evidence_json TEXT,
+    triggered_at DATETIME NOT NULL,
+    acknowledged_at DATETIME,
+    resolved_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    FOREIGN KEY (watch_id) REFERENCES stockv2_watches(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS stockv2_update_jobs (
     id TEXT PRIMARY KEY,
     trigger_type TEXT NOT NULL,
@@ -282,6 +323,15 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_strategies_scope ON stockv2_strategies(sc
 CREATE INDEX IF NOT EXISTS idx_stockv2_strategies_symbol ON stockv2_strategies(symbol);
 CREATE INDEX IF NOT EXISTS idx_stockv2_strategies_portfolio_id ON stockv2_strategies(portfolio_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_strategy_versions_strategy_id ON stockv2_strategy_versions(strategy_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_watches_status ON stockv2_watches(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_watches_portfolio_id ON stockv2_watches(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_watches_strategy_id ON stockv2_watches(strategy_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_watches_symbol ON stockv2_watches(symbol);
+CREATE INDEX IF NOT EXISTS idx_stockv2_watches_updated_at ON stockv2_watches(updated_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_watch_id ON stockv2_alerts(watch_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_status ON stockv2_alerts(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_triggered_at ON stockv2_alerts(triggered_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_dedupe_key ON stockv2_alerts(watch_id, dedupe_key);
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_status ON stockv2_update_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_created_at ON stockv2_update_jobs(created_at);
 INSERT OR IGNORE INTO stockv2_settings (id, auto_update_enabled, update_interval_sec, created_at, updated_at)
@@ -343,6 +393,12 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureColumn(ctx, "stockv2_daily_bar_jobs", "symbol", "TEXT"); err != nil {
 		return fmt.Errorf("add daily bar job symbol column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_watches", "last_run_status", "TEXT"); err != nil {
+		return fmt.Errorf("add watch last_run_status column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_watches", "last_run_reason", "TEXT"); err != nil {
+		return fmt.Errorf("add watch last_run_reason column: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bar_jobs_running_scope

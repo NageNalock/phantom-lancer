@@ -1,4 +1,4 @@
-import { Archive, ArrowsClockwise, MagnifyingGlass, Pause, Pencil, Play, Plus, Sparkle } from "@phosphor-icons/react";
+import { Archive, ArrowsClockwise, Eye, MagnifyingGlass, Pause, Pencil, Play, Plus, Sparkle } from "@phosphor-icons/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { AppActions } from "../../app/App";
@@ -13,6 +13,8 @@ import type {
   StockV2StrategyVersion,
   StockV2StrategyVersionListResponse,
   StockV2StrategyWithVersion,
+  StockV2Watch,
+  StockV2WatchListResponse,
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, ContextList, Drawer, Field, Notice, Panel, Pill, useDangerConfirm } from "../../components/ui";
@@ -29,7 +31,7 @@ import {
 } from "../../domain/labels";
 
 // 策略是长期判断依据,与 Watch(何时检查)、Review(当次判断)分离。
-// 本页只做 Strategy 对象的 CRUD + 版本展示;不接 Agent、不接 Watch、不接 Review。
+// 本页只做 Strategy 对象的 CRUD、版本展示与 Watch 关联;不接 Agent、不接 Review。
 // 后端 API 保持 strategy + activeVersion 分离,页面边界统一归一成扁平展示模型。
 
 type DrawerState =
@@ -84,6 +86,7 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
   const [versions, setVersions] = useState<StockV2StrategyVersion[]>([]);
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [strategyWatchIds, setStrategyWatchIds] = useState<Record<string, string>>({});
 
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
@@ -126,6 +129,26 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
     void fetchStrategies(page);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, statusFilter, kindFilter, portfolioFilter, keyword]);
+
+  async function fetchLinkedStrategyWatches() {
+    try {
+      const res = await actions.api<StockV2WatchListResponse>("/api/stockv2/watches?limit=200");
+      const next: Record<string, string> = {};
+      for (const watch of res.items || []) {
+        if (watch.source === "strategy" && watch.status !== "archived" && watch.strategyId) {
+          next[watch.strategyId] = watch.id;
+        }
+      }
+      setStrategyWatchIds(next);
+    } catch {
+      setStrategyWatchIds({});
+    }
+  }
+
+  useEffect(() => {
+    void fetchLinkedStrategyWatches();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [actions]);
 
   // 详情 drawer 打开时拉取版本历史;失败静默(版本历史是辅助信息)。
   useEffect(() => {
@@ -213,6 +236,28 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
     await actions.api(`/api/stockv2/strategies/${strategy.id}/${action}`, { method: "POST" });
   }
 
+  async function createWatchForStrategy(strategy: StockV2Strategy) {
+    if (strategyWatchIds[strategy.id]) {
+      openStockV2WatchesTab();
+      return;
+    }
+    if (!strategy.activeVersionId) {
+      actions.setToast("策略没有当前版本,无法创建盯盘", "warn");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const watch = await actions.api<StockV2Watch>(`/api/stockv2/strategies/${strategy.id}/create-watch`, { method: "POST" });
+      setStrategyWatchIds((current) => ({ ...current, [strategy.id]: watch.id }));
+      actions.setToast("已关联盯盘", "good");
+      openStockV2WatchesTab();
+    } catch (err) {
+      actions.setToast(friendlyError(err), "danger");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   async function requestActivateStrategy(strategy: StockV2Strategy) {
     await runStrategyAction("启用策略", () => changeStatus(strategy, "activate"));
   }
@@ -291,9 +336,11 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
                     portfolios={portfolios}
                     onSelect={() => setDrawer({ type: "detail", id: s.id })}
                     onEdit={() => setDrawer({ type: "edit", strategy: s })}
+                    hasWatch={Boolean(strategyWatchIds[s.id])}
                     onActivate={() => void requestActivateStrategy(s)}
                     onPause={() => void requestPauseStrategy(s)}
                     onArchive={() => void requestArchiveStrategy(s)}
+                    onCreateWatch={() => void createWatchForStrategy(s)}
                   />
                 ))}
               </div>
@@ -386,6 +433,8 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
           submitting={submitting}
           onClose={() => setDrawer({ type: "closed" })}
           onEdit={() => setDrawer({ type: "edit", strategy: detailStrategy })}
+          hasWatch={Boolean(strategyWatchIds[detailStrategy.id])}
+          onCreateWatch={() => void createWatchForStrategy(detailStrategy)}
           onActivate={() => void requestActivateStrategy(detailStrategy)}
           onPause={() => requestPauseStrategy(detailStrategy)}
           onArchive={async () => {
@@ -536,20 +585,25 @@ function StrategyRow({
   portfolios,
   onSelect,
   onEdit,
+  hasWatch,
   onActivate,
   onPause,
   onArchive,
+  onCreateWatch,
 }: {
   strategy: StockV2Strategy;
   portfolios: StockV2Portfolio[];
   onSelect: () => void;
   onEdit: () => void;
+  hasWatch: boolean;
   onActivate: () => void;
   onPause: () => void;
   onArchive: () => void;
+  onCreateWatch: () => void;
 }) {
   const portfolio = strategy.portfolioId ? portfolios.find((p) => p.id === strategy.portfolioId) : null;
   const archived = strategy.status === "archived";
+  const canCreateWatch = !archived && Boolean(strategy.activeVersionId) && Boolean(strategy.symbol || strategy.portfolioId);
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 transition hover:border-[var(--line-strong)]">
       <button type="button" onClick={onSelect} className="min-w-0 cursor-pointer text-left">
@@ -588,6 +642,10 @@ function StrategyRow({
         ) : null}
         {!archived ? (
           <>
+            <Button onClick={hasWatch ? openStockV2WatchesTab : onCreateWatch} disabled={!hasWatch && !canCreateWatch} title={hasWatch ? "打开盯盘" : "创建盯盘"}>
+              <Eye size={12} className="mr-1" />
+              {hasWatch ? "已关联盯盘" : "创建盯盘"}
+            </Button>
             <Button onClick={onEdit} title="编辑策略">
               <Pencil size={12} className="mr-1" />
               编辑
@@ -961,7 +1019,7 @@ function PortfolioMonitorForm({
   return (
     <div className="grid gap-3">
       <Notice tone="warn">
-        组合监控策略只承载长期判断依据。后续「每天几点检查、盘中大跌是否触发」属于 Watch,本轮不会创建真实 Watch。
+        组合监控策略只承载长期判断依据。创建后可关联 Watch,由盯盘规则负责检查和提醒。
       </Notice>
 
       <Field label="目标组合" help="将为该组合生成一条 portfolio_monitor 策略">
@@ -1003,6 +1061,8 @@ function StrategyDetailDrawer({
   submitting,
   onClose,
   onEdit,
+  hasWatch,
+  onCreateWatch,
   onActivate,
   onPause,
   onArchive,
@@ -1014,12 +1074,15 @@ function StrategyDetailDrawer({
   submitting: boolean;
   onClose: () => void;
   onEdit: () => void;
+  hasWatch: boolean;
+  onCreateWatch: () => void;
   onActivate: () => void;
   onPause: () => Promise<void>;
   onArchive: () => Promise<void>;
 }) {
   const portfolio = strategy.portfolioId ? portfolios.find((p) => p.id === strategy.portfolioId) : null;
   const archived = strategy.status === "archived";
+  const canCreateWatch = !archived && Boolean(strategy.activeVersionId) && Boolean(strategy.symbol || strategy.portfolioId);
 
   const items: Array<[string, ReactNode]> = [
     ["类型", stockV2StrategyKindLabel(strategy.kind)],
@@ -1057,6 +1120,10 @@ function StrategyDetailDrawer({
                 暂停
               </Button>
             ) : null}
+            <Button onClick={hasWatch ? openStockV2WatchesTab : onCreateWatch} disabled={submitting || (!hasWatch && !canCreateWatch)}>
+              <Eye size={14} className="mr-1.5" />
+              {hasWatch ? "已关联盯盘" : "创建盯盘"}
+            </Button>
             <Button onClick={onEdit} disabled={submitting}>
               <Pencil size={14} className="mr-1.5" />
               编辑
@@ -1401,6 +1468,15 @@ function paginationWindow(page: number, totalPages: number): Array<number | "ell
     result.push(item);
   });
   return result;
+}
+
+function openStockV2WatchesTab() {
+  const url = new URL(window.location.href);
+  url.searchParams.set("tab", "stockv2");
+  url.searchParams.set("stockv2", "watches");
+  const href = `${url.pathname}${url.search}${url.hash}`;
+  window.history.pushState(null, "", href);
+  window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
 function numOrUndef(value: string): number | undefined {

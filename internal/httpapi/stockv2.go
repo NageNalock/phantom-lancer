@@ -45,6 +45,22 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/stockv2/strategies/{id}/archive", s.handleStockV2ArchiveStrategy)
 	mux.HandleFunc("GET /api/stockv2/strategies/{id}/versions", s.handleStockV2ListStrategyVersions)
 	mux.HandleFunc("POST /api/stockv2/portfolios/{id}/monitor-strategy", s.handleStockV2CreatePortfolioMonitorStrategy)
+	mux.HandleFunc("POST /api/stockv2/strategies/{id}/create-watch", s.handleStockV2CreateStrategyWatch)
+	mux.HandleFunc("POST /api/stockv2/portfolios/{id}/create-monitor-watch", s.handleStockV2CreatePortfolioMonitorWatch)
+
+	// 盯盘与提醒
+	mux.HandleFunc("GET /api/stockv2/watches", s.handleStockV2ListWatches)
+	mux.HandleFunc("POST /api/stockv2/watches", s.handleStockV2CreateWatch)
+	mux.HandleFunc("GET /api/stockv2/watches/{id}", s.handleStockV2GetWatch)
+	mux.HandleFunc("PUT /api/stockv2/watches/{id}", s.handleStockV2UpdateWatch)
+	mux.HandleFunc("POST /api/stockv2/watches/{id}/run", s.handleStockV2RunWatch)
+	mux.HandleFunc("POST /api/stockv2/watches/{id}/activate", s.handleStockV2ActivateWatch)
+	mux.HandleFunc("POST /api/stockv2/watches/{id}/pause", s.handleStockV2PauseWatch)
+	mux.HandleFunc("POST /api/stockv2/watches/{id}/archive", s.handleStockV2ArchiveWatch)
+	mux.HandleFunc("GET /api/stockv2/alerts", s.handleStockV2ListAlerts)
+	mux.HandleFunc("POST /api/stockv2/alerts/{id}/ack", s.handleStockV2AckAlert)
+	mux.HandleFunc("POST /api/stockv2/alerts/{id}/ignore", s.handleStockV2IgnoreAlert)
+	mux.HandleFunc("POST /api/stockv2/alerts/{id}/resolve", s.handleStockV2ResolveAlert)
 
 	// 更新任务
 	mux.HandleFunc("POST /api/stockv2/update/trigger", s.handleTriggerUpdate)
