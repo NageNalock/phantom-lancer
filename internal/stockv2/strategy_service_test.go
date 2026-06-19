@@ -37,6 +37,45 @@ func TestCreateSymbolResearchStrategy(t *testing.T) {
 	}
 }
 
+func TestCreateStrategyPersistsBiasAndPlaybook(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+
+	playbook := map[string]any{
+		"version": "v1",
+		"rules": []any{
+			map[string]any{"action": "build_position", "trigger": "回踩支撑位企稳", "target": "建仓到 5%"},
+			map[string]any{"action": "exit_position", "trigger": "核心逻辑证伪", "target": "清仓"},
+		},
+	}
+	created, err := svc.CreateStrategy(ctx, RequestCreateStrategy{
+		Name:      "剧本策略",
+		Kind:      StrategyKindSymbolStrategy,
+		Scope:     StrategyScopeResearch,
+		Source:    StrategySourceManual,
+		Status:    StrategyStatusDraft,
+		Symbol:    "300750",
+		Direction: StrategyBiasBullish,
+		GenerationMeta: map[string]any{
+			"playbook": playbook,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create strategy: %v", err)
+	}
+	got, err := svc.GetStrategy(ctx, created.Strategy.ID)
+	if err != nil {
+		t.Fatalf("get strategy: %v", err)
+	}
+	if got.ActiveVersion == nil || got.ActiveVersion.Direction != StrategyBiasBullish {
+		t.Fatalf("active version = %+v", got.ActiveVersion)
+	}
+	if _, ok := got.ActiveVersion.GenerationMeta["playbook"].(map[string]any); !ok {
+		t.Fatalf("generation meta = %+v", got.ActiveVersion.GenerationMeta)
+	}
+}
+
 func TestCreatePortfolioBoundStrategyValidatesPortfolio(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStrategyTestService(t)

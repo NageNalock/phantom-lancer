@@ -25,6 +25,10 @@ const (
 	StrategyDirectionBuySignal  = "buy_signal"
 	StrategyDirectionSellSignal = "sell_signal"
 	StrategyDirectionHold       = "hold"
+
+	StrategyBiasBullish = "bullish"
+	StrategyBiasBearish = "bearish"
+	StrategyBiasNeutral = "neutral"
 )
 
 var (

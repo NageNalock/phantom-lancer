@@ -1988,8 +1988,51 @@ export type StockV2StrategyKind = "symbol_strategy" | "portfolio_monitor";
 export type StockV2StrategyStatus = "draft" | "active" | "paused" | "archived";
 export type StockV2StrategyScope = "research" | "portfolio_bound";
 export type StockV2StrategySource = "manual" | "system_template" | "agent";
-export type StockV2StrategyDirection = "watch" | "buy_signal" | "sell_signal" | "hold";
+export type StockV2StrategyDirection = "watch" | "bullish" | "bearish" | "neutral" | "buy_signal" | "sell_signal" | "hold";
 export type StockV2StrategyVersionStatus = "draft" | "active" | "superseded";
+export type StockV2StrategyActionType = "observe" | "build_position" | "add_position" | "hold" | "reduce_position" | "exit_position";
+export type StockV2StrategyPrefilterType =
+  | "price_above"
+  | "price_below"
+  | "price_between"
+  | "pct_change_above"
+  | "pct_change_below"
+  | "daily_close_above"
+  | "daily_close_below"
+  | "quote_stale"
+  | "portfolio_symbol_weight_above"
+  | "portfolio_symbol_weight_below"
+  | "news_semantic_relevance";
+
+export interface StockV2StrategyPrefilter {
+  key?: string;
+  type: StockV2StrategyPrefilterType | string;
+  threshold?: number;
+  low?: number;
+  high?: number;
+  maxAgeSeconds?: number;
+  minScore?: number;
+  topics?: string[];
+}
+
+export interface StockV2StrategyActionRule {
+  id?: string;
+  action: StockV2StrategyActionType | string;
+  title?: string;
+  trigger?: string;
+  preconditions?: string;
+  target?: string;
+  risk?: string;
+  dataPrefilters?: StockV2StrategyPrefilter[];
+  portfolioPrefilters?: StockV2StrategyPrefilter[];
+  newsPrefilters?: StockV2StrategyPrefilter[];
+  priority?: number;
+}
+
+export interface StockV2StrategyPlaybook {
+  version?: string;
+  rules?: StockV2StrategyActionRule[];
+}
 
 /** 单个策略版本的具体判断内容。旧版本必须保留。 */
 export interface StockV2StrategyVersion {
@@ -2024,6 +2067,7 @@ export interface StockV2Strategy {
   portfolioName?: string;
   activeVersionId?: string;
   direction?: StockV2StrategyDirection | string;
+  playbook?: StockV2StrategyPlaybook;
   activeVersionNo?: number;
   hasDraft?: boolean;
   title?: string;
@@ -2094,7 +2138,8 @@ export type StockV2WatchRuleType =
   | "quote_stale"
   | "daily_close_above"
   | "daily_close_below"
-  | "portfolio_symbol_weight_above";
+  | "portfolio_symbol_weight_above"
+  | "portfolio_symbol_weight_below";
 export type StockV2WatchScheduleKind = "manual" | "market_session" | "daily";
 
 export interface StockV2WatchRuleConfig {

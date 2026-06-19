@@ -459,6 +459,7 @@ func (s *Service) triggerConfigFromStrategy(ctx context.Context, strategy Strate
 	}
 
 	priceTriggers := mapFromAny(strategy.ActiveVersion.GenerationMeta["priceTriggers"])
+	playbook := mapFromAny(strategy.ActiveVersion.GenerationMeta["playbook"])
 	rules := make([]any, 0)
 	symbol := strategy.Strategy.Symbol
 
@@ -494,6 +495,7 @@ func (s *Service) triggerConfigFromStrategy(ctx context.Context, strategy Strate
 		"template":          template,
 		"strategyId":        strategy.Strategy.ID,
 		"strategyVersionId": strategy.Strategy.ActiveVersionID,
+		"playbook":          playbook,
 		"rules":             rules,
 	}, nil
 }

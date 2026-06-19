@@ -67,6 +67,8 @@ flowchart LR
     GeneratedStrategy["Agent 生成策略"]
     StrategyObj["策略"]
     StrategyVersion["策略版本"]
+    StrategyBias["策略倾向"]
+    StrategyPlaybook["操作剧本 / 动作规则"]
     StrategyPatch["策略补丁"]
   end
 
@@ -137,8 +139,12 @@ flowchart LR
   ManualStrategy --> StrategyObj
   GeneratedStrategy --> StrategyObj
   StrategyObj --> StrategyVersion
+  StrategyVersion --> StrategyBias
+  StrategyVersion --> StrategyPlaybook
   StrategyPatch --> StrategyVersion
   StrategyObj --> MonitorRun
+  StrategyPlaybook --> MatchRule
+  StrategyPlaybook --> AgentContextPack
 
   PortfolioObj --> Holding
   Holding --> PortfolioSnapshot
@@ -246,6 +252,10 @@ Agent 可以临时检索补充证据，但长期数据资产应由股票数据�
 
 `MatchRule` 是内部预筛能力，不是用户主模型。价格、涨跌幅、日 K、数据新鲜度、消息相关性、组合权重等规则都只是为了发现值得进入 Agent doublecheck 的候选命中。
 
+数据面策略监控应优先读取策略操作剧本里的 `dataPrefilters` 和 `portfolioPrefilters`，命中后生成带有 `matchedAction` 的候选命中，例如建仓、加仓、减仓或清仓候选。旧的单一触发价字段只能作为兼容兜底。
+
+消息面策略监控后续应读取策略操作剧本里的 `newsPrefilters`，与 `NewsLinkCandidate`、实时行情、历史 K 线摘要和组合快照一起构造 Agent 判断上下文。
+
 监控页面的核心应是可观测性：任务配置、正在执行的任务、执行历史、命中记录、命中证据、是否进入 Agent doublecheck、Agent 结论、最终产生的 Alert 或 Review。
 
 ## 6. 账户、仓位与策略
@@ -253,6 +263,15 @@ Agent 可以临时检索补充证据，但长期数据资产应由股票数据�
 账户/组合是操作建议的上下文核心。
 
 无账户策略可以存在，也可以输出账户无关的 `trade_signal`，例如买入、卖出、持有、观察、价格区间、触发条件、止盈止损。
+
+策略不应被建模成单一买入或卖出方向。策略版本应至少包含：
+
+- `strategy_bias`：总体倾向，例如偏多、偏空、中性或观察。
+- `playbook`：一组操作动作规则，例如观察、建仓、加仓、持有、减仓、清仓。
+
+每条操作动作规则可以包含触发描述、前置条件、目标状态、风险备注，以及供后台监控预筛使用的 `dataPrefilters`、`portfolioPrefilters` 和 `newsPrefilters`。
+
+后台监控命中操作剧本时，只表示“某个动作值得进入 Agent doublecheck 或 Review”，不代表系统已经决定执行该动作。
 
 只有绑定账户/组合快照后，系统才允许输出 `proposed_operation`，例如数量、金额、目标仓位、加仓、减仓、清仓。
 

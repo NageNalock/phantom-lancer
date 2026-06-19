@@ -700,10 +700,13 @@ export function stockV2StrategySourceLabel(source?: string): string {
 
 export function stockV2StrategyDirectionLabel(direction?: string): string {
   switch (direction) {
-    case "watch": return "仅观察";
-    case "buy_signal": return "买入信号";
-    case "sell_signal": return "卖出信号";
-    case "hold": return "持有";
+    case "watch": return "观察";
+    case "bullish": return "偏多";
+    case "bearish": return "偏空";
+    case "neutral": return "中性";
+    case "buy_signal": return "偏多";
+    case "sell_signal": return "偏空";
+    case "hold": return "中性持有";
     default: return direction || "-";
   }
 }
@@ -766,6 +769,7 @@ export function stockV2WatchTriggerLabel(kind?: string): string {
     case "daily_close_above": return "日收盘突破";
     case "daily_close_below": return "日收盘跌破";
     case "portfolio_symbol_weight_above": return "组合权重过高";
+    case "portfolio_symbol_weight_below": return "组合权重低于";
     // 旧前端草稿字段,保留展示兼容。
     case "pct_change_up": return "涨幅超限";
     case "pct_change_down": return "跌幅超限";
@@ -780,6 +784,7 @@ export function stockV2WatchTriggerIsPercent(kind?: string): boolean {
   return kind === "pct_change_above" ||
     kind === "pct_change_below" ||
     kind === "portfolio_symbol_weight_above" ||
+    kind === "portfolio_symbol_weight_below" ||
     kind === "pct_change_up" ||
     kind === "pct_change_down" ||
     kind === "portfolio_weight_high";

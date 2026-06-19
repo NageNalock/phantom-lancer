@@ -7,6 +7,7 @@ import type {
   StockV2Instrument,
   StockV2Portfolio,
   StockV2Strategy,
+  StockV2StrategyActionRule,
   StockV2StrategyInput,
   StockV2StrategyKind,
   StockV2StrategyListResponse,
@@ -27,6 +28,15 @@ import {
   stockV2StrategyVersionStatusLabel,
   stockV2StrategyVersionStatusTone,
 } from "../../domain/labels";
+import {
+  PLAYBOOK_META_KEY,
+  PlaybookEditor,
+  PlaybookSummary,
+  playbookFromGenerationMeta,
+  playbookMetaFromRules,
+  playbookRulesForForm,
+  playbookSummaryText,
+} from "./StockV2StrategyPlaybook";
 
 // 策略是长期判断依据,由系统内置监控任务扫描并产生命中候选。
 // 本页只做 Strategy 对象的 CRUD 与版本展示;不让用户创建单独价格提醒。
@@ -572,7 +582,8 @@ function StrategyRow({
             </span>
           ) : null}
           {portfolio ? <span>组合 <span className="text-[var(--text)]">{portfolio.name}</span></span> : null}
-          {strategy.direction ? <span>{stockV2StrategyDirectionLabel(strategy.direction)}</span> : null}
+          {strategy.direction ? <span>倾向 {stockV2StrategyDirectionLabel(strategy.direction)}</span> : null}
+          {strategy.playbook ? <span>剧本 {playbookSummaryText(strategy.playbook)}</span> : null}
           <span>v{strategy.activeVersionNo ?? (strategy.hasDraft ? "草稿" : "-")}</span>
           <span>更新 {formatDate(strategy.updatedAt) || "-"}</span>
         </div>
@@ -630,7 +641,7 @@ function StrategyEmptyState({
         <Plus size={18} className="text-[var(--muted)]" />
         <strong className="text-sm">新建单票策略</strong>
         <span className="text-xs leading-relaxed text-[var(--muted)]">
-          为某只股票建立长期判断:方向、逻辑、入场/出场条件和风险备注。可账户无关,也可绑定组合。
+          为某只股票建立长期判断:倾向、逻辑、操作剧本和风险备注。可账户无关,也可绑定组合。
         </span>
       </button>
       <button
@@ -778,11 +789,12 @@ function SymbolStrategyForm({
   });
   const [scope, setScope] = useState<string>(initial?.scope || "research");
   const [portfolioId, setPortfolioId] = useState<string>(initial?.portfolioId || "");
-  const [direction, setDirection] = useState<string>(initial?.direction || "buy_signal");
+  const [direction, setDirection] = useState<string>(initial?.direction || "bullish");
   const [thesis, setThesis] = useState(initial?.thesis || "");
   const [entryConditions, setEntryConditions] = useState(initial?.entryConditions || "");
   const [exitConditions, setExitConditions] = useState(initial?.exitConditions || "");
   const [riskNotes, setRiskNotes] = useState(initial?.riskNotes || "");
+  const [playbookRules, setPlaybookRules] = useState<StockV2StrategyActionRule[]>(playbookRulesForForm(initial?.generationMeta));
   const [changeSummary, setChangeSummary] = useState("");
   const [price, setPrice] = useState<PriceForm>({
     entryPriceLow: numToStr(initial?.entryPriceLow),
@@ -803,6 +815,8 @@ function SymbolStrategyForm({
     const generationMeta = mergeStrategyGenerationMeta(
       initial?.generationMeta,
       price,
+      playbookRules,
+      { entryConditions, exitConditions, riskNotes },
       mode === "edit" ? changeSummary : "",
     );
     const entryConditionList = multilineToList(entryConditions);
@@ -835,7 +849,7 @@ function SymbolStrategyForm({
         <Notice tone="warn">当前是草稿,保存会直接更新草稿内容,不生成新版本。</Notice>
       ) : null}
 
-      <Field label="策略名称" help="可留空,保存时会按标的和方向自动生成。">
+      <Field label="策略名称" help="可留空,保存时会按标的和策略倾向自动生成。">
         <input
           type="text"
           value={name}
@@ -855,12 +869,12 @@ function SymbolStrategyForm({
             <option value="portfolio_bound">绑定组合</option>
           </select>
         </Field>
-        <Field label="方向">
+        <Field label="策略倾向">
           <select value={direction} onChange={(e) => setDirection(e.target.value)}>
-            <option value="buy_signal">买入信号</option>
-            <option value="sell_signal">卖出信号</option>
-            <option value="hold">持有</option>
-            <option value="watch">仅观察</option>
+            <option value="bullish">偏多</option>
+            <option value="bearish">偏空</option>
+            <option value="neutral">中性</option>
+            <option value="watch">观察</option>
           </select>
         </Field>
       </div>
@@ -894,6 +908,8 @@ function SymbolStrategyForm({
       <Field label="风险备注">
         <textarea rows={2} value={riskNotes} placeholder="仓位上限、最大可承受回撤、需关注的事件" onChange={(e) => setRiskNotes(e.target.value)} />
       </Field>
+
+      <PlaybookEditor rules={playbookRules} onChange={setPlaybookRules} />
 
       <CollapsibleSection title="价格与触发(可选)" subtitle="结构化触发价,供后台监控任务预筛使用">
         <div className="grid grid-cols-2 gap-3">
@@ -1038,7 +1054,7 @@ function StrategyDetailDrawer({
     ["来源", stockV2StrategySourceLabel(strategy.source)],
     ...(strategy.symbol ? [["标的", <span key="s" className="font-mono">{strategy.symbol}{strategy.instrumentName ? ` · ${strategy.instrumentName}` : ""}</span>]] as Array<[string, ReactNode]> : []),
     ...(portfolio ? [["组合", portfolio.name]] as Array<[string, ReactNode]> : []),
-    ...(strategy.direction ? [["方向", stockV2StrategyDirectionLabel(strategy.direction)]] as Array<[string, ReactNode]> : []),
+    ...(strategy.direction ? [["策略倾向", stockV2StrategyDirectionLabel(strategy.direction)]] as Array<[string, ReactNode]> : []),
     ["当前版本", `v${strategy.activeVersionNo ?? (strategy.hasDraft ? "草稿" : "-")}`],
     ["创建", formatDate(strategy.createdAt) || "-"],
     ["更新", formatDate(strategy.updatedAt) || "-"],
@@ -1094,6 +1110,8 @@ function StrategyDetailDrawer({
             {strategy.riskNotes ? <DetailField label="风险备注" value={strategy.riskNotes} /> : null}
           </div>
         ) : null}
+
+        <PlaybookSummary playbook={strategy.playbook} />
 
         <PriceSummary strategy={strategy} />
 
@@ -1273,7 +1291,9 @@ function normalizeStrategyItem(item: StockV2StrategyWithVersion | StockV2Strateg
   const wrapped = "strategy" in item && item.strategy ? item as StockV2StrategyWithVersion : null;
   const strategy = wrapped ? wrapped.strategy : item as StockV2Strategy;
   const activeVersion = wrapped?.activeVersion;
-  const price = priceFromGenerationMeta(activeVersion?.generationMeta || strategy.generationMeta);
+  const generationMeta = activeVersion?.generationMeta || strategy.generationMeta;
+  const price = priceFromGenerationMeta(generationMeta);
+  const playbook = playbookFromGenerationMeta(generationMeta);
   const instrument = strategy.symbol
     ? instruments.find((inst) => inst.symbol === strategy.symbol && (!strategy.market || inst.market === strategy.market))
     : undefined;
@@ -1289,7 +1309,8 @@ function normalizeStrategyItem(item: StockV2StrategyWithVersion | StockV2Strateg
     entryConditions: listToMultiline(activeVersion?.entryConditions) || strategy.entryConditions,
     exitConditions: listToMultiline(activeVersion?.exitConditions) || strategy.exitConditions,
     riskNotes: activeVersion?.riskNotes || strategy.riskNotes,
-    generationMeta: activeVersion?.generationMeta || strategy.generationMeta,
+    generationMeta,
+    playbook,
     ...price,
   };
 }
@@ -1322,6 +1343,8 @@ function defaultStrategyName(symbolRef: SymbolRef, direction: string): string {
 function mergeStrategyGenerationMeta(
   base: Record<string, unknown> | undefined,
   price: PriceForm,
+  playbookRules: StockV2StrategyActionRule[],
+  playbookFallback: { entryConditions?: string; exitConditions?: string; riskNotes?: string },
   changeSummary: string,
 ): Record<string, unknown> | undefined {
   const next: Record<string, unknown> = { ...(base || {}) };
@@ -1330,6 +1353,13 @@ function mergeStrategyGenerationMeta(
     next[PRICE_META_KEY] = priceMeta;
   } else {
     delete next[PRICE_META_KEY];
+  }
+
+  const playbook = playbookMetaFromRules(playbookRules, playbookFallback);
+  if (playbook) {
+    next[PLAYBOOK_META_KEY] = playbook;
+  } else {
+    delete next[PLAYBOOK_META_KEY];
   }
 
   const summary = changeSummary.trim();
@@ -1383,6 +1413,8 @@ function strategyVersionStatus(strategy: StockV2Strategy, version: StockV2Strate
 function strategyVersionSummary(version: StockV2StrategyVersion): string {
   const changeSummary = version.generationMeta?.changeSummary;
   if (typeof changeSummary === "string" && changeSummary.trim()) return changeSummary.trim();
+  const playbook = playbookFromGenerationMeta(version.generationMeta);
+  if (playbook) return `剧本 ${playbookSummaryText(playbook)}`;
   if (version.title) return version.title;
   if (version.direction) return stockV2StrategyDirectionLabel(version.direction);
   return "-";

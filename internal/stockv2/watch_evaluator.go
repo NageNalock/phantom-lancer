@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -13,15 +14,16 @@ const (
 	WatchRunStatusSkipped    = "skipped"
 	WatchRunStatusDegraded   = "degraded"
 
-	WatchRulePriceAbove                = "price_above"
-	WatchRulePriceBelow                = "price_below"
-	WatchRulePriceBetween              = "price_between"
-	WatchRulePctChangeAbove            = "pct_change_above"
-	WatchRulePctChangeBelow            = "pct_change_below"
-	WatchRuleQuoteStale                = "quote_stale"
-	WatchRuleDailyCloseAbove           = "daily_close_above"
-	WatchRuleDailyCloseBelow           = "daily_close_below"
-	WatchRulePortfolioSymbolWeightOver = "portfolio_symbol_weight_above"
+	WatchRulePriceAbove                 = "price_above"
+	WatchRulePriceBelow                 = "price_below"
+	WatchRulePriceBetween               = "price_between"
+	WatchRulePctChangeAbove             = "pct_change_above"
+	WatchRulePctChangeBelow             = "pct_change_below"
+	WatchRuleQuoteStale                 = "quote_stale"
+	WatchRuleDailyCloseAbove            = "daily_close_above"
+	WatchRuleDailyCloseBelow            = "daily_close_below"
+	WatchRulePortfolioSymbolWeightOver  = "portfolio_symbol_weight_above"
+	WatchRulePortfolioSymbolWeightBelow = "portfolio_symbol_weight_below"
 )
 
 type WatchRunResult struct {
@@ -150,7 +152,7 @@ func watchRulesFromConfig(watch StockV2Watch) []watchRule {
 		if !ok {
 			continue
 		}
-		ruleType := firstRuleString(m, "type", "ruleType")
+		ruleType := normalizeWatchRuleType(firstRuleString(m, "type", "ruleType"))
 		key := firstRuleString(m, "key", "ruleKey")
 		if key == "" {
 			key = ruleType
@@ -180,7 +182,7 @@ func (s *Service) evaluateWatchRule(ctx context.Context, watch StockV2Watch, rul
 		return s.evaluateQuoteRule(ctx, rule, now)
 	case WatchRuleDailyCloseAbove, WatchRuleDailyCloseBelow:
 		return s.evaluateDailyCloseRule(ctx, rule)
-	case WatchRulePortfolioSymbolWeightOver:
+	case WatchRulePortfolioSymbolWeightOver, WatchRulePortfolioSymbolWeightBelow:
 		return s.evaluatePortfolioWeightRule(ctx, watch, rule)
 	default:
 		return ruleResult(rule, WatchRunStatusDegraded, "unsupported rule type", 0, rule.Threshold, nil, time.Time{})
@@ -273,6 +275,9 @@ func (s *Service) evaluatePortfolioWeightRule(ctx context.Context, watch StockV2
 		if weight <= 0 && holding.MarketValue > 0 {
 			weight = holding.MarketValue / snapshot.TotalAssetValue * 100
 		}
+		if rule.Type == WatchRulePortfolioSymbolWeightBelow {
+			return boolRuleResult(rule, weight < rule.Threshold, weight, rule.Threshold, fmt.Sprintf("position %.2f%% < %.2f%%", weight, rule.Threshold), portfolioEvidence(snapshot, &holding), snapshot.ValuationAt)
+		}
 		return boolRuleResult(rule, weight > rule.Threshold, weight, rule.Threshold, fmt.Sprintf("position %.2f%% > %.2f%%", weight, rule.Threshold), portfolioEvidence(snapshot, &holding), snapshot.ValuationAt)
 	}
 	return boolRuleResult(rule, false, 0, rule.Threshold, "symbol is not held in portfolio", portfolioEvidence(snapshot, nil), snapshot.ValuationAt)
@@ -364,15 +369,33 @@ func firstRuleString(m map[string]any, keys ...string) string {
 	return ""
 }
 
+func normalizeWatchRuleType(ruleType string) string {
+	switch strings.TrimSpace(ruleType) {
+	case "position_pct_above", "position_weight_above":
+		return WatchRulePortfolioSymbolWeightOver
+	case "position_pct_below", "position_weight_below":
+		return WatchRulePortfolioSymbolWeightBelow
+	default:
+		return strings.TrimSpace(ruleType)
+	}
+}
+
 func firstRuleNumber(m map[string]any, keys ...string) float64 {
 	for _, key := range keys {
 		switch value := m[key].(type) {
 		case float64:
 			return value
+		case float32:
+			return float64(value)
 		case int:
+			return float64(value)
+		case int64:
 			return float64(value)
 		case jsonNumber:
 			n, _ := value.Float64()
+			return n
+		case string:
+			n, _ := strconv.ParseFloat(value, 64)
 			return n
 		}
 	}
@@ -455,6 +478,8 @@ func alertTitleForRule(rule WatchRuleResult) string {
 		return fmt.Sprintf("日收盘价跌破 %.2f", thresholdFloat(rule.Threshold))
 	case WatchRulePortfolioSymbolWeightOver:
 		return fmt.Sprintf("仓位占比超过 %.2f%%", thresholdFloat(rule.Threshold))
+	case WatchRulePortfolioSymbolWeightBelow:
+		return fmt.Sprintf("仓位占比低于 %.2f%%", thresholdFloat(rule.Threshold))
 	case WatchRuleQuoteStale:
 		return "行情数据过期"
 	default:

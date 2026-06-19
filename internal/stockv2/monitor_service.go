@@ -195,8 +195,8 @@ func (s *Service) CountMonitorHits(ctx context.Context, filter MonitorHitListFil
 	return s.store.CountMonitorHits(ctx, filter)
 }
 
-// runDataStrategyMonitor 扫描 active 单票策略,用策略触发价规则评估最新行情/日K,命中产候选 hit。
-// 复用 triggerConfigFromStrategy + watchRulesFromConfig + evaluateWatchRule,不重写判断逻辑。
+// runDataStrategyMonitor 扫描 active 单票策略,优先用操作剧本里的数据/组合预筛产出动作候选。
+// ponytail: 保留旧 priceTriggers 兜底,兼容已有策略版本,监控判断仍复用 watch evaluator。
 func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cfg MonitorTaskConfig) MonitorRun {
 	run.Metadata["agentDoublecheck"] = monitorAgentDecisionState(cfg)
 	strategies, err := s.store.ListStrategies(ctx, StrategyListFilter{
@@ -213,6 +213,15 @@ func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cf
 	run.ScannedCount = len(strategies)
 	for _, sw := range strategies {
 		if sw.ActiveVersion == nil || sw.Strategy.Symbol == "" {
+			continue
+		}
+		hasPlaybookPrefilters, playbookMatched, playbookHits, playbookFailures := s.runStrategyPlaybookPrefilters(ctx, run, cfg, sw)
+		run.HitCount += playbookHits
+		run.FailedCount += playbookFailures
+		if hasPlaybookPrefilters {
+			if playbookMatched {
+				run.SuccessCount++
+			}
 			continue
 		}
 		triggerConfig, err := s.triggerConfigFromStrategy(ctx, sw)
@@ -232,6 +241,10 @@ func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cf
 		for _, rule := range rules {
 			rr := s.evaluateWatchRule(ctx, tempWatch, rule, run.StartedAt)
 			if rr.Status == WatchRunStatusMatched {
+				evidence := monitorEvidenceWithAgentState(rr.Evidence, cfg)
+				if playbook := mapFromAny(sw.ActiveVersion.GenerationMeta["playbook"]); len(playbook) > 0 {
+					evidence["playbook"] = playbook
+				}
 				hit := MonitorHit{
 					RunID:      run.ID,
 					TaskType:   MonitorTaskDataStrategyMonitor,
@@ -241,7 +254,7 @@ func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cf
 					Market:     sw.Strategy.Market,
 					Title:      alertTitleForRule(rr),
 					Summary:    rr.Reason,
-					Evidence:   monitorEvidenceWithAgentState(rr.Evidence, cfg),
+					Evidence:   evidence,
 				}
 				if _, err := s.store.CreateMonitorHit(ctx, hit); err != nil {
 					run.FailedCount++
@@ -259,6 +272,69 @@ func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cf
 	run.FinishedAt = time.Now()
 	run.ScopeSummary = scopeSummaryFromCount(run.ScannedCount, "strategies")
 	return run
+}
+
+func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run MonitorRun, cfg MonitorTaskConfig, sw StrategyWithVersion) (bool, bool, int, int) {
+	actions := playbookActionMapsFromMeta(sw.ActiveVersion.GenerationMeta)
+	hasPrefilters := false
+	matched := false
+	hitCount := 0
+	failedCount := 0
+
+	for _, action := range actions {
+		rules := playbookActionWatchRules(action, sw.Strategy.Symbol, sw.Strategy.PortfolioID)
+		if len(rules) == 0 {
+			continue
+		}
+		hasPrefilters = true
+		tempWatch := StockV2Watch{
+			Symbol:        sw.Strategy.Symbol,
+			Market:        sw.Strategy.Market,
+			PortfolioID:   sw.Strategy.PortfolioID,
+			TriggerPolicy: WatchTriggerPolicyAny,
+		}
+		for _, rule := range rules {
+			rr := s.evaluateWatchRule(ctx, tempWatch, rule, run.StartedAt)
+			if rr.Status != WatchRunStatusMatched {
+				continue
+			}
+			evidence := monitorEvidenceWithAgentState(rr.Evidence, cfg)
+			actionID := firstRuleString(action, "id")
+			actionType := firstRuleString(action, "action")
+			actionTitle := firstRuleString(action, "title")
+			evidence["matchedAction"] = actionType
+			evidence["matchedActionLabel"] = strategyActionLabel(actionType)
+			evidence["matchedRuleId"] = actionID
+			evidence["matchedRuleTitle"] = actionTitle
+			evidence["matchedPrefilterKey"] = rr.RuleKey
+			evidence["matchedPrefilterType"] = rr.RuleType
+			evidence["playbookRule"] = action
+
+			title := "策略动作候选: " + strategyActionLabel(actionType)
+			if actionTitle != "" {
+				title += " · " + actionTitle
+			}
+			hit := MonitorHit{
+				RunID:       run.ID,
+				TaskType:    MonitorTaskDataStrategyMonitor,
+				Status:      MonitorHitStatusCandidate,
+				StrategyID:  sw.Strategy.ID,
+				PortfolioID: sw.Strategy.PortfolioID,
+				Symbol:      sw.Strategy.Symbol,
+				Market:      sw.Strategy.Market,
+				Title:       title,
+				Summary:     rr.Reason,
+				Evidence:    evidence,
+			}
+			if _, err := s.store.CreateMonitorHit(ctx, hit); err != nil {
+				failedCount++
+				continue
+			}
+			hitCount++
+			matched = true
+		}
+	}
+	return hasPrefilters, matched, hitCount, failedCount
 }
 
 // runPortfolioRiskMonitor 扫描组合快照与持仓,检查单票权重与数据新鲜度,命中产候选 hit。
@@ -492,6 +568,112 @@ func monitorEvidenceWithAgentState(evidence map[string]any, cfg MonitorTaskConfi
 	}
 	next["agentDoublecheck"] = monitorAgentDecisionState(cfg)
 	return next
+}
+
+func playbookActionMapsFromMeta(meta map[string]any) []map[string]any {
+	playbook := mapFromAny(meta["playbook"])
+	rawRules := arrayFromAny(playbook["rules"])
+	actions := make([]map[string]any, 0, len(rawRules))
+	for _, raw := range rawRules {
+		if action := mapFromAny(raw); len(action) > 0 {
+			actions = append(actions, action)
+		}
+	}
+	return actions
+}
+
+func playbookActionWatchRules(action map[string]any, symbol, portfolioID string) []watchRule {
+	rawRules := make([]any, 0)
+	rawRules = append(rawRules, arrayFromAny(action["dataPrefilters"])...)
+	rawRules = append(rawRules, arrayFromAny(action["portfolioPrefilters"])...)
+	if len(rawRules) == 0 {
+		return nil
+	}
+	filtered := make([]any, 0, len(rawRules))
+	for _, raw := range rawRules {
+		prefilter := mapFromAny(raw)
+		if playbookPrefilterReady(prefilter) {
+			filtered = append(filtered, prefilter)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	watch := StockV2Watch{
+		Symbol:      symbol,
+		PortfolioID: portfolioID,
+		TriggerConfig: map[string]any{
+			"rules": filtered,
+		},
+	}
+	return watchRulesFromConfig(watch)
+}
+
+func playbookPrefilterReady(prefilter map[string]any) bool {
+	ruleType := normalizeWatchRuleType(firstRuleString(prefilter, "type", "ruleType"))
+	switch ruleType {
+	case "":
+		return false
+	case WatchRuleQuoteStale:
+		return true
+	case WatchRulePriceBetween:
+		return ruleNumberPresent(prefilter, "low", "lower", "min") && ruleNumberPresent(prefilter, "high", "upper", "max")
+	default:
+		return ruleNumberPresent(prefilter, "threshold", "value")
+	}
+}
+
+func ruleNumberPresent(m map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		switch value := m[key].(type) {
+		case float64, float32, int, int64:
+			return true
+		case jsonNumber:
+			_, err := value.Float64()
+			return err == nil
+		case string:
+			_, err := strconv.ParseFloat(value, 64)
+			return err == nil
+		}
+	}
+	return false
+}
+
+func arrayFromAny(value any) []any {
+	switch v := value.(type) {
+	case []any:
+		return v
+	case []map[string]any:
+		items := make([]any, 0, len(v))
+		for _, item := range v {
+			items = append(items, item)
+		}
+		return items
+	default:
+		return nil
+	}
+}
+
+func strategyActionLabel(action string) string {
+	switch action {
+	case "observe":
+		return "观察"
+	case "build_position":
+		return "建仓"
+	case "add_position":
+		return "加仓"
+	case "hold":
+		return "持有"
+	case "reduce_position":
+		return "减仓"
+	case "exit_position":
+		return "清仓"
+	default:
+		if action == "" {
+			return "动作"
+		}
+		return action
+	}
 }
 
 func scopeSummaryFromCount(count int, unit string) string {

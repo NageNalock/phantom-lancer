@@ -231,6 +231,68 @@ func TestRunWatchPortfolioSymbolWeightAbove(t *testing.T) {
 	}
 }
 
+func TestRunWatchPortfolioSymbolWeightBelow(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newWatchTestService(t)
+	defer cleanup()
+
+	portfolio := StockV2Portfolio{ID: "portfolio-weight-below", Name: "低权重组合", Cash: 9000, RiskLevel: "medium"}
+	if err := svc.store.CreatePortfolio(ctx, portfolio); err != nil {
+		t.Fatalf("create portfolio: %v", err)
+	}
+	if err := svc.store.CreateHolding(ctx, StockV2Holding{
+		ID:                "holding-weight-below",
+		PortfolioID:       portfolio.ID,
+		Symbol:            "300750",
+		Market:            "SZ",
+		Name:              "宁德时代",
+		Quantity:          10,
+		AvailableQuantity: 10,
+		CostPrice:         100,
+		LastPrice:         100,
+		LastPriceAt:       time.Now(),
+		MarketValue:       1000,
+		PositionPct:       10,
+		TradableStatus:    PortfolioValuationStatusFresh,
+	}); err != nil {
+		t.Fatalf("create holding: %v", err)
+	}
+	if err := svc.store.CreatePortfolioSnapshot(ctx, PortfolioSnapshot{
+		ID:                 "snapshot-weight-below",
+		PortfolioID:        portfolio.ID,
+		ValuationAt:        time.Now(),
+		Cash:               9000,
+		HoldingMarketValue: 1000,
+		TotalAssetValue:    10000,
+		CashPct:            90,
+		PositionCount:      1,
+		Source:             PortfolioValuationSourceLatestQuote,
+		Status:             PortfolioValuationStatusFresh,
+		CreatedAt:          time.Now(),
+	}); err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	watch, err := svc.CreateWatch(ctx, RequestCreateWatch{
+		Name:        "低仓位盯盘",
+		Source:      WatchSourcePortfolioMonitor,
+		PortfolioID: portfolio.ID,
+		Symbol:      "300750",
+		TriggerConfig: map[string]any{"rules": []any{
+			map[string]any{"key": "weight_below_20", "type": WatchRulePortfolioSymbolWeightBelow, "threshold": 20},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create watch: %v", err)
+	}
+	run, err := svc.RunWatch(ctx, watch.ID)
+	if err != nil {
+		t.Fatalf("run watch: %v", err)
+	}
+	if run.Status != WatchRunStatusMatched || run.Alert == nil {
+		t.Fatalf("portfolio below run = %+v", run)
+	}
+}
+
 func seedWatchQuote(t *testing.T, svc *Service, symbol string, price, pct float64, status string, fetchedAt time.Time) {
 	t.Helper()
 	if err := svc.store.UpsertLatestQuote(context.Background(), StockV2QuoteLatest{

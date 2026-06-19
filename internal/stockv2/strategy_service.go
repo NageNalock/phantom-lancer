@@ -318,6 +318,9 @@ func validStrategyStatus(status string) bool {
 func validateStrategyDirection(direction string) error {
 	if direction == "" ||
 		direction == StrategyDirectionWatch ||
+		direction == StrategyBiasBullish ||
+		direction == StrategyBiasBearish ||
+		direction == StrategyBiasNeutral ||
 		direction == StrategyDirectionBuySignal ||
 		direction == StrategyDirectionSellSignal ||
 		direction == StrategyDirectionHold {

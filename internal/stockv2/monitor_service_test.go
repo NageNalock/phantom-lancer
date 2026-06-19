@@ -192,6 +192,63 @@ func TestRunDataStrategyMonitorProducesHit(t *testing.T) {
 	}
 }
 
+func TestRunDataStrategyMonitorUsesPlaybookPrefilters(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+
+	seedWatchQuote(t, svc, "300750", 210, 2.4, QuoteStatusFresh, time.Now())
+	if _, err := svc.CreateStrategy(ctx, RequestCreateStrategy{
+		Name:      "宁德时代剧本策略",
+		Kind:      StrategyKindSymbolStrategy,
+		Scope:     StrategyScopeResearch,
+		Source:    StrategySourceManual,
+		Status:    StrategyStatusActive,
+		Symbol:    "300750",
+		Direction: StrategyBiasBullish,
+		GenerationMeta: map[string]any{
+			"playbook": map[string]any{
+				"version": "v1",
+				"rules": []any{
+					map[string]any{
+						"id":     "add-on-breakout",
+						"action": "add_position",
+						"title":  "突破后加仓",
+						"dataPrefilters": []any{
+							map[string]any{"key": "break_200", "type": WatchRulePriceAbove, "threshold": 200.0},
+						},
+					},
+				},
+			},
+			"priceTriggers": map[string]any{"triggerPriceAbove": 999.0},
+		},
+		CreatedBy: StrategySourceManual,
+	}); err != nil {
+		t.Fatalf("create strategy: %v", err)
+	}
+
+	run, err := svc.RunMonitorTask(ctx, MonitorTaskDataStrategyMonitor, MonitorTriggerManual)
+	if err != nil {
+		t.Fatalf("run monitor: %v", err)
+	}
+	if run.HitCount != 1 {
+		t.Fatalf("hit count = %d, want 1", run.HitCount)
+	}
+	hits, err := svc.ListMonitorHits(ctx, MonitorHitListFilter{TaskType: MonitorTaskDataStrategyMonitor, Limit: 10})
+	if err != nil {
+		t.Fatalf("list hits: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("hits = %+v, want one playbook hit", hits)
+	}
+	if got := hits[0].Evidence["matchedAction"]; got != "add_position" {
+		t.Fatalf("matched action = %v, want add_position", got)
+	}
+	if got := hits[0].Evidence["matchedPrefilterKey"]; got != "break_200" {
+		t.Fatalf("matched prefilter = %v, want break_200", got)
+	}
+}
+
 func TestRunPortfolioRiskMonitorProducesHit(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStrategyTestService(t)
