@@ -485,6 +485,116 @@ INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('news_strategy_monitor', 0, 3600, 'normal', 3600, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('daily_fundamental_monitor', 0, 86400, 'normal', 3600, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('data_quality_monitor', 0, 3600, 'normal', 3600, 0, 0, datetime('now'));
+
+-- ===== Agent 治理层:provider/model/task 绑定 + 授权 + 运行 + 决策账本 =====
+-- 本轮不存任何 secret;敏感字段在 service 层经 internal/safelog 脱敏后再写入。
+CREATE TABLE IF NOT EXISTS stockv2_agent_provider_profiles (
+    id TEXT PRIMARY KEY,
+    provider_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    display_name TEXT,
+    config_state TEXT NOT NULL DEFAULT 'not_configured',
+    auth_state TEXT NOT NULL DEFAULT 'unknown',
+    availability TEXT NOT NULL DEFAULT 'unknown',
+    last_probe_at DATETIME,
+    last_probe_result TEXT,
+    metadata_json TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_agent_provider_profiles_type ON stockv2_agent_provider_profiles(provider_type);
+CREATE INDEX IF NOT EXISTS idx_stockv2_agent_provider_profiles_availability ON stockv2_agent_provider_profiles(availability);
+CREATE TABLE IF NOT EXISTS stockv2_agent_model_profiles (
+    id TEXT PRIMARY KEY,
+    provider_id TEXT NOT NULL,
+    model_name TEXT NOT NULL,
+    display_name TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'available',
+    cost_level TEXT NOT NULL DEFAULT 'medium',
+    context_limit INTEGER NOT NULL DEFAULT 0,
+    confirm_required INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    FOREIGN KEY (provider_id) REFERENCES stockv2_agent_provider_profiles(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_agent_model_profiles_provider_id ON stockv2_agent_model_profiles(provider_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_agent_model_profiles_status ON stockv2_agent_model_profiles(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_agent_model_profiles_enabled ON stockv2_agent_model_profiles(enabled);
+CREATE TABLE IF NOT EXISTS stockv2_agent_task_profiles (
+    id TEXT PRIMARY KEY,
+    task_type TEXT NOT NULL UNIQUE,
+    primary_model_id TEXT,
+    fallback_model_id TEXT,
+    confirm_required INTEGER NOT NULL DEFAULT 0,
+    max_budget INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_agent_task_profiles_task_type ON stockv2_agent_task_profiles(task_type);
+CREATE TABLE IF NOT EXISTS stockv2_agent_authorizations (
+    id TEXT PRIMARY KEY,
+    task_type TEXT NOT NULL,
+    task_profile_id TEXT,
+    provider_id TEXT,
+    model_id TEXT,
+    trigger_object_type TEXT NOT NULL,
+    trigger_object_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending_authorization',
+    reason TEXT,
+    requested_by TEXT,
+    decided_at DATETIME,
+    decision_reason TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_agent_authorizations_task_type ON stockv2_agent_authorizations(task_type);
+CREATE INDEX IF NOT EXISTS idx_stockv2_agent_authorizations_status ON stockv2_agent_authorizations(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_agent_authorizations_trigger ON stockv2_agent_authorizations(trigger_object_type, trigger_object_id);
+CREATE TABLE IF NOT EXISTS stockv2_agent_runs (
+    id TEXT PRIMARY KEY,
+    task_type TEXT NOT NULL,
+    provider_id TEXT,
+    model_id TEXT,
+    trigger_object_type TEXT NOT NULL,
+    trigger_object_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ready',
+    cost_estimate_json TEXT,
+    error_message TEXT,
+    output TEXT,
+    decision_ledger_id TEXT,
+    authorization_id TEXT,
+    started_at DATETIME,
+    finished_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_agent_runs_task_type ON stockv2_agent_runs(task_type);
+CREATE INDEX IF NOT EXISTS idx_stockv2_agent_runs_status ON stockv2_agent_runs(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_agent_runs_trigger ON stockv2_agent_runs(trigger_object_type, trigger_object_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_agent_runs_authorization_id ON stockv2_agent_runs(authorization_id);
+CREATE TABLE IF NOT EXISTS stockv2_agent_decision_ledgers (
+    id TEXT PRIMARY KEY,
+    run_id TEXT,
+    provider_id TEXT,
+    model_id TEXT,
+    task_type TEXT NOT NULL,
+    trigger_object_type TEXT NOT NULL,
+    trigger_object_id TEXT NOT NULL,
+    input_summary TEXT,
+    prompt TEXT,
+    input_artifact_summary TEXT,
+    output_artifact_summary TEXT,
+    structured_output_json TEXT,
+    redaction_summary_json TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_agent_decision_ledgers_run_id ON stockv2_agent_decision_ledgers(run_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_agent_decision_ledgers_task_type ON stockv2_agent_decision_ledgers(task_type);
+-- operation_review 默认 task profile(模型绑定留空,用户后续绑定)。幂等种入。
+INSERT OR IGNORE INTO stockv2_agent_task_profiles (id, task_type, primary_model_id, fallback_model_id, confirm_required, max_budget, created_at, updated_at) VALUES ('agent-task-operation-review', 'operation_review', '', '', 0, 0, datetime('now'), datetime('now'));
 `
 
 // init 初始化 V2 表结构。如果检测到旧 schema（例如时间列是 TEXT 类型），
