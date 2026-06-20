@@ -88,6 +88,27 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/stockv2/history/daily/jobs/run", s.handleRunDailyBarsJob)
 	mux.HandleFunc("GET /api/stockv2/history/daily/jobs/{jobId}", s.handleGetDailyBarsJob)
 	mux.HandleFunc("GET /api/stockv2/history/daily/jobs", s.handleListDailyBarsJobs)
+
+	// Agent 治理层(provider/model/task profile、授权闸、运行与决策留痕)
+	mux.HandleFunc("GET /api/stockv2/agent/providers", s.handleStockV2ListAgentProviders)
+	mux.HandleFunc("POST /api/stockv2/agent/providers", s.handleStockV2CreateAgentProvider)
+	mux.HandleFunc("GET /api/stockv2/agent/providers/{id}", s.handleStockV2GetAgentProvider)
+	mux.HandleFunc("PUT /api/stockv2/agent/providers/{id}", s.handleStockV2UpdateAgentProvider)
+	mux.HandleFunc("GET /api/stockv2/agent/models", s.handleStockV2ListAgentModels)
+	mux.HandleFunc("POST /api/stockv2/agent/models", s.handleStockV2CreateAgentModel)
+	mux.HandleFunc("GET /api/stockv2/agent/models/{id}", s.handleStockV2GetAgentModel)
+	mux.HandleFunc("PUT /api/stockv2/agent/models/{id}", s.handleStockV2UpdateAgentModel)
+	mux.HandleFunc("GET /api/stockv2/agent/task-profiles", s.handleStockV2ListAgentTaskProfiles)
+	mux.HandleFunc("GET /api/stockv2/agent/task-profiles/{taskType}", s.handleStockV2GetAgentTaskProfile)
+	mux.HandleFunc("PUT /api/stockv2/agent/task-profiles/{taskType}", s.handleStockV2UpdateAgentTaskProfile)
+	mux.HandleFunc("GET /api/stockv2/agent/authorizations", s.handleStockV2ListAgentAuthorizations)
+	mux.HandleFunc("GET /api/stockv2/agent/authorizations/{id}", s.handleStockV2GetAgentAuthorization)
+	mux.HandleFunc("POST /api/stockv2/agent/authorizations/{id}/approve", s.handleStockV2ApproveAgentAuthorization)
+	mux.HandleFunc("POST /api/stockv2/agent/authorizations/{id}/deny", s.handleStockV2DenyAgentAuthorization)
+	mux.HandleFunc("GET /api/stockv2/agent/runs", s.handleStockV2ListAgentRuns)
+	mux.HandleFunc("GET /api/stockv2/agent/runs/{id}", s.handleStockV2GetAgentRun)
+	mux.HandleFunc("GET /api/stockv2/agent/ledgers/{id}", s.handleStockV2GetAgentDecisionLedger)
+	mux.HandleFunc("POST /api/stockv2/agent/resolve", s.handleStockV2ResolveAgentTask)
 }
 
 // handleStockV2Snapshot 处理 V2 工作台快照请求。
