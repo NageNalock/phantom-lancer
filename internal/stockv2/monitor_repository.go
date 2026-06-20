@@ -181,6 +181,18 @@ func (s *Store) UpdateMonitorRun(ctx context.Context, run MonitorRun) (MonitorRu
 	return run, nil
 }
 
+func (s *Store) IncrementMonitorRunReviewCount(ctx context.Context, id string) error {
+	if strings.TrimSpace(id) == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_monitor_runs
+		SET review_count = review_count + 1
+		WHERE id = ?
+	`, id)
+	return wrapError(err, "increment monitor run review count")
+}
+
 func (s *Store) GetMonitorRun(ctx context.Context, id string) (MonitorRun, error) {
 	row := s.db.QueryRowContext(ctx, monitorRunSelectSQL+" WHERE id = ?", id)
 	run, err := scanMonitorRun(row)
@@ -274,6 +286,33 @@ func (s *Store) CreateMonitorHit(ctx context.Context, hit MonitorHit) (MonitorHi
 		hit.CreatedAt,
 	)
 	return hit, wrapError(err, "create monitor hit")
+}
+
+func (s *Store) GetMonitorHit(ctx context.Context, id string) (MonitorHit, error) {
+	row := s.db.QueryRowContext(ctx, monitorHitSelectSQL+" WHERE id = ?", id)
+	hit, err := scanMonitorHit(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return MonitorHit{}, ErrMonitorHitNotFound
+		}
+		return MonitorHit{}, wrapError(err, "get monitor hit")
+	}
+	return hit, nil
+}
+
+func (s *Store) UpdateMonitorHitStatus(ctx context.Context, id, status string) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_monitor_hits
+		SET status = ?
+		WHERE id = ?
+	`, status, id)
+	if err != nil {
+		return wrapError(err, "update monitor hit status")
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return ErrMonitorHitNotFound
+	}
+	return nil
 }
 
 func (s *Store) ListMonitorHits(ctx context.Context, filter MonitorHitListFilter) ([]MonitorHit, error) {

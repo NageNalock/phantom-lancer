@@ -446,6 +446,36 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_monitor_hits_status ON stockv2_monitor_hi
 CREATE INDEX IF NOT EXISTS idx_stockv2_monitor_hits_strategy_id ON stockv2_monitor_hits(strategy_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_monitor_hits_portfolio_id ON stockv2_monitor_hits(portfolio_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_monitor_hits_symbol ON stockv2_monitor_hits(symbol);
+CREATE TABLE IF NOT EXISTS stockv2_operation_reviews (
+    id TEXT PRIMARY KEY,
+    hit_id TEXT NOT NULL,
+    run_id TEXT,
+    status TEXT NOT NULL,
+    output_type TEXT,
+    strategy_id TEXT,
+    portfolio_id TEXT,
+    symbol TEXT,
+    market TEXT,
+    input_context_json TEXT,
+    result_json TEXT,
+    result_summary TEXT,
+    error_message TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    completed_at DATETIME,
+    closed_at DATETIME,
+    FOREIGN KEY (hit_id) REFERENCES stockv2_monitor_hits(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_operation_reviews_hit_id ON stockv2_operation_reviews(hit_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_operation_reviews_status ON stockv2_operation_reviews(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_operation_reviews_run_id ON stockv2_operation_reviews(run_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_operation_reviews_strategy_id ON stockv2_operation_reviews(strategy_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_operation_reviews_portfolio_id ON stockv2_operation_reviews(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_operation_reviews_symbol ON stockv2_operation_reviews(symbol);
+CREATE INDEX IF NOT EXISTS idx_stockv2_operation_reviews_created_at ON stockv2_operation_reviews(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stockv2_operation_reviews_active_hit
+    ON stockv2_operation_reviews(hit_id)
+    WHERE status <> 'closed';
 -- 内置监控任务默认配置(全部默认关闭,用户显式开启后才会周期执行)。
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('universe_update', 0, 3600, 'normal', 0, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('latest_quote_refresh', 0, 300, 'normal', 0, 0, 0, datetime('now'));

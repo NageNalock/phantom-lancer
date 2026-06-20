@@ -2337,6 +2337,96 @@ export interface StockV2MonitorHit {
   createdAt?: string;
 }
 
+export type StockV2OperationReviewStatus = "pending" | "running" | "completed" | "failed" | "closed";
+export type StockV2OperationReviewOutputType =
+  | "trade_signal"
+  | "proposed_operation"
+  | "strategy_patch"
+  | "ignore"
+  | "continue_monitoring";
+
+export interface StockV2QuoteLatest {
+  symbol: string;
+  market?: string;
+  name?: string;
+  lastPrice: number;
+  prevClose?: number;
+  openPrice?: number;
+  highPrice?: number;
+  lowPrice?: number;
+  volume?: number;
+  amount?: number;
+  pctChange?: number;
+  quoteAt?: string;
+  fetchedAt?: string;
+  source?: string;
+  status?: string;
+  errorMessage?: string;
+}
+
+export interface StockV2DailyBarsContext {
+  symbol?: string;
+  adjusted?: string;
+  count?: number;
+  latestTradeDate?: string;
+  latestClose?: number;
+  latestFetchedAt?: string;
+  quality?: string;
+  summary?: Record<string, number>;
+}
+
+export interface StockV2PortfolioReviewContext {
+  portfolio: StockV2Portfolio;
+  snapshot?: StockV2PortfolioSnapshot;
+  holdings?: StockV2Holding[];
+}
+
+export interface StockV2AgentContextPack {
+  builtAt?: string;
+  hit?: StockV2MonitorHit;
+  evidence?: Record<string, unknown>;
+  strategy?: StockV2StrategyWithVersion;
+  quote?: StockV2QuoteLatest;
+  dailyBars?: StockV2DailyBarsContext;
+  portfolio?: StockV2PortfolioReviewContext;
+  freshness?: Record<string, unknown>;
+}
+
+export interface StockV2OperationReview {
+  id: string;
+  hitId: string;
+  runId?: string;
+  status: StockV2OperationReviewStatus | string;
+  outputType?: StockV2OperationReviewOutputType | string;
+  strategyId?: string;
+  portfolioId?: string;
+  symbol?: string;
+  market?: string;
+  inputContext?: StockV2AgentContextPack;
+  result?: Record<string, unknown>;
+  resultSummary?: string;
+  errorMessage?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  completedAt?: string;
+  closedAt?: string;
+}
+
+export interface StockV2OperationReviewListResponse {
+  items: StockV2OperationReview[];
+  total?: number;
+  limit?: number;
+  offset?: number;
+}
+
+export interface StockV2OperationReviewResultInput {
+  outputType?: StockV2OperationReviewOutputType | string;
+  result?: Record<string, unknown>;
+  resultSummary?: string;
+  status?: StockV2OperationReviewStatus | string;
+  errorMessage?: string;
+}
+
 export interface StockV2MonitorTask {
   definition: StockV2MonitorTaskDefinition;
   config: StockV2MonitorTaskConfig;

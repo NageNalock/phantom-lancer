@@ -45,6 +45,7 @@ const (
 
 var (
 	ErrMonitorTaskNotFound       = errors.New("monitor task not found")
+	ErrMonitorHitNotFound        = errors.New("monitor hit not found")
 	ErrMonitorTaskNotConfigured  = errors.New("monitor task not configured")
 	ErrMonitorTaskAlreadyRunning = errors.New("monitor task already running")
 	ErrInvalidMonitorTaskType    = errors.New("invalid monitor task type")
