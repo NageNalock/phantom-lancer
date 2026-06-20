@@ -1,4 +1,4 @@
-import { ArrowsClockwise, Check, CheckCircle, Pencil, Power, X } from "@phosphor-icons/react";
+import { ArrowsClockwise, Check, CheckCircle, MagnifyingGlass, Pencil, Power, X } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../../app/App";
 import type {
@@ -17,6 +17,7 @@ import type {
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, Drawer, Field, Notice, Pill, useDangerConfirm } from "../../components/ui";
+import { StockV2ReviewDrawer } from "./StockV2ReviewDrawer";
 import {
   formatDate,
   stockV2AlertLevelLabel,
@@ -64,6 +65,7 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
 
   const [editTask, setEditTask] = useState<StockV2MonitorTask | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [reviewHitId, setReviewHitId] = useState<string | null>(null);
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
   async function fetchTasks() {
@@ -424,9 +426,12 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
             setSelectedRun(null);
             setSelectedRunHits([]);
           }}
+          onOpenReview={(hitId) => setReviewHitId(hitId)}
           run={selectedRun}
         />
       ) : null}
+
+      <StockV2ReviewDrawer actions={actions} hitId={reviewHitId} onClose={() => setReviewHitId(null)} />
 
       {dangerConfirmDialog}
     </div>
@@ -674,11 +679,13 @@ function MonitorRunDrawer({
   hits,
   loading,
   onClose,
+  onOpenReview,
 }: {
   run: StockV2MonitorRun;
   hits: StockV2MonitorHit[];
   loading: boolean;
   onClose: () => void;
+  onOpenReview: (hitId: string) => void;
 }) {
   const symbols = affectedSymbols(hits);
   return (
@@ -720,7 +727,7 @@ function MonitorRunDrawer({
           ) : (
             <div className="grid gap-2">
               {hits.map((hit) => (
-                <MonitorHitDetail key={hit.id} hit={hit} />
+                <MonitorHitDetail key={hit.id} hit={hit} onOpenReview={onOpenReview} />
               ))}
             </div>
           )}
@@ -739,7 +746,20 @@ function MonitorRunDrawer({
   );
 }
 
-function MonitorHitDetail({ hit }: { hit: StockV2MonitorHit }) {
+function MonitorHitDetail({
+  hit,
+  onOpenReview,
+}: {
+  hit: StockV2MonitorHit;
+  onOpenReview: (hitId: string) => void;
+}) {
+  const evidence = hit.evidence || {};
+  const hasEvidence = Object.keys(evidence).length > 0;
+  const matchedActionLabel = evidenceStr(evidence, "matchedActionLabel") || evidenceStr(evidence, "matchedAction");
+  const prefilterKey = evidenceStr(evidence, "matchedPrefilterKey");
+  const prefilterType = evidenceStr(evidence, "matchedPrefilterType");
+  const playbookRule = evidenceStr(evidence, "playbookRule");
+  const hasReview = hit.status === "reviewed" || hit.status === "ignored";
   return (
     <div className="rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3 text-xs">
       <div className="flex flex-wrap items-center gap-2">
@@ -754,13 +774,57 @@ function MonitorHitDetail({ hit }: { hit: StockV2MonitorHit }) {
         <span>Agent {hitAgentLabel(hit)}</span>
         <span>{formatDate(hit.createdAt) || "-"}</span>
       </div>
-      {hit.evidence && Object.keys(hit.evidence).length > 0 ? (
-        <pre className="mt-2 max-h-40 overflow-auto rounded border border-[var(--line)] bg-[var(--surface-soft)] p-2 text-[11px] text-[var(--muted-strong)]">
-          {stringifyJSON(hit.evidence)}
-        </pre>
+
+      {(matchedActionLabel || prefilterKey || playbookRule) && hasEvidence ? (
+        <div className="mt-2 grid grid-cols-[80px_minmax(0,1fr)] gap-x-3 gap-y-1 rounded border border-[var(--line)] bg-[var(--surface-soft)] px-2 py-2 text-[var(--muted-strong)]">
+          {matchedActionLabel ? (
+            <>
+              <span className="text-[var(--muted)]">命中动作</span>
+              <span className="break-words">{matchedActionLabel}</span>
+            </>
+          ) : null}
+          {prefilterKey || prefilterType ? (
+            <>
+              <span className="text-[var(--muted)]">预过滤</span>
+              <span className="break-words">{[prefilterType, prefilterKey].filter(Boolean).join(" · ")}</span>
+            </>
+          ) : null}
+          {playbookRule ? (
+            <>
+              <span className="text-[var(--muted)]">规则</span>
+              <span className="break-words">{playbookRule}</span>
+            </>
+          ) : null}
+        </div>
       ) : null}
+
+      {hasEvidence ? (
+        <details className="mt-2 rounded border border-[var(--line)] bg-[var(--surface-soft)]">
+          <summary className="cursor-pointer px-2 py-1 text-[var(--muted)]">原始 evidence</summary>
+          <pre className="max-h-40 overflow-auto px-2 py-2 text-[11px] text-[var(--muted-strong)]">
+            {stringifyJSON(hit.evidence)}
+          </pre>
+        </details>
+      ) : null}
+
+      <div className="mt-2 flex justify-end">
+        <Button
+          tone={hasReview ? "neutral" : "primary"}
+          onClick={() => onOpenReview(hit.id)}
+          title={hasReview ? "查看 Review" : "进入 Review"}
+        >
+          <MagnifyingGlass size={12} className="mr-1" />
+          {hasReview ? "查看 Review" : "进入 Review"}
+        </Button>
+      </div>
     </div>
   );
+}
+
+function evidenceStr(evidence: Record<string, unknown>, key: string): string {
+  const v = evidence[key];
+  if (v === undefined || v === null || v === "") return "";
+  return typeof v === "object" ? JSON.stringify(v) : String(v);
 }
 
 function AlertRow({

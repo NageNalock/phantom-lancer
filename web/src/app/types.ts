@@ -2492,3 +2492,107 @@ export interface StockV2QuoteRefreshStateResponse {
   state: StockV2QuoteRefreshTaskState;
   items: StockV2QuoteRefreshStatus[];
 }
+
+// ===== Agent 治理层(V2)===== 对齐 internal/stockv2/agent_types.go
+
+export type StockV2AgentProviderType = "openai" | "codex_cli" | "local";
+export type StockV2AgentListResponse<T> = { items: T[]; total?: number; limit?: number; offset?: number };
+
+export interface StockV2AgentProviderProfile {
+  id: string;
+  providerType: StockV2AgentProviderType | string;
+  name: string;
+  displayName?: string;
+  configState?: string;
+  authState?: string;
+  availability?: string;
+  lastProbeAt?: string;
+  lastProbeResult?: string;
+  metadata?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface StockV2AgentModelProfile {
+  id: string;
+  providerId: string;
+  modelName: string;
+  displayName?: string;
+  enabled: boolean;
+  status?: string;
+  costLevel?: string;
+  contextLimit?: number;
+  confirmRequired?: boolean;
+  metadata?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface StockV2AgentTaskProfile {
+  id: string;
+  taskType: string;
+  primaryModelId?: string;
+  fallbackModelId?: string;
+  confirmRequired?: boolean;
+  maxBudget?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type StockV2AgentAuthorizationStatus = "pending_authorization" | "approved" | "denied";
+
+export interface StockV2AgentAuthorization {
+  id: string;
+  taskType: string;
+  taskProfileId?: string;
+  providerId?: string;
+  modelId?: string;
+  triggerObjectType?: string;
+  triggerObjectId?: string;
+  status: StockV2AgentAuthorizationStatus | string;
+  reason?: string;
+  requestedBy?: string;
+  decidedAt?: string;
+  decisionReason?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type StockV2AgentRunStatus = "pending" | "ready" | "running" | "completed" | "failed";
+
+export interface StockV2AgentRun {
+  id: string;
+  taskType: string;
+  providerId?: string;
+  modelId?: string;
+  triggerObjectType?: string;
+  triggerObjectId?: string;
+  status: StockV2AgentRunStatus | string;
+  costEstimate?: Record<string, unknown>;
+  errorMessage?: string;
+  output?: string;
+  decisionLedgerId?: string;
+  authorizationId?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface StockV2AgentDecisionLedger {
+  id: string;
+  runId?: string;
+  providerId?: string;
+  modelId?: string;
+  taskType: string;
+  triggerObjectType?: string;
+  triggerObjectId?: string;
+  inputSummary?: string;
+  prompt?: string;
+  inputArtifactSummary?: string;
+  outputArtifactSummary?: string;
+  structuredOutput?: Record<string, unknown>;
+  redactionSummary?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}

@@ -966,3 +966,169 @@ export function stockV2MonitorAgentStateLabel(state?: string): string {
     default: return state || "-";
   }
 }
+
+// ===== Operation Review / Agent 治理层 label =====
+
+export function stockV2ReviewStatusLabel(status?: string): string {
+  switch (status) {
+    case "pending": return "待处理";
+    case "running": return "运行中";
+    case "completed": return "已完成";
+    case "failed": return "失败";
+    case "closed": return "已关闭";
+    default: return status || "未知";
+  }
+}
+
+export function stockV2ReviewStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "completed": return "good";
+    case "running": return "neutral";
+    case "pending": return "warn";
+    case "failed": return "danger";
+    default: return "neutral";
+  }
+}
+
+export function stockV2ReviewOutputTypeLabel(type?: string): string {
+  switch (type) {
+    case "trade_signal": return "交易信号";
+    case "proposed_operation": return "操作提案";
+    case "strategy_patch": return "策略补丁";
+    case "ignore": return "忽略";
+    case "continue_monitoring": return "继续监控";
+    default: return type || "-";
+  }
+}
+
+export function stockV2AgentProviderTypeLabel(type?: string): string {
+  switch (type) {
+    case "openai": return "OpenAI";
+    case "codex_cli": return "Codex CLI";
+    case "local": return "本地";
+    default: return type || "-";
+  }
+}
+
+export function stockV2AgentConfigStateLabel(state?: string): string {
+  switch (state) {
+    case "not_configured": return "未配置";
+    case "configured": return "已配置";
+    case "misconfigured": return "配置异常";
+    default: return state || "-";
+  }
+}
+
+export function stockV2AgentAuthStateLabel(state?: string): string {
+  switch (state) {
+    case "unauthenticated": return "未认证";
+    case "authenticated": return "已认证";
+    case "expired": return "已过期";
+    case "unknown": return "未知";
+    default: return state || "-";
+  }
+}
+
+export function stockV2AgentAvailabilityLabel(state?: string): string {
+  switch (state) {
+    case "available": return "可用";
+    case "unavailable": return "不可用";
+    case "degraded": return "降级";
+    case "unknown": return "未知";
+    default: return state || "-";
+  }
+}
+
+export function stockV2AgentAvailabilityTone(state?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (state) {
+    case "available": return "good";
+    case "degraded": return "warn";
+    case "unavailable": return "danger";
+    default: return "neutral";
+  }
+}
+
+export function stockV2AgentModelStatusLabel(status?: string): string {
+  switch (status) {
+    case "available": return "可用";
+    case "degraded": return "降级";
+    case "unavailable": return "不可用";
+    default: return status || "-";
+  }
+}
+
+export function stockV2AgentModelStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "available": return "good";
+    case "degraded": return "warn";
+    case "unavailable": return "danger";
+    default: return "neutral";
+  }
+}
+
+export function stockV2AgentModelCostLevelLabel(level?: string): string {
+  switch (level) {
+    case "low": return "低成本";
+    case "medium": return "中成本";
+    case "high": return "高成本";
+    default: return level || "-";
+  }
+}
+
+export function stockV2AgentRunStatusLabel(status?: string): string {
+  switch (status) {
+    case "pending": return "待运行";
+    case "ready": return "就绪";
+    case "running": return "运行中";
+    case "completed": return "已完成";
+    case "failed": return "失败";
+    default: return status || "未知";
+  }
+}
+
+export function stockV2AgentRunStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "completed": return "good";
+    case "running": return "neutral";
+    case "ready": return "neutral";
+    case "pending": return "warn";
+    case "failed": return "danger";
+    default: return "neutral";
+  }
+}
+
+export function stockV2AgentAuthorizationStatusLabel(status?: string): string {
+  switch (status) {
+    case "pending_authorization": return "待授权";
+    case "approved": return "已批准";
+    case "denied": return "已拒绝";
+    default: return status || "-";
+  }
+}
+
+export function stockV2AgentAuthorizationStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "pending_authorization": return "warn";
+    case "approved": return "good";
+    case "denied": return "danger";
+    default: return "neutral";
+  }
+}
+
+export function stockV2GuardrailsStatusLabel(status?: string): string {
+  switch (status) {
+    case "pass": return "通过";
+    case "blocked": return "已拦截";
+    case "degraded": return "降级";
+    default: return status || "-";
+  }
+}
+
+export function stockV2GuardrailsStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "pass": return "good";
+    case "blocked": return "danger";
+    case "degraded": return "warn";
+    default: return "neutral";
+  }
+}
