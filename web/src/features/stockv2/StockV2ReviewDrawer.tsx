@@ -209,6 +209,8 @@ export function StockV2ReviewDrawer({
   const guardrailReasons = guardrails && Array.isArray(guardrails.reasons) ? guardrails.reasons : [];
   const blocked = guardrailsStatus === "blocked";
 
+  if (!hitId) return null;
+
   return (
     <Drawer
       title="操作复核 · Review"

@@ -431,7 +431,9 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
         />
       ) : null}
 
-      <StockV2ReviewDrawer actions={actions} hitId={reviewHitId} onClose={() => setReviewHitId(null)} />
+      {reviewHitId ? (
+        <StockV2ReviewDrawer actions={actions} hitId={reviewHitId} onClose={() => setReviewHitId(null)} />
+      ) : null}
 
       {dangerConfirmDialog}
     </div>
