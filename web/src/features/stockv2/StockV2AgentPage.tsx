@@ -200,7 +200,7 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
             <h2 className="text-lg font-semibold">Agent 治理</h2>
           </div>
           <p className="mt-1 text-xs text-[var(--muted)]">
-            供应商 / 模型 / 任务绑定。Provider 统一按 OpenAI-compatible 协议配置。
+            供应商 / 模型 / 任务绑定。默认 Provider 使用本机 Codex CLI，外部 Provider 使用 OpenAI-compatible 配置。
           </p>
         </div>
         <Button onClick={() => void openCliDebugDrawer()} title="验证 Codex CLI 与 MCP 回填链路">
@@ -211,7 +211,7 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
 
       <CollapsibleSection
         title="供应商 (Provider)"
-        subtitle="openai / codex_cli / local 配置与可用性"
+        subtitle="Codex CLI 默认入口与外部 provider 可用性"
       >
         <div onClick={openProviderSection}>
           <AgentProviderSection
@@ -348,32 +348,51 @@ function AgentProviderSection({
   if (!items || items.length === 0) return <p className="text-xs text-[var(--muted)]">暂无 Provider。</p>;
   return (
     <div className="grid gap-2">
-      {items.map((p) => (
-        <div key={p.id} className="rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
-          <div className="flex flex-wrap items-center gap-2">
-            <strong className="text-sm">{p.displayName || p.name}</strong>
-            <span className="font-mono text-[var(--muted-strong)]">{p.name}</span>
-            <Pill tone="neutral">{stockV2AgentProviderTypeLabel(p.providerType)}</Pill>
-            <Pill tone={p.apiKeySet ? "good" : "warn"}>{p.apiKeySet ? "Token 已设置" : "Token 未设置"}</Pill>
-          </div>
-          <p className="mt-1 break-words font-mono text-[var(--muted)]">{p.baseUrl || "-"}</p>
-          {p.lastProbeResult ? (
-            <p className="mt-1 break-words text-[var(--muted)]">
-              探测 {formatDate(p.lastProbeAt) || "-"}: {p.lastProbeResult}
+      {items.map((p) => {
+        const isDefaultProvider = isDefaultCodexCLIProvider(p);
+        return (
+          <div key={p.id} className="rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <strong className="text-sm">{p.displayName || p.name}</strong>
+              <span className="font-mono text-[var(--muted-strong)]">{p.name}</span>
+              <Pill tone="neutral">{stockV2AgentProviderTypeLabel(p.providerType)}</Pill>
+              {isDefaultProvider ? (
+                <Pill tone="good">本机 CLI</Pill>
+              ) : (
+                <Pill tone={p.apiKeySet ? "good" : "warn"}>{p.apiKeySet ? "Token 已设置" : "Token 未设置"}</Pill>
+              )}
+            </div>
+            <p className="mt-1 break-words font-mono text-[var(--muted)]">
+              {isDefaultProvider ? "codex login session on this host" : p.baseUrl || "-"}
             </p>
-          ) : null}
-          <div className="mt-1.5 flex justify-end gap-1.5">
-            <Button onClick={() => onEdit(p)}>
-              <Pencil size={12} className="mr-1" /> 编辑
-            </Button>
-            <Button tone="danger" onClick={() => onDelete(p)}>
-              <Trash size={12} className="mr-1" /> 删除
-            </Button>
+            {p.lastProbeResult ? (
+              <p className="mt-1 break-words text-[var(--muted)]">
+                探测 {formatDate(p.lastProbeAt) || "-"}: {p.lastProbeResult}
+              </p>
+            ) : null}
+            <div className="mt-1.5 flex justify-end gap-1.5">
+              {isDefaultProvider ? (
+                <Pill tone="neutral">系统内置</Pill>
+              ) : (
+                <>
+                  <Button onClick={() => onEdit(p)}>
+                    <Pencil size={12} className="mr-1" /> 编辑
+                  </Button>
+                  <Button tone="danger" onClick={() => onDelete(p)}>
+                    <Trash size={12} className="mr-1" /> 删除
+                  </Button>
+                </>
+              )}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
+}
+
+function isDefaultCodexCLIProvider(provider: StockV2AgentProviderProfile): boolean {
+  return provider.id === "agent-provider-codex-cli-default" && provider.providerType === "codex_cli";
 }
 
 function AgentModelSection({

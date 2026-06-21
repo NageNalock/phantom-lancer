@@ -2,6 +2,7 @@ package stockv2
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -214,6 +215,91 @@ func TestAgentProviderModelCatalogAndTestUseOpenAICompatibleProtocol(t *testing.
 	}
 	if updated.Status != AgentModelStatusAvailable {
 		t.Fatalf("model status = %q, want available", updated.Status)
+	}
+}
+
+func TestAgentDefaultCodexCLIProviderCatalogUsesCodexDebugModels(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	provider, err := svc.GetAgentProviderProfile(ctx, agentProviderCodexCLIDefaultID)
+	if err != nil {
+		t.Fatalf("get default codex provider: %v", err)
+	}
+	if provider.ProviderType != AgentProviderTypeCodexCLI || provider.Name != "default" {
+		t.Fatalf("default provider = %#v", provider)
+	}
+	if provider.BaseURL != "" || provider.APIKeySet {
+		t.Fatalf("default provider exposes runtime config: baseURL=%q apiKeySet=%v", provider.BaseURL, provider.APIKeySet)
+	}
+
+	var calls [][]string
+	svc.agentCodexCommand = func(ctx context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		return []byte(`warning: ignored
+{"models":[
+  {"slug":"gpt-5.5","display_name":"GPT-5.5","visibility":"list","supported_in_api":true},
+  {"slug":"codex-auto-review","display_name":"Codex Auto Review","visibility":"hide","supported_in_api":true}
+]}`), nil
+	}
+
+	catalog, err := svc.ListAgentProviderModels(ctx, agentProviderCodexCLIDefaultID)
+	if err != nil {
+		t.Fatalf("list default codex models: %v", err)
+	}
+	if len(calls) != 1 || strings.Join(calls[0], " ") != "debug models" {
+		t.Fatalf("codex calls = %#v, want debug models", calls)
+	}
+	if len(catalog.Items) != 1 || catalog.Items[0].ID != "gpt-5.5" {
+		t.Fatalf("catalog items = %#v", catalog.Items)
+	}
+	if catalog.Items[0].Source != "codex_cli" {
+		t.Fatalf("catalog source = %q", catalog.Items[0].Source)
+	}
+
+	result, err := svc.TestAgentModel(ctx, RequestTestAgentModel{
+		ProviderID: agentProviderCodexCLIDefaultID,
+		ModelName:  "gpt-5.5",
+	})
+	if err != nil {
+		t.Fatalf("test default codex model: %v", err)
+	}
+	if !result.OK {
+		t.Fatalf("test result = %#v, want ok", result)
+	}
+}
+
+func TestAgentDefaultCodexCLIProviderCatalogFallsBackToBundled(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	var calls [][]string
+	svc.agentCodexCommand = func(ctx context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if len(args) == 2 {
+			return []byte("network unavailable"), errors.New("live catalog failed")
+		}
+		return []byte(`{"models":[{"slug":"gpt-5.4","display_name":"GPT-5.4","visibility":"list","supported_in_api":true}]}`), nil
+	}
+
+	catalog, err := svc.ListAgentProviderModels(ctx, agentProviderCodexCLIDefaultID)
+	if err != nil {
+		t.Fatalf("list default codex models with bundled fallback: %v", err)
+	}
+	if len(calls) != 2 || strings.Join(calls[1], " ") != "debug models --bundled" {
+		t.Fatalf("codex calls = %#v, want live then bundled", calls)
+	}
+	if len(catalog.Items) != 1 || catalog.Items[0].ID != "gpt-5.4" || catalog.Items[0].Source != "codex_cli_bundled" {
+		t.Fatalf("catalog items = %#v", catalog.Items)
+	}
+	provider, err := svc.GetAgentProviderProfile(ctx, agentProviderCodexCLIDefaultID)
+	if err != nil {
+		t.Fatalf("get default provider after probe: %v", err)
+	}
+	if provider.Availability != AgentProviderAvailabilityDegraded {
+		t.Fatalf("availability = %q, want degraded", provider.Availability)
 	}
 }
 

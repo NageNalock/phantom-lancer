@@ -2337,6 +2337,20 @@ export interface StockV2MonitorHit {
   createdAt?: string;
 }
 
+export interface StockV2MonitorReviewPipeline {
+  reviewId?: string;
+  reviewCreated?: boolean;
+  reviewStatus?: string;
+  agentDoublecheckEnabled?: boolean;
+  agentAttempted?: boolean;
+  agentStatus?: string;
+  agentSkippedReason?: string;
+  agentRunId?: string;
+  agentRunStatus?: string;
+  agentError?: string;
+  error?: string;
+}
+
 export type StockV2OperationReviewStatus = "pending" | "running" | "completed" | "failed" | "closed";
 export type StockV2OperationReviewOutputType =
   | "trade_signal"
@@ -2643,6 +2657,9 @@ export interface StockV2AgentUpdateTaskProfileRequest {
 export interface StockV2AgentProviderModelCatalogItem {
   id: string;
   displayName?: string;
+  visibility?: string;
+  supportedInAPI?: boolean;
+  source?: string;
 }
 
 export interface StockV2AgentProviderModelCatalog {

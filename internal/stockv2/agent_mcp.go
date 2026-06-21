@@ -3,6 +3,7 @@ package stockv2
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 )
 
 // 轻量 MCP server。仅实现必要方法: initialize / tools/list / tools/call。
@@ -24,9 +25,9 @@ type mcpJSONRPCRequest struct {
 
 // mcpJSONRPCResponse 是 JSON-RPC 2.0 响应
 type mcpJSONRPCResponse struct {
-	JSONRPC string `json:"jsonrpc"`
-	ID      any    `json:"id,omitempty"`
-	Result  any    `json:"result,omitempty"`
+	JSONRPC string    `json:"jsonrpc"`
+	ID      any       `json:"id,omitempty"`
+	Result  any       `json:"result,omitempty"`
 	Error   *mcpError `json:"error,omitempty"`
 }
 
@@ -47,9 +48,9 @@ const (
 
 // mcpTool 定义一个 MCP tool
 type mcpTool struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	InputSchema any      `json:"inputSchema"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	InputSchema any    `json:"inputSchema"`
 }
 
 // submitResultParams 是 submit_result 工具的参数
@@ -130,8 +131,8 @@ func (p *agentTaskPool) mcpToolsList(params json.RawMessage) (any, *mcpError) {
 						"type": "object",
 						"properties": map[string]any{
 							"outputType": map[string]any{
-								"type": "string",
-								"enum": []string{"trade_signal", "proposed_operation", "strategy_patch", "ignore", "continue_monitoring"},
+								"type":        "string",
+								"enum":        []string{"trade_signal", "proposed_operation", "strategy_patch", "ignore", "continue_monitoring"},
 								"description": "The type of output result.",
 							},
 							"resultSummary": map[string]any{
@@ -140,7 +141,7 @@ func (p *agentTaskPool) mcpToolsList(params json.RawMessage) (any, *mcpError) {
 							},
 							"result": map[string]any{
 								"type":                 "object",
-								"description":          "Structured result object. Fields depend on outputType.",
+								"description":          "Structured result object. Include facts, inferences, assumptions, freshnessAssessment, and evidenceAudit. Fields depend on outputType. Do not fabricate missing market, financial, or news data.",
 								"additionalProperties": true,
 							},
 							"confidence": map[string]any{
@@ -150,7 +151,7 @@ func (p *agentTaskPool) mcpToolsList(params json.RawMessage) (any, *mcpError) {
 								"maximum":     1.0,
 							},
 						},
-						"required": []string{"taskID", "taskType", "outputType"},
+						"required": []string{"outputType"},
 					},
 				},
 				"required": []string{"taskID", "taskType", "result"},
@@ -188,6 +189,9 @@ func (p *agentTaskPool) mcpSubmitResult(args json.RawMessage) (any, *mcpError) {
 	if err := json.Unmarshal(args, &params); err != nil {
 		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "Invalid arguments: " + err.Error()}
 	}
+	params.TaskID = strings.TrimSpace(params.TaskID)
+	params.TaskType = strings.TrimSpace(params.TaskType)
+	params.Result.OutputType = strings.TrimSpace(params.Result.OutputType)
 	if params.TaskID == "" {
 		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "taskID is required"}
 	}
@@ -196,6 +200,9 @@ func (p *agentTaskPool) mcpSubmitResult(args json.RawMessage) (any, *mcpError) {
 	}
 	if params.Result.OutputType == "" {
 		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "result.outputType is required"}
+	}
+	if !validOperationReviewOutputType(params.Result.OutputType) {
+		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "invalid result.outputType"}
 	}
 
 	result := AgentTaskSubmittedResult{

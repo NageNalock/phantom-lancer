@@ -23,6 +23,7 @@ const (
 	agentProviderMetadataAPIKey  = "apiKey"
 	defaultOpenAIBaseURL         = "https://api.openai.com/v1"
 	openAIProbeMaxBodyBytes      = 1 << 20
+	codexModelCatalogTimeout     = 15 * time.Second
 )
 
 // ============================ provider profiles ============================
@@ -239,6 +240,9 @@ func (s *Service) ListAgentProviderModels(ctx context.Context, providerID string
 	if err != nil {
 		return AgentProviderModelCatalog{}, err
 	}
+	if isDefaultCodexCLIProvider(profile) {
+		return s.listDefaultCodexCLIModels(ctx, profile)
+	}
 	baseURL, apiKey, err := agentProviderOpenAIConfig(profile)
 	if err != nil {
 		return AgentProviderModelCatalog{}, err
@@ -302,6 +306,9 @@ func (s *Service) TestAgentModel(ctx context.Context, req RequestTestAgentModel)
 	if err != nil {
 		return AgentModelTestResult{}, err
 	}
+	if isDefaultCodexCLIProvider(profile) {
+		return s.testDefaultCodexCLIModel(ctx, profile, modelName), nil
+	}
 	baseURL, apiKey, err := agentProviderOpenAIConfig(profile)
 	if err != nil {
 		return AgentModelTestResult{}, err
@@ -351,6 +358,118 @@ func (s *Service) TestAgentModel(ctx context.Context, req RequestTestAgentModel)
 	s.recordAgentProviderProbe(ctx, profile, AgentProviderAvailabilityAvailable, message)
 	s.markAgentModelStatus(ctx, providerID, modelName, AgentModelStatusAvailable)
 	return AgentModelTestResult{OK: true, Message: message, LatencyMS: latencyMS}, nil
+}
+
+func (s *Service) listDefaultCodexCLIModels(ctx context.Context, profile AgentProviderProfile) (AgentProviderModelCatalog, error) {
+	items, source, err := s.fetchCodexCLIModelCatalog(ctx, false)
+	if err == nil {
+		s.recordAgentProviderProbe(ctx, profile, AgentProviderAvailabilityAvailable, fmt.Sprintf("codex cli model list ok: %d models", len(items)))
+		return AgentProviderModelCatalog{ProviderID: profile.ID, Items: items}, nil
+	}
+
+	items, source, fallbackErr := s.fetchCodexCLIModelCatalog(ctx, true)
+	if fallbackErr != nil {
+		message := "codex cli model list failed: " + safelog.Text(err.Error()+"; "+fallbackErr.Error(), 700)
+		s.recordAgentProviderProbe(ctx, profile, AgentProviderAvailabilityUnavailable, message)
+		return AgentProviderModelCatalog{}, fmt.Errorf("%s", message)
+	}
+	s.recordAgentProviderProbe(ctx, profile, AgentProviderAvailabilityDegraded, fmt.Sprintf("codex cli live catalog failed, bundled catalog ok: %d models", len(items)))
+	for i := range items {
+		items[i].Source = source
+	}
+	return AgentProviderModelCatalog{ProviderID: profile.ID, Items: items}, nil
+}
+
+func (s *Service) fetchCodexCLIModelCatalog(ctx context.Context, bundled bool) ([]AgentProviderModelCatalogItem, string, error) {
+	if s.agentCodexCommand == nil {
+		return nil, "", ErrAgentExecutorUnavailable
+	}
+	args := []string{"debug", "models"}
+	source := "codex_cli"
+	if bundled {
+		args = append(args, "--bundled")
+		source = "codex_cli_bundled"
+	}
+	cmdCtx, cancel := context.WithTimeout(ctx, codexModelCatalogTimeout)
+	defer cancel()
+	output, err := s.agentCodexCommand(cmdCtx, args...)
+	if err != nil {
+		return nil, source, fmt.Errorf("codex debug models failed: %s", safelog.Text(string(output)+" "+err.Error(), 700))
+	}
+	items, err := parseCodexCLIModelCatalog(output, source)
+	if err != nil {
+		return nil, source, err
+	}
+	if len(items) == 0 {
+		return nil, source, errors.New("codex model catalog is empty")
+	}
+	return items, source, nil
+}
+
+func parseCodexCLIModelCatalog(output []byte, source string) ([]AgentProviderModelCatalogItem, error) {
+	idx := bytes.IndexByte(output, '{')
+	if idx < 0 {
+		return nil, errors.New("codex model catalog response missing JSON object")
+	}
+	var payload struct {
+		Models []struct {
+			Slug           string `json:"slug"`
+			ID             string `json:"id"`
+			Name           string `json:"name"`
+			DisplayName    string `json:"display_name"`
+			Visibility     string `json:"visibility"`
+			SupportedInAPI bool   `json:"supported_in_api"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(bytes.NewReader(bytes.TrimSpace(output[idx:]))).Decode(&payload); err != nil {
+		return nil, err
+	}
+	items := make([]AgentProviderModelCatalogItem, 0, len(payload.Models))
+	for _, model := range payload.Models {
+		if strings.EqualFold(strings.TrimSpace(model.Visibility), "hide") {
+			continue
+		}
+		id := strings.TrimSpace(model.Slug)
+		if id == "" {
+			id = strings.TrimSpace(model.ID)
+		}
+		if id == "" {
+			id = strings.TrimSpace(model.Name)
+		}
+		if id == "" {
+			continue
+		}
+		displayName := strings.TrimSpace(model.DisplayName)
+		if displayName == "" {
+			displayName = id
+		}
+		items = append(items, AgentProviderModelCatalogItem{
+			ID:             id,
+			DisplayName:    displayName,
+			Visibility:     strings.TrimSpace(model.Visibility),
+			SupportedInAPI: model.SupportedInAPI,
+			Source:         source,
+		})
+	}
+	return items, nil
+}
+
+func (s *Service) testDefaultCodexCLIModel(ctx context.Context, profile AgentProviderProfile, modelName string) AgentModelTestResult {
+	start := time.Now()
+	catalog, err := s.listDefaultCodexCLIModels(ctx, profile)
+	latencyMS := time.Since(start).Milliseconds()
+	if err != nil {
+		s.markAgentModelStatus(ctx, profile.ID, modelName, AgentModelStatusUnavailable)
+		return AgentModelTestResult{OK: false, Message: safelog.Text(err.Error(), 700), LatencyMS: latencyMS}
+	}
+	for _, item := range catalog.Items {
+		if item.ID == modelName {
+			s.markAgentModelStatus(ctx, profile.ID, modelName, AgentModelStatusAvailable)
+			return AgentModelTestResult{OK: true, Message: "codex cli model found in catalog", LatencyMS: latencyMS}
+		}
+	}
+	s.markAgentModelStatus(ctx, profile.ID, modelName, AgentModelStatusUnavailable)
+	return AgentModelTestResult{OK: false, Message: "model not found in codex cli catalog", LatencyMS: latencyMS}
 }
 
 // ============================ task profiles ============================
@@ -683,10 +802,19 @@ func (s *Service) markAgentModelStatus(ctx context.Context, providerID, modelNam
 }
 
 func sanitizeAgentProviderProfile(profile AgentProviderProfile) AgentProviderProfile {
-	profile.BaseURL = agentProviderBaseURL(profile)
-	profile.APIKeySet = agentProviderAPIKey(profile) != ""
+	if isDefaultCodexCLIProvider(profile) {
+		profile.BaseURL = ""
+		profile.APIKeySet = false
+	} else {
+		profile.BaseURL = agentProviderBaseURL(profile)
+		profile.APIKeySet = agentProviderAPIKey(profile) != ""
+	}
 	profile.Metadata = nil
 	return profile
+}
+
+func isDefaultCodexCLIProvider(profile AgentProviderProfile) bool {
+	return profile.ProviderType == AgentProviderTypeCodexCLI && profile.ID == agentProviderCodexCLIDefaultID
 }
 
 func agentProviderOpenAIConfig(profile AgentProviderProfile) (string, string, error) {
@@ -908,7 +1036,9 @@ func (s *Service) startAgentRunAsync(
 ) {
 	defer func() {
 		if r := recover(); r != nil {
-			s.log.Error("agent run panicked", "run_id", run.ID, "panic", r)
+			if s.log != nil {
+				s.log.Error("agent run panicked", "run_id", run.ID, "panic", r)
+			}
 			s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("panic: %v", r))
 		}
 	}()
@@ -992,7 +1122,9 @@ func (s *Service) finalizeAgentRunWithOutput(
 	// 取 run 和 ledger
 	run, err := s.store.GetAgentRun(ctx, runID)
 	if err != nil {
-		s.log.Error("finalize: get run failed", "run_id", runID, "error", err)
+		if s.log != nil {
+			s.log.Error("finalize: get run failed", "run_id", runID, "error", err)
+		}
 		return
 	}
 
@@ -1001,7 +1133,9 @@ func (s *Service) finalizeAgentRunWithOutput(
 	}
 	ledger, err := s.store.GetAgentDecisionLedger(ctx, ledgerID)
 	if err != nil {
-		s.log.Warn("finalize: get ledger failed", "run_id", runID, "ledger_id", ledgerID, "error", err)
+		if s.log != nil {
+			s.log.Warn("finalize: get ledger failed", "run_id", runID, "ledger_id", ledgerID, "error", err)
+		}
 	}
 
 	// 准备 output artifact summary
@@ -1097,8 +1231,14 @@ func (s *Service) finalizeAgentRunWithOutput(
 			Status:        OperationReviewStatusCompleted,
 		}
 		if _, err := s.SaveOperationReviewResult(ctx, reviewID, saveReq); err != nil {
-			s.log.Warn("finalize: save review result failed", "run_id", runID, "review_id", reviewID, "error", err)
-			// 不影响 run 状态,只记日志
+			run.Status = AgentRunStatusFailed
+			run.ErrorMessage = safelog.Text("save review result failed: "+err.Error(), 500)
+			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
+				s.log.Warn("finalize: update run after review save failed", "run_id", runID, "error", updateErr)
+			}
+			if s.log != nil {
+				s.log.Warn("finalize: save review result failed", "run_id", runID, "review_id", reviewID, "error", err)
+			}
 		}
 	}
 }

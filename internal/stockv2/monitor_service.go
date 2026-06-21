@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strconv"
 	"time"
+
+	"phantom-lancer/internal/safelog"
 )
 
 // 监控服务:把系统固化的后台监控任务收敛成可观测对象。
@@ -195,6 +197,79 @@ func (s *Service) CountMonitorHits(ctx context.Context, filter MonitorHitListFil
 	return s.store.CountMonitorHits(ctx, filter)
 }
 
+type monitorHitPostProcessResult struct {
+	ReviewID       string
+	ReviewCreated  bool
+	AgentRunID     string
+	AgentRunStatus string
+}
+
+func (s *Service) processCreatedMonitorHit(ctx context.Context, hit MonitorHit, cfg MonitorTaskConfig) (monitorHitPostProcessResult, error) {
+	result := monitorHitPostProcessResult{}
+	evidence := copyStringAnyMap(hit.Evidence)
+	pipeline := map[string]any{
+		"agentDoublecheckEnabled": cfg.AgentDoublecheckEnabled,
+	}
+
+	existingReview, existingErr := s.store.GetActiveOperationReviewByHit(ctx, hit.ID)
+	if existingErr != nil {
+		pipeline["reviewStatus"] = "failed"
+		pipeline["error"] = safelog.Text(existingErr.Error(), 400)
+		evidence["reviewPipeline"] = pipeline
+		_ = s.store.UpdateMonitorHitEvidence(ctx, hit.ID, evidence, hit.AgentDecisionID)
+		return result, existingErr
+	}
+
+	review, err := s.CreateReviewFromMonitorHit(ctx, hit.ID)
+	if err != nil {
+		pipeline["reviewStatus"] = "failed"
+		pipeline["error"] = safelog.Text(err.Error(), 400)
+		evidence["reviewPipeline"] = pipeline
+		_ = s.store.UpdateMonitorHitEvidence(ctx, hit.ID, evidence, hit.AgentDecisionID)
+		return result, err
+	}
+	result.ReviewID = review.ID
+	result.ReviewCreated = existingReview == nil
+	pipeline["reviewId"] = review.ID
+	pipeline["reviewCreated"] = result.ReviewCreated
+	pipeline["reviewStatus"] = review.Status
+
+	if !cfg.AgentDoublecheckEnabled {
+		pipeline["agentStatus"] = "skipped"
+		pipeline["agentSkippedReason"] = "agent_doublecheck_disabled"
+		evidence["agentDoublecheck"] = "not_enabled"
+		evidence["reviewPipeline"] = pipeline
+		return result, s.store.UpdateMonitorHitEvidence(ctx, hit.ID, evidence, hit.AgentDecisionID)
+	}
+
+	pipeline["agentAttempted"] = true
+	agentRun, err := s.RunAgentReviewForReview(ctx, review.ID, "monitor:"+hit.TaskType)
+	if err != nil {
+		pipeline["agentStatus"] = "unavailable"
+		pipeline["agentError"] = safelog.Text(err.Error(), 400)
+		evidence["agentDoublecheck"] = "unavailable"
+		evidence["reviewPipeline"] = pipeline
+		if updateErr := s.store.UpdateMonitorHitEvidence(ctx, hit.ID, evidence, hit.AgentDecisionID); updateErr != nil {
+			return result, updateErr
+		}
+		return result, nil
+	}
+
+	result.AgentRunID = agentRun.ID
+	result.AgentRunStatus = agentRun.Status
+	pipeline["agentRunId"] = agentRun.ID
+	pipeline["agentRunStatus"] = agentRun.Status
+	if s.agentExecutor == nil && agentRun.Status == AgentRunStatusReady {
+		pipeline["agentStatus"] = "enabled_no_executor"
+		evidence["agentDoublecheck"] = "enabled_no_executor"
+	} else {
+		pipeline["agentStatus"] = "started"
+		evidence["agentDoublecheck"] = "started"
+	}
+	evidence["reviewPipeline"] = pipeline
+	return result, s.store.UpdateMonitorHitEvidence(ctx, hit.ID, evidence, agentRun.ID)
+}
+
 // runDataStrategyMonitor 扫描 active 单票策略,优先用操作剧本里的数据/组合预筛产出动作候选。
 // ponytail: 保留旧 priceTriggers 兜底,兼容已有策略版本,监控判断仍复用 watch evaluator。
 func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cfg MonitorTaskConfig) MonitorRun {
@@ -215,9 +290,10 @@ func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cf
 		if sw.ActiveVersion == nil || sw.Strategy.Symbol == "" {
 			continue
 		}
-		hasPlaybookPrefilters, playbookMatched, playbookHits, playbookFailures := s.runStrategyPlaybookPrefilters(ctx, run, cfg, sw)
+		hasPlaybookPrefilters, playbookMatched, playbookHits, playbookFailures, playbookReviews := s.runStrategyPlaybookPrefilters(ctx, run, cfg, sw)
 		run.HitCount += playbookHits
 		run.FailedCount += playbookFailures
+		run.ReviewCount += playbookReviews
 		if hasPlaybookPrefilters {
 			if playbookMatched {
 				run.SuccessCount++
@@ -256,9 +332,17 @@ func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cf
 					Summary:    rr.Reason,
 					Evidence:   evidence,
 				}
-				if _, err := s.store.CreateMonitorHit(ctx, hit); err != nil {
+				createdHit, err := s.store.CreateMonitorHit(ctx, hit)
+				if err != nil {
 					run.FailedCount++
 					continue
+				}
+				post, err := s.processCreatedMonitorHit(ctx, createdHit, cfg)
+				if post.ReviewCreated {
+					run.ReviewCount++
+				}
+				if err != nil {
+					run.FailedCount++
 				}
 				run.HitCount++
 				matched = true
@@ -274,12 +358,13 @@ func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cf
 	return run
 }
 
-func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run MonitorRun, cfg MonitorTaskConfig, sw StrategyWithVersion) (bool, bool, int, int) {
+func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run MonitorRun, cfg MonitorTaskConfig, sw StrategyWithVersion) (bool, bool, int, int, int) {
 	actions := playbookActionMapsFromMeta(sw.ActiveVersion.GenerationMeta)
 	hasPrefilters := false
 	matched := false
 	hitCount := 0
 	failedCount := 0
+	reviewCount := 0
 
 	for _, action := range actions {
 		rules := playbookActionWatchRules(action, sw.Strategy.Symbol, sw.Strategy.PortfolioID)
@@ -326,15 +411,23 @@ func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run Monitor
 				Summary:     rr.Reason,
 				Evidence:    evidence,
 			}
-			if _, err := s.store.CreateMonitorHit(ctx, hit); err != nil {
+			createdHit, err := s.store.CreateMonitorHit(ctx, hit)
+			if err != nil {
 				failedCount++
 				continue
+			}
+			post, err := s.processCreatedMonitorHit(ctx, createdHit, cfg)
+			if post.ReviewCreated {
+				reviewCount++
+			}
+			if err != nil {
+				failedCount++
 			}
 			hitCount++
 			matched = true
 		}
 	}
-	return hasPrefilters, matched, hitCount, failedCount
+	return hasPrefilters, matched, hitCount, failedCount, reviewCount
 }
 
 // runPortfolioRiskMonitor 扫描组合快照与持仓,检查单票权重与数据新鲜度,命中产候选 hit。
@@ -365,8 +458,18 @@ func (s *Service) runPortfolioRiskMonitor(ctx context.Context, run MonitorRun, c
 				Summary:     "最新组合快照估值不新鲜或存在 stale quote,需先刷新行情。",
 				Evidence:    monitorEvidenceWithAgentState(portfolioEvidence(snapshot, nil), cfg),
 			}
-			if _, err := s.store.CreateMonitorHit(ctx, hit); err == nil {
+			createdHit, err := s.store.CreateMonitorHit(ctx, hit)
+			if err == nil {
+				post, postErr := s.processCreatedMonitorHit(ctx, createdHit, cfg)
+				if post.ReviewCreated {
+					run.ReviewCount++
+				}
+				if postErr != nil {
+					run.FailedCount++
+				}
 				run.HitCount++
+			} else {
+				run.FailedCount++
 			}
 		}
 		// 单票权重过高
@@ -395,8 +498,18 @@ func (s *Service) runPortfolioRiskMonitor(ctx context.Context, run MonitorRun, c
 					Summary:     "持仓权重超过组合单票上限约束。",
 					Evidence:    monitorEvidenceWithAgentState(portfolioEvidence(snapshot, &holding), cfg),
 				}
-				if _, err := s.store.CreateMonitorHit(ctx, hit); err == nil {
+				createdHit, err := s.store.CreateMonitorHit(ctx, hit)
+				if err == nil {
+					post, postErr := s.processCreatedMonitorHit(ctx, createdHit, cfg)
+					if post.ReviewCreated {
+						run.ReviewCount++
+					}
+					if postErr != nil {
+						run.FailedCount++
+					}
 					run.HitCount++
+				} else {
+					run.FailedCount++
 				}
 			}
 		}

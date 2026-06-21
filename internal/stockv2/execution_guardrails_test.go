@@ -80,6 +80,66 @@ func TestSaveProposedOperationRunsGuardrails(t *testing.T) {
 	}
 }
 
+func TestSaveProposedOperationWithoutPortfolioBlockedByGuardrails(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+
+	now := time.Now()
+	seedWatchQuote(t, svc, "000977", 61, 1.2, QuoteStatusFresh, now)
+	run, err := svc.store.CreateMonitorRun(ctx, MonitorRun{
+		ID:          "run-no-portfolio-review",
+		TaskType:    MonitorTaskDataStrategyMonitor,
+		Status:      MonitorRunStatusCompleted,
+		TriggerType: MonitorTriggerManual,
+		StartedAt:   now,
+		FinishedAt:  now,
+		CreatedAt:   now,
+	})
+	if err != nil {
+		t.Fatalf("create monitor run: %v", err)
+	}
+	hit, err := svc.store.CreateMonitorHit(ctx, MonitorHit{
+		ID:        "hit-no-portfolio-review",
+		RunID:     run.ID,
+		TaskType:  MonitorTaskDataStrategyMonitor,
+		Status:    MonitorHitStatusCandidate,
+		Symbol:    "000977",
+		Market:    "SZ",
+		Title:     "账户无关监控命中",
+		Summary:   "没有组合上下文时不允许绕过 guardrails 生成账户操作。",
+		Evidence:  map[string]any{"matchedAction": "add_position"},
+		CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("create monitor hit: %v", err)
+	}
+	review, err := svc.CreateReviewFromMonitorHit(ctx, hit.ID)
+	if err != nil {
+		t.Fatalf("create review: %v", err)
+	}
+	updated, err := svc.SaveOperationReviewResult(ctx, review.ID, RequestSaveOperationReviewResult{
+		OutputType: OperationReviewOutputProposedOperation,
+		Result: map[string]any{
+			"proposedOperation": map[string]any{
+				"action": "add_position",
+				"symbol": "000977",
+				"amount": 1000.0,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("save proposed operation: %v", err)
+	}
+	guardrails := mapFromAny(updated.Result["guardrails"])
+	if guardrails["status"] != ExecutionGuardrailsStatusBlocked {
+		t.Fatalf("guardrails = %+v, want blocked", guardrails)
+	}
+	if updated.Result["acceptanceStatus"] != "blocked" {
+		t.Fatalf("acceptance status = %v, want blocked", updated.Result["acceptanceStatus"])
+	}
+}
+
 func TestStrategyPatchDoesNotUpdateActiveStrategyVersion(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStrategyTestService(t)

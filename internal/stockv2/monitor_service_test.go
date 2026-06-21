@@ -170,6 +170,9 @@ func TestRunDataStrategyMonitorProducesHit(t *testing.T) {
 	if run.HitCount < 1 {
 		t.Fatalf("hit count = %d, want >= 1", run.HitCount)
 	}
+	if run.ReviewCount < 1 {
+		t.Fatalf("review count = %d, want >= 1", run.ReviewCount)
+	}
 
 	hits, err := svc.ListMonitorHits(ctx, MonitorHitListFilter{TaskType: MonitorTaskDataStrategyMonitor, Limit: 50})
 	if err != nil {
@@ -187,8 +190,161 @@ func TestRunDataStrategyMonitorProducesHit(t *testing.T) {
 	if hits[0].AgentDecisionID != "" {
 		t.Fatalf("agent decision id = %q, want empty until executor exists", hits[0].AgentDecisionID)
 	}
-	if got := hits[0].Evidence["agentDoublecheck"]; got != "enabled_no_executor" {
-		t.Fatalf("agent state = %v, want enabled_no_executor", got)
+	if got := hits[0].Evidence["agentDoublecheck"]; got != "unavailable" {
+		t.Fatalf("agent state = %v, want unavailable", got)
+	}
+	pipeline := mapFromAny(hits[0].Evidence["reviewPipeline"])
+	if pipeline["reviewId"] == "" || pipeline["reviewCreated"] != true {
+		t.Fatalf("review pipeline = %+v, want created review", pipeline)
+	}
+	if pipeline["agentStatus"] != "unavailable" {
+		t.Fatalf("agent pipeline status = %v, want unavailable", pipeline["agentStatus"])
+	}
+	reviews, err := svc.ListOperationReviews(ctx, OperationReviewListFilter{HitID: hits[0].ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("list reviews: %v", err)
+	}
+	if len(reviews) != 1 {
+		t.Fatalf("review count for hit = %d, want 1", len(reviews))
+	}
+}
+
+func TestRunDataStrategyMonitorDoublecheckCreatesAgentRunWithoutExecutor(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+
+	configureOperationReviewModelForMonitorTest(t, svc)
+	seedWatchQuote(t, svc, "000977", 61, 1.2, QuoteStatusFresh, time.Now())
+	if _, err := svc.CreateStrategy(ctx, RequestCreateStrategy{
+		Name:      "突破策略",
+		Kind:      StrategyKindSymbolStrategy,
+		Scope:     StrategyScopeResearch,
+		Source:    StrategySourceManual,
+		Status:    StrategyStatusActive,
+		Symbol:    "000977",
+		Direction: StrategyDirectionWatch,
+		GenerationMeta: map[string]any{
+			"priceTriggers": map[string]any{"triggerPriceAbove": 60.0},
+		},
+		CreatedBy: StrategySourceManual,
+	}); err != nil {
+		t.Fatalf("create strategy: %v", err)
+	}
+	agent := true
+	if _, err := svc.UpdateMonitorTaskConfig(ctx, MonitorTaskDataStrategyMonitor, RequestUpdateMonitorTaskConfig{
+		AgentDoublecheckEnabled: &agent,
+	}); err != nil {
+		t.Fatalf("enable agent doublecheck: %v", err)
+	}
+
+	run, err := svc.RunMonitorTask(ctx, MonitorTaskDataStrategyMonitor, MonitorTriggerManual)
+	if err != nil {
+		t.Fatalf("run data strategy monitor: %v", err)
+	}
+	if run.Status != MonitorRunStatusCompleted {
+		t.Fatalf("run status = %s, want completed", run.Status)
+	}
+	if run.HitCount != 1 || run.ReviewCount != 1 || run.FailedCount != 0 {
+		t.Fatalf("run counts = %+v, want one hit/review and no failures", run)
+	}
+	hits, err := svc.ListMonitorHits(ctx, MonitorHitListFilter{TaskType: MonitorTaskDataStrategyMonitor, Limit: 10})
+	if err != nil {
+		t.Fatalf("list hits: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("hits = %d, want 1", len(hits))
+	}
+	if hits[0].AgentDecisionID == "" {
+		t.Fatalf("agent decision id empty, want AgentRun id")
+	}
+	pipeline := mapFromAny(hits[0].Evidence["reviewPipeline"])
+	if pipeline["agentRunId"] != hits[0].AgentDecisionID {
+		t.Fatalf("pipeline agentRunId = %v, hit agentDecisionId = %s", pipeline["agentRunId"], hits[0].AgentDecisionID)
+	}
+	if pipeline["agentStatus"] != "enabled_no_executor" {
+		t.Fatalf("agent status = %v, want enabled_no_executor", pipeline["agentStatus"])
+	}
+	agentRuns, err := svc.ListAgentRuns(ctx, AgentRunListFilter{
+		TaskType: AgentTaskTypeOperationReview,
+		Limit:    10,
+	})
+	if err != nil {
+		t.Fatalf("list agent runs: %v", err)
+	}
+	if len(agentRuns) != 1 || agentRuns[0].Status != AgentRunStatusReady {
+		t.Fatalf("agent runs = %+v, want one ready run", agentRuns)
+	}
+}
+
+func TestProcessCreatedMonitorHitIsIdempotentForReviewAndAgentRun(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+
+	configureOperationReviewModelForMonitorTest(t, svc)
+	now := time.Now()
+	run, err := svc.store.CreateMonitorRun(ctx, MonitorRun{
+		ID:          "run-idempotent",
+		TaskType:    MonitorTaskDataStrategyMonitor,
+		Status:      MonitorRunStatusCompleted,
+		TriggerType: MonitorTriggerManual,
+		StartedAt:   now,
+		FinishedAt:  now,
+		CreatedAt:   now,
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	hit, err := svc.store.CreateMonitorHit(ctx, MonitorHit{
+		ID:        "hit-idempotent",
+		RunID:     run.ID,
+		TaskType:  MonitorTaskDataStrategyMonitor,
+		Status:    MonitorHitStatusCandidate,
+		Symbol:    "000977",
+		Market:    "SZ",
+		Title:     "幂等命中",
+		Evidence:  map[string]any{"matchedAction": "watch"},
+		CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("create hit: %v", err)
+	}
+	cfg := MonitorTaskConfig{AgentDoublecheckEnabled: true}
+	first, err := svc.processCreatedMonitorHit(ctx, hit, cfg)
+	if err != nil {
+		t.Fatalf("first post process: %v", err)
+	}
+	second, err := svc.processCreatedMonitorHit(ctx, hit, cfg)
+	if err != nil {
+		t.Fatalf("second post process: %v", err)
+	}
+	if !first.ReviewCreated || second.ReviewCreated {
+		t.Fatalf("review created flags first=%v second=%v", first.ReviewCreated, second.ReviewCreated)
+	}
+	if first.ReviewID == "" || second.ReviewID != first.ReviewID {
+		t.Fatalf("review ids first=%q second=%q", first.ReviewID, second.ReviewID)
+	}
+	if first.AgentRunID == "" || second.AgentRunID != first.AgentRunID {
+		t.Fatalf("agent run ids first=%q second=%q", first.AgentRunID, second.AgentRunID)
+	}
+	reviewCount, err := svc.CountOperationReviews(ctx, OperationReviewListFilter{HitID: hit.ID})
+	if err != nil {
+		t.Fatalf("count reviews: %v", err)
+	}
+	if reviewCount != 1 {
+		t.Fatalf("review count = %d, want 1", reviewCount)
+	}
+	agentRunCount, err := svc.CountAgentRuns(ctx, AgentRunListFilter{
+		TaskType:          AgentTaskTypeOperationReview,
+		TriggerObjectType: "operation_review",
+		TriggerObjectID:   first.ReviewID,
+	})
+	if err != nil {
+		t.Fatalf("count agent runs: %v", err)
+	}
+	if agentRunCount != 1 {
+		t.Fatalf("agent run count = %d, want 1", agentRunCount)
 	}
 }
 
@@ -246,6 +402,10 @@ func TestRunDataStrategyMonitorUsesPlaybookPrefilters(t *testing.T) {
 	}
 	if got := hits[0].Evidence["matchedPrefilterKey"]; got != "break_200" {
 		t.Fatalf("matched prefilter = %v, want break_200", got)
+	}
+	pipeline := mapFromAny(hits[0].Evidence["reviewPipeline"])
+	if pipeline["reviewId"] == "" || pipeline["agentStatus"] != "skipped" {
+		t.Fatalf("review pipeline = %+v, want review with skipped agent", pipeline)
 	}
 }
 
@@ -424,4 +584,31 @@ func stringSliceContains(items []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func configureOperationReviewModelForMonitorTest(t *testing.T, svc *Service) AgentModelProfile {
+	t.Helper()
+	ctx := context.Background()
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeCodexCLI,
+		Name:         "codex-monitor",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	model, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID: provider.ID,
+		ModelName:  "gpt-monitor",
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	primaryID := model.ID
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeOperationReview, RequestUpdateAgentTaskProfile{
+		PrimaryModelID: &primaryID,
+	}); err != nil {
+		t.Fatalf("bind operation_review model: %v", err)
+	}
+	return model
 }

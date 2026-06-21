@@ -78,7 +78,10 @@ const (
 
 // operation_review 默认 task profile 的固定 seed id。
 // schema 内 INSERT OR IGNORE 幂等种入,模型绑定留空,由用户后续绑定。
-const agentTaskOperationReviewSeedID = "agent-task-operation-review"
+const (
+	agentProviderCodexCLIDefaultID = "agent-provider-codex-cli-default"
+	agentTaskOperationReviewSeedID = "agent-task-operation-review"
+)
 
 var (
 	ErrAgentProviderNotFound            = errors.New("agent provider profile not found")
@@ -232,8 +235,11 @@ type RequestUpdateAgentModelProfile struct {
 }
 
 type AgentProviderModelCatalogItem struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"displayName,omitempty"`
+	ID             string `json:"id"`
+	DisplayName    string `json:"displayName,omitempty"`
+	Visibility     string `json:"visibility,omitempty"`
+	SupportedInAPI bool   `json:"supportedInAPI,omitempty"`
+	Source         string `json:"source,omitempty"`
 }
 
 type AgentProviderModelCatalog struct {

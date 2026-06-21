@@ -8,6 +8,7 @@ import type {
   StockV2AlertListResponse,
   StockV2MonitorHit,
   StockV2MonitorHitListResponse,
+  StockV2MonitorReviewPipeline,
   StockV2MonitorRun,
   StockV2MonitorRunListResponse,
   StockV2MonitorTask,
@@ -27,6 +28,8 @@ import {
 import { StockV2ReviewDrawer } from "./StockV2ReviewDrawer";
 import {
   formatDate,
+  stockV2AgentRunStatusLabel,
+  stockV2AgentRunStatusTone,
   stockV2AlertLevelLabel,
   stockV2AlertLevelTone,
   stockV2AlertStatusLabel,
@@ -38,6 +41,8 @@ import {
   stockV2MonitorRunStatusLabel,
   stockV2MonitorRunStatusTone,
   stockV2MonitorTaskTypeLabel,
+  stockV2ReviewStatusLabel,
+  stockV2ReviewStatusTone,
 } from "../../domain/labels";
 
 // 监控与任务:盯盘不再是用户创建的对象,而是系统固化的后台监控。
@@ -801,7 +806,12 @@ function MonitorRunDrawer({
           ) : (
             <div className="grid gap-2">
               {hits.map((hit) => (
-                <MonitorHitDetail key={hit.id} hit={hit} onOpenReview={onOpenReview} />
+                <MonitorHitDetail
+                  key={hit.id}
+                  hit={hit}
+                  onOpenAgentRun={onOpenAgentRun}
+                  onOpenReview={onOpenReview}
+                />
               ))}
             </div>
           )}
@@ -822,9 +832,11 @@ function MonitorRunDrawer({
 
 function MonitorHitDetail({
   hit,
+  onOpenAgentRun,
   onOpenReview,
 }: {
   hit: StockV2MonitorHit;
+  onOpenAgentRun: (runId: string) => void;
   onOpenReview: (hitId: string) => void;
 }) {
   const evidence = hit.evidence || {};
@@ -833,7 +845,10 @@ function MonitorHitDetail({
   const prefilterKey = evidenceStr(evidence, "matchedPrefilterKey");
   const prefilterType = evidenceStr(evidence, "matchedPrefilterType");
   const playbookRule = evidenceStr(evidence, "playbookRule");
-  const hasReview = hit.status === "reviewed" || hit.status === "ignored";
+  const pipeline = reviewPipelineFromHit(hit);
+  const reviewId = pipeline.reviewId || "";
+  const agentRunId = pipeline.agentRunId || (hit.agentDecisionId && hit.agentDecisionId !== "pending" ? hit.agentDecisionId : "");
+  const hasReview = Boolean(reviewId) || hit.status === "reviewed" || hit.status === "ignored";
   return (
     <div className="rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3 text-xs">
       <div className="flex flex-wrap items-center gap-2">
@@ -848,6 +863,8 @@ function MonitorHitDetail({
         <span>Agent {hitAgentLabel(hit)}</span>
         <span>{formatDate(hit.createdAt) || "-"}</span>
       </div>
+
+      <MonitorHitReviewPipeline pipeline={pipeline} agentRunId={agentRunId} reviewId={reviewId} />
 
       {(matchedActionLabel || prefilterKey || playbookRule) && hasEvidence ? (
         <div className="mt-2 grid grid-cols-[80px_minmax(0,1fr)] gap-x-3 gap-y-1 rounded border border-[var(--line)] bg-[var(--surface-soft)] px-2 py-2 text-[var(--muted-strong)]">
@@ -881,7 +898,12 @@ function MonitorHitDetail({
         </details>
       ) : null}
 
-      <div className="mt-2 flex justify-end">
+      <div className="mt-2 flex flex-wrap justify-end gap-1.5">
+        {agentRunId ? (
+          <Button onClick={() => onOpenAgentRun(agentRunId)} title="查看 Agent 执行详情">
+            查看 Agent 执行详情
+          </Button>
+        ) : null}
         <Button
           tone={hasReview ? "neutral" : "primary"}
           onClick={() => onOpenReview(hit.id)}
@@ -893,6 +915,98 @@ function MonitorHitDetail({
       </div>
     </div>
   );
+}
+
+function MonitorHitReviewPipeline({
+  pipeline,
+  agentRunId,
+  reviewId,
+}: {
+  pipeline: StockV2MonitorReviewPipeline;
+  agentRunId: string;
+  reviewId: string;
+}) {
+  if (!reviewId && !pipeline.agentStatus && !agentRunId && !pipeline.error && !pipeline.agentError) return null;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5 rounded border border-[var(--line)] bg-[var(--surface-soft)] px-2 py-2">
+      <span className="text-[var(--muted)]">Review</span>
+      {reviewId ? (
+        <Pill tone={stockV2ReviewToneFromStatus(pipeline.reviewStatus)}>{stockV2ReviewLabelFromStatus(pipeline.reviewStatus)}</Pill>
+      ) : (
+        <Pill tone="warn">未创建</Pill>
+      )}
+      {pipeline.reviewCreated === true ? <Pill tone="neutral">本次创建</Pill> : null}
+      <span className="ml-1 text-[var(--muted)]">Agent</span>
+      <Pill tone={agentPipelineTone(pipeline, agentRunId)}>{agentPipelineLabel(pipeline, agentRunId)}</Pill>
+      {agentRunId ? <span className="font-mono text-[11px] text-[var(--muted-strong)]">{agentRunId.slice(0, 12)}</span> : null}
+      {pipeline.agentSkippedReason ? (
+        <span className="min-w-0 break-words text-[var(--muted)]">{pipeline.agentSkippedReason}</span>
+      ) : null}
+      {pipeline.agentError || pipeline.error ? (
+        <span className="min-w-0 break-words text-[var(--danger)]">{pipeline.agentError || pipeline.error}</span>
+      ) : null}
+    </div>
+  );
+}
+
+function reviewPipelineFromHit(hit: StockV2MonitorHit): StockV2MonitorReviewPipeline {
+  const pipeline = mapFromAny(hit.evidence?.reviewPipeline);
+  return {
+    reviewId: readPipelineString(pipeline, "reviewId"),
+    reviewCreated: pipeline.reviewCreated === true,
+    reviewStatus: readPipelineString(pipeline, "reviewStatus"),
+    agentDoublecheckEnabled: pipeline.agentDoublecheckEnabled === true,
+    agentAttempted: pipeline.agentAttempted === true,
+    agentStatus: readPipelineString(pipeline, "agentStatus"),
+    agentSkippedReason: readPipelineString(pipeline, "agentSkippedReason"),
+    agentRunId: readPipelineString(pipeline, "agentRunId"),
+    agentRunStatus: readPipelineString(pipeline, "agentRunStatus"),
+    agentError: readPipelineString(pipeline, "agentError"),
+    error: readPipelineString(pipeline, "error"),
+  };
+}
+
+function stockV2ReviewLabelFromStatus(status?: string): string {
+  return status ? stockV2ReviewStatusLabel(status) : "已创建";
+}
+
+function stockV2ReviewToneFromStatus(status?: string): "good" | "warn" | "danger" | "neutral" {
+  return status ? stockV2ReviewStatusTone(status) : "neutral";
+}
+
+function agentPipelineLabel(pipeline: StockV2MonitorReviewPipeline, agentRunId: string): string {
+  if (pipeline.agentRunStatus) return stockV2AgentRunStatusLabel(pipeline.agentRunStatus);
+  switch (pipeline.agentStatus) {
+    case "started": return "已触发";
+    case "enabled_no_executor": return "就绪(无执行器)";
+    case "unavailable": return "不可用";
+    case "skipped": return "已跳过";
+    case "not_enabled": return "未启用";
+    default: return agentRunId ? "已关联" : stockV2MonitorAgentStateLabel(pipeline.agentStatus);
+  }
+}
+
+function agentPipelineTone(
+  pipeline: StockV2MonitorReviewPipeline,
+  agentRunId: string,
+): "good" | "warn" | "danger" | "neutral" {
+  if (pipeline.agentRunStatus) return stockV2AgentRunStatusTone(pipeline.agentRunStatus);
+  if (pipeline.agentStatus === "unavailable" || pipeline.agentError) return "danger";
+  if (pipeline.agentStatus === "enabled_no_executor") return "warn";
+  if (pipeline.agentStatus === "started" || agentRunId) return "good";
+  return "neutral";
+}
+
+function mapFromAny(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function readPipelineString(map: Record<string, unknown>, key: string): string {
+  const value = map[key];
+  if (value === undefined || value === null || value === "") return "";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
 function evidenceStr(evidence: Record<string, unknown>, key: string): string {
@@ -1109,7 +1223,11 @@ function monitorAgentSummary(run: StockV2MonitorRun, hits: StockV2MonitorHit[], 
   }
   const state = String(run.metadata?.agentDoublecheck || "");
   if (state === "not_enabled" || !state) return "未启用";
-  if (hits.some((hit) => hit.agentDecisionId && hit.agentDecisionId !== "pending")) return "已有结果";
+  const pipelines = hits.map(reviewPipelineFromHit);
+  if (hits.some((hit) => hit.agentDecisionId && hit.agentDecisionId !== "pending") || pipelines.some((pipeline) => pipeline.agentRunId)) return "已触发";
+  if (pipelines.some((pipeline) => pipeline.agentStatus === "unavailable" || pipeline.agentError)) return "不可用";
+  if (pipelines.some((pipeline) => pipeline.agentStatus === "enabled_no_executor")) return "已启用 · 未接执行器";
+  if (pipelines.some((pipeline) => pipeline.reviewId)) return "Review 已创建";
   if ((run.hitCount ?? hits.length) <= 0) return "已启用 · 无候选";
   if (state === "enabled_no_executor") return "已启用 · 未接执行器";
   return stockV2MonitorAgentStateLabel(state);
@@ -1120,15 +1238,22 @@ function monitorAgentTone(run: StockV2MonitorRun, hits: StockV2MonitorHit[], age
   if (agentDetails.some((detail) => detail.run.status === "running")) return "warn";
   if (agentDetails.length > 0) return "good";
   const summary = monitorAgentSummary(run, hits, agentDetails);
-  if (summary.includes("已有结果")) return "good";
+  if (summary.includes("已触发") || summary.includes("Review 已创建")) return "good";
+  if (summary.includes("不可用")) return "danger";
   if (summary.includes("未接") || summary.includes("待")) return "warn";
   return "neutral";
 }
 
 function hitAgentLabel(hit: StockV2MonitorHit): string {
-  if (hit.agentDecisionId && hit.agentDecisionId !== "pending") return `结果 ${hit.agentDecisionId}`;
+  if (hit.agentDecisionId && hit.agentDecisionId !== "pending") return `结果 ${hit.agentDecisionId.slice(0, 8)}`;
+  const pipeline = reviewPipelineFromHit(hit);
+  if (pipeline.agentRunId) return `Run ${pipeline.agentRunId.slice(0, 8)}`;
+  if (pipeline.agentStatus) return agentPipelineLabel(pipeline, "");
   const state = String(hit.evidence?.agentDoublecheck || "");
   if (state === "enabled_no_executor") return "已启用 · 未接执行器";
+  if (state === "unavailable") return "不可用";
+  if (state === "started") return "已触发";
+  if (state === "skipped") return "已跳过";
   if (hit.agentDecisionId === "pending" || state === "pending") return "待结果";
   return "未启用";
 }

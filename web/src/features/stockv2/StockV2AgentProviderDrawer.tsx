@@ -6,7 +6,7 @@ import { friendlyError } from "../../api/client";
 import { Button, Drawer, Field, Notice } from "../../components/ui";
 
 const providerTypeTip = [
-  "codex_cli: 本地 Codex CLI 执行器分类，当前仍按 OpenAI 兼容协议填写模型调用配置。",
+  "codex_cli: 内置 default 使用本机 Codex CLI 登录态；手动新建项仍按 OpenAI-compatible endpoint 配置。",
   "openai: OpenAI 或 OpenAI-compatible 云服务。",
   "local: 本机或内网 OpenAI-compatible 服务。",
 ].join("\n");
@@ -145,7 +145,7 @@ export function StockV2AgentProviderDrawer({
         </Field>
 
         <p className="text-xs leading-5 text-[var(--muted)]">
-          当前统一按 OpenAI-compatible 协议调用。Token 只写入本地服务数据库，响应不会回显；模型是否可用在模型配置里测试。
+          内置 default Provider 不在这里编辑。手动新建 Provider 按 OpenAI-compatible 协议调用；Token 只写入本地服务数据库，响应不会回显。
         </p>
       </div>
     </Drawer>

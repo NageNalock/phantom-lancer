@@ -184,7 +184,7 @@ export function StockV2AgentModelDrawer({
                   setForm({ ...form, modelName: e.target.value });
                   setTestResult(null);
                 }}
-                placeholder="例如：gpt-4.1"
+                placeholder="例如：gpt-5.5"
                 className="min-w-0 flex-1 rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 font-mono text-sm"
               />
               <Button disabled={!form.providerId || catalogLoading} onClick={() => void fetchProviderModels()}>
@@ -205,6 +205,7 @@ export function StockV2AgentModelDrawer({
                 {catalog.map((item) => (
                   <option key={item.id} value={item.id}>
                     {item.displayName || item.id}
+                    {item.source === "codex_cli_bundled" ? " (bundled)" : ""}
                   </option>
                 ))}
               </select>

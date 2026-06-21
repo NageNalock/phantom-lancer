@@ -315,6 +315,24 @@ func (s *Store) UpdateMonitorHitStatus(ctx context.Context, id, status string) e
 	return nil
 }
 
+func (s *Store) UpdateMonitorHitEvidence(ctx context.Context, id string, evidence map[string]any, agentDecisionID string) error {
+	if evidence == nil {
+		evidence = map[string]any{}
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_monitor_hits
+		SET evidence_json = ?, agent_decision_id = ?
+		WHERE id = ?
+	`, marshalMap(evidence), nullableMonitorString(agentDecisionID), id)
+	if err != nil {
+		return wrapError(err, "update monitor hit evidence")
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return ErrMonitorHitNotFound
+	}
+	return nil
+}
+
 func (s *Store) ListMonitorHits(ctx context.Context, filter MonitorHitListFilter) ([]MonitorHit, error) {
 	where, args := monitorHitFilterSQL(filter)
 	limit := normalizedMonitorLimit(filter.Limit)

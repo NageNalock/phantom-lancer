@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -24,8 +26,9 @@ type Service struct {
 	dailyBarsSource *DailyBarsSource
 
 	// Agent 执行相关
-	agentTaskPool *agentTaskPool
-	agentExecutor AgentExecutor
+	agentTaskPool     *agentTaskPool
+	agentExecutor     AgentExecutor
+	agentCodexCommand func(ctx context.Context, args ...string) ([]byte, error)
 }
 
 // NewService 创建新的股票V2服务
@@ -37,6 +40,9 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 		universeSource:  NewUniverseDataSource(nil, httpClient),
 		dailyBarsSource: NewDailyBarsSource(nil, httpClient),
 		agentTaskPool:   newAgentTaskPool(defaultCleanupInterval),
+		agentCodexCommand: func(ctx context.Context, args ...string) ([]byte, error) {
+			return exec.CommandContext(ctx, "codex", args...).CombinedOutput()
+		},
 	}
 }
 
@@ -48,6 +54,11 @@ type AgentExecutor interface {
 // WithCodexCLIExecutor 注入 Codex CLI 执行器。
 func (s *Service) WithCodexCLIExecutor(binary, codexHome, mcpURL string) *Service {
 	s.agentExecutor = newCodexCLIExecutor(s.log, binary, codexHome, mcpURL, s.agentTaskPool)
+	if trimmed := strings.TrimSpace(binary); trimmed != "" {
+		s.agentCodexCommand = func(ctx context.Context, args ...string) ([]byte, error) {
+			return exec.CommandContext(ctx, trimmed, args...).CombinedOutput()
+		}
+	}
 	return s
 }
 

@@ -21,6 +21,7 @@ import {
   stockV2ReviewStatusLabel,
   stockV2ReviewStatusTone,
 } from "../../domain/labels";
+import { StockV2AgentRunDetailDrawer } from "./StockV2AgentExecutionLedger";
 
 // Review drawer:从 MonitorHit 进入人工/Agent 审阅。显示 ContextPack 摘要、
 // Review 状态,支持人工填写并保存结构化结果(trade_signal / proposed_operation /
@@ -58,6 +59,7 @@ export function StockV2ReviewDrawer({
   const [agentLoading, setAgentLoading] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
   const [runningAgent, setRunningAgent] = useState(false);
+  const [agentDetailRunId, setAgentDetailRunId] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
 
   // 表单状态
@@ -220,7 +222,7 @@ export function StockV2ReviewDrawer({
   async function loadAgentRun(reviewId: string) {
     try {
       const res = await actions.api<StockV2AgentListResponse<StockV2AgentRun>>(
-        `/api/stockv2/agent/runs?triggerObjectType=operation_review&triggerObjectID=${encodeURIComponent(reviewId)}&limit=1&sort=desc`,
+        `/api/stockv2/agent/runs?triggerObjectType=operation_review&triggerObjectId=${encodeURIComponent(reviewId)}&limit=1&sort=desc`,
       );
       const run = res.items?.[0] || null;
       setAgentRun(run);
@@ -304,71 +306,72 @@ export function StockV2ReviewDrawer({
   const guardrailsStatus = guardrails ? readStr(guardrails, "status") : "";
   const acceptanceStatus = review?.result ? readStr(review.result, "acceptanceStatus") : "";
   const guardrailReasons = guardrails && Array.isArray(guardrails.reasons) ? guardrails.reasons : [];
-  const blocked = guardrailsStatus === "blocked";
 
   if (!hitId) return null;
 
   return (
-    <Drawer
-      title="操作复核 · Review"
-      subtitle={review ? `状态 ${stockV2ReviewStatusLabel(review.status)}` : "从监控命中进入复核"}
-      onClose={onClose}
-      width={560}
-      footer={
-        review ? (
-          <div className="flex justify-end gap-2">
-            <Button onClick={onClose}>关闭</Button>
-            <Button tone="primary" disabled={submitting || !outputType} onClick={() => void save()}>
-              {submitting ? "保存中…" : "保存结果"}
-            </Button>
-          </div>
-        ) : null
-      }
-    >
-      <div className="grid gap-4 text-sm">
-        {phase === "loading" ? (
-          <p className="text-[var(--muted)]">加载 Review…</p>
-        ) : null}
-
-        {phase === "error" ? (
-          <div className="grid gap-3">
-            <Notice tone="danger">{error || "加载 Review 失败"}</Notice>
-            <div className="flex gap-2">
-              {hitId ? <Button onClick={() => void loadReview(hitId, "initial")}>重试</Button> : null}
+    <>
+      <Drawer
+        title="操作复核 · Review"
+        subtitle={review ? `状态 ${stockV2ReviewStatusLabel(review.status)}` : "从监控命中进入复核"}
+        onClose={onClose}
+        width={560}
+        footer={
+          review ? (
+            <div className="flex justify-end gap-2">
               <Button onClick={onClose}>关闭</Button>
-            </div>
-          </div>
-        ) : null}
-
-        {phase === "ready" && !review ? (
-          <div className="grid gap-3">
-            <p className="text-[var(--muted-strong)]">
-              该命中尚未进入复核。进入后将基于命中上下文(ContextPack)创建一条 Review 记录,可在其中填写结构化结果。
-            </p>
-            <div className="flex gap-2">
-              <Button tone="primary" onClick={() => void createReview()}>
-                进入 Review
+              <Button tone="primary" disabled={submitting || !outputType} onClick={() => void save()}>
+                {submitting ? "保存中…" : "保存结果"}
               </Button>
-              <Button onClick={onClose}>取消</Button>
             </div>
-          </div>
-        ) : null}
+          ) : null
+        }
+      >
+        <div className="grid gap-4 text-sm">
+          {phase === "loading" ? (
+            <p className="text-[var(--muted)]">加载 Review…</p>
+          ) : null}
 
-        {phase === "creating" ? <p className="text-[var(--muted)]">创建 Review…</p> : null}
+          {phase === "error" ? (
+            <div className="grid gap-3">
+              <Notice tone="danger">{error || "加载 Review 失败"}</Notice>
+              <div className="flex gap-2">
+                {hitId ? <Button onClick={() => void loadReview(hitId, "initial")}>重试</Button> : null}
+                <Button onClick={onClose}>关闭</Button>
+              </div>
+            </div>
+          ) : null}
 
-        {phase === "ready" && review ? (
-          <>
-            <ReviewStatusRow review={review} />
+          {phase === "ready" && !review ? (
+            <div className="grid gap-3">
+              <p className="text-[var(--muted-strong)]">
+                该命中尚未进入复核。进入后将基于命中上下文(ContextPack)创建一条 Review 记录,可在其中填写结构化结果。
+              </p>
+              <div className="flex gap-2">
+                <Button tone="primary" onClick={() => void createReview()}>
+                  进入 Review
+                </Button>
+                <Button onClick={onClose}>取消</Button>
+              </div>
+            </div>
+          ) : null}
 
-            <AgentRunBlock
-              review={review}
-              agentRun={agentRun}
-              agentLoading={agentLoading}
-              agentError={agentError}
-              runningAgent={runningAgent}
-              onRun={runAgentReview}
-              onRefresh={() => void loadAgentRun(review.id)}
-            />
+          {phase === "creating" ? <p className="text-[var(--muted)]">创建 Review…</p> : null}
+
+          {phase === "ready" && review ? (
+            <>
+              <ReviewStatusRow review={review} />
+
+              <AgentRunBlock
+                review={review}
+                agentRun={agentRun}
+                agentLoading={agentLoading}
+                agentError={agentError}
+                runningAgent={runningAgent}
+                onRun={runAgentReview}
+                onRefresh={() => void loadAgentRun(review.id)}
+                onOpenDetail={agentRun ? () => setAgentDetailRunId(agentRun.id) : undefined}
+              />
 
             <CollapsibleSection title="上下文摘要" subtitle="ContextPack(hit / 策略 / 行情 / 日K / 组合)">
               <ContextPackSummary review={review} />
@@ -456,10 +459,18 @@ export function StockV2ReviewDrawer({
                 填写操作提案并保存后,后端将运行执行 guardrails 并在此展示结果。
               </p>
             ) : null}
-          </>
-        ) : null}
-      </div>
-    </Drawer>
+            </>
+          ) : null}
+        </div>
+      </Drawer>
+      {agentDetailRunId ? (
+        <StockV2AgentRunDetailDrawer
+          actions={actions}
+          runId={agentDetailRunId}
+          onClose={() => setAgentDetailRunId(null)}
+        />
+      ) : null}
+    </>
   );
 }
 
@@ -483,6 +494,7 @@ function AgentRunBlock({
   runningAgent,
   onRun,
   onRefresh,
+  onOpenDetail,
 }: {
   review: StockV2OperationReview;
   agentRun: StockV2AgentRun | null;
@@ -491,11 +503,22 @@ function AgentRunBlock({
   runningAgent: boolean;
   onRun: () => void;
   onRefresh: () => void;
+  onOpenDetail?: () => void;
 }) {
   const hasRun = !!agentRun;
+  const isActiveRun = agentRun && (agentRun.status === "pending" || agentRun.status === "ready" || agentRun.status === "running");
   const isRunning = agentRun && agentRun.status === "running";
   const isCompleted = agentRun && agentRun.status === "completed";
   const isFailed = agentRun && agentRun.status === "failed";
+  const outputWritten = !!review.outputType || !!review.resultSummary || Object.keys(review.result || {}).length > 0;
+  const runButtonDisabled = runningAgent || !!isActiveRun || review.status === "completed";
+  const runButtonLabel = runningAgent || isRunning
+    ? "运行中…"
+    : isActiveRun
+      ? "AgentRun 已创建"
+      : hasRun
+        ? "重新运行"
+        : "运行 Agent Review";
 
   return (
     <div className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
@@ -508,8 +531,20 @@ function AgentRunBlock({
               {stockV2AgentRunStatusLabel(agentRun.status)}
             </Pill>
           ) : null}
+          {hasRun ? (
+            <Pill tone={outputWritten ? "good" : isCompleted ? "warn" : "neutral"}>
+              {outputWritten ? "已写入 Review" : isCompleted ? "等待写回" : "未写回"}
+            </Pill>
+          ) : (
+            <Pill tone="neutral">未触发</Pill>
+          )}
         </div>
         <div className="flex gap-1.5">
+          {hasRun && onOpenDetail ? (
+            <Button onClick={onOpenDetail}>
+              查看 Agent 执行详情
+            </Button>
+          ) : null}
           {hasRun ? (
             <Button onClick={onRefresh} disabled={agentLoading || runningAgent}>
               刷新
@@ -518,9 +553,9 @@ function AgentRunBlock({
           <Button
             tone="primary"
             onClick={onRun}
-            disabled={runningAgent || !!isRunning || review.status === "completed"}
+            disabled={runButtonDisabled}
           >
-            {runningAgent || isRunning ? "运行中…" : hasRun ? "重新运行" : "运行 Agent Review"}
+            {runButtonLabel}
           </Button>
         </div>
       </div>

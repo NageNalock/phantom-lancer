@@ -21,8 +21,8 @@ import (
 // 环境变量用 allowlist 转发, 与 codexclient 的策略对齐但不共享代码。
 
 type AgentExecutorOutput struct {
-	StdoutTail    string        `json:"stdoutTail"`    // ~4KB
-	StderrTail    string        `json:"stderrTail"`    // ~4KB
+	StdoutTail    string        `json:"stdoutTail"` // ~4KB
+	StderrTail    string        `json:"stderrTail"` // ~4KB
 	ExitCode      int           `json:"exitCode"`
 	TimedOut      bool          `json:"timedOut"`
 	Duration      time.Duration `json:"duration"`
@@ -281,8 +281,11 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 	var b strings.Builder
 
 	b.WriteString("# Operation Review Task\n\n")
-	b.WriteString("You are performing an operation review for a stock monitoring hit.\n")
-	b.WriteString("Analyze the provided context and submit your final result using the stock_agent.submit_result tool.\n\n")
+	b.WriteString("System role: you are a StockV2 monitoring-hit reviewer. You are NOT a trading executor.\n")
+	b.WriteString("Your job is to audit whether this MonitorHit is real, actionable, stale/degraded, or noise.\n")
+	b.WriteString("Do not place orders, do not modify holdings, and do not update formal strategies.\n")
+	b.WriteString("Use only the provided context. Do not invent market prices, financial data, news, filings, or sources.\n")
+	b.WriteString("Submit your final result using the stock_agent.submit_result MCP tool.\n\n")
 
 	// Task ID + 提交方式
 	b.WriteString("## Task Information\n\n")
@@ -395,6 +398,11 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 	// Output schema 说明
 	b.WriteString("## Output Requirements\n\n")
 	b.WriteString("You must submit exactly ONE result using stock_agent.submit_result.\n\n")
+	b.WriteString("Before choosing outputType, do this review in order:\n")
+	b.WriteString("1. Evidence audit: verify what facts are directly supported by MonitorHit evidence, matchedAction, matchedPrefilter, playbookRule, quote, daily bars, and portfolio snapshot.\n")
+	b.WriteString("2. Data freshness audit: inspect quote/fetchedAt/quoteAt, dailyBars quality, portfolio snapshot status, staleQuoteCount, and freshness summary.\n")
+	b.WriteString("3. Match audit: explain whether the hit is matched, degraded, skipped, or noise. If degraded/skipped, explain why.\n")
+	b.WriteString("4. Separate `facts`, `inferences`, and `assumptions` in your result object. Keep assumptions explicit and minimal.\n\n")
 	b.WriteString("### Output Types\n\n")
 	b.WriteString("Choose ONE output type:\n\n")
 	b.WriteString("1. **trade_signal** — Account-agnostic trading signal\n")
@@ -404,16 +412,24 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 	b.WriteString("5. **continue_monitoring** — Keep monitoring, no action now\n\n")
 
 	b.WriteString("### Result fields by output type\n\n")
-	b.WriteString("- **trade_signal**: `direction`, `priceRange`, `triggerSummary`, `stopLoss`, `takeProfit`\n")
-	b.WriteString("- **proposed_operation**: `action` (buy/sell/reduce/clear), `quantity`, `price`, `amount`\n")
-	b.WriteString("- **strategy_patch**: `patchSummary` (description of the patch)\n")
-	b.WriteString("- **ignore**: no additional fields\n")
-	b.WriteString("- **continue_monitoring**: no additional fields\n\n")
+	b.WriteString("Common fields for every result: `facts`, `inferences`, `assumptions`, `freshnessAssessment`, `evidenceAudit`.\n")
+	b.WriteString("- **trade_signal**: `direction`, `priceRange`, `triggerSummary`, `riskNotes`, `confidence`\n")
+	b.WriteString("- **proposed_operation**: `action`, at least one of `quantity` / `amount` / `targetWeight`, `priceBasis`, `reason`, `riskNotes`, `confidence`\n")
+	b.WriteString("- **strategy_patch**: `patchSummary`, `reason`, `pendingAcceptance: true`\n")
+	b.WriteString("- **ignore**: `reason`, `noiseType`\n")
+	b.WriteString("- **continue_monitoring**: `reason`, `nextWatchFocus`\n\n")
+	b.WriteString("Example submit_result shape:\n")
+	b.WriteString("```json\n")
+	b.WriteString("{\"taskID\":\"<TASK_ID>\",\"taskType\":\"operation_review\",\"result\":{\"outputType\":\"continue_monitoring\",\"resultSummary\":\"...\",\"result\":{\"facts\":[],\"inferences\":[],\"assumptions\":[],\"reason\":\"...\",\"nextWatchFocus\":\"...\"},\"confidence\":0.6}}\n")
+	b.WriteString("```\n\n")
 
 	b.WriteString("### Important\n\n")
 	b.WriteString("- Only call submit_result ONCE when you have completed your analysis.\n")
-	b.WriteString("- Base your analysis ONLY on the provided context. Do not invent data.\n")
-	b.WriteString("- The main program will validate your result and run guardrails for proposed_operation.\n")
+	b.WriteString("- Base your analysis ONLY on the provided context. Do not fabricate or backfill missing data.\n")
+	b.WriteString("- If portfolio context is absent, do not output proposed_operation; use trade_signal, strategy_patch, ignore, or continue_monitoring.\n")
+	b.WriteString("- For proposed_operation, the main program will validate your result and run deterministic execution guardrails before anything can proceed.\n")
+	b.WriteString("- proposed_operation must not include final execution claims; it is only a proposal pending user confirmation.\n")
+	b.WriteString("- strategy_patch must set pendingAcceptance=true and must not claim the strategy has been updated.\n")
 	b.WriteString("- If you are unsure, choose `continue_monitoring` or `ignore`.\n")
 
 	// 裁剪总长度, 避免 token 爆炸

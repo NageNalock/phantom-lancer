@@ -570,6 +570,11 @@ CREATE TABLE IF NOT EXISTS stockv2_agent_decision_ledgers (
 );
 CREATE INDEX IF NOT EXISTS idx_stockv2_agent_decision_ledgers_run_id ON stockv2_agent_decision_ledgers(run_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_agent_decision_ledgers_task_type ON stockv2_agent_decision_ledgers(task_type);
+-- Codex CLI 默认 Provider: 使用当前主机 codex 登录态,不需要第三方 key/base_url。
+INSERT OR IGNORE INTO stockv2_agent_provider_profiles
+    (id, provider_type, name, display_name, config_state, auth_state, availability, metadata_json, created_at, updated_at)
+VALUES
+    ('agent-provider-codex-cli-default', 'codex_cli', 'default', 'Codex CLI 默认 Provider', 'configured', 'unknown', 'unknown', '{"managed":"system","source":"codex_cli_default"}', datetime('now'), datetime('now'));
 -- operation_review 默认 task profile(模型绑定留空,用户后续绑定)。幂等种入。
 INSERT OR IGNORE INTO stockv2_agent_task_profiles (id, task_type, primary_model_id, fallback_model_id, max_budget, created_at, updated_at) VALUES ('agent-task-operation-review', 'operation_review', '', '', 0, datetime('now'), datetime('now'));
 `

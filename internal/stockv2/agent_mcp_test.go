@@ -172,6 +172,87 @@ func TestMCP_SubmitResult_InvalidTaskID(t *testing.T) {
 	}
 }
 
+func TestMCP_SubmitResult_MissingTaskID(t *testing.T) {
+	p := newAgentTaskPool(defaultCleanupInterval)
+	defer p.Close()
+
+	req := mustJSON(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "stock_agent.submit_result",
+			"arguments": map[string]any{
+				"taskID":   "   ",
+				"taskType": AgentTaskTypeOperationReview,
+				"result": map[string]any{
+					"outputType": "ignore",
+				},
+			},
+		},
+	})
+
+	resp := p.HandleMCPRequest(req)
+	var result struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v\nresp: %s", err, string(resp))
+	}
+	if result.Error == nil || result.Error.Code != mcpErrInvalidParams {
+		t.Fatalf("expected invalid params error, got: %+v", result.Error)
+	}
+}
+
+func TestMCP_SubmitResult_InvalidOutputTypeRejected(t *testing.T) {
+	p := newAgentTaskPool(defaultCleanupInterval)
+	defer p.Close()
+
+	taskID, _ := p.createTask(AgentTaskTypeOperationReview, "run-1", "review-1", 5*time.Minute)
+	req := mustJSON(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "stock_agent.submit_result",
+			"arguments": map[string]any{
+				"taskID":   taskID,
+				"taskType": AgentTaskTypeOperationReview,
+				"result": map[string]any{
+					"outputType": "made_up_action",
+				},
+			},
+		},
+	})
+
+	resp := p.HandleMCPRequest(req)
+	var result struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v\nresp: %s", err, string(resp))
+	}
+	if result.Error == nil || result.Error.Code != mcpErrInvalidParams {
+		t.Fatalf("expected invalid params error, got: %+v", result.Error)
+	}
+
+	entry, ok := p.getTask(taskID)
+	if !ok {
+		t.Fatal("task should exist")
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.status != agentTaskStatusWaiting {
+		t.Fatalf("status = %s, want waiting", entry.status)
+	}
+}
+
 func TestMCP_MethodNotFound(t *testing.T) {
 	p := newAgentTaskPool(defaultCleanupInterval)
 	defer p.Close()
