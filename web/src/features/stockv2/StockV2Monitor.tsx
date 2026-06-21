@@ -2,6 +2,8 @@ import { ArrowsClockwise, Check, CheckCircle, MagnifyingGlass, Pencil, Power, X 
 import { useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../../app/App";
 import type {
+  StockV2AgentExecutionDetail,
+  StockV2AgentListResponse,
   StockV2Alert,
   StockV2AlertListResponse,
   StockV2MonitorHit,
@@ -17,6 +19,11 @@ import type {
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, Drawer, Field, Notice, Pill, useDangerConfirm } from "../../components/ui";
+import {
+  StockV2AgentExecutionLedgerSection,
+  StockV2AgentExecutionSummaryList,
+  StockV2AgentRunDetailDrawer,
+} from "./StockV2AgentExecutionLedger";
 import { StockV2ReviewDrawer } from "./StockV2ReviewDrawer";
 import {
   formatDate,
@@ -51,9 +58,13 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
   const [runsLoading, setRunsLoading] = useState(false);
 
   const [hitsByRunId, setHitsByRunId] = useState<Record<string, StockV2MonitorHit[]>>({});
+  const [agentDetailsByRunId, setAgentDetailsByRunId] = useState<Record<string, StockV2AgentExecutionDetail[]>>({});
   const [selectedRun, setSelectedRun] = useState<StockV2MonitorRun | null>(null);
   const [selectedRunHits, setSelectedRunHits] = useState<StockV2MonitorHit[]>([]);
   const [selectedRunHitsLoading, setSelectedRunHitsLoading] = useState(false);
+  const [selectedRunAgentDetails, setSelectedRunAgentDetails] = useState<StockV2AgentExecutionDetail[]>([]);
+  const [selectedRunAgentLoading, setSelectedRunAgentLoading] = useState(false);
+  const [agentDetailRunId, setAgentDetailRunId] = useState<string | null>(null);
 
   const [alerts, setAlerts] = useState<StockV2Alert[]>([]);
   const [alertsTotal, setAlertsTotal] = useState(0);
@@ -91,6 +102,7 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
       setRuns(items);
       setRunsTotal(res.total ?? res.items?.length ?? 0);
       void fetchHitsForRuns(items);
+      void fetchAgentDetailsForRuns(items);
     } catch {
       setRuns([]);
       setRunsTotal(0);
@@ -119,6 +131,30 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
   async function fetchRunHits(runId: string, limit = 100) {
     const params = new URLSearchParams({ runId, limit: String(limit), offset: "0" });
     const res = await actions.api<StockV2MonitorHitListResponse>(`/api/stockv2/monitor/hits?${params}`);
+    return res.items || [];
+  }
+
+  async function fetchAgentDetailsForRuns(runItems: StockV2MonitorRun[]) {
+    const ids = runItems.map((run) => run.id).filter(Boolean);
+    if (ids.length === 0) return;
+    try {
+      const pairs = await Promise.all(ids.map(async (runId) => [runId, await fetchRunAgentDetails(runId)] as const));
+      setAgentDetailsByRunId((current) => {
+        const next = { ...current };
+        pairs.forEach(([runId, items]) => {
+          next[runId] = items;
+        });
+        return next;
+      });
+    } catch {
+      // Agent 详情是监控历史增强信息,失败不影响监控任务主列表。
+    }
+  }
+
+  async function fetchRunAgentDetails(runId: string) {
+    const res = await actions.api<StockV2AgentListResponse<StockV2AgentExecutionDetail>>(
+      `/api/stockv2/monitor/runs/${runId}/agent-runs`,
+    );
     return res.items || [];
   }
 
@@ -279,15 +315,20 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
   async function openRunDetail(run: StockV2MonitorRun) {
     setSelectedRun(run);
     setSelectedRunHits(hitsByRunId[run.id] || []);
+    setSelectedRunAgentDetails(agentDetailsByRunId[run.id] || []);
     setSelectedRunHitsLoading(true);
+    setSelectedRunAgentLoading(true);
     try {
-      const items = await fetchRunHits(run.id, 100);
-      setSelectedRunHits(items);
-      setHitsByRunId((current) => ({ ...current, [run.id]: items }));
+      const [hits, agentDetails] = await Promise.all([fetchRunHits(run.id, 100), fetchRunAgentDetails(run.id)]);
+      setSelectedRunHits(hits);
+      setSelectedRunAgentDetails(agentDetails);
+      setHitsByRunId((current) => ({ ...current, [run.id]: hits }));
+      setAgentDetailsByRunId((current) => ({ ...current, [run.id]: agentDetails }));
     } catch (err) {
       actions.setToast(`加载监控详情失败:${friendlyError(err)}`, "danger");
     } finally {
       setSelectedRunHitsLoading(false);
+      setSelectedRunAgentLoading(false);
     }
   }
 
@@ -351,6 +392,7 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
             <div className="grid gap-2">
               {runs.map((run) => (
                 <MonitorRunRow
+                  agentDetails={agentDetailsByRunId[run.id] || []}
                   hits={hitsByRunId[run.id] || []}
                   key={run.id}
                   onOpen={() => void openRunDetail(run)}
@@ -371,6 +413,8 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
           </>
         )}
       </CollapsibleSection>
+
+      <StockV2AgentExecutionLedgerSection actions={actions} />
 
       <CollapsibleSection
         title="提醒台账"
@@ -421,11 +465,15 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
       {selectedRun ? (
         <MonitorRunDrawer
           hits={selectedRunHits}
+          agentDetails={selectedRunAgentDetails}
+          agentLoading={selectedRunAgentLoading}
           loading={selectedRunHitsLoading}
           onClose={() => {
             setSelectedRun(null);
             setSelectedRunHits([]);
+            setSelectedRunAgentDetails([]);
           }}
+          onOpenAgentRun={(runId) => setAgentDetailRunId(runId)}
           onOpenReview={(hitId) => setReviewHitId(hitId)}
           run={selectedRun}
         />
@@ -433,6 +481,10 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
 
       {reviewHitId ? (
         <StockV2ReviewDrawer actions={actions} hitId={reviewHitId} onClose={() => setReviewHitId(null)} />
+      ) : null}
+
+      {agentDetailRunId ? (
+        <StockV2AgentRunDetailDrawer actions={actions} runId={agentDetailRunId} onClose={() => setAgentDetailRunId(null)} />
       ) : null}
 
       {dangerConfirmDialog}
@@ -635,10 +687,12 @@ function TaskConfigDrawer({
 function MonitorRunRow({
   run,
   hits,
+  agentDetails,
   onOpen,
 }: {
   run: StockV2MonitorRun;
   hits: StockV2MonitorHit[];
+  agentDetails: StockV2AgentExecutionDetail[];
   onOpen: () => void;
 }) {
   const symbols = affectedSymbols(hits);
@@ -655,7 +709,7 @@ function MonitorRunRow({
           <strong className="text-sm">{stockV2MonitorTaskTypeLabel(run.taskType)}</strong>
           <Pill tone={statusTone}>{stockV2MonitorRunStatusLabel(run.status)}</Pill>
           <Pill tone={hitCount > 0 ? "warn" : "neutral"}>{hitCount > 0 ? `命中候选 ${hitCount}` : "未命中候选"}</Pill>
-          <Pill tone="neutral">Agent {monitorAgentSummary(run, hits)}</Pill>
+          <Pill tone={monitorAgentTone(run, hits, agentDetails)}>Agent {monitorAgentSummary(run, hits, agentDetails)}</Pill>
           {run.triggerType ? <span className="text-[var(--muted)]">· {monitorTriggerLabel(run.triggerType)}</span> : null}
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[var(--muted-strong)]">
@@ -679,14 +733,20 @@ function MonitorRunRow({
 function MonitorRunDrawer({
   run,
   hits,
+  agentDetails,
+  agentLoading,
   loading,
   onClose,
+  onOpenAgentRun,
   onOpenReview,
 }: {
   run: StockV2MonitorRun;
   hits: StockV2MonitorHit[];
+  agentDetails: StockV2AgentExecutionDetail[];
+  agentLoading: boolean;
   loading: boolean;
   onClose: () => void;
+  onOpenAgentRun: (runId: string) => void;
   onOpenReview: (hitId: string) => void;
 }) {
   const symbols = affectedSymbols(hits);
@@ -702,7 +762,7 @@ function MonitorRunDrawer({
           <SummaryCell label="扫描对象" value={String(run.scannedCount ?? 0)} tone="neutral" />
           <SummaryCell label="命中候选" value={String(run.hitCount ?? hits.length)} tone={(run.hitCount ?? hits.length) > 0 ? "warn" : "neutral"} />
           <SummaryCell label="影响股票" value={symbols.length ? compactList(symbols, 2) : "-"} tone={symbols.length ? "warn" : "neutral"} />
-          <SummaryCell label="Agent 复核" value={monitorAgentSummary(run, hits)} tone={monitorAgentTone(run, hits)} />
+          <SummaryCell label="Agent 复核" value={monitorAgentSummary(run, hits, agentDetails)} tone={monitorAgentTone(run, hits, agentDetails)} />
         </div>
 
         <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs">
@@ -713,6 +773,18 @@ function MonitorRunDrawer({
             {run.scopeSummary ? <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">扫描范围</span><span>{run.scopeSummary}</span></div> : null}
             {run.errorMessage ? <div className="break-words text-[var(--danger)]">错误：{run.errorMessage}</div> : null}
           </div>
+        </div>
+
+        <div>
+          <div className="mb-2 flex items-center justify-between">
+            <strong className="text-sm">Agent 执行</strong>
+            <span className="text-xs text-[var(--muted)]">{agentLoading ? "加载中…" : `${agentDetails.length} 次`}</span>
+          </div>
+          {agentLoading ? (
+            <p className="text-xs text-[var(--muted)]">加载 Agent 执行详情…</p>
+          ) : (
+            <StockV2AgentExecutionSummaryList items={agentDetails} onOpen={onOpenAgentRun} />
+          )}
         </div>
 
         <div>
@@ -1026,7 +1098,15 @@ function monitorTriggerLabel(triggerType?: string): string {
   }
 }
 
-function monitorAgentSummary(run: StockV2MonitorRun, hits: StockV2MonitorHit[]): string {
+function monitorAgentSummary(run: StockV2MonitorRun, hits: StockV2MonitorHit[], agentDetails: StockV2AgentExecutionDetail[] = []): string {
+  if (agentDetails.length > 0) {
+    const running = agentDetails.filter((detail) => detail.run.status === "running").length;
+    const failed = agentDetails.filter((detail) => detail.run.status === "failed").length;
+    const completed = agentDetails.filter((detail) => detail.run.status === "completed").length;
+    if (running > 0) return `运行中 ${running}`;
+    if (failed > 0 && completed === 0) return `失败 ${failed}`;
+    return `已触发 ${agentDetails.length}`;
+  }
   const state = String(run.metadata?.agentDoublecheck || "");
   if (state === "not_enabled" || !state) return "未启用";
   if (hits.some((hit) => hit.agentDecisionId && hit.agentDecisionId !== "pending")) return "已有结果";
@@ -1035,8 +1115,11 @@ function monitorAgentSummary(run: StockV2MonitorRun, hits: StockV2MonitorHit[]):
   return stockV2MonitorAgentStateLabel(state);
 }
 
-function monitorAgentTone(run: StockV2MonitorRun, hits: StockV2MonitorHit[]): "good" | "warn" | "danger" | "neutral" {
-  const summary = monitorAgentSummary(run, hits);
+function monitorAgentTone(run: StockV2MonitorRun, hits: StockV2MonitorHit[], agentDetails: StockV2AgentExecutionDetail[] = []): "good" | "warn" | "danger" | "neutral" {
+  if (agentDetails.some((detail) => detail.run.status === "failed")) return "danger";
+  if (agentDetails.some((detail) => detail.run.status === "running")) return "warn";
+  if (agentDetails.length > 0) return "good";
+  const summary = monitorAgentSummary(run, hits, agentDetails);
   if (summary.includes("已有结果")) return "good";
   if (summary.includes("未接") || summary.includes("待")) return "warn";
   return "neutral";

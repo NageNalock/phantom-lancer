@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// Agent 治理层:股票 V2 自己的 Provider/Model 管理、任务绑定、授权闸、
+// Agent 治理层:股票 V2 自己的 Provider/Model 管理、任务绑定、
 // 运行记录与决策留痕。不耦合 Codex 页面。本轮不真实调用外部模型,
 // 不写假 AI 结论;AgentRun 停在 ready,Output 留空,等待后续轮次接入
 // 真实 executor。脱敏单点在 service 层(经 internal/safelog),store
@@ -36,7 +36,7 @@ const (
 
 // Provider 可用性(最近探测结果)。
 const (
-	AgentProviderAvailabilityUnknown    = "unknown"
+	AgentProviderAvailabilityUnknown     = "unknown"
 	AgentProviderAvailabilityAvailable   = "available"
 	AgentProviderAvailabilityUnavailable = "unavailable"
 	AgentProviderAvailabilityDegraded    = "degraded"
@@ -61,13 +61,6 @@ const (
 	AgentTaskTypeOperationReview = "operation_review"
 )
 
-// AgentAuthorization 状态机:pending_authorization 经用户 approve/deny 进入终态。
-const (
-	AgentAuthorizationStatusPending  = "pending_authorization"
-	AgentAuthorizationStatusApproved = "approved"
-	AgentAuthorizationStatusDenied   = "denied"
-)
-
 // AgentRun 状态机。本轮 CreateAgentRunRecord 只产出 ready;
 // running/completed/failed 为后续真实调用轮次预留,本轮不推进。
 const (
@@ -80,8 +73,7 @@ const (
 
 // ResolveAgentTask 解析结果状态。
 const (
-	AgentResolutionStatusAuthorized           = "authorized"
-	AgentResolutionStatusPendingAuthorization = "pending_authorization"
+	AgentResolutionStatusAuthorized = "authorized"
 )
 
 // operation_review 默认 task profile 的固定 seed id。
@@ -92,16 +84,17 @@ var (
 	ErrAgentProviderNotFound            = errors.New("agent provider profile not found")
 	ErrAgentModelNotFound               = errors.New("agent model profile not found")
 	ErrAgentTaskProfileNotFound         = errors.New("agent task profile not found")
-	ErrAgentAuthorizationNotFound       = errors.New("agent authorization not found")
 	ErrAgentRunNotFound                 = errors.New("agent run not found")
 	ErrAgentDecisionLedgerNotFound      = errors.New("agent decision ledger not found")
 	ErrAgentModelNotAvailable           = errors.New("no available agent model for task")
-	ErrAgentAuthorizationAlreadyDecided = errors.New("agent authorization already decided")
+	ErrAgentExecutorUnavailable         = errors.New("agent executor unavailable")
 	ErrInvalidAgentProviderType         = errors.New("invalid agent provider type")
 	ErrInvalidAgentProviderConfigState  = errors.New("invalid agent provider config state")
 	ErrInvalidAgentProviderAuthState    = errors.New("invalid agent provider auth state")
 	ErrInvalidAgentProviderAvailability = errors.New("invalid agent provider availability")
 	ErrInvalidAgentProviderName         = errors.New("agent provider name is required")
+	ErrAgentProviderAPIKeyRequired      = errors.New("agent provider api key is required")
+	ErrAgentProviderBaseURLRequired     = errors.New("agent provider base url is required")
 	ErrInvalidAgentModelStatus          = errors.New("invalid agent model status")
 	ErrInvalidAgentModelCostLevel       = errors.New("invalid agent model cost level")
 	ErrInvalidAgentModelName            = errors.New("agent model name is required")
@@ -109,12 +102,14 @@ var (
 )
 
 // AgentProviderProfile 供应商层(openai/codex_cli/local)。
-// 不保存真实 secret,只保存配置状态、认证状态、可用性与最近探测结果摘要。
+// API Key 存在 metadata 内部字段,对外响应只返回 APIKeySet,不回显 secret。
 type AgentProviderProfile struct {
 	ID              string         `json:"id"`
 	ProviderType    string         `json:"providerType"`
 	Name            string         `json:"name"`
 	DisplayName     string         `json:"displayName,omitempty"`
+	BaseURL         string         `json:"baseUrl,omitempty"`
+	APIKeySet       bool           `json:"apiKeySet,omitempty"`
 	ConfigState     string         `json:"configState"`
 	AuthState       string         `json:"authState"`
 	Availability    string         `json:"availability"`
@@ -127,18 +122,17 @@ type AgentProviderProfile struct {
 
 // AgentModelProfile 具体模型配置。
 type AgentModelProfile struct {
-	ID              string         `json:"id"`
-	ProviderID      string         `json:"providerId"`
-	ModelName       string         `json:"modelName"`
-	DisplayName     string         `json:"displayName,omitempty"`
-	Enabled         bool           `json:"enabled"`
-	Status          string         `json:"status"`
-	CostLevel       string         `json:"costLevel"`
-	ContextLimit    int            `json:"contextLimit"`
-	ConfirmRequired bool           `json:"confirmRequired"`
-	Metadata        map[string]any `json:"metadata,omitempty"`
-	CreatedAt       time.Time      `json:"createdAt"`
-	UpdatedAt       time.Time      `json:"updatedAt"`
+	ID           string         `json:"id"`
+	ProviderID   string         `json:"providerId"`
+	ModelName    string         `json:"modelName"`
+	DisplayName  string         `json:"displayName,omitempty"`
+	Enabled      bool           `json:"enabled"`
+	Status       string         `json:"status"`
+	CostLevel    string         `json:"costLevel"`
+	ContextLimit int            `json:"contextLimit"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+	CreatedAt    time.Time      `json:"createdAt"`
+	UpdatedAt    time.Time      `json:"updatedAt"`
 }
 
 // AgentTaskProfile 股票任务到模型的绑定。operation_review 由 schema 默认种入。
@@ -147,29 +141,9 @@ type AgentTaskProfile struct {
 	TaskType        string    `json:"taskType"`
 	PrimaryModelID  string    `json:"primaryModelId,omitempty"`
 	FallbackModelID string    `json:"fallbackModelId,omitempty"`
-	ConfirmRequired bool      `json:"confirmRequired"`
 	MaxBudget       int       `json:"maxBudget,omitempty"`
 	CreatedAt       time.Time `json:"createdAt"`
 	UpdatedAt       time.Time `json:"updatedAt"`
-}
-
-// AgentAuthorization 高成本/高风险任务的待授权闸。
-// 用户 approve 后才允许进入 AgentRun;deny 为终态。
-type AgentAuthorization struct {
-	ID                string    `json:"id"`
-	TaskType          string    `json:"taskType"`
-	TaskProfileID     string    `json:"taskProfileId,omitempty"`
-	ProviderID        string    `json:"providerId,omitempty"`
-	ModelID           string    `json:"modelId,omitempty"`
-	TriggerObjectType string    `json:"triggerObjectType"`
-	TriggerObjectID   string    `json:"triggerObjectId"`
-	Status            string    `json:"status"`
-	Reason            string    `json:"reason,omitempty"`         // 已脱敏
-	RequestedBy       string    `json:"requestedBy,omitempty"`
-	DecidedAt         time.Time `json:"decidedAt,omitempty"`
-	DecisionReason    string    `json:"decisionReason,omitempty"` // 已脱敏
-	CreatedAt         time.Time `json:"createdAt"`
-	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
 // AgentRun 一次 Agent 任务运行记录。
@@ -186,7 +160,6 @@ type AgentRun struct {
 	ErrorMessage      string         `json:"errorMessage,omitempty"` // 已脱敏
 	Output            string         `json:"output,omitempty"`       // 本轮空串(不写假结论)
 	DecisionLedgerID  string         `json:"decisionLedgerId,omitempty"`
-	AuthorizationID   string         `json:"authorizationId,omitempty"`
 	StartedAt         time.Time      `json:"startedAt,omitempty"`
 	FinishedAt        time.Time      `json:"finishedAt,omitempty"`
 	CreatedAt         time.Time      `json:"createdAt"`
@@ -218,6 +191,8 @@ type RequestCreateAgentProviderProfile struct {
 	ProviderType string         `json:"providerType"`
 	Name         string         `json:"name"`
 	DisplayName  string         `json:"displayName,omitempty"`
+	BaseURL      string         `json:"baseUrl,omitempty"`
+	APIKey       string         `json:"apiKey,omitempty"`
 	ConfigState  string         `json:"configState,omitempty"`
 	AuthState    string         `json:"authState,omitempty"`
 	Availability string         `json:"availability,omitempty"`
@@ -227,6 +202,8 @@ type RequestCreateAgentProviderProfile struct {
 type RequestUpdateAgentProviderProfile struct {
 	Name            *string        `json:"name,omitempty"`
 	DisplayName     *string        `json:"displayName,omitempty"`
+	BaseURL         *string        `json:"baseUrl,omitempty"`
+	APIKey          *string        `json:"apiKey,omitempty"`
 	ConfigState     *string        `json:"configState,omitempty"`
 	AuthState       *string        `json:"authState,omitempty"`
 	Availability    *string        `json:"availability,omitempty"`
@@ -235,31 +212,49 @@ type RequestUpdateAgentProviderProfile struct {
 }
 
 type RequestCreateAgentModelProfile struct {
-	ProviderID      string         `json:"providerId"`
-	ModelName       string         `json:"modelName"`
-	DisplayName     string         `json:"displayName,omitempty"`
-	Enabled         bool           `json:"enabled"`
-	Status          string         `json:"status,omitempty"`
-	CostLevel       string         `json:"costLevel,omitempty"`
-	ContextLimit    int            `json:"contextLimit,omitempty"`
-	ConfirmRequired bool           `json:"confirmRequired"`
-	Metadata        map[string]any `json:"metadata,omitempty"`
+	ProviderID   string         `json:"providerId"`
+	ModelName    string         `json:"modelName"`
+	DisplayName  string         `json:"displayName,omitempty"`
+	Enabled      bool           `json:"enabled"`
+	Status       string         `json:"status,omitempty"`
+	CostLevel    string         `json:"costLevel,omitempty"`
+	ContextLimit int            `json:"contextLimit,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
 }
 
 type RequestUpdateAgentModelProfile struct {
-	DisplayName     *string        `json:"displayName,omitempty"`
-	Enabled         *bool          `json:"enabled,omitempty"`
-	Status          *string        `json:"status,omitempty"`
-	CostLevel       *string        `json:"costLevel,omitempty"`
-	ContextLimit    *int           `json:"contextLimit,omitempty"`
-	ConfirmRequired *bool          `json:"confirmRequired,omitempty"`
-	Metadata        map[string]any `json:"metadata,omitempty"`
+	DisplayName  *string        `json:"displayName,omitempty"`
+	Enabled      *bool          `json:"enabled,omitempty"`
+	Status       *string        `json:"status,omitempty"`
+	CostLevel    *string        `json:"costLevel,omitempty"`
+	ContextLimit *int           `json:"contextLimit,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+}
+
+type AgentProviderModelCatalogItem struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName,omitempty"`
+}
+
+type AgentProviderModelCatalog struct {
+	ProviderID string                          `json:"providerId"`
+	Items      []AgentProviderModelCatalogItem `json:"items"`
+}
+
+type RequestTestAgentModel struct {
+	ProviderID string `json:"providerId"`
+	ModelName  string `json:"modelName"`
+}
+
+type AgentModelTestResult struct {
+	OK        bool   `json:"ok"`
+	Message   string `json:"message,omitempty"`
+	LatencyMS int64  `json:"latencyMs,omitempty"`
 }
 
 type RequestUpdateAgentTaskProfile struct {
 	PrimaryModelID  *string `json:"primaryModelId,omitempty"`
 	FallbackModelID *string `json:"fallbackModelId,omitempty"`
-	ConfirmRequired *bool   `json:"confirmRequired,omitempty"`
 	MaxBudget       *int    `json:"maxBudget,omitempty"`
 }
 
@@ -270,8 +265,16 @@ type RequestResolveAgentTask struct {
 	RequestedBy       string `json:"requestedBy,omitempty"`
 }
 
-type RequestAgentAuthorizationDecision struct {
-	DecisionReason string `json:"decisionReason,omitempty"`
+type RequestRunAgentCLIDebug struct {
+	ModelID     string `json:"modelId"`
+	RequestedBy string `json:"requestedBy,omitempty"`
+}
+
+type AgentExecutionDetail struct {
+	Run          AgentRun             `json:"run"`
+	Ledger       *AgentDecisionLedger `json:"ledger,omitempty"`
+	Review       *OperationReview     `json:"review,omitempty"`
+	InputContext *AgentContextPack    `json:"inputContext,omitempty"`
 }
 
 // ===== 内部参数 / 返回 struct =====
@@ -285,40 +288,25 @@ type AgentRunRecordParams struct {
 	TriggerObjectType    string
 	TriggerObjectID      string
 	RequestedBy          string
-	AuthorizationID      string
 	InputSummary         string
 	Prompt               string
 	InputArtifactSummary string
 }
 
-// AgentAuthorizationParams CreatePendingAuthorization 的入参。
-type AgentAuthorizationParams struct {
-	TaskType          string
-	TaskProfileID     string
-	ProviderID        string
-	ModelID           string
-	TriggerObjectType string
-	TriggerObjectID   string
-	Reason            string
-	RequestedBy       string
-}
-
 // AgentTaskResolution ResolveAgentTask 的返回。
-// confirm_required 时 PendingAuthorization 非 nil、Run 为 nil;
-// 否则 Run 与 DecisionLedger 非 nil。
+// Run 与 DecisionLedger 非 nil。
 type AgentTaskResolution struct {
-	TaskType             string               `json:"taskType"`
-	TaskProfileID        string               `json:"taskProfileId,omitempty"`
-	ProviderID           string               `json:"providerId,omitempty"`
-	ModelID              string               `json:"modelId,omitempty"`
-	ModelName            string               `json:"modelName,omitempty"`
-	TriggerObjectType    string               `json:"triggerObjectType"`
-	TriggerObjectID      string               `json:"triggerObjectId"`
-	RequestedBy          string               `json:"requestedBy,omitempty"`
-	Status               string               `json:"status"`
-	PendingAuthorization *AgentAuthorization  `json:"pendingAuthorization,omitempty"`
-	Run                  *AgentRun            `json:"run,omitempty"`
-	DecisionLedger       *AgentDecisionLedger `json:"decisionLedger,omitempty"`
+	TaskType          string               `json:"taskType"`
+	TaskProfileID     string               `json:"taskProfileId,omitempty"`
+	ProviderID        string               `json:"providerId,omitempty"`
+	ModelID           string               `json:"modelId,omitempty"`
+	ModelName         string               `json:"modelName,omitempty"`
+	TriggerObjectType string               `json:"triggerObjectType"`
+	TriggerObjectID   string               `json:"triggerObjectId"`
+	RequestedBy       string               `json:"requestedBy,omitempty"`
+	Status            string               `json:"status"`
+	Run               *AgentRun            `json:"run,omitempty"`
+	DecisionLedger    *AgentDecisionLedger `json:"decisionLedger,omitempty"`
 }
 
 // ===== ListFilter(不序列化,仅内部传递) =====
@@ -345,15 +333,6 @@ type AgentTaskProfileListFilter struct {
 	TaskType string
 	Limit    int
 	Offset   int
-}
-
-type AgentAuthorizationListFilter struct {
-	TaskType          string
-	Status            string
-	TriggerObjectType string
-	TriggerObjectID   string
-	Limit             int
-	Offset            int
 }
 
 type AgentRunListFilter struct {

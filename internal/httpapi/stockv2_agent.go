@@ -81,6 +81,20 @@ func (s *Server) handleStockV2UpdateAgentProvider(w http.ResponseWriter, r *http
 	s.writeJSON(w, result)
 }
 
+func (s *Server) handleStockV2ListAgentProviderModels(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "provider ID is required", http.StatusBadRequest)
+		return
+	}
+	result, err := s.stockV2.ListAgentProviderModels(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), stockV2AgentHTTPStatus(err))
+		return
+	}
+	s.writeJSON(w, result)
+}
+
 // ============================ models ============================
 
 func (s *Server) handleStockV2ListAgentModels(w http.ResponseWriter, r *http.Request) {
@@ -149,6 +163,20 @@ func (s *Server) handleStockV2UpdateAgentModel(w http.ResponseWriter, r *http.Re
 	s.writeJSON(w, result)
 }
 
+func (s *Server) handleStockV2TestAgentModel(w http.ResponseWriter, r *http.Request) {
+	var req stockv2.RequestTestAgentModel
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	result, err := s.stockV2.TestAgentModel(r.Context(), req)
+	if err != nil {
+		http.Error(w, err.Error(), stockV2AgentHTTPStatus(err))
+		return
+	}
+	s.writeJSON(w, result)
+}
+
 // ============================ task profiles ============================
 
 func (s *Server) handleStockV2ListAgentTaskProfiles(w http.ResponseWriter, r *http.Request) {
@@ -203,79 +231,6 @@ func (s *Server) handleStockV2UpdateAgentTaskProfile(w http.ResponseWriter, r *h
 	s.writeJSON(w, result)
 }
 
-// ============================ authorizations ============================
-
-func (s *Server) handleStockV2ListAgentAuthorizations(w http.ResponseWriter, r *http.Request) {
-	filter, err := stockV2AgentAuthorizationFilterFromRequest(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	items, err := s.stockV2.ListAgentAuthorizations(r.Context(), filter)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	total, err := s.stockV2.CountAgentAuthorizations(r.Context(), filter)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	s.writeJSON(w, map[string]any{"items": items, "total": total, "limit": filter.Limit, "offset": filter.Offset})
-}
-
-func (s *Server) handleStockV2GetAgentAuthorization(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if id == "" {
-		http.Error(w, "authorization ID is required", http.StatusBadRequest)
-		return
-	}
-	result, err := s.stockV2.GetAgentAuthorization(r.Context(), id)
-	if err != nil {
-		http.Error(w, err.Error(), stockV2AgentHTTPStatus(err))
-		return
-	}
-	s.writeJSON(w, result)
-}
-
-func (s *Server) handleStockV2ApproveAgentAuthorization(w http.ResponseWriter, r *http.Request) {
-	s.handleAgentAuthorizationDecision(w, r, true)
-}
-
-func (s *Server) handleStockV2DenyAgentAuthorization(w http.ResponseWriter, r *http.Request) {
-	s.handleAgentAuthorizationDecision(w, r, false)
-}
-
-// handleAgentAuthorizationDecision 推进授权闸;body 可空(不带 decisionReason)。
-func (s *Server) handleAgentAuthorizationDecision(w http.ResponseWriter, r *http.Request, approve bool) {
-	id := r.PathValue("id")
-	if id == "" {
-		http.Error(w, "authorization ID is required", http.StatusBadRequest)
-		return
-	}
-	var req stockv2.RequestAgentAuthorizationDecision
-	if r.Body != nil && r.ContentLength != 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
-			return
-		}
-	}
-	var (
-		result stockv2.AgentAuthorization
-		err    error
-	)
-	if approve {
-		result, err = s.stockV2.ApproveAgentAuthorization(r.Context(), id, req)
-	} else {
-		result, err = s.stockV2.DenyAgentAuthorization(r.Context(), id, req)
-	}
-	if err != nil {
-		http.Error(w, err.Error(), stockV2AgentHTTPStatus(err))
-		return
-	}
-	s.writeJSON(w, result)
-}
-
 // ============================ runs + ledgers ============================
 
 func (s *Server) handleStockV2ListAgentRuns(w http.ResponseWriter, r *http.Request) {
@@ -311,6 +266,20 @@ func (s *Server) handleStockV2GetAgentRun(w http.ResponseWriter, r *http.Request
 	s.writeJSON(w, result)
 }
 
+func (s *Server) handleStockV2GetAgentRunDetail(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "run ID is required", http.StatusBadRequest)
+		return
+	}
+	result, err := s.stockV2.GetAgentExecutionDetail(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), stockV2AgentHTTPStatus(err))
+		return
+	}
+	s.writeJSON(w, result)
+}
+
 func (s *Server) handleStockV2GetAgentDecisionLedger(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -318,6 +287,20 @@ func (s *Server) handleStockV2GetAgentDecisionLedger(w http.ResponseWriter, r *h
 		return
 	}
 	result, err := s.stockV2.GetAgentDecisionLedger(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), stockV2AgentHTTPStatus(err))
+		return
+	}
+	s.writeJSON(w, result)
+}
+
+func (s *Server) handleStockV2RunAgentCLIDebug(w http.ResponseWriter, r *http.Request) {
+	var req stockv2.RequestRunAgentCLIDebug
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	result, err := s.stockV2.RunAgentCLIDebug(r.Context(), req)
 	if err != nil {
 		http.Error(w, err.Error(), stockV2AgentHTTPStatus(err))
 		return
@@ -446,26 +429,6 @@ func stockV2AgentTaskProfileFilterFromRequest(r *http.Request) (stockv2.AgentTas
 	}, nil
 }
 
-func stockV2AgentAuthorizationFilterFromRequest(r *http.Request) (stockv2.AgentAuthorizationListFilter, error) {
-	query := r.URL.Query()
-	limit, offset, err := stockV2AgentPage(r)
-	if err != nil {
-		return stockv2.AgentAuthorizationListFilter{}, err
-	}
-	status := query.Get("status")
-	if !stockV2HTTPValidAgentEnum(status, stockv2.AgentAuthorizationStatusPending, stockv2.AgentAuthorizationStatusApproved, stockv2.AgentAuthorizationStatusDenied) {
-		return stockv2.AgentAuthorizationListFilter{}, errors.New("invalid authorization status")
-	}
-	return stockv2.AgentAuthorizationListFilter{
-		TaskType:          query.Get("taskType"),
-		Status:            status,
-		TriggerObjectType: query.Get("triggerObjectType"),
-		TriggerObjectID:   query.Get("triggerObjectId"),
-		Limit:             limit,
-		Offset:            offset,
-	}, nil
-}
-
 func stockV2AgentRunFilterFromRequest(r *http.Request) (stockv2.AgentRunListFilter, error) {
 	query := r.URL.Query()
 	limit, offset, err := stockV2AgentPage(r)
@@ -493,18 +456,19 @@ func stockV2AgentHTTPStatus(err error) int {
 	case errors.Is(err, stockv2.ErrAgentProviderNotFound),
 		errors.Is(err, stockv2.ErrAgentModelNotFound),
 		errors.Is(err, stockv2.ErrAgentTaskProfileNotFound),
-		errors.Is(err, stockv2.ErrAgentAuthorizationNotFound),
 		errors.Is(err, stockv2.ErrAgentRunNotFound),
 		errors.Is(err, stockv2.ErrAgentDecisionLedgerNotFound):
 		return http.StatusNotFound
-	case errors.Is(err, stockv2.ErrAgentAuthorizationAlreadyDecided),
-		errors.Is(err, stockv2.ErrAgentModelNotAvailable):
+	case errors.Is(err, stockv2.ErrAgentModelNotAvailable),
+		errors.Is(err, stockv2.ErrAgentExecutorUnavailable):
 		return http.StatusConflict
 	case errors.Is(err, stockv2.ErrInvalidAgentProviderType),
 		errors.Is(err, stockv2.ErrInvalidAgentProviderConfigState),
 		errors.Is(err, stockv2.ErrInvalidAgentProviderAuthState),
 		errors.Is(err, stockv2.ErrInvalidAgentProviderAvailability),
 		errors.Is(err, stockv2.ErrInvalidAgentProviderName),
+		errors.Is(err, stockv2.ErrAgentProviderAPIKeyRequired),
+		errors.Is(err, stockv2.ErrAgentProviderBaseURLRequired),
 		errors.Is(err, stockv2.ErrInvalidAgentModelStatus),
 		errors.Is(err, stockv2.ErrInvalidAgentModelCostLevel),
 		errors.Is(err, stockv2.ErrInvalidAgentModelName),
@@ -513,4 +477,34 @@ func stockV2AgentHTTPStatus(err error) int {
 	default:
 		return http.StatusInternalServerError
 	}
+}
+
+// handleStockV2AgentMCP 处理 MCP server 请求(JSON-RPC 2.0)。
+func (s *Server) handleStockV2AgentMCP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// 读 body
+	body := make([]byte, 0, 1024*64)
+	buf := make([]byte, 1024*8)
+	for {
+		n, err := r.Body.Read(buf)
+		if n > 0 {
+			body = append(body, buf[:n]...)
+		}
+		if len(body) > 1024*1024 { // 1MB 上限
+			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	resp := s.stockV2.AgentTaskPool().HandleMCPRequest(body)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(resp))
 }

@@ -85,6 +85,20 @@ func (s *Server) handleStockV2GetMonitorRun(w http.ResponseWriter, r *http.Reque
 	s.writeJSON(w, result)
 }
 
+func (s *Server) handleStockV2ListMonitorRunAgentRuns(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "run ID is required", http.StatusBadRequest)
+		return
+	}
+	items, err := s.stockV2.ListMonitorRunAgentExecutionDetails(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), stockV2MonitorHTTPStatus(err))
+		return
+	}
+	s.writeJSON(w, map[string]any{"items": items, "total": len(items), "limit": len(items), "offset": 0})
+}
+
 func (s *Server) handleStockV2ListMonitorHits(w http.ResponseWriter, r *http.Request) {
 	filter, err := stockV2MonitorHitFilterFromRequest(r)
 	if err != nil {

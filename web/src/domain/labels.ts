@@ -1097,24 +1097,6 @@ export function stockV2AgentRunStatusTone(status?: string): "good" | "warn" | "d
   }
 }
 
-export function stockV2AgentAuthorizationStatusLabel(status?: string): string {
-  switch (status) {
-    case "pending_authorization": return "待授权";
-    case "approved": return "已批准";
-    case "denied": return "已拒绝";
-    default: return status || "-";
-  }
-}
-
-export function stockV2AgentAuthorizationStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
-  switch (status) {
-    case "pending_authorization": return "warn";
-    case "approved": return "good";
-    case "denied": return "danger";
-    default: return "neutral";
-  }
-}
-
 export function stockV2GuardrailsStatusLabel(status?: string): string {
   switch (status) {
     case "pass": return "通过";

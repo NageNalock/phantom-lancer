@@ -1,4 +1,4 @@
-import { ArrowClockwise, ChartLine, Crosshair, Database, Faders, Plus, Wallet } from "@phosphor-icons/react";
+import { ArrowClockwise, ChartLine, Crosshair, Database, Faders, Plus, Robot, Wallet } from "@phosphor-icons/react";
 import type { AppActions } from "../../app/App";
 import type { AppData, StockV2Tab } from "../../app/types";
 import { friendlyError } from "../../api/client";
@@ -17,6 +17,7 @@ import { StockV2Portfolios } from "./StockV2Portfolios";
 import { StockV2Settings } from "./StockV2Settings";
 import { StockV2Strategies } from "./StockV2Strategies";
 import { StockV2DailyBars } from "./StockV2DailyBars";
+import { StockV2AgentPage } from "./StockV2AgentPage";
 
 const v2Tabs: Array<{ id: StockV2Tab; label: string; icon?: typeof Plus }> = [
   { id: "overview", label: "总览", icon: Faders },
@@ -24,13 +25,14 @@ const v2Tabs: Array<{ id: StockV2Tab; label: string; icon?: typeof Plus }> = [
   { id: "dailyBars", label: "行情与监控", icon: ChartLine },
   { id: "portfolios", label: "仓位", icon: Wallet },
   { id: "strategies", label: "策略", icon: Crosshair },
+  { id: "agent", label: "Agent", icon: Robot },
   { id: "settings", label: "设置", icon: Faders },
 ];
 
 export function StockV2View({ actions, data }: { actions: AppActions; data: AppData }) {
   const [activeTab, setActiveTab, tabHref] = useQueryParamState<StockV2Tab>(
     "stockv2",
-    ["overview", "universe", "dailyBars", "portfolios", "strategies", "settings"],
+    ["overview", "universe", "dailyBars", "portfolios", "strategies", "agent", "settings"],
     "overview",
   );
   const stockv2 = data.stockv2;
@@ -69,6 +71,7 @@ export function StockV2View({ actions, data }: { actions: AppActions; data: AppD
         {activeTab === "dailyBars" ? <StockV2DailyBars actions={actions} data={data} runAction={runAction} /> : null}
         {activeTab === "portfolios" ? <StockV2Portfolios actions={actions} data={data} runAction={runAction} /> : null}
         {activeTab === "strategies" ? <StockV2Strategies actions={actions} data={data} /> : null}
+        {activeTab === "agent" ? <StockV2AgentPage actions={actions} /> : null}
         {activeTab === "settings" ? <StockV2Settings actions={actions} data={data} runAction={runAction} /> : null}
       </div>
 

@@ -206,23 +206,22 @@ func agentProviderProfileFilterSQL(filter AgentProviderProfileListFilter) (strin
 
 const agentModelProfileSelectSQL = `
     SELECT id, provider_id, model_name, COALESCE(display_name,''), enabled, status, cost_level,
-           context_limit, confirm_required, metadata_json, created_at, updated_at
+           context_limit, metadata_json, created_at, updated_at
     FROM stockv2_agent_model_profiles
 `
 
 func scanAgentModelProfile(row rowScanner) (AgentModelProfile, error) {
 	var m AgentModelProfile
 	var displayName, metadataJSON string
-	var enabled, confirmRequired int
+	var enabled int
 	if err := row.Scan(
 		&m.ID, &m.ProviderID, &m.ModelName, &displayName, &enabled, &m.Status, &m.CostLevel,
-		&m.ContextLimit, &confirmRequired, &metadataJSON, &m.CreatedAt, &m.UpdatedAt,
+		&m.ContextLimit, &metadataJSON, &m.CreatedAt, &m.UpdatedAt,
 	); err != nil {
 		return m, err
 	}
 	m.DisplayName = displayName
 	m.Enabled = enabled != 0
-	m.ConfirmRequired = confirmRequired != 0
 	m.Metadata = unmarshalMap(metadataJSON)
 	return m, nil
 }
@@ -242,8 +241,8 @@ func (s *Store) CreateAgentModelProfile(ctx context.Context, model AgentModelPro
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO stockv2_agent_model_profiles
 			(id, provider_id, model_name, display_name, enabled, status, cost_level,
-			 context_limit, confirm_required, metadata_json, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 context_limit, metadata_json, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		model.ID,
 		model.ProviderID,
@@ -253,7 +252,6 @@ func (s *Store) CreateAgentModelProfile(ctx context.Context, model AgentModelPro
 		model.Status,
 		model.CostLevel,
 		model.ContextLimit,
-		boolToInt(model.ConfirmRequired),
 		marshalMap(model.Metadata),
 		model.CreatedAt,
 		model.UpdatedAt,
@@ -312,7 +310,7 @@ func (s *Store) UpdateAgentModelProfile(ctx context.Context, model AgentModelPro
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE stockv2_agent_model_profiles
 		SET provider_id = ?, model_name = ?, display_name = ?, enabled = ?, status = ?,
-		    cost_level = ?, context_limit = ?, confirm_required = ?, metadata_json = ?, updated_at = ?
+		    cost_level = ?, context_limit = ?, metadata_json = ?, updated_at = ?
 		WHERE id = ?
 	`,
 		model.ProviderID,
@@ -322,7 +320,6 @@ func (s *Store) UpdateAgentModelProfile(ctx context.Context, model AgentModelPro
 		model.Status,
 		model.CostLevel,
 		model.ContextLimit,
-		boolToInt(model.ConfirmRequired),
 		marshalMap(model.Metadata),
 		model.UpdatedAt,
 		model.ID,
@@ -356,20 +353,18 @@ func agentModelProfileFilterSQL(filter AgentModelProfileListFilter) (string, []a
 
 const agentTaskProfileSelectSQL = `
     SELECT id, task_type, COALESCE(primary_model_id,''), COALESCE(fallback_model_id,''),
-           confirm_required, max_budget, created_at, updated_at
+           max_budget, created_at, updated_at
     FROM stockv2_agent_task_profiles
 `
 
 func scanAgentTaskProfile(row rowScanner) (AgentTaskProfile, error) {
 	var t AgentTaskProfile
-	var confirmRequired int
 	if err := row.Scan(
 		&t.ID, &t.TaskType, &t.PrimaryModelID, &t.FallbackModelID,
-		&confirmRequired, &t.MaxBudget, &t.CreatedAt, &t.UpdatedAt,
+		&t.MaxBudget, &t.CreatedAt, &t.UpdatedAt,
 	); err != nil {
 		return t, err
 	}
-	t.ConfirmRequired = confirmRequired != 0
 	return t, nil
 }
 
@@ -431,17 +426,16 @@ func (s *Store) CountAgentTaskProfiles(ctx context.Context, filter AgentTaskProf
 	return count, nil
 }
 
-// UpdateAgentTaskProfile 只改 model 绑定/confirm/budget,task_type 为自然键不可变。
+// UpdateAgentTaskProfile 只改 model 绑定/budget,task_type 为自然键不可变。
 func (s *Store) UpdateAgentTaskProfile(ctx context.Context, profile AgentTaskProfile) (AgentTaskProfile, error) {
 	profile.UpdatedAt = time.Now()
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE stockv2_agent_task_profiles
-		SET primary_model_id = ?, fallback_model_id = ?, confirm_required = ?, max_budget = ?, updated_at = ?
+		SET primary_model_id = ?, fallback_model_id = ?, max_budget = ?, updated_at = ?
 		WHERE id = ?
 	`,
 		nullableAgentString(profile.PrimaryModelID),
 		nullableAgentString(profile.FallbackModelID),
-		boolToInt(profile.ConfirmRequired),
 		profile.MaxBudget,
 		profile.UpdatedAt,
 		profile.ID,
@@ -462,175 +456,24 @@ func agentTaskProfileFilterSQL(filter AgentTaskProfileListFilter) (string, []any
 	return strings.Join(where, " AND "), args
 }
 
-// ============================ authorizations ============================
-
-const agentAuthorizationSelectSQL = `
-    SELECT id, task_type, COALESCE(task_profile_id,''), COALESCE(provider_id,''),
-           COALESCE(model_id,''), trigger_object_type, trigger_object_id, status,
-           COALESCE(reason,''), COALESCE(requested_by,''), decided_at, COALESCE(decision_reason,''),
-           created_at, updated_at
-    FROM stockv2_agent_authorizations
-`
-
-func scanAgentAuthorization(row rowScanner) (AgentAuthorization, error) {
-	var a AgentAuthorization
-	var taskProfileID, providerID, modelID, reason, requestedBy, decisionReason string
-	var decidedAt sql.NullTime
-	if err := row.Scan(
-		&a.ID, &a.TaskType, &taskProfileID, &providerID, &modelID,
-		&a.TriggerObjectType, &a.TriggerObjectID, &a.Status,
-		&reason, &requestedBy, &decidedAt, &decisionReason,
-		&a.CreatedAt, &a.UpdatedAt,
-	); err != nil {
-		return a, err
-	}
-	a.TaskProfileID = taskProfileID
-	a.ProviderID = providerID
-	a.ModelID = modelID
-	a.Reason = reason
-	a.RequestedBy = requestedBy
-	a.DecisionReason = decisionReason
-	if decidedAt.Valid {
-		a.DecidedAt = decidedAt.Time
-	}
-	return a, nil
-}
-
-func (s *Store) CreateAgentAuthorization(ctx context.Context, auth AgentAuthorization) (AgentAuthorization, error) {
-	now := time.Now()
-	if auth.ID == "" {
-		auth.ID = generateID()
-	}
-	if auth.CreatedAt.IsZero() {
-		auth.CreatedAt = now
-	}
-	auth.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO stockv2_agent_authorizations
-			(id, task_type, task_profile_id, provider_id, model_id, trigger_object_type,
-			 trigger_object_id, status, reason, requested_by, decided_at, decision_reason,
-			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		auth.ID,
-		auth.TaskType,
-		nullableAgentString(auth.TaskProfileID),
-		nullableAgentString(auth.ProviderID),
-		nullableAgentString(auth.ModelID),
-		auth.TriggerObjectType,
-		auth.TriggerObjectID,
-		auth.Status,
-		nullableAgentString(auth.Reason),
-		nullableAgentString(auth.RequestedBy),
-		nullableAgentTime(auth.DecidedAt),
-		nullableAgentString(auth.DecisionReason),
-		auth.CreatedAt,
-		auth.UpdatedAt,
-	)
-	return auth, wrapError(err, "create agent authorization")
-}
-
-func (s *Store) GetAgentAuthorization(ctx context.Context, id string) (AgentAuthorization, error) {
-	row := s.db.QueryRowContext(ctx, agentAuthorizationSelectSQL+" WHERE id = ?", id)
-	auth, err := scanAgentAuthorization(row)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return AgentAuthorization{}, ErrAgentAuthorizationNotFound
-		}
-		return AgentAuthorization{}, wrapError(err, "get agent authorization")
-	}
-	return auth, nil
-}
-
-func (s *Store) ListAgentAuthorizations(ctx context.Context, filter AgentAuthorizationListFilter) ([]AgentAuthorization, error) {
-	where, args := agentAuthorizationFilterSQL(filter)
-	args = append(args, normalizedAgentLimit(filter.Limit), normalizedAgentOffset(filter.Offset))
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`%s WHERE %s ORDER BY created_at DESC LIMIT ? OFFSET ?`, agentAuthorizationSelectSQL, where), args...)
-	if err != nil {
-		return nil, wrapError(err, "list agent authorizations")
-	}
-	defer rows.Close()
-	items := make([]AgentAuthorization, 0)
-	for rows.Next() {
-		a, err := scanAgentAuthorization(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan agent authorization")
-		}
-		items = append(items, a)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate agent authorizations")
-	}
-	return items, nil
-}
-
-func (s *Store) CountAgentAuthorizations(ctx context.Context, filter AgentAuthorizationListFilter) (int, error) {
-	where, args := agentAuthorizationFilterSQL(filter)
-	var count int
-	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM stockv2_agent_authorizations WHERE %s`, where), args...).Scan(&count); err != nil {
-		return 0, wrapError(err, "count agent authorizations")
-	}
-	return count, nil
-}
-
-// UpdateAgentAuthorizationDecision 推进授权状态;approved/denied 时写 decided_at。
-// decisionReason 已由 service 层脱敏。
-func (s *Store) UpdateAgentAuthorizationDecision(ctx context.Context, id, status, decisionReason string) (AgentAuthorization, error) {
-	now := time.Now()
-	var decidedAt any
-	if status == AgentAuthorizationStatusApproved || status == AgentAuthorizationStatusDenied {
-		decidedAt = now
-	} else {
-		decidedAt = nil
-	}
-	result, err := s.db.ExecContext(ctx, `
-		UPDATE stockv2_agent_authorizations
-		SET status = ?, decision_reason = ?, decided_at = ?, updated_at = ?
-		WHERE id = ?
-	`,
-		status,
-		nullableAgentString(decisionReason),
-		decidedAt,
-		now,
-		id,
-	)
-	if err != nil {
-		return AgentAuthorization{}, wrapError(err, "update agent authorization decision")
-	}
-	if rows, _ := result.RowsAffected(); rows == 0 {
-		return AgentAuthorization{}, ErrAgentAuthorizationNotFound
-	}
-	return s.GetAgentAuthorization(ctx, id)
-}
-
-func agentAuthorizationFilterSQL(filter AgentAuthorizationListFilter) (string, []any) {
-	where := []string{"1=1"}
-	args := make([]any, 0)
-	agentFilterAdd(&where, &args, "task_type", filter.TaskType)
-	agentFilterAdd(&where, &args, "status", filter.Status)
-	agentFilterAdd(&where, &args, "trigger_object_type", filter.TriggerObjectType)
-	agentFilterAdd(&where, &args, "trigger_object_id", filter.TriggerObjectID)
-	return strings.Join(where, " AND "), args
-}
-
 // ============================ runs + decision ledger ============================
 
 const agentRunSelectSQL = `
     SELECT id, task_type, COALESCE(provider_id,''), COALESCE(model_id,''),
            trigger_object_type, trigger_object_id, status, cost_estimate_json,
            COALESCE(error_message,''), COALESCE(output,''), COALESCE(decision_ledger_id,''),
-           COALESCE(authorization_id,''), started_at, finished_at, created_at, updated_at
+           started_at, finished_at, created_at, updated_at
     FROM stockv2_agent_runs
 `
 
 func scanAgentRun(row rowScanner) (AgentRun, error) {
 	var r AgentRun
-	var providerID, modelID, errorMessage, output, decisionLedgerID, authorizationID, costEstimateJSON string
+	var providerID, modelID, errorMessage, output, decisionLedgerID, costEstimateJSON string
 	var startedAt, finishedAt sql.NullTime
 	if err := row.Scan(
 		&r.ID, &r.TaskType, &providerID, &modelID,
 		&r.TriggerObjectType, &r.TriggerObjectID, &r.Status, &costEstimateJSON,
-		&errorMessage, &output, &decisionLedgerID, &authorizationID,
+		&errorMessage, &output, &decisionLedgerID,
 		&startedAt, &finishedAt, &r.CreatedAt, &r.UpdatedAt,
 	); err != nil {
 		return r, err
@@ -640,7 +483,6 @@ func scanAgentRun(row rowScanner) (AgentRun, error) {
 	r.ErrorMessage = errorMessage
 	r.Output = output
 	r.DecisionLedgerID = decisionLedgerID
-	r.AuthorizationID = authorizationID
 	r.CostEstimate = unmarshalMap(costEstimateJSON)
 	if startedAt.Valid {
 		r.StartedAt = startedAt.Time
@@ -805,8 +647,8 @@ func insertAgentRunWithTx(ctx context.Context, tx *sql.Tx, run AgentRun) error {
 		INSERT INTO stockv2_agent_runs
 			(id, task_type, provider_id, model_id, trigger_object_type, trigger_object_id,
 			 status, cost_estimate_json, error_message, output, decision_ledger_id,
-			 authorization_id, started_at, finished_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 started_at, finished_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		run.ID,
 		run.TaskType,
@@ -819,7 +661,6 @@ func insertAgentRunWithTx(ctx context.Context, tx *sql.Tx, run AgentRun) error {
 		nullableAgentString(run.ErrorMessage),
 		run.Output,
 		nullableAgentString(run.DecisionLedgerID),
-		nullableAgentString(run.AuthorizationID),
 		nullableAgentTime(run.StartedAt),
 		nullableAgentTime(run.FinishedAt),
 		run.CreatedAt,
@@ -853,4 +694,63 @@ func insertAgentDecisionLedgerWithTx(ctx context.Context, tx *sql.Tx, ledger Age
 		ledger.UpdatedAt,
 	)
 	return wrapError(err, "insert agent decision ledger")
+}
+
+// ============================ updates ============================
+
+func (s *Store) UpdateAgentRun(ctx context.Context, run AgentRun) (AgentRun, error) {
+	if run.CostEstimate == nil {
+		run.CostEstimate = map[string]any{}
+	}
+	run.UpdatedAt = time.Now()
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_agent_runs
+		SET status = ?, cost_estimate_json = ?, error_message = ?, output = ?,
+		    finished_at = ?, updated_at = ?
+		WHERE id = ?
+	`,
+		run.Status,
+		marshalMap(run.CostEstimate),
+		nullableAgentString(run.ErrorMessage),
+		nullableAgentString(run.Output),
+		nullableAgentTime(run.FinishedAt),
+		run.UpdatedAt,
+		run.ID,
+	)
+	if err != nil {
+		return AgentRun{}, wrapError(err, "update agent run")
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return AgentRun{}, ErrAgentRunNotFound
+	}
+	return run, nil
+}
+
+func (s *Store) UpdateAgentDecisionLedger(ctx context.Context, ledger AgentDecisionLedger) (AgentDecisionLedger, error) {
+	if ledger.StructuredOutput == nil {
+		ledger.StructuredOutput = map[string]any{}
+	}
+	if ledger.RedactionSummary == nil {
+		ledger.RedactionSummary = map[string]any{}
+	}
+	ledger.UpdatedAt = time.Now()
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_agent_decision_ledgers
+		SET output_artifact_summary = ?, structured_output_json = ?, redaction_summary_json = ?,
+		    updated_at = ?
+		WHERE id = ?
+	`,
+		nullableAgentString(ledger.OutputArtifactSummary),
+		marshalMap(ledger.StructuredOutput),
+		marshalMap(ledger.RedactionSummary),
+		ledger.UpdatedAt,
+		ledger.ID,
+	)
+	if err != nil {
+		return AgentDecisionLedger{}, wrapError(err, "update agent decision ledger")
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return AgentDecisionLedger{}, ErrAgentDecisionLedgerNotFound
+	}
+	return ledger, nil
 }

@@ -4,7 +4,6 @@ import type { AppActions } from "../../app/App";
 import type { AppData, StockV2Settings } from "../../app/types";
 import { Button, Field, Notice, Panel, Pill, Toggle } from "../../components/ui";
 import { stockV2SettingsSummary } from "../../domain/labels";
-import { StockV2AgentConsole } from "./StockV2AgentConsole";
 
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
 
@@ -48,14 +47,6 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
       {dirty ? (
         <Notice tone="warn">当前有未保存的修改，点击下方「保存设置」按钮生效。</Notice>
       ) : null}
-
-      {/* 自动更新 */}
-      <Panel
-        title="Agent 治理"
-        subtitle="供应商/模型/任务绑定/授权/运行与决策留痕(只读观测)"
-      >
-        <StockV2AgentConsole actions={actions} />
-      </Panel>
 
       {/* 自动更新 */}
       <Panel

@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import type { AppActions } from "../../app/App";
 import type {
-  StockV2AgentAuthorization,
   StockV2AgentDecisionLedger,
   StockV2AgentListResponse,
   StockV2AgentModelProfile,
@@ -14,8 +13,6 @@ import { Button, CollapsibleSection, Notice, Pill } from "../../components/ui";
 import {
   formatDate,
   stockV2AgentAuthStateLabel,
-  stockV2AgentAuthorizationStatusLabel,
-  stockV2AgentAuthorizationStatusTone,
   stockV2AgentAvailabilityLabel,
   stockV2AgentAvailabilityTone,
   stockV2AgentConfigStateLabel,
@@ -28,14 +25,13 @@ import {
 } from "../../domain/labels";
 
 // Agent 治理轻量入口(Quiet 风格):若干折叠区,按需懒加载。只读观测为主,
-// 仅 pending authorization 提供 approve/deny。本轮不建 provider/model/task-profile
-// 编辑表单,不真实调用模型。复杂信息(ledger 脱敏原文)进折叠。
+// 不建 provider/model/task-profile 编辑表单,不真实调用模型。复杂信息(ledger 脱敏原文)进折叠。
 
 export function StockV2AgentConsole({ actions }: { actions: AppActions }) {
   return (
     <div className="grid gap-3">
       <p className="text-xs text-[var(--muted)]">
-        供应商 / 模型 / 任务绑定 / 授权闸 / 运行与决策留痕的只读观测。展开各区块按需加载。
+        供应商 / 模型 / 任务绑定 / 运行与决策留痕的只读观测。展开各区块按需加载。
       </p>
       <CollapsibleSection title="供应商 (Provider)" subtitle="openai / codex_cli / local 配置与可用性">
         <AgentProviderSection actions={actions} />
@@ -43,11 +39,8 @@ export function StockV2AgentConsole({ actions }: { actions: AppActions }) {
       <CollapsibleSection title="模型 (Model)" subtitle="按 provider 绑定的具体模型">
         <AgentModelSection actions={actions} />
       </CollapsibleSection>
-      <CollapsibleSection title="任务绑定 · operation_review" subtitle="任务到主备模型的绑定与确认策略">
+      <CollapsibleSection title="任务绑定 · operation_review" subtitle="任务到主备模型的绑定">
         <AgentTaskProfileSection actions={actions} />
-      </CollapsibleSection>
-      <CollapsibleSection title="待授权 (Pending Authorization)" subtitle="高成本/高风险任务的人工闸">
-        <AgentAuthorizationSection actions={actions} />
       </CollapsibleSection>
       <CollapsibleSection title="最近运行与决策留痕" subtitle="AgentRun + DecisionLedger">
         <AgentRunSection actions={actions} />
@@ -106,7 +99,7 @@ function AgentProviderSection({ actions }: { actions: AppActions }) {
   return (
     <SectionLoader loading={loading} error={error} items={items} onRetry={load} onLoad={load}>
       <div className="grid gap-2">
-        {items!.map((p) => (
+        {(items ?? []).map((p) => (
           <div key={p.id} className="rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
             <div className="flex flex-wrap items-center gap-2">
               <strong className="text-sm">{p.name}</strong>
@@ -149,7 +142,7 @@ function AgentModelSection({ actions }: { actions: AppActions }) {
   return (
     <SectionLoader loading={loading} error={error} items={items} onRetry={load} onLoad={load}>
       <div className="grid gap-2">
-        {items!.map((m) => (
+        {(items ?? []).map((m) => (
           <div key={m.id} className="rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
             <div className="flex flex-wrap items-center gap-2">
               <strong className="text-sm">{m.displayName || m.modelName}</strong>
@@ -157,7 +150,6 @@ function AgentModelSection({ actions }: { actions: AppActions }) {
               {m.enabled ? <Pill tone="good">已启用</Pill> : <Pill tone="neutral">未启用</Pill>}
               <Pill tone={stockV2AgentModelStatusTone(m.status)}>{stockV2AgentModelStatusLabel(m.status)}</Pill>
               <Pill tone="neutral">{stockV2AgentModelCostLevelLabel(m.costLevel)}</Pill>
-              {m.confirmRequired ? <Pill tone="warn">需确认</Pill> : null}
             </div>
             <div className="mt-1 text-[var(--muted)]">provider {m.providerId.slice(0, 8)}{m.contextLimit ? ` · 上下文 ${m.contextLimit}` : ""}</div>
           </div>
@@ -193,78 +185,11 @@ function AgentTaskProfileSection({ actions }: { actions: AppActions }) {
       <div className="grid gap-1.5 rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
         <div className="flex flex-wrap items-center gap-2">
           <strong className="text-sm">operation_review</strong>
-          {profile?.confirmRequired ? <Pill tone="warn">需确认</Pill> : null}
           {profile?.maxBudget ? <Pill tone="neutral">预算 {profile.maxBudget}</Pill> : null}
         </div>
         <Row label="主模型" value={profile?.primaryModelId ? profile.primaryModelId.slice(0, 12) : "(未绑定)"} />
         <Row label="备模型" value={profile?.fallbackModelId ? profile.fallbackModelId.slice(0, 12) : "(未绑定)"} />
-        <p className="mt-1 text-[var(--muted)]">任务 profile 由后端默认种入,模型绑定在设置中维护。本轮不提供编辑入口。</p>
-      </div>
-    </SectionLoader>
-  );
-}
-
-function AgentAuthorizationSection({ actions }: { actions: AppActions }) {
-  const [items, setItems] = useState<StockV2AgentAuthorization[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-
-  async function load() {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await actions.api<StockV2AgentListResponse<StockV2AgentAuthorization>>(
-        "/api/stockv2/agent/authorizations?status=pending_authorization",
-      );
-      setItems(res.items || []);
-    } catch (err) {
-      setError(friendlyError(err));
-      setItems([]);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function decide(id: string, approve: boolean) {
-    setBusy(id);
-    try {
-      await actions.api(`/api/stockv2/agent/authorizations/${id}/${approve ? "approve" : "deny"}`, { method: "POST" });
-      actions.setToast(approve ? "已批准授权" : "已拒绝授权", "good");
-      await load();
-    } catch (err) {
-      actions.setToast(friendlyError(err), "danger");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  return (
-    <SectionLoader loading={loading} error={error} items={items} onRetry={load} onLoad={load}>
-      <div className="grid gap-2">
-        {items!.map((a) => (
-          <div key={a.id} className="rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
-            <div className="flex flex-wrap items-center gap-2">
-              <strong className="text-sm">{a.taskType}</strong>
-              <Pill tone={stockV2AgentAuthorizationStatusTone(a.status)}>
-                {stockV2AgentAuthorizationStatusLabel(a.status)}
-              </Pill>
-              {a.triggerObjectType ? <span className="text-[var(--muted)]">{a.triggerObjectType}:{a.triggerObjectId?.slice(0, 8) || "-"}</span> : null}
-            </div>
-            {a.reason ? <p className="mt-1 break-words text-[var(--muted-strong)]">{a.reason}</p> : null}
-            <div className="mt-1 text-[var(--muted)]">
-              model {a.modelId?.slice(0, 8) || "-"} · {formatDate(a.createdAt) || "-"}
-            </div>
-            <div className="mt-2 flex justify-end gap-1.5">
-              <Button tone="danger" disabled={busy === a.id} onClick={() => void decide(a.id, false)}>
-                拒绝
-              </Button>
-              <Button tone="primary" disabled={busy === a.id} onClick={() => void decide(a.id, true)}>
-                {busy === a.id ? "处理中…" : "批准"}
-              </Button>
-            </div>
-          </div>
-        ))}
+        <p className="mt-1 text-[var(--muted)]">任务 profile 由后端默认种入,模型绑定在 Agent 治理中维护。</p>
       </div>
     </SectionLoader>
   );
@@ -315,7 +240,7 @@ function AgentRunSection({ actions }: { actions: AppActions }) {
   return (
     <SectionLoader loading={loading} error={error} items={items} onRetry={load} onLoad={load}>
       <div className="grid gap-2">
-        {items!.map((run) => (
+        {(items ?? []).map((run) => (
           <div key={run.id} className="rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
             <div className="flex flex-wrap items-center gap-2">
               <strong className="text-sm">{run.taskType}</strong>
@@ -411,7 +336,7 @@ function SectionLoader<T>({
   }, [started]);
   return (
     <SectionState
-      loading={loading}
+      loading={loading || !started}
       error={error}
       empty={started && !loading && !error && (items?.length ?? 0) === 0}
       onRetry={onRetry}

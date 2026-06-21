@@ -22,6 +22,10 @@ type Service struct {
 
 	universeSource  *UniverseDataSource
 	dailyBarsSource *DailyBarsSource
+
+	// Agent 执行相关
+	agentTaskPool *agentTaskPool
+	agentExecutor AgentExecutor
 }
 
 // NewService 创建新的股票V2服务
@@ -32,7 +36,24 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 		httpClient:      httpClient,
 		universeSource:  NewUniverseDataSource(nil, httpClient),
 		dailyBarsSource: NewDailyBarsSource(nil, httpClient),
+		agentTaskPool:   newAgentTaskPool(defaultCleanupInterval),
 	}
+}
+
+// AgentExecutor 是 Agent 执行器接口。
+type AgentExecutor interface {
+	ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName string) (*AgentExecutorOutput, error)
+}
+
+// WithCodexCLIExecutor 注入 Codex CLI 执行器。
+func (s *Service) WithCodexCLIExecutor(binary, codexHome, mcpURL string) *Service {
+	s.agentExecutor = newCodexCLIExecutor(s.log, binary, codexHome, mcpURL, s.agentTaskPool)
+	return s
+}
+
+// AgentTaskPool 返回内存任务池(给 MCP handler 用)。
+func (s *Service) AgentTaskPool() *agentTaskPool {
+	return s.agentTaskPool
 }
 
 // Initialize 初始化服务，加载数据源
@@ -793,6 +814,10 @@ func (s *Service) Close() error {
 		s.bgWg.Wait()
 	}
 	s.bgMu.Unlock()
+	// 关闭 agent task pool
+	if s.agentTaskPool != nil {
+		s.agentTaskPool.Close()
+	}
 	// 关闭底层 DB 连接
 	if s.store != nil {
 		if err := s.store.Close(); err != nil {

@@ -134,3 +134,29 @@ func stockV2HTTPValidReviewOutputType(outputType string) bool {
 		outputType == stockv2.OperationReviewOutputIgnore ||
 		outputType == stockv2.OperationReviewOutputContinueMonitoring
 }
+
+// handleStockV2RunAgentReview 对某个 Review 启动 Agent 运行。
+func (s *Server) handleStockV2RunAgentReview(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "review ID is required", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		RequestedBy string `json:"requestedBy,omitempty"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+	}
+
+	run, err := s.stockV2.RunAgentReviewForReview(r.Context(), id, req.RequestedBy)
+	if err != nil {
+		http.Error(w, err.Error(), stockV2AgentHTTPStatus(err))
+		return
+	}
+	s.writeJSON(w, run)
+}

@@ -1,7 +1,9 @@
-import { ShieldCheck } from "@phosphor-icons/react";
-import { useEffect, useState } from "react";
+import { Robot, ShieldCheck } from "@phosphor-icons/react";
+import { useEffect, useRef, useState } from "react";
 import type { AppActions } from "../../app/App";
 import type {
+  StockV2AgentListResponse,
+  StockV2AgentRun,
   StockV2OperationReview,
   StockV2OperationReviewListResponse,
   StockV2OperationReviewOutputType,
@@ -11,6 +13,8 @@ import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, ContextList, Drawer, Field, Notice, Pill } from "../../components/ui";
 import {
   formatDate,
+  stockV2AgentRunStatusLabel,
+  stockV2AgentRunStatusTone,
   stockV2GuardrailsStatusLabel,
   stockV2GuardrailsStatusTone,
   stockV2ReviewOutputTypeLabel,
@@ -49,6 +53,12 @@ export function StockV2ReviewDrawer({
   const [phase, setPhase] = useState<"loading" | "ready" | "error" | "creating">("loading");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // Agent run 相关
+  const [agentRun, setAgentRun] = useState<StockV2AgentRun | null>(null);
+  const [agentLoading, setAgentLoading] = useState(false);
+  const [agentError, setAgentError] = useState<string | null>(null);
+  const [runningAgent, setRunningAgent] = useState(false);
+  const pollRef = useRef<number | null>(null);
 
   // 表单状态
   const [outputType, setOutputType] = useState<StockV2OperationReviewOutputType | "">("");
@@ -202,6 +212,93 @@ export function StockV2ReviewDrawer({
     }
   }
 
+  // ===== Agent Review 运行 =====
+
+  const isTerminal = (s: string) =>
+    s === "completed" || s === "failed" || s === "cancelled";
+
+  async function loadAgentRun(reviewId: string) {
+    try {
+      const res = await actions.api<StockV2AgentListResponse<StockV2AgentRun>>(
+        `/api/stockv2/agent/runs?triggerObjectType=operation_review&triggerObjectID=${encodeURIComponent(reviewId)}&limit=1&sort=desc`,
+      );
+      const run = res.items?.[0] || null;
+      setAgentRun(run);
+      return run;
+    } catch (err) {
+      setAgentError(friendlyError(err));
+      return null;
+    }
+  }
+
+  async function runAgentReview() {
+    if (!review) return;
+    setRunningAgent(true);
+    setAgentError(null);
+    try {
+      const run = await actions.api<StockV2AgentRun>(
+        `/api/stockv2/reviews/${review.id}/run-agent`,
+        { method: "POST", body: { requestedBy: "user" } },
+      );
+      setAgentRun(run);
+      actions.setToast("Agent Review 已启动", "good");
+      // 启动轮询
+      startPolling(review.id);
+    } catch (err) {
+      setAgentError(friendlyError(err));
+      actions.setToast(friendlyError(err), "danger");
+    } finally {
+      setRunningAgent(false);
+    }
+  }
+
+  function startPolling(reviewId: string) {
+    stopPolling();
+    let count = 0;
+    const maxPolls = 30; // 最多 30 次 = ~60 秒
+    const tick = async () => {
+      count++;
+      const run = await loadAgentRun(reviewId);
+      if (!run || isTerminal(run.status as string) || count >= maxPolls) {
+        stopPolling();
+        if (run && run.status === "completed") {
+          // 完成后刷新 review,拿到 agent 写回的结果
+          void loadReview(hitId || "", "refresh");
+        }
+        return;
+      }
+      pollRef.current = window.setTimeout(tick, 2000);
+    };
+    pollRef.current = window.setTimeout(tick, 2000);
+  }
+
+  function stopPolling() {
+    if (pollRef.current != null) {
+      clearTimeout(pollRef.current);
+      pollRef.current = null;
+    }
+  }
+
+  // review 变化时拉一次 agent run
+  useEffect(() => {
+    if (review && review.id) {
+      setAgentLoading(true);
+      void loadAgentRun(review.id).finally(() => setAgentLoading(false));
+    } else {
+      setAgentRun(null);
+    }
+    return () => stopPolling();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [review?.id]);
+
+  // 如果已有非终态 run,启动轮询
+  useEffect(() => {
+    if (agentRun && !isTerminal(agentRun.status as string) && pollRef.current == null) {
+      startPolling(review?.id || "");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentRun?.id]);
+
   // ===== guardrails 区域(proposed_operation 保存后后端回填)=====
   const guardrails = review?.result ? mapFromAny(review.result.guardrails) : null;
   const guardrailsStatus = guardrails ? readStr(guardrails, "status") : "";
@@ -262,6 +359,16 @@ export function StockV2ReviewDrawer({
         {phase === "ready" && review ? (
           <>
             <ReviewStatusRow review={review} />
+
+            <AgentRunBlock
+              review={review}
+              agentRun={agentRun}
+              agentLoading={agentLoading}
+              agentError={agentError}
+              runningAgent={runningAgent}
+              onRun={runAgentReview}
+              onRefresh={() => void loadAgentRun(review.id)}
+            />
 
             <CollapsibleSection title="上下文摘要" subtitle="ContextPack(hit / 策略 / 行情 / 日K / 组合)">
               <ContextPackSummary review={review} />
@@ -364,6 +471,88 @@ function ReviewStatusRow({ review }: { review: StockV2OperationReview }) {
       {review.symbol ? <Pill tone="neutral">{review.symbol}</Pill> : null}
       <span className="text-xs text-[var(--muted)]">创建 {formatDate(review.createdAt) || "-"}</span>
       <span className="text-xs text-[var(--muted)]">更新 {formatDate(review.updatedAt) || "-"}</span>
+    </div>
+  );
+}
+
+function AgentRunBlock({
+  review,
+  agentRun,
+  agentLoading,
+  agentError,
+  runningAgent,
+  onRun,
+  onRefresh,
+}: {
+  review: StockV2OperationReview;
+  agentRun: StockV2AgentRun | null;
+  agentLoading: boolean;
+  agentError: string | null;
+  runningAgent: boolean;
+  onRun: () => void;
+  onRefresh: () => void;
+}) {
+  const hasRun = !!agentRun;
+  const isRunning = agentRun && agentRun.status === "running";
+  const isCompleted = agentRun && agentRun.status === "completed";
+  const isFailed = agentRun && agentRun.status === "failed";
+
+  return (
+    <div className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Robot size={14} className="text-[var(--muted)]" />
+          <strong className="text-sm">Agent 复核</strong>
+          {hasRun ? (
+            <Pill tone={stockV2AgentRunStatusTone(agentRun.status)}>
+              {stockV2AgentRunStatusLabel(agentRun.status)}
+            </Pill>
+          ) : null}
+        </div>
+        <div className="flex gap-1.5">
+          {hasRun ? (
+            <Button onClick={onRefresh} disabled={agentLoading || runningAgent}>
+              刷新
+            </Button>
+          ) : null}
+          <Button
+            tone="primary"
+            onClick={onRun}
+            disabled={runningAgent || !!isRunning || review.status === "completed"}
+          >
+            {runningAgent || isRunning ? "运行中…" : hasRun ? "重新运行" : "运行 Agent Review"}
+          </Button>
+        </div>
+      </div>
+
+      {agentError ? <Notice tone="danger">{agentError}</Notice> : null}
+
+      {agentLoading && !hasRun ? <p className="text-xs text-[var(--muted)]">加载 Agent 运行…</p> : null}
+
+      {isCompleted && agentRun?.output ? (
+        <div className="grid gap-1.5 rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
+          <p className="text-[var(--muted-strong)]">结果摘要：{agentRun.output}</p>
+          {agentRun.finishedAt ? (
+            <p className="text-[var(--muted)]">完成于 {formatDate(agentRun.finishedAt) || "-"}</p>
+          ) : null}
+          {agentRun.decisionLedgerId ? (
+            <p className="text-[var(--muted)]">
+              决策留痕 ID：<span className="font-mono">{agentRun.decisionLedgerId.slice(0, 12)}</span>
+              <span className="text-[var(--muted-strong)]">（在 Agent 页查看完整留痕）</span>
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {isFailed && agentRun?.errorMessage ? (
+        <Notice tone="danger">运行失败：{agentRun.errorMessage}</Notice>
+      ) : null}
+
+      {!hasRun && !agentLoading ? (
+        <p className="text-xs text-[var(--muted)]">
+          点击「运行 Agent Review」让 Agent 基于上下文自动分析并产出结构化结果。结果经后端校验后写入 Review，你可以再编辑。
+        </p>
+      ) : null}
     </div>
   );
 }

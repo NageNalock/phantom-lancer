@@ -1884,7 +1884,7 @@ export interface StockV2UniverseUpdateResponse {
   message: string;
 }
 
-export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "strategies" | "settings";
+export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "strategies" | "agent" | "settings";
 
 // ===== Daily Bars (日级历史行情) =====
 
@@ -2503,6 +2503,8 @@ export interface StockV2AgentProviderProfile {
   providerType: StockV2AgentProviderType | string;
   name: string;
   displayName?: string;
+  baseUrl?: string;
+  apiKeySet?: boolean;
   configState?: string;
   authState?: string;
   availability?: string;
@@ -2522,7 +2524,6 @@ export interface StockV2AgentModelProfile {
   status?: string;
   costLevel?: string;
   contextLimit?: number;
-  confirmRequired?: boolean;
   metadata?: Record<string, unknown>;
   createdAt?: string;
   updatedAt?: string;
@@ -2533,27 +2534,7 @@ export interface StockV2AgentTaskProfile {
   taskType: string;
   primaryModelId?: string;
   fallbackModelId?: string;
-  confirmRequired?: boolean;
   maxBudget?: number;
-  createdAt?: string;
-  updatedAt?: string;
-}
-
-export type StockV2AgentAuthorizationStatus = "pending_authorization" | "approved" | "denied";
-
-export interface StockV2AgentAuthorization {
-  id: string;
-  taskType: string;
-  taskProfileId?: string;
-  providerId?: string;
-  modelId?: string;
-  triggerObjectType?: string;
-  triggerObjectId?: string;
-  status: StockV2AgentAuthorizationStatus | string;
-  reason?: string;
-  requestedBy?: string;
-  decidedAt?: string;
-  decisionReason?: string;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -2572,7 +2553,6 @@ export interface StockV2AgentRun {
   errorMessage?: string;
   output?: string;
   decisionLedgerId?: string;
-  authorizationId?: string;
   startedAt?: string;
   finishedAt?: string;
   createdAt?: string;
@@ -2595,4 +2575,83 @@ export interface StockV2AgentDecisionLedger {
   redactionSummary?: Record<string, unknown>;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface StockV2AgentExecutionDetail {
+  run: StockV2AgentRun;
+  ledger?: StockV2AgentDecisionLedger;
+  review?: StockV2OperationReview;
+  inputContext?: StockV2AgentContextPack;
+}
+
+// ===== Agent 请求体 =====
+
+export interface StockV2AgentCreateProviderRequest {
+  providerType: StockV2AgentProviderType | string;
+  name?: string;
+  displayName?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  configState?: string;
+  authState?: string;
+  availability?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface StockV2AgentRunCLIDebugRequest {
+  modelId: string;
+  requestedBy?: string;
+}
+
+export interface StockV2AgentUpdateProviderRequest {
+  name?: string;
+  displayName?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  configState?: string;
+  authState?: string;
+  availability?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface StockV2AgentCreateModelRequest {
+  providerId: string;
+  modelName: string;
+  displayName?: string;
+  enabled?: boolean;
+  status?: string;
+  costLevel?: string;
+  contextLimit?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface StockV2AgentUpdateModelRequest {
+  displayName?: string;
+  enabled?: boolean;
+  status?: string;
+  costLevel?: string;
+  contextLimit?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface StockV2AgentUpdateTaskProfileRequest {
+  primaryModelId?: string;
+  fallbackModelId?: string;
+  maxBudget?: number;
+}
+
+export interface StockV2AgentProviderModelCatalogItem {
+  id: string;
+  displayName?: string;
+}
+
+export interface StockV2AgentProviderModelCatalog {
+  providerId: string;
+  items: StockV2AgentProviderModelCatalogItem[];
+}
+
+export interface StockV2AgentModelTestResult {
+  ok: boolean;
+  message?: string;
+  latencyMs?: number;
 }
