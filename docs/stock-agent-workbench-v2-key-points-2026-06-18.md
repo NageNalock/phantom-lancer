@@ -95,11 +95,17 @@ flowchart LR
 
   subgraph Agent["Agent 能力层"]
     AgentRun["Agent Run"]
-    RunSubgraph["运行子图"]
+    RunSubgraph["运行子图 / 派生视图"]
     DecisionLedger["Decision Ledger"]
-    ModelProfile["Provider / Model Profile"]
+    ProviderProfile["Provider Profile"]
+    ModelProfile["Model Profile"]
+    AgentTaskProfile["Agent Task Profile"]
     SkillRegistry["Skill Registry"]
-    AuthBoundary["授权边界"]
+    ExecutionPolicy["执行边界 / sandbox / budget / timeout"]
+    CodexCLIExecutor["Codex CLI Executor"]
+    MCPSubmit["MCP submit_result(taskID)"]
+    AgentTaskPool["AgentTaskPool 内存结果池"]
+    MainValidation["主程序校验"]
   end
 
   subgraph Memory["记忆与回流层"]
@@ -183,11 +189,21 @@ flowchart LR
   TradeSignal --> MemoryObj
   StrategyPatch --> UserConfirm
 
+  ProviderProfile --> ModelProfile
+  AgentTaskProfile --> ModelProfile
+  AgentTaskProfile --> AgentRun
   ModelProfile --> AgentRun
   SkillRegistry --> AgentRun
-  AuthBoundary --> AgentRun
+  ExecutionPolicy --> AgentRun
   AgentContextPack --> AgentRun
-  AgentRun --> TriggerDecision
+  AgentRun --> CodexCLIExecutor
+  CodexCLIExecutor --> MCPSubmit
+  MCPSubmit --> AgentTaskPool
+  AgentTaskPool --> MainValidation
+  CodexCLIExecutor --> DecisionLedger
+  MainValidation --> DecisionLedger
+  MainValidation --> OperationReview
+  AgentRun -. "消息面 / 自动 doublecheck 目标态" .-> TriggerDecision
   AgentRun --> OperationReview
   AgentRun --> GeneratedStrategy
   AgentRun --> DecisionLedger
@@ -212,6 +228,8 @@ flowchart LR
 对象网络图表示长期全局关系。
 
 运行子图表示某一次任务实际走过的节点和边。每次 Agent 任务、Review、策略生成或复杂分析，都应能回看它本次经过了哪些对象、调用了哪些能力、产出了什么结果。
+
+运行子图不是独立的核心业务对象，更像由 `MonitorRun`、`MonitorHit`、`OperationReview`、`AgentRun`、`DecisionLedger`、CLI transcript 和 MCP 回填结果拼出的派生视图。
 
 ## 4. 数据与信息面
 
@@ -301,13 +319,15 @@ guardrails 至少负责检查现金、可卖数量、单票上限、禁止买卖
 
 Agent 可以解释和建议，但不能绕过 guardrails。
 
-## 9. Agent、Skill 与授权边界
+## 9. Agent、Skill 与执行边界
 
 股票模块需要自己的 Provider / Model 管理，不应耦合 Codex 页面。
 
-Codex CLI 可以作为执行器之一，但股票模块的能力边界应独立：Agent 任务、模型 profile、skill registry、授权策略、成本边界和可用性探测都属于股票模块自己的治理面。
+Codex CLI 可以作为执行器之一，但股票模块的能力边界应独立：Agent 任务、Provider / Model profile、Agent Task Profile、skill registry、执行策略、成本边界和可用性探测都属于股票模块自己的治理面。
 
-高成本或高风险 Agent 任务应先进入待授权状态，用户确认后再执行。
+当前 V2 不保留待授权状态机。执行边界主要由模型可用性、预算、sandbox、timeout、只读执行、MCP taskID 校验和主程序结构化校验组成。
+
+Codex CLI 的执行过程由主程序 watch stdout/stderr；最终结构化结果通过 MCP `submit_result(taskID)` 回填到内存任务池，再由主程序校验、落库到 Decision Ledger，并按任务类型更新 Review 等业务对象。
 
 Skill 可以扩展数据获取、分析和检索能力。Skill 的可用性应定期探测，部分能力不可用时要在 Prompt 或任务说明中提前屏蔽。
 
@@ -361,6 +381,6 @@ V2 应优先保证：
 - 操作建议必须绑定账户上下文。
 - Review 有清晰输出。
 - guardrails 是确定性的。
-- Agent 可替换、可授权、可追溯。
+- Agent 可替换、可控、可追溯。
 - 每次任务能生成运行子图。
 - 记忆能回流但不能自动越权。
