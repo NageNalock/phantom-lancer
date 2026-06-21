@@ -192,6 +192,34 @@ func (s *Store) UpdateAgentProviderProfile(ctx context.Context, profile AgentPro
 	return profile, nil
 }
 
+func (s *Store) DeleteAgentProviderProfile(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return wrapError(err, "begin delete agent provider profile")
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE stockv2_agent_task_profiles
+		SET primary_model_id = CASE WHEN primary_model_id IN (SELECT id FROM stockv2_agent_model_profiles WHERE provider_id = ?) THEN '' ELSE primary_model_id END,
+		    fallback_model_id = CASE WHEN fallback_model_id IN (SELECT id FROM stockv2_agent_model_profiles WHERE provider_id = ?) THEN '' ELSE fallback_model_id END,
+		    updated_at = ?
+	`, id, id, time.Now()); err != nil {
+		return wrapError(err, "clear agent task model bindings")
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_agent_model_profiles WHERE provider_id = ?`, id); err != nil {
+		return wrapError(err, "delete provider agent models")
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM stockv2_agent_provider_profiles WHERE id = ?`, id)
+	if err != nil {
+		return wrapError(err, "delete agent provider profile")
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return ErrAgentProviderNotFound
+	}
+	return wrapError(tx.Commit(), "commit delete agent provider profile")
+}
+
 func agentProviderProfileFilterSQL(filter AgentProviderProfileListFilter) (string, []any) {
 	where := []string{"1=1"}
 	args := make([]any, 0)
@@ -368,8 +396,8 @@ func scanAgentTaskProfile(row rowScanner) (AgentTaskProfile, error) {
 	return t, nil
 }
 
-// 无 Create:operation_review 由 schema 内 INSERT OR IGNORE 种入;
-// 其余 task type 本轮不支持(service 层校验拒绝)。
+// 无 Create:task profiles 由 schema 内 INSERT OR IGNORE 种入;
+// 当前只有 operation_review 允许配置(service 层校验)。
 
 func (s *Store) GetAgentTaskProfile(ctx context.Context, id string) (AgentTaskProfile, error) {
 	row := s.db.QueryRowContext(ctx, agentTaskProfileSelectSQL+" WHERE id = ?", id)
@@ -594,8 +622,8 @@ func (s *Store) GetAgentDecisionLedger(ctx context.Context, id string) (AgentDec
 
 // CreateAgentRunWithLedger 事务原子写入 run 与其决策账本,防半写丢失。
 // 先写 ledger 拿到 id,再写 run(decision_ledger_id = ledger.id),commit。
-// 对齐 CreateStrategyWithVersion 的事务模式。本轮 run 不真实调用模型,
-// 不写假 output;Status 由 service 设为 ready。
+// 对齐 CreateStrategyWithVersion 的事务模式。run 创建后先进入 ready,
+// 后续由 Agent executor 推进状态并写回 stdout/MCP 结果。
 func (s *Store) CreateAgentRunWithLedger(ctx context.Context, run AgentRun, ledger AgentDecisionLedger) (AgentRun, AgentDecisionLedger, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

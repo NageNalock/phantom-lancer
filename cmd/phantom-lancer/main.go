@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -199,7 +200,6 @@ func main() {
 	codexSvc.StartBackground(ctx)
 	codexGatewaySvc.StartBackground(ctx)
 	stockSvc.StartBackground(ctx)
-	stockV2Svc.StartBackground(ctx)
 	store.StartStatsCollector(ctx)
 
 	// Events table retention pruner: deletes events older than the
@@ -273,6 +273,11 @@ func main() {
 		os.Exit(1)
 	}
 	api.SetHTTPServerManager(httpSrv)
+	stockV2Svc.WithCodexCLIExecutor(
+		stockV2CodexBinary(),
+		os.Getenv("CODEX_HOME"),
+		stockV2AgentMCPURL(actualEp.Scheme, actualEp.Addr),
+	)
 
 	// M2 split-state recovery: if the DB says TLS should be enabled but the
 	// runtime had to fall back to HTTP, reconcile DB back so they agree.
@@ -305,6 +310,7 @@ func main() {
 		"endpoint", actualEp,
 		"tls_boot_strict", tlsBootStrict,
 	)
+	stockV2Svc.StartBackground(ctx)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -391,4 +397,35 @@ func wantsVersion(args []string) bool {
 		}
 	}
 	return false
+}
+
+func stockV2CodexBinary() string {
+	if value := strings.TrimSpace(os.Getenv("PL_STOCKV2_CODEX_BIN")); value != "" {
+		return value
+	}
+	return "codex"
+}
+
+func stockV2AgentMCPURL(scheme, addr string) string {
+	if strings.TrimSpace(scheme) == "" {
+		scheme = "http"
+	}
+	host, port := stockV2LoopbackHostPort(addr)
+	return scheme + "://" + net.JoinHostPort(host, port) + "/api/stockv2/agent/mcp"
+}
+
+func stockV2LoopbackHostPort(addr string) (string, string) {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return "127.0.0.1", "8080"
+	}
+	host = strings.Trim(host, "[]")
+	switch host {
+	case "", "0.0.0.0", "::":
+		host = "127.0.0.1"
+	}
+	if port == "" {
+		port = "8080"
+	}
+	return host, port
 }

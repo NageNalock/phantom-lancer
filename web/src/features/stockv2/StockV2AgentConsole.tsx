@@ -22,10 +22,12 @@ import {
   stockV2AgentProviderTypeLabel,
   stockV2AgentRunStatusLabel,
   stockV2AgentRunStatusTone,
+  stockV2AgentTaskConfigurable,
+  stockV2AgentTaskTypeLabel,
 } from "../../domain/labels";
 
 // Agent 治理轻量入口(Quiet 风格):若干折叠区,按需懒加载。只读观测为主,
-// 不建 provider/model/task-profile 编辑表单,不真实调用模型。复杂信息(ledger 脱敏原文)进折叠。
+// 不建 provider/model/task-profile 编辑表单。复杂信息(ledger 脱敏原文)进折叠。
 
 export function StockV2AgentConsole({ actions }: { actions: AppActions }) {
   return (
@@ -39,7 +41,7 @@ export function StockV2AgentConsole({ actions }: { actions: AppActions }) {
       <CollapsibleSection title="模型 (Model)" subtitle="按 provider 绑定的具体模型">
         <AgentModelSection actions={actions} />
       </CollapsibleSection>
-      <CollapsibleSection title="任务绑定 · operation_review" subtitle="任务到主备模型的绑定">
+      <CollapsibleSection title="任务绑定" subtitle="任务到主备模型的绑定">
         <AgentTaskProfileSection actions={actions} />
       </CollapsibleSection>
       <CollapsibleSection title="最近运行与决策留痕" subtitle="AgentRun + DecisionLedger">
@@ -160,7 +162,7 @@ function AgentModelSection({ actions }: { actions: AppActions }) {
 }
 
 function AgentTaskProfileSection({ actions }: { actions: AppActions }) {
-  const [profile, setProfile] = useState<StockV2AgentTaskProfile | null>(null);
+  const [profiles, setProfiles] = useState<StockV2AgentTaskProfile[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -168,28 +170,32 @@ function AgentTaskProfileSection({ actions }: { actions: AppActions }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await actions.api<StockV2AgentTaskProfile>(
-        "/api/stockv2/agent/task-profiles/operation_review",
-      );
-      setProfile(res);
+      const res = await actions.api<StockV2AgentListResponse<StockV2AgentTaskProfile>>("/api/stockv2/agent/task-profiles?limit=20");
+      setProfiles(res.items || []);
     } catch (err) {
       setError(friendlyError(err));
-      setProfile(null);
+      setProfiles([]);
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <SectionLoader loading={loading} error={error} items={profile ? [profile] : null} onRetry={load} onLoad={load}>
-      <div className="grid gap-1.5 rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
-        <div className="flex flex-wrap items-center gap-2">
-          <strong className="text-sm">operation_review</strong>
-          {profile?.maxBudget ? <Pill tone="neutral">预算 {profile.maxBudget}</Pill> : null}
-        </div>
-        <Row label="主模型" value={profile?.primaryModelId ? profile.primaryModelId.slice(0, 12) : "(未绑定)"} />
-        <Row label="备模型" value={profile?.fallbackModelId ? profile.fallbackModelId.slice(0, 12) : "(未绑定)"} />
-        <p className="mt-1 text-[var(--muted)]">任务 profile 由后端默认种入,模型绑定在 Agent 治理中维护。</p>
+    <SectionLoader loading={loading} error={error} items={profiles} onRetry={load} onLoad={load}>
+      <div className="grid gap-2">
+        {(profiles ?? []).map((profile) => (
+          <div key={profile.id} className={`grid gap-1.5 rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs ${stockV2AgentTaskConfigurable(profile.taskType) ? "" : "opacity-60"}`}>
+            <div className="flex flex-wrap items-center gap-2">
+              <strong className="text-sm">{stockV2AgentTaskTypeLabel(profile.taskType)}</strong>
+              <Pill tone={stockV2AgentTaskConfigurable(profile.taskType) ? "good" : "neutral"}>
+                {stockV2AgentTaskConfigurable(profile.taskType) ? "已开放" : "未开放"}
+              </Pill>
+              {profile.maxBudget ? <Pill tone="neutral">预算 {profile.maxBudget}</Pill> : null}
+            </div>
+            <Row label="主模型" value={profile.primaryModelId ? profile.primaryModelId.slice(0, 12) : "(未绑定)"} />
+            <Row label="备模型" value={profile.fallbackModelId ? profile.fallbackModelId.slice(0, 12) : "(未绑定)"} />
+          </div>
+        ))}
       </div>
     </SectionLoader>
   );
@@ -243,7 +249,7 @@ function AgentRunSection({ actions }: { actions: AppActions }) {
         {(items ?? []).map((run) => (
           <div key={run.id} className="rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
             <div className="flex flex-wrap items-center gap-2">
-              <strong className="text-sm">{run.taskType}</strong>
+              <strong className="text-sm">{stockV2AgentTaskTypeLabel(run.taskType)}</strong>
               <Pill tone={stockV2AgentRunStatusTone(run.status)}>{stockV2AgentRunStatusLabel(run.status)}</Pill>
               <span className="font-mono text-[var(--muted-strong)]">model {run.modelId?.slice(0, 8) || "-"}</span>
               <span className="text-[var(--muted)]">{formatDate(run.startedAt || run.createdAt) || "-"}</span>

@@ -12,6 +12,7 @@ import {
   formatDate,
   stockV2AgentRunStatusLabel,
   stockV2AgentRunStatusTone,
+  stockV2AgentTaskTypeLabel,
 } from "../../domain/labels";
 
 const AGENT_RUN_PAGE_SIZE = 10;
@@ -207,7 +208,7 @@ export function StockV2AgentRunDetailPanel({ detail }: { detail: StockV2AgentExe
     <div className="grid gap-4 text-sm">
       <div className="grid grid-cols-2 gap-2">
         <SummaryCell label="运行状态" value={stockV2AgentRunStatusLabel(run.status)} tone={stockV2AgentRunStatusTone(run.status)} />
-        <SummaryCell label="任务类型" value={run.taskType || "-"} tone="neutral" />
+        <SummaryCell label="任务类型" value={stockV2AgentTaskTypeLabel(run.taskType)} tone="neutral" />
         <SummaryCell label="模型" value={run.modelId?.slice(0, 12) || "-"} tone="neutral" />
         <SummaryCell label="触发对象" value={`${run.triggerObjectType || "-"}:${run.triggerObjectId?.slice(0, 8) || "-"}`} tone="neutral" />
       </div>
@@ -346,7 +347,7 @@ function JSONBlock({ title, value }: { title: string; value: unknown }) {
 function agentRunTitle(detail: StockV2AgentExecutionDetail): string {
   if (detail.run.triggerObjectType === "agent_cli_debug") return "CLI 链路调试";
   if (detail.review?.symbol) return `Review · ${detail.review.symbol}`;
-  return detail.run.taskType || "Agent Run";
+  return stockV2AgentTaskTypeLabel(detail.run.taskType) || "Agent Run";
 }
 
 function paginationWindow(page: number, totalPages: number): Array<number | "ellipsis"> {

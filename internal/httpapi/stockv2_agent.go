@@ -81,6 +81,19 @@ func (s *Server) handleStockV2UpdateAgentProvider(w http.ResponseWriter, r *http
 	s.writeJSON(w, result)
 }
 
+func (s *Server) handleStockV2DeleteAgentProvider(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "provider ID is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.stockV2.DeleteAgentProviderProfile(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), stockV2AgentHTTPStatus(err))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleStockV2ListAgentProviderModels(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -460,7 +473,9 @@ func stockV2AgentHTTPStatus(err error) int {
 		errors.Is(err, stockv2.ErrAgentDecisionLedgerNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, stockv2.ErrAgentModelNotAvailable),
-		errors.Is(err, stockv2.ErrAgentExecutorUnavailable):
+		errors.Is(err, stockv2.ErrAgentExecutorUnavailable),
+		errors.Is(err, stockv2.ErrAgentTaskNotConfigurable),
+		errors.Is(err, stockv2.ErrAgentProviderProtected):
 		return http.StatusConflict
 	case errors.Is(err, stockv2.ErrInvalidAgentProviderType),
 		errors.Is(err, stockv2.ErrInvalidAgentProviderConfigState),

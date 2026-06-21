@@ -575,8 +575,16 @@ INSERT OR IGNORE INTO stockv2_agent_provider_profiles
     (id, provider_type, name, display_name, config_state, auth_state, availability, metadata_json, created_at, updated_at)
 VALUES
     ('agent-provider-codex-cli-default', 'codex_cli', 'default', 'Codex CLI 默认 Provider', 'configured', 'unknown', 'unknown', '{"managed":"system","source":"codex_cli_default"}', datetime('now'), datetime('now'));
--- operation_review 默认 task profile(模型绑定留空,用户后续绑定)。幂等种入。
-INSERT OR IGNORE INTO stockv2_agent_task_profiles (id, task_type, primary_model_id, fallback_model_id, max_budget, created_at, updated_at) VALUES ('agent-task-operation-review', 'operation_review', '', '', 0, datetime('now'), datetime('now'));
+-- Agent task profiles 幂等种入。当前只有 operation_review 可配置/执行;
+-- 其余 task 先作为未来能力展示,后端 service 会拒绝绑定和执行。
+INSERT OR IGNORE INTO stockv2_agent_task_profiles (id, task_type, primary_model_id, fallback_model_id, max_budget, created_at, updated_at) VALUES
+    ('agent-task-operation-review', 'operation_review', '', '', 0, datetime('now'), datetime('now')),
+    ('agent-task-strategy-generation', 'strategy_generation', '', '', 0, datetime('now'), datetime('now')),
+    ('agent-task-opportunity-discovery', 'opportunity_discovery', '', '', 0, datetime('now'), datetime('now')),
+    ('agent-task-news-event-review', 'news_event_review', '', '', 0, datetime('now'), datetime('now')),
+    ('agent-task-portfolio-risk-review', 'portfolio_risk_review', '', '', 0, datetime('now'), datetime('now')),
+    ('agent-task-stock-profile-summary', 'stock_profile_summary', '', '', 0, datetime('now'), datetime('now')),
+    ('agent-task-bull-bear-debate', 'bull_bear_debate', '', '', 0, datetime('now'), datetime('now'));
 `
 
 // init 初始化 V2 表结构。如果检测到旧 schema（例如时间列是 TEXT 类型），

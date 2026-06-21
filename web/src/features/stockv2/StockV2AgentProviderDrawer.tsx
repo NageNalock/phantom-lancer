@@ -78,7 +78,7 @@ export function StockV2AgentProviderDrawer({
 
   return (
     <Drawer
-      title={isEdit ? "编辑 Provider" : "新建 Provider"}
+      title={isEdit ? "配置 Provider" : "新建 Provider"}
       subtitle={isEdit ? `ID: ${provider?.id}` : "Agent 调用的供应商配置"}
       onClose={onClose}
       width={480}

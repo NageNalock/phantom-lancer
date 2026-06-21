@@ -2543,9 +2543,18 @@ export interface StockV2AgentModelProfile {
   updatedAt?: string;
 }
 
+export type StockV2AgentTaskType =
+  | "operation_review"
+  | "strategy_generation"
+  | "opportunity_discovery"
+  | "news_event_review"
+  | "portfolio_risk_review"
+  | "stock_profile_summary"
+  | "bull_bear_debate";
+
 export interface StockV2AgentTaskProfile {
   id: string;
-  taskType: string;
+  taskType: StockV2AgentTaskType | string;
   primaryModelId?: string;
   fallbackModelId?: string;
   maxBudget?: number;

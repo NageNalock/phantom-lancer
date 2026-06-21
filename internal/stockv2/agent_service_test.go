@@ -89,6 +89,32 @@ func TestAgentProviderAndModelProfileCRUD(t *testing.T) {
 		t.Fatalf("costLevel = %q, want %q", updatedModel.CostLevel, highCost)
 	}
 
+	modelID := model.ID
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeOperationReview, RequestUpdateAgentTaskProfile{
+		PrimaryModelID: &modelID,
+	}); err != nil {
+		t.Fatalf("bind model before provider delete: %v", err)
+	}
+	if err := svc.DeleteAgentProviderProfile(ctx, agentProviderCodexCLIDefaultID); !errors.Is(err, ErrAgentProviderProtected) {
+		t.Fatalf("delete default provider error = %v, want ErrAgentProviderProtected", err)
+	}
+	if err := svc.DeleteAgentProviderProfile(ctx, provider.ID); err != nil {
+		t.Fatalf("delete provider: %v", err)
+	}
+	if _, err := svc.GetAgentProviderProfile(ctx, provider.ID); !errors.Is(err, ErrAgentProviderNotFound) {
+		t.Fatalf("get deleted provider error = %v, want ErrAgentProviderNotFound", err)
+	}
+	if _, err := svc.GetAgentModelProfile(ctx, model.ID); !errors.Is(err, ErrAgentModelNotFound) {
+		t.Fatalf("get deleted provider model error = %v, want ErrAgentModelNotFound", err)
+	}
+	profile, err := svc.GetAgentTaskProfileByType(ctx, AgentTaskTypeOperationReview)
+	if err != nil {
+		t.Fatalf("get task profile after provider delete: %v", err)
+	}
+	if profile.PrimaryModelID != "" {
+		t.Fatalf("primary model id after provider delete = %q, want empty", profile.PrimaryModelID)
+	}
+
 	// model 绑定到不存在的 provider 应失败。
 	if _, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
 		ProviderID: "no-such-provider",
@@ -378,6 +404,44 @@ func TestResolveAgentTaskOperationReviewDefaultModel(t *testing.T) {
 	}
 	if len(ledger.StructuredOutput) != 0 {
 		t.Fatalf("structuredOutput = %v, want empty (no fake output)", ledger.StructuredOutput)
+	}
+}
+
+func TestAgentTaskProfilesSeedFutureTasksReadOnly(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	profiles, err := svc.ListAgentTaskProfiles(ctx, AgentTaskProfileListFilter{Limit: 20})
+	if err != nil {
+		t.Fatalf("list task profiles: %v", err)
+	}
+	seen := make(map[string]bool)
+	for _, profile := range profiles {
+		seen[profile.TaskType] = true
+	}
+	for _, taskType := range []string{
+		AgentTaskTypeOperationReview,
+		AgentTaskTypeStrategyGeneration,
+		AgentTaskTypeOpportunityDiscovery,
+		AgentTaskTypeNewsEventReview,
+		AgentTaskTypePortfolioRiskReview,
+		AgentTaskTypeStockProfileSummary,
+		AgentTaskTypeBullBearDebate,
+	} {
+		if !seen[taskType] {
+			t.Fatalf("seeded task %q not found in %#v", taskType, seen)
+		}
+		if _, err := svc.GetAgentTaskProfileByType(ctx, taskType); err != nil {
+			t.Fatalf("get seeded task %q: %v", taskType, err)
+		}
+	}
+
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeStrategyGeneration, RequestUpdateAgentTaskProfile{}); !errors.Is(err, ErrAgentTaskNotConfigurable) {
+		t.Fatalf("update future task error = %v, want ErrAgentTaskNotConfigurable", err)
+	}
+	if _, err := svc.ResolveAgentTask(ctx, AgentTaskTypeStrategyGeneration, "manual", "x", "tester"); !errors.Is(err, ErrAgentTaskNotConfigurable) {
+		t.Fatalf("resolve future task error = %v, want ErrAgentTaskNotConfigurable", err)
 	}
 }
 

@@ -102,6 +102,7 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/stockv2/agent/providers", s.handleStockV2CreateAgentProvider)
 	mux.HandleFunc("GET /api/stockv2/agent/providers/{id}", s.handleStockV2GetAgentProvider)
 	mux.HandleFunc("PUT /api/stockv2/agent/providers/{id}", s.handleStockV2UpdateAgentProvider)
+	mux.HandleFunc("DELETE /api/stockv2/agent/providers/{id}", s.handleStockV2DeleteAgentProvider)
 	mux.HandleFunc("GET /api/stockv2/agent/providers/{id}/models", s.handleStockV2ListAgentProviderModels)
 	mux.HandleFunc("GET /api/stockv2/agent/models", s.handleStockV2ListAgentModels)
 	mux.HandleFunc("POST /api/stockv2/agent/models", s.handleStockV2CreateAgentModel)

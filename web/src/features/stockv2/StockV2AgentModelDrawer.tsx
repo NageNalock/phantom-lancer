@@ -135,7 +135,7 @@ export function StockV2AgentModelDrawer({
 
   return (
     <Drawer
-      title={isEdit ? "编辑模型" : "新建模型"}
+      title={isEdit ? "配置模型" : "新建模型"}
       subtitle={isEdit ? `ID: ${model?.id}` : "具体模型实例，绑定到 Provider"}
       onClose={onClose}
       width={480}

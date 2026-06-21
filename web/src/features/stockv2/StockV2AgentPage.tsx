@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Bug, Robot, Pencil, Plus, Trash } from "@phosphor-icons/react";
 import type { AppActions } from "../../app/App";
 import type {
@@ -8,11 +8,14 @@ import type {
   StockV2AgentProviderProfile,
   StockV2AgentRunCLIDebugRequest,
   StockV2AgentTaskProfile,
+  StockV2AgentTaskType,
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, Drawer, Field, Notice, Pill, useDangerConfirm } from "../../components/ui";
 import {
   formatDate,
+  stockV2AgentTaskConfigurable,
+  stockV2AgentTaskTypeLabel,
   stockV2AgentProviderTypeLabel,
 } from "../../domain/labels";
 import { StockV2AgentRunDetailPanel } from "./StockV2AgentExecutionLedger";
@@ -37,22 +40,34 @@ type TaskProfileDrawerState =
   | { type: "closed" }
   | { type: "edit"; profile: StockV2AgentTaskProfile };
 
+type AgentTaskDefinition = {
+  taskType: StockV2AgentTaskType;
+  description: string;
+};
+
+const AGENT_TASKS: AgentTaskDefinition[] = [
+  { taskType: "operation_review", description: "监控命中后的操作复核与建议生成。" },
+  { taskType: "strategy_generation", description: "基于股票/组合上下文生成策略草案。" },
+  { taskType: "opportunity_discovery", description: "从数据面与信息面筛选机会候选。" },
+  { taskType: "news_event_review", description: "消息面事件关联股票并判断影响。" },
+  { taskType: "portfolio_risk_review", description: "审查组合风险、暴露与约束冲突。" },
+  { taskType: "stock_profile_summary", description: "生成股票画像与长期跟踪摘要。" },
+  { taskType: "bull_bear_debate", description: "多空视角辩论与证据交叉检查。" },
+];
+
 export function StockV2AgentPage({ actions }: { actions: AppActions }) {
   const [providerDrawer, setProviderDrawer] = useState<ProviderDrawerState>({ type: "closed" });
   const [modelDrawer, setModelDrawer] = useState<ModelDrawerState>({ type: "closed" });
   const [taskProfileDrawer, setTaskProfileDrawer] = useState<TaskProfileDrawerState>({ type: "closed" });
   const [providers, setProviders] = useState<StockV2AgentProviderProfile[] | null>(null);
   const [models, setModels] = useState<StockV2AgentModelProfile[] | null>(null);
-  const [taskProfile, setTaskProfile] = useState<StockV2AgentTaskProfile | null>(null);
+  const [taskProfiles, setTaskProfiles] = useState<StockV2AgentTaskProfile[] | null>(null);
   const [pLoading, setPLoading] = useState(false);
   const [mLoading, setMLoading] = useState(false);
   const [tLoading, setTLoading] = useState(false);
   const [pError, setPError] = useState<string | null>(null);
   const [mError, setMError] = useState<string | null>(null);
   const [tError, setTError] = useState<string | null>(null);
-  const [pStarted, setPStarted] = useState(false);
-  const [mStarted, setMStarted] = useState(false);
-  const [tStarted, setTStarted] = useState(false);
   const [toggleBusy, setToggleBusy] = useState<string | null>(null);
   const [cliDebugOpen, setCliDebugOpen] = useState(false);
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
@@ -95,52 +110,39 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
     }
   }
 
-  async function loadTaskProfile() {
+  async function loadTaskProfiles(): Promise<StockV2AgentTaskProfile[]> {
     setTLoading(true);
     setTError(null);
     try {
-      const res = await actions.api<StockV2AgentTaskProfile>(
-        "/api/stockv2/agent/task-profiles/operation_review",
+      const res = await actions.api<StockV2AgentListResponse<StockV2AgentTaskProfile>>(
+        "/api/stockv2/agent/task-profiles?limit=20",
       );
-      setTaskProfile(res);
+      const nextItems = res.items || [];
+      setTaskProfiles(nextItems);
+      return nextItems;
     } catch (err) {
       setTError(friendlyError(err));
-      setTaskProfile(null);
+      setTaskProfiles([]);
+      return [];
     } finally {
       setTLoading(false);
     }
   }
 
-  function openProviderSection() {
-    if (!pStarted) {
-      setPStarted(true);
-      void loadProviders();
-    }
-  }
-  function openModelSection() {
-    if (!mStarted) {
-      setMStarted(true);
-      void loadModels();
-    }
-  }
-  function openTaskSection() {
-    if (!tStarted) {
-      setTStarted(true);
-      void loadTaskProfile();
-    }
-  }
+  useEffect(() => {
+    void loadProviders();
+    void loadModels();
+    void loadTaskProfiles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function ensureProvidersLoaded() {
-    if (!pStarted) {
-      setPStarted(true);
-    }
     if (!providers) {
       await loadProviders();
     }
   }
 
   async function openCreateModelDrawer() {
-    openModelSection();
     await ensureProvidersLoaded();
     setModelDrawer({ type: "create" });
   }
@@ -151,11 +153,17 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
   }
 
   async function openCliDebugDrawer() {
-    openModelSection();
     if (!models) {
       await loadModels();
     }
     setCliDebugOpen(true);
+  }
+
+  async function openTaskProfileDrawer(profile: StockV2AgentTaskProfile) {
+    if (!models) {
+      await loadModels();
+    }
+    setTaskProfileDrawer({ type: "edit", profile });
   }
 
   async function toggleModelEnabled(id: string, enabled: boolean) {
@@ -177,7 +185,7 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
   async function deleteProvider(id: string, name: string) {
     const ok = await confirmDanger({
       title: "删除 Provider",
-      body: `确定删除 "${name}" 吗？关联的模型配置不会自动清理。`,
+      body: `确定删除 "${name}" 吗？关联模型会同步删除，任务绑定会被清空。`,
       objectName: name,
       confirmLabel: "删除",
     });
@@ -186,6 +194,8 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
       await actions.api(`/api/stockv2/agent/providers/${id}`, { method: "DELETE" });
       actions.setToast("已删除", "good");
       await loadProviders();
+      await loadModels();
+      await loadTaskProfiles();
     } catch (err) {
       actions.setToast(friendlyError(err), "danger");
     }
@@ -213,16 +223,14 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
         title="供应商 (Provider)"
         subtitle="Codex CLI 默认入口与外部 provider 可用性"
       >
-        <div onClick={openProviderSection}>
-          <AgentProviderSection
-            loading={!pStarted || pLoading}
-            error={pError}
-            items={providers}
-            onRetry={loadProviders}
-            onEdit={(p) => setProviderDrawer({ type: "edit", provider: p })}
-            onDelete={(p) => void deleteProvider(p.id, p.name)}
-          />
-        </div>
+        <AgentProviderSection
+          loading={pLoading || providers === null}
+          error={pError}
+          items={providers}
+          onRetry={loadProviders}
+          onEdit={(p) => setProviderDrawer({ type: "edit", provider: p })}
+          onDelete={(p) => void deleteProvider(p.id, p.name)}
+        />
         <div className="mt-2 flex justify-end">
           <Button onClick={() => setProviderDrawer({ type: "create" })}>
             <Plus size={14} className="mr-1" /> 新建 Provider
@@ -231,17 +239,15 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
       </CollapsibleSection>
 
       <CollapsibleSection title="模型 (Model)" subtitle="按 provider 绑定的具体模型">
-        <div onClick={openModelSection}>
-          <AgentModelSection
-            loading={!mStarted || mLoading}
-            error={mError}
-            items={models}
-            onRetry={loadModels}
-            toggleBusy={toggleBusy}
-            onToggle={toggleModelEnabled}
-            onEdit={(m) => void openEditModelDrawer(m)}
-          />
-        </div>
+        <AgentModelSection
+          loading={mLoading || models === null}
+          error={mError}
+          items={models}
+          onRetry={loadModels}
+          toggleBusy={toggleBusy}
+          onToggle={toggleModelEnabled}
+          onEdit={(m) => void openEditModelDrawer(m)}
+        />
         <div className="mt-2 flex justify-end">
           <Button
             onClick={() => void openCreateModelDrawer()}
@@ -252,27 +258,16 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
       </CollapsibleSection>
 
       <CollapsibleSection
-        title="任务绑定 · operation_review"
-        subtitle="任务到主备模型的绑定"
+        title="任务绑定"
+        subtitle="已开放任务可绑定主备模型,未开放任务先置灰展示"
       >
-        <div onClick={openTaskSection}>
-          <AgentTaskProfileSection
-            loading={!tStarted || tLoading}
-            error={tError}
-            profile={taskProfile}
-            onRetry={loadTaskProfile}
-          />
-        </div>
-        <div className="mt-2 flex justify-end">
-          <Button
-            disabled={!taskProfile}
-            onClick={() => {
-              if (taskProfile) setTaskProfileDrawer({ type: "edit", profile: taskProfile });
-            }}
-          >
-            <Pencil size={14} className="mr-1" /> 编辑绑定
-          </Button>
-        </div>
+        <AgentTaskProfileSection
+          loading={tLoading || taskProfiles === null}
+          error={tError}
+          profiles={taskProfiles}
+          onRetry={loadTaskProfiles}
+          onEdit={(profile) => void openTaskProfileDrawer(profile)}
+        />
       </CollapsibleSection>
 
       {providerDrawer.type !== "closed" ? (
@@ -298,10 +293,11 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
         <StockV2AgentTaskProfileDrawer
           profile={taskProfileDrawer.profile}
           models={models ?? []}
-          taskType="operation_review"
+          taskType={taskProfileDrawer.profile.taskType}
+          taskLabel={stockV2AgentTaskTypeLabel(taskProfileDrawer.profile.taskType)}
           actions={actions}
           onClose={() => setTaskProfileDrawer({ type: "closed" })}
-          onSaved={() => void loadTaskProfile()}
+          onSaved={() => void loadTaskProfiles()}
         />
       ) : null}
 
@@ -376,7 +372,7 @@ function AgentProviderSection({
               ) : (
                 <>
                   <Button onClick={() => onEdit(p)}>
-                    <Pencil size={12} className="mr-1" /> 编辑
+                    <Pencil size={12} className="mr-1" /> 配置
                   </Button>
                   <Button tone="danger" onClick={() => onDelete(p)}>
                     <Trash size={12} className="mr-1" /> 删除
@@ -451,7 +447,7 @@ function AgentModelSection({
           </div>
           <div className="mt-1.5 flex justify-end">
             <Button onClick={() => onEdit(m)}>
-              <Pencil size={12} className="mr-1" /> 编辑
+              <Pencil size={12} className="mr-1" /> 配置
             </Button>
           </div>
         </div>
@@ -463,13 +459,15 @@ function AgentModelSection({
 function AgentTaskProfileSection({
   loading,
   error,
-  profile,
+  profiles,
   onRetry,
+  onEdit,
 }: {
   loading: boolean;
   error: string | null;
-  profile: StockV2AgentTaskProfile | null;
-  onRetry: () => void;
+  profiles: StockV2AgentTaskProfile[] | null;
+  onRetry: () => Promise<StockV2AgentTaskProfile[]>;
+  onEdit: (profile: StockV2AgentTaskProfile) => void;
 }) {
   if (loading) return <p className="text-xs text-[var(--muted)]">加载中…</p>;
   if (error) {
@@ -480,15 +478,46 @@ function AgentTaskProfileSection({
       </div>
     );
   }
-  if (!profile) return <p className="text-xs text-[var(--muted)]">暂无任务配置。</p>;
+  if (!profiles || profiles.length === 0) return <p className="text-xs text-[var(--muted)]">暂无任务配置。</p>;
+  const profileByType = new Map(profiles.map((item) => [item.taskType, item]));
   return (
-    <div className="grid gap-1.5 rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
-      <div className="flex flex-wrap items-center gap-2">
-        <strong className="text-sm">operation_review</strong>
-        {profile.maxBudget ? <Pill tone="neutral">预算 {profile.maxBudget}</Pill> : null}
-      </div>
-      <Row label="主模型" value={profile.primaryModelId ? profile.primaryModelId.slice(0, 12) : "(未绑定)"} />
-      <Row label="备模型" value={profile.fallbackModelId ? profile.fallbackModelId.slice(0, 12) : "(未绑定)"} />
+    <div className="grid gap-2">
+      {AGENT_TASKS.map((task) => {
+        const profile = profileByType.get(task.taskType);
+        const configurable = stockV2AgentTaskConfigurable(task.taskType);
+        return (
+          <div
+            key={task.taskType}
+            className={`rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs ${
+              configurable ? "" : "opacity-60"
+            }`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <strong className="text-sm">{stockV2AgentTaskTypeLabel(task.taskType)}</strong>
+                  <Pill tone={configurable ? "good" : "neutral"}>{configurable ? "已开放" : "未开放"}</Pill>
+                  {profile?.maxBudget ? <Pill tone="neutral">预算 {profile.maxBudget}</Pill> : null}
+                </div>
+                <p className="mt-1 text-[var(--muted)]">{task.description}</p>
+              </div>
+              {configurable && profile ? (
+                <Button onClick={() => onEdit(profile)}>
+                  <Pencil size={12} className="mr-1" /> 编辑绑定
+                </Button>
+              ) : null}
+            </div>
+            {configurable ? (
+              <div className="mt-2 grid gap-1">
+                <Row label="主模型" value={profile?.primaryModelId ? profile.primaryModelId.slice(0, 12) : "(未绑定)"} />
+                <Row label="备模型" value={profile?.fallbackModelId ? profile.fallbackModelId.slice(0, 12) : "(未绑定)"} />
+              </div>
+            ) : (
+              <p className="mt-2 text-[var(--muted)]">暂不允许选择模型,后续开放时再配置绑定。</p>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -504,7 +533,7 @@ function AgentCLIDebugDrawer({
   onClose: () => void;
   onReloadModels: () => Promise<StockV2AgentModelProfile[]>;
 }) {
-  const usableModels = models.filter((model) => model.enabled);
+  const usableModels = models.filter((model) => model.enabled && model.status === "available");
   const [modelId, setModelId] = useState(usableModels[0]?.id || models[0]?.id || "");
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<StockV2AgentExecutionDetail | null>(null);
@@ -533,7 +562,7 @@ function AgentCLIDebugDrawer({
 
   async function reloadModels() {
     const nextItems = await onReloadModels();
-    const first = nextItems.find((model) => model.enabled)?.id || nextItems[0]?.id || "";
+    const first = nextItems.find((model) => model.enabled && model.status === "available")?.id || nextItems[0]?.id || "";
     setModelId((current) => current || first);
   }
 
@@ -545,7 +574,7 @@ function AgentCLIDebugDrawer({
             {models.length === 0 ? <option value="">暂无模型</option> : null}
             {models.map((model) => (
               <option key={model.id} value={model.id}>
-                {model.displayName || model.modelName}{model.enabled ? "" : " (未启用)"}
+                {model.displayName || model.modelName}{model.enabled && model.status === "available" ? "" : " (不可用于任务)"}
               </option>
             ))}
           </select>

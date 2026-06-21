@@ -12,6 +12,7 @@ export function StockV2AgentTaskProfileDrawer({
   profile,
   models,
   taskType,
+  taskLabel,
   onClose,
   onSaved,
   actions,
@@ -19,6 +20,7 @@ export function StockV2AgentTaskProfileDrawer({
   profile: StockV2AgentTaskProfile | null;
   models: StockV2AgentModelProfile[];
   taskType: string;
+  taskLabel: string;
   onClose: () => void;
   onSaved?: () => void;
   actions: AppActions;
@@ -41,15 +43,16 @@ export function StockV2AgentTaskProfileDrawer({
     }
   }, [profile]);
 
-  const enabledModels = models.filter((m) => m.enabled);
+  const enabledModels = models.filter((m) => m.enabled && m.status === "available");
 
   async function handleSubmit() {
     setSubmitting(true);
     setError(null);
     try {
+      const usableModelIds = new Set(enabledModels.map((model) => model.id));
       const body: StockV2AgentUpdateTaskProfileRequest = {
-        primaryModelId: form.primaryModelId || undefined,
-        fallbackModelId: form.fallbackModelId || undefined,
+        primaryModelId: form.primaryModelId && usableModelIds.has(form.primaryModelId) ? form.primaryModelId : "",
+        fallbackModelId: form.fallbackModelId && usableModelIds.has(form.fallbackModelId) ? form.fallbackModelId : "",
         maxBudget: form.maxBudget,
       };
       await actions.api(`/api/stockv2/agent/task-profiles/${taskType}`, { method: "PUT", body });
@@ -66,13 +69,13 @@ export function StockV2AgentTaskProfileDrawer({
   return (
     <Drawer
       title="编辑任务配置"
-      subtitle={`taskType: ${taskType}`}
+      subtitle={taskLabel}
       onClose={onClose}
       width={440}
       footer={
         <div className="flex justify-end gap-2">
           <Button onClick={onClose}>取消</Button>
-          <Button tone="primary" disabled={submitting} onClick={() => void handleSubmit()}>
+          <Button tone="primary" disabled={submitting || enabledModels.length === 0} onClick={() => void handleSubmit()}>
             {submitting ? "保存中…" : "保存"}
           </Button>
         </div>
@@ -80,6 +83,9 @@ export function StockV2AgentTaskProfileDrawer({
     >
       <div className="grid gap-3 text-sm">
         {error ? <Notice tone="danger">{error}</Notice> : null}
+        {enabledModels.length === 0 ? (
+          <Notice tone="warn">暂无可用于任务绑定的模型。请先创建模型,并确保它已启用且状态为可用。</Notice>
+        ) : null}
 
         <Field label="主模型" help="优先调用的模型，必须已启用">
           <select

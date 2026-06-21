@@ -152,6 +152,17 @@ func (s *Service) UpdateAgentProviderProfile(ctx context.Context, id string, req
 	return sanitizeAgentProviderProfile(updated), nil
 }
 
+func (s *Service) DeleteAgentProviderProfile(ctx context.Context, id string) error {
+	profile, err := s.store.GetAgentProviderProfile(ctx, id)
+	if err != nil {
+		return err
+	}
+	if isDefaultCodexCLIProvider(profile) {
+		return ErrAgentProviderProtected
+	}
+	return s.store.DeleteAgentProviderProfile(ctx, id)
+}
+
 // ============================ model profiles ============================
 
 func (s *Service) ListAgentModelProfiles(ctx context.Context, filter AgentModelProfileListFilter) ([]AgentModelProfile, error) {
@@ -487,7 +498,7 @@ func (s *Service) GetAgentTaskProfile(ctx context.Context, id string) (AgentTask
 }
 
 func (s *Service) GetAgentTaskProfileByType(ctx context.Context, taskType string) (AgentTaskProfile, error) {
-	if !validAgentTaskType(taskType) {
+	if !knownAgentTaskType(taskType) {
 		return AgentTaskProfile{}, ErrInvalidAgentTaskType
 	}
 	profile, err := s.store.GetAgentTaskProfileByType(ctx, taskType)
@@ -498,8 +509,11 @@ func (s *Service) GetAgentTaskProfileByType(ctx context.Context, taskType string
 }
 
 func (s *Service) UpdateAgentTaskProfile(ctx context.Context, taskType string, req RequestUpdateAgentTaskProfile) (AgentTaskProfile, error) {
-	if !validAgentTaskType(taskType) {
+	if !knownAgentTaskType(taskType) {
 		return AgentTaskProfile{}, ErrInvalidAgentTaskType
+	}
+	if !executableAgentTaskType(taskType) {
+		return AgentTaskProfile{}, ErrAgentTaskNotConfigurable
 	}
 	profile, err := s.store.GetAgentTaskProfileByType(ctx, taskType)
 	if err != nil {
@@ -634,11 +648,15 @@ func (s *Service) agentExecutionDetailForRun(ctx context.Context, run AgentRun) 
 	return detail, nil
 }
 
-// CreateAgentRunRecord 创建 AgentRun 及其决策账本(事务原子),不真实调用模型,
-// 不写假 output。敏感字段经 safelog 脱敏裁剪后落库,RedactionSummary 记录脱敏情况。
+// CreateAgentRunRecord 创建 AgentRun 及其决策账本(事务原子)。这里只创建 ready
+// 记录,真实 executor 的 stdout/MCP 结果由后续 finalize 写回。敏感字段经
+// safelog 脱敏裁剪后落库,RedactionSummary 记录脱敏情况。
 func (s *Service) CreateAgentRunRecord(ctx context.Context, params AgentRunRecordParams) (AgentRun, AgentDecisionLedger, error) {
-	if !validAgentTaskType(params.TaskType) {
+	if !knownAgentTaskType(params.TaskType) {
 		return AgentRun{}, AgentDecisionLedger{}, ErrInvalidAgentTaskType
+	}
+	if !executableAgentTaskType(params.TaskType) {
+		return AgentRun{}, AgentDecisionLedger{}, ErrAgentTaskNotConfigurable
 	}
 	if _, err := s.store.GetAgentProviderProfile(ctx, params.ProviderID); err != nil {
 		return AgentRun{}, AgentDecisionLedger{}, err
@@ -658,7 +676,7 @@ func (s *Service) CreateAgentRunRecord(ctx context.Context, params AgentRunRecor
 		"inputArtifactSummaryRedacted": agentRedacted(params.InputArtifactSummary),
 	}
 
-	// 本轮不写假结论:Output 空串、StructuredOutput 空、CostEstimate 空。
+	// ready 阶段不写假结论:Output 空串、StructuredOutput 空、CostEstimate 空。
 	ledger := AgentDecisionLedger{
 		ProviderID:           params.ProviderID,
 		ModelID:              params.ModelID,
@@ -693,10 +711,12 @@ func agentRedacted(value string) bool {
 // ============================ resolve ============================
 
 // ResolveAgentTask 解析任务到模型:加载 task profile → 解析 primary/fallback model → 建 run(+ledger)。
-// 本轮不真实调用模型,不写假 output。
 func (s *Service) ResolveAgentTask(ctx context.Context, taskType, triggerObjectType, triggerObjectID, requestedBy string) (AgentTaskResolution, error) {
-	if !validAgentTaskType(taskType) {
+	if !knownAgentTaskType(taskType) {
 		return AgentTaskResolution{}, ErrInvalidAgentTaskType
+	}
+	if !executableAgentTaskType(taskType) {
+		return AgentTaskResolution{}, ErrAgentTaskNotConfigurable
 	}
 	taskProfile, err := s.store.GetAgentTaskProfileByType(ctx, taskType)
 	if err != nil {
@@ -725,7 +745,7 @@ func (s *Service) ResolveAgentTask(ctx context.Context, taskType, triggerObjectT
 		TriggerObjectType: triggerObjectType,
 		TriggerObjectID:   triggerObjectID,
 		RequestedBy:       requestedBy,
-		InputSummary:      fmt.Sprintf("task_type=%s trigger=%s:%s (no model call this round)", taskType, triggerObjectType, triggerObjectID),
+		InputSummary:      fmt.Sprintf("task_type=%s trigger=%s:%s", taskType, triggerObjectType, triggerObjectID),
 	})
 	if err != nil {
 		return resolution, err

@@ -6,10 +6,10 @@ import (
 )
 
 // Agent 治理层:股票 V2 自己的 Provider/Model 管理、任务绑定、
-// 运行记录与决策留痕。不耦合 Codex 页面。本轮不真实调用外部模型,
-// 不写假 AI 结论;AgentRun 停在 ready,Output 留空,等待后续轮次接入
-// 真实 executor。脱敏单点在 service 层(经 internal/safelog),store
-// 只持久化,HTTP handler 不直接构造敏感字段。
+// 运行记录与决策留痕。不耦合 Codex 页面。已开放任务会通过 Codex CLI
+// executor 真实执行;暂未开放的任务只展示为未来能力,不可绑定/执行。
+// 脱敏单点在 service 层(经 internal/safelog),store 只持久化,
+// HTTP handler 不直接构造敏感字段。
 
 // ===== Provider 类型 =====
 
@@ -56,13 +56,20 @@ const (
 	AgentModelCostLevelHigh   = "high"
 )
 
-// Agent 任务类型。本轮只内置 operation_review;其余 task type 校验拒绝。
+// Agent 任务类型。常量值是 API/DB 稳定 key;前端展示中文名称。
+// 目前只有 operation_review 可配置并可执行,其余任务只作为未来能力展示。
 const (
-	AgentTaskTypeOperationReview = "operation_review"
+	AgentTaskTypeOperationReview      = "operation_review"
+	AgentTaskTypeStrategyGeneration   = "strategy_generation"
+	AgentTaskTypeOpportunityDiscovery = "opportunity_discovery"
+	AgentTaskTypeNewsEventReview      = "news_event_review"
+	AgentTaskTypePortfolioRiskReview  = "portfolio_risk_review"
+	AgentTaskTypeStockProfileSummary  = "stock_profile_summary"
+	AgentTaskTypeBullBearDebate       = "bull_bear_debate"
 )
 
-// AgentRun 状态机。本轮 CreateAgentRunRecord 只产出 ready;
-// running/completed/failed 为后续真实调用轮次预留,本轮不推进。
+// AgentRun 状态机。CreateAgentRunRecord 先产出 ready;有 executor 时
+// 后续推进 running/completed/failed。
 const (
 	AgentRunStatusPending   = "pending"
 	AgentRunStatusReady     = "ready"
@@ -76,11 +83,17 @@ const (
 	AgentResolutionStatusAuthorized = "authorized"
 )
 
-// operation_review 默认 task profile 的固定 seed id。
-// schema 内 INSERT OR IGNORE 幂等种入,模型绑定留空,由用户后续绑定。
+// 默认 task profile 的固定 seed id。schema 内 INSERT OR IGNORE 幂等种入。
+// 当前仅 operation_review 允许用户绑定模型。
 const (
-	agentProviderCodexCLIDefaultID = "agent-provider-codex-cli-default"
-	agentTaskOperationReviewSeedID = "agent-task-operation-review"
+	agentProviderCodexCLIDefaultID      = "agent-provider-codex-cli-default"
+	agentTaskOperationReviewSeedID      = "agent-task-operation-review"
+	agentTaskStrategyGenerationSeedID   = "agent-task-strategy-generation"
+	agentTaskOpportunityDiscoverySeedID = "agent-task-opportunity-discovery"
+	agentTaskNewsEventReviewSeedID      = "agent-task-news-event-review"
+	agentTaskPortfolioRiskReviewSeedID  = "agent-task-portfolio-risk-review"
+	agentTaskStockProfileSummarySeedID  = "agent-task-stock-profile-summary"
+	agentTaskBullBearDebateSeedID       = "agent-task-bull-bear-debate"
 )
 
 var (
@@ -96,12 +109,14 @@ var (
 	ErrInvalidAgentProviderAuthState    = errors.New("invalid agent provider auth state")
 	ErrInvalidAgentProviderAvailability = errors.New("invalid agent provider availability")
 	ErrInvalidAgentProviderName         = errors.New("agent provider name is required")
+	ErrAgentProviderProtected           = errors.New("agent provider is system managed")
 	ErrAgentProviderAPIKeyRequired      = errors.New("agent provider api key is required")
 	ErrAgentProviderBaseURLRequired     = errors.New("agent provider base url is required")
 	ErrInvalidAgentModelStatus          = errors.New("invalid agent model status")
 	ErrInvalidAgentModelCostLevel       = errors.New("invalid agent model cost level")
 	ErrInvalidAgentModelName            = errors.New("agent model name is required")
 	ErrInvalidAgentTaskType             = errors.New("invalid agent task type")
+	ErrAgentTaskNotConfigurable         = errors.New("agent task is not configurable yet")
 )
 
 // AgentProviderProfile 供应商层(openai/codex_cli/local)。
@@ -138,7 +153,7 @@ type AgentModelProfile struct {
 	UpdatedAt    time.Time      `json:"updatedAt"`
 }
 
-// AgentTaskProfile 股票任务到模型的绑定。operation_review 由 schema 默认种入。
+// AgentTaskProfile 股票任务到模型的绑定。任务 profile 由 schema 默认种入。
 type AgentTaskProfile struct {
 	ID              string    `json:"id"`
 	TaskType        string    `json:"taskType"`
@@ -149,8 +164,8 @@ type AgentTaskProfile struct {
 	UpdatedAt       time.Time `json:"updatedAt"`
 }
 
-// AgentRun 一次 Agent 任务运行记录。
-// 本轮不真实调用模型,Status 停在 ready,Output 留空(不写假结论)。
+// AgentRun 一次 Agent 任务运行记录。创建后先进入 ready;真实 executor
+// 启动后推进 running/completed/failed。Output 只保存真实执行输出摘要。
 type AgentRun struct {
 	ID                string         `json:"id"`
 	TaskType          string         `json:"taskType"`
@@ -159,9 +174,9 @@ type AgentRun struct {
 	TriggerObjectType string         `json:"triggerObjectType"`
 	TriggerObjectID   string         `json:"triggerObjectId"`
 	Status            string         `json:"status"`
-	CostEstimate      map[string]any `json:"costEstimate,omitempty"` // 本轮空 {}
+	CostEstimate      map[string]any `json:"costEstimate,omitempty"`
 	ErrorMessage      string         `json:"errorMessage,omitempty"` // 已脱敏
-	Output            string         `json:"output,omitempty"`       // 本轮空串(不写假结论)
+	Output            string         `json:"output,omitempty"`
 	DecisionLedgerID  string         `json:"decisionLedgerId,omitempty"`
 	StartedAt         time.Time      `json:"startedAt,omitempty"`
 	FinishedAt        time.Time      `json:"finishedAt,omitempty"`
@@ -178,11 +193,11 @@ type AgentDecisionLedger struct {
 	TaskType              string         `json:"taskType"`
 	TriggerObjectType     string         `json:"triggerObjectType"`
 	TriggerObjectID       string         `json:"triggerObjectId"`
-	InputSummary          string         `json:"inputSummary,omitempty"`          // 已脱敏
-	Prompt                string         `json:"prompt,omitempty"`                // 已脱敏
-	InputArtifactSummary  string         `json:"inputArtifactSummary,omitempty"`  // 已脱敏
-	OutputArtifactSummary string         `json:"outputArtifactSummary,omitempty"` // 本轮空
-	StructuredOutput      map[string]any `json:"structuredOutput,omitempty"`      // 本轮空 {}
+	InputSummary          string         `json:"inputSummary,omitempty"`         // 已脱敏
+	Prompt                string         `json:"prompt,omitempty"`               // 已脱敏
+	InputArtifactSummary  string         `json:"inputArtifactSummary,omitempty"` // 已脱敏
+	OutputArtifactSummary string         `json:"outputArtifactSummary,omitempty"`
+	StructuredOutput      map[string]any `json:"structuredOutput,omitempty"`
 	RedactionSummary      map[string]any `json:"redactionSummary,omitempty"`
 	CreatedAt             time.Time      `json:"createdAt"`
 	UpdatedAt             time.Time      `json:"updatedAt"`
@@ -392,6 +407,21 @@ func validAgentModelCostLevel(v string) bool {
 		v == AgentModelCostLevelHigh
 }
 
-func validAgentTaskType(v string) bool {
+func knownAgentTaskType(v string) bool {
+	switch v {
+	case AgentTaskTypeOperationReview,
+		AgentTaskTypeStrategyGeneration,
+		AgentTaskTypeOpportunityDiscovery,
+		AgentTaskTypeNewsEventReview,
+		AgentTaskTypePortfolioRiskReview,
+		AgentTaskTypeStockProfileSummary,
+		AgentTaskTypeBullBearDebate:
+		return true
+	default:
+		return false
+	}
+}
+
+func executableAgentTaskType(v string) bool {
 	return v == AgentTaskTypeOperationReview
 }

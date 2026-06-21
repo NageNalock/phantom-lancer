@@ -26,7 +26,7 @@ import { StockV2AgentRunDetailDrawer } from "./StockV2AgentExecutionLedger";
 // Review drawer:从 MonitorHit 进入人工/Agent 审阅。显示 ContextPack 摘要、
 // Review 状态,支持人工填写并保存结构化结果(trade_signal / proposed_operation /
 // strategy_patch / ignore / continue_monitoring)。proposed_operation 保存后由
-// 后端回填 guardrails 结果,在此展示。本轮不调用真实 Agent,只接已有后端 API。
+// 后端回填 guardrails 与 Agent 结果,在此展示。
 //
 // 健壮性:无 review / loading / error / completed / blocked guardrails 各态显式分支,
 // ContextPack 任一子块缺失跳过,Record<string,unknown> 经安全取值读取,不崩。
