@@ -33,6 +33,10 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/instruments", s.handleListInstruments)
 	mux.HandleFunc("GET /api/stockv2/instruments/market/{market}", s.handleGetInstrumentsByMarket)
 	mux.HandleFunc("GET /api/stockv2/instruments/search", s.handleSearchInstruments)
+	mux.HandleFunc("GET /api/stockv2/profiles", s.handleStockV2ListStockProfiles)
+	mux.HandleFunc("GET /api/stockv2/profiles/{symbol}", s.handleStockV2GetStockProfile)
+	mux.HandleFunc("POST /api/stockv2/profiles/{symbol}/build", s.handleStockV2BuildStockProfile)
+	mux.HandleFunc("POST /api/stockv2/profiles/rebuild", s.handleStockV2RebuildStockProfiles)
 
 	// 最新行情
 	mux.HandleFunc("GET /api/stockv2/quotes/latest", s.handleStockV2GetLatestQuotes)

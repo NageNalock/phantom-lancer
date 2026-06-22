@@ -146,6 +146,25 @@ CREATE TABLE IF NOT EXISTS stockv2_instruments (
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
 );
+CREATE TABLE IF NOT EXISTS stockv2_stock_profiles (
+    symbol TEXT PRIMARY KEY,
+    market TEXT NOT NULL,
+    instrument_type TEXT NOT NULL DEFAULT 'stock',
+    name TEXT NOT NULL,
+    aliases_json TEXT NOT NULL DEFAULT '[]',
+    industry TEXT,
+    sectors_json TEXT NOT NULL DEFAULT '[]',
+    concepts_json TEXT NOT NULL DEFAULT '[]',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    business_summary TEXT,
+    profile_text TEXT NOT NULL,
+    fund_type TEXT,
+    tracking_index TEXT,
+    theme TEXT,
+    constituent_hint TEXT,
+    profile_version INTEGER NOT NULL DEFAULT 1,
+    updated_at DATETIME NOT NULL
+);
 CREATE TABLE IF NOT EXISTS stockv2_portfolios (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -395,6 +414,9 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_market ON stockv2_instruments
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_type ON stockv2_instruments(instrument_type);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_industry ON stockv2_instruments(industry);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_status ON stockv2_instruments(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_market ON stockv2_stock_profiles(market);
+CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_type ON stockv2_stock_profiles(instrument_type);
+CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_updated_at ON stockv2_stock_profiles(updated_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolios_name ON stockv2_portfolios(name);
 CREATE INDEX IF NOT EXISTS idx_stockv2_holdings_portfolio_id ON stockv2_holdings(portfolio_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_holdings_symbol ON stockv2_holdings(symbol);
