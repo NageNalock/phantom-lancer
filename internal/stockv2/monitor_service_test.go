@@ -231,6 +231,59 @@ func TestRunDataStrategyMonitorProducesHit(t *testing.T) {
 	}
 }
 
+func TestProcessMonitorHitDoesNotAlertBeforeAsyncAgentFinalResult(t *testing.T) {
+	ctx, svc, cleanup, review := newOperationReviewAgentE2ETest(t)
+	defer cleanup()
+
+	hit, err := svc.store.GetMonitorHit(ctx, review.HitID)
+	if err != nil {
+		t.Fatalf("get hit: %v", err)
+	}
+	started := make(chan string, 1)
+	release := make(chan struct{})
+	svc.agentExecutor = fakeOperationReviewExecutor{
+		pool:       svc.agentTaskPool,
+		submit:     true,
+		outputType: OperationReviewOutputContinueMonitoring,
+		summary:    "继续观察",
+		started:    started,
+		release:    release,
+	}
+
+	post, err := svc.processCreatedMonitorHit(ctx, hit, MonitorTaskConfig{AgentDoublecheckEnabled: true, CooldownSeconds: 300})
+	if err != nil {
+		t.Fatalf("process hit: %v", err)
+	}
+	if post.AlertID != "" {
+		t.Fatalf("alert id = %q, want empty before async agent final result", post.AlertID)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("agent executor did not start")
+	}
+	count, err := svc.CountAlerts(ctx, AlertListFilter{TaskType: MonitorTaskDataStrategyMonitor, Symbol: hit.Symbol})
+	if err != nil {
+		t.Fatalf("count alerts before release: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("alert count before agent final result = %d, want 0", count)
+	}
+
+	close(release)
+	run := waitAgentRunTerminal(t, svc, post.AgentRunID)
+	if run.Status != AgentRunStatusCompleted {
+		t.Fatalf("agent run status = %s, want completed", run.Status)
+	}
+	count, err = svc.CountAlerts(ctx, AlertListFilter{TaskType: MonitorTaskDataStrategyMonitor, Symbol: hit.Symbol})
+	if err != nil {
+		t.Fatalf("count alerts after release: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("alert count after continue_monitoring = %d, want 0", count)
+	}
+}
+
 func TestRunDataStrategyMonitorDoublecheckCreatesAgentRunWithoutExecutor(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStrategyTestService(t)

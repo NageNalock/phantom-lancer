@@ -193,6 +193,18 @@ func (s *Store) IncrementMonitorRunReviewCount(ctx context.Context, id string) e
 	return wrapError(err, "increment monitor run review count")
 }
 
+func (s *Store) IncrementMonitorRunAlertCount(ctx context.Context, id string) error {
+	if strings.TrimSpace(id) == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_monitor_runs
+		SET alert_count = alert_count + 1
+		WHERE id = ?
+	`, id)
+	return wrapError(err, "increment monitor run alert count")
+}
+
 func (s *Store) GetMonitorRun(ctx context.Context, id string) (MonitorRun, error) {
 	row := s.db.QueryRowContext(ctx, monitorRunSelectSQL+" WHERE id = ?", id)
 	run, err := scanMonitorRun(row)

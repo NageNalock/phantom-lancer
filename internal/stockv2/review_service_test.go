@@ -120,6 +120,92 @@ func TestSaveOperationReviewResultMarksHitReviewed(t *testing.T) {
 	}
 }
 
+func TestSaveOperationReviewResultCreatesConfirmedAlertForActionableOutput(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+
+	hit := seedReviewMonitorHit(t, svc)
+	review, err := svc.CreateReviewFromMonitorHit(ctx, hit.ID)
+	if err != nil {
+		t.Fatalf("create review: %v", err)
+	}
+	updated, err := svc.SaveOperationReviewResult(ctx, review.ID, RequestSaveOperationReviewResult{
+		OutputType:    OperationReviewOutputTradeSignal,
+		ResultSummary: "建议进入买入观察",
+		Status:        OperationReviewStatusCompleted,
+	})
+	if err != nil {
+		t.Fatalf("save result: %v", err)
+	}
+	if updated.OutputType != OperationReviewOutputTradeSignal {
+		t.Fatalf("output type = %s, want trade_signal", updated.OutputType)
+	}
+	alerts, err := svc.ListAlerts(ctx, AlertListFilter{TaskType: MonitorTaskDataStrategyMonitor, Symbol: "000977", Limit: 10})
+	if err != nil {
+		t.Fatalf("list alerts: %v", err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("alerts = %d, want 1", len(alerts))
+	}
+	if alerts[0].TriggerSource != AlertTriggerSourceManualReviewConfirmed || alerts[0].Status != AlertStatusOpen {
+		t.Fatalf("alert = %+v, want manual confirmed open", alerts[0])
+	}
+	if alerts[0].Evidence["reviewOutputType"] != OperationReviewOutputTradeSignal {
+		t.Fatalf("review output evidence = %v", alerts[0].Evidence["reviewOutputType"])
+	}
+	reloadedHit, err := svc.store.GetMonitorHit(ctx, hit.ID)
+	if err != nil {
+		t.Fatalf("reload hit: %v", err)
+	}
+	if reloadedHit.Status != MonitorHitStatusReviewed || reloadedHit.AlertID == "" {
+		t.Fatalf("hit = %+v, want reviewed with alert", reloadedHit)
+	}
+	run, err := svc.store.GetMonitorRun(ctx, hit.RunID)
+	if err != nil {
+		t.Fatalf("reload run: %v", err)
+	}
+	if run.AlertCount != 1 {
+		t.Fatalf("run alert count = %d, want 1", run.AlertCount)
+	}
+}
+
+func TestSaveOperationReviewResultSuppressesExistingAlertForContinueMonitoring(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+
+	hit := seedReviewMonitorHit(t, svc)
+	review, err := svc.CreateReviewFromMonitorHit(ctx, hit.ID)
+	if err != nil {
+		t.Fatalf("create review: %v", err)
+	}
+	alert, _, err := svc.upsertMonitorAlert(ctx, hit, MonitorTaskConfig{CooldownSeconds: 300}, review, nil, AlertTriggerSourceDegraded, "agent_started_or_pending", hit.Evidence)
+	if err != nil {
+		t.Fatalf("create degraded alert: %v", err)
+	}
+	if alert.Status != AlertStatusOpen {
+		t.Fatalf("alert status = %s, want open", alert.Status)
+	}
+	if _, err := svc.SaveOperationReviewResult(ctx, review.ID, RequestSaveOperationReviewResult{
+		OutputType:    OperationReviewOutputContinueMonitoring,
+		ResultSummary: "继续观察,不需要提醒",
+		Status:        OperationReviewStatusCompleted,
+	}); err != nil {
+		t.Fatalf("save result: %v", err)
+	}
+	reloaded, err := svc.store.GetAlert(ctx, alert.ID)
+	if err != nil {
+		t.Fatalf("reload alert: %v", err)
+	}
+	if reloaded.Status != AlertStatusResolved {
+		t.Fatalf("alert status = %s, want resolved", reloaded.Status)
+	}
+	if reloaded.Evidence["reviewOutputType"] != OperationReviewOutputContinueMonitoring {
+		t.Fatalf("review output evidence = %v", reloaded.Evidence["reviewOutputType"])
+	}
+}
+
 func seedReviewMonitorHit(t *testing.T, svc *Service) MonitorHit {
 	t.Helper()
 	ctx := context.Background()

@@ -101,6 +101,15 @@ func TestOperationReviewAgentE2EOutputTypes(t *testing.T) {
 			if tt.assert != nil {
 				tt.assert(t, reloaded)
 			}
+			if tt.outputType == OperationReviewOutputTradeSignal {
+				alerts, err := svc.ListAlerts(ctx, AlertListFilter{TaskType: MonitorTaskDataStrategyMonitor, Symbol: "000977", Limit: 10})
+				if err != nil {
+					t.Fatalf("list alerts: %v", err)
+				}
+				if len(alerts) != 1 || alerts[0].TriggerSource != AlertTriggerSourceAgentConfirmed {
+					t.Fatalf("alerts = %+v, want one agent confirmed alert", alerts)
+				}
+			}
 		})
 	}
 }

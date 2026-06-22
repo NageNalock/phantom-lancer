@@ -280,17 +280,13 @@ func (s *Service) processCreatedMonitorHit(ctx context.Context, hit MonitorHit, 
 	pipeline["agentRunStatus"] = agentRun.Status
 	evidence["agentRunId"] = agentRun.ID
 	evidence["decisionLedgerId"] = agentRun.DecisionLedgerID
-	triggerSource := AlertTriggerSourceDegraded
-	degradedReason := "agent_started_or_pending"
+	triggerSource := ""
+	degradedReason := ""
 	if s.agentExecutor == nil && agentRun.Status == AgentRunStatusReady {
 		pipeline["agentStatus"] = "enabled_no_executor"
 		evidence["agentDoublecheck"] = "enabled_no_executor"
 		degradedReason = "agent_ready_without_executor"
-	} else if agentRun.Status == AgentRunStatusCompleted && agentRunConfirmsMonitorAlert(agentRun) {
-		pipeline["agentStatus"] = "confirmed"
-		evidence["agentDoublecheck"] = "confirmed"
-		triggerSource = AlertTriggerSourceAgentConfirmed
-		degradedReason = ""
+		triggerSource = AlertTriggerSourceDegraded
 	} else {
 		pipeline["agentStatus"] = "started"
 		evidence["agentDoublecheck"] = "started"
@@ -301,6 +297,9 @@ func (s *Service) processCreatedMonitorHit(ctx context.Context, hit MonitorHit, 
 	evidence["reviewPipeline"] = pipeline
 	if err := s.store.UpdateMonitorHitEvidence(ctx, hit.ID, evidence, agentRun.ID); err != nil {
 		return result, err
+	}
+	if triggerSource == "" {
+		return result, nil
 	}
 	alert, created, err := s.upsertMonitorAlert(ctx, hit, cfg, review, &agentRun, triggerSource, degradedReason, evidence)
 	if err != nil {
@@ -331,10 +330,26 @@ func (s *Service) upsertMonitorAlert(
 		}
 		if err == nil {
 			if existing.MonitorHitID == hit.ID {
+				existing.ReviewID = review.ID
+				existing.ReviewStatus = review.Status
+				if agentRun != nil {
+					existing.AgentRunID = agentRun.ID
+					existing.DecisionLedgerID = agentRun.DecisionLedgerID
+				}
+				existing.TriggerSource = triggerSource
+				existing.Level = monitorAlertLevel(hit, triggerSource)
+				existing.Summary = hit.Summary
+				existing.LastSeenAt = now
+				existing.TriggeredAt = now
+				existing.Evidence = mergeMonitorAlertEvidence(existing.Evidence, evidence, hit)
+				updated, updateErr := s.store.UpdateAlert(ctx, existing)
+				if updateErr != nil {
+					return StockV2Alert{}, false, updateErr
+				}
 				if linkErr := s.store.UpdateMonitorHitAlert(ctx, hit.ID, existing.ID, MonitorHitStatusAlerted); linkErr != nil {
 					return StockV2Alert{}, false, linkErr
 				}
-				return existing, false, nil
+				return updated, false, nil
 			}
 			if monitorAlertWithinCooldown(existing, now, cfg.CooldownSeconds) {
 				existing.MonitorHitID = hit.ID
@@ -423,6 +438,8 @@ func monitorAlertEvidence(
 	switch triggerSource {
 	case AlertTriggerSourceAgentConfirmed:
 		evidence["trigger_decision"] = "agent_confirmed"
+	case AlertTriggerSourceManualReviewConfirmed:
+		evidence["trigger_decision"] = "manual_review_confirmed"
 	case AlertTriggerSourceDeterministic:
 		evidence["trigger_decision"] = "deterministic_policy"
 	default:
@@ -437,6 +454,12 @@ func monitorAlertEvidence(
 	evidence["taskType"] = hit.TaskType
 	evidence["reviewId"] = review.ID
 	evidence["reviewStatus"] = review.Status
+	if review.OutputType != "" {
+		evidence["reviewOutputType"] = review.OutputType
+	}
+	if review.ResultSummary != "" {
+		evidence["reviewResultSummary"] = review.ResultSummary
+	}
 	if agentRun != nil {
 		evidence["agentRunId"] = agentRun.ID
 		evidence["agentRunStatus"] = agentRun.Status
@@ -454,13 +477,14 @@ func monitorAlertDedupeKey(hit MonitorHit, evidence map[string]any) string {
 	prefilter := firstNonEmpty(
 		stringFromAny(evidence["matchedPrefilterKey"]),
 		stringFromAny(evidence["matchedPrefilterType"]),
+		monitorAlertThresholdKey(evidence),
 		stringFromAny(evidence["matchedRuleTitle"]),
 	)
 	if action == "" {
 		action = strings.TrimSpace(hit.Title)
 	}
 	if prefilter == "" {
-		prefilter = strings.TrimSpace(hit.Summary)
+		prefilter = strings.TrimSpace(hit.Title)
 	}
 	parts := []string{
 		"monitor",
@@ -472,6 +496,15 @@ func monitorAlertDedupeKey(hit MonitorHit, evidence map[string]any) string {
 		strings.TrimSpace(prefilter),
 	}
 	return strings.Join(parts, "|")
+}
+
+func monitorAlertThresholdKey(evidence map[string]any) string {
+	ruleType := stringFromAny(evidence["matchedPrefilterType"])
+	threshold := stringFromAny(evidence["matchedThreshold"])
+	if ruleType == "" && threshold == "" {
+		return ""
+	}
+	return ruleType + ":" + threshold
 }
 
 func monitorAlertWithinCooldown(alert StockV2Alert, now time.Time, cooldownSeconds int) bool {
@@ -514,14 +547,6 @@ func monitorAlertLevel(hit MonitorHit, triggerSource string) string {
 		return AlertLevelWarning
 	}
 	return AlertLevelInfo
-}
-
-func agentRunConfirmsMonitorAlert(run AgentRun) bool {
-	if run.Status != AgentRunStatusCompleted {
-		return false
-	}
-	output := strings.ToLower(strings.TrimSpace(run.Output))
-	return output != "" && !strings.Contains(output, "ignore")
 }
 
 func stringFromAny(value any) string {
@@ -608,6 +633,12 @@ func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cf
 					Title:      alertTitleForRule(rr),
 					Summary:    rr.Reason,
 					Evidence:   evidence,
+				}
+				hit.Evidence["matchedPrefilterType"] = rr.RuleType
+				hit.Evidence["matchedThreshold"] = rr.Threshold
+				hit.Evidence["matchedPrefilterKey"] = rr.RuleKey
+				if threshold := stringFromAny(rr.Threshold); threshold != "" {
+					hit.Evidence["matchedPrefilterKey"] = rr.RuleKey + ":" + threshold
 				}
 				createdHit, err := s.store.CreateMonitorHit(ctx, hit)
 				if err != nil {

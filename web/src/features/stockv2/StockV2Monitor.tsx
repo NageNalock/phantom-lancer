@@ -73,6 +73,7 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
 
   const [alerts, setAlerts] = useState<StockV2Alert[]>([]);
   const [alertsTotal, setAlertsTotal] = useState(0);
+  const [openAlertsTotal, setOpenAlertsTotal] = useState(0);
   const [alertsPage, setAlertsPage] = useState(1);
   const [alertsLoading, setAlertsLoading] = useState(false);
   const [selectedAlert, setSelectedAlert] = useState<StockV2Alert | null>(null);
@@ -168,12 +169,18 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
     setAlertsLoading(true);
     try {
       const params = new URLSearchParams({ limit: String(ALERT_PAGE_SIZE), offset: String((Math.max(1, page) - 1) * ALERT_PAGE_SIZE) });
-      const res = await actions.api<StockV2AlertListResponse>(`/api/stockv2/alerts?${params}`);
+      const openParams = new URLSearchParams({ status: "open", limit: "1", offset: "0" });
+      const [res, openRes] = await Promise.all([
+        actions.api<StockV2AlertListResponse>(`/api/stockv2/alerts?${params}`),
+        actions.api<StockV2AlertListResponse>(`/api/stockv2/alerts?${openParams}`),
+      ]);
       setAlerts(res.items || []);
       setAlertsTotal(res.total ?? res.items?.length ?? 0);
+      setOpenAlertsTotal(openRes.total ?? openRes.items?.length ?? 0);
     } catch {
       setAlerts([]);
       setAlertsTotal(0);
+      setOpenAlertsTotal(0);
     } finally {
       setAlertsLoading(false);
     }
@@ -216,7 +223,7 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
   const runningCount = tasks.filter((t) => t.latestRun?.status === "running").length;
   const failedCount = tasks.filter((t) => t.latestRun?.status === "failed").length;
   const enabledCount = tasks.filter((t) => t.config?.enabled).length;
-  const openAlertCount = alerts.filter((a) => a.status === "open").length + Math.max(0, alertsTotal - alerts.length);
+  const openAlertCount = openAlertsTotal;
 
   async function runTask(taskType: string) {
     setSubmitting(true);
@@ -1190,6 +1197,7 @@ function KeyValue({ label, value, mono }: { label: string; value: string; mono?:
 function alertTriggerSourceLabel(source?: string): string {
   switch (source) {
     case "agent_confirmed": return "Agent 确认";
+    case "manual_review_confirmed": return "人工确认";
     case "deterministic": return "确定性触发";
     case "degraded": return "降级触发";
     default: return source || "-";
@@ -1199,6 +1207,7 @@ function alertTriggerSourceLabel(source?: string): string {
 function alertTriggerSourceTone(source?: string): "good" | "warn" | "danger" | "neutral" {
   switch (source) {
     case "agent_confirmed": return "good";
+    case "manual_review_confirmed": return "good";
     case "deterministic": return "neutral";
     case "degraded": return "warn";
     default: return "neutral";

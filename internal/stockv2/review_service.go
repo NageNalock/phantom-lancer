@@ -201,8 +201,119 @@ func (s *Service) SaveOperationReviewResult(ctx context.Context, id string, req 
 		if err := s.store.UpdateMonitorHitStatus(ctx, current.HitID, hitStatus); err != nil {
 			return OperationReview{}, err
 		}
+		if err := s.syncMonitorAlertForReviewResult(ctx, updated); err != nil {
+			return OperationReview{}, err
+		}
 	}
 	return updated, nil
+}
+
+func (s *Service) syncMonitorAlertForReviewResult(ctx context.Context, review OperationReview) error {
+	if strings.TrimSpace(review.HitID) == "" ||
+		(review.Status != OperationReviewStatusCompleted && review.Status != OperationReviewStatusClosed) {
+		return nil
+	}
+	hit, err := s.store.GetMonitorHit(ctx, review.HitID)
+	if err != nil {
+		return err
+	}
+	if operationReviewOutputTriggersAlert(review.OutputType) {
+		cfg, err := s.monitorAlertTaskConfig(ctx, hit.TaskType)
+		if err != nil {
+			return err
+		}
+		agentRun, _ := s.latestCompletedAgentRunForReview(ctx, review.ID)
+		triggerSource := AlertTriggerSourceManualReviewConfirmed
+		if agentRun != nil {
+			triggerSource = AlertTriggerSourceAgentConfirmed
+		}
+		evidence := copyStringAnyMap(hit.Evidence)
+		evidence["reviewOutputType"] = review.OutputType
+		evidence["reviewResultSummary"] = review.ResultSummary
+		_, _, err = s.upsertMonitorAlert(ctx, hit, cfg, review, agentRun, triggerSource, "", evidence)
+		if err != nil {
+			return err
+		}
+		if hit.AlertID == "" {
+			if err := s.store.IncrementMonitorRunAlertCount(ctx, hit.RunID); err != nil {
+				return err
+			}
+		}
+		if err := s.store.UpdateMonitorHitStatus(ctx, hit.ID, MonitorHitStatusReviewed); err != nil {
+			return err
+		}
+		return nil
+	}
+	return s.suppressMonitorAlertForReviewResult(ctx, hit, review)
+}
+
+func operationReviewOutputTriggersAlert(outputType string) bool {
+	return outputType == OperationReviewOutputTradeSignal ||
+		outputType == OperationReviewOutputProposedOperation ||
+		outputType == OperationReviewOutputStrategyPatch
+}
+
+func (s *Service) suppressMonitorAlertForReviewResult(ctx context.Context, hit MonitorHit, review OperationReview) error {
+	if !operationReviewOutputSuppressesAlert(review.OutputType) || strings.TrimSpace(hit.AlertID) == "" {
+		return nil
+	}
+	alert, err := s.store.GetAlert(ctx, hit.AlertID)
+	if err != nil {
+		if errors.Is(err, ErrAlertNotFound) {
+			return nil
+		}
+		return err
+	}
+	now := time.Now()
+	if review.OutputType == OperationReviewOutputIgnore {
+		alert.Status = AlertStatusIgnored
+		alert.AcknowledgedAt = now
+	} else {
+		alert.Status = AlertStatusResolved
+		alert.ResolvedAt = now
+	}
+	alert.ReviewStatus = review.Status
+	if alert.Evidence == nil {
+		alert.Evidence = map[string]any{}
+	}
+	alert.Evidence["reviewOutputType"] = review.OutputType
+	alert.Evidence["reviewResultSummary"] = review.ResultSummary
+	alert.Evidence["trigger_decision"] = review.OutputType
+	_, err = s.store.UpdateAlert(ctx, alert)
+	return err
+}
+
+func operationReviewOutputSuppressesAlert(outputType string) bool {
+	return outputType == OperationReviewOutputIgnore || outputType == OperationReviewOutputContinueMonitoring
+}
+
+func (s *Service) monitorAlertTaskConfig(ctx context.Context, taskType string) (MonitorTaskConfig, error) {
+	def, ok := monitorTaskDefinition(taskType)
+	if !ok {
+		return MonitorTaskConfig{}, ErrInvalidMonitorTaskType
+	}
+	cfg, err := s.store.GetMonitorTaskConfig(ctx, taskType)
+	if err != nil {
+		if errors.Is(err, ErrMonitorTaskNotFound) {
+			return def.DefaultConfig, nil
+		}
+		return MonitorTaskConfig{}, err
+	}
+	return cfg, nil
+}
+
+func (s *Service) latestCompletedAgentRunForReview(ctx context.Context, reviewID string) (*AgentRun, error) {
+	runs, err := s.store.ListAgentRuns(ctx, AgentRunListFilter{
+		TaskType:          AgentTaskTypeOperationReview,
+		Status:            AgentRunStatusCompleted,
+		TriggerObjectType: "operation_review",
+		TriggerObjectID:   reviewID,
+		Limit:             1,
+	})
+	if err != nil || len(runs) == 0 {
+		return nil, err
+	}
+	return &runs[0], nil
 }
 
 func (s *Service) applyProposedOperationGuardrails(ctx context.Context, review OperationReview, result map[string]any) (map[string]any, error) {

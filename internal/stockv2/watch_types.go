@@ -30,9 +30,10 @@ const (
 	AlertLevelWarning  = "warning"
 	AlertLevelCritical = "critical"
 
-	AlertTriggerSourceAgentConfirmed = "agent_confirmed"
-	AlertTriggerSourceDeterministic  = "deterministic"
-	AlertTriggerSourceDegraded       = "degraded"
+	AlertTriggerSourceAgentConfirmed        = "agent_confirmed"
+	AlertTriggerSourceManualReviewConfirmed = "manual_review_confirmed"
+	AlertTriggerSourceDeterministic         = "deterministic"
+	AlertTriggerSourceDegraded              = "degraded"
 )
 
 var (
