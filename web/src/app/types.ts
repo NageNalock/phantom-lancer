@@ -2507,6 +2507,13 @@ export interface StockV2OperationReviewResultInput {
   errorMessage?: string;
 }
 
+export interface StockV2OperationReviewActionInput {
+  reason?: string;
+  executedAt?: string;
+  price?: number;
+  quantity?: number;
+}
+
 export interface StockV2MonitorTask {
   definition: StockV2MonitorTaskDefinition;
   config: StockV2MonitorTaskConfig;

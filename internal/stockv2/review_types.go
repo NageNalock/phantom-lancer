@@ -26,6 +26,7 @@ var (
 	ErrInvalidOperationReviewStatus     = errors.New("invalid operation review status")
 	ErrInvalidOperationReviewOutputType = errors.New("invalid operation review output type")
 	ErrInvalidProposedOperation         = errors.New("invalid proposed operation")
+	ErrInvalidOperationReviewAction     = errors.New("invalid operation review action")
 )
 
 type OperationReview struct {
@@ -94,4 +95,11 @@ type RequestSaveOperationReviewResult struct {
 	ResultSummary string         `json:"resultSummary,omitempty"`
 	Status        string         `json:"status,omitempty"`
 	ErrorMessage  string         `json:"errorMessage,omitempty"`
+}
+
+type RequestApplyOperationReviewAction struct {
+	Reason     string  `json:"reason,omitempty"`
+	ExecutedAt string  `json:"executedAt,omitempty"`
+	Price      float64 `json:"price,omitempty"`
+	Quantity   float64 `json:"quantity,omitempty"`
 }

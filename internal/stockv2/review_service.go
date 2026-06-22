@@ -155,6 +155,9 @@ func (s *Service) SaveOperationReviewResult(ctx context.Context, id string, req 
 	if err != nil {
 		return OperationReview{}, err
 	}
+	if reviewAcceptanceTerminal(current.Result) {
+		return OperationReview{}, ErrInvalidOperationReviewAction
+	}
 	status, outputType, err := normalizeOperationReviewResult(req)
 	if err != nil {
 		return OperationReview{}, err

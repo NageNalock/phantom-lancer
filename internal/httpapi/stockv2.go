@@ -80,6 +80,9 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/reviews", s.handleStockV2ListOperationReviews)
 	mux.HandleFunc("GET /api/stockv2/reviews/{id}", s.handleStockV2GetOperationReview)
 	mux.HandleFunc("PUT /api/stockv2/reviews/{id}/result", s.handleStockV2SaveOperationReviewResult)
+	mux.HandleFunc("POST /api/stockv2/reviews/{id}/accept", s.handleStockV2AcceptOperationReview)
+	mux.HandleFunc("POST /api/stockv2/reviews/{id}/reject", s.handleStockV2RejectOperationReview)
+	mux.HandleFunc("POST /api/stockv2/reviews/{id}/defer", s.handleStockV2DeferOperationReview)
 	mux.HandleFunc("POST /api/stockv2/reviews/{id}/run-agent", s.handleStockV2RunAgentReview)
 
 	// 更新任务

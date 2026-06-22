@@ -5,6 +5,7 @@ import type {
   StockV2AgentListResponse,
   StockV2AgentRun,
   StockV2OperationReview,
+  StockV2OperationReviewActionInput,
   StockV2OperationReviewListResponse,
   StockV2OperationReviewOutputType,
   StockV2OperationReviewResultInput,
@@ -54,6 +55,7 @@ export function StockV2ReviewDrawer({
   const [phase, setPhase] = useState<"loading" | "ready" | "error" | "creating">("loading");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [actionSubmitting, setActionSubmitting] = useState<"accept" | "reject" | "defer" | null>(null);
   // Agent run 相关
   const [agentRun, setAgentRun] = useState<StockV2AgentRun | null>(null);
   const [agentLoading, setAgentLoading] = useState(false);
@@ -77,6 +79,10 @@ export function StockV2ReviewDrawer({
   const [quantity, setQuantity] = useState("");
   const [price, setPrice] = useState("");
   const [amount, setAmount] = useState("");
+  const [actionQuantity, setActionQuantity] = useState("");
+  const [actionPrice, setActionPrice] = useState("");
+  const [actionExecutedAt, setActionExecutedAt] = useState("");
+  const [actionReason, setActionReason] = useState("");
   // strategy_patch
   const [patchSummary, setPatchSummary] = useState("");
 
@@ -138,14 +144,21 @@ export function StockV2ReviewDrawer({
       setStopLoss(readStr(ts, "stopLoss"));
       setTakeProfit(readStr(ts, "takeProfit"));
     } else if (r.outputType === "proposed_operation") {
-      const op = mapFromAny(result.proposedOperation) || mapFromAny(result.operation) || {};
+      const proposed = mapFromAny(result.proposedOperation);
+      const op = Object.keys(proposed).length > 0 ? proposed : mapFromAny(result.operation);
+      const nextQuantity = readStr(op, "quantity");
+      const nextPrice = readStr(op, "price");
       setOpAction(readStr(op, "action") || readStr(op, "operation") || readStr(op, "type"));
-      setQuantity(readStr(op, "quantity"));
-      setPrice(readStr(op, "price"));
+      setQuantity(nextQuantity);
+      setPrice(nextPrice);
       setAmount(readStr(op, "amount"));
+      setActionQuantity(nextQuantity);
+      setActionPrice(nextPrice || (r.inputContext?.quote?.lastPrice ? String(r.inputContext.quote.lastPrice) : ""));
     } else if (r.outputType === "strategy_patch") {
       setPatchSummary(readStr(result, "patchSummary"));
     }
+    setActionExecutedAt("");
+    setActionReason("");
   }
 
   useEffect(() => {
@@ -211,6 +224,36 @@ export function StockV2ReviewDrawer({
       actions.setToast(friendlyError(err), "danger");
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function applyReviewAction(kind: "accept" | "reject" | "defer") {
+    if (!review) return;
+    setActionSubmitting(kind);
+    try {
+      const body: StockV2OperationReviewActionInput = {};
+      if (kind === "accept" && review.outputType === "proposed_operation") {
+        const nextQuantity = optionalNumber(actionQuantity);
+        const nextPrice = optionalNumber(actionPrice);
+        if (nextQuantity !== undefined) body.quantity = nextQuantity;
+        if (nextPrice !== undefined) body.price = nextPrice;
+        if (actionExecutedAt.trim()) body.executedAt = actionExecutedAt.trim();
+      }
+      if ((kind === "reject" || kind === "defer") && actionReason.trim()) {
+        body.reason = actionReason.trim();
+      }
+      const updated = await actions.api<StockV2OperationReview>(
+        `/api/stockv2/reviews/${review.id}/${kind}`,
+        { method: "POST", body },
+      );
+      setReview(updated);
+      hydrateForm(updated);
+      actions.setToast(reviewActionToast(kind, review.outputType || ""), "good");
+      void loadAgentRun(updated.id);
+    } catch (err) {
+      actions.setToast(friendlyError(err), "danger");
+    } finally {
+      setActionSubmitting(null);
     }
   }
 
@@ -305,6 +348,7 @@ export function StockV2ReviewDrawer({
   const guardrails = review?.result ? mapFromAny(review.result.guardrails) : null;
   const guardrailsStatus = guardrails ? readStr(guardrails, "status") : "";
   const acceptanceStatus = review?.result ? readStr(review.result, "acceptanceStatus") : "";
+  const acceptanceLocked = acceptanceStatus === "accepted" || acceptanceStatus === "rejected";
   const guardrailReasons = guardrails && Array.isArray(guardrails.reasons) ? guardrails.reasons : [];
 
   if (!hitId) return null;
@@ -320,8 +364,8 @@ export function StockV2ReviewDrawer({
           review ? (
             <div className="flex justify-end gap-2">
               <Button onClick={onClose}>关闭</Button>
-              <Button tone="primary" disabled={submitting || !outputType} onClick={() => void save()}>
-                {submitting ? "保存中…" : "保存结果"}
+              <Button tone="primary" disabled={submitting || !outputType || acceptanceLocked} onClick={() => void save()}>
+                {acceptanceLocked ? "结果已锁定" : submitting ? "保存中…" : "保存结果"}
               </Button>
             </div>
           ) : null
@@ -379,6 +423,9 @@ export function StockV2ReviewDrawer({
 
             <div className="grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
               <strong className="text-sm">结构化结果</strong>
+              {acceptanceLocked ? (
+                <Notice tone="warn">该 Review 已确认或作废,结构化结果已锁定。如需调整,请从新的监控命中重新进入 Review。</Notice>
+              ) : null}
               <Field label="结果类型" help="选择本次复核产出的结构化结论类型。">
                 <select value={outputType} onChange={(e) => setOutputType(e.target.value as StockV2OperationReviewOutputType)}>
                   <option value="">(未选择)</option>
@@ -458,6 +505,27 @@ export function StockV2ReviewDrawer({
               <p className="text-xs text-[var(--muted)]">
                 填写操作提案并保存后,后端将运行执行 guardrails 并在此展示结果。
               </p>
+            ) : null}
+
+            {review.status === "completed" &&
+            (review.outputType === "proposed_operation" || review.outputType === "strategy_patch") ? (
+              <ReviewPostProcessingBlock
+                review={review}
+                acceptanceStatus={acceptanceStatus}
+                guardrailsStatus={guardrailsStatus}
+                quantity={actionQuantity}
+                setQuantity={setActionQuantity}
+                price={actionPrice}
+                setPrice={setActionPrice}
+                executedAt={actionExecutedAt}
+                setExecutedAt={setActionExecutedAt}
+                reason={actionReason}
+                setReason={setActionReason}
+                submitting={actionSubmitting}
+                onAccept={() => void applyReviewAction("accept")}
+                onReject={() => void applyReviewAction("reject")}
+                onDefer={() => void applyReviewAction("defer")}
+              />
             ) : null}
             </>
           ) : null}
@@ -765,6 +833,121 @@ function GuardrailsBlock({
   );
 }
 
+function ReviewPostProcessingBlock({
+  review,
+  acceptanceStatus,
+  guardrailsStatus,
+  quantity,
+  setQuantity,
+  price,
+  setPrice,
+  executedAt,
+  setExecutedAt,
+  reason,
+  setReason,
+  submitting,
+  onAccept,
+  onReject,
+  onDefer,
+}: {
+  review: StockV2OperationReview;
+  acceptanceStatus: string;
+  guardrailsStatus: string;
+  quantity: string;
+  setQuantity: (v: string) => void;
+  price: string;
+  setPrice: (v: string) => void;
+  executedAt: string;
+  setExecutedAt: (v: string) => void;
+  reason: string;
+  setReason: (v: string) => void;
+  submitting: "accept" | "reject" | "defer" | null;
+  onAccept: () => void;
+  onReject: () => void;
+  onDefer: () => void;
+}) {
+  const result = review.result || {};
+  const outputType = review.outputType || "";
+  const terminal = acceptanceStatus === "accepted" || acceptanceStatus === "rejected";
+  const acceptedAt = readStr(result, "acceptedAt");
+  const rejectedAt = readStr(result, "rejectedAt");
+  const deferredAt = readStr(result, "deferredAt");
+  const transactionId = readStr(result, "transactionId");
+  const newVersionId = readStr(result, "newVersionId");
+  const proposedCanAccept = outputType !== "proposed_operation" ||
+    guardrailsStatus === "pass" ||
+    guardrailsStatus === "degraded";
+  const acceptDisabled =
+    terminal ||
+    submitting !== null ||
+    !proposedCanAccept;
+  const rejectDisabled = terminal || submitting !== null;
+  const deferDisabled = acceptanceStatus === "accepted" || acceptanceStatus === "rejected" || submitting !== null;
+
+  return (
+    <div className="grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <strong className="text-sm">后处理</strong>
+          <Pill tone={acceptanceTone(acceptanceStatus)}>{acceptanceStatusLabel(acceptanceStatus || "pending")}</Pill>
+          {transactionId ? <Pill tone="good">交易 {transactionId.slice(0, 8)}</Pill> : null}
+          {newVersionId ? <Pill tone="good">新版本 {newVersionId.slice(0, 8)}</Pill> : null}
+        </div>
+        <span className="text-[var(--muted)]">
+          {acceptedAt ? `确认 ${formatDate(acceptedAt) || "-"}` : rejectedAt ? `作废 ${formatDate(rejectedAt) || "-"}` : deferredAt ? `延后 ${formatDate(deferredAt) || "-"}` : "等待用户确认"}
+        </span>
+      </div>
+
+      {outputType === "proposed_operation" ? (
+        <>
+          <p className="text-[var(--muted)]">
+            确认执行只会写入本系统组合交易流水,不会连接券商或真实下单。缺少成交价或数量时可在这里补齐。
+          </p>
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="确认数量">
+              <input type="text" value={quantity} onChange={(e) => setQuantity(e.target.value)} placeholder="如 100" />
+            </Field>
+            <Field label="确认价格">
+              <input type="text" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="如 12.30" />
+            </Field>
+            <Field label="成交时间">
+              <input type="datetime-local" value={executedAt} onChange={(e) => setExecutedAt(e.target.value)} />
+            </Field>
+          </div>
+        </>
+      ) : (
+        <p className="text-[var(--muted)]">
+          接受补丁会基于当前 active version 创建一个新策略版本,再把策略指向新版本;旧版本会保留。
+        </p>
+      )}
+
+      {!terminal ? (
+        <Field label="原因(可选)" help="作废或延后时建议写一句原因,便于之后回看。">
+          <input type="text" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="例如: 等待收盘确认" />
+        </Field>
+      ) : null}
+
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button onClick={onDefer} disabled={deferDisabled}>
+          {submitting === "defer" ? "延后中…" : "延后"}
+        </Button>
+        <Button tone="danger" onClick={onReject} disabled={rejectDisabled}>
+          {submitting === "reject" ? "作废中…" : outputType === "strategy_patch" ? "拒绝补丁" : "作废"}
+        </Button>
+        <Button tone="primary" onClick={onAccept} disabled={acceptDisabled}>
+          {submitting === "accept" ? "确认中…" : outputType === "strategy_patch" ? "接受补丁" : "确认执行"}
+        </Button>
+      </div>
+      {guardrailsStatus === "blocked" ? (
+        <Notice tone="danger">guardrails 已拦截,不能确认执行。请修改提案后重新保存。</Notice>
+      ) : null}
+      {outputType === "proposed_operation" && !guardrailsStatus ? (
+        <Notice tone="warn">尚未看到 guardrails 结果,请先保存操作提案并等待后端校验。</Notice>
+      ) : null}
+    </div>
+  );
+}
+
 // ===== 安全取值工具(从 Record<string,unknown> / any 读取,不抛错)=====
 
 function mapFromAny(value: unknown): Record<string, unknown> {
@@ -791,8 +974,46 @@ function stringify(value: unknown): string {
   }
 }
 
+function optionalNumber(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const n = Number(trimmed);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function reviewActionToast(action: "accept" | "reject" | "defer", outputType: string): string {
+  if (action === "accept") {
+    return outputType === "strategy_patch" ? "已接受策略补丁" : "已确认并写入交易流水";
+  }
+  if (action === "reject") {
+    return outputType === "strategy_patch" ? "已拒绝策略补丁" : "已作废操作提案";
+  }
+  return "已延后处理";
+}
+
+function acceptanceTone(status: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "accepted":
+      return "good";
+    case "rejected":
+    case "blocked":
+      return "danger";
+    case "deferred":
+    case "pending_guardrail_review":
+      return "warn";
+    default:
+      return "neutral";
+  }
+}
+
 function acceptanceStatusLabel(status: string): string {
   switch (status) {
+    case "accepted":
+      return "已确认";
+    case "rejected":
+      return "已作废";
+    case "deferred":
+      return "已延后";
     case "blocked":
       return "已拦截";
     case "pending_guardrail_review":
