@@ -87,7 +87,7 @@ func (e *codexCLIExecutor) ExecuteOperationReview(
 	start := time.Now()
 
 	// 构建命令
-	args := []string{"exec", "--json", "--sandbox", "read-only", "--ask-for-approval", "on-request"}
+	args := []string{"exec", "--json", "--sandbox", "read-only"}
 	if modelName != "" {
 		args = append(args, "--model", modelName)
 	}

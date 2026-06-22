@@ -143,8 +143,11 @@ func TestExecBuildArgsNeverYolo(t *testing.T) {
 			t.Fatalf("exec args contain banned flag %q: %v", banned, args)
 		}
 	}
-	if !strings.Contains(joined, "--sandbox read-only") || !strings.Contains(joined, "--ask-for-approval on-request") {
-		t.Fatalf("expected sandbox/approval flags, got %v", args)
+	if !strings.Contains(joined, "--sandbox read-only") {
+		t.Fatalf("expected sandbox flag, got %v", args)
+	}
+	if strings.Contains(joined, "--ask-for-approval") {
+		t.Fatalf("exec args contain removed approval flag: %v", args)
 	}
 	if !strings.Contains(joined, "--image /tmp/a.png") {
 		t.Fatalf("expected image flag, got %v", args)

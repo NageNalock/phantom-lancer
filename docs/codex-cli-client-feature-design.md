@@ -157,8 +157,8 @@ Codex 会话必须绑定 workspace。workspace 不是通用设置项，而是 Co
 
 MVP 支持：
 
-- `Read-only`：`--sandbox read-only --ask-for-approval on-request`。
-- `Workspace write`：`--sandbox workspace-write --ask-for-approval on-request`。
+- `Read-only`：`--sandbox read-only`，审批行为由当前 Codex CLI 配置/执行策略决定。
+- `Workspace write`：`--sandbox workspace-write`，审批行为由当前 Codex CLI 配置/执行策略决定。
 - `Auto review`：仅当本机 Codex 配置和版本支持时展示；否则隐藏。
 
 默认策略：

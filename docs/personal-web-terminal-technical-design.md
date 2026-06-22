@@ -290,7 +290,7 @@ Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*`
 | app-server runtime | 定时 probe + 一键启动 | 主程序维护 running/stopped/failed/degraded 状态，页面通过受控 API 启动 |
 | 长会话 | `codex app-server --listen stdio://` | Go 后端通过 stdio JSON-RPC 连接，不暴露给浏览器 |
 | 一次性任务 fallback | `codex exec --json` | app-server 不可用时使用，默认低权限 |
-| 权限模式 | CLI `--sandbox` / `--ask-for-approval` | 由 workspace trust state 和 owner 选择共同决定 |
+| 权限模式 | CLI `--sandbox` / Codex 配置审批策略 | 由 workspace trust state 和 owner 选择共同决定 |
 | 事件接入 | JSON-RPC notification / JSONL | 后端归一化后写入 Event Module 和 SSE |
 | 子进程管理 | `os/exec` + context | 受控 env allowlist、timeout、interrupt、stderr size limit |
 
@@ -354,7 +354,7 @@ Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*`
 - Codex CLI Client 不安装、升级或替换 `codex` CLI。
 - Codex CLI Client 不通过浏览器直连 app-server，不暴露 non-loopback WebSocket listener。
 - Codex CLI Client 页面的一键启动只触发后端受控 `codex app-server --listen stdio://`，不能拼接任意命令。
-- Codex CLI Client 不默认使用 `--yolo`、`danger-full-access` 或 `--ask-for-approval never`。
+- Codex CLI Client 不默认使用 `--yolo`、`danger-full-access` 或跳过审批的危险模式。
 - Codex CLI Client 的新表使用 `codex_cli_` 前缀；旧版残留 Codex 表不自动删除、不自动迁移。
 - Codex CLI Client 详细边界见 [codex-cli-client-feature-design.md](./codex-cli-client-feature-design.md)。
 

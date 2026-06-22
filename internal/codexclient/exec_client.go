@@ -32,11 +32,8 @@ func (c *ExecClient) BuildArgs(opts ExecOptions) []string {
 	if sandbox == "" {
 		sandbox = "read-only"
 	}
-	approval := strings.TrimSpace(opts.Approval)
-	if approval == "" {
-		approval = "on-request"
-	}
-	args := []string{"exec", "--json", "--sandbox", sandbox, "--ask-for-approval", approval}
+	// ponytail: current Codex CLI exposes no approval flag; keep opts compatible and let CLI config handle approvals.
+	args := []string{"exec", "--json", "--sandbox", sandbox}
 	if model := strings.TrimSpace(opts.Model); model != "" {
 		args = append(args, "--model", model)
 	}
