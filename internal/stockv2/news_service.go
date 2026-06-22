@@ -16,6 +16,7 @@ func (s *Service) CreateRawNews(ctx context.Context, req RequestCreateRawNews) (
 	title := strings.TrimSpace(req.Title)
 	content := strings.TrimSpace(req.Content)
 	snippet := strings.TrimSpace(req.Snippet)
+	newsURL := strings.TrimSpace(req.URL)
 	if title == "" && content == "" && snippet == "" {
 		return StockV2RawNews{}, ErrInvalidRawNewsContent
 	}
@@ -23,7 +24,7 @@ func (s *Service) CreateRawNews(ctx context.Context, req RequestCreateRawNews) (
 	if fetchedAt.IsZero() {
 		fetchedAt = time.Now()
 	}
-	hash := rawNewsContentHash(source, req.SourceID, title, content, snippet, req.PublishedAt)
+	hash := rawNewsContentHash(source, req.SourceID, title, content, snippet, newsURL, req.PublishedAt)
 	dedupeKey := strings.TrimSpace(req.DedupeKey)
 	if dedupeKey == "" {
 		dedupeKey = rawNewsDedupeKey(source, req.SourceID, hash)
@@ -36,6 +37,7 @@ func (s *Service) CreateRawNews(ctx context.Context, req RequestCreateRawNews) (
 		Content:     content,
 		Snippet:     snippet,
 		PublishedAt: req.PublishedAt,
+		URL:         newsURL,
 		FetchedAt:   fetchedAt,
 		RawPayload:  req.RawPayload,
 		ContentHash: hash,
@@ -149,13 +151,14 @@ func (s *Service) CountNewsLinkCandidates(ctx context.Context, filter NewsLinkCa
 	return s.store.CountNewsLinkCandidates(ctx, filter)
 }
 
-func rawNewsContentHash(source, sourceID, title, content, snippet string, publishedAt time.Time) string {
+func rawNewsContentHash(source, sourceID, title, content, snippet, newsURL string, publishedAt time.Time) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{
 		strings.TrimSpace(source),
 		strings.TrimSpace(sourceID),
 		strings.TrimSpace(title),
 		strings.TrimSpace(content),
 		strings.TrimSpace(snippet),
+		strings.TrimSpace(newsURL),
 		publishedAt.UTC().Format(time.RFC3339Nano),
 	}, "\x00")))
 	return hex.EncodeToString(sum[:])

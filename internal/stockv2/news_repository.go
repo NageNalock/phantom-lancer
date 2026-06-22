@@ -22,8 +22,8 @@ func (s *Store) CreateRawNews(ctx context.Context, item StockV2RawNews) (StockV2
 	_, err := s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO stockv2_raw_news
 			(id, source, source_id, language, title, content, snippet, published_at, fetched_at,
-			 raw_payload_json, content_hash, dedupe_key, quality, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 url, raw_payload_json, content_hash, dedupe_key, quality, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		item.ID,
 		item.Source,
@@ -34,6 +34,7 @@ func (s *Store) CreateRawNews(ctx context.Context, item StockV2RawNews) (StockV2
 		nullableNewsString(item.Snippet),
 		nullableNewsTime(item.PublishedAt),
 		item.FetchedAt,
+		nullableNewsString(item.URL),
 		marshalMap(item.RawPayload),
 		item.ContentHash,
 		item.DedupeKey,
@@ -342,7 +343,7 @@ func (s *Store) getNewsLinkCandidateByKey(ctx context.Context, eventID, symbol, 
 const rawNewsSelectSQL = `
 	SELECT id, source, COALESCE(source_id,''), COALESCE(language,''), title,
 	       COALESCE(content,''), COALESCE(snippet,''), published_at, fetched_at,
-	       COALESCE(raw_payload_json,'{}'), content_hash, dedupe_key, quality, status, created_at, updated_at
+	       COALESCE(url,''), COALESCE(raw_payload_json,'{}'), content_hash, dedupe_key, quality, status, created_at, updated_at
 	FROM stockv2_raw_news
 `
 
@@ -366,7 +367,7 @@ func scanRawNews(row rowScanner) (StockV2RawNews, error) {
 	if err := row.Scan(
 		&item.ID, &item.Source, &item.SourceID, &item.Language, &item.Title,
 		&item.Content, &item.Snippet, &publishedAt, &item.FetchedAt,
-		&rawPayloadJSON, &item.ContentHash, &item.DedupeKey, &item.Quality, &item.Status,
+		&item.URL, &rawPayloadJSON, &item.ContentHash, &item.DedupeKey, &item.Quality, &item.Status,
 		&item.CreatedAt, &item.UpdatedAt,
 	); err != nil {
 		return item, err

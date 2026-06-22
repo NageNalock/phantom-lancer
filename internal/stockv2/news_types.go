@@ -6,6 +6,10 @@ import (
 )
 
 const (
+	NewsSourceFinancialJuice = "financialjuice"
+	NewsSourceAlphaVantage   = "alpha_vantage"
+	NewsSourceFMP            = "fmp"
+
 	NewsStatusNew       = "new"
 	NewsStatusProcessed = "processed"
 	NewsStatusFailed    = "failed"
@@ -35,6 +39,9 @@ var (
 	ErrInvalidNewsEventSource      = errors.New("news event source is required")
 	ErrInvalidNewsLinkCandidate    = errors.New("invalid news link candidate")
 	ErrInvalidNewsLinkCandidateKey = errors.New("news link candidate requires event, symbol and match method")
+	ErrNewsAdapterDisabled         = errors.New("news adapter disabled")
+	ErrUnsupportedNewsSource       = errors.New("unsupported news source")
+	ErrFinancialJuiceCookieMissing = errors.New("financialjuice cookie missing")
 )
 
 type StockV2RawNews struct {
@@ -46,6 +53,7 @@ type StockV2RawNews struct {
 	Content     string         `json:"content,omitempty"`
 	Snippet     string         `json:"snippet,omitempty"`
 	PublishedAt time.Time      `json:"publishedAt,omitempty"`
+	URL         string         `json:"url,omitempty"`
 	FetchedAt   time.Time      `json:"fetchedAt"`
 	RawPayload  map[string]any `json:"rawPayload,omitempty"`
 	ContentHash string         `json:"contentHash"`
@@ -97,6 +105,7 @@ type RequestCreateRawNews struct {
 	Content     string         `json:"content,omitempty"`
 	Snippet     string         `json:"snippet,omitempty"`
 	PublishedAt time.Time      `json:"publishedAt,omitempty"`
+	URL         string         `json:"url,omitempty"`
 	FetchedAt   time.Time      `json:"fetchedAt,omitempty"`
 	RawPayload  map[string]any `json:"rawPayload,omitempty"`
 	DedupeKey   string         `json:"dedupeKey,omitempty"`

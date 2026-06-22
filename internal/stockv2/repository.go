@@ -387,6 +387,8 @@ CREATE TABLE IF NOT EXISTS stockv2_settings (
     proxy_host TEXT,
     proxy_port INTEGER,
     last_scheduled_update DATETIME,
+    financial_juice_enabled INTEGER DEFAULT 0,
+    financial_juice_cookie TEXT,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
 );
@@ -547,6 +549,7 @@ CREATE TABLE IF NOT EXISTS stockv2_raw_news (
     snippet TEXT,
     published_at DATETIME,
     fetched_at DATETIME NOT NULL,
+    url TEXT,
     raw_payload_json TEXT,
     content_hash TEXT NOT NULL,
     dedupe_key TEXT NOT NULL UNIQUE,
@@ -750,6 +753,15 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureColumn(ctx, "stockv2_settings", "daily_bars_last_run", "DATETIME"); err != nil {
 		return fmt.Errorf("add daily_bars_last_run column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_enabled", "INTEGER DEFAULT 0"); err != nil {
+		return fmt.Errorf("add financial_juice_enabled column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_cookie", "TEXT"); err != nil {
+		return fmt.Errorf("add financial_juice_cookie column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_raw_news", "url", "TEXT"); err != nil {
+		return fmt.Errorf("add raw news url column: %w", err)
 	}
 	if err := s.ensureColumn(ctx, "stockv2_daily_bar_jobs", "symbol", "TEXT"); err != nil {
 		return fmt.Errorf("add daily bar job symbol column: %w", err)
@@ -1900,8 +1912,9 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		INSERT OR REPLACE INTO stockv2_settings (
 			id, auto_update_enabled, update_interval_sec, proxy_enabled,
 			proxy_type, proxy_host, proxy_port, last_scheduled_update,
-			daily_bars_auto_enabled, daily_bars_last_run, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			daily_bars_auto_enabled, daily_bars_last_run, financial_juice_enabled,
+			financial_juice_cookie, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	now := time.Now()
@@ -1926,6 +1939,8 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		settings.LastScheduledUpdate,
 		settings.DailyBarsAutoEnabled,
 		dailyBarsLastRun,
+		settings.FinancialJuiceEnabled,
+		nullableNewsString(settings.FinancialJuiceCookie),
 		settings.CreatedAt,
 		settings.UpdatedAt,
 	)
@@ -1986,7 +2001,9 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	query := `
 		SELECT id, auto_update_enabled, update_interval_sec, proxy_enabled,
 		       COALESCE(proxy_type,''), COALESCE(proxy_host,''), COALESCE(proxy_port, 0), last_scheduled_update,
-		       COALESCE(daily_bars_auto_enabled, 0), daily_bars_last_run, created_at, updated_at
+		       COALESCE(daily_bars_auto_enabled, 0), daily_bars_last_run,
+		       COALESCE(financial_juice_enabled, 0), COALESCE(financial_juice_cookie, ''),
+		       created_at, updated_at
 		FROM stockv2_settings
 		LIMIT 1
 	`
@@ -2007,6 +2024,8 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 		&lastScheduledUpdate,
 		&settings.DailyBarsAutoEnabled,
 		&dailyBarsLastRun,
+		&settings.FinancialJuiceEnabled,
+		&settings.FinancialJuiceCookie,
 		&settings.CreatedAt,
 		&settings.UpdatedAt,
 	)
@@ -2033,6 +2052,7 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	if dailyBarsLastRun.Valid {
 		settings.DailyBarsLastRun = dailyBarsLastRun.Time
 	}
+	settings.FinancialJuiceCookieSet = strings.TrimSpace(settings.FinancialJuiceCookie) != ""
 
 	return settings, nil
 }
