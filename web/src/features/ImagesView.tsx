@@ -449,6 +449,43 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     }
   }
 
+  async function deleteHistoryJob(kind: "legacy" | "media", rawJob: unknown) {
+    const job = kind === "legacy" ? (rawJob as ImageGenerationJob) : (rawJob as MediaGenerationJob);
+    const active = kind === "legacy" ? isActiveImageJob(job as ImageGenerationJob) : isActiveMediaJob(job as MediaGenerationJob);
+    if (active) {
+      actions.setToast("运行中的任务请先取消后再删除", "warn");
+      return;
+    }
+    const confirmed = await confirmDanger({
+      title: "删除历史记录",
+      objectName: job.id,
+      body: "该操作只删除这条生成历史，不删除资源库中的图片或视频资产。",
+      confirmLabel: "删除记录",
+      impact: [
+        "历史页将不再显示该任务的参数、状态和错误摘要。",
+        "已入库资源仍保留，可继续在资源库查看或单独删除。",
+      ],
+      recovery: "删除后的历史记录通常不可恢复；如需要复用参数，请先保存为生成预设或复制参数。",
+    });
+    if (!confirmed) return;
+    setBusy(`delete-job:${job.id}`);
+    try {
+      await actions.api(`/api/images/generations/${encodeURIComponent(job.id)}`, {
+        method: "DELETE",
+        csrf: actions.csrf,
+      });
+      if (kind === "legacy" && currentJob?.id === job.id) setCurrentJob(undefined);
+      if (kind === "media" && currentMediaJob?.id === job.id) setCurrentMediaJob(undefined);
+      if (targetJobRef?.id === job.id && targetJobRef.kind === kind) setTargetJobRef(undefined);
+      await Promise.all([actions.refreshImages(), refreshMediaData()]);
+      actions.setToast("历史记录已删除", "good");
+    } catch (error) {
+      actions.setToast(friendlyError(error), "danger");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function copyJobParams(kind: "legacy" | "media", rawJob: unknown) {
     let payload: Record<string, unknown> = {};
     if (kind === "legacy") {
@@ -1507,6 +1544,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
                 await Promise.all([actions.refreshImages(), refreshMediaData()]);
               }}
               onRetryJob={retryJob}
+              onDeleteJob={deleteHistoryJob}
               onRestoreJob={restoreJobToGenerate}
               onSaveJobAsPreset={handleSaveJobAsPreset}
               onUseAssetAsReference={useMediaAssetAsI2iFromHistory}

@@ -685,6 +685,32 @@ SELECT id FROM media_generation_jobs ORDER BY created_at DESC LIMIT -1 OFFSET ?`
 	return err
 }
 
+func (s *Store) DeleteMediaGenerationJob(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ErrNotFound
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM media_generation_sources WHERE job_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM media_generation_outputs WHERE job_id = ?`, id); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM media_generation_jobs WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit()
+}
+
 func scanMediaGenerationJob(row workspaceScanner) (MediaGenerationJob, error) {
 	var job MediaGenerationJob
 	var paramsJSON, usageJSON string

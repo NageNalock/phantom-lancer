@@ -374,6 +374,118 @@ func TestPruneImageGenerationJobsKeepsLibraryAssets(t *testing.T) {
 	}
 }
 
+func TestDeleteImageGenerationJobKeepsLibraryAsset(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateImageGenerationJob(ctx, ImageGenerationJob{
+		Mode:       "text_to_image",
+		ModeLabel:  "文生图",
+		Model:      "grok-imagine-image-quality",
+		Prompt:     "delete only history",
+		ImageCount: 1,
+	}, nil)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	asset, err := store.CreateImageAsset(ctx, ImageAsset{
+		AssetType:      "generated",
+		Status:         "available",
+		JobID:          job.ID,
+		SourceRole:     "output",
+		Slot:           1,
+		MimeType:       "image/png",
+		LocalName:      "manual-delete.png",
+		StorageBackend: "local",
+	})
+	if err != nil {
+		t.Fatalf("create asset: %v", err)
+	}
+	if _, err := store.CompleteImageGenerationJob(ctx, job.ID, "/images/generations", map[string]any{}, []ImageGenerationOutput{{
+		AssetID:   asset.ID,
+		Slot:      1,
+		LocalName: "manual-delete.png",
+		MimeType:  "image/png",
+		Storage:   "local",
+	}}); err != nil {
+		t.Fatalf("complete job: %v", err)
+	}
+
+	if err := store.DeleteImageGenerationJob(ctx, job.ID); err != nil {
+		t.Fatalf("delete job: %v", err)
+	}
+	if _, err := store.GetImageGenerationJob(ctx, job.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted job err = %v, want ErrNotFound", err)
+	}
+	if _, err := store.GetImageAsset(ctx, asset.ID); err != nil {
+		t.Fatalf("asset should remain after job delete: %v", err)
+	}
+}
+
+func TestDeleteMediaGenerationJobKeepsMediaAsset(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateMediaGenerationJob(ctx, MediaGenerationJob{
+		MediaType:   "image",
+		Provider:    "agnes",
+		Status:      "queued",
+		Mode:        "text_to_image",
+		ModeLabel:   "文生图",
+		Model:       "agnes-image-2.1-flash",
+		Prompt:      "delete media history",
+		Parameters:  map[string]any{"n": 1},
+		SourceCount: 0,
+	}, nil)
+	if err != nil {
+		t.Fatalf("create media job: %v", err)
+	}
+	asset, err := store.CreateMediaAsset(ctx, MediaAsset{
+		MediaType:      "image",
+		AssetType:      "generated",
+		Status:         "available",
+		Provider:       "agnes",
+		Model:          "agnes-image-2.1-flash",
+		JobID:          job.ID,
+		SourceRole:     "output",
+		Slot:           1,
+		MimeType:       "image/png",
+		LocalName:      "media-manual-delete.png",
+		StorageBackend: "local",
+	})
+	if err != nil {
+		t.Fatalf("create media asset: %v", err)
+	}
+	if _, err := store.CompleteMediaGenerationJob(ctx, job.ID, "/v1/images/generations", map[string]any{}, []MediaGenerationOutput{{
+		AssetID:   asset.ID,
+		Slot:      1,
+		MediaType: "image",
+		MimeType:  "image/png",
+		Storage:   "local",
+		SizeBytes: 123,
+	}}); err != nil {
+		t.Fatalf("complete media job: %v", err)
+	}
+
+	if err := store.DeleteMediaGenerationJob(ctx, job.ID); err != nil {
+		t.Fatalf("delete media job: %v", err)
+	}
+	if _, err := store.GetMediaGenerationJob(ctx, job.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted media job err = %v, want ErrNotFound", err)
+	}
+	if _, err := store.GetMediaAsset(ctx, asset.ID); err != nil {
+		t.Fatalf("media asset should remain after job delete: %v", err)
+	}
+}
+
 func TestListImageGenerationJobsDoesNotNestQueriesWhileRowsOpen(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "phantom-lancer.db"), nil)

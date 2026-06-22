@@ -600,8 +600,86 @@ func (s *Server) handleMediaGenerationSubroutes(w http.ResponseWriter, r *http.R
 		default:
 			writeError(w, http.StatusNotFound, "generation_action_not_found", "操作不存在")
 		}
+	case http.MethodDelete:
+		if !s.requireCSRF(w, r, ctx.Session) {
+			return
+		}
+		job, err := s.images.GetMediaJob(r.Context(), id)
+		if err == nil {
+			if mediaGenerationStatusActive(job.Status) {
+				writeError(w, http.StatusConflict, "generation_delete_active", "运行中的任务请先取消后再删除")
+				return
+			}
+			if err := s.store.DeleteMediaGenerationJob(r.Context(), id); err != nil {
+				writeError(w, http.StatusInternalServerError, "generation_delete_failed", err.Error())
+				return
+			}
+			_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+				EventType: "media.job.deleted",
+				RiskLevel: "medium",
+				Summary:   "Media generation 历史记录已删除",
+				Payload: map[string]any{
+					"jobId":       job.ID,
+					"mediaType":   job.MediaType,
+					"provider":    job.Provider,
+					"status":      job.Status,
+					"sourceCount": job.SourceCount,
+					"outputCount": len(job.Outputs),
+				},
+			})
+			writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "jobId": id, "jobType": "media"})
+			return
+		}
+		if !errors.Is(err, storage.ErrNotFound) {
+			writeError(w, http.StatusInternalServerError, "generation_job_read_failed", err.Error())
+			return
+		}
+		legacy, err := s.store.GetImageGenerationJob(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "generation_job_not_found", "Job 不存在")
+			return
+		}
+		if imageGenerationStatusActive(legacy.Status) {
+			writeError(w, http.StatusConflict, "generation_delete_active", "运行中的任务请先取消后再删除")
+			return
+		}
+		if err := s.store.DeleteImageGenerationJob(r.Context(), id); err != nil {
+			writeError(w, http.StatusInternalServerError, "generation_delete_failed", err.Error())
+			return
+		}
+		_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+			EventType: "images.job.deleted",
+			RiskLevel: "medium",
+			Summary:   "Images generation 历史记录已删除",
+			Payload: map[string]any{
+				"jobId":       legacy.ID,
+				"provider":    legacy.Provider,
+				"status":      legacy.Status,
+				"sourceCount": legacy.SourceCount,
+				"outputCount": len(legacy.Outputs),
+			},
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "jobId": id, "jobType": "legacy_image"})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+	}
+}
+
+func mediaGenerationStatusActive(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "queued", "running", "provider_queued":
+		return true
+	default:
+		return false
+	}
+}
+
+func imageGenerationStatusActive(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "queued", "running":
+		return true
+	default:
+		return false
 	}
 }
 

@@ -368,6 +368,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/images/generations", s.handleListMediaGenerations)
 	mux.HandleFunc("GET /api/images/generations/", s.handleMediaGenerationSubroutes)
 	mux.HandleFunc("POST /api/images/generations/", s.handleMediaGenerationSubroutes)
+	mux.HandleFunc("DELETE /api/images/generations/", s.handleMediaGenerationSubroutes)
 	mux.HandleFunc("GET /api/images/media-assets", s.handleListMediaAssets)
 	mux.HandleFunc("GET /api/images/media-assets/", s.handleMediaAssetSubroutes)
 	mux.HandleFunc("DELETE /api/images/media-assets/", s.handleMediaAssetSubroutes)

@@ -57,6 +57,7 @@ export function friendlyError(error: unknown): string {
   if (err.code === "codex_model_required") return "Codex app-server 需要明确模型。请选择一个可用模型后重试。";
   if (err.code === "api_key_missing") return "Images 模块尚未配置 xAI API Key。";
   if (err.code === "provider_failed") return `图片模型调用失败：${err.message}`;
+  if (err.code === "generation_delete_active") return "运行中的生成任务请先取消后再删除历史记录。";
   if (err.code === "images_settings_invalid") return `Images 设置无效：${err.message}`;
   if (err.code === "image_prompt_invalid") return `Prompt 无效：${err.message}`;
   if (err.code === "image_prompt_not_found") return "未找到该 Prompt，可能已被删除。";

@@ -1348,6 +1348,7 @@ export function HistoryPanel({
   mediaType,
   onMediaTypeChange,
   onCopyJobParams,
+  onDeleteJob,
   onOpenAsset,
   onProviderChange,
   pagination,
@@ -1368,6 +1369,7 @@ export function HistoryPanel({
   mediaType?: MediaType;
   onMediaTypeChange?: (t: MediaType) => void;
   onCopyJobParams?: (kind: "legacy" | "media", job: unknown) => void;
+  onDeleteJob?: (kind: "legacy" | "media", job: unknown) => void;
   onOpenAsset?: (assetId: string) => void;
   onProviderChange?: (p: ProviderID) => void;
   pagination?: PaginationState;
@@ -1477,6 +1479,7 @@ export function HistoryPanel({
                   job={row.job as ImageGenerationJob}
                   key={row.id}
                   onCopyParams={onCopyJobParams ? (j) => onCopyJobParams("legacy", j) : undefined}
+                  onDelete={onDeleteJob ? (j) => onDeleteJob("legacy", j) : undefined}
                   onRetry={onRetryJob ? (j) => onRetryJob("legacy", j) : undefined}
                   onRestore={onRestoreJob ? (j) => onRestoreJob("legacy", j) : undefined}
                   onSaveAsPreset={onSaveJobAsPreset ? (j) => onSaveJobAsPreset("legacy", j) : undefined}
@@ -1491,6 +1494,7 @@ export function HistoryPanel({
                   key={row.id}
                   libraryMediaAssets={libraryMediaAssets}
                   onCopyParams={onCopyJobParams ? (j) => onCopyJobParams("media", j) : undefined}
+                  onDelete={onDeleteJob ? (j) => onDeleteJob("media", j) : undefined}
                   onOpenAsset={onOpenAsset}
                   onRetry={onRetryJob ? (j) => onRetryJob("media", j) : undefined}
                   onRestore={onRestoreJob ? (j) => onRestoreJob("media", j) : undefined}
@@ -4170,7 +4174,7 @@ function mediaModeLabel(mode?: string, mediaType?: MediaType): string {
   return mode || "未知";
 }
 
-function MediaJobCard({ job, libraryMediaAssets = [], onCopyParams, onOpenAsset, onRetry, onRestore, onSaveAsPreset, onUseAssetAsReference, targetJobId, targetJobKind, onOpenLogs }: { job: MediaGenerationJob; libraryMediaAssets?: MediaAsset[]; onCopyParams?: (job: MediaGenerationJob) => void; onOpenAsset?: (assetId: string) => void; onRetry?: (job: MediaGenerationJob) => void; onRestore?: (job: MediaGenerationJob) => void; onSaveAsPreset?: (job: MediaGenerationJob) => void; onUseAssetAsReference?: (asset: MediaAsset) => void; targetJobId?: string; targetJobKind?: "legacy" | "media"; onOpenLogs?: (job: MediaGenerationJob) => void }) {
+function MediaJobCard({ job, libraryMediaAssets = [], onCopyParams, onDelete, onOpenAsset, onRetry, onRestore, onSaveAsPreset, onUseAssetAsReference, targetJobId, targetJobKind, onOpenLogs }: { job: MediaGenerationJob; libraryMediaAssets?: MediaAsset[]; onCopyParams?: (job: MediaGenerationJob) => void; onDelete?: (job: MediaGenerationJob) => void; onOpenAsset?: (assetId: string) => void; onRetry?: (job: MediaGenerationJob) => void; onRestore?: (job: MediaGenerationJob) => void; onSaveAsPreset?: (job: MediaGenerationJob) => void; onUseAssetAsReference?: (asset: MediaAsset) => void; targetJobId?: string; targetJobKind?: "legacy" | "media"; onOpenLogs?: (job: MediaGenerationJob) => void }) {
   const tone = mediaJobTone(job.status);
   const providerLabel = PROVIDERS.find((p) => p.id === job.provider)?.label || job.provider;
   const active = job.status === "queued" || job.status === "running" || job.status === "provider_queued";
@@ -4284,7 +4288,7 @@ function MediaJobCard({ job, libraryMediaAssets = [], onCopyParams, onOpenAsset,
           })}
         </div>
       ) : null}
-      {(onRetry || onRestore || onCopyParams || onSaveAsPreset) ? (
+      {(onRetry || onRestore || onCopyParams || onSaveAsPreset || onDelete) ? (
         <div className="flex flex-wrap gap-2 border-t border-[var(--line)] pt-2">
           {onRetry && job.status !== "queued" && job.status !== "running" && job.status !== "provider_queued" ? (
             <Button className="min-h-7 px-2 text-xs" onClick={() => onRetry(job)} type="button">
@@ -4304,6 +4308,11 @@ function MediaJobCard({ job, libraryMediaAssets = [], onCopyParams, onOpenAsset,
           {onSaveAsPreset && job.status === "success" ? (
             <Button className="min-h-7 px-2 text-xs" onClick={() => onSaveAsPreset(job)} type="button">
               保存为生成预设
+            </Button>
+          ) : null}
+          {onDelete && !active ? (
+            <Button className="min-h-7 px-2 text-xs" onClick={() => onDelete(job)} tone="danger" type="button">
+              删除记录
             </Button>
           ) : null}
         </div>
@@ -4334,7 +4343,7 @@ function MediaJobMini({ job }: { job: MediaGenerationJob }) {
   );
 }
 
-function JobCard({ job, onCopyParams, onRetry, onRestore, onSaveAsPreset, onUseOutputAsReference, targetJobId, targetJobKind, onOpenLogs }: { job: ImageGenerationJob; onCopyParams?: (job: ImageGenerationJob) => void; onRetry?: (job: ImageGenerationJob) => void; onRestore?: (job: ImageGenerationJob) => void; onSaveAsPreset?: (job: ImageGenerationJob) => void; onUseOutputAsReference?: (assetId: string, url?: string) => void; targetJobId?: string; targetJobKind?: "legacy" | "media"; onOpenLogs?: (job: ImageGenerationJob) => void }) {
+function JobCard({ job, onCopyParams, onDelete, onRetry, onRestore, onSaveAsPreset, onUseOutputAsReference, targetJobId, targetJobKind, onOpenLogs }: { job: ImageGenerationJob; onCopyParams?: (job: ImageGenerationJob) => void; onDelete?: (job: ImageGenerationJob) => void; onRetry?: (job: ImageGenerationJob) => void; onRestore?: (job: ImageGenerationJob) => void; onSaveAsPreset?: (job: ImageGenerationJob) => void; onUseOutputAsReference?: (assetId: string, url?: string) => void; targetJobId?: string; targetJobKind?: "legacy" | "media"; onOpenLogs?: (job: ImageGenerationJob) => void }) {
   const statusTone: Tone = job.status === "success" ? "good" : job.status === "failed" ? "danger" : "warn";
   const dataJobId = `legacy-${job.id}`;
   const isTarget = targetJobId && targetJobKind && `${targetJobKind}-${targetJobId}` === dataJobId;
@@ -4411,7 +4420,7 @@ function JobCard({ job, onCopyParams, onRetry, onRestore, onSaveAsPreset, onUseO
           )})}
          </div>
        ) : null}
-       {(onRetry || onRestore || onCopyParams || onSaveAsPreset) ? (
+       {(onRetry || onRestore || onCopyParams || onSaveAsPreset || onDelete) ? (
          <div className="flex flex-wrap gap-2 border-t border-[var(--line)] pt-2">
            {onRetry && job.status !== "queued" && job.status !== "running" ? (
              <Button className="min-h-7 px-2 text-xs" onClick={() => onRetry(job)} type="button">
@@ -4431,6 +4440,11 @@ function JobCard({ job, onCopyParams, onRetry, onRestore, onSaveAsPreset, onUseO
            {onSaveAsPreset && job.status === "success" ? (
              <Button className="min-h-7 px-2 text-xs" onClick={() => onSaveAsPreset(job)} type="button">
                保存为生成预设
+             </Button>
+           ) : null}
+           {onDelete && !active ? (
+             <Button className="min-h-7 px-2 text-xs" onClick={() => onDelete(job)} tone="danger" type="button">
+               删除记录
              </Button>
            ) : null}
          </div>
