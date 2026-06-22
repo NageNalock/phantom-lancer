@@ -25,6 +25,9 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/portfolios/{id}/holdings", s.handleListHoldings)
 	mux.HandleFunc("PUT /api/stockv2/portfolios/{id}/holdings/{holdingId}", s.handleUpdateHolding)
 	mux.HandleFunc("DELETE /api/stockv2/portfolios/{id}/holdings/{holdingId}", s.handleDeleteHolding)
+	mux.HandleFunc("POST /api/stockv2/portfolios/{id}/transactions", s.handleStockV2RecordTransaction)
+	mux.HandleFunc("GET /api/stockv2/portfolios/{id}/transactions", s.handleStockV2ListTransactions)
+	mux.HandleFunc("GET /api/stockv2/portfolios/{id}/asset-curve", s.handleStockV2GetAssetCurve)
 
 	// 股票主数据
 	mux.HandleFunc("GET /api/stockv2/instruments", s.handleListInstruments)

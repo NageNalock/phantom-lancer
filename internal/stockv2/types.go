@@ -74,6 +74,7 @@ type StockV2Holding struct {
 	MarketValue       float64   `json:"marketValue"`
 	PnL               float64   `json:"pnl"`
 	PositionPct       float64   `json:"positionPct"`
+	AcquiredAt        time.Time `json:"acquiredAt"` // 建仓时间(初始导入或首次买入时间)
 	CreatedAt         time.Time `json:"createdAt"`
 	UpdatedAt         time.Time `json:"updatedAt"`
 }
@@ -84,6 +85,32 @@ type StockV2HoldingPatch struct {
 	AvailableQuantity *float64 `json:"availableQuantity,omitempty"`
 	CostPrice         *float64 `json:"costPrice,omitempty"`
 	LastPrice         *float64 `json:"lastPrice,omitempty"`
+	AcquiredAt        *string  `json:"acquiredAt,omitempty"` // 建仓时间,支持 RFC3339 / datetime-local 格式
+}
+
+// StockV2Transaction 交易流水(买入/卖出)。每笔交易驱动持仓与现金变化,
+// 是组合资产变化的唯一来源;持仓和现金不再凭空手工调整。
+type StockV2Transaction struct {
+	ID          string    `json:"id"`
+	PortfolioID string    `json:"portfolioId"`
+	Symbol      string    `json:"symbol"`
+	Market      string    `json:"market,omitempty"`
+	Name        string    `json:"name,omitempty"`
+	Side        string    `json:"side"`       // buy | sell
+	Quantity    float64   `json:"quantity"`
+	Price       float64   `json:"price"`      // 成交单价
+	Amount      float64   `json:"amount"`     // = Quantity * Price(冗余便于展示)
+	ExecutedAt  time.Time `json:"executedAt"` // 成交时间(可填过去某次实际买入)
+	Note        string    `json:"note,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// TransactionResult 记录交易后的返回:更新后的组合、持仓与流水记录。
+type TransactionResult struct {
+	Transaction    StockV2Transaction `json:"transaction"`
+	Portfolio      StockV2Portfolio   `json:"portfolio"`
+	Holding        StockV2Holding     `json:"holding"`      // 卖出清仓时为零值
+	HoldingCleared bool               `json:"holdingCleared"` // 卖出清仓导致持仓删除
 }
 
 // StockV2UpdateJob 更新任务记录
@@ -246,16 +273,30 @@ type RequestUpdatePortfolio struct {
 
 // RequestCreateHolding 创建持仓请求
 type RequestCreateHolding struct {
-	Symbol    string  `json:"symbol"`
-	Name      string  `json:"name,omitempty"`
-	Market    string  `json:"market,omitempty"`
-	Quantity  float64 `json:"quantity"`
-	CostPrice float64 `json:"costPrice"`
+	Symbol     string  `json:"symbol"`
+	Name       string  `json:"name,omitempty"`
+	Market     string  `json:"market,omitempty"`
+	Quantity   float64 `json:"quantity"`
+	CostPrice  float64 `json:"costPrice"`
+	AcquiredAt string  `json:"acquiredAt,omitempty"` // 建仓时间,空用现在;支持 RFC3339 / datetime-local 格式
 }
 
 // RequestUpdateHolding 更新持仓请求
 type RequestUpdateHolding struct {
 	StockV2HoldingPatch
+}
+
+// RequestRecordTransaction 记录一笔买入/卖出交易。ExecutedAt 为空表示用当前时间,
+// 非空时支持 RFC3339 或 datetime-local("2006-01-02T15:04")格式,允许填过去的成交时间。
+type RequestRecordTransaction struct {
+	Symbol     string  `json:"symbol"`
+	Market     string  `json:"market,omitempty"`
+	Name       string  `json:"name,omitempty"`
+	Side       string  `json:"side"` // buy | sell
+	Quantity   float64 `json:"quantity"`
+	Price      float64 `json:"price"`
+	ExecutedAt string  `json:"executedAt,omitempty"`
+	Note       string  `json:"note,omitempty"`
 }
 
 // RequestCreateOrUpdateSettings 配置请求
@@ -279,6 +320,9 @@ var (
 	ErrPositionConstraint      = errors.New("position exceeds constraint")
 	InsufficientFunds          = errors.New("insufficient funds")
 	ErrUpdateJobAlreadyRunning = errors.New("update job already running")
+	ErrTransactionNotFound     = errors.New("transaction not found")
+	ErrInvalidTransactionSide  = errors.New("invalid transaction side")
+	ErrInsufficientHolding     = errors.New("insufficient holding quantity")
 )
 
 // 生成ID的辅助函数（带随机后缀，避免批量生成时冲突）

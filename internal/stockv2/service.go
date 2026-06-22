@@ -2,6 +2,7 @@ package stockv2
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -251,6 +252,12 @@ func (s *Service) CreateHolding(ctx context.Context, portfolioID string, req Req
 		market = inst.Market
 	}
 
+	// 解析建仓时间
+	acquiredAt, err := parseTransactionExecutedAt(req.AcquiredAt)
+	if err != nil {
+		return StockV2Holding{}, err
+	}
+
 	// 创建持仓
 	now := time.Now()
 	holding := StockV2Holding{
@@ -262,6 +269,7 @@ func (s *Service) CreateHolding(ctx context.Context, portfolioID string, req Req
 		Quantity:          req.Quantity,
 		AvailableQuantity: req.Quantity,
 		CostPrice:         req.CostPrice,
+		AcquiredAt:        acquiredAt,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
@@ -293,6 +301,13 @@ func (s *Service) UpdateHolding(ctx context.Context, portfolioID, holdingID stri
 	}
 	if req.LastPrice != nil {
 		holding.LastPrice = *req.LastPrice
+	}
+	if req.AcquiredAt != nil {
+		acquiredAt, err := parseTransactionExecutedAt(*req.AcquiredAt)
+		if err != nil {
+			return StockV2Holding{}, err
+		}
+		holding.AcquiredAt = acquiredAt
 	}
 
 	// 更新持仓
@@ -330,6 +345,162 @@ func (s *Service) ListHoldings(ctx context.Context, portfolioID string) ([]Stock
 	}
 
 	return holdings, nil
+}
+
+// RecordTransaction 记录一笔买入/卖出交易,原子地写流水、调整组合现金、调整持仓。
+// 买入扣现金(允许变负)、新建或加仓持仓(加权平均成本);卖出加现金、减仓,清仓则删除持仓,
+// 超量/卖空返回 ErrInsufficientHolding。事务提交后刷新一次估值并写快照(失败仅告警)。
+func (s *Service) RecordTransaction(ctx context.Context, portfolioID string, req RequestRecordTransaction) (TransactionResult, error) {
+	side := strings.TrimSpace(req.Side)
+	if side != "buy" && side != "sell" {
+		return TransactionResult{}, ErrInvalidTransactionSide
+	}
+	symbol := strings.TrimSpace(req.Symbol)
+	if symbol == "" || req.Quantity <= 0 || req.Price <= 0 {
+		return TransactionResult{}, errors.New("symbol, quantity and price are required")
+	}
+
+	executedAt, err := parseTransactionExecutedAt(req.ExecutedAt)
+	if err != nil {
+		return TransactionResult{}, err
+	}
+
+	// 主数据补全 name/market(沿用 CreateHolding 逻辑)
+	inst, _ := s.store.GetInstrument(ctx, symbol)
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = inst.Name
+	}
+	market := strings.TrimSpace(req.Market)
+	if market == "" {
+		market = inst.Market
+	}
+
+	amount := req.Quantity * req.Price
+	now := time.Now()
+	result := TransactionResult{}
+
+	if err := s.store.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		t := StockV2Transaction{
+			ID:          generateID(),
+			PortfolioID: portfolioID,
+			Symbol:      symbol,
+			Market:      market,
+			Name:        name,
+			Side:        side,
+			Quantity:    req.Quantity,
+			Price:       req.Price,
+			Amount:      amount,
+			ExecutedAt:  executedAt,
+			Note:        strings.TrimSpace(req.Note),
+			CreatedAt:   now,
+		}
+		if err := insertTransactionWithTx(ctx, tx, t); err != nil {
+			return err
+		}
+		result.Transaction = t
+
+		cash, err := getPortfolioCashWithTx(ctx, tx, portfolioID)
+		if err != nil {
+			return err
+		}
+
+		holding, found, err := getHoldingBySymbolWithTx(ctx, tx, portfolioID, symbol)
+		if err != nil {
+			return err
+		}
+
+		if side == "buy" {
+			newCash := cash - amount
+			if found {
+				// 加仓:加权平均成本
+				newQty := holding.Quantity + req.Quantity
+				holding.CostPrice = (holding.CostPrice*holding.Quantity + amount) / newQty
+				holding.Quantity = newQty
+				holding.AvailableQuantity = holding.AvailableQuantity + req.Quantity
+				holding.UpdatedAt = now
+				if err := updateHoldingWithTx(ctx, tx, holding); err != nil {
+					return err
+				}
+			} else {
+				holding = StockV2Holding{
+					ID:                generateID(),
+					PortfolioID:       portfolioID,
+					Symbol:            symbol,
+					Market:            market,
+					Name:              name,
+					Quantity:          req.Quantity,
+					AvailableQuantity: req.Quantity,
+					CostPrice:         req.Price,
+					AcquiredAt:        executedAt,
+					CreatedAt:         now,
+					UpdatedAt:         now,
+				}
+				if err := createHoldingWithTx(ctx, tx, holding); err != nil {
+					return err
+				}
+			}
+			result.Holding = holding
+			return updatePortfolioCashWithTx(ctx, tx, portfolioID, newCash, now)
+		}
+
+		// 卖出
+		if !found || holding.Quantity < req.Quantity-1e-9 {
+			return ErrInsufficientHolding
+		}
+		newCash := cash + amount
+		holding.Quantity -= req.Quantity
+		holding.AvailableQuantity -= req.Quantity
+		holding.UpdatedAt = now
+		if holding.Quantity <= 1e-9 {
+			if err := deleteHoldingWithTx(ctx, tx, holding.ID); err != nil {
+				return err
+			}
+			result.HoldingCleared = true
+		} else {
+			if err := updateHoldingWithTx(ctx, tx, holding); err != nil {
+				return err
+			}
+			result.Holding = holding
+		}
+		return updatePortfolioCashWithTx(ctx, tx, portfolioID, newCash, now)
+	}); err != nil {
+		return TransactionResult{}, err
+	}
+
+	// 交易已落库:重读完整组合(含最新 cash),再刷新估值拉最新价 + 写快照。
+	if portfolio, err := s.store.GetPortfolio(ctx, portfolioID); err == nil {
+		result.Portfolio = portfolio
+	}
+	if _, err := s.RefreshPortfolioValuation(ctx, portfolioID, "trade"); err != nil {
+		if s.log != nil {
+			s.log.Warn("refresh portfolio valuation after trade failed", "portfolioId", portfolioID, "err", err)
+		}
+	}
+	return result, nil
+}
+
+// ListTransactions 列出组合的交易流水,limit<=0 不限(资产曲线回算用)。
+func (s *Service) ListTransactions(ctx context.Context, portfolioID string, limit int) ([]StockV2Transaction, error) {
+	return s.store.ListTransactions(ctx, portfolioID, limit)
+}
+
+// parseTransactionExecutedAt 解析成交时间:空→now;支持 RFC3339 与 datetime-local 等本地格式;
+// 拒绝超过当前时间 5 分钟的未来时间(留时钟漂移容差)。
+func parseTransactionExecutedAt(raw string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Now(), nil
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04", "2006-01-02"} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			if d := time.Since(t); d < -5*time.Minute {
+				return time.Time{}, errors.New("executedAt cannot be in the future")
+			}
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid executedAt: %q", raw)
 }
 
 // ExecuteUniverseUpdate 执行股票主数据更新

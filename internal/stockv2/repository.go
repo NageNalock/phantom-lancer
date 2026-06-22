@@ -28,6 +28,21 @@ func wrapError(err error, msg string) error {
 	return fmt.Errorf("%s: %w", msg, err)
 }
 
+// runTx 在单个数据库事务里执行 apply:开启事务后运行 apply,出错自动回滚,
+// 全部成功才提交。沿用 SavePortfolioValuation 的事务模式,供 RecordTransaction
+// 这类「写流水 + 调现金 + 调持仓」的多步原子写复用。
+func (s *Store) runTx(ctx context.Context, apply func(ctx context.Context, tx *sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return wrapError(err, "begin transaction")
+	}
+	defer func() { _ = tx.Rollback() }() // commit 成功后为 no-op
+	if err := apply(ctx, tx); err != nil {
+		return err
+	}
+	return wrapError(tx.Commit(), "commit transaction")
+}
+
 // DefaultMarketDBPath 返回 Stock V2 市场数据资产库路径。
 // SQLite 只承载组合、持仓、任务和设置等操作状态；日 K 等历史行情明细
 // 进入 DuckDB，避免把高容量分析数据混入事务库。dataDir 为空时回退到
@@ -152,10 +167,28 @@ CREATE TABLE IF NOT EXISTS stockv2_holdings (
     market_value REAL DEFAULT 0.0,
     pnl REAL DEFAULT 0.0,
     position_pct REAL DEFAULT 0.0,
+    acquired_at DATETIME NOT NULL,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     FOREIGN KEY (portfolio_id) REFERENCES stockv2_portfolios(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS stockv2_transactions (
+    id TEXT PRIMARY KEY,
+    portfolio_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    market TEXT,
+    name TEXT,
+    side TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    price REAL NOT NULL,
+    amount REAL NOT NULL,
+    executed_at DATETIME NOT NULL,
+    note TEXT,
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (portfolio_id) REFERENCES stockv2_portfolios(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_transactions_portfolio ON stockv2_transactions(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_transactions_portfolio_executed ON stockv2_transactions(portfolio_id, executed_at);
 CREATE TABLE IF NOT EXISTS stockv2_quotes_latest (
     symbol TEXT PRIMARY KEY,
     market TEXT NOT NULL,
@@ -643,6 +676,11 @@ func (s *Store) init(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "stockv2_watches", "last_run_reason", "TEXT"); err != nil {
 		return fmt.Errorf("add watch last_run_reason column: %w", err)
 	}
+
+	// 增量迁移：持仓表加建仓时间
+	if err := s.ensureColumn(ctx, "stockv2_holdings", "acquired_at", "DATETIME"); err != nil {
+		return fmt.Errorf("add acquired_at column: %w", err)
+	}
 	alertColumns := []struct {
 		name    string
 		colType string
@@ -988,13 +1026,20 @@ func (s *Store) CreateHolding(ctx context.Context, holding StockV2Holding) error
 		INSERT INTO stockv2_holdings (
 			id, portfolio_id, symbol, market, name, quantity, available_quantity,
 			cost_price, last_price, last_price_at, tradable_status, market_value,
-			pnl, position_pct, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			pnl, position_pct, acquired_at, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	now := time.Now()
-	holding.CreatedAt = now
-	holding.UpdatedAt = now
+	if holding.CreatedAt.IsZero() {
+		holding.CreatedAt = now
+	}
+	if holding.UpdatedAt.IsZero() {
+		holding.UpdatedAt = now
+	}
+	if holding.AcquiredAt.IsZero() {
+		holding.AcquiredAt = now
+	}
 
 	_, err := s.db.ExecContext(ctx, query,
 		holding.ID,
@@ -1011,6 +1056,7 @@ func (s *Store) CreateHolding(ctx context.Context, holding StockV2Holding) error
 		holding.MarketValue,
 		holding.PnL,
 		holding.PositionPct,
+		holding.AcquiredAt,
 		holding.CreatedAt,
 		holding.UpdatedAt,
 	)
@@ -1023,7 +1069,7 @@ func (s *Store) GetHolding(ctx context.Context, id string) (StockV2Holding, erro
 	query := `
 		SELECT id, portfolio_id, symbol, COALESCE(market,''), COALESCE(name,''), quantity, available_quantity,
 		       cost_price, last_price, last_price_at, COALESCE(tradable_status,'unknown'), market_value,
-		       pnl, position_pct, created_at, updated_at
+		       pnl, position_pct, acquired_at, created_at, updated_at
 		FROM stockv2_holdings
 		WHERE id = ?
 	`
@@ -1032,6 +1078,7 @@ func (s *Store) GetHolding(ctx context.Context, id string) (StockV2Holding, erro
 
 	var holding StockV2Holding
 	var lastPriceAt sql.NullTime
+	var acquiredAt sql.NullTime
 	err := row.Scan(
 		&holding.ID,
 		&holding.PortfolioID,
@@ -1047,6 +1094,7 @@ func (s *Store) GetHolding(ctx context.Context, id string) (StockV2Holding, erro
 		&holding.MarketValue,
 		&holding.PnL,
 		&holding.PositionPct,
+		&acquiredAt,
 		&holding.CreatedAt,
 		&holding.UpdatedAt,
 	)
@@ -1061,6 +1109,12 @@ func (s *Store) GetHolding(ctx context.Context, id string) (StockV2Holding, erro
 	if lastPriceAt.Valid {
 		holding.LastPriceAt = lastPriceAt.Time
 	}
+	if acquiredAt.Valid {
+		holding.AcquiredAt = acquiredAt.Time
+	} else {
+		// 老数据没有 acquired_at,用 created_at 兜底
+		holding.AcquiredAt = holding.CreatedAt
+	}
 
 	return holding, nil
 }
@@ -1071,7 +1125,7 @@ func (s *Store) UpdateHolding(ctx context.Context, holding StockV2Holding) error
 		UPDATE stockv2_holdings
 		SET symbol = ?, market = ?, name = ?, quantity = ?, available_quantity = ?,
 		    cost_price = ?, last_price = ?, last_price_at = ?, tradable_status = ?,
-		    market_value = ?, pnl = ?, position_pct = ?, updated_at = ?
+		    market_value = ?, pnl = ?, position_pct = ?, acquired_at = ?, updated_at = ?
 		WHERE id = ?
 	`
 
@@ -1090,6 +1144,7 @@ func (s *Store) UpdateHolding(ctx context.Context, holding StockV2Holding) error
 		holding.MarketValue,
 		holding.PnL,
 		holding.PositionPct,
+		holding.AcquiredAt,
 		holding.UpdatedAt,
 		holding.ID,
 	)
@@ -1136,7 +1191,7 @@ func (s *Store) ListHoldings(ctx context.Context, portfolioID string) ([]StockV2
 	query := `
 		SELECT id, portfolio_id, symbol, COALESCE(market,''), COALESCE(name,''), quantity, available_quantity,
 		       cost_price, last_price, last_price_at, COALESCE(tradable_status,'unknown'), market_value,
-		       pnl, position_pct, created_at, updated_at
+		       pnl, position_pct, acquired_at, created_at, updated_at
 		FROM stockv2_holdings
 		WHERE portfolio_id = ?
 		ORDER BY created_at DESC
@@ -1152,6 +1207,7 @@ func (s *Store) ListHoldings(ctx context.Context, portfolioID string) ([]StockV2
 	for rows.Next() {
 		var holding StockV2Holding
 		var lastPriceAt sql.NullTime
+		var acquiredAt sql.NullTime
 		err := rows.Scan(
 			&holding.ID,
 			&holding.PortfolioID,
@@ -1167,6 +1223,7 @@ func (s *Store) ListHoldings(ctx context.Context, portfolioID string) ([]StockV2
 			&holding.MarketValue,
 			&holding.PnL,
 			&holding.PositionPct,
+			&acquiredAt,
 			&holding.CreatedAt,
 			&holding.UpdatedAt,
 		)
@@ -1175,6 +1232,11 @@ func (s *Store) ListHoldings(ctx context.Context, portfolioID string) ([]StockV2
 		}
 		if lastPriceAt.Valid {
 			holding.LastPriceAt = lastPriceAt.Time
+		}
+		if acquiredAt.Valid {
+			holding.AcquiredAt = acquiredAt.Time
+		} else {
+			holding.AcquiredAt = holding.CreatedAt
 		}
 		holdings = append(holdings, holding)
 	}

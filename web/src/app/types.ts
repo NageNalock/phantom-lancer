@@ -1821,8 +1821,58 @@ export interface StockV2Holding {
   marketValue: number;
   pnl: number;
   positionPct: number;
+  acquiredAt: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface StockV2Transaction {
+  id: string;
+  portfolioId: string;
+  symbol: string;
+  market: string;
+  name: string;
+  side: "buy" | "sell";
+  quantity: number;
+  price: number;
+  amount: number;
+  executedAt: string;
+  note: string;
+  createdAt: string;
+}
+
+export interface StockV2TransactionResult {
+  transaction: StockV2Transaction;
+  portfolio: StockV2Portfolio;
+  holding: StockV2Holding;
+  holdingCleared: boolean;
+}
+
+export interface StockV2AssetCurvePoint {
+  date: string; // YYYY-MM-DD
+  cash: number;
+  holdingValue: number;
+  total: number;
+}
+
+export interface StockV2AssetCurveMarker {
+  date: string;
+  side: "buy" | "sell";
+  symbol: string;
+  name: string;
+  quantity: number;
+  price: number;
+  amount: number;
+  total: number;
+}
+
+export interface StockV2AssetCurveResponse {
+  portfolioId: string;
+  points: StockV2AssetCurvePoint[];
+  markers: StockV2AssetCurveMarker[];
+  start: string;
+  end: string;
+  estimated: boolean;
 }
 
 export interface StockV2UpdateJob {
