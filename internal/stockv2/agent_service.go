@@ -1234,14 +1234,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 	redacted["structuredOutputRedacted"] = false // 结构化结果不跑全文脱敏
 	ledger.RedactionSummary = redacted
 
-	if _, err := s.store.UpdateAgentRun(ctx, run); err != nil {
-		s.log.Warn("finalize: update run failed", "run_id", runID, "error", err)
-	}
-	if _, err := s.store.UpdateAgentDecisionLedger(ctx, ledger); err != nil {
-		s.log.Warn("finalize: update ledger failed", "run_id", runID, "error", err)
-	}
-
-	// 更新 Review result(自动跑 guardrails)
+	// 更新 Review result(自动跑 guardrails)。先让闭环对象落地成功，再把 AgentRun 暴露为 completed。
 	if run.TriggerObjectType == "operation_review" && run.TriggerObjectID != "" {
 		reviewID := run.TriggerObjectID
 		saveReq := RequestSaveOperationReviewResult{
@@ -1250,7 +1243,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 			ResultSummary: submitted.ResultSummary,
 			Status:        OperationReviewStatusCompleted,
 		}
-		if _, err := s.SaveOperationReviewResult(ctx, reviewID, saveReq); err != nil {
+		if _, err := s.saveOperationReviewResult(ctx, reviewID, saveReq, &run); err != nil {
 			run.Status = AgentRunStatusFailed
 			run.ErrorMessage = safelog.Text("save review result failed: "+err.Error(), 500)
 			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
@@ -1259,7 +1252,18 @@ func (s *Service) finalizeAgentRunWithOutput(
 			if s.log != nil {
 				s.log.Warn("finalize: save review result failed", "run_id", runID, "review_id", reviewID, "error", err)
 			}
+			if _, ledgerErr := s.store.UpdateAgentDecisionLedger(ctx, ledger); ledgerErr != nil && s.log != nil {
+				s.log.Warn("finalize: update ledger after review save failed", "run_id", runID, "error", ledgerErr)
+			}
+			return
 		}
+	}
+
+	if _, err := s.store.UpdateAgentDecisionLedger(ctx, ledger); err != nil && s.log != nil {
+		s.log.Warn("finalize: update ledger failed", "run_id", runID, "error", err)
+	}
+	if _, err := s.store.UpdateAgentRun(ctx, run); err != nil && s.log != nil {
+		s.log.Warn("finalize: update run failed", "run_id", runID, "error", err)
 	}
 }
 

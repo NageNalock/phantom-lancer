@@ -195,6 +195,10 @@ func (s *Service) CountOperationReviews(ctx context.Context, filter OperationRev
 }
 
 func (s *Service) SaveOperationReviewResult(ctx context.Context, id string, req RequestSaveOperationReviewResult) (OperationReview, error) {
+	return s.saveOperationReviewResult(ctx, id, req, nil)
+}
+
+func (s *Service) saveOperationReviewResult(ctx context.Context, id string, req RequestSaveOperationReviewResult, agentRun *AgentRun) (OperationReview, error) {
 	current, err := s.store.GetOperationReview(ctx, id)
 	if err != nil {
 		return OperationReview{}, err
@@ -248,14 +252,14 @@ func (s *Service) SaveOperationReviewResult(ctx context.Context, id string, req 
 		if err := s.store.UpdateMonitorHitStatus(ctx, current.HitID, hitStatus); err != nil {
 			return OperationReview{}, err
 		}
-		if err := s.syncMonitorAlertForReviewResult(ctx, updated); err != nil {
+		if err := s.syncMonitorAlertForReviewResult(ctx, updated, agentRun); err != nil {
 			return OperationReview{}, err
 		}
 	}
 	return updated, nil
 }
 
-func (s *Service) syncMonitorAlertForReviewResult(ctx context.Context, review OperationReview) error {
+func (s *Service) syncMonitorAlertForReviewResult(ctx context.Context, review OperationReview, agentRun *AgentRun) error {
 	if strings.TrimSpace(review.HitID) == "" ||
 		(review.Status != OperationReviewStatusCompleted && review.Status != OperationReviewStatusClosed) {
 		return nil
@@ -269,7 +273,9 @@ func (s *Service) syncMonitorAlertForReviewResult(ctx context.Context, review Op
 		if err != nil {
 			return err
 		}
-		agentRun, _ := s.latestCompletedAgentRunForReview(ctx, review.ID)
+		if agentRun == nil {
+			agentRun, _ = s.latestCompletedAgentRunForReview(ctx, review.ID)
+		}
 		triggerSource := AlertTriggerSourceManualReviewConfirmed
 		if agentRun != nil {
 			triggerSource = AlertTriggerSourceAgentConfirmed

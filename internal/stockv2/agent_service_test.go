@@ -557,6 +557,61 @@ func TestRunAgentCLIDebugPersistsOutputAndSubmittedResult(t *testing.T) {
 	}
 }
 
+func TestFinalizeAgentRunFailsWhenReviewSaveFails(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeCodexCLI,
+		Name:         "codex-review-save",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	model, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID: provider.ID,
+		ModelName:  "gpt-review-save",
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	run, ledger, err := svc.CreateAgentRunRecord(ctx, AgentRunRecordParams{
+		TaskType:          AgentTaskTypeOperationReview,
+		ProviderID:        provider.ID,
+		ModelID:           model.ID,
+		TriggerObjectType: "operation_review",
+		TriggerObjectID:   "missing-review",
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	taskID, _ := svc.agentTaskPool.createTask(run.TaskType, run.ID, run.TriggerObjectID, time.Minute)
+	if _, err := svc.agentTaskPool.submitResult(taskID, AgentTaskTypeOperationReview, AgentTaskSubmittedResult{
+		OutputType:    OperationReviewOutputContinueMonitoring,
+		ResultSummary: "valid agent output",
+		Result:        map[string]any{"reason": "review save should fail"},
+		Confidence:    0.9,
+	}); err != nil {
+		t.Fatalf("submit result: %v", err)
+	}
+
+	svc.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, &AgentExecutorOutput{
+		ExitCode:   0,
+		Duration:   time.Millisecond,
+		StdoutTail: "ok",
+	}, nil)
+
+	got, err := svc.GetAgentRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.Status != AgentRunStatusFailed || !strings.Contains(got.ErrorMessage, "save review result failed") {
+		t.Fatalf("run = %+v, want failed review-save error", got)
+	}
+}
+
 type fakeDebugAgentExecutor struct {
 	pool *agentTaskPool
 }

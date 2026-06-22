@@ -53,7 +53,7 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
   }
 
   async function handleFetchFinancialJuice() {
-    await runAction("抓取 FinancialJuice RawNews", async () => {
+    await runAction("运行 FinancialJuice 消息处理", async () => {
       await actions.api("/api/stockv2/news/sources/financialjuice/fetch", { method: "POST" });
     });
   }
@@ -211,11 +211,11 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
 
       <Panel
         title="英文消息源"
-        subtitle="FinancialJuice 先落 RawNews，不触发 Agent"
+        subtitle="FinancialJuice 走统一抓取、归一化与关联链路"
         actions={
           <div className="flex flex-wrap gap-2">
             <Button onClick={() => void handleFetchFinancialJuice()} disabled={!form.financialJuiceEnabled || !settings.financialJuiceCookieSet}>
-              抓取一次
+              处理一次
             </Button>
             <Button onClick={() => void handleClearFinancialJuiceCookie()} disabled={!settings.financialJuiceCookieSet}>
               清除 Cookie

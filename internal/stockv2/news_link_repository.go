@@ -49,7 +49,20 @@ func (s *Store) GetNewsEvent(ctx context.Context, id string) (NewsEvent, error) 
 	return event, nil
 }
 
-func (s *Store) ListPendingNewsEvents(ctx context.Context, limit int) ([]NewsEvent, error) {
+func (s *Store) ListPendingNewsEvents(ctx context.Context, source string, limit int) ([]NewsEvent, error) {
+	source = strings.TrimSpace(source)
+	if source != "" {
+		rows, err := s.db.QueryContext(ctx, newsEventSelectSQL()+`
+			WHERE link_status = ? AND source = ?
+			ORDER BY event_at ASC, created_at ASC
+			LIMIT ?
+		`, NewsEventLinkStatusPending, source, normalizedNewsBatchLimit(limit))
+		if err != nil {
+			return nil, wrapError(err, "list pending news events")
+		}
+		defer rows.Close()
+		return collectNewsEvents(rows)
+	}
 	rows, err := s.db.QueryContext(ctx, newsEventSelectSQL()+`
 		WHERE link_status = ?
 		ORDER BY event_at ASC, created_at ASC
@@ -119,7 +132,17 @@ func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, candidate NewsLinkC
 	if err != nil {
 		return NewsLinkCandidate{}, wrapError(err, "upsert news link candidate")
 	}
-	return candidate, nil
+	row := s.db.QueryRowContext(ctx, newsLinkCandidateSelectSQL()+`
+		WHERE c.news_event_id = ? AND c.symbol = ?
+	`, candidate.NewsEventID, candidate.Symbol)
+	item, err := scanNewsLinkCandidate(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return NewsLinkCandidate{}, ErrNewsLinkCandidateNotFound
+		}
+		return NewsLinkCandidate{}, wrapError(err, "get upserted news link candidate")
+	}
+	return item, nil
 }
 
 func (s *Store) GetNewsLinkCandidate(ctx context.Context, id string) (NewsLinkCandidate, error) {

@@ -36,7 +36,7 @@ type Service struct {
 
 // NewService 创建新的股票V2服务
 func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Service {
-	return &Service{
+	svc := &Service{
 		store:           store,
 		log:             log,
 		httpClient:      httpClient,
@@ -50,6 +50,8 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 			return exec.CommandContext(ctx, "codex", args...).CombinedOutput()
 		},
 	}
+	svc.newsAdapters[NewsSourceFinancialJuice] = financialJuiceNewsSourceAdapter{service: svc}
+	return svc
 }
 
 func (s *Service) WithNewsSourceAdapter(adapter NewsSourceAdapter) *Service {

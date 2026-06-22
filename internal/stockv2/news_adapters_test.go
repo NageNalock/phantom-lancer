@@ -97,6 +97,68 @@ func TestFinancialJuiceMockFetchToRawNews(t *testing.T) {
 	}
 }
 
+func TestFinancialJuiceRunsThroughNewsPipeline(t *testing.T) {
+	var sawCookie string
+	client := &http.Client{Transport: newsRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		sawCookie = r.Header.Get("Cookie")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"d":"{\"News\":[{\"NewsID\":12345,\"Headline\":\"Fed officials discuss rate path\",\"Text\":\"Policy comments moved US yields.\",\"NewsTime\":\"2026-06-18T10:30:00Z\",\"URL\":\"https://example.test/fed\"}]}"}`)),
+			Request:    r,
+		}, nil
+	})}
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	svc.httpClient = client
+	ctx := context.Background()
+	if err := svc.Initialize(ctx); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	enabled := true
+	cookie := "example_session=placeholder"
+	if _, err := svc.CreateOrUpdateSettings(ctx, RequestCreateOrUpdateSettings{
+		FinancialJuiceEnabled:     &enabled,
+		FinancialJuiceCookieInput: &cookie,
+	}); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	svc.WithNewsEventLinker(NewsEventLinkerFunc(func(ctx context.Context, event NewsEvent) ([]NewsLinkCandidate, error) {
+		return []NewsLinkCandidate{{
+			Symbol:      "FED001",
+			Market:      "US",
+			MatchMethod: "test",
+			Score:       0.8,
+			Reason:      event.Title,
+		}}, nil
+	}))
+
+	result, err := svc.RunNewsPipelineOnce(ctx, NewsSourceFinancialJuice)
+	if err != nil {
+		t.Fatalf("run financialjuice pipeline: %v", err)
+	}
+	if sawCookie != cookie {
+		t.Fatalf("cookie header = %q, want configured cookie", sawCookie)
+	}
+	if result.FetchedCount != 1 || result.RawInsertedCount != 1 || result.NormalizedCount != 1 || result.LinkCandidateCount != 1 {
+		t.Fatalf("pipeline result = %+v, want full ingest/process/link", result)
+	}
+	state, ok, err := svc.GetNewsSourceState(ctx, NewsSourceFinancialJuice)
+	if err != nil {
+		t.Fatalf("get source state: %v", err)
+	}
+	if !ok || state.RawNewsCount != 1 || state.NewsEventCount != 1 || state.LinkCandidateCount != 1 {
+		t.Fatalf("state = %+v, ok=%v", state, ok)
+	}
+	candidates, err := svc.ListNewsLinkCandidates(ctx, NewsLinkCandidateListFilter{Symbol: "FED001"})
+	if err != nil {
+		t.Fatalf("list candidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].NewsEventID == "" {
+		t.Fatalf("candidates = %+v, want linked FinancialJuice candidate", candidates)
+	}
+}
+
 func TestMockAlphaVantageAndFMPResponseToRawNews(t *testing.T) {
 	fetchedAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	alpha, err := ParseAlphaVantageRawNews([]byte(`{

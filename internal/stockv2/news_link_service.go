@@ -51,7 +51,7 @@ func (s *Service) LinkNewsEvent(ctx context.Context, eventID string) ([]NewsLink
 }
 
 func (s *Service) LinkPendingNewsEventsBatch(ctx context.Context, limit int) (LinkNewsEventsBatchResult, error) {
-	events, err := s.store.ListPendingNewsEvents(ctx, limit)
+	events, err := s.store.ListPendingNewsEvents(ctx, "", limit)
 	if err != nil {
 		return LinkNewsEventsBatchResult{}, err
 	}

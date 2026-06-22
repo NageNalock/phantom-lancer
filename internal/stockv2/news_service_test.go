@@ -80,3 +80,48 @@ func TestNewsInvalidInput(t *testing.T) {
 		t.Fatalf("raw news content err = %v, want ErrInvalidRawNewsContent", err)
 	}
 }
+
+func TestNewsLinkCandidateUpsertReturnsStoredID(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	event, err := svc.CreateNewsEvent(ctx, NewsEvent{Source: "jin10", Title: "半导体设备订单"})
+	if err != nil {
+		t.Fatalf("create event: %v", err)
+	}
+	first, err := svc.store.UpsertNewsLinkCandidate(ctx, NewsLinkCandidate{
+		ID:          "candidate-original",
+		NewsEventID: event.ID,
+		Symbol:      "688012",
+		Market:      "SH",
+		MatchMethod: "keyword",
+		Score:       0.7,
+		Reason:      "first",
+	})
+	if err != nil {
+		t.Fatalf("upsert first: %v", err)
+	}
+	second, err := svc.store.UpsertNewsLinkCandidate(ctx, NewsLinkCandidate{
+		ID:          "candidate-new",
+		NewsEventID: event.ID,
+		Symbol:      "688012",
+		Market:      "SH",
+		MatchMethod: "keyword",
+		Score:       0.9,
+		Reason:      "updated",
+	})
+	if err != nil {
+		t.Fatalf("upsert second: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("second id = %q, want stored id %q", second.ID, first.ID)
+	}
+	reloaded, err := svc.store.GetNewsLinkCandidate(ctx, second.ID)
+	if err != nil {
+		t.Fatalf("get returned candidate: %v", err)
+	}
+	if reloaded.Score != 0.9 || reloaded.Reason != "updated" {
+		t.Fatalf("reloaded candidate = %+v, want updated fields", reloaded)
+	}
+}

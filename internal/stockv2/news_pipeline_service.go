@@ -133,14 +133,11 @@ func (s *Service) RunNewsProcessingBatch(ctx context.Context, source string, raw
 		result.NormalizedCount++
 	}
 
-	events, err := s.store.ListPendingNewsEvents(ctx, eventLimit)
+	events, err := s.store.ListPendingNewsEvents(ctx, source, eventLimit)
 	if err != nil {
 		return result, err
 	}
 	for _, event := range events {
-		if source != "" && event.Source != source {
-			continue
-		}
 		if s.newsLinker == nil {
 			candidates, linkErr := s.LinkNewsEvent(ctx, event.ID)
 			if linkErr != nil {

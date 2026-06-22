@@ -163,6 +163,51 @@ func TestNewsProcessingBatchCreatesEventsAndCandidates(t *testing.T) {
 	}
 }
 
+func TestNewsProcessingBatchSourceFilterDoesNotStarve(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	other, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source:  "other_news",
+		Title:   "其他来源的旧消息",
+		EventAt: time.Now().Add(-time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create other event: %v", err)
+	}
+	target, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source:  "target_news",
+		Title:   "目标来源消息",
+		EventAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("create target event: %v", err)
+	}
+
+	result, err := svc.RunNewsProcessingBatch(ctx, "target_news", 1, 1)
+	if err != nil {
+		t.Fatalf("run processing batch: %v", err)
+	}
+	if result.NormalizedCount != 0 || result.LinkCandidateCount != 0 {
+		t.Fatalf("result = %+v, want only target no-candidate processing", result)
+	}
+	gotTarget, err := svc.store.GetNewsEvent(ctx, target.ID)
+	if err != nil {
+		t.Fatalf("get target event: %v", err)
+	}
+	if gotTarget.LinkStatus != NewsEventLinkStatusNoCandidate {
+		t.Fatalf("target link status = %q, want no_candidate", gotTarget.LinkStatus)
+	}
+	gotOther, err := svc.store.GetNewsEvent(ctx, other.ID)
+	if err != nil {
+		t.Fatalf("get other event: %v", err)
+	}
+	if gotOther.LinkStatus != NewsEventLinkStatusPending {
+		t.Fatalf("other link status = %q, want pending", gotOther.LinkStatus)
+	}
+}
+
 type fakeNewsAdapter struct {
 	source  string
 	result  NewsSourceFetchResult

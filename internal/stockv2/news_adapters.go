@@ -22,19 +22,6 @@ const (
 	maxFinancialJuiceCookie  = 16 << 10
 )
 
-type RawNewsAdapter interface {
-	Source() string
-	FetchRawNews(ctx context.Context) ([]RequestCreateRawNews, error)
-}
-
-type RawNewsSourceFetchResult struct {
-	Source       string           `json:"source"`
-	FetchedCount int              `json:"fetchedCount"`
-	StoredCount  int              `json:"storedCount"`
-	Items        []StockV2RawNews `json:"items"`
-	FetchedAt    time.Time        `json:"fetchedAt"`
-}
-
 type FinancialJuiceAdapterConfig struct {
 	Enabled  bool
 	Cookie   string
@@ -100,47 +87,57 @@ func (a *FinancialJuiceRawNewsAdapter) FetchRawNews(ctx context.Context) ([]Requ
 	return ParseFinancialJuiceRawNews(body, a.cfg.Now())
 }
 
-func (s *Service) FetchRawNewsFromSource(ctx context.Context, source string) (RawNewsSourceFetchResult, error) {
-	adapter, err := s.rawNewsAdapter(ctx, source)
-	if err != nil {
-		return RawNewsSourceFetchResult{}, err
-	}
-	// ponytail: English feeds are manual fetch adapters for now; add scheduling only after cadence and value are proven.
-	rawItems, err := adapter.FetchRawNews(ctx)
-	if err != nil {
-		return RawNewsSourceFetchResult{}, err
-	}
-	result := RawNewsSourceFetchResult{
-		Source:       adapter.Source(),
-		FetchedCount: len(rawItems),
-		FetchedAt:    time.Now(),
-	}
-	for _, raw := range rawItems {
-		item, err := s.CreateRawNews(ctx, raw)
-		if err != nil {
-			return result, err
-		}
-		result.Items = append(result.Items, item)
-	}
-	result.StoredCount = len(result.Items)
-	return result, nil
+type financialJuiceNewsSourceAdapter struct {
+	service *Service
 }
 
-func (s *Service) rawNewsAdapter(ctx context.Context, source string) (RawNewsAdapter, error) {
-	switch normalizeNewsSource(source) {
-	case NewsSourceFinancialJuice:
-		settings, err := s.GetSettings(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return NewFinancialJuiceRawNewsAdapter(FinancialJuiceAdapterConfig{
-			Enabled: settings.FinancialJuiceEnabled,
-			Cookie:  settings.FinancialJuiceCookie,
-			Client:  s.httpClient,
-		}), nil
-	default:
-		return nil, ErrUnsupportedNewsSource
+func (a financialJuiceNewsSourceAdapter) SourceName() string {
+	return NewsSourceFinancialJuice
+}
+
+func (a financialJuiceNewsSourceAdapter) FetchSince(ctx context.Context, cursor NewsSourceCursor) (NewsSourceFetchResult, error) {
+	if a.service == nil {
+		return NewsSourceFetchResult{}, ErrNewsSourceAdapterNotFound
 	}
+	settings, err := a.service.GetSettings(ctx)
+	if err != nil {
+		return NewsSourceFetchResult{}, err
+	}
+	if !settings.FinancialJuiceEnabled {
+		return NewsSourceFetchResult{Disabled: true, FetchedAt: time.Now()}, nil
+	}
+	adapter := NewFinancialJuiceRawNewsAdapter(FinancialJuiceAdapterConfig{
+		Enabled: settings.FinancialJuiceEnabled,
+		Cookie:  settings.FinancialJuiceCookie,
+		Client:  a.service.httpClient,
+	})
+	rawItems, err := adapter.FetchRawNews(ctx)
+	if err != nil {
+		return NewsSourceFetchResult{}, err
+	}
+	fetchedAt := time.Now()
+	if !cursor.Since.IsZero() {
+		filtered := rawItems[:0]
+		for _, raw := range rawItems {
+			if raw.PublishedAt.IsZero() || raw.PublishedAt.After(cursor.Since) {
+				filtered = append(filtered, raw)
+			}
+		}
+		rawItems = filtered
+	}
+	items := make([]map[string]any, 0, len(rawItems))
+	for _, raw := range rawItems {
+		items = append(items, rawNewsRequestPayload(raw))
+	}
+	return NewsSourceFetchResult{Items: items, FetchedAt: fetchedAt}, nil
+}
+
+func (a financialJuiceNewsSourceAdapter) NormalizeRawPayload(payload map[string]any) (RequestCreateRawNews, error) {
+	return rawNewsRequestFromAdapterPayload(NewsSourceFinancialJuice, payload, time.Now())
+}
+
+func (s *Service) FetchRawNewsFromSource(ctx context.Context, source string) (NewsPipelineRunResult, error) {
+	return s.RunNewsPipelineOnce(ctx, source)
 }
 
 func ParseFinancialJuiceCookieInput(raw string) (string, error) {
@@ -292,6 +289,42 @@ func rawNewsRequestFromMap(source string, item map[string]any, fetchedAt time.Ti
 		Quality:     NewsQualityOK,
 		Status:      NewsStatusNew,
 	}, true
+}
+
+func rawNewsRequestPayload(item RequestCreateRawNews) map[string]any {
+	payload := map[string]any{
+		"source_id":    item.SourceID,
+		"title":        item.Title,
+		"snippet":      item.Snippet,
+		"content":      item.Content,
+		"url":          item.URL,
+		"dedupe_key":   item.DedupeKey,
+		"quality":      item.Quality,
+		"raw_payload":  item.RawPayload,
+		"published_at": item.PublishedAt.UTC().Format(time.RFC3339Nano),
+		"fetched_at":   item.FetchedAt.UTC().Format(time.RFC3339Nano),
+	}
+	return payload
+}
+
+func rawNewsRequestFromAdapterPayload(source string, payload map[string]any, fallbackFetchedAt time.Time) (RequestCreateRawNews, error) {
+	req, ok := rawNewsRequestFromMap(source, payload, fallbackFetchedAt)
+	if !ok {
+		return RequestCreateRawNews{}, ErrInvalidRawNewsContent
+	}
+	if fetchedAt := parseNewsPublishedAt(firstNewsString(payload, "fetched_at", "fetchedAt"), fallbackFetchedAt); !fetchedAt.IsZero() {
+		req.FetchedAt = fetchedAt
+	}
+	if dedupeKey := firstNewsString(payload, "dedupe_key", "dedupeKey"); dedupeKey != "" {
+		req.DedupeKey = dedupeKey
+	}
+	if quality := firstNewsString(payload, "quality", "Quality"); quality != "" {
+		req.Quality = quality
+	}
+	if rawPayload, ok := payload["raw_payload"].(map[string]any); ok {
+		req.RawPayload = rawPayload
+	}
+	return req, nil
 }
 
 func firstNewsString(item map[string]any, keys ...string) string {
