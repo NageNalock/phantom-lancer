@@ -336,6 +336,31 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 		b.WriteString("\n")
 	}
 
+	// News
+	if pack.NewsEvent != nil {
+		b.WriteString("## News Context\n\n")
+		fmt.Fprintf(&b, "- Source: %s\n", pack.NewsEvent.Source)
+		fmt.Fprintf(&b, "- Title: %s\n", pack.NewsEvent.Title)
+		if pack.NewsEvent.Summary != "" {
+			fmt.Fprintf(&b, "- Summary: %s\n", pack.NewsEvent.Summary)
+		}
+		if !pack.NewsEvent.EventAt.IsZero() {
+			fmt.Fprintf(&b, "- Event Time: %s\n", pack.NewsEvent.EventAt.Format(time.RFC3339))
+		}
+		if pack.NewsLink != nil {
+			fmt.Fprintf(&b, "- Candidate Score: %.2f\n", pack.NewsLink.Score)
+			fmt.Fprintf(&b, "- Match Method: %s\n", pack.NewsLink.MatchMethod)
+			fmt.Fprintf(&b, "- Match Reason: %s\n", pack.NewsLink.Reason)
+			if len(pack.NewsLink.MatchedTerms) > 0 {
+				fmt.Fprintf(&b, "- Matched Terms: %s\n", strings.Join(pack.NewsLink.MatchedTerms, ", "))
+			}
+		}
+		if pack.Profile != nil {
+			fmt.Fprintf(&b, "- Stock Profile: %s %s %s\n", pack.Profile.Symbol, pack.Profile.Name, pack.Profile.ProfileText)
+		}
+		b.WriteString("- Treat the link candidate as high-recall evidence, not as a confirmed fact.\n\n")
+	}
+
 	// Quote
 	if pack.Quote != nil {
 		b.WriteString("## Latest Quote\n\n")

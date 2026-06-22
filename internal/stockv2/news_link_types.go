@@ -17,6 +17,11 @@ const (
 	NewsLinkMatchKeyword        = "keyword"
 	NewsLinkMatchProfileKeyword = "profile_keyword"
 	NewsLinkMatchBoosted        = "boosted"
+
+	NewsLinkMonitorStatusPending = "pending"
+	NewsLinkMonitorStatusHit     = "hit"
+	NewsLinkMonitorStatusSkipped = "skipped"
+	NewsLinkMonitorStatusFailed  = "failed"
 )
 
 var (
@@ -54,18 +59,22 @@ type NewsLinkCandidate struct {
 	Score          float64   `json:"score"`
 	Reason         string    `json:"reason"`
 	MatchedTerms   []string  `json:"matchedTerms"`
+	MonitorStatus  string    `json:"monitorStatus,omitempty"`
+	MonitorHitID   string    `json:"monitorHitId,omitempty"`
+	MonitoredAt    time.Time `json:"monitoredAt,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 type NewsLinkCandidateListFilter struct {
-	NewsEventID string
-	RawNewsID   string
-	Symbol      string
-	Market      string
-	MatchMethod string
-	Limit       int
-	Offset      int
+	NewsEventID   string
+	RawNewsID     string
+	Symbol        string
+	Market        string
+	MatchMethod   string
+	MonitorStatus string
+	Limit         int
+	Offset        int
 }
 
 type LinkNewsEventsBatchResult struct {

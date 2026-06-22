@@ -94,6 +94,40 @@ func (s *Service) BuildAgentContextPack(ctx context.Context, hit MonitorHit) (Ag
 	symbol := strings.TrimSpace(hit.Symbol)
 	portfolioID := strings.TrimSpace(hit.PortfolioID)
 
+	if candidateID := stringFromAny(pack.Evidence["candidate_id"]); candidateID != "" {
+		candidate, err := s.store.GetNewsLinkCandidate(ctx, candidateID)
+		if err == nil {
+			pack.NewsLink = &candidate
+			if symbol == "" {
+				symbol = candidate.Symbol
+			}
+		} else if errors.Is(err, ErrNewsLinkCandidateNotFound) {
+			freshness["newsLinkCandidate"] = map[string]any{"status": "missing"}
+		} else {
+			return AgentContextPack{}, err
+		}
+	}
+	newsEventID := stringFromAny(pack.Evidence["news_event_id"])
+	if newsEventID == "" && pack.NewsLink != nil {
+		newsEventID = pack.NewsLink.NewsEventID
+	}
+	if newsEventID != "" {
+		event, err := s.store.GetNewsEvent(ctx, newsEventID)
+		if err == nil {
+			pack.NewsEvent = &event
+			freshness["newsEvent"] = map[string]any{
+				"status":        "present",
+				"source":        event.Source,
+				"eventAt":       event.EventAt,
+				"qualityStatus": event.QualityStatus,
+			}
+		} else if errors.Is(err, ErrNewsEventNotFound) {
+			freshness["newsEvent"] = map[string]any{"status": "missing"}
+		} else {
+			return AgentContextPack{}, err
+		}
+	}
+
 	if hit.StrategyID != "" {
 		if strategy, err := s.store.GetStrategy(ctx, hit.StrategyID); err == nil {
 			pack.Strategy = &strategy
@@ -124,6 +158,16 @@ func (s *Service) BuildAgentContextPack(ctx context.Context, hit MonitorHit) (Ag
 		}
 		pack.DailyBars = s.buildDailyBarsContext(ctx, symbol)
 		freshness["dailyBars"] = dailyBarsFreshnessSummary(pack.DailyBars)
+		if pack.NewsEvent != nil {
+			if profile, err := s.store.GetStockProfile(ctx, symbol); err == nil {
+				pack.Profile = &profile
+				freshness["stockProfile"] = map[string]any{"status": "present", "profileVersion": profile.ProfileVersion}
+			} else if errors.Is(err, ErrStockProfileNotFound) {
+				freshness["stockProfile"] = map[string]any{"status": "missing"}
+			} else {
+				return AgentContextPack{}, err
+			}
+		}
 	}
 
 	if portfolioID != "" {

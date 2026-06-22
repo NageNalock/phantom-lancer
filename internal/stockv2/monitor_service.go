@@ -15,6 +15,11 @@ import (
 // data_strategy / portfolio_risk 产生 MonitorHit(候选),不生成买卖建议、不改持仓。
 // universe / quote / daily_bars 仅委托现有执行器并记录摘要行,不复制执行逻辑。
 
+const (
+	newsMonitorBatchLimit         = 200
+	newsMonitorHighScoreThreshold = 80
+)
+
 // ListMonitorTasks 返回系统内置任务定义 + 当前配置 + 最近一次运行摘要。
 func (s *Service) ListMonitorTasks(ctx context.Context) ([]MonitorTask, error) {
 	configs, err := s.store.ListMonitorTaskConfigs(ctx)
@@ -152,6 +157,8 @@ func (s *Service) RunMonitorTask(ctx context.Context, taskType, triggerType stri
 		final = s.runDataStrategyMonitor(ctx, created, cfg)
 	case MonitorTaskPortfolioRiskMonitor:
 		final = s.runPortfolioRiskMonitor(ctx, created, cfg)
+	case MonitorTaskNewsStrategyMonitor:
+		final = s.runNewsStrategyMonitor(ctx, created, cfg)
 	case MonitorTaskUniverseUpdate, MonitorTaskDailyBarsSync:
 		final = s.delegateDataMonitorRun(ctx, created, taskType, triggerType)
 	default:
@@ -749,6 +756,94 @@ func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run Monitor
 	return hasPrefilters, matched, hitCount, failedCount, reviewCount, alertCount
 }
 
+// runNewsStrategyMonitor 把消息候选接入现有 MonitorHit -> Review 链路。
+// ponytail: 第一版只用候选分数和已有关联对象判断;向量召回/复杂重要性识别留在 NewsLink 层升级。
+func (s *Service) runNewsStrategyMonitor(ctx context.Context, run MonitorRun, cfg MonitorTaskConfig) MonitorRun {
+	run.Metadata["agentDoublecheck"] = monitorAgentDecisionState(cfg)
+	run.Metadata["highScoreThreshold"] = newsMonitorHighScoreThreshold
+
+	candidates, err := s.store.ListPendingNewsLinkCandidates(ctx, newsMonitorBatchLimit)
+	if err != nil {
+		run.Status = MonitorRunStatusFailed
+		run.ErrorMessage = err.Error()
+		run.FinishedAt = time.Now()
+		return run
+	}
+	run.ScannedCount = len(candidates)
+	portfolioBySymbol, err := s.newsMonitorPortfolioBySymbol(ctx)
+	if err != nil {
+		run.Status = MonitorRunStatusFailed
+		run.ErrorMessage = err.Error()
+		run.FinishedAt = time.Now()
+		return run
+	}
+	strategyBySymbol, err := s.newsMonitorActiveStrategyBySymbol(ctx)
+	if err != nil {
+		run.Status = MonitorRunStatusFailed
+		run.ErrorMessage = err.Error()
+		run.FinishedAt = time.Now()
+		return run
+	}
+
+	now := time.Now()
+	for _, candidate := range candidates {
+		event, err := s.store.GetNewsEvent(ctx, candidate.NewsEventID)
+		if err != nil {
+			run.FailedCount++
+			_ = s.store.MarkNewsLinkCandidateMonitorStatus(ctx, candidate.ID, NewsLinkMonitorStatusFailed, "", now)
+			continue
+		}
+		decision := newsMonitorCandidateDecision(candidate, event, portfolioBySymbol, strategyBySymbol)
+		if !decision.Hit {
+			if err := s.store.MarkNewsLinkCandidateMonitorStatus(ctx, candidate.ID, NewsLinkMonitorStatusSkipped, "", now); err != nil {
+				run.FailedCount++
+				continue
+			}
+			run.SuccessCount++
+			continue
+		}
+
+		evidence := monitorEvidenceWithAgentState(newsMonitorEvidence(event, candidate, decision), cfg)
+		hit := MonitorHit{
+			RunID:       run.ID,
+			TaskType:    MonitorTaskNewsStrategyMonitor,
+			Status:      MonitorHitStatusCandidate,
+			StrategyID:  decision.StrategyID,
+			PortfolioID: decision.PortfolioID,
+			Symbol:      candidate.Symbol,
+			Market:      candidate.Market,
+			Title:       newsMonitorHitTitle(candidate),
+			Summary:     event.Title,
+			Evidence:    evidence,
+		}
+		createdHit, err := s.store.CreateMonitorHit(ctx, hit)
+		if err != nil {
+			run.FailedCount++
+			_ = s.store.MarkNewsLinkCandidateMonitorStatus(ctx, candidate.ID, NewsLinkMonitorStatusFailed, "", now)
+			continue
+		}
+		if err := s.store.MarkNewsLinkCandidateMonitorStatus(ctx, candidate.ID, NewsLinkMonitorStatusHit, createdHit.ID, now); err != nil {
+			run.FailedCount++
+		}
+		post, err := s.processCreatedMonitorHit(ctx, createdHit, cfg)
+		if post.ReviewCreated {
+			run.ReviewCount++
+		}
+		if post.AlertID != "" {
+			run.AlertCount++
+		}
+		if err != nil {
+			run.FailedCount++
+		}
+		run.HitCount++
+		run.SuccessCount++
+	}
+	run.Status = MonitorRunStatusCompleted
+	run.FinishedAt = time.Now()
+	run.ScopeSummary = scopeSummaryFromCount(run.ScannedCount, "news candidates")
+	return run
+}
+
 // runPortfolioRiskMonitor 扫描组合快照与持仓,检查单票权重与数据新鲜度,命中产候选 hit。
 func (s *Service) runPortfolioRiskMonitor(ctx context.Context, run MonitorRun, cfg MonitorTaskConfig) MonitorRun {
 	run.Metadata["agentDoublecheck"] = monitorAgentDecisionState(cfg)
@@ -1006,6 +1101,146 @@ func monitorEvidenceWithAgentState(evidence map[string]any, cfg MonitorTaskConfi
 	}
 	next["agentDoublecheck"] = monitorAgentDecisionState(cfg)
 	return next
+}
+
+type newsMonitorDecision struct {
+	Hit         bool
+	StrategyID  string
+	PortfolioID string
+	Reasons     []string
+}
+
+func newsMonitorCandidateDecision(
+	candidate NewsLinkCandidate,
+	event NewsEvent,
+	portfolioBySymbol map[string]string,
+	strategyBySymbol map[string]StrategyWithVersion,
+) newsMonitorDecision {
+	if newsEventLowQuality(event) {
+		return newsMonitorDecision{Reasons: []string{"low_quality"}}
+	}
+	decision := newsMonitorDecision{}
+	if portfolioID := portfolioBySymbol[strings.TrimSpace(candidate.Symbol)]; portfolioID != "" {
+		decision.Hit = true
+		decision.PortfolioID = portfolioID
+		decision.Reasons = append(decision.Reasons, "current_holding")
+	}
+	if strategy, ok := strategyBySymbol[strings.TrimSpace(candidate.Symbol)]; ok {
+		decision.Hit = true
+		decision.StrategyID = strategy.Strategy.ID
+		if decision.PortfolioID == "" {
+			decision.PortfolioID = strategy.Strategy.PortfolioID
+		}
+		decision.Reasons = append(decision.Reasons, "active_strategy")
+	}
+	if newsEventImportant(event) {
+		decision.Hit = true
+		decision.Reasons = append(decision.Reasons, "important_news")
+	}
+	if candidate.Score >= newsMonitorHighScoreThreshold {
+		decision.Hit = true
+		decision.Reasons = append(decision.Reasons, "high_score")
+	}
+	if !decision.Hit {
+		decision.Reasons = append(decision.Reasons, "low_score_no_relevant_object")
+	}
+	return decision
+}
+
+func newsEventLowQuality(event NewsEvent) bool {
+	quality := strings.ToLower(strings.TrimSpace(event.QualityStatus))
+	return quality == NewsQualityLow || quality == "invalid" || quality == "spam"
+}
+
+func newsEventImportant(event NewsEvent) bool {
+	quality := strings.ToLower(strings.TrimSpace(event.QualityStatus))
+	return quality == NewsImportanceHigh || quality == "important" || quality == "high"
+}
+
+func newsMonitorEvidence(event NewsEvent, candidate NewsLinkCandidate, decision newsMonitorDecision) map[string]any {
+	eventTime := ""
+	if !event.EventAt.IsZero() {
+		eventTime = event.EventAt.Format(time.RFC3339)
+	}
+	return map[string]any{
+		"sourceType":            "news",
+		"matchedAction":         "news_review",
+		"matchedPrefilterType":  "news_link_candidate",
+		"matchedPrefilterKey":   candidate.ID,
+		"monitorMatchReason":    strings.Join(decision.Reasons, "；"),
+		"news_event_id":         event.ID,
+		"raw_news_id":           event.RawNewsID,
+		"candidate_id":          candidate.ID,
+		"match_method":          candidate.MatchMethod,
+		"score":                 candidate.Score,
+		"reason":                candidate.Reason,
+		"matched_terms":         candidate.MatchedTerms,
+		"source":                event.Source,
+		"event_time":            eventTime,
+		"quality_status":        event.QualityStatus,
+		"instrument_name":       candidate.InstrumentName,
+		"news_title":            event.Title,
+		"news_summary":          event.Summary,
+		"news_url":              event.URL,
+		"news_monitor_decision": decision.Reasons,
+	}
+}
+
+func newsMonitorHitTitle(candidate NewsLinkCandidate) string {
+	name := strings.TrimSpace(candidate.InstrumentName)
+	if name == "" {
+		name = strings.TrimSpace(candidate.Symbol)
+	}
+	if name == "" {
+		return "消息面候选"
+	}
+	return "消息面候选: " + name
+}
+
+func (s *Service) newsMonitorPortfolioBySymbol(ctx context.Context) (map[string]string, error) {
+	out := map[string]string{}
+	portfolios, err := s.store.ListPortfolios(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, portfolio := range portfolios {
+		holdings, err := s.store.ListHoldings(ctx, portfolio.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, holding := range holdings {
+			symbol := strings.TrimSpace(holding.Symbol)
+			if symbol == "" || holding.Quantity <= 0 || out[symbol] != "" {
+				continue
+			}
+			out[symbol] = portfolio.ID
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) newsMonitorActiveStrategyBySymbol(ctx context.Context) (map[string]StrategyWithVersion, error) {
+	out := map[string]StrategyWithVersion{}
+	const pageSize = 200
+	for offset := 0; ; offset += pageSize {
+		items, err := s.store.ListStrategies(ctx, StrategyListFilter{Status: StrategyStatusActive, Limit: pageSize, Offset: offset})
+		if err != nil {
+			return nil, err
+		}
+		if len(items) == 0 {
+			break
+		}
+		for _, item := range items {
+			symbol := strings.TrimSpace(item.Strategy.Symbol)
+			if symbol == "" {
+				continue
+			}
+			if _, exists := out[symbol]; !exists {
+				out[symbol] = item
+			}
+		}
+	}
+	return out, nil
 }
 
 func playbookActionMapsFromMeta(meta map[string]any) []map[string]any {

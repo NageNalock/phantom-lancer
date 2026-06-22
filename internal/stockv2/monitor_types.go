@@ -7,8 +7,8 @@ import (
 
 // 监控任务是系统固化的后台监控行为,不是用户创建/编辑/删除的业务对象。
 // 用户只能配置开关 / 周期 / 范围 / 敏感度 / 冷却 / Agent doublecheck 开关与预算。
-// 本轮:universe/quote/daily_bars/data_strategy/portfolio_risk 可运行;
-// news/fundamental/data_quality 仅占位(Runnable=false),不假装实现。
+// 本轮:universe/quote/daily_bars/data_strategy/portfolio_risk/news 可运行;
+// fundamental/data_quality 仅占位(Runnable=false),不假装实现。
 
 const (
 	MonitorTaskUniverseUpdate          = "universe_update"
@@ -209,12 +209,12 @@ func builtinMonitorTaskDefinitions() []MonitorTaskDefinition {
 		{
 			TaskType:     MonitorTaskNewsStrategyMonitor,
 			Label:        "消息面策略监控",
-			Description:  "消息面命中(本轮未实现新闻采集,仅占位)",
+			Description:  "扫描 NewsLinkCandidate,对持仓/活跃策略/高分消息生成 MonitorHit",
 			Category:     "news",
-			Runnable:     false,
+			Runnable:     true,
 			Configurable: true,
 			DefaultConfig: MonitorTaskConfig{
-				Enabled: false, IntervalSeconds: 3600, CooldownSeconds: 3600,
+				Enabled: false, IntervalSeconds: 600, Sensitivity: "normal", CooldownSeconds: 3600,
 			},
 		},
 		{

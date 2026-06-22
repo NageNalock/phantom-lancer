@@ -57,6 +57,9 @@ type AgentContextPack struct {
 	Quote     *StockV2QuoteLatest     `json:"quote,omitempty"`
 	DailyBars *DailyBarsContext       `json:"dailyBars,omitempty"`
 	Portfolio *PortfolioReviewContext `json:"portfolio,omitempty"`
+	NewsEvent *NewsEvent              `json:"newsEvent,omitempty"`
+	NewsLink  *NewsLinkCandidate      `json:"newsLinkCandidate,omitempty"`
+	Profile   *StockProfile           `json:"stockProfile,omitempty"`
 	Freshness map[string]any          `json:"freshness,omitempty"`
 }
 

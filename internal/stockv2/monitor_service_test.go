@@ -32,11 +32,11 @@ func TestListMonitorTasksReturnsBuiltin(t *testing.T) {
 	if enabledCount != 0 {
 		t.Fatalf("default enabled count = %d, want 0", enabledCount)
 	}
-	if !runnable[MonitorTaskDataStrategyMonitor] || !runnable[MonitorTaskPortfolioRiskMonitor] {
-		t.Fatalf("data_strategy / portfolio_risk must be runnable")
+	if !runnable[MonitorTaskDataStrategyMonitor] || !runnable[MonitorTaskPortfolioRiskMonitor] || !runnable[MonitorTaskNewsStrategyMonitor] {
+		t.Fatalf("data_strategy / portfolio_risk / news must be runnable")
 	}
-	if runnable[MonitorTaskNewsStrategyMonitor] || runnable[MonitorTaskDailyFundamentalMonitor] || runnable[MonitorTaskDataQualityMonitor] {
-		t.Fatalf("news / fundamental / quality must not be runnable this round")
+	if runnable[MonitorTaskDailyFundamentalMonitor] || runnable[MonitorTaskDataQualityMonitor] {
+		t.Fatalf("fundamental / quality must not be runnable this round")
 	}
 }
 
@@ -655,7 +655,7 @@ func TestRunDisabledMonitorTaskRejected(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 
-	if _, err := svc.RunMonitorTask(ctx, MonitorTaskNewsStrategyMonitor, MonitorTriggerManual); !errors.Is(err, ErrMonitorTaskNotConfigured) {
+	if _, err := svc.RunMonitorTask(ctx, MonitorTaskDailyFundamentalMonitor, MonitorTriggerManual); !errors.Is(err, ErrMonitorTaskNotConfigured) {
 		t.Fatalf("err = %v, want ErrMonitorTaskNotConfigured", err)
 	}
 	if _, err := svc.RunMonitorTask(ctx, "unknown_task_type", MonitorTriggerManual); !errors.Is(err, ErrInvalidMonitorTaskType) {

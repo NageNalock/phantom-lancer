@@ -193,6 +193,9 @@ CREATE TABLE IF NOT EXISTS stockv2_news_link_candidates (
     score REAL NOT NULL DEFAULT 0,
     reason TEXT,
     matched_terms_json TEXT NOT NULL DEFAULT '[]',
+    monitor_status TEXT NOT NULL DEFAULT 'pending',
+    monitor_hit_id TEXT,
+    monitored_at DATETIME,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     FOREIGN KEY (news_event_id) REFERENCES stockv2_news_events(id) ON DELETE CASCADE,
@@ -459,6 +462,7 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_event ON stockv2_new
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_raw_news ON stockv2_news_link_candidates(raw_news_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_score ON stockv2_news_link_candidates(score);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_monitor_status ON stockv2_news_link_candidates(monitor_status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolios_name ON stockv2_portfolios(name);
 CREATE INDEX IF NOT EXISTS idx_stockv2_holdings_portfolio_id ON stockv2_holdings(portfolio_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_holdings_symbol ON stockv2_holdings(symbol);
@@ -647,7 +651,7 @@ INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('daily_bars_sync', 0, 86400, 'normal', 0, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('data_strategy_monitor', 0, 600, 'normal', 1800, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('portfolio_risk_monitor', 0, 600, 'normal', 1800, 0, 0, datetime('now'));
-INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('news_strategy_monitor', 0, 3600, 'normal', 3600, 0, 0, datetime('now'));
+INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('news_strategy_monitor', 0, 600, 'normal', 3600, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('daily_fundamental_monitor', 0, 86400, 'normal', 3600, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('data_quality_monitor', 0, 3600, 'normal', 3600, 0, 0, datetime('now'));
 
@@ -799,6 +803,15 @@ func (s *Store) init(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "stockv2_raw_news", "url", "TEXT"); err != nil {
 		return fmt.Errorf("add raw news url column: %w", err)
 	}
+	if err := s.ensureColumn(ctx, "stockv2_news_link_candidates", "monitor_status", "TEXT NOT NULL DEFAULT 'pending'"); err != nil {
+		return fmt.Errorf("add news link candidate monitor_status column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_news_link_candidates", "monitor_hit_id", "TEXT"); err != nil {
+		return fmt.Errorf("add news link candidate monitor_hit_id column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_news_link_candidates", "monitored_at", "DATETIME"); err != nil {
+		return fmt.Errorf("add news link candidate monitored_at column: %w", err)
+	}
 	if err := s.ensureColumn(ctx, "stockv2_daily_bar_jobs", "symbol", "TEXT"); err != nil {
 		return fmt.Errorf("add daily bar job symbol column: %w", err)
 	}
@@ -851,10 +864,12 @@ func (s *Store) init(ctx context.Context) error {
 		return fmt.Errorf("create alert monitor indexes: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_monitor_status
+		    ON stockv2_news_link_candidates(monitor_status);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bar_jobs_running_scope
 		    ON stockv2_daily_bar_jobs(status, mode, symbol, range, adjusted)
 	`); err != nil {
-		return fmt.Errorf("create daily bar job running scope index: %w", err)
+		return fmt.Errorf("create stockv2 incremental indexes: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS stockv2_quote_refresh_statuses (
