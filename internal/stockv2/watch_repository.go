@@ -195,6 +195,15 @@ func (s *Store) CreateAlert(ctx context.Context, alert StockV2Alert) (StockV2Ale
 	if alert.TriggeredAt.IsZero() {
 		alert.TriggeredAt = now
 	}
+	if alert.OccurrenceCount <= 0 {
+		alert.OccurrenceCount = 1
+	}
+	if alert.FirstSeenAt.IsZero() {
+		alert.FirstSeenAt = alert.TriggeredAt
+	}
+	if alert.LastSeenAt.IsZero() {
+		alert.LastSeenAt = alert.TriggeredAt
+	}
 	alert.CreatedAt = now
 	alert.UpdatedAt = now
 	if alert.Evidence == nil {
@@ -203,19 +212,36 @@ func (s *Store) CreateAlert(ctx context.Context, alert StockV2Alert) (StockV2Ale
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO stockv2_alerts (
-			id, watch_id, status, level, title, summary, dedupe_key,
-			evidence_json, triggered_at, acknowledged_at, resolved_at,
-			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			id, watch_id, monitor_hit_id, monitor_run_id, task_type, strategy_id,
+			portfolio_id, symbol, market, review_id, review_status, agent_run_id,
+			decision_ledger_id, trigger_source, status, level, title, summary,
+			dedupe_key, evidence_json, occurrence_count, first_seen_at, last_seen_at,
+			triggered_at, acknowledged_at, resolved_at, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		alert.ID,
 		alert.WatchID,
+		nullableWatchString(alert.MonitorHitID),
+		nullableWatchString(alert.MonitorRunID),
+		nullableWatchString(alert.TaskType),
+		nullableWatchString(alert.StrategyID),
+		nullableWatchString(alert.PortfolioID),
+		nullableWatchString(alert.Symbol),
+		nullableWatchString(alert.Market),
+		nullableWatchString(alert.ReviewID),
+		nullableWatchString(alert.ReviewStatus),
+		nullableWatchString(alert.AgentRunID),
+		nullableWatchString(alert.DecisionLedgerID),
+		nullableWatchString(alert.TriggerSource),
 		alert.Status,
 		alert.Level,
 		alert.Title,
 		alert.Summary,
 		nullableWatchString(alert.DedupeKey),
 		marshalMap(alert.Evidence),
+		alert.OccurrenceCount,
+		nullableWatchTime(alert.FirstSeenAt),
+		nullableWatchTime(alert.LastSeenAt),
 		alert.TriggeredAt,
 		nullableWatchTime(alert.AcknowledgedAt),
 		nullableWatchTime(alert.ResolvedAt),
@@ -246,7 +272,7 @@ func (s *Store) ListAlerts(ctx context.Context, filter AlertListFilter) ([]Stock
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		%s
 		WHERE %s
-		ORDER BY triggered_at DESC, created_at DESC
+		ORDER BY COALESCE(last_seen_at, triggered_at) DESC, created_at DESC
 		LIMIT ? OFFSET ?
 	`, alertSelectSQL, where), args...)
 	if err != nil {
@@ -288,18 +314,37 @@ func (s *Store) UpdateAlert(ctx context.Context, alert StockV2Alert) (StockV2Ale
 	}
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE stockv2_alerts
-		SET watch_id = ?, status = ?, level = ?, title = ?, summary = ?,
-		    dedupe_key = ?, evidence_json = ?, triggered_at = ?,
-		    acknowledged_at = ?, resolved_at = ?, updated_at = ?
+		SET watch_id = ?, monitor_hit_id = ?, monitor_run_id = ?, task_type = ?,
+		    strategy_id = ?, portfolio_id = ?, symbol = ?, market = ?, review_id = ?,
+		    review_status = ?, agent_run_id = ?, decision_ledger_id = ?,
+		    trigger_source = ?, status = ?, level = ?, title = ?, summary = ?,
+		    dedupe_key = ?, evidence_json = ?, occurrence_count = ?, first_seen_at = ?,
+		    last_seen_at = ?, triggered_at = ?, acknowledged_at = ?, resolved_at = ?,
+		    updated_at = ?
 		WHERE id = ?
 	`,
 		alert.WatchID,
+		nullableWatchString(alert.MonitorHitID),
+		nullableWatchString(alert.MonitorRunID),
+		nullableWatchString(alert.TaskType),
+		nullableWatchString(alert.StrategyID),
+		nullableWatchString(alert.PortfolioID),
+		nullableWatchString(alert.Symbol),
+		nullableWatchString(alert.Market),
+		nullableWatchString(alert.ReviewID),
+		nullableWatchString(alert.ReviewStatus),
+		nullableWatchString(alert.AgentRunID),
+		nullableWatchString(alert.DecisionLedgerID),
+		nullableWatchString(alert.TriggerSource),
 		alert.Status,
 		alert.Level,
 		alert.Title,
 		alert.Summary,
 		nullableWatchString(alert.DedupeKey),
 		marshalMap(alert.Evidence),
+		alert.OccurrenceCount,
+		nullableWatchTime(alert.FirstSeenAt),
+		nullableWatchTime(alert.LastSeenAt),
 		alert.TriggeredAt,
 		nullableWatchTime(alert.AcknowledgedAt),
 		nullableWatchTime(alert.ResolvedAt),
@@ -319,12 +364,28 @@ func (s *Store) UpdateAlert(ctx context.Context, alert StockV2Alert) (StockV2Ale
 	return alert, nil
 }
 
-func (s *Store) FindLatestAlertByDedupeKey(ctx context.Context, watchID, dedupeKey string) (StockV2Alert, error) {
+func (s *Store) FindLatestAlertByWatchDedupeKey(ctx context.Context, watchID, dedupeKey string) (StockV2Alert, error) {
 	row := s.db.QueryRowContext(ctx, alertSelectSQL+`
 		WHERE watch_id = ? AND dedupe_key = ?
-		ORDER BY triggered_at DESC, created_at DESC
+		ORDER BY COALESCE(last_seen_at, triggered_at) DESC, created_at DESC
 		LIMIT 1
 	`, watchID, dedupeKey)
+	alert, err := scanAlert(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return StockV2Alert{}, ErrAlertNotFound
+		}
+		return StockV2Alert{}, wrapError(err, "find latest alert by dedupe key")
+	}
+	return alert, nil
+}
+
+func (s *Store) FindLatestAlertByDedupeKey(ctx context.Context, dedupeKey string) (StockV2Alert, error) {
+	row := s.db.QueryRowContext(ctx, alertSelectSQL+`
+		WHERE dedupe_key = ?
+		ORDER BY COALESCE(last_seen_at, triggered_at) DESC, created_at DESC
+		LIMIT 1
+	`, dedupeKey)
 	alert, err := scanAlert(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -345,8 +406,13 @@ const watchSelectSQL = `
 `
 
 const alertSelectSQL = `
-	SELECT id, watch_id, status, level, title, COALESCE(summary,''), dedupe_key,
-	       evidence_json, triggered_at, acknowledged_at, resolved_at, created_at, updated_at
+	SELECT id, COALESCE(watch_id,''), COALESCE(monitor_hit_id,''), COALESCE(monitor_run_id,''),
+	       COALESCE(task_type,''), COALESCE(strategy_id,''), COALESCE(portfolio_id,''),
+	       COALESCE(symbol,''), COALESCE(market,''), COALESCE(review_id,''),
+	       COALESCE(review_status,''), COALESCE(agent_run_id,''), COALESCE(decision_ledger_id,''),
+	       COALESCE(trigger_source,''), status, level, title, COALESCE(summary,''), dedupe_key,
+	       evidence_json, COALESCE(occurrence_count, 1), first_seen_at, last_seen_at,
+	       triggered_at, acknowledged_at, resolved_at, created_at, updated_at
 	FROM stockv2_alerts
 `
 
@@ -401,16 +467,31 @@ func scanWatch(row rowScanner) (StockV2Watch, error) {
 func scanAlert(row rowScanner) (StockV2Alert, error) {
 	var alert StockV2Alert
 	var dedupeKey, evidenceJSON sql.NullString
-	var acknowledgedAt, resolvedAt sql.NullTime
+	var firstSeenAt, lastSeenAt, acknowledgedAt, resolvedAt sql.NullTime
 	err := row.Scan(
 		&alert.ID,
 		&alert.WatchID,
+		&alert.MonitorHitID,
+		&alert.MonitorRunID,
+		&alert.TaskType,
+		&alert.StrategyID,
+		&alert.PortfolioID,
+		&alert.Symbol,
+		&alert.Market,
+		&alert.ReviewID,
+		&alert.ReviewStatus,
+		&alert.AgentRunID,
+		&alert.DecisionLedgerID,
+		&alert.TriggerSource,
 		&alert.Status,
 		&alert.Level,
 		&alert.Title,
 		&alert.Summary,
 		&dedupeKey,
 		&evidenceJSON,
+		&alert.OccurrenceCount,
+		&firstSeenAt,
+		&lastSeenAt,
 		&alert.TriggeredAt,
 		&acknowledgedAt,
 		&resolvedAt,
@@ -422,6 +503,19 @@ func scanAlert(row rowScanner) (StockV2Alert, error) {
 	}
 	alert.DedupeKey = dedupeKey.String
 	alert.Evidence = unmarshalMap(evidenceJSON.String)
+	if alert.OccurrenceCount <= 0 {
+		alert.OccurrenceCount = 1
+	}
+	if firstSeenAt.Valid {
+		alert.FirstSeenAt = firstSeenAt.Time
+	} else {
+		alert.FirstSeenAt = alert.CreatedAt
+	}
+	if lastSeenAt.Valid {
+		alert.LastSeenAt = lastSeenAt.Time
+	} else {
+		alert.LastSeenAt = alert.TriggeredAt
+	}
 	if acknowledgedAt.Valid {
 		alert.AcknowledgedAt = acknowledgedAt.Time
 	}
@@ -460,6 +554,10 @@ func alertFilterSQL(filter AlertListFilter) (string, []any) {
 	}
 	add("status", filter.Status)
 	add("watch_id", filter.WatchID)
+	add("task_type", filter.TaskType)
+	add("symbol", filter.Symbol)
+	add("portfolio_id", filter.PortfolioID)
+	add("strategy_id", filter.StrategyID)
 	return strings.Join(where, " AND "), args
 }
 

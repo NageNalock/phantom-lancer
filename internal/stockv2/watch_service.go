@@ -151,7 +151,7 @@ func (s *Service) CreateAlert(ctx context.Context, req RequestCreateAlert) (Stoc
 	}
 
 	if alert.DedupeKey != "" {
-		existing, err := s.store.FindLatestAlertByDedupeKey(ctx, alert.WatchID, alert.DedupeKey)
+		existing, err := s.store.FindLatestAlertByWatchDedupeKey(ctx, alert.WatchID, alert.DedupeKey)
 		if err != nil && !errors.Is(err, ErrAlertNotFound) {
 			return StockV2Alert{}, err
 		}
@@ -374,15 +374,30 @@ func alertFromCreateRequest(req RequestCreateAlert) StockV2Alert {
 		evidence = map[string]any{}
 	}
 	return StockV2Alert{
-		ID:          generateID(),
-		WatchID:     strings.TrimSpace(req.WatchID),
-		Status:      AlertStatusOpen,
-		Level:       level,
-		Title:       strings.TrimSpace(req.Title),
-		Summary:     strings.TrimSpace(req.Summary),
-		DedupeKey:   strings.TrimSpace(req.DedupeKey),
-		Evidence:    evidence,
-		TriggeredAt: triggeredAt,
+		ID:               generateID(),
+		WatchID:          strings.TrimSpace(req.WatchID),
+		MonitorHitID:     strings.TrimSpace(req.MonitorHitID),
+		MonitorRunID:     strings.TrimSpace(req.MonitorRunID),
+		TaskType:         strings.TrimSpace(req.TaskType),
+		StrategyID:       strings.TrimSpace(req.StrategyID),
+		PortfolioID:      strings.TrimSpace(req.PortfolioID),
+		Symbol:           strings.TrimSpace(req.Symbol),
+		Market:           strings.TrimSpace(req.Market),
+		ReviewID:         strings.TrimSpace(req.ReviewID),
+		ReviewStatus:     strings.TrimSpace(req.ReviewStatus),
+		AgentRunID:       strings.TrimSpace(req.AgentRunID),
+		DecisionLedgerID: strings.TrimSpace(req.DecisionLedgerID),
+		TriggerSource:    strings.TrimSpace(req.TriggerSource),
+		Status:           AlertStatusOpen,
+		Level:            level,
+		Title:            strings.TrimSpace(req.Title),
+		Summary:          strings.TrimSpace(req.Summary),
+		DedupeKey:        strings.TrimSpace(req.DedupeKey),
+		Evidence:         evidence,
+		OccurrenceCount:  1,
+		FirstSeenAt:      triggeredAt,
+		LastSeenAt:       triggeredAt,
+		TriggeredAt:      triggeredAt,
 	}
 }
 

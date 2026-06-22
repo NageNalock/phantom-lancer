@@ -238,10 +238,14 @@ func stockV2AlertFilterFromRequest(r *http.Request) (stockv2.AlertListFilter, er
 		return stockv2.AlertListFilter{}, errors.New("invalid alert status")
 	}
 	return stockv2.AlertListFilter{
-		Status:  status,
-		WatchID: query.Get("watchId"),
-		Limit:   limit,
-		Offset:  offset,
+		Status:      status,
+		WatchID:     query.Get("watchId"),
+		TaskType:    query.Get("taskType"),
+		Symbol:      query.Get("symbol"),
+		PortfolioID: query.Get("portfolioId"),
+		StrategyID:  query.Get("strategyId"),
+		Limit:       limit,
+		Offset:      offset,
 	}, nil
 }
 

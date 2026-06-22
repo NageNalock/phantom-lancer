@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"phantom-lancer/internal/safelog"
@@ -202,6 +203,8 @@ type monitorHitPostProcessResult struct {
 	ReviewCreated  bool
 	AgentRunID     string
 	AgentRunStatus string
+	AlertID        string
+	AlertCreated   bool
 }
 
 func (s *Service) processCreatedMonitorHit(ctx context.Context, hit MonitorHit, cfg MonitorTaskConfig) (monitorHitPostProcessResult, error) {
@@ -239,7 +242,16 @@ func (s *Service) processCreatedMonitorHit(ctx context.Context, hit MonitorHit, 
 		pipeline["agentSkippedReason"] = "agent_doublecheck_disabled"
 		evidence["agentDoublecheck"] = "not_enabled"
 		evidence["reviewPipeline"] = pipeline
-		return result, s.store.UpdateMonitorHitEvidence(ctx, hit.ID, evidence, hit.AgentDecisionID)
+		if err := s.store.UpdateMonitorHitEvidence(ctx, hit.ID, evidence, hit.AgentDecisionID); err != nil {
+			return result, err
+		}
+		alert, created, err := s.upsertMonitorAlert(ctx, hit, cfg, review, nil, AlertTriggerSourceDeterministic, "", evidence)
+		if err != nil {
+			return result, err
+		}
+		result.AlertID = alert.ID
+		result.AlertCreated = created
+		return result, nil
 	}
 
 	pipeline["agentAttempted"] = true
@@ -248,10 +260,17 @@ func (s *Service) processCreatedMonitorHit(ctx context.Context, hit MonitorHit, 
 		pipeline["agentStatus"] = "unavailable"
 		pipeline["agentError"] = safelog.Text(err.Error(), 400)
 		evidence["agentDoublecheck"] = "unavailable"
+		evidence["degraded_reason"] = "agent_unavailable"
 		evidence["reviewPipeline"] = pipeline
 		if updateErr := s.store.UpdateMonitorHitEvidence(ctx, hit.ID, evidence, hit.AgentDecisionID); updateErr != nil {
 			return result, updateErr
 		}
+		alert, created, alertErr := s.upsertMonitorAlert(ctx, hit, cfg, review, nil, AlertTriggerSourceDegraded, "agent_unavailable", evidence)
+		if alertErr != nil {
+			return result, alertErr
+		}
+		result.AlertID = alert.ID
+		result.AlertCreated = created
 		return result, nil
 	}
 
@@ -259,15 +278,272 @@ func (s *Service) processCreatedMonitorHit(ctx context.Context, hit MonitorHit, 
 	result.AgentRunStatus = agentRun.Status
 	pipeline["agentRunId"] = agentRun.ID
 	pipeline["agentRunStatus"] = agentRun.Status
+	evidence["agentRunId"] = agentRun.ID
+	evidence["decisionLedgerId"] = agentRun.DecisionLedgerID
+	triggerSource := AlertTriggerSourceDegraded
+	degradedReason := "agent_started_or_pending"
 	if s.agentExecutor == nil && agentRun.Status == AgentRunStatusReady {
 		pipeline["agentStatus"] = "enabled_no_executor"
 		evidence["agentDoublecheck"] = "enabled_no_executor"
+		degradedReason = "agent_ready_without_executor"
+	} else if agentRun.Status == AgentRunStatusCompleted && agentRunConfirmsMonitorAlert(agentRun) {
+		pipeline["agentStatus"] = "confirmed"
+		evidence["agentDoublecheck"] = "confirmed"
+		triggerSource = AlertTriggerSourceAgentConfirmed
+		degradedReason = ""
 	} else {
 		pipeline["agentStatus"] = "started"
 		evidence["agentDoublecheck"] = "started"
 	}
+	if degradedReason != "" {
+		evidence["degraded_reason"] = degradedReason
+	}
 	evidence["reviewPipeline"] = pipeline
-	return result, s.store.UpdateMonitorHitEvidence(ctx, hit.ID, evidence, agentRun.ID)
+	if err := s.store.UpdateMonitorHitEvidence(ctx, hit.ID, evidence, agentRun.ID); err != nil {
+		return result, err
+	}
+	alert, created, err := s.upsertMonitorAlert(ctx, hit, cfg, review, &agentRun, triggerSource, degradedReason, evidence)
+	if err != nil {
+		return result, err
+	}
+	result.AlertID = alert.ID
+	result.AlertCreated = created
+	return result, nil
+}
+
+func (s *Service) upsertMonitorAlert(
+	ctx context.Context,
+	hit MonitorHit,
+	cfg MonitorTaskConfig,
+	review OperationReview,
+	agentRun *AgentRun,
+	triggerSource string,
+	degradedReason string,
+	sourceEvidence map[string]any,
+) (StockV2Alert, bool, error) {
+	now := time.Now()
+	evidence := monitorAlertEvidence(hit, review, agentRun, triggerSource, degradedReason, sourceEvidence)
+	dedupeKey := monitorAlertDedupeKey(hit, evidence)
+	if dedupeKey != "" {
+		existing, err := s.store.FindLatestAlertByDedupeKey(ctx, dedupeKey)
+		if err != nil && !errors.Is(err, ErrAlertNotFound) {
+			return StockV2Alert{}, false, err
+		}
+		if err == nil {
+			if existing.MonitorHitID == hit.ID {
+				if linkErr := s.store.UpdateMonitorHitAlert(ctx, hit.ID, existing.ID, MonitorHitStatusAlerted); linkErr != nil {
+					return StockV2Alert{}, false, linkErr
+				}
+				return existing, false, nil
+			}
+			if monitorAlertWithinCooldown(existing, now, cfg.CooldownSeconds) {
+				existing.MonitorHitID = hit.ID
+				existing.MonitorRunID = hit.RunID
+				existing.TaskType = hit.TaskType
+				existing.StrategyID = hit.StrategyID
+				existing.PortfolioID = hit.PortfolioID
+				existing.Symbol = hit.Symbol
+				existing.Market = hit.Market
+				existing.ReviewID = review.ID
+				existing.ReviewStatus = review.Status
+				if agentRun != nil {
+					existing.AgentRunID = agentRun.ID
+					existing.DecisionLedgerID = agentRun.DecisionLedgerID
+				}
+				existing.TriggerSource = triggerSource
+				existing.Level = monitorAlertLevel(hit, triggerSource)
+				existing.Summary = hit.Summary
+				existing.OccurrenceCount++
+				existing.LastSeenAt = now
+				existing.TriggeredAt = now
+				existing.Evidence = mergeMonitorAlertEvidence(existing.Evidence, evidence, hit)
+				updated, updateErr := s.store.UpdateAlert(ctx, existing)
+				if updateErr != nil {
+					return StockV2Alert{}, false, updateErr
+				}
+				if linkErr := s.store.UpdateMonitorHitAlert(ctx, hit.ID, updated.ID, MonitorHitStatusAlerted); linkErr != nil {
+					return StockV2Alert{}, false, linkErr
+				}
+				return updated, false, nil
+			}
+		}
+	}
+
+	alert := StockV2Alert{
+		ID:              generateID(),
+		WatchID:         "",
+		MonitorHitID:    hit.ID,
+		MonitorRunID:    hit.RunID,
+		TaskType:        hit.TaskType,
+		StrategyID:      hit.StrategyID,
+		PortfolioID:     hit.PortfolioID,
+		Symbol:          hit.Symbol,
+		Market:          hit.Market,
+		ReviewID:        review.ID,
+		ReviewStatus:    review.Status,
+		TriggerSource:   triggerSource,
+		Status:          AlertStatusOpen,
+		Level:           monitorAlertLevel(hit, triggerSource),
+		Title:           strings.TrimSpace(hit.Title),
+		Summary:         strings.TrimSpace(hit.Summary),
+		DedupeKey:       dedupeKey,
+		Evidence:        mergeMonitorAlertEvidence(nil, evidence, hit),
+		OccurrenceCount: 1,
+		FirstSeenAt:     now,
+		LastSeenAt:      now,
+		TriggeredAt:     now,
+	}
+	if alert.Title == "" {
+		alert.Title = "监控提醒"
+	}
+	if agentRun != nil {
+		alert.AgentRunID = agentRun.ID
+		alert.DecisionLedgerID = agentRun.DecisionLedgerID
+	}
+	created, err := s.store.CreateAlert(ctx, alert)
+	if err != nil {
+		return StockV2Alert{}, false, err
+	}
+	if linkErr := s.store.UpdateMonitorHitAlert(ctx, hit.ID, created.ID, MonitorHitStatusAlerted); linkErr != nil {
+		return StockV2Alert{}, false, linkErr
+	}
+	return created, true, nil
+}
+
+func monitorAlertEvidence(
+	hit MonitorHit,
+	review OperationReview,
+	agentRun *AgentRun,
+	triggerSource string,
+	degradedReason string,
+	source map[string]any,
+) map[string]any {
+	evidence := copyStringAnyMap(source)
+	evidence["trigger_source"] = triggerSource
+	switch triggerSource {
+	case AlertTriggerSourceAgentConfirmed:
+		evidence["trigger_decision"] = "agent_confirmed"
+	case AlertTriggerSourceDeterministic:
+		evidence["trigger_decision"] = "deterministic_policy"
+	default:
+		evidence["trigger_decision"] = "degraded_policy"
+	}
+	if degradedReason != "" {
+		evidence["degraded_reason"] = degradedReason
+		evidence["agent_status"] = degradedReason
+	}
+	evidence["monitorHitId"] = hit.ID
+	evidence["monitorRunId"] = hit.RunID
+	evidence["taskType"] = hit.TaskType
+	evidence["reviewId"] = review.ID
+	evidence["reviewStatus"] = review.Status
+	if agentRun != nil {
+		evidence["agentRunId"] = agentRun.ID
+		evidence["agentRunStatus"] = agentRun.Status
+		evidence["decisionLedgerId"] = agentRun.DecisionLedgerID
+	}
+	return evidence
+}
+
+func monitorAlertDedupeKey(hit MonitorHit, evidence map[string]any) string {
+	action := firstNonEmpty(
+		stringFromAny(evidence["matchedAction"]),
+		stringFromAny(evidence["matchedActionLabel"]),
+		stringFromAny(evidence["matchedRuleId"]),
+	)
+	prefilter := firstNonEmpty(
+		stringFromAny(evidence["matchedPrefilterKey"]),
+		stringFromAny(evidence["matchedPrefilterType"]),
+		stringFromAny(evidence["matchedRuleTitle"]),
+	)
+	if action == "" {
+		action = strings.TrimSpace(hit.Title)
+	}
+	if prefilter == "" {
+		prefilter = strings.TrimSpace(hit.Summary)
+	}
+	parts := []string{
+		"monitor",
+		strings.TrimSpace(hit.TaskType),
+		strings.TrimSpace(hit.StrategyID),
+		strings.TrimSpace(hit.PortfolioID),
+		strings.TrimSpace(hit.Symbol),
+		strings.TrimSpace(action),
+		strings.TrimSpace(prefilter),
+	}
+	return strings.Join(parts, "|")
+}
+
+func monitorAlertWithinCooldown(alert StockV2Alert, now time.Time, cooldownSeconds int) bool {
+	if cooldownSeconds <= 0 {
+		return false
+	}
+	last := alert.LastSeenAt
+	if last.IsZero() {
+		last = alert.TriggeredAt
+	}
+	if last.IsZero() {
+		last = alert.CreatedAt
+	}
+	if last.IsZero() {
+		return false
+	}
+	return !now.After(last.Add(time.Duration(cooldownSeconds) * time.Second))
+}
+
+func mergeMonitorAlertEvidence(current map[string]any, next map[string]any, hit MonitorHit) map[string]any {
+	merged := copyStringAnyMap(current)
+	for key, value := range next {
+		merged[key] = value
+	}
+	merged["lastHitId"] = hit.ID
+	merged["lastRunId"] = hit.RunID
+	merged["lastSummary"] = hit.Summary
+	merged["lastTitle"] = hit.Title
+	return merged
+}
+
+func monitorAlertLevel(hit MonitorHit, triggerSource string) string {
+	if hit.TaskType == MonitorTaskPortfolioRiskMonitor && strings.Contains(hit.Title, "超限") {
+		return AlertLevelCritical
+	}
+	if triggerSource == AlertTriggerSourceDeterministic {
+		return AlertLevelWarning
+	}
+	if triggerSource == AlertTriggerSourceDegraded {
+		return AlertLevelWarning
+	}
+	return AlertLevelInfo
+}
+
+func agentRunConfirmsMonitorAlert(run AgentRun) bool {
+	if run.Status != AgentRunStatusCompleted {
+		return false
+	}
+	output := strings.ToLower(strings.TrimSpace(run.Output))
+	return output != "" && !strings.Contains(output, "ignore")
+}
+
+func stringFromAny(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(typed)
+	case int:
+		return strconv.Itoa(typed)
+	case int64:
+		return strconv.FormatInt(typed, 10)
+	case float64:
+		return strconv.FormatFloat(typed, 'f', -1, 64)
+	case bool:
+		if typed {
+			return "true"
+		}
+		return "false"
+	default:
+		return ""
+	}
 }
 
 // runDataStrategyMonitor 扫描 active 单票策略,优先用操作剧本里的数据/组合预筛产出动作候选。
@@ -290,10 +566,11 @@ func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cf
 		if sw.ActiveVersion == nil || sw.Strategy.Symbol == "" {
 			continue
 		}
-		hasPlaybookPrefilters, playbookMatched, playbookHits, playbookFailures, playbookReviews := s.runStrategyPlaybookPrefilters(ctx, run, cfg, sw)
+		hasPlaybookPrefilters, playbookMatched, playbookHits, playbookFailures, playbookReviews, playbookAlerts := s.runStrategyPlaybookPrefilters(ctx, run, cfg, sw)
 		run.HitCount += playbookHits
 		run.FailedCount += playbookFailures
 		run.ReviewCount += playbookReviews
+		run.AlertCount += playbookAlerts
 		if hasPlaybookPrefilters {
 			if playbookMatched {
 				run.SuccessCount++
@@ -341,6 +618,9 @@ func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cf
 				if post.ReviewCreated {
 					run.ReviewCount++
 				}
+				if post.AlertID != "" {
+					run.AlertCount++
+				}
 				if err != nil {
 					run.FailedCount++
 				}
@@ -358,13 +638,14 @@ func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cf
 	return run
 }
 
-func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run MonitorRun, cfg MonitorTaskConfig, sw StrategyWithVersion) (bool, bool, int, int, int) {
+func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run MonitorRun, cfg MonitorTaskConfig, sw StrategyWithVersion) (bool, bool, int, int, int, int) {
 	actions := playbookActionMapsFromMeta(sw.ActiveVersion.GenerationMeta)
 	hasPrefilters := false
 	matched := false
 	hitCount := 0
 	failedCount := 0
 	reviewCount := 0
+	alertCount := 0
 
 	for _, action := range actions {
 		rules := playbookActionWatchRules(action, sw.Strategy.Symbol, sw.Strategy.PortfolioID)
@@ -420,6 +701,9 @@ func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run Monitor
 			if post.ReviewCreated {
 				reviewCount++
 			}
+			if post.AlertID != "" {
+				alertCount++
+			}
 			if err != nil {
 				failedCount++
 			}
@@ -427,7 +711,7 @@ func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run Monitor
 			matched = true
 		}
 	}
-	return hasPrefilters, matched, hitCount, failedCount, reviewCount
+	return hasPrefilters, matched, hitCount, failedCount, reviewCount, alertCount
 }
 
 // runPortfolioRiskMonitor 扫描组合快照与持仓,检查单票权重与数据新鲜度,命中产候选 hit。
@@ -463,6 +747,9 @@ func (s *Service) runPortfolioRiskMonitor(ctx context.Context, run MonitorRun, c
 				post, postErr := s.processCreatedMonitorHit(ctx, createdHit, cfg)
 				if post.ReviewCreated {
 					run.ReviewCount++
+				}
+				if post.AlertID != "" {
+					run.AlertCount++
 				}
 				if postErr != nil {
 					run.FailedCount++
@@ -503,6 +790,9 @@ func (s *Service) runPortfolioRiskMonitor(ctx context.Context, run MonitorRun, c
 					post, postErr := s.processCreatedMonitorHit(ctx, createdHit, cfg)
 					if post.ReviewCreated {
 						run.ReviewCount++
+					}
+					if post.AlertID != "" {
+						run.AlertCount++
 					}
 					if postErr != nil {
 						run.FailedCount++

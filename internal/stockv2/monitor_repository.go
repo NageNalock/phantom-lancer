@@ -333,6 +333,24 @@ func (s *Store) UpdateMonitorHitEvidence(ctx context.Context, id string, evidenc
 	return nil
 }
 
+func (s *Store) UpdateMonitorHitAlert(ctx context.Context, id, alertID, status string) error {
+	if status == "" {
+		status = MonitorHitStatusAlerted
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_monitor_hits
+		SET alert_id = ?, status = ?
+		WHERE id = ?
+	`, nullableMonitorString(alertID), status, id)
+	if err != nil {
+		return wrapError(err, "update monitor hit alert")
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return ErrMonitorHitNotFound
+	}
+	return nil
+}
+
 func (s *Store) ListMonitorHits(ctx context.Context, filter MonitorHitListFilter) ([]MonitorHit, error) {
 	where, args := monitorHitFilterSQL(filter)
 	limit := normalizedMonitorLimit(filter.Limit)

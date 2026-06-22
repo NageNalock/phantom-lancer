@@ -75,6 +75,7 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
   const [alertsTotal, setAlertsTotal] = useState(0);
   const [alertsPage, setAlertsPage] = useState(1);
   const [alertsLoading, setAlertsLoading] = useState(false);
+  const [selectedAlert, setSelectedAlert] = useState<StockV2Alert | null>(null);
 
   const [quoteRefreshState, setQuoteRefreshState] = useState<StockV2QuoteRefreshStateResponse | null>(null);
   const [quoteRefreshLoading, setQuoteRefreshLoading] = useState(false);
@@ -343,10 +344,48 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
         <Notice tone="warn">监控接口暂不可用:{tasksError}</Notice>
       ) : null}
 
+      <CollapsibleSection
+        title="提醒台账"
+        subtitle={alertsTotal > 0 ? `${alertsTotal} 条提醒 · 待处理 ${openAlertCount} · 只放需要用户处理的监控结果` : "暂无需要处理的提醒"}
+        defaultOpen={false}
+      >
+        {alertsLoading ? (
+          <p className="text-sm text-[var(--muted)]">加载提醒…</p>
+        ) : alerts.length === 0 ? (
+          <p className="text-sm text-[var(--muted)]">暂无提醒。命中经(可选)Agent 复核后,需要用户关注的结果会进入台账。</p>
+        ) : (
+          <>
+            <div className="grid gap-2">
+              {alerts.map((alert) => (
+                <AlertRow
+                  key={alert.id}
+                  alert={alert}
+                  submitting={submitting}
+                  onOpen={() => setSelectedAlert(alert)}
+                  onAck={() => void ackAlert(alert)}
+                  onIgnore={() => void ignoreAlert(alert)}
+                  onResolve={() => void resolveAlert(alert)}
+                />
+              ))}
+            </div>
+            <Pagination
+              loading={alertsLoading}
+              page={alertsPage}
+              pageNumbers={alertsPageNumbers}
+              pageSize={ALERT_PAGE_SIZE}
+              total={alertsTotal}
+              totalPages={alertsTotalPages}
+              onPage={setAlertsPage}
+              label="提醒页码"
+            />
+          </>
+        )}
+      </CollapsibleSection>
+
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <SummaryCell label="启用任务" value={tasksLoading ? "—" : String(enabledCount)} tone={enabledCount > 0 ? "good" : "neutral"} />
-        <SummaryCell label="运行中" value={tasksLoading ? "—" : String(runningCount)} tone={runningCount > 0 ? "warn" : "neutral"} />
-        <SummaryCell label="最近失败" value={tasksLoading ? "—" : String(failedCount)} tone={failedCount > 0 ? "danger" : "neutral"} />
+        <SummaryCell label="启用任务" value={tasksLoading ? "-" : String(enabledCount)} tone={enabledCount > 0 ? "good" : "neutral"} />
+        <SummaryCell label="运行中" value={tasksLoading ? "-" : String(runningCount)} tone={runningCount > 0 ? "warn" : "neutral"} />
+        <SummaryCell label="最近失败" value={tasksLoading ? "-" : String(failedCount)} tone={failedCount > 0 ? "danger" : "neutral"} />
         <SummaryCell label="Open Alert" value={String(openAlertCount)} tone={openAlertCount > 0 ? "warn" : "neutral"} />
       </div>
 
@@ -421,43 +460,6 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
 
       <StockV2AgentExecutionLedgerSection actions={actions} />
 
-      <CollapsibleSection
-        title="提醒台账"
-        subtitle={alertsTotal > 0 ? `${alertsTotal} 条提醒 · 待处理 ${openAlertCount} · 只放需要用户处理的监控结果` : "暂无需要处理的提醒"}
-        defaultOpen={false}
-      >
-        {alertsLoading ? (
-          <p className="text-sm text-[var(--muted)]">加载提醒…</p>
-        ) : alerts.length === 0 ? (
-          <p className="text-sm text-[var(--muted)]">暂无提醒。命中经(可选)Agent 复核后,需要用户关注的结果会进入台账。</p>
-        ) : (
-          <>
-            <div className="grid gap-2">
-              {alerts.map((alert) => (
-                <AlertRow
-                  key={alert.id}
-                  alert={alert}
-                  submitting={submitting}
-                  onAck={() => void ackAlert(alert)}
-                  onIgnore={() => void ignoreAlert(alert)}
-                  onResolve={() => void resolveAlert(alert)}
-                />
-              ))}
-            </div>
-            <Pagination
-              loading={alertsLoading}
-              page={alertsPage}
-              pageNumbers={alertsPageNumbers}
-              pageSize={ALERT_PAGE_SIZE}
-              total={alertsTotal}
-              totalPages={alertsTotalPages}
-              onPage={setAlertsPage}
-              label="提醒页码"
-            />
-          </>
-        )}
-      </CollapsibleSection>
-
       {editTask ? (
         <TaskConfigDrawer
           task={editTask}
@@ -486,6 +488,15 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
 
       {reviewHitId ? (
         <StockV2ReviewDrawer actions={actions} hitId={reviewHitId} onClose={() => setReviewHitId(null)} />
+      ) : null}
+
+      {selectedAlert ? (
+        <AlertDrawer
+          alert={selectedAlert}
+          onClose={() => setSelectedAlert(null)}
+          onOpenAgentRun={(runId) => setAgentDetailRunId(runId)}
+          onOpenReview={(hitId) => setReviewHitId(hitId)}
+        />
       ) : null}
 
       {agentDetailRunId ? (
@@ -591,7 +602,7 @@ function MonitorTaskRow({
         </div>
         {def.description ? <p className="mt-1 text-xs text-[var(--muted)]">{def.description}</p> : null}
         <div className="mt-1 text-xs text-[var(--muted)]">
-          最近运行:{latest ? `${stockV2MonitorRunStatusLabel(latest.status)} · 命中 ${latest.hitCount ?? 0} · ${formatDate(latest.startedAt) || "-"}` : "—"}
+          最近运行:{latest ? `${stockV2MonitorRunStatusLabel(latest.status)} · 命中 ${latest.hitCount ?? 0} · ${formatDate(latest.startedAt) || "-"}` : "-"}
         </div>
       </div>
       <div className="flex flex-wrap items-start justify-end gap-1">
@@ -1018,28 +1029,50 @@ function evidenceStr(evidence: Record<string, unknown>, key: string): string {
 function AlertRow({
   alert,
   submitting,
+  onOpen,
   onAck,
   onIgnore,
   onResolve,
 }: {
   alert: StockV2Alert;
   submitting: boolean;
+  onOpen: () => void;
   onAck: () => void;
   onIgnore: () => void;
   onResolve: () => void;
 }) {
   const open = alert.status === "open";
+  const evidence = alert.evidence || {};
+  const degradedReason = evidenceStr(evidence, "degraded_reason");
+  const triggerDecision = evidenceStr(evidence, "trigger_decision");
+  const agentSummary = evidenceStr(evidence, "agent_summary") || evidenceStr(evidence, "agentRunStatus");
+  const reviewLabel = alert.reviewStatus ? stockV2ReviewStatusLabel(alert.reviewStatus) : (alert.reviewId ? "已创建" : "-");
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3">
-      <div className="min-w-0">
+      <button className="min-w-0 text-left" type="button" onClick={onOpen}>
         <div className="flex flex-wrap items-center gap-2">
           <Pill tone={stockV2AlertStatusTone(alert.status)}>{stockV2AlertStatusLabel(alert.status)}</Pill>
           <Pill tone={stockV2AlertLevelTone(alert.level)}>{stockV2AlertLevelLabel(alert.level)}</Pill>
+          {alert.taskType ? <Pill tone="neutral">{stockV2MonitorTaskTypeLabel(alert.taskType)}</Pill> : null}
+          {alert.triggerSource ? <Pill tone={alertTriggerSourceTone(alert.triggerSource)}>{alertTriggerSourceLabel(alert.triggerSource)}</Pill> : null}
+          {alert.symbol ? <Pill tone="neutral">{alert.symbol}</Pill> : null}
           <strong className="truncate text-sm">{alert.title || "(无标题)"}</strong>
         </div>
         {alert.summary ? <p className="mt-1 break-words text-xs leading-relaxed text-[var(--muted-strong)]">{alert.summary}</p> : null}
-        <div className="mt-1 text-xs text-[var(--muted)]">触发 {formatDate(alert.triggeredAt || alert.createdAt) || "—"}</div>
-      </div>
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--muted-strong)]">
+          {alert.strategyId ? <span>策略 {shortID(alert.strategyId)}</span> : null}
+          {alert.portfolioId ? <span>组合 {shortID(alert.portfolioId)}</span> : null}
+          <span>Review {reviewLabel}</span>
+          <span>次数 {alert.occurrenceCount ?? 1}</span>
+          <span>最近 {formatDate(alert.lastSeenAt || alert.triggeredAt || alert.createdAt) || "-"}</span>
+        </div>
+        {(degradedReason || agentSummary || triggerDecision) ? (
+          <div className="mt-1 truncate text-xs text-[var(--muted)]">
+            {degradedReason ? `降级原因 ${degradedReason}` : agentSummary ? `Agent ${agentSummary}` : `触发判断 ${triggerDecision}`}
+          </div>
+        ) : null}
+        <div className="mt-1 text-xs text-[var(--accent)]">点击查看证据与关联对象</div>
+      </button>
       <div className="flex flex-wrap items-start justify-end gap-1">
         {open ? (
           <Button onClick={onAck} disabled={submitting} title="确认">
@@ -1062,6 +1095,119 @@ function AlertRow({
       </div>
     </div>
   );
+}
+
+function AlertDrawer({
+  alert,
+  onClose,
+  onOpenAgentRun,
+  onOpenReview,
+}: {
+  alert: StockV2Alert;
+  onClose: () => void;
+  onOpenAgentRun: (runId: string) => void;
+  onOpenReview: (hitId: string) => void;
+}) {
+  const evidence = alert.evidence || {};
+  const degradedReason = evidenceStr(evidence, "degraded_reason");
+  const triggerDecision = evidenceStr(evidence, "trigger_decision");
+  return (
+    <Drawer
+      title={`提醒详情 · ${alert.title || alert.id}`}
+      subtitle={`${stockV2AlertStatusLabel(alert.status)} · ${alertTriggerSourceLabel(alert.triggerSource)} · ${formatDate(alert.lastSeenAt || alert.triggeredAt || alert.createdAt) || "-"}`}
+      onClose={onClose}
+      width={560}
+    >
+      <div className="grid gap-4 text-sm">
+        <div className="grid grid-cols-2 gap-2">
+          <SummaryCell label="来源任务" value={alert.taskType ? stockV2MonitorTaskTypeLabel(alert.taskType) : "-"} tone="neutral" />
+          <SummaryCell label="触发来源" value={alertTriggerSourceLabel(alert.triggerSource)} tone={alertTriggerSourceTone(alert.triggerSource)} />
+          <SummaryCell label="发生次数" value={String(alert.occurrenceCount ?? 1)} tone={(alert.occurrenceCount ?? 1) > 1 ? "warn" : "neutral"} />
+          <SummaryCell label="Review" value={alert.reviewStatus ? stockV2ReviewStatusLabel(alert.reviewStatus) : (alert.reviewId ? "已创建" : "-")} tone={stockV2ReviewToneFromStatus(alert.reviewStatus)} />
+        </div>
+
+        <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs">
+          <div className="grid gap-1.5">
+            {alert.symbol ? <KeyValue label="股票" value={[alert.market, alert.symbol].filter(Boolean).join(" ")} /> : null}
+            {alert.strategyId ? <KeyValue label="策略" value={alert.strategyId} mono /> : null}
+            {alert.portfolioId ? <KeyValue label="组合" value={alert.portfolioId} mono /> : null}
+            {alert.monitorRunId ? <KeyValue label="MonitorRun" value={alert.monitorRunId} mono /> : null}
+            {alert.monitorHitId ? <KeyValue label="MonitorHit" value={alert.monitorHitId} mono /> : null}
+            {alert.reviewId ? <KeyValue label="ReviewID" value={alert.reviewId} mono /> : null}
+            {alert.agentRunId ? <KeyValue label="AgentRun" value={alert.agentRunId} mono /> : null}
+            {alert.decisionLedgerId ? <KeyValue label="DecisionLedger" value={alert.decisionLedgerId} mono /> : null}
+            {alert.dedupeKey ? <KeyValue label="Dedupe" value={alert.dedupeKey} mono /> : null}
+          </div>
+        </div>
+
+        {alert.summary ? (
+          <div>
+            <strong className="text-sm">摘要</strong>
+            <p className="mt-1 text-xs leading-relaxed text-[var(--muted-strong)]">{alert.summary}</p>
+          </div>
+        ) : null}
+
+        <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs">
+          <div className="grid gap-1.5">
+            <KeyValue label="触发判断" value={triggerDecision || "-"} />
+            {degradedReason ? <KeyValue label="降级原因" value={degradedReason} /> : null}
+            <KeyValue label="首次出现" value={formatDate(alert.firstSeenAt || alert.createdAt) || "-"} />
+            <KeyValue label="最近出现" value={formatDate(alert.lastSeenAt || alert.triggeredAt || alert.createdAt) || "-"} />
+          </div>
+        </div>
+
+        <div>
+          <strong className="text-sm">Evidence</strong>
+          <pre className="mt-2 max-h-72 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs text-[var(--muted-strong)]">
+            {stringifyJSON(evidence)}
+          </pre>
+        </div>
+
+        <div className="flex flex-wrap justify-end gap-2 border-t border-[var(--line)] pt-3">
+          {alert.agentRunId ? (
+            <Button onClick={() => onOpenAgentRun(alert.agentRunId || "")}>查看 Agent 执行</Button>
+          ) : null}
+          {alert.monitorHitId ? (
+            <Button tone="primary" onClick={() => onOpenReview(alert.monitorHitId || "")}>
+              查看 Review
+            </Button>
+          ) : null}
+        </div>
+      </div>
+    </Drawer>
+  );
+}
+
+function KeyValue({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="grid grid-cols-[96px_minmax(0,1fr)] gap-3">
+      <span className="text-[var(--muted)]">{label}</span>
+      <span className={`break-words ${mono ? "font-mono" : ""}`}>{value}</span>
+    </div>
+  );
+}
+
+function alertTriggerSourceLabel(source?: string): string {
+  switch (source) {
+    case "agent_confirmed": return "Agent 确认";
+    case "deterministic": return "确定性触发";
+    case "degraded": return "降级触发";
+    default: return source || "-";
+  }
+}
+
+function alertTriggerSourceTone(source?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (source) {
+    case "agent_confirmed": return "good";
+    case "deterministic": return "neutral";
+    case "degraded": return "warn";
+    default: return "neutral";
+  }
+}
+
+function shortID(value?: string): string {
+  if (!value) return "-";
+  return value.length > 8 ? value.slice(0, 8) : value;
 }
 
 function Pagination({

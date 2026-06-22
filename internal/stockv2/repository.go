@@ -279,19 +279,34 @@ CREATE TABLE IF NOT EXISTS stockv2_watches (
 );
 CREATE TABLE IF NOT EXISTS stockv2_alerts (
     id TEXT PRIMARY KEY,
-    watch_id TEXT NOT NULL,
+    watch_id TEXT,
+    monitor_hit_id TEXT,
+    monitor_run_id TEXT,
+    task_type TEXT,
+    strategy_id TEXT,
+    portfolio_id TEXT,
+    symbol TEXT,
+    market TEXT,
+    review_id TEXT,
+    review_status TEXT,
+    agent_run_id TEXT,
+    decision_ledger_id TEXT,
+    trigger_source TEXT,
     status TEXT NOT NULL,
     level TEXT NOT NULL,
     title TEXT NOT NULL,
     summary TEXT,
     dedupe_key TEXT,
     evidence_json TEXT,
+    occurrence_count INTEGER NOT NULL DEFAULT 1,
+    first_seen_at DATETIME,
+    last_seen_at DATETIME,
     triggered_at DATETIME NOT NULL,
     acknowledged_at DATETIME,
     resolved_at DATETIME,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
-    FOREIGN KEY (watch_id) REFERENCES stockv2_watches(id) ON DELETE CASCADE
+    FOREIGN KEY (watch_id) REFERENCES stockv2_watches(id) ON DELETE SET NULL
 );
 CREATE TABLE IF NOT EXISTS stockv2_update_jobs (
     id TEXT PRIMARY KEY,
@@ -627,6 +642,43 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureColumn(ctx, "stockv2_watches", "last_run_reason", "TEXT"); err != nil {
 		return fmt.Errorf("add watch last_run_reason column: %w", err)
+	}
+	alertColumns := []struct {
+		name    string
+		colType string
+	}{
+		{"monitor_hit_id", "TEXT"},
+		{"monitor_run_id", "TEXT"},
+		{"task_type", "TEXT"},
+		{"strategy_id", "TEXT"},
+		{"portfolio_id", "TEXT"},
+		{"symbol", "TEXT"},
+		{"market", "TEXT"},
+		{"review_id", "TEXT"},
+		{"review_status", "TEXT"},
+		{"agent_run_id", "TEXT"},
+		{"decision_ledger_id", "TEXT"},
+		{"trigger_source", "TEXT"},
+		{"occurrence_count", "INTEGER NOT NULL DEFAULT 1"},
+		{"first_seen_at", "DATETIME"},
+		{"last_seen_at", "DATETIME"},
+	}
+	for _, column := range alertColumns {
+		if err := s.ensureColumn(ctx, "stockv2_alerts", column.name, column.colType); err != nil {
+			return fmt.Errorf("add alert %s column: %w", column.name, err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_monitor_hit_id ON stockv2_alerts(monitor_hit_id);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_monitor_run_id ON stockv2_alerts(monitor_run_id);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_task_type ON stockv2_alerts(task_type);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_strategy_id ON stockv2_alerts(strategy_id);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_portfolio_id ON stockv2_alerts(portfolio_id);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_symbol ON stockv2_alerts(symbol);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_monitor_dedupe_key ON stockv2_alerts(dedupe_key);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_last_seen_at ON stockv2_alerts(last_seen_at);
+	`); err != nil {
+		return fmt.Errorf("create alert monitor indexes: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bar_jobs_running_scope

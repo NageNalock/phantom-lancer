@@ -107,17 +107,45 @@ export PL_NO_SUPERVISOR=1
 export PL_DATA_DIR
 export PL_ADDR="$ADDR"
 
-cleanup() {
+STOPPING=0
+
+stop_server() {
+  local sig="$1"
+  STOPPING=1
   log ""
-  log "收到停止信号，正在关闭..."
+  log "收到停止信号(${sig})，正在关闭..."
   # 子进程会随 shell 退出被 SIGHUP，这里再确认一下
   if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
   fi
   ok "已停止"
+  case "$sig" in
+    INT) exit 130 ;;
+    TERM) exit 143 ;;
+    *) exit 1 ;;
+  esac
 }
-trap cleanup EXIT INT TERM
+
+on_exit() {
+  local status=$?
+  if [[ "$STOPPING" == "1" ]]; then
+    return "$status"
+  fi
+  if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
+  if [[ "$status" == "0" ]]; then
+    ok "服务进程已退出"
+  else
+    warn "服务进程已退出 (exit=$status)，请查看上方输出或日志: $DATA_DIR/logs/phantom-lancer.jsonl"
+  fi
+  return "$status"
+}
+trap on_exit EXIT
+trap 'stop_server INT' INT
+trap 'stop_server TERM' TERM
 
 "$BIN" \
   --addr "$ADDR" \

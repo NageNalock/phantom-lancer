@@ -173,6 +173,9 @@ func TestRunDataStrategyMonitorProducesHit(t *testing.T) {
 	if run.ReviewCount < 1 {
 		t.Fatalf("review count = %d, want >= 1", run.ReviewCount)
 	}
+	if run.AlertCount < 1 {
+		t.Fatalf("alert count = %d, want >= 1", run.AlertCount)
+	}
 
 	hits, err := svc.ListMonitorHits(ctx, MonitorHitListFilter{TaskType: MonitorTaskDataStrategyMonitor, Limit: 50})
 	if err != nil {
@@ -181,11 +184,14 @@ func TestRunDataStrategyMonitorProducesHit(t *testing.T) {
 	if len(hits) == 0 {
 		t.Fatalf("no monitor hits produced")
 	}
-	if hits[0].Status != MonitorHitStatusCandidate {
-		t.Fatalf("hit status = %s, want candidate", hits[0].Status)
+	if hits[0].Status != MonitorHitStatusAlerted {
+		t.Fatalf("hit status = %s, want alerted", hits[0].Status)
 	}
 	if hits[0].Symbol != "000977" {
 		t.Fatalf("hit symbol = %q", hits[0].Symbol)
+	}
+	if hits[0].AlertID == "" {
+		t.Fatalf("hit alert id empty")
 	}
 	if hits[0].AgentDecisionID != "" {
 		t.Fatalf("agent decision id = %q, want empty until executor exists", hits[0].AgentDecisionID)
@@ -206,6 +212,22 @@ func TestRunDataStrategyMonitorProducesHit(t *testing.T) {
 	}
 	if len(reviews) != 1 {
 		t.Fatalf("review count for hit = %d, want 1", len(reviews))
+	}
+	alerts, err := svc.ListAlerts(ctx, AlertListFilter{TaskType: MonitorTaskDataStrategyMonitor, Symbol: "000977", Limit: 10})
+	if err != nil {
+		t.Fatalf("list alerts: %v", err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("alerts = %d, want 1", len(alerts))
+	}
+	if alerts[0].TriggerSource != AlertTriggerSourceDegraded {
+		t.Fatalf("trigger source = %s, want degraded", alerts[0].TriggerSource)
+	}
+	if alerts[0].MonitorHitID != hits[0].ID || alerts[0].ReviewID == "" {
+		t.Fatalf("alert linkage = %+v, hit=%s", alerts[0], hits[0].ID)
+	}
+	if alerts[0].Evidence["degraded_reason"] != "agent_unavailable" {
+		t.Fatalf("alert degraded reason = %v, want agent_unavailable", alerts[0].Evidence["degraded_reason"])
 	}
 }
 
@@ -245,8 +267,8 @@ func TestRunDataStrategyMonitorDoublecheckCreatesAgentRunWithoutExecutor(t *test
 	if run.Status != MonitorRunStatusCompleted {
 		t.Fatalf("run status = %s, want completed", run.Status)
 	}
-	if run.HitCount != 1 || run.ReviewCount != 1 || run.FailedCount != 0 {
-		t.Fatalf("run counts = %+v, want one hit/review and no failures", run)
+	if run.HitCount != 1 || run.ReviewCount != 1 || run.AlertCount != 1 || run.FailedCount != 0 {
+		t.Fatalf("run counts = %+v, want one hit/review/alert and no failures", run)
 	}
 	hits, err := svc.ListMonitorHits(ctx, MonitorHitListFilter{TaskType: MonitorTaskDataStrategyMonitor, Limit: 10})
 	if err != nil {
@@ -274,6 +296,19 @@ func TestRunDataStrategyMonitorDoublecheckCreatesAgentRunWithoutExecutor(t *test
 	}
 	if len(agentRuns) != 1 || agentRuns[0].Status != AgentRunStatusReady {
 		t.Fatalf("agent runs = %+v, want one ready run", agentRuns)
+	}
+	alerts, err := svc.ListAlerts(ctx, AlertListFilter{TaskType: MonitorTaskDataStrategyMonitor, Symbol: "000977", Limit: 10})
+	if err != nil {
+		t.Fatalf("list alerts: %v", err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("alerts = %d, want 1", len(alerts))
+	}
+	if alerts[0].TriggerSource != AlertTriggerSourceDegraded || alerts[0].AgentRunID != hits[0].AgentDecisionID {
+		t.Fatalf("alert = %+v, want degraded linked to agent run", alerts[0])
+	}
+	if alerts[0].Evidence["degraded_reason"] != "agent_ready_without_executor" {
+		t.Fatalf("degraded reason = %v, want agent_ready_without_executor", alerts[0].Evidence["degraded_reason"])
 	}
 }
 
@@ -346,6 +381,13 @@ func TestProcessCreatedMonitorHitIsIdempotentForReviewAndAgentRun(t *testing.T) 
 	if agentRunCount != 1 {
 		t.Fatalf("agent run count = %d, want 1", agentRunCount)
 	}
+	alertCount, err := svc.CountAlerts(ctx, AlertListFilter{TaskType: MonitorTaskDataStrategyMonitor, Symbol: "000977"})
+	if err != nil {
+		t.Fatalf("count alerts: %v", err)
+	}
+	if alertCount != 1 {
+		t.Fatalf("alert count = %d, want 1", alertCount)
+	}
 }
 
 func TestRunDataStrategyMonitorUsesPlaybookPrefilters(t *testing.T) {
@@ -390,6 +432,9 @@ func TestRunDataStrategyMonitorUsesPlaybookPrefilters(t *testing.T) {
 	if run.HitCount != 1 {
 		t.Fatalf("hit count = %d, want 1", run.HitCount)
 	}
+	if run.AlertCount != 1 {
+		t.Fatalf("alert count = %d, want 1", run.AlertCount)
+	}
 	hits, err := svc.ListMonitorHits(ctx, MonitorHitListFilter{TaskType: MonitorTaskDataStrategyMonitor, Limit: 10})
 	if err != nil {
 		t.Fatalf("list hits: %v", err)
@@ -406,6 +451,82 @@ func TestRunDataStrategyMonitorUsesPlaybookPrefilters(t *testing.T) {
 	pipeline := mapFromAny(hits[0].Evidence["reviewPipeline"])
 	if pipeline["reviewId"] == "" || pipeline["agentStatus"] != "skipped" {
 		t.Fatalf("review pipeline = %+v, want review with skipped agent", pipeline)
+	}
+	alerts, err := svc.ListAlerts(ctx, AlertListFilter{TaskType: MonitorTaskDataStrategyMonitor, Symbol: "300750", Limit: 10})
+	if err != nil {
+		t.Fatalf("list alerts: %v", err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("alerts = %d, want 1", len(alerts))
+	}
+	if alerts[0].TriggerSource != AlertTriggerSourceDeterministic {
+		t.Fatalf("trigger source = %s, want deterministic", alerts[0].TriggerSource)
+	}
+	if alerts[0].Evidence["trigger_decision"] != "deterministic_policy" {
+		t.Fatalf("trigger decision = %v, want deterministic_policy", alerts[0].Evidence["trigger_decision"])
+	}
+}
+
+func TestMonitorAlertDedupeCooldownUpdatesOccurrence(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+
+	seedWatchQuote(t, svc, "300750", 210, 2.4, QuoteStatusFresh, time.Now())
+	if _, err := svc.CreateStrategy(ctx, RequestCreateStrategy{
+		Name:      "宁德时代剧本策略",
+		Kind:      StrategyKindSymbolStrategy,
+		Scope:     StrategyScopeResearch,
+		Source:    StrategySourceManual,
+		Status:    StrategyStatusActive,
+		Symbol:    "300750",
+		Direction: StrategyBiasBullish,
+		GenerationMeta: map[string]any{
+			"playbook": map[string]any{
+				"version": "v1",
+				"rules": []any{
+					map[string]any{
+						"id":     "add-on-breakout",
+						"action": "add_position",
+						"title":  "突破后加仓",
+						"dataPrefilters": []any{
+							map[string]any{"key": "break_200", "type": WatchRulePriceAbove, "threshold": 200.0},
+						},
+					},
+				},
+			},
+		},
+		CreatedBy: StrategySourceManual,
+	}); err != nil {
+		t.Fatalf("create strategy: %v", err)
+	}
+
+	first, err := svc.RunMonitorTask(ctx, MonitorTaskDataStrategyMonitor, MonitorTriggerManual)
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	second, err := svc.RunMonitorTask(ctx, MonitorTaskDataStrategyMonitor, MonitorTriggerManual)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if first.AlertCount != 1 || second.AlertCount != 1 {
+		t.Fatalf("alert counts first=%d second=%d, want 1/1", first.AlertCount, second.AlertCount)
+	}
+	alerts, err := svc.ListAlerts(ctx, AlertListFilter{TaskType: MonitorTaskDataStrategyMonitor, Symbol: "300750", Limit: 10})
+	if err != nil {
+		t.Fatalf("list alerts: %v", err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("alerts = %d, want one reused alert", len(alerts))
+	}
+	if alerts[0].OccurrenceCount != 2 {
+		t.Fatalf("occurrence count = %d, want 2", alerts[0].OccurrenceCount)
+	}
+	if alerts[0].Evidence["lastRunId"] != second.ID {
+		t.Fatalf("last run id = %v, want %s", alerts[0].Evidence["lastRunId"], second.ID)
+	}
+	if alerts[0].FirstSeenAt.IsZero() || alerts[0].LastSeenAt.IsZero() || alerts[0].LastSeenAt.Before(alerts[0].FirstSeenAt) {
+		t.Fatalf("seen timestamps invalid: first=%s last=%s", alerts[0].FirstSeenAt, alerts[0].LastSeenAt)
 	}
 }
 
