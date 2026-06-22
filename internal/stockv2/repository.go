@@ -439,6 +439,8 @@ CREATE TABLE IF NOT EXISTS stockv2_settings (
     proxy_host TEXT,
     proxy_port INTEGER,
     last_scheduled_update DATETIME,
+    financial_juice_enabled INTEGER DEFAULT 0,
+    financial_juice_cookie TEXT,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
 );
@@ -609,6 +611,7 @@ CREATE TABLE IF NOT EXISTS stockv2_raw_news (
     snippet TEXT,
     published_at DATETIME,
     fetched_at DATETIME NOT NULL,
+    url TEXT,
     raw_payload_json TEXT,
     content_hash TEXT NOT NULL,
     dedupe_key TEXT NOT NULL UNIQUE,
@@ -620,50 +623,6 @@ CREATE TABLE IF NOT EXISTS stockv2_raw_news (
 CREATE INDEX IF NOT EXISTS idx_stockv2_raw_news_source ON stockv2_raw_news(source);
 CREATE INDEX IF NOT EXISTS idx_stockv2_raw_news_status ON stockv2_raw_news(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_raw_news_fetched_at ON stockv2_raw_news(fetched_at);
-
-CREATE TABLE IF NOT EXISTS stockv2_news_events (
-    id TEXT PRIMARY KEY,
-    raw_news_id TEXT,
-    title TEXT NOT NULL,
-    summary TEXT,
-    snippet TEXT,
-    language TEXT,
-    source TEXT NOT NULL,
-    event_time DATETIME NOT NULL,
-    importance TEXT NOT NULL,
-    tags_json TEXT,
-    topics_json TEXT,
-    dedupe_key TEXT NOT NULL UNIQUE,
-    quality TEXT NOT NULL,
-    status TEXT NOT NULL,
-    created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL,
-    FOREIGN KEY (raw_news_id) REFERENCES stockv2_raw_news(id) ON DELETE SET NULL
-);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_raw_news_id ON stockv2_news_events(raw_news_id);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_source ON stockv2_news_events(source);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_status ON stockv2_news_events(status);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_event_time ON stockv2_news_events(event_time);
-
-CREATE TABLE IF NOT EXISTS stockv2_news_link_candidates (
-    id TEXT PRIMARY KEY,
-    news_event_id TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    market TEXT NOT NULL DEFAULT '',
-    match_method TEXT NOT NULL,
-    score REAL NOT NULL,
-    reason TEXT,
-    matched_terms_json TEXT,
-    status TEXT NOT NULL,
-    created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL,
-    FOREIGN KEY (news_event_id) REFERENCES stockv2_news_events(id) ON DELETE CASCADE
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_key
-    ON stockv2_news_link_candidates(news_event_id, symbol, market, match_method);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_event ON stockv2_news_link_candidates(news_event_id);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol, market);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_status ON stockv2_news_link_candidates(status);
 
 CREATE TABLE IF NOT EXISTS stockv2_news_source_states (
     source TEXT PRIMARY KEY,
@@ -830,6 +789,15 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureColumn(ctx, "stockv2_settings", "daily_bars_last_run", "DATETIME"); err != nil {
 		return fmt.Errorf("add daily_bars_last_run column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_enabled", "INTEGER DEFAULT 0"); err != nil {
+		return fmt.Errorf("add financial_juice_enabled column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_cookie", "TEXT"); err != nil {
+		return fmt.Errorf("add financial_juice_cookie column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_raw_news", "url", "TEXT"); err != nil {
+		return fmt.Errorf("add raw news url column: %w", err)
 	}
 	if err := s.ensureColumn(ctx, "stockv2_daily_bar_jobs", "symbol", "TEXT"); err != nil {
 		return fmt.Errorf("add daily bar job symbol column: %w", err)
@@ -1980,8 +1948,9 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		INSERT OR REPLACE INTO stockv2_settings (
 			id, auto_update_enabled, update_interval_sec, proxy_enabled,
 			proxy_type, proxy_host, proxy_port, last_scheduled_update,
-			daily_bars_auto_enabled, daily_bars_last_run, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			daily_bars_auto_enabled, daily_bars_last_run, financial_juice_enabled,
+			financial_juice_cookie, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	now := time.Now()
@@ -2006,6 +1975,8 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		settings.LastScheduledUpdate,
 		settings.DailyBarsAutoEnabled,
 		dailyBarsLastRun,
+		settings.FinancialJuiceEnabled,
+		nullableNewsString(settings.FinancialJuiceCookie),
 		settings.CreatedAt,
 		settings.UpdatedAt,
 	)
@@ -2066,7 +2037,9 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	query := `
 		SELECT id, auto_update_enabled, update_interval_sec, proxy_enabled,
 		       COALESCE(proxy_type,''), COALESCE(proxy_host,''), COALESCE(proxy_port, 0), last_scheduled_update,
-		       COALESCE(daily_bars_auto_enabled, 0), daily_bars_last_run, created_at, updated_at
+		       COALESCE(daily_bars_auto_enabled, 0), daily_bars_last_run,
+		       COALESCE(financial_juice_enabled, 0), COALESCE(financial_juice_cookie, ''),
+		       created_at, updated_at
 		FROM stockv2_settings
 		LIMIT 1
 	`
@@ -2087,6 +2060,8 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 		&lastScheduledUpdate,
 		&settings.DailyBarsAutoEnabled,
 		&dailyBarsLastRun,
+		&settings.FinancialJuiceEnabled,
+		&settings.FinancialJuiceCookie,
 		&settings.CreatedAt,
 		&settings.UpdatedAt,
 	)
@@ -2113,6 +2088,7 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	if dailyBarsLastRun.Valid {
 		settings.DailyBarsLastRun = dailyBarsLastRun.Time
 	}
+	settings.FinancialJuiceCookieSet = strings.TrimSpace(settings.FinancialJuiceCookie) != ""
 
 	return settings, nil
 }

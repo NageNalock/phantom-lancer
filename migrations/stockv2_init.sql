@@ -105,6 +105,8 @@ CREATE TABLE IF NOT EXISTS stockv2_settings (
     proxy_host TEXT,
     proxy_port INTEGER,
     last_scheduled_update TEXT,
+    financial_juice_enabled INTEGER DEFAULT 0,
+    financial_juice_cookie TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

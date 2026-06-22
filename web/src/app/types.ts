@@ -1918,6 +1918,8 @@ export interface StockV2Settings {
   proxyType: string;
   proxyHost: string;
   proxyPort: number;
+  financialJuiceEnabled: boolean;
+  financialJuiceCookieSet: boolean;
   lastScheduledUpdate: string;
   dailyBarsLastRun: string;
   createdAt: string;

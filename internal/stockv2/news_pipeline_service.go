@@ -122,7 +122,7 @@ func (s *Service) RunNewsProcessingBatch(ctx context.Context, source string, raw
 		return result, err
 	}
 	for _, raw := range rawItems {
-		_, createErr := s.CreateNewsEvent(ctx, newsEventRequestFromRawNews(raw))
+		_, createErr := s.CreateNewsEvent(ctx, newsEventFromRawNews(raw))
 		if createErr != nil {
 			_ = s.store.UpdateRawNewsStatus(ctx, raw.ID, NewsStatusFailed)
 			continue
@@ -133,27 +133,43 @@ func (s *Service) RunNewsProcessingBatch(ctx context.Context, source string, raw
 		result.NormalizedCount++
 	}
 
-	if s.newsLinker != nil {
-		events, err := s.store.ListNewsEvents(ctx, NewsEventListFilter{Source: source, Status: NewsStatusNew, Limit: eventLimit})
-		if err != nil {
-			return result, err
+	events, err := s.store.ListPendingNewsEvents(ctx, eventLimit)
+	if err != nil {
+		return result, err
+	}
+	for _, event := range events {
+		if source != "" && event.Source != source {
+			continue
 		}
-		for _, event := range events {
-			candidates, linkErr := s.newsLinker.LinkNewsEvent(ctx, event)
+		if s.newsLinker == nil {
+			candidates, linkErr := s.LinkNewsEvent(ctx, event.ID)
 			if linkErr != nil {
-				_ = s.store.UpdateNewsEventStatus(ctx, event.ID, NewsStatusFailed)
 				continue
 			}
-			for _, candidate := range candidates {
-				candidate.NewsEventID = event.ID
-				if _, err := s.UpsertNewsLinkCandidate(ctx, candidate); err != nil {
-					return result, err
-				}
-				result.LinkCandidateCount++
+			result.LinkCandidateCount += len(candidates)
+			continue
+		}
+		candidates, linkErr := s.newsLinker.LinkNewsEvent(ctx, event)
+		if linkErr != nil {
+			_ = s.store.UpdateNewsEventLinkStatus(ctx, event.ID, NewsEventLinkStatusFailed, time.Now())
+			continue
+		}
+		for _, candidate := range candidates {
+			candidate.NewsEventID = event.ID
+			if candidate.RawNewsID == "" {
+				candidate.RawNewsID = event.RawNewsID
 			}
-			if err := s.store.UpdateNewsEventStatus(ctx, event.ID, NewsStatusProcessed); err != nil {
+			if _, err := s.store.UpsertNewsLinkCandidate(ctx, candidate); err != nil {
 				return result, err
 			}
+			result.LinkCandidateCount++
+		}
+		status := NewsEventLinkStatusLinked
+		if len(candidates) == 0 {
+			status = NewsEventLinkStatusNoCandidate
+		}
+		if err := s.store.UpdateNewsEventLinkStatus(ctx, event.ID, status, time.Now()); err != nil {
+			return result, err
 		}
 	}
 
@@ -227,7 +243,7 @@ func failedNewsSourceState(state NewsSourceState, err error, now time.Time) News
 	return state
 }
 
-func newsEventRequestFromRawNews(raw StockV2RawNews) RequestCreateNewsEvent {
+func newsEventFromRawNews(raw StockV2RawNews) NewsEvent {
 	eventTime := raw.PublishedAt
 	if eventTime.IsZero() {
 		eventTime = raw.FetchedAt
@@ -239,16 +255,18 @@ func newsEventRequestFromRawNews(raw StockV2RawNews) RequestCreateNewsEvent {
 	if title == "" {
 		title = raw.Content
 	}
-	return RequestCreateNewsEvent{
-		RawNewsID: raw.ID,
-		Title:     title,
-		Summary:   raw.Snippet,
-		Snippet:   raw.Snippet,
-		Language:  raw.Language,
-		Source:    raw.Source,
-		EventTime: eventTime,
-		Quality:   raw.Quality,
-		Status:    NewsStatusNew,
+	return NewsEvent{
+		RawNewsID:     raw.ID,
+		Source:        raw.Source,
+		ExternalID:    raw.SourceID,
+		Title:         title,
+		Summary:       raw.Snippet,
+		Content:       raw.Content,
+		URL:           raw.URL,
+		QualityStatus: raw.Quality,
+		DedupeKey:     raw.DedupeKey,
+		LinkStatus:    NewsEventLinkStatusPending,
+		EventAt:       eventTime,
 	}
 }
 

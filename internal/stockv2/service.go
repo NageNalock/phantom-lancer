@@ -755,6 +755,20 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	if req.DailyBarsAutoEnabled != nil {
 		settings.DailyBarsAutoEnabled = *req.DailyBarsAutoEnabled
 	}
+	if req.FinancialJuiceEnabled != nil {
+		settings.FinancialJuiceEnabled = *req.FinancialJuiceEnabled
+	}
+	if req.FinancialJuiceClearCookie != nil && *req.FinancialJuiceClearCookie {
+		settings.FinancialJuiceCookie = ""
+	}
+	if req.FinancialJuiceCookieInput != nil && strings.TrimSpace(*req.FinancialJuiceCookieInput) != "" {
+		cookie, err := ParseFinancialJuiceCookieInput(*req.FinancialJuiceCookieInput)
+		if err != nil {
+			return StockV2Settings{}, err
+		}
+		settings.FinancialJuiceCookie = cookie
+	}
+	settings.FinancialJuiceCookieSet = strings.TrimSpace(settings.FinancialJuiceCookie) != ""
 
 	// 保存配置
 	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil {

@@ -10,11 +10,13 @@ type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
 export function StockV2Settings({ actions, data, runAction }: { actions: AppActions; data: AppData; runAction: RunAction }) {
   const settings = data.stockv2.settings;
   const [form, setForm] = useState<Partial<StockV2Settings>>({});
+  const [financialJuiceCookieInput, setFinancialJuiceCookieInput] = useState("");
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
     if (settings) {
       setForm(settings);
+      setFinancialJuiceCookieInput("");
       setDirty(false);
     }
   }, [settings?.id]);
@@ -26,11 +28,33 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
 
   async function handleSave() {
     await runAction("保存设置", async () => {
+      const body: Record<string, unknown> = { ...form };
+      if (financialJuiceCookieInput.trim()) {
+        body.financialJuiceCookieInput = financialJuiceCookieInput;
+      }
       await actions.api("/api/stockv2/settings", {
         method: "PUT",
-        body: form,
+        body,
       });
+      setFinancialJuiceCookieInput("");
       setDirty(false);
+    });
+  }
+
+  async function handleClearFinancialJuiceCookie() {
+    await runAction("清除 FinancialJuice Cookie", async () => {
+      await actions.api("/api/stockv2/settings", {
+        method: "PUT",
+        body: { financialJuiceClearCookie: true },
+      });
+      setFinancialJuiceCookieInput("");
+      setDirty(false);
+    });
+  }
+
+  async function handleFetchFinancialJuice() {
+    await runAction("抓取 FinancialJuice RawNews", async () => {
+      await actions.api("/api/stockv2/news/sources/financialjuice/fetch", { method: "POST" });
     });
   }
 
@@ -185,6 +209,56 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
         </div>
       </Panel>
 
+      <Panel
+        title="英文消息源"
+        subtitle="FinancialJuice 先落 RawNews，不触发 Agent"
+        actions={
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => void handleFetchFinancialJuice()} disabled={!form.financialJuiceEnabled || !settings.financialJuiceCookieSet}>
+              抓取一次
+            </Button>
+            <Button onClick={() => void handleClearFinancialJuiceCookie()} disabled={!settings.financialJuiceCookieSet}>
+              清除 Cookie
+            </Button>
+          </div>
+        }
+      >
+        <div className="grid gap-4">
+          <Toggle
+            checked={!!form.financialJuiceEnabled}
+            label={
+              <div>
+                <div>启用 FinancialJuice</div>
+                <div className="muted mt-0.5 text-xs">使用用户本机保存的 Cookie 拉取英文快讯</div>
+              </div>
+            }
+            onChange={(checked) => update("financialJuiceEnabled", checked)}
+          />
+
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-[var(--muted)]">Cookie 状态</span>
+              <Pill tone={settings.financialJuiceCookieSet ? "good" : "neutral"}>
+                {settings.financialJuiceCookieSet ? "已配置" : "未配置"}
+              </Pill>
+            </div>
+            <p className="muted mt-2 text-xs">保存后仅显示配置状态，不在 API 响应中回显 Cookie。</p>
+          </div>
+
+          <Field label="FinancialJuice 请求片段" help="粘贴浏览器复制的 curl 或 Cookie header，系统只提取 Cookie。">
+            <textarea
+              rows={5}
+              value={financialJuiceCookieInput}
+              onChange={(e) => {
+                setFinancialJuiceCookieInput(e.target.value);
+                setDirty(true);
+              }}
+              placeholder="curl 'https://live.financialjuice.com/FJService.asmx/Startup?...' -H 'Cookie: ...'"
+            />
+          </Field>
+        </div>
+      </Panel>
+
       {/* 数据源信息 */}
       <Panel
         title="数据源"
@@ -225,6 +299,7 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
         <Button
           onClick={() => {
             setForm(settings);
+            setFinancialJuiceCookieInput("");
             setDirty(false);
           }}
           disabled={!dirty}

@@ -157,29 +157,33 @@ type StockV2UpdateProgress struct {
 
 // StockV2Settings V2 配置
 type StockV2Settings struct {
-	ID                   string    `json:"id"`
-	AutoUpdateEnabled    bool      `json:"autoUpdateEnabled"`
-	UpdateIntervalSec    int       `json:"updateIntervalSec"`
-	ProxyEnabled         bool      `json:"proxyEnabled"`
-	ProxyType            string    `json:"proxyType"`
-	ProxyHost            string    `json:"proxyHost"`
-	ProxyPort            int       `json:"proxyPort"`
-	LastScheduledUpdate  time.Time `json:"lastScheduledUpdate"`
-	DailyBarsAutoEnabled bool      `json:"dailyBarsAutoEnabled"` // 日 K 每日定时增量开关
-	DailyBarsLastRun     time.Time `json:"dailyBarsLastRun"`     // 日 K 定时增量上次执行时间（当日去重）
-	CreatedAt            time.Time `json:"createdAt"`
-	UpdatedAt            time.Time `json:"updatedAt"`
+	ID                      string    `json:"id"`
+	AutoUpdateEnabled       bool      `json:"autoUpdateEnabled"`
+	UpdateIntervalSec       int       `json:"updateIntervalSec"`
+	ProxyEnabled            bool      `json:"proxyEnabled"`
+	ProxyType               string    `json:"proxyType"`
+	ProxyHost               string    `json:"proxyHost"`
+	ProxyPort               int       `json:"proxyPort"`
+	LastScheduledUpdate     time.Time `json:"lastScheduledUpdate"`
+	DailyBarsAutoEnabled    bool      `json:"dailyBarsAutoEnabled"` // 日 K 每日定时增量开关
+	DailyBarsLastRun        time.Time `json:"dailyBarsLastRun"`     // 日 K 定时增量上次执行时间（当日去重）
+	FinancialJuiceEnabled   bool      `json:"financialJuiceEnabled"`
+	FinancialJuiceCookie    string    `json:"-"`
+	FinancialJuiceCookieSet bool      `json:"financialJuiceCookieSet"`
+	CreatedAt               time.Time `json:"createdAt"`
+	UpdatedAt               time.Time `json:"updatedAt"`
 }
 
 // StockV2SettingsPatch 配置更新补丁
 type StockV2SettingsPatch struct {
-	AutoUpdateEnabled    *bool   `json:"autoUpdateEnabled,omitempty"`
-	UpdateIntervalSec    *int    `json:"updateIntervalSec,omitempty"`
-	ProxyEnabled         *bool   `json:"proxyEnabled,omitempty"`
-	ProxyType            *string `json:"proxyType,omitempty"`
-	ProxyHost            *string `json:"proxyHost,omitempty"`
-	ProxyPort            *int    `json:"proxyPort,omitempty"`
-	DailyBarsAutoEnabled *bool   `json:"dailyBarsAutoEnabled,omitempty"`
+	AutoUpdateEnabled     *bool   `json:"autoUpdateEnabled,omitempty"`
+	UpdateIntervalSec     *int    `json:"updateIntervalSec,omitempty"`
+	ProxyEnabled          *bool   `json:"proxyEnabled,omitempty"`
+	ProxyType             *string `json:"proxyType,omitempty"`
+	ProxyHost             *string `json:"proxyHost,omitempty"`
+	ProxyPort             *int    `json:"proxyPort,omitempty"`
+	DailyBarsAutoEnabled  *bool   `json:"dailyBarsAutoEnabled,omitempty"`
+	FinancialJuiceEnabled *bool   `json:"financialJuiceEnabled,omitempty"`
 }
 
 // Repository 接口定义
@@ -307,13 +311,16 @@ type RequestRecordTransaction struct {
 
 // RequestCreateOrUpdateSettings 配置请求
 type RequestCreateOrUpdateSettings struct {
-	AutoUpdateEnabled    *bool   `json:"autoUpdateEnabled,omitempty"`
-	UpdateIntervalSec    *int    `json:"updateIntervalSec,omitempty"`
-	ProxyEnabled         *bool   `json:"proxyEnabled,omitempty"`
-	ProxyType            *string `json:"proxyType,omitempty"`
-	ProxyHost            *string `json:"proxyHost,omitempty"`
-	ProxyPort            *int    `json:"proxyPort,omitempty"`
-	DailyBarsAutoEnabled *bool   `json:"dailyBarsAutoEnabled,omitempty"`
+	AutoUpdateEnabled         *bool   `json:"autoUpdateEnabled,omitempty"`
+	UpdateIntervalSec         *int    `json:"updateIntervalSec,omitempty"`
+	ProxyEnabled              *bool   `json:"proxyEnabled,omitempty"`
+	ProxyType                 *string `json:"proxyType,omitempty"`
+	ProxyHost                 *string `json:"proxyHost,omitempty"`
+	ProxyPort                 *int    `json:"proxyPort,omitempty"`
+	DailyBarsAutoEnabled      *bool   `json:"dailyBarsAutoEnabled,omitempty"`
+	FinancialJuiceEnabled     *bool   `json:"financialJuiceEnabled,omitempty"`
+	FinancialJuiceCookieInput *string `json:"financialJuiceCookieInput,omitempty"`
+	FinancialJuiceClearCookie *bool   `json:"financialJuiceClearCookie,omitempty"`
 }
 
 // 错误定义

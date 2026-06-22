@@ -122,8 +122,8 @@ func TestNewsProcessingBatchCreatesEventsAndCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create raw news: %v", err)
 	}
-	svc.WithNewsEventLinker(NewsEventLinkerFunc(func(ctx context.Context, event StockV2NewsEvent) ([]RequestUpsertNewsLinkCandidate, error) {
-		return []RequestUpsertNewsLinkCandidate{{
+	svc.WithNewsEventLinker(NewsEventLinkerFunc(func(ctx context.Context, event NewsEvent) ([]NewsLinkCandidate, error) {
+		return []NewsLinkCandidate{{
 			Symbol:       "688012",
 			Market:       "SH",
 			MatchMethod:  "keyword",
@@ -147,19 +147,19 @@ func TestNewsProcessingBatchCreatesEventsAndCandidates(t *testing.T) {
 	if len(processedRaw) != 1 || processedRaw[0].ID != raw.ID {
 		t.Fatalf("processed raw = %+v", processedRaw)
 	}
-	events, err := svc.ListNewsEvents(ctx, NewsEventListFilter{Source: source, Status: NewsStatusProcessed})
-	if err != nil {
-		t.Fatalf("list processed events: %v", err)
-	}
-	if len(events) != 1 || events[0].RawNewsID != raw.ID {
-		t.Fatalf("events = %+v", events)
-	}
 	candidates, err := svc.ListNewsLinkCandidates(ctx, NewsLinkCandidateListFilter{Symbol: "688012"})
 	if err != nil {
 		t.Fatalf("list candidates: %v", err)
 	}
-	if len(candidates) != 1 || candidates[0].NewsEventID != events[0].ID {
+	if len(candidates) != 1 {
 		t.Fatalf("candidates = %+v", candidates)
+	}
+	event, err := svc.store.GetNewsEvent(ctx, candidates[0].NewsEventID)
+	if err != nil {
+		t.Fatalf("get event: %v", err)
+	}
+	if event.RawNewsID != raw.ID || event.LinkStatus != NewsEventLinkStatusLinked {
+		t.Fatalf("event = %+v", event)
 	}
 }
 
