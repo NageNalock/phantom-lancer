@@ -131,6 +131,21 @@ func (s *Store) ListUnprocessedRawNews(ctx context.Context, before time.Time, li
 	return items, wrapError(rows.Err(), "iterate unprocessed raw news")
 }
 
+func (s *Store) UpdateRawNewsStatus(ctx context.Context, id, status string) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_raw_news
+		SET status = ?, updated_at = ?
+		WHERE id = ?
+	`, status, time.Now(), id)
+	if err != nil {
+		return wrapError(err, "update raw news status")
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return ErrRawNewsNotFound
+	}
+	return nil
+}
+
 func (s *Store) CreateNewsEvent(ctx context.Context, event StockV2NewsEvent) (StockV2NewsEvent, error) {
 	now := time.Now()
 	if event.ID == "" {
@@ -253,6 +268,21 @@ func (s *Store) ListUnprocessedNewsEvents(ctx context.Context, before time.Time,
 	return items, wrapError(rows.Err(), "iterate unprocessed news events")
 }
 
+func (s *Store) UpdateNewsEventStatus(ctx context.Context, id, status string) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_news_events
+		SET status = ?, updated_at = ?
+		WHERE id = ?
+	`, status, time.Now(), id)
+	if err != nil {
+		return wrapError(err, "update news event status")
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return ErrNewsEventNotFound
+	}
+	return nil
+}
+
 func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, item StockV2NewsLinkCandidate) (StockV2NewsLinkCandidate, error) {
 	now := time.Now()
 	if item.ID == "" {
@@ -339,6 +369,71 @@ func (s *Store) getNewsLinkCandidateByKey(ctx context.Context, eventID, symbol, 
 	return item, nil
 }
 
+func (s *Store) UpsertNewsSourceState(ctx context.Context, state NewsSourceState) error {
+	if strings.TrimSpace(state.Source) == "" {
+		return ErrNewsSourceAdapterNotFound
+	}
+	if state.Status == "" {
+		state.Status = NewsSourceStatusIdle
+	}
+	state.UpdatedAt = time.Now()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO stockv2_news_source_states
+			(source, enabled, status, cursor, last_fetch_at, last_success_at, last_error_at,
+			 last_error, consecutive_failures, backoff_until, raw_news_count, news_event_count,
+			 link_candidate_count, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(source) DO UPDATE SET
+			enabled = excluded.enabled,
+			status = excluded.status,
+			cursor = excluded.cursor,
+			last_fetch_at = excluded.last_fetch_at,
+			last_success_at = excluded.last_success_at,
+			last_error_at = excluded.last_error_at,
+			last_error = excluded.last_error,
+			consecutive_failures = excluded.consecutive_failures,
+			backoff_until = excluded.backoff_until,
+			raw_news_count = excluded.raw_news_count,
+			news_event_count = excluded.news_event_count,
+			link_candidate_count = excluded.link_candidate_count,
+			updated_at = excluded.updated_at
+	`,
+		state.Source,
+		boolToInt(state.Enabled),
+		state.Status,
+		nullableNewsString(state.Cursor),
+		nullableNewsTime(state.LastFetchAt),
+		nullableNewsTime(state.LastSuccessAt),
+		nullableNewsTime(state.LastErrorAt),
+		nullableNewsString(state.LastError),
+		state.ConsecutiveFailures,
+		nullableNewsTime(state.BackoffUntil),
+		state.RawNewsCount,
+		state.NewsEventCount,
+		state.LinkCandidateCount,
+		state.UpdatedAt,
+	)
+	return wrapError(err, "upsert news source state")
+}
+
+func (s *Store) GetNewsSourceState(ctx context.Context, source string) (NewsSourceState, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT source, enabled, status, COALESCE(cursor,''), last_fetch_at, last_success_at,
+		       last_error_at, COALESCE(last_error,''), consecutive_failures, backoff_until,
+		       raw_news_count, news_event_count, link_candidate_count, updated_at
+		FROM stockv2_news_source_states
+		WHERE source = ?
+	`, strings.TrimSpace(source))
+	state, err := scanNewsSourceState(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return NewsSourceState{}, false, nil
+		}
+		return NewsSourceState{}, false, wrapError(err, "get news source state")
+	}
+	return state, true, nil
+}
+
 const rawNewsSelectSQL = `
 	SELECT id, source, COALESCE(source_id,''), COALESCE(language,''), title,
 	       COALESCE(content,''), COALESCE(snippet,''), published_at, fetched_at,
@@ -406,6 +501,33 @@ func scanNewsLinkCandidate(row rowScanner) (StockV2NewsLinkCandidate, error) {
 	}
 	item.MatchedTerms = unmarshalStrings(matchedTermsJSON)
 	return item, nil
+}
+
+func scanNewsSourceState(row rowScanner) (NewsSourceState, error) {
+	var state NewsSourceState
+	var enabled int
+	var lastFetchAt, lastSuccessAt, lastErrorAt, backoffUntil sql.NullTime
+	if err := row.Scan(
+		&state.Source, &enabled, &state.Status, &state.Cursor, &lastFetchAt, &lastSuccessAt,
+		&lastErrorAt, &state.LastError, &state.ConsecutiveFailures, &backoffUntil,
+		&state.RawNewsCount, &state.NewsEventCount, &state.LinkCandidateCount, &state.UpdatedAt,
+	); err != nil {
+		return state, err
+	}
+	state.Enabled = enabled != 0
+	if lastFetchAt.Valid {
+		state.LastFetchAt = lastFetchAt.Time
+	}
+	if lastSuccessAt.Valid {
+		state.LastSuccessAt = lastSuccessAt.Time
+	}
+	if lastErrorAt.Valid {
+		state.LastErrorAt = lastErrorAt.Time
+	}
+	if backoffUntil.Valid {
+		state.BackoffUntil = backoffUntil.Time
+	}
+	return state, nil
 }
 
 func rawNewsFilterSQL(filter RawNewsListFilter) (string, []any) {

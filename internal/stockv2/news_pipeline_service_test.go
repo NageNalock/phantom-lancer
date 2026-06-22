@@ -1,0 +1,200 @@
+package stockv2
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"testing"
+	"time"
+)
+
+func TestNewsIngestDisabledAdapterDoesNotFail(t *testing.T) {
+	t.Setenv(jin10EndpointEnv, "")
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	result, err := svc.RunNewsIngestJob(ctx, NewsSourceJin10)
+	if err != nil {
+		t.Fatalf("run disabled ingest: %v", err)
+	}
+	if result.Status != NewsSourceStatusDisabled {
+		t.Fatalf("status = %q, want %q", result.Status, NewsSourceStatusDisabled)
+	}
+	state, ok, err := svc.GetNewsSourceState(ctx, NewsSourceJin10)
+	if err != nil {
+		t.Fatalf("get state: %v", err)
+	}
+	if !ok || state.Enabled || state.Status != NewsSourceStatusDisabled {
+		t.Fatalf("state = %+v, ok=%v", state, ok)
+	}
+}
+
+func TestNewsIngestDedupesAndAdvancesCursor(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	adapter := &fakeNewsAdapter{
+		source: "mock_news",
+		result: NewsSourceFetchResult{
+			Items: []map[string]any{
+				{"id": "flash-1", "title": "算力产业链消息"},
+				{"id": "flash-1", "title": "重复消息"},
+			},
+			NextCursor: "cursor-2",
+			FetchedAt:  time.Now(),
+		},
+	}
+	svc.WithNewsSourceAdapter(adapter)
+
+	result, err := svc.RunNewsIngestJob(ctx, adapter.source)
+	if err != nil {
+		t.Fatalf("run ingest: %v", err)
+	}
+	if result.FetchedCount != 2 || result.RawInsertedCount != 1 {
+		t.Fatalf("result = %+v, want fetched=2 inserted=1", result)
+	}
+	if adapter.calls != 1 || len(adapter.cursors) != 1 || adapter.cursors[0].Cursor != "" {
+		t.Fatalf("adapter calls=%d cursors=%+v", adapter.calls, adapter.cursors)
+	}
+	count, err := svc.CountRawNews(ctx, RawNewsListFilter{Source: adapter.source})
+	if err != nil {
+		t.Fatalf("count raw news: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("raw count = %d, want 1", count)
+	}
+	state, ok, err := svc.GetNewsSourceState(ctx, adapter.source)
+	if err != nil {
+		t.Fatalf("get state: %v", err)
+	}
+	if !ok || state.Cursor != "cursor-2" || state.RawNewsCount != 1 {
+		t.Fatalf("state = %+v, ok=%v", state, ok)
+	}
+}
+
+func TestNewsIngestFailureBackoff(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	adapter := &fakeNewsAdapter{
+		source: "mock_news",
+		err:    errors.New("temporary upstream failure"),
+	}
+	svc.WithNewsSourceAdapter(adapter)
+
+	result, err := svc.RunNewsIngestJob(ctx, adapter.source)
+	if err == nil {
+		t.Fatalf("run ingest err = nil, want failure")
+	}
+	if result.Status != NewsSourceStatusFailed {
+		t.Fatalf("result status = %q, want failed", result.Status)
+	}
+	state, ok, err := svc.GetNewsSourceState(ctx, adapter.source)
+	if err != nil {
+		t.Fatalf("get state: %v", err)
+	}
+	if !ok || state.Status != NewsSourceStatusBackoff || state.ConsecutiveFailures != 1 || !state.BackoffUntil.After(time.Now()) {
+		t.Fatalf("state = %+v, ok=%v", state, ok)
+	}
+
+	result, err = svc.RunNewsIngestJob(ctx, adapter.source)
+	if err != nil {
+		t.Fatalf("run backoff ingest: %v", err)
+	}
+	if result.Status != NewsSourceStatusBackoff || adapter.calls != 1 {
+		t.Fatalf("result=%+v calls=%d, want backoff without second fetch", result, adapter.calls)
+	}
+}
+
+func TestNewsProcessingBatchCreatesEventsAndCandidates(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	const source = "mock_news"
+	raw, err := svc.CreateRawNews(ctx, RequestCreateRawNews{
+		Source:   source,
+		SourceID: "flash-2",
+		Language: "zh-CN",
+		Title:    "半导体设备公司披露订单变化",
+		Snippet:  "消息提到半导体设备订单变化。",
+	})
+	if err != nil {
+		t.Fatalf("create raw news: %v", err)
+	}
+	svc.WithNewsEventLinker(NewsEventLinkerFunc(func(ctx context.Context, event StockV2NewsEvent) ([]RequestUpsertNewsLinkCandidate, error) {
+		return []RequestUpsertNewsLinkCandidate{{
+			Symbol:       "688012",
+			Market:       "SH",
+			MatchMethod:  "keyword",
+			Score:        0.7,
+			Reason:       "命中半导体设备关键词",
+			MatchedTerms: []string{"半导体设备"},
+		}}, nil
+	}))
+
+	result, err := svc.RunNewsProcessingBatch(ctx, source, 10, 10)
+	if err != nil {
+		t.Fatalf("run processing batch: %v", err)
+	}
+	if result.NormalizedCount != 1 || result.LinkCandidateCount != 1 {
+		t.Fatalf("result = %+v, want normalized=1 candidates=1", result)
+	}
+	processedRaw, err := svc.ListRawNews(ctx, RawNewsListFilter{Source: source, Status: NewsStatusProcessed})
+	if err != nil {
+		t.Fatalf("list processed raw news: %v", err)
+	}
+	if len(processedRaw) != 1 || processedRaw[0].ID != raw.ID {
+		t.Fatalf("processed raw = %+v", processedRaw)
+	}
+	events, err := svc.ListNewsEvents(ctx, NewsEventListFilter{Source: source, Status: NewsStatusProcessed})
+	if err != nil {
+		t.Fatalf("list processed events: %v", err)
+	}
+	if len(events) != 1 || events[0].RawNewsID != raw.ID {
+		t.Fatalf("events = %+v", events)
+	}
+	candidates, err := svc.ListNewsLinkCandidates(ctx, NewsLinkCandidateListFilter{Symbol: "688012"})
+	if err != nil {
+		t.Fatalf("list candidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].NewsEventID != events[0].ID {
+		t.Fatalf("candidates = %+v", candidates)
+	}
+}
+
+type fakeNewsAdapter struct {
+	source  string
+	result  NewsSourceFetchResult
+	err     error
+	calls   int
+	cursors []NewsSourceCursor
+}
+
+func (a *fakeNewsAdapter) SourceName() string {
+	return a.source
+}
+
+func (a *fakeNewsAdapter) FetchSince(_ context.Context, cursor NewsSourceCursor) (NewsSourceFetchResult, error) {
+	a.calls++
+	a.cursors = append(a.cursors, cursor)
+	return a.result, a.err
+}
+
+func (a *fakeNewsAdapter) NormalizeRawPayload(payload map[string]any) (RequestCreateRawNews, error) {
+	title := fmt.Sprint(payload["title"])
+	sourceID := fmt.Sprint(payload["id"])
+	if title == "" || title == "<nil>" {
+		return RequestCreateRawNews{}, ErrInvalidRawNewsContent
+	}
+	if sourceID == "<nil>" {
+		sourceID = ""
+	}
+	return RequestCreateRawNews{
+		Source:     a.source,
+		SourceID:   sourceID,
+		Language:   "zh-CN",
+		Title:      title,
+		RawPayload: payload,
+	}, nil
+}

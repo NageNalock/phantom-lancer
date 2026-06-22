@@ -602,6 +602,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_key
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_event ON stockv2_news_link_candidates(news_event_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol, market);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_status ON stockv2_news_link_candidates(status);
+
+CREATE TABLE IF NOT EXISTS stockv2_news_source_states (
+    source TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    cursor TEXT,
+    last_fetch_at DATETIME,
+    last_success_at DATETIME,
+    last_error_at DATETIME,
+    last_error TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    backoff_until DATETIME,
+    raw_news_count INTEGER NOT NULL DEFAULT 0,
+    news_event_count INTEGER NOT NULL DEFAULT 0,
+    link_candidate_count INTEGER NOT NULL DEFAULT 0,
+    updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_source_states_status ON stockv2_news_source_states(status);
 -- 内置监控任务默认配置(全部默认关闭,用户显式开启后才会周期执行)。
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('universe_update', 0, 3600, 'normal', 0, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('latest_quote_refresh', 0, 300, 'normal', 0, 0, 0, datetime('now'));
