@@ -241,7 +241,7 @@ func (s *Service) CreateHolding(ctx context.Context, portfolioID string, req Req
 		return StockV2Holding{}, ErrPortfolioNotFound
 	}
 
-	// 从主数据补全股票名称和市场
+	// 从主数据补全标的名称和市场
 	inst, _ := s.store.GetInstrument(ctx, req.Symbol)
 	name := req.Name
 	if name == "" && inst.Name != "" {
@@ -503,7 +503,7 @@ func parseTransactionExecutedAt(raw string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("invalid executedAt: %q", raw)
 }
 
-// ExecuteUniverseUpdate 执行股票主数据更新
+// ExecuteUniverseUpdate 执行标的主数据更新
 func (s *Service) ExecuteUniverseUpdate(ctx context.Context, triggerType, triggerSource string) (StockV2UpdateJob, error) {
 	// 检查是否有正在运行的更新任务
 	recentJobs, err := s.store.ListUpdateJobs(ctx, 1)
@@ -539,7 +539,7 @@ func (s *Service) ExecuteUniverseUpdate(ctx context.Context, triggerType, trigge
 	return job, nil
 }
 
-// runUniverseUpdate 运行股票主数据更新任务
+// runUniverseUpdate 运行标的主数据更新任务
 func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -559,7 +559,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 		UpdatedAt:   time.Now(),
 	}
 
-	// 获取默认股票代码列表
+	// 获取默认标的代码列表
 	symbols := s.universeSource.GetDefaultSymbols()
 	totalCount := len(symbols)
 
@@ -770,12 +770,12 @@ func (s *Service) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	return s.store.GetSettings(ctx)
 }
 
-// GetInstruments 获取股票主数据
+// GetInstruments 获取标的主数据
 func (s *Service) GetInstruments(ctx context.Context, limit, offset int) ([]StockV2Instrument, error) {
 	return s.store.GetInstruments(ctx, limit, offset)
 }
 
-// CountInstruments 获取股票主数据总数
+// CountInstruments 获取标的主数据总数
 func (s *Service) CountInstruments(ctx context.Context) (int, error) {
 	return s.store.CountInstruments(ctx)
 }
@@ -950,7 +950,7 @@ func (s *Service) tickScheduledMonitors(ctx context.Context) {
 //
 // Snapshot 服务于页面首屏恢复和侧栏概览，所以只带足够 UI 展示的轻量数据：
 // 组合/持仓、最近任务、设置，以及一小段主数据样本。不要把它当作全量主
-// 数据接口；判断股票主数据是否完整时，应调用 GetInstruments/CountInstruments
+// 数据接口；判断标的主数据是否完整时，应调用 GetInstruments/CountInstruments
 // 或 HTTP 层的 /api/stockv2/instruments 分页接口。
 func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {
 	// 获取投资组合和持仓

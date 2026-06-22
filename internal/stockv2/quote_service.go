@@ -308,15 +308,25 @@ func isSixDigitSymbol(symbol string) bool {
 }
 
 func inferAStockMarket(symbol string) string {
+	market, _ := inferInstrumentMarketAndType(symbol)
+	return market
+}
+
+func inferInstrumentMarketAndType(symbol string) (string, string) {
+	symbol = strings.TrimSpace(symbol)
 	switch {
+	case strings.HasPrefix(symbol, "5"):
+		return "SH", InstrumentTypeExchangeFund
+	case strings.HasPrefix(symbol, "15"), strings.HasPrefix(symbol, "16"), strings.HasPrefix(symbol, "18"):
+		return "SZ", InstrumentTypeExchangeFund
 	case strings.HasPrefix(symbol, "6"):
-		return "SH"
+		return "SH", InstrumentTypeStock
 	case strings.HasPrefix(symbol, "0"), strings.HasPrefix(symbol, "3"):
-		return "SZ"
+		return "SZ", InstrumentTypeStock
 	case strings.HasPrefix(symbol, "8"), strings.HasPrefix(symbol, "4"):
-		return "BJ"
+		return "BJ", InstrumentTypeStock
 	default:
-		return ""
+		return "", ""
 	}
 }
 

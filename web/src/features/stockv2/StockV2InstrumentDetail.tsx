@@ -17,6 +17,7 @@ import {
   stockV2DailyBarJobTypeLabel,
   stockV2DailyBarsQualityLabel,
   stockV2DailyBarsQualityTone,
+  stockV2InstrumentTypeLabel,
   stockV2RangeLabel,
 } from "../../domain/labels";
 import type { Tone } from "../../app/types";
@@ -221,7 +222,8 @@ export function StockV2InstrumentDetail({
               <Pill tone="neutral">
                 <span className="font-mono">{inst.symbol}</span>
               </Pill>
-              <Pill tone="neutral">{inst.market || "—"}</Pill>
+              <Pill tone="neutral">{inst.market || "-"}</Pill>
+              <Pill tone="neutral">{stockV2InstrumentTypeLabel(inst.instrumentType)}</Pill>
               {inst.status && inst.status !== "active" ? (
                 <Pill tone="warn">{inst.status}</Pill>
               ) : null}

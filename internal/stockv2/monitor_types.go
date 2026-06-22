@@ -154,7 +154,7 @@ func builtinMonitorTaskDefinitions() []MonitorTaskDefinition {
 		{
 			TaskType:     MonitorTaskUniverseUpdate,
 			Label:        "主数据更新",
-			Description:  "全市场股票主数据后台更新",
+			Description:  "全市场标的主数据后台更新",
 			Category:     "data",
 			Runnable:     true,
 			Configurable: true,

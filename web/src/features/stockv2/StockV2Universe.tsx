@@ -4,7 +4,7 @@ import type { AppActions } from "../../app/App";
 import type { AppData, StockV2Instrument, StockV2UpdateJob, StockV2UniverseUpdateRequest } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, Field, Panel, Pill } from "../../components/ui";
-import { stockV2TriggerTypeLabel, stockV2UpdateStatusLabel, stockV2UpdateStatusTone } from "../../domain/labels";
+import { stockV2InstrumentTypeLabel, stockV2TriggerTypeLabel, stockV2UpdateStatusLabel, stockV2UpdateStatusTone } from "../../domain/labels";
 import { StockV2InstrumentDetail } from "./StockV2InstrumentDetail";
 
 const PAGE_SIZE = 50;
@@ -213,10 +213,10 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         </div>
       </Panel>
 
-      {/* 股票列表 */}
+      {/* 标的列表 */}
       <Panel
-        title={`股票主数据 (${totalCount > 0 ? totalCount : "..."})`}
-        subtitle="新浪列表源 + 腾讯行情源 · 全量 A 股"
+        title={`标的主数据 (${totalCount > 0 ? totalCount : "..."})`}
+        subtitle="新浪列表源 + 腾讯行情源 · A 股股票与场内基金"
       >
         <div className="mb-3 flex items-center justify-between gap-3">
           <div className="relative w-[340px] max-w-full">
@@ -225,7 +225,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
               type="search"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="搜索代码或名称，例如 302132 / 中航成飞"
+              placeholder="搜索代码或名称，例如 302132 / 510300"
               className="w-full rounded border border-[var(--line)] bg-[var(--surface)] py-2 pl-8 pr-3 text-sm text-[var(--text)] focus:border-[var(--accent)] focus:outline-none"
             />
           </div>
@@ -241,7 +241,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         ) : !instrumentsPage || instrumentsPage.items.length === 0 ? (
           <div className="py-8 text-center text-sm text-[var(--muted)]">
             <Clock size={24} className="mx-auto mb-2 opacity-50" />
-            {isSearching ? `未找到「${searchQuery.trim()}」匹配的股票。` : "暂无股票数据，点击右上角「立即更新」开始首次同步。"}
+            {isSearching ? `未找到「${searchQuery.trim()}」匹配的标的。` : "暂无标的数据，点击右上角「立即更新」开始首次同步。"}
           </div>
         ) : (
           <>
@@ -252,6 +252,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
                     <th className="py-2 pr-4 font-medium">代码</th>
                     <th className="py-2 pr-4 font-medium">名称</th>
                     <th className="py-2 pr-4 font-medium">市场</th>
+                    <th className="py-2 pr-4 font-medium">类型</th>
                     <th className="py-2 pr-4 font-medium">行业</th>
                     <th className="py-2 pr-4 font-medium">板块</th>
                     <th className="py-2 pr-4 font-medium">状态</th>
@@ -417,6 +418,9 @@ function StockRow({ inst, onAdd, onClick }: { inst: StockV2Instrument; onAdd: ()
       <td className="py-2 pr-4 font-medium">{inst.name || "-"}</td>
       <td className="py-2 pr-4">
         <Pill tone="neutral">{marketLabel}</Pill>
+      </td>
+      <td className="py-2 pr-4">
+        <Pill tone="neutral">{stockV2InstrumentTypeLabel(inst.instrumentType)}</Pill>
       </td>
       <td className="py-2 pr-4 text-[var(--muted)]">{inst.industry || "-"}</td>
       <td className="py-2 pr-4 text-[var(--muted)]">{inst.sector || "-"}</td>

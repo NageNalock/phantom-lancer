@@ -18,22 +18,27 @@ import (
 
 // TencentQuoteResponse 腾讯行情响应结构
 type TencentQuoteResponse struct {
-	Symbol      string  `json:"symbol"`
-	Name        string  `json:"name"`
-	LastPrice   float64 `json:"lastPrice"`
-	PrevClose   float64 `json:"prevClose"`
-	OpenPrice   float64 `json:"openPrice"`
-	Volume      float64 `json:"volume"`
-	High        float64 `json:"high"`
-	Low         float64 `json:"low"`
-	Amount      float64 `json:"amount"`
-	Market      string  `json:"market"`
+	Symbol    string  `json:"symbol"`
+	Name      string  `json:"name"`
+	LastPrice float64 `json:"lastPrice"`
+	PrevClose float64 `json:"prevClose"`
+	OpenPrice float64 `json:"openPrice"`
+	Volume    float64 `json:"volume"`
+	High      float64 `json:"high"`
+	Low       float64 `json:"low"`
+	Amount    float64 `json:"amount"`
+	Market    string  `json:"market"`
 }
 
 // UniverseDataSource 数据源管理
 type UniverseDataSource struct {
 	service    *Service
 	httpClient *http.Client
+}
+
+type instrumentCodeMeta struct {
+	Market         string
+	InstrumentType string
 }
 
 // NewUniverseDataSource 创建数据源管理器
@@ -44,20 +49,20 @@ func NewUniverseDataSource(service *Service, client *http.Client) *UniverseDataS
 	}
 }
 
-// FetchStockUniverse 批量获取股票主数据
+// FetchStockUniverse 批量获取标的主数据
 func (uds *UniverseDataSource) FetchStockUniverse(ctx context.Context, symbols []string) ([]StockV2Instrument, error) {
 	if len(symbols) == 0 {
 		return nil, nil
 	}
 
 	// 过滤和处理代码
-	validSymbols, marketMap := uds.processSymbols(symbols)
+	validSymbols, metaMap := uds.processSymbols(symbols)
 	if len(validSymbols) == 0 {
 		return nil, errors.New("no valid symbols to fetch")
 	}
 
 	// 使用腾讯接口批量获取数据
-	instruments, err := uds.fetchTencentBatch(ctx, validSymbols, marketMap)
+	instruments, err := uds.fetchTencentBatch(ctx, validSymbols, metaMap)
 	if err != nil {
 		return nil, fmt.Errorf("fetch tencent data failed: %w", err)
 	}
@@ -65,33 +70,42 @@ func (uds *UniverseDataSource) FetchStockUniverse(ctx context.Context, symbols [
 	return instruments, nil
 }
 
-// processSymbols 处理股票代码，添加市场前缀
-func (uds *UniverseDataSource) processSymbols(symbols []string) ([]string, map[string]string) {
+// processSymbols 处理标的代码，添加腾讯市场前缀。
+func (uds *UniverseDataSource) processSymbols(symbols []string) ([]string, map[string]instrumentCodeMeta) {
 	validSymbols := make([]string, 0, len(symbols))
-	marketMap := make(map[string]string)
+	metaMap := make(map[string]instrumentCodeMeta)
 
 	for _, sym := range symbols {
-		switch {
-		case strings.HasPrefix(sym, "6"):
-			validSymbols = append(validSymbols, "sh"+sym)
-			marketMap["sh"+sym] = "SH"
-		case strings.HasPrefix(sym, "0"), strings.HasPrefix(sym, "3"):
-			validSymbols = append(validSymbols, "sz"+sym)
-			marketMap["sz"+sym] = "SZ"
-		case strings.HasPrefix(sym, "8"), strings.HasPrefix(sym, "4"):
-			validSymbols = append(validSymbols, "bj"+sym)
-			marketMap["bj"+sym] = "BJ"
-		default:
-			uds.service.log.Warn("unknown market symbol", "symbol", sym)
+		sym = strings.TrimSpace(sym)
+		if sym == "" {
+			continue
+		}
+		symbol, explicitMarket := normalizeQuoteSymbolInput(sym)
+		inferredMarket, instrumentType := inferInstrumentMarketAndType(symbol)
+		market := inferredMarket
+		if explicitMarket != "" {
+			market = explicitMarket
+		}
+		if market == "" || !isSixDigitSymbol(symbol) {
+			if uds != nil && uds.service != nil && uds.service.log != nil {
+				uds.service.log.Warn("unknown market symbol", "symbol", sym)
+			}
+			continue
+		}
+		code := strings.ToLower(market) + symbol
+		validSymbols = append(validSymbols, code)
+		metaMap[code] = instrumentCodeMeta{
+			Market:         market,
+			InstrumentType: instrumentType,
 		}
 	}
 
-	return validSymbols, marketMap
+	return validSymbols, metaMap
 }
 
 // fetchTencentBatch 批量获取腾讯数据
-func (uds *UniverseDataSource) fetchTencentBatch(ctx context.Context, symbols []string, marketMap map[string]string) ([]StockV2Instrument, error) {
-	const batchSize = 80  // 腾讯接口推荐批量大小
+func (uds *UniverseDataSource) fetchTencentBatch(ctx context.Context, symbols []string, metaMap map[string]instrumentCodeMeta) ([]StockV2Instrument, error) {
+	const batchSize = 80 // 腾讯接口推荐批量大小
 	instruments := make([]StockV2Instrument, 0, len(symbols))
 
 	total := len(symbols)
@@ -103,7 +117,7 @@ func (uds *UniverseDataSource) fetchTencentBatch(ctx context.Context, symbols []
 		batch := symbols[start:end]
 
 		// 调用腾讯接口
-		batchInstruments, err := uds.fetchTencentQuotes(ctx, batch, marketMap)
+		batchInstruments, err := uds.fetchTencentQuotes(ctx, batch, metaMap)
 		if err != nil {
 			uds.service.log.Error("fetch tencent quotes failed",
 				"batch_start", start,
@@ -130,7 +144,7 @@ func (uds *UniverseDataSource) fetchTencentBatch(ctx context.Context, symbols []
 }
 
 // fetchTencentQuotes 获取腾讯实时行情
-func (uds *UniverseDataSource) fetchTencentQuotes(ctx context.Context, tencentCodes []string, marketMap map[string]string) ([]StockV2Instrument, error) {
+func (uds *UniverseDataSource) fetchTencentQuotes(ctx context.Context, tencentCodes []string, metaMap map[string]instrumentCodeMeta) ([]StockV2Instrument, error) {
 	if len(tencentCodes) == 0 {
 		return nil, nil
 	}
@@ -170,7 +184,7 @@ func (uds *UniverseDataSource) fetchTencentQuotes(ctx context.Context, tencentCo
 	}
 
 	// 解析响应
-	instruments, err := uds.parseTencentResponse(body, marketMap)
+	instruments, err := uds.parseTencentResponse(body, metaMap)
 	if err != nil {
 		return nil, fmt.Errorf("parse response failed: %w", err)
 	}
@@ -179,7 +193,7 @@ func (uds *UniverseDataSource) fetchTencentQuotes(ctx context.Context, tencentCo
 }
 
 // parseTencentResponse 解析腾讯响应
-func (uds *UniverseDataSource) parseTencentResponse(body []byte, marketMap map[string]string) ([]StockV2Instrument, error) {
+func (uds *UniverseDataSource) parseTencentResponse(body []byte, metaMap map[string]instrumentCodeMeta) ([]StockV2Instrument, error) {
 	// GBK 转 UTF-8
 	utf8Body, err := simplifiedchinese.GBK.NewDecoder().Bytes(body)
 	if err != nil && !utf8.Valid(body) {
@@ -201,9 +215,11 @@ func (uds *UniverseDataSource) parseTencentResponse(body []byte, marketMap map[s
 		line = strings.TrimSuffix(line, ";")
 
 		// 解析每行数据
-		instrument, err := uds.parseTencentLine(line, marketMap)
+		instrument, err := uds.parseTencentLine(line, metaMap)
 		if err != nil {
-			uds.service.log.Warn("parse tencent line failed", "line", line, "error", err)
+			if uds != nil && uds.service != nil && uds.service.log != nil {
+				uds.service.log.Warn("parse tencent line failed", "line", line, "error", err)
+			}
 			continue
 		}
 
@@ -222,7 +238,7 @@ func (uds *UniverseDataSource) parseTencentResponse(body []byte, marketMap map[s
 }
 
 // parseTencentLine 解析单行腾讯数据
-func (uds *UniverseDataSource) parseTencentLine(line string, marketMap map[string]string) (*StockV2Instrument, error) {
+func (uds *UniverseDataSource) parseTencentLine(line string, metaMap map[string]instrumentCodeMeta) (*StockV2Instrument, error) {
 	// 解析行格式：v_sh600000="1~浦发银行~600000~12.34~12.10~12.05~1000~500~500~...";\n
 	eq := strings.Index(line, "=")
 	if eq < 0 {
@@ -246,20 +262,17 @@ func (uds *UniverseDataSource) parseTencentLine(line string, marketMap map[strin
 		return nil, fmt.Errorf("empty symbol or name")
 	}
 
-	// 获取市场
+	// 获取市场与标的类型
 	market := ""
-	if tencentCode, ok := marketMap[line[:eq]]; ok {
-		market = tencentCode
+	instrumentType := InstrumentTypeStock
+	tencentKey := strings.TrimPrefix(line[:eq], "v_")
+	if meta, ok := metaMap[tencentKey]; ok {
+		market = meta.Market
+		instrumentType = normalizeInstrumentType(meta.InstrumentType)
 	} else {
 		// 从代码推断市场
-		switch {
-		case strings.HasPrefix(symbol, "6"):
-			market = "SH"
-		case strings.HasPrefix(symbol, "0"), strings.HasPrefix(symbol, "3"):
-			market = "SZ"
-		case strings.HasPrefix(symbol, "8"), strings.HasPrefix(symbol, "4"):
-			market = "BJ"
-		default:
+		market, instrumentType = inferInstrumentMarketAndType(symbol)
+		if market == "" {
 			return nil, fmt.Errorf("unknown market for symbol: %s", symbol)
 		}
 	}
@@ -273,14 +286,15 @@ func (uds *UniverseDataSource) parseTencentLine(line string, marketMap map[strin
 		return nil, nil
 	}
 
-	// 创建股票主数据对象
+	// 创建标的主数据对象
 	instrument := StockV2Instrument{
-		ID:       generateID(),
-		Symbol:   symbol,
-		Market:   market,
-		Name:     name,
-		Status:   "active",
-		LastUpdate: time.Now(),
+		ID:             generateID(),
+		Symbol:         symbol,
+		Market:         market,
+		InstrumentType: instrumentType,
+		Name:           name,
+		Status:         "active",
+		LastUpdate:     time.Now(),
 	}
 
 	return &instrument, nil
@@ -315,44 +329,48 @@ func sleepJitter(ctx context.Context, base, jitter time.Duration) error {
 func (uds *UniverseDataSource) MockDataForTest() []StockV2Instrument {
 	return []StockV2Instrument{
 		{
-			ID:       generateID(),
-			Symbol:   "000001",
-			Market:   "SZ",
-			Name:     "平安银行",
-			Industry: "银行",
-			Sector:   "金融",
-			Status:   "active",
-			LastUpdate: time.Now(),
+			ID:             generateID(),
+			Symbol:         "000001",
+			Market:         "SZ",
+			InstrumentType: InstrumentTypeStock,
+			Name:           "平安银行",
+			Industry:       "银行",
+			Sector:         "金融",
+			Status:         "active",
+			LastUpdate:     time.Now(),
 		},
 		{
-			ID:       generateID(),
-			Symbol:   "000002",
-			Market:   "SZ",
-			Name:     "万科A",
-			Industry: "房地产",
-			Sector:   "地产",
-			Status:   "active",
-			LastUpdate: time.Now(),
+			ID:             generateID(),
+			Symbol:         "000002",
+			Market:         "SZ",
+			InstrumentType: InstrumentTypeStock,
+			Name:           "万科A",
+			Industry:       "房地产",
+			Sector:         "地产",
+			Status:         "active",
+			LastUpdate:     time.Now(),
 		},
 		{
-			ID:       generateID(),
-			Symbol:   "600000",
-			Market:   "SH",
-			Name:     "浦发银行",
-			Industry: "银行",
-			Sector:   "金融",
-			Status:   "active",
-			LastUpdate: time.Now(),
+			ID:             generateID(),
+			Symbol:         "600000",
+			Market:         "SH",
+			InstrumentType: InstrumentTypeStock,
+			Name:           "浦发银行",
+			Industry:       "银行",
+			Sector:         "金融",
+			Status:         "active",
+			LastUpdate:     time.Now(),
 		},
 		{
-			ID:       generateID(),
-			Symbol:   "600036",
-			Market:   "SH",
-			Name:     "招商银行",
-			Industry: "银行",
-			Sector:   "金融",
-			Status:   "active",
-			LastUpdate: time.Now(),
+			ID:             generateID(),
+			Symbol:         "600036",
+			Market:         "SH",
+			InstrumentType: InstrumentTypeStock,
+			Name:           "招商银行",
+			Industry:       "银行",
+			Sector:         "金融",
+			Status:         "active",
+			LastUpdate:     time.Now(),
 		},
 	}
 }
@@ -368,8 +386,8 @@ func (uds *UniverseDataSource) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
-// GetDefaultSymbols 获取默认股票代码列表。
-// 优先从新浪行情接口拉取全 A 股列表（沪深京），失败时回退到核心龙头样本。
+// GetDefaultSymbols 获取默认标的代码列表。
+// 优先从新浪行情接口拉取 A 股股票 + ETF/LOF 场内基金，失败时回退到核心龙头样本。
 func (uds *UniverseDataSource) GetDefaultSymbols() []string {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -401,13 +419,16 @@ func (uds *UniverseDataSource) sampleUniverseSymbols() []string {
 		"300274", "300751", "300770", "300014", "300433", "300450",
 		// 北交所
 		"839008", "830799", "834765", "835179", "833819",
+		// 场内基金
+		"510300", "510500", "159915", "159949", "161725",
 	}
 }
 
-// fetchSinaUniverseSymbols 从新浪行情接口拉取全 A 股代码列表（沪深京），自动分页
+// fetchSinaUniverseSymbols 从新浪行情接口拉取 A 股与主要场内基金代码列表，自动分页。
 func (uds *UniverseDataSource) fetchSinaUniverseSymbols(ctx context.Context) ([]string, error) {
-	nodes := []string{"sh_a", "sz_a", "bj_a"}
+	nodes := []string{"sh_a", "sz_a", "bj_a", "etf_hq_fund", "lof_hq_fund"}
 	var all []string
+	seen := make(map[string]struct{})
 	const pageSize = 100 // 新浪单页上限
 	const maxPages = 80  // 防护：最多 80 页
 
@@ -455,8 +476,14 @@ func (uds *UniverseDataSource) fetchSinaUniverseSymbols(ctx context.Context) ([]
 			if len(symbols) == 0 {
 				break // 空页 = 已经拉完
 			}
-			all = append(all, symbols...)
-			nodeCount += len(symbols)
+			for _, symbol := range symbols {
+				if _, ok := seen[symbol]; ok {
+					continue
+				}
+				seen[symbol] = struct{}{}
+				all = append(all, symbol)
+				nodeCount++
+			}
 
 			if len(symbols) < pageSize {
 				break // 不满一页 = 最后一页
@@ -477,7 +504,7 @@ func (uds *UniverseDataSource) fetchSinaUniverseSymbols(ctx context.Context) ([]
 	return all, nil
 }
 
-// parseSinaSymbolList 从新浪伪 JSON 中提取股票代码列表
+// parseSinaSymbolList 从新浪伪 JSON 中提取标的代码列表
 func parseSinaSymbolList(body []byte) []string {
 	s := string(body)
 	// 去掉 UTF-8 BOM (EF BB BF)

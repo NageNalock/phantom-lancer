@@ -1743,6 +1743,7 @@ export interface StockV2Instrument {
   id: string;
   symbol: string;
   market: string;
+  instrumentType?: string;
   name: string;
   industry: string;
   sector: string;

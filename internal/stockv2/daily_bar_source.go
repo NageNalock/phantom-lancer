@@ -43,14 +43,15 @@ func marketPrefix(market, symbol string) (prefix, marketOut string) {
 	case "BJ":
 		return "bj", "BJ"
 	}
-	// 兜底：按代码推断
-	switch {
-	case strings.HasPrefix(symbol, "6"):
-		return "sh", "SH"
-	case strings.HasPrefix(symbol, "0"), strings.HasPrefix(symbol, "3"):
-		return "sz", "SZ"
-	case strings.HasPrefix(symbol, "8"), strings.HasPrefix(symbol, "4"):
-		return "bj", "BJ"
+	if inferred, _ := inferInstrumentMarketAndType(symbol); inferred != "" {
+		switch inferred {
+		case "SH":
+			return "sh", "SH"
+		case "SZ":
+			return "sz", "SZ"
+		case "BJ":
+			return "bj", "BJ"
+		}
 	}
 	return "sh", "SH"
 }
@@ -70,8 +71,15 @@ func adjustedToFQ(adjusted string) (fqParam, dataKey string) {
 // FetchDailyBars 抓取指定区间日 K。count 为请求条数上限（按区间档位给，
 // 经验证 ≤1800 稳定返回 object；过大会触发端点异常返回 list）。
 func (d *DailyBarsSource) FetchDailyBars(ctx context.Context, symbol, market, startDate, endDate, adjusted string, count int) ([]StockV2DailyBar, error) {
+	symbol, explicitMarket := normalizeQuoteSymbolInput(symbol)
 	if symbol == "" {
 		return nil, fmt.Errorf("symbol is required")
+	}
+	if !isSixDigitSymbol(symbol) {
+		return nil, fmt.Errorf("invalid symbol: %s", symbol)
+	}
+	if market == "" {
+		market = explicitMarket
 	}
 	if count <= 0 {
 		count = 400

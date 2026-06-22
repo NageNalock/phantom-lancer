@@ -19,6 +19,7 @@ import { friendlyError } from "../../api/client";
 import { Button, Drawer, Field, Notice, Panel, Pill, useDangerConfirm } from "../../components/ui";
 import {
   formatDate,
+  stockV2InstrumentTypeLabel,
   stockV2AlertLevelLabel,
   stockV2AlertLevelTone,
   stockV2AlertStatusLabel,
@@ -666,7 +667,7 @@ function CreateWatchDrawer({
           <input type="text" value={name} placeholder="留空将按标的与规则自动生成" onChange={(e) => setName(e.target.value)} />
         </Field>
 
-        <Field label="标的股票" help={needsPortfolio ? "组合权重规则需要同时选择组合和标的。" : "单票规则需选择标的。"}>
+        <Field label="标的" help={needsPortfolio ? "组合权重规则需要同时选择组合和标的。" : "单标的规则需选择标的。"}>
           <SymbolPicker actions={actions} value={symbolRef} onChange={setSymbolRef} />
         </Field>
 
@@ -813,7 +814,7 @@ function SymbolPicker({
           {searching ? (
             <div className="px-3 py-2 text-xs text-[var(--muted)]">搜索中…</div>
           ) : results.length === 0 ? (
-            <div className="px-3 py-2 text-xs text-[var(--muted)]">{query ? "未找到匹配的股票" : "输入关键词开始搜索"}</div>
+            <div className="px-3 py-2 text-xs text-[var(--muted)]">{query ? "未找到匹配的标的" : "输入关键词开始搜索"}</div>
           ) : (
             results.map((inst) => (
               <button
@@ -824,9 +825,14 @@ function SymbolPicker({
               >
                 <span className="font-mono">{inst.symbol}</span>
                 <span className="mx-2 min-w-0 truncate text-[var(--muted)]">{inst.name}</span>
-                <Pill tone="neutral" className="text-xs">
-                  {inst.market === "SH" ? "沪" : inst.market === "SZ" ? "深" : inst.market === "BJ" ? "北" : inst.market}
-                </Pill>
+                <span className="flex shrink-0 items-center gap-1">
+                  <Pill tone="neutral" className="text-xs">
+                    {inst.market === "SH" ? "沪" : inst.market === "SZ" ? "深" : inst.market === "BJ" ? "北" : inst.market}
+                  </Pill>
+                  <Pill tone="neutral" className="text-xs">
+                    {stockV2InstrumentTypeLabel(inst.instrumentType)}
+                  </Pill>
+                </span>
               </button>
             ))
           )}

@@ -33,7 +33,7 @@ export function StockV2Overview({ data }: { data: AppData }) {
         <Metric
           label="主数据标的"
           value={instruments.length}
-          detail="SH / SZ / BJ"
+          detail="股票 / 场内基金"
           tone={instruments.length ? "good" : "warn"}
         />
         <Metric
@@ -46,7 +46,7 @@ export function StockV2Overview({ data }: { data: AppData }) {
 
       <Panel title="功能闭环">
         <div className="grid gap-3">
-          <LoopRow done={instruments.length > 0} label="股票主数据" value="从腾讯接口拉取股票基本信息、行业、概念，支持批量打散更新和实时进度。" />
+          <LoopRow done={instruments.length > 0} label="标的主数据" value="从新浪列表源和腾讯行情源拉取 A 股股票与场内基金，支持批量打散更新和实时进度。" />
           <LoopRow done={portfolios.length > 0} label="投资组合 / 仓位" value="支持创建多个组合，配置风控参数（风险等级、单票上限、最大回撤），独立管理持仓。" />
           <LoopRow done={!!settings?.autoUpdateEnabled} label="定时自动更新" value="可配置自动更新周期，后台定时拉取最新行情数据，支持代理配置。" />
           <LoopRow done={jobs.length > 0} label="更新历史追溯" value="每次更新任务完整记录：触发方式、成功/失败数、耗时、错误信息，可弹窗查看。" />

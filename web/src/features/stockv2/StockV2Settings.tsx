@@ -59,7 +59,7 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
             label={
               <div>
                 <div>启用自动更新</div>
-                <div className="muted mt-0.5 text-xs">按设定周期自动更新股票主数据和行情</div>
+                <div className="muted mt-0.5 text-xs">按设定周期自动更新标的主数据和行情</div>
               </div>
             }
             onChange={(checked) => update("autoUpdateEnabled", checked)}

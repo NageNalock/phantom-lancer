@@ -8,21 +8,27 @@ import (
 	"time"
 )
 
-// StockV2Instrument 股票主数据
+const (
+	InstrumentTypeStock        = "stock"
+	InstrumentTypeExchangeFund = "exchange_fund"
+)
+
+// StockV2Instrument 标的主数据。第一阶段只区分股票与场内基金,不展开基金净值/申赎等专属字段。
 type StockV2Instrument struct {
-	ID         string    `json:"id"`
-	Symbol     string    `json:"symbol"`
-	Market     string    `json:"market"`
-	Name       string    `json:"name"`
-	Industry   string    `json:"industry"`
-	Sector     string    `json:"sector"`
-	Concepts   []string  `json:"concepts"` // 概念信息数组
-	ListDate   string    `json:"listDate"`
-	DelistDate string    `json:"delistDate"`
-	Status     string    `json:"status"` // active, delisted, suspended
-	LastUpdate time.Time `json:"lastUpdate"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	ID             string    `json:"id"`
+	Symbol         string    `json:"symbol"`
+	Market         string    `json:"market"`
+	InstrumentType string    `json:"instrumentType"`
+	Name           string    `json:"name"`
+	Industry       string    `json:"industry"`
+	Sector         string    `json:"sector"`
+	Concepts       []string  `json:"concepts"` // 概念信息数组
+	ListDate       string    `json:"listDate"`
+	DelistDate     string    `json:"delistDate"`
+	Status         string    `json:"status"` // active, delisted, suspended
+	LastUpdate     time.Time `json:"lastUpdate"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // StockV2Portfolio 投资组合/仓位
@@ -96,7 +102,7 @@ type StockV2Transaction struct {
 	Symbol      string    `json:"symbol"`
 	Market      string    `json:"market,omitempty"`
 	Name        string    `json:"name,omitempty"`
-	Side        string    `json:"side"`       // buy | sell
+	Side        string    `json:"side"` // buy | sell
 	Quantity    float64   `json:"quantity"`
 	Price       float64   `json:"price"`      // 成交单价
 	Amount      float64   `json:"amount"`     // = Quantity * Price(冗余便于展示)
@@ -109,7 +115,7 @@ type StockV2Transaction struct {
 type TransactionResult struct {
 	Transaction    StockV2Transaction `json:"transaction"`
 	Portfolio      StockV2Portfolio   `json:"portfolio"`
-	Holding        StockV2Holding     `json:"holding"`      // 卖出清仓时为零值
+	Holding        StockV2Holding     `json:"holding"`        // 卖出清仓时为零值
 	HoldingCleared bool               `json:"holdingCleared"` // 卖出清仓导致持仓删除
 }
 
@@ -227,8 +233,8 @@ type PortfolioWithHoldings struct {
 //
 // 这个结构用于前端首屏、右侧概览和轻量刷新：它聚合组合、少量主数据、
 // 最近更新任务和设置，便于页面一次请求恢复当前工作台上下文。它不是全量
-// 股票主数据导出，也不能用 Instruments 的长度判断主数据是否完整。需要
-// 全量或分页检查股票主数据时，应使用 /api/stockv2/instruments 返回的
+// 标的主数据导出，也不能用 Instruments 的长度判断主数据是否完整。需要
+// 全量或分页检查标的主数据时，应使用 /api/stockv2/instruments 返回的
 // items/total/limit/offset。
 type Snapshot struct {
 	Portfolios  []PortfolioWithHoldings `json:"portfolios"`
@@ -238,7 +244,7 @@ type Snapshot struct {
 	LastUpdate  time.Time               `json:"lastUpdate"`
 }
 
-// UniverseUpdateRequest 股票主数据更新请求
+// UniverseUpdateRequest 标的主数据更新请求
 type UniverseUpdateRequest struct {
 	TriggerType   string   `json:"triggerType"`   // manual, scheduled
 	TriggerSource string   `json:"triggerSource"` // user, system

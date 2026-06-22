@@ -528,6 +528,16 @@ export function stockV2UpdateStatusTone(job?: StockV2UpdateJob): "good" | "warn"
   }
 }
 
+export function stockV2InstrumentTypeLabel(type?: string): string {
+  switch (type) {
+    case "exchange_fund": return "场内基金";
+    case "stock":
+    case "":
+    case undefined: return "股票";
+    default: return type;
+  }
+}
+
 export function stockV2TriggerTypeLabel(triggerType?: string): string {
   if (triggerType === "manual") return "手动更新";
   if (triggerType === "scheduled") return "定时更新";

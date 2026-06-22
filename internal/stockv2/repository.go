@@ -28,6 +28,15 @@ func wrapError(err error, msg string) error {
 	return fmt.Errorf("%s: %w", msg, err)
 }
 
+func normalizeInstrumentType(value string) string {
+	switch strings.TrimSpace(value) {
+	case InstrumentTypeExchangeFund:
+		return InstrumentTypeExchangeFund
+	default:
+		return InstrumentTypeStock
+	}
+}
+
 // runTx 在单个数据库事务里执行 apply:开启事务后运行 apply,出错自动回滚,
 // 全部成功才提交。沿用 SavePortfolioValuation 的事务模式,供 RecordTransaction
 // 这类「写流水 + 调现金 + 调持仓」的多步原子写复用。
@@ -125,6 +134,7 @@ CREATE TABLE IF NOT EXISTS stockv2_instruments (
     id TEXT PRIMARY KEY,
     symbol TEXT NOT NULL UNIQUE,
     market TEXT NOT NULL,
+    instrument_type TEXT NOT NULL DEFAULT 'stock',
     name TEXT,
     industry TEXT,
     sector TEXT,
@@ -382,6 +392,7 @@ CREATE TABLE IF NOT EXISTS stockv2_settings (
 );
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_symbol ON stockv2_instruments(symbol);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_market ON stockv2_instruments(market);
+CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_type ON stockv2_instruments(instrument_type);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_industry ON stockv2_instruments(industry);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_status ON stockv2_instruments(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolios_name ON stockv2_portfolios(name);
@@ -653,6 +664,12 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, initSchemaSQL); err != nil {
 		return fmt.Errorf("exec init schema: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_instruments", "instrument_type", "TEXT NOT NULL DEFAULT 'stock'"); err != nil {
+		return fmt.Errorf("add instrument_type column: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_type ON stockv2_instruments(instrument_type)`); err != nil {
+		return fmt.Errorf("create instrument type index: %w", err)
 	}
 
 	// 增量迁移：给 stockv2_update_jobs 加 failed_items 列
@@ -1244,16 +1261,17 @@ func (s *Store) ListHoldings(ctx context.Context, portfolioID string) ([]StockV2
 	return holdings, nil
 }
 
-// CreateInstrument 创建股票主数据
-// UpsertInstrument 插入或更新股票主数据（按 symbol 去重）
+// CreateInstrument 创建标的主数据
+// UpsertInstrument 插入或更新标的主数据（按 symbol 去重）
 func (s *Store) UpsertInstrument(ctx context.Context, instrument StockV2Instrument) error {
 	query := `
 		INSERT INTO stockv2_instruments (
-			id, symbol, market, name, industry, sector, concepts,
+			id, symbol, market, instrument_type, name, industry, sector, concepts,
 			list_date, delist_date, status, last_update_at, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(symbol) DO UPDATE SET
 			market = excluded.market,
+			instrument_type = excluded.instrument_type,
 			name = excluded.name,
 			industry = excluded.industry,
 			sector = excluded.sector,
@@ -1267,6 +1285,7 @@ func (s *Store) UpsertInstrument(ctx context.Context, instrument StockV2Instrume
 
 	now := time.Now()
 	instrument.UpdatedAt = now
+	instrument.InstrumentType = normalizeInstrumentType(instrument.InstrumentType)
 
 	// 如果是新插入，设置 created_at；ON CONFLICT 时保留原值
 	// 这里我们用同一份参数，created_at 在冲突时被 excluded 值覆盖的问题不存在
@@ -1279,6 +1298,7 @@ func (s *Store) UpsertInstrument(ctx context.Context, instrument StockV2Instrume
 		instrument.ID,
 		instrument.Symbol,
 		instrument.Market,
+		instrument.InstrumentType,
 		instrument.Name,
 		instrument.Industry,
 		instrument.Sector,
@@ -1294,10 +1314,10 @@ func (s *Store) UpsertInstrument(ctx context.Context, instrument StockV2Instrume
 	return wrapError(err, "upsert instrument")
 }
 
-// GetInstrument 获取股票主数据
+// GetInstrument 获取标的主数据
 func (s *Store) GetInstrument(ctx context.Context, symbol string) (StockV2Instrument, error) {
 	query := `
-		SELECT id, symbol, market, COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
+		SELECT id, symbol, market, COALESCE(instrument_type,'stock'), COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
 		       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), COALESCE(status,'active'),
 		       last_update_at, created_at, updated_at
 		FROM stockv2_instruments
@@ -1314,6 +1334,7 @@ func (s *Store) GetInstrument(ctx context.Context, symbol string) (StockV2Instru
 		&instrument.ID,
 		&instrument.Symbol,
 		&instrument.Market,
+		&instrument.InstrumentType,
 		&instrument.Name,
 		&instrument.Industry,
 		&instrument.Sector,
@@ -1336,6 +1357,7 @@ func (s *Store) GetInstrument(ctx context.Context, symbol string) (StockV2Instru
 	if lastUpdate.Valid {
 		instrument.LastUpdate = lastUpdate.Time
 	}
+	instrument.InstrumentType = normalizeInstrumentType(instrument.InstrumentType)
 	// 解析JSON字段
 	if len(conceptsJSON) > 0 {
 		_ = json.Unmarshal(conceptsJSON, &instrument.Concepts)
@@ -1344,7 +1366,7 @@ func (s *Store) GetInstrument(ctx context.Context, symbol string) (StockV2Instru
 	return instrument, nil
 }
 
-// GetInstruments 获取股票主数据列表（分页）
+// GetInstruments 获取标的主数据列表（分页）
 func (s *Store) CountInstruments(ctx context.Context) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_instruments`).Scan(&count)
@@ -1353,7 +1375,7 @@ func (s *Store) CountInstruments(ctx context.Context) (int, error) {
 
 func (s *Store) GetInstruments(ctx context.Context, limit int, offset int) ([]StockV2Instrument, error) {
 	query := `
-		SELECT id, symbol, market, COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
+		SELECT id, symbol, market, COALESCE(instrument_type,'stock'), COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
 		       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), COALESCE(status,'active'),
 		       last_update_at, created_at, updated_at
 		FROM stockv2_instruments
@@ -1377,6 +1399,7 @@ func (s *Store) GetInstruments(ctx context.Context, limit int, offset int) ([]St
 			&instrument.ID,
 			&instrument.Symbol,
 			&instrument.Market,
+			&instrument.InstrumentType,
 			&instrument.Name,
 			&instrument.Industry,
 			&instrument.Sector,
@@ -1395,6 +1418,7 @@ func (s *Store) GetInstruments(ctx context.Context, limit int, offset int) ([]St
 		if lastUpdate.Valid {
 			instrument.LastUpdate = lastUpdate.Time
 		}
+		instrument.InstrumentType = normalizeInstrumentType(instrument.InstrumentType)
 		if len(conceptsJSON) > 0 {
 			_ = json.Unmarshal(conceptsJSON, &instrument.Concepts)
 		}
@@ -1411,7 +1435,7 @@ func (s *Store) SearchInstruments(ctx context.Context, keyword string, limit int
 	}
 	pattern := "%" + strings.ToLower(keyword) + "%"
 	query := `
-		SELECT id, symbol, market, COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
+		SELECT id, symbol, market, COALESCE(instrument_type,'stock'), COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
 		       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), COALESCE(status,'active'),
 		       last_update_at, created_at, updated_at
 		FROM stockv2_instruments
@@ -1438,6 +1462,7 @@ func (s *Store) SearchInstruments(ctx context.Context, keyword string, limit int
 			&instrument.ID,
 			&instrument.Symbol,
 			&instrument.Market,
+			&instrument.InstrumentType,
 			&instrument.Name,
 			&instrument.Industry,
 			&instrument.Sector,
@@ -1456,6 +1481,7 @@ func (s *Store) SearchInstruments(ctx context.Context, keyword string, limit int
 		if lastUpdate.Valid {
 			instrument.LastUpdate = lastUpdate.Time
 		}
+		instrument.InstrumentType = normalizeInstrumentType(instrument.InstrumentType)
 		if len(conceptsJSON) > 0 {
 			_ = json.Unmarshal(conceptsJSON, &instrument.Concepts)
 		}
@@ -1468,7 +1494,7 @@ func (s *Store) SearchInstruments(ctx context.Context, keyword string, limit int
 // GetInstrumentsByMarket 根据市场获取股票列表
 func (s *Store) GetInstrumentsByMarket(ctx context.Context, market string) ([]StockV2Instrument, error) {
 	query := `
-		SELECT id, symbol, market, COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
+		SELECT id, symbol, market, COALESCE(instrument_type,'stock'), COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
 		       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), COALESCE(status,'active'),
 		       last_update_at, created_at, updated_at
 		FROM stockv2_instruments
@@ -1492,6 +1518,7 @@ func (s *Store) GetInstrumentsByMarket(ctx context.Context, market string) ([]St
 			&instrument.ID,
 			&instrument.Symbol,
 			&instrument.Market,
+			&instrument.InstrumentType,
 			&instrument.Name,
 			&instrument.Industry,
 			&instrument.Sector,
@@ -1510,6 +1537,7 @@ func (s *Store) GetInstrumentsByMarket(ctx context.Context, market string) ([]St
 		if lastUpdate.Valid {
 			instrument.LastUpdate = lastUpdate.Time
 		}
+		instrument.InstrumentType = normalizeInstrumentType(instrument.InstrumentType)
 		if len(conceptsJSON) > 0 {
 			_ = json.Unmarshal(conceptsJSON, &instrument.Concepts)
 		}
@@ -1519,11 +1547,11 @@ func (s *Store) GetInstrumentsByMarket(ctx context.Context, market string) ([]St
 	return instruments, nil
 }
 
-// UpdateInstrument 更新股票主数据
+// UpdateInstrument 更新标的主数据
 func (s *Store) UpdateInstrument(ctx context.Context, instrument StockV2Instrument) error {
 	query := `
 		UPDATE stockv2_instruments
-		SET name = ?, industry = ?, sector = ?, concepts = ?,
+		SET instrument_type = ?, name = ?, industry = ?, sector = ?, concepts = ?,
 		    list_date = ?, delist_date = ?, status = ?, last_update_at = ?, updated_at = ?
 		WHERE id = ?
 	`
@@ -1531,10 +1559,12 @@ func (s *Store) UpdateInstrument(ctx context.Context, instrument StockV2Instrume
 	now := time.Now()
 	instrument.UpdatedAt = now
 	instrument.LastUpdate = now
+	instrument.InstrumentType = normalizeInstrumentType(instrument.InstrumentType)
 
 	conceptsJSON, _ := json.Marshal(instrument.Concepts)
 
 	result, err := s.db.ExecContext(ctx, query,
+		instrument.InstrumentType,
 		instrument.Name,
 		instrument.Industry,
 		instrument.Sector,

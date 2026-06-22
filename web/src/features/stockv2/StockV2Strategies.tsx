@@ -19,6 +19,7 @@ import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, ContextList, Drawer, Field, Notice, Panel, Pill, useDangerConfirm } from "../../components/ui";
 import {
   formatDate,
+  stockV2InstrumentTypeLabel,
   stockV2StrategyDirectionLabel,
   stockV2StrategyKindLabel,
   stockV2StrategyScopeLabel,
@@ -641,7 +642,7 @@ function StrategyEmptyState({
         <Plus size={18} className="text-[var(--muted)]" />
         <strong className="text-sm">新建单票策略</strong>
         <span className="text-xs leading-relaxed text-[var(--muted)]">
-          为某只股票建立长期判断:倾向、逻辑、操作剧本和风险备注。可账户无关,也可绑定组合。
+          为某个标的建立长期判断:倾向、逻辑、操作剧本和风险备注。可账户无关,也可绑定组合。
         </span>
       </button>
       <button
@@ -858,7 +859,7 @@ function SymbolStrategyForm({
         />
       </Field>
 
-      <Field label="标的股票">
+      <Field label="标的">
         <SymbolPicker actions={actions} value={symbolRef} onChange={setSymbolRef} />
       </Field>
 
@@ -897,7 +898,7 @@ function SymbolStrategyForm({
       )}
 
       <Field label="核心逻辑 / Thesis">
-        <textarea rows={3} value={thesis} placeholder="为什么看好/看空这只股票" onChange={(e) => setThesis(e.target.value)} />
+        <textarea rows={3} value={thesis} placeholder="为什么看好/看空这个标的" onChange={(e) => setThesis(e.target.value)} />
       </Field>
       <Field label="入场条件">
         <textarea rows={2} value={entryConditions} placeholder="例如:回踩 20 日线企稳、放量突破前高" onChange={(e) => setEntryConditions(e.target.value)} />
@@ -1262,7 +1263,7 @@ function SymbolPicker({
           {searching ? (
             <div className="px-3 py-2 text-xs text-[var(--muted)]">搜索中…</div>
           ) : results.length === 0 ? (
-            <div className="px-3 py-2 text-xs text-[var(--muted)]">{query ? "未找到匹配的股票" : "输入关键词开始搜索"}</div>
+            <div className="px-3 py-2 text-xs text-[var(--muted)]">{query ? "未找到匹配的标的" : "输入关键词开始搜索"}</div>
           ) : (
             results.map((inst) => (
               <button
@@ -1273,9 +1274,14 @@ function SymbolPicker({
               >
                 <span className="font-mono">{inst.symbol}</span>
                 <span className="mx-2 min-w-0 truncate text-[var(--muted)]">{inst.name}</span>
-                <Pill tone="neutral" className="text-xs">
-                  {inst.market === "SH" ? "沪" : inst.market === "SZ" ? "深" : inst.market === "BJ" ? "北" : inst.market}
-                </Pill>
+                <span className="flex shrink-0 items-center gap-1">
+                  <Pill tone="neutral" className="text-xs">
+                    {inst.market === "SH" ? "沪" : inst.market === "SZ" ? "深" : inst.market === "BJ" ? "北" : inst.market}
+                  </Pill>
+                  <Pill tone="neutral" className="text-xs">
+                    {stockV2InstrumentTypeLabel(inst.instrumentType)}
+                  </Pill>
+                </span>
               </button>
             ))
           )}

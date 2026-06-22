@@ -115,7 +115,7 @@ type StockV2DailyBarJob struct {
 	ID             string          `json:"id"`
 	JobType        string          `json:"jobType"`          // daily_bars_ensure | daily_bars_incremental
 	Mode           string          `json:"mode"`             // symbol | hot | universe_incremental
-	Symbol         string          `json:"symbol,omitempty"` // mode=symbol 时的股票代码，用于去重与详情轮询
+	Symbol         string          `json:"symbol,omitempty"` // mode=symbol 时的标的代码，用于去重与详情轮询
 	Status         string          `json:"status"`           // running | completed | failed | cancelled
 	TotalCount     int             `json:"totalCount"`
 	ProcessedCount int             `json:"processedCount"`

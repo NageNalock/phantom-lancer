@@ -4,10 +4,11 @@ import { AreaSeries, createChart, createSeriesMarkers, type CrosshairMode, type 
 import type { AppActions } from "../../app/App";
 import type { AppData, StockV2AssetCurveResponse, StockV2Holding, StockV2Instrument, StockV2Portfolio, StockV2PortfolioRefreshResult, StockV2PortfolioSnapshot, StockV2PortfolioWithHoldings, StockV2Transaction } from "../../app/types";
 import { Button, EmptyState, Field, Notice, Panel, Pill, SubTabs } from "../../components/ui";
-import { stockV2RiskLabel, stockV2ValuationStatusLabel, stockV2ValuationStatusTone } from "../../domain/labels";
+import { stockV2InstrumentTypeLabel, stockV2RiskLabel, stockV2ValuationStatusLabel, stockV2ValuationStatusTone } from "../../domain/labels";
 import { StockV2InstrumentDetail } from "./StockV2InstrumentDetail";
 
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
+type PortfolioDetailTab = "holdings" | "transactions" | "curve";
 
 export function StockV2Portfolios({ actions, data, runAction }: { actions: AppActions; data: AppData; runAction: RunAction }) {
   const portfolios = data.stockv2.portfolios || [];
@@ -21,7 +22,7 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
   const [snapshots, setSnapshots] = useState<StockV2PortfolioSnapshot[]>([]);
   const [transactions, setTransactions] = useState<StockV2Transaction[]>([]);
   const [assetCurve, setAssetCurve] = useState<StockV2AssetCurveResponse | null>(null);
-  const [detailTab, setDetailTab] = useState<"holdings" | "transactions" | "curve">("holdings");
+  const [detailTab, setDetailTab] = useState<PortfolioDetailTab>("holdings");
   const [selectedInstrument, setSelectedInstrument] = useState<StockV2Instrument | null>(null);
 
   // 选中第一个组合
@@ -170,7 +171,7 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
                 { id: "curve", label: "资产图" },
               ]}
               activeId={detailTab}
-              onChange={setDetailTab}
+              onChange={(id) => setDetailTab(id as PortfolioDetailTab)}
               ariaLabel="组合详情"
             />
           </div>
@@ -229,9 +230,11 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
           {detailTab === "curve" ? (
             <div className="mt-3">
               {assetCurve?.estimated ? (
-                <Notice tone="warn" className="mb-2">
-                  部分日期缺少行情数据，已用最近收盘价 / 最新价估算。补全日 K 后曲线会更准确。
-                </Notice>
+                <div className="mb-2">
+                  <Notice tone="warn">
+                    部分日期缺少行情数据，已用最近收盘价 / 最新价估算。补全日 K 后曲线会更准确。
+                  </Notice>
+                </div>
               ) : null}
               <StockV2PortfolioAssetChart curve={assetCurve} />
             </div>
@@ -776,7 +779,7 @@ function HoldingDialog({
   return (
     <Dialog title={mode === "add" ? "添加持仓" : "编辑持仓"} onClose={onClose}>
       <div className="grid gap-3">
-        <Field label="股票代码 / 名称">
+        <Field label="标的代码 / 名称">
           <div className="relative" ref={dropdownRef}>
             <div className="relative">
               <MagnifyingGlass size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
@@ -801,7 +804,7 @@ function HoldingDialog({
                   <div className="px-3 py-2 text-xs text-[var(--muted)]">搜索中...</div>
                 ) : searchResults.length === 0 ? (
                   <div className="px-3 py-2 text-xs text-[var(--muted)]">
-                    {searchQuery ? "未找到匹配的股票" : "输入关键词开始搜索"}
+                    {searchQuery ? "未找到匹配的标的" : "输入关键词开始搜索"}
                   </div>
                 ) : (
                   searchResults.map((inst) => (
@@ -812,10 +815,15 @@ function HoldingDialog({
                       className="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-[var(--surface-soft)]"
                     >
                       <span className="font-mono">{inst.symbol}</span>
-                      <span className="text-[var(--muted)]">{inst.name}</span>
-                      <Pill tone="neutral" className="text-xs">
-                        {inst.market === "SH" ? "沪市" : inst.market === "SZ" ? "深市" : "北市"}
-                      </Pill>
+                      <span className="min-w-0 flex-1 truncate px-2 text-[var(--muted)]">{inst.name}</span>
+                      <span className="flex shrink-0 items-center gap-1">
+                        <Pill tone="neutral" className="text-xs">
+                          {inst.market === "SH" ? "沪市" : inst.market === "SZ" ? "深市" : "北市"}
+                        </Pill>
+                        <Pill tone="neutral" className="text-xs">
+                          {stockV2InstrumentTypeLabel(inst.instrumentType)}
+                        </Pill>
+                      </span>
                     </button>
                   ))
                 )}
@@ -824,11 +832,11 @@ function HoldingDialog({
           </div>
         </Field>
 
-        <Field label="股票名称">
+        <Field label="标的名称">
           <input
             type="text"
             value={form.name}
-            placeholder="选中股票后自动填入，也可手动修正"
+            placeholder="选中标的后自动填入，也可手动修正"
             onChange={(e) => setForm({ ...form, name: e.target.value })}
           />
         </Field>
@@ -1186,7 +1194,7 @@ function TradeDialog({
   return (
     <Dialog title={mode === "buy" ? "买入" : "卖出"} onClose={onClose}>
       <div className="grid gap-3">
-        <Field label="股票代码 / 名称">
+        <Field label="标的代码 / 名称">
           <div className="relative" ref={dropdownRef}>
             <div className="relative">
               <MagnifyingGlass size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
@@ -1212,7 +1220,7 @@ function TradeDialog({
                   <div className="px-3 py-2 text-xs text-[var(--muted)]">搜索中...</div>
                 ) : searchResults.length === 0 ? (
                   <div className="px-3 py-2 text-xs text-[var(--muted)]">
-                    {searchQuery ? "未找到匹配的股票" : "输入关键词开始搜索"}
+                    {searchQuery ? "未找到匹配的标的" : "输入关键词开始搜索"}
                   </div>
                 ) : (
                   searchResults.map((inst) => (
@@ -1223,10 +1231,15 @@ function TradeDialog({
                       className="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-[var(--surface-soft)]"
                     >
                       <span className="font-mono">{inst.symbol}</span>
-                      <span className="text-[var(--muted)]">{inst.name}</span>
-                      <Pill tone="neutral" className="text-xs">
-                        {inst.market === "SH" ? "沪市" : inst.market === "SZ" ? "深市" : "北市"}
-                      </Pill>
+                      <span className="min-w-0 flex-1 truncate px-2 text-[var(--muted)]">{inst.name}</span>
+                      <span className="flex shrink-0 items-center gap-1">
+                        <Pill tone="neutral" className="text-xs">
+                          {inst.market === "SH" ? "沪市" : inst.market === "SZ" ? "深市" : "北市"}
+                        </Pill>
+                        <Pill tone="neutral" className="text-xs">
+                          {stockV2InstrumentTypeLabel(inst.instrumentType)}
+                        </Pill>
+                      </span>
                     </button>
                   ))
                 )}
@@ -1235,11 +1248,11 @@ function TradeDialog({
           </div>
         </Field>
 
-        <Field label="股票名称">
+        <Field label="标的名称">
           <input
             type="text"
             value={form.name}
-            placeholder="选中股票后自动填入,也可手动修正"
+            placeholder="选中标的后自动填入,也可手动修正"
             onChange={(e) => setForm({ ...form, name: e.target.value })}
           />
         </Field>

@@ -120,7 +120,7 @@ export function StockV2DailyBars({ actions, data, runAction }: { actions: AppAct
         triggerSource: "web",
       };
       if (mode === "symbol") {
-        if (!symbol.trim()) throw new Error("请输入股票代码");
+        if (!symbol.trim()) throw new Error("请输入标的代码");
         req.symbol = symbol.trim();
       }
       await actions.api<StockV2DailyBarJob>("/api/stockv2/history/daily/jobs/run", {
@@ -339,7 +339,7 @@ function DailyBarsTriggerDrawer({
             ) : null}
 
             <div className="grid gap-4 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
-              <Field label="股票代码（symbol）" help="单只补拉时必填；持仓热集合和全市场增量会忽略这个输入。">
+              <Field label="标的代码（symbol）" help="单只补拉时必填；持仓热集合和全市场增量会忽略这个输入。">
                 <input
                   autoFocus
                   className="input mono"
