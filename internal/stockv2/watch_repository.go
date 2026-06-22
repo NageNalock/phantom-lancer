@@ -554,6 +554,8 @@ func alertFilterSQL(filter AlertListFilter) (string, []any) {
 	}
 	add("status", filter.Status)
 	add("watch_id", filter.WatchID)
+	add("monitor_hit_id", filter.MonitorHitID)
+	add("review_id", filter.ReviewID)
 	add("task_type", filter.TaskType)
 	add("symbol", filter.Symbol)
 	add("portfolio_id", filter.PortfolioID)

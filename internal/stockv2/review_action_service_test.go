@@ -2,6 +2,7 @@ package stockv2
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -80,6 +81,18 @@ func TestAcceptProposedOperationCreatesTransaction(t *testing.T) {
 	}
 	if len(txs) != 1 || txs[0].Side != "buy" || txs[0].Quantity != 10 || txs[0].Price != 61 {
 		t.Fatalf("transactions = %+v, want one buy", txs)
+	}
+	if !strings.Contains(txs[0].Note, "reviewId="+saved.ID) || !strings.Contains(txs[0].Note, "hitId="+hit.ID) || !strings.Contains(txs[0].Note, "alertId=") {
+		t.Fatalf("transaction note missing review/hit/alert linkage: %q", txs[0].Note)
+	}
+	impact, ok := accepted.Result["transactionImpact"].(map[string]any)
+	if !ok || len(impact) == 0 {
+		t.Fatalf("transactionImpact should be written: %+v", accepted.Result)
+	}
+	before := mapFromAny(impact["before"])
+	after := mapFromAny(impact["after"])
+	if before["cash"] == after["cash"] {
+		t.Fatalf("cash should change in transactionImpact: before=%+v after=%+v", before, after)
 	}
 	if _, err := svc.SaveOperationReviewResult(ctx, accepted.ID, RequestSaveOperationReviewResult{
 		OutputType:    OperationReviewOutputProposedOperation,

@@ -118,6 +118,20 @@ func (s *Server) handleStockV2ListMonitorHits(w http.ResponseWriter, r *http.Req
 	s.writeJSON(w, map[string]any{"items": items, "total": total, "limit": filter.Limit, "offset": filter.Offset})
 }
 
+func (s *Server) handleStockV2GetMonitorHit(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "hit ID is required", http.StatusBadRequest)
+		return
+	}
+	result, err := s.stockV2.GetMonitorHit(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), stockV2MonitorHTTPStatus(err))
+		return
+	}
+	s.writeJSON(w, result)
+}
+
 func stockV2MonitorRunFilterFromRequest(r *http.Request) (stockv2.MonitorRunListFilter, error) {
 	query := r.URL.Query()
 	limit, err := stockV2WatchPositiveInt(query.Get("limit"), 50)
@@ -168,7 +182,8 @@ func stockV2MonitorHitFilterFromRequest(r *http.Request) (stockv2.MonitorHitList
 
 func stockV2MonitorHTTPStatus(err error) int {
 	switch {
-	case errors.Is(err, stockv2.ErrMonitorTaskNotFound):
+	case errors.Is(err, stockv2.ErrMonitorTaskNotFound),
+		errors.Is(err, stockv2.ErrMonitorHitNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, stockv2.ErrMonitorTaskAlreadyRunning):
 		return http.StatusConflict

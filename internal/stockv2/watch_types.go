@@ -168,12 +168,14 @@ type RequestCreateAlert struct {
 }
 
 type AlertListFilter struct {
-	Status      string
-	WatchID     string
-	TaskType    string
-	Symbol      string
-	PortfolioID string
-	StrategyID  string
-	Limit       int
-	Offset      int
+	Status       string
+	WatchID      string
+	MonitorHitID string
+	ReviewID     string
+	TaskType     string
+	Symbol       string
+	PortfolioID  string
+	StrategyID   string
+	Limit        int
+	Offset       int
 }

@@ -125,6 +125,8 @@ func (s *Service) acceptProposedOperationReview(ctx context.Context, review Oper
 	if finalGuardrails.Status == ExecutionGuardrailsStatusBlocked {
 		return OperationReview{}, ErrInvalidProposedOperation
 	}
+	beforeImpact := s.portfolioTransactionTraceState(ctx, op.PortfolioID, op.Symbol)
+	alertID := s.alertIDForReview(ctx, review)
 
 	txReq := RequestRecordTransaction{
 		Symbol:     op.Symbol,
@@ -134,16 +136,18 @@ func (s *Service) acceptProposedOperationReview(ctx context.Context, review Oper
 		Quantity:   quantity,
 		Price:      price,
 		ExecutedAt: strings.TrimSpace(req.ExecutedAt),
-		Note:       reviewTransactionNote(review, finalGuardrails.Status),
+		Note:       reviewTransactionNote(review, finalGuardrails.Status, alertID),
 	}
 	tx, err := s.RecordTransaction(ctx, op.PortfolioID, txReq)
 	if err != nil {
 		return OperationReview{}, err
 	}
+	afterImpact := s.portfolioTransactionTraceState(ctx, op.PortfolioID, op.Symbol)
 	return s.saveOperationReviewAcceptance(ctx, review, operationReviewAcceptanceAccepted, "", map[string]any{
-		"transactionId": tx.Transaction.ID,
-		"transaction":   tx.Transaction,
-		"guardrails":    finalGuardrails,
+		"transactionId":     tx.Transaction.ID,
+		"transaction":       tx.Transaction,
+		"transactionImpact": reviewTransactionImpact(beforeImpact, afterImpact, tx.HoldingCleared),
+		"guardrails":        finalGuardrails,
 	}, AlertStatusResolved)
 }
 
@@ -321,17 +325,85 @@ func reviewOperationRaw(result map[string]any) map[string]any {
 	return result
 }
 
-func reviewTransactionNote(review OperationReview, guardrailsStatus string) string {
+func (s *Service) alertIDForReview(ctx context.Context, review OperationReview) string {
+	if strings.TrimSpace(review.HitID) == "" {
+		return ""
+	}
+	hit, err := s.store.GetMonitorHit(ctx, review.HitID)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(hit.AlertID)
+}
+
+func reviewTransactionNote(review OperationReview, guardrailsStatus, alertID string) string {
 	parts := []string{
 		"source=operation_review",
 		"reviewId=" + review.ID,
 		"hitId=" + review.HitID,
 		"guardrails=" + guardrailsStatus,
 	}
+	if alertID != "" {
+		parts = append(parts, "alertId="+alertID)
+	}
 	if summary := strings.TrimSpace(review.ResultSummary); summary != "" {
 		parts = append(parts, "summary="+summary)
 	}
 	return strings.Join(parts, "; ")
+}
+
+func (s *Service) portfolioTransactionTraceState(ctx context.Context, portfolioID, symbol string) map[string]any {
+	state := map[string]any{}
+	if portfolio, err := s.store.GetPortfolio(ctx, portfolioID); err == nil {
+		state["cash"] = portfolio.Cash
+		state["riskLevel"] = portfolio.RiskLevel
+		state["maxSinglePositionPct"] = portfolio.MaxSinglePositionPct
+	}
+	if holdings, err := s.store.ListHoldings(ctx, portfolioID); err == nil {
+		for _, holding := range holdings {
+			if holding.Symbol == symbol {
+				state["holding"] = map[string]any{
+					"symbol":            holding.Symbol,
+					"market":            holding.Market,
+					"name":              holding.Name,
+					"quantity":          holding.Quantity,
+					"availableQuantity": holding.AvailableQuantity,
+					"costPrice":         holding.CostPrice,
+					"lastPrice":         holding.LastPrice,
+					"marketValue":       holding.MarketValue,
+					"pnl":               holding.PnL,
+					"positionPct":       holding.PositionPct,
+					"tradableStatus":    holding.TradableStatus,
+				}
+				break
+			}
+		}
+	}
+	if snapshots, err := s.store.GetPortfolioSnapshots(ctx, portfolioID, 1); err == nil && len(snapshots) > 0 {
+		snapshot := snapshots[0]
+		state["snapshot"] = map[string]any{
+			"id":                  snapshot.ID,
+			"valuationAt":         snapshot.ValuationAt,
+			"cash":                snapshot.Cash,
+			"holdingMarketValue":  snapshot.HoldingMarketValue,
+			"totalAssetValue":     snapshot.TotalAssetValue,
+			"cashPct":             snapshot.CashPct,
+			"positionCount":       snapshot.PositionCount,
+			"staleQuoteCount":     snapshot.StaleQuoteCount,
+			"estimatedQuoteCount": snapshot.EstimatedQuoteCount,
+			"status":              snapshot.Status,
+			"source":              snapshot.Source,
+		}
+	}
+	return state
+}
+
+func reviewTransactionImpact(before, after map[string]any, holdingCleared bool) map[string]any {
+	return map[string]any{
+		"before":         before,
+		"after":          after,
+		"holdingCleared": holdingCleared,
+	}
 }
 
 func numericTokenFromString(value string) float64 {

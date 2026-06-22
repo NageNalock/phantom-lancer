@@ -2,8 +2,8 @@ import { ArrowClockwise, Eye, Plus, Minus, Trash, Pencil, Wallet, X, Check, Magn
 import { useEffect, useRef, useState } from "react";
 import { AreaSeries, createChart, createSeriesMarkers, type CrosshairMode, type IChartApi, type ISeriesApi, type Time } from "lightweight-charts";
 import type { AppActions } from "../../app/App";
-import type { AppData, StockV2AssetCurveResponse, StockV2Holding, StockV2Instrument, StockV2Portfolio, StockV2PortfolioRefreshResult, StockV2PortfolioSnapshot, StockV2PortfolioWithHoldings, StockV2Transaction } from "../../app/types";
-import { Button, EmptyState, Field, Notice, Panel, Pill, SubTabs } from "../../components/ui";
+import type { AppData, StockV2Alert, StockV2AlertListResponse, StockV2AssetCurveResponse, StockV2Holding, StockV2Instrument, StockV2MonitorHit, StockV2OperationReview, StockV2Portfolio, StockV2PortfolioRefreshResult, StockV2PortfolioSnapshot, StockV2PortfolioWithHoldings, StockV2Transaction } from "../../app/types";
+import { Button, ContextList, Drawer, EmptyState, Field, Notice, Panel, Pill, SubTabs } from "../../components/ui";
 import { stockV2InstrumentTypeLabel, stockV2RiskLabel, stockV2ValuationStatusLabel, stockV2ValuationStatusTone } from "../../domain/labels";
 import { StockV2InstrumentDetail } from "./StockV2InstrumentDetail";
 
@@ -24,6 +24,7 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
   const [assetCurve, setAssetCurve] = useState<StockV2AssetCurveResponse | null>(null);
   const [detailTab, setDetailTab] = useState<PortfolioDetailTab>("holdings");
   const [selectedInstrument, setSelectedInstrument] = useState<StockV2Instrument | null>(null);
+  const [selectedTransaction, setSelectedTransaction] = useState<StockV2Transaction | null>(null);
 
   // 选中第一个组合
   useEffect(() => {
@@ -224,7 +225,7 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
           ) : null}
 
           {detailTab === "transactions" ? (
-            <TransactionsTable transactions={transactions} />
+            <TransactionsTable transactions={transactions} onInspect={setSelectedTransaction} />
           ) : null}
 
           {detailTab === "curve" ? (
@@ -336,6 +337,14 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
           inst={selectedInstrument}
           actions={actions}
           onClose={() => setSelectedInstrument(null)}
+        />
+      ) : null}
+
+      {selectedTransaction ? (
+        <TransactionTraceDrawer
+          actions={actions}
+          transaction={selectedTransaction}
+          onClose={() => setSelectedTransaction(null)}
         />
       ) : null}
     </div>
@@ -935,7 +944,7 @@ function DialogActions({ onClose, onSubmit, submitLabel = "保存" }: { onClose:
 }
 
 // ---- 交易流水表格 ----
-function TransactionsTable({ transactions }: { transactions: StockV2Transaction[] }) {
+function TransactionsTable({ transactions, onInspect }: { transactions: StockV2Transaction[]; onInspect: (transaction: StockV2Transaction) => void }) {
   if (transactions.length === 0) {
     return <EmptyState title="暂无交易流水" body="买入或卖出后会在这里记录每一笔交易。" />;
   }
@@ -951,30 +960,318 @@ function TransactionsTable({ transactions }: { transactions: StockV2Transaction[
             <th className="py-2 pr-4 font-medium">数量</th>
             <th className="py-2 pr-4 font-medium">价格</th>
             <th className="py-2 pr-4 font-medium">金额</th>
-            <th className="py-2 pr-4 font-medium">备注</th>
+            <th className="py-2 pr-4 font-medium">来源</th>
+            <th className="py-2 pr-4 font-medium">操作</th>
           </tr>
         </thead>
         <tbody>
-          {transactions.map((t) => (
-            <tr key={t.id} className="border-b border-[var(--line-soft)] last:border-b-0">
-              <td className="py-2 pr-4 text-xs text-[var(--muted)]">{formatDateTime(t.executedAt)}</td>
-              <td className="py-2 pr-4">
-                <Pill tone={t.side === "buy" ? "danger" : "good"}>
-                  {t.side === "buy" ? "买入" : "卖出"}
-                </Pill>
-              </td>
-              <td className="py-2 pr-4 font-mono">{t.symbol}</td>
-              <td className="py-2 pr-4">{t.name || "-"}</td>
-              <td className="py-2 pr-4">{t.quantity.toLocaleString()}</td>
-              <td className="py-2 pr-4 font-mono">{t.price.toFixed(2)}</td>
-              <td className="py-2 pr-4 font-mono">{formatMoney(t.amount)}</td>
-              <td className="py-2 pr-4 text-xs text-[var(--muted)]">{t.note || "-"}</td>
-            </tr>
-          ))}
+          {transactions.map((t) => {
+            const trace = parseTransactionTrace(t.note);
+            return (
+              <tr key={t.id} className="border-b border-[var(--line-soft)] last:border-b-0">
+                <td className="py-2 pr-4 text-xs text-[var(--muted)]">{formatDateTime(t.executedAt)}</td>
+                <td className="py-2 pr-4">
+                  <Pill tone={t.side === "buy" ? "danger" : "good"}>
+                    {t.side === "buy" ? "买入" : "卖出"}
+                  </Pill>
+                </td>
+                <td className="py-2 pr-4 font-mono">{t.symbol}</td>
+                <td className="py-2 pr-4">{t.name || "-"}</td>
+                <td className="py-2 pr-4">{t.quantity.toLocaleString()}</td>
+                <td className="py-2 pr-4 font-mono">{t.price.toFixed(2)}</td>
+                <td className="py-2 pr-4 font-mono">{formatMoney(t.amount)}</td>
+                <td className="py-2 pr-4 text-xs">
+                  <TransactionSourcePill trace={trace} />
+                </td>
+                <td className="py-2 pr-4">
+                  <Button onClick={() => onInspect(t)}>查看追溯</Button>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
   );
+}
+
+function TransactionSourcePill({ trace }: { trace: TransactionTraceNote }) {
+  if (trace.source === "operation_review") {
+    return <Pill tone="good">Review 确认</Pill>;
+  }
+  if (trace.source) {
+    return <Pill tone="neutral">{trace.source}</Pill>;
+  }
+  return <Pill tone="neutral">手工流水</Pill>;
+}
+
+function TransactionTraceDrawer({
+  actions,
+  transaction,
+  onClose,
+}: {
+  actions: AppActions;
+  transaction: StockV2Transaction;
+  onClose: () => void;
+}) {
+  const trace = parseTransactionTrace(transaction.note);
+  const [review, setReview] = useState<StockV2OperationReview | null>(null);
+  const [alert, setAlert] = useState<StockV2Alert | null>(null);
+  const [hit, setHit] = useState<StockV2MonitorHit | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      try {
+        const nextReview = trace.reviewId
+          ? await actions.api<StockV2OperationReview>(`/api/stockv2/reviews/${encodeURIComponent(trace.reviewId)}`).catch(() => null)
+          : null;
+        const nextHit = trace.hitId
+          ? await actions.api<StockV2MonitorHit>(`/api/stockv2/monitor/hits/${encodeURIComponent(trace.hitId)}`).catch(() => null)
+          : null;
+        const alertParams = new URLSearchParams({ limit: "1" });
+        if (trace.reviewId) {
+          alertParams.set("reviewId", trace.reviewId);
+        } else if (trace.hitId) {
+          alertParams.set("monitorHitId", trace.hitId);
+        }
+        const nextAlert = trace.reviewId || trace.hitId
+          ? await actions.api<StockV2AlertListResponse>(`/api/stockv2/alerts?${alertParams.toString()}`).then((res) => res.items?.[0] || null).catch(() => null)
+          : null;
+        if (!cancelled) {
+          setReview(nextReview);
+          setHit(nextHit);
+          setAlert(nextAlert);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [actions, trace.hitId, trace.reviewId]);
+
+  const result = review?.result || {};
+  const guardrails = mapFromUnknown(result.guardrails);
+  const impact = mapFromUnknown(result.transactionImpact);
+  const before = mapFromUnknown(impact.before);
+  const after = mapFromUnknown(impact.after);
+  const triggerSource = alert?.triggerSource || "";
+  const reason = review?.resultSummary || trace.summary || alert?.summary || hit?.summary || transaction.note || "";
+
+  return (
+    <Drawer
+      title="交易追溯"
+      subtitle={`${transaction.symbol} · ${transaction.side === "buy" ? "买入" : "卖出"} · ${formatMoney(transaction.amount)}`}
+      onClose={onClose}
+      width={620}
+    >
+      <div className="grid gap-4 text-sm">
+        {loading ? <p className="text-xs text-[var(--muted)]">加载关联信息…</p> : null}
+
+        <section className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+          <strong className="text-sm">交易流水</strong>
+          <ContextList
+            items={[
+              ["交易 ID", <span className="font-mono">{transaction.id}</span>],
+              ["成交", `${transaction.side === "buy" ? "买入" : "卖出"} · ${transaction.quantity.toLocaleString()} 股 · ${transaction.price.toFixed(2)}`],
+              ["金额", <span className="font-mono">{formatMoney(transaction.amount)}</span>],
+              ["时间", formatDateTime(transaction.executedAt)],
+              ["来源", <TransactionSourcePill trace={trace} />],
+            ]}
+          />
+        </section>
+
+        <section className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+          <strong className="text-sm">来源链路</strong>
+          <ContextList
+            items={[
+              ["Review", trace.reviewId ? <span className="font-mono">{trace.reviewId}</span> : "未关联"],
+              ["Alert", (alert?.id || trace.alertId) ? <span className="font-mono">{alert?.id || trace.alertId}</span> : "未关联"],
+              ["MonitorHit", trace.hitId ? <span className="font-mono">{trace.hitId}</span> : "未关联"],
+              ["判断来源", triggerSourceLabel(triggerSource)],
+              ["理由", reason || "-"],
+            ]}
+          />
+          {!trace.reviewId ? <Notice tone="warn">这是一笔手工交易流水,没有关联 Review / Alert / MonitorHit。</Notice> : null}
+        </section>
+
+        {review || alert || hit ? (
+          <section className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+            <strong className="text-sm">Review / Alert / Hit</strong>
+            <ContextList
+              items={[
+                ["Review 状态", review ? `${review.status || "-"} · ${review.outputType || "-"}` : "-"],
+                ["Review 摘要", review?.resultSummary || "-"],
+                ["Alert 状态", alert ? `${alert.status || "-"} · ${alert.title || "-"}` : "-"],
+                ["Hit", hit ? `${hit.status || "-"} · ${hit.title || "-"}` : "-"],
+                ["Hit 摘要", hit?.summary || "-"],
+              ]}
+            />
+          </section>
+        ) : null}
+
+        <section className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+          <strong className="text-sm">Guardrails</strong>
+          {Object.keys(guardrails).length > 0 ? (
+            <>
+              <ContextList
+                items={[
+                  ["状态", guardrailsStatusLabel(readString(guardrails.status) || trace.guardrails || "")],
+                  ["检查时间", formatDateTime(readString(guardrails.checkedAt)) || "-"],
+                ]}
+              />
+              <GuardrailReasons reasons={Array.isArray(guardrails.reasons) ? guardrails.reasons : []} />
+            </>
+          ) : (
+            <p className="text-xs text-[var(--muted)]">{trace.guardrails ? `记录状态: ${trace.guardrails}` : "未记录 guardrails 详情。"}</p>
+          )}
+        </section>
+
+        <section className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+          <strong className="text-sm">组合影响</strong>
+          {Object.keys(impact).length > 0 ? (
+            <TransactionImpact before={before} after={after} />
+          ) : (
+            <Notice tone="warn">该交易尚未记录确认前后的持仓、现金和快照差异。新的 Review 确认交易会自动写入这段信息。</Notice>
+          )}
+        </section>
+      </div>
+    </Drawer>
+  );
+}
+
+function GuardrailReasons({ reasons }: { reasons: unknown[] }) {
+  if (reasons.length === 0) {
+    return <p className="text-xs text-[var(--muted)]">无拦截或降级原因。</p>;
+  }
+  return (
+    <div className="grid gap-1">
+      {reasons.map((item, index) => {
+        const reason = mapFromUnknown(item);
+        return (
+          <div className="rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1 text-xs" key={index}>
+            <span className="font-mono text-[var(--muted-strong)]">{readString(reason.code) || `#${index + 1}`}</span>
+            <span className="ml-2">{readString(reason.message) || "-"}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function TransactionImpact({ before, after }: { before: Record<string, unknown>; after: Record<string, unknown> }) {
+  const beforeHolding = mapFromUnknown(before.holding);
+  const afterHolding = mapFromUnknown(after.holding);
+  const beforeSnapshot = mapFromUnknown(before.snapshot);
+  const afterSnapshot = mapFromUnknown(after.snapshot);
+  return (
+    <div className="grid gap-3">
+      <ContextList
+        items={[
+          ["现金", `${formatOptionalMoney(readNumber(before.cash))} -> ${formatOptionalMoney(readNumber(after.cash))}`],
+          ["持仓数量", `${formatOptionalNumber(readNumber(beforeHolding.quantity))} -> ${formatOptionalNumber(readNumber(afterHolding.quantity))}`],
+          ["持仓市值", `${formatOptionalMoney(readNumber(beforeHolding.marketValue))} -> ${formatOptionalMoney(readNumber(afterHolding.marketValue))}`],
+          ["持仓占比", `${formatOptionalPct(readNumber(beforeHolding.positionPct))} -> ${formatOptionalPct(readNumber(afterHolding.positionPct))}`],
+          ["快照总资产", `${formatOptionalMoney(readNumber(beforeSnapshot.totalAssetValue))} -> ${formatOptionalMoney(readNumber(afterSnapshot.totalAssetValue))}`],
+          ["快照状态", `${readString(beforeSnapshot.status) || "-"} -> ${readString(afterSnapshot.status) || "-"}`],
+        ]}
+      />
+    </div>
+  );
+}
+
+type TransactionTraceNote = {
+  source?: string;
+  reviewId?: string;
+  hitId?: string;
+  alertId?: string;
+  guardrails?: string;
+  summary?: string;
+};
+
+function parseTransactionTrace(note: string): TransactionTraceNote {
+  const raw = (note || "").trim();
+  if (!raw) return {};
+  if (raw.startsWith("{")) {
+    try {
+      return JSON.parse(raw) as TransactionTraceNote;
+    } catch {
+      return {};
+    }
+  }
+  const out: TransactionTraceNote = {};
+  for (const part of raw.split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    const value = rest.join("=").trim();
+    if (!key || !value) continue;
+    if (key === "source" || key === "reviewId" || key === "hitId" || key === "alertId" || key === "guardrails" || key === "summary") {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+function mapFromUnknown(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function readString(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+function readNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
+}
+
+function formatOptionalMoney(value?: number): string {
+  return value === undefined ? "-" : formatMoney(value);
+}
+
+function formatOptionalNumber(value?: number): string {
+  return value === undefined ? "-" : value.toLocaleString();
+}
+
+function formatOptionalPct(value?: number): string {
+  return value === undefined ? "-" : `${value.toFixed(2)}%`;
+}
+
+function triggerSourceLabel(source: string): string {
+  switch (source) {
+    case "agent_confirmed":
+      return "Agent 确认";
+    case "manual_review_confirmed":
+      return "人工 Review";
+    case "degraded":
+      return "降级提醒";
+    case "deterministic":
+      return "确定性规则";
+    default:
+      return source || "-";
+  }
+}
+
+function guardrailsStatusLabel(status: string): string {
+  switch (status) {
+    case "pass":
+      return "通过";
+    case "degraded":
+      return "降级通过";
+    case "blocked":
+      return "已拦截";
+    default:
+      return status || "-";
+  }
 }
 
 // ---- 资产变化图 ----

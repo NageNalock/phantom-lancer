@@ -74,6 +74,7 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/monitor/runs/{id}/agent-runs", s.handleStockV2ListMonitorRunAgentRuns)
 	mux.HandleFunc("GET /api/stockv2/monitor/runs/{id}", s.handleStockV2GetMonitorRun)
 	mux.HandleFunc("GET /api/stockv2/monitor/hits", s.handleStockV2ListMonitorHits)
+	mux.HandleFunc("GET /api/stockv2/monitor/hits/{id}", s.handleStockV2GetMonitorHit)
 	mux.HandleFunc("POST /api/stockv2/monitor/hits/{id}/review", s.handleStockV2CreateReviewFromMonitorHit)
 
 	// Operation Review(从 MonitorHit 进入人工/后续 Agent 审阅)

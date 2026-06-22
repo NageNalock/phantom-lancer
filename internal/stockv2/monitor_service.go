@@ -194,6 +194,10 @@ func (s *Service) ListMonitorHits(ctx context.Context, filter MonitorHitListFilt
 	return s.store.ListMonitorHits(ctx, filter)
 }
 
+func (s *Service) GetMonitorHit(ctx context.Context, id string) (MonitorHit, error) {
+	return s.store.GetMonitorHit(ctx, id)
+}
+
 func (s *Service) CountMonitorHits(ctx context.Context, filter MonitorHitListFilter) (int, error) {
 	return s.store.CountMonitorHits(ctx, filter)
 }
