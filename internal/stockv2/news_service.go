@@ -1,0 +1,232 @@
+package stockv2
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
+	"time"
+)
+
+func (s *Service) CreateRawNews(ctx context.Context, req RequestCreateRawNews) (StockV2RawNews, error) {
+	source := strings.TrimSpace(req.Source)
+	if source == "" {
+		return StockV2RawNews{}, ErrInvalidRawNewsSource
+	}
+	title := strings.TrimSpace(req.Title)
+	content := strings.TrimSpace(req.Content)
+	snippet := strings.TrimSpace(req.Snippet)
+	if title == "" && content == "" && snippet == "" {
+		return StockV2RawNews{}, ErrInvalidRawNewsContent
+	}
+	fetchedAt := req.FetchedAt
+	if fetchedAt.IsZero() {
+		fetchedAt = time.Now()
+	}
+	hash := rawNewsContentHash(source, req.SourceID, title, content, snippet, req.PublishedAt)
+	dedupeKey := strings.TrimSpace(req.DedupeKey)
+	if dedupeKey == "" {
+		dedupeKey = rawNewsDedupeKey(source, req.SourceID, hash)
+	}
+	item := StockV2RawNews{
+		Source:      source,
+		SourceID:    strings.TrimSpace(req.SourceID),
+		Language:    strings.TrimSpace(req.Language),
+		Title:       title,
+		Content:     content,
+		Snippet:     snippet,
+		PublishedAt: req.PublishedAt,
+		FetchedAt:   fetchedAt,
+		RawPayload:  req.RawPayload,
+		ContentHash: hash,
+		DedupeKey:   dedupeKey,
+		Quality:     newsQualityOrDefault(req.Quality),
+		Status:      newsStatusOrDefault(req.Status),
+	}
+	return s.store.CreateRawNews(ctx, item)
+}
+
+func (s *Service) ListRawNews(ctx context.Context, filter RawNewsListFilter) ([]StockV2RawNews, error) {
+	return s.store.ListRawNews(ctx, filter)
+}
+
+func (s *Service) CountRawNews(ctx context.Context, filter RawNewsListFilter) (int, error) {
+	return s.store.CountRawNews(ctx, filter)
+}
+
+func (s *Service) ListUnprocessedRawNews(ctx context.Context, before time.Time, limit int) ([]StockV2RawNews, error) {
+	return s.store.ListUnprocessedRawNews(ctx, before, limit)
+}
+
+func (s *Service) CreateNewsEvent(ctx context.Context, req RequestCreateNewsEvent) (StockV2NewsEvent, error) {
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		return StockV2NewsEvent{}, ErrInvalidNewsEventTitle
+	}
+	source := strings.TrimSpace(req.Source)
+	if source == "" {
+		return StockV2NewsEvent{}, ErrInvalidNewsEventSource
+	}
+	rawNewsID := strings.TrimSpace(req.RawNewsID)
+	if rawNewsID != "" {
+		if _, err := s.store.GetRawNews(ctx, rawNewsID); err != nil {
+			return StockV2NewsEvent{}, err
+		}
+	}
+	eventTime := req.EventTime
+	if eventTime.IsZero() {
+		eventTime = time.Now()
+	}
+	dedupeKey := strings.TrimSpace(req.DedupeKey)
+	if dedupeKey == "" {
+		if rawNewsID != "" {
+			dedupeKey = source + ":raw:" + rawNewsID
+		} else {
+			dedupeKey = newsEventDedupeKey(source, title, strings.TrimSpace(req.Summary), eventTime)
+		}
+	}
+	event := StockV2NewsEvent{
+		RawNewsID:  rawNewsID,
+		Title:      title,
+		Summary:    strings.TrimSpace(req.Summary),
+		Snippet:    strings.TrimSpace(req.Snippet),
+		Language:   strings.TrimSpace(req.Language),
+		Source:     source,
+		EventTime:  eventTime,
+		Importance: newsImportanceOrDefault(req.Importance),
+		Tags:       compactStrings(req.Tags),
+		Topics:     compactStrings(req.Topics),
+		DedupeKey:  dedupeKey,
+		Quality:    newsQualityOrDefault(req.Quality),
+		Status:     newsStatusOrDefault(req.Status),
+	}
+	return s.store.CreateNewsEvent(ctx, event)
+}
+
+func (s *Service) ListNewsEvents(ctx context.Context, filter NewsEventListFilter) ([]StockV2NewsEvent, error) {
+	return s.store.ListNewsEvents(ctx, filter)
+}
+
+func (s *Service) CountNewsEvents(ctx context.Context, filter NewsEventListFilter) (int, error) {
+	return s.store.CountNewsEvents(ctx, filter)
+}
+
+func (s *Service) ListUnprocessedNewsEvents(ctx context.Context, before time.Time, limit int) ([]StockV2NewsEvent, error) {
+	return s.store.ListUnprocessedNewsEvents(ctx, before, limit)
+}
+
+func (s *Service) UpsertNewsLinkCandidate(ctx context.Context, req RequestUpsertNewsLinkCandidate) (StockV2NewsLinkCandidate, error) {
+	eventID := strings.TrimSpace(req.NewsEventID)
+	symbol := strings.TrimSpace(req.Symbol)
+	matchMethod := strings.TrimSpace(req.MatchMethod)
+	if eventID == "" || symbol == "" || matchMethod == "" {
+		return StockV2NewsLinkCandidate{}, ErrInvalidNewsLinkCandidateKey
+	}
+	if req.Score < 0 {
+		return StockV2NewsLinkCandidate{}, ErrInvalidNewsLinkCandidate
+	}
+	if _, err := s.store.GetNewsEvent(ctx, eventID); err != nil {
+		return StockV2NewsLinkCandidate{}, err
+	}
+	item := StockV2NewsLinkCandidate{
+		NewsEventID:  eventID,
+		Symbol:       symbol,
+		Market:       strings.TrimSpace(req.Market),
+		MatchMethod:  matchMethod,
+		Score:        req.Score,
+		Reason:       strings.TrimSpace(req.Reason),
+		MatchedTerms: compactStrings(req.MatchedTerms),
+		Status:       newsLinkCandidateStatusOrDefault(req.Status),
+	}
+	return s.store.UpsertNewsLinkCandidate(ctx, item)
+}
+
+func (s *Service) ListNewsLinkCandidates(ctx context.Context, filter NewsLinkCandidateListFilter) ([]StockV2NewsLinkCandidate, error) {
+	return s.store.ListNewsLinkCandidates(ctx, filter)
+}
+
+func (s *Service) CountNewsLinkCandidates(ctx context.Context, filter NewsLinkCandidateListFilter) (int, error) {
+	return s.store.CountNewsLinkCandidates(ctx, filter)
+}
+
+func rawNewsContentHash(source, sourceID, title, content, snippet string, publishedAt time.Time) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		strings.TrimSpace(source),
+		strings.TrimSpace(sourceID),
+		strings.TrimSpace(title),
+		strings.TrimSpace(content),
+		strings.TrimSpace(snippet),
+		publishedAt.UTC().Format(time.RFC3339Nano),
+	}, "\x00")))
+	return hex.EncodeToString(sum[:])
+}
+
+func rawNewsDedupeKey(source, sourceID, contentHash string) string {
+	if sid := strings.TrimSpace(sourceID); sid != "" {
+		return strings.TrimSpace(source) + ":" + sid
+	}
+	return strings.TrimSpace(source) + ":hash:" + contentHash
+}
+
+func newsEventDedupeKey(source, title, summary string, eventTime time.Time) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		strings.TrimSpace(source),
+		strings.TrimSpace(title),
+		strings.TrimSpace(summary),
+		eventTime.UTC().Format(time.RFC3339),
+	}, "\x00")))
+	return strings.TrimSpace(source) + ":event:" + hex.EncodeToString(sum[:])
+}
+
+func compactStrings(items []string) []string {
+	out := make([]string, 0, len(items))
+	seen := map[string]struct{}{}
+	for _, item := range items {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
+func newsStatusOrDefault(value string) string {
+	switch strings.TrimSpace(value) {
+	case NewsStatusProcessed, NewsStatusFailed, NewsStatusIgnored:
+		return strings.TrimSpace(value)
+	default:
+		return NewsStatusNew
+	}
+}
+
+func newsQualityOrDefault(value string) string {
+	switch strings.TrimSpace(value) {
+	case NewsQualityOK, NewsQualityLow:
+		return strings.TrimSpace(value)
+	default:
+		return NewsQualityUnknown
+	}
+}
+
+func newsImportanceOrDefault(value string) string {
+	switch strings.TrimSpace(value) {
+	case NewsImportanceLow, NewsImportanceHigh:
+		return strings.TrimSpace(value)
+	default:
+		return NewsImportanceNormal
+	}
+}
+
+func newsLinkCandidateStatusOrDefault(value string) string {
+	switch strings.TrimSpace(value) {
+	case NewsLinkCandidateStatusConfirmed, NewsLinkCandidateStatusRejected, NewsLinkCandidateStatusIgnored:
+		return strings.TrimSpace(value)
+	default:
+		return NewsLinkCandidateStatusCandidate
+	}
+}

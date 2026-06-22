@@ -535,6 +535,73 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_operation_reviews_created_at ON stockv2_o
 CREATE UNIQUE INDEX IF NOT EXISTS idx_stockv2_operation_reviews_active_hit
     ON stockv2_operation_reviews(hit_id)
     WHERE status <> 'closed';
+
+-- ===== 消息面数据资产:RawNews -> NewsEvent -> NewsLinkCandidate =====
+CREATE TABLE IF NOT EXISTS stockv2_raw_news (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    source_id TEXT,
+    language TEXT,
+    title TEXT NOT NULL,
+    content TEXT,
+    snippet TEXT,
+    published_at DATETIME,
+    fetched_at DATETIME NOT NULL,
+    raw_payload_json TEXT,
+    content_hash TEXT NOT NULL,
+    dedupe_key TEXT NOT NULL UNIQUE,
+    quality TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_raw_news_source ON stockv2_raw_news(source);
+CREATE INDEX IF NOT EXISTS idx_stockv2_raw_news_status ON stockv2_raw_news(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_raw_news_fetched_at ON stockv2_raw_news(fetched_at);
+
+CREATE TABLE IF NOT EXISTS stockv2_news_events (
+    id TEXT PRIMARY KEY,
+    raw_news_id TEXT,
+    title TEXT NOT NULL,
+    summary TEXT,
+    snippet TEXT,
+    language TEXT,
+    source TEXT NOT NULL,
+    event_time DATETIME NOT NULL,
+    importance TEXT NOT NULL,
+    tags_json TEXT,
+    topics_json TEXT,
+    dedupe_key TEXT NOT NULL UNIQUE,
+    quality TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    FOREIGN KEY (raw_news_id) REFERENCES stockv2_raw_news(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_raw_news_id ON stockv2_news_events(raw_news_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_source ON stockv2_news_events(source);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_status ON stockv2_news_events(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_event_time ON stockv2_news_events(event_time);
+
+CREATE TABLE IF NOT EXISTS stockv2_news_link_candidates (
+    id TEXT PRIMARY KEY,
+    news_event_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    market TEXT NOT NULL DEFAULT '',
+    match_method TEXT NOT NULL,
+    score REAL NOT NULL,
+    reason TEXT,
+    matched_terms_json TEXT,
+    status TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    FOREIGN KEY (news_event_id) REFERENCES stockv2_news_events(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_key
+    ON stockv2_news_link_candidates(news_event_id, symbol, market, match_method);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_event ON stockv2_news_link_candidates(news_event_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol, market);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_status ON stockv2_news_link_candidates(status);
 -- 内置监控任务默认配置(全部默认关闭,用户显式开启后才会周期执行)。
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('universe_update', 0, 3600, 'normal', 0, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('latest_quote_refresh', 0, 300, 'normal', 0, 0, 0, datetime('now'));
