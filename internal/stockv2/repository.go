@@ -146,6 +146,58 @@ CREATE TABLE IF NOT EXISTS stockv2_instruments (
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
 );
+CREATE TABLE IF NOT EXISTS stockv2_stock_profiles (
+    symbol TEXT PRIMARY KEY,
+    market TEXT NOT NULL,
+    instrument_type TEXT NOT NULL DEFAULT 'stock',
+    name TEXT NOT NULL,
+    aliases_json TEXT NOT NULL DEFAULT '[]',
+    industry TEXT,
+    sectors_json TEXT NOT NULL DEFAULT '[]',
+    concepts_json TEXT NOT NULL DEFAULT '[]',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    business_summary TEXT,
+    profile_text TEXT NOT NULL,
+    fund_type TEXT,
+    tracking_index TEXT,
+    theme TEXT,
+    constituent_hint TEXT,
+    profile_version INTEGER NOT NULL DEFAULT 1,
+    updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_news_events (
+    id TEXT PRIMARY KEY,
+    raw_news_id TEXT,
+    source TEXT NOT NULL,
+    external_id TEXT,
+    title TEXT NOT NULL,
+    summary TEXT,
+    content TEXT,
+    url TEXT,
+    quality_status TEXT,
+    dedupe_key TEXT,
+    link_status TEXT NOT NULL DEFAULT 'pending',
+    event_at DATETIME NOT NULL,
+    link_processed_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_news_link_candidates (
+    id TEXT PRIMARY KEY,
+    news_event_id TEXT NOT NULL,
+    raw_news_id TEXT,
+    symbol TEXT NOT NULL,
+    market TEXT,
+    instrument_name TEXT,
+    match_method TEXT NOT NULL,
+    score REAL NOT NULL DEFAULT 0,
+    reason TEXT,
+    matched_terms_json TEXT NOT NULL DEFAULT '[]',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    FOREIGN KEY (news_event_id) REFERENCES stockv2_news_events(id) ON DELETE CASCADE,
+    UNIQUE(news_event_id, symbol)
+);
 CREATE TABLE IF NOT EXISTS stockv2_portfolios (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -397,6 +449,16 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_market ON stockv2_instruments
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_type ON stockv2_instruments(instrument_type);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_industry ON stockv2_instruments(industry);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_status ON stockv2_instruments(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_market ON stockv2_stock_profiles(market);
+CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_type ON stockv2_stock_profiles(instrument_type);
+CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_updated_at ON stockv2_stock_profiles(updated_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_link_status ON stockv2_news_events(link_status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_raw_news_id ON stockv2_news_events(raw_news_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_event_at ON stockv2_news_events(event_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_event ON stockv2_news_link_candidates(news_event_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_raw_news ON stockv2_news_link_candidates(raw_news_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_score ON stockv2_news_link_candidates(score);
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolios_name ON stockv2_portfolios(name);
 CREATE INDEX IF NOT EXISTS idx_stockv2_holdings_portfolio_id ON stockv2_holdings(portfolio_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_holdings_symbol ON stockv2_holdings(symbol);
@@ -562,49 +624,23 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_raw_news_source ON stockv2_raw_news(sourc
 CREATE INDEX IF NOT EXISTS idx_stockv2_raw_news_status ON stockv2_raw_news(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_raw_news_fetched_at ON stockv2_raw_news(fetched_at);
 
-CREATE TABLE IF NOT EXISTS stockv2_news_events (
-    id TEXT PRIMARY KEY,
-    raw_news_id TEXT,
-    title TEXT NOT NULL,
-    summary TEXT,
-    snippet TEXT,
-    language TEXT,
-    source TEXT NOT NULL,
-    event_time DATETIME NOT NULL,
-    importance TEXT NOT NULL,
-    tags_json TEXT,
-    topics_json TEXT,
-    dedupe_key TEXT NOT NULL UNIQUE,
-    quality TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS stockv2_news_source_states (
+    source TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
-    created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL,
-    FOREIGN KEY (raw_news_id) REFERENCES stockv2_raw_news(id) ON DELETE SET NULL
+    cursor TEXT,
+    last_fetch_at DATETIME,
+    last_success_at DATETIME,
+    last_error_at DATETIME,
+    last_error TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    backoff_until DATETIME,
+    raw_news_count INTEGER NOT NULL DEFAULT 0,
+    news_event_count INTEGER NOT NULL DEFAULT 0,
+    link_candidate_count INTEGER NOT NULL DEFAULT 0,
+    updated_at DATETIME NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_raw_news_id ON stockv2_news_events(raw_news_id);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_source ON stockv2_news_events(source);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_status ON stockv2_news_events(status);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_event_time ON stockv2_news_events(event_time);
-
-CREATE TABLE IF NOT EXISTS stockv2_news_link_candidates (
-    id TEXT PRIMARY KEY,
-    news_event_id TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    market TEXT NOT NULL DEFAULT '',
-    match_method TEXT NOT NULL,
-    score REAL NOT NULL,
-    reason TEXT,
-    matched_terms_json TEXT,
-    status TEXT NOT NULL,
-    created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL,
-    FOREIGN KEY (news_event_id) REFERENCES stockv2_news_events(id) ON DELETE CASCADE
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_key
-    ON stockv2_news_link_candidates(news_event_id, symbol, market, match_method);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_event ON stockv2_news_link_candidates(news_event_id);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol, market);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_status ON stockv2_news_link_candidates(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_source_states_status ON stockv2_news_source_states(status);
 -- 内置监控任务默认配置(全部默认关闭,用户显式开启后才会周期执行)。
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('universe_update', 0, 3600, 'normal', 0, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('latest_quote_refresh', 0, 300, 'normal', 0, 0, 0, datetime('now'));

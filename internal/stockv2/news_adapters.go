@@ -27,7 +27,7 @@ type RawNewsAdapter interface {
 	FetchRawNews(ctx context.Context) ([]RequestCreateRawNews, error)
 }
 
-type NewsSourceFetchResult struct {
+type RawNewsSourceFetchResult struct {
 	Source       string           `json:"source"`
 	FetchedCount int              `json:"fetchedCount"`
 	StoredCount  int              `json:"storedCount"`
@@ -100,17 +100,17 @@ func (a *FinancialJuiceRawNewsAdapter) FetchRawNews(ctx context.Context) ([]Requ
 	return ParseFinancialJuiceRawNews(body, a.cfg.Now())
 }
 
-func (s *Service) FetchRawNewsFromSource(ctx context.Context, source string) (NewsSourceFetchResult, error) {
+func (s *Service) FetchRawNewsFromSource(ctx context.Context, source string) (RawNewsSourceFetchResult, error) {
 	adapter, err := s.rawNewsAdapter(ctx, source)
 	if err != nil {
-		return NewsSourceFetchResult{}, err
+		return RawNewsSourceFetchResult{}, err
 	}
 	// ponytail: English feeds are manual fetch adapters for now; add scheduling only after cadence and value are proven.
 	rawItems, err := adapter.FetchRawNews(ctx)
 	if err != nil {
-		return NewsSourceFetchResult{}, err
+		return RawNewsSourceFetchResult{}, err
 	}
-	result := NewsSourceFetchResult{
+	result := RawNewsSourceFetchResult{
 		Source:       adapter.Source(),
 		FetchedCount: len(rawItems),
 		FetchedAt:    time.Now(),

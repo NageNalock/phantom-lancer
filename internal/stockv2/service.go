@@ -25,6 +25,8 @@ type Service struct {
 
 	universeSource  *UniverseDataSource
 	dailyBarsSource *DailyBarsSource
+	newsAdapters    map[string]NewsSourceAdapter
+	newsLinker      NewsEventLinker
 
 	// Agent 执行相关
 	agentTaskPool     *agentTaskPool
@@ -40,11 +42,30 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 		httpClient:      httpClient,
 		universeSource:  NewUniverseDataSource(nil, httpClient),
 		dailyBarsSource: NewDailyBarsSource(nil, httpClient),
-		agentTaskPool:   newAgentTaskPool(defaultCleanupInterval),
+		newsAdapters: map[string]NewsSourceAdapter{
+			NewsSourceJin10: NewJin10NewsAdapterFromEnv(httpClient),
+		},
+		agentTaskPool: newAgentTaskPool(defaultCleanupInterval),
 		agentCodexCommand: func(ctx context.Context, args ...string) ([]byte, error) {
 			return exec.CommandContext(ctx, "codex", args...).CombinedOutput()
 		},
 	}
+}
+
+func (s *Service) WithNewsSourceAdapter(adapter NewsSourceAdapter) *Service {
+	if adapter == nil || strings.TrimSpace(adapter.SourceName()) == "" {
+		return s
+	}
+	if s.newsAdapters == nil {
+		s.newsAdapters = map[string]NewsSourceAdapter{}
+	}
+	s.newsAdapters[adapter.SourceName()] = adapter
+	return s
+}
+
+func (s *Service) WithNewsEventLinker(linker NewsEventLinker) *Service {
+	s.newsLinker = linker
+	return s
 }
 
 // AgentExecutor 是 Agent 执行器接口。
