@@ -1,6 +1,7 @@
 package images
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
@@ -98,6 +99,10 @@ func ParseCount(raw string) (int, error) {
 }
 
 func ValidateImageURL(rawURL string) error {
+	rawURL = strings.TrimSpace(rawURL)
+	if strings.HasPrefix(rawURL, "data:image/") {
+		return validateImageDataURL(rawURL)
+	}
 	if len(rawURL) > 4096 {
 		return errors.New("url is too long")
 	}
@@ -110,6 +115,28 @@ func ValidateImageURL(rawURL string) error {
 	}
 	if (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host == "" {
 		return errors.New("url host is required")
+	}
+	return nil
+}
+
+func validateImageDataURL(dataURL string) error {
+	parts := strings.SplitN(dataURL, ",", 2)
+	if len(parts) != 2 || !strings.Contains(parts[0], ";base64") {
+		return errors.New("data url is not base64 encoded")
+	}
+	mimeType := strings.TrimPrefix(strings.TrimSuffix(parts[0], ";base64"), "data:")
+	if !AllowedImageMime(mimeType) {
+		return errors.New("data url mime type must be jpeg, png, gif, or webp")
+	}
+	if len(parts[1]) > base64.StdEncoding.EncodedLen(MaxImageBytes) {
+		return fmt.Errorf("image data is larger than %d MB", MaxImageBytes>>20)
+	}
+	data, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return errors.New("data url is not valid base64")
+	}
+	if len(data) > MaxImageBytes {
+		return fmt.Errorf("image data is larger than %d MB", MaxImageBytes>>20)
 	}
 	return nil
 }

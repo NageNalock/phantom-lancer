@@ -2,6 +2,7 @@ package images
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,20 @@ import (
 )
 
 const onePixelPNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+
+func TestValidateImageURLKeepsRemoteLimitButAllowsDataURLBytes(t *testing.T) {
+	if err := ValidateImageURL("https://example.com/" + strings.Repeat("a", 4096)); err == nil {
+		t.Fatal("long remote URL should fail")
+	}
+	largeDataURL := "data:image/png;base64," + strings.Repeat("A", 4096)
+	if err := ValidateImageURL(largeDataURL); err != nil {
+		t.Fatalf("large data URL should be accepted by byte limit: %v", err)
+	}
+	tooLargeDataURL := "data:image/png;base64," + strings.Repeat("A", base64.StdEncoding.EncodedLen(MaxImageBytes)+4)
+	if err := ValidateImageURL(tooLargeDataURL); err == nil {
+		t.Fatal("oversized data URL should fail")
+	}
+}
 
 func TestValidateRequestModes(t *testing.T) {
 	tests := []struct {
