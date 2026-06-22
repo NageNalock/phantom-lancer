@@ -2,6 +2,7 @@ package stockv2
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 )
@@ -104,4 +105,112 @@ func TestInstrumentTypeRoundTrip(t *testing.T) {
 	if stock.InstrumentType != InstrumentTypeStock {
 		t.Fatalf("stock type = %q, want default %q", stock.InstrumentType, InstrumentTypeStock)
 	}
+}
+
+func TestStoreInitMigratesOldStockV2ColumnsBeforeIndexes(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "stockv2.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE stockv2_portfolios (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		);
+		CREATE TABLE stockv2_instruments (
+			id TEXT PRIMARY KEY,
+			symbol TEXT NOT NULL UNIQUE,
+			market TEXT NOT NULL,
+			name TEXT,
+			industry TEXT,
+			sector TEXT,
+			concepts TEXT,
+			list_date TEXT,
+			delist_date TEXT,
+			status TEXT DEFAULT 'active',
+			last_update_at DATETIME,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		);
+		CREATE TABLE stockv2_stock_profiles (
+			symbol TEXT PRIMARY KEY,
+			market TEXT NOT NULL,
+			name TEXT NOT NULL,
+			aliases_json TEXT NOT NULL DEFAULT '[]',
+			industry TEXT,
+			sectors_json TEXT NOT NULL DEFAULT '[]',
+			concepts_json TEXT NOT NULL DEFAULT '[]',
+			tags_json TEXT NOT NULL DEFAULT '[]',
+			business_summary TEXT,
+			profile_text TEXT NOT NULL,
+			fund_type TEXT,
+			tracking_index TEXT,
+			theme TEXT,
+			constituent_hint TEXT,
+			profile_version INTEGER NOT NULL DEFAULT 1,
+			updated_at DATETIME NOT NULL
+		);
+		CREATE TABLE stockv2_news_events (
+			id TEXT PRIMARY KEY,
+			source TEXT NOT NULL,
+			title TEXT NOT NULL,
+			link_status TEXT NOT NULL DEFAULT 'pending',
+			event_at DATETIME NOT NULL,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		);
+		CREATE TABLE stockv2_news_link_candidates (
+			id TEXT PRIMARY KEY,
+			news_event_id TEXT NOT NULL,
+			raw_news_id TEXT,
+			symbol TEXT NOT NULL,
+			market TEXT,
+			instrument_name TEXT,
+			match_method TEXT NOT NULL,
+			score REAL NOT NULL DEFAULT 0,
+			reason TEXT,
+			matched_terms_json TEXT NOT NULL DEFAULT '[]',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			UNIQUE(news_event_id, symbol)
+		);
+	`)
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("seed old schema: %v", err)
+	}
+	_ = db.Close()
+
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("new store should migrate old schema: %v", err)
+	}
+	defer store.Close()
+
+	for _, tc := range []struct {
+		table  string
+		column string
+	}{
+		{"stockv2_instruments", "instrument_type"},
+		{"stockv2_stock_profiles", "instrument_type"},
+		{"stockv2_news_link_candidates", "monitor_status"},
+		{"stockv2_news_link_candidates", "monitor_hit_id"},
+		{"stockv2_news_link_candidates", "monitored_at"},
+	} {
+		if !testColumnExists(t, store.db, tc.table, tc.column) {
+			t.Fatalf("%s.%s was not migrated", tc.table, tc.column)
+		}
+	}
+}
+
+func testColumnExists(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count); err != nil {
+		t.Fatalf("check column %s.%s: %v", table, column, err)
+	}
+	return count > 0
 }
