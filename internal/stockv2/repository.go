@@ -165,6 +165,39 @@ CREATE TABLE IF NOT EXISTS stockv2_stock_profiles (
     profile_version INTEGER NOT NULL DEFAULT 1,
     updated_at DATETIME NOT NULL
 );
+CREATE TABLE IF NOT EXISTS stockv2_news_events (
+    id TEXT PRIMARY KEY,
+    raw_news_id TEXT,
+    source TEXT NOT NULL,
+    external_id TEXT,
+    title TEXT NOT NULL,
+    summary TEXT,
+    content TEXT,
+    url TEXT,
+    quality_status TEXT,
+    dedupe_key TEXT,
+    link_status TEXT NOT NULL DEFAULT 'pending',
+    event_at DATETIME NOT NULL,
+    link_processed_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_news_link_candidates (
+    id TEXT PRIMARY KEY,
+    news_event_id TEXT NOT NULL,
+    raw_news_id TEXT,
+    symbol TEXT NOT NULL,
+    market TEXT,
+    instrument_name TEXT,
+    match_method TEXT NOT NULL,
+    score REAL NOT NULL DEFAULT 0,
+    reason TEXT,
+    matched_terms_json TEXT NOT NULL DEFAULT '[]',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    FOREIGN KEY (news_event_id) REFERENCES stockv2_news_events(id) ON DELETE CASCADE,
+    UNIQUE(news_event_id, symbol)
+);
 CREATE TABLE IF NOT EXISTS stockv2_portfolios (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -417,6 +450,13 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_status ON stockv2_instruments
 CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_market ON stockv2_stock_profiles(market);
 CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_type ON stockv2_stock_profiles(instrument_type);
 CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_updated_at ON stockv2_stock_profiles(updated_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_link_status ON stockv2_news_events(link_status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_raw_news_id ON stockv2_news_events(raw_news_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_event_at ON stockv2_news_events(event_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_event ON stockv2_news_link_candidates(news_event_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_raw_news ON stockv2_news_link_candidates(raw_news_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol);
+CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_score ON stockv2_news_link_candidates(score);
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolios_name ON stockv2_portfolios(name);
 CREATE INDEX IF NOT EXISTS idx_stockv2_holdings_portfolio_id ON stockv2_holdings(portfolio_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_holdings_symbol ON stockv2_holdings(symbol);
