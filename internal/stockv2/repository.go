@@ -480,7 +480,6 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_industry ON stockv2_instrumen
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_status ON stockv2_instruments(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_market ON stockv2_stock_profiles(market);
 CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_updated_at ON stockv2_stock_profiles(updated_at);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_event_at ON stockv2_news_events(event_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_event ON stockv2_news_link_candidates(news_event_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_score ON stockv2_news_link_candidates(score);
@@ -897,14 +896,32 @@ func (s *Store) init(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "stockv2_raw_news", "url", "TEXT"); err != nil {
 		return fmt.Errorf("add raw news url column: %w", err)
 	}
-	if err := s.ensureColumn(ctx, "stockv2_news_events", "raw_news_id", "TEXT"); err != nil {
-		return fmt.Errorf("add news event raw_news_id column: %w", err)
+	newsEventColumns := []struct {
+		name    string
+		colType string
+	}{
+		{"raw_news_id", "TEXT"},
+		{"external_id", "TEXT"},
+		{"summary", "TEXT"},
+		{"content", "TEXT"},
+		{"url", "TEXT"},
+		{"quality_status", "TEXT"},
+		{"dedupe_key", "TEXT"},
+		{"link_status", "TEXT NOT NULL DEFAULT 'pending'"},
+		{"event_at", "DATETIME"},
+		{"link_processed_at", "DATETIME"},
 	}
-	if err := s.ensureColumn(ctx, "stockv2_news_events", "link_status", "TEXT NOT NULL DEFAULT 'pending'"); err != nil {
-		return fmt.Errorf("add news event link_status column: %w", err)
+	for _, column := range newsEventColumns {
+		if err := s.ensureColumn(ctx, "stockv2_news_events", column.name, column.colType); err != nil {
+			return fmt.Errorf("add news event %s column: %w", column.name, err)
+		}
 	}
-	if err := s.ensureColumn(ctx, "stockv2_news_events", "link_processed_at", "DATETIME"); err != nil {
-		return fmt.Errorf("add news event link_processed_at column: %w", err)
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_news_events
+		SET event_at = COALESCE(NULLIF(event_at, ''), created_at, updated_at, datetime('now'))
+		WHERE event_at IS NULL OR event_at = ''
+	`); err != nil {
+		return fmt.Errorf("backfill news event event_at: %w", err)
 	}
 	if err := s.ensureColumn(ctx, "stockv2_news_link_candidates", "raw_news_id", "TEXT"); err != nil {
 		return fmt.Errorf("add news link candidate raw_news_id column: %w", err)
@@ -994,6 +1011,8 @@ func (s *Store) init(ctx context.Context) error {
 		    ON stockv2_news_events(raw_news_id);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_link_status
 		    ON stockv2_news_events(link_status);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_event_at
+		    ON stockv2_news_events(event_at);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_raw_news
 		    ON stockv2_news_link_candidates(raw_news_id);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_monitor_status

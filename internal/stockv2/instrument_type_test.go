@@ -157,7 +157,6 @@ func TestStoreInitMigratesOldStockV2ColumnsBeforeIndexes(t *testing.T) {
 			id TEXT PRIMARY KEY,
 			source TEXT NOT NULL,
 			title TEXT NOT NULL,
-			event_at DATETIME NOT NULL,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL
 		);
@@ -176,6 +175,8 @@ func TestStoreInitMigratesOldStockV2ColumnsBeforeIndexes(t *testing.T) {
 			updated_at DATETIME NOT NULL,
 			UNIQUE(news_event_id, symbol)
 		);
+		INSERT INTO stockv2_news_events (id, source, title, created_at, updated_at)
+		VALUES ('old-news-event', 'jin10', '旧消息', '2026-06-18 09:30:00', '2026-06-18 09:31:00');
 	`)
 	if err != nil {
 		_ = db.Close()
@@ -195,7 +196,15 @@ func TestStoreInitMigratesOldStockV2ColumnsBeforeIndexes(t *testing.T) {
 	}{
 		{"stockv2_instruments", "instrument_type"},
 		{"stockv2_stock_profiles", "instrument_type"},
+		{"stockv2_news_events", "raw_news_id"},
+		{"stockv2_news_events", "external_id"},
+		{"stockv2_news_events", "summary"},
+		{"stockv2_news_events", "content"},
+		{"stockv2_news_events", "url"},
+		{"stockv2_news_events", "quality_status"},
+		{"stockv2_news_events", "dedupe_key"},
 		{"stockv2_news_events", "link_status"},
+		{"stockv2_news_events", "event_at"},
 		{"stockv2_news_events", "link_processed_at"},
 		{"stockv2_news_link_candidates", "monitor_status"},
 		{"stockv2_news_link_candidates", "monitor_hit_id"},
@@ -204,6 +213,13 @@ func TestStoreInitMigratesOldStockV2ColumnsBeforeIndexes(t *testing.T) {
 		if !testColumnExists(t, store.db, tc.table, tc.column) {
 			t.Fatalf("%s.%s was not migrated", tc.table, tc.column)
 		}
+	}
+	var eventAt string
+	if err := store.db.QueryRow(`SELECT event_at FROM stockv2_news_events WHERE id = 'old-news-event'`).Scan(&eventAt); err != nil {
+		t.Fatalf("query migrated event_at: %v", err)
+	}
+	if eventAt == "" {
+		t.Fatal("event_at was not backfilled")
 	}
 }
 
