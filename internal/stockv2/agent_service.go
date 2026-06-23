@@ -1178,7 +1178,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 
 	// 判断成功还是失败
 	hasValidResult := submitted != nil && submitted.OutputType != "" &&
-		validOperationReviewOutputType(submitted.OutputType)
+		validAgentTaskOutputType(run.TaskType, submitted.OutputType)
 
 	if execErr != nil && !hasValidResult {
 		// 失败路径
@@ -1235,7 +1235,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 	ledger.RedactionSummary = redacted
 
 	// 更新 Review result(自动跑 guardrails)。先让闭环对象落地成功，再把 AgentRun 暴露为 completed。
-	if run.TriggerObjectType == "operation_review" && run.TriggerObjectID != "" {
+	if run.TaskType == AgentTaskTypeOperationReview && run.TriggerObjectType == "operation_review" && run.TriggerObjectID != "" {
 		reviewID := run.TriggerObjectID
 		saveReq := RequestSaveOperationReviewResult{
 			OutputType:    submitted.OutputType,
@@ -1258,6 +1258,23 @@ func (s *Service) finalizeAgentRunWithOutput(
 			return
 		}
 	}
+	if run.TaskType == AgentTaskTypeStockProfileSummary && run.TriggerObjectType == "stock_profile" && run.TriggerObjectID != "" {
+		modelName := s.agentRunModelName(ctx, run)
+		if _, err := s.applyStockProfileEnhancementResult(ctx, run.TriggerObjectID, submitted.Result, modelName, submitted.Confidence); err != nil {
+			run.Status = AgentRunStatusFailed
+			run.ErrorMessage = safelog.Text("save stock profile enhancement failed: "+err.Error(), 500)
+			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
+				s.log.Warn("finalize: update run after stock profile save failed", "run_id", runID, "error", updateErr)
+			}
+			if s.log != nil {
+				s.log.Warn("finalize: save stock profile enhancement failed", "run_id", runID, "symbol", run.TriggerObjectID, "error", err)
+			}
+			if _, ledgerErr := s.store.UpdateAgentDecisionLedger(ctx, ledger); ledgerErr != nil && s.log != nil {
+				s.log.Warn("finalize: update ledger after stock profile save failed", "run_id", runID, "error", ledgerErr)
+			}
+			return
+		}
+	}
 
 	if _, err := s.store.UpdateAgentDecisionLedger(ctx, ledger); err != nil && s.log != nil {
 		s.log.Warn("finalize: update ledger failed", "run_id", runID, "error", err)
@@ -1265,6 +1282,14 @@ func (s *Service) finalizeAgentRunWithOutput(
 	if _, err := s.store.UpdateAgentRun(ctx, run); err != nil && s.log != nil {
 		s.log.Warn("finalize: update run failed", "run_id", runID, "error", err)
 	}
+}
+
+func (s *Service) agentRunModelName(ctx context.Context, run AgentRun) string {
+	model, err := s.store.GetAgentModelProfile(ctx, run.ModelID)
+	if err == nil && strings.TrimSpace(model.ModelName) != "" {
+		return model.ModelName
+	}
+	return strings.TrimSpace(run.ModelID)
 }
 
 // validOperationReviewOutputType 在 review_service.go 中定义

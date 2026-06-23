@@ -132,7 +132,7 @@ func (p *agentTaskPool) mcpToolsList(params json.RawMessage) (any, *mcpError) {
 						"properties": map[string]any{
 							"outputType": map[string]any{
 								"type":        "string",
-								"enum":        []string{"trade_signal", "proposed_operation", "strategy_patch", "ignore", "continue_monitoring"},
+								"enum":        []string{"trade_signal", "proposed_operation", "strategy_patch", "ignore", "continue_monitoring", "stock_profile_summary"},
 								"description": "The type of output result.",
 							},
 							"resultSummary": map[string]any{
@@ -201,7 +201,7 @@ func (p *agentTaskPool) mcpSubmitResult(args json.RawMessage) (any, *mcpError) {
 	if params.Result.OutputType == "" {
 		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "result.outputType is required"}
 	}
-	if !validOperationReviewOutputType(params.Result.OutputType) {
+	if !validAgentTaskOutputType(params.TaskType, params.Result.OutputType) {
 		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "invalid result.outputType"}
 	}
 

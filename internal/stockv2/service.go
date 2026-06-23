@@ -73,6 +73,7 @@ func (s *Service) WithNewsEventLinker(linker NewsEventLinker) *Service {
 // AgentExecutor 是 Agent 执行器接口。
 type AgentExecutor interface {
 	ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName string) (*AgentExecutorOutput, error)
+	ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error)
 }
 
 // WithCodexCLIExecutor 注入 Codex CLI 执行器。
@@ -663,7 +664,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 				continue
 			}
 
-			if err := s.store.UpsertInstrument(ctx, inst); err != nil {
+			if err := s.upsertInstrumentWithProfile(ctx, inst); err != nil {
 				s.log.Error("save instrument failed", "symbol", inst.Symbol, "error", err)
 				failedItems = append(failedItems, UpdateFailure{
 					Symbol: sym,

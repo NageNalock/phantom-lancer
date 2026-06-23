@@ -2,6 +2,8 @@ package stockv2
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -15,7 +17,7 @@ func (s *Service) BuildStockProfile(ctx context.Context, symbol string) (StockPr
 	if err != nil {
 		return StockProfile{}, err
 	}
-	profile := buildStockProfileFromInstrument(instrument)
+	profile := s.stockProfileFromInstrument(ctx, instrument)
 	return s.store.UpsertStockProfile(ctx, profile)
 }
 
@@ -35,7 +37,7 @@ func (s *Service) RebuildStockProfiles(ctx context.Context) (RebuildStockProfile
 			break
 		}
 		for _, instrument := range instruments {
-			if _, err := s.store.UpsertStockProfile(ctx, buildStockProfileFromInstrument(instrument)); err != nil {
+			if _, err := s.store.UpsertStockProfile(ctx, s.stockProfileFromInstrument(ctx, instrument)); err != nil {
 				result.Failed++
 				result.FailedItems = append(result.FailedItems, UpdateFailure{
 					Symbol: instrument.Symbol,
@@ -73,6 +75,163 @@ func (s *Service) CountStockProfiles(ctx context.Context, filter StockProfileLis
 	return s.store.CountStockProfiles(ctx, filter)
 }
 
+func (s *Service) RunAgentStockProfileSummary(ctx context.Context, symbol string, requestedBy string) (AgentRun, error) {
+	if s.agentExecutor == nil {
+		return AgentRun{}, ErrAgentExecutorUnavailable
+	}
+	profile, err := s.BuildStockProfile(ctx, symbol)
+	if err != nil {
+		return AgentRun{}, err
+	}
+	taskProfile, err := s.store.GetAgentTaskProfileByType(ctx, AgentTaskTypeStockProfileSummary)
+	if err != nil {
+		return AgentRun{}, err
+	}
+	model, err := s.resolveModel(ctx, taskProfile)
+	if err != nil {
+		profile.AIProfileStatus = StockProfileAIStatusNotConfigured
+		profile.AIProfileError = err.Error()
+		_, _ = s.store.UpsertStockProfile(ctx, profile)
+		return AgentRun{}, err
+	}
+	inputArtifact, _ := json.Marshal(map[string]any{
+		"task":    AgentTaskTypeStockProfileSummary,
+		"profile": profile,
+	})
+	run, ledger, err := s.CreateAgentRunRecord(ctx, AgentRunRecordParams{
+		TaskType:             AgentTaskTypeStockProfileSummary,
+		ProviderID:           model.ProviderID,
+		ModelID:              model.ID,
+		TriggerObjectType:    "stock_profile",
+		TriggerObjectID:      profile.Symbol,
+		RequestedBy:          requestedBy,
+		InputSummary:         fmt.Sprintf("stock_profile_summary symbol=%s market=%s name=%s", profile.Symbol, profile.Market, profile.Name),
+		InputArtifactSummary: string(inputArtifact),
+	})
+	if err != nil {
+		return AgentRun{}, err
+	}
+	go s.startStockProfileAgentRunAsync(context.Background(), run, ledger, profile, model.ModelName)
+	return run, nil
+}
+
+func (s *Service) startStockProfileAgentRunAsync(ctx context.Context, run AgentRun, ledger AgentDecisionLedger, profile StockProfile, modelName string) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("panic: %v", r))
+		}
+	}()
+	if s.agentExecutor == nil {
+		s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("no executor configured"))
+		return
+	}
+	running := run
+	running.Status = AgentRunStatusRunning
+	if _, err := s.store.UpdateAgentRun(ctx, running); err != nil && s.log != nil {
+		s.log.Warn("update stock profile agent run to running failed", "run_id", run.ID, "error", err)
+	}
+	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
+	execOutput, execErr := s.agentExecutor.ExecuteStockProfileSummary(ctx, taskID, profile, modelName)
+	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, execOutput, execErr)
+}
+
+func (s *Service) applyStockProfileEnhancementResult(ctx context.Context, symbol string, result map[string]any, modelName string, confidence float64) (StockProfile, error) {
+	profile, err := s.store.GetStockProfile(ctx, strings.TrimSpace(symbol))
+	if err != nil {
+		return StockProfile{}, err
+	}
+	if len(result) == 0 {
+		profile.AIProfileStatus = StockProfileAIStatusFailed
+		profile.AIProfileError = ErrInvalidStockProfileEnhancement.Error()
+		_, _ = s.store.UpsertStockProfile(ctx, profile)
+		return StockProfile{}, ErrInvalidStockProfileEnhancement
+	}
+	profile.BusinessSummaryZh = firstProfileResultString(result, "summaryZh", "businessSummaryZh")
+	if profile.BusinessSummaryZh == "" {
+		profile.BusinessSummaryZh = profile.BusinessSummary
+	}
+	profile.BusinessSummaryEn = firstProfileResultString(result, "summaryEn", "businessSummaryEn")
+	profile.AliasesZh = appendProfileTerms(profile.AliasesZh, profileResultStrings(result, "aliasesZh", "aliasZh")...)
+	profile.AliasesEn = appendProfileTerms(profile.AliasesEn, profileResultStrings(result, "aliasesEn", "aliasEn")...)
+	profile.KeywordsZh = appendProfileTerms(profile.KeywordsZh, profileResultStrings(result, "keywordsZh", "keywordZh")...)
+	profile.KeywordsEn = appendProfileTerms(profile.KeywordsEn, profileResultStrings(result, "keywordsEn", "keywordEn")...)
+	profile.BusinessLinesZh = appendProfileTerms(profile.BusinessLinesZh, profileResultStrings(result, "businessLinesZh", "businessLineZh")...)
+	profile.BusinessLinesEn = appendProfileTerms(profile.BusinessLinesEn, profileResultStrings(result, "businessLinesEn", "businessLineEn")...)
+	profile.RiskTagsZh = appendProfileTerms(profile.RiskTagsZh, profileResultStrings(result, "riskTagsZh", "riskTagZh")...)
+	profile.RiskTagsEn = appendProfileTerms(profile.RiskTagsEn, profileResultStrings(result, "riskTagsEn", "riskTagEn")...)
+	profile.Aliases = appendProfileTerms(profile.Aliases, profile.AliasesZh...)
+	profile.Aliases = appendProfileTerms(profile.Aliases, profile.AliasesEn...)
+	profile.ProfileTextZh = buildProfileTextZh(profile)
+	profile.ProfileTextEn = buildProfileTextEn(profile)
+	profile.ProfileText = buildProfileText(profile)
+	profile.AIProfileStatus = StockProfileAIStatusReady
+	profile.AIProfileModel = modelName
+	profile.AIProfileConfidence = confidence
+	profile.AIProfileError = ""
+	profile.AIProfileUpdatedAt = time.Now()
+	return s.store.UpsertStockProfile(ctx, profile)
+}
+
+func firstProfileResultString(result map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(stringFromAny(result[key])); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func profileResultStrings(result map[string]any, keys ...string) []string {
+	for _, key := range keys {
+		if items := stringsFromAny(result[key]); len(items) > 0 {
+			return items
+		}
+	}
+	return nil
+}
+
+func stringsFromAny(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return cleanProfileTerms(typed)
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(stringFromAny(item)); text != "" {
+				out = append(out, text)
+			}
+		}
+		return cleanProfileTerms(out)
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return nil
+		}
+		return cleanProfileTerms(strings.FieldsFunc(typed, func(r rune) bool {
+			return r == ',' || r == '，' || r == ';' || r == '；' || r == '、' || r == '\n'
+		}))
+	default:
+		return nil
+	}
+}
+
+func (s *Service) upsertInstrumentWithProfile(ctx context.Context, instrument StockV2Instrument) error {
+	if err := s.store.UpsertInstrument(ctx, instrument); err != nil {
+		return err
+	}
+	_, err := s.store.UpsertStockProfile(ctx, s.stockProfileFromInstrument(ctx, instrument))
+	return err
+}
+
+func (s *Service) stockProfileFromInstrument(ctx context.Context, instrument StockV2Instrument) StockProfile {
+	base := buildStockProfileFromInstrument(instrument)
+	existing, err := s.store.GetStockProfile(ctx, base.Symbol)
+	if err != nil {
+		return base
+	}
+	// ponytail: 没有 profile_text_hash 前先保留已有 AI 增强;后续有真实变更检测再置 stale。
+	return mergeStockProfileAIFields(base, existing)
+}
+
 func buildStockProfileFromInstrument(instrument StockV2Instrument) StockProfile {
 	instrument.InstrumentType = normalizeInstrumentType(instrument.InstrumentType)
 	aliases := cleanProfileTerms([]string{
@@ -86,16 +245,21 @@ func buildStockProfileFromInstrument(instrument StockV2Instrument) StockProfile 
 	tags := cleanProfileTerms([]string{instrument.Industry, instrument.Sector})
 
 	profile := StockProfile{
-		Symbol:         strings.TrimSpace(instrument.Symbol),
-		Market:         strings.TrimSpace(instrument.Market),
-		InstrumentType: instrument.InstrumentType,
-		Name:           strings.TrimSpace(instrument.Name),
-		Aliases:        aliases,
-		Industry:       strings.TrimSpace(instrument.Industry),
-		Sectors:        sectors,
-		Concepts:       concepts,
-		Tags:           tags,
-		ProfileVersion: 1,
+		Symbol:          strings.TrimSpace(instrument.Symbol),
+		Market:          strings.TrimSpace(instrument.Market),
+		InstrumentType:  instrument.InstrumentType,
+		Name:            strings.TrimSpace(instrument.Name),
+		Aliases:         aliases,
+		AliasesZh:       cleanProfileTerms([]string{strings.TrimSpace(instrument.Name)}),
+		AliasesEn:       cleanProfileTerms([]string{instrument.Symbol, instrument.Market + instrument.Symbol, instrument.Symbol + "." + instrument.Market}),
+		Industry:        strings.TrimSpace(instrument.Industry),
+		Sectors:         sectors,
+		Concepts:        concepts,
+		Tags:            tags,
+		KeywordsZh:      cleanProfileTerms(append([]string{instrument.Industry, instrument.Sector}, instrument.Concepts...)),
+		KeywordsEn:      cleanProfileTerms([]string{instrument.Symbol, instrument.Market}),
+		ProfileVersion:  2,
+		AIProfileStatus: StockProfileAIStatusMissing,
 	}
 	if profile.Name == "" {
 		profile.Name = profile.Symbol
@@ -104,8 +268,37 @@ func buildStockProfileFromInstrument(instrument StockV2Instrument) StockProfile 
 		enrichExchangeFundProfile(&profile)
 	}
 	profile.BusinessSummary = buildProfileSummary(profile)
+	profile.BusinessSummaryZh = profile.BusinessSummary
+	profile.ProfileTextZh = buildProfileTextZh(profile)
+	profile.ProfileTextEn = buildProfileTextEn(profile)
 	profile.ProfileText = buildProfileText(profile)
 	return profile
+}
+
+func mergeStockProfileAIFields(base, existing StockProfile) StockProfile {
+	base.BusinessSummaryEn = existing.BusinessSummaryEn
+	base.BusinessLinesZh = existing.BusinessLinesZh
+	base.BusinessLinesEn = existing.BusinessLinesEn
+	base.RiskTagsZh = existing.RiskTagsZh
+	base.RiskTagsEn = existing.RiskTagsEn
+	base.AIProfileStatus = existing.AIProfileStatus
+	base.AIProfileModel = existing.AIProfileModel
+	base.AIProfileConfidence = existing.AIProfileConfidence
+	base.AIProfileError = existing.AIProfileError
+	base.AIProfileUpdatedAt = existing.AIProfileUpdatedAt
+	base.AliasesZh = appendProfileTerms(base.AliasesZh, existing.AliasesZh...)
+	base.AliasesEn = appendProfileTerms(base.AliasesEn, existing.AliasesEn...)
+	base.KeywordsZh = appendProfileTerms(base.KeywordsZh, existing.KeywordsZh...)
+	base.KeywordsEn = appendProfileTerms(base.KeywordsEn, existing.KeywordsEn...)
+	if existing.BusinessSummaryZh != "" {
+		base.BusinessSummaryZh = existing.BusinessSummaryZh
+	}
+	base.Aliases = appendProfileTerms(base.Aliases, base.AliasesZh...)
+	base.Aliases = appendProfileTerms(base.Aliases, base.AliasesEn...)
+	base.ProfileTextZh = buildProfileTextZh(base)
+	base.ProfileTextEn = buildProfileTextEn(base)
+	base.ProfileText = buildProfileText(base)
+	return base
 }
 
 func cleanProfileTerms(items []string) []string {
@@ -145,11 +338,16 @@ func enrichExchangeFundProfile(profile *StockProfile) {
 	profile.Tags = appendProfileTerms(profile.Tags, "场内基金")
 	if strings.Contains(upperName, "ETF") {
 		profile.FundType = "ETF"
-		profile.Tags = appendProfileTerms(profile.Tags, "ETF", strings.TrimSpace(strings.ReplaceAll(name, "ETF", "")))
+		themeName := strings.TrimSpace(strings.ReplaceAll(name, "ETF", ""))
+		profile.Tags = appendProfileTerms(profile.Tags, "ETF", themeName)
+		profile.AliasesEn = appendProfileTerms(profile.AliasesEn, "ETF")
+		profile.KeywordsEn = appendProfileTerms(profile.KeywordsEn, "ETF", themeName)
 	}
 	if strings.Contains(upperName, "LOF") {
 		profile.FundType = "LOF"
 		profile.Tags = appendProfileTerms(profile.Tags, "LOF")
+		profile.AliasesEn = appendProfileTerms(profile.AliasesEn, "LOF")
+		profile.KeywordsEn = appendProfileTerms(profile.KeywordsEn, "LOF")
 	}
 
 	// ponytail: ETF 画像先用名称关键词做高召回种子;等有正式基金画像源后替换这里的规则表。
@@ -191,6 +389,8 @@ func enrichExchangeFundProfile(profile *StockProfile) {
 		profile.ConstituentHint = "关注 " + profile.Theme + " 主题相关成分股"
 	}
 	profile.Aliases = appendProfileTerms(profile.Aliases, profile.FundType, profile.TrackingIndex, profile.Theme)
+	profile.AliasesZh = appendProfileTerms(profile.AliasesZh, profile.FundType, profile.TrackingIndex, profile.Theme)
+	profile.KeywordsZh = appendProfileTerms(profile.KeywordsZh, profile.FundType, profile.TrackingIndex, profile.Theme, profile.ConstituentHint)
 }
 
 func buildProfileSummary(profile StockProfile) string {
@@ -225,6 +425,20 @@ func buildProfileSummary(profile StockProfile) string {
 }
 
 func buildProfileText(profile StockProfile) string {
+	terms := []string{profile.ProfileTextZh, profile.ProfileTextEn}
+	terms = append(terms, profile.Aliases...)
+	terms = append(terms, profile.AliasesZh...)
+	terms = append(terms, profile.AliasesEn...)
+	terms = append(terms, profile.KeywordsZh...)
+	terms = append(terms, profile.KeywordsEn...)
+	terms = append(terms, profile.BusinessLinesZh...)
+	terms = append(terms, profile.BusinessLinesEn...)
+	terms = append(terms, profile.RiskTagsZh...)
+	terms = append(terms, profile.RiskTagsEn...)
+	return strings.Join(cleanProfileTerms(terms), " ")
+}
+
+func buildProfileTextZh(profile StockProfile) string {
 	terms := []string{
 		profile.Symbol,
 		profile.Market,
@@ -242,5 +456,25 @@ func buildProfileText(profile StockProfile) string {
 	terms = append(terms, profile.Sectors...)
 	terms = append(terms, profile.Concepts...)
 	terms = append(terms, profile.Tags...)
+	terms = append(terms, profile.AliasesZh...)
+	terms = append(terms, profile.KeywordsZh...)
+	terms = append(terms, profile.BusinessLinesZh...)
+	terms = append(terms, profile.RiskTagsZh...)
+	return strings.Join(cleanProfileTerms(terms), " ")
+}
+
+func buildProfileTextEn(profile StockProfile) string {
+	terms := []string{
+		profile.Symbol,
+		profile.Market,
+		profile.Market + profile.Symbol,
+		profile.Symbol + "." + profile.Market,
+		profile.BusinessSummaryEn,
+		profile.FundType,
+	}
+	terms = append(terms, profile.AliasesEn...)
+	terms = append(terms, profile.KeywordsEn...)
+	terms = append(terms, profile.BusinessLinesEn...)
+	terms = append(terms, profile.RiskTagsEn...)
 	return strings.Join(cleanProfileTerms(terms), " ")
 }

@@ -37,6 +37,7 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/profiles", s.handleStockV2ListStockProfiles)
 	mux.HandleFunc("GET /api/stockv2/profiles/{symbol}", s.handleStockV2GetStockProfile)
 	mux.HandleFunc("POST /api/stockv2/profiles/{symbol}/build", s.handleStockV2BuildStockProfile)
+	mux.HandleFunc("POST /api/stockv2/profiles/{symbol}/run-agent", s.handleStockV2RunStockProfileAgent)
 	mux.HandleFunc("POST /api/stockv2/profiles/rebuild", s.handleStockV2RebuildStockProfiles)
 
 	// 最新行情

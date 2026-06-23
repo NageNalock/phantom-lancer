@@ -158,6 +158,23 @@ CREATE TABLE IF NOT EXISTS stockv2_stock_profiles (
     tags_json TEXT NOT NULL DEFAULT '[]',
     business_summary TEXT,
     profile_text TEXT NOT NULL,
+    aliases_zh_json TEXT NOT NULL DEFAULT '[]',
+    aliases_en_json TEXT NOT NULL DEFAULT '[]',
+    keywords_zh_json TEXT NOT NULL DEFAULT '[]',
+    keywords_en_json TEXT NOT NULL DEFAULT '[]',
+    business_summary_zh TEXT,
+    business_summary_en TEXT,
+    business_lines_zh_json TEXT NOT NULL DEFAULT '[]',
+    business_lines_en_json TEXT NOT NULL DEFAULT '[]',
+    risk_tags_zh_json TEXT NOT NULL DEFAULT '[]',
+    risk_tags_en_json TEXT NOT NULL DEFAULT '[]',
+    profile_text_zh TEXT,
+    profile_text_en TEXT,
+    ai_profile_status TEXT NOT NULL DEFAULT 'missing',
+    ai_profile_model TEXT,
+    ai_profile_confidence REAL NOT NULL DEFAULT 0,
+    ai_profile_error TEXT,
+    ai_profile_updated_at DATETIME,
     fund_type TEXT,
     tracking_index TEXT,
     theme TEXT,
@@ -781,6 +798,33 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_type ON stockv2_stock_profiles(instrument_type)`); err != nil {
 		return fmt.Errorf("create stock profile type index: %w", err)
+	}
+	profileColumns := []struct {
+		name    string
+		colType string
+	}{
+		{"aliases_zh_json", "TEXT NOT NULL DEFAULT '[]'"},
+		{"aliases_en_json", "TEXT NOT NULL DEFAULT '[]'"},
+		{"keywords_zh_json", "TEXT NOT NULL DEFAULT '[]'"},
+		{"keywords_en_json", "TEXT NOT NULL DEFAULT '[]'"},
+		{"business_summary_zh", "TEXT"},
+		{"business_summary_en", "TEXT"},
+		{"business_lines_zh_json", "TEXT NOT NULL DEFAULT '[]'"},
+		{"business_lines_en_json", "TEXT NOT NULL DEFAULT '[]'"},
+		{"risk_tags_zh_json", "TEXT NOT NULL DEFAULT '[]'"},
+		{"risk_tags_en_json", "TEXT NOT NULL DEFAULT '[]'"},
+		{"profile_text_zh", "TEXT"},
+		{"profile_text_en", "TEXT"},
+		{"ai_profile_status", "TEXT NOT NULL DEFAULT 'missing'"},
+		{"ai_profile_model", "TEXT"},
+		{"ai_profile_confidence", "REAL NOT NULL DEFAULT 0"},
+		{"ai_profile_error", "TEXT"},
+		{"ai_profile_updated_at", "DATETIME"},
+	}
+	for _, column := range profileColumns {
+		if err := s.ensureColumn(ctx, "stockv2_stock_profiles", column.name, column.colType); err != nil {
+			return fmt.Errorf("add stock profile %s column: %w", column.name, err)
+		}
 	}
 
 	// 增量迁移：给 stockv2_update_jobs 加 failed_items 列

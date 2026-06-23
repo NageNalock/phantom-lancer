@@ -78,7 +78,28 @@ func (e *codexCLIExecutor) ExecuteOperationReview(
 
 	// 构建 prompt
 	prompt := buildOperationReviewPrompt(taskID, pack, e.mcpURL)
+	return e.executePrompt(ctx, taskID, prompt, modelName)
+}
 
+func (e *codexCLIExecutor) ExecuteStockProfileSummary(
+	ctx context.Context,
+	taskID string,
+	profile StockProfile,
+	modelName string,
+) (*AgentExecutorOutput, error) {
+	if e.binary == "" {
+		return nil, fmt.Errorf("codex binary path not configured")
+	}
+	prompt := buildStockProfileSummaryPrompt(taskID, profile, e.mcpURL)
+	return e.executePrompt(ctx, taskID, prompt, modelName)
+}
+
+func (e *codexCLIExecutor) executePrompt(
+	ctx context.Context,
+	taskID string,
+	prompt string,
+	modelName string,
+) (*AgentExecutorOutput, error) {
 	// 超时控制
 	timeout := execDefaultTimeout
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -466,6 +487,50 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 		return result[:6000] + "\n... [truncated]\n...\n" + result[len(result)-2000:]
 	}
 
+	return b.String()
+}
+
+func buildStockProfileSummaryPrompt(taskID string, profile StockProfile, mcpURL string) string {
+	var b strings.Builder
+	b.WriteString("# Stock Profile Bilingual Enhancement Task\n\n")
+	b.WriteString("System role: you enrich a stock/fund profile for high-recall Chinese and English news matching.\n")
+	b.WriteString("You are NOT making trading recommendations. Do not infer portfolio, position, or user-specific facts.\n")
+	b.WriteString("Use only the provided profile fields. If information is missing, keep the field concise instead of inventing facts.\n")
+	b.WriteString("Submit your final result using the stock_agent.submit_result MCP tool.\n\n")
+
+	b.WriteString("## Task Information\n\n")
+	fmt.Fprintf(&b, "- Task ID: `%s`\n", taskID)
+	fmt.Fprintf(&b, "- Task Type: `%s`\n", AgentTaskTypeStockProfileSummary)
+	if mcpURL != "" {
+		fmt.Fprintf(&b, "- MCP Server: `%s`\n", mcpURL)
+	}
+	b.WriteString("\n")
+
+	b.WriteString("## Base Profile\n\n```json\n")
+	raw, _ := json.MarshalIndent(profile, "", "  ")
+	b.Write(raw)
+	b.WriteString("\n```\n\n")
+
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("You must submit exactly ONE result using stock_agent.submit_result.\n")
+	b.WriteString("Use outputType `stock_profile_summary` and return this result object:\n")
+	b.WriteString("```json\n")
+	b.WriteString("{\"summaryZh\":\"...\",\"summaryEn\":\"...\",\"aliasesZh\":[],\"aliasesEn\":[],\"keywordsZh\":[],\"keywordsEn\":[],\"businessLinesZh\":[],\"businessLinesEn\":[],\"riskTagsZh\":[],\"riskTagsEn\":[],\"sourceNotes\":[]}\n")
+	b.WriteString("```\n")
+	b.WriteString("- `aliasesEn` should include common English company/fund names, ticker forms, abbreviations, and obvious transliterations when safe.\n")
+	b.WriteString("- `keywordsEn` should translate industry/concept/theme terms for matching English news.\n")
+	b.WriteString("- Keep every list high-recall but not noisy; prefer 5-20 useful terms per list.\n")
+	b.WriteString("- Put uncertain translation choices in `sourceNotes`; do not pretend they are verified official names.\n\n")
+	b.WriteString("Example submit_result shape:\n")
+	b.WriteString("```json\n")
+	b.WriteString("{\"taskID\":\"<TASK_ID>\",\"taskType\":\"stock_profile_summary\",\"result\":{\"outputType\":\"stock_profile_summary\",\"resultSummary\":\"...\",\"result\":{\"summaryZh\":\"...\",\"summaryEn\":\"...\",\"aliasesZh\":[],\"aliasesEn\":[],\"keywordsZh\":[],\"keywordsEn\":[],\"businessLinesZh\":[],\"businessLinesEn\":[],\"riskTagsZh\":[],\"riskTagsEn\":[],\"sourceNotes\":[]},\"confidence\":0.75}}\n")
+	b.WriteString("```\n")
+
+	const maxPromptLen = 8000
+	if b.Len() > maxPromptLen {
+		result := b.String()
+		return result[:6000] + "\n... [truncated]\n...\n" + result[len(result)-2000:]
+	}
 	return b.String()
 }
 

@@ -1092,14 +1092,14 @@ export function stockV2AgentTaskTypeLabel(taskType?: string): string {
     case "opportunity_discovery": return "机会发现";
     case "news_event_review": return "消息面研判";
     case "portfolio_risk_review": return "组合风险审查";
-    case "stock_profile_summary": return "股票画像摘要";
+    case "stock_profile_summary": return "股票画像生成";
     case "bull_bear_debate": return "多空辩论";
     default: return taskType || "-";
   }
 }
 
 export function stockV2AgentTaskConfigurable(taskType?: string): boolean {
-  return taskType === "operation_review";
+  return taskType === "operation_review" || taskType === "stock_profile_summary";
 }
 
 export function stockV2AgentRunStatusLabel(status?: string): string {

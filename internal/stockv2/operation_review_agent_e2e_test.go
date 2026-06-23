@@ -387,6 +387,26 @@ func (f fakeOperationReviewExecutor) ExecuteOperationReview(ctx context.Context,
 	}, f.execErr
 }
 
+func (f fakeOperationReviewExecutor) ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error) {
+	result := f.result
+	if result == nil {
+		result = map[string]any{"summaryZh": profile.BusinessSummary, "summaryEn": profile.Name}
+	}
+	if f.submit {
+		_, _ = f.pool.submitResult(taskID, AgentTaskTypeStockProfileSummary, AgentTaskSubmittedResult{
+			OutputType:    AgentTaskTypeStockProfileSummary,
+			ResultSummary: f.summary,
+			Result:        result,
+			Confidence:    f.confidence,
+		})
+	}
+	return &AgentExecutorOutput{
+		StdoutTail: "fake profile stdout for " + profile.Symbol,
+		ExitCode:   0,
+		Duration:   time.Millisecond,
+	}, f.execErr
+}
+
 func mcpSubmitResultRequest(taskID, outputType, summary string, result map[string]any, confidence float64) []byte {
 	raw, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",

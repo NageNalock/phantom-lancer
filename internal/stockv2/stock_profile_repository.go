@@ -24,13 +24,26 @@ func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (S
 	sectorsJSON := marshalProfileStrings(profile.Sectors)
 	conceptsJSON := marshalProfileStrings(profile.Concepts)
 	tagsJSON := marshalProfileStrings(profile.Tags)
+	aliasesZhJSON := marshalProfileStrings(profile.AliasesZh)
+	aliasesEnJSON := marshalProfileStrings(profile.AliasesEn)
+	keywordsZhJSON := marshalProfileStrings(profile.KeywordsZh)
+	keywordsEnJSON := marshalProfileStrings(profile.KeywordsEn)
+	businessLinesZhJSON := marshalProfileStrings(profile.BusinessLinesZh)
+	businessLinesEnJSON := marshalProfileStrings(profile.BusinessLinesEn)
+	riskTagsZhJSON := marshalProfileStrings(profile.RiskTagsZh)
+	riskTagsEnJSON := marshalProfileStrings(profile.RiskTagsEn)
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO stockv2_stock_profiles (
 			symbol, market, instrument_type, name, aliases_json, industry, sectors_json,
 			concepts_json, tags_json, business_summary, profile_text, fund_type,
-			tracking_index, theme, constituent_hint, profile_version, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			tracking_index, theme, constituent_hint, profile_version,
+			aliases_zh_json, aliases_en_json, keywords_zh_json, keywords_en_json,
+			business_summary_zh, business_summary_en, business_lines_zh_json,
+			business_lines_en_json, risk_tags_zh_json, risk_tags_en_json,
+			profile_text_zh, profile_text_en, ai_profile_status, ai_profile_model,
+			ai_profile_confidence, ai_profile_error, ai_profile_updated_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(symbol) DO UPDATE SET
 			market = excluded.market,
 			instrument_type = excluded.instrument_type,
@@ -47,11 +60,33 @@ func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (S
 			theme = excluded.theme,
 			constituent_hint = excluded.constituent_hint,
 			profile_version = excluded.profile_version,
+			aliases_zh_json = excluded.aliases_zh_json,
+			aliases_en_json = excluded.aliases_en_json,
+			keywords_zh_json = excluded.keywords_zh_json,
+			keywords_en_json = excluded.keywords_en_json,
+			business_summary_zh = excluded.business_summary_zh,
+			business_summary_en = excluded.business_summary_en,
+			business_lines_zh_json = excluded.business_lines_zh_json,
+			business_lines_en_json = excluded.business_lines_en_json,
+			risk_tags_zh_json = excluded.risk_tags_zh_json,
+			risk_tags_en_json = excluded.risk_tags_en_json,
+			profile_text_zh = excluded.profile_text_zh,
+			profile_text_en = excluded.profile_text_en,
+			ai_profile_status = excluded.ai_profile_status,
+			ai_profile_model = excluded.ai_profile_model,
+			ai_profile_confidence = excluded.ai_profile_confidence,
+			ai_profile_error = excluded.ai_profile_error,
+			ai_profile_updated_at = excluded.ai_profile_updated_at,
 			updated_at = excluded.updated_at
 	`, profile.Symbol, profile.Market, profile.InstrumentType, profile.Name, aliasesJSON,
 		profile.Industry, sectorsJSON, conceptsJSON, tagsJSON, profile.BusinessSummary,
 		profile.ProfileText, profile.FundType, profile.TrackingIndex, profile.Theme,
-		profile.ConstituentHint, profile.ProfileVersion, profile.UpdatedAt)
+		profile.ConstituentHint, profile.ProfileVersion, aliasesZhJSON, aliasesEnJSON,
+		keywordsZhJSON, keywordsEnJSON, profile.BusinessSummaryZh, profile.BusinessSummaryEn,
+		businessLinesZhJSON, businessLinesEnJSON, riskTagsZhJSON, riskTagsEnJSON,
+		profile.ProfileTextZh, profile.ProfileTextEn, profile.AIProfileStatus, profile.AIProfileModel,
+		profile.AIProfileConfidence, profile.AIProfileError, nullableNewsTime(profile.AIProfileUpdatedAt),
+		profile.UpdatedAt)
 	if err != nil {
 		return StockProfile{}, wrapError(err, "upsert stock profile")
 	}
@@ -106,7 +141,16 @@ func stockProfileSelectSQL() string {
 		       COALESCE(industry,''), sectors_json, concepts_json, tags_json,
 		       COALESCE(business_summary,''), profile_text, COALESCE(fund_type,''),
 		       COALESCE(tracking_index,''), COALESCE(theme,''), COALESCE(constituent_hint,''),
-		       profile_version, updated_at
+		       profile_version,
+		       COALESCE(aliases_zh_json,'[]'), COALESCE(aliases_en_json,'[]'),
+		       COALESCE(keywords_zh_json,'[]'), COALESCE(keywords_en_json,'[]'),
+		       COALESCE(business_summary_zh,''), COALESCE(business_summary_en,''),
+		       COALESCE(business_lines_zh_json,'[]'), COALESCE(business_lines_en_json,'[]'),
+		       COALESCE(risk_tags_zh_json,'[]'), COALESCE(risk_tags_en_json,'[]'),
+		       COALESCE(profile_text_zh,''), COALESCE(profile_text_en,''),
+		       COALESCE(ai_profile_status,'missing'), COALESCE(ai_profile_model,''),
+		       COALESCE(ai_profile_confidence,0), COALESCE(ai_profile_error,''),
+		       ai_profile_updated_at, updated_at
 		FROM stockv2_stock_profiles`
 }
 
@@ -139,6 +183,9 @@ type stockProfileScanner interface {
 func scanStockProfile(scanner stockProfileScanner) (StockProfile, error) {
 	var profile StockProfile
 	var aliasesJSON, sectorsJSON, conceptsJSON, tagsJSON string
+	var aliasesZhJSON, aliasesEnJSON, keywordsZhJSON, keywordsEnJSON string
+	var businessLinesZhJSON, businessLinesEnJSON, riskTagsZhJSON, riskTagsEnJSON string
+	var aiProfileUpdatedAt sql.NullTime
 	if err := scanner.Scan(
 		&profile.Symbol,
 		&profile.Market,
@@ -156,6 +203,23 @@ func scanStockProfile(scanner stockProfileScanner) (StockProfile, error) {
 		&profile.Theme,
 		&profile.ConstituentHint,
 		&profile.ProfileVersion,
+		&aliasesZhJSON,
+		&aliasesEnJSON,
+		&keywordsZhJSON,
+		&keywordsEnJSON,
+		&profile.BusinessSummaryZh,
+		&profile.BusinessSummaryEn,
+		&businessLinesZhJSON,
+		&businessLinesEnJSON,
+		&riskTagsZhJSON,
+		&riskTagsEnJSON,
+		&profile.ProfileTextZh,
+		&profile.ProfileTextEn,
+		&profile.AIProfileStatus,
+		&profile.AIProfileModel,
+		&profile.AIProfileConfidence,
+		&profile.AIProfileError,
+		&aiProfileUpdatedAt,
 		&profile.UpdatedAt,
 	); err != nil {
 		return StockProfile{}, err
@@ -165,8 +229,22 @@ func scanStockProfile(scanner stockProfileScanner) (StockProfile, error) {
 	profile.Sectors = unmarshalProfileStrings(sectorsJSON)
 	profile.Concepts = unmarshalProfileStrings(conceptsJSON)
 	profile.Tags = unmarshalProfileStrings(tagsJSON)
+	profile.AliasesZh = unmarshalProfileStrings(aliasesZhJSON)
+	profile.AliasesEn = unmarshalProfileStrings(aliasesEnJSON)
+	profile.KeywordsZh = unmarshalProfileStrings(keywordsZhJSON)
+	profile.KeywordsEn = unmarshalProfileStrings(keywordsEnJSON)
+	profile.BusinessLinesZh = unmarshalProfileStrings(businessLinesZhJSON)
+	profile.BusinessLinesEn = unmarshalProfileStrings(businessLinesEnJSON)
+	profile.RiskTagsZh = unmarshalProfileStrings(riskTagsZhJSON)
+	profile.RiskTagsEn = unmarshalProfileStrings(riskTagsEnJSON)
+	if aiProfileUpdatedAt.Valid {
+		profile.AIProfileUpdatedAt = aiProfileUpdatedAt.Time
+	}
 	if profile.ProfileVersion <= 0 {
 		profile.ProfileVersion = 1
+	}
+	if profile.AIProfileStatus == "" {
+		profile.AIProfileStatus = StockProfileAIStatusMissing
 	}
 	return profile, nil
 }

@@ -423,5 +423,17 @@ func knownAgentTaskType(v string) bool {
 }
 
 func executableAgentTaskType(v string) bool {
-	return v == AgentTaskTypeOperationReview
+	return v == AgentTaskTypeOperationReview ||
+		v == AgentTaskTypeStockProfileSummary
+}
+
+func validAgentTaskOutputType(taskType, outputType string) bool {
+	switch taskType {
+	case AgentTaskTypeOperationReview:
+		return validOperationReviewOutputType(outputType)
+	case AgentTaskTypeStockProfileSummary:
+		return outputType == AgentTaskTypeStockProfileSummary
+	default:
+		return false
+	}
 }

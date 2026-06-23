@@ -635,3 +635,21 @@ func (f fakeDebugAgentExecutor) ExecuteOperationReview(ctx context.Context, task
 		RawTranscript: "debug stdout",
 	}, nil
 }
+
+func (f fakeDebugAgentExecutor) ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error) {
+	_, err := f.pool.submitResult(taskID, AgentTaskTypeStockProfileSummary, AgentTaskSubmittedResult{
+		OutputType:    AgentTaskTypeStockProfileSummary,
+		ResultSummary: "profile ok",
+		Result:        map[string]any{"summaryZh": profile.BusinessSummary, "summaryEn": profile.Name},
+		Confidence:    1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &AgentExecutorOutput{
+		StdoutTail:    "profile stdout",
+		ExitCode:      0,
+		Duration:      time.Millisecond,
+		RawTranscript: "profile stdout",
+	}, nil
+}
