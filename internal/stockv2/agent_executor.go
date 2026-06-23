@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,11 +41,19 @@ type codexCLIExecutor struct {
 }
 
 const (
-	execDefaultTimeout = 5 * time.Minute
-	stdoutTailMaxBytes = 4 * 1024
-	stderrTailMaxBytes = 4 * 1024
-	transcriptMaxBytes = 16 * 1024
+	execDefaultTimeout     = 5 * time.Minute
+	stdoutTailMaxBytes     = 4 * 1024
+	stderrTailMaxBytes     = 4 * 1024
+	transcriptMaxBytes     = 16 * 1024
+	codexStockAgentMCPName = "stock_agent"
+	codexSubmitResultTool  = "stock_agent.submit_result"
 )
+
+type codexMCPServerCapability struct {
+	Name          string
+	URL           string
+	RequiredTools []string
+}
 
 // 允许转发给子进程的环境变量(与 codexclient 对齐, 但独立维护)
 var executorAllowedEnvKeys = []string{
@@ -107,7 +118,12 @@ func (e *codexCLIExecutor) executePrompt(
 
 	start := time.Now()
 
-	cmd := exec.CommandContext(execCtx, e.binary, buildCodexExecArgs(modelName, prompt)...)
+	mcpServers := e.codexMCPServers()
+	if err := e.preflightCodexMCPServers(mcpServers); err != nil {
+		return nil, err
+	}
+
+	cmd := exec.CommandContext(execCtx, e.binary, buildCodexExecArgs(modelName, prompt, mcpServers)...)
 	cmd.Env = e.buildEnv()
 
 	var stdoutBuf, stderrBuf, transcriptBuf ringBuffer
@@ -263,13 +279,100 @@ waitLoop:
 	return output, nil
 }
 
-func buildCodexExecArgs(modelName, prompt string) []string {
+func buildCodexExecArgs(modelName, prompt string, mcpServers []codexMCPServerCapability) []string {
 	// ponytail: stockv2 agent tasks are controlled read-only prompts; if future tasks need repo context, pass an explicit trusted --cd workspace instead.
 	args := []string{"exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check"}
+	for _, server := range mcpServers {
+		args = append(args, "-c", fmt.Sprintf("mcp_servers.%s.url=%s", server.Name, strconv.Quote(strings.TrimSpace(server.URL))))
+	}
 	if modelName != "" {
 		args = append(args, "--model", modelName)
 	}
 	return append(args, prompt)
+}
+
+func (e *codexCLIExecutor) codexMCPServers() []codexMCPServerCapability {
+	return []codexMCPServerCapability{{
+		Name:          codexStockAgentMCPName,
+		URL:           strings.TrimSpace(e.mcpURL),
+		RequiredTools: []string{codexSubmitResultTool},
+	}}
+}
+
+func (e *codexCLIExecutor) preflightCodexMCPServers(servers []codexMCPServerCapability) error {
+	if len(servers) == 0 {
+		return errors.New("codex MCP capability list is empty")
+	}
+	for _, server := range servers {
+		if err := validateCodexMCPServerCapability(server); err != nil {
+			return err
+		}
+		if server.Name == codexStockAgentMCPName {
+			if err := e.preflightStockAgentMCPTools(server.RequiredTools); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateCodexMCPServerCapability(server codexMCPServerCapability) error {
+	name := strings.TrimSpace(server.Name)
+	if name == "" || strings.ContainsAny(name, ". \t\r\n") {
+		return fmt.Errorf("invalid codex MCP server name %q", server.Name)
+	}
+	endpoint, err := url.Parse(strings.TrimSpace(server.URL))
+	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
+		return fmt.Errorf("invalid codex MCP server URL for %s", name)
+	}
+	if endpoint.Scheme != "http" && endpoint.Scheme != "https" {
+		return fmt.Errorf("unsupported codex MCP server URL scheme for %s", name)
+	}
+	if len(server.RequiredTools) == 0 {
+		return fmt.Errorf("codex MCP server %s has no required tools", name)
+	}
+	for _, tool := range server.RequiredTools {
+		if strings.TrimSpace(tool) == "" {
+			return fmt.Errorf("codex MCP server %s has an empty required tool", name)
+		}
+	}
+	return nil
+}
+
+func (e *codexCLIExecutor) preflightStockAgentMCPTools(requiredTools []string) error {
+	if e.taskPool == nil {
+		return errors.New("stock agent MCP task pool is not configured")
+	}
+	req, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      "stock-agent-preflight-tools",
+		"method":  "tools/list",
+	})
+	raw := e.taskPool.HandleMCPRequest(req)
+	var resp struct {
+		Error  *mcpError `json:"error"`
+		Result struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return fmt.Errorf("stock agent MCP tools/list decode failed: %w", err)
+	}
+	if resp.Error != nil {
+		return fmt.Errorf("stock agent MCP tools/list failed: %s", resp.Error.Message)
+	}
+	available := make(map[string]bool, len(resp.Result.Tools))
+	for _, tool := range resp.Result.Tools {
+		available[strings.TrimSpace(tool.Name)] = true
+	}
+	for _, tool := range requiredTools {
+		if !available[strings.TrimSpace(tool)] {
+			return fmt.Errorf("stock agent MCP required tool missing: %s", tool)
+		}
+	}
+	return nil
 }
 
 func (e *codexCLIExecutor) buildEnv() []string {
@@ -315,6 +418,7 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 	fmt.Fprintf(&b, "- Task ID: `%s`\n", taskID)
 	fmt.Fprintf(&b, "- Task Type: `operation_review`\n")
 	if mcpURL != "" {
+		fmt.Fprintf(&b, "- MCP Server Name: `%s`\n", codexStockAgentMCPName)
 		fmt.Fprintf(&b, "- MCP Server: `%s`\n", mcpURL)
 	}
 	b.WriteString("\n")
@@ -504,6 +608,7 @@ func buildStockProfileSummaryPrompt(taskID string, profile StockProfile, mcpURL 
 	fmt.Fprintf(&b, "- Task ID: `%s`\n", taskID)
 	fmt.Fprintf(&b, "- Task Type: `%s`\n", AgentTaskTypeStockProfileSummary)
 	if mcpURL != "" {
+		fmt.Fprintf(&b, "- MCP Server Name: `%s`\n", codexStockAgentMCPName)
 		fmt.Fprintf(&b, "- MCP Server: `%s`\n", mcpURL)
 	}
 	b.WriteString("\n")
