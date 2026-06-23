@@ -471,7 +471,7 @@ func (s *Service) newsSourceConfigured(ctx context.Context, source string) (bool
 			return false, "FinancialJuice 未启用"
 		}
 		if !settings.FinancialJuiceCookieSet {
-			return false, "FinancialJuice Cookie 未配置"
+			return false, "FinancialJuice 凭据未配置"
 		}
 		return true, ""
 	default:

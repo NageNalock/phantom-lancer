@@ -175,6 +175,7 @@ type StockV2Settings struct {
 	Jin10EndpointSet                   bool      `json:"jin10EndpointSet"`
 	Jin10CookieSet                     bool      `json:"jin10CookieSet"`
 	FinancialJuiceEnabled              bool      `json:"financialJuiceEnabled"`
+	FinancialJuiceEndpoint             string    `json:"-"`
 	FinancialJuiceCookie               string    `json:"-"`
 	FinancialJuiceCookieSet            bool      `json:"financialJuiceCookieSet"`
 	BaseProfileAutoMaintainEnabled     bool      `json:"baseProfileAutoMaintainEnabled"`

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -17,9 +18,10 @@ import (
 )
 
 const (
-	financialJuiceStartupURL = "https://live.financialjuice.com/FJService.asmx/Startup"
-	maxNewsAdapterBodyBytes  = 2 << 20
-	maxFinancialJuiceCookie  = 16 << 10
+	financialJuiceStartupURL  = "https://live.financialjuice.com/FJService.asmx/Startup"
+	maxNewsAdapterBodyBytes   = 2 << 20
+	maxFinancialJuiceEndpoint = 16 << 10
+	maxFinancialJuiceCookie   = 16 << 10
 )
 
 type FinancialJuiceAdapterConfig struct {
@@ -56,18 +58,22 @@ func (a *FinancialJuiceRawNewsAdapter) FetchRawNews(ctx context.Context) ([]Requ
 		return nil, ErrNewsAdapterDisabled
 	}
 	cookie := strings.TrimSpace(a.cfg.Cookie)
-	if cookie == "" {
+	endpoint := strings.TrimSpace(a.cfg.Endpoint)
+	if cookie == "" && !financialJuiceEndpointHasCredential(endpoint) {
 		return nil, ErrFinancialJuiceCookieMissing
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, financialJuiceRequestURL(a.cfg.Endpoint), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, financialJuiceRequestURL(endpoint), nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("Origin", "https://www.financialjuice.com")
 	req.Header.Set("Referer", "https://www.financialjuice.com/")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; PhantomLancer/stockv2)")
-	req.Header.Set("Cookie", cookie)
+	if cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
 
 	resp, err := a.cfg.Client.Do(req)
 	if err != nil {
@@ -79,7 +85,7 @@ func (a *FinancialJuiceRawNewsAdapter) FetchRawNews(ctx context.Context) ([]Requ
 		return nil, err
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, ErrFinancialJuiceCookieMissing
+		return nil, ErrFinancialJuiceInvalidCredential
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("financialjuice fetch failed: status %d", resp.StatusCode)
@@ -107,9 +113,10 @@ func (a financialJuiceNewsSourceAdapter) FetchSince(ctx context.Context, cursor 
 		return NewsSourceFetchResult{Disabled: true, FetchedAt: time.Now()}, nil
 	}
 	adapter := NewFinancialJuiceRawNewsAdapter(FinancialJuiceAdapterConfig{
-		Enabled: settings.FinancialJuiceEnabled,
-		Cookie:  settings.FinancialJuiceCookie,
-		Client:  a.service.httpClient,
+		Enabled:  settings.FinancialJuiceEnabled,
+		Endpoint: settings.FinancialJuiceEndpoint,
+		Cookie:   settings.FinancialJuiceCookie,
+		Client:   a.service.httpClient,
 	})
 	rawItems, err := adapter.FetchRawNews(ctx)
 	if err != nil {
@@ -141,13 +148,35 @@ func (s *Service) FetchRawNewsFromSource(ctx context.Context, source string) (Ne
 }
 
 func ParseFinancialJuiceCookieInput(raw string) (string, error) {
-	text := strings.TrimSpace(raw)
-	if text == "" {
+	cfg, err := ParseFinancialJuiceCredentialInput(raw)
+	if err != nil {
+		return "", err
+	}
+	if cfg.Cookie == "" {
 		return "", ErrFinancialJuiceCookieMissing
 	}
+	return cfg.Cookie, nil
+}
+
+type FinancialJuiceCredentialConfig struct {
+	Endpoint string
+	Cookie   string
+}
+
+func ParseFinancialJuiceCredentialInput(raw string) (FinancialJuiceCredentialConfig, error) {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return FinancialJuiceCredentialConfig{}, ErrFinancialJuiceCookieMissing
+	}
+	cfg := FinancialJuiceCredentialConfig{Endpoint: financialJuiceCredentialEndpointFromFields(shellFieldsLite(text))}
 	for _, field := range shellFieldsLite(text) {
 		if cookie, ok := cookieFromHeader(field); ok {
-			return cleanFinancialJuiceCookie(cookie)
+			cleaned, err := cleanFinancialJuiceCookie(cookie)
+			if err != nil {
+				return FinancialJuiceCredentialConfig{}, err
+			}
+			cfg.Cookie = cleaned
+			return cfg, nil
 		}
 	}
 	fields := shellFieldsLite(text)
@@ -156,28 +185,69 @@ func ParseFinancialJuiceCookieInput(raw string) (string, error) {
 		if (lower == "-h" || lower == "--header" || lower == "-b" || lower == "--cookie") && i+1 < len(fields) {
 			next := fields[i+1]
 			if lower == "-b" || lower == "--cookie" {
-				return cleanFinancialJuiceCookie(next)
+				cleaned, err := cleanFinancialJuiceCookie(next)
+				if err != nil {
+					return FinancialJuiceCredentialConfig{}, err
+				}
+				cfg.Cookie = cleaned
+				return cfg, nil
 			}
 			if cookie, ok := cookieFromHeader(next); ok {
-				return cleanFinancialJuiceCookie(cookie)
+				cleaned, err := cleanFinancialJuiceCookie(cookie)
+				if err != nil {
+					return FinancialJuiceCredentialConfig{}, err
+				}
+				cfg.Cookie = cleaned
+				return cfg, nil
 			}
 		}
 		if strings.HasPrefix(lower, "--cookie=") {
-			return cleanFinancialJuiceCookie(strings.TrimPrefix(field, field[:len("--cookie=")]))
+			cleaned, err := cleanFinancialJuiceCookie(strings.TrimPrefix(field, field[:len("--cookie=")]))
+			if err != nil {
+				return FinancialJuiceCredentialConfig{}, err
+			}
+			cfg.Cookie = cleaned
+			return cfg, nil
 		}
 	}
 	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		if cookie, ok := cookieFromHeader(line); ok {
-			return cleanFinancialJuiceCookie(cookie)
+			cleaned, err := cleanFinancialJuiceCookie(cookie)
+			if err != nil {
+				return FinancialJuiceCredentialConfig{}, err
+			}
+			cfg.Cookie = cleaned
+			return cfg, nil
 		}
 	}
-	if strings.Contains(text, "=") && !strings.Contains(strings.ToLower(text), "curl ") {
-		return cleanFinancialJuiceCookie(text)
+	if cfg.Endpoint != "" {
+		return cfg, nil
 	}
-	return "", ErrFinancialJuiceCookieMissing
+	if strings.Contains(text, "=") && !strings.Contains(strings.ToLower(text), "curl ") {
+		cleaned, err := cleanFinancialJuiceCookie(text)
+		if err != nil {
+			return FinancialJuiceCredentialConfig{}, err
+		}
+		cfg.Cookie = cleaned
+		return cfg, nil
+	}
+	return FinancialJuiceCredentialConfig{}, ErrFinancialJuiceCookieMissing
 }
 
 func ParseFinancialJuiceRawNews(body []byte, fetchedAt time.Time) ([]RequestCreateRawNews, error) {
+	body = bytes.TrimSpace(body)
+	if financialJuiceResponseLooksHTML(body) {
+		return nil, ErrFinancialJuiceInvalidCredential
+	}
+	if financialJuiceResponseLooksXML(body) {
+		var envelope struct {
+			Text string `xml:",chardata"`
+		}
+		if err := xml.Unmarshal(body, &envelope); err != nil {
+			return nil, err
+		}
+		body = []byte(strings.TrimSpace(envelope.Text))
+	}
 	return parseEnglishRawNewsPayload(NewsSourceFinancialJuice, body, fetchedAt)
 }
 
@@ -210,6 +280,59 @@ func financialJuiceRequestURL(endpoint string) string {
 	return u.String()
 }
 
+func financialJuiceCredentialEndpointFromFields(fields []string) string {
+	for _, field := range fields {
+		endpoint, err := cleanFinancialJuiceEndpoint(field)
+		if err == nil && financialJuiceEndpointHasCredential(endpoint) {
+			return endpoint
+		}
+	}
+	return ""
+}
+
+func cleanFinancialJuiceEndpoint(raw string) (string, error) {
+	endpoint := strings.Trim(strings.TrimSpace(strings.TrimSuffix(raw, "\\")), `'"`)
+	if endpoint == "" || len(endpoint) > maxFinancialJuiceEndpoint {
+		return "", ErrFinancialJuiceCookieMissing
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme != "https" || !isFinancialJuiceHost(parsed.Hostname()) {
+		return "", ErrFinancialJuiceCookieMissing
+	}
+	if !strings.EqualFold(parsed.Path, "/FJService.asmx/Startup") {
+		return "", ErrFinancialJuiceCookieMissing
+	}
+	return parsed.String(), nil
+}
+
+func financialJuiceEndpointHasCredential(endpoint string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return false
+	}
+	return parsed.Scheme == "https" &&
+		strings.EqualFold(parsed.Path, "/FJService.asmx/Startup") &&
+		parsed.Query().Get("info") != "" &&
+		isFinancialJuiceHost(parsed.Hostname())
+}
+
+func financialJuiceResponseLooksHTML(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	lower := strings.ToLower(string(trimmed[:min(len(trimmed), 32)]))
+	return strings.HasPrefix(lower, "<!doctype html") || strings.HasPrefix(lower, "<html")
+}
+
+func financialJuiceResponseLooksXML(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	lower := strings.ToLower(string(trimmed[:min(len(trimmed), 32)]))
+	return strings.HasPrefix(lower, "<?xml") || strings.HasPrefix(lower, "<string")
+}
+
+func isFinancialJuiceHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	return host == "financialjuice.com" || strings.HasSuffix(host, ".financialjuice.com")
+}
+
 func parseEnglishRawNewsPayload(source string, body []byte, fetchedAt time.Time) ([]RequestCreateRawNews, error) {
 	var payload any
 	dec := json.NewDecoder(bytes.NewReader(body))
@@ -229,6 +352,10 @@ func collectEnglishRawNews(source string, value any, fetchedAt time.Time, out *[
 			collectEnglishRawNews(source, item, fetchedAt, out)
 		}
 	case map[string]any:
+		if newsItems, ok := newsContainerItems(v); ok {
+			collectEnglishRawNews(source, newsItems, fetchedAt, out)
+			return
+		}
 		if req, ok := rawNewsRequestFromMap(source, v, fetchedAt); ok {
 			*out = append(*out, req)
 			return
@@ -250,6 +377,15 @@ func collectEnglishRawNews(source string, value any, fetchedAt time.Time, out *[
 	}
 }
 
+func newsContainerItems(item map[string]any) (any, bool) {
+	for key, value := range item {
+		if strings.EqualFold(key, "News") {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
 func rawNewsRequestFromMap(source string, item map[string]any, fetchedAt time.Time) (RequestCreateRawNews, bool) {
 	title := firstNewsString(item, "title", "Title", "headline", "Headline", "NewsTitle", "news_title")
 	snippet := firstNewsString(item, "snippet", "Snippet", "summary", "Summary", "description", "Description", "text", "Text")
@@ -266,9 +402,9 @@ func rawNewsRequestFromMap(source string, item map[string]any, fetchedAt time.Ti
 
 	publishedAt := parseNewsPublishedAt(firstNewsString(item,
 		"published_at", "publishedAt", "publishedDate", "PublishedDate", "time_published", "TimePublished",
-		"date", "Date", "datetime", "DateTime", "time", "Time", "NewsTime", "CreatedDate",
+		"date", "Date", "datetime", "DateTime", "time", "Time", "NewsTime", "CreatedDate", "DatePublished",
 	), fetchedAt)
-	newsURL := firstNewsString(item, "url", "URL", "link", "Link", "newsUrl", "NewsURL", "NewsUrl")
+	newsURL := firstNewsString(item, "url", "URL", "link", "Link", "newsUrl", "NewsURL", "NewsUrl", "EURL", "RURL")
 	sourceID := firstNewsString(item, "source_id", "sourceId", "SourceID", "id", "ID", "newsId", "NewsID", "NewsId", "NID")
 	if sourceID == "" {
 		sourceID = stableNewsSourceID(source, newsURL, title, publishedAt)

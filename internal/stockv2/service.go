@@ -811,16 +811,18 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 		settings.BaseProfileNextMaintainAt = time.Time{}
 	}
 	if req.FinancialJuiceClearCookie != nil && *req.FinancialJuiceClearCookie {
+		settings.FinancialJuiceEndpoint = ""
 		settings.FinancialJuiceCookie = ""
 	}
 	if req.FinancialJuiceCookieInput != nil && strings.TrimSpace(*req.FinancialJuiceCookieInput) != "" {
-		cookie, err := ParseFinancialJuiceCookieInput(*req.FinancialJuiceCookieInput)
+		cfg, err := ParseFinancialJuiceCredentialInput(*req.FinancialJuiceCookieInput)
 		if err != nil {
 			return StockV2Settings{}, err
 		}
-		settings.FinancialJuiceCookie = cookie
+		settings.FinancialJuiceEndpoint = cfg.Endpoint
+		settings.FinancialJuiceCookie = cfg.Cookie
 	}
-	settings.FinancialJuiceCookieSet = strings.TrimSpace(settings.FinancialJuiceCookie) != ""
+	settings.FinancialJuiceCookieSet = strings.TrimSpace(settings.FinancialJuiceCookie) != "" || financialJuiceEndpointHasCredential(settings.FinancialJuiceEndpoint)
 
 	// 保存配置
 	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil {

@@ -2468,8 +2468,21 @@ func (s *Server) staticHandler() http.Handler {
 		if contentType := mime.TypeByExtension(path.Ext(name)); contentType != "" {
 			w.Header().Set("Content-Type", contentType)
 		}
+		setStaticCacheControl(w, name)
 		http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(data))
 	})
+}
+
+func setStaticCacheControl(w http.ResponseWriter, name string) {
+	if name == "index.html" {
+		w.Header().Set("Cache-Control", "no-cache")
+		return
+	}
+	if strings.HasPrefix(name, "assets/") {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
 }
 
 func (s *Server) recover(next http.Handler) http.Handler {

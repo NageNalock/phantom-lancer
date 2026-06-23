@@ -44,7 +44,7 @@ func (s *Server) handleStockV2RunNewsSourceOnce(w http.ResponseWriter, r *http.R
 	}
 	result, err := s.stockV2.RunNewsPipelineOnce(r.Context(), r.PathValue("source"))
 	if err != nil {
-		http.Error(w, err.Error(), stockV2NewsHTTPStatus(err))
+		writeError(w, stockV2NewsHTTPStatus(err), "stockv2_news_source_failed", err.Error())
 		return
 	}
 	s.writeJSON(w, result)
@@ -189,6 +189,7 @@ func stockV2NewsHTTPStatus(err error) int {
 		errors.Is(err, stockv2.ErrUnsupportedNewsSource),
 		errors.Is(err, stockv2.ErrJin10ConfigMissing),
 		errors.Is(err, stockv2.ErrFinancialJuiceCookieMissing),
+		errors.Is(err, stockv2.ErrFinancialJuiceInvalidCredential),
 		errors.Is(err, stockv2.ErrNewsSourceAdapterNotFound):
 		return http.StatusBadRequest
 	case errors.Is(err, stockv2.ErrRawNewsNotFound):
