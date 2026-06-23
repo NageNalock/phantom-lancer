@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -66,6 +67,7 @@ func (a *FinancialJuiceRawNewsAdapter) FetchRawNews(ctx context.Context) ([]Requ
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("Origin", "https://www.financialjuice.com")
 	req.Header.Set("Referer", "https://www.financialjuice.com/")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; PhantomLancer/stockv2)")
@@ -83,7 +85,7 @@ func (a *FinancialJuiceRawNewsAdapter) FetchRawNews(ctx context.Context) ([]Requ
 		return nil, err
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, ErrFinancialJuiceCookieMissing
+		return nil, ErrFinancialJuiceInvalidCredential
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("financialjuice fetch failed: status %d", resp.StatusCode)
@@ -233,6 +235,19 @@ func ParseFinancialJuiceCredentialInput(raw string) (FinancialJuiceCredentialCon
 }
 
 func ParseFinancialJuiceRawNews(body []byte, fetchedAt time.Time) ([]RequestCreateRawNews, error) {
+	body = bytes.TrimSpace(body)
+	if financialJuiceResponseLooksHTML(body) {
+		return nil, ErrFinancialJuiceInvalidCredential
+	}
+	if financialJuiceResponseLooksXML(body) {
+		var envelope struct {
+			Text string `xml:",chardata"`
+		}
+		if err := xml.Unmarshal(body, &envelope); err != nil {
+			return nil, err
+		}
+		body = []byte(strings.TrimSpace(envelope.Text))
+	}
 	return parseEnglishRawNewsPayload(NewsSourceFinancialJuice, body, fetchedAt)
 }
 
@@ -301,6 +316,18 @@ func financialJuiceEndpointHasCredential(endpoint string) bool {
 		isFinancialJuiceHost(parsed.Hostname())
 }
 
+func financialJuiceResponseLooksHTML(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	lower := strings.ToLower(string(trimmed[:min(len(trimmed), 32)]))
+	return strings.HasPrefix(lower, "<!doctype html") || strings.HasPrefix(lower, "<html")
+}
+
+func financialJuiceResponseLooksXML(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	lower := strings.ToLower(string(trimmed[:min(len(trimmed), 32)]))
+	return strings.HasPrefix(lower, "<?xml") || strings.HasPrefix(lower, "<string")
+}
+
 func isFinancialJuiceHost(host string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
 	return host == "financialjuice.com" || strings.HasSuffix(host, ".financialjuice.com")
@@ -325,6 +352,10 @@ func collectEnglishRawNews(source string, value any, fetchedAt time.Time, out *[
 			collectEnglishRawNews(source, item, fetchedAt, out)
 		}
 	case map[string]any:
+		if newsItems, ok := newsContainerItems(v); ok {
+			collectEnglishRawNews(source, newsItems, fetchedAt, out)
+			return
+		}
 		if req, ok := rawNewsRequestFromMap(source, v, fetchedAt); ok {
 			*out = append(*out, req)
 			return
@@ -346,6 +377,15 @@ func collectEnglishRawNews(source string, value any, fetchedAt time.Time, out *[
 	}
 }
 
+func newsContainerItems(item map[string]any) (any, bool) {
+	for key, value := range item {
+		if strings.EqualFold(key, "News") {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
 func rawNewsRequestFromMap(source string, item map[string]any, fetchedAt time.Time) (RequestCreateRawNews, bool) {
 	title := firstNewsString(item, "title", "Title", "headline", "Headline", "NewsTitle", "news_title")
 	snippet := firstNewsString(item, "snippet", "Snippet", "summary", "Summary", "description", "Description", "text", "Text")
@@ -362,9 +402,9 @@ func rawNewsRequestFromMap(source string, item map[string]any, fetchedAt time.Ti
 
 	publishedAt := parseNewsPublishedAt(firstNewsString(item,
 		"published_at", "publishedAt", "publishedDate", "PublishedDate", "time_published", "TimePublished",
-		"date", "Date", "datetime", "DateTime", "time", "Time", "NewsTime", "CreatedDate",
+		"date", "Date", "datetime", "DateTime", "time", "Time", "NewsTime", "CreatedDate", "DatePublished",
 	), fetchedAt)
-	newsURL := firstNewsString(item, "url", "URL", "link", "Link", "newsUrl", "NewsURL", "NewsUrl")
+	newsURL := firstNewsString(item, "url", "URL", "link", "Link", "newsUrl", "NewsURL", "NewsUrl", "EURL", "RURL")
 	sourceID := firstNewsString(item, "source_id", "sourceId", "SourceID", "id", "ID", "newsId", "NewsID", "NewsId", "NID")
 	if sourceID == "" {
 		sourceID = stableNewsSourceID(source, newsURL, title, publishedAt)

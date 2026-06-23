@@ -222,12 +222,14 @@ func TestFinancialJuiceAdapterDisabled(t *testing.T) {
 
 func TestFinancialJuiceMockFetchToRawNews(t *testing.T) {
 	var sawCookie string
+	var sawContentType string
 	client := &http.Client{Transport: newsRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		sawCookie = r.Header.Get("Cookie")
+		sawContentType = r.Header.Get("Content-Type")
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"d":"{\"News\":[{\"NewsID\":12345,\"Headline\":\"Fed officials discuss rate path\",\"Text\":\"Policy comments moved US yields.\",\"NewsTime\":\"2026-06-18T10:30:00Z\",\"URL\":\"https://example.test/fed\"}]}"}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"d":"{\"News\":[{\"NewsID\":67890,\"Headline\":\"Fed officials discuss rate path\",\"Text\":\"Policy comments moved US yields.\",\"NewsTime\":\"2026-06-18T10:30:00Z\",\"URL\":\"https://example.test/fed\"}]}"}`)),
 			Request:    r,
 		}, nil
 	})}
@@ -246,11 +248,14 @@ func TestFinancialJuiceMockFetchToRawNews(t *testing.T) {
 	if sawCookie != "example_session=placeholder" {
 		t.Fatalf("cookie header = %q", sawCookie)
 	}
+	if sawContentType != "application/json; charset=utf-8" {
+		t.Fatalf("content-type header = %q", sawContentType)
+	}
 	if len(items) != 1 {
 		t.Fatalf("items len = %d, want 1", len(items))
 	}
 	got := items[0]
-	if got.Source != NewsSourceFinancialJuice || got.SourceID != "12345" || got.Language != "en" || got.Quality != NewsQualityOK {
+	if got.Source != NewsSourceFinancialJuice || got.SourceID != "67890" || got.Language != "en" || got.Quality != NewsQualityOK {
 		t.Fatalf("raw news = %+v", got)
 	}
 	if got.Title != "Fed officials discuss rate path" || got.Snippet != "Policy comments moved US yields." || got.URL != "https://example.test/fed" {
@@ -292,6 +297,55 @@ func TestFinancialJuiceMockFetchUsesInfoEndpointWithoutCookie(t *testing.T) {
 	}
 }
 
+func TestFinancialJuiceHTMLResponseIsCredentialInvalid(t *testing.T) {
+	client := &http.Client{Transport: newsRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+			Body:       io.NopCloser(strings.NewReader(`<!doctype html><html><body>login</body></html>`)),
+			Request:    r,
+		}, nil
+	})}
+
+	adapter := NewFinancialJuiceRawNewsAdapter(FinancialJuiceAdapterConfig{
+		Enabled:  true,
+		Endpoint: "https://live.financialjuice.com/FJService.asmx/Startup?info=%22token-placeholder%22&TimeOffset=8",
+		Client:   client,
+		Now:      func() time.Time { return time.Date(2026, 6, 18, 10, 31, 0, 0, time.UTC) },
+	})
+	if _, err := adapter.FetchRawNews(context.Background()); !errors.Is(err, ErrFinancialJuiceInvalidCredential) {
+		t.Fatalf("FetchRawNews() err = %v, want ErrFinancialJuiceInvalidCredential", err)
+	}
+}
+
+func TestFinancialJuiceXMLResponseToRawNews(t *testing.T) {
+	items, err := ParseFinancialJuiceRawNews([]byte(`<?xml version="1.0" encoding="utf-8"?>
+<string xmlns="http://tempuri.org/">{"News":[{"NewsID":12345,"Title":"BoC remarks cross the wire","Text":"Central bank comments moved CAD.","NewsTime":"2026-06-18T10:30:00Z","URL":"https://example.test/boc"}]}</string>`), time.Date(2026, 6, 18, 10, 31, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("parse xml response: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(items))
+	}
+	got := items[0]
+	if got.SourceID != "12345" || got.Title != "BoC remarks cross the wire" || got.Snippet != "Central bank comments moved CAD." {
+		t.Fatalf("raw news = %+v", got)
+	}
+}
+
+func TestFinancialJuiceContainerSummaryDoesNotBecomeNews(t *testing.T) {
+	items, err := ParseFinancialJuiceRawNews([]byte(`{"d":"{\"News\":[{\"NewsID\":12345,\"Title\":\"Real headline\",\"Text\":\"Real text\",\"DatePublished\":\"2026-06-18T10:30:00Z\"}],\"Summary\":\"<div>not a news item</div>\"}"}`), time.Date(2026, 6, 18, 10, 31, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(items))
+	}
+	if items[0].Title != "Real headline" || items[0].SourceID != "12345" {
+		t.Fatalf("raw news = %+v", items[0])
+	}
+}
+
 func TestFinancialJuiceRunsThroughNewsPipeline(t *testing.T) {
 	var sawCookie string
 	client := &http.Client{Transport: newsRoundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -299,7 +353,7 @@ func TestFinancialJuiceRunsThroughNewsPipeline(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"d":"{\"News\":[{\"NewsID\":12345,\"Headline\":\"Fed officials discuss rate path\",\"Text\":\"Policy comments moved US yields.\",\"NewsTime\":\"2026-06-18T10:30:00Z\",\"URL\":\"https://example.test/fed\"}]}"}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"d":"{\"News\":[{\"NewsID\":98765,\"Headline\":\"Fed officials discuss rate path\",\"Text\":\"Policy comments moved US yields.\",\"NewsTime\":\"2026-06-18T10:30:00Z\",\"URL\":\"https://example.test/fed\"}]}"}`)),
 			Request:    r,
 		}, nil
 	})}
