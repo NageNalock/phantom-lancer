@@ -139,16 +139,16 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
       </Panel>
 
       <Panel
-        title="基础画像维护"
-        subtitle="定期为主数据生成确定性股票画像，不触发全市场 AI"
+        title="自动更新画像"
+        subtitle="后台维护画像索引，并按队列、预算和限速执行深度画像更新"
       >
         <div className="grid gap-4">
           <Toggle
             checked={!!form.baseProfileAutoMaintainEnabled}
             label={
               <div>
-                <div>启用基础画像自动维护</div>
-                <div className="muted mt-0.5 text-xs">只运行本地确定性 RebuildStockProfiles；AI 画像仍需单只手动触发。</div>
+                <div>启用画像自动维护</div>
+                <div className="muted mt-0.5 text-xs">先修复本地索引，再小批量深度更新；基础输入变化时才尝试 AI。</div>
               </div>
             }
             onChange={(checked) => update("baseProfileAutoMaintainEnabled", checked)}
@@ -164,6 +164,39 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
             />
           </Field>
 
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="每轮标的数" help="每次自动维护最多处理多少只标的。">
+              <input
+                min={1}
+                max={50}
+                step={1}
+                type="number"
+                value={form.baseProfileDeepUpdateBatchSize ?? 12}
+                onChange={(e) => update("baseProfileDeepUpdateBatchSize", Number(e.target.value))}
+              />
+            </Field>
+            <Field label="AI 预算" help="每轮最多启动多少次画像 AI。">
+              <input
+                min={1}
+                max={10}
+                step={1}
+                type="number"
+                value={form.baseProfileDeepUpdateAiBudget ?? 2}
+                onChange={(e) => update("baseProfileDeepUpdateAiBudget", Number(e.target.value))}
+              />
+            </Field>
+            <Field label="单只间隔 (ms)" help="候选之间的基础等待时间，后台会再做稳定打散。">
+              <input
+                min={100}
+                max={60000}
+                step={100}
+                type="number"
+                value={form.baseProfileDeepUpdateRateLimitMs ?? 1500}
+                onChange={(e) => update("baseProfileDeepUpdateRateLimitMs", Number(e.target.value))}
+              />
+            </Field>
+          </div>
+
           <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-sm">
             <div className="flex items-center justify-between">
               <span className="text-[var(--muted)]">维护状态</span>
@@ -174,6 +207,9 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
             <div className="mt-2 grid gap-1 text-xs text-[var(--muted)]">
               <span>上次：{formatTime(settings.baseProfileLastMaintainAt)}</span>
               <span>下次：{formatTime(settings.baseProfileNextMaintainAt)}</span>
+              <span>
+                队列：每轮 {form.baseProfileDeepUpdateBatchSize ?? 12} 只，AI {form.baseProfileDeepUpdateAiBudget ?? 2} 次，间隔 {form.baseProfileDeepUpdateRateLimitMs ?? 1500}ms
+              </span>
               {settings.baseProfileLastMaintainResult ? <span className="break-words">结果：{settings.baseProfileLastMaintainResult}</span> : null}
             </div>
           </div>

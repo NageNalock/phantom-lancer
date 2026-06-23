@@ -182,6 +182,25 @@ CREATE TABLE IF NOT EXISTS stockv2_stock_profiles (
     profile_version INTEGER NOT NULL DEFAULT 1,
     updated_at DATETIME NOT NULL
 );
+CREATE TABLE IF NOT EXISTS stockv2_stock_profile_update_tasks (
+    id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    market TEXT,
+    trigger_source TEXT NOT NULL,
+    trigger_reason TEXT,
+    status TEXT NOT NULL,
+    base_input_hash_before TEXT,
+    base_input_hash_after TEXT,
+    base_input_changed INTEGER NOT NULL DEFAULT 0,
+    ai_decision TEXT NOT NULL,
+    agent_run_id TEXT,
+    source_statuses_json TEXT NOT NULL DEFAULT '[]',
+    error_message TEXT,
+    started_at DATETIME NOT NULL,
+    finished_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
 CREATE TABLE IF NOT EXISTS stockv2_news_events (
     id TEXT PRIMARY KEY,
     raw_news_id TEXT,
@@ -469,6 +488,9 @@ CREATE TABLE IF NOT EXISTS stockv2_settings (
     financial_juice_cookie TEXT,
     base_profile_auto_maintain_enabled INTEGER DEFAULT 0,
     base_profile_maintain_interval_seconds INTEGER DEFAULT 86400,
+    base_profile_deep_update_batch_size INTEGER DEFAULT 12,
+    base_profile_deep_update_ai_budget INTEGER DEFAULT 2,
+    base_profile_deep_update_rate_limit_ms INTEGER DEFAULT 1500,
     base_profile_last_maintain_at DATETIME,
     base_profile_next_maintain_at DATETIME,
     base_profile_last_maintain_result TEXT,
@@ -481,6 +503,9 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_industry ON stockv2_instrumen
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_status ON stockv2_instruments(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_market ON stockv2_stock_profiles(market);
 CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_updated_at ON stockv2_stock_profiles(updated_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_profile_update_tasks_symbol ON stockv2_stock_profile_update_tasks(symbol);
+CREATE INDEX IF NOT EXISTS idx_stockv2_profile_update_tasks_created_at ON stockv2_stock_profile_update_tasks(created_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_profile_update_tasks_status ON stockv2_stock_profile_update_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_event ON stockv2_news_link_candidates(news_event_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_score ON stockv2_news_link_candidates(score);
@@ -887,6 +912,15 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_maintain_interval_seconds", "INTEGER DEFAULT 86400"); err != nil {
 		return fmt.Errorf("add base_profile_maintain_interval_seconds column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_deep_update_batch_size", "INTEGER DEFAULT 12"); err != nil {
+		return fmt.Errorf("add base_profile_deep_update_batch_size column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_deep_update_ai_budget", "INTEGER DEFAULT 2"); err != nil {
+		return fmt.Errorf("add base_profile_deep_update_ai_budget column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_deep_update_rate_limit_ms", "INTEGER DEFAULT 1500"); err != nil {
+		return fmt.Errorf("add base_profile_deep_update_rate_limit_ms column: %w", err)
 	}
 	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_last_maintain_at", "DATETIME"); err != nil {
 		return fmt.Errorf("add base_profile_last_maintain_at column: %w", err)
@@ -2121,10 +2155,11 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 			daily_bars_auto_enabled, daily_bars_last_run, jin10_enabled,
 			jin10_endpoint, jin10_cookie, jin10_x_app_id, jin10_x_version,
 			financial_juice_enabled, financial_juice_endpoint, financial_juice_cookie, base_profile_auto_maintain_enabled,
-			base_profile_maintain_interval_seconds, base_profile_last_maintain_at,
+			base_profile_maintain_interval_seconds, base_profile_deep_update_batch_size,
+			base_profile_deep_update_ai_budget, base_profile_deep_update_rate_limit_ms, base_profile_last_maintain_at,
 			base_profile_next_maintain_at, base_profile_last_maintain_result,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	now := time.Now()
@@ -2140,6 +2175,9 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 	if settings.BaseProfileMaintainIntervalSeconds <= 0 {
 		settings.BaseProfileMaintainIntervalSeconds = 86400
 	}
+	settings.BaseProfileDeepUpdateBatchSize = normalizeStockProfileDeepUpdateBatchSize(settings.BaseProfileDeepUpdateBatchSize)
+	settings.BaseProfileDeepUpdateAIBudget = normalizeStockProfileDeepUpdateAIBudget(settings.BaseProfileDeepUpdateAIBudget)
+	settings.BaseProfileDeepUpdateRateLimitMs = normalizeStockProfileDeepUpdateRateLimitMs(settings.BaseProfileDeepUpdateRateLimitMs)
 
 	_, err := s.db.ExecContext(ctx, query,
 		settings.ID,
@@ -2162,6 +2200,9 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		nullableNewsString(settings.FinancialJuiceCookie),
 		settings.BaseProfileAutoMaintainEnabled,
 		settings.BaseProfileMaintainIntervalSeconds,
+		settings.BaseProfileDeepUpdateBatchSize,
+		settings.BaseProfileDeepUpdateAIBudget,
+		settings.BaseProfileDeepUpdateRateLimitMs,
 		nullableNewsTime(settings.BaseProfileLastMaintainAt),
 		nullableNewsTime(settings.BaseProfileNextMaintainAt),
 		nullableNewsString(settings.BaseProfileLastMaintainResult),
@@ -2231,6 +2272,9 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 		       COALESCE(financial_juice_enabled, 0), COALESCE(financial_juice_endpoint, ''), COALESCE(financial_juice_cookie, ''),
 		       COALESCE(base_profile_auto_maintain_enabled, 0),
 		       COALESCE(base_profile_maintain_interval_seconds, 86400),
+		       COALESCE(base_profile_deep_update_batch_size, 12),
+		       COALESCE(base_profile_deep_update_ai_budget, 2),
+		       COALESCE(base_profile_deep_update_rate_limit_ms, 1500),
 		       base_profile_last_maintain_at, base_profile_next_maintain_at,
 		       COALESCE(base_profile_last_maintain_result, ''),
 		       created_at, updated_at
@@ -2266,6 +2310,9 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 		&settings.FinancialJuiceCookie,
 		&settings.BaseProfileAutoMaintainEnabled,
 		&settings.BaseProfileMaintainIntervalSeconds,
+		&settings.BaseProfileDeepUpdateBatchSize,
+		&settings.BaseProfileDeepUpdateAIBudget,
+		&settings.BaseProfileDeepUpdateRateLimitMs,
 		&baseProfileLastMaintainAt,
 		&baseProfileNextMaintainAt,
 		&settings.BaseProfileLastMaintainResult,
@@ -2285,6 +2332,9 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 				ProxyHost:                          "",
 				ProxyPort:                          8080,
 				BaseProfileMaintainIntervalSeconds: 86400,
+				BaseProfileDeepUpdateBatchSize:     defaultStockProfileDeepUpdateBatchSize,
+				BaseProfileDeepUpdateAIBudget:      defaultStockProfileDeepUpdateAIBudget,
+				BaseProfileDeepUpdateRateLimitMs:   defaultStockProfileDeepUpdateRateLimitMs,
 				CreatedAt:                          time.Now(),
 				UpdatedAt:                          time.Now(),
 			}, nil
@@ -2305,6 +2355,9 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	if settings.BaseProfileMaintainIntervalSeconds <= 0 {
 		settings.BaseProfileMaintainIntervalSeconds = 86400
 	}
+	settings.BaseProfileDeepUpdateBatchSize = normalizeStockProfileDeepUpdateBatchSize(settings.BaseProfileDeepUpdateBatchSize)
+	settings.BaseProfileDeepUpdateAIBudget = normalizeStockProfileDeepUpdateAIBudget(settings.BaseProfileDeepUpdateAIBudget)
+	settings.BaseProfileDeepUpdateRateLimitMs = normalizeStockProfileDeepUpdateRateLimitMs(settings.BaseProfileDeepUpdateRateLimitMs)
 	settings.Jin10EndpointSet = strings.TrimSpace(settings.Jin10Endpoint) != ""
 	settings.Jin10CookieSet = strings.TrimSpace(settings.Jin10Cookie) != ""
 	settings.FinancialJuiceCookieSet = strings.TrimSpace(settings.FinancialJuiceCookie) != "" || financialJuiceEndpointHasCredential(settings.FinancialJuiceEndpoint)

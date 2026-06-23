@@ -1798,6 +1798,39 @@ export interface StockV2StockProfile extends StockV2StockProfileSummary {
   profileVersion?: number;
 }
 
+export interface StockV2StockProfileSourceStatus {
+  source: string;
+  status: string;
+  message?: string;
+  fetchedAt?: string;
+}
+
+export interface StockV2StockProfileUpdateTask {
+  id: string;
+  symbol: string;
+  market?: string;
+  triggerSource: "manual" | "auto" | string;
+  triggerReason?: string;
+  status: string;
+  baseInputHashBefore?: string;
+  baseInputHashAfter?: string;
+  baseInputChanged: boolean;
+  aiDecision: string;
+  agentRunId?: string;
+  sourceStatuses?: StockV2StockProfileSourceStatus[];
+  errorMessage?: string;
+  startedAt: string;
+  finishedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockV2StockProfileUpdateResult {
+  profile: StockV2StockProfile;
+  task: StockV2StockProfileUpdateTask;
+  agentRun?: StockV2AgentRun;
+}
+
 export interface StockV2Portfolio {
   id: string;
   name: string;
@@ -1967,6 +2000,9 @@ export interface StockV2Settings {
   financialJuiceCookieSet: boolean;
   baseProfileAutoMaintainEnabled: boolean;
   baseProfileMaintainIntervalSeconds: number;
+  baseProfileDeepUpdateBatchSize: number;
+  baseProfileDeepUpdateAiBudget: number;
+  baseProfileDeepUpdateRateLimitMs: number;
   baseProfileLastMaintainAt?: string;
   baseProfileNextMaintainAt?: string;
   baseProfileLastMaintainResult?: string;
