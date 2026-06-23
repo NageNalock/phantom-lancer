@@ -60,11 +60,10 @@ func TestJin10CurlParseAndSettingsSave(t *testing.T) {
 	}
 
 	enabled := true
-	input := `curl 'https://www.jin10.com/tv/index/list?app=jin10' \
+	input := `curl 'https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1' \
   -H 'accept: */*' \
   -H 'x-app-id: app-placeholder' \
-  -H 'x-version: 2.1' \
-  -b 'did=placeholder-device; x-token=placeholder-token'`
+  -H 'x-version: 2.1'`
 	updated, err := svc.CreateOrUpdateSettings(ctx, RequestCreateOrUpdateSettings{
 		Jin10Enabled:   &enabled,
 		Jin10CurlInput: &input,
@@ -72,7 +71,7 @@ func TestJin10CurlParseAndSettingsSave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save settings: %v", err)
 	}
-	if !updated.Jin10Enabled || !updated.Jin10EndpointSet || !updated.Jin10CookieSet {
+	if !updated.Jin10Enabled || !updated.Jin10EndpointSet || updated.Jin10CookieSet {
 		t.Fatalf("updated settings = %+v", updated)
 	}
 	state, ok, err := svc.GetNewsSourceState(ctx, NewsSourceJin10)
@@ -86,10 +85,10 @@ func TestJin10CurlParseAndSettingsSave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get settings: %v", err)
 	}
-	if stored.Jin10Endpoint != "https://www.jin10.com/tv/index/list?app=jin10" {
+	if stored.Jin10Endpoint != defaultJin10FlashEndpoint {
 		t.Fatalf("stored endpoint = %q", stored.Jin10Endpoint)
 	}
-	if stored.Jin10Cookie != "did=placeholder-device; x-token=placeholder-token" {
+	if stored.Jin10Cookie != "" {
 		t.Fatalf("stored cookie = %q", stored.Jin10Cookie)
 	}
 	if stored.Jin10XAppID != "app-placeholder" || stored.Jin10XVersion != "2.1" {
@@ -99,10 +98,56 @@ func TestJin10CurlParseAndSettingsSave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal settings: %v", err)
 	}
-	for _, secretFragment := range []string{"placeholder-token", "placeholder-device", "app-placeholder"} {
+	for _, secretFragment := range []string{"app-placeholder"} {
 		if strings.Contains(string(encoded), secretFragment) {
 			t.Fatalf("settings JSON leaked private config %q: %s", secretFragment, encoded)
 		}
+	}
+}
+
+func TestJin10EnabledUsesDefaultFlashEndpointWithoutCurl(t *testing.T) {
+	var sawURL string
+	var sawAppID string
+	var sawVersion string
+	client := &http.Client{Transport: newsRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		sawURL = r.URL.String()
+		sawAppID = r.Header.Get("x-app-id")
+		sawVersion = r.Header.Get("x-version")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"data":[{"id":"20260623230511003800","time":"2026-06-23 23:05:11","type":0,"data":{"content":"加拿大央行行长麦克勒姆：前瞻指引中的虚假精确性是无益的。"}}]}`)),
+			Request:    r,
+		}, nil
+	})}
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	svc.httpClient = client
+	svc.newsAdapters[NewsSourceJin10] = jin10NewsSourceAdapter{service: svc, fallback: NewJin10NewsAdapterFromEnv(client)}
+	ctx := context.Background()
+	if err := svc.Initialize(ctx); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	enabled := true
+	if _, err := svc.CreateOrUpdateSettings(ctx, RequestCreateOrUpdateSettings{Jin10Enabled: &enabled}); err != nil {
+		t.Fatalf("enable jin10: %v", err)
+	}
+	configured, reason := svc.newsSourceConfigured(ctx, NewsSourceJin10)
+	if !configured {
+		t.Fatalf("configured = false, reason = %q", reason)
+	}
+	result, err := svc.RunNewsIngestJob(ctx, NewsSourceJin10)
+	if err != nil {
+		t.Fatalf("run ingest: %v", err)
+	}
+	if result.FetchedCount != 1 || result.RawInsertedCount != 1 {
+		t.Fatalf("run result = %+v", result)
+	}
+	if sawURL != defaultJin10FlashEndpoint {
+		t.Fatalf("url = %q", sawURL)
+	}
+	if sawAppID != defaultJin10XAppID || sawVersion != defaultJin10XVersion {
+		t.Fatalf("headers app/version = %q/%q", sawAppID, sawVersion)
 	}
 }
 
@@ -135,7 +180,7 @@ func TestJin10FetchUsesCurlConfigAndParsesNestedPayload(t *testing.T) {
 		}, nil
 	})}
 	adapter := &Jin10NewsAdapter{
-		endpoint:   "https://www.jin10.com/tv/index/list?app=jin10",
+		endpoint:   "https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1",
 		cookie:     "did=placeholder-device; x-token=placeholder-token",
 		xAppID:     "app-placeholder",
 		xVersion:   "2.1",
@@ -145,7 +190,7 @@ func TestJin10FetchUsesCurlConfigAndParsesNestedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetch jin10: %v", err)
 	}
-	if sawURL != "https://www.jin10.com/tv/index/list?app=jin10" {
+	if sawURL != defaultJin10FlashEndpoint {
 		t.Fatalf("url = %q", sawURL)
 	}
 	if sawCookie != "did=placeholder-device; x-token=placeholder-token" || sawAppID != "app-placeholder" || sawVersion != "2.1" {
@@ -160,6 +205,50 @@ func TestJin10FetchUsesCurlConfigAndParsesNestedPayload(t *testing.T) {
 	}
 	if raw.Title != "沪指午后走强" || raw.Language != "zh-CN" || raw.PublishedAt.IsZero() {
 		t.Fatalf("raw news = %+v", raw)
+	}
+}
+
+func TestJin10FetchEmptyDataWrapperDoesNotBecomeOKNews(t *testing.T) {
+	adapter := &Jin10NewsAdapter{
+		endpoint: "https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1",
+		cookie:   "did=placeholder-device; x-token=placeholder-token",
+		httpClient: &http.Client{Transport: newsRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"data":[],"message":"OK","status":200}`)),
+				Request:    r,
+			}, nil
+		})},
+	}
+	result, err := adapter.FetchSince(context.Background(), NewsSourceCursor{})
+	if err != nil {
+		t.Fatalf("fetch jin10: %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("items = %+v, want empty", result.Items)
+	}
+}
+
+func TestJin10LegacyTVEndpointUsesFlashEndpoint(t *testing.T) {
+	var sawURL string
+	adapter := &Jin10NewsAdapter{
+		endpoint: "https://www.jin10.com/tv/index/list?app=jin10",
+		httpClient: &http.Client{Transport: newsRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			sawURL = r.URL.String()
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"data":[]}`)),
+				Request:    r,
+			}, nil
+		})},
+	}
+	if _, err := adapter.FetchSince(context.Background(), NewsSourceCursor{}); err != nil {
+		t.Fatalf("fetch jin10: %v", err)
+	}
+	if sawURL != defaultJin10FlashEndpoint {
+		t.Fatalf("url = %q", sawURL)
 	}
 }
 

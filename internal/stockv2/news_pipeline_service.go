@@ -447,19 +447,21 @@ func (s *Service) newsSourceConfigured(ctx context.Context, source string) (bool
 	switch normalizeNewsSourceName(source) {
 	case NewsSourceJin10:
 		settings, err := s.GetSettings(ctx)
-		if err == nil && settings.Jin10Enabled {
-			if !settings.Jin10EndpointSet {
-				return false, "金十 curl endpoint 未配置"
-			}
-			if !settings.Jin10CookieSet {
-				return false, "金十 Cookie 未配置"
-			}
-			return true, ""
+		if err != nil {
+			return false, "读取设置失败"
 		}
-		if adapter, ok := s.newsAdapters[NewsSourceJin10].(jin10NewsSourceAdapter); ok && adapter.fallback != nil && strings.TrimSpace(adapter.fallback.endpoint) != "" {
-			return true, "使用环境变量 fallback"
+		if !settings.Jin10Enabled {
+			return false, "金十未启用"
 		}
-		return false, "金十未启用或未粘贴浏览器 curl"
+		if settings.Jin10EndpointSet {
+			return true, "使用自定义金十 endpoint"
+		}
+		if adapter, ok := s.newsAdapters[NewsSourceJin10].(jin10NewsSourceAdapter); ok && adapter.fallback != nil {
+			if _, err := normalizeJin10FlashEndpoint(adapter.fallback.endpoint); err == nil {
+				return true, "使用金十首页默认快讯接口"
+			}
+		}
+		return false, "金十默认接口不可用"
 	case NewsSourceFinancialJuice:
 		settings, err := s.GetSettings(ctx)
 		if err != nil {

@@ -276,10 +276,10 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
 
       <Panel
         title="中文消息源"
-        subtitle="金十市场快讯，粘贴浏览器复制的 curl 后由系统解析 endpoint / Cookie / 必要 header"
+        subtitle="金十市场快讯默认使用首页接口；可粘贴浏览器复制的 curl 覆盖 endpoint / Cookie / 必要 header"
         actions={
           <div className="flex flex-wrap gap-2">
-            <Button onClick={() => void handleFetchJin10()} disabled={!form.jin10Enabled || !settings.jin10EndpointSet || !settings.jin10CookieSet}>
+            <Button onClick={() => void handleFetchJin10()} disabled={!form.jin10Enabled}>
               处理一次
             </Button>
             <Button onClick={() => void handleClearJin10Config()} disabled={!settings.jin10EndpointSet && !settings.jin10CookieSet}>
@@ -294,7 +294,7 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
             label={
               <div>
                 <div>启用金十</div>
-                <div className="muted mt-0.5 text-xs">使用 www.jin10.com 市场快讯请求配置；敏感 Cookie 不会在 API 响应中回显。</div>
+                <div className="muted mt-0.5 text-xs">默认抓取 www.jin10.com 市场快讯；敏感 Cookie 不会在 API 响应中回显。</div>
               </div>
             }
             onChange={(checked) => update("jin10Enabled", checked)}
@@ -305,17 +305,17 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
               <span className="text-[var(--muted)]">配置状态</span>
               <div className="flex gap-1.5">
                 <Pill tone={settings.jin10EndpointSet ? "good" : "neutral"}>
-                  endpoint {settings.jin10EndpointSet ? "已保存" : "未保存"}
+                  endpoint {settings.jin10EndpointSet ? "已保存" : "默认接口"}
                 </Pill>
                 <Pill tone={settings.jin10CookieSet ? "good" : "neutral"}>
-                  Cookie {settings.jin10CookieSet ? "已保存" : "未保存"}
+                  Cookie {settings.jin10CookieSet ? "已保存" : "可选"}
                 </Pill>
               </div>
             </div>
-            <p className="muted mt-2 text-xs">从浏览器 Network 里复制金十市场快讯请求的 curl，保存后只展示配置状态。</p>
+            <p className="muted mt-2 text-xs">默认接口可直接抓取首页市场快讯；粘贴 curl 只用于覆盖默认请求配置。</p>
           </div>
 
-          <Field label="金十请求 curl" help="支持解析请求 URL、-b/--cookie、Cookie header、x-app-id、x-version。">
+          <Field label="金十请求 curl" help="可选。支持解析请求 URL、-b/--cookie、Cookie header、x-app-id、x-version。">
             <textarea
               rows={5}
               value={jin10CurlInput}
@@ -323,7 +323,7 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
                 setJin10CurlInput(e.target.value);
                 setDirty(true);
               }}
-              placeholder="curl 'https://...jin10.com/tv/index/list?app=jin10' -b '...' -H 'x-app-id: ...' -H 'x-version: ...'"
+              placeholder="curl 'https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1' -H 'x-app-id: bVBF4FyRTn5NJF5n' -H 'x-version: 1.0.0'"
             />
           </Field>
         </div>

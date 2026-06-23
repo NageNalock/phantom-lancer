@@ -15,12 +15,15 @@ import (
 )
 
 const (
-	NewsSourceJin10          = "jin10"
-	jin10EndpointEnv         = "STOCKV2_JIN10_ENDPOINT"
-	jin10TokenEnv            = "STOCKV2_JIN10_TOKEN"
-	newsSourceMaxBodyBytes   = 2 << 20
-	defaultNewsSourceTimeout = 10 * time.Second
-	maxJin10CookieBytes      = 16 << 10
+	NewsSourceJin10           = "jin10"
+	jin10EndpointEnv          = "STOCKV2_JIN10_ENDPOINT"
+	jin10TokenEnv             = "STOCKV2_JIN10_TOKEN"
+	defaultJin10FlashEndpoint = "https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1"
+	defaultJin10XAppID        = "bVBF4FyRTn5NJF5n"
+	defaultJin10XVersion      = "1.0.0"
+	newsSourceMaxBodyBytes    = 2 << 20
+	defaultNewsSourceTimeout  = 10 * time.Second
+	maxJin10CookieBytes       = 16 << 10
 )
 
 type Jin10NewsAdapter struct {
@@ -40,9 +43,15 @@ type Jin10CurlConfig struct {
 }
 
 func NewJin10NewsAdapterFromEnv(httpClient *http.Client) *Jin10NewsAdapter {
+	endpoint := strings.TrimSpace(os.Getenv(jin10EndpointEnv))
+	if endpoint == "" {
+		endpoint = defaultJin10FlashEndpoint
+	}
 	return &Jin10NewsAdapter{
-		endpoint:   strings.TrimSpace(os.Getenv(jin10EndpointEnv)),
+		endpoint:   endpoint,
 		token:      strings.TrimSpace(os.Getenv(jin10TokenEnv)),
+		xAppID:     defaultJin10XAppID,
+		xVersion:   defaultJin10XVersion,
 		httpClient: httpClient,
 	}
 }
@@ -67,7 +76,10 @@ func (a jin10NewsSourceAdapter) FetchSince(ctx context.Context, cursor NewsSourc
 	if err != nil {
 		return NewsSourceFetchResult{}, err
 	}
-	if settings.Jin10Enabled && strings.TrimSpace(settings.Jin10Endpoint) != "" && strings.TrimSpace(settings.Jin10Cookie) != "" {
+	if !settings.Jin10Enabled {
+		return NewsSourceFetchResult{Disabled: true, FetchedAt: time.Now()}, nil
+	}
+	if strings.TrimSpace(settings.Jin10Endpoint) != "" {
 		adapter := &Jin10NewsAdapter{
 			endpoint:   settings.Jin10Endpoint,
 			cookie:     settings.Jin10Cookie,
@@ -96,10 +108,7 @@ func (a *Jin10NewsAdapter) SourceName() string {
 }
 
 func (a *Jin10NewsAdapter) FetchSince(ctx context.Context, cursor NewsSourceCursor) (NewsSourceFetchResult, error) {
-	if strings.TrimSpace(a.endpoint) == "" {
-		return NewsSourceFetchResult{Disabled: true, FetchedAt: time.Now()}, nil
-	}
-	endpoint, err := url.Parse(a.endpoint)
+	endpoint, err := normalizeJin10FlashEndpoint(a.endpoint)
 	if err != nil {
 		return NewsSourceFetchResult{}, err
 	}
@@ -120,7 +129,7 @@ func (a *Jin10NewsAdapter) FetchSince(ctx context.Context, cursor NewsSourceCurs
 	if err != nil {
 		return NewsSourceFetchResult{}, err
 	}
-	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Origin", "https://www.jin10.com")
 	req.Header.Set("Referer", "https://www.jin10.com/")
@@ -131,12 +140,16 @@ func (a *Jin10NewsAdapter) FetchSince(ctx context.Context, cursor NewsSourceCurs
 	if a.cookie != "" {
 		req.Header.Set("Cookie", a.cookie)
 	}
-	if a.xAppID != "" {
-		req.Header.Set("x-app-id", a.xAppID)
+	xAppID := strings.TrimSpace(a.xAppID)
+	if xAppID == "" {
+		xAppID = defaultJin10XAppID
 	}
-	if a.xVersion != "" {
-		req.Header.Set("x-version", a.xVersion)
+	xVersion := strings.TrimSpace(a.xVersion)
+	if xVersion == "" {
+		xVersion = defaultJin10XVersion
 	}
+	req.Header.Set("x-app-id", xAppID)
+	req.Header.Set("x-version", xVersion)
 	client := a.httpClient
 	if client == nil {
 		client = http.DefaultClient
@@ -262,7 +275,7 @@ func cleanJin10CurlConfig(cfg Jin10CurlConfig) (Jin10CurlConfig, error) {
 	if cfg.Endpoint == "" {
 		return Jin10CurlConfig{}, ErrJin10ConfigMissing
 	}
-	endpoint, err := url.Parse(cfg.Endpoint)
+	endpoint, err := normalizeJin10FlashEndpoint(cfg.Endpoint)
 	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
 		return Jin10CurlConfig{}, errors.New("invalid jin10 endpoint")
 	}
@@ -272,13 +285,50 @@ func cleanJin10CurlConfig(cfg Jin10CurlConfig) (Jin10CurlConfig, error) {
 	if !isJin10PublicHost(endpoint.Hostname()) {
 		return Jin10CurlConfig{}, errors.New("jin10 endpoint must be under jin10.com")
 	}
-	if cfg.Cookie == "" || !strings.Contains(cfg.Cookie, "=") {
-		return Jin10CurlConfig{}, ErrJin10ConfigMissing
+	cfg.Endpoint = endpoint.String()
+	if cfg.XAppID == "" {
+		cfg.XAppID = defaultJin10XAppID
 	}
-	if strings.ContainsAny(cfg.Cookie, "\r\n") || len(cfg.Cookie) > maxJin10CookieBytes {
+	if cfg.XVersion == "" {
+		cfg.XVersion = defaultJin10XVersion
+	}
+	if cfg.Cookie != "" && (!strings.Contains(cfg.Cookie, "=") || strings.ContainsAny(cfg.Cookie, "\r\n") || len(cfg.Cookie) > maxJin10CookieBytes) {
 		return Jin10CurlConfig{}, errors.New("jin10 cookie is invalid")
 	}
 	return cfg, nil
+}
+
+func normalizeJin10FlashEndpoint(raw string) (*url.URL, error) {
+	endpointRaw := strings.TrimSpace(raw)
+	if endpointRaw == "" {
+		endpointRaw = defaultJin10FlashEndpoint
+	}
+	endpoint, err := url.Parse(endpointRaw)
+	if err != nil {
+		return nil, err
+	}
+	// ponytail: Older UI examples pointed at the TV/live endpoint; keep old stored configs working by routing them to the actual homepage flash endpoint.
+	if isLegacyJin10TVEndpoint(endpoint) {
+		return url.Parse(defaultJin10FlashEndpoint)
+	}
+	if strings.EqualFold(endpoint.Hostname(), "flash-api.jin10.com") && strings.TrimRight(endpoint.EscapedPath(), "/") == "/get_flash_list" {
+		query := endpoint.Query()
+		if query.Get("channel") == "" {
+			query.Set("channel", "-8200")
+		}
+		if query.Get("vip") == "" {
+			query.Set("vip", "1")
+		}
+		endpoint.RawQuery = query.Encode()
+	}
+	return endpoint, nil
+}
+
+func isLegacyJin10TVEndpoint(endpoint *url.URL) bool {
+	if endpoint == nil {
+		return false
+	}
+	return strings.TrimRight(endpoint.EscapedPath(), "/") == "/tv/index/list"
 }
 
 func isJin10PublicHost(host string) bool {
@@ -296,13 +346,19 @@ func parseNewsSourceItems(body []byte) ([]map[string]any, string, error) {
 		return nil, "", err
 	}
 	var items []map[string]any
+	hasWrappedItems := false
 	for _, key := range []string{"items", "data", "list", "result"} {
-		if collected := collectNewsSourceMaps(wrapped[key], 0); len(collected) > 0 {
+		value, ok := wrapped[key]
+		if !ok {
+			continue
+		}
+		hasWrappedItems = true
+		if collected := collectNewsSourceMaps(value, 0); len(collected) > 0 {
 			items = collected
 			break
 		}
 	}
-	if len(items) == 0 {
+	if len(items) == 0 && !hasWrappedItems {
 		items = collectNewsSourceMaps(wrapped, 0)
 	}
 	nextCursor := firstPayloadString(wrapped, "nextCursor", "cursor")
