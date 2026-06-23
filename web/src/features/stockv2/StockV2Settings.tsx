@@ -10,12 +10,14 @@ type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
 export function StockV2Settings({ actions, data, runAction }: { actions: AppActions; data: AppData; runAction: RunAction }) {
   const settings = data.stockv2.settings;
   const [form, setForm] = useState<Partial<StockV2Settings>>({});
+  const [jin10CurlInput, setJin10CurlInput] = useState("");
   const [financialJuiceCookieInput, setFinancialJuiceCookieInput] = useState("");
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
     if (settings) {
       setForm(settings);
+      setJin10CurlInput("");
       setFinancialJuiceCookieInput("");
       setDirty(false);
     }
@@ -29,6 +31,9 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
   async function handleSave() {
     await runAction("保存设置", async () => {
       const body: Record<string, unknown> = { ...form };
+      if (jin10CurlInput.trim()) {
+        body.jin10CurlInput = jin10CurlInput;
+      }
       if (financialJuiceCookieInput.trim()) {
         body.financialJuiceCookieInput = financialJuiceCookieInput;
       }
@@ -36,8 +41,26 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
         method: "PUT",
         body,
       });
+      setJin10CurlInput("");
       setFinancialJuiceCookieInput("");
       setDirty(false);
+    });
+  }
+
+  async function handleClearJin10Config() {
+    await runAction("清除金十配置", async () => {
+      await actions.api("/api/stockv2/settings", {
+        method: "PUT",
+        body: { jin10ClearConfig: true },
+      });
+      setJin10CurlInput("");
+      setDirty(false);
+    });
+  }
+
+  async function handleFetchJin10() {
+    await runAction("运行金十消息处理", async () => {
+      await actions.api("/api/stockv2/news/sources/jin10/run-once", { method: "POST" });
     });
   }
 
@@ -54,7 +77,7 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
 
   async function handleFetchFinancialJuice() {
     await runAction("运行 FinancialJuice 消息处理", async () => {
-      await actions.api("/api/stockv2/news/sources/financialjuice/fetch", { method: "POST" });
+      await actions.api("/api/stockv2/news/sources/financialjuice/run-once", { method: "POST" });
     });
   }
 
@@ -111,6 +134,48 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
                 上次定时更新：{formatTime(settings.lastScheduledUpdate)}
               </p>
             ) : null}
+          </div>
+        </div>
+      </Panel>
+
+      <Panel
+        title="基础画像维护"
+        subtitle="定期为主数据生成确定性股票画像，不触发全市场 AI"
+      >
+        <div className="grid gap-4">
+          <Toggle
+            checked={!!form.baseProfileAutoMaintainEnabled}
+            label={
+              <div>
+                <div>启用基础画像自动维护</div>
+                <div className="muted mt-0.5 text-xs">只运行本地确定性 RebuildStockProfiles；AI 画像仍需单只手动触发。</div>
+              </div>
+            }
+            onChange={(checked) => update("baseProfileAutoMaintainEnabled", checked)}
+          />
+
+          <Field label="维护周期 (秒)" help="建议 86400 秒（每天一次）；关闭时不会后台运行。">
+            <input
+              min={3600}
+              step={3600}
+              type="number"
+              value={form.baseProfileMaintainIntervalSeconds ?? 86400}
+              onChange={(e) => update("baseProfileMaintainIntervalSeconds", Number(e.target.value))}
+            />
+          </Field>
+
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-[var(--muted)]">维护状态</span>
+              <Pill tone={form.baseProfileAutoMaintainEnabled ? "good" : "neutral"}>
+                {form.baseProfileAutoMaintainEnabled ? "已开启" : "手动维护"}
+              </Pill>
+            </div>
+            <div className="mt-2 grid gap-1 text-xs text-[var(--muted)]">
+              <span>上次：{formatTime(settings.baseProfileLastMaintainAt)}</span>
+              <span>下次：{formatTime(settings.baseProfileNextMaintainAt)}</span>
+              {settings.baseProfileLastMaintainResult ? <span className="break-words">结果：{settings.baseProfileLastMaintainResult}</span> : null}
+            </div>
           </div>
         </div>
       </Panel>
@@ -210,6 +275,61 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
       </Panel>
 
       <Panel
+        title="中文消息源"
+        subtitle="金十市场快讯，粘贴浏览器复制的 curl 后由系统解析 endpoint / Cookie / 必要 header"
+        actions={
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => void handleFetchJin10()} disabled={!form.jin10Enabled || !settings.jin10EndpointSet || !settings.jin10CookieSet}>
+              处理一次
+            </Button>
+            <Button onClick={() => void handleClearJin10Config()} disabled={!settings.jin10EndpointSet && !settings.jin10CookieSet}>
+              清除配置
+            </Button>
+          </div>
+        }
+      >
+        <div className="grid gap-4">
+          <Toggle
+            checked={!!form.jin10Enabled}
+            label={
+              <div>
+                <div>启用金十</div>
+                <div className="muted mt-0.5 text-xs">使用 www.jin10.com 市场快讯请求配置；敏感 Cookie 不会在 API 响应中回显。</div>
+              </div>
+            }
+            onChange={(checked) => update("jin10Enabled", checked)}
+          />
+
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-[var(--muted)]">配置状态</span>
+              <div className="flex gap-1.5">
+                <Pill tone={settings.jin10EndpointSet ? "good" : "neutral"}>
+                  endpoint {settings.jin10EndpointSet ? "已保存" : "未保存"}
+                </Pill>
+                <Pill tone={settings.jin10CookieSet ? "good" : "neutral"}>
+                  Cookie {settings.jin10CookieSet ? "已保存" : "未保存"}
+                </Pill>
+              </div>
+            </div>
+            <p className="muted mt-2 text-xs">从浏览器 Network 里复制金十市场快讯请求的 curl，保存后只展示配置状态。</p>
+          </div>
+
+          <Field label="金十请求 curl" help="支持解析请求 URL、-b/--cookie、Cookie header、x-app-id、x-version。">
+            <textarea
+              rows={5}
+              value={jin10CurlInput}
+              onChange={(e) => {
+                setJin10CurlInput(e.target.value);
+                setDirty(true);
+              }}
+              placeholder="curl 'https://...jin10.com/tv/index/list?app=jin10' -b '...' -H 'x-app-id: ...' -H 'x-version: ...'"
+            />
+          </Field>
+        </div>
+      </Panel>
+
+      <Panel
         title="英文消息源"
         subtitle="FinancialJuice 走统一抓取、归一化与关联链路"
         actions={
@@ -299,6 +419,7 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
         <Button
           onClick={() => {
             setForm(settings);
+            setJin10CurlInput("");
             setFinancialJuiceCookieInput("");
             setDirty(false);
           }}

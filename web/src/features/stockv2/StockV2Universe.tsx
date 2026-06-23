@@ -1,7 +1,7 @@
 import { ArrowClockwise, CaretLeft, CaretRight, Clock, ClockCounterClockwise, MagnifyingGlass, Plus, X } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import type { AppActions } from "../../app/App";
-import type { AppData, StockV2Instrument, StockV2UpdateJob, StockV2UniverseUpdateRequest } from "../../app/types";
+import type { AppData, StockV2Instrument, StockV2StockProfileSummary, StockV2UpdateJob, StockV2UniverseUpdateRequest } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, Field, Panel, Pill } from "../../components/ui";
 import { stockV2InstrumentTypeLabel, stockV2TriggerTypeLabel, stockV2UpdateStatusLabel, stockV2UpdateStatusTone } from "../../domain/labels";
@@ -62,6 +62,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   const [searchQuery, setSearchQuery] = useState("");
   const [addHolding, setAddHolding] = useState<{ inst: StockV2Instrument } | null>(null);
   const [selectedInst, setSelectedInst] = useState<StockV2Instrument | null>(null);
+  const [profileSummaries, setProfileSummaries] = useState<Record<string, StockV2StockProfileSummary>>({});
 
   const portfolios = stockv2.portfolios || [];
   const isSearching = searchQuery.trim().length > 0;
@@ -97,23 +98,42 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         });
         setPage(0);
         setTotalCount(data.total ?? items.length);
+        await loadProfileSummaries(items);
       } else {
         const data = await actions.api<InstrumentsPage>(
           `/api/stockv2/instruments?limit=${PAGE_SIZE}&offset=${pageNum * PAGE_SIZE}`
         );
+        const items = Array.isArray(data.items) ? data.items : [];
         setInstrumentsPage({
           ...data,
-          items: Array.isArray(data.items) ? data.items : [],
+          items,
         });
         setPage(pageNum);
         if (data.total !== undefined) {
           setTotalCount(data.total);
         }
+        await loadProfileSummaries(items);
       }
     } catch (e) {
       actions.setToast(`加载失败：${friendlyError(e)}`, "danger");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadProfileSummaries(items: StockV2Instrument[]) {
+    const symbols = items.map((item) => item.symbol).filter(Boolean);
+    if (symbols.length === 0) {
+      setProfileSummaries({});
+      return;
+    }
+    try {
+      const res = await actions.api<{ items?: Record<string, StockV2StockProfileSummary> }>(
+        `/api/stockv2/profiles/summaries?symbols=${encodeURIComponent(symbols.join(","))}`,
+      );
+      setProfileSummaries(res.items ?? {});
+    } catch {
+      setProfileSummaries({});
     }
   }
 
@@ -255,6 +275,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
                     <th className="py-2 pr-4 font-medium">类型</th>
                     <th className="py-2 pr-4 font-medium">行业</th>
                     <th className="py-2 pr-4 font-medium">板块</th>
+                    <th className="py-2 pr-4 font-medium">画像</th>
                     <th className="py-2 pr-4 font-medium">状态</th>
                     <th className="py-2 pr-4 font-medium">更新时间</th>
                     <th className="py-2 pr-2 text-right font-medium">操作</th>
@@ -267,6 +288,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
                       inst={inst}
                       onAdd={() => setAddHolding({ inst })}
                       onClick={() => setSelectedInst(inst)}
+                      profile={profileSummaries[inst.symbol]}
                     />
                   ))}
                 </tbody>
@@ -397,9 +419,11 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   );
 }
 
-function StockRow({ inst, onAdd, onClick }: { inst: StockV2Instrument; onAdd: () => void; onClick?: () => void }) {
+function StockRow({ inst, onAdd, onClick, profile }: { inst: StockV2Instrument; onAdd: () => void; onClick?: () => void; profile?: StockV2StockProfileSummary }) {
   const marketLabel = { SH: "沪市", SZ: "深市", BJ: "北市" }[inst.market] || inst.market;
   const statusTone = inst.status === "active" ? "good" : "neutral";
+  const profileTone = profile?.status === "ready" ? "good" : profile?.status === "partial" ? "warn" : "neutral";
+  const aiTone = profile?.aiProfileStatus === "ready" ? "good" : profile?.aiProfileStatus === "failed" ? "danger" : "neutral";
 
   return (
     <tr
@@ -424,6 +448,12 @@ function StockRow({ inst, onAdd, onClick }: { inst: StockV2Instrument; onAdd: ()
       </td>
       <td className="py-2 pr-4 text-[var(--muted)]">{inst.industry || "-"}</td>
       <td className="py-2 pr-4 text-[var(--muted)]">{inst.sector || "-"}</td>
+      <td className="py-2 pr-4">
+        <div className="flex flex-wrap gap-1">
+          <Pill tone={profileTone}>{profile?.status === "ready" ? "基础" : profile?.status === "partial" ? "部分" : "缺失"}</Pill>
+          <Pill tone={aiTone}>AI {profile?.aiProfileStatus || "missing"}</Pill>
+        </div>
+      </td>
       <td className="py-2 pr-4">
         <Pill tone={statusTone}>{inst.status === "active" ? "活跃" : inst.status}</Pill>
       </td>

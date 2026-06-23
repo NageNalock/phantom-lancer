@@ -15,13 +15,14 @@ import (
 
 // Service 主业务服务
 type Service struct {
-	store      *Store
-	log        *slog.Logger
-	httpClient *http.Client
-	bgMu       sync.Mutex
-	bgCancel   context.CancelFunc
-	bgWg       sync.WaitGroup
-	settings   StockV2Settings
+	store         *Store
+	log           *slog.Logger
+	httpClient    *http.Client
+	bgMu          sync.Mutex
+	bgCancel      context.CancelFunc
+	bgWg          sync.WaitGroup
+	settings      StockV2Settings
+	baseProfileMu sync.Mutex
 
 	universeSource  *UniverseDataSource
 	dailyBarsSource *DailyBarsSource
@@ -42,14 +43,13 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 		httpClient:      httpClient,
 		universeSource:  NewUniverseDataSource(nil, httpClient),
 		dailyBarsSource: NewDailyBarsSource(nil, httpClient),
-		newsAdapters: map[string]NewsSourceAdapter{
-			NewsSourceJin10: NewJin10NewsAdapterFromEnv(httpClient),
-		},
-		agentTaskPool: newAgentTaskPool(defaultCleanupInterval),
+		newsAdapters:    map[string]NewsSourceAdapter{},
+		agentTaskPool:   newAgentTaskPool(defaultCleanupInterval),
 		agentCodexCommand: func(ctx context.Context, args ...string) ([]byte, error) {
 			return exec.CommandContext(ctx, "codex", args...).CombinedOutput()
 		},
 	}
+	svc.newsAdapters[NewsSourceJin10] = jin10NewsSourceAdapter{service: svc, fallback: NewJin10NewsAdapterFromEnv(httpClient)}
 	svc.newsAdapters[NewsSourceFinancialJuice] = financialJuiceNewsSourceAdapter{service: svc}
 	return svc
 }
@@ -711,6 +711,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 	if err := s.store.PruneUpdateJobs(ctx, 100); err != nil {
 		s.log.Warn("prune update jobs failed", "error", err)
 	}
+	s.maybeRunBaseProfileMaintenance(ctx, "universe_update")
 }
 
 // GetUpdateJob 获取更新任务
@@ -736,6 +737,12 @@ func (s *Service) GetUpdateProgress(ctx context.Context, jobID string) (StockV2U
 // CreateOrUpdateSettings 创建或更新配置
 func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateOrUpdateSettings) (StockV2Settings, error) {
 	// 应用更新
+	prevAuto := s.settings.AutoUpdateEnabled
+	prevDaily := s.settings.DailyBarsAutoEnabled
+	prevBaseProfile := s.settings.BaseProfileAutoMaintainEnabled
+	prevInterval := s.settings.UpdateIntervalSec
+	prevBaseProfileInterval := s.settings.BaseProfileMaintainIntervalSeconds
+	prevNewsBG := s.hasEnabledNewsSources(ctx)
 	settings := s.settings
 	if req.AutoUpdateEnabled != nil {
 		settings.AutoUpdateEnabled = *req.AutoUpdateEnabled
@@ -758,8 +765,50 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	if req.DailyBarsAutoEnabled != nil {
 		settings.DailyBarsAutoEnabled = *req.DailyBarsAutoEnabled
 	}
+	if req.Jin10Enabled != nil {
+		settings.Jin10Enabled = *req.Jin10Enabled
+	}
+	if req.Jin10ClearConfig != nil && *req.Jin10ClearConfig {
+		settings.Jin10Endpoint = ""
+		settings.Jin10Cookie = ""
+		settings.Jin10XAppID = ""
+		settings.Jin10XVersion = ""
+	}
+	if req.Jin10CurlInput != nil && strings.TrimSpace(*req.Jin10CurlInput) != "" {
+		cfg, err := ParseJin10CurlInput(*req.Jin10CurlInput)
+		if err != nil {
+			return StockV2Settings{}, err
+		}
+		settings.Jin10Endpoint = cfg.Endpoint
+		settings.Jin10Cookie = cfg.Cookie
+		settings.Jin10XAppID = cfg.XAppID
+		settings.Jin10XVersion = cfg.XVersion
+	}
+	settings.Jin10EndpointSet = strings.TrimSpace(settings.Jin10Endpoint) != ""
+	settings.Jin10CookieSet = strings.TrimSpace(settings.Jin10Cookie) != ""
 	if req.FinancialJuiceEnabled != nil {
 		settings.FinancialJuiceEnabled = *req.FinancialJuiceEnabled
+	}
+	if req.BaseProfileAutoMaintainEnabled != nil {
+		settings.BaseProfileAutoMaintainEnabled = *req.BaseProfileAutoMaintainEnabled
+	}
+	if req.BaseProfileMaintainIntervalSeconds != nil {
+		settings.BaseProfileMaintainIntervalSeconds = *req.BaseProfileMaintainIntervalSeconds
+	}
+	if settings.BaseProfileMaintainIntervalSeconds <= 0 {
+		settings.BaseProfileMaintainIntervalSeconds = 86400
+	}
+	if settings.BaseProfileAutoMaintainEnabled {
+		interval := time.Duration(settings.BaseProfileMaintainIntervalSeconds) * time.Second
+		if !prevBaseProfile {
+			settings.BaseProfileNextMaintainAt = time.Now()
+		} else if settings.BaseProfileLastMaintainAt.IsZero() {
+			settings.BaseProfileNextMaintainAt = time.Now().Add(interval)
+		} else {
+			settings.BaseProfileNextMaintainAt = settings.BaseProfileLastMaintainAt.Add(interval)
+		}
+	} else {
+		settings.BaseProfileNextMaintainAt = time.Time{}
 	}
 	if req.FinancialJuiceClearCookie != nil && *req.FinancialJuiceClearCookie {
 		settings.FinancialJuiceCookie = ""
@@ -777,19 +826,22 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil {
 		return StockV2Settings{}, wrapError(err, "save settings")
 	}
+	if err := s.syncNewsSourceStatesForSettings(ctx, settings); err != nil {
+		return StockV2Settings{}, wrapError(err, "sync news source states")
+	}
 
 	// 更新本地配置
-	prevAuto := s.settings.AutoUpdateEnabled
-	prevDaily := s.settings.DailyBarsAutoEnabled
-	prevInterval := s.settings.UpdateIntervalSec
 	s.settings = settings
 
-	// 主数据自动更新 或 日 K 定时增量 任一开启都需要后台调度。
+	// 主数据自动更新 / 日 K 定时增量 / base profile 自动维护任一开启都需要后台调度。
 	// 任一开关从关→开，或主数据周期变化时重启后台，以拾取新 ticker。
-	needBG := settings.AutoUpdateEnabled || settings.DailyBarsAutoEnabled
-	prevNeedBG := prevAuto || prevDaily
+	newsBG := s.hasEnabledNewsSources(ctx)
+	needBG := settings.AutoUpdateEnabled || settings.DailyBarsAutoEnabled || settings.BaseProfileAutoMaintainEnabled || newsBG
+	prevNeedBG := prevAuto || prevDaily || prevBaseProfile || prevNewsBG
 	if needBG {
-		if !prevNeedBG || (prevAuto && prevInterval != settings.UpdateIntervalSec) {
+		if !prevNeedBG ||
+			(prevAuto && prevInterval != settings.UpdateIntervalSec) ||
+			(prevBaseProfile && prevBaseProfileInterval != settings.BaseProfileMaintainIntervalSeconds) {
 			if prevNeedBG {
 				s.StopBackground()
 			}
@@ -864,6 +916,20 @@ func (s *Service) StartBackground(ctx context.Context) {
 	go func() {
 		defer s.bgWg.Done()
 		s.runScheduledMonitors(bgCtx)
+	}()
+
+	// 消息面源调度（按各 source 的 next_run_at / backoff 独立触发）。
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runNewsSourceScheduler(bgCtx)
+	}()
+
+	// base profile 自动维护：只维护确定性画像，不触发全市场 AI。
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runBaseProfileMaintenanceScheduler(bgCtx)
 	}()
 }
 

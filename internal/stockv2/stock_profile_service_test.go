@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildStockProfileForStock(t *testing.T) {
@@ -125,6 +126,29 @@ func TestUpsertInstrumentWithProfileMaintainsProfile(t *testing.T) {
 	}
 }
 
+func TestEnableBaseProfileMaintenanceSchedulesImmediateRun(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	if err := svc.Initialize(ctx); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	enabled := true
+	updated, err := svc.CreateOrUpdateSettings(ctx, RequestCreateOrUpdateSettings{
+		BaseProfileAutoMaintainEnabled: &enabled,
+	})
+	if err != nil {
+		t.Fatalf("enable base profile maintenance: %v", err)
+	}
+	if !updated.BaseProfileAutoMaintainEnabled {
+		t.Fatalf("base profile auto maintain disabled: %+v", updated)
+	}
+	if updated.BaseProfileNextMaintainAt.IsZero() || updated.BaseProfileNextMaintainAt.After(updated.UpdatedAt.Add(2*time.Second)) {
+		t.Fatalf("next maintain at = %v, updated at = %v; want immediate first run", updated.BaseProfileNextMaintainAt, updated.UpdatedAt)
+	}
+}
+
 func TestRunAgentStockProfileSummaryUpdatesBilingualFields(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStockProfileTestService(t)
@@ -238,7 +262,9 @@ func newStockProfileTestService(t *testing.T) (*Service, func()) {
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	return NewService(store, nil, nil), func() {
+	svc := NewService(store, nil, nil)
+	return svc, func() {
+		svc.StopBackground()
 		if err := store.Close(); err != nil {
 			t.Fatalf("close store: %v", err)
 		}

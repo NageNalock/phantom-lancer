@@ -66,8 +66,8 @@ type AssetCurveResponse struct {
 	PortfolioID string             `json:"portfolioId"`
 	Points      []AssetCurvePoint  `json:"points"`
 	Markers     []AssetCurveMarker `json:"markers"`
-	Start       string             `json:"start"` // "2006-01-02"
-	End         string             `json:"end"`   // "2006-01-02"
+	Start       string             `json:"start"`     // "2006-01-02"
+	End         string             `json:"end"`       // "2006-01-02"
 	Estimated   bool               `json:"estimated"` // 有 symbol 缺日 K 用了估算价
 }
 

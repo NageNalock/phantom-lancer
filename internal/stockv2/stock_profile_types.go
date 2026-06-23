@@ -64,6 +64,17 @@ type StockProfileListFilter struct {
 	Offset         int
 }
 
+type StockProfileSummary struct {
+	Symbol              string    `json:"symbol"`
+	Status              string    `json:"status"`
+	BusinessSummary     string    `json:"businessSummary,omitempty"`
+	AIProfileStatus     string    `json:"aiProfileStatus,omitempty"`
+	AIProfileModel      string    `json:"aiProfileModel,omitempty"`
+	AIProfileConfidence float64   `json:"aiProfileConfidence,omitempty"`
+	AIProfileUpdatedAt  time.Time `json:"aiProfileUpdatedAt,omitempty"`
+	UpdatedAt           time.Time `json:"updatedAt,omitempty"`
+}
+
 type RebuildStockProfilesResult struct {
 	Total       int             `json:"total"`
 	Success     int             `json:"success"`

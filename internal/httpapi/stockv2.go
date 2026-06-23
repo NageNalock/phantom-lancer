@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strconv"
 
@@ -35,6 +34,7 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/instruments/market/{market}", s.handleGetInstrumentsByMarket)
 	mux.HandleFunc("GET /api/stockv2/instruments/search", s.handleSearchInstruments)
 	mux.HandleFunc("GET /api/stockv2/profiles", s.handleStockV2ListStockProfiles)
+	mux.HandleFunc("GET /api/stockv2/profiles/summaries", s.handleStockV2ListStockProfileSummaries)
 	mux.HandleFunc("GET /api/stockv2/profiles/{symbol}", s.handleStockV2GetStockProfile)
 	mux.HandleFunc("POST /api/stockv2/profiles/{symbol}/build", s.handleStockV2BuildStockProfile)
 	mux.HandleFunc("POST /api/stockv2/profiles/{symbol}/run-agent", s.handleStockV2RunStockProfileAgent)
@@ -103,7 +103,14 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/stockv2/settings", s.handleStockV2UpdateSettings)
 
 	// 消息源 adapter：只落 RawNews，不触发 Agent / Review。
+	mux.HandleFunc("GET /api/stockv2/news/sources", s.handleStockV2ListNewsSources)
+	mux.HandleFunc("PUT /api/stockv2/news/sources/{source}/config", s.handleStockV2UpdateNewsSourceConfig)
+	mux.HandleFunc("POST /api/stockv2/news/sources/{source}/run-once", s.handleStockV2RunNewsSourceOnce)
 	mux.HandleFunc("POST /api/stockv2/news/sources/{source}/fetch", s.handleStockV2FetchRawNewsSource)
+	mux.HandleFunc("GET /api/stockv2/news/raw", s.handleStockV2ListRawNews)
+	mux.HandleFunc("GET /api/stockv2/news/raw/{id}", s.handleStockV2GetRawNews)
+	mux.HandleFunc("GET /api/stockv2/news/events", s.handleStockV2ListNewsEvents)
+	mux.HandleFunc("GET /api/stockv2/news/link-candidates", s.handleStockV2ListNewsLinkCandidates)
 
 	// 日级历史行情（Daily Bars）
 	mux.HandleFunc("POST /api/stockv2/history/daily/ensure", s.handleEnsureDailyBars)
@@ -545,14 +552,7 @@ func (s *Server) handleStockV2FetchRawNewsSource(w http.ResponseWriter, r *http.
 	}
 	result, err := s.stockV2.FetchRawNewsFromSource(r.Context(), r.PathValue("source"))
 	if err != nil {
-		switch {
-		case errors.Is(err, stockv2.ErrNewsAdapterDisabled),
-			errors.Is(err, stockv2.ErrUnsupportedNewsSource),
-			errors.Is(err, stockv2.ErrFinancialJuiceCookieMissing):
-			http.Error(w, err.Error(), http.StatusBadRequest)
-		default:
-			http.Error(w, err.Error(), http.StatusBadGateway)
-		}
+		http.Error(w, err.Error(), stockV2NewsHTTPStatus(err))
 		return
 	}
 	s.writeJSON(w, result)

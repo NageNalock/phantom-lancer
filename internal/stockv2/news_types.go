@@ -48,6 +48,7 @@ var (
 	ErrInvalidNewsLinkCandidateKey = errors.New("news link candidate requires event, symbol and match method")
 	ErrNewsAdapterDisabled         = errors.New("news adapter disabled")
 	ErrUnsupportedNewsSource       = errors.New("unsupported news source")
+	ErrJin10ConfigMissing          = errors.New("jin10 curl config missing")
 	ErrFinancialJuiceCookieMissing = errors.New("financialjuice cookie missing")
 	ErrNewsSourceAdapterNotFound   = errors.New("news source adapter not found")
 )
@@ -85,6 +86,16 @@ type NewsSourceState struct {
 	Enabled             bool      `json:"enabled"`
 	Status              string    `json:"status"`
 	Cursor              string    `json:"cursor,omitempty"`
+	PollIntervalSeconds int       `json:"pollIntervalSeconds"`
+	JitterSeconds       int       `json:"jitterSeconds"`
+	BatchLimit          int       `json:"batchLimit"`
+	ProcessLimit        int       `json:"processLimit"`
+	BackoffBaseSeconds  int       `json:"backoffBaseSeconds"`
+	BackoffMaxSeconds   int       `json:"backoffMaxSeconds"`
+	NextRunAt           time.Time `json:"nextRunAt,omitempty"`
+	LastRunAt           time.Time `json:"lastRunAt,omitempty"`
+	LastRunStatus       string    `json:"lastRunStatus,omitempty"`
+	LastRunError        string    `json:"lastRunError,omitempty"`
 	LastFetchAt         time.Time `json:"lastFetchAt,omitempty"`
 	LastSuccessAt       time.Time `json:"lastSuccessAt,omitempty"`
 	LastErrorAt         time.Time `json:"lastErrorAt,omitempty"`
@@ -95,6 +106,23 @@ type NewsSourceState struct {
 	NewsEventCount      int       `json:"newsEventCount"`
 	LinkCandidateCount  int       `json:"linkCandidateCount"`
 	UpdatedAt           time.Time `json:"updatedAt"`
+}
+
+type NewsSourceOverview struct {
+	State      NewsSourceState `json:"state"`
+	Configured bool            `json:"configured"`
+	Reason     string          `json:"reason,omitempty"`
+}
+
+type NewsSourceConfigPatch struct {
+	Enabled             *bool      `json:"enabled,omitempty"`
+	PollIntervalSeconds *int       `json:"pollIntervalSeconds,omitempty"`
+	JitterSeconds       *int       `json:"jitterSeconds,omitempty"`
+	BatchLimit          *int       `json:"batchLimit,omitempty"`
+	ProcessLimit        *int       `json:"processLimit,omitempty"`
+	BackoffBaseSeconds  *int       `json:"backoffBaseSeconds,omitempty"`
+	BackoffMaxSeconds   *int       `json:"backoffMaxSeconds,omitempty"`
+	NextRunAt           *time.Time `json:"nextRunAt,omitempty"`
 }
 
 type NewsPipelineRunResult struct {
@@ -151,6 +179,7 @@ type RawNewsListFilter struct {
 	Language string
 	Status   string
 	Quality  string
+	Query    string
 	Since    time.Time
 	Until    time.Time
 	Limit    int

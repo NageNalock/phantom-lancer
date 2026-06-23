@@ -49,7 +49,18 @@ func (s *Service) CreateRawNews(ctx context.Context, req RequestCreateRawNews) (
 }
 
 func (s *Service) ListRawNews(ctx context.Context, filter RawNewsListFilter) ([]StockV2RawNews, error) {
-	return s.store.ListRawNews(ctx, filter)
+	items, err := s.store.ListRawNews(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		items[i].RawPayload = nil
+	}
+	return items, nil
+}
+
+func (s *Service) GetRawNews(ctx context.Context, id string) (StockV2RawNews, error) {
+	return s.store.GetRawNews(ctx, id)
 }
 
 func (s *Service) CountRawNews(ctx context.Context, filter RawNewsListFilter) (int, error) {
@@ -58,6 +69,18 @@ func (s *Service) CountRawNews(ctx context.Context, filter RawNewsListFilter) (i
 
 func (s *Service) ListUnprocessedRawNews(ctx context.Context, before time.Time, limit int) ([]StockV2RawNews, error) {
 	return s.store.ListUnprocessedRawNews(ctx, before, limit)
+}
+
+func (s *Service) ListNewsEvents(ctx context.Context, filter NewsEventListFilter) ([]NewsEvent, error) {
+	return s.store.ListNewsEvents(ctx, filter)
+}
+
+func (s *Service) CountNewsEvents(ctx context.Context, filter NewsEventListFilter) (int, error) {
+	return s.store.CountNewsEvents(ctx, filter)
+}
+
+func (s *Service) CountNewsLinkCandidates(ctx context.Context, filter NewsLinkCandidateListFilter) (int, error) {
+	return s.store.CountNewsLinkCandidates(ctx, filter)
 }
 
 func rawNewsContentHash(source, sourceID, title, content, snippet, newsURL string, publishedAt time.Time) string {

@@ -107,6 +107,83 @@ func TestNewsIngestFailureBackoff(t *testing.T) {
 	}
 }
 
+func TestNewsSourceConfigSchedulesNextRun(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	adapter := &fakeNewsAdapter{
+		source: "mock_sched",
+		result: NewsSourceFetchResult{
+			Items:     []map[string]any{{"id": "flash-sched", "title": "调度消息"}},
+			FetchedAt: time.Now(),
+		},
+	}
+	svc.WithNewsSourceAdapter(adapter)
+
+	enabled := true
+	interval := 120
+	jitter := 0
+	batch := 7
+	process := 9
+	overview, err := svc.UpdateNewsSourceConfig(ctx, adapter.source, NewsSourceConfigPatch{
+		Enabled:             &enabled,
+		PollIntervalSeconds: &interval,
+		JitterSeconds:       &jitter,
+		BatchLimit:          &batch,
+		ProcessLimit:        &process,
+	})
+	if err != nil {
+		t.Fatalf("update source config: %v", err)
+	}
+	if !overview.State.Enabled || overview.State.PollIntervalSeconds != interval || overview.State.BatchLimit != batch || overview.State.ProcessLimit != process {
+		t.Fatalf("overview state = %+v", overview.State)
+	}
+	if overview.State.NextRunAt.IsZero() || time.Until(overview.State.NextRunAt) <= 0 {
+		t.Fatalf("next run at = %v, want future", overview.State.NextRunAt)
+	}
+
+	result, err := svc.RunNewsPipelineOnce(ctx, adapter.source)
+	if err != nil {
+		t.Fatalf("run pipeline once: %v", err)
+	}
+	if result.RawInsertedCount != 1 {
+		t.Fatalf("result = %+v, want one raw insert", result)
+	}
+	state, ok, err := svc.GetNewsSourceState(ctx, adapter.source)
+	if err != nil {
+		t.Fatalf("get state: %v", err)
+	}
+	if !ok || state.LastRunStatus != NewsSourceStatusIdle || state.NextRunAt.IsZero() {
+		t.Fatalf("state = %+v, ok=%v", state, ok)
+	}
+}
+
+func TestNewsSourceConfigClampsFastPolling(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	adapter := &fakeNewsAdapter{source: "mock_clamp"}
+	svc.WithNewsSourceAdapter(adapter)
+
+	enabled := true
+	tooFast := 1
+	overview, err := svc.UpdateNewsSourceConfig(ctx, adapter.source, NewsSourceConfigPatch{
+		Enabled:             &enabled,
+		PollIntervalSeconds: &tooFast,
+		BackoffBaseSeconds:  &tooFast,
+		BackoffMaxSeconds:   &tooFast,
+	})
+	if err != nil {
+		t.Fatalf("update source config: %v", err)
+	}
+	if overview.State.PollIntervalSeconds != minNewsPollIntervalSeconds {
+		t.Fatalf("poll interval = %d, want %d", overview.State.PollIntervalSeconds, minNewsPollIntervalSeconds)
+	}
+	if overview.State.BackoffBaseSeconds != minNewsBackoffBaseSeconds || overview.State.BackoffMaxSeconds != minNewsBackoffBaseSeconds {
+		t.Fatalf("backoff = %d/%d, want %d", overview.State.BackoffBaseSeconds, overview.State.BackoffMaxSeconds, minNewsBackoffBaseSeconds)
+	}
+}
+
 func TestNewsProcessingBatchCreatesEventsAndCandidates(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

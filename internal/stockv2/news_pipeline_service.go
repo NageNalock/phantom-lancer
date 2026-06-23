@@ -2,6 +2,7 @@ package stockv2
 
 import (
 	"context"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -10,8 +11,6 @@ import (
 
 const (
 	newsIngestMinInterval = 5 * time.Second
-	newsBackoffBase       = 30 * time.Second
-	newsBackoffMax        = 15 * time.Minute
 	defaultNewsBatchLimit = 50
 )
 
@@ -24,6 +23,10 @@ func (s *Service) RunNewsIngestJob(ctx context.Context, source string) (NewsPipe
 	result := NewsPipelineRunResult{Source: source}
 	state := s.currentNewsSourceState(ctx, source)
 	now := time.Now()
+	if !state.Enabled {
+		result.Status = NewsSourceStatusDisabled
+		return result, nil
+	}
 
 	if !state.BackoffUntil.IsZero() && state.BackoffUntil.After(now) {
 		result.Status = NewsSourceStatusBackoff
@@ -181,25 +184,132 @@ func (s *Service) RunNewsProcessingBatch(ctx context.Context, source string, raw
 }
 
 func (s *Service) RunNewsPipelineOnce(ctx context.Context, source string) (NewsPipelineRunResult, error) {
+	source = normalizeNewsSourceName(source)
+	state := s.currentNewsSourceState(ctx, source)
+	now := time.Now()
+	state.Status = NewsSourceStatusRunning
+	state.LastRunAt = now
+	state.LastRunStatus = NewsSourceStatusRunning
+	state.LastRunError = ""
+	_ = s.store.UpsertNewsSourceState(ctx, state)
+
 	ingest, err := s.RunNewsIngestJob(ctx, source)
 	if err != nil {
+		s.recordNewsPipelineRunResult(ctx, source, ingest, err)
 		return ingest, err
 	}
 	if ingest.Status == NewsSourceStatusDisabled || ingest.Status == NewsSourceStatusBackoff || ingest.Status == NewsSourceStatusRateLimited {
+		s.recordNewsPipelineRunResult(ctx, source, ingest, nil)
 		return ingest, nil
 	}
-	process, err := s.RunNewsProcessingBatch(ctx, source, defaultNewsBatchLimit, defaultNewsBatchLimit)
+	state = s.currentNewsSourceState(ctx, source)
+	process, err := s.RunNewsProcessingBatch(ctx, source, state.BatchLimit, state.ProcessLimit)
 	ingest.NormalizedCount = process.NormalizedCount
 	ingest.LinkCandidateCount = process.LinkCandidateCount
 	if err != nil {
 		ingest.Status = NewsSourceStatusFailed
 		ingest.ErrorMessage = safelog.Text(err.Error(), 400)
 	}
+	s.recordNewsPipelineRunResult(ctx, source, ingest, err)
 	return ingest, err
 }
 
 func (s *Service) GetNewsSourceState(ctx context.Context, source string) (NewsSourceState, bool, error) {
 	return s.store.GetNewsSourceState(ctx, normalizeNewsSourceName(source))
+}
+
+func (s *Service) ListNewsSourceOverviews(ctx context.Context) ([]NewsSourceOverview, error) {
+	sources := []string{NewsSourceJin10, NewsSourceFinancialJuice}
+	out := make([]NewsSourceOverview, 0, len(sources))
+	for _, source := range sources {
+		state := s.currentNewsSourceState(ctx, source)
+		configured, reason := s.newsSourceConfigured(ctx, source)
+		out = append(out, NewsSourceOverview{
+			State:      state,
+			Configured: configured,
+			Reason:     reason,
+		})
+	}
+	return out, nil
+}
+
+func (s *Service) UpdateNewsSourceConfig(ctx context.Context, source string, patch NewsSourceConfigPatch) (NewsSourceOverview, error) {
+	source = normalizeNewsSourceName(source)
+	if s.newsAdapter(source) == nil {
+		return NewsSourceOverview{}, ErrNewsSourceAdapterNotFound
+	}
+	state := s.currentNewsSourceState(ctx, source)
+	if patch.Enabled != nil {
+		state.Enabled = *patch.Enabled
+	}
+	if patch.PollIntervalSeconds != nil {
+		state.PollIntervalSeconds = *patch.PollIntervalSeconds
+	}
+	if patch.JitterSeconds != nil {
+		state.JitterSeconds = *patch.JitterSeconds
+	}
+	if patch.BatchLimit != nil {
+		state.BatchLimit = *patch.BatchLimit
+	}
+	if patch.ProcessLimit != nil {
+		state.ProcessLimit = *patch.ProcessLimit
+	}
+	if patch.BackoffBaseSeconds != nil {
+		state.BackoffBaseSeconds = *patch.BackoffBaseSeconds
+	}
+	if patch.BackoffMaxSeconds != nil {
+		state.BackoffMaxSeconds = *patch.BackoffMaxSeconds
+	}
+	state = normalizeNewsSourceStateDefaults(state)
+	if patch.NextRunAt != nil {
+		state.NextRunAt = *patch.NextRunAt
+	} else if state.NextRunAt.IsZero() || state.NextRunAt.Before(time.Now()) {
+		state.NextRunAt = nextNewsRunAt(state, time.Now())
+	}
+	if !state.Enabled {
+		state.Status = NewsSourceStatusDisabled
+	} else if state.Status == "" || state.Status == NewsSourceStatusDisabled {
+		state.Status = NewsSourceStatusIdle
+	}
+	if err := s.store.UpsertNewsSourceState(ctx, state); err != nil {
+		return NewsSourceOverview{}, err
+	}
+	if state.Enabled {
+		s.StartBackground(context.Background())
+	}
+	configured, reason := s.newsSourceConfigured(ctx, source)
+	return NewsSourceOverview{State: state, Configured: configured, Reason: reason}, nil
+}
+
+func (s *Service) syncNewsSourceStatesForSettings(ctx context.Context, settings StockV2Settings) error {
+	if err := s.syncNewsSourceState(ctx, NewsSourceJin10, settings.Jin10Enabled); err != nil {
+		return err
+	}
+	return s.syncNewsSourceState(ctx, NewsSourceFinancialJuice, settings.FinancialJuiceEnabled)
+}
+
+func (s *Service) syncNewsSourceState(ctx context.Context, source string, enabled bool) error {
+	state, ok, err := s.store.GetNewsSourceState(ctx, source)
+	if err != nil {
+		return err
+	}
+	wasEnabled := ok && state.Enabled
+	if !ok {
+		state = NewsSourceState{Source: source, Status: NewsSourceStatusIdle}
+	}
+	state.Enabled = enabled
+	if !enabled {
+		state.Status = NewsSourceStatusDisabled
+		state.NextRunAt = time.Time{}
+	} else {
+		if state.Status == "" || state.Status == NewsSourceStatusDisabled {
+			state.Status = NewsSourceStatusIdle
+		}
+		if !wasEnabled || state.NextRunAt.IsZero() {
+			state.NextRunAt = time.Now()
+		}
+	}
+	return s.store.UpsertNewsSourceState(ctx, normalizeNewsSourceStateDefaults(state))
 }
 
 func (s *Service) newsAdapter(source string) NewsSourceAdapter {
@@ -218,26 +328,153 @@ func (s *Service) currentNewsSourceState(ctx context.Context, source string) New
 	if err == nil && ok {
 		return state
 	}
-	return NewsSourceState{Source: source, Enabled: true, Status: NewsSourceStatusIdle}
+	return normalizeNewsSourceStateDefaults(NewsSourceState{Source: source, Enabled: true, Status: NewsSourceStatusIdle, JitterSeconds: 60})
 }
 
 func failedNewsSourceState(state NewsSourceState, err error, now time.Time) NewsSourceState {
+	state = normalizeNewsSourceStateDefaults(state)
 	state.Enabled = true
 	state.Status = NewsSourceStatusBackoff
 	state.LastFetchAt = now
 	state.LastErrorAt = now
 	state.LastError = safelog.Text(err.Error(), 400)
 	state.ConsecutiveFailures++
-	backoff := newsBackoffBase
+	backoff := time.Duration(state.BackoffBaseSeconds) * time.Second
+	maxBackoff := time.Duration(state.BackoffMaxSeconds) * time.Second
 	for i := 1; i < state.ConsecutiveFailures; i++ {
 		backoff *= 2
-		if backoff >= newsBackoffMax {
-			backoff = newsBackoffMax
+		if backoff >= maxBackoff {
+			backoff = maxBackoff
 			break
 		}
 	}
 	state.BackoffUntil = now.Add(backoff)
 	return state
+}
+
+func (s *Service) recordNewsPipelineRunResult(ctx context.Context, source string, result NewsPipelineRunResult, runErr error) {
+	state := s.currentNewsSourceState(ctx, source)
+	wasBackoff := state.Status == NewsSourceStatusBackoff
+	state.Status = result.Status
+	state.LastRunAt = time.Now()
+	state.LastRunStatus = result.Status
+	if runErr != nil {
+		state.LastRunError = safelog.Text(runErr.Error(), 400)
+	} else {
+		state.LastRunError = safelog.Text(result.ErrorMessage, 400)
+	}
+	if result.Status == NewsSourceStatusFailed && runErr != nil && !wasBackoff {
+		state = failedNewsSourceState(state, runErr, state.LastRunAt)
+	}
+	if !state.BackoffUntil.IsZero() && state.BackoffUntil.After(state.LastRunAt) {
+		state.NextRunAt = state.BackoffUntil
+	} else {
+		state.NextRunAt = nextNewsRunAt(state, state.LastRunAt)
+	}
+	_ = s.store.UpsertNewsSourceState(ctx, state)
+}
+
+func nextNewsRunAt(state NewsSourceState, now time.Time) time.Time {
+	state = normalizeNewsSourceStateDefaults(state)
+	delay := time.Duration(state.PollIntervalSeconds) * time.Second
+	if state.JitterSeconds > 0 {
+		delay += time.Duration(rand.Intn(state.JitterSeconds+1)) * time.Second
+	}
+	return now.Add(delay)
+}
+
+func (s *Service) runNewsSourceScheduler(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	s.tickNewsSourceScheduler(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.tickNewsSourceScheduler(ctx)
+		}
+	}
+}
+
+func (s *Service) tickNewsSourceScheduler(ctx context.Context) {
+	now := time.Now()
+	for _, source := range []string{NewsSourceJin10, NewsSourceFinancialJuice} {
+		state, ok, err := s.store.GetNewsSourceState(ctx, source)
+		if err != nil || !ok || !state.Enabled || state.Status == NewsSourceStatusRunning {
+			continue
+		}
+		if !state.BackoffUntil.IsZero() && state.BackoffUntil.After(now) {
+			if state.NextRunAt.IsZero() || state.NextRunAt.After(state.BackoffUntil) {
+				state.NextRunAt = state.BackoffUntil
+				_ = s.store.UpsertNewsSourceState(ctx, state)
+			}
+			continue
+		}
+		if state.NextRunAt.IsZero() {
+			state.NextRunAt = nextNewsRunAt(state, now)
+			_ = s.store.UpsertNewsSourceState(ctx, state)
+			continue
+		}
+		if state.NextRunAt.After(now) {
+			continue
+		}
+		if configured, _ := s.newsSourceConfigured(ctx, source); !configured {
+			state.Status = NewsSourceStatusDisabled
+			state.NextRunAt = nextNewsRunAt(state, now)
+			_ = s.store.UpsertNewsSourceState(ctx, state)
+			continue
+		}
+		go func(source string) {
+			if _, err := s.RunNewsPipelineOnce(context.Background(), source); err != nil && s.log != nil {
+				s.log.Warn("scheduled news pipeline failed", "source", source, "error", safelog.Text(err.Error(), 240))
+			}
+		}(source)
+	}
+}
+
+func (s *Service) hasEnabledNewsSources(ctx context.Context) bool {
+	for _, source := range []string{NewsSourceJin10, NewsSourceFinancialJuice} {
+		state, ok, err := s.store.GetNewsSourceState(ctx, source)
+		if err == nil && ok && state.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) newsSourceConfigured(ctx context.Context, source string) (bool, string) {
+	switch normalizeNewsSourceName(source) {
+	case NewsSourceJin10:
+		settings, err := s.GetSettings(ctx)
+		if err == nil && settings.Jin10Enabled {
+			if !settings.Jin10EndpointSet {
+				return false, "金十 curl endpoint 未配置"
+			}
+			if !settings.Jin10CookieSet {
+				return false, "金十 Cookie 未配置"
+			}
+			return true, ""
+		}
+		if adapter, ok := s.newsAdapters[NewsSourceJin10].(jin10NewsSourceAdapter); ok && adapter.fallback != nil && strings.TrimSpace(adapter.fallback.endpoint) != "" {
+			return true, "使用环境变量 fallback"
+		}
+		return false, "金十未启用或未粘贴浏览器 curl"
+	case NewsSourceFinancialJuice:
+		settings, err := s.GetSettings(ctx)
+		if err != nil {
+			return false, "读取设置失败"
+		}
+		if !settings.FinancialJuiceEnabled {
+			return false, "FinancialJuice 未启用"
+		}
+		if !settings.FinancialJuiceCookieSet {
+			return false, "FinancialJuice Cookie 未配置"
+		}
+		return true, ""
+	default:
+		return s.newsAdapter(source) != nil, ""
+	}
 }
 
 func newsEventFromRawNews(raw StockV2RawNews) NewsEvent {

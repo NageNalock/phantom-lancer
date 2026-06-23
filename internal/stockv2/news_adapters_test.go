@@ -14,6 +14,7 @@ import (
 func TestFinancialJuiceCookieParseAndSettingsSave(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
+	svc.httpClient = emptyNewsHTTPClient()
 	ctx := context.Background()
 	if err := svc.Initialize(ctx); err != nil {
 		t.Fatalf("initialize: %v", err)
@@ -46,6 +47,119 @@ func TestFinancialJuiceCookieParseAndSettingsSave(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), "placeholder") || strings.Contains(string(encoded), "example_session") {
 		t.Fatalf("settings JSON leaked cookie: %s", encoded)
+	}
+}
+
+func TestJin10CurlParseAndSettingsSave(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	svc.httpClient = emptyNewsHTTPClient()
+	ctx := context.Background()
+	if err := svc.Initialize(ctx); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	enabled := true
+	input := `curl 'https://www.jin10.com/tv/index/list?app=jin10' \
+  -H 'accept: */*' \
+  -H 'x-app-id: app-placeholder' \
+  -H 'x-version: 2.1' \
+  -b 'did=placeholder-device; x-token=placeholder-token'`
+	updated, err := svc.CreateOrUpdateSettings(ctx, RequestCreateOrUpdateSettings{
+		Jin10Enabled:   &enabled,
+		Jin10CurlInput: &input,
+	})
+	if err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	if !updated.Jin10Enabled || !updated.Jin10EndpointSet || !updated.Jin10CookieSet {
+		t.Fatalf("updated settings = %+v", updated)
+	}
+	state, ok, err := svc.GetNewsSourceState(ctx, NewsSourceJin10)
+	if err != nil {
+		t.Fatalf("get jin10 source state: %v", err)
+	}
+	if !ok || !state.Enabled || state.NextRunAt.IsZero() {
+		t.Fatalf("jin10 state = %+v, ok=%v; want enabled state with next run", state, ok)
+	}
+	stored, err := svc.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("get settings: %v", err)
+	}
+	if stored.Jin10Endpoint != "https://www.jin10.com/tv/index/list?app=jin10" {
+		t.Fatalf("stored endpoint = %q", stored.Jin10Endpoint)
+	}
+	if stored.Jin10Cookie != "did=placeholder-device; x-token=placeholder-token" {
+		t.Fatalf("stored cookie = %q", stored.Jin10Cookie)
+	}
+	if stored.Jin10XAppID != "app-placeholder" || stored.Jin10XVersion != "2.1" {
+		t.Fatalf("stored headers = %q/%q", stored.Jin10XAppID, stored.Jin10XVersion)
+	}
+	encoded, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	for _, secretFragment := range []string{"placeholder-token", "placeholder-device", "app-placeholder"} {
+		if strings.Contains(string(encoded), secretFragment) {
+			t.Fatalf("settings JSON leaked private config %q: %s", secretFragment, encoded)
+		}
+	}
+}
+
+func emptyNewsHTTPClient() *http.Client {
+	return &http.Client{Transport: newsRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"data":[]}`)),
+			Request:    r,
+		}, nil
+	})}
+}
+
+func TestJin10FetchUsesCurlConfigAndParsesNestedPayload(t *testing.T) {
+	var sawURL string
+	var sawCookie string
+	var sawAppID string
+	var sawVersion string
+	client := &http.Client{Transport: newsRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		sawURL = r.URL.String()
+		sawCookie = r.Header.Get("Cookie")
+		sawAppID = r.Header.Get("x-app-id")
+		sawVersion = r.Header.Get("x-version")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"data":[{"id":"jin10-1","data":{"content":"沪指午后走强","time":"2026-06-23 14:30:00"}}]}`)),
+			Request:    r,
+		}, nil
+	})}
+	adapter := &Jin10NewsAdapter{
+		endpoint:   "https://www.jin10.com/tv/index/list?app=jin10",
+		cookie:     "did=placeholder-device; x-token=placeholder-token",
+		xAppID:     "app-placeholder",
+		xVersion:   "2.1",
+		httpClient: client,
+	}
+	result, err := adapter.FetchSince(context.Background(), NewsSourceCursor{Cursor: "ignored"})
+	if err != nil {
+		t.Fatalf("fetch jin10: %v", err)
+	}
+	if sawURL != "https://www.jin10.com/tv/index/list?app=jin10" {
+		t.Fatalf("url = %q", sawURL)
+	}
+	if sawCookie != "did=placeholder-device; x-token=placeholder-token" || sawAppID != "app-placeholder" || sawVersion != "2.1" {
+		t.Fatalf("headers cookie/app/version = %q/%q/%q", sawCookie, sawAppID, sawVersion)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(result.Items))
+	}
+	raw, err := adapter.NormalizeRawPayload(result.Items[0])
+	if err != nil {
+		t.Fatalf("normalize jin10: %v", err)
+	}
+	if raw.Title != "沪指午后走强" || raw.Language != "zh-CN" || raw.PublishedAt.IsZero() {
+		t.Fatalf("raw news = %+v", raw)
 	}
 }
 

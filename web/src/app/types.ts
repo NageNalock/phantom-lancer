@@ -1754,6 +1754,48 @@ export interface StockV2Instrument {
   lastUpdate: string;
   createdAt: string;
   updatedAt: string;
+  profileSummary?: StockV2StockProfileSummary;
+}
+
+export interface StockV2StockProfileSummary {
+  symbol: string;
+  status: string;
+  businessSummary?: string;
+  aiProfileStatus?: string;
+  aiProfileModel?: string;
+  aiProfileConfidence?: number;
+  aiProfileUpdatedAt?: string;
+  updatedAt?: string;
+}
+
+export interface StockV2StockProfile extends StockV2StockProfileSummary {
+  market: string;
+  instrumentType: string;
+  name: string;
+  aliases?: string[];
+  aliasesZh?: string[];
+  aliasesEn?: string[];
+  industry?: string;
+  sectors?: string[];
+  concepts?: string[];
+  tags?: string[];
+  keywordsZh?: string[];
+  keywordsEn?: string[];
+  businessSummaryZh?: string;
+  businessSummaryEn?: string;
+  businessLinesZh?: string[];
+  businessLinesEn?: string[];
+  riskTagsZh?: string[];
+  riskTagsEn?: string[];
+  profileText?: string;
+  profileTextZh?: string;
+  profileTextEn?: string;
+  aiProfileError?: string;
+  fundType?: string;
+  trackingIndex?: string;
+  theme?: string;
+  constituentHint?: string;
+  profileVersion?: number;
 }
 
 export interface StockV2Portfolio {
@@ -1918,8 +1960,16 @@ export interface StockV2Settings {
   proxyType: string;
   proxyHost: string;
   proxyPort: number;
+  jin10Enabled: boolean;
+  jin10EndpointSet: boolean;
+  jin10CookieSet: boolean;
   financialJuiceEnabled: boolean;
   financialJuiceCookieSet: boolean;
+  baseProfileAutoMaintainEnabled: boolean;
+  baseProfileMaintainIntervalSeconds: number;
+  baseProfileLastMaintainAt?: string;
+  baseProfileNextMaintainAt?: string;
+  baseProfileLastMaintainResult?: string;
   lastScheduledUpdate: string;
   dailyBarsLastRun: string;
   createdAt: string;
@@ -1938,6 +1988,120 @@ export interface StockV2UniverseUpdateResponse {
 }
 
 export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "strategies" | "agent" | "settings";
+
+// ===== News side (消息面数据资产) =====
+
+export interface StockV2NewsSourceState {
+  source: string;
+  enabled: boolean;
+  status: string;
+  cursor?: string;
+  pollIntervalSeconds: number;
+  jitterSeconds: number;
+  batchLimit: number;
+  processLimit: number;
+  backoffBaseSeconds: number;
+  backoffMaxSeconds: number;
+  nextRunAt?: string;
+  lastRunAt?: string;
+  lastRunStatus?: string;
+  lastRunError?: string;
+  lastFetchAt?: string;
+  lastSuccessAt?: string;
+  lastErrorAt?: string;
+  lastError?: string;
+  consecutiveFailures: number;
+  backoffUntil?: string;
+  rawNewsCount: number;
+  newsEventCount: number;
+  linkCandidateCount: number;
+  updatedAt: string;
+}
+
+export interface StockV2NewsSourceOverview {
+  state: StockV2NewsSourceState;
+  configured: boolean;
+  reason?: string;
+}
+
+export interface StockV2NewsPipelineRunResult {
+  source: string;
+  status: string;
+  fetchedAt?: string;
+  fetchedCount: number;
+  rawInsertedCount: number;
+  normalizedCount: number;
+  linkCandidateCount: number;
+  cursor?: string;
+  nextCursor?: string;
+  errorMessage?: string;
+}
+
+export interface StockV2RawNews {
+  id: string;
+  source: string;
+  sourceId?: string;
+  language?: string;
+  title: string;
+  content?: string;
+  snippet?: string;
+  publishedAt?: string;
+  url?: string;
+  fetchedAt: string;
+  rawPayload?: Record<string, unknown>;
+  contentHash: string;
+  dedupeKey: string;
+  quality: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockV2NewsEvent {
+  id: string;
+  rawNewsId?: string;
+  source: string;
+  externalId?: string;
+  title: string;
+  summary?: string;
+  content?: string;
+  url?: string;
+  qualityStatus?: string;
+  dedupeKey?: string;
+  linkStatus: string;
+  eventAt: string;
+  linkProcessedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockV2NewsLinkCandidate {
+  id: string;
+  newsEventId: string;
+  rawNewsId?: string;
+  newsEventTitle?: string;
+  newsEventSource?: string;
+  newsEventAt?: string;
+  symbol: string;
+  market?: string;
+  instrumentName?: string;
+  matchMethod: string;
+  score: number;
+  reason: string;
+  matchedTerms: string[];
+  monitorStatus?: string;
+  monitorHitId?: string;
+  monitoredAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockV2PagedResponse<T> {
+  items: T[];
+  total?: number;
+  limit?: number;
+  offset?: number;
+}
 
 // ===== Daily Bars (日级历史行情) =====
 

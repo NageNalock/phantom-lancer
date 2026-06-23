@@ -59,6 +59,18 @@ func TestRawNewsCreateDedupeAndPagination(t *testing.T) {
 	if len(page) != 2 {
 		t.Fatalf("page len = %d, want 2", len(page))
 	}
+	for _, item := range page {
+		if item.RawPayload != nil {
+			t.Fatalf("list raw news leaked raw payload: %+v", item.RawPayload)
+		}
+	}
+	detail, err := svc.GetRawNews(ctx, first.ID)
+	if err != nil {
+		t.Fatalf("get raw news detail: %v", err)
+	}
+	if detail.RawPayload["kind"] != "flash" {
+		t.Fatalf("detail raw payload = %+v, want full payload", detail.RawPayload)
+	}
 	unprocessed, err := svc.ListUnprocessedRawNews(ctx, time.Now().Add(time.Hour), 10)
 	if err != nil {
 		t.Fatalf("list unprocessed raw news: %v", err)

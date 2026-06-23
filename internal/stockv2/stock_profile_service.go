@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -51,6 +52,66 @@ func (s *Service) RebuildStockProfiles(ctx context.Context) (RebuildStockProfile
 	return result, nil
 }
 
+func (s *Service) runBaseProfileMaintenanceScheduler(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	s.maybeRunBaseProfileMaintenance(ctx, "scheduler")
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.maybeRunBaseProfileMaintenance(ctx, "scheduler")
+		}
+	}
+}
+
+func (s *Service) maybeRunBaseProfileMaintenance(ctx context.Context, trigger string) {
+	settings, err := s.GetSettings(ctx)
+	if err != nil || !settings.BaseProfileAutoMaintainEnabled {
+		return
+	}
+	interval := time.Duration(settings.BaseProfileMaintainIntervalSeconds) * time.Second
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
+	now := time.Now()
+	if !settings.BaseProfileNextMaintainAt.IsZero() && settings.BaseProfileNextMaintainAt.After(now) {
+		return
+	}
+	if settings.BaseProfileNextMaintainAt.IsZero() && !settings.BaseProfileLastMaintainAt.IsZero() && now.Sub(settings.BaseProfileLastMaintainAt) < interval {
+		settings.BaseProfileNextMaintainAt = settings.BaseProfileLastMaintainAt.Add(interval)
+		_ = s.store.CreateOrUpdateSettings(ctx, settings)
+		s.settings = settings
+		return
+	}
+
+	s.baseProfileMu.Lock()
+	defer s.baseProfileMu.Unlock()
+	settings, err = s.GetSettings(ctx)
+	if err != nil || !settings.BaseProfileAutoMaintainEnabled {
+		return
+	}
+	now = time.Now()
+	if !settings.BaseProfileNextMaintainAt.IsZero() && settings.BaseProfileNextMaintainAt.After(now) {
+		return
+	}
+
+	result, runErr := s.RebuildStockProfiles(ctx)
+	settings.BaseProfileLastMaintainAt = now
+	settings.BaseProfileNextMaintainAt = now.Add(interval)
+	if runErr != nil {
+		settings.BaseProfileLastMaintainResult = fmt.Sprintf("failed trigger=%s error=%s", trigger, runErr.Error())
+	} else {
+		settings.BaseProfileLastMaintainResult = fmt.Sprintf("completed trigger=%s total=%d success=%d failed=%d", trigger, result.Total, result.Success, result.Failed)
+	}
+	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil && s.log != nil {
+		s.log.Warn("save base profile maintenance state failed", "error", err)
+		return
+	}
+	s.settings = settings
+}
+
 func (s *Service) GetStockProfile(ctx context.Context, symbol string) (StockProfile, error) {
 	normalizedSymbol, _ := normalizeQuoteSymbolInput(symbol)
 	if normalizedSymbol == "" {
@@ -73,6 +134,39 @@ func (s *Service) CountStockProfiles(ctx context.Context, filter StockProfileLis
 		filter.InstrumentType = normalizeInstrumentType(filter.InstrumentType)
 	}
 	return s.store.CountStockProfiles(ctx, filter)
+}
+
+func (s *Service) ListStockProfileSummaries(ctx context.Context, symbols []string) (map[string]StockProfileSummary, error) {
+	out := make(map[string]StockProfileSummary, len(symbols))
+	for _, raw := range symbols {
+		symbol := strings.TrimSpace(raw)
+		if symbol == "" {
+			continue
+		}
+		profile, err := s.store.GetStockProfile(ctx, symbol)
+		if err != nil {
+			if errors.Is(err, ErrStockProfileNotFound) {
+				out[symbol] = StockProfileSummary{Symbol: symbol, Status: "missing", AIProfileStatus: StockProfileAIStatusMissing}
+				continue
+			}
+			return nil, err
+		}
+		status := "ready"
+		if strings.TrimSpace(profile.ProfileText) == "" {
+			status = "partial"
+		}
+		out[symbol] = StockProfileSummary{
+			Symbol:              profile.Symbol,
+			Status:              status,
+			BusinessSummary:     firstNonEmpty(profile.BusinessSummaryZh, profile.BusinessSummary, profile.BusinessSummaryEn),
+			AIProfileStatus:     profile.AIProfileStatus,
+			AIProfileModel:      profile.AIProfileModel,
+			AIProfileConfidence: profile.AIProfileConfidence,
+			AIProfileUpdatedAt:  profile.AIProfileUpdatedAt,
+			UpdatedAt:           profile.UpdatedAt,
+		}
+	}
+	return out, nil
 }
 
 func (s *Service) RunAgentStockProfileSummary(ctx context.Context, symbol string, requestedBy string) (AgentRun, error) {

@@ -18,9 +18,9 @@ import (
 // taskID 用 crypto/rand 16 字节 hex, 不可猜。
 
 var (
-	ErrTaskNotFound   = errors.New("agent task not found")
-	ErrTaskDuplicate  = errors.New("agent task result already submitted")
-	ErrTaskExpired    = errors.New("agent task expired")
+	ErrTaskNotFound     = errors.New("agent task not found")
+	ErrTaskDuplicate    = errors.New("agent task result already submitted")
+	ErrTaskExpired      = errors.New("agent task expired")
 	ErrTaskTypeMismatch = errors.New("agent task type mismatch")
 )
 
@@ -55,10 +55,10 @@ type agentTaskEntry struct {
 }
 
 type agentTaskPool struct {
-	tasks   map[string]*agentTaskEntry
-	mu      sync.RWMutex
-	stopCh  chan struct{}
-	doneCh  chan struct{}
+	tasks  map[string]*agentTaskEntry
+	mu     sync.RWMutex
+	stopCh chan struct{}
+	doneCh chan struct{}
 }
 
 const defaultTaskTTL = 10 * time.Minute

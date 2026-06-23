@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
 	"phantom-lancer/internal/stockv2"
 )
@@ -40,6 +41,24 @@ func (s *Server) handleStockV2GetStockProfile(w http.ResponseWriter, r *http.Req
 		return
 	}
 	s.writeJSON(w, profile)
+}
+
+func (s *Server) handleStockV2ListStockProfileSummaries(w http.ResponseWriter, r *http.Request) {
+	raw := r.URL.Query().Get("symbols")
+	if strings.TrimSpace(raw) == "" {
+		s.writeJSON(w, map[string]any{"items": map[string]stockv2.StockProfileSummary{}})
+		return
+	}
+	parts := strings.Split(raw, ",")
+	if len(parts) > 200 {
+		parts = parts[:200]
+	}
+	items, err := s.stockV2.ListStockProfileSummaries(r.Context(), parts)
+	if err != nil {
+		http.Error(w, err.Error(), stockV2ProfileHTTPStatus(err))
+		return
+	}
+	s.writeJSON(w, map[string]any{"items": items})
 }
 
 func (s *Server) handleStockV2BuildStockProfile(w http.ResponseWriter, r *http.Request) {

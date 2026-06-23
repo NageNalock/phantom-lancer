@@ -157,21 +157,33 @@ type StockV2UpdateProgress struct {
 
 // StockV2Settings V2 配置
 type StockV2Settings struct {
-	ID                      string    `json:"id"`
-	AutoUpdateEnabled       bool      `json:"autoUpdateEnabled"`
-	UpdateIntervalSec       int       `json:"updateIntervalSec"`
-	ProxyEnabled            bool      `json:"proxyEnabled"`
-	ProxyType               string    `json:"proxyType"`
-	ProxyHost               string    `json:"proxyHost"`
-	ProxyPort               int       `json:"proxyPort"`
-	LastScheduledUpdate     time.Time `json:"lastScheduledUpdate"`
-	DailyBarsAutoEnabled    bool      `json:"dailyBarsAutoEnabled"` // 日 K 每日定时增量开关
-	DailyBarsLastRun        time.Time `json:"dailyBarsLastRun"`     // 日 K 定时增量上次执行时间（当日去重）
-	FinancialJuiceEnabled   bool      `json:"financialJuiceEnabled"`
-	FinancialJuiceCookie    string    `json:"-"`
-	FinancialJuiceCookieSet bool      `json:"financialJuiceCookieSet"`
-	CreatedAt               time.Time `json:"createdAt"`
-	UpdatedAt               time.Time `json:"updatedAt"`
+	ID                                 string    `json:"id"`
+	AutoUpdateEnabled                  bool      `json:"autoUpdateEnabled"`
+	UpdateIntervalSec                  int       `json:"updateIntervalSec"`
+	ProxyEnabled                       bool      `json:"proxyEnabled"`
+	ProxyType                          string    `json:"proxyType"`
+	ProxyHost                          string    `json:"proxyHost"`
+	ProxyPort                          int       `json:"proxyPort"`
+	LastScheduledUpdate                time.Time `json:"lastScheduledUpdate"`
+	DailyBarsAutoEnabled               bool      `json:"dailyBarsAutoEnabled"` // 日 K 每日定时增量开关
+	DailyBarsLastRun                   time.Time `json:"dailyBarsLastRun"`     // 日 K 定时增量上次执行时间（当日去重）
+	Jin10Enabled                       bool      `json:"jin10Enabled"`
+	Jin10Endpoint                      string    `json:"-"`
+	Jin10Cookie                        string    `json:"-"`
+	Jin10XAppID                        string    `json:"-"`
+	Jin10XVersion                      string    `json:"-"`
+	Jin10EndpointSet                   bool      `json:"jin10EndpointSet"`
+	Jin10CookieSet                     bool      `json:"jin10CookieSet"`
+	FinancialJuiceEnabled              bool      `json:"financialJuiceEnabled"`
+	FinancialJuiceCookie               string    `json:"-"`
+	FinancialJuiceCookieSet            bool      `json:"financialJuiceCookieSet"`
+	BaseProfileAutoMaintainEnabled     bool      `json:"baseProfileAutoMaintainEnabled"`
+	BaseProfileMaintainIntervalSeconds int       `json:"baseProfileMaintainIntervalSeconds"`
+	BaseProfileLastMaintainAt          time.Time `json:"baseProfileLastMaintainAt,omitempty"`
+	BaseProfileNextMaintainAt          time.Time `json:"baseProfileNextMaintainAt,omitempty"`
+	BaseProfileLastMaintainResult      string    `json:"baseProfileLastMaintainResult,omitempty"`
+	CreatedAt                          time.Time `json:"createdAt"`
+	UpdatedAt                          time.Time `json:"updatedAt"`
 }
 
 // StockV2SettingsPatch 配置更新补丁
@@ -311,16 +323,21 @@ type RequestRecordTransaction struct {
 
 // RequestCreateOrUpdateSettings 配置请求
 type RequestCreateOrUpdateSettings struct {
-	AutoUpdateEnabled         *bool   `json:"autoUpdateEnabled,omitempty"`
-	UpdateIntervalSec         *int    `json:"updateIntervalSec,omitempty"`
-	ProxyEnabled              *bool   `json:"proxyEnabled,omitempty"`
-	ProxyType                 *string `json:"proxyType,omitempty"`
-	ProxyHost                 *string `json:"proxyHost,omitempty"`
-	ProxyPort                 *int    `json:"proxyPort,omitempty"`
-	DailyBarsAutoEnabled      *bool   `json:"dailyBarsAutoEnabled,omitempty"`
-	FinancialJuiceEnabled     *bool   `json:"financialJuiceEnabled,omitempty"`
-	FinancialJuiceCookieInput *string `json:"financialJuiceCookieInput,omitempty"`
-	FinancialJuiceClearCookie *bool   `json:"financialJuiceClearCookie,omitempty"`
+	AutoUpdateEnabled                  *bool   `json:"autoUpdateEnabled,omitempty"`
+	UpdateIntervalSec                  *int    `json:"updateIntervalSec,omitempty"`
+	ProxyEnabled                       *bool   `json:"proxyEnabled,omitempty"`
+	ProxyType                          *string `json:"proxyType,omitempty"`
+	ProxyHost                          *string `json:"proxyHost,omitempty"`
+	ProxyPort                          *int    `json:"proxyPort,omitempty"`
+	DailyBarsAutoEnabled               *bool   `json:"dailyBarsAutoEnabled,omitempty"`
+	Jin10Enabled                       *bool   `json:"jin10Enabled,omitempty"`
+	Jin10CurlInput                     *string `json:"jin10CurlInput,omitempty"`
+	Jin10ClearConfig                   *bool   `json:"jin10ClearConfig,omitempty"`
+	FinancialJuiceEnabled              *bool   `json:"financialJuiceEnabled,omitempty"`
+	FinancialJuiceCookieInput          *string `json:"financialJuiceCookieInput,omitempty"`
+	FinancialJuiceClearCookie          *bool   `json:"financialJuiceClearCookie,omitempty"`
+	BaseProfileAutoMaintainEnabled     *bool   `json:"baseProfileAutoMaintainEnabled,omitempty"`
+	BaseProfileMaintainIntervalSeconds *int    `json:"baseProfileMaintainIntervalSeconds,omitempty"`
 }
 
 // 错误定义

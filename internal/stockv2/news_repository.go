@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+const (
+	minNewsPollIntervalSeconds = 60
+	minNewsBackoffBaseSeconds  = 30
+)
+
 func (s *Store) CreateRawNews(ctx context.Context, item StockV2RawNews) (StockV2RawNews, error) {
 	now := time.Now()
 	if item.ID == "" {
@@ -78,7 +83,7 @@ func (s *Store) ListRawNews(ctx context.Context, filter RawNewsListFilter) ([]St
 	args = append(args, normalizedNewsLimit(filter.Limit), normalizedNewsOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		%s WHERE %s ORDER BY fetched_at DESC, created_at DESC LIMIT ? OFFSET ?
-	`, rawNewsSelectSQL, where), args...)
+	`, rawNewsListSelectSQL, where), args...)
 	if err != nil {
 		return nil, wrapError(err, "list raw news")
 	}
@@ -154,17 +159,31 @@ func (s *Store) UpsertNewsSourceState(ctx context.Context, state NewsSourceState
 	if state.Status == "" {
 		state.Status = NewsSourceStatusIdle
 	}
+	state = normalizeNewsSourceStateDefaults(state)
 	state.UpdatedAt = time.Now()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO stockv2_news_source_states
-			(source, enabled, status, cursor, last_fetch_at, last_success_at, last_error_at,
-			 last_error, consecutive_failures, backoff_until, raw_news_count, news_event_count,
+			(source, enabled, status, cursor, poll_interval_seconds, jitter_seconds,
+			 batch_limit, process_limit, backoff_base_seconds, backoff_max_seconds,
+			 next_run_at, last_run_at, last_run_status, last_run_error,
+			 last_fetch_at, last_success_at, last_error_at, last_error,
+			 consecutive_failures, backoff_until, raw_news_count, news_event_count,
 			 link_candidate_count, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(source) DO UPDATE SET
 			enabled = excluded.enabled,
 			status = excluded.status,
 			cursor = excluded.cursor,
+			poll_interval_seconds = excluded.poll_interval_seconds,
+			jitter_seconds = excluded.jitter_seconds,
+			batch_limit = excluded.batch_limit,
+			process_limit = excluded.process_limit,
+			backoff_base_seconds = excluded.backoff_base_seconds,
+			backoff_max_seconds = excluded.backoff_max_seconds,
+			next_run_at = excluded.next_run_at,
+			last_run_at = excluded.last_run_at,
+			last_run_status = excluded.last_run_status,
+			last_run_error = excluded.last_run_error,
 			last_fetch_at = excluded.last_fetch_at,
 			last_success_at = excluded.last_success_at,
 			last_error_at = excluded.last_error_at,
@@ -180,6 +199,16 @@ func (s *Store) UpsertNewsSourceState(ctx context.Context, state NewsSourceState
 		boolToInt(state.Enabled),
 		state.Status,
 		nullableNewsString(state.Cursor),
+		state.PollIntervalSeconds,
+		state.JitterSeconds,
+		state.BatchLimit,
+		state.ProcessLimit,
+		state.BackoffBaseSeconds,
+		state.BackoffMaxSeconds,
+		nullableNewsTime(state.NextRunAt),
+		nullableNewsTime(state.LastRunAt),
+		nullableNewsString(state.LastRunStatus),
+		nullableNewsString(state.LastRunError),
 		nullableNewsTime(state.LastFetchAt),
 		nullableNewsTime(state.LastSuccessAt),
 		nullableNewsTime(state.LastErrorAt),
@@ -199,6 +228,10 @@ func (s *Store) GetNewsSourceState(ctx context.Context, source string) (NewsSour
 		SELECT source, enabled, status, COALESCE(cursor,''), last_fetch_at, last_success_at,
 		       last_error_at, COALESCE(last_error,''), consecutive_failures, backoff_until,
 		       raw_news_count, news_event_count, link_candidate_count, updated_at
+		       , COALESCE(poll_interval_seconds, 600), COALESCE(jitter_seconds, 60),
+		       COALESCE(batch_limit, 50), COALESCE(process_limit, 50),
+		       COALESCE(backoff_base_seconds, 30), COALESCE(backoff_max_seconds, 900),
+		       next_run_at, last_run_at, COALESCE(last_run_status,''), COALESCE(last_run_error,'')
 		FROM stockv2_news_source_states
 		WHERE source = ?
 	`, strings.TrimSpace(source))
@@ -216,6 +249,13 @@ const rawNewsSelectSQL = `
 	SELECT id, source, COALESCE(source_id,''), COALESCE(language,''), title,
 	       COALESCE(content,''), COALESCE(snippet,''), published_at, fetched_at,
 	       COALESCE(url,''), COALESCE(raw_payload_json,'{}'), content_hash, dedupe_key, quality, status, created_at, updated_at
+	FROM stockv2_raw_news
+`
+
+const rawNewsListSelectSQL = `
+	SELECT id, source, COALESCE(source_id,''), COALESCE(language,''), title,
+	       COALESCE(content,''), COALESCE(snippet,''), published_at, fetched_at,
+	       COALESCE(url,''), '{}', content_hash, dedupe_key, quality, status, created_at, updated_at
 	FROM stockv2_raw_news
 `
 
@@ -242,10 +282,14 @@ func scanNewsSourceState(row rowScanner) (NewsSourceState, error) {
 	var state NewsSourceState
 	var enabled int
 	var lastFetchAt, lastSuccessAt, lastErrorAt, backoffUntil sql.NullTime
+	var nextRunAt, lastRunAt sql.NullTime
 	if err := row.Scan(
 		&state.Source, &enabled, &state.Status, &state.Cursor, &lastFetchAt, &lastSuccessAt,
 		&lastErrorAt, &state.LastError, &state.ConsecutiveFailures, &backoffUntil,
 		&state.RawNewsCount, &state.NewsEventCount, &state.LinkCandidateCount, &state.UpdatedAt,
+		&state.PollIntervalSeconds, &state.JitterSeconds, &state.BatchLimit, &state.ProcessLimit,
+		&state.BackoffBaseSeconds, &state.BackoffMaxSeconds, &nextRunAt, &lastRunAt,
+		&state.LastRunStatus, &state.LastRunError,
 	); err != nil {
 		return state, err
 	}
@@ -262,7 +306,13 @@ func scanNewsSourceState(row rowScanner) (NewsSourceState, error) {
 	if backoffUntil.Valid {
 		state.BackoffUntil = backoffUntil.Time
 	}
-	return state, nil
+	if nextRunAt.Valid {
+		state.NextRunAt = nextRunAt.Time
+	}
+	if lastRunAt.Valid {
+		state.LastRunAt = lastRunAt.Time
+	}
+	return normalizeNewsSourceStateDefaults(state), nil
 }
 
 func rawNewsFilterSQL(filter RawNewsListFilter) (string, []any) {
@@ -273,7 +323,49 @@ func rawNewsFilterSQL(filter RawNewsListFilter) (string, []any) {
 	addNewsStringFilter(&where, &args, "status", filter.Status)
 	addNewsStringFilter(&where, &args, "quality", filter.Quality)
 	addNewsTimeWindow(&where, &args, "fetched_at", filter.Since, filter.Until)
+	if q := strings.TrimSpace(filter.Query); q != "" {
+		pattern := "%" + strings.ToLower(q) + "%"
+		where = append(where, "(LOWER(title) LIKE ? OR LOWER(snippet) LIKE ? OR LOWER(content) LIKE ? OR LOWER(source_id) LIKE ? OR LOWER(dedupe_key) LIKE ?)")
+		args = append(args, pattern, pattern, pattern, pattern, pattern)
+	}
 	return strings.Join(where, " AND "), args
+}
+
+func normalizeNewsSourceStateDefaults(state NewsSourceState) NewsSourceState {
+	if state.PollIntervalSeconds <= 0 {
+		state.PollIntervalSeconds = 600
+	} else if state.PollIntervalSeconds < minNewsPollIntervalSeconds {
+		state.PollIntervalSeconds = minNewsPollIntervalSeconds
+	}
+	if state.JitterSeconds < 0 {
+		state.JitterSeconds = 0
+	}
+	if state.BatchLimit <= 0 {
+		state.BatchLimit = 50
+	}
+	if state.BatchLimit > 200 {
+		state.BatchLimit = 200
+	}
+	if state.ProcessLimit <= 0 {
+		state.ProcessLimit = 50
+	}
+	if state.ProcessLimit > 200 {
+		state.ProcessLimit = 200
+	}
+	if state.BackoffBaseSeconds <= 0 {
+		state.BackoffBaseSeconds = 30
+	} else if state.BackoffBaseSeconds < minNewsBackoffBaseSeconds {
+		state.BackoffBaseSeconds = minNewsBackoffBaseSeconds
+	}
+	if state.BackoffMaxSeconds <= 0 {
+		state.BackoffMaxSeconds = 900
+	} else if state.BackoffMaxSeconds < minNewsBackoffBaseSeconds {
+		state.BackoffMaxSeconds = minNewsBackoffBaseSeconds
+	}
+	if state.BackoffMaxSeconds < state.BackoffBaseSeconds {
+		state.BackoffMaxSeconds = state.BackoffBaseSeconds
+	}
+	return state
 }
 
 func addNewsStringFilter(where *[]string, args *[]any, column, value string) {

@@ -308,6 +308,7 @@ func newStrategyTestService(t *testing.T) (*Service, func()) {
 	}
 	svc := NewService(store, nil, nil)
 	return svc, func() {
+		svc.StopBackground()
 		_ = store.Close()
 	}
 }

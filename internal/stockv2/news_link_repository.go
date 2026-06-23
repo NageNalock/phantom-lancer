@@ -75,6 +75,29 @@ func (s *Store) ListPendingNewsEvents(ctx context.Context, source string, limit 
 	return collectNewsEvents(rows)
 }
 
+func (s *Store) ListNewsEvents(ctx context.Context, filter NewsEventListFilter) ([]NewsEvent, error) {
+	where, args := newsEventWhere(filter)
+	args = append(args, normalizedNewsLimit(filter.Limit), normalizedNewsOffset(filter.Offset))
+	rows, err := s.db.QueryContext(ctx, newsEventSelectSQL()+where+`
+		ORDER BY event_at DESC, created_at DESC
+		LIMIT ? OFFSET ?
+	`, args...)
+	if err != nil {
+		return nil, wrapError(err, "list news events")
+	}
+	defer rows.Close()
+	return collectNewsEvents(rows)
+}
+
+func (s *Store) CountNewsEvents(ctx context.Context, filter NewsEventListFilter) (int, error) {
+	where, args := newsEventWhere(filter)
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_events`+where, args...).Scan(&count); err != nil {
+		return 0, wrapError(err, "count news events")
+	}
+	return count, nil
+}
+
 func (s *Store) UpdateNewsEventLinkStatus(ctx context.Context, id, status string, processedAt time.Time) error {
 	if processedAt.IsZero() {
 		processedAt = time.Now()
@@ -196,7 +219,7 @@ func (s *Store) ListNewsLinkCandidates(ctx context.Context, filter NewsLinkCandi
 	where, args := newsLinkCandidateWhere(filter)
 	args = append(args, normalizedNewsCandidateLimit(filter.Limit), normalizedStockProfileOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, newsLinkCandidateSelectSQL()+where+`
-		ORDER BY score DESC, updated_at DESC, symbol ASC
+		ORDER BY c.score DESC, c.updated_at DESC, c.symbol ASC
 		LIMIT ? OFFSET ?
 	`, args...)
 	if err != nil {
@@ -204,6 +227,15 @@ func (s *Store) ListNewsLinkCandidates(ctx context.Context, filter NewsLinkCandi
 	}
 	defer rows.Close()
 	return collectNewsLinkCandidates(rows)
+}
+
+func (s *Store) CountNewsLinkCandidates(ctx context.Context, filter NewsLinkCandidateListFilter) (int, error) {
+	where, args := newsLinkCandidateWhere(filter)
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_link_candidates c LEFT JOIN stockv2_news_events e ON e.id = c.news_event_id`+where, args...).Scan(&count); err != nil {
+		return 0, wrapError(err, "count news link candidates")
+	}
+	return count, nil
 }
 
 func collectNewsLinkCandidates(rows *sql.Rows) ([]NewsLinkCandidate, error) {
@@ -228,6 +260,29 @@ func newsEventSelectSQL() string {
 		       COALESCE(quality_status,''), COALESCE(dedupe_key,''), link_status,
 		       event_at, link_processed_at, created_at, updated_at
 		FROM stockv2_news_events`
+}
+
+func newsEventWhere(filter NewsEventListFilter) (string, []any) {
+	parts := make([]string, 0, 5)
+	args := make([]any, 0, 5)
+	add := func(column, value string) {
+		if value = strings.TrimSpace(value); value != "" {
+			parts = append(parts, column+" = ?")
+			args = append(args, value)
+		}
+	}
+	add("source", filter.Source)
+	add("link_status", filter.LinkStatus)
+	add("quality_status", filter.QualityStatus)
+	if q := strings.TrimSpace(filter.Query); q != "" {
+		pattern := "%" + strings.ToLower(q) + "%"
+		parts = append(parts, "(LOWER(title) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(content) LIKE ? OR LOWER(external_id) LIKE ?)")
+		args = append(args, pattern, pattern, pattern, pattern)
+	}
+	if len(parts) == 0 {
+		return "", args
+	}
+	return " WHERE " + strings.Join(parts, " AND "), args
 }
 
 func collectNewsEvents(rows *sql.Rows) ([]NewsEvent, error) {
@@ -275,12 +330,15 @@ func scanNewsEvent(row rowScanner) (NewsEvent, error) {
 
 func newsLinkCandidateSelectSQL() string {
 	return `
-		SELECT c.id, c.news_event_id, COALESCE(c.raw_news_id,''), c.symbol,
+		SELECT c.id, c.news_event_id, COALESCE(c.raw_news_id,''),
+		       COALESCE(e.title,''), COALESCE(e.source,''), e.event_at,
+		       c.symbol,
 		       COALESCE(c.market,''), COALESCE(c.instrument_name,''), c.match_method,
 		       c.score, COALESCE(c.reason,''), c.matched_terms_json,
 		       COALESCE(c.monitor_status,''), COALESCE(c.monitor_hit_id,''), c.monitored_at,
 		       c.created_at, c.updated_at
-		FROM stockv2_news_link_candidates c`
+		FROM stockv2_news_link_candidates c
+		LEFT JOIN stockv2_news_events e ON e.id = c.news_event_id`
 }
 
 func newsLinkCandidateWhere(filter NewsLinkCandidateListFilter) (string, []any) {
@@ -294,10 +352,16 @@ func newsLinkCandidateWhere(filter NewsLinkCandidateListFilter) (string, []any) 
 	}
 	add("c.news_event_id", filter.NewsEventID)
 	add("c.raw_news_id", filter.RawNewsID)
+	add("e.source", filter.Source)
 	add("c.symbol", filter.Symbol)
 	add("c.market", filter.Market)
 	add("c.match_method", filter.MatchMethod)
 	add("c.monitor_status", filter.MonitorStatus)
+	if q := strings.TrimSpace(filter.Query); q != "" {
+		pattern := "%" + strings.ToLower(q) + "%"
+		parts = append(parts, "(LOWER(c.symbol) LIKE ? OR LOWER(c.instrument_name) LIKE ? OR LOWER(c.reason) LIKE ? OR LOWER(e.title) LIKE ? OR LOWER(e.summary) LIKE ?)")
+		args = append(args, pattern, pattern, pattern, pattern, pattern)
+	}
 	if len(parts) == 0 {
 		return "", args
 	}
@@ -308,10 +372,14 @@ func scanNewsLinkCandidate(row rowScanner) (NewsLinkCandidate, error) {
 	var item NewsLinkCandidate
 	var matchedTermsJSON string
 	var monitoredAt sql.NullTime
+	var newsEventAt sql.NullTime
 	if err := row.Scan(
 		&item.ID,
 		&item.NewsEventID,
 		&item.RawNewsID,
+		&item.NewsEventTitle,
+		&item.NewsEventSource,
+		&newsEventAt,
 		&item.Symbol,
 		&item.Market,
 		&item.InstrumentName,
@@ -330,6 +398,9 @@ func scanNewsLinkCandidate(row rowScanner) (NewsLinkCandidate, error) {
 	item.MatchedTerms = unmarshalProfileStrings(matchedTermsJSON)
 	if monitoredAt.Valid {
 		item.MonitoredAt = monitoredAt.Time
+	}
+	if newsEventAt.Valid {
+		item.NewsEventAt = newsEventAt.Time
 	}
 	return item, nil
 }

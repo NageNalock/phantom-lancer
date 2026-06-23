@@ -49,30 +49,44 @@ type NewsEvent struct {
 }
 
 type NewsLinkCandidate struct {
-	ID             string    `json:"id"`
-	NewsEventID    string    `json:"newsEventId"`
-	RawNewsID      string    `json:"rawNewsId,omitempty"`
-	Symbol         string    `json:"symbol"`
-	Market         string    `json:"market,omitempty"`
-	InstrumentName string    `json:"instrumentName,omitempty"`
-	MatchMethod    string    `json:"matchMethod"`
-	Score          float64   `json:"score"`
-	Reason         string    `json:"reason"`
-	MatchedTerms   []string  `json:"matchedTerms"`
-	MonitorStatus  string    `json:"monitorStatus,omitempty"`
-	MonitorHitID   string    `json:"monitorHitId,omitempty"`
-	MonitoredAt    time.Time `json:"monitoredAt,omitempty"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	ID              string    `json:"id"`
+	NewsEventID     string    `json:"newsEventId"`
+	RawNewsID       string    `json:"rawNewsId,omitempty"`
+	NewsEventTitle  string    `json:"newsEventTitle,omitempty"`
+	NewsEventSource string    `json:"newsEventSource,omitempty"`
+	NewsEventAt     time.Time `json:"newsEventAt,omitempty"`
+	Symbol          string    `json:"symbol"`
+	Market          string    `json:"market,omitempty"`
+	InstrumentName  string    `json:"instrumentName,omitempty"`
+	MatchMethod     string    `json:"matchMethod"`
+	Score           float64   `json:"score"`
+	Reason          string    `json:"reason"`
+	MatchedTerms    []string  `json:"matchedTerms"`
+	MonitorStatus   string    `json:"monitorStatus,omitempty"`
+	MonitorHitID    string    `json:"monitorHitId,omitempty"`
+	MonitoredAt     time.Time `json:"monitoredAt,omitempty"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
 }
 
 type NewsLinkCandidateListFilter struct {
 	NewsEventID   string
 	RawNewsID     string
+	Source        string
 	Symbol        string
 	Market        string
 	MatchMethod   string
 	MonitorStatus string
+	Query         string
+	Limit         int
+	Offset        int
+}
+
+type NewsEventListFilter struct {
+	Source        string
+	LinkStatus    string
+	QualityStatus string
+	Query         string
 	Limit         int
 	Offset        int
 }

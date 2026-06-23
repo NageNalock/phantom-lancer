@@ -55,17 +55,17 @@ func (s *Server) handleUpdateCodexGatewaySettings(w http.ResponseWriter, r *http
 		return
 	}
 	var req struct {
-		Enabled               *bool   `json:"enabled"`
-		BaseURL               *string `json:"baseUrl"`
-		OAuthAuthURL          *string `json:"oauthAuthUrl"`
-		OAuthTokenURL         *string `json:"oauthTokenUrl"`
-		OAuthClientID         *string `json:"oauthClientId"`
-		OAuthRedirectURI      *string `json:"oauthRedirectUri"`
-		RequestTimeoutSeconds               *int    `json:"requestTimeoutSeconds"`
-		RefreshMarginSeconds                *int    `json:"refreshMarginSeconds"`
-		AccountHealthCheckIntervalSeconds   *int    `json:"accountHealthCheckIntervalSeconds"`
-		DefaultInstructions                 *string `json:"defaultInstructions"`
-		InstallationID        *string `json:"installationId"`
+		Enabled                           *bool   `json:"enabled"`
+		BaseURL                           *string `json:"baseUrl"`
+		OAuthAuthURL                      *string `json:"oauthAuthUrl"`
+		OAuthTokenURL                     *string `json:"oauthTokenUrl"`
+		OAuthClientID                     *string `json:"oauthClientId"`
+		OAuthRedirectURI                  *string `json:"oauthRedirectUri"`
+		RequestTimeoutSeconds             *int    `json:"requestTimeoutSeconds"`
+		RefreshMarginSeconds              *int    `json:"refreshMarginSeconds"`
+		AccountHealthCheckIntervalSeconds *int    `json:"accountHealthCheckIntervalSeconds"`
+		DefaultInstructions               *string `json:"defaultInstructions"`
+		InstallationID                    *string `json:"installationId"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return

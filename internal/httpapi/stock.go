@@ -1577,4 +1577,3 @@ func buildStockSetupGuide() string {
 	w()
 	return b.String()
 }
-

@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,12 +20,23 @@ const (
 	jin10TokenEnv            = "STOCKV2_JIN10_TOKEN"
 	newsSourceMaxBodyBytes   = 2 << 20
 	defaultNewsSourceTimeout = 10 * time.Second
+	maxJin10CookieBytes      = 16 << 10
 )
 
 type Jin10NewsAdapter struct {
 	endpoint   string
 	token      string
+	cookie     string
+	xAppID     string
+	xVersion   string
 	httpClient *http.Client
+}
+
+type Jin10CurlConfig struct {
+	Endpoint string
+	Cookie   string
+	XAppID   string
+	XVersion string
 }
 
 func NewJin10NewsAdapterFromEnv(httpClient *http.Client) *Jin10NewsAdapter {
@@ -33,6 +45,50 @@ func NewJin10NewsAdapterFromEnv(httpClient *http.Client) *Jin10NewsAdapter {
 		token:      strings.TrimSpace(os.Getenv(jin10TokenEnv)),
 		httpClient: httpClient,
 	}
+}
+
+type jin10NewsSourceAdapter struct {
+	service  *Service
+	fallback *Jin10NewsAdapter
+}
+
+func (a jin10NewsSourceAdapter) SourceName() string {
+	return NewsSourceJin10
+}
+
+func (a jin10NewsSourceAdapter) FetchSince(ctx context.Context, cursor NewsSourceCursor) (NewsSourceFetchResult, error) {
+	if a.service == nil {
+		if a.fallback == nil {
+			return NewsSourceFetchResult{}, ErrNewsSourceAdapterNotFound
+		}
+		return a.fallback.FetchSince(ctx, cursor)
+	}
+	settings, err := a.service.GetSettings(ctx)
+	if err != nil {
+		return NewsSourceFetchResult{}, err
+	}
+	if settings.Jin10Enabled && strings.TrimSpace(settings.Jin10Endpoint) != "" && strings.TrimSpace(settings.Jin10Cookie) != "" {
+		adapter := &Jin10NewsAdapter{
+			endpoint:   settings.Jin10Endpoint,
+			cookie:     settings.Jin10Cookie,
+			xAppID:     settings.Jin10XAppID,
+			xVersion:   settings.Jin10XVersion,
+			httpClient: a.service.httpClient,
+		}
+		return adapter.FetchSince(ctx, cursor)
+	}
+	if a.fallback != nil && strings.TrimSpace(a.fallback.endpoint) != "" {
+		return a.fallback.FetchSince(ctx, cursor)
+	}
+	return NewsSourceFetchResult{Disabled: true, FetchedAt: time.Now()}, nil
+}
+
+func (a jin10NewsSourceAdapter) NormalizeRawPayload(payload map[string]any) (RequestCreateRawNews, error) {
+	adapter := a.fallback
+	if adapter == nil {
+		adapter = &Jin10NewsAdapter{}
+	}
+	return adapter.NormalizeRawPayload(payload)
 }
 
 func (a *Jin10NewsAdapter) SourceName() string {
@@ -47,14 +103,16 @@ func (a *Jin10NewsAdapter) FetchSince(ctx context.Context, cursor NewsSourceCurs
 	if err != nil {
 		return NewsSourceFetchResult{}, err
 	}
-	query := endpoint.Query()
-	if cursor.Cursor != "" {
-		query.Set("cursor", cursor.Cursor)
+	if !isJin10PublicHost(endpoint.Hostname()) {
+		query := endpoint.Query()
+		if cursor.Cursor != "" {
+			query.Set("cursor", cursor.Cursor)
+		}
+		if !cursor.Since.IsZero() {
+			query.Set("since", cursor.Since.UTC().Format(time.RFC3339))
+		}
+		endpoint.RawQuery = query.Encode()
 	}
-	if !cursor.Since.IsZero() {
-		query.Set("since", cursor.Since.UTC().Format(time.RFC3339))
-	}
-	endpoint.RawQuery = query.Encode()
 
 	reqCtx, cancel := context.WithTimeout(ctx, defaultNewsSourceTimeout)
 	defer cancel()
@@ -62,9 +120,22 @@ func (a *Jin10NewsAdapter) FetchSince(ctx context.Context, cursor NewsSourceCurs
 	if err != nil {
 		return NewsSourceFetchResult{}, err
 	}
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://www.jin10.com")
+	req.Header.Set("Referer", "https://www.jin10.com/")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; PhantomLancer/stockv2)")
 	if a.token != "" {
 		req.Header.Set("Authorization", "Bearer "+a.token)
+	}
+	if a.cookie != "" {
+		req.Header.Set("Cookie", a.cookie)
+	}
+	if a.xAppID != "" {
+		req.Header.Set("x-app-id", a.xAppID)
+	}
+	if a.xVersion != "" {
+		req.Header.Set("x-version", a.xVersion)
 	}
 	client := a.httpClient
 	if client == nil {
@@ -90,14 +161,22 @@ func (a *Jin10NewsAdapter) FetchSince(ctx context.Context, cursor NewsSourceCurs
 }
 
 func (a *Jin10NewsAdapter) NormalizeRawPayload(payload map[string]any) (RequestCreateRawNews, error) {
+	dataPayload := payload
+	if nested, ok := firstPayloadMap(payload, "data"); ok {
+		dataPayload = nested
+	}
+	publishedAt := firstPayloadTime(payload, "published_at", "publishedAt", "time", "datetime", "created_at")
+	if publishedAt.IsZero() {
+		publishedAt = firstPayloadTime(dataPayload, "published_at", "publishedAt", "time", "datetime", "created_at")
+	}
 	req := RequestCreateRawNews{
 		Source:      NewsSourceJin10,
 		SourceID:    firstPayloadString(payload, "source_id", "sourceId", "id", "news_id"),
 		Language:    firstPayloadString(payload, "language", "lang"),
-		Title:       firstPayloadString(payload, "title", "headline"),
-		Content:     firstPayloadString(payload, "content", "text", "message"),
-		Snippet:     firstPayloadString(payload, "snippet", "summary", "brief"),
-		PublishedAt: firstPayloadTime(payload, "published_at", "publishedAt", "time", "datetime", "created_at"),
+		Title:       firstPayloadString(dataPayload, "title", "headline", "content", "text"),
+		Content:     firstPayloadString(dataPayload, "content", "text", "message"),
+		Snippet:     firstPayloadString(dataPayload, "snippet", "summary", "brief"),
+		PublishedAt: publishedAt,
 		RawPayload:  payload,
 		Quality:     NewsQualityUnknown,
 		Status:      NewsStatusNew,
@@ -117,29 +196,147 @@ func (a *Jin10NewsAdapter) NormalizeRawPayload(payload map[string]any) (RequestC
 	return req, nil
 }
 
+func ParseJin10CurlInput(raw string) (Jin10CurlConfig, error) {
+	fields := shellFieldsLite(raw)
+	var cfg Jin10CurlConfig
+	for i, field := range fields {
+		lower := strings.ToLower(field)
+		if strings.HasPrefix(field, "http://") || strings.HasPrefix(field, "https://") {
+			cfg.Endpoint = field
+			continue
+		}
+		if (lower == "--url" || lower == "url") && i+1 < len(fields) {
+			cfg.Endpoint = fields[i+1]
+			continue
+		}
+		if strings.HasPrefix(lower, "--url=") {
+			cfg.Endpoint = strings.TrimPrefix(field, field[:len("--url=")])
+			continue
+		}
+		if (lower == "-b" || lower == "--cookie") && i+1 < len(fields) {
+			cfg.Cookie = fields[i+1]
+			continue
+		}
+		if strings.HasPrefix(lower, "--cookie=") {
+			cfg.Cookie = strings.TrimPrefix(field, field[:len("--cookie=")])
+			continue
+		}
+		if (lower == "-h" || lower == "--header") && i+1 < len(fields) {
+			applyJin10Header(&cfg, fields[i+1])
+			continue
+		}
+	}
+	if cfg.Cookie == "" {
+		for _, field := range fields {
+			if cookie, ok := cookieFromHeader(field); ok {
+				cfg.Cookie = cookie
+				break
+			}
+		}
+	}
+	return cleanJin10CurlConfig(cfg)
+}
+
+func applyJin10Header(cfg *Jin10CurlConfig, raw string) {
+	idx := strings.Index(raw, ":")
+	if idx < 0 {
+		return
+	}
+	key := strings.ToLower(strings.TrimSpace(raw[:idx]))
+	value := strings.TrimSpace(raw[idx+1:])
+	switch key {
+	case "cookie":
+		cfg.Cookie = value
+	case "x-app-id":
+		cfg.XAppID = value
+	case "x-version":
+		cfg.XVersion = value
+	}
+}
+
+func cleanJin10CurlConfig(cfg Jin10CurlConfig) (Jin10CurlConfig, error) {
+	cfg.Endpoint = strings.Trim(strings.TrimSpace(cfg.Endpoint), `'"`)
+	cfg.Cookie = strings.Trim(strings.TrimSpace(cfg.Cookie), `'"`)
+	cfg.XAppID = strings.Trim(strings.TrimSpace(cfg.XAppID), `'"`)
+	cfg.XVersion = strings.Trim(strings.TrimSpace(cfg.XVersion), `'"`)
+	if cfg.Endpoint == "" {
+		return Jin10CurlConfig{}, ErrJin10ConfigMissing
+	}
+	endpoint, err := url.Parse(cfg.Endpoint)
+	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
+		return Jin10CurlConfig{}, errors.New("invalid jin10 endpoint")
+	}
+	if endpoint.Scheme != "https" && endpoint.Scheme != "http" {
+		return Jin10CurlConfig{}, errors.New("jin10 endpoint must be http or https")
+	}
+	if !isJin10PublicHost(endpoint.Hostname()) {
+		return Jin10CurlConfig{}, errors.New("jin10 endpoint must be under jin10.com")
+	}
+	if cfg.Cookie == "" || !strings.Contains(cfg.Cookie, "=") {
+		return Jin10CurlConfig{}, ErrJin10ConfigMissing
+	}
+	if strings.ContainsAny(cfg.Cookie, "\r\n") || len(cfg.Cookie) > maxJin10CookieBytes {
+		return Jin10CurlConfig{}, errors.New("jin10 cookie is invalid")
+	}
+	return cfg, nil
+}
+
+func isJin10PublicHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	return host == "jin10.com" || strings.HasSuffix(host, ".jin10.com")
+}
+
 func parseNewsSourceItems(body []byte) ([]map[string]any, string, error) {
 	var direct []map[string]any
 	if err := json.Unmarshal(body, &direct); err == nil {
 		return direct, "", nil
 	}
-	var wrapped struct {
-		Items      []map[string]any `json:"items"`
-		Data       []map[string]any `json:"data"`
-		NextCursor string           `json:"nextCursor"`
-		Cursor     string           `json:"cursor"`
-	}
+	var wrapped map[string]any
 	if err := json.Unmarshal(body, &wrapped); err != nil {
 		return nil, "", err
 	}
-	items := wrapped.Items
+	var items []map[string]any
+	for _, key := range []string{"items", "data", "list", "result"} {
+		if collected := collectNewsSourceMaps(wrapped[key], 0); len(collected) > 0 {
+			items = collected
+			break
+		}
+	}
 	if len(items) == 0 {
-		items = wrapped.Data
+		items = collectNewsSourceMaps(wrapped, 0)
 	}
-	nextCursor := wrapped.NextCursor
-	if nextCursor == "" {
-		nextCursor = wrapped.Cursor
-	}
+	nextCursor := firstPayloadString(wrapped, "nextCursor", "cursor")
 	return items, nextCursor, nil
+}
+
+func collectNewsSourceMaps(value any, depth int) []map[string]any {
+	if value == nil || depth > 3 {
+		return nil
+	}
+	switch v := value.(type) {
+	case []any:
+		out := make([]map[string]any, 0, len(v))
+		for _, item := range v {
+			out = append(out, collectNewsSourceMaps(item, depth+1)...)
+		}
+		return out
+	case []map[string]any:
+		return v
+	case map[string]any:
+		if looksLikeNewsSourceItem(v) {
+			return []map[string]any{v}
+		}
+		for _, key := range []string{"items", "data", "list", "result"} {
+			if out := collectNewsSourceMaps(v[key], depth+1); len(out) > 0 {
+				return out
+			}
+		}
+	}
+	return nil
+}
+
+func looksLikeNewsSourceItem(item map[string]any) bool {
+	return firstPayloadString(item, "id", "news_id", "time", "title", "content", "text", "message") != ""
 }
 
 func firstPayloadString(payload map[string]any, keys ...string) string {
@@ -164,6 +361,25 @@ func firstPayloadString(payload map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstPayloadMap(payload map[string]any, keys ...string) (map[string]any, bool) {
+	for _, key := range keys {
+		value, ok := payload[key]
+		if !ok || value == nil {
+			continue
+		}
+		if item, ok := value.(map[string]any); ok {
+			return item, true
+		}
+		if raw, ok := value.(string); ok {
+			var item map[string]any
+			if err := json.Unmarshal([]byte(raw), &item); err == nil {
+				return item, true
+			}
+		}
+	}
+	return nil, false
 }
 
 func firstPayloadTime(payload map[string]any, keys ...string) time.Time {

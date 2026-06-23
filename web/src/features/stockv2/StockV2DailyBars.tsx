@@ -19,8 +19,10 @@ import {
   stockV2RangeLabel,
 } from "../../domain/labels";
 import { StockV2Monitor } from "./StockV2Monitor";
+import { StockV2NewsWorkbench } from "./StockV2NewsWorkbench";
 
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
+type MarketView = "monitor" | "dailyBars" | "news";
 
 const RANGES: DailyBarRange[] = ["6m", "1y", "3y", "5y"];
 const ADJUSTEDS: DailyBarAdjusted[] = ["none", "qfq", "hfq"];
@@ -47,6 +49,7 @@ export function StockV2DailyBars({ actions, data, runAction }: { actions: AppAct
   const [adjusted, setAdjusted] = useState<DailyBarAdjusted>("none");
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
   const [symbolCheck, setSymbolCheck] = useState<StockV2DailyBarsQuality | null>(null);
+  const [marketView, setMarketView] = useState<MarketView>("monitor");
 
   const pollRef = useRef<number | null>(null);
 
@@ -163,8 +166,31 @@ export function StockV2DailyBars({ actions, data, runAction }: { actions: AppAct
 
   return (
     <div className="grid gap-4">
-      <StockV2Monitor actions={actions} />
+      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--line)] pb-3">
+        {[
+          { id: "monitor" as const, label: "监控任务" },
+          { id: "dailyBars" as const, label: "日 K 任务" },
+          { id: "news" as const, label: "消息面" },
+        ].map((tab) => (
+          <button
+            className={`rounded-md border px-3 py-1.5 text-sm ${
+              marketView === tab.id
+                ? "border-[var(--accent)] bg-[var(--surface-strong)] text-[var(--text)]"
+                : "border-[var(--line)] text-[var(--muted-strong)] hover:bg-[var(--surface-soft)]"
+            }`}
+            key={tab.id}
+            onClick={() => setMarketView(tab.id)}
+            type="button"
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
 
+      {marketView === "monitor" ? <StockV2Monitor actions={actions} /> : null}
+      {marketView === "news" ? <StockV2NewsWorkbench actions={actions} /> : null}
+
+      {marketView === "dailyBars" ? (
       <CollapsibleSection
         title={
           <span className="flex items-center gap-2">
@@ -173,7 +199,7 @@ export function StockV2DailyBars({ actions, data, runAction }: { actions: AppAct
           </span>
         }
         subtitle={`日 K 数据面的抓取任务记录 · ${historySubtitle}`}
-        defaultOpen={false}
+        defaultOpen
       >
         <div className="flex flex-wrap justify-end gap-2">
           <Button onClick={() => void loadJobs(page, true)} disabled={loading}>
@@ -254,6 +280,7 @@ export function StockV2DailyBars({ actions, data, runAction }: { actions: AppAct
           </div>
         ) : null}
       </CollapsibleSection>
+      ) : null}
 
       {drawerOpen ? (
         <DailyBarsTriggerDrawer
