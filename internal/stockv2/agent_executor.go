@@ -107,14 +107,7 @@ func (e *codexCLIExecutor) executePrompt(
 
 	start := time.Now()
 
-	// 构建命令
-	args := []string{"exec", "--json", "--sandbox", "read-only"}
-	if modelName != "" {
-		args = append(args, "--model", modelName)
-	}
-	args = append(args, prompt)
-
-	cmd := exec.CommandContext(execCtx, e.binary, args...)
+	cmd := exec.CommandContext(execCtx, e.binary, buildCodexExecArgs(modelName, prompt)...)
 	cmd.Env = e.buildEnv()
 
 	var stdoutBuf, stderrBuf, transcriptBuf ringBuffer
@@ -268,6 +261,15 @@ waitLoop:
 	}
 
 	return output, nil
+}
+
+func buildCodexExecArgs(modelName, prompt string) []string {
+	// ponytail: stockv2 agent tasks are controlled read-only prompts; if future tasks need repo context, pass an explicit trusted --cd workspace instead.
+	args := []string{"exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check"}
+	if modelName != "" {
+		args = append(args, "--model", modelName)
+	}
+	return append(args, prompt)
 }
 
 func (e *codexCLIExecutor) buildEnv() []string {
