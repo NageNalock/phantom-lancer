@@ -480,7 +480,6 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_industry ON stockv2_instrumen
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_status ON stockv2_instruments(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_market ON stockv2_stock_profiles(market);
 CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_updated_at ON stockv2_stock_profiles(updated_at);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_link_status ON stockv2_news_events(link_status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_event_at ON stockv2_news_events(event_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_event ON stockv2_news_link_candidates(news_event_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol);
@@ -901,6 +900,12 @@ func (s *Store) init(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "stockv2_news_events", "raw_news_id", "TEXT"); err != nil {
 		return fmt.Errorf("add news event raw_news_id column: %w", err)
 	}
+	if err := s.ensureColumn(ctx, "stockv2_news_events", "link_status", "TEXT NOT NULL DEFAULT 'pending'"); err != nil {
+		return fmt.Errorf("add news event link_status column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_news_events", "link_processed_at", "DATETIME"); err != nil {
+		return fmt.Errorf("add news event link_processed_at column: %w", err)
+	}
 	if err := s.ensureColumn(ctx, "stockv2_news_link_candidates", "raw_news_id", "TEXT"); err != nil {
 		return fmt.Errorf("add news link candidate raw_news_id column: %w", err)
 	}
@@ -987,6 +992,8 @@ func (s *Store) init(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `
 		CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_raw_news_id
 		    ON stockv2_news_events(raw_news_id);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_link_status
+		    ON stockv2_news_events(link_status);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_raw_news
 		    ON stockv2_news_link_candidates(raw_news_id);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_monitor_status

@@ -157,7 +157,6 @@ func TestStoreInitMigratesOldStockV2ColumnsBeforeIndexes(t *testing.T) {
 			id TEXT PRIMARY KEY,
 			source TEXT NOT NULL,
 			title TEXT NOT NULL,
-			link_status TEXT NOT NULL DEFAULT 'pending',
 			event_at DATETIME NOT NULL,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL
@@ -196,6 +195,8 @@ func TestStoreInitMigratesOldStockV2ColumnsBeforeIndexes(t *testing.T) {
 	}{
 		{"stockv2_instruments", "instrument_type"},
 		{"stockv2_stock_profiles", "instrument_type"},
+		{"stockv2_news_events", "link_status"},
+		{"stockv2_news_events", "link_processed_at"},
 		{"stockv2_news_link_candidates", "monitor_status"},
 		{"stockv2_news_link_candidates", "monitor_hit_id"},
 		{"stockv2_news_link_candidates", "monitored_at"},
