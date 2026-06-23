@@ -5,6 +5,23 @@ import (
 	"testing"
 )
 
+func TestBuildCodexExecArgsUsesReadOnlyAndSkipsRepoCheck(t *testing.T) {
+	args := buildCodexExecArgs("id-202606222", "submit debug result")
+	got := strings.Join(args, "\x00")
+	for _, want := range []string{
+		"exec",
+		"--json",
+		"--sandbox\x00read-only",
+		"--skip-git-repo-check",
+		"--model\x00id-202606222",
+		"submit debug result",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("args missing %q: %#v", want, args)
+		}
+	}
+}
+
 func TestBuildOperationReviewPromptDocumentsReviewContract(t *testing.T) {
 	prompt := buildOperationReviewPrompt("task-review-123", AgentContextPack{
 		Hit: MonitorHit{
