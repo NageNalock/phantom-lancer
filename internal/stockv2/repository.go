@@ -465,6 +465,7 @@ CREATE TABLE IF NOT EXISTS stockv2_settings (
     jin10_x_app_id TEXT,
     jin10_x_version TEXT,
     financial_juice_enabled INTEGER DEFAULT 0,
+    financial_juice_endpoint TEXT,
     financial_juice_cookie TEXT,
     base_profile_auto_maintain_enabled INTEGER DEFAULT 0,
     base_profile_maintain_interval_seconds INTEGER DEFAULT 86400,
@@ -859,6 +860,9 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_enabled", "INTEGER DEFAULT 0"); err != nil {
 		return fmt.Errorf("add financial_juice_enabled column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_endpoint", "TEXT"); err != nil {
+		return fmt.Errorf("add financial_juice_endpoint column: %w", err)
 	}
 	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_cookie", "TEXT"); err != nil {
 		return fmt.Errorf("add financial_juice_cookie column: %w", err)
@@ -2116,11 +2120,11 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 			proxy_type, proxy_host, proxy_port, last_scheduled_update,
 			daily_bars_auto_enabled, daily_bars_last_run, jin10_enabled,
 			jin10_endpoint, jin10_cookie, jin10_x_app_id, jin10_x_version,
-			financial_juice_enabled, financial_juice_cookie, base_profile_auto_maintain_enabled,
+			financial_juice_enabled, financial_juice_endpoint, financial_juice_cookie, base_profile_auto_maintain_enabled,
 			base_profile_maintain_interval_seconds, base_profile_last_maintain_at,
 			base_profile_next_maintain_at, base_profile_last_maintain_result,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	now := time.Now()
@@ -2154,6 +2158,7 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		nullableNewsString(settings.Jin10XAppID),
 		nullableNewsString(settings.Jin10XVersion),
 		settings.FinancialJuiceEnabled,
+		nullableNewsString(settings.FinancialJuiceEndpoint),
 		nullableNewsString(settings.FinancialJuiceCookie),
 		settings.BaseProfileAutoMaintainEnabled,
 		settings.BaseProfileMaintainIntervalSeconds,
@@ -2223,7 +2228,7 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 		       COALESCE(daily_bars_auto_enabled, 0), daily_bars_last_run,
 		       COALESCE(jin10_enabled, 0), COALESCE(jin10_endpoint, ''), COALESCE(jin10_cookie, ''),
 		       COALESCE(jin10_x_app_id, ''), COALESCE(jin10_x_version, ''),
-		       COALESCE(financial_juice_enabled, 0), COALESCE(financial_juice_cookie, ''),
+		       COALESCE(financial_juice_enabled, 0), COALESCE(financial_juice_endpoint, ''), COALESCE(financial_juice_cookie, ''),
 		       COALESCE(base_profile_auto_maintain_enabled, 0),
 		       COALESCE(base_profile_maintain_interval_seconds, 86400),
 		       base_profile_last_maintain_at, base_profile_next_maintain_at,
@@ -2257,6 +2262,7 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 		&settings.Jin10XAppID,
 		&settings.Jin10XVersion,
 		&settings.FinancialJuiceEnabled,
+		&settings.FinancialJuiceEndpoint,
 		&settings.FinancialJuiceCookie,
 		&settings.BaseProfileAutoMaintainEnabled,
 		&settings.BaseProfileMaintainIntervalSeconds,
@@ -2301,7 +2307,7 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	}
 	settings.Jin10EndpointSet = strings.TrimSpace(settings.Jin10Endpoint) != ""
 	settings.Jin10CookieSet = strings.TrimSpace(settings.Jin10Cookie) != ""
-	settings.FinancialJuiceCookieSet = strings.TrimSpace(settings.FinancialJuiceCookie) != ""
+	settings.FinancialJuiceCookieSet = strings.TrimSpace(settings.FinancialJuiceCookie) != "" || financialJuiceEndpointHasCredential(settings.FinancialJuiceEndpoint)
 
 	return settings, nil
 }
