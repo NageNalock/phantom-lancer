@@ -155,6 +155,18 @@ func TestJin10CurlParseAndSettingsSave(t *testing.T) {
 	}
 }
 
+func TestJin10CurlParseDropsStaleFlashQueryParams(t *testing.T) {
+	cfg, err := ParseJin10CurlInput(`curl 'https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1&max_time=2026-06-18%2010%3A00%3A00&_t=stale' \
+  -H 'x-app-id: app-placeholder' \
+  -H 'x-version: 2.1'`)
+	if err != nil {
+		t.Fatalf("parse jin10 curl: %v", err)
+	}
+	if cfg.Endpoint != defaultJin10FlashEndpoint {
+		t.Fatalf("endpoint = %q, want %q", cfg.Endpoint, defaultJin10FlashEndpoint)
+	}
+}
+
 func TestJin10EnabledUsesDefaultFlashEndpointWithoutCurl(t *testing.T) {
 	var sawURL string
 	var sawAppID string
@@ -230,7 +242,7 @@ func TestJin10FetchUsesCurlConfigAndParsesNestedPayload(t *testing.T) {
 		}, nil
 	})}
 	adapter := &Jin10NewsAdapter{
-		endpoint:   "https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1",
+		endpoint:   "https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1&max_time=2026-06-18%2010%3A00%3A00&_t=stale",
 		cookie:     "did=placeholder-device; x-token=placeholder-token",
 		xAppID:     "app-placeholder",
 		xVersion:   "2.1",
