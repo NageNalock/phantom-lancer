@@ -2716,6 +2716,9 @@ export function LibraryPanel({
                               <button className="rounded px-1.5 py-0.5 text-xs hover:bg-[var(--surface-soft)]" onClick={() => { onSelect(asset); setViewer(asset); }} type="button">
                                 预览
                               </button>
+                              <button className="rounded px-1.5 py-0.5 text-xs text-[var(--danger)] hover:bg-[var(--danger-soft)]" onClick={() => onDelete(asset)} type="button">
+                                删除
+                              </button>
                             </div>
                           </div>
                         </article>
@@ -2781,6 +2784,11 @@ export function LibraryPanel({
                               <button className="rounded px-1.5 py-0.5 text-xs hover:bg-[var(--surface-soft)]" onClick={() => { onSelectMedia?.(asset); setMediaViewer(asset); }} type="button">
                                 预览
                               </button>
+                              {onDeleteMedia ? (
+                                <button className="rounded px-1.5 py-0.5 text-xs text-[var(--danger)] hover:bg-[var(--danger-soft)]" onClick={() => onDeleteMedia(asset)} type="button">
+                                  删除
+                                </button>
+                              ) : null}
                             </div>
                           </div>
                         </article>
@@ -4305,14 +4313,14 @@ function MediaJobCard({ job, libraryMediaAssets = [], onCopyParams, onDelete, on
               复制参数
             </Button>
           ) : null}
-          {onSaveAsPreset && job.status === "success" ? (
-            <Button className="min-h-7 px-2 text-xs" onClick={() => onSaveAsPreset(job)} type="button">
-              保存为生成预设
-            </Button>
-          ) : null}
           {onDelete && !active ? (
             <Button className="min-h-7 px-2 text-xs" onClick={() => onDelete(job)} tone="danger" type="button">
               删除记录
+            </Button>
+          ) : null}
+          {onSaveAsPreset && job.status === "success" ? (
+            <Button className="min-h-7 px-2 text-xs" onClick={() => onSaveAsPreset(job)} type="button">
+              保存为生成预设
             </Button>
           ) : null}
         </div>
@@ -4437,14 +4445,14 @@ function JobCard({ job, onCopyParams, onDelete, onRetry, onRestore, onSaveAsPres
                复制参数
              </Button>
            ) : null}
-           {onSaveAsPreset && job.status === "success" ? (
-             <Button className="min-h-7 px-2 text-xs" onClick={() => onSaveAsPreset(job)} type="button">
-               保存为生成预设
-             </Button>
-           ) : null}
            {onDelete && !active ? (
              <Button className="min-h-7 px-2 text-xs" onClick={() => onDelete(job)} tone="danger" type="button">
                删除记录
+             </Button>
+           ) : null}
+           {onSaveAsPreset && job.status === "success" ? (
+             <Button className="min-h-7 px-2 text-xs" onClick={() => onSaveAsPreset(job)} type="button">
+               保存为生成预设
              </Button>
            ) : null}
          </div>
