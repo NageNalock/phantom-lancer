@@ -9,10 +9,13 @@ import (
 )
 
 func TestNewsIngestDisabledAdapterDoesNotFail(t *testing.T) {
-	t.Setenv(jin10EndpointEnv, "")
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
+	enabled := false
+	if _, err := svc.UpdateNewsSourceConfig(ctx, NewsSourceJin10, NewsSourceConfigPatch{Enabled: &enabled}); err != nil {
+		t.Fatalf("disable jin10 source: %v", err)
+	}
 
 	result, err := svc.RunNewsIngestJob(ctx, NewsSourceJin10)
 	if err != nil {

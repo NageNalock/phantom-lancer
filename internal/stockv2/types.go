@@ -167,17 +167,10 @@ type StockV2Settings struct {
 	LastScheduledUpdate                time.Time `json:"lastScheduledUpdate"`
 	DailyBarsAutoEnabled               bool      `json:"dailyBarsAutoEnabled"` // 日 K 每日定时增量开关
 	DailyBarsLastRun                   time.Time `json:"dailyBarsLastRun"`     // 日 K 定时增量上次执行时间（当日去重）
-	Jin10Enabled                       bool      `json:"jin10Enabled"`
-	Jin10Endpoint                      string    `json:"-"`
-	Jin10Cookie                        string    `json:"-"`
-	Jin10XAppID                        string    `json:"-"`
-	Jin10XVersion                      string    `json:"-"`
-	Jin10EndpointSet                   bool      `json:"jin10EndpointSet"`
-	Jin10CookieSet                     bool      `json:"jin10CookieSet"`
-	FinancialJuiceEnabled              bool      `json:"financialJuiceEnabled"`
+	FinancialJuiceEnabled              bool      `json:"-"`
 	FinancialJuiceEndpoint             string    `json:"-"`
 	FinancialJuiceCookie               string    `json:"-"`
-	FinancialJuiceCookieSet            bool      `json:"financialJuiceCookieSet"`
+	FinancialJuiceCookieSet            bool      `json:"-"`
 	BaseProfileAutoMaintainEnabled     bool      `json:"baseProfileAutoMaintainEnabled"`
 	BaseProfileMaintainIntervalSeconds int       `json:"baseProfileMaintainIntervalSeconds"`
 	BaseProfileDeepUpdateBatchSize     int       `json:"baseProfileDeepUpdateBatchSize"`
@@ -192,14 +185,13 @@ type StockV2Settings struct {
 
 // StockV2SettingsPatch 配置更新补丁
 type StockV2SettingsPatch struct {
-	AutoUpdateEnabled     *bool   `json:"autoUpdateEnabled,omitempty"`
-	UpdateIntervalSec     *int    `json:"updateIntervalSec,omitempty"`
-	ProxyEnabled          *bool   `json:"proxyEnabled,omitempty"`
-	ProxyType             *string `json:"proxyType,omitempty"`
-	ProxyHost             *string `json:"proxyHost,omitempty"`
-	ProxyPort             *int    `json:"proxyPort,omitempty"`
-	DailyBarsAutoEnabled  *bool   `json:"dailyBarsAutoEnabled,omitempty"`
-	FinancialJuiceEnabled *bool   `json:"financialJuiceEnabled,omitempty"`
+	AutoUpdateEnabled    *bool   `json:"autoUpdateEnabled,omitempty"`
+	UpdateIntervalSec    *int    `json:"updateIntervalSec,omitempty"`
+	ProxyEnabled         *bool   `json:"proxyEnabled,omitempty"`
+	ProxyType            *string `json:"proxyType,omitempty"`
+	ProxyHost            *string `json:"proxyHost,omitempty"`
+	ProxyPort            *int    `json:"proxyPort,omitempty"`
+	DailyBarsAutoEnabled *bool   `json:"dailyBarsAutoEnabled,omitempty"`
 }
 
 // Repository 接口定义
@@ -334,12 +326,6 @@ type RequestCreateOrUpdateSettings struct {
 	ProxyHost                          *string `json:"proxyHost,omitempty"`
 	ProxyPort                          *int    `json:"proxyPort,omitempty"`
 	DailyBarsAutoEnabled               *bool   `json:"dailyBarsAutoEnabled,omitempty"`
-	Jin10Enabled                       *bool   `json:"jin10Enabled,omitempty"`
-	Jin10CurlInput                     *string `json:"jin10CurlInput,omitempty"`
-	Jin10ClearConfig                   *bool   `json:"jin10ClearConfig,omitempty"`
-	FinancialJuiceEnabled              *bool   `json:"financialJuiceEnabled,omitempty"`
-	FinancialJuiceCookieInput          *string `json:"financialJuiceCookieInput,omitempty"`
-	FinancialJuiceClearCookie          *bool   `json:"financialJuiceClearCookie,omitempty"`
 	BaseProfileAutoMaintainEnabled     *bool   `json:"baseProfileAutoMaintainEnabled,omitempty"`
 	BaseProfileMaintainIntervalSeconds *int    `json:"baseProfileMaintainIntervalSeconds,omitempty"`
 	BaseProfileDeepUpdateBatchSize     *int    `json:"baseProfileDeepUpdateBatchSize,omitempty"`

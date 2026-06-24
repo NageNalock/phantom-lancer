@@ -478,11 +478,6 @@ CREATE TABLE IF NOT EXISTS stockv2_settings (
     proxy_host TEXT,
     proxy_port INTEGER,
     last_scheduled_update DATETIME,
-    jin10_enabled INTEGER DEFAULT 0,
-    jin10_endpoint TEXT,
-    jin10_cookie TEXT,
-    jin10_x_app_id TEXT,
-    jin10_x_version TEXT,
     financial_juice_enabled INTEGER DEFAULT 0,
     financial_juice_endpoint TEXT,
     financial_juice_cookie TEXT,
@@ -891,21 +886,6 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_cookie", "TEXT"); err != nil {
 		return fmt.Errorf("add financial_juice_cookie column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "jin10_enabled", "INTEGER DEFAULT 0"); err != nil {
-		return fmt.Errorf("add jin10_enabled column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "jin10_endpoint", "TEXT"); err != nil {
-		return fmt.Errorf("add jin10_endpoint column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "jin10_cookie", "TEXT"); err != nil {
-		return fmt.Errorf("add jin10_cookie column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "jin10_x_app_id", "TEXT"); err != nil {
-		return fmt.Errorf("add jin10_x_app_id column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "jin10_x_version", "TEXT"); err != nil {
-		return fmt.Errorf("add jin10_x_version column: %w", err)
 	}
 	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_auto_maintain_enabled", "INTEGER DEFAULT 0"); err != nil {
 		return fmt.Errorf("add base_profile_auto_maintain_enabled column: %w", err)
@@ -2152,14 +2132,13 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		INSERT OR REPLACE INTO stockv2_settings (
 			id, auto_update_enabled, update_interval_sec, proxy_enabled,
 			proxy_type, proxy_host, proxy_port, last_scheduled_update,
-			daily_bars_auto_enabled, daily_bars_last_run, jin10_enabled,
-			jin10_endpoint, jin10_cookie, jin10_x_app_id, jin10_x_version,
+			daily_bars_auto_enabled, daily_bars_last_run,
 			financial_juice_enabled, financial_juice_endpoint, financial_juice_cookie, base_profile_auto_maintain_enabled,
 			base_profile_maintain_interval_seconds, base_profile_deep_update_batch_size,
 			base_profile_deep_update_ai_budget, base_profile_deep_update_rate_limit_ms, base_profile_last_maintain_at,
 			base_profile_next_maintain_at, base_profile_last_maintain_result,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	now := time.Now()
@@ -2190,11 +2169,6 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		settings.LastScheduledUpdate,
 		settings.DailyBarsAutoEnabled,
 		dailyBarsLastRun,
-		settings.Jin10Enabled,
-		nullableNewsString(settings.Jin10Endpoint),
-		nullableNewsString(settings.Jin10Cookie),
-		nullableNewsString(settings.Jin10XAppID),
-		nullableNewsString(settings.Jin10XVersion),
 		settings.FinancialJuiceEnabled,
 		nullableNewsString(settings.FinancialJuiceEndpoint),
 		nullableNewsString(settings.FinancialJuiceCookie),
@@ -2267,8 +2241,6 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 		SELECT id, auto_update_enabled, update_interval_sec, proxy_enabled,
 		       COALESCE(proxy_type,''), COALESCE(proxy_host,''), COALESCE(proxy_port, 0), last_scheduled_update,
 		       COALESCE(daily_bars_auto_enabled, 0), daily_bars_last_run,
-		       COALESCE(jin10_enabled, 0), COALESCE(jin10_endpoint, ''), COALESCE(jin10_cookie, ''),
-		       COALESCE(jin10_x_app_id, ''), COALESCE(jin10_x_version, ''),
 		       COALESCE(financial_juice_enabled, 0), COALESCE(financial_juice_endpoint, ''), COALESCE(financial_juice_cookie, ''),
 		       COALESCE(base_profile_auto_maintain_enabled, 0),
 		       COALESCE(base_profile_maintain_interval_seconds, 86400),
@@ -2300,11 +2272,6 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 		&lastScheduledUpdate,
 		&settings.DailyBarsAutoEnabled,
 		&dailyBarsLastRun,
-		&settings.Jin10Enabled,
-		&settings.Jin10Endpoint,
-		&settings.Jin10Cookie,
-		&settings.Jin10XAppID,
-		&settings.Jin10XVersion,
 		&settings.FinancialJuiceEnabled,
 		&settings.FinancialJuiceEndpoint,
 		&settings.FinancialJuiceCookie,
@@ -2358,8 +2325,6 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	settings.BaseProfileDeepUpdateBatchSize = normalizeStockProfileDeepUpdateBatchSize(settings.BaseProfileDeepUpdateBatchSize)
 	settings.BaseProfileDeepUpdateAIBudget = normalizeStockProfileDeepUpdateAIBudget(settings.BaseProfileDeepUpdateAIBudget)
 	settings.BaseProfileDeepUpdateRateLimitMs = normalizeStockProfileDeepUpdateRateLimitMs(settings.BaseProfileDeepUpdateRateLimitMs)
-	settings.Jin10EndpointSet = strings.TrimSpace(settings.Jin10Endpoint) != ""
-	settings.Jin10CookieSet = strings.TrimSpace(settings.Jin10Cookie) != ""
 	settings.FinancialJuiceCookieSet = strings.TrimSpace(settings.FinancialJuiceCookie) != "" || financialJuiceEndpointHasCredential(settings.FinancialJuiceEndpoint)
 
 	return settings, nil

@@ -232,12 +232,7 @@ func (s *Service) ListNewsSourceOverviews(ctx context.Context) ([]NewsSourceOver
 	out := make([]NewsSourceOverview, 0, len(sources))
 	for _, source := range sources {
 		state := s.currentNewsSourceState(ctx, source)
-		configured, reason := s.newsSourceConfigured(ctx, source)
-		out = append(out, NewsSourceOverview{
-			State:      state,
-			Configured: configured,
-			Reason:     reason,
-		})
+		out = append(out, s.newsSourceOverview(ctx, source, state))
 	}
 	return out, nil
 }
@@ -246,6 +241,9 @@ func (s *Service) UpdateNewsSourceConfig(ctx context.Context, source string, pat
 	source = normalizeNewsSourceName(source)
 	if s.newsAdapter(source) == nil {
 		return NewsSourceOverview{}, ErrNewsSourceAdapterNotFound
+	}
+	if err := s.updateNewsSourceCredential(ctx, source, patch); err != nil {
+		return NewsSourceOverview{}, err
 	}
 	state := s.currentNewsSourceState(ctx, source)
 	if patch.Enabled != nil {
@@ -277,6 +275,7 @@ func (s *Service) UpdateNewsSourceConfig(ctx context.Context, source string, pat
 	}
 	if !state.Enabled {
 		state.Status = NewsSourceStatusDisabled
+		state.NextRunAt = time.Time{}
 	} else if state.Status == "" || state.Status == NewsSourceStatusDisabled {
 		state.Status = NewsSourceStatusIdle
 	}
@@ -285,40 +284,64 @@ func (s *Service) UpdateNewsSourceConfig(ctx context.Context, source string, pat
 	}
 	if state.Enabled {
 		s.StartBackground(context.Background())
+	} else if !s.settings.AutoUpdateEnabled && !s.settings.DailyBarsAutoEnabled && !s.settings.BaseProfileAutoMaintainEnabled && !s.hasEnabledNewsSources(ctx) {
+		s.StopBackground()
 	}
+	return s.newsSourceOverview(ctx, source, state), nil
+}
+
+func (s *Service) newsSourceOverview(ctx context.Context, source string, state NewsSourceState) NewsSourceOverview {
 	configured, reason := s.newsSourceConfigured(ctx, source)
-	return NewsSourceOverview{State: state, Configured: configured, Reason: reason}, nil
-}
-
-func (s *Service) syncNewsSourceStatesForSettings(ctx context.Context, settings StockV2Settings) error {
-	if err := s.syncNewsSourceState(ctx, NewsSourceJin10, settings.Jin10Enabled); err != nil {
-		return err
+	overview := NewsSourceOverview{State: state, Configured: configured, Reason: reason}
+	settings, err := s.GetSettings(ctx)
+	if err != nil {
+		return overview
 	}
-	return s.syncNewsSourceState(ctx, NewsSourceFinancialJuice, settings.FinancialJuiceEnabled)
+	switch normalizeNewsSourceName(source) {
+	case NewsSourceFinancialJuice:
+		overview.CredentialSet = settings.FinancialJuiceCookieSet
+	}
+	return overview
 }
 
-func (s *Service) syncNewsSourceState(ctx context.Context, source string, enabled bool) error {
-	state, ok, err := s.store.GetNewsSourceState(ctx, source)
+func (s *Service) updateNewsSourceCredential(ctx context.Context, source string, patch NewsSourceConfigPatch) error {
+	clear := patch.ClearCredential != nil && *patch.ClearCredential
+	input := ""
+	if patch.CredentialInput != nil {
+		input = strings.TrimSpace(*patch.CredentialInput)
+	}
+	if !clear && input == "" {
+		return nil
+	}
+	settings, err := s.GetSettings(ctx)
 	if err != nil {
 		return err
 	}
-	wasEnabled := ok && state.Enabled
-	if !ok {
-		state = NewsSourceState{Source: source, Status: NewsSourceStatusIdle}
-	}
-	state.Enabled = enabled
-	if !enabled {
-		state.Status = NewsSourceStatusDisabled
-		state.NextRunAt = time.Time{}
-	} else {
-		if state.Status == "" || state.Status == NewsSourceStatusDisabled {
-			state.Status = NewsSourceStatusIdle
+	switch normalizeNewsSourceName(source) {
+	case NewsSourceJin10:
+		return ErrNewsSourceCredentialUnsupported
+	case NewsSourceFinancialJuice:
+		if clear {
+			settings.FinancialJuiceEndpoint = ""
+			settings.FinancialJuiceCookie = ""
 		}
-		if !wasEnabled || state.NextRunAt.IsZero() {
-			state.NextRunAt = time.Now()
+		if input != "" {
+			cfg, err := ParseFinancialJuiceCredentialInput(input)
+			if err != nil {
+				return err
+			}
+			settings.FinancialJuiceEndpoint = cfg.Endpoint
+			settings.FinancialJuiceCookie = cfg.Cookie
 		}
+	default:
+		return ErrNewsSourceAdapterNotFound
 	}
-	return s.store.UpsertNewsSourceState(ctx, normalizeNewsSourceStateDefaults(state))
+	settings.FinancialJuiceCookieSet = strings.TrimSpace(settings.FinancialJuiceCookie) != "" || financialJuiceEndpointHasCredential(settings.FinancialJuiceEndpoint)
+	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil {
+		return wrapError(err, "save news source credential")
+	}
+	s.settings = settings
+	return nil
 }
 
 func (s *Service) newsAdapter(source string) NewsSourceAdapter {
@@ -455,29 +478,14 @@ func (s *Service) hasEnabledNewsSources(ctx context.Context) bool {
 func (s *Service) newsSourceConfigured(ctx context.Context, source string) (bool, string) {
 	switch normalizeNewsSourceName(source) {
 	case NewsSourceJin10:
-		settings, err := s.GetSettings(ctx)
-		if err != nil {
-			return false, "读取设置失败"
+		if s.newsAdapter(NewsSourceJin10) == nil {
+			return false, "金十适配器不可用"
 		}
-		if !settings.Jin10Enabled {
-			return false, "金十未启用"
-		}
-		if settings.Jin10EndpointSet {
-			return true, "使用自定义金十 endpoint"
-		}
-		if adapter, ok := s.newsAdapters[NewsSourceJin10].(jin10NewsSourceAdapter); ok && adapter.fallback != nil {
-			if _, err := normalizeJin10FlashEndpoint(adapter.fallback.endpoint); err == nil {
-				return true, "使用金十首页默认快讯接口"
-			}
-		}
-		return false, "金十默认接口不可用"
+		return true, ""
 	case NewsSourceFinancialJuice:
 		settings, err := s.GetSettings(ctx)
 		if err != nil {
 			return false, "读取设置失败"
-		}
-		if !settings.FinancialJuiceEnabled {
-			return false, "FinancialJuice 未启用"
 		}
 		if !settings.FinancialJuiceCookieSet {
 			return false, "FinancialJuice 凭据未配置"

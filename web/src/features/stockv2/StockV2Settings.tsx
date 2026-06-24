@@ -13,8 +13,6 @@ const PROFILE_TASK_PAGE_SIZE = 12;
 export function StockV2Settings({ actions, data, runAction }: { actions: AppActions; data: AppData; runAction: RunAction }) {
   const settings = data.stockv2.settings;
   const [form, setForm] = useState<Partial<StockV2Settings>>({});
-  const [jin10CurlInput, setJin10CurlInput] = useState("");
-  const [financialJuiceCookieInput, setFinancialJuiceCookieInput] = useState("");
   const [profileTasks, setProfileTasks] = useState<StockV2StockProfileUpdateTask[]>([]);
   const [profileTaskTotal, setProfileTaskTotal] = useState(0);
   const [profileTaskPage, setProfileTaskPage] = useState(1);
@@ -25,8 +23,6 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
   useEffect(() => {
     if (settings) {
       setForm(settings);
-      setJin10CurlInput("");
-      setFinancialJuiceCookieInput("");
       setDirty(false);
     }
   }, [settings?.id]);
@@ -38,54 +34,11 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
 
   async function handleSave() {
     await runAction("保存设置", async () => {
-      const body: Record<string, unknown> = { ...form };
-      if (jin10CurlInput.trim()) {
-        body.jin10CurlInput = jin10CurlInput;
-      }
-      if (financialJuiceCookieInput.trim()) {
-        body.financialJuiceCookieInput = financialJuiceCookieInput;
-      }
       await actions.api("/api/stockv2/settings", {
         method: "PUT",
-        body,
+        body: form,
       });
-      setJin10CurlInput("");
-      setFinancialJuiceCookieInput("");
       setDirty(false);
-    });
-  }
-
-  async function handleClearJin10Config() {
-    await runAction("清除金十配置", async () => {
-      await actions.api("/api/stockv2/settings", {
-        method: "PUT",
-        body: { jin10ClearConfig: true },
-      });
-      setJin10CurlInput("");
-      setDirty(false);
-    });
-  }
-
-  async function handleFetchJin10() {
-    await runAction("运行金十消息处理", async () => {
-      await actions.api("/api/stockv2/news/sources/jin10/run-once", { method: "POST" });
-    });
-  }
-
-  async function handleClearFinancialJuiceCookie() {
-    await runAction("清除 FinancialJuice 凭据", async () => {
-      await actions.api("/api/stockv2/settings", {
-        method: "PUT",
-        body: { financialJuiceClearCookie: true },
-      });
-      setFinancialJuiceCookieInput("");
-      setDirty(false);
-    });
-  }
-
-  async function handleFetchFinancialJuice() {
-    await runAction("运行 FinancialJuice 消息处理", async () => {
-      await actions.api("/api/stockv2/news/sources/financialjuice/run-once", { method: "POST" });
     });
   }
 
@@ -358,111 +311,6 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
         </div>
       </Panel>
 
-      <Panel
-        title="中文消息源"
-        subtitle="金十市场快讯默认使用首页接口；可粘贴浏览器复制的 curl 覆盖 endpoint / Cookie / 必要 header"
-        actions={
-          <div className="flex flex-wrap gap-2">
-            <Button onClick={() => void handleFetchJin10()} disabled={!form.jin10Enabled}>
-              处理一次
-            </Button>
-            <Button onClick={() => void handleClearJin10Config()} disabled={!settings.jin10EndpointSet && !settings.jin10CookieSet}>
-              清除配置
-            </Button>
-          </div>
-        }
-      >
-        <div className="grid gap-4">
-          <Toggle
-            checked={!!form.jin10Enabled}
-            label={
-              <div>
-                <div>启用金十</div>
-                <div className="muted mt-0.5 text-xs">默认抓取 www.jin10.com 市场快讯；敏感 Cookie 不会在 API 响应中回显。</div>
-              </div>
-            }
-            onChange={(checked) => update("jin10Enabled", checked)}
-          />
-
-          <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-sm">
-            <div className="flex items-center justify-between">
-              <span className="text-[var(--muted)]">配置状态</span>
-              <div className="flex gap-1.5">
-                <Pill tone={settings.jin10EndpointSet ? "good" : "neutral"}>
-                  endpoint {settings.jin10EndpointSet ? "已保存" : "默认接口"}
-                </Pill>
-                <Pill tone={settings.jin10CookieSet ? "good" : "neutral"}>
-                  Cookie {settings.jin10CookieSet ? "已保存" : "可选"}
-                </Pill>
-              </div>
-            </div>
-            <p className="muted mt-2 text-xs">默认接口可直接抓取首页市场快讯；粘贴 curl 只用于覆盖默认请求配置。</p>
-          </div>
-
-          <Field label="金十请求 curl" help="可选。支持解析请求 URL、-b/--cookie、Cookie header、x-app-id、x-version。">
-            <textarea
-              rows={5}
-              value={jin10CurlInput}
-              onChange={(e) => {
-                setJin10CurlInput(e.target.value);
-                setDirty(true);
-              }}
-              placeholder="curl 'https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1' -H 'x-app-id: bVBF4FyRTn5NJF5n' -H 'x-version: 1.0.0'"
-            />
-          </Field>
-        </div>
-      </Panel>
-
-      <Panel
-        title="英文消息源"
-        subtitle="FinancialJuice 走统一抓取、归一化与关联链路"
-        actions={
-          <div className="flex flex-wrap gap-2">
-            <Button onClick={() => void handleFetchFinancialJuice()} disabled={!form.financialJuiceEnabled || !settings.financialJuiceCookieSet}>
-              处理一次
-            </Button>
-            <Button onClick={() => void handleClearFinancialJuiceCookie()} disabled={!settings.financialJuiceCookieSet}>
-              清除凭据
-            </Button>
-          </div>
-        }
-      >
-        <div className="grid gap-4">
-          <Toggle
-            checked={!!form.financialJuiceEnabled}
-            label={
-              <div>
-                <div>启用 FinancialJuice</div>
-                <div className="muted mt-0.5 text-xs">使用用户本机复制的请求凭据拉取英文快讯</div>
-              </div>
-            }
-            onChange={(checked) => update("financialJuiceEnabled", checked)}
-          />
-
-          <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-sm">
-            <div className="flex items-center justify-between">
-              <span className="text-[var(--muted)]">凭据状态</span>
-              <Pill tone={settings.financialJuiceCookieSet ? "good" : "neutral"}>
-                {settings.financialJuiceCookieSet ? "已配置" : "未配置"}
-              </Pill>
-            </div>
-            <p className="muted mt-2 text-xs">保存后仅显示配置状态，不在 API 响应中回显 URL token 或 Cookie。</p>
-          </div>
-
-          <Field label="FinancialJuice 请求片段" help="粘贴浏览器复制的 Startup curl、含 info 的请求 URL 或 Cookie header。">
-            <textarea
-              rows={5}
-              value={financialJuiceCookieInput}
-              onChange={(e) => {
-                setFinancialJuiceCookieInput(e.target.value);
-                setDirty(true);
-              }}
-              placeholder="curl 'https://live.financialjuice.com/FJService.asmx/Startup?info=...' 或 Cookie: ..."
-            />
-          </Field>
-        </div>
-      </Panel>
-
       {/* 数据源信息 */}
       <Panel
         title="数据源"
@@ -503,8 +351,6 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
         <Button
           onClick={() => {
             setForm(settings);
-            setJin10CurlInput("");
-            setFinancialJuiceCookieInput("");
             setDirty(false);
           }}
           disabled={!dirty}
