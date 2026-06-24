@@ -867,6 +867,18 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	if settings.BaseProfileMaintainIntervalSeconds <= 0 {
 		settings.BaseProfileMaintainIntervalSeconds = 86400
 	}
+	if req.BaseProfileDeepUpdateBatchSize != nil {
+		settings.BaseProfileDeepUpdateBatchSize = *req.BaseProfileDeepUpdateBatchSize
+	}
+	if req.BaseProfileDeepUpdateAIBudget != nil {
+		settings.BaseProfileDeepUpdateAIBudget = *req.BaseProfileDeepUpdateAIBudget
+	}
+	if req.BaseProfileDeepUpdateRateLimitMs != nil {
+		settings.BaseProfileDeepUpdateRateLimitMs = *req.BaseProfileDeepUpdateRateLimitMs
+	}
+	settings.BaseProfileDeepUpdateBatchSize = normalizeStockProfileDeepUpdateBatchSize(settings.BaseProfileDeepUpdateBatchSize)
+	settings.BaseProfileDeepUpdateAIBudget = normalizeStockProfileDeepUpdateAIBudget(settings.BaseProfileDeepUpdateAIBudget)
+	settings.BaseProfileDeepUpdateRateLimitMs = normalizeStockProfileDeepUpdateRateLimitMs(settings.BaseProfileDeepUpdateRateLimitMs)
 	if settings.BaseProfileAutoMaintainEnabled {
 		interval := time.Duration(settings.BaseProfileMaintainIntervalSeconds) * time.Second
 		if !prevBaseProfile {

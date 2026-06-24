@@ -2,24 +2,128 @@ package stockv2
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
 
 func (s *Service) BuildStockProfile(ctx context.Context, symbol string) (StockProfile, error) {
-	normalizedSymbol, _ := normalizeQuoteSymbolInput(symbol)
-	if normalizedSymbol == "" {
-		normalizedSymbol = strings.TrimSpace(symbol)
-	}
-	instrument, err := s.store.GetInstrument(ctx, normalizedSymbol)
+	result, err := s.UpdateStockProfile(ctx, RequestUpdateStockProfile{
+		Symbol:        symbol,
+		TriggerSource: StockProfileUpdateTriggerManual,
+		TriggerReason: "build_compat",
+		RequestedBy:   "system",
+	})
 	if err != nil {
 		return StockProfile{}, err
 	}
-	profile := s.stockProfileFromInstrument(ctx, instrument)
-	return s.store.UpsertStockProfile(ctx, profile)
+	return result.Profile, nil
+}
+
+func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStockProfile) (StockProfileUpdateResult, error) {
+	normalizedSymbol, _ := normalizeQuoteSymbolInput(req.Symbol)
+	if normalizedSymbol == "" {
+		normalizedSymbol = strings.TrimSpace(req.Symbol)
+	}
+	trigger := normalizeStockProfileUpdateTrigger(req.TriggerSource)
+	startedAt := time.Now()
+	task := StockProfileUpdateTask{
+		ID:            generateID(),
+		Symbol:        normalizedSymbol,
+		TriggerSource: trigger,
+		TriggerReason: strings.TrimSpace(req.TriggerReason),
+		Status:        StockProfileUpdateStatusCompleted,
+		AIDecision:    StockProfileAIDecisionSkippedUnchanged,
+		StartedAt:     startedAt,
+		CreatedAt:     startedAt,
+		UpdatedAt:     startedAt,
+	}
+
+	existing, err := s.store.GetStockProfile(ctx, normalizedSymbol)
+	if err != nil && !errors.Is(err, ErrStockProfileNotFound) {
+		task.Status = StockProfileUpdateStatusFailed
+		task.ErrorMessage = err.Error()
+		task.FinishedAt = time.Now()
+		_, _ = s.store.CreateStockProfileUpdateTask(ctx, task)
+		return StockProfileUpdateResult{}, err
+	}
+	if err == nil {
+		if latestTasks, listErr := s.store.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Symbol: normalizedSymbol, Limit: 1}); listErr == nil && len(latestTasks) > 0 && latestTasks[0].BaseInputHashAfter != "" {
+			task.BaseInputHashBefore = latestTasks[0].BaseInputHashAfter
+		} else {
+			task.BaseInputHashBefore = stockProfileAIInputHash(existing)
+		}
+	}
+	instrument, err := s.store.GetInstrument(ctx, normalizedSymbol)
+	if err != nil {
+		task.Status = StockProfileUpdateStatusFailed
+		task.ErrorMessage = err.Error()
+		task.FinishedAt = time.Now()
+		_, _ = s.store.CreateStockProfileUpdateTask(ctx, task)
+		return StockProfileUpdateResult{}, err
+	}
+	task.Market = instrument.Market
+	baseProfile, sourceStatuses := s.stockProfileBaseFromInstrumentWithSourceStatuses(ctx, instrument, true)
+	profile := s.mergeStockProfileExisting(ctx, baseProfile)
+	task.SourceStatuses = sourceStatuses
+	task.BaseInputHashAfter = stockProfileAIInputHash(baseProfile)
+	task.BaseInputChanged = task.BaseInputHashBefore == "" || task.BaseInputHashBefore != task.BaseInputHashAfter
+
+	profile, err = s.store.UpsertStockProfile(ctx, profile)
+	if err != nil {
+		task.Status = StockProfileUpdateStatusFailed
+		task.ErrorMessage = err.Error()
+		task.FinishedAt = time.Now()
+		_, _ = s.store.CreateStockProfileUpdateTask(ctx, task)
+		return StockProfileUpdateResult{}, err
+	}
+
+	var agentRun *AgentRun
+	var strictErr error
+	if req.ForceAI || task.BaseInputChanged {
+		run, runErr := s.startStockProfileSummaryAgentRun(ctx, profile, req.RequestedBy)
+		if runErr != nil {
+			task.AIDecision = stockProfileAIDecisionForError(runErr)
+			if task.AIDecision == StockProfileAIDecisionFailed || req.StrictAI {
+				task.Status = StockProfileUpdateStatusPartial
+				task.ErrorMessage = runErr.Error()
+			}
+			if req.StrictAI {
+				task.Status = StockProfileUpdateStatusFailed
+				strictErr = runErr
+			}
+		} else {
+			task.AIDecision = StockProfileAIDecisionCalled
+			task.AgentRunID = run.ID
+			agentRun = &run
+		}
+	} else {
+		task.AIDecision = StockProfileAIDecisionSkippedUnchanged
+	}
+
+	task.FinishedAt = time.Now()
+	createdTask, createErr := s.store.CreateStockProfileUpdateTask(ctx, task)
+	if createErr != nil {
+		return StockProfileUpdateResult{}, createErr
+	}
+	if strictErr != nil {
+		return StockProfileUpdateResult{Profile: profile, Task: createdTask}, strictErr
+	}
+	return StockProfileUpdateResult{Profile: profile, Task: createdTask, AgentRun: agentRun}, nil
+}
+
+func (s *Service) ListStockProfileUpdateTasks(ctx context.Context, filter StockProfileUpdateTaskListFilter) ([]StockProfileUpdateTask, error) {
+	filter.Limit = normalizedStockProfileLimit(filter.Limit)
+	filter.Offset = normalizedStockProfileOffset(filter.Offset)
+	return s.store.ListStockProfileUpdateTasks(ctx, filter)
+}
+
+func (s *Service) CountStockProfileUpdateTasks(ctx context.Context, filter StockProfileUpdateTaskListFilter) (int, error) {
+	return s.store.CountStockProfileUpdateTasks(ctx, filter)
 }
 
 func (s *Service) RebuildStockProfiles(ctx context.Context) (RebuildStockProfilesResult, error) {
@@ -38,7 +142,7 @@ func (s *Service) RebuildStockProfiles(ctx context.Context) (RebuildStockProfile
 			break
 		}
 		for _, instrument := range instruments {
-			if _, err := s.store.UpsertStockProfile(ctx, s.stockProfileFromInstrument(ctx, instrument)); err != nil {
+			if _, err := s.store.UpsertStockProfile(ctx, s.stockProfileFromInstrument(ctx, instrument, false)); err != nil {
 				result.Failed++
 				result.FailedItems = append(result.FailedItems, UpdateFailure{
 					Symbol: instrument.Symbol,
@@ -49,6 +153,112 @@ func (s *Service) RebuildStockProfiles(ctx context.Context) (RebuildStockProfile
 			result.Success++
 		}
 	}
+	return result, nil
+}
+
+type stockProfileDeepUpdateOptions struct {
+	SymbolBudget int
+	AIBudget     int
+	RateLimit    time.Duration
+	Now          time.Time
+	RequestedBy  string
+}
+
+func (s *Service) RunAutomaticDeepStockProfileUpdate(ctx context.Context, trigger string) (StockProfileDeepUpdateResult, error) {
+	settings, err := s.GetSettings(ctx)
+	if err != nil {
+		return StockProfileDeepUpdateResult{}, err
+	}
+	return s.runAutomaticDeepStockProfileUpdate(ctx, trigger, stockProfileDeepUpdateOptions{
+		SymbolBudget: settings.BaseProfileDeepUpdateBatchSize,
+		AIBudget:     settings.BaseProfileDeepUpdateAIBudget,
+		RateLimit:    time.Duration(settings.BaseProfileDeepUpdateRateLimitMs) * time.Millisecond,
+		RequestedBy:  "system",
+	})
+}
+
+func (s *Service) runAutomaticDeepStockProfileUpdate(ctx context.Context, trigger string, opts stockProfileDeepUpdateOptions) (StockProfileDeepUpdateResult, error) {
+	now := opts.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	symbolBudget := normalizeStockProfileDeepUpdateBatchSize(opts.SymbolBudget)
+	aiBudget := normalizeStockProfileDeepUpdateAIBudget(opts.AIBudget)
+	rateLimit := opts.RateLimit
+	if rateLimit < 0 {
+		rateLimit = 0
+	}
+	requestedBy := strings.TrimSpace(opts.RequestedBy)
+	if requestedBy == "" {
+		requestedBy = "system"
+	}
+	result := StockProfileDeepUpdateResult{
+		SymbolBudget: symbolBudget,
+		AIBudget:     aiBudget,
+		RateLimitMs:  int(rateLimit / time.Millisecond),
+		UpdatedAt:    now,
+	}
+	headLimit := symbolBudget * 8
+	if headLimit < symbolBudget {
+		headLimit = symbolBudget
+	}
+	candidates, err := s.store.ListStockProfileDeepUpdateCandidates(ctx, headLimit)
+	if err != nil {
+		return result, err
+	}
+	seed := now.Format("2006-01-02")
+	// ponytail: 现阶段用“旧任务优先 + 每日稳定 hash”当滚动队列；需要强 SLA 时再加持久化队列表。
+	sort.SliceStable(candidates, func(i, j int) bool {
+		leftBucket := stockProfileDeepUpdateFreshnessBucket(candidates[i].LastTaskAt)
+		rightBucket := stockProfileDeepUpdateFreshnessBucket(candidates[j].LastTaskAt)
+		if leftBucket != rightBucket {
+			return leftBucket < rightBucket
+		}
+		return stockProfileScatterRank(candidates[i].Instrument.Symbol, seed) < stockProfileScatterRank(candidates[j].Instrument.Symbol, seed)
+	})
+	if len(candidates) > symbolBudget {
+		candidates = candidates[:symbolBudget]
+	}
+	result.CandidateCount = len(candidates)
+
+	for i, candidate := range candidates {
+		if result.AICalledCount >= aiBudget {
+			result.StoppedByBudget = true
+			break
+		}
+		if i > 0 {
+			if err := sleepStockProfileDeepUpdate(ctx, stockProfileDeepUpdateDelay(candidate.Instrument.Symbol, rateLimit, seed)); err != nil {
+				return result, err
+			}
+		}
+		update, err := s.UpdateStockProfile(ctx, RequestUpdateStockProfile{
+			Symbol:        candidate.Instrument.Symbol,
+			TriggerSource: StockProfileUpdateTriggerAuto,
+			TriggerReason: "auto_deep_queue:" + strings.TrimSpace(trigger),
+			RequestedBy:   requestedBy,
+		})
+		result.ProcessedCount++
+		if err != nil {
+			result.FailedCount++
+			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: candidate.Instrument.Symbol, Reason: stockProfileSnippet(err.Error(), 240)})
+			continue
+		}
+		result.SuccessCount++
+		if update.Task.BaseInputChanged {
+			result.InputChanged++
+		} else {
+			result.InputUnchanged++
+		}
+		if update.Task.AIDecision == StockProfileAIDecisionCalled {
+			result.AICalledCount++
+		} else {
+			result.AISkippedCount++
+		}
+		if result.AICalledCount >= aiBudget {
+			result.StoppedByBudget = true
+		}
+	}
+	result.UpdatedAt = time.Now()
 	return result, nil
 }
 
@@ -98,12 +308,24 @@ func (s *Service) maybeRunBaseProfileMaintenance(ctx context.Context, trigger st
 	}
 
 	result, runErr := s.RebuildStockProfiles(ctx)
+	deepResult := StockProfileDeepUpdateResult{}
+	var deepErr error
+	if runErr == nil {
+		deepResult, deepErr = s.runAutomaticDeepStockProfileUpdate(ctx, trigger, stockProfileDeepUpdateOptions{
+			SymbolBudget: settings.BaseProfileDeepUpdateBatchSize,
+			AIBudget:     settings.BaseProfileDeepUpdateAIBudget,
+			RateLimit:    time.Duration(settings.BaseProfileDeepUpdateRateLimitMs) * time.Millisecond,
+			RequestedBy:  "system",
+		})
+	}
 	settings.BaseProfileLastMaintainAt = now
 	settings.BaseProfileNextMaintainAt = now.Add(interval)
 	if runErr != nil {
 		settings.BaseProfileLastMaintainResult = fmt.Sprintf("failed trigger=%s error=%s", trigger, runErr.Error())
+	} else if deepErr != nil {
+		settings.BaseProfileLastMaintainResult = fmt.Sprintf("partial trigger=%s total=%d success=%d failed=%d deepError=%s", trigger, result.Total, result.Success, result.Failed, stockProfileSnippet(deepErr.Error(), 180))
 	} else {
-		settings.BaseProfileLastMaintainResult = fmt.Sprintf("completed trigger=%s total=%d success=%d failed=%d", trigger, result.Total, result.Success, result.Failed)
+		settings.BaseProfileLastMaintainResult = fmt.Sprintf("completed trigger=%s total=%d success=%d failed=%d deepCandidates=%d deepProcessed=%d deepAI=%d deepFailed=%d stoppedByBudget=%t", trigger, result.Total, result.Success, result.Failed, deepResult.CandidateCount, deepResult.ProcessedCount, deepResult.AICalledCount, deepResult.FailedCount, deepResult.StoppedByBudget)
 	}
 	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil && s.log != nil {
 		s.log.Warn("save base profile maintenance state failed", "error", err)
@@ -170,13 +392,24 @@ func (s *Service) ListStockProfileSummaries(ctx context.Context, symbols []strin
 }
 
 func (s *Service) RunAgentStockProfileSummary(ctx context.Context, symbol string, requestedBy string) (AgentRun, error) {
-	if s.agentExecutor == nil {
-		return AgentRun{}, ErrAgentExecutorUnavailable
-	}
-	profile, err := s.BuildStockProfile(ctx, symbol)
+	result, err := s.UpdateStockProfile(ctx, RequestUpdateStockProfile{
+		Symbol:        symbol,
+		TriggerSource: StockProfileUpdateTriggerManual,
+		TriggerReason: "legacy_run_agent",
+		RequestedBy:   requestedBy,
+		ForceAI:       true,
+		StrictAI:      true,
+	})
 	if err != nil {
 		return AgentRun{}, err
 	}
+	if result.AgentRun == nil {
+		return AgentRun{}, ErrAgentExecutorUnavailable
+	}
+	return *result.AgentRun, nil
+}
+
+func (s *Service) startStockProfileSummaryAgentRun(ctx context.Context, profile StockProfile, requestedBy string) (AgentRun, error) {
 	taskProfile, err := s.store.GetAgentTaskProfileByType(ctx, AgentTaskTypeStockProfileSummary)
 	if err != nil {
 		return AgentRun{}, err
@@ -187,6 +420,9 @@ func (s *Service) RunAgentStockProfileSummary(ctx context.Context, symbol string
 		profile.AIProfileError = err.Error()
 		_, _ = s.store.UpsertStockProfile(ctx, profile)
 		return AgentRun{}, err
+	}
+	if s.agentExecutor == nil {
+		return AgentRun{}, ErrAgentExecutorUnavailable
 	}
 	inputArtifact, _ := json.Marshal(map[string]any{
 		"task":    AgentTaskTypeStockProfileSummary,
@@ -312,17 +548,35 @@ func (s *Service) upsertInstrumentWithProfile(ctx context.Context, instrument St
 	if err := s.store.UpsertInstrument(ctx, instrument); err != nil {
 		return err
 	}
-	_, err := s.store.UpsertStockProfile(ctx, s.stockProfileFromInstrument(ctx, instrument))
+	_, err := s.store.UpsertStockProfile(ctx, s.stockProfileFromInstrument(ctx, instrument, false))
 	return err
 }
 
-func (s *Service) stockProfileFromInstrument(ctx context.Context, instrument StockV2Instrument) StockProfile {
+func (s *Service) stockProfileFromInstrument(ctx context.Context, instrument StockV2Instrument, enrichPublicSources bool) StockProfile {
+	profile, _ := s.stockProfileFromInstrumentWithSourceStatuses(ctx, instrument, enrichPublicSources)
+	return profile
+}
+
+func (s *Service) stockProfileFromInstrumentWithSourceStatuses(ctx context.Context, instrument StockV2Instrument, enrichPublicSources bool) (StockProfile, []StockProfileSourceStatus) {
+	base, sourceStatuses := s.stockProfileBaseFromInstrumentWithSourceStatuses(ctx, instrument, enrichPublicSources)
+	return s.mergeStockProfileExisting(ctx, base), sourceStatuses
+}
+
+func (s *Service) stockProfileBaseFromInstrumentWithSourceStatuses(ctx context.Context, instrument StockV2Instrument, enrichPublicSources bool) (StockProfile, []StockProfileSourceStatus) {
 	base := buildStockProfileFromInstrument(instrument)
+	var sourceStatuses []StockProfileSourceStatus
+	if enrichPublicSources {
+		base, sourceStatuses = s.enrichStockProfileFromPublicSources(ctx, base, instrument)
+	}
+	return base, sourceStatuses
+}
+
+func (s *Service) mergeStockProfileExisting(ctx context.Context, base StockProfile) StockProfile {
 	existing, err := s.store.GetStockProfile(ctx, base.Symbol)
 	if err != nil {
 		return base
 	}
-	// ponytail: 没有 profile_text_hash 前先保留已有 AI 增强;后续有真实变更检测再置 stale。
+	// ponytail: profile_update_tasks 保存基础输入 hash;这里仅合并既有 AI 增强与兼容字段。
 	return mergeStockProfileAIFields(base, existing)
 }
 
@@ -371,10 +625,10 @@ func buildStockProfileFromInstrument(instrument StockV2Instrument) StockProfile 
 
 func mergeStockProfileAIFields(base, existing StockProfile) StockProfile {
 	base.BusinessSummaryEn = existing.BusinessSummaryEn
-	base.BusinessLinesZh = existing.BusinessLinesZh
-	base.BusinessLinesEn = existing.BusinessLinesEn
-	base.RiskTagsZh = existing.RiskTagsZh
-	base.RiskTagsEn = existing.RiskTagsEn
+	base.BusinessLinesZh = appendProfileTerms(base.BusinessLinesZh, existing.BusinessLinesZh...)
+	base.BusinessLinesEn = appendProfileTerms(base.BusinessLinesEn, existing.BusinessLinesEn...)
+	base.RiskTagsZh = appendProfileTerms(base.RiskTagsZh, existing.RiskTagsZh...)
+	base.RiskTagsEn = appendProfileTerms(base.RiskTagsEn, existing.RiskTagsEn...)
 	base.AIProfileStatus = existing.AIProfileStatus
 	base.AIProfileModel = existing.AIProfileModel
 	base.AIProfileConfidence = existing.AIProfileConfidence
@@ -384,8 +638,23 @@ func mergeStockProfileAIFields(base, existing StockProfile) StockProfile {
 	base.AliasesEn = appendProfileTerms(base.AliasesEn, existing.AliasesEn...)
 	base.KeywordsZh = appendProfileTerms(base.KeywordsZh, existing.KeywordsZh...)
 	base.KeywordsEn = appendProfileTerms(base.KeywordsEn, existing.KeywordsEn...)
-	if existing.BusinessSummaryZh != "" {
+	if existing.BusinessSummaryZh != "" && (existing.AIProfileStatus == StockProfileAIStatusReady || stockProfileSummaryLooksBasic(base.BusinessSummaryZh)) {
 		base.BusinessSummaryZh = existing.BusinessSummaryZh
+	}
+	if base.BusinessSummaryZh != "" {
+		base.BusinessSummary = base.BusinessSummaryZh
+	}
+	if base.FundType == "" {
+		base.FundType = existing.FundType
+	}
+	if base.TrackingIndex == "" {
+		base.TrackingIndex = existing.TrackingIndex
+	}
+	if base.Theme == "" {
+		base.Theme = existing.Theme
+	}
+	if base.ConstituentHint == "" {
+		base.ConstituentHint = existing.ConstituentHint
 	}
 	base.Aliases = appendProfileTerms(base.Aliases, base.AliasesZh...)
 	base.Aliases = appendProfileTerms(base.Aliases, base.AliasesEn...)
@@ -393,6 +662,15 @@ func mergeStockProfileAIFields(base, existing StockProfile) StockProfile {
 	base.ProfileTextEn = buildProfileTextEn(base)
 	base.ProfileText = buildProfileText(base)
 	return base
+}
+
+func stockProfileSummaryLooksBasic(summary string) bool {
+	summary = strings.TrimSpace(summary)
+	return summary == "" ||
+		strings.Contains(summary, "股票标的") ||
+		strings.Contains(summary, "场内基金") ||
+		strings.Contains(summary, "行业:") ||
+		strings.Contains(summary, "基金类型:")
 }
 
 func cleanProfileTerms(items []string) []string {
@@ -571,4 +849,117 @@ func buildProfileTextEn(profile StockProfile) string {
 	terms = append(terms, profile.BusinessLinesEn...)
 	terms = append(terms, profile.RiskTagsEn...)
 	return strings.Join(cleanProfileTerms(terms), " ")
+}
+
+func normalizeStockProfileUpdateTrigger(value string) string {
+	switch strings.TrimSpace(value) {
+	case StockProfileUpdateTriggerAuto:
+		return StockProfileUpdateTriggerAuto
+	default:
+		return StockProfileUpdateTriggerManual
+	}
+}
+
+func stockProfileAIDecisionForError(err error) string {
+	switch {
+	case errors.Is(err, ErrAgentTaskProfileNotFound), errors.Is(err, ErrAgentModelNotAvailable):
+		return StockProfileAIDecisionSkippedNotConfigured
+	case errors.Is(err, ErrAgentExecutorUnavailable):
+		return StockProfileAIDecisionSkippedUnavailable
+	default:
+		return StockProfileAIDecisionFailed
+	}
+}
+
+func stockProfileAIInputHash(profile StockProfile) string {
+	input := struct {
+		Symbol            string   `json:"symbol"`
+		Market            string   `json:"market"`
+		InstrumentType    string   `json:"instrumentType"`
+		Name              string   `json:"name"`
+		Aliases           []string `json:"aliases"`
+		AliasesZh         []string `json:"aliasesZh"`
+		AliasesEn         []string `json:"aliasesEn"`
+		Industry          string   `json:"industry"`
+		Sectors           []string `json:"sectors"`
+		Concepts          []string `json:"concepts"`
+		Tags              []string `json:"tags"`
+		KeywordsZh        []string `json:"keywordsZh"`
+		KeywordsEn        []string `json:"keywordsEn"`
+		BusinessSummary   string   `json:"businessSummary"`
+		BusinessSummaryZh string   `json:"businessSummaryZh"`
+		BusinessLinesZh   []string `json:"businessLinesZh"`
+		BusinessLinesEn   []string `json:"businessLinesEn"`
+		RiskTagsZh        []string `json:"riskTagsZh"`
+		RiskTagsEn        []string `json:"riskTagsEn"`
+		FundType          string   `json:"fundType"`
+		TrackingIndex     string   `json:"trackingIndex"`
+		Theme             string   `json:"theme"`
+		ConstituentHint   string   `json:"constituentHint"`
+	}{
+		Symbol:            profile.Symbol,
+		Market:            profile.Market,
+		InstrumentType:    profile.InstrumentType,
+		Name:              profile.Name,
+		Aliases:           cleanProfileTerms(profile.Aliases),
+		AliasesZh:         cleanProfileTerms(profile.AliasesZh),
+		AliasesEn:         cleanProfileTerms(profile.AliasesEn),
+		Industry:          strings.TrimSpace(profile.Industry),
+		Sectors:           cleanProfileTerms(profile.Sectors),
+		Concepts:          cleanProfileTerms(profile.Concepts),
+		Tags:              cleanProfileTerms(profile.Tags),
+		KeywordsZh:        cleanProfileTerms(profile.KeywordsZh),
+		KeywordsEn:        cleanProfileTerms(profile.KeywordsEn),
+		BusinessSummary:   strings.TrimSpace(profile.BusinessSummary),
+		BusinessSummaryZh: strings.TrimSpace(profile.BusinessSummaryZh),
+		BusinessLinesZh:   cleanProfileTerms(profile.BusinessLinesZh),
+		BusinessLinesEn:   cleanProfileTerms(profile.BusinessLinesEn),
+		RiskTagsZh:        cleanProfileTerms(profile.RiskTagsZh),
+		RiskTagsEn:        cleanProfileTerms(profile.RiskTagsEn),
+		FundType:          strings.TrimSpace(profile.FundType),
+		TrackingIndex:     strings.TrimSpace(profile.TrackingIndex),
+		Theme:             strings.TrimSpace(profile.Theme),
+		ConstituentHint:   strings.TrimSpace(profile.ConstituentHint),
+	}
+	data, _ := json.Marshal(input)
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func stockProfileScatterRank(symbol, seed string) uint64 {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(seed) + ":" + strings.TrimSpace(symbol)))
+	var rank uint64
+	for i := 0; i < 8; i++ {
+		rank = rank<<8 | uint64(sum[i])
+	}
+	return rank
+}
+
+func stockProfileDeepUpdateFreshnessBucket(lastTaskAt time.Time) int64 {
+	if lastTaskAt.IsZero() {
+		return 0
+	}
+	return lastTaskAt.UTC().Unix()/86400 + 1
+}
+
+func stockProfileDeepUpdateDelay(symbol string, base time.Duration, seed string) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	jitter := time.Duration(stockProfileScatterRank(symbol, seed) % uint64(base))
+	return base + jitter
+}
+
+func sleepStockProfileDeepUpdate(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

@@ -180,6 +180,9 @@ type StockV2Settings struct {
 	FinancialJuiceCookieSet            bool      `json:"financialJuiceCookieSet"`
 	BaseProfileAutoMaintainEnabled     bool      `json:"baseProfileAutoMaintainEnabled"`
 	BaseProfileMaintainIntervalSeconds int       `json:"baseProfileMaintainIntervalSeconds"`
+	BaseProfileDeepUpdateBatchSize     int       `json:"baseProfileDeepUpdateBatchSize"`
+	BaseProfileDeepUpdateAIBudget      int       `json:"baseProfileDeepUpdateAiBudget"`
+	BaseProfileDeepUpdateRateLimitMs   int       `json:"baseProfileDeepUpdateRateLimitMs"`
 	BaseProfileLastMaintainAt          time.Time `json:"baseProfileLastMaintainAt,omitempty"`
 	BaseProfileNextMaintainAt          time.Time `json:"baseProfileNextMaintainAt,omitempty"`
 	BaseProfileLastMaintainResult      string    `json:"baseProfileLastMaintainResult,omitempty"`
@@ -339,6 +342,9 @@ type RequestCreateOrUpdateSettings struct {
 	FinancialJuiceClearCookie          *bool   `json:"financialJuiceClearCookie,omitempty"`
 	BaseProfileAutoMaintainEnabled     *bool   `json:"baseProfileAutoMaintainEnabled,omitempty"`
 	BaseProfileMaintainIntervalSeconds *int    `json:"baseProfileMaintainIntervalSeconds,omitempty"`
+	BaseProfileDeepUpdateBatchSize     *int    `json:"baseProfileDeepUpdateBatchSize,omitempty"`
+	BaseProfileDeepUpdateAIBudget      *int    `json:"baseProfileDeepUpdateAiBudget,omitempty"`
+	BaseProfileDeepUpdateRateLimitMs   *int    `json:"baseProfileDeepUpdateRateLimitMs,omitempty"`
 }
 
 // 错误定义

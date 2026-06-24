@@ -1,17 +1,25 @@
-import { Clock, Globe, Shield } from "@phosphor-icons/react";
+import { ArrowClockwise } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import type { AppActions } from "../../app/App";
-import type { AppData, StockV2Settings } from "../../app/types";
-import { Button, Field, Notice, Panel, Pill, Toggle } from "../../components/ui";
+import type { AppData, StockV2PagedResponse, StockV2Settings, StockV2StockProfileUpdateTask } from "../../app/types";
+import { friendlyError } from "../../api/client";
+import { Button, EmptyState, Field, Notice, Panel, Pill, Toggle } from "../../components/ui";
 import { stockV2SettingsSummary } from "../../domain/labels";
 
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
+
+const PROFILE_TASK_PAGE_SIZE = 12;
 
 export function StockV2Settings({ actions, data, runAction }: { actions: AppActions; data: AppData; runAction: RunAction }) {
   const settings = data.stockv2.settings;
   const [form, setForm] = useState<Partial<StockV2Settings>>({});
   const [jin10CurlInput, setJin10CurlInput] = useState("");
   const [financialJuiceCookieInput, setFinancialJuiceCookieInput] = useState("");
+  const [profileTasks, setProfileTasks] = useState<StockV2StockProfileUpdateTask[]>([]);
+  const [profileTaskTotal, setProfileTaskTotal] = useState(0);
+  const [profileTaskPage, setProfileTaskPage] = useState(1);
+  const [profileTaskLoading, setProfileTaskLoading] = useState(false);
+  const [profileTaskError, setProfileTaskError] = useState("");
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
@@ -81,6 +89,36 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
     });
   }
 
+  async function loadProfileTasks(nextPage = profileTaskPage) {
+    setProfileTaskLoading(true);
+    setProfileTaskError("");
+    try {
+      const safePage = Math.max(1, nextPage);
+      const params = new URLSearchParams({
+        limit: String(PROFILE_TASK_PAGE_SIZE),
+        offset: String((safePage - 1) * PROFILE_TASK_PAGE_SIZE),
+      });
+      const res = await actions.api<StockV2PagedResponse<StockV2StockProfileUpdateTask>>(
+        `/api/stockv2/profiles/update-tasks?${params.toString()}`,
+      );
+      const total = res.total ?? 0;
+      const limit = res.limit || PROFILE_TASK_PAGE_SIZE;
+      const resolvedOffset = res.offset ?? (safePage - 1) * PROFILE_TASK_PAGE_SIZE;
+      setProfileTasks(res.items ?? []);
+      setProfileTaskTotal(total);
+      setProfileTaskPage(total > 0 && resolvedOffset >= total ? Math.max(1, Math.ceil(total / limit)) : safePage);
+    } catch (error) {
+      setProfileTaskError(friendlyError(error));
+    } finally {
+      setProfileTaskLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadProfileTasks(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   if (!settings) {
     return (
       <Panel title="设置">
@@ -139,22 +177,22 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
       </Panel>
 
       <Panel
-        title="基础画像维护"
-        subtitle="定期为主数据生成确定性股票画像，不触发全市场 AI"
+        title="自动画像更新"
+        subtitle="后台按队列、预算和限速更新基础输入；输入变化时才启动画像 AI"
       >
         <div className="grid gap-4">
           <Toggle
             checked={!!form.baseProfileAutoMaintainEnabled}
             label={
               <div>
-                <div>启用基础画像自动维护</div>
-                <div className="muted mt-0.5 text-xs">只运行本地确定性 RebuildStockProfiles；AI 画像仍需单只手动触发。</div>
+                <div>启用自动画像更新</div>
+                <div className="muted mt-0.5 text-xs">先修复本地索引，再小批量深度更新；基础输入变化时才尝试 AI。</div>
               </div>
             }
             onChange={(checked) => update("baseProfileAutoMaintainEnabled", checked)}
           />
 
-          <Field label="维护周期 (秒)" help="建议 86400 秒（每天一次）；关闭时不会后台运行。">
+          <Field label="更新周期 (秒)" help="建议 86400 秒（每天一次）；关闭时不会后台运行。">
             <input
               min={3600}
               step={3600}
@@ -164,19 +202,65 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
             />
           </Field>
 
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="每轮标的数" help="每次自动维护最多处理多少只标的。">
+              <input
+                min={1}
+                max={50}
+                step={1}
+                type="number"
+                value={form.baseProfileDeepUpdateBatchSize ?? 12}
+                onChange={(e) => update("baseProfileDeepUpdateBatchSize", Number(e.target.value))}
+              />
+            </Field>
+            <Field label="AI 预算" help="每轮最多启动多少次画像 AI。">
+              <input
+                min={1}
+                max={10}
+                step={1}
+                type="number"
+                value={form.baseProfileDeepUpdateAiBudget ?? 2}
+                onChange={(e) => update("baseProfileDeepUpdateAiBudget", Number(e.target.value))}
+              />
+            </Field>
+            <Field label="单只间隔 (ms)" help="候选之间的基础等待时间，后台会再做稳定打散。">
+              <input
+                min={100}
+                max={60000}
+                step={100}
+                type="number"
+                value={form.baseProfileDeepUpdateRateLimitMs ?? 1500}
+                onChange={(e) => update("baseProfileDeepUpdateRateLimitMs", Number(e.target.value))}
+              />
+            </Field>
+          </div>
+
           <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-sm">
             <div className="flex items-center justify-between">
-              <span className="text-[var(--muted)]">维护状态</span>
+              <span className="text-[var(--muted)]">自动更新状态</span>
               <Pill tone={form.baseProfileAutoMaintainEnabled ? "good" : "neutral"}>
-                {form.baseProfileAutoMaintainEnabled ? "已开启" : "手动维护"}
+                {form.baseProfileAutoMaintainEnabled ? "已开启" : "已关闭"}
               </Pill>
             </div>
             <div className="mt-2 grid gap-1 text-xs text-[var(--muted)]">
               <span>上次：{formatTime(settings.baseProfileLastMaintainAt)}</span>
               <span>下次：{formatTime(settings.baseProfileNextMaintainAt)}</span>
-              {settings.baseProfileLastMaintainResult ? <span className="break-words">结果：{settings.baseProfileLastMaintainResult}</span> : null}
+              <span>
+                队列：每轮 {form.baseProfileDeepUpdateBatchSize ?? 12} 只，AI {form.baseProfileDeepUpdateAiBudget ?? 2} 次，间隔 {form.baseProfileDeepUpdateRateLimitMs ?? 1500}ms
+              </span>
+              {settings.baseProfileLastMaintainResult ? <span className="break-words">最近结果：{settings.baseProfileLastMaintainResult}</span> : null}
             </div>
           </div>
+
+          <StockProfileUpdateTasksPanel
+            items={profileTasks}
+            loading={profileTaskLoading}
+            error={profileTaskError}
+            page={profileTaskPage}
+            total={profileTaskTotal}
+            onRefresh={() => void loadProfileTasks(profileTaskPage)}
+            onPage={(page) => void loadProfileTasks(page)}
+          />
         </div>
       </Panel>
 
@@ -450,4 +534,188 @@ function formatTime(iso?: string): string {
 
 function hasMeaningfulTime(iso?: string): iso is string {
   return !!iso && !iso.startsWith("0001-01-01");
+}
+
+function StockProfileUpdateTasksPanel({
+  items,
+  loading,
+  error,
+  page,
+  total,
+  onRefresh,
+  onPage,
+}: {
+  items: StockV2StockProfileUpdateTask[];
+  loading: boolean;
+  error: string;
+  page: number;
+  total: number;
+  onRefresh: () => void;
+  onPage: (page: number) => void;
+}) {
+  const totalPages = Math.max(1, Math.ceil(total / PROFILE_TASK_PAGE_SIZE));
+  const start = total === 0 ? 0 : (page - 1) * PROFILE_TASK_PAGE_SIZE + 1;
+  const end = Math.min(total, page * PROFILE_TASK_PAGE_SIZE);
+
+  return (
+    <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <strong className="block text-sm">画像更新记录</strong>
+          <p className="muted mt-1 mb-0 text-xs">记录自动/手动触发、基础输入变化、AI 调用决策和数据源状态。</p>
+        </div>
+        <Button className="inline-flex items-center gap-1.5" onClick={onRefresh} disabled={loading}>
+          <ArrowClockwise size={15} />
+          刷新
+        </Button>
+      </div>
+
+      {error ? <Notice tone="danger">加载画像更新记录失败：{error}</Notice> : null}
+
+      {items.length === 0 && !loading ? (
+        <div className="mt-3">
+          <EmptyState title="暂无画像更新记录" body="自动画像更新或单只股票手动更新执行后，会在这里留下任务记录。" />
+        </div>
+      ) : (
+        <div className="mt-3 overflow-x-auto rounded-md border border-[var(--line)] bg-[var(--surface)]">
+          <table className="min-w-full text-left text-sm">
+            <thead className="border-b border-[var(--line)] text-xs text-[var(--muted)]">
+              <tr>
+                <th className="px-3 py-2 font-medium">标的</th>
+                <th className="px-3 py-2 font-medium">触发</th>
+                <th className="px-3 py-2 font-medium">状态</th>
+                <th className="px-3 py-2 font-medium">基础输入</th>
+                <th className="px-3 py-2 font-medium">AI</th>
+                <th className="px-3 py-2 font-medium">数据源</th>
+                <th className="px-3 py-2 font-medium">时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((task) => (
+                <tr key={task.id} className="border-b border-[var(--line)] last:border-b-0">
+                  <td className="px-3 py-2 align-top">
+                    <div className="font-mono text-xs font-semibold">{task.symbol}</div>
+                    <div className="muted mt-0.5 text-xs">{task.market || "-"}</div>
+                  </td>
+                  <td className="px-3 py-2 align-top">
+                    <Pill tone={task.triggerSource === "auto" ? "good" : "neutral"}>{triggerSourceLabel(task.triggerSource)}</Pill>
+                    {task.triggerReason ? <div className="muted mt-1 max-w-[220px] truncate text-xs">{task.triggerReason}</div> : null}
+                  </td>
+                  <td className="px-3 py-2 align-top">
+                    <Pill tone={taskStatusTone(task.status)}>{taskStatusLabel(task.status)}</Pill>
+                    {task.errorMessage ? <div className="mt-1 max-w-[240px] truncate text-xs text-[var(--danger)]">{task.errorMessage}</div> : null}
+                  </td>
+                  <td className="px-3 py-2 align-top">
+                    <Pill tone={task.baseInputChanged ? "warn" : "neutral"}>{task.baseInputChanged ? "有变化" : "无变化"}</Pill>
+                  </td>
+                  <td className="px-3 py-2 align-top">
+                    <Pill tone={aiDecisionTone(task.aiDecision)}>{aiDecisionLabel(task.aiDecision)}</Pill>
+                    {task.agentRunId ? <div className="muted mt-1 font-mono text-xs">run {shortID(task.agentRunId)}</div> : null}
+                  </td>
+                  <td className="px-3 py-2 align-top">
+                    <StockProfileSourceStatusSummary task={task} />
+                  </td>
+                  <td className="px-3 py-2 align-top">
+                    <div className="text-xs">{formatTime(task.startedAt)}</div>
+                    {hasMeaningfulTime(task.finishedAt) ? <div className="muted mt-0.5 text-xs">完成 {formatTime(task.finishedAt)}</div> : null}
+                  </td>
+                </tr>
+              ))}
+              {loading ? (
+                <tr>
+                  <td className="muted px-3 py-4 text-center text-sm" colSpan={7}>加载中...</td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--muted)]">
+        <span>
+          第 {page} / {totalPages} 页 · {start}-{end} / {total}
+        </span>
+        <div className="flex items-center gap-1.5">
+          <Button disabled={loading || page <= 1} onClick={() => onPage(page - 1)}>上一页</Button>
+          <Button disabled={loading || page >= totalPages} onClick={() => onPage(page + 1)}>下一页</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StockProfileSourceStatusSummary({ task }: { task: StockV2StockProfileUpdateTask }) {
+  const statuses = task.sourceStatuses ?? [];
+  if (statuses.length === 0) return <span className="text-xs text-[var(--muted)]">-</span>;
+  return (
+    <div className="flex max-w-[260px] flex-wrap gap-1">
+      {statuses.slice(0, 3).map((item) => (
+        <Pill className="max-w-[180px] truncate" key={`${task.id}-${item.source}`} tone={sourceStatusTone(item.status)}>
+          {item.source} {sourceStatusLabel(item.status)}
+        </Pill>
+      ))}
+      {statuses.length > 3 ? <span className="text-xs text-[var(--muted)]">+{statuses.length - 3}</span> : null}
+    </div>
+  );
+}
+
+function triggerSourceLabel(value: string): string {
+  if (value === "auto") return "自动";
+  if (value === "manual") return "手动";
+  return value || "-";
+}
+
+function taskStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    completed: "完成",
+    partial: "部分完成",
+    failed: "失败",
+  };
+  return labels[status] ?? status;
+}
+
+function taskStatusTone(status: string): "neutral" | "good" | "warn" | "danger" {
+  if (status === "completed") return "good";
+  if (status === "partial") return "warn";
+  if (status === "failed") return "danger";
+  return "neutral";
+}
+
+function aiDecisionLabel(decision: string): string {
+  const labels: Record<string, string> = {
+    called: "已调用",
+    skipped_unchanged: "输入未变",
+    skipped_not_configured: "未配置",
+    skipped_unavailable: "不可用",
+    failed: "失败",
+  };
+  return labels[decision] ?? (decision || "-");
+}
+
+function aiDecisionTone(decision: string): "neutral" | "good" | "warn" | "danger" {
+  if (decision === "called") return "good";
+  if (decision === "failed") return "danger";
+  if (decision === "skipped_unavailable") return "warn";
+  return "neutral";
+}
+
+function sourceStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    success: "成功",
+    failed: "失败",
+    skipped: "跳过",
+  };
+  return labels[status] ?? status;
+}
+
+function sourceStatusTone(status: string): "neutral" | "good" | "warn" | "danger" {
+  if (status === "success") return "good";
+  if (status === "failed") return "danger";
+  if (status === "skipped") return "neutral";
+  return "neutral";
+}
+
+function shortID(id: string): string {
+  if (!id) return "-";
+  return id.length <= 10 ? id : id.slice(0, 8);
 }
