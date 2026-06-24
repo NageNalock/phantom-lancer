@@ -128,6 +128,15 @@ func (s *Service) RunNewsProcessingBatch(ctx context.Context, source string, raw
 		_, createErr := s.CreateNewsEvent(ctx, newsEventFromRawNews(raw))
 		if createErr != nil {
 			_ = s.store.UpdateRawNewsStatus(ctx, raw.ID, NewsStatusFailed)
+			if s.log != nil {
+				s.log.Warn(
+					"stockv2 raw news processing failed",
+					"source", source,
+					"raw_news_id", raw.ID,
+					"source_id", safelog.Text(raw.SourceID, 80),
+					"error", safelog.Text(createErr.Error(), 240),
+				)
+			}
 			continue
 		}
 		if err := s.store.UpdateRawNewsStatus(ctx, raw.ID, NewsStatusProcessed); err != nil {
@@ -480,7 +489,7 @@ func (s *Service) newsSourceConfigured(ctx context.Context, source string) (bool
 }
 
 func newsEventFromRawNews(raw StockV2RawNews) NewsEvent {
-	eventTime := raw.PublishedAt
+	eventTime := clampFutureNewsPublishedAt(raw.PublishedAt, raw.FetchedAt)
 	if eventTime.IsZero() {
 		eventTime = raw.FetchedAt
 	}

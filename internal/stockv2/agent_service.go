@@ -982,6 +982,10 @@ func (s *Service) RunAgentCLIDebug(ctx context.Context, req RequestRunAgentCLIDe
 	if err != nil {
 		return AgentExecutionDetail{}, err
 	}
+	if req.Async {
+		go s.startAgentRunAsync(context.Background(), run, ledger, pack, model.ModelName)
+		return s.GetAgentExecutionDetail(ctx, run.ID)
+	}
 	if _, _, err := s.executeAgentRun(ctx, run, ledger, pack, model.ModelName); err != nil {
 		detail, detailErr := s.GetAgentExecutionDetail(ctx, run.ID)
 		if detailErr == nil {

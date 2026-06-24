@@ -154,6 +154,38 @@ func TestExecBuildArgsNeverYolo(t *testing.T) {
 	}
 }
 
+func TestExecRunReturnsWhenDescendantKeepsStdoutOpen(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "fake-codex")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '{\"type\":\"turn.completed\"}\\n'\n(sleep 3) &\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+
+	client := NewExecClient()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	lines := 0
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Run(ctx, ExecOptions{Binary: script, Prompt: "hi"}, func(line []byte) {
+			if strings.Contains(string(line), "turn.completed") {
+				lines++
+			}
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if lines != 1 {
+			t.Fatalf("lines = %d, want 1", lines)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ExecClient.Run did not return after codex process exited")
+	}
+}
+
 func TestDefaultModelFromCatalogPrefersLiveDefault(t *testing.T) {
 	model := defaultModelFromCatalog([]CodexModel{
 		{ID: "gpt-5"},

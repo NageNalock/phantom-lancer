@@ -24,7 +24,7 @@ func (s *Store) CreateRawNews(ctx context.Context, item StockV2RawNews) (StockV2
 	}
 	item.CreatedAt = now
 	item.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO stockv2_raw_news
 			(id, source, source_id, language, title, content, snippet, published_at, fetched_at,
 			 url, raw_payload_json, content_hash, dedupe_key, quality, status, created_at, updated_at)
@@ -50,6 +50,23 @@ func (s *Store) CreateRawNews(ctx context.Context, item StockV2RawNews) (StockV2
 	)
 	if err != nil {
 		return StockV2RawNews{}, wrapError(err, "create raw news")
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return StockV2RawNews{}, wrapError(err, "check raw news affected rows")
+	}
+	if rows == 0 {
+		existing, err := s.getRawNewsByDedupeKey(ctx, item.DedupeKey)
+		if err != nil {
+			return StockV2RawNews{}, err
+		}
+		if existing.Status == NewsStatusFailed && item.Status == NewsStatusNew {
+			if err := s.UpdateRawNewsStatus(ctx, existing.ID, NewsStatusNew); err != nil {
+				return StockV2RawNews{}, err
+			}
+			return s.GetRawNews(ctx, existing.ID)
+		}
+		return existing, nil
 	}
 	return s.getRawNewsByDedupeKey(ctx, item.DedupeKey)
 }
@@ -82,8 +99,8 @@ func (s *Store) ListRawNews(ctx context.Context, filter RawNewsListFilter) ([]St
 	where, args := rawNewsFilterSQL(filter)
 	args = append(args, normalizedNewsLimit(filter.Limit), normalizedNewsOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		%s WHERE %s ORDER BY fetched_at DESC, created_at DESC LIMIT ? OFFSET ?
-	`, rawNewsListSelectSQL, where), args...)
+		%s WHERE %s ORDER BY %s DESC, fetched_at DESC, created_at DESC LIMIT ? OFFSET ?
+	`, rawNewsListSelectSQL, where, rawNewsTimeSQL), args...)
 	if err != nil {
 		return nil, wrapError(err, "list raw news")
 	}
@@ -100,6 +117,69 @@ func (s *Store) ListRawNews(ctx context.Context, filter RawNewsListFilter) ([]St
 		return nil, wrapError(err, "iterate raw news")
 	}
 	return items, nil
+}
+
+func (s *Store) TruncateRawNewsBefore(ctx context.Context, before time.Time) (int, error) {
+	if before.IsZero() {
+		return 0, ErrInvalidRawNewsTruncateBefore
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, wrapError(err, "begin truncate raw news")
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT source, COUNT(*)
+		FROM stockv2_raw_news
+		WHERE %s < ?
+		GROUP BY source
+	`, rawNewsTimeSQL), before)
+	if err != nil {
+		return 0, wrapError(err, "count raw news truncate by source")
+	}
+	deletedBySource := make(map[string]int)
+	for rows.Next() {
+		var source string
+		var count int
+		if err := rows.Scan(&source, &count); err != nil {
+			rows.Close()
+			return 0, wrapError(err, "scan raw news truncate count")
+		}
+		deletedBySource[source] = count
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, wrapError(err, "iterate raw news truncate count")
+	}
+	rows.Close()
+
+	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		DELETE FROM stockv2_raw_news
+		WHERE %s < ?
+	`, rawNewsTimeSQL), before)
+	if err != nil {
+		return 0, wrapError(err, "truncate raw news")
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, wrapError(err, "check truncated raw news rows")
+	}
+	now := time.Now()
+	for source, count := range deletedBySource {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE stockv2_news_source_states
+			SET raw_news_count = CASE WHEN raw_news_count > ? THEN raw_news_count - ? ELSE 0 END,
+			    updated_at = ?
+			WHERE source = ?
+		`, count, count, now, source); err != nil {
+			return 0, wrapError(err, "sync raw news source count after truncate")
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, wrapError(err, "commit truncate raw news")
+	}
+	return int(deleted), nil
 }
 
 func (s *Store) CountRawNews(ctx context.Context, filter RawNewsListFilter) (int, error) {
@@ -259,6 +339,11 @@ const rawNewsListSelectSQL = `
 	FROM stockv2_raw_news
 `
 
+const rawNewsTimeSQL = `CASE
+	WHEN published_at IS NOT NULL AND julianday(published_at) <= julianday(fetched_at) + (2.0 / 1440.0) THEN published_at
+	ELSE fetched_at
+END`
+
 func scanRawNews(row rowScanner) (StockV2RawNews, error) {
 	var item StockV2RawNews
 	var publishedAt sql.NullTime
@@ -322,7 +407,7 @@ func rawNewsFilterSQL(filter RawNewsListFilter) (string, []any) {
 	addNewsStringFilter(&where, &args, "language", filter.Language)
 	addNewsStringFilter(&where, &args, "status", filter.Status)
 	addNewsStringFilter(&where, &args, "quality", filter.Quality)
-	addNewsTimeWindow(&where, &args, "fetched_at", filter.Since, filter.Until)
+	addNewsTimeWindow(&where, &args, rawNewsTimeSQL, filter.Since, filter.Until)
 	if q := strings.TrimSpace(filter.Query); q != "" {
 		pattern := "%" + strings.ToLower(q) + "%"
 		where = append(where, "(LOWER(title) LIKE ? OR LOWER(snippet) LIKE ? OR LOWER(content) LIKE ? OR LOWER(source_id) LIKE ? OR LOWER(dedupe_key) LIKE ?)")

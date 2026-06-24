@@ -79,7 +79,7 @@ func (s *Store) ListNewsEvents(ctx context.Context, filter NewsEventListFilter) 
 	where, args := newsEventWhere(filter)
 	args = append(args, normalizedNewsLimit(filter.Limit), normalizedNewsOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, newsEventSelectSQL()+where+`
-		ORDER BY event_at DESC, created_at DESC
+		ORDER BY `+newsEventTimeSQL+` DESC, created_at DESC
 		LIMIT ? OFFSET ?
 	`, args...)
 	if err != nil {
@@ -219,7 +219,7 @@ func (s *Store) ListNewsLinkCandidates(ctx context.Context, filter NewsLinkCandi
 	where, args := newsLinkCandidateWhere(filter)
 	args = append(args, normalizedNewsCandidateLimit(filter.Limit), normalizedStockProfileOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, newsLinkCandidateSelectSQL()+where+`
-		ORDER BY c.score DESC, c.updated_at DESC, c.symbol ASC
+		ORDER BY `+newsLinkCandidateEventTimeSQL+` DESC, c.created_at DESC, c.score DESC, c.symbol ASC
 		LIMIT ? OFFSET ?
 	`, args...)
 	if err != nil {
@@ -261,6 +261,16 @@ func newsEventSelectSQL() string {
 		       event_at, link_processed_at, created_at, updated_at
 		FROM stockv2_news_events`
 }
+
+const newsEventTimeSQL = `CASE
+	WHEN event_at IS NOT NULL AND julianday(event_at) <= julianday(created_at) + (2.0 / 1440.0) THEN event_at
+	ELSE created_at
+END`
+
+const newsLinkCandidateEventTimeSQL = `CASE
+	WHEN e.event_at IS NOT NULL AND julianday(e.event_at) <= julianday(c.created_at) + (2.0 / 1440.0) THEN e.event_at
+	ELSE c.created_at
+END`
 
 func newsEventWhere(filter NewsEventListFilter) (string, []any) {
 	parts := make([]string, 0, 5)

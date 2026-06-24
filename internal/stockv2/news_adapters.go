@@ -62,7 +62,7 @@ func (a *FinancialJuiceRawNewsAdapter) FetchRawNews(ctx context.Context) ([]Requ
 	if cookie == "" && !financialJuiceEndpointHasCredential(endpoint) {
 		return nil, ErrFinancialJuiceCookieMissing
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, financialJuiceRequestURL(endpoint), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, financialJuiceRequestURL(endpoint, a.cfg.Now()), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -259,15 +259,13 @@ func ParseFMPRawNews(body []byte, fetchedAt time.Time) ([]RequestCreateRawNews, 
 	return parseEnglishRawNewsPayload(NewsSourceFMP, body, fetchedAt)
 }
 
-func financialJuiceRequestURL(endpoint string) string {
+func financialJuiceRequestURL(endpoint string, now time.Time) string {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return endpoint
 	}
 	q := u.Query()
-	if q.Get("TimeOffset") == "" {
-		q.Set("TimeOffset", "8")
-	}
+	q.Set("TimeOffset", financialJuiceTimeOffset(now))
 	for _, key := range []string{"tabID", "oldID", "TickerID", "FeedCompanyID", "extraNID"} {
 		if q.Get(key) == "" {
 			q.Set(key, "0")
@@ -278,6 +276,14 @@ func financialJuiceRequestURL(endpoint string) string {
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+func financialJuiceTimeOffset(now time.Time) string {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	_, seconds := now.Zone()
+	return strconv.Itoa(seconds / 3600)
 }
 
 func financialJuiceCredentialEndpointFromFields(fields []string) string {
@@ -513,35 +519,57 @@ func parseNewsPublishedAt(raw string, fetchedAt time.Time) time.Time {
 	if strings.HasPrefix(text, "/Date(") {
 		end := strings.Index(text, ")/")
 		if end > len("/Date(") {
-			return epochNewsTime(text[len("/Date("):end])
+			return clampFutureNewsPublishedAt(epochNewsTime(text[len("/Date("):end]), fetchedAt)
 		}
 	}
 	if num, err := strconv.ParseInt(text, 10, 64); err == nil {
-		return epochNewsTime(strconv.FormatInt(num, 10))
+		return clampFutureNewsPublishedAt(epochNewsTime(strconv.FormatInt(num, 10)), fetchedAt)
 	}
-	layouts := []string{
+	zoneLayouts := []string{
 		time.RFC3339Nano,
 		time.RFC3339,
 		time.RFC1123Z,
 		time.RFC1123,
+	}
+	for _, layout := range zoneLayouts {
+		if t, err := time.Parse(layout, text); err == nil {
+			return clampFutureNewsPublishedAt(t, fetchedAt)
+		}
+	}
+	localLayouts := []string{
 		"2006-01-02 15:04:05",
 		"2006-01-02 15:04",
 		"2006-01-02T15:04:05",
 		"20060102T150405",
 		"20060102T1504",
 	}
-	for _, layout := range layouts {
-		if t, err := time.Parse(layout, text); err == nil {
-			return t
+	loc := time.Local
+	if !fetchedAt.IsZero() {
+		loc = fetchedAt.Location()
+	}
+	for _, layout := range localLayouts {
+		if t, err := time.ParseInLocation(layout, text, loc); err == nil {
+			return clampFutureNewsPublishedAt(t, fetchedAt)
 		}
 	}
 	if len(text) == len("15:04:05") {
 		if t, err := time.Parse("15:04:05", text); err == nil && !fetchedAt.IsZero() {
 			y, m, d := fetchedAt.Date()
-			return time.Date(y, m, d, t.Hour(), t.Minute(), t.Second(), 0, fetchedAt.Location())
+			return clampFutureNewsPublishedAt(time.Date(y, m, d, t.Hour(), t.Minute(), t.Second(), 0, fetchedAt.Location()), fetchedAt)
 		}
 	}
 	return time.Time{}
+}
+
+func clampFutureNewsPublishedAt(publishedAt, fetchedAt time.Time) time.Time {
+	if publishedAt.IsZero() || fetchedAt.IsZero() {
+		return publishedAt
+	}
+	// ponytail: wire-news timestamps are publish times, not schedules; cap display-time timezone drift at fetch time.
+	if publishedAt.After(fetchedAt.Add(2 * time.Minute)) {
+		return fetchedAt
+	}
+	return publishedAt
 }
 
 func epochNewsTime(raw string) time.Time {

@@ -100,7 +100,7 @@ func (p *agentTaskPool) mcpInitialize(params json.RawMessage) (any, *mcpError) {
 	// MCP 握手:返回 server info + capabilities
 	return map[string]any{
 		"protocolVersion": "2024-11-05",
-		"server": map[string]string{
+		"serverInfo": map[string]string{
 			"name":    mcpServerName,
 			"version": mcpServerVersion,
 		},

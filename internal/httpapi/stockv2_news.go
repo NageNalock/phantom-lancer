@@ -79,6 +79,30 @@ func (s *Server) handleStockV2GetRawNews(w http.ResponseWriter, r *http.Request)
 	s.writeJSON(w, item)
 }
 
+func (s *Server) handleStockV2TruncateRawNews(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requireAuth(w, r)
+	if !ok || !s.requireCSRF(w, r, session.Session) {
+		return
+	}
+	var req struct {
+		Before string `json:"before"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	before := parseStockV2NewsTime(req.Before)
+	if before.IsZero() {
+		writeError(w, http.StatusBadRequest, "invalid_before", stockv2.ErrInvalidRawNewsTruncateBefore.Error())
+		return
+	}
+	result, err := s.stockV2.TruncateRawNewsBefore(r.Context(), before)
+	if err != nil {
+		writeError(w, stockV2NewsHTTPStatus(err), "stockv2_raw_news_truncate_failed", err.Error())
+		return
+	}
+	s.writeJSON(w, result)
+}
+
 func (s *Server) handleStockV2ListNewsEvents(w http.ResponseWriter, r *http.Request) {
 	filter := newsEventFilterFromRequest(r)
 	items, err := s.stockV2.ListNewsEvents(r.Context(), filter)
@@ -180,6 +204,11 @@ func parseStockV2NewsTime(raw string) time.Time {
 			return ts
 		}
 	}
+	for _, layout := range []string{"2006-01-02T15:04", "2006-01-02T15:04:05", "2006-01-02 15:04", "2006-01-02 15:04:05"} {
+		if ts, err := time.ParseInLocation(layout, raw, time.Local); err == nil {
+			return ts
+		}
+	}
 	return time.Time{}
 }
 
@@ -190,7 +219,8 @@ func stockV2NewsHTTPStatus(err error) int {
 		errors.Is(err, stockv2.ErrJin10ConfigMissing),
 		errors.Is(err, stockv2.ErrFinancialJuiceCookieMissing),
 		errors.Is(err, stockv2.ErrFinancialJuiceInvalidCredential),
-		errors.Is(err, stockv2.ErrNewsSourceAdapterNotFound):
+		errors.Is(err, stockv2.ErrNewsSourceAdapterNotFound),
+		errors.Is(err, stockv2.ErrInvalidRawNewsTruncateBefore):
 		return http.StatusBadRequest
 	case errors.Is(err, stockv2.ErrRawNewsNotFound):
 		return http.StatusNotFound

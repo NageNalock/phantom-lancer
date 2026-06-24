@@ -2,11 +2,13 @@ package stockv2
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestBuildCodexExecArgsUsesReadOnlyAndSkipsRepoCheck(t *testing.T) {
+func TestBuildCodexExecArgsUsesFullAccessAndSkipsRepoCheck(t *testing.T) {
 	args := buildCodexExecArgs("id-202606222", "submit debug result", []codexMCPServerCapability{{
 		Name:          codexStockAgentMCPName,
 		URL:           "http://127.0.0.1:8080/api/stockv2/agent/mcp",
@@ -16,8 +18,10 @@ func TestBuildCodexExecArgsUsesReadOnlyAndSkipsRepoCheck(t *testing.T) {
 	for _, want := range []string{
 		"exec",
 		"--json",
-		"--sandbox\x00read-only",
+		"--ignore-user-config",
+		"--dangerously-bypass-approvals-and-sandbox",
 		"--skip-git-repo-check",
+		"-c\x00mcp_servers={}",
 		"-c\x00mcp_servers.stock_agent.url=\"http://127.0.0.1:8080/api/stockv2/agent/mcp\"",
 		"--model\x00id-202606222",
 		"submit debug result",
@@ -25,6 +29,9 @@ func TestBuildCodexExecArgsUsesReadOnlyAndSkipsRepoCheck(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("args missing %q: %#v", want, args)
 		}
+	}
+	if strings.Contains(got, "--sandbox") {
+		t.Fatalf("stockv2 agent args should bypass sandbox, got %#v", args)
 	}
 }
 
@@ -83,6 +90,67 @@ func TestExecutePromptFailsBeforeCodexWhenMCPMissing(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "invalid codex MCP server URL") {
 		t.Fatalf("err = %v, want MCP preflight URL error", err)
+	}
+}
+
+func TestSuppressCodexStderrLineOnlyDropsKnownExternalMCPNoise(t *testing.T) {
+	notionLine := []byte(`ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { resource_metadata="https://mcp.notion.com/.well-known/oauth-protected-resource/mcp" })`)
+	if !suppressCodexStderrLine(notionLine) {
+		t.Fatal("expected Notion auth worker noise to be suppressed")
+	}
+	stockLine := []byte(`ERROR codex_core::tools::router: stock_agent submit_result failed`)
+	if suppressCodexStderrLine(stockLine) {
+		t.Fatal("stock_agent errors must remain visible")
+	}
+}
+
+func TestExecutePromptReturnsAfterResultAndCleanProcessExit(t *testing.T) {
+	script := t.TempDir() + "/fake-codex"
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'fake stdout\\n'\nsleep 0.05\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	pool := newAgentTaskPool(defaultCleanupInterval)
+	defer pool.Close()
+	executor := &codexCLIExecutor{
+		binary:   script,
+		taskPool: pool,
+		mcpURL:   "http://127.0.0.1:8080/api/stockv2/agent/mcp",
+	}
+	taskID, _ := pool.createTask(AgentTaskTypeOperationReview, "run-clean-exit", "", time.Minute)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		_, _ = pool.submitResult(taskID, AgentTaskTypeOperationReview, AgentTaskSubmittedResult{
+			OutputType:    OperationReviewOutputContinueMonitoring,
+			ResultSummary: "debug ok",
+			Result:        map[string]any{"debug": true},
+			Confidence:    1,
+		})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan struct {
+		output *AgentExecutorOutput
+		err    error
+	}, 1)
+	go func() {
+		output, err := executor.executePrompt(ctx, taskID, "prompt", "model")
+		done <- struct {
+			output *AgentExecutorOutput
+			err    error
+		}{output: output, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("execute prompt: %v", got.err)
+		}
+		if got.output == nil || got.output.ExitCode != 0 || !strings.Contains(got.output.StdoutTail, "fake stdout") {
+			t.Fatalf("output = %+v, want clean stdout exit", got.output)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("executePrompt did not return after MCP result and clean process exit")
 	}
 }
 

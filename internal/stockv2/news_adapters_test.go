@@ -256,6 +256,9 @@ func TestJin10FetchUsesCurlConfigAndParsesNestedPayload(t *testing.T) {
 	if raw.Title != "沪指午后走强" || raw.Language != "zh-CN" || raw.PublishedAt.IsZero() {
 		t.Fatalf("raw news = %+v", raw)
 	}
+	if got := raw.PublishedAt.Format(time.RFC3339); got != "2026-06-23T14:30:00+08:00" {
+		t.Fatalf("published_at = %s, want Jin10 local time +08:00", got)
+	}
 }
 
 func TestJin10FetchEmptyDataWrapperDoesNotBecomeOKNews(t *testing.T) {
@@ -381,8 +384,31 @@ func TestFinancialJuiceMockFetchUsesInfoEndpointWithoutCookie(t *testing.T) {
 	if !strings.Contains(sawURL, "info=%22token-placeholder%22") {
 		t.Fatalf("request URL = %q, want info credential", sawURL)
 	}
+	if strings.Contains(sawURL, "TimeOffset=8") || !strings.Contains(sawURL, "TimeOffset=0") {
+		t.Fatalf("request URL = %q, want normalized UTC TimeOffset", sawURL)
+	}
 	if sawCookie != "" {
 		t.Fatalf("cookie header = %q, want empty cookie", sawCookie)
+	}
+}
+
+func TestFinancialJuiceTimeOffsetUsesLocalUTCOffset(t *testing.T) {
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+	got := financialJuiceTimeOffset(time.Date(2026, 6, 24, 16, 0, 0, 0, loc))
+	if got != "8" {
+		t.Fatalf("financialJuiceTimeOffset = %q, want 8", got)
+	}
+}
+
+func TestNewsPublishedAtClampsFutureDisplayTime(t *testing.T) {
+	loc := time.FixedZone("CST", 8*60*60)
+	fetchedAt := time.Date(2026, 6, 24, 0, 40, 0, 0, loc)
+
+	for _, raw := range []string{"08:40:00", "2026-06-24T08:40:00", "2026-06-24 08:40:00"} {
+		got := parseNewsPublishedAt(raw, fetchedAt)
+		if !got.Equal(fetchedAt) {
+			t.Fatalf("parseNewsPublishedAt(%q) = %s, want fetch time %s", raw, got, fetchedAt)
+		}
 	}
 }
 

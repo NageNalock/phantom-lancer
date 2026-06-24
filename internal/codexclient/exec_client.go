@@ -5,6 +5,7 @@ import (
 	"context"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // ExecOptions configures a single `codex exec --json` invocation.
@@ -64,16 +65,35 @@ func (c *ExecClient) Run(ctx context.Context, opts ExecOptions, onLine func([]by
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(strings.TrimSpace(string(line))) == 0 {
-			continue
+	scanDone := make(chan struct{}, 1)
+	go func() {
+		defer func() { scanDone <- struct{}{} }()
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if len(strings.TrimSpace(string(line))) == 0 {
+				continue
+			}
+			cp := make([]byte, len(line))
+			copy(cp, line)
+			onLine(cp)
 		}
-		cp := make([]byte, len(line))
-		copy(cp, line)
-		onLine(cp)
+	}()
+	err = cmd.Wait()
+	waitExecScanDone(scanDone, stdout)
+	return err
+}
+
+func waitExecScanDone(done <-chan struct{}, stdout interface{ Close() error }) {
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		// ponytail: normal JSONL drains immediately; close inherited pipes instead of hanging on stray descendants.
+		_ = stdout.Close()
+		select {
+		case <-done:
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
-	return cmd.Wait()
 }

@@ -93,6 +93,148 @@ func TestNewsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestRawNewsDuplicateFailedResetsToNew(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	failed, err := svc.CreateRawNews(ctx, RequestCreateRawNews{
+		Source:   "financialjuice",
+		SourceID: "9648580",
+		Title:    "Iran's President Pezeshkian: We will never negotiate our defensive ability with anyone.",
+		Status:   NewsStatusFailed,
+	})
+	if err != nil {
+		t.Fatalf("create failed raw news: %v", err)
+	}
+	reloaded, err := svc.CreateRawNews(ctx, RequestCreateRawNews{
+		Source:   "financialjuice",
+		SourceID: "9648580",
+		Title:    failed.Title,
+		Status:   NewsStatusNew,
+	})
+	if err != nil {
+		t.Fatalf("create duplicate raw news: %v", err)
+	}
+	if reloaded.ID != failed.ID || reloaded.Status != NewsStatusNew {
+		t.Fatalf("reloaded = %+v, failed = %+v; want same row reset to new", reloaded, failed)
+	}
+}
+
+func TestRawNewsListSortsByEffectiveTimeDesc(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	base := time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC)
+
+	older, err := svc.CreateRawNews(ctx, RequestCreateRawNews{
+		Source:      "jin10",
+		SourceID:    "sort-old",
+		Title:       "older published news",
+		PublishedAt: base.Add(-time.Hour),
+		FetchedAt:   base,
+	})
+	if err != nil {
+		t.Fatalf("create older raw news: %v", err)
+	}
+	newer, err := svc.CreateRawNews(ctx, RequestCreateRawNews{
+		Source:      "jin10",
+		SourceID:    "sort-new",
+		Title:       "newer published news",
+		PublishedAt: base.Add(time.Hour),
+		FetchedAt:   base.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create newer raw news: %v", err)
+	}
+	future, err := svc.CreateRawNews(ctx, RequestCreateRawNews{
+		Source:      "jin10",
+		SourceID:    "sort-future",
+		Title:       "future published news",
+		PublishedAt: base.Add(8 * time.Hour),
+		FetchedAt:   base.Add(-2 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create future raw news: %v", err)
+	}
+	items, err := svc.ListRawNews(ctx, RawNewsListFilter{Source: "jin10", Limit: 10})
+	if err != nil {
+		t.Fatalf("list raw news: %v", err)
+	}
+	if len(items) < 3 || items[0].ID != newer.ID || items[1].ID != older.ID || items[2].ID != future.ID {
+		t.Fatalf("items = %+v, want effective time desc", items)
+	}
+}
+
+func TestCreateRawNewsClampsFuturePublishedAt(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	fetchedAt := time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC)
+
+	item, err := svc.CreateRawNews(ctx, RequestCreateRawNews{
+		Source:      "jin10",
+		SourceID:    "future-clamp",
+		Title:       "future raw news",
+		PublishedAt: fetchedAt.Add(8 * time.Hour),
+		FetchedAt:   fetchedAt,
+	})
+	if err != nil {
+		t.Fatalf("create raw news: %v", err)
+	}
+	if !item.PublishedAt.Equal(fetchedAt) {
+		t.Fatalf("published_at = %s, want fetched_at %s", item.PublishedAt, fetchedAt)
+	}
+}
+
+func TestTruncateRawNewsBeforeDeletesOldEffectiveTime(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	base := time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC)
+	if err := svc.store.UpsertNewsSourceState(ctx, NewsSourceState{Source: "jin10", Status: NewsSourceStatusIdle, RawNewsCount: 2}); err != nil {
+		t.Fatalf("seed jin10 state: %v", err)
+	}
+	if err := svc.store.UpsertNewsSourceState(ctx, NewsSourceState{Source: "financialjuice", Status: NewsSourceStatusIdle, RawNewsCount: 1}); err != nil {
+		t.Fatalf("seed financialjuice state: %v", err)
+	}
+	for _, req := range []RequestCreateRawNews{
+		{Source: "jin10", SourceID: "truncate-old-published", Title: "old published", PublishedAt: base.Add(-2 * time.Hour), FetchedAt: base},
+		{Source: "financialjuice", SourceID: "truncate-old-fetched", Title: "old fetched", FetchedAt: base.Add(-90 * time.Minute)},
+		{Source: "jin10", SourceID: "truncate-keep", Title: "keep", PublishedAt: base.Add(-30 * time.Minute), FetchedAt: base.Add(-30 * time.Minute)},
+	} {
+		if _, err := svc.CreateRawNews(ctx, req); err != nil {
+			t.Fatalf("create raw news %s: %v", req.SourceID, err)
+		}
+	}
+
+	result, err := svc.TruncateRawNewsBefore(ctx, base.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("truncate raw news: %v", err)
+	}
+	if result.DeletedCount != 2 {
+		t.Fatalf("deleted = %d, want 2", result.DeletedCount)
+	}
+	remaining, err := svc.ListRawNews(ctx, RawNewsListFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("list remaining raw news: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].SourceID != "truncate-keep" {
+		t.Fatalf("remaining = %+v, want only truncate-keep", remaining)
+	}
+	jin10, ok, err := svc.GetNewsSourceState(ctx, "jin10")
+	if err != nil || !ok {
+		t.Fatalf("get jin10 state ok=%v err=%v", ok, err)
+	}
+	financialjuice, ok, err := svc.GetNewsSourceState(ctx, "financialjuice")
+	if err != nil || !ok {
+		t.Fatalf("get financialjuice state ok=%v err=%v", ok, err)
+	}
+	if jin10.RawNewsCount != 1 || financialjuice.RawNewsCount != 0 {
+		t.Fatalf("raw counts jin10=%d financialjuice=%d, want 1/0", jin10.RawNewsCount, financialjuice.RawNewsCount)
+	}
+}
+
 func TestNewsLinkCandidateUpsertReturnsStoredID(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

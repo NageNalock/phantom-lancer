@@ -111,6 +111,7 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/stockv2/news/sources/{source}/run-once", s.handleStockV2RunNewsSourceOnce)
 	mux.HandleFunc("POST /api/stockv2/news/sources/{source}/fetch", s.handleStockV2FetchRawNewsSource)
 	mux.HandleFunc("GET /api/stockv2/news/raw", s.handleStockV2ListRawNews)
+	mux.HandleFunc("POST /api/stockv2/news/raw/truncate", s.handleStockV2TruncateRawNews)
 	mux.HandleFunc("GET /api/stockv2/news/raw/{id}", s.handleStockV2GetRawNews)
 	mux.HandleFunc("GET /api/stockv2/news/events", s.handleStockV2ListNewsEvents)
 	mux.HandleFunc("GET /api/stockv2/news/link-candidates", s.handleStockV2ListNewsLinkCandidates)

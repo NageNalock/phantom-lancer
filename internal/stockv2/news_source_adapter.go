@@ -26,6 +26,8 @@ const (
 	maxJin10CookieBytes       = 16 << 10
 )
 
+var jin10Location = time.FixedZone("Asia/Shanghai", 8*60*60)
+
 type Jin10NewsAdapter struct {
 	endpoint   string
 	token      string
@@ -466,10 +468,18 @@ func parseNewsTimeString(value string) time.Time {
 	for _, layout := range []string{
 		time.RFC3339Nano,
 		time.RFC3339,
-		"2006-01-02 15:04:05",
-		"2006-01-02 15:04",
 	} {
 		if ts, err := time.Parse(layout, trimmed); err == nil {
+			return ts
+		}
+	}
+	for _, layout := range []string{
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02T15:04:05",
+		"2006-01-02T15:04",
+	} {
+		if ts, err := time.ParseInLocation(layout, trimmed, jin10Location); err == nil {
 			return ts
 		}
 	}

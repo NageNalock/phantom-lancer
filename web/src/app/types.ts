@@ -2093,6 +2093,11 @@ export interface StockV2RawNews {
   updatedAt: string;
 }
 
+export interface StockV2RawNewsTruncateResult {
+  before: string;
+  deletedCount: number;
+}
+
 export interface StockV2NewsEvent {
   id: string;
   rawNewsId?: string;
@@ -2118,13 +2123,13 @@ export interface StockV2NewsLinkCandidate {
   newsEventTitle?: string;
   newsEventSource?: string;
   newsEventAt?: string;
-  symbol: string;
+  symbol?: string;
   market?: string;
   instrumentName?: string;
-  matchMethod: string;
-  score: number;
-  reason: string;
-  matchedTerms: string[];
+  matchMethod?: string;
+  score?: number | null;
+  reason?: string;
+  matchedTerms?: string[] | null;
   monitorStatus?: string;
   monitorHitId?: string;
   monitoredAt?: string;
@@ -2907,6 +2912,7 @@ export interface StockV2AgentCreateProviderRequest {
 export interface StockV2AgentRunCLIDebugRequest {
   modelId: string;
   requestedBy?: string;
+  async?: boolean;
 }
 
 export interface StockV2AgentUpdateProviderRequest {

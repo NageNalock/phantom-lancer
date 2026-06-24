@@ -218,7 +218,7 @@ export function StockV2AgentRunDetailPanel({ detail }: { detail: StockV2AgentExe
 
       <div className="grid gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs">
         <Row label="开始时间" value={formatDate(run.startedAt || run.createdAt) || "-"} />
-        <Row label="结束时间" value={formatDate(run.finishedAt) || "-"} />
+        <Row label="结束时间" value={formatAgentRunFinishedAt(run)} />
         <Row label="Run ID" value={run.id} />
         <Row label="Ledger ID" value={run.decisionLedgerId || ledger?.id || "-"} />
         {review ? <Row label="Review" value={`${review.status || "-"} · ${review.id}`} /> : null}
@@ -299,6 +299,12 @@ function AgentPagination({
       </div>
     </div>
   );
+}
+
+function formatAgentRunFinishedAt(run: StockV2AgentRun): string {
+  if (run.status !== "completed" && run.status !== "failed") return "-";
+  if (!run.finishedAt || run.finishedAt.startsWith("0001-01-01")) return "-";
+  return formatDate(run.finishedAt) || "-";
 }
 
 function SummaryCell({ label, value, tone }: { label: string; value: string; tone: "neutral" | "good" | "warn" | "danger" }) {

@@ -289,6 +289,7 @@ type RequestResolveAgentTask struct {
 type RequestRunAgentCLIDebug struct {
 	ModelID     string `json:"modelId"`
 	RequestedBy string `json:"requestedBy,omitempty"`
+	Async       bool   `json:"async,omitempty"`
 }
 
 type AgentExecutionDetail struct {

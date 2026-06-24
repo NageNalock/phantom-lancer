@@ -31,6 +31,13 @@ func TestStockV2SensitiveWritesRequireCSRF(t *testing.T) {
 			body:   ``,
 			call:   server.handleStockV2FetchRawNewsSource,
 		},
+		{
+			name:   "raw news truncate",
+			method: http.MethodPost,
+			target: "/api/stockv2/news/raw/truncate",
+			body:   `{"before":"2026-06-24T00:00:00Z"}`,
+			call:   server.handleStockV2TruncateRawNews,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))

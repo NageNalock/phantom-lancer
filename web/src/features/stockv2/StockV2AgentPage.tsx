@@ -18,6 +18,8 @@ import {
   stockV2AgentTaskConfigurable,
   stockV2AgentTaskTypeLabel,
   stockV2AgentProviderTypeLabel,
+  stockV2AgentRunStatusLabel,
+  stockV2AgentRunStatusTone,
 } from "../../domain/labels";
 import { StockV2AgentRunDetailPanel } from "./StockV2AgentExecutionLedger";
 import { StockV2AgentProviderDrawer } from "./StockV2AgentProviderDrawer";
@@ -613,20 +615,57 @@ function AgentCLIDebugDrawer({
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<StockV2AgentExecutionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [debugStartedAt, setDebugStartedAt] = useState<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const activeRun = result && agentRunStillActive(result.run.status) ? result.run : null;
+  const debugActive = submitting || !!activeRun;
+
+  useEffect(() => {
+    if (!debugActive || !debugStartedAt) return;
+    const tick = () => setElapsedSeconds(Math.max(0, Math.floor((Date.now() - debugStartedAt) / 1000)));
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [debugActive, debugStartedAt]);
+
+  useEffect(() => {
+    if (!activeRun?.id) return;
+    let mounted = true;
+    const timer = window.setInterval(() => {
+      void actions.api<StockV2AgentExecutionDetail>(`/api/stockv2/agent/runs/${encodeURIComponent(activeRun.id)}/detail`)
+        .then((next) => {
+          if (!mounted) return;
+          setResult(next);
+          if (!agentRunStillActive(next.run.status)) {
+            actions.setToast(next.run.status === "completed" ? "CLI 验证完成" : "CLI 验证失败，已保存执行上下文", next.run.status === "completed" ? "good" : "warn");
+          }
+        })
+        .catch((err) => {
+          if (!mounted) return;
+          setError(friendlyError(err));
+        });
+    }, 2000);
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+    };
+  }, [actions, activeRun?.id]);
 
   async function runDebug() {
     if (!modelId) return;
     setSubmitting(true);
     setError(null);
     setResult(null);
+    setDebugStartedAt(Date.now());
+    setElapsedSeconds(0);
     try {
-      const body: StockV2AgentRunCLIDebugRequest = { modelId };
+      const body: StockV2AgentRunCLIDebugRequest = { modelId, async: true };
       const res = await actions.api<StockV2AgentExecutionDetail>("/api/stockv2/agent/cli-debug", {
         method: "POST",
         body,
       });
       setResult(res);
-      actions.setToast(res.run.status === "completed" ? "CLI 验证完成" : "CLI 验证已返回失败上下文", res.run.status === "completed" ? "good" : "warn");
+      actions.setToast(agentRunStillActive(res.run.status) ? "CLI 验证已启动" : "CLI 验证已返回上下文", agentRunStillActive(res.run.status) ? "good" : res.run.status === "completed" ? "good" : "warn");
     } catch (err) {
       setError(friendlyError(err));
       actions.setToast(friendlyError(err), "danger");
@@ -657,12 +696,26 @@ function AgentCLIDebugDrawer({
         <p className="text-xs leading-relaxed text-[var(--muted)]">
           这会启动一次真实 Codex CLI 调试任务,并要求 CLI 通过股票模块 MCP 回填结果。完成后下方会显示 stdout/stderr 摘要和 MCP 结构化结果。
         </p>
+        {debugStartedAt ? (
+          <div className="grid gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-[var(--muted-strong)]">调试状态</span>
+              <Pill tone={error && !result ? "danger" : result ? stockV2AgentRunStatusTone(result.run.status) : "warn"}>
+                {error && !result ? "请求失败" : submitting && !result ? "请求中" : stockV2AgentRunStatusLabel(result?.run.status)}
+              </Pill>
+              <span className="font-mono text-[var(--muted)]">{formatElapsedSeconds(elapsedSeconds)}</span>
+            </div>
+            <Row label="当前阶段" value={cliDebugProgressText(submitting, result, elapsedSeconds)} />
+            <Row label="Run ID" value={result?.run.id || "等待后端创建"} />
+            <Row label="查看位置" value="Agent 执行台账会保留 stdout/stderr、MCP 回填和失败原因" />
+          </div>
+        ) : null}
         {error ? <Notice tone="danger">{error}</Notice> : null}
         <div className="flex justify-end gap-2 border-t border-[var(--line)] pt-3">
           <Button onClick={() => void reloadModels()} disabled={submitting}>刷新模型</Button>
-          <Button onClick={onClose} disabled={submitting}>关闭</Button>
-          <Button tone="primary" disabled={submitting || !modelId} onClick={() => void runDebug()}>
-            {submitting ? "调试中…" : "开始调试"}
+          <Button onClick={onClose}>关闭</Button>
+          <Button tone="primary" disabled={debugActive || !modelId} onClick={() => void runDebug()}>
+            {debugActive ? "调试中…" : "开始调试"}
           </Button>
         </div>
         {result ? <StockV2AgentRunDetailPanel detail={result} /> : null}
@@ -672,6 +725,31 @@ function AgentCLIDebugDrawer({
 }
 
 // ===== 小工具 =====
+
+function agentRunStillActive(status?: string): boolean {
+  return status === "pending" || status === "ready" || status === "running";
+}
+
+function formatElapsedSeconds(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return `${minutes}m ${String(rest).padStart(2, "0")}s`;
+}
+
+function cliDebugProgressText(submitting: boolean, detail: StockV2AgentExecutionDetail | null, elapsedSeconds: number): string {
+  if (submitting && !detail) return "请求已发出，等待后端创建 AgentRun";
+  const status = detail?.run.status;
+  if (status === "ready" || status === "pending") return "AgentRun 已创建，等待后台执行器启动";
+  if (status === "running") {
+    if (elapsedSeconds > 45) return "Codex CLI 仍在运行或等待 MCP submit_result 回填";
+    if (elapsedSeconds > 10) return "Codex CLI 已启动，正在等待 stdout/stderr 或 MCP 回填";
+    return "后台执行器正在启动 Codex CLI";
+  }
+  if (status === "completed") return "已收到 MCP 回填并写入执行台账";
+  if (status === "failed") return "调试失败，详情里会保留错误和 stdout/stderr 摘要";
+  return "尚未开始";
+}
 
 function Row({ label, value }: { label: string; value: string }) {
   return (

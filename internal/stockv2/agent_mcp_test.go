@@ -22,10 +22,10 @@ func TestMCP_Initialize(t *testing.T) {
 		ID      int    `json:"id"`
 		Result  struct {
 			ProtocolVersion string `json:"protocolVersion"`
-			Server          struct {
+			ServerInfo      struct {
 				Name    string `json:"name"`
 				Version string `json:"version"`
-			} `json:"server"`
+			} `json:"serverInfo"`
 			Capabilities struct {
 				Tools any `json:"tools"`
 			} `json:"capabilities"`
@@ -37,8 +37,8 @@ func TestMCP_Initialize(t *testing.T) {
 	if result.JSONRPC != "2.0" {
 		t.Errorf("jsonrpc = %s, want 2.0", result.JSONRPC)
 	}
-	if result.Result.Server.Name != mcpServerName {
-		t.Errorf("server name = %s, want %s", result.Result.Server.Name, mcpServerName)
+	if result.Result.ServerInfo.Name != mcpServerName {
+		t.Errorf("server name = %s, want %s", result.Result.ServerInfo.Name, mcpServerName)
 	}
 }
 

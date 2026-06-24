@@ -24,7 +24,8 @@ func (s *Service) CreateRawNews(ctx context.Context, req RequestCreateRawNews) (
 	if fetchedAt.IsZero() {
 		fetchedAt = time.Now()
 	}
-	hash := rawNewsContentHash(source, req.SourceID, title, content, snippet, newsURL, req.PublishedAt)
+	publishedAt := clampFutureNewsPublishedAt(req.PublishedAt, fetchedAt)
+	hash := rawNewsContentHash(source, req.SourceID, title, content, snippet, newsURL, publishedAt)
 	dedupeKey := strings.TrimSpace(req.DedupeKey)
 	if dedupeKey == "" {
 		dedupeKey = rawNewsDedupeKey(source, req.SourceID, hash)
@@ -36,7 +37,7 @@ func (s *Service) CreateRawNews(ctx context.Context, req RequestCreateRawNews) (
 		Title:       title,
 		Content:     content,
 		Snippet:     snippet,
-		PublishedAt: req.PublishedAt,
+		PublishedAt: publishedAt,
 		URL:         newsURL,
 		FetchedAt:   fetchedAt,
 		RawPayload:  req.RawPayload,
@@ -65,6 +66,14 @@ func (s *Service) GetRawNews(ctx context.Context, id string) (StockV2RawNews, er
 
 func (s *Service) CountRawNews(ctx context.Context, filter RawNewsListFilter) (int, error) {
 	return s.store.CountRawNews(ctx, filter)
+}
+
+func (s *Service) TruncateRawNewsBefore(ctx context.Context, before time.Time) (RawNewsTruncateResult, error) {
+	deleted, err := s.store.TruncateRawNewsBefore(ctx, before)
+	if err != nil {
+		return RawNewsTruncateResult{}, err
+	}
+	return RawNewsTruncateResult{Before: before, DeletedCount: deleted}, nil
 }
 
 func (s *Service) ListUnprocessedRawNews(ctx context.Context, before time.Time, limit int) ([]StockV2RawNews, error) {

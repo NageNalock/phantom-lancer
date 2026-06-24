@@ -625,8 +625,14 @@ func normalizeFeedTime(value string) string {
 	if value == "" {
 		return ""
 	}
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
 		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.Format(time.RFC3339Nano)
+		}
+	}
+	loc := time.FixedZone("Asia/Shanghai", 8*3600)
+	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02"} {
+		if parsed, err := time.ParseInLocation(layout, value, loc); err == nil {
 			return parsed.Format(time.RFC3339Nano)
 		}
 	}

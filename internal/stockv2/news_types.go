@@ -42,6 +42,7 @@ var (
 	ErrNewsLinkCandidateNotFound       = errors.New("news link candidate not found")
 	ErrInvalidRawNewsSource            = errors.New("raw news source is required")
 	ErrInvalidRawNewsContent           = errors.New("raw news title or content is required")
+	ErrInvalidRawNewsTruncateBefore    = errors.New("raw news truncate before time is required")
 	ErrInvalidNewsEventTitle           = errors.New("news event title is required")
 	ErrInvalidNewsEventSource          = errors.New("news event source is required")
 	ErrInvalidNewsLinkCandidate        = errors.New("invalid news link candidate")
@@ -185,4 +186,9 @@ type RawNewsListFilter struct {
 	Until    time.Time
 	Limit    int
 	Offset   int
+}
+
+type RawNewsTruncateResult struct {
+	Before       time.Time `json:"before"`
+	DeletedCount int       `json:"deletedCount"`
 }

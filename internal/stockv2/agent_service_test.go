@@ -557,6 +557,55 @@ func TestRunAgentCLIDebugPersistsOutputAndSubmittedResult(t *testing.T) {
 	}
 }
 
+func TestRunAgentCLIDebugAsyncReturnsRunBeforeCompletion(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeCodexCLI,
+		Name:         "codex-cli-debug-async",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	model, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID: provider.ID,
+		ModelName:  "gpt-debug-async",
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	svc.agentExecutor = fakeDebugAgentExecutor{pool: svc.agentTaskPool}
+
+	detail, err := svc.RunAgentCLIDebug(ctx, RequestRunAgentCLIDebug{ModelID: model.ID, Async: true})
+	if err != nil {
+		t.Fatalf("run cli debug async: %v", err)
+	}
+	if detail.Run.ID == "" || detail.Run.TriggerObjectType != "agent_cli_debug" {
+		t.Fatalf("detail = %+v, want debug run", detail.Run)
+	}
+	if detail.Run.Status != AgentRunStatusReady && detail.Run.Status != AgentRunStatusRunning && detail.Run.Status != AgentRunStatusCompleted {
+		t.Fatalf("initial run status = %q", detail.Run.Status)
+	}
+
+	var final AgentExecutionDetail
+	for i := 0; i < 20; i++ {
+		final, err = svc.GetAgentExecutionDetail(ctx, detail.Run.ID)
+		if err != nil {
+			t.Fatalf("get async detail: %v", err)
+		}
+		if final.Run.Status == AgentRunStatusCompleted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if final.Run.Status != AgentRunStatusCompleted {
+		t.Fatalf("final run status = %q, want completed", final.Run.Status)
+	}
+}
+
 func TestFinalizeAgentRunFailsWhenReviewSaveFails(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
