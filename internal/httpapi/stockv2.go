@@ -35,6 +35,7 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/instruments/search", s.handleSearchInstruments)
 	mux.HandleFunc("GET /api/stockv2/profiles", s.handleStockV2ListStockProfiles)
 	mux.HandleFunc("GET /api/stockv2/profiles/summaries", s.handleStockV2ListStockProfileSummaries)
+	mux.HandleFunc("GET /api/stockv2/profiles/update-tasks", s.handleStockV2ListStockProfileUpdateTasks)
 	mux.HandleFunc("GET /api/stockv2/profiles/{symbol}", s.handleStockV2GetStockProfile)
 	mux.HandleFunc("POST /api/stockv2/profiles/{symbol}/update", s.handleStockV2UpdateStockProfile)
 	mux.HandleFunc("GET /api/stockv2/profiles/{symbol}/update-tasks", s.handleStockV2ListStockProfileUpdateTasks)

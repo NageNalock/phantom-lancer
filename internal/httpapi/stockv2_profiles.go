@@ -102,10 +102,6 @@ func (s *Server) handleStockV2UpdateStockProfile(w http.ResponseWriter, r *http.
 
 func (s *Server) handleStockV2ListStockProfileUpdateTasks(w http.ResponseWriter, r *http.Request) {
 	symbol := r.PathValue("symbol")
-	if symbol == "" {
-		http.Error(w, "symbol is required", http.StatusBadRequest)
-		return
-	}
 	limit, err := stockV2StrategyPositiveInt(r.URL.Query().Get("limit"), 20)
 	if err != nil || limit > 100 {
 		http.Error(w, "invalid limit", http.StatusBadRequest)
