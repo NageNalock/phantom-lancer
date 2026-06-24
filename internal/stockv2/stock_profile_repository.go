@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 )
@@ -33,7 +34,7 @@ func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (S
 	riskTagsZhJSON := marshalProfileStrings(profile.RiskTagsZh)
 	riskTagsEnJSON := marshalProfileStrings(profile.RiskTagsEn)
 
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.assetDB().ExecContext(ctx, `
 		INSERT INTO stockv2_stock_profiles (
 			symbol, market, instrument_type, name, aliases_json, industry, sectors_json,
 			concepts_json, tags_json, business_summary, profile_text, fund_type,
@@ -94,7 +95,7 @@ func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (S
 }
 
 func (s *Store) GetStockProfile(ctx context.Context, symbol string) (StockProfile, error) {
-	row := s.db.QueryRowContext(ctx, stockProfileSelectSQL()+` WHERE symbol = ?`, strings.TrimSpace(symbol))
+	row := s.assetDB().QueryRowContext(ctx, stockProfileSelectSQL()+` WHERE symbol = ?`, strings.TrimSpace(symbol))
 	profile, err := scanStockProfile(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -108,7 +109,7 @@ func (s *Store) GetStockProfile(ctx context.Context, symbol string) (StockProfil
 func (s *Store) ListStockProfiles(ctx context.Context, filter StockProfileListFilter) ([]StockProfile, error) {
 	where, args := stockProfileWhere(filter)
 	args = append(args, normalizedStockProfileLimit(filter.Limit), normalizedStockProfileOffset(filter.Offset))
-	rows, err := s.db.QueryContext(ctx, stockProfileSelectSQL()+where+` ORDER BY updated_at DESC, symbol ASC LIMIT ? OFFSET ?`, args...)
+	rows, err := s.assetDB().QueryContext(ctx, stockProfileSelectSQL()+where+` ORDER BY updated_at DESC, symbol ASC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, wrapError(err, "list stock profiles")
 	}
@@ -131,7 +132,7 @@ func (s *Store) ListStockProfiles(ctx context.Context, filter StockProfileListFi
 func (s *Store) CountStockProfiles(ctx context.Context, filter StockProfileListFilter) (int, error) {
 	where, args := stockProfileWhere(filter)
 	var total int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_stock_profiles`+where, args...).Scan(&total)
+	err := s.assetDB().QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_stock_profiles`+where, args...).Scan(&total)
 	return total, wrapError(err, "count stock profiles")
 }
 
@@ -227,23 +228,41 @@ func (s *Store) ListStockProfileDeepUpdateCandidates(ctx context.Context, limit 
 	if limit <= 0 {
 		return []stockProfileDeepUpdateCandidate{}, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT i.id, i.symbol, i.market, COALESCE(i.instrument_type,'stock'),
-		       COALESCE(i.name,''), COALESCE(i.industry,''), COALESCE(i.sector,''),
-		       i.concepts, COALESCE(i.list_date,''), COALESCE(i.delist_date,''),
-		       COALESCE(i.status,'active'), i.last_update_at, i.created_at, i.updated_at,
-		       MAX(t.created_at) AS last_profile_task_at
-		FROM stockv2_instruments i
-		LEFT JOIN stockv2_stock_profile_update_tasks t
-		  ON t.symbol = i.symbol
-		WHERE COALESCE(i.status,'active') = 'active'
-		GROUP BY i.symbol
-		ORDER BY
-		  CASE WHEN MAX(t.created_at) IS NULL THEN 0 ELSE 1 END,
-		  MAX(t.created_at) ASC,
-		  i.symbol ASC
-		LIMIT ?
-	`, limit)
+	lastTaskBySymbol := make(map[string]time.Time)
+	taskRows, err := s.db.QueryContext(ctx, `
+		SELECT symbol, MAX(created_at)
+		FROM stockv2_stock_profile_update_tasks
+		GROUP BY symbol
+	`)
+	if err != nil {
+		return nil, wrapError(err, "list stock profile deep update task times")
+	}
+	for taskRows.Next() {
+		var symbol string
+		var last sql.NullString
+		if err := taskRows.Scan(&symbol, &last); err != nil {
+			taskRows.Close()
+			return nil, wrapError(err, "scan stock profile deep update task time")
+		}
+		if last.Valid {
+			lastTaskBySymbol[symbol] = parseStockProfileTaskTime(last.String)
+		}
+	}
+	if err := taskRows.Err(); err != nil {
+		taskRows.Close()
+		return nil, wrapError(err, "iterate stock profile deep update task times")
+	}
+	taskRows.Close()
+
+	rows, err := s.assetDB().QueryContext(ctx, `
+		SELECT id, symbol, market, COALESCE(instrument_type,'stock'),
+		       COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
+		       concepts, COALESCE(list_date,''), COALESCE(delist_date,''),
+		       COALESCE(status,'active'), last_update_at, created_at, updated_at
+		FROM stockv2_instruments
+		WHERE COALESCE(status,'active') = 'active'
+		ORDER BY symbol ASC
+	`)
 	if err != nil {
 		return nil, wrapError(err, "list stock profile deep update candidates")
 	}
@@ -254,7 +273,6 @@ func (s *Store) ListStockProfileDeepUpdateCandidates(ctx context.Context, limit 
 		var item stockProfileDeepUpdateCandidate
 		var conceptsJSON []byte
 		var lastUpdate sql.NullTime
-		var lastTaskAt sql.NullString
 		if err := rows.Scan(
 			&item.Instrument.ID,
 			&item.Instrument.Symbol,
@@ -270,7 +288,6 @@ func (s *Store) ListStockProfileDeepUpdateCandidates(ctx context.Context, limit 
 			&lastUpdate,
 			&item.Instrument.CreatedAt,
 			&item.Instrument.UpdatedAt,
-			&lastTaskAt,
 		); err != nil {
 			return nil, wrapError(err, "scan stock profile deep update candidate")
 		}
@@ -278,9 +295,7 @@ func (s *Store) ListStockProfileDeepUpdateCandidates(ctx context.Context, limit 
 		if lastUpdate.Valid {
 			item.Instrument.LastUpdate = lastUpdate.Time
 		}
-		if lastTaskAt.Valid {
-			item.LastTaskAt = parseStockProfileTaskTime(lastTaskAt.String)
-		}
+		item.LastTaskAt = lastTaskBySymbol[item.Instrument.Symbol]
 		if len(conceptsJSON) > 0 {
 			_ = json.Unmarshal(conceptsJSON, &item.Instrument.Concepts)
 		}
@@ -288,6 +303,20 @@ func (s *Store) ListStockProfileDeepUpdateCandidates(ctx context.Context, limit 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, wrapError(err, "iterate stock profile deep update candidates")
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		leftEmpty := items[i].LastTaskAt.IsZero()
+		rightEmpty := items[j].LastTaskAt.IsZero()
+		if leftEmpty != rightEmpty {
+			return leftEmpty
+		}
+		if !items[i].LastTaskAt.Equal(items[j].LastTaskAt) {
+			return items[i].LastTaskAt.Before(items[j].LastTaskAt)
+		}
+		return items[i].Instrument.Symbol < items[j].Instrument.Symbol
+	})
+	if len(items) > limit {
+		items = items[:limit]
 	}
 	return items, nil
 }

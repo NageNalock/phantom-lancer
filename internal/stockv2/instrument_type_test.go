@@ -107,6 +107,40 @@ func TestInstrumentTypeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestInstrumentListFiltersMarketAndType(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	for _, inst := range []StockV2Instrument{
+		{ID: "inst-510300", Symbol: "510300", Market: "SH", InstrumentType: InstrumentTypeExchangeFund, Name: "沪深300ETF", Status: "active"},
+		{ID: "inst-159915", Symbol: "159915", Market: "SZ", InstrumentType: InstrumentTypeExchangeFund, Name: "创业板ETF", Status: "active"},
+		{ID: "inst-000001", Symbol: "000001", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "平安银行", Status: "active"},
+	} {
+		if err := store.UpsertInstrument(ctx, inst); err != nil {
+			t.Fatalf("upsert %s: %v", inst.Symbol, err)
+		}
+	}
+
+	funds, err := store.GetInstrumentsFiltered(ctx, "SZ", InstrumentTypeExchangeFund, 10, 0)
+	if err != nil {
+		t.Fatalf("list filtered funds: %v", err)
+	}
+	if len(funds) != 1 || funds[0].Symbol != "159915" {
+		t.Fatalf("filtered funds = %+v, want only 159915", funds)
+	}
+	count, err := store.CountInstrumentsFiltered(ctx, "SZ", InstrumentTypeExchangeFund)
+	if err != nil {
+		t.Fatalf("count filtered funds: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count = %d, want 1", count)
+	}
+}
+
 func TestStoreInitMigratesOldStockV2ColumnsBeforeIndexes(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "stockv2.db")
 	db, err := sql.Open("sqlite3", dbPath)

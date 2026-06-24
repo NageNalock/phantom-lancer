@@ -95,6 +95,7 @@ export function StockV2KLineChart({
       width: Math.max(1, Math.floor(rect.width || host.clientWidth || 640)),
       height: Math.max(1, Math.floor(rect.height || host.clientHeight || 420)),
       layout: {
+        attributionLogo: false,
         background: { color: surface },
         textColor: text,
         fontFamily:
@@ -244,6 +245,40 @@ export function StockV2KLineChart({
     return (
       <div className="h-[420px] w-full">
         <EmptyState title="本地尚无日 K" body="点击右上角『刷新』可触发补拉；系统会在后台异步抓取并落盘。" />
+      </div>
+    );
+  }
+
+  if (bars.length === 1) {
+    const only = bars[0];
+    return (
+      <div className="flex h-[420px] w-full flex-col rounded-lg border border-[var(--line)] bg-[var(--surface)]">
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border-b border-[var(--line)] bg-[var(--surface-soft)] px-3 py-2 text-xs">
+          <span className="font-mono text-[var(--muted-strong)]">{only.tradeDate}</span>
+          <span>
+            <span className="text-[var(--muted)]">开 </span>
+            <span className="font-mono">{only.open.toFixed(2)}</span>
+          </span>
+          <span>
+            <span className="text-[var(--muted)]">高 </span>
+            <span className="font-mono text-[var(--danger)]">{only.high.toFixed(2)}</span>
+          </span>
+          <span>
+            <span className="text-[var(--muted)]">低 </span>
+            <span className="font-mono text-[var(--good)]">{only.low.toFixed(2)}</span>
+          </span>
+          <span>
+            <span className="text-[var(--muted)]">收 </span>
+            <span className="font-mono font-semibold">{only.close.toFixed(2)}</span>
+          </span>
+          <span className="ml-auto text-[var(--muted)]">
+            <span>量 </span>
+            <span className="font-mono">{formatVol(only.volume)}</span>
+          </span>
+        </div>
+        <div className="flex flex-1 items-center justify-center p-4">
+          <EmptyState title="本地只有 1 根日 K" body="该标的可能刚上市，或数据源仅返回一个交易日；少于 2 根时不绘制 K 线，避免单根蜡烛被拉伸成异常图形。" />
+        </div>
       </div>
     );
   }

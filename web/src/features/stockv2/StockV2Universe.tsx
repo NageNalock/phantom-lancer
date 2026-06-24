@@ -6,8 +6,10 @@ import { friendlyError } from "../../api/client";
 import { Button, Field, Panel, Pill } from "../../components/ui";
 import { stockV2InstrumentTypeLabel, stockV2TriggerTypeLabel, stockV2UpdateStatusLabel, stockV2UpdateStatusTone } from "../../domain/labels";
 import { StockV2InstrumentDetail } from "./StockV2InstrumentDetail";
+import { StockV2ProfileRecords, StockV2ProfileSettings } from "./StockV2ProfileWorkbench";
 
 const PAGE_SIZE = 50;
+type MasterDataView = "instruments" | "profileSettings" | "profileRecords";
 
 // 生成页码数组：首页、当前页附近、末页，用省略号间隔
 function buildPageNumbers(currentPage: number, totalPages: number): (number | "...")[] {
@@ -60,6 +62,9 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   const [loading, setLoading] = useState(false);
   const [jumpInput, setJumpInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [marketFilter, setMarketFilter] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [masterDataView, setMasterDataView] = useState<MasterDataView>("instruments");
   const [addHolding, setAddHolding] = useState<{ inst: StockV2Instrument } | null>(null);
   const [selectedInst, setSelectedInst] = useState<StockV2Instrument | null>(null);
   const [profileSummaries, setProfileSummaries] = useState<Record<string, StockV2StockProfileSummary>>({});
@@ -81,13 +86,18 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   }
 
   // 拉取分页数据；输入搜索词时改走后端模糊搜索，避免一次性加载全市场后前端过滤。
-  async function loadPage(pageNum: number, query = searchQuery) {
+  async function loadPage(pageNum: number, query = searchQuery, market = marketFilter, instrumentType = typeFilter) {
     const keyword = query.trim();
+    const params = new URLSearchParams();
+    if (market) params.set("market", market);
+    if (instrumentType) params.set("instrumentType", instrumentType);
     setLoading(true);
     try {
       if (keyword) {
+        params.set("q", keyword);
+        params.set("limit", "100");
         const data = await actions.api<Partial<InstrumentsPage>>(
-          `/api/stockv2/instruments/search?q=${encodeURIComponent(keyword)}&limit=100`
+          `/api/stockv2/instruments/search?${params.toString()}`
         );
         const items = Array.isArray(data.items) ? data.items : [];
         setInstrumentsPage({
@@ -100,8 +110,10 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         setTotalCount(data.total ?? items.length);
         await loadProfileSummaries(items);
       } else {
+        params.set("limit", String(PAGE_SIZE));
+        params.set("offset", String(pageNum * PAGE_SIZE));
         const data = await actions.api<InstrumentsPage>(
-          `/api/stockv2/instruments?limit=${PAGE_SIZE}&offset=${pageNum * PAGE_SIZE}`
+          `/api/stockv2/instruments?${params.toString()}`
         );
         const items = Array.isArray(data.items) ? data.items : [];
         setInstrumentsPage({
@@ -140,11 +152,11 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   // 初始加载 + 搜索防抖刷新
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void loadPage(0, searchQuery);
+      void loadPage(0, searchQuery, marketFilter, typeFilter);
     }, searchQuery.trim() ? 250 : 0);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery]);
+  }, [searchQuery, marketFilter, typeFilter]);
 
   // 当更新状态从 running 变为完成时，刷新第一页
   const wasRunningRef = useRef(false);
@@ -187,7 +199,35 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
 
   return (
     <div className="grid gap-4">
-      {/* 进度条区域 —— 始终展示占位，运行时有动效 */}
+      <div className="flex flex-wrap gap-1 border-b border-[var(--line)] pb-2">
+        {[
+          { id: "instruments" as const, label: "标的主数据" },
+          { id: "profileSettings" as const, label: "画像配置" },
+          { id: "profileRecords" as const, label: "画像记录" },
+        ].map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setMasterDataView(tab.id)}
+            className={[
+              "rounded-md px-3 py-1.5 text-sm transition",
+              masterDataView === tab.id
+                ? "bg-[var(--surface-strong)] font-medium text-[var(--text)]"
+                : "text-[var(--muted-strong)] hover:bg-[var(--surface-soft)]",
+            ].join(" ")}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {masterDataView === "profileSettings" ? (
+        <StockV2ProfileSettings actions={actions} data={data} runAction={runAction} />
+      ) : null}
+      {masterDataView === "profileRecords" ? <StockV2ProfileRecords actions={actions} /> : null}
+      {masterDataView !== "instruments" ? null : (
+      <>
+      {/* 进度条区域：始终展示占位，运行时有动效 */}
       <Panel
         title="数据更新进度"
         subtitle={
@@ -239,15 +279,38 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         subtitle="新浪列表源 + 腾讯行情源 · A 股股票与场内基金"
       >
         <div className="mb-3 flex items-center justify-between gap-3">
-          <div className="relative w-[340px] max-w-full">
-            <MagnifyingGlass size={15} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
-            <input
-              type="search"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="搜索代码或名称，例如 302132 / 510300"
-              className="w-full rounded border border-[var(--line)] bg-[var(--surface)] py-2 pl-8 pr-3 text-sm text-[var(--text)] focus:border-[var(--accent)] focus:outline-none"
-            />
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative w-[340px] max-w-full">
+              <MagnifyingGlass size={15} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="搜索代码或名称，例如 302132 / 510300"
+                className="w-full rounded border border-[var(--line)] bg-[var(--surface)] py-2 pl-8 pr-3 text-sm text-[var(--text)] focus:border-[var(--accent)] focus:outline-none"
+              />
+            </div>
+            <select
+              value={marketFilter}
+              onChange={(e) => setMarketFilter(e.target.value)}
+              className="rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-2 text-sm text-[var(--text)] focus:border-[var(--accent)] focus:outline-none"
+              aria-label="按市场过滤"
+            >
+              <option value="">全部市场</option>
+              <option value="SH">沪市</option>
+              <option value="SZ">深市</option>
+              <option value="BJ">北市</option>
+            </select>
+            <select
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+              className="rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-2 text-sm text-[var(--text)] focus:border-[var(--accent)] focus:outline-none"
+              aria-label="按类型过滤"
+            >
+              <option value="">全部类型</option>
+              <option value="stock">股票</option>
+              <option value="exchange_fund">场内基金</option>
+            </select>
           </div>
           <span className="shrink-0 text-xs text-[var(--muted)]">
             {isSearching ? `搜索结果 ${instrumentsPage?.items.length || 0} 条` : `每页 ${PAGE_SIZE} 条`}
@@ -273,9 +336,8 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
                     <th className="py-2 pr-4 font-medium">名称</th>
                     <th className="py-2 pr-4 font-medium">市场</th>
                     <th className="py-2 pr-4 font-medium">类型</th>
-                    <th className="py-2 pr-4 font-medium">行业</th>
-                    <th className="py-2 pr-4 font-medium">板块</th>
-                    <th className="py-2 pr-4 font-medium">画像</th>
+                    <th className="py-2 pr-4 font-medium">画像摘要</th>
+                    <th className="py-2 pr-4 font-medium">画像状态</th>
                     <th className="py-2 pr-4 font-medium">状态</th>
                     <th className="py-2 pr-4 font-medium">更新时间</th>
                     <th className="py-2 pr-2 text-right font-medium">操作</th>
@@ -415,6 +477,8 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
           onClose={() => setSelectedInst(null)}
         />
       ) : null}
+      </>
+      )}
     </div>
   );
 }
@@ -446,8 +510,9 @@ function StockRow({ inst, onAdd, onClick, profile }: { inst: StockV2Instrument; 
       <td className="py-2 pr-4">
         <Pill tone="neutral">{stockV2InstrumentTypeLabel(inst.instrumentType)}</Pill>
       </td>
-      <td className="py-2 pr-4 text-[var(--muted)]">{inst.industry || "-"}</td>
-      <td className="py-2 pr-4 text-[var(--muted)]">{inst.sector || "-"}</td>
+      <td className="max-w-[360px] py-2 pr-4 text-xs text-[var(--muted-strong)]">
+        <span className="block max-h-10 overflow-hidden leading-5">{profile?.businessSummary || "-"}</span>
+      </td>
       <td className="py-2 pr-4">
         <div className="flex flex-wrap gap-1">
           <Pill tone={profileTone}>{profile?.status === "ready" ? "基础" : profile?.status === "partial" ? "部分" : "缺失"}</Pill>

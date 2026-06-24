@@ -145,3 +145,100 @@ func TestNewStoreWithMarketDBMigratesLegacySQLiteDailyBars(t *testing.T) {
 		t.Fatalf("daily bar jobs compatibility total=%d err=%v", total, err)
 	}
 }
+
+func TestStoreDataAssetsWriteToDuckDB(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := NewStoreWithMarketDB(
+		filepath.Join(dir, "stockv2.sqlite"),
+		filepath.Join(dir, "stockv2", "stock_market.duckdb"),
+	)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.UpsertInstrument(ctx, StockV2Instrument{
+		ID:             "inst-1",
+		Symbol:         "302132",
+		Market:         "SZ",
+		InstrumentType: InstrumentTypeStock,
+		Name:           "中航成飞",
+		Status:         "active",
+	}); err != nil {
+		t.Fatalf("upsert instrument: %v", err)
+	}
+	if err := store.UpsertLatestQuote(ctx, StockV2QuoteLatest{
+		Symbol:    "302132",
+		Market:    "SZ",
+		Name:      "中航成飞",
+		LastPrice: 59.33,
+		Source:    QuoteSourceTencent,
+	}); err != nil {
+		t.Fatalf("upsert quote: %v", err)
+	}
+	if _, err := store.UpsertStockProfile(ctx, StockProfile{
+		Symbol:      "302132",
+		Market:      "SZ",
+		Name:        "中航成飞",
+		ProfileText: "航空装备",
+	}); err != nil {
+		t.Fatalf("upsert profile: %v", err)
+	}
+	raw, err := store.CreateRawNews(ctx, StockV2RawNews{
+		Source:      "jin10",
+		Title:       "航空产业链消息",
+		ContentHash: "hash-1",
+		DedupeKey:   "jin10:1",
+		Quality:     NewsQualityOK,
+		Status:      NewsStatusNew,
+	})
+	if err != nil {
+		t.Fatalf("create raw news: %v", err)
+	}
+	event, err := store.CreateNewsEvent(ctx, NewsEvent{
+		RawNewsID:     raw.ID,
+		Source:        raw.Source,
+		Title:         raw.Title,
+		QualityStatus: NewsQualityOK,
+	})
+	if err != nil {
+		t.Fatalf("create news event: %v", err)
+	}
+	if _, err := store.UpsertNewsLinkCandidate(ctx, NewsLinkCandidate{
+		NewsEventID:    event.ID,
+		RawNewsID:      raw.ID,
+		Symbol:         "302132",
+		Market:         "SZ",
+		InstrumentName: "中航成飞",
+		MatchMethod:    NewsLinkMatchKeyword,
+		Score:          0.9,
+	}); err != nil {
+		t.Fatalf("upsert news link candidate: %v", err)
+	}
+
+	for _, table := range []string{
+		"stockv2_instruments",
+		"stockv2_quotes_latest",
+		"stockv2_stock_profiles",
+		"stockv2_raw_news",
+		"stockv2_news_events",
+		"stockv2_news_link_candidates",
+	} {
+		if got := countRowsForTest(t, store.marketDB.db, table); got != 1 {
+			t.Fatalf("duckdb %s count = %d, want 1", table, got)
+		}
+		if got := countRowsForTest(t, store.db, table); got != 0 {
+			t.Fatalf("sqlite %s count = %d, want 0", table, got)
+		}
+	}
+}
+
+func countRowsForTest(t *testing.T, db *sql.DB, table string) int {
+	t.Helper()
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	return count
+}

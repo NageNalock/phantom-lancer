@@ -127,6 +127,14 @@ func (s *Store) MarketDBPath() string {
 	return s.marketDB.Path()
 }
 
+func (s *Store) assetDB() *sql.DB {
+	if s != nil && s.marketDB != nil && s.marketDB.db != nil {
+		return s.marketDB.db
+	}
+	// ponytail: fallback only keeps empty-path tests alive; normal Stock V2 stores use DuckDB.
+	return s.db
+}
+
 // initSchemaSQL 初始化 V2 表结构。只创建表、索引和默认配置行，不依赖
 // 触发器/视图（Go 层显式维护 updated_at）。
 const initSchemaSQL = `
@@ -1613,7 +1621,7 @@ func (s *Store) UpsertInstrument(ctx context.Context, instrument StockV2Instrume
 
 	conceptsJSON, _ := json.Marshal(instrument.Concepts)
 
-	_, err := s.db.ExecContext(ctx, query,
+	_, err := s.assetDB().ExecContext(ctx, query,
 		instrument.ID,
 		instrument.Symbol,
 		instrument.Market,
@@ -1643,7 +1651,7 @@ func (s *Store) GetInstrument(ctx context.Context, symbol string) (StockV2Instru
 		WHERE symbol = ?
 	`
 
-	row := s.db.QueryRowContext(ctx, query, symbol)
+	row := s.assetDB().QueryRowContext(ctx, query, symbol)
 
 	var instrument StockV2Instrument
 	var conceptsJSON []byte
@@ -1688,21 +1696,35 @@ func (s *Store) GetInstrument(ctx context.Context, symbol string) (StockV2Instru
 // GetInstruments 获取标的主数据列表（分页）
 func (s *Store) CountInstruments(ctx context.Context) (int, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_instruments`).Scan(&count)
+	err := s.assetDB().QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_instruments`).Scan(&count)
 	return count, wrapError(err, "count instruments")
 }
 
+func (s *Store) CountInstrumentsFiltered(ctx context.Context, market, instrumentType string) (int, error) {
+	where, args := instrumentFilterSQL(market, instrumentType)
+	var count int
+	err := s.assetDB().QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_instruments WHERE `+where, args...).Scan(&count)
+	return count, wrapError(err, "count filtered instruments")
+}
+
 func (s *Store) GetInstruments(ctx context.Context, limit int, offset int) ([]StockV2Instrument, error) {
+	return s.GetInstrumentsFiltered(ctx, "", "", limit, offset)
+}
+
+func (s *Store) GetInstrumentsFiltered(ctx context.Context, market, instrumentType string, limit int, offset int) ([]StockV2Instrument, error) {
+	where, args := instrumentFilterSQL(market, instrumentType)
+	args = append(args, limit, offset)
 	query := `
 		SELECT id, symbol, market, COALESCE(instrument_type,'stock'), COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
 		       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), COALESCE(status,'active'),
 		       last_update_at, created_at, updated_at
 		FROM stockv2_instruments
+		WHERE ` + where + `
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?
 	`
 
-	rows, err := s.db.QueryContext(ctx, query, limit, offset)
+	rows, err := s.assetDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, wrapError(err, "get instruments")
 	}
@@ -1749,23 +1771,30 @@ func (s *Store) GetInstruments(ctx context.Context, limit int, offset int) ([]St
 
 // SearchInstruments 按代码或名称搜索股票（模糊匹配）
 func (s *Store) SearchInstruments(ctx context.Context, keyword string, limit int) ([]StockV2Instrument, error) {
+	return s.SearchInstrumentsFiltered(ctx, keyword, "", "", limit)
+}
+
+func (s *Store) SearchInstrumentsFiltered(ctx context.Context, keyword, market, instrumentType string, limit int) ([]StockV2Instrument, error) {
 	if keyword == "" {
 		return []StockV2Instrument{}, nil
 	}
 	pattern := "%" + strings.ToLower(keyword) + "%"
+	where, filterArgs := instrumentFilterSQL(market, instrumentType)
+	args := append([]any{pattern, pattern}, filterArgs...)
+	args = append(args, keyword, limit)
 	query := `
 		SELECT id, symbol, market, COALESCE(instrument_type,'stock'), COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
 		       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), COALESCE(status,'active'),
 		       last_update_at, created_at, updated_at
 		FROM stockv2_instruments
-		WHERE LOWER(symbol) LIKE ? OR LOWER(name) LIKE ?
+		WHERE (LOWER(symbol) LIKE ? OR LOWER(name) LIKE ?) AND ` + where + `
 		ORDER BY
 		  CASE WHEN LOWER(symbol) = LOWER(?) THEN 0 ELSE 1 END,
 		  symbol ASC
 		LIMIT ?
 	`
 
-	rows, err := s.db.QueryContext(ctx, query, pattern, pattern, keyword, limit)
+	rows, err := s.assetDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, wrapError(err, "search instruments")
 	}
@@ -1810,6 +1839,28 @@ func (s *Store) SearchInstruments(ctx context.Context, keyword string, limit int
 	return instruments, nil
 }
 
+func instrumentFilterSQL(market, instrumentType string) (string, []any) {
+	var parts []string
+	var args []any
+	switch strings.ToUpper(strings.TrimSpace(market)) {
+	case "SH", "SZ", "BJ":
+		parts = append(parts, "market = ?")
+		args = append(args, strings.ToUpper(strings.TrimSpace(market)))
+	}
+	switch strings.TrimSpace(instrumentType) {
+	case InstrumentTypeExchangeFund:
+		parts = append(parts, "COALESCE(instrument_type,'stock') = ?")
+		args = append(args, InstrumentTypeExchangeFund)
+	case InstrumentTypeStock:
+		parts = append(parts, "COALESCE(instrument_type,'stock') = ?")
+		args = append(args, InstrumentTypeStock)
+	}
+	if len(parts) == 0 {
+		return "1=1", args
+	}
+	return strings.Join(parts, " AND "), args
+}
+
 // GetInstrumentsByMarket 根据市场获取股票列表
 func (s *Store) GetInstrumentsByMarket(ctx context.Context, market string) ([]StockV2Instrument, error) {
 	query := `
@@ -1821,7 +1872,7 @@ func (s *Store) GetInstrumentsByMarket(ctx context.Context, market string) ([]St
 		ORDER BY symbol ASC
 	`
 
-	rows, err := s.db.QueryContext(ctx, query, market)
+	rows, err := s.assetDB().QueryContext(ctx, query, market)
 	if err != nil {
 		return nil, wrapError(err, "get instruments by market")
 	}
@@ -1882,7 +1933,7 @@ func (s *Store) UpdateInstrument(ctx context.Context, instrument StockV2Instrume
 
 	conceptsJSON, _ := json.Marshal(instrument.Concepts)
 
-	result, err := s.db.ExecContext(ctx, query,
+	result, err := s.assetDB().ExecContext(ctx, query,
 		instrument.InstrumentType,
 		instrument.Name,
 		instrument.Industry,

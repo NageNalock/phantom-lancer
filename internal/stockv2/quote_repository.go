@@ -48,7 +48,7 @@ func (s *Store) UpsertLatestQuote(ctx context.Context, quote StockV2QuoteLatest)
 		quote.Status = QuoteStatusFresh
 	}
 
-	_, err := s.db.ExecContext(ctx, query,
+	_, err := s.assetDB().ExecContext(ctx, query,
 		quote.Symbol,
 		quote.Market,
 		quote.Name,
@@ -90,7 +90,7 @@ func (s *Store) GetLatestQuotes(ctx context.Context, symbols []string) ([]StockV
 		WHERE symbol IN (%s)
 	`, placeholders)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.assetDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, wrapError(err, "get latest quotes")
 	}
@@ -128,7 +128,7 @@ func (s *Store) MarkLatestQuoteFailed(ctx context.Context, symbol, reason string
 	}
 
 	now := time.Now()
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.assetDB().ExecContext(ctx, `
 		UPDATE stockv2_quotes_latest
 		SET status = ?, error_message = ?, updated_at = ?
 		WHERE symbol = ?
@@ -287,7 +287,7 @@ func (s *Store) ListQuoteRefreshStatuses(ctx context.Context, limit int) ([]Quot
 }
 
 func (s *Store) getLatestQuote(ctx context.Context, symbol string) (StockV2QuoteLatest, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.assetDB().QueryRowContext(ctx, `
 		SELECT symbol, market, COALESCE(name,''), last_price, prev_close, open_price,
 		       high_price, low_price, volume, amount, pct_change, quote_at, fetched_at,
 		       source, status, COALESCE(error_message,'')

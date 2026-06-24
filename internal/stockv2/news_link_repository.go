@@ -21,7 +21,7 @@ func (s *Store) CreateNewsEvent(ctx context.Context, event NewsEvent) (NewsEvent
 	}
 	event.CreatedAt = now
 	event.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.assetDB().ExecContext(ctx, `
 		INSERT INTO stockv2_news_events (
 			id, raw_news_id, source, external_id, title, summary, content, url,
 			quality_status, dedupe_key, link_status, event_at, link_processed_at,
@@ -38,7 +38,7 @@ func (s *Store) CreateNewsEvent(ctx context.Context, event NewsEvent) (NewsEvent
 }
 
 func (s *Store) GetNewsEvent(ctx context.Context, id string) (NewsEvent, error) {
-	row := s.db.QueryRowContext(ctx, newsEventSelectSQL()+` WHERE id = ?`, strings.TrimSpace(id))
+	row := s.assetDB().QueryRowContext(ctx, newsEventSelectSQL()+` WHERE id = ?`, strings.TrimSpace(id))
 	event, err := scanNewsEvent(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -52,7 +52,7 @@ func (s *Store) GetNewsEvent(ctx context.Context, id string) (NewsEvent, error) 
 func (s *Store) ListPendingNewsEvents(ctx context.Context, source string, limit int) ([]NewsEvent, error) {
 	source = strings.TrimSpace(source)
 	if source != "" {
-		rows, err := s.db.QueryContext(ctx, newsEventSelectSQL()+`
+		rows, err := s.assetDB().QueryContext(ctx, newsEventSelectSQL()+`
 			WHERE link_status = ? AND source = ?
 			ORDER BY event_at ASC, created_at ASC
 			LIMIT ?
@@ -63,7 +63,7 @@ func (s *Store) ListPendingNewsEvents(ctx context.Context, source string, limit 
 		defer rows.Close()
 		return collectNewsEvents(rows)
 	}
-	rows, err := s.db.QueryContext(ctx, newsEventSelectSQL()+`
+	rows, err := s.assetDB().QueryContext(ctx, newsEventSelectSQL()+`
 		WHERE link_status = ?
 		ORDER BY event_at ASC, created_at ASC
 		LIMIT ?
@@ -78,7 +78,7 @@ func (s *Store) ListPendingNewsEvents(ctx context.Context, source string, limit 
 func (s *Store) ListNewsEvents(ctx context.Context, filter NewsEventListFilter) ([]NewsEvent, error) {
 	where, args := newsEventWhere(filter)
 	args = append(args, normalizedNewsLimit(filter.Limit), normalizedNewsOffset(filter.Offset))
-	rows, err := s.db.QueryContext(ctx, newsEventSelectSQL()+where+`
+	rows, err := s.assetDB().QueryContext(ctx, newsEventSelectSQL()+where+`
 		ORDER BY `+newsEventTimeSQL+` DESC, created_at DESC
 		LIMIT ? OFFSET ?
 	`, args...)
@@ -92,7 +92,7 @@ func (s *Store) ListNewsEvents(ctx context.Context, filter NewsEventListFilter) 
 func (s *Store) CountNewsEvents(ctx context.Context, filter NewsEventListFilter) (int, error) {
 	where, args := newsEventWhere(filter)
 	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_events`+where, args...).Scan(&count); err != nil {
+	if err := s.assetDB().QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_events`+where, args...).Scan(&count); err != nil {
 		return 0, wrapError(err, "count news events")
 	}
 	return count, nil
@@ -102,7 +102,7 @@ func (s *Store) UpdateNewsEventLinkStatus(ctx context.Context, id, status string
 	if processedAt.IsZero() {
 		processedAt = time.Now()
 	}
-	result, err := s.db.ExecContext(ctx, `
+	result, err := s.assetDB().ExecContext(ctx, `
 		UPDATE stockv2_news_events
 		SET link_status = ?, link_processed_at = ?, updated_at = ?
 		WHERE id = ?
@@ -132,7 +132,7 @@ func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, candidate NewsLinkC
 		candidate.CreatedAt = now
 	}
 	candidate.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.assetDB().ExecContext(ctx, `
 		INSERT INTO stockv2_news_link_candidates (
 			id, news_event_id, raw_news_id, symbol, market, instrument_name,
 			match_method, score, reason, matched_terms_json, monitor_status,
@@ -155,7 +155,7 @@ func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, candidate NewsLinkC
 	if err != nil {
 		return NewsLinkCandidate{}, wrapError(err, "upsert news link candidate")
 	}
-	row := s.db.QueryRowContext(ctx, newsLinkCandidateSelectSQL()+`
+	row := s.assetDB().QueryRowContext(ctx, newsLinkCandidateSelectSQL()+`
 		WHERE c.news_event_id = ? AND c.symbol = ?
 	`, candidate.NewsEventID, candidate.Symbol)
 	item, err := scanNewsLinkCandidate(row)
@@ -169,7 +169,7 @@ func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, candidate NewsLinkC
 }
 
 func (s *Store) GetNewsLinkCandidate(ctx context.Context, id string) (NewsLinkCandidate, error) {
-	row := s.db.QueryRowContext(ctx, newsLinkCandidateSelectSQL()+` WHERE c.id = ?`, strings.TrimSpace(id))
+	row := s.assetDB().QueryRowContext(ctx, newsLinkCandidateSelectSQL()+` WHERE c.id = ?`, strings.TrimSpace(id))
 	item, err := scanNewsLinkCandidate(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -181,7 +181,7 @@ func (s *Store) GetNewsLinkCandidate(ctx context.Context, id string) (NewsLinkCa
 }
 
 func (s *Store) ListPendingNewsLinkCandidates(ctx context.Context, limit int) ([]NewsLinkCandidate, error) {
-	rows, err := s.db.QueryContext(ctx, newsLinkCandidateSelectSQL()+`
+	rows, err := s.assetDB().QueryContext(ctx, newsLinkCandidateSelectSQL()+`
 		WHERE COALESCE(c.monitor_status, ?) = ?
 		ORDER BY c.updated_at ASC, c.score DESC, c.symbol ASC
 		LIMIT ?
@@ -197,7 +197,7 @@ func (s *Store) MarkNewsLinkCandidateMonitorStatus(ctx context.Context, id, stat
 	if monitoredAt.IsZero() {
 		monitoredAt = time.Now()
 	}
-	result, err := s.db.ExecContext(ctx, `
+	result, err := s.assetDB().ExecContext(ctx, `
 		UPDATE stockv2_news_link_candidates
 		SET monitor_status = ?, monitor_hit_id = ?, monitored_at = ?, updated_at = ?
 		WHERE id = ?
@@ -218,7 +218,7 @@ func (s *Store) MarkNewsLinkCandidateMonitorStatus(ctx context.Context, id, stat
 func (s *Store) ListNewsLinkCandidates(ctx context.Context, filter NewsLinkCandidateListFilter) ([]NewsLinkCandidate, error) {
 	where, args := newsLinkCandidateWhere(filter)
 	args = append(args, normalizedNewsCandidateLimit(filter.Limit), normalizedStockProfileOffset(filter.Offset))
-	rows, err := s.db.QueryContext(ctx, newsLinkCandidateSelectSQL()+where+`
+	rows, err := s.assetDB().QueryContext(ctx, newsLinkCandidateSelectSQL()+where+`
 		ORDER BY `+newsLinkCandidateEventTimeSQL+` DESC, c.created_at DESC, c.score DESC, c.symbol ASC
 		LIMIT ? OFFSET ?
 	`, args...)
@@ -232,7 +232,7 @@ func (s *Store) ListNewsLinkCandidates(ctx context.Context, filter NewsLinkCandi
 func (s *Store) CountNewsLinkCandidates(ctx context.Context, filter NewsLinkCandidateListFilter) (int, error) {
 	where, args := newsLinkCandidateWhere(filter)
 	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_link_candidates c LEFT JOIN stockv2_news_events e ON e.id = c.news_event_id`+where, args...).Scan(&count); err != nil {
+	if err := s.assetDB().QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_link_candidates c LEFT JOIN stockv2_news_events e ON e.id = c.news_event_id`+where, args...).Scan(&count); err != nil {
 		return 0, wrapError(err, "count news link candidates")
 	}
 	return count, nil
@@ -262,15 +262,9 @@ func newsEventSelectSQL() string {
 		FROM stockv2_news_events`
 }
 
-const newsEventTimeSQL = `CASE
-	WHEN event_at IS NOT NULL AND julianday(event_at) <= julianday(created_at) + (2.0 / 1440.0) THEN event_at
-	ELSE created_at
-END`
+const newsEventTimeSQL = `COALESCE(event_at, created_at)`
 
-const newsLinkCandidateEventTimeSQL = `CASE
-	WHEN e.event_at IS NOT NULL AND julianday(e.event_at) <= julianday(c.created_at) + (2.0 / 1440.0) THEN e.event_at
-	ELSE c.created_at
-END`
+const newsLinkCandidateEventTimeSQL = `COALESCE(e.event_at, c.created_at)`
 
 func newsEventWhere(filter NewsEventListFilter) (string, []any) {
 	parts := make([]string, 0, 5)

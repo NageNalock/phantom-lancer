@@ -948,9 +948,17 @@ func (s *Service) GetInstruments(ctx context.Context, limit, offset int) ([]Stoc
 	return s.store.GetInstruments(ctx, limit, offset)
 }
 
+func (s *Service) GetInstrumentsFiltered(ctx context.Context, market, instrumentType string, limit, offset int) ([]StockV2Instrument, error) {
+	return s.store.GetInstrumentsFiltered(ctx, market, instrumentType, limit, offset)
+}
+
 // CountInstruments 获取标的主数据总数
 func (s *Service) CountInstruments(ctx context.Context) (int, error) {
 	return s.store.CountInstruments(ctx)
+}
+
+func (s *Service) CountInstrumentsFiltered(ctx context.Context, market, instrumentType string) (int, error) {
+	return s.store.CountInstrumentsFiltered(ctx, market, instrumentType)
 }
 
 // GetInstrumentsByMarket 根据市场获取股票列表
@@ -967,6 +975,16 @@ func (s *Service) SearchInstruments(ctx context.Context, keyword string, limit i
 		limit = 100
 	}
 	return s.store.SearchInstruments(ctx, keyword, limit)
+}
+
+func (s *Service) SearchInstrumentsFiltered(ctx context.Context, keyword, market, instrumentType string, limit int) ([]StockV2Instrument, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	return s.store.SearchInstrumentsFiltered(ctx, keyword, market, instrumentType, limit)
 }
 
 // StartBackground 启动后台任务

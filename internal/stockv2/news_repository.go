@@ -24,7 +24,7 @@ func (s *Store) CreateRawNews(ctx context.Context, item StockV2RawNews) (StockV2
 	}
 	item.CreatedAt = now
 	item.UpdatedAt = now
-	result, err := s.db.ExecContext(ctx, `
+	result, err := s.assetDB().ExecContext(ctx, `
 		INSERT OR IGNORE INTO stockv2_raw_news
 			(id, source, source_id, language, title, content, snippet, published_at, fetched_at,
 			 url, raw_payload_json, content_hash, dedupe_key, quality, status, created_at, updated_at)
@@ -72,7 +72,7 @@ func (s *Store) CreateRawNews(ctx context.Context, item StockV2RawNews) (StockV2
 }
 
 func (s *Store) GetRawNews(ctx context.Context, id string) (StockV2RawNews, error) {
-	row := s.db.QueryRowContext(ctx, rawNewsSelectSQL+" WHERE id = ?", id)
+	row := s.assetDB().QueryRowContext(ctx, rawNewsSelectSQL+" WHERE id = ?", id)
 	item, err := scanRawNews(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -84,7 +84,7 @@ func (s *Store) GetRawNews(ctx context.Context, id string) (StockV2RawNews, erro
 }
 
 func (s *Store) getRawNewsByDedupeKey(ctx context.Context, dedupeKey string) (StockV2RawNews, error) {
-	row := s.db.QueryRowContext(ctx, rawNewsSelectSQL+" WHERE dedupe_key = ?", dedupeKey)
+	row := s.assetDB().QueryRowContext(ctx, rawNewsSelectSQL+" WHERE dedupe_key = ?", dedupeKey)
 	item, err := scanRawNews(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -98,7 +98,7 @@ func (s *Store) getRawNewsByDedupeKey(ctx context.Context, dedupeKey string) (St
 func (s *Store) ListRawNews(ctx context.Context, filter RawNewsListFilter) ([]StockV2RawNews, error) {
 	where, args := rawNewsFilterSQL(filter)
 	args = append(args, normalizedNewsLimit(filter.Limit), normalizedNewsOffset(filter.Offset))
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+	rows, err := s.assetDB().QueryContext(ctx, fmt.Sprintf(`
 		%s WHERE %s ORDER BY %s DESC, fetched_at DESC, created_at DESC LIMIT ? OFFSET ?
 	`, rawNewsListSelectSQL, where, rawNewsTimeSQL), args...)
 	if err != nil {
@@ -123,7 +123,7 @@ func (s *Store) TruncateRawNewsBefore(ctx context.Context, before time.Time) (in
 	if before.IsZero() {
 		return 0, ErrInvalidRawNewsTruncateBefore
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.assetDB().BeginTx(ctx, nil)
 	if err != nil {
 		return 0, wrapError(err, "begin truncate raw news")
 	}
@@ -167,7 +167,7 @@ func (s *Store) TruncateRawNewsBefore(ctx context.Context, before time.Time) (in
 	}
 	now := time.Now()
 	for source, count := range deletedBySource {
-		if _, err := tx.ExecContext(ctx, `
+		if _, err := s.db.ExecContext(ctx, `
 			UPDATE stockv2_news_source_states
 			SET raw_news_count = CASE WHEN raw_news_count > ? THEN raw_news_count - ? ELSE 0 END,
 			    updated_at = ?
@@ -185,7 +185,7 @@ func (s *Store) TruncateRawNewsBefore(ctx context.Context, before time.Time) (in
 func (s *Store) CountRawNews(ctx context.Context, filter RawNewsListFilter) (int, error) {
 	where, args := rawNewsFilterSQL(filter)
 	var count int
-	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM stockv2_raw_news WHERE %s`, where), args...).Scan(&count); err != nil {
+	if err := s.assetDB().QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM stockv2_raw_news WHERE %s`, where), args...).Scan(&count); err != nil {
 		return 0, wrapError(err, "count raw news")
 	}
 	return count, nil
@@ -199,7 +199,7 @@ func (s *Store) ListUnprocessedRawNews(ctx context.Context, before time.Time, li
 		args = append(args, before)
 	}
 	args = append(args, normalizedNewsLimit(limit))
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+	rows, err := s.assetDB().QueryContext(ctx, fmt.Sprintf(`
 		%s WHERE %s ORDER BY fetched_at ASC, created_at ASC LIMIT ?
 	`, rawNewsSelectSQL, where), args...)
 	if err != nil {
@@ -218,7 +218,7 @@ func (s *Store) ListUnprocessedRawNews(ctx context.Context, before time.Time, li
 }
 
 func (s *Store) UpdateRawNewsStatus(ctx context.Context, id, status string) error {
-	result, err := s.db.ExecContext(ctx, `
+	result, err := s.assetDB().ExecContext(ctx, `
 		UPDATE stockv2_raw_news
 		SET status = ?, updated_at = ?
 		WHERE id = ?
@@ -339,10 +339,7 @@ const rawNewsListSelectSQL = `
 	FROM stockv2_raw_news
 `
 
-const rawNewsTimeSQL = `CASE
-	WHEN published_at IS NOT NULL AND julianday(published_at) <= julianday(fetched_at) + (2.0 / 1440.0) THEN published_at
-	ELSE fetched_at
-END`
+const rawNewsTimeSQL = `COALESCE(published_at, fetched_at)`
 
 func scanRawNews(row rowScanner) (StockV2RawNews, error) {
 	var item StockV2RawNews

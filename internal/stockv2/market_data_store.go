@@ -87,6 +87,158 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 			ON stockv2_daily_bars(symbol, trade_date);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bars_symbol_adjusted
 			ON stockv2_daily_bars(symbol, adjusted);
+
+		CREATE TABLE IF NOT EXISTS stockv2_instruments (
+			id VARCHAR,
+			symbol VARCHAR NOT NULL UNIQUE,
+			market VARCHAR NOT NULL,
+			instrument_type VARCHAR NOT NULL DEFAULT 'stock',
+			name VARCHAR,
+			industry VARCHAR,
+			sector VARCHAR,
+			concepts VARCHAR,
+			list_date VARCHAR,
+			delist_date VARCHAR,
+			status VARCHAR DEFAULT 'active',
+			last_update_at TIMESTAMP,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			PRIMARY KEY(id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_symbol ON stockv2_instruments(symbol);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_market ON stockv2_instruments(market);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_status ON stockv2_instruments(status);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_type ON stockv2_instruments(instrument_type);
+
+		CREATE TABLE IF NOT EXISTS stockv2_quotes_latest (
+			symbol VARCHAR PRIMARY KEY,
+			market VARCHAR NOT NULL,
+			name VARCHAR,
+			last_price DOUBLE NOT NULL DEFAULT 0,
+			prev_close DOUBLE NOT NULL DEFAULT 0,
+			open_price DOUBLE NOT NULL DEFAULT 0,
+			high_price DOUBLE NOT NULL DEFAULT 0,
+			low_price DOUBLE NOT NULL DEFAULT 0,
+			volume DOUBLE NOT NULL DEFAULT 0,
+			amount DOUBLE NOT NULL DEFAULT 0,
+			pct_change DOUBLE NOT NULL DEFAULT 0,
+			quote_at TIMESTAMP NOT NULL,
+			fetched_at TIMESTAMP NOT NULL,
+			source VARCHAR NOT NULL,
+			status VARCHAR NOT NULL,
+			error_message VARCHAR,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_quotes_latest_status ON stockv2_quotes_latest(status);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_quotes_latest_fetched_at ON stockv2_quotes_latest(fetched_at);
+
+		CREATE TABLE IF NOT EXISTS stockv2_stock_profiles (
+			symbol VARCHAR PRIMARY KEY,
+			market VARCHAR NOT NULL,
+			instrument_type VARCHAR NOT NULL DEFAULT 'stock',
+			name VARCHAR NOT NULL,
+			aliases_json VARCHAR NOT NULL DEFAULT '[]',
+			industry VARCHAR,
+			sectors_json VARCHAR NOT NULL DEFAULT '[]',
+			concepts_json VARCHAR NOT NULL DEFAULT '[]',
+			tags_json VARCHAR NOT NULL DEFAULT '[]',
+			business_summary VARCHAR,
+			profile_text VARCHAR NOT NULL,
+			aliases_zh_json VARCHAR NOT NULL DEFAULT '[]',
+			aliases_en_json VARCHAR NOT NULL DEFAULT '[]',
+			keywords_zh_json VARCHAR NOT NULL DEFAULT '[]',
+			keywords_en_json VARCHAR NOT NULL DEFAULT '[]',
+			business_summary_zh VARCHAR,
+			business_summary_en VARCHAR,
+			business_lines_zh_json VARCHAR NOT NULL DEFAULT '[]',
+			business_lines_en_json VARCHAR NOT NULL DEFAULT '[]',
+			risk_tags_zh_json VARCHAR NOT NULL DEFAULT '[]',
+			risk_tags_en_json VARCHAR NOT NULL DEFAULT '[]',
+			profile_text_zh VARCHAR,
+			profile_text_en VARCHAR,
+			ai_profile_status VARCHAR NOT NULL DEFAULT 'missing',
+			ai_profile_model VARCHAR,
+			ai_profile_confidence DOUBLE NOT NULL DEFAULT 0,
+			ai_profile_error VARCHAR,
+			ai_profile_updated_at TIMESTAMP,
+			fund_type VARCHAR,
+			tracking_index VARCHAR,
+			theme VARCHAR,
+			constituent_hint VARCHAR,
+			profile_version INTEGER NOT NULL DEFAULT 1,
+			updated_at TIMESTAMP NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_stock_profiles_market ON stockv2_stock_profiles(market);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_stock_profiles_type ON stockv2_stock_profiles(instrument_type);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_stock_profiles_updated_at ON stockv2_stock_profiles(updated_at);
+
+		CREATE TABLE IF NOT EXISTS stockv2_raw_news (
+			id VARCHAR PRIMARY KEY,
+			source VARCHAR NOT NULL,
+			source_id VARCHAR,
+			language VARCHAR,
+			title VARCHAR NOT NULL,
+			content VARCHAR,
+			snippet VARCHAR,
+			published_at TIMESTAMP,
+			fetched_at TIMESTAMP NOT NULL,
+			url VARCHAR,
+			raw_payload_json VARCHAR,
+			content_hash VARCHAR NOT NULL,
+			dedupe_key VARCHAR NOT NULL UNIQUE,
+			quality VARCHAR NOT NULL,
+			status VARCHAR NOT NULL,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_raw_news_source ON stockv2_raw_news(source);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_raw_news_status ON stockv2_raw_news(status);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_raw_news_fetched_at ON stockv2_raw_news(fetched_at);
+
+		CREATE TABLE IF NOT EXISTS stockv2_news_events (
+			id VARCHAR PRIMARY KEY,
+			raw_news_id VARCHAR,
+			source VARCHAR NOT NULL,
+			external_id VARCHAR,
+			title VARCHAR NOT NULL,
+			summary VARCHAR,
+			content VARCHAR,
+			url VARCHAR,
+			quality_status VARCHAR,
+			dedupe_key VARCHAR,
+			link_status VARCHAR NOT NULL DEFAULT 'pending',
+			event_at TIMESTAMP NOT NULL,
+			link_processed_at TIMESTAMP,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_events_raw_news ON stockv2_news_events(raw_news_id);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_events_link_status ON stockv2_news_events(link_status);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_events_event_at ON stockv2_news_events(event_at);
+
+		CREATE TABLE IF NOT EXISTS stockv2_news_link_candidates (
+			id VARCHAR PRIMARY KEY,
+			news_event_id VARCHAR NOT NULL,
+			raw_news_id VARCHAR,
+			symbol VARCHAR NOT NULL,
+			market VARCHAR,
+			instrument_name VARCHAR,
+			match_method VARCHAR NOT NULL,
+			score DOUBLE NOT NULL DEFAULT 0,
+			reason VARCHAR,
+			matched_terms_json VARCHAR NOT NULL DEFAULT '[]',
+			monitor_status VARCHAR NOT NULL DEFAULT 'pending',
+			monitor_hit_id VARCHAR,
+			monitored_at TIMESTAMP,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			UNIQUE(news_event_id, symbol)
+		);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_event ON stockv2_news_link_candidates(news_event_id);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_raw_news ON stockv2_news_link_candidates(raw_news_id);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_monitor_status ON stockv2_news_link_candidates(monitor_status);
 	`)
 	if err != nil {
 		return fmt.Errorf("init duckdb daily bars schema: %w", err)

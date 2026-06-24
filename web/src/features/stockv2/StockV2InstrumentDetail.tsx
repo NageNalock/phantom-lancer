@@ -55,7 +55,7 @@ export function StockV2InstrumentDetail({
   const [range, setRange] = useState<DailyBarRange>("1y");
   const [adjusted, setAdjusted] = useState<DailyBarAdjusted>("none");
 
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [quality, setQuality] = useState<StockV2DailyBarsQuality | null>(null);
   const [bars, setBars] = useState<StockV2DailyBar[] | null>(null);
@@ -70,6 +70,7 @@ export function StockV2InstrumentDetail({
 
   // 区间/复权切换或切换标的时，清空旧 bars，避免展示不匹配的假 K 线。
   useEffect(() => {
+    setLoading(true);
     setBars(null);
     setError(null);
     setEnsureResult(null);
@@ -435,8 +436,8 @@ export function StockV2InstrumentDetail({
           <div className="flex flex-wrap gap-x-4 gap-y-1">
             <span>范围：{stockV2RangeLabel(range)}</span>
             <span>复权：{stockV2AdjustedLabel(adjusted)}</span>
-            <span>最早：{quality?.earliestDate || "—"}</span>
-            <span>最近：{quality?.latestDate || "—"}</span>
+            <span>最早：{quality?.earliestDate || "-"}</span>
+            <span>最近：{quality?.latestDate || "-"}</span>
             <span>条数：{quality?.rowCount ?? 0}</span>
             {quality?.source ? <span>来源：{quality.source}</span> : null}
             {quality?.stale ? (
@@ -648,7 +649,7 @@ function stockProfileAIDecisionTone(decision?: string): Tone {
 }
 
 function formatTime(iso?: string): string {
-  if (!iso) return "—";
+  if (!iso) return "-";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString("zh-CN", { hour12: false });
