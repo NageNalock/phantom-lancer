@@ -314,13 +314,11 @@ func normalizeJin10FlashEndpoint(raw string) (*url.URL, error) {
 		return url.Parse(defaultJin10FlashEndpoint)
 	}
 	if strings.EqualFold(endpoint.Hostname(), "flash-api.jin10.com") && strings.TrimRight(endpoint.EscapedPath(), "/") == "/get_flash_list" {
-		query := endpoint.Query()
-		if query.Get("channel") == "" {
-			query.Set("channel", "-8200")
-		}
-		if query.Get("vip") == "" {
-			query.Set("vip", "1")
-		}
+		rawQuery := endpoint.Query()
+		query := url.Values{}
+		// ponytail: Browser-copied Jin10 URLs may include stale pagination/cache params; keep only the stable latest-feed selectors.
+		query.Set("channel", firstNonEmpty(rawQuery.Get("channel"), "-8200"))
+		query.Set("vip", firstNonEmpty(rawQuery.Get("vip"), "1"))
 		endpoint.RawQuery = query.Encode()
 	}
 	return endpoint, nil
