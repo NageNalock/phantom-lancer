@@ -494,32 +494,7 @@ func stockV2AgentHTTPStatus(err error) int {
 	}
 }
 
-// handleStockV2AgentMCP 处理 MCP server 请求(JSON-RPC 2.0)。
-func (s *Server) handleStockV2AgentMCP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	// 读 body
-	body := make([]byte, 0, 1024*64)
-	buf := make([]byte, 1024*8)
-	for {
-		n, err := r.Body.Read(buf)
-		if n > 0 {
-			body = append(body, buf[:n]...)
-		}
-		if len(body) > 1024*1024 { // 1MB 上限
-			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		if err != nil {
-			break
-		}
-	}
-
-	resp := s.stockV2.AgentTaskPool().HandleMCPRequest(body)
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(resp))
+// handleStockV2AgentMCPStatus 返回给 UI 的 Codex MCP loopback 状态。
+func (s *Server) handleStockV2AgentMCPStatus(w http.ResponseWriter, r *http.Request) {
+	s.writeJSON(w, s.stockV2.AgentMCPStatus())
 }

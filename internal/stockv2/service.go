@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -33,6 +35,9 @@ type Service struct {
 	agentTaskPool     *agentTaskPool
 	agentExecutor     AgentExecutor
 	agentCodexCommand func(ctx context.Context, args ...string) ([]byte, error)
+	agentMCPMu        sync.RWMutex
+	agentMCPServer    *http.Server
+	agentMCPURL       string
 }
 
 // NewService 创建新的股票V2服务
@@ -85,6 +90,70 @@ func (s *Service) WithCodexCLIExecutor(binary, codexHome, mcpURL string) *Servic
 		}
 	}
 	return s
+}
+
+type AgentMCPStatus struct {
+	Enabled       bool     `json:"enabled"`
+	ServerName    string   `json:"serverName"`
+	Transport     string   `json:"transport"`
+	URL           string   `json:"url,omitempty"`
+	RequiredTools []string `json:"requiredTools"`
+}
+
+func (s *Service) StartAgentMCPServer() (string, error) {
+	s.agentMCPMu.Lock()
+	defer s.agentMCPMu.Unlock()
+	if s.agentMCPServer != nil && s.agentMCPURL != "" {
+		return s.agentMCPURL, nil
+	}
+	if s.agentTaskPool == nil {
+		return "", errors.New("stockv2 agent task pool is not configured")
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/stockv2/agent/mcp", s.handleAgentMCPRequest)
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	url := "http://" + ln.Addr().String() + "/api/stockv2/agent/mcp"
+	s.agentMCPServer = srv
+	s.agentMCPURL = url
+
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && s.log != nil {
+			s.log.Warn("stockv2 agent MCP loopback server stopped", "error", err)
+		}
+	}()
+	return url, nil
+}
+
+func (s *Service) AgentMCPStatus() AgentMCPStatus {
+	s.agentMCPMu.RLock()
+	defer s.agentMCPMu.RUnlock()
+	return AgentMCPStatus{
+		Enabled:       s.agentMCPServer != nil && s.agentMCPURL != "",
+		ServerName:    codexStockAgentMCPName,
+		Transport:     "loopback_http",
+		URL:           s.agentMCPURL,
+		RequiredTools: []string{codexSubmitResultTool},
+	}
+}
+
+func (s *Service) handleAgentMCPRequest(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024*1024))
+	if err != nil {
+		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	resp := s.agentTaskPool.HandleMCPRequest(body)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(resp)
 }
 
 // AgentTaskPool 返回内存任务池(给 MCP handler 用)。
@@ -1102,6 +1171,18 @@ func (s *Service) Close() error {
 		s.bgWg.Wait()
 	}
 	s.bgMu.Unlock()
+	s.agentMCPMu.Lock()
+	mcpServer := s.agentMCPServer
+	s.agentMCPServer = nil
+	s.agentMCPURL = ""
+	s.agentMCPMu.Unlock()
+	if mcpServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := mcpServer.Shutdown(ctx); err != nil && s.log != nil {
+			s.log.Warn("stockv2 agent MCP loopback shutdown failed", "error", err)
+		}
+		cancel()
+	}
 	// 关闭 agent task pool
 	if s.agentTaskPool != nil {
 		s.agentTaskPool.Close()

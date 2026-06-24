@@ -141,7 +141,7 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/agent/runs/{id}", s.handleStockV2GetAgentRun)
 	mux.HandleFunc("GET /api/stockv2/agent/ledgers/{id}", s.handleStockV2GetAgentDecisionLedger)
 	mux.HandleFunc("POST /api/stockv2/agent/resolve", s.handleStockV2ResolveAgentTask)
-	mux.HandleFunc("POST /api/stockv2/agent/mcp", s.handleStockV2AgentMCP)
+	mux.HandleFunc("GET /api/stockv2/agent/mcp/status", s.handleStockV2AgentMCPStatus)
 }
 
 // handleStockV2Snapshot 处理 V2 工作台快照请求。

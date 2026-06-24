@@ -2801,6 +2801,14 @@ export interface StockV2AgentTaskProfile {
   updatedAt?: string;
 }
 
+export interface StockV2AgentMCPStatus {
+  enabled: boolean;
+  serverName: string;
+  transport: string;
+  url?: string;
+  requiredTools: string[];
+}
+
 export type StockV2AgentRunStatus = "pending" | "ready" | "running" | "completed" | "failed";
 
 export interface StockV2AgentRun {

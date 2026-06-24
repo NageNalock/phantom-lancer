@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -273,10 +272,15 @@ func main() {
 		os.Exit(1)
 	}
 	api.SetHTTPServerManager(httpSrv)
+	stockV2MCPURL, err := stockV2Svc.StartAgentMCPServer()
+	if err != nil {
+		logger.Error("stockv2 agent MCP loopback server boot failed", "error", err)
+		os.Exit(1)
+	}
 	stockV2Svc.WithCodexCLIExecutor(
 		stockV2CodexBinary(),
 		os.Getenv("CODEX_HOME"),
-		stockV2AgentMCPURL(actualEp.Scheme, actualEp.Addr),
+		stockV2MCPURL,
 	)
 
 	// M2 split-state recovery: if the DB says TLS should be enabled but the
@@ -404,28 +408,4 @@ func stockV2CodexBinary() string {
 		return value
 	}
 	return "codex"
-}
-
-func stockV2AgentMCPURL(scheme, addr string) string {
-	if strings.TrimSpace(scheme) == "" {
-		scheme = "http"
-	}
-	host, port := stockV2LoopbackHostPort(addr)
-	return scheme + "://" + net.JoinHostPort(host, port) + "/api/stockv2/agent/mcp"
-}
-
-func stockV2LoopbackHostPort(addr string) (string, string) {
-	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
-	if err != nil {
-		return "127.0.0.1", "8080"
-	}
-	host = strings.Trim(host, "[]")
-	switch host {
-	case "", "0.0.0.0", "::":
-		host = "127.0.0.1"
-	}
-	if port == "" {
-		port = "8080"
-	}
-	return host, port
 }

@@ -4,6 +4,7 @@ import type { AppActions } from "../../app/App";
 import type {
   StockV2AgentExecutionDetail,
   StockV2AgentListResponse,
+  StockV2AgentMCPStatus,
   StockV2AgentModelProfile,
   StockV2AgentProviderProfile,
   StockV2AgentRunCLIDebugRequest,
@@ -62,12 +63,15 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
   const [providers, setProviders] = useState<StockV2AgentProviderProfile[] | null>(null);
   const [models, setModels] = useState<StockV2AgentModelProfile[] | null>(null);
   const [taskProfiles, setTaskProfiles] = useState<StockV2AgentTaskProfile[] | null>(null);
+  const [mcpStatus, setMCPStatus] = useState<StockV2AgentMCPStatus | null>(null);
   const [pLoading, setPLoading] = useState(false);
   const [mLoading, setMLoading] = useState(false);
   const [tLoading, setTLoading] = useState(false);
+  const [mcpLoading, setMCPLoading] = useState(false);
   const [pError, setPError] = useState<string | null>(null);
   const [mError, setMError] = useState<string | null>(null);
   const [tError, setTError] = useState<string | null>(null);
+  const [mcpError, setMCPError] = useState<string | null>(null);
   const [toggleBusy, setToggleBusy] = useState<string | null>(null);
   const [cliDebugOpen, setCliDebugOpen] = useState(false);
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
@@ -129,7 +133,24 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
     }
   }
 
+  async function loadMCPStatus(): Promise<StockV2AgentMCPStatus | null> {
+    setMCPLoading(true);
+    setMCPError(null);
+    try {
+      const res = await actions.api<StockV2AgentMCPStatus>("/api/stockv2/agent/mcp/status");
+      setMCPStatus(res);
+      return res;
+    } catch (err) {
+      setMCPError(friendlyError(err));
+      setMCPStatus(null);
+      return null;
+    } finally {
+      setMCPLoading(false);
+    }
+  }
+
   useEffect(() => {
+    void loadMCPStatus();
     void loadProviders();
     void loadModels();
     void loadTaskProfiles();
@@ -218,6 +239,19 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
           验证 CLI
         </Button>
       </div>
+
+      <CollapsibleSection
+        title="Codex MCP"
+        subtitle="stock_agent.submit_result 本机回填通道"
+        defaultOpen
+      >
+        <AgentMCPSection
+          loading={mcpLoading || (!mcpStatus && !mcpError)}
+          error={mcpError}
+          status={mcpStatus}
+          onRetry={loadMCPStatus}
+        />
+      </CollapsibleSection>
 
       <CollapsibleSection
         title="供应商 (Provider)"
@@ -316,6 +350,47 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
 }
 
 // ============ Section 子组件 ============
+
+function AgentMCPSection({
+  loading,
+  error,
+  status,
+  onRetry,
+}: {
+  loading: boolean;
+  error: string | null;
+  status: StockV2AgentMCPStatus | null;
+  onRetry: () => Promise<StockV2AgentMCPStatus | null>;
+}) {
+  if (loading) return <p className="text-xs text-[var(--muted)]">加载中…</p>;
+  if (error) {
+    return (
+      <div className="grid gap-2">
+        <Notice tone="danger">{error}</Notice>
+        <Button onClick={() => void onRetry()}>重试</Button>
+      </div>
+    );
+  }
+  if (!status) return <p className="text-xs text-[var(--muted)]">暂无 MCP 状态。</p>;
+  return (
+    <div className="grid gap-2">
+      <div className="rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
+        <div className="flex flex-wrap items-center gap-2">
+          <strong className="text-sm">{status.serverName || "stock_agent"}</strong>
+          <Pill tone={status.enabled ? "good" : "warn"}>{status.enabled ? "可用" : "未启动"}</Pill>
+          <Pill tone="neutral">{status.transport || "loopback_http"}</Pill>
+        </div>
+        <div className="mt-2 grid gap-1">
+          <Row label="Endpoint" value={status.url || "(未启动)"} />
+          <Row label="Tools" value={status.requiredTools?.join(", ") || "-"} />
+        </div>
+      </div>
+      <div className="flex justify-end">
+        <Button onClick={() => void onRetry()}>刷新</Button>
+      </div>
+    </div>
+  );
+}
 
 function AgentProviderSection({
   loading,
