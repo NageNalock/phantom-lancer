@@ -10,6 +10,8 @@ import type {
   StockV2Instrument,
   StockV2AgentRun,
   StockV2StockProfile,
+  StockV2StockProfileUpdateResult,
+  StockV2StockProfileUpdateTask,
 } from "../../app/types";
 import type { AppActions } from "../../app/App";
 import {
@@ -63,6 +65,7 @@ export function StockV2InstrumentDetail({
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileRun, setProfileRun] = useState<StockV2AgentRun | null>(null);
+  const [profileTask, setProfileTask] = useState<StockV2StockProfileUpdateTask | null>(null);
   const profileRunPollRef = useRef<number | null>(null);
 
   // 区间/复权切换或切换标的时，清空旧 bars，避免展示不匹配的假 K 线。
@@ -74,12 +77,14 @@ export function StockV2InstrumentDetail({
     setProfile(null);
     setProfileError(null);
     setProfileRun(null);
+    setProfileTask(null);
     if (profileRunPollRef.current !== null) {
       window.clearTimeout(profileRunPollRef.current);
       profileRunPollRef.current = null;
     }
     void load();
     void loadProfile();
+    void loadProfileTasks();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inst?.symbol, range, adjusted]);
 
@@ -212,6 +217,18 @@ export function StockV2InstrumentDetail({
     }
   }, [actions, inst]);
 
+  const loadProfileTasks = useCallback(async () => {
+    if (!inst) return;
+    try {
+      const res = await actions.api<{ items?: StockV2StockProfileUpdateTask[] }>(
+        `/api/stockv2/profiles/${encodeURIComponent(inst.symbol)}/update-tasks?limit=1`,
+      );
+      setProfileTask(res.items?.[0] ?? null);
+    } catch {
+      setProfileTask(null);
+    }
+  }, [actions, inst]);
+
   const pollProfileRun = useCallback((runID: string) => {
     if (profileRunPollRef.current !== null) {
       window.clearTimeout(profileRunPollRef.current);
@@ -224,6 +241,7 @@ export function StockV2InstrumentDetail({
         if (run.status === "completed" || run.status === "failed") {
           setProfileBusy(false);
           await loadProfile();
+          await loadProfileTasks();
           return;
         }
         profileRunPollRef.current = window.setTimeout(tick, 1500);
@@ -233,47 +251,49 @@ export function StockV2InstrumentDetail({
       }
     };
     void tick();
-  }, [actions, loadProfile]);
+  }, [actions, loadProfile, loadProfileTasks]);
 
-  const rebuildProfile = useCallback(async () => {
+  const updateProfile = useCallback(async () => {
     if (!inst) return;
     setProfileBusy(true);
     try {
-      const item = await actions.api<StockV2StockProfile>(`/api/stockv2/profiles/${encodeURIComponent(inst.symbol)}/build`, {
+      const result = await actions.api<StockV2StockProfileUpdateResult>(`/api/stockv2/profiles/${encodeURIComponent(inst.symbol)}/update`, {
         method: "POST",
+        body: { triggerSource: "manual", triggerReason: "user_click", requestedBy: "web" },
         csrf: actions.csrf,
       });
-      setProfile(item);
+      setProfile(result.profile);
+      setProfileTask(result.task);
+      setProfileRun(result.agentRun ?? null);
       setProfileError(null);
+      if (result.agentRun) {
+        actions.setToast("画像已更新，AI 增强已提交", "good");
+        if (result.agentRun.status === "completed" || result.agentRun.status === "failed") {
+          await loadProfile();
+          await loadProfileTasks();
+          setProfileBusy(false);
+        } else {
+          pollProfileRun(result.agentRun.id);
+        }
+        return;
+      }
+      actions.setToast(stockProfileUpdateToast(result.task), result.task.status === "failed" ? "warn" : "good");
+      setProfileBusy(false);
     } catch (err) {
       setProfileError(friendlyErr(err));
+      setProfileBusy(false);
+    }
+  }, [actions, inst, loadProfile, loadProfileTasks, pollProfileRun]);
+
+  const refreshProfileView = useCallback(async () => {
+    setProfileBusy(true);
+    try {
+      await loadProfile();
+      await loadProfileTasks();
     } finally {
       setProfileBusy(false);
     }
-  }, [actions, inst]);
-
-  const runAIProfile = useCallback(async () => {
-    if (!inst) return;
-    setProfileBusy(true);
-    try {
-      const run = await actions.api<StockV2AgentRun>(`/api/stockv2/profiles/${encodeURIComponent(inst.symbol)}/run-agent`, {
-        method: "POST",
-        body: { requestedBy: "web" },
-        csrf: actions.csrf,
-      });
-      setProfileRun(run);
-      actions.setToast("AI 画像任务已提交", "good");
-      if (run.status === "completed" || run.status === "failed") {
-        await loadProfile();
-        setProfileBusy(false);
-      } else {
-        pollProfileRun(run.id);
-      }
-    } catch (err) {
-      setProfileError(friendlyErr(err));
-      setProfileBusy(false);
-    }
-  }, [actions, inst, loadProfile, pollProfileRun]);
+  }, [loadProfile, loadProfileTasks]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current !== null) {
@@ -448,11 +468,11 @@ export function StockV2InstrumentDetail({
           <StockProfileSection
             busy={profileBusy}
             error={profileError}
-            onRebuild={() => void rebuildProfile()}
-            onRefresh={() => void loadProfile()}
-            onRunAI={() => void runAIProfile()}
+            onRefresh={() => void refreshProfileView()}
+            onUpdate={() => void updateProfile()}
             profile={profile}
             agentRun={profileRun}
+            updateTask={profileTask}
           />
         </section>
 
@@ -468,32 +488,32 @@ function StockProfileSection({
   agentRun,
   busy,
   error,
-  onRebuild,
   onRefresh,
-  onRunAI,
+  onUpdate,
   profile,
+  updateTask,
 }: {
   agentRun: StockV2AgentRun | null;
   busy: boolean;
   error: string | null;
-  onRebuild: () => void;
   onRefresh: () => void;
-  onRunAI: () => void;
+  onUpdate: () => void;
   profile: StockV2StockProfile | null;
+  updateTask: StockV2StockProfileUpdateTask | null;
 }) {
   const aiTone = profile?.aiProfileStatus === "ready" ? "good" : profile?.aiProfileStatus === "failed" ? "danger" : profile?.aiProfileStatus === "not_configured" ? "warn" : "neutral";
   const runTone = agentRun ? stockV2AgentRunStatusTone(agentRun.status) as Tone : "neutral";
+  const taskTone = updateTask?.status === "failed" ? "danger" : updateTask?.status === "partial" ? "warn" : "neutral";
   return (
     <section className="mt-4 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)]">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] px-3 py-3">
         <div>
           <h4 className="m-0 text-sm font-semibold">股票画像</h4>
-          <p className="muted mt-1 mb-0 text-xs">基础画像来自主数据；AI 画像只在手动点击时运行。</p>
+          <p className="muted mt-1 mb-0 text-xs">更新画像会刷新事实输入；仅当输入变化时才提交 AI 增强。</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button className="px-2 py-1 text-xs" onClick={onRefresh} disabled={busy}>刷新画像</Button>
-          <Button className="px-2 py-1 text-xs" onClick={onRebuild} disabled={busy}>重建基础</Button>
-          <Button className="px-2 py-1 text-xs" onClick={onRunAI} disabled={busy} tone="primary">运行 AI</Button>
+          <Button className="px-2 py-1 text-xs" onClick={onRefresh} disabled={busy}>重新读取</Button>
+          <Button className="px-2 py-1 text-xs" onClick={onUpdate} disabled={busy} tone="primary">{busy ? "更新中…" : "更新画像"}</Button>
         </div>
       </div>
       <div className="grid gap-3 p-3 text-sm">
@@ -515,6 +535,26 @@ function StockProfileSection({
               {profile.aiProfileModel ? <Pill tone="neutral">{profile.aiProfileModel}</Pill> : null}
               {profile.aiProfileConfidence ? <Pill tone="neutral">置信 {Math.round(profile.aiProfileConfidence * 100)}%</Pill> : null}
             </div>
+            {updateTask ? (
+              <div className="flex flex-wrap items-center gap-1.5 text-xs text-[var(--muted)]">
+                <Pill tone={taskTone}>{stockProfileUpdateStatusLabel(updateTask.status)}</Pill>
+                <Pill tone="neutral">{stockProfileTriggerLabel(updateTask.triggerSource)}</Pill>
+                <Pill tone={updateTask.baseInputChanged ? "warn" : "neutral"}>
+                  {updateTask.baseInputChanged ? "输入已变化" : "输入无变化"}
+                </Pill>
+                <Pill tone={stockProfileAIDecisionTone(updateTask.aiDecision)}>
+                  {stockProfileAIDecisionLabel(updateTask.aiDecision)}
+                </Pill>
+                {updateTask.agentRunId ? <Pill tone="neutral">{updateTask.agentRunId}</Pill> : null}
+                <span>{formatTime(updateTask.finishedAt || updateTask.updatedAt)}</span>
+              </div>
+            ) : null}
+            {updateTask?.sourceStatuses?.length ? (
+              <ProfileTerms
+                label="资料源"
+                values={updateTask.sourceStatuses.map((item) => `${item.source}:${item.status}`)}
+              />
+            ) : null}
             <ProfileRow label="摘要" value={profile.businessSummaryZh || profile.businessSummary || profile.businessSummaryEn} />
             <ProfileRow label="行业" value={profile.industry} />
             <ProfileTerms label="关键词" values={[...(profile.keywordsZh || []), ...(profile.keywordsEn || [])]} />
@@ -568,6 +608,50 @@ function getRangeBound(r: DailyBarRange): { start: string; end: string } {
     start: start.toISOString().slice(0, 10),
     end: end.toISOString().slice(0, 10),
   };
+}
+
+function stockProfileUpdateToast(task: StockV2StockProfileUpdateTask): string {
+  if (task.aiDecision === "called") return "画像已更新，AI 增强已提交";
+  if (task.aiDecision === "skipped_unchanged") return "画像输入无变化，已保留现有 AI 总结";
+  if (task.aiDecision === "skipped_not_configured") return "画像已更新，AI 未配置";
+  if (task.aiDecision === "skipped_unavailable") return "画像已更新，AI 执行器不可用";
+  if (task.aiDecision === "failed") return "画像已更新，AI 增强失败";
+  return "画像已更新";
+}
+
+function stockProfileUpdateStatusLabel(status?: string): string {
+  if (status === "completed") return "已完成";
+  if (status === "partial") return "部分完成";
+  if (status === "failed") return "失败";
+  return status || "未知";
+}
+
+function stockProfileTriggerLabel(trigger?: string): string {
+  if (trigger === "auto") return "自动更新";
+  if (trigger === "manual") return "手动更新";
+  return trigger || "未知触发";
+}
+
+function stockProfileAIDecisionLabel(decision?: string): string {
+  if (decision === "called") return "AI 已提交";
+  if (decision === "skipped_unchanged") return "AI 跳过：输入无变化";
+  if (decision === "skipped_not_configured") return "AI 跳过：未配置";
+  if (decision === "skipped_unavailable") return "AI 跳过：不可用";
+  if (decision === "failed") return "AI 失败";
+  return decision || "AI 未运行";
+}
+
+function stockProfileAIDecisionTone(decision?: string): Tone {
+  if (decision === "called") return "warn";
+  if (decision === "failed") return "danger";
+  return "neutral";
+}
+
+function formatTime(iso?: string): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("zh-CN", { hour12: false });
 }
 
 function friendlyErr(err: unknown): string {

@@ -135,6 +135,163 @@ func (s *Store) CountStockProfiles(ctx context.Context, filter StockProfileListF
 	return total, wrapError(err, "count stock profiles")
 }
 
+func (s *Store) CreateStockProfileUpdateTask(ctx context.Context, task StockProfileUpdateTask) (StockProfileUpdateTask, error) {
+	now := time.Now()
+	if task.ID == "" {
+		task.ID = generateID()
+	}
+	if task.TriggerSource == "" {
+		task.TriggerSource = StockProfileUpdateTriggerManual
+	}
+	if task.Status == "" {
+		task.Status = StockProfileUpdateStatusCompleted
+	}
+	if task.StartedAt.IsZero() {
+		task.StartedAt = now
+	}
+	if task.FinishedAt.IsZero() && task.Status != "" {
+		task.FinishedAt = now
+	}
+	if task.CreatedAt.IsZero() {
+		task.CreatedAt = now
+	}
+	task.UpdatedAt = now
+	sourceStatusesJSON := marshalStockProfileSourceStatuses(task.SourceStatuses)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO stockv2_stock_profile_update_tasks (
+			id, symbol, market, trigger_source, trigger_reason, status,
+			base_input_hash_before, base_input_hash_after, base_input_changed,
+			ai_decision, agent_run_id, source_statuses_json, error_message,
+			started_at, finished_at, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		task.ID,
+		task.Symbol,
+		nullableNewsString(task.Market),
+		task.TriggerSource,
+		nullableNewsString(task.TriggerReason),
+		task.Status,
+		nullableNewsString(task.BaseInputHashBefore),
+		nullableNewsString(task.BaseInputHashAfter),
+		boolToInt(task.BaseInputChanged),
+		task.AIDecision,
+		nullableNewsString(task.AgentRunID),
+		sourceStatusesJSON,
+		nullableNewsString(task.ErrorMessage),
+		task.StartedAt,
+		nullableNewsTime(task.FinishedAt),
+		task.CreatedAt,
+		task.UpdatedAt,
+	)
+	if err != nil {
+		return StockProfileUpdateTask{}, wrapError(err, "create stock profile update task")
+	}
+	return task, nil
+}
+
+func (s *Store) ListStockProfileUpdateTasks(ctx context.Context, filter StockProfileUpdateTaskListFilter) ([]StockProfileUpdateTask, error) {
+	where, args := stockProfileUpdateTaskWhere(filter)
+	args = append(args, normalizedStockProfileLimit(filter.Limit), normalizedStockProfileOffset(filter.Offset))
+	rows, err := s.db.QueryContext(ctx, stockProfileUpdateTaskSelectSQL()+where+` ORDER BY created_at DESC LIMIT ? OFFSET ?`, args...)
+	if err != nil {
+		return nil, wrapError(err, "list stock profile update tasks")
+	}
+	defer rows.Close()
+	items := make([]StockProfileUpdateTask, 0)
+	for rows.Next() {
+		item, err := scanStockProfileUpdateTask(rows)
+		if err != nil {
+			return nil, wrapError(err, "scan stock profile update task")
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(err, "iterate stock profile update tasks")
+	}
+	return items, nil
+}
+
+func (s *Store) CountStockProfileUpdateTasks(ctx context.Context, filter StockProfileUpdateTaskListFilter) (int, error) {
+	where, args := stockProfileUpdateTaskWhere(filter)
+	var total int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_stock_profile_update_tasks`+where, args...).Scan(&total)
+	return total, wrapError(err, "count stock profile update tasks")
+}
+
+type stockProfileDeepUpdateCandidate struct {
+	Instrument StockV2Instrument
+	LastTaskAt time.Time
+}
+
+func (s *Store) ListStockProfileDeepUpdateCandidates(ctx context.Context, limit int) ([]stockProfileDeepUpdateCandidate, error) {
+	if limit <= 0 {
+		return []stockProfileDeepUpdateCandidate{}, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT i.id, i.symbol, i.market, COALESCE(i.instrument_type,'stock'),
+		       COALESCE(i.name,''), COALESCE(i.industry,''), COALESCE(i.sector,''),
+		       i.concepts, COALESCE(i.list_date,''), COALESCE(i.delist_date,''),
+		       COALESCE(i.status,'active'), i.last_update_at, i.created_at, i.updated_at,
+		       MAX(t.created_at) AS last_profile_task_at
+		FROM stockv2_instruments i
+		LEFT JOIN stockv2_stock_profile_update_tasks t
+		  ON t.symbol = i.symbol
+		WHERE COALESCE(i.status,'active') = 'active'
+		GROUP BY i.symbol
+		ORDER BY
+		  CASE WHEN MAX(t.created_at) IS NULL THEN 0 ELSE 1 END,
+		  MAX(t.created_at) ASC,
+		  i.symbol ASC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, wrapError(err, "list stock profile deep update candidates")
+	}
+	defer rows.Close()
+
+	items := make([]stockProfileDeepUpdateCandidate, 0)
+	for rows.Next() {
+		var item stockProfileDeepUpdateCandidate
+		var conceptsJSON []byte
+		var lastUpdate sql.NullTime
+		var lastTaskAt sql.NullString
+		if err := rows.Scan(
+			&item.Instrument.ID,
+			&item.Instrument.Symbol,
+			&item.Instrument.Market,
+			&item.Instrument.InstrumentType,
+			&item.Instrument.Name,
+			&item.Instrument.Industry,
+			&item.Instrument.Sector,
+			&conceptsJSON,
+			&item.Instrument.ListDate,
+			&item.Instrument.DelistDate,
+			&item.Instrument.Status,
+			&lastUpdate,
+			&item.Instrument.CreatedAt,
+			&item.Instrument.UpdatedAt,
+			&lastTaskAt,
+		); err != nil {
+			return nil, wrapError(err, "scan stock profile deep update candidate")
+		}
+		item.Instrument.InstrumentType = normalizeInstrumentType(item.Instrument.InstrumentType)
+		if lastUpdate.Valid {
+			item.Instrument.LastUpdate = lastUpdate.Time
+		}
+		if lastTaskAt.Valid {
+			item.LastTaskAt = parseStockProfileTaskTime(lastTaskAt.String)
+		}
+		if len(conceptsJSON) > 0 {
+			_ = json.Unmarshal(conceptsJSON, &item.Instrument.Concepts)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(err, "iterate stock profile deep update candidates")
+	}
+	return items, nil
+}
+
 func stockProfileSelectSQL() string {
 	return `
 		SELECT symbol, market, COALESCE(instrument_type,'stock'), name, aliases_json,
@@ -262,6 +419,94 @@ func unmarshalProfileStrings(raw string) []string {
 	return items
 }
 
+func stockProfileUpdateTaskSelectSQL() string {
+	return `
+		SELECT id, symbol, COALESCE(market,''), trigger_source, COALESCE(trigger_reason,''),
+		       status, COALESCE(base_input_hash_before,''), COALESCE(base_input_hash_after,''),
+		       base_input_changed, ai_decision, COALESCE(agent_run_id,''),
+		       COALESCE(source_statuses_json,'[]'), COALESCE(error_message,''),
+		       started_at, finished_at, created_at, updated_at
+		FROM stockv2_stock_profile_update_tasks`
+}
+
+func stockProfileUpdateTaskWhere(filter StockProfileUpdateTaskListFilter) (string, []any) {
+	args := make([]any, 0, 1)
+	if symbol := strings.TrimSpace(filter.Symbol); symbol != "" {
+		return " WHERE symbol = ?", append(args, symbol)
+	}
+	return "", args
+}
+
+func scanStockProfileUpdateTask(scanner stockProfileScanner) (StockProfileUpdateTask, error) {
+	var task StockProfileUpdateTask
+	var changed int
+	var sourceStatusesJSON string
+	var finishedAt sql.NullTime
+	if err := scanner.Scan(
+		&task.ID,
+		&task.Symbol,
+		&task.Market,
+		&task.TriggerSource,
+		&task.TriggerReason,
+		&task.Status,
+		&task.BaseInputHashBefore,
+		&task.BaseInputHashAfter,
+		&changed,
+		&task.AIDecision,
+		&task.AgentRunID,
+		&sourceStatusesJSON,
+		&task.ErrorMessage,
+		&task.StartedAt,
+		&finishedAt,
+		&task.CreatedAt,
+		&task.UpdatedAt,
+	); err != nil {
+		return StockProfileUpdateTask{}, err
+	}
+	task.BaseInputChanged = changed != 0
+	task.SourceStatuses = unmarshalStockProfileSourceStatuses(sourceStatusesJSON)
+	if finishedAt.Valid {
+		task.FinishedAt = finishedAt.Time
+	}
+	return task, nil
+}
+
+func marshalStockProfileSourceStatuses(items []StockProfileSourceStatus) string {
+	if items == nil {
+		items = []StockProfileSourceStatus{}
+	}
+	data, _ := json.Marshal(items)
+	return string(data)
+}
+
+func unmarshalStockProfileSourceStatuses(raw string) []StockProfileSourceStatus {
+	var items []StockProfileSourceStatus
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		return []StockProfileSourceStatus{}
+	}
+	return items
+}
+
+func parseStockProfileTaskTime(value string) time.Time {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05",
+	} {
+		if parsed, err := time.Parse(layout, text); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
 func normalizedStockProfileLimit(limit int) int {
 	if limit <= 0 {
 		return 50
@@ -277,4 +522,34 @@ func normalizedStockProfileOffset(offset int) int {
 		return 0
 	}
 	return offset
+}
+
+func normalizeStockProfileDeepUpdateBatchSize(value int) int {
+	if value <= 0 {
+		return defaultStockProfileDeepUpdateBatchSize
+	}
+	if value > maxStockProfileDeepUpdateBatchSize {
+		return maxStockProfileDeepUpdateBatchSize
+	}
+	return value
+}
+
+func normalizeStockProfileDeepUpdateAIBudget(value int) int {
+	if value <= 0 {
+		return defaultStockProfileDeepUpdateAIBudget
+	}
+	if value > maxStockProfileDeepUpdateAIBudget {
+		return maxStockProfileDeepUpdateAIBudget
+	}
+	return value
+}
+
+func normalizeStockProfileDeepUpdateRateLimitMs(value int) int {
+	if value <= 0 {
+		return defaultStockProfileDeepUpdateRateLimitMs
+	}
+	if value > maxStockProfileDeepUpdateRateLimitMs {
+		return maxStockProfileDeepUpdateRateLimitMs
+	}
+	return value
 }

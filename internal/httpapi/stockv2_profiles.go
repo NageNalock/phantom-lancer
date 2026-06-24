@@ -75,6 +75,57 @@ func (s *Server) handleStockV2BuildStockProfile(w http.ResponseWriter, r *http.R
 	s.writeJSON(w, profile)
 }
 
+func (s *Server) handleStockV2UpdateStockProfile(w http.ResponseWriter, r *http.Request) {
+	symbol := r.PathValue("symbol")
+	if symbol == "" {
+		http.Error(w, "symbol is required", http.StatusBadRequest)
+		return
+	}
+	var req stockv2.RequestUpdateStockProfile
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+	}
+	req.Symbol = symbol
+	if req.TriggerSource == "" {
+		req.TriggerSource = stockv2.StockProfileUpdateTriggerManual
+	}
+	result, err := s.stockV2.UpdateStockProfile(r.Context(), req)
+	if err != nil {
+		http.Error(w, err.Error(), stockV2ProfileHTTPStatus(err))
+		return
+	}
+	s.writeJSON(w, result)
+}
+
+func (s *Server) handleStockV2ListStockProfileUpdateTasks(w http.ResponseWriter, r *http.Request) {
+	symbol := r.PathValue("symbol")
+	limit, err := stockV2StrategyPositiveInt(r.URL.Query().Get("limit"), 20)
+	if err != nil || limit > 100 {
+		http.Error(w, "invalid limit", http.StatusBadRequest)
+		return
+	}
+	offset, err := stockV2StrategyNonNegativeInt(r.URL.Query().Get("offset"), 0)
+	if err != nil {
+		http.Error(w, "invalid offset", http.StatusBadRequest)
+		return
+	}
+	filter := stockv2.StockProfileUpdateTaskListFilter{Symbol: symbol, Limit: limit, Offset: offset}
+	items, err := s.stockV2.ListStockProfileUpdateTasks(r.Context(), filter)
+	if err != nil {
+		http.Error(w, err.Error(), stockV2ProfileHTTPStatus(err))
+		return
+	}
+	total, err := s.stockV2.CountStockProfileUpdateTasks(r.Context(), filter)
+	if err != nil {
+		http.Error(w, err.Error(), stockV2ProfileHTTPStatus(err))
+		return
+	}
+	s.writeJSON(w, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
+}
+
 func (s *Server) handleStockV2RebuildStockProfiles(w http.ResponseWriter, r *http.Request) {
 	result, err := s.stockV2.RebuildStockProfiles(r.Context())
 	if err != nil {

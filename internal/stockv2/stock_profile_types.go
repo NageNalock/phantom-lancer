@@ -17,6 +17,34 @@ const (
 	StockProfileAIStatusNotConfigured = "not_configured"
 )
 
+const (
+	StockProfileUpdateTriggerManual = "manual"
+	StockProfileUpdateTriggerAuto   = "auto"
+
+	StockProfileUpdateStatusCompleted = "completed"
+	StockProfileUpdateStatusPartial   = "partial"
+	StockProfileUpdateStatusFailed    = "failed"
+
+	StockProfileAIDecisionCalled               = "called"
+	StockProfileAIDecisionSkippedUnchanged     = "skipped_unchanged"
+	StockProfileAIDecisionSkippedNotConfigured = "skipped_not_configured"
+	StockProfileAIDecisionSkippedUnavailable   = "skipped_unavailable"
+	StockProfileAIDecisionFailed               = "failed"
+
+	StockProfileSourceStatusSuccess = "success"
+	StockProfileSourceStatusFailed  = "failed"
+	StockProfileSourceStatusSkipped = "skipped"
+)
+
+const (
+	defaultStockProfileDeepUpdateBatchSize   = 12
+	defaultStockProfileDeepUpdateAIBudget    = 2
+	defaultStockProfileDeepUpdateRateLimitMs = 1500
+	maxStockProfileDeepUpdateBatchSize       = 50
+	maxStockProfileDeepUpdateAIBudget        = 10
+	maxStockProfileDeepUpdateRateLimitMs     = 60000
+)
+
 // StockProfile 是消息面高召回关联使用的静态文本资产。
 // 它只来自标的主数据/基金元数据,不包含组合、成本、仓位和风险偏好等动态上下文。
 type StockProfile struct {
@@ -81,4 +109,69 @@ type RebuildStockProfilesResult struct {
 	Failed      int             `json:"failed"`
 	FailedItems []UpdateFailure `json:"failedItems,omitempty"`
 	UpdatedAt   time.Time       `json:"updatedAt"`
+}
+
+type StockProfileDeepUpdateResult struct {
+	CandidateCount  int             `json:"candidateCount"`
+	SymbolBudget    int             `json:"symbolBudget"`
+	AIBudget        int             `json:"aiBudget"`
+	RateLimitMs     int             `json:"rateLimitMs"`
+	ProcessedCount  int             `json:"processedCount"`
+	SuccessCount    int             `json:"successCount"`
+	FailedCount     int             `json:"failedCount"`
+	InputChanged    int             `json:"inputChanged"`
+	InputUnchanged  int             `json:"inputUnchanged"`
+	AICalledCount   int             `json:"aiCalledCount"`
+	AISkippedCount  int             `json:"aiSkippedCount"`
+	StoppedByBudget bool            `json:"stoppedByBudget"`
+	FailedItems     []UpdateFailure `json:"failedItems,omitempty"`
+	UpdatedAt       time.Time       `json:"updatedAt"`
+}
+
+type RequestUpdateStockProfile struct {
+	Symbol        string `json:"symbol,omitempty"`
+	TriggerSource string `json:"triggerSource,omitempty"` // manual | auto
+	TriggerReason string `json:"triggerReason,omitempty"`
+	RequestedBy   string `json:"requestedBy,omitempty"`
+	ForceAI       bool   `json:"forceAI,omitempty"`
+	StrictAI      bool   `json:"strictAI,omitempty"`
+}
+
+type StockProfileSourceStatus struct {
+	Source    string    `json:"source"`
+	Status    string    `json:"status"`
+	Message   string    `json:"message,omitempty"`
+	FetchedAt time.Time `json:"fetchedAt,omitempty"`
+}
+
+type StockProfileUpdateTask struct {
+	ID                  string                     `json:"id"`
+	Symbol              string                     `json:"symbol"`
+	Market              string                     `json:"market,omitempty"`
+	TriggerSource       string                     `json:"triggerSource"`
+	TriggerReason       string                     `json:"triggerReason,omitempty"`
+	Status              string                     `json:"status"`
+	BaseInputHashBefore string                     `json:"baseInputHashBefore,omitempty"`
+	BaseInputHashAfter  string                     `json:"baseInputHashAfter,omitempty"`
+	BaseInputChanged    bool                       `json:"baseInputChanged"`
+	AIDecision          string                     `json:"aiDecision"`
+	AgentRunID          string                     `json:"agentRunId,omitempty"`
+	SourceStatuses      []StockProfileSourceStatus `json:"sourceStatuses,omitempty"`
+	ErrorMessage        string                     `json:"errorMessage,omitempty"`
+	StartedAt           time.Time                  `json:"startedAt"`
+	FinishedAt          time.Time                  `json:"finishedAt,omitempty"`
+	CreatedAt           time.Time                  `json:"createdAt"`
+	UpdatedAt           time.Time                  `json:"updatedAt"`
+}
+
+type StockProfileUpdateTaskListFilter struct {
+	Symbol string
+	Limit  int
+	Offset int
+}
+
+type StockProfileUpdateResult struct {
+	Profile  StockProfile           `json:"profile"`
+	Task     StockProfileUpdateTask `json:"task"`
+	AgentRun *AgentRun              `json:"agentRun,omitempty"`
 }
