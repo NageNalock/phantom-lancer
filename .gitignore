@@ -24,6 +24,8 @@ web/.vite/
 web/.cache/
 web/.turbo/
 web/coverage/
+web/pnpm-lock.yaml
+web/pnpm-workspace.yaml
 
 # Environment and local overrides
 .env
