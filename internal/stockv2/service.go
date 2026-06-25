@@ -54,7 +54,7 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 			return exec.CommandContext(ctx, "codex", args...).CombinedOutput()
 		},
 	}
-	svc.newsAdapters[NewsSourceJin10] = jin10NewsSourceAdapter{service: svc, fallback: NewJin10NewsAdapterFromEnv(httpClient)}
+	svc.newsAdapters[NewsSourceJin10] = jin10NewsSourceAdapter{httpClient: httpClient}
 	svc.newsAdapters[NewsSourceFinancialJuice] = financialJuiceNewsSourceAdapter{service: svc}
 	return svc
 }
@@ -834,30 +834,6 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	if req.DailyBarsAutoEnabled != nil {
 		settings.DailyBarsAutoEnabled = *req.DailyBarsAutoEnabled
 	}
-	if req.Jin10Enabled != nil {
-		settings.Jin10Enabled = *req.Jin10Enabled
-	}
-	if req.Jin10ClearConfig != nil && *req.Jin10ClearConfig {
-		settings.Jin10Endpoint = ""
-		settings.Jin10Cookie = ""
-		settings.Jin10XAppID = ""
-		settings.Jin10XVersion = ""
-	}
-	if req.Jin10CurlInput != nil && strings.TrimSpace(*req.Jin10CurlInput) != "" {
-		cfg, err := ParseJin10CurlInput(*req.Jin10CurlInput)
-		if err != nil {
-			return StockV2Settings{}, err
-		}
-		settings.Jin10Endpoint = cfg.Endpoint
-		settings.Jin10Cookie = cfg.Cookie
-		settings.Jin10XAppID = cfg.XAppID
-		settings.Jin10XVersion = cfg.XVersion
-	}
-	settings.Jin10EndpointSet = strings.TrimSpace(settings.Jin10Endpoint) != ""
-	settings.Jin10CookieSet = strings.TrimSpace(settings.Jin10Cookie) != ""
-	if req.FinancialJuiceEnabled != nil {
-		settings.FinancialJuiceEnabled = *req.FinancialJuiceEnabled
-	}
 	if req.BaseProfileAutoMaintainEnabled != nil {
 		settings.BaseProfileAutoMaintainEnabled = *req.BaseProfileAutoMaintainEnabled
 	}
@@ -891,28 +867,11 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	} else {
 		settings.BaseProfileNextMaintainAt = time.Time{}
 	}
-	if req.FinancialJuiceClearCookie != nil && *req.FinancialJuiceClearCookie {
-		settings.FinancialJuiceEndpoint = ""
-		settings.FinancialJuiceCookie = ""
-	}
-	if req.FinancialJuiceCookieInput != nil && strings.TrimSpace(*req.FinancialJuiceCookieInput) != "" {
-		cfg, err := ParseFinancialJuiceCredentialInput(*req.FinancialJuiceCookieInput)
-		if err != nil {
-			return StockV2Settings{}, err
-		}
-		settings.FinancialJuiceEndpoint = cfg.Endpoint
-		settings.FinancialJuiceCookie = cfg.Cookie
-	}
-	settings.FinancialJuiceCookieSet = strings.TrimSpace(settings.FinancialJuiceCookie) != "" || financialJuiceEndpointHasCredential(settings.FinancialJuiceEndpoint)
 
 	// 保存配置
 	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil {
 		return StockV2Settings{}, wrapError(err, "save settings")
 	}
-	if err := s.syncNewsSourceStatesForSettings(ctx, settings); err != nil {
-		return StockV2Settings{}, wrapError(err, "sync news source states")
-	}
-
 	// 更新本地配置
 	s.settings = settings
 

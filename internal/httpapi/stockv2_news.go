@@ -216,10 +216,10 @@ func stockV2NewsHTTPStatus(err error) int {
 	switch {
 	case errors.Is(err, stockv2.ErrNewsAdapterDisabled),
 		errors.Is(err, stockv2.ErrUnsupportedNewsSource),
-		errors.Is(err, stockv2.ErrJin10ConfigMissing),
 		errors.Is(err, stockv2.ErrFinancialJuiceCookieMissing),
 		errors.Is(err, stockv2.ErrFinancialJuiceInvalidCredential),
 		errors.Is(err, stockv2.ErrNewsSourceAdapterNotFound),
+		errors.Is(err, stockv2.ErrNewsSourceCredentialUnsupported),
 		errors.Is(err, stockv2.ErrInvalidRawNewsTruncateBefore):
 		return http.StatusBadRequest
 	case errors.Is(err, stockv2.ErrRawNewsNotFound):

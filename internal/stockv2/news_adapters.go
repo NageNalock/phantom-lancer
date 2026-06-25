@@ -109,11 +109,8 @@ func (a financialJuiceNewsSourceAdapter) FetchSince(ctx context.Context, cursor 
 	if err != nil {
 		return NewsSourceFetchResult{}, err
 	}
-	if !settings.FinancialJuiceEnabled {
-		return NewsSourceFetchResult{Disabled: true, FetchedAt: time.Now()}, nil
-	}
 	adapter := NewFinancialJuiceRawNewsAdapter(FinancialJuiceAdapterConfig{
-		Enabled:  settings.FinancialJuiceEnabled,
+		Enabled:  true,
 		Endpoint: settings.FinancialJuiceEndpoint,
 		Cookie:   settings.FinancialJuiceCookie,
 		Client:   a.service.httpClient,

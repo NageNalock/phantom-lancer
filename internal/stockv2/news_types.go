@@ -49,10 +49,10 @@ var (
 	ErrInvalidNewsLinkCandidateKey     = errors.New("news link candidate requires event, symbol and match method")
 	ErrNewsAdapterDisabled             = errors.New("news adapter disabled")
 	ErrUnsupportedNewsSource           = errors.New("unsupported news source")
-	ErrJin10ConfigMissing              = errors.New("jin10 curl config missing")
 	ErrFinancialJuiceCookieMissing     = errors.New("financialjuice cookie missing")
 	ErrFinancialJuiceInvalidCredential = errors.New("financialjuice credential invalid or expired; refresh the copied Startup request")
 	ErrNewsSourceAdapterNotFound       = errors.New("news source adapter not found")
+	ErrNewsSourceCredentialUnsupported = errors.New("news source credential config unsupported")
 )
 
 type NewsSourceCursor struct {
@@ -111,9 +111,10 @@ type NewsSourceState struct {
 }
 
 type NewsSourceOverview struct {
-	State      NewsSourceState `json:"state"`
-	Configured bool            `json:"configured"`
-	Reason     string          `json:"reason,omitempty"`
+	State         NewsSourceState `json:"state"`
+	Configured    bool            `json:"configured"`
+	Reason        string          `json:"reason,omitempty"`
+	CredentialSet bool            `json:"credentialSet,omitempty"`
 }
 
 type NewsSourceConfigPatch struct {
@@ -125,6 +126,8 @@ type NewsSourceConfigPatch struct {
 	BackoffBaseSeconds  *int       `json:"backoffBaseSeconds,omitempty"`
 	BackoffMaxSeconds   *int       `json:"backoffMaxSeconds,omitempty"`
 	NextRunAt           *time.Time `json:"nextRunAt,omitempty"`
+	CredentialInput     *string    `json:"credentialInput,omitempty"`
+	ClearCredential     *bool      `json:"clearCredential,omitempty"`
 }
 
 type NewsPipelineRunResult struct {

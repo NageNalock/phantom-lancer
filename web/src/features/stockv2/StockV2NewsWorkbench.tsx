@@ -482,14 +482,19 @@ function NewsSourceConfigDrawer({
     backoffBaseSeconds: state.backoffBaseSeconds || 30,
     backoffMaxSeconds: state.backoffMaxSeconds || 900,
   });
+  const [credentialInput, setCredentialInput] = useState("");
+  const [clearCredential, setClearCredential] = useState(false);
   const [saving, setSaving] = useState(false);
 
   async function save() {
     setSaving(true);
     try {
+      const body: Record<string, unknown> = { ...form };
+      if (credentialInput.trim()) body.credentialInput = credentialInput;
+      if (clearCredential) body.clearCredential = true;
       await actions.api(`/api/stockv2/news/sources/${state.source}/config`, {
         method: "PUT",
-        body: form,
+        body,
         csrf: actions.csrf,
       });
       actions.setToast(`已保存 ${state.source} 配置`, "good");
@@ -508,7 +513,7 @@ function NewsSourceConfigDrawer({
         <header className="flex items-start gap-3 border-b border-[var(--line)] p-4">
           <div className="min-w-0 flex-1">
             <h3 className="m-0 text-base font-semibold">配置消息源</h3>
-            <p className="muted mt-1 mb-0 text-xs"><span className="font-mono">{state.source}</span> · 凭据和 endpoint 状态不会在这里回显敏感值。</p>
+            <p className="muted mt-1 mb-0 text-xs"><span className="font-mono">{state.source}</span> · 启用状态、后台调度和必要凭据集中在这里维护。</p>
           </div>
           <Button aria-label="关闭" className="px-2 py-1 text-xs" onClick={onClose}><X size={16} /></Button>
         </header>
@@ -516,9 +521,40 @@ function NewsSourceConfigDrawer({
           <div className="grid gap-4">
             {!item.configured ? <Notice tone="warn"><span className="text-xs">{item.reason || "该 source 还没有完成本机配置。"}</span></Notice> : null}
             <label className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-sm">
-              <span>启用后台调度</span>
+              <span>
+                <span className="block">启用消息源</span>
+                <span className="muted mt-0.5 block text-xs">开启后可手动执行，并按下方周期进入后台调度。</span>
+              </span>
               <input checked={form.enabled} onChange={(event) => setForm((prev) => ({ ...prev, enabled: event.target.checked }))} type="checkbox" />
             </label>
+            {isCredentialSource(state.source) ? (
+              <div className="grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <strong className="text-sm">{sourceCredentialTitle(state.source)}</strong>
+                    <p className="muted mt-1 mb-0 text-xs">{sourceCredentialDescription(state.source)}</p>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    <Pill tone={item.credentialSet ? "good" : "neutral"}>{item.credentialSet ? "凭据已保存" : "凭据未配置"}</Pill>
+                  </div>
+                </div>
+                {clearCredential ? <Notice tone="warn"><span className="text-xs">保存后会清除当前保存的凭据。</span></Notice> : null}
+                <Field label={sourceCredentialFieldLabel(state.source)} help={sourceCredentialHelp(state.source)}>
+                  <textarea
+                    className="input min-h-28"
+                    onChange={(event) => setCredentialInput(event.target.value)}
+                    placeholder={sourceCredentialPlaceholder(state.source)}
+                    rows={5}
+                    value={credentialInput}
+                  />
+                </Field>
+                <div className="flex justify-end">
+                  <Button disabled={!item.credentialSet} onClick={() => setClearCredential(true)}>
+                    保存时清除凭据
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             <div className="grid grid-cols-2 gap-3">
               <NumberField label="抓取周期 (秒)" min={60} value={form.pollIntervalSeconds} onChange={(value) => setForm((prev) => ({ ...prev, pollIntervalSeconds: value }))} />
               <NumberField label="随机抖动 (秒)" min={0} value={form.jitterSeconds} onChange={(value) => setForm((prev) => ({ ...prev, jitterSeconds: value }))} />
@@ -528,7 +564,7 @@ function NewsSourceConfigDrawer({
               <NumberField label="最大退避 (秒)" min={30} value={form.backoffMaxSeconds} onChange={(value) => setForm((prev) => ({ ...prev, backoffMaxSeconds: value }))} />
             </div>
             <Notice tone="warn">
-              <span className="text-xs">保存后后台调度按 next_run_at 到期执行；手动“执行一次”不改变配置，但会更新状态和下一次运行时间。</span>
+              <span className="text-xs">启用后会按 next_run_at 到期执行；手动“执行一次”不改变配置，但会更新状态和下一次运行时间。</span>
             </Notice>
           </div>
         </div>
@@ -547,6 +583,30 @@ function NumberField({ label, max, min, onChange, value }: { label: string; max?
       <input className="input" max={max} min={min} onChange={(event) => onChange(Number(event.target.value))} type="number" value={value} />
     </Field>
   );
+}
+
+function isCredentialSource(source: string): boolean {
+  return source === "financialjuice";
+}
+
+function sourceCredentialTitle(source: string): string {
+  return source === "financialjuice" ? "FinancialJuice 凭据" : "凭据";
+}
+
+function sourceCredentialDescription(source: string): string {
+  return source === "financialjuice" ? "保存浏览器复制的 Startup 请求片段、info URL 或 Cookie header。" : "";
+}
+
+function sourceCredentialFieldLabel(source: string): string {
+  return source === "financialjuice" ? "FinancialJuice 请求片段" : "请求片段";
+}
+
+function sourceCredentialHelp(source: string): string {
+  return source === "financialjuice" ? "支持 Startup curl、含 info 的请求 URL 或 Cookie header。敏感值保存后不会回显。" : "";
+}
+
+function sourceCredentialPlaceholder(source: string): string {
+  return source === "financialjuice" ? "curl 'https://live.financialjuice.com/FJService.asmx/Startup?info=...' 或 Cookie: ..." : "";
 }
 
 function NewsDetailDrawer({ item, onClose }: { item: DetailItem; onClose: () => void }) {

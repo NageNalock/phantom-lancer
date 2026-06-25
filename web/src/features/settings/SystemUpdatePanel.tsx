@@ -38,7 +38,6 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
   const [status, setStatus] = useState<SystemUpdateStatus>({});
   const [busy, setBusy] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [ownerPassword, setOwnerPassword] = useState("");
   const [confirmService, setConfirmService] = useState(false);
   const [confirmTasks, setConfirmTasks] = useState(false);
   const [events, setEvents] = useState<EventRecord[]>([]);
@@ -207,10 +206,8 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
           releaseId: check.releaseId,
           confirmServiceInterruption: confirmService,
           confirmTaskInterruption: confirmTasks,
-          ownerPassword,
         },
       });
-      setOwnerPassword("");
       setConfirmOpen(false);
       setConfirmService(false);
       setConfirmTasks(false);
@@ -260,7 +257,7 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
   }
 
   const canApply = Boolean(check?.canApply && check.latestVersion && !activeJob);
-  const canSubmit = canApply && confirmService && confirmTasks && ownerPassword.trim().length > 0;
+  const canSubmit = canApply && confirmService && confirmTasks;
 
   return (
     <Panel
@@ -322,10 +319,6 @@ export function SystemUpdatePanel({ actions }: { actions: AppActions }) {
               <strong className="text-sm">确认更新到 <span className="mono">{check?.latestVersion}</span></strong>
               <span className="muted text-xs">更新会短暂中断服务，当前运行中的异步任务可能停止。数据目录、SQLite 和配置文件不会被覆盖。</span>
             </div>
-            <label className="field">
-              <span>管理员密码</span>
-              <input autoComplete="current-password" className="input" name="system_update_owner_password" onChange={(event) => setOwnerPassword(event.target.value)} type="password" value={ownerPassword} />
-            </label>
             <CheckLabel
               align="start"
               checked={confirmService}

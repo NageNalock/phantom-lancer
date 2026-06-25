@@ -1993,11 +1993,6 @@ export interface StockV2Settings {
   proxyType: string;
   proxyHost: string;
   proxyPort: number;
-  jin10Enabled: boolean;
-  jin10EndpointSet: boolean;
-  jin10CookieSet: boolean;
-  financialJuiceEnabled: boolean;
-  financialJuiceCookieSet: boolean;
   baseProfileAutoMaintainEnabled: boolean;
   baseProfileMaintainIntervalSeconds: number;
   baseProfileDeepUpdateBatchSize: number;
@@ -2058,6 +2053,7 @@ export interface StockV2NewsSourceOverview {
   state: StockV2NewsSourceState;
   configured: boolean;
   reason?: string;
+  credentialSet?: boolean;
 }
 
 export interface StockV2NewsPipelineRunResult {

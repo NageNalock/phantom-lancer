@@ -201,7 +201,7 @@ RestartSec=2
 点击“下载并更新”后，后端先执行预检：
 
 1. 校验 owner session 和 CSRF。
-2. 要求近期敏感操作确认，可复用密码确认或短期 re-auth token。
+2. 要求用户在确认弹窗中明确勾选服务中断和任务中断确认。
 3. 检查当前 OS/arch 与 asset 匹配。
 4. 检查 release tag、asset、checksum asset 是否和最近检查结果一致。
 5. 检查当前 binary 路径可解析且目标目录可写。
@@ -452,7 +452,7 @@ payload 只放低敏字段：
 
 - 所有 API 必须 auth。
 - 修改类 API 必须 CSRF。
-- `apply` 必须近期 re-auth 或密码确认。
+- `apply` 必须勾选服务中断和任务中断确认；`rollback` 仍必须密码确认。
 - 前端不能传下载 URL，后端只使用 GitHub API 发现的 release asset。
 - 只允许 HTTPS。
 - release asset 必须 checksum 校验成功。

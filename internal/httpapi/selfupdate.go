@@ -105,12 +105,8 @@ func (s *Server) handleSystemUpdateApply(w http.ResponseWriter, r *http.Request)
 		ReleaseID                  string `json:"releaseId"`
 		ConfirmServiceInterruption bool   `json:"confirmServiceInterruption"`
 		ConfirmTaskInterruption    bool   `json:"confirmTaskInterruption"`
-		OwnerPassword              string `json:"ownerPassword"`
 	}
 	if !decodeJSON(w, r, &req) {
-		return
-	}
-	if !s.verifyUpdatePassword(w, r, ctx, req.OwnerPassword) {
 		return
 	}
 	result, err := s.updates.Apply(r.Context(), selfupdate.ApplyRequest{
