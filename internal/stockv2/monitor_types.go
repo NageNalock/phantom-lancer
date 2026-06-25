@@ -153,8 +153,8 @@ func builtinMonitorTaskDefinitions() []MonitorTaskDefinition {
 	return []MonitorTaskDefinition{
 		{
 			TaskType:     MonitorTaskUniverseUpdate,
-			Label:        "主数据更新",
-			Description:  "全市场标的主数据后台更新",
+			Label:        "数据资产维护",
+			Description:  "全市场标的、最新价与日 K 覆盖后台维护",
 			Category:     "data",
 			Runnable:     true,
 			Configurable: true,

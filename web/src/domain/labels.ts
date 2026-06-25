@@ -576,11 +576,10 @@ export function stockV2SettingsSummary(settings?: StockV2Settings): string {
   const parts: string[] = [];
   if (settings.autoUpdateEnabled) {
     const hours = Math.round(settings.updateIntervalSec / 3600 * 10) / 10;
-    parts.push(`主数据 ${hours}h`);
+    parts.push(`数据资产 ${hours}h`);
   } else {
-    parts.push("主数据手动");
+    parts.push("数据资产手动");
   }
-  parts.push(settings.dailyBarsAutoEnabled ? "日K自动" : "日K手动");
   return parts.join(" · ");
 }
 

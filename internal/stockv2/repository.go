@@ -879,7 +879,7 @@ func (s *Store) init(ctx context.Context) error {
 		return fmt.Errorf("add failed_items column: %w", err)
 	}
 
-	// 增量迁移：日 K 定时增量开关与上次执行时间
+	// 增量迁移：legacy 独立日 K 调度开关与最近日 K 维护时间
 	if err := s.ensureColumn(ctx, "stockv2_settings", "daily_bars_auto_enabled", "INTEGER DEFAULT 0"); err != nil {
 		return fmt.Errorf("add daily_bars_auto_enabled column: %w", err)
 	}

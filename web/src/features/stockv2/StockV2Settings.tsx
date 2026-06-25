@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import type { AppActions } from "../../app/App";
 import type { AppData, StockV2Settings } from "../../app/types";
 import { Button, Field, Notice, Panel, Pill, Toggle } from "../../components/ui";
-import { stockV2SettingsSummary } from "../../domain/labels";
 
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
 
@@ -28,7 +27,6 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
       const body: Record<string, unknown> = {
         autoUpdateEnabled: !!form.autoUpdateEnabled,
         updateIntervalSec: Number(form.updateIntervalSec ?? 3600),
-        dailyBarsAutoEnabled: !!form.dailyBarsAutoEnabled,
         proxyEnabled: !!form.proxyEnabled,
         proxyType: form.proxyType || "http",
         proxyHost: form.proxyHost || "",
@@ -56,24 +54,30 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
         <Notice tone="warn">当前有未保存的修改，点击下方「保存设置」按钮生效。</Notice>
       ) : null}
 
-      {/* 自动更新 */}
+      <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-sm text-[var(--muted-strong)]">
+        这里配置统一的数据资产维护任务。每次任务会刷新标的与最新价，并逐只检查日 K；本地缺失、不足 250 根或已陈旧时才补拉。
+      </div>
+
+      {/* 数据资产自动维护 */}
       <Panel
-        title="自动更新"
-        subtitle="定时后台拉取最新股票数据"
+        title="数据资产自动维护"
+        subtitle="同一任务维护标的、最新价和本地日 K 覆盖"
       >
         <div className="grid gap-4">
           <Toggle
             checked={!!form.autoUpdateEnabled}
             label={
               <div>
-                <div>启用自动更新</div>
-                <div className="muted mt-0.5 text-xs">按设定周期自动更新标的主数据和行情</div>
+                <div>启用后台维护</div>
+                <div className="muted mt-0.5 text-xs">
+                  按下面周期刷新标的列表、名称、市场、类型、状态、最新价，并按需补日 K。
+                </div>
               </div>
             }
             onChange={(checked) => update("autoUpdateEnabled", checked)}
           />
 
-          <Field label="更新周期 (秒)" help="最小 300 秒（5 分钟），建议 1800-3600 秒">
+          <Field label="维护周期 (秒)" help="影响统一数据资产维护。最小 300 秒，建议 1800-3600 秒。">
             <input
               type="number"
               min={300}
@@ -87,56 +91,18 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
             <div className="flex items-center justify-between">
               <span className="text-[var(--muted)]">当前状态</span>
               <Pill tone={form.autoUpdateEnabled ? "good" : "neutral"}>
-                {stockV2SettingsSummary(form as StockV2Settings)}
+                {form.autoUpdateEnabled ? `每 ${formatInterval(Number(form.updateIntervalSec ?? 3600))}` : "已关闭"}
               </Pill>
             </div>
             {settings.lastScheduledUpdate ? (
               <p className="muted mt-2 text-xs">
-                上次定时更新：{formatTime(settings.lastScheduledUpdate)}
+                上次维护：{formatTime(settings.lastScheduledUpdate)}
               </p>
             ) : null}
-          </div>
-        </div>
-      </Panel>
-
-      {/* 日级 K 线自动增量 */}
-      <Panel
-        title="日级 K 线（Daily Bars）"
-        subtitle="收盘后自动为全市场最近交易日窗口补拉日级行情（周末跳过）"
-      >
-        <div className="grid gap-4">
-          <Toggle
-            checked={!!form.dailyBarsAutoEnabled}
-            label={
-              <div>
-                <div>启用自动增量</div>
-                <div className="muted mt-0.5 text-xs">
-                  工作日 16:30 (Asia/Shanghai) 之后触发一次全市场最近交易日增量；当日去重，周末不跑。
-                </div>
-              </div>
-            }
-            onChange={(checked) => update("dailyBarsAutoEnabled", checked)}
-          />
-
-          <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-sm">
-            <div className="flex items-center justify-between">
-              <span className="text-[var(--muted)]">调度状态</span>
-              <Pill tone={form.dailyBarsAutoEnabled ? "good" : "neutral"}>
-                {form.dailyBarsAutoEnabled ? "已开启" : "手动触发"}
-              </Pill>
-            </div>
-            {hasMeaningfulTime(settings.dailyBarsLastRun) ? (
-              <p className="muted mt-2 text-xs">
-                上次定时增量：{formatTime(settings.dailyBarsLastRun)}
-              </p>
-            ) : (
-              <p className="muted mt-2 text-xs">尚未执行定时增量。</p>
-            )}
             <ul className="muted mt-2 list-inside list-disc text-xs">
-              <li>自动任务 = 全市场 active 主数据最近约 10 个自然日窗口</li>
-              <li>热集合 = 手动任务，当前全部持仓（去重 symbol）</li>
-              <li>交易日历简化：仅跳过周六日，当日不重复执行</li>
-              <li>单只间随机抖动 80±60ms，避免被数据源风控</li>
+              <li>标的不存在或信息需要更新时，会刷新该标的主数据与最新价</li>
+              <li>日 K 不存在、不足 250 根或超过新鲜度窗口时，会单独补拉该标的</li>
+              <li>已满足覆盖的标的只做检查并跳过，批次内仍带随机打散</li>
             </ul>
           </div>
         </div>
@@ -195,8 +161,8 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
 
       {/* 数据源信息 */}
       <Panel
-        title="数据源"
-        subtitle="当前使用的行情接口"
+        title="数据源说明"
+        subtitle="这里只展示外部接口和限频策略，不是独立维护任务"
       >
         <div className="grid gap-3">
           <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
@@ -205,10 +171,10 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
                 <strong className="text-sm">腾讯行情接口</strong>
                 <span className="ml-2 text-xs text-[var(--muted)]">qt.gtimg.cn</span>
               </div>
-              <Pill tone="good">主数据源</Pill>
+              <Pill tone="good">标的/Quote</Pill>
             </div>
             <p className="muted mt-2 text-xs">
-              海外可用，支持 A 股 / 港股 / 美股。批量 80 只，批间抖动 30-50ms 避免风控。
+              用于刷新标的基础信息、最新价和日 K。批量请求会自动打散，避免短时间打满数据源。
             </p>
           </div>
 
@@ -220,9 +186,9 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
               <Pill tone="good">已启用</Pill>
             </div>
             <ul className="muted mt-2 list-inside list-disc text-xs">
-              <li>每批 80 只股票</li>
-              <li>批间随机抖动 30-50ms</li>
-              <li>失败自动重试，指数退避</li>
+              <li>自动维护：按上面的周期触发，统一处理标的、最新价和日 K 覆盖</li>
+              <li>手动补拉：在“维护任务”里立即创建日 K 抓取任务</li>
+              <li>失败会记录在维护历史里，不会删除已有本地数据</li>
             </ul>
           </div>
         </div>
@@ -258,6 +224,13 @@ function formatTime(iso?: string): string {
     minute: "2-digit",
     second: "2-digit",
   });
+}
+
+function formatInterval(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "-";
+  if (seconds % 3600 === 0) return `${seconds / 3600} 小时`;
+  if (seconds % 60 === 0) return `${seconds / 60} 分钟`;
+  return `${seconds} 秒`;
 }
 
 function hasMeaningfulTime(iso?: string): iso is string {

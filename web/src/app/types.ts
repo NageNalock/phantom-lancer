@@ -2018,7 +2018,7 @@ export interface StockV2UniverseUpdateResponse {
   message: string;
 }
 
-export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "strategies" | "agent" | "settings";
+export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "strategies" | "agent";
 
 // ===== News side (消息面数据资产) =====
 

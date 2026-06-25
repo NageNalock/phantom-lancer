@@ -284,7 +284,7 @@ func (s *Service) UpdateNewsSourceConfig(ctx context.Context, source string, pat
 	}
 	if state.Enabled {
 		s.StartBackground(context.Background())
-	} else if !s.settings.AutoUpdateEnabled && !s.settings.DailyBarsAutoEnabled && !s.settings.BaseProfileAutoMaintainEnabled && !s.hasEnabledNewsSources(ctx) {
+	} else if !s.settings.AutoUpdateEnabled && !s.settings.BaseProfileAutoMaintainEnabled && !s.hasEnabledNewsSources(ctx) {
 		s.StopBackground()
 	}
 	return s.newsSourceOverview(ctx, source, state), nil

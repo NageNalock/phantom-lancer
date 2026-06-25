@@ -4,15 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
 // Daily Bars 服务层。
 //
-// 三类调度（见 docs/stock-agent-workbench-v2-key-points-2026-06-18.md）：
-//  1. 按需补拉：EnsureDailyBars，用户点详情 / 未来 Agent research pack 触发，缺失才补。
-//  2. 每日增量：runDailyBarsScheduler，收盘后一次，全市场最近交易日窗口，受 DailyBarsAutoEnabled 开关 + 当日去重。
-//  3. 热集合：手动任务，本轮 = 持仓 symbol；关注/盯盘/策略属后续层。
+// 两类入口：
+//  1. 统一数据资产维护：runUniverseUpdate 保存标的后检查该标的日 K，缺失 / 不足 / 陈旧才补。
+//  2. 手动补拉：RunDailyBarsJob 支持单只、持仓热集合、全市场最近交易日窗口。
 //
 // 失败绝不伪造：抓取失败返回 error，不写空 bar、不伪装、不用最新价派生。
 
@@ -135,6 +135,27 @@ func (s *Service) GetDailyBarsQuality(ctx context.Context, symbol, adjusted stri
 		q.Stale = true
 	}
 	return q, nil
+}
+
+func (s *Service) GetDailyBarsQualityBatch(ctx context.Context, symbols []string, adjusted string) (map[string]DailyBarsQuality, error) {
+	out := make(map[string]DailyBarsQuality, len(symbols))
+	seen := make(map[string]bool, len(symbols))
+	for _, raw := range symbols {
+		symbol := strings.TrimSpace(raw)
+		if symbol == "" || seen[symbol] {
+			continue
+		}
+		seen[symbol] = true
+		if len(seen) > 100 {
+			break
+		}
+		quality, err := s.GetDailyBarsQuality(ctx, symbol, adjusted)
+		if err != nil {
+			return nil, err
+		}
+		out[symbol] = quality
+	}
+	return out, nil
 }
 
 // ensureOneSymbol 抓取单只股票指定区间日 K 并落盘。失败返回 error，不写坏数据。
@@ -451,62 +472,6 @@ func (s *Service) ListRunningDailyBarJobs(ctx context.Context) ([]StockV2DailyBa
 }
 func (s *Service) GetLatestDailyBarJob(ctx context.Context) (StockV2DailyBarJob, error) {
 	return s.store.GetLatestDailyBarJob(ctx)
-}
-
-// runDailyBarsScheduler 日 K 每日定时增量调度器。
-// 每小时检查一次：开关开、已过 16:30(Asia/Shanghai)、非周末、当日未成功跑 → 触发全市场最近交易日增量。
-func (s *Service) runDailyBarsScheduler(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Hour)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.maybeRunScheduledDailyBars(ctx)
-		}
-	}
-}
-
-func (s *Service) maybeRunScheduledDailyBars(ctx context.Context) {
-	if !s.settings.DailyBarsAutoEnabled {
-		return
-	}
-	loc, err := time.LoadLocation("Asia/Shanghai")
-	if err != nil {
-		loc = time.Local
-	}
-	now := time.Now().In(loc)
-
-	// 简化交易日历：跳过周末（不做完整节假日表）
-	if wd := now.Weekday(); wd == time.Saturday || wd == time.Sunday {
-		return
-	}
-	// 收盘后触发（16:30）
-	if now.Before(time.Date(now.Year(), now.Month(), now.Day(), 16, 30, 0, 0, loc)) {
-		return
-	}
-	// 当日去重
-	if sameDayInLoc(s.settings.DailyBarsLastRun, now, loc) {
-		return
-	}
-
-	s.log.Info("scheduled daily bars incremental update (universe)")
-	_, err = s.RunDailyBarsJob(ctx, DailyBarsJobRequest{
-		Mode:          DailyBarJobModeUniverseIncremental,
-		RangeCode:     DailyBarRange1Y,
-		Adjusted:      DailyBarAdjustedNone,
-		TriggerType:   "scheduled",
-		TriggerSource: "auto-updater",
-	})
-	if err != nil {
-		if errors.Is(err, ErrDailyBarJobAlreadyRunning) {
-			return // 上一个还在跑，静默等下一轮
-		}
-		s.log.Error("scheduled daily bars failed", "error", err)
-		return
-	}
 }
 
 func (s *Service) recordDailyBarsLastRun(ctx context.Context, when time.Time) {

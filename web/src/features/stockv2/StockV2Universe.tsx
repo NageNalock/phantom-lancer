@@ -1,15 +1,24 @@
 import { ArrowClockwise, CaretLeft, CaretRight, Clock, ClockCounterClockwise, MagnifyingGlass, Plus, X } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import type { AppActions } from "../../app/App";
-import type { AppData, StockV2Instrument, StockV2StockProfileSummary, StockV2UpdateJob, StockV2UniverseUpdateRequest } from "../../app/types";
+import type { AppData, StockV2DailyBarsQuality, StockV2Instrument, StockV2StockProfileSummary, StockV2UpdateJob, StockV2UniverseUpdateRequest } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, Field, Panel, Pill } from "../../components/ui";
-import { stockV2InstrumentTypeLabel, stockV2TriggerTypeLabel, stockV2UpdateStatusLabel, stockV2UpdateStatusTone } from "../../domain/labels";
+import {
+  stockV2DailyBarsQualityLabel,
+  stockV2DailyBarsQualityTone,
+  stockV2InstrumentTypeLabel,
+  stockV2TriggerTypeLabel,
+  stockV2UpdateStatusLabel,
+  stockV2UpdateStatusTone,
+} from "../../domain/labels";
+import { StockV2DailyBarsMaintenance } from "./StockV2DailyBars";
 import { StockV2InstrumentDetail } from "./StockV2InstrumentDetail";
 import { StockV2ProfileRecords, StockV2ProfileSettings } from "./StockV2ProfileWorkbench";
+import { StockV2Settings } from "./StockV2Settings";
 
 const PAGE_SIZE = 50;
-type MasterDataView = "instruments" | "profileSettings" | "profileRecords";
+type MasterDataView = "instruments" | "maintenance" | "maintenanceSettings" | "profileSettings" | "profileRecords";
 
 // 生成页码数组：首页、当前页附近、末页，用省略号间隔
 function buildPageNumbers(currentPage: number, totalPages: number): (number | "...")[] {
@@ -68,6 +77,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   const [addHolding, setAddHolding] = useState<{ inst: StockV2Instrument } | null>(null);
   const [selectedInst, setSelectedInst] = useState<StockV2Instrument | null>(null);
   const [profileSummaries, setProfileSummaries] = useState<Record<string, StockV2StockProfileSummary>>({});
+  const [dailyQualities, setDailyQualities] = useState<Record<string, StockV2DailyBarsQuality>>({});
 
   const portfolios = stockv2.portfolios || [];
   const isSearching = searchQuery.trim().length > 0;
@@ -108,7 +118,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         });
         setPage(0);
         setTotalCount(data.total ?? items.length);
-        await loadProfileSummaries(items);
+        await Promise.all([loadProfileSummaries(items), loadDailyBarQualities(items)]);
       } else {
         params.set("limit", String(PAGE_SIZE));
         params.set("offset", String(pageNum * PAGE_SIZE));
@@ -124,7 +134,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         if (data.total !== undefined) {
           setTotalCount(data.total);
         }
-        await loadProfileSummaries(items);
+        await Promise.all([loadProfileSummaries(items), loadDailyBarQualities(items)]);
       }
     } catch (e) {
       actions.setToast(`加载失败：${friendlyError(e)}`, "danger");
@@ -146,6 +156,22 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
       setProfileSummaries(res.items ?? {});
     } catch {
       setProfileSummaries({});
+    }
+  }
+
+  async function loadDailyBarQualities(items: StockV2Instrument[]) {
+    const symbols = items.map((item) => item.symbol).filter(Boolean);
+    if (symbols.length === 0) {
+      setDailyQualities({});
+      return;
+    }
+    try {
+      const res = await actions.api<{ items?: Record<string, StockV2DailyBarsQuality> }>(
+        `/api/stockv2/history/daily/qualities?adjusted=none&symbols=${encodeURIComponent(symbols.join(","))}`,
+      );
+      setDailyQualities(res.items ?? {});
+    } catch {
+      setDailyQualities({});
     }
   }
 
@@ -201,7 +227,9 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
     <div className="grid gap-4">
       <div className="flex flex-wrap gap-1 border-b border-[var(--line)] pb-2">
         {[
-          { id: "instruments" as const, label: "标的主数据" },
+          { id: "instruments" as const, label: "数据资产" },
+          { id: "maintenance" as const, label: "维护任务" },
+          { id: "maintenanceSettings" as const, label: "维护配置" },
           { id: "profileSettings" as const, label: "画像配置" },
           { id: "profileRecords" as const, label: "画像记录" },
         ].map((tab) => (
@@ -221,6 +249,19 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         ))}
       </div>
 
+      {masterDataView === "maintenance" ? (
+        <StockV2MaintenanceTasks
+          actions={actions}
+          data={data}
+          jobs={jobs}
+          runAction={runAction}
+          runningJob={runningJob}
+          onTriggerUpdate={handleTriggerUpdate}
+        />
+      ) : null}
+      {masterDataView === "maintenanceSettings" ? (
+        <StockV2Settings actions={actions} data={data} runAction={runAction} />
+      ) : null}
       {masterDataView === "profileSettings" ? (
         <StockV2ProfileSettings actions={actions} data={data} runAction={runAction} />
       ) : null}
@@ -229,23 +270,23 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
       <>
       {/* 进度条区域：始终展示占位，运行时有动效 */}
       <Panel
-        title="数据更新进度"
+        title="数据资产维护进度"
         subtitle={
           runningJob
-            ? `正在更新 ${runningJob.totalCount || runningJob.processedCount} 只标的 · ${stockV2TriggerTypeLabel(runningJob.triggerType)}`
+            ? `正在维护 ${runningJob.totalCount || runningJob.processedCount} 只标的 · ${stockV2TriggerTypeLabel(runningJob.triggerType)}`
             : jobs[0]
-              ? `上次更新：${stockV2UpdateStatusLabel(jobs[0])} · ${stockV2TriggerTypeLabel(jobs[0].triggerType)} · ${formatCompactTime(jobs[0].startAt)}`
-              : "尚未执行过更新"
+              ? `上次维护：${stockV2UpdateStatusLabel(jobs[0])} · ${stockV2TriggerTypeLabel(jobs[0].triggerType)} · ${formatCompactTime(jobs[0].startAt)}`
+              : "尚未执行过维护"
         }
         actions={
           <div className="flex gap-2">
             <Button onClick={() => setHistoryOpen(true)}>
               <ClockCounterClockwise size={14} className="mr-1.5" />
-              更新历史
+              维护历史
             </Button>
-            <Button tone="primary" onClick={() => void runAction("触发更新", handleTriggerUpdate)} disabled={!!runningJob}>
+            <Button tone="primary" onClick={() => void runAction("触发数据资产维护", handleTriggerUpdate)} disabled={!!runningJob}>
               <ArrowClockwise size={14} className="mr-1.5" />
-              {runningJob ? "更新中..." : "立即更新"}
+              {runningJob ? "维护中..." : "立即维护"}
             </Button>
           </div>
         }
@@ -275,8 +316,8 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
 
       {/* 标的列表 */}
       <Panel
-        title={`标的主数据 (${totalCount > 0 ? totalCount : "..."})`}
-        subtitle="新浪列表源 + 腾讯行情源 · A 股股票与场内基金"
+        title={`标的数据资产 (${totalCount > 0 ? totalCount : "..."})`}
+        subtitle="证券字典、最新行情、日 K 覆盖和画像状态的统一入口"
       >
         <div className="mb-3 flex items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2">
@@ -324,7 +365,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         ) : !instrumentsPage || instrumentsPage.items.length === 0 ? (
           <div className="py-8 text-center text-sm text-[var(--muted)]">
             <Clock size={24} className="mx-auto mb-2 opacity-50" />
-            {isSearching ? `未找到「${searchQuery.trim()}」匹配的标的。` : "暂无标的数据，点击右上角「立即更新」开始首次同步。"}
+            {isSearching ? `未找到「${searchQuery.trim()}」匹配的标的。` : "暂无标的数据，点击右上角「立即维护」开始首次同步。"}
           </div>
         ) : (
           <>
@@ -336,6 +377,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
                     <th className="py-2 pr-4 font-medium">名称</th>
                     <th className="py-2 pr-4 font-medium">市场</th>
                     <th className="py-2 pr-4 font-medium">类型</th>
+                    <th className="py-2 pr-4 font-medium">日 K 覆盖</th>
                     <th className="py-2 pr-4 font-medium">画像摘要</th>
                     <th className="py-2 pr-4 font-medium">画像状态</th>
                     <th className="py-2 pr-4 font-medium">状态</th>
@@ -350,6 +392,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
                       inst={inst}
                       onAdd={() => setAddHolding({ inst })}
                       onClick={() => setSelectedInst(inst)}
+                      dailyQuality={dailyQualities[inst.symbol]}
                       profile={profileSummaries[inst.symbol]}
                     />
                   ))}
@@ -464,7 +507,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         />
       ) : null}
 
-      {/* 更新历史弹窗 */}
+      {/* 维护历史弹窗 */}
       {historyOpen ? (
         <UpdateHistoryDialog jobs={jobs} onClose={() => setHistoryOpen(false)} />
       ) : null}
@@ -483,11 +526,134 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   );
 }
 
-function StockRow({ inst, onAdd, onClick, profile }: { inst: StockV2Instrument; onAdd: () => void; onClick?: () => void; profile?: StockV2StockProfileSummary }) {
+function StockV2MaintenanceTasks({
+  actions,
+  data,
+  jobs,
+  runAction,
+  runningJob,
+  onTriggerUpdate,
+}: {
+  actions: AppActions;
+  data: AppData;
+  jobs: StockV2UpdateJob[];
+  runAction: RunAction;
+  runningJob?: StockV2UpdateJob;
+  onTriggerUpdate: () => Promise<void>;
+}) {
+  const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
+
+  function toggleFailed(job: StockV2UpdateJob) {
+    if (!job.failedItems?.length) return;
+    setExpandedJobId(expandedJobId === job.id ? null : job.id);
+  }
+
+  return (
+    <div className="grid gap-4">
+      <Panel
+        title="数据资产维护任务"
+        subtitle="全量标的扫描 + 覆盖式 upsert + 按需日 K 补拉，失败项不会删除本地旧数据"
+        actions={
+          <Button tone="primary" onClick={() => void runAction("触发数据资产维护", onTriggerUpdate)} disabled={!!runningJob}>
+            <ArrowClockwise size={14} className="mr-1.5" />
+            {runningJob ? "维护中..." : "立即维护"}
+          </Button>
+        }
+      >
+        {jobs.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-[var(--line)] bg-[var(--surface-soft)] p-6 text-center text-sm text-[var(--muted)]">
+            暂无数据资产维护记录。点击“立即维护”会拉取全量标的列表、最新价，并按需补齐日 K。
+          </div>
+        ) : (
+          <div className="grid gap-2">
+            {jobs.map((job) => (
+              <div
+                className={`rounded-lg border bg-[var(--surface)] p-3 ${
+                  job.status === "running" ? "border-[rgba(199,85,8,0.28)]" : "border-[var(--line)]"
+                }`}
+                key={job.id}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Pill tone={stockV2UpdateStatusTone(job)}>
+                        {stockV2UpdateStatusLabel(job)}
+                      </Pill>
+                      <span className="text-sm font-medium">{stockV2TriggerTypeLabel(job.triggerType)}</span>
+                      {job.triggerSource ? <Pill tone="neutral">{job.triggerSource}</Pill> : null}
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--muted-strong)]">
+                      <span>总数 {job.totalCount || job.processedCount || "-"}</span>
+                      <span>已处理 {job.processedCount}</span>
+                      <span className="text-[var(--good)]">成功 {job.successCount}</span>
+                      <span className={job.failedCount > 0 ? "text-[var(--danger)]" : ""}>
+                        失败{" "}
+                        {job.failedCount > 0 && job.failedItems?.length ? (
+                          <button
+                            className="font-semibold underline decoration-dotted underline-offset-2"
+                            onClick={() => toggleFailed(job)}
+                            type="button"
+                          >
+                            {job.failedCount}
+                          </button>
+                        ) : (
+                          job.failedCount
+                        )}
+                      </span>
+                      {job.endAt ? <span>耗时 {formatDuration(job.startAt, job.endAt)}</span> : null}
+                    </div>
+                  </div>
+                  <span className="shrink-0 text-xs text-[var(--muted)]">{formatDateTime(job.startAt)}</span>
+                </div>
+
+                {expandedJobId === job.id && job.failedItems?.length ? (
+                  <div className="mt-3 rounded border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+                    <div className="mb-1 text-xs font-medium text-[var(--danger)]">失败项（{job.failedItems.length} 只）</div>
+                    <div className="grid max-h-40 gap-1 overflow-y-auto">
+                      {job.failedItems.map((item, idx) => (
+                        <div className="flex gap-2 text-xs" key={idx}>
+                          <span className="font-mono text-[var(--text)]">{item.symbol}</span>
+                          <span className="truncate text-[var(--muted-strong)]">{item.reason}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {job.errorMessage ? (
+                  <div className="mt-3 rounded border border-[rgba(207,31,50,0.22)] bg-[var(--danger-soft)] px-2 py-1.5 text-xs text-[var(--danger)]">
+                    {job.errorMessage}
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
+
+      <StockV2DailyBarsMaintenance actions={actions} data={data} runAction={runAction} />
+    </div>
+  );
+}
+
+function StockRow({
+  dailyQuality,
+  inst,
+  onAdd,
+  onClick,
+  profile,
+}: {
+  dailyQuality?: StockV2DailyBarsQuality;
+  inst: StockV2Instrument;
+  onAdd: () => void;
+  onClick?: () => void;
+  profile?: StockV2StockProfileSummary;
+}) {
   const marketLabel = { SH: "沪市", SZ: "深市", BJ: "北市" }[inst.market] || inst.market;
   const statusTone = inst.status === "active" ? "good" : "neutral";
   const profileTone = profile?.status === "ready" ? "good" : profile?.status === "partial" ? "warn" : "neutral";
   const aiTone = profile?.aiProfileStatus === "ready" ? "good" : profile?.aiProfileStatus === "failed" ? "danger" : "neutral";
+  const dailyTone = stockV2DailyBarsQualityTone(dailyQuality);
 
   return (
     <tr
@@ -509,6 +675,14 @@ function StockRow({ inst, onAdd, onClick, profile }: { inst: StockV2Instrument; 
       </td>
       <td className="py-2 pr-4">
         <Pill tone="neutral">{stockV2InstrumentTypeLabel(inst.instrumentType)}</Pill>
+      </td>
+      <td className="py-2 pr-4">
+        <div className="grid gap-1">
+          <Pill tone={dailyTone}>{stockV2DailyBarsQualityLabel(dailyQuality)}</Pill>
+          <span className="text-xs text-[var(--muted)]">
+            {dailyQuality?.latestDate ? `最近 ${dailyQuality.latestDate}` : "本地未覆盖"}
+          </span>
+        </div>
       </td>
       <td className="max-w-[360px] py-2 pr-4 text-xs text-[var(--muted-strong)]">
         <span className="block max-h-10 overflow-hidden leading-5">{profile?.businessSummary || "-"}</span>
@@ -704,7 +878,7 @@ function UpdateHistoryDialog({ jobs, onClose }: { jobs: StockV2UpdateJob[]; onCl
       >
         <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-3">
           <div>
-            <h3 className="m-0 text-base font-semibold">更新历史记录</h3>
+            <h3 className="m-0 text-base font-semibold">维护历史记录</h3>
             <p className="muted mt-0.5 mb-0 text-xs">每次数据更新的执行情况</p>
           </div>
           <Button onClick={onClose}>

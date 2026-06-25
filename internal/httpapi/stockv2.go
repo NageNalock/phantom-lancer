@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"phantom-lancer/internal/stockv2"
 )
@@ -119,6 +120,7 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	// 日级历史行情（Daily Bars）
 	mux.HandleFunc("POST /api/stockv2/history/daily/ensure", s.handleEnsureDailyBars)
 	mux.HandleFunc("GET /api/stockv2/history/daily", s.handleGetDailyBars)
+	mux.HandleFunc("GET /api/stockv2/history/daily/qualities", s.handleGetDailyBarsQualities)
 	mux.HandleFunc("GET /api/stockv2/history/daily/quality", s.handleGetDailyBarsQuality)
 	mux.HandleFunc("POST /api/stockv2/history/daily/jobs/run", s.handleRunDailyBarsJob)
 	mux.HandleFunc("GET /api/stockv2/history/daily/jobs/{jobId}", s.handleGetDailyBarsJob)
@@ -642,6 +644,23 @@ func (s *Server) handleGetDailyBarsQuality(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.writeJSON(w, quality)
+}
+
+func (s *Server) handleGetDailyBarsQualities(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	rawSymbols := strings.TrimSpace(q.Get("symbols"))
+	if rawSymbols == "" {
+		http.Error(w, "symbols is required", http.StatusBadRequest)
+		return
+	}
+	adjusted := q.Get("adjusted")
+
+	qualities, err := s.stockV2.GetDailyBarsQualityBatch(r.Context(), strings.Split(rawSymbols, ","), adjusted)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.writeJSON(w, map[string]any{"items": qualities})
 }
 
 // handleRunDailyBarsJob 手动触发日 K 批量任务（symbol / hot / universe_incremental）。

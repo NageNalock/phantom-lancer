@@ -165,8 +165,8 @@ type StockV2Settings struct {
 	ProxyHost                          string    `json:"proxyHost"`
 	ProxyPort                          int       `json:"proxyPort"`
 	LastScheduledUpdate                time.Time `json:"lastScheduledUpdate"`
-	DailyBarsAutoEnabled               bool      `json:"dailyBarsAutoEnabled"` // 日 K 每日定时增量开关
-	DailyBarsLastRun                   time.Time `json:"dailyBarsLastRun"`     // 日 K 定时增量上次执行时间（当日去重）
+	DailyBarsAutoEnabled               bool      `json:"dailyBarsAutoEnabled"` // legacy: 旧版独立日 K 调度开关，V2 产品路径不再使用
+	DailyBarsLastRun                   time.Time `json:"dailyBarsLastRun"`     // 最近一次统一维护或手动日 K 批任务完成时间
 	FinancialJuiceEnabled              bool      `json:"-"`
 	FinancialJuiceEndpoint             string    `json:"-"`
 	FinancialJuiceCookie               string    `json:"-"`
@@ -191,7 +191,7 @@ type StockV2SettingsPatch struct {
 	ProxyType            *string `json:"proxyType,omitempty"`
 	ProxyHost            *string `json:"proxyHost,omitempty"`
 	ProxyPort            *int    `json:"proxyPort,omitempty"`
-	DailyBarsAutoEnabled *bool   `json:"dailyBarsAutoEnabled,omitempty"`
+	DailyBarsAutoEnabled *bool   `json:"dailyBarsAutoEnabled,omitempty"` // legacy: 新流程使用 autoUpdateEnabled
 }
 
 // Repository 接口定义
@@ -325,7 +325,7 @@ type RequestCreateOrUpdateSettings struct {
 	ProxyType                          *string `json:"proxyType,omitempty"`
 	ProxyHost                          *string `json:"proxyHost,omitempty"`
 	ProxyPort                          *int    `json:"proxyPort,omitempty"`
-	DailyBarsAutoEnabled               *bool   `json:"dailyBarsAutoEnabled,omitempty"`
+	DailyBarsAutoEnabled               *bool   `json:"dailyBarsAutoEnabled,omitempty"` // legacy: 新流程使用 autoUpdateEnabled
 	BaseProfileAutoMaintainEnabled     *bool   `json:"baseProfileAutoMaintainEnabled,omitempty"`
 	BaseProfileMaintainIntervalSeconds *int    `json:"baseProfileMaintainIntervalSeconds,omitempty"`
 	BaseProfileDeepUpdateBatchSize     *int    `json:"baseProfileDeepUpdateBatchSize,omitempty"`

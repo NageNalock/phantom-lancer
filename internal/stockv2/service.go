@@ -168,6 +168,7 @@ func (s *Service) Initialize(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("get settings failed: %w", err)
 	}
+	settings = s.normalizeDataAssetMaintenanceSettings(ctx, settings)
 	s.settings = settings
 
 	// 设置数据源的服务引用
@@ -596,7 +597,7 @@ func parseTransactionExecutedAt(raw string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("invalid executedAt: %q", raw)
 }
 
-// ExecuteUniverseUpdate 执行标的主数据更新
+// ExecuteUniverseUpdate 执行统一数据资产维护（标的 / 最新价 / 日 K 覆盖）
 func (s *Service) ExecuteUniverseUpdate(ctx context.Context, triggerType, triggerSource string) (StockV2UpdateJob, error) {
 	// 检查是否有正在运行的更新任务
 	recentJobs, err := s.store.ListUpdateJobs(ctx, 1)
@@ -632,7 +633,7 @@ func (s *Service) ExecuteUniverseUpdate(ctx context.Context, triggerType, trigge
 	return job, nil
 }
 
-// runUniverseUpdate 运行标的主数据更新任务
+// runUniverseUpdate 运行统一数据资产维护任务
 func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -670,6 +671,30 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 	var failedItems []UpdateFailure
 	successCount := 0
 	processedCount := 0
+	flushProgress := func(includeFailedItems bool) {
+		progress.ProcessedCount = processedCount
+		progress.SuccessCount = successCount
+		progress.ErrorCount = len(failedItems)
+		if len(failedItems) > 0 {
+			progress.LastError = failedItems[len(failedItems)-1].Reason
+		}
+		if err := s.store.UpdateUpdateProgress(ctx, progress); err != nil {
+			s.log.Warn("update maintenance progress failed", "job_id", jobID, "error", err)
+		}
+		update := StockV2UpdateJob{
+			ID:             jobID,
+			TotalCount:     totalCount,
+			ProcessedCount: processedCount,
+			SuccessCount:   successCount,
+			FailedCount:    len(failedItems),
+		}
+		if includeFailedItems {
+			update.FailedItems = failedItems
+		}
+		if err := s.store.UpdateUpdateJob(ctx, update); err != nil {
+			s.log.Warn("update maintenance job progress failed", "job_id", jobID, "error", err)
+		}
+	}
 
 	for batch := 0; batch < totalBatches; batch++ {
 		select {
@@ -712,6 +737,9 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 				})
 			}
 			processedCount += len(batchSymbols)
+			progress.CurrentBatchProgress = len(batchSymbols)
+			progress.CurrentSymbol = batchSymbols[len(batchSymbols)-1]
+			flushProgress(true)
 			continue
 		}
 
@@ -721,44 +749,49 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 			resultMap[inst.Symbol] = inst
 		}
 
-		// 保存股票数据
-		batchSuccess := 0
+		// 保存股票数据，并把历史日 K 覆盖纳入同一个数据资产维护任务。
+		batchProcessed := 0
 		for _, sym := range batchSymbols {
+			progress.CurrentSymbol = sym
+			failedBefore := len(failedItems)
+			fetchedDailyBars := false
 			inst, ok := resultMap[sym]
 			if !ok {
 				failedItems = append(failedItems, UpdateFailure{
 					Symbol: sym,
 					Reason: "no data from source",
 				})
-				continue
-			}
-
-			if err := s.upsertInstrumentWithProfile(ctx, inst); err != nil {
+			} else if err := s.upsertInstrumentWithProfile(ctx, inst); err != nil {
 				s.log.Error("save instrument failed", "symbol", inst.Symbol, "error", err)
 				failedItems = append(failedItems, UpdateFailure{
 					Symbol: sym,
 					Reason: err.Error(),
 				})
 			} else {
-				batchSuccess++
-				progress.CurrentBatchProgress++
+				var err error
+				fetchedDailyBars, err = s.maintainDailyBarsForInstrument(ctx, inst)
+				if err != nil {
+					s.log.Error("maintain daily bars failed", "symbol", inst.Symbol, "error", err)
+					failedItems = append(failedItems, UpdateFailure{
+						Symbol: sym,
+						Reason: "daily bars: " + truncateDailyBarErr(err.Error()),
+					})
+				} else {
+					successCount++
+				}
+			}
+
+			processedCount++
+			batchProcessed++
+			progress.CurrentBatchProgress = batchProcessed
+			flushProgress(len(failedItems) != failedBefore)
+
+			if fetchedDailyBars {
+				if err := sleepJitter(ctx, 80*time.Millisecond, 60*time.Millisecond); err != nil {
+					return
+				}
 			}
 		}
-
-		successCount += batchSuccess
-		processedCount += len(batchSymbols)
-
-		// 更新总体进度
-		progress.ProcessedCount = processedCount
-		progress.SuccessCount = successCount
-		s.store.UpdateUpdateProgress(ctx, progress)
-		s.store.UpdateUpdateJob(ctx, StockV2UpdateJob{
-			ID:             jobID,
-			ProcessedCount: processedCount,
-			SuccessCount:   successCount,
-			FailedCount:    len(failedItems),
-			FailedItems:    failedItems,
-		})
 
 		// 批间延迟（避免风控）
 		if batch < totalBatches-1 {
@@ -768,19 +801,46 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 		}
 	}
 
+	endAt := time.Now()
 	// 完成更新
 	s.store.UpdateUpdateJob(ctx, StockV2UpdateJob{
-		ID:          jobID,
-		Status:      "completed",
-		EndAt:       time.Now(),
-		FailedItems: failedItems,
+		ID:             jobID,
+		Status:         "completed",
+		TotalCount:     totalCount,
+		ProcessedCount: processedCount,
+		SuccessCount:   successCount,
+		FailedCount:    len(failedItems),
+		EndAt:          endAt,
+		FailedItems:    failedItems,
 	})
+	s.recordDailyBarsLastRun(ctx, endAt)
 
 	// 清理过期更新历史（保留最近 100 条）
 	if err := s.store.PruneUpdateJobs(ctx, 100); err != nil {
 		s.log.Warn("prune update jobs failed", "error", err)
 	}
 	s.maybeRunBaseProfileMaintenance(ctx, "universe_update")
+}
+
+func (s *Service) maintainDailyBarsForInstrument(ctx context.Context, inst StockV2Instrument) (bool, error) {
+	quality, err := s.GetDailyBarsQuality(ctx, inst.Symbol, DailyBarAdjustedNone)
+	if err != nil {
+		return false, err
+	}
+	if !dailyBarsNeedsMaintenance(quality) {
+		return false, nil
+	}
+
+	start, end := dailyBarRangeStartEnd(DailyBarRange1Y, time.Now())
+	if quality.HasData && quality.Meets250 && quality.Stale && quality.LatestDate != "" {
+		start = quality.LatestDate
+	}
+	_, err = s.ensureOneSymbol(ctx, inst.Symbol, inst.Market, start, end, DailyBarAdjustedNone)
+	return true, err
+}
+
+func dailyBarsNeedsMaintenance(q DailyBarsQuality) bool {
+	return !q.HasData || !q.Meets250 || q.Stale
 }
 
 // GetUpdateJob 获取更新任务
@@ -807,7 +867,6 @@ func (s *Service) GetUpdateProgress(ctx context.Context, jobID string) (StockV2U
 func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateOrUpdateSettings) (StockV2Settings, error) {
 	// 应用更新
 	prevAuto := s.settings.AutoUpdateEnabled
-	prevDaily := s.settings.DailyBarsAutoEnabled
 	prevBaseProfile := s.settings.BaseProfileAutoMaintainEnabled
 	prevInterval := s.settings.UpdateIntervalSec
 	prevBaseProfileInterval := s.settings.BaseProfileMaintainIntervalSeconds
@@ -818,6 +877,12 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	}
 	if req.UpdateIntervalSec != nil {
 		settings.UpdateIntervalSec = *req.UpdateIntervalSec
+	}
+	if req.DailyBarsAutoEnabled != nil {
+		if *req.DailyBarsAutoEnabled {
+			settings.AutoUpdateEnabled = true
+		}
+		settings.DailyBarsAutoEnabled = false
 	}
 	if req.ProxyEnabled != nil {
 		settings.ProxyEnabled = *req.ProxyEnabled
@@ -830,9 +895,6 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	}
 	if req.ProxyPort != nil {
 		settings.ProxyPort = *req.ProxyPort
-	}
-	if req.DailyBarsAutoEnabled != nil {
-		settings.DailyBarsAutoEnabled = *req.DailyBarsAutoEnabled
 	}
 	if req.BaseProfileAutoMaintainEnabled != nil {
 		settings.BaseProfileAutoMaintainEnabled = *req.BaseProfileAutoMaintainEnabled
@@ -875,11 +937,11 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	// 更新本地配置
 	s.settings = settings
 
-	// 主数据自动更新 / 日 K 定时增量 / base profile 自动维护任一开启都需要后台调度。
-	// 任一开关从关→开，或主数据周期变化时重启后台，以拾取新 ticker。
+	// 数据资产自动维护 / base profile 自动维护任一开启都需要后台调度。
+	// 任一开关从关→开，或数据资产周期变化时重启后台，以拾取新 ticker。
 	newsBG := s.hasEnabledNewsSources(ctx)
-	needBG := settings.AutoUpdateEnabled || settings.DailyBarsAutoEnabled || settings.BaseProfileAutoMaintainEnabled || newsBG
-	prevNeedBG := prevAuto || prevDaily || prevBaseProfile || prevNewsBG
+	needBG := settings.AutoUpdateEnabled || settings.BaseProfileAutoMaintainEnabled || newsBG
+	prevNeedBG := prevAuto || prevBaseProfile || prevNewsBG
 	if needBG {
 		if !prevNeedBG ||
 			(prevAuto && prevInterval != settings.UpdateIntervalSec) ||
@@ -899,7 +961,28 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 
 // GetSettings 获取配置
 func (s *Service) GetSettings(ctx context.Context) (StockV2Settings, error) {
-	return s.store.GetSettings(ctx)
+	settings, err := s.store.GetSettings(ctx)
+	if err != nil {
+		return StockV2Settings{}, err
+	}
+	return s.normalizeDataAssetMaintenanceSettings(ctx, settings), nil
+}
+
+func (s *Service) normalizeDataAssetMaintenanceSettings(ctx context.Context, settings StockV2Settings) StockV2Settings {
+	if !settings.DailyBarsAutoEnabled {
+		return settings
+	}
+	if !settings.AutoUpdateEnabled {
+		settings.AutoUpdateEnabled = true
+	}
+	// ponytail: one-time compatibility shim for the removed standalone daily-bar scheduler.
+	settings.DailyBarsAutoEnabled = false
+	if s.store != nil {
+		if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil && s.log != nil {
+			s.log.Warn("migrate legacy daily bars auto setting failed", "error", err)
+		}
+	}
+	return settings
 }
 
 // GetInstruments 获取标的主数据
@@ -964,13 +1047,6 @@ func (s *Service) StartBackground(ctx context.Context) {
 		s.runScheduledUpdater(bgCtx)
 	}()
 
-	// 日 K 每日定时增量调度（独立 goroutine，受 DailyBarsAutoEnabled 开关控制）
-	s.bgWg.Add(1)
-	go func() {
-		defer s.bgWg.Done()
-		s.runDailyBarsScheduler(bgCtx)
-	}()
-
 	// 监控任务周期调度（独立 goroutine，按各 monitor task 的 enabled/interval 触发）
 	s.bgWg.Add(1)
 	go func() {
@@ -1006,7 +1082,7 @@ func (s *Service) StopBackground() {
 	s.bgWg.Wait()
 }
 
-// runScheduledUpdater 运行定时更新器
+// runScheduledUpdater 运行数据资产定时维护器
 func (s *Service) runScheduledUpdater(ctx context.Context) {
 	interval := time.Duration(s.settings.UpdateIntervalSec) * time.Second
 	if interval <= 0 {
@@ -1031,7 +1107,7 @@ func (s *Service) runScheduledUpdater(ctx context.Context) {
 	}
 }
 
-// checkAndExecuteScheduledUpdate 检查并执行定时更新
+// checkAndExecuteScheduledUpdate 检查并执行数据资产维护
 func (s *Service) checkAndExecuteScheduledUpdate(ctx context.Context) {
 	now := time.Now()
 	interval := time.Duration(s.settings.UpdateIntervalSec) * time.Second
@@ -1041,8 +1117,8 @@ func (s *Service) checkAndExecuteScheduledUpdate(ctx context.Context) {
 		return
 	}
 
-	// 执行更新
-	s.log.Info("executing scheduled universe update")
+	// 执行维护
+	s.log.Info("executing scheduled stock data asset maintenance")
 	if _, err := s.ExecuteUniverseUpdate(ctx, "scheduled", "auto-updater"); err != nil {
 		s.log.Error("scheduled update failed", "error", err)
 		return

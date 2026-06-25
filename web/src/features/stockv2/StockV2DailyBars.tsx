@@ -22,7 +22,7 @@ import { StockV2Monitor } from "./StockV2Monitor";
 import { StockV2NewsWorkbench } from "./StockV2NewsWorkbench";
 
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
-type MarketView = "monitor" | "dailyBars" | "news";
+type MarketView = "monitor" | "news";
 
 const RANGES: DailyBarRange[] = ["6m", "1y", "3y", "5y"];
 const ADJUSTEDS: DailyBarAdjusted[] = ["none", "qfq", "hfq"];
@@ -36,7 +36,38 @@ interface JobsResponse {
   offset?: number;
 }
 
-export function StockV2DailyBars({ actions, data, runAction }: { actions: AppActions; data: AppData; runAction: RunAction }) {
+export function StockV2DailyBars({ actions }: { actions: AppActions; data: AppData; runAction: RunAction }) {
+  const [marketView, setMarketView] = useState<MarketView>("monitor");
+
+  return (
+    <div className="grid gap-4">
+      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--line)] pb-3">
+        {[
+          { id: "monitor" as const, label: "监控任务" },
+          { id: "news" as const, label: "消息面" },
+        ].map((tab) => (
+          <button
+            className={`rounded-md border px-3 py-1.5 text-sm ${
+              marketView === tab.id
+                ? "border-[var(--accent)] bg-[var(--surface-strong)] text-[var(--text)]"
+                : "border-[var(--line)] text-[var(--muted-strong)] hover:bg-[var(--surface-soft)]"
+            }`}
+            key={tab.id}
+            onClick={() => setMarketView(tab.id)}
+            type="button"
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {marketView === "monitor" ? <StockV2Monitor actions={actions} /> : null}
+      {marketView === "news" ? <StockV2NewsWorkbench actions={actions} /> : null}
+    </div>
+  );
+}
+
+export function StockV2DailyBarsMaintenance({ actions, data, runAction }: { actions: AppActions; data: AppData; runAction: RunAction }) {
   const settings = data.stockv2.settings;
   const [jobs, setJobs] = useState<StockV2DailyBarJob[]>([]);
   const [runningJobs, setRunningJobs] = useState<StockV2DailyBarJob[]>([]);
@@ -49,8 +80,6 @@ export function StockV2DailyBars({ actions, data, runAction }: { actions: AppAct
   const [adjusted, setAdjusted] = useState<DailyBarAdjusted>("none");
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
   const [symbolCheck, setSymbolCheck] = useState<StockV2DailyBarsQuality | null>(null);
-  const [marketView, setMarketView] = useState<MarketView>("monitor");
-
   const pollRef = useRef<number | null>(null);
 
   const loadJobs = async (nextPage = page, showLoading = false) => {
@@ -166,39 +195,14 @@ export function StockV2DailyBars({ actions, data, runAction }: { actions: AppAct
 
   return (
     <div className="grid gap-4">
-      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--line)] pb-3">
-        {[
-          { id: "monitor" as const, label: "监控任务" },
-          { id: "dailyBars" as const, label: "日 K 任务" },
-          { id: "news" as const, label: "消息面" },
-        ].map((tab) => (
-          <button
-            className={`rounded-md border px-3 py-1.5 text-sm ${
-              marketView === tab.id
-                ? "border-[var(--accent)] bg-[var(--surface-strong)] text-[var(--text)]"
-                : "border-[var(--line)] text-[var(--muted-strong)] hover:bg-[var(--surface-soft)]"
-            }`}
-            key={tab.id}
-            onClick={() => setMarketView(tab.id)}
-            type="button"
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
-      {marketView === "monitor" ? <StockV2Monitor actions={actions} /> : null}
-      {marketView === "news" ? <StockV2NewsWorkbench actions={actions} /> : null}
-
-      {marketView === "dailyBars" ? (
       <CollapsibleSection
         title={
           <span className="flex items-center gap-2">
             <ChartLine size={16} style={{ color: "var(--accent)" }} />
-            数据抓取任务历史
+            手动日 K 抓取历史
           </span>
         }
-        subtitle={`日 K 数据面的抓取任务记录 · ${historySubtitle}`}
+        subtitle={`手动补拉和临时全市场增量记录 · ${historySubtitle}`}
         defaultOpen
       >
         <div className="flex flex-wrap justify-end gap-2">
@@ -223,7 +227,7 @@ export function StockV2DailyBars({ actions, data, runAction }: { actions: AppAct
 
         {visibleJobs.length === 0 ? (
           <div className="rounded-lg border border-dashed border-[var(--line)] bg-[var(--surface-soft)] p-6 text-center text-sm text-[var(--muted)]">
-            暂无日 K 任务记录。点击“手动抓取”可以立即创建一次任务；自动增量开关在股票 V2 设置页。
+            暂无日 K 任务记录。点击“手动抓取”可以立即创建一次任务；统一维护周期在维护配置里。
           </div>
         ) : (
           <div className="grid gap-2">
@@ -280,7 +284,6 @@ export function StockV2DailyBars({ actions, data, runAction }: { actions: AppAct
           </div>
         ) : null}
       </CollapsibleSection>
-      ) : null}
 
       {drawerOpen ? (
         <DailyBarsTriggerDrawer
@@ -293,7 +296,7 @@ export function StockV2DailyBars({ actions, data, runAction }: { actions: AppAct
           onSymbolChange={setSymbol}
           onTrigger={(mode) => void triggerRun(mode)}
           range={range}
-          settingsAutoEnabled={!!settings?.dailyBarsAutoEnabled}
+          unifiedMaintenanceEnabled={!!settings?.autoUpdateEnabled}
           symbol={symbol}
           symbolCheck={symbolCheck}
         />
@@ -312,7 +315,7 @@ function DailyBarsTriggerDrawer({
   onSymbolChange,
   onTrigger,
   range,
-  settingsAutoEnabled,
+  unifiedMaintenanceEnabled,
   symbol,
   symbolCheck,
 }: {
@@ -325,7 +328,7 @@ function DailyBarsTriggerDrawer({
   onSymbolChange: (value: string) => void;
   onTrigger: (mode: "symbol" | "hot" | "universe_incremental") => void;
   range: DailyBarRange;
-  settingsAutoEnabled: boolean;
+  unifiedMaintenanceEnabled: boolean;
   symbol: string;
   symbolCheck: StockV2DailyBarsQuality | null;
 }) {
@@ -419,16 +422,16 @@ function DailyBarsTriggerDrawer({
 
             <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs leading-relaxed text-[var(--muted-strong)]">
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                <strong className="text-[var(--text)]">自动增量和手动触发的关系</strong>
-                <Pill tone={settingsAutoEnabled ? "good" : "neutral"}>
-                  自动增量{settingsAutoEnabled ? "已开启" : "未开启"}
+                <strong className="text-[var(--text)]">统一维护和手动补拉的关系</strong>
+                <Pill tone={unifiedMaintenanceEnabled ? "good" : "neutral"}>
+                  统一维护{unifiedMaintenanceEnabled ? "已开启" : "未开启"}
                 </Pill>
               </div>
               <p className="m-0">
-                自动增量不是一个手动模式。它是设置页里的后台调度：工作日 16:30 之后，如果当天没有成功跑过，会自动创建一次全市场最近交易日窗口任务。
+                统一维护是维护配置里的后台调度：每次刷新标的与最新价后，会逐只检查日 K，缺失、不足 250 根或陈旧时才补拉。
               </p>
               <p className="mt-2 mb-0">
-                手动触发是立即创建一次任务，可以选单只、持仓热集合或全市场增量。两者共用任务历史和运行去重，同一时间只允许一个批量任务打数据源。
+                手动补拉是立即创建一次日 K 任务，可以选单只、持仓热集合或全市场增量。两者都遵守数据源打散和并发限制。
               </p>
             </div>
           </div>

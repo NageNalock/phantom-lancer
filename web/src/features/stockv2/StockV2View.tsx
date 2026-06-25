@@ -14,7 +14,6 @@ import { useQueryParamState } from "../../hooks/useQueryParamState";
 import { StockV2Overview } from "./StockV2Overview";
 import { StockV2Universe } from "./StockV2Universe";
 import { StockV2Portfolios } from "./StockV2Portfolios";
-import { StockV2Settings } from "./StockV2Settings";
 import { StockV2Strategies } from "./StockV2Strategies";
 import { StockV2DailyBars } from "./StockV2DailyBars";
 import { StockV2AgentPage } from "./StockV2AgentPage";
@@ -22,17 +21,16 @@ import { StockV2AgentPage } from "./StockV2AgentPage";
 const v2Tabs: Array<{ id: StockV2Tab; label: string; icon?: typeof Plus }> = [
   { id: "overview", label: "总览", icon: Faders },
   { id: "universe", label: "主数据", icon: Database },
-  { id: "dailyBars", label: "行情与监控", icon: ChartLine },
+  { id: "dailyBars", label: "监控与消息", icon: ChartLine },
   { id: "portfolios", label: "仓位", icon: Wallet },
   { id: "strategies", label: "策略", icon: Crosshair },
   { id: "agent", label: "Agent", icon: Robot },
-  { id: "settings", label: "设置", icon: Faders },
 ];
 
 export function StockV2View({ actions, data }: { actions: AppActions; data: AppData }) {
   const [activeTab, setActiveTab, tabHref] = useQueryParamState<StockV2Tab>(
     "stockv2",
-    ["overview", "universe", "dailyBars", "portfolios", "strategies", "agent", "settings"],
+    ["overview", "universe", "dailyBars", "portfolios", "strategies", "agent"],
     "overview",
   );
   const stockv2 = data.stockv2;
@@ -72,7 +70,6 @@ export function StockV2View({ actions, data }: { actions: AppActions; data: AppD
         {activeTab === "portfolios" ? <StockV2Portfolios actions={actions} data={data} runAction={runAction} /> : null}
         {activeTab === "strategies" ? <StockV2Strategies actions={actions} data={data} /> : null}
         {activeTab === "agent" ? <StockV2AgentPage actions={actions} /> : null}
-        {activeTab === "settings" ? <StockV2Settings actions={actions} data={data} runAction={runAction} /> : null}
       </div>
 
       <aside className="border-l border-[var(--line)] bg-[var(--surface-soft)] p-5 max-xl:border-l-0 max-xl:border-t">
