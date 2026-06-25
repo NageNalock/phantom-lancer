@@ -1134,8 +1134,9 @@ func (s *Service) checkAndExecuteScheduledUpdate(ctx context.Context) {
 // runScheduledMonitors 周期检查各监控任务的 enabled/interval，到点触发对应 scan。
 // 实际是否执行由各 task config 的 enabled 控制；未启用或未到周期则跳过。
 func (s *Service) runScheduledMonitors(ctx context.Context) {
-	ticker := time.NewTicker(60 * time.Second)
+	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
+	s.tickScheduledMonitors(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -1147,9 +1148,17 @@ func (s *Service) runScheduledMonitors(ctx context.Context) {
 }
 
 func (s *Service) tickScheduledMonitors(ctx context.Context) {
-	configs, err := s.store.ListMonitorTaskConfigs(ctx)
+	storedConfigs, err := s.store.ListMonitorTaskConfigs(ctx)
 	if err != nil {
 		return
+	}
+	configs := make(map[string]MonitorTaskConfig)
+	for _, def := range builtinMonitorTaskDefinitions() {
+		cfg := def.DefaultConfig
+		if stored, ok := storedConfigs[def.TaskType]; ok {
+			cfg = stored
+		}
+		configs[def.TaskType] = cfg
 	}
 	now := time.Now()
 	for taskType, cfg := range configs {
@@ -1169,7 +1178,9 @@ func (s *Service) tickScheduledMonitors(ctx context.Context) {
 				continue
 			}
 			if _, err := s.RunLatestQuoteRefreshTask(ctx, MonitorTriggerScheduled); err != nil {
-				s.log.Warn("scheduled quote refresh failed", "error", err)
+				if s.log != nil {
+					s.log.Warn("scheduled quote refresh failed", "error", err)
+				}
 			}
 			continue
 		}
@@ -1181,7 +1192,9 @@ func (s *Service) tickScheduledMonitors(ctx context.Context) {
 			continue
 		}
 		if _, err := s.RunMonitorTask(ctx, taskType, MonitorTriggerScheduled); err != nil {
-			s.log.Warn("scheduled monitor run failed", "task_type", taskType, "error", err)
+			if s.log != nil {
+				s.log.Warn("scheduled monitor run failed", "task_type", taskType, "error", err)
+			}
 		}
 	}
 }

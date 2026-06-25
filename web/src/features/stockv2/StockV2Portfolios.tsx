@@ -1,4 +1,4 @@
-import { ArrowClockwise, Eye, Plus, Minus, Trash, Pencil, Wallet, X, Check, MagnifyingGlass } from "@phosphor-icons/react";
+import { Eye, Plus, Minus, Trash, Pencil, Wallet, X, Check, MagnifyingGlass } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { AreaSeries, createChart, createSeriesMarkers, type CrosshairMode, type IChartApi, type ISeriesApi, type Time } from "lightweight-charts";
 import type { AppActions } from "../../app/App";
@@ -17,7 +17,6 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
   const [selectedId, setSelectedId] = useState<string | null>(portfolios[0]?.id || null);
   const [holdingsDialog, setHoldingsDialog] = useState<{ portfolioId: string; mode: "add" | "edit"; holding?: StockV2Holding } | null>(null);
   const [tradeDialog, setTradeDialog] = useState<{ portfolioId: string; mode: "buy" | "sell"; holding?: StockV2Holding } | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
   const [refreshResult, setRefreshResult] = useState<StockV2PortfolioRefreshResult | null>(null);
   const [snapshots, setSnapshots] = useState<StockV2PortfolioSnapshot[]>([]);
   const [transactions, setTransactions] = useState<StockV2Transaction[]>([]);
@@ -80,24 +79,6 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
     };
   }, [actions, selectedId, detailTab]);
 
-  async function refreshSelectedPortfolio() {
-    if (!selected) return;
-    setRefreshing(true);
-    try {
-      await runAction("刷新资产", async () => {
-        const result = await actions.api<StockV2PortfolioRefreshResult>(`/api/stockv2/portfolios/${selected.id}/refresh`, {
-          method: "POST",
-          body: { triggerSource: "web" },
-        });
-        setRefreshResult(result);
-        const history = await actions.api<{ items: StockV2PortfolioSnapshot[] }>(`/api/stockv2/portfolios/${selected.id}/snapshots?limit=5`);
-        setSnapshots(history.items || []);
-      });
-    } finally {
-      setRefreshing(false);
-    }
-  }
-
   return (
     <div className="grid gap-4">
       {/* 组合列表 */}
@@ -139,10 +120,6 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
           subtitle={`${selected.name} · ${displayedHoldings.length} 只持仓 · ${transactions.length} 笔交易`}
           actions={
             <>
-              <Button onClick={() => void refreshSelectedPortfolio()} disabled={refreshing}>
-                <ArrowClockwise size={14} className="mr-1.5" />
-                {refreshing ? "刷新中" : "刷新资产"}
-              </Button>
               <Button onClick={openStockV2MonitorTab}>
                 <Eye size={14} className="mr-1.5" />
                 监控与任务
@@ -319,8 +296,6 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
                 body: payload,
               });
               setTradeDialog(null);
-              // 刷新持仓估值 + 流水
-              await refreshSelectedPortfolio();
               const t = await actions.api<{ items: StockV2Transaction[] }>(`/api/stockv2/portfolios/${tradeDialog.portfolioId}/transactions?limit=100`);
               setTransactions(t.items || []);
               if (detailTab === "curve") {
@@ -555,7 +530,7 @@ function SummaryCell({ label, value, muted = false }: { label: string; value: st
 function SnapshotHistory({ snapshots }: { snapshots: StockV2PortfolioSnapshot[] }) {
   return (
     <div className="mt-4 border-t border-[var(--line)] pt-3">
-      <div className="mb-2 text-xs font-medium text-[var(--muted)]">最近 snapshot</div>
+      <div className="mb-2 text-xs font-medium text-[var(--muted)]">估值留底</div>
       <div className="grid gap-2">
         {snapshots.slice(0, 5).map((snapshot) => (
           <div key={snapshot.id} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 rounded-md border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">

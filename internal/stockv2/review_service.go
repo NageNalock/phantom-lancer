@@ -158,6 +158,8 @@ func (s *Service) BuildAgentContextPack(ctx context.Context, hit MonitorHit) (Ag
 		}
 		pack.DailyBars = s.buildDailyBarsContext(ctx, symbol)
 		freshness["dailyBars"] = dailyBarsFreshnessSummary(pack.DailyBars)
+		pack.MinuteBars = s.buildMinuteBarsContext(ctx, symbol)
+		freshness["minuteBars"] = minuteBarsFreshnessSummary(pack.MinuteBars)
 		if pack.NewsEvent != nil {
 			if profile, err := s.store.GetStockProfile(ctx, symbol); err == nil {
 				pack.Profile = &profile
@@ -503,6 +505,44 @@ func (s *Service) buildDailyBarsContext(ctx context.Context, symbol string) *Dai
 	}
 }
 
+func (s *Service) buildMinuteBarsContext(ctx context.Context, symbol string) *MinuteBarsContext {
+	bars, err := s.store.ListMinuteBars(ctx, symbol, time.Now().AddDate(0, 0, -5), 1200)
+	if err != nil || len(bars) == 0 {
+		return &MinuteBarsContext{Symbol: symbol}
+	}
+	latest := bars[len(bars)-1]
+	high := bars[0].High
+	low := bars[0].Low
+	totalVolume := 0.0
+	totalNetInflow := 0.0
+	for _, bar := range bars {
+		if bar.High > high {
+			high = bar.High
+		}
+		if bar.Low < low {
+			low = bar.Low
+		}
+		totalVolume += bar.Volume
+		totalNetInflow += bar.MainNetInflow
+	}
+	return &MinuteBarsContext{
+		Symbol:          symbol,
+		Count:           len(bars),
+		LatestMinuteAt:  latest.MinuteAt,
+		LatestClose:     latest.Close,
+		LatestVolume:    latest.Volume,
+		LatestNetInflow: latest.MainNetInflow,
+		Source:          latest.Source,
+		Summary: map[string]float64{
+			"rangeHigh":       high,
+			"rangeLow":        low,
+			"totalVolume":     totalVolume,
+			"totalNetInflow":  totalNetInflow,
+			"latestPctChange": latest.PctChange,
+		},
+	}
+}
+
 func (s *Service) buildPortfolioReviewContext(ctx context.Context, portfolioID string) (*PortfolioReviewContext, map[string]any, error) {
 	portfolio, err := s.store.GetPortfolio(ctx, portfolioID)
 	if err != nil {
@@ -602,5 +642,17 @@ func dailyBarsFreshnessSummary(ctx *DailyBarsContext) map[string]any {
 		"latestTradeDate": ctx.LatestTradeDate,
 		"latestFetchedAt": ctx.LatestFetchedAt,
 		"count":           ctx.Count,
+	}
+}
+
+func minuteBarsFreshnessSummary(ctx *MinuteBarsContext) map[string]any {
+	if ctx == nil || ctx.Count == 0 {
+		return map[string]any{"status": "missing"}
+	}
+	return map[string]any{
+		"status":         "present",
+		"latestMinuteAt": ctx.LatestMinuteAt,
+		"count":          ctx.Count,
+		"source":         ctx.Source,
 	}
 }

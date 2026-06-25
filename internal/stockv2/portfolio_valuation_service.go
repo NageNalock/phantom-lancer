@@ -2,8 +2,11 @@ package stockv2
 
 import (
 	"context"
+	"strings"
 	"time"
 )
+
+const portfolioSnapshotSampleInterval = 15 * time.Minute
 
 func (s *Service) RefreshPortfolioValuation(ctx context.Context, portfolioID string, triggerSource string) (PortfolioRefreshResult, error) {
 	portfolio, err := s.store.GetPortfolio(ctx, portfolioID)
@@ -22,7 +25,8 @@ func (s *Service) RefreshPortfolioValuation(ctx context.Context, portfolioID str
 	}
 
 	result := RecalculatePortfolioFromQuotes(portfolio, holdings, quoteRefresh.Items, time.Now())
-	if err := s.store.SavePortfolioValuation(ctx, result.Holdings, result.Snapshot); err != nil {
+	writeSnapshot := s.shouldWritePortfolioSnapshot(ctx, portfolio.ID, triggerSource, result.Snapshot)
+	if err := s.store.SavePortfolioValuation(ctx, result.Holdings, result.Snapshot, writeSnapshot); err != nil {
 		return result, err
 	}
 	return result, nil
@@ -30,6 +34,56 @@ func (s *Service) RefreshPortfolioValuation(ctx context.Context, portfolioID str
 
 func (s *Service) GetPortfolioSnapshots(ctx context.Context, portfolioID string, limit int) ([]PortfolioSnapshot, error) {
 	return s.store.GetPortfolioSnapshots(ctx, portfolioID, limit)
+}
+
+func (s *Service) RefreshPortfoliosFromLatestQuotes(ctx context.Context, quotes []StockV2QuoteLatest) error {
+	if len(quotes) == 0 {
+		return nil
+	}
+	quoteSymbols := make(map[string]struct{}, len(quotes))
+	for _, quote := range quotes {
+		if quote.Symbol != "" {
+			quoteSymbols[quote.Symbol] = struct{}{}
+		}
+	}
+	portfolios, err := s.store.ListPortfolios(ctx)
+	if err != nil {
+		return err
+	}
+	for _, portfolio := range portfolios {
+		holdings, err := s.store.ListHoldings(ctx, portfolio.ID)
+		if err != nil {
+			return wrapError(err, "list holdings for quote valuation")
+		}
+		if !portfolioHasAnyQuoteSymbol(holdings, quoteSymbols) {
+			continue
+		}
+		result := RecalculatePortfolioFromQuotes(portfolio, holdings, quotes, time.Now())
+		writeSnapshot := s.shouldWritePortfolioSnapshot(ctx, portfolio.ID, "monitor", result.Snapshot)
+		if err := s.store.SavePortfolioValuation(ctx, result.Holdings, result.Snapshot, writeSnapshot); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) shouldWritePortfolioSnapshot(ctx context.Context, portfolioID, triggerSource string, snapshot PortfolioSnapshot) bool {
+	trigger := strings.ToLower(strings.TrimSpace(triggerSource))
+	switch trigger {
+	case "", "monitor", "scheduled", "system", "auto", "auto-updater":
+		// continue below: background valuation is sampled, not appended every tick.
+	default:
+		return true
+	}
+	items, err := s.store.GetPortfolioSnapshots(ctx, portfolioID, 1)
+	if err != nil || len(items) == 0 {
+		return true
+	}
+	valuationAt := snapshot.ValuationAt
+	if valuationAt.IsZero() {
+		valuationAt = time.Now()
+	}
+	return valuationAt.Sub(items[0].ValuationAt) >= portfolioSnapshotSampleInterval
 }
 
 func RecalculatePortfolioFromQuotes(portfolio StockV2Portfolio, holdings []StockV2Holding, quotes []StockV2QuoteLatest, valuationAt time.Time) PortfolioRefreshResult {
@@ -164,4 +218,13 @@ func uniqueHoldingSymbols(holdings []StockV2Holding) []string {
 		symbols = append(symbols, holding.Symbol)
 	}
 	return symbols
+}
+
+func portfolioHasAnyQuoteSymbol(holdings []StockV2Holding, symbols map[string]struct{}) bool {
+	for _, holding := range holdings {
+		if _, ok := symbols[holding.Symbol]; ok {
+			return true
+		}
+	}
+	return false
 }

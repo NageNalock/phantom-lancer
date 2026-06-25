@@ -8,6 +8,7 @@ import type {
   StockV2DailyBarsEnsureResult,
   StockV2DailyBarsQuality,
   StockV2Instrument,
+  StockV2MinuteBar,
   StockV2AgentRun,
   StockV2StockProfile,
   StockV2StockProfileUpdateResult,
@@ -32,6 +33,7 @@ import { StockV2KLineChart } from "./StockV2KLineChart";
 
 const RANGES: DailyBarRange[] = ["6m", "1y", "3y", "5y"];
 const ADJUSTEDS: DailyBarAdjusted[] = ["none", "qfq", "hfq"];
+type ChartMode = "daily" | "minute";
 
 /**
  * StockV2InstrumentDetail：右侧 680px Drawer 查看单只标的详情（K 线 + 质量 + Job）。
@@ -54,11 +56,15 @@ export function StockV2InstrumentDetail({
 }) {
   const [range, setRange] = useState<DailyBarRange>("1y");
   const [adjusted, setAdjusted] = useState<DailyBarAdjusted>("none");
+  const [chartMode, setChartMode] = useState<ChartMode>("daily");
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [quality, setQuality] = useState<StockV2DailyBarsQuality | null>(null);
   const [bars, setBars] = useState<StockV2DailyBar[] | null>(null);
+  const [minuteBars, setMinuteBars] = useState<StockV2MinuteBar[] | null>(null);
+  const [minuteLoading, setMinuteLoading] = useState(false);
+  const [minuteError, setMinuteError] = useState<string | null>(null);
   const [ensureResult, setEnsureResult] = useState<StockV2DailyBarsEnsureResult | null>(null);
   const [activeJob, setActiveJob] = useState<StockV2DailyBarJob | null>(null);
   const [profile, setProfile] = useState<StockV2StockProfile | null>(null);
@@ -72,7 +78,9 @@ export function StockV2InstrumentDetail({
   useEffect(() => {
     setLoading(true);
     setBars(null);
+    setMinuteBars(null);
     setError(null);
+    setMinuteError(null);
     setEnsureResult(null);
     setActiveJob(null);
     setProfile(null);
@@ -84,6 +92,7 @@ export function StockV2InstrumentDetail({
       profileRunPollRef.current = null;
     }
     void load();
+    void loadMinuteBars();
     void loadProfile();
     void loadProfileTasks();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -114,6 +123,51 @@ export function StockV2InstrumentDetail({
     );
     return res.items ?? [];
   }, [actions, adjusted, inst, queryRange]);
+
+  const loadMinuteBars = useCallback(async () => {
+    if (!inst) return;
+    setMinuteLoading(true);
+    setMinuteError(null);
+    try {
+      const res = await actions.api<{ items?: StockV2MinuteBar[] }>(
+        `/api/stockv2/intraday/minute-bars?symbol=${encodeURIComponent(inst.symbol)}&days=5`,
+      );
+      const items = res.items ?? [];
+      setMinuteBars(items);
+      if (items.length === 0) {
+        setMinuteError("同步完成，但本地仍无分钟行情。请检查行情刷新状态或服务日志里的分钟源错误。");
+      }
+    } catch (err) {
+      setMinuteError(friendlyErr(err));
+    } finally {
+      setMinuteLoading(false);
+    }
+  }, [actions, inst]);
+
+  const refreshMinuteBars = useCallback(async () => {
+    if (!inst) return;
+    setMinuteLoading(true);
+    setMinuteError(null);
+    try {
+      await actions.api("/api/stockv2/quotes/refresh", {
+        method: "POST",
+        body: { symbols: [inst.symbol], triggerSource: "instrument_detail" },
+        csrf: actions.csrf,
+      });
+      const res = await actions.api<{ items?: StockV2MinuteBar[] }>(
+        `/api/stockv2/intraday/minute-bars?symbol=${encodeURIComponent(inst.symbol)}&days=5`,
+      );
+      const items = res.items ?? [];
+      setMinuteBars(items);
+      if (items.length === 0) {
+        setMinuteError("同步完成，但本地仍无分钟行情。请检查行情刷新状态或服务日志里的分钟源错误。");
+      }
+    } catch (err) {
+      setMinuteError(friendlyErr(err));
+    } finally {
+      setMinuteLoading(false);
+    }
+  }, [actions, inst]);
 
   const load = useCallback(async () => {
     if (!inst) return;
@@ -378,6 +432,24 @@ export function StockV2InstrumentDetail({
         {/* 控制条 */}
         <section className="flex flex-wrap items-center gap-3 border-b border-[var(--line)] px-4 py-3">
           <div className="flex gap-1 rounded-md border border-[var(--line)] p-0.5">
+            {(["daily", "minute"] as ChartMode[]).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => setChartMode(mode)}
+                className={`rounded px-2 py-1 text-xs transition ${
+                  chartMode === mode
+                    ? "bg-[var(--surface-strong)] text-[var(--text)]"
+                    : "text-[var(--muted-strong)] hover:bg-[var(--surface-soft)]"
+                }`}
+                type="button"
+              >
+                {mode === "daily" ? "日 K" : "分钟"}
+              </button>
+            ))}
+          </div>
+          {chartMode === "daily" ? (
+            <>
+          <div className="flex gap-1 rounded-md border border-[var(--line)] p-0.5">
             {RANGES.map((r) => (
               <button
                 key={r}
@@ -416,11 +488,27 @@ export function StockV2InstrumentDetail({
           >
             {loading ? "加载中…" : "刷新日 K"}
           </Button>
+            </>
+          ) : (
+            <div className="flex items-center gap-2 text-xs text-[var(--muted-strong)]">
+              <span>最近 5 天</span>
+              <span>后台盘中分钟行情自动采集</span>
+              <Button onClick={() => void refreshMinuteBars()} disabled={minuteLoading} className="px-3 py-1 text-xs">
+                {minuteLoading ? "同步中…" : "同步分钟线"}
+              </Button>
+            </div>
+          )}
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            <Pill tone={qualityTone}>
-              {stockV2DailyBarsQualityLabel(quality ?? undefined)}
-            </Pill>
-            {activeJob ? (
+            {chartMode === "daily" ? (
+              <Pill tone={qualityTone}>
+                {stockV2DailyBarsQualityLabel(quality ?? undefined)}
+              </Pill>
+            ) : (
+              <Pill tone={minuteBars?.length ? "good" : "neutral"}>
+                {minuteBars?.length || 0} 根
+              </Pill>
+            )}
+            {chartMode === "daily" && activeJob ? (
               <Pill tone={jobTone ?? "warn"}>
                 {stockV2DailyBarJobTypeLabel(activeJob)} · {stockV2DailyBarJobStatusLabel(activeJob)}
                 {activeJob.totalCount > 0
@@ -434,6 +522,15 @@ export function StockV2InstrumentDetail({
         {/* 质量细项 */}
         <section className="border-b border-[var(--line)] px-4 py-2 text-[11px] text-[var(--muted-strong)]">
           <div className="flex flex-wrap gap-x-4 gap-y-1">
+            {chartMode === "minute" ? (
+              <>
+                <span>范围：最近 5 天</span>
+                <span>条数：{minuteBars?.length ?? 0}</span>
+                {minuteBars?.[0]?.source ? <span>来源：{minuteBars[0].source}</span> : null}
+                <span>保留策略：5 天滚动</span>
+              </>
+            ) : (
+              <>
             <span>范围：{stockV2RangeLabel(range)}</span>
             <span>复权：{stockV2AdjustedLabel(adjusted)}</span>
             <span>最早：{quality?.earliestDate || "-"}</span>
@@ -454,18 +551,30 @@ export function StockV2InstrumentDetail({
             {ensureResult?.skipped ? (
               <span className="text-[var(--muted)]">本地命中，跳过抓取</span>
             ) : null}
+              </>
+            )}
           </div>
         </section>
 
         {/* 图表主区 */}
         <section className="min-h-0 flex-1 overflow-y-auto p-4">
-          {error ? (
+          {chartMode === "daily" && error ? (
             <Notice tone="danger">
               <strong className="block text-xs">加载失败</strong>
               <span className="mt-1 block break-words text-[11px] leading-relaxed opacity-90">{error}</span>
             </Notice>
           ) : null}
-          <StockV2KLineChart bars={bars} error={error} loading={loading && !bars?.length} />
+          {chartMode === "minute" && minuteError ? (
+            <Notice tone="danger">
+              <strong className="block text-xs">加载失败</strong>
+              <span className="mt-1 block break-words text-[11px] leading-relaxed opacity-90">{minuteError}</span>
+            </Notice>
+          ) : null}
+          {chartMode === "daily" ? (
+            <StockV2KLineChart bars={bars} error={error} loading={loading && !bars?.length} mode="daily" />
+          ) : (
+            <StockV2KLineChart bars={minuteBars} error={minuteError} loading={minuteLoading && !minuteBars?.length} mode="minute" />
+          )}
           <StockProfileSection
             busy={profileBusy}
             error={profileError}
@@ -478,7 +587,7 @@ export function StockV2InstrumentDetail({
         </section>
 
         <footer className="border-t border-[var(--line)] px-4 py-2 text-[11px] text-[var(--muted)]">
-          数据来源：{bars?.[0]?.source || quality?.source || "tencent_fqkline"}（公开端点，异步落盘）。失败时不会伪造 K 线。
+          数据来源：{chartMode === "minute" ? minuteBars?.[0]?.source || "分钟行情待同步" : bars?.[0]?.source || quality?.source || "tencent_fqkline"}（公开端点，异步落盘）。失败时不会伪造 K 线。
         </footer>
       </aside>
     </div>

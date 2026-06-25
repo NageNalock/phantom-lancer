@@ -148,7 +148,6 @@ type MonitorHitListFilter struct {
 }
 
 // builtinMonitorTaskDefinitions 返回系统内置监控任务定义注册表。
-// 默认全部 enabled=false:用户显式开启后才会周期执行。
 func builtinMonitorTaskDefinitions() []MonitorTaskDefinition {
 	return []MonitorTaskDefinition{
 		{
@@ -164,13 +163,13 @@ func builtinMonitorTaskDefinitions() []MonitorTaskDefinition {
 		},
 		{
 			TaskType:     MonitorTaskLatestQuoteRefresh,
-			Label:        "最新行情刷新",
-			Description:  "持仓与监控标的的最新行情刷新",
+			Label:        "盘中分钟行情",
+			Description:  "持仓与监控标的的分钟级行情快照采集,并驱动组合估值刷新",
 			Category:     "data",
 			Runnable:     true,
 			Configurable: true,
 			DefaultConfig: MonitorTaskConfig{
-				Enabled: false, IntervalSeconds: 300, Sensitivity: "normal",
+				Enabled: true, IntervalSeconds: 30, Sensitivity: "normal",
 			},
 		},
 		{

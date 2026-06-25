@@ -310,6 +310,15 @@ CREATE TABLE IF NOT EXISTS stockv2_quotes_latest (
     volume REAL NOT NULL DEFAULT 0.0,
     amount REAL NOT NULL DEFAULT 0.0,
     pct_change REAL NOT NULL DEFAULT 0.0,
+    amplitude REAL NOT NULL DEFAULT 0.0,
+    turnover_rate REAL NOT NULL DEFAULT 0.0,
+    volume_ratio REAL NOT NULL DEFAULT 0.0,
+    main_net_inflow REAL NOT NULL DEFAULT 0.0,
+    super_net_inflow REAL NOT NULL DEFAULT 0.0,
+    large_net_inflow REAL NOT NULL DEFAULT 0.0,
+    medium_net_inflow REAL NOT NULL DEFAULT 0.0,
+    small_net_inflow REAL NOT NULL DEFAULT 0.0,
+    main_net_inflow_pct REAL NOT NULL DEFAULT 0.0,
     quote_at DATETIME NOT NULL,
     fetched_at DATETIME NOT NULL,
     source TEXT NOT NULL,
@@ -317,6 +326,54 @@ CREATE TABLE IF NOT EXISTS stockv2_quotes_latest (
     error_message TEXT,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_quote_snapshots (
+    id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    market TEXT,
+    name TEXT,
+    last_price REAL NOT NULL DEFAULT 0.0,
+    prev_close REAL NOT NULL DEFAULT 0.0,
+    open_price REAL NOT NULL DEFAULT 0.0,
+    high_price REAL NOT NULL DEFAULT 0.0,
+    low_price REAL NOT NULL DEFAULT 0.0,
+    volume REAL NOT NULL DEFAULT 0.0,
+    amount REAL NOT NULL DEFAULT 0.0,
+    pct_change REAL NOT NULL DEFAULT 0.0,
+    amplitude REAL NOT NULL DEFAULT 0.0,
+    turnover_rate REAL NOT NULL DEFAULT 0.0,
+    volume_ratio REAL NOT NULL DEFAULT 0.0,
+    main_net_inflow REAL NOT NULL DEFAULT 0.0,
+    super_net_inflow REAL NOT NULL DEFAULT 0.0,
+    large_net_inflow REAL NOT NULL DEFAULT 0.0,
+    medium_net_inflow REAL NOT NULL DEFAULT 0.0,
+    small_net_inflow REAL NOT NULL DEFAULT 0.0,
+    main_net_inflow_pct REAL NOT NULL DEFAULT 0.0,
+    quote_at DATETIME NOT NULL,
+    collected_at DATETIME NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    created_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_minute_bars (
+    symbol TEXT NOT NULL,
+    market TEXT,
+    minute_at DATETIME NOT NULL,
+    open REAL NOT NULL DEFAULT 0.0,
+    high REAL NOT NULL DEFAULT 0.0,
+    low REAL NOT NULL DEFAULT 0.0,
+    close REAL NOT NULL DEFAULT 0.0,
+    prev_close REAL NOT NULL DEFAULT 0.0,
+    volume REAL NOT NULL DEFAULT 0.0,
+    amount REAL NOT NULL DEFAULT 0.0,
+    pct_change REAL NOT NULL DEFAULT 0.0,
+    main_net_inflow REAL NOT NULL DEFAULT 0.0,
+    snapshot_count INTEGER NOT NULL DEFAULT 0,
+    source TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY(symbol, minute_at)
 );
 CREATE TABLE IF NOT EXISTS stockv2_quote_refresh_statuses (
     symbol TEXT PRIMARY KEY,
@@ -518,6 +575,8 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_holdings_symbol ON stockv2_holdings(symbo
 CREATE INDEX IF NOT EXISTS idx_stockv2_quotes_latest_market ON stockv2_quotes_latest(market);
 CREATE INDEX IF NOT EXISTS idx_stockv2_quotes_latest_status ON stockv2_quotes_latest(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_quotes_latest_fetched_at ON stockv2_quotes_latest(fetched_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_quote_snapshots_symbol_collected ON stockv2_quote_snapshots(symbol, collected_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_minute_bars_symbol_minute ON stockv2_minute_bars(symbol, minute_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_snapshots_portfolio_id ON stockv2_portfolio_snapshots(portfolio_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_snapshots_valuation_at ON stockv2_portfolio_snapshots(valuation_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_strategies_kind ON stockv2_strategies(kind);
@@ -706,7 +765,7 @@ CREATE TABLE IF NOT EXISTS stockv2_news_source_states (
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_source_states_status ON stockv2_news_source_states(status);
 -- 内置监控任务默认配置(全部默认关闭,用户显式开启后才会周期执行)。
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('universe_update', 0, 3600, 'normal', 0, 0, 0, datetime('now'));
-INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('latest_quote_refresh', 0, 300, 'normal', 0, 0, 0, datetime('now'));
+INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('latest_quote_refresh', 1, 30, 'normal', 0, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('daily_bars_sync', 0, 86400, 'normal', 0, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('data_strategy_monitor', 0, 600, 'normal', 1800, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('portfolio_risk_monitor', 0, 600, 'normal', 1800, 0, 0, datetime('now'));
@@ -834,6 +893,13 @@ func (s *Store) init(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, initSchemaSQL); err != nil {
 		return fmt.Errorf("exec init schema: %w", err)
 	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_monitor_task_configs
+		SET enabled = 1, interval_seconds = 30, updated_at = datetime('now')
+		WHERE task_type = 'latest_quote_refresh' AND enabled = 0 AND interval_seconds = 300
+	`); err != nil {
+		return fmt.Errorf("migrate latest quote monitor default: %w", err)
+	}
 	if err := s.ensureColumn(ctx, "stockv2_instruments", "instrument_type", "TEXT NOT NULL DEFAULT 'stock'"); err != nil {
 		return fmt.Errorf("add instrument_type column: %w", err)
 	}
@@ -845,6 +911,25 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_type ON stockv2_stock_profiles(instrument_type)`); err != nil {
 		return fmt.Errorf("create stock profile type index: %w", err)
+	}
+	quoteColumns := []struct {
+		name    string
+		colType string
+	}{
+		{"amplitude", "REAL NOT NULL DEFAULT 0"},
+		{"turnover_rate", "REAL NOT NULL DEFAULT 0"},
+		{"volume_ratio", "REAL NOT NULL DEFAULT 0"},
+		{"main_net_inflow", "REAL NOT NULL DEFAULT 0"},
+		{"super_net_inflow", "REAL NOT NULL DEFAULT 0"},
+		{"large_net_inflow", "REAL NOT NULL DEFAULT 0"},
+		{"medium_net_inflow", "REAL NOT NULL DEFAULT 0"},
+		{"small_net_inflow", "REAL NOT NULL DEFAULT 0"},
+		{"main_net_inflow_pct", "REAL NOT NULL DEFAULT 0"},
+	}
+	for _, column := range quoteColumns {
+		if err := s.ensureColumn(ctx, "stockv2_quotes_latest", column.name, column.colType); err != nil {
+			return fmt.Errorf("add latest quote %s column: %w", column.name, err)
+		}
 	}
 	profileColumns := []struct {
 		name    string

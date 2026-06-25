@@ -8,11 +8,11 @@ import {
   type ISeriesApi,
   type UTCTimestamp,
 } from "lightweight-charts";
-import type { StockV2DailyBar } from "../../app/types";
+import type { StockV2DailyBar, StockV2MinuteBar } from "../../app/types";
 import { EmptyState, Notice } from "../../components/ui";
 
 /**
- * StockV2KLineChart 使用 lightweight-charts v5 绘制日级 K 线 + 成交量。
+ * StockV2KLineChart 使用 lightweight-charts v5 绘制 K 线 + 成交量。
  *
  * 核心原则（Ponytail / 安全）：
  *   - 有 error 或 bars 为空时，不画任何假 K 线。
@@ -22,10 +22,12 @@ export function StockV2KLineChart({
   bars,
   error,
   loading,
+  mode = "daily",
 }: {
-  bars?: StockV2DailyBar[] | null;
+  bars?: Array<StockV2DailyBar | StockV2MinuteBar> | null;
   error?: string | null;
   loading?: boolean;
+  mode?: "daily" | "minute";
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -45,19 +47,20 @@ export function StockV2KLineChart({
   const candleData = useMemo(() => {
     if (!bars?.length) return [];
     return bars.map((b) => {
-      const t = Math.floor(new Date(b.tradeDate + "T00:00:00Z").getTime() / 1000) as UTCTimestamp;
+      const label = barLabel(b, mode);
+      const t = chartTimestamp(b, mode);
       return {
         time: t,
         open: round2(b.open),
         high: round2(b.high),
         low: round2(b.low),
         close: round2(b.close),
-        _volume: round0(b.volume),
-        _pct: b.pctChange,
-        _date: b.tradeDate,
+        _volume: round0(b.volume ?? 0),
+        _pct: b.pctChange ?? NaN,
+        _date: label,
       };
     });
-  }, [bars]);
+  }, [bars, mode]);
   const candleDataRef = useRef(candleData);
   useEffect(() => {
     candleDataRef.current = candleData;
@@ -66,15 +69,15 @@ export function StockV2KLineChart({
   const volumeData = useMemo(() => {
     if (!bars?.length) return [];
     return bars.map((b) => {
-      const t = Math.floor(new Date(b.tradeDate + "T00:00:00Z").getTime() / 1000) as UTCTimestamp;
+      const t = chartTimestamp(b, mode);
       const up = b.close >= b.open;
       return {
         time: t,
-        value: round0(b.volume),
+        value: round0(b.volume ?? 0),
         color: up ? "rgba(207,31,50,0.55)" : "rgba(18,132,79,0.55)",
       };
     });
-  }, [bars]);
+  }, [bars, mode]);
   const shouldRenderChart = !error && !loading && !!bars?.length;
 
   // 初始化图表。组件第一次渲染常常是 loading/empty 分支，此时 chart 容器还不存在；
@@ -109,7 +112,7 @@ export function StockV2KLineChart({
       rightPriceScale: { borderColor: line, scaleMargins: { top: 0.08, bottom: 0.28 } },
       timeScale: {
         borderColor: line,
-        timeVisible: false,
+        timeVisible: mode === "minute",
         secondsVisible: false,
         minBarSpacing: 1,
       },
@@ -175,6 +178,15 @@ export function StockV2KLineChart({
     };
   }, [shouldRenderChart]);
 
+  useEffect(() => {
+    chartRef.current?.applyOptions({
+      timeScale: {
+        timeVisible: mode === "minute",
+        secondsVisible: false,
+      },
+    });
+  }, [mode]);
+
   // Drawer / 侧栏布局下，图表容器尺寸可能在实例创建后的下一帧才稳定。
   // 这里由组件自己观察容器尺寸，避免首次宽度为 0 时出现空白图。
   useEffect(() => {
@@ -222,11 +234,11 @@ export function StockV2KLineChart({
     return (
       <div className="flex h-[420px] w-full flex-col">
         <Notice tone="danger">
-          <strong className="block text-xs">获取日 K 失败</strong>
+          <strong className="block text-xs">获取{mode === "minute" ? "分钟行情" : "日 K"}失败</strong>
           <span className="mt-1 block break-words text-[11px] leading-relaxed opacity-90">{error}</span>
         </Notice>
         <div className="mt-2 flex-1">
-          <EmptyState title="暂无 K 线" body="拉取失败时不会伪造或展示旧数据，请稍后重试或点击『刷新』。" />
+          <EmptyState title="暂无 K 线" body="拉取失败时不会伪造或展示旧数据，请稍后重试。" />
         </div>
       </div>
     );
@@ -236,7 +248,7 @@ export function StockV2KLineChart({
     return (
       <div className="flex h-[420px] w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-[var(--line)] bg-[var(--surface-soft)]">
         <div className="h-3 w-3 animate-spin rounded-full border-2 border-[var(--line)] border-t-[var(--accent)]" />
-        <span className="text-xs text-[var(--muted-strong)]">正在加载日 K…</span>
+        <span className="text-xs text-[var(--muted-strong)]">正在加载{mode === "minute" ? "分钟行情" : "日 K"}…</span>
       </div>
     );
   }
@@ -244,17 +256,21 @@ export function StockV2KLineChart({
   if (!bars?.length) {
     return (
       <div className="h-[420px] w-full">
-        <EmptyState title="本地尚无日 K" body="点击右上角『刷新』可触发补拉；系统会在后台异步抓取并落盘。" />
+        <EmptyState
+          title={mode === "minute" ? "本地尚无分钟行情" : "本地尚无日 K"}
+          body={mode === "minute" ? "后台盘中分钟行情任务会自动采集持仓和监控标的；有快照后会显示最近 5 天分钟 K。" : "点击右上角『刷新』可触发补拉；系统会在后台异步抓取并落盘。"}
+        />
       </div>
     );
   }
 
   if (bars.length === 1) {
     const only = bars[0];
+    const label = barLabel(only, mode);
     return (
       <div className="flex h-[420px] w-full flex-col rounded-lg border border-[var(--line)] bg-[var(--surface)]">
         <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border-b border-[var(--line)] bg-[var(--surface-soft)] px-3 py-2 text-xs">
-          <span className="font-mono text-[var(--muted-strong)]">{only.tradeDate}</span>
+          <span className="font-mono text-[var(--muted-strong)]">{label}</span>
           <span>
             <span className="text-[var(--muted)]">开 </span>
             <span className="font-mono">{only.open.toFixed(2)}</span>
@@ -273,11 +289,14 @@ export function StockV2KLineChart({
           </span>
           <span className="ml-auto text-[var(--muted)]">
             <span>量 </span>
-            <span className="font-mono">{formatVol(only.volume)}</span>
+            <span className="font-mono">{formatVol(only.volume ?? 0)}</span>
           </span>
         </div>
         <div className="flex flex-1 items-center justify-center p-4">
-          <EmptyState title="本地只有 1 根日 K" body="该标的可能刚上市，或数据源仅返回一个交易日；少于 2 根时不绘制 K 线，避免单根蜡烛被拉伸成异常图形。" />
+          <EmptyState
+            title={mode === "minute" ? "本地只有 1 根分钟 K" : "本地只有 1 根日 K"}
+            body="少于 2 根时不绘制 K 线，避免单根蜡烛被拉伸成异常图形。"
+          />
         </div>
       </div>
     );
@@ -285,13 +304,13 @@ export function StockV2KLineChart({
 
   const latest = bars[bars.length - 1];
   const display = hover ?? {
-    time: latest.tradeDate,
+    time: barLabel(latest, mode),
     open: latest.open,
     high: latest.high,
     low: latest.low,
     close: latest.close,
-    volume: latest.volume,
-    pct: latest.pctChange,
+    volume: latest.volume ?? 0,
+    pct: latest.pctChange ?? NaN,
   };
   const up = display.close >= display.open;
 
@@ -350,4 +369,28 @@ function formatVol(n: number): string {
   if (n >= 1e8) return (n / 1e8).toFixed(2) + "亿";
   if (n >= 1e4) return (n / 1e4).toFixed(2) + "万";
   return String(Math.round(n));
+}
+
+function barTimeValue(b: StockV2DailyBar | StockV2MinuteBar, mode: "daily" | "minute"): string {
+  if (mode === "minute") {
+    return (b as StockV2MinuteBar).minuteAt;
+  }
+  return (b as StockV2DailyBar).tradeDate + "T00:00:00Z";
+}
+
+function chartTimestamp(b: StockV2DailyBar | StockV2MinuteBar, mode: "daily" | "minute"): UTCTimestamp {
+  const seconds = Math.floor(new Date(barTimeValue(b, mode)).getTime() / 1000);
+  // lightweight-charts has no timezone option and renders intraday labels as UTC.
+  // A-share minute bars are China local wall-clock time, so shift only the chart coordinate.
+  return (mode === "minute" ? seconds + 8 * 60 * 60 : seconds) as UTCTimestamp;
+}
+
+function barLabel(b: StockV2DailyBar | StockV2MinuteBar, mode: "daily" | "minute"): string {
+  if (mode === "minute") {
+    const raw = (b as StockV2MinuteBar).minuteAt;
+    const d = new Date(raw);
+    if (Number.isNaN(d.getTime())) return raw || "-";
+    return d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Shanghai" });
+  }
+  return (b as StockV2DailyBar).tradeDate;
 }

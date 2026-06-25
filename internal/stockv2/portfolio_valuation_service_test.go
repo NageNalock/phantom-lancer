@@ -71,3 +71,68 @@ func TestRefreshPortfolioValuationUsesQuotesAndWritesSnapshot(t *testing.T) {
 		t.Fatalf("snapshots = %+v, want created snapshot", snapshots)
 	}
 }
+
+func TestRefreshPortfoliosFromLatestQuotesSamplesSnapshots(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	portfolio := StockV2Portfolio{ID: "portfolio-sampled", Name: "采样组合", Cash: 1000, RiskLevel: "medium"}
+	if err := store.CreatePortfolio(ctx, portfolio); err != nil {
+		t.Fatalf("create portfolio: %v", err)
+	}
+	if err := store.CreateHolding(ctx, StockV2Holding{
+		ID:                "holding-sampled",
+		PortfolioID:       portfolio.ID,
+		Symbol:            "000001",
+		Market:            "SZ",
+		Name:              "平安银行",
+		Quantity:          100,
+		AvailableQuantity: 100,
+		CostPrice:         10,
+	}); err != nil {
+		t.Fatalf("create holding: %v", err)
+	}
+	svc := NewService(store, nil, nil)
+
+	if err := svc.RefreshPortfoliosFromLatestQuotes(ctx, []StockV2QuoteLatest{{
+		Symbol:    "000001",
+		Market:    "SZ",
+		Name:      "平安银行",
+		LastPrice: 12,
+		QuoteAt:   time.Now(),
+		FetchedAt: time.Now(),
+		Status:    QuoteStatusFresh,
+	}}); err != nil {
+		t.Fatalf("first refresh from quotes: %v", err)
+	}
+	if err := svc.RefreshPortfoliosFromLatestQuotes(ctx, []StockV2QuoteLatest{{
+		Symbol:    "000001",
+		Market:    "SZ",
+		Name:      "平安银行",
+		LastPrice: 13,
+		QuoteAt:   time.Now(),
+		FetchedAt: time.Now(),
+		Status:    QuoteStatusFresh,
+	}}); err != nil {
+		t.Fatalf("second refresh from quotes: %v", err)
+	}
+
+	reloaded, err := svc.GetPortfolio(ctx, portfolio.ID)
+	if err != nil {
+		t.Fatalf("get portfolio: %v", err)
+	}
+	if len(reloaded.Holdings) != 1 || reloaded.Holdings[0].LastPrice != 13 || reloaded.TotalValue != 1300 {
+		t.Fatalf("current valuation not updated: %+v", reloaded)
+	}
+	snapshots, err := svc.GetPortfolioSnapshots(ctx, portfolio.ID, 20)
+	if err != nil {
+		t.Fatalf("get snapshots: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshot count = %d, want sampled single snapshot: %+v", len(snapshots), snapshots)
+	}
+}

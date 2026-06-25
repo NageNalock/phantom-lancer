@@ -6,32 +6,68 @@ import (
 )
 
 const (
-	QuoteStatusFresh     = "fresh"
-	QuoteStatusStale     = "stale"
-	QuoteStatusFailed    = "failed"
-	QuoteStatusEstimated = "estimated"
-	QuoteSourceTencent   = "tencent"
+	QuoteStatusFresh           = "fresh"
+	QuoteStatusStale           = "stale"
+	QuoteStatusFailed          = "failed"
+	QuoteStatusEstimated       = "estimated"
+	QuoteSourceTencent         = "tencent"
+	QuoteSourceTencentMinute   = "tencent_minute"
+	QuoteSourceEastmoney       = "eastmoney_push2his"
+	QuoteSourceEastmoneyMinute = "eastmoney_minute_kline"
 )
 
 // StockV2QuoteLatest is the latest-state quote for one instrument. It is not
 // a minute bar or historical series.
 type StockV2QuoteLatest struct {
-	Symbol       string    `json:"symbol"`
-	Market       string    `json:"market"`
-	Name         string    `json:"name"`
-	LastPrice    float64   `json:"lastPrice"`
-	PrevClose    float64   `json:"prevClose"`
-	OpenPrice    float64   `json:"openPrice"`
-	HighPrice    float64   `json:"highPrice"`
-	LowPrice     float64   `json:"lowPrice"`
-	Volume       float64   `json:"volume"`
-	Amount       float64   `json:"amount"`
-	PctChange    float64   `json:"pctChange"`
-	QuoteAt      time.Time `json:"quoteAt"`
-	FetchedAt    time.Time `json:"fetchedAt"`
-	Source       string    `json:"source"`
-	Status       string    `json:"status"`
-	ErrorMessage string    `json:"errorMessage,omitempty"`
+	Symbol           string    `json:"symbol"`
+	Market           string    `json:"market"`
+	Name             string    `json:"name"`
+	LastPrice        float64   `json:"lastPrice"`
+	PrevClose        float64   `json:"prevClose"`
+	OpenPrice        float64   `json:"openPrice"`
+	HighPrice        float64   `json:"highPrice"`
+	LowPrice         float64   `json:"lowPrice"`
+	Volume           float64   `json:"volume"`
+	Amount           float64   `json:"amount"`
+	PctChange        float64   `json:"pctChange"`
+	Amplitude        float64   `json:"amplitude,omitempty"`
+	TurnoverRate     float64   `json:"turnoverRate,omitempty"`
+	VolumeRatio      float64   `json:"volumeRatio,omitempty"`
+	MainNetInflow    float64   `json:"mainNetInflow,omitempty"`
+	SuperNetInflow   float64   `json:"superNetInflow,omitempty"`
+	LargeNetInflow   float64   `json:"largeNetInflow,omitempty"`
+	MediumNetInflow  float64   `json:"mediumNetInflow,omitempty"`
+	SmallNetInflow   float64   `json:"smallNetInflow,omitempty"`
+	MainNetInflowPct float64   `json:"mainNetInflowPct,omitempty"`
+	QuoteAt          time.Time `json:"quoteAt"`
+	FetchedAt        time.Time `json:"fetchedAt"`
+	Source           string    `json:"source"`
+	Status           string    `json:"status"`
+	ErrorMessage     string    `json:"errorMessage,omitempty"`
+}
+
+type StockV2QuoteSnapshot struct {
+	StockV2QuoteLatest
+	CollectedAt time.Time `json:"collectedAt"`
+}
+
+type StockV2MinuteBar struct {
+	Symbol        string    `json:"symbol"`
+	Market        string    `json:"market,omitempty"`
+	MinuteAt      time.Time `json:"minuteAt"`
+	Open          float64   `json:"open"`
+	High          float64   `json:"high"`
+	Low           float64   `json:"low"`
+	Close         float64   `json:"close"`
+	PrevClose     float64   `json:"prevClose,omitempty"`
+	Volume        float64   `json:"volume,omitempty"`
+	Amount        float64   `json:"amount,omitempty"`
+	PctChange     float64   `json:"pctChange,omitempty"`
+	MainNetInflow float64   `json:"mainNetInflow,omitempty"`
+	SnapshotCount int       `json:"snapshotCount"`
+	Source        string    `json:"source,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 type QuoteRefreshResult struct {

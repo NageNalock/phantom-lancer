@@ -22,15 +22,15 @@ func TestListMonitorTasksReturnsBuiltin(t *testing.T) {
 		t.Fatalf("task count = %d, want 8", len(tasks))
 	}
 	runnable := make(map[string]bool, len(tasks))
-	enabledCount := 0
+	enabledTasks := make(map[string]bool)
 	for _, task := range tasks {
 		runnable[task.Definition.TaskType] = task.Definition.Runnable
 		if task.Config.Enabled {
-			enabledCount++
+			enabledTasks[task.Definition.TaskType] = true
 		}
 	}
-	if enabledCount != 0 {
-		t.Fatalf("default enabled count = %d, want 0", enabledCount)
+	if len(enabledTasks) != 1 || !enabledTasks[MonitorTaskLatestQuoteRefresh] {
+		t.Fatalf("default enabled tasks = %#v, want only latest quote refresh", enabledTasks)
 	}
 	if !runnable[MonitorTaskDataStrategyMonitor] || !runnable[MonitorTaskPortfolioRiskMonitor] || !runnable[MonitorTaskNewsStrategyMonitor] {
 		t.Fatalf("data_strategy / portfolio_risk / news must be runnable")

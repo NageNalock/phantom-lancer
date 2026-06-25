@@ -417,14 +417,19 @@ func firstNonEmpty(values ...string) string {
 
 func quoteEvidence(quote StockV2QuoteLatest) map[string]any {
 	return map[string]any{
-		"symbol":    quote.Symbol,
-		"market":    quote.Market,
-		"lastPrice": quote.LastPrice,
-		"pctChange": quote.PctChange,
-		"status":    quote.Status,
-		"source":    quote.Source,
-		"quoteAt":   quote.QuoteAt,
-		"fetchedAt": quote.FetchedAt,
+		"symbol":           quote.Symbol,
+		"market":           quote.Market,
+		"lastPrice":        quote.LastPrice,
+		"pctChange":        quote.PctChange,
+		"amplitude":        quote.Amplitude,
+		"turnoverRate":     quote.TurnoverRate,
+		"volumeRatio":      quote.VolumeRatio,
+		"mainNetInflow":    quote.MainNetInflow,
+		"mainNetInflowPct": quote.MainNetInflowPct,
+		"status":           quote.Status,
+		"source":           quote.Source,
+		"quoteAt":          quote.QuoteAt,
+		"fetchedAt":        quote.FetchedAt,
 	}
 }
 

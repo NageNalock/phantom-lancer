@@ -122,6 +122,15 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 			volume DOUBLE NOT NULL DEFAULT 0,
 			amount DOUBLE NOT NULL DEFAULT 0,
 			pct_change DOUBLE NOT NULL DEFAULT 0,
+			amplitude DOUBLE NOT NULL DEFAULT 0,
+			turnover_rate DOUBLE NOT NULL DEFAULT 0,
+			volume_ratio DOUBLE NOT NULL DEFAULT 0,
+			main_net_inflow DOUBLE NOT NULL DEFAULT 0,
+			super_net_inflow DOUBLE NOT NULL DEFAULT 0,
+			large_net_inflow DOUBLE NOT NULL DEFAULT 0,
+			medium_net_inflow DOUBLE NOT NULL DEFAULT 0,
+			small_net_inflow DOUBLE NOT NULL DEFAULT 0,
+			main_net_inflow_pct DOUBLE NOT NULL DEFAULT 0,
 			quote_at TIMESTAMP NOT NULL,
 			fetched_at TIMESTAMP NOT NULL,
 			source VARCHAR NOT NULL,
@@ -132,6 +141,60 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_quotes_latest_status ON stockv2_quotes_latest(status);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_quotes_latest_fetched_at ON stockv2_quotes_latest(fetched_at);
+
+		CREATE TABLE IF NOT EXISTS stockv2_quote_snapshots (
+			id VARCHAR PRIMARY KEY,
+			symbol VARCHAR NOT NULL,
+			market VARCHAR,
+			name VARCHAR,
+			last_price DOUBLE NOT NULL DEFAULT 0,
+			prev_close DOUBLE NOT NULL DEFAULT 0,
+			open_price DOUBLE NOT NULL DEFAULT 0,
+			high_price DOUBLE NOT NULL DEFAULT 0,
+			low_price DOUBLE NOT NULL DEFAULT 0,
+			volume DOUBLE NOT NULL DEFAULT 0,
+			amount DOUBLE NOT NULL DEFAULT 0,
+			pct_change DOUBLE NOT NULL DEFAULT 0,
+			amplitude DOUBLE NOT NULL DEFAULT 0,
+			turnover_rate DOUBLE NOT NULL DEFAULT 0,
+			volume_ratio DOUBLE NOT NULL DEFAULT 0,
+			main_net_inflow DOUBLE NOT NULL DEFAULT 0,
+			super_net_inflow DOUBLE NOT NULL DEFAULT 0,
+			large_net_inflow DOUBLE NOT NULL DEFAULT 0,
+			medium_net_inflow DOUBLE NOT NULL DEFAULT 0,
+			small_net_inflow DOUBLE NOT NULL DEFAULT 0,
+			main_net_inflow_pct DOUBLE NOT NULL DEFAULT 0,
+			quote_at TIMESTAMP NOT NULL,
+			collected_at TIMESTAMP NOT NULL,
+			source VARCHAR NOT NULL,
+			status VARCHAR NOT NULL,
+			error_message VARCHAR,
+			created_at TIMESTAMP NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_quote_snapshots_symbol_collected
+			ON stockv2_quote_snapshots(symbol, collected_at);
+
+		CREATE TABLE IF NOT EXISTS stockv2_minute_bars (
+			symbol VARCHAR NOT NULL,
+			market VARCHAR,
+			minute_at TIMESTAMP NOT NULL,
+			open DOUBLE NOT NULL DEFAULT 0,
+			high DOUBLE NOT NULL DEFAULT 0,
+			low DOUBLE NOT NULL DEFAULT 0,
+			close DOUBLE NOT NULL DEFAULT 0,
+			prev_close DOUBLE NOT NULL DEFAULT 0,
+			volume DOUBLE NOT NULL DEFAULT 0,
+			amount DOUBLE NOT NULL DEFAULT 0,
+			pct_change DOUBLE NOT NULL DEFAULT 0,
+			main_net_inflow DOUBLE NOT NULL DEFAULT 0,
+			snapshot_count INTEGER NOT NULL DEFAULT 0,
+			source VARCHAR,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			PRIMARY KEY(symbol, minute_at)
+		);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_minute_bars_symbol_minute
+			ON stockv2_minute_bars(symbol, minute_at);
 
 		CREATE TABLE IF NOT EXISTS stockv2_stock_profiles (
 			symbol VARCHAR PRIMARY KEY,
@@ -242,6 +305,21 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("init duckdb daily bars schema: %w", err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS amplitude DOUBLE DEFAULT 0`,
+		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS turnover_rate DOUBLE DEFAULT 0`,
+		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS volume_ratio DOUBLE DEFAULT 0`,
+		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS main_net_inflow DOUBLE DEFAULT 0`,
+		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS super_net_inflow DOUBLE DEFAULT 0`,
+		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS large_net_inflow DOUBLE DEFAULT 0`,
+		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS medium_net_inflow DOUBLE DEFAULT 0`,
+		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS small_net_inflow DOUBLE DEFAULT 0`,
+		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS main_net_inflow_pct DOUBLE DEFAULT 0`,
+	} {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("migrate duckdb latest quote columns: %w", err)
+		}
 	}
 	return nil
 }

@@ -76,6 +76,38 @@ func (s *Server) handleStockV2GetQuoteRefreshState(w http.ResponseWriter, r *htt
 	s.writeJSON(w, map[string]any{"state": state, "items": items})
 }
 
+func (s *Server) handleStockV2ListMinuteBars(w http.ResponseWriter, r *http.Request) {
+	symbol := strings.TrimSpace(r.URL.Query().Get("symbol"))
+	days := 5
+	if raw := r.URL.Query().Get("days"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 || value > 5 {
+			http.Error(w, "invalid days", http.StatusBadRequest)
+			return
+		}
+		days = value
+	}
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 || value > 5000 {
+			http.Error(w, "invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = value
+	}
+	items, err := s.stockV2.ListMinuteBars(r.Context(), symbol, days, limit)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, stockv2.ErrInvalidQuoteSymbol) {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	s.writeJSON(w, map[string]any{"items": items, "days": days, "limit": limit})
+}
+
 func parseStockV2QuoteSymbols(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil

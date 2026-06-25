@@ -50,17 +50,18 @@ type OperationReview struct {
 }
 
 type AgentContextPack struct {
-	BuiltAt   time.Time               `json:"builtAt"`
-	Hit       MonitorHit              `json:"hit"`
-	Evidence  map[string]any          `json:"evidence,omitempty"`
-	Strategy  *StrategyWithVersion    `json:"strategy,omitempty"`
-	Quote     *StockV2QuoteLatest     `json:"quote,omitempty"`
-	DailyBars *DailyBarsContext       `json:"dailyBars,omitempty"`
-	Portfolio *PortfolioReviewContext `json:"portfolio,omitempty"`
-	NewsEvent *NewsEvent              `json:"newsEvent,omitempty"`
-	NewsLink  *NewsLinkCandidate      `json:"newsLinkCandidate,omitempty"`
-	Profile   *StockProfile           `json:"stockProfile,omitempty"`
-	Freshness map[string]any          `json:"freshness,omitempty"`
+	BuiltAt    time.Time               `json:"builtAt"`
+	Hit        MonitorHit              `json:"hit"`
+	Evidence   map[string]any          `json:"evidence,omitempty"`
+	Strategy   *StrategyWithVersion    `json:"strategy,omitempty"`
+	Quote      *StockV2QuoteLatest     `json:"quote,omitempty"`
+	DailyBars  *DailyBarsContext       `json:"dailyBars,omitempty"`
+	MinuteBars *MinuteBarsContext      `json:"minuteBars,omitempty"`
+	Portfolio  *PortfolioReviewContext `json:"portfolio,omitempty"`
+	NewsEvent  *NewsEvent              `json:"newsEvent,omitempty"`
+	NewsLink   *NewsLinkCandidate      `json:"newsLinkCandidate,omitempty"`
+	Profile    *StockProfile           `json:"stockProfile,omitempty"`
+	Freshness  map[string]any          `json:"freshness,omitempty"`
 }
 
 type DailyBarsContext struct {
@@ -71,6 +72,17 @@ type DailyBarsContext struct {
 	LatestClose     float64            `json:"latestClose,omitempty"`
 	LatestFetchedAt time.Time          `json:"latestFetchedAt,omitempty"`
 	Quality         string             `json:"quality,omitempty"`
+	Summary         map[string]float64 `json:"summary,omitempty"`
+}
+
+type MinuteBarsContext struct {
+	Symbol          string             `json:"symbol,omitempty"`
+	Count           int                `json:"count"`
+	LatestMinuteAt  time.Time          `json:"latestMinuteAt,omitempty"`
+	LatestClose     float64            `json:"latestClose,omitempty"`
+	LatestVolume    float64            `json:"latestVolume,omitempty"`
+	LatestNetInflow float64            `json:"latestNetInflow,omitempty"`
+	Source          string             `json:"source,omitempty"`
 	Summary         map[string]float64 `json:"summary,omitempty"`
 }
 

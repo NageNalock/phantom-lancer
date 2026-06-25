@@ -1009,6 +1009,9 @@ func (s *Service) RunLatestQuoteRefreshTask(ctx context.Context, triggerType str
 	}
 
 	result, err := s.RefreshLatestQuotes(ctx, symbols, "monitor")
+	if err == nil {
+		err = s.RefreshPortfoliosFromLatestQuotes(ctx, result.Items)
+	}
 	finishedAt := time.Now()
 	state.FinishedAt = finishedAt
 	state.UpdatedAt = finishedAt

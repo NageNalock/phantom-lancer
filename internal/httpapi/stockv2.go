@@ -48,6 +48,7 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/quotes/latest", s.handleStockV2GetLatestQuotes)
 	mux.HandleFunc("GET /api/stockv2/quotes/refresh-state", s.handleStockV2GetQuoteRefreshState)
 	mux.HandleFunc("POST /api/stockv2/quotes/refresh", s.handleStockV2RefreshLatestQuotes)
+	mux.HandleFunc("GET /api/stockv2/intraday/minute-bars", s.handleStockV2ListMinuteBars)
 
 	// 策略对象
 	mux.HandleFunc("GET /api/stockv2/strategies", s.handleStockV2ListStrategies)

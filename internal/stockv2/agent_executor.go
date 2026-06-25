@@ -547,6 +547,25 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 		b.WriteString("\n")
 	}
 
+	if pack.MinuteBars != nil {
+		b.WriteString("## Intraday Minute Bars Context\n\n")
+		fmt.Fprintf(&b, "- Count: %d bars\n", pack.MinuteBars.Count)
+		fmt.Fprintf(&b, "- Latest Close: %.2f\n", pack.MinuteBars.LatestClose)
+		if !pack.MinuteBars.LatestMinuteAt.IsZero() {
+			fmt.Fprintf(&b, "- Latest Minute: %s\n", pack.MinuteBars.LatestMinuteAt.Format(time.RFC3339))
+		}
+		if pack.MinuteBars.Source != "" {
+			fmt.Fprintf(&b, "- Source: %s\n", pack.MinuteBars.Source)
+		}
+		if pack.MinuteBars.Summary != nil {
+			b.WriteString("- Summary:\n")
+			for k, v := range pack.MinuteBars.Summary {
+				fmt.Fprintf(&b, "  - %s: %.2f\n", k, v)
+			}
+		}
+		b.WriteString("\n")
+	}
+
 	// Portfolio
 	if pack.Portfolio != nil {
 		b.WriteString("## Portfolio Context\n\n")

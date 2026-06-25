@@ -42,7 +42,7 @@ func (s *Store) CreatePortfolioSnapshot(ctx context.Context, snapshot PortfolioS
 	return wrapError(err, "create portfolio snapshot")
 }
 
-func (s *Store) SavePortfolioValuation(ctx context.Context, holdings []StockV2Holding, snapshot PortfolioSnapshot) error {
+func (s *Store) SavePortfolioValuation(ctx context.Context, holdings []StockV2Holding, snapshot PortfolioSnapshot, writeSnapshot ...bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return wrapError(err, "begin portfolio valuation transaction")
@@ -54,8 +54,14 @@ func (s *Store) SavePortfolioValuation(ctx context.Context, holdings []StockV2Ho
 			return err
 		}
 	}
-	if err := insertPortfolioSnapshotWithTx(ctx, tx, snapshot); err != nil {
-		return err
+	shouldWriteSnapshot := true
+	if len(writeSnapshot) > 0 {
+		shouldWriteSnapshot = writeSnapshot[0]
+	}
+	if shouldWriteSnapshot {
+		if err := insertPortfolioSnapshotWithTx(ctx, tx, snapshot); err != nil {
+			return err
+		}
 	}
 	return wrapError(tx.Commit(), "commit portfolio valuation")
 }

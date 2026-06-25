@@ -2170,6 +2170,25 @@ export interface StockV2DailyBarsResponse {
   limit: number;
 }
 
+export interface StockV2MinuteBar {
+  symbol: string;
+  market?: string;
+  minuteAt: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  prevClose?: number;
+  volume?: number;
+  amount?: number;
+  pctChange?: number;
+  mainNetInflow?: number;
+  snapshotCount?: number;
+  source?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface StockV2DailyBarsQuality {
   symbol: string;
   adjusted: string;
@@ -2640,6 +2659,15 @@ export interface StockV2QuoteLatest {
   volume?: number;
   amount?: number;
   pctChange?: number;
+  amplitude?: number;
+  turnoverRate?: number;
+  volumeRatio?: number;
+  mainNetInflow?: number;
+  superNetInflow?: number;
+  largeNetInflow?: number;
+  mediumNetInflow?: number;
+  smallNetInflow?: number;
+  mainNetInflowPct?: number;
   quoteAt?: string;
   fetchedAt?: string;
   source?: string;
@@ -2658,6 +2686,17 @@ export interface StockV2DailyBarsContext {
   summary?: Record<string, number>;
 }
 
+export interface StockV2MinuteBarsContext {
+  symbol?: string;
+  count?: number;
+  latestMinuteAt?: string;
+  latestClose?: number;
+  latestVolume?: number;
+  latestNetInflow?: number;
+  source?: string;
+  summary?: Record<string, number>;
+}
+
 export interface StockV2PortfolioReviewContext {
   portfolio: StockV2Portfolio;
   snapshot?: StockV2PortfolioSnapshot;
@@ -2671,6 +2710,7 @@ export interface StockV2AgentContextPack {
   strategy?: StockV2StrategyWithVersion;
   quote?: StockV2QuoteLatest;
   dailyBars?: StockV2DailyBarsContext;
+  minuteBars?: StockV2MinuteBarsContext;
   portfolio?: StockV2PortfolioReviewContext;
   freshness?: Record<string, unknown>;
 }
