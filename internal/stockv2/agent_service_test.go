@@ -661,6 +661,63 @@ func TestFinalizeAgentRunFailsWhenReviewSaveFails(t *testing.T) {
 	}
 }
 
+func TestFinalizeAgentRunFailureIncludesStderrHint(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeCodexCLI,
+		Name:         "codex-stderr-hint",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	model, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID: provider.ID,
+		ModelName:  "gpt-stderr-hint",
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	run, ledger, err := svc.CreateAgentRunRecord(ctx, AgentRunRecordParams{
+		TaskType:          AgentTaskTypeOperationReview,
+		ProviderID:        provider.ID,
+		ModelID:           model.ID,
+		TriggerObjectType: "operation_review",
+		TriggerObjectID:   "review-stderr-hint",
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	taskID, _ := svc.agentTaskPool.createTask(run.TaskType, run.ID, run.TriggerObjectID, time.Minute)
+
+	svc.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, &AgentExecutorOutput{
+		ExitCode:   2,
+		Duration:   time.Millisecond,
+		StderrTail: "first line\nunknown model gpt-stderr-hint\n",
+	}, errors.New("process exited (code 2) without submitting result"))
+
+	got, err := svc.GetAgentRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.Status != AgentRunStatusFailed {
+		t.Fatalf("run status = %q, want failed", got.Status)
+	}
+	if !strings.Contains(got.ErrorMessage, "process exited (code 2)") || !strings.Contains(got.ErrorMessage, "unknown model gpt-stderr-hint") {
+		t.Fatalf("error message = %q, want exit code and stderr hint", got.ErrorMessage)
+	}
+	detail, err := svc.GetAgentExecutionDetail(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("get detail: %v", err)
+	}
+	if detail.Ledger == nil || !strings.Contains(detail.Ledger.OutputArtifactSummary, "stderr_tail:") {
+		t.Fatalf("ledger output = %+v, want stderr tail", detail.Ledger)
+	}
+}
+
 type fakeDebugAgentExecutor struct {
 	pool *agentTaskPool
 }

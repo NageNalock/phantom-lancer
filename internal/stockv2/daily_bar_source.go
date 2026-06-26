@@ -7,6 +7,8 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -97,7 +99,11 @@ func (d *DailyBarsSource) FetchDailyBars(ctx context.Context, symbol, market, st
 	}
 	req.Header.Set("User-Agent", pickDailyBarsUA())
 
-	resp, err := d.httpClient.Do(req)
+	client := d.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fqkline request failed: %w", err)
 	}
@@ -117,9 +123,153 @@ func (d *DailyBarsSource) FetchDailyBars(ctx context.Context, symbol, market, st
 		return nil, err
 	}
 	if len(bars) == 0 {
+		if fundBars, fundErr := d.fetchEastmoneyFundNAV(ctx, symbol, marketNorm, startDate, endDate, adjusted, count); fundErr == nil && len(fundBars) > 0 {
+			return fundBars, nil
+		} else if fundErr != nil && isFundNAVFallbackCandidate(symbol, adjusted) {
+			return nil, fmt.Errorf("fqkline returned 0 bars for %s; fund nav fallback failed: %w", symbol, fundErr)
+		}
 		return nil, fmt.Errorf("fqkline returned 0 bars for %s", symbol)
 	}
 	return bars, nil
+}
+
+func isFundNAVFallbackCandidate(symbol, adjusted string) bool {
+	_, typ := inferInstrumentMarketAndType(symbol)
+	return typ == InstrumentTypeExchangeFund && normalizeDailyBarAdjusted(adjusted) == DailyBarAdjustedNone
+}
+
+func (d *DailyBarsSource) fetchEastmoneyFundNAV(ctx context.Context, symbol, market, startDate, endDate, adjusted string, count int) ([]StockV2DailyBar, error) {
+	if !isFundNAVFallbackCandidate(symbol, adjusted) {
+		return nil, fmt.Errorf("fund nav fallback only supports exchange funds with adjusted=none")
+	}
+	if count <= 0 {
+		count = 400
+	}
+	if count > 1800 {
+		count = 1800
+	}
+	const pageSize = 20
+	maxPages := (count + pageSize - 1) / pageSize
+	if maxPages <= 0 {
+		maxPages = 1
+	}
+
+	client := d.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	now := time.Now()
+	bars := make([]StockV2DailyBar, 0, count)
+	for page := 1; page <= maxPages; page++ {
+		values := url.Values{}
+		values.Set("fundCode", symbol)
+		values.Set("pageIndex", strconv.Itoa(page))
+		values.Set("pageSize", strconv.Itoa(pageSize))
+		if startDate != "" {
+			values.Set("startDate", startDate)
+		}
+		if endDate != "" {
+			values.Set("endDate", endDate)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.fund.eastmoney.com/f10/lsjz?"+values.Encode(), nil)
+		if err != nil {
+			return nil, fmt.Errorf("build eastmoney fund nav request: %w", err)
+		}
+		req.Header.Set("User-Agent", pickDailyBarsUA())
+		req.Header.Set("Referer", "https://fundf10.eastmoney.com/")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("eastmoney fund nav request failed: %w", err)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+		closeErr := resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read eastmoney fund nav body: %w", readErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close eastmoney fund nav body: %w", closeErr)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("eastmoney fund nav http error: %d", resp.StatusCode)
+		}
+
+		rows, err := parseEastmoneyFundNAVRows(body, symbol, market, adjusted, now)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			break
+		}
+		bars = append(bars, rows...)
+		if len(bars) >= count {
+			bars = bars[:count]
+			break
+		}
+	}
+	sortDailyBarsAscending(bars)
+	for i := range bars {
+		if i == 0 {
+			bars[i].PrevClose = 0
+			continue
+		}
+		bars[i].PrevClose = bars[i-1].Close
+	}
+	return bars, nil
+}
+
+func parseEastmoneyFundNAVRows(body []byte, symbol, market, adjusted string, fetchedAt time.Time) ([]StockV2DailyBar, error) {
+	var resp struct {
+		Data struct {
+			LSJZList []struct {
+				FSRQ  string `json:"FSRQ"`
+				DWJZ  string `json:"DWJZ"`
+				JZZZL string `json:"JZZZL"`
+			} `json:"LSJZList"`
+		} `json:"Data"`
+		ErrCode int    `json:"ErrCode"`
+		ErrMsg  string `json:"ErrMsg"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode eastmoney fund nav response: %w", err)
+	}
+	if resp.ErrCode != 0 {
+		return nil, fmt.Errorf("eastmoney fund nav code=%d msg=%q", resp.ErrCode, resp.ErrMsg)
+	}
+
+	bars := make([]StockV2DailyBar, 0, len(resp.Data.LSJZList))
+	for _, row := range resp.Data.LSJZList {
+		date := strings.TrimSpace(row.FSRQ)
+		closeP := parseFloatTencent(row.DWJZ)
+		if date == "" || closeP <= 0 {
+			continue
+		}
+		// ponytail: Fund NAV is a daily valuation point, not traded OHLC; use flat OHLC until a fund trading kline source is added.
+		bars = append(bars, StockV2DailyBar{
+			ID:        generateID(),
+			Symbol:    symbol,
+			Market:    market,
+			TradeDate: date,
+			Open:      closeP,
+			High:      closeP,
+			Low:       closeP,
+			Close:     closeP,
+			PctChange: parseFloatTencent(row.JZZZL),
+			Adjusted:  adjusted,
+			Source:    "eastmoney_fund_nav",
+			FetchedAt: fetchedAt,
+			Quality:   DailyBarQualityPartial,
+		})
+	}
+	return bars, nil
+}
+
+func sortDailyBarsAscending(bars []StockV2DailyBar) {
+	sort.Slice(bars, func(i, j int) bool {
+		return bars[i].TradeDate < bars[j].TradeDate
+	})
 }
 
 // parseTencentFqKLine 解析腾讯 fqkline 响应。

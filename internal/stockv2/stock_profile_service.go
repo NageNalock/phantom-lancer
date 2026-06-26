@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"phantom-lancer/internal/safelog"
 )
 
 func (s *Service) BuildStockProfile(ctx context.Context, symbol string) (StockProfile, error) {
@@ -500,6 +502,25 @@ func (s *Service) applyStockProfileEnhancementResult(ctx context.Context, symbol
 	profile.AIProfileError = ""
 	profile.AIProfileUpdatedAt = time.Now()
 	return s.store.UpsertStockProfile(ctx, profile)
+}
+
+func (s *Service) markStockProfileAIEnhancementFailed(ctx context.Context, run AgentRun, message string) {
+	if run.TaskType != AgentTaskTypeStockProfileSummary || run.TriggerObjectType != "stock_profile" || strings.TrimSpace(run.TriggerObjectID) == "" {
+		return
+	}
+	profile, err := s.store.GetStockProfile(ctx, strings.TrimSpace(run.TriggerObjectID))
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("mark stock profile ai failed: get profile failed", "run_id", run.ID, "symbol", run.TriggerObjectID, "error", err)
+		}
+		return
+	}
+	profile.AIProfileStatus = StockProfileAIStatusFailed
+	profile.AIProfileError = safelog.Text(message, 500)
+	profile.AIProfileUpdatedAt = time.Now()
+	if _, err := s.store.UpsertStockProfile(ctx, profile); err != nil && s.log != nil {
+		s.log.Warn("mark stock profile ai failed: save profile failed", "run_id", run.ID, "symbol", run.TriggerObjectID, "error", err)
+	}
 }
 
 func firstProfileResultString(result map[string]any, keys ...string) string {
