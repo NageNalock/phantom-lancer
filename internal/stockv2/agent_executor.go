@@ -488,6 +488,21 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 		b.WriteString("\n```\n\n")
 	}
 
+	if pack.Hit.TaskType == "agent_cli_debug" {
+		googleNewsDate := stringFromAny(pack.Evidence["googleNewsDate"])
+		if googleNewsDate == "" {
+			googleNewsDate = time.Now().Format("2006-01-02")
+		}
+		b.WriteString("## CLI Debug Search Check\n\n")
+		b.WriteString("This is a debug-only task. For the Google News check only, use any available web/search MCP or search tool instead of relying only on the provided context.\n")
+		fmt.Fprintf(&b, "- Search target: Google News headlines for `%s`.\n", googleNewsDate)
+		b.WriteString("- Return all human-readable text in Chinese.\n")
+		b.WriteString("- Use outputType `continue_monitoring`.\n")
+		b.WriteString("- The result object must include `googleNewsSearchStatus`, `googleNewsTodayZh`, and `searchAudit`.\n")
+		b.WriteString("- `googleNewsTodayZh` should contain 3-5 items with `title`, `source`, `publishedAt`, `url`, and `summaryZh` when search succeeds.\n")
+		b.WriteString("- If no search/web tool is available or search fails, set `googleNewsSearchStatus` to `unavailable` or `failed`, keep `googleNewsTodayZh` as an empty array, and explain in Chinese. Do not fabricate news.\n\n")
+	}
+
 	// Strategy
 	if pack.Strategy != nil {
 		b.WriteString("## Strategy\n\n")

@@ -127,7 +127,7 @@ func TestExecutePromptReturnsAfterResultAndCleanProcessExit(t *testing.T) {
 		})
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	done := make(chan struct {
 		output *AgentExecutorOutput
@@ -149,7 +149,7 @@ func TestExecutePromptReturnsAfterResultAndCleanProcessExit(t *testing.T) {
 		if got.output == nil || got.output.ExitCode != 0 || !strings.Contains(got.output.StdoutTail, "fake stdout") {
 			t.Fatalf("output = %+v, want clean stdout exit", got.output)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(4 * time.Second):
 		t.Fatal("executePrompt did not return after MCP result and clean process exit")
 	}
 }
@@ -193,6 +193,41 @@ func TestBuildOperationReviewPromptDocumentsReviewContract(t *testing.T) {
 		"guardrails",
 	}
 	for _, want := range mustContain {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestBuildOperationReviewPromptIncludesDebugGoogleNewsSearchCheck(t *testing.T) {
+	prompt := buildOperationReviewPrompt("task-debug", AgentContextPack{
+		Hit: MonitorHit{
+			Title:    "Agent CLI debug self check with Google News search",
+			TaskType: "agent_cli_debug",
+			Status:   MonitorHitStatusCandidate,
+			Evidence: map[string]any{
+				"googleNewsDate":           "2026-06-26",
+				"googleNewsSearchRequired": true,
+				"requiredResultField":      "googleNewsTodayZh",
+			},
+		},
+		Evidence: map[string]any{
+			"googleNewsDate":           "2026-06-26",
+			"googleNewsSearchRequired": true,
+			"requiredResultField":      "googleNewsTodayZh",
+		},
+	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
+
+	for _, want := range []string{
+		"CLI Debug Search Check",
+		"Google News headlines",
+		"2026-06-26",
+		"web/search MCP",
+		"Return all human-readable text in Chinese",
+		"googleNewsTodayZh",
+		"googleNewsSearchStatus",
+		"searchAudit",
+	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}

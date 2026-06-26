@@ -13,24 +13,32 @@ import { Button, Drawer, Field, Notice, Toggle } from "../../components/ui";
 
 export function StockV2AgentModelDrawer({
   model,
+  initialModelType = "chat",
   providers,
   onClose,
   onSaved,
   actions,
 }: {
   model: StockV2AgentModelProfile | null; // null = 新建
+  initialModelType?: "chat" | "embedding";
   providers: StockV2AgentProviderProfile[];
   onClose: () => void;
   onSaved?: () => void;
   actions: AppActions;
 }) {
   const isEdit = model != null;
+  const fixedModelType = model?.modelType || initialModelType || "chat";
   const [form, setForm] = useState<StockV2AgentCreateModelRequest>({
     providerId: model?.providerId || providers[0]?.id || "",
     modelName: model?.modelName || "",
     displayName: model?.displayName || "",
     enabled: model?.enabled ?? true,
     contextLimit: model?.contextLimit,
+    modelType: fixedModelType,
+    embeddingProtocol: model?.embeddingProtocol || "openai_embeddings",
+    embeddingDimensions: model?.embeddingDimensions,
+    inputModalities: model?.inputModalities || ["text"],
+    encodingFormat: model?.encodingFormat || "float",
   });
   const [catalog, setCatalog] = useState<StockV2AgentProviderModelCatalogItem[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
@@ -48,9 +56,23 @@ export function StockV2AgentModelDrawer({
         displayName: model.displayName || "",
         enabled: model.enabled,
         contextLimit: model.contextLimit,
+        modelType: model.modelType || "chat",
+        embeddingProtocol: model.embeddingProtocol || "openai_embeddings",
+        embeddingDimensions: model.embeddingDimensions,
+        inputModalities: model.inputModalities || ["text"],
+        encodingFormat: model.encodingFormat || "float",
       });
+    } else {
+      setForm((prev) => ({
+        ...prev,
+        modelType: initialModelType,
+        embeddingProtocol: initialModelType === "embedding" ? prev.embeddingProtocol || "openai_embeddings" : undefined,
+        embeddingDimensions: initialModelType === "embedding" ? prev.embeddingDimensions : undefined,
+        inputModalities: initialModelType === "embedding" ? prev.inputModalities || ["text"] : undefined,
+        encodingFormat: initialModelType === "embedding" ? prev.encodingFormat || "float" : undefined,
+      }));
     }
-  }, [model]);
+  }, [initialModelType, model]);
 
   useEffect(() => {
     if (!isEdit && !form.providerId && providers[0]?.id) {
@@ -58,6 +80,8 @@ export function StockV2AgentModelDrawer({
     }
   }, [form.providerId, isEdit, providers]);
 
+  const isEmbedding = (form.modelType || "chat") === "embedding";
+  const isOpenAIEmbedding = isEmbedding && (form.embeddingProtocol || "openai_embeddings") === "openai_embeddings";
   const canSubmit = !!form.providerId && !!form.modelName.trim();
 
   async function handleSubmit() {
@@ -70,7 +94,12 @@ export function StockV2AgentModelDrawer({
         modelName: form.modelName.trim(),
         displayName: form.displayName?.trim(),
         enabled: form.enabled,
-        contextLimit: form.contextLimit,
+        contextLimit: isEmbedding ? undefined : form.contextLimit,
+        modelType: form.modelType || "chat",
+        embeddingProtocol: isEmbedding ? form.embeddingProtocol || "openai_embeddings" : undefined,
+        embeddingDimensions: isEmbedding ? form.embeddingDimensions : undefined,
+        inputModalities: isEmbedding ? form.inputModalities || ["text"] : undefined,
+        encodingFormat: isOpenAIEmbedding ? form.encodingFormat || "float" : undefined,
       };
       if (isEdit) {
         await actions.api(`/api/stockv2/agent/models/${model.id}`, { method: "PUT", body });
@@ -113,7 +142,15 @@ export function StockV2AgentModelDrawer({
     try {
       const res = await actions.api<StockV2AgentModelTestResult>("/api/stockv2/agent/models/test", {
         method: "POST",
-        body: { providerId: form.providerId, modelName: form.modelName.trim() },
+        body: {
+          providerId: form.providerId,
+          modelName: form.modelName.trim(),
+          modelType: form.modelType || "chat",
+          embeddingProtocol: isEmbedding ? form.embeddingProtocol || "openai_embeddings" : undefined,
+          embeddingDimensions: isEmbedding ? form.embeddingDimensions : undefined,
+          inputModalities: isEmbedding ? form.inputModalities || ["text"] : undefined,
+          encodingFormat: isOpenAIEmbedding ? form.encodingFormat || "float" : undefined,
+        },
       });
       setTestResult(res);
       actions.setToast(res.ok ? "模型可用" : "模型测试未通过", res.ok ? "good" : "warn");
@@ -135,7 +172,7 @@ export function StockV2AgentModelDrawer({
 
   return (
     <Drawer
-      title={isEdit ? "配置模型" : "新建模型"}
+      title={isEdit ? `配置${isEmbedding ? "嵌入" : "对话"}模型` : `新建${isEmbedding ? "嵌入" : "对话"}模型`}
       subtitle={isEdit ? `ID: ${model?.id}` : "具体模型实例，绑定到 Provider"}
       onClose={onClose}
       width={480}
@@ -222,39 +259,105 @@ export function StockV2AgentModelDrawer({
           />
         </Field>
 
-        <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
-          <Field label="上下文长度">
-            <input
-              type="number"
-              value={form.contextLimit ?? ""}
-              onChange={(e) =>
-                setForm({
-                  ...form,
-                  contextLimit: e.target.value ? Number(e.target.value) : undefined,
-                })
-              }
-              placeholder="如 200000"
-              className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
-            />
-          </Field>
-          <div className="flex items-end">
+        {isEmbedding ? (
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="嵌入协议">
+              <select
+                value={form.embeddingProtocol || "openai_embeddings"}
+                onChange={(e) => {
+                  setForm({ ...form, embeddingProtocol: e.target.value });
+                  setTestResult(null);
+                }}
+                className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
+              >
+                <option value="openai_embeddings">OpenAI embeddings</option>
+                <option value="volcengine_multimodal_embeddings">火山方舟多模态 embeddings</option>
+              </select>
+            </Field>
+            <Field label="维度">
+              <input
+                type="number"
+                min={1}
+                value={form.embeddingDimensions ?? ""}
+                onChange={(e) => {
+                  setForm({
+                    ...form,
+                    embeddingDimensions: e.target.value ? Number(e.target.value) : undefined,
+                  });
+                  setTestResult(null);
+                }}
+                placeholder="如 1536"
+                className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
+              />
+            </Field>
+            <Field label="输入类型">
+              <input
+                value="text"
+                readOnly
+                className="w-full rounded border border-[var(--line)] bg-[var(--surface-soft)] px-2 py-1.5 text-sm text-[var(--muted-strong)]"
+              />
+            </Field>
+            {isOpenAIEmbedding ? (
+              <Field label="编码格式">
+                <select
+                  value={form.encodingFormat || "float"}
+                  onChange={(e) => {
+                    setForm({ ...form, encodingFormat: e.target.value });
+                    setTestResult(null);
+                  }}
+                  className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
+                >
+                  <option value="float">float</option>
+                  <option value="base64">base64</option>
+                </select>
+              </Field>
+            ) : null}
+          </div>
+        ) : null}
+
+        {isEmbedding ? (
+          <div className="flex justify-end">
             <Button disabled={!canSubmit || testLoading} onClick={() => void testModel()}>
-              {testLoading ? "测试中…" : "测试模型"}
+              {testLoading ? "测试中…" : "测试向量化"}
             </Button>
           </div>
-        </div>
+        ) : (
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+            <Field label="上下文长度">
+              <input
+                type="number"
+                value={form.contextLimit ?? ""}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    contextLimit: e.target.value ? Number(e.target.value) : undefined,
+                  })
+                }
+                placeholder="如 200000"
+                className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
+              />
+            </Field>
+            <div className="flex items-end">
+              <Button disabled={!canSubmit || testLoading} onClick={() => void testModel()}>
+                {testLoading ? "测试中…" : "测试模型"}
+              </Button>
+            </div>
+          </div>
+        )}
 
         {testResult ? (
           testResult.ok ? (
             <div className="rounded-lg border border-[rgba(18,132,79,0.22)] bg-[var(--good-soft)] p-3 text-sm text-[var(--good)]">
               模型可用
               {testResult.latencyMs ? ` · ${testResult.latencyMs} ms` : ""}
+              {testResult.embeddingDimensions ? ` · ${testResult.embeddingDimensions} 维` : ""}
               {testResult.message ? ` · ${testResult.message}` : ""}
             </div>
           ) : (
             <Notice tone="warn">
               模型测试未通过
               {testResult.latencyMs ? ` · ${testResult.latencyMs} ms` : ""}
+              {testResult.embeddingDimensions ? ` · ${testResult.embeddingDimensions} 维` : ""}
               {testResult.message ? ` · ${testResult.message}` : ""}
             </Notice>
           )

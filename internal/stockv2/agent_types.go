@@ -56,6 +56,17 @@ const (
 	AgentModelCostLevelHigh   = "high"
 )
 
+// Model 类型。旧数据没有类型时默认 chat;embedding 只用于向量化,不能绑定 Agent task。
+const (
+	AgentModelTypeChat      = "chat"
+	AgentModelTypeEmbedding = "embedding"
+)
+
+const (
+	AgentEmbeddingProtocolOpenAI               = "openai_embeddings"
+	AgentEmbeddingProtocolVolcengineMultimodal = "volcengine_multimodal_embeddings"
+)
+
 // Agent 任务类型。常量值是 API/DB 稳定 key;前端展示中文名称。
 // operation_review / strategy_generation / stock_profile_summary 已可配置并执行,
 // 其余任务只作为未来能力展示。
@@ -115,9 +126,11 @@ var (
 	ErrAgentProviderBaseURLRequired     = errors.New("agent provider base url is required")
 	ErrInvalidAgentModelStatus          = errors.New("invalid agent model status")
 	ErrInvalidAgentModelCostLevel       = errors.New("invalid agent model cost level")
+	ErrInvalidAgentModelType            = errors.New("invalid agent model type")
 	ErrInvalidAgentModelName            = errors.New("agent model name is required")
 	ErrInvalidAgentTaskType             = errors.New("invalid agent task type")
 	ErrAgentTaskNotConfigurable         = errors.New("agent task is not configurable yet")
+	ErrAgentModelTypeNotAllowed         = errors.New("agent model type is not allowed for this task")
 )
 
 // AgentProviderProfile 供应商层(openai/codex_cli/local)。
@@ -141,17 +154,22 @@ type AgentProviderProfile struct {
 
 // AgentModelProfile 具体模型配置。
 type AgentModelProfile struct {
-	ID           string         `json:"id"`
-	ProviderID   string         `json:"providerId"`
-	ModelName    string         `json:"modelName"`
-	DisplayName  string         `json:"displayName,omitempty"`
-	Enabled      bool           `json:"enabled"`
-	Status       string         `json:"status"`
-	CostLevel    string         `json:"costLevel"`
-	ContextLimit int            `json:"contextLimit"`
-	Metadata     map[string]any `json:"metadata,omitempty"`
-	CreatedAt    time.Time      `json:"createdAt"`
-	UpdatedAt    time.Time      `json:"updatedAt"`
+	ID                  string         `json:"id"`
+	ProviderID          string         `json:"providerId"`
+	ModelName           string         `json:"modelName"`
+	DisplayName         string         `json:"displayName,omitempty"`
+	Enabled             bool           `json:"enabled"`
+	Status              string         `json:"status"`
+	CostLevel           string         `json:"costLevel"`
+	ContextLimit        int            `json:"contextLimit"`
+	ModelType           string         `json:"modelType"`
+	EmbeddingProtocol   string         `json:"embeddingProtocol,omitempty"`
+	EmbeddingDimensions int            `json:"embeddingDimensions,omitempty"`
+	InputModalities     []string       `json:"inputModalities,omitempty"`
+	EncodingFormat      string         `json:"encodingFormat,omitempty"`
+	Metadata            map[string]any `json:"metadata,omitempty"`
+	CreatedAt           time.Time      `json:"createdAt"`
+	UpdatedAt           time.Time      `json:"updatedAt"`
 }
 
 // AgentTaskProfile 股票任务到模型的绑定。任务 profile 由 schema 默认种入。
@@ -231,23 +249,33 @@ type RequestUpdateAgentProviderProfile struct {
 }
 
 type RequestCreateAgentModelProfile struct {
-	ProviderID   string         `json:"providerId"`
-	ModelName    string         `json:"modelName"`
-	DisplayName  string         `json:"displayName,omitempty"`
-	Enabled      bool           `json:"enabled"`
-	Status       string         `json:"status,omitempty"`
-	CostLevel    string         `json:"costLevel,omitempty"`
-	ContextLimit int            `json:"contextLimit,omitempty"`
-	Metadata     map[string]any `json:"metadata,omitempty"`
+	ProviderID          string         `json:"providerId"`
+	ModelName           string         `json:"modelName"`
+	DisplayName         string         `json:"displayName,omitempty"`
+	Enabled             bool           `json:"enabled"`
+	Status              string         `json:"status,omitempty"`
+	CostLevel           string         `json:"costLevel,omitempty"`
+	ContextLimit        int            `json:"contextLimit,omitempty"`
+	ModelType           string         `json:"modelType,omitempty"`
+	EmbeddingProtocol   string         `json:"embeddingProtocol,omitempty"`
+	EmbeddingDimensions int            `json:"embeddingDimensions,omitempty"`
+	InputModalities     []string       `json:"inputModalities,omitempty"`
+	EncodingFormat      string         `json:"encodingFormat,omitempty"`
+	Metadata            map[string]any `json:"metadata,omitempty"`
 }
 
 type RequestUpdateAgentModelProfile struct {
-	DisplayName  *string        `json:"displayName,omitempty"`
-	Enabled      *bool          `json:"enabled,omitempty"`
-	Status       *string        `json:"status,omitempty"`
-	CostLevel    *string        `json:"costLevel,omitempty"`
-	ContextLimit *int           `json:"contextLimit,omitempty"`
-	Metadata     map[string]any `json:"metadata,omitempty"`
+	DisplayName         *string        `json:"displayName,omitempty"`
+	Enabled             *bool          `json:"enabled,omitempty"`
+	Status              *string        `json:"status,omitempty"`
+	CostLevel           *string        `json:"costLevel,omitempty"`
+	ContextLimit        *int           `json:"contextLimit,omitempty"`
+	ModelType           *string        `json:"modelType,omitempty"`
+	EmbeddingProtocol   *string        `json:"embeddingProtocol,omitempty"`
+	EmbeddingDimensions *int           `json:"embeddingDimensions,omitempty"`
+	InputModalities     []string       `json:"inputModalities,omitempty"`
+	EncodingFormat      *string        `json:"encodingFormat,omitempty"`
+	Metadata            map[string]any `json:"metadata,omitempty"`
 }
 
 type AgentProviderModelCatalogItem struct {
@@ -264,14 +292,22 @@ type AgentProviderModelCatalog struct {
 }
 
 type RequestTestAgentModel struct {
-	ProviderID string `json:"providerId"`
-	ModelName  string `json:"modelName"`
+	ProviderID          string   `json:"providerId"`
+	ModelName           string   `json:"modelName"`
+	ModelType           string   `json:"modelType,omitempty"`
+	EmbeddingProtocol   string   `json:"embeddingProtocol,omitempty"`
+	EmbeddingDimensions int      `json:"embeddingDimensions,omitempty"`
+	InputModalities     []string `json:"inputModalities,omitempty"`
+	EncodingFormat      string   `json:"encodingFormat,omitempty"`
+	Input               string   `json:"input,omitempty"`
 }
 
 type AgentModelTestResult struct {
-	OK        bool   `json:"ok"`
-	Message   string `json:"message,omitempty"`
-	LatencyMS int64  `json:"latencyMs,omitempty"`
+	OK                  bool   `json:"ok"`
+	Message             string `json:"message,omitempty"`
+	LatencyMS           int64  `json:"latencyMs,omitempty"`
+	ModelType           string `json:"modelType,omitempty"`
+	EmbeddingDimensions int    `json:"embeddingDimensions,omitempty"`
 }
 
 type RequestUpdateAgentTaskProfile struct {
@@ -407,6 +443,10 @@ func validAgentModelCostLevel(v string) bool {
 	return v == AgentModelCostLevelLow ||
 		v == AgentModelCostLevelMedium ||
 		v == AgentModelCostLevelHigh
+}
+
+func validAgentModelType(v string) bool {
+	return v == "" || v == AgentModelTypeChat || v == AgentModelTypeEmbedding
 }
 
 func knownAgentTaskType(v string) bool {

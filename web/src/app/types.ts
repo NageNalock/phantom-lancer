@@ -2310,6 +2310,11 @@ export interface StockV2AgentModelProfile {
   status?: string;
   costLevel?: string;
   contextLimit?: number;
+  modelType?: "chat" | "embedding" | string;
+  embeddingProtocol?: string;
+  embeddingDimensions?: number;
+  inputModalities?: string[];
+  encodingFormat?: string;
   metadata?: Record<string, unknown>;
   createdAt?: string;
   updatedAt?: string;
@@ -2426,6 +2431,11 @@ export interface StockV2AgentCreateModelRequest {
   status?: string;
   costLevel?: string;
   contextLimit?: number;
+  modelType?: "chat" | "embedding" | string;
+  embeddingProtocol?: string;
+  embeddingDimensions?: number;
+  inputModalities?: string[];
+  encodingFormat?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -2435,6 +2445,11 @@ export interface StockV2AgentUpdateModelRequest {
   status?: string;
   costLevel?: string;
   contextLimit?: number;
+  modelType?: "chat" | "embedding" | string;
+  embeddingProtocol?: string;
+  embeddingDimensions?: number;
+  inputModalities?: string[];
+  encodingFormat?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -2461,4 +2476,6 @@ export interface StockV2AgentModelTestResult {
   ok: boolean;
   message?: string;
   latencyMs?: number;
+  modelType?: string;
+  embeddingDimensions?: number;
 }
