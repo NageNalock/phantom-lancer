@@ -93,6 +93,19 @@ func (e *codexCLIExecutor) ExecuteOperationReview(
 	return e.executePrompt(ctx, taskID, prompt, modelName)
 }
 
+func (e *codexCLIExecutor) ExecuteStrategyGeneration(
+	ctx context.Context,
+	taskID string,
+	pack StrategyGenerationContext,
+	modelName string,
+) (*AgentExecutorOutput, error) {
+	if e.binary == "" {
+		return nil, fmt.Errorf("codex binary path not configured")
+	}
+	prompt := buildStrategyGenerationPrompt(taskID, pack, e.mcpURL)
+	return e.executePrompt(ctx, taskID, prompt, modelName)
+}
+
 func (e *codexCLIExecutor) ExecuteStockProfileSummary(
 	ctx context.Context,
 	taskID string,
@@ -640,6 +653,57 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 		return result[:6000] + "\n... [truncated]\n...\n" + result[len(result)-2000:]
 	}
 
+	return b.String()
+}
+
+func buildStrategyGenerationPrompt(taskID string, pack StrategyGenerationContext, mcpURL string) string {
+	var b strings.Builder
+
+	b.WriteString("# Strategy Generation Task\n\n")
+	b.WriteString("System role: you are a StockV2 strategy generation agent. You are NOT a trading executor.\n")
+	b.WriteString("Use only the provided context. Do not invent market prices, financial data, news, filings, or sources.\n")
+	b.WriteString("Do not place orders, do not modify holdings, do not update active strategy versions, and do not create proposed_operation.\n")
+	b.WriteString("Submit your final result using the stock_agent.submit_result MCP tool.\n\n")
+	b.WriteString("Do not use shell commands or curl to submit the result; use the MCP tool directly.\n\n")
+
+	b.WriteString("## Task Information\n\n")
+	fmt.Fprintf(&b, "- Task ID: `%s`\n", taskID)
+	fmt.Fprintf(&b, "- Task Type: `%s`\n", AgentTaskTypeStrategyGeneration)
+	fmt.Fprintf(&b, "- Mode: `%s`\n", pack.Mode)
+	if mcpURL != "" {
+		fmt.Fprintf(&b, "- MCP Server Name: `%s`\n", codexStockAgentMCPName)
+		fmt.Fprintf(&b, "- MCP Server: `%s`\n", mcpURL)
+	}
+	b.WriteString("\n")
+
+	b.WriteString("## Strategy Generation Context\n\n```json\n")
+	raw, _ := json.MarshalIndent(pack, "", "  ")
+	b.Write(raw)
+	b.WriteString("\n```\n\n")
+
+	b.WriteString("## Portfolio Diagnosis Requirements\n\n")
+	b.WriteString("- Diagnose every current holding. For each holding, state current_status, whether to continue holding, whether a new strategy is needed, whether an existing strategy needs patching, whether it should enter Review, data triggers, news focus, and risk notes.\n")
+	b.WriteString("- At portfolio level, state position concentration, cash status, priority order, and missing strategies.\n")
+	b.WriteString("- For holdings without strategy coverage, you may output `draft_type: \"new_strategy\"` with a playbook.\n")
+	b.WriteString("- For holdings with active/draft/paused strategy coverage, output `draft_type: \"strategy_patch\"` or `no_change`; do not rewrite the active version.\n")
+	b.WriteString("- If immediate handling is needed, fill `portfolio_aware_suggestion.review_request`; do not create or request a proposed operation.\n\n")
+
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("You must submit exactly ONE result using stock_agent.submit_result.\n")
+	b.WriteString("Use outputType `strategy_generation` and return result schema `strategy-generation-report/v1`.\n")
+	b.WriteString("The playbook protocol is fixed: `playbook.rules[]` with fields `id`, `action`, `title`, `trigger`, `preconditions`, `target`, `risk`, `dataPrefilters`, `portfolioPrefilters`, `newsPrefilters`, `priority`.\n")
+	b.WriteString("Allowed rule actions: `observe`, `build_position`, `add_position`, `hold`, `reduce_position`, `exit_position`.\n")
+	b.WriteString("Do not introduce actions/action_type/add/reduce/clear or any second action protocol.\n\n")
+	b.WriteString("Example submit_result shape:\n")
+	b.WriteString("```json\n")
+	b.WriteString("{\"taskID\":\"<TASK_ID>\",\"taskType\":\"strategy_generation\",\"result\":{\"outputType\":\"strategy_generation\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"strategy-generation-report/v1\",\"run_summary\":{\"mode\":\"portfolio_strategy_diagnosis\",\"overall_conclusion\":\"...\",\"key_conflicts\":[],\"data_quality_notes\":[]},\"drafts\":[{\"symbol\":\"302132\",\"market\":\"SZ\",\"name\":\"中航成飞\",\"draft_type\":\"new_strategy\",\"strategy_bias\":\"bullish\",\"thesis\":\"...\",\"confidence\":0.72,\"evidence_summary\":[],\"risk_summary\":[],\"invalid_conditions\":[],\"playbook\":{\"version\":\"v1\",\"rules\":[{\"id\":\"observe_1\",\"action\":\"observe\",\"title\":\"观察\",\"trigger\":\"...\",\"preconditions\":\"...\",\"target\":\"...\",\"risk\":\"...\",\"dataPrefilters\":[],\"portfolioPrefilters\":[],\"newsPrefilters\":[],\"priority\":1}]},\"portfolio_aware_suggestion\":{\"trade_signal\":\"observe\",\"target_position_hint\":\"\",\"review_request\":\"\"}}]}}}\n")
+	b.WriteString("```\n")
+
+	const maxPromptLen = 12000
+	if b.Len() > maxPromptLen {
+		result := b.String()
+		return result[:9000] + "\n... [truncated]\n...\n" + result[len(result)-3000:]
+	}
 	return b.String()
 }
 

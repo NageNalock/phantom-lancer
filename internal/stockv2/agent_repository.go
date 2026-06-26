@@ -397,7 +397,7 @@ func scanAgentTaskProfile(row rowScanner) (AgentTaskProfile, error) {
 }
 
 // 无 Create:task profiles 由 schema 内 INSERT OR IGNORE 种入;
-// 当前只有 operation_review 允许配置(service 层校验)。
+// 可配置任务由 service 层 executableAgentTaskType 校验。
 
 func (s *Store) GetAgentTaskProfile(ctx context.Context, id string) (AgentTaskProfile, error) {
 	row := s.db.QueryRowContext(ctx, agentTaskProfileSelectSQL+" WHERE id = ?", id)

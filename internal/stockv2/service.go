@@ -78,6 +78,7 @@ func (s *Service) WithNewsEventLinker(linker NewsEventLinker) *Service {
 // AgentExecutor 是 Agent 执行器接口。
 type AgentExecutor interface {
 	ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName string) (*AgentExecutorOutput, error)
+	ExecuteStrategyGeneration(ctx context.Context, taskID string, pack StrategyGenerationContext, modelName string) (*AgentExecutorOutput, error)
 	ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error)
 }
 

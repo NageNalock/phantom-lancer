@@ -861,7 +861,7 @@ INSERT OR IGNORE INTO stockv2_agent_provider_profiles
     (id, provider_type, name, display_name, config_state, auth_state, availability, metadata_json, created_at, updated_at)
 VALUES
     ('agent-provider-codex-cli-default', 'codex_cli', 'default', 'Codex CLI 默认 Provider', 'configured', 'unknown', 'unknown', '{"managed":"system","source":"codex_cli_default"}', datetime('now'), datetime('now'));
--- Agent task profiles 幂等种入。当前只有 operation_review 可配置/执行;
+-- Agent task profiles 幂等种入。可配置/执行任务由 service 层校验;
 -- 其余 task 先作为未来能力展示,后端 service 会拒绝绑定和执行。
 INSERT OR IGNORE INTO stockv2_agent_task_profiles (id, task_type, primary_model_id, fallback_model_id, max_budget, created_at, updated_at) VALUES
     ('agent-task-operation-review', 'operation_review', '', '', 0, datetime('now'), datetime('now')),

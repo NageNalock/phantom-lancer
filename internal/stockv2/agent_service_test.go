@@ -437,11 +437,14 @@ func TestAgentTaskProfilesSeedFutureTasksReadOnly(t *testing.T) {
 		}
 	}
 
-	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeStrategyGeneration, RequestUpdateAgentTaskProfile{}); !errors.Is(err, ErrAgentTaskNotConfigurable) {
-		t.Fatalf("update future task error = %v, want ErrAgentTaskNotConfigurable", err)
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeStrategyGeneration, RequestUpdateAgentTaskProfile{}); err != nil {
+		t.Fatalf("update strategy_generation task: %v", err)
 	}
-	if _, err := svc.ResolveAgentTask(ctx, AgentTaskTypeStrategyGeneration, "manual", "x", "tester"); !errors.Is(err, ErrAgentTaskNotConfigurable) {
-		t.Fatalf("resolve future task error = %v, want ErrAgentTaskNotConfigurable", err)
+	if _, err := svc.ResolveAgentTask(ctx, AgentTaskTypeStrategyGeneration, "manual", "x", "tester"); !errors.Is(err, ErrAgentModelNotAvailable) {
+		t.Fatalf("resolve unbound strategy_generation error = %v, want ErrAgentModelNotAvailable", err)
+	}
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeOpportunityDiscovery, RequestUpdateAgentTaskProfile{}); !errors.Is(err, ErrAgentTaskNotConfigurable) {
+		t.Fatalf("update future task error = %v, want ErrAgentTaskNotConfigurable", err)
 	}
 }
 
@@ -739,6 +742,28 @@ func (f fakeDebugAgentExecutor) ExecuteOperationReview(ctx context.Context, task
 		TimedOut:      false,
 		Duration:      time.Millisecond,
 		RawTranscript: "debug stdout",
+	}, nil
+}
+
+func (f fakeDebugAgentExecutor) ExecuteStrategyGeneration(ctx context.Context, taskID string, pack StrategyGenerationContext, modelName string) (*AgentExecutorOutput, error) {
+	_, err := f.pool.submitResult(taskID, AgentTaskTypeStrategyGeneration, AgentTaskSubmittedResult{
+		OutputType:    StrategyGenerationOutputType,
+		ResultSummary: "strategy generation ok",
+		Result: map[string]any{
+			"schema_version": "strategy-generation-report/v1",
+			"run_summary":    map[string]any{"mode": pack.Mode},
+			"drafts":         []any{},
+		},
+		Confidence: 1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &AgentExecutorOutput{
+		StdoutTail:    "strategy generation stdout",
+		ExitCode:      0,
+		Duration:      time.Millisecond,
+		RawTranscript: "strategy generation stdout",
 	}, nil
 }
 

@@ -407,6 +407,37 @@ func (f fakeOperationReviewExecutor) ExecuteStockProfileSummary(ctx context.Cont
 	}, f.execErr
 }
 
+func (f fakeOperationReviewExecutor) ExecuteStrategyGeneration(ctx context.Context, taskID string, pack StrategyGenerationContext, modelName string) (*AgentExecutorOutput, error) {
+	result := f.result
+	if result == nil {
+		result = map[string]any{
+			"schema_version": "strategy-generation-report/v1",
+			"run_summary":    map[string]any{"mode": pack.Mode},
+			"drafts":         []any{},
+		}
+	}
+	if f.submit {
+		_, _ = f.pool.submitResult(taskID, AgentTaskTypeStrategyGeneration, AgentTaskSubmittedResult{
+			OutputType:    StrategyGenerationOutputType,
+			ResultSummary: f.summary,
+			Result:        result,
+			Confidence:    f.confidence,
+		})
+	}
+	exitCode := 0
+	stderr := ""
+	if f.execErr != nil {
+		exitCode = 1
+		stderr = f.execErr.Error()
+	}
+	return &AgentExecutorOutput{
+		StdoutTail: "fake strategy generation stdout",
+		StderrTail: stderr,
+		ExitCode:   exitCode,
+		Duration:   time.Millisecond,
+	}, f.execErr
+}
+
 func mcpSubmitResultRequest(taskID, outputType, summary string, result map[string]any, confidence float64) []byte {
 	raw, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",

@@ -132,7 +132,7 @@ func (p *agentTaskPool) mcpToolsList(params json.RawMessage) (any, *mcpError) {
 						"properties": map[string]any{
 							"outputType": map[string]any{
 								"type":        "string",
-								"enum":        []string{"trade_signal", "proposed_operation", "strategy_patch", "ignore", "continue_monitoring", "stock_profile_summary"},
+								"enum":        []string{"trade_signal", "proposed_operation", "strategy_patch", "ignore", "continue_monitoring", "stock_profile_summary", "strategy_generation"},
 								"description": "The type of output result.",
 							},
 							"resultSummary": map[string]any{

@@ -1281,6 +1281,22 @@ func (s *Service) finalizeAgentRunWithOutput(
 			return
 		}
 	}
+	if run.TaskType == AgentTaskTypeStrategyGeneration && run.TriggerObjectType == "strategy_generation" {
+		if _, err := s.applyStrategyGenerationResult(ctx, run, submitted.Result, submitted.Confidence); err != nil {
+			run.Status = AgentRunStatusFailed
+			run.ErrorMessage = safelog.Text("save strategy generation result failed: "+err.Error(), 500)
+			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
+				s.log.Warn("finalize: update run after strategy generation save failed", "run_id", runID, "error", updateErr)
+			}
+			if s.log != nil {
+				s.log.Warn("finalize: save strategy generation result failed", "run_id", runID, "portfolio_id", run.TriggerObjectID, "error", err)
+			}
+			if _, ledgerErr := s.store.UpdateAgentDecisionLedger(ctx, ledger); ledgerErr != nil && s.log != nil {
+				s.log.Warn("finalize: update ledger after strategy generation save failed", "run_id", runID, "error", ledgerErr)
+			}
+			return
+		}
+	}
 
 	if _, err := s.store.UpdateAgentDecisionLedger(ctx, ledger); err != nil && s.log != nil {
 		s.log.Warn("finalize: update ledger failed", "run_id", runID, "error", err)
