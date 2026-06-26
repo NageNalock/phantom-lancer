@@ -1766,6 +1766,7 @@ export interface StockV2Strategy {
   entryConditions?: string;
   exitConditions?: string;
   riskNotes?: string;
+  evidenceRefs?: string[];
   generationMeta?: Record<string, unknown>;
   entryPriceLow?: number;
   entryPriceHigh?: number;
@@ -1811,6 +1812,43 @@ export interface StockV2StrategyInput {
   evidenceRefs?: string[];
   generationMeta?: Record<string, unknown>;
   createdBy?: string;
+}
+
+// ===== 策略生成 (strategy_generation) =====
+//
+// Agent 策略生成入口提交体。后端 POST /api/stockv2/agent/strategy-generation/run
+// 接收 StrategyGenerationInput(camelCase)，返回 StockV2AgentRun；策略草案异步落库。
+export type StockV2StrategyGenerationMode =
+  | "manual_target"
+  | "single_instrument"
+  | "portfolio_strategy_diagnosis";
+
+export type StockV2StrategyGenerationTimeHorizon =
+  | "short"
+  | "swing"
+  | "medium"
+  | "long"
+  | "unspecified";
+
+export interface StockV2StrategyGenerationTargetInstrument {
+  symbol: string;
+  market?: string;
+  name?: string;
+  userNote?: string;
+}
+
+export interface StockV2StrategyGenerationInput {
+  schemaVersion?: string;
+  mode: StockV2StrategyGenerationMode;
+  userGoal?: string;
+  userIntent?: string;
+  portfolioId?: string;
+  targetInstruments?: StockV2StrategyGenerationTargetInstrument[];
+  requestedBy?: string;
+  opportunityId?: string;
+  timeHorizon?: StockV2StrategyGenerationTimeHorizon;
+  allowedActions?: StockV2StrategyActionType[];
+  evidenceScope?: Record<string, boolean>;
 }
 
 // ===== Legacy Watch / Alert compatibility =====

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { X } from "@phosphor-icons/react";
+import { Sparkle, X } from "@phosphor-icons/react";
 import type {
   DailyBarAdjusted,
   DailyBarRange,
@@ -30,6 +30,7 @@ import {
 import type { Tone } from "../../app/types";
 import { Button, Pill, Notice } from "../../components/ui";
 import { StockV2KLineChart } from "./StockV2KLineChart";
+import { StrategyGenerationDrawer } from "./StockV2StrategyGenerationDrawer";
 
 const RANGES: DailyBarRange[] = ["6m", "1y", "3y", "5y"];
 const ADJUSTEDS: DailyBarAdjusted[] = ["none", "qfq", "hfq"];
@@ -72,6 +73,7 @@ export function StockV2InstrumentDetail({
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileRun, setProfileRun] = useState<StockV2AgentRun | null>(null);
   const [profileTask, setProfileTask] = useState<StockV2StockProfileUpdateTask | null>(null);
+  const [genOpen, setGenOpen] = useState(false);
   const profileRunPollRef = useRef<number | null>(null);
 
   // 区间/复权切换或切换标的时，清空旧 bars，避免展示不匹配的假 K 线。
@@ -432,6 +434,14 @@ export function StockV2InstrumentDetail({
             </div>
           </div>
           <Button
+            onClick={() => setGenOpen(true)}
+            title="为该股票生成策略"
+            className="px-2 py-1 text-xs"
+          >
+            <Sparkle size={14} className="mr-1" />
+            生成策略
+          </Button>
+          <Button
             onClick={onClose}
             aria-label="关闭"
             title="关闭 (Esc)"
@@ -602,6 +612,16 @@ export function StockV2InstrumentDetail({
           数据来源：{chartMode === "minute" ? minuteBars?.[0]?.source || "分钟行情待同步" : bars?.[0]?.source || quality?.source || "tencent_fqkline"}（公开端点，异步落盘）。失败时不会伪造 K 线。
         </footer>
       </aside>
+      {genOpen && inst ? (
+        <StrategyGenerationDrawer
+          actions={actions}
+          initial={{
+            mode: "single_instrument",
+            targetInstruments: [{ symbol: inst.symbol, market: inst.market, name: inst.name }],
+          }}
+          onClose={() => setGenOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

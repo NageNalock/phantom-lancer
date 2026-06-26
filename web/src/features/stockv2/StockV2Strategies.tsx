@@ -1,4 +1,4 @@
-import { Archive, ArrowsClockwise, Eye, MagnifyingGlass, Pause, Pencil, Play, Plus, Sparkle } from "@phosphor-icons/react";
+import { Archive, ArrowsClockwise, ArrowSquareOut, Eye, Pause, Pencil, Play, Plus, Sparkle } from "@phosphor-icons/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { AppActions } from "../../app/App";
@@ -19,7 +19,6 @@ import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, ContextList, Drawer, Field, Notice, Panel, Pill, useDangerConfirm } from "../../components/ui";
 import {
   formatDate,
-  stockV2InstrumentTypeLabel,
   stockV2StrategyDirectionLabel,
   stockV2StrategyKindLabel,
   stockV2StrategyScopeLabel,
@@ -38,6 +37,9 @@ import {
   playbookRulesForForm,
   playbookSummaryText,
 } from "./StockV2StrategyPlaybook";
+import { SymbolPicker, SymbolRef } from "./StockV2SymbolPicker";
+import { StrategyGenerationDrawer } from "./StockV2StrategyGenerationDrawer";
+import { StockV2AgentRunDetailDrawer } from "./StockV2AgentExecutionLedger";
 
 // 策略是长期判断依据,由系统内置监控任务扫描并产生命中候选。
 // 本页只做 Strategy 对象的 CRUD 与版本展示;不让用户创建单独价格提醒。
@@ -47,13 +49,8 @@ type DrawerState =
   | { type: "closed" }
   | { type: "create"; initialKind?: StockV2StrategyKind }
   | { type: "detail"; id: string }
-  | { type: "edit"; strategy: StockV2Strategy };
-
-interface SymbolRef {
-  symbol: string;
-  market?: string;
-  name?: string;
-}
+  | { type: "edit"; strategy: StockV2Strategy }
+  | { type: "generate" };
 
 interface PriceForm {
   entryPriceLow: string;
@@ -95,6 +92,7 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
   const [versions, setVersions] = useState<StockV2StrategyVersion[]>([]);
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [agentRunDetailId, setAgentRunDetailId] = useState<string | null>(null);
 
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
@@ -348,11 +346,10 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
           />
         )}
 
-        {/* Agent 生成策略尚未落地:入口可见但禁用,保留语义占位。 */}
         <div className="mt-4 border-t border-[var(--line)] pt-3">
-          <Button disabled title="Agent 生成策略将在后续版本提供">
+          <Button tone="primary" onClick={() => setDrawer({ type: "generate" })}>
             <Sparkle size={14} className="mr-1.5" />
-            Agent 生成策略(即将支持)
+            生成策略
           </Button>
         </div>
       </Panel>
@@ -405,6 +402,23 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
             const done = await requestArchiveStrategy(detailStrategy);
             if (done) setDrawer({ type: "closed" });
           }}
+          onOpenAgentRun={(runId) => setAgentRunDetailId(runId)}
+        />
+      ) : null}
+
+      {drawer.type === "generate" ? (
+        <StrategyGenerationDrawer
+          actions={actions}
+          initial={{ mode: "manual_target" }}
+          onClose={() => setDrawer({ type: "closed" })}
+        />
+      ) : null}
+
+      {agentRunDetailId ? (
+        <StockV2AgentRunDetailDrawer
+          actions={actions}
+          runId={agentRunDetailId}
+          onClose={() => setAgentRunDetailId(null)}
         />
       ) : null}
 
@@ -572,6 +586,7 @@ function StrategyRow({
           <strong className="text-sm">{strategy.name}</strong>
           <Pill tone="neutral">{stockV2StrategyKindLabel(strategy.kind)}</Pill>
           <Pill tone={stockV2StrategyStatusTone(strategy.status)}>{stockV2StrategyStatusLabel(strategy.status)}</Pill>
+          {strategy.source === "agent" && strategy.status === "draft" ? <Pill tone="warn">草案</Pill> : null}
           {strategy.scope ? <Pill tone="neutral">{stockV2StrategyScopeLabel(strategy.scope)}</Pill> : null}
           <span className="text-xs text-[var(--muted)]">· {stockV2StrategySourceLabel(strategy.source)}</span>
         </div>
@@ -1032,6 +1047,7 @@ function StrategyDetailDrawer({
   onActivate,
   onPause,
   onArchive,
+  onOpenAgentRun,
 }: {
   strategy: StockV2Strategy;
   portfolios: StockV2Portfolio[];
@@ -1044,9 +1060,11 @@ function StrategyDetailDrawer({
   onActivate: () => void;
   onPause: () => Promise<void>;
   onArchive: () => Promise<void>;
+  onOpenAgentRun: (runId: string) => void;
 }) {
   const portfolio = strategy.portfolioId ? portfolios.find((p) => p.id === strategy.portfolioId) : null;
   const archived = strategy.status === "archived";
+  const gen = readAgentGenerationMeta(strategy.generationMeta);
 
   const items: Array<[string, ReactNode]> = [
     ["类型", stockV2StrategyKindLabel(strategy.kind)],
@@ -1116,6 +1134,10 @@ function StrategyDetailDrawer({
 
         <PriceSummary strategy={strategy} />
 
+        {strategy.source === "agent" ? (
+          <AgentGenerationSection strategy={strategy} gen={gen} onOpenAgentRun={onOpenAgentRun} />
+        ) : null}
+
         <div>
           <div className="mb-2 text-xs font-medium text-[var(--muted-strong)]">版本历史</div>
           {versionsLoading ? (
@@ -1158,6 +1180,98 @@ function DetailField({ label, value }: { label: string; value: string }) {
   );
 }
 
+function BulletField({ label, items }: { label: string; items: string[] }) {
+  return (
+    <div className="grid gap-1">
+      <span className="text-xs text-[var(--muted)]">{label}</span>
+      <ul className="m-0 grid list-none gap-0.5 p-0">
+        {items.map((item, idx) => (
+          <li key={idx} className="whitespace-pre-wrap leading-relaxed text-[var(--text)]">· {item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+interface AgentGenerationMetaView {
+  agentRunId?: string;
+  confidence?: number;
+  overallConclusion?: string;
+  keyConflicts?: string[];
+  dataQualityNotes?: string[];
+}
+
+// 从 generationMeta 安全读取 Agent 策略生成留痕字段（agentRunId / 置信度 / runSummary）。
+// 后端结构漂移或字段缺失时返回空，不抛错，详情区按可空渲染。
+function readAgentGenerationMeta(meta?: Record<string, unknown>): AgentGenerationMetaView {
+  if (!meta) return {};
+  const agentRunId = typeof meta.agentRunId === "string" ? meta.agentRunId : undefined;
+  const sgRaw = meta.strategyGeneration;
+  const sg = sgRaw && typeof sgRaw === "object" ? (sgRaw as Record<string, unknown>) : {};
+  const confidence = typeof sg.confidence === "number" ? sg.confidence : undefined;
+  const rsRaw = sg.runSummary;
+  const rs = rsRaw && typeof rsRaw === "object" ? (rsRaw as Record<string, unknown>) : {};
+  const overallConclusion = typeof rs.overall_conclusion === "string" ? rs.overall_conclusion : undefined;
+  const keyConflicts = Array.isArray(rs.key_conflicts)
+    ? rs.key_conflicts.filter((x): x is string => typeof x === "string")
+    : undefined;
+  const dataQualityNotes = Array.isArray(rs.data_quality_notes)
+    ? rs.data_quality_notes.filter((x): x is string => typeof x === "string")
+    : undefined;
+  return { agentRunId, confidence, overallConclusion, keyConflicts, dataQualityNotes };
+}
+
+// Agent 生成草案的留痕区：常驻置信度 + 查看 Agent 运行详情入口；
+// 总体结论 / 关键分歧 / 数据质量 / 证据 收进折叠区，避免首屏噪音。
+function AgentGenerationSection({
+  strategy,
+  gen,
+  onOpenAgentRun,
+}: {
+  strategy: StockV2Strategy;
+  gen: AgentGenerationMetaView;
+  onOpenAgentRun: (runId: string) => void;
+}) {
+  const evidence = strategy.evidenceRefs?.length ? strategy.evidenceRefs : undefined;
+  const hasFoldDetail = !!(
+    gen.overallConclusion ||
+    gen.keyConflicts?.length ||
+    gen.dataQualityNotes?.length ||
+    evidence?.length
+  );
+  return (
+    <div className="grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-xs font-medium text-[var(--muted-strong)]">Agent 留痕</div>
+        {gen.agentRunId ? (
+          <Button onClick={() => onOpenAgentRun(gen.agentRunId!)} title="查看 Agent 运行详情">
+            <ArrowSquareOut size={14} className="mr-1.5" />
+            查看 Agent 运行详情
+          </Button>
+        ) : null}
+      </div>
+
+      {gen.confidence !== undefined ? (
+        <div className="grid gap-0.5">
+          <span className="text-xs text-[var(--muted)]">置信度</span>
+          <span className="font-mono text-sm text-[var(--text)]">{(gen.confidence * 100).toFixed(0)}%</span>
+        </div>
+      ) : null}
+
+      {hasFoldDetail ? (
+        <CollapsibleSection title="生成结论与证据">
+          <div className="grid gap-3 text-sm">
+            {gen.overallConclusion ? <DetailField label="总体结论" value={gen.overallConclusion} /> : null}
+            {gen.keyConflicts?.length ? <BulletField label="关键分歧" items={gen.keyConflicts} /> : null}
+            {gen.dataQualityNotes?.length ? <BulletField label="数据质量备注" items={gen.dataQualityNotes} /> : null}
+            {evidence?.length ? <BulletField label="证据" items={evidence} /> : null}
+          </div>
+        </CollapsibleSection>
+      ) : null}
+    </div>
+  );
+}
+
 function PriceSummary({ strategy }: { strategy: StockV2Strategy }) {
   const rows: Array<[string, string]> = [];
   if (definedPrice(strategy.entryPriceLow) || definedPrice(strategy.entryPriceHigh)) {
@@ -1179,114 +1293,6 @@ function PriceSummary({ strategy }: { strategy: StockV2Strategy }) {
           </div>
         ))}
       </div>
-    </div>
-  );
-}
-
-// ============================ 标的搜索 ============================
-
-function SymbolPicker({
-  actions,
-  value,
-  onChange,
-}: {
-  actions: AppActions;
-  value: SymbolRef;
-  onChange: (ref: SymbolRef) => void;
-}) {
-  const [query, setQuery] = useState(value.symbol && value.name ? `${value.symbol} · ${value.name}` : value.symbol || "");
-  const [results, setResults] = useState<StockV2Instrument[]>([]);
-  const [open, setOpen] = useState(false);
-  const [searching, setSearching] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const wrapRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    function onClick(e: MouseEvent) {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
-    }
-    document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
-  }, []);
-
-  useEffect(() => {
-    if (timerRef.current) clearTimeout(timerRef.current);
-    if (!query.trim()) {
-      setResults([]);
-      return;
-    }
-    timerRef.current = setTimeout(async () => {
-      setSearching(true);
-      try {
-        const res = await actions.api<{ items: StockV2Instrument[] }>(
-          `/api/stockv2/instruments/search?q=${encodeURIComponent(query)}&limit=20`,
-        );
-        setResults(res.items || []);
-        setOpen(true);
-      } catch {
-        setResults([]);
-      } finally {
-        setSearching(false);
-      }
-    }, 200);
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-    };
-  }, [query, actions]);
-
-  function pick(inst: StockV2Instrument) {
-    onChange({ symbol: inst.symbol, market: inst.market, name: inst.name });
-    setQuery(`${inst.symbol} · ${inst.name || ""}`);
-    setOpen(false);
-  }
-
-  return (
-    <div className="relative" ref={wrapRef}>
-      <div className="relative">
-        <MagnifyingGlass size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
-        <input
-          type="text"
-          className="w-full rounded border border-[var(--line)] bg-[var(--surface)] py-2 pl-8 pr-3 text-sm text-[var(--text)] focus:border-[var(--accent)] focus:outline-none"
-          placeholder="输入代码或名称搜索"
-          value={query}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setOpen(true);
-          }}
-          onFocus={() => {
-            if (results.length) setOpen(true);
-          }}
-        />
-      </div>
-      {open ? (
-        <div className="absolute left-0 right-0 top-full z-10 mt-1 max-h-64 overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--surface)] shadow-[var(--shadow)]">
-          {searching ? (
-            <div className="px-3 py-2 text-xs text-[var(--muted)]">搜索中…</div>
-          ) : results.length === 0 ? (
-            <div className="px-3 py-2 text-xs text-[var(--muted)]">{query ? "未找到匹配的标的" : "输入关键词开始搜索"}</div>
-          ) : (
-            results.map((inst) => (
-              <button
-                key={inst.id}
-                type="button"
-                onClick={() => pick(inst)}
-                className="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-[var(--surface-soft)]"
-              >
-                <span className="font-mono">{inst.symbol}</span>
-                <span className="mx-2 min-w-0 truncate text-[var(--muted)]">{inst.name}</span>
-                <span className="flex shrink-0 items-center gap-1">
-                  <Pill tone="neutral" className="text-xs">
-                    {inst.market === "SH" ? "沪" : inst.market === "SZ" ? "深" : inst.market === "BJ" ? "北" : inst.market}
-                  </Pill>
-                  <Pill tone="neutral" className="text-xs">
-                    {stockV2InstrumentTypeLabel(inst.instrumentType)}
-                  </Pill>
-                </span>
-              </button>
-            ))
-          )}
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -1315,6 +1321,7 @@ function normalizeStrategyItem(item: StockV2StrategyWithVersion | StockV2Strateg
     entryConditions: listToMultiline(activeVersion?.entryConditions) || strategy.entryConditions,
     exitConditions: listToMultiline(activeVersion?.exitConditions) || strategy.exitConditions,
     riskNotes: activeVersion?.riskNotes || strategy.riskNotes,
+    evidenceRefs: activeVersion?.evidenceRefs ?? strategy.evidenceRefs,
     generationMeta,
     playbook,
     ...price,

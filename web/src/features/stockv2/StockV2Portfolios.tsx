@@ -1,4 +1,4 @@
-import { Eye, Plus, Minus, Trash, Pencil, Wallet, X, Check, MagnifyingGlass } from "@phosphor-icons/react";
+import { Eye, Plus, Minus, Sparkle, Trash, Pencil, Wallet, X, Check, MagnifyingGlass } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { AreaSeries, createChart, createSeriesMarkers, type CrosshairMode, type IChartApi, type ISeriesApi, type Time } from "lightweight-charts";
 import type { AppActions } from "../../app/App";
@@ -6,6 +6,7 @@ import type { AppData, StockV2Alert, StockV2AlertListResponse, StockV2AssetCurve
 import { Button, ContextList, Drawer, EmptyState, Field, Notice, Panel, Pill, SubTabs } from "../../components/ui";
 import { stockV2InstrumentTypeLabel, stockV2RiskLabel, stockV2ValuationStatusLabel, stockV2ValuationStatusTone } from "../../domain/labels";
 import { StockV2InstrumentDetail } from "./StockV2InstrumentDetail";
+import { StrategyGenerationDrawer } from "./StockV2StrategyGenerationDrawer";
 
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
 type PortfolioDetailTab = "holdings" | "transactions" | "curve";
@@ -24,6 +25,7 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
   const [detailTab, setDetailTab] = useState<PortfolioDetailTab>("holdings");
   const [selectedInstrument, setSelectedInstrument] = useState<StockV2Instrument | null>(null);
   const [selectedTransaction, setSelectedTransaction] = useState<StockV2Transaction | null>(null);
+  const [genPortfolio, setGenPortfolio] = useState<{ id: string; name: string } | null>(null);
 
   // 选中第一个组合
   useEffect(() => {
@@ -123,6 +125,10 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
               <Button onClick={openStockV2MonitorTab}>
                 <Eye size={14} className="mr-1.5" />
                 监控与任务
+              </Button>
+              <Button onClick={() => setGenPortfolio({ id: selected.id, name: selected.name })}>
+                <Sparkle size={14} className="mr-1.5" />
+                诊断当前组合
               </Button>
               <Button onClick={() => setHoldingsDialog({ portfolioId: selected.id, mode: "add" })}>
                 <Plus size={14} className="mr-1.5" />
@@ -320,6 +326,18 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
           actions={actions}
           transaction={selectedTransaction}
           onClose={() => setSelectedTransaction(null)}
+        />
+      ) : null}
+
+      {genPortfolio ? (
+        <StrategyGenerationDrawer
+          actions={actions}
+          initial={{
+            mode: "portfolio_strategy_diagnosis",
+            portfolioId: genPortfolio.id,
+            portfolioName: genPortfolio.name,
+          }}
+          onClose={() => setGenPortfolio(null)}
         />
       ) : null}
     </div>
