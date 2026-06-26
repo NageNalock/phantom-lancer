@@ -1,0 +1,553 @@
+# 股票 V2 机会发现技术设计
+
+> 文档日期：2026-06-26
+>
+> 状态：V2 开发前技术设计
+>
+> REPLACES：无。本文补充 `stock-agent-workbench-v2-key-points-2026-06-18.md` 中 `Opportunity`、`Theme`、`GeneratedStrategy`、`AgentRun` 和 `DecisionLedger` 的机会发现落地细节。
+>
+> 相关文档：`docs/stock-v2-strategy-generation-design-2026-06-26.md` 定义候选进入策略生成后的 `strategy_generation` 流程。
+
+## 1. 目标
+
+机会发现解决的是“用户知道一个主题、事件或判断，但不知道应该关注哪只股票，也不知道策略是什么”的场景。
+
+典型输入：
+
+```text
+字节跳动的新 AI 模型很好，帮我找 A 股 / ETF 里的相关机会，并给出后续策略方向。
+```
+
+目标链路：
+
+```text
+用户输入主题
+-> Opportunity
+-> OpportunityDiscoveryRun
+-> Codex CLI 研究执行
+-> MCP 查询项目内资料
+-> Codex CLI 自行搜索外部公开资料
+-> 结构化步骤 / 证据 / 候选留痕
+-> OpportunityCandidate 候选池
+-> 用户选择候选
+-> strategy_generation
+-> 策略草案
+```
+
+第一阶段只做“主题到候选池”的闭环，并打通候选进入策略生成。不要在第一阶段引入向量库、复杂搜索代理或独立爬虫。
+
+## 2. 核心原则
+
+机会发现由 Codex CLI 作为研究执行者闭环完成，主程序不替 Agent 做完整候选计算。
+
+主程序只负责：
+
+- 创建机会、运行记录和任务上下文。
+- 提供受控的项目内数据 MCP 查询工具。
+- 提供 MCP 过程记录与最终结果回填工具。
+- watch Codex CLI 的可见执行过程，并写入 Agent 运行留痕。
+- 校验 Agent 回填结果并落库。
+- 提供清晰的前端可观测视图。
+
+外部公开资料搜索由 Codex CLI 自己完成。主程序不提供 `web_search` / `web_fetch` MCP 工具，避免做出比 CLI 自带能力更窄的搜索实现。
+
+## 3. 能力边界
+
+允许：
+
+- Agent 查询项目内股票、ETF、画像、行情、日 K、新闻、已有策略和组合上下文。
+- Agent 使用 Codex CLI 自身搜索 / 浏览能力查外部公开资料。
+- Agent 通过 MCP 记录研究步骤、外部来源、证据、候选和最终结论。
+- 主程序把通过校验的候选落库。
+- 用户从候选进入策略生成。
+
+禁止：
+
+- Agent 直接写数据库。
+- Agent 直接改持仓。
+- Agent 直接创建操作单。
+- Agent 直接激活策略。
+- Agent 读取 token、cookie、私有配置或本地敏感文件。
+- Agent 把外部网页搜索结果当成已核验事实；必须保留来源和不确定性。
+
+## 4. 数据模型
+
+### 4.1 stockv2_opportunities
+
+表示一个长期存在的主题机会。
+
+```text
+id
+title
+user_thesis
+market_scope              // a_share | hk | us | all，第一阶段只实现 a_share
+instrument_scope          // stock | exchange_fund | both
+status                    // draft | researching | completed | closed
+created_by
+created_at
+updated_at
+```
+
+说明：
+
+- `title` 是短标题，例如“字节跳动 AI 模型主题”。
+- `user_thesis` 保留用户原始判断。
+- `status=completed` 只表示本轮机会发现完成，不代表机会一定成立。
+
+### 4.2 stockv2_opportunity_discovery_runs
+
+表示一次机会发现运行。
+
+```text
+id
+opportunity_id
+agent_run_id
+status                    // pending | running | completed | failed | cancelled
+current_step_id
+step_total
+step_completed
+candidate_count
+evidence_count
+external_source_count
+started_at
+finished_at
+error_message
+created_at
+updated_at
+```
+
+说明：
+
+- 一个 Opportunity 可以有多次 discovery run。
+- `agent_run_id` 关联现有 AgentRun / DecisionLedger。
+- `current_step_id` 用于前端展示当前进度。
+
+### 4.3 stockv2_opportunity_discovery_steps
+
+表示 Agent 研究过程中的结构化步骤。
+
+```text
+id
+run_id
+step_key                  // understand_theme | internal_recall | external_research | ...
+step_title
+status                    // pending | running | completed | failed
+order_index
+input_summary
+output_summary
+metadata_json
+started_at
+finished_at
+created_at
+updated_at
+```
+
+第一阶段固定 8 个步骤：
+
+```text
+1. understand_theme        主题理解
+2. internal_recall         项目内资料召回
+3. external_research       外部公开资料搜索
+4. theme_chain             产业链 / 主题链条拆解
+5. candidate_merge         候选合并与去噪
+6. market_risk_check       行情与风险检查
+7. candidate_ranking       候选排序
+8. final_report            最终报告
+```
+
+### 4.4 stockv2_opportunity_evidence
+
+表示候选和结论的证据来源。
+
+```text
+id
+run_id
+candidate_id              // nullable
+source_type               // internal_profile | internal_news | quote | daily_bar | external_source | agent_note
+source_ref                // symbol / news_event_id / URL hash / agent note id
+title
+summary
+url                       // nullable
+publisher                 // nullable
+published_at              // nullable
+confidence
+metadata_json
+created_at
+```
+
+说明：
+
+- 外部来源 URL 写入前必须去掉敏感 query。
+- 外部来源只代表 Agent 看到过该来源，不代表来源内容一定正确。
+
+### 4.5 stockv2_opportunity_candidates
+
+表示一次机会发现产出的股票 / ETF 候选。
+
+```text
+id
+opportunity_id
+run_id
+symbol
+market
+instrument_type           // stock | exchange_fund
+name
+relation_type             // direct | supply_chain | theme_etf | competitor | weak
+relevance_score
+evidence_score
+market_risk_score
+confidence
+rank
+status                    // candidate | shortlisted | rejected | strategy_requested | strategy_generated
+reason
+risk_summary
+metadata_json
+created_at
+updated_at
+```
+
+说明：
+
+- `relevance_score` 表示与主题的相关性。
+- `evidence_score` 表示证据强度。
+- `market_risk_score` 表示行情过热、数据缺失、流动性等风险。
+- 主程序只接受主数据中已存在的股票 / ETF。无法解析的 symbol 不落为有效候选。
+
+### 4.6 stockv2_opportunity_results
+
+表示一次运行的最终报告。
+
+```text
+id
+run_id
+summary
+conclusion
+recommended_next_action
+raw_result_json
+created_at
+```
+
+## 5. MCP 工具
+
+机会发现复用现有 `stock_agent` MCP server。第一阶段扩展工具即可，不引入新的 MCP server。
+
+### 5.1 项目内资料查询
+
+```text
+stock_agent.search_instruments
+stock_agent.search_stock_profiles
+stock_agent.get_stock_profile
+stock_agent.get_latest_quotes
+stock_agent.get_daily_bars_summary
+stock_agent.search_news_events
+stock_agent.search_news_link_candidates
+stock_agent.list_existing_strategies
+stock_agent.get_portfolio_context
+```
+
+查询工具必须只返回业务所需字段，不返回 token、cookie、私有配置和数据库路径。
+
+### 5.2 过程记录
+
+```text
+stock_agent.start_discovery_step
+stock_agent.finish_discovery_step
+stock_agent.fail_discovery_step
+stock_agent.record_external_source
+stock_agent.record_evidence
+stock_agent.record_candidate
+stock_agent.update_candidate
+stock_agent.submit_result
+```
+
+`record_external_source` 示例：
+
+```json
+{
+  "runId": "run_xxx",
+  "stepId": "step_xxx",
+  "title": "source title",
+  "url": "https://example.com/article",
+  "publisher": "example",
+  "publishedAt": "2026-06-26T10:00:00Z",
+  "summary": "source summary",
+  "relatedSymbols": ["300000"],
+  "confidence": 0.7
+}
+```
+
+`submit_result` 仍采用 taskID 校验。`taskType` 必须是 `opportunity_discovery`。
+
+## 6. Codex CLI Executor
+
+新增 `opportunity_discovery` 执行分支。
+
+执行输入：
+
+- `taskID`
+- `opportunityID`
+- 用户主题和范围设置
+- MCP server 信息
+- 输出 schema
+- 安全边界
+
+Prompt 必须明确：
+
+```text
+你是股票机会发现 Agent。
+你必须主动使用 Codex CLI 自身搜索 / 浏览能力查公开资料。
+不要只依赖项目内 MCP 数据。
+项目内数据只能通过 stock_agent MCP 查询。
+每个阶段必须通过 MCP 记录 start / finish。
+每个外部来源必须通过 MCP 记录 record_external_source。
+每个候选必须有内部证据或外部证据。
+最终只能生成候选和策略草案建议，不能生成操作单，不能改持仓，不能激活策略。
+```
+
+当前 executor 如果使用隔离配置，需要验证 Codex CLI 自带搜索 / 浏览能力是否仍可用。若隔离配置屏蔽了搜索能力，应为 `opportunity_discovery` 增加单独的 executor 配置：
+
+- 只注入 `stock_agent` MCP。
+- 不加载无关用户 MCP。
+- 保留 CLI 内建搜索 / 浏览能力。
+- 继续捕获 stdout、stderr 和 JSON event transcript。
+
+## 7. Agent 输出 Schema
+
+`submit_result.result.outputType`：
+
+```text
+opportunity_discovery
+```
+
+`result.result`：
+
+```json
+{
+  "schema_version": "opportunity-discovery-report/v1",
+  "opportunity_id": "opp_xxx",
+  "summary": "本次机会发现摘要",
+  "theme_chain": ["主题链条 1", "主题链条 2"],
+  "candidates": [
+    {
+      "symbol": "300000",
+      "market": "SZ",
+      "name": "示例股票",
+      "instrument_type": "stock",
+      "relation_type": "supply_chain",
+      "rank": 1,
+      "relevance_score": 82,
+      "evidence_score": 70,
+      "market_risk_score": 45,
+      "confidence": 0.72,
+      "reason": "相关原因",
+      "risk_summary": "主要风险",
+      "suggested_strategy_intent": "建议后续策略生成关注点"
+    }
+  ],
+  "excluded": [
+    {
+      "symbol": "300001",
+      "reason": "证据不足或相关性弱"
+    }
+  ],
+  "data_quality_notes": [],
+  "external_sources": []
+}
+```
+
+主程序校验规则：
+
+- `schema_version` 必须为 `opportunity-discovery-report/v1`。
+- `opportunity_id` 必须匹配当前 run。
+- 候选 `symbol` 必须存在于 StockV2 主数据。
+- 分数必须在 0 到 100 之间。
+- `confidence` 必须在 0 到 1 之间。
+- 不允许包含操作单、持仓修改或策略激活指令。
+
+## 8. 后端 API
+
+第一阶段 API：
+
+```text
+GET    /api/stockv2/opportunities
+POST   /api/stockv2/opportunities
+GET    /api/stockv2/opportunities/{id}
+PATCH  /api/stockv2/opportunities/{id}
+POST   /api/stockv2/opportunities/{id}/discovery-runs
+GET    /api/stockv2/opportunities/{id}/discovery-runs
+GET    /api/stockv2/opportunity-discovery-runs/{id}
+GET    /api/stockv2/opportunity-discovery-runs/{id}/steps
+GET    /api/stockv2/opportunity-discovery-runs/{id}/evidence
+GET    /api/stockv2/opportunity-discovery-runs/{id}/candidates
+POST   /api/stockv2/opportunity-candidates/{id}/generate-strategy
+PATCH  /api/stockv2/opportunity-candidates/{id}
+```
+
+列表接口统一支持 `limit` / `offset`，前端做分页。
+
+`generate-strategy` 调用已有 `strategy_generation`，并把以下上下文传入：
+
+```text
+opportunityId
+candidateId
+candidate reason
+candidate scores
+evidence refs
+external source summaries
+```
+
+`StrategyGenerationContext` 需要补充：
+
+```text
+Opportunity
+OpportunityCandidate
+OpportunityEvidence[]
+```
+
+## 9. 运行流程
+
+```text
+1. 用户创建 Opportunity。
+2. 用户点击“开始发现”。
+3. 主程序创建 OpportunityDiscoveryRun。
+4. 主程序创建 AgentRun(task_type=opportunity_discovery)。
+5. 主程序启动 Codex CLI。
+6. Codex CLI 调 MCP start_discovery_step。
+7. Codex CLI 调项目内资料 MCP 查询。
+8. Codex CLI 使用自身搜索 / 浏览能力查外部资料。
+9. Codex CLI 调 record_external_source / record_evidence / record_candidate。
+10. Codex CLI 调 submit_result。
+11. 主程序校验结果。
+12. 主程序落库结果，更新 run 状态。
+13. 用户查看候选和证据。
+14. 用户选择候选进入 strategy_generation。
+```
+
+失败处理：
+
+- Codex CLI 失败：run 标记 `failed`，保留 transcript 和已完成步骤。
+- MCP 回填缺失：run 超时后标记 `failed`，保留 transcript。
+- 候选校验失败：该候选标记 rejected，run 可继续完成。
+- 外部来源记录失败：不阻断任务，但 step 输出必须写明证据缺口。
+
+## 10. 前端可观测性
+
+新增“机会发现”二级页面或 StockV2 下的独立视图。
+
+主界面：
+
+```text
+左侧：Opportunity 列表
+中间：机会详情、候选池
+右侧：最近运行状态 inspector
+```
+
+运行详情 Drawer：
+
+```text
+顶部状态条：
+状态、当前步骤、进度、候选数、证据数、外部来源数、耗时。
+
+中部 Step Timeline：
+✓ 主题理解
+✓ 项目内资料召回
+● 外部公开资料搜索
+○ 产业链拆解
+○ 候选合并与去噪
+○ 行情与风险检查
+○ 候选排序
+○ 最终报告
+
+右侧 Step Detail：
+输入摘要、输出摘要、外部来源、内部 MCP 查询、候选变化、原始 CLI 片段。
+```
+
+候选池：
+
+```text
+Rank
+股票 / ETF
+关系类型
+相关性
+证据强度
+市场风险
+置信度
+证据数
+操作：生成策略 / 标记排除 / 查看证据
+```
+
+候选详情 Drawer：
+
+```text
+为什么相关
+支持证据
+反对与风险
+行情摘要
+日 K 摘要
+相关新闻
+外部来源
+是否已有策略
+```
+
+UI 验收标准：
+
+- 能一眼看出当前运行做到哪一步。
+- 能看出每一步的输入和输出。
+- 能看出候选为什么被选中或排除。
+- 能从候选追溯到内部证据和外部来源。
+- 能打开原始 Agent run / DecisionLedger 查看 transcript。
+
+## 11. 安全与留痕
+
+必须保留：
+
+- Codex CLI transcript。
+- MCP tool call。
+- step input / output。
+- external source URL / summary。
+- candidate score 变化。
+- final structured result。
+
+脱敏要求：
+
+- 不保存 cookie、token、authorization、API key。
+- 外部 URL 保存前去掉敏感 query。
+- stdout / stderr 继续走现有 redaction 和长度裁剪。
+- 外部网页内容只保存摘要，不保存全文。
+
+权限边界：
+
+- MCP 查询工具只暴露 StockV2 业务数据。
+- MCP 写入工具只写入当前 run 的 step / evidence / candidate / result。
+- `taskID` / `runID` 必须匹配当前运行。
+- 主程序最终校验通过后才落库为正式候选。
+
+## 12. 分阶段交付
+
+### 第一阶段：机会发现最小闭环
+
+- Opportunity / Run / Step / Evidence / Candidate / Result 表。
+- Opportunity CRUD。
+- Opportunity discovery run 启动。
+- Codex CLI `opportunity_discovery` executor。
+- MCP step / evidence / candidate / submit_result。
+- CLI transcript 保存。
+- 前端机会发现页面、Step Timeline、候选池。
+
+### 第二阶段：打通策略生成
+
+- 项目内资料 MCP 查询工具补齐。
+- 候选详情 Drawer。
+- 从候选调用 `strategy_generation`。
+- `StrategyGenerationContext` 带入 opportunity / candidate / evidence。
+- 策略草案显示其来源机会。
+
+### 第三阶段：召回增强
+
+- 股票画像向量资产。
+- 主题与股票画像相似度召回。
+- 候选排序增强。
+- 用户反馈回流到候选排序。
+- 记忆参与机会发现。
+
+第一阶段不要阻塞在向量召回上。关键词、股票画像搜索、消息候选、外部搜索和 Agent 判断足以跑通主题机会发现闭环。
