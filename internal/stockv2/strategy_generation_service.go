@@ -10,154 +10,157 @@ import (
 	"time"
 )
 
-const (
-	StrategyGenerationInputSchemaVersion  = "strategy-generation-input/v1"
-	StrategyGenerationReportSchemaVersion = "strategy-generation-report/v1"
-	StrategyGenerationModePortfolio       = "portfolio_strategy_diagnosis"
-	StrategyGenerationOutputType          = "strategy_generation"
-
-	StrategyGenerationDraftNewStrategy = "new_strategy"
-	StrategyGenerationDraftPatch       = "strategy_patch"
-	StrategyGenerationDraftNoChange    = "no_change"
-
-	StrategyGenerationActionObserve       = "observe"
-	StrategyGenerationActionBuildPosition = "build_position"
-	StrategyGenerationActionAddPosition   = "add_position"
-	StrategyGenerationActionHold          = "hold"
-	StrategyGenerationActionReduce        = "reduce_position"
-	StrategyGenerationActionExit          = "exit_position"
-)
-
-var (
-	ErrStrategyGenerationPortfolioRequired = errors.New("portfolioId is required for portfolio_strategy_diagnosis")
-	ErrStrategyGenerationModeUnsupported   = errors.New("strategy generation mode is not supported yet")
-	ErrInvalidStrategyGenerationResult     = errors.New("invalid strategy generation result")
-)
-
-type StrategyGenerationInput struct {
-	SchemaVersion     string                               `json:"schema_version,omitempty"`
-	Mode              string                               `json:"mode"`
-	UserIntent        string                               `json:"user_intent,omitempty"`
-	TargetInstruments []StrategyGenerationTargetInstrument `json:"target_instruments,omitempty"`
-	OpportunityID     string                               `json:"opportunity_id,omitempty"`
-	PortfolioID       string                               `json:"portfolio_id,omitempty"`
-	TimeHorizon       string                               `json:"time_horizon,omitempty"`
-	AllowedActions    []string                             `json:"allowed_actions,omitempty"`
-	EvidenceScope     map[string]bool                      `json:"evidence_scope,omitempty"`
-}
-
-type StrategyGenerationTargetInstrument struct {
-	Symbol   string `json:"symbol"`
-	Market   string `json:"market,omitempty"`
-	Name     string `json:"name,omitempty"`
-	UserNote string `json:"user_note,omitempty"`
-}
-
-type StrategyGenerationContext struct {
-	SchemaVersion  string                                 `json:"schema_version"`
-	Mode           string                                 `json:"mode"`
-	UserIntent     string                                 `json:"user_intent,omitempty"`
-	TimeHorizon    string                                 `json:"time_horizon,omitempty"`
-	AllowedActions []string                               `json:"allowed_actions,omitempty"`
-	BuiltAt        time.Time                              `json:"builtAt"`
-	Portfolio      PortfolioReviewContext                 `json:"portfolio"`
-	Diagnostics    StrategyGenerationPortfolioDiagnostics `json:"diagnostics"`
-	Holdings       []StrategyGenerationHoldingContext     `json:"holdings"`
-	RecentReviews  []OperationReview                      `json:"recentReviews,omitempty"`
-	Transactions   []StockV2Transaction                   `json:"transactions,omitempty"`
-	Freshness      map[string]any                         `json:"freshness,omitempty"`
-	MissingItems   []string                               `json:"missingItems,omitempty"`
-}
-
-type StrategyGenerationPortfolioDiagnostics struct {
-	HoldingCount           int      `json:"holdingCount"`
-	Cash                   float64  `json:"cash"`
-	TotalAssetValue        float64  `json:"totalAssetValue"`
-	CashPct                float64  `json:"cashPct"`
-	LargestPositionSymbol  string   `json:"largestPositionSymbol,omitempty"`
-	LargestPositionPct     float64  `json:"largestPositionPct,omitempty"`
-	MissingStrategySymbols []string `json:"missingStrategySymbols,omitempty"`
-	PatchCandidateSymbols  []string `json:"patchCandidateSymbols,omitempty"`
-}
-
-type StrategyGenerationHoldingContext struct {
-	Symbol            string                             `json:"symbol"`
-	Market            string                             `json:"market,omitempty"`
-	Name              string                             `json:"name,omitempty"`
-	CostPrice         float64                            `json:"costPrice"`
-	Quantity          float64                            `json:"quantity"`
-	AvailableQuantity float64                            `json:"availableQuantity"`
-	CurrentPrice      float64                            `json:"currentPrice"`
-	MarketValue       float64                            `json:"marketValue"`
-	PnL               float64                            `json:"pnl"`
-	PositionPct       float64                            `json:"positionPct"`
-	Holding           StockV2Holding                     `json:"holding"`
-	Quote             *StockV2QuoteLatest                `json:"quote,omitempty"`
-	DailyBars         *DailyBarsContext                  `json:"dailyBars,omitempty"`
-	Profile           *StockProfile                      `json:"stockProfile,omitempty"`
-	StrategyCoverage  StrategyGenerationStrategyCoverage `json:"strategyCoverage"`
-	RecentReviews     []OperationReview                  `json:"recentReviews,omitempty"`
-	Transactions      []StockV2Transaction               `json:"transactions,omitempty"`
-	Freshness         map[string]any                     `json:"freshness,omitempty"`
-}
-
-type StrategyGenerationStrategyCoverage struct {
-	HasStrategy      bool                                `json:"hasStrategy"`
-	HasActive        bool                                `json:"hasActive"`
-	HasDraft         bool                                `json:"hasDraft"`
-	HasPaused        bool                                `json:"hasPaused"`
-	NeedsNewStrategy bool                                `json:"needsNewStrategy"`
-	PatchCandidate   bool                                `json:"patchCandidate"`
-	Strategies       []StrategyGenerationStrategySummary `json:"strategies,omitempty"`
-}
-
-type StrategyGenerationStrategySummary struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Status    string `json:"status"`
-	Scope     string `json:"scope,omitempty"`
-	Source    string `json:"source,omitempty"`
-	VersionID string `json:"versionId,omitempty"`
-	Title     string `json:"title,omitempty"`
-	Direction string `json:"direction,omitempty"`
+func (s *Service) RunStrategyGeneration(ctx context.Context, input StrategyGenerationInput) (AgentRun, error) {
+	normalized, err := normalizeStrategyGenerationInput(input)
+	if err != nil {
+		return AgentRun{}, err
+	}
+	taskProfile, err := s.store.GetAgentTaskProfileByType(ctx, AgentTaskTypeStrategyGeneration)
+	if err != nil {
+		return AgentRun{}, err
+	}
+	model, err := s.resolveModel(ctx, taskProfile)
+	if err != nil {
+		return AgentRun{}, err
+	}
+	genCtx, err := s.BuildStrategyGenerationContext(ctx, normalized)
+	if err != nil {
+		return AgentRun{}, err
+	}
+	artifact, _ := json.Marshal(genCtx)
+	triggerID := strategyGenerationTriggerID(normalized)
+	run, ledger, err := s.CreateAgentRunRecord(ctx, AgentRunRecordParams{
+		TaskType:             AgentTaskTypeStrategyGeneration,
+		ProviderID:           model.ProviderID,
+		ModelID:              model.ID,
+		TriggerObjectType:    "strategy_generation",
+		TriggerObjectID:      triggerID,
+		RequestedBy:          normalized.RequestedBy,
+		InputSummary:         strategyGenerationInputSummary(normalized),
+		InputArtifactSummary: string(artifact),
+	})
+	if err != nil {
+		return AgentRun{}, err
+	}
+	if s.agentExecutor != nil {
+		go s.startStrategyGenerationRunAsync(context.Background(), run, ledger, genCtx, model.ModelName)
+	}
+	return run, nil
 }
 
 func (s *Service) BuildStrategyGenerationContext(ctx context.Context, input StrategyGenerationInput) (StrategyGenerationContext, error) {
-	input = normalizeStrategyGenerationInput(input)
-	if input.Mode != StrategyGenerationModePortfolio {
-		return StrategyGenerationContext{}, ErrStrategyGenerationModeUnsupported
+	normalized, err := normalizeStrategyGenerationInput(input)
+	if err != nil {
+		return StrategyGenerationContext{}, err
 	}
-	if strings.TrimSpace(input.PortfolioID) == "" {
-		return StrategyGenerationContext{}, ErrStrategyGenerationPortfolioRequired
+	out := StrategyGenerationContext{
+		BuiltAt:          time.Now(),
+		Input:            normalized,
+		Mode:             normalized.Mode,
+		Targets:          make([]StrategyGenerationInstrumentContext, 0, len(normalized.TargetInstruments)),
+		FreshnessSummary: map[string]any{},
 	}
+	if normalized.Mode == StrategyGenerationModePortfolio {
+		return s.buildPortfolioStrategyGenerationContext(ctx, normalized, out)
+	}
+	for _, target := range normalized.TargetInstruments {
+		item, err := s.strategyGenerationInstrumentContext(ctx, target)
+		if err != nil {
+			return StrategyGenerationContext{}, err
+		}
+		out.Targets = append(out.Targets, item)
+	}
+	out.FreshnessSummary["targetCount"] = len(out.Targets)
+	out.FreshnessSummary["builtAt"] = out.BuiltAt.Format(time.RFC3339)
+	return out, nil
+}
+
+func (s *Service) strategyGenerationInstrumentContext(ctx context.Context, target StrategyGenerationTargetInstrument) (StrategyGenerationInstrumentContext, error) {
+	symbol := strings.TrimSpace(target.Symbol)
+	instrument, err := s.store.GetInstrument(ctx, symbol)
+	if err != nil {
+		return StrategyGenerationInstrumentContext{}, err
+	}
+	item := StrategyGenerationInstrumentContext{
+		Instrument:    &instrument,
+		DataFreshness: map[string]any{"symbol": instrument.Symbol},
+	}
+	if quotes, err := s.store.GetLatestQuotes(ctx, []string{instrument.Symbol}); err == nil && len(quotes) > 0 {
+		quote := quotes[0]
+		item.LatestQuote = &quote
+		item.DataFreshness["latestQuoteAt"] = quote.QuoteAt.Format(time.RFC3339)
+		item.DataFreshness["latestQuoteFetchedAt"] = quote.FetchedAt.Format(time.RFC3339)
+		item.DataFreshness["latestQuoteStatus"] = quote.Status
+	} else {
+		item.DataFreshness["latestQuoteMissing"] = true
+	}
+	rowCount, earliest, latest, source, lastErr, err := s.store.GetDailyBarsStats(ctx, instrument.Symbol, DailyBarAdjustedNone)
+	if err == nil {
+		item.DailyBars = &StrategyGenerationBarsSummary{
+			Adjusted:  DailyBarAdjustedNone,
+			RowCount:  rowCount,
+			Earliest:  earliest,
+			Latest:    latest,
+			Source:    source,
+			LastError: lastErr,
+			HasData:   rowCount > 0,
+		}
+		item.DataFreshness["dailyBarsRowCount"] = rowCount
+		item.DataFreshness["dailyBarsLatest"] = latest
+	} else {
+		item.DataFreshness["dailyBarsError"] = "daily bars stats unavailable"
+	}
+	if profile, err := s.store.GetStockProfile(ctx, instrument.Symbol); err == nil {
+		item.Profile = &profile
+		item.DataFreshness["profileUpdatedAt"] = profile.UpdatedAt.Format(time.RFC3339)
+	} else {
+		item.DataFreshness["profileMissing"] = true
+	}
+	strategies, err := s.strategyGenerationExistingStrategies(ctx, instrument.Symbol)
+	if err != nil {
+		return StrategyGenerationInstrumentContext{}, err
+	}
+	item.ExistingStrategies = strategies
+	item.DataFreshness["existingStrategyCount"] = len(strategies)
+	return item, nil
+}
+
+func (s *Service) strategyGenerationExistingStrategies(ctx context.Context, symbol string) ([]StrategyWithVersion, error) {
+	var out []StrategyWithVersion
+	for _, status := range []string{StrategyStatusActive, StrategyStatusDraft} {
+		items, err := s.store.ListStrategies(ctx, StrategyListFilter{
+			Kind:   StrategyKindSymbolStrategy,
+			Symbol: symbol,
+			Status: status,
+			Limit:  20,
+		})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, items...)
+	}
+	return out, nil
+}
+
+func (s *Service) buildPortfolioStrategyGenerationContext(ctx context.Context, input StrategyGenerationInput, out StrategyGenerationContext) (StrategyGenerationContext, error) {
 	portfolio, err := s.store.GetPortfolio(ctx, input.PortfolioID)
 	if err != nil {
 		return StrategyGenerationContext{}, err
 	}
+	freshness := out.FreshnessSummary
+	freshness["mode"] = input.Mode
 
-	freshness := map[string]any{"builtAt": time.Now().Format(time.RFC3339)}
-	missing := make([]string, 0)
-	markMissing := func(key string) {
-		missing = append(missing, key)
-		freshness[key] = map[string]any{"status": "missing"}
-	}
-
-	out := StrategyGenerationContext{
-		SchemaVersion:  StrategyGenerationInputSchemaVersion,
-		Mode:           input.Mode,
-		UserIntent:     strings.TrimSpace(input.UserIntent),
-		TimeHorizon:    strings.TrimSpace(input.TimeHorizon),
-		AllowedActions: input.AllowedActions,
-		BuiltAt:        time.Now(),
-		Portfolio:      PortfolioReviewContext{Portfolio: portfolio},
-		Freshness:      freshness,
+	portfolioCtx := &PortfolioReviewContext{Portfolio: portfolio}
+	out.Portfolio = portfolioCtx
+	out.Diagnostics = &StrategyGenerationPortfolioDiagnosis{
+		Cash: portfolio.Cash,
 	}
 
 	if snapshots, err := s.store.GetPortfolioSnapshots(ctx, portfolio.ID, 1); err != nil {
 		return StrategyGenerationContext{}, err
 	} else if len(snapshots) > 0 {
 		snapshot := snapshots[0]
-		out.Portfolio.Snapshot = &snapshot
+		portfolioCtx.Snapshot = &snapshot
 		freshness["portfolioSnapshot"] = map[string]any{
 			"status":              snapshot.Status,
 			"valuationAt":         snapshot.ValuationAt,
@@ -165,14 +168,16 @@ func (s *Service) BuildStrategyGenerationContext(ctx context.Context, input Stra
 			"estimatedQuoteCount": snapshot.EstimatedQuoteCount,
 		}
 	} else {
-		markMissing("portfolioSnapshot")
+		out.MissingItems = append(out.MissingItems, "portfolioSnapshot")
+		freshness["portfolioSnapshot"] = map[string]any{"status": "missing"}
 	}
 
 	holdings, err := s.store.ListHoldings(ctx, portfolio.ID)
 	if err != nil {
 		return StrategyGenerationContext{}, err
 	}
-	out.Portfolio.Holdings = holdings
+	portfolioCtx.Holdings = holdings
+	out.Diagnostics.HoldingCount = len(holdings)
 	freshness["holdings"] = map[string]any{"status": "present", "count": len(holdings)}
 
 	reviews, err := s.store.ListOperationReviews(ctx, OperationReviewListFilter{PortfolioID: portfolio.ID, Limit: 50})
@@ -188,8 +193,8 @@ func (s *Service) BuildStrategyGenerationContext(ctx context.Context, input Stra
 	}
 	out.Transactions = transactions
 	freshness["transactions"] = map[string]any{"status": "present", "count": len(transactions)}
-	freshness["operationRecords"] = map[string]any{"status": "missing", "reason": "no separate operation record repository; transactions are included"}
-	missing = append(missing, "operationRecords")
+	freshness["operationRecords"] = map[string]any{"status": "missing", "reason": "transactions are included; no separate operation record repository"}
+	out.MissingItems = append(out.MissingItems, "operationRecords")
 
 	symbols := holdingSymbols(holdings)
 	quotesBySymbol := map[string]StockV2QuoteLatest{}
@@ -204,22 +209,20 @@ func (s *Service) BuildStrategyGenerationContext(ctx context.Context, input Stra
 	}
 
 	totalAsset := portfolio.Cash
-	if out.Portfolio.Snapshot != nil && out.Portfolio.Snapshot.TotalAssetValue > 0 {
-		totalAsset = out.Portfolio.Snapshot.TotalAssetValue
+	if portfolioCtx.Snapshot != nil && portfolioCtx.Snapshot.TotalAssetValue > 0 {
+		totalAsset = portfolioCtx.Snapshot.TotalAssetValue
 	} else {
 		for _, holding := range holdings {
 			totalAsset += strategyGenerationHoldingMarketValue(holding, quotesBySymbol)
 		}
 	}
-	out.Diagnostics.Cash = portfolio.Cash
 	out.Diagnostics.TotalAssetValue = totalAsset
 	if totalAsset > 0 {
 		out.Diagnostics.CashPct = portfolio.Cash / totalAsset * 100
 	}
-	out.Diagnostics.HoldingCount = len(holdings)
 
 	for _, holding := range holdings {
-		hctx, err := s.buildStrategyGenerationHoldingContext(ctx, portfolio.ID, holding, totalAsset, quotesBySymbol, reviews, transactions, &missing)
+		hctx, err := s.buildStrategyGenerationHoldingContext(ctx, portfolio.ID, holding, totalAsset, quotesBySymbol, reviews, transactions, &out.MissingItems)
 		if err != nil {
 			return StrategyGenerationContext{}, err
 		}
@@ -237,68 +240,21 @@ func (s *Service) BuildStrategyGenerationContext(ctx context.Context, input Stra
 	}
 	sort.Strings(out.Diagnostics.MissingStrategySymbols)
 	sort.Strings(out.Diagnostics.PatchCandidateSymbols)
-	out.MissingItems = compactStrings(missing)
+	out.MissingItems = compactStrings(out.MissingItems)
+	freshness["holdingCount"] = len(out.Holdings)
 	return out, nil
 }
 
-func (s *Service) RunStrategyGeneration(ctx context.Context, input StrategyGenerationInput, requestedBy string) (AgentRun, error) {
-	pack, err := s.BuildStrategyGenerationContext(ctx, input)
-	if err != nil {
-		return AgentRun{}, err
-	}
-	taskProfile, err := s.store.GetAgentTaskProfileByType(ctx, AgentTaskTypeStrategyGeneration)
-	if err != nil {
-		return AgentRun{}, err
-	}
-	model, err := s.resolveModel(ctx, taskProfile)
-	if err != nil {
-		return AgentRun{}, err
-	}
-	inputArtifact, _ := json.Marshal(map[string]any{
-		"task":    AgentTaskTypeStrategyGeneration,
-		"context": pack,
-	})
-	portfolioID := pack.Portfolio.Portfolio.ID
-	run, ledger, err := s.CreateAgentRunRecord(ctx, AgentRunRecordParams{
-		TaskType:             AgentTaskTypeStrategyGeneration,
-		ProviderID:           model.ProviderID,
-		ModelID:              model.ID,
-		TriggerObjectType:    "strategy_generation",
-		TriggerObjectID:      portfolioID,
-		RequestedBy:          requestedBy,
-		InputSummary:         fmt.Sprintf("strategy_generation mode=%s portfolio_id=%s holdings=%d", pack.Mode, portfolioID, len(pack.Holdings)),
-		InputArtifactSummary: string(inputArtifact),
-	})
-	if err != nil {
-		return AgentRun{}, err
-	}
-	if s.agentExecutor != nil {
-		go s.startStrategyGenerationAgentRunAsync(context.Background(), run, ledger, pack, model.ModelName)
-	}
-	return run, nil
-}
-
-func (s *Service) startStrategyGenerationAgentRunAsync(ctx context.Context, run AgentRun, ledger AgentDecisionLedger, pack StrategyGenerationContext, modelName string) {
-	defer func() {
-		if r := recover(); r != nil {
-			s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("panic: %v", r))
-		}
-	}()
-	if s.agentExecutor == nil {
-		s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("no executor configured"))
-		return
-	}
-	running := run
-	running.Status = AgentRunStatusRunning
-	if _, err := s.store.UpdateAgentRun(ctx, running); err != nil && s.log != nil {
-		s.log.Warn("update strategy generation agent run to running failed", "run_id", run.ID, "error", err)
-	}
-	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
-	execOutput, execErr := s.agentExecutor.ExecuteStrategyGeneration(ctx, taskID, pack, modelName)
-	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, execOutput, execErr)
-}
-
-func (s *Service) buildStrategyGenerationHoldingContext(ctx context.Context, portfolioID string, holding StockV2Holding, totalAsset float64, quotes map[string]StockV2QuoteLatest, reviews []OperationReview, transactions []StockV2Transaction, missing *[]string) (StrategyGenerationHoldingContext, error) {
+func (s *Service) buildStrategyGenerationHoldingContext(
+	ctx context.Context,
+	portfolioID string,
+	holding StockV2Holding,
+	totalAsset float64,
+	quotes map[string]StockV2QuoteLatest,
+	reviews []OperationReview,
+	transactions []StockV2Transaction,
+	missing *[]string,
+) (StrategyGenerationHoldingContext, error) {
 	hctx := StrategyGenerationHoldingContext{
 		Symbol:            strings.TrimSpace(holding.Symbol),
 		Market:            strings.TrimSpace(holding.Market),
@@ -330,11 +286,13 @@ func (s *Service) buildStrategyGenerationHoldingContext(ctx context.Context, por
 	if hctx.PositionPct <= 0 && totalAsset > 0 && hctx.MarketValue > 0 {
 		hctx.PositionPct = hctx.MarketValue / totalAsset * 100
 	}
+
 	hctx.DailyBars = s.buildDailyBarsContext(ctx, hctx.Symbol)
 	hctx.Freshness["dailyBars"] = dailyBarsFreshnessSummary(hctx.DailyBars)
 	if hctx.DailyBars == nil || hctx.DailyBars.Count == 0 {
 		*missing = append(*missing, "dailyBars:"+hctx.Symbol)
 	}
+
 	if profile, err := s.store.GetStockProfile(ctx, hctx.Symbol); err == nil {
 		hctx.Profile = &profile
 		hctx.Freshness["stockProfile"] = map[string]any{"status": "present", "profileVersion": profile.ProfileVersion}
@@ -344,21 +302,259 @@ func (s *Service) buildStrategyGenerationHoldingContext(ctx context.Context, por
 	} else {
 		return StrategyGenerationHoldingContext{}, err
 	}
-	if coverage, err := s.strategyGenerationCoverage(ctx, portfolioID, hctx.Symbol); err == nil {
-		hctx.StrategyCoverage = coverage
-	} else {
+
+	coverage, err := s.strategyGenerationCoverage(ctx, portfolioID, hctx.Symbol)
+	if err != nil {
 		return StrategyGenerationHoldingContext{}, err
 	}
+	hctx.StrategyCoverage = coverage
 	hctx.RecentReviews = filterReviewsBySymbol(reviews, hctx.Symbol, 5)
 	hctx.Transactions = filterTransactionsBySymbol(transactions, hctx.Symbol, 5)
 	return hctx, nil
 }
 
-func (s *Service) applyStrategyGenerationResult(ctx context.Context, run AgentRun, result map[string]any, confidence float64) ([]StrategyWithVersion, error) {
-	if stringFromAny(result["schema_version"]) != StrategyGenerationReportSchemaVersion {
-		return nil, fmt.Errorf("%w: schema_version must be %s", ErrInvalidStrategyGenerationResult, StrategyGenerationReportSchemaVersion)
+func normalizeStrategyGenerationInput(input StrategyGenerationInput) (StrategyGenerationInput, error) {
+	input.Mode = strings.TrimSpace(input.Mode)
+	if input.Mode == "" {
+		input.Mode = StrategyGenerationModeManualTarget
 	}
-	portfolioID := strings.TrimSpace(run.TriggerObjectID)
+	if !validStrategyGenerationMode(input.Mode) {
+		return StrategyGenerationInput{}, ErrInvalidStrategyGenerationInput
+	}
+	input.UserGoal = strings.TrimSpace(input.UserGoal)
+	input.UserIntent = strings.TrimSpace(input.UserIntent)
+	if input.UserGoal == "" {
+		input.UserGoal = input.UserIntent
+	}
+	input.PortfolioID = strings.TrimSpace(input.PortfolioID)
+	input.RequestedBy = strings.TrimSpace(input.RequestedBy)
+	input.OpportunityID = strings.TrimSpace(input.OpportunityID)
+	input.TimeHorizon = strings.TrimSpace(input.TimeHorizon)
+	if len(input.AllowedActions) == 0 && input.Mode == StrategyGenerationModePortfolio {
+		input.AllowedActions = []string{
+			StrategyGenerationRuleActionObserve,
+			StrategyGenerationRuleActionBuildPosition,
+			StrategyGenerationRuleActionAddPosition,
+			StrategyGenerationRuleActionHold,
+			StrategyGenerationRuleActionReduce,
+			StrategyGenerationRuleActionExit,
+		}
+	}
+	targets := make([]StrategyGenerationTargetInstrument, 0, len(input.TargetInstruments))
+	seen := map[string]bool{}
+	for _, target := range input.TargetInstruments {
+		target.Symbol = strings.TrimSpace(target.Symbol)
+		target.Market = strings.TrimSpace(target.Market)
+		target.Name = strings.TrimSpace(target.Name)
+		target.UserNote = strings.TrimSpace(target.UserNote)
+		if target.Symbol == "" || seen[target.Symbol] {
+			continue
+		}
+		seen[target.Symbol] = true
+		targets = append(targets, target)
+	}
+	if input.Mode == StrategyGenerationModePortfolio {
+		if input.PortfolioID == "" {
+			return StrategyGenerationInput{}, ErrStrategyGenerationPortfolioRequired
+		}
+		input.TargetInstruments = targets
+		return input, nil
+	}
+	if input.Mode == StrategyGenerationModeSingleInstrument && len(targets) != 1 {
+		return StrategyGenerationInput{}, ErrInvalidStrategyGenerationInput
+	}
+	if len(targets) == 0 {
+		return StrategyGenerationInput{}, ErrInvalidStrategyGenerationInput
+	}
+	input.TargetInstruments = targets
+	return input, nil
+}
+
+func strategyGenerationTriggerID(input StrategyGenerationInput) string {
+	parts := make([]string, 0, len(input.TargetInstruments))
+	for _, target := range input.TargetInstruments {
+		parts = append(parts, target.Symbol)
+	}
+	if input.Mode == StrategyGenerationModePortfolio {
+		if len(parts) == 0 {
+			return fmt.Sprintf("%s:portfolio=%s", input.Mode, input.PortfolioID)
+		}
+		return fmt.Sprintf("%s:portfolio=%s:symbols=%s", input.Mode, input.PortfolioID, strings.Join(parts, ","))
+	}
+	if input.PortfolioID != "" {
+		return fmt.Sprintf("%s:portfolio=%s:symbols=%s", input.Mode, input.PortfolioID, strings.Join(parts, ","))
+	}
+	return strings.TrimSpace(input.Mode) + ":symbols=" + strings.Join(parts, ",")
+}
+
+func strategyGenerationInputSummary(input StrategyGenerationInput) string {
+	return fmt.Sprintf("strategy_generation mode=%s targets=%s goal=%s", input.Mode, strategyGenerationTriggerID(input), input.UserGoal)
+}
+
+func strategyGenerationReportFromResult(raw map[string]any) (StrategyGenerationReport, error) {
+	if len(raw) == 0 {
+		return StrategyGenerationReport{}, ErrInvalidStrategyGenerationResult
+	}
+	if err := rejectLegacyStrategyGenerationPlaybookShape(raw); err != nil {
+		return StrategyGenerationReport{}, err
+	}
+	payload, err := json.Marshal(raw)
+	if err != nil {
+		return StrategyGenerationReport{}, err
+	}
+	var report StrategyGenerationReport
+	if err := json.Unmarshal(payload, &report); err != nil {
+		return StrategyGenerationReport{}, err
+	}
+	if err := validateStrategyGenerationReport(report); err != nil {
+		return StrategyGenerationReport{}, err
+	}
+	return report, nil
+}
+
+func rejectLegacyStrategyGenerationPlaybookShape(raw map[string]any) error {
+	for _, draftRaw := range sliceFromAny(raw["drafts"]) {
+		draft := mapFromAny(draftRaw)
+		playbook := mapFromAny(draft["playbook"])
+		if _, ok := playbook["actions"]; ok {
+			return ErrInvalidStrategyGenerationResult
+		}
+		for _, ruleRaw := range sliceFromAny(playbook["rules"]) {
+			rule := mapFromAny(ruleRaw)
+			if _, ok := rule["action_type"]; ok {
+				return ErrInvalidStrategyGenerationResult
+			}
+		}
+	}
+	return nil
+}
+
+func validateStrategyGenerationReport(report StrategyGenerationReport) error {
+	if strings.TrimSpace(report.SchemaVersion) != StrategyGenerationReportSchemaVersion {
+		return ErrInvalidStrategyGenerationResult
+	}
+	if !validStrategyGenerationMode(strings.TrimSpace(report.RunSummary.Mode)) {
+		return ErrInvalidStrategyGenerationResult
+	}
+	if len(report.Drafts) == 0 && report.RunSummary.Mode != StrategyGenerationModePortfolio {
+		return ErrInvalidStrategyGenerationResult
+	}
+	for _, draft := range report.Drafts {
+		if !validStrategyGenerationDraftType(strings.TrimSpace(draft.DraftType)) {
+			return ErrInvalidStrategyGenerationResult
+		}
+		if draft.DraftType != StrategyGenerationDraftTypeNewStrategy {
+			continue
+		}
+		if strings.TrimSpace(draft.Symbol) == "" || strings.TrimSpace(draft.Thesis) == "" {
+			return ErrInvalidStrategyGenerationResult
+		}
+		if _, err := strategyGenerationDraftDirection(draft); err != nil {
+			return ErrInvalidStrategyGenerationResult
+		}
+		if len(draft.Playbook.Rules) == 0 {
+			return ErrInvalidStrategyGenerationResult
+		}
+		for _, rule := range draft.Playbook.Rules {
+			if strings.TrimSpace(rule.ID) == "" || !validStrategyGenerationRuleAction(strings.TrimSpace(rule.Action)) {
+				return ErrInvalidStrategyGenerationResult
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) createDraftStrategiesFromStrategyGeneration(ctx context.Context, run AgentRun, submitted AgentTaskSubmittedResult, report StrategyGenerationReport) ([]StrategyWithVersion, error) {
+	if strings.TrimSpace(report.RunSummary.Mode) == StrategyGenerationModePortfolio {
+		return s.createPortfolioStrategyDiagnosisDrafts(ctx, run, submitted, report)
+	}
+	created := make([]StrategyWithVersion, 0, len(report.Drafts))
+	for _, draft := range report.Drafts {
+		if draft.DraftType != StrategyGenerationDraftTypeNewStrategy {
+			continue
+		}
+		req, err := s.strategyCreateRequestFromGenerationDraft(run, submitted, report, draft)
+		if err != nil {
+			return nil, err
+		}
+		item, err := s.CreateStrategy(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		created = append(created, item)
+	}
+	return created, nil
+}
+
+func (s *Service) strategyCreateRequestFromGenerationDraft(run AgentRun, submitted AgentTaskSubmittedResult, report StrategyGenerationReport, draft StrategyGenerationDraft) (RequestCreateStrategy, error) {
+	direction, err := strategyGenerationDraftDirection(draft)
+	if err != nil {
+		return RequestCreateStrategy{}, err
+	}
+	symbol := strings.TrimSpace(draft.Symbol)
+	market := strings.TrimSpace(draft.Market)
+	if market == "" {
+		market = inferAStockMarket(symbol)
+	}
+	name := strings.TrimSpace(draft.Name)
+	if name == "" {
+		name = symbol
+	}
+	scope := StrategyScopeResearch
+	portfolioID := strategyGenerationPortfolioIDFromTrigger(run.TriggerObjectID)
+	if portfolioID != "" {
+		scope = StrategyScopePortfolioBound
+	}
+	title := strings.TrimSpace(draft.Thesis)
+	if title != "" && len([]rune(title)) > 60 {
+		title = string([]rune(title)[:60])
+	}
+	if title == "" {
+		title = "Agent strategy draft - " + symbol
+	}
+	playbook := draft.Playbook
+	if strings.TrimSpace(playbook.Version) == "" {
+		playbook.Version = "v1"
+	}
+	return RequestCreateStrategy{
+		Name:            "Agent策略草案 - " + name,
+		Kind:            StrategyKindSymbolStrategy,
+		Scope:           scope,
+		Source:          StrategySourceAgent,
+		Status:          StrategyStatusDraft,
+		Symbol:          symbol,
+		Market:          market,
+		PortfolioID:     portfolioID,
+		Title:           title,
+		Direction:       direction,
+		Thesis:          strings.TrimSpace(draft.Thesis),
+		EntryConditions: strategyGenerationEntryConditions(draft.Playbook),
+		ExitConditions:  draft.InvalidConditions,
+		RiskNotes:       strategyGenerationRiskNotes(draft),
+		EvidenceRefs:    draft.EvidenceSummary,
+		GenerationMeta: map[string]any{
+			"source":     AgentTaskTypeStrategyGeneration,
+			"playbook":   playbook,
+			"agentRunId": run.ID,
+			"strategyGeneration": map[string]any{
+				"schemaVersion":            report.SchemaVersion,
+				"mode":                     report.RunSummary.Mode,
+				"draftType":                draft.DraftType,
+				"confidence":               draft.Confidence,
+				"resultSummary":            submitted.ResultSummary,
+				"portfolioAwareSuggestion": draft.PortfolioAwareSuggestion,
+				"runSummary":               report.RunSummary,
+			},
+		},
+		CreatedBy: StrategySourceAgent,
+	}, nil
+}
+
+func (s *Service) createPortfolioStrategyDiagnosisDrafts(ctx context.Context, run AgentRun, submitted AgentTaskSubmittedResult, report StrategyGenerationReport) ([]StrategyWithVersion, error) {
+	portfolioID := strategyGenerationPortfolioIDFromTrigger(run.TriggerObjectID)
+	if portfolioID == "" && !strings.Contains(run.TriggerObjectID, ":") {
+		portfolioID = strings.TrimSpace(run.TriggerObjectID)
+	}
 	if portfolioID == "" {
 		return nil, ErrStrategyGenerationPortfolioRequired
 	}
@@ -372,27 +568,20 @@ func (s *Service) applyStrategyGenerationResult(ctx context.Context, run AgentRu
 	}
 	held := map[string]StockV2Holding{}
 	for _, holding := range holdings {
-		if strings.TrimSpace(holding.Symbol) != "" {
-			held[holding.Symbol] = holding
+		symbol := strings.TrimSpace(holding.Symbol)
+		if symbol != "" {
+			held[symbol] = holding
 		}
 	}
 
 	created := make([]StrategyWithVersion, 0)
-	for _, rawDraft := range anySlice(result["drafts"]) {
-		draft := mapFromAny(rawDraft)
-		symbol := strings.TrimSpace(stringFromAny(draft["symbol"]))
-		if symbol == "" {
+	for _, draft := range report.Drafts {
+		if draft.DraftType != StrategyGenerationDraftTypeNewStrategy {
 			continue
 		}
+		symbol := strings.TrimSpace(draft.Symbol)
 		holding, ok := held[symbol]
 		if !ok {
-			continue
-		}
-		draftType, err := strategyGenerationDraftType(draft)
-		if err != nil {
-			return nil, err
-		}
-		if draftType != StrategyGenerationDraftNewStrategy {
 			continue
 		}
 		coverage, err := s.strategyGenerationCoverage(ctx, portfolioID, symbol)
@@ -402,43 +591,20 @@ func (s *Service) applyStrategyGenerationResult(ctx context.Context, run AgentRu
 		if coverage.HasStrategy {
 			continue
 		}
-		playbook, err := normalizeStrategyGenerationPlaybook(mapFromAny(draft["playbook"]))
+		req, err := s.strategyCreateRequestFromGenerationDraft(run, submitted, report, draft)
 		if err != nil {
 			return nil, err
 		}
-		item, err := s.CreateStrategy(ctx, RequestCreateStrategy{
-			Name:            strategyGenerationDraftName(portfolio, holding, draft),
-			Kind:            StrategyKindSymbolStrategy,
-			Scope:           StrategyScopePortfolioBound,
-			Source:          StrategySourceAgent,
-			Status:          StrategyStatusDraft,
-			Symbol:          symbol,
-			Market:          firstNonEmpty(stringFromAny(draft["market"]), holding.Market),
-			PortfolioID:     portfolioID,
-			Title:           firstNonEmpty(stringFromAny(draft["title"]), stringFromAny(draft["name"]), "Agent 组合诊断策略草案"),
-			Direction:       normalizeStrategyGenerationBias(stringFromAny(draft["strategy_bias"])),
-			Thesis:          strings.TrimSpace(stringFromAny(draft["thesis"])),
-			EntryConditions: playbookRuleTriggers(playbook),
-			ExitConditions:  stringsFromAny(draft["invalid_conditions"]),
-			RiskNotes:       strings.Join(stringsFromAny(draft["risk_summary"]), "\n"),
-			EvidenceRefs:    stringsFromAny(draft["evidence_summary"]),
-			GenerationMeta: map[string]any{
-				"source":        AgentTaskTypeStrategyGeneration,
-				"mode":          StrategyGenerationModePortfolio,
-				"runID":         run.ID,
-				"portfolioId":   portfolioID,
-				"schemaVersion": StrategyGenerationReportSchemaVersion,
-				"playbook":      playbook,
-				"strategyGeneration": map[string]any{
-					"draftType":                StrategyGenerationDraftNewStrategy,
-					"confidence":               firstNonZeroNumber(draft["confidence"], confidence),
-					"runSummary":               result["run_summary"],
-					"portfolioAwareSuggestion": mapFromAny(draft["portfolio_aware_suggestion"]),
-					"reviewRequest":            stringFromAny(mapFromAny(draft["portfolio_aware_suggestion"])["review_request"]),
-				},
-			},
-			CreatedBy: StrategySourceAgent,
-		})
+		req.Name = strategyGenerationPortfolioDraftName(portfolio, holding, draft)
+		req.Scope = StrategyScopePortfolioBound
+		req.PortfolioID = portfolioID
+		req.Market = firstNonEmpty(req.Market, holding.Market, inferAStockMarket(symbol))
+		req.GenerationMeta["portfolioId"] = portfolioID
+		if sg := mapFromAny(req.GenerationMeta["strategyGeneration"]); sg != nil {
+			sg["reviewRequest"] = draft.PortfolioAwareSuggestion.ReviewRequest
+			req.GenerationMeta["strategyGeneration"] = sg
+		}
+		item, err := s.CreateStrategy(ctx, req)
 		if err != nil {
 			return nil, err
 		}
@@ -447,24 +613,50 @@ func (s *Service) applyStrategyGenerationResult(ctx context.Context, run AgentRu
 	return created, nil
 }
 
-func normalizeStrategyGenerationInput(input StrategyGenerationInput) StrategyGenerationInput {
-	input.SchemaVersion = firstNonEmpty(strings.TrimSpace(input.SchemaVersion), StrategyGenerationInputSchemaVersion)
-	input.Mode = strings.TrimSpace(input.Mode)
-	if input.Mode == "" {
-		input.Mode = StrategyGenerationModePortfolio
-	}
-	input.PortfolioID = strings.TrimSpace(input.PortfolioID)
-	if len(input.AllowedActions) == 0 {
-		input.AllowedActions = []string{
-			StrategyGenerationActionObserve,
-			StrategyGenerationActionBuildPosition,
-			StrategyGenerationActionAddPosition,
-			StrategyGenerationActionHold,
-			StrategyGenerationActionReduce,
-			StrategyGenerationActionExit,
+func strategyGenerationPortfolioIDFromTrigger(triggerID string) string {
+	for _, part := range strings.Split(triggerID, ":") {
+		if value, ok := strings.CutPrefix(part, "portfolio="); ok {
+			return strings.TrimSpace(value)
 		}
 	}
-	return input
+	return ""
+}
+
+func strategyGenerationDraftDirection(draft StrategyGenerationDraft) (string, error) {
+	direction := strings.TrimSpace(draft.StrategyBias)
+	if direction == "" {
+		return StrategyDirectionWatch, nil
+	}
+	if err := validateStrategyDirection(direction); err != nil {
+		return "", err
+	}
+	return direction, nil
+}
+
+func strategyGenerationEntryConditions(playbook StrategyGenerationPlaybook) []string {
+	out := make([]string, 0, len(playbook.Rules))
+	for _, rule := range playbook.Rules {
+		value := strings.TrimSpace(rule.Title)
+		if value == "" {
+			value = strings.TrimSpace(rule.Trigger)
+		}
+		if value == "" {
+			value = strings.TrimSpace(rule.ID)
+		}
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func strategyGenerationRiskNotes(draft StrategyGenerationDraft) string {
+	parts := make([]string, 0, len(draft.RiskSummary)+len(draft.InvalidConditions))
+	parts = append(parts, draft.RiskSummary...)
+	if len(draft.InvalidConditions) > 0 {
+		parts = append(parts, "Invalid conditions: "+strings.Join(draft.InvalidConditions, "; "))
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
 func (s *Service) strategyGenerationCoverage(ctx context.Context, portfolioID, symbol string) (StrategyGenerationStrategyCoverage, error) {
@@ -478,15 +670,19 @@ func (s *Service) strategyGenerationCoverage(ctx context.Context, portfolioID, s
 	}
 	coverage := StrategyGenerationStrategyCoverage{}
 	for _, item := range items {
-		if item.Strategy.PortfolioID != "" && item.Strategy.PortfolioID != portfolioID {
+		strategy := item.Strategy
+		if strategy.Status == StrategyStatusArchived {
+			continue
+		}
+		if strategy.PortfolioID != "" && strategy.PortfolioID != portfolioID {
 			continue
 		}
 		summary := StrategyGenerationStrategySummary{
-			ID:     item.Strategy.ID,
-			Name:   item.Strategy.Name,
-			Status: item.Strategy.Status,
-			Scope:  item.Strategy.Scope,
-			Source: item.Strategy.Source,
+			ID:     strategy.ID,
+			Name:   strategy.Name,
+			Status: strategy.Status,
+			Scope:  strategy.Scope,
+			Source: strategy.Source,
 		}
 		if item.ActiveVersion != nil {
 			summary.VersionID = item.ActiveVersion.ID
@@ -494,7 +690,7 @@ func (s *Service) strategyGenerationCoverage(ctx context.Context, portfolioID, s
 			summary.Direction = item.ActiveVersion.Direction
 		}
 		coverage.Strategies = append(coverage.Strategies, summary)
-		switch item.Strategy.Status {
+		switch strategy.Status {
 		case StrategyStatusActive:
 			coverage.HasActive = true
 			coverage.HasStrategy = true
@@ -511,105 +707,12 @@ func (s *Service) strategyGenerationCoverage(ctx context.Context, portfolioID, s
 	return coverage, nil
 }
 
-func normalizeStrategyGenerationPlaybook(playbook map[string]any) (map[string]any, error) {
-	rawRules := anySlice(playbook["rules"])
-	if len(rawRules) == 0 {
-		return nil, fmt.Errorf("%w: playbook.rules is required", ErrInvalidStrategyGenerationResult)
+func strategyGenerationPortfolioDraftName(portfolio StockV2Portfolio, holding StockV2Holding, draft StrategyGenerationDraft) string {
+	display := firstNonEmpty(strings.TrimSpace(holding.Name), strings.TrimSpace(draft.Name), holding.Symbol)
+	if portfolio.Name == "" {
+		return "Agent组合诊断策略草案 - " + display
 	}
-	rules := make([]any, 0, len(rawRules))
-	for i, raw := range rawRules {
-		rule := mapFromAny(raw)
-		action := strings.TrimSpace(stringFromAny(rule["action"]))
-		if !validStrategyGenerationRuleAction(action) {
-			return nil, fmt.Errorf("%w: invalid playbook rule action %q", ErrInvalidStrategyGenerationResult, action)
-		}
-		id := strings.TrimSpace(stringFromAny(rule["id"]))
-		if id == "" {
-			id = fmt.Sprintf("%s_%d", action, i+1)
-		}
-		priority := i + 1
-		if n, ok := numberFromAny(rule["priority"]); ok {
-			priority = int(n)
-		}
-		rules = append(rules, map[string]any{
-			"id":                  id,
-			"action":              action,
-			"title":               stringFromAny(rule["title"]),
-			"trigger":             stringFromAny(rule["trigger"]),
-			"preconditions":       stringFromAny(rule["preconditions"]),
-			"target":              stringFromAny(rule["target"]),
-			"risk":                stringFromAny(rule["risk"]),
-			"dataPrefilters":      anySlice(rule["dataPrefilters"]),
-			"portfolioPrefilters": anySlice(rule["portfolioPrefilters"]),
-			"newsPrefilters":      anySlice(rule["newsPrefilters"]),
-			"priority":            priority,
-		})
-	}
-	version := strings.TrimSpace(stringFromAny(playbook["version"]))
-	if version == "" {
-		version = "v1"
-	}
-	return map[string]any{"version": version, "rules": rules}, nil
-}
-
-func validStrategyGenerationRuleAction(action string) bool {
-	switch action {
-	case StrategyGenerationActionObserve,
-		StrategyGenerationActionBuildPosition,
-		StrategyGenerationActionAddPosition,
-		StrategyGenerationActionHold,
-		StrategyGenerationActionReduce,
-		StrategyGenerationActionExit:
-		return true
-	default:
-		return false
-	}
-}
-
-func strategyGenerationDraftType(draft map[string]any) (string, error) {
-	switch strings.TrimSpace(stringFromAny(draft["draft_type"])) {
-	case StrategyGenerationDraftNewStrategy:
-		return StrategyGenerationDraftNewStrategy, nil
-	case StrategyGenerationDraftPatch:
-		return StrategyGenerationDraftPatch, nil
-	case StrategyGenerationDraftNoChange:
-		return StrategyGenerationDraftNoChange, nil
-	default:
-		return "", fmt.Errorf("%w: invalid draft_type", ErrInvalidStrategyGenerationResult)
-	}
-}
-
-func normalizeStrategyGenerationBias(value string) string {
-	switch strings.TrimSpace(value) {
-	case StrategyBiasBullish:
-		return StrategyBiasBullish
-	case StrategyBiasBearish:
-		return StrategyBiasBearish
-	case StrategyBiasNeutral:
-		return StrategyBiasNeutral
-	default:
-		return StrategyDirectionWatch
-	}
-}
-
-func strategyGenerationDraftName(portfolio StockV2Portfolio, holding StockV2Holding, draft map[string]any) string {
-	if name := strings.TrimSpace(stringFromAny(draft["strategy_name"])); name != "" {
-		return name
-	}
-	display := firstNonEmpty(strings.TrimSpace(holding.Name), strings.TrimSpace(stringFromAny(draft["name"])), holding.Symbol)
 	return fmt.Sprintf("%s Agent组合诊断策略草案 - %s", portfolio.Name, display)
-}
-
-func playbookRuleTriggers(playbook map[string]any) []string {
-	out := make([]string, 0)
-	for _, raw := range anySlice(playbook["rules"]) {
-		rule := mapFromAny(raw)
-		trigger := strings.TrimSpace(stringFromAny(rule["trigger"]))
-		if trigger != "" {
-			out = append(out, trigger)
-		}
-	}
-	return out
 }
 
 func holdingSymbols(holdings []StockV2Holding) []string {
@@ -635,30 +738,6 @@ func strategyGenerationHoldingMarketValue(holding StockV2Holding, quotes map[str
 	}
 	if holding.LastPrice > 0 {
 		return holding.LastPrice * holding.Quantity
-	}
-	return 0
-}
-
-func anySlice(value any) []any {
-	switch typed := value.(type) {
-	case []any:
-		return typed
-	case []map[string]any:
-		out := make([]any, 0, len(typed))
-		for _, item := range typed {
-			out = append(out, item)
-		}
-		return out
-	default:
-		return []any{}
-	}
-}
-
-func firstNonZeroNumber(values ...any) float64 {
-	for _, value := range values {
-		if n, ok := numberFromAny(value); ok && n != 0 {
-			return n
-		}
 	}
 	return 0
 }
@@ -704,4 +783,29 @@ func filterTransactionsBySymbol(items []StockV2Transaction, symbol string, limit
 		}
 	}
 	return out
+}
+
+func sliceFromAny(value any) []any {
+	switch typed := value.(type) {
+	case []any:
+		return typed
+	case []map[string]any:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, item)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func strategyGenerationSaveError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrInvalidStrategyGenerationResult) {
+		return err
+	}
+	return fmt.Errorf("%w: %v", ErrInvalidStrategyGenerationResult, err)
 }

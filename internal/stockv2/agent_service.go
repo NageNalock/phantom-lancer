@@ -1107,6 +1107,59 @@ func (s *Service) executeAgentRun(
 	return finalRun, finalLedger, execErr
 }
 
+func (s *Service) startStrategyGenerationRunAsync(
+	ctx context.Context,
+	run AgentRun,
+	ledger AgentDecisionLedger,
+	genCtx StrategyGenerationContext,
+	modelName string,
+) {
+	defer func() {
+		if r := recover(); r != nil {
+			if s.log != nil {
+				s.log.Error("strategy generation agent run panicked", "run_id", run.ID, "panic", r)
+			}
+			s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("panic: %v", r))
+		}
+	}()
+
+	if s.agentExecutor == nil {
+		s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("no executor configured"))
+		return
+	}
+	if _, _, err := s.executeStrategyGenerationRun(ctx, run, ledger, genCtx, modelName); err != nil && s.log != nil {
+		s.log.Warn("strategy generation agent run finished with error", "run_id", run.ID, "error", safelog.Text(err.Error(), 300))
+	}
+}
+
+func (s *Service) executeStrategyGenerationRun(
+	ctx context.Context,
+	run AgentRun,
+	ledger AgentDecisionLedger,
+	genCtx StrategyGenerationContext,
+	modelName string,
+) (AgentRun, AgentDecisionLedger, error) {
+	if s.agentExecutor == nil {
+		s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("no executor configured"))
+		finalRun, finalLedger := s.safeGetAgentRunAndLedger(ctx, run.ID, ledger.ID)
+		return finalRun, finalLedger, ErrAgentExecutorUnavailable
+	}
+
+	running := run
+	running.Status = AgentRunStatusRunning
+	if _, err := s.store.UpdateAgentRun(ctx, running); err != nil {
+		if s.log != nil {
+			s.log.Warn("update strategy generation run to running failed", "run_id", run.ID, "error", err)
+		}
+	}
+
+	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
+	execOutput, execErr := s.agentExecutor.ExecuteStrategyGeneration(ctx, taskID, genCtx, modelName)
+	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, execOutput, execErr)
+	finalRun, finalLedger := s.safeGetAgentRunAndLedger(ctx, run.ID, ledger.ID)
+	return finalRun, finalLedger, execErr
+}
+
 func (s *Service) safeGetAgentRunAndLedger(ctx context.Context, runID, ledgerID string) (AgentRun, AgentDecisionLedger) {
 	run, _ := s.store.GetAgentRun(ctx, runID)
 	if ledgerID == "" {
@@ -1281,21 +1334,43 @@ func (s *Service) finalizeAgentRunWithOutput(
 			return
 		}
 	}
-	if run.TaskType == AgentTaskTypeStrategyGeneration && run.TriggerObjectType == "strategy_generation" {
-		if _, err := s.applyStrategyGenerationResult(ctx, run, submitted.Result, submitted.Confidence); err != nil {
+	if run.TaskType == AgentTaskTypeStrategyGeneration {
+		report, err := strategyGenerationReportFromResult(submitted.Result)
+		if err != nil {
 			run.Status = AgentRunStatusFailed
-			run.ErrorMessage = safelog.Text("save strategy generation result failed: "+err.Error(), 500)
+			run.ErrorMessage = safelog.Text("invalid strategy generation result: "+err.Error(), 500)
+			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
+				s.log.Warn("finalize: update run after strategy generation validation failed", "run_id", runID, "error", updateErr)
+			}
+			if _, ledgerErr := s.store.UpdateAgentDecisionLedger(ctx, ledger); ledgerErr != nil && s.log != nil {
+				s.log.Warn("finalize: update ledger after strategy generation validation failed", "run_id", runID, "error", ledgerErr)
+			}
+			return
+		}
+		created, err := s.createDraftStrategiesFromStrategyGeneration(ctx, run, *submitted, report)
+		if err != nil {
+			run.Status = AgentRunStatusFailed
+			run.ErrorMessage = safelog.Text("save strategy generation draft failed: "+strategyGenerationSaveError(err).Error(), 500)
 			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
 				s.log.Warn("finalize: update run after strategy generation save failed", "run_id", runID, "error", updateErr)
 			}
 			if s.log != nil {
-				s.log.Warn("finalize: save strategy generation result failed", "run_id", runID, "portfolio_id", run.TriggerObjectID, "error", err)
+				s.log.Warn("finalize: save strategy generation draft failed", "run_id", runID, "error", err)
 			}
 			if _, ledgerErr := s.store.UpdateAgentDecisionLedger(ctx, ledger); ledgerErr != nil && s.log != nil {
 				s.log.Warn("finalize: update ledger after strategy generation save failed", "run_id", runID, "error", ledgerErr)
 			}
 			return
 		}
+		createdSummaries := make([]map[string]string, 0, len(created))
+		for _, item := range created {
+			createdSummaries = append(createdSummaries, map[string]string{
+				"id":     item.Strategy.ID,
+				"symbol": item.Strategy.Symbol,
+				"status": item.Strategy.Status,
+			})
+		}
+		ledger.StructuredOutput["createdStrategies"] = createdSummaries
 	}
 
 	if _, err := s.store.UpdateAgentDecisionLedger(ctx, ledger); err != nil && s.log != nil {

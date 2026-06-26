@@ -321,6 +321,20 @@ func (s *Server) handleStockV2RunAgentCLIDebug(w http.ResponseWriter, r *http.Re
 	s.writeJSON(w, result)
 }
 
+func (s *Server) handleStockV2RunStrategyGeneration(w http.ResponseWriter, r *http.Request) {
+	var req stockv2.StrategyGenerationInput
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	result, err := s.stockV2.RunStrategyGeneration(r.Context(), req)
+	if err != nil {
+		http.Error(w, err.Error(), stockV2AgentHTTPStatus(err))
+		return
+	}
+	s.writeJSON(w, result)
+}
+
 // ============================ resolve ============================
 
 func (s *Server) handleStockV2ResolveAgentTask(w http.ResponseWriter, r *http.Request) {
@@ -487,7 +501,9 @@ func stockV2AgentHTTPStatus(err error) int {
 		errors.Is(err, stockv2.ErrInvalidAgentModelStatus),
 		errors.Is(err, stockv2.ErrInvalidAgentModelCostLevel),
 		errors.Is(err, stockv2.ErrInvalidAgentModelName),
-		errors.Is(err, stockv2.ErrInvalidAgentTaskType):
+		errors.Is(err, stockv2.ErrInvalidAgentTaskType),
+		errors.Is(err, stockv2.ErrInvalidStrategyGenerationInput),
+		errors.Is(err, stockv2.ErrInvalidStrategyGenerationResult):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError

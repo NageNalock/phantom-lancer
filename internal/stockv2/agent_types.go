@@ -57,7 +57,7 @@ const (
 )
 
 // Agent 任务类型。常量值是 API/DB 稳定 key;前端展示中文名称。
-// 当前 operation_review、strategy_generation、stock_profile_summary 可配置并可执行,
+// operation_review / strategy_generation / stock_profile_summary 已可配置并执行,
 // 其余任务只作为未来能力展示。
 const (
 	AgentTaskTypeOperationReview      = "operation_review"
@@ -85,7 +85,7 @@ const (
 )
 
 // 默认 task profile 的固定 seed id。schema 内 INSERT OR IGNORE 幂等种入。
-// 当前仅已开放执行的任务允许用户绑定模型。
+// 当前仅已开放执行的 task 允许用户绑定模型。
 const (
 	agentProviderCodexCLIDefaultID      = "agent-provider-codex-cli-default"
 	agentTaskOperationReviewSeedID      = "agent-task-operation-review"

@@ -410,15 +410,16 @@ func (f fakeOperationReviewExecutor) ExecuteStockProfileSummary(ctx context.Cont
 func (f fakeOperationReviewExecutor) ExecuteStrategyGeneration(ctx context.Context, taskID string, pack StrategyGenerationContext, modelName string) (*AgentExecutorOutput, error) {
 	result := f.result
 	if result == nil {
+		mode := firstNonEmpty(pack.Input.Mode, pack.Mode, StrategyGenerationModePortfolio)
 		result = map[string]any{
 			"schema_version": "strategy-generation-report/v1",
-			"run_summary":    map[string]any{"mode": pack.Mode},
+			"run_summary":    map[string]any{"mode": mode},
 			"drafts":         []any{},
 		}
 	}
 	if f.submit {
 		_, _ = f.pool.submitResult(taskID, AgentTaskTypeStrategyGeneration, AgentTaskSubmittedResult{
-			OutputType:    StrategyGenerationOutputType,
+			OutputType:    AgentTaskTypeStrategyGeneration,
 			ResultSummary: f.summary,
 			Result:        result,
 			Confidence:    f.confidence,
