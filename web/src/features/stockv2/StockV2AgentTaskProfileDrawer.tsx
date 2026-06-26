@@ -43,7 +43,7 @@ export function StockV2AgentTaskProfileDrawer({
     }
   }, [profile]);
 
-  const enabledModels = models.filter((m) => m.enabled && m.status === "available");
+  const enabledModels = models.filter((m) => m.enabled && m.status === "available" && (m.modelType || "chat") === "chat");
 
   async function handleSubmit() {
     setSubmitting(true);
@@ -84,7 +84,7 @@ export function StockV2AgentTaskProfileDrawer({
       <div className="grid gap-3 text-sm">
         {error ? <Notice tone="danger">{error}</Notice> : null}
         {enabledModels.length === 0 ? (
-          <Notice tone="warn">暂无可用于任务绑定的模型。请先创建模型,并确保它已启用且状态为可用。</Notice>
+          <Notice tone="warn">暂无可用于任务绑定的对话模型。请先创建 chat 模型,并确保它已启用且状态为可用。</Notice>
         ) : null}
 
         <Field label="主模型" help="优先调用的模型，必须已启用">

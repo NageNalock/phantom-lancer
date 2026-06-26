@@ -36,7 +36,7 @@ type ProviderDrawerState =
 
 type ModelDrawerState =
   | { type: "closed" }
-  | { type: "create" }
+  | { type: "create"; modelType: "chat" | "embedding" }
   | { type: "edit"; model: StockV2AgentModelProfile };
 
 type TaskProfileDrawerState =
@@ -165,9 +165,9 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
     }
   }
 
-  async function openCreateModelDrawer() {
+  async function openCreateModelDrawer(modelType: "chat" | "embedding") {
     await ensureProvidersLoaded();
-    setModelDrawer({ type: "create" });
+    setModelDrawer({ type: "create", modelType });
   }
 
   async function openEditModelDrawer(model: StockV2AgentModelProfile) {
@@ -283,14 +283,8 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
           toggleBusy={toggleBusy}
           onToggle={toggleModelEnabled}
           onEdit={(m) => void openEditModelDrawer(m)}
+          onCreate={(modelType) => void openCreateModelDrawer(modelType)}
         />
-        <div className="mt-2 flex justify-end">
-          <Button
-            onClick={() => void openCreateModelDrawer()}
-          >
-            <Plus size={14} className="mr-1" /> 新建模型
-          </Button>
-        </div>
       </CollapsibleSection>
 
       <CollapsibleSection
@@ -318,6 +312,7 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
       {modelDrawer.type !== "closed" ? (
         <StockV2AgentModelDrawer
           model={modelDrawer.type === "edit" ? modelDrawer.model : null}
+          initialModelType={modelDrawer.type === "create" ? modelDrawer.modelType : undefined}
           providers={providers ?? []}
           actions={actions}
           onClose={() => setModelDrawer({ type: "closed" })}
@@ -468,6 +463,10 @@ function isDefaultCodexCLIProvider(provider: StockV2AgentProviderProfile): boole
   return provider.id === "agent-provider-codex-cli-default" && provider.providerType === "codex_cli";
 }
 
+function stockV2AgentModelTypeLabel(modelType?: string): string {
+  return modelType === "embedding" ? "嵌入" : "对话";
+}
+
 function AgentModelSection({
   loading,
   error,
@@ -476,6 +475,7 @@ function AgentModelSection({
   toggleBusy,
   onToggle,
   onEdit,
+  onCreate,
 }: {
   loading: boolean;
   error: string | null;
@@ -484,6 +484,7 @@ function AgentModelSection({
   toggleBusy: string | null;
   onToggle: (id: string, enabled: boolean) => void;
   onEdit: (m: StockV2AgentModelProfile) => void;
+  onCreate: (modelType: "chat" | "embedding") => void;
 }) {
   if (loading) return <p className="text-xs text-[var(--muted)]">加载中…</p>;
   if (error) {
@@ -494,14 +495,82 @@ function AgentModelSection({
       </div>
     );
   }
-  if (!items || items.length === 0) return <p className="text-xs text-[var(--muted)]">暂无模型。</p>;
+  const chatModels = (items || []).filter((model) => (model.modelType || "chat") === "chat");
+  const embeddingModels = (items || []).filter((model) => model.modelType === "embedding");
   return (
-    <div className="grid gap-2">
-      {items.map((m) => (
+    <div className="grid gap-4">
+      <AgentModelGroup
+        title="对话模型"
+        subtitle="用于 Agent task、CLI debug 和策略生成等对话式执行"
+        empty="暂无对话模型。"
+        createLabel="新建对话模型"
+        models={chatModels}
+        modelType="chat"
+        toggleBusy={toggleBusy}
+        onToggle={onToggle}
+        onEdit={onEdit}
+        onCreate={onCreate}
+      />
+      <AgentModelGroup
+        title="嵌入模型"
+        subtitle="用于后续向量化能力，不参与 Agent task 绑定"
+        empty="暂无嵌入模型。"
+        createLabel="新建嵌入模型"
+        models={embeddingModels}
+        modelType="embedding"
+        toggleBusy={toggleBusy}
+        onToggle={onToggle}
+        onEdit={onEdit}
+        onCreate={onCreate}
+      />
+    </div>
+  );
+}
+
+function AgentModelGroup({
+  title,
+  subtitle,
+  empty,
+  createLabel,
+  models,
+  modelType,
+  toggleBusy,
+  onToggle,
+  onEdit,
+  onCreate,
+}: {
+  title: string;
+  subtitle: string;
+  empty: string;
+  createLabel: string;
+  models: StockV2AgentModelProfile[];
+  modelType: "chat" | "embedding";
+  toggleBusy: string | null;
+  onToggle: (id: string, enabled: boolean) => void;
+  onEdit: (m: StockV2AgentModelProfile) => void;
+  onCreate: (modelType: "chat" | "embedding") => void;
+}) {
+  return (
+    <div className="grid gap-2 border-t border-[var(--line)] pt-3 first:border-t-0 first:pt-0">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <div className="flex items-center gap-2">
+            <strong className="text-sm">{title}</strong>
+            <Pill tone="neutral">{models.length}</Pill>
+          </div>
+          <p className="mt-0.5 text-xs text-[var(--muted)]">{subtitle}</p>
+        </div>
+        <Button onClick={() => onCreate(modelType)}>
+          <Plus size={14} className="mr-1" /> {createLabel}
+        </Button>
+      </div>
+      {models.length === 0 ? <p className="text-xs text-[var(--muted)]">{empty}</p> : null}
+      {models.map((m) => (
         <div key={m.id} className="rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
           <div className="flex flex-wrap items-center gap-2">
             <strong className="text-sm">{m.displayName || m.modelName}</strong>
             <span className="font-mono text-[var(--muted-strong)]">{m.modelName}</span>
+            <Pill tone="neutral">{stockV2AgentModelTypeLabel(m.modelType || "chat")}</Pill>
             <button
               type="button"
               disabled={toggleBusy === m.id}
@@ -520,7 +589,9 @@ function AgentModelSection({
           </div>
           <div className="mt-1 text-[var(--muted)]">
             provider {m.providerId.slice(0, 8)}
-            {m.contextLimit ? ` · 上下文 ${m.contextLimit}` : ""}
+            {modelType === "embedding" ? ` · ${m.embeddingProtocol || "openai_embeddings"}` : ""}
+            {modelType === "embedding" && m.embeddingDimensions ? ` · ${m.embeddingDimensions} 维` : ""}
+            {modelType === "chat" && m.contextLimit ? ` · 上下文 ${m.contextLimit}` : ""}
           </div>
           <div className="mt-1.5 flex justify-end">
             <Button onClick={() => onEdit(m)}>
@@ -610,8 +681,9 @@ function AgentCLIDebugDrawer({
   onClose: () => void;
   onReloadModels: () => Promise<StockV2AgentModelProfile[]>;
 }) {
-  const usableModels = models.filter((model) => model.enabled && model.status === "available");
-  const [modelId, setModelId] = useState(usableModels[0]?.id || models[0]?.id || "");
+  const chatModels = models.filter((model) => (model.modelType || "chat") === "chat");
+  const usableModels = chatModels.filter((model) => model.enabled && model.status === "available");
+  const [modelId, setModelId] = useState(usableModels[0]?.id || chatModels[0]?.id || "");
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<StockV2AgentExecutionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -676,7 +748,8 @@ function AgentCLIDebugDrawer({
 
   async function reloadModels() {
     const nextItems = await onReloadModels();
-    const first = nextItems.find((model) => model.enabled && model.status === "available")?.id || nextItems[0]?.id || "";
+    const nextChatModels = nextItems.filter((model) => (model.modelType || "chat") === "chat");
+    const first = nextChatModels.find((model) => model.enabled && model.status === "available")?.id || nextChatModels[0]?.id || "";
     setModelId((current) => current || first);
   }
 
@@ -685,8 +758,8 @@ function AgentCLIDebugDrawer({
       <div className="grid gap-4">
         <Field label="模型">
           <select value={modelId} onChange={(event) => setModelId(event.target.value)}>
-            {models.length === 0 ? <option value="">暂无模型</option> : null}
-            {models.map((model) => (
+            {chatModels.length === 0 ? <option value="">暂无对话模型</option> : null}
+            {chatModels.map((model) => (
               <option key={model.id} value={model.id}>
                 {model.displayName || model.modelName}{model.enabled && model.status === "available" ? "" : " (不可用于任务)"}
               </option>

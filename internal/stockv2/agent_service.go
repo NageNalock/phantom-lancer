@@ -3,6 +3,7 @@ package stockv2
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -200,14 +201,22 @@ func (s *Service) CreateAgentModelProfile(ctx context.Context, req RequestCreate
 		return AgentModelProfile{}, ErrInvalidAgentModelCostLevel
 	}
 	model := AgentModelProfile{
-		ProviderID:   req.ProviderID,
-		ModelName:    strings.TrimSpace(req.ModelName),
-		DisplayName:  strings.TrimSpace(req.DisplayName),
-		Enabled:      req.Enabled,
-		Status:       status,
-		CostLevel:    costLevel,
-		ContextLimit: req.ContextLimit,
-		Metadata:     req.Metadata,
+		ProviderID:          req.ProviderID,
+		ModelName:           strings.TrimSpace(req.ModelName),
+		DisplayName:         strings.TrimSpace(req.DisplayName),
+		Enabled:             req.Enabled,
+		Status:              status,
+		CostLevel:           costLevel,
+		ContextLimit:        req.ContextLimit,
+		ModelType:           req.ModelType,
+		EmbeddingProtocol:   req.EmbeddingProtocol,
+		EmbeddingDimensions: req.EmbeddingDimensions,
+		InputModalities:     req.InputModalities,
+		EncodingFormat:      req.EncodingFormat,
+		Metadata:            req.Metadata,
+	}
+	if err := normalizeAgentModelRuntimeFields(&model); err != nil {
+		return AgentModelProfile{}, err
 	}
 	return s.store.CreateAgentModelProfile(ctx, model)
 }
@@ -243,7 +252,127 @@ func (s *Service) UpdateAgentModelProfile(ctx context.Context, id string, req Re
 	if req.Metadata != nil {
 		model.Metadata = req.Metadata
 	}
+	if req.ModelType != nil {
+		model.ModelType = strings.TrimSpace(*req.ModelType)
+	}
+	if req.EmbeddingProtocol != nil {
+		model.EmbeddingProtocol = strings.TrimSpace(*req.EmbeddingProtocol)
+	}
+	if req.EmbeddingDimensions != nil {
+		model.EmbeddingDimensions = *req.EmbeddingDimensions
+	}
+	if req.InputModalities != nil {
+		model.InputModalities = req.InputModalities
+	}
+	if req.EncodingFormat != nil {
+		model.EncodingFormat = strings.TrimSpace(*req.EncodingFormat)
+	}
+	if err := normalizeAgentModelRuntimeFields(&model); err != nil {
+		return AgentModelProfile{}, err
+	}
+	if model.ModelType != AgentModelTypeChat {
+		used, err := s.agentModelUsedByTaskProfile(ctx, model.ID)
+		if err != nil {
+			return AgentModelProfile{}, err
+		}
+		if used {
+			return AgentModelProfile{}, ErrAgentModelTypeNotAllowed
+		}
+	}
 	return s.store.UpdateAgentModelProfile(ctx, model)
+}
+
+func normalizeAgentModelRuntimeFields(model *AgentModelProfile) error {
+	if model.Metadata == nil {
+		model.Metadata = map[string]any{}
+	}
+	modelType := strings.TrimSpace(model.ModelType)
+	if modelType == "" {
+		modelType = stringFromAny(model.Metadata["modelType"])
+	}
+	normalizedType, err := normalizeAgentModelType(modelType)
+	if err != nil {
+		return err
+	}
+	model.ModelType = normalizedType
+	if model.ModelType != AgentModelTypeEmbedding {
+		model.EmbeddingProtocol = ""
+		model.EmbeddingDimensions = 0
+		model.InputModalities = nil
+		model.EncodingFormat = ""
+		return nil
+	}
+	protocol := strings.TrimSpace(model.EmbeddingProtocol)
+	if protocol == "" {
+		protocol = stringFromAny(model.Metadata["embeddingProtocol"])
+	}
+	normalizedProtocol, err := normalizeEmbeddingProtocol(protocol)
+	if err != nil {
+		return err
+	}
+	model.EmbeddingProtocol = normalizedProtocol
+	if model.EmbeddingDimensions < 0 {
+		return ErrInvalidAgentModelType
+	}
+	if model.EmbeddingDimensions == 0 {
+		if value, ok := numberFromAny(model.Metadata["embeddingDimensions"]); ok && value > 0 {
+			model.EmbeddingDimensions = int(value)
+		}
+	}
+	if len(model.InputModalities) == 0 {
+		model.InputModalities = agentModelStringListFromAny(model.Metadata["inputModalities"])
+	}
+	model.InputModalities = normalizeAgentModelInputModalities(model.InputModalities)
+	if model.EmbeddingProtocol != AgentEmbeddingProtocolOpenAI {
+		model.EncodingFormat = ""
+		return nil
+	}
+	if strings.TrimSpace(model.EncodingFormat) == "" {
+		model.EncodingFormat = stringFromAny(model.Metadata["encodingFormat"])
+	}
+	model.EncodingFormat = strings.TrimSpace(model.EncodingFormat)
+	return nil
+}
+
+func normalizeAgentModelType(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return AgentModelTypeChat, nil
+	}
+	if !validAgentModelType(value) {
+		return "", ErrInvalidAgentModelType
+	}
+	return value, nil
+}
+
+func normalizeEmbeddingProtocol(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return AgentEmbeddingProtocolOpenAI, nil
+	}
+	switch value {
+	case AgentEmbeddingProtocolOpenAI, AgentEmbeddingProtocolVolcengineMultimodal:
+	default:
+		return "", ErrInvalidAgentModelType
+	}
+	return value, nil
+}
+
+func normalizeAgentModelInputModalities(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return []string{"text"}
+	}
+	return out
 }
 
 func (s *Service) ListAgentProviderModels(ctx context.Context, providerID string) (AgentProviderModelCatalog, error) {
@@ -317,6 +446,13 @@ func (s *Service) TestAgentModel(ctx context.Context, req RequestTestAgentModel)
 	if err != nil {
 		return AgentModelTestResult{}, err
 	}
+	modelType, err := normalizeAgentModelType(req.ModelType)
+	if err != nil {
+		return AgentModelTestResult{}, err
+	}
+	if modelType == AgentModelTypeEmbedding {
+		return s.testEmbeddingModel(ctx, profile, modelName, req)
+	}
 	if isDefaultCodexCLIProvider(profile) {
 		return s.testDefaultCodexCLIModel(ctx, profile, modelName), nil
 	}
@@ -346,8 +482,8 @@ func (s *Service) TestAgentModel(ctx context.Context, req RequestTestAgentModel)
 	if err != nil {
 		message := "model test request failed: " + safelog.Text(err.Error(), 600)
 		s.recordAgentProviderProbe(ctx, profile, AgentProviderAvailabilityUnavailable, message)
-		s.markAgentModelStatus(ctx, providerID, modelName, AgentModelStatusUnavailable)
-		return AgentModelTestResult{OK: false, Message: message, LatencyMS: latencyMS}, nil
+		s.markAgentModelStatusForType(ctx, providerID, modelName, AgentModelTypeChat, AgentModelStatusUnavailable)
+		return AgentModelTestResult{OK: false, Message: message, LatencyMS: latencyMS, ModelType: AgentModelTypeChat}, nil
 	}
 	defer resp.Body.Close()
 
@@ -355,20 +491,165 @@ func (s *Service) TestAgentModel(ctx context.Context, req RequestTestAgentModel)
 	if readErr != nil {
 		message := "model test response read failed: " + safelog.Text(readErr.Error(), 600)
 		s.recordAgentProviderProbe(ctx, profile, AgentProviderAvailabilityUnavailable, message)
-		s.markAgentModelStatus(ctx, providerID, modelName, AgentModelStatusUnavailable)
-		return AgentModelTestResult{OK: false, Message: message, LatencyMS: latencyMS}, nil
+		s.markAgentModelStatusForType(ctx, providerID, modelName, AgentModelTypeChat, AgentModelStatusUnavailable)
+		return AgentModelTestResult{OK: false, Message: message, LatencyMS: latencyMS, ModelType: AgentModelTypeChat}, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		message := fmt.Sprintf("model test returned %s: %s", resp.Status, safelog.Text(string(respBody), 600))
 		s.recordAgentProviderProbe(ctx, profile, AgentProviderAvailabilityUnavailable, message)
-		s.markAgentModelStatus(ctx, providerID, modelName, AgentModelStatusUnavailable)
-		return AgentModelTestResult{OK: false, Message: message, LatencyMS: latencyMS}, nil
+		s.markAgentModelStatusForType(ctx, providerID, modelName, AgentModelTypeChat, AgentModelStatusUnavailable)
+		return AgentModelTestResult{OK: false, Message: message, LatencyMS: latencyMS, ModelType: AgentModelTypeChat}, nil
 	}
 
 	message := "model test ok"
 	s.recordAgentProviderProbe(ctx, profile, AgentProviderAvailabilityAvailable, message)
-	s.markAgentModelStatus(ctx, providerID, modelName, AgentModelStatusAvailable)
-	return AgentModelTestResult{OK: true, Message: message, LatencyMS: latencyMS}, nil
+	s.markAgentModelStatusForType(ctx, providerID, modelName, AgentModelTypeChat, AgentModelStatusAvailable)
+	return AgentModelTestResult{OK: true, Message: message, LatencyMS: latencyMS, ModelType: AgentModelTypeChat}, nil
+}
+
+func (s *Service) testEmbeddingModel(ctx context.Context, profile AgentProviderProfile, modelName string, req RequestTestAgentModel) (AgentModelTestResult, error) {
+	if isDefaultCodexCLIProvider(profile) {
+		return AgentModelTestResult{OK: false, Message: "embedding test is not supported for the default Codex CLI provider", ModelType: AgentModelTypeEmbedding}, nil
+	}
+	protocol, err := normalizeEmbeddingProtocol(req.EmbeddingProtocol)
+	if err != nil {
+		return AgentModelTestResult{}, err
+	}
+	baseURL, apiKey, err := agentProviderOpenAIConfig(profile)
+	if err != nil {
+		return AgentModelTestResult{}, err
+	}
+	input := strings.TrimSpace(req.Input)
+	if input == "" {
+		input = "StockV2 embedding connectivity test"
+	}
+	body := map[string]any{}
+	endpoint := "/embeddings"
+	switch protocol {
+	case AgentEmbeddingProtocolVolcengineMultimodal:
+		// ponytail: text input verifies the multimodal endpoint; add image probes only when the UI needs image-vector tests.
+		body = map[string]any{
+			"model": modelName,
+			"input": []map[string]string{
+				{"type": "text", "text": input},
+			},
+		}
+		endpoint = "/embeddings/multimodal"
+	default:
+		body = map[string]any{
+			"model": modelName,
+			"input": input,
+		}
+		if format := strings.TrimSpace(req.EncodingFormat); format != "" {
+			body["encoding_format"] = format
+		} else {
+			body["encoding_format"] = "float"
+		}
+	}
+	payload, _ := json.Marshal(body)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return AgentModelTestResult{}, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+
+	start := time.Now()
+	resp, err := s.agentHTTPClient().Do(httpReq)
+	latencyMS := time.Since(start).Milliseconds()
+	if err != nil {
+		message := "embedding model test request failed: " + safelog.Text(err.Error(), 600)
+		s.recordAgentProviderProbe(ctx, profile, AgentProviderAvailabilityUnavailable, message)
+		s.markAgentModelStatusForType(ctx, profile.ID, modelName, AgentModelTypeEmbedding, AgentModelStatusUnavailable)
+		return AgentModelTestResult{OK: false, Message: message, LatencyMS: latencyMS, ModelType: AgentModelTypeEmbedding}, nil
+	}
+	defer resp.Body.Close()
+
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, openAIProbeMaxBodyBytes))
+	if readErr != nil {
+		message := "embedding model test response read failed: " + safelog.Text(readErr.Error(), 600)
+		s.recordAgentProviderProbe(ctx, profile, AgentProviderAvailabilityUnavailable, message)
+		s.markAgentModelStatusForType(ctx, profile.ID, modelName, AgentModelTypeEmbedding, AgentModelStatusUnavailable)
+		return AgentModelTestResult{OK: false, Message: message, LatencyMS: latencyMS, ModelType: AgentModelTypeEmbedding}, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		message := fmt.Sprintf("embedding model test returned %s: %s", resp.Status, safelog.Text(string(respBody), 600))
+		s.recordAgentProviderProbe(ctx, profile, AgentProviderAvailabilityUnavailable, message)
+		s.markAgentModelStatusForType(ctx, profile.ID, modelName, AgentModelTypeEmbedding, AgentModelStatusUnavailable)
+		return AgentModelTestResult{OK: false, Message: message, LatencyMS: latencyMS, ModelType: AgentModelTypeEmbedding}, nil
+	}
+
+	rawEmbedding, ok := embeddingRawFromResponse(respBody)
+	if !ok {
+		message := "embedding model test response has no readable embedding: " + safelog.Text(string(respBody), 600)
+		s.recordAgentProviderProbe(ctx, profile, AgentProviderAvailabilityDegraded, message)
+		s.markAgentModelStatusForType(ctx, profile.ID, modelName, AgentModelTypeEmbedding, AgentModelStatusDegraded)
+		return AgentModelTestResult{OK: false, Message: message, LatencyMS: latencyMS, ModelType: AgentModelTypeEmbedding}, nil
+	}
+	dimensions, ok := embeddingDimensionsFromRaw(rawEmbedding)
+	if !ok {
+		message := "embedding model test response is missing a readable embedding vector"
+		s.recordAgentProviderProbe(ctx, profile, AgentProviderAvailabilityDegraded, message)
+		s.markAgentModelStatusForType(ctx, profile.ID, modelName, AgentModelTypeEmbedding, AgentModelStatusDegraded)
+		return AgentModelTestResult{OK: false, Message: message, LatencyMS: latencyMS, ModelType: AgentModelTypeEmbedding}, nil
+	}
+	if req.EmbeddingDimensions > 0 && req.EmbeddingDimensions != dimensions {
+		message := fmt.Sprintf("embedding dimension mismatch: got %d, want %d", dimensions, req.EmbeddingDimensions)
+		s.recordAgentProviderProbe(ctx, profile, AgentProviderAvailabilityDegraded, message)
+		s.markAgentModelStatusForType(ctx, profile.ID, modelName, AgentModelTypeEmbedding, AgentModelStatusDegraded)
+		return AgentModelTestResult{OK: false, Message: message, LatencyMS: latencyMS, ModelType: AgentModelTypeEmbedding, EmbeddingDimensions: dimensions}, nil
+	}
+	message := fmt.Sprintf("embedding model test ok: %d dimensions", dimensions)
+	s.recordAgentProviderProbe(ctx, profile, AgentProviderAvailabilityAvailable, message)
+	s.markAgentModelStatusForType(ctx, profile.ID, modelName, AgentModelTypeEmbedding, AgentModelStatusAvailable)
+	return AgentModelTestResult{OK: true, Message: message, LatencyMS: latencyMS, ModelType: AgentModelTypeEmbedding, EmbeddingDimensions: dimensions}, nil
+}
+
+func embeddingRawFromResponse(respBody []byte) (json.RawMessage, bool) {
+	var response struct {
+		Data      json.RawMessage `json:"data"`
+		Embedding json.RawMessage `json:"embedding"`
+	}
+	if err := json.Unmarshal(respBody, &response); err != nil {
+		return nil, false
+	}
+	var items []struct {
+		Embedding json.RawMessage `json:"embedding"`
+	}
+	if err := json.Unmarshal(response.Data, &items); err == nil && len(items) > 0 && len(items[0].Embedding) > 0 {
+		return items[0].Embedding, true
+	}
+	var item struct {
+		Embedding json.RawMessage `json:"embedding"`
+	}
+	if err := json.Unmarshal(response.Data, &item); err == nil && len(item.Embedding) > 0 {
+		return item.Embedding, true
+	}
+	if len(response.Embedding) > 0 {
+		return response.Embedding, true
+	}
+	return nil, false
+}
+
+func embeddingDimensionsFromRaw(raw json.RawMessage) (int, bool) {
+	var floats []float64
+	if err := json.Unmarshal(raw, &floats); err == nil && len(floats) > 0 {
+		return len(floats), true
+	}
+	var nested [][]float64
+	if err := json.Unmarshal(raw, &nested); err == nil && len(nested) > 0 && len(nested[0]) > 0 {
+		return len(nested[0]), true
+	}
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err != nil || strings.TrimSpace(encoded) == "" {
+		return 0, false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(decoded) == 0 || len(decoded)%4 != 0 {
+		return 0, false
+	}
+	return len(decoded) / 4, true
 }
 
 func (s *Service) listDefaultCodexCLIModels(ctx context.Context, profile AgentProviderProfile) (AgentProviderModelCatalog, error) {
@@ -470,17 +751,17 @@ func (s *Service) testDefaultCodexCLIModel(ctx context.Context, profile AgentPro
 	catalog, err := s.listDefaultCodexCLIModels(ctx, profile)
 	latencyMS := time.Since(start).Milliseconds()
 	if err != nil {
-		s.markAgentModelStatus(ctx, profile.ID, modelName, AgentModelStatusUnavailable)
-		return AgentModelTestResult{OK: false, Message: safelog.Text(err.Error(), 700), LatencyMS: latencyMS}
+		s.markAgentModelStatusForType(ctx, profile.ID, modelName, AgentModelTypeChat, AgentModelStatusUnavailable)
+		return AgentModelTestResult{OK: false, Message: safelog.Text(err.Error(), 700), LatencyMS: latencyMS, ModelType: AgentModelTypeChat}
 	}
 	for _, item := range catalog.Items {
 		if item.ID == modelName {
-			s.markAgentModelStatus(ctx, profile.ID, modelName, AgentModelStatusAvailable)
-			return AgentModelTestResult{OK: true, Message: "codex cli model found in catalog", LatencyMS: latencyMS}
+			s.markAgentModelStatusForType(ctx, profile.ID, modelName, AgentModelTypeChat, AgentModelStatusAvailable)
+			return AgentModelTestResult{OK: true, Message: "codex cli model found in catalog", LatencyMS: latencyMS, ModelType: AgentModelTypeChat}
 		}
 	}
-	s.markAgentModelStatus(ctx, profile.ID, modelName, AgentModelStatusUnavailable)
-	return AgentModelTestResult{OK: false, Message: "model not found in codex cli catalog", LatencyMS: latencyMS}
+	s.markAgentModelStatusForType(ctx, profile.ID, modelName, AgentModelTypeChat, AgentModelStatusUnavailable)
+	return AgentModelTestResult{OK: false, Message: "model not found in codex cli catalog", LatencyMS: latencyMS, ModelType: AgentModelTypeChat}
 }
 
 // ============================ task profiles ============================
@@ -522,7 +803,7 @@ func (s *Service) UpdateAgentTaskProfile(ctx context.Context, taskType string, r
 	if req.PrimaryModelID != nil {
 		primaryID := strings.TrimSpace(*req.PrimaryModelID)
 		if primaryID != "" {
-			if _, err := s.store.GetAgentModelProfile(ctx, primaryID); err != nil {
+			if _, err := s.ensureAgentTaskModelAllowed(ctx, primaryID); err != nil {
 				return AgentTaskProfile{}, err // 防悬空绑定
 			}
 		}
@@ -531,7 +812,7 @@ func (s *Service) UpdateAgentTaskProfile(ctx context.Context, taskType string, r
 	if req.FallbackModelID != nil {
 		fallbackID := strings.TrimSpace(*req.FallbackModelID)
 		if fallbackID != "" {
-			if _, err := s.store.GetAgentModelProfile(ctx, fallbackID); err != nil {
+			if _, err := s.ensureAgentTaskModelAllowed(ctx, fallbackID); err != nil {
 				return AgentTaskProfile{}, err
 			}
 		}
@@ -541,6 +822,30 @@ func (s *Service) UpdateAgentTaskProfile(ctx context.Context, taskType string, r
 		profile.MaxBudget = *req.MaxBudget
 	}
 	return s.store.UpdateAgentTaskProfile(ctx, profile)
+}
+
+func (s *Service) ensureAgentTaskModelAllowed(ctx context.Context, modelID string) (AgentModelProfile, error) {
+	model, err := s.store.GetAgentModelProfile(ctx, modelID)
+	if err != nil {
+		return AgentModelProfile{}, err
+	}
+	if model.ModelType != AgentModelTypeChat {
+		return AgentModelProfile{}, ErrAgentModelTypeNotAllowed
+	}
+	return model, nil
+}
+
+func (s *Service) agentModelUsedByTaskProfile(ctx context.Context, modelID string) (bool, error) {
+	profiles, err := s.store.ListAgentTaskProfiles(ctx, AgentTaskProfileListFilter{Limit: 1000})
+	if err != nil {
+		return false, err
+	}
+	for _, profile := range profiles {
+		if profile.PrimaryModelID == modelID || profile.FallbackModelID == modelID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ============================ runs + decision ledger ============================
@@ -661,7 +966,7 @@ func (s *Service) CreateAgentRunRecord(ctx context.Context, params AgentRunRecor
 	if _, err := s.store.GetAgentProviderProfile(ctx, params.ProviderID); err != nil {
 		return AgentRun{}, AgentDecisionLedger{}, err
 	}
-	if _, err := s.store.GetAgentModelProfile(ctx, params.ModelID); err != nil {
+	if _, err := s.ensureAgentTaskModelAllowed(ctx, params.ModelID); err != nil {
 		return AgentRun{}, AgentDecisionLedger{}, err
 	}
 
@@ -766,7 +1071,7 @@ func (s *Service) resolveModel(ctx context.Context, taskProfile AgentTaskProfile
 		if err != nil {
 			return AgentModelProfile{}, false // 不存在或不可用 → 降级 fallback
 		}
-		if m.Enabled && m.Status == AgentModelStatusAvailable {
+		if m.Enabled && m.Status == AgentModelStatusAvailable && m.ModelType == AgentModelTypeChat {
 			return m, true
 		}
 		return AgentModelProfile{}, false
@@ -800,6 +1105,10 @@ func (s *Service) recordAgentProviderProbe(ctx context.Context, profile AgentPro
 }
 
 func (s *Service) markAgentModelStatus(ctx context.Context, providerID, modelName, status string) {
+	s.markAgentModelStatusForType(ctx, providerID, modelName, "", status)
+}
+
+func (s *Service) markAgentModelStatusForType(ctx context.Context, providerID, modelName, modelType, status string) {
 	if !validAgentModelStatus(status) {
 		return
 	}
@@ -812,6 +1121,9 @@ func (s *Service) markAgentModelStatus(ctx context.Context, providerID, modelNam
 	}
 	for _, model := range items {
 		if model.ModelName != modelName {
+			continue
+		}
+		if modelType != "" && model.ModelType != modelType {
 			continue
 		}
 		model.Status = status
@@ -939,29 +1251,44 @@ func (s *Service) RunAgentCLIDebug(ctx context.Context, req RequestRunAgentCLIDe
 	if err != nil {
 		return AgentExecutionDetail{}, err
 	}
+	if model.ModelType != AgentModelTypeChat {
+		return AgentExecutionDetail{}, ErrAgentModelTypeNotAllowed
+	}
 	if !model.Enabled || model.Status != AgentModelStatusAvailable {
 		return AgentExecutionDetail{}, ErrAgentModelNotAvailable
 	}
 
 	triggerID := "debug-" + generateID()
+	today := time.Now().Format("2006-01-02")
 	pack := AgentContextPack{
 		BuiltAt: time.Now(),
 		Hit: MonitorHit{
 			ID:       triggerID,
 			TaskType: "agent_cli_debug",
 			Status:   MonitorHitStatusCandidate,
-			Title:    "Agent CLI debug self check",
-			Summary:  "Verify Codex CLI execution, stdout capture, and MCP submit_result callback.",
+			Title:    "Agent CLI debug self check with Google News search",
+			Summary:  "Verify Codex CLI execution, search/web tool access, stdout capture, and MCP submit_result callback.",
 			Evidence: map[string]any{
-				"debug":              true,
-				"expectedOutputType": OperationReviewOutputContinueMonitoring,
-				"instruction":        "Return continue_monitoring after confirming the MCP callback path works.",
+				"debug":                    true,
+				"expectedOutputType":       OperationReviewOutputContinueMonitoring,
+				"googleNewsDate":           today,
+				"googleNewsSearchRequired": true,
+				"requiredLanguage":         "zh-CN",
+				"requiredResultField":      "googleNewsTodayZh",
+				"instruction":              "Use available search/web tools to find today's Google News headlines, then return continue_monitoring in Chinese through stock_agent.submit_result.",
 			},
 		},
-		Evidence: map[string]any{"debug": true},
+		Evidence: map[string]any{
+			"debug":                    true,
+			"googleNewsDate":           today,
+			"googleNewsSearchRequired": true,
+			"requiredLanguage":         "zh-CN",
+			"requiredResultField":      "googleNewsTodayZh",
+		},
 		Freshness: map[string]any{
-			"generatedAt": time.Now().Format(time.RFC3339),
-			"purpose":     "agent_cli_debug",
+			"generatedAt":    time.Now().Format(time.RFC3339),
+			"purpose":        "agent_cli_debug",
+			"googleNewsDate": today,
 		},
 	}
 	inputArtifact, _ := json.Marshal(map[string]any{
@@ -976,7 +1303,7 @@ func (s *Service) RunAgentCLIDebug(ctx context.Context, req RequestRunAgentCLIDe
 		TriggerObjectType:    "agent_cli_debug",
 		TriggerObjectID:      triggerID,
 		RequestedBy:          req.RequestedBy,
-		InputSummary:         "CLI debug: verify Codex CLI stdout capture and MCP submit_result callback.",
+		InputSummary:         "CLI debug: verify Codex CLI search/web access with today's Google News in Chinese and MCP submit_result callback.",
 		InputArtifactSummary: string(inputArtifact),
 	})
 	if err != nil {

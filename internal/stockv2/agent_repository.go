@@ -251,7 +251,111 @@ func scanAgentModelProfile(row rowScanner) (AgentModelProfile, error) {
 	m.DisplayName = displayName
 	m.Enabled = enabled != 0
 	m.Metadata = unmarshalMap(metadataJSON)
+	hydrateAgentModelProfile(&m)
 	return m, nil
+}
+
+func hydrateAgentModelProfile(model *AgentModelProfile) {
+	if model.Metadata == nil {
+		model.Metadata = map[string]any{}
+	}
+	modelType := strings.TrimSpace(model.ModelType)
+	if modelType == "" {
+		modelType = stringFromAny(model.Metadata["modelType"])
+	}
+	if !validAgentModelType(modelType) || modelType == "" {
+		modelType = AgentModelTypeChat
+	}
+	model.ModelType = modelType
+	if model.ModelType != AgentModelTypeEmbedding {
+		model.EmbeddingProtocol = ""
+		model.EmbeddingDimensions = 0
+		model.InputModalities = nil
+		model.EncodingFormat = ""
+		return
+	}
+	if strings.TrimSpace(model.EmbeddingProtocol) == "" {
+		model.EmbeddingProtocol = stringFromAny(model.Metadata["embeddingProtocol"])
+	}
+	if strings.TrimSpace(model.EmbeddingProtocol) == "" {
+		model.EmbeddingProtocol = AgentEmbeddingProtocolOpenAI
+	}
+	if model.EmbeddingDimensions <= 0 {
+		if value, ok := numberFromAny(model.Metadata["embeddingDimensions"]); ok && value > 0 {
+			model.EmbeddingDimensions = int(value)
+		}
+	}
+	if len(model.InputModalities) == 0 {
+		model.InputModalities = agentModelStringListFromAny(model.Metadata["inputModalities"])
+	}
+	if len(model.InputModalities) == 0 {
+		model.InputModalities = []string{"text"}
+	}
+	if strings.TrimSpace(model.EncodingFormat) == "" {
+		model.EncodingFormat = stringFromAny(model.Metadata["encodingFormat"])
+	}
+}
+
+func agentModelProfileForStore(model AgentModelProfile) AgentModelProfile {
+	hydrateAgentModelProfile(&model)
+	if model.Metadata == nil {
+		model.Metadata = map[string]any{}
+	}
+	// ponytail: embedding 字段先复用 metadata_json;未来需要列表筛选或统计时再迁移成列。
+	model.Metadata["modelType"] = model.ModelType
+	if model.ModelType != AgentModelTypeEmbedding {
+		delete(model.Metadata, "embeddingProtocol")
+		delete(model.Metadata, "embeddingDimensions")
+		delete(model.Metadata, "inputModalities")
+		delete(model.Metadata, "encodingFormat")
+		return model
+	}
+	model.Metadata["embeddingProtocol"] = model.EmbeddingProtocol
+	if model.EmbeddingDimensions > 0 {
+		model.Metadata["embeddingDimensions"] = model.EmbeddingDimensions
+	} else {
+		delete(model.Metadata, "embeddingDimensions")
+	}
+	if len(model.InputModalities) > 0 {
+		model.Metadata["inputModalities"] = model.InputModalities
+	} else {
+		delete(model.Metadata, "inputModalities")
+	}
+	if strings.TrimSpace(model.EncodingFormat) != "" {
+		model.Metadata["encodingFormat"] = strings.TrimSpace(model.EncodingFormat)
+	} else {
+		delete(model.Metadata, "encodingFormat")
+	}
+	return model
+}
+
+func agentModelStringListFromAny(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(item); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(stringFromAny(item)); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	case string:
+		text := strings.TrimSpace(typed)
+		if text == "" {
+			return nil
+		}
+		return []string{text}
+	default:
+		return nil
+	}
 }
 
 func (s *Store) CreateAgentModelProfile(ctx context.Context, model AgentModelProfile) (AgentModelProfile, error) {
@@ -266,6 +370,7 @@ func (s *Store) CreateAgentModelProfile(ctx context.Context, model AgentModelPro
 	if model.Metadata == nil {
 		model.Metadata = map[string]any{}
 	}
+	model = agentModelProfileForStore(model)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO stockv2_agent_model_profiles
 			(id, provider_id, model_name, display_name, enabled, status, cost_level,
@@ -334,6 +439,7 @@ func (s *Store) UpdateAgentModelProfile(ctx context.Context, model AgentModelPro
 	if model.Metadata == nil {
 		model.Metadata = map[string]any{}
 	}
+	model = agentModelProfileForStore(model)
 	model.UpdatedAt = time.Now()
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE stockv2_agent_model_profiles

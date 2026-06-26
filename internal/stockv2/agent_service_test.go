@@ -2,7 +2,9 @@ package stockv2
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -75,6 +77,9 @@ func TestAgentProviderAndModelProfileCRUD(t *testing.T) {
 	}
 	if model.CostLevel != AgentModelCostLevelMedium {
 		t.Fatalf("default cost level = %q, want medium", model.CostLevel)
+	}
+	if model.ModelType != AgentModelTypeChat {
+		t.Fatalf("default model type = %q, want chat", model.ModelType)
 	}
 
 	// model 更新。
@@ -241,6 +246,233 @@ func TestAgentProviderModelCatalogAndTestUseOpenAICompatibleProtocol(t *testing.
 	}
 	if updated.Status != AgentModelStatusAvailable {
 		t.Fatalf("model status = %q, want available", updated.Status)
+	}
+}
+
+func TestAgentEmbeddingModelProfileAndTestUseOpenAIEmbeddingsProtocol(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	var embeddingsCalled bool
+	svc.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if got, want := req.Header.Get("Authorization"), "Bearer secret-test-token"; got != want {
+			t.Fatalf("authorization header = %q, want %q", got, want)
+		}
+		if req.URL.Path != "/v1/embeddings" {
+			t.Fatalf("unexpected provider path: %s", req.URL.Path)
+		}
+		embeddingsCalled = true
+		body, _ := io.ReadAll(req.Body)
+		text := string(body)
+		if !strings.Contains(text, `"model":"embed-test"`) || !strings.Contains(text, `"input"`) {
+			t.Fatalf("embedding request body = %s", text)
+		}
+		if strings.Contains(text, `"messages"`) {
+			t.Fatalf("embedding request should not contain chat messages: %s", text)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{"data":[{"embedding":[0.1,0.2,0.3]}],"usage":{"prompt_tokens":3,"total_tokens":3}}`)),
+		}, nil
+	})}
+
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeCodexCLI,
+		BaseURL:      "https://example.test/v1",
+		APIKey:       "secret-test-token",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	model, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID:          provider.ID,
+		ModelName:           "embed-test",
+		Enabled:             true,
+		ModelType:           AgentModelTypeEmbedding,
+		EmbeddingDimensions: 3,
+	})
+	if err != nil {
+		t.Fatalf("create embedding model: %v", err)
+	}
+	if model.ModelType != AgentModelTypeEmbedding {
+		t.Fatalf("model type = %q, want embedding", model.ModelType)
+	}
+	if model.EmbeddingProtocol != AgentEmbeddingProtocolOpenAI {
+		t.Fatalf("embedding protocol = %q, want openai embeddings", model.EmbeddingProtocol)
+	}
+	if model.EmbeddingDimensions != 3 {
+		t.Fatalf("embedding dimensions = %d, want 3", model.EmbeddingDimensions)
+	}
+	if got := stringFromAny(model.Metadata["modelType"]); got != AgentModelTypeEmbedding {
+		t.Fatalf("metadata modelType = %q, want embedding", got)
+	}
+
+	result, err := svc.TestAgentModel(ctx, RequestTestAgentModel{
+		ProviderID:          provider.ID,
+		ModelName:           "embed-test",
+		ModelType:           AgentModelTypeEmbedding,
+		EmbeddingDimensions: 3,
+	})
+	if err != nil {
+		t.Fatalf("test embedding model: %v", err)
+	}
+	if !embeddingsCalled {
+		t.Fatal("embeddings endpoint not called")
+	}
+	if !result.OK || result.ModelType != AgentModelTypeEmbedding || result.EmbeddingDimensions != 3 {
+		t.Fatalf("embedding test result = %#v, want ok with 3 dimensions", result)
+	}
+	updated, err := svc.GetAgentModelProfile(ctx, model.ID)
+	if err != nil {
+		t.Fatalf("get embedding model: %v", err)
+	}
+	if updated.Status != AgentModelStatusAvailable {
+		t.Fatalf("embedding model status = %q, want available", updated.Status)
+	}
+}
+
+func TestAgentEmbeddingModelProfileAndTestUseVolcengineMultimodalProtocol(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	var multimodalCalled bool
+	svc.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if got, want := req.Header.Get("Authorization"), "Bearer secret-test-token"; got != want {
+			t.Fatalf("authorization header = %q, want %q", got, want)
+		}
+		if req.URL.Path != "/api/v3/embeddings/multimodal" {
+			t.Fatalf("unexpected provider path: %s", req.URL.Path)
+		}
+		multimodalCalled = true
+		body, _ := io.ReadAll(req.Body)
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("embedding request body is not json: %v", err)
+		}
+		if payload["model"] != "doubao-embedding-vision-251215" {
+			t.Fatalf("model = %#v, want doubao embedding vision", payload["model"])
+		}
+		input, ok := payload["input"].([]any)
+		if !ok || len(input) != 1 {
+			t.Fatalf("input = %#v, want one typed part", payload["input"])
+		}
+		part, ok := input[0].(map[string]any)
+		if !ok || part["type"] != "text" || strings.TrimSpace(fmt.Sprint(part["text"])) == "" {
+			t.Fatalf("input part = %#v, want text part", input[0])
+		}
+		if _, ok := payload["dimensions"]; ok {
+			t.Fatalf("dimensions should not be sent for volcengine multimodal: %#v", payload["dimensions"])
+		}
+		if _, ok := payload["encoding_format"]; ok {
+			t.Fatalf("encoding_format should not be sent for volcengine multimodal: %#v", payload["encoding_format"])
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{"data":{"embedding":[0.1,0.2,0.3,0.4]},"usage":{"prompt_tokens":3,"total_tokens":3}}`)),
+		}, nil
+	})}
+
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeOpenAI,
+		BaseURL:      "https://ark.cn-beijing.volces.com/api/v3",
+		APIKey:       "secret-test-token",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	model, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID:          provider.ID,
+		ModelName:           "doubao-embedding-vision-251215",
+		Enabled:             true,
+		ModelType:           AgentModelTypeEmbedding,
+		EmbeddingProtocol:   AgentEmbeddingProtocolVolcengineMultimodal,
+		EmbeddingDimensions: 4,
+	})
+	if err != nil {
+		t.Fatalf("create embedding model: %v", err)
+	}
+	if model.EmbeddingProtocol != AgentEmbeddingProtocolVolcengineMultimodal {
+		t.Fatalf("embedding protocol = %q, want volcengine multimodal", model.EmbeddingProtocol)
+	}
+
+	result, err := svc.TestAgentModel(ctx, RequestTestAgentModel{
+		ProviderID:          provider.ID,
+		ModelName:           "doubao-embedding-vision-251215",
+		ModelType:           AgentModelTypeEmbedding,
+		EmbeddingProtocol:   AgentEmbeddingProtocolVolcengineMultimodal,
+		EmbeddingDimensions: 4,
+	})
+	if err != nil {
+		t.Fatalf("test embedding model: %v", err)
+	}
+	if !multimodalCalled {
+		t.Fatal("multimodal embeddings endpoint not called")
+	}
+	if !result.OK || result.ModelType != AgentModelTypeEmbedding || result.EmbeddingDimensions != 4 {
+		t.Fatalf("embedding test result = %#v, want ok with 4 dimensions", result)
+	}
+}
+
+func TestAgentTaskProfilesRejectEmbeddingModel(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeOpenAI,
+		Name:         "openai-embedding-only",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	model, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID: provider.ID,
+		ModelName:  "embed-task-blocked",
+		Enabled:    true,
+		ModelType:  AgentModelTypeEmbedding,
+	})
+	if err != nil {
+		t.Fatalf("create embedding model: %v", err)
+	}
+	modelID := model.ID
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeOperationReview, RequestUpdateAgentTaskProfile{
+		PrimaryModelID: &modelID,
+	}); !errors.Is(err, ErrAgentModelTypeNotAllowed) {
+		t.Fatalf("bind embedding model error = %v, want ErrAgentModelTypeNotAllowed", err)
+	}
+	if _, _, err := svc.CreateAgentRunRecord(ctx, AgentRunRecordParams{
+		TaskType:          AgentTaskTypeOperationReview,
+		ProviderID:        provider.ID,
+		ModelID:           model.ID,
+		TriggerObjectType: "monitor_hit",
+		TriggerObjectID:   "hit-embedding",
+	}); !errors.Is(err, ErrAgentModelTypeNotAllowed) {
+		t.Fatalf("create run with embedding model error = %v, want ErrAgentModelTypeNotAllowed", err)
+	}
+
+	chatModel, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID: provider.ID,
+		ModelName:  "chat-bound",
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("create chat model: %v", err)
+	}
+	chatModelID := chatModel.ID
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeOperationReview, RequestUpdateAgentTaskProfile{
+		PrimaryModelID: &chatModelID,
+	}); err != nil {
+		t.Fatalf("bind chat model: %v", err)
+	}
+	embeddingType := AgentModelTypeEmbedding
+	if _, err := svc.UpdateAgentModelProfile(ctx, chatModel.ID, RequestUpdateAgentModelProfile{
+		ModelType: &embeddingType,
+	}); !errors.Is(err, ErrAgentModelTypeNotAllowed) {
+		t.Fatalf("convert bound chat model to embedding error = %v, want ErrAgentModelTypeNotAllowed", err)
 	}
 }
 
@@ -595,6 +827,13 @@ func TestRunAgentCLIDebugPersistsOutputAndSubmittedResult(t *testing.T) {
 	if got := detail.Ledger.StructuredOutput["outputType"]; got != OperationReviewOutputContinueMonitoring {
 		t.Fatalf("structured output type = %v", got)
 	}
+	if !strings.Contains(detail.Ledger.InputArtifactSummary, "googleNewsTodayZh") || !strings.Contains(detail.Ledger.InputArtifactSummary, "googleNewsDate") {
+		t.Fatalf("input artifact summary = %q, want google news debug request", detail.Ledger.InputArtifactSummary)
+	}
+	result := mapFromAny(detail.Ledger.StructuredOutput["result"])
+	if got := sliceFromAny(result["googleNewsTodayZh"]); len(got) == 0 {
+		t.Fatalf("googleNewsTodayZh = %#v, want debug news items", result["googleNewsTodayZh"])
+	}
 }
 
 func TestRunAgentCLIDebugAsyncReturnsRunBeforeCompletion(t *testing.T) {
@@ -763,10 +1002,28 @@ type fakeDebugAgentExecutor struct {
 }
 
 func (f fakeDebugAgentExecutor) ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName string) (*AgentExecutorOutput, error) {
+	result := map[string]any{"debug": true, "model": modelName, "hitTitle": pack.Hit.Title}
+	if pack.Hit.TaskType == "agent_cli_debug" {
+		result["googleNewsSearchStatus"] = "ok"
+		result["googleNewsTodayZh"] = []any{
+			map[string]any{
+				"title":       "今日谷歌新闻调试样例",
+				"source":      "Google News",
+				"publishedAt": stringFromAny(pack.Evidence["googleNewsDate"]),
+				"url":         "https://news.google.com/",
+				"summaryZh":   "用于验证 debug CLI 回填字段是否展示,真实运行时由 Codex 搜索工具填充。",
+			},
+		}
+		result["searchAudit"] = map[string]any{
+			"toolUsed":  "fake",
+			"query":     "Google News today",
+			"checkedAt": time.Now().Format(time.RFC3339),
+		}
+	}
 	_, err := f.pool.submitResult(taskID, AgentTaskTypeOperationReview, AgentTaskSubmittedResult{
 		OutputType:    OperationReviewOutputContinueMonitoring,
 		ResultSummary: "debug ok",
-		Result:        map[string]any{"debug": true, "model": modelName, "hitTitle": pack.Hit.Title},
+		Result:        result,
 		Confidence:    1,
 	})
 	if err != nil {
