@@ -351,6 +351,128 @@ func TestMCP_SubmitResult_StrategyGenerationRejectsIllegalOutputType(t *testing.
 	}
 }
 
+func TestMCP_SubmitResult_RejectsTaskTypeMismatch(t *testing.T) {
+	p := newAgentTaskPool(defaultCleanupInterval)
+	defer p.Close()
+
+	taskID, _ := p.createTask(AgentTaskTypeStrategyGeneration, "run-1", "", 5*time.Minute)
+	resp := p.HandleMCPRequest(mustJSON(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "stock_agent.submit_result",
+			"arguments": map[string]any{
+				"taskID":   taskID,
+				"taskType": AgentTaskTypeOperationReview,
+				"result": map[string]any{
+					"outputType": OperationReviewOutputContinueMonitoring,
+				},
+			},
+		},
+	}))
+	var result struct {
+		Error *struct {
+			Code int            `json:"code"`
+			Data map[string]any `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v\nresp: %s", err, string(resp))
+	}
+	if result.Error == nil || result.Error.Code != mcpErrInvalidParams {
+		t.Fatalf("expected invalid params error, got: %+v", result.Error)
+	}
+	if result.Error.Data["status"] != "invalid_task" {
+		t.Fatalf("error data = %+v, want invalid_task status", result.Error.Data)
+	}
+
+	entry, ok := p.getTask(taskID)
+	if !ok {
+		t.Fatal("task should exist")
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.status != agentTaskStatusWaiting || entry.submittedResult != nil {
+		t.Fatalf("entry after mismatch = %+v, want waiting without result", entry)
+	}
+}
+
+func TestMCP_SubmitResult_DuplicateSubmitKeepsFirstResult(t *testing.T) {
+	p := newAgentTaskPool(defaultCleanupInterval)
+	defer p.Close()
+
+	taskID, _ := p.createTask(AgentTaskTypeStrategyGeneration, "run-1", "", 5*time.Minute)
+	first := mustJSON(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "stock_agent.submit_result",
+			"arguments": map[string]any{
+				"taskID":   taskID,
+				"taskType": AgentTaskTypeStrategyGeneration,
+				"result": map[string]any{
+					"outputType":    AgentTaskTypeStrategyGeneration,
+					"resultSummary": "first result",
+					"result":        map[string]any{"schema_version": StrategyGenerationReportSchemaVersion},
+					"confidence":    0.8,
+				},
+			},
+		},
+	})
+	firstResp := p.HandleMCPRequest(first)
+	var firstResult struct {
+		Error any `json:"error"`
+	}
+	if err := json.Unmarshal(firstResp, &firstResult); err != nil {
+		t.Fatalf("unmarshal first response: %v\nresp: %s", err, string(firstResp))
+	}
+	if firstResult.Error != nil {
+		t.Fatalf("first submit returned error: %s", string(firstResp))
+	}
+	second := mustJSON(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "stock_agent.submit_result",
+			"arguments": map[string]any{
+				"taskID":   taskID,
+				"taskType": AgentTaskTypeStrategyGeneration,
+				"result": map[string]any{
+					"outputType":    AgentTaskTypeStrategyGeneration,
+					"resultSummary": "second result",
+					"result":        map[string]any{"schema_version": StrategyGenerationReportSchemaVersion},
+				},
+			},
+		},
+	})
+	resp := p.HandleMCPRequest(second)
+	var result struct {
+		Error *struct {
+			Code int            `json:"code"`
+			Data map[string]any `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v\nresp: %s", err, string(resp))
+	}
+	if result.Error == nil || result.Error.Code != mcpErrInvalidParams || result.Error.Data["status"] != "duplicate" {
+		t.Fatalf("duplicate response = %+v", result.Error)
+	}
+
+	entry, ok := p.getTask(taskID)
+	if !ok {
+		t.Fatal("task should exist")
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.submitCount != 1 || entry.submittedResult == nil || entry.submittedResult.ResultSummary != "first result" {
+		t.Fatalf("entry after duplicate = %+v, want first result only", entry)
+	}
+}
+
 func TestMCP_MethodNotFound(t *testing.T) {
 	p := newAgentTaskPool(defaultCleanupInterval)
 	defer p.Close()

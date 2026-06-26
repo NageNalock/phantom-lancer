@@ -76,7 +76,7 @@ Agent 在一次输出中给出多头理由、空头理由、关键分歧、组�
 
 ## 4. 入口模式
 
-`strategy_generation` 支持四种模式。
+`strategy_generation` 目标支持四种模式。当前第一版 HTTP 入口已开放 `manual_target`、`single_instrument` 和 `portfolio_strategy_diagnosis`；`opportunity` 保留为机会详情入口接入后的模式，不在本轮强行开放。
 
 | 模式 | 入口 | 是否必须绑定组合 | 主要产物 |
 |---|---|---:|---|
@@ -91,32 +91,33 @@ Agent 在一次输出中给出多头理由、空头理由、关键分歧、组�
 
 ## 5. 输入模型
 
-建议输入对象为 `StrategyGenerationInput`。
+建议输入对象为 `StrategyGenerationInput`。当前 HTTP API 为 `POST /api/stockv2/agent/strategy-generation/run`，请求体按 Go/TypeScript API 约定使用 camelCase；Agent MCP 回填的 `strategy-generation-report/v1` 仍使用下文定义的 snake_case report schema。
 
 ```json
 {
-  "schema_version": "strategy-generation-input/v1",
-  "mode": "manual_target|opportunity|single_instrument|portfolio_strategy_diagnosis",
-  "user_intent": "用户目标、问题或备注",
-  "target_instruments": [
+  "schemaVersion": "strategy-generation-input/v1",
+  "mode": "manual_target|single_instrument|portfolio_strategy_diagnosis",
+  "userGoal": "用户目标、问题或备注；后端兼容 userIntent 作为兜底",
+  "userIntent": "用户输入的自然语言意图",
+  "targetInstruments": [
     {
       "symbol": "302132",
       "market": "SZ",
       "name": "中航成飞",
-      "user_note": "可选。用户对该标的的补充说明。"
+      "userNote": "可选。用户对该标的的补充说明。"
     }
   ],
-  "opportunity_id": "",
-  "portfolio_id": "",
-  "time_horizon": "short|swing|medium|long|unspecified",
-  "allowed_actions": ["observe", "build_position", "add_position", "hold", "reduce_position", "exit_position"],
-  "evidence_scope": {
+  "opportunityId": "",
+  "portfolioId": "",
+  "timeHorizon": "short|swing|medium|long|unspecified",
+  "allowedActions": ["observe", "build_position", "add_position", "hold", "reduce_position", "exit_position"],
+  "evidenceScope": {
     "quote": true,
-    "daily_bars": true,
-    "stock_profile": true,
-    "recent_news": true,
-    "existing_strategy": true,
-    "portfolio_snapshot": true,
+    "dailyBars": true,
+    "stockProfile": true,
+    "recentNews": true,
+    "existingStrategy": true,
+    "portfolioSnapshot": true,
     "memory": true
   }
 }

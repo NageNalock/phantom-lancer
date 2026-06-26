@@ -147,6 +147,92 @@ func TestBuildPortfolioStrategyDiagnosisRequiresPortfolioID(t *testing.T) {
 	}
 }
 
+func TestBuildPortfolioStrategyDiagnosisContextMarksQuoteQuality(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	portfolio := createStrategyTestPortfolio(t, svc.store, "pf-context-quality")
+	now := time.Now()
+	for _, holding := range []StockV2Holding{
+		{
+			ID:                "h-fresh-context",
+			PortfolioID:       portfolio.ID,
+			Symbol:            "600000",
+			Market:            "SH",
+			Name:              "浦发银行",
+			Quantity:          100,
+			AvailableQuantity: 100,
+			CostPrice:         10,
+		},
+		{
+			ID:                "h-stale-context",
+			PortfolioID:       portfolio.ID,
+			Symbol:            "000001",
+			Market:            "SZ",
+			Name:              "平安银行",
+			Quantity:          100,
+			AvailableQuantity: 100,
+			CostPrice:         8,
+		},
+		{
+			ID:                "h-missing-context",
+			PortfolioID:       portfolio.ID,
+			Symbol:            "300001",
+			Market:            "SZ",
+			Name:              "特锐德",
+			Quantity:          100,
+			AvailableQuantity: 100,
+			CostPrice:         15,
+			LastPrice:         88,
+			LastPriceAt:       now.Add(-24 * time.Hour),
+		},
+	} {
+		if err := svc.store.CreateHolding(ctx, holding); err != nil {
+			t.Fatalf("create holding %s: %v", holding.Symbol, err)
+		}
+	}
+	seedWatchQuote(t, svc, "600000", 11, 1.2, QuoteStatusFresh, now)
+	seedWatchQuote(t, svc, "000001", 9, -0.3, QuoteStatusStale, now.Add(-2*time.Hour))
+	seedWatchDailyBar(t, svc, "600000", 10.8)
+
+	genCtx, err := svc.BuildStrategyGenerationContext(ctx, StrategyGenerationInput{
+		Mode:        StrategyGenerationModePortfolio,
+		UserGoal:    "诊断当前组合",
+		PortfolioID: portfolio.ID,
+	})
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	if genCtx.Diagnostics == nil || genCtx.Diagnostics.HoldingCount != 3 {
+		t.Fatalf("diagnostics = %+v, want three holdings", genCtx.Diagnostics)
+	}
+	bySymbol := map[string]StrategyGenerationHoldingContext{}
+	for _, holding := range genCtx.Holdings {
+		bySymbol[holding.Symbol] = holding
+	}
+	fresh := bySymbol["600000"]
+	if fresh.Quote == nil || fresh.CurrentPrice != 11 || fresh.DailyBars == nil || fresh.DailyBars.Count == 0 {
+		t.Fatalf("fresh holding context = %+v, want quote price and daily bars", fresh)
+	}
+	stale := bySymbol["000001"]
+	if stale.Quote == nil || stale.CurrentPrice != 0 {
+		t.Fatalf("stale holding context = %+v, want quote present but no currentPrice", stale)
+	}
+	if quoteFreshness := mapFromAny(stale.Freshness["quote"]); quoteFreshness["status"] != QuoteStatusStale {
+		t.Fatalf("stale quote freshness = %+v, want stale", quoteFreshness)
+	}
+	missing := bySymbol["300001"]
+	if missing.Quote != nil || missing.CurrentPrice != 0 {
+		t.Fatalf("missing quote context = %+v, want no quote and no fabricated currentPrice", missing)
+	}
+	for _, want := range []string{"quote:300001", "quoteStale:000001", "dailyBars:000001", "dailyBars:300001"} {
+		if !containsString(genCtx.MissingItems, want) {
+			t.Fatalf("missingItems = %v, want %s", genCtx.MissingItems, want)
+		}
+	}
+}
+
 func TestPortfolioStrategyDiagnosisEmptyHoldingsNoDrafts(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
@@ -196,6 +282,104 @@ func TestPortfolioStrategyDiagnosisEmptyHoldingsNoDrafts(t *testing.T) {
 	}
 	if len(strategies) != 0 {
 		t.Fatalf("draft strategies = %d, want 0", len(strategies))
+	}
+}
+
+func TestStrategyGenerationDraftActivationFeedsDataMonitor(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	seedStrategyGenerationInstrument(t, svc, ctx, "300750")
+	seedWatchQuote(t, svc, "300750", 210, 2.4, QuoteStatusFresh, time.Now())
+	configureStrategyGenerationModel(t, svc, ctx)
+
+	run, err := svc.RunStrategyGeneration(ctx, StrategyGenerationInput{
+		Mode:     StrategyGenerationModeManualTarget,
+		UserGoal: "生成宁德时代突破策略",
+		TargetInstruments: []StrategyGenerationTargetInstrument{{
+			Symbol: "300750",
+			Market: "SZ",
+			Name:   "宁德时代",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("run strategy generation: %v", err)
+	}
+	report := strategyGenerationReportResult("300750")
+	draft := mapFromAny(sliceFromAny(report["drafts"])[0])
+	draft["name"] = "宁德时代"
+	playbook := mapFromAny(draft["playbook"])
+	rule := mapFromAny(sliceFromAny(playbook["rules"])[0])
+	rule["action"] = StrategyGenerationRuleActionAddPosition
+	rule["title"] = "突破后加仓观察"
+	rule["dataPrefilters"] = []any{map[string]any{"key": "break_200", "type": WatchRulePriceAbove, "threshold": 200.0}}
+	rule["portfolioPrefilters"] = []any{}
+	rule["newsPrefilters"] = []any{map[string]any{"keyword": "动力电池订单", "importance": "high"}}
+
+	taskID, _ := svc.agentTaskPool.createTask(run.TaskType, run.ID, "", time.Minute)
+	if _, err := svc.agentTaskPool.submitResult(taskID, AgentTaskTypeStrategyGeneration, AgentTaskSubmittedResult{
+		OutputType:    AgentTaskTypeStrategyGeneration,
+		ResultSummary: "生成突破策略草案",
+		Result:        report,
+		Confidence:    0.74,
+	}); err != nil {
+		t.Fatalf("submit result: %v", err)
+	}
+	svc.finalizeAgentRunWithOutput(ctx, run.ID, run.DecisionLedgerID, taskID, &AgentExecutorOutput{ExitCode: 0, Duration: time.Millisecond}, nil)
+
+	drafts, err := svc.ListStrategies(ctx, StrategyListFilter{Source: StrategySourceAgent, Status: StrategyStatusDraft, Symbol: "300750", Limit: 10})
+	if err != nil {
+		t.Fatalf("list drafts: %v", err)
+	}
+	if len(drafts) != 1 {
+		t.Fatalf("drafts = %d, want 1", len(drafts))
+	}
+	meta := drafts[0].ActiveVersion.GenerationMeta
+	if meta["source"] != AgentTaskTypeStrategyGeneration {
+		t.Fatalf("generationMeta source = %v, want strategy_generation", meta["source"])
+	}
+	savedRule := mapFromAny(sliceFromAny(mapFromAny(meta["playbook"])["rules"])[0])
+	if len(sliceFromAny(savedRule["newsPrefilters"])) != 1 {
+		t.Fatalf("saved rule = %#v, want persisted newsPrefilters", savedRule)
+	}
+	reviewsBefore, err := svc.ListOperationReviews(ctx, OperationReviewListFilter{Symbol: "300750", Limit: 10})
+	if err != nil {
+		t.Fatalf("list reviews before monitor: %v", err)
+	}
+	if len(reviewsBefore) != 0 {
+		t.Fatalf("reviews before monitor = %#v, want none", reviewsBefore)
+	}
+
+	activated, err := svc.ActivateStrategy(ctx, drafts[0].Strategy.ID)
+	if err != nil {
+		t.Fatalf("activate draft: %v", err)
+	}
+	if activated.Strategy.Status != StrategyStatusActive {
+		t.Fatalf("activated status = %s", activated.Strategy.Status)
+	}
+	monitorRun, err := svc.RunMonitorTask(ctx, MonitorTaskDataStrategyMonitor, MonitorTriggerManual)
+	if err != nil {
+		t.Fatalf("run data monitor: %v", err)
+	}
+	if monitorRun.HitCount != 1 {
+		t.Fatalf("monitor hit count = %d, want 1", monitorRun.HitCount)
+	}
+	hits, err := svc.ListMonitorHits(ctx, MonitorHitListFilter{TaskType: MonitorTaskDataStrategyMonitor, Symbol: "300750", Limit: 10})
+	if err != nil {
+		t.Fatalf("list hits: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("hits = %d, want 1", len(hits))
+	}
+	if got := hits[0].Evidence["matchedAction"]; got != StrategyGenerationRuleActionAddPosition {
+		t.Fatalf("matched action = %v, want add_position", got)
+	}
+	if got := hits[0].Evidence["matchedPrefilterKey"]; got != "break_200" {
+		t.Fatalf("matched prefilter = %v, want break_200", got)
+	}
+	if len(sliceFromAny(mapFromAny(hits[0].Evidence["playbookRule"])["newsPrefilters"])) != 1 {
+		t.Fatalf("hit playbook rule = %#v, want newsPrefilters preserved", hits[0].Evidence["playbookRule"])
 	}
 }
 

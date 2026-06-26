@@ -479,6 +479,9 @@ func TestAgentTaskProfilesSeedFutureTasksAndStrategyGenerationConfigurable(t *te
 		if _, err := svc.UpdateAgentTaskProfile(ctx, taskType, RequestUpdateAgentTaskProfile{}); !errors.Is(err, ErrAgentTaskNotConfigurable) {
 			t.Fatalf("update future task %s error = %v, want ErrAgentTaskNotConfigurable", taskType, err)
 		}
+		if _, err := svc.ResolveAgentTask(ctx, taskType, "manual", "x", "tester"); !errors.Is(err, ErrAgentTaskNotConfigurable) {
+			t.Fatalf("resolve future task %s error = %v, want ErrAgentTaskNotConfigurable", taskType, err)
+		}
 	}
 }
 

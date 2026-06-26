@@ -262,7 +262,6 @@ func (s *Service) buildStrategyGenerationHoldingContext(
 		CostPrice:         holding.CostPrice,
 		Quantity:          holding.Quantity,
 		AvailableQuantity: holding.AvailableQuantity,
-		CurrentPrice:      holding.LastPrice,
 		MarketValue:       holding.MarketValue,
 		PnL:               holding.PnL,
 		PositionPct:       holding.PositionPct,
@@ -271,8 +270,12 @@ func (s *Service) buildStrategyGenerationHoldingContext(
 	}
 	if quote, ok := quotes[hctx.Symbol]; ok {
 		hctx.Quote = &quote
-		hctx.CurrentPrice = quote.LastPrice
 		hctx.Freshness["quote"] = quoteFreshnessSummary(quote)
+		if quote.Status == QuoteStatusFresh && quote.LastPrice > 0 {
+			hctx.CurrentPrice = quote.LastPrice
+		} else {
+			*missing = append(*missing, "quoteStale:"+hctx.Symbol)
+		}
 	} else {
 		*missing = append(*missing, "quote:"+hctx.Symbol)
 		hctx.Freshness["quote"] = map[string]any{"status": "missing"}
@@ -733,11 +736,8 @@ func strategyGenerationHoldingMarketValue(holding StockV2Holding, quotes map[str
 	if holding.MarketValue > 0 {
 		return holding.MarketValue
 	}
-	if quote, ok := quotes[holding.Symbol]; ok && quote.LastPrice > 0 {
+	if quote, ok := quotes[holding.Symbol]; ok && quote.Status == QuoteStatusFresh && quote.LastPrice > 0 {
 		return quote.LastPrice * holding.Quantity
-	}
-	if holding.LastPrice > 0 {
-		return holding.LastPrice * holding.Quantity
 	}
 	return 0
 }
