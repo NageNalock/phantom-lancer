@@ -1187,9 +1187,10 @@ func (s *Service) finalizeAgentRunWithOutput(
 	if execErr != nil && !hasValidResult {
 		// 失败路径
 		run.Status = AgentRunStatusFailed
-		run.ErrorMessage = safelog.Text(execErr.Error(), 500)
+		run.ErrorMessage = agentRunFailureMessage(execErr.Error(), execOutput)
 		now := time.Now()
 		run.FinishedAt = now
+		s.markStockProfileAIEnhancementFailed(ctx, run, run.ErrorMessage)
 
 		ledger.OutputArtifactSummary = safelog.Text(outputArtifact.String(), 16384)
 
@@ -1206,8 +1207,9 @@ func (s *Service) finalizeAgentRunWithOutput(
 	if !hasValidResult {
 		// 进程退出了但没提交 result,也算失败
 		run.Status = AgentRunStatusFailed
-		run.ErrorMessage = "no valid result submitted"
+		run.ErrorMessage = agentRunFailureMessage("no valid result submitted", execOutput)
 		run.FinishedAt = time.Now()
+		s.markStockProfileAIEnhancementFailed(ctx, run, run.ErrorMessage)
 		ledger.OutputArtifactSummary = safelog.Text(outputArtifact.String(), 16384)
 		s.store.UpdateAgentRun(ctx, run)
 		s.store.UpdateAgentDecisionLedger(ctx, ledger)
@@ -1286,6 +1288,32 @@ func (s *Service) finalizeAgentRunWithOutput(
 	if _, err := s.store.UpdateAgentRun(ctx, run); err != nil && s.log != nil {
 		s.log.Warn("finalize: update run failed", "run_id", runID, "error", err)
 	}
+}
+
+func agentRunFailureMessage(base string, execOutput *AgentExecutorOutput) string {
+	message := strings.TrimSpace(base)
+	if message == "" {
+		message = "agent run failed"
+	}
+	if execOutput == nil || strings.TrimSpace(execOutput.StderrTail) == "" {
+		return safelog.Text(message, 500)
+	}
+	stderr := lastNonEmptyLine(execOutput.StderrTail)
+	if stderr == "" {
+		return safelog.Text(message, 500)
+	}
+	// ponytail: Keep the run error compact; full stdout/stderr remains in the ledger detail.
+	return safelog.Text(message+": "+stderr, 500)
+}
+
+func lastNonEmptyLine(text string) string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 func (s *Service) agentRunModelName(ctx context.Context, run AgentRun) string {
