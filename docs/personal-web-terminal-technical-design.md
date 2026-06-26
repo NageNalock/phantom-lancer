@@ -1,15 +1,5 @@
 # 个人全面 Web 终端技术方案
 
-> **⚠️ PARTIALLY DEPRECATED（部分章节已过期）⚠️**
->
-> 标记日期：2026-06-17
->
-> 本文档中所有与「股票 Agent 工作台 / Stock Agent Workbench Module」相关的章节
-> （第 1 节能力域清单、第 2 节架构/存储层中的股票部分、第 3 节后端模块架构中的 Stock 节点、
-> 第 3.5 节审计中的股票审计项、**第 3.8 节「Stock Agent Workbench Module」全文**等）
-> 均已作废。股票模块正处于全面重构阶段，任何实现、评审或 Agent 参考都**不得**
-> 以这些章节为准；非股票章节仍然有效。请以重构过程中产出的新设计文档 / 最新代码为准。
-
 文档日期：2026-06-07
 关联产品文档：[personal-web-terminal-product-features.md](./personal-web-terminal-product-features.md)
 后端要求：Go
@@ -23,7 +13,7 @@ Codex CLI Client 和 Codex Gateway / OpenAI Gateway 是并列独立能力域：
 
 ## 1. 技术定位
 
-本项目是一个面向个人使用的服务器 Web 控制台。当前能力域包括控制台总览、Codex、Codex Gateway、日志中心、多媒体图片/视频生成、股票 Agent 工作台、V2Ray 和全局设置；后续可继续扩展应用管理、文件、服务、任务自动化等服务器管理模块。
+本项目是一个面向个人使用的服务器 Web 控制台。当前能力域包括控制台总览、Codex、Codex Gateway、日志中心、多媒体图片/视频生成、股票V2、V2Ray 和全局设置；后续可继续扩展应用管理、文件、服务、任务自动化等服务器管理模块。
 
 技术方案保持单机、轻量、可扩展：
 
@@ -44,7 +34,7 @@ flowchart LR
   Backend --> CodexClient["Codex CLI Client"]
   Backend --> Gateway["Codex Gateway"]
   Backend --> Media["Media Manager"]
-  Backend --> Stock["Stock Agent Workbench"]
+  Backend --> Stock["StockV2"]
   Backend --> V2Ray["V2Ray Manager"]
   Backend --> Logs["Log Center"]
   Backend --> Audit["Audit Logger"]
@@ -65,7 +55,7 @@ flowchart LR
 - Codex Gateway 管理页。
 - 日志中心。
 - 多媒体图片/视频生成和资源库。
-- 股票 Agent 工作台。
+- 股票V2。
 - V2Ray 管理页。
 - 全局设置。
 
@@ -124,7 +114,7 @@ flowchart TD
   API --> CodexClient["Codex CLI Client Module"]
   API --> Gateway["Gateway Module"]
   API --> Media["Media Module"]
-  API --> Stock["Stock Agent Workbench Module"]
+  API --> Stock["StockV2 Module"]
   API --> V2Ray["V2Ray Module"]
   API --> Logs["Logs Module"]
   API --> Audit["Audit Module"]
@@ -234,17 +224,15 @@ Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*`
 
 多媒体资源库的详细产品交互和对象存储设计见 [images-library-feature-design.md](./images-library-feature-design.md)；Agnes 图片/视频接入设计见 [agnes-image-video-integration-design.md](./agnes-image-video-integration-design.md)。
 
-### 3.8 Stock Agent Workbench Module
+### 3.8 StockV2 Module
 
 负责：
 
-- 管理股票机会、账户/仓位、持仓、行情快照、数据源、消息面、策略、盯盘任务、Alert、Review、信号、操作建议、人工操作记录和复盘记忆。
-- 以 SQLite 保存完整对象网络，支持从机会生成策略、从策略创建盯盘、从 Alert 进入 Review、从 proposed operation 进入人工确认或作废。
-- 后台按 A 股交易日历和盯盘间隔执行检查；在真实行情 provider 未配置时明确记录 `quote_refresh` blocked task，并只消费手工或外部写入的快照。
-- Review 保留 deterministic system trace 作为 guardrails 和降级路径，同时支持 `codex_cli` profile 作为只读 Agent executor 执行 Review 辅助分析；每次运行记录 evidence、counter-evidence、guardrails、memory updates、next actions、executor step 和 Agent trace。
-- 所有确认、作废、策略补丁接受/拒绝和风险边界变化写入 audit；普通行情读取和轮询不写高频服务日志。
+- 当前股票模块只保留 StockV2：后端 `internal/stockv2/`，API `/api/stockv2/*`，前端 `web/src/features/stockv2/`。
+- 管理股票标的、日 K / 分钟行情、股票画像、组合、持仓、策略、后台监控、消息、Alert、Review、Agent 治理和留痕。
+- StockV1 的 `internal/stock/`、`/api/stock/*` 和旧设计文档已经移除，不再作为实现边界。
 
-详细设计见 [stock-agent-workbench-feature-design.md](./stock-agent-workbench-feature-design.md)。
+详细设计见 [stock-agent-workbench-v2-key-points-2026-06-18.md](./stock-agent-workbench-v2-key-points-2026-06-18.md)。
 
 ### 3.9 V2Ray Module
 

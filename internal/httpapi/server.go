@@ -37,7 +37,6 @@ import (
 	"phantom-lancer/internal/logsampler"
 	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/selfupdate"
-	stocksvc "phantom-lancer/internal/stock"
 	stockv2 "phantom-lancer/internal/stockv2"
 	"phantom-lancer/internal/storage"
 	"phantom-lancer/internal/v2ray"
@@ -92,7 +91,6 @@ type Server struct {
 	codex          *codexclient.Service
 	v2ray          *v2ray.Service
 	images         *imagegen.Service
-	stock          *stocksvc.Service
 	stockV2        *stockv2.Service
 	docker         *dockercontrol.Service
 	logs           *logcenter.Service
@@ -136,7 +134,7 @@ type sessionContext struct {
 	Session storage.Session
 }
 
-func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, stockSvc *stocksvc.Service, stockV2Svc *stockv2.Service, dockerSvc *dockercontrol.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
+func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, v2raySvc *v2ray.Service, imagesSvc *imagegen.Service, stockV2Svc *stockv2.Service, dockerSvc *dockercontrol.Service, logsSvc *logcenter.Service, updateSvc *selfupdate.Service, staticFS fs.FS, logger *slog.Logger) (*Server, error) {
 	return &Server{
 		cfg:              cfg,
 		store:            store,
@@ -145,7 +143,6 @@ func New(cfg config.Config, store *storage.Store, hub *events.Hub, codexGatewayS
 		codex:            codexSvc,
 		v2ray:            v2raySvc,
 		images:           imagesSvc,
-		stock:            stockSvc,
 		stockV2:          stockV2Svc,
 		docker:           dockerSvc,
 		logs:             logsSvc,
@@ -293,59 +290,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/docker/images/", s.handleDockerRemoveImage)
 	mux.HandleFunc("GET /api/docker/volumes", s.handleDockerListVolumes)
 	mux.HandleFunc("GET /api/docker/networks", s.handleDockerListNetworks)
-	mux.HandleFunc("GET /api/stock/snapshot", s.handleStockSnapshot)
-	mux.HandleFunc("GET /api/stock/settings", s.handleGetStockSettings)
-	mux.HandleFunc("PUT /api/stock/settings", s.handleUpdateStockSettings)
-	mux.HandleFunc("POST /api/stock/settings/proxy-test", s.handleTestStockProxyConnectivity)
-	mux.HandleFunc("GET /api/stock/setup-guide", s.handleStockSetupGuide)
-	mux.HandleFunc("GET /api/stock/portfolios", s.handleStockPortfolios)
-	mux.HandleFunc("POST /api/stock/portfolios", s.handleStockPortfolios)
-	mux.HandleFunc("PATCH /api/stock/portfolios/", s.handleStockPortfolioSubroutes)
-	mux.HandleFunc("POST /api/stock/portfolios/", s.handleStockPortfolioSubroutes)
-	mux.HandleFunc("DELETE /api/stock/portfolios/", s.handleStockPortfolioSubroutes)
-	mux.HandleFunc("GET /api/stock/quotes", s.handleStockQuotes)
-	mux.HandleFunc("POST /api/stock/quotes", s.handleStockQuotes)
-	mux.HandleFunc("POST /api/stock/quotes/refresh", s.handleStockQuoteRefresh)
-	mux.HandleFunc("GET /api/stock/data-sources", s.handleStockDataSources)
-	mux.HandleFunc("POST /api/stock/data-sources", s.handleStockDataSources)
-	mux.HandleFunc("POST /api/stock/data-sources/", s.handleStockDataSourceSubroutes)
-	mux.HandleFunc("GET /api/stock/instruments/search", s.handleStockInstrumentSearch)
-	mux.HandleFunc("GET /api/stock/instruments/industries", s.handleStockInstrumentIndustries)
-	mux.HandleFunc("GET /api/stock/instruments", s.handleStockInstruments)
-	mux.HandleFunc("POST /api/stock/instruments", s.handleStockInstruments)
-	mux.HandleFunc("GET /api/stock/market-data", s.handleStockMarketData)
-	mux.HandleFunc("POST /api/stock/market-data", s.handleStockMarketData)
-	mux.HandleFunc("GET /api/stock/news", s.handleStockNews)
-	mux.HandleFunc("POST /api/stock/news/ingest", s.handleStockNewsIngest)
-	mux.HandleFunc("GET /api/stock/data-tasks", s.handleStockDataTasks)
-	mux.HandleFunc("POST /api/stock/data-tasks/run", s.handleStockDataTasksRun)
-	mux.HandleFunc("GET /api/stock/opportunities", s.handleStockOpportunities)
-	mux.HandleFunc("POST /api/stock/opportunities", s.handleStockOpportunities)
-	mux.HandleFunc("POST /api/stock/opportunities/discover", s.handleStockOpportunitiesDiscover)
-	mux.HandleFunc("POST /api/stock/opportunities/", s.handleStockOpportunitySubroutes)
-	mux.HandleFunc("GET /api/stock/strategies", s.handleStockStrategies)
-	mux.HandleFunc("POST /api/stock/strategies", s.handleStockStrategies)
-	mux.HandleFunc("POST /api/stock/strategies/", s.handleStockStrategySubroutes)
-	mux.HandleFunc("GET /api/stock/watches", s.handleStockWatches)
-	mux.HandleFunc("PATCH /api/stock/watches/", s.handleStockWatchSubroutes)
-	mux.HandleFunc("POST /api/stock/watches/check", s.handleStockWatchCheck)
-	mux.HandleFunc("GET /api/stock/alerts", s.handleStockAlerts)
-	mux.HandleFunc("PATCH /api/stock/alerts/", s.handleStockAlertSubroutes)
-	mux.HandleFunc("POST /api/stock/alerts/", s.handleStockAlertSubroutes)
-	mux.HandleFunc("GET /api/stock/reviews", s.handleStockReviews)
-	mux.HandleFunc("GET /api/stock/agent/model-profiles", s.handleStockAgentModelProfiles)
-	mux.HandleFunc("POST /api/stock/agent/model-profiles", s.handleStockAgentModelProfiles)
-	mux.HandleFunc("GET /api/stock/agent/runs", s.handleStockAgentRuns)
-	mux.HandleFunc("GET /api/stock/agent/authorizations", s.handleStockAgentAuthorizations)
-	mux.HandleFunc("POST /api/stock/agent/authorizations/", s.handleStockAgentAuthorizationSubroutes)
-	mux.HandleFunc("POST /api/stock/agent/ledger/cleanup", s.handleStockAgentLedgerCleanup)
-	mux.HandleFunc("GET /api/stock/agent/steps", s.handleStockAgentSteps)
-	mux.HandleFunc("GET /api/stock/agent/claims", s.handleStockAgentClaims)
-	mux.HandleFunc("GET /api/stock/strategy-patches", s.handleStockStrategyPatches)
-	mux.HandleFunc("POST /api/stock/strategy-patches/", s.handleStockStrategyPatchSubroutes)
-	mux.HandleFunc("GET /api/stock/proposed-operations", s.handleStockProposedOperations)
-	mux.HandleFunc("POST /api/stock/proposed-operations/", s.handleStockProposedOperationSubroutes)
-	mux.HandleFunc("GET /api/stock/operations", s.handleStockOperations)
 	// V2 股票系统路由
 	s.RegisterStockV2Routes(mux)
 	mux.HandleFunc("GET /api/images/library/private/status", s.handleImagePrivateStatus)

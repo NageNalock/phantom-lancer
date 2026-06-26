@@ -1,18 +1,7 @@
 # 个人全面 Web 终端产品功能文档
 
-> **⚠️ PARTIALLY DEPRECATED（部分章节已过期）⚠️**
->
-> 标记日期：2026-06-17
->
-> 本文档中所有与「股票 Agent 工作台」相关的描述
-> （引言中的能力域清单、第 5 节产品模块地图中的股票节点、第 6.2 节左侧主导航中的股票入口、
-> 第 6.3 节主工作区中的股票对象列表、第 7.8 节审计日志中的股票审计项、
-> 第 8.1 节总览 Dashboard 中的股票运行摘要与快速入口、第 13.2 节 Phase 2 中的股票交付项等）
-> 均已作废。股票模块正处于全面重构阶段，任何实现、评审或 Agent 参考都**不得**
-> 以这些章节为准；非股票章节仍然有效。请以重构过程中产出的新设计文档 / 最新代码为准。
-
 文档日期：2026-06-07
-产品定位：面向个人使用的服务器 Web 控制台。它是一个长期演进的个人全面 Web 终端，用来在任何地方管理服务器上的自定义应用、命令执行、日志、文件、服务、自动化任务和 AI 代理能力。当前能力域包括控制台总览、Codex、Codex Gateway、日志中心、多媒体图片/视频生成、股票 Agent 工作台、V2Ray 和全局设置。
+产品定位：面向个人使用的服务器 Web 控制台。它是一个长期演进的个人全面 Web 终端，用来在任何地方管理服务器上的自定义应用、命令执行、日志、文件、服务、自动化任务和 AI 代理能力。当前能力域包括控制台总览、Codex、Codex Gateway、日志中心、多媒体图片/视频生成、股票V2、V2Ray 和全局设置。
 
 Codex 和 Codex Gateway / OpenAI Gateway 是两个并列的独立能力域：
 
@@ -88,7 +77,7 @@ flowchart LR
   Console --> Gateway["Codex Gateway"]
   Console --> Logs["日志中心"]
   Console --> Media["多媒体 图片/视频生成/资源库"]
-  Console --> Stock["股票 Agent 工作台"]
+  Console --> Stock["股票V2"]
   Console --> V2Ray["V2Ray"]
   Console --> Settings["设置"]
   Console --> Apps["应用管理（预留）"]
@@ -99,7 +88,7 @@ flowchart LR
   Console --> Secrets["密钥/环境变量（预留）"]
 ```
 
-第一阶段完整落地 `Dashboard`、`Codex`、`Codex Gateway`、`Logs`、`多媒体`、`股票`、`V2Ray`、`Settings`。`Codex`、`Codex Gateway` 和 `股票` 是并列独立能力域，作为一级导航存在。其他模块先在产品文档中预留。
+第一阶段完整落地 `Dashboard`、`Codex`、`Codex Gateway`、`Logs`、`多媒体`、`股票V2`、`V2Ray`、`Settings`。`Codex`、`Codex Gateway` 和 `股票V2` 是并列独立能力域，作为一级导航存在。其他模块先在产品文档中预留。
 
 ## 6. 信息架构
 
@@ -766,7 +755,7 @@ MVP 成功标准：
 - Codex CLI Client。
 - Codex Gateway。
 - 多媒体图片/视频生成和资源库。
-- 股票 Agent 工作台。
+- 股票V2。
 - V2Ray 配置和运行控制。
 - 日志中心。
 

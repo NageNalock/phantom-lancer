@@ -4,11 +4,11 @@
 >
 > 状态：V2 重构基准说明
 >
-> REPLACES:
-> - `docs/stock-agent-workbench-feature-design.md`
-> - `docs/stock-masterdata-self-closed-loop-design.md`
+> StockV1 代码与旧设计文档已移除；本文是当前 StockV2 的核心系统思路说明。
 >
 > 本文只记录 V2 的核心系统思路，不展开 API、表结构、页面细节和交付拆分。
+>
+> 相关补充设计：`docs/stock-v2-strategy-generation-design-2026-06-26.md` 定义 `strategy_generation`、组合持仓诊断模式和策略草案确认流程。
 
 ## 1. 核心定位
 

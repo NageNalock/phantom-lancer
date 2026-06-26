@@ -1074,7 +1074,7 @@ func TestDescribeTable(t *testing.T) {
 		{"audit_events", "审计日志"},
 		{"image_assets", "图片素材库"},
 		{"codex_cli_threads", "Codex CLI 模块表"},
-		{"stock_market_data_points", "行情数据点"},
+		{"stockv2_daily_bars", "数据表"},
 		{"unknown_table", "数据表"},
 		{"__internal", "SQLite 内部表"},
 	}

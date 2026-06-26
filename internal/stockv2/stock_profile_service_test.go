@@ -2,6 +2,7 @@ package stockv2
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -483,6 +484,46 @@ func TestRunAgentStockProfileSummaryUpdatesBilingualFields(t *testing.T) {
 		if !strings.Contains(profile.ProfileText, keyword) {
 			t.Fatalf("profile text %q missing %q", profile.ProfileText, keyword)
 		}
+	}
+}
+
+func TestRunAgentStockProfileSummaryMarksProfileFailedOnAgentError(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+
+	if err := svc.store.UpsertInstrument(ctx, StockV2Instrument{
+		ID:             "inst-300750",
+		Symbol:         "300750",
+		Market:         "SZ",
+		InstrumentType: InstrumentTypeStock,
+		Name:           "宁德时代",
+		Industry:       "电力设备",
+		Status:         "active",
+	}); err != nil {
+		t.Fatalf("upsert instrument: %v", err)
+	}
+	configureStockProfileAgent(t, svc, ctx)
+	svc.agentExecutor = fakeOperationReviewExecutor{
+		pool:    svc.agentTaskPool,
+		submit:  false,
+		execErr: errors.New("process exited (code 2) without submitting result"),
+	}
+
+	run, err := svc.RunAgentStockProfileSummary(ctx, "300750", "test")
+	if err != nil {
+		t.Fatalf("run profile agent: %v", err)
+	}
+	run = waitAgentRunTerminal(t, svc, run.ID)
+	if run.Status != AgentRunStatusFailed {
+		t.Fatalf("run status = %s, want failed", run.Status)
+	}
+	profile, err := svc.GetStockProfile(ctx, "300750")
+	if err != nil {
+		t.Fatalf("get profile: %v", err)
+	}
+	if profile.AIProfileStatus != StockProfileAIStatusFailed || !strings.Contains(profile.AIProfileError, "code 2") {
+		t.Fatalf("profile ai status/error = %q/%q, want failed with code 2", profile.AIProfileStatus, profile.AIProfileError)
 	}
 }
 

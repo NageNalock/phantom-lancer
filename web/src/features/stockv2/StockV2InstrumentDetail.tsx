@@ -278,9 +278,21 @@ export function StockV2InstrumentDetail({
       const res = await actions.api<{ items?: StockV2StockProfileUpdateTask[] }>(
         `/api/stockv2/profiles/${encodeURIComponent(inst.symbol)}/update-tasks?limit=1`,
       );
-      setProfileTask(res.items?.[0] ?? null);
+      const task = res.items?.[0] ?? null;
+      setProfileTask(task);
+      if (task?.agentRunId) {
+        try {
+          const run = await actions.api<StockV2AgentRun>(`/api/stockv2/agent/runs/${encodeURIComponent(task.agentRunId)}`);
+          setProfileRun(run);
+        } catch {
+          setProfileRun(null);
+        }
+      } else {
+        setProfileRun(null);
+      }
     } catch {
       setProfileTask(null);
+      setProfileRun(null);
     }
   }, [actions, inst]);
 
@@ -322,7 +334,7 @@ export function StockV2InstrumentDetail({
       setProfileRun(result.agentRun ?? null);
       setProfileError(null);
       if (result.agentRun) {
-        actions.setToast("画像已更新，AI 增强已提交", "good");
+        actions.setToast("画像已更新，AI 增强已发起", "good");
         if (result.agentRun.status === "completed" || result.agentRun.status === "failed") {
           await loadProfile();
           await loadProfileTasks();
@@ -721,7 +733,7 @@ function getRangeBound(r: DailyBarRange): { start: string; end: string } {
 }
 
 function stockProfileUpdateToast(task: StockV2StockProfileUpdateTask): string {
-  if (task.aiDecision === "called") return "画像已更新，AI 增强已提交";
+  if (task.aiDecision === "called") return "画像已更新，AI 增强已发起";
   if (task.aiDecision === "skipped_unchanged") return "画像输入无变化，已保留现有 AI 总结";
   if (task.aiDecision === "skipped_not_configured") return "画像已更新，AI 未配置";
   if (task.aiDecision === "skipped_unavailable") return "画像已更新，AI 执行器不可用";
@@ -743,7 +755,7 @@ function stockProfileTriggerLabel(trigger?: string): string {
 }
 
 function stockProfileAIDecisionLabel(decision?: string): string {
-  if (decision === "called") return "AI 已提交";
+  if (decision === "called") return "AI 已发起";
   if (decision === "skipped_unchanged") return "AI 跳过：输入无变化";
   if (decision === "skipped_not_configured") return "AI 跳过：未配置";
   if (decision === "skipped_unavailable") return "AI 跳过：不可用";

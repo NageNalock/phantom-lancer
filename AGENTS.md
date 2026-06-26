@@ -23,24 +23,14 @@
 
 ---
 
-## 🚧 重要：股票模块相关文档全部作废（2026-06-17 起）
+## 🚧 重要：StockV1 已移除
 
-> **任何 Agent 在涉及股票（stock）模块的实现、评审、设计、重构时，一律不得参考以下文档的任何内容。**
+股票 V1 已从仓库中删除。任何 Agent 在涉及股票模块的实现、评审、设计或重构时：
 
-已作废文档清单：
-
-| 文档 | 状态 | 说明 |
-|---|---|---|
-| `docs/stock-agent-workbench-feature-design.md` | **全部 DEPRECATED** | 股票 Agent 工作台产品设计全文作废，包括对象网络、数据源、策略、盯盘、Review、Agent 协议、交付分期等全部 20 节。 |
-| `docs/stock-masterdata-self-closed-loop-design.md` | **全部 DEPRECATED** | A 股主数据自闭环方案全文作废，包括东财/新浪数据源选型、FTS5、Combobox、DuckDB 分层等全部 9 节。 |
-| `docs/personal-web-terminal-product-features.md` | **部分 DEPRECATED** | 其中所有涉及「股票 Agent 工作台」的章节（能力域、模块地图、导航、主工作区、审计、Dashboard、Phase 2 交付项等）作废，其余章节照常参考。 |
-| `docs/personal-web-terminal-technical-design.md` | **部分 DEPRECATED** | 其中所有涉及「股票 Agent 工作台 / Stock Agent Workbench Module」的章节（第 3.8 节全文、架构图/存储层/模块图中的股票节点、股票相关审计项等）作废，其余章节照常参考。 |
-
-补充要求：
-
-1. **不要**从上述文档中摘取模型、API、数据结构、字段名、任务清单、流程图或交付分期作为实现依据；
-2. 当不确定股票模块的正确设计时，优先向用户（owner）确认，或直接阅读 `internal/stock/` 下**当前最新代码**与 `docs/` 下重构过程中新产出的设计文档（以文件名中的日期和 `REPLACES:` 注释为准）；
-3. 用户显式声明"以用户本次指令为准"时，以上禁止参考规则仍然生效——本处是基础规则，不随单次指令覆盖。
+1. 不要恢复或引用旧 V1 路径：`internal/stock/`、`/api/stock/*`、`web/src/features/StockView.tsx`、`web/src/features/stock/`；
+2. 不要引用已删除的 V1 文档：`docs/stock-agent-workbench-feature-design.md`、`docs/stock-masterdata-self-closed-loop-design.md`；
+3. 当前股票模块以 StockV2 为准：后端 `internal/stockv2/`、API `/api/stockv2/*`、前端 `web/src/features/stockv2/`、设计说明 `docs/stock-agent-workbench-v2-key-points-2026-06-18.md`；
+4. 当不确定股票模块的正确设计时，优先向用户（owner）确认，或阅读 StockV2 当前代码和最新 StockV2 文档。
 
 ---
 
