@@ -13,7 +13,7 @@ import (
 // 监控服务:把系统固化的后台监控任务收敛成可观测对象。
 // 复用 watch_evaluator 的规则判断(data_strategy scan),不重写规则逻辑;
 // data_strategy / portfolio_risk 产生 MonitorHit(候选),不生成买卖建议、不改持仓。
-// universe / quote / daily_bars 仅委托现有执行器并记录摘要行,不复制执行逻辑。
+// quote 刷新记录复用 quote task state,不复制执行逻辑。
 
 const (
 	newsMonitorBatchLimit         = 200
@@ -159,8 +159,6 @@ func (s *Service) RunMonitorTask(ctx context.Context, taskType, triggerType stri
 		final = s.runPortfolioRiskMonitor(ctx, created, cfg)
 	case MonitorTaskNewsStrategyMonitor:
 		final = s.runNewsStrategyMonitor(ctx, created, cfg)
-	case MonitorTaskUniverseUpdate, MonitorTaskDailyBarsSync:
-		final = s.delegateDataMonitorRun(ctx, created, taskType, triggerType)
 	default:
 		final = created
 		final.Status = MonitorRunStatusFailed
@@ -938,39 +936,6 @@ func (s *Service) runPortfolioRiskMonitor(ctx context.Context, run MonitorRun, c
 	run.Status = MonitorRunStatusCompleted
 	run.FinishedAt = time.Now()
 	run.ScopeSummary = scopeSummaryFromCount(run.ScannedCount, "portfolios")
-	return run
-}
-
-// delegateDataMonitorRun 委托现有数据任务执行器(universe/daily_bars),
-// 监控历史只记录触发摘要行,数据抓取细节仍留在各自的数据任务历史。
-func (s *Service) delegateDataMonitorRun(ctx context.Context, run MonitorRun, taskType, triggerType string) MonitorRun {
-	run.FinishedAt = time.Now()
-	switch taskType {
-	case MonitorTaskUniverseUpdate:
-		run.Metadata["delegated"] = "universe_update"
-		job, err := s.ExecuteUniverseUpdate(ctx, triggerType, "monitor")
-		if err != nil {
-			run.Status = MonitorRunStatusFailed
-			run.ErrorMessage = err.Error()
-			return run
-		}
-		run.Metadata["jobId"] = job.ID
-		run.Status = MonitorRunStatusCompleted
-		run.ScannedCount = 1
-		run.ScopeSummary = "universe"
-	case MonitorTaskDailyBarsSync:
-		run.Metadata["delegated"] = "daily_bars_sync"
-		job, err := s.RunDailyBarsJob(ctx, DailyBarsJobRequest{Mode: DailyBarJobModeHot, TriggerSource: "monitor"})
-		if err != nil {
-			run.Status = MonitorRunStatusFailed
-			run.ErrorMessage = err.Error()
-			return run
-		}
-		run.Metadata["jobId"] = job.ID
-		run.Status = MonitorRunStatusCompleted
-		run.ScannedCount = 1
-		run.ScopeSummary = "daily_bars"
-	}
 	return run
 }
 

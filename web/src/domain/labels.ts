@@ -900,9 +900,9 @@ export function stockV2AlertLevelTone(level?: string): "good" | "warn" | "danger
 
 export function stockV2MonitorTaskTypeLabel(taskType?: string): string {
   switch (taskType) {
-    case "universe_update": return "主数据更新";
+    case "universe_update": return "旧数据资产维护";
     case "latest_quote_refresh": return "最新行情刷新";
-    case "daily_bars_sync": return "日K抓取";
+    case "daily_bars_sync": return "旧日K抓取";
     case "data_strategy_monitor": return "数据面策略监控";
     case "portfolio_risk_monitor": return "组合风险监控";
     case "news_strategy_monitor": return "消息面策略监控";

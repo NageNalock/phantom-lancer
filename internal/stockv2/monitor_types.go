@@ -7,13 +7,11 @@ import (
 
 // 监控任务是系统固化的后台监控行为,不是用户创建/编辑/删除的业务对象。
 // 用户只能配置开关 / 周期 / 范围 / 敏感度 / 冷却 / Agent doublecheck 开关与预算。
-// 本轮:universe/quote/daily_bars/data_strategy/portfolio_risk/news 可运行;
+// 本轮:quote/data_strategy/portfolio_risk/news 可运行;
 // fundamental/data_quality 仅占位(Runnable=false),不假装实现。
 
 const (
-	MonitorTaskUniverseUpdate          = "universe_update"
 	MonitorTaskLatestQuoteRefresh      = "latest_quote_refresh"
-	MonitorTaskDailyBarsSync           = "daily_bars_sync"
 	MonitorTaskDataStrategyMonitor     = "data_strategy_monitor"
 	MonitorTaskPortfolioRiskMonitor    = "portfolio_risk_monitor"
 	MonitorTaskNewsStrategyMonitor     = "news_strategy_monitor"
@@ -151,17 +149,6 @@ type MonitorHitListFilter struct {
 func builtinMonitorTaskDefinitions() []MonitorTaskDefinition {
 	return []MonitorTaskDefinition{
 		{
-			TaskType:     MonitorTaskUniverseUpdate,
-			Label:        "数据资产维护",
-			Description:  "全市场标的、最新价与日 K 覆盖后台维护",
-			Category:     "data",
-			Runnable:     true,
-			Configurable: true,
-			DefaultConfig: MonitorTaskConfig{
-				Enabled: false, IntervalSeconds: 3600, Sensitivity: "normal",
-			},
-		},
-		{
 			TaskType:     MonitorTaskLatestQuoteRefresh,
 			Label:        "盘中分钟行情",
 			Description:  "持仓与监控标的的分钟级行情快照采集,并驱动组合估值刷新",
@@ -170,17 +157,6 @@ func builtinMonitorTaskDefinitions() []MonitorTaskDefinition {
 			Configurable: true,
 			DefaultConfig: MonitorTaskConfig{
 				Enabled: true, IntervalSeconds: 30, Sensitivity: "normal",
-			},
-		},
-		{
-			TaskType:     MonitorTaskDailyBarsSync,
-			Label:        "日K抓取",
-			Description:  "日 K 历史行情增量抓取",
-			Category:     "data",
-			Runnable:     true,
-			Configurable: true,
-			DefaultConfig: MonitorTaskConfig{
-				Enabled: false, IntervalSeconds: 86400, Sensitivity: "normal",
 			},
 		},
 		{

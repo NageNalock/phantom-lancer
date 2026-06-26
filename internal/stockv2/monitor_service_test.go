@@ -18,12 +18,18 @@ func TestListMonitorTasksReturnsBuiltin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list monitor tasks: %v", err)
 	}
-	if len(tasks) != 8 {
-		t.Fatalf("task count = %d, want 8", len(tasks))
+	if len(tasks) != 6 {
+		t.Fatalf("task count = %d, want 6", len(tasks))
 	}
 	runnable := make(map[string]bool, len(tasks))
 	enabledTasks := make(map[string]bool)
 	for _, task := range tasks {
+		if task.Definition.TaskType == "universe_update" {
+			t.Fatalf("data asset maintenance should not be listed as a monitor task")
+		}
+		if task.Definition.TaskType == "daily_bars_sync" {
+			t.Fatalf("standalone daily bars task should not be listed")
+		}
 		runnable[task.Definition.TaskType] = task.Definition.Runnable
 		if task.Config.Enabled {
 			enabledTasks[task.Definition.TaskType] = true
@@ -37,6 +43,19 @@ func TestListMonitorTasksReturnsBuiltin(t *testing.T) {
 	}
 	if runnable[MonitorTaskDailyFundamentalMonitor] || runnable[MonitorTaskDataQualityMonitor] {
 		t.Fatalf("fundamental / quality must not be runnable this round")
+	}
+}
+
+func TestRemovedDataAssetMonitorTasks(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+
+	if _, err := svc.RunMonitorTask(ctx, "universe_update", MonitorTriggerManual); !errors.Is(err, ErrInvalidMonitorTaskType) {
+		t.Fatalf("run removed universe task err = %v, want invalid task type", err)
+	}
+	if _, err := svc.RunMonitorTask(ctx, "daily_bars_sync", MonitorTriggerManual); !errors.Is(err, ErrInvalidMonitorTaskType) {
+		t.Fatalf("run removed daily bars task err = %v, want invalid task type", err)
 	}
 }
 
