@@ -27,7 +27,6 @@ import (
 	"phantom-lancer/internal/logging"
 	logcenter "phantom-lancer/internal/logs"
 	"phantom-lancer/internal/selfupdate"
-	stocksvc "phantom-lancer/internal/stock"
 	stockv2svc "phantom-lancer/internal/stockv2"
 	"phantom-lancer/internal/storage"
 	"phantom-lancer/internal/v2ray"
@@ -118,8 +117,6 @@ func main() {
 	v2raySvc := v2ray.NewService(store, hub, cfg.DataDir, logger)
 	defer v2raySvc.Close()
 	imagesSvc := images.NewService(store, hub, cfg.DataDir, logger)
-	stockSvc := stocksvc.NewService(store, logger)
-	defer stockSvc.Close()
 	httpClient := &http.Client{
 		Timeout: 30 * time.Second,
 	}
@@ -170,7 +167,7 @@ func main() {
 	if rollbackPath != "" {
 		logger.Info("self-update watchdog triggered, rolling back to backup binary", "path", rollbackPath)
 		logger.Info("phantom lancer preparing rollback self-exec", "path", rollbackPath)
-		orderlyClose(logger, dockerSvc, stockSvc, stockV2Svc, v2raySvc, codexGatewaySvc, codexSvc, store, logHandle)
+		orderlyClose(logger, dockerSvc, stockV2Svc, v2raySvc, codexGatewaySvc, codexSvc, store, logHandle)
 		if err := syscall.Exec(rollbackPath, os.Args, os.Environ()); err != nil {
 			logger.Error("rollback syscall.Exec failed", "error", err, "path", rollbackPath)
 			os.Exit(1)
@@ -198,7 +195,6 @@ func main() {
 	}
 	codexSvc.StartBackground(ctx)
 	codexGatewaySvc.StartBackground(ctx)
-	stockSvc.StartBackground(ctx)
 	store.StartStatsCollector(ctx)
 
 	// Events table retention pruner: deletes events older than the
@@ -235,7 +231,7 @@ func main() {
 			logger.Error("start embedded v2ray failed", "error", err)
 		}
 	}
-	api, err := httpapi.New(cfg, store, hub, codexGatewaySvc, codexSvc, v2raySvc, imagesSvc, stockSvc, stockV2Svc, dockerSvc, logsSvc, updateSvc, staticFS, logger)
+	api, err := httpapi.New(cfg, store, hub, codexGatewaySvc, codexSvc, v2raySvc, imagesSvc, stockV2Svc, dockerSvc, logsSvc, updateSvc, staticFS, logger)
 	if err != nil {
 		logger.Error("create api failed", "error", err)
 		os.Exit(1)
@@ -348,7 +344,7 @@ func main() {
 		} else {
 			logger.Info("phantom lancer exiting for update restart", "restart_mode", cfg.Updates.RestartMode, "requires_external_supervisor", cfg.Updates.RestartMode == selfupdate.RestartModeExit)
 		}
-		orderlyClose(logger, dockerSvc, stockSvc, stockV2Svc, v2raySvc, codexGatewaySvc, codexSvc, store, logHandle)
+		orderlyClose(logger, dockerSvc, stockV2Svc, v2raySvc, codexGatewaySvc, codexSvc, store, logHandle)
 		if selfExecPath != "" {
 			if err := syscall.Exec(selfExecPath, os.Args, os.Environ()); err != nil {
 				logger.Error("self-exec syscall.Exec failed, falling back to plain exit", "error", err, "path", selfExecPath)
@@ -362,7 +358,7 @@ func main() {
 // order the defers were registered in main() so an explicit exit path (e.g.
 // for self-update) releases resources correctly before os.Exit() /
 // syscall.Exec() would otherwise skip the deferred calls.
-func orderlyClose(logger *slog.Logger, dockerSvc *dockercontrol.Service, stockSvc *stocksvc.Service, stockV2Svc *stockv2svc.Service, v2raySvc *v2ray.Service, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, store *storage.Store, logHandle *logging.LoggerHandle) {
+func orderlyClose(logger *slog.Logger, dockerSvc *dockercontrol.Service, stockV2Svc *stockv2svc.Service, v2raySvc *v2ray.Service, codexGatewaySvc *codexgateway.Service, codexSvc *codexclient.Service, store *storage.Store, logHandle *logging.LoggerHandle) {
 	warn := func(name string, err error) {
 		if err != nil && logger != nil {
 			logger.Warn(name+" close returned error", "error", err)
@@ -370,9 +366,6 @@ func orderlyClose(logger *slog.Logger, dockerSvc *dockercontrol.Service, stockSv
 	}
 	if dockerSvc != nil {
 		dockerSvc.Close()
-	}
-	if stockSvc != nil {
-		stockSvc.Close()
 	}
 	if stockV2Svc != nil {
 		stockV2Svc.Close()

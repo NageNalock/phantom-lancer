@@ -81,9 +81,6 @@ export function friendlyError(error: unknown): string {
   if (err.code === "model_not_supported") return "当前账号 plan 不支持该模型。";
   if (err.code === "oauth_settings_invalid") return `OAuth 设置无效：${err.message}`;
   if (err.code === "model_refresh_failed") return `模型刷新失败：${err.message}`;
-  if (err.code === "stock_portfolio_in_use") return err.message || "该账户仍被策略、盯盘或历史记录引用，不能删除。";
-  if (err.code === "stock_portfolio_not_found") return "该股票账户不存在，可能已被删除。";
-  if (err.code === "stock_portfolio_update_failed") return `股票账户更新失败：${err.message}`;
   return err.message || "请求失败";
 }
 

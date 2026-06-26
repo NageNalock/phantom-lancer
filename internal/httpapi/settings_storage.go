@@ -115,7 +115,7 @@ func collectDuckDBFileStats(dataDir, dbPath string) []localDatabaseFileStat {
 
 func duckDBCandidateDirs(dataDir string) []string {
 	dirs := []string{dataDir}
-	for _, name := range []string{"stock", "stockv2", "market", "markets"} {
+	for _, name := range []string{"stockv2", "market", "markets"} {
 		dirs = append(dirs, filepath.Join(dataDir, name))
 	}
 	return dirs

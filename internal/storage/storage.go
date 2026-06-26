@@ -1368,15 +1368,6 @@ CREATE INDEX IF NOT EXISTS idx_media_assets_checksum ON media_assets(checksum_sh
 	if err := s.migrateCodexCli(ctx); err != nil {
 		return err
 	}
-	if err := s.migrateStock(ctx); err != nil {
-		return err
-	}
-	if err := s.migrateStockData(ctx); err != nil {
-		return err
-	}
-	if err := s.migrateStockAgent(ctx); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -2132,26 +2123,6 @@ var tableDescriptionMap = map[string]string{
 	"docker_registry_repositories": "Docker 仓库",
 	"docker_registry_manifests":    "Docker 镜像清单",
 	"docker_registry_tags":         "Docker 标签",
-
-	// Stock
-	"stock_portfolios":         "投资组合",
-	"stock_holdings":           "持仓",
-	"stock_quotes":             "股票报价",
-	"stock_opportunities":      "投资机会",
-	"stock_strategies":         "策略",
-	"stock_watches":            "监控 / 观察列表",
-	"stock_alerts":             "告警",
-	"stock_reviews":            "AI 评审",
-	"stock_trade_signals":      "交易信号",
-	"stock_operations":         "操作记录",
-	"stock_memories":           "笔记 / 记忆",
-	"stock_instruments":        "股票标的基础信息",
-	"stock_market_data_points": "行情数据点",
-	"stock_news_items":         "新闻条目",
-	"stock_data_sources":       "数据源",
-	"stock_data_tasks":         "数据任务",
-	"stock_agent_runs":         "AI 代理运行记录",
-	"stock_agent_run_steps":    "AI 代理运行步骤",
 }
 
 // describeTable returns a human-readable description for a table,
@@ -2165,8 +2136,6 @@ func describeTable(name string) string {
 		return "Codex Gateway 模块表"
 	case strings.HasPrefix(name, "codex_cli_"):
 		return "Codex CLI 模块表"
-	case strings.HasPrefix(name, "stock_"):
-		return "股票模块表"
 	case strings.HasPrefix(name, "image_") || strings.HasPrefix(name, "media_") || strings.HasPrefix(name, "object_storage_"):
 		return "多媒体模块表"
 	case strings.HasPrefix(name, "v2ray_"):
@@ -2220,8 +2189,8 @@ func (s *Store) refreshDatabaseStats(ctx context.Context) (DatabaseStats, error)
 //     internals).  This keeps the pie chart visually consistent with the
 //     file size the user sees elsewhere.
 //
-// This approach avoids requiring the dbstat virtual table (which isn't
-// compiled into the stock go-sqlite3 build) and stays fast enough to run
+// This approach avoids requiring the dbstat virtual table (which may not be
+// compiled into the go-sqlite3 build) and stays fast enough to run
 // once per minute even on multi-hundred-MB databases.
 func (s *Store) computeDatabaseStats(ctx context.Context) (DatabaseStats, error) {
 	totalBytes, err := s.DatabaseSizeBytes()

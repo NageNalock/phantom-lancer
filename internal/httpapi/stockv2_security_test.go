@@ -8,7 +8,7 @@ import (
 )
 
 func TestStockV2SensitiveWritesRequireCSRF(t *testing.T) {
-	server, _, session, _ := newStockHTTPTest(t)
+	server, _, session, _ := newStockV2HTTPTest(t)
 
 	for _, tc := range []struct {
 		name   string
