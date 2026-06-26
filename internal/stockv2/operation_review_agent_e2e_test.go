@@ -407,6 +407,10 @@ func (f fakeOperationReviewExecutor) ExecuteStockProfileSummary(ctx context.Cont
 	}, f.execErr
 }
 
+func (f fakeOperationReviewExecutor) ExecuteStrategyGeneration(ctx context.Context, taskID string, genCtx StrategyGenerationContext, modelName string) (*AgentExecutorOutput, error) {
+	return nil, errors.New("strategy generation is not used by fakeOperationReviewExecutor")
+}
+
 func mcpSubmitResultRequest(taskID, outputType, summary string, result map[string]any, confidence float64) []byte {
 	raw, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",

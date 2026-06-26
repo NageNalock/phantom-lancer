@@ -106,6 +106,19 @@ func (e *codexCLIExecutor) ExecuteStockProfileSummary(
 	return e.executePrompt(ctx, taskID, prompt, modelName)
 }
 
+func (e *codexCLIExecutor) ExecuteStrategyGeneration(
+	ctx context.Context,
+	taskID string,
+	genCtx StrategyGenerationContext,
+	modelName string,
+) (*AgentExecutorOutput, error) {
+	if e.binary == "" {
+		return nil, fmt.Errorf("codex binary path not configured")
+	}
+	prompt := buildStrategyGenerationPrompt(taskID, genCtx, e.mcpURL)
+	return e.executePrompt(ctx, taskID, prompt, modelName)
+}
+
 func (e *codexCLIExecutor) executePrompt(
 	ctx context.Context,
 	taskID string,
@@ -685,6 +698,57 @@ func buildStockProfileSummaryPrompt(taskID string, profile StockProfile, mcpURL 
 	if b.Len() > maxPromptLen {
 		result := b.String()
 		return result[:6000] + "\n... [truncated]\n...\n" + result[len(result)-2000:]
+	}
+	return b.String()
+}
+
+func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationContext, mcpURL string) string {
+	var b strings.Builder
+	b.WriteString("# Strategy Generation Task\n\n")
+	b.WriteString("System role: you are a StockV2 strategy drafting assistant. You are NOT a trading executor.\n")
+	b.WriteString("Draft monitoring strategies only. Do not place orders, do not modify holdings, do not create proposed_operation, and do not claim any operation was executed.\n")
+	b.WriteString("Use only the provided context. Do not invent market prices, financial data, news, filings, or sources.\n")
+	b.WriteString("Submit your final result using the stock_agent.submit_result MCP tool.\n\n")
+	b.WriteString("Do not use shell commands or curl to submit the result; use the MCP tool directly.\n\n")
+
+	b.WriteString("## Task Information\n\n")
+	fmt.Fprintf(&b, "- Task ID: `%s`\n", taskID)
+	fmt.Fprintf(&b, "- Task Type: `%s`\n", AgentTaskTypeStrategyGeneration)
+	if mcpURL != "" {
+		fmt.Fprintf(&b, "- MCP Server Name: `%s`\n", codexStockAgentMCPName)
+		fmt.Fprintf(&b, "- MCP Server: `%s`\n", mcpURL)
+	}
+	b.WriteString("\n")
+
+	b.WriteString("## Strategy Generation Context\n\n```json\n")
+	raw, _ := json.MarshalIndent(genCtx, "", "  ")
+	b.Write(raw)
+	b.WriteString("\n```\n\n")
+
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("You must submit exactly ONE result using stock_agent.submit_result.\n")
+	b.WriteString("The MCP taskType must be `strategy_generation` and result.outputType must be `strategy_generation`.\n")
+	b.WriteString("Return a strategy-generation report with schema_version `strategy-generation-report/v1`.\n")
+	b.WriteString("Every new strategy draft must use `playbook.rules[]`. Do not write `playbook.actions[]`, `actions`, `action_type`, `add`, `reduce`, or `clear`.\n")
+	b.WriteString("Allowed rule.action values are: observe, build_position, add_position, hold, reduce_position, exit_position.\n")
+	b.WriteString("Rule fields are exactly: id, action, title, trigger, preconditions, target, risk, dataPrefilters, portfolioPrefilters, newsPrefilters, priority.\n")
+	b.WriteString("Do not output proposed_operation. If a future trade review is needed, use portfolio_aware_suggestion.trade_signal or review_request only.\n\n")
+
+	b.WriteString("Example submit_result shape:\n")
+	b.WriteString("```json\n")
+	b.WriteString("{\"taskID\":\"<TASK_ID>\",\"taskType\":\"strategy_generation\",\"result\":{\"outputType\":\"strategy_generation\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"strategy-generation-report/v1\",\"run_summary\":{\"mode\":\"manual_target\",\"overall_conclusion\":\"...\",\"key_conflicts\":[],\"data_quality_notes\":[]},\"drafts\":[{\"symbol\":\"302132\",\"market\":\"SZ\",\"name\":\"中航成飞\",\"draft_type\":\"new_strategy\",\"strategy_bias\":\"bullish\",\"thesis\":\"...\",\"confidence\":0.72,\"evidence_summary\":[],\"risk_summary\":[],\"invalid_conditions\":[],\"playbook\":{\"version\":\"v1\",\"rules\":[{\"id\":\"observe_1\",\"action\":\"observe\",\"title\":\"观察\",\"trigger\":\"...\",\"preconditions\":\"...\",\"target\":\"...\",\"risk\":\"...\",\"dataPrefilters\":[],\"portfolioPrefilters\":[],\"newsPrefilters\":[],\"priority\":1}]},\"portfolio_aware_suggestion\":{\"trade_signal\":\"observe\",\"target_position_hint\":\"\",\"review_request\":\"\"}}]}}}\n")
+	b.WriteString("```\n\n")
+
+	b.WriteString("### Important\n\n")
+	b.WriteString("- Only call submit_result ONCE when you have completed your analysis.\n")
+	b.WriteString("- Keep facts, uncertainty, and data freshness caveats explicit in the report fields.\n")
+	b.WriteString("- strategy_patch drafts may be reported, but the main program will not update formal strategies in this version.\n")
+	b.WriteString("- The main program will create draft strategies only; users must activate them explicitly later.\n")
+
+	const maxPromptLen = 10000
+	if b.Len() > maxPromptLen {
+		result := b.String()
+		return result[:7500] + "\n... [truncated]\n...\n" + result[len(result)-2500:]
 	}
 	return b.String()
 }

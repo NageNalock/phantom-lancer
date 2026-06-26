@@ -79,6 +79,7 @@ func (s *Service) WithNewsEventLinker(linker NewsEventLinker) *Service {
 type AgentExecutor interface {
 	ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName string) (*AgentExecutorOutput, error)
 	ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error)
+	ExecuteStrategyGeneration(ctx context.Context, taskID string, genCtx StrategyGenerationContext, modelName string) (*AgentExecutorOutput, error)
 }
 
 // WithCodexCLIExecutor 注入 Codex CLI 执行器。

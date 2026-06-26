@@ -407,7 +407,7 @@ func TestResolveAgentTaskOperationReviewDefaultModel(t *testing.T) {
 	}
 }
 
-func TestAgentTaskProfilesSeedFutureTasksReadOnly(t *testing.T) {
+func TestAgentTaskProfilesSeedFutureTasksAndStrategyGenerationConfigurable(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -437,11 +437,42 @@ func TestAgentTaskProfilesSeedFutureTasksReadOnly(t *testing.T) {
 		}
 	}
 
-	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeStrategyGeneration, RequestUpdateAgentTaskProfile{}); !errors.Is(err, ErrAgentTaskNotConfigurable) {
-		t.Fatalf("update future task error = %v, want ErrAgentTaskNotConfigurable", err)
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeCodexCLI,
+		Name:         "codex-strategy-generation",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
 	}
-	if _, err := svc.ResolveAgentTask(ctx, AgentTaskTypeStrategyGeneration, "manual", "x", "tester"); !errors.Is(err, ErrAgentTaskNotConfigurable) {
-		t.Fatalf("resolve future task error = %v, want ErrAgentTaskNotConfigurable", err)
+	model, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID: provider.ID,
+		ModelName:  "gpt-strategy-generation",
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	modelID := model.ID
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeStrategyGeneration, RequestUpdateAgentTaskProfile{PrimaryModelID: &modelID}); err != nil {
+		t.Fatalf("update strategy_generation task profile: %v", err)
+	}
+	resolution, err := svc.ResolveAgentTask(ctx, AgentTaskTypeStrategyGeneration, "manual", "x", "tester")
+	if err != nil {
+		t.Fatalf("resolve strategy_generation task: %v", err)
+	}
+	if resolution.Status != AgentResolutionStatusAuthorized || resolution.Run == nil {
+		t.Fatalf("resolution = %+v, want authorized run", resolution)
+	}
+
+	for _, taskType := range []string{
+		AgentTaskTypeOpportunityDiscovery,
+		AgentTaskTypeNewsEventReview,
+		AgentTaskTypePortfolioRiskReview,
+		AgentTaskTypeBullBearDebate,
+	} {
+		if _, err := svc.UpdateAgentTaskProfile(ctx, taskType, RequestUpdateAgentTaskProfile{}); !errors.Is(err, ErrAgentTaskNotConfigurable) {
+			t.Fatalf("update future task %s error = %v, want ErrAgentTaskNotConfigurable", taskType, err)
+		}
 	}
 }
 
@@ -758,4 +789,8 @@ func (f fakeDebugAgentExecutor) ExecuteStockProfileSummary(ctx context.Context, 
 		Duration:      time.Millisecond,
 		RawTranscript: "profile stdout",
 	}, nil
+}
+
+func (f fakeDebugAgentExecutor) ExecuteStrategyGeneration(ctx context.Context, taskID string, genCtx StrategyGenerationContext, modelName string) (*AgentExecutorOutput, error) {
+	return nil, errors.New("strategy generation is not used by fakeDebugAgentExecutor")
 }

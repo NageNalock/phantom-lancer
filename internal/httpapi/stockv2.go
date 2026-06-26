@@ -143,6 +143,7 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/agent/task-profiles/{taskType}", s.handleStockV2GetAgentTaskProfile)
 	mux.HandleFunc("PUT /api/stockv2/agent/task-profiles/{taskType}", s.handleStockV2UpdateAgentTaskProfile)
 	mux.HandleFunc("POST /api/stockv2/agent/cli-debug", s.handleStockV2RunAgentCLIDebug)
+	mux.HandleFunc("POST /api/stockv2/agent/strategy-generation/run", s.handleStockV2RunStrategyGeneration)
 	mux.HandleFunc("GET /api/stockv2/agent/runs", s.handleStockV2ListAgentRuns)
 	mux.HandleFunc("GET /api/stockv2/agent/runs/{id}/detail", s.handleStockV2GetAgentRunDetail)
 	mux.HandleFunc("GET /api/stockv2/agent/runs/{id}", s.handleStockV2GetAgentRun)
