@@ -106,6 +106,19 @@ func (e *codexCLIExecutor) ExecuteStrategyGeneration(
 	return e.executePrompt(ctx, taskID, prompt, modelName)
 }
 
+func (e *codexCLIExecutor) ExecuteOpportunityDiscovery(
+	ctx context.Context,
+	taskID string,
+	pack OpportunityDiscoveryContext,
+	modelName string,
+) (*AgentExecutorOutput, error) {
+	if e.binary == "" {
+		return nil, fmt.Errorf("codex binary path not configured")
+	}
+	prompt := buildOpportunityDiscoveryPrompt(taskID, pack, e.mcpURL)
+	return e.executePrompt(ctx, taskID, prompt, modelName)
+}
+
 func (e *codexCLIExecutor) ExecuteStockProfileSummary(
 	ctx context.Context,
 	taskID string,
@@ -317,8 +330,28 @@ func (e *codexCLIExecutor) codexMCPServers() []codexMCPServerCapability {
 	return []codexMCPServerCapability{{
 		Name:          codexStockAgentMCPName,
 		URL:           strings.TrimSpace(e.mcpURL),
-		RequiredTools: []string{codexSubmitResultTool},
+		RequiredTools: codexStockAgentRequiredTools(),
 	}}
+}
+
+func codexStockAgentRequiredTools() []string {
+	return []string{
+		codexSubmitResultTool,
+		"stock_agent.search_instruments",
+		"stock_agent.search_stock_profiles",
+		"stock_agent.get_stock_profile",
+		"stock_agent.get_latest_quotes",
+		"stock_agent.get_daily_bars_summary",
+		"stock_agent.list_existing_strategies",
+		"stock_agent.get_embedding_status",
+		"stock_agent.start_discovery_step",
+		"stock_agent.finish_discovery_step",
+		"stock_agent.fail_discovery_step",
+		"stock_agent.record_external_source",
+		"stock_agent.record_evidence",
+		"stock_agent.record_candidate",
+		"stock_agent.update_candidate",
+	}
 }
 
 func (e *codexCLIExecutor) preflightCodexMCPServers(servers []codexMCPServerCapability) error {
@@ -668,6 +701,72 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 		return result[:6000] + "\n... [truncated]\n...\n" + result[len(result)-2000:]
 	}
 
+	return b.String()
+}
+
+func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscoveryContext, mcpURL string) string {
+	var b strings.Builder
+	b.WriteString("# Opportunity Discovery Task\n\n")
+	b.WriteString("System role: you are a StockV2 opportunity discovery research agent. You are NOT a trading executor.\n")
+	b.WriteString("Your job is to research the user's theme/event, connect it to StockV2 instruments, record evidence, and submit validated candidates.\n")
+	b.WriteString("You must actively use Codex CLI's own public search/browse capability for external public information. Do not rely only on project MCP data.\n")
+	b.WriteString("Do not implement or request web_search/web_fetch MCP tools from the main program; external search is your responsibility inside Codex CLI.\n")
+	b.WriteString("Use the stock_agent MCP only for project data queries, process recording, evidence/candidate recording, embedding status, and final submit_result.\n")
+	b.WriteString("Do not place orders, do not modify holdings, do not create proposed_operation, do not activate strategies, and do not read token/cookie/private config.\n")
+	b.WriteString("Every candidate symbol must exist in StockV2 master data. Use stock_agent.search_instruments or stock_agent.search_stock_profiles before recording candidates.\n")
+	b.WriteString("Do not use shell commands or curl to submit results; use MCP tools directly.\n\n")
+
+	b.WriteString("## Task Information\n\n")
+	fmt.Fprintf(&b, "- Task ID: `%s`\n", taskID)
+	fmt.Fprintf(&b, "- Task Type: `%s`\n", AgentTaskTypeOpportunityDiscovery)
+	fmt.Fprintf(&b, "- Opportunity ID: `%s`\n", discCtx.Opportunity.ID)
+	fmt.Fprintf(&b, "- Discovery Run ID: `%s`\n", discCtx.DiscoveryRun.ID)
+	if mcpURL != "" {
+		fmt.Fprintf(&b, "- MCP Server Name: `%s`\n", codexStockAgentMCPName)
+		fmt.Fprintf(&b, "- MCP Server: `%s`\n", mcpURL)
+	}
+	b.WriteString("\n")
+
+	b.WriteString("## Opportunity Context\n\n```json\n")
+	raw, _ := json.MarshalIndent(discCtx, "", "  ")
+	b.Write(raw)
+	b.WriteString("\n```\n\n")
+
+	b.WriteString("## Required Workflow\n\n")
+	b.WriteString("For each research phase, call stock_agent.start_discovery_step before work and stock_agent.finish_discovery_step after work. If a phase cannot be completed, call stock_agent.fail_discovery_step with a concise reason and continue when possible.\n")
+	b.WriteString("Use these step keys in order: `theme_understanding`, `external_search`, `internal_masterdata_search`, `stock_profile_search`, `embedding_status_check`, `candidate_generation`, `evidence_audit`, `final_report`.\n")
+	b.WriteString("For every external article/search result you rely on, call stock_agent.record_external_source with title, URL, publisher, publishedAt when available, summary, relatedSymbols, and confidence.\n")
+	b.WriteString("For each material fact or reasoning item, call stock_agent.record_evidence. Link it to a candidate when the candidate exists.\n")
+	b.WriteString("For each candidate, call stock_agent.record_candidate after validating the symbol through StockV2 master data. Use stock_agent.update_candidate when the score, rank, reason, or risk changes.\n")
+	b.WriteString("When you need semantic vector recall, first call stock_agent.get_embedding_status. If it is not available, record the embedding_status_check step as failed and explain that semantic recall could not run. Do not silently fall back to keyword search and label it semantic.\n\n")
+
+	b.WriteString("## Project MCP Tools\n\n")
+	b.WriteString("- stock_agent.search_instruments: keyword/market/instrumentType lookup in StockV2 master data.\n")
+	b.WriteString("- stock_agent.search_stock_profiles and stock_agent.get_stock_profile: project stock profile lookup.\n")
+	b.WriteString("- stock_agent.get_latest_quotes and stock_agent.get_daily_bars_summary: local quote/bars freshness context.\n")
+	b.WriteString("- stock_agent.list_existing_strategies: check whether a candidate already has strategies.\n")
+	b.WriteString("- stock_agent.get_embedding_status: embedding model binding and availability check.\n")
+	b.WriteString("- stock_agent.start_discovery_step / finish_discovery_step / fail_discovery_step: observable run progress.\n")
+	b.WriteString("- stock_agent.record_external_source / record_evidence / record_candidate / update_candidate: persistent research trace.\n")
+	b.WriteString("- stock_agent.submit_result: final report, call exactly once.\n\n")
+
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("You must submit exactly ONE final result using stock_agent.submit_result.\n")
+	b.WriteString("The MCP taskType must be `opportunity_discovery` and result.outputType must be `opportunity_discovery`.\n")
+	b.WriteString("Return a report with schema_version `opportunity-discovery-report/v1` and opportunity_id matching this prompt.\n")
+	b.WriteString("Candidate scores `relevance_score`, `evidence_score`, and `market_risk_score` must be 0-100. `confidence` must be 0-1.\n")
+	b.WriteString("Do not include instructions to buy/sell, change holdings, create OperationReview, or activate strategy. You may include `suggested_strategy_intent` for a later strategy_generation task.\n")
+	b.WriteString("Final result shape:\n")
+	b.WriteString("```json\n")
+	fmt.Fprintf(&b, "{\"taskID\":\"%s\",\"taskType\":\"opportunity_discovery\",\"result\":{\"outputType\":\"opportunity_discovery\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"opportunity-discovery-report/v1\",\"opportunity_id\":\"%s\",\"summary\":\"...\",\"theme_chain\":[],\"candidates\":[{\"symbol\":\"300000\",\"market\":\"SZ\",\"name\":\"示例股票\",\"instrument_type\":\"stock\",\"relation_type\":\"supply_chain\",\"rank\":1,\"relevance_score\":82,\"evidence_score\":70,\"market_risk_score\":45,\"confidence\":0.72,\"reason\":\"...\",\"risk_summary\":\"...\",\"suggested_strategy_intent\":\"...\"}],\"excluded\":[],\"data_quality_notes\":[],\"external_sources\":[]}}}\n", taskID, discCtx.Opportunity.ID)
+	b.WriteString("```\n\n")
+	b.WriteString("If external search/browse is unavailable, record the failure through MCP, return an empty candidates array, and explain the limitation in Chinese. Do not fabricate sources or candidates.\n")
+
+	const maxPromptLen = 12000
+	if b.Len() > maxPromptLen {
+		result := b.String()
+		return result[:9000] + "\n... [truncated]\n...\n" + result[len(result)-3000:]
+	}
 	return b.String()
 }
 

@@ -45,6 +45,8 @@ type agentTaskEntry struct {
 	taskType        string
 	agentRunID      string
 	reviewID        string
+	discoveryRunID  string
+	opportunityID   string
 	deadline        time.Time
 	status          agentTaskStatus
 	submittedResult *AgentTaskSubmittedResult
@@ -55,10 +57,11 @@ type agentTaskEntry struct {
 }
 
 type agentTaskPool struct {
-	tasks  map[string]*agentTaskEntry
-	mu     sync.RWMutex
-	stopCh chan struct{}
-	doneCh chan struct{}
+	tasks   map[string]*agentTaskEntry
+	service *Service
+	mu      sync.RWMutex
+	stopCh  chan struct{}
+	doneCh  chan struct{}
 }
 
 const defaultTaskTTL = 10 * time.Minute
@@ -105,6 +108,15 @@ func (p *agentTaskPool) createTask(taskType, agentRunID, reviewID string, ttl ti
 	p.tasks[id] = entry
 	p.mu.Unlock()
 
+	return id, entry
+}
+
+func (p *agentTaskPool) createOpportunityDiscoveryTask(agentRunID, discoveryRunID, opportunityID string, ttl time.Duration) (string, *agentTaskEntry) {
+	id, entry := p.createTask(AgentTaskTypeOpportunityDiscovery, agentRunID, "", ttl)
+	entry.mu.Lock()
+	entry.discoveryRunID = discoveryRunID
+	entry.opportunityID = opportunityID
+	entry.mu.Unlock()
 	return id, entry
 }
 

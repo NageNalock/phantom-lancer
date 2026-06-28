@@ -856,6 +856,120 @@ CREATE TABLE IF NOT EXISTS stockv2_agent_decision_ledgers (
 );
 CREATE INDEX IF NOT EXISTS idx_stockv2_agent_decision_ledgers_run_id ON stockv2_agent_decision_ledgers(run_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_agent_decision_ledgers_task_type ON stockv2_agent_decision_ledgers(task_type);
+
+-- ===== Opportunity discovery =====
+CREATE TABLE IF NOT EXISTS stockv2_opportunities (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    user_thesis TEXT,
+    market_scope TEXT NOT NULL DEFAULT 'a_share',
+    instrument_scope TEXT NOT NULL DEFAULT 'both',
+    status TEXT NOT NULL DEFAULT 'draft',
+    created_by TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunities_status ON stockv2_opportunities(status);
+CREATE TABLE IF NOT EXISTS stockv2_opportunity_discovery_runs (
+    id TEXT PRIMARY KEY,
+    opportunity_id TEXT NOT NULL,
+    agent_run_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    current_step_id TEXT,
+    step_total INTEGER NOT NULL DEFAULT 8,
+    step_completed INTEGER NOT NULL DEFAULT 0,
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    evidence_count INTEGER NOT NULL DEFAULT 0,
+    external_source_count INTEGER NOT NULL DEFAULT 0,
+    started_at DATETIME,
+    finished_at DATETIME,
+    error_message TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_discovery_runs_opp ON stockv2_opportunity_discovery_runs(opportunity_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_discovery_runs_agent_run ON stockv2_opportunity_discovery_runs(agent_run_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_discovery_runs_status ON stockv2_opportunity_discovery_runs(status);
+CREATE TABLE IF NOT EXISTS stockv2_opportunity_discovery_steps (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    step_key TEXT NOT NULL,
+    step_title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    order_index INTEGER NOT NULL DEFAULT 0,
+    input_summary TEXT,
+    output_summary TEXT,
+    metadata_json TEXT,
+    started_at DATETIME,
+    finished_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    UNIQUE(run_id, step_key)
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_discovery_steps_run ON stockv2_opportunity_discovery_steps(run_id);
+CREATE TABLE IF NOT EXISTS stockv2_opportunity_evidence (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    candidate_id TEXT,
+    source_type TEXT NOT NULL,
+    source_ref TEXT,
+    title TEXT NOT NULL,
+    summary TEXT,
+    url TEXT,
+    publisher TEXT,
+    published_at DATETIME,
+    confidence REAL NOT NULL DEFAULT 0,
+    metadata_json TEXT,
+    created_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_evidence_run ON stockv2_opportunity_evidence(run_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_evidence_candidate ON stockv2_opportunity_evidence(candidate_id);
+CREATE TABLE IF NOT EXISTS stockv2_opportunity_candidates (
+    id TEXT PRIMARY KEY,
+    opportunity_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    market TEXT NOT NULL,
+    instrument_type TEXT NOT NULL DEFAULT 'stock',
+    name TEXT NOT NULL,
+    relation_type TEXT NOT NULL DEFAULT 'weak',
+    relevance_score REAL NOT NULL DEFAULT 0,
+    evidence_score REAL NOT NULL DEFAULT 0,
+    market_risk_score REAL NOT NULL DEFAULT 0,
+    confidence REAL NOT NULL DEFAULT 0,
+    rank INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'candidate',
+    reason TEXT,
+    risk_summary TEXT,
+    metadata_json TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    UNIQUE(run_id, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_candidates_opp ON stockv2_opportunity_candidates(opportunity_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_candidates_run ON stockv2_opportunity_candidates(run_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_candidates_symbol ON stockv2_opportunity_candidates(symbol);
+CREATE TABLE IF NOT EXISTS stockv2_opportunity_results (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    summary TEXT,
+    conclusion TEXT,
+    recommended_next_action TEXT,
+    raw_result_json TEXT,
+    created_at DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS stockv2_embedding_config (
+    id TEXT PRIMARY KEY,
+    embedding_model_id TEXT,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    last_probe_at DATETIME,
+    last_probe_status TEXT,
+    last_error TEXT,
+    updated_at DATETIME NOT NULL
+);
+INSERT OR IGNORE INTO stockv2_embedding_config (id, embedding_model_id, enabled, updated_at)
+VALUES ('default', '', 0, datetime('now'));
 -- Codex CLI 默认 Provider: 使用当前主机 codex 登录态,不需要第三方 key/base_url。
 INSERT OR IGNORE INTO stockv2_agent_provider_profiles
     (id, provider_type, name, display_name, config_state, auth_state, availability, metadata_json, created_at, updated_at)

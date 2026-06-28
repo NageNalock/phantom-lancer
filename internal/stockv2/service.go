@@ -56,6 +56,7 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 	}
 	svc.newsAdapters[NewsSourceJin10] = jin10NewsSourceAdapter{httpClient: httpClient}
 	svc.newsAdapters[NewsSourceFinancialJuice] = financialJuiceNewsSourceAdapter{service: svc}
+	svc.agentTaskPool.service = svc
 	return svc
 }
 
@@ -79,6 +80,7 @@ func (s *Service) WithNewsEventLinker(linker NewsEventLinker) *Service {
 type AgentExecutor interface {
 	ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName string) (*AgentExecutorOutput, error)
 	ExecuteStrategyGeneration(ctx context.Context, taskID string, pack StrategyGenerationContext, modelName string) (*AgentExecutorOutput, error)
+	ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName string) (*AgentExecutorOutput, error)
 	ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error)
 }
 
@@ -141,7 +143,7 @@ func (s *Service) AgentMCPStatus() AgentMCPStatus {
 		ServerName:    codexStockAgentMCPName,
 		Transport:     "loopback_http",
 		URL:           s.agentMCPURL,
-		RequiredTools: []string{codexSubmitResultTool},
+		RequiredTools: codexStockAgentRequiredTools(),
 	}
 }
 

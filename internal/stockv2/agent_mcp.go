@@ -7,7 +7,7 @@ import (
 )
 
 // 轻量 MCP server。仅实现必要方法: initialize / tools/list / tools/call。
-// 工具: stock_agent.submit_result。
+// 工具: stock_agent.submit_result 以及 opportunity_discovery 的项目内查询/过程留痕工具。
 //
 // ponytail: 手工实现最小 JSON-RPC 2.0 + MCP 协议子集, 不引入 MCP SDK。
 // 协议参考 Model Context Protocol spec, 仅实现股票 agent 所需的最小子集。
@@ -107,7 +107,7 @@ func (p *agentTaskPool) mcpInitialize(params json.RawMessage) (any, *mcpError) {
 		"capabilities": map[string]any{
 			"tools": map[string]any{},
 		},
-		"instructions": "StockV2 Agent MCP Server. Use stock_agent.submit_result to submit the final result of your task.",
+		"instructions": "StockV2 Agent MCP Server. Use stock_agent MCP tools for project data lookup, discovery trace recording, and final submit_result. External public search/browse is handled by Codex CLI itself, not by this MCP server.",
 	}, nil
 }
 
@@ -132,7 +132,7 @@ func (p *agentTaskPool) mcpToolsList(params json.RawMessage) (any, *mcpError) {
 						"properties": map[string]any{
 							"outputType": map[string]any{
 								"type":        "string",
-								"enum":        []string{"trade_signal", "proposed_operation", "strategy_patch", "ignore", "continue_monitoring", "stock_profile_summary", "strategy_generation"},
+								"enum":        []string{"trade_signal", "proposed_operation", "strategy_patch", "ignore", "continue_monitoring", "stock_profile_summary", "strategy_generation", "opportunity_discovery"},
 								"description": "The type of output result.",
 							},
 							"resultSummary": map[string]any{
@@ -158,6 +158,7 @@ func (p *agentTaskPool) mcpToolsList(params json.RawMessage) (any, *mcpError) {
 			},
 		},
 	}
+	tools = append(tools, opportunityDiscoveryMCPTools()...)
 
 	return map[string]any{
 		"tools": tools,
@@ -180,6 +181,9 @@ func (p *agentTaskPool) mcpToolsCall(params json.RawMessage) (any, *mcpError) {
 	case "stock_agent.submit_result":
 		return p.mcpSubmitResult(callParams.Arguments)
 	default:
+		if result, handled, err := p.mcpOpportunityToolsCall(callParams.Name, callParams.Arguments); handled {
+			return result, err
+		}
 		return nil, &mcpError{Code: mcpErrMethodNotFound, Message: "Tool not found: " + callParams.Name}
 	}
 }

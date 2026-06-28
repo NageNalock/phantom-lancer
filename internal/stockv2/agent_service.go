@@ -1257,6 +1257,9 @@ func (s *Service) RunAgentCLIDebug(ctx context.Context, req RequestRunAgentCLIDe
 	if !model.Enabled || model.Status != AgentModelStatusAvailable {
 		return AgentExecutionDetail{}, ErrAgentModelNotAvailable
 	}
+	if strings.TrimSpace(req.DebugMode) == AgentTaskTypeOpportunityDiscovery {
+		return s.runOpportunityDiscoveryCLIDebug(ctx, req, model)
+	}
 
 	triggerID := "debug-" + generateID()
 	today := time.Now().Format("2006-01-02")
@@ -1571,6 +1574,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 		now := time.Now()
 		run.FinishedAt = now
 		s.markStockProfileAIEnhancementFailed(ctx, run, run.ErrorMessage)
+		s.markOpportunityDiscoveryRunFailed(ctx, run, run.ErrorMessage)
 
 		ledger.OutputArtifactSummary = safelog.Text(outputArtifact.String(), 16384)
 
@@ -1590,6 +1594,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 		run.ErrorMessage = agentRunFailureMessage("no valid result submitted", execOutput)
 		run.FinishedAt = time.Now()
 		s.markStockProfileAIEnhancementFailed(ctx, run, run.ErrorMessage)
+		s.markOpportunityDiscoveryRunFailed(ctx, run, run.ErrorMessage)
 		ledger.OutputArtifactSummary = safelog.Text(outputArtifact.String(), 16384)
 		s.store.UpdateAgentRun(ctx, run)
 		s.store.UpdateAgentDecisionLedger(ctx, ledger)
@@ -1698,6 +1703,33 @@ func (s *Service) finalizeAgentRunWithOutput(
 			})
 		}
 		ledger.StructuredOutput["createdStrategies"] = createdSummaries
+	}
+	if run.TaskType == AgentTaskTypeOpportunityDiscovery {
+		saved, err := s.saveOpportunityDiscoveryResult(ctx, run, *submitted)
+		if err != nil {
+			run.Status = AgentRunStatusFailed
+			run.ErrorMessage = safelog.Text("save opportunity discovery result failed: "+err.Error(), 500)
+			s.markOpportunityDiscoveryRunFailed(ctx, run, run.ErrorMessage)
+			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
+				s.log.Warn("finalize: update run after opportunity discovery save failed", "run_id", runID, "error", updateErr)
+			}
+			if s.log != nil {
+				s.log.Warn("finalize: save opportunity discovery result failed", "run_id", runID, "error", err)
+			}
+			if _, ledgerErr := s.store.UpdateAgentDecisionLedger(ctx, ledger); ledgerErr != nil && s.log != nil {
+				s.log.Warn("finalize: update ledger after opportunity discovery save failed", "run_id", runID, "error", ledgerErr)
+			}
+			return
+		}
+		savedSummaries := make([]map[string]any, 0, len(saved))
+		for _, item := range saved {
+			savedSummaries = append(savedSummaries, map[string]any{
+				"id":     item.ID,
+				"symbol": item.Symbol,
+				"rank":   item.Rank,
+			})
+		}
+		ledger.StructuredOutput["savedCandidates"] = savedSummaries
 	}
 
 	if _, err := s.store.UpdateAgentDecisionLedger(ctx, ledger); err != nil && s.log != nil {

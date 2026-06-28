@@ -701,9 +701,24 @@ func TestAgentTaskProfilesSeedFutureTasksAndStrategyGenerationConfigurable(t *te
 	if resolution.Status != AgentResolutionStatusAuthorized || resolution.Run == nil {
 		t.Fatalf("resolution = %+v, want authorized run", resolution)
 	}
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeOpportunityDiscovery, RequestUpdateAgentTaskProfile{}); err != nil {
+		t.Fatalf("update opportunity_discovery task: %v", err)
+	}
+	if _, err := svc.ResolveAgentTask(ctx, AgentTaskTypeOpportunityDiscovery, "opportunity", "x", "tester"); !errors.Is(err, ErrAgentModelNotAvailable) {
+		t.Fatalf("resolve unbound opportunity_discovery error = %v, want ErrAgentModelNotAvailable", err)
+	}
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeOpportunityDiscovery, RequestUpdateAgentTaskProfile{PrimaryModelID: &modelID}); err != nil {
+		t.Fatalf("bind opportunity_discovery task profile: %v", err)
+	}
+	oppResolution, err := svc.ResolveAgentTask(ctx, AgentTaskTypeOpportunityDiscovery, "opportunity", "x", "tester")
+	if err != nil {
+		t.Fatalf("resolve opportunity_discovery task: %v", err)
+	}
+	if oppResolution.Status != AgentResolutionStatusAuthorized || oppResolution.Run == nil {
+		t.Fatalf("opportunity discovery resolution = %+v, want authorized run", oppResolution)
+	}
 
 	for _, taskType := range []string{
-		AgentTaskTypeOpportunityDiscovery,
 		AgentTaskTypeNewsEventReview,
 		AgentTaskTypePortfolioRiskReview,
 		AgentTaskTypeBullBearDebate,
@@ -1059,6 +1074,29 @@ func (f fakeDebugAgentExecutor) ExecuteStrategyGeneration(ctx context.Context, t
 		ExitCode:      0,
 		Duration:      time.Millisecond,
 		RawTranscript: "strategy generation stdout",
+	}, nil
+}
+
+func (f fakeDebugAgentExecutor) ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName string) (*AgentExecutorOutput, error) {
+	_, err := f.pool.submitResult(taskID, AgentTaskTypeOpportunityDiscovery, AgentTaskSubmittedResult{
+		OutputType:    OpportunityDiscoveryOutputType,
+		ResultSummary: "opportunity discovery ok",
+		Result: map[string]any{
+			"schema_version": OpportunityDiscoveryReportSchemaVersion,
+			"opportunity_id": pack.Opportunity.ID,
+			"summary":        "debug opportunity discovery ok",
+			"candidates":     []any{},
+		},
+		Confidence: 1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &AgentExecutorOutput{
+		StdoutTail:    "opportunity discovery stdout",
+		ExitCode:      0,
+		Duration:      time.Millisecond,
+		RawTranscript: "opportunity discovery stdout",
 	}, nil
 }
 

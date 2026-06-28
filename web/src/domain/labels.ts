@@ -1033,7 +1033,7 @@ export function stockV2AgentTaskTypeLabel(taskType?: string): string {
 }
 
 export function stockV2AgentTaskConfigurable(taskType?: string): boolean {
-  return taskType === "operation_review" || taskType === "stock_profile_summary";
+  return taskType === "operation_review" || taskType === "strategy_generation" || taskType === "opportunity_discovery" || taskType === "stock_profile_summary";
 }
 
 export function stockV2AgentRunStatusLabel(status?: string): string {

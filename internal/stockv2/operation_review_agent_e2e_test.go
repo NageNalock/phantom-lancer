@@ -439,6 +439,38 @@ func (f fakeOperationReviewExecutor) ExecuteStrategyGeneration(ctx context.Conte
 	}, f.execErr
 }
 
+func (f fakeOperationReviewExecutor) ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName string) (*AgentExecutorOutput, error) {
+	result := f.result
+	if result == nil {
+		result = map[string]any{
+			"schema_version": OpportunityDiscoveryReportSchemaVersion,
+			"opportunity_id": pack.Opportunity.ID,
+			"summary":        "fake opportunity discovery",
+			"candidates":     []any{},
+		}
+	}
+	if f.submit {
+		_, _ = f.pool.submitResult(taskID, AgentTaskTypeOpportunityDiscovery, AgentTaskSubmittedResult{
+			OutputType:    OpportunityDiscoveryOutputType,
+			ResultSummary: f.summary,
+			Result:        result,
+			Confidence:    f.confidence,
+		})
+	}
+	exitCode := 0
+	stderr := ""
+	if f.execErr != nil {
+		exitCode = 1
+		stderr = f.execErr.Error()
+	}
+	return &AgentExecutorOutput{
+		StdoutTail: "fake opportunity discovery stdout",
+		StderrTail: stderr,
+		ExitCode:   exitCode,
+		Duration:   time.Millisecond,
+	}, f.execErr
+}
+
 func mcpSubmitResultRequest(taskID, outputType, summary string, result map[string]any, confidence float64) []byte {
 	raw, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",

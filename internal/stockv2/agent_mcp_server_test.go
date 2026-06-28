@@ -41,8 +41,14 @@ func TestAgentMCPServerUsesLoopbackHTTP(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		t.Fatalf("decode tools/list: %v", err)
 	}
-	if len(decoded.Result.Tools) != 1 || decoded.Result.Tools[0].Name != codexSubmitResultTool {
-		t.Fatalf("tools = %+v, want %s", decoded.Result.Tools, codexSubmitResultTool)
+	names := map[string]bool{}
+	for _, tool := range decoded.Result.Tools {
+		names[tool.Name] = true
+	}
+	for _, want := range []string{codexSubmitResultTool, "stock_agent.start_discovery_step", "stock_agent.record_candidate"} {
+		if !names[want] {
+			t.Fatalf("tools = %+v, want %s", decoded.Result.Tools, want)
+		}
 	}
 }
 
@@ -63,7 +69,11 @@ func TestAgentMCPStatusReflectsLoopbackServer(t *testing.T) {
 	if !after.Enabled || after.URL != endpoint || after.Transport != "loopback_http" {
 		t.Fatalf("after = %+v, endpoint = %q", after, endpoint)
 	}
-	if len(after.RequiredTools) != 1 || after.RequiredTools[0] != codexSubmitResultTool {
+	required := map[string]bool{}
+	for _, tool := range after.RequiredTools {
+		required[tool] = true
+	}
+	if !required[codexSubmitResultTool] || !required["stock_agent.start_discovery_step"] || !required["stock_agent.record_candidate"] {
 		t.Fatalf("required tools = %+v", after.RequiredTools)
 	}
 }
