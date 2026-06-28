@@ -141,7 +141,7 @@ func (s *Service) AgentMCPStatus() AgentMCPStatus {
 		ServerName:    codexStockAgentMCPName,
 		Transport:     "loopback_http",
 		URL:           s.agentMCPURL,
-		RequiredTools: []string{codexSubmitResultTool},
+		RequiredTools: stockAgentMCPRequiredTools(),
 	}
 }
 
@@ -151,7 +151,7 @@ func (s *Service) handleAgentMCPRequest(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	resp := s.agentTaskPool.HandleMCPRequest(body)
+	resp := s.HandleMCPRequest(body)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)

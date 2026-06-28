@@ -70,9 +70,56 @@ func (s *Service) BuildStrategyGenerationContext(ctx context.Context, input Stra
 		}
 		out.Targets = append(out.Targets, item)
 	}
+	if err := s.fillStrategyGenerationOpportunityContext(ctx, normalized, &out); err != nil {
+		return StrategyGenerationContext{}, err
+	}
 	out.FreshnessSummary["targetCount"] = len(out.Targets)
 	out.FreshnessSummary["builtAt"] = out.BuiltAt.Format(time.RFC3339)
 	return out, nil
+}
+
+func (s *Service) fillStrategyGenerationOpportunityContext(ctx context.Context, input StrategyGenerationInput, out *StrategyGenerationContext) error {
+	if strings.TrimSpace(input.OpportunityID) == "" && strings.TrimSpace(input.CandidateID) == "" {
+		return nil
+	}
+	if strings.TrimSpace(input.OpportunityID) != "" {
+		opp, err := s.store.GetOpportunity(ctx, input.OpportunityID)
+		if err != nil {
+			return err
+		}
+		out.Opportunity = &opp
+	}
+	if strings.TrimSpace(input.CandidateID) != "" {
+		candidate, err := s.store.GetOpportunityCandidate(ctx, input.CandidateID)
+		if err != nil {
+			return err
+		}
+		out.OpportunityCandidate = &candidate
+		if out.Opportunity == nil {
+			opp, err := s.store.GetOpportunity(ctx, candidate.OpportunityID)
+			if err != nil {
+				return err
+			}
+			out.Opportunity = &opp
+		}
+		evidence, err := s.store.ListOpportunityEvidence(ctx, OpportunityEvidenceListFilter{
+			RunID:       candidate.RunID,
+			CandidateID: candidate.ID,
+			Limit:       100,
+		})
+		if err != nil {
+			return err
+		}
+		out.OpportunityEvidence = evidence
+		out.FreshnessSummary["opportunityEvidenceCount"] = len(evidence)
+	}
+	if out.Opportunity != nil {
+		out.FreshnessSummary["opportunityId"] = out.Opportunity.ID
+	}
+	if out.OpportunityCandidate != nil {
+		out.FreshnessSummary["opportunityCandidateId"] = out.OpportunityCandidate.ID
+	}
+	return nil
 }
 
 func (s *Service) strategyGenerationInstrumentContext(ctx context.Context, target StrategyGenerationTargetInstrument) (StrategyGenerationInstrumentContext, error) {
@@ -332,6 +379,7 @@ func normalizeStrategyGenerationInput(input StrategyGenerationInput) (StrategyGe
 	input.PortfolioID = strings.TrimSpace(input.PortfolioID)
 	input.RequestedBy = strings.TrimSpace(input.RequestedBy)
 	input.OpportunityID = strings.TrimSpace(input.OpportunityID)
+	input.CandidateID = strings.TrimSpace(input.CandidateID)
 	input.TimeHorizon = strings.TrimSpace(input.TimeHorizon)
 	if len(input.AllowedActions) == 0 && input.Mode == StrategyGenerationModePortfolio {
 		input.AllowedActions = []string{
@@ -383,6 +431,9 @@ func strategyGenerationTriggerID(input StrategyGenerationInput) string {
 			return fmt.Sprintf("%s:portfolio=%s", input.Mode, input.PortfolioID)
 		}
 		return fmt.Sprintf("%s:portfolio=%s:symbols=%s", input.Mode, input.PortfolioID, strings.Join(parts, ","))
+	}
+	if input.Mode == StrategyGenerationModeOpportunity && input.OpportunityID != "" {
+		return fmt.Sprintf("%s:opportunity=%s:candidate=%s:symbols=%s", input.Mode, input.OpportunityID, input.CandidateID, strings.Join(parts, ","))
 	}
 	if input.PortfolioID != "" {
 		return fmt.Sprintf("%s:portfolio=%s:symbols=%s", input.Mode, input.PortfolioID, strings.Join(parts, ","))

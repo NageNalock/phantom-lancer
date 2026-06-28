@@ -118,6 +118,26 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/news/events", s.handleStockV2ListNewsEvents)
 	mux.HandleFunc("GET /api/stockv2/news/link-candidates", s.handleStockV2ListNewsLinkCandidates)
 
+	// 主题机会发现
+	mux.HandleFunc("GET /api/stockv2/opportunities", s.handleStockV2ListOpportunities)
+	mux.HandleFunc("POST /api/stockv2/opportunities", s.handleStockV2CreateOpportunity)
+	mux.HandleFunc("GET /api/stockv2/opportunities/{id}", s.handleStockV2GetOpportunity)
+	mux.HandleFunc("PATCH /api/stockv2/opportunities/{id}", s.handleStockV2UpdateOpportunity)
+	mux.HandleFunc("DELETE /api/stockv2/opportunities/{id}", s.handleStockV2DeleteOpportunity)
+	mux.HandleFunc("POST /api/stockv2/opportunities/{id}/discovery-runs", s.handleStockV2StartOpportunityDiscoveryRun)
+	mux.HandleFunc("GET /api/stockv2/opportunities/{id}/discovery-runs", s.handleStockV2ListOpportunityDiscoveryRuns)
+	mux.HandleFunc("GET /api/stockv2/opportunity-discovery-runs/{id}", s.handleStockV2GetOpportunityDiscoveryRun)
+	mux.HandleFunc("GET /api/stockv2/opportunity-discovery-runs/{id}/steps", s.handleStockV2ListOpportunityDiscoverySteps)
+	mux.HandleFunc("GET /api/stockv2/opportunity-discovery-runs/{id}/evidence", s.handleStockV2ListOpportunityEvidence)
+	mux.HandleFunc("GET /api/stockv2/opportunity-discovery-runs/{id}/candidates", s.handleStockV2ListOpportunityCandidates)
+	mux.HandleFunc("GET /api/stockv2/opportunity-discovery-runs/{id}/result", s.handleStockV2GetOpportunityResult)
+	mux.HandleFunc("PATCH /api/stockv2/opportunity-candidates/{id}", s.handleStockV2UpdateOpportunityCandidate)
+	mux.HandleFunc("POST /api/stockv2/opportunity-candidates/{id}/generate-strategy", s.handleStockV2GenerateStrategyFromOpportunityCandidate)
+	mux.HandleFunc("GET /api/stockv2/embeddings/status", s.handleStockV2GetEmbeddingStatus)
+	mux.HandleFunc("PATCH /api/stockv2/embeddings/config", s.handleStockV2UpdateEmbeddingConfig)
+	mux.HandleFunc("POST /api/stockv2/embeddings/rebuild", s.handleStockV2RebuildEmbeddings)
+	mux.HandleFunc("GET /api/stockv2/embeddings/assets", s.handleStockV2ListEmbeddingAssets)
+
 	// 日级历史行情（Daily Bars）
 	mux.HandleFunc("POST /api/stockv2/history/daily/ensure", s.handleEnsureDailyBars)
 	mux.HandleFunc("GET /api/stockv2/history/daily", s.handleGetDailyBars)

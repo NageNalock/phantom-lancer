@@ -1699,6 +1699,30 @@ func (s *Service) finalizeAgentRunWithOutput(
 		}
 		ledger.StructuredOutput["createdStrategies"] = createdSummaries
 	}
+	if run.TaskType == AgentTaskTypeOpportunityDiscovery {
+		discoveryRun, err := s.store.GetOpportunityDiscoveryRunByAgentRunID(ctx, run.ID)
+		if err != nil {
+			run.Status = AgentRunStatusFailed
+			run.ErrorMessage = safelog.Text("opportunity discovery run not found: "+err.Error(), 500)
+			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
+				s.log.Warn("finalize: update run after opportunity discovery lookup failed", "run_id", runID, "error", updateErr)
+			}
+			return
+		}
+		result, err := s.ProcessOpportunityDiscoverySubmittedResult(ctx, discoveryRun.ID, *submitted)
+		if err != nil {
+			run.Status = AgentRunStatusFailed
+			run.ErrorMessage = safelog.Text("save opportunity discovery result failed: "+err.Error(), 500)
+			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
+				s.log.Warn("finalize: update run after opportunity discovery save failed", "run_id", runID, "error", updateErr)
+			}
+			if _, ledgerErr := s.store.UpdateAgentDecisionLedger(ctx, ledger); ledgerErr != nil && s.log != nil {
+				s.log.Warn("finalize: update ledger after opportunity discovery save failed", "run_id", runID, "error", ledgerErr)
+			}
+			return
+		}
+		ledger.StructuredOutput["opportunityResultId"] = result.ID
+	}
 
 	if _, err := s.store.UpdateAgentDecisionLedger(ctx, ledger); err != nil && s.log != nil {
 		s.log.Warn("finalize: update ledger failed", "run_id", runID, "error", err)
