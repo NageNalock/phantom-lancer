@@ -489,7 +489,10 @@ func stockV2AgentHTTPStatus(err error) int {
 	case errors.Is(err, stockv2.ErrAgentModelNotAvailable),
 		errors.Is(err, stockv2.ErrAgentExecutorUnavailable),
 		errors.Is(err, stockv2.ErrAgentTaskNotConfigurable),
-		errors.Is(err, stockv2.ErrAgentProviderProtected):
+		errors.Is(err, stockv2.ErrAgentProviderProtected),
+		errors.Is(err, stockv2.ErrEmbeddingModelNotConfigured),
+		errors.Is(err, stockv2.ErrEmbeddingModelUnavailable),
+		errors.Is(err, stockv2.ErrEmbeddingAssetNotReady):
 		return http.StatusConflict
 	case errors.Is(err, stockv2.ErrInvalidAgentProviderType),
 		errors.Is(err, stockv2.ErrInvalidAgentProviderConfigState),
@@ -504,6 +507,8 @@ func stockV2AgentHTTPStatus(err error) int {
 		errors.Is(err, stockv2.ErrInvalidAgentModelName),
 		errors.Is(err, stockv2.ErrAgentModelTypeNotAllowed),
 		errors.Is(err, stockv2.ErrInvalidAgentTaskType),
+		errors.Is(err, stockv2.ErrInvalidEmbeddingConfig),
+		errors.Is(err, stockv2.ErrInvalidEmbeddingRequest),
 		errors.Is(err, stockv2.ErrInvalidStrategyGenerationInput),
 		errors.Is(err, stockv2.ErrInvalidStrategyGenerationResult):
 		return http.StatusBadRequest

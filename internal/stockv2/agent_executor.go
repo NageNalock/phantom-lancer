@@ -330,28 +330,8 @@ func (e *codexCLIExecutor) codexMCPServers() []codexMCPServerCapability {
 	return []codexMCPServerCapability{{
 		Name:          codexStockAgentMCPName,
 		URL:           strings.TrimSpace(e.mcpURL),
-		RequiredTools: codexStockAgentRequiredTools(),
+		RequiredTools: stockAgentMCPRequiredTools(),
 	}}
-}
-
-func codexStockAgentRequiredTools() []string {
-	return []string{
-		codexSubmitResultTool,
-		"stock_agent.search_instruments",
-		"stock_agent.search_stock_profiles",
-		"stock_agent.get_stock_profile",
-		"stock_agent.get_latest_quotes",
-		"stock_agent.get_daily_bars_summary",
-		"stock_agent.list_existing_strategies",
-		"stock_agent.get_embedding_status",
-		"stock_agent.start_discovery_step",
-		"stock_agent.finish_discovery_step",
-		"stock_agent.fail_discovery_step",
-		"stock_agent.record_external_source",
-		"stock_agent.record_evidence",
-		"stock_agent.record_candidate",
-		"stock_agent.update_candidate",
-	}
 }
 
 func (e *codexCLIExecutor) preflightCodexMCPServers(servers []codexMCPServerCapability) error {

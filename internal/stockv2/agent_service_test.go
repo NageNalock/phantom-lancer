@@ -718,6 +718,17 @@ func TestAgentTaskProfilesSeedFutureTasksAndStrategyGenerationConfigurable(t *te
 		t.Fatalf("opportunity discovery resolution = %+v, want authorized run", oppResolution)
 	}
 
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeOpportunityDiscovery, RequestUpdateAgentTaskProfile{PrimaryModelID: &modelID}); err != nil {
+		t.Fatalf("update opportunity_discovery task profile: %v", err)
+	}
+	opportunityResolution, err := svc.ResolveAgentTask(ctx, AgentTaskTypeOpportunityDiscovery, "opportunity", "x", "tester")
+	if err != nil {
+		t.Fatalf("resolve opportunity_discovery task: %v", err)
+	}
+	if opportunityResolution.Status != AgentResolutionStatusAuthorized || opportunityResolution.Run == nil {
+		t.Fatalf("opportunity resolution = %+v, want authorized run", opportunityResolution)
+	}
+
 	for _, taskType := range []string{
 		AgentTaskTypeNewsEventReview,
 		AgentTaskTypePortfolioRiskReview,

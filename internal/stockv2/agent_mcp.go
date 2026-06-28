@@ -68,6 +68,9 @@ type submitResultParamsInner struct {
 }
 
 func (p *agentTaskPool) HandleMCPRequest(raw []byte) []byte {
+	if p.service != nil {
+		return p.service.HandleMCPRequest(raw)
+	}
 	var req mcpJSONRPCRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return mcpErrorResponse(nil, mcpErrParseError, "Parse error", nil)
@@ -107,58 +110,22 @@ func (p *agentTaskPool) mcpInitialize(params json.RawMessage) (any, *mcpError) {
 		"capabilities": map[string]any{
 			"tools": map[string]any{},
 		},
-		"instructions": "StockV2 Agent MCP Server. Use stock_agent MCP tools for project data lookup, discovery trace recording, and final submit_result. External public search/browse is handled by Codex CLI itself, not by this MCP server.",
+		"instructions": p.mcpInstructions(),
 	}, nil
 }
 
 func (p *agentTaskPool) mcpToolsList(params json.RawMessage) (any, *mcpError) {
-	tools := []mcpTool{
-		{
-			Name:        "stock_agent.submit_result",
-			Description: "Submit the final structured result of a stock agent task to the main program. Only call this ONCE when you have completed your analysis. Do not call it multiple times. The result will be validated by the main program before it is persisted.",
+	tools := make([]mcpTool, 0, len(stockAgentMCPRequiredTools()))
+	for _, name := range stockAgentMCPRequiredTools() {
+		tools = append(tools, mcpTool{
+			Name:        name,
+			Description: stockAgentMCPToolDescription(name),
 			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"taskID": map[string]any{
-						"type":        "string",
-						"description": "The unique task ID provided to you in the prompt. This is required for authentication.",
-					},
-					"taskType": map[string]any{
-						"type":        "string",
-						"description": "The type of task you are performing (e.g., operation_review). Must match the task type from the prompt.",
-					},
-					"result": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"outputType": map[string]any{
-								"type":        "string",
-								"enum":        []string{"trade_signal", "proposed_operation", "strategy_patch", "ignore", "continue_monitoring", "stock_profile_summary", "strategy_generation", "opportunity_discovery"},
-								"description": "The type of output result.",
-							},
-							"resultSummary": map[string]any{
-								"type":        "string",
-								"description": "A brief summary of your conclusion.",
-							},
-							"result": map[string]any{
-								"type":                 "object",
-								"description":          "Structured result object. Include facts, inferences, assumptions, freshnessAssessment, and evidenceAudit. Fields depend on outputType. Do not fabricate missing market, financial, or news data.",
-								"additionalProperties": true,
-							},
-							"confidence": map[string]any{
-								"type":        "number",
-								"description": "Your confidence in this result, from 0.0 to 1.0.",
-								"minimum":     0.0,
-								"maximum":     1.0,
-							},
-						},
-						"required": []string{"outputType"},
-					},
-				},
-				"required": []string{"taskID", "taskType", "result"},
+				"type":                 "object",
+				"additionalProperties": true,
 			},
-		},
+		})
 	}
-	tools = append(tools, opportunityDiscoveryMCPTools()...)
 
 	return map[string]any{
 		"tools": tools,
@@ -180,10 +147,31 @@ func (p *agentTaskPool) mcpToolsCall(params json.RawMessage) (any, *mcpError) {
 	switch callParams.Name {
 	case "stock_agent.submit_result":
 		return p.mcpSubmitResult(callParams.Arguments)
+	case "stock_agent.search_instruments":
+		return p.mcpSearchInstruments(callParams.Arguments)
+	case "stock_agent.search_stock_profiles":
+		return p.mcpSearchStockProfiles(callParams.Arguments)
+	case "stock_agent.semantic_search_stock_profiles":
+		return p.mcpSemanticSearchStockProfiles(callParams.Arguments)
+	case "stock_agent.get_stock_profile":
+		return p.mcpGetStockProfile(callParams.Arguments)
+	case "stock_agent.get_latest_quotes":
+		return p.mcpGetLatestQuotes(callParams.Arguments)
+	case "stock_agent.get_daily_bars_summary":
+		return p.mcpGetDailyBarsSummary(callParams.Arguments)
+	case "stock_agent.search_news_events":
+		return p.mcpSearchNewsEvents(callParams.Arguments)
+	case "stock_agent.semantic_search_news_events":
+		return p.mcpSemanticSearchNewsEvents(callParams.Arguments)
+	case "stock_agent.search_news_link_candidates":
+		return p.mcpSearchNewsLinkCandidates(callParams.Arguments)
+	case "stock_agent.list_existing_strategies":
+		return p.mcpListExistingStrategies(callParams.Arguments)
+	case "stock_agent.get_portfolio_context":
+		return p.mcpGetPortfolioContext(callParams.Arguments)
+	case "stock_agent.get_embedding_status":
+		return p.mcpGetEmbeddingStatus(callParams.Arguments)
 	default:
-		if result, handled, err := p.mcpOpportunityToolsCall(callParams.Name, callParams.Arguments); handled {
-			return result, err
-		}
 		return nil, &mcpError{Code: mcpErrMethodNotFound, Message: "Tool not found: " + callParams.Name}
 	}
 }

@@ -42,6 +42,7 @@ type Service struct {
 
 // NewService 创建新的股票V2服务
 func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Service {
+	pool := newAgentTaskPool(defaultCleanupInterval)
 	svc := &Service{
 		store:           store,
 		log:             log,
@@ -49,14 +50,14 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 		universeSource:  NewUniverseDataSource(nil, httpClient),
 		dailyBarsSource: NewDailyBarsSource(nil, httpClient),
 		newsAdapters:    map[string]NewsSourceAdapter{},
-		agentTaskPool:   newAgentTaskPool(defaultCleanupInterval),
+		agentTaskPool:   pool,
 		agentCodexCommand: func(ctx context.Context, args ...string) ([]byte, error) {
 			return exec.CommandContext(ctx, "codex", args...).CombinedOutput()
 		},
 	}
+	pool.service = svc
 	svc.newsAdapters[NewsSourceJin10] = jin10NewsSourceAdapter{httpClient: httpClient}
 	svc.newsAdapters[NewsSourceFinancialJuice] = financialJuiceNewsSourceAdapter{service: svc}
-	svc.agentTaskPool.service = svc
 	return svc
 }
 
@@ -143,7 +144,7 @@ func (s *Service) AgentMCPStatus() AgentMCPStatus {
 		ServerName:    codexStockAgentMCPName,
 		Transport:     "loopback_http",
 		URL:           s.agentMCPURL,
-		RequiredTools: codexStockAgentRequiredTools(),
+		RequiredTools: stockAgentMCPRequiredTools(),
 	}
 }
 
@@ -153,7 +154,7 @@ func (s *Service) handleAgentMCPRequest(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	resp := s.agentTaskPool.HandleMCPRequest(body)
+	resp := s.HandleMCPRequest(body)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)

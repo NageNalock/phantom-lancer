@@ -1705,31 +1705,28 @@ func (s *Service) finalizeAgentRunWithOutput(
 		ledger.StructuredOutput["createdStrategies"] = createdSummaries
 	}
 	if run.TaskType == AgentTaskTypeOpportunityDiscovery {
-		saved, err := s.saveOpportunityDiscoveryResult(ctx, run, *submitted)
+		discoveryRun, err := s.store.GetOpportunityDiscoveryRunByAgentRunID(ctx, run.ID)
+		if err != nil {
+			run.Status = AgentRunStatusFailed
+			run.ErrorMessage = safelog.Text("opportunity discovery run not found: "+err.Error(), 500)
+			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
+				s.log.Warn("finalize: update run after opportunity discovery lookup failed", "run_id", runID, "error", updateErr)
+			}
+			return
+		}
+		result, err := s.ProcessOpportunityDiscoverySubmittedResult(ctx, discoveryRun.ID, *submitted)
 		if err != nil {
 			run.Status = AgentRunStatusFailed
 			run.ErrorMessage = safelog.Text("save opportunity discovery result failed: "+err.Error(), 500)
-			s.markOpportunityDiscoveryRunFailed(ctx, run, run.ErrorMessage)
 			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
 				s.log.Warn("finalize: update run after opportunity discovery save failed", "run_id", runID, "error", updateErr)
-			}
-			if s.log != nil {
-				s.log.Warn("finalize: save opportunity discovery result failed", "run_id", runID, "error", err)
 			}
 			if _, ledgerErr := s.store.UpdateAgentDecisionLedger(ctx, ledger); ledgerErr != nil && s.log != nil {
 				s.log.Warn("finalize: update ledger after opportunity discovery save failed", "run_id", runID, "error", ledgerErr)
 			}
 			return
 		}
-		savedSummaries := make([]map[string]any, 0, len(saved))
-		for _, item := range saved {
-			savedSummaries = append(savedSummaries, map[string]any{
-				"id":     item.ID,
-				"symbol": item.Symbol,
-				"rank":   item.Rank,
-			})
-		}
-		ledger.StructuredOutput["savedCandidates"] = savedSummaries
+		ledger.StructuredOutput["opportunityResultId"] = result.ID
 	}
 
 	if _, err := s.store.UpdateAgentDecisionLedger(ctx, ledger); err != nil && s.log != nil {
