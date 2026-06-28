@@ -42,6 +42,7 @@ type Service struct {
 
 // NewService 创建新的股票V2服务
 func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Service {
+	pool := newAgentTaskPool(defaultCleanupInterval)
 	svc := &Service{
 		store:           store,
 		log:             log,
@@ -49,11 +50,12 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 		universeSource:  NewUniverseDataSource(nil, httpClient),
 		dailyBarsSource: NewDailyBarsSource(nil, httpClient),
 		newsAdapters:    map[string]NewsSourceAdapter{},
-		agentTaskPool:   newAgentTaskPool(defaultCleanupInterval),
+		agentTaskPool:   pool,
 		agentCodexCommand: func(ctx context.Context, args ...string) ([]byte, error) {
 			return exec.CommandContext(ctx, "codex", args...).CombinedOutput()
 		},
 	}
+	pool.service = svc
 	svc.newsAdapters[NewsSourceJin10] = jin10NewsSourceAdapter{httpClient: httpClient}
 	svc.newsAdapters[NewsSourceFinancialJuice] = financialJuiceNewsSourceAdapter{service: svc}
 	return svc

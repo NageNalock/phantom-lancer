@@ -55,10 +55,11 @@ type agentTaskEntry struct {
 }
 
 type agentTaskPool struct {
-	tasks  map[string]*agentTaskEntry
-	mu     sync.RWMutex
-	stopCh chan struct{}
-	doneCh chan struct{}
+	tasks   map[string]*agentTaskEntry
+	service *Service
+	mu      sync.RWMutex
+	stopCh  chan struct{}
+	doneCh  chan struct{}
 }
 
 const defaultTaskTTL = 10 * time.Minute

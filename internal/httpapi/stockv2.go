@@ -150,6 +150,12 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/agent/ledgers/{id}", s.handleStockV2GetAgentDecisionLedger)
 	mux.HandleFunc("POST /api/stockv2/agent/resolve", s.handleStockV2ResolveAgentTask)
 	mux.HandleFunc("GET /api/stockv2/agent/mcp/status", s.handleStockV2AgentMCPStatus)
+
+	// Embedding assets and semantic recall readiness.
+	mux.HandleFunc("GET /api/stockv2/embeddings/status", s.handleStockV2EmbeddingStatus)
+	mux.HandleFunc("PATCH /api/stockv2/embeddings/config", s.handleStockV2UpdateEmbeddingConfig)
+	mux.HandleFunc("POST /api/stockv2/embeddings/rebuild", s.handleStockV2RebuildEmbeddings)
+	mux.HandleFunc("GET /api/stockv2/embeddings/assets", s.handleStockV2ListEmbeddingAssets)
 }
 
 // handleStockV2Snapshot 处理 V2 工作台快照请求。

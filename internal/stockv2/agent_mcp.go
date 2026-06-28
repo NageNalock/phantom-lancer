@@ -107,7 +107,7 @@ func (p *agentTaskPool) mcpInitialize(params json.RawMessage) (any, *mcpError) {
 		"capabilities": map[string]any{
 			"tools": map[string]any{},
 		},
-		"instructions": "StockV2 Agent MCP Server. Use stock_agent.submit_result to submit the final result of your task.",
+		"instructions": p.mcpInstructions(),
 	}, nil
 }
 
@@ -132,7 +132,7 @@ func (p *agentTaskPool) mcpToolsList(params json.RawMessage) (any, *mcpError) {
 						"properties": map[string]any{
 							"outputType": map[string]any{
 								"type":        "string",
-								"enum":        []string{"trade_signal", "proposed_operation", "strategy_patch", "ignore", "continue_monitoring", "stock_profile_summary", "strategy_generation"},
+								"enum":        []string{"trade_signal", "proposed_operation", "strategy_patch", "ignore", "continue_monitoring", "stock_profile_summary", "strategy_generation", "opportunity_discovery"},
 								"description": "The type of output result.",
 							},
 							"resultSummary": map[string]any{
@@ -158,6 +158,9 @@ func (p *agentTaskPool) mcpToolsList(params json.RawMessage) (any, *mcpError) {
 			},
 		},
 	}
+	if p.service != nil && p.service.store != nil {
+		tools = append(tools, p.mcpDataTools()...)
+	}
 
 	return map[string]any{
 		"tools": tools,
@@ -179,6 +182,30 @@ func (p *agentTaskPool) mcpToolsCall(params json.RawMessage) (any, *mcpError) {
 	switch callParams.Name {
 	case "stock_agent.submit_result":
 		return p.mcpSubmitResult(callParams.Arguments)
+	case "stock_agent.search_instruments":
+		return p.mcpSearchInstruments(callParams.Arguments)
+	case "stock_agent.search_stock_profiles":
+		return p.mcpSearchStockProfiles(callParams.Arguments)
+	case "stock_agent.semantic_search_stock_profiles":
+		return p.mcpSemanticSearchStockProfiles(callParams.Arguments)
+	case "stock_agent.get_stock_profile":
+		return p.mcpGetStockProfile(callParams.Arguments)
+	case "stock_agent.get_latest_quotes":
+		return p.mcpGetLatestQuotes(callParams.Arguments)
+	case "stock_agent.get_daily_bars_summary":
+		return p.mcpGetDailyBarsSummary(callParams.Arguments)
+	case "stock_agent.search_news_events":
+		return p.mcpSearchNewsEvents(callParams.Arguments)
+	case "stock_agent.semantic_search_news_events":
+		return p.mcpSemanticSearchNewsEvents(callParams.Arguments)
+	case "stock_agent.search_news_link_candidates":
+		return p.mcpSearchNewsLinkCandidates(callParams.Arguments)
+	case "stock_agent.list_existing_strategies":
+		return p.mcpListExistingStrategies(callParams.Arguments)
+	case "stock_agent.get_portfolio_context":
+		return p.mcpGetPortfolioContext(callParams.Arguments)
+	case "stock_agent.get_embedding_status":
+		return p.mcpGetEmbeddingStatus(callParams.Arguments)
 	default:
 		return nil, &mcpError{Code: mcpErrMethodNotFound, Message: "Tool not found: " + callParams.Name}
 	}

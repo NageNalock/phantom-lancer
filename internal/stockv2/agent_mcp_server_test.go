@@ -10,8 +10,9 @@ import (
 )
 
 func TestAgentMCPServerUsesLoopbackHTTP(t *testing.T) {
-	svc := NewService(nil, slog.Default(), http.DefaultClient)
-	defer svc.Close()
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	svc.log = slog.Default()
 
 	endpoint, err := svc.StartAgentMCPServer()
 	if err != nil {
@@ -41,8 +42,12 @@ func TestAgentMCPServerUsesLoopbackHTTP(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		t.Fatalf("decode tools/list: %v", err)
 	}
-	if len(decoded.Result.Tools) != 1 || decoded.Result.Tools[0].Name != codexSubmitResultTool {
-		t.Fatalf("tools = %+v, want %s", decoded.Result.Tools, codexSubmitResultTool)
+	seen := map[string]bool{}
+	for _, tool := range decoded.Result.Tools {
+		seen[tool.Name] = true
+	}
+	if !seen[codexSubmitResultTool] || !seen["stock_agent.search_instruments"] || !seen["stock_agent.semantic_search_stock_profiles"] {
+		t.Fatalf("tools = %+v, want submit_result and project-data tools", decoded.Result.Tools)
 	}
 }
 

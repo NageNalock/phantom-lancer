@@ -478,6 +478,8 @@ func validAgentTaskOutputType(taskType, outputType string) bool {
 		return outputType == StrategyGenerationOutputType
 	case AgentTaskTypeStockProfileSummary:
 		return outputType == AgentTaskTypeStockProfileSummary
+	case AgentTaskTypeOpportunityDiscovery:
+		return outputType == AgentTaskTypeOpportunityDiscovery
 	default:
 		return false
 	}

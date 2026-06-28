@@ -220,5 +220,44 @@ BEGIN
     ) VALUES (NEW.id, 0, 0, datetime('now'));
 END;
 
+-- StockV2 embedding config and vector asset metadata.
+CREATE TABLE IF NOT EXISTS stockv2_embedding_config (
+    id TEXT PRIMARY KEY,
+    embedding_model_id TEXT,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    last_probe_at DATETIME,
+    last_probe_status TEXT,
+    last_error TEXT,
+    updated_at DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS stockv2_embedding_assets (
+    id TEXT PRIMARY KEY,
+    object_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    text_hash TEXT NOT NULL,
+    text_summary TEXT,
+    model_id TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    embedding_protocol TEXT NOT NULL,
+    embedding_dimensions INTEGER NOT NULL,
+    vector_ref TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    UNIQUE(object_type, object_id, model_id, embedding_dimensions)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_object
+    ON stockv2_embedding_assets(object_type, object_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_model_status
+    ON stockv2_embedding_assets(model_id, embedding_dimensions, status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_status
+    ON stockv2_embedding_assets(status);
+
+INSERT OR IGNORE INTO stockv2_embedding_config (id, enabled, updated_at)
+VALUES ('default', 0, datetime('now'));
+
 -- 显示创建完成信息
 SELECT '股票系统 V2 数据库初始化完成' as status;
