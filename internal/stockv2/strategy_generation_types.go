@@ -7,6 +7,7 @@ import (
 
 const (
 	StrategyGenerationModeManualTarget     = "manual_target"
+	StrategyGenerationModeOpportunity      = "opportunity"
 	StrategyGenerationModeSingleInstrument = "single_instrument"
 	StrategyGenerationModePortfolio        = "portfolio_strategy_diagnosis"
 
@@ -52,6 +53,7 @@ type StrategyGenerationInput struct {
 	TargetInstruments []StrategyGenerationTargetInstrument `json:"targetInstruments,omitempty"`
 	RequestedBy       string                               `json:"requestedBy,omitempty"`
 	OpportunityID     string                               `json:"opportunityId,omitempty"`
+	CandidateID       string                               `json:"candidateId,omitempty"`
 	TimeHorizon       string                               `json:"timeHorizon,omitempty"`
 	AllowedActions    []string                             `json:"allowedActions,omitempty"`
 	EvidenceScope     map[string]bool                      `json:"evidenceScope,omitempty"`
@@ -65,17 +67,20 @@ type StrategyGenerationTargetInstrument struct {
 }
 
 type StrategyGenerationContext struct {
-	BuiltAt          time.Time                             `json:"builtAt"`
-	Input            StrategyGenerationInput               `json:"input"`
-	Mode             string                                `json:"mode,omitempty"`
-	Targets          []StrategyGenerationInstrumentContext `json:"targets"`
-	FreshnessSummary map[string]any                        `json:"freshnessSummary,omitempty"`
-	Portfolio        *PortfolioReviewContext               `json:"portfolio,omitempty"`
-	Diagnostics      *StrategyGenerationPortfolioDiagnosis `json:"diagnostics,omitempty"`
-	Holdings         []StrategyGenerationHoldingContext    `json:"holdings,omitempty"`
-	RecentReviews    []OperationReview                     `json:"recentReviews,omitempty"`
-	Transactions     []StockV2Transaction                  `json:"transactions,omitempty"`
-	MissingItems     []string                              `json:"missingItems,omitempty"`
+	BuiltAt              time.Time                             `json:"builtAt"`
+	Input                StrategyGenerationInput               `json:"input"`
+	Mode                 string                                `json:"mode,omitempty"`
+	Targets              []StrategyGenerationInstrumentContext `json:"targets"`
+	FreshnessSummary     map[string]any                        `json:"freshnessSummary,omitempty"`
+	Portfolio            *PortfolioReviewContext               `json:"portfolio,omitempty"`
+	Diagnostics          *StrategyGenerationPortfolioDiagnosis `json:"diagnostics,omitempty"`
+	Holdings             []StrategyGenerationHoldingContext    `json:"holdings,omitempty"`
+	RecentReviews        []OperationReview                     `json:"recentReviews,omitempty"`
+	Transactions         []StockV2Transaction                  `json:"transactions,omitempty"`
+	MissingItems         []string                              `json:"missingItems,omitempty"`
+	Opportunity          *Opportunity                          `json:"opportunity,omitempty"`
+	OpportunityCandidate *OpportunityCandidate                 `json:"opportunityCandidate,omitempty"`
+	OpportunityEvidence  []OpportunityEvidence                 `json:"opportunityEvidence,omitempty"`
 }
 
 type StrategyGenerationInstrumentContext struct {
@@ -205,6 +210,7 @@ type StrategyGenerationStrategySummary struct {
 
 func validStrategyGenerationMode(mode string) bool {
 	return mode == StrategyGenerationModeManualTarget ||
+		mode == StrategyGenerationModeOpportunity ||
 		mode == StrategyGenerationModeSingleInstrument ||
 		mode == StrategyGenerationModePortfolio
 }

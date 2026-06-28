@@ -467,6 +467,7 @@ func knownAgentTaskType(v string) bool {
 func executableAgentTaskType(v string) bool {
 	return v == AgentTaskTypeOperationReview ||
 		v == AgentTaskTypeStrategyGeneration ||
+		v == AgentTaskTypeOpportunityDiscovery ||
 		v == AgentTaskTypeStockProfileSummary
 }
 
@@ -476,10 +477,10 @@ func validAgentTaskOutputType(taskType, outputType string) bool {
 		return validOperationReviewOutputType(outputType)
 	case AgentTaskTypeStrategyGeneration:
 		return outputType == StrategyGenerationOutputType
+	case AgentTaskTypeOpportunityDiscovery:
+		return outputType == OpportunityDiscoveryOutputType
 	case AgentTaskTypeStockProfileSummary:
 		return outputType == AgentTaskTypeStockProfileSummary
-	case AgentTaskTypeOpportunityDiscovery:
-		return outputType == AgentTaskTypeOpportunityDiscovery
 	default:
 		return false
 	}

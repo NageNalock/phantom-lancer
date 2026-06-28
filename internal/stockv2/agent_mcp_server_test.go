@@ -42,12 +42,14 @@ func TestAgentMCPServerUsesLoopbackHTTP(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		t.Fatalf("decode tools/list: %v", err)
 	}
-	seen := map[string]bool{}
+	toolNames := map[string]bool{}
 	for _, tool := range decoded.Result.Tools {
-		seen[tool.Name] = true
+		toolNames[tool.Name] = true
 	}
-	if !seen[codexSubmitResultTool] || !seen["stock_agent.search_instruments"] || !seen["stock_agent.semantic_search_stock_profiles"] {
-		t.Fatalf("tools = %+v, want submit_result and project-data tools", decoded.Result.Tools)
+	for _, want := range []string{codexSubmitResultTool, "stock_agent.search_instruments", "stock_agent.record_candidate", "stock_agent.semantic_search_stock_profiles"} {
+		if !toolNames[want] {
+			t.Fatalf("tools = %+v, missing %s", decoded.Result.Tools, want)
+		}
 	}
 }
 
@@ -68,7 +70,7 @@ func TestAgentMCPStatusReflectsLoopbackServer(t *testing.T) {
 	if !after.Enabled || after.URL != endpoint || after.Transport != "loopback_http" {
 		t.Fatalf("after = %+v, endpoint = %q", after, endpoint)
 	}
-	if len(after.RequiredTools) != 1 || after.RequiredTools[0] != codexSubmitResultTool {
+	if len(after.RequiredTools) != len(stockAgentMCPRequiredTools()) || !stringSliceContains(after.RequiredTools, codexSubmitResultTool) {
 		t.Fatalf("required tools = %+v", after.RequiredTools)
 	}
 }

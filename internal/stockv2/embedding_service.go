@@ -13,75 +13,150 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
 	"phantom-lancer/internal/safelog"
 )
 
+type embeddingAssetSource struct {
+	ObjectType string
+	ObjectID   string
+	Text       string
+}
+
+type SemanticSearchHit struct {
+	Asset     EmbeddingAsset `json:"asset"`
+	Score     float64        `json:"score"`
+	Profile   *StockProfile  `json:"profile,omitempty"`
+	NewsEvent *NewsEvent     `json:"newsEvent,omitempty"`
+}
+
 func (s *Service) GetEmbeddingStatus(ctx context.Context) (EmbeddingStatus, error) {
-	config, err := s.store.GetEmbeddingConfig(ctx)
+	cfg, err := s.embeddingConfigOrDefault(ctx)
 	if err != nil {
 		return EmbeddingStatus{}, err
 	}
-	status := EmbeddingStatus{Config: config}
-	ready, _ := s.store.CountEmbeddingAssetsByStatus(ctx, EmbeddingAssetStatusReady)
-	stale, _ := s.store.CountEmbeddingAssetsByStatus(ctx, EmbeddingAssetStatusStale)
-	failed, _ := s.store.CountEmbeddingAssetsByStatus(ctx, EmbeddingAssetStatusFailed)
+	status := EmbeddingStatus{
+		Config:       cfg,
+		Status:       EmbeddingStatusModelNotConfigured,
+		Code:         EmbeddingStatusModelNotConfigured,
+		ErrorCode:    EmbeddingStatusModelNotConfigured,
+		ErrorMessage: ErrEmbeddingModelNotConfigured.Error(),
+		Message:      "embedding model is not configured",
+	}
+	if strings.TrimSpace(cfg.EmbeddingModelID) == "" {
+		return status, nil
+	}
+	if !cfg.Enabled {
+		status.Status = EmbeddingStatusModelUnavailable
+		status.Code = EmbeddingStatusModelUnavailable
+		status.ErrorCode = EmbeddingStatusModelUnavailable
+		status.ErrorMessage = ErrEmbeddingModelUnavailable.Error()
+		status.Message = "embedding model is disabled"
+		return status, nil
+	}
+	model, err := s.store.GetAgentModelProfile(ctx, cfg.EmbeddingModelID)
+	if err != nil {
+		status.Status = EmbeddingStatusModelUnavailable
+		status.Code = EmbeddingStatusModelUnavailable
+		status.ErrorCode = EmbeddingStatusModelUnavailable
+		status.ErrorMessage = ErrEmbeddingModelUnavailable.Error()
+		status.Message = "embedding model not found"
+		return status, nil
+	}
+	status.Model = &model
+	status.ModelID = model.ID
+	status.ProviderID = model.ProviderID
+	status.ModelName = model.ModelName
+	status.EmbeddingProtocol = model.EmbeddingProtocol
+	status.EmbeddingDimensions = model.EmbeddingDimensions
+
+	ready, _ := s.store.CountEmbeddingAssets(ctx, EmbeddingAssetListFilter{
+		ModelID: model.ID,
+		Status:  EmbeddingAssetStatusReady,
+	})
+	stale, _ := s.store.CountEmbeddingAssets(ctx, EmbeddingAssetListFilter{Status: EmbeddingAssetStatusStale})
+	failed, _ := s.store.CountEmbeddingAssets(ctx, EmbeddingAssetListFilter{
+		ModelID: model.ID,
+		Status:  EmbeddingAssetStatusFailed,
+	})
+	status.ReadyAssets = ready
+	status.StaleAssets = stale
+	status.FailedAssets = failed
 	status.ReadyAssetCount = ready
 	status.StaleAssetCount = stale
 	status.FailedAssetCount = failed
 
-	binding, err := s.resolveEmbeddingModel(ctx)
-	if err != nil {
-		status.ErrorCode = embeddingErrorCode(err)
-		status.ErrorMessage = err.Error()
+	if err := validateEmbeddingModel(model); err != nil {
+		status.Status = EmbeddingStatusModelUnavailable
+		status.Code = EmbeddingStatusModelUnavailable
+		status.ErrorCode = EmbeddingStatusModelUnavailable
+		status.ErrorMessage = ErrEmbeddingModelUnavailable.Error()
+		status.Message = err.Error()
 		return status, nil
 	}
+	if ready == 0 {
+		status.Status = EmbeddingStatusAssetNotReady
+		status.Code = EmbeddingStatusAssetNotReady
+		status.ErrorCode = EmbeddingStatusAssetNotReady
+		status.ErrorMessage = ErrEmbeddingAssetNotReady.Error()
+		status.Message = "embedding assets are empty or stale; rebuild first"
+		return status, nil
+	}
+	status.Ready = true
 	status.Available = true
-	status.Config = binding.Config
-	status.ModelID = binding.Model.ID
-	status.ProviderID = binding.Model.ProviderID
-	status.ModelName = binding.Model.ModelName
-	status.EmbeddingProtocol = binding.Model.EmbeddingProtocol
-	status.EmbeddingDimensions = binding.Model.EmbeddingDimensions
+	status.Status = EmbeddingStatusReady
+	status.Code = ""
+	status.ErrorCode = ""
+	status.ErrorMessage = ""
+	status.Message = "embedding is ready"
 	return status, nil
 }
 
 func (s *Service) UpdateEmbeddingConfig(ctx context.Context, req RequestUpdateEmbeddingConfig) (EmbeddingStatus, error) {
-	config, err := s.store.GetEmbeddingConfig(ctx)
+	cfg, err := s.embeddingConfigOrDefault(ctx)
 	if err != nil {
 		return EmbeddingStatus{}, err
 	}
-	oldModelID := strings.TrimSpace(config.EmbeddingModelID)
+	oldModelID := strings.TrimSpace(cfg.EmbeddingModelID)
 	if req.EmbeddingModelID != nil {
-		config.EmbeddingModelID = strings.TrimSpace(*req.EmbeddingModelID)
+		modelID := strings.TrimSpace(*req.EmbeddingModelID)
+		if modelID != "" {
+			model, err := s.store.GetAgentModelProfile(ctx, modelID)
+			if err != nil {
+				return EmbeddingStatus{}, err
+			}
+			if model.ModelType != AgentModelTypeEmbedding {
+				return EmbeddingStatus{}, ErrEmbeddingModelInvalid
+			}
+		}
+		cfg.EmbeddingModelID = modelID
 	}
 	if req.Enabled != nil {
-		config.Enabled = *req.Enabled
+		cfg.Enabled = *req.Enabled
 	}
-	if strings.TrimSpace(config.EmbeddingModelID) == "" {
-		config.Enabled = false
+	if strings.TrimSpace(cfg.EmbeddingModelID) == "" {
+		cfg.Enabled = false
 	}
-	if config.Enabled {
-		model, err := s.store.GetAgentModelProfile(ctx, config.EmbeddingModelID)
-		if err != nil || model.ModelType != AgentModelTypeEmbedding {
-			return EmbeddingStatus{}, ErrEmbeddingModelNotConfigured
+	cfg.LastProbeStatus = EmbeddingStatusModelNotConfigured
+	cfg.LastError = ""
+	if cfg.Enabled {
+		model, err := s.store.GetAgentModelProfile(ctx, cfg.EmbeddingModelID)
+		if err != nil {
+			return EmbeddingStatus{}, err
 		}
-		if !model.Enabled || model.Status != AgentModelStatusAvailable {
-			return EmbeddingStatus{}, ErrEmbeddingModelUnavailable
+		if err := validateEmbeddingModel(model); err != nil {
+			return EmbeddingStatus{}, err
 		}
-		config.LastProbeStatus = AgentModelStatusAvailable
-		config.LastError = ""
-		config.LastProbeAt = time.Now()
+		cfg.LastProbeAt = time.Now()
+		cfg.LastProbeStatus = EmbeddingStatusReady
 	}
-	updated, err := s.store.UpdateEmbeddingConfig(ctx, config)
-	if err != nil {
+	if _, err := s.store.UpsertEmbeddingConfig(ctx, cfg); err != nil {
 		return EmbeddingStatus{}, err
 	}
-	if oldModelID != "" && oldModelID != strings.TrimSpace(updated.EmbeddingModelID) {
-		if err := s.store.MarkEmbeddingAssetsStaleForModelChange(ctx, updated.EmbeddingModelID); err != nil {
+	if oldModelID != "" && oldModelID != strings.TrimSpace(cfg.EmbeddingModelID) {
+		if err := s.store.MarkEmbeddingAssetsStaleForModelChange(ctx, cfg.EmbeddingModelID); err != nil {
 			return EmbeddingStatus{}, err
 		}
 	}
@@ -89,73 +164,114 @@ func (s *Service) UpdateEmbeddingConfig(ctx context.Context, req RequestUpdateEm
 }
 
 func (s *Service) RebuildEmbeddingAssets(ctx context.Context, req RequestRebuildEmbeddingAssets) (EmbeddingRebuildResult, error) {
-	binding, err := s.resolveEmbeddingModel(ctx)
+	model, cfg, err := s.ensureEmbeddingModelReady(ctx)
 	if err != nil {
 		return EmbeddingRebuildResult{}, err
 	}
-	objectTypes := normalizeEmbeddingObjectTypes(req.ObjectTypes)
-	result := EmbeddingRebuildResult{ObjectTypes: objectTypes, UpdatedAt: time.Now()}
 	limit := req.Limit
-	for _, objectType := range objectTypes {
-		switch objectType {
-		case EmbeddingObjectStockProfile:
-			s.rebuildStockProfileEmbeddings(ctx, binding, limit, &result)
-		case EmbeddingObjectNewsEvent:
-			s.rebuildNewsEventEmbeddings(ctx, binding, limit, &result)
-		}
+	if limit <= 0 {
+		limit = 100
 	}
+	if limit > 200 {
+		limit = 200
+	}
+	objectTypes := normalizeEmbeddingObjectTypes(req.ObjectTypes)
+	sources, err := s.collectEmbeddingSources(ctx, objectTypes, limit)
+	if err != nil {
+		return EmbeddingRebuildResult{}, err
+	}
+	result := EmbeddingRebuildResult{
+		Status:      "completed",
+		ObjectTypes: objectTypes,
+		Total:       len(sources),
+		UpdatedAt:   time.Now(),
+	}
+	for _, source := range sources {
+		text := strings.TrimSpace(source.Text)
+		if text == "" {
+			result.Skipped++
+			continue
+		}
+		textHash := hashEmbeddingText(text)
+		if !req.Force {
+			if existing, err := s.store.GetEmbeddingAssetByObject(ctx, source.ObjectType, source.ObjectID, model.ID); err == nil &&
+				existing.Status == EmbeddingAssetStatusReady &&
+				existing.TextHash == textHash &&
+				existing.EmbeddingDimensions == model.EmbeddingDimensions {
+				result.Skipped++
+				continue
+			}
+		}
+		vector, err := s.generateEmbedding(ctx, model, text)
+		if err != nil {
+			result.Failed++
+			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: source.ObjectID, Reason: safelog.Text(err.Error(), 240)})
+			_, _ = s.store.UpsertEmbeddingAsset(ctx, EmbeddingAsset{
+				ObjectType:          source.ObjectType,
+				ObjectID:            source.ObjectID,
+				TextHash:            textHash,
+				TextSummary:         safelog.Text(text, 500),
+				ModelID:             model.ID,
+				ProviderID:          model.ProviderID,
+				EmbeddingProtocol:   model.EmbeddingProtocol,
+				EmbeddingDimensions: model.EmbeddingDimensions,
+				Status:              EmbeddingAssetStatusFailed,
+				ErrorMessage:        safelog.Text(err.Error(), 500),
+			})
+			continue
+		}
+		if err := validateEmbeddingDimensions(model, len(vector)); err != nil {
+			result.Failed++
+			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: source.ObjectID, Reason: err.Error()})
+			continue
+		}
+		asset := EmbeddingAsset{
+			ObjectType:          source.ObjectType,
+			ObjectID:            source.ObjectID,
+			TextHash:            textHash,
+			TextSummary:         safelog.Text(text, 500),
+			ModelID:             model.ID,
+			ProviderID:          model.ProviderID,
+			EmbeddingProtocol:   model.EmbeddingProtocol,
+			EmbeddingDimensions: len(vector),
+			VectorRef:           "emb_" + generateID(),
+			Status:              EmbeddingAssetStatusReady,
+		}
+		if existing, err := s.store.GetEmbeddingAssetByObject(ctx, source.ObjectType, source.ObjectID, model.ID); err == nil && existing.VectorRef != "" {
+			asset.ID = existing.ID
+			asset.VectorRef = existing.VectorRef
+		}
+		if err := s.store.UpsertEmbeddingVector(ctx, asset, vector); err != nil {
+			result.Failed++
+			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: source.ObjectID, Reason: safelog.Text(err.Error(), 240)})
+			continue
+		}
+		if _, err := s.store.UpsertEmbeddingAsset(ctx, asset); err != nil {
+			result.Failed++
+			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: source.ObjectID, Reason: safelog.Text(err.Error(), 240)})
+			continue
+		}
+		result.Succeeded++
+		result.Success++
+	}
+	if result.Failed > 0 && result.Succeeded == 0 {
+		result.Status = "failed"
+	} else if result.Failed > 0 {
+		result.Status = "partial"
+	}
+	cfg.LastProbeAt = time.Now()
+	cfg.LastProbeStatus = result.Status
+	cfg.LastError = ""
+	if result.Failed > 0 {
+		cfg.LastError = fmt.Sprintf("%d embedding assets failed", result.Failed)
+	}
+	_, _ = s.store.UpsertEmbeddingConfig(ctx, cfg)
 	return result, nil
 }
 
-func (s *Service) SemanticSearchStockProfiles(ctx context.Context, req SemanticSearchRequest) ([]SemanticStockProfileResult, error) {
-	queryVector, binding, err := s.embedSemanticSearchQuery(ctx, req.Query)
-	if err != nil {
-		return nil, err
-	}
-	assets, scores, err := s.semanticSearchAssets(ctx, EmbeddingObjectStockProfile, binding, queryVector, req.Limit, req.MinScore)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]SemanticStockProfileResult, 0, len(assets))
-	for _, asset := range assets {
-		profile, err := s.store.GetStockProfile(ctx, asset.ObjectID)
-		if err != nil {
-			continue
-		}
-		out = append(out, SemanticStockProfileResult{
-			Score:   scores[asset.ID],
-			Profile: profile,
-			Asset:   asset,
-		})
-	}
-	return out, nil
-}
-
-func (s *Service) SemanticSearchNewsEvents(ctx context.Context, req SemanticSearchRequest) ([]SemanticNewsEventResult, error) {
-	queryVector, binding, err := s.embedSemanticSearchQuery(ctx, req.Query)
-	if err != nil {
-		return nil, err
-	}
-	assets, scores, err := s.semanticSearchAssets(ctx, EmbeddingObjectNewsEvent, binding, queryVector, req.Limit, req.MinScore)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]SemanticNewsEventResult, 0, len(assets))
-	for _, asset := range assets {
-		event, err := s.store.GetNewsEvent(ctx, asset.ObjectID)
-		if err != nil {
-			continue
-		}
-		out = append(out, SemanticNewsEventResult{
-			Score: scores[asset.ID],
-			Event: event,
-			Asset: asset,
-		})
-	}
-	return out, nil
-}
-
 func (s *Service) ListEmbeddingAssets(ctx context.Context, filter EmbeddingAssetListFilter) ([]EmbeddingAsset, error) {
+	filter.Limit = normalizedOpportunityLimit(filter.Limit)
+	filter.Offset = normalizedOpportunityOffset(filter.Offset)
 	return s.store.ListEmbeddingAssets(ctx, filter)
 }
 
@@ -163,248 +279,288 @@ func (s *Service) CountEmbeddingAssets(ctx context.Context, filter EmbeddingAsse
 	return s.store.CountEmbeddingAssets(ctx, filter)
 }
 
-func (s *Service) resolveEmbeddingModel(ctx context.Context) (embeddingModelBinding, error) {
-	config, err := s.store.GetEmbeddingConfig(ctx)
-	if err != nil {
-		return embeddingModelBinding{}, err
-	}
-	if !config.Enabled || strings.TrimSpace(config.EmbeddingModelID) == "" {
-		return embeddingModelBinding{}, ErrEmbeddingModelNotConfigured
-	}
-	if status := strings.TrimSpace(config.LastProbeStatus); status != "" && status != AgentModelStatusAvailable {
-		return embeddingModelBinding{}, ErrEmbeddingModelUnavailable
-	}
-	model, err := s.store.GetAgentModelProfile(ctx, config.EmbeddingModelID)
-	if err != nil {
-		if errors.Is(err, ErrAgentModelNotFound) {
-			return embeddingModelBinding{}, ErrEmbeddingModelNotConfigured
-		}
-		return embeddingModelBinding{}, err
-	}
-	if model.ModelType != AgentModelTypeEmbedding {
-		return embeddingModelBinding{}, ErrEmbeddingModelNotConfigured
-	}
-	if !model.Enabled || model.Status != AgentModelStatusAvailable {
-		return embeddingModelBinding{}, ErrEmbeddingModelUnavailable
-	}
-	provider, err := s.store.GetAgentProviderProfile(ctx, model.ProviderID)
-	if err != nil {
-		return embeddingModelBinding{}, ErrEmbeddingModelUnavailable
-	}
-	if _, _, err := agentProviderOpenAIConfig(provider); err != nil {
-		return embeddingModelBinding{}, ErrEmbeddingModelUnavailable
-	}
-	return embeddingModelBinding{Config: config, Model: model, Provider: provider}, nil
-}
-
-func (s *Service) embedSemanticSearchQuery(ctx context.Context, query string) ([]float64, embeddingModelBinding, error) {
+func (s *Service) SemanticSearch(ctx context.Context, objectType, query string, limit int) ([]SemanticSearchHit, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
-		return nil, embeddingModelBinding{}, ErrInvalidEmbeddingRequest
+		return nil, ErrInvalidEmbeddingRequest
 	}
-	binding, err := s.resolveEmbeddingModel(ctx)
+	model, _, err := s.ensureEmbeddingModelReady(ctx)
 	if err != nil {
-		return nil, embeddingModelBinding{}, err
+		return nil, err
 	}
-	vector, err := s.generateTextEmbedding(ctx, binding, query)
-	if err != nil {
-		return nil, embeddingModelBinding{}, err
-	}
-	return vector, binding, nil
-}
-
-func (s *Service) semanticSearchAssets(ctx context.Context, objectType string, binding embeddingModelBinding, queryVector []float64, limit int, minScore float64) ([]EmbeddingAsset, map[string]float64, error) {
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 50 {
-		limit = 50
-	}
-	dimensions := len(queryVector)
-	// ponytail: exact scan over 1000 ready vectors is enough for the current personal universe; switch this to DuckDB VSS or paged scans when recall assets grow past that.
-	assets, err := s.store.ListReadyEmbeddingAssetsForSearch(ctx, objectType, binding.Model.ID, dimensions, 1000)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(assets) == 0 {
-		return nil, nil, ErrEmbeddingAssetNotReady
-	}
-	refs := make([]string, 0, len(assets))
-	for _, asset := range assets {
-		refs = append(refs, asset.VectorRef)
-	}
-	vectors, err := s.store.GetEmbeddingVectors(ctx, refs)
-	if err != nil {
-		return nil, nil, err
-	}
-	type scoredAsset struct {
-		asset EmbeddingAsset
-		score float64
-	}
-	scored := make([]scoredAsset, 0, len(assets))
-	for _, asset := range assets {
-		vector := vectors[asset.VectorRef]
-		if len(vector) != dimensions {
-			continue
-		}
-		score := cosineSimilarity(queryVector, vector)
-		if minScore != 0 && score < minScore {
-			continue
-		}
-		scored = append(scored, scoredAsset{asset: asset, score: score})
-	}
-	if len(scored) == 0 {
-		return nil, nil, ErrEmbeddingAssetNotReady
-	}
-	sort.SliceStable(scored, func(i, j int) bool {
-		if scored[i].score == scored[j].score {
-			return scored[i].asset.ObjectID < scored[j].asset.ObjectID
-		}
-		return scored[i].score > scored[j].score
+	ready, err := s.store.CountEmbeddingAssets(ctx, EmbeddingAssetListFilter{
+		ObjectType: objectType,
+		ModelID:    model.ID,
+		Status:     EmbeddingAssetStatusReady,
+		Dimensions: model.EmbeddingDimensions,
 	})
-	if len(scored) > limit {
-		scored = scored[:limit]
-	}
-	out := make([]EmbeddingAsset, 0, len(scored))
-	scores := make(map[string]float64, len(scored))
-	for _, item := range scored {
-		out = append(out, item.asset)
-		scores[item.asset.ID] = item.score
-	}
-	return out, scores, nil
-}
-
-func (s *Service) rebuildStockProfileEmbeddings(ctx context.Context, binding embeddingModelBinding, limit int, result *EmbeddingRebuildResult) {
-	remaining := normalizeEmbeddingRebuildLimit(limit)
-	offset := 0
-	for remaining > 0 {
-		pageLimit := minInt(200, remaining)
-		profiles, err := s.store.ListStockProfiles(ctx, StockProfileListFilter{Limit: pageLimit, Offset: offset})
-		if err != nil {
-			result.Failed++
-			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: EmbeddingObjectStockProfile, Reason: err.Error()})
-			return
-		}
-		if len(profiles) == 0 {
-			return
-		}
-		for _, profile := range profiles {
-			result.Total++
-			if err := s.rebuildOneEmbeddingAsset(ctx, binding, EmbeddingObjectStockProfile, profile.Symbol, stockProfileEmbeddingText(profile)); err != nil {
-				result.Failed++
-				result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: profile.Symbol, Reason: safelog.Text(err.Error(), 240)})
-				continue
-			}
-			result.Success++
-		}
-		offset += len(profiles)
-		remaining -= len(profiles)
-		if len(profiles) < pageLimit {
-			return
-		}
-	}
-}
-
-func (s *Service) rebuildNewsEventEmbeddings(ctx context.Context, binding embeddingModelBinding, limit int, result *EmbeddingRebuildResult) {
-	remaining := normalizeEmbeddingRebuildLimit(limit)
-	offset := 0
-	for remaining > 0 {
-		pageLimit := minInt(200, remaining)
-		events, err := s.store.ListNewsEvents(ctx, NewsEventListFilter{Limit: pageLimit, Offset: offset})
-		if err != nil {
-			result.Failed++
-			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: EmbeddingObjectNewsEvent, Reason: err.Error()})
-			return
-		}
-		if len(events) == 0 {
-			return
-		}
-		for _, event := range events {
-			result.Total++
-			if err := s.rebuildOneEmbeddingAsset(ctx, binding, EmbeddingObjectNewsEvent, event.ID, newsEventEmbeddingText(event)); err != nil {
-				result.Failed++
-				result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: event.ID, Reason: safelog.Text(err.Error(), 240)})
-				continue
-			}
-			result.Success++
-		}
-		offset += len(events)
-		remaining -= len(events)
-		if len(events) < pageLimit {
-			return
-		}
-	}
-}
-
-func (s *Service) rebuildOneEmbeddingAsset(ctx context.Context, binding embeddingModelBinding, objectType, objectID, text string) error {
-	text = trimEmbeddingInput(text)
-	if strings.TrimSpace(text) == "" {
-		return ErrInvalidEmbeddingRequest
-	}
-	vector, err := s.generateTextEmbedding(ctx, binding, text)
 	if err != nil {
-		asset := EmbeddingAsset{
-			ObjectType:          objectType,
-			ObjectID:            objectID,
-			TextHash:            embeddingTextHash(text),
-			TextSummary:         safelog.Text(text, 500),
-			ModelID:             binding.Model.ID,
-			ProviderID:          binding.Model.ProviderID,
-			EmbeddingProtocol:   binding.Model.EmbeddingProtocol,
-			EmbeddingDimensions: maxInt(binding.Model.EmbeddingDimensions, len(vector)),
-			Status:              EmbeddingAssetStatusFailed,
-			ErrorMessage:        safelog.Text(err.Error(), 500),
+		return nil, err
+	}
+	if ready == 0 {
+		return nil, ErrEmbeddingAssetNotReady
+	}
+	vector, err := s.generateEmbedding(ctx, model, query)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateEmbeddingDimensions(model, len(vector)); err != nil {
+		return nil, err
+	}
+	hits, err := s.store.SearchEmbeddingVectors(ctx, model.ID, objectType, vector, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SemanticSearchHit, 0, len(hits))
+	for _, hit := range hits {
+		asset, err := s.store.GetEmbeddingAssetByVectorRef(ctx, hit.VectorRef)
+		if err != nil ||
+			asset.Status != EmbeddingAssetStatusReady ||
+			asset.ModelID != model.ID ||
+			asset.EmbeddingDimensions != len(vector) {
+			continue
 		}
-		_, _ = s.store.UpsertEmbeddingAsset(ctx, asset)
-		return err
+		item := SemanticSearchHit{Asset: asset, Score: hit.Score}
+		switch asset.ObjectType {
+		case EmbeddingObjectStockProfile:
+			if profile, err := s.store.GetStockProfile(ctx, asset.ObjectID); err == nil {
+				item.Profile = &profile
+			}
+		case EmbeddingObjectNewsEvent:
+			if event, err := s.store.GetNewsEvent(ctx, asset.ObjectID); err == nil {
+				item.NewsEvent = &event
+			}
+		}
+		out = append(out, item)
 	}
-	dimensions := len(vector)
-	asset := EmbeddingAsset{
-		ObjectType:          objectType,
-		ObjectID:            objectID,
-		TextHash:            embeddingTextHash(text),
-		TextSummary:         safelog.Text(text, 500),
-		ModelID:             binding.Model.ID,
-		ProviderID:          binding.Model.ProviderID,
-		EmbeddingProtocol:   binding.Model.EmbeddingProtocol,
-		EmbeddingDimensions: dimensions,
-		VectorRef:           generateID(),
-		Status:              EmbeddingAssetStatusReady,
+	if len(out) == 0 {
+		return nil, ErrEmbeddingAssetNotReady
 	}
-	if err := s.store.UpsertEmbeddingVector(ctx, asset.VectorRef, binding.Model.ID, dimensions, vector); err != nil {
-		return err
-	}
-	if err := s.store.MarkEmbeddingObjectAssetsStaleExcept(ctx, objectType, objectID, binding.Model.ID, dimensions); err != nil {
-		return err
-	}
-	_, err = s.store.UpsertEmbeddingAsset(ctx, asset)
-	return err
+	return out, nil
 }
 
-func (s *Service) generateTextEmbedding(ctx context.Context, binding embeddingModelBinding, text string) ([]float64, error) {
-	baseURL, apiKey, err := agentProviderOpenAIConfig(binding.Provider)
+func (s *Service) SemanticSearchStockProfiles(ctx context.Context, req SemanticSearchRequest) ([]SemanticStockProfileResult, error) {
+	hits, err := s.SemanticSearch(ctx, EmbeddingObjectStockProfile, req.Query, req.Limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SemanticStockProfileResult, 0, len(hits))
+	for _, hit := range hits {
+		if req.MinScore != 0 && hit.Score < req.MinScore {
+			continue
+		}
+		if hit.Profile == nil {
+			continue
+		}
+		out = append(out, SemanticStockProfileResult{Score: hit.Score, Profile: *hit.Profile, Asset: hit.Asset})
+	}
+	return out, nil
+}
+
+func (s *Service) SemanticSearchNewsEvents(ctx context.Context, req SemanticSearchRequest) ([]SemanticNewsEventResult, error) {
+	hits, err := s.SemanticSearch(ctx, EmbeddingObjectNewsEvent, req.Query, req.Limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SemanticNewsEventResult, 0, len(hits))
+	for _, hit := range hits {
+		if req.MinScore != 0 && hit.Score < req.MinScore {
+			continue
+		}
+		if hit.NewsEvent == nil {
+			continue
+		}
+		out = append(out, SemanticNewsEventResult{Score: hit.Score, Event: *hit.NewsEvent, Asset: hit.Asset})
+	}
+	return out, nil
+}
+
+func (s *Service) embeddingConfigOrDefault(ctx context.Context) (EmbeddingConfig, error) {
+	cfg, err := s.store.GetEmbeddingConfig(ctx)
+	if err == nil {
+		return cfg, nil
+	}
+	if !errors.Is(err, ErrEmbeddingConfigNotFound) {
+		return EmbeddingConfig{}, err
+	}
+	return s.store.UpsertEmbeddingConfig(ctx, EmbeddingConfig{
+		ID:              EmbeddingConfigIDDefault,
+		Enabled:         false,
+		LastProbeStatus: EmbeddingStatusModelNotConfigured,
+	})
+}
+
+func (s *Service) ensureEmbeddingModelReady(ctx context.Context) (AgentModelProfile, EmbeddingConfig, error) {
+	cfg, err := s.embeddingConfigOrDefault(ctx)
+	if err != nil {
+		return AgentModelProfile{}, EmbeddingConfig{}, err
+	}
+	if strings.TrimSpace(cfg.EmbeddingModelID) == "" {
+		return AgentModelProfile{}, cfg, ErrEmbeddingModelNotConfigured
+	}
+	if !cfg.Enabled {
+		return AgentModelProfile{}, cfg, ErrEmbeddingModelUnavailable
+	}
+	model, err := s.store.GetAgentModelProfile(ctx, cfg.EmbeddingModelID)
+	if err != nil {
+		return AgentModelProfile{}, cfg, ErrEmbeddingModelUnavailable
+	}
+	if err := validateEmbeddingModel(model); err != nil {
+		return AgentModelProfile{}, cfg, err
+	}
+	return model, cfg, nil
+}
+
+func validateEmbeddingModel(model AgentModelProfile) error {
+	if model.ModelType != AgentModelTypeEmbedding {
+		return ErrEmbeddingModelInvalid
+	}
+	if !model.Enabled || model.Status != AgentModelStatusAvailable {
+		return ErrEmbeddingModelUnavailable
+	}
+	if model.EmbeddingDimensions <= 0 {
+		return ErrEmbeddingDimensionsMismatch
+	}
+	return nil
+}
+
+func validateEmbeddingDimensions(model AgentModelProfile, got int) error {
+	if model.EmbeddingDimensions > 0 && got != model.EmbeddingDimensions {
+		return ErrEmbeddingDimensionsMismatch
+	}
+	if got <= 0 {
+		return ErrEmbeddingDimensionsMismatch
+	}
+	return nil
+}
+
+func normalizeEmbeddingObjectTypes(values []string) []string {
+	if len(values) == 0 {
+		return []string{EmbeddingObjectStockProfile, EmbeddingObjectNewsEvent, EmbeddingObjectOpportunity}
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		switch value {
+		case EmbeddingObjectStockProfile, EmbeddingObjectNewsEvent, EmbeddingObjectOpportunity:
+			if !seen[value] {
+				seen[value] = true
+				out = append(out, value)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return []string{EmbeddingObjectStockProfile, EmbeddingObjectNewsEvent, EmbeddingObjectOpportunity}
+	}
+	return out
+}
+
+func (s *Service) collectEmbeddingSources(ctx context.Context, objectTypes []string, limit int) ([]embeddingAssetSource, error) {
+	out := make([]embeddingAssetSource, 0)
+	for _, objectType := range objectTypes {
+		switch objectType {
+		case EmbeddingObjectStockProfile:
+			items, err := s.store.ListStockProfiles(ctx, StockProfileListFilter{Limit: limit})
+			if err != nil {
+				return nil, err
+			}
+			for _, item := range items {
+				out = append(out, embeddingAssetSource{ObjectType: objectType, ObjectID: item.Symbol, Text: stockProfileEmbeddingText(item)})
+			}
+		case EmbeddingObjectNewsEvent:
+			items, err := s.store.ListNewsEvents(ctx, NewsEventListFilter{Limit: limit})
+			if err != nil {
+				return nil, err
+			}
+			for _, item := range items {
+				out = append(out, embeddingAssetSource{ObjectType: objectType, ObjectID: item.ID, Text: newsEventEmbeddingText(item)})
+			}
+		case EmbeddingObjectOpportunity:
+			items, err := s.store.ListOpportunities(ctx, OpportunityListFilter{Limit: limit})
+			if err != nil {
+				return nil, err
+			}
+			for _, item := range items {
+				out = append(out, embeddingAssetSource{ObjectType: objectType, ObjectID: item.ID, Text: item.Title + "\n" + item.UserThesis})
+			}
+		}
+	}
+	return out, nil
+}
+
+func stockProfileEmbeddingText(item StockProfile) string {
+	parts := []string{
+		item.Symbol,
+		item.Market,
+		item.InstrumentType,
+		item.Name,
+		item.Industry,
+		strings.Join(item.Sectors, " "),
+		strings.Join(item.Concepts, " "),
+		strings.Join(item.Tags, " "),
+		item.BusinessSummary,
+		item.BusinessSummaryZh,
+		item.BusinessSummaryEn,
+		strings.Join(item.KeywordsZh, " "),
+		strings.Join(item.KeywordsEn, " "),
+		strings.Join(item.BusinessLinesZh, " "),
+		strings.Join(item.BusinessLinesEn, " "),
+		item.Theme,
+		item.TrackingIndex,
+		item.ConstituentHint,
+		item.ProfileText,
+		item.ProfileTextZh,
+		item.ProfileTextEn,
+	}
+	return strings.Join(nonEmptyStrings(parts), "\n")
+}
+
+func newsEventEmbeddingText(item NewsEvent) string {
+	return strings.Join(nonEmptyStrings([]string{item.Source, item.Title, item.Summary, item.Content, item.QualityStatus}), "\n")
+}
+
+func hashEmbeddingText(text string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(text)))
+	return hex.EncodeToString(sum[:])
+}
+
+func nonEmptyStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if text := strings.TrimSpace(value); text != "" {
+			out = append(out, text)
+		}
+	}
+	return out
+}
+
+func (s *Service) generateEmbedding(ctx context.Context, model AgentModelProfile, input string) ([]float64, error) {
+	provider, err := s.store.GetAgentProviderProfile(ctx, model.ProviderID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrEmbeddingModelUnavailable, safelog.Text(err.Error(), 300))
+	}
+	if isDefaultCodexCLIProvider(provider) {
+		return nil, ErrEmbeddingModelUnavailable
+	}
+	baseURL, apiKey, err := agentProviderOpenAIConfig(provider)
 	if err != nil {
 		return nil, ErrEmbeddingModelUnavailable
 	}
 	body := map[string]any{}
 	endpoint := "/embeddings"
-	switch binding.Model.EmbeddingProtocol {
+	switch model.EmbeddingProtocol {
 	case AgentEmbeddingProtocolVolcengineMultimodal:
 		body = map[string]any{
-			"model": binding.Model.ModelName,
-			"input": []map[string]string{
-				{"type": "text", "text": text},
-			},
+			"model": model.ModelName,
+			"input": []map[string]string{{"type": "text", "text": safelog.Text(input, 12000)}},
 		}
 		endpoint = "/embeddings/multimodal"
 	default:
 		body = map[string]any{
-			"model":           binding.Model.ModelName,
-			"input":           text,
-			"encoding_format": "float",
-		}
-		if format := strings.TrimSpace(binding.Model.EncodingFormat); format != "" {
-			body["encoding_format"] = format
+			"model":           model.ModelName,
+			"input":           safelog.Text(input, 12000),
+			"encoding_format": firstNonEmptyOpportunity(model.EncodingFormat, "float"),
 		}
 	}
 	payload, _ := json.Marshal(body)
@@ -415,7 +571,6 @@ func (s *Service) generateTextEmbedding(ctx context.Context, binding embeddingMo
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-
 	resp, err := s.agentHTTPClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrEmbeddingModelUnavailable, safelog.Text(err.Error(), 600))
@@ -423,7 +578,7 @@ func (s *Service) generateTextEmbedding(ctx context.Context, binding embeddingMo
 	defer resp.Body.Close()
 	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, openAIProbeMaxBodyBytes))
 	if readErr != nil {
-		return nil, readErr
+		return nil, fmt.Errorf("%w: %s", ErrEmbeddingModelUnavailable, safelog.Text(readErr.Error(), 600))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("%w: %s", ErrEmbeddingModelUnavailable, safelog.Text(string(respBody), 600))
@@ -435,9 +590,6 @@ func (s *Service) generateTextEmbedding(ctx context.Context, binding embeddingMo
 	vector, ok := embeddingVectorFromRaw(raw)
 	if !ok {
 		return nil, fmt.Errorf("%w: embedding response vector is unreadable", ErrEmbeddingModelUnavailable)
-	}
-	if binding.Model.EmbeddingDimensions > 0 && binding.Model.EmbeddingDimensions != len(vector) {
-		return nil, fmt.Errorf("%w: embedding dimension mismatch: got %d want %d", ErrEmbeddingModelUnavailable, len(vector), binding.Model.EmbeddingDimensions)
 	}
 	return vector, nil
 }
@@ -461,141 +613,21 @@ func embeddingVectorFromRaw(raw json.RawMessage) ([]float64, bool) {
 	}
 	out := make([]float64, 0, len(decoded)/4)
 	for i := 0; i < len(decoded); i += 4 {
-		out = append(out, float64(math.Float32frombits(binary.LittleEndian.Uint32(decoded[i:i+4]))))
+		bits := binary.LittleEndian.Uint32(decoded[i : i+4])
+		out = append(out, float64(math.Float32frombits(bits)))
 	}
 	return out, len(out) > 0
-}
-
-func normalizeEmbeddingObjectTypes(values []string) []string {
-	if len(values) == 0 {
-		return []string{EmbeddingObjectStockProfile, EmbeddingObjectNewsEvent}
-	}
-	seen := map[string]bool{}
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if (value == EmbeddingObjectStockProfile || value == EmbeddingObjectNewsEvent) && !seen[value] {
-			seen[value] = true
-			out = append(out, value)
-		}
-	}
-	if len(out) == 0 {
-		return []string{EmbeddingObjectStockProfile, EmbeddingObjectNewsEvent}
-	}
-	return out
-}
-
-func normalizeEmbeddingRebuildLimit(limit int) int {
-	if limit <= 0 {
-		return 1000000
-	}
-	if limit > 1000000 {
-		return 1000000
-	}
-	return limit
-}
-
-func trimEmbeddingInput(text string) string {
-	text = strings.TrimSpace(text)
-	runes := []rune(text)
-	if len(runes) > 12000 {
-		return string(runes[:12000])
-	}
-	return text
-}
-
-func stockProfileEmbeddingText(profile StockProfile) string {
-	parts := []string{
-		profile.Symbol,
-		profile.Market,
-		profile.InstrumentType,
-		profile.Name,
-		profile.Industry,
-		strings.Join(profile.Sectors, " "),
-		strings.Join(profile.Concepts, " "),
-		strings.Join(profile.Tags, " "),
-		profile.BusinessSummary,
-		profile.BusinessSummaryZh,
-		profile.BusinessSummaryEn,
-		strings.Join(profile.KeywordsZh, " "),
-		strings.Join(profile.KeywordsEn, " "),
-		strings.Join(profile.BusinessLinesZh, " "),
-		strings.Join(profile.BusinessLinesEn, " "),
-		profile.Theme,
-		profile.TrackingIndex,
-		profile.ConstituentHint,
-		profile.ProfileText,
-		profile.ProfileTextZh,
-		profile.ProfileTextEn,
-	}
-	return strings.Join(nonEmptyStrings(parts), "\n")
-}
-
-func newsEventEmbeddingText(event NewsEvent) string {
-	parts := []string{
-		event.Source,
-		event.Title,
-		event.Summary,
-		event.Content,
-		event.QualityStatus,
-	}
-	return strings.Join(nonEmptyStrings(parts), "\n")
-}
-
-func nonEmptyStrings(values []string) []string {
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		if text := strings.TrimSpace(value); text != "" {
-			out = append(out, text)
-		}
-	}
-	return out
-}
-
-func embeddingTextHash(text string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(text)))
-	return hex.EncodeToString(sum[:])
-}
-
-func cosineSimilarity(a, b []float64) float64 {
-	if len(a) == 0 || len(a) != len(b) {
-		return 0
-	}
-	var dot, normA, normB float64
-	for i := range a {
-		dot += a[i] * b[i]
-		normA += a[i] * a[i]
-		normB += b[i] * b[i]
-	}
-	if normA == 0 || normB == 0 {
-		return 0
-	}
-	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
 func embeddingErrorCode(err error) string {
 	switch {
 	case errors.Is(err, ErrEmbeddingModelNotConfigured):
-		return ErrEmbeddingModelNotConfigured.Error()
-	case errors.Is(err, ErrEmbeddingModelUnavailable):
-		return ErrEmbeddingModelUnavailable.Error()
+		return EmbeddingStatusModelNotConfigured
+	case errors.Is(err, ErrEmbeddingModelUnavailable), errors.Is(err, ErrEmbeddingModelInvalid), errors.Is(err, ErrEmbeddingDimensionsMismatch):
+		return EmbeddingStatusModelUnavailable
 	case errors.Is(err, ErrEmbeddingAssetNotReady):
-		return ErrEmbeddingAssetNotReady.Error()
+		return EmbeddingStatusAssetNotReady
 	default:
 		return ""
 	}
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

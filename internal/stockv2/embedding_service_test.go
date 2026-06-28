@@ -10,29 +10,52 @@ import (
 	"testing"
 )
 
-func TestEmbeddingEntrypointsRequireConfiguredAvailableModel(t *testing.T) {
-	svc, cleanup := newStrategyTestService(t)
-	defer cleanup()
+func TestEmbeddingEntrypointsRequireConfiguredAvailableEmbeddingModel(t *testing.T) {
+	store := newTestStore(t)
+	svc := NewService(store, nil, nil)
+	defer svc.Close()
 	ctx := context.Background()
 
+	status, err := svc.GetEmbeddingStatus(ctx)
+	if err != nil {
+		t.Fatalf("get embedding status: %v", err)
+	}
+	if status.Ready || status.Code != EmbeddingStatusModelNotConfigured {
+		t.Fatalf("status=%+v, want model_not_configured", status)
+	}
 	if _, err := svc.RebuildEmbeddingAssets(ctx, RequestRebuildEmbeddingAssets{}); !errors.Is(err, ErrEmbeddingModelNotConfigured) {
-		t.Fatalf("rebuild without config error = %v, want ErrEmbeddingModelNotConfigured", err)
+		t.Fatalf("rebuild without config error=%v, want ErrEmbeddingModelNotConfigured", err)
+	}
+	if _, err := svc.SemanticSearch(ctx, EmbeddingObjectStockProfile, "AI model", 5); !errors.Is(err, ErrEmbeddingModelNotConfigured) {
+		t.Fatalf("semantic search without model error=%v, want ErrEmbeddingModelNotConfigured", err)
 	}
 	if _, err := svc.SemanticSearchStockProfiles(ctx, SemanticSearchRequest{Query: "AI"}); !errors.Is(err, ErrEmbeddingModelNotConfigured) {
-		t.Fatalf("semantic search without config error = %v, want ErrEmbeddingModelNotConfigured", err)
+		t.Fatalf("semantic stock search without config error=%v, want ErrEmbeddingModelNotConfigured", err)
 	}
 
-	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
-		ProviderType: AgentProviderTypeOpenAI,
-		BaseURL:      "https://example.test/v1",
-		APIKey:       "secret-test-token",
+	provider := seedEmbeddingProvider(t, svc, ctx)
+	chatModel, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID: provider.ID,
+		ModelName:  "chat-model",
+		Enabled:    true,
+		Status:     AgentModelStatusAvailable,
+		ModelType:  AgentModelTypeChat,
 	})
 	if err != nil {
-		t.Fatalf("create provider: %v", err)
+		t.Fatalf("create chat model: %v", err)
 	}
-	model, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+	enabled := true
+	chatModelID := chatModel.ID
+	if _, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{
+		EmbeddingModelID: &chatModelID,
+		Enabled:          &enabled,
+	}); !errors.Is(err, ErrEmbeddingModelInvalid) {
+		t.Fatalf("bind chat model error=%v, want ErrEmbeddingModelInvalid", err)
+	}
+
+	disabledModel, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
 		ProviderID:          provider.ID,
-		ModelName:           "embed-disabled",
+		ModelName:           "disabled-embedding",
 		Enabled:             false,
 		Status:              AgentModelStatusAvailable,
 		ModelType:           AgentModelTypeEmbedding,
@@ -41,12 +64,31 @@ func TestEmbeddingEntrypointsRequireConfiguredAvailableModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create disabled embedding model: %v", err)
 	}
-	enabled := true
+	disabledModelID := disabledModel.ID
 	if _, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{
-		EmbeddingModelID: &model.ID,
+		EmbeddingModelID: &disabledModelID,
 		Enabled:          &enabled,
 	}); !errors.Is(err, ErrEmbeddingModelUnavailable) {
-		t.Fatalf("bind disabled model error = %v, want ErrEmbeddingModelUnavailable", err)
+		t.Fatalf("bind disabled embedding model error=%v, want ErrEmbeddingModelUnavailable", err)
+	}
+
+	zeroDimModel, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID:          provider.ID,
+		ModelName:           "zero-dim-embedding",
+		Enabled:             true,
+		Status:              AgentModelStatusAvailable,
+		ModelType:           AgentModelTypeEmbedding,
+		EmbeddingDimensions: 0,
+	})
+	if err != nil {
+		t.Fatalf("create zero dim embedding model: %v", err)
+	}
+	zeroDimModelID := zeroDimModel.ID
+	if _, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{
+		EmbeddingModelID: &zeroDimModelID,
+		Enabled:          &enabled,
+	}); !errors.Is(err, ErrEmbeddingDimensionsMismatch) {
+		t.Fatalf("bind zero-dim embedding model error=%v, want ErrEmbeddingDimensionsMismatch", err)
 	}
 }
 
@@ -63,8 +105,8 @@ func TestEmbeddingRebuildAndSemanticSearchUseRealVectors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rebuild embeddings: %v", err)
 	}
-	if result.Success != 2 || result.Failed != 0 {
-		t.Fatalf("rebuild result = %#v, want 2 success", result)
+	if result.Succeeded != 2 || result.Success != 2 || result.Failed != 0 {
+		t.Fatalf("rebuild result=%#v, want 2 success", result)
 	}
 
 	items, err := svc.SemanticSearchStockProfiles(ctx, SemanticSearchRequest{Query: "动力电池机会", Limit: 1})
@@ -72,9 +114,13 @@ func TestEmbeddingRebuildAndSemanticSearchUseRealVectors(t *testing.T) {
 		t.Fatalf("semantic search: %v", err)
 	}
 	if len(items) != 1 || items[0].Profile.Symbol != "300750" {
-		t.Fatalf("semantic results = %#v, want 300750 first", items)
+		t.Fatalf("semantic results=%#v, want 300750 first", items)
 	}
-	if items[0].Asset.ModelID == "" || items[0].Asset.ProviderID == "" || items[0].Asset.EmbeddingDimensions != 3 || items[0].Asset.TextHash == "" || items[0].Asset.VectorRef == "" {
+	if items[0].Asset.ModelID == "" ||
+		items[0].Asset.ProviderID == "" ||
+		items[0].Asset.EmbeddingDimensions != 3 ||
+		items[0].Asset.TextHash == "" ||
+		items[0].Asset.VectorRef == "" {
 		t.Fatalf("embedding asset metadata incomplete: %#v", items[0].Asset)
 	}
 }
@@ -101,18 +147,19 @@ func TestEmbeddingModelSwitchMarksOldVectorsStale(t *testing.T) {
 		t.Fatalf("create model2: %v", err)
 	}
 	enabled := true
-	if _, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{EmbeddingModelID: &model2.ID, Enabled: &enabled}); err != nil {
+	model2ID := model2.ID
+	if _, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{EmbeddingModelID: &model2ID, Enabled: &enabled}); err != nil {
 		t.Fatalf("switch embedding config: %v", err)
 	}
 	status, err := svc.GetEmbeddingStatus(ctx)
 	if err != nil {
 		t.Fatalf("embedding status: %v", err)
 	}
-	if status.StaleAssetCount == 0 {
-		t.Fatalf("stale count = %d, want old vectors marked stale", status.StaleAssetCount)
+	if status.Code != EmbeddingStatusAssetNotReady || status.StaleAssetCount == 0 {
+		t.Fatalf("status=%+v, want asset_not_ready with stale old vectors", status)
 	}
 	if _, err := svc.SemanticSearchStockProfiles(ctx, SemanticSearchRequest{Query: "动力电池"}); !errors.Is(err, ErrEmbeddingAssetNotReady) {
-		t.Fatalf("semantic search after model switch error = %v, want ErrEmbeddingAssetNotReady", err)
+		t.Fatalf("semantic search after model switch error=%v, want ErrEmbeddingAssetNotReady", err)
 	}
 }
 
@@ -173,7 +220,7 @@ func newEmbeddingTestService(t *testing.T) (*Service, func()) {
 	svc, cleanup := newStrategyTestService(t)
 	svc.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if got, want := req.Header.Get("Authorization"), "Bearer secret-test-token"; got != want {
-			t.Fatalf("authorization header = %q, want %q", got, want)
+			t.Fatalf("authorization header=%q, want %q", got, want)
 		}
 		if req.URL.Path != "/v1/embeddings" {
 			t.Fatalf("unexpected embedding path: %s", req.URL.Path)
@@ -206,6 +253,7 @@ func configureEmbeddingModel(t *testing.T, svc *Service, modelName string) Agent
 	ctx := context.Background()
 	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
 		ProviderType: AgentProviderTypeOpenAI,
+		Name:         "embedding-provider",
 		BaseURL:      "https://example.test/v1",
 		APIKey:       "secret-test-token",
 	})
@@ -223,14 +271,29 @@ func configureEmbeddingModel(t *testing.T, svc *Service, modelName string) Agent
 	if err != nil {
 		t.Fatalf("create embedding model: %v", err)
 	}
+	modelID := model.ID
 	enabled := true
 	if _, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{
-		EmbeddingModelID: &model.ID,
+		EmbeddingModelID: &modelID,
 		Enabled:          &enabled,
 	}); err != nil {
 		t.Fatalf("bind embedding model: %v", err)
 	}
 	return model
+}
+
+func seedEmbeddingProvider(t *testing.T, svc *Service, ctx context.Context) AgentProviderProfile {
+	t.Helper()
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeOpenAI,
+		Name:         "embedding-provider",
+		BaseURL:      "https://embedding.test/v1",
+		APIKey:       "test-key",
+	})
+	if err != nil {
+		t.Fatalf("create embedding provider: %v", err)
+	}
+	return provider
 }
 
 func upsertEmbeddingTestProfile(t *testing.T, svc *Service, symbol, name, text string) {

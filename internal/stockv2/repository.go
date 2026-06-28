@@ -763,6 +763,152 @@ CREATE TABLE IF NOT EXISTS stockv2_news_source_states (
     updated_at DATETIME NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_source_states_status ON stockv2_news_source_states(status);
+
+-- ===== Opportunity Discovery:主题机会发现对象、运行留痕和 embedding 元数据 =====
+CREATE TABLE IF NOT EXISTS stockv2_opportunities (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    user_thesis TEXT NOT NULL,
+    market_scope TEXT NOT NULL,
+    instrument_scope TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_by TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunities_status ON stockv2_opportunities(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunities_updated_at ON stockv2_opportunities(updated_at);
+CREATE TABLE IF NOT EXISTS stockv2_opportunity_discovery_runs (
+    id TEXT PRIMARY KEY,
+    opportunity_id TEXT NOT NULL,
+    agent_run_id TEXT,
+    status TEXT NOT NULL,
+    current_step_id TEXT,
+    step_total INTEGER NOT NULL DEFAULT 0,
+    step_completed INTEGER NOT NULL DEFAULT 0,
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    evidence_count INTEGER NOT NULL DEFAULT 0,
+    external_source_count INTEGER NOT NULL DEFAULT 0,
+    started_at DATETIME,
+    finished_at DATETIME,
+    error_message TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    FOREIGN KEY (opportunity_id) REFERENCES stockv2_opportunities(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_runs_opportunity ON stockv2_opportunity_discovery_runs(opportunity_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_runs_agent ON stockv2_opportunity_discovery_runs(agent_run_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_runs_status ON stockv2_opportunity_discovery_runs(status);
+CREATE TABLE IF NOT EXISTS stockv2_opportunity_discovery_steps (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    step_key TEXT NOT NULL,
+    step_title TEXT NOT NULL,
+    status TEXT NOT NULL,
+    order_index INTEGER NOT NULL,
+    input_summary TEXT,
+    output_summary TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    started_at DATETIME,
+    finished_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES stockv2_opportunity_discovery_runs(id) ON DELETE CASCADE,
+    UNIQUE(run_id, step_key)
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_steps_run ON stockv2_opportunity_discovery_steps(run_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_steps_status ON stockv2_opportunity_discovery_steps(status);
+CREATE TABLE IF NOT EXISTS stockv2_opportunity_candidates (
+    id TEXT PRIMARY KEY,
+    opportunity_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    market TEXT,
+    instrument_type TEXT NOT NULL,
+    name TEXT,
+    relation_type TEXT NOT NULL,
+    relevance_score REAL NOT NULL DEFAULT 0,
+    evidence_score REAL NOT NULL DEFAULT 0,
+    market_risk_score REAL NOT NULL DEFAULT 0,
+    confidence REAL NOT NULL DEFAULT 0,
+    rank INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    reason TEXT,
+    risk_summary TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    FOREIGN KEY (opportunity_id) REFERENCES stockv2_opportunities(id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id) REFERENCES stockv2_opportunity_discovery_runs(id) ON DELETE CASCADE,
+    UNIQUE(run_id, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_candidates_opportunity ON stockv2_opportunity_candidates(opportunity_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_candidates_run ON stockv2_opportunity_candidates(run_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_candidates_status ON stockv2_opportunity_candidates(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_candidates_symbol ON stockv2_opportunity_candidates(symbol);
+CREATE TABLE IF NOT EXISTS stockv2_opportunity_evidence (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    candidate_id TEXT,
+    source_type TEXT NOT NULL,
+    source_ref TEXT,
+    title TEXT NOT NULL,
+    summary TEXT,
+    url TEXT,
+    publisher TEXT,
+    published_at DATETIME,
+    confidence REAL NOT NULL DEFAULT 0,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES stockv2_opportunity_discovery_runs(id) ON DELETE CASCADE,
+    FOREIGN KEY (candidate_id) REFERENCES stockv2_opportunity_candidates(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_evidence_run ON stockv2_opportunity_evidence(run_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_evidence_candidate ON stockv2_opportunity_evidence(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_evidence_source_type ON stockv2_opportunity_evidence(source_type);
+CREATE TABLE IF NOT EXISTS stockv2_opportunity_results (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    summary TEXT,
+    conclusion TEXT,
+    recommended_next_action TEXT,
+    raw_result_json TEXT NOT NULL DEFAULT '{}',
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES stockv2_opportunity_discovery_runs(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS stockv2_embedding_config (
+    id TEXT PRIMARY KEY,
+    embedding_model_id TEXT,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    last_probe_at DATETIME,
+    last_probe_status TEXT,
+    last_error TEXT,
+    updated_at DATETIME NOT NULL
+);
+INSERT OR IGNORE INTO stockv2_embedding_config
+    (id, embedding_model_id, enabled, last_probe_status, updated_at)
+VALUES
+    ('stockv2-embedding-config', '', 0, 'embedding_model_not_configured', datetime('now'));
+CREATE TABLE IF NOT EXISTS stockv2_embedding_assets (
+    id TEXT PRIMARY KEY,
+    object_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    text_hash TEXT NOT NULL,
+    text_summary TEXT,
+    model_id TEXT NOT NULL,
+    provider_id TEXT,
+    embedding_protocol TEXT,
+    embedding_dimensions INTEGER NOT NULL DEFAULT 0,
+    vector_ref TEXT,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    UNIQUE(object_type, object_id, model_id)
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_object ON stockv2_embedding_assets(object_type, object_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_model ON stockv2_embedding_assets(model_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_status ON stockv2_embedding_assets(status);
 -- 内置监控任务默认配置(全部默认关闭,用户显式开启后才会周期执行)。
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('latest_quote_refresh', 1, 30, 'normal', 0, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('data_strategy_monitor', 0, 600, 'normal', 1800, 0, 0, datetime('now'));

@@ -304,15 +304,19 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_monitor_status ON stockv2_news_link_candidates(monitor_status);
 
 		CREATE TABLE IF NOT EXISTS stockv2_embedding_vectors (
-			vector_ref VARCHAR PRIMARY KEY,
+			vector_ref VARCHAR NOT NULL,
+			dim_index INTEGER NOT NULL,
+			value DOUBLE NOT NULL,
 			model_id VARCHAR NOT NULL,
-			dimensions INTEGER NOT NULL,
-			vector_json VARCHAR NOT NULL,
-			created_at TIMESTAMP NOT NULL,
-			updated_at TIMESTAMP NOT NULL
+			object_type VARCHAR NOT NULL,
+			object_id VARCHAR NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			PRIMARY KEY(vector_ref, dim_index)
 		);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_vectors_model_dims
-			ON stockv2_embedding_vectors(model_id, dimensions);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_vectors_model_object
+			ON stockv2_embedding_vectors(model_id, object_type, object_id);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_vectors_ref
+			ON stockv2_embedding_vectors(vector_ref);
 	`)
 	if err != nil {
 		return fmt.Errorf("init duckdb daily bars schema: %w", err)
