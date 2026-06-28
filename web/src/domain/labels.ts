@@ -1075,3 +1075,198 @@ export function stockV2GuardrailsStatusTone(status?: string): "good" | "warn" | 
     default: return "neutral";
   }
 }
+
+// ========== Opportunity Discovery (主题机会发现) ==========
+
+export function stockV2OpportunityStatusLabel(status?: string): string {
+  switch (status) {
+    case "draft": return "草稿";
+    case "researching": return "研究中";
+    case "completed": return "已完成";
+    case "closed": return "已关闭";
+    default: return status || "未知";
+  }
+}
+
+export function stockV2OpportunityStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "completed": return "good";
+    case "researching": return "warn";
+    case "draft": return "neutral";
+    case "closed": return "neutral";
+    default: return "neutral";
+  }
+}
+
+export function stockV2OpportunityMarketScopeLabel(scope?: string): string {
+  switch (scope) {
+    case "a_share": return "A股";
+    case "hk": return "港股";
+    case "us": return "美股";
+    case "all": return "全部";
+    default: return scope || "-";
+  }
+}
+
+export function stockV2OpportunityInstrumentScopeLabel(scope?: string): string {
+  switch (scope) {
+    case "stock": return "个股";
+    case "exchange_fund": return "ETF";
+    case "both": return "个股+ETF";
+    default: return scope || "-";
+  }
+}
+
+export function stockV2DiscoveryRunStatusLabel(status?: string): string {
+  switch (status) {
+    case "pending": return "待运行";
+    case "running": return "运行中";
+    case "completed": return "已完成";
+    case "failed": return "失败";
+    case "cancelled": return "已取消";
+    default: return status || "未知";
+  }
+}
+
+export function stockV2DiscoveryRunStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "completed": return "good";
+    case "running": return "neutral";
+    case "pending": return "warn";
+    case "failed": return "danger";
+    case "cancelled": return "warn";
+    default: return "neutral";
+  }
+}
+
+// 固定 8 步中文标题，对齐设计文档 §4.3
+export function stockV2DiscoveryStepLabel(key?: string): string {
+  switch (key) {
+    case "understand_theme": return "主题理解";
+    case "internal_recall": return "项目内资料召回";
+    case "external_research": return "外部公开资料搜索";
+    case "theme_chain": return "产业链拆解";
+    case "candidate_merge": return "候选合并与去噪";
+    case "market_risk_check": return "行情与风险检查";
+    case "candidate_ranking": return "候选排序";
+    case "final_report": return "最终报告";
+    default: return key || "-";
+  }
+}
+
+export function stockV2DiscoveryStepStatusLabel(status?: string): string {
+  switch (status) {
+    case "pending": return "待执行";
+    case "running": return "执行中";
+    case "completed": return "已完成";
+    case "failed": return "失败";
+    default: return status || "未知";
+  }
+}
+
+export function stockV2DiscoveryStepStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "completed": return "good";
+    case "running": return "warn";
+    case "pending": return "neutral";
+    case "failed": return "danger";
+    default: return "neutral";
+  }
+}
+
+export function stockV2CandidateRelationTypeLabel(type?: string): string {
+  switch (type) {
+    case "direct": return "直接相关";
+    case "supply_chain": return "供应链";
+    case "theme_etf": return "主题ETF";
+    case "competitor": return "竞争";
+    case "weak": return "弱相关";
+    default: return type || "-";
+  }
+}
+
+export function stockV2CandidateRelationTypeTone(type?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (type) {
+    case "direct": return "good";
+    case "supply_chain": return "good";
+    case "theme_etf": return "neutral";
+    case "competitor": return "warn";
+    case "weak": return "neutral";
+    default: return "neutral";
+  }
+}
+
+export function stockV2CandidateStatusLabel(status?: string): string {
+  switch (status) {
+    case "candidate": return "候选";
+    case "shortlisted": return "已入围";
+    case "rejected": return "已排除";
+    case "strategy_requested": return "策略生成中";
+    case "strategy_generated": return "已生成策略";
+    default: return status || "未知";
+  }
+}
+
+export function stockV2CandidateStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "shortlisted": return "good";
+    case "strategy_generated": return "good";
+    case "strategy_requested": return "warn";
+    case "candidate": return "neutral";
+    case "rejected": return "danger";
+    default: return "neutral";
+  }
+}
+
+export function stockV2EvidenceSourceTypeLabel(type?: string): string {
+  switch (type) {
+    case "internal_profile": return "内部画像";
+    case "internal_news": return "内部新闻";
+    case "quote": return "行情";
+    case "daily_bar": return "日K";
+    case "external_source": return "外部来源";
+    case "agent_note": return "Agent备注";
+    case "semantic_recall": return "语义召回";
+    default: return type || "-";
+  }
+}
+
+export function stockV2EvidenceSourceTypeTone(type?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (type) {
+    case "semantic_recall": return "neutral";
+    case "internal_profile": return "good";
+    case "internal_news": return "good";
+    case "quote": return "neutral";
+    case "daily_bar": return "neutral";
+    case "external_source": return "warn";
+    case "agent_note": return "neutral";
+    default: return "neutral";
+  }
+}
+
+export function stockV2EmbeddingAssetStatusLabel(status?: string): string {
+  switch (status) {
+    case "ready": return "就绪";
+    case "stale": return "过期";
+    case "failed": return "失败";
+    default: return status || "-";
+  }
+}
+
+export function stockV2EmbeddingAssetStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "ready": return "good";
+    case "stale": return "warn";
+    case "failed": return "danger";
+    default: return "neutral";
+  }
+}
+
+export function stockV2EmbeddingErrorCodeLabel(code?: string): string {
+  switch (code) {
+    case "embedding_model_not_configured": return "未绑定嵌入模型";
+    case "embedding_model_unavailable": return "嵌入模型不可用";
+    case "embedding_asset_not_ready": return "向量资产未就绪";
+    default: return code || "嵌入模型不可用";
+  }
+}

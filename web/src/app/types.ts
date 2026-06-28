@@ -1436,7 +1436,7 @@ export interface StockV2UniverseUpdateResponse {
   message: string;
 }
 
-export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "strategies" | "agent";
+export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "strategies" | "agent" | "opportunity";
 
 // ===== News side (消息面数据资产) =====
 
@@ -2478,4 +2478,244 @@ export interface StockV2AgentModelTestResult {
   latencyMs?: number;
   modelType?: string;
   embeddingDimensions?: number;
+}
+
+// ===== 主题机会发现 (V2) ===== 对齐 docs/stock-v2-opportunity-discovery-technical-design §4 + internal/stockv2
+
+// --- Opportunity ---
+export type StockV2OpportunityStatus = "draft" | "researching" | "completed" | "closed";
+export type StockV2OpportunityMarketScope = "a_share" | "hk" | "us" | "all";
+export type StockV2OpportunityInstrumentScope = "stock" | "exchange_fund" | "both";
+
+export interface StockV2Opportunity {
+  id: string;
+  title: string;
+  userThesis?: string;
+  marketScope: StockV2OpportunityMarketScope | string;
+  instrumentScope: StockV2OpportunityInstrumentScope | string;
+  status: StockV2OpportunityStatus | string;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockV2OpportunityInput {
+  title: string;
+  userThesis?: string;
+  marketScope?: StockV2OpportunityMarketScope;
+  instrumentScope?: StockV2OpportunityInstrumentScope;
+}
+
+// --- Discovery Run ---
+export type StockV2DiscoveryRunStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+
+export interface StockV2OpportunityDiscoveryRun {
+  id: string;
+  opportunityId: string;
+  agentRunId?: string;
+  status: StockV2DiscoveryRunStatus | string;
+  currentStepId?: string;
+  stepTotal?: number;
+  stepCompleted?: number;
+  candidateCount?: number;
+  evidenceCount?: number;
+  externalSourceCount?: number;
+  startedAt?: string;
+  finishedAt?: string;
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// --- Discovery Steps（固定 8 步）---
+export type StockV2DiscoveryStepKey =
+  | "understand_theme"
+  | "internal_recall"
+  | "external_research"
+  | "theme_chain"
+  | "candidate_merge"
+  | "market_risk_check"
+  | "candidate_ranking"
+  | "final_report";
+
+export type StockV2DiscoveryStepStatus = "pending" | "running" | "completed" | "failed";
+
+export interface StockV2OpportunityDiscoveryStep {
+  id: string;
+  runId: string;
+  stepKey: StockV2DiscoveryStepKey | string;
+  stepTitle?: string;
+  status: StockV2DiscoveryStepStatus | string;
+  orderIndex?: number;
+  inputSummary?: string;
+  outputSummary?: string;
+  metadataJson?: Record<string, unknown>;
+  startedAt?: string;
+  finishedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// --- Evidence ---
+export type StockV2OpportunityEvidenceSourceType =
+  | "internal_profile"
+  | "internal_news"
+  | "quote"
+  | "daily_bar"
+  | "external_source"
+  | "agent_note"
+  | "semantic_recall";
+
+export interface StockV2OpportunityEvidence {
+  id: string;
+  runId?: string;
+  candidateId?: string;
+  stepId?: string;
+  sourceType: StockV2OpportunityEvidenceSourceType | string;
+  sourceRef?: string;
+  title?: string;
+  summary?: string;
+  url?: string;
+  publisher?: string;
+  publishedAt?: string;
+  confidence?: number;
+  metadataJson?: Record<string, unknown>;
+  // 语义召回来源附加字段（当 sourceType === "semantic_recall"）
+  embeddingModelId?: string;
+  embeddingModelName?: string;
+  embeddingProtocol?: string;
+  assetStatus?: string;
+  score?: number;
+  createdAt: string;
+}
+
+// --- Candidate ---
+export type StockV2OpportunityCandidateRelationType =
+  | "direct"
+  | "supply_chain"
+  | "theme_etf"
+  | "competitor"
+  | "weak";
+
+export type StockV2OpportunityCandidateStatus =
+  | "candidate"
+  | "shortlisted"
+  | "rejected"
+  | "strategy_requested"
+  | "strategy_generated";
+
+export interface StockV2OpportunityCandidate {
+  id: string;
+  opportunityId: string;
+  runId?: string;
+  symbol: string;
+  market?: string;
+  instrumentType?: "stock" | "exchange_fund" | string;
+  name?: string;
+  relationType: StockV2OpportunityCandidateRelationType | string;
+  relevanceScore?: number;
+  evidenceScore?: number;
+  marketRiskScore?: number;
+  confidence?: number;
+  rank?: number;
+  status: StockV2OpportunityCandidateStatus | string;
+  reason?: string;
+  riskSummary?: string;
+  evidenceCount?: number;
+  metadataJson?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockV2OpportunityCandidateUpdate {
+  status?: StockV2OpportunityCandidateStatus;
+  shortlisted?: boolean;
+}
+
+// --- Result ---
+export interface StockV2OpportunityResult {
+  id: string;
+  runId: string;
+  summary?: string;
+  conclusion?: string;
+  recommendedNextAction?: string;
+  rawResultJson?: Record<string, unknown>;
+  createdAt: string;
+}
+
+// ===== Embedding (V2) ===== 对齐 internal/stockv2/embedding_types.go（camelCase JSON）
+export type StockV2EmbeddingObjectType =
+  | "stock_profile"
+  | "news_event"
+  | "opportunity"
+  | "theme"
+  | "external_source";
+
+export type StockV2EmbeddingAssetStatus = "ready" | "stale" | "failed";
+
+export type StockV2EmbeddingErrorCode =
+  | "embedding_model_not_configured"
+  | "embedding_model_unavailable"
+  | "embedding_asset_not_ready"
+  | string;
+
+export interface StockV2EmbeddingConfig {
+  id: string;
+  embeddingModelId?: string;
+  enabled: boolean;
+  lastProbeAt?: string;
+  lastProbeStatus?: string;
+  lastError?: string;
+  updatedAt: string;
+}
+
+export interface StockV2EmbeddingStatus {
+  available: boolean;
+  errorCode?: StockV2EmbeddingErrorCode;
+  errorMessage?: string;
+  config: StockV2EmbeddingConfig;
+  modelId?: string;
+  providerId?: string;
+  modelName?: string;
+  embeddingProtocol?: string;
+  embeddingDimensions?: number;
+  readyAssetCount: number;
+  staleAssetCount: number;
+  failedAssetCount: number;
+}
+
+export interface StockV2EmbeddingAsset {
+  id: string;
+  objectType: StockV2EmbeddingObjectType | string;
+  objectId: string;
+  textHash: string;
+  textSummary?: string;
+  modelId: string;
+  providerId: string;
+  embeddingProtocol: string;
+  embeddingDimensions: number;
+  vectorRef: string;
+  status: StockV2EmbeddingAssetStatus | string;
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockV2EmbeddingConfigUpdate {
+  embeddingModelId?: string;
+  enabled?: boolean;
+}
+
+export interface StockV2EmbeddingRebuildRequest {
+  objectTypes?: StockV2EmbeddingObjectType[];
+  limit?: number;
+}
+
+export interface StockV2EmbeddingRebuildResult {
+  objectTypes?: string[];
+  total: number;
+  success: number;
+  failed: number;
+  failedItems?: Array<{ id?: string; error?: string }>;
+  updatedAt?: string;
 }
