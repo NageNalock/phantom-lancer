@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { AppActions } from "../app/App";
-import type { AppData, ListenerEndpoint, LocalDatabaseFileStat, RuntimeSettings, SystemSettings, TLSProbeResult } from "../app/types";
+import type { AppData, ListenerEndpoint, LocalDatabaseFileStat, RuntimeSettings, TLSProbeResult } from "../app/types";
 import { friendlyError } from "../api/client";
 import { Button, ContextList, Field, Panel, Pill, SubTabs, Toggle } from "../components/ui";
 import { defaultRuntime, formatDate } from "../domain/labels";
@@ -112,19 +112,14 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
     setHstsMaxAgeSeconds(nextEndpoint.hstsMaxAgeSeconds ?? nextRuntime.hstsMaxAgeSeconds ?? 15724800);
   }, [data.settings.listener, data.settings.runtime, data.settings.file?.addr]);
 
-  const listenerDirty = useMemo(() => {
-    const nextEndpoint = (data.settings.listener ?? {}) as ListenerEndpoint;
-    const nextRuntime = (data.settings.runtime || defaultRuntime()) as RuntimeSettings;
-    return (
-      listenAddr.trim() !== (nextRuntime.addr || nextEndpoint.addr || "").trim() ||
-      tlsEnabled !== Boolean(nextRuntime.tlsEnabled || nextEndpoint.tlsEnabled) ||
-      tlsCertFile.trim() !== (nextRuntime.tlsCertFile || "").trim() ||
-      tlsKeyFile.trim() !== (nextRuntime.tlsKeyFile || "").trim() ||
-      tlsOwnerUidCheck !== (nextRuntime.tlsOwnerUidCheck ?? true) ||
-      hstsEnabled !== Boolean(nextRuntime.hstsEnabled || nextEndpoint.hstsEnabled) ||
-      hstsMaxAgeSeconds !== (nextRuntime.hstsMaxAgeSeconds ?? nextEndpoint.hstsMaxAgeSeconds ?? 15724800)
-    );
-  }, [listenAddr, tlsEnabled, tlsCertFile, tlsKeyFile, tlsOwnerUidCheck, hstsEnabled, hstsMaxAgeSeconds, data.settings]);
+  const listenerDirty =
+    listenAddr.trim() !== (currentRuntime.addr || currentEndpoint.addr || "").trim() ||
+    tlsEnabled !== Boolean(currentRuntime.tlsEnabled || currentEndpoint.tlsEnabled) ||
+    tlsCertFile.trim() !== (currentRuntime.tlsCertFile || "").trim() ||
+    tlsKeyFile.trim() !== (currentRuntime.tlsKeyFile || "").trim() ||
+    tlsOwnerUidCheck !== (currentRuntime.tlsOwnerUidCheck ?? true) ||
+    hstsEnabled !== Boolean(currentRuntime.hstsEnabled || currentEndpoint.hstsEnabled) ||
+    hstsMaxAgeSeconds !== (currentRuntime.hstsMaxAgeSeconds ?? currentEndpoint.hstsMaxAgeSeconds ?? 15724800);
 
   async function saveRuntime() {
     const payload: RuntimeSettings = {

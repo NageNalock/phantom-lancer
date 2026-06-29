@@ -25,7 +25,8 @@ const emptyClient = {
 };
 
 export function V2RayView({ actions, data, exportOpen, exported }: { actions: AppActions; data: AppData; exportOpen: boolean; exported: V2RayExport | null }) {
-  const [v2ray, setV2Ray] = useState<V2RaySettings>({ ...defaultV2RaySettings(), ...(data.v2ray.settings || {}) });
+  const savedSettings = { ...defaultV2RaySettings(), ...(data.v2ray.settings || {}) };
+  const [v2ray, setV2Ray] = useState<V2RaySettings>(savedSettings);
   const [clientDraft, setClientDraft] = useState(emptyClient);
   const [clientCreateOpen, setClientCreateOpen] = useState(false);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
@@ -34,11 +35,11 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
 
   const status = data.v2ray.status;
   const clients = data.v2ray.clients || [];
-  const settingsDirty = !sameV2RaySettings(v2ray, { ...defaultV2RaySettings(), ...(data.v2ray.settings || {}) });
+  const settingsDirty = !sameV2RaySettings(v2ray, savedSettings);
   const clientFormOpen = clientCreateOpen || !clients.length;
 
   useEffect(() => {
-    setV2Ray({ ...defaultV2RaySettings(), ...(data.v2ray.settings || {}) });
+    setV2Ray(savedSettings);
   }, [data.v2ray.settings]);
 
   async function saveV2Ray() {
@@ -433,16 +434,10 @@ export function V2RayView({ actions, data, exportOpen, exported }: { actions: Ap
 
 function normalizedV2Ray(settings: V2RaySettings): V2RaySettings {
   return {
+    ...defaultV2RaySettings(),
     ...settings,
     id: "default",
-    configMode: settings.configMode || "guided",
-    configFormat: settings.configFormat || "json",
-    protocol: settings.protocol || "vmess",
-    transport: settings.transport || "tcp",
-    security: settings.security || "none",
-    listen: settings.listen || "0.0.0.0",
     port: Number(settings.port || 10086),
-    logLevel: settings.logLevel || "warning",
   };
 }
 

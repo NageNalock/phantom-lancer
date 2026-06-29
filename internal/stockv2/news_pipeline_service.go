@@ -56,6 +56,9 @@ func (s *Service) RunNewsIngestJob(ctx context.Context, source string) (NewsPipe
 	if err != nil {
 		state = failedNewsSourceState(state, err, now)
 		_ = s.store.UpsertNewsSourceState(ctx, state)
+		if s.log != nil {
+			s.log.Warn("stockv2 news ingest failed", "source", source, "cursor", safelog.Text(state.Cursor, 120), "since", state.LastSuccessAt.Format(time.RFC3339Nano), "consecutive_failures", state.ConsecutiveFailures, "backoff_until", state.BackoffUntil.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 300))
+		}
 		result.Status = NewsSourceStatusFailed
 		result.ErrorMessage = state.LastError
 		return result, err
@@ -75,6 +78,9 @@ func (s *Service) RunNewsIngestJob(ctx context.Context, source string) (NewsPipe
 			req.FetchedAt = result.FetchedAt
 		}
 		if _, err := s.CreateRawNews(ctx, req); err != nil {
+			if s.log != nil {
+				s.log.Warn("stockv2 raw news create failed", "source", source, "source_id", safelog.Text(req.SourceID, 120), "fetched_at", req.FetchedAt.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 300))
+			}
 			return result, err
 		}
 	}
@@ -153,6 +159,10 @@ func (s *Service) RunNewsProcessingBatch(ctx context.Context, source string, raw
 		if s.newsLinker == nil {
 			candidates, linkErr := s.LinkNewsEvent(ctx, event.ID)
 			if linkErr != nil {
+				_ = s.store.UpdateNewsEventLinkStatus(ctx, event.ID, NewsEventLinkStatusFailed, time.Now())
+				if s.log != nil {
+					s.log.Warn("stockv2 news event link failed", "source", source, "news_event_id", event.ID, "raw_news_id", event.RawNewsID, "event_source", event.Source, "event_title", safelog.Text(event.Title, 160), "linker", "default", "error", safelog.Text(linkErr.Error(), 300))
+				}
 				continue
 			}
 			result.LinkCandidateCount += len(candidates)
@@ -161,6 +171,9 @@ func (s *Service) RunNewsProcessingBatch(ctx context.Context, source string, raw
 		candidates, linkErr := s.newsLinker.LinkNewsEvent(ctx, event)
 		if linkErr != nil {
 			_ = s.store.UpdateNewsEventLinkStatus(ctx, event.ID, NewsEventLinkStatusFailed, time.Now())
+			if s.log != nil {
+				s.log.Warn("stockv2 news event link failed", "source", source, "news_event_id", event.ID, "raw_news_id", event.RawNewsID, "event_source", event.Source, "event_title", safelog.Text(event.Title, 160), "linker", "custom", "error", safelog.Text(linkErr.Error(), 300))
+			}
 			continue
 		}
 		for _, candidate := range candidates {
@@ -169,6 +182,9 @@ func (s *Service) RunNewsProcessingBatch(ctx context.Context, source string, raw
 				candidate.RawNewsID = event.RawNewsID
 			}
 			if _, err := s.store.UpsertNewsLinkCandidate(ctx, candidate); err != nil {
+				if s.log != nil {
+					s.log.Warn("stockv2 news link candidate save failed", "source", source, "news_event_id", event.ID, "raw_news_id", event.RawNewsID, "symbol", candidate.Symbol, "market", candidate.Market, "match_method", candidate.MatchMethod, "error", safelog.Text(err.Error(), 300))
+				}
 				return result, err
 			}
 			result.LinkCandidateCount++

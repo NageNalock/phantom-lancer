@@ -18,16 +18,9 @@ const FENCE_RE = /^(```+|~~~+)([A-Za-z0-9_+.#-]*)[ \t]*$/;
 const CLOSING_FENCE_RE = /^(```+|~~~+)[ \t]*$/;
 const MARKDOWN_LANGUAGES = new Set(["md", "markdown", "mdx"]);
 
-registerLanguage("bash", bash);
-registerLanguage("css", css);
-registerLanguage("diff", diff);
-registerLanguage("go", go);
-registerLanguage("javascript", javascript);
-registerLanguage("json", json);
-registerLanguage("markdown", markdown);
-registerLanguage("typescript", typescript);
-registerLanguage("xml", xml);
-registerLanguage("yaml", yaml);
+Object.entries({ bash, css, diff, go, javascript, json, markdown, typescript, xml, yaml }).forEach(([name, language]) => {
+  if (!hljs.getLanguage(name)) hljs.registerLanguage(name, language);
+});
 
 const markdownComponents: Components = {
   a({ children, href, node: _node, ...props }) {
@@ -67,7 +60,7 @@ export function RichMessage({ streaming, text }: { streaming?: boolean; text: st
   return (
     <div className={`message-rich ${streaming ? "chat-streaming-text" : ""}`}>
       <ReactMarkdown components={markdownComponents} remarkPlugins={[remarkGfm]} skipHtml>
-        {preprocessMarkdown(text)}
+        {unwrapMarkdownFences(normalizeMessageFences(text))}
       </ReactMarkdown>
     </div>
   );
@@ -97,10 +90,6 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
       </pre>
     </div>
   );
-}
-
-function preprocessMarkdown(text: string): string {
-  return unwrapMarkdownFences(normalizeMessageFences(text));
 }
 
 function normalizeMessageFences(text: string): string {
@@ -138,10 +127,9 @@ function unwrapMarkdownFences(text: string): string {
 }
 
 function highlightedCode(code: string, language: string): string {
-  const highlighterLanguage = highlightLanguage(language);
-  if (!highlighterLanguage) return escapeHtml(code);
+  if (!hljs.getLanguage(language)) return escapeHtml(code);
   try {
-    return hljs.highlight(code, { language: highlighterLanguage, ignoreIllegals: true }).value;
+    return hljs.highlight(code, { language, ignoreIllegals: true }).value;
   } catch {
     return escapeHtml(code);
   }
@@ -163,11 +151,6 @@ function normalizeLanguage(value: string): string {
   return language;
 }
 
-function highlightLanguage(language: string): string {
-  if (hljs.getLanguage(language)) return language;
-  return "";
-}
-
 function safeLinkHref(href?: string): string {
   const value = href?.trim() || "";
   return /^(https?:|mailto:)/i.test(value) ? value : "";
@@ -187,8 +170,4 @@ function escapeHtml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
-}
-
-function registerLanguage(name: string, language: Parameters<typeof hljs.registerLanguage>[1]) {
-  if (!hljs.getLanguage(name)) hljs.registerLanguage(name, language);
 }

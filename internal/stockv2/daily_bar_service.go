@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"phantom-lancer/internal/safelog"
 )
 
 // Daily Bars 服务层。
@@ -113,7 +115,9 @@ func (s *Service) GetDailyBarsQuality(ctx context.Context, symbol, adjusted stri
 	if lastErr == "" {
 		jobErr, err := s.store.GetLatestDailyBarJobError(ctx, symbol, adjusted)
 		if err != nil {
-			s.log.Warn("get latest daily bar job error failed", "symbol", symbol, "error", err)
+			if s.log != nil {
+				s.log.Warn("get latest daily bar job error failed", "symbol", symbol, "adjusted", adjusted, "error", safelog.Text(err.Error(), 240))
+			}
 		} else {
 			lastErr = jobErr
 		}
@@ -142,7 +146,9 @@ func (s *Service) GetDailyBarsQualityBatch(ctx context.Context, symbols []string
 	}
 	jobErrors, err := s.store.GetLatestDailyBarJobErrors(ctx, symbols, adjusted)
 	if err != nil {
-		s.log.Warn("get latest daily bar job errors failed", "error", err)
+		if s.log != nil {
+			s.log.Warn("get latest daily bar job errors failed", "symbol_count", len(symbols), "adjusted", adjusted, "error", safelog.Text(err.Error(), 240))
+		}
 		jobErrors = map[string]string{}
 	}
 	checkedAt := time.Now()
@@ -262,7 +268,9 @@ func (s *Service) EnsureDailyBars(ctx context.Context, symbol, rangeCode, adjust
 func (s *Service) runEnsureSymbolJob(ctx context.Context, jobID, symbol, market, start, end, adjusted string) {
 	defer func() {
 		if r := recover(); r != nil {
-			s.log.Error("daily bar ensure job panicked", "job_id", jobID, "symbol", symbol, "panic", r)
+			if s.log != nil {
+				s.log.Error("daily bar ensure job panicked", "job_id", jobID, "symbol", symbol, "market", market, "start_date", start, "end_date", end, "adjusted", adjusted, "panic", r)
+			}
 			_ = s.store.UpdateDailyBarJob(ctx, StockV2DailyBarJob{
 				ID:           jobID,
 				Status:       "failed",
@@ -275,7 +283,9 @@ func (s *Service) runEnsureSymbolJob(ctx context.Context, jobID, symbol, market,
 	_, err := s.ensureOneSymbol(ctx, symbol, market, start, end, adjusted)
 	now := time.Now()
 	if err != nil {
-		s.log.Warn("ensure daily bars failed", "symbol", symbol, "error", err)
+		if s.log != nil {
+			s.log.Warn("ensure daily bars failed", "job_id", jobID, "symbol", symbol, "market", market, "start_date", start, "end_date", end, "adjusted", adjusted, "error", safelog.Text(err.Error(), 300))
+		}
 		_ = s.store.UpdateDailyBarJob(ctx, StockV2DailyBarJob{
 			ID:             jobID,
 			Status:         "failed",
@@ -366,7 +376,9 @@ func (s *Service) RunDailyBarsJob(ctx context.Context, req DailyBarsJobRequest) 
 func (s *Service) runDailyBarsBatchJob(ctx context.Context, jobID string, req DailyBarsJobRequest, mode, rangeCode, adjusted string) {
 	defer func() {
 		if r := recover(); r != nil {
-			s.log.Error("daily bar batch job panicked", "job_id", jobID, "panic", r)
+			if s.log != nil {
+				s.log.Error("daily bar batch job panicked", "job_id", jobID, "mode", mode, "range_code", rangeCode, "adjusted", adjusted, "trigger_type", req.TriggerType, "trigger_source", req.TriggerSource, "symbol", req.Symbol, "panic", r)
+			}
 			_ = s.store.UpdateDailyBarJob(ctx, StockV2DailyBarJob{
 				ID:           jobID,
 				Status:       "failed",
@@ -404,6 +416,9 @@ func (s *Service) runDailyBarsBatchJob(ctx context.Context, jobID string, req Da
 		collectErr = fmt.Errorf("unknown mode %q", mode)
 	}
 	if collectErr != nil {
+		if s.log != nil {
+			s.log.Warn("daily bar batch collect symbols failed", "job_id", jobID, "mode", mode, "range_code", rangeCode, "adjusted", adjusted, "trigger_type", req.TriggerType, "trigger_source", req.TriggerSource, "symbol", req.Symbol, "error", safelog.Text(collectErr.Error(), 240))
+		}
 		_ = s.store.UpdateDailyBarJob(ctx, StockV2DailyBarJob{
 			ID: jobID, Status: "failed", EndAt: time.Now(),
 			ErrorMessage: truncateDailyBarErr(collectErr.Error()),
@@ -433,7 +448,7 @@ func (s *Service) runDailyBarsBatchJob(ctx context.Context, jobID string, req Da
 		processed++
 		_, err := s.ensureOneSymbol(ctx, sym, "", start, end, adjusted)
 		if err != nil {
-			failedItems = append(failedItems, UpdateFailure{Symbol: sym, Reason: truncateDailyBarErr(err.Error())})
+			failedItems = append(failedItems, UpdateFailure{Symbol: sym, Reason: safelog.Text(truncateDailyBarErr(err.Error()), 240)})
 		} else {
 			success++
 		}
@@ -471,6 +486,9 @@ func (s *Service) runDailyBarsBatchJob(ctx context.Context, jobID string, req Da
 		FailedCount:    len(failedItems),
 		FailedItems:    failedItems,
 	})
+	if len(failedItems) > 0 && s.log != nil {
+		s.log.Warn("daily bar batch job completed with item failures", "job_id", jobID, "mode", mode, "range_code", rangeCode, "adjusted", adjusted, "trigger_type", req.TriggerType, "trigger_source", req.TriggerSource, "symbol", req.Symbol, "start_date", start, "end_date", end, "total_count", total, "processed_count", processed, "success_count", success, "failed_count", len(failedItems), "failure_sample", stockV2FailureSample(failedItems, 5))
+	}
 	if req.TriggerType == "scheduled" && mode == DailyBarJobModeUniverseIncremental && status == "completed" {
 		s.recordDailyBarsLastRun(ctx, endAt)
 	}
@@ -498,7 +516,9 @@ func (s *Service) recordDailyBarsLastRun(ctx context.Context, when time.Time) {
 	settings := s.settings
 	settings.DailyBarsLastRun = when
 	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil {
-		s.log.Warn("update daily bars last run failed", "error", err)
+		if s.log != nil {
+			s.log.Warn("update daily bars last run failed", "last_run_at", when.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 240))
+		}
 		return
 	}
 	s.settings = settings

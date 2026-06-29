@@ -1033,7 +1033,7 @@ func (s *Server) exchangeGatewayOAuthCode(ctx context.Context, code, state strin
 		return storage.CodexGatewayAccount{}, false, err
 	}
 	account, err := s.store.CreateCodexGatewayAccount(ctx, storage.CodexGatewayAccountInput{
-		Label: codexgateway.AccountOAuthLabel(tokens), Status: "active", AccessToken: strings.TrimSpace(tokens.AccessToken), RefreshToken: strings.TrimSpace(tokens.RefreshToken), ExpiresAt: gatewayExpiresAt(tokens.ExpiresIn),
+		Label: codexgateway.AccountOAuthLabel(tokens), Status: "active", AccessToken: strings.TrimSpace(tokens.AccessToken), RefreshToken: strings.TrimSpace(tokens.RefreshToken), ExpiresAt: codexgateway.ExpiresAtFromSeconds(tokens.ExpiresIn),
 	})
 	if err != nil {
 		s.gatewayOAuth.release(state)
@@ -1086,11 +1086,4 @@ func gatewayOAuthHTML(success bool, message string) string {
 	escaped := html.EscapeString(message)
 	data, _ := json.Marshal(message)
 	return `<!doctype html><html><head><meta charset="utf-8"><title>Codex Gateway login</title></head><body><p>` + escaped + `</p><script>if(window.opener){try{window.opener.postMessage({type:"codex-gateway-oauth-error",error:` + string(data) + `},"*")}catch(e){}}</script></body></html>`
-}
-
-func gatewayExpiresAt(seconds int) string {
-	if seconds <= 0 {
-		return ""
-	}
-	return time.Now().UTC().Add(time.Duration(seconds) * time.Second).Format(time.RFC3339Nano)
 }

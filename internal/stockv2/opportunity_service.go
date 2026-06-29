@@ -177,7 +177,7 @@ func (s *Service) startOpportunityDiscoveryRunAsync(ctx context.Context, run Age
 	defer func() {
 		if r := recover(); r != nil {
 			if s.log != nil {
-				s.log.Error("opportunity discovery agent run panicked", "run_id", run.ID, "panic", r)
+				s.log.Error("opportunity discovery agent run panicked", "run_id", run.ID, "ledger_id", ledger.ID, "discovery_run_id", discCtx.DiscoveryRun.ID, "opportunity_id", discCtx.DiscoveryRun.OpportunityID, "model", modelName, "panic", r)
 			}
 			s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("panic: %v", r))
 		}
@@ -187,7 +187,7 @@ func (s *Service) startOpportunityDiscoveryRunAsync(ctx context.Context, run Age
 		return
 	}
 	if err := s.executeOpportunityDiscoveryRun(ctx, run, ledger, discCtx, modelName); err != nil && s.log != nil {
-		s.log.Warn("opportunity discovery agent run finished with error", "run_id", run.ID, "error", safelog.Text(err.Error(), 300))
+		s.log.Warn("opportunity discovery agent run finished with error", "run_id", run.ID, "ledger_id", ledger.ID, "discovery_run_id", discCtx.DiscoveryRun.ID, "opportunity_id", discCtx.DiscoveryRun.OpportunityID, "model", modelName, "error", safelog.Text(err.Error(), 300))
 	}
 }
 
@@ -199,7 +199,7 @@ func (s *Service) executeOpportunityDiscoveryRun(ctx context.Context, run AgentR
 	running := run
 	running.Status = AgentRunStatusRunning
 	if _, err := s.store.UpdateAgentRun(ctx, running); err != nil && s.log != nil {
-		s.log.Warn("update opportunity discovery agent run to running failed", "run_id", run.ID, "error", err)
+		s.log.Warn("update opportunity discovery agent run to running failed", "run_id", run.ID, "discovery_run_id", discCtx.DiscoveryRun.ID, "opportunity_id", discCtx.DiscoveryRun.OpportunityID, "error", safelog.Text(err.Error(), 240))
 	}
 	discoveryRun := discCtx.DiscoveryRun
 	discoveryRun.Status = OpportunityDiscoveryRunStatusRunning
@@ -207,7 +207,7 @@ func (s *Service) executeOpportunityDiscoveryRun(ctx context.Context, run AgentR
 		discoveryRun.StartedAt = time.Now()
 	}
 	if _, err := s.store.UpdateOpportunityDiscoveryRun(ctx, discoveryRun); err != nil && s.log != nil {
-		s.log.Warn("update opportunity discovery run to running failed", "discovery_run_id", discoveryRun.ID, "error", err)
+		s.log.Warn("update opportunity discovery run to running failed", "discovery_run_id", discoveryRun.ID, "opportunity_id", discoveryRun.OpportunityID, "agent_run_id", run.ID, "error", safelog.Text(err.Error(), 240))
 	}
 	discCtx.DiscoveryRun = discoveryRun
 	taskID, _ := s.agentTaskPool.createOpportunityDiscoveryTask(run.ID, discoveryRun.ID, discoveryRun.OpportunityID, 10*time.Minute)
@@ -549,20 +549,34 @@ func (s *Service) ProcessOpportunityDiscoverySubmittedResult(ctx context.Context
 	if err != nil {
 		return OpportunityResult{}, err
 	}
+	markFailed := func(message string) {
+		run.Status = OpportunityDiscoveryRunStatusFailed
+		run.ErrorMessage = safelog.Text(message, 500)
+		run.FinishedAt = time.Now()
+		if _, updateErr := s.store.UpdateOpportunityDiscoveryRun(ctx, run); updateErr != nil {
+			if s.log != nil {
+				s.log.Warn("update opportunity discovery run after submitted result failure failed", "discovery_run_id", run.ID, "opportunity_id", run.OpportunityID, "agent_run_id", run.AgentRunID, "output_type", submitted.OutputType, "error", safelog.Text(updateErr.Error(), 240))
+			}
+			return
+		}
+		if s.log != nil {
+			s.log.Warn("opportunity discovery submitted result failed", "discovery_run_id", run.ID, "opportunity_id", run.OpportunityID, "agent_run_id", run.AgentRunID, "output_type", submitted.OutputType, "error", safelog.Text(message, 300))
+		}
+	}
 	report, raw, err := s.opportunityDiscoveryReportFromResult(ctx, run, submitted.Result)
 	if err != nil {
-		run.Status = OpportunityDiscoveryRunStatusFailed
-		run.ErrorMessage = safelog.Text(err.Error(), 500)
-		run.FinishedAt = time.Now()
-		_, _ = s.store.UpdateOpportunityDiscoveryRun(ctx, run)
+		markFailed(err.Error())
 		return OpportunityResult{}, err
 	}
 	for _, candidate := range report.Candidates {
-		inst, err := s.store.GetInstrument(ctx, strings.TrimSpace(candidate.Symbol))
+		symbol := strings.TrimSpace(candidate.Symbol)
+		inst, err := s.store.GetInstrument(ctx, symbol)
 		if err != nil {
 			if errors.Is(err, ErrInstrumentNotFound) {
+				markFailed("candidate symbol not found: " + safelog.Text(symbol, 80))
 				return OpportunityResult{}, ErrOpportunitySymbolNotFound
 			}
+			markFailed("load candidate instrument failed: " + err.Error())
 			return OpportunityResult{}, err
 		}
 		relationType := strings.TrimSpace(candidate.RelationType)
@@ -595,6 +609,7 @@ func (s *Service) ProcessOpportunityDiscoverySubmittedResult(ctx context.Context
 			},
 		})
 		if err != nil {
+			markFailed("record candidate failed: " + err.Error())
 			return OpportunityResult{}, err
 		}
 	}
@@ -606,12 +621,18 @@ func (s *Service) ProcessOpportunityDiscoverySubmittedResult(ctx context.Context
 		RawResult:             raw,
 	})
 	if err != nil {
+		markFailed("save opportunity result failed: " + err.Error())
 		return OpportunityResult{}, err
 	}
 	run.Status = OpportunityDiscoveryRunStatusCompleted
 	run.FinishedAt = time.Now()
 	run.ErrorMessage = ""
-	_, _ = s.store.UpdateOpportunityDiscoveryRun(ctx, run)
+	if _, err := s.store.UpdateOpportunityDiscoveryRun(ctx, run); err != nil {
+		if s.log != nil {
+			s.log.Warn("complete opportunity discovery run status update failed", "discovery_run_id", run.ID, "opportunity_id", run.OpportunityID, "agent_run_id", run.AgentRunID, "error", safelog.Text(err.Error(), 240))
+		}
+		return OpportunityResult{}, err
+	}
 	_ = s.refreshOpportunityRunCounters(ctx, run.ID)
 	if opp, err := s.store.GetOpportunity(ctx, run.OpportunityID); err == nil {
 		opp.Status = OpportunityStatusCompleted

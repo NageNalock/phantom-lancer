@@ -27,7 +27,7 @@ import { DockerTable, DockerValue } from "./docker/DockerTable";
 import { CreateContainerDrawer } from "./docker/CreateContainerDrawer";
 import type { CreateContainerTemplate } from "./docker/CreateContainerDrawer";
 import { HostOperationsPanel } from "./docker/HostOperationsPanel";
-import { RegistryPanel } from "./docker/RegistryPanel";
+import { RegistryPanel, registryTagPullBusyKey } from "./docker/RegistryPanel";
 
 type RegistryView = "repositories" | "credentials" | "settings";
 const REGISTRY_VIEW_IDS: RegistryView[] = ["repositories", "credentials", "settings"];
@@ -141,10 +141,6 @@ function registryHostFromPublicUrl(publicUrl: string | undefined): string {
   return (publicUrl || "").trim().replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "").replace(/\/+$/, "");
 }
 
-function registryTagPullBusyKey(tag: DockerRegistryTag): string {
-  return `registry-pull-${tag.repository}:${tag.tag}`;
-}
-
 export function DockerView({ actions }: { actions: AppActions }) {
   const [tab, _setTab, tabHref] = useQueryParamState<DockerTab>("docker", DOCKER_TAB_IDS, "overview", { clearKeys: DOCKER_CLEAR_KEYS });
   const setTab = useCallback((next: DockerTab) => {
@@ -168,7 +164,6 @@ export function DockerView({ actions }: { actions: AppActions }) {
   const [selectedRepo, setSelectedRepo] = useStringQueryParamState("drrepo", "", { clearKeys: ["drtag"] });
   const [selectedTag, setSelectedTag] = useStringQueryParamState("drtag", "");
   const [createFormOpen, setCreateFormOpen, toggleCreateForm] = useBoolQueryParamState("dcform", false, { clearKeys: [] });
-  const [selectedContainerId, setSelectedContainerId] = useStringQueryParamState("dselc", "");
   const [selectedImageId, setSelectedImageId] = useStringQueryParamState("dseli", "");
   const selectedRepoRef = useRef(selectedRepo);
   const [status, setStatus] = useState<DockerStatus | null>(null);
@@ -376,6 +371,18 @@ export function DockerView({ actions }: { actions: AppActions }) {
     if (next) await loadTab(tab, next.available);
   }
 
+  function resetCreateDraft(image = "", source = "") {
+    setCreateImage(image);
+    setCreateSource(source);
+    setCreatePorts("");
+    setCreateVolumes("");
+    setCreateEnv("");
+  }
+
+  function openCreateDrawer() {
+    if (!createFormOpen) toggleCreateForm();
+  }
+
   function attachJob(result: DockerOperationResult, message: string) {
     if (result.job) {
       setJob(result.job);
@@ -478,7 +485,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
     }
   }
 
-  function toggleLogsLive(container: DockerContainerSummary, enabled: boolean) {
+  function toggleLogsLive(enabled: boolean) {
     setLogsLive(enabled);
     if (!enabled) {
       setLogLiveClosed("用户已停止 live tail");
@@ -825,15 +832,11 @@ export function DockerView({ actions }: { actions: AppActions }) {
       return;
     }
     const ref = `${host}/${item.repository}:${item.tag}`;
-    setCreateImage(ref);
-    setCreateSource(`Registry · ${item.repository}:${item.tag}`);
-    setCreatePorts("");
-    setCreateVolumes("");
-    setCreateEnv("");
+    resetCreateDraft(ref, `Registry · ${item.repository}:${item.tag}`);
     setPullRef(ref);
     setSelectedTag(`${item.repository}:${item.tag}`);
     setTab("containers");
-    if (!createFormOpen) toggleCreateForm();
+    openCreateDrawer();
     actions.setToast("已带入容器创建表单", "good");
   }
 
@@ -1065,12 +1068,8 @@ export function DockerView({ actions }: { actions: AppActions }) {
             actions={
               <span className="flex gap-2">
                 <Button onClick={() => {
-                  setCreateImage("");
-                  setCreateSource("");
-                  setCreatePorts("");
-                  setCreateVolumes("");
-                  setCreateEnv("");
-                  if (!createFormOpen) toggleCreateForm();
+                  resetCreateDraft();
+                  openCreateDrawer();
                 }} tone="primary">
                   创建容器
                 </Button>
@@ -1092,12 +1091,8 @@ export function DockerView({ actions }: { actions: AppActions }) {
                       <Button
                         tone="primary"
                         onClick={() => {
-                          setCreateImage("");
-                          setCreateSource("");
-                          setCreatePorts("");
-                          setCreateVolumes("");
-                          setCreateEnv("");
-                          if (!createFormOpen) toggleCreateForm();
+                          resetCreateDraft();
+                          openCreateDrawer();
                         }}
                       >
                         创建第一个容器
@@ -1133,12 +1128,8 @@ export function DockerView({ actions }: { actions: AppActions }) {
                       onAction={(action) => void containerAction(item, action)}
                       onClone={() => {
                         setCreateName(`${item.names[0] || item.id}-copy`.slice(0, 63));
-                        setCreateImage(item.image);
-                        setCreateSource(`以此镜像创建 · ${item.names[0] || item.id}`);
-                        setCreatePorts("");
-                        setCreateVolumes("");
-                        setCreateEnv("");
-                        if (!createFormOpen) toggleCreateForm();
+                        resetCreateDraft(item.image, `以此镜像创建 · ${item.names[0] || item.id}`);
+                        openCreateDrawer();
                       }}
                       onDetails={() => void openContainerDetails(item)}
                       onRemove={() => void removeContainer(item)}
@@ -1167,7 +1158,7 @@ export function DockerView({ actions }: { actions: AppActions }) {
               setLogLiveClosed("");
             }}
             onRefreshLogs={() => logsFor && void refreshLogs(logsFor)}
-            onToggleLogsLive={(enabled) => logsFor && toggleLogsLive(logsFor, enabled)}
+            onToggleLogsLive={toggleLogsLive}
             selected={selectedContainer}
             stats={containerStats}
           />
@@ -1182,17 +1173,12 @@ export function DockerView({ actions }: { actions: AppActions }) {
           onCloseImage={() => setSelectedImageId("")}
           onCreateFromImage={(item) => {
             if (item.tags?.[0]) {
-              setCreateImage(item.tags[0]);
-              setCreateSource(`镜像 · ${item.tags[0]}`);
+              resetCreateDraft(item.tags[0], `镜像 · ${item.tags[0]}`);
             } else {
-              setCreateImage(item.id);
-              setCreateSource(`镜像 · ${item.id}`);
+              resetCreateDraft(item.id, `镜像 · ${item.id}`);
             }
-            setCreatePorts("");
-            setCreateVolumes("");
-            setCreateEnv("");
             setTab("containers");
-            if (!createFormOpen) toggleCreateForm();
+            openCreateDrawer();
           }}
           onPull={() => void pullImage()}
           onRemoveImage={(item) => void removeImage(item)}

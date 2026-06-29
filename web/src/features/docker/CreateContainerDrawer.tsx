@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
-import { Button, Field, Panel, Pill } from "../../components/ui";
+import { Button, Field, Pill } from "../../components/ui";
 
 type CreatePort = { containerPort: number; hostPort?: number; protocol?: string; hostIp?: string };
 type CreateVolume = { volumeName: string; destination: string; readOnly?: boolean };

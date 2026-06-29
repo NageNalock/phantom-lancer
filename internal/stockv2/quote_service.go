@@ -165,6 +165,9 @@ func (s *Service) RefreshLatestQuotes(ctx context.Context, symbols []string, tri
 	}
 
 	result.FailedCount = len(result.FailedItems)
+	if result.FailedCount > 0 && s.log != nil && shouldLogQuoteRefreshWarning(triggerSource) {
+		s.log.Warn("stockv2 latest quote refresh completed with failures", "trigger_source", triggerSource, "requested_count", len(symbols), "refreshed_count", result.RefreshedCount, "failed_count", result.FailedCount, "failure_sample", stockV2FailureSample(result.FailedItems, 5))
+	}
 	return result, nil
 }
 

@@ -13,6 +13,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"phantom-lancer/internal/safelog"
+
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
@@ -122,7 +124,8 @@ func (uds *UniverseDataSource) fetchTencentBatch(ctx context.Context, symbols []
 			uds.service.log.Error("fetch tencent quotes failed",
 				"batch_start", start,
 				"batch_end", end,
-				"error", err)
+				"batch_size", len(batch),
+				"error", safelog.Text(err.Error(), 300))
 			continue
 		}
 
@@ -218,7 +221,7 @@ func (uds *UniverseDataSource) parseTencentResponse(body []byte, metaMap map[str
 		instrument, err := uds.parseTencentLine(line, metaMap)
 		if err != nil {
 			if uds != nil && uds.service != nil && uds.service.log != nil {
-				uds.service.log.Warn("parse tencent line failed", "line", line, "error", err)
+				uds.service.log.Warn("parse tencent line failed", "line", safelog.Text(line, 240), "error", safelog.Text(err.Error(), 240))
 			}
 			continue
 		}
@@ -398,7 +401,7 @@ func (uds *UniverseDataSource) GetDefaultSymbols() []string {
 		return symbols
 	}
 
-	uds.service.log.Warn("fallback to sample universe", "error", err, "sample_count", len(uds.sampleUniverseSymbols()))
+	uds.service.log.Warn("fallback to sample universe", "error", safelog.Text(err.Error(), 300), "sample_count", len(uds.sampleUniverseSymbols()))
 	return uds.sampleUniverseSymbols()
 }
 
@@ -450,7 +453,7 @@ func (uds *UniverseDataSource) fetchSinaUniverseSymbols(ctx context.Context) ([]
 
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 			if err != nil {
-				uds.service.log.Warn("sina universe request build failed", "node", node, "page", page, "error", err)
+				uds.service.log.Warn("sina universe request build failed", "node", node, "page", page, "error", safelog.Text(err.Error(), 240))
 				break
 			}
 			req.Header.Set("Referer", "https://finance.sina.com.cn/")
@@ -458,13 +461,13 @@ func (uds *UniverseDataSource) fetchSinaUniverseSymbols(ctx context.Context) ([]
 
 			resp, err := uds.httpClient.Do(req)
 			if err != nil {
-				uds.service.log.Warn("sina universe fetch failed", "node", node, "page", page, "error", err)
+				uds.service.log.Warn("sina universe fetch failed", "node", node, "page", page, "error", safelog.Text(err.Error(), 240))
 				break
 			}
 			body, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
 			resp.Body.Close()
 			if err != nil {
-				uds.service.log.Warn("sina universe read failed", "node", node, "page", page, "error", err)
+				uds.service.log.Warn("sina universe read failed", "node", node, "page", page, "error", safelog.Text(err.Error(), 240))
 				break
 			}
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {

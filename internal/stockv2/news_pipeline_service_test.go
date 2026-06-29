@@ -1,9 +1,12 @@
 package stockv2
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -285,6 +288,55 @@ func TestNewsProcessingBatchSourceFilterDoesNotStarve(t *testing.T) {
 	}
 	if gotOther.LinkStatus != NewsEventLinkStatusPending {
 		t.Fatalf("other link status = %q, want pending", gotOther.LinkStatus)
+	}
+}
+
+func TestNewsProcessingBatchLogsLinkFailureContext(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	var logs bytes.Buffer
+	svc.log = slog.New(slog.NewTextHandler(&logs, nil))
+	ctx := context.Background()
+	const source = "mock_news"
+	event, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		RawNewsID: "raw-log-context",
+		Source:    source,
+		Title:     "需要链接的消息",
+		EventAt:   time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("create event: %v", err)
+	}
+	svc.WithNewsEventLinker(NewsEventLinkerFunc(func(context.Context, NewsEvent) ([]NewsLinkCandidate, error) {
+		return nil, errors.New("link backend unavailable")
+	}))
+
+	result, err := svc.RunNewsProcessingBatch(ctx, source, 0, 10)
+	if err != nil {
+		t.Fatalf("run processing batch: %v", err)
+	}
+	if result.LinkCandidateCount != 0 {
+		t.Fatalf("result = %+v, want no candidates", result)
+	}
+	got, err := svc.store.GetNewsEvent(ctx, event.ID)
+	if err != nil {
+		t.Fatalf("get event: %v", err)
+	}
+	if got.LinkStatus != NewsEventLinkStatusFailed {
+		t.Fatalf("link status = %q, want failed", got.LinkStatus)
+	}
+	text := logs.String()
+	for _, want := range []string{
+		"stockv2 news event link failed",
+		"source=mock_news",
+		"news_event_id=" + event.ID,
+		"raw_news_id=raw-log-context",
+		"linker=custom",
+		"link backend unavailable",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("log %q does not contain %q", text, want)
+		}
 	}
 }
 

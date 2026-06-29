@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"phantom-lancer/internal/safelog"
 )
 
 // Service 主业务服务
@@ -71,7 +73,7 @@ func (s *Service) markInterruptedRunningUpdateJobs(ctx context.Context) {
 	count, err := s.store.FailRunningUpdateJobs(ctx, "interrupted by service restart before completion")
 	if err != nil {
 		if s.log != nil {
-			s.log.Warn("mark interrupted stock data asset maintenance jobs failed", "error", err)
+			s.log.Warn("mark interrupted stock data asset maintenance jobs failed", "error", safelog.Text(err.Error(), 240))
 		}
 		return
 	}
@@ -149,7 +151,7 @@ func (s *Service) StartAgentMCPServer() (string, error) {
 
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && s.log != nil {
-			s.log.Warn("stockv2 agent MCP loopback server stopped", "error", err)
+			s.log.Warn("stockv2 agent MCP loopback server stopped", "error", safelog.Text(err.Error(), 240))
 		}
 	}()
 	return url, nil
@@ -342,7 +344,7 @@ func (s *Service) ListPortfolios(ctx context.Context) ([]PortfolioWithHoldings, 
 	for _, portfolio := range portfolios {
 		portfolioWithHoldings, err := s.GetPortfolio(ctx, portfolio.ID)
 		if err != nil {
-			s.log.Warn("get portfolio holdings failed", "portfolio_id", portfolio.ID, "error", err)
+			s.log.Warn("get portfolio holdings failed", "portfolio_id", portfolio.ID, "error", safelog.Text(err.Error(), 240))
 			continue
 		}
 		results = append(results, portfolioWithHoldings)
@@ -591,7 +593,7 @@ func (s *Service) RecordTransaction(ctx context.Context, portfolioID string, req
 	}
 	if _, err := s.RefreshPortfolioValuation(ctx, portfolioID, "trade"); err != nil {
 		if s.log != nil {
-			s.log.Warn("refresh portfolio valuation after trade failed", "portfolioId", portfolioID, "err", err)
+			s.log.Warn("refresh portfolio valuation after trade failed", "portfolio_id", portfolioID, "trigger_source", "trade", "error", safelog.Text(err.Error(), 240))
 		}
 	}
 	return result, nil
@@ -651,16 +653,19 @@ func (s *Service) ExecuteUniverseUpdate(ctx context.Context, triggerType, trigge
 	}
 
 	// 启动更新任务（异步，使用独立 context，不随请求结束而取消）
-	go s.runUniverseUpdate(context.Background(), job.ID)
+	go s.runUniverseUpdate(context.Background(), job)
 
 	return job, nil
 }
 
 // runUniverseUpdate 运行统一数据资产维护任务
-func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
+func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
+	jobID := job.ID
 	defer func() {
 		if r := recover(); r != nil {
-			s.log.Error("runUniverseUpdate panicked", "job_id", jobID, "panic", r)
+			if s.log != nil {
+				s.log.Error("runUniverseUpdate panicked", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "panic", r)
+			}
 			s.store.UpdateUpdateJob(ctx, StockV2UpdateJob{
 				ID:           jobID,
 				Status:       "failed",
@@ -685,7 +690,9 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 		ID:         jobID,
 		TotalCount: totalCount,
 	}); err != nil {
-		s.log.Error("update job total count failed", "job_id", jobID, "error", err)
+		if s.log != nil {
+			s.log.Error("update job total count failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "total_count", totalCount, "error", safelog.Text(err.Error(), 240))
+		}
 	}
 
 	// 分批更新股票
@@ -703,7 +710,9 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 			progress.LastError = failedItems[len(failedItems)-1].Reason
 		}
 		if err := s.store.UpdateUpdateProgress(ctx, progress); err != nil {
-			s.log.Warn("update maintenance progress failed", "job_id", jobID, "error", err)
+			if s.log != nil {
+				s.log.Warn("update maintenance progress failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "processed_count", processedCount, "failed_count", len(failedItems), "current_symbol", progress.CurrentSymbol, "error", safelog.Text(err.Error(), 240))
+			}
 		}
 		update := StockV2UpdateJob{
 			ID:             jobID,
@@ -716,7 +725,9 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 			update.FailedItems = failedItems
 		}
 		if err := s.store.UpdateUpdateJob(ctx, update); err != nil {
-			s.log.Warn("update maintenance job progress failed", "job_id", jobID, "error", err)
+			if s.log != nil {
+				s.log.Warn("update maintenance job progress failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "processed_count", processedCount, "failed_count", len(failedItems), "error", safelog.Text(err.Error(), 240))
+			}
 		}
 	}
 
@@ -755,7 +766,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 			skip, err := s.shouldSkipFreshUniverseSymbol(ctx, sym, batchNow, freshnessWindow)
 			if err != nil {
 				if s.log != nil {
-					s.log.Warn("check stock data asset freshness failed", "symbol", sym, "error", err)
+					s.log.Warn("check stock data asset freshness failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol", sym, "freshness_window", freshnessWindow.String(), "error", safelog.Text(err.Error(), 240))
 				}
 				workSymbols = append(workSymbols, sym)
 				continue
@@ -779,12 +790,14 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 		// 获取这批股票数据
 		instruments, err := s.universeSource.FetchStockUniverse(ctx, workSymbols)
 		if err != nil {
-			s.log.Error("fetch batch failed", "batch", batch, "error", err)
+			if s.log != nil {
+				s.log.Error("stock data asset maintenance batch fetch failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "batch", batch+1, "total_batches", totalBatches, "batch_size", len(workSymbols), "first_symbol", workSymbols[0], "last_symbol", workSymbols[len(workSymbols)-1], "error", safelog.Text(err.Error(), 300))
+			}
 			// 整批失败，逐个记入失败列表
 			for _, sym := range workSymbols {
 				failedItems = append(failedItems, UpdateFailure{
 					Symbol: sym,
-					Reason: err.Error(),
+					Reason: safelog.Text(err.Error(), 240),
 				})
 			}
 			processedCount += len(workSymbols)
@@ -813,19 +826,23 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 					Reason: "no data from source",
 				})
 			} else if err := s.upsertInstrumentWithProfile(ctx, inst); err != nil {
-				s.log.Error("save instrument failed", "symbol", inst.Symbol, "error", err)
+				if s.log != nil {
+					s.log.Error("stock data asset maintenance save instrument failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol", inst.Symbol, "market", inst.Market, "instrument_type", inst.InstrumentType, "error", safelog.Text(err.Error(), 300))
+				}
 				failedItems = append(failedItems, UpdateFailure{
 					Symbol: sym,
-					Reason: err.Error(),
+					Reason: safelog.Text(err.Error(), 240),
 				})
 			} else {
 				var err error
 				fetchedDailyBars, err = s.maintainDailyBarsForInstrument(ctx, inst)
 				if err != nil {
-					s.log.Error("maintain daily bars failed", "symbol", inst.Symbol, "error", err)
+					if s.log != nil {
+						s.log.Error("stock data asset maintenance daily bars failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol", inst.Symbol, "market", inst.Market, "instrument_type", inst.InstrumentType, "error", safelog.Text(err.Error(), 300))
+					}
 					failedItems = append(failedItems, UpdateFailure{
 						Symbol: sym,
-						Reason: "daily bars: " + truncateDailyBarErr(err.Error()),
+						Reason: safelog.Text("daily bars: "+truncateDailyBarErr(err.Error()), 240),
 					})
 				} else {
 					successCount++
@@ -864,11 +881,14 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 		EndAt:          endAt,
 		FailedItems:    failedItems,
 	})
+	if len(failedItems) > 0 && s.log != nil {
+		s.log.Warn("stock data asset maintenance completed with item failures", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "total_count", totalCount, "processed_count", processedCount, "success_count", successCount, "failed_count", len(failedItems), "failure_sample", stockV2FailureSample(failedItems, 5))
+	}
 	s.recordDailyBarsLastRun(ctx, endAt)
 
 	// 清理过期更新历史（保留最近 100 条）
 	if err := s.store.PruneUpdateJobs(ctx, 100); err != nil {
-		s.log.Warn("prune update jobs failed", "error", err)
+		s.log.Warn("prune update jobs failed", "retention_count", 100, "error", safelog.Text(err.Error(), 240))
 	}
 	s.maybeRunBaseProfileMaintenance(ctx, "universe_update")
 }
@@ -1066,7 +1086,7 @@ func (s *Service) normalizeDataAssetMaintenanceSettings(ctx context.Context, set
 	settings.DailyBarsAutoEnabled = false
 	if s.store != nil {
 		if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil && s.log != nil {
-			s.log.Warn("migrate legacy daily bars auto setting failed", "error", err)
+			s.log.Warn("migrate legacy daily bars auto setting failed", "error", safelog.Text(err.Error(), 240))
 		}
 	}
 	return settings
@@ -1216,9 +1236,9 @@ func (s *Service) checkAndExecuteScheduledUpdate(ctx context.Context) {
 	}
 
 	// 执行维护
-	s.log.Info("executing scheduled stock data asset maintenance")
+	s.log.Info("executing scheduled stock data asset maintenance", "trigger_type", "scheduled", "trigger_source", "auto-updater", "interval", interval.String(), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano))
 	if _, err := s.ExecuteUniverseUpdate(ctx, "scheduled", "auto-updater"); err != nil {
-		s.log.Error("scheduled update failed", "error", err)
+		s.log.Error("scheduled update failed", "trigger_type", "scheduled", "trigger_source", "auto-updater", "interval", interval.String(), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 300))
 		return
 	}
 
@@ -1236,7 +1256,7 @@ func (s *Service) hasRecentCompletedUniverseUpdate(ctx context.Context, now time
 	}
 	if err != nil {
 		if s.log != nil {
-			s.log.Warn("check latest stock data asset maintenance failed", "error", err)
+			s.log.Warn("check latest stock data asset maintenance failed", "interval", interval.String(), "error", safelog.Text(err.Error(), 240))
 		}
 		return false
 	}
@@ -1250,14 +1270,14 @@ func (s *Service) markScheduledUpdateChecked(ctx context.Context, at time.Time) 
 	settings, err := s.GetSettings(ctx)
 	if err != nil {
 		if s.log != nil {
-			s.log.Warn("load settings before marking scheduled stock maintenance checked failed", "error", err)
+			s.log.Warn("load settings before marking scheduled stock maintenance checked failed", "checked_at", at.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 240))
 		}
 		return
 	}
 	settings.LastScheduledUpdate = at
 	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil {
 		if s.log != nil {
-			s.log.Warn("mark scheduled stock maintenance checked failed", "error", err)
+			s.log.Warn("mark scheduled stock maintenance checked failed", "checked_at", at.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 240))
 		}
 		return
 	}
@@ -1283,6 +1303,9 @@ func (s *Service) runScheduledMonitors(ctx context.Context) {
 func (s *Service) tickScheduledMonitors(ctx context.Context) {
 	storedConfigs, err := s.store.ListMonitorTaskConfigs(ctx)
 	if err != nil {
+		if s.log != nil {
+			s.log.Warn("scheduled monitor config list failed", "error", safelog.Text(err.Error(), 240))
+		}
 		return
 	}
 	configs := make(map[string]MonitorTaskConfig)
@@ -1312,7 +1335,7 @@ func (s *Service) tickScheduledMonitors(ctx context.Context) {
 			}
 			if _, err := s.RunLatestQuoteRefreshTask(ctx, MonitorTriggerScheduled); err != nil {
 				if s.log != nil {
-					s.log.Warn("scheduled quote refresh failed", "error", err)
+					s.log.Warn("scheduled quote refresh failed", "task_type", taskType, "trigger_type", MonitorTriggerScheduled, "interval_seconds", cfg.IntervalSeconds, "error", safelog.Text(err.Error(), 240))
 				}
 			}
 			continue
@@ -1326,7 +1349,7 @@ func (s *Service) tickScheduledMonitors(ctx context.Context) {
 		}
 		if _, err := s.RunMonitorTask(ctx, taskType, MonitorTriggerScheduled); err != nil {
 			if s.log != nil {
-				s.log.Warn("scheduled monitor run failed", "task_type", taskType, "error", err)
+				s.log.Warn("scheduled monitor run failed", "task_type", taskType, "trigger_type", MonitorTriggerScheduled, "interval_seconds", cfg.IntervalSeconds, "error", safelog.Text(err.Error(), 240))
 			}
 		}
 	}
@@ -1373,6 +1396,23 @@ func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {
 	}, nil
 }
 
+func stockV2FailureSample(items []UpdateFailure, limit int) []UpdateFailure {
+	if limit <= 0 || len(items) == 0 {
+		return nil
+	}
+	if len(items) < limit {
+		limit = len(items)
+	}
+	out := make([]UpdateFailure, 0, limit)
+	for _, item := range items[:limit] {
+		out = append(out, UpdateFailure{
+			Symbol: safelog.Text(item.Symbol, 80),
+			Reason: safelog.Text(item.Reason, 240),
+		})
+	}
+	return out
+}
+
 // Close 关闭服务，清理资源
 func (s *Service) Close() error {
 	// 停止后台任务
@@ -1390,7 +1430,7 @@ func (s *Service) Close() error {
 	if mcpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		if err := mcpServer.Shutdown(ctx); err != nil && s.log != nil {
-			s.log.Warn("stockv2 agent MCP loopback shutdown failed", "error", err)
+			s.log.Warn("stockv2 agent MCP loopback shutdown failed", "timeout", "2s", "error", safelog.Text(err.Error(), 240))
 		}
 		cancel()
 	}
@@ -1400,8 +1440,8 @@ func (s *Service) Close() error {
 	}
 	// 关闭底层 DB 连接
 	if s.store != nil {
-		if err := s.store.Close(); err != nil {
-			s.log.Warn("stockv2 store close failed", "error", err)
+		if err := s.store.Close(); err != nil && s.log != nil {
+			s.log.Warn("stockv2 store close failed", "error", safelog.Text(err.Error(), 240))
 		}
 	}
 	return nil

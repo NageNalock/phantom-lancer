@@ -6,7 +6,6 @@ import type {
   StockV2NewsLinkCandidate,
   StockV2NewsPipelineRunResult,
   StockV2NewsSourceOverview,
-  StockV2NewsSourceState,
   StockV2PagedResponse,
   StockV2RawNews,
   StockV2RawNewsTruncateResult,

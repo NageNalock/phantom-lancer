@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -206,6 +207,38 @@ func TestOpportunityServiceRejectsUnsafeAndMalformedSubmittedResults(t *testing.
 		},
 	}); !errors.Is(err, ErrInvalidOpportunityResult) {
 		t.Fatalf("semantic trace error=%v, want ErrInvalidOpportunityResult", err)
+	}
+
+	run4, err := svc.StartOpportunityDiscoveryRun(ctx, opp.ID, RequestStartOpportunityDiscoveryRun{})
+	if err != nil {
+		t.Fatalf("start fourth run: %v", err)
+	}
+	if _, err := svc.ProcessOpportunityDiscoverySubmittedResult(ctx, run4.ID, AgentTaskSubmittedResult{
+		OutputType: OpportunityDiscoveryOutputType,
+		Result: map[string]any{
+			"schema_version": OpportunityDiscoveryReportSchemaVersion,
+			"opportunity_id": opp.ID,
+			"summary":        "unknown symbol",
+			"candidates": []any{
+				map[string]any{
+					"symbol":            "999999",
+					"relation_type":     OpportunityRelationDirect,
+					"relevance_score":   90,
+					"evidence_score":    80,
+					"market_risk_score": 30,
+					"confidence":        0.8,
+				},
+			},
+		},
+	}); !errors.Is(err, ErrOpportunitySymbolNotFound) {
+		t.Fatalf("unknown symbol error=%v, want ErrOpportunitySymbolNotFound", err)
+	}
+	failedRun, err := svc.GetOpportunityDiscoveryRun(ctx, run4.ID)
+	if err != nil {
+		t.Fatalf("get failed run: %v", err)
+	}
+	if failedRun.Status != OpportunityDiscoveryRunStatusFailed || !strings.Contains(failedRun.ErrorMessage, "candidate symbol not found") {
+		t.Fatalf("failed run=%+v, want failed status with candidate symbol context", failedRun)
 	}
 }
 

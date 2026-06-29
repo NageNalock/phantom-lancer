@@ -377,12 +377,8 @@ function payloadItemId(event: CodexEvent): string {
   const payload = event.payload || {};
   const direct = firstString(payload.itemId, payload.item_id, payload.callId, payload.call_id);
   if (direct) return direct;
-  const item = payload.item;
-  if (item && typeof item === "object") {
-    const record = item as Record<string, unknown>;
-    return firstString(record.id, record.itemId, record.item_id, record.callId, record.call_id);
-  }
-  return "";
+  const item = recordValue(payload.item);
+  return item ? firstString(item.id, item.itemId, item.item_id, item.callId, item.call_id) : "";
 }
 
 function recordValue(value: unknown): Record<string, unknown> | null {

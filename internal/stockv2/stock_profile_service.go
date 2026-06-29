@@ -50,7 +50,7 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 	if err != nil && !errors.Is(err, ErrStockProfileNotFound) {
 		task.Status = StockProfileUpdateStatusFailed
 		task.BaseProfileStatus = StockProfileUpdateBaseStatusFailed
-		task.ErrorMessage = err.Error()
+		task.ErrorMessage = safelog.Text(err.Error(), 500)
 		task.FinishedAt = time.Now()
 		_, _ = s.store.CreateStockProfileUpdateTask(ctx, task)
 		return StockProfileUpdateResult{}, err
@@ -67,7 +67,7 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 	if err != nil {
 		task.Status = StockProfileUpdateStatusFailed
 		task.BaseProfileStatus = StockProfileUpdateBaseStatusFailed
-		task.ErrorMessage = err.Error()
+		task.ErrorMessage = safelog.Text(err.Error(), 500)
 		task.FinishedAt = time.Now()
 		_, _ = s.store.CreateStockProfileUpdateTask(ctx, task)
 		return StockProfileUpdateResult{}, err
@@ -83,7 +83,7 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 	if err != nil {
 		task.Status = StockProfileUpdateStatusFailed
 		task.BaseProfileStatus = StockProfileUpdateBaseStatusFailed
-		task.ErrorMessage = err.Error()
+		task.ErrorMessage = safelog.Text(err.Error(), 500)
 		task.FinishedAt = time.Now()
 		_, _ = s.store.CreateStockProfileUpdateTask(ctx, task)
 		return StockProfileUpdateResult{}, err
@@ -101,10 +101,10 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 		if runErr != nil {
 			task.AIDecision = stockProfileAIDecisionForError(runErr)
 			task.AIProfileStatus = stockProfileAITaskStatusForDecision(task.AIDecision)
-			task.AIProfileError = runErr.Error()
+			task.AIProfileError = safelog.Text(runErr.Error(), 500)
 			task.Status = StockProfileUpdateStatusPartial
 			if task.AIDecision != StockProfileAIDecisionSkippedNotConfigured || req.StrictAI {
-				task.ErrorMessage = runErr.Error()
+				task.ErrorMessage = safelog.Text(runErr.Error(), 500)
 			}
 			if req.StrictAI {
 				task.Status = StockProfileUpdateStatusFailed
@@ -178,7 +178,7 @@ func (s *Service) RebuildStockProfiles(ctx context.Context) (RebuildStockProfile
 				result.Failed++
 				result.FailedItems = append(result.FailedItems, UpdateFailure{
 					Symbol: instrument.Symbol,
-					Reason: err.Error(),
+					Reason: stockProfileSnippet(err.Error(), 240),
 				})
 				continue
 			}
@@ -348,15 +348,24 @@ func (s *Service) maybeRunBaseProfileMaintenance(ctx context.Context, trigger st
 	settings.BaseProfileLastMaintainAt = now
 	settings.BaseProfileNextMaintainAt = now.Add(interval)
 	if runErr != nil {
-		settings.BaseProfileLastMaintainResult = fmt.Sprintf("failed trigger=%s error=%s", trigger, runErr.Error())
+		settings.BaseProfileLastMaintainResult = fmt.Sprintf("failed trigger=%s error=%s", trigger, safelog.Text(runErr.Error(), 180))
 	} else if deepErr != nil {
 		settings.BaseProfileLastMaintainResult = fmt.Sprintf("partial trigger=%s total=%d success=%d failed=%d deepError=%s", trigger, result.Total, result.Success, result.Failed, stockProfileSnippet(deepErr.Error(), 180))
 	} else {
 		settings.BaseProfileLastMaintainResult = fmt.Sprintf("completed trigger=%s total=%d success=%d failed=%d deepCandidates=%d deepProcessed=%d deepAI=%d aiRoundsPerSymbol=%d deepFailed=%d", trigger, result.Total, result.Success, result.Failed, deepResult.CandidateCount, deepResult.ProcessedCount, deepResult.AICalledCount, deepResult.AIRoundsPerSymbol, deepResult.FailedCount)
 	}
 	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil && s.log != nil {
-		s.log.Warn("save base profile maintenance state failed", "error", err)
+		s.log.Warn("save base profile maintenance state failed", "trigger", trigger, "error", safelog.Text(err.Error(), 240))
 		return
+	}
+	if s.log != nil && (runErr != nil || deepErr != nil || result.Failed > 0 || deepResult.FailedCount > 0) {
+		errText := ""
+		if runErr != nil {
+			errText = runErr.Error()
+		} else if deepErr != nil {
+			errText = deepErr.Error()
+		}
+		s.log.Warn("stock profile maintenance finished with errors", "trigger", trigger, "total_count", result.Total, "success_count", result.Success, "failed_count", result.Failed, "failure_sample", stockV2FailureSample(result.FailedItems, 5), "deep_candidate_count", deepResult.CandidateCount, "deep_processed_count", deepResult.ProcessedCount, "deep_success_count", deepResult.SuccessCount, "deep_failed_count", deepResult.FailedCount, "deep_failure_sample", stockV2FailureSample(deepResult.FailedItems, 5), "error", safelog.Text(errText, 300))
 	}
 	s.settings = settings
 }
@@ -455,6 +464,9 @@ func (s *Service) prepareStockProfileSummaryAgentRun(ctx context.Context, profil
 func (s *Service) startStockProfileAgentRunAsync(ctx context.Context, run AgentRun, ledger AgentDecisionLedger, profile StockProfile, modelName string) {
 	defer func() {
 		if r := recover(); r != nil {
+			if s.log != nil {
+				s.log.Error("stock profile agent run panicked", "run_id", run.ID, "ledger_id", ledger.ID, "symbol", profile.Symbol, "market", profile.Market, "model", modelName, "panic", r)
+			}
 			s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("panic: %v", r))
 		}
 	}()
@@ -465,7 +477,7 @@ func (s *Service) startStockProfileAgentRunAsync(ctx context.Context, run AgentR
 	running := run
 	running.Status = AgentRunStatusRunning
 	if _, err := s.store.UpdateAgentRun(ctx, running); err != nil && s.log != nil {
-		s.log.Warn("update stock profile agent run to running failed", "run_id", run.ID, "error", err)
+		s.log.Warn("update stock profile agent run to running failed", "run_id", run.ID, "ledger_id", ledger.ID, "symbol", profile.Symbol, "market", profile.Market, "model", modelName, "error", safelog.Text(err.Error(), 240))
 	}
 	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
 	execOutput, execErr := s.agentExecutor.ExecuteStockProfileSummary(ctx, taskID, profile, modelName)
@@ -521,7 +533,7 @@ func (s *Service) markStockProfileAIEnhancementFailed(ctx context.Context, run A
 	profile, err := s.store.GetStockProfile(ctx, strings.TrimSpace(run.TriggerObjectID))
 	if err != nil {
 		if s.log != nil {
-			s.log.Warn("mark stock profile ai failed: get profile failed", "run_id", run.ID, "symbol", run.TriggerObjectID, "error", err)
+			s.log.Warn("mark stock profile ai failed: get profile failed", "run_id", run.ID, "task_type", run.TaskType, "symbol", run.TriggerObjectID, "error", safelog.Text(err.Error(), 240))
 		}
 		return
 	}
@@ -529,7 +541,7 @@ func (s *Service) markStockProfileAIEnhancementFailed(ctx context.Context, run A
 	profile.AIProfileError = safelog.Text(message, 500)
 	profile.AIProfileUpdatedAt = time.Now()
 	if _, err := s.store.UpsertStockProfile(ctx, profile); err != nil && s.log != nil {
-		s.log.Warn("mark stock profile ai failed: save profile failed", "run_id", run.ID, "symbol", run.TriggerObjectID, "error", err)
+		s.log.Warn("mark stock profile ai failed: save profile failed", "run_id", run.ID, "task_type", run.TaskType, "symbol", run.TriggerObjectID, "error", safelog.Text(err.Error(), 240))
 	}
 	s.markStockProfileUpdateTaskAIResult(ctx, run.ID, StockProfileUpdateStatusPartial, StockProfileAIStatusFailed, message)
 }

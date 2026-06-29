@@ -30,7 +30,7 @@ type Service struct {
 	Log       *slog.Logger
 	refreshMu sync.Mutex
 	refreshes map[string]*refreshCall
-	bgMu      sync.Mutex       // guards bgCancel
+	bgMu      sync.Mutex // guards bgCancel
 	bgCancel  context.CancelFunc
 	bgWg      sync.WaitGroup
 }
@@ -550,7 +550,7 @@ func (s *Service) refreshAccountAccessTokenOnce(ctx context.Context, secret stor
 	if nextRefresh == "" {
 		nextRefresh = secret.RefreshToken
 	}
-	return s.Store.UpdateCodexGatewayAccountTokens(ctx, secret.ID, strings.TrimSpace(tokens.AccessToken), nextRefresh, expiresAtFromSeconds(tokens.ExpiresIn))
+	return s.Store.UpdateCodexGatewayAccountTokens(ctx, secret.ID, strings.TrimSpace(tokens.AccessToken), nextRefresh, ExpiresAtFromSeconds(tokens.ExpiresIn))
 }
 
 func (s *Service) markRefreshFailure(ctx context.Context, id string, err error) (storage.CodexGatewayAccount, error) {
@@ -659,7 +659,7 @@ func tokenRefreshDue(account storage.CodexGatewayAccountSecret, margin time.Dura
 	return !expiresAt.After(now.Add(margin)), expired
 }
 
-func expiresAtFromSeconds(seconds int) string {
+func ExpiresAtFromSeconds(seconds int) string {
 	if seconds <= 0 {
 		return ""
 	}

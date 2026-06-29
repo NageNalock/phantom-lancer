@@ -283,7 +283,7 @@ func (s *Service) RunEmbeddingMaintenanceBatch(ctx context.Context, req RequestR
 		}
 		if err := validateEmbeddingDimensions(model, len(vector)); err != nil {
 			result.Failed++
-			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: source.ObjectID, Reason: err.Error()})
+			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: source.ObjectID, Reason: safelog.Text(err.Error(), 240)})
 			continue
 		}
 		asset := EmbeddingAsset{
@@ -331,6 +331,9 @@ func (s *Service) RunEmbeddingMaintenanceBatch(ctx context.Context, req RequestR
 		result.Status = "partial"
 	}
 	s.recordEmbeddingMaintenanceResult(ctx, cfg, result)
+	if result.Failed > 0 && s.log != nil {
+		s.log.Warn("stockv2 embedding maintenance completed with failures", "model_id", model.ID, "provider_id", model.ProviderID, "object_types", result.ObjectTypes, "force", req.Force, "limit", limit, "status", result.Status, "total_count", result.Total, "success_count", result.Success, "skipped_count", result.Skipped, "failed_count", result.Failed, "failure_sample", stockV2FailureSample(result.FailedItems, 5))
+	}
 	return result, nil
 }
 
@@ -428,7 +431,7 @@ func (s *Service) maybeRunEmbeddingMaintenance(ctx context.Context) {
 		cfg.LastMaintainResult = "failed: " + safelog.Text(err.Error(), 240)
 		_, _ = s.store.UpsertEmbeddingConfig(context.Background(), cfg)
 		if s.log != nil {
-			s.log.Warn("stockv2 embedding maintenance failed", "error", safelog.Text(err.Error(), 300))
+			s.log.Warn("stockv2 embedding maintenance failed", "model_id", cfg.EmbeddingModelID, "object_types", normalizeEmbeddingObjectTypes(nil), "limit", cfg.MaintainBatchSize, "error", safelog.Text(err.Error(), 300))
 		}
 	}
 }

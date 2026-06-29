@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../app/App";
 import type { ApiError, AppData, ImageAsset, ImageGenerationJob, ImagePrompt, ObjectStorageProfile } from "../app/types";
 import { friendlyError } from "../api/client";
-import { Button, Panel, Pill, SubTabs, useDangerConfirm } from "../components/ui";
+import { Pill, SubTabs, useDangerConfirm } from "../components/ui";
 import { defaultImageSettings, defaultImageStorageSettings, formatDate } from "../domain/labels";
 import { useQueryParamState } from "../hooks/useQueryParamState";
 import { GeneratePanel, HistoryPanel, ImagePromptFormState, ImageStorageSettingsPanel, ImagesInspector, ImagesTabs, LibraryPanel, MediaProviderSettingsPanel, PromptLibraryPanel } from "../images/components";
@@ -13,7 +13,6 @@ import type {
   ImageLibraryScope,
   ImagePrivateStatus,
   ImagePromptDraft,
-  ImageSettingsDraft,
   ImageStorageSettingsDraft,
   ImageUploadResponse,
   ImagesTab,
@@ -28,7 +27,7 @@ import type {
   ProviderStatus,
   ProvidersStatus,
 } from "../images/types";
-import { DURATION_PRESETS, MEDIA_TYPES, PROVIDERS, VIDEO_MODES } from "../images/types";
+import { MEDIA_TYPES, PROVIDERS, VIDEO_MODES } from "../images/types";
 
 const IMAGE_TAB_IDS: ImagesTab[] = ["generate", "presets", "library", "history", "settings"];
 const IMAGE_CLEAR_KEYS = ["codex", "codexInbox", "codexRuntime", "gateway", "docker", "settings"];
@@ -725,32 +724,6 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
     } else if (latestJob) {
       restoreJobToGenerate("legacy", latestJob);
       actions.setToast("参数已恢复，确认后点击生成按钮提交", "good");
-    }
-  }
-
-  async function saveSettings(draft: ImageSettingsDraft) {
-    setBusy("settings");
-    try {
-      await actions.api("/api/images/settings", {
-        method: "PUT",
-        csrf: actions.csrf,
-        body: {
-          xaiApiKey: draft.xaiApiKey,
-          clearApiKey: draft.clearApiKey,
-          defaultModel: draft.defaultModel,
-          defaultResponseFormat: draft.defaultResponseFormat,
-          defaultResolution: draft.defaultResolution,
-          defaultAspectRatio: draft.defaultAspectRatio,
-          historyRetention: Number(draft.historyRetention || 500),
-        },
-      });
-      await actions.refreshImages();
-      await fetchProvidersStatus();
-      actions.setToast("多媒体设置已保存", "good");
-    } catch (error) {
-      actions.setToast(friendlyError(error), "danger");
-    } finally {
-      setBusy("");
     }
   }
 
@@ -1454,7 +1427,6 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
               prompts={prompts}
               providerDefaults={providerDefaults}
               settings={settings}
-              storageSettings={storageSettings}
               videoReferenceRef={videoReferenceRef}
             />
           ) : null}
@@ -1482,9 +1454,7 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
                mediaAssets={scopedLibraryMediaAssets}
                mediaJobs={allMediaJobs}
                legacyJobs={historyJobs}
-               mediaType={mediaType}
               onArchive={(asset) => void archiveAsset(asset)}
-              onArchiveMedia={(asset) => void archiveMediaAsset(asset)}
               onBulkDeleteResources={(resources) => bulkDeleteResources(resources)}
               onBulkDownloadComplete={(n) => actions.setToast(`已触发 ${n} 个下载`, "good")}
               onDelete={(asset) => void deleteAsset(asset)}
@@ -1492,9 +1462,6 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
               onGoToGenerate={() => setActiveTab("generate")}
               onGoToSettings={() => setActiveTab("settings")}
               onLockPrivate={() => void lockPrivateCollection()}
-              onMarkPrivate={(asset, nextPrivate) => void setAssetPrivate(asset, nextPrivate)}
-              onMarkPrivateMedia={(asset, nextPrivate) => void setMediaAssetPrivate(asset, nextPrivate)}
-              onMediaTypeChange={setMediaType}
               onOpenJob={(jobId, kind) => openJobFromAsset(jobId, kind)}
               pagination={{
                 ...libraryPagination,
@@ -1625,7 +1592,6 @@ export function ImagesView({ actions, data }: { actions: AppActions; data: AppDa
           libraryScope={activeTab === "library" ? libraryScope : "public"}
           mediaAsset={selectedMediaAsset}
           mediaAssets={inspectorMediaAssets}
-          mediaType={mediaType}
           onArchive={(asset) => void archiveAsset(asset)}
           onArchiveMedia={(asset) => void archiveMediaAsset(asset)}
           onDelete={(asset) => void deleteAsset(asset)}

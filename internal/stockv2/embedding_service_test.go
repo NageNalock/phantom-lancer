@@ -510,10 +510,12 @@ func configureEmbeddingModelWithDimensions(t *testing.T, svc *Service, modelName
 	}
 	modelID := model.ID
 	enabled := true
+	autoMaintain := false
 	rateLimit := 0
 	if _, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{
 		EmbeddingModelID:    &modelID,
 		Enabled:             &enabled,
+		AutoMaintainEnabled: &autoMaintain,
 		MaintainRateLimitMs: &rateLimit,
 	}); err != nil {
 		t.Fatalf("bind embedding model: %v", err)

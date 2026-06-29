@@ -165,6 +165,9 @@ func (s *Service) RunMonitorTask(ctx context.Context, taskType, triggerType stri
 	if _, err := s.store.UpdateMonitorRun(ctx, final); err != nil {
 		return final, err
 	}
+	if s.log != nil && (final.Status == MonitorRunStatusFailed || final.FailedCount > 0) {
+		s.log.Warn("stockv2 monitor run finished with errors", "run_id", final.ID, "task_type", final.TaskType, "trigger_type", final.TriggerType, "status", final.Status, "scanned_count", final.ScannedCount, "success_count", final.SuccessCount, "failed_count", final.FailedCount, "hit_count", final.HitCount, "review_count", final.ReviewCount, "alert_count", final.AlertCount, "error", safelog.Text(final.ErrorMessage, 300))
+	}
 	return final, nil
 }
 
@@ -588,7 +591,7 @@ func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cf
 	})
 	if err != nil {
 		run.Status = MonitorRunStatusFailed
-		run.ErrorMessage = err.Error()
+		run.ErrorMessage = safelog.Text(err.Error(), 500)
 		run.FinishedAt = time.Now()
 		return run
 	}
@@ -760,7 +763,7 @@ func (s *Service) runNewsStrategyMonitor(ctx context.Context, run MonitorRun, cf
 	candidates, err := s.store.ListPendingNewsLinkCandidates(ctx, newsMonitorBatchLimit)
 	if err != nil {
 		run.Status = MonitorRunStatusFailed
-		run.ErrorMessage = err.Error()
+		run.ErrorMessage = safelog.Text(err.Error(), 500)
 		run.FinishedAt = time.Now()
 		return run
 	}
@@ -768,14 +771,14 @@ func (s *Service) runNewsStrategyMonitor(ctx context.Context, run MonitorRun, cf
 	portfolioBySymbol, err := s.newsMonitorPortfolioBySymbol(ctx)
 	if err != nil {
 		run.Status = MonitorRunStatusFailed
-		run.ErrorMessage = err.Error()
+		run.ErrorMessage = safelog.Text(err.Error(), 500)
 		run.FinishedAt = time.Now()
 		return run
 	}
 	strategyBySymbol, err := s.newsMonitorActiveStrategyBySymbol(ctx)
 	if err != nil {
 		run.Status = MonitorRunStatusFailed
-		run.ErrorMessage = err.Error()
+		run.ErrorMessage = safelog.Text(err.Error(), 500)
 		run.FinishedAt = time.Now()
 		return run
 	}
@@ -845,7 +848,7 @@ func (s *Service) runPortfolioRiskMonitor(ctx context.Context, run MonitorRun, c
 	portfolios, err := s.store.ListPortfolios(ctx)
 	if err != nil {
 		run.Status = MonitorRunStatusFailed
-		run.ErrorMessage = err.Error()
+		run.ErrorMessage = safelog.Text(err.Error(), 500)
 		run.FinishedAt = time.Now()
 		return run
 	}
@@ -981,7 +984,7 @@ func (s *Service) RunLatestQuoteRefreshTask(ctx context.Context, triggerType str
 	state.FailedCount = result.FailedCount
 	if err != nil {
 		state.Status = MonitorRunStatusFailed
-		state.ErrorMessage = err.Error()
+		state.ErrorMessage = safelog.Text(err.Error(), 500)
 	} else {
 		state.Status = MonitorRunStatusCompleted
 	}
@@ -990,6 +993,13 @@ func (s *Service) RunLatestQuoteRefreshTask(ctx context.Context, triggerType str
 			return state, err
 		}
 		return state, saveErr
+	}
+	if s.log != nil && (err != nil || result.FailedCount > 0) {
+		errText := ""
+		if err != nil {
+			errText = err.Error()
+		}
+		s.log.Warn("stockv2 latest quote refresh task finished with errors", "task_type", state.TaskType, "trigger_type", state.TriggerType, "status", state.Status, "scope_summary", state.ScopeSummary, "scanned_count", state.ScannedCount, "success_count", state.SuccessCount, "failed_count", state.FailedCount, "failure_sample", stockV2FailureSample(result.FailedItems, 5), "error", safelog.Text(errText, 300))
 	}
 	return state, err
 }
