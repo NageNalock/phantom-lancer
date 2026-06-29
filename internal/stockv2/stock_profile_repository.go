@@ -123,6 +123,66 @@ func (s *Store) CountStockProfiles(ctx context.Context, filter StockProfileListF
 	return total, wrapError(err, "count stock profiles")
 }
 
+func (s *Store) ListStockProfileSummaries(ctx context.Context, symbols []string) (map[string]StockProfileSummary, error) {
+	symbols = compactStringList(symbols, 100)
+	if len(symbols) == 0 {
+		return map[string]StockProfileSummary{}, nil
+	}
+	args := make([]any, 0, len(symbols))
+	for _, symbol := range symbols {
+		args = append(args, symbol)
+	}
+	rows, err := s.assetDB().QueryContext(ctx, `
+		SELECT symbol, COALESCE(profile_text,''), COALESCE(business_summary_zh,''),
+		       COALESCE(business_summary,''), COALESCE(business_summary_en,''),
+		       COALESCE(ai_profile_status,'missing'), COALESCE(ai_profile_model,''),
+		       COALESCE(ai_profile_confidence,0), ai_profile_updated_at, updated_at
+		FROM stockv2_stock_profiles
+		WHERE symbol IN (`+sqlPlaceholders(len(symbols))+`)
+	`, args...)
+	if err != nil {
+		return nil, wrapError(err, "list stock profile summaries")
+	}
+	defer rows.Close()
+
+	out := make(map[string]StockProfileSummary, len(symbols))
+	for rows.Next() {
+		var item StockProfileSummary
+		var profileText, summaryZh, summary, summaryEn string
+		var aiUpdatedAt sql.NullTime
+		if err := rows.Scan(
+			&item.Symbol,
+			&profileText,
+			&summaryZh,
+			&summary,
+			&summaryEn,
+			&item.AIProfileStatus,
+			&item.AIProfileModel,
+			&item.AIProfileConfidence,
+			&aiUpdatedAt,
+			&item.UpdatedAt,
+		); err != nil {
+			return nil, wrapError(err, "scan stock profile summary")
+		}
+		item.Status = "ready"
+		if strings.TrimSpace(profileText) == "" {
+			item.Status = "partial"
+		}
+		item.BusinessSummary = firstNonEmpty(summaryZh, summary, summaryEn)
+		if aiUpdatedAt.Valid {
+			item.AIProfileUpdatedAt = aiUpdatedAt.Time
+		}
+		if item.AIProfileStatus == "" {
+			item.AIProfileStatus = StockProfileAIStatusMissing
+		}
+		out[item.Symbol] = item
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(err, "iterate stock profile summaries")
+	}
+	return out, nil
+}
+
 func (s *Store) CreateStockProfileUpdateTask(ctx context.Context, task StockProfileUpdateTask) (StockProfileUpdateTask, error) {
 	now := time.Now()
 	if task.ID == "" {

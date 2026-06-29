@@ -18,7 +18,35 @@ import { StockV2ProfileRecords, StockV2ProfileSettings } from "./StockV2ProfileW
 import { StockV2Settings } from "./StockV2Settings";
 
 const PAGE_SIZE = 50;
+const SUPPLEMENT_CACHE_TTL_MS = 60_000;
 type MasterDataView = "instruments" | "maintenance" | "maintenanceSettings" | "profileSettings" | "profileRecords";
+type SupplementCacheEntry<T> = { value: T; expiresAt: number };
+
+const profileSummaryCache = new Map<string, SupplementCacheEntry<StockV2StockProfileSummary>>();
+const dailyQualityCache = new Map<string, SupplementCacheEntry<StockV2DailyBarsQuality>>();
+
+function readFreshCache<T>(cache: Map<string, SupplementCacheEntry<T>>, key: string, now = Date.now()): T | undefined {
+  const item = cache.get(key);
+  if (!item) return undefined;
+  if (item.expiresAt <= now) {
+    cache.delete(key);
+    return undefined;
+  }
+  return item.value;
+}
+
+function writeFreshCache<T>(cache: Map<string, SupplementCacheEntry<T>>, key: string, value: T) {
+  cache.set(key, { value, expiresAt: Date.now() + SUPPLEMENT_CACHE_TTL_MS });
+}
+
+function clearInstrumentSupplementCache() {
+  profileSummaryCache.clear();
+  dailyQualityCache.clear();
+}
+
+function uniqueSymbols(items: StockV2Instrument[]) {
+  return Array.from(new Set(items.map((item) => item.symbol).filter(Boolean)));
+}
 
 // 生成页码数组：首页、当前页附近、末页，用省略号间隔
 function buildPageNumbers(currentPage: number, totalPages: number): (number | "...")[] {
@@ -79,6 +107,8 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   const [selectedInst, setSelectedInst] = useState<StockV2Instrument | null>(null);
   const [profileSummaries, setProfileSummaries] = useState<Record<string, StockV2StockProfileSummary>>({});
   const [dailyQualities, setDailyQualities] = useState<Record<string, StockV2DailyBarsQuality>>({});
+  const [supplementLoading, setSupplementLoading] = useState(false);
+  const supplementRequestRef = useRef(0);
 
   const portfolios = stockv2.portfolios || [];
   const isSearching = searchQuery.trim().length > 0;
@@ -126,7 +156,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         });
         setPage(0);
         setTotalCount(data.total ?? items.length);
-        await Promise.all([loadProfileSummaries(items), loadDailyBarQualities(items)]);
+        void loadSupplementalColumns(items);
       } else {
         params.set("limit", String(PAGE_SIZE));
         params.set("offset", String(pageNum * PAGE_SIZE));
@@ -142,7 +172,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         if (data.total !== undefined) {
           setTotalCount(data.total);
         }
-        await Promise.all([loadProfileSummaries(items), loadDailyBarQualities(items)]);
+        void loadSupplementalColumns(items);
       }
     } catch (e) {
       actions.setToast(`加载失败：${friendlyError(e)}`, "danger");
@@ -151,35 +181,78 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
     }
   }
 
-  async function loadProfileSummaries(items: StockV2Instrument[]) {
-    const symbols = items.map((item) => item.symbol).filter(Boolean);
+  async function loadSupplementalColumns(items: StockV2Instrument[]) {
+    const requestID = ++supplementRequestRef.current;
+    const symbols = uniqueSymbols(items);
     if (symbols.length === 0) {
       setProfileSummaries({});
+      setDailyQualities({});
       return;
     }
-    try {
-      const res = await actions.api<{ items?: Record<string, StockV2StockProfileSummary> }>(
-        `/api/stockv2/profiles/summaries?symbols=${encodeURIComponent(symbols.join(","))}`,
-      );
-      setProfileSummaries(res.items ?? {});
-    } catch {
-      setProfileSummaries({});
-    }
-  }
 
-  async function loadDailyBarQualities(items: StockV2Instrument[]) {
-    const symbols = items.map((item) => item.symbol).filter(Boolean);
-    if (symbols.length === 0) {
-      setDailyQualities({});
+    const cachedProfiles: Record<string, StockV2StockProfileSummary> = {};
+    const cachedQualities: Record<string, StockV2DailyBarsQuality> = {};
+    const missingProfileSymbols: string[] = [];
+    const missingQualitySymbols: string[] = [];
+    const now = Date.now();
+
+    for (const symbol of symbols) {
+      const profile = readFreshCache(profileSummaryCache, symbol, now);
+      if (profile) {
+        cachedProfiles[symbol] = profile;
+      } else {
+        missingProfileSymbols.push(symbol);
+      }
+      const quality = readFreshCache(dailyQualityCache, `none:${symbol}`, now);
+      if (quality) {
+        cachedQualities[symbol] = quality;
+      } else {
+        missingQualitySymbols.push(symbol);
+      }
+    }
+
+    setProfileSummaries(cachedProfiles);
+    setDailyQualities(cachedQualities);
+    if (missingProfileSymbols.length === 0 && missingQualitySymbols.length === 0) {
+      setSupplementLoading(false);
       return;
     }
+
+    setSupplementLoading(true);
     try {
-      const res = await actions.api<{ items?: Record<string, StockV2DailyBarsQuality> }>(
-        `/api/stockv2/history/daily/qualities?adjusted=none&symbols=${encodeURIComponent(symbols.join(","))}`,
-      );
-      setDailyQualities(res.items ?? {});
+      const [profilesRes, qualitiesRes] = await Promise.all([
+        missingProfileSymbols.length > 0
+          ? actions.api<{ items?: Record<string, StockV2StockProfileSummary> }>(
+              `/api/stockv2/profiles/summaries?symbols=${encodeURIComponent(missingProfileSymbols.join(","))}`,
+            )
+          : Promise.resolve({ items: {} }),
+        missingQualitySymbols.length > 0
+          ? actions.api<{ items?: Record<string, StockV2DailyBarsQuality> }>(
+              `/api/stockv2/history/daily/qualities?adjusted=none&symbols=${encodeURIComponent(missingQualitySymbols.join(","))}`,
+            )
+          : Promise.resolve({ items: {} }),
+      ]);
+      const profiles = profilesRes.items ?? {};
+      const qualities = qualitiesRes.items ?? {};
+      for (const [symbol, profile] of Object.entries(profiles)) {
+        writeFreshCache(profileSummaryCache, symbol, profile);
+      }
+      for (const [symbol, quality] of Object.entries(qualities)) {
+        writeFreshCache(dailyQualityCache, `none:${symbol}`, quality);
+      }
+      if (requestID === supplementRequestRef.current) {
+        setProfileSummaries({ ...cachedProfiles, ...profiles });
+        setDailyQualities({ ...cachedQualities, ...qualities });
+      }
     } catch {
-      setDailyQualities({});
+      if (requestID === supplementRequestRef.current) {
+        setProfileSummaries(cachedProfiles);
+        setDailyQualities(cachedQualities);
+      }
+    } finally {
+      if (requestID === supplementRequestRef.current) {
+        setSupplementLoading(false);
+      }
     }
   }
 
@@ -197,6 +270,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   useEffect(() => {
     const isRunning = !!runningJob;
     if (wasRunningRef.current && !isRunning) {
+      clearInstrumentSupplementCache();
       void loadPage(0);
     }
     wasRunningRef.current = isRunning;
@@ -417,6 +491,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
                       onClick={() => setSelectedInst(inst)}
                       dailyQuality={dailyQualities[inst.symbol]}
                       profile={profileSummaries[inst.symbol]}
+                      supplementLoading={supplementLoading}
                     />
                   ))}
                 </tbody>
@@ -665,12 +740,14 @@ function StockRow({
   onAdd,
   onClick,
   profile,
+  supplementLoading,
 }: {
   dailyQuality?: StockV2DailyBarsQuality;
   inst: StockV2Instrument;
   onAdd: () => void;
   onClick?: () => void;
   profile?: StockV2StockProfileSummary;
+  supplementLoading?: boolean;
 }) {
   const marketLabel = { SH: "沪市", SZ: "深市", BJ: "北市" }[inst.market] || inst.market;
   const statusTone = inst.status === "active" ? "good" : "neutral";
@@ -701,19 +778,23 @@ function StockRow({
       </td>
       <td className="py-2 pr-4">
         <div className="grid gap-1">
-          <Pill tone={dailyTone}>{stockV2DailyBarsQualityLabel(dailyQuality)}</Pill>
+          <Pill tone={dailyQuality ? dailyTone : "neutral"}>
+            {dailyQuality ? stockV2DailyBarsQualityLabel(dailyQuality) : supplementLoading ? "读取中" : "未评估"}
+          </Pill>
           <span className="text-xs text-[var(--muted)]">
             {dailyQuality?.latestDate ? `最近 ${dailyQuality.latestDate}` : "本地未覆盖"}
           </span>
         </div>
       </td>
       <td className="max-w-[360px] py-2 pr-4 text-xs text-[var(--muted-strong)]">
-        <span className="block max-h-10 overflow-hidden leading-5">{profile?.businessSummary || "-"}</span>
+        <span className="block max-h-10 overflow-hidden leading-5">{profile?.businessSummary || (supplementLoading ? "读取中..." : "-")}</span>
       </td>
       <td className="py-2 pr-4">
         <div className="flex flex-wrap gap-1">
-          <Pill tone={profileTone}>{profile?.status === "ready" ? "基础" : profile?.status === "partial" ? "部分" : "缺失"}</Pill>
-          <Pill tone={aiTone}>AI {profile?.aiProfileStatus || "missing"}</Pill>
+          <Pill tone={profile ? profileTone : "neutral"}>
+            {profile ? profile.status === "ready" ? "基础" : profile.status === "partial" ? "部分" : "缺失" : supplementLoading ? "读取中" : "缺失"}
+          </Pill>
+          <Pill tone={profile ? aiTone : "neutral"}>AI {profile?.aiProfileStatus || (supplementLoading ? "读取中" : "missing")}</Pill>
         </div>
       </td>
       <td className="py-2 pr-4">

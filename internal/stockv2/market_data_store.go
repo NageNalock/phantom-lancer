@@ -464,6 +464,61 @@ func (s *MarketDataStore) GetDailyBarsStats(ctx context.Context, symbol, adjuste
 	return rowCount, earliest, latest, source, lastError, nil
 }
 
+func (s *MarketDataStore) GetDailyBarsStatsBatch(ctx context.Context, symbols []string, adjusted string) (map[string]dailyBarsStats, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("market data store is not initialized")
+	}
+	symbols = compactStringList(symbols, 100)
+	if len(symbols) == 0 {
+		return map[string]dailyBarsStats{}, nil
+	}
+	args := make([]any, 0, len(symbols)+3)
+	args = append(args, adjusted, adjusted, adjusted)
+	for _, symbol := range symbols {
+		args = append(args, symbol)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT d.symbol,
+		       COUNT(*),
+		       COALESCE(strftime(MIN(d.trade_date), '%Y-%m-%d'),''),
+		       COALESCE(strftime(MAX(d.trade_date), '%Y-%m-%d'),''),
+		       COALESCE((SELECT source FROM stockv2_daily_bars s2
+		                 WHERE s2.symbol = d.symbol AND s2.adjusted = ?
+		                 ORDER BY s2.fetched_at DESC LIMIT 1),''),
+		       COALESCE((SELECT error_message FROM stockv2_daily_bars e2
+		                 WHERE e2.symbol = d.symbol AND e2.adjusted = ?
+		                   AND COALESCE(e2.error_message, '') != ''
+		                 ORDER BY e2.fetched_at DESC LIMIT 1),'')
+		FROM stockv2_daily_bars d
+		WHERE d.adjusted = ? AND d.symbol IN (`+sqlPlaceholders(len(symbols))+`)
+		GROUP BY d.symbol
+	`, args...)
+	if err != nil {
+		return nil, wrapError(err, "get duckdb daily bars stats batch")
+	}
+	defer rows.Close()
+
+	out := make(map[string]dailyBarsStats, len(symbols))
+	for rows.Next() {
+		var item dailyBarsStats
+		if err := rows.Scan(
+			&item.Symbol,
+			&item.RowCount,
+			&item.Earliest,
+			&item.Latest,
+			&item.Source,
+			&item.LastError,
+		); err != nil {
+			return nil, wrapError(err, "scan daily bars stats batch")
+		}
+		out[item.Symbol] = item
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(err, "iterate daily bars stats batch")
+	}
+	return out, nil
+}
+
 func (s *MarketDataStore) CountDailyBars(ctx context.Context) (int, error) {
 	if s == nil || s.db == nil {
 		return 0, nil

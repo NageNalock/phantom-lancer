@@ -28,6 +28,23 @@ func (s *Store) GetDailyBarsStats(ctx context.Context, symbol, adjusted string) 
 	return s.marketDB.GetDailyBarsStats(ctx, symbol, adjusted)
 }
 
+type dailyBarsStats struct {
+	Symbol    string
+	RowCount  int
+	Earliest  string
+	Latest    string
+	Source    string
+	LastError string
+}
+
+func (s *Store) GetDailyBarsStatsBatch(ctx context.Context, symbols []string, adjusted string) (map[string]dailyBarsStats, error) {
+	symbols = compactStringList(symbols, 100)
+	if len(symbols) == 0 {
+		return map[string]dailyBarsStats{}, nil
+	}
+	return s.marketDB.GetDailyBarsStatsBatch(ctx, symbols, adjusted)
+}
+
 // migrateLegacyDailyBars 把早期写在 SQLite 里的日 K 明细迁入 DuckDB。
 // 任务历史/运行中监控仍在 SQLite，因此只迁移 stockv2_daily_bars 明细表。
 func (s *Store) migrateLegacyDailyBars(ctx context.Context) error {
@@ -329,6 +346,60 @@ func (s *Store) GetLatestDailyBarJobError(ctx context.Context, symbol, adjusted 
 		return "", wrapError(err, "iterate daily bar job errors")
 	}
 	return "", nil
+}
+
+func (s *Store) GetLatestDailyBarJobErrors(ctx context.Context, symbols []string, adjusted string) (map[string]string, error) {
+	symbols = compactStringList(symbols, 100)
+	if len(symbols) == 0 {
+		return map[string]string{}, nil
+	}
+	wanted := make(map[string]bool, len(symbols))
+	for _, symbol := range symbols {
+		wanted[symbol] = true
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT COALESCE(symbol,''), COALESCE(error_message,''), COALESCE(failed_items,'')
+		FROM stockv2_daily_bar_jobs
+		WHERE COALESCE(adjusted,'') = ?
+		  AND (status = 'failed' OR failed_count > 0)
+		ORDER BY created_at DESC
+		LIMIT 100
+	`, adjusted)
+	if err != nil {
+		return nil, wrapError(err, "get latest daily bar job errors")
+	}
+	defer rows.Close()
+
+	out := make(map[string]string, len(symbols))
+	for rows.Next() {
+		var jobSymbol, errorMessage, failedItemsJSON string
+		if err := rows.Scan(&jobSymbol, &errorMessage, &failedItemsJSON); err != nil {
+			return nil, wrapError(err, "scan daily bar job error")
+		}
+		if wanted[jobSymbol] && errorMessage != "" {
+			if _, ok := out[jobSymbol]; !ok {
+				out[jobSymbol] = errorMessage
+			}
+		}
+		if failedItemsJSON == "" || failedItemsJSON == "[]" {
+			continue
+		}
+		var failedItems []UpdateFailure
+		if err := json.Unmarshal([]byte(failedItemsJSON), &failedItems); err != nil {
+			continue
+		}
+		for _, item := range failedItems {
+			if wanted[item.Symbol] && item.Reason != "" {
+				if _, ok := out[item.Symbol]; !ok {
+					out[item.Symbol] = item.Reason
+				}
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(err, "iterate daily bar job errors")
+	}
+	return out, nil
 }
 
 // PruneDailyBarJobs 清理日 K 任务记录，保留最近 keep 条
