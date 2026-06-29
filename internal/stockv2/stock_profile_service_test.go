@@ -216,7 +216,17 @@ func TestUpdateStockProfileSkipsAIWhenInputUnchanged(t *testing.T) {
 	if !first.Task.BaseInputChanged || first.Task.AIDecision != StockProfileAIDecisionCalled || first.AgentRun == nil {
 		t.Fatalf("first result = %+v, want changed and ai called", first)
 	}
+	if first.Task.Status != StockProfileUpdateStatusRunning || first.Task.BaseProfileStatus != StockProfileUpdateBaseStatusReady || first.Task.AIProfileStatus != StockProfileUpdateAIStatusRunning {
+		t.Fatalf("first task status = %+v, want base ready and ai running", first.Task)
+	}
 	_ = waitAgentRunTerminal(t, svc, first.AgentRun.ID)
+	firstTasks, err := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Symbol: "300750", Limit: 1})
+	if err != nil {
+		t.Fatalf("list first profile update task: %v", err)
+	}
+	if len(firstTasks) != 1 || firstTasks[0].Status != StockProfileUpdateStatusCompleted || firstTasks[0].AIProfileStatus != StockProfileAIStatusReady {
+		t.Fatalf("first persisted task = %+v, want completed with ai ready", firstTasks)
+	}
 
 	second, err := svc.UpdateStockProfile(ctx, RequestUpdateStockProfile{Symbol: "300750", TriggerSource: StockProfileUpdateTriggerManual, RequestedBy: "test"})
 	if err != nil {
@@ -224,6 +234,9 @@ func TestUpdateStockProfileSkipsAIWhenInputUnchanged(t *testing.T) {
 	}
 	if second.Task.BaseInputChanged || second.Task.AIDecision != StockProfileAIDecisionSkippedUnchanged || second.AgentRun != nil {
 		t.Fatalf("second result = %+v, want unchanged and ai skipped", second)
+	}
+	if second.Task.BaseProfileStatus != StockProfileUpdateBaseStatusReady || second.Task.AIProfileStatus != StockProfileAIStatusReady {
+		t.Fatalf("second task profile status = %+v, want base ready and ai ready", second.Task)
 	}
 	tasks, err := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Symbol: "300750", Limit: 10})
 	if err != nil {
@@ -412,7 +425,7 @@ func TestSavingBaseProfileSettingsStartsMissingBackgroundRunner(t *testing.T) {
 	}
 }
 
-func TestAutomaticDeepStockProfileUpdateStopsAtAIBudget(t *testing.T) {
+func TestAutomaticDeepStockProfileUpdateUsesPerSymbolAIRounds(t *testing.T) {
 	ctx := context.Background()
 	businessLine := "动力电池系统"
 	svc, cleanup := newStockProfileTestServiceWithClient(t, stockProfileF10TestClient(&businessLine))
@@ -430,17 +443,17 @@ func TestAutomaticDeepStockProfileUpdateStopsAtAIBudget(t *testing.T) {
 	}
 
 	result, err := svc.runAutomaticDeepStockProfileUpdate(ctx, "test", stockProfileDeepUpdateOptions{
-		SymbolBudget: 3,
-		AIBudget:     1,
-		RateLimit:    0,
-		Now:          time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC),
-		RequestedBy:  "test",
+		SymbolBudget:      3,
+		AIRoundsPerSymbol: 1,
+		RateLimit:         0,
+		Now:               time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC),
+		RequestedBy:       "test",
 	})
 	if err != nil {
 		t.Fatalf("run automatic deep profile update: %v", err)
 	}
-	if result.ProcessedCount != 1 || result.AICalledCount != 1 || !result.StoppedByBudget {
-		t.Fatalf("result = %+v, want one processed and stopped by ai budget", result)
+	if result.ProcessedCount != 3 || result.AICalledCount != 3 || result.AIRoundsPerSymbol != 1 || result.StoppedByBudget {
+		t.Fatalf("result = %+v, want all symbols processed with per-symbol ai rounds", result)
 	}
 	runs, err := svc.ListAgentRuns(ctx, AgentRunListFilter{TaskType: AgentTaskTypeStockProfileSummary, Limit: 5})
 	if err != nil {
@@ -460,11 +473,11 @@ func TestAutomaticDeepStockProfileUpdateRollsQueue(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		result, err := svc.runAutomaticDeepStockProfileUpdate(ctx, "test", stockProfileDeepUpdateOptions{
-			SymbolBudget: 2,
-			AIBudget:     1,
-			RateLimit:    0,
-			Now:          time.Date(2026, 6, 24+i, 9, 0, 0, 0, time.UTC),
-			RequestedBy:  "test",
+			SymbolBudget:      2,
+			AIRoundsPerSymbol: 1,
+			RateLimit:         0,
+			Now:               time.Date(2026, 6, 24+i, 9, 0, 0, 0, time.UTC),
+			RequestedBy:       "test",
 		})
 		if err != nil {
 			t.Fatalf("run automatic deep profile update %d: %v", i, err)
@@ -544,6 +557,13 @@ func TestRunAgentStockProfileSummaryUpdatesBilingualFields(t *testing.T) {
 	if profile.AIProfileStatus != StockProfileAIStatusReady || profile.BusinessSummaryEn == "" {
 		t.Fatalf("profile ai fields = %+v", profile)
 	}
+	tasks, err := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Symbol: "300750", Limit: 1})
+	if err != nil {
+		t.Fatalf("list profile update tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Status != StockProfileUpdateStatusCompleted || tasks[0].AIProfileStatus != StockProfileAIStatusReady {
+		t.Fatalf("profile update task = %+v, want completed with ai ready", tasks)
+	}
 	for _, keyword := range []string{"CATL", "lithium battery", "EV batteries"} {
 		if !strings.Contains(profile.ProfileText, keyword) {
 			t.Fatalf("profile text %q missing %q", profile.ProfileText, keyword)
@@ -588,6 +608,13 @@ func TestRunAgentStockProfileSummaryMarksProfileFailedOnAgentError(t *testing.T)
 	}
 	if profile.AIProfileStatus != StockProfileAIStatusFailed || !strings.Contains(profile.AIProfileError, "code 2") {
 		t.Fatalf("profile ai status/error = %q/%q, want failed with code 2", profile.AIProfileStatus, profile.AIProfileError)
+	}
+	tasks, err := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Symbol: "300750", Limit: 1})
+	if err != nil {
+		t.Fatalf("list profile update tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Status != StockProfileUpdateStatusPartial || tasks[0].AIProfileStatus != StockProfileAIStatusFailed || !strings.Contains(tasks[0].AIProfileError, "code 2") {
+		t.Fatalf("profile update task = %+v, want partial with ai failed", tasks)
 	}
 }
 

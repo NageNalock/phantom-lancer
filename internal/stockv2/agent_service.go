@@ -1562,13 +1562,18 @@ func (s *Service) finalizeAgentRunWithOutput(
 		if execOutput.TimedOut {
 			outputArtifact.WriteString("timed_out: true\n")
 		}
+		includeEmptyTails := execErr != nil || execOutput.ExitCode != 0 || execOutput.TimedOut
 		if execOutput.StdoutTail != "" {
 			outputArtifact.WriteString("stdout_tail:\n")
 			outputArtifact.WriteString(execOutput.StdoutTail)
+		} else if includeEmptyTails {
+			outputArtifact.WriteString("stdout_tail: (empty)\n")
 		}
 		if execOutput.StderrTail != "" {
 			outputArtifact.WriteString("stderr_tail:\n")
 			outputArtifact.WriteString(execOutput.StderrTail)
+		} else if includeEmptyTails {
+			outputArtifact.WriteString("stderr_tail: (empty)\n")
 		}
 	}
 
@@ -1663,6 +1668,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 		if _, err := s.applyStockProfileEnhancementResult(ctx, run.TriggerObjectID, submitted.Result, modelName, submitted.Confidence); err != nil {
 			run.Status = AgentRunStatusFailed
 			run.ErrorMessage = safelog.Text("save stock profile enhancement failed: "+err.Error(), 500)
+			s.markStockProfileUpdateTaskAIResult(ctx, run.ID, StockProfileUpdateStatusPartial, StockProfileAIStatusFailed, run.ErrorMessage)
 			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
 				s.log.Warn("finalize: update run after stock profile save failed", "run_id", runID, "error", updateErr)
 			}
@@ -1674,6 +1680,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 			}
 			return
 		}
+		s.markStockProfileUpdateTaskAIResult(ctx, run.ID, StockProfileUpdateStatusCompleted, StockProfileAIStatusReady, "")
 	}
 	if run.TaskType == AgentTaskTypeStrategyGeneration {
 		report, err := strategyGenerationReportFromResult(submitted.Result)

@@ -200,8 +200,11 @@ CREATE TABLE IF NOT EXISTS stockv2_stock_profile_update_tasks (
     base_input_hash_before TEXT,
     base_input_hash_after TEXT,
     base_input_changed INTEGER NOT NULL DEFAULT 0,
+    base_profile_status TEXT,
     ai_decision TEXT NOT NULL,
     agent_run_id TEXT,
+    ai_profile_status TEXT,
+    ai_profile_error TEXT,
     source_statuses_json TEXT NOT NULL DEFAULT '[]',
     error_message TEXT,
     started_at DATETIME NOT NULL,
@@ -1233,6 +1236,19 @@ func (s *Store) init(ctx context.Context) error {
 	for _, column := range profileColumns {
 		if err := s.ensureColumn(ctx, "stockv2_stock_profiles", column.name, column.colType); err != nil {
 			return fmt.Errorf("add stock profile %s column: %w", column.name, err)
+		}
+	}
+	profileTaskColumns := []struct {
+		name    string
+		colType string
+	}{
+		{"base_profile_status", "TEXT"},
+		{"ai_profile_status", "TEXT"},
+		{"ai_profile_error", "TEXT"},
+	}
+	for _, column := range profileTaskColumns {
+		if err := s.ensureColumn(ctx, "stockv2_stock_profile_update_tasks", column.name, column.colType); err != nil {
+			return fmt.Errorf("add stock profile update task %s column: %w", column.name, err)
 		}
 	}
 

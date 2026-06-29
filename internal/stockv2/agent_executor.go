@@ -44,12 +44,13 @@ type codexCLIExecutor struct {
 }
 
 const (
-	execDefaultTimeout     = 5 * time.Minute
-	stdoutTailMaxBytes     = 4 * 1024
-	stderrTailMaxBytes     = 4 * 1024
-	transcriptMaxBytes     = 16 * 1024
-	codexStockAgentMCPName = "stock_agent"
-	codexSubmitResultTool  = "stock_agent.submit_result"
+	execDefaultTimeout         = 5 * time.Minute
+	stdoutTailMaxBytes         = 4 * 1024
+	stderrTailMaxBytes         = 4 * 1024
+	transcriptMaxBytes         = 16 * 1024
+	executorReaderDrainTimeout = 2 * time.Second
+	codexStockAgentMCPName     = "stock_agent"
+	codexSubmitResultTool      = "stock_agent.submit_result"
 )
 
 type codexMCPServerCapability struct {
@@ -186,7 +187,7 @@ func (e *codexCLIExecutor) executePrompt(
 			transcriptBuf.Write(line)
 			transcriptBuf.Write([]byte("\n"))
 		}
-		doneCh <- nil
+		doneCh <- scanner.Err()
 	}()
 	go func() {
 		scanner := bufio.NewScanner(stderrPipe)
@@ -202,7 +203,7 @@ func (e *codexCLIExecutor) executePrompt(
 			transcriptBuf.Write(line)
 			transcriptBuf.Write([]byte("\n"))
 		}
-		doneCh <- nil
+		doneCh <- scanner.Err()
 	}()
 
 	// 同时等: result / 进程退出 / context 取消
@@ -232,6 +233,7 @@ func (e *codexCLIExecutor) executePrompt(
 	timedOut := false
 	resultReceived := false
 	processDone := false
+	var readerErrs []error
 
 waitLoop:
 	for {
@@ -239,7 +241,7 @@ waitLoop:
 		case err := <-waitDone:
 			execErr = err
 			processDone = true
-			waitForExecutorReaders(doneCh, 2, 250*time.Millisecond)
+			readerErrs = append(readerErrs, waitForExecutorReaders(doneCh, 2, executorReaderDrainTimeout)...)
 			break waitLoop
 		case r := <-resultCh:
 			if r.err == nil {
@@ -266,7 +268,7 @@ waitLoop:
 		case err := <-waitDone:
 			execErr = err
 			processDone = true
-			waitForExecutorReaders(doneCh, 2, 250*time.Millisecond)
+			readerErrs = append(readerErrs, waitForExecutorReaders(doneCh, 2, executorReaderDrainTimeout)...)
 		case <-shortCtx.Done():
 			// 超时 kill
 			if cmd.Process != nil {
@@ -274,7 +276,16 @@ waitLoop:
 			}
 			execErr = <-waitDone
 			processDone = true
-			waitForExecutorReaders(doneCh, 2, 250*time.Millisecond)
+			readerErrs = append(readerErrs, waitForExecutorReaders(doneCh, 2, executorReaderDrainTimeout)...)
+		}
+	}
+	if timedOut && !processDone {
+		select {
+		case err := <-waitDone:
+			execErr = err
+			processDone = true
+			readerErrs = append(readerErrs, waitForExecutorReaders(doneCh, 2, executorReaderDrainTimeout)...)
+		case <-time.After(executorReaderDrainTimeout):
 		}
 	}
 
@@ -287,6 +298,15 @@ waitLoop:
 		}
 	} else {
 		exitCode = 0
+	}
+	for _, err := range readerErrs {
+		if err == nil {
+			continue
+		}
+		line := []byte("executor_output_read_error: " + err.Error() + "\n")
+		stderrBuf.Write(line)
+		transcriptBuf.Write([]byte("stderr: "))
+		transcriptBuf.Write(line)
 	}
 
 	// 脱敏后输出
@@ -488,17 +508,22 @@ func suppressCodexStderrLine(line []byte) bool {
 	return strings.Contains(text, "mcp.notion.com") && strings.Contains(text, "AuthRequired")
 }
 
-func waitForExecutorReaders(doneCh <-chan error, count int, timeout time.Duration) {
+func waitForExecutorReaders(doneCh <-chan error, count int, timeout time.Duration) []error {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	errs := make([]error, 0, count)
 	for count > 0 {
 		select {
-		case <-doneCh:
+		case err := <-doneCh:
+			if err != nil {
+				errs = append(errs, err)
+			}
 			count--
 		case <-timer.C:
-			return
+			return errs
 		}
 	}
+	return errs
 }
 
 // buildOperationReviewPrompt 从 ContextPack 构建 codex exec 的 prompt。

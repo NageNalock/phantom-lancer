@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"phantom-lancer/internal/safelog"
 )
 
 func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (StockProfile, error) {
@@ -197,7 +199,7 @@ func (s *Store) CreateStockProfileUpdateTask(ctx context.Context, task StockProf
 	if task.StartedAt.IsZero() {
 		task.StartedAt = now
 	}
-	if task.FinishedAt.IsZero() && task.Status != "" {
+	if task.FinishedAt.IsZero() && task.Status != "" && task.Status != StockProfileUpdateStatusRunning {
 		task.FinishedAt = now
 	}
 	if task.CreatedAt.IsZero() {
@@ -209,9 +211,10 @@ func (s *Store) CreateStockProfileUpdateTask(ctx context.Context, task StockProf
 		INSERT INTO stockv2_stock_profile_update_tasks (
 			id, symbol, market, trigger_source, trigger_reason, status,
 			base_input_hash_before, base_input_hash_after, base_input_changed,
-			ai_decision, agent_run_id, source_statuses_json, error_message,
+			base_profile_status, ai_decision, agent_run_id, ai_profile_status,
+			ai_profile_error, source_statuses_json, error_message,
 			started_at, finished_at, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		task.ID,
 		task.Symbol,
@@ -222,8 +225,11 @@ func (s *Store) CreateStockProfileUpdateTask(ctx context.Context, task StockProf
 		nullableString(task.BaseInputHashBefore),
 		nullableString(task.BaseInputHashAfter),
 		boolToInt(task.BaseInputChanged),
+		nullableString(task.BaseProfileStatus),
 		task.AIDecision,
 		nullableString(task.AgentRunID),
+		nullableString(task.AIProfileStatus),
+		nullableString(task.AIProfileError),
 		sourceStatusesJSON,
 		nullableString(task.ErrorMessage),
 		task.StartedAt,
@@ -245,6 +251,23 @@ func (s *Store) ListStockProfileUpdateTasks(ctx context.Context, filter StockPro
 		return nil, wrapError(err, "list stock profile update tasks")
 	}
 	return scanRows(rows, scanStockProfileUpdateTask, "scan stock profile update task", "iterate stock profile update tasks")
+}
+
+func (s *Store) UpdateStockProfileUpdateTaskAIResultByAgentRunID(ctx context.Context, agentRunID, taskStatus, aiStatus, aiError string) error {
+	agentRunID = strings.TrimSpace(agentRunID)
+	if agentRunID == "" {
+		return nil
+	}
+	now := time.Now()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_stock_profile_update_tasks
+		SET status = ?, ai_profile_status = ?, ai_profile_error = ?, finished_at = ?, updated_at = ?
+		WHERE agent_run_id = ?
+	`, taskStatus, nullableString(aiStatus), nullableString(safelog.Text(aiError, 500)), now, now, agentRunID)
+	if err != nil {
+		return wrapError(err, "update stock profile update task ai result")
+	}
+	return nil
 }
 
 func (s *Store) CountStockProfileUpdateTasks(ctx context.Context, filter StockProfileUpdateTaskListFilter) (int, error) {
@@ -483,7 +506,8 @@ func stockProfileUpdateTaskSelectSQL() string {
 	return `
 		SELECT id, symbol, COALESCE(market,''), trigger_source, COALESCE(trigger_reason,''),
 		       status, COALESCE(base_input_hash_before,''), COALESCE(base_input_hash_after,''),
-		       base_input_changed, ai_decision, COALESCE(agent_run_id,''),
+		       base_input_changed, COALESCE(base_profile_status,''), ai_decision,
+		       COALESCE(agent_run_id,''), COALESCE(ai_profile_status,''), COALESCE(ai_profile_error,''),
 		       COALESCE(source_statuses_json,'[]'), COALESCE(error_message,''),
 		       started_at, finished_at, created_at, updated_at
 		FROM stockv2_stock_profile_update_tasks`
@@ -512,8 +536,11 @@ func scanStockProfileUpdateTask(scanner rowScanner) (StockProfileUpdateTask, err
 		&task.BaseInputHashBefore,
 		&task.BaseInputHashAfter,
 		&changed,
+		&task.BaseProfileStatus,
 		&task.AIDecision,
 		&task.AgentRunID,
+		&task.AIProfileStatus,
+		&task.AIProfileError,
 		&sourceStatusesJSON,
 		&task.ErrorMessage,
 		&task.StartedAt,

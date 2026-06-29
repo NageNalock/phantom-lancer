@@ -660,7 +660,11 @@ function StockProfileSection({
 }) {
   const aiTone = profile?.aiProfileStatus === "ready" ? "good" : profile?.aiProfileStatus === "failed" ? "danger" : profile?.aiProfileStatus === "not_configured" ? "warn" : "neutral";
   const runTone = agentRun ? stockV2AgentRunStatusTone(agentRun.status) as Tone : "neutral";
-  const taskTone = updateTask?.status === "failed" ? "danger" : updateTask?.status === "partial" ? "warn" : "neutral";
+  const taskTone =
+    updateTask?.status === "failed" ? "danger" :
+    updateTask?.status === "partial" || updateTask?.status === "running" ? "warn" :
+    updateTask?.status === "completed" ? "good" :
+    "neutral";
   return (
     <section className="mt-4 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)]">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] px-3 py-3">
@@ -702,14 +706,25 @@ function StockProfileSection({
                 <Pill tone={updateTask.baseInputChanged ? "warn" : "neutral"}>
                   {updateTask.baseInputChanged ? "输入已变化" : "输入无变化"}
                 </Pill>
+                {updateTask.baseProfileStatus ? (
+                  <Pill tone={stockProfileResultTone(updateTask.baseProfileStatus)}>
+                    {stockProfileBaseStatusLabel(updateTask.baseProfileStatus)}
+                  </Pill>
+                ) : null}
                 <Pill tone={stockProfileAIDecisionTone(updateTask.aiDecision)}>
                   {stockProfileAIDecisionLabel(updateTask.aiDecision)}
                 </Pill>
+                {updateTask.aiProfileStatus ? (
+                  <Pill tone={stockProfileResultTone(updateTask.aiProfileStatus)}>
+                    {stockProfileAIStatusLabel(updateTask.aiProfileStatus)}
+                  </Pill>
+                ) : null}
                 {updateTask.agentRunId ? (
                   <Button className="px-2 py-0.5 text-xs" onClick={() => onOpenAgentRun(updateTask.agentRunId!)}>
                     Agent {updateTask.agentRunId.slice(0, 12)}
                   </Button>
                 ) : null}
+                {updateTask.aiProfileError ? <span className="break-words text-[var(--danger)]">{updateTask.aiProfileError}</span> : null}
                 <span>{formatTime(updateTask.finishedAt || updateTask.updatedAt)}</span>
               </div>
             ) : null}
@@ -813,6 +828,7 @@ function stockProfileUpdateToast(task: StockV2StockProfileUpdateTask): string {
 }
 
 function stockProfileUpdateStatusLabel(status?: string): string {
+  if (status === "running") return "运行中";
   if (status === "completed") return "已完成";
   if (status === "partial") return "部分完成";
   if (status === "failed") return "失败";
@@ -837,6 +853,29 @@ function stockProfileAIDecisionLabel(decision?: string): string {
 function stockProfileAIDecisionTone(decision?: string): Tone {
   if (decision === "called") return "warn";
   if (decision === "failed") return "danger";
+  if (decision === "skipped_unavailable") return "warn";
+  return "neutral";
+}
+
+function stockProfileBaseStatusLabel(status?: string): string {
+  if (status === "ready") return "基础已生成";
+  if (status === "failed") return "基础失败";
+  return status || "基础未知";
+}
+
+function stockProfileAIStatusLabel(status?: string): string {
+  if (status === "ready") return "AI 生成成功";
+  if (status === "running") return "AI 生成中";
+  if (status === "failed") return "AI 生成失败";
+  if (status === "not_configured") return "AI 未配置";
+  if (status === "missing") return "AI 未生成";
+  return status || "AI 未知";
+}
+
+function stockProfileResultTone(status?: string): Tone {
+  if (status === "ready") return "good";
+  if (status === "running" || status === "not_configured" || status === "missing") return "warn";
+  if (status === "failed") return "danger";
   return "neutral";
 }
 

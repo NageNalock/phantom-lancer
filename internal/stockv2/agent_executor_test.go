@@ -93,6 +93,35 @@ func TestExecutePromptFailsBeforeCodexWhenMCPMissing(t *testing.T) {
 	}
 }
 
+func TestExecutePromptCapturesFastExitStderr(t *testing.T) {
+	script := t.TempDir() + "/fake-codex"
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'unknown model gpt-5.5\\nFor more information, try --help.\\n' >&2\nexit 2\n"), 0755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	pool := newAgentTaskPool(defaultCleanupInterval)
+	defer pool.Close()
+	executor := &codexCLIExecutor{
+		binary:   script,
+		taskPool: pool,
+		mcpURL:   "http://127.0.0.1:8080/api/stockv2/agent/mcp",
+	}
+	taskID, _ := pool.createTask(AgentTaskTypeStockProfileSummary, "run-fast-exit", "", time.Minute)
+
+	output, err := executor.executePrompt(context.Background(), taskID, "prompt", "gpt-5.5")
+	if err == nil || !strings.Contains(err.Error(), "process exited (code 2)") {
+		t.Fatalf("err = %v, want code 2 without result", err)
+	}
+	if output == nil {
+		t.Fatal("output nil, want captured command and stderr")
+	}
+	if output.ExitCode != 2 {
+		t.Fatalf("exit code = %d, want 2", output.ExitCode)
+	}
+	if !strings.Contains(output.StderrTail, "unknown model gpt-5.5") || !strings.Contains(output.StderrTail, "try --help") {
+		t.Fatalf("stderr tail = %q, want fast cli usage error", output.StderrTail)
+	}
+}
+
 func TestSuppressCodexStderrLineOnlyDropsKnownExternalMCPNoise(t *testing.T) {
 	notionLine := []byte(`ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { resource_metadata="https://mcp.notion.com/.well-known/oauth-protected-resource/mcp" })`)
 	if !suppressCodexStderrLine(notionLine) {

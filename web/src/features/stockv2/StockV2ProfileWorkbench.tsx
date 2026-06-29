@@ -72,7 +72,7 @@ export function StockV2ProfileSettings({
   return (
     <Panel
       title="画像配置"
-      subtitle="后台按队列、AI 调用次数和限速更新基础输入；输入变化时才启动画像 AI"
+      subtitle="后台按队列、单标的 AI 轮数和限速更新基础输入；输入变化时才启动画像 AI"
       actions={
         <div className="flex gap-2">
           <Button
@@ -125,7 +125,7 @@ export function StockV2ProfileSettings({
               onChange={(e) => update("baseProfileDeepUpdateBatchSize", Number(e.target.value))}
             />
           </Field>
-          <Field label="每轮 AI 调用次数" help="每轮最多启动多少次画像 AI。">
+          <Field label="每标的 AI 轮数" help="每只标的在一次自动维护中最多允许几轮画像 AI；不会截断整轮队列。">
             <input
               min={1}
               max={10}
@@ -158,7 +158,7 @@ export function StockV2ProfileSettings({
             <span>上次：{formatTime(settings.baseProfileLastMaintainAt)}</span>
             <span>下次：{formatTime(settings.baseProfileNextMaintainAt)}</span>
             <span>
-              队列：每轮 {form.baseProfileDeepUpdateBatchSize ?? 12} 只，AI {form.baseProfileDeepUpdateAiBudget ?? 2} 次，间隔 {form.baseProfileDeepUpdateRateLimitMs ?? 1500}ms
+              队列：每轮 {form.baseProfileDeepUpdateBatchSize ?? 12} 只，每标的 AI {form.baseProfileDeepUpdateAiBudget ?? 2} 轮，间隔 {form.baseProfileDeepUpdateRateLimitMs ?? 1500}ms
             </span>
             {settings.baseProfileLastMaintainResult ? <span className="break-words">最近结果：{settings.baseProfileLastMaintainResult}</span> : null}
           </div>
@@ -256,10 +256,21 @@ function StockProfileUpdateTasksTable({ items, loading }: { items: StockV2StockP
               </td>
               <td className="px-3 py-2 align-top">
                 <Pill tone={task.baseInputChanged ? "warn" : "neutral"}>{task.baseInputChanged ? "有变化" : "无变化"}</Pill>
+                {task.baseProfileStatus ? (
+                  <div className="mt-1">
+                    <Pill tone={profileResultTone(task.baseProfileStatus)}>{baseProfileStatusLabel(task.baseProfileStatus)}</Pill>
+                  </div>
+                ) : null}
               </td>
               <td className="px-3 py-2 align-top">
                 <Pill tone={aiDecisionTone(task.aiDecision)}>{aiDecisionLabel(task.aiDecision)}</Pill>
+                {task.aiProfileStatus ? (
+                  <div className="mt-1">
+                    <Pill tone={profileResultTone(task.aiProfileStatus)}>{aiProfileStatusLabel(task.aiProfileStatus)}</Pill>
+                  </div>
+                ) : null}
                 {task.agentRunId ? <div className="muted mt-1 font-mono text-xs">run {shortID(task.agentRunId)}</div> : null}
+                {task.aiProfileError ? <div className="mt-1 max-w-[240px] truncate text-xs text-[var(--danger)]">{task.aiProfileError}</div> : null}
               </td>
               <td className="px-3 py-2 align-top">
                 <StockProfileSourceStatusSummary task={task} />
@@ -331,6 +342,7 @@ function triggerSourceLabel(value: string): string {
 
 function taskStatusLabel(status: string): string {
   const labels: Record<string, string> = {
+    running: "运行中",
     completed: "完成",
     partial: "部分完成",
     failed: "失败",
@@ -339,6 +351,7 @@ function taskStatusLabel(status: string): string {
 }
 
 function taskStatusTone(status: string): "neutral" | "good" | "warn" | "danger" {
+  if (status === "running") return "warn";
   if (status === "completed") return "good";
   if (status === "partial") return "warn";
   if (status === "failed") return "danger";
@@ -360,6 +373,28 @@ function aiDecisionTone(decision: string): "neutral" | "good" | "warn" | "danger
   if (decision === "called") return "good";
   if (decision === "failed") return "danger";
   if (decision === "skipped_unavailable") return "warn";
+  return "neutral";
+}
+
+function baseProfileStatusLabel(status?: string): string {
+  if (status === "ready") return "基础已生成";
+  if (status === "failed") return "基础失败";
+  return status || "-";
+}
+
+function aiProfileStatusLabel(status?: string): string {
+  if (status === "ready") return "AI 生成成功";
+  if (status === "running") return "AI 生成中";
+  if (status === "failed") return "AI 生成失败";
+  if (status === "not_configured") return "AI 未配置";
+  if (status === "missing") return "AI 未生成";
+  return status || "-";
+}
+
+function profileResultTone(status?: string): "neutral" | "good" | "warn" | "danger" {
+  if (status === "ready") return "good";
+  if (status === "running" || status === "not_configured" || status === "missing") return "warn";
+  if (status === "failed") return "danger";
   return "neutral";
 }
 

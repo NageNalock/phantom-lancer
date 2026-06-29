@@ -1233,8 +1233,11 @@ export interface StockV2StockProfileUpdateTask {
   baseInputHashBefore?: string;
   baseInputHashAfter?: string;
   baseInputChanged: boolean;
+  baseProfileStatus?: string;
   aiDecision: string;
   agentRunId?: string;
+  aiProfileStatus?: string;
+  aiProfileError?: string;
   sourceStatuses?: StockV2StockProfileSourceStatus[];
   errorMessage?: string;
   startedAt: string;

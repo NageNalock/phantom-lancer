@@ -21,9 +21,15 @@ const (
 	StockProfileUpdateTriggerManual = "manual"
 	StockProfileUpdateTriggerAuto   = "auto"
 
+	StockProfileUpdateStatusRunning   = "running"
 	StockProfileUpdateStatusCompleted = "completed"
 	StockProfileUpdateStatusPartial   = "partial"
 	StockProfileUpdateStatusFailed    = "failed"
+
+	StockProfileUpdateBaseStatusReady  = "ready"
+	StockProfileUpdateBaseStatusFailed = "failed"
+
+	StockProfileUpdateAIStatusRunning = "running"
 
 	StockProfileAIDecisionCalled               = "called"
 	StockProfileAIDecisionSkippedUnchanged     = "skipped_unchanged"
@@ -112,20 +118,21 @@ type RebuildStockProfilesResult struct {
 }
 
 type StockProfileDeepUpdateResult struct {
-	CandidateCount  int             `json:"candidateCount"`
-	SymbolBudget    int             `json:"symbolBudget"`
-	AIBudget        int             `json:"aiBudget"`
-	RateLimitMs     int             `json:"rateLimitMs"`
-	ProcessedCount  int             `json:"processedCount"`
-	SuccessCount    int             `json:"successCount"`
-	FailedCount     int             `json:"failedCount"`
-	InputChanged    int             `json:"inputChanged"`
-	InputUnchanged  int             `json:"inputUnchanged"`
-	AICalledCount   int             `json:"aiCalledCount"`
-	AISkippedCount  int             `json:"aiSkippedCount"`
-	StoppedByBudget bool            `json:"stoppedByBudget"`
-	FailedItems     []UpdateFailure `json:"failedItems,omitempty"`
-	UpdatedAt       time.Time       `json:"updatedAt"`
+	CandidateCount    int             `json:"candidateCount"`
+	SymbolBudget      int             `json:"symbolBudget"`
+	AIRoundsPerSymbol int             `json:"aiRoundsPerSymbol"`
+	AIBudget          int             `json:"aiBudget"` // legacy: same value as aiRoundsPerSymbol
+	RateLimitMs       int             `json:"rateLimitMs"`
+	ProcessedCount    int             `json:"processedCount"`
+	SuccessCount      int             `json:"successCount"`
+	FailedCount       int             `json:"failedCount"`
+	InputChanged      int             `json:"inputChanged"`
+	InputUnchanged    int             `json:"inputUnchanged"`
+	AICalledCount     int             `json:"aiCalledCount"`
+	AISkippedCount    int             `json:"aiSkippedCount"`
+	StoppedByBudget   bool            `json:"stoppedByBudget"`
+	FailedItems       []UpdateFailure `json:"failedItems,omitempty"`
+	UpdatedAt         time.Time       `json:"updatedAt"`
 }
 
 type RequestUpdateStockProfile struct {
@@ -154,8 +161,11 @@ type StockProfileUpdateTask struct {
 	BaseInputHashBefore string                     `json:"baseInputHashBefore,omitempty"`
 	BaseInputHashAfter  string                     `json:"baseInputHashAfter,omitempty"`
 	BaseInputChanged    bool                       `json:"baseInputChanged"`
+	BaseProfileStatus   string                     `json:"baseProfileStatus,omitempty"`
 	AIDecision          string                     `json:"aiDecision"`
 	AgentRunID          string                     `json:"agentRunId,omitempty"`
+	AIProfileStatus     string                     `json:"aiProfileStatus,omitempty"`
+	AIProfileError      string                     `json:"aiProfileError,omitempty"`
 	SourceStatuses      []StockProfileSourceStatus `json:"sourceStatuses,omitempty"`
 	ErrorMessage        string                     `json:"errorMessage,omitempty"`
 	StartedAt           time.Time                  `json:"startedAt"`
