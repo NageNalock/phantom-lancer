@@ -999,6 +999,8 @@ func TestFinalizeAgentRunFailureIncludesStderrHint(t *testing.T) {
 	taskID, _ := svc.agentTaskPool.createTask(run.TaskType, run.ID, run.TriggerObjectID, time.Minute)
 
 	svc.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, &AgentExecutorOutput{
+		Command:    "codex exec --json <prompt:42 chars>",
+		Prompt:     "stock profile prompt for 300750",
 		ExitCode:   2,
 		Duration:   time.Millisecond,
 		StderrTail: "first line\nunknown model gpt-stderr-hint\n",
@@ -1020,6 +1022,12 @@ func TestFinalizeAgentRunFailureIncludesStderrHint(t *testing.T) {
 	}
 	if detail.Ledger == nil || !strings.Contains(detail.Ledger.OutputArtifactSummary, "stderr_tail:") {
 		t.Fatalf("ledger output = %+v, want stderr tail", detail.Ledger)
+	}
+	if !strings.Contains(detail.Ledger.OutputArtifactSummary, "command:\ncodex exec --json <prompt:42 chars>") {
+		t.Fatalf("ledger output = %q, want command summary", detail.Ledger.OutputArtifactSummary)
+	}
+	if !strings.Contains(detail.Ledger.Prompt, "stock profile prompt for 300750") {
+		t.Fatalf("ledger prompt = %q, want executor prompt", detail.Ledger.Prompt)
 	}
 }
 

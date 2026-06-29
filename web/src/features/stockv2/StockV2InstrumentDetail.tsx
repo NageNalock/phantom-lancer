@@ -31,6 +31,7 @@ import type { Tone } from "../../app/types";
 import { Button, Pill, Notice } from "../../components/ui";
 import { StockV2KLineChart } from "./StockV2KLineChart";
 import { StrategyGenerationDrawer } from "./StockV2StrategyGenerationDrawer";
+import { StockV2AgentRunDetailDrawer } from "./StockV2AgentExecutionLedger";
 
 const RANGES: DailyBarRange[] = ["6m", "1y", "3y", "5y"];
 const ADJUSTEDS: DailyBarAdjusted[] = ["none", "qfq", "hfq"];
@@ -73,6 +74,7 @@ export function StockV2InstrumentDetail({
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileRun, setProfileRun] = useState<StockV2AgentRun | null>(null);
   const [profileTask, setProfileTask] = useState<StockV2StockProfileUpdateTask | null>(null);
+  const [profileRunDetailId, setProfileRunDetailId] = useState<string | null>(null);
   const [genOpen, setGenOpen] = useState(false);
   const profileRunPollRef = useRef<number | null>(null);
 
@@ -89,6 +91,7 @@ export function StockV2InstrumentDetail({
     setProfileError(null);
     setProfileRun(null);
     setProfileTask(null);
+    setProfileRunDetailId(null);
     if (profileRunPollRef.current !== null) {
       window.clearTimeout(profileRunPollRef.current);
       profileRunPollRef.current = null;
@@ -278,13 +281,15 @@ export function StockV2InstrumentDetail({
     if (!inst) return;
     try {
       const res = await actions.api<{ items?: StockV2StockProfileUpdateTask[] }>(
-        `/api/stockv2/profiles/${encodeURIComponent(inst.symbol)}/update-tasks?limit=1`,
+        `/api/stockv2/profiles/${encodeURIComponent(inst.symbol)}/update-tasks?limit=6`,
       );
-      const task = res.items?.[0] ?? null;
+      const tasks = res.items ?? [];
+      const task = tasks[0] ?? null;
+      const agentTask = tasks.find((item) => item.agentRunId);
       setProfileTask(task);
-      if (task?.agentRunId) {
+      if (agentTask?.agentRunId) {
         try {
-          const run = await actions.api<StockV2AgentRun>(`/api/stockv2/agent/runs/${encodeURIComponent(task.agentRunId)}`);
+          const run = await actions.api<StockV2AgentRun>(`/api/stockv2/agent/runs/${encodeURIComponent(agentTask.agentRunId)}`);
           setProfileRun(run);
         } catch {
           setProfileRun(null);
@@ -602,6 +607,7 @@ export function StockV2InstrumentDetail({
             error={profileError}
             onRefresh={() => void refreshProfileView()}
             onUpdate={() => void updateProfile()}
+            onOpenAgentRun={(runId) => setProfileRunDetailId(runId)}
             profile={profile}
             agentRun={profileRun}
             updateTask={profileTask}
@@ -622,6 +628,13 @@ export function StockV2InstrumentDetail({
           onClose={() => setGenOpen(false)}
         />
       ) : null}
+      {profileRunDetailId ? (
+        <StockV2AgentRunDetailDrawer
+          actions={actions}
+          runId={profileRunDetailId}
+          onClose={() => setProfileRunDetailId(null)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -630,6 +643,7 @@ function StockProfileSection({
   agentRun,
   busy,
   error,
+  onOpenAgentRun,
   onRefresh,
   onUpdate,
   profile,
@@ -638,6 +652,7 @@ function StockProfileSection({
   agentRun: StockV2AgentRun | null;
   busy: boolean;
   error: string | null;
+  onOpenAgentRun: (runId: string) => void;
   onRefresh: () => void;
   onUpdate: () => void;
   profile: StockV2StockProfile | null;
@@ -665,6 +680,9 @@ function StockProfileSection({
               AI 任务 {stockV2AgentRunStatusLabel(agentRun.status)}
               <Pill tone={runTone} className="ml-2">{agentRun.id}</Pill>
               {agentRun.errorMessage ? <span className="ml-2 break-words">{agentRun.errorMessage}</span> : null}
+              <Button className="ml-2 px-2 py-0.5 text-xs" onClick={() => onOpenAgentRun(agentRun.id)}>
+                查看执行详情
+              </Button>
             </span>
           </Notice>
         ) : null}
@@ -687,7 +705,11 @@ function StockProfileSection({
                 <Pill tone={stockProfileAIDecisionTone(updateTask.aiDecision)}>
                   {stockProfileAIDecisionLabel(updateTask.aiDecision)}
                 </Pill>
-                {updateTask.agentRunId ? <Pill tone="neutral">{updateTask.agentRunId}</Pill> : null}
+                {updateTask.agentRunId ? (
+                  <Button className="px-2 py-0.5 text-xs" onClick={() => onOpenAgentRun(updateTask.agentRunId!)}>
+                    Agent {updateTask.agentRunId.slice(0, 12)}
+                  </Button>
+                ) : null}
                 <span>{formatTime(updateTask.finishedAt || updateTask.updatedAt)}</span>
               </div>
             ) : null}

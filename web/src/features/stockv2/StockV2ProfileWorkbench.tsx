@@ -9,6 +9,16 @@ import { formatMeaningfulDateTime as formatTime, hasMeaningfulTime } from "./tim
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
 const PROFILE_TASK_PAGE_SIZE = 12;
 
+function profileSettingsForm(settings: StockV2Settings): Partial<StockV2Settings> {
+  return {
+    baseProfileAutoMaintainEnabled: settings.baseProfileAutoMaintainEnabled,
+    baseProfileMaintainIntervalSeconds: settings.baseProfileMaintainIntervalSeconds,
+    baseProfileDeepUpdateBatchSize: settings.baseProfileDeepUpdateBatchSize,
+    baseProfileDeepUpdateAiBudget: settings.baseProfileDeepUpdateAiBudget,
+    baseProfileDeepUpdateRateLimitMs: settings.baseProfileDeepUpdateRateLimitMs,
+  };
+}
+
 export function StockV2ProfileSettings({
   actions,
   data,
@@ -23,17 +33,11 @@ export function StockV2ProfileSettings({
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
-    if (settings) {
-      setForm({
-        baseProfileAutoMaintainEnabled: settings.baseProfileAutoMaintainEnabled,
-        baseProfileMaintainIntervalSeconds: settings.baseProfileMaintainIntervalSeconds,
-        baseProfileDeepUpdateBatchSize: settings.baseProfileDeepUpdateBatchSize,
-        baseProfileDeepUpdateAiBudget: settings.baseProfileDeepUpdateAiBudget,
-        baseProfileDeepUpdateRateLimitMs: settings.baseProfileDeepUpdateRateLimitMs,
-      });
+    if (settings && !dirty) {
+      setForm(profileSettingsForm(settings));
       setDirty(false);
     }
-  }, [settings]);
+  }, [settings, dirty]);
 
   function update<K extends keyof StockV2Settings>(key: K, value: StockV2Settings[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -52,8 +56,8 @@ export function StockV2ProfileSettings({
           baseProfileDeepUpdateRateLimitMs: Number(form.baseProfileDeepUpdateRateLimitMs ?? 1500),
         },
       });
-      setDirty(false);
       await actions.refreshStockV2();
+      setDirty(false);
     });
   }
 
@@ -73,13 +77,7 @@ export function StockV2ProfileSettings({
         <div className="flex gap-2">
           <Button
             onClick={() => {
-              setForm({
-                baseProfileAutoMaintainEnabled: settings.baseProfileAutoMaintainEnabled,
-                baseProfileMaintainIntervalSeconds: settings.baseProfileMaintainIntervalSeconds,
-                baseProfileDeepUpdateBatchSize: settings.baseProfileDeepUpdateBatchSize,
-                baseProfileDeepUpdateAiBudget: settings.baseProfileDeepUpdateAiBudget,
-                baseProfileDeepUpdateRateLimitMs: settings.baseProfileDeepUpdateRateLimitMs,
-              });
+              setForm(profileSettingsForm(settings));
               setDirty(false);
             }}
             disabled={!dirty}

@@ -133,8 +133,9 @@ func TestExecutePromptReturnsAfterResultAndCleanProcessExit(t *testing.T) {
 		output *AgentExecutorOutput
 		err    error
 	}, 1)
+	rawPrompt := "raw prompt body"
 	go func() {
-		output, err := executor.executePrompt(ctx, taskID, "prompt", "model")
+		output, err := executor.executePrompt(ctx, taskID, rawPrompt, "model")
 		done <- struct {
 			output *AgentExecutorOutput
 			err    error
@@ -148,6 +149,12 @@ func TestExecutePromptReturnsAfterResultAndCleanProcessExit(t *testing.T) {
 		}
 		if got.output == nil || got.output.ExitCode != 0 || !strings.Contains(got.output.StdoutTail, "fake stdout") {
 			t.Fatalf("output = %+v, want clean stdout exit", got.output)
+		}
+		if !strings.Contains(got.output.Command, "fake-codex exec") || strings.Contains(got.output.Command, rawPrompt) {
+			t.Fatalf("command summary = %q, want binary and redacted prompt", got.output.Command)
+		}
+		if got.output.Prompt != rawPrompt {
+			t.Fatalf("prompt = %q, want raw prompt for service-layer ledger redaction", got.output.Prompt)
 		}
 	case <-time.After(4 * time.Second):
 		t.Fatal("executePrompt did not return after MCP result and clean process exit")

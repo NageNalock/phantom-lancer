@@ -791,10 +791,11 @@ func (s *Store) UpdateAgentDecisionLedger(ctx context.Context, ledger AgentDecis
 	ledger.UpdatedAt = time.Now()
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE stockv2_agent_decision_ledgers
-		SET output_artifact_summary = ?, structured_output_json = ?, redaction_summary_json = ?,
+		SET prompt = ?, output_artifact_summary = ?, structured_output_json = ?, redaction_summary_json = ?,
 		    updated_at = ?
 		WHERE id = ?
 	`,
+		nullableString(ledger.Prompt),
 		nullableString(ledger.OutputArtifactSummary),
 		marshalMap(ledger.StructuredOutput),
 		marshalMap(ledger.RedactionSummary),

@@ -1545,6 +1545,18 @@ func (s *Service) finalizeAgentRunWithOutput(
 	// 准备 output artifact summary
 	var outputArtifact strings.Builder
 	if execOutput != nil {
+		if strings.TrimSpace(execOutput.Prompt) != "" {
+			ledger.Prompt = safelog.Text(execOutput.Prompt, 16384)
+			if ledger.RedactionSummary == nil {
+				ledger.RedactionSummary = map[string]any{}
+			}
+			ledger.RedactionSummary["promptRedacted"] = agentRedacted(execOutput.Prompt)
+		}
+		if execOutput.Command != "" {
+			outputArtifact.WriteString("command:\n")
+			outputArtifact.WriteString(execOutput.Command)
+			outputArtifact.WriteString("\n")
+		}
 		fmt.Fprintf(&outputArtifact, "exit_code: %d\n", execOutput.ExitCode)
 		fmt.Fprintf(&outputArtifact, "duration: %s\n", execOutput.Duration)
 		if execOutput.TimedOut {

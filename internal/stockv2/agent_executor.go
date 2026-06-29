@@ -25,6 +25,8 @@ import (
 // 环境变量用 allowlist 转发, 与 codexclient 的策略对齐但不共享代码。
 
 type AgentExecutorOutput struct {
+	Command       string        `json:"command,omitempty"` // redacted, prompt omitted
+	Prompt        string        `json:"-"`
 	StdoutTail    string        `json:"stdoutTail"` // ~4KB
 	StderrTail    string        `json:"stderrTail"` // ~4KB
 	ExitCode      int           `json:"exitCode"`
@@ -150,7 +152,8 @@ func (e *codexCLIExecutor) executePrompt(
 		return nil, err
 	}
 
-	cmd := exec.CommandContext(execCtx, e.binary, buildCodexExecArgs(modelName, prompt, mcpServers)...)
+	args := buildCodexExecArgs(modelName, prompt, mcpServers)
+	cmd := exec.CommandContext(execCtx, e.binary, args...)
 	cmd.Env = e.buildEnv()
 
 	var stdoutBuf, stderrBuf, transcriptBuf ringBuffer
@@ -292,6 +295,8 @@ waitLoop:
 	transcript := safelog.Text(transcriptBuf.String(), transcriptMaxBytes)
 
 	output := &AgentExecutorOutput{
+		Command:       codexCommandSummary(e.binary, args),
+		Prompt:        prompt,
 		StdoutTail:    stdoutTail,
 		StderrTail:    stderrTail,
 		ExitCode:      exitCode,
@@ -324,6 +329,48 @@ func buildCodexExecArgs(modelName, prompt string, mcpServers []codexMCPServerCap
 		args = append(args, "--model", modelName)
 	}
 	return append(args, prompt)
+}
+
+func codexCommandSummary(binary string, args []string) string {
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, filepathBase(binary))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if i == len(args)-1 {
+			parts = append(parts, fmt.Sprintf("<prompt:%d chars>", len(arg)))
+			break
+		}
+		if arg == "-c" && i+1 < len(args) {
+			parts = append(parts, "-c", redactCodexConfigArg(args[i+1]))
+			i++
+			continue
+		}
+		parts = append(parts, arg)
+	}
+	return safelog.Text(strings.Join(parts, " "), 2000)
+}
+
+func filepathBase(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "codex"
+	}
+	path = strings.TrimRight(path, "/")
+	if idx := strings.LastIndex(path, "/"); idx >= 0 {
+		return path[idx+1:]
+	}
+	return path
+}
+
+func redactCodexConfigArg(value string) string {
+	lower := strings.ToLower(value)
+	if strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "key") || strings.Contains(lower, "password") || strings.Contains(lower, "cookie") {
+		if idx := strings.Index(value, "="); idx >= 0 {
+			return value[:idx+1] + "<redacted>"
+		}
+		return "<redacted>"
+	}
+	return value
 }
 
 func (e *codexCLIExecutor) codexMCPServers() []codexMCPServerCapability {
