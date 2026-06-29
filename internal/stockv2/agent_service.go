@@ -1388,7 +1388,7 @@ func (s *Service) startAgentRunAsync(
 	defer func() {
 		if r := recover(); r != nil {
 			if s.log != nil {
-				s.log.Error("agent run panicked", "run_id", run.ID, "panic", r)
+				s.log.Error("agent run panicked", "run_id", run.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "model", modelName, "panic", r)
 			}
 			s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("panic: %v", r))
 		}
@@ -1400,7 +1400,7 @@ func (s *Service) startAgentRunAsync(
 	}
 
 	if _, _, err := s.executeAgentRun(ctx, run, ledger, pack, modelName); err != nil && s.log != nil {
-		s.log.Warn("agent run finished with error", "run_id", run.ID, "error", safelog.Text(err.Error(), 300))
+		s.log.Warn("agent run finished with error", "run_id", run.ID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "model", modelName, "error", safelog.Text(err.Error(), 300))
 	}
 }
 
@@ -1421,7 +1421,7 @@ func (s *Service) executeAgentRun(
 	running.Status = AgentRunStatusRunning
 	if _, err := s.store.UpdateAgentRun(ctx, running); err != nil {
 		if s.log != nil {
-			s.log.Warn("update agent run to running failed", "run_id", run.ID, "error", err)
+			s.log.Warn("update agent run to running failed", "run_id", run.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(err.Error(), 240))
 		}
 	}
 
@@ -1444,7 +1444,7 @@ func (s *Service) startStrategyGenerationRunAsync(
 	defer func() {
 		if r := recover(); r != nil {
 			if s.log != nil {
-				s.log.Error("strategy generation agent run panicked", "run_id", run.ID, "panic", r)
+				s.log.Error("strategy generation agent run panicked", "run_id", run.ID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "model", modelName, "panic", r)
 			}
 			s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("panic: %v", r))
 		}
@@ -1455,7 +1455,7 @@ func (s *Service) startStrategyGenerationRunAsync(
 		return
 	}
 	if _, _, err := s.executeStrategyGenerationRun(ctx, run, ledger, genCtx, modelName); err != nil && s.log != nil {
-		s.log.Warn("strategy generation agent run finished with error", "run_id", run.ID, "error", safelog.Text(err.Error(), 300))
+		s.log.Warn("strategy generation agent run finished with error", "run_id", run.ID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "model", modelName, "error", safelog.Text(err.Error(), 300))
 	}
 }
 
@@ -1476,7 +1476,7 @@ func (s *Service) executeStrategyGenerationRun(
 	running.Status = AgentRunStatusRunning
 	if _, err := s.store.UpdateAgentRun(ctx, running); err != nil {
 		if s.log != nil {
-			s.log.Warn("update strategy generation run to running failed", "run_id", run.ID, "error", err)
+			s.log.Warn("update strategy generation run to running failed", "run_id", run.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(err.Error(), 240))
 		}
 	}
 
@@ -1586,12 +1586,15 @@ func (s *Service) finalizeAgentRunWithOutput(
 		s.markOpportunityDiscoveryRunFailed(ctx, run, run.ErrorMessage)
 
 		ledger.OutputArtifactSummary = safelog.Text(outputArtifact.String(), 16384)
-
-		if _, err := s.store.UpdateAgentRun(ctx, run); err != nil {
-			s.log.Warn("finalize: update run failed", "run_id", runID, "error", err)
+		if s.log != nil {
+			s.log.Warn("agent run finalized as failed", "run_id", run.ID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "status", run.Status, "error", safelog.Text(run.ErrorMessage, 300))
 		}
-		if _, err := s.store.UpdateAgentDecisionLedger(ctx, ledger); err != nil {
-			s.log.Warn("finalize: update ledger failed", "run_id", runID, "error", err)
+
+		if _, err := s.store.UpdateAgentRun(ctx, run); err != nil && s.log != nil {
+			s.log.Warn("finalize: update run failed", "run_id", runID, "task_type", run.TaskType, "error", safelog.Text(err.Error(), 240))
+		}
+		if _, err := s.store.UpdateAgentDecisionLedger(ctx, ledger); err != nil && s.log != nil {
+			s.log.Warn("finalize: update ledger failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "error", safelog.Text(err.Error(), 240))
 		}
 		return
 	}
@@ -1605,8 +1608,15 @@ func (s *Service) finalizeAgentRunWithOutput(
 		s.markStockProfileAIEnhancementFailed(ctx, run, run.ErrorMessage)
 		s.markOpportunityDiscoveryRunFailed(ctx, run, run.ErrorMessage)
 		ledger.OutputArtifactSummary = safelog.Text(outputArtifact.String(), 16384)
-		s.store.UpdateAgentRun(ctx, run)
-		s.store.UpdateAgentDecisionLedger(ctx, ledger)
+		if s.log != nil {
+			s.log.Warn("agent run finalized without valid result", "run_id", run.ID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "status", run.Status, "error", safelog.Text(run.ErrorMessage, 300))
+		}
+		if _, err := s.store.UpdateAgentRun(ctx, run); err != nil && s.log != nil {
+			s.log.Warn("finalize: update run after missing result failed", "run_id", runID, "task_type", run.TaskType, "error", safelog.Text(err.Error(), 240))
+		}
+		if _, err := s.store.UpdateAgentDecisionLedger(ctx, ledger); err != nil && s.log != nil {
+			s.log.Warn("finalize: update ledger after missing result failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "error", safelog.Text(err.Error(), 240))
+		}
 		return
 	}
 
