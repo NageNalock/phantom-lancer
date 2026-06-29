@@ -102,10 +102,13 @@ func (s *Service) GetEmbeddingStatus(ctx context.Context) (EmbeddingStatus, erro
 	status.ReadyAssetCount = ready
 	status.StaleAssetCount = stale
 	status.FailedAssetCount = failed
-	if missing, err := s.countMissingEmbeddingSources(ctx, normalizeEmbeddingObjectTypes(nil), model); err == nil {
-		status.MissingAssetCount = missing
+	objectTypes := normalizeEmbeddingObjectTypes(nil)
+	missingByType := map[string]int{}
+	if counts, err := s.store.CountMissingEmbeddingSourcesByType(ctx, objectTypes, model.ID); err == nil {
+		missingByType = counts
+		status.MissingAssetCount = sumMissingEmbeddingCounts(counts, objectTypes)
 	}
-	status.AssetBreakdown = s.embeddingAssetBreakdown(ctx, model)
+	status.AssetBreakdown = s.embeddingAssetBreakdown(ctx, model, missingByType)
 
 	if err := validateEmbeddingModel(model); err != nil {
 		status.Status = EmbeddingStatusModelUnavailable
@@ -355,7 +358,7 @@ func (s *Service) CountEmbeddingAssets(ctx context.Context, filter EmbeddingAsse
 	return s.store.CountEmbeddingAssets(ctx, filter)
 }
 
-func (s *Service) embeddingAssetBreakdown(ctx context.Context, model AgentModelProfile) []EmbeddingAssetBreakdown {
+func (s *Service) embeddingAssetBreakdown(ctx context.Context, model AgentModelProfile, missingByType map[string]int) []EmbeddingAssetBreakdown {
 	categories := []struct {
 		category    string
 		objectTypes []string
@@ -363,6 +366,9 @@ func (s *Service) embeddingAssetBreakdown(ctx context.Context, model AgentModelP
 		{category: EmbeddingObjectStockProfile, objectTypes: []string{EmbeddingObjectStockProfile}},
 		{category: EmbeddingObjectNewsEvent, objectTypes: []string{EmbeddingObjectNewsEvent}},
 		{category: "other", objectTypes: []string{EmbeddingObjectOpportunity}},
+	}
+	if missingByType == nil {
+		missingByType, _ = s.store.CountMissingEmbeddingSourcesByType(ctx, normalizeEmbeddingObjectTypes(nil), model.ID)
 	}
 	out := make([]EmbeddingAssetBreakdown, 0, len(categories))
 	for _, category := range categories {
@@ -375,9 +381,7 @@ func (s *Service) embeddingAssetBreakdown(ctx context.Context, model AgentModelP
 			}); err == nil {
 				item.ReadyAssetCount += ready
 			}
-			if missing, err := s.countMissingEmbeddingSources(ctx, []string{objectType}, model); err == nil {
-				item.MissingAssetCount += missing
-			}
+			item.MissingAssetCount += missingByType[objectType]
 		}
 		out = append(out, item)
 	}
@@ -730,21 +734,20 @@ func (s *Service) collectEmbeddingWorkSources(ctx context.Context, objectTypes [
 }
 
 func (s *Service) countMissingEmbeddingSources(ctx context.Context, objectTypes []string, model AgentModelProfile) (int, error) {
+	objectTypes = normalizeEmbeddingObjectTypes(objectTypes)
+	counts, err := s.store.CountMissingEmbeddingSourcesByType(ctx, objectTypes, model.ID)
+	if err != nil {
+		return 0, err
+	}
+	return sumMissingEmbeddingCounts(counts, objectTypes), nil
+}
+
+func sumMissingEmbeddingCounts(counts map[string]int, objectTypes []string) int {
 	total := 0
-	err := s.forEachEmbeddingSource(ctx, objectTypes, func(source embeddingAssetSource) error {
-		if strings.TrimSpace(source.Text) == "" {
-			return nil
-		}
-		if _, err := s.store.GetEmbeddingAssetByObject(ctx, source.ObjectType, source.ObjectID, model.ID); err != nil {
-			if errors.Is(err, ErrEmbeddingAssetNotFound) {
-				total++
-				return nil
-			}
-			return err
-		}
-		return nil
-	})
-	return total, err
+	for _, objectType := range normalizeEmbeddingObjectTypes(objectTypes) {
+		total += counts[objectType]
+	}
+	return total
 }
 
 func (s *Service) forEachEmbeddingSource(ctx context.Context, objectTypes []string, visit func(embeddingAssetSource) error) error {

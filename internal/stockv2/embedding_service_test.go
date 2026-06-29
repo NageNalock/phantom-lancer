@@ -280,6 +280,55 @@ func TestEmbeddingStatusBreakdownGroupsReadyAndMissingAssets(t *testing.T) {
 	}
 }
 
+func TestCountMissingEmbeddingSourcesByTypeUsesCurrentModelAssets(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	model := configureEmbeddingModel(t, svc, "embed-v1")
+
+	upsertEmbeddingTestProfile(t, svc, "300750", "宁德时代", "动力电池")
+	upsertEmbeddingTestProfile(t, svc, "600519", "贵州茅台", "白酒")
+	event, err := svc.CreateNewsEvent(ctx, NewsEvent{Source: "test", Title: "储能产业链更新"})
+	if err != nil {
+		t.Fatalf("create news event: %v", err)
+	}
+	if _, err := svc.CreateOpportunity(ctx, RequestCreateOpportunity{Title: "机器人产业链", UserThesis: "关注上游零部件"}); err != nil {
+		t.Fatalf("create opportunity: %v", err)
+	}
+	if _, err := svc.store.UpsertEmbeddingAsset(ctx, EmbeddingAsset{
+		ObjectType:          EmbeddingObjectStockProfile,
+		ObjectID:            "300750",
+		TextHash:            "hash",
+		ModelID:             model.ID,
+		ProviderID:          model.ProviderID,
+		EmbeddingProtocol:   model.EmbeddingProtocol,
+		EmbeddingDimensions: 3,
+		VectorRef:           "ready-300750",
+		Status:              EmbeddingAssetStatusReady,
+	}); err != nil {
+		t.Fatalf("upsert profile asset: %v", err)
+	}
+	if _, err := svc.store.UpsertEmbeddingAsset(ctx, EmbeddingAsset{
+		ObjectType:          EmbeddingObjectNewsEvent,
+		ObjectID:            event.ID,
+		TextHash:            "old-hash",
+		ModelID:             "old-model",
+		EmbeddingDimensions: 3,
+		VectorRef:           "old-news",
+		Status:              EmbeddingAssetStatusReady,
+	}); err != nil {
+		t.Fatalf("upsert old news asset: %v", err)
+	}
+
+	counts, err := svc.store.CountMissingEmbeddingSourcesByType(ctx, normalizeEmbeddingObjectTypes(nil), model.ID)
+	if err != nil {
+		t.Fatalf("count missing: %v", err)
+	}
+	if counts[EmbeddingObjectStockProfile] != 1 || counts[EmbeddingObjectNewsEvent] != 1 || counts[EmbeddingObjectOpportunity] != 1 {
+		t.Fatalf("counts=%+v, want profile=1 news=1 opportunity=1", counts)
+	}
+}
+
 func TestStockProfileAIEnhancementMarksEmbeddingAssetStale(t *testing.T) {
 	svc, cleanup := newEmbeddingTestService(t)
 	defer cleanup()

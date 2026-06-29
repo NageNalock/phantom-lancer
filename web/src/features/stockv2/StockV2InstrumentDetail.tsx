@@ -725,11 +725,11 @@ function StockProfileSection({
             <ProfileTerms label="业务线" values={[...(profile.businessLinesZh || []), ...(profile.businessLinesEn || [])]} />
             <ProfileTerms label="风险标签" values={[...(profile.riskTagsZh || []), ...(profile.riskTagsEn || [])]} />
             {profile.aiProfileError ? <ProfileRow label="AI 错误" value={profile.aiProfileError} danger /> : null}
+            <BilingualProfileDetails profile={profile} />
             <details className="rounded border border-[var(--line)] bg-[var(--surface)] p-3">
-              <summary className="cursor-pointer text-xs font-medium">完整 profile text</summary>
-              <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap text-xs text-[var(--muted-strong)]">
-                {profile.profileTextZh || profile.profileText || profile.profileTextEn || "暂无 profile text"}
-              </pre>
+              <summary className="cursor-pointer text-xs font-medium">完整 profile text（中英文）</summary>
+              <ProfileTextBlock title="中文" value={profile.profileTextZh || profile.profileText} />
+              <ProfileTextBlock title="English" value={profile.profileTextEn} />
             </details>
           </>
         ) : !error ? (
@@ -737,6 +737,35 @@ function StockProfileSection({
         ) : null}
       </div>
     </section>
+  );
+}
+
+function BilingualProfileDetails({ profile }: { profile: StockV2StockProfile }) {
+  return (
+    <details className="rounded border border-[var(--line)] bg-[var(--surface)] p-3">
+      <summary className="cursor-pointer text-xs font-medium">AI 总结画像（中英文）</summary>
+      <div className="mt-3 grid gap-3">
+        <ProfileRow label="中文摘要" value={profile.businessSummaryZh || profile.businessSummary} />
+        <ProfileTerms label="中文关键词" values={profile.keywordsZh || []} />
+        <ProfileTerms label="中文业务线" values={profile.businessLinesZh || []} />
+        <ProfileTerms label="中文风险" values={profile.riskTagsZh || []} />
+        <ProfileRow label="EN Summary" value={profile.businessSummaryEn} />
+        <ProfileTerms label="EN Keywords" values={profile.keywordsEn || []} />
+        <ProfileTerms label="EN Lines" values={profile.businessLinesEn || []} />
+        <ProfileTerms label="EN Risks" values={profile.riskTagsEn || []} />
+      </div>
+    </details>
+  );
+}
+
+function ProfileTextBlock({ title, value }: { title: string; value?: string }) {
+  return (
+    <div className="mt-3">
+      <div className="mb-1 text-[11px] font-medium text-[var(--muted)]">{title}</div>
+      <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded border border-[var(--line)] bg-[var(--surface-soft)] p-2 text-xs text-[var(--muted-strong)]">
+        {value || "暂无"}
+      </pre>
+    </div>
   );
 }
 

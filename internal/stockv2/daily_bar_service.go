@@ -16,7 +16,10 @@ import (
 //
 // 失败绝不伪造：抓取失败返回 error，不写空 bar、不伪装、不用最新价派生。
 
-const dailyBarsAgentTarget = 250 // Agent 默认要求最近 250 个交易日
+const (
+	dailyBarsAgentTarget            = 250 // Agent 默认要求最近 250 个交易日
+	universeMaintenanceMaxFreshness = 24 * time.Hour
+)
 
 func isValidDailyBarRange(r string) bool {
 	switch r {

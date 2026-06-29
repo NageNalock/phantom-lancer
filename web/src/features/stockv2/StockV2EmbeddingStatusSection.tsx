@@ -12,28 +12,56 @@ import {
 import { StockV2EmbeddingRebuildDrawer } from "./StockV2EmbeddingRebuildDrawer";
 import { StockV2EmbeddingBindDrawer } from "./StockV2EmbeddingBindDrawer";
 
+const EMBEDDING_STATUS_CACHE_TTL_MS = 60_000;
+let embeddingStatusCache: { value: StockV2EmbeddingStatus; fetchedAt: number } | null = null;
+
+function getFreshEmbeddingStatusCache() {
+  if (!embeddingStatusCache) return null;
+  return Date.now() - embeddingStatusCache.fetchedAt <= EMBEDDING_STATUS_CACHE_TTL_MS
+    ? embeddingStatusCache
+    : null;
+}
+
 // Embedding 状态区（顶部常驻 Panel，独立加载 /embeddings/status）。
 // 它是「主题机会」页语义召回能力的前提状态，与 opportunity 列表解耦：
 // 即便 opportunity 相关后端 404，本区仍展示真实的模型绑定与向量资产状态。
 // 拦截逻辑只读 status.available，不在前端做 embedding 计算。
 export function StockV2EmbeddingStatusSection({ actions }: { actions: AppActions }) {
-  const [status, setStatus] = useState<StockV2EmbeddingStatus | null>(null);
-  const [loading, setLoading] = useState(true);
+  const initialCache = getFreshEmbeddingStatusCache();
+  const [status, setStatus] = useState<StockV2EmbeddingStatus | null>(initialCache?.value ?? null);
+  const [loading, setLoading] = useState(!initialCache);
+  const [refreshing, setRefreshing] = useState(!!initialCache);
+  const [loadedAt, setLoadedAt] = useState(initialCache?.fetchedAt ?? 0);
   const [error, setError] = useState<string | null>(null);
   const [showRebuild, setShowRebuild] = useState(false);
   const [showBind, setShowBind] = useState(false);
 
-  async function load() {
-    setLoading(true);
+  async function load(force = false) {
+    const cached = force ? null : getFreshEmbeddingStatusCache();
+    if (cached) {
+      setStatus(cached.value);
+      setLoadedAt(cached.fetchedAt);
+      setLoading(false);
+      setRefreshing(true);
+    } else if (status) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
     setError(null);
     try {
       const res = await actions.api<StockV2EmbeddingStatus>("/api/stockv2/embeddings/status");
+      embeddingStatusCache = { value: res, fetchedAt: Date.now() };
       setStatus(res);
+      setLoadedAt(embeddingStatusCache.fetchedAt);
     } catch (err) {
       setError(friendlyError(err));
-      setStatus(null);
+      if (!cached && !status) {
+        setStatus(null);
+      }
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }
 
@@ -72,7 +100,7 @@ export function StockV2EmbeddingStatusSection({ actions }: { actions: AppActions
             )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={() => void load()} title="重新拉取状态">
+            <Button onClick={() => void load(true)} title="重新拉取状态">
               <ArrowClockwise size={14} className="mr-1.5" />
               刷新
             </Button>
@@ -122,6 +150,7 @@ export function StockV2EmbeddingStatusSection({ actions }: { actions: AppActions
               </span>
               {status.maintenance?.lastRunAt ? <span>上次：{formatEmbeddingTime(status.maintenance.lastRunAt)}</span> : null}
               {status.maintenance?.nextRunAt ? <span>下次：{formatEmbeddingTime(status.maintenance.nextRunAt)}</span> : null}
+              {refreshing ? <span>后台刷新中…</span> : loadedAt ? <span>状态：{formatEmbeddingTime(new Date(loadedAt).toISOString())}</span> : null}
             </div>
 
             {modelNotConfigured ? (
@@ -194,14 +223,14 @@ export function StockV2EmbeddingStatusSection({ actions }: { actions: AppActions
       </div>
 
       {showRebuild ? (
-        <StockV2EmbeddingRebuildDrawer actions={actions} onClose={() => setShowRebuild(false)} onDone={() => void load()} />
+        <StockV2EmbeddingRebuildDrawer actions={actions} onClose={() => setShowRebuild(false)} onDone={() => void load(true)} />
       ) : null}
       {showBind ? (
         <StockV2EmbeddingBindDrawer
           actions={actions}
           status={status}
           onClose={() => setShowBind(false)}
-          onDone={() => void load()}
+          onDone={() => void load(true)}
         />
       ) : null}
     </>

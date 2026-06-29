@@ -104,3 +104,104 @@ func (s *Store) MarkEmbeddingAssetsStaleForObject(ctx context.Context, objectTyp
 	`, EmbeddingAssetStatusStale, time.Now(), strings.TrimSpace(objectType), strings.TrimSpace(objectID), EmbeddingAssetStatusReady)
 	return wrapError(err, "mark embedding assets stale for object")
 }
+
+func (s *Store) CountMissingEmbeddingSourcesByType(ctx context.Context, objectTypes []string, modelID string) (map[string]int, error) {
+	out := map[string]int{}
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return out, nil
+	}
+	for _, objectType := range normalizeEmbeddingObjectTypes(objectTypes) {
+		var count int
+		var err error
+		switch objectType {
+		case EmbeddingObjectStockProfile:
+			count, err = s.countMissingEmbeddingSourcesFromAssetDB(ctx, objectType, modelID, `
+				SELECT symbol
+				FROM stockv2_stock_profiles
+				WHERE TRIM(COALESCE(symbol, '')) <> ''
+			`)
+		case EmbeddingObjectNewsEvent:
+			count, err = s.countMissingEmbeddingSourcesFromAssetDB(ctx, objectType, modelID, `
+				SELECT id
+				FROM stockv2_news_events
+				WHERE TRIM(COALESCE(source, '') || COALESCE(title, '') || COALESCE(summary, '') || COALESCE(content, '') || COALESCE(quality_status, '')) <> ''
+			`)
+		case EmbeddingObjectOpportunity:
+			err = s.db.QueryRowContext(ctx, `
+				SELECT COUNT(*)
+				FROM stockv2_opportunities o
+				LEFT JOIN stockv2_embedding_assets a
+				  ON a.object_type = ? AND a.object_id = o.id AND a.model_id = ?
+				WHERE a.id IS NULL
+				  AND TRIM(COALESCE(o.title, '') || COALESCE(o.user_thesis, '')) <> ''
+			`, objectType, modelID).Scan(&count)
+		}
+		if err != nil {
+			return nil, wrapError(err, "count missing embedding sources "+objectType)
+		}
+		out[objectType] = count
+	}
+	return out, nil
+}
+
+func (s *Store) countMissingEmbeddingSourcesFromAssetDB(ctx context.Context, objectType, modelID, sourceIDSQL string) (int, error) {
+	// ponytail: source rows live in DuckDB and embedding assets live in SQLite; batch IDs here
+	// instead of introducing cross-db attach or a mirrored queue table.
+	rows, err := s.assetDB().QueryContext(ctx, sourceIDSQL)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0, 256)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		if id = strings.TrimSpace(id); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	existing, err := s.countEmbeddingAssetsForObjectIDs(ctx, objectType, modelID, ids)
+	if err != nil {
+		return 0, err
+	}
+	return len(ids) - existing, nil
+}
+
+func (s *Store) countEmbeddingAssetsForObjectIDs(ctx context.Context, objectType, modelID string, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	const chunkSize = 500
+	total := 0
+	for start := 0; start < len(ids); start += chunkSize {
+		end := start + chunkSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]any, 0, 2+len(chunk))
+		args = append(args, objectType, modelID)
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		var count int
+		err := s.db.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM stockv2_embedding_assets
+			WHERE object_type = ? AND model_id = ? AND object_id IN (`+strings.Join(placeholders, ",")+`)
+		`, args...).Scan(&count)
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	return total, nil
+}

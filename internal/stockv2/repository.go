@@ -2199,6 +2199,19 @@ func (s *Store) UpdateUpdateJob(ctx context.Context, job StockV2UpdateJob) error
 	return wrapError(err, "update update job")
 }
 
+func (s *Store) FailRunningUpdateJobs(ctx context.Context, reason string) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_update_jobs
+		SET status = 'failed', end_at = ?, error_message = ?
+		WHERE status = 'running'
+	`, time.Now(), strings.TrimSpace(reason))
+	if err != nil {
+		return 0, wrapError(err, "fail running update jobs")
+	}
+	rows, _ := result.RowsAffected()
+	return rows, nil
+}
+
 // ListUpdateJobs 获取更新任务列表
 func (s *Store) ListUpdateJobs(ctx context.Context, limit int) ([]StockV2UpdateJob, error) {
 	rows, err := s.db.QueryContext(ctx, updateJobSelectSQL+" ORDER BY created_at DESC LIMIT ?", limit)

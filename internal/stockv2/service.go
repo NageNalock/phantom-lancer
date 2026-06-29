@@ -60,7 +60,24 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 	pool.service = svc
 	svc.newsAdapters[NewsSourceJin10] = jin10NewsSourceAdapter{httpClient: httpClient}
 	svc.newsAdapters[NewsSourceFinancialJuice] = financialJuiceNewsSourceAdapter{service: svc}
+	svc.markInterruptedRunningUpdateJobs(context.Background())
 	return svc
+}
+
+func (s *Service) markInterruptedRunningUpdateJobs(ctx context.Context) {
+	if s == nil || s.store == nil {
+		return
+	}
+	count, err := s.store.FailRunningUpdateJobs(ctx, "interrupted by service restart before completion")
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("mark interrupted stock data asset maintenance jobs failed", "error", err)
+		}
+		return
+	}
+	if count > 0 && s.log != nil {
+		s.log.Warn("marked interrupted stock data asset maintenance jobs", "count", count)
+	}
 }
 
 func (s *Service) WithNewsSourceAdapter(adapter NewsSourceAdapter) *Service {
@@ -677,6 +694,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 	var failedItems []UpdateFailure
 	successCount := 0
 	processedCount := 0
+	freshnessWindow := s.universeMaintenanceFreshnessWindow()
 	flushProgress := func(includeFailedItems bool) {
 		progress.ProcessedCount = processedCount
 		progress.SuccessCount = successCount
@@ -731,20 +749,47 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 		progress.CurrentSymbol = batchSymbols[0]
 		s.store.UpdateUpdateProgress(ctx, progress)
 
+		workSymbols := make([]string, 0, len(batchSymbols))
+		batchNow := time.Now()
+		for _, sym := range batchSymbols {
+			skip, err := s.shouldSkipFreshUniverseSymbol(ctx, sym, batchNow, freshnessWindow)
+			if err != nil {
+				if s.log != nil {
+					s.log.Warn("check stock data asset freshness failed", "symbol", sym, "error", err)
+				}
+				workSymbols = append(workSymbols, sym)
+				continue
+			}
+			if skip {
+				processedCount++
+				successCount++
+				progress.CurrentBatchProgress++
+				progress.CurrentSymbol = sym
+				continue
+			}
+			workSymbols = append(workSymbols, sym)
+		}
+		if progress.CurrentBatchProgress > 0 {
+			flushProgress(false)
+		}
+		if len(workSymbols) == 0 {
+			continue
+		}
+
 		// 获取这批股票数据
-		instruments, err := s.universeSource.FetchStockUniverse(ctx, batchSymbols)
+		instruments, err := s.universeSource.FetchStockUniverse(ctx, workSymbols)
 		if err != nil {
 			s.log.Error("fetch batch failed", "batch", batch, "error", err)
 			// 整批失败，逐个记入失败列表
-			for _, sym := range batchSymbols {
+			for _, sym := range workSymbols {
 				failedItems = append(failedItems, UpdateFailure{
 					Symbol: sym,
 					Reason: err.Error(),
 				})
 			}
-			processedCount += len(batchSymbols)
+			processedCount += len(workSymbols)
 			progress.CurrentBatchProgress = len(batchSymbols)
-			progress.CurrentSymbol = batchSymbols[len(batchSymbols)-1]
+			progress.CurrentSymbol = workSymbols[len(workSymbols)-1]
 			flushProgress(true)
 			continue
 		}
@@ -756,8 +801,8 @@ func (s *Service) runUniverseUpdate(ctx context.Context, jobID string) {
 		}
 
 		// 保存股票数据，并把历史日 K 覆盖纳入同一个数据资产维护任务。
-		batchProcessed := 0
-		for _, sym := range batchSymbols {
+		batchProcessed := progress.CurrentBatchProgress
+		for _, sym := range workSymbols {
 			progress.CurrentSymbol = sym
 			failedBefore := len(failedItems)
 			fetchedDailyBars := false
@@ -847,6 +892,42 @@ func (s *Service) maintainDailyBarsForInstrument(ctx context.Context, inst Stock
 
 func dailyBarsNeedsMaintenance(q DailyBarsQuality) bool {
 	return !q.HasData || !q.Meets250 || q.Stale
+}
+
+func (s *Service) universeMaintenanceFreshnessWindow() time.Duration {
+	interval := time.Duration(s.settings.UpdateIntervalSec) * time.Second
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	if interval > universeMaintenanceMaxFreshness {
+		return universeMaintenanceMaxFreshness
+	}
+	return interval
+}
+
+func (s *Service) shouldSkipFreshUniverseSymbol(ctx context.Context, symbol string, now time.Time, freshness time.Duration) (bool, error) {
+	inst, err := s.store.GetInstrument(ctx, symbol)
+	if errors.Is(err, ErrInstrumentNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if inst.UpdatedAt.IsZero() || now.Sub(inst.UpdatedAt) > freshness {
+		return false, nil
+	}
+	rowCount, _, latest, _, _, err := s.store.GetDailyBarsStats(ctx, symbol, DailyBarAdjustedNone)
+	if err != nil {
+		return false, err
+	}
+	quality := DailyBarsQuality{
+		HasData:  rowCount > 0,
+		Meets250: rowCount >= dailyBarsAgentTarget,
+		Stale:    rowCount == 0 || isDailyBarsStale(latest, now),
+	}
+	// ponytail: existing updated_at plus daily-bar quality is enough for v1 fast-skip;
+	// split per-source freshness if quote/profile cadences need independent SLAs.
+	return !dailyBarsNeedsMaintenance(quality), nil
 }
 
 // GetUpdateJob 获取更新任务
@@ -1130,6 +1211,10 @@ func (s *Service) checkAndExecuteScheduledUpdate(ctx context.Context) {
 	if now.Sub(s.settings.LastScheduledUpdate) < interval {
 		return
 	}
+	if s.hasRecentCompletedUniverseUpdate(ctx, now, interval) {
+		s.markScheduledUpdateChecked(ctx, now)
+		return
+	}
 
 	// 执行维护
 	s.log.Info("executing scheduled stock data asset maintenance")
@@ -1139,9 +1224,44 @@ func (s *Service) checkAndExecuteScheduledUpdate(ctx context.Context) {
 	}
 
 	// 更新最后一次执行时间
-	settings, _ := s.GetSettings(ctx)
-	settings.LastScheduledUpdate = now
-	s.store.CreateOrUpdateSettings(ctx, settings)
+	s.markScheduledUpdateChecked(ctx, now)
+}
+
+func (s *Service) hasRecentCompletedUniverseUpdate(ctx context.Context, now time.Time, interval time.Duration) bool {
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	latest, err := s.store.GetLatestUpdateJob(ctx)
+	if errors.Is(err, ErrUpdateJobNotFound) {
+		return false
+	}
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("check latest stock data asset maintenance failed", "error", err)
+		}
+		return false
+	}
+	if latest.Status != "completed" {
+		return false
+	}
+	return !latest.EndAt.IsZero() && now.Sub(latest.EndAt) >= 0 && now.Sub(latest.EndAt) < interval
+}
+
+func (s *Service) markScheduledUpdateChecked(ctx context.Context, at time.Time) {
+	settings, err := s.GetSettings(ctx)
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("load settings before marking scheduled stock maintenance checked failed", "error", err)
+		}
+		return
+	}
+	settings.LastScheduledUpdate = at
+	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil {
+		if s.log != nil {
+			s.log.Warn("mark scheduled stock maintenance checked failed", "error", err)
+		}
+		return
+	}
 	s.settings = settings
 }
 
