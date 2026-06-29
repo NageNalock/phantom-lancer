@@ -29,7 +29,7 @@ func (s *Store) CreateNewsEvent(ctx context.Context, event NewsEvent) (NewsEvent
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, event.ID, event.RawNewsID, event.Source, event.ExternalID, event.Title,
 		event.Summary, event.Content, event.URL, event.QualityStatus, event.DedupeKey,
-		event.LinkStatus, event.EventAt, nullableNewsTime(event.LinkProcessedAt),
+		event.LinkStatus, event.EventAt, nullableTime(event.LinkProcessedAt),
 		event.CreatedAt, event.UpdatedAt)
 	if err != nil {
 		return NewsEvent{}, wrapError(err, "create news event")
@@ -56,28 +56,26 @@ func (s *Store) ListPendingNewsEvents(ctx context.Context, source string, limit 
 			WHERE link_status = ? AND source = ?
 			ORDER BY event_at ASC, created_at ASC
 			LIMIT ?
-		`, NewsEventLinkStatusPending, source, normalizedNewsBatchLimit(limit))
+		`, NewsEventLinkStatusPending, source, normalizedPageLimit(limit, 200))
 		if err != nil {
 			return nil, wrapError(err, "list pending news events")
 		}
-		defer rows.Close()
-		return collectNewsEvents(rows)
+		return scanRows(rows, scanNewsEvent, "scan news event", "iterate news events")
 	}
 	rows, err := s.assetDB().QueryContext(ctx, newsEventSelectSQL()+`
 		WHERE link_status = ?
 		ORDER BY event_at ASC, created_at ASC
 		LIMIT ?
-	`, NewsEventLinkStatusPending, normalizedNewsBatchLimit(limit))
+	`, NewsEventLinkStatusPending, normalizedPageLimit(limit, 200))
 	if err != nil {
 		return nil, wrapError(err, "list pending news events")
 	}
-	defer rows.Close()
-	return collectNewsEvents(rows)
+	return scanRows(rows, scanNewsEvent, "scan news event", "iterate news events")
 }
 
 func (s *Store) ListNewsEvents(ctx context.Context, filter NewsEventListFilter) ([]NewsEvent, error) {
 	where, args := newsEventWhere(filter)
-	args = append(args, normalizedNewsLimit(filter.Limit), normalizedNewsOffset(filter.Offset))
+	args = append(args, normalizedPageLimit(filter.Limit, 200), normalizedPageOffset(filter.Offset))
 	rows, err := s.assetDB().QueryContext(ctx, newsEventSelectSQL()+where+`
 		ORDER BY `+newsEventTimeSQL+` DESC, created_at DESC
 		LIMIT ? OFFSET ?
@@ -85,8 +83,7 @@ func (s *Store) ListNewsEvents(ctx context.Context, filter NewsEventListFilter) 
 	if err != nil {
 		return nil, wrapError(err, "list news events")
 	}
-	defer rows.Close()
-	return collectNewsEvents(rows)
+	return scanRows(rows, scanNewsEvent, "scan news event", "iterate news events")
 }
 
 func (s *Store) CountNewsEvents(ctx context.Context, filter NewsEventListFilter) (int, error) {
@@ -150,7 +147,7 @@ func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, candidate NewsLinkC
 	`, candidate.ID, candidate.NewsEventID, candidate.RawNewsID, candidate.Symbol,
 		candidate.Market, candidate.InstrumentName, candidate.MatchMethod, candidate.Score,
 		candidate.Reason, marshalProfileStrings(candidate.MatchedTerms), candidate.MonitorStatus,
-		nullableNewsString(candidate.MonitorHitID), nullableNewsTime(candidate.MonitoredAt),
+		nullableString(candidate.MonitorHitID), nullableTime(candidate.MonitoredAt),
 		candidate.CreatedAt, candidate.UpdatedAt)
 	if err != nil {
 		return NewsLinkCandidate{}, wrapError(err, "upsert news link candidate")
@@ -185,12 +182,11 @@ func (s *Store) ListPendingNewsLinkCandidates(ctx context.Context, limit int) ([
 		WHERE COALESCE(c.monitor_status, ?) = ?
 		ORDER BY c.updated_at ASC, c.score DESC, c.symbol ASC
 		LIMIT ?
-	`, NewsLinkMonitorStatusPending, NewsLinkMonitorStatusPending, normalizedNewsCandidateLimit(limit))
+	`, NewsLinkMonitorStatusPending, NewsLinkMonitorStatusPending, normalizedPageLimit(limit, 500))
 	if err != nil {
 		return nil, wrapError(err, "list pending news link candidates")
 	}
-	defer rows.Close()
-	return collectNewsLinkCandidates(rows)
+	return scanRows(rows, scanNewsLinkCandidate, "scan news link candidate", "iterate news link candidates")
 }
 
 func (s *Store) MarkNewsLinkCandidateMonitorStatus(ctx context.Context, id, status, monitorHitID string, monitoredAt time.Time) error {
@@ -201,7 +197,7 @@ func (s *Store) MarkNewsLinkCandidateMonitorStatus(ctx context.Context, id, stat
 		UPDATE stockv2_news_link_candidates
 		SET monitor_status = ?, monitor_hit_id = ?, monitored_at = ?, updated_at = ?
 		WHERE id = ?
-	`, status, nullableNewsString(monitorHitID), monitoredAt, monitoredAt, strings.TrimSpace(id))
+	`, status, nullableString(monitorHitID), monitoredAt, monitoredAt, strings.TrimSpace(id))
 	if err != nil {
 		return wrapError(err, "mark news link candidate monitor status")
 	}
@@ -217,7 +213,7 @@ func (s *Store) MarkNewsLinkCandidateMonitorStatus(ctx context.Context, id, stat
 
 func (s *Store) ListNewsLinkCandidates(ctx context.Context, filter NewsLinkCandidateListFilter) ([]NewsLinkCandidate, error) {
 	where, args := newsLinkCandidateWhere(filter)
-	args = append(args, normalizedNewsCandidateLimit(filter.Limit), normalizedStockProfileOffset(filter.Offset))
+	args = append(args, normalizedPageLimit(filter.Limit, 500), normalizedPageOffset(filter.Offset))
 	rows, err := s.assetDB().QueryContext(ctx, newsLinkCandidateSelectSQL()+where+`
 		ORDER BY `+newsLinkCandidateEventTimeSQL+` DESC, c.created_at DESC, c.score DESC, c.symbol ASC
 		LIMIT ? OFFSET ?
@@ -225,8 +221,7 @@ func (s *Store) ListNewsLinkCandidates(ctx context.Context, filter NewsLinkCandi
 	if err != nil {
 		return nil, wrapError(err, "list news link candidates")
 	}
-	defer rows.Close()
-	return collectNewsLinkCandidates(rows)
+	return scanRows(rows, scanNewsLinkCandidate, "scan news link candidate", "iterate news link candidates")
 }
 
 func (s *Store) CountNewsLinkCandidates(ctx context.Context, filter NewsLinkCandidateListFilter) (int, error) {
@@ -236,21 +231,6 @@ func (s *Store) CountNewsLinkCandidates(ctx context.Context, filter NewsLinkCand
 		return 0, wrapError(err, "count news link candidates")
 	}
 	return count, nil
-}
-
-func collectNewsLinkCandidates(rows *sql.Rows) ([]NewsLinkCandidate, error) {
-	items := make([]NewsLinkCandidate, 0)
-	for rows.Next() {
-		item, err := scanNewsLinkCandidate(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan news link candidate")
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate news link candidates")
-	}
-	return items, nil
 }
 
 func newsEventSelectSQL() string {
@@ -287,21 +267,6 @@ func newsEventWhere(filter NewsEventListFilter) (string, []any) {
 		return "", args
 	}
 	return " WHERE " + strings.Join(parts, " AND "), args
-}
-
-func collectNewsEvents(rows *sql.Rows) ([]NewsEvent, error) {
-	items := make([]NewsEvent, 0)
-	for rows.Next() {
-		item, err := scanNewsEvent(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan news event")
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate news events")
-	}
-	return items, nil
 }
 
 func scanNewsEvent(row rowScanner) (NewsEvent, error) {
@@ -407,31 +372,4 @@ func scanNewsLinkCandidate(row rowScanner) (NewsLinkCandidate, error) {
 		item.NewsEventAt = newsEventAt.Time
 	}
 	return item, nil
-}
-
-func normalizedNewsBatchLimit(limit int) int {
-	if limit <= 0 {
-		return 50
-	}
-	if limit > 200 {
-		return 200
-	}
-	return limit
-}
-
-func normalizedNewsCandidateLimit(limit int) int {
-	if limit <= 0 {
-		return 50
-	}
-	if limit > 500 {
-		return 500
-	}
-	return limit
-}
-
-func nullableNewsTime(value time.Time) any {
-	if value.IsZero() {
-		return nil
-	}
-	return value
 }

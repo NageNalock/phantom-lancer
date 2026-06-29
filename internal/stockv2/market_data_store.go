@@ -475,13 +475,6 @@ func (s *MarketDataStore) CountDailyBars(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-func nullableTime(t time.Time) any {
-	if t.IsZero() {
-		return nil
-	}
-	return t
-}
-
 func scanDailyBarsRows(rows *sql.Rows) ([]StockV2DailyBar, error) {
 	var out []StockV2DailyBar
 	for rows.Next() {

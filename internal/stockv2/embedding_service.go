@@ -270,8 +270,8 @@ func (s *Service) RebuildEmbeddingAssets(ctx context.Context, req RequestRebuild
 }
 
 func (s *Service) ListEmbeddingAssets(ctx context.Context, filter EmbeddingAssetListFilter) ([]EmbeddingAsset, error) {
-	filter.Limit = normalizedOpportunityLimit(filter.Limit)
-	filter.Offset = normalizedOpportunityOffset(filter.Offset)
+	filter.Limit = normalizedPageLimit(filter.Limit, 200)
+	filter.Offset = normalizedPageOffset(filter.Offset)
 	return s.store.ListEmbeddingAssets(ctx, filter)
 }
 

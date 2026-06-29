@@ -29,7 +29,7 @@ func (s *Store) UpsertMonitorTaskConfig(ctx context.Context, taskType string, cf
 		taskType,
 		boolToInt(cfg.Enabled),
 		cfg.IntervalSeconds,
-		nullableMonitorString(cfg.Scope),
+		nullableString(cfg.Scope),
 		monitorStringOrDefault(cfg.Sensitivity, "normal"),
 		cfg.CooldownSeconds,
 		boolToInt(cfg.AgentDoublecheckEnabled),
@@ -133,15 +133,15 @@ func (s *Store) CreateMonitorRun(ctx context.Context, run MonitorRun) (MonitorRu
 		run.Status,
 		run.TriggerType,
 		run.StartedAt,
-		nullableMonitorTime(run.FinishedAt),
-		nullableMonitorString(run.ScopeSummary),
+		nullableTime(run.FinishedAt),
+		nullableString(run.ScopeSummary),
 		run.ScannedCount,
 		run.HitCount,
 		run.AlertCount,
 		run.ReviewCount,
 		run.SuccessCount,
 		run.FailedCount,
-		nullableMonitorString(run.ErrorMessage),
+		nullableString(run.ErrorMessage),
 		marshalMap(run.Metadata),
 		run.CreatedAt,
 	)
@@ -160,15 +160,15 @@ func (s *Store) UpdateMonitorRun(ctx context.Context, run MonitorRun) (MonitorRu
 		WHERE id = ?
 	`,
 		run.Status,
-		nullableMonitorTime(run.FinishedAt),
-		nullableMonitorString(run.ScopeSummary),
+		nullableTime(run.FinishedAt),
+		nullableString(run.ScopeSummary),
 		run.ScannedCount,
 		run.HitCount,
 		run.AlertCount,
 		run.ReviewCount,
 		run.SuccessCount,
 		run.FailedCount,
-		nullableMonitorString(run.ErrorMessage),
+		nullableString(run.ErrorMessage),
 		marshalMap(run.Metadata),
 		run.ID,
 	)
@@ -231,8 +231,8 @@ func (s *Store) GetLatestMonitorRun(ctx context.Context, taskType string) (*Moni
 
 func (s *Store) ListMonitorRuns(ctx context.Context, filter MonitorRunListFilter) ([]MonitorRun, error) {
 	where, args := monitorRunFilterSQL(filter)
-	limit := normalizedMonitorLimit(filter.Limit)
-	offset := normalizedMonitorOffset(filter.Offset)
+	limit := normalizedPageLimit(filter.Limit, 200)
+	offset := normalizedPageOffset(filter.Offset)
 	args = append(args, limit, offset)
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		%s WHERE %s ORDER BY started_at DESC, created_at DESC LIMIT ? OFFSET ?
@@ -240,19 +240,7 @@ func (s *Store) ListMonitorRuns(ctx context.Context, filter MonitorRunListFilter
 	if err != nil {
 		return nil, wrapError(err, "list monitor runs")
 	}
-	defer rows.Close()
-	items := make([]MonitorRun, 0)
-	for rows.Next() {
-		run, err := scanMonitorRun(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan monitor run")
-		}
-		items = append(items, run)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate monitor runs")
-	}
-	return items, nil
+	return scanRows(rows, scanMonitorRun, "scan monitor run", "iterate monitor runs")
 }
 
 func (s *Store) CountMonitorRuns(ctx context.Context, filter MonitorRunListFilter) (int, error) {
@@ -286,15 +274,15 @@ func (s *Store) CreateMonitorHit(ctx context.Context, hit MonitorHit) (MonitorHi
 		hit.RunID,
 		hit.TaskType,
 		hit.Status,
-		nullableMonitorString(hit.StrategyID),
-		nullableMonitorString(hit.PortfolioID),
-		nullableMonitorString(hit.Symbol),
-		nullableMonitorString(hit.Market),
+		nullableString(hit.StrategyID),
+		nullableString(hit.PortfolioID),
+		nullableString(hit.Symbol),
+		nullableString(hit.Market),
 		hit.Title,
-		nullableMonitorString(hit.Summary),
+		nullableString(hit.Summary),
 		marshalMap(hit.Evidence),
-		nullableMonitorString(hit.AgentDecisionID),
-		nullableMonitorString(hit.AlertID),
+		nullableString(hit.AgentDecisionID),
+		nullableString(hit.AlertID),
 		hit.CreatedAt,
 	)
 	return hit, wrapError(err, "create monitor hit")
@@ -335,7 +323,7 @@ func (s *Store) UpdateMonitorHitEvidence(ctx context.Context, id string, evidenc
 		UPDATE stockv2_monitor_hits
 		SET evidence_json = ?, agent_decision_id = ?
 		WHERE id = ?
-	`, marshalMap(evidence), nullableMonitorString(agentDecisionID), id)
+	`, marshalMap(evidence), nullableString(agentDecisionID), id)
 	if err != nil {
 		return wrapError(err, "update monitor hit evidence")
 	}
@@ -353,7 +341,7 @@ func (s *Store) UpdateMonitorHitAlert(ctx context.Context, id, alertID, status s
 		UPDATE stockv2_monitor_hits
 		SET alert_id = ?, status = ?
 		WHERE id = ?
-	`, nullableMonitorString(alertID), status, id)
+	`, nullableString(alertID), status, id)
 	if err != nil {
 		return wrapError(err, "update monitor hit alert")
 	}
@@ -365,8 +353,8 @@ func (s *Store) UpdateMonitorHitAlert(ctx context.Context, id, alertID, status s
 
 func (s *Store) ListMonitorHits(ctx context.Context, filter MonitorHitListFilter) ([]MonitorHit, error) {
 	where, args := monitorHitFilterSQL(filter)
-	limit := normalizedMonitorLimit(filter.Limit)
-	offset := normalizedMonitorOffset(filter.Offset)
+	limit := normalizedPageLimit(filter.Limit, 200)
+	offset := normalizedPageOffset(filter.Offset)
 	args = append(args, limit, offset)
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		%s WHERE %s ORDER BY created_at DESC LIMIT ? OFFSET ?
@@ -374,19 +362,7 @@ func (s *Store) ListMonitorHits(ctx context.Context, filter MonitorHitListFilter
 	if err != nil {
 		return nil, wrapError(err, "list monitor hits")
 	}
-	defer rows.Close()
-	items := make([]MonitorHit, 0)
-	for rows.Next() {
-		hit, err := scanMonitorHit(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan monitor hit")
-		}
-		items = append(items, hit)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate monitor hits")
-	}
-	return items, nil
+	return scanRows(rows, scanMonitorHit, "scan monitor hit", "iterate monitor hits")
 }
 
 func (s *Store) CountMonitorHits(ctx context.Context, filter MonitorHitListFilter) (int, error) {
@@ -492,37 +468,6 @@ func monitorHitFilterSQL(filter MonitorHitListFilter) (string, []any) {
 	add("portfolio_id", filter.PortfolioID)
 	add("symbol", filter.Symbol)
 	return strings.Join(where, " AND "), args
-}
-
-func normalizedMonitorLimit(limit int) int {
-	if limit <= 0 {
-		return 50
-	}
-	if limit > 200 {
-		return 200
-	}
-	return limit
-}
-
-func normalizedMonitorOffset(offset int) int {
-	if offset < 0 {
-		return 0
-	}
-	return offset
-}
-
-func nullableMonitorString(value string) any {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	return value
-}
-
-func nullableMonitorTime(value time.Time) any {
-	if value.IsZero() {
-		return nil
-	}
-	return value
 }
 
 func boolToInt(b bool) int {

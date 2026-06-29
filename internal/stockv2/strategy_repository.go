@@ -203,20 +203,7 @@ func (s *Store) ListStrategyVersions(ctx context.Context, strategyID string) ([]
 	if err != nil {
 		return nil, wrapError(err, "list strategy versions")
 	}
-	defer rows.Close()
-
-	versions := make([]StockV2StrategyVersion, 0)
-	for rows.Next() {
-		version, err := scanStrategyVersion(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan strategy version")
-		}
-		versions = append(versions, version)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate strategy versions")
-	}
-	return versions, nil
+	return scanRows(rows, scanStrategyVersion, "scan strategy version", "iterate strategy versions")
 }
 
 func (s *Store) getStrategy(ctx context.Context, id string) (StockV2Strategy, error) {
@@ -267,13 +254,13 @@ func insertStrategyWithTx(ctx context.Context, tx *sql.Tx, strategy StockV2Strat
 		strategy.Scope,
 		strategy.Source,
 		strategy.Status,
-		nullableStrategyString(strategy.Symbol),
-		nullableStrategyString(strategy.Market),
-		nullableStrategyString(strategy.PortfolioID),
-		nullableStrategyString(strategy.ActiveVersionID),
+		nullableString(strategy.Symbol),
+		nullableString(strategy.Market),
+		nullableString(strategy.PortfolioID),
+		nullableString(strategy.ActiveVersionID),
 		strategy.CreatedAt,
 		strategy.UpdatedAt,
-		nullableStrategyTime(strategy.ArchivedAt),
+		nullableTime(strategy.ArchivedAt),
 	)
 	return wrapError(err, "insert strategy")
 }
@@ -291,12 +278,12 @@ func updateStrategyWithTx(ctx context.Context, tx *sql.Tx, strategy StockV2Strat
 		strategy.Scope,
 		strategy.Source,
 		strategy.Status,
-		nullableStrategyString(strategy.Symbol),
-		nullableStrategyString(strategy.Market),
-		nullableStrategyString(strategy.PortfolioID),
-		nullableStrategyString(strategy.ActiveVersionID),
+		nullableString(strategy.Symbol),
+		nullableString(strategy.Market),
+		nullableString(strategy.PortfolioID),
+		nullableString(strategy.ActiveVersionID),
 		strategy.UpdatedAt,
-		nullableStrategyTime(strategy.ArchivedAt),
+		nullableTime(strategy.ArchivedAt),
 		strategy.ID,
 	)
 	if err != nil {
@@ -467,18 +454,4 @@ func unmarshalMap(raw string) map[string]any {
 	}
 	_ = json.Unmarshal([]byte(raw), &items)
 	return items
-}
-
-func nullableStrategyString(value string) any {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	return value
-}
-
-func nullableStrategyTime(value time.Time) any {
-	if value.IsZero() {
-		return nil
-	}
-	return value
 }

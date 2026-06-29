@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 
 	"phantom-lancer/internal/stockv2"
 )
@@ -142,11 +141,11 @@ func (s *Server) handleStockV2StrategyStatusAction(w http.ResponseWriter, r *htt
 
 func stockV2StrategyFilterFromRequest(r *http.Request) (stockv2.StrategyListFilter, error) {
 	query := r.URL.Query()
-	limit, err := stockV2StrategyPositiveInt(query.Get("limit"), 50)
+	limit, err := stockV2PositiveInt(query.Get("limit"), 50)
 	if err != nil || limit > 200 {
 		return stockv2.StrategyListFilter{}, errors.New("invalid limit")
 	}
-	offset, err := stockV2StrategyNonNegativeInt(query.Get("offset"), 0)
+	offset, err := stockV2NonNegativeInt(query.Get("offset"), 0)
 	if err != nil {
 		return stockv2.StrategyListFilter{}, errors.New("invalid offset")
 	}
@@ -190,26 +189,4 @@ func stockV2StrategyHTTPStatus(err error) int {
 	default:
 		return http.StatusInternalServerError
 	}
-}
-
-func stockV2StrategyPositiveInt(raw string, fallback int) (int, error) {
-	if raw == "" {
-		return fallback, nil
-	}
-	value, err := strconv.Atoi(raw)
-	if err != nil || value <= 0 {
-		return 0, errors.New("invalid positive integer")
-	}
-	return value, nil
-}
-
-func stockV2StrategyNonNegativeInt(raw string, fallback int) (int, error) {
-	if raw == "" {
-		return fallback, nil
-	}
-	value, err := strconv.Atoi(raw)
-	if err != nil || value < 0 {
-		return 0, errors.New("invalid non-negative integer")
-	}
-	return value, nil
 }

@@ -38,21 +38,21 @@ func (s *Store) CreateOperationReview(ctx context.Context, review OperationRevie
 	`,
 		review.ID,
 		review.HitID,
-		nullableMonitorString(review.RunID),
+		nullableString(review.RunID),
 		review.Status,
-		nullableMonitorString(review.OutputType),
-		nullableMonitorString(review.StrategyID),
-		nullableMonitorString(review.PortfolioID),
-		nullableMonitorString(review.Symbol),
-		nullableMonitorString(review.Market),
+		nullableString(review.OutputType),
+		nullableString(review.StrategyID),
+		nullableString(review.PortfolioID),
+		nullableString(review.Symbol),
+		nullableString(review.Market),
 		marshalJSON(review.InputContext),
 		marshalMap(review.Result),
-		nullableMonitorString(safelog.Text(review.ResultSummary, 800)),
-		nullableMonitorString(safelog.Text(review.ErrorMessage, 400)),
+		nullableString(safelog.Text(review.ResultSummary, 800)),
+		nullableString(safelog.Text(review.ErrorMessage, 400)),
 		review.CreatedAt,
 		review.UpdatedAt,
-		nullableMonitorTime(review.CompletedAt),
-		nullableMonitorTime(review.ClosedAt),
+		nullableTime(review.CompletedAt),
+		nullableTime(review.ClosedAt),
 	)
 	if err != nil {
 		return OperationReview{}, wrapError(err, "create operation review")
@@ -90,8 +90,8 @@ func (s *Store) GetActiveOperationReviewByHit(ctx context.Context, hitID string)
 
 func (s *Store) ListOperationReviews(ctx context.Context, filter OperationReviewListFilter) ([]OperationReview, error) {
 	where, args := operationReviewFilterSQL(filter)
-	limit := normalizedMonitorLimit(filter.Limit)
-	offset := normalizedMonitorOffset(filter.Offset)
+	limit := normalizedPageLimit(filter.Limit, 200)
+	offset := normalizedPageOffset(filter.Offset)
 	args = append(args, limit, offset)
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		%s WHERE %s ORDER BY created_at DESC LIMIT ? OFFSET ?
@@ -99,20 +99,7 @@ func (s *Store) ListOperationReviews(ctx context.Context, filter OperationReview
 	if err != nil {
 		return nil, wrapError(err, "list operation reviews")
 	}
-	defer rows.Close()
-
-	items := make([]OperationReview, 0)
-	for rows.Next() {
-		item, err := scanOperationReview(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan operation review")
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate operation reviews")
-	}
-	return items, nil
+	return scanRows(rows, scanOperationReview, "scan operation review", "iterate operation reviews")
 }
 
 func (s *Store) CountOperationReviews(ctx context.Context, filter OperationReviewListFilter) (int, error) {
@@ -135,13 +122,13 @@ func (s *Store) SaveOperationReviewResult(ctx context.Context, review OperationR
 		WHERE id = ?
 	`,
 		review.Status,
-		nullableMonitorString(review.OutputType),
+		nullableString(review.OutputType),
 		marshalMap(review.Result),
-		nullableMonitorString(review.ResultSummary),
-		nullableMonitorString(review.ErrorMessage),
+		nullableString(review.ResultSummary),
+		nullableString(review.ErrorMessage),
 		review.UpdatedAt,
-		nullableMonitorTime(review.CompletedAt),
-		nullableMonitorTime(review.ClosedAt),
+		nullableTime(review.CompletedAt),
+		nullableTime(review.ClosedAt),
 		review.ID,
 	)
 	if err != nil {

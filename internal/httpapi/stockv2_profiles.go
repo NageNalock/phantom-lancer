@@ -102,12 +102,12 @@ func (s *Server) handleStockV2UpdateStockProfile(w http.ResponseWriter, r *http.
 
 func (s *Server) handleStockV2ListStockProfileUpdateTasks(w http.ResponseWriter, r *http.Request) {
 	symbol := r.PathValue("symbol")
-	limit, err := stockV2StrategyPositiveInt(r.URL.Query().Get("limit"), 20)
+	limit, err := stockV2PositiveInt(r.URL.Query().Get("limit"), 20)
 	if err != nil || limit > 100 {
 		http.Error(w, "invalid limit", http.StatusBadRequest)
 		return
 	}
-	offset, err := stockV2StrategyNonNegativeInt(r.URL.Query().Get("offset"), 0)
+	offset, err := stockV2NonNegativeInt(r.URL.Query().Get("offset"), 0)
 	if err != nil {
 		http.Error(w, "invalid offset", http.StatusBadRequest)
 		return
@@ -160,11 +160,11 @@ func (s *Server) handleStockV2RunStockProfileAgent(w http.ResponseWriter, r *htt
 
 func stockV2ProfileFilterFromRequest(r *http.Request) (stockv2.StockProfileListFilter, error) {
 	query := r.URL.Query()
-	limit, err := stockV2StrategyPositiveInt(query.Get("limit"), 50)
+	limit, err := stockV2PositiveInt(query.Get("limit"), 50)
 	if err != nil || limit > 500 {
 		return stockv2.StockProfileListFilter{}, errors.New("invalid limit")
 	}
-	offset, err := stockV2StrategyNonNegativeInt(query.Get("offset"), 0)
+	offset, err := stockV2NonNegativeInt(query.Get("offset"), 0)
 	if err != nil {
 		return stockv2.StockProfileListFilter{}, errors.New("invalid offset")
 	}

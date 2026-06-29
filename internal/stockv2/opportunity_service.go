@@ -89,8 +89,8 @@ func normalizeOpportunityListFilter(filter OpportunityListFilter) OpportunityLis
 	filter.MarketScope = strings.TrimSpace(filter.MarketScope)
 	filter.InstrumentScope = strings.TrimSpace(filter.InstrumentScope)
 	filter.Keyword = strings.TrimSpace(filter.Keyword)
-	filter.Limit = normalizedOpportunityLimit(filter.Limit)
-	filter.Offset = normalizedOpportunityOffset(filter.Offset)
+	filter.Limit = normalizedPageLimit(filter.Limit, 200)
+	filter.Offset = normalizedPageOffset(filter.Offset)
 	return filter
 }
 
@@ -293,20 +293,20 @@ func (s *Service) GetOpportunityDiscoveryRun(ctx context.Context, id string) (Op
 }
 
 func (s *Service) ListOpportunityDiscoveryRuns(ctx context.Context, filter DiscoveryRunListFilter) ([]OpportunityDiscoveryRun, error) {
-	filter.Limit = normalizedOpportunityLimit(filter.Limit)
-	filter.Offset = normalizedOpportunityOffset(filter.Offset)
+	filter.Limit = normalizedPageLimit(filter.Limit, 200)
+	filter.Offset = normalizedPageOffset(filter.Offset)
 	return s.store.ListOpportunityDiscoveryRuns(ctx, filter)
 }
 
 func (s *Service) CountOpportunityDiscoveryRuns(ctx context.Context, filter DiscoveryRunListFilter) (int, error) {
-	filter.Limit = normalizedOpportunityLimit(filter.Limit)
-	filter.Offset = normalizedOpportunityOffset(filter.Offset)
+	filter.Limit = normalizedPageLimit(filter.Limit, 200)
+	filter.Offset = normalizedPageOffset(filter.Offset)
 	return s.store.CountOpportunityDiscoveryRuns(ctx, filter)
 }
 
 func (s *Service) ListOpportunityDiscoverySteps(ctx context.Context, filter DiscoveryStepListFilter) ([]OpportunityDiscoveryStep, error) {
-	filter.Limit = normalizedOpportunityLimit(filter.Limit)
-	filter.Offset = normalizedOpportunityOffset(filter.Offset)
+	filter.Limit = normalizedPageLimit(filter.Limit, 200)
+	filter.Offset = normalizedPageOffset(filter.Offset)
 	return s.store.ListOpportunityDiscoverySteps(ctx, filter)
 }
 
@@ -392,8 +392,8 @@ func mergeMaps(base, patch map[string]any) map[string]any {
 }
 
 func (s *Service) ListOpportunityEvidence(ctx context.Context, filter OpportunityEvidenceListFilter) ([]OpportunityEvidence, error) {
-	filter.Limit = normalizedOpportunityLimit(filter.Limit)
-	filter.Offset = normalizedOpportunityOffset(filter.Offset)
+	filter.Limit = normalizedPageLimit(filter.Limit, 200)
+	filter.Offset = normalizedPageOffset(filter.Offset)
 	return s.store.ListOpportunityEvidence(ctx, filter)
 }
 
@@ -448,8 +448,8 @@ func sanitizeOpportunityURL(raw string) string {
 }
 
 func (s *Service) ListOpportunityCandidates(ctx context.Context, filter OpportunityCandidateListFilter) ([]OpportunityCandidate, error) {
-	filter.Limit = normalizedOpportunityLimit(filter.Limit)
-	filter.Offset = normalizedOpportunityOffset(filter.Offset)
+	filter.Limit = normalizedPageLimit(filter.Limit, 200)
+	filter.Offset = normalizedPageOffset(filter.Offset)
 	return s.store.ListOpportunityCandidates(ctx, filter)
 }
 

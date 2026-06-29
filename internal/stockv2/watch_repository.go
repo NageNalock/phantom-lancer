@@ -32,20 +32,20 @@ func (s *Store) CreateWatch(ctx context.Context, watch StockV2Watch) (StockV2Wat
 		watch.Name,
 		watch.Status,
 		watch.Source,
-		nullableWatchString(watch.Symbol),
-		nullableWatchString(watch.Market),
-		nullableWatchString(watch.PortfolioID),
-		nullableWatchString(watch.StrategyID),
-		nullableWatchString(watch.StrategyVersionID),
+		nullableString(watch.Symbol),
+		nullableString(watch.Market),
+		nullableString(watch.PortfolioID),
+		nullableString(watch.StrategyID),
+		nullableString(watch.StrategyVersionID),
 		watch.TriggerPolicy,
 		marshalMap(watch.TriggerConfig),
 		watch.ScheduleKind,
 		watch.CooldownSeconds,
-		nullableWatchTime(watch.LastCheckedAt),
-		nullableWatchTime(watch.LastTriggeredAt),
-		nullableWatchString(watch.LastRunStatus),
-		nullableWatchString(watch.LastRunReason),
-		nullableWatchTime(watch.ArchivedAt),
+		nullableTime(watch.LastCheckedAt),
+		nullableTime(watch.LastTriggeredAt),
+		nullableString(watch.LastRunStatus),
+		nullableString(watch.LastRunReason),
+		nullableTime(watch.ArchivedAt),
 		watch.CreatedAt,
 		watch.UpdatedAt,
 	)
@@ -66,8 +66,8 @@ func (s *Store) GetWatch(ctx context.Context, id string) (StockV2Watch, error) {
 
 func (s *Store) ListWatches(ctx context.Context, filter WatchListFilter) ([]StockV2Watch, error) {
 	where, args := watchFilterSQL(filter)
-	limit := normalizedWatchLimit(filter.Limit)
-	offset := normalizedWatchOffset(filter.Offset)
+	limit := normalizedPageLimit(filter.Limit, 200)
+	offset := normalizedPageOffset(filter.Offset)
 	args = append(args, limit, offset)
 
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
@@ -79,20 +79,7 @@ func (s *Store) ListWatches(ctx context.Context, filter WatchListFilter) ([]Stoc
 	if err != nil {
 		return nil, wrapError(err, "list watches")
 	}
-	defer rows.Close()
-
-	items := make([]StockV2Watch, 0)
-	for rows.Next() {
-		watch, err := scanWatch(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan watch")
-		}
-		items = append(items, watch)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate watches")
-	}
-	return items, nil
+	return scanRows(rows, scanWatch, "scan watch", "iterate watches")
 }
 
 func (s *Store) CountWatches(ctx context.Context, filter WatchListFilter) (int, error) {
@@ -125,20 +112,20 @@ func (s *Store) UpdateWatch(ctx context.Context, watch StockV2Watch) (StockV2Wat
 		watch.Name,
 		watch.Status,
 		watch.Source,
-		nullableWatchString(watch.Symbol),
-		nullableWatchString(watch.Market),
-		nullableWatchString(watch.PortfolioID),
-		nullableWatchString(watch.StrategyID),
-		nullableWatchString(watch.StrategyVersionID),
+		nullableString(watch.Symbol),
+		nullableString(watch.Market),
+		nullableString(watch.PortfolioID),
+		nullableString(watch.StrategyID),
+		nullableString(watch.StrategyVersionID),
 		watch.TriggerPolicy,
 		marshalMap(watch.TriggerConfig),
 		watch.ScheduleKind,
 		watch.CooldownSeconds,
-		nullableWatchTime(watch.LastCheckedAt),
-		nullableWatchTime(watch.LastTriggeredAt),
-		nullableWatchString(watch.LastRunStatus),
-		nullableWatchString(watch.LastRunReason),
-		nullableWatchTime(watch.ArchivedAt),
+		nullableTime(watch.LastCheckedAt),
+		nullableTime(watch.LastTriggeredAt),
+		nullableString(watch.LastRunStatus),
+		nullableString(watch.LastRunReason),
+		nullableTime(watch.ArchivedAt),
 		watch.UpdatedAt,
 		watch.ID,
 	)
@@ -221,30 +208,30 @@ func (s *Store) CreateAlert(ctx context.Context, alert StockV2Alert) (StockV2Ale
 	`,
 		alert.ID,
 		alert.WatchID,
-		nullableWatchString(alert.MonitorHitID),
-		nullableWatchString(alert.MonitorRunID),
-		nullableWatchString(alert.TaskType),
-		nullableWatchString(alert.StrategyID),
-		nullableWatchString(alert.PortfolioID),
-		nullableWatchString(alert.Symbol),
-		nullableWatchString(alert.Market),
-		nullableWatchString(alert.ReviewID),
-		nullableWatchString(alert.ReviewStatus),
-		nullableWatchString(alert.AgentRunID),
-		nullableWatchString(alert.DecisionLedgerID),
-		nullableWatchString(alert.TriggerSource),
+		nullableString(alert.MonitorHitID),
+		nullableString(alert.MonitorRunID),
+		nullableString(alert.TaskType),
+		nullableString(alert.StrategyID),
+		nullableString(alert.PortfolioID),
+		nullableString(alert.Symbol),
+		nullableString(alert.Market),
+		nullableString(alert.ReviewID),
+		nullableString(alert.ReviewStatus),
+		nullableString(alert.AgentRunID),
+		nullableString(alert.DecisionLedgerID),
+		nullableString(alert.TriggerSource),
 		alert.Status,
 		alert.Level,
 		alert.Title,
 		alert.Summary,
-		nullableWatchString(alert.DedupeKey),
+		nullableString(alert.DedupeKey),
 		marshalMap(alert.Evidence),
 		alert.OccurrenceCount,
-		nullableWatchTime(alert.FirstSeenAt),
-		nullableWatchTime(alert.LastSeenAt),
+		nullableTime(alert.FirstSeenAt),
+		nullableTime(alert.LastSeenAt),
 		alert.TriggeredAt,
-		nullableWatchTime(alert.AcknowledgedAt),
-		nullableWatchTime(alert.ResolvedAt),
+		nullableTime(alert.AcknowledgedAt),
+		nullableTime(alert.ResolvedAt),
 		alert.CreatedAt,
 		alert.UpdatedAt,
 	)
@@ -265,8 +252,8 @@ func (s *Store) GetAlert(ctx context.Context, id string) (StockV2Alert, error) {
 
 func (s *Store) ListAlerts(ctx context.Context, filter AlertListFilter) ([]StockV2Alert, error) {
 	where, args := alertFilterSQL(filter)
-	limit := normalizedWatchLimit(filter.Limit)
-	offset := normalizedWatchOffset(filter.Offset)
+	limit := normalizedPageLimit(filter.Limit, 200)
+	offset := normalizedPageOffset(filter.Offset)
 	args = append(args, limit, offset)
 
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
@@ -278,20 +265,7 @@ func (s *Store) ListAlerts(ctx context.Context, filter AlertListFilter) ([]Stock
 	if err != nil {
 		return nil, wrapError(err, "list alerts")
 	}
-	defer rows.Close()
-
-	items := make([]StockV2Alert, 0)
-	for rows.Next() {
-		alert, err := scanAlert(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan alert")
-		}
-		items = append(items, alert)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate alerts")
-	}
-	return items, nil
+	return scanRows(rows, scanAlert, "scan alert", "iterate alerts")
 }
 
 func (s *Store) CountAlerts(ctx context.Context, filter AlertListFilter) (int, error) {
@@ -324,30 +298,30 @@ func (s *Store) UpdateAlert(ctx context.Context, alert StockV2Alert) (StockV2Ale
 		WHERE id = ?
 	`,
 		alert.WatchID,
-		nullableWatchString(alert.MonitorHitID),
-		nullableWatchString(alert.MonitorRunID),
-		nullableWatchString(alert.TaskType),
-		nullableWatchString(alert.StrategyID),
-		nullableWatchString(alert.PortfolioID),
-		nullableWatchString(alert.Symbol),
-		nullableWatchString(alert.Market),
-		nullableWatchString(alert.ReviewID),
-		nullableWatchString(alert.ReviewStatus),
-		nullableWatchString(alert.AgentRunID),
-		nullableWatchString(alert.DecisionLedgerID),
-		nullableWatchString(alert.TriggerSource),
+		nullableString(alert.MonitorHitID),
+		nullableString(alert.MonitorRunID),
+		nullableString(alert.TaskType),
+		nullableString(alert.StrategyID),
+		nullableString(alert.PortfolioID),
+		nullableString(alert.Symbol),
+		nullableString(alert.Market),
+		nullableString(alert.ReviewID),
+		nullableString(alert.ReviewStatus),
+		nullableString(alert.AgentRunID),
+		nullableString(alert.DecisionLedgerID),
+		nullableString(alert.TriggerSource),
 		alert.Status,
 		alert.Level,
 		alert.Title,
 		alert.Summary,
-		nullableWatchString(alert.DedupeKey),
+		nullableString(alert.DedupeKey),
 		marshalMap(alert.Evidence),
 		alert.OccurrenceCount,
-		nullableWatchTime(alert.FirstSeenAt),
-		nullableWatchTime(alert.LastSeenAt),
+		nullableTime(alert.FirstSeenAt),
+		nullableTime(alert.LastSeenAt),
 		alert.TriggeredAt,
-		nullableWatchTime(alert.AcknowledgedAt),
-		nullableWatchTime(alert.ResolvedAt),
+		nullableTime(alert.AcknowledgedAt),
+		nullableTime(alert.ResolvedAt),
 		alert.UpdatedAt,
 		alert.ID,
 	)
@@ -561,35 +535,4 @@ func alertFilterSQL(filter AlertListFilter) (string, []any) {
 	add("portfolio_id", filter.PortfolioID)
 	add("strategy_id", filter.StrategyID)
 	return strings.Join(where, " AND "), args
-}
-
-func normalizedWatchLimit(limit int) int {
-	if limit <= 0 {
-		return 50
-	}
-	if limit > 200 {
-		return 200
-	}
-	return limit
-}
-
-func normalizedWatchOffset(offset int) int {
-	if offset < 0 {
-		return 0
-	}
-	return offset
-}
-
-func nullableWatchString(value string) any {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	return value
-}
-
-func nullableWatchTime(value time.Time) any {
-	if value.IsZero() {
-		return nil
-	}
-	return value
 }

@@ -398,13 +398,13 @@ func (s *Store) UpsertQuoteRefreshStatus(ctx context.Context, status QuoteRefres
 			updated_at = excluded.updated_at
 	`,
 		status.Symbol,
-		nullableMonitorString(status.Market),
-		nullableMonitorString(status.Source),
+		nullableString(status.Market),
+		nullableString(status.Source),
 		status.Status,
 		status.LastAttemptAt,
-		nullableMonitorTime(status.LastSuccessAt),
-		nullableMonitorTime(status.LastFailureAt),
-		nullableMonitorString(status.ErrorMessage),
+		nullableTime(status.LastSuccessAt),
+		nullableTime(status.LastFailureAt),
+		nullableString(status.ErrorMessage),
 		failures,
 		status.UpdatedAt,
 		QuoteStatusFailed,
@@ -440,14 +440,14 @@ func (s *Store) UpsertQuoteRefreshTaskState(ctx context.Context, state QuoteRefr
 	`,
 		state.TaskType,
 		state.Status,
-		nullableMonitorString(state.TriggerType),
-		nullableMonitorTime(state.StartedAt),
-		nullableMonitorTime(state.FinishedAt),
-		nullableMonitorString(state.ScopeSummary),
+		nullableString(state.TriggerType),
+		nullableTime(state.StartedAt),
+		nullableTime(state.FinishedAt),
+		nullableString(state.ScopeSummary),
 		state.ScannedCount,
 		state.SuccessCount,
 		state.FailedCount,
-		nullableMonitorString(state.ErrorMessage),
+		nullableString(state.ErrorMessage),
 		state.UpdatedAt,
 	)
 	return wrapError(err, "upsert quote refresh task state")
@@ -486,20 +486,7 @@ func (s *Store) ListQuoteRefreshStatuses(ctx context.Context, limit int) ([]Quot
 	if err != nil {
 		return nil, wrapError(err, "list quote refresh statuses")
 	}
-	defer rows.Close()
-
-	items := make([]QuoteRefreshStatus, 0)
-	for rows.Next() {
-		item, err := scanQuoteRefreshStatus(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan quote refresh status")
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate quote refresh statuses")
-	}
-	return items, nil
+	return scanRows(rows, scanQuoteRefreshStatus, "scan quote refresh status", "iterate quote refresh statuses")
 }
 
 func (s *Store) getLatestQuote(ctx context.Context, symbol string) (StockV2QuoteLatest, error) {

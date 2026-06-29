@@ -134,11 +134,11 @@ func (s *Server) handleStockV2GetMonitorHit(w http.ResponseWriter, r *http.Reque
 
 func stockV2MonitorRunFilterFromRequest(r *http.Request) (stockv2.MonitorRunListFilter, error) {
 	query := r.URL.Query()
-	limit, err := stockV2WatchPositiveInt(query.Get("limit"), 50)
+	limit, err := stockV2PositiveInt(query.Get("limit"), 50)
 	if err != nil || limit > 200 {
 		return stockv2.MonitorRunListFilter{}, errors.New("invalid limit")
 	}
-	offset, err := stockV2WatchNonNegativeInt(query.Get("offset"), 0)
+	offset, err := stockV2NonNegativeInt(query.Get("offset"), 0)
 	if err != nil {
 		return stockv2.MonitorRunListFilter{}, errors.New("invalid offset")
 	}
@@ -156,11 +156,11 @@ func stockV2MonitorRunFilterFromRequest(r *http.Request) (stockv2.MonitorRunList
 
 func stockV2MonitorHitFilterFromRequest(r *http.Request) (stockv2.MonitorHitListFilter, error) {
 	query := r.URL.Query()
-	limit, err := stockV2WatchPositiveInt(query.Get("limit"), 50)
+	limit, err := stockV2PositiveInt(query.Get("limit"), 50)
 	if err != nil || limit > 200 {
 		return stockv2.MonitorHitListFilter{}, errors.New("invalid limit")
 	}
-	offset, err := stockV2WatchNonNegativeInt(query.Get("offset"), 0)
+	offset, err := stockV2NonNegativeInt(query.Get("offset"), 0)
 	if err != nil {
 		return stockv2.MonitorHitListFilter{}, errors.New("invalid offset")
 	}
@@ -196,16 +196,9 @@ func stockV2MonitorHTTPStatus(err error) int {
 }
 
 func stockV2HTTPValidMonitorRunStatus(status string) bool {
-	return status == stockv2.MonitorRunStatusRunning ||
-		status == stockv2.MonitorRunStatusCompleted ||
-		status == stockv2.MonitorRunStatusFailed ||
-		status == stockv2.MonitorRunStatusCancelled
+	return stockV2HTTPValueIn(status, stockv2.MonitorRunStatusRunning, stockv2.MonitorRunStatusCompleted, stockv2.MonitorRunStatusFailed, stockv2.MonitorRunStatusCancelled)
 }
 
 func stockV2HTTPValidMonitorHitStatus(status string) bool {
-	return status == stockv2.MonitorHitStatusCandidate ||
-		status == stockv2.MonitorHitStatusDoublechecked ||
-		status == stockv2.MonitorHitStatusAlerted ||
-		status == stockv2.MonitorHitStatusReviewed ||
-		status == stockv2.MonitorHitStatusIgnored
+	return stockV2HTTPValueIn(status, stockv2.MonitorHitStatusCandidate, stockv2.MonitorHitStatusDoublechecked, stockv2.MonitorHitStatusAlerted, stockv2.MonitorHitStatusReviewed, stockv2.MonitorHitStatusIgnored)
 }

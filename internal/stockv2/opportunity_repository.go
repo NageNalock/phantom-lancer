@@ -25,43 +25,12 @@ var defaultOpportunityDiscoverySteps = []opportunityStepDefinition{
 	{Key: "final_report", Title: "最终报告"},
 }
 
-func normalizedOpportunityLimit(limit int) int {
-	if limit <= 0 {
-		return 50
-	}
-	if limit > 200 {
-		return 200
-	}
-	return limit
-}
-
-func normalizedOpportunityOffset(offset int) int {
-	if offset < 0 {
-		return 0
-	}
-	return offset
-}
-
 func opportunityFilterAdd(where *[]string, args *[]any, column, value string) {
 	if strings.TrimSpace(value) == "" {
 		return
 	}
 	*where = append(*where, column+" = ?")
 	*args = append(*args, strings.TrimSpace(value))
-}
-
-func nullableOpportunityString(value string) any {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	return value
-}
-
-func nullableOpportunityTime(value time.Time) any {
-	if value.IsZero() {
-		return nil
-	}
-	return value
 }
 
 const opportunitySelectSQL = `
@@ -95,7 +64,7 @@ func (s *Store) CreateOpportunity(ctx context.Context, item Opportunity) (Opport
 			(id, title, user_thesis, market_scope, instrument_scope, status, created_by, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, item.ID, item.Title, item.UserThesis, item.MarketScope, item.InstrumentScope, item.Status,
-		nullableOpportunityString(item.CreatedBy), item.CreatedAt, item.UpdatedAt)
+		nullableString(item.CreatedBy), item.CreatedAt, item.UpdatedAt)
 	return item, wrapError(err, "create opportunity")
 }
 
@@ -118,7 +87,7 @@ func (s *Store) UpdateOpportunity(ctx context.Context, item Opportunity) (Opport
 		    status = ?, created_by = ?, updated_at = ?
 		WHERE id = ?
 	`, item.Title, item.UserThesis, item.MarketScope, item.InstrumentScope, item.Status,
-		nullableOpportunityString(item.CreatedBy), item.UpdatedAt, item.ID)
+		nullableString(item.CreatedBy), item.UpdatedAt, item.ID)
 	if err != nil {
 		return Opportunity{}, wrapError(err, "update opportunity")
 	}
@@ -171,24 +140,12 @@ func opportunityWhere(filter OpportunityListFilter) (string, []any) {
 
 func (s *Store) ListOpportunities(ctx context.Context, filter OpportunityListFilter) ([]Opportunity, error) {
 	where, args := opportunityWhere(filter)
-	args = append(args, normalizedOpportunityLimit(filter.Limit), normalizedOpportunityOffset(filter.Offset))
+	args = append(args, normalizedPageLimit(filter.Limit, 200), normalizedPageOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`%s WHERE %s ORDER BY updated_at DESC LIMIT ? OFFSET ?`, opportunitySelectSQL, where), args...)
 	if err != nil {
 		return nil, wrapError(err, "list opportunities")
 	}
-	defer rows.Close()
-	items := make([]Opportunity, 0)
-	for rows.Next() {
-		item, err := scanOpportunity(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan opportunity")
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate opportunities")
-	}
-	return items, nil
+	return scanRows(rows, scanOpportunity, "scan opportunity", "iterate opportunities")
 }
 
 func (s *Store) CountOpportunities(ctx context.Context, filter OpportunityListFilter) (int, error) {
@@ -249,11 +206,11 @@ func (s *Store) CreateOpportunityDiscoveryRun(ctx context.Context, run Opportuni
 			 candidate_count, evidence_count, external_source_count, started_at, finished_at,
 			 error_message, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, run.ID, run.OpportunityID, nullableOpportunityString(run.AgentRunID), run.Status,
-		nullableOpportunityString(run.CurrentStepID), run.StepTotal, run.StepCompleted,
+	`, run.ID, run.OpportunityID, nullableString(run.AgentRunID), run.Status,
+		nullableString(run.CurrentStepID), run.StepTotal, run.StepCompleted,
 		run.CandidateCount, run.EvidenceCount, run.ExternalSourceCount,
-		nullableOpportunityTime(run.StartedAt), nullableOpportunityTime(run.FinishedAt),
-		nullableOpportunityString(run.ErrorMessage), run.CreatedAt, run.UpdatedAt); err != nil {
+		nullableTime(run.StartedAt), nullableTime(run.FinishedAt),
+		nullableString(run.ErrorMessage), run.CreatedAt, run.UpdatedAt); err != nil {
 		return OpportunityDiscoveryRun{}, nil, wrapError(err, "insert opportunity discovery run")
 	}
 	for i := range steps {
@@ -285,9 +242,9 @@ func insertOpportunityStepWithTx(ctx context.Context, tx *sql.Tx, step Opportuni
 			 output_summary, metadata_json, started_at, finished_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, step.ID, step.RunID, step.StepKey, step.StepTitle, step.Status, step.OrderIndex,
-		nullableOpportunityString(step.InputSummary), nullableOpportunityString(step.OutputSummary),
-		marshalMap(step.Metadata), nullableOpportunityTime(step.StartedAt),
-		nullableOpportunityTime(step.FinishedAt), step.CreatedAt, step.UpdatedAt)
+		nullableString(step.InputSummary), nullableString(step.OutputSummary),
+		marshalMap(step.Metadata), nullableTime(step.StartedAt),
+		nullableTime(step.FinishedAt), step.CreatedAt, step.UpdatedAt)
 	return wrapError(err, "insert opportunity discovery step")
 }
 
@@ -321,10 +278,10 @@ func (s *Store) UpdateOpportunityDiscoveryRun(ctx context.Context, run Opportuni
 		    candidate_count = ?, evidence_count = ?, external_source_count = ?, started_at = ?,
 		    finished_at = ?, error_message = ?, updated_at = ?
 		WHERE id = ?
-	`, nullableOpportunityString(run.AgentRunID), run.Status, nullableOpportunityString(run.CurrentStepID),
+	`, nullableString(run.AgentRunID), run.Status, nullableString(run.CurrentStepID),
 		run.StepTotal, run.StepCompleted, run.CandidateCount, run.EvidenceCount, run.ExternalSourceCount,
-		nullableOpportunityTime(run.StartedAt), nullableOpportunityTime(run.FinishedAt),
-		nullableOpportunityString(run.ErrorMessage), run.UpdatedAt, run.ID)
+		nullableTime(run.StartedAt), nullableTime(run.FinishedAt),
+		nullableString(run.ErrorMessage), run.UpdatedAt, run.ID)
 	if err != nil {
 		return OpportunityDiscoveryRun{}, wrapError(err, "update opportunity discovery run")
 	}
@@ -344,24 +301,12 @@ func opportunityRunWhere(filter DiscoveryRunListFilter) (string, []any) {
 
 func (s *Store) ListOpportunityDiscoveryRuns(ctx context.Context, filter DiscoveryRunListFilter) ([]OpportunityDiscoveryRun, error) {
 	where, args := opportunityRunWhere(filter)
-	args = append(args, normalizedOpportunityLimit(filter.Limit), normalizedOpportunityOffset(filter.Offset))
+	args = append(args, normalizedPageLimit(filter.Limit, 200), normalizedPageOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`%s WHERE %s ORDER BY created_at DESC LIMIT ? OFFSET ?`, opportunityRunSelectSQL, where), args...)
 	if err != nil {
 		return nil, wrapError(err, "list opportunity discovery runs")
 	}
-	defer rows.Close()
-	items := make([]OpportunityDiscoveryRun, 0)
-	for rows.Next() {
-		item, err := scanOpportunityRun(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan opportunity discovery run")
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate opportunity discovery runs")
-	}
-	return items, nil
+	return scanRows(rows, scanOpportunityRun, "scan opportunity discovery run", "iterate opportunity discovery runs")
 }
 
 func (s *Store) CountOpportunityDiscoveryRuns(ctx context.Context, filter DiscoveryRunListFilter) (int, error) {
@@ -430,9 +375,9 @@ func (s *Store) UpdateOpportunityDiscoveryStep(ctx context.Context, step Opportu
 		SET status = ?, input_summary = ?, output_summary = ?, metadata_json = ?,
 		    started_at = ?, finished_at = ?, updated_at = ?
 		WHERE id = ?
-	`, step.Status, nullableOpportunityString(step.InputSummary), nullableOpportunityString(step.OutputSummary),
-		marshalMap(step.Metadata), nullableOpportunityTime(step.StartedAt),
-		nullableOpportunityTime(step.FinishedAt), step.UpdatedAt, step.ID)
+	`, step.Status, nullableString(step.InputSummary), nullableString(step.OutputSummary),
+		marshalMap(step.Metadata), nullableTime(step.StartedAt),
+		nullableTime(step.FinishedAt), step.UpdatedAt, step.ID)
 	if err != nil {
 		return OpportunityDiscoveryStep{}, wrapError(err, "update opportunity discovery step")
 	}
@@ -452,21 +397,12 @@ func opportunityStepWhere(filter DiscoveryStepListFilter) (string, []any) {
 
 func (s *Store) ListOpportunityDiscoverySteps(ctx context.Context, filter DiscoveryStepListFilter) ([]OpportunityDiscoveryStep, error) {
 	where, args := opportunityStepWhere(filter)
-	args = append(args, normalizedOpportunityLimit(filter.Limit), normalizedOpportunityOffset(filter.Offset))
+	args = append(args, normalizedPageLimit(filter.Limit, 200), normalizedPageOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`%s WHERE %s ORDER BY order_index ASC LIMIT ? OFFSET ?`, opportunityStepSelectSQL, where), args...)
 	if err != nil {
 		return nil, wrapError(err, "list opportunity discovery steps")
 	}
-	defer rows.Close()
-	items := make([]OpportunityDiscoveryStep, 0)
-	for rows.Next() {
-		item, err := scanOpportunityStep(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan opportunity discovery step")
-		}
-		items = append(items, item)
-	}
-	return items, wrapError(rows.Err(), "iterate opportunity discovery steps")
+	return scanRows(rows, scanOpportunityStep, "scan opportunity discovery step", "iterate opportunity discovery steps")
 }
 
 func (s *Store) CountOpportunityDiscoverySteps(ctx context.Context, filter DiscoveryStepListFilter) (int, error) {
@@ -536,7 +472,7 @@ func (s *Store) UpsertOpportunityCandidate(ctx context.Context, item Opportunity
 	`, item.ID, item.OpportunityID, item.RunID, item.Symbol, item.Market, item.InstrumentType,
 		item.Name, item.RelationType, item.RelevanceScore, item.EvidenceScore,
 		item.MarketRiskScore, item.Confidence, item.Rank, item.Status,
-		nullableOpportunityString(item.Reason), nullableOpportunityString(item.RiskSummary),
+		nullableString(item.Reason), nullableString(item.RiskSummary),
 		marshalMap(item.Metadata), item.CreatedAt, item.UpdatedAt)
 	if err != nil {
 		return OpportunityCandidate{}, wrapError(err, "upsert opportunity candidate")
@@ -575,7 +511,7 @@ func (s *Store) UpdateOpportunityCandidate(ctx context.Context, item Opportunity
 		UPDATE stockv2_opportunity_candidates
 		SET status = ?, reason = ?, risk_summary = ?, metadata_json = ?, updated_at = ?
 		WHERE id = ?
-	`, item.Status, nullableOpportunityString(item.Reason), nullableOpportunityString(item.RiskSummary),
+	`, item.Status, nullableString(item.Reason), nullableString(item.RiskSummary),
 		marshalMap(item.Metadata), item.UpdatedAt, item.ID)
 	if err != nil {
 		return OpportunityCandidate{}, wrapError(err, "update opportunity candidate")
@@ -598,21 +534,12 @@ func opportunityCandidateWhere(filter OpportunityCandidateListFilter) (string, [
 
 func (s *Store) ListOpportunityCandidates(ctx context.Context, filter OpportunityCandidateListFilter) ([]OpportunityCandidate, error) {
 	where, args := opportunityCandidateWhere(filter)
-	args = append(args, normalizedOpportunityLimit(filter.Limit), normalizedOpportunityOffset(filter.Offset))
+	args = append(args, normalizedPageLimit(filter.Limit, 200), normalizedPageOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`%s WHERE %s ORDER BY rank ASC, relevance_score DESC, created_at DESC LIMIT ? OFFSET ?`, opportunityCandidateSelectSQL, where), args...)
 	if err != nil {
 		return nil, wrapError(err, "list opportunity candidates")
 	}
-	defer rows.Close()
-	items := make([]OpportunityCandidate, 0)
-	for rows.Next() {
-		item, err := scanOpportunityCandidate(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan opportunity candidate")
-		}
-		items = append(items, item)
-	}
-	return items, wrapError(rows.Err(), "iterate opportunity candidates")
+	return scanRows(rows, scanOpportunityCandidate, "scan opportunity candidate", "iterate opportunity candidates")
 }
 
 func (s *Store) CountOpportunityCandidates(ctx context.Context, filter OpportunityCandidateListFilter) (int, error) {
@@ -663,10 +590,10 @@ func (s *Store) CreateOpportunityEvidence(ctx context.Context, item OpportunityE
 			(id, run_id, candidate_id, source_type, source_ref, title, summary, url,
 			 publisher, published_at, confidence, metadata_json, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, item.ID, item.RunID, nullableOpportunityString(item.CandidateID), item.SourceType,
-		nullableOpportunityString(item.SourceRef), item.Title, nullableOpportunityString(item.Summary),
-		nullableOpportunityString(item.URL), nullableOpportunityString(item.Publisher),
-		nullableOpportunityTime(item.PublishedAt), item.Confidence, marshalMap(item.Metadata),
+	`, item.ID, item.RunID, nullableString(item.CandidateID), item.SourceType,
+		nullableString(item.SourceRef), item.Title, nullableString(item.Summary),
+		nullableString(item.URL), nullableString(item.Publisher),
+		nullableTime(item.PublishedAt), item.Confidence, marshalMap(item.Metadata),
 		item.CreatedAt)
 	return item, wrapError(err, "create opportunity evidence")
 }
@@ -682,21 +609,12 @@ func opportunityEvidenceWhere(filter OpportunityEvidenceListFilter) (string, []a
 
 func (s *Store) ListOpportunityEvidence(ctx context.Context, filter OpportunityEvidenceListFilter) ([]OpportunityEvidence, error) {
 	where, args := opportunityEvidenceWhere(filter)
-	args = append(args, normalizedOpportunityLimit(filter.Limit), normalizedOpportunityOffset(filter.Offset))
+	args = append(args, normalizedPageLimit(filter.Limit, 200), normalizedPageOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`%s WHERE %s ORDER BY created_at DESC LIMIT ? OFFSET ?`, opportunityEvidenceSelectSQL, where), args...)
 	if err != nil {
 		return nil, wrapError(err, "list opportunity evidence")
 	}
-	defer rows.Close()
-	items := make([]OpportunityEvidence, 0)
-	for rows.Next() {
-		item, err := scanOpportunityEvidence(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan opportunity evidence")
-		}
-		items = append(items, item)
-	}
-	return items, wrapError(rows.Err(), "iterate opportunity evidence")
+	return scanRows(rows, scanOpportunityEvidence, "scan opportunity evidence", "iterate opportunity evidence")
 }
 
 func (s *Store) CountOpportunityEvidence(ctx context.Context, filter OpportunityEvidenceListFilter) (int, error) {
@@ -742,8 +660,8 @@ func (s *Store) UpsertOpportunityResult(ctx context.Context, item OpportunityRes
 			conclusion = excluded.conclusion,
 			recommended_next_action = excluded.recommended_next_action,
 			raw_result_json = excluded.raw_result_json
-	`, item.ID, item.RunID, nullableOpportunityString(item.Summary), nullableOpportunityString(item.Conclusion),
-		nullableOpportunityString(item.RecommendedNextAction), marshalMap(item.RawResult), item.CreatedAt)
+	`, item.ID, item.RunID, nullableString(item.Summary), nullableString(item.Conclusion),
+		nullableString(item.RecommendedNextAction), marshalMap(item.RawResult), item.CreatedAt)
 	if err != nil {
 		return OpportunityResult{}, wrapError(err, "upsert opportunity result")
 	}
@@ -800,9 +718,9 @@ func (s *Store) UpsertEmbeddingConfig(ctx context.Context, item EmbeddingConfig)
 			last_probe_status = excluded.last_probe_status,
 			last_error = excluded.last_error,
 			updated_at = excluded.updated_at
-	`, item.ID, nullableOpportunityString(item.EmbeddingModelID), boolToInt(item.Enabled),
-		nullableOpportunityTime(item.LastProbeAt), nullableOpportunityString(item.LastProbeStatus),
-		nullableOpportunityString(item.LastError), item.UpdatedAt)
+	`, item.ID, nullableString(item.EmbeddingModelID), boolToInt(item.Enabled),
+		nullableTime(item.LastProbeAt), nullableString(item.LastProbeStatus),
+		nullableString(item.LastError), item.UpdatedAt)
 	if err != nil {
 		return EmbeddingConfig{}, wrapError(err, "upsert embedding config")
 	}
@@ -852,10 +770,10 @@ func (s *Store) UpsertEmbeddingAsset(ctx context.Context, item EmbeddingAsset) (
 			status = excluded.status,
 			error_message = excluded.error_message,
 			updated_at = excluded.updated_at
-	`, item.ID, item.ObjectType, item.ObjectID, item.TextHash, nullableOpportunityString(item.TextSummary),
-		item.ModelID, nullableOpportunityString(item.ProviderID), nullableOpportunityString(item.EmbeddingProtocol),
-		item.EmbeddingDimensions, nullableOpportunityString(item.VectorRef), item.Status,
-		nullableOpportunityString(item.ErrorMessage), item.CreatedAt, item.UpdatedAt)
+	`, item.ID, item.ObjectType, item.ObjectID, item.TextHash, nullableString(item.TextSummary),
+		item.ModelID, nullableString(item.ProviderID), nullableString(item.EmbeddingProtocol),
+		item.EmbeddingDimensions, nullableString(item.VectorRef), item.Status,
+		nullableString(item.ErrorMessage), item.CreatedAt, item.UpdatedAt)
 	if err != nil {
 		return EmbeddingAsset{}, wrapError(err, "upsert embedding asset")
 	}
@@ -900,21 +818,12 @@ func embeddingAssetWhere(filter EmbeddingAssetListFilter) (string, []any) {
 
 func (s *Store) ListEmbeddingAssets(ctx context.Context, filter EmbeddingAssetListFilter) ([]EmbeddingAsset, error) {
 	where, args := embeddingAssetWhere(filter)
-	args = append(args, normalizedOpportunityLimit(filter.Limit), normalizedOpportunityOffset(filter.Offset))
+	args = append(args, normalizedPageLimit(filter.Limit, 200), normalizedPageOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`%s WHERE %s ORDER BY updated_at DESC LIMIT ? OFFSET ?`, embeddingAssetSelectSQL, where), args...)
 	if err != nil {
 		return nil, wrapError(err, "list embedding assets")
 	}
-	defer rows.Close()
-	items := make([]EmbeddingAsset, 0)
-	for rows.Next() {
-		item, err := scanEmbeddingAsset(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan embedding asset")
-		}
-		items = append(items, item)
-	}
-	return items, wrapError(rows.Err(), "iterate embedding assets")
+	return scanRows(rows, scanEmbeddingAsset, "scan embedding asset", "iterate embedding assets")
 }
 
 func (s *Store) CountEmbeddingAssets(ctx context.Context, filter EmbeddingAssetListFilter) (int, error) {

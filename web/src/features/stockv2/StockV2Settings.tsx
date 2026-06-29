@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { AppActions } from "../../app/App";
 import type { AppData, StockV2Settings } from "../../app/types";
 import { Button, Field, Notice, Panel, Pill, Toggle } from "../../components/ui";
+import { formatMeaningfulDateTime as formatTime } from "./time";
 
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
 
@@ -213,26 +214,9 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
   );
 }
 
-function formatTime(iso?: string): string {
-  if (!hasMeaningfulTime(iso)) return "-";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  return d.toLocaleString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
-
 function formatInterval(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return "-";
   if (seconds % 3600 === 0) return `${seconds / 3600} 小时`;
   if (seconds % 60 === 0) return `${seconds / 60} 分钟`;
   return `${seconds} 秒`;
-}
-
-function hasMeaningfulTime(iso?: string): iso is string {
-  return !!iso && !iso.startsWith("0001-01-01");
 }

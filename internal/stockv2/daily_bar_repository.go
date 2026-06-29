@@ -113,16 +113,7 @@ func (s *Store) ListHoldingSymbols(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, wrapError(err, "list holding symbols")
 	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var sym string
-		if err := rows.Scan(&sym); err != nil {
-			return nil, wrapError(err, "scan holding symbol")
-		}
-		out = append(out, sym)
-	}
-	return out, rows.Err()
+	return scanStrings(rows, "scan holding symbol", "iterate holding symbols")
 }
 
 // ListInstrumentSymbols 返回全部活跃主数据 symbol（日 K 全市场增量用）。
@@ -132,16 +123,7 @@ func (s *Store) ListInstrumentSymbols(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, wrapError(err, "list instrument symbols")
 	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var sym string
-		if err := rows.Scan(&sym); err != nil {
-			return nil, wrapError(err, "scan instrument symbol")
-		}
-		out = append(out, sym)
-	}
-	return out, rows.Err()
+	return scanStrings(rows, "scan instrument symbol", "iterate instrument symbols")
 }
 
 // CreateDailyBarJob 创建日 K 任务记录
@@ -220,7 +202,7 @@ func (s *Store) UpdateDailyBarJob(ctx context.Context, job StockV2DailyBarJob) e
 // GetDailyBarJob 获取单个日 K 任务
 func (s *Store) GetDailyBarJob(ctx context.Context, id string) (StockV2DailyBarJob, error) {
 	row := s.db.QueryRowContext(ctx, dailyBarJobSelect+" WHERE id = ?", id)
-	job, err := s.scanDailyBarJob(row)
+	job, err := scanDailyBarJob(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return StockV2DailyBarJob{}, ErrDailyBarJobNotFound
@@ -233,7 +215,7 @@ func (s *Store) GetDailyBarJob(ctx context.Context, id string) (StockV2DailyBarJ
 // GetLatestDailyBarJob 获取最近一条日 K 任务
 func (s *Store) GetLatestDailyBarJob(ctx context.Context) (StockV2DailyBarJob, error) {
 	row := s.db.QueryRowContext(ctx, dailyBarJobSelect+" ORDER BY created_at DESC LIMIT 1")
-	job, err := s.scanDailyBarJob(row)
+	job, err := scanDailyBarJob(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return StockV2DailyBarJob{}, ErrDailyBarJobNotFound
@@ -255,20 +237,7 @@ func (s *Store) ListDailyBarJobs(ctx context.Context, limit int, offset int) ([]
 	if err != nil {
 		return nil, wrapError(err, "list daily bar jobs")
 	}
-	defer rows.Close()
-
-	var jobs []StockV2DailyBarJob
-	for rows.Next() {
-		job, err := s.scanDailyBarJob(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan daily bar job")
-		}
-		jobs = append(jobs, job)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate daily bar jobs")
-	}
-	return jobs, nil
+	return scanRows(rows, scanDailyBarJob, "scan daily bar job", "iterate daily bar jobs")
 }
 
 // CountDailyBarJobs 返回日 K 任务总数，供前端分页。
@@ -287,20 +256,7 @@ func (s *Store) ListRunningDailyBarJobs(ctx context.Context) ([]StockV2DailyBarJ
 	if err != nil {
 		return nil, wrapError(err, "list running daily bar jobs")
 	}
-	defer rows.Close()
-
-	var jobs []StockV2DailyBarJob
-	for rows.Next() {
-		job, err := s.scanDailyBarJob(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan running daily bar job")
-		}
-		jobs = append(jobs, job)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate running daily bar jobs")
-	}
-	return jobs, nil
+	return scanRows(rows, scanDailyBarJob, "scan running daily bar job", "iterate running daily bar jobs")
 }
 
 // FindRunningDailyBarJob 获取同一任务作用域内的运行中日 K 任务。
@@ -314,7 +270,7 @@ func (s *Store) FindRunningDailyBarJob(ctx context.Context, mode, symbol, rangeC
 		ORDER BY created_at DESC
 		LIMIT 1
 	`, mode, symbol, rangeCode, adjusted)
-	job, err := s.scanDailyBarJob(row)
+	job, err := scanDailyBarJob(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return StockV2DailyBarJob{}, ErrDailyBarJobNotFound
@@ -396,7 +352,7 @@ const dailyBarJobSelect = `
 	FROM stockv2_daily_bar_jobs
 `
 
-func (s *Store) scanDailyBarJob(row rowScanner) (StockV2DailyBarJob, error) {
+func scanDailyBarJob(row rowScanner) (StockV2DailyBarJob, error) {
 	var job StockV2DailyBarJob
 	var startAt, endAt sql.NullTime
 	var failedItemsJSON string

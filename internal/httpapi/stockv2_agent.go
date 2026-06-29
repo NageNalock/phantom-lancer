@@ -355,11 +355,11 @@ func (s *Server) handleStockV2ResolveAgentTask(w http.ResponseWriter, r *http.Re
 
 func stockV2AgentPage(r *http.Request) (limit, offset int, err error) {
 	query := r.URL.Query()
-	limit, err = stockV2WatchPositiveInt(query.Get("limit"), 50)
+	limit, err = stockV2PositiveInt(query.Get("limit"), 50)
 	if err != nil || limit > 200 {
 		return 0, 0, errors.New("invalid limit")
 	}
-	offset, err = stockV2WatchNonNegativeInt(query.Get("offset"), 0)
+	offset, err = stockV2NonNegativeInt(query.Get("offset"), 0)
 	if err != nil {
 		return 0, 0, errors.New("invalid offset")
 	}
@@ -368,15 +368,7 @@ func stockV2AgentPage(r *http.Request) (limit, offset int, err error) {
 
 // stockV2HTTPValidAgentEnum 空值通过(不过滤),非空须命中白名单。
 func stockV2HTTPValidAgentEnum(value string, valid ...string) bool {
-	if value == "" {
-		return true
-	}
-	for _, v := range valid {
-		if v == value {
-			return true
-		}
-	}
-	return false
+	return value == "" || stockV2HTTPValueIn(value, valid...)
 }
 
 func stockV2AgentProviderFilterFromRequest(r *http.Request) (stockv2.AgentProviderProfileListFilter, error) {

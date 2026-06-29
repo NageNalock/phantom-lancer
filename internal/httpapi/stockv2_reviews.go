@@ -122,11 +122,11 @@ func (s *Server) handleStockV2ReviewAction(w http.ResponseWriter, r *http.Reques
 
 func stockV2ReviewFilterFromRequest(r *http.Request) (stockv2.OperationReviewListFilter, error) {
 	query := r.URL.Query()
-	limit, err := stockV2StrategyPositiveInt(query.Get("limit"), 50)
+	limit, err := stockV2PositiveInt(query.Get("limit"), 50)
 	if err != nil || limit > 200 {
 		return stockv2.OperationReviewListFilter{}, errors.New("invalid limit")
 	}
-	offset, err := stockV2StrategyNonNegativeInt(query.Get("offset"), 0)
+	offset, err := stockV2NonNegativeInt(query.Get("offset"), 0)
 	if err != nil {
 		return stockv2.OperationReviewListFilter{}, errors.New("invalid offset")
 	}
@@ -173,19 +173,11 @@ func stockV2ReviewHTTPStatus(err error) int {
 }
 
 func stockV2HTTPValidReviewStatus(status string) bool {
-	return status == stockv2.OperationReviewStatusPending ||
-		status == stockv2.OperationReviewStatusRunning ||
-		status == stockv2.OperationReviewStatusCompleted ||
-		status == stockv2.OperationReviewStatusFailed ||
-		status == stockv2.OperationReviewStatusClosed
+	return stockV2HTTPValueIn(status, stockv2.OperationReviewStatusPending, stockv2.OperationReviewStatusRunning, stockv2.OperationReviewStatusCompleted, stockv2.OperationReviewStatusFailed, stockv2.OperationReviewStatusClosed)
 }
 
 func stockV2HTTPValidReviewOutputType(outputType string) bool {
-	return outputType == stockv2.OperationReviewOutputTradeSignal ||
-		outputType == stockv2.OperationReviewOutputProposedOperation ||
-		outputType == stockv2.OperationReviewOutputStrategyPatch ||
-		outputType == stockv2.OperationReviewOutputIgnore ||
-		outputType == stockv2.OperationReviewOutputContinueMonitoring
+	return stockV2HTTPValueIn(outputType, stockv2.OperationReviewOutputTradeSignal, stockv2.OperationReviewOutputProposedOperation, stockv2.OperationReviewOutputStrategyPatch, stockv2.OperationReviewOutputIgnore, stockv2.OperationReviewOutputContinueMonitoring)
 }
 
 // handleStockV2RunAgentReview 对某个 Review 启动 Agent 运行。

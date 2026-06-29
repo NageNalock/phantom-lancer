@@ -86,7 +86,7 @@ func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (S
 		keywordsZhJSON, keywordsEnJSON, profile.BusinessSummaryZh, profile.BusinessSummaryEn,
 		businessLinesZhJSON, businessLinesEnJSON, riskTagsZhJSON, riskTagsEnJSON,
 		profile.ProfileTextZh, profile.ProfileTextEn, profile.AIProfileStatus, profile.AIProfileModel,
-		profile.AIProfileConfidence, profile.AIProfileError, nullableNewsTime(profile.AIProfileUpdatedAt),
+		profile.AIProfileConfidence, profile.AIProfileError, nullableTime(profile.AIProfileUpdatedAt),
 		profile.UpdatedAt)
 	if err != nil {
 		return StockProfile{}, wrapError(err, "upsert stock profile")
@@ -108,25 +108,12 @@ func (s *Store) GetStockProfile(ctx context.Context, symbol string) (StockProfil
 
 func (s *Store) ListStockProfiles(ctx context.Context, filter StockProfileListFilter) ([]StockProfile, error) {
 	where, args := stockProfileWhere(filter)
-	args = append(args, normalizedStockProfileLimit(filter.Limit), normalizedStockProfileOffset(filter.Offset))
+	args = append(args, normalizedPageLimit(filter.Limit, 500), normalizedPageOffset(filter.Offset))
 	rows, err := s.assetDB().QueryContext(ctx, stockProfileSelectSQL()+where+` ORDER BY updated_at DESC, symbol ASC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, wrapError(err, "list stock profiles")
 	}
-	defer rows.Close()
-
-	items := make([]StockProfile, 0)
-	for rows.Next() {
-		item, err := scanStockProfile(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan stock profile")
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate stock profiles")
-	}
-	return items, nil
+	return scanRows(rows, scanStockProfile, "scan stock profile", "iterate stock profiles")
 }
 
 func (s *Store) CountStockProfiles(ctx context.Context, filter StockProfileListFilter) (int, error) {
@@ -168,19 +155,19 @@ func (s *Store) CreateStockProfileUpdateTask(ctx context.Context, task StockProf
 	`,
 		task.ID,
 		task.Symbol,
-		nullableNewsString(task.Market),
+		nullableString(task.Market),
 		task.TriggerSource,
-		nullableNewsString(task.TriggerReason),
+		nullableString(task.TriggerReason),
 		task.Status,
-		nullableNewsString(task.BaseInputHashBefore),
-		nullableNewsString(task.BaseInputHashAfter),
+		nullableString(task.BaseInputHashBefore),
+		nullableString(task.BaseInputHashAfter),
 		boolToInt(task.BaseInputChanged),
 		task.AIDecision,
-		nullableNewsString(task.AgentRunID),
+		nullableString(task.AgentRunID),
 		sourceStatusesJSON,
-		nullableNewsString(task.ErrorMessage),
+		nullableString(task.ErrorMessage),
 		task.StartedAt,
-		nullableNewsTime(task.FinishedAt),
+		nullableTime(task.FinishedAt),
 		task.CreatedAt,
 		task.UpdatedAt,
 	)
@@ -192,24 +179,12 @@ func (s *Store) CreateStockProfileUpdateTask(ctx context.Context, task StockProf
 
 func (s *Store) ListStockProfileUpdateTasks(ctx context.Context, filter StockProfileUpdateTaskListFilter) ([]StockProfileUpdateTask, error) {
 	where, args := stockProfileUpdateTaskWhere(filter)
-	args = append(args, normalizedStockProfileLimit(filter.Limit), normalizedStockProfileOffset(filter.Offset))
+	args = append(args, normalizedPageLimit(filter.Limit, 500), normalizedPageOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, stockProfileUpdateTaskSelectSQL()+where+` ORDER BY created_at DESC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, wrapError(err, "list stock profile update tasks")
 	}
-	defer rows.Close()
-	items := make([]StockProfileUpdateTask, 0)
-	for rows.Next() {
-		item, err := scanStockProfileUpdateTask(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan stock profile update task")
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate stock profile update tasks")
-	}
-	return items, nil
+	return scanRows(rows, scanStockProfileUpdateTask, "scan stock profile update task", "iterate stock profile update tasks")
 }
 
 func (s *Store) CountStockProfileUpdateTasks(ctx context.Context, filter StockProfileUpdateTaskListFilter) (int, error) {
@@ -362,11 +337,7 @@ func stockProfileWhere(filter StockProfileListFilter) (string, []any) {
 	return " WHERE " + strings.Join(parts, " AND "), args
 }
 
-type stockProfileScanner interface {
-	Scan(dest ...any) error
-}
-
-func scanStockProfile(scanner stockProfileScanner) (StockProfile, error) {
+func scanStockProfile(scanner rowScanner) (StockProfile, error) {
 	var profile StockProfile
 	var aliasesJSON, sectorsJSON, conceptsJSON, tagsJSON string
 	var aliasesZhJSON, aliasesEnJSON, keywordsZhJSON, keywordsEnJSON string
@@ -466,7 +437,7 @@ func stockProfileUpdateTaskWhere(filter StockProfileUpdateTaskListFilter) (strin
 	return "", args
 }
 
-func scanStockProfileUpdateTask(scanner stockProfileScanner) (StockProfileUpdateTask, error) {
+func scanStockProfileUpdateTask(scanner rowScanner) (StockProfileUpdateTask, error) {
 	var task StockProfileUpdateTask
 	var changed int
 	var sourceStatusesJSON string
@@ -534,23 +505,6 @@ func parseStockProfileTaskTime(value string) time.Time {
 		}
 	}
 	return time.Time{}
-}
-
-func normalizedStockProfileLimit(limit int) int {
-	if limit <= 0 {
-		return 50
-	}
-	if limit > 500 {
-		return 500
-	}
-	return limit
-}
-
-func normalizedStockProfileOffset(offset int) int {
-	if offset < 0 {
-		return 0
-	}
-	return offset
 }
 
 func normalizeStockProfileDeepUpdateBatchSize(value int) int {

@@ -32,14 +32,14 @@ func (s *Store) CreateRawNews(ctx context.Context, item StockV2RawNews) (StockV2
 	`,
 		item.ID,
 		item.Source,
-		nullableNewsString(item.SourceID),
-		nullableNewsString(item.Language),
+		nullableString(item.SourceID),
+		nullableString(item.Language),
 		item.Title,
-		nullableNewsString(item.Content),
-		nullableNewsString(item.Snippet),
-		nullableNewsTime(item.PublishedAt),
+		nullableString(item.Content),
+		nullableString(item.Snippet),
+		nullableTime(item.PublishedAt),
 		item.FetchedAt,
-		nullableNewsString(item.URL),
+		nullableString(item.URL),
 		marshalMap(item.RawPayload),
 		item.ContentHash,
 		item.DedupeKey,
@@ -97,26 +97,14 @@ func (s *Store) getRawNewsByDedupeKey(ctx context.Context, dedupeKey string) (St
 
 func (s *Store) ListRawNews(ctx context.Context, filter RawNewsListFilter) ([]StockV2RawNews, error) {
 	where, args := rawNewsFilterSQL(filter)
-	args = append(args, normalizedNewsLimit(filter.Limit), normalizedNewsOffset(filter.Offset))
+	args = append(args, normalizedPageLimit(filter.Limit, 200), normalizedPageOffset(filter.Offset))
 	rows, err := s.assetDB().QueryContext(ctx, fmt.Sprintf(`
 		%s WHERE %s ORDER BY %s DESC, fetched_at DESC, created_at DESC LIMIT ? OFFSET ?
 	`, rawNewsListSelectSQL, where, rawNewsTimeSQL), args...)
 	if err != nil {
 		return nil, wrapError(err, "list raw news")
 	}
-	defer rows.Close()
-	items := make([]StockV2RawNews, 0)
-	for rows.Next() {
-		item, err := scanRawNews(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan raw news")
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate raw news")
-	}
-	return items, nil
+	return scanRows(rows, scanRawNews, "scan raw news", "iterate raw news")
 }
 
 func (s *Store) TruncateRawNewsBefore(ctx context.Context, before time.Time) (int, error) {
@@ -198,23 +186,14 @@ func (s *Store) ListUnprocessedRawNews(ctx context.Context, before time.Time, li
 		where += " AND fetched_at <= ?"
 		args = append(args, before)
 	}
-	args = append(args, normalizedNewsLimit(limit))
+	args = append(args, normalizedPageLimit(limit, 200))
 	rows, err := s.assetDB().QueryContext(ctx, fmt.Sprintf(`
 		%s WHERE %s ORDER BY fetched_at ASC, created_at ASC LIMIT ?
 	`, rawNewsSelectSQL, where), args...)
 	if err != nil {
 		return nil, wrapError(err, "list unprocessed raw news")
 	}
-	defer rows.Close()
-	items := make([]StockV2RawNews, 0)
-	for rows.Next() {
-		item, err := scanRawNews(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan unprocessed raw news")
-		}
-		items = append(items, item)
-	}
-	return items, wrapError(rows.Err(), "iterate unprocessed raw news")
+	return scanRows(rows, scanRawNews, "scan unprocessed raw news", "iterate unprocessed raw news")
 }
 
 func (s *Store) UpdateRawNewsStatus(ctx context.Context, id, status string) error {
@@ -278,23 +257,23 @@ func (s *Store) UpsertNewsSourceState(ctx context.Context, state NewsSourceState
 		state.Source,
 		boolToInt(state.Enabled),
 		state.Status,
-		nullableNewsString(state.Cursor),
+		nullableString(state.Cursor),
 		state.PollIntervalSeconds,
 		state.JitterSeconds,
 		state.BatchLimit,
 		state.ProcessLimit,
 		state.BackoffBaseSeconds,
 		state.BackoffMaxSeconds,
-		nullableNewsTime(state.NextRunAt),
-		nullableNewsTime(state.LastRunAt),
-		nullableNewsString(state.LastRunStatus),
-		nullableNewsString(state.LastRunError),
-		nullableNewsTime(state.LastFetchAt),
-		nullableNewsTime(state.LastSuccessAt),
-		nullableNewsTime(state.LastErrorAt),
-		nullableNewsString(state.LastError),
+		nullableTime(state.NextRunAt),
+		nullableTime(state.LastRunAt),
+		nullableString(state.LastRunStatus),
+		nullableString(state.LastRunError),
+		nullableTime(state.LastFetchAt),
+		nullableTime(state.LastSuccessAt),
+		nullableTime(state.LastErrorAt),
+		nullableString(state.LastError),
 		state.ConsecutiveFailures,
-		nullableNewsTime(state.BackoffUntil),
+		nullableTime(state.BackoffUntil),
 		state.RawNewsCount,
 		state.NewsEventCount,
 		state.LinkCandidateCount,
@@ -467,28 +446,4 @@ func addNewsTimeWindow(where *[]string, args *[]any, column string, since, until
 		*where = append(*where, column+" <= ?")
 		*args = append(*args, until)
 	}
-}
-
-func normalizedNewsLimit(limit int) int {
-	if limit <= 0 {
-		return 50
-	}
-	if limit > 200 {
-		return 200
-	}
-	return limit
-}
-
-func normalizedNewsOffset(offset int) int {
-	if offset < 0 {
-		return 0
-	}
-	return offset
-}
-
-func nullableNewsString(value string) any {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	return value
 }

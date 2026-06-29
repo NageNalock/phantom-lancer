@@ -15,37 +15,6 @@ import (
 
 // ============================ helpers ============================
 
-func normalizedAgentLimit(limit int) int {
-	if limit <= 0 {
-		return 50
-	}
-	if limit > 200 {
-		return 200
-	}
-	return limit
-}
-
-func normalizedAgentOffset(offset int) int {
-	if offset < 0 {
-		return 0
-	}
-	return offset
-}
-
-func nullableAgentString(value string) any {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	return value
-}
-
-func nullableAgentTime(value time.Time) any {
-	if value.IsZero() {
-		return nil
-	}
-	return value
-}
-
 func agentFilterAdd(where *[]string, args *[]any, column, value string) {
 	if strings.TrimSpace(value) == "" {
 		return
@@ -104,12 +73,12 @@ func (s *Store) CreateAgentProviderProfile(ctx context.Context, profile AgentPro
 		profile.ID,
 		profile.ProviderType,
 		profile.Name,
-		nullableAgentString(profile.DisplayName),
+		nullableString(profile.DisplayName),
 		profile.ConfigState,
 		profile.AuthState,
 		profile.Availability,
-		nullableAgentTime(profile.LastProbeAt),
-		nullableAgentString(profile.LastProbeResult),
+		nullableTime(profile.LastProbeAt),
+		nullableString(profile.LastProbeResult),
 		marshalMap(profile.Metadata),
 		profile.CreatedAt,
 		profile.UpdatedAt,
@@ -131,24 +100,12 @@ func (s *Store) GetAgentProviderProfile(ctx context.Context, id string) (AgentPr
 
 func (s *Store) ListAgentProviderProfiles(ctx context.Context, filter AgentProviderProfileListFilter) ([]AgentProviderProfile, error) {
 	where, args := agentProviderProfileFilterSQL(filter)
-	args = append(args, normalizedAgentLimit(filter.Limit), normalizedAgentOffset(filter.Offset))
+	args = append(args, normalizedPageLimit(filter.Limit, 200), normalizedPageOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`%s WHERE %s ORDER BY created_at DESC LIMIT ? OFFSET ?`, agentProviderProfileSelectSQL, where), args...)
 	if err != nil {
 		return nil, wrapError(err, "list agent provider profiles")
 	}
-	defer rows.Close()
-	items := make([]AgentProviderProfile, 0)
-	for rows.Next() {
-		p, err := scanAgentProviderProfile(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan agent provider profile")
-		}
-		items = append(items, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate agent provider profiles")
-	}
-	return items, nil
+	return scanRows(rows, scanAgentProviderProfile, "scan agent provider profile", "iterate agent provider profiles")
 }
 
 func (s *Store) CountAgentProviderProfiles(ctx context.Context, filter AgentProviderProfileListFilter) (int, error) {
@@ -173,12 +130,12 @@ func (s *Store) UpdateAgentProviderProfile(ctx context.Context, profile AgentPro
 	`,
 		profile.ProviderType,
 		profile.Name,
-		nullableAgentString(profile.DisplayName),
+		nullableString(profile.DisplayName),
 		profile.ConfigState,
 		profile.AuthState,
 		profile.Availability,
-		nullableAgentTime(profile.LastProbeAt),
-		nullableAgentString(profile.LastProbeResult),
+		nullableTime(profile.LastProbeAt),
+		nullableString(profile.LastProbeResult),
 		marshalMap(profile.Metadata),
 		profile.UpdatedAt,
 		profile.ID,
@@ -380,7 +337,7 @@ func (s *Store) CreateAgentModelProfile(ctx context.Context, model AgentModelPro
 		model.ID,
 		model.ProviderID,
 		model.ModelName,
-		nullableAgentString(model.DisplayName),
+		nullableString(model.DisplayName),
 		boolToInt(model.Enabled),
 		model.Status,
 		model.CostLevel,
@@ -406,24 +363,12 @@ func (s *Store) GetAgentModelProfile(ctx context.Context, id string) (AgentModel
 
 func (s *Store) ListAgentModelProfiles(ctx context.Context, filter AgentModelProfileListFilter) ([]AgentModelProfile, error) {
 	where, args := agentModelProfileFilterSQL(filter)
-	args = append(args, normalizedAgentLimit(filter.Limit), normalizedAgentOffset(filter.Offset))
+	args = append(args, normalizedPageLimit(filter.Limit, 200), normalizedPageOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`%s WHERE %s ORDER BY created_at DESC LIMIT ? OFFSET ?`, agentModelProfileSelectSQL, where), args...)
 	if err != nil {
 		return nil, wrapError(err, "list agent model profiles")
 	}
-	defer rows.Close()
-	items := make([]AgentModelProfile, 0)
-	for rows.Next() {
-		m, err := scanAgentModelProfile(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan agent model profile")
-		}
-		items = append(items, m)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate agent model profiles")
-	}
-	return items, nil
+	return scanRows(rows, scanAgentModelProfile, "scan agent model profile", "iterate agent model profiles")
 }
 
 func (s *Store) CountAgentModelProfiles(ctx context.Context, filter AgentModelProfileListFilter) (int, error) {
@@ -449,7 +394,7 @@ func (s *Store) UpdateAgentModelProfile(ctx context.Context, model AgentModelPro
 	`,
 		model.ProviderID,
 		model.ModelName,
-		nullableAgentString(model.DisplayName),
+		nullableString(model.DisplayName),
 		boolToInt(model.Enabled),
 		model.Status,
 		model.CostLevel,
@@ -531,24 +476,12 @@ func (s *Store) GetAgentTaskProfileByType(ctx context.Context, taskType string) 
 
 func (s *Store) ListAgentTaskProfiles(ctx context.Context, filter AgentTaskProfileListFilter) ([]AgentTaskProfile, error) {
 	where, args := agentTaskProfileFilterSQL(filter)
-	args = append(args, normalizedAgentLimit(filter.Limit), normalizedAgentOffset(filter.Offset))
+	args = append(args, normalizedPageLimit(filter.Limit, 200), normalizedPageOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`%s WHERE %s ORDER BY created_at ASC LIMIT ? OFFSET ?`, agentTaskProfileSelectSQL, where), args...)
 	if err != nil {
 		return nil, wrapError(err, "list agent task profiles")
 	}
-	defer rows.Close()
-	items := make([]AgentTaskProfile, 0)
-	for rows.Next() {
-		tp, err := scanAgentTaskProfile(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan agent task profile")
-		}
-		items = append(items, tp)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate agent task profiles")
-	}
-	return items, nil
+	return scanRows(rows, scanAgentTaskProfile, "scan agent task profile", "iterate agent task profiles")
 }
 
 func (s *Store) CountAgentTaskProfiles(ctx context.Context, filter AgentTaskProfileListFilter) (int, error) {
@@ -568,8 +501,8 @@ func (s *Store) UpdateAgentTaskProfile(ctx context.Context, profile AgentTaskPro
 		SET primary_model_id = ?, fallback_model_id = ?, max_budget = ?, updated_at = ?
 		WHERE id = ?
 	`,
-		nullableAgentString(profile.PrimaryModelID),
-		nullableAgentString(profile.FallbackModelID),
+		nullableString(profile.PrimaryModelID),
+		nullableString(profile.FallbackModelID),
 		profile.MaxBudget,
 		profile.UpdatedAt,
 		profile.ID,
@@ -641,24 +574,12 @@ func (s *Store) GetAgentRun(ctx context.Context, id string) (AgentRun, error) {
 
 func (s *Store) ListAgentRuns(ctx context.Context, filter AgentRunListFilter) ([]AgentRun, error) {
 	where, args := agentRunFilterSQL(filter)
-	args = append(args, normalizedAgentLimit(filter.Limit), normalizedAgentOffset(filter.Offset))
+	args = append(args, normalizedPageLimit(filter.Limit, 200), normalizedPageOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`%s WHERE %s ORDER BY created_at DESC LIMIT ? OFFSET ?`, agentRunSelectSQL, where), args...)
 	if err != nil {
 		return nil, wrapError(err, "list agent runs")
 	}
-	defer rows.Close()
-	items := make([]AgentRun, 0)
-	for rows.Next() {
-		r, err := scanAgentRun(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan agent run")
-		}
-		items = append(items, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate agent runs")
-	}
-	return items, nil
+	return scanRows(rows, scanAgentRun, "scan agent run", "iterate agent runs")
 }
 
 func (s *Store) CountAgentRuns(ctx context.Context, filter AgentRunListFilter) (int, error) {
@@ -786,17 +707,17 @@ func insertAgentRunWithTx(ctx context.Context, tx *sql.Tx, run AgentRun) error {
 	`,
 		run.ID,
 		run.TaskType,
-		nullableAgentString(run.ProviderID),
-		nullableAgentString(run.ModelID),
+		nullableString(run.ProviderID),
+		nullableString(run.ModelID),
 		run.TriggerObjectType,
 		run.TriggerObjectID,
 		run.Status,
 		marshalMap(run.CostEstimate),
-		nullableAgentString(run.ErrorMessage),
+		nullableString(run.ErrorMessage),
 		run.Output,
-		nullableAgentString(run.DecisionLedgerID),
-		nullableAgentTime(run.StartedAt),
-		nullableAgentTime(run.FinishedAt),
+		nullableString(run.DecisionLedgerID),
+		nullableTime(run.StartedAt),
+		nullableTime(run.FinishedAt),
 		run.CreatedAt,
 		run.UpdatedAt,
 	)
@@ -812,16 +733,16 @@ func insertAgentDecisionLedgerWithTx(ctx context.Context, tx *sql.Tx, ledger Age
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		ledger.ID,
-		nullableAgentString(ledger.RunID),
-		nullableAgentString(ledger.ProviderID),
-		nullableAgentString(ledger.ModelID),
+		nullableString(ledger.RunID),
+		nullableString(ledger.ProviderID),
+		nullableString(ledger.ModelID),
 		ledger.TaskType,
 		ledger.TriggerObjectType,
 		ledger.TriggerObjectID,
-		nullableAgentString(ledger.InputSummary),
-		nullableAgentString(ledger.Prompt),
-		nullableAgentString(ledger.InputArtifactSummary),
-		nullableAgentString(ledger.OutputArtifactSummary),
+		nullableString(ledger.InputSummary),
+		nullableString(ledger.Prompt),
+		nullableString(ledger.InputArtifactSummary),
+		nullableString(ledger.OutputArtifactSummary),
 		marshalMap(ledger.StructuredOutput),
 		marshalMap(ledger.RedactionSummary),
 		ledger.CreatedAt,
@@ -845,9 +766,9 @@ func (s *Store) UpdateAgentRun(ctx context.Context, run AgentRun) (AgentRun, err
 	`,
 		run.Status,
 		marshalMap(run.CostEstimate),
-		nullableAgentString(run.ErrorMessage),
-		nullableAgentString(run.Output),
-		nullableAgentTime(run.FinishedAt),
+		nullableString(run.ErrorMessage),
+		nullableString(run.Output),
+		nullableTime(run.FinishedAt),
 		run.UpdatedAt,
 		run.ID,
 	)
@@ -874,7 +795,7 @@ func (s *Store) UpdateAgentDecisionLedger(ctx context.Context, ledger AgentDecis
 		    updated_at = ?
 		WHERE id = ?
 	`,
-		nullableAgentString(ledger.OutputArtifactSummary),
+		nullableString(ledger.OutputArtifactSummary),
 		marshalMap(ledger.StructuredOutput),
 		marshalMap(ledger.RedactionSummary),
 		ledger.UpdatedAt,

@@ -119,8 +119,8 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 }
 
 func (s *Service) ListStockProfileUpdateTasks(ctx context.Context, filter StockProfileUpdateTaskListFilter) ([]StockProfileUpdateTask, error) {
-	filter.Limit = normalizedStockProfileLimit(filter.Limit)
-	filter.Offset = normalizedStockProfileOffset(filter.Offset)
+	filter.Limit = normalizedPageLimit(filter.Limit, 500)
+	filter.Offset = normalizedPageOffset(filter.Offset)
 	return s.store.ListStockProfileUpdateTasks(ctx, filter)
 }
 
@@ -345,8 +345,8 @@ func (s *Service) GetStockProfile(ctx context.Context, symbol string) (StockProf
 }
 
 func (s *Service) ListStockProfiles(ctx context.Context, filter StockProfileListFilter) ([]StockProfile, error) {
-	filter.Limit = normalizedStockProfileLimit(filter.Limit)
-	filter.Offset = normalizedStockProfileOffset(filter.Offset)
+	filter.Limit = normalizedPageLimit(filter.Limit, 500)
+	filter.Offset = normalizedPageOffset(filter.Offset)
 	if filter.InstrumentType != "" {
 		filter.InstrumentType = normalizeInstrumentType(filter.InstrumentType)
 	}

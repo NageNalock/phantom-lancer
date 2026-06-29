@@ -13,6 +13,7 @@ import type {
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, Field, Notice, Panel, Pill } from "../../components/ui";
+import { hasMeaningfulTime } from "./time";
 
 type NewsAssetKind = "raw" | "events" | "candidates";
 type DetailItem = StockV2RawNews | StockV2NewsEvent | StockV2NewsLinkCandidate | null;
@@ -750,10 +751,6 @@ function boundedDisplayTime(primary?: string, fallback?: string): string | undef
   const fallbackDate = new Date(fallback);
   if (isNaN(primaryDate.getTime()) || isNaN(fallbackDate.getTime())) return primary;
   return primaryDate.getTime() > fallbackDate.getTime() + 2 * 60 * 1000 ? fallback : primary;
-}
-
-function hasMeaningfulTime(iso?: string): iso is string {
-  return !!iso && !iso.startsWith("0001-01-01");
 }
 
 function safeJSONString(value: unknown): string {

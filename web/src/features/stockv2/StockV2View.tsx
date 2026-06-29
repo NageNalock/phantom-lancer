@@ -18,6 +18,7 @@ import { StockV2Strategies } from "./StockV2Strategies";
 import { StockV2DailyBars } from "./StockV2DailyBars";
 import { StockV2AgentPage } from "./StockV2AgentPage";
 import { StockV2OpportunityPage } from "./StockV2OpportunityPage";
+import { formatCompactMeaningfulTime as formatCompactTime } from "./time";
 
 const v2Tabs: Array<{ id: StockV2Tab; label: string; icon?: typeof Plus }> = [
   { id: "overview", label: "总览", icon: Faders },
@@ -130,22 +131,4 @@ export function StockV2View({ actions, data }: { actions: AppActions; data: AppD
       </aside>
     </div>
   );
-}
-
-function formatCompactTime(iso?: string): string {
-  if (!hasMeaningfulTime(iso)) return "-";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  const now = new Date();
-  const diffMs = now.getTime() - d.getTime();
-  const diffMin = Math.floor(diffMs / 60000);
-  if (diffMin < 1) return "刚刚";
-  if (diffMin < 60) return `${diffMin} 分钟前`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr} 小时前`;
-  return d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-}
-
-function hasMeaningfulTime(iso?: string): iso is string {
-  return !!iso && !iso.startsWith("0001-01-01");
 }

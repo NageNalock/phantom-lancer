@@ -4,6 +4,7 @@ import type { AppActions } from "../../app/App";
 import type { AppData, StockV2PagedResponse, StockV2Settings, StockV2StockProfileUpdateTask } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, EmptyState, Field, Notice, Panel, Pill, Toggle } from "../../components/ui";
+import { formatMeaningfulDateTime as formatTime, hasMeaningfulTime } from "./time";
 
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
 const PROFILE_TASK_PAGE_SIZE = 12;
@@ -322,23 +323,6 @@ function StockProfileSourceStatusSummary({ task }: { task: StockV2StockProfileUp
       {statuses.length > 3 ? <span className="text-xs text-[var(--muted)]">+{statuses.length - 3}</span> : null}
     </div>
   );
-}
-
-function formatTime(iso?: string): string {
-  if (!hasMeaningfulTime(iso)) return "-";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
-
-function hasMeaningfulTime(iso?: string): iso is string {
-  return !!iso && !iso.startsWith("0001-01-01");
 }
 
 function triggerSourceLabel(value: string): string {

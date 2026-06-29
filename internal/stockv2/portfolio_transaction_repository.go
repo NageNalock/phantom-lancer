@@ -13,9 +13,7 @@ const transactionSelectColumns = `
     amount, executed_at, COALESCE(note,''), created_at
 `
 
-func scanTransaction(row interface {
-	Scan(dest ...any) error
-}) (StockV2Transaction, error) {
+func scanTransaction(row rowScanner) (StockV2Transaction, error) {
 	var t StockV2Transaction
 	if err := row.Scan(
 		&t.ID,
@@ -31,7 +29,7 @@ func scanTransaction(row interface {
 		&t.Note,
 		&t.CreatedAt,
 	); err != nil {
-		return StockV2Transaction{}, wrapError(err, "scan transaction")
+		return StockV2Transaction{}, err
 	}
 	return t, nil
 }
@@ -71,8 +69,7 @@ func (s *Store) ListTransactions(ctx context.Context, portfolioID string, limit 
 		if err != nil {
 			return nil, wrapError(err, "list transactions")
 		}
-		defer rows.Close()
-		return collectTransactions(rows)
+		return scanRows(rows, scanTransaction, "scan transaction", "iterate transactions")
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT `+transactionSelectColumns+`
@@ -83,23 +80,7 @@ func (s *Store) ListTransactions(ctx context.Context, portfolioID string, limit 
 	if err != nil {
 		return nil, wrapError(err, "list transactions")
 	}
-	defer rows.Close()
-	return collectTransactions(rows)
-}
-
-func collectTransactions(rows *sql.Rows) ([]StockV2Transaction, error) {
-	items := make([]StockV2Transaction, 0)
-	for rows.Next() {
-		t, err := scanTransaction(rows)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, t)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate transactions")
-	}
-	return items, nil
+	return scanRows(rows, scanTransaction, "scan transaction", "iterate transactions")
 }
 
 // GetTransaction 按 id 取单条交易流水。
@@ -114,7 +95,7 @@ func (s *Store) GetTransaction(ctx context.Context, id string) (StockV2Transacti
 		if errors.Is(err, sql.ErrNoRows) {
 			return StockV2Transaction{}, ErrTransactionNotFound
 		}
-		return StockV2Transaction{}, err
+		return StockV2Transaction{}, wrapError(err, "scan transaction")
 	}
 	return t, nil
 }

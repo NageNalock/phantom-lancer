@@ -1508,6 +1508,13 @@ func (s *Store) dropAllV2Tables(ctx context.Context) error {
 	return nil
 }
 
+const portfolioSelectSQL = `
+	SELECT id, name, COALESCE(description,''), cash, risk_level, max_single_position_pct,
+	       max_drawdown_pct, allow_buy, allow_add, allow_reduce, allow_sell, COALESCE(notes,''),
+	       created_at, updated_at
+	FROM stockv2_portfolios
+`
+
 // CreatePortfolio 创建投资组合
 func (s *Store) CreatePortfolio(ctx context.Context, portfolio StockV2Portfolio) error {
 	query := `
@@ -1544,34 +1551,7 @@ func (s *Store) CreatePortfolio(ctx context.Context, portfolio StockV2Portfolio)
 
 // GetPortfolio 获取投资组合
 func (s *Store) GetPortfolio(ctx context.Context, id string) (StockV2Portfolio, error) {
-	query := `
-		SELECT id, name, COALESCE(description,''), cash, risk_level, max_single_position_pct,
-		       max_drawdown_pct, allow_buy, allow_add, allow_reduce, allow_sell, COALESCE(notes,''),
-		       created_at, updated_at
-		FROM stockv2_portfolios
-		WHERE id = ?
-	`
-
-	row := s.db.QueryRowContext(ctx, query, id)
-
-	var portfolio StockV2Portfolio
-	err := row.Scan(
-		&portfolio.ID,
-		&portfolio.Name,
-		&portfolio.Description,
-		&portfolio.Cash,
-		&portfolio.RiskLevel,
-		&portfolio.MaxSinglePositionPct,
-		&portfolio.MaxDrawdownPct,
-		&portfolio.AllowBuy,
-		&portfolio.AllowAdd,
-		&portfolio.AllowReduce,
-		&portfolio.AllowSell,
-		&portfolio.Notes,
-		&portfolio.CreatedAt,
-		&portfolio.UpdatedAt,
-	)
-
+	portfolio, err := scanPortfolio(s.db.QueryRowContext(ctx, portfolioSelectSQL+" WHERE id = ?", id))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return StockV2Portfolio{}, ErrPortfolioNotFound
@@ -1649,47 +1629,29 @@ func (s *Store) DeletePortfolio(ctx context.Context, id string) error {
 
 // ListPortfolios 列出所有投资组合
 func (s *Store) ListPortfolios(ctx context.Context) ([]StockV2Portfolio, error) {
-	query := `
-		SELECT id, name, COALESCE(description,''), cash, risk_level, max_single_position_pct,
-		       max_drawdown_pct, allow_buy, allow_add, allow_reduce, allow_sell, COALESCE(notes,''),
-		       created_at, updated_at
-		FROM stockv2_portfolios
-		ORDER BY created_at DESC
-	`
-
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.db.QueryContext(ctx, portfolioSelectSQL+" ORDER BY created_at DESC")
 	if err != nil {
 		return nil, wrapError(err, "list portfolios")
 	}
-	defer rows.Close()
-
-	var portfolios []StockV2Portfolio
-	for rows.Next() {
-		var portfolio StockV2Portfolio
-		err := rows.Scan(
-			&portfolio.ID,
-			&portfolio.Name,
-			&portfolio.Description,
-			&portfolio.Cash,
-			&portfolio.RiskLevel,
-			&portfolio.MaxSinglePositionPct,
-			&portfolio.MaxDrawdownPct,
-			&portfolio.AllowBuy,
-			&portfolio.AllowAdd,
-			&portfolio.AllowReduce,
-			&portfolio.AllowSell,
-			&portfolio.Notes,
-			&portfolio.CreatedAt,
-			&portfolio.UpdatedAt,
-		)
-		if err != nil {
-			return nil, wrapError(err, "scan portfolio")
-		}
-		portfolios = append(portfolios, portfolio)
-	}
-
-	return portfolios, nil
+	return scanRows(rows, scanPortfolio, "scan portfolio", "iterate portfolios")
 }
+
+func scanPortfolio(row rowScanner) (StockV2Portfolio, error) {
+	var p StockV2Portfolio
+	err := row.Scan(
+		&p.ID, &p.Name, &p.Description, &p.Cash, &p.RiskLevel, &p.MaxSinglePositionPct,
+		&p.MaxDrawdownPct, &p.AllowBuy, &p.AllowAdd, &p.AllowReduce, &p.AllowSell,
+		&p.Notes, &p.CreatedAt, &p.UpdatedAt,
+	)
+	return p, err
+}
+
+const holdingSelectSQL = `
+	SELECT id, portfolio_id, symbol, COALESCE(market,''), COALESCE(name,''), quantity, available_quantity,
+	       cost_price, last_price, last_price_at, COALESCE(tradable_status,'unknown'), market_value,
+	       pnl, position_pct, acquired_at, created_at, updated_at
+	FROM stockv2_holdings
+`
 
 // CreateHolding 创建持仓
 func (s *Store) CreateHolding(ctx context.Context, holding StockV2Holding) error {
@@ -1737,54 +1699,12 @@ func (s *Store) CreateHolding(ctx context.Context, holding StockV2Holding) error
 
 // GetHolding 获取持仓
 func (s *Store) GetHolding(ctx context.Context, id string) (StockV2Holding, error) {
-	query := `
-		SELECT id, portfolio_id, symbol, COALESCE(market,''), COALESCE(name,''), quantity, available_quantity,
-		       cost_price, last_price, last_price_at, COALESCE(tradable_status,'unknown'), market_value,
-		       pnl, position_pct, acquired_at, created_at, updated_at
-		FROM stockv2_holdings
-		WHERE id = ?
-	`
-
-	row := s.db.QueryRowContext(ctx, query, id)
-
-	var holding StockV2Holding
-	var lastPriceAt sql.NullTime
-	var acquiredAt sql.NullTime
-	err := row.Scan(
-		&holding.ID,
-		&holding.PortfolioID,
-		&holding.Symbol,
-		&holding.Market,
-		&holding.Name,
-		&holding.Quantity,
-		&holding.AvailableQuantity,
-		&holding.CostPrice,
-		&holding.LastPrice,
-		&lastPriceAt,
-		&holding.TradableStatus,
-		&holding.MarketValue,
-		&holding.PnL,
-		&holding.PositionPct,
-		&acquiredAt,
-		&holding.CreatedAt,
-		&holding.UpdatedAt,
-	)
-
+	holding, err := scanHolding(s.db.QueryRowContext(ctx, holdingSelectSQL+" WHERE id = ?", id))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return StockV2Holding{}, ErrHoldingNotFound
 		}
 		return StockV2Holding{}, wrapError(err, "get holding")
-	}
-
-	if lastPriceAt.Valid {
-		holding.LastPriceAt = lastPriceAt.Time
-	}
-	if acquiredAt.Valid {
-		holding.AcquiredAt = acquiredAt.Time
-	} else {
-		// 老数据没有 acquired_at,用 created_at 兜底
-		holding.AcquiredAt = holding.CreatedAt
 	}
 
 	return holding, nil
@@ -1859,61 +1779,39 @@ func (s *Store) DeleteHolding(ctx context.Context, id string) error {
 
 // ListHoldings 列出投资组合的所有持仓
 func (s *Store) ListHoldings(ctx context.Context, portfolioID string) ([]StockV2Holding, error) {
-	query := `
-		SELECT id, portfolio_id, symbol, COALESCE(market,''), COALESCE(name,''), quantity, available_quantity,
-		       cost_price, last_price, last_price_at, COALESCE(tradable_status,'unknown'), market_value,
-		       pnl, position_pct, acquired_at, created_at, updated_at
-		FROM stockv2_holdings
-		WHERE portfolio_id = ?
-		ORDER BY created_at DESC
-	`
-
-	rows, err := s.db.QueryContext(ctx, query, portfolioID)
+	rows, err := s.db.QueryContext(ctx, holdingSelectSQL+" WHERE portfolio_id = ? ORDER BY created_at DESC", portfolioID)
 	if err != nil {
 		return nil, wrapError(err, "list holdings")
 	}
-	defer rows.Close()
-
-	var holdings []StockV2Holding
-	for rows.Next() {
-		var holding StockV2Holding
-		var lastPriceAt sql.NullTime
-		var acquiredAt sql.NullTime
-		err := rows.Scan(
-			&holding.ID,
-			&holding.PortfolioID,
-			&holding.Symbol,
-			&holding.Market,
-			&holding.Name,
-			&holding.Quantity,
-			&holding.AvailableQuantity,
-			&holding.CostPrice,
-			&holding.LastPrice,
-			&lastPriceAt,
-			&holding.TradableStatus,
-			&holding.MarketValue,
-			&holding.PnL,
-			&holding.PositionPct,
-			&acquiredAt,
-			&holding.CreatedAt,
-			&holding.UpdatedAt,
-		)
-		if err != nil {
-			return nil, wrapError(err, "scan holding")
-		}
-		if lastPriceAt.Valid {
-			holding.LastPriceAt = lastPriceAt.Time
-		}
-		if acquiredAt.Valid {
-			holding.AcquiredAt = acquiredAt.Time
-		} else {
-			holding.AcquiredAt = holding.CreatedAt
-		}
-		holdings = append(holdings, holding)
-	}
-
-	return holdings, nil
+	return scanRows(rows, scanHolding, "scan holding", "iterate holdings")
 }
+
+func scanHolding(row rowScanner) (StockV2Holding, error) {
+	var h StockV2Holding
+	var lastPriceAt, acquiredAt sql.NullTime
+	err := row.Scan(
+		&h.ID, &h.PortfolioID, &h.Symbol, &h.Market, &h.Name, &h.Quantity,
+		&h.AvailableQuantity, &h.CostPrice, &h.LastPrice, &lastPriceAt,
+		&h.TradableStatus, &h.MarketValue, &h.PnL, &h.PositionPct, &acquiredAt,
+		&h.CreatedAt, &h.UpdatedAt,
+	)
+	if lastPriceAt.Valid {
+		h.LastPriceAt = lastPriceAt.Time
+	}
+	if acquiredAt.Valid {
+		h.AcquiredAt = acquiredAt.Time
+	} else {
+		h.AcquiredAt = h.CreatedAt
+	}
+	return h, err
+}
+
+const instrumentSelectSQL = `
+	SELECT id, symbol, market, COALESCE(instrument_type,'stock'), COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
+	       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), COALESCE(status,'active'),
+	       last_update_at, created_at, updated_at
+	FROM stockv2_instruments
+`
 
 // CreateInstrument 创建标的主数据
 // UpsertInstrument 插入或更新标的主数据（按 symbol 去重）
@@ -1970,51 +1868,12 @@ func (s *Store) UpsertInstrument(ctx context.Context, instrument StockV2Instrume
 
 // GetInstrument 获取标的主数据
 func (s *Store) GetInstrument(ctx context.Context, symbol string) (StockV2Instrument, error) {
-	query := `
-		SELECT id, symbol, market, COALESCE(instrument_type,'stock'), COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
-		       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), COALESCE(status,'active'),
-		       last_update_at, created_at, updated_at
-		FROM stockv2_instruments
-		WHERE symbol = ?
-	`
-
-	row := s.assetDB().QueryRowContext(ctx, query, symbol)
-
-	var instrument StockV2Instrument
-	var conceptsJSON []byte
-	var lastUpdate sql.NullTime
-
-	err := row.Scan(
-		&instrument.ID,
-		&instrument.Symbol,
-		&instrument.Market,
-		&instrument.InstrumentType,
-		&instrument.Name,
-		&instrument.Industry,
-		&instrument.Sector,
-		&conceptsJSON,
-		&instrument.ListDate,
-		&instrument.DelistDate,
-		&instrument.Status,
-		&lastUpdate,
-		&instrument.CreatedAt,
-		&instrument.UpdatedAt,
-	)
-
+	instrument, err := scanInstrument(s.assetDB().QueryRowContext(ctx, instrumentSelectSQL+" WHERE symbol = ?", symbol))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return StockV2Instrument{}, ErrInstrumentNotFound
 		}
 		return StockV2Instrument{}, wrapError(err, "get instrument")
-	}
-
-	if lastUpdate.Valid {
-		instrument.LastUpdate = lastUpdate.Time
-	}
-	instrument.InstrumentType = normalizeInstrumentType(instrument.InstrumentType)
-	// 解析JSON字段
-	if len(conceptsJSON) > 0 {
-		_ = json.Unmarshal(conceptsJSON, &instrument.Concepts)
 	}
 
 	return instrument, nil
@@ -2041,59 +1900,11 @@ func (s *Store) GetInstruments(ctx context.Context, limit int, offset int) ([]St
 func (s *Store) GetInstrumentsFiltered(ctx context.Context, market, instrumentType string, limit int, offset int) ([]StockV2Instrument, error) {
 	where, args := instrumentFilterSQL(market, instrumentType)
 	args = append(args, limit, offset)
-	query := `
-		SELECT id, symbol, market, COALESCE(instrument_type,'stock'), COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
-		       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), COALESCE(status,'active'),
-		       last_update_at, created_at, updated_at
-		FROM stockv2_instruments
-		WHERE ` + where + `
-		ORDER BY created_at DESC
-		LIMIT ? OFFSET ?
-	`
-
-	rows, err := s.assetDB().QueryContext(ctx, query, args...)
+	rows, err := s.assetDB().QueryContext(ctx, instrumentSelectSQL+" WHERE "+where+" ORDER BY created_at DESC LIMIT ? OFFSET ?", args...)
 	if err != nil {
 		return nil, wrapError(err, "get instruments")
 	}
-	defer rows.Close()
-
-	instruments := make([]StockV2Instrument, 0)
-	for rows.Next() {
-		var instrument StockV2Instrument
-		var conceptsJSON []byte
-		var lastUpdate sql.NullTime
-
-		err := rows.Scan(
-			&instrument.ID,
-			&instrument.Symbol,
-			&instrument.Market,
-			&instrument.InstrumentType,
-			&instrument.Name,
-			&instrument.Industry,
-			&instrument.Sector,
-			&conceptsJSON,
-			&instrument.ListDate,
-			&instrument.DelistDate,
-			&instrument.Status,
-			&lastUpdate,
-			&instrument.CreatedAt,
-			&instrument.UpdatedAt,
-		)
-		if err != nil {
-			return nil, wrapError(err, "scan instrument")
-		}
-
-		if lastUpdate.Valid {
-			instrument.LastUpdate = lastUpdate.Time
-		}
-		instrument.InstrumentType = normalizeInstrumentType(instrument.InstrumentType)
-		if len(conceptsJSON) > 0 {
-			_ = json.Unmarshal(conceptsJSON, &instrument.Concepts)
-		}
-		instruments = append(instruments, instrument)
-	}
-
-	return instruments, nil
+	return scanRows(rows, scanInstrument, "scan instrument", "iterate instruments")
 }
 
 // SearchInstruments 按代码或名称搜索股票（模糊匹配）
@@ -2109,11 +1920,7 @@ func (s *Store) SearchInstrumentsFiltered(ctx context.Context, keyword, market, 
 	where, filterArgs := instrumentFilterSQL(market, instrumentType)
 	args := append([]any{pattern, pattern}, filterArgs...)
 	args = append(args, keyword, limit)
-	query := `
-		SELECT id, symbol, market, COALESCE(instrument_type,'stock'), COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
-		       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), COALESCE(status,'active'),
-		       last_update_at, created_at, updated_at
-		FROM stockv2_instruments
+	query := instrumentSelectSQL + `
 		WHERE (LOWER(symbol) LIKE ? OR LOWER(name) LIKE ?) AND ` + where + `
 		ORDER BY
 		  CASE WHEN LOWER(symbol) = LOWER(?) THEN 0 ELSE 1 END,
@@ -2125,45 +1932,7 @@ func (s *Store) SearchInstrumentsFiltered(ctx context.Context, keyword, market, 
 	if err != nil {
 		return nil, wrapError(err, "search instruments")
 	}
-	defer rows.Close()
-
-	var instruments []StockV2Instrument
-	for rows.Next() {
-		var instrument StockV2Instrument
-		var conceptsJSON []byte
-		var lastUpdate sql.NullTime
-
-		err := rows.Scan(
-			&instrument.ID,
-			&instrument.Symbol,
-			&instrument.Market,
-			&instrument.InstrumentType,
-			&instrument.Name,
-			&instrument.Industry,
-			&instrument.Sector,
-			&conceptsJSON,
-			&instrument.ListDate,
-			&instrument.DelistDate,
-			&instrument.Status,
-			&lastUpdate,
-			&instrument.CreatedAt,
-			&instrument.UpdatedAt,
-		)
-		if err != nil {
-			return nil, wrapError(err, "scan instrument")
-		}
-
-		if lastUpdate.Valid {
-			instrument.LastUpdate = lastUpdate.Time
-		}
-		instrument.InstrumentType = normalizeInstrumentType(instrument.InstrumentType)
-		if len(conceptsJSON) > 0 {
-			_ = json.Unmarshal(conceptsJSON, &instrument.Concepts)
-		}
-		instruments = append(instruments, instrument)
-	}
-
-	return instruments, nil
+	return scanRows(rows, scanInstrument, "scan instrument", "iterate instruments")
 }
 
 func instrumentFilterSQL(market, instrumentType string) (string, []any) {
@@ -2190,58 +1959,30 @@ func instrumentFilterSQL(market, instrumentType string) (string, []any) {
 
 // GetInstrumentsByMarket 根据市场获取股票列表
 func (s *Store) GetInstrumentsByMarket(ctx context.Context, market string) ([]StockV2Instrument, error) {
-	query := `
-		SELECT id, symbol, market, COALESCE(instrument_type,'stock'), COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
-		       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), COALESCE(status,'active'),
-		       last_update_at, created_at, updated_at
-		FROM stockv2_instruments
-		WHERE market = ? AND status = 'active'
-		ORDER BY symbol ASC
-	`
-
-	rows, err := s.assetDB().QueryContext(ctx, query, market)
+	rows, err := s.assetDB().QueryContext(ctx, instrumentSelectSQL+" WHERE market = ? AND status = 'active' ORDER BY symbol ASC", market)
 	if err != nil {
 		return nil, wrapError(err, "get instruments by market")
 	}
-	defer rows.Close()
+	return scanRows(rows, scanInstrument, "scan instrument", "iterate instruments")
+}
 
-	var instruments []StockV2Instrument
-	for rows.Next() {
-		var instrument StockV2Instrument
-		var conceptsJSON []byte
-		var lastUpdate sql.NullTime
-
-		err := rows.Scan(
-			&instrument.ID,
-			&instrument.Symbol,
-			&instrument.Market,
-			&instrument.InstrumentType,
-			&instrument.Name,
-			&instrument.Industry,
-			&instrument.Sector,
-			&conceptsJSON,
-			&instrument.ListDate,
-			&instrument.DelistDate,
-			&instrument.Status,
-			&lastUpdate,
-			&instrument.CreatedAt,
-			&instrument.UpdatedAt,
-		)
-		if err != nil {
-			return nil, wrapError(err, "scan instrument")
-		}
-
-		if lastUpdate.Valid {
-			instrument.LastUpdate = lastUpdate.Time
-		}
-		instrument.InstrumentType = normalizeInstrumentType(instrument.InstrumentType)
-		if len(conceptsJSON) > 0 {
-			_ = json.Unmarshal(conceptsJSON, &instrument.Concepts)
-		}
-		instruments = append(instruments, instrument)
+func scanInstrument(row rowScanner) (StockV2Instrument, error) {
+	var inst StockV2Instrument
+	var conceptsJSON []byte
+	var lastUpdate sql.NullTime
+	err := row.Scan(
+		&inst.ID, &inst.Symbol, &inst.Market, &inst.InstrumentType, &inst.Name,
+		&inst.Industry, &inst.Sector, &conceptsJSON, &inst.ListDate, &inst.DelistDate,
+		&inst.Status, &lastUpdate, &inst.CreatedAt, &inst.UpdatedAt,
+	)
+	if lastUpdate.Valid {
+		inst.LastUpdate = lastUpdate.Time
 	}
-
-	return instruments, nil
+	inst.InstrumentType = normalizeInstrumentType(inst.InstrumentType)
+	if len(conceptsJSON) > 0 {
+		_ = json.Unmarshal(conceptsJSON, &inst.Concepts)
+	}
+	return inst, err
 }
 
 // UpdateInstrument 更新标的主数据
@@ -2290,7 +2031,6 @@ func (s *Store) UpdateInstrument(ctx context.Context, instrument StockV2Instrume
 	return nil
 }
 
-// CreateUpdateJob 创建更新任务
 func (s *Store) CreateUpdateJob(ctx context.Context, job StockV2UpdateJob) error {
 	query := `
 		INSERT INTO stockv2_update_jobs (
@@ -2321,19 +2061,15 @@ func (s *Store) CreateUpdateJob(ctx context.Context, job StockV2UpdateJob) error
 	return wrapError(err, "create update job")
 }
 
-// GetUpdateJob 获取更新任务
+const updateJobSelectSQL = `
+	SELECT id, trigger_type, COALESCE(trigger_source,''), status, total_count,
+	       processed_count, success_count, failed_count, COALESCE(failed_items,''),
+	       start_at, end_at, COALESCE(error_message,''), created_at
+	FROM stockv2_update_jobs
+`
+
 func (s *Store) GetUpdateJob(ctx context.Context, id string) (StockV2UpdateJob, error) {
-	query := `
-		SELECT id, trigger_type, COALESCE(trigger_source,''), status, total_count,
-		       processed_count, success_count, failed_count, COALESCE(failed_items,''),
-		       start_at, end_at, COALESCE(error_message,''), created_at
-		FROM stockv2_update_jobs
-		WHERE id = ?
-	`
-
-	row := s.db.QueryRowContext(ctx, query, id)
-
-	job, err := s.scanUpdateJob(row)
+	job, err := scanUpdateJob(s.db.QueryRowContext(ctx, updateJobSelectSQL+" WHERE id = ?", id))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return StockV2UpdateJob{}, ErrUpdateJobNotFound
@@ -2345,17 +2081,7 @@ func (s *Store) GetUpdateJob(ctx context.Context, id string) (StockV2UpdateJob, 
 
 // GetLatestUpdateJob 获取最新的更新任务
 func (s *Store) GetLatestUpdateJob(ctx context.Context) (StockV2UpdateJob, error) {
-	query := `
-		SELECT id, trigger_type, COALESCE(trigger_source,''), status, total_count,
-		       processed_count, success_count, failed_count, COALESCE(failed_items,''),
-		       start_at, end_at, COALESCE(error_message,''), created_at
-		FROM stockv2_update_jobs
-		ORDER BY created_at DESC
-		LIMIT 1
-	`
-
-	row := s.db.QueryRowContext(ctx, query)
-	job, err := s.scanUpdateJob(row)
+	job, err := scanUpdateJob(s.db.QueryRowContext(ctx, updateJobSelectSQL+" ORDER BY created_at DESC LIMIT 1"))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return StockV2UpdateJob{}, ErrUpdateJobNotFound
@@ -2365,7 +2091,6 @@ func (s *Store) GetLatestUpdateJob(ctx context.Context) (StockV2UpdateJob, error
 	return job, nil
 }
 
-// UpdateUpdateJob 更新任务状态
 // UpdateUpdateJob 增量更新更新任务（只更新非零值字段）
 func (s *Store) UpdateUpdateJob(ctx context.Context, job StockV2UpdateJob) error {
 	var sets []string
@@ -2419,35 +2144,11 @@ func (s *Store) UpdateUpdateJob(ctx context.Context, job StockV2UpdateJob) error
 
 // ListUpdateJobs 获取更新任务列表
 func (s *Store) ListUpdateJobs(ctx context.Context, limit int) ([]StockV2UpdateJob, error) {
-	query := `
-		SELECT id, trigger_type, COALESCE(trigger_source,''), status, total_count,
-		       processed_count, success_count, failed_count, COALESCE(failed_items,''),
-		       start_at, end_at, COALESCE(error_message,''), created_at
-		FROM stockv2_update_jobs
-		ORDER BY created_at DESC
-		LIMIT ?
-	`
-
-	rows, err := s.db.QueryContext(ctx, query, limit)
+	rows, err := s.db.QueryContext(ctx, updateJobSelectSQL+" ORDER BY created_at DESC LIMIT ?", limit)
 	if err != nil {
 		return nil, wrapError(err, "list update jobs")
 	}
-	defer rows.Close()
-
-	var jobs []StockV2UpdateJob
-	for rows.Next() {
-		job, err := s.scanUpdateJob(rows)
-		if err != nil {
-			return nil, wrapError(err, "scan update job")
-		}
-		jobs = append(jobs, job)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate update jobs")
-	}
-
-	return jobs, nil
+	return scanRows(rows, scanUpdateJob, "scan update job", "iterate update jobs")
 }
 
 // PruneUpdateJobs 清理更新任务记录，只保留最新的 keep 条
@@ -2568,16 +2269,16 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		settings.DailyBarsAutoEnabled,
 		dailyBarsLastRun,
 		settings.FinancialJuiceEnabled,
-		nullableNewsString(settings.FinancialJuiceEndpoint),
-		nullableNewsString(settings.FinancialJuiceCookie),
+		nullableString(settings.FinancialJuiceEndpoint),
+		nullableString(settings.FinancialJuiceCookie),
 		settings.BaseProfileAutoMaintainEnabled,
 		settings.BaseProfileMaintainIntervalSeconds,
 		settings.BaseProfileDeepUpdateBatchSize,
 		settings.BaseProfileDeepUpdateAIBudget,
 		settings.BaseProfileDeepUpdateRateLimitMs,
-		nullableNewsTime(settings.BaseProfileLastMaintainAt),
-		nullableNewsTime(settings.BaseProfileNextMaintainAt),
-		nullableNewsString(settings.BaseProfileLastMaintainResult),
+		nullableTime(settings.BaseProfileLastMaintainAt),
+		nullableTime(settings.BaseProfileNextMaintainAt),
+		nullableString(settings.BaseProfileLastMaintainResult),
 		settings.CreatedAt,
 		settings.UpdatedAt,
 	)
@@ -2598,7 +2299,7 @@ type rowScanner interface {
 	Scan(dest ...interface{}) error
 }
 
-func (s *Store) scanUpdateJob(row rowScanner) (StockV2UpdateJob, error) {
+func scanUpdateJob(row rowScanner) (StockV2UpdateJob, error) {
 	var job StockV2UpdateJob
 	var startAt, endAt sql.NullTime
 	var failedItemsJSON string

@@ -20,6 +20,7 @@ import {
 } from "../../domain/labels";
 import { StockV2Monitor } from "./StockV2Monitor";
 import { StockV2NewsWorkbench } from "./StockV2NewsWorkbench";
+import { formatCompactMeaningfulTime as formatCompactTime, hasMeaningfulTime } from "./time";
 
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
 type MarketView = "monitor" | "news";
@@ -587,20 +588,6 @@ function paginationWindow(page: number, totalPages: number): Array<number | "ell
   return out;
 }
 
-function formatCompactTime(iso?: string): string {
-  if (!hasMeaningfulTime(iso)) return "-";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  const now = new Date();
-  const diffMs = now.getTime() - d.getTime();
-  const diffMin = Math.floor(diffMs / 60000);
-  if (diffMin < 1) return "刚刚";
-  if (diffMin < 60) return `${diffMin} 分钟前`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr} 小时前`;
-  return d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-}
-
 function formatDuration(start?: string, end?: string): string {
   if (!hasMeaningfulTime(start)) return "-";
   const s = new Date(start).getTime();
@@ -618,8 +605,4 @@ function formatDuration(start?: string, end?: string): string {
 
 function firstMeaningfulTime(...times: Array<string | undefined>): string | undefined {
   return times.find(hasMeaningfulTime);
-}
-
-function hasMeaningfulTime(iso?: string): iso is string {
-  return !!iso && !iso.startsWith("0001-01-01");
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 
 	"phantom-lancer/internal/stockv2"
 )
@@ -201,11 +200,11 @@ func (s *Server) handleStockV2AlertStatusAction(w http.ResponseWriter, r *http.R
 
 func stockV2WatchFilterFromRequest(r *http.Request) (stockv2.WatchListFilter, error) {
 	query := r.URL.Query()
-	limit, err := stockV2WatchPositiveInt(query.Get("limit"), 50)
+	limit, err := stockV2PositiveInt(query.Get("limit"), 50)
 	if err != nil || limit > 200 {
 		return stockv2.WatchListFilter{}, errors.New("invalid limit")
 	}
-	offset, err := stockV2WatchNonNegativeInt(query.Get("offset"), 0)
+	offset, err := stockV2NonNegativeInt(query.Get("offset"), 0)
 	if err != nil {
 		return stockv2.WatchListFilter{}, errors.New("invalid offset")
 	}
@@ -225,11 +224,11 @@ func stockV2WatchFilterFromRequest(r *http.Request) (stockv2.WatchListFilter, er
 
 func stockV2AlertFilterFromRequest(r *http.Request) (stockv2.AlertListFilter, error) {
 	query := r.URL.Query()
-	limit, err := stockV2WatchPositiveInt(query.Get("limit"), 50)
+	limit, err := stockV2PositiveInt(query.Get("limit"), 50)
 	if err != nil || limit > 200 {
 		return stockv2.AlertListFilter{}, errors.New("invalid limit")
 	}
-	offset, err := stockV2WatchNonNegativeInt(query.Get("offset"), 0)
+	offset, err := stockV2NonNegativeInt(query.Get("offset"), 0)
 	if err != nil {
 		return stockv2.AlertListFilter{}, errors.New("invalid offset")
 	}
@@ -280,36 +279,9 @@ func stockV2WatchHTTPStatus(err error) int {
 }
 
 func stockV2HTTPValidWatchStatus(status string) bool {
-	return status == stockv2.WatchStatusActive ||
-		status == stockv2.WatchStatusPaused ||
-		status == stockv2.WatchStatusArchived
+	return stockV2HTTPValueIn(status, stockv2.WatchStatusActive, stockv2.WatchStatusPaused, stockv2.WatchStatusArchived)
 }
 
 func stockV2HTTPValidAlertStatus(status string) bool {
-	return status == stockv2.AlertStatusOpen ||
-		status == stockv2.AlertStatusAcknowledged ||
-		status == stockv2.AlertStatusIgnored ||
-		status == stockv2.AlertStatusResolved
-}
-
-func stockV2WatchPositiveInt(raw string, fallback int) (int, error) {
-	if raw == "" {
-		return fallback, nil
-	}
-	value, err := strconv.Atoi(raw)
-	if err != nil || value <= 0 {
-		return 0, errors.New("invalid positive integer")
-	}
-	return value, nil
-}
-
-func stockV2WatchNonNegativeInt(raw string, fallback int) (int, error) {
-	if raw == "" {
-		return fallback, nil
-	}
-	value, err := strconv.Atoi(raw)
-	if err != nil || value < 0 {
-		return 0, errors.New("invalid non-negative integer")
-	}
-	return value, nil
+	return stockV2HTTPValueIn(status, stockv2.AlertStatusOpen, stockv2.AlertStatusAcknowledged, stockv2.AlertStatusIgnored, stockv2.AlertStatusResolved)
 }

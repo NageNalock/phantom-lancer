@@ -74,8 +74,8 @@ func (s *Service) LinkPendingNewsEventsBatch(ctx context.Context, limit int) (Li
 }
 
 func (s *Service) ListNewsLinkCandidates(ctx context.Context, filter NewsLinkCandidateListFilter) ([]NewsLinkCandidate, error) {
-	filter.Limit = normalizedNewsCandidateLimit(filter.Limit)
-	filter.Offset = normalizedStockProfileOffset(filter.Offset)
+	filter.Limit = normalizedPageLimit(filter.Limit, 500)
+	filter.Offset = normalizedPageOffset(filter.Offset)
 	return s.store.ListNewsLinkCandidates(ctx, filter)
 }
 
