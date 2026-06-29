@@ -1,7 +1,6 @@
-import { ArrowClockwise, Database, Wallet } from "@phosphor-icons/react";
 import type { AppData } from "../../app/types";
 import { Metric, Panel, Pill } from "../../components/ui";
-import { stockV2RiskLabel, stockV2TriggerTypeLabel, stockV2SettingsSummary, stockV2UpdateStatusLabel, stockV2UpdateStatusTone } from "../../domain/labels";
+import { stockV2RiskLabel, stockV2TriggerTypeLabel, stockV2UpdateStatusLabel, stockV2UpdateStatusTone } from "../../domain/labels";
 
 export function StockV2Overview({ data }: { data: AppData }) {
   const stockv2 = data.stockv2;

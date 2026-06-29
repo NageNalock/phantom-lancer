@@ -91,7 +91,6 @@ export function StockV2KLineChart({
     const surface = css.getPropertyValue("--surface").trim() || "#0f1115";
     const line = css.getPropertyValue("--line").trim() || "#2a2f36";
     const text = css.getPropertyValue("--text").trim() || "#e6e8eb";
-    const muted = css.getPropertyValue("--muted").trim() || "#8a8f98";
 
     const rect = host.getBoundingClientRect();
     const chart = createChart(host, {

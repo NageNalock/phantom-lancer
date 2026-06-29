@@ -1,4 +1,4 @@
-import type { ImageAsset, ImageGenerationJob, ImagePrompt, ImageProviderSettings, ImageStorageSettings } from "../app/types";
+import type { ImageAsset, ImageGenerationJob, ImagePrompt, ImageStorageSettings } from "../app/types";
 
 export type ImageMode = "text_to_image" | "image_to_image" | "multi_image_edit";
 export type VideoMode = "text_to_video" | "image_to_video" | "multi_image_video" | "keyframes";
@@ -9,30 +9,6 @@ export type ImagesTab = "generate" | "presets" | "library" | "history" | "settin
 export type ImageLibraryScope = "public" | "private";
 export type AssetKind = "legacy" | "media";
 export type AssetRef = { kind: AssetKind; id: string };
-
-export interface Preset {
-  id: string;
-  name: string;
-  prompt: string;
-  negativePrompt?: string;
-  mediaType: MediaType;
-  provider?: ProviderID;
-  model?: string;
-  mode?: string;
-  tags?: string[];
-  createdAt: string;
-}
-
-export interface LibraryMergedAsset {
-  kind: AssetKind;
-  data: ImageAsset | MediaAsset;
-}
-
-export interface ImagesGenerateForm {
-  multiEditImages?: AssetRef[];
-  keyframes?: AssetRef[];
-  referenceImageForVideo?: AssetRef;
-}
 
 export interface ModelParameterSchema {
   sizePresets?: string[];
@@ -83,22 +59,6 @@ export interface ProvidersStatus {
   providers: ProviderStatus[];
   models: ModelCapability[];
   defaultXAI: string;
-}
-
-export interface MediaProviderSettings {
-  provider: ProviderID;
-  enabled: boolean;
-  apiKey?: string;
-  hasApiKey: boolean;
-  maskedApiKey?: string;
-  defaultImageModel: string;
-  defaultVideoModel: string;
-  defaultImageParams: Record<string, unknown>;
-  defaultVideoParams: Record<string, unknown>;
-  lastTestedAt?: string;
-  lastError?: string;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface MediaGenerationSource {
@@ -221,11 +181,6 @@ export interface ImagePrivateStatus {
   expiresAt?: string;
 }
 
-export interface MediaAssetResponse {
-  asset?: MediaAsset;
-  duplicate?: boolean;
-}
-
 export interface ImageUploadResponse {
   asset?: ImageAsset;
   duplicate?: boolean;
@@ -241,11 +196,6 @@ export interface ImagePromptDraft {
   resolution: string;
   imageCount: number;
   tags: string[];
-}
-
-export interface ImageSettingsDraft extends Required<ImageProviderSettings> {
-  xaiApiKey: string;
-  clearApiKey: boolean;
 }
 
 export interface MediaProviderSettingsDraft {

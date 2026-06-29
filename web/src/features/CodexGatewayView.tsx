@@ -885,15 +885,8 @@ function normalizeGatewaySettings(draft: Required<CodexGatewaySettings>): CodexG
 
 function changedGatewaySettings(next: CodexGatewaySettings, current: Required<CodexGatewaySettings>): CodexGatewaySettings {
   const patch: CodexGatewaySettings = {};
-  const keys: Array<keyof CodexGatewaySettings> = [
-    "enabled",
-    "defaultInstructions",
-  ];
-  for (const key of keys) {
-    if (next[key] !== current[key]) {
-      (patch as Record<keyof CodexGatewaySettings, string | number | boolean | undefined>)[key] = next[key];
-    }
-  }
+  if (next.enabled !== current.enabled) patch.enabled = next.enabled;
+  if (next.defaultInstructions !== current.defaultInstructions) patch.defaultInstructions = next.defaultInstructions;
   return patch;
 }
 

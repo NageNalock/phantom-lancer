@@ -61,7 +61,7 @@ function statusTone(status: string | undefined): Tone {
   return status === "active" ? "good" : status === "disabled" || status === "revoked" ? "danger" : "neutral";
 }
 
-function registryTagPullBusyKey(tag: DockerRegistryTag): string {
+export function registryTagPullBusyKey(tag: DockerRegistryTag): string {
   return `registry-pull-${tag.repository}:${tag.tag}`;
 }
 

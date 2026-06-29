@@ -236,14 +236,6 @@ export interface SystemUpdateStatus {
   supervisorPID?: number;
 }
 
-interface SystemStatusPayload {
-  version?: BuildInfo;
-  supervisor?: SupervisorStatus;
-  dataDir?: string;
-  startedAt?: string;
-  uptimeMs?: number;
-}
-
 export interface CodexGatewaySettings {
   id?: string;
   enabled?: boolean;

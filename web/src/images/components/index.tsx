@@ -1,11 +1,11 @@
 import type { MediaGenerationOutput, ProviderStatus } from "../types";
-import type { FormEvent, ReactNode } from "react";
+import type { Dispatch, FormEvent, ReactNode, SetStateAction } from "react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ImageAsset, ImageGenerationJob, ImagePrompt, ImageProviderSettings, ImageStatus, ImageStorageSettings, ObjectStorageProfile, Tone } from "../../app/types";
 import { Button, CheckLabel, ContextList, EmptyState, Field, ImageDropInput, Notice, Panel, Pill, SubTabs } from "../../components/ui";
 import { formatBytes } from "../../utils/format";
-import { defaultImageSettings, defaultImageStorageSettings, formatDate, imageAssetTypeLabel, imageJobStatusLabel, imageModeLabel, imageStatusLabel, imageStorageBackendLabel } from "../../domain/labels";
-import type { AppliedImagePrompt, AssetKind, AssetRef, ImageLibraryScope, ImageMode, ImagePromptDraft, ImageSettingsDraft, ImagesTab, ImageStorageSettingsDraft, MediaAsset, MediaGenerationJob, MediaMode, MediaProviderSettingsDraft, MediaType, ModelCapability, ProviderID, VideoMode } from "../types";
+import { defaultImageSettings, defaultImageStorageSettings, formatDate, imageAssetTypeLabel, imageJobStatusLabel, imageStatusLabel, imageStorageBackendLabel } from "../../domain/labels";
+import type { AppliedImagePrompt, AssetKind, AssetRef, ImageLibraryScope, ImageMode, ImagePromptDraft, ImagesTab, ImageStorageSettingsDraft, MediaAsset, MediaGenerationJob, MediaMode, MediaProviderSettingsDraft, MediaType, ModelCapability, ProviderID, VideoMode } from "../types";
 import { ASPECT_OPTIONS, DURATION_PRESETS, GROK_MODEL_OPTIONS, IMAGE_MODES, MEDIA_TYPES, PROVIDERS, RESOLUTION_OPTIONS, VIDEO_MODES } from "../types";
 
 type PaginationState = {
@@ -58,9 +58,9 @@ function sameAssetRef(a: AssetRef, b: AssetRef): boolean {
 
 function imageFilesFromClipboard(data: DataTransfer | null): File[] {
   if (!data) return [];
-  const directFiles = Array.from(data.files || []).filter((file) => file.type.startsWith("image/"));
+  const directFiles = Array.from(data.files).filter((file) => file.type.startsWith("image/"));
   if (directFiles.length) return directFiles.map((file, index) => normalizeClipboardImageFile(file, index));
-  const itemFiles = Array.from(data.items || [])
+  const itemFiles = Array.from(data.items)
     .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
     .map((item) => item.getAsFile())
     .filter(Boolean) as File[];
@@ -129,10 +129,9 @@ export function GeneratePanel({
   onUseCurrentAsReference,
   providers,
   onSubmit,
-  prompts,
+  prompts = [],
   providerDefaults,
   settings,
-  storageSettings,
   videoReferenceRef,
 }: {
   appliedPrompt?: AppliedImagePrompt;
@@ -171,7 +170,6 @@ export function GeneratePanel({
   prompts?: ImagePrompt[];
   providerDefaults?: ProviderStatus;
   settings: ImageProviderSettings;
-  storageSettings: ImageStorageSettings;
   videoReferenceRef?: AssetRef;
 }) {
   const providerInfo = PROVIDERS.find((p) => p.id === currentProvider);
@@ -202,18 +200,11 @@ export function GeneratePanel({
   const [referenceUploadFiles, setReferenceUploadFiles] = useState<Record<number, File>>({});
   const [referencePasteMessage, setReferencePasteMessage] = useState("");
 
-  function resolveAssetRef(ref: AssetRef): ImageAsset | MediaAsset | undefined {
-    if (ref.kind === "legacy") return libraryAssets.find((a) => a.id === ref.id);
-    return libraryMediaAssets.find((a) => a.id === ref.id);
-  }
-  function assetURL(asset: ImageAsset | MediaAsset | undefined): string {
-    if (!asset) return "";
-    if ("mediaType" in asset) return mediaContentURL(asset as MediaAsset);
-    return (asset as ImageAsset).downloadUrl || (asset as ImageAsset).url || "";
-  }
-  function assetTitleFromRef(ref: AssetRef): string {
-    const a = resolveAssetRef(ref);
-    return a ? ("promptPreview" in a ? (a as MediaAsset).promptPreview || (a as MediaAsset).originalFilename || a.id : assetTitle(a as ImageAsset)) : ref.id;
+  function assetViewFromRef(ref: AssetRef): AnyAssetView | undefined {
+    const data = ref.kind === "legacy"
+      ? libraryAssets.find((a) => a.id === ref.id)
+      : libraryMediaAssets.find((a) => a.id === ref.id);
+    return data ? assetView({ kind: ref.kind, data } as AnyAsset) : undefined;
   }
 
   const slotRefs: AssetRef[] = useMemo(() => {
@@ -532,7 +523,7 @@ export function GeneratePanel({
             lastAppliedTitle={lastAppliedPromptTitle}
             onApply={onApplyPrompt}
             onOpenLibrary={onOpenPromptLibrary}
-            prompts={prompts || []}
+            prompts={prompts}
           />
 
           <Field label="提示词" help="最多 8000 字符；详细描述主体、风格、镜头和约束。">
@@ -655,9 +646,9 @@ export function GeneratePanel({
               {referenceFilledCount > 0 ? (
                 <div className="flex flex-wrap gap-2 rounded-md border border-[var(--line)] bg-[var(--surface)] p-2">
                   {effectiveSlotRefs.map((ref, index) => {
-                    const resolvedAsset = resolveAssetRef(ref);
-                    const thumb = assetURL(resolvedAsset);
-                    const title = assetTitleFromRef(ref);
+                    const resolvedAsset = assetViewFromRef(ref);
+                    const thumb = resolvedAsset?.url || "";
+                    const title = resolvedAsset?.title || ref.id;
                     return (
                       <div className="group flex min-w-0 items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--surface-soft)] p-1.5" key={`${ref.kind}-${ref.id}-${index}`}>
                         <input name={`source_asset_${index + 1}`} type="hidden" value={assetRefKey(ref)} />
@@ -979,37 +970,37 @@ function ReferenceLibraryDrawer({
     };
   }, [open, onClose]);
 
-  const imageItems = useMemo<AnyAsset[]>(() => {
-    const legacy: AnyAsset[] = (assets || [])
+  const imageItems = useMemo<AnyAssetView[]>(() => {
+    const legacy = assets
       .filter((asset) => !asset.deletedAt)
-      .map((asset) => ({ kind: "legacy", data: asset }));
-    const media: AnyAsset[] = (mediaAssets || [])
+      .map((asset) => assetView({ kind: "legacy", data: asset }));
+    const media = mediaAssets
       .filter((asset) => asset.mediaType === "image" && !asset.deletedAt && asset.status !== "failed")
-      .map((asset) => ({ kind: "media", data: asset }));
+      .map((asset) => assetView({ kind: "media", data: asset }));
     return [...legacy, ...media];
   }, [assets, mediaAssets]);
 
-  const filteredItems = useMemo(() => {
+  const filteredItems = useMemo<AnyAssetView[]>(() => {
     const needle = query.trim().toLowerCase();
     const list = imageItems.filter((item) => {
-      if (needle && !anyAssetSearchText(item).includes(needle)) return false;
-      if (providerFilter !== "all" && anyAssetProvider(item) !== providerFilter) return false;
+      if (needle && !item.searchText.includes(needle)) return false;
+      if (providerFilter !== "all" && item.provider !== providerFilter) return false;
       if (storageFilter !== "all") {
-        if (storageFilter === "local" && !anyAssetIsLocal(item)) return false;
-        if (storageFilter === "s3" && !anyAssetIsS3(item)) return false;
-        if (storageFilter === "remote" && !anyAssetIsRemote(item)) return false;
+        if (storageFilter === "local" && !item.local) return false;
+        if (storageFilter === "s3" && !item.s3) return false;
+        if (storageFilter === "remote" && !item.remote) return false;
       }
-      if (sourceFilter === "generated" && !anyAssetIsGenerated(item)) return false;
-      if (sourceFilter === "upload" && !anyAssetIsUpload(item)) return false;
-      if (sourceFilter === "source" && !anyAssetIsSource(item)) return false;
-      if (privacyFilter === "private" && !anyAssetIsPrivate(item)) return false;
-      if (privacyFilter === "public" && anyAssetIsPrivate(item)) return false;
+      if (sourceFilter === "generated" && !item.generated) return false;
+      if (sourceFilter === "upload" && !item.upload) return false;
+      if (sourceFilter === "source" && !item.source) return false;
+      if (privacyFilter === "private" && !item.private) return false;
+      if (privacyFilter === "public" && item.private) return false;
       return true;
     });
     return [...list].sort((a, b) => {
-      if (sortOrder === "oldest") return anyAssetCreatedAt(a).localeCompare(anyAssetCreatedAt(b));
-      if (sortOrder === "size") return anyAssetSizeBytes(b) - anyAssetSizeBytes(a);
-      return anyAssetCreatedAt(b).localeCompare(anyAssetCreatedAt(a));
+      if (sortOrder === "oldest") return a.createdAt.localeCompare(b.createdAt);
+      if (sortOrder === "size") return b.sizeBytes - a.sizeBytes;
+      return b.createdAt.localeCompare(a.createdAt);
     });
   }, [imageItems, query, providerFilter, storageFilter, sourceFilter, privacyFilter, sortOrder]);
 
@@ -1122,17 +1113,15 @@ function ReferenceLibraryDrawer({
             {filteredItems.length ? (
               <div className="grid gap-2">
                 {filteredItems.map((item) => {
-                  const ref: AssetRef = { kind: item.kind, id: anyAssetId(item) };
+                  const ref: AssetRef = { kind: item.kind, id: item.id };
                   const key = assetRefKey(ref);
                   const checked = selectedKeys.has(key);
                   const disabled = !checked && draftRefs.length >= maxCount;
-                  const title = referenceAnyAssetTitle(item);
-                  const thumb = referenceAnyAssetURL(item);
                   const meta = [
-                    anyAssetProvider(item) || "unknown",
-                    imageStorageBackendLabel(anyAssetStorage(item)),
-                    anyAssetSizeBytes(item) ? formatBytes(anyAssetSizeBytes(item)) : "",
-                    anyAssetCreatedAt(item) ? formatDate(anyAssetCreatedAt(item)) : "",
+                    item.provider || "unknown",
+                    imageStorageBackendLabel(item.storage),
+                    item.sizeBytes ? formatBytes(item.sizeBytes) : "",
+                    item.createdAt ? formatDate(item.createdAt) : "",
                   ].filter(Boolean).join(" · ");
                   return (
                     <label
@@ -1146,19 +1135,19 @@ function ReferenceLibraryDrawer({
                         onChange={() => toggleRef(ref)}
                         type="checkbox"
                       />
-                      {thumb ? (
-                        <img alt={title || ""} className="aspect-square h-[72px] w-[72px] rounded-md border border-[var(--line)] object-cover" decoding="async" loading="lazy" src={thumb} />
+                      {item.url ? (
+                        <img alt={item.title || ""} className="aspect-square h-[72px] w-[72px] rounded-md border border-[var(--line)] object-cover" decoding="async" loading="lazy" src={item.url} />
                       ) : (
                         <div className="grid aspect-square h-[72px] w-[72px] place-items-center rounded-md border border-[var(--line)] text-xs text-[var(--muted)]">image</div>
                       )}
                       <div className="grid min-w-0 gap-1">
                         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                          <span className="truncate text-sm font-medium">{title || anyAssetId(item)}</span>
-                          {anyAssetIsPrivate(item) ? <Pill tone="warn">私密</Pill> : null}
-                          <Pill>{referenceAnyAssetSourceLabel(item)}</Pill>
+                          <span className="truncate text-sm font-medium">{item.title || item.id}</span>
+                          {item.private ? <Pill tone="warn">私密</Pill> : null}
+                          <Pill>{item.sourceLabel}</Pill>
                         </div>
-                        <p className="muted m-0 truncate text-xs">{meta || anyAssetId(item)}</p>
-                        <p className="mono muted m-0 truncate text-[11px]">{item.kind}:{anyAssetId(item)}</p>
+                        <p className="muted m-0 truncate text-xs">{meta || item.id}</p>
+                        <p className="mono muted m-0 truncate text-[11px]">{item.kind}:{item.id}</p>
                       </div>
                     </label>
                   );
@@ -1344,7 +1333,7 @@ function PaginationFooter({ pagination, visibleCount }: { pagination?: Paginatio
 export function HistoryPanel({
   jobs,
   libraryMediaAssets,
-  mediaJobs,
+  mediaJobs = [],
   mediaType,
   onMediaTypeChange,
   onCopyJobParams,
@@ -1387,36 +1376,25 @@ export function HistoryPanel({
   const scrolledRef = useRef(false);
   const [showAllTypes, setShowAllTypes] = useState(true);
   const [providerFilter, setProviderFilter] = useState<ProviderID | "all">("all");
-  const [modeFilter, setModeFilter] = useState<string>("all");
-  const [statusFilter, setStatusFilter] = useState<string>("all");
   const allJobs = useMemo(() => {
-    const legacy = (jobs || []).map((j) => ({ kind: "legacy" as const, id: j.id, createdAt: j.createdAt, job: j as ImageGenerationJob | MediaGenerationJob }));
-    const media = (mediaJobs || []).map((j) => ({ kind: "media" as const, id: j.id, createdAt: j.createdAt, job: j as ImageGenerationJob | MediaGenerationJob }));
+    const legacy = jobs.map((j) => ({ kind: "legacy" as const, id: j.id, createdAt: j.createdAt, job: j as ImageGenerationJob | MediaGenerationJob }));
+    const media = mediaJobs.map((j) => ({ kind: "media" as const, id: j.id, createdAt: j.createdAt, job: j as ImageGenerationJob | MediaGenerationJob }));
     return [...legacy, ...media].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
   }, [jobs, mediaJobs]);
 
   const filteredJobs = useMemo(() => {
     return allJobs.filter((row) => {
-      let status: string;
-      let mode: string;
       if (row.kind === "legacy") {
-        const lj = row.job as ImageGenerationJob;
         if (!showAllTypes && mediaType && mediaType !== "image") return false;
         if (providerFilter !== "all" && providerFilter !== "xai") return false;
-        status = lj.status || "";
-        mode = String(lj.mode || "text_to_image");
       } else {
         const mj = row.job as MediaGenerationJob;
         if (!showAllTypes && mediaType && mj.mediaType !== mediaType) return false;
         if (providerFilter !== "all" && mj.provider !== providerFilter) return false;
-        status = mj.status || "";
-        mode = mj.mode || (mj.mediaType === "video" ? "text_to_video" : "text_to_image");
       }
-      if (modeFilter !== "all" && mode !== modeFilter) return false;
-      if (statusFilter !== "all" && status !== statusFilter) return false;
       return true;
     });
-  }, [allJobs, mediaType, providerFilter, modeFilter, statusFilter, showAllTypes]);
+  }, [allJobs, mediaType, providerFilter, showAllTypes]);
 
   useEffect(() => {
     if (!targetJobId || !targetJobKind || scrolledRef.current) return;
@@ -1959,6 +1937,12 @@ function promptModelOptions(current: string, settings: ImageProviderSettings, me
 }
 
 type AnyAsset = { kind: "legacy"; data: ImageAsset } | { kind: "media"; data: MediaAsset };
+type AnyAssetViewBase = {
+  id: string; createdAt: string; mode: string; provider: string; private: boolean; searchText: string; sizeBytes: number;
+  sourceLabel: string; storage: string; title: string; url: string; generated: boolean; local: boolean; remote: boolean;
+  s3: boolean; source: boolean; upload: boolean; video: boolean;
+};
+type AnyAssetView = AnyAssetViewBase & ({ kind: "legacy"; data: ImageAsset } | { kind: "media"; data: MediaAsset });
 
 function uniqueAssetRefs(refs: AssetRef[]): AssetRef[] {
   const seen = new Set<string>();
@@ -1972,107 +1956,75 @@ function uniqueAssetRefs(refs: AssetRef[]): AssetRef[] {
   return result;
 }
 
-function anyAssetId(a: AnyAsset): string {
-  return a.kind === "legacy" ? (a.data.id ?? "") : (a.data.id ?? "");
-}
-function anyAssetCreatedAt(a: AnyAsset): string {
-  return (a.kind === "legacy" ? a.data.createdAt : a.data.createdAt) || "";
-}
-function anyAssetSizeBytes(a: AnyAsset): number {
-  return (a.kind === "legacy" ? a.data.sizeBytes : a.data.sizeBytes) || 0;
-}
-function anyAssetMediaType(a: AnyAsset): "image" | "video" {
-  return a.kind === "legacy" ? "image" : (a.data.mediaType || "image") as "image" | "video";
-}
-function anyAssetStorage(a: AnyAsset): string {
-  return (a.kind === "legacy" ? a.data.storageBackend : a.data.storageBackend) || "";
-}
-function anyAssetSearchText(a: AnyAsset): string {
+function assetView(a: AnyAsset, mediaJobs?: MediaGenerationJob[], legacyJobs?: ImageGenerationJob[]): AnyAssetView {
+  const d = a.data;
+  const assetType = d.assetType || "";
+  const generated = assetType === "generated";
+  const upload = assetType.includes("upload");
+  const storage = d.storageBackend || "";
+  const local = storage === "local";
+  const s3 = storage === "s3" || storage === "object_storage";
+  const base = {
+    id: d.id || "",
+    createdAt: d.createdAt || "",
+    private: Boolean(d.private),
+    searchText: [d.promptPreview, d.revisedPromptPreview, d.model, d.jobId, d.id, d.originalFilename].filter(Boolean).join(" ").toLowerCase(),
+    sizeBytes: d.sizeBytes || 0,
+    storage,
+    generated,
+    local,
+    s3,
+    upload,
+  };
   if (a.kind === "legacy") {
-    const d = a.data;
-    return [d.promptPreview || "", d.revisedPromptPreview || "", d.model || "", d.jobId || "", d.id, d.originalFilename || ""].join(" ").toLowerCase();
+    const legacy = a.data;
+    const source = assetType === "source_upload";
+    const job = legacy.jobId && legacyJobs ? legacyJobs.find((x) => x.id === legacy.jobId) : undefined;
+    return {
+      ...base,
+      kind: "legacy",
+      data: legacy,
+      mode: job?.mode || (legacy.jobId ? "text_to_image" : ""),
+      provider: "xai",
+      sourceLabel: assetSourceLabel(assetType, generated, upload, source),
+      title: assetTitle(legacy),
+      url: legacy.downloadUrl || legacy.url || "",
+      remote: storage === "remote",
+      source,
+      video: false,
+    };
   }
-  const d = a.data;
-  return [d.promptPreview || "", d.revisedPromptPreview || "", d.model || "", d.jobId || "", d.id, d.originalFilename || ""].join(" ").toLowerCase();
-}
-function anyAssetIsGenerated(a: AnyAsset): boolean {
-  const t = (a.kind === "legacy" ? a.data.assetType : a.data.assetType) || "";
-  return t === "generated";
-}
-function anyAssetIsUpload(a: AnyAsset): boolean {
-  const t = (a.kind === "legacy" ? a.data.assetType : a.data.assetType) || "";
-  return t.includes("upload");
-}
-function anyAssetIsSource(a: AnyAsset): boolean {
-  if (a.kind === "legacy") return a.data.assetType === "source_upload";
-  return Boolean(a.data.sourceRole !== undefined && a.data.sourceRole !== null && a.data.sourceRole !== "");
-}
-function anyAssetIsVideo(a: AnyAsset): boolean {
-  return anyAssetMediaType(a) === "video";
-}
-function anyAssetIsLocal(a: AnyAsset): boolean {
-  return anyAssetStorage(a) === "local";
-}
-function anyAssetIsS3(a: AnyAsset): boolean {
-  const s = anyAssetStorage(a);
-  return s === "s3" || s === "object_storage";
-}
-function anyAssetIsRemote(a: AnyAsset): boolean {
-  if (a.kind === "legacy") return a.data.storageBackend === "remote";
-  const d = a.data;
-  const hasUrl = Boolean(d.url || d.downloadUrl);
-  const isLocalOrS3 = anyAssetIsLocal(a) || anyAssetIsS3(a);
-  return hasUrl && !isLocalOrS3;
-}
-function anyAssetProvider(a: AnyAsset): string {
-  if (a.kind === "legacy") return "xai";
-  return (a.data.provider || "") as string;
-}
-function anyAssetIsPrivate(a: AnyAsset): boolean {
-  return Boolean(a.kind === "legacy" ? a.data.private : a.data.private);
-}
-function anyAssetMode(a: AnyAsset, mediaJobs?: MediaGenerationJob[], legacyJobs?: ImageGenerationJob[]): string {
-  const jobId = a.kind === "legacy" ? a.data.jobId : a.data.jobId;
-  if (!jobId) return "";
-  if (a.kind === "legacy" && legacyJobs) {
-    const j = legacyJobs.find((x) => x.id === jobId);
-    if (j) return j.mode || "text_to_image";
-  }
-  if (a.kind === "media" && mediaJobs) {
-    const j = mediaJobs.find((x) => x.id === jobId);
-    if (j) return j.mode || (a.data.mediaType === "video" ? "text_to_video" : "text_to_image");
-  }
-  return "";
+  const media = a.data;
+  const source = Boolean(media.sourceRole);
+  const mediaType = (media.mediaType || "image") as "image" | "video";
+  const job = media.jobId && mediaJobs ? mediaJobs.find((x) => x.id === media.jobId) : undefined;
+  return {
+    ...base,
+    kind: "media",
+    data: media,
+    mode: job?.mode || (media.jobId ? (mediaType === "video" ? "text_to_video" : "text_to_image") : ""),
+    provider: media.provider || "",
+    sourceLabel: assetSourceLabel(assetType, generated, upload, source),
+    title: media.originalFilename || media.promptPreview || media.revisedPromptPreview || media.id,
+    url: mediaContentURL(media),
+    remote: Boolean(media.url || media.downloadUrl) && !local && !s3,
+    source,
+    video: mediaType === "video",
+  };
 }
 
-function referenceAnyAssetTitle(a: AnyAsset): string {
-  if (a.kind === "legacy") return assetTitle(a.data);
-  return a.data.originalFilename || a.data.promptPreview || a.data.revisedPromptPreview || a.data.id;
-}
-
-function referenceAnyAssetURL(a: AnyAsset): string {
-  if (a.kind === "legacy") return a.data.downloadUrl || a.data.url || "";
-  return mediaContentURL(a.data);
-}
-
-function referenceAnyAssetSourceLabel(a: AnyAsset): string {
-  if (anyAssetIsGenerated(a)) return "生成";
-  if (anyAssetIsUpload(a)) return "上传";
-  if (anyAssetIsSource(a)) return "参考源";
-  const type = a.kind === "legacy" ? a.data.assetType : a.data.assetType;
-  return type || "图片";
+function assetSourceLabel(type: string, generated: boolean, upload: boolean, source: boolean): string {
+  return generated ? "生成" : upload ? "上传" : source ? "参考源" : type || "图片";
 }
 
 export function LibraryPanel({
   assets,
   busy,
   libraryScope,
-  mediaAssets,
+  mediaAssets = [],
   mediaJobs,
   legacyJobs,
-  mediaType,
   onArchive,
-  onArchiveMedia,
   onBulkDeleteResources,
   onBulkDownloadComplete,
   onDelete,
@@ -2080,9 +2032,6 @@ export function LibraryPanel({
   onGoToGenerate,
   onGoToSettings,
   onLockPrivate,
-  onMarkPrivate,
-  onMarkPrivateMedia,
-  onMediaTypeChange,
   onOpenJob,
   pagination,
   onRefresh,
@@ -2109,9 +2058,7 @@ export function LibraryPanel({
    mediaAssets?: MediaAsset[];
    mediaJobs?: MediaGenerationJob[];
    legacyJobs?: ImageGenerationJob[];
-   mediaType?: MediaType;
    onArchive: (asset: ImageAsset) => void;
-   onArchiveMedia?: (asset: MediaAsset) => void;
    onBulkDeleteResources?: (resources: AssetRef[]) => Promise<boolean>;
    onBulkDownloadComplete?: (count: number) => void;
    onDelete: (asset: ImageAsset) => void;
@@ -2119,9 +2066,6 @@ export function LibraryPanel({
    onGoToGenerate?: () => void;
    onGoToSettings?: () => void;
    onLockPrivate: () => void;
-   onMarkPrivate: (asset: ImageAsset, nextPrivate: boolean) => void;
-   onMarkPrivateMedia?: (asset: MediaAsset, nextPrivate: boolean) => void;
-   onMediaTypeChange?: (t: MediaType) => void;
    onOpenJob?: (jobId: string, kind: AssetKind) => void;
    pagination?: PaginationState;
    onRefresh: () => void | Promise<void>;
@@ -2161,73 +2105,50 @@ export function LibraryPanel({
   const [uploadOpen, setUploadOpen] = useState(false);
   const [bulkError, setBulkError] = useState<{ failedCount: number; summary: string } | null>(null);
 
-  const filteredMediaAssets = useMemo(() => {
-    return mediaAssets || [];
-  }, [mediaAssets]);
+  const allAssetViews = useMemo(() => [
+    ...assets.map((asset) => assetView({ kind: "legacy", data: asset }, mediaJobs, legacyJobs)),
+    ...mediaAssets.map((asset) => assetView({ kind: "media", data: asset }, mediaJobs, legacyJobs)),
+  ], [assets, mediaAssets, mediaJobs, legacyJobs]);
 
-  const allAssets = useMemo<AnyAsset[]>(() => {
-    const legacy: AnyAsset[] = (assets || []).map((a) => ({ kind: "legacy", data: a }));
-    const media: AnyAsset[] = (filteredMediaAssets || []).map((a) => ({ kind: "media", data: a }));
-    return [...legacy, ...media];
-  }, [assets, filteredMediaAssets]);
-
-  const filteredSorted = useMemo<AnyAsset[]>(() => {
+  const filteredSorted = useMemo<AnyAssetView[]>(() => {
     const needle = searchQuery.trim().toLowerCase();
-    let list = allAssets.filter((a) => {
-      if (needle && !anyAssetSearchText(a).includes(needle)) return false;
+    let list = allAssetViews.filter((a) => {
+      if (needle && !a.searchText.includes(needle)) return false;
       switch (filterMediaType) {
-        case "image": if (anyAssetIsVideo(a)) return false; break;
-        case "video": if (!anyAssetIsVideo(a)) return false; break;
+        case "image": if (a.video) return false; break;
+        case "video": if (!a.video) return false; break;
       }
       if (filterProvider !== "all") {
-        const prov = anyAssetProvider(a).toLowerCase();
-        if (prov !== filterProvider) return false;
+        if (a.provider.toLowerCase() !== filterProvider) return false;
       }
       if (filterStorage !== "all") {
         switch (filterStorage) {
-          case "local": if (!anyAssetIsLocal(a)) return false; break;
-          case "s3": if (!anyAssetIsS3(a)) return false; break;
-          case "remote": if (!anyAssetIsRemote(a)) return false; break;
+          case "local": if (!a.local) return false; break;
+          case "s3": if (!a.s3) return false; break;
+          case "remote": if (!a.remote) return false; break;
         }
       }
-      if (filterPrivate === "private" && !anyAssetIsPrivate(a)) return false;
-      if (filterPrivate === "public" && anyAssetIsPrivate(a)) return false;
-      if (filterMode !== "all" && anyAssetMode(a, mediaJobs, legacyJobs) !== filterMode) return false;
+      if (filterPrivate === "private" && !a.private) return false;
+      if (filterPrivate === "public" && a.private) return false;
+      if (filterMode !== "all" && a.mode !== filterMode) return false;
       return true;
     });
     list = [...list];
     switch (sortOrder) {
       case "newest":
-        list.sort((a, b) => anyAssetCreatedAt(b).localeCompare(anyAssetCreatedAt(a))); break;
+        list.sort((a, b) => b.createdAt.localeCompare(a.createdAt)); break;
       case "oldest":
-        list.sort((a, b) => anyAssetCreatedAt(a).localeCompare(anyAssetCreatedAt(b))); break;
+        list.sort((a, b) => a.createdAt.localeCompare(b.createdAt)); break;
       case "size":
-        list.sort((a, b) => anyAssetSizeBytes(b) - anyAssetSizeBytes(a)); break;
+        list.sort((a, b) => b.sizeBytes - a.sizeBytes); break;
     }
     return list;
-  }, [allAssets, searchQuery, filterMediaType, filterProvider, filterStorage, filterPrivate, filterMode, mediaJobs, legacyJobs, sortOrder]);
+  }, [allAssetViews, searchQuery, filterMediaType, filterProvider, filterStorage, filterPrivate, filterMode, sortOrder]);
 
-  const filteredLegacyIds = useMemo(() => new Set(filteredSorted.filter((a) => a.kind === "legacy").map((a) => a.data.id)), [filteredSorted]);
-  const filteredMediaIds = useMemo(() => new Set(filteredSorted.filter((a) => a.kind === "media").map((a) => a.data.id)), [filteredSorted]);
-  const displayLegacyAssets = useMemo(() => assets.filter((a) => filteredLegacyIds.has(a.id)), [assets, filteredLegacyIds]);
-  const displayMediaAssets = useMemo(() => filteredMediaAssets.filter((a) => filteredMediaIds.has(a.id)), [filteredMediaAssets, filteredMediaIds]);
-  const visibleLegacyAssets = useMemo(() => {
-    const order = new Map<string, number>();
-    let i = 0;
-    for (const a of filteredSorted) { if (a.kind === "legacy") order.set(a.data.id, i++); }
-    return [...displayLegacyAssets].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
-  }, [filteredSorted, displayLegacyAssets]);
-  const visibleMediaAssets = useMemo(() => {
-    const order = new Map<string, number>();
-    let i = 0;
-    for (const a of filteredSorted) { if (a.kind === "media") order.set(a.data.id, i++); }
-    return [...displayMediaAssets].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
-  }, [filteredSorted, displayMediaAssets]);
+  const filteredLegacyList = useMemo(() => filteredSorted.flatMap((a) => a.kind === "legacy" ? [a.data] : []), [filteredSorted]);
+  const filteredMediaList = useMemo(() => filteredSorted.flatMap((a) => a.kind === "media" ? [a.data] : []), [filteredSorted]);
 
-  const filteredLegacyList = visibleLegacyAssets;
-  const filteredMediaList = visibleMediaAssets;
-
-  const visibleIds = useMemo(() => new Set(filteredSorted.map(anyAssetId)), [filteredSorted]);
+  const visibleIds = useMemo(() => new Set(filteredSorted.map((a) => a.id)), [filteredSorted]);
   const viewerLegacyIndex = viewer ? filteredLegacyList.findIndex((a) => a.id === viewer.id) : -1;
   const viewerMediaIndex = mediaViewer ? filteredMediaList.findIndex((a) => a.id === mediaViewer.id) : -1;
 
@@ -2240,7 +2161,7 @@ export function LibraryPanel({
   }
 
   function handleSelectAll() {
-    const allInView = filteredSorted.map(anyAssetId);
+    const allInView = filteredSorted.map((a) => a.id);
     const allSelected = allInView.length > 0 && allInView.every((id) => selectedIds.has(id));
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -2258,7 +2179,7 @@ export function LibraryPanel({
         urls.push(assetDownloadURL(legacy));
         continue;
       }
-      const media = filteredMediaAssets.find((a) => a.id === id);
+      const media = mediaAssets.find((a) => a.id === id);
       if (media) {
         urls.push(mediaDownloadURL(media));
       }
@@ -2286,8 +2207,8 @@ export function LibraryPanel({
   function handleBulkArchive() {
     const localLegacy: ImageAsset[] = [];
     for (const a of filteredSorted) {
-      if (!selectedIds.has(anyAssetId(a))) continue;
-      if (a.kind === "legacy" && (a.data.storageBackend === "local" || a.data.storageBackend === "remote")) {
+      if (!selectedIds.has(a.id)) continue;
+      if (a.kind === "legacy" && (a.storage === "local" || a.storage === "remote")) {
         localLegacy.push(a.data);
       }
     }
@@ -2298,7 +2219,7 @@ export function LibraryPanel({
     const resources: Array<{ kind: "legacy" | "media"; id: string }> = [];
     for (const id of selectedIds) {
       if (assets.some((a) => a.id === id)) resources.push({ kind: "legacy", id });
-      else if (filteredMediaAssets.some((a) => a.id === id)) resources.push({ kind: "media", id });
+      else if (mediaAssets.some((a) => a.id === id)) resources.push({ kind: "media", id });
     }
     if (!resources.length) return;
     const totalCount = resources.length;
@@ -2318,23 +2239,14 @@ export function LibraryPanel({
     }
   }
 
-  function handleUseSelectedForI2I() {
-    const selectedList = filteredSorted.filter((a) => selectedIds.has(anyAssetId(a)));
-    if (selectedList.length !== 1) return;
-    const target = selectedList[0];
-    if (anyAssetIsVideo(target)) return;
-    if (target.kind === "legacy") onUseForImage(target.data);
-    else onUseMediaForImage?.(target.data);
-  }
-
-  function getSelectedImageAssets(): AnyAsset[] {
-    return filteredSorted.filter((a) => selectedIds.has(anyAssetId(a)) && !anyAssetIsVideo(a));
+  function getSelectedImageAssets(): AnyAssetView[] {
+    return filteredSorted.filter((a) => selectedIds.has(a.id) && !a.video);
   }
 
   const numSelectedImages = useMemo(() => getSelectedImageAssets().length, [selectedIds, filteredSorted]);
 
-  function assetRefFromAny(a: AnyAsset): AssetRef {
-    return { kind: a.kind as AssetKind, id: anyAssetId(a) };
+  function assetRefFromAny(a: AnyAssetView): AssetRef {
+    return { kind: a.kind as AssetKind, id: a.id };
   }
 
   function handleUseForI2IReference() {
@@ -2366,34 +2278,15 @@ export function LibraryPanel({
     onSetVideoReference?.(ref);
   }
 
-  const hasLocalSelected = useMemo(() => filteredSorted.some((a) => selectedIds.has(anyAssetId(a)) && a.kind === "legacy" && (a.data.storageBackend === "local" || a.data.storageBackend === "remote")), [filteredSorted, selectedIds]);
-  const exactlyOneImageSelected = useMemo(() => {
-    const sel = filteredSorted.filter((a) => selectedIds.has(anyAssetId(a)));
-    return sel.length === 1 && !anyAssetIsVideo(sel[0]);
-  }, [filteredSorted, selectedIds]);
+  const hasLocalSelected = useMemo(() => filteredSorted.some((a) => selectedIds.has(a.id) && a.kind === "legacy" && (a.storage === "local" || a.storage === "remote")), [filteredSorted, selectedIds]);
   const hasSelected = selectedIds.size > 0;
   const allVisibleSelected = visibleIds.size > 0 && [...visibleIds].every((id) => selectedIds.has(id));
-  const selectedLegacyCount = useMemo(() => filteredSorted.filter((a) => a.kind === "legacy" && selectedIds.has(a.data.id)).length, [filteredSorted, selectedIds]);
+  const selectedLegacyCount = useMemo(() => filteredSorted.filter((a) => a.kind === "legacy" && selectedIds.has(a.id)).length, [filteredSorted, selectedIds]);
   const selectedMediaCount = selectedIds.size - selectedLegacyCount;
-
-  function triggerDownload(asset: ImageAsset) {
-    window.open(assetDownloadURL(asset), "_blank");
-  }
-  function triggerMediaDownload(asset: MediaAsset) {
-    const a = document.createElement('a');
-    a.href = asset.downloadUrl || asset.url || '';
-    a.download = '';
-    a.target = '_blank';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  }
-
-  const totalAssetCount = assets.length + (filteredMediaAssets.length || 0);
-  const totalImageCount = assets.length + (mediaAssets || []).filter((a) => a.mediaType === "image").length;
-  const totalVideoCount = (mediaAssets || []).filter((a) => a.mediaType === "video").length;
-  const totalObjectStorage = assets.filter((asset) => asset.storageBackend === "s3").length +
-    (mediaAssets || []).filter((a) => a.storageBackend === "s3" || a.storageBackend === "object_storage").length;
+  const canUseSingleImage = numSelectedImages === 1;
+  const canUseMultiEdit = numSelectedImages >= 2 && numSelectedImages <= 3;
+  const canUseKeyframes = numSelectedImages >= 2 && numSelectedImages <= 6;
+  const referenceItemClass = (enabled: boolean) => `block w-full rounded px-2 py-1.5 text-left text-sm ${enabled ? "hover:bg-[var(--surface-soft)]" : "text-[var(--muted)] cursor-not-allowed"}`;
 
   async function submitUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2405,22 +2298,16 @@ export function LibraryPanel({
   }
 
   useEffect(() => {
-    if (!viewer) return;
+    if (!viewer && !mediaViewer) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setViewer(null);
+      if (event.key === "Escape") {
+        setViewer(null);
+        setMediaViewer(null);
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [viewer]);
-
-  useEffect(() => {
-    if (!mediaViewer) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMediaViewer(null);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [mediaViewer]);
+  }, [viewer, mediaViewer]);
 
   return (
     <>
@@ -2589,62 +2476,33 @@ export function LibraryPanel({
                     <Button className="min-h-7 px-2 text-xs" disabled={!hasSelected || !onBulkDeleteResources} onClick={handleBulkDeleteClick} tone="danger" type="button">
                       批量删除
                     </Button>
-                    {exactlyOneImageSelected ? (
-                      <div className="relative">
-                        <Button
-                          className="min-h-7 px-2 text-xs"
-                          onClick={() => setI2iMenuOpen((o) => !o)}
-                          onBlur={() => window.setTimeout(() => setI2iMenuOpen(false), 150)}
-                          type="button"
-                        >
-                           作为参考使用 ▾
-                         </Button>
-                         {i2iMenuOpen ? (
-                           <div className="absolute right-0 z-20 mt-1 w-56 rounded-md border border-[var(--line)] bg-[var(--surface)] p-1 shadow-lg">
-                              <button className="block w-full rounded px-2 py-1.5 text-left text-sm hover:bg-[var(--surface-soft)]" onClick={handleUseForI2IReference} type="button">
-                                图生图参考
-                              </button>
-                              <button className="block w-full rounded px-2 py-1.5 text-left text-sm text-[var(--muted)] cursor-not-allowed" disabled onClick={handleUseForMultiEdit} type="button">
-                                多图编辑素材（2-3 张）
-                              </button>
-                              <button className="block w-full rounded px-2 py-1.5 text-left text-sm text-[var(--muted)] cursor-not-allowed" disabled onClick={handleUseForKeyframes} type="button">
-                                关键帧视频素材（2-6 张）
-                              </button>
-                              <button className="block w-full rounded px-2 py-1.5 text-left text-sm hover:bg-[var(--surface-soft)]" onClick={handleUseForVideoReference} type="button">
-                                图生视频参考
-                              </button>
-                           </div>
-                         ) : null}
-                       </div>
-                     ) : (
-                       <div className="relative">
-                         <Button
-                           className="min-h-7 px-2 text-xs"
-                           disabled={numSelectedImages < 1}
-                           onClick={() => setI2iMenuOpen((o) => !o)}
-                           onBlur={() => window.setTimeout(() => setI2iMenuOpen(false), 150)}
-                           type="button"
-                         >
-                           作为参考使用 ▾
-                         </Button>
-                         {i2iMenuOpen ? (
-                           <div className="absolute right-0 z-20 mt-1 w-56 rounded-md border border-[var(--line)] bg-[var(--surface)] p-1 shadow-lg">
-                              <button className={`block w-full rounded px-2 py-1.5 text-left text-sm ${numSelectedImages === 1 ? "hover:bg-[var(--surface-soft)]" : "text-[var(--muted)] cursor-not-allowed"}`} disabled={numSelectedImages !== 1} onClick={handleUseForI2IReference} type="button">
-                                 图生图参考（1 张）
-                               </button>
-                               <button className={`block w-full rounded px-2 py-1.5 text-left text-sm ${numSelectedImages >= 2 && numSelectedImages <= 3 ? "hover:bg-[var(--surface-soft)]" : "text-[var(--muted)] cursor-not-allowed"}`} disabled={numSelectedImages < 2 || numSelectedImages > 3} onClick={handleUseForMultiEdit} type="button">
-                                 多图编辑素材（2-3 张）
-                               </button>
-                               <button className={`block w-full rounded px-2 py-1.5 text-left text-sm ${numSelectedImages >= 2 && numSelectedImages <= 6 ? "hover:bg-[var(--surface-soft)]" : "text-[var(--muted)] cursor-not-allowed"}`} disabled={numSelectedImages < 2 || numSelectedImages > 6} onClick={handleUseForKeyframes} type="button">
-                                 关键帧视频素材（2-6 张）
-                               </button>
-                               <button className={`block w-full rounded px-2 py-1.5 text-left text-sm ${numSelectedImages === 1 ? "hover:bg-[var(--surface-soft)]" : "text-[var(--muted)] cursor-not-allowed"}`} disabled={numSelectedImages !== 1} onClick={handleUseForVideoReference} type="button">
-                                 图生视频参考（1 张）
-                               </button>
-                          </div>
-                        ) : null}
-                      </div>
-                     )}
+                    <div className="relative">
+                      <Button
+                        className="min-h-7 px-2 text-xs"
+                        disabled={numSelectedImages < 1}
+                        onClick={() => setI2iMenuOpen((o) => !o)}
+                        onBlur={() => window.setTimeout(() => setI2iMenuOpen(false), 150)}
+                        type="button"
+                      >
+                        作为参考使用 ▾
+                      </Button>
+                      {i2iMenuOpen ? (
+                        <div className="absolute right-0 z-20 mt-1 w-56 rounded-md border border-[var(--line)] bg-[var(--surface)] p-1 shadow-lg">
+                          <button className={referenceItemClass(canUseSingleImage)} disabled={!canUseSingleImage} onClick={handleUseForI2IReference} type="button">
+                            图生图参考（1 张）
+                          </button>
+                          <button className={referenceItemClass(canUseMultiEdit)} disabled={!canUseMultiEdit} onClick={handleUseForMultiEdit} type="button">
+                            多图编辑素材（2-3 张）
+                          </button>
+                          <button className={referenceItemClass(canUseKeyframes)} disabled={!canUseKeyframes} onClick={handleUseForKeyframes} type="button">
+                            关键帧视频素材（2-6 张）
+                          </button>
+                          <button className={referenceItemClass(canUseSingleImage)} disabled={!canUseSingleImage} onClick={handleUseForVideoReference} type="button">
+                            图生视频参考（1 张）
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
                    </div>
                  </div>
                  {bulkError ? (
@@ -2726,7 +2584,6 @@ export function LibraryPanel({
                     } else {
                       const asset = item.data as MediaAsset;
                       const isVideo = asset.mediaType === "video";
-                      const providerLabel = PROVIDERS.find((p) => p.id === asset.provider)?.label || asset.provider;
                       const isSelected = selectedMediaId === asset.id;
                       const bulkSelected = selectedIds.has(asset.id);
                        const isArchived = asset.status === "archived" || Boolean(asset.archivedAt);
@@ -2815,10 +2672,7 @@ export function LibraryPanel({
            asset={viewer}
            assets={filteredLegacyList}
            index={viewerLegacyIndex}
-           onArchive={onArchive}
            onClose={() => setViewer(null)}
-           onDelete={(asset) => { onDelete(asset); setViewer(null); }}
-           onDownload={triggerDownload}
            onNext={() => {
              const next = viewerLegacyIndex + 1;
              if (next >= 0 && next < filteredLegacyList.length) {
@@ -2826,7 +2680,6 @@ export function LibraryPanel({
                onSelect(filteredLegacyList[next]);
              }
            }}
-           onOpenJob={(asset) => asset.jobId ? onOpenJob?.(asset.jobId, "legacy") : undefined}
            onPrev={() => {
              const prev = viewerLegacyIndex - 1;
              if (prev >= 0 && prev < filteredLegacyList.length) {
@@ -2834,8 +2687,6 @@ export function LibraryPanel({
                onSelect(filteredLegacyList[prev]);
              }
            }}
-           onUseForImage={(asset) => { setViewer(null); onUseForImage(asset); }}
-           storageSettings={storageSettings}
          />
        ) : null}
       {mediaViewer ? (
@@ -2843,11 +2694,7 @@ export function LibraryPanel({
           asset={mediaViewer}
           assets={filteredMediaList}
           index={viewerMediaIndex}
-          onArchive={(asset) => { onArchiveMedia?.(asset); setMediaViewer(null); }}
           onClose={() => setMediaViewer(null)}
-          onDelete={(asset) => { onDeleteMedia?.(asset); setMediaViewer(null); }}
-          onDownload={triggerMediaDownload}
-          onMarkPrivate={(asset, nextPrivate) => { onMarkPrivateMedia?.(asset, nextPrivate); }}
           onNext={() => {
             const next = viewerMediaIndex + 1;
             if (next >= 0 && next < filteredMediaList.length) {
@@ -2855,7 +2702,6 @@ export function LibraryPanel({
               onSelectMedia?.(filteredMediaList[next]);
             }
           }}
-          onOpenJob={(asset) => asset.jobId ? onOpenJob?.(asset.jobId, "media") : undefined}
           onPrev={() => {
             const prev = viewerMediaIndex - 1;
             if (prev >= 0 && prev < filteredMediaList.length) {
@@ -2863,8 +2709,6 @@ export function LibraryPanel({
               onSelectMedia?.(filteredMediaList[prev]);
             }
           }}
-          onUseForImage={(asset) => { setMediaViewer(null); onUseMediaForImage?.(asset); }}
-          storageSettings={storageSettings}
         />
       ) : null}
     </>
@@ -2945,39 +2789,44 @@ function LibraryMetric({ label, value }: { label: string; value: number }) {
   );
 }
 
-function ImageViewer({
-  asset,
-  assets = [],
-  index = -1,
-  onArchive,
-  onClose,
-  onDelete,
-  onDownload,
-  onNext,
-  onOpenJob,
-  onPrev,
-  onUseForImage,
-  storageSettings,
-}: {
-  asset: ImageAsset;
-  assets?: ImageAsset[];
-  index?: number;
-  onArchive?: (asset: ImageAsset) => void;
-  onClose: () => void;
-  onDelete?: (asset: ImageAsset) => void;
-  onDownload?: (asset: ImageAsset) => void;
-  onNext?: () => void;
-  onOpenJob?: (asset: ImageAsset) => void;
-  onPrev?: () => void;
-  onUseForImage?: (asset: ImageAsset) => void;
-  storageSettings?: ImageStorageSettings;
-}) {
-  const titleId = useId();
-  const dialogRef = useRef<HTMLDivElement | null>(null);
-  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
-  const [zoomMode, setZoomMode] = useState<"fit" | "actual">("fit");
-  const [zoomLevel, setZoomLevel] = useState<number>(1);
+type ZoomMode = "fit" | "actual";
+type ZoomModeSetter = Dispatch<SetStateAction<ZoomMode>>;
+type ZoomLevelSetter = Dispatch<SetStateAction<number>>;
 
+function setFitZoom(setZoomMode: ZoomModeSetter, setZoomLevel: ZoomLevelSetter) {
+  setZoomMode("fit");
+  setZoomLevel(1);
+}
+
+function setActualZoom(setZoomMode: ZoomModeSetter, setZoomLevel: ZoomLevelSetter) {
+  setZoomMode("actual");
+  setZoomLevel(1);
+}
+
+function stepZoom(setZoomMode: ZoomModeSetter, setZoomLevel: ZoomLevelSetter, delta: number) {
+  setZoomMode("actual");
+  setZoomLevel((z) => Math.max(0.25, Math.min(8, Number((z + delta).toFixed(2)))));
+}
+
+function useViewerDialogKeyboard({
+  closeButtonRef,
+  dialogRef,
+  onClose,
+  onNext,
+  onPrev,
+  setZoomLevel,
+  setZoomMode,
+  zoomEnabled,
+}: {
+  closeButtonRef: { current: HTMLButtonElement | null };
+  dialogRef: { current: HTMLDivElement | null };
+  onClose: () => void;
+  onNext?: () => void;
+  onPrev?: () => void;
+  setZoomLevel: ZoomLevelSetter;
+  setZoomMode: ZoomModeSetter;
+  zoomEnabled: boolean;
+}) {
   useEffect(() => {
     const previousFocus = document.activeElement;
     closeButtonRef.current?.focus();
@@ -2994,25 +2843,23 @@ function ImageViewer({
         onNext?.();
         return;
       }
-      if (event.key === "0") {
-        setZoomMode("fit");
-        setZoomLevel(1);
-        return;
-      }
-      if (event.key === "1") {
-        setZoomMode("actual");
-        setZoomLevel(1);
-        return;
-      }
-      if (event.key === "+" || event.key === "=") {
-        setZoomMode("actual");
-        setZoomLevel((z) => Math.min(8, Number((z + 0.25).toFixed(2))));
-        return;
-      }
-      if (event.key === "-" || event.key === "_") {
-        setZoomMode("actual");
-        setZoomLevel((z) => Math.max(0.25, Number((z - 0.25).toFixed(2))));
-        return;
+      if (zoomEnabled) {
+        if (event.key === "0") {
+          setFitZoom(setZoomMode, setZoomLevel);
+          return;
+        }
+        if (event.key === "1") {
+          setActualZoom(setZoomMode, setZoomLevel);
+          return;
+        }
+        if (event.key === "+" || event.key === "=") {
+          stepZoom(setZoomMode, setZoomLevel, 0.25);
+          return;
+        }
+        if (event.key === "-" || event.key === "_") {
+          stepZoom(setZoomMode, setZoomLevel, -0.25);
+          return;
+        }
       }
       if (event.key !== "Tab" || !dialogRef.current) return;
       const focusable = Array.from(
@@ -3034,7 +2881,52 @@ function ImageViewer({
       window.removeEventListener("keydown", onKeyDown);
       if (previousFocus instanceof HTMLElement) previousFocus.focus();
     };
-  }, [onClose, onNext, onPrev]);
+  }, [closeButtonRef, dialogRef, onClose, onNext, onPrev, setZoomLevel, setZoomMode, zoomEnabled]);
+}
+
+function ViewerZoomControls({ setZoomLevel, setZoomMode, zoomLevel, zoomMode }: { setZoomLevel: ZoomLevelSetter; setZoomMode: ZoomModeSetter; zoomLevel: number; zoomMode: ZoomMode }) {
+  return (
+    <>
+      <Button aria-pressed={zoomMode === "fit"} className="min-h-8 px-2 text-xs" onClick={() => setFitZoom(setZoomMode, setZoomLevel)} tone={zoomMode === "fit" ? "primary" : "neutral"} type="button">
+        适应
+      </Button>
+      <Button aria-pressed={zoomMode === "actual"} className="min-h-8 px-2 text-xs" onClick={() => setActualZoom(setZoomMode, setZoomLevel)} tone={zoomMode === "actual" ? "primary" : "neutral"} type="button">
+        原始
+      </Button>
+      <Button aria-label="缩小" className="min-h-8 px-2 text-xs" onClick={() => stepZoom(setZoomMode, setZoomLevel, -0.25)} type="button">
+        −
+      </Button>
+      <span className="mono min-w-[48px] text-center text-xs">{zoomMode === "fit" ? "fit" : `${Math.round(zoomLevel * 100)}%`}</span>
+      <Button aria-label="放大" className="min-h-8 px-2 text-xs" onClick={() => stepZoom(setZoomMode, setZoomLevel, 0.25)} type="button">
+        ＋
+      </Button>
+      <div className="mx-1 h-5 w-px bg-[var(--line)]" />
+    </>
+  );
+}
+
+function ImageViewer({
+  asset,
+  assets = [],
+  index = -1,
+  onClose,
+  onNext,
+  onPrev,
+}: {
+  asset: ImageAsset;
+  assets?: ImageAsset[];
+  index?: number;
+  onClose: () => void;
+  onNext?: () => void;
+  onPrev?: () => void;
+}) {
+  const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [zoomMode, setZoomMode] = useState<ZoomMode>("fit");
+  const [zoomLevel, setZoomLevel] = useState<number>(1);
+
+  useViewerDialogKeyboard({ closeButtonRef, dialogRef, onClose, onNext, onPrev, setZoomLevel, setZoomMode, zoomEnabled: true });
 
   const zoomStyle = zoomMode === "fit" ? {} : { transform: `scale(${zoomLevel})`, transformOrigin: "top left" };
   const showNav = assets.length > 0 && index >= 0;
@@ -3055,32 +2947,7 @@ function ImageViewer({
             ) : <span className="muted mono text-xs">-</span>}
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
-            <Button
-              aria-pressed={zoomMode === "fit"}
-              className="min-h-8 px-2 text-xs"
-              onClick={() => { setZoomMode("fit"); setZoomLevel(1); }}
-              tone={zoomMode === "fit" ? "primary" : "neutral"}
-              type="button"
-            >
-              适应
-            </Button>
-            <Button
-              aria-pressed={zoomMode === "actual"}
-              className="min-h-8 px-2 text-xs"
-              onClick={() => { setZoomMode("actual"); setZoomLevel(1); }}
-              tone={zoomMode === "actual" ? "primary" : "neutral"}
-              type="button"
-            >
-              原始
-            </Button>
-            <Button aria-label="缩小" className="min-h-8 px-2 text-xs" onClick={() => { setZoomMode("actual"); setZoomLevel((z) => Math.max(0.25, Number((z - 0.25).toFixed(2)))); }} type="button">
-              −
-            </Button>
-            <span className="mono min-w-[48px] text-center text-xs">{zoomMode === "fit" ? "fit" : `${Math.round(zoomLevel * 100)}%`}</span>
-            <Button aria-label="放大" className="min-h-8 px-2 text-xs" onClick={() => { setZoomMode("actual"); setZoomLevel((z) => Math.min(8, Number((z + 0.25).toFixed(2)))); }} type="button">
-              ＋
-            </Button>
-            <div className="mx-1 h-5 w-px bg-[var(--line)]" />
+            <ViewerZoomControls setZoomLevel={setZoomLevel} setZoomMode={setZoomMode} zoomLevel={zoomLevel} zoomMode={zoomMode} />
              <a
                className="button min-h-8 px-2 text-xs"
                download
@@ -3134,30 +3001,16 @@ function MediaAssetViewer({
   asset,
   assets = [],
   index = -1,
-  onArchive,
   onClose,
-  onDelete,
-  onDownload,
-  onMarkPrivate,
   onNext,
-  onOpenJob,
   onPrev,
-  onUseForImage,
-  storageSettings,
 }: {
   asset: MediaAsset;
   assets?: MediaAsset[];
   index?: number;
-  onArchive?: (asset: MediaAsset) => void;
   onClose: () => void;
-  onDelete?: (asset: MediaAsset) => void;
-  onDownload?: (asset: MediaAsset) => void;
-  onMarkPrivate?: (asset: MediaAsset, nextPrivate: boolean) => void;
   onNext?: () => void;
-  onOpenJob?: (asset: MediaAsset) => void;
   onPrev?: () => void;
-  onUseForImage?: (asset: MediaAsset) => void;
-  storageSettings?: ImageStorageSettings;
 }) {
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -3165,68 +3018,10 @@ function MediaAssetViewer({
   const isVideo = asset.mediaType === "video";
   const providerLabel = PROVIDERS.find((p) => p.id === asset.provider)?.label || asset.provider || "-";
   const url = asset.url || asset.downloadUrl || "";
-  const [zoomMode, setZoomMode] = useState<"fit" | "actual">("fit");
+  const [zoomMode, setZoomMode] = useState<ZoomMode>("fit");
   const [zoomLevel, setZoomLevel] = useState<number>(1);
 
-  useEffect(() => {
-    const previousFocus = document.activeElement;
-    closeButtonRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onClose();
-        return;
-      }
-      if (event.key === "ArrowLeft") {
-        onPrev?.();
-        return;
-      }
-      if (event.key === "ArrowRight") {
-        onNext?.();
-        return;
-      }
-      if (!isVideo) {
-        if (event.key === "0") {
-          setZoomMode("fit");
-          setZoomLevel(1);
-          return;
-        }
-        if (event.key === "1") {
-          setZoomMode("actual");
-          setZoomLevel(1);
-          return;
-        }
-        if (event.key === "+" || event.key === "=") {
-          setZoomMode("actual");
-          setZoomLevel((z) => Math.min(8, Number((z + 0.25).toFixed(2))));
-          return;
-        }
-        if (event.key === "-" || event.key === "_") {
-          setZoomMode("actual");
-          setZoomLevel((z) => Math.max(0.25, Number((z - 0.25).toFixed(2))));
-          return;
-        }
-      }
-      if (event.key !== "Tab" || !dialogRef.current) return;
-      const focusable = Array.from(
-        dialogRef.current.querySelectorAll<HTMLElement>("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])"),
-      ).filter((element) => !element.hasAttribute("disabled"));
-      if (!focusable.length) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      if (previousFocus instanceof HTMLElement) previousFocus.focus();
-    };
-  }, [onClose, onNext, onPrev, isVideo]);
+  useViewerDialogKeyboard({ closeButtonRef, dialogRef, onClose, onNext, onPrev, setZoomLevel, setZoomMode, zoomEnabled: !isVideo });
 
   const zoomStyle = zoomMode === "fit" ? {} : { transform: `scale(${zoomLevel})`, transformOrigin: "top left" };
   const showNav = assets.length > 0 && index >= 0;
@@ -3249,32 +3044,7 @@ function MediaAssetViewer({
            <div className="flex flex-wrap items-center justify-end gap-2">
               {!isVideo ? (
                 <>
-                  <Button
-                    aria-pressed={zoomMode === "fit"}
-                    className="min-h-8 px-2 text-xs"
-                    onClick={() => { setZoomMode("fit"); setZoomLevel(1); }}
-                    tone={zoomMode === "fit" ? "primary" : "neutral"}
-                    type="button"
-                  >
-                    适应
-                  </Button>
-                  <Button
-                    aria-pressed={zoomMode === "actual"}
-                    className="min-h-8 px-2 text-xs"
-                    onClick={() => { setZoomMode("actual"); setZoomLevel(1); }}
-                    tone={zoomMode === "actual" ? "primary" : "neutral"}
-                    type="button"
-                  >
-                    原始
-                  </Button>
-                  <Button aria-label="缩小" className="min-h-8 px-2 text-xs" onClick={() => { setZoomMode("actual"); setZoomLevel((z) => Math.max(0.25, Number((z - 0.25).toFixed(2)))); }} type="button">
-                    −
-                  </Button>
-                  <span className="mono min-w-[48px] text-center text-xs">{zoomMode === "fit" ? "fit" : `${Math.round(zoomLevel * 100)}%`}</span>
-                  <Button aria-label="放大" className="min-h-8 px-2 text-xs" onClick={() => { setZoomMode("actual"); setZoomLevel((z) => Math.min(8, Number((z + 0.25).toFixed(2)))); }} type="button">
-                    ＋
-                  </Button>
-                  <div className="mx-1 h-5 w-px bg-[var(--line)]" />
+                  <ViewerZoomControls setZoomLevel={setZoomLevel} setZoomMode={setZoomMode} zoomLevel={zoomLevel} zoomMode={zoomMode} />
                 </>
               ) : null}
                <a
@@ -3332,96 +3102,10 @@ function MediaAssetViewer({
   );
 }
 
-export function ProviderSettingsPanel({
-  busy,
-  settings,
-  onSave,
-}: {
-  busy: boolean;
-  settings: ImageProviderSettings;
-  onSave: (settings: ImageSettingsDraft) => Promise<void>;
-}) {
-  const [draft, setDraft] = useState<ImageSettingsDraft>({ ...defaultImageSettings(), ...settings, xaiApiKey: "", clearApiKey: false });
-
-  useEffect(() => {
-    setDraft((current) => ({ ...current, ...defaultImageSettings(), ...settings, xaiApiKey: "", clearApiKey: false }));
-  }, [settings]);
-
-  return (
-    <Panel
-      actions={
-        <Button disabled={busy} onClick={() => void onSave(draft)} tone="primary">
-          保存
-        </Button>
-      }
-      subtitle="供应商设置属于多媒体模块，不进入全局运行设置。"
-      title="供应商设置"
-    >
-      <div className="grid gap-4">
-        <div className="grid grid-cols-2 gap-3 max-md:grid-cols-1">
-          <Field label="供应商">
-             <input className="input mono" disabled value={draft.provider} />
-          </Field>
-          <Field label="密钥状态">
-             <input className="input mono" disabled value={draft.hasApiKey ? draft.maskedApiKey || "configured" : "未配置"} />
-          </Field>
-        </div>
-        <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 max-md:grid-cols-1">
-          <Field label="xAI 密钥" help="留空表示不修改现有 key；清除时不会在审计中写入明文。">
-             <input autoComplete="new-password" className="input mono" name="images_xai_api_key" onChange={(event) => updateDraft("xaiApiKey", event.target.value)} spellCheck={false} type="password" value={draft.xaiApiKey} />
-           </Field>
-           <div className="flex min-h-9 items-end pb-2">
-             <CheckLabel
-               checked={draft.clearApiKey}
-               onChange={(checked) => updateDraft("clearApiKey", checked)}
-             >
-               清除密钥
-             </CheckLabel>
-           </div>
-        </div>
-
-        <div className="grid grid-cols-4 gap-3 max-lg:grid-cols-2 max-md:grid-cols-1">
-          <Field label="默认模型">
-            <select className="select mono" onChange={(event) => updateDraft("defaultModel", event.target.value)} value={draft.defaultModel}>
-              {GROK_MODEL_OPTIONS.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="默认响应格式">
-            <select className="select mono" onChange={(event) => updateDraft("defaultResponseFormat", event.target.value)} value={draft.defaultResponseFormat}>
-              <option value="url">url</option>
-              <option value="b64_json">b64_json</option>
-            </select>
-          </Field>
-          <Field label="默认分辨率">
-            <select className="select mono" onChange={(event) => updateDraft("defaultResolution", event.target.value)} value={draft.defaultResolution}>
-              {RESOLUTION_OPTIONS.map((value) => (
-                <option key={value || "default"} value={value}>
-                  {value || "默认"}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="历史保留">
-            <input className="input mono" max={2000} min={50} onChange={(event) => updateDraft("historyRetention", Number(event.target.value || 500))} type="number" value={draft.historyRetention} />
-          </Field>
-        </div>
-      </div>
-    </Panel>
-  );
-
-  function updateDraft<Key extends keyof ImageSettingsDraft>(key: Key, value: ImageSettingsDraft[Key]) {
-    setDraft((current) => ({ ...current, [key]: value }));
-  }
-}
-
 export function MediaProviderSettingsPanel({
   busy,
   legacyImageSettings,
-  models,
+  models = [],
   onSave,
   onTest,
   providers,
@@ -3517,7 +3201,7 @@ export function MediaProviderSettingsPanel({
       >
         {PROVIDERS.map((p) => {
           const status = providers.find((s) => s.provider === p.id);
-          const caps = (models || []).filter((m) => m.provider === p.id);
+          const caps = models.filter((m) => m.provider === p.id);
           const draft = drafts[p.id];
           const imageModels = providerImageModelOptions(p.id, caps, draft.defaultImageModel);
           const videoModels = providerVideoModelOptions(p.id, caps, draft.defaultVideoModel);
@@ -3918,8 +3602,7 @@ export function ImagesInspector({
   jobs,
   libraryScope,
   mediaAsset,
-  mediaAssets,
-  mediaType,
+  mediaAssets = [],
   onArchive,
   onArchiveMedia,
   onDelete,
@@ -3941,7 +3624,6 @@ export function ImagesInspector({
   libraryScope?: ImageLibraryScope;
   mediaAsset?: MediaAsset;
   mediaAssets?: MediaAsset[];
-  mediaType?: MediaType;
   onArchive?: (asset: ImageAsset) => void;
   onArchiveMedia?: (asset: MediaAsset) => void;
   onDelete?: (asset: ImageAsset) => void;
@@ -3960,8 +3642,8 @@ export function ImagesInspector({
   const tone: Tone = status?.hasApiKey ? (status?.lastJobStatus === "failed" ? "warn" : "good") : "warn";
   const localAssets = assets.filter((item) => item.storageBackend === "local").length;
   const s3Assets = assets.filter((item) => item.storageBackend === "s3").length;
-  const mediaAssetCount = (mediaAssets || []).length;
-  const videoCount = (mediaAssets || []).filter((a) => a.mediaType === "video").length;
+  const mediaAssetCount = mediaAssets.length;
+  const videoCount = mediaAssets.filter((a) => a.mediaType === "video").length;
   const combinedCount = assets.length + mediaAssetCount;
   return (
     <aside className="grid content-start gap-4 border-l border-[var(--line)] bg-[var(--surface-soft)] p-4 max-xl:border-l-0 max-xl:border-t">
@@ -4060,7 +3742,7 @@ export function ImagesInspector({
                   <LibraryMetric label="总资源" value={combinedCount} />
                   <LibraryMetric label="图片" value={combinedCount - videoCount} />
                   <LibraryMetric label="视频" value={videoCount} />
-                  <LibraryMetric label="私密" value={assets.filter((a) => a.private).length + (mediaAssets || []).filter((a) => a.private).length} />
+                  <LibraryMetric label="私密" value={assets.filter((a) => a.private).length + mediaAssets.filter((a) => a.private).length} />
                 </div>
                 <EmptyState title="未选择资源" body="在资源库中选择任意图片或视频查看详情和可用操作。" />
               </div>

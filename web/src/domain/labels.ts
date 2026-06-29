@@ -1,4 +1,4 @@
-import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, CodexStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, StockV2DailyBarsQuality, StockV2DailyBarJob, StockV2Payload, StockV2Settings, StockV2UpdateJob, V2RaySettings, V2RayStatus } from "../app/types";
+import type { AuditEvent, CodexGatewaySettings, CodexGatewayStatus, CodexStatus, ImageProviderSettings, ImageStatus, ImageStorageSettings, StockV2DailyBarsQuality, StockV2Payload, StockV2Settings, StockV2UpdateJob, V2RaySettings, V2RayStatus } from "../app/types";
 
 export const NAV_ITEMS = [
   { id: "dashboard", label: "控制台", description: "服务器状态、执行边界和下一步入口" },
