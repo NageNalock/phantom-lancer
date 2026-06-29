@@ -81,6 +81,7 @@ type StrategyGenerationContext struct {
 	Opportunity          *Opportunity                          `json:"opportunity,omitempty"`
 	OpportunityCandidate *OpportunityCandidate                 `json:"opportunityCandidate,omitempty"`
 	OpportunityEvidence  []OpportunityEvidence                 `json:"opportunityEvidence,omitempty"`
+	EmbeddingStatus      *EmbeddingStatus                      `json:"embeddingStatus,omitempty"`
 }
 
 type StrategyGenerationInstrumentContext struct {

@@ -90,6 +90,29 @@ func TestLinkNewsEventKeywordRecall(t *testing.T) {
 	}
 }
 
+func TestLinkNewsEventUsesSemanticProfileRecall(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	configureEmbeddingModel(t, svc, "embed-v1")
+	upsertEmbeddingTestProfile(t, svc, "300750", "宁德时代", "动力电池")
+	if _, err := svc.RebuildEmbeddingAssets(ctx, RequestRebuildEmbeddingAssets{ObjectTypes: []string{EmbeddingObjectStockProfile}}); err != nil {
+		t.Fatalf("rebuild embeddings: %v", err)
+	}
+
+	event := createNewsLinkEvent(t, svc, NewsEvent{Source: "test", Title: "电池订单增长带动储能产业链"})
+	candidates, err := svc.LinkNewsEvent(ctx, event.ID)
+	if err != nil {
+		t.Fatalf("link news event: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates = %+v, want one semantic candidate", candidates)
+	}
+	if candidates[0].Symbol != "300750" || candidates[0].MatchMethod != NewsLinkMatchSemanticProfile {
+		t.Fatalf("candidate = %+v, want semantic profile 300750", candidates[0])
+	}
+}
+
 func TestLinkNewsEventBoostsHoldingAndActiveStrategy(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStockProfileTestService(t)

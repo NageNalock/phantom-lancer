@@ -75,8 +75,8 @@ export function StockV2OpportunityDetail({
         { method: "POST", body: {} },
       );
       actions.setToast("机会发现已启动", "good");
-      await load();
       if (res?.id) onOpenRun(res.id);
+      void load();
     } catch (err) {
       actions.setToast(friendlyError(err), "danger");
     } finally {

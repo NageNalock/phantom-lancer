@@ -683,11 +683,14 @@ export function Drawer({
 }) {
   const [shown, setShown] = useState(false);
   const titleId = useId();
+  const panelRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     const raf = requestAnimationFrame(() => setShown(true));
     function onKey(event: globalThis.KeyboardEvent) {
       if (event.key === "Escape") {
+        const dialogs = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]'));
+        if (dialogs[dialogs.length - 1] !== panelRef.current) return;
         event.preventDefault();
         onClose();
       }
@@ -706,6 +709,7 @@ export function Drawer({
         aria-modal="true"
         className={`flex h-full flex-col border-l border-[var(--line)] bg-[var(--surface)] shadow-[var(--shadow)] transition-transform duration-200 ease-out ${shown ? "translate-x-0" : "translate-x-full"}`}
         onClick={(event) => event.stopPropagation()}
+        ref={panelRef}
         role="dialog"
         style={{ width: `min(${width}px, 100vw)` }}
       >

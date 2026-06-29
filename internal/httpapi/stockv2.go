@@ -371,6 +371,7 @@ func (s *Server) handleListInstruments(w http.ResponseWriter, r *http.Request) {
 	offsetStr := r.URL.Query().Get("offset")
 	market := r.URL.Query().Get("market")
 	instrumentType := r.URL.Query().Get("instrumentType")
+	profileStatus := r.URL.Query().Get("profileStatus")
 
 	limit := 100 // 默认值
 	offset := 0  // 默认值
@@ -387,13 +388,13 @@ func (s *Server) handleListInstruments(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	instruments, err := s.stockV2.GetInstrumentsFiltered(ctx, market, instrumentType, limit, offset)
+	instruments, err := s.stockV2.GetInstrumentsFiltered(ctx, market, instrumentType, profileStatus, limit, offset)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	total, err := s.stockV2.CountInstrumentsFiltered(ctx, market, instrumentType)
+	total, err := s.stockV2.CountInstrumentsFiltered(ctx, market, instrumentType, profileStatus)
 	if err != nil {
 		// 计数失败不影响主数据，返回 0 即可
 		total = 0
@@ -413,6 +414,7 @@ func (s *Server) handleSearchInstruments(w http.ResponseWriter, r *http.Request)
 	keyword := r.URL.Query().Get("q")
 	market := r.URL.Query().Get("market")
 	instrumentType := r.URL.Query().Get("instrumentType")
+	profileStatus := r.URL.Query().Get("profileStatus")
 	limitStr := r.URL.Query().Get("limit")
 
 	limit := 20
@@ -422,7 +424,7 @@ func (s *Server) handleSearchInstruments(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	instruments, err := s.stockV2.SearchInstrumentsFiltered(ctx, keyword, market, instrumentType, limit)
+	instruments, err := s.stockV2.SearchInstrumentsFiltered(ctx, keyword, market, instrumentType, profileStatus, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

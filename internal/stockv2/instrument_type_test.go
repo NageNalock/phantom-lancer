@@ -125,19 +125,62 @@ func TestInstrumentListFiltersMarketAndType(t *testing.T) {
 		}
 	}
 
-	funds, err := store.GetInstrumentsFiltered(ctx, "SZ", InstrumentTypeExchangeFund, 10, 0)
+	funds, err := store.GetInstrumentsFiltered(ctx, "SZ", InstrumentTypeExchangeFund, "", 10, 0)
 	if err != nil {
 		t.Fatalf("list filtered funds: %v", err)
 	}
 	if len(funds) != 1 || funds[0].Symbol != "159915" {
 		t.Fatalf("filtered funds = %+v, want only 159915", funds)
 	}
-	count, err := store.CountInstrumentsFiltered(ctx, "SZ", InstrumentTypeExchangeFund)
+	count, err := store.CountInstrumentsFiltered(ctx, "SZ", InstrumentTypeExchangeFund, "")
 	if err != nil {
 		t.Fatalf("count filtered funds: %v", err)
 	}
 	if count != 1 {
 		t.Fatalf("count = %d, want 1", count)
+	}
+}
+
+func TestInstrumentListFiltersProfileStatus(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	for _, inst := range []StockV2Instrument{
+		{ID: "inst-300750", Symbol: "300750", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "宁德时代", Status: "active"},
+		{ID: "inst-600519", Symbol: "600519", Market: "SH", InstrumentType: InstrumentTypeStock, Name: "贵州茅台", Status: "active"},
+	} {
+		if err := store.UpsertInstrument(ctx, inst); err != nil {
+			t.Fatalf("upsert %s: %v", inst.Symbol, err)
+		}
+	}
+	if _, err := store.UpsertStockProfile(ctx, StockProfile{
+		Symbol:          "300750",
+		Market:          "SZ",
+		InstrumentType:  InstrumentTypeStock,
+		Name:            "宁德时代",
+		ProfileText:     "动力电池 储能",
+		AIProfileStatus: StockProfileAIStatusReady,
+	}); err != nil {
+		t.Fatalf("upsert stock profile: %v", err)
+	}
+
+	ready, err := store.GetInstrumentsFiltered(ctx, "", "", "ai_ready", 10, 0)
+	if err != nil {
+		t.Fatalf("list ai_ready instruments: %v", err)
+	}
+	if len(ready) != 1 || ready[0].Symbol != "300750" {
+		t.Fatalf("ai_ready instruments = %+v, want only 300750", ready)
+	}
+	missingCount, err := store.CountInstrumentsFiltered(ctx, "", "", "basic_missing")
+	if err != nil {
+		t.Fatalf("count basic_missing instruments: %v", err)
+	}
+	if missingCount != 1 {
+		t.Fatalf("basic_missing count = %d, want 1", missingCount)
 	}
 }
 

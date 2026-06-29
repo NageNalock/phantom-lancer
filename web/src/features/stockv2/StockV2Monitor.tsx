@@ -398,7 +398,7 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
 
       <CollapsibleSection
         title="监控任务配置"
-        subtitle={`${enabledCount}/${tasks.length} 启用 · 只配置系统内置监控任务的开关、周期、范围、敏感度、冷却和 Agent 预算`}
+        subtitle={`${enabledCount}/${tasks.length} 启用 · 只配置系统内置监控任务的开关、周期、范围、敏感度、冷却和 Agent doublecheck`}
         defaultOpen={false}
       >
         {tasksLoading ? (
@@ -649,7 +649,6 @@ function TaskConfigDrawer({
   const [scope, setScope] = useState(cfg.scope ?? def.defaultConfig?.scope ?? "");
   const [sensitivity, setSensitivity] = useState(cfg.sensitivity ?? def.defaultConfig?.sensitivity ?? "normal");
   const [agentDoublecheck, setAgentDoublecheck] = useState<boolean>(cfg.agentDoublecheckEnabled || false);
-  const [agentBudget, setAgentBudget] = useState(String(cfg.agentBudget ?? 0));
 
   function buildInput(): StockV2MonitorTaskConfigInput {
     return {
@@ -659,7 +658,6 @@ function TaskConfigDrawer({
       scope: scope.trim() || undefined,
       sensitivity,
       agentDoublecheckEnabled: agentDoublecheck,
-      agentBudget: Math.max(0, Number(agentBudget) || 0),
     };
   }
 
@@ -690,9 +688,6 @@ function TaskConfigDrawer({
           <span>Agent doublecheck(预留)</span>
           <input type="checkbox" checked={agentDoublecheck} onChange={(e) => setAgentDoublecheck(e.target.checked)} className="h-4 w-4 accent-[var(--accent)]" />
         </label>
-        <Field label="Agent 预算(预留)">
-          <input type="number" min="0" step="1" value={agentBudget} onChange={(e) => setAgentBudget(e.target.value)} />
-        </Field>
         <p className="text-xs leading-relaxed text-[var(--muted)]">
           监控只产生命中候选与提醒,不直接生成买卖建议,不会修改持仓。
         </p>

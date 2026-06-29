@@ -6,7 +6,7 @@ import (
 )
 
 // 监控任务是系统固化的后台监控行为,不是用户创建/编辑/删除的业务对象。
-// 用户只能配置开关 / 周期 / 范围 / 敏感度 / 冷却 / Agent doublecheck 开关与预算。
+// 用户只能配置开关 / 周期 / 范围 / 敏感度 / 冷却 / Agent doublecheck 开关。
 // 本轮:quote/data_strategy/portfolio_risk/news 可运行;
 // fundamental/data_quality 仅占位(Runnable=false),不假装实现。
 

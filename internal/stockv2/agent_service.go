@@ -818,9 +818,6 @@ func (s *Service) UpdateAgentTaskProfile(ctx context.Context, taskType string, r
 		}
 		profile.FallbackModelID = fallbackID
 	}
-	if req.MaxBudget != nil {
-		profile.MaxBudget = *req.MaxBudget
-	}
 	return s.store.UpdateAgentTaskProfile(ctx, profile)
 }
 

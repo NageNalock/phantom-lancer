@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"phantom-lancer/internal/safelog"
 )
 
 func (s *Service) RunStrategyGeneration(ctx context.Context, input StrategyGenerationInput) (AgentRun, error) {
@@ -60,6 +62,7 @@ func (s *Service) BuildStrategyGenerationContext(ctx context.Context, input Stra
 		Targets:          make([]StrategyGenerationInstrumentContext, 0, len(normalized.TargetInstruments)),
 		FreshnessSummary: map[string]any{},
 	}
+	s.fillStrategyGenerationEmbeddingStatus(ctx, &out)
 	if normalized.Mode == StrategyGenerationModePortfolio {
 		return s.buildPortfolioStrategyGenerationContext(ctx, normalized, out)
 	}
@@ -76,6 +79,27 @@ func (s *Service) BuildStrategyGenerationContext(ctx context.Context, input Stra
 	out.FreshnessSummary["targetCount"] = len(out.Targets)
 	out.FreshnessSummary["builtAt"] = out.BuiltAt.Format(time.RFC3339)
 	return out, nil
+}
+
+func (s *Service) fillStrategyGenerationEmbeddingStatus(ctx context.Context, out *StrategyGenerationContext) {
+	status, err := s.GetEmbeddingStatus(ctx)
+	if err != nil {
+		out.FreshnessSummary["embeddingStatus"] = map[string]any{
+			"available": false,
+			"error":     safelog.Text(err.Error(), 240),
+		}
+		return
+	}
+	out.EmbeddingStatus = &status
+	out.FreshnessSummary["embeddingStatus"] = map[string]any{
+		"available": status.Available,
+		"status":    status.Status,
+		"modelId":   status.ModelID,
+		"ready":     status.ReadyAssetCount,
+		"missing":   status.MissingAssetCount,
+		"stale":     status.StaleAssetCount,
+		"failed":    status.FailedAssetCount,
+	}
 }
 
 func (s *Service) fillStrategyGenerationOpportunityContext(ctx context.Context, input StrategyGenerationInput, out *StrategyGenerationContext) error {

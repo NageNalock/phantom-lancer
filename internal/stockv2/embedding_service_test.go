@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -84,11 +85,11 @@ func TestEmbeddingEntrypointsRequireConfiguredAvailableEmbeddingModel(t *testing
 		t.Fatalf("create zero dim embedding model: %v", err)
 	}
 	zeroDimModelID := zeroDimModel.ID
-	if _, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{
+	if status, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{
 		EmbeddingModelID: &zeroDimModelID,
 		Enabled:          &enabled,
-	}); !errors.Is(err, ErrEmbeddingDimensionsMismatch) {
-		t.Fatalf("bind zero-dim embedding model error=%v, want ErrEmbeddingDimensionsMismatch", err)
+	}); err != nil || status.Code != EmbeddingStatusAssetNotReady {
+		t.Fatalf("bind zero-dim embedding model status=%+v error=%v, want asset_not_ready", status, err)
 	}
 }
 
@@ -122,6 +123,185 @@ func TestEmbeddingRebuildAndSemanticSearchUseRealVectors(t *testing.T) {
 		items[0].Asset.TextHash == "" ||
 		items[0].Asset.VectorRef == "" {
 		t.Fatalf("embedding asset metadata incomplete: %#v", items[0].Asset)
+	}
+}
+
+func TestEmbeddingRebuildDoesNotSelectUnchangedOptionalDimensionAssets(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	configureEmbeddingModelWithDimensions(t, svc, "embed-dynamic", 0)
+
+	upsertEmbeddingTestProfile(t, svc, "300750", "宁德时代", "动力电池")
+	first, err := svc.RebuildEmbeddingAssets(ctx, RequestRebuildEmbeddingAssets{ObjectTypes: []string{EmbeddingObjectStockProfile}})
+	if err != nil {
+		t.Fatalf("first rebuild embeddings: %v", err)
+	}
+	if first.Success != 1 || first.Skipped != 0 {
+		t.Fatalf("first rebuild result=%#v, want 1 success", first)
+	}
+	second, err := svc.RebuildEmbeddingAssets(ctx, RequestRebuildEmbeddingAssets{ObjectTypes: []string{EmbeddingObjectStockProfile}})
+	if err != nil {
+		t.Fatalf("second rebuild embeddings: %v", err)
+	}
+	if second.Total != 0 || second.Success != 0 || second.Skipped != 0 {
+		t.Fatalf("second rebuild result=%#v, want unchanged ready asset not selected", second)
+	}
+}
+
+func TestEmbeddingMaintenanceScansPastReadyUnchangedAssets(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	model := configureEmbeddingModel(t, svc, "embed-v1")
+
+	for i := 0; i < 205; i++ {
+		profile := StockProfile{
+			Symbol:         fmt.Sprintf("T%03d", i),
+			Market:         "SZ",
+			InstrumentType: InstrumentTypeStock,
+			Name:           fmt.Sprintf("测试标的%03d", i),
+			ProfileText:    fmt.Sprintf("测试画像 %03d", i),
+		}
+		if _, err := svc.store.UpsertStockProfile(ctx, profile); err != nil {
+			t.Fatalf("upsert profile %s: %v", profile.Symbol, err)
+		}
+	}
+	profiles, err := svc.store.ListStockProfiles(ctx, StockProfileListFilter{Limit: 205})
+	if err != nil {
+		t.Fatalf("list profiles: %v", err)
+	}
+	if len(profiles) < 201 {
+		t.Fatalf("profiles=%d, want at least 201", len(profiles))
+	}
+	missingSymbol := profiles[200].Symbol
+	for i := 0; i < 200; i++ {
+		profile := profiles[i]
+		if _, err := svc.store.UpsertEmbeddingAsset(ctx, EmbeddingAsset{
+			ObjectType:          EmbeddingObjectStockProfile,
+			ObjectID:            profile.Symbol,
+			TextHash:            hashEmbeddingText(stockProfileEmbeddingText(profile)),
+			ModelID:             model.ID,
+			ProviderID:          model.ProviderID,
+			EmbeddingProtocol:   model.EmbeddingProtocol,
+			EmbeddingDimensions: 3,
+			VectorRef:           "ready-" + profile.Symbol,
+			Status:              EmbeddingAssetStatusReady,
+		}); err != nil {
+			t.Fatalf("upsert ready asset %s: %v", profile.Symbol, err)
+		}
+	}
+
+	result, err := svc.RunEmbeddingMaintenanceBatch(ctx, RequestRebuildEmbeddingAssets{
+		ObjectTypes: []string{EmbeddingObjectStockProfile},
+		Limit:       1,
+	})
+	if err != nil {
+		t.Fatalf("maintenance batch: %v", err)
+	}
+	if result.Total != 1 || result.Success != 1 || result.Skipped != 0 {
+		t.Fatalf("result=%#v, want one missing asset processed after ready unchanged head", result)
+	}
+	if _, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectStockProfile, missingSymbol, model.ID); err != nil {
+		t.Fatalf("missing profile %s was not embedded: %v", missingSymbol, err)
+	}
+}
+
+func TestEmbeddingMaintenanceCreatesNewsEventAsset(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	model := configureEmbeddingModel(t, svc, "embed-v1")
+
+	event, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source:  "test",
+		Title:   "动力电池公司发布储能新品",
+		Summary: "储能与新能源车产业链更新",
+		Content: "电池材料订单增长",
+	})
+	if err != nil {
+		t.Fatalf("create news event: %v", err)
+	}
+	result, err := svc.RunEmbeddingMaintenanceBatch(ctx, RequestRebuildEmbeddingAssets{
+		ObjectTypes: []string{EmbeddingObjectNewsEvent},
+		Limit:       1,
+	})
+	if err != nil {
+		t.Fatalf("maintenance batch: %v", err)
+	}
+	if result.Total != 1 || result.Success != 1 {
+		t.Fatalf("result=%#v, want one news asset processed", result)
+	}
+	asset, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectNewsEvent, event.ID, model.ID)
+	if err != nil {
+		t.Fatalf("get news embedding asset: %v", err)
+	}
+	if asset.Status != EmbeddingAssetStatusReady || asset.TextHash == "" {
+		t.Fatalf("asset=%#v, want ready with text hash", asset)
+	}
+}
+
+func TestEmbeddingStatusBreakdownGroupsReadyAndMissingAssets(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	configureEmbeddingModel(t, svc, "embed-v1")
+
+	upsertEmbeddingTestProfile(t, svc, "300750", "宁德时代", "动力电池")
+	if _, err := svc.CreateNewsEvent(ctx, NewsEvent{Source: "test", Title: "储能产业链更新"}); err != nil {
+		t.Fatalf("create news event: %v", err)
+	}
+	if _, err := svc.CreateOpportunity(ctx, RequestCreateOpportunity{Title: "机器人产业链", UserThesis: "关注上游零部件"}); err != nil {
+		t.Fatalf("create opportunity: %v", err)
+	}
+	if _, err := svc.RunEmbeddingMaintenanceBatch(ctx, RequestRebuildEmbeddingAssets{
+		ObjectTypes: []string{EmbeddingObjectStockProfile},
+		Limit:       1,
+	}); err != nil {
+		t.Fatalf("maintenance batch: %v", err)
+	}
+
+	status, err := svc.GetEmbeddingStatus(ctx)
+	if err != nil {
+		t.Fatalf("get embedding status: %v", err)
+	}
+	breakdown := map[string]EmbeddingAssetBreakdown{}
+	for _, item := range status.AssetBreakdown {
+		breakdown[item.Category] = item
+	}
+	if got := breakdown[EmbeddingObjectStockProfile]; got.ReadyAssetCount != 1 || got.MissingAssetCount != 0 {
+		t.Fatalf("stock profile breakdown=%+v, want ready=1 missing=0", got)
+	}
+	if got := breakdown[EmbeddingObjectNewsEvent]; got.ReadyAssetCount != 0 || got.MissingAssetCount != 1 {
+		t.Fatalf("news event breakdown=%+v, want ready=0 missing=1", got)
+	}
+	if got := breakdown["other"]; got.ReadyAssetCount != 0 || got.MissingAssetCount != 1 {
+		t.Fatalf("other breakdown=%+v, want ready=0 missing=1", got)
+	}
+}
+
+func TestStockProfileAIEnhancementMarksEmbeddingAssetStale(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	model := configureEmbeddingModel(t, svc, "embed-v1")
+
+	upsertEmbeddingTestProfile(t, svc, "300750", "宁德时代", "动力电池")
+	if _, err := svc.RunEmbeddingMaintenanceBatch(ctx, RequestRebuildEmbeddingAssets{ObjectTypes: []string{EmbeddingObjectStockProfile}}); err != nil {
+		t.Fatalf("maintenance batch: %v", err)
+	}
+	if _, err := svc.applyStockProfileEnhancementResult(ctx, "300750", map[string]any{
+		"summaryZh":  "动力电池与储能龙头",
+		"keywordsZh": []any{"储能"},
+	}, "test-model", 0.8); err != nil {
+		t.Fatalf("apply enhancement: %v", err)
+	}
+	asset, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectStockProfile, "300750", model.ID)
+	if err != nil {
+		t.Fatalf("get embedding asset: %v", err)
+	}
+	if asset.Status != EmbeddingAssetStatusStale {
+		t.Fatalf("asset status=%s, want stale", asset.Status)
 	}
 }
 
@@ -249,6 +429,10 @@ func newEmbeddingTestService(t *testing.T) (*Service, func()) {
 }
 
 func configureEmbeddingModel(t *testing.T, svc *Service, modelName string) AgentModelProfile {
+	return configureEmbeddingModelWithDimensions(t, svc, modelName, 3)
+}
+
+func configureEmbeddingModelWithDimensions(t *testing.T, svc *Service, modelName string, dimensions int) AgentModelProfile {
 	t.Helper()
 	ctx := context.Background()
 	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
@@ -266,16 +450,18 @@ func configureEmbeddingModel(t *testing.T, svc *Service, modelName string) Agent
 		Enabled:             true,
 		Status:              AgentModelStatusAvailable,
 		ModelType:           AgentModelTypeEmbedding,
-		EmbeddingDimensions: 3,
+		EmbeddingDimensions: dimensions,
 	})
 	if err != nil {
 		t.Fatalf("create embedding model: %v", err)
 	}
 	modelID := model.ID
 	enabled := true
+	rateLimit := 0
 	if _, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{
-		EmbeddingModelID: &modelID,
-		Enabled:          &enabled,
+		EmbeddingModelID:    &modelID,
+		Enabled:             &enabled,
+		MaintainRateLimitMs: &rateLimit,
 	}); err != nil {
 		t.Fatalf("bind embedding model: %v", err)
 	}

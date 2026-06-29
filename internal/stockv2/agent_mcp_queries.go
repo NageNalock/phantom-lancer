@@ -62,9 +62,9 @@ func (p *agentTaskPool) mcpSearchInstruments(args json.RawMessage) (any, *mcpErr
 	var items []StockV2Instrument
 	var err error
 	if strings.TrimSpace(argsObj.Query) == "" {
-		items, err = svc.GetInstrumentsFiltered(context.Background(), argsObj.Market, argsObj.InstrumentType, limit, 0)
+		items, err = svc.GetInstrumentsFiltered(context.Background(), argsObj.Market, argsObj.InstrumentType, "", limit, 0)
 	} else {
-		items, err = svc.SearchInstrumentsFiltered(context.Background(), argsObj.Query, argsObj.Market, argsObj.InstrumentType, limit)
+		items, err = svc.SearchInstrumentsFiltered(context.Background(), argsObj.Query, argsObj.Market, argsObj.InstrumentType, "", limit)
 	}
 	if err != nil {
 		return nil, mcpInternal(err)

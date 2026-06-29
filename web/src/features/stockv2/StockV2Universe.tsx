@@ -73,6 +73,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   const [searchQuery, setSearchQuery] = useState("");
   const [marketFilter, setMarketFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
+  const [profileStatusFilter, setProfileStatusFilter] = useState("");
   const [masterDataView, setMasterDataView] = useState<MasterDataView>("instruments");
   const [addHolding, setAddHolding] = useState<{ inst: StockV2Instrument } | null>(null);
   const [selectedInst, setSelectedInst] = useState<StockV2Instrument | null>(null);
@@ -96,11 +97,18 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   }
 
   // 拉取分页数据；输入搜索词时改走后端模糊搜索，避免一次性加载全市场后前端过滤。
-  async function loadPage(pageNum: number, query = searchQuery, market = marketFilter, instrumentType = typeFilter) {
+  async function loadPage(
+    pageNum: number,
+    query = searchQuery,
+    market = marketFilter,
+    instrumentType = typeFilter,
+    profileStatus = profileStatusFilter,
+  ) {
     const keyword = query.trim();
     const params = new URLSearchParams();
     if (market) params.set("market", market);
     if (instrumentType) params.set("instrumentType", instrumentType);
+    if (profileStatus) params.set("profileStatus", profileStatus);
     setLoading(true);
     try {
       if (keyword) {
@@ -178,11 +186,11 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   // 初始加载 + 搜索防抖刷新
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void loadPage(0, searchQuery, marketFilter, typeFilter);
+      void loadPage(0, searchQuery, marketFilter, typeFilter, profileStatusFilter);
     }, searchQuery.trim() ? 250 : 0);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery, marketFilter, typeFilter]);
+  }, [searchQuery, marketFilter, typeFilter, profileStatusFilter]);
 
   // 当更新状态从 running 变为完成时，刷新第一页
   const wasRunningRef = useRef(false);
@@ -351,6 +359,21 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
               <option value="">全部类型</option>
               <option value="stock">股票</option>
               <option value="exchange_fund">场内基金</option>
+            </select>
+            <select
+              value={profileStatusFilter}
+              onChange={(e) => setProfileStatusFilter(e.target.value)}
+              className="rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-2 text-sm text-[var(--text)] focus:border-[var(--accent)] focus:outline-none"
+              aria-label="按画像状态过滤"
+            >
+              <option value="">全部画像</option>
+              <option value="basic_ready">基础就绪</option>
+              <option value="basic_partial">基础部分</option>
+              <option value="basic_missing">基础缺失</option>
+              <option value="ai_ready">AI 就绪</option>
+              <option value="ai_failed">AI 失败</option>
+              <option value="ai_not_configured">AI 未配置</option>
+              <option value="ai_missing">AI 缺失</option>
             </select>
           </div>
           <span className="shrink-0 text-xs text-[var(--muted)]">

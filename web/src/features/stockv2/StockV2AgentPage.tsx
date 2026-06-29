@@ -58,6 +58,37 @@ const AGENT_TASKS: AgentTaskDefinition[] = [
   { taskType: "bull_bear_debate", description: "多空视角辩论与证据交叉检查。" },
 ];
 
+type MCPToolInfo = {
+  name: string;
+  group: string;
+  purpose: string;
+};
+
+const MCP_TOOL_INFO: MCPToolInfo[] = [
+  { name: "stock_agent.search_instruments", group: "主数据查询", purpose: "按关键词、市场和类型检索 StockV2 标的主数据，用于确认候选 symbol 是否存在。" },
+  { name: "stock_agent.search_stock_profiles", group: "项目资料查询", purpose: "关键词检索股票画像，给 Agent 提供公司业务、产业链和长期跟踪摘要。" },
+  { name: "stock_agent.semantic_search_stock_profiles", group: "语义召回", purpose: "基于向量资产语义检索股票画像；未绑定可用嵌入模型或资产未就绪时会直接失败。" },
+  { name: "stock_agent.get_stock_profile", group: "项目资料查询", purpose: "读取单只股票的完整画像，用于核对候选关系、风险和已有上下文。" },
+  { name: "stock_agent.get_latest_quotes", group: "行情查询", purpose: "读取最新行情摘要，帮助 Agent 判断候选的当前交易状态和数据新鲜度。" },
+  { name: "stock_agent.get_daily_bars_summary", group: "行情查询", purpose: "读取日 K 摘要，给市场风险、趋势和波动判断提供基础数据。" },
+  { name: "stock_agent.search_news_events", group: "项目资料查询", purpose: "关键词检索本地新闻事件库，用于把主题和已有消息面记录关联起来。" },
+  { name: "stock_agent.semantic_search_news_events", group: "语义召回", purpose: "基于向量资产语义检索新闻事件；不静默降级为关键词搜索。" },
+  { name: "stock_agent.search_news_link_candidates", group: "项目资料查询", purpose: "查询新闻和股票的候选关联记录，辅助发现弱关联或待确认线索。" },
+  { name: "stock_agent.list_existing_strategies", group: "策略上下文", purpose: "列出候选标的已有策略，避免重复生成或忽略现有策略约束。" },
+  { name: "stock_agent.get_portfolio_context", group: "组合上下文", purpose: "读取组合、持仓和风险上下文；只用于分析，不允许通过 MCP 改仓位。" },
+  { name: "stock_agent.get_embedding_status", group: "语义召回", purpose: "检查嵌入模型绑定、维度、向量资产数量和可用状态，是 semantic_search 前置检查。" },
+  { name: "stock_agent.start_discovery_step", group: "过程记录", purpose: "标记机会发现某个阶段开始，让前端时间线能显示当前步骤。" },
+  { name: "stock_agent.finish_discovery_step", group: "过程记录", purpose: "记录阶段输出摘要和完成状态，形成可恢复的研究轨迹。" },
+  { name: "stock_agent.fail_discovery_step", group: "过程记录", purpose: "记录阶段失败原因，任务可保留失败上下文并继续或结束。" },
+  { name: "stock_agent.record_external_source", group: "证据记录", purpose: "记录外部公开来源摘要；后端会剥离 URL query 和 fragment，避免敏感参数入库。" },
+  { name: "stock_agent.record_evidence", group: "证据记录", purpose: "记录支撑候选的证据，可关联到 step、candidate 和来源。" },
+  { name: "stock_agent.record_candidate", group: "候选记录", purpose: "记录经过主数据校验的候选股票或 ETF，包括关系、评分、风险和理由。" },
+  { name: "stock_agent.update_candidate", group: "候选记录", purpose: "在研究过程中更新候选评分、排名、理由、风险或状态。" },
+  { name: "stock_agent.submit_result", group: "最终回填", purpose: "提交最终结构化结果。主程序会校验 taskID、taskType、schema 和候选 symbol 后再落库。" },
+];
+
+const MCP_TOOL_INFO_BY_NAME = new Map(MCP_TOOL_INFO.map((item) => [item.name, item]));
+
 export function StockV2AgentPage({ actions }: { actions: AppActions }) {
   const [providerDrawer, setProviderDrawer] = useState<ProviderDrawerState>({ type: "closed" });
   const [modelDrawer, setModelDrawer] = useState<ModelDrawerState>({ type: "closed" });
@@ -359,6 +390,8 @@ function AgentMCPSection({
   status: StockV2AgentMCPStatus | null;
   onRetry: () => Promise<StockV2AgentMCPStatus | null>;
 }) {
+  const [showTools, setShowTools] = useState(false);
+
   if (loading) return <p className="text-xs text-[var(--muted)]">加载中…</p>;
   if (error) {
     return (
@@ -369,23 +402,76 @@ function AgentMCPSection({
     );
   }
   if (!status) return <p className="text-xs text-[var(--muted)]">暂无 MCP 状态。</p>;
+  const toolCount = status.requiredTools?.length || 0;
   return (
-    <div className="grid gap-2">
-      <div className="rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
-        <div className="flex flex-wrap items-center gap-2">
-          <strong className="text-sm">{status.serverName || "stock_agent"}</strong>
-          <Pill tone={status.enabled ? "good" : "warn"}>{status.enabled ? "可用" : "未启动"}</Pill>
-          <Pill tone="neutral">{status.transport || "loopback_http"}</Pill>
+    <>
+      <div className="grid gap-2">
+        <div className="rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <strong className="text-sm">{status.serverName || "stock_agent"}</strong>
+            <Pill tone={status.enabled ? "good" : "warn"}>{status.enabled ? "可用" : "未启动"}</Pill>
+            <Pill tone="neutral">{status.transport || "loopback_http"}</Pill>
+          </div>
+          <div className="mt-2 grid gap-1">
+            <Row label="Endpoint" value={status.url || "(未启动)"} />
+            <Row label="Tools" value={toolCount > 0 ? `${toolCount} 个工具` : "-"} />
+          </div>
+          {toolCount > 0 ? (
+            <div className="mt-2 flex justify-end">
+              <Button onClick={() => setShowTools(true)}>
+                <Robot size={12} className="mr-1" />
+                查看工具
+              </Button>
+            </div>
+          ) : null}
         </div>
-        <div className="mt-2 grid gap-1">
+        <div className="flex justify-end">
+          <Button onClick={() => void onRetry()}>刷新</Button>
+        </div>
+      </div>
+      {showTools ? <MCPToolsDrawer status={status} onClose={() => setShowTools(false)} /> : null}
+    </>
+  );
+}
+
+function MCPToolsDrawer({ status, onClose }: { status: StockV2AgentMCPStatus; onClose: () => void }) {
+  const tools = (status.requiredTools || []).map((name) => {
+    return MCP_TOOL_INFO_BY_NAME.get(name) || {
+      name,
+      group: "未分类",
+      purpose: "当前前端没有记录该工具说明，请以后端 tools/list 描述为准。",
+    };
+  });
+  return (
+    <Drawer
+      title="stock_agent MCP 工具"
+      subtitle={`${status.transport || "loopback_http"} · ${tools.length} 个工具`}
+      onClose={onClose}
+      width={760}
+    >
+      <div className="grid gap-4 text-sm">
+        <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs">
+          <Row label="Server" value={status.serverName || "stock_agent"} />
           <Row label="Endpoint" value={status.url || "(未启动)"} />
-          <Row label="Tools" value={status.requiredTools?.join(", ") || "-"} />
+        </div>
+        <Notice tone="warn">
+          这些 MCP 工具只给 Codex CLI 的股票 Agent 使用：查询项目内资料、记录研究过程、回填结构化结果。外部公开资料搜索仍由 Codex CLI 自己完成。
+        </Notice>
+        <div className="grid gap-2">
+          {tools.map((tool) => (
+            <div key={tool.name} className="rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <code className="break-all rounded bg-[var(--surface-soft)] px-1.5 py-0.5 font-mono text-xs text-[var(--text)]">
+                  {tool.name}
+                </code>
+                <Pill tone="neutral">{tool.group}</Pill>
+              </div>
+              <p className="mt-2 mb-0 text-xs leading-relaxed text-[var(--muted-strong)]">{tool.purpose}</p>
+            </div>
+          ))}
         </div>
       </div>
-      <div className="flex justify-end">
-        <Button onClick={() => void onRetry()}>刷新</Button>
-      </div>
-    </div>
+    </Drawer>
   );
 }
 
@@ -645,7 +731,6 @@ function AgentTaskProfileSection({
                 <div className="flex flex-wrap items-center gap-2">
                   <strong className="text-sm">{stockV2AgentTaskTypeLabel(task.taskType)}</strong>
                   <Pill tone={configurable ? "good" : "neutral"}>{configurable ? "已开放" : "未开放"}</Pill>
-                  {profile?.maxBudget ? <Pill tone="neutral">预算 {profile.maxBudget}</Pill> : null}
                 </div>
                 <p className="mt-1 text-[var(--muted)]">{task.description}</p>
               </div>

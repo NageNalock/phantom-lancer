@@ -48,7 +48,8 @@ export function StockV2OpportunityCandidateDrawer({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
-  const [strategyRunId, setStrategyRunId] = useState<string | null>(null);
+  const [lastStrategyRunId, setLastStrategyRunId] = useState<string | null>(null);
+  const [agentRunDrawerId, setAgentRunDrawerId] = useState<string | null>(null);
 
   async function load() {
     setLoading(true);
@@ -88,7 +89,8 @@ export function StockV2OpportunityCandidateDrawer({
         { method: "POST", body: {} },
       );
       actions.setToast("策略生成已启动，完成后进入策略草案列表", "good");
-      setStrategyRunId(res.id);
+      setLastStrategyRunId(res.id);
+      setAgentRunDrawerId(res.id);
     } catch (err) {
       actions.setToast(friendlyError(err), "danger");
     } finally {
@@ -118,11 +120,17 @@ export function StockV2OpportunityCandidateDrawer({
         footer={
           <Button
             tone={strategyStarted ? "neutral" : "primary"}
-            disabled={generating || strategyStarted}
-            onClick={() => void generateStrategy()}
+            disabled={generating || (strategyStarted && !lastStrategyRunId)}
+            onClick={() => {
+              if (strategyStarted) {
+                if (lastStrategyRunId) setAgentRunDrawerId(lastStrategyRunId);
+                return;
+              }
+              void generateStrategy();
+            }}
           >
-            <Sparkle size={14} className="mr-1.5" />
-            {strategyStarted ? "已生成策略" : generating ? "提交中…" : "生成策略草案"}
+            {strategyStarted && lastStrategyRunId ? <ArrowSquareOut size={14} className="mr-1.5" /> : <Sparkle size={14} className="mr-1.5" />}
+            {strategyStarted ? (lastStrategyRunId ? "查看 Agent 运行" : "已生成策略") : generating ? "提交中…" : "生成策略草案"}
           </Button>
         }
       >
@@ -176,12 +184,20 @@ export function StockV2OpportunityCandidateDrawer({
             <p className="mt-1 text-[var(--muted-strong)]">
               {strategyStarted ? "已从该候选发起策略生成，结果在策略草案列表查看。" : "尚无关联策略。可点击下方「生成策略草案」。"}
             </p>
+            {lastStrategyRunId ? (
+              <div className="mt-2">
+                <Button onClick={() => setAgentRunDrawerId(lastStrategyRunId)}>
+                  <ArrowSquareOut size={12} className="mr-1" />
+                  查看运行 {lastStrategyRunId.slice(0, 8)}
+                </Button>
+              </div>
+            ) : null}
           </div>
         </div>
       </Drawer>
 
-      {strategyRunId ? (
-        <StockV2AgentRunDetailDrawer actions={actions} runId={strategyRunId} onClose={() => setStrategyRunId(null)} />
+      {agentRunDrawerId ? (
+        <StockV2AgentRunDetailDrawer actions={actions} runId={agentRunDrawerId} onClose={() => setAgentRunDrawerId(null)} />
       ) : null}
     </>
   );

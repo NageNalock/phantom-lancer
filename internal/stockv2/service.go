@@ -25,6 +25,8 @@ type Service struct {
 	bgWg          sync.WaitGroup
 	settings      StockV2Settings
 	baseProfileMu sync.Mutex
+	embeddingMu   sync.Mutex
+	embeddingRun  bool
 
 	universeSource  *UniverseDataSource
 	dailyBarsSource *DailyBarsSource
@@ -944,8 +946,9 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	// 数据资产自动维护 / base profile 自动维护任一开启都需要后台调度。
 	// 任一开关从关→开，或数据资产周期变化时重启后台，以拾取新 ticker。
 	newsBG := s.hasEnabledNewsSources(ctx)
-	needBG := settings.AutoUpdateEnabled || settings.BaseProfileAutoMaintainEnabled || newsBG
-	prevNeedBG := prevAuto || prevBaseProfile || prevNewsBG
+	embeddingBG := s.hasEmbeddingAutoMaintenanceEnabled(ctx)
+	needBG := settings.AutoUpdateEnabled || settings.BaseProfileAutoMaintainEnabled || newsBG || embeddingBG
+	prevNeedBG := prevAuto || prevBaseProfile || prevNewsBG || embeddingBG
 	if needBG {
 		if !prevNeedBG ||
 			(prevAuto && prevInterval != settings.UpdateIntervalSec) ||
@@ -994,8 +997,8 @@ func (s *Service) GetInstruments(ctx context.Context, limit, offset int) ([]Stoc
 	return s.store.GetInstruments(ctx, limit, offset)
 }
 
-func (s *Service) GetInstrumentsFiltered(ctx context.Context, market, instrumentType string, limit, offset int) ([]StockV2Instrument, error) {
-	return s.store.GetInstrumentsFiltered(ctx, market, instrumentType, limit, offset)
+func (s *Service) GetInstrumentsFiltered(ctx context.Context, market, instrumentType, profileStatus string, limit, offset int) ([]StockV2Instrument, error) {
+	return s.store.GetInstrumentsFiltered(ctx, market, instrumentType, profileStatus, limit, offset)
 }
 
 // CountInstruments 获取标的主数据总数
@@ -1003,8 +1006,8 @@ func (s *Service) CountInstruments(ctx context.Context) (int, error) {
 	return s.store.CountInstruments(ctx)
 }
 
-func (s *Service) CountInstrumentsFiltered(ctx context.Context, market, instrumentType string) (int, error) {
-	return s.store.CountInstrumentsFiltered(ctx, market, instrumentType)
+func (s *Service) CountInstrumentsFiltered(ctx context.Context, market, instrumentType, profileStatus string) (int, error) {
+	return s.store.CountInstrumentsFiltered(ctx, market, instrumentType, profileStatus)
 }
 
 // GetInstrumentsByMarket 根据市场获取股票列表
@@ -1023,14 +1026,14 @@ func (s *Service) SearchInstruments(ctx context.Context, keyword string, limit i
 	return s.store.SearchInstruments(ctx, keyword, limit)
 }
 
-func (s *Service) SearchInstrumentsFiltered(ctx context.Context, keyword, market, instrumentType string, limit int) ([]StockV2Instrument, error) {
+func (s *Service) SearchInstrumentsFiltered(ctx context.Context, keyword, market, instrumentType, profileStatus string, limit int) ([]StockV2Instrument, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	if limit > 100 {
 		limit = 100
 	}
-	return s.store.SearchInstrumentsFiltered(ctx, keyword, market, instrumentType, limit)
+	return s.store.SearchInstrumentsFiltered(ctx, keyword, market, instrumentType, profileStatus, limit)
 }
 
 // StartBackground 启动后台任务
@@ -1070,6 +1073,13 @@ func (s *Service) StartBackground(ctx context.Context) {
 	go func() {
 		defer s.bgWg.Done()
 		s.runBaseProfileMaintenanceScheduler(bgCtx)
+	}()
+
+	// embedding asset 维护复用现有资产表和模型配置，不引入独立任务队列。
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runEmbeddingMaintenanceScheduler(bgCtx)
 	}()
 }
 

@@ -61,7 +61,7 @@ func (s *Service) GetMonitorTask(ctx context.Context, taskType string) (MonitorT
 	return MonitorTask{Definition: def, Config: cfg, LatestRun: latest}, nil
 }
 
-// UpdateMonitorTaskConfig 修改任务配置(开关/周期/范围/敏感度/冷却/Agent 开关与预算)。
+// UpdateMonitorTaskConfig 修改任务配置(开关/周期/范围/敏感度/冷却/Agent 开关)。
 func (s *Service) UpdateMonitorTaskConfig(ctx context.Context, taskType string, req RequestUpdateMonitorTaskConfig) (MonitorTask, error) {
 	def, ok := monitorTaskDefinition(taskType)
 	if !ok {
@@ -92,9 +92,6 @@ func (s *Service) UpdateMonitorTaskConfig(ctx context.Context, taskType string, 
 	}
 	if req.AgentDoublecheckEnabled != nil {
 		current.AgentDoublecheckEnabled = *req.AgentDoublecheckEnabled
-	}
-	if req.AgentBudget != nil && *req.AgentBudget >= 0 {
-		current.AgentBudget = *req.AgentBudget
 	}
 	if err := s.store.UpsertMonitorTaskConfig(ctx, taskType, current); err != nil {
 		return MonitorTask{}, err

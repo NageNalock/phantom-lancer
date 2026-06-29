@@ -198,13 +198,20 @@ type OpportunityResult struct {
 }
 
 type EmbeddingConfig struct {
-	ID               string    `json:"id"`
-	EmbeddingModelID string    `json:"embeddingModelId,omitempty"`
-	Enabled          bool      `json:"enabled"`
-	LastProbeAt      time.Time `json:"lastProbeAt,omitempty"`
-	LastProbeStatus  string    `json:"lastProbeStatus,omitempty"`
-	LastError        string    `json:"lastError,omitempty"`
-	UpdatedAt        time.Time `json:"updatedAt"`
+	ID                      string    `json:"id"`
+	EmbeddingModelID        string    `json:"embeddingModelId,omitempty"`
+	Enabled                 bool      `json:"enabled"`
+	AutoMaintainEnabled     bool      `json:"autoMaintainEnabled"`
+	MaintainIntervalSeconds int       `json:"maintainIntervalSeconds"`
+	MaintainBatchSize       int       `json:"maintainBatchSize"`
+	MaintainRateLimitMs     int       `json:"maintainRateLimitMs"`
+	LastProbeAt             time.Time `json:"lastProbeAt,omitempty"`
+	LastProbeStatus         string    `json:"lastProbeStatus,omitempty"`
+	LastError               string    `json:"lastError,omitempty"`
+	LastMaintainAt          time.Time `json:"lastMaintainAt,omitempty"`
+	NextMaintainAt          time.Time `json:"nextMaintainAt,omitempty"`
+	LastMaintainResult      string    `json:"lastMaintainResult,omitempty"`
+	UpdatedAt               time.Time `json:"updatedAt"`
 }
 
 type EmbeddingAsset struct {
@@ -258,8 +265,12 @@ type RequestGenerateStrategyFromOpportunityCandidate struct {
 }
 
 type RequestUpdateEmbeddingConfig struct {
-	EmbeddingModelID *string `json:"embeddingModelId,omitempty"`
-	Enabled          *bool   `json:"enabled,omitempty"`
+	EmbeddingModelID        *string `json:"embeddingModelId,omitempty"`
+	Enabled                 *bool   `json:"enabled,omitempty"`
+	AutoMaintainEnabled     *bool   `json:"autoMaintainEnabled,omitempty"`
+	MaintainIntervalSeconds *int    `json:"maintainIntervalSeconds,omitempty"`
+	MaintainBatchSize       *int    `json:"maintainBatchSize,omitempty"`
+	MaintainRateLimitMs     *int    `json:"maintainRateLimitMs,omitempty"`
 }
 
 type RequestRebuildEmbeddingAssets struct {
@@ -269,26 +280,43 @@ type RequestRebuildEmbeddingAssets struct {
 }
 
 type EmbeddingStatus struct {
-	Ready               bool               `json:"ready"`
-	Available           bool               `json:"available"`
-	Status              string             `json:"status"`
-	Code                string             `json:"code,omitempty"`
-	Message             string             `json:"message,omitempty"`
-	ErrorCode           string             `json:"errorCode,omitempty"`
-	ErrorMessage        string             `json:"errorMessage,omitempty"`
-	Config              EmbeddingConfig    `json:"config"`
-	Model               *AgentModelProfile `json:"model,omitempty"`
-	ModelID             string             `json:"modelId,omitempty"`
-	ProviderID          string             `json:"providerId,omitempty"`
-	ModelName           string             `json:"modelName,omitempty"`
-	EmbeddingProtocol   string             `json:"embeddingProtocol,omitempty"`
-	EmbeddingDimensions int                `json:"embeddingDimensions,omitempty"`
-	ReadyAssets         int                `json:"readyAssets"`
-	StaleAssets         int                `json:"staleAssets"`
-	FailedAssets        int                `json:"failedAssets"`
-	ReadyAssetCount     int                `json:"readyAssetCount"`
-	StaleAssetCount     int                `json:"staleAssetCount"`
-	FailedAssetCount    int                `json:"failedAssetCount"`
+	Ready               bool                       `json:"ready"`
+	Available           bool                       `json:"available"`
+	Status              string                     `json:"status"`
+	Code                string                     `json:"code,omitempty"`
+	Message             string                     `json:"message,omitempty"`
+	ErrorCode           string                     `json:"errorCode,omitempty"`
+	ErrorMessage        string                     `json:"errorMessage,omitempty"`
+	Config              EmbeddingConfig            `json:"config"`
+	Model               *AgentModelProfile         `json:"model,omitempty"`
+	ModelID             string                     `json:"modelId,omitempty"`
+	ProviderID          string                     `json:"providerId,omitempty"`
+	ModelName           string                     `json:"modelName,omitempty"`
+	EmbeddingProtocol   string                     `json:"embeddingProtocol,omitempty"`
+	EmbeddingDimensions int                        `json:"embeddingDimensions,omitempty"`
+	ReadyAssets         int                        `json:"readyAssets"`
+	StaleAssets         int                        `json:"staleAssets"`
+	FailedAssets        int                        `json:"failedAssets"`
+	MissingAssetCount   int                        `json:"missingAssetCount"`
+	ReadyAssetCount     int                        `json:"readyAssetCount"`
+	StaleAssetCount     int                        `json:"staleAssetCount"`
+	FailedAssetCount    int                        `json:"failedAssetCount"`
+	AssetBreakdown      []EmbeddingAssetBreakdown  `json:"assetBreakdown,omitempty"`
+	Maintenance         EmbeddingMaintenanceStatus `json:"maintenance"`
+}
+
+type EmbeddingAssetBreakdown struct {
+	Category          string `json:"category"`
+	ReadyAssetCount   int    `json:"readyAssetCount"`
+	MissingAssetCount int    `json:"missingAssetCount"`
+}
+
+type EmbeddingMaintenanceStatus struct {
+	Enabled    bool      `json:"enabled"`
+	Running    bool      `json:"running"`
+	LastRunAt  time.Time `json:"lastRunAt,omitempty"`
+	NextRunAt  time.Time `json:"nextRunAt,omitempty"`
+	LastResult string    `json:"lastResult,omitempty"`
 }
 
 type EmbeddingRebuildResult struct {

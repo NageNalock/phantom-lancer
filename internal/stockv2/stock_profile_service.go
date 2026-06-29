@@ -83,6 +83,7 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 		_, _ = s.store.CreateStockProfileUpdateTask(ctx, task)
 		return StockProfileUpdateResult{}, err
 	}
+	s.markStockProfileEmbeddingStale(ctx, profile.Symbol)
 
 	var agentRun *AgentRun
 	var strictErr error
@@ -144,7 +145,8 @@ func (s *Service) RebuildStockProfiles(ctx context.Context) (RebuildStockProfile
 			break
 		}
 		for _, instrument := range instruments {
-			if _, err := s.store.UpsertStockProfile(ctx, s.stockProfileFromInstrument(ctx, instrument, false)); err != nil {
+			profile := s.stockProfileFromInstrument(ctx, instrument, false)
+			if _, err := s.store.UpsertStockProfile(ctx, profile); err != nil {
 				result.Failed++
 				result.FailedItems = append(result.FailedItems, UpdateFailure{
 					Symbol: instrument.Symbol,
@@ -152,6 +154,7 @@ func (s *Service) RebuildStockProfiles(ctx context.Context) (RebuildStockProfile
 				})
 				continue
 			}
+			s.markStockProfileEmbeddingStale(ctx, profile.Symbol)
 			result.Success++
 		}
 	}
@@ -501,7 +504,12 @@ func (s *Service) applyStockProfileEnhancementResult(ctx context.Context, symbol
 	profile.AIProfileConfidence = confidence
 	profile.AIProfileError = ""
 	profile.AIProfileUpdatedAt = time.Now()
-	return s.store.UpsertStockProfile(ctx, profile)
+	updated, err := s.store.UpsertStockProfile(ctx, profile)
+	if err != nil {
+		return StockProfile{}, err
+	}
+	s.markStockProfileEmbeddingStale(ctx, updated.Symbol)
+	return updated, nil
 }
 
 func (s *Service) markStockProfileAIEnhancementFailed(ctx context.Context, run AgentRun, message string) {
@@ -569,8 +577,22 @@ func (s *Service) upsertInstrumentWithProfile(ctx context.Context, instrument St
 	if err := s.store.UpsertInstrument(ctx, instrument); err != nil {
 		return err
 	}
-	_, err := s.store.UpsertStockProfile(ctx, s.stockProfileFromInstrument(ctx, instrument, false))
-	return err
+	profile, err := s.store.UpsertStockProfile(ctx, s.stockProfileFromInstrument(ctx, instrument, false))
+	if err != nil {
+		return err
+	}
+	s.markStockProfileEmbeddingStale(ctx, profile.Symbol)
+	return nil
+}
+
+func (s *Service) markStockProfileEmbeddingStale(ctx context.Context, symbol string) {
+	symbol = strings.TrimSpace(symbol)
+	if symbol == "" {
+		return
+	}
+	if err := s.store.MarkEmbeddingAssetsStaleForObject(ctx, EmbeddingObjectStockProfile, symbol); err != nil && s.log != nil {
+		s.log.Warn("mark stock profile embedding stale failed", "symbol", safelog.Text(symbol, 80), "error", safelog.Text(err.Error(), 240))
+	}
 }
 
 func (s *Service) stockProfileFromInstrument(ctx context.Context, instrument StockV2Instrument, enrichPublicSources bool) StockProfile {

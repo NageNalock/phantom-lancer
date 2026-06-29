@@ -94,13 +94,23 @@ func (s *Service) buildNewsLinkCandidates(ctx context.Context, event NewsEvent) 
 	}
 
 	text := normalizeNewsMatchText(event.Title + " " + event.Summary + " " + event.Content)
-	items := make([]NewsLinkCandidate, 0)
+	accBySymbol := make(map[string]*newsCandidateAccumulator)
 	for _, profile := range profiles {
 		acc := newNewsCandidateAccumulator(event, profile)
 		matchProfileAgainstNews(text, profile, acc)
 		if !acc.hasTextEvidence() {
 			continue
 		}
+		accBySymbol[profile.Symbol] = acc
+	}
+	s.addSemanticNewsProfileCandidates(ctx, event, profiles, accBySymbol)
+
+	items := make([]NewsLinkCandidate, 0, len(accBySymbol))
+	for _, acc := range accBySymbol {
+		if !acc.hasTextEvidence() {
+			continue
+		}
+		profile := acc.profile
 		if _, ok := held[profile.Symbol]; ok {
 			acc.addBoost(newsBoostHolding, "当前持仓 boost")
 		}
@@ -116,6 +126,47 @@ func (s *Service) buildNewsLinkCandidates(ctx context.Context, event NewsEvent) 
 		return items[i].Score > items[j].Score
 	})
 	return items, nil
+}
+
+func (s *Service) addSemanticNewsProfileCandidates(ctx context.Context, event NewsEvent, profiles []StockProfile, accBySymbol map[string]*newsCandidateAccumulator) {
+	query := strings.TrimSpace(newsEventEmbeddingText(event))
+	if query == "" {
+		return
+	}
+	hits, err := s.SemanticSearchStockProfiles(ctx, SemanticSearchRequest{Query: query, Limit: 12})
+	if err != nil {
+		return
+	}
+	profileBySymbol := make(map[string]StockProfile, len(profiles))
+	for _, profile := range profiles {
+		profileBySymbol[profile.Symbol] = profile
+	}
+	for _, hit := range hits {
+		profile := hit.Profile
+		if existing, ok := profileBySymbol[profile.Symbol]; ok {
+			profile = existing
+		}
+		if strings.TrimSpace(profile.Symbol) == "" {
+			continue
+		}
+		acc := accBySymbol[profile.Symbol]
+		if acc == nil {
+			acc = newNewsCandidateAccumulator(event, profile)
+			accBySymbol[profile.Symbol] = acc
+		}
+		score := semanticNewsProfileScore(hit.Score)
+		acc.addMatch(NewsLinkMatchSemanticProfile, score, firstNonEmptyOpportunity(profile.Name, profile.Symbol), "语义召回画像 "+firstNonEmptyOpportunity(profile.Name, profile.Symbol))
+	}
+}
+
+func semanticNewsProfileScore(score float64) float64 {
+	if score < 0 {
+		score = 0
+	}
+	if score > 1 {
+		score = 1
+	}
+	return 45 + score*40
 }
 
 func (s *Service) listAllStockProfiles(ctx context.Context) ([]StockProfile, error) {

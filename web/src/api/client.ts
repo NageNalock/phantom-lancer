@@ -27,12 +27,19 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
   }
 
   const response = await fetch(path, init);
-  const payload = (await response.json().catch(() => ({}))) as {
-    error?: { code?: string; message?: string };
-  };
+  // 后端部分错误（如 stockv2 的 http.Error）以 text/plain 返回：只读一次 body，再尝试解析 JSON，
+  // 否则像「embedding dimensions mismatch」这样的原因会被吞成「请求失败：400」。
+  let payload: { error?: { code?: string; message?: string } } = {};
+  const rawText = await response.text().catch(() => "");
+  try {
+    const parsed = rawText ? JSON.parse(rawText) : {};
+    payload = parsed && typeof parsed === "object" ? parsed as { error?: { code?: string; message?: string } } : {};
+  } catch {
+    payload = {};
+  }
 
   if (!response.ok) {
-    const error = new Error(payload.error?.message || `请求失败：${response.status}`) as ApiError;
+    const error = new Error(payload.error?.message || rawText || `请求失败：${response.status}`) as ApiError;
     error.code = payload.error?.code || "";
     error.status = response.status;
     error.payload = payload;
@@ -81,6 +88,12 @@ export function friendlyError(error: unknown): string {
   if (err.code === "model_not_supported") return "当前账号 plan 不支持该模型。";
   if (err.code === "oauth_settings_invalid") return `OAuth 设置无效：${err.message}`;
   if (err.code === "model_refresh_failed") return `模型刷新失败：${err.message}`;
+  // stockv2 后端部分错误以 err.Error() 文本返回（无 code），按消息映射中文
+  if (err.message === "embedding dimensions mismatch") return "嵌入维度不一致：模型预设维度与 API 实际返回不一致。可在 Agent 页清空维度（由 API 返回决定）或改为正确值";
+  if (err.message === "embedding_model_not_configured") return "未绑定嵌入模型";
+  if (err.message === "embedding_model_unavailable") return "嵌入模型不可用（已禁用或状态非 available）";
+  if (err.message === "embedding_asset_not_ready") return "向量资产未就绪，请先维护向量化";
+  if (err.message.includes("modelType=embedding")) return "该模型不是可用的 embedding 类型";
   return err.message || "请求失败";
 }
 

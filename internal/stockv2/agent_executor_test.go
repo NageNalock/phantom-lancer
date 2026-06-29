@@ -199,6 +199,30 @@ func TestBuildOperationReviewPromptDocumentsReviewContract(t *testing.T) {
 	}
 }
 
+func TestBuildOpportunityDiscoveryPromptRequiresEmbeddingSemanticRecall(t *testing.T) {
+	prompt := buildOpportunityDiscoveryPrompt("task-opp", OpportunityDiscoveryContext{
+		BuiltAt: time.Now(),
+		Opportunity: Opportunity{
+			ID:         "opp-1",
+			Title:      "AI 端侧机会",
+			UserThesis: "端侧模型带动算力链",
+		},
+		DiscoveryRun: OpportunityDiscoveryRun{ID: "run-1", OpportunityID: "opp-1"},
+	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
+
+	for _, want := range []string{
+		"stock_agent.get_embedding_status",
+		"stock_agent.semantic_search_stock_profiles",
+		"stock_agent.semantic_search_news_events",
+		"embedding_status_check",
+		"Do not silently fall back",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestBuildOperationReviewPromptIncludesDebugGoogleNewsSearchCheck(t *testing.T) {
 	prompt := buildOperationReviewPrompt("task-debug", AgentContextPack{
 		Hit: MonitorHit{

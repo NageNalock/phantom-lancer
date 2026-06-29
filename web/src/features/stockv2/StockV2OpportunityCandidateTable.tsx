@@ -38,7 +38,9 @@ export function StockV2OpportunityCandidateTable({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
-  const [strategyRunId, setStrategyRunId] = useState<string | null>(null);
+  const [lastStrategyRunId, setLastStrategyRunId] = useState<string | null>(null);
+  const [agentRunDrawerId, setAgentRunDrawerId] = useState<string | null>(null);
+  const [candidateStrategyRunIds, setCandidateStrategyRunIds] = useState<Record<string, string>>({});
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -54,8 +56,16 @@ export function StockV2OpportunityCandidateTable({
       const res = await actions.api<StockV2AgentListResponse<StockV2OpportunityCandidate>>(
         `/api/stockv2/opportunity-discovery-runs/${encodeURIComponent(runId)}/candidates?${params}`,
       );
-      setItems(res.items || []);
-      setTotal(res.total ?? res.items?.length ?? 0);
+      const nextItems = res.items || [];
+      const nextTotal = res.total ?? nextItems.length;
+      const nextTotalPages = Math.max(1, Math.ceil(nextTotal / PAGE_SIZE));
+      setTotal(nextTotal);
+      if (nextPage > nextTotalPages) {
+        setItems([]);
+        setPage(nextTotalPages);
+        return;
+      }
+      setItems(nextItems);
     } catch (err) {
       const status = (err as ApiError).status;
       setError(status === 404 ? "候选池暂不可用（后端尚未实现 404）。" : friendlyError(err));
@@ -67,11 +77,13 @@ export function StockV2OpportunityCandidateTable({
   }
 
   useEffect(() => {
+    setPage(1);
     void load(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId]);
 
   useEffect(() => {
+    if (page === 1) return;
     void load(page);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
@@ -84,7 +96,9 @@ export function StockV2OpportunityCandidateTable({
         { method: "POST", body: {} },
       );
       actions.setToast("策略生成已启动，完成后进入策略草案列表", "good");
-      setStrategyRunId(res.id);
+      setLastStrategyRunId(res.id);
+      setAgentRunDrawerId(res.id);
+      setCandidateStrategyRunIds((prev) => ({ ...prev, [c.id]: res.id }));
       void load(page);
     } catch (err) {
       actions.setToast(friendlyError(err), "danger");
@@ -149,6 +163,7 @@ export function StockV2OpportunityCandidateTable({
           <tbody>
             {items.map((c) => {
               const strategyStarted = c.status === "strategy_requested" || c.status === "strategy_generated";
+              const strategyRunId = candidateStrategyRunIds[c.id] || "";
               const busy = updatingId === c.id;
               return (
                 <tr key={c.id} className="border-b border-[var(--line)] align-middle">
@@ -186,12 +201,18 @@ export function StockV2OpportunityCandidateTable({
                     <div className="flex items-center gap-1">
                       <Button
                         tone={strategyStarted ? "neutral" : "primary"}
-                        disabled={busy}
-                        title={strategyStarted ? "已请求策略生成" : "从该候选生成策略草案"}
-                        onClick={() => void generateStrategy(c)}
+                        disabled={busy || (strategyStarted && !strategyRunId)}
+                        title={strategyStarted ? (strategyRunId ? "查看策略生成运行" : "已请求策略生成") : "从该候选生成策略草案"}
+                        onClick={() => {
+                          if (strategyStarted) {
+                            if (strategyRunId) setAgentRunDrawerId(strategyRunId);
+                            return;
+                          }
+                          void generateStrategy(c);
+                        }}
                       >
                         <Sparkle size={12} className="mr-1" />
-                        {strategyStarted ? "已生成" : "策略"}
+                        {strategyStarted ? (strategyRunId ? "查看运行" : "已请求") : "策略"}
                       </Button>
                       <Button disabled={busy || c.status === "rejected"} title="查看证据" onClick={() => onOpenCandidate(c)}>
                         <Eye size={12} />
@@ -214,11 +235,11 @@ export function StockV2OpportunityCandidateTable({
         <SimplePager loading={loading} page={page} pageSize={PAGE_SIZE} total={total} totalPages={totalPages} onPage={setPage} />
       </div>
 
-      {strategyRunId ? (
+      {lastStrategyRunId ? (
         <div className="mt-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-[var(--muted-strong)]">策略生成运行已启动（{strategyRunId.slice(0, 8)}）</span>
-            <Button onClick={() => setStrategyRunId(strategyRunId)}>
+            <span className="text-[var(--muted-strong)]">策略生成运行已启动（{lastStrategyRunId.slice(0, 8)}）</span>
+            <Button onClick={() => setAgentRunDrawerId(lastStrategyRunId)}>
               <ArrowSquareOut size={12} className="mr-1" />
               查看 Agent 运行
             </Button>
@@ -226,11 +247,11 @@ export function StockV2OpportunityCandidateTable({
         </div>
       ) : null}
 
-      {strategyRunId ? (
+      {agentRunDrawerId ? (
         <StockV2AgentRunDetailDrawer
           actions={actions}
-          runId={strategyRunId}
-          onClose={() => setStrategyRunId(null)}
+          runId={agentRunDrawerId}
+          onClose={() => setAgentRunDrawerId(null)}
         />
       ) : null}
 

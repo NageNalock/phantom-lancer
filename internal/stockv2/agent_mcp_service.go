@@ -221,7 +221,7 @@ func (s *Service) mcpSearchInstruments(args json.RawMessage) (any, *mcpError) {
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "Invalid arguments"}
 	}
-	items, err := s.SearchInstrumentsFiltered(contextFromMCP(), firstNonEmptyOpportunity(p.Query, p.Keyword), p.Market, p.InstrumentType, normalizedMCPLimit(p.Limit))
+	items, err := s.SearchInstrumentsFiltered(contextFromMCP(), firstNonEmptyOpportunity(p.Query, p.Keyword), p.Market, p.InstrumentType, "", normalizedMCPLimit(p.Limit))
 	return mcpResultOrError(items, err)
 }
 

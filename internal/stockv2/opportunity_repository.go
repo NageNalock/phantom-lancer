@@ -681,46 +681,73 @@ func (s *Store) GetOpportunityResultByRunID(ctx context.Context, runID string) (
 
 func (s *Store) GetEmbeddingConfig(ctx context.Context) (EmbeddingConfig, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, COALESCE(embedding_model_id,''), enabled, last_probe_at,
-		       COALESCE(last_probe_status,''), COALESCE(last_error,''), updated_at
+		SELECT id, COALESCE(embedding_model_id,''), enabled, auto_maintain_enabled,
+		       maintain_interval_seconds, maintain_batch_size, maintain_rate_limit_ms,
+		       last_probe_at, COALESCE(last_probe_status,''), COALESCE(last_error,''),
+		       last_maintain_at, next_maintain_at, COALESCE(last_maintain_result,''), updated_at
 		FROM stockv2_embedding_config
 		WHERE id = ?
 	`, EmbeddingConfigIDDefault)
 	var item EmbeddingConfig
-	var enabled int
-	var lastProbe sql.NullTime
-	if err := row.Scan(&item.ID, &item.EmbeddingModelID, &enabled, &lastProbe, &item.LastProbeStatus, &item.LastError, &item.UpdatedAt); err != nil {
+	var enabled, autoMaintain int
+	var lastProbe, lastMaintain, nextMaintain sql.NullTime
+	if err := row.Scan(
+		&item.ID, &item.EmbeddingModelID, &enabled, &autoMaintain,
+		&item.MaintainIntervalSeconds, &item.MaintainBatchSize, &item.MaintainRateLimitMs,
+		&lastProbe, &item.LastProbeStatus, &item.LastError,
+		&lastMaintain, &nextMaintain, &item.LastMaintainResult, &item.UpdatedAt,
+	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return EmbeddingConfig{}, ErrEmbeddingConfigNotFound
 		}
 		return EmbeddingConfig{}, wrapError(err, "get embedding config")
 	}
 	item.Enabled = enabled != 0
+	item.AutoMaintainEnabled = autoMaintain != 0
 	if lastProbe.Valid {
 		item.LastProbeAt = lastProbe.Time
 	}
-	return item, nil
+	if lastMaintain.Valid {
+		item.LastMaintainAt = lastMaintain.Time
+	}
+	if nextMaintain.Valid {
+		item.NextMaintainAt = nextMaintain.Time
+	}
+	return normalizeEmbeddingConfig(item), nil
 }
 
 func (s *Store) UpsertEmbeddingConfig(ctx context.Context, item EmbeddingConfig) (EmbeddingConfig, error) {
 	if item.ID == "" {
 		item.ID = EmbeddingConfigIDDefault
 	}
+	item = normalizeEmbeddingConfig(item)
 	item.UpdatedAt = time.Now()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO stockv2_embedding_config
-			(id, embedding_model_id, enabled, last_probe_at, last_probe_status, last_error, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+			(id, embedding_model_id, enabled, auto_maintain_enabled, maintain_interval_seconds,
+			 maintain_batch_size, maintain_rate_limit_ms, last_probe_at, last_probe_status,
+			 last_error, last_maintain_at, next_maintain_at, last_maintain_result, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			embedding_model_id = excluded.embedding_model_id,
 			enabled = excluded.enabled,
+			auto_maintain_enabled = excluded.auto_maintain_enabled,
+			maintain_interval_seconds = excluded.maintain_interval_seconds,
+			maintain_batch_size = excluded.maintain_batch_size,
+			maintain_rate_limit_ms = excluded.maintain_rate_limit_ms,
 			last_probe_at = excluded.last_probe_at,
 			last_probe_status = excluded.last_probe_status,
 			last_error = excluded.last_error,
+			last_maintain_at = excluded.last_maintain_at,
+			next_maintain_at = excluded.next_maintain_at,
+			last_maintain_result = excluded.last_maintain_result,
 			updated_at = excluded.updated_at
 	`, item.ID, nullableString(item.EmbeddingModelID), boolToInt(item.Enabled),
+		boolToInt(item.AutoMaintainEnabled), item.MaintainIntervalSeconds,
+		item.MaintainBatchSize, item.MaintainRateLimitMs,
 		nullableTime(item.LastProbeAt), nullableString(item.LastProbeStatus),
-		nullableString(item.LastError), item.UpdatedAt)
+		nullableString(item.LastError), nullableTime(item.LastMaintainAt),
+		nullableTime(item.NextMaintainAt), nullableString(item.LastMaintainResult), item.UpdatedAt)
 	if err != nil {
 		return EmbeddingConfig{}, wrapError(err, "upsert embedding config")
 	}

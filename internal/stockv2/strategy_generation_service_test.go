@@ -479,6 +479,9 @@ func TestBuildStrategyGenerationPromptRequiresMCPAndRules(t *testing.T) {
 		"outputType\":\"strategy_generation",
 		"playbook.rules[]",
 		"Do not output proposed_operation",
+		"stock_agent.get_embedding_status",
+		"stock_agent.semantic_search_stock_profiles",
+		"stock_agent.semantic_search_news_events",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)

@@ -2549,7 +2549,7 @@ export interface StockV2OpportunityDiscoveryStep {
   orderIndex?: number;
   inputSummary?: string;
   outputSummary?: string;
-  metadataJson?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
   startedAt?: string;
   finishedAt?: string;
   createdAt: string;
@@ -2579,7 +2579,7 @@ export interface StockV2OpportunityEvidence {
   publisher?: string;
   publishedAt?: string;
   confidence?: number;
-  metadataJson?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
   // 语义召回来源附加字段（当 sourceType === "semantic_recall"）
   embeddingModelId?: string;
   embeddingModelName?: string;
@@ -2622,7 +2622,7 @@ export interface StockV2OpportunityCandidate {
   reason?: string;
   riskSummary?: string;
   evidenceCount?: number;
-  metadataJson?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
 }
@@ -2663,10 +2663,31 @@ export interface StockV2EmbeddingConfig {
   id: string;
   embeddingModelId?: string;
   enabled: boolean;
+  autoMaintainEnabled: boolean;
+  maintainIntervalSeconds: number;
+  maintainBatchSize: number;
+  maintainRateLimitMs: number;
   lastProbeAt?: string;
   lastProbeStatus?: string;
   lastError?: string;
+  lastMaintainAt?: string;
+  nextMaintainAt?: string;
+  lastMaintainResult?: string;
   updatedAt: string;
+}
+
+export interface StockV2EmbeddingMaintenanceStatus {
+  enabled: boolean;
+  running: boolean;
+  lastRunAt?: string;
+  nextRunAt?: string;
+  lastResult?: string;
+}
+
+export interface StockV2EmbeddingAssetBreakdown {
+  category: StockV2EmbeddingObjectType | "other" | string;
+  readyAssetCount: number;
+  missingAssetCount: number;
 }
 
 export interface StockV2EmbeddingStatus {
@@ -2679,9 +2700,12 @@ export interface StockV2EmbeddingStatus {
   modelName?: string;
   embeddingProtocol?: string;
   embeddingDimensions?: number;
+  missingAssetCount: number;
   readyAssetCount: number;
   staleAssetCount: number;
   failedAssetCount: number;
+  assetBreakdown?: StockV2EmbeddingAssetBreakdown[];
+  maintenance: StockV2EmbeddingMaintenanceStatus;
 }
 
 export interface StockV2EmbeddingAsset {
@@ -2704,17 +2728,26 @@ export interface StockV2EmbeddingAsset {
 export interface StockV2EmbeddingConfigUpdate {
   embeddingModelId?: string;
   enabled?: boolean;
+  autoMaintainEnabled?: boolean;
+  maintainIntervalSeconds?: number;
+  maintainBatchSize?: number;
+  maintainRateLimitMs?: number;
 }
 
 export interface StockV2EmbeddingRebuildRequest {
   objectTypes?: StockV2EmbeddingObjectType[];
   limit?: number;
+  force?: boolean;
 }
 
 export interface StockV2EmbeddingRebuildResult {
+  status?: string;
+  message?: string;
   objectTypes?: string[];
   total: number;
+  succeeded?: number;
   success: number;
+  skipped?: number;
   failed: number;
   failedItems?: Array<{ id?: string; error?: string }>;
   updatedAt?: string;

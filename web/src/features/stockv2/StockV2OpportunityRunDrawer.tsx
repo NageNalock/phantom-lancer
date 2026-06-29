@@ -38,6 +38,9 @@ export function StockV2OpportunityRunDrawer({
   const [error, setError] = useState<string | null>(null);
   const [agentRunDrawerId, setAgentRunDrawerId] = useState<string | null>(null);
   const prevStatusRef = useRef<string | null>(null);
+  // api 是模块级函数、setToast 是 useCallback，均为稳定引用；不要依赖整个 actions 对象，
+  // 避免 actions 因 csrf 刷新变引用时重置轮询、清空 prevStatusRef 导致完成 toast 漏发。
+  const { api, setToast } = actions;
 
   useEffect(() => {
     let mounted = true;
@@ -47,10 +50,10 @@ export function StockV2OpportunityRunDrawer({
     async function poll() {
       try {
         const [r, s] = await Promise.all([
-          actions.api<StockV2OpportunityDiscoveryRun>(
+          api<StockV2OpportunityDiscoveryRun>(
             `/api/stockv2/opportunity-discovery-runs/${encodeURIComponent(runId)}`,
           ),
-          actions.api<StockV2AgentListResponse<StockV2OpportunityDiscoveryStep>>(
+          api<StockV2AgentListResponse<StockV2OpportunityDiscoveryStep>>(
             `/api/stockv2/opportunity-discovery-runs/${encodeURIComponent(runId)}/steps`,
           ),
         ]);
@@ -66,7 +69,7 @@ export function StockV2OpportunityRunDrawer({
         if (!active) {
           // 仅在从 active 变为终态时通知，避免打开历史 run 时弹 toast
           if (prev && (prev === "pending" || prev === "running")) {
-            actions.setToast(
+            setToast(
               r.status === "completed" ? "机会发现已完成" : r.status === "failed" ? "机会发现失败" : "机会发现已停止",
               r.status === "completed" ? "good" : "warn",
             );
@@ -88,11 +91,15 @@ export function StockV2OpportunityRunDrawer({
       mounted = false;
       if (timer) window.clearTimeout(timer);
     };
-  }, [actions, runId]);
+  }, [api, runId, setToast]);
 
-  // 默认选中：currentStepId → running → 第一个
+  // 默认选中 / 失效回退：currentStepId → running → 第一个
   useEffect(() => {
-    if (selectedStepId || steps.length === 0) return;
+    if (steps.length === 0) {
+      if (selectedStepId) setSelectedStepId(null);
+      return;
+    }
+    if (selectedStepId && steps.some((s) => s.id === selectedStepId)) return;
     const current = steps.find((s) => !!run?.currentStepId && s.id === run.currentStepId);
     const running = steps.find((s) => s.status === "running");
     const target = current || running || steps[0];
@@ -211,8 +218,8 @@ function StepDetail({
       {step.inputSummary ? <Block title="输入摘要" value={step.inputSummary} /> : null}
       {step.outputSummary ? <Block title="输出摘要" value={step.outputSummary} /> : null}
 
-      {step.metadataJson && Object.keys(step.metadataJson).length > 0 ? (
-        <JSONBlock title="MCP 调用 / 外部来源 / 候选变化" value={step.metadataJson} />
+      {step.metadata && Object.keys(step.metadata).length > 0 ? (
+        <JSONBlock title="MCP 调用 / 外部来源 / 候选变化" value={step.metadata} />
       ) : null}
 
       <div className="grid gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs">

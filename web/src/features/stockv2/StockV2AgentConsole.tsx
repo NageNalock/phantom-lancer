@@ -190,7 +190,6 @@ function AgentTaskProfileSection({ actions }: { actions: AppActions }) {
               <Pill tone={stockV2AgentTaskConfigurable(profile.taskType) ? "good" : "neutral"}>
                 {stockV2AgentTaskConfigurable(profile.taskType) ? "已开放" : "未开放"}
               </Pill>
-              {profile.maxBudget ? <Pill tone="neutral">预算 {profile.maxBudget}</Pill> : null}
             </div>
             <Row label="主模型" value={profile.primaryModelId ? profile.primaryModelId.slice(0, 12) : "(未绑定)"} />
             <Row label="备模型" value={profile.fallbackModelId ? profile.fallbackModelId.slice(0, 12) : "(未绑定)"} />

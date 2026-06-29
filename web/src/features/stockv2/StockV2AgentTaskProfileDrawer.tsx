@@ -28,7 +28,6 @@ export function StockV2AgentTaskProfileDrawer({
   const [form, setForm] = useState<StockV2AgentUpdateTaskProfileRequest>({
     primaryModelId: profile?.primaryModelId || "",
     fallbackModelId: profile?.fallbackModelId || "",
-    maxBudget: profile?.maxBudget,
   });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +37,6 @@ export function StockV2AgentTaskProfileDrawer({
       setForm({
         primaryModelId: profile.primaryModelId || "",
         fallbackModelId: profile.fallbackModelId || "",
-        maxBudget: profile.maxBudget,
       });
     }
   }, [profile]);
@@ -53,7 +51,6 @@ export function StockV2AgentTaskProfileDrawer({
       const body: StockV2AgentUpdateTaskProfileRequest = {
         primaryModelId: form.primaryModelId && usableModelIds.has(form.primaryModelId) ? form.primaryModelId : "",
         fallbackModelId: form.fallbackModelId && usableModelIds.has(form.fallbackModelId) ? form.fallbackModelId : "",
-        maxBudget: form.maxBudget,
       };
       await actions.api(`/api/stockv2/agent/task-profiles/${taskType}`, { method: "PUT", body });
       actions.setToast("任务配置已更新", "good");
@@ -115,20 +112,6 @@ export function StockV2AgentTaskProfileDrawer({
               </option>
             ))}
           </select>
-        </Field>
-
-        <Field label="预算上限" help="每次运行的成本上限 (token 或金额，依 provider 定义)">
-          <input
-            type="number"
-            value={form.maxBudget ?? ""}
-            onChange={(e) =>
-              setForm({
-                ...form,
-                maxBudget: e.target.value ? Number(e.target.value) : undefined,
-              })
-            }
-            className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
-          />
         </Field>
       </div>
     </Drawer>

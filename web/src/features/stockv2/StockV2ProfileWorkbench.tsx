@@ -68,7 +68,7 @@ export function StockV2ProfileSettings({
   return (
     <Panel
       title="画像配置"
-      subtitle="后台按队列、预算和限速更新基础输入；输入变化时才启动画像 AI"
+      subtitle="后台按队列、AI 调用次数和限速更新基础输入；输入变化时才启动画像 AI"
       actions={
         <div className="flex gap-2">
           <Button
@@ -127,7 +127,7 @@ export function StockV2ProfileSettings({
               onChange={(e) => update("baseProfileDeepUpdateBatchSize", Number(e.target.value))}
             />
           </Field>
-          <Field label="AI 预算" help="每轮最多启动多少次画像 AI。">
+          <Field label="每轮 AI 调用次数" help="每轮最多启动多少次画像 AI。">
             <input
               min={1}
               max={10}

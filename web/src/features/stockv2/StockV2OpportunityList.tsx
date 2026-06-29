@@ -45,8 +45,16 @@ export function StockV2OpportunityList({
       const res = await actions.api<StockV2AgentListResponse<StockV2Opportunity>>(
         `/api/stockv2/opportunities?${params}`,
       );
-      setItems(res.items || []);
-      setTotal(res.total ?? res.items?.length ?? 0);
+      const nextItems = res.items || [];
+      const nextTotal = res.total ?? nextItems.length;
+      const nextTotalPages = Math.max(1, Math.ceil(nextTotal / PAGE_SIZE));
+      setTotal(nextTotal);
+      if (nextPage > nextTotalPages) {
+        setItems([]);
+        setPage(nextTotalPages);
+        return;
+      }
+      setItems(nextItems);
     } catch (err) {
       const status = (err as ApiError).status;
       setError(status === 404 ? "该能力后端尚未实现（404），Embedding 状态区可正常使用。" : friendlyError(err));
@@ -56,11 +64,6 @@ export function StockV2OpportunityList({
       setLoading(false);
     }
   }
-
-  useEffect(() => {
-    void load(1);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   useEffect(() => {
     void load(page);

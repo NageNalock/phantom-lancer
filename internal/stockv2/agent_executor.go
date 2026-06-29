@@ -715,14 +715,17 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 	b.WriteString("## Required Workflow\n\n")
 	b.WriteString("For each research phase, call stock_agent.start_discovery_step before work and stock_agent.finish_discovery_step after work. If a phase cannot be completed, call stock_agent.fail_discovery_step with a concise reason and continue when possible.\n")
 	b.WriteString("Use these step keys in order: `theme_understanding`, `external_search`, `internal_masterdata_search`, `stock_profile_search`, `embedding_status_check`, `candidate_generation`, `evidence_audit`, `final_report`.\n")
+	b.WriteString("In `embedding_status_check`, always call stock_agent.get_embedding_status before candidate generation. If status.available is true, call stock_agent.semantic_search_stock_profiles for related instruments and stock_agent.semantic_search_news_events for related project news; merge those results with deterministic keyword/masterdata candidates. If status.available is false, record the degraded reason in the step output and continue with deterministic search only.\n")
 	b.WriteString("For every external article/search result you rely on, call stock_agent.record_external_source with title, URL, publisher, publishedAt when available, summary, relatedSymbols, and confidence.\n")
 	b.WriteString("For each material fact or reasoning item, call stock_agent.record_evidence. Link it to a candidate when the candidate exists.\n")
 	b.WriteString("For each candidate, call stock_agent.record_candidate after validating the symbol through StockV2 master data. Use stock_agent.update_candidate when the score, rank, reason, or risk changes.\n")
-	b.WriteString("When you need semantic vector recall, first call stock_agent.get_embedding_status. If it is not available, record the embedding_status_check step as failed and explain that semantic recall could not run. Do not silently fall back to keyword search and label it semantic.\n\n")
+	b.WriteString("Do not silently fall back to keyword search and label it semantic.\n\n")
 
 	b.WriteString("## Project MCP Tools\n\n")
 	b.WriteString("- stock_agent.search_instruments: keyword/market/instrumentType lookup in StockV2 master data.\n")
 	b.WriteString("- stock_agent.search_stock_profiles and stock_agent.get_stock_profile: project stock profile lookup.\n")
+	b.WriteString("- stock_agent.semantic_search_stock_profiles: vector recall over StockV2 stock profiles when embedding is available.\n")
+	b.WriteString("- stock_agent.search_news_events and stock_agent.semantic_search_news_events: project news lookup and vector recall when embedding is available.\n")
 	b.WriteString("- stock_agent.get_latest_quotes and stock_agent.get_daily_bars_summary: local quote/bars freshness context.\n")
 	b.WriteString("- stock_agent.list_existing_strategies: check whether a candidate already has strategies.\n")
 	b.WriteString("- stock_agent.get_embedding_status: embedding model binding and availability check.\n")
@@ -818,6 +821,13 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 	raw, _ := json.MarshalIndent(genCtx, "", "  ")
 	b.Write(raw)
 	b.WriteString("\n```\n\n")
+
+	b.WriteString("## Required Project Context Refresh\n\n")
+	b.WriteString("- First call stock_agent.get_embedding_status and use it to decide whether semantic recall is available.\n")
+	b.WriteString("- For each target or opportunity candidate, read the project profile with stock_agent.get_stock_profile or stock_agent.search_stock_profiles, fetch stock_agent.get_latest_quotes and stock_agent.get_daily_bars_summary, search related project news with stock_agent.search_news_events, and check stock_agent.list_existing_strategies before drafting.\n")
+	b.WriteString("- If embedding status is available, call stock_agent.semantic_search_stock_profiles and stock_agent.semantic_search_news_events with the thesis/candidate/news query to find adjacent internal context. Merge these results into evidence_summary and data_quality_notes as appropriate.\n")
+	b.WriteString("- If embedding status is unavailable or assets are not ready, state the degraded reason in data_quality_notes and do not label keyword search as semantic recall.\n")
+	b.WriteString("- Do not implement or request web_search/web_fetch MCP tools from the main program. External public research, when needed, must be done by Codex CLI's own capabilities and cited conservatively in the draft.\n\n")
 
 	if genCtx.Input.Mode == StrategyGenerationModePortfolio || genCtx.Mode == StrategyGenerationModePortfolio {
 		b.WriteString("## Portfolio Diagnosis Requirements\n\n")

@@ -624,7 +624,7 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bar_jobs_created_at
     ON stockv2_daily_bar_jobs(created_at);
 
 -- 监控与任务:系统固化的后台监控行为(非用户创建对象)。
--- task_configs 存开关/周期/范围/敏感度/冷却/Agent 开关与预算;runs 记录每次执行;
+-- task_configs 存开关/周期/范围/敏感度/冷却/Agent 开关;runs 记录每次执行;
 -- hits 记录规则命中候选(candidate→可选 doublecheck→alerted)。
 CREATE TABLE IF NOT EXISTS stockv2_monitor_task_configs (
     task_type TEXT PRIMARY KEY,
@@ -880,9 +880,16 @@ CREATE TABLE IF NOT EXISTS stockv2_embedding_config (
     id TEXT PRIMARY KEY,
     embedding_model_id TEXT,
     enabled INTEGER NOT NULL DEFAULT 0,
+    auto_maintain_enabled INTEGER NOT NULL DEFAULT 0,
+    maintain_interval_seconds INTEGER NOT NULL DEFAULT 600,
+    maintain_batch_size INTEGER NOT NULL DEFAULT 50,
+    maintain_rate_limit_ms INTEGER NOT NULL DEFAULT 500,
     last_probe_at DATETIME,
     last_probe_status TEXT,
     last_error TEXT,
+    last_maintain_at DATETIME,
+    next_maintain_at DATETIME,
+    last_maintain_result TEXT,
     updated_at DATETIME NOT NULL
 );
 INSERT OR IGNORE INTO stockv2_embedding_config
@@ -1109,12 +1116,20 @@ CREATE TABLE IF NOT EXISTS stockv2_embedding_config (
     id TEXT PRIMARY KEY,
     embedding_model_id TEXT,
     enabled INTEGER NOT NULL DEFAULT 0,
+    auto_maintain_enabled INTEGER NOT NULL DEFAULT 0,
+    maintain_interval_seconds INTEGER NOT NULL DEFAULT 600,
+    maintain_batch_size INTEGER NOT NULL DEFAULT 50,
+    maintain_rate_limit_ms INTEGER NOT NULL DEFAULT 500,
     last_probe_at DATETIME,
     last_probe_status TEXT,
     last_error TEXT,
+    last_maintain_at DATETIME,
+    next_maintain_at DATETIME,
+    last_maintain_result TEXT,
     updated_at DATETIME NOT NULL
 );
-INSERT OR IGNORE INTO stockv2_embedding_config (id, embedding_model_id, enabled, updated_at)
+INSERT OR IGNORE INTO stockv2_embedding_config
+    (id, embedding_model_id, enabled, updated_at)
 VALUES ('default', '', 0, datetime('now'));
 -- Codex CLI 默认 Provider: 使用当前主机 codex 登录态,不需要第三方 key/base_url。
 INSERT OR IGNORE INTO stockv2_agent_provider_profiles
@@ -1886,21 +1901,23 @@ func (s *Store) CountInstruments(ctx context.Context) (int, error) {
 	return count, wrapError(err, "count instruments")
 }
 
-func (s *Store) CountInstrumentsFiltered(ctx context.Context, market, instrumentType string) (int, error) {
-	where, args := instrumentFilterSQL(market, instrumentType)
+func (s *Store) CountInstrumentsFiltered(ctx context.Context, market, instrumentType, profileStatus string) (int, error) {
+	where, args := instrumentFilterSQL(market, instrumentType, profileStatus)
 	var count int
-	err := s.assetDB().QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_instruments WHERE `+where, args...).Scan(&count)
+	query := `SELECT COUNT(*) FROM stockv2_instruments i` + instrumentProfileJoinSQL(profileStatus) + ` WHERE ` + where
+	err := s.assetDB().QueryRowContext(ctx, query, args...).Scan(&count)
 	return count, wrapError(err, "count filtered instruments")
 }
 
 func (s *Store) GetInstruments(ctx context.Context, limit int, offset int) ([]StockV2Instrument, error) {
-	return s.GetInstrumentsFiltered(ctx, "", "", limit, offset)
+	return s.GetInstrumentsFiltered(ctx, "", "", "", limit, offset)
 }
 
-func (s *Store) GetInstrumentsFiltered(ctx context.Context, market, instrumentType string, limit int, offset int) ([]StockV2Instrument, error) {
-	where, args := instrumentFilterSQL(market, instrumentType)
+func (s *Store) GetInstrumentsFiltered(ctx context.Context, market, instrumentType, profileStatus string, limit int, offset int) ([]StockV2Instrument, error) {
+	where, args := instrumentFilterSQL(market, instrumentType, profileStatus)
 	args = append(args, limit, offset)
-	rows, err := s.assetDB().QueryContext(ctx, instrumentSelectSQL+" WHERE "+where+" ORDER BY created_at DESC LIMIT ? OFFSET ?", args...)
+	query := instrumentSelectFilteredSQL(profileStatus) + " WHERE " + where + " ORDER BY i.created_at DESC LIMIT ? OFFSET ?"
+	rows, err := s.assetDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, wrapError(err, "get instruments")
 	}
@@ -1909,22 +1926,22 @@ func (s *Store) GetInstrumentsFiltered(ctx context.Context, market, instrumentTy
 
 // SearchInstruments 按代码或名称搜索股票（模糊匹配）
 func (s *Store) SearchInstruments(ctx context.Context, keyword string, limit int) ([]StockV2Instrument, error) {
-	return s.SearchInstrumentsFiltered(ctx, keyword, "", "", limit)
+	return s.SearchInstrumentsFiltered(ctx, keyword, "", "", "", limit)
 }
 
-func (s *Store) SearchInstrumentsFiltered(ctx context.Context, keyword, market, instrumentType string, limit int) ([]StockV2Instrument, error) {
+func (s *Store) SearchInstrumentsFiltered(ctx context.Context, keyword, market, instrumentType, profileStatus string, limit int) ([]StockV2Instrument, error) {
 	if keyword == "" {
 		return []StockV2Instrument{}, nil
 	}
 	pattern := "%" + strings.ToLower(keyword) + "%"
-	where, filterArgs := instrumentFilterSQL(market, instrumentType)
+	where, filterArgs := instrumentFilterSQL(market, instrumentType, profileStatus)
 	args := append([]any{pattern, pattern}, filterArgs...)
 	args = append(args, keyword, limit)
-	query := instrumentSelectSQL + `
-		WHERE (LOWER(symbol) LIKE ? OR LOWER(name) LIKE ?) AND ` + where + `
+	query := instrumentSelectFilteredSQL(profileStatus) + `
+		WHERE (LOWER(i.symbol) LIKE ? OR LOWER(i.name) LIKE ?) AND ` + where + `
 		ORDER BY
-		  CASE WHEN LOWER(symbol) = LOWER(?) THEN 0 ELSE 1 END,
-		  symbol ASC
+		  CASE WHEN LOWER(i.symbol) = LOWER(?) THEN 0 ELSE 1 END,
+		  i.symbol ASC
 		LIMIT ?
 	`
 
@@ -1935,26 +1952,66 @@ func (s *Store) SearchInstrumentsFiltered(ctx context.Context, keyword, market, 
 	return scanRows(rows, scanInstrument, "scan instrument", "iterate instruments")
 }
 
-func instrumentFilterSQL(market, instrumentType string) (string, []any) {
+func instrumentSelectFilteredSQL(profileStatus string) string {
+	return `
+	SELECT i.id, i.symbol, i.market, COALESCE(i.instrument_type,'stock'), COALESCE(i.name,''), COALESCE(i.industry,''), COALESCE(i.sector,''),
+	       i.concepts, COALESCE(i.list_date,''), COALESCE(i.delist_date,''), COALESCE(i.status,'active'),
+	       i.last_update_at, i.created_at, i.updated_at
+	FROM stockv2_instruments i
+` + instrumentProfileJoinSQL(profileStatus)
+}
+
+func instrumentProfileJoinSQL(profileStatus string) string {
+	if instrumentProfileStatusSQL(profileStatus) == "" {
+		return ""
+	}
+	return " LEFT JOIN stockv2_stock_profiles p ON p.symbol = i.symbol"
+}
+
+func instrumentFilterSQL(market, instrumentType, profileStatus string) (string, []any) {
 	var parts []string
 	var args []any
 	switch strings.ToUpper(strings.TrimSpace(market)) {
 	case "SH", "SZ", "BJ":
-		parts = append(parts, "market = ?")
+		parts = append(parts, "i.market = ?")
 		args = append(args, strings.ToUpper(strings.TrimSpace(market)))
 	}
 	switch strings.TrimSpace(instrumentType) {
 	case InstrumentTypeExchangeFund:
-		parts = append(parts, "COALESCE(instrument_type,'stock') = ?")
+		parts = append(parts, "COALESCE(i.instrument_type,'stock') = ?")
 		args = append(args, InstrumentTypeExchangeFund)
 	case InstrumentTypeStock:
-		parts = append(parts, "COALESCE(instrument_type,'stock') = ?")
+		parts = append(parts, "COALESCE(i.instrument_type,'stock') = ?")
 		args = append(args, InstrumentTypeStock)
+	}
+	if profileSQL := instrumentProfileStatusSQL(profileStatus); profileSQL != "" {
+		parts = append(parts, profileSQL)
 	}
 	if len(parts) == 0 {
 		return "1=1", args
 	}
 	return strings.Join(parts, " AND "), args
+}
+
+func instrumentProfileStatusSQL(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "basic_ready", "ready":
+		return "p.symbol IS NOT NULL AND COALESCE(p.profile_text,'') <> ''"
+	case "basic_partial", "partial":
+		return "p.symbol IS NOT NULL AND COALESCE(p.profile_text,'') = ''"
+	case "basic_missing", "missing":
+		return "p.symbol IS NULL"
+	case "ai_ready":
+		return "p.symbol IS NOT NULL AND COALESCE(p.ai_profile_status,'missing') = 'ready'"
+	case "ai_failed":
+		return "p.symbol IS NOT NULL AND COALESCE(p.ai_profile_status,'missing') = 'failed'"
+	case "ai_not_configured":
+		return "p.symbol IS NOT NULL AND COALESCE(p.ai_profile_status,'missing') = 'not_configured'"
+	case "ai_missing":
+		return "p.symbol IS NULL OR COALESCE(p.ai_profile_status,'missing') = 'missing'"
+	default:
+		return ""
+	}
 }
 
 // GetInstrumentsByMarket 根据市场获取股票列表

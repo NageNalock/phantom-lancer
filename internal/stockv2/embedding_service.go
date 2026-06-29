@@ -25,6 +25,14 @@ type embeddingAssetSource struct {
 	Text       string
 }
 
+const (
+	defaultEmbeddingMaintainIntervalSeconds = 600
+	defaultEmbeddingMaintainBatchSize       = 50
+	defaultEmbeddingMaintainRateLimitMs     = 500
+	maxEmbeddingMaintainBatchSize           = 200
+	embeddingMaintenanceScanPageSize        = 200
+)
+
 type SemanticSearchHit struct {
 	Asset     EmbeddingAsset `json:"asset"`
 	Score     float64        `json:"score"`
@@ -44,6 +52,13 @@ func (s *Service) GetEmbeddingStatus(ctx context.Context) (EmbeddingStatus, erro
 		ErrorCode:    EmbeddingStatusModelNotConfigured,
 		ErrorMessage: ErrEmbeddingModelNotConfigured.Error(),
 		Message:      "embedding model is not configured",
+		Maintenance: EmbeddingMaintenanceStatus{
+			Enabled:    cfg.AutoMaintainEnabled,
+			Running:    s.embeddingMaintenanceRunning(),
+			LastRunAt:  cfg.LastMaintainAt,
+			NextRunAt:  cfg.NextMaintainAt,
+			LastResult: cfg.LastMaintainResult,
+		},
 	}
 	if strings.TrimSpace(cfg.EmbeddingModelID) == "" {
 		return status, nil
@@ -87,6 +102,10 @@ func (s *Service) GetEmbeddingStatus(ctx context.Context) (EmbeddingStatus, erro
 	status.ReadyAssetCount = ready
 	status.StaleAssetCount = stale
 	status.FailedAssetCount = failed
+	if missing, err := s.countMissingEmbeddingSources(ctx, normalizeEmbeddingObjectTypes(nil), model); err == nil {
+		status.MissingAssetCount = missing
+	}
+	status.AssetBreakdown = s.embeddingAssetBreakdown(ctx, model)
 
 	if err := validateEmbeddingModel(model); err != nil {
 		status.Status = EmbeddingStatusModelUnavailable
@@ -136,9 +155,28 @@ func (s *Service) UpdateEmbeddingConfig(ctx context.Context, req RequestUpdateEm
 	if req.Enabled != nil {
 		cfg.Enabled = *req.Enabled
 	}
+	if req.AutoMaintainEnabled != nil {
+		cfg.AutoMaintainEnabled = *req.AutoMaintainEnabled
+	}
+	if req.MaintainIntervalSeconds != nil {
+		cfg.MaintainIntervalSeconds = *req.MaintainIntervalSeconds
+	}
+	if req.MaintainBatchSize != nil {
+		cfg.MaintainBatchSize = *req.MaintainBatchSize
+	}
+	if req.MaintainRateLimitMs != nil {
+		cfg.MaintainRateLimitMs = *req.MaintainRateLimitMs
+	}
 	if strings.TrimSpace(cfg.EmbeddingModelID) == "" {
 		cfg.Enabled = false
+		cfg.AutoMaintainEnabled = false
 	}
+	modelChanged := req.EmbeddingModelID != nil && oldModelID != strings.TrimSpace(cfg.EmbeddingModelID)
+	enabledRequested := req.Enabled != nil && *req.Enabled
+	if cfg.Enabled && strings.TrimSpace(cfg.EmbeddingModelID) != "" && req.AutoMaintainEnabled == nil && (modelChanged || enabledRequested) {
+		cfg.AutoMaintainEnabled = true
+	}
+	cfg = normalizeEmbeddingConfig(cfg)
 	cfg.LastProbeStatus = EmbeddingStatusModelNotConfigured
 	cfg.LastError = ""
 	if cfg.Enabled {
@@ -151,6 +189,12 @@ func (s *Service) UpdateEmbeddingConfig(ctx context.Context, req RequestUpdateEm
 		}
 		cfg.LastProbeAt = time.Now()
 		cfg.LastProbeStatus = EmbeddingStatusReady
+		if cfg.AutoMaintainEnabled && cfg.NextMaintainAt.IsZero() {
+			cfg.NextMaintainAt = time.Now()
+		}
+	} else {
+		cfg.AutoMaintainEnabled = false
+		cfg.NextMaintainAt = time.Time{}
 	}
 	if _, err := s.store.UpsertEmbeddingConfig(ctx, cfg); err != nil {
 		return EmbeddingStatus{}, err
@@ -160,23 +204,42 @@ func (s *Service) UpdateEmbeddingConfig(ctx context.Context, req RequestUpdateEm
 			return EmbeddingStatus{}, err
 		}
 	}
+	if cfg.Enabled && cfg.AutoMaintainEnabled {
+		s.StartBackground(context.Background())
+	}
 	return s.GetEmbeddingStatus(ctx)
 }
 
 func (s *Service) RebuildEmbeddingAssets(ctx context.Context, req RequestRebuildEmbeddingAssets) (EmbeddingRebuildResult, error) {
+	return s.RunEmbeddingMaintenanceBatch(ctx, req)
+}
+
+func (s *Service) RunEmbeddingMaintenanceBatch(ctx context.Context, req RequestRebuildEmbeddingAssets) (EmbeddingRebuildResult, error) {
+	if !s.beginEmbeddingMaintenance() {
+		return EmbeddingRebuildResult{
+			Status:    "running",
+			Message:   "embedding maintenance is already running",
+			UpdatedAt: time.Now(),
+		}, nil
+	}
+	defer s.endEmbeddingMaintenance()
+
 	model, cfg, err := s.ensureEmbeddingModelReady(ctx)
 	if err != nil {
 		return EmbeddingRebuildResult{}, err
 	}
 	limit := req.Limit
 	if limit <= 0 {
-		limit = 100
+		limit = cfg.MaintainBatchSize
 	}
-	if limit > 200 {
-		limit = 200
+	if limit <= 0 {
+		limit = defaultEmbeddingMaintainBatchSize
+	}
+	if limit > maxEmbeddingMaintainBatchSize {
+		limit = maxEmbeddingMaintainBatchSize
 	}
 	objectTypes := normalizeEmbeddingObjectTypes(req.ObjectTypes)
-	sources, err := s.collectEmbeddingSources(ctx, objectTypes, limit)
+	sources, err := s.collectEmbeddingWorkSources(ctx, objectTypes, model, limit, req.Force)
 	if err != nil {
 		return EmbeddingRebuildResult{}, err
 	}
@@ -186,22 +249,17 @@ func (s *Service) RebuildEmbeddingAssets(ctx context.Context, req RequestRebuild
 		Total:       len(sources),
 		UpdatedAt:   time.Now(),
 	}
-	for _, source := range sources {
+	if len(sources) == 0 {
+		s.recordEmbeddingMaintenanceResult(ctx, cfg, result)
+		return result, nil
+	}
+	for idx, source := range sources {
 		text := strings.TrimSpace(source.Text)
 		if text == "" {
 			result.Skipped++
 			continue
 		}
 		textHash := hashEmbeddingText(text)
-		if !req.Force {
-			if existing, err := s.store.GetEmbeddingAssetByObject(ctx, source.ObjectType, source.ObjectID, model.ID); err == nil &&
-				existing.Status == EmbeddingAssetStatusReady &&
-				existing.TextHash == textHash &&
-				existing.EmbeddingDimensions == model.EmbeddingDimensions {
-				result.Skipped++
-				continue
-			}
-		}
 		vector, err := s.generateEmbedding(ctx, model, text)
 		if err != nil {
 			result.Failed++
@@ -253,20 +311,38 @@ func (s *Service) RebuildEmbeddingAssets(ctx context.Context, req RequestRebuild
 		}
 		result.Succeeded++
 		result.Success++
+		if cfg.MaintainRateLimitMs > 0 && idx < len(sources)-1 {
+			select {
+			case <-ctx.Done():
+				result.Status = "partial"
+				result.Message = safelog.Text(ctx.Err().Error(), 240)
+				s.recordEmbeddingMaintenanceResult(ctx, cfg, result)
+				return result, ctx.Err()
+			case <-time.After(time.Duration(cfg.MaintainRateLimitMs) * time.Millisecond):
+			}
+		}
 	}
 	if result.Failed > 0 && result.Succeeded == 0 {
 		result.Status = "failed"
 	} else if result.Failed > 0 {
 		result.Status = "partial"
 	}
+	s.recordEmbeddingMaintenanceResult(ctx, cfg, result)
+	return result, nil
+}
+
+func (s *Service) recordEmbeddingMaintenanceResult(ctx context.Context, cfg EmbeddingConfig, result EmbeddingRebuildResult) {
+	now := time.Now()
 	cfg.LastProbeAt = time.Now()
 	cfg.LastProbeStatus = result.Status
 	cfg.LastError = ""
 	if result.Failed > 0 {
 		cfg.LastError = fmt.Sprintf("%d embedding assets failed", result.Failed)
 	}
+	cfg.LastMaintainAt = now
+	cfg.NextMaintainAt = now.Add(time.Duration(cfg.MaintainIntervalSeconds) * time.Second)
+	cfg.LastMaintainResult = embeddingMaintenanceResultText(result)
 	_, _ = s.store.UpsertEmbeddingConfig(ctx, cfg)
-	return result, nil
 }
 
 func (s *Service) ListEmbeddingAssets(ctx context.Context, filter EmbeddingAssetListFilter) ([]EmbeddingAsset, error) {
@@ -277,6 +353,88 @@ func (s *Service) ListEmbeddingAssets(ctx context.Context, filter EmbeddingAsset
 
 func (s *Service) CountEmbeddingAssets(ctx context.Context, filter EmbeddingAssetListFilter) (int, error) {
 	return s.store.CountEmbeddingAssets(ctx, filter)
+}
+
+func (s *Service) embeddingAssetBreakdown(ctx context.Context, model AgentModelProfile) []EmbeddingAssetBreakdown {
+	categories := []struct {
+		category    string
+		objectTypes []string
+	}{
+		{category: EmbeddingObjectStockProfile, objectTypes: []string{EmbeddingObjectStockProfile}},
+		{category: EmbeddingObjectNewsEvent, objectTypes: []string{EmbeddingObjectNewsEvent}},
+		{category: "other", objectTypes: []string{EmbeddingObjectOpportunity}},
+	}
+	out := make([]EmbeddingAssetBreakdown, 0, len(categories))
+	for _, category := range categories {
+		item := EmbeddingAssetBreakdown{Category: category.category}
+		for _, objectType := range category.objectTypes {
+			if ready, err := s.store.CountEmbeddingAssets(ctx, EmbeddingAssetListFilter{
+				ObjectType: objectType,
+				ModelID:    model.ID,
+				Status:     EmbeddingAssetStatusReady,
+			}); err == nil {
+				item.ReadyAssetCount += ready
+			}
+			if missing, err := s.countMissingEmbeddingSources(ctx, []string{objectType}, model); err == nil {
+				item.MissingAssetCount += missing
+			}
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func (s *Service) runEmbeddingMaintenanceScheduler(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	s.maybeRunEmbeddingMaintenance(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.maybeRunEmbeddingMaintenance(ctx)
+		}
+	}
+}
+
+func (s *Service) maybeRunEmbeddingMaintenance(ctx context.Context) {
+	cfg, err := s.embeddingConfigOrDefault(ctx)
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("stockv2 embedding maintenance config unavailable", "error", safelog.Text(err.Error(), 300))
+		}
+		return
+	}
+	if !cfg.Enabled || !cfg.AutoMaintainEnabled || strings.TrimSpace(cfg.EmbeddingModelID) == "" {
+		return
+	}
+	now := time.Now()
+	if !cfg.NextMaintainAt.IsZero() && cfg.NextMaintainAt.After(now) {
+		return
+	}
+	if _, err := s.RunEmbeddingMaintenanceBatch(ctx, RequestRebuildEmbeddingAssets{
+		ObjectTypes: normalizeEmbeddingObjectTypes(nil),
+		Limit:       cfg.MaintainBatchSize,
+	}); err != nil {
+		cfg.LastMaintainAt = now
+		cfg.NextMaintainAt = now.Add(time.Duration(cfg.MaintainIntervalSeconds) * time.Second)
+		cfg.LastProbeStatus = "failed"
+		cfg.LastError = safelog.Text(err.Error(), 500)
+		cfg.LastMaintainResult = "failed: " + safelog.Text(err.Error(), 240)
+		_, _ = s.store.UpsertEmbeddingConfig(context.Background(), cfg)
+		if s.log != nil {
+			s.log.Warn("stockv2 embedding maintenance failed", "error", safelog.Text(err.Error(), 300))
+		}
+	}
+}
+
+func (s *Service) hasEmbeddingAutoMaintenanceEnabled(ctx context.Context) bool {
+	cfg, err := s.embeddingConfigOrDefault(ctx)
+	if err != nil {
+		return false
+	}
+	return cfg.Enabled && cfg.AutoMaintainEnabled && strings.TrimSpace(cfg.EmbeddingModelID) != ""
 }
 
 func (s *Service) SemanticSearch(ctx context.Context, objectType, query string, limit int) ([]SemanticSearchHit, error) {
@@ -378,16 +536,38 @@ func (s *Service) SemanticSearchNewsEvents(ctx context.Context, req SemanticSear
 func (s *Service) embeddingConfigOrDefault(ctx context.Context) (EmbeddingConfig, error) {
 	cfg, err := s.store.GetEmbeddingConfig(ctx)
 	if err == nil {
-		return cfg, nil
+		return normalizeEmbeddingConfig(cfg), nil
 	}
 	if !errors.Is(err, ErrEmbeddingConfigNotFound) {
 		return EmbeddingConfig{}, err
 	}
 	return s.store.UpsertEmbeddingConfig(ctx, EmbeddingConfig{
-		ID:              EmbeddingConfigIDDefault,
-		Enabled:         false,
-		LastProbeStatus: EmbeddingStatusModelNotConfigured,
+		ID:                      EmbeddingConfigIDDefault,
+		Enabled:                 false,
+		MaintainIntervalSeconds: defaultEmbeddingMaintainIntervalSeconds,
+		MaintainBatchSize:       defaultEmbeddingMaintainBatchSize,
+		MaintainRateLimitMs:     defaultEmbeddingMaintainRateLimitMs,
+		LastProbeStatus:         EmbeddingStatusModelNotConfigured,
 	})
+}
+
+func normalizeEmbeddingConfig(cfg EmbeddingConfig) EmbeddingConfig {
+	if cfg.ID == "" {
+		cfg.ID = EmbeddingConfigIDDefault
+	}
+	if cfg.MaintainIntervalSeconds <= 0 {
+		cfg.MaintainIntervalSeconds = defaultEmbeddingMaintainIntervalSeconds
+	}
+	if cfg.MaintainBatchSize <= 0 {
+		cfg.MaintainBatchSize = defaultEmbeddingMaintainBatchSize
+	}
+	if cfg.MaintainBatchSize > maxEmbeddingMaintainBatchSize {
+		cfg.MaintainBatchSize = maxEmbeddingMaintainBatchSize
+	}
+	if cfg.MaintainRateLimitMs < 0 {
+		cfg.MaintainRateLimitMs = defaultEmbeddingMaintainRateLimitMs
+	}
+	return cfg
 }
 
 func (s *Service) ensureEmbeddingModelReady(ctx context.Context) (AgentModelProfile, EmbeddingConfig, error) {
@@ -418,9 +598,10 @@ func validateEmbeddingModel(model AgentModelProfile) error {
 	if !model.Enabled || model.Status != AgentModelStatusAvailable {
 		return ErrEmbeddingModelUnavailable
 	}
-	if model.EmbeddingDimensions <= 0 {
-		return ErrEmbeddingDimensionsMismatch
-	}
+	// 维度可选：火山引擎 / OpenAI 等 embedding 的维度由 API 返回决定，用户无需预设。
+	// rebuild 时以实际向量长度为准（asset.EmbeddingDimensions = len(vector)），向量库
+	// stockv2_embedding_vectors 用长表 (vector_ref, dim_index, value) 存储，不依赖固定维度。
+	// 若用户填了维度，rebuild / 搜索阶段会据此做一致性校验（见 validateEmbeddingDimensions）。
 	return nil
 }
 
@@ -454,6 +635,178 @@ func normalizeEmbeddingObjectTypes(values []string) []string {
 		return []string{EmbeddingObjectStockProfile, EmbeddingObjectNewsEvent, EmbeddingObjectOpportunity}
 	}
 	return out
+}
+
+func (s *Service) beginEmbeddingMaintenance() bool {
+	s.embeddingMu.Lock()
+	defer s.embeddingMu.Unlock()
+	if s.embeddingRun {
+		return false
+	}
+	s.embeddingRun = true
+	return true
+}
+
+func (s *Service) endEmbeddingMaintenance() {
+	s.embeddingMu.Lock()
+	s.embeddingRun = false
+	s.embeddingMu.Unlock()
+}
+
+func (s *Service) embeddingMaintenanceRunning() bool {
+	s.embeddingMu.Lock()
+	defer s.embeddingMu.Unlock()
+	return s.embeddingRun
+}
+
+func embeddingMaintenanceResultText(result EmbeddingRebuildResult) string {
+	return fmt.Sprintf("status=%s total=%d success=%d skipped=%d failed=%d", result.Status, result.Total, result.Success, result.Skipped, result.Failed)
+}
+
+func (s *Service) collectEmbeddingWorkSources(ctx context.Context, objectTypes []string, model AgentModelProfile, limit int, force bool) ([]embeddingAssetSource, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	var forced []embeddingAssetSource
+	var missing []embeddingAssetSource
+	var stale []embeddingAssetSource
+	var failed []embeddingAssetSource
+	var changed []embeddingAssetSource
+	appendBounded := func(items *[]embeddingAssetSource, source embeddingAssetSource) {
+		if len(*items) < limit {
+			*items = append(*items, source)
+		}
+	}
+	// ponytail: this scans current business rows instead of adding a queue table; upgrade to a
+	// persistent queue only if asset volume or SLA needs strict incremental checkpoints.
+	err := s.forEachEmbeddingSource(ctx, objectTypes, func(source embeddingAssetSource) error {
+		text := strings.TrimSpace(source.Text)
+		if text == "" {
+			return nil
+		}
+		if force {
+			appendBounded(&forced, source)
+			return nil
+		}
+		existing, err := s.store.GetEmbeddingAssetByObject(ctx, source.ObjectType, source.ObjectID, model.ID)
+		if err != nil {
+			if errors.Is(err, ErrEmbeddingAssetNotFound) {
+				appendBounded(&missing, source)
+				return nil
+			}
+			return err
+		}
+		switch existing.Status {
+		case EmbeddingAssetStatusStale:
+			appendBounded(&stale, source)
+		case EmbeddingAssetStatusFailed:
+			appendBounded(&failed, source)
+		case EmbeddingAssetStatusReady:
+			textHash := hashEmbeddingText(text)
+			if existing.TextHash != textHash || (model.EmbeddingDimensions > 0 && existing.EmbeddingDimensions != model.EmbeddingDimensions) {
+				appendBounded(&changed, source)
+			}
+		default:
+			appendBounded(&failed, source)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if force {
+		return forced, nil
+	}
+	out := make([]embeddingAssetSource, 0, limit)
+	for _, group := range [][]embeddingAssetSource{missing, stale, failed, changed} {
+		for _, source := range group {
+			if len(out) >= limit {
+				return out, nil
+			}
+			out = append(out, source)
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) countMissingEmbeddingSources(ctx context.Context, objectTypes []string, model AgentModelProfile) (int, error) {
+	total := 0
+	err := s.forEachEmbeddingSource(ctx, objectTypes, func(source embeddingAssetSource) error {
+		if strings.TrimSpace(source.Text) == "" {
+			return nil
+		}
+		if _, err := s.store.GetEmbeddingAssetByObject(ctx, source.ObjectType, source.ObjectID, model.ID); err != nil {
+			if errors.Is(err, ErrEmbeddingAssetNotFound) {
+				total++
+				return nil
+			}
+			return err
+		}
+		return nil
+	})
+	return total, err
+}
+
+func (s *Service) forEachEmbeddingSource(ctx context.Context, objectTypes []string, visit func(embeddingAssetSource) error) error {
+	for _, objectType := range objectTypes {
+		offset := 0
+		for {
+			items, err := s.listEmbeddingSourcesPage(ctx, objectType, embeddingMaintenanceScanPageSize, offset)
+			if err != nil {
+				return err
+			}
+			if len(items) == 0 {
+				break
+			}
+			for _, item := range items {
+				if err := visit(item); err != nil {
+					return err
+				}
+			}
+			if len(items) < embeddingMaintenanceScanPageSize {
+				break
+			}
+			offset += len(items)
+		}
+	}
+	return nil
+}
+
+func (s *Service) listEmbeddingSourcesPage(ctx context.Context, objectType string, limit, offset int) ([]embeddingAssetSource, error) {
+	switch objectType {
+	case EmbeddingObjectStockProfile:
+		items, err := s.store.ListStockProfiles(ctx, StockProfileListFilter{Limit: limit, Offset: offset})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]embeddingAssetSource, 0, len(items))
+		for _, item := range items {
+			out = append(out, embeddingAssetSource{ObjectType: objectType, ObjectID: item.Symbol, Text: stockProfileEmbeddingText(item)})
+		}
+		return out, nil
+	case EmbeddingObjectNewsEvent:
+		items, err := s.store.ListNewsEvents(ctx, NewsEventListFilter{Limit: limit, Offset: offset})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]embeddingAssetSource, 0, len(items))
+		for _, item := range items {
+			out = append(out, embeddingAssetSource{ObjectType: objectType, ObjectID: item.ID, Text: newsEventEmbeddingText(item)})
+		}
+		return out, nil
+	case EmbeddingObjectOpportunity:
+		items, err := s.store.ListOpportunities(ctx, OpportunityListFilter{Limit: limit, Offset: offset})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]embeddingAssetSource, 0, len(items))
+		for _, item := range items {
+			out = append(out, embeddingAssetSource{ObjectType: objectType, ObjectID: item.ID, Text: item.Title + "\n" + item.UserThesis})
+		}
+		return out, nil
+	default:
+		return nil, nil
+	}
 }
 
 func (s *Service) collectEmbeddingSources(ctx context.Context, objectTypes []string, limit int) ([]embeddingAssetSource, error) {
