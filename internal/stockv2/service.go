@@ -1031,15 +1031,14 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	needBG := settings.AutoUpdateEnabled || settings.BaseProfileAutoMaintainEnabled || newsBG || embeddingBG
 	prevNeedBG := prevAuto || prevBaseProfile || prevNewsBG || embeddingBG
 	if needBG {
-		if !prevNeedBG ||
+		restartBG := !prevNeedBG ||
 			(prevAuto && prevInterval != settings.UpdateIntervalSec) ||
-			(prevBaseProfile && prevBaseProfileInterval != settings.BaseProfileMaintainIntervalSeconds) {
-			if prevNeedBG {
-				s.StopBackground()
-			}
-			// 后台任务用独立 context，不随请求结束而取消
-			s.StartBackground(context.Background())
+			(prevBaseProfile && prevBaseProfileInterval != settings.BaseProfileMaintainIntervalSeconds)
+		if restartBG && prevNeedBG {
+			s.StopBackground()
 		}
+		// 后台任务用独立 context，不随请求结束而取消；若已运行，StartBackground 会 no-op。
+		s.StartBackground(context.Background())
 	} else {
 		s.StopBackground()
 	}

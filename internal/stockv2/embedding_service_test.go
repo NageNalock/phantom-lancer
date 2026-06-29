@@ -336,8 +336,12 @@ func TestStockProfileAIEnhancementMarksEmbeddingAssetStale(t *testing.T) {
 	model := configureEmbeddingModel(t, svc, "embed-v1")
 
 	upsertEmbeddingTestProfile(t, svc, "300750", "宁德时代", "动力电池")
-	if _, err := svc.RunEmbeddingMaintenanceBatch(ctx, RequestRebuildEmbeddingAssets{ObjectTypes: []string{EmbeddingObjectStockProfile}}); err != nil {
+	result, err := svc.RunEmbeddingMaintenanceBatch(ctx, RequestRebuildEmbeddingAssets{ObjectTypes: []string{EmbeddingObjectStockProfile}})
+	if err != nil {
 		t.Fatalf("maintenance batch: %v", err)
+	}
+	if result.Success != 1 {
+		t.Fatalf("maintenance result=%#v, want one successful embedding asset", result)
 	}
 	if _, err := svc.applyStockProfileEnhancementResult(ctx, "300750", map[string]any{
 		"summaryZh":  "动力电池与储能龙头",

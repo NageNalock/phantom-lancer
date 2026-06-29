@@ -348,6 +348,37 @@ func TestEnableBaseProfileMaintenanceSchedulesImmediateRun(t *testing.T) {
 	}
 }
 
+func TestSavingBaseProfileSettingsStartsMissingBackgroundRunner(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	if err := svc.Initialize(ctx); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	now := time.Now()
+	settings := svc.settings
+	settings.BaseProfileAutoMaintainEnabled = true
+	settings.BaseProfileMaintainIntervalSeconds = 3600
+	settings.BaseProfileLastMaintainAt = now
+	settings.BaseProfileNextMaintainAt = now.Add(time.Hour)
+	if err := svc.store.CreateOrUpdateSettings(ctx, settings); err != nil {
+		t.Fatalf("save existing settings: %v", err)
+	}
+	svc.settings = settings
+	svc.StopBackground()
+
+	batchSize := 24
+	if _, err := svc.CreateOrUpdateSettings(ctx, RequestCreateOrUpdateSettings{
+		BaseProfileDeepUpdateBatchSize: &batchSize,
+	}); err != nil {
+		t.Fatalf("save base profile settings: %v", err)
+	}
+	if svc.bgCancel == nil {
+		t.Fatalf("background runner was not started")
+	}
+}
+
 func TestAutomaticDeepStockProfileUpdateStopsAtAIBudget(t *testing.T) {
 	ctx := context.Background()
 	businessLine := "动力电池系统"
