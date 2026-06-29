@@ -73,7 +73,7 @@ func (s *Service) markInterruptedRunningUpdateJobs(ctx context.Context) {
 	count, err := s.store.FailRunningUpdateJobs(ctx, "interrupted by service restart before completion")
 	if err != nil {
 		if s.log != nil {
-			s.log.Warn("mark interrupted stock data asset maintenance jobs failed", "error", err)
+			s.log.Warn("mark interrupted stock data asset maintenance jobs failed", "error", safelog.Text(err.Error(), 240))
 		}
 		return
 	}
@@ -151,7 +151,7 @@ func (s *Service) StartAgentMCPServer() (string, error) {
 
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && s.log != nil {
-			s.log.Warn("stockv2 agent MCP loopback server stopped", "error", err)
+			s.log.Warn("stockv2 agent MCP loopback server stopped", "error", safelog.Text(err.Error(), 240))
 		}
 	}()
 	return url, nil
@@ -344,7 +344,7 @@ func (s *Service) ListPortfolios(ctx context.Context) ([]PortfolioWithHoldings, 
 	for _, portfolio := range portfolios {
 		portfolioWithHoldings, err := s.GetPortfolio(ctx, portfolio.ID)
 		if err != nil {
-			s.log.Warn("get portfolio holdings failed", "portfolio_id", portfolio.ID, "error", err)
+			s.log.Warn("get portfolio holdings failed", "portfolio_id", portfolio.ID, "error", safelog.Text(err.Error(), 240))
 			continue
 		}
 		results = append(results, portfolioWithHoldings)
@@ -593,7 +593,7 @@ func (s *Service) RecordTransaction(ctx context.Context, portfolioID string, req
 	}
 	if _, err := s.RefreshPortfolioValuation(ctx, portfolioID, "trade"); err != nil {
 		if s.log != nil {
-			s.log.Warn("refresh portfolio valuation after trade failed", "portfolioId", portfolioID, "err", err)
+			s.log.Warn("refresh portfolio valuation after trade failed", "portfolio_id", portfolioID, "trigger_source", "trade", "error", safelog.Text(err.Error(), 240))
 		}
 	}
 	return result, nil
@@ -888,7 +888,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 
 	// 清理过期更新历史（保留最近 100 条）
 	if err := s.store.PruneUpdateJobs(ctx, 100); err != nil {
-		s.log.Warn("prune update jobs failed", "error", err)
+		s.log.Warn("prune update jobs failed", "retention_count", 100, "error", safelog.Text(err.Error(), 240))
 	}
 	s.maybeRunBaseProfileMaintenance(ctx, "universe_update")
 }
@@ -1086,7 +1086,7 @@ func (s *Service) normalizeDataAssetMaintenanceSettings(ctx context.Context, set
 	settings.DailyBarsAutoEnabled = false
 	if s.store != nil {
 		if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil && s.log != nil {
-			s.log.Warn("migrate legacy daily bars auto setting failed", "error", err)
+			s.log.Warn("migrate legacy daily bars auto setting failed", "error", safelog.Text(err.Error(), 240))
 		}
 	}
 	return settings
@@ -1236,9 +1236,9 @@ func (s *Service) checkAndExecuteScheduledUpdate(ctx context.Context) {
 	}
 
 	// 执行维护
-	s.log.Info("executing scheduled stock data asset maintenance")
+	s.log.Info("executing scheduled stock data asset maintenance", "trigger_type", "scheduled", "trigger_source", "auto-updater", "interval", interval.String(), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano))
 	if _, err := s.ExecuteUniverseUpdate(ctx, "scheduled", "auto-updater"); err != nil {
-		s.log.Error("scheduled update failed", "error", err)
+		s.log.Error("scheduled update failed", "trigger_type", "scheduled", "trigger_source", "auto-updater", "interval", interval.String(), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 300))
 		return
 	}
 
@@ -1256,7 +1256,7 @@ func (s *Service) hasRecentCompletedUniverseUpdate(ctx context.Context, now time
 	}
 	if err != nil {
 		if s.log != nil {
-			s.log.Warn("check latest stock data asset maintenance failed", "error", err)
+			s.log.Warn("check latest stock data asset maintenance failed", "interval", interval.String(), "error", safelog.Text(err.Error(), 240))
 		}
 		return false
 	}
@@ -1270,14 +1270,14 @@ func (s *Service) markScheduledUpdateChecked(ctx context.Context, at time.Time) 
 	settings, err := s.GetSettings(ctx)
 	if err != nil {
 		if s.log != nil {
-			s.log.Warn("load settings before marking scheduled stock maintenance checked failed", "error", err)
+			s.log.Warn("load settings before marking scheduled stock maintenance checked failed", "checked_at", at.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 240))
 		}
 		return
 	}
 	settings.LastScheduledUpdate = at
 	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil {
 		if s.log != nil {
-			s.log.Warn("mark scheduled stock maintenance checked failed", "error", err)
+			s.log.Warn("mark scheduled stock maintenance checked failed", "checked_at", at.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 240))
 		}
 		return
 	}
@@ -1303,6 +1303,9 @@ func (s *Service) runScheduledMonitors(ctx context.Context) {
 func (s *Service) tickScheduledMonitors(ctx context.Context) {
 	storedConfigs, err := s.store.ListMonitorTaskConfigs(ctx)
 	if err != nil {
+		if s.log != nil {
+			s.log.Warn("scheduled monitor config list failed", "error", safelog.Text(err.Error(), 240))
+		}
 		return
 	}
 	configs := make(map[string]MonitorTaskConfig)
@@ -1332,7 +1335,7 @@ func (s *Service) tickScheduledMonitors(ctx context.Context) {
 			}
 			if _, err := s.RunLatestQuoteRefreshTask(ctx, MonitorTriggerScheduled); err != nil {
 				if s.log != nil {
-					s.log.Warn("scheduled quote refresh failed", "error", err)
+					s.log.Warn("scheduled quote refresh failed", "task_type", taskType, "trigger_type", MonitorTriggerScheduled, "interval_seconds", cfg.IntervalSeconds, "error", safelog.Text(err.Error(), 240))
 				}
 			}
 			continue
@@ -1346,7 +1349,7 @@ func (s *Service) tickScheduledMonitors(ctx context.Context) {
 		}
 		if _, err := s.RunMonitorTask(ctx, taskType, MonitorTriggerScheduled); err != nil {
 			if s.log != nil {
-				s.log.Warn("scheduled monitor run failed", "task_type", taskType, "error", err)
+				s.log.Warn("scheduled monitor run failed", "task_type", taskType, "trigger_type", MonitorTriggerScheduled, "interval_seconds", cfg.IntervalSeconds, "error", safelog.Text(err.Error(), 240))
 			}
 		}
 	}
@@ -1427,7 +1430,7 @@ func (s *Service) Close() error {
 	if mcpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		if err := mcpServer.Shutdown(ctx); err != nil && s.log != nil {
-			s.log.Warn("stockv2 agent MCP loopback shutdown failed", "error", err)
+			s.log.Warn("stockv2 agent MCP loopback shutdown failed", "timeout", "2s", "error", safelog.Text(err.Error(), 240))
 		}
 		cancel()
 	}

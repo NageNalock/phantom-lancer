@@ -1527,7 +1527,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 	run, err := s.store.GetAgentRun(ctx, runID)
 	if err != nil {
 		if s.log != nil {
-			s.log.Error("finalize: get run failed", "run_id", runID, "error", err)
+			s.log.Error("finalize: get run failed", "run_id", runID, "error", safelog.Text(err.Error(), 240))
 		}
 		return
 	}
@@ -1538,7 +1538,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 	ledger, err := s.store.GetAgentDecisionLedger(ctx, ledgerID)
 	if err != nil {
 		if s.log != nil {
-			s.log.Warn("finalize: get ledger failed", "run_id", runID, "ledger_id", ledgerID, "error", err)
+			s.log.Warn("finalize: get ledger failed", "run_id", runID, "ledger_id", ledgerID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(err.Error(), 240))
 		}
 	}
 
@@ -1657,13 +1657,13 @@ func (s *Service) finalizeAgentRunWithOutput(
 			run.Status = AgentRunStatusFailed
 			run.ErrorMessage = safelog.Text("save review result failed: "+err.Error(), 500)
 			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
-				s.log.Warn("finalize: update run after review save failed", "run_id", runID, "error", updateErr)
+				s.log.Warn("finalize: update run after review save failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(updateErr.Error(), 240))
 			}
 			if s.log != nil {
-				s.log.Warn("finalize: save review result failed", "run_id", runID, "review_id", reviewID, "error", err)
+				s.log.Warn("finalize: save review result failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "review_id", reviewID, "error", safelog.Text(err.Error(), 300))
 			}
 			if _, ledgerErr := s.store.UpdateAgentDecisionLedger(ctx, ledger); ledgerErr != nil && s.log != nil {
-				s.log.Warn("finalize: update ledger after review save failed", "run_id", runID, "error", ledgerErr)
+				s.log.Warn("finalize: update ledger after review save failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "review_id", reviewID, "error", safelog.Text(ledgerErr.Error(), 240))
 			}
 			return
 		}
@@ -1674,13 +1674,13 @@ func (s *Service) finalizeAgentRunWithOutput(
 			run.Status = AgentRunStatusFailed
 			run.ErrorMessage = safelog.Text("save stock profile enhancement failed: "+err.Error(), 500)
 			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
-				s.log.Warn("finalize: update run after stock profile save failed", "run_id", runID, "error", updateErr)
+				s.log.Warn("finalize: update run after stock profile save failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "symbol", run.TriggerObjectID, "model", modelName, "error", safelog.Text(updateErr.Error(), 240))
 			}
 			if s.log != nil {
-				s.log.Warn("finalize: save stock profile enhancement failed", "run_id", runID, "symbol", run.TriggerObjectID, "error", err)
+				s.log.Warn("finalize: save stock profile enhancement failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "symbol", run.TriggerObjectID, "model", modelName, "error", safelog.Text(err.Error(), 300))
 			}
 			if _, ledgerErr := s.store.UpdateAgentDecisionLedger(ctx, ledger); ledgerErr != nil && s.log != nil {
-				s.log.Warn("finalize: update ledger after stock profile save failed", "run_id", runID, "error", ledgerErr)
+				s.log.Warn("finalize: update ledger after stock profile save failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "symbol", run.TriggerObjectID, "model", modelName, "error", safelog.Text(ledgerErr.Error(), 240))
 			}
 			return
 		}
@@ -1690,11 +1690,14 @@ func (s *Service) finalizeAgentRunWithOutput(
 		if err != nil {
 			run.Status = AgentRunStatusFailed
 			run.ErrorMessage = safelog.Text("invalid strategy generation result: "+err.Error(), 500)
+			if s.log != nil {
+				s.log.Warn("finalize: invalid strategy generation result", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(err.Error(), 300))
+			}
 			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
-				s.log.Warn("finalize: update run after strategy generation validation failed", "run_id", runID, "error", updateErr)
+				s.log.Warn("finalize: update run after strategy generation validation failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(updateErr.Error(), 240))
 			}
 			if _, ledgerErr := s.store.UpdateAgentDecisionLedger(ctx, ledger); ledgerErr != nil && s.log != nil {
-				s.log.Warn("finalize: update ledger after strategy generation validation failed", "run_id", runID, "error", ledgerErr)
+				s.log.Warn("finalize: update ledger after strategy generation validation failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(ledgerErr.Error(), 240))
 			}
 			return
 		}
@@ -1703,13 +1706,13 @@ func (s *Service) finalizeAgentRunWithOutput(
 			run.Status = AgentRunStatusFailed
 			run.ErrorMessage = safelog.Text("save strategy generation draft failed: "+strategyGenerationSaveError(err).Error(), 500)
 			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
-				s.log.Warn("finalize: update run after strategy generation save failed", "run_id", runID, "error", updateErr)
+				s.log.Warn("finalize: update run after strategy generation save failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(updateErr.Error(), 240))
 			}
 			if s.log != nil {
-				s.log.Warn("finalize: save strategy generation draft failed", "run_id", runID, "error", err)
+				s.log.Warn("finalize: save strategy generation draft failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(strategyGenerationSaveError(err).Error(), 300))
 			}
 			if _, ledgerErr := s.store.UpdateAgentDecisionLedger(ctx, ledger); ledgerErr != nil && s.log != nil {
-				s.log.Warn("finalize: update ledger after strategy generation save failed", "run_id", runID, "error", ledgerErr)
+				s.log.Warn("finalize: update ledger after strategy generation save failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(ledgerErr.Error(), 240))
 			}
 			return
 		}
@@ -1728,8 +1731,11 @@ func (s *Service) finalizeAgentRunWithOutput(
 		if err != nil {
 			run.Status = AgentRunStatusFailed
 			run.ErrorMessage = safelog.Text("opportunity discovery run not found: "+err.Error(), 500)
+			if s.log != nil {
+				s.log.Warn("finalize: opportunity discovery run lookup failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(err.Error(), 300))
+			}
 			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
-				s.log.Warn("finalize: update run after opportunity discovery lookup failed", "run_id", runID, "error", updateErr)
+				s.log.Warn("finalize: update run after opportunity discovery lookup failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(updateErr.Error(), 240))
 			}
 			return
 		}
@@ -1737,11 +1743,14 @@ func (s *Service) finalizeAgentRunWithOutput(
 		if err != nil {
 			run.Status = AgentRunStatusFailed
 			run.ErrorMessage = safelog.Text("save opportunity discovery result failed: "+err.Error(), 500)
+			if s.log != nil {
+				s.log.Warn("finalize: save opportunity discovery result failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "discovery_run_id", discoveryRun.ID, "opportunity_id", discoveryRun.OpportunityID, "error", safelog.Text(err.Error(), 300))
+			}
 			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
-				s.log.Warn("finalize: update run after opportunity discovery save failed", "run_id", runID, "error", updateErr)
+				s.log.Warn("finalize: update run after opportunity discovery save failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "discovery_run_id", discoveryRun.ID, "opportunity_id", discoveryRun.OpportunityID, "error", safelog.Text(updateErr.Error(), 240))
 			}
 			if _, ledgerErr := s.store.UpdateAgentDecisionLedger(ctx, ledger); ledgerErr != nil && s.log != nil {
-				s.log.Warn("finalize: update ledger after opportunity discovery save failed", "run_id", runID, "error", ledgerErr)
+				s.log.Warn("finalize: update ledger after opportunity discovery save failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "discovery_run_id", discoveryRun.ID, "opportunity_id", discoveryRun.OpportunityID, "error", safelog.Text(ledgerErr.Error(), 240))
 			}
 			return
 		}
@@ -1749,10 +1758,10 @@ func (s *Service) finalizeAgentRunWithOutput(
 	}
 
 	if _, err := s.store.UpdateAgentDecisionLedger(ctx, ledger); err != nil && s.log != nil {
-		s.log.Warn("finalize: update ledger failed", "run_id", runID, "error", err)
+		s.log.Warn("finalize: update ledger failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(err.Error(), 240))
 	}
 	if _, err := s.store.UpdateAgentRun(ctx, run); err != nil && s.log != nil {
-		s.log.Warn("finalize: update run failed", "run_id", runID, "error", err)
+		s.log.Warn("finalize: update run failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(err.Error(), 240))
 	}
 }
 

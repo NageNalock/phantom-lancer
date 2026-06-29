@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"phantom-lancer/internal/safelog"
 )
 
 const (
@@ -60,7 +62,7 @@ func (s *Service) LinkPendingNewsEventsBatch(ctx context.Context, limit int) (Li
 		candidates, err := s.LinkNewsEvent(ctx, event.ID)
 		if err != nil {
 			result.Failed++
-			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: event.ID, Reason: err.Error()})
+			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: event.ID, Reason: safelog.Text(err.Error(), 240)})
 			continue
 		}
 		result.Candidates += len(candidates)
