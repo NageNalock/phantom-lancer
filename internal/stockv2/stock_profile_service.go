@@ -364,33 +364,14 @@ func (s *Service) CountStockProfiles(ctx context.Context, filter StockProfileLis
 }
 
 func (s *Service) ListStockProfileSummaries(ctx context.Context, symbols []string) (map[string]StockProfileSummary, error) {
-	out := make(map[string]StockProfileSummary, len(symbols))
-	for _, raw := range symbols {
-		symbol := strings.TrimSpace(raw)
-		if symbol == "" {
-			continue
-		}
-		profile, err := s.store.GetStockProfile(ctx, symbol)
-		if err != nil {
-			if errors.Is(err, ErrStockProfileNotFound) {
-				out[symbol] = StockProfileSummary{Symbol: symbol, Status: "missing", AIProfileStatus: StockProfileAIStatusMissing}
-				continue
-			}
-			return nil, err
-		}
-		status := "ready"
-		if strings.TrimSpace(profile.ProfileText) == "" {
-			status = "partial"
-		}
-		out[symbol] = StockProfileSummary{
-			Symbol:              profile.Symbol,
-			Status:              status,
-			BusinessSummary:     firstNonEmpty(profile.BusinessSummaryZh, profile.BusinessSummary, profile.BusinessSummaryEn),
-			AIProfileStatus:     profile.AIProfileStatus,
-			AIProfileModel:      profile.AIProfileModel,
-			AIProfileConfidence: profile.AIProfileConfidence,
-			AIProfileUpdatedAt:  profile.AIProfileUpdatedAt,
-			UpdatedAt:           profile.UpdatedAt,
+	symbols = compactStringList(symbols, 100)
+	out, err := s.store.ListStockProfileSummaries(ctx, symbols)
+	if err != nil {
+		return nil, err
+	}
+	for _, symbol := range symbols {
+		if _, ok := out[symbol]; !ok {
+			out[symbol] = StockProfileSummary{Symbol: symbol, Status: "missing", AIProfileStatus: StockProfileAIStatusMissing}
 		}
 	}
 	return out, nil

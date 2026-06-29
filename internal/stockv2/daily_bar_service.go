@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -120,45 +119,63 @@ func (s *Service) GetDailyBarsQuality(ctx context.Context, symbol, adjusted stri
 		}
 	}
 
-	q := DailyBarsQuality{
-		Symbol:           symbol,
-		Adjusted:         adjusted,
-		HasData:          rowCount > 0,
-		RowCount:         rowCount,
-		EarliestDate:     earliest,
-		LatestDate:       latest,
-		LastErrorMessage: lastErr,
-		Source:           source,
-		CheckedAt:        time.Now(),
-	}
-	if rowCount > 0 {
-		q.Meets250 = rowCount >= dailyBarsAgentTarget
-		q.Stale = isDailyBarsStale(latest, time.Now())
-	} else {
-		q.Stale = true
-	}
-	return q, nil
+	return dailyBarsQualityFromStats(symbol, adjusted, dailyBarsStats{
+		Symbol:    symbol,
+		RowCount:  rowCount,
+		Earliest:  earliest,
+		Latest:    latest,
+		Source:    source,
+		LastError: lastErr,
+	}, time.Now()), nil
 }
 
 func (s *Service) GetDailyBarsQualityBatch(ctx context.Context, symbols []string, adjusted string) (map[string]DailyBarsQuality, error) {
+	adjusted = normalizeDailyBarAdjusted(adjusted)
+	symbols = compactStringList(symbols, 100)
 	out := make(map[string]DailyBarsQuality, len(symbols))
-	seen := make(map[string]bool, len(symbols))
-	for _, raw := range symbols {
-		symbol := strings.TrimSpace(raw)
-		if symbol == "" || seen[symbol] {
-			continue
+	if len(symbols) == 0 {
+		return out, nil
+	}
+	stats, err := s.store.GetDailyBarsStatsBatch(ctx, symbols, adjusted)
+	if err != nil {
+		return nil, err
+	}
+	jobErrors, err := s.store.GetLatestDailyBarJobErrors(ctx, symbols, adjusted)
+	if err != nil {
+		s.log.Warn("get latest daily bar job errors failed", "error", err)
+		jobErrors = map[string]string{}
+	}
+	checkedAt := time.Now()
+	for _, symbol := range symbols {
+		stat := stats[symbol]
+		stat.Symbol = symbol
+		if stat.LastError == "" {
+			stat.LastError = jobErrors[symbol]
 		}
-		seen[symbol] = true
-		if len(seen) > 100 {
-			break
-		}
-		quality, err := s.GetDailyBarsQuality(ctx, symbol, adjusted)
-		if err != nil {
-			return nil, err
-		}
-		out[symbol] = quality
+		out[symbol] = dailyBarsQualityFromStats(symbol, adjusted, stat, checkedAt)
 	}
 	return out, nil
+}
+
+func dailyBarsQualityFromStats(symbol, adjusted string, stats dailyBarsStats, checkedAt time.Time) DailyBarsQuality {
+	q := DailyBarsQuality{
+		Symbol:           symbol,
+		Adjusted:         adjusted,
+		HasData:          stats.RowCount > 0,
+		RowCount:         stats.RowCount,
+		EarliestDate:     stats.Earliest,
+		LatestDate:       stats.Latest,
+		LastErrorMessage: stats.LastError,
+		Source:           stats.Source,
+		CheckedAt:        checkedAt,
+	}
+	if stats.RowCount > 0 {
+		q.Meets250 = stats.RowCount >= dailyBarsAgentTarget
+		q.Stale = isDailyBarsStale(stats.Latest, checkedAt)
+	} else {
+		q.Stale = true
+	}
+	return q
 }
 
 // ensureOneSymbol 抓取单只股票指定区间日 K 并落盘。失败返回 error，不写坏数据。

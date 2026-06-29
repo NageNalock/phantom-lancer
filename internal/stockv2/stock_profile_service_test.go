@@ -348,6 +348,70 @@ func TestEnableBaseProfileMaintenanceSchedulesImmediateRun(t *testing.T) {
 	}
 }
 
+func TestListStockProfileSummariesReturnsBatchAndMissing(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+
+	if _, err := svc.store.UpsertStockProfile(ctx, StockProfile{
+		Symbol:            "300750",
+		Market:            "SZ",
+		InstrumentType:    InstrumentTypeStock,
+		Name:              "宁德时代",
+		BusinessSummary:   "fallback summary",
+		BusinessSummaryZh: "动力电池龙头",
+		ProfileText:       "基础画像",
+		AIProfileStatus:   StockProfileAIStatusReady,
+		AIProfileModel:    "model-a",
+	}); err != nil {
+		t.Fatalf("upsert stock profile: %v", err)
+	}
+
+	got, err := svc.ListStockProfileSummaries(ctx, []string{"300750", "300750", "600519", ""})
+	if err != nil {
+		t.Fatalf("list summaries: %v", err)
+	}
+	if got["300750"].Status != "ready" ||
+		got["300750"].BusinessSummary != "动力电池龙头" ||
+		got["300750"].AIProfileStatus != StockProfileAIStatusReady {
+		t.Fatalf("summary for 300750 = %+v", got["300750"])
+	}
+	if got["600519"].Status != "missing" || got["600519"].AIProfileStatus != StockProfileAIStatusMissing {
+		t.Fatalf("summary for missing profile = %+v", got["600519"])
+	}
+}
+
+func TestSavingBaseProfileSettingsStartsMissingBackgroundRunner(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	if err := svc.Initialize(ctx); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	now := time.Now()
+	settings := svc.settings
+	settings.BaseProfileAutoMaintainEnabled = true
+	settings.BaseProfileMaintainIntervalSeconds = 3600
+	settings.BaseProfileLastMaintainAt = now
+	settings.BaseProfileNextMaintainAt = now.Add(time.Hour)
+	if err := svc.store.CreateOrUpdateSettings(ctx, settings); err != nil {
+		t.Fatalf("save existing settings: %v", err)
+	}
+	svc.settings = settings
+	svc.StopBackground()
+
+	batchSize := 24
+	if _, err := svc.CreateOrUpdateSettings(ctx, RequestCreateOrUpdateSettings{
+		BaseProfileDeepUpdateBatchSize: &batchSize,
+	}); err != nil {
+		t.Fatalf("save base profile settings: %v", err)
+	}
+	if svc.bgCancel == nil {
+		t.Fatalf("background runner was not started")
+	}
+}
+
 func TestAutomaticDeepStockProfileUpdateStopsAtAIBudget(t *testing.T) {
 	ctx := context.Background()
 	businessLine := "动力电池系统"
