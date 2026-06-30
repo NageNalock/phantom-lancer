@@ -1597,6 +1597,7 @@ func strategyGenerationPipelineSteps() []strategyGenerationPipelineStepDef {
 			objective: "Collect a compact fact pack for the targets or portfolio holdings.",
 			instructions: []string{
 				"Call project MCP tools and Codex CLI external public search/browse as equal-priority evidence channels to fill quote, daily bars, profile, news, existing strategy, portfolio, embedding status, and recent public context.",
+				"Use serenity-skill methodology for material holdings/themes: map value-chain layers, scarce constraints, evidence strength, and failure conditions, while keeping this step's JSON schema.",
 				"When internal data is stale, missing, or contradictory, verify with external public sources and output conflict_resolution plus research_log; do not only recommend future verification.",
 				"Do not produce strategy recommendations.",
 				"Mark stale, missing, or weak evidence explicitly.",
@@ -1609,6 +1610,7 @@ func strategyGenerationPipelineSteps() []strategyGenerationPipelineStepDef {
 			objective: "Build the bullish or constructive case for each target or holding.",
 			instructions: []string{
 				"Use the evidence collector output and context, and refresh with internal MCP or external public search when a material constructive claim needs confirmation.",
+				"Use serenity-skill to distinguish scarce-layer exposure from generic theme exposure before making constructive claims.",
 				"If the evidence collector marked a material conflict as unresolved, verify it before using the claim or explicitly downgrade it.",
 				"Focus on reasons to observe, hold, build_position, or add_position.",
 				"Every important claim should point to evidence_refs or state that support is weak.",
@@ -1621,6 +1623,7 @@ func strategyGenerationPipelineSteps() []strategyGenerationPipelineStepDef {
 			objective: "Build the bearish or risk case for each target or holding.",
 			instructions: []string{
 				"Use the evidence collector output and context, and refresh with internal MCP or external public search when a material risk claim needs confirmation.",
+				"Use serenity-skill failure-condition thinking: substitution, faster competitor expansion, weak demand, margin failure, financing pressure, governance, geopolitics, customer loss, and valuation already pricing in success.",
 				"If stale or conflicting data drives the risk case, verify it with internal MCP and public sources or label it unresolved with confidence impact.",
 				"Focus on reasons to reduce_position, exit_position, avoid adding, or require Review.",
 				"Every important claim should point to evidence_refs or state that support is weak.",
@@ -1634,6 +1637,7 @@ func strategyGenerationPipelineSteps() []strategyGenerationPipelineStepDef {
 			instructions: []string{
 				"Do not introduce new investment opinions.",
 				"Use internal MCP and external public search as equal-priority verification channels when checking contested, stale, or high-impact claims.",
+				"Grade evidence using serenity-skill source standards: strong primary filings/announcements/contracts/project records/patents; medium reputable media/trade/company pages/cross-checks; weak social or rumor leads.",
 				"For every contested quote/bar/profile/news/portfolio claim, output verified, partially_verified, weak, unsupported, stale, or conflicting with the verification source and unresolved reason.",
 				"Label claims as verified, partially_verified, weak, unsupported, stale, or conflicting.",
 				"Identify claims that must not be used by the final formatter.",
@@ -1647,6 +1651,7 @@ func strategyGenerationPipelineSteps() []strategyGenerationPipelineStepDef {
 			instructions: []string{
 				"Respect cash, concentration, risk level, existing strategy coverage, and allowed actions.",
 				"Refresh portfolio, strategy coverage, and material market context with internal MCP and external public search when prior outputs are stale or conflicting.",
+				"Use serenity-skill scarce-layer and evidence-strength conclusions only as research inputs; portfolio permissions and StockV2 guardrails decide allowed action space.",
 				"Do not base draft type or action-space decisions on unresolved conflicting data without explicitly stating the degraded assumption.",
 				"Decide new_strategy, strategy_patch, or no_change for each holding or target.",
 				"Use review_request when immediate account-bound handling is needed; do not create proposed_operation.",
@@ -1660,6 +1665,7 @@ func strategyGenerationPipelineSteps() []strategyGenerationPipelineStepDef {
 			instructions: []string{
 				"Do not add new claims beyond prior results.",
 				"Carry forward unresolved conflicts, research_log summaries, and data_quality_notes into the final report instead of dropping them.",
+				"Carry forward serenity-skill scarce-layer/evidence-strength/failure-condition summaries when prior steps produced them.",
 				"Generate playbook.rules[] using the StockV2 protocol.",
 				"Use empty arrays for unstructured prefilters.",
 			},
