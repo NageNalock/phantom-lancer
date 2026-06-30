@@ -135,6 +135,31 @@ func TestStrategyGenerationRejectsLegacyPlaybookActions(t *testing.T) {
 	}
 }
 
+func TestStrategyGenerationNormalizesStringPlaybookPrefilters(t *testing.T) {
+	report := strategyGenerationReportResult("302132")
+	draft := mapFromAny(sliceFromAny(report["drafts"])[0])
+	playbook := mapFromAny(draft["playbook"])
+	rule := mapFromAny(sliceFromAny(playbook["rules"])[0])
+	rule["dataPrefilters"] = "quote freshness and price observation only"
+	rule["portfolioPrefilters"] = map[string]any{"type": WatchRuleQuoteStale}
+	rule["newsPrefilters"] = "no structured news filter"
+
+	parsed, err := strategyGenerationReportFromResult(report)
+	if err != nil {
+		t.Fatalf("strategyGenerationReportFromResult: %v", err)
+	}
+	got := parsed.Drafts[0].Playbook.Rules[0]
+	if len(got.DataPrefilters) != 0 {
+		t.Fatalf("dataPrefilters = %#v, want empty array after string normalization", got.DataPrefilters)
+	}
+	if len(got.PortfolioPrefilters) != 1 || got.PortfolioPrefilters[0]["type"] != WatchRuleQuoteStale {
+		t.Fatalf("portfolioPrefilters = %#v, want single object wrapped in array", got.PortfolioPrefilters)
+	}
+	if len(got.NewsPrefilters) != 0 {
+		t.Fatalf("newsPrefilters = %#v, want empty array after string normalization", got.NewsPrefilters)
+	}
+}
+
 func TestBuildPortfolioStrategyDiagnosisRequiresPortfolioID(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

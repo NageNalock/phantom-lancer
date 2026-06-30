@@ -476,6 +476,7 @@ func strategyGenerationReportFromResult(raw map[string]any) (StrategyGenerationR
 	if err := rejectLegacyStrategyGenerationPlaybookShape(raw); err != nil {
 		return StrategyGenerationReport{}, err
 	}
+	normalizeStrategyGenerationPlaybookPrefilters(raw)
 	payload, err := json.Marshal(raw)
 	if err != nil {
 		return StrategyGenerationReport{}, err
@@ -505,6 +506,30 @@ func rejectLegacyStrategyGenerationPlaybookShape(raw map[string]any) error {
 		}
 	}
 	return nil
+}
+
+func normalizeStrategyGenerationPlaybookPrefilters(raw map[string]any) {
+	for _, draftRaw := range sliceFromAny(raw["drafts"]) {
+		draft := mapFromAny(draftRaw)
+		playbook := mapFromAny(draft["playbook"])
+		for _, ruleRaw := range sliceFromAny(playbook["rules"]) {
+			rule := mapFromAny(ruleRaw)
+			for _, key := range []string{"dataPrefilters", "portfolioPrefilters", "newsPrefilters"} {
+				switch value := rule[key].(type) {
+				case nil:
+					continue
+				case []any, []map[string]any:
+					continue
+				case map[string]any:
+					rule[key] = []any{value}
+				case string:
+					rule[key] = []any{}
+				default:
+					rule[key] = []any{}
+				}
+			}
+		}
+	}
 }
 
 func validateStrategyGenerationReport(report StrategyGenerationReport) error {
