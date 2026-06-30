@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestBuildCodexExecArgsUsesFullAccessAndSkipsRepoCheck(t *testing.T) {
@@ -119,6 +120,36 @@ func TestExecutePromptCapturesFastExitStderr(t *testing.T) {
 	}
 	if !strings.Contains(output.StderrTail, "unknown model gpt-5.5") || !strings.Contains(output.StderrTail, "try --help") {
 		t.Fatalf("stderr tail = %q, want fast cli usage error", output.StderrTail)
+	}
+}
+
+func TestBuildStockProfileSummaryPromptTruncatesUTF8Safely(t *testing.T) {
+	profile := StockProfile{
+		Symbol:            "000815",
+		Market:            "SZ",
+		InstrumentType:    InstrumentTypeStock,
+		Name:              "美利云",
+		BusinessSummaryZh: strings.Repeat("中冶美利云产业投资股份有限公司推进云计算数据中心与造纸业务协同。", 180),
+		ProfileTextZh:     strings.Repeat("绿色能源 数据中心 造纸 央企 混改 ", 220),
+	}
+
+	prompt := buildStockProfileSummaryPrompt("task-profile", profile, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
+	if !utf8.ValidString(prompt) {
+		t.Fatalf("prompt is invalid utf8")
+	}
+	if !strings.Contains(prompt, "... [truncated]") {
+		t.Fatalf("prompt was not truncated")
+	}
+}
+
+func TestTruncatePromptUTF8KeepsValidUTF8AtByteBoundary(t *testing.T) {
+	value := strings.Repeat("中", 3000) + strings.Repeat("尾", 1000)
+	got := truncatePromptUTF8(value, 6000, 2000)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated prompt is invalid utf8")
+	}
+	if !strings.Contains(got, "... [truncated]") {
+		t.Fatalf("truncated marker missing")
 	}
 }
 

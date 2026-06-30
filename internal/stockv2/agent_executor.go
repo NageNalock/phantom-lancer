@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"phantom-lancer/internal/safelog"
 )
@@ -368,6 +369,38 @@ func codexCommandSummary(binary string, args []string) string {
 		parts = append(parts, arg)
 	}
 	return safelog.Text(strings.Join(parts, " "), 2000)
+}
+
+func truncatePromptUTF8(value string, headBytes, tailBytes int) string {
+	if value == "" || headBytes <= 0 || tailBytes <= 0 || len(value) <= headBytes+tailBytes {
+		return value
+	}
+	head := value[:utf8SafePrefixLen(value, headBytes)]
+	tailStart := utf8SafeSuffixStart(value, len(value)-tailBytes)
+	return head + "\n... [truncated]\n...\n" + value[tailStart:]
+}
+
+func utf8SafePrefixLen(value string, limit int) int {
+	if limit >= len(value) {
+		return len(value)
+	}
+	for limit > 0 && !utf8.ValidString(value[:limit]) {
+		limit--
+	}
+	return limit
+}
+
+func utf8SafeSuffixStart(value string, start int) int {
+	if start <= 0 {
+		return 0
+	}
+	if start >= len(value) {
+		return len(value)
+	}
+	for start < len(value) && !utf8.RuneStart(value[start]) {
+		start++
+	}
+	return start
 }
 
 func filepathBase(path string) string {
@@ -747,10 +780,7 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 	// 裁剪总长度, 避免 token 爆炸
 	const maxPromptLen = 8000
 	if b.Len() > maxPromptLen {
-		// 简单截断: 保留前 6000 字符 + 后 2000 字符
-		// ponytail: 不做复杂的智能裁剪, 直接截断并加标记
-		result := b.String()
-		return result[:6000] + "\n... [truncated]\n...\n" + result[len(result)-2000:]
+		return truncatePromptUTF8(b.String(), 6000, 2000)
 	}
 
 	return b.String()
@@ -819,8 +849,7 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 
 	const maxPromptLen = 12000
 	if b.Len() > maxPromptLen {
-		result := b.String()
-		return result[:9000] + "\n... [truncated]\n...\n" + result[len(result)-3000:]
+		return truncatePromptUTF8(b.String(), 9000, 3000)
 	}
 	return b.String()
 }
@@ -865,8 +894,7 @@ func buildStockProfileSummaryPrompt(taskID string, profile StockProfile, mcpURL 
 
 	const maxPromptLen = 8000
 	if b.Len() > maxPromptLen {
-		result := b.String()
-		return result[:6000] + "\n... [truncated]\n...\n" + result[len(result)-2000:]
+		return truncatePromptUTF8(b.String(), 6000, 2000)
 	}
 	return b.String()
 }
@@ -932,8 +960,7 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 
 	const maxPromptLen = 10000
 	if b.Len() > maxPromptLen {
-		result := b.String()
-		return result[:7500] + "\n... [truncated]\n...\n" + result[len(result)-2500:]
+		return truncatePromptUTF8(b.String(), 7500, 2500)
 	}
 	return b.String()
 }
