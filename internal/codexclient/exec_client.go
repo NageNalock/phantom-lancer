@@ -3,6 +3,7 @@ package codexclient
 import (
 	"bufio"
 	"context"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -63,14 +64,19 @@ func (c *ExecClient) Run(ctx context.Context, opts ExecOptions, onLine func([]by
 	// Otherwise a stray grandchild keeps the stdout pipe write-end open and the
 	// scanner below never sees EOF.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	stdout, err := cmd.StdoutPipe()
+	// ponytail: own the read end so cmd.Wait cannot close it before scanner drains.
+	stdout, stdoutW, err := os.Pipe()
 	if err != nil {
 		return err
 	}
+	defer stdout.Close()
+	cmd.Stdout = stdoutW
 	cmd.Stderr = nil
 	if err := cmd.Start(); err != nil {
+		_ = stdoutW.Close()
 		return err
 	}
+	_ = stdoutW.Close()
 	pgid := 0
 	if cmd.Process != nil {
 		pgid = cmd.Process.Pid
