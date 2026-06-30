@@ -60,7 +60,7 @@ func (s *Store) UpsertLatestQuote(ctx context.Context, quote StockV2QuoteLatest)
 		quote.Status = QuoteStatusFresh
 	}
 
-	_, err := s.assetDB().ExecContext(ctx, query,
+	_, err := s.db.ExecContext(ctx, query,
 		quote.Symbol,
 		quote.Market,
 		quote.Name,
@@ -114,7 +114,7 @@ func (s *Store) GetLatestQuotes(ctx context.Context, symbols []string) ([]StockV
 		WHERE symbol IN (%s)
 	`, placeholders)
 
-	rows, err := s.assetDB().QueryContext(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, wrapError(err, "get latest quotes")
 	}
@@ -158,7 +158,7 @@ func (s *Store) InsertQuoteSnapshot(ctx context.Context, snapshot StockV2QuoteSn
 	if snapshot.Source == "" {
 		snapshot.Source = QuoteSourceTencent
 	}
-	_, err := s.assetDB().ExecContext(ctx, `
+	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO stockv2_quote_snapshots (
 			id, symbol, market, name, last_price, prev_close, open_price, high_price,
 			low_price, volume, amount, pct_change, amplitude, turnover_rate,
@@ -224,7 +224,7 @@ func (s *Store) GetLatestMinuteBar(ctx context.Context, symbol string) (StockV2M
 	if symbol == "" {
 		return StockV2MinuteBar{}, false, nil
 	}
-	row := s.assetDB().QueryRowContext(ctx, `
+	row := s.db.QueryRowContext(ctx, `
 		SELECT symbol, COALESCE(market,''), minute_at, open, high, low, close,
 		       prev_close, volume, amount, pct_change, main_net_inflow,
 		       snapshot_count, COALESCE(source,''), created_at, updated_at
@@ -281,7 +281,7 @@ func (s *Store) ListMinuteBars(ctx context.Context, symbol string, since time.Ti
 	}
 	query += ` ORDER BY minute_at ASC LIMIT ?`
 	args = append(args, limit)
-	rows, err := s.assetDB().QueryContext(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, wrapError(err, "list minute bars")
 	}
@@ -324,10 +324,10 @@ func (s *Store) PruneIntradayQuotes(ctx context.Context, before time.Time) error
 	if before.IsZero() {
 		return nil
 	}
-	if _, err := s.assetDB().ExecContext(ctx, `DELETE FROM stockv2_quote_snapshots WHERE collected_at < ?`, before); err != nil {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM stockv2_quote_snapshots WHERE collected_at < ?`, before); err != nil {
 		return wrapError(err, "prune quote snapshots")
 	}
-	if _, err := s.assetDB().ExecContext(ctx, `DELETE FROM stockv2_minute_bars WHERE minute_at < ?`, before); err != nil {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM stockv2_minute_bars WHERE minute_at < ?`, before); err != nil {
 		return wrapError(err, "prune minute bars")
 	}
 	return nil
@@ -344,7 +344,7 @@ func (s *Store) MarkLatestQuoteFailed(ctx context.Context, symbol, reason string
 	}
 
 	now := time.Now()
-	_, err = s.assetDB().ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 		UPDATE stockv2_quotes_latest
 		SET status = ?, error_message = ?, updated_at = ?
 		WHERE symbol = ?
@@ -504,7 +504,7 @@ func (s *Store) ListQuoteRefreshStatuses(ctx context.Context, limit int) ([]Quot
 }
 
 func (s *Store) getLatestQuote(ctx context.Context, symbol string) (StockV2QuoteLatest, error) {
-	row := s.assetDB().QueryRowContext(ctx, `
+	row := s.db.QueryRowContext(ctx, `
 		SELECT symbol, market, COALESCE(name,''), last_price, prev_close, open_price,
 		       high_price, low_price, volume, amount, pct_change, COALESCE(amplitude,0),
 		       COALESCE(turnover_rate,0), COALESCE(volume_ratio,0), COALESCE(main_net_inflow,0), COALESCE(super_net_inflow,0),
@@ -623,7 +623,7 @@ func (s *Store) listQuoteSnapshots(ctx context.Context, symbol string, since tim
 	}
 	query += ` ORDER BY collected_at ASC`
 
-	rows, err := s.assetDB().QueryContext(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, wrapError(err, "list quote snapshots")
 	}
@@ -682,7 +682,7 @@ func (s *Store) upsertMinuteBars(ctx context.Context, bars []StockV2MinuteBar) e
 		if bar.UpdatedAt.IsZero() {
 			bar.UpdatedAt = now
 		}
-		_, err := s.assetDB().ExecContext(ctx, `
+		_, err := s.db.ExecContext(ctx, `
 			INSERT INTO stockv2_minute_bars (
 				symbol, market, minute_at, open, high, low, close, prev_close,
 				volume, amount, pct_change, main_net_inflow, snapshot_count,

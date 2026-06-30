@@ -111,6 +111,82 @@ func stringResponse(status int, body string) *http.Response {
 	}
 }
 
+func TestQuoteHotTablesUseSQLite(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 30, 10, 0, 0, 0, chinaMarketTZ)
+	quote := StockV2QuoteLatest{
+		Symbol: "000001", Market: "SZ", Name: "平安银行", LastPrice: 10,
+		QuoteAt: now, FetchedAt: now, Source: QuoteSourceTencent, Status: QuoteStatusFresh,
+	}
+	if err := store.UpsertLatestQuote(ctx, quote); err != nil {
+		t.Fatalf("upsert latest quote: %v", err)
+	}
+	if err := store.InsertQuoteSnapshot(ctx, StockV2QuoteSnapshot{StockV2QuoteLatest: quote, CollectedAt: now}); err != nil {
+		t.Fatalf("insert quote snapshot: %v", err)
+	}
+	if err := store.UpsertMinuteBars(ctx, []StockV2MinuteBar{{
+		Symbol: "000001", Market: "SZ", MinuteAt: now,
+		Open: 10, High: 10, Low: 10, Close: 10, Source: QuoteSourceTencentMinute,
+	}}); err != nil {
+		t.Fatalf("upsert minute bars: %v", err)
+	}
+
+	for _, table := range []string{"stockv2_quotes_latest", "stockv2_quote_snapshots", "stockv2_minute_bars"} {
+		var count int
+		if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&count); err != nil {
+			t.Fatalf("count %s in sqlite: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("sqlite %s count = %d, want 1", table, count)
+		}
+	}
+}
+
+func TestPruneIntradayQuotesRunsAtLowFrequency(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+	svc := NewService(store, nil, nil)
+
+	oldAt := time.Date(2026, 6, 20, 10, 0, 0, 0, chinaMarketTZ)
+	now := time.Date(2026, 6, 30, 10, 0, 0, 0, chinaMarketTZ)
+	quote := StockV2QuoteLatest{
+		Symbol: "000001", Market: "SZ", Name: "平安银行", LastPrice: 10,
+		QuoteAt: oldAt, FetchedAt: oldAt, Source: QuoteSourceTencent, Status: QuoteStatusFresh,
+	}
+	if err := store.InsertQuoteSnapshot(ctx, StockV2QuoteSnapshot{StockV2QuoteLatest: quote, CollectedAt: oldAt}); err != nil {
+		t.Fatalf("insert old snapshot: %v", err)
+	}
+	svc.pruneIntradayQuotesIfDue(ctx, now)
+	var count int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_quote_snapshots`).Scan(&count); err != nil {
+		t.Fatalf("count snapshots after first prune: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("snapshot count after first prune = %d, want 0", count)
+	}
+
+	if err := store.InsertQuoteSnapshot(ctx, StockV2QuoteSnapshot{StockV2QuoteLatest: quote, CollectedAt: oldAt}); err != nil {
+		t.Fatalf("insert second old snapshot: %v", err)
+	}
+	svc.pruneIntradayQuotesIfDue(ctx, now.Add(time.Hour))
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_quote_snapshots`).Scan(&count); err != nil {
+		t.Fatalf("count snapshots after skipped prune: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("snapshot count after skipped prune = %d, want 1", count)
+	}
+}
+
 func TestParseTencentQuoteTimeUsesChinaMarketTimezone(t *testing.T) {
 	got := parseTencentQuoteTime("20260618145503", time.Time{})
 	if got.Format(time.RFC3339) != "2026-06-18T14:55:03+08:00" {

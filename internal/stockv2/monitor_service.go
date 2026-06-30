@@ -19,6 +19,7 @@ const (
 	newsMonitorBatchLimit         = 200
 	newsMonitorHighScoreThreshold = 80
 	latestQuoteRefreshTaskTimeout = 2 * time.Minute
+	quoteRefreshFailureBackoff    = 5 * time.Minute
 )
 
 // ListMonitorTasks 返回系统内置任务定义 + 当前配置 + 最近一次运行摘要。

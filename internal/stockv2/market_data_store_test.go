@@ -219,7 +219,6 @@ func TestStoreDataAssetsWriteToDuckDB(t *testing.T) {
 
 	for _, table := range []string{
 		"stockv2_instruments",
-		"stockv2_quotes_latest",
 		"stockv2_stock_profiles",
 		"stockv2_raw_news",
 		"stockv2_news_events",
@@ -231,6 +230,12 @@ func TestStoreDataAssetsWriteToDuckDB(t *testing.T) {
 		if got := countRowsForTest(t, store.db, table); got != 0 {
 			t.Fatalf("sqlite %s count = %d, want 0", table, got)
 		}
+	}
+	if got := countRowsForTest(t, store.db, "stockv2_quotes_latest"); got != 1 {
+		t.Fatalf("sqlite stockv2_quotes_latest count = %d, want 1", got)
+	}
+	if got := countRowsForTest(t, store.marketDB.db, "stockv2_quotes_latest"); got != 0 {
+		t.Fatalf("duckdb stockv2_quotes_latest count = %d, want 0", got)
 	}
 }
 

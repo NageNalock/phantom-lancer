@@ -2385,6 +2385,40 @@ export interface StockV2AgentExecutionDetail {
   ledger?: StockV2AgentDecisionLedger;
   review?: StockV2OperationReview;
   inputContext?: StockV2AgentContextPack;
+  strategyGenerationSteps?: StockV2StrategyGenerationStepRun[];
+  strategyGenerationContexts?: StockV2StrategyGenerationContextItem[];
+}
+
+export interface StockV2StrategyGenerationStepRun {
+  id: string;
+  runId: string;
+  stepKey: string;
+  stepName: string;
+  role: string;
+  status: string;
+  sequenceNo: number;
+  inputSummary?: string;
+  outputSummary?: string;
+  errorMessage?: string;
+  prompt?: string;
+  outputArtifactSummary?: string;
+  structuredOutput?: Record<string, unknown>;
+  startedAt?: string;
+  finishedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface StockV2StrategyGenerationContextItem {
+  id: string;
+  runId: string;
+  stepId?: string;
+  contextType: string;
+  title?: string;
+  contentJson?: Record<string, unknown>;
+  contentText?: string;
+  sequenceNo: number;
+  createdAt?: string;
 }
 
 // ===== Agent 请求体 =====

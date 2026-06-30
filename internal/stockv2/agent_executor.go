@@ -110,6 +110,19 @@ func (e *codexCLIExecutor) ExecuteStrategyGeneration(
 	return e.executePrompt(ctx, taskID, prompt, modelName)
 }
 
+func (e *codexCLIExecutor) ExecuteStrategyGenerationStep(
+	ctx context.Context,
+	taskID string,
+	pack StrategyGenerationStepPack,
+	modelName string,
+) (*AgentExecutorOutput, error) {
+	if e.binary == "" {
+		return nil, fmt.Errorf("codex binary path not configured")
+	}
+	prompt := buildStrategyGenerationStepPrompt(taskID, pack, e.mcpURL)
+	return e.executePrompt(ctx, taskID, prompt, modelName)
+}
+
 func (e *codexCLIExecutor) ExecuteOpportunityDiscovery(
 	ctx context.Context,
 	taskID string,
@@ -962,6 +975,86 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 	const maxPromptLen = 10000
 	if b.Len() > maxPromptLen {
 		return truncatePromptUTF8(b.String(), 7500, 2500)
+	}
+	return b.String()
+}
+
+func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationStepPack, mcpURL string) string {
+	var b strings.Builder
+	b.WriteString("# Strategy Generation Pipeline Step\n\n")
+	b.WriteString("System role: you are one role in a StockV2 strategy generation pipeline. You are NOT a trading executor.\n")
+	b.WriteString("Use the provided context, allowed stock_agent MCP tools, and Codex CLI's own public search/browse capability for external public information. Treat internal project search and external public search as equal-priority evidence channels; do not rely only on either one.\n")
+	b.WriteString("Do not implement or request web_search/web_fetch MCP tools from the main program; external public research is your responsibility inside Codex CLI.\n")
+	b.WriteString("Keep internal project data, external public sources, inference, and uncertainty separate. Never fabricate prices, news, filings, sources, or citations.\n")
+	b.WriteString("Submit exactly one result using stock_agent.submit_result. Do not use shell commands or curl to submit the result.\n\n")
+
+	b.WriteString("## Task Information\n\n")
+	fmt.Fprintf(&b, "- Task ID: `%s`\n", taskID)
+	fmt.Fprintf(&b, "- Task Type: `%s`\n", AgentTaskTypeStrategyGeneration)
+	fmt.Fprintf(&b, "- Run ID: `%s`\n", pack.RunID)
+	fmt.Fprintf(&b, "- Step Key: `%s`\n", pack.StepKey)
+	fmt.Fprintf(&b, "- Role: `%s`\n", pack.Role)
+	if mcpURL != "" {
+		fmt.Fprintf(&b, "- MCP Server Name: `%s`\n", codexStockAgentMCPName)
+		fmt.Fprintf(&b, "- MCP Server: `%s`\n", mcpURL)
+	}
+	b.WriteString("\n")
+
+	b.WriteString("## Objective\n\n")
+	b.WriteString(pack.Objective)
+	b.WriteString("\n\n")
+	if len(pack.Instructions) > 0 {
+		b.WriteString("## Role Instructions\n\n")
+		for _, item := range pack.Instructions {
+			fmt.Fprintf(&b, "- %s\n", item)
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("## Required Research Refresh\n\n")
+	b.WriteString("- Treat stock_agent internal search and Codex CLI external public search/browse as equal-priority research channels. For material targets, use both when possible before making material claims.\n")
+	b.WriteString("- Use stock_agent.get_embedding_status to decide whether semantic recall is available. If available, use stock_agent.semantic_search_stock_profiles and stock_agent.semantic_search_news_events for adjacent internal context; if unavailable, state the degraded reason.\n")
+	b.WriteString("- For each material target or holding, prefer checking project profile/search, latest quotes, daily bars, related project news, existing strategies, and portfolio context before drafting or judging.\n")
+	b.WriteString("- Use Codex CLI public search/browse for recent public news, filings, policy, industry, and company context that is not present in project data. Cite compact source references in evidence_refs or data_quality_notes.\n")
+	b.WriteString("- If external search/browse is unavailable, say so explicitly and lower confidence instead of inventing evidence.\n\n")
+
+	b.WriteString("## Strategy Generation Context\n\n```json\n")
+	raw, _ := json.MarshalIndent(pack.Context, "", "  ")
+	b.Write(raw)
+	b.WriteString("\n```\n\n")
+
+	if len(pack.PriorResults) > 0 {
+		b.WriteString("## Prior Pipeline Results\n\n```json\n")
+		prior, _ := json.MarshalIndent(pack.PriorResults, "", "  ")
+		b.Write(prior)
+		b.WriteString("\n```\n\n")
+	}
+
+	b.WriteString("## Required Output\n\n")
+	if pack.StepKey == StrategyGenerationStepFormatter {
+		b.WriteString("You are the formatter. Do not introduce new investment claims. Convert the prior results into the final strategy-generation report.\n")
+		b.WriteString("Return result.result as schema_version `strategy-generation-report/v1` with run_summary and drafts[].\n")
+		b.WriteString("Every new_strategy draft must use playbook.rules[]. dataPrefilters, portfolioPrefilters, and newsPrefilters must be arrays. Use [] when no structured prefilter exists.\n")
+		b.WriteString("Do not output proposed_operation. Use portfolio_aware_suggestion.review_request when Review is needed.\n\n")
+	} else {
+		b.WriteString("Return result.result as a `strategy-generation-step/v1` object:\n")
+		b.WriteString("```json\n")
+		b.WriteString("{\"schema_version\":\"strategy-generation-step/v1\",\"step_key\":\"")
+		b.WriteString(pack.StepKey)
+		b.WriteString("\",\"role\":\"")
+		b.WriteString(pack.Role)
+		b.WriteString("\",\"summary\":\"...\",\"findings\":[],\"claims\":[],\"evidence_refs\":[],\"data_quality_notes\":[],\"next_inputs\":{}}\n")
+		b.WriteString("```\n")
+		b.WriteString("For claims, include fields when possible: claim, stance, symbol, support_level, evidence_refs, data_freshness, uncertainty.\n\n")
+	}
+	b.WriteString("MCP submit_result shape:\n")
+	b.WriteString("```json\n")
+	b.WriteString("{\"taskID\":\"<TASK_ID>\",\"taskType\":\"strategy_generation\",\"result\":{\"outputType\":\"strategy_generation\",\"resultSummary\":\"short summary\",\"confidence\":0.7,\"result\":{}}}\n")
+	b.WriteString("```\n")
+
+	const maxPromptLen = 12000
+	if b.Len() > maxPromptLen {
+		return truncatePromptUTF8(b.String(), 8500, 3500)
 	}
 	return b.String()
 }

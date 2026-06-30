@@ -1096,6 +1096,38 @@ func (f fakeDebugAgentExecutor) ExecuteStrategyGeneration(ctx context.Context, t
 	}, nil
 }
 
+func (f fakeDebugAgentExecutor) ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName string) (*AgentExecutorOutput, error) {
+	result := map[string]any{
+		"schema_version": StrategyGenerationStepOutputSchema,
+		"step_key":       pack.StepKey,
+		"role":           pack.Role,
+		"summary":        "step ok",
+	}
+	if pack.StepKey == StrategyGenerationStepFormatter {
+		mode := firstNonEmpty(pack.Context.Input.Mode, pack.Context.Mode, StrategyGenerationModePortfolio)
+		result = map[string]any{
+			"schema_version": StrategyGenerationReportSchemaVersion,
+			"run_summary":    map[string]any{"mode": mode},
+			"drafts":         []any{},
+		}
+	}
+	_, err := f.pool.submitResult(taskID, AgentTaskTypeStrategyGeneration, AgentTaskSubmittedResult{
+		OutputType:    AgentTaskTypeStrategyGeneration,
+		ResultSummary: "strategy generation step ok",
+		Result:        result,
+		Confidence:    1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &AgentExecutorOutput{
+		StdoutTail:    "strategy generation step stdout",
+		ExitCode:      0,
+		Duration:      time.Millisecond,
+		RawTranscript: "strategy generation step stdout",
+	}, nil
+}
+
 func (f fakeDebugAgentExecutor) ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName string) (*AgentExecutorOutput, error) {
 	_, err := f.pool.submitResult(taskID, AgentTaskTypeOpportunityDiscovery, AgentTaskSubmittedResult{
 		OutputType:    OpportunityDiscoveryOutputType,

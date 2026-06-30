@@ -947,6 +947,18 @@ func (s *Service) agentExecutionDetailForRun(ctx context.Context, run AgentRun) 
 			detail.InputContext = &review.InputContext
 		}
 	}
+	if run.TaskType == AgentTaskTypeStrategyGeneration {
+		steps, err := s.store.ListStrategyGenerationSteps(ctx, run.ID)
+		if err != nil {
+			return AgentExecutionDetail{}, err
+		}
+		contexts, err := s.store.ListStrategyGenerationContextItems(ctx, run.ID)
+		if err != nil {
+			return AgentExecutionDetail{}, err
+		}
+		detail.StrategyGenerationSteps = steps
+		detail.StrategyGenerationContexts = contexts
+	}
 	return detail, nil
 }
 
@@ -1480,11 +1492,250 @@ func (s *Service) executeStrategyGenerationRun(
 		}
 	}
 
-	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
-	execOutput, execErr := s.agentExecutor.ExecuteStrategyGeneration(ctx, taskID, genCtx, modelName)
+	taskID, execOutput, execErr := s.executeStrategyGenerationPipeline(ctx, run, genCtx, modelName)
 	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, execOutput, execErr)
 	finalRun, finalLedger := s.safeGetAgentRunAndLedger(ctx, run.ID, ledger.ID)
 	return finalRun, finalLedger, execErr
+}
+
+func (s *Service) executeStrategyGenerationPipeline(
+	ctx context.Context,
+	run AgentRun,
+	genCtx StrategyGenerationContext,
+	modelName string,
+) (string, *AgentExecutorOutput, error) {
+	_ = s.addStrategyGenerationContext(ctx, run.ID, "", "context_bundle", "StrategyGenerationContext", map[string]any{"context": genCtx}, "", 1)
+	prior := map[string]any{}
+	var finalTaskID string
+	var finalOutput *AgentExecutorOutput
+	steps := strategyGenerationPipelineSteps()
+	for idx, def := range steps {
+		step, err := s.store.CreateStrategyGenerationStep(ctx, StrategyGenerationStepRun{
+			RunID:        run.ID,
+			StepKey:      def.key,
+			StepName:     def.name,
+			Role:         def.role,
+			Status:       StrategyGenerationStepStatusPending,
+			SequenceNo:   idx + 1,
+			InputSummary: def.objective,
+		})
+		if err != nil && s.log != nil {
+			s.log.Warn("create strategy generation step failed", "run_id", run.ID, "step", def.key, "error", safelog.Text(err.Error(), 240))
+		}
+		step.Status = StrategyGenerationStepStatusRunning
+		step.StartedAt = time.Now()
+		_, _ = s.store.UpdateStrategyGenerationStep(ctx, step)
+
+		taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
+		pack := StrategyGenerationStepPack{
+			RunID:        run.ID,
+			StepKey:      def.key,
+			Role:         def.role,
+			Objective:    def.objective,
+			Instructions: def.instructions,
+			Context:      genCtx,
+			PriorResults: prior,
+		}
+		execOutput, execErr := s.agentExecutor.ExecuteStrategyGenerationStep(ctx, taskID, pack, modelName)
+		step.Prompt = ""
+		if execOutput != nil {
+			step.Prompt = safelog.Text(execOutput.Prompt, 16384)
+			step.OutputArtifactSummary = safelog.Text(agentExecutorOutputSummary(execOutput), 16384)
+		}
+		submitted := s.consumeAgentTaskSubmittedResult(taskID)
+		if execErr != nil && submitted == nil {
+			step.Status = StrategyGenerationStepStatusFailed
+			step.ErrorMessage = agentRunFailureMessage(execErr.Error(), execOutput)
+			step.FinishedAt = time.Now()
+			_, _ = s.store.UpdateStrategyGenerationStep(ctx, step)
+			return "", execOutput, execErr
+		}
+		if submitted == nil || submitted.OutputType != StrategyGenerationOutputType {
+			step.Status = StrategyGenerationStepStatusFailed
+			step.ErrorMessage = "no valid strategy_generation step result submitted"
+			step.FinishedAt = time.Now()
+			_, _ = s.store.UpdateStrategyGenerationStep(ctx, step)
+			return "", execOutput, errors.New(step.ErrorMessage)
+		}
+
+		step.Status = StrategyGenerationStepStatusCompleted
+		step.OutputSummary = safelog.Text(submitted.ResultSummary, 2000)
+		step.StructuredOutput = map[string]any{
+			"outputType":    submitted.OutputType,
+			"resultSummary": submitted.ResultSummary,
+			"confidence":    submitted.Confidence,
+			"result":        submitted.Result,
+		}
+		step.FinishedAt = time.Now()
+		_, _ = s.store.UpdateStrategyGenerationStep(ctx, step)
+		_ = s.addStrategyGenerationContext(ctx, run.ID, step.ID, "step_result", def.name, submitted.Result, submitted.ResultSummary, idx+2)
+
+		prior[def.key] = submitted.Result
+		if def.key == StrategyGenerationStepFormatter {
+			finalTaskID = taskID
+			finalOutput = execOutput
+			s.restoreAgentTaskSubmittedResult(finalTaskID, run.TaskType, run.ID, submitted)
+		}
+	}
+	return finalTaskID, finalOutput, nil
+}
+
+type strategyGenerationPipelineStepDef struct {
+	key          string
+	name         string
+	role         string
+	objective    string
+	instructions []string
+}
+
+func strategyGenerationPipelineSteps() []strategyGenerationPipelineStepDef {
+	return []strategyGenerationPipelineStepDef{
+		{
+			key:       StrategyGenerationStepEvidenceCollector,
+			name:      "证据收集",
+			role:      StrategyGenerationStepEvidenceCollector,
+			objective: "Collect a compact fact pack for the targets or portfolio holdings.",
+			instructions: []string{
+				"Call project MCP tools and Codex CLI external public search/browse as equal-priority evidence channels to fill quote, daily bars, profile, news, existing strategy, portfolio, embedding status, and recent public context.",
+				"Do not produce strategy recommendations.",
+				"Mark stale, missing, or weak evidence explicitly.",
+			},
+		},
+		{
+			key:       StrategyGenerationStepBullResearcher,
+			name:      "多头研究",
+			role:      StrategyGenerationStepBullResearcher,
+			objective: "Build the bullish or constructive case for each target or holding.",
+			instructions: []string{
+				"Use the evidence collector output and context, and refresh with internal MCP or external public search when a material constructive claim needs confirmation.",
+				"Focus on reasons to observe, hold, build_position, or add_position.",
+				"Every important claim should point to evidence_refs or state that support is weak.",
+			},
+		},
+		{
+			key:       StrategyGenerationStepBearResearcher,
+			name:      "空头研究",
+			role:      StrategyGenerationStepBearResearcher,
+			objective: "Build the bearish or risk case for each target or holding.",
+			instructions: []string{
+				"Use the evidence collector output and context, and refresh with internal MCP or external public search when a material risk claim needs confirmation.",
+				"Focus on reasons to reduce_position, exit_position, avoid adding, or require Review.",
+				"Every important claim should point to evidence_refs or state that support is weak.",
+			},
+		},
+		{
+			key:       StrategyGenerationStepEvidenceChecker,
+			name:      "证据校验",
+			role:      StrategyGenerationStepEvidenceChecker,
+			objective: "Check bull and bear claims against the fact pack.",
+			instructions: []string{
+				"Do not introduce new investment opinions.",
+				"Use internal MCP and external public search as equal-priority verification channels when checking contested, stale, or high-impact claims.",
+				"Label claims as verified, partially_verified, weak, unsupported, stale, or conflicting.",
+				"Identify claims that must not be used by the final formatter.",
+			},
+		},
+		{
+			key:       StrategyGenerationStepPortfolioJudge,
+			name:      "组合裁决",
+			role:      StrategyGenerationStepPortfolioJudge,
+			objective: "Apply portfolio constraints and decide the desired draft type and action space.",
+			instructions: []string{
+				"Respect cash, concentration, risk level, existing strategy coverage, and allowed actions.",
+				"Refresh portfolio, strategy coverage, and material market context with internal MCP and external public search when prior outputs are stale or conflicting.",
+				"Decide new_strategy, strategy_patch, or no_change for each holding or target.",
+				"Use review_request when immediate account-bound handling is needed; do not create proposed_operation.",
+			},
+		},
+		{
+			key:       StrategyGenerationStepFormatter,
+			name:      "策略草案结构化",
+			role:      StrategyGenerationStepFormatter,
+			objective: "Format the prior pipeline outputs into the final strategy-generation-report/v1.",
+			instructions: []string{
+				"Do not add new claims beyond prior results.",
+				"Generate playbook.rules[] using the StockV2 protocol.",
+				"Use empty arrays for unstructured prefilters.",
+			},
+		},
+	}
+}
+
+func (s *Service) consumeAgentTaskSubmittedResult(taskID string) *AgentTaskSubmittedResult {
+	if taskID == "" {
+		return nil
+	}
+	var submitted *AgentTaskSubmittedResult
+	if entry, ok := s.agentTaskPool.getTask(taskID); ok {
+		entry.mu.Lock()
+		submitted = entry.submittedResult
+		entry.mu.Unlock()
+	}
+	s.agentTaskPool.remove(taskID)
+	return submitted
+}
+
+func (s *Service) restoreAgentTaskSubmittedResult(taskID, taskType, runID string, submitted *AgentTaskSubmittedResult) {
+	if taskID == "" || submitted == nil {
+		return
+	}
+	entry := &agentTaskEntry{
+		id:              taskID,
+		taskType:        taskType,
+		agentRunID:      runID,
+		deadline:        time.Now().Add(10 * time.Minute),
+		status:          agentTaskStatusSubmitted,
+		submittedResult: submitted,
+		submittedAt:     time.Now(),
+		submitCount:     1,
+		resultCh:        make(chan struct{}),
+	}
+	close(entry.resultCh)
+	s.agentTaskPool.mu.Lock()
+	s.agentTaskPool.tasks[taskID] = entry
+	s.agentTaskPool.mu.Unlock()
+}
+
+func (s *Service) addStrategyGenerationContext(ctx context.Context, runID, stepID, contextType, title string, content map[string]any, text string, sequence int) error {
+	_, err := s.store.AddStrategyGenerationContextItem(ctx, StrategyGenerationContextItem{
+		RunID:       runID,
+		StepID:      stepID,
+		ContextType: contextType,
+		Title:       title,
+		ContentJSON: content,
+		ContentText: safelog.Text(text, 4000),
+		SequenceNo:  sequence,
+	})
+	if err != nil && s.log != nil {
+		s.log.Warn("add strategy generation context failed", "run_id", runID, "step_id", stepID, "context_type", contextType, "error", safelog.Text(err.Error(), 240))
+	}
+	return err
+}
+
+func agentExecutorOutputSummary(output *AgentExecutorOutput) string {
+	if output == nil {
+		return ""
+	}
+	var b strings.Builder
+	if output.Command != "" {
+		b.WriteString("command:\n")
+		b.WriteString(output.Command)
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "exit_code: %d\n", output.ExitCode)
+	fmt.Fprintf(&b, "duration: %s\n", output.Duration)
+	if output.TimedOut {
+		b.WriteString("timed_out: true\n")
+	}
+	if output.StdoutTail != "" {
+		b.WriteString("stdout_tail:\n")
+		b.WriteString(output.StdoutTail)
+	}
+	if output.StderrTail != "" {
+		b.WriteString("stderr_tail:\n")
+		b.WriteString(output.StderrTail)
+	}
+	return b.String()
 }
 
 func (s *Service) safeGetAgentRunAndLedger(ctx context.Context, runID, ledgerID string) (AgentRun, AgentDecisionLedger) {

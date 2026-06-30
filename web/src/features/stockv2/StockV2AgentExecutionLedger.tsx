@@ -215,6 +215,7 @@ export function StockV2AgentRunDetailPanel({ detail }: { detail: StockV2AgentExe
 
       {run.output ? <Block title="运行结论" value={run.output} /> : null}
       {run.errorMessage ? <Block title="运行错误" value={run.errorMessage} danger /> : null}
+      {detail.strategyGenerationSteps?.length ? <StrategyGenerationPipelineDetail detail={detail} /> : null}
 
       <div className="grid gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs">
         <Row label="开始时间" value={formatDate(run.startedAt || run.createdAt) || "-"} />
@@ -239,6 +240,88 @@ export function StockV2AgentRunDetailPanel({ detail }: { detail: StockV2AgentExe
       {inputContext ? <JSONBlock title="Review 输入上下文" value={inputContext} /> : null}
     </div>
   );
+}
+
+function StrategyGenerationPipelineDetail({ detail }: { detail: StockV2AgentExecutionDetail }) {
+  const contexts = detail.strategyGenerationContexts || [];
+  return (
+    <div className="grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+      <div>
+        <strong className="text-sm">策略生成流程</strong>
+        <p className="mt-0.5 text-xs text-[var(--muted)]">多角色 Codex CLI 调用、证据校验、组合裁决和最终结构化草案。</p>
+      </div>
+      <div className="grid gap-2">
+        {(detail.strategyGenerationSteps || []).map((step) => {
+          const stepContexts = contexts.filter((item) => item.stepId === step.id);
+          return (
+            <details key={step.id} className="rounded-lg border border-[var(--line)] bg-[var(--surface)]" open={step.status === "failed" || step.stepKey === "strategy_formatter"}>
+              <summary className="cursor-pointer px-3 py-2">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full border border-[var(--line)] font-mono">{step.sequenceNo}</span>
+                  <strong className="text-sm">{step.stepName || step.stepKey}</strong>
+                  <Pill tone={agentStepTone(step.status)}>{agentStepStatusLabel(step.status)}</Pill>
+                  <span className="font-mono text-[var(--muted)]">{step.role}</span>
+                  <span className="text-[var(--muted)]">{formatDate(step.startedAt || step.createdAt) || "-"}</span>
+                </div>
+                {step.outputSummary ? <p className="mt-1 text-xs text-[var(--muted-strong)]">{step.outputSummary}</p> : null}
+                {step.errorMessage ? <p className="mt-1 text-xs text-[var(--danger)]">{step.errorMessage}</p> : null}
+              </summary>
+              <div className="grid gap-3 border-t border-[var(--line)] p-3">
+                {step.inputSummary ? <Block title="步骤目标" value={step.inputSummary} /> : null}
+                {step.prompt ? <Block title="Step Prompt" value={step.prompt} mono /> : null}
+                {step.outputArtifactSummary ? <Block title="Step stdout/stderr" value={step.outputArtifactSummary} mono /> : null}
+                <JSONBlock title="Step MCP 回填" value={step.structuredOutput || {}} />
+                {stepContexts.map((ctx) => (
+                  <div key={ctx.id} className="grid gap-2">
+                    {ctx.contentText ? <Block title={ctx.title || ctx.contextType} value={ctx.contentText} /> : null}
+                    <JSONBlock title={`上下文 · ${ctx.title || ctx.contextType}`} value={ctx.contentJson || {}} />
+                  </div>
+                ))}
+              </div>
+            </details>
+          );
+        })}
+      </div>
+      {contexts.some((item) => !item.stepId) ? (
+        <details className="rounded-lg border border-[var(--line)] bg-[var(--surface)]">
+          <summary className="cursor-pointer px-3 py-2 text-sm font-medium">全局输入上下文</summary>
+          <div className="grid gap-2 border-t border-[var(--line)] p-3">
+            {contexts.filter((item) => !item.stepId).map((ctx) => (
+              <JSONBlock key={ctx.id} title={ctx.title || ctx.contextType} value={ctx.contentJson || {}} />
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function agentStepStatusLabel(status: string): string {
+  switch (status) {
+    case "completed":
+      return "完成";
+    case "running":
+      return "运行中";
+    case "failed":
+      return "失败";
+    case "pending":
+      return "等待";
+    default:
+      return status || "-";
+  }
+}
+
+function agentStepTone(status: string): "neutral" | "good" | "warn" | "danger" {
+  switch (status) {
+    case "completed":
+      return "good";
+    case "running":
+      return "warn";
+    case "failed":
+      return "danger";
+    default:
+      return "neutral";
+  }
 }
 
 function AgentPagination({

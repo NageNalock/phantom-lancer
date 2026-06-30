@@ -1116,6 +1116,40 @@ CREATE TABLE IF NOT EXISTS stockv2_opportunity_results (
     created_at DATETIME NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS stockv2_strategy_generation_steps (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    step_key TEXT NOT NULL,
+    step_name TEXT NOT NULL,
+    role TEXT NOT NULL,
+    status TEXT NOT NULL,
+    sequence_no INTEGER NOT NULL DEFAULT 0,
+    input_summary TEXT,
+    output_summary TEXT,
+    error_message TEXT,
+    prompt TEXT,
+    output_artifact_summary TEXT,
+    structured_output_json TEXT,
+    started_at DATETIME,
+    finished_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    UNIQUE(run_id, step_key)
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_strategy_generation_steps_run ON stockv2_strategy_generation_steps(run_id, sequence_no);
+CREATE TABLE IF NOT EXISTS stockv2_strategy_generation_contexts (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    step_id TEXT,
+    context_type TEXT NOT NULL,
+    title TEXT,
+    content_json TEXT,
+    content_text TEXT,
+    sequence_no INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_strategy_generation_contexts_run ON stockv2_strategy_generation_contexts(run_id, sequence_no);
+
 CREATE TABLE IF NOT EXISTS stockv2_embedding_config (
     id TEXT PRIMARY KEY,
     embedding_model_id TEXT,

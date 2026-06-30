@@ -331,10 +331,12 @@ type RequestRunAgentCLIDebug struct {
 }
 
 type AgentExecutionDetail struct {
-	Run          AgentRun             `json:"run"`
-	Ledger       *AgentDecisionLedger `json:"ledger,omitempty"`
-	Review       *OperationReview     `json:"review,omitempty"`
-	InputContext *AgentContextPack    `json:"inputContext,omitempty"`
+	Run                        AgentRun                        `json:"run"`
+	Ledger                     *AgentDecisionLedger            `json:"ledger,omitempty"`
+	Review                     *OperationReview                `json:"review,omitempty"`
+	InputContext               *AgentContextPack               `json:"inputContext,omitempty"`
+	StrategyGenerationSteps    []StrategyGenerationStepRun     `json:"strategyGenerationSteps,omitempty"`
+	StrategyGenerationContexts []StrategyGenerationContextItem `json:"strategyGenerationContexts,omitempty"`
 }
 
 // ===== 内部参数 / 返回 struct =====

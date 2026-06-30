@@ -20,7 +20,10 @@ import (
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
-const maxLatestQuoteSymbols = 200
+const (
+	maxLatestQuoteSymbols      = 200
+	intradayQuotePruneInterval = 6 * time.Hour
+)
 
 var chinaMarketTZ = time.FixedZone("Asia/Shanghai", 8*60*60)
 
@@ -143,9 +146,7 @@ func (s *Service) RefreshLatestQuotes(ctx context.Context, symbols []string, tri
 		result.RefreshedCount++
 	}
 	if result.RefreshedCount > 0 {
-		if err := s.store.PruneIntradayQuotes(ctx, time.Now().AddDate(0, 0, -5)); err != nil && s.log != nil {
-			s.log.Warn("stockv2 prune intraday quotes failed", "error", safelog.Text(err.Error(), 240))
-		}
+		s.pruneIntradayQuotesIfDue(ctx, result.FetchedAt)
 	}
 
 	specBySymbol := make(map[string]quoteSymbol, len(specs))
@@ -169,6 +170,25 @@ func (s *Service) RefreshLatestQuotes(ctx context.Context, symbols []string, tri
 		s.log.Warn("stockv2 latest quote refresh completed with failures", "trigger_source", triggerSource, "requested_count", len(symbols), "refreshed_count", result.RefreshedCount, "failed_count", result.FailedCount, "failure_sample", stockV2FailureSample(result.FailedItems, 5))
 	}
 	return result, nil
+}
+
+func (s *Service) pruneIntradayQuotesIfDue(ctx context.Context, now time.Time) {
+	if s == nil || s.store == nil {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	s.quotePruneMu.Lock()
+	if !s.lastQuotePrune.IsZero() && now.Sub(s.lastQuotePrune) < intradayQuotePruneInterval {
+		s.quotePruneMu.Unlock()
+		return
+	}
+	s.lastQuotePrune = now
+	s.quotePruneMu.Unlock()
+	if err := s.store.PruneIntradayQuotes(ctx, now.AddDate(0, 0, -5)); err != nil && s.log != nil {
+		s.log.Warn("stockv2 prune intraday quotes failed", "error", safelog.Text(err.Error(), 240))
+	}
 }
 
 func (s *Service) fetchRecentMinuteBars(ctx context.Context, spec quoteSymbol, fetchedAt time.Time) ([]StockV2MinuteBar, string, error) {

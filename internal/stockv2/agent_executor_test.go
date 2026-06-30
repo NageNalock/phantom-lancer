@@ -290,6 +290,40 @@ func TestBuildOpportunityDiscoveryPromptRequiresEmbeddingSemanticRecall(t *testi
 	}
 }
 
+func TestBuildStrategyGenerationStepPromptEncouragesInternalAndExternalSearch(t *testing.T) {
+	prompt := buildStrategyGenerationStepPrompt("task-strategy-step", StrategyGenerationStepPack{
+		RunID:     "run-1",
+		StepKey:   StrategyGenerationStepEvidenceCollector,
+		Role:      StrategyGenerationStepEvidenceCollector,
+		Objective: "Collect evidence",
+		Instructions: []string{
+			"Call project MCP tools and Codex CLI external public search/browse as equal-priority evidence channels.",
+		},
+		Context: StrategyGenerationContext{
+			BuiltAt: time.Now(),
+			Input: StrategyGenerationInput{
+				Mode:              StrategyGenerationModeSingleInstrument,
+				TargetInstruments: []StrategyGenerationTargetInstrument{{Symbol: "302132"}},
+			},
+		},
+	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
+
+	for _, want := range []string{
+		"Treat internal project search and external public search as equal-priority evidence channels",
+		"Codex CLI's own public search/browse capability",
+		"stock_agent.get_embedding_status",
+		"stock_agent.semantic_search_stock_profiles",
+		"stock_agent.semantic_search_news_events",
+		"Do not implement or request web_search/web_fetch MCP tools",
+		"If external search/browse is unavailable",
+		"Never fabricate prices, news, filings, sources, or citations",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestBuildOperationReviewPromptIncludesDebugGoogleNewsSearchCheck(t *testing.T) {
 	prompt := buildOperationReviewPrompt("task-debug", AgentContextPack{
 		Hit: MonitorHit{

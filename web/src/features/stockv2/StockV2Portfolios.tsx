@@ -1,4 +1,4 @@
-import { ArrowsClockwise, Eye, Plus, Minus, Sparkle, Trash, Pencil, Wallet, X, Check, MagnifyingGlass } from "@phosphor-icons/react";
+import { ArrowsClockwise, CaretDown, CaretRight, Eye, Plus, Minus, Sparkle, Trash, Pencil, Wallet, X, Check, MagnifyingGlass } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { AreaSeries, createChart, createSeriesMarkers, type CrosshairMode, type IChartApi, type ISeriesApi, type Time } from "lightweight-charts";
 import type { AppActions } from "../../app/App";
@@ -31,6 +31,7 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
   const [diagnosisLoading, setDiagnosisLoading] = useState(false);
   const [diagnosisError, setDiagnosisError] = useState<string | null>(null);
   const [diagnosisDetailRunId, setDiagnosisDetailRunId] = useState<string | null>(null);
+  const [diagnosisExpanded, setDiagnosisExpanded] = useState(false);
 
   // 选中第一个组合
   useEffect(() => {
@@ -95,6 +96,7 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
   }
 
   useEffect(() => {
+    setDiagnosisExpanded(false);
     void loadDiagnosisRuns(selectedId || "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
@@ -184,6 +186,8 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
             items={diagnosisRuns}
             loading={diagnosisLoading}
             error={diagnosisError}
+            expanded={diagnosisExpanded}
+            onToggle={() => setDiagnosisExpanded((value) => !value)}
             onRefresh={() => void loadDiagnosisRuns(selected.id)}
             onOpenDetail={setDiagnosisDetailRunId}
           />
@@ -404,65 +408,86 @@ function PortfolioDiagnosisRuns({
   items,
   loading,
   error,
+  expanded,
+  onToggle,
   onRefresh,
   onOpenDetail,
 }: {
   items: StockV2AgentRun[];
   loading: boolean;
   error: string | null;
+  expanded: boolean;
+  onToggle: () => void;
   onRefresh: () => void;
   onOpenDetail: (runId: string) => void;
 }) {
   const latest = items[0];
+  const summary = latest
+    ? `${stockV2AgentRunStatusLabel(latest.status)} · ${formatDate(latest.startedAt || latest.createdAt) || "-"}`
+    : loading
+      ? "加载中"
+      : "暂无运行";
   return (
     <div className="mt-4 grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <strong className="text-sm">最近组合诊断</strong>
-          <p className="mt-0.5 text-xs text-[var(--muted)]">关闭诊断抽屉后，可在这里继续查看本次流程、错误和运行详情。</p>
-        </div>
-        <Button onClick={onRefresh} disabled={loading}>
-          <ArrowsClockwise size={14} className="mr-1.5" />
-          {loading ? "刷新中" : "刷新"}
-        </Button>
+        <button type="button" className="flex min-w-0 flex-1 items-start gap-2 text-left" onClick={onToggle} aria-expanded={expanded}>
+          <span className="mt-0.5 text-[var(--muted)]">{expanded ? <CaretDown size={14} /> : <CaretRight size={14} />}</span>
+          <span className="min-w-0">
+            <strong className="text-sm">最近组合诊断</strong>
+            <span className="ml-2 text-xs text-[var(--muted)]">{summary}</span>
+            {expanded ? (
+              <p className="mt-0.5 text-xs text-[var(--muted)]">关闭诊断抽屉后，可在这里继续查看本次流程、错误和运行详情。</p>
+            ) : null}
+          </span>
+        </button>
+        {expanded ? (
+          <Button onClick={onRefresh} disabled={loading}>
+            <ArrowsClockwise size={14} className="mr-1.5" />
+            {loading ? "刷新中" : "刷新"}
+          </Button>
+        ) : null}
       </div>
-      {error ? <Notice tone="danger">{error}</Notice> : null}
-      {!latest && !loading ? (
-        <p className="text-xs text-[var(--muted)]">暂无组合诊断运行。</p>
-      ) : null}
-      {latest ? (
-        <div className="grid gap-3 rounded-md border border-[var(--line)] bg-[var(--surface)] p-3 text-xs">
-          <div className="flex flex-wrap items-center gap-2">
-            <Pill tone={stockV2AgentRunStatusTone(latest.status)}>{stockV2AgentRunStatusLabel(latest.status)}</Pill>
-            <span className="font-mono text-[var(--muted-strong)]">{latest.id.slice(0, 12)}</span>
-            <span className="text-[var(--muted)]">{formatDate(latest.startedAt || latest.createdAt) || "-"}</span>
-          </div>
-          {latest.output ? <p className="m-0 text-[var(--muted-strong)]">{latest.output}</p> : null}
-          {latest.errorMessage ? <Notice tone="danger">诊断失败：{latest.errorMessage}</Notice> : null}
-          <DiagnosisStepList run={latest} />
-          <div className="flex flex-wrap justify-end gap-2">
-            <Button onClick={() => onOpenDetail(latest.id)}>查看完整运行详情</Button>
-          </div>
-        </div>
-      ) : null}
-      {items.length > 1 ? (
-        <details className="rounded-md border border-[var(--line)] bg-[var(--surface)]">
-          <summary className="cursor-pointer px-3 py-2 text-xs font-medium">历史诊断 {items.length - 1} 次</summary>
-          <div className="grid gap-1 border-t border-[var(--line)] p-2">
-            {items.slice(1).map((run) => (
-              <button
-                key={run.id}
-                type="button"
-                className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-[var(--surface-soft)]"
-                onClick={() => onOpenDetail(run.id)}
-              >
-                <Pill tone={stockV2AgentRunStatusTone(run.status)}>{stockV2AgentRunStatusLabel(run.status)}</Pill>
-                <span className="min-w-0 truncate">{run.output || run.errorMessage || run.id}</span>
-                <span className="text-[var(--muted)]">{formatDate(run.startedAt || run.createdAt) || "-"}</span>
-              </button>
-            ))}
-          </div>
-        </details>
+      {expanded ? (
+        <>
+          {error ? <Notice tone="danger">{error}</Notice> : null}
+          {!latest && !loading ? (
+            <p className="text-xs text-[var(--muted)]">暂无组合诊断运行。</p>
+          ) : null}
+          {latest ? (
+            <div className="grid gap-3 rounded-md border border-[var(--line)] bg-[var(--surface)] p-3 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <Pill tone={stockV2AgentRunStatusTone(latest.status)}>{stockV2AgentRunStatusLabel(latest.status)}</Pill>
+                <span className="font-mono text-[var(--muted-strong)]">{latest.id.slice(0, 12)}</span>
+                <span className="text-[var(--muted)]">{formatDate(latest.startedAt || latest.createdAt) || "-"}</span>
+              </div>
+              {latest.output ? <p className="m-0 text-[var(--muted-strong)]">{latest.output}</p> : null}
+              {latest.errorMessage ? <Notice tone="danger">诊断失败：{latest.errorMessage}</Notice> : null}
+              <DiagnosisStepList run={latest} />
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button onClick={() => onOpenDetail(latest.id)}>查看完整运行详情</Button>
+              </div>
+            </div>
+          ) : null}
+          {items.length > 1 ? (
+            <details className="rounded-md border border-[var(--line)] bg-[var(--surface)]">
+              <summary className="cursor-pointer px-3 py-2 text-xs font-medium">历史诊断 {items.length - 1} 次</summary>
+              <div className="grid gap-1 border-t border-[var(--line)] p-2">
+                {items.slice(1).map((run) => (
+                  <button
+                    key={run.id}
+                    type="button"
+                    className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-[var(--surface-soft)]"
+                    onClick={() => onOpenDetail(run.id)}
+                  >
+                    <Pill tone={stockV2AgentRunStatusTone(run.status)}>{stockV2AgentRunStatusLabel(run.status)}</Pill>
+                    <span className="min-w-0 truncate">{run.output || run.errorMessage || run.id}</span>
+                    <span className="text-[var(--muted)]">{formatDate(run.startedAt || run.createdAt) || "-"}</span>
+                  </button>
+                ))}
+              </div>
+            </details>
+          ) : null}
+        </>
       ) : null}
     </div>
   );
@@ -473,24 +498,15 @@ function DiagnosisStepList({ run }: { run: StockV2AgentRun }) {
   const running = run.status === "running";
   const completed = run.status === "completed";
   const ready = run.status === "ready" || run.status === "pending";
+  const agentState = failed ? "failed" : running ? "running" : completed ? "done" : "pending";
+  const agentDetail = failed ? "某个阶段失败，打开完整运行详情查看具体 role、Prompt 和 stdout/stderr" : running ? "多角色 Codex CLI 流程正在执行" : completed ? "多阶段输出已回填并通过后端处理" : ready ? "等待执行器启动" : "等待中";
   const steps: Array<{ label: string; state: "done" | "running" | "failed" | "pending"; detail: string }> = [
     { label: "创建诊断任务", state: "done", detail: "已记录 AgentRun 和 DecisionLedger" },
     { label: "构建组合上下文", state: "done", detail: "已读取组合、持仓、行情、画像、日 K 和策略覆盖" },
-    {
-      label: "执行 Agent 分析",
-      state: failed ? "failed" : running ? "running" : completed ? "done" : "pending",
-      detail: failed ? "执行失败，查看运行详情里的 stderr / Prompt" : running ? "Agent 正在分析" : completed ? "Agent 已提交结构化结果" : ready ? "等待执行器启动" : "等待中",
-    },
-    {
-      label: "校验 MCP 回填结果",
-      state: completed ? "done" : failed ? "failed" : "pending",
-      detail: completed ? "结构化输出已通过后端校验" : failed ? "可能未回填或 schema / 保存失败" : "等待 Agent submit_result",
-    },
-    {
-      label: "生成策略草案",
-      state: completed ? "done" : failed ? "failed" : "pending",
-      detail: completed ? "若输出 new_strategy，草案已进入策略列表" : failed ? "未完成草案生成" : "等待校验完成",
-    },
+    { label: "证据收集", state: agentState, detail: agentDetail },
+    { label: "多头 / 空头研究", state: completed ? "done" : failed ? "failed" : "pending", detail: "完整观点、证据引用和不确定性在运行详情中逐步展示" },
+    { label: "证据校验与组合裁决", state: completed ? "done" : failed ? "failed" : "pending", detail: "校验观点是否有证据支撑，并应用现金、集中度和策略覆盖约束" },
+    { label: "结构化策略草案", state: completed ? "done" : failed ? "failed" : "pending", detail: completed ? "若输出 new_strategy，草案已进入策略列表" : failed ? "未完成草案生成" : "等待 formatter 输出最终 report" },
   ];
   return (
     <div className="grid gap-2">

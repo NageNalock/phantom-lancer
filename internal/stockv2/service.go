@@ -19,16 +19,18 @@ import (
 
 // Service 主业务服务
 type Service struct {
-	store         *Store
-	log           *slog.Logger
-	httpClient    *http.Client
-	bgMu          sync.Mutex
-	bgCancel      context.CancelFunc
-	bgWg          sync.WaitGroup
-	settings      StockV2Settings
-	baseProfileMu sync.Mutex
-	embeddingMu   sync.Mutex
-	embeddingRun  bool
+	store          *Store
+	log            *slog.Logger
+	httpClient     *http.Client
+	bgMu           sync.Mutex
+	bgCancel       context.CancelFunc
+	bgWg           sync.WaitGroup
+	settings       StockV2Settings
+	baseProfileMu  sync.Mutex
+	embeddingMu    sync.Mutex
+	embeddingRun   bool
+	quotePruneMu   sync.Mutex
+	lastQuotePrune time.Time
 
 	universeSource  *UniverseDataSource
 	dailyBarsSource *DailyBarsSource
@@ -115,6 +117,7 @@ func (s *Service) WithNewsEventLinker(linker NewsEventLinker) *Service {
 type AgentExecutor interface {
 	ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName string) (*AgentExecutorOutput, error)
 	ExecuteStrategyGeneration(ctx context.Context, taskID string, pack StrategyGenerationContext, modelName string) (*AgentExecutorOutput, error)
+	ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName string) (*AgentExecutorOutput, error)
 	ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName string) (*AgentExecutorOutput, error)
 	ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error)
 }
@@ -1472,6 +1475,9 @@ func (s *Service) tickScheduledMonitors(ctx context.Context) {
 			if state != nil && state.Status == MonitorRunStatusRunning {
 				continue
 			}
+			if state != nil && quoteRefreshBackoffActive(*state, now) {
+				continue
+			}
 			if state != nil && !state.StartedAt.IsZero() && now.Sub(state.StartedAt) < time.Duration(cfg.IntervalSeconds)*time.Second {
 				continue
 			}
@@ -1495,6 +1501,20 @@ func (s *Service) tickScheduledMonitors(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func quoteRefreshBackoffActive(state QuoteRefreshTaskState, now time.Time) bool {
+	if state.Status != MonitorRunStatusFailed {
+		return false
+	}
+	base := state.FinishedAt
+	if base.IsZero() {
+		base = state.UpdatedAt
+	}
+	if base.IsZero() {
+		return false
+	}
+	return now.Before(base.Add(quoteRefreshFailureBackoff))
 }
 
 // Snapshot 获取 V2 工作台快照数据。

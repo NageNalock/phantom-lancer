@@ -198,6 +198,53 @@ func TestLatestQuoteRefreshTimeoutPersistsFailedState(t *testing.T) {
 	}
 }
 
+func TestScheduledLatestQuoteRefreshBacksOffAfterFailure(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+	calls := 0
+	svc := NewService(store, nil, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		return stringResponse(http.StatusOK, tencentQuoteLine("sz000001", "平安银行", "000001", "10.50", "10.00")), nil
+	})})
+
+	portfolio := createStrategyTestPortfolio(t, store, "portfolio-quote-backoff")
+	if err := store.CreateHolding(ctx, StockV2Holding{
+		ID:          "holding-quote-backoff",
+		PortfolioID: portfolio.ID,
+		Symbol:      "000001",
+		Market:      "SZ",
+		Name:        "平安银行",
+		Quantity:    100,
+		CostPrice:   10,
+	}); err != nil {
+		t.Fatalf("create holding: %v", err)
+	}
+
+	now := time.Now()
+	if err := store.UpsertQuoteRefreshTaskState(ctx, QuoteRefreshTaskState{
+		TaskType:     MonitorTaskLatestQuoteRefresh,
+		Status:       MonitorRunStatusFailed,
+		TriggerType:  MonitorTriggerScheduled,
+		StartedAt:    now.Add(-2 * time.Minute),
+		FinishedAt:   now,
+		ScopeSummary: "scanned 1 symbols",
+		ScannedCount: 1,
+		ErrorMessage: "context deadline exceeded",
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("seed quote refresh task state: %v", err)
+	}
+
+	svc.tickScheduledMonitors(ctx)
+	if calls != 0 {
+		t.Fatalf("scheduled refresh calls = %d, want 0 during failure backoff", calls)
+	}
+}
+
 func TestRunDataStrategyMonitorProducesHit(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStrategyTestService(t)
