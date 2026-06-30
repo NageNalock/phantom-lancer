@@ -599,6 +599,7 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_triggered_at ON stockv2_alerts(tri
 CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_dedupe_key ON stockv2_alerts(watch_id, dedupe_key);
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_status ON stockv2_update_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_created_at ON stockv2_update_jobs(created_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_status_created ON stockv2_update_jobs(status, created_at DESC);
 INSERT OR IGNORE INTO stockv2_settings (id, auto_update_enabled, update_interval_sec, created_at, updated_at)
 VALUES ('1', 0, 3600, datetime('now'), datetime('now'));
 

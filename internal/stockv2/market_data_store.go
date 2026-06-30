@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -83,10 +84,23 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 			updated_at TIMESTAMP NOT NULL,
 			PRIMARY KEY(symbol, trade_date, adjusted, source)
 		);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bars_symbol_date
-			ON stockv2_daily_bars(symbol, trade_date);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bars_symbol_adjusted
-			ON stockv2_daily_bars(symbol, adjusted);
+		DROP INDEX IF EXISTS idx_stockv2_daily_bars_symbol_date;
+		DROP INDEX IF EXISTS idx_stockv2_daily_bars_symbol_adjusted;
+		CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bars_symbol_adjusted_date
+			ON stockv2_daily_bars(symbol, adjusted, trade_date);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bars_symbol_adjusted_fetched
+			ON stockv2_daily_bars(symbol, adjusted, fetched_at);
+		CREATE TABLE IF NOT EXISTS stockv2_daily_bar_quality (
+			symbol VARCHAR NOT NULL,
+			adjusted VARCHAR NOT NULL,
+			row_count BIGINT NOT NULL,
+			earliest_date VARCHAR,
+			latest_date VARCHAR,
+			source VARCHAR,
+			last_error VARCHAR,
+			updated_at TIMESTAMP NOT NULL,
+			PRIMARY KEY(symbol, adjusted)
+		);
 
 		CREATE TABLE IF NOT EXISTS stockv2_instruments (
 			id VARCHAR,
@@ -321,6 +335,9 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("init duckdb daily bars schema: %w", err)
 	}
+	if err := s.backfillDailyBarQuality(ctx); err != nil {
+		return err
+	}
 	for _, stmt := range []string{
 		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS amplitude DOUBLE DEFAULT 0`,
 		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS turnover_rate DOUBLE DEFAULT 0`,
@@ -335,6 +352,43 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("migrate duckdb latest quote columns: %w", err)
 		}
+	}
+	return nil
+}
+
+func (s *MarketDataStore) backfillDailyBarQuality(ctx context.Context) error {
+	var qualityCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_daily_bar_quality`).Scan(&qualityCount); err != nil {
+		return wrapError(err, "count duckdb daily bar quality")
+	}
+	if qualityCount > 0 {
+		return nil
+	}
+	var barCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_daily_bars`).Scan(&barCount); err != nil {
+		return wrapError(err, "count duckdb daily bars for quality backfill")
+	}
+	if barCount == 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO stockv2_daily_bar_quality (
+			symbol, adjusted, row_count, earliest_date, latest_date, source, last_error, updated_at
+		)
+		SELECT
+			symbol,
+			adjusted,
+			COUNT(*),
+			COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'), ''),
+			COALESCE(strftime(MAX(trade_date), '%Y-%m-%d'), ''),
+			'',
+			'',
+			?
+		FROM stockv2_daily_bars
+		GROUP BY symbol, adjusted
+	`, time.Now())
+	if err != nil {
+		return wrapError(err, "backfill duckdb daily bar quality")
 	}
 	return nil
 }
@@ -369,6 +423,7 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 	defer stmt.Close()
 
 	now := time.Now()
+	affected := map[string]StockV2DailyBar{}
 	for i := range bars {
 		b := bars[i]
 		if b.ID == "" {
@@ -391,10 +446,44 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 		); err != nil {
 			return wrapError(err, fmt.Sprintf("upsert duckdb daily bar %s %s", b.Symbol, b.TradeDate))
 		}
+		affected[b.Symbol+"\x00"+b.Adjusted] = b
+	}
+
+	for _, b := range affected {
+		if err := refreshDailyBarQualityWithTx(ctx, tx, b.Symbol, b.Adjusted, now); err != nil {
+			return err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
 		return wrapError(err, "commit duckdb daily bars")
+	}
+	return nil
+}
+
+func refreshDailyBarQualityWithTx(ctx context.Context, tx *sql.Tx, symbol, adjusted string, updatedAt time.Time) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT OR REPLACE INTO stockv2_daily_bar_quality (
+			symbol, adjusted, row_count, earliest_date, latest_date, source, last_error, updated_at
+		)
+		SELECT
+			?,
+			?,
+			COUNT(*),
+			COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'), ''),
+			COALESCE(strftime(MAX(trade_date), '%Y-%m-%d'), ''),
+			COALESCE((SELECT source FROM stockv2_daily_bars
+			          WHERE symbol = ? AND adjusted = ?
+			          ORDER BY fetched_at DESC LIMIT 1), ''),
+			COALESCE((SELECT error_message FROM stockv2_daily_bars
+			          WHERE symbol = ? AND adjusted = ? AND COALESCE(error_message, '') != ''
+			          ORDER BY fetched_at DESC LIMIT 1), ''),
+			?
+		FROM stockv2_daily_bars
+		WHERE symbol = ? AND adjusted = ?
+	`, symbol, adjusted, symbol, adjusted, symbol, adjusted, updatedAt, symbol, adjusted)
+	if err != nil {
+		return wrapError(err, fmt.Sprintf("refresh duckdb daily bar quality %s %s", symbol, adjusted))
 	}
 	return nil
 }
@@ -439,27 +528,16 @@ func (s *MarketDataStore) GetDailyBarsStats(ctx context.Context, symbol, adjuste
 		return 0, "", "", "", "", fmt.Errorf("market data store is not initialized")
 	}
 	err = s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*),
-		       COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'),''),
-		       COALESCE(strftime(MAX(trade_date), '%Y-%m-%d'),''),
-		       COALESCE((SELECT source FROM stockv2_daily_bars
-		                 WHERE symbol = ? AND adjusted = ?
-		                 ORDER BY fetched_at DESC LIMIT 1),'')
-		FROM stockv2_daily_bars
+		SELECT row_count, COALESCE(earliest_date,''), COALESCE(latest_date,''),
+		       COALESCE(source,''), COALESCE(last_error,'')
+		FROM stockv2_daily_bar_quality
 		WHERE symbol = ? AND adjusted = ?
-	`, symbol, adjusted, symbol, adjusted).Scan(&rowCount, &earliest, &latest, &source)
+	`, symbol, adjusted).Scan(&rowCount, &earliest, &latest, &source, &lastError)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", "", "", "", nil
+	}
 	if err != nil {
 		return 0, "", "", "", "", wrapError(err, "get duckdb daily bars stats")
-	}
-
-	var le sql.NullString
-	_ = s.db.QueryRowContext(ctx, `
-		SELECT error_message FROM stockv2_daily_bars
-		WHERE symbol = ? AND adjusted = ? AND COALESCE(error_message, '') != ''
-		ORDER BY fetched_at DESC LIMIT 1
-	`, symbol, adjusted).Scan(&le)
-	if le.Valid {
-		lastError = le.String
 	}
 	return rowCount, earliest, latest, source, lastError, nil
 }
@@ -473,25 +551,15 @@ func (s *MarketDataStore) GetDailyBarsStatsBatch(ctx context.Context, symbols []
 		return map[string]dailyBarsStats{}, nil
 	}
 	args := make([]any, 0, len(symbols)+3)
-	args = append(args, adjusted, adjusted, adjusted)
+	args = append(args, adjusted)
 	for _, symbol := range symbols {
 		args = append(args, symbol)
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT d.symbol,
-		       COUNT(*),
-		       COALESCE(strftime(MIN(d.trade_date), '%Y-%m-%d'),''),
-		       COALESCE(strftime(MAX(d.trade_date), '%Y-%m-%d'),''),
-		       COALESCE((SELECT source FROM stockv2_daily_bars s2
-		                 WHERE s2.symbol = d.symbol AND s2.adjusted = ?
-		                 ORDER BY s2.fetched_at DESC LIMIT 1),''),
-		       COALESCE((SELECT error_message FROM stockv2_daily_bars e2
-		                 WHERE e2.symbol = d.symbol AND e2.adjusted = ?
-		                   AND COALESCE(e2.error_message, '') != ''
-		                 ORDER BY e2.fetched_at DESC LIMIT 1),'')
-		FROM stockv2_daily_bars d
-		WHERE d.adjusted = ? AND d.symbol IN (`+sqlPlaceholders(len(symbols))+`)
-		GROUP BY d.symbol
+		SELECT symbol, row_count, COALESCE(earliest_date,''), COALESCE(latest_date,''),
+		       COALESCE(source,''), COALESCE(last_error,'')
+		FROM stockv2_daily_bar_quality
+		WHERE adjusted = ? AND symbol IN (`+sqlPlaceholders(len(symbols))+`)
 	`, args...)
 	if err != nil {
 		return nil, wrapError(err, "get duckdb daily bars stats batch")

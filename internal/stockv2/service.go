@@ -125,6 +125,11 @@ type AgentMCPStatus struct {
 	RequiredTools []string `json:"requiredTools"`
 }
 
+type pendingUniverseDailyBars struct {
+	Instrument StockV2Instrument
+	Bars       []StockV2DailyBar
+}
+
 func (s *Service) StartAgentMCPServer() (string, error) {
 	s.agentMCPMu.Lock()
 	defer s.agentMCPMu.Unlock()
@@ -762,8 +767,16 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 
 		workSymbols := make([]string, 0, len(batchSymbols))
 		batchNow := time.Now()
+		qualityBySymbol, qualityErr := s.dailyBarsQualityForUniverseBatch(ctx, batchSymbols)
+		if qualityErr != nil && s.log != nil {
+			s.log.Warn("batch stock data asset daily bar quality failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "batch", batch+1, "symbol_count", len(batchSymbols), "error", safelog.Text(qualityErr.Error(), 240))
+		}
 		for _, sym := range batchSymbols {
-			skip, err := s.shouldSkipFreshUniverseSymbol(ctx, sym, batchNow, freshnessWindow)
+			quality, hasQuality := qualityBySymbol[sym]
+			if qualityErr != nil {
+				hasQuality = false
+			}
+			skip, err := s.shouldSkipFreshUniverseSymbol(ctx, sym, batchNow, freshnessWindow, quality, hasQuality)
 			if err != nil {
 				if s.log != nil {
 					s.log.Warn("check stock data asset freshness failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol", sym, "freshness_window", freshnessWindow.String(), "error", safelog.Text(err.Error(), 240))
@@ -815,6 +828,35 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 
 		// 保存股票数据，并把历史日 K 覆盖纳入同一个数据资产维护任务。
 		batchProcessed := progress.CurrentBatchProgress
+		pendingDailyBars := make([]pendingUniverseDailyBars, 0, universeDailyBarsFlushSymbols)
+		flushPendingDailyBars := func() bool {
+			if len(pendingDailyBars) == 0 {
+				return false
+			}
+			totalBars := 0
+			for _, pending := range pendingDailyBars {
+				totalBars += len(pending.Bars)
+			}
+			bars := make([]StockV2DailyBar, 0, totalBars)
+			for _, pending := range pendingDailyBars {
+				bars = append(bars, pending.Bars...)
+			}
+			if err := s.store.UpsertDailyBars(ctx, bars); err != nil {
+				if s.log != nil {
+					s.log.Error("stock data asset maintenance daily bars batch save failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol_count", len(pendingDailyBars), "bar_count", len(bars), "error", safelog.Text(err.Error(), 300))
+				}
+				for _, pending := range pendingDailyBars {
+					failedItems = append(failedItems, UpdateFailure{
+						Symbol: pending.Instrument.Symbol,
+						Reason: safelog.Text("daily bars save: "+truncateDailyBarErr(err.Error()), 240),
+					})
+				}
+			} else {
+				successCount += len(pendingDailyBars)
+			}
+			pendingDailyBars = pendingDailyBars[:0]
+			return true
+		}
 		for _, sym := range workSymbols {
 			progress.CurrentSymbol = sym
 			failedBefore := len(failedItems)
@@ -835,7 +877,9 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 				})
 			} else {
 				var err error
-				fetchedDailyBars, err = s.maintainDailyBarsForInstrument(ctx, inst)
+				var bars []StockV2DailyBar
+				quality, hasQuality := qualityBySymbol[inst.Symbol]
+				fetchedDailyBars, bars, err = s.fetchDailyBarsForInstrumentWithQuality(ctx, inst, quality, hasQuality && qualityErr == nil)
 				if err != nil {
 					if s.log != nil {
 						s.log.Error("stock data asset maintenance daily bars failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol", inst.Symbol, "market", inst.Market, "instrument_type", inst.InstrumentType, "error", safelog.Text(err.Error(), 300))
@@ -844,6 +888,14 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 						Symbol: sym,
 						Reason: safelog.Text("daily bars: "+truncateDailyBarErr(err.Error()), 240),
 					})
+				} else if fetchedDailyBars {
+					pendingDailyBars = append(pendingDailyBars, pendingUniverseDailyBars{
+						Instrument: inst,
+						Bars:       bars,
+					})
+					if len(pendingDailyBars) >= universeDailyBarsFlushSymbols {
+						_ = flushPendingDailyBars()
+					}
 				} else {
 					successCount++
 				}
@@ -859,6 +911,9 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 					return
 				}
 			}
+		}
+		if flushPendingDailyBars() {
+			flushProgress(true)
 		}
 
 		// 批间延迟（避免风控）
@@ -890,7 +945,6 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 	if err := s.store.PruneUpdateJobs(ctx, 100); err != nil {
 		s.log.Warn("prune update jobs failed", "retention_count", 100, "error", safelog.Text(err.Error(), 240))
 	}
-	s.maybeRunBaseProfileMaintenance(ctx, "universe_update")
 }
 
 func (s *Service) maintainDailyBarsForInstrument(ctx context.Context, inst StockV2Instrument) (bool, error) {
@@ -898,16 +952,44 @@ func (s *Service) maintainDailyBarsForInstrument(ctx context.Context, inst Stock
 	if err != nil {
 		return false, err
 	}
+	return s.maintainDailyBarsForInstrumentWithQuality(ctx, inst, quality, true)
+}
+
+func (s *Service) maintainDailyBarsForInstrumentWithQuality(ctx context.Context, inst StockV2Instrument, quality DailyBarsQuality, hasQuality bool) (bool, error) {
+	fetched, bars, err := s.fetchDailyBarsForInstrumentWithQuality(ctx, inst, quality, hasQuality)
+	if err != nil || !fetched {
+		return fetched, err
+	}
+	if err := s.store.UpsertDailyBars(ctx, bars); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, inst StockV2Instrument, quality DailyBarsQuality, hasQuality bool) (bool, []StockV2DailyBar, error) {
+	if !hasQuality {
+		var err error
+		quality, err = s.GetDailyBarsQuality(ctx, inst.Symbol, DailyBarAdjustedNone)
+		if err != nil {
+			return false, nil, err
+		}
+	}
 	if !dailyBarsNeedsMaintenance(quality) {
-		return false, nil
+		return false, nil, nil
 	}
 
 	start, end := dailyBarRangeStartEnd(DailyBarRange1Y, time.Now())
 	if quality.HasData && quality.Meets250 && quality.Stale && quality.LatestDate != "" {
 		start = quality.LatestDate
 	}
-	_, err = s.ensureOneSymbol(ctx, inst.Symbol, inst.Market, start, end, DailyBarAdjustedNone)
-	return true, err
+	bars, err := s.dailyBarsSource.FetchDailyBars(ctx, inst.Symbol, inst.Market, start, end, DailyBarAdjustedNone, 1800)
+	if err != nil {
+		return true, nil, err
+	}
+	for i := range bars {
+		bars[i].Symbol = inst.Symbol
+	}
+	return true, bars, nil
 }
 
 func dailyBarsNeedsMaintenance(q DailyBarsQuality) bool {
@@ -925,7 +1007,25 @@ func (s *Service) universeMaintenanceFreshnessWindow() time.Duration {
 	return interval
 }
 
-func (s *Service) shouldSkipFreshUniverseSymbol(ctx context.Context, symbol string, now time.Time, freshness time.Duration) (bool, error) {
+func (s *Service) dailyBarsQualityForUniverseBatch(ctx context.Context, symbols []string) (map[string]DailyBarsQuality, error) {
+	out := make(map[string]DailyBarsQuality, len(symbols))
+	for start := 0; start < len(symbols); start += 100 {
+		end := start + 100
+		if end > len(symbols) {
+			end = len(symbols)
+		}
+		qualities, err := s.GetDailyBarsQualityBatch(ctx, symbols[start:end], DailyBarAdjustedNone)
+		if err != nil {
+			return nil, err
+		}
+		for symbol, quality := range qualities {
+			out[symbol] = quality
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) shouldSkipFreshUniverseSymbol(ctx context.Context, symbol string, now time.Time, freshness time.Duration, quality DailyBarsQuality, hasQuality bool) (bool, error) {
 	inst, err := s.store.GetInstrument(ctx, symbol)
 	if errors.Is(err, ErrInstrumentNotFound) {
 		return false, nil
@@ -936,14 +1036,12 @@ func (s *Service) shouldSkipFreshUniverseSymbol(ctx context.Context, symbol stri
 	if inst.UpdatedAt.IsZero() || now.Sub(inst.UpdatedAt) > freshness {
 		return false, nil
 	}
-	rowCount, _, latest, _, _, err := s.store.GetDailyBarsStats(ctx, symbol, DailyBarAdjustedNone)
-	if err != nil {
-		return false, err
-	}
-	quality := DailyBarsQuality{
-		HasData:  rowCount > 0,
-		Meets250: rowCount >= dailyBarsAgentTarget,
-		Stale:    rowCount == 0 || isDailyBarsStale(latest, now),
+	if !hasQuality {
+		loaded, err := s.GetDailyBarsQuality(ctx, symbol, DailyBarAdjustedNone)
+		if err != nil {
+			return false, err
+		}
+		quality = loaded
 	}
 	// ponytail: existing updated_at plus daily-bar quality is enough for v1 fast-skip;
 	// split per-source freshness if quote/profile cadences need independent SLAs.
@@ -1200,14 +1298,16 @@ func (s *Service) StopBackground() {
 	s.bgWg.Wait()
 }
 
+const (
+	scheduledUniverseUpdateHour      = 23
+	scheduledUniverseUpdateWindowEnd = 6
+	scheduledUpdaterPollInterval     = time.Minute
+	universeDailyBarsFlushSymbols    = 50
+)
+
 // runScheduledUpdater 运行数据资产定时维护器
 func (s *Service) runScheduledUpdater(ctx context.Context) {
-	interval := time.Duration(s.settings.UpdateIntervalSec) * time.Second
-	if interval <= 0 {
-		interval = 1 * time.Hour // 防御：0 或负值时给个默认值
-	}
-
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(scheduledUpdaterPollInterval)
 	defer ticker.Stop()
 
 	for {
@@ -1227,27 +1327,52 @@ func (s *Service) runScheduledUpdater(ctx context.Context) {
 
 // checkAndExecuteScheduledUpdate 检查并执行数据资产维护
 func (s *Service) checkAndExecuteScheduledUpdate(ctx context.Context) {
-	now := time.Now()
-	interval := time.Duration(s.settings.UpdateIntervalSec) * time.Second
+	s.checkAndExecuteScheduledUpdateAt(ctx, time.Now())
+}
 
-	// 检查是否到了更新时间
-	if now.Sub(s.settings.LastScheduledUpdate) < interval {
+func (s *Service) checkAndExecuteScheduledUpdateAt(ctx context.Context, now time.Time) {
+	due, slotStart := shouldRunDailyUniverseUpdate(s.settings.LastScheduledUpdate, now)
+	if !due {
 		return
 	}
-	if s.hasRecentCompletedUniverseUpdate(ctx, now, interval) {
+
+	if s.hasRecentCompletedUniverseUpdate(ctx, now, 24*time.Hour) {
 		s.markScheduledUpdateChecked(ctx, now)
 		return
 	}
 
 	// 执行维护
-	s.log.Info("executing scheduled stock data asset maintenance", "trigger_type", "scheduled", "trigger_source", "auto-updater", "interval", interval.String(), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano))
+	s.log.Info("executing scheduled stock data asset maintenance", "trigger_type", "scheduled", "trigger_source", "auto-updater", "schedule", "daily_23:00", "slot_start", slotStart.Format(time.RFC3339Nano), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano))
 	if _, err := s.ExecuteUniverseUpdate(ctx, "scheduled", "auto-updater"); err != nil {
-		s.log.Error("scheduled update failed", "trigger_type", "scheduled", "trigger_source", "auto-updater", "interval", interval.String(), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 300))
+		s.log.Error("scheduled update failed", "trigger_type", "scheduled", "trigger_source", "auto-updater", "schedule", "daily_23:00", "slot_start", slotStart.Format(time.RFC3339Nano), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 300))
 		return
 	}
 
 	// 更新最后一次执行时间
 	s.markScheduledUpdateChecked(ctx, now)
+}
+
+func shouldRunDailyUniverseUpdate(lastScheduled, now time.Time) (bool, time.Time) {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		loc = time.Local
+	}
+	localNow := now.In(loc)
+	hour := localNow.Hour()
+	inWindow := hour >= scheduledUniverseUpdateHour || hour < scheduledUniverseUpdateWindowEnd
+	if !inWindow {
+		return false, time.Time{}
+	}
+
+	slotDay := localNow
+	if hour < scheduledUniverseUpdateWindowEnd {
+		slotDay = slotDay.AddDate(0, 0, -1)
+	}
+	slotStart := time.Date(slotDay.Year(), slotDay.Month(), slotDay.Day(), scheduledUniverseUpdateHour, 0, 0, 0, loc)
+	if lastScheduled.IsZero() {
+		return true, slotStart
+	}
+	return lastScheduled.In(loc).Before(slotStart), slotStart
 }
 
 func (s *Service) hasRecentCompletedUniverseUpdate(ctx context.Context, now time.Time, interval time.Duration) bool {

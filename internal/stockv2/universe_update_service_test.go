@@ -64,7 +64,11 @@ func TestUniverseMaintenanceFreshSkipRequiresReadyDailyBars(t *testing.T) {
 		t.Fatalf("upsert ready bars: %v", err)
 	}
 
-	skip, err := svc.shouldSkipFreshUniverseSymbol(ctx, "000001", time.Now(), svc.universeMaintenanceFreshnessWindow())
+	quality, err := svc.GetDailyBarsQuality(ctx, "000001", DailyBarAdjustedNone)
+	if err != nil {
+		t.Fatalf("get daily bar quality: %v", err)
+	}
+	skip, err := svc.shouldSkipFreshUniverseSymbol(ctx, "000001", time.Now(), svc.universeMaintenanceFreshnessWindow(), quality, true)
 	if err != nil {
 		t.Fatalf("fresh skip check: %v", err)
 	}
@@ -82,7 +86,11 @@ func TestUniverseMaintenanceFreshSkipRequiresReadyDailyBars(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert missing bars instrument: %v", err)
 	}
-	skip, err = svc.shouldSkipFreshUniverseSymbol(ctx, "000002", time.Now(), svc.universeMaintenanceFreshnessWindow())
+	quality, err = svc.GetDailyBarsQuality(ctx, "000002", DailyBarAdjustedNone)
+	if err != nil {
+		t.Fatalf("get missing daily bar quality: %v", err)
+	}
+	skip, err = svc.shouldSkipFreshUniverseSymbol(ctx, "000002", time.Now(), svc.universeMaintenanceFreshnessWindow(), quality, true)
 	if err != nil {
 		t.Fatalf("missing bars skip check: %v", err)
 	}
@@ -99,11 +107,12 @@ func TestScheduledUniverseUpdateSkipsWhenRecentJobCompleted(t *testing.T) {
 		t.Fatalf("initialize: %v", err)
 	}
 
-	now := time.Now()
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+	now := time.Date(2026, 6, 30, 23, 5, 0, 0, loc)
 	settings := svc.settings
 	settings.AutoUpdateEnabled = true
 	settings.UpdateIntervalSec = 3600
-	settings.LastScheduledUpdate = now.Add(-2 * time.Hour)
+	settings.LastScheduledUpdate = now.AddDate(0, 0, -1)
 	if err := svc.store.CreateOrUpdateSettings(ctx, settings); err != nil {
 		t.Fatalf("save settings: %v", err)
 	}
@@ -123,8 +132,8 @@ func TestScheduledUniverseUpdateSkipsWhenRecentJobCompleted(t *testing.T) {
 		t.Fatalf("create completed job: %v", err)
 	}
 
-	before := time.Now()
-	svc.checkAndExecuteScheduledUpdate(ctx)
+	before := now.Add(-time.Second)
+	svc.checkAndExecuteScheduledUpdateAt(ctx, now)
 
 	jobs, err := svc.store.ListUpdateJobs(ctx, 10)
 	if err != nil {
@@ -139,6 +148,33 @@ func TestScheduledUniverseUpdateSkipsWhenRecentJobCompleted(t *testing.T) {
 	}
 	if gotSettings.LastScheduledUpdate.Before(before.Add(-time.Second)) {
 		t.Fatalf("last scheduled update = %v, want refreshed after %v", gotSettings.LastScheduledUpdate, before)
+	}
+}
+
+func TestScheduledUniverseUpdateOnlyRunsInNightWindow(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	if err := svc.Initialize(ctx); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+	settings := svc.settings
+	settings.AutoUpdateEnabled = true
+	settings.LastScheduledUpdate = time.Time{}
+	if err := svc.store.CreateOrUpdateSettings(ctx, settings); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	svc.settings = settings
+
+	svc.checkAndExecuteScheduledUpdateAt(ctx, time.Date(2026, 6, 30, 14, 0, 0, 0, loc))
+	jobs, err := svc.store.ListUpdateJobs(ctx, 10)
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("job count = %d, want 0 outside night window", len(jobs))
 	}
 }
 
