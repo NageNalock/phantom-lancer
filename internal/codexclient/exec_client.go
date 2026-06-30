@@ -5,6 +5,7 @@ import (
 	"context"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -57,6 +58,11 @@ func (c *ExecClient) Run(ctx context.Context, opts ExecOptions, onLine func([]by
 	if strings.TrimSpace(opts.Cwd) != "" {
 		cmd.Dir = opts.Cwd
 	}
+	// Run codex in its own process group (same pattern as supervisor.go): when
+	// the main process exits we can reap descendants that inherited stdout.
+	// Otherwise a stray grandchild keeps the stdout pipe write-end open and the
+	// scanner below never sees EOF.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -64,6 +70,10 @@ func (c *ExecClient) Run(ctx context.Context, opts ExecOptions, onLine func([]by
 	cmd.Stderr = nil
 	if err := cmd.Start(); err != nil {
 		return err
+	}
+	pgid := 0
+	if cmd.Process != nil {
+		pgid = cmd.Process.Pid
 	}
 	scanDone := make(chan struct{}, 1)
 	go func() {
@@ -81,6 +91,13 @@ func (c *ExecClient) Run(ctx context.Context, opts ExecOptions, onLine func([]by
 		}
 	}()
 	err = cmd.Wait()
+	// 主进程已退出，但继承 stdout 的孙子进程（如 stray 子进程）可能仍持有 pipe 写端，
+	// 让 scanner 永不 EOF。杀整个进程组释放写端：pipe 里已写入的行仍会被 scanner 读出
+	// 后再 EOF，不会丢行——区别于直接 Close 读端（会丢弃未读 buffer）。复用 supervisor
+	// 的进程组清理模式。
+	if pgid > 0 {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	}
 	waitExecScanDone(scanDone, stdout)
 	return err
 }
