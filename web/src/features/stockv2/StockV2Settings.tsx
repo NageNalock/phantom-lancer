@@ -173,12 +173,25 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
             <div className="flex items-center justify-between">
               <div>
                 <strong className="text-sm">腾讯行情接口</strong>
-                <span className="ml-2 text-xs text-[var(--muted)]">qt.gtimg.cn</span>
+                <span className="ml-2 text-xs text-[var(--muted)]">qt.gtimg.cn / web.ifzq.gtimg.cn</span>
               </div>
-              <Pill tone="good">标的/Quote</Pill>
+              <Pill tone="good">标的 / Quote / 日 K</Pill>
             </div>
             <p className="muted mt-2 text-xs">
-              用于刷新标的基础信息、最新价和日 K。批量请求会自动打散，避免短时间打满数据源。
+              标的主数据与批量 Quote 走 qt.gtimg.cn，日 K 走腾讯 fqkline；批量请求会自动打散，避免短时间打满数据源。
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <strong className="text-sm">东方财富 fallback</strong>
+                <span className="ml-2 text-xs text-[var(--muted)]">push2his / fund NAV</span>
+              </div>
+              <Pill tone="neutral">分钟线 / 基金净值</Pill>
+            </div>
+            <p className="muted mt-2 text-xs">
+              最新价优先用分钟线投影，腾讯分钟线不可用时回退东方财富分钟线；场内基金日 K 缺口会回退基金净值接口。
             </p>
           </div>
 

@@ -47,7 +47,7 @@ export function StockV2Overview({ data }: { data: AppData }) {
         <div className="grid gap-3">
           <LoopRow done={instruments.length > 0} label="标的主数据" value="从新浪列表源和腾讯行情源拉取 A 股股票与场内基金，支持批量打散更新和实时进度。" />
           <LoopRow done={portfolios.length > 0} label="投资组合 / 仓位" value="支持创建多个组合，配置风控参数（风险等级、单票上限、最大回撤），独立管理持仓。" />
-          <LoopRow done={!!settings?.autoUpdateEnabled} label="定时自动更新" value="可配置自动更新周期，后台定时拉取最新行情数据，支持代理配置。" />
+          <LoopRow done={!!settings?.autoUpdateEnabled} label="数据资产自动维护" value="每日 23:00 后低峰窗口统一维护标的、最新价和日 K；设置里的秒数只作为数据新鲜度窗口。" />
           <LoopRow done={jobs.length > 0} label="更新历史追溯" value="每次更新任务完整记录：触发方式、成功/失败数、耗时、错误信息，可弹窗查看。" />
         </div>
       </Panel>
@@ -92,12 +92,24 @@ export function StockV2Overview({ data }: { data: AppData }) {
             <div className="flex items-center justify-between">
               <div>
                 <strong className="text-sm">腾讯行情接口</strong>
-                <span className="ml-2 text-xs text-[var(--muted)]">qt.gtimg.cn</span>
+                <span className="ml-2 text-xs text-[var(--muted)]">qt.gtimg.cn / web.ifzq.gtimg.cn</span>
               </div>
-              <Pill tone="good">主数据源</Pill>
+              <Pill tone="good">主数据 / Quote / 日 K</Pill>
             </div>
             <p className="muted mt-2 text-xs">
-              海外可用，支持 A 股 / 港股 / 美股等市场。批量大小 80 只，批间抖动 30-50ms 避免风控。
+              标的主数据与批量 Quote 走 qt.gtimg.cn，日 K 走腾讯 fqkline；批量请求会打散，避免短时间打满数据源。
+            </p>
+          </div>
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <strong className="text-sm">东方财富 fallback</strong>
+                <span className="ml-2 text-xs text-[var(--muted)]">push2his / fund NAV</span>
+              </div>
+              <Pill tone="neutral">分钟线 / 基金净值</Pill>
+            </div>
+            <p className="muted mt-2 text-xs">
+              最新价优先用分钟线投影，腾讯分钟线不可用时回退东方财富分钟线；场内基金日 K 缺口会回退基金净值接口。
             </p>
           </div>
           {settings?.proxyEnabled ? (
