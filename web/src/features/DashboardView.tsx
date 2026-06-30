@@ -21,6 +21,7 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
   const images = data.images.status || data.dashboard.images;
   const codex = data.dashboard.codex;
   const stockv2 = data.stockv2;
+  const stockInstrumentTotal = stockv2?.instrumentTotal ?? stockv2?.instruments?.length ?? 0;
   const latestAudit = data.audit[0];
   const nextActions = dashboardNextActions(codex, gateway, images, v2ray);
   const allowedRoots = data.settings.runtime?.allowedRoots || [];
@@ -69,11 +70,11 @@ export function DashboardView({ actions, data }: { actions: AppActions; data: Ap
             value={v2rayStateLabel(v2ray)}
           />
           <Metric
-            detail={`${stockv2?.portfolios?.length || 0} 组合 / ${stockv2?.instruments?.length || 0} 标的`}
+            detail={`${stockv2?.portfolios?.length || 0} 组合 / ${stockInstrumentTotal} 标的`}
             href={actions.mainTabHref("stockv2")}
             label="股票V2"
             onClick={(event) => handleMainTabLink(event, "stockv2")}
-            tone={stockv2?.updateJobs?.some((job) => job.status === "running") ? "warn" : stockv2?.instruments?.length ? "good" : "neutral"}
+            tone={stockv2?.updateJobs?.some((job) => job.status === "running") ? "warn" : stockInstrumentTotal ? "good" : "neutral"}
             value={stockV2StatusLabel(stockv2)}
           />
         </section>

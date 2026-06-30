@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { AreaSeries, createChart, createSeriesMarkers, type CrosshairMode, type IChartApi, type ISeriesApi, type Time } from "lightweight-charts";
 import type { AppActions } from "../../app/App";
 import type { AppData, StockV2AgentRun, StockV2Alert, StockV2AlertListResponse, StockV2AssetCurveResponse, StockV2Holding, StockV2Instrument, StockV2MonitorHit, StockV2OperationReview, StockV2Portfolio, StockV2PortfolioRefreshResult, StockV2PortfolioSnapshot, StockV2PortfolioWithHoldings, StockV2Transaction } from "../../app/types";
-import { Button, CollapsibleSection, ContextList, Drawer, EmptyState, Field, Notice, Panel, Pill, SubTabs } from "../../components/ui";
+import { Button, CollapsibleSection, ContextList, Drawer, EmptyState, Field, Notice, Panel, Pill, SubTabs, Toggle } from "../../components/ui";
 import { formatDate, stockV2AgentRunStatusLabel, stockV2AgentRunStatusTone, stockV2InstrumentTypeLabel, stockV2RiskLabel, stockV2ValuationStatusLabel, stockV2ValuationStatusTone } from "../../domain/labels";
 import { StockV2AgentRunDetailDrawer } from "./StockV2AgentExecutionLedger";
 import { StockV2InstrumentDetail } from "./StockV2InstrumentDetail";
@@ -526,6 +526,9 @@ function PortfolioRow({
           <span>
             最大回撤 <strong className="text-[var(--text)]">{portfolio.maxDrawdownPct}%</strong>
           </span>
+          <span>
+            Agent 权限 <strong className="text-[var(--text)]">{portfolioPermissionLabel(portfolio)}</strong>
+          </span>
         </div>
       </div>
       <div className="flex items-start gap-1">
@@ -538,6 +541,16 @@ function PortfolioRow({
       </div>
     </div>
   );
+}
+
+function portfolioPermissionLabel(portfolio: Pick<StockV2Portfolio, "allowBuy" | "allowAdd" | "allowReduce" | "allowSell">) {
+  const enabled = [
+    portfolio.allowBuy ? "买入" : "",
+    portfolio.allowAdd ? "加仓" : "",
+    portfolio.allowReduce ? "减仓" : "",
+    portfolio.allowSell ? "卖出" : "",
+  ].filter(Boolean);
+  return enabled.length > 0 ? enabled.join("/") : "只观察";
 }
 
 function HoldingRow({
@@ -738,6 +751,10 @@ function PortfolioDialog({
     riskLevel: initial?.riskLevel || "medium",
     maxSinglePositionPct: initial?.maxSinglePositionPct ?? 20,
     maxDrawdownPct: initial?.maxDrawdownPct ?? 30,
+    allowBuy: initial?.allowBuy ?? true,
+    allowAdd: initial?.allowAdd ?? true,
+    allowReduce: initial?.allowReduce ?? true,
+    allowSell: initial?.allowSell ?? true,
     notes: initial?.notes || "",
   });
 
@@ -812,6 +829,38 @@ function PortfolioDialog({
               onChange={(e) => setForm({ ...form, maxDrawdownPct: Number(e.target.value) })}
             />
           </Field>
+        </div>
+
+        <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium">Agent 操作边界</p>
+              <p className="mt-0.5 text-xs text-[var(--muted)]">限制模型可建议的组合操作，不限制 owner 手工记账。</p>
+            </div>
+            <span className="text-xs text-[var(--muted)]">{portfolioPermissionLabel(form)}</span>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Toggle
+              checked={form.allowBuy}
+              label="允许买入建仓"
+              onChange={(allowBuy) => setForm({ ...form, allowBuy })}
+            />
+            <Toggle
+              checked={form.allowAdd}
+              label="允许加仓"
+              onChange={(allowAdd) => setForm({ ...form, allowAdd })}
+            />
+            <Toggle
+              checked={form.allowReduce}
+              label="允许减仓"
+              onChange={(allowReduce) => setForm({ ...form, allowReduce })}
+            />
+            <Toggle
+              checked={form.allowSell}
+              label="允许卖出"
+              onChange={(allowSell) => setForm({ ...form, allowSell })}
+            />
+          </div>
         </div>
 
         <Field label="备注">

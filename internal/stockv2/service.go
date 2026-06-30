@@ -245,10 +245,10 @@ func (s *Service) CreatePortfolio(ctx context.Context, req RequestCreatePortfoli
 		RiskLevel:            req.RiskLevel,
 		MaxSinglePositionPct: req.MaxSinglePositionPct,
 		MaxDrawdownPct:       req.MaxDrawdownPct,
-		AllowBuy:             req.AllowBuy,
-		AllowAdd:             req.AllowAdd,
-		AllowReduce:          req.AllowReduce,
-		AllowSell:            req.AllowSell,
+		AllowBuy:             boolDefault(req.AllowBuy, true),
+		AllowAdd:             boolDefault(req.AllowAdd, true),
+		AllowReduce:          boolDefault(req.AllowReduce, true),
+		AllowSell:            boolDefault(req.AllowSell, true),
 		Notes:                req.Notes,
 	}
 
@@ -311,6 +311,13 @@ func (s *Service) UpdatePortfolio(ctx context.Context, id string, req RequestUpd
 	}
 
 	return existing, nil
+}
+
+func boolDefault(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 
 // DeletePortfolio 删除投资组合
@@ -1530,9 +1537,14 @@ func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, wrapError(err, "get portfolios")
 	}
 
-	// 获取首屏主数据样本。这里刻意限制为 1000 条，避免 snapshot 变成
-	// 大响应；全量数量和分页内容由 /api/stockv2/instruments 提供。
-	instruments, err := s.GetInstruments(ctx, 1000, 0)
+	instrumentTotal, err := s.store.CountInstruments(ctx)
+	if err != nil {
+		return Snapshot{}, wrapError(err, "count instruments")
+	}
+
+	// 获取首屏主数据样本。这里刻意限制为少量记录，避免 snapshot 变成
+	// 大响应；真实总数和分页内容由 /api/stockv2/instruments 提供。
+	instruments, err := s.GetInstruments(ctx, 20, 0)
 	if err != nil {
 		return Snapshot{}, wrapError(err, "get instruments")
 	}
@@ -1550,11 +1562,12 @@ func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {
 	}
 
 	return Snapshot{
-		Portfolios:  portfolios,
-		Instruments: instruments,
-		UpdateJobs:  jobs,
-		Settings:    settings,
-		LastUpdate:  time.Now(),
+		Portfolios:      portfolios,
+		Instruments:     instruments,
+		InstrumentTotal: instrumentTotal,
+		UpdateJobs:      jobs,
+		Settings:        settings,
+		LastUpdate:      time.Now(),
 	}, nil
 }
 

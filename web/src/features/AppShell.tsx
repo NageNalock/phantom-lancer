@@ -117,7 +117,7 @@ export function AppShell({
               >
                 <StatusSummaryRow label="Gateway" tone={gateway?.enabled ? "good" : "warn"} value={gateway?.enabled ? "已启用" : "未启用"} />
                 <StatusSummaryRow label="多媒体" tone={images?.hasApiKey ? "good" : "warn"} value={images?.hasApiKey ? "已配置" : "未配置"} />
-                <StatusSummaryRow label="股票V2" tone={data.stockv2?.updateJobs?.some(j => j.status === "running") ? "warn" : data.stockv2?.instruments?.length ? "good" : "neutral"} value={stockV2StatusLabel(data.stockv2)} />
+                <StatusSummaryRow label="股票V2" tone={data.stockv2?.updateJobs?.some(j => j.status === "running") ? "warn" : (data.stockv2?.instrumentTotal || data.stockv2?.instruments?.length) ? "good" : "neutral"} value={stockV2StatusLabel(data.stockv2)} />
                 <StatusSummaryRow label="V2Ray" tone={v2ray?.running ? "good" : "warn"} value={v2rayStateLabel(v2ray)} />
               </div>
             ) : null}
@@ -156,7 +156,7 @@ function activeStatusPill(activeTab: MainTab, data: AppData) {
   if (activeTab === "stockv2") {
     const stockv2 = data.stockv2;
     const running = stockv2?.updateJobs?.some(j => j.status === "running");
-    const tone: "good" | "warn" | "neutral" = running ? "warn" : stockv2?.instruments?.length ? "good" : "neutral";
+    const tone: "good" | "warn" | "neutral" = running ? "warn" : (stockv2?.instrumentTotal || stockv2?.instruments?.length) ? "good" : "neutral";
     return <Pill tone={tone}>股票V2 {stockV2StatusLabel(stockv2)}</Pill>;
   }
   if (activeTab === "codex") {

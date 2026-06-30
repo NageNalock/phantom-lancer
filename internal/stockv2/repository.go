@@ -78,12 +78,17 @@ func NewStore(dbPath string) (*Store, error) {
 
 // NewStoreWithMarketDB 创建 Stock V2 存储，并显式指定 DuckDB 市场数据文件。
 func NewStoreWithMarketDB(dbPath, marketDBPath string) (*Store, error) {
-	dsn := fmt.Sprintf("%s?_parse_time=true&_loc=Local&_busy_timeout=5000", dbPath)
+	dsn := sqliteDSN(dbPath)
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open stockv2 db: %w", err)
 	}
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(4)
+	if err := configureSQLite(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("configure stockv2 sqlite: %w", err)
+	}
 	marketDB, err := NewMarketDataStore(marketDBPath)
 	if err != nil {
 		_ = db.Close()
@@ -104,6 +109,31 @@ func NewStoreWithMarketDB(dbPath, marketDBPath string) (*Store, error) {
 		return nil, fmt.Errorf("init stockv2 schema: %w", err)
 	}
 	return s, nil
+}
+
+func sqliteDSN(dbPath string) string {
+	separator := "?"
+	if strings.Contains(dbPath, "?") {
+		separator = "&"
+	}
+	return fmt.Sprintf("%s%s_parse_time=true&_loc=Local&_busy_timeout=5000", dbPath, separator)
+}
+
+func configureSQLite(ctx context.Context, db *sql.DB) error {
+	// ponytail: WAL addresses foreground reads waiting behind scheduled StockV2
+	// writes without introducing a second database; revisit for network filesystems.
+	pragmas := []string{
+		`PRAGMA journal_mode=WAL`,
+		`PRAGMA synchronous=NORMAL`,
+		`PRAGMA busy_timeout=5000`,
+		`PRAGMA wal_autocheckpoint=1000`,
+	}
+	for _, pragma := range pragmas {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
+			return fmt.Errorf("%s: %w", pragma, err)
+		}
+	}
+	return nil
 }
 
 // Close 关闭底层 DB 连接
@@ -564,6 +594,7 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_symbol ON stockv2_instruments
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_market ON stockv2_instruments(market);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_industry ON stockv2_instruments(industry);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_status ON stockv2_instruments(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_created_at ON stockv2_instruments(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_market ON stockv2_stock_profiles(market);
 CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_updated_at ON stockv2_stock_profiles(updated_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_profile_update_tasks_symbol ON stockv2_stock_profile_update_tasks(symbol);

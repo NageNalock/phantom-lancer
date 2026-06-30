@@ -249,11 +249,12 @@ type PortfolioWithHoldings struct {
 // 全量或分页检查标的主数据时，应使用 /api/stockv2/instruments 返回的
 // items/total/limit/offset。
 type Snapshot struct {
-	Portfolios  []PortfolioWithHoldings `json:"portfolios"`
-	Instruments []StockV2Instrument     `json:"instruments"`
-	UpdateJobs  []StockV2UpdateJob      `json:"updateJobs"`
-	Settings    StockV2Settings         `json:"settings"`
-	LastUpdate  time.Time               `json:"lastUpdate"`
+	Portfolios      []PortfolioWithHoldings `json:"portfolios"`
+	Instruments     []StockV2Instrument     `json:"instruments"`
+	InstrumentTotal int                     `json:"instrumentTotal"`
+	UpdateJobs      []StockV2UpdateJob      `json:"updateJobs"`
+	Settings        StockV2Settings         `json:"settings"`
+	LastUpdate      time.Time               `json:"lastUpdate"`
 }
 
 // UniverseUpdateRequest 标的主数据更新请求
@@ -277,10 +278,10 @@ type RequestCreatePortfolio struct {
 	RiskLevel            string  `json:"riskLevel"`
 	MaxSinglePositionPct float64 `json:"maxSinglePositionPct"`
 	MaxDrawdownPct       float64 `json:"maxDrawdownPct"`
-	AllowBuy             bool    `json:"allowBuy"`
-	AllowAdd             bool    `json:"allowAdd"`
-	AllowReduce          bool    `json:"allowReduce"`
-	AllowSell            bool    `json:"allowSell"`
+	AllowBuy             *bool   `json:"allowBuy,omitempty"`
+	AllowAdd             *bool   `json:"allowAdd,omitempty"`
+	AllowReduce          *bool   `json:"allowReduce,omitempty"`
+	AllowSell            *bool   `json:"allowSell,omitempty"`
 	Notes                string  `json:"notes,omitempty"`
 }
 

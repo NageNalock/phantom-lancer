@@ -1144,6 +1144,7 @@ export interface DockerStats {
 export interface StockV2Payload {
   portfolios?: StockV2PortfolioWithHoldings[];
   instruments?: StockV2Instrument[];
+  instrumentTotal?: number;
   updateJobs?: StockV2UpdateJob[];
   settings?: StockV2Settings;
   lastUpdate?: string;

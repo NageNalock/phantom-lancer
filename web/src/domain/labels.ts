@@ -432,7 +432,7 @@ export function codexEventTitle(type?: string): string {
 
 export function stockV2StatusLabel(payload?: StockV2Payload): string {
   if (payload?.updateJobs?.some(j => j.status === "running")) return "更新中";
-  if (!payload?.portfolios?.length && !payload?.instruments?.length) return "未初始化";
+  if (!payload?.portfolios?.length && !(payload?.instrumentTotal || payload?.instruments?.length)) return "未初始化";
   return "可用";
 }
 

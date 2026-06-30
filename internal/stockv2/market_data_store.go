@@ -34,7 +34,8 @@ func NewMarketDataStore(path string) (*MarketDataStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open duckdb: %w", err)
 	}
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
 	s := &MarketDataStore{db: db, path: path}
 	if err := s.init(context.Background()); err != nil {
 		_ = db.Close()
@@ -123,6 +124,7 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_market ON stockv2_instruments(market);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_status ON stockv2_instruments(status);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_type ON stockv2_instruments(instrument_type);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_created_at ON stockv2_instruments(created_at);
 
 		CREATE TABLE IF NOT EXISTS stockv2_quotes_latest (
 			symbol VARCHAR PRIMARY KEY,

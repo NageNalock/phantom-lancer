@@ -477,6 +477,7 @@ func strategyGenerationReportFromResult(raw map[string]any) (StrategyGenerationR
 		return StrategyGenerationReport{}, err
 	}
 	normalizeStrategyGenerationPlaybookPrefilters(raw)
+	normalizeStrategyGenerationReportShape(raw)
 	payload, err := json.Marshal(raw)
 	if err != nil {
 		return StrategyGenerationReport{}, err
@@ -530,6 +531,50 @@ func normalizeStrategyGenerationPlaybookPrefilters(raw map[string]any) {
 			}
 		}
 	}
+}
+
+func normalizeStrategyGenerationReportShape(raw map[string]any) {
+	for _, draftRaw := range sliceFromAny(raw["drafts"]) {
+		draft := mapFromAny(draftRaw)
+		target := mapFromAny(draft["target"])
+		setStringIfEmpty(draft, "symbol", target["symbol"])
+		setStringIfEmpty(draft, "market", target["market"])
+		setStringIfEmpty(draft, "name", target["name"])
+		setStringIfEmpty(draft, "strategy_bias", draft["direction"])
+
+		playbook := mapFromAny(draft["playbook"])
+		for _, ruleRaw := range sliceFromAny(playbook["rules"]) {
+			rule := mapFromAny(ruleRaw)
+			setStringIfEmpty(rule, "title", rule["name"])
+			if strings.TrimSpace(stringFromAny(rule["action"])) != "" {
+				continue
+			}
+			rule["action"] = strategyGenerationRuleActionFromActions(rule["actions"])
+		}
+	}
+}
+
+func setStringIfEmpty(target map[string]any, key string, value any) {
+	if strings.TrimSpace(stringFromAny(target[key])) != "" {
+		return
+	}
+	if text := strings.TrimSpace(stringFromAny(value)); text != "" {
+		target[key] = text
+	}
+}
+
+func strategyGenerationRuleActionFromActions(value any) string {
+	for _, candidate := range sliceFromAny(value) {
+		action := strings.TrimSpace(stringFromAny(candidate))
+		if validStrategyGenerationRuleAction(action) {
+			return action
+		}
+	}
+	action := strings.TrimSpace(stringFromAny(value))
+	if validStrategyGenerationRuleAction(action) {
+		return action
+	}
+	return StrategyGenerationRuleActionObserve
 }
 
 func validateStrategyGenerationReport(report StrategyGenerationReport) error {

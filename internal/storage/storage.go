@@ -507,12 +507,17 @@ type ImageGenerationOutput struct {
 }
 
 func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open("sqlite3", sqliteDSN(path))
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(4)
 	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := configureSQLite(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -526,6 +531,30 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 		return nil, fmt.Errorf("storage: master key: %w", err)
 	}
 	return store, nil
+}
+
+func sqliteDSN(path string) string {
+	if strings.Contains(path, "?") {
+		return path + "&_busy_timeout=5000"
+	}
+	return path + "?_busy_timeout=5000"
+}
+
+func configureSQLite(ctx context.Context, db *sql.DB) error {
+	// ponytail: WAL is the smallest concurrency fix for this single-node SQLite
+	// deployment; if the DB moves to network storage, make journal mode configurable.
+	pragmas := []string{
+		`PRAGMA journal_mode=WAL`,
+		`PRAGMA synchronous=NORMAL`,
+		`PRAGMA busy_timeout=5000`,
+		`PRAGMA wal_autocheckpoint=1000`,
+	}
+	for _, pragma := range pragmas {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
+			return fmt.Errorf("%s: %w", pragma, err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error {
@@ -4748,10 +4777,8 @@ func (s *Store) ListImageGenerationJobsPage(ctx context.Context, limit, offset i
 	if err := rows.Close(); err != nil {
 		return nil, 0, err
 	}
-	for i := range out {
-		if err := s.attachImageJobRelations(ctx, &out[i]); err != nil {
-			return nil, 0, err
-		}
+	if err := s.attachImageJobsRelations(ctx, out); err != nil {
+		return nil, 0, err
 	}
 	return out, total, nil
 }
@@ -5576,37 +5603,77 @@ func scanImageGenerationOutput(row workspaceScanner) (ImageGenerationOutput, err
 }
 
 func (s *Store) attachImageJobRelations(ctx context.Context, job *ImageGenerationJob) error {
-	sourceRows, err := s.db.QueryContext(ctx, `SELECT id, job_id, asset_id, slot, source_type, source_label, mime_type, size_bytes, url_redacted, created_at FROM image_generation_sources WHERE job_id = ? ORDER BY slot ASC`, job.ID)
+	if job == nil {
+		return nil
+	}
+	jobs := []ImageGenerationJob{*job}
+	if err := s.attachImageJobsRelations(ctx, jobs); err != nil {
+		return err
+	}
+	*job = jobs[0]
+	return nil
+}
+
+func (s *Store) attachImageJobsRelations(ctx context.Context, jobs []ImageGenerationJob) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	ids := make([]any, 0, len(jobs))
+	byID := make(map[string]*ImageGenerationJob, len(jobs))
+	for i := range jobs {
+		jobs[i].Sources = []ImageGenerationSource{}
+		jobs[i].Outputs = []ImageGenerationOutput{}
+		if jobs[i].ID == "" {
+			continue
+		}
+		ids = append(ids, jobs[i].ID)
+		byID[jobs[i].ID] = &jobs[i]
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	sourceRows, err := s.db.QueryContext(ctx, `SELECT id, job_id, asset_id, slot, source_type, source_label, mime_type, size_bytes, url_redacted, created_at FROM image_generation_sources WHERE job_id IN (`+sqlPlaceholders(len(ids))+`) ORDER BY job_id ASC, slot ASC`, ids...)
 	if err != nil {
 		return err
 	}
-	defer sourceRows.Close()
-	job.Sources = []ImageGenerationSource{}
 	for sourceRows.Next() {
 		source, err := scanImageGenerationSource(sourceRows)
 		if err != nil {
+			_ = sourceRows.Close()
 			return err
 		}
-		job.Sources = append(job.Sources, source)
+		if job := byID[source.JobID]; job != nil {
+			job.Sources = append(job.Sources, source)
+		}
 	}
 	if err := sourceRows.Err(); err != nil {
+		_ = sourceRows.Close()
+		return err
+	}
+	if err := sourceRows.Close(); err != nil {
 		return err
 	}
 
-	outputRows, err := s.db.QueryContext(ctx, `SELECT id, job_id, asset_id, slot, remote_url, local_name, mime_type, revised_prompt, storage, size_bytes, created_at FROM image_generation_outputs WHERE job_id = ? ORDER BY slot ASC`, job.ID)
+	outputRows, err := s.db.QueryContext(ctx, `SELECT id, job_id, asset_id, slot, remote_url, local_name, mime_type, revised_prompt, storage, size_bytes, created_at FROM image_generation_outputs WHERE job_id IN (`+sqlPlaceholders(len(ids))+`) ORDER BY job_id ASC, slot ASC`, ids...)
 	if err != nil {
 		return err
 	}
-	defer outputRows.Close()
-	job.Outputs = []ImageGenerationOutput{}
 	for outputRows.Next() {
 		output, err := scanImageGenerationOutput(outputRows)
 		if err != nil {
+			_ = outputRows.Close()
 			return err
 		}
-		job.Outputs = append(job.Outputs, output)
+		if job := byID[output.JobID]; job != nil {
+			job.Outputs = append(job.Outputs, output)
+		}
 	}
-	return outputRows.Err()
+	if err := outputRows.Err(); err != nil {
+		_ = outputRows.Close()
+		return err
+	}
+	return outputRows.Close()
 }
 
 func boolInt(value bool) int {

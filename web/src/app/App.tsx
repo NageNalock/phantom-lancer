@@ -80,19 +80,52 @@ export function App() {
     };
   }, []);
 
+  const loadImagesData = useCallback(async (): Promise<ImagesPayload> => {
+    const [settings, storageSettings, jobs, assets, prompts] = await Promise.all([
+      api<ImagesPayload>("/api/images/settings"),
+      api<{ settings?: ImagesPayload["storageSettings"] }>("/api/images/storage-settings"),
+      api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=200"),
+      api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=200"),
+      api<{ items?: ImagesPayload["prompts"] }>("/api/images/prompts?limit=120"),
+    ]);
+    return {
+      ...settings,
+      storageSettings: storageSettings.settings,
+      jobs: jobs.items || [],
+      assets: assets.items || [],
+      prompts: prompts.items || [],
+      count: jobs.count || 0,
+    };
+  }, []);
+
+  const loadCoreData = useCallback(async () => {
+    const [dashboard, audit, codexGateway, settings, v2ray] = await Promise.all([
+      api<AppData["dashboard"]>("/api/dashboard/summary"),
+      api<{ items?: AppData["audit"] }>("/api/audit/events"),
+      loadCodexGatewayData(),
+      api<SettingsPayload>("/api/settings"),
+      api<V2RayPayload>("/api/v2ray/settings"),
+    ]);
+
+    setData((current) => ({
+      ...current,
+      dashboard,
+      audit: audit.items || [],
+      codexGateway,
+      settings,
+      v2ray,
+    }));
+  }, [loadCodexGatewayData]);
+
   const loadAppData = useCallback(async () => {
-    const [dashboard, audit, codexGateway, settings, v2ray, stockv2, imagesSettings, imageStorageSettings, imageJobs, imageAssets, imagePrompts] = await Promise.all([
+    const [dashboard, audit, codexGateway, settings, v2ray, stockv2, images] = await Promise.all([
       api<AppData["dashboard"]>("/api/dashboard/summary"),
       api<{ items?: AppData["audit"] }>("/api/audit/events"),
       loadCodexGatewayData(),
       api<SettingsPayload>("/api/settings"),
       api<V2RayPayload>("/api/v2ray/settings"),
       api<StockV2Payload>("/api/stockv2/snapshot"),
-      api<ImagesPayload>("/api/images/settings"),
-      api<{ settings?: ImagesPayload["storageSettings"] }>("/api/images/storage-settings"),
-      api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=200"),
-      api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=200"),
-      api<{ items?: ImagesPayload["prompts"] }>("/api/images/prompts?limit=120"),
+      loadImagesData(),
     ]);
 
     setData({
@@ -102,9 +135,25 @@ export function App() {
       settings,
       v2ray,
       stockv2,
-      images: { ...imagesSettings, storageSettings: imageStorageSettings.settings, jobs: imageJobs.items || [], assets: imageAssets.items || [], prompts: imagePrompts.items || [], count: imageJobs.count || 0 },
+      images,
     });
-  }, [loadCodexGatewayData]);
+  }, [loadCodexGatewayData, loadImagesData]);
+
+  const loadDeferredData = useCallback(async () => {
+    const [stockv2, images] = await Promise.allSettled([
+      api<StockV2Payload>("/api/stockv2/snapshot"),
+      loadImagesData(),
+    ]);
+    setData((current) => ({
+      ...current,
+      stockv2: stockv2.status === "fulfilled" ? stockv2.value : current.stockv2,
+      images: images.status === "fulfilled" ? images.value : current.images,
+      dashboard: {
+        ...current.dashboard,
+        images: images.status === "fulfilled" ? images.value.status : current.dashboard.images,
+      },
+    }));
+  }, [loadImagesData]);
 
   useEffect(() => {
     let active = true;
@@ -120,8 +169,11 @@ export function App() {
           const me = await api<{ session: AuthSession }>("/api/auth/me");
           if (!active) return;
           setSession(me.session);
-          await loadAppData();
-          if (active) setAuthMode("ready");
+          await loadCoreData();
+          if (active) {
+            setAuthMode("ready");
+            void loadDeferredData();
+          }
         } catch {
           if (active) setAuthMode("login");
         }
@@ -136,7 +188,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [loadAppData]);
+  }, [loadCoreData, loadDeferredData]);
 
   const actions = useMemo<AppActions>(
     () => ({
@@ -155,25 +207,11 @@ export function App() {
         setData((current) => ({ ...current, v2ray: next, dashboard: { ...current.dashboard, v2ray: next.status } }));
       },
       refreshImages: async () => {
-        const [settings, storageSettings, jobs, assets, prompts] = await Promise.allSettled([
-          api<ImagesPayload>("/api/images/settings"),
-          api<{ settings?: ImagesPayload["storageSettings"] }>("/api/images/storage-settings"),
-          api<{ items?: ImagesPayload["jobs"]; count?: number }>("/api/images/jobs?limit=200"),
-          api<{ items?: ImagesPayload["assets"] }>("/api/images/library/assets?limit=200"),
-          api<{ items?: ImagesPayload["prompts"] }>("/api/images/prompts?limit=120"),
-        ]);
+        const next = await loadImagesData();
         setData((current) => ({
           ...current,
-          images: {
-            ...current.images,
-            ...(settings.status === "fulfilled" ? settings.value : {}),
-            storageSettings: storageSettings.status === "fulfilled" ? storageSettings.value.settings : current.images.storageSettings,
-            jobs: jobs.status === "fulfilled" ? jobs.value.items || [] : current.images.jobs,
-            assets: assets.status === "fulfilled" ? assets.value.items || [] : current.images.assets,
-            prompts: prompts.status === "fulfilled" ? prompts.value.items || [] : current.images.prompts,
-            count: jobs.status === "fulfilled" ? jobs.value.count || 0 : current.images.count,
-          },
-          dashboard: { ...current.dashboard, images: settings.status === "fulfilled" ? settings.value.status : current.dashboard.images },
+          images: next,
+          dashboard: { ...current.dashboard, images: next.status },
         }));
       },
       refreshStockV2: async () => {
@@ -183,7 +221,7 @@ export function App() {
       setV2RayExportOpen,
       setV2RayExport,
     }),
-    [csrf, loadAppData, loadCodexGatewayData, mainTabHref, setActiveTab, setToast],
+    [csrf, loadAppData, loadCodexGatewayData, loadImagesData, mainTabHref, setActiveTab, setToast],
   );
 
   async function handleAuth(mode: "bootstrap" | "login", username: string, password: string) {
@@ -193,8 +231,9 @@ export function App() {
     });
     setCsrf(result.csrfToken || readCookie("pl_csrf"));
     setSession(result.session);
-    await loadAppData();
+    await loadCoreData();
     setAuthMode("ready");
+    void loadDeferredData();
   }
 
   async function logout() {

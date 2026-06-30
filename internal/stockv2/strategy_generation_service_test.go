@@ -161,6 +161,45 @@ func TestStrategyGenerationNormalizesStringPlaybookPrefilters(t *testing.T) {
 	}
 }
 
+func TestStrategyGenerationReportNormalizesFormatterTargetAndActions(t *testing.T) {
+	raw := strategyGenerationPortfolioReportResult([]string{"600276"})
+	draft := mapFromAny(sliceFromAny(raw["drafts"])[0])
+	delete(draft, "symbol")
+	delete(draft, "market")
+	delete(draft, "name")
+	delete(draft, "strategy_bias")
+	draft["target"] = map[string]any{
+		"symbol": "600276",
+		"market": "SH",
+		"name":   "恒瑞医药",
+	}
+	draft["direction"] = "watch"
+	playbook := mapFromAny(draft["playbook"])
+	rule := mapFromAny(sliceFromAny(playbook["rules"])[0])
+	delete(rule, "action")
+	delete(rule, "title")
+	rule["name"] = "观察触发"
+	rule["actions"] = []any{"request_review", "observe"}
+
+	report, err := strategyGenerationReportFromResult(raw)
+	if err != nil {
+		t.Fatalf("strategyGenerationReportFromResult: %v", err)
+	}
+	got := report.Drafts[0]
+	if got.Symbol != "600276" || got.Market != "SH" || got.Name != "恒瑞医药" {
+		t.Fatalf("draft target fields = %s/%s/%s, want normalized target fields", got.Symbol, got.Market, got.Name)
+	}
+	if got.StrategyBias != "watch" {
+		t.Fatalf("strategy bias = %q, want watch", got.StrategyBias)
+	}
+	if got.Playbook.Rules[0].Action != StrategyGenerationRuleActionObserve {
+		t.Fatalf("rule action = %q, want observe", got.Playbook.Rules[0].Action)
+	}
+	if got.Playbook.Rules[0].Title != "观察触发" {
+		t.Fatalf("rule title = %q, want normalized name", got.Playbook.Rules[0].Title)
+	}
+}
+
 func TestBuildPortfolioStrategyDiagnosisRequiresPortfolioID(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
