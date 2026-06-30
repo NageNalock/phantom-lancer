@@ -960,7 +960,7 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 	b.WriteString("You must submit exactly ONE result using stock_agent.submit_result.\n")
 	b.WriteString("The MCP taskType must be `strategy_generation` and result.outputType must be `strategy_generation`.\n")
 	b.WriteString("Return a strategy-generation report with schema_version `strategy-generation-report/v1`.\n")
-	b.WriteString("Put material data conflicts and verification attempts in run_summary.key_conflicts and run_summary.data_quality_notes; include compact external/internal source references in draft evidence_summary or risk_summary.\n")
+	b.WriteString("run_summary.key_conflicts and run_summary.data_quality_notes MUST be flat arrays of short human-readable strings (one concise sentence per element). Put material data conflicts and verification attempts there as plain strings; include compact external/internal source references in draft evidence_summary or risk_summary. Never put objects or nested arrays inside key_conflicts or data_quality_notes.\n")
 	b.WriteString("Every new strategy draft must use `playbook.rules[]`. Do not write `playbook.actions[]`, `actions`, `action_type`, `add`, `reduce`, or `clear`.\n")
 	b.WriteString("Allowed rule.action values are: observe, build_position, add_position, hold, reduce_position, exit_position.\n")
 	b.WriteString("Rule fields are exactly: id, action, title, trigger, preconditions, target, risk, dataPrefilters, portfolioPrefilters, newsPrefilters, priority.\n")

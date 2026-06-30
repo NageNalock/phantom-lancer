@@ -240,6 +240,62 @@ func strategyGenerationReviewRequestText(value any) string {
 	}
 }
 
+// UnmarshalJSON 让 RunSummary 容错：LLM 偶尔会把 key_conflicts / data_quality_notes
+// 输出成对象数组或单字符串。统一规范化为 []string，避免整个 report 反序列化失败而把
+// 策略生成运行判为 failed（见 agent_service.go 中 strategyGenerationReportFromResult 的调用）。
+func (s *StrategyGenerationRunSummary) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*s = StrategyGenerationRunSummary{
+		Mode:              strategyGenerationStringField(raw["mode"]),
+		OverallConclusion: strategyGenerationStringField(raw["overall_conclusion"]),
+		KeyConflicts:      strategyGenerationStringSliceField(raw["key_conflicts"]),
+		DataQualityNotes:  strategyGenerationStringSliceField(raw["data_quality_notes"]),
+	}
+	return nil
+}
+
+func strategyGenerationStringSliceField(raw json.RawMessage) []string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return nil
+	}
+	return strategyGenerationStringSliceText(decoded)
+}
+
+func strategyGenerationStringSliceText(value any) []string {
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case string:
+		if text := strings.TrimSpace(v); text != "" {
+			return []string{text}
+		}
+		return nil
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			if text := strings.TrimSpace(strategyGenerationReviewRequestText(item)); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		if len(parts) == 0 {
+			return nil
+		}
+		return parts
+	default:
+		if text := strings.TrimSpace(strategyGenerationReviewRequestText(v)); text != "" {
+			return []string{text}
+		}
+		return nil
+	}
+}
+
 type StrategyGenerationPortfolioDiagnosis struct {
 	HoldingCount           int      `json:"holdingCount"`
 	Cash                   float64  `json:"cash"`

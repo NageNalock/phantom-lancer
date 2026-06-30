@@ -2,6 +2,7 @@ package stockv2
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -338,6 +339,31 @@ func TestStrategyGenerationReportAcceptsStructuredReviewRequests(t *testing.T) {
 	if !strings.Contains(got, "[high/data_validation] Validate 600276 cost basis") ||
 		!strings.Contains(got, "[medium/account_permission] Portfolio flags disable") {
 		t.Fatalf("review request = %q, want normalized structured requests", got)
+	}
+}
+
+// LLM 偶尔会把 key_conflicts / data_quality_notes 输出成对象数组或单字符串；
+// RunSummary 必须容错为 []string，否则整个 report 反序列化失败会导致运行被判 failed。
+func TestStrategyGenerationRunSummaryToleratesMixedConflictShapes(t *testing.T) {
+	raw := `{"mode":"portfolio_strategy_diagnosis","overall_conclusion":"ok","key_conflicts":["quote stale vs daily bar",{"field":"price","conflict":"latest quote disagrees with daily close","resolution":"adopted daily close"}],"data_quality_notes":"single note"}`
+	var summary StrategyGenerationRunSummary
+	if err := json.Unmarshal([]byte(raw), &summary); err != nil {
+		t.Fatalf("unmarshal run summary with mixed key_conflicts: %v", err)
+	}
+	if summary.Mode != "portfolio_strategy_diagnosis" {
+		t.Fatalf("mode = %q", summary.Mode)
+	}
+	if len(summary.KeyConflicts) != 2 {
+		t.Fatalf("key conflicts count = %d, want 2", len(summary.KeyConflicts))
+	}
+	if summary.KeyConflicts[0] != "quote stale vs daily bar" {
+		t.Fatalf("key conflicts[0] = %q", summary.KeyConflicts[0])
+	}
+	if !strings.Contains(summary.KeyConflicts[1], "price") {
+		t.Fatalf("key conflicts[1] = %q, want object flattened to text containing 'price'", summary.KeyConflicts[1])
+	}
+	if len(summary.DataQualityNotes) != 1 || summary.DataQualityNotes[0] != "single note" {
+		t.Fatalf("data quality notes = %v", summary.DataQualityNotes)
 	}
 }
 
