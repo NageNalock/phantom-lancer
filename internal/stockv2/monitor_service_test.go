@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -148,6 +149,52 @@ func TestLatestQuoteRefreshUsesStateNotMonitorHistory(t *testing.T) {
 	}
 	if len(statuses) != 1 || statuses[0].Symbol != "000001" || statuses[0].Status != QuoteStatusFresh {
 		t.Fatalf("statuses = %+v", statuses)
+	}
+}
+
+func TestLatestQuoteRefreshTimeoutPersistsFailedState(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+	svc := NewService(store, nil, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})})
+
+	portfolio := createStrategyTestPortfolio(t, store, "portfolio-quote-timeout")
+	if err := store.CreateHolding(ctx, StockV2Holding{
+		ID:          "holding-quote-timeout",
+		PortfolioID: portfolio.ID,
+		Symbol:      "000001",
+		Market:      "SZ",
+		Name:        "平安银行",
+		Quantity:    100,
+		CostPrice:   10,
+	}); err != nil {
+		t.Fatalf("create holding: %v", err)
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	state, err := svc.RunLatestQuoteRefreshTask(runCtx, MonitorTriggerScheduled)
+	if err == nil {
+		t.Fatalf("run latest quote refresh err = nil, want timeout")
+	}
+	if state.Status != MonitorRunStatusFailed {
+		t.Fatalf("returned state = %+v, want failed", state)
+	}
+	stored, err := store.GetQuoteRefreshTaskState(ctx, MonitorTaskLatestQuoteRefresh)
+	if err != nil {
+		t.Fatalf("get quote refresh state: %v", err)
+	}
+	if stored == nil || stored.Status != MonitorRunStatusFailed || stored.FinishedAt.IsZero() {
+		t.Fatalf("stored state = %+v, want failed with finished_at", stored)
+	}
+	if !strings.Contains(stored.ErrorMessage, "deadline exceeded") {
+		t.Fatalf("stored error = %q, want deadline exceeded", stored.ErrorMessage)
 	}
 }
 

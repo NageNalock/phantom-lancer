@@ -228,7 +228,7 @@ export function StockV2DailyBarsMaintenance({ actions, data, runAction }: { acti
 
         {visibleJobs.length === 0 ? (
           <div className="rounded-lg border border-dashed border-[var(--line)] bg-[var(--surface-soft)] p-6 text-center text-sm text-[var(--muted)]">
-            暂无日 K 任务记录。点击“手动抓取”可以立即创建一次任务；统一维护周期在维护配置里。
+            暂无日 K 任务记录。点击“手动抓取”可以立即创建一次任务；统一维护调度在维护配置里。
           </div>
         ) : (
           <div className="grid gap-2">

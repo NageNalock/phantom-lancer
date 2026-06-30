@@ -304,6 +304,22 @@ func (s *Store) GetNewsSourceState(ctx context.Context, source string) (NewsSour
 	return state, true, nil
 }
 
+func (s *Store) FailRunningNewsSourceStates(ctx context.Context, reason string) (int64, error) {
+	now := time.Now()
+	reason = strings.TrimSpace(reason)
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_news_source_states
+		SET status = ?, last_run_status = ?, last_run_error = ?, last_error_at = ?,
+		    last_error = ?, consecutive_failures = consecutive_failures + 1, updated_at = ?
+		WHERE status = ?
+	`, NewsSourceStatusIdle, NewsSourceStatusFailed, reason, now, reason, now, NewsSourceStatusRunning)
+	if err != nil {
+		return 0, wrapError(err, "fail running news source states")
+	}
+	rows, _ := result.RowsAffected()
+	return rows, nil
+}
+
 const rawNewsSelectSQL = `
 	SELECT id, source, COALESCE(source_id,''), COALESCE(language,''), title,
 	       COALESCE(content,''), COALESCE(snippet,''), published_at, fetched_at,

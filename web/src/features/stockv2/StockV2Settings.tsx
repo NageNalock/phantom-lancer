@@ -56,7 +56,7 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
       ) : null}
 
       <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-sm text-[var(--muted-strong)]">
-        这里配置统一的数据资产维护任务。每次任务会刷新标的与最新价，并逐只检查日 K；本地缺失、不足 250 根或已陈旧时才补拉。
+        这里配置统一的数据资产维护任务。自动维护固定在每日 23:00 后的低峰窗口运行；每次任务会刷新标的与最新价，并逐只检查日 K。
       </div>
 
       {/* 数据资产自动维护 */}
@@ -69,16 +69,16 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
             checked={!!form.autoUpdateEnabled}
             label={
               <div>
-                <div>启用后台维护</div>
+                <div>启用全市场自动维护</div>
                 <div className="muted mt-0.5 text-xs">
-                  按下面周期刷新标的列表、名称、市场、类型、状态、最新价，并按需补日 K。
+                  每天 23:00 开始运行；23:00-06:00 低峰窗口内允许补跑，白天不追补。
                 </div>
               </div>
             }
             onChange={(checked) => update("autoUpdateEnabled", checked)}
           />
 
-          <Field label="维护周期 (秒)" help="影响统一数据资产维护。最小 300 秒，建议 1800-3600 秒。">
+          <Field label="数据新鲜度窗口 (秒)" help="不控制自动维护触发时间；只影响统一维护中“标的是否足够新鲜可跳过”的判断，最大按 24 小时生效。">
             <input
               type="number"
               min={300}
@@ -92,12 +92,15 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
             <div className="flex items-center justify-between">
               <span className="text-[var(--muted)]">当前状态</span>
               <Pill tone={form.autoUpdateEnabled ? "good" : "neutral"}>
-                {form.autoUpdateEnabled ? `每 ${formatInterval(Number(form.updateIntervalSec ?? 3600))}` : "已关闭"}
+                {form.autoUpdateEnabled ? "每日 23:00" : "已关闭"}
               </Pill>
             </div>
+            <p className="muted mt-2 text-xs">
+              调度窗口：Asia/Shanghai 23:00-06:00；新鲜度窗口：{formatInterval(Number(form.updateIntervalSec ?? 3600))}
+            </p>
             {settings.lastScheduledUpdate ? (
               <p className="muted mt-2 text-xs">
-                上次维护：{formatTime(settings.lastScheduledUpdate)}
+                上次自动维护调度确认：{formatTime(settings.lastScheduledUpdate)}
               </p>
             ) : null}
             <ul className="muted mt-2 list-inside list-disc text-xs">
@@ -187,7 +190,7 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
               <Pill tone="good">已启用</Pill>
             </div>
             <ul className="muted mt-2 list-inside list-disc text-xs">
-              <li>自动维护：按上面的周期触发，统一处理标的、最新价和日 K 覆盖</li>
+              <li>自动维护：每日 23:00 后低峰窗口触发，统一处理标的、最新价和日 K 覆盖</li>
               <li>手动补拉：在“维护任务”里立即创建日 K 抓取任务</li>
               <li>失败会记录在维护历史里，不会删除已有本地数据</li>
             </ul>

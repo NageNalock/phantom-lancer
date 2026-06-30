@@ -62,23 +62,36 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 	pool.service = svc
 	svc.newsAdapters[NewsSourceJin10] = jin10NewsSourceAdapter{httpClient: httpClient}
 	svc.newsAdapters[NewsSourceFinancialJuice] = financialJuiceNewsSourceAdapter{service: svc}
-	svc.markInterruptedRunningUpdateJobs(context.Background())
+	svc.markInterruptedRunningTasks(context.Background())
 	return svc
 }
 
-func (s *Service) markInterruptedRunningUpdateJobs(ctx context.Context) {
+func (s *Service) markInterruptedRunningTasks(ctx context.Context) {
 	if s == nil || s.store == nil {
 		return
 	}
-	count, err := s.store.FailRunningUpdateJobs(ctx, "interrupted by service restart before completion")
-	if err != nil {
-		if s.log != nil {
-			s.log.Warn("mark interrupted stock data asset maintenance jobs failed", "error", safelog.Text(err.Error(), 240))
-		}
-		return
+	reason := "interrupted by service restart before completion"
+	failures := []struct {
+		name string
+		fn   func(context.Context, string) (int64, error)
+	}{
+		{name: "stock data asset maintenance", fn: s.store.FailRunningUpdateJobs},
+		{name: "daily bar jobs", fn: s.store.FailRunningDailyBarJobs},
+		{name: "quote refresh task", fn: s.store.FailRunningQuoteRefreshTasks},
+		{name: "monitor runs", fn: s.store.FailRunningMonitorRuns},
+		{name: "news source runs", fn: s.store.FailRunningNewsSourceStates},
 	}
-	if count > 0 && s.log != nil {
-		s.log.Warn("marked interrupted stock data asset maintenance jobs", "count", count)
+	for _, failure := range failures {
+		count, err := failure.fn(ctx, reason)
+		if err != nil {
+			if s.log != nil {
+				s.log.Warn("mark interrupted stockv2 tasks failed", "task_group", failure.name, "error", safelog.Text(err.Error(), 240))
+			}
+			continue
+		}
+		if count > 0 && s.log != nil {
+			s.log.Warn("marked interrupted stockv2 tasks", "task_group", failure.name, "count", count)
+		}
 	}
 }
 

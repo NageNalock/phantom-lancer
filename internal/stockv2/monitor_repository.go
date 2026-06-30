@@ -181,6 +181,19 @@ func (s *Store) UpdateMonitorRun(ctx context.Context, run MonitorRun) (MonitorRu
 	return run, nil
 }
 
+func (s *Store) FailRunningMonitorRuns(ctx context.Context, reason string) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_monitor_runs
+		SET status = ?, finished_at = ?, error_message = ?
+		WHERE status = ?
+	`, MonitorRunStatusFailed, time.Now(), strings.TrimSpace(reason), MonitorRunStatusRunning)
+	if err != nil {
+		return 0, wrapError(err, "fail running monitor runs")
+	}
+	rows, _ := result.RowsAffected()
+	return rows, nil
+}
+
 func (s *Store) IncrementMonitorRunReviewCount(ctx context.Context, id string) error {
 	if strings.TrimSpace(id) == "" {
 		return nil

@@ -510,8 +510,7 @@ export function stockV2SettingsSummary(settings?: StockV2Settings): string {
   if (!settings) return "未配置";
   const parts: string[] = [];
   if (settings.autoUpdateEnabled) {
-    const hours = Math.round(settings.updateIntervalSec / 3600 * 10) / 10;
-    parts.push(`数据资产 ${hours}h`);
+    parts.push("数据资产每日23点");
   } else {
     parts.push("数据资产手动");
   }

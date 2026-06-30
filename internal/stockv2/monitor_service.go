@@ -18,6 +18,7 @@ import (
 const (
 	newsMonitorBatchLimit         = 200
 	newsMonitorHighScoreThreshold = 80
+	latestQuoteRefreshTaskTimeout = 2 * time.Minute
 )
 
 // ListMonitorTasks 返回系统内置任务定义 + 当前配置 + 最近一次运行摘要。
@@ -973,9 +974,11 @@ func (s *Service) RunLatestQuoteRefreshTask(ctx context.Context, triggerType str
 		return state, nil
 	}
 
-	result, err := s.RefreshLatestQuotes(ctx, symbols, "monitor")
+	workCtx, cancel := context.WithTimeout(ctx, latestQuoteRefreshTaskTimeout)
+	defer cancel()
+	result, err := s.RefreshLatestQuotes(workCtx, symbols, "monitor")
 	if err == nil {
-		err = s.RefreshPortfoliosFromLatestQuotes(ctx, result.Items)
+		err = s.RefreshPortfoliosFromLatestQuotes(workCtx, result.Items)
 	}
 	finishedAt := time.Now()
 	state.FinishedAt = finishedAt
@@ -988,7 +991,9 @@ func (s *Service) RunLatestQuoteRefreshTask(ctx context.Context, triggerType str
 	} else {
 		state.Status = MonitorRunStatusCompleted
 	}
-	if saveErr := s.store.UpsertQuoteRefreshTaskState(ctx, state); saveErr != nil {
+	saveCtx, saveCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer saveCancel()
+	if saveErr := s.store.UpsertQuoteRefreshTaskState(saveCtx, state); saveErr != nil {
 		if err != nil {
 			return state, err
 		}

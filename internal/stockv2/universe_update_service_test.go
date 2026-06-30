@@ -42,6 +42,102 @@ func TestNewServiceMarksInterruptedUniverseUpdateJobFailed(t *testing.T) {
 	}
 }
 
+func TestNewServiceMarksInterruptedScheduledTasksFailed(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	startedAt := time.Now().Add(-time.Hour)
+	if err := store.UpsertQuoteRefreshTaskState(ctx, QuoteRefreshTaskState{
+		TaskType:     MonitorTaskLatestQuoteRefresh,
+		Status:       MonitorRunStatusRunning,
+		TriggerType:  MonitorTriggerScheduled,
+		StartedAt:    startedAt,
+		ScopeSummary: "scanned 4 symbols",
+		ScannedCount: 4,
+		UpdatedAt:    startedAt,
+	}); err != nil {
+		t.Fatalf("upsert quote refresh state: %v", err)
+	}
+	if err := store.CreateDailyBarJob(ctx, StockV2DailyBarJob{
+		ID:            "daily-interrupted",
+		JobType:       DailyBarJobTypeIncremental,
+		Mode:          DailyBarJobModeUniverseIncremental,
+		Status:        "running",
+		TriggerType:   MonitorTriggerScheduled,
+		TriggerSource: "test",
+		StartAt:       startedAt,
+		CreatedAt:     startedAt,
+	}); err != nil {
+		t.Fatalf("create daily bar job: %v", err)
+	}
+	if _, err := store.CreateMonitorRun(ctx, MonitorRun{
+		ID:          "monitor-interrupted",
+		TaskType:    MonitorTaskPortfolioRiskMonitor,
+		Status:      MonitorRunStatusRunning,
+		TriggerType: MonitorTriggerScheduled,
+		StartedAt:   startedAt,
+		CreatedAt:   startedAt,
+	}); err != nil {
+		t.Fatalf("create monitor run: %v", err)
+	}
+	if err := store.UpsertNewsSourceState(ctx, NewsSourceState{
+		Source:              NewsSourceJin10,
+		Enabled:             true,
+		Status:              NewsSourceStatusRunning,
+		PollIntervalSeconds: 600,
+		BatchLimit:          50,
+		ProcessLimit:        50,
+		LastRunAt:           startedAt,
+	}); err != nil {
+		t.Fatalf("upsert news source state: %v", err)
+	}
+
+	svc := NewService(store, nil, nil)
+	defer svc.StopBackground()
+
+	quoteState, err := store.GetQuoteRefreshTaskState(ctx, MonitorTaskLatestQuoteRefresh)
+	if err != nil {
+		t.Fatalf("get quote refresh state: %v", err)
+	}
+	if quoteState == nil || quoteState.Status != MonitorRunStatusFailed {
+		t.Fatalf("quote refresh status = %#v, want failed", quoteState)
+	}
+	if quoteState.FinishedAt.IsZero() || !strings.Contains(quoteState.ErrorMessage, "service restart") {
+		t.Fatalf("quote refresh state = %#v, want finished restart failure", quoteState)
+	}
+
+	dailyJob, err := store.GetDailyBarJob(ctx, "daily-interrupted")
+	if err != nil {
+		t.Fatalf("get daily bar job: %v", err)
+	}
+	if dailyJob.Status != "failed" || dailyJob.EndAt.IsZero() || !strings.Contains(dailyJob.ErrorMessage, "service restart") {
+		t.Fatalf("daily bar job = %#v, want failed restart state", dailyJob)
+	}
+
+	monitorRun, err := store.GetMonitorRun(ctx, "monitor-interrupted")
+	if err != nil {
+		t.Fatalf("get monitor run: %v", err)
+	}
+	if monitorRun.Status != MonitorRunStatusFailed || monitorRun.FinishedAt.IsZero() || !strings.Contains(monitorRun.ErrorMessage, "service restart") {
+		t.Fatalf("monitor run = %#v, want failed restart state", monitorRun)
+	}
+
+	newsState, ok, err := store.GetNewsSourceState(ctx, NewsSourceJin10)
+	if err != nil {
+		t.Fatalf("get news source state: %v", err)
+	}
+	if !ok {
+		t.Fatalf("news source state missing")
+	}
+	if newsState.Status != NewsSourceStatusIdle || newsState.LastRunStatus != NewsSourceStatusFailed || !strings.Contains(newsState.LastRunError, "service restart") {
+		t.Fatalf("news source state = %#v, want idle with failed last run", newsState)
+	}
+}
+
 func TestUniverseMaintenanceFreshSkipRequiresReadyDailyBars(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

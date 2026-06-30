@@ -453,6 +453,20 @@ func (s *Store) UpsertQuoteRefreshTaskState(ctx context.Context, state QuoteRefr
 	return wrapError(err, "upsert quote refresh task state")
 }
 
+func (s *Store) FailRunningQuoteRefreshTasks(ctx context.Context, reason string) (int64, error) {
+	now := time.Now()
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_quote_refresh_task_state
+		SET status = ?, finished_at = ?, error_message = ?, updated_at = ?
+		WHERE status = ?
+	`, MonitorRunStatusFailed, now, strings.TrimSpace(reason), now, MonitorRunStatusRunning)
+	if err != nil {
+		return 0, wrapError(err, "fail running quote refresh tasks")
+	}
+	rows, _ := result.RowsAffected()
+	return rows, nil
+}
+
 func (s *Store) GetQuoteRefreshTaskState(ctx context.Context, taskType string) (*QuoteRefreshTaskState, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT task_type, status, COALESCE(trigger_type,''), started_at, finished_at,
