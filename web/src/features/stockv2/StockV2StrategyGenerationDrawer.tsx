@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { ArrowSquareOut, ArrowsClockwise, Trash } from "@phosphor-icons/react";
 import type { AppActions } from "../../app/App";
 import type {
@@ -10,7 +10,7 @@ import type {
   StockV2StrategyGenerationTimeHorizon,
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
-import { Button, Drawer, Field, Notice, Pill } from "../../components/ui";
+import { Button, ContextList, Drawer, Field, Notice, Pill } from "../../components/ui";
 import { stockV2AgentRunStatusLabel, stockV2AgentRunStatusTone } from "../../domain/labels";
 import { playbookActionLabel } from "./StockV2StrategyPlaybook";
 import { SymbolPicker, SymbolRef } from "./StockV2SymbolPicker";
@@ -237,7 +237,7 @@ export function StrategyGenerationDrawer({
                           key={action}
                           type="button"
                           onClick={() => toggleAction(action)}
-                          className={`rounded border px-2 py-1 text-xs transition ${
+                          className={`rounded-md border px-2 py-1 text-xs transition ${
                             active
                               ? "border-[var(--accent)] text-[var(--accent)]"
                               : "border-[var(--line)] text-[var(--muted-strong)] hover:border-[var(--line-strong)]"
@@ -335,6 +335,12 @@ function SubmittedView({
   onRefresh: () => void;
   onClose: () => void;
 }) {
+  const metaItems: Array<[string, ReactNode]> = [
+    ["Run ID", <span className="font-mono">{run.id}</span>],
+    ["任务类型", <span className="font-mono">{run.taskType}</span>],
+  ];
+  if (run.modelId) metaItems.push(["模型", <span className="font-mono">{run.modelId}</span>]);
+  if (run.decisionLedgerId) metaItems.push(["Ledger", <span className="font-mono">{run.decisionLedgerId}</span>]);
   return (
     <div className="grid gap-4">
       <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-sm">
@@ -351,12 +357,7 @@ function SubmittedView({
         <Notice tone="danger">运行错误：{run.errorMessage}</Notice>
       ) : null}
 
-      <div className="grid gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs">
-        <Row label="Run ID" value={run.id} mono />
-        <Row label="任务类型" value={run.taskType} mono />
-        {run.modelId ? <Row label="模型" value={run.modelId} mono /> : null}
-        {run.decisionLedgerId ? <Row label="Ledger" value={run.decisionLedgerId} mono /> : null}
-      </div>
+      <ContextList items={metaItems} />
 
       <div className="flex flex-wrap justify-end gap-2 border-t border-[var(--line)] pt-3">
         <Button onClick={onRefresh} title="重新拉取运行状态">
@@ -371,15 +372,6 @@ function SubmittedView({
           关闭
         </Button>
       </div>
-    </div>
-  );
-}
-
-function Row({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <span className="text-[var(--muted)]">{label}</span>
-      <span className={`min-w-0 truncate ${mono ? "font-mono" : ""} text-[var(--text)]`}>{value}</span>
     </div>
   );
 }

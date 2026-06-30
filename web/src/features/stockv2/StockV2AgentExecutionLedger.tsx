@@ -1,5 +1,5 @@
 import { MagnifyingGlass, TerminalWindow } from "@phosphor-icons/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { AppActions } from "../../app/App";
 import type {
   StockV2AgentExecutionDetail,
@@ -7,7 +7,7 @@ import type {
   StockV2AgentRun,
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
-import { Button, CollapsibleSection, Drawer, Notice, Pill } from "../../components/ui";
+import { Button, CollapsibleSection, ContextList, Drawer, Notice, Pill } from "../../components/ui";
 import {
   formatDate,
   stockV2AgentRunStatusLabel,
@@ -204,26 +204,29 @@ export function StockV2AgentRunDetailDrawer({
 
 export function StockV2AgentRunDetailPanel({ detail }: { detail: StockV2AgentExecutionDetail }) {
   const { run, ledger, inputContext, review } = detail;
+  const identityItems: Array<[string, ReactNode]> = [
+    ["开始时间", formatDate(run.startedAt || run.createdAt) || "-"],
+    ["结束时间", formatAgentRunFinishedAt(run)],
+    ["Run ID", <span className="font-mono">{run.id}</span>],
+    ["Ledger ID", <span className="font-mono">{run.decisionLedgerId || ledger?.id || "-"}</span>],
+  ];
+  if (review) identityItems.push(["Review", `${review.status || "-"} · ${review.id}`]);
   return (
     <div className="grid gap-4 text-sm">
       <div className="grid grid-cols-2 gap-2">
-        <SummaryCell label="运行状态" value={stockV2AgentRunStatusLabel(run.status)} tone={stockV2AgentRunStatusTone(run.status)} />
-        <SummaryCell label="任务类型" value={stockV2AgentTaskTypeLabel(run.taskType)} tone="neutral" />
-        <SummaryCell label="模型" value={run.modelId?.slice(0, 12) || "-"} tone="neutral" />
-        <SummaryCell label="触发对象" value={`${run.triggerObjectType || "-"}:${run.triggerObjectId?.slice(0, 8) || "-"}`} tone="neutral" />
+        <SummaryCell label="运行状态">
+          <Pill tone={stockV2AgentRunStatusTone(run.status)}>{stockV2AgentRunStatusLabel(run.status)}</Pill>
+        </SummaryCell>
+        <SummaryCell label="任务类型">{stockV2AgentTaskTypeLabel(run.taskType)}</SummaryCell>
+        <SummaryCell label="模型"><span className="font-mono">{run.modelId?.slice(0, 12) || "-"}</span></SummaryCell>
+        <SummaryCell label="触发对象"><span className="font-mono">{`${run.triggerObjectType || "-"}:${run.triggerObjectId?.slice(0, 8) || "-"}`}</span></SummaryCell>
       </div>
 
       {run.output ? <Block title="运行结论" value={run.output} /> : null}
       {run.errorMessage ? <Block title="运行错误" value={run.errorMessage} danger /> : null}
       {detail.strategyGenerationSteps?.length ? <StrategyGenerationPipelineDetail detail={detail} /> : null}
 
-      <div className="grid gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs">
-        <Row label="开始时间" value={formatDate(run.startedAt || run.createdAt) || "-"} />
-        <Row label="结束时间" value={formatAgentRunFinishedAt(run)} />
-        <Row label="Run ID" value={run.id} />
-        <Row label="Ledger ID" value={run.decisionLedgerId || ledger?.id || "-"} />
-        {review ? <Row label="Review" value={`${review.status || "-"} · ${review.id}`} /> : null}
-      </div>
+      <ContextList items={identityItems} />
 
       {ledger ? (
         <>
@@ -390,20 +393,11 @@ function formatAgentRunFinishedAt(run: StockV2AgentRun): string {
   return formatDate(run.finishedAt) || "-";
 }
 
-function SummaryCell({ label, value, tone }: { label: string; value: string; tone: "neutral" | "good" | "warn" | "danger" }) {
+function SummaryCell({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
       <span className="block text-xs text-[var(--muted)]">{label}</span>
-      <Pill tone={tone} className="mt-1.5 text-sm">{value}</Pill>
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="grid grid-cols-[86px_minmax(0,1fr)] gap-2">
-      <span className="text-[var(--muted)]">{label}</span>
-      <span className="break-words text-[var(--muted-strong)]">{value}</span>
+      <div className="mt-1.5 text-sm">{children}</div>
     </div>
   );
 }
