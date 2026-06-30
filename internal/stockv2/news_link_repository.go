@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const newsLinkWriteConflictRetries = 3
+
 func (s *Store) CreateNewsEvent(ctx context.Context, event NewsEvent) (NewsEvent, error) {
 	now := time.Now()
 	if event.ID == "" {
@@ -99,11 +101,16 @@ func (s *Store) UpdateNewsEventLinkStatus(ctx context.Context, id, status string
 	if processedAt.IsZero() {
 		processedAt = time.Now()
 	}
-	result, err := s.assetDB().ExecContext(ctx, `
-		UPDATE stockv2_news_events
-		SET link_status = ?, link_processed_at = ?, updated_at = ?
-		WHERE id = ?
-	`, status, processedAt, processedAt, id)
+	var result sql.Result
+	err := retryNewsLinkWriteConflict(ctx, func() error {
+		var execErr error
+		result, execErr = s.assetDB().ExecContext(ctx, `
+			UPDATE stockv2_news_events
+			SET link_status = ?, link_processed_at = ?, updated_at = ?
+			WHERE id = ?
+		`, status, processedAt, processedAt, id)
+		return execErr
+	})
 	if err != nil {
 		return wrapError(err, "update news event link status")
 	}
@@ -129,26 +136,29 @@ func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, candidate NewsLinkC
 		candidate.CreatedAt = now
 	}
 	candidate.UpdatedAt = now
-	_, err := s.assetDB().ExecContext(ctx, `
-		INSERT INTO stockv2_news_link_candidates (
-			id, news_event_id, raw_news_id, symbol, market, instrument_name,
-			match_method, score, reason, matched_terms_json, monitor_status,
-			monitor_hit_id, monitored_at, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(news_event_id, symbol) DO UPDATE SET
-			raw_news_id = excluded.raw_news_id,
-			market = excluded.market,
-			instrument_name = excluded.instrument_name,
-			match_method = excluded.match_method,
-			score = excluded.score,
-			reason = excluded.reason,
-			matched_terms_json = excluded.matched_terms_json,
-			updated_at = excluded.updated_at
-	`, candidate.ID, candidate.NewsEventID, candidate.RawNewsID, candidate.Symbol,
-		candidate.Market, candidate.InstrumentName, candidate.MatchMethod, candidate.Score,
-		candidate.Reason, marshalProfileStrings(candidate.MatchedTerms), candidate.MonitorStatus,
-		nullableString(candidate.MonitorHitID), nullableTime(candidate.MonitoredAt),
-		candidate.CreatedAt, candidate.UpdatedAt)
+	err := retryNewsLinkWriteConflict(ctx, func() error {
+		_, execErr := s.assetDB().ExecContext(ctx, `
+			INSERT INTO stockv2_news_link_candidates (
+				id, news_event_id, raw_news_id, symbol, market, instrument_name,
+				match_method, score, reason, matched_terms_json, monitor_status,
+				monitor_hit_id, monitored_at, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(news_event_id, symbol) DO UPDATE SET
+				raw_news_id = excluded.raw_news_id,
+				market = excluded.market,
+				instrument_name = excluded.instrument_name,
+				match_method = excluded.match_method,
+				score = excluded.score,
+				reason = excluded.reason,
+				matched_terms_json = excluded.matched_terms_json,
+				updated_at = excluded.updated_at
+		`, candidate.ID, candidate.NewsEventID, candidate.RawNewsID, candidate.Symbol,
+			candidate.Market, candidate.InstrumentName, candidate.MatchMethod, candidate.Score,
+			candidate.Reason, marshalProfileStrings(candidate.MatchedTerms), candidate.MonitorStatus,
+			nullableString(candidate.MonitorHitID), nullableTime(candidate.MonitoredAt),
+			candidate.CreatedAt, candidate.UpdatedAt)
+		return execErr
+	})
 	if err != nil {
 		return NewsLinkCandidate{}, wrapError(err, "upsert news link candidate")
 	}
@@ -163,6 +173,34 @@ func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, candidate NewsLinkC
 		return NewsLinkCandidate{}, wrapError(err, "get upserted news link candidate")
 	}
 	return item, nil
+}
+
+func retryNewsLinkWriteConflict(ctx context.Context, exec func() error) error {
+	var err error
+	for attempt := 0; attempt <= newsLinkWriteConflictRetries; attempt++ {
+		err = exec()
+		if err == nil || !isDuckDBTransientWriteConflict(err) {
+			return err
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * 80 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return err
+}
+
+func isDuckDBTransientWriteConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "write-write conflict") ||
+		strings.Contains(msg, "conflict on tuple deletion") ||
+		strings.Contains(msg, "duplicate key")
 }
 
 func (s *Store) GetNewsLinkCandidate(ctx context.Context, id string) (NewsLinkCandidate, error) {

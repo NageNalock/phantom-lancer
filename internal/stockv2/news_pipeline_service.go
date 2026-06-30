@@ -210,6 +210,16 @@ func (s *Service) RunNewsProcessingBatch(ctx context.Context, source string, raw
 
 func (s *Service) RunNewsPipelineOnce(ctx context.Context, source string) (NewsPipelineRunResult, error) {
 	source = normalizeNewsSourceName(source)
+	if !s.tryStartNewsPipelineRun() {
+		return NewsPipelineRunResult{
+			Source:       source,
+			Status:       NewsSourceStatusRateLimited,
+			FetchedAt:    time.Now(),
+			ErrorMessage: "news pipeline already running",
+		}, nil
+	}
+	defer s.finishNewsPipelineRun()
+
 	state := s.currentNewsSourceState(ctx, source)
 	now := time.Now()
 	state.Status = NewsSourceStatusRunning
@@ -237,6 +247,22 @@ func (s *Service) RunNewsPipelineOnce(ctx context.Context, source string) (NewsP
 	}
 	s.recordNewsPipelineRunResult(ctx, source, ingest, err)
 	return ingest, err
+}
+
+func (s *Service) tryStartNewsPipelineRun() bool {
+	s.newsPipelineMu.Lock()
+	defer s.newsPipelineMu.Unlock()
+	if s.newsPipelineRun {
+		return false
+	}
+	s.newsPipelineRun = true
+	return true
+}
+
+func (s *Service) finishNewsPipelineRun() {
+	s.newsPipelineMu.Lock()
+	s.newsPipelineRun = false
+	s.newsPipelineMu.Unlock()
 }
 
 func (s *Service) GetNewsSourceState(ctx context.Context, source string) (NewsSourceState, bool, error) {

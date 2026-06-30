@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,7 +25,13 @@ type Config struct {
 	AllowedRoots          []string
 	CookieSecure          bool
 	LoginFailureThreshold int
+	Pprof                 PprofConfig
 	Updates               UpdateConfig
+}
+
+type PprofConfig struct {
+	Enabled bool
+	Addr    string
 }
 
 type UpdateConfig struct {
@@ -69,6 +76,8 @@ func Load(args []string) (Config, error) {
 	fs.IntVar(&cfg.LogMaxAgeDays, "log-max-age-days", cfg.LogMaxAgeDays, "managed service log max age in days")
 	fs.BoolVar(&cfg.LogStdout, "log-stdout", cfg.LogStdout, "also write structured service logs to stdout")
 	fs.IntVar(&cfg.LoginFailureThreshold, "login-failure-threshold", cfg.LoginFailureThreshold, "failed login attempts before account/IP backoff")
+	fs.BoolVar(&cfg.Pprof.Enabled, "pprof-enabled", cfg.Pprof.Enabled, "enable loopback pprof debug listener")
+	fs.StringVar(&cfg.Pprof.Addr, "pprof-addr", cfg.Pprof.Addr, "loopback pprof listen address")
 	fs.BoolVar(&cfg.Updates.Enabled, "updates-enabled", cfg.Updates.Enabled, "enable manual update checks and installs")
 	allowedRoots := fs.String("allowed-roots", strings.Join(cfg.AllowedRoots, ","), "comma-separated default workspace roots")
 	cookieSecure := fs.Bool("cookie-secure", cfg.CookieSecure, "default Secure flag for session cookies")
@@ -109,6 +118,14 @@ func Load(args []string) (Config, error) {
 	}
 	if cfg.LoginFailureThreshold <= 0 {
 		return Config{}, errors.New("login failure threshold must be positive")
+	}
+	if cfg.Pprof.Enabled {
+		if cfg.Pprof.Addr == "" {
+			return Config{}, errors.New("pprof addr is required when pprof is enabled")
+		}
+		if !isLoopbackAddr(cfg.Pprof.Addr) {
+			return Config{}, errors.New("pprof addr must be loopback-only")
+		}
 	}
 	if cfg.LogMaxSizeMB <= 0 {
 		return Config{}, errors.New("log max size must be positive")
@@ -152,6 +169,10 @@ func defaults(cwd string) Config {
 		LogMaxFiles:           5,
 		LogMaxAgeDays:         14,
 		LoginFailureThreshold: 5,
+		Pprof: PprofConfig{
+			Enabled: true,
+			Addr:    "127.0.0.1:6060",
+		},
 		Updates: UpdateConfig{
 			Enabled:                true,
 			Repository:             "NageNalock/phantom-lancer",
@@ -217,6 +238,12 @@ func applyEnv(cfg *Config) {
 	}
 	if value := os.Getenv("PL_LOGIN_FAILURE_THRESHOLD"); value != "" {
 		cfg.LoginFailureThreshold = parseInt(value, cfg.LoginFailureThreshold)
+	}
+	if value := os.Getenv("PL_PPROF_ENABLED"); value != "" {
+		cfg.Pprof.Enabled = parseBool(value)
+	}
+	if value := os.Getenv("PL_PPROF_ADDR"); value != "" {
+		cfg.Pprof.Addr = value
 	}
 	if value := os.Getenv("PL_UPDATES_ENABLED"); value != "" {
 		cfg.Updates.Enabled = parseBool(value)
@@ -295,6 +322,10 @@ func applyConfigFile(cfg *Config, path string) error {
 			cfg.CookieSecure = parseBool(value)
 		case "auth.login_failure_threshold", "security.login_failure_threshold":
 			cfg.LoginFailureThreshold = parseInt(value, cfg.LoginFailureThreshold)
+		case "pprof.enabled":
+			cfg.Pprof.Enabled = parseBool(value)
+		case "pprof.addr":
+			cfg.Pprof.Addr = parseString(value)
 		case "updates.enabled":
 			cfg.Updates.Enabled = parseBool(value)
 		case "updates.repository":
@@ -381,6 +412,29 @@ func parseInt(value string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return false
+	}
+	if len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		if !ip.IsLoopback() {
+			return false
+		}
+	}
+	return true
 }
 
 func resolvePath(baseDir, value string) string {

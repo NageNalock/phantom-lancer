@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -303,6 +305,10 @@ func main() {
 		logger.Error("http server initial bind failed", "error", err, "addr", actualEp.Addr)
 		os.Exit(1)
 	}
+	pprofSrv, err := startPprofServer(cfg, logger)
+	if err != nil {
+		logger.Warn("pprof server boot failed; continuing without pprof", "error", err, "addr", cfg.Pprof.Addr)
+	}
 	logger.Info("phantom lancer listening",
 		"addr", httpSrv.Addr(),
 		"db", cfg.DBPath,
@@ -337,6 +343,11 @@ func main() {
 			logger.Error("shutdown failed", "error", err)
 		}
 	}
+	if pprofSrv != nil {
+		if err := pprofSrv.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("pprof server shutdown failed", "error", err)
+		}
+	}
 	logger.Info("phantom lancer http server stopped", "restart_for_update", restartForUpdate)
 	if restartForUpdate {
 		if selfExecPath != "" {
@@ -352,6 +363,35 @@ func main() {
 		}
 		os.Exit(0)
 	}
+}
+
+func startPprofServer(cfg config.Config, logger *slog.Logger) (*http.Server, error) {
+	if !cfg.Pprof.Enabled {
+		return nil, nil
+	}
+	ln, err := net.Listen("tcp", cfg.Pprof.Addr)
+	if err != nil {
+		return nil, err
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && logger != nil {
+			logger.Warn("pprof server stopped", "error", err, "addr", cfg.Pprof.Addr)
+		}
+	}()
+	if logger != nil {
+		logger.Info("pprof server listening", "addr", ln.Addr().String())
+	}
+	return srv, nil
 }
 
 // orderlyClose shuts down the long-lived subsystems in the exact reverse

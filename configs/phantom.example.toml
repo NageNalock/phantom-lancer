@@ -19,6 +19,12 @@ max_files = 5
 max_age_days = 14
 stdout = false
 
+[pprof]
+# Enabled by default on loopback only.
+# Capture CPU profiles from the server itself or through an SSH tunnel.
+enabled = true
+addr = "127.0.0.1:6060"
+
 [updates]
 # Manual self-update checks use public GitHub Releases only. Keep restart_mode
 # as "exit" when the service is supervised by systemd with Restart=always.

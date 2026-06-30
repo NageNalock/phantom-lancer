@@ -164,6 +164,47 @@ func TestNewsSourceConfigSchedulesNextRun(t *testing.T) {
 	}
 }
 
+func TestNewsPipelineOnceSkipsConcurrentRun(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	adapter := &blockingNewsAdapter{
+		source:  "mock_slow",
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	svc.WithNewsSourceAdapter(adapter)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := svc.RunNewsPipelineOnce(ctx, adapter.source)
+		done <- err
+	}()
+	select {
+	case <-adapter.started:
+	case <-time.After(time.Second):
+		t.Fatal("pipeline did not start")
+	}
+
+	result, err := svc.RunNewsPipelineOnce(ctx, "another_source")
+	if err != nil {
+		t.Fatalf("concurrent pipeline err = %v", err)
+	}
+	if result.Status != NewsSourceStatusRateLimited || !strings.Contains(result.ErrorMessage, "already running") {
+		t.Fatalf("concurrent result = %+v, want rate limited already-running", result)
+	}
+
+	close(adapter.release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("first pipeline err = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first pipeline did not finish")
+	}
+}
+
 func TestNewsSourceConfigClampsFastPolling(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
@@ -356,6 +397,30 @@ func (a *fakeNewsAdapter) FetchSince(_ context.Context, cursor NewsSourceCursor)
 	a.calls++
 	a.cursors = append(a.cursors, cursor)
 	return a.result, a.err
+}
+
+type blockingNewsAdapter struct {
+	source  string
+	started chan struct{}
+	release chan struct{}
+}
+
+func (a *blockingNewsAdapter) SourceName() string {
+	return a.source
+}
+
+func (a *blockingNewsAdapter) FetchSince(ctx context.Context, _ NewsSourceCursor) (NewsSourceFetchResult, error) {
+	close(a.started)
+	select {
+	case <-ctx.Done():
+		return NewsSourceFetchResult{}, ctx.Err()
+	case <-a.release:
+		return NewsSourceFetchResult{FetchedAt: time.Now()}, nil
+	}
+}
+
+func (a *blockingNewsAdapter) NormalizeRawPayload(payload map[string]any) (RequestCreateRawNews, error) {
+	return RequestCreateRawNews{Source: a.source, SourceID: fmt.Sprint(payload["id"]), Title: fmt.Sprint(payload["title"])}, nil
 }
 
 func (a *fakeNewsAdapter) NormalizeRawPayload(payload map[string]any) (RequestCreateRawNews, error) {

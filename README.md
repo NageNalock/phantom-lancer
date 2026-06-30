@@ -82,6 +82,7 @@ Useful environment variables:
 - `PL_SERVICE_LOG_FILE`: managed JSONL service log path, default `<data_dir>/logs/phantom-lancer.jsonl`
 - `PL_LOG_FILE`: nohup stdout/stderr capture path for `manage.sh`
 - `PL_LOG_MAX_SIZE_MB`, `PL_LOG_MAX_FILES`, `PL_LOG_MAX_AGE_DAYS`: service log rotation and cleanup limits
+- `PL_PPROF_ENABLED`, `PL_PPROF_ADDR`: loopback-only pprof listener, enabled by default on `127.0.0.1:6060`
 - `PL_PID_FILE`: pid file path for `manage.sh`
 - `PL_SKIP_WEB_BUILD`: set to `1` to reuse existing `web/dist` during Go builds
 - `PHANTOM_MASTER_KEY`: master key for wrapped credentials stored in the DB,
@@ -100,6 +101,12 @@ Useful environment variables:
   is unset the service falls back to the key stored in the `settings`
   table, which still guards against accidental plaintext exposure in
   `SELECT` output but offers no defence against full-DB exfiltration.
+
+For local CPU investigations, capture from the same machine:
+
+```bash
+go tool pprof -http=127.0.0.1:0 http://127.0.0.1:6060/debug/pprof/profile?seconds=30
+```
 
 ## GitHub Actions
 

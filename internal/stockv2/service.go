@@ -19,18 +19,22 @@ import (
 
 // Service 主业务服务
 type Service struct {
-	store          *Store
-	log            *slog.Logger
-	httpClient     *http.Client
-	bgMu           sync.Mutex
-	bgCancel       context.CancelFunc
-	bgWg           sync.WaitGroup
-	settings       StockV2Settings
-	baseProfileMu  sync.Mutex
-	embeddingMu    sync.Mutex
-	embeddingRun   bool
-	quotePruneMu   sync.Mutex
-	lastQuotePrune time.Time
+	store         *Store
+	log           *slog.Logger
+	httpClient    *http.Client
+	bgMu          sync.Mutex
+	bgCancel      context.CancelFunc
+	bgWg          sync.WaitGroup
+	settings      StockV2Settings
+	baseProfileMu sync.Mutex
+	embeddingMu   sync.Mutex
+	embeddingRun  bool
+	// ponytail: process-local single-flight is enough for the single deployed Go service;
+	// move to a persisted lease only if multiple StockV2 workers are introduced.
+	newsPipelineMu  sync.Mutex
+	newsPipelineRun bool
+	quotePruneMu    sync.Mutex
+	lastQuotePrune  time.Time
 
 	universeSource  *UniverseDataSource
 	dailyBarsSource *DailyBarsSource
