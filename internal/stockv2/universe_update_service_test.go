@@ -247,6 +247,43 @@ func TestScheduledUniverseUpdateSkipsWhenRecentJobCompleted(t *testing.T) {
 	}
 }
 
+func TestScheduledUniverseUpdateDecisionStartsWithoutConfirmingSlot(t *testing.T) {
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+	now := time.Date(2026, 6, 30, 23, 5, 0, 0, loc)
+
+	decision, _ := decideScheduledUniverseUpdate(now.AddDate(0, 0, -1), StockV2UpdateJob{}, false, now)
+	if decision != scheduledUniverseUpdateStart {
+		t.Fatalf("decision = %s, want start", decision)
+	}
+}
+
+func TestScheduledUniverseUpdateDecisionWaitsWhileJobRunning(t *testing.T) {
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+	now := time.Date(2026, 6, 30, 23, 5, 0, 0, loc)
+	latest := StockV2UpdateJob{Status: "running", CreatedAt: now.Add(-time.Minute)}
+
+	decision, _ := decideScheduledUniverseUpdate(now.AddDate(0, 0, -1), latest, true, now)
+	if decision != scheduledUniverseUpdateWait {
+		t.Fatalf("decision = %s, want wait", decision)
+	}
+}
+
+func TestScheduledUniverseUpdateDecisionRetriesFailedCurrentSlot(t *testing.T) {
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+	slotStart := time.Date(2026, 6, 30, 23, 0, 0, 0, loc)
+	now := slotStart.Add(48 * time.Minute)
+	latest := StockV2UpdateJob{
+		Status:    "failed",
+		CreatedAt: slotStart.Add(30 * time.Second),
+		EndAt:     now.Add(-time.Minute),
+	}
+
+	decision, _ := decideScheduledUniverseUpdate(slotStart.Add(30*time.Second), latest, true, now)
+	if decision != scheduledUniverseUpdateStart {
+		t.Fatalf("decision = %s, want start", decision)
+	}
+}
+
 func TestScheduledUniverseUpdateOnlyRunsInNightWindow(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

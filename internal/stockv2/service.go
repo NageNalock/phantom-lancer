@@ -1353,26 +1353,50 @@ func (s *Service) checkAndExecuteScheduledUpdate(ctx context.Context) {
 	s.checkAndExecuteScheduledUpdateAt(ctx, time.Now())
 }
 
-func (s *Service) checkAndExecuteScheduledUpdateAt(ctx context.Context, now time.Time) {
-	due, slotStart := shouldRunDailyUniverseUpdate(s.settings.LastScheduledUpdate, now)
-	if !due {
-		return
-	}
+type scheduledUniverseUpdateDecision string
 
-	if s.hasRecentCompletedUniverseUpdate(ctx, now, 24*time.Hour) {
+const (
+	scheduledUniverseUpdateSkip    scheduledUniverseUpdateDecision = "skip"
+	scheduledUniverseUpdateWait    scheduledUniverseUpdateDecision = "wait"
+	scheduledUniverseUpdateConfirm scheduledUniverseUpdateDecision = "confirm"
+	scheduledUniverseUpdateStart   scheduledUniverseUpdateDecision = "start"
+)
+
+func (s *Service) checkAndExecuteScheduledUpdateAt(ctx context.Context, now time.Time) {
+	latest, latestOK := s.latestUniverseUpdateJob(ctx)
+	decision, slotStart := decideScheduledUniverseUpdate(s.settings.LastScheduledUpdate, latest, latestOK, now)
+	switch decision {
+	case scheduledUniverseUpdateSkip, scheduledUniverseUpdateWait:
+		return
+	case scheduledUniverseUpdateConfirm:
 		s.markScheduledUpdateChecked(ctx, now)
 		return
 	}
 
 	// 执行维护
-	s.log.Info("executing scheduled stock data asset maintenance", "trigger_type", "scheduled", "trigger_source", "auto-updater", "schedule", "daily_23:00", "slot_start", slotStart.Format(time.RFC3339Nano), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano))
+	if s.log != nil {
+		s.log.Info("executing scheduled stock data asset maintenance", "trigger_type", "scheduled", "trigger_source", "auto-updater", "schedule", "daily_23:00", "slot_start", slotStart.Format(time.RFC3339Nano), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano))
+	}
 	if _, err := s.ExecuteUniverseUpdate(ctx, "scheduled", "auto-updater"); err != nil {
-		s.log.Error("scheduled update failed", "trigger_type", "scheduled", "trigger_source", "auto-updater", "schedule", "daily_23:00", "slot_start", slotStart.Format(time.RFC3339Nano), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 300))
+		if s.log != nil {
+			s.log.Error("scheduled update failed", "trigger_type", "scheduled", "trigger_source", "auto-updater", "schedule", "daily_23:00", "slot_start", slotStart.Format(time.RFC3339Nano), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 300))
+		}
 		return
 	}
+}
 
-	// 更新最后一次执行时间
-	s.markScheduledUpdateChecked(ctx, now)
+func decideScheduledUniverseUpdate(lastScheduled time.Time, latest StockV2UpdateJob, latestOK bool, now time.Time) (scheduledUniverseUpdateDecision, time.Time) {
+	due, slotStart := shouldRunDailyUniverseUpdate(lastScheduled, now)
+	if !due && !shouldRetryFailedUniverseUpdateSlot(latest, latestOK, slotStart, now) {
+		return scheduledUniverseUpdateSkip, slotStart
+	}
+	if latestOK && latest.Status == "running" {
+		return scheduledUniverseUpdateWait, slotStart
+	}
+	if latestOK && isRecentCompletedUniverseUpdate(latest, now, 24*time.Hour) {
+		return scheduledUniverseUpdateConfirm, slotStart
+	}
+	return scheduledUniverseUpdateStart, slotStart
 }
 
 func shouldRunDailyUniverseUpdate(lastScheduled, now time.Time) (bool, time.Time) {
@@ -1398,24 +1422,36 @@ func shouldRunDailyUniverseUpdate(lastScheduled, now time.Time) (bool, time.Time
 	return lastScheduled.In(loc).Before(slotStart), slotStart
 }
 
-func (s *Service) hasRecentCompletedUniverseUpdate(ctx context.Context, now time.Time, interval time.Duration) bool {
-	if interval <= 0 {
-		interval = time.Hour
-	}
+func (s *Service) latestUniverseUpdateJob(ctx context.Context) (StockV2UpdateJob, bool) {
 	latest, err := s.store.GetLatestUpdateJob(ctx)
 	if errors.Is(err, ErrUpdateJobNotFound) {
-		return false
+		return StockV2UpdateJob{}, false
 	}
 	if err != nil {
 		if s.log != nil {
-			s.log.Warn("check latest stock data asset maintenance failed", "interval", interval.String(), "error", safelog.Text(err.Error(), 240))
+			s.log.Warn("check latest stock data asset maintenance failed", "error", safelog.Text(err.Error(), 240))
 		}
-		return false
+		return StockV2UpdateJob{}, false
+	}
+	return latest, true
+}
+
+func isRecentCompletedUniverseUpdate(latest StockV2UpdateJob, now time.Time, interval time.Duration) bool {
+	if interval <= 0 {
+		interval = time.Hour
 	}
 	if latest.Status != "completed" {
 		return false
 	}
 	return !latest.EndAt.IsZero() && now.Sub(latest.EndAt) >= 0 && now.Sub(latest.EndAt) < interval
+}
+
+func shouldRetryFailedUniverseUpdateSlot(latest StockV2UpdateJob, ok bool, slotStart, now time.Time) bool {
+	if !ok || latest.Status != "failed" || slotStart.IsZero() {
+		return false
+	}
+	createdAt := latest.CreatedAt.In(slotStart.Location())
+	return !createdAt.Before(slotStart) && !createdAt.After(now.In(slotStart.Location()))
 }
 
 func (s *Service) markScheduledUpdateChecked(ctx context.Context, at time.Time) {
