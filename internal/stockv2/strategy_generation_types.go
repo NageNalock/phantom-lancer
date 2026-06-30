@@ -1,7 +1,10 @@
 package stockv2
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -154,6 +157,87 @@ type StrategyGenerationPortfolioAwareSuggestion struct {
 	TradeSignal        string `json:"trade_signal,omitempty"`
 	TargetPositionHint string `json:"target_position_hint,omitempty"`
 	ReviewRequest      string `json:"review_request,omitempty"`
+}
+
+func (s *StrategyGenerationPortfolioAwareSuggestion) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*s = StrategyGenerationPortfolioAwareSuggestion{
+		TradeSignal:        strategyGenerationStringField(raw["trade_signal"]),
+		TargetPositionHint: strategyGenerationStringField(raw["target_position_hint"]),
+		ReviewRequest:      strategyGenerationReviewRequestField(raw["review_request"]),
+	}
+	return nil
+}
+
+func strategyGenerationStringField(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err == nil {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+func strategyGenerationReviewRequestField(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err == nil {
+		return strings.TrimSpace(value)
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strategyGenerationReviewRequestText(decoded))
+}
+
+func strategyGenerationReviewRequestText(value any) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(v)
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			if text := strategyGenerationReviewRequestText(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "; ")
+	case map[string]any:
+		reason := strings.TrimSpace(stringFromAny(v["reason"]))
+		priority := strings.TrimSpace(stringFromAny(v["priority"]))
+		requestType := strings.TrimSpace(stringFromAny(v["type"]))
+		prefixParts := make([]string, 0, 2)
+		if priority != "" {
+			prefixParts = append(prefixParts, priority)
+		}
+		if requestType != "" {
+			prefixParts = append(prefixParts, requestType)
+		}
+		if reason != "" {
+			if len(prefixParts) > 0 {
+				return "[" + strings.Join(prefixParts, "/") + "] " + reason
+			}
+			return reason
+		}
+		if payload, err := json.Marshal(v); err == nil {
+			return string(payload)
+		}
+		return ""
+	case float64, bool:
+		return fmt.Sprint(v)
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
 }
 
 type StrategyGenerationPortfolioDiagnosis struct {
