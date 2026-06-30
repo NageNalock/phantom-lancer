@@ -1526,7 +1526,6 @@ func (s *Service) executeStrategyGenerationPipeline(
 		step.StartedAt = time.Now()
 		_, _ = s.store.UpdateStrategyGenerationStep(ctx, step)
 
-		taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
 		pack := StrategyGenerationStepPack{
 			RunID:        run.ID,
 			StepKey:      def.key,
@@ -1536,7 +1535,7 @@ func (s *Service) executeStrategyGenerationPipeline(
 			Context:      genCtx,
 			PriorResults: prior,
 		}
-		execOutput, execErr := s.agentExecutor.ExecuteStrategyGenerationStep(ctx, taskID, pack, modelName)
+		execOutput, execErr, taskID := s.executeStrategyGenerationStepWithRetry(ctx, run, step, pack, modelName)
 		step.Prompt = ""
 		if execOutput != nil {
 			step.Prompt = safelog.Text(execOutput.Prompt, 16384)
@@ -1578,6 +1577,47 @@ func (s *Service) executeStrategyGenerationPipeline(
 		}
 	}
 	return finalTaskID, finalOutput, nil
+}
+
+func (s *Service) executeStrategyGenerationStepWithRetry(
+	ctx context.Context,
+	run AgentRun,
+	step StrategyGenerationStepRun,
+	pack StrategyGenerationStepPack,
+	modelName string,
+) (*AgentExecutorOutput, error, string) {
+	const maxAttempts = 2
+	var lastOutput *AgentExecutorOutput
+	var lastErr error
+	var taskID string
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		taskID, _ = s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
+		output, err := s.agentExecutor.ExecuteStrategyGenerationStep(ctx, taskID, pack, modelName)
+		lastOutput = output
+		lastErr = err
+		if err == nil || !retryableNoSubmitTimeout(err, output) || attempt == maxAttempts {
+			return output, err, taskID
+		}
+		if s.log != nil {
+			s.log.Warn("retrying strategy generation step after timeout without submission", "run_id", run.ID, "step_id", step.ID, "step_key", step.StepKey, "attempt", attempt, "max_attempts", maxAttempts, "duration", outputDurationString(output), "error", safelog.Text(err.Error(), 240))
+		}
+	}
+	return lastOutput, lastErr, taskID
+}
+
+func retryableNoSubmitTimeout(err error, output *AgentExecutorOutput) bool {
+	if err == nil || output == nil || !output.TimedOut {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "timed out") && strings.Contains(text, "no result submitted")
+}
+
+func outputDurationString(output *AgentExecutorOutput) string {
+	if output == nil {
+		return ""
+	}
+	return output.Duration.String()
 }
 
 type strategyGenerationPipelineStepDef struct {

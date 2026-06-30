@@ -911,6 +911,73 @@ func TestRunAgentCLIDebugAsyncReturnsRunBeforeCompletion(t *testing.T) {
 	}
 }
 
+func TestStrategyGenerationStepRetriesTimeoutWithoutSubmission(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	executor := &retryStrategyGenerationStepExecutor{
+		fakeDebugAgentExecutor: fakeDebugAgentExecutor{pool: svc.agentTaskPool},
+		failStep:               StrategyGenerationStepEvidenceCollector,
+		attempts:               map[string]int{},
+	}
+	svc.agentExecutor = executor
+
+	_, _, err := svc.executeStrategyGenerationPipeline(ctx, AgentRun{
+		ID:       "run-strategy-retry-timeout",
+		TaskType: AgentTaskTypeStrategyGeneration,
+	}, StrategyGenerationContext{
+		Mode:  StrategyGenerationModePortfolio,
+		Input: StrategyGenerationInput{Mode: StrategyGenerationModePortfolio},
+	}, "gpt-retry")
+	if err != nil {
+		t.Fatalf("execute strategy generation pipeline: %v", err)
+	}
+	if got := executor.attempts[StrategyGenerationStepEvidenceCollector]; got != 2 {
+		t.Fatalf("evidence attempts = %d, want 2", got)
+	}
+	steps, err := svc.store.ListStrategyGenerationSteps(ctx, "run-strategy-retry-timeout")
+	if err != nil {
+		t.Fatalf("list steps: %v", err)
+	}
+	if len(steps) == 0 || steps[0].Status != StrategyGenerationStepStatusCompleted {
+		t.Fatalf("first step = %+v, want completed after retry", steps)
+	}
+}
+
+func TestStrategyGenerationStepDoesNotRetryNonTimeoutError(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	executor := &retryStrategyGenerationStepExecutor{
+		fakeDebugAgentExecutor: fakeDebugAgentExecutor{pool: svc.agentTaskPool},
+		failStep:               StrategyGenerationStepEvidenceCollector,
+		nonRetry:               true,
+		attempts:               map[string]int{},
+	}
+	svc.agentExecutor = executor
+
+	_, _, err := svc.executeStrategyGenerationPipeline(ctx, AgentRun{
+		ID:       "run-strategy-no-retry",
+		TaskType: AgentTaskTypeStrategyGeneration,
+	}, StrategyGenerationContext{
+		Mode:  StrategyGenerationModePortfolio,
+		Input: StrategyGenerationInput{Mode: StrategyGenerationModePortfolio},
+	}, "gpt-no-retry")
+	if err == nil {
+		t.Fatal("execute strategy generation pipeline err = nil, want error")
+	}
+	if got := executor.attempts[StrategyGenerationStepEvidenceCollector]; got != 1 {
+		t.Fatalf("evidence attempts = %d, want 1", got)
+	}
+	steps, err := svc.store.ListStrategyGenerationSteps(ctx, "run-strategy-no-retry")
+	if err != nil {
+		t.Fatalf("list steps: %v", err)
+	}
+	if len(steps) == 0 || steps[0].Status != StrategyGenerationStepStatusFailed {
+		t.Fatalf("first step = %+v, want failed without retry", steps)
+	}
+}
+
 func TestFinalizeAgentRunFailsWhenReviewSaveFails(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
@@ -1035,6 +1102,13 @@ type fakeDebugAgentExecutor struct {
 	pool *agentTaskPool
 }
 
+type retryStrategyGenerationStepExecutor struct {
+	fakeDebugAgentExecutor
+	failStep string
+	nonRetry bool
+	attempts map[string]int
+}
+
 func (f fakeDebugAgentExecutor) ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName string) (*AgentExecutorOutput, error) {
 	result := map[string]any{"debug": true, "model": modelName, "hitTitle": pack.Hit.Title}
 	if pack.Hit.TaskType == "agent_cli_debug" {
@@ -1126,6 +1200,17 @@ func (f fakeDebugAgentExecutor) ExecuteStrategyGenerationStep(ctx context.Contex
 		Duration:      time.Millisecond,
 		RawTranscript: "strategy generation step stdout",
 	}, nil
+}
+
+func (f *retryStrategyGenerationStepExecutor) ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName string) (*AgentExecutorOutput, error) {
+	f.attempts[pack.StepKey]++
+	if pack.StepKey == f.failStep && f.attempts[pack.StepKey] == 1 {
+		if f.nonRetry {
+			return &AgentExecutorOutput{ExitCode: 2, Duration: time.Second, StderrTail: "invalid model"}, errors.New("process exited (code 2) without submitting result")
+		}
+		return &AgentExecutorOutput{TimedOut: true, ExitCode: -1, Duration: execDefaultTimeout, StderrTail: "Reading additional input from stdin..."}, fmt.Errorf("execution timed out after %s, no result submitted", execDefaultTimeout)
+	}
+	return f.fakeDebugAgentExecutor.ExecuteStrategyGenerationStep(ctx, taskID, pack, modelName)
 }
 
 func (f fakeDebugAgentExecutor) ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName string) (*AgentExecutorOutput, error) {
