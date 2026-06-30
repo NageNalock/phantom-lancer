@@ -1,10 +1,11 @@
-import { Eye, Plus, Minus, Sparkle, Trash, Pencil, Wallet, X, Check, MagnifyingGlass } from "@phosphor-icons/react";
+import { ArrowsClockwise, Eye, Plus, Minus, Sparkle, Trash, Pencil, Wallet, X, Check, MagnifyingGlass } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { AreaSeries, createChart, createSeriesMarkers, type CrosshairMode, type IChartApi, type ISeriesApi, type Time } from "lightweight-charts";
 import type { AppActions } from "../../app/App";
-import type { AppData, StockV2Alert, StockV2AlertListResponse, StockV2AssetCurveResponse, StockV2Holding, StockV2Instrument, StockV2MonitorHit, StockV2OperationReview, StockV2Portfolio, StockV2PortfolioRefreshResult, StockV2PortfolioSnapshot, StockV2PortfolioWithHoldings, StockV2Transaction } from "../../app/types";
+import type { AppData, StockV2AgentRun, StockV2Alert, StockV2AlertListResponse, StockV2AssetCurveResponse, StockV2Holding, StockV2Instrument, StockV2MonitorHit, StockV2OperationReview, StockV2Portfolio, StockV2PortfolioRefreshResult, StockV2PortfolioSnapshot, StockV2PortfolioWithHoldings, StockV2Transaction } from "../../app/types";
 import { Button, ContextList, Drawer, EmptyState, Field, Notice, Panel, Pill, SubTabs } from "../../components/ui";
-import { stockV2InstrumentTypeLabel, stockV2RiskLabel, stockV2ValuationStatusLabel, stockV2ValuationStatusTone } from "../../domain/labels";
+import { formatDate, stockV2AgentRunStatusLabel, stockV2AgentRunStatusTone, stockV2InstrumentTypeLabel, stockV2RiskLabel, stockV2ValuationStatusLabel, stockV2ValuationStatusTone } from "../../domain/labels";
+import { StockV2AgentRunDetailDrawer } from "./StockV2AgentExecutionLedger";
 import { StockV2InstrumentDetail } from "./StockV2InstrumentDetail";
 import { StrategyGenerationDrawer } from "./StockV2StrategyGenerationDrawer";
 
@@ -26,6 +27,10 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
   const [selectedInstrument, setSelectedInstrument] = useState<StockV2Instrument | null>(null);
   const [selectedTransaction, setSelectedTransaction] = useState<StockV2Transaction | null>(null);
   const [genPortfolio, setGenPortfolio] = useState<{ id: string; name: string } | null>(null);
+  const [diagnosisRuns, setDiagnosisRuns] = useState<StockV2AgentRun[]>([]);
+  const [diagnosisLoading, setDiagnosisLoading] = useState(false);
+  const [diagnosisError, setDiagnosisError] = useState<string | null>(null);
+  const [diagnosisDetailRunId, setDiagnosisDetailRunId] = useState<string | null>(null);
 
   // 选中第一个组合
   useEffect(() => {
@@ -64,6 +69,35 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
       cancelled = true;
     };
   }, [actions, selectedId]);
+
+  async function loadDiagnosisRuns(portfolioId = selectedId || "") {
+    if (!portfolioId) {
+      setDiagnosisRuns([]);
+      return;
+    }
+    setDiagnosisLoading(true);
+    setDiagnosisError(null);
+    try {
+      const params = new URLSearchParams({
+        taskType: "strategy_generation",
+        triggerObjectType: "strategy_generation",
+        triggerObjectId: portfolioDiagnosisTriggerId(portfolioId),
+        limit: "5",
+      });
+      const res = await actions.api<{ items?: StockV2AgentRun[] }>(`/api/stockv2/agent/runs?${params.toString()}`);
+      setDiagnosisRuns(res.items || []);
+    } catch (err) {
+      setDiagnosisError(err instanceof Error ? err.message : "加载组合诊断历史失败");
+      setDiagnosisRuns([]);
+    } finally {
+      setDiagnosisLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadDiagnosisRuns(selectedId || "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
 
   // 资产曲线懒加载:切到「资产图」tab 才拉
   useEffect(() => {
@@ -146,6 +180,13 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
           }
         >
           <PortfolioValuationSummary portfolio={selected} refreshResult={selectedRefreshResult} snapshot={latestSnapshot} />
+          <PortfolioDiagnosisRuns
+            items={diagnosisRuns}
+            loading={diagnosisLoading}
+            error={diagnosisError}
+            onRefresh={() => void loadDiagnosisRuns(selected.id)}
+            onOpenDetail={setDiagnosisDetailRunId}
+          />
 
           <div className="mt-4">
             <SubTabs
@@ -337,11 +378,148 @@ export function StockV2Portfolios({ actions, data, runAction }: { actions: AppAc
             portfolioId: genPortfolio.id,
             portfolioName: genPortfolio.name,
           }}
+          onSubmitted={(run) => {
+            setDiagnosisRuns((prev) => [run, ...prev.filter((item) => item.id !== run.id)].slice(0, 5));
+          }}
           onClose={() => setGenPortfolio(null)}
+        />
+      ) : null}
+
+      {diagnosisDetailRunId ? (
+        <StockV2AgentRunDetailDrawer
+          actions={actions}
+          runId={diagnosisDetailRunId}
+          onClose={() => setDiagnosisDetailRunId(null)}
         />
       ) : null}
     </div>
   );
+}
+
+function portfolioDiagnosisTriggerId(portfolioId: string): string {
+  return `portfolio_strategy_diagnosis:portfolio=${portfolioId}`;
+}
+
+function PortfolioDiagnosisRuns({
+  items,
+  loading,
+  error,
+  onRefresh,
+  onOpenDetail,
+}: {
+  items: StockV2AgentRun[];
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+  onOpenDetail: (runId: string) => void;
+}) {
+  const latest = items[0];
+  return (
+    <div className="mt-4 grid gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <strong className="text-sm">最近组合诊断</strong>
+          <p className="mt-0.5 text-xs text-[var(--muted)]">关闭诊断抽屉后，可在这里继续查看本次流程、错误和运行详情。</p>
+        </div>
+        <Button onClick={onRefresh} disabled={loading}>
+          <ArrowsClockwise size={14} className="mr-1.5" />
+          {loading ? "刷新中" : "刷新"}
+        </Button>
+      </div>
+      {error ? <Notice tone="danger">{error}</Notice> : null}
+      {!latest && !loading ? (
+        <p className="text-xs text-[var(--muted)]">暂无组合诊断运行。</p>
+      ) : null}
+      {latest ? (
+        <div className="grid gap-3 rounded-md border border-[var(--line)] bg-[var(--surface)] p-3 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <Pill tone={stockV2AgentRunStatusTone(latest.status)}>{stockV2AgentRunStatusLabel(latest.status)}</Pill>
+            <span className="font-mono text-[var(--muted-strong)]">{latest.id.slice(0, 12)}</span>
+            <span className="text-[var(--muted)]">{formatDate(latest.startedAt || latest.createdAt) || "-"}</span>
+          </div>
+          {latest.output ? <p className="m-0 text-[var(--muted-strong)]">{latest.output}</p> : null}
+          {latest.errorMessage ? <Notice tone="danger">诊断失败：{latest.errorMessage}</Notice> : null}
+          <DiagnosisStepList run={latest} />
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button onClick={() => onOpenDetail(latest.id)}>查看完整运行详情</Button>
+          </div>
+        </div>
+      ) : null}
+      {items.length > 1 ? (
+        <details className="rounded-md border border-[var(--line)] bg-[var(--surface)]">
+          <summary className="cursor-pointer px-3 py-2 text-xs font-medium">历史诊断 {items.length - 1} 次</summary>
+          <div className="grid gap-1 border-t border-[var(--line)] p-2">
+            {items.slice(1).map((run) => (
+              <button
+                key={run.id}
+                type="button"
+                className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-[var(--surface-soft)]"
+                onClick={() => onOpenDetail(run.id)}
+              >
+                <Pill tone={stockV2AgentRunStatusTone(run.status)}>{stockV2AgentRunStatusLabel(run.status)}</Pill>
+                <span className="min-w-0 truncate">{run.output || run.errorMessage || run.id}</span>
+                <span className="text-[var(--muted)]">{formatDate(run.startedAt || run.createdAt) || "-"}</span>
+              </button>
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function DiagnosisStepList({ run }: { run: StockV2AgentRun }) {
+  const failed = run.status === "failed";
+  const running = run.status === "running";
+  const completed = run.status === "completed";
+  const ready = run.status === "ready" || run.status === "pending";
+  const steps: Array<{ label: string; state: "done" | "running" | "failed" | "pending"; detail: string }> = [
+    { label: "创建诊断任务", state: "done", detail: "已记录 AgentRun 和 DecisionLedger" },
+    { label: "构建组合上下文", state: "done", detail: "已读取组合、持仓、行情、画像、日 K 和策略覆盖" },
+    {
+      label: "执行 Agent 分析",
+      state: failed ? "failed" : running ? "running" : completed ? "done" : "pending",
+      detail: failed ? "执行失败，查看运行详情里的 stderr / Prompt" : running ? "Agent 正在分析" : completed ? "Agent 已提交结构化结果" : ready ? "等待执行器启动" : "等待中",
+    },
+    {
+      label: "校验 MCP 回填结果",
+      state: completed ? "done" : failed ? "failed" : "pending",
+      detail: completed ? "结构化输出已通过后端校验" : failed ? "可能未回填或 schema / 保存失败" : "等待 Agent submit_result",
+    },
+    {
+      label: "生成策略草案",
+      state: completed ? "done" : failed ? "failed" : "pending",
+      detail: completed ? "若输出 new_strategy，草案已进入策略列表" : failed ? "未完成草案生成" : "等待校验完成",
+    },
+  ];
+  return (
+    <div className="grid gap-2">
+      {steps.map((step, index) => (
+        <div key={step.label} className="grid grid-cols-[24px_minmax(0,1fr)] gap-2">
+          <span className={`mt-0.5 flex h-5 w-5 items-center justify-center rounded-full border text-[10px] ${diagnosisStepClass(step.state)}`}>
+            {index + 1}
+          </span>
+          <div>
+            <div className="font-medium text-[var(--text)]">{step.label}</div>
+            <div className="text-[var(--muted)]">{step.detail}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function diagnosisStepClass(state: "done" | "running" | "failed" | "pending"): string {
+  switch (state) {
+    case "done":
+      return "border-[rgba(18,132,79,0.35)] bg-[var(--good-soft)] text-[var(--good)]";
+    case "running":
+      return "border-[rgba(160,109,13,0.35)] bg-[var(--warn-soft)] text-[var(--warn)]";
+    case "failed":
+      return "border-[rgba(176,57,44,0.35)] bg-[var(--danger-soft)] text-[var(--danger)]";
+    default:
+      return "border-[var(--line)] bg-[var(--surface-soft)] text-[var(--muted)]";
+  }
 }
 
 function PortfolioRow({

@@ -53,10 +53,12 @@ export function StrategyGenerationDrawer({
   actions,
   initial,
   onClose,
+  onSubmitted,
 }: {
   actions: AppActions;
   initial: StrategyGenerationInitial;
   onClose: () => void;
+  onSubmitted?: (run: StockV2AgentRun) => void;
 }) {
   const mode = initial.mode;
   const isPortfolio = mode === "portfolio_strategy_diagnosis";
@@ -126,6 +128,7 @@ export function StrategyGenerationDrawer({
         body: buildInput(),
       });
       setRun(res);
+      onSubmitted?.(res);
       setPhase("submitted");
       actions.setToast("Agent 运行已启动，策略草案将在完成后进入草案列表", "good");
     } catch (err) {
