@@ -290,7 +290,7 @@ func (s *Service) runAutomaticDeepStockProfileUpdate(ctx context.Context, trigge
 }
 
 func (s *Service) runBaseProfileMaintenanceScheduler(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	s.maybeRunBaseProfileMaintenance(ctx, "scheduler")
 	for {

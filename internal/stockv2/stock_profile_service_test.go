@@ -361,6 +361,68 @@ func TestEnableBaseProfileMaintenanceSchedulesImmediateRun(t *testing.T) {
 	}
 }
 
+func TestBaseProfileMaintenanceIntervalChangeRecomputesNextRun(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	if err := svc.Initialize(ctx); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	now := time.Now()
+	settings := svc.settings
+	settings.BaseProfileAutoMaintainEnabled = true
+	settings.BaseProfileMaintainIntervalSeconds = 86400
+	settings.BaseProfileLastMaintainAt = now.Add(-2 * time.Hour)
+	settings.BaseProfileNextMaintainAt = now.Add(22 * time.Hour)
+	if err := svc.store.CreateOrUpdateSettings(ctx, settings); err != nil {
+		t.Fatalf("save existing settings: %v", err)
+	}
+	svc.settings = settings
+
+	shorter := 3600
+	updated, err := svc.CreateOrUpdateSettings(ctx, RequestCreateOrUpdateSettings{
+		BaseProfileMaintainIntervalSeconds: &shorter,
+	})
+	if err != nil {
+		t.Fatalf("shorten base profile interval: %v", err)
+	}
+	if updated.BaseProfileNextMaintainAt.IsZero() || updated.BaseProfileNextMaintainAt.After(time.Now().Add(2*time.Second)) {
+		t.Fatalf("next maintain at = %v; want due after shortening interval", updated.BaseProfileNextMaintainAt)
+	}
+}
+
+func TestSavingBaseProfileSettingsKeepsPendingImmediateRun(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	if err := svc.Initialize(ctx); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	now := time.Now()
+	settings := svc.settings
+	settings.BaseProfileAutoMaintainEnabled = true
+	settings.BaseProfileMaintainIntervalSeconds = 86400
+	settings.BaseProfileLastMaintainAt = time.Time{}
+	settings.BaseProfileNextMaintainAt = now
+	if err := svc.store.CreateOrUpdateSettings(ctx, settings); err != nil {
+		t.Fatalf("save existing settings: %v", err)
+	}
+	svc.settings = settings
+
+	batchSize := 24
+	updated, err := svc.CreateOrUpdateSettings(ctx, RequestCreateOrUpdateSettings{
+		BaseProfileDeepUpdateBatchSize: &batchSize,
+	})
+	if err != nil {
+		t.Fatalf("save base profile batch size: %v", err)
+	}
+	if updated.BaseProfileNextMaintainAt.IsZero() || updated.BaseProfileNextMaintainAt.After(time.Now().Add(2*time.Second)) {
+		t.Fatalf("next maintain at = %v; want pending immediate run preserved", updated.BaseProfileNextMaintainAt)
+	}
+}
+
 func TestListStockProfileSummariesReturnsBatchAndMissing(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStockProfileTestService(t)

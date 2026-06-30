@@ -978,6 +978,7 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	prevInterval := s.settings.UpdateIntervalSec
 	prevBaseProfileInterval := s.settings.BaseProfileMaintainIntervalSeconds
 	prevNewsBG := s.hasEnabledNewsSources(ctx)
+	now := time.Now()
 	settings := s.settings
 	if req.AutoUpdateEnabled != nil {
 		settings.AutoUpdateEnabled = *req.AutoUpdateEnabled
@@ -1026,12 +1027,15 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	settings.BaseProfileDeepUpdateRateLimitMs = normalizeStockProfileDeepUpdateRateLimitMs(settings.BaseProfileDeepUpdateRateLimitMs)
 	if settings.BaseProfileAutoMaintainEnabled {
 		interval := time.Duration(settings.BaseProfileMaintainIntervalSeconds) * time.Second
-		if !prevBaseProfile {
-			settings.BaseProfileNextMaintainAt = time.Now()
-		} else if settings.BaseProfileLastMaintainAt.IsZero() {
-			settings.BaseProfileNextMaintainAt = time.Now().Add(interval)
-		} else {
-			settings.BaseProfileNextMaintainAt = settings.BaseProfileLastMaintainAt.Add(interval)
+		baseProfileIntervalChanged := prevBaseProfileInterval != settings.BaseProfileMaintainIntervalSeconds
+		if !prevBaseProfile || (baseProfileIntervalChanged && settings.BaseProfileLastMaintainAt.IsZero()) {
+			settings.BaseProfileNextMaintainAt = now
+		} else if baseProfileIntervalChanged || settings.BaseProfileNextMaintainAt.IsZero() {
+			next := settings.BaseProfileLastMaintainAt.Add(interval)
+			if settings.BaseProfileLastMaintainAt.IsZero() || !next.After(now) {
+				next = now
+			}
+			settings.BaseProfileNextMaintainAt = next
 		}
 	} else {
 		settings.BaseProfileNextMaintainAt = time.Time{}
