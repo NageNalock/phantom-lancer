@@ -581,7 +581,8 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 	b.WriteString("System role: you are a StockV2 monitoring-hit reviewer. You are NOT a trading executor.\n")
 	b.WriteString("Your job is to audit whether this MonitorHit is real, actionable, stale/degraded, or noise.\n")
 	b.WriteString("Do not place orders, do not modify holdings, and do not update formal strategies.\n")
-	b.WriteString("Use only the provided context. Do not invent market prices, financial data, news, filings, or sources.\n")
+	b.WriteString("Use provided context, stock_agent MCP data, and Codex CLI public search/browse for external verification when facts are stale, conflicting, high-impact, or not directly supported. Do not invent market prices, financial data, news, filings, or sources.\n")
+	b.WriteString("Do not implement or request web_search/web_fetch MCP tools from the main program; external public verification is your responsibility inside Codex CLI.\n")
 	b.WriteString("Submit your final result using the stock_agent.submit_result MCP tool.\n\n")
 	b.WriteString("Do not use shell commands or curl to submit the result; use the MCP tool directly.\n\n")
 
@@ -759,8 +760,9 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 	b.WriteString("Before choosing outputType, do this review in order:\n")
 	b.WriteString("1. Evidence audit: verify what facts are directly supported by MonitorHit evidence, matchedAction, matchedPrefilter, playbookRule, quote, daily bars, and portfolio snapshot.\n")
 	b.WriteString("2. Data freshness audit: inspect quote/fetchedAt/quoteAt, dailyBars quality, portfolio snapshot status, staleQuoteCount, and freshness summary.\n")
-	b.WriteString("3. Match audit: explain whether the hit is matched, degraded, skipped, or noise. If degraded/skipped, explain why.\n")
-	b.WriteString("4. Separate `facts`, `inferences`, and `assumptions` in your result object. Keep assumptions explicit and minimal.\n\n")
+	b.WriteString("3. Conflict verification: when quote, bars, news link, profile, portfolio, or freshness fields disagree, use stock_agent MCP and Codex CLI external public search/browse to resolve the conflict before making a material conclusion. If verification is unavailable, mark the result degraded and explain exactly what was attempted.\n")
+	b.WriteString("4. Match audit: explain whether the hit is matched, degraded, skipped, or noise. If degraded/skipped, explain why.\n")
+	b.WriteString("5. Separate `facts`, `inferences`, and `assumptions` in your result object. Keep assumptions explicit and minimal.\n\n")
 	b.WriteString("### Output Types\n\n")
 	b.WriteString("Choose ONE output type:\n\n")
 	b.WriteString("1. **trade_signal** — Account-agnostic trading signal\n")
@@ -770,7 +772,7 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 	b.WriteString("5. **continue_monitoring** — Keep monitoring, no action now\n\n")
 
 	b.WriteString("### Result fields by output type\n\n")
-	b.WriteString("Common fields for every result: `facts`, `inferences`, `assumptions`, `freshnessAssessment`, `evidenceAudit`.\n")
+	b.WriteString("Common fields for every result: `facts`, `inferences`, `assumptions`, `freshnessAssessment`, `evidenceAudit`, `conflictResolution`, `researchLog`.\n")
 	b.WriteString("- **trade_signal**: `direction`, `priceRange`, `triggerSummary`, `riskNotes`, `confidence`\n")
 	b.WriteString("- **proposed_operation**: `action`, at least one of `quantity` / `amount` / `targetWeight`, `priceBasis`, `reason`, `riskNotes`, `confidence`\n")
 	b.WriteString("- **strategy_patch**: `patchSummary`, `reason`, `pendingAcceptance: true`\n")
@@ -783,7 +785,7 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 
 	b.WriteString("### Important\n\n")
 	b.WriteString("- Only call submit_result ONCE when you have completed your analysis.\n")
-	b.WriteString("- Base your analysis ONLY on the provided context. Do not fabricate or backfill missing data.\n")
+	b.WriteString("- Do not fabricate or backfill missing data. If project data is stale or contradictory, verify with MCP and public sources, or explicitly degrade confidence with attempted verification in `researchLog`.\n")
 	b.WriteString("- If portfolio context is absent, do not output proposed_operation; use trade_signal, strategy_patch, ignore, or continue_monitoring.\n")
 	b.WriteString("- For proposed_operation, the main program will validate your result and run deterministic execution guardrails before anything can proceed.\n")
 	b.WriteString("- proposed_operation must not include final execution claims; it is only a proposal pending user confirmation.\n")
@@ -834,6 +836,7 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 	b.WriteString("For every external article/search result you rely on, call stock_agent.record_external_source with title, URL, publisher, publishedAt when available, summary, relatedSymbols, and confidence.\n")
 	b.WriteString("For each material fact or reasoning item, call stock_agent.record_evidence. Link it to a candidate when the candidate exists.\n")
 	b.WriteString("For each candidate, call stock_agent.record_candidate after validating the symbol through StockV2 master data. Use stock_agent.update_candidate when the score, rank, reason, or risk changes.\n")
+	b.WriteString("When internal MCP data conflicts with public sources or is stale/missing, record the conflict, what you checked externally, the adopted value or unresolved status, and why. Do not leave the conflict only as a future recommendation when it affects candidate ranking or risk.\n")
 	b.WriteString("Do not silently fall back to keyword search and label it semantic.\n\n")
 
 	b.WriteString("## Project MCP Tools\n\n")
@@ -917,7 +920,7 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 	b.WriteString("# Strategy Generation Task\n\n")
 	b.WriteString("System role: you are a StockV2 strategy drafting assistant. You are NOT a trading executor.\n")
 	b.WriteString("Draft monitoring strategies only. Do not place orders, do not modify holdings, do not create proposed_operation, and do not claim any operation was executed.\n")
-	b.WriteString("Use only the provided context. Do not invent market prices, financial data, news, filings, or sources.\n")
+	b.WriteString("Use provided context, stock_agent MCP tools, and Codex CLI public search/browse. Do not invent market prices, financial data, news, filings, or sources.\n")
 	b.WriteString("Submit your final result using the stock_agent.submit_result MCP tool.\n\n")
 	b.WriteString("Do not use shell commands or curl to submit the result; use the MCP tool directly.\n\n")
 
@@ -940,7 +943,9 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 	b.WriteString("- For each target or opportunity candidate, read the project profile with stock_agent.get_stock_profile or stock_agent.search_stock_profiles, fetch stock_agent.get_latest_quotes and stock_agent.get_daily_bars_summary, search related project news with stock_agent.search_news_events, and check stock_agent.list_existing_strategies before drafting.\n")
 	b.WriteString("- If embedding status is available, call stock_agent.semantic_search_stock_profiles and stock_agent.semantic_search_news_events with the thesis/candidate/news query to find adjacent internal context. Merge these results into evidence_summary and data_quality_notes as appropriate.\n")
 	b.WriteString("- If embedding status is unavailable or assets are not ready, state the degraded reason in data_quality_notes and do not label keyword search as semantic recall.\n")
-	b.WriteString("- Do not implement or request web_search/web_fetch MCP tools from the main program. External public research, when needed, must be done by Codex CLI's own capabilities and cited conservatively in the draft.\n\n")
+	b.WriteString("- Treat internal MCP and Codex CLI external public search/browse as equal-priority evidence channels for material claims. Do not rely only on project data when profile, quote, bar, news, strategy coverage, or portfolio data is stale, missing, or conflicting.\n")
+	b.WriteString("- When data conflicts, perform conflict verification before drafting: identify each conflicting field, check internal MCP and public sources, state the adopted value or unresolved status, and lower confidence if unresolved.\n")
+	b.WriteString("- Do not implement or request web_search/web_fetch MCP tools from the main program. External public research must be done by Codex CLI's own capabilities and cited conservatively in the draft.\n\n")
 
 	if genCtx.Input.Mode == StrategyGenerationModePortfolio || genCtx.Mode == StrategyGenerationModePortfolio {
 		b.WriteString("## Portfolio Diagnosis Requirements\n\n")
@@ -955,6 +960,7 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 	b.WriteString("You must submit exactly ONE result using stock_agent.submit_result.\n")
 	b.WriteString("The MCP taskType must be `strategy_generation` and result.outputType must be `strategy_generation`.\n")
 	b.WriteString("Return a strategy-generation report with schema_version `strategy-generation-report/v1`.\n")
+	b.WriteString("Put material data conflicts and verification attempts in run_summary.key_conflicts and run_summary.data_quality_notes; include compact external/internal source references in draft evidence_summary or risk_summary.\n")
 	b.WriteString("Every new strategy draft must use `playbook.rules[]`. Do not write `playbook.actions[]`, `actions`, `action_type`, `add`, `reduce`, or `clear`.\n")
 	b.WriteString("Allowed rule.action values are: observe, build_position, add_position, hold, reduce_position, exit_position.\n")
 	b.WriteString("Rule fields are exactly: id, action, title, trigger, preconditions, target, risk, dataPrefilters, portfolioPrefilters, newsPrefilters, priority.\n")
@@ -1012,10 +1018,12 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 	}
 
 	b.WriteString("## Required Research Refresh\n\n")
-	b.WriteString("- Treat stock_agent internal search and Codex CLI external public search/browse as equal-priority research channels. For material targets, use both when possible before making material claims.\n")
+	b.WriteString("- Treat stock_agent internal search and Codex CLI external public search/browse as equal-priority research channels. For each material target or holding, use both before making material claims unless one channel is unavailable; if unavailable, record the attempted verification and lower confidence.\n")
 	b.WriteString("- Use stock_agent.get_embedding_status to decide whether semantic recall is available. If available, use stock_agent.semantic_search_stock_profiles and stock_agent.semantic_search_news_events for adjacent internal context; if unavailable, state the degraded reason.\n")
 	b.WriteString("- For each material target or holding, prefer checking project profile/search, latest quotes, daily bars, related project news, existing strategies, and portfolio context before drafting or judging.\n")
-	b.WriteString("- Use Codex CLI public search/browse for recent public news, filings, policy, industry, and company context that is not present in project data. Cite compact source references in evidence_refs or data_quality_notes.\n")
+	b.WriteString("- Use Codex CLI public search/browse for recent public news, filings, policy, industry, company context, market quotes, ETF NAV/premium-discount/holdings, and other public sources needed to verify stale or conflicting project data. Cite compact source references in evidence_refs or data_quality_notes.\n")
+	b.WriteString("- Conflict handling is mandatory: when internal quote, bar, profile, news, strategy coverage, portfolio, or freshness fields disagree, identify the conflict, verify with internal MCP and public sources, choose the adopted value or mark unresolved, and explain the confidence impact. Do not leave a material conflict only as a next-step recommendation.\n")
+	b.WriteString("- Include `research_log` in step outputs when you perform or attempt external verification. Each entry should include query/source/url when available, purpose, result, and failure reason when applicable.\n")
 	b.WriteString("- If external search/browse is unavailable, say so explicitly and lower confidence instead of inventing evidence.\n\n")
 
 	b.WriteString("## Strategy Generation Context\n\n```json\n")
@@ -1043,7 +1051,7 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 		b.WriteString(pack.StepKey)
 		b.WriteString("\",\"role\":\"")
 		b.WriteString(pack.Role)
-		b.WriteString("\",\"summary\":\"...\",\"findings\":[],\"claims\":[],\"evidence_refs\":[],\"data_quality_notes\":[],\"next_inputs\":{}}\n")
+		b.WriteString("\",\"summary\":\"...\",\"findings\":[],\"claims\":[],\"evidence_refs\":[],\"conflict_resolution\":[],\"research_log\":[],\"data_quality_notes\":[],\"next_inputs\":{}}\n")
 		b.WriteString("```\n")
 		b.WriteString("For claims, include fields when possible: claim, stance, symbol, support_level, evidence_refs, data_freshness, uncertainty.\n\n")
 	}

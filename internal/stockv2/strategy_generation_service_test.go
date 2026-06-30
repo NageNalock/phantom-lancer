@@ -310,6 +310,37 @@ func TestPortfolioStrategyDiagnosisEmptyHoldingsNoDrafts(t *testing.T) {
 	}
 }
 
+func TestStrategyGenerationReportAcceptsStructuredReviewRequests(t *testing.T) {
+	raw := strategyGenerationPortfolioReportResult([]string{"600276"})
+	draft := mapFromAny(sliceFromAny(raw["drafts"])[0])
+	draft["portfolio_aware_suggestion"] = map[string]any{
+		"trade_signal":         "hold",
+		"target_position_hint": "",
+		"review_request": []any{
+			map[string]any{
+				"priority": "high",
+				"type":     "data_validation",
+				"reason":   "Validate 600276 cost basis before trade-enabled use.",
+			},
+			map[string]any{
+				"priority": "medium",
+				"type":     "account_permission",
+				"reason":   "Portfolio flags disable buy/add/reduce/sell.",
+			},
+		},
+	}
+
+	report, err := strategyGenerationReportFromResult(raw)
+	if err != nil {
+		t.Fatalf("parse strategy generation report: %v", err)
+	}
+	got := report.Drafts[0].PortfolioAwareSuggestion.ReviewRequest
+	if !strings.Contains(got, "[high/data_validation] Validate 600276 cost basis") ||
+		!strings.Contains(got, "[medium/account_permission] Portfolio flags disable") {
+		t.Fatalf("review request = %q, want normalized structured requests", got)
+	}
+}
+
 func TestStrategyGenerationDraftActivationFeedsDataMonitor(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
