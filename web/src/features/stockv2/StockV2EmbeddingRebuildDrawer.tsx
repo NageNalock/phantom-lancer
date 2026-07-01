@@ -82,7 +82,7 @@ export function StockV2EmbeddingRebuildDrawer({
             {result.failedItems?.length ? (
               <details className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)]">
                 <summary className="cursor-pointer px-3 py-2 text-sm font-medium">失败明细（{result.failedItems.length}）</summary>
-                <pre className="max-h-48 overflow-auto border-t border-[var(--line)] px-3 py-2 text-xs text-[var(--muted-strong)]">
+                <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words border-t border-[var(--line)] px-3 py-2 text-xs text-[var(--muted-strong)]">
                   {JSON.stringify(result.failedItems, null, 2)}
                 </pre>
               </details>

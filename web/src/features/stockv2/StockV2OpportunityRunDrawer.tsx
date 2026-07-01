@@ -8,7 +8,7 @@ import type {
   StockV2OpportunityDiscoveryStep,
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
-import { Button, Drawer, Notice, Pill } from "../../components/ui";
+import { Button, CopyButton, Drawer, Notice, Pill } from "../../components/ui";
 import {
   stockV2DiscoveryRunStatusLabel,
   stockV2DiscoveryRunStatusTone,
@@ -241,8 +241,11 @@ function StepDetail({
 function Block({ title, value }: { title: string; value: string }) {
   return (
     <div>
-      <strong className="text-sm">{title}</strong>
-      <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs text-[var(--muted-strong)]">
+      <div className="flex items-center justify-between gap-2">
+        <strong className="text-sm">{title}</strong>
+        <CopyButton text={value} />
+      </div>
+      <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs text-[var(--muted-strong)]">
         {value}
       </pre>
     </div>
@@ -250,14 +253,16 @@ function Block({ title, value }: { title: string; value: string }) {
 }
 
 function JSONBlock({ title, value }: { title: string; value: unknown }) {
+  const text = stringifyJSON(value);
   return (
     <details className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)]" open>
       <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm font-medium">
         <MagnifyingGlass size={14} />
         {title}
+        <CopyButton text={text} className="ml-auto" />
       </summary>
-      <pre className="max-h-72 overflow-auto whitespace-pre-wrap border-t border-[var(--line)] px-3 py-3 text-xs text-[var(--muted-strong)]">
-        {stringifyJSON(value)}
+      <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words border-t border-[var(--line)] px-3 py-3 text-xs text-[var(--muted-strong)]">
+        {text}
       </pre>
     </details>
   );

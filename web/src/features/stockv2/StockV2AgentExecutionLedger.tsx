@@ -7,7 +7,7 @@ import type {
   StockV2AgentRun,
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
-import { Button, CollapsibleSection, ContextList, Drawer, Notice, Pill } from "../../components/ui";
+import { Button, CollapsibleSection, ContextList, CopyButton, Drawer, Notice, Pill } from "../../components/ui";
 import {
   formatDate,
   stockV2AgentRunStatusLabel,
@@ -405,8 +405,11 @@ function SummaryCell({ label, children }: { label: string; children: ReactNode }
 function Block({ title, value, mono, danger }: { title: string; value: string; mono?: boolean; danger?: boolean }) {
   return (
     <div>
-      <strong className="text-sm">{title}</strong>
-      <pre className={`mt-2 max-h-56 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs whitespace-pre-wrap ${mono ? "font-mono" : ""} ${danger ? "text-[var(--danger)]" : "text-[var(--muted-strong)]"}`}>
+      <div className="flex items-center justify-between gap-2">
+        <strong className="text-sm">{title}</strong>
+        <CopyButton text={value} />
+      </div>
+      <pre className={`mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs ${mono ? "font-mono" : ""} ${danger ? "text-[var(--danger)]" : "text-[var(--muted-strong)]"}`}>
         {value}
       </pre>
     </div>
@@ -414,14 +417,16 @@ function Block({ title, value, mono, danger }: { title: string; value: string; m
 }
 
 function JSONBlock({ title, value }: { title: string; value: unknown }) {
+  const text = stringifyJSON(value);
   return (
     <details className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)]">
       <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm font-medium">
         <MagnifyingGlass size={14} />
         {title}
+        <CopyButton text={text} className="ml-auto" />
       </summary>
-      <pre className="max-h-72 overflow-auto border-t border-[var(--line)] px-3 py-3 text-xs text-[var(--muted-strong)]">
-        {stringifyJSON(value)}
+      <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words border-t border-[var(--line)] px-3 py-3 text-xs text-[var(--muted-strong)]">
+        {text}
       </pre>
     </details>
   );

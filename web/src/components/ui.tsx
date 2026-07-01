@@ -93,6 +93,34 @@ export const Button = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HTMLBut
   return <button {...props} className={`button ${toneClass} ${className}`} ref={ref} type={props.type || "button"} />;
 });
 
+/**
+ * CopyButton — 一键复制文本到剪贴板的小按钮。内置 stopPropagation,放进
+ * <summary> 等会冒泡的容器内,点击也不会触发父级 <details> 折叠/展开。
+ * 复制成功后短暂显示「已复制」并自动复位(约 1.2s)。
+ */
+export function CopyButton({ text, label = "复制", className = "" }: {
+  text: string;
+  label?: string;
+  className?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  async function onCopy(e: ReactMouseEvent) {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  }
+  return (
+    <button type="button" onClick={onCopy} className={`shrink-0 text-xs text-[var(--muted)] hover:text-[var(--muted-strong)] ${className}`}>
+      {copied ? "已复制" : label}
+    </button>
+  );
+}
+
 export function Panel({ title, subtitle, actions, children, className = "" }: { title?: ReactNode; subtitle?: ReactNode; actions?: ReactNode; children: ReactNode; className?: string }) {
   return (
     <section className={`panel ${className}`}>

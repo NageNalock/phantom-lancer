@@ -625,13 +625,13 @@ function NewsDetailDrawer({ item, onClose }: { item: DetailItem; onClose: () => 
           <Button aria-label="关闭" className="px-2 py-1 text-xs" onClick={onClose}><X size={16} /></Button>
         </header>
         <div className="flex-1 overflow-y-auto p-4">
-          <pre className="max-h-[42vh] overflow-auto rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs leading-relaxed text-[var(--muted-strong)]">
+          <pre className="max-h-[42vh] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs leading-relaxed text-[var(--muted-strong)]">
             {safeJSONString(item)}
           </pre>
           {payload ? (
             <details className="mt-4 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
               <summary className="cursor-pointer text-sm font-medium">Raw payload（已裁剪脱敏）</summary>
-              <pre className="mt-3 max-h-[36vh] overflow-auto rounded border border-[var(--line)] bg-[var(--surface)] p-3 text-xs text-[var(--muted-strong)]">
+              <pre className="mt-3 max-h-[36vh] overflow-auto whitespace-pre-wrap break-words rounded border border-[var(--line)] bg-[var(--surface)] p-3 text-xs text-[var(--muted-strong)]">
                 {safeJSONString(payload)}
               </pre>
             </details>

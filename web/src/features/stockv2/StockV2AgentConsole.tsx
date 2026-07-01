@@ -288,7 +288,7 @@ function LedgerDetail({ ledger, error }: { ledger: StockV2AgentDecisionLedger | 
       {ledger.outputArtifactSummary ? <Row label="输出摘要" value={ledger.outputArtifactSummary} /> : null}
       <details className="rounded border border-[var(--line)] bg-[var(--surface)]">
         <summary className="cursor-pointer px-2 py-1 text-[var(--muted)]">脱敏留痕 / 结构化输出</summary>
-        <pre className="max-h-40 overflow-auto px-2 py-2 text-[11px] text-[var(--muted-strong)]">
+        <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words px-2 py-2 text-[11px] text-[var(--muted-strong)]">
           {stringify({ redaction: ledger.redactionSummary, structuredOutput: ledger.structuredOutput })}
         </pre>
       </details>

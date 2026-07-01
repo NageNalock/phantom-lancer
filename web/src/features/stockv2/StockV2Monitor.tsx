@@ -833,7 +833,7 @@ function MonitorRunDrawer({
         {run.metadata && Object.keys(run.metadata).length > 0 ? (
           <div>
             <strong className="text-sm">运行上下文</strong>
-            <pre className="mt-2 max-h-48 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs text-[var(--muted-strong)]">
+            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs text-[var(--muted-strong)]">
               {stringifyJSON(run.metadata)}
             </pre>
           </div>
@@ -905,7 +905,7 @@ function MonitorHitDetail({
       {hasEvidence ? (
         <details className="mt-2 rounded border border-[var(--line)] bg-[var(--surface-soft)]">
           <summary className="cursor-pointer px-2 py-1 text-[var(--muted)]">原始 evidence</summary>
-          <pre className="max-h-40 overflow-auto px-2 py-2 text-[11px] text-[var(--muted-strong)]">
+          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words px-2 py-2 text-[11px] text-[var(--muted-strong)]">
             {stringifyJSON(hit.evidence)}
           </pre>
         </details>
@@ -1160,7 +1160,7 @@ function AlertDrawer({
 
         <div>
           <strong className="text-sm">Evidence</strong>
-          <pre className="mt-2 max-h-72 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs text-[var(--muted-strong)]">
+          <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs text-[var(--muted-strong)]">
             {stringifyJSON(evidence)}
           </pre>
         </div>

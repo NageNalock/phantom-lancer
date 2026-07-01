@@ -695,7 +695,7 @@ function ContextPackSummary({ review }: { review: StockV2OperationReview }) {
       <ContextList items={items} />
       <details className="rounded border border-[var(--line)] bg-[var(--surface)]">
         <summary className="cursor-pointer px-2 py-1 text-xs text-[var(--muted)]">原始 ContextPack JSON</summary>
-        <pre className="max-h-56 overflow-auto px-2 py-2 text-[11px] text-[var(--muted-strong)]">{stringify(pack)}</pre>
+        <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words px-2 py-2 text-[11px] text-[var(--muted-strong)]">{stringify(pack)}</pre>
       </details>
     </div>
   );

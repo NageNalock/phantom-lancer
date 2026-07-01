@@ -222,7 +222,7 @@ function LogLineRow({ line, query, wrap }: { line: LogLine; query: string; wrap:
       {line.fields ? (
         <details className="log-line-fields">
           <summary>fields</summary>
-          <pre>{JSON.stringify(line.fields, null, 2)}</pre>
+          <pre className="whitespace-pre-wrap break-words text-xs">{JSON.stringify(line.fields, null, 2)}</pre>
         </details>
       ) : null}
     </article>
