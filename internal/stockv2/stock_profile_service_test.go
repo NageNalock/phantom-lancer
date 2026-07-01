@@ -423,6 +423,39 @@ func TestSavingBaseProfileSettingsKeepsPendingImmediateRun(t *testing.T) {
 	}
 }
 
+func TestSavingBaseProfileSettingsUsesPersistedSettingsAsBase(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	if err := svc.Initialize(ctx); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	settings := svc.settings
+	settings.AutoUpdateEnabled = true
+	settings.UpdateIntervalSec = 7200
+	settings.BaseProfileAutoMaintainEnabled = true
+	settings.BaseProfileMaintainIntervalSeconds = 86400
+	if err := svc.store.CreateOrUpdateSettings(ctx, settings); err != nil {
+		t.Fatalf("save persisted settings: %v", err)
+	}
+	svc.settings = StockV2Settings{ID: "1", UpdateIntervalSec: 3600}
+
+	batchSize := 24
+	updated, err := svc.CreateOrUpdateSettings(ctx, RequestCreateOrUpdateSettings{
+		BaseProfileDeepUpdateBatchSize: &batchSize,
+	})
+	if err != nil {
+		t.Fatalf("save base profile settings: %v", err)
+	}
+	if !updated.AutoUpdateEnabled || updated.UpdateIntervalSec != 7200 {
+		t.Fatalf("unrelated persisted settings were overwritten: %+v", updated)
+	}
+	if !updated.BaseProfileAutoMaintainEnabled || updated.BaseProfileDeepUpdateBatchSize != batchSize {
+		t.Fatalf("base profile settings not saved: %+v", updated)
+	}
+}
+
 func TestListStockProfileSummariesReturnsBatchAndMissing(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStockProfileTestService(t)

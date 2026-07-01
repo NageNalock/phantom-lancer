@@ -1098,13 +1098,16 @@ func (s *Service) GetUpdateProgress(ctx context.Context, jobID string) (StockV2U
 // CreateOrUpdateSettings 创建或更新配置
 func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateOrUpdateSettings) (StockV2Settings, error) {
 	// 应用更新
-	prevAuto := s.settings.AutoUpdateEnabled
-	prevBaseProfile := s.settings.BaseProfileAutoMaintainEnabled
-	prevInterval := s.settings.UpdateIntervalSec
-	prevBaseProfileInterval := s.settings.BaseProfileMaintainIntervalSeconds
+	settings, err := s.GetSettings(ctx)
+	if err != nil {
+		return StockV2Settings{}, err
+	}
+	prevAuto := settings.AutoUpdateEnabled
+	prevBaseProfile := settings.BaseProfileAutoMaintainEnabled
+	prevInterval := settings.UpdateIntervalSec
+	prevBaseProfileInterval := settings.BaseProfileMaintainIntervalSeconds
 	prevNewsBG := s.hasEnabledNewsSources(ctx)
 	now := time.Now()
-	settings := s.settings
 	if req.AutoUpdateEnabled != nil {
 		settings.AutoUpdateEnabled = *req.AutoUpdateEnabled
 	}

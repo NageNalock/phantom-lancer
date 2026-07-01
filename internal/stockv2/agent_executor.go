@@ -45,7 +45,7 @@ type codexCLIExecutor struct {
 }
 
 const (
-	execDefaultTimeout         = 5 * time.Minute
+	execDefaultTimeout         = 10 * time.Minute
 	stdoutTailMaxBytes         = 4 * 1024
 	stderrTailMaxBytes         = 4 * 1024
 	transcriptMaxBytes         = 16 * 1024
@@ -221,10 +221,15 @@ func (e *codexCLIExecutor) executePrompt(
 	}()
 
 	// 同时等: result / 进程退出 / context 取消
+	type executorWaitResult struct {
+		err        error
+		readerErrs []error
+	}
 	var execErr error
-	waitDone := make(chan error, 1)
+	waitDone := make(chan executorWaitResult, 1)
 	go func() {
-		waitDone <- cmd.Wait()
+		readerErrs := waitForExecutorReaders(doneCh, 2, execDefaultTimeout+executorReaderDrainTimeout)
+		waitDone <- executorWaitResult{err: cmd.Wait(), readerErrs: readerErrs}
 	}()
 
 	var submittedResult *AgentTaskSubmittedResult
@@ -252,10 +257,10 @@ func (e *codexCLIExecutor) executePrompt(
 waitLoop:
 	for {
 		select {
-		case err := <-waitDone:
-			execErr = err
+		case result := <-waitDone:
+			execErr = result.err
+			readerErrs = append(readerErrs, result.readerErrs...)
 			processDone = true
-			readerErrs = append(readerErrs, waitForExecutorReaders(doneCh, 2, executorReaderDrainTimeout)...)
 			break waitLoop
 		case r := <-resultCh:
 			if r.err == nil {
@@ -279,26 +284,27 @@ waitLoop:
 		shortCtx, shortCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shortCancel()
 		select {
-		case err := <-waitDone:
-			execErr = err
+		case result := <-waitDone:
+			execErr = result.err
+			readerErrs = append(readerErrs, result.readerErrs...)
 			processDone = true
-			readerErrs = append(readerErrs, waitForExecutorReaders(doneCh, 2, executorReaderDrainTimeout)...)
 		case <-shortCtx.Done():
 			// 超时 kill
 			if cmd.Process != nil {
 				cmd.Process.Kill()
 			}
-			execErr = <-waitDone
+			result := <-waitDone
+			execErr = result.err
+			readerErrs = append(readerErrs, result.readerErrs...)
 			processDone = true
-			readerErrs = append(readerErrs, waitForExecutorReaders(doneCh, 2, executorReaderDrainTimeout)...)
 		}
 	}
 	if timedOut && !processDone {
 		select {
-		case err := <-waitDone:
-			execErr = err
+		case result := <-waitDone:
+			execErr = result.err
+			readerErrs = append(readerErrs, result.readerErrs...)
 			processDone = true
-			readerErrs = append(readerErrs, waitForExecutorReaders(doneCh, 2, executorReaderDrainTimeout)...)
 		case <-time.After(executorReaderDrainTimeout):
 		}
 	}
