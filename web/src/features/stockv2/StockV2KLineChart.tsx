@@ -56,7 +56,7 @@ export function StockV2KLineChart({
         low: round2(b.low),
         close: round2(b.close),
         _volume: round0(b.volume ?? 0),
-        _pct: b.pctChange ?? NaN,
+        _pct: barPctChange(b, mode),
         _date: label,
       };
     });
@@ -309,7 +309,7 @@ export function StockV2KLineChart({
     low: latest.low,
     close: latest.close,
     volume: latest.volume ?? 0,
-    pct: latest.pctChange ?? NaN,
+    pct: barPctChange(latest, mode),
   };
   const up = display.close >= display.open;
 
@@ -392,4 +392,27 @@ function barLabel(b: StockV2DailyBar | StockV2MinuteBar, mode: "daily" | "minute
     return d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Shanghai" });
   }
   return (b as StockV2DailyBar).tradeDate;
+}
+
+/**
+ * 抬头百分比的统一语义：当日涨跌幅（相对昨收 prevClose），与日级后端 pctChange 自洽。
+ *
+ * - 日级：StockV2DailyBar.pctChange 必填且权威（已考虑除权等），直接用。
+ * - 分钟级：StockV2MinuteBar.pctChange 带 omitempty，snapshot 没采到当日涨跌时 JSON
+ *   会省略该字段，前端拿不到值。这里优先用后端值，缺失时用 prevClose（昨收）兜底
+ *   计算当日涨跌幅——prevClose 是价格字段，只要采到价就有值，比 pctChange 可靠。
+ * 两者都缺失时返回 NaN，抬头会隐藏百分比（保持原有行为）。
+ */
+function barPctChange(b: StockV2DailyBar | StockV2MinuteBar, mode: "daily" | "minute"): number {
+  if (mode === "daily") {
+    return typeof b.pctChange === "number" && Number.isFinite(b.pctChange) ? b.pctChange : NaN;
+  }
+  if (typeof b.pctChange === "number" && Number.isFinite(b.pctChange) && b.pctChange !== 0) {
+    return b.pctChange;
+  }
+  const prevClose = (b as StockV2MinuteBar).prevClose;
+  if (typeof prevClose === "number" && prevClose > 0) {
+    return ((b.close - prevClose) / prevClose) * 100;
+  }
+  return NaN;
 }
