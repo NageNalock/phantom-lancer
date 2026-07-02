@@ -959,6 +959,13 @@ func (s *Service) agentExecutionDetailForRun(ctx context.Context, run AgentRun) 
 		detail.StrategyGenerationSteps = steps
 		detail.StrategyGenerationContexts = contexts
 	}
+	if run.TaskType == AgentTaskTypePortfolioSentinel && run.TriggerObjectType == "portfolio_sentinel_run" && run.TriggerObjectID != "" {
+		if sentinelDetail, err := s.GetPortfolioSentinelRunDetail(ctx, run.TriggerObjectID); err == nil {
+			detail.Metadata = map[string]any{"portfolioSentinel": sentinelDetail}
+		} else if !errors.Is(err, ErrPortfolioSentinelRunNotFound) {
+			return AgentExecutionDetail{}, err
+		}
+	}
 	return detail, nil
 }
 
@@ -1892,6 +1899,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 		run.FinishedAt = now
 		s.markStockProfileAIEnhancementFailed(ctx, run, run.ErrorMessage)
 		s.markOpportunityDiscoveryRunFailed(ctx, run, run.ErrorMessage)
+		s.markPortfolioSentinelAgentRunFailed(ctx, run, run.ErrorMessage)
 
 		ledger.OutputArtifactSummary = safelog.Text(outputArtifact.String(), 16384)
 		if s.log != nil {
@@ -1915,6 +1923,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 		run.FinishedAt = time.Now()
 		s.markStockProfileAIEnhancementFailed(ctx, run, run.ErrorMessage)
 		s.markOpportunityDiscoveryRunFailed(ctx, run, run.ErrorMessage)
+		s.markPortfolioSentinelAgentRunFailed(ctx, run, run.ErrorMessage)
 		ledger.OutputArtifactSummary = safelog.Text(outputArtifact.String(), 16384)
 		if s.log != nil {
 			s.log.Warn("agent run finalized without valid result", "run_id", run.ID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "status", run.Status, "error", safelog.Text(run.ErrorMessage, 300))
@@ -2065,6 +2074,24 @@ func (s *Service) finalizeAgentRunWithOutput(
 			return
 		}
 		ledger.StructuredOutput["opportunityResultId"] = result.ID
+	}
+	if run.TaskType == AgentTaskTypePortfolioSentinel && run.TriggerObjectType == "portfolio_sentinel_run" && run.TriggerObjectID != "" {
+		result, err := s.ProcessPortfolioSentinelSubmittedResult(ctx, run.TriggerObjectID, *submitted)
+		if err != nil {
+			run.Status = AgentRunStatusFailed
+			run.ErrorMessage = safelog.Text("save portfolio sentinel result failed: "+err.Error(), 500)
+			if s.log != nil {
+				s.log.Warn("finalize: save portfolio sentinel result failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "sentinel_run_id", run.TriggerObjectID, "error", safelog.Text(err.Error(), 300))
+			}
+			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
+				s.log.Warn("finalize: update run after portfolio sentinel save failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "sentinel_run_id", run.TriggerObjectID, "error", safelog.Text(updateErr.Error(), 240))
+			}
+			if _, ledgerErr := s.store.UpdateAgentDecisionLedger(ctx, ledger); ledgerErr != nil && s.log != nil {
+				s.log.Warn("finalize: update ledger after portfolio sentinel save failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "sentinel_run_id", run.TriggerObjectID, "error", safelog.Text(ledgerErr.Error(), 240))
+			}
+			return
+		}
+		ledger.StructuredOutput["portfolioSentinelResultId"] = result.ID
 	}
 
 	if _, err := s.store.UpdateAgentDecisionLedger(ctx, ledger); err != nil && s.log != nil {

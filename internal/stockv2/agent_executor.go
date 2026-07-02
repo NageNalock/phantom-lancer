@@ -136,6 +136,19 @@ func (e *codexCLIExecutor) ExecuteOpportunityDiscovery(
 	return e.executePrompt(ctx, taskID, prompt, modelName)
 }
 
+func (e *codexCLIExecutor) ExecutePortfolioSentinel(
+	ctx context.Context,
+	taskID string,
+	pack PortfolioSentinelContext,
+	modelName string,
+) (*AgentExecutorOutput, error) {
+	if e.binary == "" {
+		return nil, fmt.Errorf("codex binary path not configured")
+	}
+	prompt := buildPortfolioSentinelPrompt(taskID, pack, e.mcpURL)
+	return e.executePrompt(ctx, taskID, prompt, modelName)
+}
+
 func (e *codexCLIExecutor) ExecuteStockProfileSummary(
 	ctx context.Context,
 	taskID string,
@@ -875,6 +888,58 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 	const maxPromptLen = 12000
 	if b.Len() > maxPromptLen {
 		return truncatePromptUTF8(b.String(), 9000, 3000)
+	}
+	return b.String()
+}
+
+func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, mcpURL string) string {
+	var b strings.Builder
+	b.WriteString("# Portfolio Sentinel Task\n\n")
+	b.WriteString("System role: you are a StockV2 portfolio sentinel. You are NOT a trading executor.\n")
+	b.WriteString("Your job is to review the provided portfolio holdings, news window, quotes, daily bars, minute bars, profiles, transactions, and recent reviews to identify material positive/negative risks before the next trading decision window.\n")
+	b.WriteString("Use the globally installed `serenity-skill` methodology for material technology/supply-chain themes: map value-chain exposure, scarce constraints, evidence strength, and failure conditions. Keep StockV2 portfolio permissions and guardrails authoritative.\n")
+	b.WriteString("Use provided context, stock_agent MCP data, and Codex CLI public search/browse for external verification when facts are stale, conflicting, high-impact, or not directly supported. Do not invent prices, news, filings, or sources.\n")
+	b.WriteString("Do not place orders, do not modify holdings, do not activate strategies, and do not read token/cookie/private config.\n")
+	b.WriteString("You may propose portfolio-bound operations only as pending user-confirmed proposals; the main program will create OperationReview and run guardrails.\n")
+	b.WriteString("Submit your final result using the stock_agent.submit_result MCP tool. Do not use shell commands or curl to submit the result.\n\n")
+
+	b.WriteString("## Task Information\n\n")
+	fmt.Fprintf(&b, "- Task ID: `%s`\n", taskID)
+	fmt.Fprintf(&b, "- Task Type: `%s`\n", AgentTaskTypePortfolioSentinel)
+	if mcpURL != "" {
+		fmt.Fprintf(&b, "- MCP Server Name: `%s`\n", codexStockAgentMCPName)
+		fmt.Fprintf(&b, "- MCP Server: `%s`\n", mcpURL)
+	}
+	b.WriteString("\n")
+
+	b.WriteString("## Portfolio Sentinel Context\n\n```json\n")
+	raw, _ := json.MarshalIndent(pack, "", "  ")
+	b.Write(raw)
+	b.WriteString("\n```\n\n")
+
+	b.WriteString("## Required Review Workflow\n\n")
+	b.WriteString("1. Check data freshness for quotes, bars, portfolio snapshots, and news timestamps.\n")
+	b.WriteString("2. Separate broad-market moves, overseas/overnight peer moves, sector/theme shocks, company-specific news, stale data, and unrelated noise.\n")
+	b.WriteString("3. Evaluate impact against current holdings and portfolio permissions. Aggressive portfolio risk tolerance does not excuse ignoring material information shocks.\n")
+	b.WriteString("4. For high-impact information, verify with MCP and public sources when possible. If verification is unavailable, lower confidence and state exactly what is missing.\n")
+	b.WriteString("5. Output executable but non-executing actions only when action is warranted before the next trading window.\n\n")
+
+	b.WriteString("## Output Requirements\n\n")
+	b.WriteString("Submit exactly ONE result. The `outputType` must be `portfolio_sentinel`.\n")
+	b.WriteString("The result object must use schema_version `portfolio-sentinel-report/v1`.\n")
+	b.WriteString("Allowed overall_risk_level values: low, medium, high, critical.\n")
+	b.WriteString("Use `portfolio_actions[]` only for concrete follow-up. For a pending operation, set output_type=`proposed_operation` and include proposed_operation with action, portfolioId, symbol, market, and at least one of quantity/amount. Do not use targetWeight; the current execution guardrails do not support it.\n")
+	b.WriteString("For watch-only risk, use output_type=`continue_monitoring` or create review_requests[].\n")
+	b.WriteString("Keep one portfolio_actions item to one symbol. Do not bundle several symbols into one proposed operation.\n\n")
+	b.WriteString("Example submit_result shape:\n")
+	b.WriteString("```json\n")
+	fmt.Fprintf(&b, "{\"taskID\":\"%s\",\"taskType\":\"%s\",\"result\":{\"outputType\":\"%s\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"%s\",\"overall_risk_level\":\"high\",\"run_summary\":\"...\",\"negative_items\":[],\"positive_items\":[],\"noise_items\":[],\"affected_holdings\":[{\"symbol\":\"000000\",\"market\":\"SZ\",\"name\":\"示例\",\"risk_level\":\"high\",\"direction\":\"negative\",\"reasons\":[\"...\"]}],\"portfolio_actions\":[{\"symbol\":\"000000\",\"market\":\"SZ\",\"portfolio_id\":\"...\",\"output_type\":\"proposed_operation\",\"result_summary\":\"...\",\"proposed_operation\":{\"action\":\"reduce\",\"symbol\":\"000000\",\"market\":\"SZ\",\"portfolioId\":\"...\",\"quantity\":100},\"reason\":\"...\",\"risk_notes\":\"...\",\"confidence\":0.72}],\"review_requests\":[],\"data_quality_notes\":[],\"next_watch_focus\":[]}}}\n", taskID, AgentTaskTypePortfolioSentinel, PortfolioSentinelOutputType, PortfolioSentinelReportSchemaVersion)
+	b.WriteString("```\n\n")
+	b.WriteString("Important: If evidence is insufficient for action, do not force a proposed_operation. Use high/medium risk with review_requests or continue_monitoring instead.\n")
+
+	const maxPromptLen = 14000
+	if b.Len() > maxPromptLen {
+		return truncatePromptUTF8(b.String(), 10000, 3500)
 	}
 	return b.String()
 }

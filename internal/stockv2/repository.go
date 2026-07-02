@@ -747,6 +747,70 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_stockv2_operation_reviews_active_hit
     ON stockv2_operation_reviews(hit_id)
     WHERE status <> 'closed';
 
+-- ===== Portfolio Sentinel:窗口级组合信息面 + 数据面巡检 =====
+CREATE TABLE IF NOT EXISTS stockv2_portfolio_sentinel_config (
+    id TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    pre_market_enabled INTEGER NOT NULL DEFAULT 1,
+    midday_enabled INTEGER NOT NULL DEFAULT 1,
+    post_close_enabled INTEGER NOT NULL DEFAULT 1,
+    max_news_items INTEGER NOT NULL DEFAULT 80,
+    max_news_per_holding INTEGER NOT NULL DEFAULT 20,
+    agent_doublecheck_enabled INTEGER NOT NULL DEFAULT 1,
+    updated_at DATETIME NOT NULL
+);
+INSERT OR IGNORE INTO stockv2_portfolio_sentinel_config
+    (id, enabled, pre_market_enabled, midday_enabled, post_close_enabled,
+     max_news_items, max_news_per_holding, agent_doublecheck_enabled, updated_at)
+VALUES ('default', 0, 1, 1, 1, 80, 20, 1, datetime('now'));
+CREATE TABLE IF NOT EXISTS stockv2_portfolio_sentinel_runs (
+    id TEXT PRIMARY KEY,
+    portfolio_id TEXT,
+    agent_run_id TEXT,
+    decision_ledger_id TEXT,
+    status TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    window_type TEXT NOT NULL,
+    window_start_at DATETIME NOT NULL,
+    window_end_at DATETIME NOT NULL,
+    scanned_portfolio_count INTEGER NOT NULL DEFAULT 0,
+    scanned_holding_count INTEGER NOT NULL DEFAULT 0,
+    news_event_count INTEGER NOT NULL DEFAULT 0,
+    raw_news_count INTEGER NOT NULL DEFAULT 0,
+    quote_count INTEGER NOT NULL DEFAULT 0,
+    daily_bar_symbol_count INTEGER NOT NULL DEFAULT 0,
+    minute_bar_symbol_count INTEGER NOT NULL DEFAULT 0,
+    result_risk_level TEXT,
+    generated_alert_count INTEGER NOT NULL DEFAULT 0,
+    generated_hit_count INTEGER NOT NULL DEFAULT 0,
+    generated_review_count INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    started_at DATETIME NOT NULL,
+    finished_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    FOREIGN KEY (portfolio_id) REFERENCES stockv2_portfolios(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_sentinel_runs_status ON stockv2_portfolio_sentinel_runs(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_sentinel_runs_window ON stockv2_portfolio_sentinel_runs(window_type, window_start_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_sentinel_runs_portfolio ON stockv2_portfolio_sentinel_runs(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_sentinel_runs_agent ON stockv2_portfolio_sentinel_runs(agent_run_id);
+CREATE TABLE IF NOT EXISTS stockv2_portfolio_sentinel_results (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    schema_version TEXT NOT NULL,
+    summary TEXT,
+    risk_level TEXT,
+    raw_result_json TEXT NOT NULL DEFAULT '{}',
+    context_summary_json TEXT NOT NULL DEFAULT '{}',
+    derived_alert_ids_json TEXT NOT NULL DEFAULT '[]',
+    derived_monitor_hit_ids_json TEXT NOT NULL DEFAULT '[]',
+    derived_review_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES stockv2_portfolio_sentinel_runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_sentinel_results_risk ON stockv2_portfolio_sentinel_results(risk_level);
+
 -- ===== 消息面数据资产:RawNews -> NewsEvent -> NewsLinkCandidate =====
 CREATE TABLE IF NOT EXISTS stockv2_raw_news (
     id TEXT PRIMARY KEY,
@@ -956,6 +1020,7 @@ INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('data_strategy_monitor', 0, 600, 'normal', 1800, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('portfolio_risk_monitor', 0, 600, 'normal', 1800, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('news_strategy_monitor', 0, 600, 'normal', 3600, 0, 0, datetime('now'));
+INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('portfolio_sentinel', 0, 14400, 'normal', 3600, 1, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('daily_fundamental_monitor', 0, 86400, 'normal', 3600, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('data_quality_monitor', 0, 3600, 'normal', 3600, 0, 0, datetime('now'));
 DELETE FROM stockv2_monitor_task_configs WHERE task_type IN ('universe_update', 'daily_bars_sync');
@@ -1211,6 +1276,7 @@ INSERT OR IGNORE INTO stockv2_agent_task_profiles (id, task_type, primary_model_
     ('agent-task-operation-review', 'operation_review', '', '', 0, datetime('now'), datetime('now')),
     ('agent-task-strategy-generation', 'strategy_generation', '', '', 0, datetime('now'), datetime('now')),
     ('agent-task-opportunity-discovery', 'opportunity_discovery', '', '', 0, datetime('now'), datetime('now')),
+    ('agent-task-portfolio-sentinel', 'portfolio_sentinel', '', '', 0, datetime('now'), datetime('now')),
     ('agent-task-news-event-review', 'news_event_review', '', '', 0, datetime('now'), datetime('now')),
     ('agent-task-portfolio-risk-review', 'portfolio_risk_review', '', '', 0, datetime('now'), datetime('now')),
     ('agent-task-stock-profile-summary', 'stock_profile_summary', '', '', 0, datetime('now'), datetime('now')),

@@ -123,6 +123,7 @@ type AgentExecutor interface {
 	ExecuteStrategyGeneration(ctx context.Context, taskID string, pack StrategyGenerationContext, modelName string) (*AgentExecutorOutput, error)
 	ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName string) (*AgentExecutorOutput, error)
 	ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName string) (*AgentExecutorOutput, error)
+	ExecutePortfolioSentinel(ctx context.Context, taskID string, pack PortfolioSentinelContext, modelName string) (*AgentExecutorOutput, error)
 	ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error)
 }
 
@@ -1313,6 +1314,13 @@ func (s *Service) StartBackground(ctx context.Context) {
 		defer s.bgWg.Done()
 		s.runEmbeddingMaintenanceScheduler(bgCtx)
 	}()
+
+	// 组合哨兵按固定交易决策窗口触发,不复用旧 monitor runner。
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runPortfolioSentinelScheduler(bgCtx)
+	}()
 }
 
 // StopBackground 停止后台任务
@@ -1513,6 +1521,9 @@ func (s *Service) tickScheduledMonitors(ctx context.Context) {
 	}
 	now := time.Now()
 	for taskType, cfg := range configs {
+		if taskType == MonitorTaskPortfolioSentinel {
+			continue
+		}
 		if !cfg.Enabled || cfg.IntervalSeconds <= 0 {
 			continue
 		}

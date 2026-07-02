@@ -88,6 +88,14 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/monitor/hits/{id}", s.handleStockV2GetMonitorHit)
 	mux.HandleFunc("POST /api/stockv2/monitor/hits/{id}/review", s.handleStockV2CreateReviewFromMonitorHit)
 
+	// 组合哨兵:窗口级组合信息面 + 数据面巡检。UI 由后续工作接入。
+	mux.HandleFunc("GET /api/stockv2/portfolio-sentinel/config", s.handleStockV2GetPortfolioSentinelConfig)
+	mux.HandleFunc("PUT /api/stockv2/portfolio-sentinel/config", s.handleStockV2UpdatePortfolioSentinelConfig)
+	mux.HandleFunc("POST /api/stockv2/portfolio-sentinel/runs", s.handleStockV2RunPortfolioSentinel)
+	mux.HandleFunc("GET /api/stockv2/portfolio-sentinel/runs", s.handleStockV2ListPortfolioSentinelRuns)
+	mux.HandleFunc("GET /api/stockv2/portfolio-sentinel/runs/{id}", s.handleStockV2GetPortfolioSentinelRun)
+	mux.HandleFunc("GET /api/stockv2/portfolio-sentinel/results/{id}", s.handleStockV2GetPortfolioSentinelResult)
+
 	// Operation Review(从 MonitorHit 进入人工/后续 Agent 审阅)
 	mux.HandleFunc("GET /api/stockv2/reviews", s.handleStockV2ListOperationReviews)
 	mux.HandleFunc("GET /api/stockv2/reviews/{id}", s.handleStockV2GetOperationReview)
