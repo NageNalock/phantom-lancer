@@ -75,15 +75,6 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
     sizeBytes: data.settings.file?.dbSizeBytes || 0,
   };
   const duckDBFiles = data.settings.storage?.duckdb || [];
-  const embeddingMigration = data.settings.storage?.embeddingVectorMigration;
-  const embeddingMigrationTotal = embeddingMigration?.totalVectors || 0;
-  const embeddingMigrationMoved = embeddingMigration?.migratedVectors || 0;
-  const embeddingMigrationRemaining = embeddingMigration?.remainingVectors || 0;
-  const embeddingMigrationPercent = embeddingMigrationTotal > 0
-    ? Math.min(100, Math.max(0, Math.round((embeddingMigrationMoved / embeddingMigrationTotal) * 100)))
-    : embeddingMigration?.status === "completed"
-      ? 100
-      : 0;
   const [listenAddr, setListenAddr] = useState<string>(currentEndpoint.addr || currentRuntime.addr || data.settings.file?.addr || "");
   const [tlsEnabled, setTlsEnabled] = useState<boolean>(Boolean(currentEndpoint.tlsEnabled || currentRuntime.tlsEnabled));
   const [tlsCertFile, setTlsCertFile] = useState<string>(currentRuntime.tlsCertFile || "");
@@ -462,32 +453,6 @@ export function SettingsView({ actions, data }: { actions: AppActions; data: App
                     </div>
                   )}
                 </div>
-
-                {embeddingMigration ? (
-                  <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium">Embedding 向量存储迁移</div>
-                        <p className="muted mt-1 mb-0 text-xs">向量从长表搬迁到一行一个 vector_ref 的紧凑表，进度来自轻量元数据。</p>
-                      </div>
-                      <Pill tone={embeddingMigration.status === "completed" ? "good" : embeddingMigration.status === "failed" ? "danger" : "warn"}>
-                        {embeddingMigration.status || "pending"}
-                      </Pill>
-                    </div>
-                    <div className="mt-3 h-2 overflow-hidden rounded-full bg-[var(--surface)]">
-                      <div className="h-full bg-[var(--accent)]" style={{ width: `${embeddingMigrationPercent}%` }} />
-                    </div>
-                    <div className="mt-2 grid gap-1 text-xs text-[var(--muted-strong)] sm:grid-cols-4">
-                      <div>已搬迁 {embeddingMigrationMoved.toLocaleString()}</div>
-                      <div>剩余 {embeddingMigrationRemaining.toLocaleString()}</div>
-                      <div>总计 {embeddingMigrationTotal.toLocaleString()}</div>
-                      <div>批次 {embeddingMigration?.batchSize || 0}</div>
-                    </div>
-                    {embeddingMigration.lastError ? (
-                      <div className="mt-2 text-xs text-[var(--danger)]">{embeddingMigration.lastError}</div>
-                    ) : null}
-                  </div>
-                ) : null}
               </div>
             </Panel>
           </div>

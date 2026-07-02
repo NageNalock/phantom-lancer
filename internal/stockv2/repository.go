@@ -590,20 +590,6 @@ CREATE TABLE IF NOT EXISTS stockv2_settings (
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
 );
-CREATE TABLE IF NOT EXISTS stockv2_embedding_vector_migrations (
-    id TEXT PRIMARY KEY,
-    schema_version INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    total_vectors INTEGER NOT NULL DEFAULT 0,
-    migrated_vectors INTEGER NOT NULL DEFAULT 0,
-    remaining_vectors INTEGER NOT NULL DEFAULT 0,
-    batch_size INTEGER NOT NULL DEFAULT 0,
-    last_vector_ref TEXT,
-    last_error TEXT,
-    started_at DATETIME,
-    completed_at DATETIME,
-    updated_at DATETIME NOT NULL
-);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_symbol ON stockv2_instruments(symbol);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_market ON stockv2_instruments(market);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_industry ON stockv2_instruments(industry);

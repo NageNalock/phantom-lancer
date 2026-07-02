@@ -1,14 +1,11 @@
 package httpapi
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
-
-	"phantom-lancer/internal/stockv2"
 )
 
 type localDatabaseFileStat struct {
@@ -21,9 +18,8 @@ type localDatabaseFileStat struct {
 }
 
 type localStorageStats struct {
-	SQLite                   localDatabaseFileStat                   `json:"sqlite"`
-	DuckDB                   []localDatabaseFileStat                 `json:"duckdb"`
-	EmbeddingVectorMigration *stockv2.EmbeddingVectorMigrationStatus `json:"embeddingVectorMigration,omitempty"`
+	SQLite localDatabaseFileStat   `json:"sqlite"`
+	DuckDB []localDatabaseFileStat `json:"duckdb"`
 }
 
 func (s *Server) settingsLocalStorageStats() localStorageStats {
@@ -45,16 +41,10 @@ func (s *Server) settingsLocalStorageStats() localStorageStats {
 		}
 	}
 
-	stats := localStorageStats{
+	return localStorageStats{
 		SQLite: sqlite,
 		DuckDB: collectDuckDBFileStats(s.cfg.DataDir, s.cfg.DBPath),
 	}
-	if s.stockV2 != nil {
-		if status, err := s.stockV2.EmbeddingVectorMigrationStatus(context.Background()); err == nil {
-			stats.EmbeddingVectorMigration = &status
-		}
-	}
-	return stats
 }
 
 func collectDuckDBFileStats(dataDir, dbPath string) []localDatabaseFileStat {
