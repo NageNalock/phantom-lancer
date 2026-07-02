@@ -79,3 +79,39 @@ func TestMigrateEmbeddingVectorsOnceMovesLegacyRowsAndUpdatesStatus(t *testing.T
 		t.Fatalf("legacy rows after v2-only upsert = %d", legacyRows)
 	}
 }
+
+func TestUpsertEmbeddingVectorCleansLegacyRowWhenMigrationCompletesDuringWrite(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := store.EnsureEmbeddingVectorMigrationStatus(ctx, 1, 0, 200); err != nil {
+		t.Fatalf("ensure running migration: %v", err)
+	}
+	if err := store.marketDB.UpsertEmbeddingVector(ctx, EmbeddingAsset{
+		VectorRef:  "vec-race",
+		ModelID:    "embedding-model-1",
+		ObjectType: EmbeddingObjectStockProfile,
+		ObjectID:   "688012",
+	}, []float64{0.1, 0.2}); err != nil {
+		t.Fatalf("upsert while running: %v", err)
+	}
+	if err := store.MarkEmbeddingVectorMigrationProgress(ctx, 1, 1, 200, "vec-race"); err != nil {
+		t.Fatalf("mark completed: %v", err)
+	}
+
+	if err := store.UpsertEmbeddingVector(ctx, EmbeddingAsset{
+		VectorRef:  "vec-race",
+		ModelID:    "embedding-model-1",
+		ObjectType: EmbeddingObjectStockProfile,
+		ObjectID:   "688012",
+	}, []float64{0.2, 0.4}); err != nil {
+		t.Fatalf("upsert after completed: %v", err)
+	}
+	var legacyRows int
+	if err := store.marketDB.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_embedding_vectors WHERE vector_ref = 'vec-race'`).Scan(&legacyRows); err != nil {
+		t.Fatalf("count legacy rows: %v", err)
+	}
+	if legacyRows != 0 {
+		t.Fatalf("legacy rows after completed upsert = %d", legacyRows)
+	}
+}

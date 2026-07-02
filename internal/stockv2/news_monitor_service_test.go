@@ -123,6 +123,52 @@ func TestRunNewsStrategyMonitorHitsActiveStrategy(t *testing.T) {
 	}
 }
 
+func TestRunNewsStrategyMonitorSkipsHighScoreUnrelatedCandidate(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+
+	seedNewsLinkProfile(t, svc, StockV2Instrument{
+		ID:             "inst-news-unrelated",
+		Symbol:         "301526",
+		Market:         "SZ",
+		InstrumentType: InstrumentTypeStock,
+		Name:           "国际复材",
+		Status:         "active",
+	})
+	event := createNewsLinkEvent(t, svc, NewsEvent{Source: "test", Title: "国际复材发布异动公告"})
+	candidates, err := svc.LinkNewsEvent(ctx, event.ID)
+	if err != nil {
+		t.Fatalf("link news event: %v", err)
+	}
+	candidate := newsCandidateForSymbol(t, candidates, "301526")
+	if candidate.Score < newsMonitorHighScoreThreshold {
+		t.Fatalf("candidate score = %f, want high score", candidate.Score)
+	}
+
+	run, err := svc.RunMonitorTask(ctx, MonitorTaskNewsStrategyMonitor, MonitorTriggerManual)
+	if err != nil {
+		t.Fatalf("run news monitor: %v", err)
+	}
+	if run.HitCount != 0 {
+		t.Fatalf("hit count = %d, want 0 for unrelated high score candidate", run.HitCount)
+	}
+	hits, err := svc.ListMonitorHits(ctx, MonitorHitListFilter{TaskType: MonitorTaskNewsStrategyMonitor, Symbol: "301526", Limit: 10})
+	if err != nil {
+		t.Fatalf("list hits: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("hits = %+v, want none", hits)
+	}
+	monitored, err := svc.store.GetNewsLinkCandidate(ctx, candidate.ID)
+	if err != nil {
+		t.Fatalf("get candidate: %v", err)
+	}
+	if monitored.MonitorStatus != NewsLinkMonitorStatusSkipped {
+		t.Fatalf("monitor status = %s, want skipped", monitored.MonitorStatus)
+	}
+}
+
 func TestRunNewsStrategyMonitorSkipsLowQualityCandidate(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStrategyTestService(t)
@@ -172,6 +218,19 @@ func TestNewsMonitorReviewContextIncludesNews(t *testing.T) {
 		Name:           "比亚迪",
 		Status:         "active",
 	})
+	portfolio := createStrategyTestPortfolio(t, svc.store, "portfolio-news-context")
+	if err := svc.store.CreateHolding(ctx, StockV2Holding{
+		ID:                "holding-news-context",
+		PortfolioID:       portfolio.ID,
+		Symbol:            "002594",
+		Market:            "SZ",
+		Name:              "比亚迪",
+		Quantity:          100,
+		AvailableQuantity: 100,
+		CostPrice:         200,
+	}); err != nil {
+		t.Fatalf("create holding: %v", err)
+	}
 	event := createNewsLinkEvent(t, svc, NewsEvent{
 		RawNewsID:     "raw-news-context",
 		Source:        NewsSourceJin10,

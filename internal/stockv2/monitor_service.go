@@ -1114,16 +1114,20 @@ func newsMonitorCandidateDecision(
 		}
 		decision.Reasons = append(decision.Reasons, "active_strategy")
 	}
-	if newsEventImportant(event) {
-		decision.Hit = true
+	if decision.Hit && newsEventImportant(event) {
 		decision.Reasons = append(decision.Reasons, "important_news")
 	}
-	if candidate.Score >= newsMonitorHighScoreThreshold {
-		decision.Hit = true
+	if decision.Hit && candidate.Score >= newsMonitorHighScoreThreshold {
 		decision.Reasons = append(decision.Reasons, "high_score")
 	}
 	if !decision.Hit {
-		decision.Reasons = append(decision.Reasons, "low_score_no_relevant_object")
+		if newsEventImportant(event) {
+			decision.Reasons = append(decision.Reasons, "important_news_unrelated")
+		}
+		if candidate.Score >= newsMonitorHighScoreThreshold {
+			decision.Reasons = append(decision.Reasons, "high_score_unrelated")
+		}
+		decision.Reasons = append(decision.Reasons, "no_relevant_portfolio_or_strategy")
 	}
 	return decision
 }

@@ -50,9 +50,19 @@ func (s *Store) UpsertEmbeddingVector(ctx context.Context, asset EmbeddingAsset,
 	}
 	ready, err := s.embeddingVectorV2Ready(ctx)
 	if err == nil && ready {
-		return s.marketDB.UpsertEmbeddingVectorV2(ctx, asset, vector)
+		if err := s.marketDB.UpsertEmbeddingVectorV2(ctx, asset, vector); err != nil {
+			return err
+		}
+		return s.marketDB.DeleteLegacyEmbeddingVector(ctx, asset.VectorRef)
 	}
-	return s.marketDB.UpsertEmbeddingVector(ctx, asset, vector)
+	if err := s.marketDB.UpsertEmbeddingVector(ctx, asset, vector); err != nil {
+		return err
+	}
+	ready, err = s.embeddingVectorV2Ready(ctx)
+	if err == nil && ready {
+		return s.marketDB.DeleteLegacyEmbeddingVector(ctx, asset.VectorRef)
+	}
+	return nil
 }
 
 func (s *Store) DeleteEmbeddingVector(ctx context.Context, vectorRef string) error {
@@ -133,6 +143,14 @@ func (s *MarketDataStore) DeleteEmbeddingVector(ctx context.Context, vectorRef s
 		return wrapError(err, "delete embedding vector v2")
 	}
 	return wrapError(tx.Commit(), "commit delete embedding vector")
+}
+
+func (s *MarketDataStore) DeleteLegacyEmbeddingVector(ctx context.Context, vectorRef string) error {
+	if s == nil || s.db == nil || vectorRef == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM stockv2_embedding_vectors WHERE vector_ref = ?`, vectorRef)
+	return wrapError(err, "delete legacy embedding vector")
 }
 
 func (s *MarketDataStore) UpsertEmbeddingVectorV2(ctx context.Context, asset EmbeddingAsset, vector []float64) error {
