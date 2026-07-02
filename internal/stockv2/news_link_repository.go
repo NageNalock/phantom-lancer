@@ -8,8 +8,6 @@ import (
 	"time"
 )
 
-const newsLinkWriteConflictRetries = 3
-
 func (s *Store) CreateNewsEvent(ctx context.Context, event NewsEvent) (NewsEvent, error) {
 	now := time.Now()
 	if event.ID == "" {
@@ -102,7 +100,7 @@ func (s *Store) UpdateNewsEventLinkStatus(ctx context.Context, id, status string
 		processedAt = time.Now()
 	}
 	var result sql.Result
-	err := retryNewsLinkWriteConflict(ctx, func() error {
+	err := retryStockV2TransientWriteConflict(ctx, func() error {
 		var execErr error
 		result, execErr = s.assetDB().ExecContext(ctx, `
 			UPDATE stockv2_news_events
@@ -136,7 +134,7 @@ func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, candidate NewsLinkC
 		candidate.CreatedAt = now
 	}
 	candidate.UpdatedAt = now
-	err := retryNewsLinkWriteConflict(ctx, func() error {
+	err := retryStockV2TransientWriteConflict(ctx, func() error {
 		_, execErr := s.assetDB().ExecContext(ctx, `
 			INSERT INTO stockv2_news_link_candidates (
 				id, news_event_id, raw_news_id, symbol, market, instrument_name,
@@ -173,34 +171,6 @@ func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, candidate NewsLinkC
 		return NewsLinkCandidate{}, wrapError(err, "get upserted news link candidate")
 	}
 	return item, nil
-}
-
-func retryNewsLinkWriteConflict(ctx context.Context, exec func() error) error {
-	var err error
-	for attempt := 0; attempt <= newsLinkWriteConflictRetries; attempt++ {
-		err = exec()
-		if err == nil || !isDuckDBTransientWriteConflict(err) {
-			return err
-		}
-		timer := time.NewTimer(time.Duration(attempt+1) * 80 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
-	return err
-}
-
-func isDuckDBTransientWriteConflict(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "write-write conflict") ||
-		strings.Contains(msg, "conflict on tuple deletion") ||
-		strings.Contains(msg, "duplicate key")
 }
 
 func (s *Store) GetNewsLinkCandidate(ctx context.Context, id string) (NewsLinkCandidate, error) {

@@ -513,7 +513,13 @@ func (s *Service) GetLatestDailyBarJob(ctx context.Context) (StockV2DailyBarJob,
 }
 
 func (s *Service) recordDailyBarsLastRun(ctx context.Context, when time.Time) {
-	settings := s.settings
+	settings, err := s.GetSettings(ctx)
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("load settings before updating daily bars last run failed", "last_run_at", when.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 240))
+		}
+		return
+	}
 	settings.DailyBarsLastRun = when
 	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil {
 		if s.log != nil {
