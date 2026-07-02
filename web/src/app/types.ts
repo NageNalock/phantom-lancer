@@ -145,9 +145,25 @@ export interface LocalDatabaseFileStat {
   updatedAt?: string;
 }
 
+export interface EmbeddingVectorMigrationStatus {
+  id?: string;
+  schemaVersion?: number;
+  status?: string;
+  totalVectors?: number;
+  migratedVectors?: number;
+  remainingVectors?: number;
+  batchSize?: number;
+  lastVectorRef?: string;
+  lastError?: string;
+  startedAt?: string;
+  completedAt?: string;
+  updatedAt?: string;
+}
+
 export interface LocalStorageStats {
   sqlite?: LocalDatabaseFileStat;
   duckdb?: LocalDatabaseFileStat[];
+  embeddingVectorMigration?: EmbeddingVectorMigrationStatus;
 }
 
 export interface SystemSettings {

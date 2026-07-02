@@ -1301,6 +1301,13 @@ func (s *Service) StartBackground(ctx context.Context) {
 		s.runNewsSourceScheduler(bgCtx)
 	}()
 
+	// NewsLinkCandidate 保留策略：清理低价值旧候选，避免消息面弱关联无限增长。
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runNewsLinkCandidateRetentionScheduler(bgCtx)
+	}()
+
 	// base profile 自动维护：只维护确定性画像，不触发全市场 AI。
 	s.bgWg.Add(1)
 	go func() {
@@ -1313,6 +1320,13 @@ func (s *Service) StartBackground(ctx context.Context) {
 	go func() {
 		defer s.bgWg.Done()
 		s.runEmbeddingMaintenanceScheduler(bgCtx)
+	}()
+
+	// embedding 向量紧凑存储迁移：前台只读 SQLite 进度，搬迁批次后台执行。
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runEmbeddingVectorMigrationScheduler(bgCtx)
 	}()
 
 	// 组合哨兵按固定交易决策窗口触发,不复用旧 monitor runner。
