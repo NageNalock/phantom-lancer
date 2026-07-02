@@ -19,8 +19,8 @@ func TestListMonitorTasksReturnsBuiltin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list monitor tasks: %v", err)
 	}
-	if len(tasks) != 6 {
-		t.Fatalf("task count = %d, want 6", len(tasks))
+	if len(tasks) != 7 {
+		t.Fatalf("task count = %d, want 7", len(tasks))
 	}
 	runnable := make(map[string]bool, len(tasks))
 	enabledTasks := make(map[string]bool)
@@ -42,8 +42,8 @@ func TestListMonitorTasksReturnsBuiltin(t *testing.T) {
 	if !runnable[MonitorTaskDataStrategyMonitor] || !runnable[MonitorTaskPortfolioRiskMonitor] || !runnable[MonitorTaskNewsStrategyMonitor] {
 		t.Fatalf("data_strategy / portfolio_risk / news must be runnable")
 	}
-	if runnable[MonitorTaskDailyFundamentalMonitor] || runnable[MonitorTaskDataQualityMonitor] {
-		t.Fatalf("fundamental / quality must not be runnable this round")
+	if runnable[MonitorTaskDailyFundamentalMonitor] || runnable[MonitorTaskDataQualityMonitor] || runnable[MonitorTaskPortfolioSentinel] {
+		t.Fatalf("fundamental / quality / portfolio_sentinel must not be runnable through monitor API")
 	}
 }
 

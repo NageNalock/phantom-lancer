@@ -511,6 +511,39 @@ func (f fakeOperationReviewExecutor) ExecuteOpportunityDiscovery(ctx context.Con
 	}, f.execErr
 }
 
+func (f fakeOperationReviewExecutor) ExecutePortfolioSentinel(ctx context.Context, taskID string, pack PortfolioSentinelContext, modelName string) (*AgentExecutorOutput, error) {
+	result := f.result
+	if result == nil {
+		result = map[string]any{
+			"schema_version":     PortfolioSentinelReportSchemaVersion,
+			"overall_risk_level": PortfolioSentinelRiskLow,
+			"run_summary":        "fake portfolio sentinel",
+			"portfolio_actions":  []any{},
+			"affected_holdings":  []any{},
+		}
+	}
+	if f.submit {
+		_, _ = f.pool.submitResult(taskID, AgentTaskTypePortfolioSentinel, AgentTaskSubmittedResult{
+			OutputType:    PortfolioSentinelOutputType,
+			ResultSummary: f.summary,
+			Result:        result,
+			Confidence:    f.confidence,
+		})
+	}
+	exitCode := 0
+	stderr := ""
+	if f.execErr != nil {
+		exitCode = 1
+		stderr = f.execErr.Error()
+	}
+	return &AgentExecutorOutput{
+		StdoutTail: "fake portfolio sentinel stdout",
+		StderrTail: stderr,
+		ExitCode:   exitCode,
+		Duration:   time.Millisecond,
+	}, f.execErr
+}
+
 func mcpSubmitResultRequest(taskID, outputType, summary string, result map[string]any, confidence float64) []byte {
 	raw, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",

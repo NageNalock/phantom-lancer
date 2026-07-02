@@ -15,6 +15,7 @@ const (
 	MonitorTaskDataStrategyMonitor     = "data_strategy_monitor"
 	MonitorTaskPortfolioRiskMonitor    = "portfolio_risk_monitor"
 	MonitorTaskNewsStrategyMonitor     = "news_strategy_monitor"
+	MonitorTaskPortfolioSentinel       = AgentTaskTypePortfolioSentinel
 	MonitorTaskDailyFundamentalMonitor = "daily_fundamental_monitor"
 	MonitorTaskDataQualityMonitor      = "data_quality_monitor"
 )
@@ -157,6 +158,17 @@ func builtinMonitorTaskDefinitions() []MonitorTaskDefinition {
 			Configurable: true,
 			DefaultConfig: MonitorTaskConfig{
 				Enabled: true, IntervalSeconds: 30, Sensitivity: "normal",
+			},
+		},
+		{
+			TaskType:     MonitorTaskPortfolioSentinel,
+			Label:        "组合哨兵",
+			Description:  "窗口级扫描组合信息面与数据面,由 Agent 判断风险并派生 Review",
+			Category:     "portfolio",
+			Runnable:     false,
+			Configurable: false,
+			DefaultConfig: MonitorTaskConfig{
+				Enabled: false, IntervalSeconds: 14400, Sensitivity: "normal", CooldownSeconds: 3600, AgentDoublecheckEnabled: true,
 			},
 		},
 		{

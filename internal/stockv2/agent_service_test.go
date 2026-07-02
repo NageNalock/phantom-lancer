@@ -1236,6 +1236,30 @@ func (f fakeDebugAgentExecutor) ExecuteOpportunityDiscovery(ctx context.Context,
 	}, nil
 }
 
+func (f fakeDebugAgentExecutor) ExecutePortfolioSentinel(ctx context.Context, taskID string, pack PortfolioSentinelContext, modelName string) (*AgentExecutorOutput, error) {
+	_, err := f.pool.submitResult(taskID, AgentTaskTypePortfolioSentinel, AgentTaskSubmittedResult{
+		OutputType:    PortfolioSentinelOutputType,
+		ResultSummary: "portfolio sentinel ok",
+		Result: map[string]any{
+			"schema_version":     PortfolioSentinelReportSchemaVersion,
+			"overall_risk_level": PortfolioSentinelRiskLow,
+			"run_summary":        "debug portfolio sentinel ok",
+			"portfolio_actions":  []any{},
+			"affected_holdings":  []any{},
+		},
+		Confidence: 1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &AgentExecutorOutput{
+		StdoutTail:    "portfolio sentinel stdout",
+		ExitCode:      0,
+		Duration:      time.Millisecond,
+		RawTranscript: "portfolio sentinel stdout",
+	}, nil
+}
+
 func (f fakeDebugAgentExecutor) ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error) {
 	_, err := f.pool.submitResult(taskID, AgentTaskTypeStockProfileSummary, AgentTaskSubmittedResult{
 		OutputType:    AgentTaskTypeStockProfileSummary,

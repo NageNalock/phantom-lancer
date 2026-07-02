@@ -74,6 +74,7 @@ const (
 	AgentTaskTypeOperationReview      = "operation_review"
 	AgentTaskTypeStrategyGeneration   = "strategy_generation"
 	AgentTaskTypeOpportunityDiscovery = "opportunity_discovery"
+	AgentTaskTypePortfolioSentinel    = "portfolio_sentinel"
 	AgentTaskTypeNewsEventReview      = "news_event_review"
 	AgentTaskTypePortfolioRiskReview  = "portfolio_risk_review"
 	AgentTaskTypeStockProfileSummary  = "stock_profile_summary"
@@ -102,6 +103,7 @@ const (
 	agentTaskOperationReviewSeedID      = "agent-task-operation-review"
 	agentTaskStrategyGenerationSeedID   = "agent-task-strategy-generation"
 	agentTaskOpportunityDiscoverySeedID = "agent-task-opportunity-discovery"
+	agentTaskPortfolioSentinelSeedID    = "agent-task-portfolio-sentinel"
 	agentTaskNewsEventReviewSeedID      = "agent-task-news-event-review"
 	agentTaskPortfolioRiskReviewSeedID  = "agent-task-portfolio-risk-review"
 	agentTaskStockProfileSummarySeedID  = "agent-task-stock-profile-summary"
@@ -337,6 +339,7 @@ type AgentExecutionDetail struct {
 	InputContext               *AgentContextPack               `json:"inputContext,omitempty"`
 	StrategyGenerationSteps    []StrategyGenerationStepRun     `json:"strategyGenerationSteps,omitempty"`
 	StrategyGenerationContexts []StrategyGenerationContextItem `json:"strategyGenerationContexts,omitempty"`
+	Metadata                   map[string]any                  `json:"metadata,omitempty"`
 }
 
 // ===== 内部参数 / 返回 struct =====
@@ -457,6 +460,7 @@ func knownAgentTaskType(v string) bool {
 	case AgentTaskTypeOperationReview,
 		AgentTaskTypeStrategyGeneration,
 		AgentTaskTypeOpportunityDiscovery,
+		AgentTaskTypePortfolioSentinel,
 		AgentTaskTypeNewsEventReview,
 		AgentTaskTypePortfolioRiskReview,
 		AgentTaskTypeStockProfileSummary,
@@ -471,6 +475,7 @@ func executableAgentTaskType(v string) bool {
 	return v == AgentTaskTypeOperationReview ||
 		v == AgentTaskTypeStrategyGeneration ||
 		v == AgentTaskTypeOpportunityDiscovery ||
+		v == AgentTaskTypePortfolioSentinel ||
 		v == AgentTaskTypeStockProfileSummary
 }
 
@@ -482,6 +487,8 @@ func validAgentTaskOutputType(taskType, outputType string) bool {
 		return outputType == StrategyGenerationOutputType
 	case AgentTaskTypeOpportunityDiscovery:
 		return outputType == OpportunityDiscoveryOutputType
+	case AgentTaskTypePortfolioSentinel:
+		return outputType == PortfolioSentinelOutputType
 	case AgentTaskTypeStockProfileSummary:
 		return outputType == AgentTaskTypeStockProfileSummary
 	default:
