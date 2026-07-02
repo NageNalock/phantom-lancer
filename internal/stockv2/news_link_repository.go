@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -188,7 +189,18 @@ func (s *Store) GetNewsLinkCandidate(ctx context.Context, id string) (NewsLinkCa
 func (s *Store) ListPendingNewsLinkCandidates(ctx context.Context, limit int) ([]NewsLinkCandidate, error) {
 	rows, err := s.assetDB().QueryContext(ctx, newsLinkCandidateSelectSQL()+`
 		WHERE COALESCE(c.monitor_status, ?) = ?
-		ORDER BY c.updated_at ASC, c.score DESC, c.symbol ASC
+		ORDER BY
+			CASE
+				WHEN c.score >= 80 THEN 0
+				WHEN c.match_method = 'boosted' THEN 1
+				WHEN c.match_method IN ('exact_symbol', 'exact_name', 'alias') THEN 2
+				WHEN c.match_method = 'semantic_profile' AND c.score >= 70 THEN 3
+				WHEN c.match_method = 'keyword' THEN 4
+				ELSE 5
+			END ASC,
+			c.score DESC,
+			c.updated_at ASC,
+			c.symbol ASC
 		LIMIT ?
 	`, NewsLinkMonitorStatusPending, NewsLinkMonitorStatusPending, normalizedPageLimit(limit, 500))
 	if err != nil {
@@ -239,6 +251,57 @@ func (s *Store) CountNewsLinkCandidates(ctx context.Context, filter NewsLinkCand
 		return 0, wrapError(err, "count news link candidates")
 	}
 	return count, nil
+}
+
+type NewsLinkCandidateRetentionResult struct {
+	DeletedSkippedFailed int `json:"deletedSkippedFailed"`
+	DeletedLowConfidence int `json:"deletedLowConfidence"`
+	DeletedTotal         int `json:"deletedTotal"`
+}
+
+func (s *Store) PruneNewsLinkCandidates(ctx context.Context, now time.Time) (NewsLinkCandidateRetentionResult, error) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	var result NewsLinkCandidateRetentionResult
+	deleted, err := s.deleteNewsLinkCandidates(ctx, `
+		COALESCE(monitor_status, ?) IN (?, ?)
+		AND COALESCE(updated_at, created_at) < ?
+	`, NewsLinkMonitorStatusPending, NewsLinkMonitorStatusSkipped, NewsLinkMonitorStatusFailed, now.AddDate(0, 0, -14))
+	if err != nil {
+		return result, err
+	}
+	result.DeletedSkippedFailed = deleted
+
+	deleted, err = s.deleteNewsLinkCandidates(ctx, `
+		COALESCE(monitor_status, ?) = ?
+		AND match_method IN (?, ?, ?)
+		AND score < ?
+		AND COALESCE(updated_at, created_at) < ?
+	`, NewsLinkMonitorStatusPending, NewsLinkMonitorStatusPending,
+		NewsLinkMatchProfileKeyword, NewsLinkMatchSemanticProfile, NewsLinkMatchKeyword,
+		55.0, now.AddDate(0, 0, -3))
+	if err != nil {
+		return result, err
+	}
+	result.DeletedLowConfidence = deleted
+	result.DeletedTotal = result.DeletedSkippedFailed + result.DeletedLowConfidence
+	return result, nil
+}
+
+func (s *Store) deleteNewsLinkCandidates(ctx context.Context, where string, args ...any) (int, error) {
+	result, err := s.assetDB().ExecContext(ctx, `DELETE FROM stockv2_news_link_candidates WHERE `+where, args...)
+	if err != nil {
+		return 0, wrapError(err, "delete news link candidates")
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, wrapError(err, "check deleted news link candidates")
+	}
+	if rows > int64(^uint(0)>>1) {
+		return 0, fmt.Errorf("delete news link candidates affected rows overflow: %d", rows)
+	}
+	return int(rows), nil
 }
 
 func newsEventSelectSQL() string {

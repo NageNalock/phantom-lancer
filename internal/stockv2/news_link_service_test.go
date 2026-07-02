@@ -2,8 +2,10 @@ package stockv2
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLinkNewsEventMatchesStockName(t *testing.T) {
@@ -110,6 +112,168 @@ func TestLinkNewsEventUsesSemanticProfileRecall(t *testing.T) {
 	}
 	if candidates[0].Symbol != "300750" || candidates[0].MatchMethod != NewsLinkMatchSemanticProfile {
 		t.Fatalf("candidate = %+v, want semantic profile 300750", candidates[0])
+	}
+}
+
+func TestLinkNewsEventIgnoresGenericEnglishProfileTextTerms(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	if _, err := svc.store.UpsertStockProfile(ctx, StockProfile{
+		Symbol:          "600000",
+		Market:          "SH",
+		Name:            "浦发银行",
+		ProfileText:     "bank is on the market for retail credit",
+		AIProfileStatus: StockProfileAIStatusReady,
+	}); err != nil {
+		t.Fatalf("upsert profile: %v", err)
+	}
+
+	event := createNewsLinkEvent(t, svc, NewsEvent{
+		Source: "test",
+		Title:  "BoE's Mann: the question is whether there will be upside surprises in fiscal policy.",
+	})
+	candidates, err := svc.LinkNewsEvent(ctx, event.ID)
+	if err != nil {
+		t.Fatalf("link news event: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("candidates = %+v, want generic English terms ignored", candidates)
+	}
+}
+
+func TestLinkNewsEventKeepsSpecificEnglishProfileTextTerm(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	if _, err := svc.store.UpsertStockProfile(ctx, StockProfile{
+		Symbol:          "688001",
+		Market:          "SH",
+		Name:            "半导体设备",
+		ProfileText:     "semiconductor lithography equipment",
+		AIProfileStatus: StockProfileAIStatusReady,
+	}); err != nil {
+		t.Fatalf("upsert profile: %v", err)
+	}
+
+	event := createNewsLinkEvent(t, svc, NewsEvent{Source: "test", Title: "Semiconductor equipment demand improves"})
+	candidates, err := svc.LinkNewsEvent(ctx, event.ID)
+	if err != nil {
+		t.Fatalf("link news event: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].MatchMethod != NewsLinkMatchProfileKeyword || !newsTestContains(candidates[0].MatchedTerms, "semiconductor") {
+		t.Fatalf("candidates = %+v, want specific English profile keyword", candidates)
+	}
+}
+
+func TestListPendingNewsLinkCandidatesPrioritizesHighConfidence(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	event := createNewsLinkEvent(t, svc, NewsEvent{Source: "test", Title: "消息面队列排序"})
+	for _, candidate := range []NewsLinkCandidate{
+		{
+			NewsEventID:    event.ID,
+			Symbol:         "600000",
+			Market:         "SH",
+			InstrumentName: "低分噪音",
+			MatchMethod:    NewsLinkMatchProfileKeyword,
+			Score:          newsScoreProfileKeyword,
+			Reason:         "低分画像文本",
+			MatchedTerms:   []string{"market"},
+		},
+		{
+			NewsEventID:    event.ID,
+			Symbol:         "300750",
+			Market:         "SZ",
+			InstrumentName: "高分明确命中",
+			MatchMethod:    NewsLinkMatchExactName,
+			Score:          newsScoreExactName,
+			Reason:         "命中标的名称",
+			MatchedTerms:   []string{"高分明确命中"},
+		},
+		{
+			NewsEventID:    event.ID,
+			Symbol:         "162719",
+			Market:         "SZ",
+			InstrumentName: "一般语义召回",
+			MatchMethod:    NewsLinkMatchSemanticProfile,
+			Score:          61,
+			Reason:         "语义召回画像",
+			MatchedTerms:   []string{"一般语义召回"},
+		},
+	} {
+		if _, err := svc.store.UpsertNewsLinkCandidate(ctx, candidate); err != nil {
+			t.Fatalf("upsert candidate %s: %v", candidate.Symbol, err)
+		}
+	}
+
+	pending, err := svc.store.ListPendingNewsLinkCandidates(ctx, 2)
+	if err != nil {
+		t.Fatalf("list pending candidates: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("pending = %+v, want two", pending)
+	}
+	if pending[0].Symbol != "300750" || pending[1].Symbol != "162719" {
+		t.Fatalf("pending order = %+v, want high-confidence candidates before low-score profile keyword", pending)
+	}
+}
+
+func TestPruneNewsLinkCandidatesKeepsHighValueRecords(t *testing.T) {
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	event := createNewsLinkEvent(t, svc, NewsEvent{ID: "event-retention", Source: "test", Title: "通用市场消息"})
+	old := time.Now().AddDate(0, 0, -15)
+
+	candidates := []NewsLinkCandidate{
+		{
+			ID: "old-skipped", NewsEventID: event.ID, Symbol: "600001", Market: "SH", InstrumentName: "低价值已跳过",
+			MatchMethod: NewsLinkMatchProfileKeyword, Score: 40, MonitorStatus: NewsLinkMonitorStatusSkipped,
+		},
+		{
+			ID: "old-low-pending", NewsEventID: event.ID, Symbol: "600002", Market: "SH", InstrumentName: "低价值待处理",
+			MatchMethod: NewsLinkMatchSemanticProfile, Score: 45, MonitorStatus: NewsLinkMonitorStatusPending,
+		},
+		{
+			ID: "old-hit", NewsEventID: event.ID, Symbol: "600003", Market: "SH", InstrumentName: "已命中",
+			MatchMethod: NewsLinkMatchSemanticProfile, Score: 40, MonitorStatus: NewsLinkMonitorStatusHit,
+		},
+		{
+			ID: "old-high", NewsEventID: event.ID, Symbol: "600004", Market: "SH", InstrumentName: "高分候选",
+			MatchMethod: NewsLinkMatchSemanticProfile, Score: 90, MonitorStatus: NewsLinkMonitorStatusPending,
+		},
+	}
+	for _, candidate := range candidates {
+		if _, err := svc.store.UpsertNewsLinkCandidate(ctx, candidate); err != nil {
+			t.Fatalf("upsert candidate %s: %v", candidate.ID, err)
+		}
+	}
+	if _, err := svc.store.assetDB().ExecContext(ctx, `
+		UPDATE stockv2_news_link_candidates
+		SET created_at = ?, updated_at = ?
+		WHERE id IN ('old-skipped', 'old-low-pending', 'old-hit', 'old-high')
+	`, old, old); err != nil {
+		t.Fatalf("age candidates: %v", err)
+	}
+
+	result, err := svc.store.PruneNewsLinkCandidates(ctx, time.Now())
+	if err != nil {
+		t.Fatalf("prune candidates: %v", err)
+	}
+	if result.DeletedTotal != 2 {
+		t.Fatalf("deleted total = %d, result = %#v", result.DeletedTotal, result)
+	}
+	for _, id := range []string{"old-hit", "old-high"} {
+		if _, err := svc.store.GetNewsLinkCandidate(ctx, id); err != nil {
+			t.Fatalf("expected %s to remain: %v", id, err)
+		}
+	}
+	for _, id := range []string{"old-skipped", "old-low-pending"} {
+		if _, err := svc.store.GetNewsLinkCandidate(ctx, id); !errors.Is(err, ErrNewsLinkCandidateNotFound) {
+			t.Fatalf("expected %s deleted, err = %v", id, err)
+		}
 	}
 }
 

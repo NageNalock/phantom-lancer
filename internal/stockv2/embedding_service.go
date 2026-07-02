@@ -607,7 +607,7 @@ func validateEmbeddingModel(model AgentModelProfile) error {
 	}
 	// 维度可选：火山引擎 / OpenAI 等 embedding 的维度由 API 返回决定，用户无需预设。
 	// rebuild 时以实际向量长度为准（asset.EmbeddingDimensions = len(vector)），向量库
-	// stockv2_embedding_vectors 用长表 (vector_ref, dim_index, value) 存储，不依赖固定维度。
+	// 向量库按实际维度保存，迁移完成后使用一行一个 vector_ref 的紧凑二进制表。
 	// 若用户填了维度，rebuild / 搜索阶段会据此做一致性校验（见 validateEmbeddingDimensions）。
 	return nil
 }

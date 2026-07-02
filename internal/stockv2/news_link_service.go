@@ -17,6 +17,8 @@ const (
 	newsScoreProfileKeyword = 40
 	newsBoostHolding        = 10
 	newsBoostActiveStrategy = 8
+	newsSemanticMinScore    = 0.45
+	newsProfileEnglishMin   = 4
 )
 
 func (s *Service) CreateNewsEvent(ctx context.Context, event NewsEvent) (NewsEvent, error) {
@@ -144,6 +146,9 @@ func (s *Service) addSemanticNewsProfileCandidates(ctx context.Context, event Ne
 		profileBySymbol[profile.Symbol] = profile
 	}
 	for _, hit := range hits {
+		if hit.Score < newsSemanticMinScore {
+			continue
+		}
 		profile := hit.Profile
 		if existing, ok := profileBySymbol[profile.Symbol]; ok {
 			profile = existing
@@ -362,7 +367,7 @@ func matchProfileAgainstNews(text string, profile StockProfile, acc *newsCandida
 
 	// ponytail: 先复用 profile_text 的空格分词做高召回兜底;后续接 embedding/分词器时替换这里。
 	for _, term := range strings.Fields(profile.ProfileText) {
-		if isNewsGenericTerm(term) || sameNewsTerm(term, profile.Symbol) || sameNewsTerm(term, profile.Name) {
+		if !usefulNewsProfileTextTerm(term) || sameNewsTerm(term, profile.Symbol) || sameNewsTerm(term, profile.Name) {
 			continue
 		}
 		if newsTermMatched(text, term) {
@@ -399,13 +404,39 @@ func usefulNewsTerm(term string) bool {
 	return true
 }
 
+func usefulNewsProfileTextTerm(term string) bool {
+	term = strings.TrimSpace(term)
+	if !usefulNewsTerm(term) {
+		return false
+	}
+	if isASCIIAlpha(term) && len(term) < newsProfileEnglishMin {
+		return false
+	}
+	return true
+}
+
 func isNewsGenericTerm(term string) bool {
 	switch strings.ToLower(strings.TrimSpace(term)) {
-	case "", "sh", "sz", "bj", "etf", "lof", "股票", "股票标的", "基金", "场内基金", "市场":
+	case "", "sh", "sz", "bj", "etf", "lof", "股票", "股票标的", "基金", "场内基金", "市场",
+		"a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have",
+		"in", "into", "is", "it", "its", "of", "on", "or", "that", "the", "this", "to",
+		"was", "were", "will", "with":
 		return true
 	default:
 		return false
 	}
+}
+
+func isASCIIAlpha(term string) bool {
+	if term == "" {
+		return false
+	}
+	for _, r := range term {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') {
+			return false
+		}
+	}
+	return true
 }
 
 func sameNewsTerm(a, b string) bool {
