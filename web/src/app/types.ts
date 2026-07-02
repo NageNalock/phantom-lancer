@@ -1432,7 +1432,7 @@ export interface StockV2UniverseUpdateResponse {
   message: string;
 }
 
-export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "strategies" | "agent" | "opportunity";
+export type StockV2Tab = "overview" | "universe" | "dailyBars" | "portfolios" | "strategies" | "sentinel" | "agent" | "opportunity";
 
 // ===== News side (消息面数据资产) =====
 
@@ -2241,6 +2241,103 @@ export interface StockV2MonitorHitListResponse {
   total?: number;
   limit?: number;
   offset?: number;
+}
+
+// ===== 组合哨兵 (Portfolio Sentinel) ===== 对齐 internal/stockv2/portfolio_sentinel_types.go
+// 周期性窗口级组合巡检:收集窗口内消息面+数据面,Agent 判断利好/利空/噪音,
+// 生成组合级风险结论,必要时 fan-out 到单票 OperationReview。
+
+export type StockV2PortfolioSentinelStatus = "running" | "completed" | "failed";
+export type StockV2PortfolioSentinelTrigger = "manual" | "scheduled";
+export type StockV2PortfolioSentinelWindow = "manual" | "pre_market" | "midday" | "post_close";
+
+export interface StockV2PortfolioSentinelRun {
+  id: string;
+  portfolioId?: string;
+  agentRunId?: string;
+  decisionLedgerId?: string;
+  status: StockV2PortfolioSentinelStatus | string;
+  triggerType: StockV2PortfolioSentinelTrigger | string;
+  windowType: StockV2PortfolioSentinelWindow | string;
+  windowStartAt: string;
+  windowEndAt: string;
+  scannedPortfolioCount?: number;
+  scannedHoldingCount?: number;
+  newsEventCount?: number;
+  rawNewsCount?: number;
+  quoteCount?: number;
+  dailyBarSymbolCount?: number;
+  minuteBarSymbolCount?: number;
+  resultRiskLevel?: string;
+  generatedAlertCount?: number;
+  generatedHitCount?: number;
+  generatedReviewCount?: number;
+  errorMessage?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface StockV2PortfolioSentinelResult {
+  id: string;
+  runId: string;
+  schemaVersion?: string;
+  summary?: string;
+  riskLevel?: string;
+  rawResult?: Record<string, unknown>;
+  contextSummary?: Record<string, unknown>;
+  derivedAlertIds?: string[];
+  derivedMonitorHitIds?: string[];
+  derivedReviewIds?: string[];
+  createdAt?: string;
+}
+
+export interface StockV2PortfolioSentinelConfig {
+  id?: string;
+  enabled?: boolean;
+  preMarketEnabled?: boolean;
+  middayEnabled?: boolean;
+  postCloseEnabled?: boolean;
+  maxNewsItems?: number;
+  maxNewsPerHolding?: number;
+  agentDoublecheckEnabled?: boolean;
+  updatedAt?: string;
+}
+
+export interface StockV2PortfolioSentinelConfigInput {
+  enabled?: boolean;
+  preMarketEnabled?: boolean;
+  middayEnabled?: boolean;
+  postCloseEnabled?: boolean;
+  maxNewsItems?: number;
+  maxNewsPerHolding?: number;
+  agentDoublecheckEnabled?: boolean;
+}
+
+export interface StockV2PortfolioSentinelRunDetail {
+  run: StockV2PortfolioSentinelRun;
+  result?: StockV2PortfolioSentinelResult;
+  agentRun?: StockV2AgentRun;
+  decisionLedger?: StockV2AgentDecisionLedger;
+  alerts?: StockV2Alert[];
+  monitorHits?: StockV2MonitorHit[];
+  reviews?: StockV2OperationReview[];
+}
+
+export interface StockV2PortfolioSentinelRunListResponse {
+  items: StockV2PortfolioSentinelRun[];
+  total?: number;
+  limit?: number;
+  offset?: number;
+}
+
+export interface StockV2RequestRunPortfolioSentinel {
+  portfolioId?: string;
+  windowType?: string;
+  startAt?: string;
+  endAt?: string;
+  note?: string;
 }
 
 export interface StockV2QuoteRefreshStatus {

@@ -1,4 +1,4 @@
-import { ArrowClockwise, ChartLine, Crosshair, Database, Faders, Plus, Robot, Sparkle, Wallet } from "@phosphor-icons/react";
+import { ArrowClockwise, ChartLine, Crosshair, Database, Faders, Plus, Robot, ShieldCheck, Sparkle, Wallet } from "@phosphor-icons/react";
 import type { AppActions } from "../../app/App";
 import type { AppData, StockV2Tab } from "../../app/types";
 import { friendlyError } from "../../api/client";
@@ -15,6 +15,7 @@ import { StockV2Overview } from "./StockV2Overview";
 import { StockV2Universe } from "./StockV2Universe";
 import { StockV2Portfolios } from "./StockV2Portfolios";
 import { StockV2Strategies } from "./StockV2Strategies";
+import { StockV2Sentinel } from "./StockV2Sentinel";
 import { StockV2DailyBars } from "./StockV2DailyBars";
 import { StockV2AgentPage } from "./StockV2AgentPage";
 import { StockV2OpportunityPage } from "./StockV2OpportunityPage";
@@ -26,6 +27,7 @@ const v2Tabs: Array<{ id: StockV2Tab; label: string; icon?: typeof Plus }> = [
   { id: "dailyBars", label: "监控与消息", icon: ChartLine },
   { id: "portfolios", label: "仓位", icon: Wallet },
   { id: "strategies", label: "策略", icon: Crosshair },
+  { id: "sentinel", label: "组合哨兵", icon: ShieldCheck },
   { id: "opportunity", label: "主题机会", icon: Sparkle },
   { id: "agent", label: "Agent", icon: Robot },
 ];
@@ -33,7 +35,7 @@ const v2Tabs: Array<{ id: StockV2Tab; label: string; icon?: typeof Plus }> = [
 export function StockV2View({ actions, data }: { actions: AppActions; data: AppData }) {
   const [activeTab, setActiveTab, tabHref] = useQueryParamState<StockV2Tab>(
     "stockv2",
-    ["overview", "universe", "dailyBars", "portfolios", "strategies", "opportunity", "agent"],
+    ["overview", "universe", "dailyBars", "portfolios", "strategies", "sentinel", "opportunity", "agent"],
     "overview",
   );
   const stockv2 = data.stockv2;
@@ -72,6 +74,7 @@ export function StockV2View({ actions, data }: { actions: AppActions; data: AppD
         {activeTab === "dailyBars" ? <StockV2DailyBars actions={actions} data={data} runAction={runAction} /> : null}
         {activeTab === "portfolios" ? <StockV2Portfolios actions={actions} data={data} runAction={runAction} /> : null}
         {activeTab === "strategies" ? <StockV2Strategies actions={actions} data={data} /> : null}
+        {activeTab === "sentinel" ? <StockV2Sentinel actions={actions} /> : null}
         {activeTab === "opportunity" ? <StockV2OpportunityPage actions={actions} /> : null}
         {activeTab === "agent" ? <StockV2AgentPage actions={actions} /> : null}
       </div>

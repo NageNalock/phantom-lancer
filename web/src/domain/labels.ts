@@ -910,6 +910,74 @@ export function stockV2MonitorAgentStateLabel(state?: string): string {
   }
 }
 
+// ========== 组合哨兵 (Portfolio Sentinel) ==========
+
+export function stockV2SentinelWindowLabel(window?: string): string {
+  switch (window) {
+    case "manual": return "手动";
+    case "pre_market": return "盘前";
+    case "midday": return "午间";
+    case "post_close": return "盘后/夜间";
+    default: return window || "-";
+  }
+}
+
+export function stockV2SentinelTriggerLabel(trigger?: string): string {
+  switch (trigger) {
+    case "manual": return "手动触发";
+    case "scheduled": return "定时触发";
+    default: return trigger || "-";
+  }
+}
+
+export function stockV2SentinelStatusLabel(status?: string): string {
+  switch (status) {
+    case "running": return "运行中";
+    case "completed": return "已完成";
+    case "failed": return "失败";
+    case "cancelled": return "已取消";
+    case "pending": return "等待中";
+    default: return status || "-";
+  }
+}
+
+export function stockV2SentinelStatusTone(status?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (status) {
+    case "completed": return "good";
+    case "running":
+    case "pending": return "warn";
+    case "failed": return "danger";
+    default: return "neutral";
+  }
+}
+
+// 风险级别同时兼容两套取值:代码常量 low/medium/high/critical 与文档正文 none/info/warning/critical。
+export function stockV2SentinelRiskLabel(level?: string): string {
+  switch (level) {
+    case "none": return "无风险";
+    case "info": return "提示";
+    case "low": return "低";
+    case "warning": return "警告";
+    case "medium": return "中";
+    case "high": return "高";
+    case "critical": return "紧急";
+    default: return level || "-";
+  }
+}
+
+export function stockV2SentinelRiskTone(level?: string): "good" | "warn" | "danger" | "neutral" {
+  switch (level) {
+    case "none":
+    case "info":
+    case "low": return "neutral";
+    case "warning":
+    case "medium": return "warn";
+    case "high":
+    case "critical": return "danger";
+    default: return "neutral";
+  }
+}
+
 // ===== Operation Review / Agent 治理层 label =====
 
 export function stockV2ReviewStatusLabel(status?: string): string {
