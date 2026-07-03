@@ -176,19 +176,19 @@ func (s *Service) RunNewsProcessingBatch(ctx context.Context, source string, raw
 			}
 			continue
 		}
-		for _, candidate := range candidates {
-			candidate.NewsEventID = event.ID
-			if candidate.RawNewsID == "" {
-				candidate.RawNewsID = event.RawNewsID
+		for i := range candidates {
+			candidates[i].NewsEventID = event.ID
+			if candidates[i].RawNewsID == "" {
+				candidates[i].RawNewsID = event.RawNewsID
 			}
-			if _, err := s.store.UpsertNewsLinkCandidate(ctx, candidate); err != nil {
-				if s.log != nil {
-					s.log.Warn("stockv2 news link candidate save failed", "source", source, "news_event_id", event.ID, "raw_news_id", event.RawNewsID, "symbol", candidate.Symbol, "market", candidate.Market, "match_method", candidate.MatchMethod, "error", safelog.Text(err.Error(), 300))
-				}
-				return result, err
-			}
-			result.LinkCandidateCount++
 		}
+		if err := s.store.UpsertNewsLinkCandidates(ctx, candidates); err != nil {
+			if s.log != nil {
+				s.log.Warn("stockv2 news link candidates save failed", "source", source, "news_event_id", event.ID, "raw_news_id", event.RawNewsID, "candidate_count", len(candidates), "error", safelog.Text(err.Error(), 300))
+			}
+			return result, err
+		}
+		result.LinkCandidateCount += len(candidates)
 		status := NewsEventLinkStatusLinked
 		if len(candidates) == 0 {
 			status = NewsEventLinkStatusNoCandidate

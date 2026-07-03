@@ -34,8 +34,8 @@ func NewMarketDataStore(path string) (*MarketDataStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open duckdb: %w", err)
 	}
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(2)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	s := &MarketDataStore{db: db, path: path}
 	if err := s.init(context.Background()); err != nil {
 		_ = db.Close()
@@ -408,12 +408,22 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if _, err := tx.ExecContext(ctx, `
+		CREATE TEMP TABLE IF NOT EXISTS stockv2_daily_bars_stage AS
+		SELECT * FROM stockv2_daily_bars WHERE 1 = 0
+	`); err != nil {
+		return wrapError(err, "create duckdb daily bar stage")
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_daily_bars_stage`); err != nil {
+		return wrapError(err, "clear duckdb daily bar stage")
+	}
+
 	const q = `
-		INSERT OR REPLACE INTO stockv2_daily_bars (
-			id, symbol, market, trade_date, open, high, low, close, prev_close,
-			volume, amount, pct_change, adjusted, source, fetched_at, quality,
-			error_message, created_at, updated_at
-		) VALUES (?, ?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO stockv2_daily_bars_stage (
+				id, symbol, market, trade_date, open, high, low, close, prev_close,
+				volume, amount, pct_change, adjusted, source, fetched_at, quality,
+				error_message, created_at, updated_at
+			) VALUES (?, ?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	stmt, err := tx.PrepareContext(ctx, q)
 	if err != nil {
@@ -443,9 +453,16 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 			nullableTime(b.FetchedAt), b.Quality, b.ErrorMessage,
 			b.CreatedAt, b.UpdatedAt,
 		); err != nil {
-			return wrapError(err, fmt.Sprintf("upsert duckdb daily bar %s %s", b.Symbol, b.TradeDate))
+			return wrapError(err, fmt.Sprintf("stage duckdb daily bar %s %s", b.Symbol, b.TradeDate))
 		}
 		affected[b.Symbol+"\x00"+b.Adjusted] = b
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR REPLACE INTO stockv2_daily_bars
+		SELECT * FROM stockv2_daily_bars_stage
+	`); err != nil {
+		return wrapError(err, "merge duckdb daily bar stage")
 	}
 
 	for _, b := range affected {

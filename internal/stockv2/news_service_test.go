@@ -359,3 +359,51 @@ func TestNewsLinkCandidateUpsertReturnsStoredID(t *testing.T) {
 		t.Fatalf("reloaded candidate = %+v, want updated fields", reloaded)
 	}
 }
+
+func TestNewsLinkCandidateBatchUpsertPreservesMonitorStatus(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	event, err := svc.CreateNewsEvent(ctx, NewsEvent{Source: "jin10", Title: "半导体设备订单"})
+	if err != nil {
+		t.Fatalf("create event: %v", err)
+	}
+	first, err := svc.store.UpsertNewsLinkCandidate(ctx, NewsLinkCandidate{
+		ID:          "candidate-original",
+		NewsEventID: event.ID,
+		Symbol:      "688012",
+		Market:      "SH",
+		MatchMethod: "keyword",
+		Score:       0.7,
+		Reason:      "first",
+	})
+	if err != nil {
+		t.Fatalf("upsert first: %v", err)
+	}
+	if err := svc.store.MarkNewsLinkCandidateMonitorStatus(ctx, first.ID, NewsLinkMonitorStatusHit, "hit-1", time.Now()); err != nil {
+		t.Fatalf("mark monitor status: %v", err)
+	}
+	if err := svc.store.UpsertNewsLinkCandidates(ctx, []NewsLinkCandidate{{
+		ID:            "candidate-new",
+		NewsEventID:   event.ID,
+		Symbol:        "688012",
+		Market:        "SH",
+		MatchMethod:   "keyword",
+		Score:         0.9,
+		Reason:        "updated",
+		MonitorStatus: NewsLinkMonitorStatusPending,
+	}}); err != nil {
+		t.Fatalf("batch upsert: %v", err)
+	}
+	reloaded, err := svc.store.GetNewsLinkCandidate(ctx, first.ID)
+	if err != nil {
+		t.Fatalf("get candidate: %v", err)
+	}
+	if reloaded.ID != first.ID || reloaded.Score != 0.9 || reloaded.Reason != "updated" {
+		t.Fatalf("reloaded candidate = %+v, want updated fields on original row", reloaded)
+	}
+	if reloaded.MonitorStatus != NewsLinkMonitorStatusHit || reloaded.MonitorHitID != "hit-1" {
+		t.Fatalf("monitor fields = status %q hit %q, want preserved hit", reloaded.MonitorStatus, reloaded.MonitorHitID)
+	}
+}

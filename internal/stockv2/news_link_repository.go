@@ -195,6 +195,67 @@ func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, candidate NewsLinkC
 	return item, nil
 }
 
+func (s *Store) UpsertNewsLinkCandidates(ctx context.Context, candidates []NewsLinkCandidate) error {
+	if len(candidates) == 0 {
+		return nil
+	}
+	now := time.Now()
+	err := retryStockV2TransientWriteConflict(ctx, func() error {
+		tx, err := s.assetDB().BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		stmt, err := tx.PrepareContext(ctx, `
+			INSERT INTO stockv2_news_link_candidates (
+				id, news_event_id, raw_news_id, symbol, market, instrument_name,
+				match_method, score, reason, matched_terms_json, monitor_status,
+				monitor_hit_id, monitored_at, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(news_event_id, symbol) DO UPDATE SET
+				raw_news_id = excluded.raw_news_id,
+				market = excluded.market,
+				instrument_name = excluded.instrument_name,
+				match_method = excluded.match_method,
+				score = excluded.score,
+				reason = excluded.reason,
+				matched_terms_json = excluded.matched_terms_json,
+				updated_at = excluded.updated_at
+		`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+
+		for i := range candidates {
+			candidate := candidates[i]
+			if candidate.ID == "" {
+				candidate.ID = generateID()
+			}
+			if candidate.MonitorStatus == "" {
+				candidate.MonitorStatus = NewsLinkMonitorStatusPending
+			}
+			if candidate.CreatedAt.IsZero() {
+				candidate.CreatedAt = now
+			}
+			candidate.UpdatedAt = now
+			if _, err := stmt.ExecContext(ctx, candidate.ID, candidate.NewsEventID, candidate.RawNewsID, candidate.Symbol,
+				candidate.Market, candidate.InstrumentName, candidate.MatchMethod, candidate.Score,
+				candidate.Reason, marshalProfileStrings(candidate.MatchedTerms), candidate.MonitorStatus,
+				nullableString(candidate.MonitorHitID), nullableTime(candidate.MonitoredAt),
+				candidate.CreatedAt, candidate.UpdatedAt); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	})
+	if err != nil {
+		return wrapError(err, "upsert news link candidates")
+	}
+	return nil
+}
+
 func (s *Store) GetNewsLinkCandidate(ctx context.Context, id string) (NewsLinkCandidate, error) {
 	row := s.assetDB().QueryRowContext(ctx, newsLinkCandidateSelectSQL()+` WHERE c.id = ?`, strings.TrimSpace(id))
 	item, err := scanNewsLinkCandidate(row)
