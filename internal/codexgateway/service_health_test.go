@@ -148,22 +148,36 @@ func TestServiceHealthCheckInitialPassRunsImmediately(t *testing.T) {
 	svc.StartBackground(ctx)
 	defer svc.Close()
 
-	// The background goroutine is launched asynchronously; poll for the
-	// writes we expect. 2 seconds is extremely generous for two in-process
-	// DB calls.
+	// The background goroutine is launched asynchronously; poll until the
+	// initial sequential pass has touched both non-disabled accounts. The list
+	// order is newest first, so observing only the active account can race ahead
+	// of the invalid-account recovery check below.
 	deadline := time.Now().Add(2 * time.Second)
+	var checkedActive, checkedInvalid storage.CodexGatewayAccount
 	for time.Now().Before(deadline) {
 		a, err := store.GetCodexGatewayAccount(ctx, active.ID)
 		if err != nil {
 			t.Fatalf("reget active: %v", err)
 		}
-		if a.LastCheckedAt != "" {
-			if !strings.Contains(a.LastError, "缺少") {
-				t.Fatalf("active acct last_error = %q, want substring \"缺少\"", a.LastError)
-			}
+		i, err := store.GetCodexGatewayAccount(ctx, invalid.ID)
+		if err != nil {
+			t.Fatalf("reget invalid: %v", err)
+		}
+		if a.LastCheckedAt != "" && i.LastCheckedAt != "" {
+			checkedActive = a
+			checkedInvalid = i
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	if checkedActive.LastCheckedAt == "" {
+		t.Fatalf("initial health pass did not write last_checked_at for active account")
+	}
+	if !strings.Contains(checkedActive.LastError, "缺少") {
+		t.Fatalf("active acct last_error = %q, want substring \"缺少\"", checkedActive.LastError)
+	}
+	if checkedInvalid.LastCheckedAt == "" {
+		t.Fatalf("invalid account should still be re-checked during health pass")
 	}
 
 	// Disabled should be untouched.
@@ -177,14 +191,7 @@ func TestServiceHealthCheckInitialPassRunsImmediately(t *testing.T) {
 	}
 
 	// Invalid account must also be checked (recovery path).
-	i, err := store.GetCodexGatewayAccount(ctx, invalid.ID)
-	if err != nil {
-		t.Fatalf("reget invalid: %v", err)
-	}
-	if i.LastCheckedAt == "" {
-		t.Fatalf("invalid account should still be re-checked during health pass")
-	}
-	if i.Status != "invalid" {
-		t.Fatalf("invalid account status should still be invalid (missing tokens), got %q", i.Status)
+	if checkedInvalid.Status != "invalid" {
+		t.Fatalf("invalid account status should still be invalid (missing tokens), got %q", checkedInvalid.Status)
 	}
 }
