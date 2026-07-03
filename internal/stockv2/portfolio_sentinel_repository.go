@@ -25,10 +25,10 @@ func (s *Store) UpsertPortfolioSentinelConfig(ctx context.Context, cfg Portfolio
 		cfg.ID = "default"
 	}
 	if cfg.MaxNewsItems <= 0 {
-		cfg.MaxNewsItems = 80
+		cfg.MaxNewsItems = 200
 	}
 	if cfg.MaxNewsPerHolding <= 0 {
-		cfg.MaxNewsPerHolding = 20
+		cfg.MaxNewsPerHolding = 50
 	}
 	cfg.UpdatedAt = time.Now()
 	_, err := s.db.ExecContext(ctx, `

@@ -14,6 +14,15 @@ func (s *Store) CreateNewsEvent(ctx context.Context, event NewsEvent) (NewsEvent
 	if event.ID == "" {
 		event.ID = generateID()
 	}
+	if strings.TrimSpace(event.DedupeKey) != "" {
+		existing, found, err := s.getNewsEventByDedupeKey(ctx, event.DedupeKey)
+		if err != nil {
+			return NewsEvent{}, err
+		}
+		if found {
+			return existing, nil
+		}
+	}
 	if event.EventAt.IsZero() {
 		event.EventAt = now
 	}
@@ -36,6 +45,18 @@ func (s *Store) CreateNewsEvent(ctx context.Context, event NewsEvent) (NewsEvent
 		return NewsEvent{}, wrapError(err, "create news event")
 	}
 	return event, nil
+}
+
+func (s *Store) getNewsEventByDedupeKey(ctx context.Context, dedupeKey string) (NewsEvent, bool, error) {
+	row := s.assetDB().QueryRowContext(ctx, newsEventSelectSQL()+` WHERE dedupe_key = ?`, strings.TrimSpace(dedupeKey))
+	event, err := scanNewsEvent(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return NewsEvent{}, false, nil
+		}
+		return NewsEvent{}, false, wrapError(err, "get news event by dedupe key")
+	}
+	return event, true, nil
 }
 
 func (s *Store) GetNewsEvent(ctx context.Context, id string) (NewsEvent, error) {
@@ -329,6 +350,7 @@ func newsEventWhere(filter NewsEventListFilter) (string, []any) {
 	add("source", filter.Source)
 	add("link_status", filter.LinkStatus)
 	add("quality_status", filter.QualityStatus)
+	addNewsTimeWindow(&parts, &args, newsEventTimeSQL, filter.Since, filter.Until)
 	if q := strings.TrimSpace(filter.Query); q != "" {
 		pattern := "%" + strings.ToLower(q) + "%"
 		parts = append(parts, "(LOWER(title) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(content) LIKE ? OR LOWER(external_id) LIKE ?)")
@@ -397,6 +419,7 @@ func newsLinkCandidateWhere(filter NewsLinkCandidateListFilter) (string, []any) 
 	add("c.market", filter.Market)
 	add("c.match_method", filter.MatchMethod)
 	add("c.monitor_status", filter.MonitorStatus)
+	addNewsTimeWindow(&parts, &args, newsLinkCandidateEventTimeSQL, filter.Since, filter.Until)
 	if q := strings.TrimSpace(filter.Query); q != "" {
 		pattern := "%" + strings.ToLower(q) + "%"
 		parts = append(parts, "(LOWER(c.symbol) LIKE ? OR LOWER(c.instrument_name) LIKE ? OR LOWER(c.reason) LIKE ? OR LOWER(e.title) LIKE ? OR LOWER(e.summary) LIKE ?)")

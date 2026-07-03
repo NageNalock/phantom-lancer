@@ -235,6 +235,86 @@ func TestTruncateRawNewsBeforeDeletesOldEffectiveTime(t *testing.T) {
 	}
 }
 
+func TestPruneRawNewsRetentionProcessesAndDeletesOlderThanWindow(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 4, 10, 0, 0, 0, time.UTC)
+	if err := svc.store.UpsertNewsSourceState(ctx, NewsSourceState{Source: "jin10", Status: NewsSourceStatusIdle, RawNewsCount: 3}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	for _, req := range []RequestCreateRawNews{
+		{Source: "jin10", SourceID: "retention-old-new", Title: "旧消息先转事件", PublishedAt: now.Add(-5 * time.Hour), FetchedAt: now.Add(-5 * time.Hour)},
+		{Source: "jin10", SourceID: "retention-old-failed", Title: "旧失败消息", PublishedAt: now.Add(-6 * time.Hour), FetchedAt: now.Add(-6 * time.Hour), Status: NewsStatusFailed},
+		{Source: "jin10", SourceID: "retention-recent", Title: "近期消息保留", PublishedAt: now.Add(-2 * time.Hour), FetchedAt: now.Add(-2 * time.Hour)},
+	} {
+		if _, err := svc.CreateRawNews(ctx, req); err != nil {
+			t.Fatalf("create raw news %s: %v", req.SourceID, err)
+		}
+	}
+
+	result, err := svc.PruneRawNewsRetention(ctx, now)
+	if err != nil {
+		t.Fatalf("prune raw news retention: %v", err)
+	}
+	if result.DeletedCount != 2 || result.ProcessedBeforePrune != 2 {
+		t.Fatalf("retention result = %#v, want delete 2 process 2", result)
+	}
+	remaining, err := svc.ListRawNews(ctx, RawNewsListFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("list raw news: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].SourceID != "retention-recent" {
+		t.Fatalf("remaining raw news = %+v, want recent only", remaining)
+	}
+	events, err := svc.ListNewsEvents(ctx, NewsEventListFilter{Source: "jin10", Query: "旧消息先转事件", Limit: 10})
+	if err != nil {
+		t.Fatalf("list news events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events len = %d, want processed old event", len(events))
+	}
+}
+
+func TestNewsEventDedupeSurvivesRawNewsRetention(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 4, 10, 0, 0, 0, time.UTC)
+	if err := svc.store.UpsertNewsSourceState(ctx, NewsSourceState{Source: "jin10", Status: NewsSourceStatusIdle, RawNewsCount: 1}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	req := RequestCreateRawNews{
+		Source:      "jin10",
+		SourceID:    "retention-dedupe",
+		Title:       "重复旧消息",
+		PublishedAt: now.Add(-5 * time.Hour),
+		FetchedAt:   now.Add(-5 * time.Hour),
+	}
+	if _, err := svc.CreateRawNews(ctx, req); err != nil {
+		t.Fatalf("create raw news: %v", err)
+	}
+	if _, err := svc.RunNewsProcessingBatch(ctx, "jin10", 50, 50); err != nil {
+		t.Fatalf("process news: %v", err)
+	}
+	if _, err := svc.PruneRawNewsRetention(ctx, now); err != nil {
+		t.Fatalf("prune raw news retention: %v", err)
+	}
+	if _, err := svc.CreateRawNews(ctx, req); err != nil {
+		t.Fatalf("recreate duplicate raw news: %v", err)
+	}
+	if _, err := svc.RunNewsProcessingBatch(ctx, "jin10", 50, 50); err != nil {
+		t.Fatalf("process duplicate news: %v", err)
+	}
+	events, err := svc.ListNewsEvents(ctx, NewsEventListFilter{Source: "jin10", Limit: 10})
+	if err != nil {
+		t.Fatalf("list news events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events len = %d, want deduped event after raw prune", len(events))
+	}
+}
+
 func TestNewsLinkCandidateUpsertReturnsStoredID(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

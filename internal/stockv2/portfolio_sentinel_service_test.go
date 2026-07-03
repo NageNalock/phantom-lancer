@@ -29,20 +29,45 @@ func TestBuildPortfolioSentinelContextIncludesHoldingsAndWindowNews(t *testing.T
 		t.Fatalf("create holding: %v", err)
 	}
 	seedWatchQuote(t, svc, "000977", 48, -3.2, QuoteStatusFresh, now)
-	if _, err := svc.CreateRawNews(ctx, RequestCreateRawNews{
-		Source:      "test",
-		Title:       "海外存储股大跌拖累浪潮信息相关链条",
-		PublishedAt: now.Add(-time.Hour),
-		FetchedAt:   now.Add(-time.Hour),
-	}); err != nil {
-		t.Fatalf("create raw news: %v", err)
-	}
-	if _, err := svc.CreateNewsEvent(ctx, NewsEvent{
+	event, err := svc.CreateNewsEvent(ctx, NewsEvent{
 		Source:  "test",
 		Title:   "浪潮信息相关存储服务器链条承压",
 		EventAt: now.Add(-time.Hour),
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("create news event: %v", err)
+	}
+	if _, err := svc.store.UpsertNewsLinkCandidate(ctx, NewsLinkCandidate{
+		NewsEventID:     event.ID,
+		Symbol:          "000977",
+		Market:          "SZ",
+		InstrumentName:  "浪潮信息",
+		MatchMethod:     NewsLinkMatchExactSymbol,
+		Score:           100,
+		Reason:          "持仓代码命中",
+		MonitorStatus:   NewsLinkMonitorStatusPending,
+		NewsEventAt:     event.EventAt,
+		NewsEventTitle:  event.Title,
+		NewsEventSource: event.Source,
+	}); err != nil {
+		t.Fatalf("create news link candidate: %v", err)
+	}
+	oldEvent, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source:  "test",
+		Title:   "浪潮信息窗口外旧消息",
+		EventAt: now.Add(-4 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create old news event: %v", err)
+	}
+	if _, err := svc.store.UpsertNewsLinkCandidate(ctx, NewsLinkCandidate{
+		NewsEventID: oldEvent.ID,
+		Symbol:      "000977",
+		Market:      "SZ",
+		MatchMethod: NewsLinkMatchExactSymbol,
+		Score:       100,
+	}); err != nil {
+		t.Fatalf("create old news link candidate: %v", err)
 	}
 	run := PortfolioSentinelRun{
 		ID:            "sentinel-context-run",
@@ -63,8 +88,17 @@ func TestBuildPortfolioSentinelContextIncludesHoldingsAndWindowNews(t *testing.T
 	if holding.Quote == nil || holding.Quote.PctChange != -3.2 {
 		t.Fatalf("holding quote = %+v, want seeded quote", holding.Quote)
 	}
-	if len(holding.RawNews) == 0 || len(holding.News) == 0 {
-		t.Fatalf("holding news raw=%d events=%d, want matched news", len(holding.RawNews), len(holding.News))
+	if len(holding.RawNews) != 0 {
+		t.Fatalf("holding raw news len = %d, want 0", len(holding.RawNews))
+	}
+	if len(holding.News) != 1 || holding.News[0].ID != event.ID {
+		t.Fatalf("holding news = %+v, want only linked window event", holding.News)
+	}
+	if len(holding.NewsLinks) != 1 || holding.NewsLinks[0].NewsEventID != event.ID {
+		t.Fatalf("holding news links = %+v, want linked window candidate", holding.NewsLinks)
+	}
+	if len(pack.RawNews) != 0 || len(pack.NewsEvents) != 1 {
+		t.Fatalf("pack raw=%d events=%d, want no raw and one event", len(pack.RawNews), len(pack.NewsEvents))
 	}
 }
 

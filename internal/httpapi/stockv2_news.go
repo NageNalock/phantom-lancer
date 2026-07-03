@@ -155,6 +155,8 @@ func newsEventFilterFromRequest(r *http.Request) stockv2.NewsEventListFilter {
 		LinkStatus:    query.Get("linkStatus"),
 		QualityStatus: query.Get("qualityStatus"),
 		Query:         query.Get("q"),
+		Since:         parseStockV2NewsTime(query.Get("since")),
+		Until:         parseStockV2NewsTime(query.Get("until")),
 		Limit:         stockV2NewsInt(query.Get("limit"), 50, 200),
 		Offset:        stockV2NewsOffset(query.Get("offset")),
 	}
@@ -171,6 +173,8 @@ func newsLinkCandidateFilterFromRequest(r *http.Request) stockv2.NewsLinkCandida
 		MatchMethod:   query.Get("matchMethod"),
 		MonitorStatus: query.Get("monitorStatus"),
 		Query:         query.Get("q"),
+		Since:         parseStockV2NewsTime(query.Get("since")),
+		Until:         parseStockV2NewsTime(query.Get("until")),
 		Limit:         stockV2NewsInt(query.Get("limit"), 50, 200),
 		Offset:        stockV2NewsOffset(query.Get("offset")),
 	}

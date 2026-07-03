@@ -1308,6 +1308,13 @@ func (s *Service) StartBackground(ctx context.Context) {
 		s.runNewsLinkCandidateRetentionScheduler(bgCtx)
 	}()
 
+	// RawNews 是短期 staging 数据；只保留 4 小时，长期分析使用 NewsEvent/LinkCandidate。
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runRawNewsRetentionScheduler(bgCtx)
+	}()
+
 	// base profile 自动维护：只维护确定性画像，不触发全市场 AI。
 	s.bgWg.Add(1)
 	go func() {

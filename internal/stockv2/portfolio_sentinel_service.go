@@ -105,6 +105,9 @@ func (s *Service) startPortfolioSentinelRun(ctx context.Context, triggerType, wi
 		return PortfolioSentinelRun{}, err
 	}
 
+	if err := s.preparePortfolioSentinelNews(ctx, run); err != nil && s.log != nil {
+		s.log.Warn("portfolio sentinel news refresh skipped", "run_id", run.ID, "error", safelog.Text(err.Error(), 240))
+	}
 	contextPack, err := s.BuildPortfolioSentinelContext(ctx, run, note)
 	if err != nil {
 		return s.failPortfolioSentinelRun(ctx, run, err)
@@ -158,15 +161,6 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 		}
 		portfolios = filtered
 	}
-	rawNews, err := s.store.ListRawNews(ctx, RawNewsListFilter{Since: run.WindowStartAt, Until: run.WindowEndAt, Limit: cfg.MaxNewsItems})
-	if err != nil {
-		return PortfolioSentinelContext{}, err
-	}
-	newsEvents, err := s.store.ListNewsEvents(ctx, NewsEventListFilter{Limit: cfg.MaxNewsItems})
-	if err != nil {
-		return PortfolioSentinelContext{}, err
-	}
-
 	out := PortfolioSentinelContext{
 		SchemaVersion: PortfolioSentinelReportSchemaVersion,
 		RunID:         run.ID,
@@ -177,12 +171,14 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 			EndAt:         run.WindowEndAt,
 			MarketSession: portfolioSentinelMarketSession(run.WindowType),
 		},
-		NewsEvents:    newsEvents,
-		RawNews:       rawNews,
 		DataFreshness: map[string]any{},
 		ContextStats:  map[string]any{},
 		Note:          note,
 	}
+	selectedEvents := make([]NewsEvent, 0, cfg.MaxNewsItems)
+	selectedEventIDs := make(map[string]struct{})
+	newsLinkCount := 0
+	newsTruncated := false
 
 	allSymbols := make([]string, 0)
 	for _, portfolio := range portfolios {
@@ -215,11 +211,19 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 			}
 		}
 		for _, holding := range holdings {
+			holdingNews, holdingLinks, truncated, err := s.portfolioSentinelHoldingNews(ctx, holding, run, cfg, selectedEventIDs, &selectedEvents)
+			if err != nil {
+				return PortfolioSentinelContext{}, err
+			}
+			newsLinkCount += len(holdingLinks)
+			if truncated {
+				newsTruncated = true
+			}
 			hctx := PortfolioSentinelHoldingContext{
 				Holding:   holding,
 				Freshness: map[string]any{},
-				News:      selectNewsEventsForHolding(newsEvents, holding, cfg.MaxNewsPerHolding),
-				RawNews:   selectRawNewsForHolding(rawNews, holding, cfg.MaxNewsPerHolding),
+				News:      holdingNews,
+				NewsLinks: holdingLinks,
 			}
 			if quote, ok := quoteBySymbol[holding.Symbol]; ok {
 				hctx.Quote = &quote
@@ -243,6 +247,7 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 			return PortfolioSentinelContext{}, err
 		}
 	}
+	out.NewsEvents = selectedEvents
 	if len(allSymbols) > 0 {
 		reviews, err := s.store.ListOperationReviews(ctx, OperationReviewListFilter{Limit: 50})
 		if err != nil {
@@ -251,7 +256,77 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 		out.RecentReviews = reviews
 	}
 	out.ContextStats = portfolioSentinelContextStats(out)
+	out.ContextStats["newsLinkCount"] = newsLinkCount
+	out.ContextStats["newsTruncated"] = newsTruncated
 	return out, nil
+}
+
+func (s *Service) preparePortfolioSentinelNews(ctx context.Context, run PortfolioSentinelRun) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	if !s.tryStartNewsPipelineRun() {
+		return nil
+	}
+	defer s.finishNewsPipelineRun()
+	for _, source := range []string{NewsSourceJin10, NewsSourceFinancialJuice} {
+		if _, err := s.RunNewsProcessingBatch(ctx, source, 200, 200); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) portfolioSentinelHoldingNews(
+	ctx context.Context,
+	holding StockV2Holding,
+	run PortfolioSentinelRun,
+	cfg PortfolioSentinelConfig,
+	selectedEventIDs map[string]struct{},
+	selectedEvents *[]NewsEvent,
+) ([]NewsEvent, []NewsLinkCandidate, bool, error) {
+	perHoldingLimit := cfg.MaxNewsPerHolding
+	if perHoldingLimit <= 0 {
+		perHoldingLimit = 50
+	}
+	candidates, err := s.store.ListNewsLinkCandidates(ctx, NewsLinkCandidateListFilter{
+		Symbol: holding.Symbol,
+		Market: holding.Market,
+		Since:  run.WindowStartAt,
+		Until:  run.WindowEndAt,
+		Limit:  perHoldingLimit,
+	})
+	if err != nil {
+		return nil, nil, false, err
+	}
+	events := make([]NewsEvent, 0, len(candidates))
+	links := make([]NewsLinkCandidate, 0, len(candidates))
+	holdingEventIDs := make(map[string]struct{})
+	truncated := false
+	for _, candidate := range candidates {
+		if _, ok := holdingEventIDs[candidate.NewsEventID]; ok {
+			continue
+		}
+		event, err := s.store.GetNewsEvent(ctx, candidate.NewsEventID)
+		if err != nil {
+			if errors.Is(err, ErrNewsEventNotFound) {
+				continue
+			}
+			return nil, nil, false, err
+		}
+		holdingEventIDs[candidate.NewsEventID] = struct{}{}
+		events = append(events, event)
+		links = append(links, candidate)
+		if _, ok := selectedEventIDs[event.ID]; !ok {
+			if cfg.MaxNewsItems > 0 && len(*selectedEvents) >= cfg.MaxNewsItems {
+				truncated = true
+				continue
+			}
+			selectedEventIDs[event.ID] = struct{}{}
+			*selectedEvents = append(*selectedEvents, event)
+		}
+	}
+	return events, links, truncated, nil
 }
 
 func (s *Service) startPortfolioSentinelRunAsync(ctx context.Context, run AgentRun, ledger AgentDecisionLedger, pack PortfolioSentinelContext, modelName string) {
@@ -530,8 +605,8 @@ func defaultPortfolioSentinelConfig() PortfolioSentinelConfig {
 		PreMarketEnabled:        true,
 		MiddayEnabled:           true,
 		PostCloseEnabled:        true,
-		MaxNewsItems:            80,
-		MaxNewsPerHolding:       20,
+		MaxNewsItems:            200,
+		MaxNewsPerHolding:       50,
 		AgentDoublecheckEnabled: true,
 		UpdatedAt:               time.Now(),
 	}
@@ -541,11 +616,11 @@ func normalizePortfolioSentinelConfig(cfg PortfolioSentinelConfig) PortfolioSent
 	if cfg.ID == "" {
 		cfg.ID = "default"
 	}
-	if cfg.MaxNewsItems <= 0 || cfg.MaxNewsItems > 200 {
-		cfg.MaxNewsItems = 80
+	if cfg.MaxNewsItems <= 0 || cfg.MaxNewsItems == 80 || cfg.MaxNewsItems > 500 {
+		cfg.MaxNewsItems = 200
 	}
-	if cfg.MaxNewsPerHolding <= 0 || cfg.MaxNewsPerHolding > 50 {
-		cfg.MaxNewsPerHolding = 20
+	if cfg.MaxNewsPerHolding <= 0 || cfg.MaxNewsPerHolding == 20 || cfg.MaxNewsPerHolding > 100 {
+		cfg.MaxNewsPerHolding = 50
 	}
 	return cfg
 }
@@ -660,48 +735,6 @@ func portfolioSentinelContextStats(ctx PortfolioSentinelContext) map[string]any 
 		"dailyBarSymbols":  daily,
 		"minuteBarSymbols": minute,
 	}
-}
-
-func selectNewsEventsForHolding(items []NewsEvent, holding StockV2Holding, limit int) []NewsEvent {
-	out := make([]NewsEvent, 0)
-	terms := holdingMatchTerms(holding)
-	for _, item := range items {
-		if textMatchesTerms(item.Title+" "+item.Summary+" "+item.Content, terms) {
-			out = append(out, item)
-			if len(out) >= limit {
-				break
-			}
-		}
-	}
-	return out
-}
-
-func selectRawNewsForHolding(items []StockV2RawNews, holding StockV2Holding, limit int) []StockV2RawNews {
-	out := make([]StockV2RawNews, 0)
-	terms := holdingMatchTerms(holding)
-	for _, item := range items {
-		if textMatchesTerms(item.Title+" "+item.Snippet+" "+item.Content, terms) {
-			out = append(out, item)
-			if len(out) >= limit {
-				break
-			}
-		}
-	}
-	return out
-}
-
-func holdingMatchTerms(holding StockV2Holding) []string {
-	return compactStringList([]string{holding.Symbol, holding.Name}, 8)
-}
-
-func textMatchesTerms(text string, terms []string) bool {
-	text = strings.ToLower(text)
-	for _, term := range terms {
-		if term != "" && strings.Contains(text, strings.ToLower(term)) {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Service) failPortfolioSentinelRun(ctx context.Context, run PortfolioSentinelRun, err error) (PortfolioSentinelRun, error) {

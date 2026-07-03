@@ -229,7 +229,7 @@ export function StockV2Sentinel({ actions }: { actions: AppActions }) {
               />
             </div>
             <div className="grid gap-2 sm:grid-cols-2">
-              <Field label="每个组合最多新闻数" help="进入 Agent 的消息面上限,默认 80。">
+              <Field label="每个组合最多新闻数" help="进入 Agent 的相关事件上限,默认 200。">
                 <input
                   type="number"
                   min="0"
@@ -238,7 +238,7 @@ export function StockV2Sentinel({ actions }: { actions: AppActions }) {
                   onChange={(e) => setConfigDraft((d) => ({ ...d, maxNewsItems: Math.max(0, Number(e.target.value) || 0) }))}
                 />
               </Field>
-              <Field label="每个持仓最多新闻数" help="单标的消息上限,默认 20。">
+              <Field label="每个持仓最多新闻数" help="单标的相关事件上限,默认 50。">
                 <input
                   type="number"
                   min="0"
@@ -382,7 +382,7 @@ function SentinelRunRow({ run, onOpen }: { run: StockV2PortfolioSentinelRun; onO
       <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[var(--muted-strong)]">
         <span>组合 {run.scannedPortfolioCount ?? 0}</span>
         <span>持仓 {run.scannedHoldingCount ?? 0}</span>
-        <span>新闻 {run.newsEventCount ?? 0}/{run.rawNewsCount ?? 0}</span>
+        <span>相关事件 {run.newsEventCount ?? 0}</span>
         <span>行情 {run.quoteCount ?? 0}</span>
         <span>生成 Alert {run.generatedAlertCount ?? 0} · Review {run.generatedReviewCount ?? 0}</span>
       </div>
@@ -425,7 +425,7 @@ function SentinelRunDrawer({
           <SummaryCell label="状态" value={stockV2SentinelStatusLabel(run.status)} tone={stockV2SentinelStatusTone(run.status)} />
           <SummaryCell label="风险级别" value={stockV2SentinelRiskLabel(run.resultRiskLevel || report.overallRiskLevel)} tone={stockV2SentinelRiskTone(run.resultRiskLevel || report.overallRiskLevel)} />
           <SummaryCell label="扫描规模" value={`组合 ${run.scannedPortfolioCount ?? 0} · 持仓 ${run.scannedHoldingCount ?? 0}`} tone="neutral" />
-          <SummaryCell label="消息面" value={`事件 ${run.newsEventCount ?? 0} · 原始 ${run.rawNewsCount ?? 0}`} tone="neutral" />
+          <SummaryCell label="消息面" value={`相关事件 ${run.newsEventCount ?? 0}`} tone="neutral" />
           <SummaryCell
             label="Agent"
             value={detail.agentRun ? stockV2AgentRunStatusLabel(detail.agentRun.status) : run.agentRunId ? "已触发" : "未进入"}

@@ -277,6 +277,38 @@ func TestPruneNewsLinkCandidatesKeepsHighValueRecords(t *testing.T) {
 	}
 }
 
+func TestNewsEventAndLinkCandidateFiltersUseTimeWindow(t *testing.T) {
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 4, 10, 0, 0, 0, time.UTC)
+	inWindow := createNewsLinkEvent(t, svc, NewsEvent{ID: "event-window-in", Source: "test", Title: "窗口内消息", EventAt: now.Add(-time.Hour)})
+	outWindow := createNewsLinkEvent(t, svc, NewsEvent{ID: "event-window-out", Source: "test", Title: "窗口外消息", EventAt: now.Add(-5 * time.Hour)})
+	for _, candidate := range []NewsLinkCandidate{
+		{ID: "candidate-window-in", NewsEventID: inWindow.ID, Symbol: "000977", Market: "SZ", MatchMethod: NewsLinkMatchExactSymbol, Score: 100},
+		{ID: "candidate-window-out", NewsEventID: outWindow.ID, Symbol: "000977", Market: "SZ", MatchMethod: NewsLinkMatchExactSymbol, Score: 100},
+	} {
+		if _, err := svc.store.UpsertNewsLinkCandidate(ctx, candidate); err != nil {
+			t.Fatalf("upsert candidate %s: %v", candidate.ID, err)
+		}
+	}
+
+	events, err := svc.ListNewsEvents(ctx, NewsEventListFilter{Since: now.Add(-2 * time.Hour), Until: now, Limit: 10})
+	if err != nil {
+		t.Fatalf("list news events: %v", err)
+	}
+	if len(events) != 1 || events[0].ID != inWindow.ID {
+		t.Fatalf("events = %+v, want only in-window event", events)
+	}
+	candidates, err := svc.ListNewsLinkCandidates(ctx, NewsLinkCandidateListFilter{Symbol: "000977", Since: now.Add(-2 * time.Hour), Until: now, Limit: 10})
+	if err != nil {
+		t.Fatalf("list news link candidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].NewsEventID != inWindow.ID {
+		t.Fatalf("candidates = %+v, want only in-window candidate", candidates)
+	}
+}
+
 func TestLinkNewsEventBoostsHoldingAndActiveStrategy(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStockProfileTestService(t)

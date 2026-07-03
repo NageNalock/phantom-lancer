@@ -1,5 +1,5 @@
-import { ArrowsClockwise, Check, CheckCircle, MagnifyingGlass, Pencil, Power, X } from "@phosphor-icons/react";
-import { useEffect, useMemo, useState } from "react";
+import { ArrowsClockwise, Check, CheckCircle, MagnifyingGlass, Pencil, Power, ShieldCheck, X } from "@phosphor-icons/react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AppActions } from "../../app/App";
 import type {
   StockV2AgentExecutionDetail,
@@ -20,6 +20,7 @@ import type {
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, Drawer, Field, Notice, Pill, useDangerConfirm } from "../../components/ui";
+import { buildQueryHref } from "../../hooks/useQueryParamState";
 import {
   StockV2AgentExecutionLedgerSection,
   StockV2AgentExecutionSummaryList,
@@ -85,6 +86,8 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
   const [submitting, setSubmitting] = useState(false);
   const [reviewHitId, setReviewHitId] = useState<string | null>(null);
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
+  const initialRunsLoaded = useRef(false);
+  const initialAlertsLoaded = useRef(false);
 
   async function fetchTasks() {
     setTasksLoading(true);
@@ -207,10 +210,18 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
   }, []);
 
   useEffect(() => {
+    if (!initialRunsLoaded.current) {
+      initialRunsLoaded.current = true;
+      return;
+    }
     void fetchRuns(runsPage);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runsPage]);
   useEffect(() => {
+    if (!initialAlertsLoaded.current) {
+      initialAlertsLoaded.current = true;
+      return;
+    }
     void fetchAlerts(alertsPage);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [alertsPage]);
@@ -266,6 +277,10 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  function openPortfolioSentinel() {
+    openPortfolioSentinelPage();
   }
 
   async function changeAlertStatus(alert: StockV2Alert, action: "ack" | "ignore" | "resolve") {
@@ -415,6 +430,7 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
                 onRun={() => void runTask(task.definition.taskType)}
                 onToggle={() => void toggleTaskEnabled(task)}
                 onEdit={() => setEditTask(task)}
+                onOpenSentinel={openPortfolioSentinel}
               />
             ))}
           </div>
@@ -579,17 +595,20 @@ function MonitorTaskRow({
   onRun,
   onToggle,
   onEdit,
+  onOpenSentinel,
 }: {
   task: StockV2MonitorTask;
   submitting: boolean;
   onRun: () => void;
   onToggle: () => void;
   onEdit: () => void;
+  onOpenSentinel: () => void;
 }) {
   const def = task.definition;
   const cfg = task.config || {};
   const latest = task.latestRun;
   const runnable = def.runnable;
+  const portfolioSentinel = def.taskType === "portfolio_sentinel";
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
       <div className="min-w-0">
@@ -597,7 +616,7 @@ function MonitorTaskRow({
           <strong className="text-sm">{def.label || def.taskType}</strong>
           <Pill tone="neutral">{stockV2MonitorCategoryLabel(def.category)}</Pill>
           {cfg.enabled ? <Pill tone="good">已启用</Pill> : <Pill tone="neutral">未启用</Pill>}
-          {!runnable ? <Pill tone="warn">未实现</Pill> : null}
+          {portfolioSentinel ? <Pill tone="neutral">独立入口</Pill> : !runnable ? <Pill tone="warn">未实现</Pill> : null}
           {cfg.agentDoublecheckEnabled ? <Pill tone="neutral">Agent 复核</Pill> : null}
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--muted-strong)]">
@@ -613,18 +632,27 @@ function MonitorTaskRow({
         </div>
       </div>
       <div className="flex flex-wrap items-start justify-end gap-1">
-        <Button onClick={onToggle} disabled={submitting || !runnable} title={cfg.enabled ? "暂停" : "启用"}>
-          <Power size={12} className="mr-1" />
-          {cfg.enabled ? "暂停" : "启用"}
-        </Button>
-        <Button onClick={onRun} disabled={submitting || !runnable} title="立即运行">
-          <ArrowsClockwise size={12} className="mr-1" />
-          运行
-        </Button>
-        <Button onClick={onEdit} disabled={submitting} title="配置">
-          <Pencil size={12} className="mr-1" />
-          配置
-        </Button>
+        {portfolioSentinel ? (
+          <Button onClick={onOpenSentinel} disabled={submitting} title="打开组合哨兵">
+            <ShieldCheck size={12} className="mr-1" />
+            查看哨兵
+          </Button>
+        ) : (
+          <>
+            <Button onClick={onToggle} disabled={submitting || !runnable} title={cfg.enabled ? "暂停" : "启用"}>
+              <Power size={12} className="mr-1" />
+              {cfg.enabled ? "暂停" : "启用"}
+            </Button>
+            <Button onClick={onRun} disabled={submitting || !runnable} title="立即运行">
+              <ArrowsClockwise size={12} className="mr-1" />
+              运行
+            </Button>
+            <Button onClick={onEdit} disabled={submitting || !def.configurable} title="配置">
+              <Pencil size={12} className="mr-1" />
+              配置
+            </Button>
+          </>
+        )}
       </div>
     </div>
   );
@@ -768,14 +796,27 @@ function MonitorRunDrawer({
   onOpenReview: (hitId: string) => void;
 }) {
   const symbols = affectedSymbols(hits);
+  const portfolioSentinel = run.taskType === "portfolio_sentinel";
   return (
     <Drawer
-      title={`监控任务详情 · ${stockV2MonitorTaskTypeLabel(run.taskType)}`}
-      subtitle={`${stockV2MonitorRunStatusLabel(run.status)} · ${monitorTriggerLabel(run.triggerType)} · ${formatDate(run.startedAt) || "-"}`}
+      title={portfolioSentinel ? "组合哨兵派生详情" : `监控任务详情 · ${stockV2MonitorTaskTypeLabel(run.taskType)}`}
+      subtitle={
+        portfolioSentinel
+          ? `${stockV2MonitorRunStatusLabel(run.status)} · 从组合哨兵结果派生 MonitorHit / Review / Alert · ${formatDate(run.startedAt) || "-"}`
+          : `${stockV2MonitorRunStatusLabel(run.status)} · ${monitorTriggerLabel(run.triggerType)} · ${formatDate(run.startedAt) || "-"}`
+      }
       onClose={onClose}
       width={620}
     >
       <div className="grid gap-4 text-sm">
+        {portfolioSentinel ? (
+          <Notice>
+            <span className="text-xs">
+              这不是组合哨兵的主运行记录,而是哨兵结论进入通用监控流水线后的派生记录。完整窗口上下文和 Agent 报告在组合哨兵页查看。
+            </span>
+          </Notice>
+        ) : null}
+
         <div className="grid grid-cols-2 gap-2">
           <SummaryCell label="扫描对象" value={String(run.scannedCount ?? 0)} tone="neutral" />
           <SummaryCell label="命中候选" value={String(run.hitCount ?? hits.length)} tone={(run.hitCount ?? hits.length) > 0 ? "warn" : "neutral"} />
@@ -789,9 +830,19 @@ function MonitorRunDrawer({
             <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">执行时间</span><span>{formatDate(run.startedAt) || "-"} → {formatDate(run.finishedAt) || (run.status === "running" ? "进行中" : "-")}</span></div>
             <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">结果计数</span><span>成功 {run.successCount ?? 0} / 失败 {run.failedCount ?? 0} / Alert {run.alertCount ?? 0}</span></div>
             {run.scopeSummary ? <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">扫描范围</span><span>{run.scopeSummary}</span></div> : null}
+            {portfolioSentinelRunID(run) ? <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">哨兵运行</span><span className="font-mono">{shortID(portfolioSentinelRunID(run))}</span></div> : null}
             {run.errorMessage ? <div className="break-words text-[var(--danger)]">错误：{run.errorMessage}</div> : null}
           </div>
         </div>
+
+        {portfolioSentinel ? (
+          <div className="flex justify-end">
+            <Button onClick={openPortfolioSentinelPage} title="查看组合哨兵">
+              <ShieldCheck size={12} className="mr-1" />
+              查看哨兵
+            </Button>
+          </div>
+        ) : null}
 
         <div>
           <div className="mb-2 flex items-center justify-between">
@@ -841,6 +892,20 @@ function MonitorRunDrawer({
       </div>
     </Drawer>
   );
+}
+
+function openPortfolioSentinelPage() {
+  const href = buildQueryHref({ tab: "stockv2", stockv2: "sentinel" });
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (href !== current) {
+    window.history.pushState(null, "", href);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }
+}
+
+function portfolioSentinelRunID(run: StockV2MonitorRun): string {
+  const value = run.metadata?.portfolioSentinelRunId;
+  return typeof value === "string" ? value : "";
 }
 
 function MonitorHitDetail({

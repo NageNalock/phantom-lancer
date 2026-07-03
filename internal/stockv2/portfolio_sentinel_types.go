@@ -171,6 +171,7 @@ type PortfolioSentinelHoldingContext struct {
 	MinuteBars *MinuteBarsContext  `json:"minuteBars,omitempty"`
 	Profile    *StockProfile       `json:"stockProfile,omitempty"`
 	News       []NewsEvent         `json:"news,omitempty"`
+	NewsLinks  []NewsLinkCandidate `json:"newsLinks,omitempty"`
 	RawNews    []StockV2RawNews    `json:"rawNews,omitempty"`
 	Freshness  map[string]any      `json:"freshness,omitempty"`
 }

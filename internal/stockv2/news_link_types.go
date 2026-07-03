@@ -79,6 +79,8 @@ type NewsLinkCandidateListFilter struct {
 	MatchMethod   string
 	MonitorStatus string
 	Query         string
+	Since         time.Time
+	Until         time.Time
 	Limit         int
 	Offset        int
 }
@@ -88,6 +90,8 @@ type NewsEventListFilter struct {
 	LinkStatus    string
 	QualityStatus string
 	Query         string
+	Since         time.Time
+	Until         time.Time
 	Limit         int
 	Offset        int
 }
