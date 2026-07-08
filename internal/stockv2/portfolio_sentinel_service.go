@@ -5,11 +5,30 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"phantom-lancer/internal/safelog"
 )
+
+const (
+	// ponytail: 先用确定性分数阈值和弱候选限额控制噪音；如果后续需要更细的
+	// 信息价值排序，再升级为按事件类型/语义分桶的 scorer。
+	portfolioSentinelLowPriorityNewsDetailLimit = 10
+	portfolioSentinelNewsScanMultiplier         = 4
+	portfolioSentinelNewsScanMin                = 200
+	portfolioSentinelNewsHighScoreThreshold     = 65
+)
+
+type portfolioSentinelNewsFilterStats struct {
+	InputCandidates              int
+	RetainedCandidates           int
+	RetainedLowPriorityCount     int
+	SuppressedLowPriorityCount   int
+	SuppressedLowPriorityTerms   map[string]int
+	SuppressedLowPrioritySymbols map[string]int
+}
 
 func (s *Service) GetPortfolioSentinelConfig(ctx context.Context) (PortfolioSentinelConfig, error) {
 	cfg, err := s.store.GetPortfolioSentinelConfig(ctx)
@@ -179,6 +198,10 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 	selectedEventIDs := make(map[string]struct{})
 	newsLinkCount := 0
 	newsTruncated := false
+	newsFilterStats := portfolioSentinelNewsFilterStats{
+		SuppressedLowPriorityTerms:   map[string]int{},
+		SuppressedLowPrioritySymbols: map[string]int{},
+	}
 
 	allSymbols := make([]string, 0)
 	for _, portfolio := range portfolios {
@@ -211,10 +234,11 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 			}
 		}
 		for _, holding := range holdings {
-			holdingNews, holdingLinks, truncated, err := s.portfolioSentinelHoldingNews(ctx, holding, run, cfg, selectedEventIDs, &selectedEvents)
+			holdingNews, holdingLinks, truncated, filterStats, err := s.portfolioSentinelHoldingNews(ctx, holding, run, cfg, selectedEventIDs, &selectedEvents)
 			if err != nil {
 				return PortfolioSentinelContext{}, err
 			}
+			newsFilterStats.merge(filterStats)
 			newsLinkCount += len(holdingLinks)
 			if truncated {
 				newsTruncated = true
@@ -258,6 +282,7 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 	out.ContextStats = portfolioSentinelContextStats(out)
 	out.ContextStats["newsLinkCount"] = newsLinkCount
 	out.ContextStats["newsTruncated"] = newsTruncated
+	portfolioSentinelApplyNewsFilterStats(out.ContextStats, newsFilterStats)
 	return out, nil
 }
 
@@ -284,21 +309,23 @@ func (s *Service) portfolioSentinelHoldingNews(
 	cfg PortfolioSentinelConfig,
 	selectedEventIDs map[string]struct{},
 	selectedEvents *[]NewsEvent,
-) ([]NewsEvent, []NewsLinkCandidate, bool, error) {
+) ([]NewsEvent, []NewsLinkCandidate, bool, portfolioSentinelNewsFilterStats, error) {
 	perHoldingLimit := cfg.MaxNewsPerHolding
 	if perHoldingLimit <= 0 {
 		perHoldingLimit = 50
 	}
+	scanLimit := portfolioSentinelNewsScanLimit(perHoldingLimit)
 	candidates, err := s.store.ListNewsLinkCandidates(ctx, NewsLinkCandidateListFilter{
 		Symbol: holding.Symbol,
 		Market: holding.Market,
 		Since:  run.WindowStartAt,
 		Until:  run.WindowEndAt,
-		Limit:  perHoldingLimit,
+		Limit:  scanLimit,
 	})
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, portfolioSentinelNewsFilterStats{}, err
 	}
+	candidates, filterStats := portfolioSentinelSelectNewsCandidates(candidates, perHoldingLimit)
 	events := make([]NewsEvent, 0, len(candidates))
 	links := make([]NewsLinkCandidate, 0, len(candidates))
 	holdingEventIDs := make(map[string]struct{})
@@ -312,7 +339,7 @@ func (s *Service) portfolioSentinelHoldingNews(
 			if errors.Is(err, ErrNewsEventNotFound) {
 				continue
 			}
-			return nil, nil, false, err
+			return nil, nil, false, filterStats, err
 		}
 		holdingEventIDs[candidate.NewsEventID] = struct{}{}
 		events = append(events, event)
@@ -326,7 +353,148 @@ func (s *Service) portfolioSentinelHoldingNews(
 			*selectedEvents = append(*selectedEvents, event)
 		}
 	}
-	return events, links, truncated, nil
+	return events, links, truncated, filterStats, nil
+}
+
+func portfolioSentinelNewsScanLimit(detailLimit int) int {
+	if detailLimit <= 0 {
+		detailLimit = 50
+	}
+	limit := detailLimit * portfolioSentinelNewsScanMultiplier
+	if limit < portfolioSentinelNewsScanMin {
+		limit = portfolioSentinelNewsScanMin
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	return limit
+}
+
+func portfolioSentinelSelectNewsCandidates(candidates []NewsLinkCandidate, detailLimit int) ([]NewsLinkCandidate, portfolioSentinelNewsFilterStats) {
+	stats := portfolioSentinelNewsFilterStats{
+		InputCandidates:              len(candidates),
+		SuppressedLowPriorityTerms:   map[string]int{},
+		SuppressedLowPrioritySymbols: map[string]int{},
+	}
+	if detailLimit <= 0 {
+		detailLimit = 50
+	}
+	if len(candidates) <= detailLimit && len(candidates) <= portfolioSentinelLowPriorityNewsDetailLimit {
+		stats.RetainedCandidates = len(candidates)
+		for _, candidate := range candidates {
+			if portfolioSentinelLowPriorityNewsCandidate(candidate) {
+				stats.RetainedLowPriorityCount++
+			}
+		}
+		return candidates, stats
+	}
+	lowLimit := portfolioSentinelLowPriorityNewsDetailLimit
+	if lowLimit > detailLimit {
+		lowLimit = detailLimit
+	}
+	highLimit := detailLimit - lowLimit
+	if highLimit < 0 {
+		highLimit = 0
+	}
+	high := make([]NewsLinkCandidate, 0, detailLimit)
+	low := make([]NewsLinkCandidate, 0, lowLimit)
+	for _, candidate := range candidates {
+		if portfolioSentinelLowPriorityNewsCandidate(candidate) {
+			if len(low) < lowLimit {
+				low = append(low, candidate)
+				stats.RetainedLowPriorityCount++
+			} else {
+				stats.SuppressedLowPriorityCount++
+				stats.SuppressedLowPrioritySymbols[strings.TrimSpace(candidate.Symbol)]++
+				for _, term := range candidate.MatchedTerms {
+					term = strings.TrimSpace(term)
+					if term != "" {
+						stats.SuppressedLowPriorityTerms[term]++
+					}
+				}
+			}
+			continue
+		}
+		if len(high) < highLimit {
+			high = append(high, candidate)
+		}
+	}
+	out := make([]NewsLinkCandidate, 0, len(high)+len(low))
+	out = append(out, high...)
+	out = append(out, low...)
+	stats.RetainedCandidates = len(out)
+	return out, stats
+}
+
+func portfolioSentinelLowPriorityNewsCandidate(candidate NewsLinkCandidate) bool {
+	if candidate.Score >= portfolioSentinelNewsHighScoreThreshold {
+		return false
+	}
+	reason := candidate.Reason
+	if strings.Contains(reason, "命中股票代码") ||
+		strings.Contains(reason, "命中标的名称") ||
+		strings.Contains(reason, "命中别名") {
+		return false
+	}
+	return true
+}
+
+func (s *portfolioSentinelNewsFilterStats) merge(other portfolioSentinelNewsFilterStats) {
+	s.InputCandidates += other.InputCandidates
+	s.RetainedCandidates += other.RetainedCandidates
+	s.RetainedLowPriorityCount += other.RetainedLowPriorityCount
+	s.SuppressedLowPriorityCount += other.SuppressedLowPriorityCount
+	if s.SuppressedLowPriorityTerms == nil {
+		s.SuppressedLowPriorityTerms = map[string]int{}
+	}
+	for term, count := range other.SuppressedLowPriorityTerms {
+		s.SuppressedLowPriorityTerms[term] += count
+	}
+	if s.SuppressedLowPrioritySymbols == nil {
+		s.SuppressedLowPrioritySymbols = map[string]int{}
+	}
+	for symbol, count := range other.SuppressedLowPrioritySymbols {
+		s.SuppressedLowPrioritySymbols[symbol] += count
+	}
+}
+
+func portfolioSentinelApplyNewsFilterStats(stats map[string]any, filter portfolioSentinelNewsFilterStats) {
+	stats["newsInputCandidateCount"] = filter.InputCandidates
+	stats["newsRetainedCandidateCount"] = filter.RetainedCandidates
+	stats["retainedLowPriorityNewsCount"] = filter.RetainedLowPriorityCount
+	stats["suppressedLowPriorityNewsCount"] = filter.SuppressedLowPriorityCount
+	if filter.SuppressedLowPriorityCount > 0 {
+		stats["topSuppressedLowPriorityTerms"] = portfolioSentinelTopCounts(filter.SuppressedLowPriorityTerms, 12)
+		stats["suppressedLowPriorityBySymbol"] = portfolioSentinelTopCounts(filter.SuppressedLowPrioritySymbols, 12)
+	}
+}
+
+func portfolioSentinelTopCounts(counts map[string]int, limit int) []map[string]any {
+	type item struct {
+		key   string
+		count int
+	}
+	items := make([]item, 0, len(counts))
+	for key, count := range counts {
+		if strings.TrimSpace(key) == "" || count <= 0 {
+			continue
+		}
+		items = append(items, item{key: key, count: count})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].count == items[j].count {
+			return items[i].key < items[j].key
+		}
+		return items[i].count > items[j].count
+	})
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, map[string]any{"value": item.key, "count": item.count})
+	}
+	return out
 }
 
 func (s *Service) startPortfolioSentinelRunAsync(ctx context.Context, run AgentRun, ledger AgentDecisionLedger, pack PortfolioSentinelContext, modelName string) {

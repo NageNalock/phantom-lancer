@@ -1,6 +1,7 @@
 package stockv2
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -190,6 +191,46 @@ type PortfolioSentinelReport struct {
 	NextWatchFocus   []string                           `json:"next_watch_focus,omitempty"`
 }
 
+func (r *PortfolioSentinelReport) UnmarshalJSON(data []byte) error {
+	type reportAlias PortfolioSentinelReport
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var parsed reportAlias
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		var relaxed struct {
+			SchemaVersion    string                             `json:"schema_version"`
+			OverallRiskLevel string                             `json:"overall_risk_level"`
+			RunSummary       string                             `json:"run_summary"`
+			PositiveItems    []map[string]any                   `json:"positive_items,omitempty"`
+			NegativeItems    []map[string]any                   `json:"negative_items,omitempty"`
+			NoiseItems       []map[string]any                   `json:"noise_items,omitempty"`
+			AffectedHoldings []PortfolioSentinelAffectedHolding `json:"affected_holdings,omitempty"`
+			PortfolioActions []PortfolioSentinelAction          `json:"portfolio_actions,omitempty"`
+			ReviewRequests   []PortfolioSentinelReviewRequest   `json:"review_requests,omitempty"`
+		}
+		if relaxedErr := json.Unmarshal(data, &relaxed); relaxedErr != nil {
+			return err
+		}
+		parsed = reportAlias{
+			SchemaVersion:    relaxed.SchemaVersion,
+			OverallRiskLevel: relaxed.OverallRiskLevel,
+			RunSummary:       relaxed.RunSummary,
+			PositiveItems:    relaxed.PositiveItems,
+			NegativeItems:    relaxed.NegativeItems,
+			NoiseItems:       relaxed.NoiseItems,
+			AffectedHoldings: relaxed.AffectedHoldings,
+			PortfolioActions: relaxed.PortfolioActions,
+			ReviewRequests:   relaxed.ReviewRequests,
+		}
+	}
+	parsed.DataQualityNotes = agentStringListFromRaw(raw["data_quality_notes"])
+	parsed.NextWatchFocus = agentStringListFromRaw(raw["next_watch_focus"])
+	*r = PortfolioSentinelReport(parsed)
+	return nil
+}
+
 type PortfolioSentinelAffectedHolding struct {
 	Symbol       string   `json:"symbol"`
 	Market       string   `json:"market,omitempty"`
@@ -198,6 +239,36 @@ type PortfolioSentinelAffectedHolding struct {
 	Direction    string   `json:"direction,omitempty"`
 	Reasons      []string `json:"reasons,omitempty"`
 	EvidenceRefs []string `json:"evidence_refs,omitempty"`
+}
+
+func (h *PortfolioSentinelAffectedHolding) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	type holdingAlias PortfolioSentinelAffectedHolding
+	var parsed holdingAlias
+	var relaxed struct {
+		Symbol    string `json:"symbol"`
+		Market    string `json:"market,omitempty"`
+		Name      string `json:"name,omitempty"`
+		RiskLevel string `json:"risk_level,omitempty"`
+		Direction string `json:"direction,omitempty"`
+	}
+	if err := json.Unmarshal(data, &relaxed); err != nil {
+		return err
+	}
+	parsed = holdingAlias{
+		Symbol:    relaxed.Symbol,
+		Market:    relaxed.Market,
+		Name:      relaxed.Name,
+		RiskLevel: relaxed.RiskLevel,
+		Direction: relaxed.Direction,
+	}
+	parsed.Reasons = agentStringListFromRaw(raw["reasons"])
+	parsed.EvidenceRefs = agentStringListFromRaw(raw["evidence_refs"])
+	*h = PortfolioSentinelAffectedHolding(parsed)
+	return nil
 }
 
 type PortfolioSentinelAction struct {
@@ -220,4 +291,35 @@ type PortfolioSentinelReviewRequest struct {
 	Summary      string   `json:"summary,omitempty"`
 	RiskLevel    string   `json:"risk_level,omitempty"`
 	EvidenceRefs []string `json:"evidence_refs,omitempty"`
+}
+
+func (r *PortfolioSentinelReviewRequest) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	type requestAlias PortfolioSentinelReviewRequest
+	var parsed requestAlias
+	var relaxed struct {
+		Symbol      string `json:"symbol"`
+		Market      string `json:"market,omitempty"`
+		PortfolioID string `json:"portfolio_id,omitempty"`
+		Title       string `json:"title,omitempty"`
+		Summary     string `json:"summary,omitempty"`
+		RiskLevel   string `json:"risk_level,omitempty"`
+	}
+	if err := json.Unmarshal(data, &relaxed); err != nil {
+		return err
+	}
+	parsed = requestAlias{
+		Symbol:      relaxed.Symbol,
+		Market:      relaxed.Market,
+		PortfolioID: relaxed.PortfolioID,
+		Title:       relaxed.Title,
+		Summary:     relaxed.Summary,
+		RiskLevel:   relaxed.RiskLevel,
+	}
+	parsed.EvidenceRefs = agentStringListFromRaw(raw["evidence_refs"])
+	*r = PortfolioSentinelReviewRequest(parsed)
+	return nil
 }
