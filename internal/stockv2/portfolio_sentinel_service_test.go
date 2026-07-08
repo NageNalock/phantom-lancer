@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -99,6 +100,158 @@ func TestBuildPortfolioSentinelContextIncludesHoldingsAndWindowNews(t *testing.T
 	}
 	if len(pack.RawNews) != 0 || len(pack.NewsEvents) != 1 {
 		t.Fatalf("pack raw=%d events=%d, want no raw and one event", len(pack.RawNews), len(pack.NewsEvents))
+	}
+}
+
+func TestBuildPortfolioSentinelContextSuppressesLowPriorityNewsCandidates(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	now := time.Now()
+	portfolio := createStrategyTestPortfolio(t, svc.store, "portfolio-sentinel-news-filter")
+	if err := svc.store.CreateHolding(ctx, StockV2Holding{
+		ID:                "holding-sentinel-news-filter",
+		PortfolioID:       portfolio.ID,
+		Symbol:            "000977",
+		Market:            "SZ",
+		Name:              "浪潮信息",
+		Quantity:          1000,
+		AvailableQuantity: 1000,
+		CostPrice:         50,
+		AcquiredAt:        now.AddDate(0, 0, -10),
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}); err != nil {
+		t.Fatalf("create holding: %v", err)
+	}
+	strongEvent, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source:  "test",
+		Title:   "浪潮信息签署重要订单",
+		EventAt: now.Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("create strong event: %v", err)
+	}
+	if _, err := svc.store.UpsertNewsLinkCandidate(ctx, NewsLinkCandidate{
+		NewsEventID:     strongEvent.ID,
+		Symbol:          "000977",
+		Market:          "SZ",
+		InstrumentName:  "浪潮信息",
+		MatchMethod:     NewsLinkMatchExactName,
+		Score:           95,
+		Reason:          "命中标的名称 浪潮信息",
+		MatchedTerms:    []string{"浪潮信息"},
+		MonitorStatus:   NewsLinkMonitorStatusPending,
+		NewsEventAt:     strongEvent.EventAt,
+		NewsEventTitle:  strongEvent.Title,
+		NewsEventSource: strongEvent.Source,
+	}); err != nil {
+		t.Fatalf("create strong candidate: %v", err)
+	}
+	for i := 0; i < 25; i++ {
+		event, err := svc.CreateNewsEvent(ctx, NewsEvent{
+			Source:  "test",
+			Title:   fmt.Sprintf("泛 AI 风险弱关联新闻 %02d", i),
+			EventAt: now.Add(-time.Duration(i+2) * time.Minute),
+		})
+		if err != nil {
+			t.Fatalf("create weak event %d: %v", i, err)
+		}
+		if _, err := svc.store.UpsertNewsLinkCandidate(ctx, NewsLinkCandidate{
+			NewsEventID:     event.ID,
+			Symbol:          "000977",
+			Market:          "SZ",
+			InstrumentName:  "浪潮信息",
+			MatchMethod:     NewsLinkMatchBoosted,
+			Score:           50,
+			Reason:          "命中画像文本 global；当前持仓 boost",
+			MatchedTerms:    []string{"global"},
+			MonitorStatus:   NewsLinkMonitorStatusPending,
+			NewsEventAt:     event.EventAt,
+			NewsEventTitle:  event.Title,
+			NewsEventSource: event.Source,
+		}); err != nil {
+			t.Fatalf("create weak candidate %d: %v", i, err)
+		}
+	}
+	run := PortfolioSentinelRun{
+		ID:            "sentinel-news-filter-run",
+		PortfolioID:   portfolio.ID,
+		TriggerType:   PortfolioSentinelTriggerManual,
+		WindowType:    PortfolioSentinelWindowManual,
+		WindowStartAt: now.Add(-time.Hour),
+		WindowEndAt:   now,
+	}
+	pack, err := svc.BuildPortfolioSentinelContext(ctx, run, "")
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	holding := pack.Portfolios[0].Holdings[0]
+	if len(holding.NewsLinks) != 11 {
+		t.Fatalf("news links = %d, want one strong plus ten weak samples", len(holding.NewsLinks))
+	}
+	if holding.NewsLinks[0].NewsEventID != strongEvent.ID {
+		t.Fatalf("first retained candidate = %+v, want strong direct event first", holding.NewsLinks[0])
+	}
+	if got := intFromContextStat(pack.ContextStats["newsInputCandidateCount"]); got != 26 {
+		t.Fatalf("newsInputCandidateCount = %d, want 26", got)
+	}
+	if got := intFromContextStat(pack.ContextStats["newsRetainedCandidateCount"]); got != 11 {
+		t.Fatalf("newsRetainedCandidateCount = %d, want 11", got)
+	}
+	if got := intFromContextStat(pack.ContextStats["retainedLowPriorityNewsCount"]); got != 10 {
+		t.Fatalf("retainedLowPriorityNewsCount = %d, want 10", got)
+	}
+	if got := intFromContextStat(pack.ContextStats["suppressedLowPriorityNewsCount"]); got != 15 {
+		t.Fatalf("suppressedLowPriorityNewsCount = %d, want 15", got)
+	}
+}
+
+func TestPortfolioSentinelReportNormalizesStringListFields(t *testing.T) {
+	report, err := portfolioSentinelReportFromResult(map[string]any{
+		"schema_version":     PortfolioSentinelReportSchemaVersion,
+		"overall_risk_level": PortfolioSentinelRiskMedium,
+		"run_summary":        "数据质量说明为对象数组也应可保存",
+		"data_quality_notes": []any{
+			map[string]any{"type": "freshness", "note": "报价新鲜"},
+			"单条字符串说明",
+		},
+		"next_watch_focus": map[string]any{"summary": "继续观察 AI 链"},
+		"affected_holdings": []any{
+			map[string]any{
+				"symbol":        "000977",
+				"reasons":       []any{map[string]any{"severity": "high", "reason": "弱结构也要转成文本"}},
+				"evidence_refs": map[string]any{"summary": "来源摘要"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("parse report: %v", err)
+	}
+	if len(report.DataQualityNotes) != 2 || report.DataQualityNotes[0] != "[freshness] 报价新鲜" {
+		t.Fatalf("data quality notes = %#v, want normalized strings", report.DataQualityNotes)
+	}
+	if len(report.NextWatchFocus) != 1 || report.NextWatchFocus[0] != "继续观察 AI 链" {
+		t.Fatalf("next watch focus = %#v, want normalized string list", report.NextWatchFocus)
+	}
+	if len(report.AffectedHoldings) != 1 ||
+		len(report.AffectedHoldings[0].Reasons) != 1 ||
+		report.AffectedHoldings[0].Reasons[0] != "[high] 弱结构也要转成文本" ||
+		report.AffectedHoldings[0].EvidenceRefs[0] != "来源摘要" {
+		t.Fatalf("affected holdings = %#v, want normalized nested string lists", report.AffectedHoldings)
+	}
+}
+
+func intFromContextStat(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	default:
+		return 0
 	}
 }
 
