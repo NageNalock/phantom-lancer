@@ -1490,20 +1490,11 @@ export interface StockV2UpdateProgress {
 export interface StockV2Settings {
   id: string;
   autoUpdateEnabled: boolean;
-  dailyBarsAutoEnabled: boolean;
   updateIntervalSec: number;
   proxyEnabled: boolean;
   proxyType: string;
   proxyHost: string;
   proxyPort: number;
-  baseProfileAutoMaintainEnabled: boolean;
-  baseProfileMaintainIntervalSeconds: number;
-  baseProfileDeepUpdateBatchSize: number;
-  baseProfileDeepUpdateAiBudget: number;
-  baseProfileDeepUpdateRateLimitMs: number;
-  baseProfileLastMaintainAt?: string;
-  baseProfileNextMaintainAt?: string;
-  baseProfileLastMaintainResult?: string;
   lastScheduledUpdate: string;
   dailyBarsLastRun: string;
   createdAt: string;
@@ -1861,12 +1852,6 @@ export interface StockV2Strategy {
   riskNotes?: string;
   evidenceRefs?: string[];
   generationMeta?: Record<string, unknown>;
-  entryPriceLow?: number;
-  entryPriceHigh?: number;
-  triggerPriceAbove?: number;
-  triggerPriceBelow?: number;
-  stopLoss?: number;
-  takeProfit?: number;
   targetPositionPct?: number;
   createdAt?: string;
   updatedAt?: string;
@@ -1944,133 +1929,13 @@ export interface StockV2StrategyGenerationInput {
   evidenceScope?: Record<string, boolean>;
 }
 
-// ===== Legacy Watch / Alert compatibility =====
-//
-// Watch 不再是 V2 的用户主模型;保留这些类型是为了兼容旧路由、旧数据和底层规则评估。
-// 新 UI 只暴露系统内置 MonitorTask 的开关、周期、运行历史、命中记录和 Alert 台账。
-export type StockV2WatchStatus = "active" | "paused" | "archived";
-export type StockV2WatchSource = "manual" | "strategy" | "portfolio_monitor";
-export type StockV2WatchTriggerPolicy = "any" | "all";
-export type StockV2WatchRuleType =
-  | "price_above"
-  | "price_below"
-  | "price_between"
-  | "pct_change_above"
-  | "pct_change_below"
-  | "quote_stale"
-  | "daily_close_above"
-  | "daily_close_below"
-  | "portfolio_symbol_weight_above"
-  | "portfolio_symbol_weight_below";
-export type StockV2WatchScheduleKind = "manual" | "market_session" | "daily";
-
-export interface StockV2WatchRuleConfig {
-  key?: string;
-  type?: StockV2WatchRuleType | string;
-  ruleType?: StockV2WatchRuleType | string;
-  symbol?: string;
-  portfolioId?: string;
-  threshold?: number;
-  low?: number;
-  high?: number;
-  maxAgeSeconds?: number;
-}
-
-export interface StockV2WatchTriggerConfig {
-  source?: string;
-  template?: string;
-  rules?: StockV2WatchRuleConfig[];
-  [key: string]: unknown;
-}
-
-export interface StockV2Watch {
-  id: string;
-  name?: string;
-  status?: StockV2WatchStatus | string;
-  source?: StockV2WatchSource | string;
-  symbol?: string;
-  market?: string;
-  instrumentName?: string;
-  portfolioId?: string;
-  portfolioName?: string;
-  strategyId?: string;
-  strategyName?: string;
-  strategyVersionId?: string;
-  triggerPolicy?: StockV2WatchTriggerPolicy | string;
-  triggerConfig?: StockV2WatchTriggerConfig;
-  triggerKind?: StockV2WatchRuleType | string;
-  threshold?: number;
-  comparator?: string;
-  cooldownSeconds?: number;
-  scheduleKind?: StockV2WatchScheduleKind | string;
-  /** 后端可预生成的规则摘要;缺失时前端按 triggerKind + threshold 拼。 */
-  ruleSummary?: string;
-  lastCheckedAt?: string;
-  lastTriggeredAt?: string;
-  lastRunStatus?: string;
-  lastRunReason?: string;
-  archivedAt?: string;
-  createdAt?: string;
-  updatedAt?: string;
-}
-
-export interface StockV2WatchInput {
-  name: string;
-  source?: StockV2WatchSource | string;
-  symbol?: string;
-  market?: string;
-  portfolioId?: string;
-  strategyId?: string;
-  strategyVersionId?: string;
-  triggerPolicy?: StockV2WatchTriggerPolicy | string;
-  triggerConfig?: StockV2WatchTriggerConfig;
-  cooldownSeconds?: number;
-  scheduleKind?: StockV2WatchScheduleKind | string;
-}
-
-export interface StockV2WatchListResponse {
-  items: StockV2Watch[];
-  total?: number;
-  limit?: number;
-  offset?: number;
-}
-
-export interface StockV2WatchRuleResult {
-  ruleKey?: string;
-  ruleType?: StockV2WatchRuleType | string;
-  status?: "matched" | "not_matched" | "skipped" | "degraded" | string;
-  reason?: string;
-  observedValue?: number;
-  threshold?: unknown;
-  evidence?: Record<string, unknown>;
-  dataTime?: string;
-}
-
-/** 旧 Watch 兼容运行结果。matched / not_matched / skipped / degraded 为规则评估状态。 */
-export interface StockV2WatchRunResult {
-  watchId?: string;
-  status?: "matched" | "not_matched" | "skipped" | "degraded" | string;
-  reason?: string;
-  ruleResults?: StockV2WatchRuleResult[];
-  alert?: StockV2Alert;
-  checkedAt?: string;
-  totals?: {
-    matched?: number;
-    notMatched?: number;
-    skipped?: number;
-    degraded?: number;
-  };
-  /** 命中后产生的新 alert(若有)。 */
-  alerts?: StockV2Alert[];
-  note?: string;
-}
+// ===== Monitor Alert ledger =====
 
 export type StockV2AlertStatus = "open" | "acknowledged" | "ignored" | "resolved";
 export type StockV2AlertLevel = "info" | "warning" | "critical";
 
 export interface StockV2Alert {
   id: string;
-  watchId?: string;
   monitorHitId?: string;
   monitorRunId?: string;
   taskType?: string;
@@ -2082,7 +1947,6 @@ export interface StockV2Alert {
   agentRunId?: string;
   decisionLedgerId?: string;
   triggerSource?: string;
-  watchName?: string;
   status?: StockV2AlertStatus | string;
   level?: StockV2AlertLevel | string;
   title?: string;

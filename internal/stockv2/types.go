@@ -158,41 +158,31 @@ type StockV2UpdateProgress struct {
 
 // StockV2Settings V2 配置
 type StockV2Settings struct {
-	ID                                 string    `json:"id"`
-	AutoUpdateEnabled                  bool      `json:"autoUpdateEnabled"`
-	UpdateIntervalSec                  int       `json:"updateIntervalSec"`
-	ProxyEnabled                       bool      `json:"proxyEnabled"`
-	ProxyType                          string    `json:"proxyType"`
-	ProxyHost                          string    `json:"proxyHost"`
-	ProxyPort                          int       `json:"proxyPort"`
-	LastScheduledUpdate                time.Time `json:"lastScheduledUpdate"`
-	DailyBarsAutoEnabled               bool      `json:"dailyBarsAutoEnabled"` // legacy: 旧版独立日 K 调度开关，V2 产品路径不再使用
-	DailyBarsLastRun                   time.Time `json:"dailyBarsLastRun"`     // 最近一次统一维护或手动日 K 批任务完成时间
-	FinancialJuiceEnabled              bool      `json:"-"`
-	FinancialJuiceEndpoint             string    `json:"-"`
-	FinancialJuiceCookie               string    `json:"-"`
-	FinancialJuiceCookieSet            bool      `json:"-"`
-	BaseProfileAutoMaintainEnabled     bool      `json:"baseProfileAutoMaintainEnabled"`
-	BaseProfileMaintainIntervalSeconds int       `json:"baseProfileMaintainIntervalSeconds"`
-	BaseProfileDeepUpdateBatchSize     int       `json:"baseProfileDeepUpdateBatchSize"`
-	BaseProfileDeepUpdateAIBudget      int       `json:"baseProfileDeepUpdateAiBudget"`
-	BaseProfileDeepUpdateRateLimitMs   int       `json:"baseProfileDeepUpdateRateLimitMs"`
-	BaseProfileLastMaintainAt          time.Time `json:"baseProfileLastMaintainAt,omitempty"`
-	BaseProfileNextMaintainAt          time.Time `json:"baseProfileNextMaintainAt,omitempty"`
-	BaseProfileLastMaintainResult      string    `json:"baseProfileLastMaintainResult,omitempty"`
-	CreatedAt                          time.Time `json:"createdAt"`
-	UpdatedAt                          time.Time `json:"updatedAt"`
+	ID                      string    `json:"id"`
+	AutoUpdateEnabled       bool      `json:"autoUpdateEnabled"`
+	UpdateIntervalSec       int       `json:"updateIntervalSec"`
+	ProxyEnabled            bool      `json:"proxyEnabled"`
+	ProxyType               string    `json:"proxyType"`
+	ProxyHost               string    `json:"proxyHost"`
+	ProxyPort               int       `json:"proxyPort"`
+	LastScheduledUpdate     time.Time `json:"lastScheduledUpdate"`
+	DailyBarsLastRun        time.Time `json:"dailyBarsLastRun"` // 最近一次统一维护或手动日 K 批任务完成时间
+	FinancialJuiceEnabled   bool      `json:"-"`
+	FinancialJuiceEndpoint  string    `json:"-"`
+	FinancialJuiceCookie    string    `json:"-"`
+	FinancialJuiceCookieSet bool      `json:"-"`
+	CreatedAt               time.Time `json:"createdAt"`
+	UpdatedAt               time.Time `json:"updatedAt"`
 }
 
 // StockV2SettingsPatch 配置更新补丁
 type StockV2SettingsPatch struct {
-	AutoUpdateEnabled    *bool   `json:"autoUpdateEnabled,omitempty"`
-	UpdateIntervalSec    *int    `json:"updateIntervalSec,omitempty"`
-	ProxyEnabled         *bool   `json:"proxyEnabled,omitempty"`
-	ProxyType            *string `json:"proxyType,omitempty"`
-	ProxyHost            *string `json:"proxyHost,omitempty"`
-	ProxyPort            *int    `json:"proxyPort,omitempty"`
-	DailyBarsAutoEnabled *bool   `json:"dailyBarsAutoEnabled,omitempty"` // legacy: 新流程使用 autoUpdateEnabled
+	AutoUpdateEnabled *bool   `json:"autoUpdateEnabled,omitempty"`
+	UpdateIntervalSec *int    `json:"updateIntervalSec,omitempty"`
+	ProxyEnabled      *bool   `json:"proxyEnabled,omitempty"`
+	ProxyType         *string `json:"proxyType,omitempty"`
+	ProxyHost         *string `json:"proxyHost,omitempty"`
+	ProxyPort         *int    `json:"proxyPort,omitempty"`
 }
 
 // Repository 接口定义
@@ -323,18 +313,12 @@ type RequestRecordTransaction struct {
 
 // RequestCreateOrUpdateSettings 配置请求
 type RequestCreateOrUpdateSettings struct {
-	AutoUpdateEnabled                  *bool   `json:"autoUpdateEnabled,omitempty"`
-	UpdateIntervalSec                  *int    `json:"updateIntervalSec,omitempty"`
-	ProxyEnabled                       *bool   `json:"proxyEnabled,omitempty"`
-	ProxyType                          *string `json:"proxyType,omitempty"`
-	ProxyHost                          *string `json:"proxyHost,omitempty"`
-	ProxyPort                          *int    `json:"proxyPort,omitempty"`
-	DailyBarsAutoEnabled               *bool   `json:"dailyBarsAutoEnabled,omitempty"` // legacy: 新流程使用 autoUpdateEnabled
-	BaseProfileAutoMaintainEnabled     *bool   `json:"baseProfileAutoMaintainEnabled,omitempty"`
-	BaseProfileMaintainIntervalSeconds *int    `json:"baseProfileMaintainIntervalSeconds,omitempty"`
-	BaseProfileDeepUpdateBatchSize     *int    `json:"baseProfileDeepUpdateBatchSize,omitempty"`
-	BaseProfileDeepUpdateAIBudget      *int    `json:"baseProfileDeepUpdateAiBudget,omitempty"`
-	BaseProfileDeepUpdateRateLimitMs   *int    `json:"baseProfileDeepUpdateRateLimitMs,omitempty"`
+	AutoUpdateEnabled *bool   `json:"autoUpdateEnabled,omitempty"`
+	UpdateIntervalSec *int    `json:"updateIntervalSec,omitempty"`
+	ProxyEnabled      *bool   `json:"proxyEnabled,omitempty"`
+	ProxyType         *string `json:"proxyType,omitempty"`
+	ProxyHost         *string `json:"proxyHost,omitempty"`
+	ProxyPort         *int    `json:"proxyPort,omitempty"`
 }
 
 // 错误定义

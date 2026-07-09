@@ -86,7 +86,7 @@ func TestSaveProposedOperationWithoutPortfolioBlockedByGuardrails(t *testing.T) 
 	defer cleanup()
 
 	now := time.Now()
-	seedWatchQuote(t, svc, "000977", 61, 1.2, QuoteStatusFresh, now)
+	seedMonitorQuote(t, svc, "000977", 61, 1.2, QuoteStatusFresh, now)
 	run, err := svc.store.CreateMonitorRun(ctx, MonitorRun{
 		ID:          "run-no-portfolio-review",
 		TaskType:    MonitorTaskDataStrategyMonitor,

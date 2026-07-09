@@ -250,7 +250,7 @@ func TestRunDataStrategyMonitorProducesHit(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 
-	seedWatchQuote(t, svc, "000977", 61, 1.2, QuoteStatusFresh, time.Now())
+	seedMonitorQuote(t, svc, "000977", 61, 1.2, QuoteStatusFresh, time.Now())
 	if _, err := svc.CreateStrategy(ctx, RequestCreateStrategy{
 		Name:      "突破策略",
 		Kind:      StrategyKindSymbolStrategy,
@@ -260,7 +260,19 @@ func TestRunDataStrategyMonitorProducesHit(t *testing.T) {
 		Symbol:    "000977",
 		Direction: StrategyDirectionWatch,
 		GenerationMeta: map[string]any{
-			"priceTriggers": map[string]any{"triggerPriceAbove": 60.0},
+			"playbook": map[string]any{
+				"version": "v1",
+				"rules": []any{
+					map[string]any{
+						"id":     "observe-breakout",
+						"action": "observe",
+						"title":  "突破后观察",
+						"dataPrefilters": []any{
+							map[string]any{"key": "break_60", "type": MonitorRulePriceAbove, "threshold": 60.0},
+						},
+					},
+				},
+			},
 		},
 		CreatedBy: StrategySourceManual,
 	}); err != nil {
@@ -403,7 +415,7 @@ func TestRunDataStrategyMonitorDoublecheckCreatesAgentRunWithoutExecutor(t *test
 	defer cleanup()
 
 	configureOperationReviewModelForMonitorTest(t, svc)
-	seedWatchQuote(t, svc, "000977", 61, 1.2, QuoteStatusFresh, time.Now())
+	seedMonitorQuote(t, svc, "000977", 61, 1.2, QuoteStatusFresh, time.Now())
 	if _, err := svc.CreateStrategy(ctx, RequestCreateStrategy{
 		Name:      "突破策略",
 		Kind:      StrategyKindSymbolStrategy,
@@ -413,7 +425,19 @@ func TestRunDataStrategyMonitorDoublecheckCreatesAgentRunWithoutExecutor(t *test
 		Symbol:    "000977",
 		Direction: StrategyDirectionWatch,
 		GenerationMeta: map[string]any{
-			"priceTriggers": map[string]any{"triggerPriceAbove": 60.0},
+			"playbook": map[string]any{
+				"version": "v1",
+				"rules": []any{
+					map[string]any{
+						"id":     "observe-breakout",
+						"action": "observe",
+						"title":  "突破后观察",
+						"dataPrefilters": []any{
+							map[string]any{"key": "break_60", "type": MonitorRulePriceAbove, "threshold": 60.0},
+						},
+					},
+				},
+			},
 		},
 		CreatedBy: StrategySourceManual,
 	}); err != nil {
@@ -561,7 +585,7 @@ func TestRunDataStrategyMonitorUsesPlaybookPrefilters(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 
-	seedWatchQuote(t, svc, "300750", 210, 2.4, QuoteStatusFresh, time.Now())
+	seedMonitorQuote(t, svc, "300750", 210, 2.4, QuoteStatusFresh, time.Now())
 	if _, err := svc.CreateStrategy(ctx, RequestCreateStrategy{
 		Name:      "宁德时代剧本策略",
 		Kind:      StrategyKindSymbolStrategy,
@@ -579,12 +603,11 @@ func TestRunDataStrategyMonitorUsesPlaybookPrefilters(t *testing.T) {
 						"action": "add_position",
 						"title":  "突破后加仓",
 						"dataPrefilters": []any{
-							map[string]any{"key": "break_200", "type": WatchRulePriceAbove, "threshold": 200.0},
+							map[string]any{"key": "break_200", "type": MonitorRulePriceAbove, "threshold": 200.0},
 						},
 					},
 				},
 			},
-			"priceTriggers": map[string]any{"triggerPriceAbove": 999.0},
 		},
 		CreatedBy: StrategySourceManual,
 	}); err != nil {
@@ -638,7 +661,7 @@ func TestMonitorAlertDedupeCooldownUpdatesOccurrence(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 
-	seedWatchQuote(t, svc, "300750", 210, 2.4, QuoteStatusFresh, time.Now())
+	seedMonitorQuote(t, svc, "300750", 210, 2.4, QuoteStatusFresh, time.Now())
 	if _, err := svc.CreateStrategy(ctx, RequestCreateStrategy{
 		Name:      "宁德时代剧本策略",
 		Kind:      StrategyKindSymbolStrategy,
@@ -656,7 +679,7 @@ func TestMonitorAlertDedupeCooldownUpdatesOccurrence(t *testing.T) {
 						"action": "add_position",
 						"title":  "突破后加仓",
 						"dataPrefilters": []any{
-							map[string]any{"key": "break_200", "type": WatchRulePriceAbove, "threshold": 200.0},
+							map[string]any{"key": "break_200", "type": MonitorRulePriceAbove, "threshold": 200.0},
 						},
 					},
 				},
@@ -818,7 +841,7 @@ func TestMonitorRunsAndHitsPagination(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 
-	seedWatchQuote(t, svc, "000977", 61, 1.2, QuoteStatusFresh, time.Now())
+	seedMonitorQuote(t, svc, "000977", 61, 1.2, QuoteStatusFresh, time.Now())
 	if _, err := svc.CreateStrategy(ctx, RequestCreateStrategy{
 		Name:      "突破策略",
 		Kind:      StrategyKindSymbolStrategy,
@@ -828,7 +851,19 @@ func TestMonitorRunsAndHitsPagination(t *testing.T) {
 		Symbol:    "000977",
 		Direction: StrategyDirectionWatch,
 		GenerationMeta: map[string]any{
-			"priceTriggers": map[string]any{"triggerPriceAbove": 60.0},
+			"playbook": map[string]any{
+				"version": "v1",
+				"rules": []any{
+					map[string]any{
+						"id":     "observe-breakout",
+						"action": "observe",
+						"title":  "突破后观察",
+						"dataPrefilters": []any{
+							map[string]any{"key": "break_60", "type": MonitorRulePriceAbove, "threshold": 60.0},
+						},
+					},
+				},
+			},
 		},
 		CreatedBy: StrategySourceManual,
 	}); err != nil {

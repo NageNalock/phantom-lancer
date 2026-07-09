@@ -29,7 +29,7 @@ func TestBuildPortfolioSentinelContextIncludesHoldingsAndWindowNews(t *testing.T
 	}); err != nil {
 		t.Fatalf("create holding: %v", err)
 	}
-	seedWatchQuote(t, svc, "000977", 48, -3.2, QuoteStatusFresh, now)
+	seedMonitorQuote(t, svc, "000977", 48, -3.2, QuoteStatusFresh, now)
 	event, err := svc.CreateNewsEvent(ctx, NewsEvent{
 		Source:  "test",
 		Title:   "浪潮信息相关存储服务器链条承压",
@@ -276,7 +276,7 @@ func TestPortfolioSentinelAgentResultCreatesReviewWithGuardrails(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create holding: %v", err)
 	}
-	seedWatchQuote(t, svc, "000977", 48, -3.2, QuoteStatusFresh, now)
+	seedMonitorQuote(t, svc, "000977", 48, -3.2, QuoteStatusFresh, now)
 	model := configurePortfolioSentinelModelForTest(t, svc)
 	svc.agentExecutor = fakeOperationReviewExecutor{
 		pool:    svc.agentTaskPool,
@@ -422,7 +422,7 @@ func TestPortfolioSentinelLowRiskRunOnlySavesResult(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create holding: %v", err)
 	}
-	seedWatchQuote(t, svc, "000977", 48, -3.2, QuoteStatusFresh, now)
+	seedMonitorQuote(t, svc, "000977", 48, -3.2, QuoteStatusFresh, now)
 	configurePortfolioSentinelModelForTest(t, svc)
 	svc.agentExecutor = fakeOperationReviewExecutor{
 		pool:   svc.agentTaskPool,
@@ -482,7 +482,7 @@ func TestPortfolioSentinelMultipleProposedOperationsFanOutReviews(t *testing.T) 
 		}); err != nil {
 			t.Fatalf("create holding %s: %v", h.symbol, err)
 		}
-		seedWatchQuote(t, svc, h.symbol, 48, -3.2, QuoteStatusFresh, now)
+		seedMonitorQuote(t, svc, h.symbol, 48, -3.2, QuoteStatusFresh, now)
 	}
 	configurePortfolioSentinelModelForTest(t, svc)
 	svc.agentExecutor = fakeOperationReviewExecutor{
@@ -564,7 +564,7 @@ func TestPortfolioSentinelGuardrailsBlockedReviewHasNoTransaction(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("create holding: %v", err)
 	}
-	seedWatchQuote(t, svc, "000977", 48, -3.2, QuoteStatusFresh, now)
+	seedMonitorQuote(t, svc, "000977", 48, -3.2, QuoteStatusFresh, now)
 	configurePortfolioSentinelModelForTest(t, svc)
 	svc.agentExecutor = fakeOperationReviewExecutor{
 		pool:   svc.agentTaskPool,
@@ -634,7 +634,7 @@ func TestPortfolioSentinelAgentUnavailableFailsRun(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create holding: %v", err)
 	}
-	seedWatchQuote(t, svc, "000977", 48, -3.2, QuoteStatusFresh, now)
+	seedMonitorQuote(t, svc, "000977", 48, -3.2, QuoteStatusFresh, now)
 	configurePortfolioSentinelModelForTest(t, svc)
 	svc.agentExecutor = fakeOperationReviewExecutor{
 		pool:    svc.agentTaskPool,

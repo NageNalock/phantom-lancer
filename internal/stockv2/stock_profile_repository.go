@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"sort"
 	"strings"
 	"time"
 
@@ -284,108 +283,6 @@ func (s *Store) CountStockProfileUpdateTasks(ctx context.Context, filter StockPr
 	return total, wrapError(err, "count stock profile update tasks")
 }
 
-type stockProfileDeepUpdateCandidate struct {
-	Instrument StockV2Instrument
-	LastTaskAt time.Time
-}
-
-func (s *Store) ListStockProfileDeepUpdateCandidates(ctx context.Context, limit int) ([]stockProfileDeepUpdateCandidate, error) {
-	if limit <= 0 {
-		return []stockProfileDeepUpdateCandidate{}, nil
-	}
-	lastTaskBySymbol := make(map[string]time.Time)
-	taskRows, err := s.db.QueryContext(ctx, `
-		SELECT symbol, MAX(created_at)
-		FROM stockv2_stock_profile_update_tasks
-		GROUP BY symbol
-	`)
-	if err != nil {
-		return nil, wrapError(err, "list stock profile deep update task times")
-	}
-	for taskRows.Next() {
-		var symbol string
-		var last sql.NullString
-		if err := taskRows.Scan(&symbol, &last); err != nil {
-			taskRows.Close()
-			return nil, wrapError(err, "scan stock profile deep update task time")
-		}
-		if last.Valid {
-			lastTaskBySymbol[symbol] = parseStockProfileTaskTime(last.String)
-		}
-	}
-	if err := taskRows.Err(); err != nil {
-		taskRows.Close()
-		return nil, wrapError(err, "iterate stock profile deep update task times")
-	}
-	taskRows.Close()
-
-	rows, err := s.assetDB().QueryContext(ctx, `
-		SELECT id, symbol, market, COALESCE(instrument_type,'stock'),
-		       COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
-		       concepts, COALESCE(list_date,''), COALESCE(delist_date,''),
-		       COALESCE(status,'active'), last_update_at, created_at, updated_at
-		FROM stockv2_instruments
-		WHERE COALESCE(status,'active') = 'active'
-		ORDER BY symbol ASC
-	`)
-	if err != nil {
-		return nil, wrapError(err, "list stock profile deep update candidates")
-	}
-	defer rows.Close()
-
-	items := make([]stockProfileDeepUpdateCandidate, 0)
-	for rows.Next() {
-		var item stockProfileDeepUpdateCandidate
-		var conceptsJSON []byte
-		var lastUpdate sql.NullTime
-		if err := rows.Scan(
-			&item.Instrument.ID,
-			&item.Instrument.Symbol,
-			&item.Instrument.Market,
-			&item.Instrument.InstrumentType,
-			&item.Instrument.Name,
-			&item.Instrument.Industry,
-			&item.Instrument.Sector,
-			&conceptsJSON,
-			&item.Instrument.ListDate,
-			&item.Instrument.DelistDate,
-			&item.Instrument.Status,
-			&lastUpdate,
-			&item.Instrument.CreatedAt,
-			&item.Instrument.UpdatedAt,
-		); err != nil {
-			return nil, wrapError(err, "scan stock profile deep update candidate")
-		}
-		item.Instrument.InstrumentType = normalizeInstrumentType(item.Instrument.InstrumentType)
-		if lastUpdate.Valid {
-			item.Instrument.LastUpdate = lastUpdate.Time
-		}
-		item.LastTaskAt = lastTaskBySymbol[item.Instrument.Symbol]
-		if len(conceptsJSON) > 0 {
-			_ = json.Unmarshal(conceptsJSON, &item.Instrument.Concepts)
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, wrapError(err, "iterate stock profile deep update candidates")
-	}
-	sort.SliceStable(items, func(i, j int) bool {
-		leftEmpty := items[i].LastTaskAt.IsZero()
-		rightEmpty := items[j].LastTaskAt.IsZero()
-		if leftEmpty != rightEmpty {
-			return leftEmpty
-		}
-		if !items[i].LastTaskAt.Equal(items[j].LastTaskAt) {
-			return items[i].LastTaskAt.Before(items[j].LastTaskAt)
-		}
-		return items[i].Instrument.Symbol < items[j].Instrument.Symbol
-	})
-	if len(items) > limit {
-		items = items[:limit]
-	}
-	return items, nil
-}
-
 func stockProfileSelectSQL() string {
 	return `
 		SELECT symbol, market, COALESCE(instrument_type,'stock'), name, aliases_json,
@@ -604,34 +501,4 @@ func parseStockProfileTaskTime(value string) time.Time {
 		}
 	}
 	return time.Time{}
-}
-
-func normalizeStockProfileDeepUpdateBatchSize(value int) int {
-	if value <= 0 {
-		return defaultStockProfileDeepUpdateBatchSize
-	}
-	if value > maxStockProfileDeepUpdateBatchSize {
-		return maxStockProfileDeepUpdateBatchSize
-	}
-	return value
-}
-
-func normalizeStockProfileDeepUpdateAIBudget(value int) int {
-	if value <= 0 {
-		return defaultStockProfileDeepUpdateAIBudget
-	}
-	if value > maxStockProfileDeepUpdateAIBudget {
-		return maxStockProfileDeepUpdateAIBudget
-	}
-	return value
-}
-
-func normalizeStockProfileDeepUpdateRateLimitMs(value int) int {
-	if value <= 0 {
-		return defaultStockProfileDeepUpdateRateLimitMs
-	}
-	if value > maxStockProfileDeepUpdateRateLimitMs {
-		return maxStockProfileDeepUpdateRateLimitMs
-	}
-	return value
 }

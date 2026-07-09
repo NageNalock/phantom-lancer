@@ -52,25 +52,6 @@ type DrawerState =
   | { type: "edit"; strategy: StockV2Strategy }
   | { type: "generate" };
 
-interface PriceForm {
-  entryPriceLow: string;
-  entryPriceHigh: string;
-  triggerPriceAbove: string;
-  triggerPriceBelow: string;
-  stopLoss: string;
-  takeProfit: string;
-}
-
-const EMPTY_PRICE_FORM: PriceForm = {
-  entryPriceLow: "",
-  entryPriceHigh: "",
-  triggerPriceAbove: "",
-  triggerPriceBelow: "",
-  stopLoss: "",
-  takeProfit: "",
-};
-
-const PRICE_META_KEY = "priceTriggers";
 const STRATEGY_PAGE_SIZE = 12;
 
 export function StockV2Strategies({ actions, data }: { actions: AppActions; data: AppData }) {
@@ -812,14 +793,6 @@ function SymbolStrategyForm({
   const [riskNotes, setRiskNotes] = useState(initial?.riskNotes || "");
   const [playbookRules, setPlaybookRules] = useState<StockV2StrategyActionRule[]>(playbookRulesForForm(initial?.generationMeta));
   const [changeSummary, setChangeSummary] = useState("");
-  const [price, setPrice] = useState<PriceForm>({
-    entryPriceLow: numToStr(initial?.entryPriceLow),
-    entryPriceHigh: numToStr(initial?.entryPriceHigh),
-    triggerPriceAbove: numToStr(initial?.triggerPriceAbove),
-    triggerPriceBelow: numToStr(initial?.triggerPriceBelow),
-    stopLoss: numToStr(initial?.stopLoss),
-    takeProfit: numToStr(initial?.takeProfit),
-  });
 
   const boundScope = scope === "portfolio_bound";
   const canSubmit =
@@ -830,7 +803,6 @@ function SymbolStrategyForm({
   function buildInput(): StockV2StrategyInput {
     const generationMeta = mergeStrategyGenerationMeta(
       initial?.generationMeta,
-      price,
       playbookRules,
       { entryConditions, exitConditions, riskNotes },
       mode === "edit" ? changeSummary : "",
@@ -926,29 +898,6 @@ function SymbolStrategyForm({
       </Field>
 
       <PlaybookEditor rules={playbookRules} onChange={setPlaybookRules} />
-
-      <CollapsibleSection title="价格与触发(可选)" subtitle="结构化触发价,供后台监控任务预筛使用">
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="入场价下限">
-            <input type="number" step="0.01" value={price.entryPriceLow} placeholder="例如: 18.50" onChange={(e) => setPrice({ ...price, entryPriceLow: e.target.value })} />
-          </Field>
-          <Field label="入场价上限">
-            <input type="number" step="0.01" value={price.entryPriceHigh} placeholder="例如: 20.00" onChange={(e) => setPrice({ ...price, entryPriceHigh: e.target.value })} />
-          </Field>
-          <Field label="突破触发价">
-            <input type="number" step="0.01" value={price.triggerPriceAbove} placeholder="高于该价触发" onChange={(e) => setPrice({ ...price, triggerPriceAbove: e.target.value })} />
-          </Field>
-          <Field label="跌破触发价">
-            <input type="number" step="0.01" value={price.triggerPriceBelow} placeholder="低于该价触发" onChange={(e) => setPrice({ ...price, triggerPriceBelow: e.target.value })} />
-          </Field>
-          <Field label="止损价">
-            <input type="number" step="0.01" value={price.stopLoss} placeholder="例如: 16.80" onChange={(e) => setPrice({ ...price, stopLoss: e.target.value })} />
-          </Field>
-          <Field label="止盈价">
-            <input type="number" step="0.01" value={price.takeProfit} placeholder="例如: 24.00" onChange={(e) => setPrice({ ...price, takeProfit: e.target.value })} />
-          </Field>
-        </div>
-      </CollapsibleSection>
 
       {mode === "edit" ? (
         <Field label="本次变更说明(可选)">
@@ -1132,8 +1081,6 @@ function StrategyDetailDrawer({
 
         <PlaybookSummary playbook={strategy.playbook} />
 
-        <PriceSummary strategy={strategy} />
-
         {strategy.source === "agent" ? (
           <AgentGenerationSection strategy={strategy} gen={gen} onOpenAgentRun={onOpenAgentRun} />
         ) : null}
@@ -1272,31 +1219,6 @@ function AgentGenerationSection({
   );
 }
 
-function PriceSummary({ strategy }: { strategy: StockV2Strategy }) {
-  const rows: Array<[string, string]> = [];
-  if (definedPrice(strategy.entryPriceLow) || definedPrice(strategy.entryPriceHigh)) {
-    rows.push(["入场区间", `${strategy.entryPriceLow ?? "-"} ~ ${strategy.entryPriceHigh ?? "-"}`]);
-  }
-  if (definedPrice(strategy.triggerPriceAbove)) rows.push(["突破触发", String(strategy.triggerPriceAbove)]);
-  if (definedPrice(strategy.triggerPriceBelow)) rows.push(["跌破触发", String(strategy.triggerPriceBelow)]);
-  if (definedPrice(strategy.stopLoss)) rows.push(["止损", String(strategy.stopLoss)]);
-  if (definedPrice(strategy.takeProfit)) rows.push(["止盈", String(strategy.takeProfit)]);
-  if (rows.length === 0) return null;
-  return (
-    <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
-      <div className="mb-2 text-xs font-medium text-[var(--muted-strong)]">价格与触发</div>
-      <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
-        {rows.map(([label, value]) => (
-          <div key={label} className="grid gap-0.5">
-            <span className="text-[var(--muted)]">{label}</span>
-            <span className="font-mono text-[var(--text)]">{value}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 // ============================ helpers ============================
 
 function normalizeStrategyItem(item: StockV2StrategyWithVersion | StockV2Strategy, instruments: StockV2Instrument[]): StockV2Strategy {
@@ -1304,7 +1226,6 @@ function normalizeStrategyItem(item: StockV2StrategyWithVersion | StockV2Strateg
   const strategy = wrapped ? wrapped.strategy : item as StockV2Strategy;
   const activeVersion = wrapped?.activeVersion;
   const generationMeta = activeVersion?.generationMeta || strategy.generationMeta;
-  const price = priceFromGenerationMeta(generationMeta);
   const playbook = playbookFromGenerationMeta(generationMeta);
   const instrument = strategy.symbol
     ? instruments.find((inst) => inst.symbol === strategy.symbol && (!strategy.market || inst.market === strategy.market))
@@ -1324,7 +1245,6 @@ function normalizeStrategyItem(item: StockV2StrategyWithVersion | StockV2Strateg
     evidenceRefs: activeVersion?.evidenceRefs ?? strategy.evidenceRefs,
     generationMeta,
     playbook,
-    ...price,
   };
 }
 
@@ -1355,18 +1275,11 @@ function defaultStrategyName(symbolRef: SymbolRef, direction: string): string {
 
 function mergeStrategyGenerationMeta(
   base: Record<string, unknown> | undefined,
-  price: PriceForm,
   playbookRules: StockV2StrategyActionRule[],
   playbookFallback: { entryConditions?: string; exitConditions?: string; riskNotes?: string },
   changeSummary: string,
 ): Record<string, unknown> | undefined {
   const next: Record<string, unknown> = { ...(base || {}) };
-  const priceMeta = priceFormToMeta(price);
-  if (Object.keys(priceMeta).length > 0) {
-    next[PRICE_META_KEY] = priceMeta;
-  } else {
-    delete next[PRICE_META_KEY];
-  }
 
   const playbook = playbookMetaFromRules(playbookRules, playbookFallback);
   if (playbook) {
@@ -1383,38 +1296,6 @@ function mergeStrategyGenerationMeta(
   }
 
   return Object.keys(next).length ? next : undefined;
-}
-
-function priceFormToMeta(price: PriceForm): Record<string, number> {
-  const result: Record<string, number> = {};
-  (Object.keys(EMPTY_PRICE_FORM) as Array<keyof PriceForm>).forEach((key) => {
-    const value = numOrUndef(price[key]);
-    if (value !== undefined) result[key] = value;
-  });
-  return result;
-}
-
-function priceFromGenerationMeta(meta?: Record<string, unknown>): Partial<Record<keyof PriceForm, number>> {
-  const raw = meta?.[PRICE_META_KEY];
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const record = raw as Record<string, unknown>;
-  return {
-    entryPriceLow: numberFromUnknown(record.entryPriceLow),
-    entryPriceHigh: numberFromUnknown(record.entryPriceHigh),
-    triggerPriceAbove: numberFromUnknown(record.triggerPriceAbove),
-    triggerPriceBelow: numberFromUnknown(record.triggerPriceBelow),
-    stopLoss: numberFromUnknown(record.stopLoss),
-    takeProfit: numberFromUnknown(record.takeProfit),
-  };
-}
-
-function numberFromUnknown(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string") {
-    const n = Number(value);
-    if (Number.isFinite(n)) return n;
-  }
-  return undefined;
 }
 
 function strategyVersionStatus(strategy: StockV2Strategy, version: StockV2StrategyVersion): "active" | "superseded" {
@@ -1469,18 +1350,4 @@ function openStockV2MonitorTab() {
   const href = `${url.pathname}${url.search}${url.hash}`;
   window.history.pushState(null, "", href);
   window.dispatchEvent(new PopStateEvent("popstate"));
-}
-
-function numOrUndef(value: string): number | undefined {
-  if (value.trim() === "") return undefined;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : undefined;
-}
-
-function numToStr(value?: number): string {
-  return typeof value === "number" && Number.isFinite(value) ? String(value) : "";
-}
-
-function definedPrice(value?: number): value is number {
-  return typeof value === "number" && Number.isFinite(value);
 }

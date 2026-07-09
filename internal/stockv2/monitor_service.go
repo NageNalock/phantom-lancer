@@ -11,7 +11,7 @@ import (
 )
 
 // 监控服务:把系统固化的后台监控任务收敛成可观测对象。
-// 复用 watch_evaluator 的规则判断(data_strategy scan),不重写规则逻辑;
+// 数据面策略监控消费 playbook prefilters,产出 MonitorHit 候选;
 // data_strategy / portfolio_risk 产生 MonitorHit(候选),不生成买卖建议、不改持仓。
 // quote 刷新记录复用 quote task state,不复制执行逻辑。
 
@@ -397,7 +397,6 @@ func (s *Service) upsertMonitorAlert(
 
 	alert := StockV2Alert{
 		ID:              generateID(),
-		WatchID:         "",
 		MonitorHitID:    hit.ID,
 		MonitorRunID:    hit.RunID,
 		TaskType:        hit.TaskType,
@@ -582,8 +581,7 @@ func stringFromAny(value any) string {
 	}
 }
 
-// runDataStrategyMonitor 扫描 active 单票策略,优先用操作剧本里的数据/组合预筛产出动作候选。
-// ponytail: 保留旧 priceTriggers 兜底,兼容已有策略版本,监控判断仍复用 watch evaluator。
+// runDataStrategyMonitor 扫描 active 单票策略,只消费操作剧本里的数据/组合预筛产出动作候选。
 func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cfg MonitorTaskConfig) MonitorRun {
 	run.Metadata["agentDoublecheck"] = monitorAgentDecisionState(cfg)
 	strategies, err := s.store.ListStrategies(ctx, StrategyListFilter{
@@ -611,67 +609,6 @@ func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cf
 			if playbookMatched {
 				run.SuccessCount++
 			}
-			continue
-		}
-		triggerConfig, err := s.triggerConfigFromStrategy(ctx, sw)
-		if err != nil {
-			run.FailedCount++
-			continue
-		}
-		tempWatch := StockV2Watch{
-			Symbol:        sw.Strategy.Symbol,
-			Market:        sw.Strategy.Market,
-			PortfolioID:   sw.Strategy.PortfolioID,
-			TriggerPolicy: WatchTriggerPolicyAny,
-			TriggerConfig: triggerConfig,
-		}
-		rules := watchRulesFromConfig(tempWatch)
-		matched := false
-		for _, rule := range rules {
-			rr := s.evaluateWatchRule(ctx, tempWatch, rule, run.StartedAt)
-			if rr.Status == WatchRunStatusMatched {
-				evidence := monitorEvidenceWithAgentState(rr.Evidence, cfg)
-				if playbook := mapFromAny(sw.ActiveVersion.GenerationMeta["playbook"]); len(playbook) > 0 {
-					evidence["playbook"] = playbook
-				}
-				hit := MonitorHit{
-					RunID:      run.ID,
-					TaskType:   MonitorTaskDataStrategyMonitor,
-					Status:     MonitorHitStatusCandidate,
-					StrategyID: sw.Strategy.ID,
-					Symbol:     sw.Strategy.Symbol,
-					Market:     sw.Strategy.Market,
-					Title:      alertTitleForRule(rr),
-					Summary:    rr.Reason,
-					Evidence:   evidence,
-				}
-				hit.Evidence["matchedPrefilterType"] = rr.RuleType
-				hit.Evidence["matchedThreshold"] = rr.Threshold
-				hit.Evidence["matchedPrefilterKey"] = rr.RuleKey
-				if threshold := stringFromAny(rr.Threshold); threshold != "" {
-					hit.Evidence["matchedPrefilterKey"] = rr.RuleKey + ":" + threshold
-				}
-				createdHit, err := s.store.CreateMonitorHit(ctx, hit)
-				if err != nil {
-					run.FailedCount++
-					continue
-				}
-				post, err := s.processCreatedMonitorHit(ctx, createdHit, cfg)
-				if post.ReviewCreated {
-					run.ReviewCount++
-				}
-				if post.AlertID != "" {
-					run.AlertCount++
-				}
-				if err != nil {
-					run.FailedCount++
-				}
-				run.HitCount++
-				matched = true
-			}
-		}
-		if matched {
-			run.SuccessCount++
 		}
 	}
 	run.Status = MonitorRunStatusCompleted
@@ -690,20 +627,14 @@ func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run Monitor
 	alertCount := 0
 
 	for _, action := range actions {
-		rules := playbookActionWatchRules(action, sw.Strategy.Symbol, sw.Strategy.PortfolioID)
+		rules := playbookActionMonitorRules(action, sw.Strategy.Symbol, sw.Strategy.PortfolioID)
 		if len(rules) == 0 {
 			continue
 		}
 		hasPrefilters = true
-		tempWatch := StockV2Watch{
-			Symbol:        sw.Strategy.Symbol,
-			Market:        sw.Strategy.Market,
-			PortfolioID:   sw.Strategy.PortfolioID,
-			TriggerPolicy: WatchTriggerPolicyAny,
-		}
 		for _, rule := range rules {
-			rr := s.evaluateWatchRule(ctx, tempWatch, rule, run.StartedAt)
-			if rr.Status != WatchRunStatusMatched {
+			rr := s.evaluateMonitorRule(ctx, rule, run.StartedAt)
+			if rr.Status != MonitorRuleStatusMatched {
 				continue
 			}
 			evidence := monitorEvidenceWithAgentState(rr.Evidence, cfg)
@@ -1240,7 +1171,7 @@ func playbookActionMapsFromMeta(meta map[string]any) []map[string]any {
 	return actions
 }
 
-func playbookActionWatchRules(action map[string]any, symbol, portfolioID string) []watchRule {
+func playbookActionMonitorRules(action map[string]any, symbol, portfolioID string) []monitorRule {
 	rawRules := make([]any, 0)
 	rawRules = append(rawRules, arrayFromAny(action["dataPrefilters"])...)
 	rawRules = append(rawRules, arrayFromAny(action["portfolioPrefilters"])...)
@@ -1257,24 +1188,17 @@ func playbookActionWatchRules(action map[string]any, symbol, portfolioID string)
 	if len(filtered) == 0 {
 		return nil
 	}
-	watch := StockV2Watch{
-		Symbol:      symbol,
-		PortfolioID: portfolioID,
-		TriggerConfig: map[string]any{
-			"rules": filtered,
-		},
-	}
-	return watchRulesFromConfig(watch)
+	return monitorRulesFromConfig(map[string]any{"rules": filtered}, symbol, portfolioID)
 }
 
 func playbookPrefilterReady(prefilter map[string]any) bool {
-	ruleType := normalizeWatchRuleType(firstRuleString(prefilter, "type", "ruleType"))
+	ruleType := normalizeMonitorRuleType(firstRuleString(prefilter, "type", "ruleType"))
 	switch ruleType {
 	case "":
 		return false
-	case WatchRuleQuoteStale:
+	case MonitorRuleQuoteStale:
 		return true
-	case WatchRulePriceBetween:
+	case MonitorRulePriceBetween:
 		return ruleNumberPresent(prefilter, "low", "lower", "min") && ruleNumberPresent(prefilter, "high", "upper", "max")
 	default:
 		return ruleNumberPresent(prefilter, "threshold", "value")

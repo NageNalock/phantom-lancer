@@ -8,7 +8,7 @@ import (
 	"phantom-lancer/internal/stockv2"
 )
 
-// 监控与任务 HTTP 层。watch/alert 仍保留底层路由,前端不再暴露「新建盯盘」入口。
+// 监控与任务 HTTP 层。告警账本在 stockv2_alerts.go 中单独暴露。
 
 func (s *Server) handleStockV2ListMonitorTasks(w http.ResponseWriter, r *http.Request) {
 	items, err := s.stockV2.ListMonitorTasks(r.Context())

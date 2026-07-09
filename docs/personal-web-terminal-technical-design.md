@@ -70,7 +70,7 @@ Go 后端是系统唯一的执行入口和权限边界，负责：
 - Codex CLI 安装探测、app-server runtime supervisor、workspace policy、exec runner、审批和事件归一化。
 - Gateway public API、账号凭据摘要、模型目录和请求日志管理。
 - 多媒体生成 job、图片/视频资产和对象存储管理。
-- 股票机会、账户/仓位、数据底座、策略、盯盘、Alert、Review、操作建议和记忆管理。
+- 股票机会、账户/仓位、数据底座、策略、后台监控、Alert、Review、操作建议和记忆管理。
 - V2Ray 配置与运行控制。
 - 日志源登记和受控 tail。
 - 实时事件推送。
@@ -101,7 +101,7 @@ Go 后端是系统唯一的执行入口和权限边界，负责：
 - 活动审计。
 - 持久事件。
 - 多媒体 generation jobs、图片/视频资产、provider 设置和资源存储设置。
-- 股票机会、账户/仓位、行情快照、数据任务、消息、策略、盯盘、Alert、Review、信号、操作建议、人工操作、记忆和 Agent trace。
+- 股票机会、账户/仓位、行情快照、数据任务、消息、策略、后台监控、Alert、Review、信号、操作建议、人工操作、记忆和 Agent trace。
 - V2Ray 配置和运行状态。
 
 SQLite 足够支撑个人单机使用，后续如需要多服务器或更强并发，可迁移到 PostgreSQL。
@@ -193,7 +193,7 @@ Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*`
 - Codex workspace、thread、turn、审批、设置和诊断审计。
 - Gateway 配置和账号变更审计。
 - 多媒体生成和资产变更审计。
-- 股票机会、账户/仓位、策略、盯盘、Alert、Review、操作建议和人工操作审计。
+- 股票机会、账户/仓位、策略、后台监控、Alert、Review、操作建议和人工操作审计。
 - V2Ray 配置和控制审计。
 - 全局设置变更审计。
 

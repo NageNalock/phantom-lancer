@@ -259,8 +259,8 @@ func seedReviewMonitorHit(t *testing.T, svc *Service) MonitorHit {
 	}); err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	seedWatchQuote(t, svc, "000977", 61, 1.2, QuoteStatusFresh, now)
-	seedWatchDailyBar(t, svc, "000977", 60)
+	seedMonitorQuote(t, svc, "000977", 61, 1.2, QuoteStatusFresh, now)
+	seedMonitorDailyBar(t, svc, "000977", 60)
 
 	strategy, err := svc.CreateStrategy(ctx, RequestCreateStrategy{
 		Name:        "Review 策略",

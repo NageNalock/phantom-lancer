@@ -19,16 +19,15 @@ import (
 
 // Service 主业务服务
 type Service struct {
-	store         *Store
-	log           *slog.Logger
-	httpClient    *http.Client
-	bgMu          sync.Mutex
-	bgCancel      context.CancelFunc
-	bgWg          sync.WaitGroup
-	settings      StockV2Settings
-	baseProfileMu sync.Mutex
-	embeddingMu   sync.Mutex
-	embeddingRun  bool
+	store        *Store
+	log          *slog.Logger
+	httpClient   *http.Client
+	bgMu         sync.Mutex
+	bgCancel     context.CancelFunc
+	bgWg         sync.WaitGroup
+	settings     StockV2Settings
+	embeddingMu  sync.Mutex
+	embeddingRun bool
 	// ponytail: process-local single-flight is enough for the single deployed Go service;
 	// move to a persisted lease only if multiple StockV2 workers are introduced.
 	newsPipelineMu  sync.Mutex
@@ -226,7 +225,6 @@ func (s *Service) Initialize(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("get settings failed: %w", err)
 	}
-	settings = s.normalizeDataAssetMaintenanceSettings(ctx, settings)
 	s.settings = settings
 
 	// 设置数据源的服务引用
@@ -1062,22 +1060,13 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 		return StockV2Settings{}, err
 	}
 	prevAuto := settings.AutoUpdateEnabled
-	prevBaseProfile := settings.BaseProfileAutoMaintainEnabled
 	prevInterval := settings.UpdateIntervalSec
-	prevBaseProfileInterval := settings.BaseProfileMaintainIntervalSeconds
 	prevNewsBG := s.hasEnabledNewsSources(ctx)
-	now := time.Now()
 	if req.AutoUpdateEnabled != nil {
 		settings.AutoUpdateEnabled = *req.AutoUpdateEnabled
 	}
 	if req.UpdateIntervalSec != nil {
 		settings.UpdateIntervalSec = *req.UpdateIntervalSec
-	}
-	if req.DailyBarsAutoEnabled != nil {
-		if *req.DailyBarsAutoEnabled {
-			settings.AutoUpdateEnabled = true
-		}
-		settings.DailyBarsAutoEnabled = false
 	}
 	if req.ProxyEnabled != nil {
 		settings.ProxyEnabled = *req.ProxyEnabled
@@ -1091,42 +1080,6 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	if req.ProxyPort != nil {
 		settings.ProxyPort = *req.ProxyPort
 	}
-	if req.BaseProfileAutoMaintainEnabled != nil {
-		settings.BaseProfileAutoMaintainEnabled = *req.BaseProfileAutoMaintainEnabled
-	}
-	if req.BaseProfileMaintainIntervalSeconds != nil {
-		settings.BaseProfileMaintainIntervalSeconds = *req.BaseProfileMaintainIntervalSeconds
-	}
-	if settings.BaseProfileMaintainIntervalSeconds <= 0 {
-		settings.BaseProfileMaintainIntervalSeconds = 86400
-	}
-	if req.BaseProfileDeepUpdateBatchSize != nil {
-		settings.BaseProfileDeepUpdateBatchSize = *req.BaseProfileDeepUpdateBatchSize
-	}
-	if req.BaseProfileDeepUpdateAIBudget != nil {
-		settings.BaseProfileDeepUpdateAIBudget = *req.BaseProfileDeepUpdateAIBudget
-	}
-	if req.BaseProfileDeepUpdateRateLimitMs != nil {
-		settings.BaseProfileDeepUpdateRateLimitMs = *req.BaseProfileDeepUpdateRateLimitMs
-	}
-	settings.BaseProfileDeepUpdateBatchSize = normalizeStockProfileDeepUpdateBatchSize(settings.BaseProfileDeepUpdateBatchSize)
-	settings.BaseProfileDeepUpdateAIBudget = normalizeStockProfileDeepUpdateAIBudget(settings.BaseProfileDeepUpdateAIBudget)
-	settings.BaseProfileDeepUpdateRateLimitMs = normalizeStockProfileDeepUpdateRateLimitMs(settings.BaseProfileDeepUpdateRateLimitMs)
-	if settings.BaseProfileAutoMaintainEnabled {
-		interval := time.Duration(settings.BaseProfileMaintainIntervalSeconds) * time.Second
-		baseProfileIntervalChanged := prevBaseProfileInterval != settings.BaseProfileMaintainIntervalSeconds
-		if !prevBaseProfile || (baseProfileIntervalChanged && settings.BaseProfileLastMaintainAt.IsZero()) {
-			settings.BaseProfileNextMaintainAt = now
-		} else if baseProfileIntervalChanged || settings.BaseProfileNextMaintainAt.IsZero() {
-			next := settings.BaseProfileLastMaintainAt.Add(interval)
-			if settings.BaseProfileLastMaintainAt.IsZero() || !next.After(now) {
-				next = now
-			}
-			settings.BaseProfileNextMaintainAt = next
-		}
-	} else {
-		settings.BaseProfileNextMaintainAt = time.Time{}
-	}
 
 	// 保存配置
 	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil {
@@ -1135,16 +1088,15 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	// 更新本地配置
 	s.settings = settings
 
-	// 数据资产自动维护 / base profile 自动维护任一开启都需要后台调度。
+	// 数据资产自动维护、消息源或 embedding 自动维护任一开启都需要后台调度。
 	// 任一开关从关→开，或数据资产周期变化时重启后台，以拾取新 ticker。
 	newsBG := s.hasEnabledNewsSources(ctx)
 	embeddingBG := s.hasEmbeddingAutoMaintenanceEnabled(ctx)
-	needBG := settings.AutoUpdateEnabled || settings.BaseProfileAutoMaintainEnabled || newsBG || embeddingBG
-	prevNeedBG := prevAuto || prevBaseProfile || prevNewsBG || embeddingBG
+	needBG := settings.AutoUpdateEnabled || newsBG || embeddingBG
+	prevNeedBG := prevAuto || prevNewsBG || embeddingBG
 	if needBG {
 		restartBG := !prevNeedBG ||
-			(prevAuto && prevInterval != settings.UpdateIntervalSec) ||
-			(prevBaseProfile && prevBaseProfileInterval != settings.BaseProfileMaintainIntervalSeconds)
+			(prevAuto && prevInterval != settings.UpdateIntervalSec)
 		if restartBG && prevNeedBG {
 			s.StopBackground()
 		}
@@ -1159,28 +1111,7 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 
 // GetSettings 获取配置
 func (s *Service) GetSettings(ctx context.Context) (StockV2Settings, error) {
-	settings, err := s.store.GetSettings(ctx)
-	if err != nil {
-		return StockV2Settings{}, err
-	}
-	return s.normalizeDataAssetMaintenanceSettings(ctx, settings), nil
-}
-
-func (s *Service) normalizeDataAssetMaintenanceSettings(ctx context.Context, settings StockV2Settings) StockV2Settings {
-	if !settings.DailyBarsAutoEnabled {
-		return settings
-	}
-	if !settings.AutoUpdateEnabled {
-		settings.AutoUpdateEnabled = true
-	}
-	// ponytail: one-time compatibility shim for the removed standalone daily-bar scheduler.
-	settings.DailyBarsAutoEnabled = false
-	if s.store != nil {
-		if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil && s.log != nil {
-			s.log.Warn("migrate legacy daily bars auto setting failed", "error", safelog.Text(err.Error(), 240))
-		}
-	}
-	return settings
+	return s.store.GetSettings(ctx)
 }
 
 // GetInstruments 获取标的主数据

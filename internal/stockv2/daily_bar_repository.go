@@ -137,10 +137,10 @@ func (s *Store) ListHoldingSymbols(ctx context.Context) ([]string, error) {
 	return scanStrings(rows, "scan holding symbol", "iterate holding symbols")
 }
 
-// ListInstrumentSymbols 返回全部活跃主数据 symbol（日 K 全市场增量用）。
+// ListInstrumentSymbols 返回全部主数据 symbol（日 K 全市场增量用）。
 func (s *Store) ListInstrumentSymbols(ctx context.Context) ([]string, error) {
 	rows, err := s.assetDB().QueryContext(ctx,
-		`SELECT symbol FROM stockv2_instruments WHERE status = 'active' ORDER BY symbol`)
+		`SELECT symbol FROM stockv2_instruments WHERE symbol != '' ORDER BY symbol`)
 	if err != nil {
 		return nil, wrapError(err, "list instrument symbols")
 	}

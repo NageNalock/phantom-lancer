@@ -485,15 +485,6 @@ func (s *Service) selectAssetMaintenanceSymbols(ctx context.Context, req Univers
 		}
 	}
 	if len(out) < maxSymbols {
-		if watches, err := s.store.ListWatches(ctx, WatchListFilter{Status: WatchStatusActive, Limit: 5000}); err == nil {
-			items := make([]string, 0, len(watches))
-			for _, watch := range watches {
-				items = append(items, watch.Symbol)
-			}
-			add(items)
-		}
-	}
-	if len(out) < maxSymbols {
 		if stored, err := s.store.ListInstrumentSymbols(ctx); err == nil {
 			add(stored)
 		}

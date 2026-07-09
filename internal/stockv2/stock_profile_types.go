@@ -42,15 +42,6 @@ const (
 	StockProfileSourceStatusSkipped = "skipped"
 )
 
-const (
-	defaultStockProfileDeepUpdateBatchSize   = 12
-	defaultStockProfileDeepUpdateAIBudget    = 2
-	defaultStockProfileDeepUpdateRateLimitMs = 1500
-	maxStockProfileDeepUpdateBatchSize       = 50
-	maxStockProfileDeepUpdateAIBudget        = 10
-	maxStockProfileDeepUpdateRateLimitMs     = 60000
-)
-
 // StockProfile 是消息面高召回关联使用的静态文本资产。
 // 它只来自标的主数据/基金元数据,不包含组合、成本、仓位和风险偏好等动态上下文。
 type StockProfile struct {
@@ -117,24 +108,6 @@ type RebuildStockProfilesResult struct {
 	Failed      int             `json:"failed"`
 	FailedItems []UpdateFailure `json:"failedItems,omitempty"`
 	UpdatedAt   time.Time       `json:"updatedAt"`
-}
-
-type StockProfileDeepUpdateResult struct {
-	CandidateCount    int             `json:"candidateCount"`
-	SymbolBudget      int             `json:"symbolBudget"`
-	AIRoundsPerSymbol int             `json:"aiRoundsPerSymbol"`
-	AIBudget          int             `json:"aiBudget"` // legacy: same value as aiRoundsPerSymbol
-	RateLimitMs       int             `json:"rateLimitMs"`
-	ProcessedCount    int             `json:"processedCount"`
-	SuccessCount      int             `json:"successCount"`
-	FailedCount       int             `json:"failedCount"`
-	InputChanged      int             `json:"inputChanged"`
-	InputUnchanged    int             `json:"inputUnchanged"`
-	AICalledCount     int             `json:"aiCalledCount"`
-	AISkippedCount    int             `json:"aiSkippedCount"`
-	StoppedByBudget   bool            `json:"stoppedByBudget"`
-	FailedItems       []UpdateFailure `json:"failedItems,omitempty"`
-	UpdatedAt         time.Time       `json:"updatedAt"`
 }
 
 type RequestUpdateStockProfile struct {

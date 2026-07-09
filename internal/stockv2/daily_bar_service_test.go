@@ -28,33 +28,6 @@ func TestDailyBarsNeedsMaintenance(t *testing.T) {
 	}
 }
 
-func TestLegacyDailyBarsAutoMigratesToUnifiedMaintenance(t *testing.T) {
-	svc, cleanup := newStrategyTestService(t)
-	defer cleanup()
-	ctx := context.Background()
-	if err := svc.Initialize(ctx); err != nil {
-		t.Fatalf("initialize: %v", err)
-	}
-
-	settings := svc.settings
-	settings.AutoUpdateEnabled = false
-	settings.DailyBarsAutoEnabled = true
-	if err := svc.store.CreateOrUpdateSettings(ctx, settings); err != nil {
-		t.Fatalf("save legacy settings: %v", err)
-	}
-
-	got, err := svc.GetSettings(ctx)
-	if err != nil {
-		t.Fatalf("get settings: %v", err)
-	}
-	if !got.AutoUpdateEnabled {
-		t.Fatalf("AutoUpdateEnabled = false, want migrated true")
-	}
-	if got.DailyBarsAutoEnabled {
-		t.Fatalf("DailyBarsAutoEnabled = true, want legacy field cleared")
-	}
-}
-
 func TestRecordDailyBarsLastRunUsesPersistedSettingsAsBase(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
@@ -66,7 +39,6 @@ func TestRecordDailyBarsLastRunUsesPersistedSettingsAsBase(t *testing.T) {
 	settings := svc.settings
 	settings.AutoUpdateEnabled = true
 	settings.UpdateIntervalSec = 7200
-	settings.BaseProfileAutoMaintainEnabled = true
 	if err := svc.store.CreateOrUpdateSettings(ctx, settings); err != nil {
 		t.Fatalf("save persisted settings: %v", err)
 	}
@@ -82,7 +54,7 @@ func TestRecordDailyBarsLastRunUsesPersistedSettingsAsBase(t *testing.T) {
 	if got.DailyBarsLastRun.IsZero() || !got.DailyBarsLastRun.Equal(when) {
 		t.Fatalf("DailyBarsLastRun = %v, want %v", got.DailyBarsLastRun, when)
 	}
-	if !got.AutoUpdateEnabled || got.UpdateIntervalSec != 7200 || !got.BaseProfileAutoMaintainEnabled {
+	if !got.AutoUpdateEnabled || got.UpdateIntervalSec != 7200 {
 		t.Fatalf("unrelated persisted settings were overwritten: %+v", got)
 	}
 }

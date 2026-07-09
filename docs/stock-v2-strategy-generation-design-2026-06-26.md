@@ -33,7 +33,7 @@
 
 ## 2. 能力边界
 
-策略生成只生成策略草案，不自动下单，不直接改持仓，不直接创建人工盯盘任务。
+策略生成只生成策略草案，不自动下单，不直接改持仓，不直接创建独立价格规则任务。
 
 正式策略必须经过用户确认：
 
@@ -288,7 +288,7 @@ generationMeta.playbook.rules
 
 当前已实现的数据面监控消费 `dataPrefilters` 和 `portfolioPrefilters`。`newsPrefilters` 可以先由 Agent 写入并展示，消息面监控第一版仍按消息候选、持仓、活跃策略、重要性和分数触发；后续再让消息面监控精细读取 `newsPrefilters`。
 
-StockPulse 里的 `monitoring_task_blueprint` 在当前 V2 中对应 `generationMeta.playbook.rules`，不是用户手动创建的盯盘任务。
+StockPulse 里的 `monitoring_task_blueprint` 在当前 V2 中对应 `generationMeta.playbook.rules`，不是用户手动创建的独立价格规则任务。
 
 ## 11. Agent 治理与留痕
 
@@ -341,7 +341,7 @@ StockPulse 里的 `monitoring_task_blueprint` 在当前 V2 中对应 `generation
 - 真实多 Agent 辩论。
 - 复杂仓位求解器。
 - 自动下单。
-- 单独的用户手动盯盘创建流程。
+- 单独的用户手动价格规则创建流程。
 
 ## 14. 验收标准
 
@@ -357,7 +357,7 @@ StockPulse 里的 `monitoring_task_blueprint` 在当前 V2 中对应 `generation
 
 关键体验验收：
 
-- 用户不需要手动配置盯盘规则。
+- 用户不需要手动配置独立价格规则。
 - 用户能看懂“为什么生成这个策略”。
 - 用户能区分策略草案、正式策略、策略补丁和操作提案。
 - 用户能从运行详情回看 Agent 使用了哪些数据和上下文。

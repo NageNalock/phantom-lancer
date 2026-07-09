@@ -505,34 +505,8 @@ CREATE TABLE IF NOT EXISTS stockv2_strategy_versions (
     FOREIGN KEY (strategy_id) REFERENCES stockv2_strategies(id) ON DELETE CASCADE,
     UNIQUE(strategy_id, version_no)
 );
-CREATE TABLE IF NOT EXISTS stockv2_watches (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    status TEXT NOT NULL,
-    source TEXT NOT NULL,
-    symbol TEXT,
-    market TEXT,
-    portfolio_id TEXT,
-    strategy_id TEXT,
-    strategy_version_id TEXT,
-    trigger_policy TEXT NOT NULL,
-    trigger_config_json TEXT,
-    schedule_kind TEXT NOT NULL,
-    cooldown_seconds INTEGER NOT NULL DEFAULT 0,
-    last_checked_at DATETIME,
-    last_triggered_at DATETIME,
-    last_run_status TEXT,
-    last_run_reason TEXT,
-    archived_at DATETIME,
-    created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL,
-    FOREIGN KEY (portfolio_id) REFERENCES stockv2_portfolios(id) ON DELETE SET NULL,
-    FOREIGN KEY (strategy_id) REFERENCES stockv2_strategies(id) ON DELETE SET NULL,
-    FOREIGN KEY (strategy_version_id) REFERENCES stockv2_strategy_versions(id) ON DELETE SET NULL
-);
 CREATE TABLE IF NOT EXISTS stockv2_alerts (
     id TEXT PRIMARY KEY,
-    watch_id TEXT,
     monitor_hit_id TEXT,
     monitor_run_id TEXT,
     task_type TEXT,
@@ -558,8 +532,7 @@ CREATE TABLE IF NOT EXISTS stockv2_alerts (
     acknowledged_at DATETIME,
     resolved_at DATETIME,
     created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL,
-    FOREIGN KEY (watch_id) REFERENCES stockv2_watches(id) ON DELETE SET NULL
+    updated_at DATETIME NOT NULL
 );
 CREATE TABLE IF NOT EXISTS stockv2_update_jobs (
     id TEXT PRIMARY KEY,
@@ -629,17 +602,10 @@ CREATE TABLE IF NOT EXISTS stockv2_settings (
     proxy_host TEXT,
     proxy_port INTEGER,
     last_scheduled_update DATETIME,
+    daily_bars_last_run DATETIME,
     financial_juice_enabled INTEGER DEFAULT 0,
     financial_juice_endpoint TEXT,
     financial_juice_cookie TEXT,
-    base_profile_auto_maintain_enabled INTEGER DEFAULT 0,
-    base_profile_maintain_interval_seconds INTEGER DEFAULT 86400,
-    base_profile_deep_update_batch_size INTEGER DEFAULT 12,
-    base_profile_deep_update_ai_budget INTEGER DEFAULT 2,
-    base_profile_deep_update_rate_limit_ms INTEGER DEFAULT 1500,
-    base_profile_last_maintain_at DATETIME,
-    base_profile_next_maintain_at DATETIME,
-    base_profile_last_maintain_result TEXT,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
 );
@@ -674,15 +640,9 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_strategies_scope ON stockv2_strategies(sc
 CREATE INDEX IF NOT EXISTS idx_stockv2_strategies_symbol ON stockv2_strategies(symbol);
 CREATE INDEX IF NOT EXISTS idx_stockv2_strategies_portfolio_id ON stockv2_strategies(portfolio_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_strategy_versions_strategy_id ON stockv2_strategy_versions(strategy_id);
-CREATE INDEX IF NOT EXISTS idx_stockv2_watches_status ON stockv2_watches(status);
-CREATE INDEX IF NOT EXISTS idx_stockv2_watches_portfolio_id ON stockv2_watches(portfolio_id);
-CREATE INDEX IF NOT EXISTS idx_stockv2_watches_strategy_id ON stockv2_watches(strategy_id);
-CREATE INDEX IF NOT EXISTS idx_stockv2_watches_symbol ON stockv2_watches(symbol);
-CREATE INDEX IF NOT EXISTS idx_stockv2_watches_updated_at ON stockv2_watches(updated_at);
-CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_watch_id ON stockv2_alerts(watch_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_status ON stockv2_alerts(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_triggered_at ON stockv2_alerts(triggered_at);
-CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_dedupe_key ON stockv2_alerts(watch_id, dedupe_key);
+CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_dedupe_key ON stockv2_alerts(dedupe_key);
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_status ON stockv2_update_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_created_at ON stockv2_update_jobs(created_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_status_created ON stockv2_update_jobs(status, created_at DESC);
@@ -1452,9 +1412,6 @@ func (s *Store) init(ctx context.Context) error {
 	}
 
 	// 增量迁移：legacy 独立日 K 调度开关与最近日 K 维护时间
-	if err := s.ensureColumn(ctx, "stockv2_settings", "daily_bars_auto_enabled", "INTEGER DEFAULT 0"); err != nil {
-		return fmt.Errorf("add daily_bars_auto_enabled column: %w", err)
-	}
 	if err := s.ensureColumn(ctx, "stockv2_settings", "daily_bars_last_run", "DATETIME"); err != nil {
 		return fmt.Errorf("add daily_bars_last_run column: %w", err)
 	}
@@ -1466,30 +1423,6 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_cookie", "TEXT"); err != nil {
 		return fmt.Errorf("add financial_juice_cookie column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_auto_maintain_enabled", "INTEGER DEFAULT 0"); err != nil {
-		return fmt.Errorf("add base_profile_auto_maintain_enabled column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_maintain_interval_seconds", "INTEGER DEFAULT 86400"); err != nil {
-		return fmt.Errorf("add base_profile_maintain_interval_seconds column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_deep_update_batch_size", "INTEGER DEFAULT 12"); err != nil {
-		return fmt.Errorf("add base_profile_deep_update_batch_size column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_deep_update_ai_budget", "INTEGER DEFAULT 2"); err != nil {
-		return fmt.Errorf("add base_profile_deep_update_ai_budget column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_deep_update_rate_limit_ms", "INTEGER DEFAULT 1500"); err != nil {
-		return fmt.Errorf("add base_profile_deep_update_rate_limit_ms column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_last_maintain_at", "DATETIME"); err != nil {
-		return fmt.Errorf("add base_profile_last_maintain_at column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_next_maintain_at", "DATETIME"); err != nil {
-		return fmt.Errorf("add base_profile_next_maintain_at column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_last_maintain_result", "TEXT"); err != nil {
-		return fmt.Errorf("add base_profile_last_maintain_result column: %w", err)
 	}
 	if err := s.ensureColumn(ctx, "stockv2_raw_news", "url", "TEXT"); err != nil {
 		return fmt.Errorf("add raw news url column: %w", err)
@@ -1555,12 +1488,6 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureColumn(ctx, "stockv2_daily_bar_jobs", "symbol", "TEXT"); err != nil {
 		return fmt.Errorf("add daily bar job symbol column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_watches", "last_run_status", "TEXT"); err != nil {
-		return fmt.Errorf("add watch last_run_status column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_watches", "last_run_reason", "TEXT"); err != nil {
-		return fmt.Errorf("add watch last_run_reason column: %w", err)
 	}
 
 	// 增量迁移：持仓表加建仓时间
@@ -2033,7 +1960,7 @@ func scanHolding(row rowScanner) (StockV2Holding, error) {
 
 const instrumentSelectSQL = `
 	SELECT id, symbol, market, COALESCE(instrument_type,'stock'), COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
-	       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), COALESCE(status,'active'),
+	       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), COALESCE(status,'unknown'),
 	       last_update_at, created_at, updated_at
 	FROM stockv2_instruments
 `
@@ -2226,7 +2153,7 @@ func instrumentProfileStatusSQL(status string) string {
 
 // GetInstrumentsByMarket 根据市场获取股票列表
 func (s *Store) GetInstrumentsByMarket(ctx context.Context, market string) ([]StockV2Instrument, error) {
-	rows, err := s.assetDB().QueryContext(ctx, instrumentSelectSQL+" WHERE market = ? AND status = 'active' ORDER BY symbol ASC", market)
+	rows, err := s.assetDB().QueryContext(ctx, instrumentSelectSQL+" WHERE market = ? ORDER BY symbol ASC", market)
 	if err != nil {
 		return nil, wrapError(err, "get instruments by market")
 	}
@@ -2518,13 +2445,10 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		INSERT OR REPLACE INTO stockv2_settings (
 			id, auto_update_enabled, update_interval_sec, proxy_enabled,
 			proxy_type, proxy_host, proxy_port, last_scheduled_update,
-			daily_bars_auto_enabled, daily_bars_last_run,
-			financial_juice_enabled, financial_juice_endpoint, financial_juice_cookie, base_profile_auto_maintain_enabled,
-			base_profile_maintain_interval_seconds, base_profile_deep_update_batch_size,
-			base_profile_deep_update_ai_budget, base_profile_deep_update_rate_limit_ms, base_profile_last_maintain_at,
-			base_profile_next_maintain_at, base_profile_last_maintain_result,
+			daily_bars_last_run,
+			financial_juice_enabled, financial_juice_endpoint, financial_juice_cookie,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	now := time.Now()
@@ -2537,12 +2461,6 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 	if !settings.DailyBarsLastRun.IsZero() {
 		dailyBarsLastRun = settings.DailyBarsLastRun
 	}
-	if settings.BaseProfileMaintainIntervalSeconds <= 0 {
-		settings.BaseProfileMaintainIntervalSeconds = 86400
-	}
-	settings.BaseProfileDeepUpdateBatchSize = normalizeStockProfileDeepUpdateBatchSize(settings.BaseProfileDeepUpdateBatchSize)
-	settings.BaseProfileDeepUpdateAIBudget = normalizeStockProfileDeepUpdateAIBudget(settings.BaseProfileDeepUpdateAIBudget)
-	settings.BaseProfileDeepUpdateRateLimitMs = normalizeStockProfileDeepUpdateRateLimitMs(settings.BaseProfileDeepUpdateRateLimitMs)
 
 	_, err := s.db.ExecContext(ctx, query,
 		settings.ID,
@@ -2553,19 +2471,10 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		settings.ProxyHost,
 		settings.ProxyPort,
 		settings.LastScheduledUpdate,
-		settings.DailyBarsAutoEnabled,
 		dailyBarsLastRun,
 		settings.FinancialJuiceEnabled,
 		nullableString(settings.FinancialJuiceEndpoint),
 		nullableString(settings.FinancialJuiceCookie),
-		settings.BaseProfileAutoMaintainEnabled,
-		settings.BaseProfileMaintainIntervalSeconds,
-		settings.BaseProfileDeepUpdateBatchSize,
-		settings.BaseProfileDeepUpdateAIBudget,
-		settings.BaseProfileDeepUpdateRateLimitMs,
-		nullableTime(settings.BaseProfileLastMaintainAt),
-		nullableTime(settings.BaseProfileNextMaintainAt),
-		nullableString(settings.BaseProfileLastMaintainResult),
 		settings.CreatedAt,
 		settings.UpdatedAt,
 	)
@@ -2631,15 +2540,8 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	query := `
 		SELECT id, auto_update_enabled, update_interval_sec, proxy_enabled,
 		       COALESCE(proxy_type,''), COALESCE(proxy_host,''), COALESCE(proxy_port, 0), last_scheduled_update,
-		       COALESCE(daily_bars_auto_enabled, 0), daily_bars_last_run,
+		       daily_bars_last_run,
 		       COALESCE(financial_juice_enabled, 0), COALESCE(financial_juice_endpoint, ''), COALESCE(financial_juice_cookie, ''),
-		       COALESCE(base_profile_auto_maintain_enabled, 0),
-		       COALESCE(base_profile_maintain_interval_seconds, 86400),
-		       COALESCE(base_profile_deep_update_batch_size, 12),
-		       COALESCE(base_profile_deep_update_ai_budget, 2),
-		       COALESCE(base_profile_deep_update_rate_limit_ms, 1500),
-		       base_profile_last_maintain_at, base_profile_next_maintain_at,
-		       COALESCE(base_profile_last_maintain_result, ''),
 		       created_at, updated_at
 		FROM stockv2_settings
 		LIMIT 1
@@ -2650,8 +2552,6 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	var settings StockV2Settings
 	var lastScheduledUpdate sql.NullTime
 	var dailyBarsLastRun sql.NullTime
-	var baseProfileLastMaintainAt sql.NullTime
-	var baseProfileNextMaintainAt sql.NullTime
 	err := row.Scan(
 		&settings.ID,
 		&settings.AutoUpdateEnabled,
@@ -2661,19 +2561,10 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 		&settings.ProxyHost,
 		&settings.ProxyPort,
 		&lastScheduledUpdate,
-		&settings.DailyBarsAutoEnabled,
 		&dailyBarsLastRun,
 		&settings.FinancialJuiceEnabled,
 		&settings.FinancialJuiceEndpoint,
 		&settings.FinancialJuiceCookie,
-		&settings.BaseProfileAutoMaintainEnabled,
-		&settings.BaseProfileMaintainIntervalSeconds,
-		&settings.BaseProfileDeepUpdateBatchSize,
-		&settings.BaseProfileDeepUpdateAIBudget,
-		&settings.BaseProfileDeepUpdateRateLimitMs,
-		&baseProfileLastMaintainAt,
-		&baseProfileNextMaintainAt,
-		&settings.BaseProfileLastMaintainResult,
 		&settings.CreatedAt,
 		&settings.UpdatedAt,
 	)
@@ -2682,19 +2573,15 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 		if errors.Is(err, sql.ErrNoRows) {
 			// 如果没有配置记录，返回默认配置
 			return StockV2Settings{
-				ID:                                 "1",
-				AutoUpdateEnabled:                  false,
-				UpdateIntervalSec:                  3600,
-				ProxyEnabled:                       false,
-				ProxyType:                          "http",
-				ProxyHost:                          "",
-				ProxyPort:                          8080,
-				BaseProfileMaintainIntervalSeconds: 86400,
-				BaseProfileDeepUpdateBatchSize:     defaultStockProfileDeepUpdateBatchSize,
-				BaseProfileDeepUpdateAIBudget:      defaultStockProfileDeepUpdateAIBudget,
-				BaseProfileDeepUpdateRateLimitMs:   defaultStockProfileDeepUpdateRateLimitMs,
-				CreatedAt:                          time.Now(),
-				UpdatedAt:                          time.Now(),
+				ID:                "1",
+				AutoUpdateEnabled: false,
+				UpdateIntervalSec: 3600,
+				ProxyEnabled:      false,
+				ProxyType:         "http",
+				ProxyHost:         "",
+				ProxyPort:         8080,
+				CreatedAt:         time.Now(),
+				UpdatedAt:         time.Now(),
 			}, nil
 		}
 		return StockV2Settings{}, wrapError(err, "get settings")
@@ -2704,18 +2591,6 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	if dailyBarsLastRun.Valid {
 		settings.DailyBarsLastRun = dailyBarsLastRun.Time
 	}
-	if baseProfileLastMaintainAt.Valid {
-		settings.BaseProfileLastMaintainAt = baseProfileLastMaintainAt.Time
-	}
-	if baseProfileNextMaintainAt.Valid {
-		settings.BaseProfileNextMaintainAt = baseProfileNextMaintainAt.Time
-	}
-	if settings.BaseProfileMaintainIntervalSeconds <= 0 {
-		settings.BaseProfileMaintainIntervalSeconds = 86400
-	}
-	settings.BaseProfileDeepUpdateBatchSize = normalizeStockProfileDeepUpdateBatchSize(settings.BaseProfileDeepUpdateBatchSize)
-	settings.BaseProfileDeepUpdateAIBudget = normalizeStockProfileDeepUpdateAIBudget(settings.BaseProfileDeepUpdateAIBudget)
-	settings.BaseProfileDeepUpdateRateLimitMs = normalizeStockProfileDeepUpdateRateLimitMs(settings.BaseProfileDeepUpdateRateLimitMs)
 	settings.FinancialJuiceCookieSet = strings.TrimSpace(settings.FinancialJuiceCookie) != "" || financialJuiceEndpointHasCredential(settings.FinancialJuiceEndpoint)
 
 	return settings, nil

@@ -15,8 +15,8 @@ func TestStrategyGenerationFinalizeCreatesDraftStrategy(t *testing.T) {
 	ctx := context.Background()
 
 	seedStrategyGenerationInstrument(t, svc, ctx, "302132")
-	seedWatchQuote(t, svc, "302132", 68.5, 2.1, QuoteStatusFresh, time.Now())
-	seedWatchDailyBar(t, svc, "302132", 66.8)
+	seedMonitorQuote(t, svc, "302132", 68.5, 2.1, QuoteStatusFresh, time.Now())
+	seedMonitorDailyBar(t, svc, "302132", 66.8)
 	if _, err := svc.store.UpsertStockProfile(ctx, StockProfile{
 		Symbol:          "302132",
 		Market:          "SZ",
@@ -142,7 +142,7 @@ func TestStrategyGenerationNormalizesStringPlaybookPrefilters(t *testing.T) {
 	playbook := mapFromAny(draft["playbook"])
 	rule := mapFromAny(sliceFromAny(playbook["rules"])[0])
 	rule["dataPrefilters"] = "quote freshness and price observation only"
-	rule["portfolioPrefilters"] = map[string]any{"type": WatchRuleQuoteStale}
+	rule["portfolioPrefilters"] = map[string]any{"type": MonitorRuleQuoteStale}
 	rule["newsPrefilters"] = "no structured news filter"
 
 	parsed, err := strategyGenerationReportFromResult(report)
@@ -153,7 +153,7 @@ func TestStrategyGenerationNormalizesStringPlaybookPrefilters(t *testing.T) {
 	if len(got.DataPrefilters) != 0 {
 		t.Fatalf("dataPrefilters = %#v, want empty array after string normalization", got.DataPrefilters)
 	}
-	if len(got.PortfolioPrefilters) != 1 || got.PortfolioPrefilters[0]["type"] != WatchRuleQuoteStale {
+	if len(got.PortfolioPrefilters) != 1 || got.PortfolioPrefilters[0]["type"] != MonitorRuleQuoteStale {
 		t.Fatalf("portfolioPrefilters = %#v, want single object wrapped in array", got.PortfolioPrefilters)
 	}
 	if len(got.NewsPrefilters) != 0 {
@@ -257,9 +257,9 @@ func TestBuildPortfolioStrategyDiagnosisContextMarksQuoteQuality(t *testing.T) {
 			t.Fatalf("create holding %s: %v", holding.Symbol, err)
 		}
 	}
-	seedWatchQuote(t, svc, "600000", 11, 1.2, QuoteStatusFresh, now)
-	seedWatchQuote(t, svc, "000001", 9, -0.3, QuoteStatusStale, now.Add(-2*time.Hour))
-	seedWatchDailyBar(t, svc, "600000", 10.8)
+	seedMonitorQuote(t, svc, "600000", 11, 1.2, QuoteStatusFresh, now)
+	seedMonitorQuote(t, svc, "000001", 9, -0.3, QuoteStatusStale, now.Add(-2*time.Hour))
+	seedMonitorDailyBar(t, svc, "600000", 10.8)
 
 	genCtx, err := svc.BuildStrategyGenerationContext(ctx, StrategyGenerationInput{
 		Mode:        StrategyGenerationModePortfolio,
@@ -412,7 +412,7 @@ func TestStrategyGenerationDraftActivationFeedsDataMonitor(t *testing.T) {
 	ctx := context.Background()
 
 	seedStrategyGenerationInstrument(t, svc, ctx, "300750")
-	seedWatchQuote(t, svc, "300750", 210, 2.4, QuoteStatusFresh, time.Now())
+	seedMonitorQuote(t, svc, "300750", 210, 2.4, QuoteStatusFresh, time.Now())
 	configureStrategyGenerationModel(t, svc, ctx)
 
 	run, err := svc.RunStrategyGeneration(ctx, StrategyGenerationInput{
@@ -434,7 +434,7 @@ func TestStrategyGenerationDraftActivationFeedsDataMonitor(t *testing.T) {
 	rule := mapFromAny(sliceFromAny(playbook["rules"])[0])
 	rule["action"] = StrategyGenerationRuleActionAddPosition
 	rule["title"] = "突破后加仓观察"
-	rule["dataPrefilters"] = []any{map[string]any{"key": "break_200", "type": WatchRulePriceAbove, "threshold": 200.0}}
+	rule["dataPrefilters"] = []any{map[string]any{"key": "break_200", "type": MonitorRulePriceAbove, "threshold": 200.0}}
 	rule["portfolioPrefilters"] = []any{}
 	rule["newsPrefilters"] = []any{map[string]any{"keyword": "动力电池订单", "importance": "high"}}
 
@@ -514,10 +514,10 @@ func TestPortfolioStrategyDiagnosisCreatesDraftOnlyForMissingCoverage(t *testing
 	seedStrategyGenerationInstrument(t, svc, ctx, "000001")
 	seedStrategyGenerationHolding(t, svc, ctx, portfolio.ID, "600000", "浦发银行", 100, 10)
 	seedStrategyGenerationHolding(t, svc, ctx, portfolio.ID, "000001", "平安银行", 200, 8)
-	seedWatchQuote(t, svc, "600000", 11, 1.2, QuoteStatusFresh, time.Now())
-	seedWatchQuote(t, svc, "000001", 9, 0.8, QuoteStatusFresh, time.Now())
-	seedWatchDailyBar(t, svc, "600000", 10.8)
-	seedWatchDailyBar(t, svc, "000001", 8.8)
+	seedMonitorQuote(t, svc, "600000", 11, 1.2, QuoteStatusFresh, time.Now())
+	seedMonitorQuote(t, svc, "000001", 9, 0.8, QuoteStatusFresh, time.Now())
+	seedMonitorDailyBar(t, svc, "600000", 10.8)
+	seedMonitorDailyBar(t, svc, "000001", 8.8)
 	if _, err := svc.CreateStrategy(ctx, RequestCreateStrategy{
 		Name:        "已有策略",
 		Kind:        StrategyKindSymbolStrategy,
