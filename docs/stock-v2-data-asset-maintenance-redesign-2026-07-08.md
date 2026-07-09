@@ -140,7 +140,6 @@
 
 - `called`
 - `skipped_unchanged`
-- `skipped_budget_exhausted`
 - `skipped_not_configured`
 - `skipped_unavailable`
 - `failed`
@@ -194,8 +193,8 @@
 - `turnover_rate`
 - `net_inflow`
 - `main_net_inflow`
-- `buy_amount`
-- `sell_amount`
+
+注：`buy_amount` / `sell_amount` 已移除（无可靠数据源替代）。
 
 来源差异较大的字段先进入：
 
@@ -224,6 +223,14 @@
 - 中间缺口：按缺口段抓取。
 
 如果缺少可靠交易日历，第一版可以用数据源返回结果校验缺口，不要自己伪造交易日。
+
+### 7.1 数据源
+
+日 K 主数据源：百度财经（`finance.pae.baidu.com/selfselect/getstockquotation`）。
+
+- 一次请求返回全量历史（~2000 条/250KB），含 `amount`（成交额）和 `turnoverratio`（换手率）。
+- 腾讯 fqkline 作为备用（不含 amount/turnover_rate，但支持前/后复权）。
+- 东财资金流端点（`push2his.eastmoney.com/api/qt/stock/fflow/daykline/get`）提供 `NetInflow`/`MainNetInflow` enrichment。
 
 ## 8. 基础画像维护
 
@@ -254,6 +261,16 @@ base_profile_hash = hash(normalized_base_profile_input)
 
 - 不重复写大量字段。
 - 不触发 AI，除非存在新公告 / 重大事项或 AI 画像缺失。
+
+### 8.1 F10 刷新缓存
+
+批量维护中，基础画像的 F10 抓取（东财 3 个端点）成本较高但变化频率低。
+因此内置 7 天缓存：如果 `base_profile_updated_at` 在 7 天内，跳过 F10 抓取，
+仅从 instrument 表更新名称/行业/概念等基础字段，hash 复用既有值。
+
+- 节省：每只股票 3 次 HTTP 请求（日常维护中大部分股票命中缓存）
+- 代价：F10 级别变化（如经营范围变更）最多延迟 7 天检测
+- 手动触发（ForceAI）时绕过缓存，立即刷新
 
 ## 9. 公告和重大事项维护
 
@@ -291,8 +308,7 @@ base_profile_hash = hash(normalized_base_profile_input)
 1. 基础画像无变化。
 2. 没有新增公告 / 重大事项。
 3. 已有 AI 画像总结。
-4. 本轮 AI 预算耗尽。
-5. 模型未配置或执行器不可用。
+4. 模型未配置或执行器不可用。
 
 AI prompt 必须包含：
 
@@ -317,18 +333,21 @@ AI 输出仍只更新画像总结和检索辅助字段，不生成交易建议�
 - 每轮最大持仓 / 策略高优先级 symbol 数。
 - 每轮最大公告检查数。
 - 每轮最大日 K 缺口抓取数。
-- 每轮最大 AI 调用数。
 - 每 symbol 最大耗时。
 - 整个任务最大耗时。
 
+注：AI 调用不设数量上限，由触发条件（基础画像变化、新公告、AI 缺失、失败重试）自然控制。
+
 ### 11.2 并发限制
 
-建议默认：
+实现配置：
 
-- 标的和公告数据源请求并发：2 到 4。
-- 日 K 数据源请求并发：2 到 4。
-- DuckDB 写入：单 writer，批量 flush。
-- AI 总结并发：1，最多 2。
+- 标的维护管线并发：4 worker（worker pool），5000+ 股票可在 2 小时内完成。
+- 日 K 数据源：百度财经一次返回全量历史（含 amount/turnover_rate），腾讯 fqkline 作为备用。
+- 进度 flush：每 50 个 symbol 批量写入一次（减少 DuckDB 写入次数）。
+- DuckDB 写入：单 writer（`SetMaxOpenConns(1)`），批量 upsert。
+- AI 总结并发：1（semaphore 限制）。
+- DuckDB 资源：`memory_limit = '2GB'`，`threads = 2`。
 
 ### 11.3 DuckDB 写入策略
 
@@ -517,7 +536,6 @@ Agent 负责：
 - 单个 symbol 失败不影响整轮任务。
 - 单个 source 失败有退避，不会无限重试。
 - DuckDB 批量写入不会长时间阻塞前端读取。
-- AI 预算耗尽时任务仍能完成，并记录跳过原因。
 
 前端验收：
 

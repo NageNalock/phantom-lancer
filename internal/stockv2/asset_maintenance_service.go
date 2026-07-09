@@ -11,20 +11,15 @@ import (
 )
 
 const (
-	defaultAssetMaintenanceAIBudget = 20
-	assetAIBackoff                  = 6 * time.Hour
+	assetAIBackoff            = 6 * time.Hour
+	baseProfileRefreshInterval = 7 * 24 * time.Hour
 )
-
-type assetMaintenanceBudget struct {
-	AIRemaining int
-}
 
 type assetMaintenanceOptions struct {
 	JobID         string
 	TriggerSource string
 	RequestedBy   string
 	ForceAI       bool
-	Budget        *assetMaintenanceBudget
 }
 
 func (s *Service) MaintainAssetForSymbol(ctx context.Context, symbol string, req AssetMaintainSymbolRequest) (AssetMaintainSymbolResult, error) {
@@ -39,15 +34,10 @@ func (s *Service) MaintainAssetForSymbol(ctx context.Context, symbol string, req
 	if err != nil {
 		return AssetMaintainSymbolResult{}, err
 	}
-	budget := &assetMaintenanceBudget{AIRemaining: 1}
-	if !req.ForceAI {
-		budget.AIRemaining = defaultAssetMaintenanceAIBudget
-	}
 	return s.maintainAssetForInstrument(ctx, inst, assetMaintenanceOptions{
 		TriggerSource: firstNonEmpty(req.TriggerSource, "manual"),
 		RequestedBy:   firstNonEmpty(req.RequestedBy, "user"),
 		ForceAI:       req.ForceAI,
-		Budget:        budget,
 	})
 }
 
@@ -93,7 +83,8 @@ func (s *Service) maintainAssetForInstrument(ctx context.Context, inst StockV2In
 		item.DailyBarStatus = AssetDailyBarStatusSkipped
 	}
 
-	profile, profileBefore, profileSourceStatuses, err := s.refreshAssetBaseProfile(ctx, inst)
+	// F10 基础画像刷新缓存：7 天内已刷新过则跳过 F10 抓取（节省 3 次 HTTP 请求/股票）
+	profile, profileBefore, profileSourceStatuses, err := s.refreshAssetBaseProfileWithCache(ctx, inst, opts)
 	sourceStatuses = append(sourceStatuses, profileSourceStatuses...)
 	if err != nil {
 		item.BaseProfileStatus = AssetBaseProfileStatusFailed
@@ -171,6 +162,7 @@ func (s *Service) refreshAssetBaseProfile(ctx context.Context, inst StockV2Instr
 	} else if !errors.Is(err, ErrStockProfileNotFound) {
 		return StockProfile{}, StockProfile{}, nil, err
 	}
+
 	baseProfile, profileStatuses := s.stockProfileBaseFromInstrumentWithSourceStatuses(ctx, inst, true)
 	profile := s.mergeStockProfileExisting(ctx, baseProfile)
 	hash := stockProfileAIInputHash(baseProfile)
@@ -201,6 +193,46 @@ func (s *Service) refreshAssetBaseProfile(ctx context.Context, inst StockV2Instr
 	}
 	_, _ = s.store.CreateStockProfileUpdateTask(ctx, task)
 	return updated, existing, stockProfileSourceStatusesToAsset(profileStatuses), nil
+}
+
+// refreshAssetBaseProfileWithCache 在批量维护管线中调用，带 F10 缓存逻辑。
+// 如果基础画像在 7 天内已刷新过，则跳过 F10 抓取（节省 3 次 HTTP 请求/股票），
+// 仅从 instrument 更新基础字段，hash 复用既有值。
+func (s *Service) refreshAssetBaseProfileWithCache(ctx context.Context, inst StockV2Instrument, opts assetMaintenanceOptions) (StockProfile, StockProfile, []AssetMaintenanceSourceStatus, error) {
+	// 手动强制时不走缓存
+	if opts.ForceAI {
+		return s.refreshAssetBaseProfile(ctx, inst)
+	}
+
+	var existing StockProfile
+	if loaded, err := s.store.GetStockProfile(ctx, inst.Symbol); err == nil {
+		existing = loaded
+	} else if !errors.Is(err, ErrStockProfileNotFound) {
+		return StockProfile{}, StockProfile{}, nil, err
+	}
+
+	// 缓存命中：7 天内已刷新过 F10，跳过 F10 抓取
+	if !existing.BaseProfileUpdatedAt.IsZero() && time.Since(existing.BaseProfileUpdatedAt) < baseProfileRefreshInterval {
+		baseProfile := buildStockProfileFromInstrument(inst)
+		profile := s.mergeStockProfileExisting(ctx, baseProfile)
+		// 复用既有 hash（未重新抓取 F10，无法检测 F10 级别变化）
+		profile.BaseProfileHash = existing.BaseProfileHash
+		profile.BaseProfileUpdatedAt = existing.BaseProfileUpdatedAt
+		updated, err := s.store.UpsertStockProfile(ctx, profile)
+		if err != nil {
+			return StockProfile{}, existing, nil, err
+		}
+		cacheStatus := []AssetMaintenanceSourceStatus{{
+			Source:    "f10_cache",
+			Status:    "skipped",
+			Message:   "base profile refreshed within 7d, skipping F10 enrichment",
+			CheckedAt: time.Now(),
+		}}
+		return updated, existing, cacheStatus, nil
+	}
+
+	// 缓存未命中：正常刷新
+	return s.refreshAssetBaseProfile(ctx, inst)
 }
 
 func stockProfileSourceStatusesToAsset(items []StockProfileSourceStatus) []AssetMaintenanceSourceStatus {
@@ -311,13 +343,6 @@ func (s *Service) maybeRunAssetProfileAI(
 	decision := assetAIDecision(profile, previous, item, newAnnouncements, opts.ForceAI)
 	if decision == AssetAIDecisionSkippedUnneeded {
 		return nil, decision, normalizeStockProfileAIStatus(profile.AIProfileStatus), nil
-	}
-	budget := opts.Budget
-	if budget != nil {
-		if budget.AIRemaining <= 0 {
-			return nil, AssetAIDecisionSkippedBudget, normalizeStockProfileAIStatus(profile.AIProfileStatus), nil
-		}
-		budget.AIRemaining--
 	}
 	pack := s.buildStockProfileSummaryContext(ctx, profile, previous, item, newAnnouncements, sourceStatuses)
 	run, ledger, modelName, err := s.prepareStockProfileSummaryAgentRun(ctx, pack, firstNonEmpty(opts.RequestedBy, "system"))
@@ -520,7 +545,7 @@ func mergeAssetMaintenanceStats(stats AssetMaintenanceStats, item AssetMaintenan
 	switch item.AIDecision {
 	case AssetAIDecisionMissing, AssetAIDecisionBaseChanged, AssetAIDecisionAnnouncement, AssetAIDecisionRetry, AssetAIDecisionManualForce:
 		stats.AICalled++
-	case AssetAIDecisionSkippedUnneeded, AssetAIDecisionSkippedBudget, AssetAIDecisionSkippedConfig:
+	case AssetAIDecisionSkippedUnneeded, AssetAIDecisionSkippedConfig:
 		stats.AISkipped++
 	}
 	return stats

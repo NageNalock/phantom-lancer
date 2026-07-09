@@ -516,7 +516,6 @@ func runAssetProfileAIForTest(t *testing.T, svc *Service, ctx context.Context, s
 		TriggerSource: StockProfileUpdateTriggerManual,
 		RequestedBy:   "test",
 		ForceAI:       force,
-		Budget:        &assetMaintenanceBudget{AIRemaining: 1},
 	})
 	if err != nil && agentRun == nil {
 		t.Fatalf("run asset profile ai %s: %v", symbol, err)

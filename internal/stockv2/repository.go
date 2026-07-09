@@ -157,6 +157,12 @@ func (s *Store) MarketDBPath() string {
 	return s.marketDB.Path()
 }
 
+// assetDB 返回资产数据表（instruments, stock_profiles, announcements, daily_bars 等）
+// 所在的数据库连接。正常运行时路由到 DuckDB（marketDB），DuckDB 不可用时
+// 回退到 SQLite（s.db）。所有资产表的读写必须通过此函数，不要直接用 s.db。
+//
+// 仅存在于 SQLite 的表（portfolios, holdings, transactions, quotes, update_jobs 等）
+// 应直接使用 s.db。
 func (s *Store) assetDB() *sql.DB {
 	if s != nil && s.marketDB != nil && s.marketDB.db != nil {
 		return s.marketDB.db
@@ -167,7 +173,15 @@ func (s *Store) assetDB() *sql.DB {
 
 // initSchemaSQL 初始化 V2 表结构。只创建表、索引和默认配置行，不依赖
 // 触发器/视图（Go 层显式维护 updated_at）。
+//
+// 注意：以下表在 SQLite 和 DuckDB 中都创建，但运行时通过 assetDB() 路由到 DuckDB：
+//   - stockv2_instruments
+//   - stockv2_stock_profiles
+//   - stockv2_announcements
+// SQLite 中的这些表仅作为 DuckDB 不可用时的 fallback（如空路径测试），
+// 正常运行时始终为空。所有读写必须通过 assetDB() 而非 s.db。
 const initSchemaSQL = `
+-- === 以下表由 assetDB() 路由到 DuckDB，SQLite 中仅作 fallback ===
 CREATE TABLE IF NOT EXISTS stockv2_instruments (
     id TEXT PRIMARY KEY,
     symbol TEXT NOT NULL UNIQUE,
@@ -298,6 +312,7 @@ CREATE TABLE IF NOT EXISTS stockv2_announcements (
     updated_at DATETIME NOT NULL,
     UNIQUE(source, symbol, content_hash)
 );
+-- === 以上表由 assetDB() 路由到 DuckDB；以下表仅存在于 SQLite ===
 CREATE TABLE IF NOT EXISTS stockv2_portfolios (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

@@ -91,16 +91,22 @@ func parseEastmoneyDailyFlowFacets(body []byte) (map[string]dailyBarDataFacet, e
 	out := make(map[string]dailyBarDataFacet, len(resp.Data.KLines))
 	for _, line := range resp.Data.KLines {
 		parts := strings.Split(line, ",")
-		if len(parts) < 3 {
+		if len(parts) < 4 {
 			continue
 		}
 		date := strings.TrimSpace(parts[0])
 		if date == "" {
 			continue
 		}
+		// 东财资金流字段: date, 主力净流入, 小单净流入, 中单净流入, 大单净流入, 超大单净流入, ...
+		// MainNetInflow = 主力净流入(parts[1])
+		// NetInflow = 全部净流入 = 主力 + 小单 + 中单
+		mainNet := parseFloatTencent(parts[1])
+		smallNet := parseFloatTencent(parts[2])
+		midNet := parseFloatTencent(parts[3])
 		out[date] = dailyBarDataFacet{
-			MainNetInflow: parseFloatTencent(parts[1]),
-			NetInflow:     parseFloatTencent(parts[1]),
+			MainNetInflow: mainNet,
+			NetInflow:     mainNet + smallNet + midNet,
 			Raw:           line,
 		}
 	}

@@ -64,8 +64,6 @@ type StockV2DailyBar struct {
 	TurnoverRate  float64   `json:"turnoverRate,omitempty"`
 	NetInflow     float64   `json:"netInflow,omitempty"`
 	MainNetInflow float64   `json:"mainNetInflow,omitempty"`
-	BuyAmount     float64   `json:"buyAmount,omitempty"`
-	SellAmount    float64   `json:"sellAmount,omitempty"`
 	DataPayload   string    `json:"dataPayload,omitempty"`
 	Adjusted      string    `json:"adjusted"` // none | qfq | hfq
 	Source        string    `json:"source"`   // 如 tencent_fqkline

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"strings"
 	"time"
 
@@ -233,7 +232,13 @@ func (s *Store) UpsertAnnouncements(ctx context.Context, items []StockV2Announce
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now()
-	inserted := 0
+
+	// 先记录事务前总数，用于计算新增数量
+	var beforeCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_announcements`).Scan(&beforeCount); err != nil {
+		return 0, wrapError(err, "count announcements before upsert")
+	}
+
 	for i := range items {
 		item := items[i]
 		if item.ID == "" {
@@ -249,40 +254,44 @@ func (s *Store) UpsertAnnouncements(ctx context.Context, items []StockV2Announce
 			item.CreatedAt = now
 		}
 		item.UpdatedAt = now
-		var existingID string
-		err := tx.QueryRowContext(ctx, `
-			SELECT id FROM stockv2_announcements
-			WHERE source = ? AND symbol = ? AND content_hash = ?
-		`, item.Source, item.Symbol, item.ContentHash).Scan(&existingID)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return inserted, wrapError(err, "lookup announcement duplicate")
-		}
-		if existingID != "" {
-			_, err = tx.ExecContext(ctx, `
-				UPDATE stockv2_announcements
-				SET market = ?, org_id = ?, title = ?, category = ?, announcement_id = ?,
-				    pdf_url = ?, major = ?, major_reason = ?, published_at = ?,
-				    fetched_at = ?, updated_at = ?
-				WHERE id = ?
-			`, item.Market, item.OrgID, item.Title, item.Category, item.AnnouncementID,
-				item.PDFURL, item.Major, item.MajorReason, nullableTime(item.PublishedAt),
-				item.FetchedAt, item.UpdatedAt, existingID)
-		} else {
-			_, err = tx.ExecContext(ctx, `
-				INSERT INTO stockv2_announcements (
-					id, source, symbol, market, org_id, title, category, announcement_id,
-					pdf_url, content_hash, major, major_reason, published_at,
-					fetched_at, created_at, updated_at
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			`, item.ID, item.Source, item.Symbol, item.Market, item.OrgID, item.Title,
-				item.Category, item.AnnouncementID, item.PDFURL, item.ContentHash, item.Major,
-				item.MajorReason, nullableTime(item.PublishedAt), item.FetchedAt, item.CreatedAt, item.UpdatedAt)
-			inserted++
-		}
+
+		// 使用 ON CONFLICT 替代原来的 SELECT + INSERT/UPDATE（2N → N 次查询）
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO stockv2_announcements (
+				id, source, symbol, market, org_id, title, category, announcement_id,
+				pdf_url, content_hash, major, major_reason, published_at,
+				fetched_at, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(source, symbol, content_hash) DO UPDATE SET
+				market = EXCLUDED.market,
+				org_id = EXCLUDED.org_id,
+				title = EXCLUDED.title,
+				category = EXCLUDED.category,
+				announcement_id = EXCLUDED.announcement_id,
+				pdf_url = EXCLUDED.pdf_url,
+				major = EXCLUDED.major,
+				major_reason = EXCLUDED.major_reason,
+				published_at = EXCLUDED.published_at,
+				fetched_at = EXCLUDED.fetched_at,
+				updated_at = EXCLUDED.updated_at
+		`, item.ID, item.Source, item.Symbol, item.Market, item.OrgID, item.Title,
+			item.Category, item.AnnouncementID, item.PDFURL, item.ContentHash, item.Major,
+			item.MajorReason, nullableTime(item.PublishedAt), item.FetchedAt, item.CreatedAt, item.UpdatedAt)
 		if err != nil {
-			return inserted, wrapError(err, "upsert announcement")
+			return 0, wrapError(err, "upsert announcement")
 		}
 	}
+
+	// 通过事务前后总数差计算新增数量
+	var afterCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_announcements`).Scan(&afterCount); err != nil {
+		return 0, wrapError(err, "count announcements after upsert")
+	}
+	inserted := afterCount - beforeCount
+	if inserted < 0 {
+		inserted = 0
+	}
+
 	if err := tx.Commit(); err != nil {
 		return inserted, wrapError(err, "commit announcements")
 	}
@@ -340,15 +349,28 @@ func (s *Store) LatestAnnouncementStats(ctx context.Context, symbols []string) (
 	for _, symbol := range symbols {
 		args = append(args, symbol)
 	}
+	// 使用窗口函数一次查询获取每个 symbol 的聚合统计 + 最新标题，
+	// 避免 N+1 查询（原实现对每个 symbol 单独查一次标题）。
 	rows, err := s.assetDB().QueryContext(ctx, `
-		SELECT symbol,
-		       COUNT(*),
-		       SUM(CASE WHEN major THEN 1 ELSE 0 END),
-		       MAX(published_at)
-		FROM stockv2_announcements
-		WHERE symbol IN (`+sqlPlaceholders(len(symbols))+`)
-		GROUP BY symbol
-	`, args...)
+		WITH agg AS (
+			SELECT symbol,
+			       COUNT(*) AS total_count,
+			       SUM(CASE WHEN major THEN 1 ELSE 0 END) AS major_count,
+			       MAX(published_at) AS latest_published
+			FROM stockv2_announcements
+			WHERE symbol IN (`+sqlPlaceholders(len(symbols))+`)
+			GROUP BY symbol
+		),
+		ranked AS (
+			SELECT symbol, title,
+			       ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY COALESCE(published_at, created_at) DESC, created_at DESC) AS rn
+			FROM stockv2_announcements
+			WHERE symbol IN (`+sqlPlaceholders(len(symbols))+`)
+		)
+		SELECT a.symbol, a.total_count, a.major_count, a.latest_published, COALESCE(r.title, '')
+		FROM agg a
+		LEFT JOIN ranked r ON r.symbol = a.symbol AND r.rn = 1
+	`, append(args, args...)...)
 	if err != nil {
 		return nil, wrapError(err, "list announcement stats")
 	}
@@ -358,7 +380,8 @@ func (s *Store) LatestAnnouncementStats(ctx context.Context, symbols []string) (
 		var symbol string
 		var total, major int
 		var latest sql.NullTime
-		if err := rows.Scan(&symbol, &total, &major, &latest); err != nil {
+		var title string
+		if err := rows.Scan(&symbol, &total, &major, &latest, &title); err != nil {
 			return nil, wrapError(err, "scan announcement stats")
 		}
 		item := out[symbol]
@@ -368,19 +391,11 @@ func (s *Store) LatestAnnouncementStats(ctx context.Context, symbols []string) (
 		if latest.Valid {
 			item.LatestAnnouncementAt = latest.Time
 		}
+		item.LatestAnnouncementTitle = title
 		out[symbol] = item
 	}
 	if err := rows.Err(); err != nil {
 		return nil, wrapError(err, "iterate announcement stats")
-	}
-	for symbol, item := range out {
-		var title string
-		_ = s.assetDB().QueryRowContext(ctx, `
-			SELECT COALESCE(title,'') FROM stockv2_announcements
-			WHERE symbol = ? ORDER BY COALESCE(published_at, created_at) DESC, created_at DESC LIMIT 1
-		`, symbol).Scan(&title)
-		item.LatestAnnouncementTitle = title
-		out[symbol] = item
 	}
 	return out, nil
 }

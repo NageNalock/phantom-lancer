@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/duckdb/duckdb-go/v2"
@@ -36,6 +37,17 @@ func NewMarketDataStore(path string) (*MarketDataStore, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+
+	// 设置合理的 DuckDB 资源限制，防止大量数据操作时 OOM
+	if _, err := db.ExecContext(context.Background(), "SET memory_limit = '2GB'"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set duckdb memory_limit: %w", err)
+	}
+	if _, err := db.ExecContext(context.Background(), "SET threads = 2"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set duckdb threads: %w", err)
+	}
+
 	s := &MarketDataStore{db: db, path: path}
 	if err := s.init(context.Background()); err != nil {
 		_ = db.Close()
@@ -79,8 +91,6 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 			turnover_rate DOUBLE,
 			net_inflow DOUBLE,
 			main_net_inflow DOUBLE,
-			buy_amount DOUBLE,
-			sell_amount DOUBLE,
 			data_payload_json VARCHAR,
 			adjusted VARCHAR NOT NULL DEFAULT 'none',
 			source VARCHAR,
@@ -374,8 +384,6 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS turnover_rate DOUBLE DEFAULT 0`,
 		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS net_inflow DOUBLE DEFAULT 0`,
 		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS main_net_inflow DOUBLE DEFAULT 0`,
-		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS buy_amount DOUBLE DEFAULT 0`,
-		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS sell_amount DOUBLE DEFAULT 0`,
 		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS data_payload_json VARCHAR`,
 		`ALTER TABLE stockv2_stock_profiles ADD COLUMN IF NOT EXISTS base_profile_hash VARCHAR`,
 		`ALTER TABLE stockv2_stock_profiles ADD COLUMN IF NOT EXISTS base_profile_updated_at TIMESTAMP`,
@@ -511,9 +519,9 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 			INSERT INTO stockv2_daily_bars_stage (
 				id, symbol, market, trade_date, open, high, low, close, prev_close,
 				volume, amount, pct_change, turnover_rate, net_inflow, main_net_inflow,
-				buy_amount, sell_amount, data_payload_json, adjusted, source, fetched_at,
+				data_payload_json, adjusted, source, fetched_at,
 				quality, error_message, created_at, updated_at
-			) VALUES (?, ?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	stmt, err := tx.PrepareContext(ctx, q)
 	if err != nil {
@@ -540,7 +548,7 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 			b.ID, b.Symbol, b.Market, b.TradeDate,
 			b.Open, b.High, b.Low, b.Close, b.PrevClose,
 			b.Volume, b.Amount, b.PctChange, b.TurnoverRate, b.NetInflow, b.MainNetInflow,
-			b.BuyAmount, b.SellAmount, b.DataPayload, b.Adjusted, b.Source,
+			b.DataPayload, b.Adjusted, b.Source,
 			nullableTime(b.FetchedAt), b.Quality, b.ErrorMessage,
 			b.CreatedAt, b.UpdatedAt,
 		); err != nil {
@@ -556,10 +564,9 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 		return wrapError(err, "merge duckdb daily bar stage")
 	}
 
-	for _, b := range affected {
-		if err := refreshDailyBarQualityWithTx(ctx, tx, b.Symbol, b.Adjusted, now); err != nil {
-			return err
-		}
+	// 批量刷新所有受影响 symbol 的 quality（一次查询代替 N 次）
+	if err := batchRefreshDailyBarQualityWithTx(ctx, tx, affected, now); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -595,6 +602,87 @@ func refreshDailyBarQualityWithTx(ctx context.Context, tx *sql.Tx, symbol, adjus
 	return nil
 }
 
+// batchRefreshDailyBarQualityWithTx 批量刷新多个 symbol+adjusted 的日 K 质量统计。
+// 用一次窗口函数查询代替原来每个 symbol 单独查询（N 次 → 1 次）。
+func batchRefreshDailyBarQualityWithTx(ctx context.Context, tx *sql.Tx, affected map[string]StockV2DailyBar, updatedAt time.Time) error {
+	if len(affected) == 0 {
+		return nil
+	}
+
+	// 收集所有受影响的 (symbol, adjusted) 对
+	type pair struct{ symbol, adjusted string }
+	pairs := make([]pair, 0, len(affected))
+	for _, b := range affected {
+		pairs = append(pairs, pair{b.Symbol, b.Adjusted})
+	}
+
+	// 构建 IN 子句
+	placeholders := make([]string, len(pairs))
+	args := make([]any, 0, len(pairs)*2+1)
+	for i, p := range pairs {
+		placeholders[i] = "(?, ?)"
+		args = append(args, p.symbol, p.adjusted)
+	}
+	args = append(args, updatedAt)
+
+	// 使用窗口函数一次查询所有 symbol 的质量统计
+	query := `
+		INSERT OR REPLACE INTO stockv2_daily_bar_quality (
+			symbol, adjusted, row_count, earliest_date, latest_date, source, last_error, updated_at
+		)
+		WITH agg AS (
+			SELECT
+				symbol,
+				adjusted,
+				COUNT(*) AS row_count,
+				COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'), '') AS earliest_date,
+				COALESCE(strftime(MAX(trade_date), '%Y-%m-%d'), '') AS latest_date
+			FROM stockv2_daily_bars
+			WHERE (symbol, adjusted) IN (` + strings.Join(placeholders, ",") + `)
+			GROUP BY symbol, adjusted
+		),
+		latest_source AS (
+			SELECT symbol, adjusted, source,
+				ROW_NUMBER() OVER (PARTITION BY symbol, adjusted ORDER BY fetched_at DESC) AS rn
+			FROM stockv2_daily_bars
+			WHERE (symbol, adjusted) IN (` + strings.Join(placeholders, ",") + `)
+		),
+		latest_error AS (
+			SELECT symbol, adjusted, error_message,
+				ROW_NUMBER() OVER (PARTITION BY symbol, adjusted ORDER BY fetched_at DESC) AS rn
+			FROM stockv2_daily_bars
+			WHERE (symbol, adjusted) IN (` + strings.Join(placeholders, ",") + `)
+			  AND COALESCE(error_message, '') != ''
+		)
+		SELECT
+			a.symbol,
+			a.adjusted,
+			a.row_count,
+			a.earliest_date,
+			a.latest_date,
+			COALESCE(ls.source, '') AS source,
+			COALESCE(le.error_message, '') AS last_error,
+			?
+		FROM agg a
+		LEFT JOIN latest_source ls ON ls.symbol = a.symbol AND ls.adjusted = a.adjusted AND ls.rn = 1
+		LEFT JOIN latest_error le ON le.symbol = a.symbol AND le.adjusted = a.adjusted AND le.rn = 1
+	`
+
+	// 展开参数：IN 子句出现 3 次，每次都需要完整的 pairs 参数
+	fullArgs := make([]any, 0, len(pairs)*6+1)
+	for i := 0; i < 3; i++ {
+		for _, p := range pairs {
+			fullArgs = append(fullArgs, p.symbol, p.adjusted)
+		}
+	}
+	fullArgs = append(fullArgs, updatedAt)
+
+	if _, err := tx.ExecContext(ctx, query, fullArgs...); err != nil {
+		return wrapError(err, "batch refresh duckdb daily bar quality")
+	}
+	return nil
+}
+
 func (s *MarketDataStore) GetDailyBars(ctx context.Context, symbol, adjusted, startDate, endDate string, limit int) ([]StockV2DailyBar, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("market data store is not initialized")
@@ -604,7 +692,7 @@ func (s *MarketDataStore) GetDailyBars(ctx context.Context, symbol, adjusted, st
 		       COALESCE(open,0), COALESCE(high,0), COALESCE(low,0), COALESCE(close,0),
 		       COALESCE(prev_close,0), COALESCE(volume,0), COALESCE(amount,0), COALESCE(pct_change,0),
 		       COALESCE(turnover_rate,0), COALESCE(net_inflow,0), COALESCE(main_net_inflow,0),
-		       COALESCE(buy_amount,0), COALESCE(sell_amount,0), COALESCE(data_payload_json,''),
+		       COALESCE(data_payload_json,''),
 		       adjusted, COALESCE(source,''), fetched_at, COALESCE(quality,''), COALESCE(error_message,''),
 		       created_at, updated_at
 		FROM stockv2_daily_bars
@@ -748,7 +836,7 @@ func (s *MarketDataStore) CountDailyBars(ctx context.Context) (int, error) {
 func scanDailyBarsRows(rows *sql.Rows) ([]StockV2DailyBar, error) {
 	var out []StockV2DailyBar
 	columns, _ := rows.Columns()
-	withDataFacets := len(columns) >= 25
+	withDataFacets := len(columns) >= 23
 	for rows.Next() {
 		var b StockV2DailyBar
 		var fetchedAt sql.NullTime
@@ -757,7 +845,7 @@ func scanDailyBarsRows(rows *sql.Rows) ([]StockV2DailyBar, error) {
 				&b.ID, &b.Symbol, &b.Market, &b.TradeDate,
 				&b.Open, &b.High, &b.Low, &b.Close,
 				&b.PrevClose, &b.Volume, &b.Amount, &b.PctChange,
-				&b.TurnoverRate, &b.NetInflow, &b.MainNetInflow, &b.BuyAmount, &b.SellAmount, &b.DataPayload,
+				&b.TurnoverRate, &b.NetInflow, &b.MainNetInflow, &b.DataPayload,
 				&b.Adjusted, &b.Source, &fetchedAt, &b.Quality, &b.ErrorMessage,
 				&b.CreatedAt, &b.UpdatedAt,
 			); err != nil {

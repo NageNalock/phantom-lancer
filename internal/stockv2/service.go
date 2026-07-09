@@ -39,6 +39,7 @@ type Service struct {
 
 	universeSource     *UniverseDataSource
 	dailyBarsSource    *DailyBarsSource
+	baiduDailyBars     *BaiduDailyBarsSource
 	announcementSource *AnnouncementSource
 	newsAdapters       map[string]NewsSourceAdapter
 	newsLinker         NewsEventLinker
@@ -62,6 +63,7 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 		httpClient:         httpClient,
 		universeSource:     NewUniverseDataSource(nil, httpClient),
 		dailyBarsSource:    NewDailyBarsSource(nil, httpClient),
+		baiduDailyBars:     NewBaiduDailyBarsSource(httpClient),
 		announcementSource: NewAnnouncementSource(httpClient),
 		assetBackoff:       map[string]time.Time{},
 		newsAdapters:       map[string]NewsSourceAdapter{},
@@ -749,7 +751,6 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 	successCount := 0
 	processedCount := 0
 	assetStats := AssetMaintenanceStats{}
-	budget := &assetMaintenanceBudget{AIRemaining: defaultAssetMaintenanceAIBudget}
 	flushProgress := func(includeFailedItems bool) {
 		progress.ProcessedCount = processedCount
 		progress.SuccessCount = successCount
@@ -838,49 +839,112 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 		}
 
 		// 保存股票数据，并把日 K、基础画像、公告和 AI 决策纳入同一个 per-symbol 管线。
+		// 使用 worker pool 并发处理（4 路），5000+ 股票可在维护时间窗内完成。
+		const maintenanceConcurrency = 4
+		const progressFlushInterval = 50 // 每 50 只 symbol flush 一次进度，减少 DuckDB 写入
+
+		var mu sync.Mutex
 		batchProcessed := progress.CurrentBatchProgress
+		sem := make(chan struct{}, maintenanceConcurrency)
+		var wg sync.WaitGroup
+		ctxCancelled := false
+
 		for _, sym := range workSymbols {
-			progress.CurrentSymbol = sym
-			failedBefore := len(failedItems)
-			inst, ok := resultMap[sym]
-			if !ok {
-				failedItems = append(failedItems, UpdateFailure{
-					Symbol: sym,
-					Reason: "no data from source",
-				})
-			} else {
+			if ctx.Err() != nil {
+				ctxCancelled = true
+				break
+			}
+
+			wg.Add(1)
+			select {
+			case sem <- struct{}{}: // acquire worker slot
+			case <-ctx.Done():
+				wg.Done()
+				ctxCancelled = true
+				break
+			}
+			if ctxCancelled {
+				break
+			}
+
+			go func(symbol string) {
+				defer wg.Done()
+				defer func() { <-sem }() // release worker slot
+
+				failedBefore := 0
+				mu.Lock()
+				progress.CurrentSymbol = symbol
+				failedBefore = len(failedItems)
+				mu.Unlock()
+
+				inst, ok := resultMap[symbol]
+				if !ok {
+					mu.Lock()
+					failedItems = append(failedItems, UpdateFailure{
+						Symbol: symbol,
+						Reason: "no data from source",
+					})
+					processedCount++
+					batchProcessed++
+					progress.CurrentBatchProgress = batchProcessed
+					needFlush := processedCount%progressFlushInterval == 0
+					mu.Unlock()
+					if needFlush {
+						flushProgress(true)
+					}
+					return
+				}
+
 				result, maintainErr := s.maintainAssetForInstrument(ctx, inst, assetMaintenanceOptions{
 					JobID:         jobID,
 					TriggerSource: job.TriggerSource,
 					RequestedBy:   "system",
 					ForceAI:       req.ForceAI,
-					Budget:        budget,
 				})
+
+				mu.Lock()
 				assetStats = mergeAssetMaintenanceStats(assetStats, result.Item)
 				if maintainErr != nil {
 					if s.log != nil {
 						s.log.Warn("stock data asset maintenance item partial", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol", inst.Symbol, "market", inst.Market, "instrument_type", inst.InstrumentType, "error", safelog.Text(maintainErr.Error(), 300))
 					}
 					failedItems = append(failedItems, UpdateFailure{
-						Symbol: sym,
+						Symbol: symbol,
 						Reason: safelog.Text(maintainErr.Error(), 240),
 					})
 				} else {
 					successCount++
 				}
-			}
-
-			processedCount++
-			batchProcessed++
-			progress.CurrentBatchProgress = batchProcessed
-			flushProgress(len(failedItems) != failedBefore)
-
-			if resultMap[sym].Symbol != "" {
-				if err := sleepJitter(ctx, 80*time.Millisecond, 60*time.Millisecond); err != nil {
-					return
+				processedCount++
+				batchProcessed++
+				progress.CurrentBatchProgress = batchProcessed
+				needFlush := processedCount%progressFlushInterval == 0 || len(failedItems) != failedBefore
+				mu.Unlock()
+				if needFlush {
+					flushProgress(len(failedItems) != failedBefore)
 				}
-			}
+
+				if inst.Symbol != "" {
+					if err := sleepJitter(ctx, 80*time.Millisecond, 60*time.Millisecond); err != nil {
+						return // context cancelled
+					}
+				}
+			}(sym)
 		}
+		wg.Wait()
+
+		if ctxCancelled {
+			s.store.UpdateUpdateJob(ctx, StockV2UpdateJob{
+				ID:          jobID,
+				Status:      "cancelled",
+				EndAt:       time.Now(),
+				FailedItems: failedItems,
+			})
+			return
+		}
+
+		// 批次结束时 flush 剩余进度
+		flushProgress(true)
 
 		// 批间延迟（避免风控）
 		if batch < totalBatches-1 {
@@ -956,17 +1020,40 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 	if len(ranges) == 0 {
 		return false, nil, nil
 	}
-	bars := make([]StockV2DailyBar, 0, 256)
-	for _, r := range ranges {
-		fetched, fetchErr := s.dailyBarsSource.FetchDailyBars(ctx, inst.Symbol, inst.Market, r.Start, r.End, DailyBarAdjustedNone, 1800)
-		if fetchErr != nil {
-			return true, nil, fetchErr
+
+	// 使用百度财经作为主数据源（提供 amount 和 turnover_rate），一次拿全量数据
+	var bars []StockV2DailyBar
+	if s.baiduDailyBars != nil {
+		fetched, baiduErr := s.baiduDailyBars.FetchDailyBars(ctx, inst.Symbol, inst.Market, inst.InstrumentType)
+		if baiduErr != nil {
+			// 百度失败时回退到腾讯 fqkline
+			if s.log != nil {
+				s.log.Warn("baidu daily bars failed, falling back to tencent", "symbol", inst.Symbol, "error", safelog.Text(baiduErr.Error(), 200))
+			}
+		} else {
+			for i := range fetched {
+				fetched[i].Symbol = inst.Symbol
+			}
+			bars = fetched
 		}
-		for i := range fetched {
-			fetched[i].Symbol = inst.Symbol
-		}
-		bars = append(bars, fetched...)
 	}
+
+	// 如果百度未使用或失败，使用腾讯源按缺口区间抓取
+	if len(bars) == 0 {
+		bars = make([]StockV2DailyBar, 0, 256)
+		for _, r := range ranges {
+			fetched, fetchErr := s.dailyBarsSource.FetchDailyBars(ctx, inst.Symbol, inst.Market, r.Start, r.End, DailyBarAdjustedNone, 1800)
+			if fetchErr != nil {
+				return true, nil, fetchErr
+			}
+			for i := range fetched {
+				fetched[i].Symbol = inst.Symbol
+			}
+			bars = append(bars, fetched...)
+		}
+	}
+
+	// 东财资金面 enrichment（填充 NetInflow / MainNetInflow）
 	_ = s.enrichDailyBarsWithDataFacets(ctx, inst, bars)
 	if len(bars) == 0 && !dailyBarsNeedsMaintenance(quality) {
 		return false, nil, nil

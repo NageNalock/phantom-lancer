@@ -332,6 +332,9 @@ func buildStockProfileFromInstrument(instrument StockV2Instrument) StockProfile 
 	profile.ProfileTextZh = buildProfileTextZh(profile)
 	profile.ProfileTextEn = buildProfileTextEn(profile)
 	profile.ProfileText = buildProfileText(profile)
+	// 确保 Aliases 包含 AliasesZh / AliasesEn（与 mergeStockProfileAIFields 保持一致）
+	profile.Aliases = appendProfileTerms(profile.Aliases, profile.AliasesZh...)
+	profile.Aliases = appendProfileTerms(profile.Aliases, profile.AliasesEn...)
 	return profile
 }
 

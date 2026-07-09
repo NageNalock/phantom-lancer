@@ -27,7 +27,6 @@ const (
 	AssetAIDecisionRetry           = "called_retry"
 	AssetAIDecisionManualForce     = "called_manual_force"
 	AssetAIDecisionSkippedUnneeded = "skipped_unneeded"
-	AssetAIDecisionSkippedBudget   = "skipped_budget_exhausted"
 	AssetAIDecisionSkippedConfig   = "skipped_not_configured"
 	AssetAIDecisionFailed          = "failed"
 
