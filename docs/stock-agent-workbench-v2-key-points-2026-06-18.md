@@ -248,11 +248,17 @@ Agent 可以临时检索补充证据，但长期数据资产应由股票数据�
 
 `NewsLinkCandidate` 是候选关系，不是事实关系。为了避免漏掉关键信息，第一轮过滤应偏向高召回：阈值可以保守偏低，保留 topK 候选；显式命中的股票名、代码、持仓股票、活跃监控任务和活跃策略可以降低进入门槛。
 
+`NewsLinkCandidate` 在不同消费方中的角色：
+- **消息面策略监控（`news_strategy_monitor`）**：以 `NewsLinkCandidate` pending 队列为入口，每次消费少量候选，适合单条消息命中。
+- **组合哨兵（`portfolio_sentinel`）**：不依赖 `NewsLinkCandidate` 作为主链路。组合哨兵直接从 `stockv2_news_events` 读取窗口内新闻，通过多路打分（实体匹配、关键词、语义向量、NLC 辅助、来源质量、新鲜度）筛选与持仓相关的新闻。`NewsLinkCandidate` 降级为辅助信号（用于解释和加分）。
+
 当候选消息达到某类系统监控任务或机会发现的初筛条件后，系统应构造 `Agent Context Pack`，把消息、候选关联、实时行情、历史 K 线摘要、组合快照、策略、内部预筛结果、数据新鲜度和近期同类记录一起交给 Agent。Agent 再输出结构化的 `TriggerDecision`，决定是否真的触发提醒、进入 Review、生成机会，或忽略本次消息。
 
 股票画像用于支撑信息面召回和机会发现。初始画像不需要追求完整知识图谱，可以先由股票主数据、行业/板块/概念标签、历史 K 线统计、成交量特征、近期已确认消息主题和人工补充信息拼成可向量化文本。组合持仓、成本、仓位和风险约束属于用户上下文，不应写入通用股票画像，而应在 `Agent Context Pack` 中动态附加。
 
-向量资产只负责语义召回，不替代关键词和实体匹配。Embedding 生成必须依赖 StockV2 已绑定且可用的嵌入模型；DuckDB 只负责存储和搜索向量，不负责生成 embedding。未绑定嵌入模型时，股票画像 / 新闻 / 主题的 embedding 生成、向量索引重建和语义向量召回必须在上层入口直接拦截并展示不可用原因，不允许静默降级成“假向量召回”。
+向量资产只负责语义召回，不替代关键词和实体匹配。Embedding 生成必须依赖 StockV2 已绑定且可用的嵌入模型；DuckDB 只负责存储和搜索向量，不负责生成 embedding。未绑定嵌入模型时，股票画像 / 新闻 / 主题的 embedding 生成、向量索引重建和语义向量召回必须在上层入口直接拦截并展示不可用原因，不允许静默降级成”假向量召回”。
+
+向量检索性能优化：`stockv2_embedding_vectors_v2` 表新增 `vector_values DOUBLE[]` 列存储原生向量数组，检索时通过 DuckDB SQL 层 `list_transform + list_sum` 手动计算 cosine similarity 并完成 TopK 排序，避免全量加载到 Go 层解码计算。旧数据（只有 `vector_blob` BLOB）通过回退路径在 Go 层计算。
 
 ## 5. 后台监控与命中
 

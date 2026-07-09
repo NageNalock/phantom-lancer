@@ -299,24 +299,46 @@ intradayDirectionSummary
 
 ### 7.4 News context
 
-组合哨兵直接从 `stockv2_news_events` / `stockv2_raw_news` 读取窗口内消息，不等 `NewsLinkCandidate`。
+组合哨兵直接从 `stockv2_news_events` 读取窗口内消息，不等 `NewsLinkCandidate`。`NewsLinkCandidate` 降级为辅助信号（用于解释和加分），不再是唯一入口。
 
-裁剪策略：
+#### 7.4.1 多路召回与打分
 
-1. 当前持仓名称、代码、别名命中。
-2. 股票画像关键词命中。
-3. 语义向量召回持仓画像相似新闻。
-4. 来源重要性、标题中出现明显市场/行业/公司动作。
-5. 最近消息优先。
+每条窗口内新闻与每个持仓的相关性通过 `SentinelNewsCandidate` 结构计算 6 维分数：
 
-第一版限制：
+| 维度 | 字段 | 权重 | 说明 |
+|---|---|---|---|
+| 实体匹配 | `EntityMatchScore` | 0.30-0.35 | 股票代码、名称、别名在新闻标题/摘要/正文中的命中 |
+| 关键词匹配 | `KeywordMatchScore` | 0.15-0.20 | 行业、概念、标签、中文关键词与新闻文本的重叠度 |
+| 语义相似度 | `SemanticScore` | 0.25 | 持仓画像文本 vs news_event embedding 的 cosine similarity（反向召回） |
+| NLC 辅助分数 | `NewsLinkCandidateScore` | 0.10-0.15 | 既有 `NewsLinkCandidate.score` 归一化到 0-1 |
+| 来源质量 | `SourceQualityScore` | 0.10-0.15 | 金十/财联社=0.9，东方财富/同花顺=0.7，其他=0.5 |
+| 新鲜度 | `FreshnessScore` | 0.10-0.15 | 1h内=1.0，4h内=0.85，12h内=0.65，24h内=0.45 |
 
-- 每个组合最多 80 条新闻进入 Agent。
-- 每个持仓最多 20 条新闻。
-- 全局重要新闻最多 30 条。
-- 超限时保留最新、高相似、高来源质量的消息。
+**召回方式**（`RecallMethods` 字段）：
+- `entity_match`：实体匹配命中
+- `keyword`：关键词匹配命中
+- `semantic`：语义向量召回命中（持仓画像→新闻 embedding 反向搜索）
+- `news_link`：既有 NewsLinkCandidate 辅助命中
 
-每条新闻必须保留：
+**总分计算**：加权求和，有语义命中时权重调整（语义占比提升到 0.25，实体/关键词相应降低）。
+
+#### 7.4.2 高/低优先级分桶
+
+为抑制噪音，候选分为高优先级和低优先级：
+
+- **高优先级**：实体匹配命中，或 NLC 分数 >= 65（归一化 0.65）。不受数量限制。
+- **低优先级**：只有关键词或语义匹配，无实体/NLC 命中。最多保留 10 条。
+
+超出低优先级限额的候选被抑制，记录在 `ContextStats.suppressedLowPriorityNewsCount` 中。
+
+#### 7.4.3 数量限制
+
+- 每个组合最多 200 条新闻进入 Agent（`MaxNewsItems`）。
+- 每个持仓最多 50 条候选（`MaxNewsPerHolding`）。
+- 窗口内最多扫描 500 条 NewsEvent。
+- 超限时按总分排序保留高优先级候选。
+
+#### 7.4.4 每条新闻上下文字段
 
 ```text
 id
@@ -325,10 +347,19 @@ title
 summary/snippet
 eventAt
 url
-matchReason
-matchedHoldingSymbols[]
-retrievalMethod         // keyword | semantic | source_priority | manual
+// 以下由 SentinelNewsCandidate 提供：
+scoreBreakdown          // 各维度分数明细 {entity, keyword, semantic, news_link, source_quality, freshness}
+totalScore              // 加权总分
+recallMethods[]         // 召回方式 ["entity_match", "semantic", ...]
+newsLinkCandidateScore  // NLC 归一化辅助分数（0-1）
 ```
+
+#### 7.4.5 语义召回不可用标注
+
+当 embedding 模型未配置或向量资产不可用时：
+- `SemanticScore` 为 0
+- `RecallMethods` 中不包含 `"semantic"`
+- 系统仍通过实体匹配和关键词匹配召回，不静默降级为"假语义"
 
 ### 7.5 策略和历史上下文
 
@@ -708,5 +739,7 @@ StockV2 下新增二级入口：`组合哨兵`。
 - 不改变现有 `OperationReview` schema 的语义。
 - 不要求已有策略必须 active。
 - 空库或无持仓部署必须可用，输出无扫描对象。
-- 缺 embedding 时允许关键词/名称召回降级，但必须在结果中标注语义召回不可用。
+- 缺 embedding 时允许关键词/名称召回降级，但必须在结果中标注语义召回不可用（`RecallMethods` 不含 `"semantic"`，`SemanticScore` 为 0）。
+- `NewsLinkCandidate` 表保留，继续由新闻关联任务维护。组合哨兵将其降级为辅助信号（`NewsLinkCandidateScore`），不再作为唯一新闻入口。`PortfolioSentinelHoldingContext.NewsLinks` 仍返回实际的 NLC 行用于兼容旧接口。
+- `PortfolioSentinelHoldingContext` 新增 `NewsCandidates` 字段，包含 `SentinelNewsCandidate` 多路打分详情。旧字段 `News` 和 `NewsLinks` 保持不变。
 

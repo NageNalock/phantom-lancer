@@ -468,6 +468,33 @@ AI总结       5 已发起 / 1 失败 / 26 跳过
 
 embedding 生成仍由独立向量资产维护执行，不应阻塞数据资产维护主任务。
 
+#### 13.2.1 向量检索优化（DuckDB 原生计算）
+
+`stockv2_embedding_vectors_v2` 表新增 `vector_values DOUBLE[]` 列，存储原生向量数组，与 `vector_blob`（旧格式 BLOB）共存。
+
+**写入**：`UpsertEmbeddingVector` 时同时写入 `vector_blob`（兼容旧数据）和 `vector_values`（新格式）。
+
+**检索**：`SearchEmbeddingVectors` 优先使用 `vector_values` 列，通过 SQL 层 `list_transform + list_sum + sqrt` 手动计算 cosine similarity + ORDER BY + LIMIT，在 DuckDB 内完成 TopK 计算，避免全量加载到 Go 层。
+
+```sql
+WITH query_vec AS (SELECT ?::DOUBLE[] AS qv)
+SELECT e.vector_ref, e.object_type, e.object_id,
+    list_sum(list_transform(e.vector_values, (x, i) -> x * query_vec.qv[i]))
+    / (sqrt(list_sum(list_transform(e.vector_values, x -> x*x)))
+       * sqrt(list_sum(list_transform(query_vec.qv, x -> x*x))))
+    AS score
+FROM stockv2_embedding_vectors_v2 e, query_vec
+WHERE e.model_id = ? AND e.vector_values IS NOT NULL
+ORDER BY score DESC
+LIMIT ?
+```
+
+> 注：DuckDB 的 `array_cosine_distance` 要求 `DOUBLE[ANY]` 类型参数，与列存储的 `DOUBLE[]` 类型不匹配，因此使用手动展开计算。
+
+**回退**：旧数据（只有 `vector_blob`，`vector_values IS NULL`）通过 `searchEmbeddingVectorsBlob` 在 Go 层解码计算。两条路径结果通过 `mergeEmbeddingHits` 合并去重。
+
+**迁移**：`ALTER TABLE stockv2_embedding_vectors_v2 ADD COLUMN IF NOT EXISTS vector_values DOUBLE[]`，旧数据保持 NULL，下次 embedding 重建时自动填充。
+
 ### 13.3 与 Agent
 
 Agent 只负责画像总结，不负责采集数据。
