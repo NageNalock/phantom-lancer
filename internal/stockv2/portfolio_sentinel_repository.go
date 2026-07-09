@@ -242,6 +242,32 @@ func (s *Store) GetPortfolioSentinelResultByRunID(ctx context.Context, runID str
 	return &result, nil
 }
 
+// UpdatePortfolioSentinelResult 更新已有结果（用于在 Agent 返回后合并新数据到预创建的记录）。
+func (s *Store) UpdatePortfolioSentinelResult(ctx context.Context, result PortfolioSentinelResult) (PortfolioSentinelResult, error) {
+	if result.ID == "" {
+		return PortfolioSentinelResult{}, ErrInvalidPortfolioSentinelResult
+	}
+	if result.ContextSummary == nil {
+		result.ContextSummary = map[string]any{}
+	}
+	if result.RawResult == nil {
+		result.RawResult = map[string]any{}
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_portfolio_sentinel_results
+		SET schema_version = ?, summary = ?, risk_level = ?, raw_result_json = ?,
+		    context_summary_json = ?, derived_alert_ids_json = ?, derived_monitor_hit_ids_json = ?,
+		    derived_review_ids_json = ?
+		WHERE id = ?
+	`, result.SchemaVersion, nullableString(result.Summary), nullableString(result.RiskLevel),
+		marshalMap(result.RawResult), marshalMap(result.ContextSummary), marshalStrings(result.DerivedAlertIDs),
+		marshalStrings(result.DerivedMonitorHitIDs), marshalStrings(result.DerivedReviewIDs), result.ID)
+	if err != nil {
+		return PortfolioSentinelResult{}, wrapError(err, "update portfolio sentinel result")
+	}
+	return result, nil
+}
+
 func scanPortfolioSentinelRun(row rowScanner) (PortfolioSentinelRun, error) {
 	var run PortfolioSentinelRun
 	var finishedAt sql.NullTime

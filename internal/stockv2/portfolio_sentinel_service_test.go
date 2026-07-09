@@ -658,8 +658,12 @@ func TestPortfolioSentinelAgentUnavailableFailsRun(t *testing.T) {
 	if detail.Run.ErrorMessage == "" {
 		t.Fatalf("failed run should keep error message")
 	}
-	if detail.Result != nil {
-		t.Fatalf("failed run should not save result, got %+v", detail.Result)
+	// 预创建的结果记录含 holdingNewsCandidates，即使 Agent 失败也保留候选可追溯性。
+	if detail.Result == nil {
+		t.Fatalf("failed run should have preliminary result with news candidate summary")
+	}
+	if _, ok := detail.Result.ContextSummary["holdingNewsCandidates"]; !ok {
+		t.Fatalf("result contextSummary should contain holdingNewsCandidates")
 	}
 	if len(detail.Reviews) != 0 {
 		t.Fatalf("failed run should not fan-out reviews, got %d", len(detail.Reviews))

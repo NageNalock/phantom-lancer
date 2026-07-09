@@ -139,6 +139,20 @@ func (s *Service) startPortfolioSentinelRun(ctx context.Context, triggerType, wi
 	run.RawNewsCount = len(contextPack.RawNews)
 	run.QuoteCount, run.DailyBarSymbolCount, run.MinuteBarSymbolCount = portfolioSentinelDataCounts(contextPack)
 
+	// 将持仓新闻候选（含 recallMethods、scoreBreakdown）持久化到 result contextSummary，
+	// 使历史运行可追溯"为什么这条新闻进来了"。
+	// 在 Agent 执行前预创建结果记录，Agent 返回后由 ProcessPortfolioSentinelSubmittedResult 更新。
+	prelimResult := PortfolioSentinelResult{
+		RunID:          run.ID,
+		SchemaVersion:  PortfolioSentinelReportSchemaVersion,
+		ContextSummary: buildHoldingNewsCandidateSummary(contextPack),
+	}
+	if _, err := s.store.CreatePortfolioSentinelResult(ctx, prelimResult); err != nil {
+		if s.log != nil {
+			s.log.Warn("preliminary sentinel result save failed (will retry later)", "run_id", run.ID, "error", safelog.Text(err.Error(), 240))
+		}
+	}
+
 	resolution, err := s.ResolveAgentTask(ctx, AgentTaskTypePortfolioSentinel, "portfolio_sentinel_run", run.ID, "system")
 	if err != nil {
 		run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
@@ -289,6 +303,57 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 	out.ContextStats["newsTruncated"] = newsTruncated
 	portfolioSentinelApplyNewsFilterStats(out.ContextStats, newsFilterStats)
 	return out, nil
+}
+
+// buildHoldingNewsCandidateSummary 从 context pack 中提取每个持仓的新闻候选摘要，
+// 持久化到 result.contextSummary，使历史运行可追溯每条新闻的召回方式和分数来源。
+func buildHoldingNewsCandidateSummary(pack PortfolioSentinelContext) map[string]any {
+	holdings := make([]map[string]any, 0)
+	for _, p := range pack.Portfolios {
+		for _, h := range p.Holdings {
+			if len(h.NewsCandidates) == 0 {
+				continue
+			}
+			candidates := make([]map[string]any, 0, len(h.NewsCandidates))
+			for _, c := range h.NewsCandidates {
+				cand := map[string]any{
+					"newsEventId":       c.NewsEventID,
+					"totalScore":        c.TotalScore,
+					"scoreBreakdown":    c.ScoreBreakdown,
+					"recallMethods":     c.RecallMethods,
+					"entityMatchScore":  c.EntityMatchScore,
+					"keywordMatchScore": c.KeywordMatchScore,
+					"semanticScore":     c.SemanticScore,
+					"nlcScore":          c.NewsLinkCandidateScore,
+					"sourceQualityScore": c.SourceQualityScore,
+					"freshnessScore":    c.FreshnessScore,
+				}
+				if c.NewsEvent != nil {
+					cand["newsEvent"] = map[string]any{
+						"id":       c.NewsEvent.ID,
+						"title":    c.NewsEvent.Title,
+						"source":   c.NewsEvent.Source,
+						"summary":  c.NewsEvent.Summary,
+						"eventAt":  c.NewsEvent.EventAt,
+						"url":      c.NewsEvent.URL,
+					}
+				}
+				candidates = append(candidates, cand)
+			}
+			symbol := h.Holding.Symbol
+			name := h.Holding.Name
+			holdings = append(holdings, map[string]any{
+				"symbol":       symbol,
+				"name":         name,
+				"portfolioId":  p.Portfolio.ID,
+				"portfolioName": p.Portfolio.Name,
+				"candidates":   candidates,
+			})
+		}
+	}
+	return map[string]any{
+		"holdingNewsCandidates": holdings,
+	}
 }
 
 func (s *Service) preparePortfolioSentinelNews(ctx context.Context, run PortfolioSentinelRun) error {
@@ -1069,14 +1134,28 @@ func (s *Service) ProcessPortfolioSentinelSubmittedResult(ctx context.Context, r
 		run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
 		return PortfolioSentinelResult{}, err
 	}
+
+	// 优先更新预创建的结果记录（含 newsCandidates 摘要），保留 contextSummary 中的历史可追溯数据。
+	existing, _ := s.store.GetPortfolioSentinelResultByRunID(ctx, run.ID)
 	result := PortfolioSentinelResult{
-		RunID:          run.ID,
-		SchemaVersion:  report.SchemaVersion,
-		Summary:        firstNonEmpty(report.RunSummary, submitted.ResultSummary),
-		RiskLevel:      normalizePortfolioSentinelRiskLevel(report.OverallRiskLevel),
-		RawResult:      submitted.Result,
-		ContextSummary: map[string]any{"confidence": submitted.Confidence},
+		RunID:         run.ID,
+		SchemaVersion: report.SchemaVersion,
+		Summary:       firstNonEmpty(report.RunSummary, submitted.ResultSummary),
+		RiskLevel:     normalizePortfolioSentinelRiskLevel(report.OverallRiskLevel),
+		RawResult:     submitted.Result,
 	}
+	if existing != nil {
+		result.ID = existing.ID
+		result.CreatedAt = existing.CreatedAt
+		// 合并 contextSummary：保留预存的 holdingNewsCandidates，加入 confidence
+		result.ContextSummary = make(map[string]any, len(existing.ContextSummary)+1)
+		for k, v := range existing.ContextSummary {
+			result.ContextSummary[k] = v
+		}
+	} else {
+		result.ContextSummary = map[string]any{}
+	}
+	result.ContextSummary["confidence"] = submitted.Confidence
 	derived, err := s.derivePortfolioSentinelObjects(ctx, run, report, submitted.Result)
 	if err != nil {
 		run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
@@ -1085,7 +1164,11 @@ func (s *Service) ProcessPortfolioSentinelSubmittedResult(ctx context.Context, r
 	result.DerivedAlertIDs = derived.alertIDs
 	result.DerivedMonitorHitIDs = derived.hitIDs
 	result.DerivedReviewIDs = derived.reviewIDs
-	result, err = s.store.CreatePortfolioSentinelResult(ctx, result)
+	if existing != nil {
+		result, err = s.store.UpdatePortfolioSentinelResult(ctx, result)
+	} else {
+		result, err = s.store.CreatePortfolioSentinelResult(ctx, result)
+	}
 	if err != nil {
 		run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
 		return PortfolioSentinelResult{}, err

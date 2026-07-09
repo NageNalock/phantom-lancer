@@ -412,6 +412,7 @@ function SentinelRunDrawer({
   const { run, result } = detail;
   const report = readReport(result?.rawResult);
   const context = result?.contextSummary || {};
+  const holdingNewsCandidates = readHoldingNewsCandidates(context["holdingNewsCandidates"]);
   return (
     <Drawer
       title={`组合哨兵详情 · ${stockV2SentinelWindowLabel(run.windowType)}`}
@@ -457,6 +458,20 @@ function SentinelRunDrawer({
             <div className="mt-2 grid gap-2">
               {report.affectedHoldings.map((item, idx) => (
                 <AffectedHoldingItem key={idx} item={item} />
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {holdingNewsCandidates.length > 0 ? (
+          <div>
+            <strong className="text-sm">新闻候选召回详情</strong>
+            <p className="mt-0.5 text-xs text-[var(--muted)]">
+              每个持仓的窗口新闻候选，展示召回方式和分数拆解，可追溯"为什么这条新闻进来了"。
+            </p>
+            <div className="mt-2 grid gap-3">
+              {holdingNewsCandidates.map((h, hi) => (
+                <HoldingNewsCandidatesBlock key={hi} holding={h} />
               ))}
             </div>
           </div>
@@ -572,6 +587,206 @@ function AffectedHoldingItem({ item }: { item: Record<string, unknown> }) {
           ))}
         </ul>
       ) : null}
+    </div>
+  );
+}
+
+// ===== 新闻候选召回展示 =====
+
+interface HoldingNewsCandidateSummary {
+  symbol: string;
+  name: string;
+  portfolioId?: string;
+  portfolioName?: string;
+  candidates: Array<{
+    newsEventId: string;
+    totalScore: number;
+    scoreBreakdown?: Record<string, number>;
+    recallMethods?: string[];
+    entityMatchScore: number;
+    keywordMatchScore: number;
+    semanticScore: number;
+    nlcScore: number;
+    sourceQualityScore: number;
+    freshnessScore: number;
+    newsEvent?: {
+      id: string;
+      title: string;
+      source: string;
+      summary?: string;
+      eventAt?: string;
+      url?: string;
+    };
+  }>;
+}
+
+function readHoldingNewsCandidates(value: unknown): HoldingNewsCandidateSummary[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((v): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v))
+    .map((h) => {
+      const rawCandidates = arr(h["candidates"]);
+      const candidates = rawCandidates.map((c) => ({
+        newsEventId: str(c["newsEventId"]),
+        totalScore: num(c["totalScore"]),
+        scoreBreakdown: mapFromAny(c["scoreBreakdown"]) as Record<string, number>,
+        recallMethods: Array.isArray(c["recallMethods"]) ? (c["recallMethods"] as unknown[]).map(str).filter(Boolean) : undefined,
+        entityMatchScore: num(c["entityMatchScore"]),
+        keywordMatchScore: num(c["keywordMatchScore"]),
+        semanticScore: num(c["semanticScore"]),
+        nlcScore: num(c["nlcScore"]),
+        sourceQualityScore: num(c["sourceQualityScore"]),
+        freshnessScore: num(c["freshnessScore"]),
+        newsEvent: (() => {
+          const ne = mapFromAny(c["newsEvent"]);
+          if (!ne["id"]) return undefined;
+          return {
+            id: str(ne["id"]),
+            title: str(ne["title"]),
+            source: str(ne["source"]),
+            summary: str(ne["summary"]) || undefined,
+            eventAt: str(ne["eventAt"]) || undefined,
+            url: str(ne["url"]) || undefined,
+          };
+        })(),
+      }));
+      return {
+        symbol: str(h["symbol"]),
+        name: str(h["name"]),
+        portfolioId: str(h["portfolioId"]) || undefined,
+        portfolioName: str(h["portfolioName"]) || undefined,
+        candidates,
+      };
+    })
+    .filter((h) => h.candidates.length > 0);
+}
+
+function num(value: unknown): number {
+  if (typeof value === "number") return value;
+  if (typeof value === "string") {
+    const n = parseFloat(value);
+    return isNaN(n) ? 0 : n;
+  }
+  return 0;
+}
+
+const RECALL_LABELS: Record<string, string> = {
+  entity_match: "实体匹配",
+  keyword: "关键词",
+  semantic: "语义",
+  news_link: "新闻链接",
+};
+
+const RECALL_TONES: Record<string, "good" | "warn" | "neutral" | "danger"> = {
+  entity_match: "good",
+  keyword: "warn",
+  semantic: "primary" as unknown as "neutral",
+  news_link: "neutral",
+};
+
+function recallMethodLabel(method: string): string {
+  return RECALL_LABELS[method] || method;
+}
+
+function recallMethodTone(method: string): "good" | "warn" | "danger" | "neutral" {
+  return RECALL_TONES[method] || "neutral";
+}
+
+const SCORE_DIMENSION_LABELS: Record<string, string> = {
+  entityMatch: "实体匹配",
+  keywordMatch: "关键词",
+  semantic: "语义",
+  nlc: "新闻链接",
+  sourceQuality: "来源质量",
+  freshness: "新鲜度",
+};
+
+function HoldingNewsCandidatesBlock({ holding }: { holding: HoldingNewsCandidateSummary }) {
+  return (
+    <div className="rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3 text-xs">
+      <div className="flex flex-wrap items-center gap-2">
+        {holding.symbol ? <Pill tone="neutral">{holding.symbol}</Pill> : null}
+        {holding.name ? <strong className="text-sm">{holding.name}</strong> : null}
+        {holding.portfolioName ? <span className="text-[var(--muted)]">· {holding.portfolioName}</span> : null}
+        <span className="text-[var(--muted)]">{holding.candidates.length} 条候选</span>
+      </div>
+      <div className="mt-2 grid gap-2">
+        {holding.candidates.map((c, ci) => (
+          <NewsCandidateItem key={ci} candidate={c} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function NewsCandidateItem({ candidate }: { candidate: HoldingNewsCandidateSummary["candidates"][number] }) {
+  const ne = candidate.newsEvent;
+  const breakdown = candidate.scoreBreakdown;
+  return (
+    <div className="rounded border border-[var(--line)] bg-[var(--surface-soft)] p-2">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          {ne?.title ? (
+            ne?.url ? (
+              <a
+                href={ne.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-medium text-[var(--accent)] hover:underline"
+              >
+                {ne.title}
+              </a>
+            ) : (
+              <span className="font-medium">{ne.title}</span>
+            )
+          ) : (
+            <span className="font-mono text-[var(--muted)]">{candidate.newsEventId}</span>
+          )}
+          {ne?.source ? <span className="ml-2 text-[var(--muted)]">{ne.source}</span> : null}
+          {ne?.eventAt ? <span className="ml-2 text-[var(--muted)]">{formatDate(ne.eventAt)}</span> : null}
+        </div>
+        <Pill tone={candidate.totalScore >= 0.5 ? "good" : candidate.totalScore >= 0.2 ? "warn" : "neutral"}>
+          {candidate.totalScore.toFixed(3)}
+        </Pill>
+      </div>
+      {candidate.recallMethods && candidate.recallMethods.length > 0 ? (
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {candidate.recallMethods.map((m, mi) => (
+            <Pill key={mi} tone={recallMethodTone(m)} className="text-[10px]">
+              {recallMethodLabel(m)}
+            </Pill>
+          ))}
+        </div>
+      ) : null}
+      {breakdown && Object.keys(breakdown).length > 0 ? (
+        <div className="mt-1.5 grid grid-cols-3 gap-x-3 gap-y-0.5 text-[10px] text-[var(--muted-strong)]">
+          {Object.entries(breakdown).map(([key, val]) => (
+            <div key={key} className="flex justify-between">
+              <span>{SCORE_DIMENSION_LABELS[key] || key}</span>
+              <span className="font-mono">{typeof val === "number" ? val.toFixed(3) : String(val)}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="mt-1.5 grid grid-cols-3 gap-x-3 gap-y-0.5 text-[10px] text-[var(--muted-strong)]">
+          {([
+            ["entityMatch", candidate.entityMatchScore],
+            ["keywordMatch", candidate.keywordMatchScore],
+            ["semantic", candidate.semanticScore],
+            ["nlc", candidate.nlcScore],
+            ["sourceQuality", candidate.sourceQualityScore],
+            ["freshness", candidate.freshnessScore],
+          ] as Array<[string, number]>)
+            .filter(([, v]) => v > 0)
+            .map(([k, v]) => (
+              <div key={k} className="flex justify-between">
+                <span>{SCORE_DIMENSION_LABELS[k] || k}</span>
+                <span className="font-mono">{(v as number).toFixed(3)}</span>
+              </div>
+            ))}
+        </div>
+      )}
+      {ne?.summary ? <p className="mt-1 text-[var(--muted-strong)]">{ne.summary}</p> : null}
     </div>
   );
 }
