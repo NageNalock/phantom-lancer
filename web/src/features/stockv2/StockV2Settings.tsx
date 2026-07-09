@@ -56,13 +56,13 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
       ) : null}
 
       <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-sm text-[var(--muted-strong)]">
-        这里配置统一的数据资产维护任务。自动维护固定在每日 23:00 后的低峰窗口运行；每次任务会刷新标的与最新价，并逐只检查日 K。
+        这里配置统一的数据资产维护任务。自动维护固定在每日 23:00 后的低峰窗口运行；每次任务会逐只检查日 K 缺口、基础画像、公告/重大事项和 AI 画像总结触发。
       </div>
 
       {/* 数据资产自动维护 */}
       <Panel
         title="数据资产自动维护"
-        subtitle="同一任务维护标的、最新价和本地日 K 覆盖"
+        subtitle="同一任务维护日 K、基础画像、公告/重大事项和 AI 决策"
       >
         <div className="grid gap-4">
           <Toggle
@@ -78,7 +78,7 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
             onChange={(checked) => update("autoUpdateEnabled", checked)}
           />
 
-          <Field label="数据新鲜度窗口 (秒)" help="不控制自动维护触发时间；只影响统一维护中“标的是否足够新鲜可跳过”的判断，最大按 24 小时生效。">
+          <Field label="数据新鲜度窗口 (秒)" help="不控制自动维护触发时间；旧兼容字段，统一维护会让各子步骤自行判断是否需要补齐。">
             <input
               type="number"
               min={300}

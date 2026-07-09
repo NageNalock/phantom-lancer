@@ -48,8 +48,8 @@ export function StockV2Overview({ data }: { data: AppData }) {
         <div className="grid gap-3">
           <LoopRow done={instrumentTotal > 0} label="标的主数据" value="从新浪列表源和腾讯行情源拉取 A 股股票与场内基金，支持批量打散更新和实时进度。" />
           <LoopRow done={portfolios.length > 0} label="投资组合 / 仓位" value="支持创建多个组合，配置风控参数（风险等级、单票上限、最大回撤），独立管理持仓。" />
-          <LoopRow done={!!settings?.autoUpdateEnabled} label="数据资产自动维护" value="每日 23:00 后低峰窗口统一维护标的、最新价和日 K；设置里的秒数只作为数据新鲜度窗口。" />
-          <LoopRow done={jobs.length > 0} label="更新历史追溯" value="每次更新任务完整记录：触发方式、成功/失败数、耗时、错误信息，可弹窗查看。" />
+          <LoopRow done={!!settings?.autoUpdateEnabled} label="数据资产自动维护" value="每日 23:00 后低峰窗口统一维护日 K、基础画像、公告/重大事项和 AI 画像总结触发。" />
+          <LoopRow done={jobs.length > 0} label="更新历史追溯" value="每次维护任务记录触发方式、分项进度、symbol 明细、耗时和错误摘要。" />
         </div>
       </Panel>
 

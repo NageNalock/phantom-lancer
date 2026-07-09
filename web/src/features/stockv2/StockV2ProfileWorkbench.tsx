@@ -45,7 +45,7 @@ export function StockV2ProfileSettings({
   }
 
   async function handleSave() {
-    await runAction("保存画像配置", async () => {
+    await runAction("保存维护兼容字段", async () => {
       await actions.api("/api/stockv2/settings", {
         method: "PUT",
         body: {
@@ -63,7 +63,7 @@ export function StockV2ProfileSettings({
 
   if (!settings) {
     return (
-      <Panel title="画像配置">
+      <Panel title="维护兼容字段">
         <p className="text-sm text-[var(--muted)]">加载中...</p>
       </Panel>
     );
@@ -71,8 +71,8 @@ export function StockV2ProfileSettings({
 
   return (
     <Panel
-      title="画像配置"
-      subtitle="后台按队列、单标的 AI 轮数和限速更新基础输入；输入变化时才启动画像 AI"
+      title="维护兼容字段"
+      subtitle="这些旧字段仅保留兼容；调度由统一数据资产维护接管"
       actions={
         <div className="flex gap-2">
           <Button
@@ -91,14 +91,14 @@ export function StockV2ProfileSettings({
       }
     >
       <div className="grid gap-4">
-        {dirty ? <Notice tone="warn">当前有未保存的画像配置修改。</Notice> : null}
+        {dirty ? <Notice tone="warn">当前有未保存的维护兼容字段修改。</Notice> : null}
 
         <Toggle
           checked={!!form.baseProfileAutoMaintainEnabled}
           label={
             <div>
-              <div>启用自动画像更新</div>
-              <div className="muted mt-0.5 text-xs">先修复本地索引，再小批量深度更新；基础输入变化时才尝试 AI。</div>
+              <div>兼容开关</div>
+              <div className="muted mt-0.5 text-xs">统一维护任务会逐只刷新基础画像；此开关不再单独驱动调度。</div>
             </div>
           }
           onChange={(checked) => update("baseProfileAutoMaintainEnabled", checked)}
@@ -125,7 +125,7 @@ export function StockV2ProfileSettings({
               onChange={(e) => update("baseProfileDeepUpdateBatchSize", Number(e.target.value))}
             />
           </Field>
-          <Field label="每标的 AI 轮数" help="每只标的在一次自动维护中最多允许几轮画像 AI；不会截断整轮队列。">
+          <Field label="每标的 AI 预算" help="兼容字段；统一维护按本轮 AI 预算控制触发次数。">
             <input
               min={1}
               max={10}
@@ -215,7 +215,7 @@ export function StockV2ProfileRecords({ actions }: { actions: AppActions }) {
     >
       {error ? <Notice tone="danger">加载画像更新记录失败：{error}</Notice> : null}
       {items.length === 0 && !loading ? (
-        <EmptyState title="暂无画像更新记录" body="自动画像更新或单只股票手动更新执行后，会在这里留下任务记录。" />
+        <EmptyState title="暂无画像更新记录" body="统一数据资产维护或单只标的手动维护后，会在这里留下任务记录。" />
       ) : (
         <StockProfileUpdateTasksTable items={items} loading={loading} />
       )}

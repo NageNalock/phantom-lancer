@@ -35,11 +35,14 @@ type Service struct {
 	newsPipelineRun bool
 	quotePruneMu    sync.Mutex
 	lastQuotePrune  time.Time
+	assetBackoffMu  sync.Mutex
+	assetBackoff    map[string]time.Time
 
-	universeSource  *UniverseDataSource
-	dailyBarsSource *DailyBarsSource
-	newsAdapters    map[string]NewsSourceAdapter
-	newsLinker      NewsEventLinker
+	universeSource     *UniverseDataSource
+	dailyBarsSource    *DailyBarsSource
+	announcementSource *AnnouncementSource
+	newsAdapters       map[string]NewsSourceAdapter
+	newsLinker         NewsEventLinker
 
 	// Agent 执行相关
 	agentTaskPool     *agentTaskPool
@@ -48,19 +51,23 @@ type Service struct {
 	agentMCPMu        sync.RWMutex
 	agentMCPServer    *http.Server
 	agentMCPURL       string
+	stockProfileAISem chan struct{}
 }
 
 // NewService 创建新的股票V2服务
 func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Service {
 	pool := newAgentTaskPool(defaultCleanupInterval)
 	svc := &Service{
-		store:           store,
-		log:             log,
-		httpClient:      httpClient,
-		universeSource:  NewUniverseDataSource(nil, httpClient),
-		dailyBarsSource: NewDailyBarsSource(nil, httpClient),
-		newsAdapters:    map[string]NewsSourceAdapter{},
-		agentTaskPool:   pool,
+		store:              store,
+		log:                log,
+		httpClient:         httpClient,
+		universeSource:     NewUniverseDataSource(nil, httpClient),
+		dailyBarsSource:    NewDailyBarsSource(nil, httpClient),
+		announcementSource: NewAnnouncementSource(httpClient),
+		assetBackoff:       map[string]time.Time{},
+		newsAdapters:       map[string]NewsSourceAdapter{},
+		agentTaskPool:      pool,
+		stockProfileAISem:  make(chan struct{}, 1),
 		agentCodexCommand: func(ctx context.Context, args ...string) ([]byte, error) {
 			return exec.CommandContext(ctx, "codex", args...).CombinedOutput()
 		},
@@ -124,7 +131,7 @@ type AgentExecutor interface {
 	ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName string) (*AgentExecutorOutput, error)
 	ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName string) (*AgentExecutorOutput, error)
 	ExecutePortfolioSentinel(ctx context.Context, taskID string, pack PortfolioSentinelContext, modelName string) (*AgentExecutorOutput, error)
-	ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error)
+	ExecuteStockProfileSummary(ctx context.Context, taskID string, pack StockProfileSummaryContext, modelName string) (*AgentExecutorOutput, error)
 }
 
 // WithCodexCLIExecutor 注入 Codex CLI 执行器。
@@ -655,8 +662,8 @@ func parseTransactionExecutedAt(raw string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("invalid executedAt: %q", raw)
 }
 
-// ExecuteUniverseUpdate 执行统一数据资产维护（标的 / 最新价 / 日 K 覆盖）
-func (s *Service) ExecuteUniverseUpdate(ctx context.Context, triggerType, triggerSource string) (StockV2UpdateJob, error) {
+// ExecuteUniverseUpdate 执行统一数据资产维护。
+func (s *Service) ExecuteUniverseUpdate(ctx context.Context, req UniverseUpdateRequest) (StockV2UpdateJob, error) {
 	// 检查是否有正在运行的更新任务
 	recentJobs, err := s.store.ListUpdateJobs(ctx, 1)
 	if err != nil {
@@ -670,8 +677,8 @@ func (s *Service) ExecuteUniverseUpdate(ctx context.Context, triggerType, trigge
 	// 创建更新任务
 	job := StockV2UpdateJob{
 		ID:             generateID(),
-		TriggerType:    triggerType,
-		TriggerSource:  triggerSource,
+		TriggerType:    firstNonEmpty(req.TriggerType, "manual"),
+		TriggerSource:  firstNonEmpty(req.TriggerSource, "user"),
 		Status:         "running",
 		TotalCount:     0,
 		ProcessedCount: 0,
@@ -686,13 +693,13 @@ func (s *Service) ExecuteUniverseUpdate(ctx context.Context, triggerType, trigge
 	}
 
 	// 启动更新任务（异步，使用独立 context，不随请求结束而取消）
-	go s.runUniverseUpdate(context.Background(), job)
+	go s.runUniverseUpdate(context.Background(), job, req)
 
 	return job, nil
 }
 
 // runUniverseUpdate 运行统一数据资产维护任务
-func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
+func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, req UniverseUpdateRequest) {
 	jobID := job.ID
 	defer func() {
 		if r := recover(); r != nil {
@@ -714,8 +721,17 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 		UpdatedAt:   time.Now(),
 	}
 
-	// 获取默认标的代码列表
-	symbols := s.universeSource.GetDefaultSymbols()
+	// 获取本轮维护标的。
+	symbols, selectErr := s.selectAssetMaintenanceSymbols(ctx, req)
+	if selectErr != nil {
+		s.store.UpdateUpdateJob(ctx, StockV2UpdateJob{
+			ID:           jobID,
+			Status:       "failed",
+			EndAt:        time.Now(),
+			ErrorMessage: selectErr.Error(),
+		})
+		return
+	}
 	totalCount := len(symbols)
 
 	// 更新任务总数量
@@ -734,7 +750,8 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 	var failedItems []UpdateFailure
 	successCount := 0
 	processedCount := 0
-	freshnessWindow := s.universeMaintenanceFreshnessWindow()
+	assetStats := AssetMaintenanceStats{}
+	budget := &assetMaintenanceBudget{AIRemaining: defaultAssetMaintenanceAIBudget}
 	flushProgress := func(includeFailedItems bool) {
 		progress.ProcessedCount = processedCount
 		progress.SuccessCount = successCount
@@ -753,6 +770,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 			ProcessedCount: processedCount,
 			SuccessCount:   successCount,
 			FailedCount:    len(failedItems),
+			AssetStats:     assetStats,
 		}
 		if includeFailedItems {
 			update.FailedItems = failedItems
@@ -793,40 +811,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 		progress.CurrentSymbol = batchSymbols[0]
 		s.store.UpdateUpdateProgress(ctx, progress)
 
-		workSymbols := make([]string, 0, len(batchSymbols))
-		batchNow := time.Now()
-		qualityBySymbol, qualityErr := s.dailyBarsQualityForUniverseBatch(ctx, batchSymbols)
-		if qualityErr != nil && s.log != nil {
-			s.log.Warn("batch stock data asset daily bar quality failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "batch", batch+1, "symbol_count", len(batchSymbols), "error", safelog.Text(qualityErr.Error(), 240))
-		}
-		for _, sym := range batchSymbols {
-			quality, hasQuality := qualityBySymbol[sym]
-			if qualityErr != nil {
-				hasQuality = false
-			}
-			skip, err := s.shouldSkipFreshUniverseSymbol(ctx, sym, batchNow, freshnessWindow, quality, hasQuality)
-			if err != nil {
-				if s.log != nil {
-					s.log.Warn("check stock data asset freshness failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol", sym, "freshness_window", freshnessWindow.String(), "error", safelog.Text(err.Error(), 240))
-				}
-				workSymbols = append(workSymbols, sym)
-				continue
-			}
-			if skip {
-				processedCount++
-				successCount++
-				progress.CurrentBatchProgress++
-				progress.CurrentSymbol = sym
-				continue
-			}
-			workSymbols = append(workSymbols, sym)
-		}
-		if progress.CurrentBatchProgress > 0 {
-			flushProgress(false)
-		}
-		if len(workSymbols) == 0 {
-			continue
-		}
+		workSymbols := batchSymbols
 
 		// 获取这批股票数据
 		instruments, err := s.universeSource.FetchStockUniverse(ctx, workSymbols)
@@ -854,76 +839,34 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 			resultMap[inst.Symbol] = inst
 		}
 
-		// 保存股票数据，并把历史日 K 覆盖纳入同一个数据资产维护任务。
+		// 保存股票数据，并把日 K、基础画像、公告和 AI 决策纳入同一个 per-symbol 管线。
 		batchProcessed := progress.CurrentBatchProgress
-		pendingDailyBars := make([]pendingUniverseDailyBars, 0, universeDailyBarsFlushSymbols)
-		flushPendingDailyBars := func() bool {
-			if len(pendingDailyBars) == 0 {
-				return false
-			}
-			totalBars := 0
-			for _, pending := range pendingDailyBars {
-				totalBars += len(pending.Bars)
-			}
-			bars := make([]StockV2DailyBar, 0, totalBars)
-			for _, pending := range pendingDailyBars {
-				bars = append(bars, pending.Bars...)
-			}
-			if err := s.store.UpsertDailyBars(ctx, bars); err != nil {
-				if s.log != nil {
-					s.log.Error("stock data asset maintenance daily bars batch save failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol_count", len(pendingDailyBars), "bar_count", len(bars), "error", safelog.Text(err.Error(), 300))
-				}
-				for _, pending := range pendingDailyBars {
-					failedItems = append(failedItems, UpdateFailure{
-						Symbol: pending.Instrument.Symbol,
-						Reason: safelog.Text("daily bars save: "+truncateDailyBarErr(err.Error()), 240),
-					})
-				}
-			} else {
-				successCount += len(pendingDailyBars)
-			}
-			pendingDailyBars = pendingDailyBars[:0]
-			return true
-		}
 		for _, sym := range workSymbols {
 			progress.CurrentSymbol = sym
 			failedBefore := len(failedItems)
-			fetchedDailyBars := false
 			inst, ok := resultMap[sym]
 			if !ok {
 				failedItems = append(failedItems, UpdateFailure{
 					Symbol: sym,
 					Reason: "no data from source",
 				})
-			} else if err := s.upsertInstrumentWithProfile(ctx, inst); err != nil {
-				if s.log != nil {
-					s.log.Error("stock data asset maintenance save instrument failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol", inst.Symbol, "market", inst.Market, "instrument_type", inst.InstrumentType, "error", safelog.Text(err.Error(), 300))
-				}
-				failedItems = append(failedItems, UpdateFailure{
-					Symbol: sym,
-					Reason: safelog.Text(err.Error(), 240),
-				})
 			} else {
-				var err error
-				var bars []StockV2DailyBar
-				quality, hasQuality := qualityBySymbol[inst.Symbol]
-				fetchedDailyBars, bars, err = s.fetchDailyBarsForInstrumentWithQuality(ctx, inst, quality, hasQuality && qualityErr == nil)
-				if err != nil {
+				result, maintainErr := s.maintainAssetForInstrument(ctx, inst, assetMaintenanceOptions{
+					JobID:         jobID,
+					TriggerSource: job.TriggerSource,
+					RequestedBy:   "system",
+					ForceAI:       req.ForceAI,
+					Budget:        budget,
+				})
+				assetStats = mergeAssetMaintenanceStats(assetStats, result.Item)
+				if maintainErr != nil {
 					if s.log != nil {
-						s.log.Error("stock data asset maintenance daily bars failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol", inst.Symbol, "market", inst.Market, "instrument_type", inst.InstrumentType, "error", safelog.Text(err.Error(), 300))
+						s.log.Warn("stock data asset maintenance item partial", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol", inst.Symbol, "market", inst.Market, "instrument_type", inst.InstrumentType, "error", safelog.Text(maintainErr.Error(), 300))
 					}
 					failedItems = append(failedItems, UpdateFailure{
 						Symbol: sym,
-						Reason: safelog.Text("daily bars: "+truncateDailyBarErr(err.Error()), 240),
+						Reason: safelog.Text(maintainErr.Error(), 240),
 					})
-				} else if fetchedDailyBars {
-					pendingDailyBars = append(pendingDailyBars, pendingUniverseDailyBars{
-						Instrument: inst,
-						Bars:       bars,
-					})
-					if len(pendingDailyBars) >= universeDailyBarsFlushSymbols {
-						_ = flushPendingDailyBars()
-					}
 				} else {
 					successCount++
 				}
@@ -934,14 +877,11 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 			progress.CurrentBatchProgress = batchProcessed
 			flushProgress(len(failedItems) != failedBefore)
 
-			if fetchedDailyBars {
+			if resultMap[sym].Symbol != "" {
 				if err := sleepJitter(ctx, 80*time.Millisecond, 60*time.Millisecond); err != nil {
 					return
 				}
 			}
-		}
-		if flushPendingDailyBars() {
-			flushProgress(true)
 		}
 
 		// 批间延迟（避免风控）
@@ -963,6 +903,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 		FailedCount:    len(failedItems),
 		EndAt:          endAt,
 		FailedItems:    failedItems,
+		AssetStats:     assetStats,
 	})
 	if len(failedItems) > 0 && s.log != nil {
 		s.log.Warn("stock data asset maintenance completed with item failures", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "total_count", totalCount, "processed_count", processedCount, "success_count", successCount, "failed_count", len(failedItems), "failure_sample", stockV2FailureSample(failedItems, 5))
@@ -1002,20 +943,37 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 			return false, nil, err
 		}
 	}
-	if !dailyBarsNeedsMaintenance(quality) {
+	start, end := dailyBarRangeStartEnd(DailyBarRange1Y, time.Now())
+	startTime, err := time.Parse("2006-01-02", start)
+	if err != nil {
+		return false, nil, err
+	}
+	endTime, err := time.Parse("2006-01-02", end)
+	if err != nil {
+		return false, nil, err
+	}
+	dates, err := s.store.GetDailyBarDates(ctx, inst.Symbol, DailyBarAdjustedNone, start, end)
+	if err != nil {
+		return false, nil, err
+	}
+	ranges := planDailyBarMissingRanges(dates, startTime, endTime)
+	if len(ranges) == 0 {
 		return false, nil, nil
 	}
-
-	start, end := dailyBarRangeStartEnd(DailyBarRange1Y, time.Now())
-	if quality.HasData && quality.Meets250 && quality.Stale && quality.LatestDate != "" {
-		start = quality.LatestDate
+	bars := make([]StockV2DailyBar, 0, 256)
+	for _, r := range ranges {
+		fetched, fetchErr := s.dailyBarsSource.FetchDailyBars(ctx, inst.Symbol, inst.Market, r.Start, r.End, DailyBarAdjustedNone, 1800)
+		if fetchErr != nil {
+			return true, nil, fetchErr
+		}
+		for i := range fetched {
+			fetched[i].Symbol = inst.Symbol
+		}
+		bars = append(bars, fetched...)
 	}
-	bars, err := s.dailyBarsSource.FetchDailyBars(ctx, inst.Symbol, inst.Market, start, end, DailyBarAdjustedNone, 1800)
-	if err != nil {
-		return true, nil, err
-	}
-	for i := range bars {
-		bars[i].Symbol = inst.Symbol
+	_ = s.enrichDailyBarsWithDataFacets(ctx, inst, bars)
+	if len(bars) == 0 && !dailyBarsNeedsMaintenance(quality) {
+		return false, nil, nil
 	}
 	return true, bars, nil
 }
@@ -1315,12 +1273,8 @@ func (s *Service) StartBackground(ctx context.Context) {
 		s.runRawNewsRetentionScheduler(bgCtx)
 	}()
 
-	// base profile 自动维护：只维护确定性画像，不触发全市场 AI。
-	s.bgWg.Add(1)
-	go func() {
-		defer s.bgWg.Done()
-		s.runBaseProfileMaintenanceScheduler(bgCtx)
-	}()
+	// Legacy base-profile scheduler is intentionally not started; unified asset
+	// maintenance now owns base profile refresh and AI summary decisions.
 
 	// embedding asset 维护复用现有资产表和模型配置，不引入独立任务队列。
 	s.bgWg.Add(1)
@@ -1406,7 +1360,7 @@ func (s *Service) checkAndExecuteScheduledUpdateAt(ctx context.Context, now time
 	if s.log != nil {
 		s.log.Info("executing scheduled stock data asset maintenance", "trigger_type", "scheduled", "trigger_source", "auto-updater", "schedule", "daily_23:00", "slot_start", slotStart.Format(time.RFC3339Nano), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano))
 	}
-	if _, err := s.ExecuteUniverseUpdate(ctx, "scheduled", "auto-updater"); err != nil {
+	if _, err := s.ExecuteUniverseUpdate(ctx, UniverseUpdateRequest{TriggerType: "scheduled", TriggerSource: "auto-updater"}); err != nil {
 		if s.log != nil {
 			s.log.Error("scheduled update failed", "trigger_type", "scheduled", "trigger_source", "auto-updater", "schedule", "daily_23:00", "slot_start", slotStart.Format(time.RFC3339Nano), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 300))
 		}

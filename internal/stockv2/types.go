@@ -121,19 +121,20 @@ type TransactionResult struct {
 
 // StockV2UpdateJob 更新任务记录
 type StockV2UpdateJob struct {
-	ID             string          `json:"id"`
-	TriggerType    string          `json:"triggerType"`   // manual, scheduled
-	TriggerSource  string          `json:"triggerSource"` // user, system
-	Status         string          `json:"status"`        // running, completed, failed, cancelled
-	TotalCount     int             `json:"totalCount"`
-	ProcessedCount int             `json:"processedCount"`
-	SuccessCount   int             `json:"successCount"`
-	FailedCount    int             `json:"failedCount"`
-	FailedItems    []UpdateFailure `json:"failedItems,omitempty"` // 失败详情
-	StartAt        time.Time       `json:"startAt"`
-	EndAt          time.Time       `json:"endAt"`
-	ErrorMessage   string          `json:"errorMessage,omitempty"`
-	CreatedAt      time.Time       `json:"createdAt"`
+	ID             string                `json:"id"`
+	TriggerType    string                `json:"triggerType"`   // manual, scheduled
+	TriggerSource  string                `json:"triggerSource"` // user, system
+	Status         string                `json:"status"`        // running, completed, failed, cancelled
+	TotalCount     int                   `json:"totalCount"`
+	ProcessedCount int                   `json:"processedCount"`
+	SuccessCount   int                   `json:"successCount"`
+	FailedCount    int                   `json:"failedCount"`
+	FailedItems    []UpdateFailure       `json:"failedItems,omitempty"` // 失败详情
+	AssetStats     AssetMaintenanceStats `json:"assetStats,omitempty"`
+	StartAt        time.Time             `json:"startAt"`
+	EndAt          time.Time             `json:"endAt"`
+	ErrorMessage   string                `json:"errorMessage,omitempty"`
+	CreatedAt      time.Time             `json:"createdAt"`
 }
 
 // UpdateFailure 单只股票更新失败记录
@@ -262,6 +263,8 @@ type UniverseUpdateRequest struct {
 	TriggerType   string   `json:"triggerType"`   // manual, scheduled
 	TriggerSource string   `json:"triggerSource"` // user, system
 	Symbols       []string `json:"symbols"`       // 可选，为空则更新全部
+	MaxSymbols    int      `json:"maxSymbols,omitempty"`
+	ForceAI       bool     `json:"forceAi,omitempty"`
 }
 
 // UniverseUpdateResponse 更新响应

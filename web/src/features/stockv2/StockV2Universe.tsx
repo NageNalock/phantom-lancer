@@ -1,9 +1,9 @@
 import { ArrowClockwise, CaretLeft, CaretRight, Clock, ClockCounterClockwise, MagnifyingGlass, Plus, X } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import type { AppActions } from "../../app/App";
-import type { AppData, StockV2DailyBarsQuality, StockV2Instrument, StockV2StockProfileSummary, StockV2UpdateJob, StockV2UniverseUpdateRequest } from "../../app/types";
+import type { AppData, StockV2Announcement, StockV2AssetMaintenanceItem, StockV2AssetSummary, StockV2Instrument, StockV2UpdateJob, StockV2UniverseUpdateRequest } from "../../app/types";
 import { friendlyError } from "../../api/client";
-import { Button, Field, Panel, Pill } from "../../components/ui";
+import { Button, Field, Panel, Pill, SubTabs } from "../../components/ui";
 import {
   stockV2DailyBarsQualityLabel,
   stockV2DailyBarsQualityTone,
@@ -14,16 +14,15 @@ import {
 } from "../../domain/labels";
 import { StockV2DailyBarsMaintenance } from "./StockV2DailyBars";
 import { StockV2InstrumentDetail } from "./StockV2InstrumentDetail";
-import { StockV2ProfileRecords, StockV2ProfileSettings } from "./StockV2ProfileWorkbench";
+import { StockV2ProfileRecords } from "./StockV2ProfileWorkbench";
 import { StockV2Settings } from "./StockV2Settings";
 
 const PAGE_SIZE = 50;
 const SUPPLEMENT_CACHE_TTL_MS = 60_000;
-type MasterDataView = "instruments" | "maintenance" | "maintenanceSettings" | "profileSettings" | "profileRecords";
+type MasterDataView = "overview" | "maintenance" | "maintenanceSettings" | "announcements" | "profileRecords";
 type SupplementCacheEntry<T> = { value: T; expiresAt: number };
 
-const profileSummaryCache = new Map<string, SupplementCacheEntry<StockV2StockProfileSummary>>();
-const dailyQualityCache = new Map<string, SupplementCacheEntry<StockV2DailyBarsQuality>>();
+const assetSummaryCache = new Map<string, SupplementCacheEntry<StockV2AssetSummary>>();
 
 function readFreshCache<T>(cache: Map<string, SupplementCacheEntry<T>>, key: string, now = Date.now()): T | undefined {
   const item = cache.get(key);
@@ -40,8 +39,7 @@ function writeFreshCache<T>(cache: Map<string, SupplementCacheEntry<T>>, key: st
 }
 
 function clearInstrumentSupplementCache() {
-  profileSummaryCache.clear();
-  dailyQualityCache.clear();
+  assetSummaryCache.clear();
 }
 
 function uniqueSymbols(items: StockV2Instrument[]) {
@@ -102,11 +100,10 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   const [marketFilter, setMarketFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [profileStatusFilter, setProfileStatusFilter] = useState("");
-  const [masterDataView, setMasterDataView] = useState<MasterDataView>("instruments");
+  const [masterDataView, setMasterDataView] = useState<MasterDataView>("overview");
   const [addHolding, setAddHolding] = useState<{ inst: StockV2Instrument } | null>(null);
   const [selectedInst, setSelectedInst] = useState<StockV2Instrument | null>(null);
-  const [profileSummaries, setProfileSummaries] = useState<Record<string, StockV2StockProfileSummary>>({});
-  const [dailyQualities, setDailyQualities] = useState<Record<string, StockV2DailyBarsQuality>>({});
+  const [assetSummaries, setAssetSummaries] = useState<Record<string, StockV2AssetSummary>>({});
   const [supplementLoading, setSupplementLoading] = useState(false);
   const supplementRequestRef = useRef(0);
 
@@ -185,69 +182,44 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
     const requestID = ++supplementRequestRef.current;
     const symbols = uniqueSymbols(items);
     if (symbols.length === 0) {
-      setProfileSummaries({});
-      setDailyQualities({});
+      setAssetSummaries({});
       return;
     }
 
-    const cachedProfiles: Record<string, StockV2StockProfileSummary> = {};
-    const cachedQualities: Record<string, StockV2DailyBarsQuality> = {};
-    const missingProfileSymbols: string[] = [];
-    const missingQualitySymbols: string[] = [];
+    const cachedSummaries: Record<string, StockV2AssetSummary> = {};
+    const missingSymbols: string[] = [];
     const now = Date.now();
 
     for (const symbol of symbols) {
-      const profile = readFreshCache(profileSummaryCache, symbol, now);
-      if (profile) {
-        cachedProfiles[symbol] = profile;
+      const summary = readFreshCache(assetSummaryCache, symbol, now);
+      if (summary) {
+        cachedSummaries[symbol] = summary;
       } else {
-        missingProfileSymbols.push(symbol);
-      }
-      const quality = readFreshCache(dailyQualityCache, `none:${symbol}`, now);
-      if (quality) {
-        cachedQualities[symbol] = quality;
-      } else {
-        missingQualitySymbols.push(symbol);
+        missingSymbols.push(symbol);
       }
     }
 
-    setProfileSummaries(cachedProfiles);
-    setDailyQualities(cachedQualities);
-    if (missingProfileSymbols.length === 0 && missingQualitySymbols.length === 0) {
+    setAssetSummaries(cachedSummaries);
+    if (missingSymbols.length === 0) {
       setSupplementLoading(false);
       return;
     }
 
     setSupplementLoading(true);
     try {
-      const [profilesRes, qualitiesRes] = await Promise.all([
-        missingProfileSymbols.length > 0
-          ? actions.api<{ items?: Record<string, StockV2StockProfileSummary> }>(
-              `/api/stockv2/profiles/summaries?symbols=${encodeURIComponent(missingProfileSymbols.join(","))}`,
-            )
-          : Promise.resolve({ items: {} }),
-        missingQualitySymbols.length > 0
-          ? actions.api<{ items?: Record<string, StockV2DailyBarsQuality> }>(
-              `/api/stockv2/history/daily/qualities?adjusted=none&symbols=${encodeURIComponent(missingQualitySymbols.join(","))}`,
-            )
-          : Promise.resolve({ items: {} }),
-      ]);
-      const profiles = profilesRes.items ?? {};
-      const qualities = qualitiesRes.items ?? {};
-      for (const [symbol, profile] of Object.entries(profiles)) {
-        writeFreshCache(profileSummaryCache, symbol, profile);
-      }
-      for (const [symbol, quality] of Object.entries(qualities)) {
-        writeFreshCache(dailyQualityCache, `none:${symbol}`, quality);
+      const res = await actions.api<{ items?: Record<string, StockV2AssetSummary> }>(
+        `/api/stockv2/assets/summaries?symbols=${encodeURIComponent(missingSymbols.join(","))}`,
+      );
+      const summaries = res.items ?? {};
+      for (const [symbol, summary] of Object.entries(summaries)) {
+        writeFreshCache(assetSummaryCache, symbol, summary);
       }
       if (requestID === supplementRequestRef.current) {
-        setProfileSummaries({ ...cachedProfiles, ...profiles });
-        setDailyQualities({ ...cachedQualities, ...qualities });
+        setAssetSummaries({ ...cachedSummaries, ...summaries });
       }
     } catch {
       if (requestID === supplementRequestRef.current) {
-        setProfileSummaries(cachedProfiles);
-        setDailyQualities(cachedQualities);
+        setAssetSummaries(cachedSummaries);
       }
     } finally {
       if (requestID === supplementRequestRef.current) {
@@ -307,29 +279,17 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
 
   return (
     <div className="grid gap-4">
-      <div className="flex flex-wrap gap-1 border-b border-[var(--line)] pb-2">
-        {[
-          { id: "instruments" as const, label: "数据资产" },
-          { id: "maintenance" as const, label: "维护任务" },
-          { id: "maintenanceSettings" as const, label: "维护配置" },
-          { id: "profileSettings" as const, label: "画像配置" },
-          { id: "profileRecords" as const, label: "画像记录" },
-        ].map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            onClick={() => setMasterDataView(tab.id)}
-            className={[
-              "rounded-md px-3 py-1.5 text-sm transition",
-              masterDataView === tab.id
-                ? "bg-[var(--surface-strong)] font-medium text-[var(--text)]"
-                : "text-[var(--muted-strong)] hover:bg-[var(--surface-soft)]",
-            ].join(" ")}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
+      <SubTabs
+        activeId={masterDataView}
+        onChange={(id) => setMasterDataView(id as MasterDataView)}
+        tabs={[
+          { id: "overview", label: "资产总览" },
+          { id: "maintenance", label: "维护任务" },
+          { id: "maintenanceSettings", label: "维护配置" },
+          { id: "announcements", label: "公告 / 重大事项" },
+          { id: "profileRecords", label: "画像记录" },
+        ]}
+      />
 
       {masterDataView === "maintenance" ? (
         <StockV2MaintenanceTasks
@@ -344,11 +304,9 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
       {masterDataView === "maintenanceSettings" ? (
         <StockV2Settings actions={actions} data={data} runAction={runAction} />
       ) : null}
-      {masterDataView === "profileSettings" ? (
-        <StockV2ProfileSettings actions={actions} data={data} runAction={runAction} />
-      ) : null}
+      {masterDataView === "announcements" ? <StockV2AnnouncementsPanel actions={actions} /> : null}
       {masterDataView === "profileRecords" ? <StockV2ProfileRecords actions={actions} /> : null}
-      {masterDataView !== "instruments" ? null : (
+      {masterDataView !== "overview" ? null : (
       <>
       {/* 进度条区域：始终展示占位，运行时有动效 */}
       <Panel
@@ -475,8 +433,9 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
                     <th className="py-2 pr-4 font-medium">市场</th>
                     <th className="py-2 pr-4 font-medium">类型</th>
                     <th className="py-2 pr-4 font-medium">日 K 覆盖</th>
-                    <th className="py-2 pr-4 font-medium">画像摘要</th>
-                    <th className="py-2 pr-4 font-medium">画像状态</th>
+                    <th className="py-2 pr-4 font-medium">基础画像</th>
+                    <th className="py-2 pr-4 font-medium">公告 / 重大事项</th>
+                    <th className="py-2 pr-4 font-medium">AI 状态</th>
                     <th className="py-2 pr-4 font-medium">状态</th>
                     <th className="py-2 pr-4 font-medium">更新时间</th>
                     <th className="py-2 pr-2 text-right font-medium">操作</th>
@@ -489,8 +448,7 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
                       inst={inst}
                       onAdd={() => setAddHolding({ inst })}
                       onClick={() => setSelectedInst(inst)}
-                      dailyQuality={dailyQualities[inst.symbol]}
-                      profile={profileSummaries[inst.symbol]}
+                      summary={assetSummaries[inst.symbol]}
                       supplementLoading={supplementLoading}
                     />
                   ))}
@@ -640,17 +598,34 @@ function StockV2MaintenanceTasks({
   onTriggerUpdate: () => Promise<void>;
 }) {
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
+  const [jobItems, setJobItems] = useState<Record<string, StockV2AssetMaintenanceItem[]>>({});
+  const [itemsLoading, setItemsLoading] = useState(false);
 
-  function toggleFailed(job: StockV2UpdateJob) {
-    if (!job.failedItems?.length) return;
-    setExpandedJobId(expandedJobId === job.id ? null : job.id);
+  async function toggleJob(job: StockV2UpdateJob) {
+    if (expandedJobId === job.id) {
+      setExpandedJobId(null);
+      return;
+    }
+    setExpandedJobId(job.id);
+    if (jobItems[job.id]) return;
+    setItemsLoading(true);
+    try {
+      const res = await actions.api<{ items?: StockV2AssetMaintenanceItem[] }>(
+        `/api/stockv2/update/jobs/${encodeURIComponent(job.id)}/items?limit=300`,
+      );
+      setJobItems((prev) => ({ ...prev, [job.id]: res.items ?? [] }));
+    } catch (e) {
+      actions.setToast(`加载维护明细失败：${friendlyError(e)}`, "danger");
+    } finally {
+      setItemsLoading(false);
+    }
   }
 
   return (
     <div className="grid gap-4">
       <Panel
         title="数据资产维护任务"
-        subtitle="全量标的扫描 + 覆盖式 upsert + 按需日 K 补拉，失败项不会删除本地旧数据"
+        subtitle="日 K 缺口补齐、基础画像、公告/重大事项和 AI 总结触发的统一管线"
         actions={
           <Button tone="primary" onClick={() => void runAction("触发数据资产维护", onTriggerUpdate)} disabled={!!runningJob}>
             <ArrowClockwise size={14} className="mr-1.5" />
@@ -687,34 +662,81 @@ function StockV2MaintenanceTasks({
                       <span className={job.failedCount > 0 ? "text-[var(--danger)]" : ""}>
                         失败{" "}
                         {job.failedCount > 0 && job.failedItems?.length ? (
-                          <button
-                            className="font-semibold underline decoration-dotted underline-offset-2"
-                            onClick={() => toggleFailed(job)}
-                            type="button"
-                          >
-                            {job.failedCount}
-                          </button>
+                          <button className="font-semibold underline decoration-dotted underline-offset-2" onClick={() => void toggleJob(job)} type="button">{job.failedCount}</button>
                         ) : (
                           job.failedCount
                         )}
                       </span>
                       {job.endAt ? <span>耗时 {formatDuration(job.startAt, job.endAt)}</span> : null}
                     </div>
+                    {job.assetStats ? (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        <Pill tone="neutral">日 K {job.assetStats.dailyBarFetched}</Pill>
+                        <Pill tone="neutral">基础更新 {job.assetStats.baseProfileUpdated}</Pill>
+                        <Pill tone={job.assetStats.majorAnnouncementsNew > 0 ? "warn" : "neutral"}>重大 {job.assetStats.majorAnnouncementsNew}</Pill>
+                        <Pill tone="neutral">AI {job.assetStats.aiCalled}</Pill>
+                      </div>
+                    ) : null}
                   </div>
-                  <span className="shrink-0 text-xs text-[var(--muted)]">{formatDateTime(job.startAt)}</span>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span className="text-xs text-[var(--muted)]">{formatDateTime(job.startAt)}</span>
+                    <Button onClick={() => void toggleJob(job)}>{expandedJobId === job.id ? "收起" : "明细"}</Button>
+                  </div>
                 </div>
 
-                {expandedJobId === job.id && job.failedItems?.length ? (
+                {expandedJobId === job.id ? (
                   <div className="mt-3 rounded border border-[var(--line)] bg-[var(--surface-soft)] p-3">
-                    <div className="mb-1 text-xs font-medium text-[var(--danger)]">失败项（{job.failedItems.length} 只）</div>
-                    <div className="grid max-h-40 gap-1 overflow-y-auto">
-                      {job.failedItems.map((item, idx) => (
-                        <div className="flex gap-2 text-xs" key={idx}>
-                          <span className="font-mono text-[var(--text)]">{item.symbol}</span>
-                          <span className="truncate text-[var(--muted-strong)]">{item.reason}</span>
-                        </div>
-                      ))}
-                    </div>
+                    {itemsLoading && !jobItems[job.id] ? (
+                      <div className="py-4 text-sm text-[var(--muted)]">读取维护明细...</div>
+                    ) : jobItems[job.id]?.length ? (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b border-[var(--line)] text-left text-[var(--muted)]">
+                              <th className="py-2 pr-3 font-medium">标的</th>
+                              <th className="py-2 pr-3 font-medium">日 K</th>
+                              <th className="py-2 pr-3 font-medium">基础画像</th>
+                              <th className="py-2 pr-3 font-medium">公告</th>
+                              <th className="py-2 pr-3 font-medium">重大</th>
+                              <th className="py-2 pr-3 font-medium">AI</th>
+                              <th className="py-2 pr-3 font-medium">耗时</th>
+                              <th className="py-2 pr-0 font-medium">错误</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {jobItems[job.id].map((item) => (
+                              <tr className="border-b border-[var(--line-soft)] last:border-b-0" key={item.id}>
+                                <td className="py-2 pr-3 font-mono text-[var(--text)]">{item.symbol}</td>
+                                <td className="py-2 pr-3">{item.dailyBarStatus || "-"} {item.dailyBarFetched ? `+${item.dailyBarFetched}` : ""}</td>
+                                <td className="py-2 pr-3">{item.baseProfileStatus || "-"}{item.baseProfileChanged ? " · changed" : ""}</td>
+                                <td className="py-2 pr-3">{item.announcementsNew}</td>
+                                <td className="py-2 pr-3">{item.majorAnnouncementsNew}</td>
+                                <td className="py-2 pr-3">
+                                  {item.agentRunId ? (
+                                    <span className="font-mono">{item.aiDecision || "called"}</span>
+                                  ) : (
+                                    item.aiDecision || "-"
+                                  )}
+                                </td>
+                                <td className="py-2 pr-3">{formatMs(item.durationMs)}</td>
+                                <td className="max-w-[280px] truncate py-2 pr-0 text-[var(--danger)]">{item.errorMessage || ""}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : job.failedItems?.length ? (
+                      <div className="grid max-h-40 gap-1 overflow-y-auto">
+                        {job.failedItems.map((item, idx) => (
+                          <div className="flex gap-2 text-xs" key={idx}>
+                            <span className="font-mono text-[var(--text)]">{item.symbol}</span>
+                            <span className="truncate text-[var(--muted-strong)]">{item.reason}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="py-3 text-sm text-[var(--muted)]">暂无明细记录。</div>
+                    )}
                   </div>
                 ) : null}
 
@@ -734,26 +756,146 @@ function StockV2MaintenanceTasks({
   );
 }
 
+function StockV2AnnouncementsPanel({ actions }: { actions: AppActions }) {
+  const [items, setItems] = useState<StockV2Announcement[]>([]);
+  const [symbol, setSymbol] = useState("");
+  const [majorOnly, setMajorOnly] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function loadAnnouncements() {
+    const params = new URLSearchParams();
+    params.set("limit", "80");
+    if (symbol.trim()) params.set("symbol", symbol.trim());
+    if (majorOnly) params.set("majorOnly", "true");
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await actions.api<{ items?: StockV2Announcement[] }>(`/api/stockv2/announcements?${params.toString()}`);
+      setItems(res.items ?? []);
+    } catch (e) {
+      setError(friendlyError(e));
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadAnnouncements();
+    }, symbol.trim() ? 250 : 0);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, majorOnly]);
+
+  return (
+    <Panel
+      title="公告 / 重大事项"
+      subtitle="独立公告资产表，按来源、标的和内容 hash 去重"
+      actions={
+        <Button onClick={() => void loadAnnouncements()} disabled={loading}>
+          <ArrowClockwise size={14} className="mr-1.5" />
+          刷新
+        </Button>
+      }
+    >
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <div className="relative w-[260px] max-w-full">
+          <MagnifyingGlass size={15} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
+          <input
+            type="search"
+            value={symbol}
+            onChange={(event) => setSymbol(event.target.value)}
+            placeholder="按标的代码过滤"
+            className="w-full rounded border border-[var(--line)] bg-[var(--surface)] py-2 pl-8 pr-3 text-sm text-[var(--text)] focus:border-[var(--accent)] focus:outline-none"
+          />
+        </div>
+        <label className="flex items-center gap-2 text-sm text-[var(--muted-strong)]">
+          <input
+            type="checkbox"
+            checked={majorOnly}
+            onChange={(event) => setMajorOnly(event.target.checked)}
+          />
+          仅重大事项
+        </label>
+      </div>
+      {error ? (
+        <div className="rounded border border-[rgba(207,31,50,0.22)] bg-[var(--danger-soft)] px-3 py-2 text-sm text-[var(--danger)]">
+          {error}
+        </div>
+      ) : loading && items.length === 0 ? (
+        <div className="py-8 text-center text-sm text-[var(--muted)]">读取中...</div>
+      ) : items.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-[var(--line)] bg-[var(--surface-soft)] p-6 text-center text-sm text-[var(--muted)]">
+          暂无公告记录。维护单只标的或运行数据资产维护后会在这里出现。
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-[var(--line)] text-left text-xs text-[var(--muted)]">
+                <th className="py-2 pr-4 font-medium">标的</th>
+                <th className="py-2 pr-4 font-medium">发布日期</th>
+                <th className="py-2 pr-4 font-medium">标题</th>
+                <th className="py-2 pr-4 font-medium">分类</th>
+                <th className="py-2 pr-4 font-medium">重大事项</th>
+                <th className="py-2 pr-2 text-right font-medium">来源</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item) => (
+                <tr className="border-b border-[var(--line-soft)] last:border-b-0" key={item.id}>
+                  <td className="py-2 pr-4 font-mono">{item.symbol}</td>
+                  <td className="py-2 pr-4 text-xs text-[var(--muted)]">{formatCompactTime(item.publishedAt || item.fetchedAt)}</td>
+                  <td className="max-w-[520px] py-2 pr-4">
+                    <span className="block truncate">{item.title}</span>
+                  </td>
+                  <td className="py-2 pr-4 text-xs text-[var(--muted-strong)]">{item.category || "-"}</td>
+                  <td className="py-2 pr-4">
+                    <Pill tone={item.major ? "warn" : "neutral"}>{item.major ? item.majorReason || "重大" : "普通"}</Pill>
+                  </td>
+                  <td className="py-2 pl-2 text-right">
+                    {item.pdfUrl ? (
+                      <a className="text-xs text-[var(--accent)] hover:underline" href={item.pdfUrl} rel="noreferrer" target="_blank">
+                        PDF
+                      </a>
+                    ) : (
+                      <span className="text-xs text-[var(--muted)]">{item.source}</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 function StockRow({
-  dailyQuality,
   inst,
   onAdd,
   onClick,
-  profile,
+  summary,
   supplementLoading,
 }: {
-  dailyQuality?: StockV2DailyBarsQuality;
   inst: StockV2Instrument;
   onAdd: () => void;
   onClick?: () => void;
-  profile?: StockV2StockProfileSummary;
+  summary?: StockV2AssetSummary;
   supplementLoading?: boolean;
 }) {
   const marketLabel = { SH: "沪市", SZ: "深市", BJ: "北市" }[inst.market] || inst.market;
   const statusTone = inst.status === "active" ? "good" : "neutral";
+  const dailyQuality = summary?.dailyBarQuality;
+  const profile = summary?.profileSummary;
   const profileTone = profile?.status === "ready" ? "good" : profile?.status === "partial" ? "warn" : "neutral";
   const aiTone = profile?.aiProfileStatus === "ready" ? "good" : profile?.aiProfileStatus === "failed" ? "danger" : "neutral";
   const dailyTone = stockV2DailyBarsQualityTone(dailyQuality);
+  const majorCount = summary?.majorAnnouncementCount ?? 0;
+  const announcementCount = summary?.announcementCount ?? 0;
 
   return (
     <tr
@@ -786,13 +928,24 @@ function StockRow({
           </span>
         </div>
       </td>
-      <td className="max-w-[360px] py-2 pr-4 text-xs text-[var(--muted-strong)]">
+      <td className="max-w-[320px] py-2 pr-4 text-xs text-[var(--muted-strong)]">
         <span className="block max-h-10 overflow-hidden leading-5">{profile?.businessSummary || (supplementLoading ? "读取中..." : "-")}</span>
+      </td>
+      <td className="py-2 pr-4">
+        <div className="grid gap-1">
+          <div className="flex flex-wrap gap-1">
+            <Pill tone={announcementCount > 0 ? "neutral" : "neutral"}>{supplementLoading && !summary ? "读取中" : `公告 ${announcementCount}`}</Pill>
+            <Pill tone={majorCount > 0 ? "warn" : "neutral"}>重大 {majorCount}</Pill>
+          </div>
+          <span className="block max-w-[260px] truncate text-xs text-[var(--muted)]">
+            {summary?.latestAnnouncementTitle || "暂无公告记录"}
+          </span>
+        </div>
       </td>
       <td className="py-2 pr-4">
         <div className="flex flex-wrap gap-1">
           <Pill tone={profile ? profileTone : "neutral"}>
-            {profile ? profile.status === "ready" ? "基础" : profile.status === "partial" ? "部分" : "缺失" : supplementLoading ? "读取中" : "缺失"}
+            {profile ? profile.status === "ready" ? "基础就绪" : profile.status === "partial" ? "基础部分" : "基础缺失" : supplementLoading ? "读取中" : "基础缺失"}
           </Pill>
           <Pill tone={profile ? aiTone : "neutral"}>AI {profile?.aiProfileStatus || (supplementLoading ? "读取中" : "missing")}</Pill>
         </div>
@@ -1131,4 +1284,10 @@ function formatDuration(start: string, end: string): string {
   const min = Math.floor(sec / 60);
   const rem = sec % 60;
   return `${min} 分 ${rem} 秒`;
+}
+
+function formatMs(ms?: number): string {
+  if (!ms || ms <= 0) return "-";
+  if (ms < 1000) return `${ms} ms`;
+  return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} 秒`;
 }

@@ -36,8 +36,11 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/instruments/search", s.handleSearchInstruments)
 	mux.HandleFunc("GET /api/stockv2/profiles", s.handleStockV2ListStockProfiles)
 	mux.HandleFunc("GET /api/stockv2/profiles/summaries", s.handleStockV2ListStockProfileSummaries)
+	mux.HandleFunc("GET /api/stockv2/assets/summaries", s.handleStockV2ListAssetSummaries)
+	mux.HandleFunc("GET /api/stockv2/announcements", s.handleStockV2ListAnnouncements)
 	mux.HandleFunc("GET /api/stockv2/profiles/update-tasks", s.handleStockV2ListStockProfileUpdateTasks)
 	mux.HandleFunc("GET /api/stockv2/profiles/{symbol}", s.handleStockV2GetStockProfile)
+	mux.HandleFunc("POST /api/stockv2/assets/{symbol}/maintain", s.handleStockV2MaintainAsset)
 	mux.HandleFunc("POST /api/stockv2/profiles/{symbol}/update", s.handleStockV2UpdateStockProfile)
 	mux.HandleFunc("GET /api/stockv2/profiles/{symbol}/update-tasks", s.handleStockV2ListStockProfileUpdateTasks)
 	mux.HandleFunc("POST /api/stockv2/profiles/{symbol}/build", s.handleStockV2BuildStockProfile)
@@ -108,6 +111,7 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	// 更新任务
 	mux.HandleFunc("POST /api/stockv2/update/trigger", s.handleTriggerUpdate)
 	mux.HandleFunc("GET /api/stockv2/update/status/{jobId}", s.handleGetUpdateStatus)
+	mux.HandleFunc("GET /api/stockv2/update/jobs/{jobId}/items", s.handleStockV2ListUpdateJobItems)
 	mux.HandleFunc("GET /api/stockv2/update/latest", s.handleGetLatestUpdate)
 	mux.HandleFunc("GET /api/stockv2/update/history", s.handleGetUpdateHistory)
 
@@ -479,7 +483,7 @@ func (s *Server) handleTriggerUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	job, err := s.stockV2.ExecuteUniverseUpdate(ctx, req.TriggerType, req.TriggerSource)
+	job, err := s.stockV2.ExecuteUniverseUpdate(ctx, req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

@@ -76,6 +76,12 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 			volume DOUBLE,
 			amount DOUBLE,
 			pct_change DOUBLE,
+			turnover_rate DOUBLE,
+			net_inflow DOUBLE,
+			main_net_inflow DOUBLE,
+			buy_amount DOUBLE,
+			sell_amount DOUBLE,
+			data_payload_json VARCHAR,
 			adjusted VARCHAR NOT NULL DEFAULT 'none',
 			source VARCHAR,
 			fetched_at TIMESTAMP,
@@ -245,6 +251,8 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 			tracking_index VARCHAR,
 			theme VARCHAR,
 			constituent_hint VARCHAR,
+			base_profile_hash VARCHAR,
+			base_profile_updated_at TIMESTAMP,
 			profile_version INTEGER NOT NULL DEFAULT 1,
 			updated_at TIMESTAMP NOT NULL
 		);
@@ -319,6 +327,30 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_monitor_status ON stockv2_news_link_candidates(monitor_status);
 
+		CREATE TABLE IF NOT EXISTS stockv2_announcements (
+			id VARCHAR PRIMARY KEY,
+			source VARCHAR NOT NULL,
+			symbol VARCHAR NOT NULL,
+			market VARCHAR,
+			org_id VARCHAR,
+			title VARCHAR NOT NULL,
+			category VARCHAR,
+			announcement_id VARCHAR,
+			pdf_url VARCHAR,
+			content_hash VARCHAR NOT NULL,
+			major BOOLEAN NOT NULL DEFAULT FALSE,
+			major_reason VARCHAR,
+			published_at TIMESTAMP,
+			fetched_at TIMESTAMP NOT NULL,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			UNIQUE(source, symbol, content_hash)
+		);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_announcements_symbol_published
+			ON stockv2_announcements(symbol, published_at);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_announcements_major
+			ON stockv2_announcements(major, published_at);
+
 		CREATE TABLE IF NOT EXISTS stockv2_embedding_vectors_v2 (
 			vector_ref VARCHAR PRIMARY KEY,
 			vector_blob BLOB NOT NULL,
@@ -338,6 +370,14 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		return err
 	}
 	for _, stmt := range []string{
+		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS turnover_rate DOUBLE DEFAULT 0`,
+		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS net_inflow DOUBLE DEFAULT 0`,
+		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS main_net_inflow DOUBLE DEFAULT 0`,
+		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS buy_amount DOUBLE DEFAULT 0`,
+		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS sell_amount DOUBLE DEFAULT 0`,
+		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS data_payload_json VARCHAR`,
+		`ALTER TABLE stockv2_stock_profiles ADD COLUMN IF NOT EXISTS base_profile_hash VARCHAR`,
+		`ALTER TABLE stockv2_stock_profiles ADD COLUMN IF NOT EXISTS base_profile_updated_at TIMESTAMP`,
 		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS amplitude DOUBLE DEFAULT 0`,
 		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS turnover_rate DOUBLE DEFAULT 0`,
 		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS volume_ratio DOUBLE DEFAULT 0`,
@@ -349,7 +389,7 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS main_net_inflow_pct DOUBLE DEFAULT 0`,
 	} {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("migrate duckdb latest quote columns: %w", err)
+			return fmt.Errorf("migrate duckdb asset columns: %w", err)
 		}
 	}
 	return nil
@@ -421,9 +461,10 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 	const q = `
 			INSERT INTO stockv2_daily_bars_stage (
 				id, symbol, market, trade_date, open, high, low, close, prev_close,
-				volume, amount, pct_change, adjusted, source, fetched_at, quality,
-				error_message, created_at, updated_at
-			) VALUES (?, ?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				volume, amount, pct_change, turnover_rate, net_inflow, main_net_inflow,
+				buy_amount, sell_amount, data_payload_json, adjusted, source, fetched_at,
+				quality, error_message, created_at, updated_at
+			) VALUES (?, ?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	stmt, err := tx.PrepareContext(ctx, q)
 	if err != nil {
@@ -449,7 +490,8 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 		if _, err := stmt.ExecContext(ctx,
 			b.ID, b.Symbol, b.Market, b.TradeDate,
 			b.Open, b.High, b.Low, b.Close, b.PrevClose,
-			b.Volume, b.Amount, b.PctChange, b.Adjusted, b.Source,
+			b.Volume, b.Amount, b.PctChange, b.TurnoverRate, b.NetInflow, b.MainNetInflow,
+			b.BuyAmount, b.SellAmount, b.DataPayload, b.Adjusted, b.Source,
 			nullableTime(b.FetchedAt), b.Quality, b.ErrorMessage,
 			b.CreatedAt, b.UpdatedAt,
 		); err != nil {
@@ -512,6 +554,8 @@ func (s *MarketDataStore) GetDailyBars(ctx context.Context, symbol, adjusted, st
 		SELECT id, symbol, COALESCE(market,''), strftime(trade_date, '%Y-%m-%d') AS trade_date,
 		       COALESCE(open,0), COALESCE(high,0), COALESCE(low,0), COALESCE(close,0),
 		       COALESCE(prev_close,0), COALESCE(volume,0), COALESCE(amount,0), COALESCE(pct_change,0),
+		       COALESCE(turnover_rate,0), COALESCE(net_inflow,0), COALESCE(main_net_inflow,0),
+		       COALESCE(buy_amount,0), COALESCE(sell_amount,0), COALESCE(data_payload_json,''),
 		       adjusted, COALESCE(source,''), fetched_at, COALESCE(quality,''), COALESCE(error_message,''),
 		       created_at, updated_at
 		FROM stockv2_daily_bars
@@ -537,6 +581,44 @@ func (s *MarketDataStore) GetDailyBars(ctx context.Context, symbol, adjusted, st
 	}
 	defer rows.Close()
 	return scanDailyBarsRows(rows)
+}
+
+func (s *MarketDataStore) GetDailyBarDates(ctx context.Context, symbol, adjusted, startDate, endDate string) ([]string, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("market data store is not initialized")
+	}
+	query := `
+		SELECT DISTINCT strftime(trade_date, '%Y-%m-%d') AS trade_date
+		FROM stockv2_daily_bars
+		WHERE symbol = ? AND adjusted = ?
+	`
+	args := []any{symbol, adjusted}
+	if startDate != "" {
+		query += " AND trade_date >= CAST(? AS DATE)"
+		args = append(args, startDate)
+	}
+	if endDate != "" {
+		query += " AND trade_date <= CAST(? AS DATE)"
+		args = append(args, endDate)
+	}
+	query += " ORDER BY trade_date ASC"
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, wrapError(err, "get duckdb daily bar dates")
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var date string
+		if err := rows.Scan(&date); err != nil {
+			return nil, wrapError(err, "scan daily bar date")
+		}
+		out = append(out, date)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(err, "iterate daily bar dates")
+	}
+	return out, nil
 }
 
 func (s *MarketDataStore) GetDailyBarsStats(ctx context.Context, symbol, adjusted string) (rowCount int, earliest, latest, source, lastError string, err error) {
@@ -616,17 +698,32 @@ func (s *MarketDataStore) CountDailyBars(ctx context.Context) (int, error) {
 
 func scanDailyBarsRows(rows *sql.Rows) ([]StockV2DailyBar, error) {
 	var out []StockV2DailyBar
+	columns, _ := rows.Columns()
+	withDataFacets := len(columns) >= 25
 	for rows.Next() {
 		var b StockV2DailyBar
 		var fetchedAt sql.NullTime
-		if err := rows.Scan(
-			&b.ID, &b.Symbol, &b.Market, &b.TradeDate,
-			&b.Open, &b.High, &b.Low, &b.Close,
-			&b.PrevClose, &b.Volume, &b.Amount, &b.PctChange,
-			&b.Adjusted, &b.Source, &fetchedAt, &b.Quality, &b.ErrorMessage,
-			&b.CreatedAt, &b.UpdatedAt,
-		); err != nil {
-			return nil, wrapError(err, "scan daily bar")
+		if withDataFacets {
+			if err := rows.Scan(
+				&b.ID, &b.Symbol, &b.Market, &b.TradeDate,
+				&b.Open, &b.High, &b.Low, &b.Close,
+				&b.PrevClose, &b.Volume, &b.Amount, &b.PctChange,
+				&b.TurnoverRate, &b.NetInflow, &b.MainNetInflow, &b.BuyAmount, &b.SellAmount, &b.DataPayload,
+				&b.Adjusted, &b.Source, &fetchedAt, &b.Quality, &b.ErrorMessage,
+				&b.CreatedAt, &b.UpdatedAt,
+			); err != nil {
+				return nil, wrapError(err, "scan daily bar")
+			}
+		} else {
+			if err := rows.Scan(
+				&b.ID, &b.Symbol, &b.Market, &b.TradeDate,
+				&b.Open, &b.High, &b.Low, &b.Close,
+				&b.PrevClose, &b.Volume, &b.Amount, &b.PctChange,
+				&b.Adjusted, &b.Source, &fetchedAt, &b.Quality, &b.ErrorMessage,
+				&b.CreatedAt, &b.UpdatedAt,
+			); err != nil {
+				return nil, wrapError(err, "scan daily bar")
+			}
 		}
 		if fetchedAt.Valid {
 			b.FetchedAt = fetchedAt.Time

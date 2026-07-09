@@ -217,6 +217,8 @@ CREATE TABLE IF NOT EXISTS stockv2_stock_profiles (
     tracking_index TEXT,
     theme TEXT,
     constituent_hint TEXT,
+    base_profile_hash TEXT,
+    base_profile_updated_at DATETIME,
     profile_version INTEGER NOT NULL DEFAULT 1,
     updated_at DATETIME NOT NULL
 );
@@ -277,6 +279,25 @@ CREATE TABLE IF NOT EXISTS stockv2_news_link_candidates (
     updated_at DATETIME NOT NULL,
     FOREIGN KEY (news_event_id) REFERENCES stockv2_news_events(id) ON DELETE CASCADE,
     UNIQUE(news_event_id, symbol)
+);
+CREATE TABLE IF NOT EXISTS stockv2_announcements (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    market TEXT,
+    org_id TEXT,
+    title TEXT NOT NULL,
+    category TEXT,
+    announcement_id TEXT,
+    pdf_url TEXT,
+    content_hash TEXT NOT NULL,
+    major INTEGER NOT NULL DEFAULT 0,
+    major_reason TEXT,
+    published_at DATETIME,
+    fetched_at DATETIME NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    UNIQUE(source, symbol, content_hash)
 );
 CREATE TABLE IF NOT EXISTS stockv2_portfolios (
     id TEXT PRIMARY KEY,
@@ -550,10 +571,42 @@ CREATE TABLE IF NOT EXISTS stockv2_update_jobs (
     success_count INTEGER DEFAULT 0,
     failed_count INTEGER DEFAULT 0,
     failed_items TEXT,
+    asset_stats_json TEXT,
     start_at DATETIME,
     end_at DATETIME,
     error_message TEXT,
     created_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_asset_maintenance_items (
+    id TEXT PRIMARY KEY,
+    job_id TEXT,
+    symbol TEXT NOT NULL,
+    market TEXT,
+    instrument_type TEXT,
+    name TEXT,
+    status TEXT NOT NULL,
+    daily_bar_status TEXT,
+    daily_bar_fetched INTEGER DEFAULT 0,
+    daily_bar_start TEXT,
+    daily_bar_end TEXT,
+    base_profile_status TEXT,
+    base_profile_changed INTEGER DEFAULT 0,
+    base_profile_hash_before TEXT,
+    base_profile_hash_after TEXT,
+    announcement_status TEXT,
+    announcements_new INTEGER DEFAULT 0,
+    major_announcements_new INTEGER DEFAULT 0,
+    ai_decision TEXT,
+    ai_profile_status TEXT,
+    agent_run_id TEXT,
+    error_message TEXT,
+    source_statuses_json TEXT,
+    duration_ms INTEGER DEFAULT 0,
+    started_at DATETIME NOT NULL,
+    finished_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    FOREIGN KEY (job_id) REFERENCES stockv2_update_jobs(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS stockv2_update_progress (
     update_job_id TEXT PRIMARY KEY,
@@ -603,6 +656,8 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_profile_update_tasks_status ON stockv2_st
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_event ON stockv2_news_link_candidates(news_event_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_score ON stockv2_news_link_candidates(score);
+CREATE INDEX IF NOT EXISTS idx_stockv2_announcements_symbol_published ON stockv2_announcements(symbol, published_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_announcements_major ON stockv2_announcements(major, published_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolios_name ON stockv2_portfolios(name);
 CREATE INDEX IF NOT EXISTS idx_stockv2_holdings_portfolio_id ON stockv2_holdings(portfolio_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_holdings_symbol ON stockv2_holdings(symbol);
@@ -631,6 +686,8 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_dedupe_key ON stockv2_alerts(watch
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_status ON stockv2_update_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_created_at ON stockv2_update_jobs(created_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_status_created ON stockv2_update_jobs(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_stockv2_asset_items_job ON stockv2_asset_maintenance_items(job_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_stockv2_asset_items_symbol ON stockv2_asset_maintenance_items(symbol, created_at DESC);
 INSERT OR IGNORE INTO stockv2_settings (id, auto_update_enabled, update_interval_sec, created_at, updated_at)
 VALUES ('1', 0, 3600, datetime('now'), datetime('now'));
 
@@ -1364,6 +1421,8 @@ func (s *Store) init(ctx context.Context) error {
 		{"ai_profile_confidence", "REAL NOT NULL DEFAULT 0"},
 		{"ai_profile_error", "TEXT"},
 		{"ai_profile_updated_at", "DATETIME"},
+		{"base_profile_hash", "TEXT"},
+		{"base_profile_updated_at", "DATETIME"},
 	}
 	for _, column := range profileColumns {
 		if err := s.ensureColumn(ctx, "stockv2_stock_profiles", column.name, column.colType); err != nil {
@@ -1387,6 +1446,9 @@ func (s *Store) init(ctx context.Context) error {
 	// 增量迁移：给 stockv2_update_jobs 加 failed_items 列
 	if err := s.ensureColumn(ctx, "stockv2_update_jobs", "failed_items", "TEXT"); err != nil {
 		return fmt.Errorf("add failed_items column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_update_jobs", "asset_stats_json", "TEXT"); err != nil {
+		return fmt.Errorf("add asset_stats_json column: %w", err)
 	}
 
 	// 增量迁移：legacy 独立日 K 调度开关与最近日 K 维护时间
@@ -2240,13 +2302,14 @@ func (s *Store) CreateUpdateJob(ctx context.Context, job StockV2UpdateJob) error
 	query := `
 		INSERT INTO stockv2_update_jobs (
 			id, trigger_type, trigger_source, status, total_count,
-			processed_count, success_count, failed_count, start_at, end_at,
+			processed_count, success_count, failed_count, asset_stats_json, start_at, end_at,
 			error_message, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	now := time.Now()
 	job.CreatedAt = now
+	statsJSON, _ := json.Marshal(job.AssetStats)
 
 	_, err := s.db.ExecContext(ctx, query,
 		job.ID,
@@ -2257,6 +2320,7 @@ func (s *Store) CreateUpdateJob(ctx context.Context, job StockV2UpdateJob) error
 		job.ProcessedCount,
 		job.SuccessCount,
 		job.FailedCount,
+		string(statsJSON),
 		job.StartAt,
 		job.EndAt,
 		job.ErrorMessage,
@@ -2269,7 +2333,7 @@ func (s *Store) CreateUpdateJob(ctx context.Context, job StockV2UpdateJob) error
 const updateJobSelectSQL = `
 	SELECT id, trigger_type, COALESCE(trigger_source,''), status, total_count,
 	       processed_count, success_count, failed_count, COALESCE(failed_items,''),
-	       start_at, end_at, COALESCE(error_message,''), created_at
+	       COALESCE(asset_stats_json,''), start_at, end_at, COALESCE(error_message,''), created_at
 	FROM stockv2_update_jobs
 `
 
@@ -2326,6 +2390,11 @@ func (s *Store) UpdateUpdateJob(ctx context.Context, job StockV2UpdateJob) error
 		failedJSON, _ := json.Marshal(job.FailedItems)
 		sets = append(sets, "failed_items = ?")
 		args = append(args, string(failedJSON))
+	}
+	if job.AssetStats != (AssetMaintenanceStats{}) {
+		statsJSON, _ := json.Marshal(job.AssetStats)
+		sets = append(sets, "asset_stats_json = ?")
+		args = append(args, string(statsJSON))
 	}
 	if !job.EndAt.IsZero() {
 		sets = append(sets, "end_at = ?")
@@ -2521,6 +2590,7 @@ func scanUpdateJob(row rowScanner) (StockV2UpdateJob, error) {
 	var job StockV2UpdateJob
 	var startAt, endAt sql.NullTime
 	var failedItemsJSON string
+	var assetStatsJSON string
 
 	err := row.Scan(
 		&job.ID,
@@ -2532,6 +2602,7 @@ func scanUpdateJob(row rowScanner) (StockV2UpdateJob, error) {
 		&job.SuccessCount,
 		&job.FailedCount,
 		&failedItemsJSON,
+		&assetStatsJSON,
 		&startAt,
 		&endAt,
 		&job.ErrorMessage,
@@ -2547,6 +2618,9 @@ func scanUpdateJob(row rowScanner) (StockV2UpdateJob, error) {
 	// 解析失败详情 JSON
 	if failedItemsJSON != "" && failedItemsJSON != "[]" {
 		_ = json.Unmarshal([]byte(failedItemsJSON), &job.FailedItems)
+	}
+	if assetStatsJSON != "" && assetStatsJSON != "{}" {
+		_ = json.Unmarshal([]byte(assetStatsJSON), &job.AssetStats)
 	}
 
 	return job, nil

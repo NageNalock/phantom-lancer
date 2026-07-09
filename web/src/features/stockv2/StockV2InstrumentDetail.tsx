@@ -10,8 +10,9 @@ import type {
   StockV2Instrument,
   StockV2MinuteBar,
   StockV2AgentRun,
+  StockV2Announcement,
+  StockV2MaintainSymbolResult,
   StockV2StockProfile,
-  StockV2StockProfileUpdateResult,
   StockV2StockProfileUpdateTask,
 } from "../../app/types";
 import type { AppActions } from "../../app/App";
@@ -74,6 +75,7 @@ export function StockV2InstrumentDetail({
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileRun, setProfileRun] = useState<StockV2AgentRun | null>(null);
   const [profileTask, setProfileTask] = useState<StockV2StockProfileUpdateTask | null>(null);
+  const [maintenanceResult, setMaintenanceResult] = useState<StockV2MaintainSymbolResult | null>(null);
   const [profileRunDetailId, setProfileRunDetailId] = useState<string | null>(null);
   const [genOpen, setGenOpen] = useState(false);
   const profileRunPollRef = useRef<number | null>(null);
@@ -91,6 +93,7 @@ export function StockV2InstrumentDetail({
     setProfileError(null);
     setProfileRun(null);
     setProfileTask(null);
+    setMaintenanceResult(null);
     setProfileRunDetailId(null);
     if (profileRunPollRef.current !== null) {
       window.clearTimeout(profileRunPollRef.current);
@@ -331,33 +334,32 @@ export function StockV2InstrumentDetail({
     if (!inst) return;
     setProfileBusy(true);
     try {
-      const result = await actions.api<StockV2StockProfileUpdateResult>(`/api/stockv2/profiles/${encodeURIComponent(inst.symbol)}/update`, {
+      const result = await actions.api<StockV2MaintainSymbolResult>(`/api/stockv2/assets/${encodeURIComponent(inst.symbol)}/maintain`, {
         method: "POST",
-        body: { triggerSource: "manual", triggerReason: "user_click", requestedBy: "web" },
+        body: { triggerSource: "manual", requestedBy: "web" },
         csrf: actions.csrf,
       });
-      setProfile(result.profile);
-      setProfileTask(result.task);
+      setMaintenanceResult(result);
+      if (result.profile) setProfile(result.profile);
       setProfileRun(result.agentRun ?? null);
       setProfileError(null);
+      await Promise.all([load(), loadProfile(), loadProfileTasks()]);
       if (result.agentRun) {
-        actions.setToast("画像已更新，AI 增强已发起", "good");
+        actions.setToast("数据资产已维护，AI 画像总结已发起", "good");
         if (result.agentRun.status === "completed" || result.agentRun.status === "failed") {
-          await loadProfile();
-          await loadProfileTasks();
           setProfileBusy(false);
         } else {
           pollProfileRun(result.agentRun.id);
         }
         return;
       }
-      actions.setToast(stockProfileUpdateToast(result.task), result.task.status === "failed" ? "warn" : "good");
+      actions.setToast(assetMaintenanceToast(result), result.item.status === "failed" ? "warn" : "good");
       setProfileBusy(false);
     } catch (err) {
       setProfileError(friendlyErr(err));
       setProfileBusy(false);
     }
-  }, [actions, inst, loadProfile, loadProfileTasks, pollProfileRun]);
+  }, [actions, inst, load, loadProfile, loadProfileTasks, pollProfileRun]);
 
   const refreshProfileView = useCallback(async () => {
     setProfileBusy(true);
@@ -610,6 +612,7 @@ export function StockV2InstrumentDetail({
             onOpenAgentRun={(runId) => setProfileRunDetailId(runId)}
             profile={profile}
             agentRun={profileRun}
+            maintenanceResult={maintenanceResult}
             updateTask={profileTask}
           />
         </section>
@@ -647,6 +650,7 @@ function StockProfileSection({
   onRefresh,
   onUpdate,
   profile,
+  maintenanceResult,
   updateTask,
 }: {
   agentRun: StockV2AgentRun | null;
@@ -656,6 +660,7 @@ function StockProfileSection({
   onRefresh: () => void;
   onUpdate: () => void;
   profile: StockV2StockProfile | null;
+  maintenanceResult: StockV2MaintainSymbolResult | null;
   updateTask: StockV2StockProfileUpdateTask | null;
 }) {
   const aiTone = profile?.aiProfileStatus === "ready" ? "good" : profile?.aiProfileStatus === "failed" ? "danger" : profile?.aiProfileStatus === "not_configured" ? "warn" : "neutral";
@@ -669,15 +674,22 @@ function StockProfileSection({
     <section className="mt-4 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)]">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] px-3 py-3">
         <div>
-          <h4 className="m-0 text-sm font-semibold">股票画像</h4>
-          <p className="muted mt-1 mb-0 text-xs">更新画像会刷新事实输入；仅当输入变化时才提交 AI 增强。</p>
+          <h4 className="m-0 text-sm font-semibold">数据资产维护</h4>
+          <p className="muted mt-1 mb-0 text-xs">补齐日 K 缺口，检查基础画像和公告/重大事项，并按条件触发 AI 画像总结。</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button className="px-2 py-1 text-xs" onClick={onRefresh} disabled={busy}>重新读取</Button>
-          <Button className="px-2 py-1 text-xs" onClick={onUpdate} disabled={busy} tone="primary">{busy ? "更新中…" : "更新画像"}</Button>
+          <Button className="px-2 py-1 text-xs" onClick={onUpdate} disabled={busy} tone="primary">{busy ? "维护中…" : "维护该标的数据资产"}</Button>
         </div>
       </div>
       <div className="grid gap-3 p-3 text-sm">
+        {maintenanceResult?.item ? (
+          <AssetMaintenanceResultSummary
+            announcements={maintenanceResult.announcements || []}
+            item={maintenanceResult.item}
+            onOpenAgentRun={onOpenAgentRun}
+          />
+        ) : null}
         {agentRun ? (
           <Notice tone={agentRun.status === "failed" ? "danger" : "warn"}>
             <span className="text-xs">
@@ -773,6 +785,48 @@ function BilingualProfileDetails({ profile }: { profile: StockV2StockProfile }) 
   );
 }
 
+function AssetMaintenanceResultSummary({
+  announcements,
+  item,
+  onOpenAgentRun,
+}: {
+  announcements: StockV2Announcement[];
+  item: StockV2MaintainSymbolResult["item"];
+  onOpenAgentRun: (runId: string) => void;
+}) {
+  const major = announcements.filter((ann) => ann.major);
+  return (
+    <div className="rounded border border-[var(--line)] bg-[var(--surface)] p-3">
+      <div className="mb-2 flex flex-wrap items-center gap-1.5 text-xs">
+        <Pill tone={item.status === "failed" ? "danger" : item.status === "partial" ? "warn" : "good"}>
+          {assetMaintenanceStatusLabel(item.status)}
+        </Pill>
+        <Pill tone="neutral">日 K {item.dailyBarStatus || "-"} {item.dailyBarFetched ? `+${item.dailyBarFetched}` : ""}</Pill>
+        <Pill tone={item.baseProfileChanged ? "warn" : "neutral"}>基础画像 {item.baseProfileStatus || "-"}</Pill>
+        <Pill tone={item.majorAnnouncementsNew > 0 ? "warn" : "neutral"}>公告 {item.announcementsNew} / 重大 {item.majorAnnouncementsNew}</Pill>
+        <Pill tone={item.aiDecision?.startsWith("called") ? "warn" : "neutral"}>AI {item.aiDecision || "-"}</Pill>
+        {item.agentRunId ? (
+          <Button className="px-2 py-0.5 text-xs" onClick={() => onOpenAgentRun(item.agentRunId!)}>
+            Agent {item.agentRunId.slice(0, 12)}
+          </Button>
+        ) : null}
+        <span className="text-[var(--muted)]">{formatDurationMs(item.durationMs)}</span>
+      </div>
+      {item.errorMessage ? <div className="mb-2 text-xs text-[var(--danger)]">{item.errorMessage}</div> : null}
+      {announcements.length ? (
+        <div className="grid gap-1 text-xs text-[var(--muted-strong)]">
+          {(major.length ? major : announcements).slice(0, 4).map((ann) => (
+            <div className="flex min-w-0 items-center gap-2" key={ann.id}>
+              <Pill tone={ann.major ? "warn" : "neutral"}>{ann.major ? ann.majorReason || "重大" : "公告"}</Pill>
+              <span className="truncate">{ann.title}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ProfileTextBlock({ title, value }: { title: string; value?: string }) {
   return (
     <div className="mt-3">
@@ -818,13 +872,32 @@ function getRangeBound(r: DailyBarRange): { start: string; end: string } {
   };
 }
 
-function stockProfileUpdateToast(task: StockV2StockProfileUpdateTask): string {
-  if (task.aiDecision === "called") return "画像已更新，AI 增强已发起";
-  if (task.aiDecision === "skipped_unchanged") return "画像输入无变化，已保留现有 AI 总结";
-  if (task.aiDecision === "skipped_not_configured") return "画像已更新，AI 未配置";
-  if (task.aiDecision === "skipped_unavailable") return "画像已更新，AI 执行器不可用";
-  if (task.aiDecision === "failed") return "画像已更新，AI 增强失败";
-  return "画像已更新";
+function assetMaintenanceToast(result: StockV2MaintainSymbolResult): string {
+  if (result.item.agentRunId) return "数据资产已维护，AI 画像总结已发起";
+  if (result.item.aiDecision === "skipped_budget_exhausted") return "数据资产已维护，本轮 AI 预算已耗尽";
+  if (result.item.aiDecision === "skipped_not_configured") return "数据资产已维护，AI 未配置";
+  return "数据资产已维护";
+}
+
+function assetMaintenanceStatusLabel(status?: string): string {
+  switch (status) {
+    case "completed":
+      return "已完成";
+    case "partial":
+      return "部分完成";
+    case "failed":
+      return "失败";
+    case "running":
+      return "运行中";
+    default:
+      return status || "-";
+  }
+}
+
+function formatDurationMs(ms?: number): string {
+  if (!ms || ms <= 0) return "-";
+  if (ms < 1000) return `${ms} ms`;
+  return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} 秒`;
 }
 
 function stockProfileUpdateStatusLabel(status?: string): string {

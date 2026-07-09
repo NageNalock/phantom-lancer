@@ -1206,7 +1206,95 @@ export interface StockV2StockProfile extends StockV2StockProfileSummary {
   trackingIndex?: string;
   theme?: string;
   constituentHint?: string;
+  baseProfileHash?: string;
+  baseProfileUpdatedAt?: string;
   profileVersion?: number;
+}
+
+export interface StockV2AssetMaintenanceStats {
+  dailyBarFetched: number;
+  dailyBarSkipped: number;
+  baseProfileUpdated: number;
+  baseProfileUnchanged: number;
+  announcementsNew: number;
+  majorAnnouncementsNew: number;
+  aiCalled: number;
+  aiSkipped: number;
+}
+
+export interface StockV2AssetMaintenanceSourceStatus {
+  source: string;
+  status: string;
+  message?: string;
+  checkedAt?: string;
+}
+
+export interface StockV2AssetMaintenanceItem {
+  id: string;
+  jobId?: string;
+  symbol: string;
+  market?: string;
+  instrumentType?: string;
+  name?: string;
+  status: string;
+  dailyBarStatus?: string;
+  dailyBarFetched: number;
+  dailyBarStart?: string;
+  dailyBarEnd?: string;
+  baseProfileStatus?: string;
+  baseProfileChanged: boolean;
+  baseProfileHashBefore?: string;
+  baseProfileHashAfter?: string;
+  announcementStatus?: string;
+  announcementsNew: number;
+  majorAnnouncementsNew: number;
+  aiDecision?: string;
+  aiProfileStatus?: string;
+  agentRunId?: string;
+  errorMessage?: string;
+  sourceStatuses?: StockV2AssetMaintenanceSourceStatus[];
+  durationMs: number;
+  startedAt: string;
+  finishedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockV2Announcement {
+  id: string;
+  source: string;
+  symbol: string;
+  market?: string;
+  orgId?: string;
+  title: string;
+  category?: string;
+  announcementId?: string;
+  pdfUrl?: string;
+  contentHash: string;
+  major: boolean;
+  majorReason?: string;
+  publishedAt?: string;
+  fetchedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockV2AssetSummary {
+  symbol: string;
+  dailyBarQuality: StockV2DailyBarsQuality;
+  profileSummary: StockV2StockProfileSummary;
+  latestAnnouncementAt?: string;
+  latestAnnouncementTitle?: string;
+  announcementCount: number;
+  majorAnnouncementCount: number;
+  latestMaintenance?: StockV2AssetMaintenanceItem;
+}
+
+export interface StockV2MaintainSymbolResult {
+  item: StockV2AssetMaintenanceItem;
+  profile?: StockV2StockProfile;
+  announcements?: StockV2Announcement[];
+  agentRun?: StockV2AgentRun;
 }
 
 export interface StockV2StockProfileSourceStatus {
@@ -1375,6 +1463,7 @@ export interface StockV2UpdateJob {
   successCount: number;
   failedCount: number;
   failedItems?: UpdateFailure[];
+  assetStats?: StockV2AssetMaintenanceStats;
   startAt: string;
   endAt: string;
   errorMessage: string;
@@ -1425,6 +1514,8 @@ export interface StockV2UniverseUpdateRequest {
   triggerType?: string;
   triggerSource?: string;
   symbols?: string[];
+  maxSymbols?: number;
+  forceAi?: boolean;
 }
 
 export interface StockV2UniverseUpdateResponse {
@@ -1569,6 +1660,12 @@ export interface StockV2DailyBar {
   volume: number;
   amount: number;
   pctChange: number;
+  turnoverRate?: number;
+  netInflow?: number;
+  mainNetInflow?: number;
+  buyAmount?: number;
+  sellAmount?: number;
+  dataPayload?: string;
   adjusted: string; // none | qfq | hfq
   source: string;
   fetchedAt: string;

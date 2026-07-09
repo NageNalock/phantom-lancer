@@ -133,7 +133,7 @@ func TestBuildStockProfileSummaryPromptTruncatesUTF8Safely(t *testing.T) {
 		ProfileTextZh:     strings.Repeat("绿色能源 数据中心 造纸 央企 混改 ", 220),
 	}
 
-	prompt := buildStockProfileSummaryPrompt("task-profile", profile, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
+	prompt := buildStockProfileSummaryPrompt("task-profile", StockProfileSummaryContext{Profile: profile}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
 	if !utf8.ValidString(prompt) {
 		t.Fatalf("prompt is invalid utf8")
 	}

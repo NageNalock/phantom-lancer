@@ -152,13 +152,13 @@ func (e *codexCLIExecutor) ExecutePortfolioSentinel(
 func (e *codexCLIExecutor) ExecuteStockProfileSummary(
 	ctx context.Context,
 	taskID string,
-	profile StockProfile,
+	pack StockProfileSummaryContext,
 	modelName string,
 ) (*AgentExecutorOutput, error) {
 	if e.binary == "" {
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
-	prompt := buildStockProfileSummaryPrompt(taskID, profile, e.mcpURL)
+	prompt := buildStockProfileSummaryPrompt(taskID, pack, e.mcpURL)
 	return e.executePrompt(ctx, taskID, prompt, modelName)
 }
 
@@ -944,12 +944,12 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	return b.String()
 }
 
-func buildStockProfileSummaryPrompt(taskID string, profile StockProfile, mcpURL string) string {
+func buildStockProfileSummaryPrompt(taskID string, pack StockProfileSummaryContext, mcpURL string) string {
 	var b strings.Builder
 	b.WriteString("# Stock Profile Bilingual Enhancement Task\n\n")
 	b.WriteString("System role: you enrich a stock/fund profile for high-recall Chinese and English news matching.\n")
 	b.WriteString("You are NOT making trading recommendations. Do not infer portfolio, position, or user-specific facts.\n")
-	b.WriteString("Use only the provided profile fields. If information is missing, keep the field concise instead of inventing facts.\n")
+	b.WriteString("Use only the provided context fields. If information is missing, keep the field concise instead of inventing facts.\n")
 	b.WriteString("Submit your final result using the stock_agent.submit_result MCP tool.\n\n")
 	b.WriteString("Do not use shell commands or curl to submit the result; use the MCP tool directly.\n\n")
 
@@ -962,8 +962,8 @@ func buildStockProfileSummaryPrompt(taskID string, profile StockProfile, mcpURL 
 	}
 	b.WriteString("\n")
 
-	b.WriteString("## Base Profile\n\n```json\n")
-	raw, _ := json.MarshalIndent(profile, "", "  ")
+	b.WriteString("## Profile Summary Context\n\n```json\n")
+	raw, _ := json.MarshalIndent(pack, "", "  ")
 	b.Write(raw)
 	b.WriteString("\n```\n\n")
 

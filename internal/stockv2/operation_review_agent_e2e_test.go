@@ -387,7 +387,8 @@ func (f fakeOperationReviewExecutor) ExecuteOperationReview(ctx context.Context,
 	}, f.execErr
 }
 
-func (f fakeOperationReviewExecutor) ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error) {
+func (f fakeOperationReviewExecutor) ExecuteStockProfileSummary(ctx context.Context, taskID string, pack StockProfileSummaryContext, modelName string) (*AgentExecutorOutput, error) {
+	profile := pack.Profile
 	result := f.result
 	if result == nil {
 		result = map[string]any{"summaryZh": profile.BusinessSummary, "summaryEn": profile.Name}

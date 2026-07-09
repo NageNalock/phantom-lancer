@@ -49,25 +49,31 @@ const (
 
 // StockV2DailyBar 单个交易日的日 K 行情
 type StockV2DailyBar struct {
-	ID           string    `json:"id"`
-	Symbol       string    `json:"symbol"`
-	Market       string    `json:"market,omitempty"` // SH / SZ / BJ
-	TradeDate    string    `json:"tradeDate"`        // "2006-01-02"
-	Open         float64   `json:"open"`
-	High         float64   `json:"high"`
-	Low          float64   `json:"low"`
-	Close        float64   `json:"close"`
-	PrevClose    float64   `json:"prevClose"` // 前一交易日收盘；首条无前日时为 0
-	Volume       float64   `json:"volume"`    // 单位：手（数据源原值，未换算）
-	Amount       float64   `json:"amount"`    // 成交额；当前数据源不提供时为 0
-	PctChange    float64   `json:"pctChange"` // 涨跌幅 %，prevClose<=0 时为 0
-	Adjusted     string    `json:"adjusted"`  // none | qfq | hfq
-	Source       string    `json:"source"`    // 如 tencent_fqkline
-	FetchedAt    time.Time `json:"fetchedAt"`
-	Quality      string    `json:"quality"` // ok | partial | stale | failed
-	ErrorMessage string    `json:"errorMessage,omitempty"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	ID            string    `json:"id"`
+	Symbol        string    `json:"symbol"`
+	Market        string    `json:"market,omitempty"` // SH / SZ / BJ
+	TradeDate     string    `json:"tradeDate"`        // "2006-01-02"
+	Open          float64   `json:"open"`
+	High          float64   `json:"high"`
+	Low           float64   `json:"low"`
+	Close         float64   `json:"close"`
+	PrevClose     float64   `json:"prevClose"` // 前一交易日收盘；首条无前日时为 0
+	Volume        float64   `json:"volume"`    // 单位：手（数据源原值，未换算）
+	Amount        float64   `json:"amount"`    // 成交额；当前数据源不提供时为 0
+	PctChange     float64   `json:"pctChange"` // 涨跌幅 %，prevClose<=0 时为 0
+	TurnoverRate  float64   `json:"turnoverRate,omitempty"`
+	NetInflow     float64   `json:"netInflow,omitempty"`
+	MainNetInflow float64   `json:"mainNetInflow,omitempty"`
+	BuyAmount     float64   `json:"buyAmount,omitempty"`
+	SellAmount    float64   `json:"sellAmount,omitempty"`
+	DataPayload   string    `json:"dataPayload,omitempty"`
+	Adjusted      string    `json:"adjusted"` // none | qfq | hfq
+	Source        string    `json:"source"`   // 如 tencent_fqkline
+	FetchedAt     time.Time `json:"fetchedAt"`
+	Quality       string    `json:"quality"` // ok | partial | stale | failed
+	ErrorMessage  string    `json:"errorMessage,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 // DailyBarsQuality 日 K 数据质量评估

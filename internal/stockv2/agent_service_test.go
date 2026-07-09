@@ -1260,7 +1260,8 @@ func (f fakeDebugAgentExecutor) ExecutePortfolioSentinel(ctx context.Context, ta
 	}, nil
 }
 
-func (f fakeDebugAgentExecutor) ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error) {
+func (f fakeDebugAgentExecutor) ExecuteStockProfileSummary(ctx context.Context, taskID string, pack StockProfileSummaryContext, modelName string) (*AgentExecutorOutput, error) {
+	profile := pack.Profile
 	_, err := f.pool.submitResult(taskID, AgentTaskTypeStockProfileSummary, AgentTaskSubmittedResult{
 		OutputType:    AgentTaskTypeStockProfileSummary,
 		ResultSummary: "profile ok",

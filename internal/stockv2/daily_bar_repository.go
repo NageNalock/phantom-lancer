@@ -22,6 +22,10 @@ func (s *Store) GetDailyBars(ctx context.Context, symbol, adjusted, startDate, e
 	return s.marketDB.GetDailyBars(ctx, symbol, adjusted, startDate, endDate, limit)
 }
 
+func (s *Store) GetDailyBarDates(ctx context.Context, symbol, adjusted, startDate, endDate string) ([]string, error) {
+	return s.marketDB.GetDailyBarDates(ctx, symbol, adjusted, startDate, endDate)
+}
+
 // GetDailyBarsStats 返回本地日 K 统计，供质量评估使用。
 // rowCount=0 表示本地无数据。
 func (s *Store) GetDailyBarsStats(ctx context.Context, symbol, adjusted string) (rowCount int, earliest, latest, source, lastError string, err error) {

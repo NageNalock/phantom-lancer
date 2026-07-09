@@ -78,6 +78,8 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 	task.SourceStatuses = sourceStatuses
 	task.BaseInputHashAfter = stockProfileAIInputHash(baseProfile)
 	task.BaseInputChanged = task.BaseInputHashBefore == "" || task.BaseInputHashBefore != task.BaseInputHashAfter
+	profile.BaseProfileHash = task.BaseInputHashAfter
+	profile.BaseProfileUpdatedAt = time.Now()
 
 	profile, err = s.store.UpsertStockProfile(ctx, profile)
 	if err != nil {
@@ -97,7 +99,14 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 	var agentRunModelName string
 	var strictErr error
 	if req.ForceAI || task.BaseInputChanged {
-		run, ledger, modelName, runErr := s.prepareStockProfileSummaryAgentRun(ctx, profile, req.RequestedBy)
+		pack := s.buildStockProfileSummaryContext(ctx, profile, existing, AssetMaintenanceItem{
+			Symbol:                profile.Symbol,
+			BaseProfileHashBefore: task.BaseInputHashBefore,
+			BaseProfileHashAfter:  task.BaseInputHashAfter,
+			BaseProfileChanged:    task.BaseInputChanged,
+			StartedAt:             startedAt,
+		}, nil, stockProfileSourceStatusesToAsset(sourceStatuses))
+		run, ledger, modelName, runErr := s.prepareStockProfileSummaryAgentRun(ctx, pack, req.RequestedBy)
 		if runErr != nil {
 			task.AIDecision = stockProfileAIDecisionForError(runErr)
 			task.AIProfileStatus = stockProfileAITaskStatusForDecision(task.AIDecision)
@@ -142,7 +151,14 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 		return StockProfileUpdateResult{Profile: profile, Task: createdTask}, strictErr
 	}
 	if agentRun != nil {
-		go s.startStockProfileAgentRunAsync(context.Background(), *agentRun, agentLedger, profile, agentRunModelName)
+		pack := s.buildStockProfileSummaryContext(context.Background(), profile, existing, AssetMaintenanceItem{
+			Symbol:                profile.Symbol,
+			BaseProfileHashBefore: task.BaseInputHashBefore,
+			BaseProfileHashAfter:  task.BaseInputHashAfter,
+			BaseProfileChanged:    task.BaseInputChanged,
+			StartedAt:             startedAt,
+		}, nil, stockProfileSourceStatusesToAsset(sourceStatuses))
+		go s.startStockProfileAgentRunAsync(context.Background(), *agentRun, agentLedger, pack, agentRunModelName)
 	}
 	return StockProfileUpdateResult{Profile: profile, Task: createdTask, AgentRun: agentRun}, nil
 }
@@ -426,7 +442,8 @@ func (s *Service) RunAgentStockProfileSummary(ctx context.Context, symbol string
 	return *result.AgentRun, nil
 }
 
-func (s *Service) prepareStockProfileSummaryAgentRun(ctx context.Context, profile StockProfile, requestedBy string) (AgentRun, AgentDecisionLedger, string, error) {
+func (s *Service) prepareStockProfileSummaryAgentRun(ctx context.Context, pack StockProfileSummaryContext, requestedBy string) (AgentRun, AgentDecisionLedger, string, error) {
+	profile := pack.Profile
 	taskProfile, err := s.store.GetAgentTaskProfileByType(ctx, AgentTaskTypeStockProfileSummary)
 	if err != nil {
 		return AgentRun{}, AgentDecisionLedger{}, "", err
@@ -443,7 +460,7 @@ func (s *Service) prepareStockProfileSummaryAgentRun(ctx context.Context, profil
 	}
 	inputArtifact, _ := json.Marshal(map[string]any{
 		"task":    AgentTaskTypeStockProfileSummary,
-		"profile": profile,
+		"context": pack,
 	})
 	run, ledger, err := s.CreateAgentRunRecord(ctx, AgentRunRecordParams{
 		TaskType:             AgentTaskTypeStockProfileSummary,
@@ -461,7 +478,8 @@ func (s *Service) prepareStockProfileSummaryAgentRun(ctx context.Context, profil
 	return run, ledger, model.ModelName, nil
 }
 
-func (s *Service) startStockProfileAgentRunAsync(ctx context.Context, run AgentRun, ledger AgentDecisionLedger, profile StockProfile, modelName string) {
+func (s *Service) startStockProfileAgentRunAsync(ctx context.Context, run AgentRun, ledger AgentDecisionLedger, pack StockProfileSummaryContext, modelName string) {
+	profile := pack.Profile
 	defer func() {
 		if r := recover(); r != nil {
 			if s.log != nil {
@@ -474,13 +492,22 @@ func (s *Service) startStockProfileAgentRunAsync(ctx context.Context, run AgentR
 		s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("no executor configured"))
 		return
 	}
+	if s.stockProfileAISem != nil {
+		select {
+		case s.stockProfileAISem <- struct{}{}:
+			defer func() { <-s.stockProfileAISem }()
+		case <-ctx.Done():
+			s.finalizeAgentRun(ctx, run.ID, nil, ctx.Err())
+			return
+		}
+	}
 	running := run
 	running.Status = AgentRunStatusRunning
 	if _, err := s.store.UpdateAgentRun(ctx, running); err != nil && s.log != nil {
 		s.log.Warn("update stock profile agent run to running failed", "run_id", run.ID, "ledger_id", ledger.ID, "symbol", profile.Symbol, "market", profile.Market, "model", modelName, "error", safelog.Text(err.Error(), 240))
 	}
 	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
-	execOutput, execErr := s.agentExecutor.ExecuteStockProfileSummary(ctx, taskID, profile, modelName)
+	execOutput, execErr := s.agentExecutor.ExecuteStockProfileSummary(ctx, taskID, pack, modelName)
 	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, execOutput, execErr)
 }
 

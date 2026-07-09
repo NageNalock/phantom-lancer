@@ -1898,6 +1898,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 		now := time.Now()
 		run.FinishedAt = now
 		s.markStockProfileAIEnhancementFailed(ctx, run, run.ErrorMessage)
+		_ = s.store.UpdateAssetMaintenanceItemByAgentRun(ctx, run.ID, AssetMaintenanceItemStatusFailed, StockProfileAIStatusFailed, run.ErrorMessage, now)
 		s.markOpportunityDiscoveryRunFailed(ctx, run, run.ErrorMessage)
 		s.markPortfolioSentinelAgentRunFailed(ctx, run, run.ErrorMessage)
 
@@ -1922,6 +1923,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 		run.ErrorMessage = agentRunFailureMessage("no valid result submitted", execOutput)
 		run.FinishedAt = time.Now()
 		s.markStockProfileAIEnhancementFailed(ctx, run, run.ErrorMessage)
+		_ = s.store.UpdateAssetMaintenanceItemByAgentRun(ctx, run.ID, AssetMaintenanceItemStatusFailed, StockProfileAIStatusFailed, run.ErrorMessage, run.FinishedAt)
 		s.markOpportunityDiscoveryRunFailed(ctx, run, run.ErrorMessage)
 		s.markPortfolioSentinelAgentRunFailed(ctx, run, run.ErrorMessage)
 		ledger.OutputArtifactSummary = safelog.Text(outputArtifact.String(), 16384)
@@ -1991,6 +1993,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 			run.Status = AgentRunStatusFailed
 			run.ErrorMessage = safelog.Text("save stock profile enhancement failed: "+err.Error(), 500)
 			s.markStockProfileUpdateTaskAIResult(ctx, run.ID, StockProfileUpdateStatusPartial, StockProfileAIStatusFailed, run.ErrorMessage)
+			_ = s.store.UpdateAssetMaintenanceItemByAgentRun(ctx, run.ID, AssetMaintenanceItemStatusFailed, StockProfileAIStatusFailed, run.ErrorMessage, time.Now())
 			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
 				s.log.Warn("finalize: update run after stock profile save failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "symbol", run.TriggerObjectID, "model", modelName, "error", safelog.Text(updateErr.Error(), 240))
 			}
@@ -2003,6 +2006,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 			return
 		}
 		s.markStockProfileUpdateTaskAIResult(ctx, run.ID, StockProfileUpdateStatusCompleted, StockProfileAIStatusReady, "")
+		_ = s.store.UpdateAssetMaintenanceItemByAgentRun(ctx, run.ID, AssetMaintenanceItemStatusCompleted, StockProfileAIStatusReady, "", time.Now())
 	}
 	if run.TaskType == AgentTaskTypeStrategyGeneration {
 		report, err := strategyGenerationReportFromResult(submitted.Result)

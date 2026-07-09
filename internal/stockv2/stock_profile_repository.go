@@ -46,8 +46,9 @@ func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (S
 				business_summary_zh, business_summary_en, business_lines_zh_json,
 				business_lines_en_json, risk_tags_zh_json, risk_tags_en_json,
 				profile_text_zh, profile_text_en, ai_profile_status, ai_profile_model,
-				ai_profile_confidence, ai_profile_error, ai_profile_updated_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				ai_profile_confidence, ai_profile_error, ai_profile_updated_at,
+				base_profile_hash, base_profile_updated_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(symbol) DO UPDATE SET
 				market = excluded.market,
 				instrument_type = excluded.instrument_type,
@@ -81,6 +82,8 @@ func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (S
 				ai_profile_confidence = excluded.ai_profile_confidence,
 				ai_profile_error = excluded.ai_profile_error,
 				ai_profile_updated_at = excluded.ai_profile_updated_at,
+				base_profile_hash = excluded.base_profile_hash,
+				base_profile_updated_at = excluded.base_profile_updated_at,
 				updated_at = excluded.updated_at
 		`, profile.Symbol, profile.Market, profile.InstrumentType, profile.Name, aliasesJSON,
 			profile.Industry, sectorsJSON, conceptsJSON, tagsJSON, profile.BusinessSummary,
@@ -90,6 +93,7 @@ func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (S
 			businessLinesZhJSON, businessLinesEnJSON, riskTagsZhJSON, riskTagsEnJSON,
 			profile.ProfileTextZh, profile.ProfileTextEn, profile.AIProfileStatus, profile.AIProfileModel,
 			profile.AIProfileConfidence, profile.AIProfileError, nullableTime(profile.AIProfileUpdatedAt),
+			profile.BaseProfileHash, nullableTime(profile.BaseProfileUpdatedAt),
 			profile.UpdatedAt)
 		return execErr
 	})
@@ -397,7 +401,7 @@ func stockProfileSelectSQL() string {
 		       COALESCE(profile_text_zh,''), COALESCE(profile_text_en,''),
 		       COALESCE(ai_profile_status,'missing'), COALESCE(ai_profile_model,''),
 		       COALESCE(ai_profile_confidence,0), COALESCE(ai_profile_error,''),
-		       ai_profile_updated_at, updated_at
+		       ai_profile_updated_at, COALESCE(base_profile_hash,''), base_profile_updated_at, updated_at
 		FROM stockv2_stock_profiles`
 }
 
@@ -428,7 +432,7 @@ func scanStockProfile(scanner rowScanner) (StockProfile, error) {
 	var aliasesJSON, sectorsJSON, conceptsJSON, tagsJSON string
 	var aliasesZhJSON, aliasesEnJSON, keywordsZhJSON, keywordsEnJSON string
 	var businessLinesZhJSON, businessLinesEnJSON, riskTagsZhJSON, riskTagsEnJSON string
-	var aiProfileUpdatedAt sql.NullTime
+	var aiProfileUpdatedAt, baseProfileUpdatedAt sql.NullTime
 	if err := scanner.Scan(
 		&profile.Symbol,
 		&profile.Market,
@@ -463,6 +467,8 @@ func scanStockProfile(scanner rowScanner) (StockProfile, error) {
 		&profile.AIProfileConfidence,
 		&profile.AIProfileError,
 		&aiProfileUpdatedAt,
+		&profile.BaseProfileHash,
+		&baseProfileUpdatedAt,
 		&profile.UpdatedAt,
 	); err != nil {
 		return StockProfile{}, err
@@ -482,6 +488,9 @@ func scanStockProfile(scanner rowScanner) (StockProfile, error) {
 	profile.RiskTagsEn = unmarshalProfileStrings(riskTagsEnJSON)
 	if aiProfileUpdatedAt.Valid {
 		profile.AIProfileUpdatedAt = aiProfileUpdatedAt.Time
+	}
+	if baseProfileUpdatedAt.Valid {
+		profile.BaseProfileUpdatedAt = baseProfileUpdatedAt.Time
 	}
 	if profile.ProfileVersion <= 0 {
 		profile.ProfileVersion = 1
