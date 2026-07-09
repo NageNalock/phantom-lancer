@@ -71,9 +71,23 @@ func dailyBarRangeStartEnd(r string, now time.Time) (string, string) {
 	if err != nil {
 		loc = time.Local
 	}
-	end := now.In(loc)
+	end := effectiveDailyBarEnd(now.In(loc), loc)
 	start := end.AddDate(0, 0, -dailyBarRangeDays(r))
 	return start.Format("2006-01-02"), end.Format("2006-01-02")
+}
+
+func effectiveDailyBarEnd(now time.Time, loc *time.Location) time.Time {
+	if loc == nil {
+		loc = time.Local
+	}
+	end := now.In(loc)
+	if end.Hour() < 16 || (end.Hour() == 16 && end.Minute() < 30) {
+		end = end.AddDate(0, 0, -1)
+	}
+	for end.Weekday() == time.Saturday || end.Weekday() == time.Sunday {
+		end = end.AddDate(0, 0, -1)
+	}
+	return end
 }
 
 func isDailyBarsStale(latestDate string, now time.Time) bool {

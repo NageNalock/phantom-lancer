@@ -43,10 +43,12 @@ export function StockV2KLineChart({
     pct: number;
   } | null>(null);
 
+  const chartBars = useMemo(() => dedupeChartBars(bars ?? [], mode), [bars, mode]);
+
   // lightweight-charts 需要 time 为 UTCTimestamp（秒级）。
   const candleData = useMemo(() => {
-    if (!bars?.length) return [];
-    return bars.map((b) => {
+    if (!chartBars.length) return [];
+    return chartBars.map((b) => {
       const label = barLabel(b, mode);
       const t = chartTimestamp(b, mode);
       return {
@@ -60,15 +62,15 @@ export function StockV2KLineChart({
         _date: label,
       };
     });
-  }, [bars, mode]);
+  }, [chartBars, mode]);
   const candleDataRef = useRef(candleData);
   useEffect(() => {
     candleDataRef.current = candleData;
   }, [candleData]);
 
   const volumeData = useMemo(() => {
-    if (!bars?.length) return [];
-    return bars.map((b) => {
+    if (!chartBars.length) return [];
+    return chartBars.map((b) => {
       const t = chartTimestamp(b, mode);
       const up = b.close >= b.open;
       return {
@@ -77,8 +79,8 @@ export function StockV2KLineChart({
         color: up ? "rgba(207,31,50,0.55)" : "rgba(18,132,79,0.55)",
       };
     });
-  }, [bars, mode]);
-  const shouldRenderChart = !error && !loading && !!bars?.length;
+  }, [chartBars, mode]);
+  const shouldRenderChart = !error && !loading && chartBars.length > 0;
 
   // 初始化图表。组件第一次渲染常常是 loading/empty 分支，此时 chart 容器还不存在；
   // 因此不能用空依赖只跑一次，要等真实容器出现后再创建 lightweight-charts 实例。
@@ -252,7 +254,7 @@ export function StockV2KLineChart({
     );
   }
 
-  if (!bars?.length) {
+  if (!chartBars.length) {
     return (
       <div className="h-[420px] w-full">
         <EmptyState
@@ -263,8 +265,8 @@ export function StockV2KLineChart({
     );
   }
 
-  if (bars.length === 1) {
-    const only = bars[0];
+  if (chartBars.length === 1) {
+    const only = chartBars[0];
     const label = barLabel(only, mode);
     return (
       <div className="flex h-[420px] w-full flex-col rounded-lg border border-[var(--line)] bg-[var(--surface)]">
@@ -301,7 +303,7 @@ export function StockV2KLineChart({
     );
   }
 
-  const latest = bars[bars.length - 1];
+  const latest = chartBars[chartBars.length - 1];
   const display = hover ?? {
     time: barLabel(latest, mode),
     open: latest.open,
@@ -368,6 +370,32 @@ function formatVol(n: number): string {
   if (n >= 1e8) return (n / 1e8).toFixed(2) + "亿";
   if (n >= 1e4) return (n / 1e4).toFixed(2) + "万";
   return String(Math.round(n));
+}
+
+function dedupeChartBars(
+  bars: Array<StockV2DailyBar | StockV2MinuteBar>,
+  mode: "daily" | "minute",
+): Array<StockV2DailyBar | StockV2MinuteBar> {
+  if (bars.length <= 1) return bars;
+  const byTime = new Map<string, StockV2DailyBar | StockV2MinuteBar>();
+  for (const bar of bars) {
+    const key = barTimeValue(bar, mode);
+    const prev = byTime.get(key);
+    if (!prev || chartBarRank(bar) > chartBarRank(prev)) {
+      byTime.set(key, bar);
+    }
+  }
+  return Array.from(byTime.values()).sort((a, b) => barTimeValue(a, mode).localeCompare(barTimeValue(b, mode)));
+}
+
+function chartBarRank(bar: StockV2DailyBar | StockV2MinuteBar): number {
+  const source = "source" in bar ? bar.source || "" : "";
+  let rank = 0;
+  if (source === "baidu_kline") rank += 100;
+  if ("amount" in bar && (bar.amount ?? 0) > 0) rank += 10;
+  if ("turnoverRate" in bar && (bar.turnoverRate ?? 0) > 0) rank += 5;
+  if ((bar.volume ?? 0) > 0) rank += 1;
+  return rank;
 }
 
 function barTimeValue(b: StockV2DailyBar | StockV2MinuteBar, mode: "daily" | "minute"): string {

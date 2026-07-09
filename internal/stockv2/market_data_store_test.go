@@ -75,6 +75,86 @@ func TestMarketDataStoreUpsertQueryStats(t *testing.T) {
 	}
 }
 
+func TestMarketDataStoreGetDailyBarsDedupesSources(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewMarketDataStore(filepath.Join(t.TempDir(), "stock_market.duckdb"))
+	if err != nil {
+		t.Fatalf("new market store: %v", err)
+	}
+	defer store.Close()
+
+	fetchedAt := time.Date(2026, 7, 9, 15, 5, 0, 0, time.UTC)
+	bars := []StockV2DailyBar{
+		{
+			Symbol:    "002457",
+			Market:    "SZ",
+			TradeDate: "2026-07-09",
+			Open:      15.16,
+			High:      15.37,
+			Low:       14.59,
+			Close:     15.06,
+			Volume:    632970,
+			Adjusted:  DailyBarAdjustedNone,
+			Source:    "tencent_fqkline",
+			FetchedAt: fetchedAt,
+			Quality:   DailyBarQualityOK,
+		},
+		{
+			Symbol:       "002457",
+			Market:       "SZ",
+			TradeDate:    "2026-07-09",
+			Open:         15.16,
+			High:         15.37,
+			Low:          14.59,
+			Close:        15.06,
+			Volume:       63297016,
+			Amount:       946834366,
+			TurnoverRate: 18.99,
+			Adjusted:     DailyBarAdjustedNone,
+			Source:       "baidu_kline",
+			FetchedAt:    fetchedAt.Add(-time.Minute),
+			Quality:      DailyBarQualityOK,
+		},
+		{
+			Symbol:    "002457",
+			Market:    "SZ",
+			TradeDate: "2026-07-08",
+			Open:      14.93,
+			High:      16.3,
+			Low:       14.14,
+			Close:     15.48,
+			Volume:    87073222,
+			Amount:    1313594073,
+			Adjusted:  DailyBarAdjustedNone,
+			Source:    "baidu_kline",
+			FetchedAt: fetchedAt,
+			Quality:   DailyBarQualityOK,
+		},
+	}
+	if err := store.UpsertDailyBars(ctx, bars); err != nil {
+		t.Fatalf("upsert bars: %v", err)
+	}
+
+	got, err := store.GetDailyBars(ctx, "002457", DailyBarAdjustedNone, "", "", 0)
+	if err != nil {
+		t.Fatalf("get bars: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	if got[1].TradeDate != "2026-07-09" || got[1].Source != "baidu_kline" || got[1].Amount == 0 {
+		t.Fatalf("unexpected deduped latest bar: %+v", got[1])
+	}
+
+	count, earliest, latest, source, _, err := store.GetDailyBarsStats(ctx, "002457", DailyBarAdjustedNone)
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if count != 2 || earliest != "2026-07-08" || latest != "2026-07-09" || source != "baidu_kline" {
+		t.Fatalf("unexpected stats: count=%d earliest=%q latest=%q source=%q", count, earliest, latest, source)
+	}
+}
+
 func TestNewStoreWithMarketDBMigratesLegacySQLiteDailyBars(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

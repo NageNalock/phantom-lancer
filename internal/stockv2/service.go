@@ -1030,7 +1030,10 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 	// 使用百度财经作为主数据源（提供 amount 和 turnover_rate），
 	// 抓取全量后按缺口区间过滤，只保留需要补的 bars，避免全量 upsert。
 	var bars []StockV2DailyBar
+	baiduTried := false
+	baiduSucceeded := false
 	if s.baiduDailyBars != nil {
+		baiduTried = true
 		fetched, baiduErr := s.baiduDailyBars.FetchDailyBars(ctx, inst.Symbol, inst.Market, inst.InstrumentType)
 		if baiduErr != nil {
 			// 百度失败时回退到腾讯 fqkline
@@ -1043,11 +1046,18 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 			}
 			// 只保留缺口区间内的 bars，不全量 upsert
 			bars = filterBarsByRanges(fetched, ranges)
+			baiduSucceeded = true
 		}
 	}
 
-	// 如果百度未使用或失败，使用腾讯源按缺口区间抓取
-	if len(bars) == 0 {
+	// 百度全量成功但缺口内没有 bar，通常是凌晨/节假日把尚未产生的交易日当成缺口；
+	// 这不是源失败，不能再回退腾讯并把 0 条当错误。
+	if baiduSucceeded && len(bars) == 0 {
+		return false, nil, nil
+	}
+
+	// 如果百度未使用或失败，使用腾讯源按缺口区间抓取。
+	if !baiduTried || !baiduSucceeded {
 		bars = make([]StockV2DailyBar, 0, 256)
 		for _, r := range ranges {
 			fetched, fetchErr := s.dailyBarsSource.FetchDailyBars(ctx, inst.Symbol, inst.Market, r.Start, r.End, DailyBarAdjustedNone, 1800)

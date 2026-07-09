@@ -28,6 +28,47 @@ func TestDailyBarsNeedsMaintenance(t *testing.T) {
 	}
 }
 
+func TestDailyBarRangeStartEndUsesAvailableTradeDate(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	tests := []struct {
+		name    string
+		now     time.Time
+		wantEnd string
+	}{
+		{
+			name:    "before close data uses previous weekday",
+			now:     time.Date(2026, 7, 10, 0, 17, 0, 0, loc),
+			wantEnd: "2026-07-09",
+		},
+		{
+			name:    "after close data uses same weekday",
+			now:     time.Date(2026, 7, 10, 16, 45, 0, 0, loc),
+			wantEnd: "2026-07-10",
+		},
+		{
+			name:    "weekend rolls back to friday",
+			now:     time.Date(2026, 7, 12, 12, 0, 0, 0, loc),
+			wantEnd: "2026-07-10",
+		},
+		{
+			name:    "monday before close rolls back to friday",
+			now:     time.Date(2026, 7, 13, 9, 0, 0, 0, loc),
+			wantEnd: "2026-07-10",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, gotEnd := dailyBarRangeStartEnd(DailyBarRange1Y, tt.now)
+			if gotEnd != tt.wantEnd {
+				t.Fatalf("end=%s, want %s", gotEnd, tt.wantEnd)
+			}
+		})
+	}
+}
+
 func TestGetDailyBarsQualityBatchReturnsDataAndJobErrors(t *testing.T) {
 	ctx := context.Background()
 	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))

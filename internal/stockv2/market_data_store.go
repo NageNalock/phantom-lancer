@@ -606,22 +606,37 @@ func refreshDailyBarQualityWithTx(ctx context.Context, tx *sql.Tx, symbol, adjus
 		INSERT OR REPLACE INTO stockv2_daily_bar_quality (
 			symbol, adjusted, row_count, earliest_date, latest_date, source, last_error, updated_at
 		)
+		WITH selected AS (
+			SELECT *
+			FROM (
+				SELECT *,
+					ROW_NUMBER() OVER (
+						PARTITION BY symbol, adjusted, trade_date
+						ORDER BY
+							CASE WHEN source = 'baidu_kline' THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(amount, 0) > 0 THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(turnover_rate, 0) > 0 THEN 0 ELSE 1 END,
+							fetched_at DESC
+					) AS rn
+				FROM stockv2_daily_bars
+				WHERE symbol = ? AND adjusted = ?
+			)
+			WHERE rn = 1
+		)
 		SELECT
 			?,
 			?,
 			COUNT(*),
 			COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'), ''),
 			COALESCE(strftime(MAX(trade_date), '%Y-%m-%d'), ''),
-			COALESCE((SELECT source FROM stockv2_daily_bars
-			          WHERE symbol = ? AND adjusted = ?
+			COALESCE((SELECT source FROM selected
 			          ORDER BY fetched_at DESC LIMIT 1), ''),
 			COALESCE((SELECT error_message FROM stockv2_daily_bars
 			          WHERE symbol = ? AND adjusted = ? AND COALESCE(error_message, '') != ''
 			          ORDER BY fetched_at DESC LIMIT 1), ''),
 			?
-		FROM stockv2_daily_bars
-		WHERE symbol = ? AND adjusted = ?
-	`, symbol, adjusted, symbol, adjusted, symbol, adjusted, updatedAt, symbol, adjusted)
+		FROM selected
+	`, symbol, adjusted, symbol, adjusted, symbol, adjusted, updatedAt)
 	if err != nil {
 		return wrapError(err, fmt.Sprintf("refresh duckdb daily bar quality %s %s", symbol, adjusted))
 	}
@@ -656,22 +671,37 @@ func batchRefreshDailyBarQualityWithTx(ctx context.Context, tx *sql.Tx, affected
 		INSERT OR REPLACE INTO stockv2_daily_bar_quality (
 			symbol, adjusted, row_count, earliest_date, latest_date, source, last_error, updated_at
 		)
-		WITH agg AS (
+		WITH selected AS (
+			SELECT *
+			FROM (
+				SELECT *,
+					ROW_NUMBER() OVER (
+						PARTITION BY symbol, adjusted, trade_date
+						ORDER BY
+							CASE WHEN source = 'baidu_kline' THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(amount, 0) > 0 THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(turnover_rate, 0) > 0 THEN 0 ELSE 1 END,
+							fetched_at DESC
+					) AS rn
+				FROM stockv2_daily_bars
+				WHERE (symbol, adjusted) IN (` + strings.Join(placeholders, ",") + `)
+			)
+			WHERE rn = 1
+		),
+		agg AS (
 			SELECT
 				symbol,
 				adjusted,
 				COUNT(*) AS row_count,
 				COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'), '') AS earliest_date,
 				COALESCE(strftime(MAX(trade_date), '%Y-%m-%d'), '') AS latest_date
-			FROM stockv2_daily_bars
-			WHERE (symbol, adjusted) IN (` + strings.Join(placeholders, ",") + `)
+			FROM selected
 			GROUP BY symbol, adjusted
 		),
 		latest_source AS (
 			SELECT symbol, adjusted, source,
 				ROW_NUMBER() OVER (PARTITION BY symbol, adjusted ORDER BY fetched_at DESC) AS rn
-			FROM stockv2_daily_bars
-			WHERE (symbol, adjusted) IN (` + strings.Join(placeholders, ",") + `)
+			FROM selected
 		),
 		latest_error AS (
 			SELECT symbol, adjusted, error_message,
@@ -694,9 +724,9 @@ func batchRefreshDailyBarQualityWithTx(ctx context.Context, tx *sql.Tx, affected
 		LEFT JOIN latest_error le ON le.symbol = a.symbol AND le.adjusted = a.adjusted AND le.rn = 1
 	`
 
-	// 展开参数：IN 子句出现 3 次，每次都需要完整的 pairs 参数
+	// 展开参数：IN 子句出现 2 次，每次都需要完整的 pairs 参数
 	fullArgs := make([]any, 0, len(pairs)*6+1)
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 2; i++ {
 		for _, p := range pairs {
 			fullArgs = append(fullArgs, p.symbol, p.adjusted)
 		}
@@ -714,15 +744,23 @@ func (s *MarketDataStore) GetDailyBars(ctx context.Context, symbol, adjusted, st
 		return nil, fmt.Errorf("market data store is not initialized")
 	}
 	baseQuery := `
-		SELECT id, symbol, COALESCE(market,''), strftime(trade_date, '%Y-%m-%d') AS trade_date,
-		       COALESCE(open,0), COALESCE(high,0), COALESCE(low,0), COALESCE(close,0),
-		       COALESCE(prev_close,0), COALESCE(volume,0), COALESCE(amount,0), COALESCE(pct_change,0),
-		       COALESCE(turnover_rate,0), COALESCE(net_inflow,0), COALESCE(main_net_inflow,0),
-		       COALESCE(data_payload_json,''),
-		       adjusted, COALESCE(source,''), fetched_at, COALESCE(quality,''), COALESCE(error_message,''),
-		       created_at, updated_at
-		FROM stockv2_daily_bars
-		WHERE symbol = ? AND adjusted = ?
+		WITH selected AS (
+			SELECT id, symbol, market, trade_date, open, high, low, close, prev_close,
+			       volume, amount, pct_change, turnover_rate, net_inflow, main_net_inflow,
+			       data_payload_json, adjusted, source, fetched_at, quality, error_message,
+			       created_at, updated_at
+			FROM (
+				SELECT *,
+					ROW_NUMBER() OVER (
+						PARTITION BY symbol, adjusted, trade_date
+						ORDER BY
+							CASE WHEN source = 'baidu_kline' THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(amount, 0) > 0 THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(turnover_rate, 0) > 0 THEN 0 ELSE 1 END,
+							fetched_at DESC
+					) AS rn
+				FROM stockv2_daily_bars
+				WHERE symbol = ? AND adjusted = ?
 	`
 	args := []any{symbol, adjusted}
 	if startDate != "" {
@@ -733,6 +771,19 @@ func (s *MarketDataStore) GetDailyBars(ctx context.Context, symbol, adjusted, st
 		baseQuery += " AND trade_date <= CAST(? AS DATE)"
 		args = append(args, endDate)
 	}
+	baseQuery += `
+			)
+			WHERE rn = 1
+		)
+		SELECT id, symbol, COALESCE(market,''), strftime(trade_date, '%Y-%m-%d') AS trade_date,
+		       COALESCE(open,0), COALESCE(high,0), COALESCE(low,0), COALESCE(close,0),
+		       COALESCE(prev_close,0), COALESCE(volume,0), COALESCE(amount,0), COALESCE(pct_change,0),
+		       COALESCE(turnover_rate,0), COALESCE(net_inflow,0), COALESCE(main_net_inflow,0),
+		       COALESCE(data_payload_json,''),
+		       adjusted, COALESCE(source,''), fetched_at, COALESCE(quality,''), COALESCE(error_message,''),
+		       created_at, updated_at
+		FROM selected
+	`
 	query := baseQuery + " ORDER BY trade_date ASC"
 	if limit > 0 {
 		query = "SELECT * FROM (" + baseQuery + " ORDER BY trade_date DESC LIMIT ?) ORDER BY trade_date ASC"
