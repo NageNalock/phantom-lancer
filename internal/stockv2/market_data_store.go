@@ -620,6 +620,7 @@ func refreshDailyBarQualityWithTx(ctx context.Context, tx *sql.Tx, symbol, adjus
 					) AS rn
 				FROM stockv2_daily_bars
 				WHERE symbol = ? AND adjusted = ?
+				  AND (source != 'tencent_fqkline' OR COALESCE(amount, 0) > 0 OR COALESCE(turnover_rate, 0) > 0)
 			)
 			WHERE rn = 1
 		)
@@ -685,6 +686,7 @@ func batchRefreshDailyBarQualityWithTx(ctx context.Context, tx *sql.Tx, affected
 					) AS rn
 				FROM stockv2_daily_bars
 				WHERE (symbol, adjusted) IN (` + strings.Join(placeholders, ",") + `)
+				  AND (source != 'tencent_fqkline' OR COALESCE(amount, 0) > 0 OR COALESCE(turnover_rate, 0) > 0)
 			)
 			WHERE rn = 1
 		),
@@ -805,6 +807,7 @@ func (s *MarketDataStore) GetDailyBarDates(ctx context.Context, symbol, adjusted
 		SELECT DISTINCT strftime(trade_date, '%Y-%m-%d') AS trade_date
 		FROM stockv2_daily_bars
 		WHERE symbol = ? AND adjusted = ?
+		  AND (source != 'tencent_fqkline' OR COALESCE(amount, 0) > 0 OR COALESCE(turnover_rate, 0) > 0)
 	`
 	args := []any{symbol, adjusted}
 	if startDate != "" {

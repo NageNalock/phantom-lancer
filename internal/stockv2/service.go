@@ -1027,6 +1027,26 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 		return false, nil, nil
 	}
 
+	bars, err := s.fetchDailyBarsForMissingRanges(ctx, inst, ranges)
+	if err != nil {
+		return true, nil, err
+	}
+
+	// 百度全量成功但缺口内没有 bar，通常是凌晨/节假日把尚未产生的交易日当成缺口。
+	if len(bars) == 0 {
+		return false, nil, nil
+	}
+
+	// 东财资金面 enrichment（填充 NetInflow / MainNetInflow）
+	_ = s.enrichDailyBarsWithDataFacets(ctx, inst, bars)
+	return true, bars, nil
+}
+
+func (s *Service) fetchDailyBarsForMissingRanges(ctx context.Context, inst StockV2Instrument, ranges []dailyBarMissingRange) ([]StockV2DailyBar, error) {
+	if len(ranges) == 0 {
+		return nil, nil
+	}
+
 	// 使用百度财经作为主数据源（提供 amount 和 turnover_rate），
 	// 抓取全量后按缺口区间过滤，只保留需要补的 bars，避免全量 upsert。
 	var bars []StockV2DailyBar
@@ -1036,13 +1056,10 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 		baiduTried = true
 		fetched, baiduErr := s.baiduDailyBars.FetchDailyBars(ctx, inst.Symbol, inst.Market, inst.InstrumentType)
 		if baiduErr != nil {
-			if errors.Is(baiduErr, errBaiduDailyBarsAccessDenied) {
-				return true, nil, baiduErr
-			}
-			// 百度失败时回退到腾讯 fqkline
 			if s.log != nil {
-				s.log.Warn("baidu daily bars failed, falling back to tencent", "symbol", inst.Symbol, "error", safelog.Text(baiduErr.Error(), 200))
+				s.log.Warn("baidu daily bars failed", "symbol", inst.Symbol, "error", safelog.Text(baiduErr.Error(), 200))
 			}
+			return nil, baiduErr
 		} else {
 			for i := range fetched {
 				fetched[i].Symbol = inst.Symbol
@@ -1053,10 +1070,9 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 		}
 	}
 
-	// 百度全量成功但缺口内没有 bar，通常是凌晨/节假日把尚未产生的交易日当成缺口；
-	// 这不是源失败，不能再回退腾讯并把 0 条当错误。
-	if baiduSucceeded && len(bars) == 0 {
-		return false, nil, nil
+	// 百度全量成功但缺口内没有 bar，这不是源失败，不能再回退腾讯并把 0 条当错误。
+	if baiduSucceeded {
+		return bars, nil
 	}
 
 	// 如果百度未使用或失败，使用腾讯源按缺口区间抓取。
@@ -1065,7 +1081,7 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 		for _, r := range ranges {
 			fetched, fetchErr := s.dailyBarsSource.FetchDailyBars(ctx, inst.Symbol, inst.Market, r.Start, r.End, DailyBarAdjustedNone, 1800)
 			if fetchErr != nil {
-				return true, nil, fetchErr
+				return nil, fetchErr
 			}
 			for i := range fetched {
 				fetched[i].Symbol = inst.Symbol
@@ -1073,13 +1089,7 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 			bars = append(bars, fetched...)
 		}
 	}
-
-	// 东财资金面 enrichment（填充 NetInflow / MainNetInflow）
-	_ = s.enrichDailyBarsWithDataFacets(ctx, inst, bars)
-	if len(bars) == 0 && !dailyBarsNeedsMaintenance(quality) {
-		return false, nil, nil
-	}
-	return true, bars, nil
+	return bars, nil
 }
 
 func dailyBarsNeedsMaintenance(q DailyBarsQuality) bool {

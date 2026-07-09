@@ -198,7 +198,34 @@ func dailyBarsQualityFromStats(symbol, adjusted string, stats dailyBarsStats, ch
 }
 
 // ensureOneSymbol 抓取单只股票指定区间日 K 并落盘。失败返回 error，不写坏数据。
-func (s *Service) ensureOneSymbol(ctx context.Context, symbol, market, startDate, endDate, adjusted string) (int, error) {
+func (s *Service) ensureOneSymbol(ctx context.Context, inst StockV2Instrument, startDate, endDate, adjusted string) (int, error) {
+	symbol := inst.Symbol
+	market := inst.Market
+	if adjusted == DailyBarAdjustedNone {
+		startTime, err := time.Parse("2006-01-02", startDate)
+		if err != nil {
+			return 0, err
+		}
+		endTime, err := time.Parse("2006-01-02", endDate)
+		if err != nil {
+			return 0, err
+		}
+		dates, err := s.store.GetDailyBarDates(ctx, symbol, adjusted, startDate, endDate)
+		if err != nil {
+			return 0, err
+		}
+		ranges := planDailyBarMissingRanges(dates, startTime, endTime)
+		bars, err := s.fetchDailyBarsForMissingRanges(ctx, inst, ranges)
+		if err != nil {
+			return 0, err
+		}
+		_ = s.enrichDailyBarsWithDataFacets(ctx, inst, bars)
+		if err := s.store.UpsertDailyBars(ctx, bars); err != nil {
+			return 0, err
+		}
+		return len(bars), nil
+	}
+
 	// start/end 已限定范围；count 给上限 1800（经端点验证稳定），覆盖 5y。
 	bars, err := s.dailyBarsSource.FetchDailyBars(ctx, symbol, market, startDate, endDate, adjusted, 1800)
 	if err != nil {
@@ -247,10 +274,11 @@ func (s *Service) EnsureDailyBars(ctx context.Context, symbol, rangeCode, adjust
 		return result, err
 	}
 
-	// market 优先取主数据；缺失时数据源会按代码推断
-	market := ""
-	if inst, err := s.store.GetInstrument(ctx, symbol); err == nil {
-		market = inst.Market
+	// instrument 优先取主数据；缺失时数据源会按代码推断 market。
+	inst := StockV2Instrument{Symbol: symbol, InstrumentType: InstrumentTypeStock}
+	if existing, err := s.store.GetInstrument(ctx, symbol); err == nil {
+		inst = existing
+		inst.Symbol = symbol
 	}
 
 	job := StockV2DailyBarJob{
@@ -273,12 +301,14 @@ func (s *Service) EnsureDailyBars(ctx context.Context, symbol, rangeCode, adjust
 
 	result.JobID = job.ID
 	result.JobRunning = true
-	go s.runEnsureSymbolJob(context.Background(), job.ID, symbol, market, start, end, adjusted)
+	go s.runEnsureSymbolJob(context.Background(), job.ID, inst, start, end, adjusted)
 	return result, nil
 }
 
 // runEnsureSymbolJob 异步执行单只补拉，更新任务状态。
-func (s *Service) runEnsureSymbolJob(ctx context.Context, jobID, symbol, market, start, end, adjusted string) {
+func (s *Service) runEnsureSymbolJob(ctx context.Context, jobID string, inst StockV2Instrument, start, end, adjusted string) {
+	symbol := inst.Symbol
+	market := inst.Market
 	defer func() {
 		if r := recover(); r != nil {
 			if s.log != nil {
@@ -293,7 +323,7 @@ func (s *Service) runEnsureSymbolJob(ctx context.Context, jobID, symbol, market,
 		}
 	}()
 
-	_, err := s.ensureOneSymbol(ctx, symbol, market, start, end, adjusted)
+	_, err := s.ensureOneSymbol(ctx, inst, start, end, adjusted)
 	now := time.Now()
 	if err != nil {
 		if s.log != nil {
@@ -459,7 +489,8 @@ func (s *Service) runDailyBarsBatchJob(ctx context.Context, jobID string, req Da
 		}
 
 		processed++
-		_, err := s.ensureOneSymbol(ctx, sym, "", start, end, adjusted)
+		inst := StockV2Instrument{Symbol: sym, InstrumentType: InstrumentTypeStock}
+		_, err := s.ensureOneSymbol(ctx, inst, start, end, adjusted)
 		if err != nil {
 			failedItems = append(failedItems, UpdateFailure{Symbol: sym, Reason: safelog.Text(truncateDailyBarErr(err.Error()), 240)})
 		} else {

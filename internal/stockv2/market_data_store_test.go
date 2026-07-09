@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -152,6 +153,30 @@ func TestMarketDataStoreGetDailyBarsDedupesSources(t *testing.T) {
 	}
 	if count != 2 || earliest != "2026-07-08" || latest != "2026-07-09" || source != "baidu_kline" {
 		t.Fatalf("unexpected stats: count=%d earliest=%q latest=%q source=%q", count, earliest, latest, source)
+	}
+
+	if err := store.UpsertDailyBars(ctx, []StockV2DailyBar{{
+		Symbol:    "002457",
+		Market:    "SZ",
+		TradeDate: "2026-07-10",
+		Open:      15.06,
+		High:      15.2,
+		Low:       14.9,
+		Close:     15.1,
+		Volume:    100,
+		Adjusted:  DailyBarAdjustedNone,
+		Source:    "tencent_fqkline",
+		FetchedAt: fetchedAt,
+		Quality:   DailyBarQualityOK,
+	}}); err != nil {
+		t.Fatalf("upsert tencent-only bar: %v", err)
+	}
+	dates, err := store.GetDailyBarDates(ctx, "002457", DailyBarAdjustedNone, "2026-07-08", "2026-07-10")
+	if err != nil {
+		t.Fatalf("get dates: %v", err)
+	}
+	if strings.Join(dates, ",") != "2026-07-08,2026-07-09" {
+		t.Fatalf("dates = %v, want only complete baidu dates", dates)
 	}
 }
 
