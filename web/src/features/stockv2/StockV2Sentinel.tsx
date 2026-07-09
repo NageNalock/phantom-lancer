@@ -595,12 +595,13 @@ function ItemList({ title, tone, items }: { title: string; tone: "good" | "warn"
 function ReviewItem({ review, onOpenReview }: { review: StockV2OperationReview; onOpenReview: (hitId: string) => void }) {
   const guardrails = mapFromAny(review.result?.["guardrails"]);
   const guardStatus = str(guardrails["status"]);
+  const instrumentLabel = reviewInstrumentLabel(review);
   return (
     <div className="rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3 text-xs">
       <div className="flex flex-wrap items-center gap-2">
         <Pill tone={stockV2ReviewStatusTone(review.status)}>{stockV2ReviewStatusLabel(review.status)}</Pill>
         {review.outputType ? <Pill tone="neutral">{stockV2ReviewOutputTypeLabel(review.outputType)}</Pill> : null}
-        {review.symbol ? <Pill tone="neutral">{review.symbol}</Pill> : null}
+        {instrumentLabel ? <Pill tone="neutral">{instrumentLabel}</Pill> : null}
         {guardStatus ? <Pill tone={guardStatus === "blocked" ? "danger" : "good"}>guardrails {guardStatus}</Pill> : null}
       </div>
       {review.resultSummary ? <p className="mt-1 break-words text-[var(--muted-strong)]">{review.resultSummary}</p> : null}
@@ -611,6 +612,31 @@ function ReviewItem({ review, onOpenReview }: { review: StockV2OperationReview; 
       </div>
     </div>
   );
+}
+
+function reviewInstrumentLabel(review: StockV2OperationReview): string {
+  const symbol = str(review.symbol || review.inputContext?.hit?.symbol).trim();
+  if (!symbol) return "";
+  const market = str(review.market || review.inputContext?.hit?.market).trim();
+  const name = reviewHoldingName(review, symbol, market) || reviewAffectedHoldingName(review, symbol, market);
+  return name ? `${symbol} · ${name}` : symbol;
+}
+
+function reviewHoldingName(review: StockV2OperationReview, symbol: string, market: string): string {
+  const holdings = review.inputContext?.portfolio?.holdings || [];
+  const holding = holdings.find((item) => sameInstrument(item.symbol, item.market, symbol, market));
+  return holding?.name?.trim() || "";
+}
+
+function reviewAffectedHoldingName(review: StockV2OperationReview, symbol: string, market: string): string {
+  const evidence = review.inputContext?.hit?.evidence || {};
+  const rawResult = mapFromAny(evidence["portfolioSentinelRawResult"]);
+  const affected = arr(rawResult["affected_holdings"]).find((item) => sameInstrument(str(item["symbol"]), str(item["market"]), symbol, market));
+  return str(affected?.["name"]).trim();
+}
+
+function sameInstrument(itemSymbol: string, itemMarket: string, symbol: string, market: string): boolean {
+  return itemSymbol.trim() === symbol && (!market || itemMarket.trim() === market);
 }
 
 function TriggerDrawer({
