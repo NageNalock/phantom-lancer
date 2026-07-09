@@ -80,10 +80,7 @@
 - 单标的手动“更新画像”可以继续存在，但内部调用同一条 per-symbol 资产维护管线，并允许只处理该 symbol。
 
 迁移要求：
-
-- 旧设置字段可保留一段时间用于兼容，但前端不再展示为独立配置。
-- 后端读旧字段时应映射到统一维护默认预算，避免旧数据导致启动失败。
-- 旧 `stockv2_stock_profile_update_tasks` 可以继续作为历史记录读取；新任务明细应能关联或替代它。
+- 旧的设置信息可以全部放弃, 不要默兼容, 导致新的逻辑不符合预期
 
 ## 5. 维护对象范围
 
@@ -559,3 +556,247 @@ Agent 负责：
 - 不要把全量市场重爬作为默认路径。
 - 不要只改后端。前端导航、配置、任务历史和单标的详情必须同步。
 - 不要删除旧字段导致历史数据不可读；废弃旧逻辑时保留兼容层。
+
+# 相关股票信息获取接口
+
+下面是带接口地址和测试格式的版本, 由于本服务部署在海外, 所以部分接口无法使用. 以下为经过测试的接口:
+
+  1. 腾讯日 K fqkline
+
+  用途：日 K 缺口补齐。
+
+  测试 URL：
+
+  https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sz002457,day,2026-07-01,2026-07-08,20,
+
+  格式：
+
+  param={marketPrefix}{code},day,{startDate},{endDate},{count},{fq}
+
+  示例：
+
+  param=sz002457,day,2026-07-01,2026-07-08,20,
+
+  返回结果：成功，HTTP 200，返回 6 根日 K。
+
+  字段形态：
+
+  ["2026-07-08", "14.930", "15.480", "16.300", "14.140", "870732.000"]
+
+  含义：
+
+  date, open, close, high, low, volume
+
+  限制：不提供成交额、换手率、资金流。
+
+  2. 腾讯实时行情
+
+  用途：实时价、涨跌幅、换手率等轻量字段。
+
+  测试 URL：
+
+  https://qt.gtimg.cn/q=sz002457
+
+  格式：
+
+  q={marketPrefix}{code}
+
+  结果：成功，HTTP 200，返回 88 个 ~ 分隔字段。
+
+  本次样例字段：
+
+  字段 3  = 15.48  最新价
+  字段 32 = 3.27   涨跌幅
+  字段 38 = 26.13  换手率
+
+  这个适合高频/批量，优先级高于东财实时类接口。
+
+  3. 东财 F10 公司概况
+
+  用途：公司全称、简称、行业、公司简介、经营范围。
+
+  测试 URL：
+
+  https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/CompanySurveyAjax?code=SZ002457
+
+  格式：
+
+  code={MARKET}{code}
+
+  示例：
+
+  code=SZ002457
+
+  结果：成功。
+
+  关键字段：
+
+  jbzl.gsmc      公司全称
+  jbzl.agjc      A股简称
+  jbzl.sshy      所属行业
+  jbzl.sszjhhy   证监会行业
+  jbzl.gsjj      公司简介
+  jbzl.jyfw      经营范围
+
+  4. 东财 F10 主营构成
+
+  用途：主营业务构成、收入占比、毛利率等。
+
+  测试 URL：
+
+  https://emweb.securities.eastmoney.com/PC_HSF10/BusinessAnalysis/PageAjax?code=SZ002457
+
+  格式：
+
+  code={MARKET}{code}
+
+  结果：成功，返回 200 条。
+
+  关键字段：
+
+  zygcfx[].REPORT_DATE
+  zygcfx[].MAINOP_TYPE
+  zygcfx[].ITEM_NAME
+  zygcfx[].MAIN_BUSINESS_INCOME
+  zygcfx[].MBI_RATIO
+  zygcfx[].GROSS_RPOFIT_RATIO
+
+  样例业务：
+
+  非金属矿物制品业
+  水利技术专业服务业
+
+  5. 东财 F10 核心题材 / 板块
+
+  用途：重点板块、概念、主营业务、行业背景。
+
+  测试 URL：
+
+  https://emweb.securities.eastmoney.com/PC_HSF10/CoreConception/PageAjax?code=SZ002457
+
+  格式同上：
+
+  code=SZ002457
+
+  结果：成功，返回 20 个板块、12 个核心题材。
+
+  关键字段：
+
+  ssbk[].BOARD_NAME      板块名
+  hxtc[].KEYWORD         关键词
+  hxtc[].MAINPOINT_CONTENT 说明正文
+  hxtc[].KEY_CLASSIF     分类
+
+  样例：
+
+  板块：建筑材料、装修建材、管材、宁夏板块
+  主营：高品质输水管道及相关产品的研发、生产、销售
+
+  6. 巨潮 orgId 映射
+
+  用途：公告查询前拿真实 orgId。
+
+  测试 URL：
+
+  http://www.cninfo.com.cn/new/data/szse_stock.json
+
+  结果：成功，约 6209 条。
+
+  002457 命中：
+
+  {
+    "code": "002457",
+    "orgId": "9900013690",
+    "zwjc": "青龙管业"
+  }
+
+  7. 巨潮公告查询
+
+  用途：公告、重大事项披露。
+
+  测试 URL：
+
+  https://www.cninfo.com.cn/new/hisAnnouncement/query
+
+  测试 POST body：
+
+  stock=002457,9900013690
+  &tabName=fulltext
+  &pageSize=10
+  &pageNum=1
+  &column=szse
+  &category=
+  &plate=sz
+  &seDate=
+  &searchkey=
+  &secid=
+  &sortName=
+  &sortType=
+  &isHLtitle=true
+
+  关键点：stock 必须是：
+
+  {code},{orgId}
+
+  结果：成功，totalAnnouncement=2095，最近 10 条正常返回。
+
+  样例：
+
+  2026-07-08 关于股票交易异常波动公告
+  2026-07-07 关于签订买卖合同的公告
+  2026-07-02 关于收到拟中标通知书的公告
+
+  PDF 地址格式：
+
+  https://static.cninfo.com.cn/{adjunctUrl}
+
+  测试样例：
+
+  https://static.cninfo.com.cn/finalpage/2026-07-08/1225414335.PDF
+
+  结果：HTTP 200，Content-Type: application/pdf。
+
+  8. 东财日级资金流
+
+  用途：日级主力、大单、中单、小单、超大单净流入。
+
+  测试 URL：
+
+  https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=20&klt=101&secid=0.002457&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63
+
+  格式：
+
+  secid={marketCode}.{code}
+
+  其中：
+
+  沪市 1.xxxxxx
+  深市 0.xxxxxx
+
+  结果：成功，返回 20 条。
+
+  样例行：
+
+  2026-07-08,-7063286.0,-8017200.0,15080480.0,6673264.0,-13736550.0,-0.54,-0.61,1.15,0.51,-1.05,15.48,3.27
+
+  前几个字段可按：
+
+  date, main_net, small_net, mid_net, large_net, super_net, ...
+
+  注意：东财 push2his 可用，但要限速和失败退避。
+
+  9. 不建议第一版依赖的接口
+
+  东财 slist 板块接口：
+
+  https://push2.eastmoney.com/api/qt/slist/get?fltt=2&invt=2&secid=0.002457&spt=3&pi=0&pz=200&po=1&fields=f12,f14,f3,f128
+
+  测试结果：当前网络返回 302 且 body 为空。
+
+  东财 stock/get：
+
+  https://push2.eastmoney.com/api/qt/stock/get?secid=0.002457&fields=f43,f44,f45,f46,f47,f48,f49,f50,f57,f58,f84,f85,f116,f117,f168,f169,f170
+
+  测试结果：当前网络出现 502 / 空响应。
+
+  结论：这两个不放进核心路径。板块优先用东财 F10 CoreConception，实时字段优先用腾讯。
