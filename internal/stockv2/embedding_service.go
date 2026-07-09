@@ -540,6 +540,66 @@ func (s *Service) SemanticSearchNewsEvents(ctx context.Context, req SemanticSear
 	return out, nil
 }
 
+// SemanticSearchNewsEventsByIDs 在指定 NewsEvent IDs 范围内做语义搜索。
+// 与 SemanticSearchNewsEvents 不同：不是全库 TopK 后过滤，而是先确定 ID 范围再搜索，
+// 避免窗口外的新闻占用 TopK 名额。
+func (s *Service) SemanticSearchNewsEventsByIDs(ctx context.Context, query string, eventIDs []string, limit int, minScore float64) ([]SemanticNewsEventResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" || len(eventIDs) == 0 {
+		return nil, nil
+	}
+	model, _, err := s.ensureEmbeddingModelReady(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ready, err := s.store.CountEmbeddingAssets(ctx, EmbeddingAssetListFilter{
+		ObjectType: EmbeddingObjectNewsEvent,
+		ModelID:    model.ID,
+		Status:     EmbeddingAssetStatusReady,
+		Dimensions: model.EmbeddingDimensions,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if ready == 0 {
+		return nil, nil
+	}
+	vector, err := s.generateEmbedding(ctx, model, query)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateEmbeddingDimensions(model, len(vector)); err != nil {
+		return nil, err
+	}
+	// 在指定 object IDs 内搜索
+	hits, err := s.store.SearchEmbeddingVectorsByIDs(ctx, model.ID, EmbeddingObjectNewsEvent, vector, eventIDs, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SemanticNewsEventResult, 0, len(hits))
+	for _, hit := range hits {
+		if minScore != 0 && hit.Score < minScore {
+			continue
+		}
+		asset, err := s.store.GetEmbeddingAssetByVectorRef(ctx, hit.VectorRef)
+		if err != nil ||
+			asset.Status != EmbeddingAssetStatusReady ||
+			asset.ModelID != model.ID ||
+			asset.EmbeddingDimensions != len(vector) {
+			continue
+		}
+		if asset.ObjectType != EmbeddingObjectNewsEvent {
+			continue
+		}
+		event, err := s.store.GetNewsEvent(ctx, asset.ObjectID)
+		if err != nil {
+			continue
+		}
+		out = append(out, SemanticNewsEventResult{Score: hit.Score, Event: event, Asset: asset})
+	}
+	return out, nil
+}
+
 func (s *Service) embeddingConfigOrDefault(ctx context.Context) (EmbeddingConfig, error) {
 	cfg, err := s.store.GetEmbeddingConfig(ctx)
 	if err == nil {

@@ -782,7 +782,7 @@ func (s *Store) UpsertEmbeddingAsset(ctx context.Context, item EmbeddingAsset) (
 		item.CreatedAt = now
 	}
 	item.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.marketDB.db.ExecContext(ctx, `
 		INSERT INTO stockv2_embedding_assets
 			(id, object_type, object_id, text_hash, text_summary, model_id, provider_id,
 			 embedding_protocol, embedding_dimensions, vector_ref, status, error_message, created_at, updated_at)
@@ -808,7 +808,7 @@ func (s *Store) UpsertEmbeddingAsset(ctx context.Context, item EmbeddingAsset) (
 }
 
 func (s *Store) GetEmbeddingAssetByObject(ctx context.Context, objectType, objectID, modelID string) (EmbeddingAsset, error) {
-	item, err := scanEmbeddingAsset(s.db.QueryRowContext(ctx, embeddingAssetSelectSQL+" WHERE object_type = ? AND object_id = ? AND model_id = ?", objectType, objectID, modelID))
+	item, err := scanEmbeddingAsset(s.marketDB.db.QueryRowContext(ctx, embeddingAssetSelectSQL+" WHERE object_type = ? AND object_id = ? AND model_id = ?", objectType, objectID, modelID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return EmbeddingAsset{}, ErrEmbeddingAssetNotFound
@@ -819,7 +819,7 @@ func (s *Store) GetEmbeddingAssetByObject(ctx context.Context, objectType, objec
 }
 
 func (s *Store) GetEmbeddingAssetByVectorRef(ctx context.Context, vectorRef string) (EmbeddingAsset, error) {
-	item, err := scanEmbeddingAsset(s.db.QueryRowContext(ctx, embeddingAssetSelectSQL+" WHERE vector_ref = ?", vectorRef))
+	item, err := scanEmbeddingAsset(s.marketDB.db.QueryRowContext(ctx, embeddingAssetSelectSQL+" WHERE vector_ref = ?", vectorRef))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return EmbeddingAsset{}, ErrEmbeddingAssetNotFound
@@ -846,7 +846,7 @@ func embeddingAssetWhere(filter EmbeddingAssetListFilter) (string, []any) {
 func (s *Store) ListEmbeddingAssets(ctx context.Context, filter EmbeddingAssetListFilter) ([]EmbeddingAsset, error) {
 	where, args := embeddingAssetWhere(filter)
 	args = append(args, normalizedPageLimit(filter.Limit, 200), normalizedPageOffset(filter.Offset))
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`%s WHERE %s ORDER BY updated_at DESC LIMIT ? OFFSET ?`, embeddingAssetSelectSQL, where), args...)
+	rows, err := s.marketDB.db.QueryContext(ctx, fmt.Sprintf(`%s WHERE %s ORDER BY updated_at DESC LIMIT ? OFFSET ?`, embeddingAssetSelectSQL, where), args...)
 	if err != nil {
 		return nil, wrapError(err, "list embedding assets")
 	}
@@ -856,12 +856,12 @@ func (s *Store) ListEmbeddingAssets(ctx context.Context, filter EmbeddingAssetLi
 func (s *Store) CountEmbeddingAssets(ctx context.Context, filter EmbeddingAssetListFilter) (int, error) {
 	where, args := embeddingAssetWhere(filter)
 	var total int
-	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM stockv2_embedding_assets WHERE %s`, where), args...).Scan(&total)
+	err := s.marketDB.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM stockv2_embedding_assets WHERE %s`, where), args...).Scan(&total)
 	return total, wrapError(err, "count embedding assets")
 }
 
 func (s *Store) CountEmbeddingAssetsByStatus(ctx context.Context, modelID string) (ready, stale, failed int, err error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.marketDB.db.QueryContext(ctx, `
 		SELECT status, COUNT(*)
 		FROM stockv2_embedding_assets
 		WHERE model_id = ?

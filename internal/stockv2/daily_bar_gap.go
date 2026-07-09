@@ -64,6 +64,28 @@ func compactDailyBarRanges(ranges []dailyBarMissingRange) []dailyBarMissingRange
 	return out
 }
 
+// filterBarsByRanges 只保留 tradeDate 落在任一缺口区间内的 bars。
+// 用于百度全量抓取后按缺口过滤，避免不必要的全量 upsert。
+func filterBarsByRanges(bars []StockV2DailyBar, ranges []dailyBarMissingRange) []StockV2DailyBar {
+	if len(bars) == 0 || len(ranges) == 0 {
+		return nil
+	}
+	out := make([]StockV2DailyBar, 0, len(bars))
+	for _, bar := range bars {
+		date := bar.TradeDate
+		if date == "" {
+			continue
+		}
+		for _, r := range ranges {
+			if date >= r.Start && date <= r.End {
+				out = append(out, bar)
+				break
+			}
+		}
+	}
+	return out
+}
+
 func normalizeDateOnly(t time.Time) time.Time {
 	if t.IsZero() {
 		return t

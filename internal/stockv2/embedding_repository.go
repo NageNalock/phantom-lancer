@@ -6,7 +6,92 @@ import (
 	"time"
 )
 
+// migrateEmbeddingAssetsToMarketDB 将 stockv2_embedding_assets 从 ops SQLite 迁入 market DuckDB。
+// 与 stockv2_embedding_vectors_v2 同库后，向量检索可在 SQL 层 JOIN 做状态/维度过滤。
+// 只在 market DB 表为空且 ops DB 表有数据时执行。
+func (s *Store) migrateEmbeddingAssetsToMarketDB(ctx context.Context) error {
+	if s == nil || s.marketDB == nil || s.marketDB.db == nil {
+		return nil
+	}
+	// 检查 market DB 是否已填充
+	var marketCount int
+	if err := s.marketDB.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_embedding_assets`).Scan(&marketCount); err != nil {
+		return err
+	}
+	if marketCount > 0 {
+		return nil // 已有数据，不重复迁移
+	}
+	// 检查 ops DB 是否有旧数据
+	var opsCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_embedding_assets`).Scan(&opsCount); err != nil {
+		// ops DB 可能还没有这张表（全新部署），不算错误
+		return nil
+	}
+	if opsCount == 0 {
+		return nil
+	}
+
+	// 从 ops DB 读取全部行
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, object_type, object_id, text_hash, text_summary,
+			model_id, provider_id, embedding_protocol, embedding_dimensions,
+			vector_ref, status, error_message, created_at, updated_at
+		FROM stockv2_embedding_assets
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	tx, err := s.marketDB.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO stockv2_embedding_assets
+			(id, object_type, object_id, text_hash, text_summary,
+			 model_id, provider_id, embedding_protocol, embedding_dimensions,
+			 vector_ref, status, error_message, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	count := 0
+	for rows.Next() {
+		var id, objectType, objectID, textHash, modelID, status string
+		var textSummary, providerID, embeddingProtocol, vectorRef, errorMessage *string
+		var embeddingDimensions int
+		var createdAt, updatedAt time.Time
+		if err := rows.Scan(&id, &objectType, &objectID, &textHash, &textSummary,
+			&modelID, &providerID, &embeddingProtocol, &embeddingDimensions,
+			&vectorRef, &status, &errorMessage, &createdAt, &updatedAt); err != nil {
+			return err
+		}
+		if _, err := stmt.ExecContext(ctx, id, objectType, objectID, textHash,
+			textSummary, modelID, providerID, embeddingProtocol, embeddingDimensions,
+			vectorRef, status, errorMessage, createdAt, updatedAt); err != nil {
+			return err
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Store) ensureEmbeddingSchema(ctx context.Context) error {
+	// stockv2_embedding_config 保留在 ops DB（系统配置）
+	// stockv2_embedding_assets 已迁移到 market DB（与 embedding_vectors_v2 同库），
+	// 由 MarketDataStore.init() 创建。此处不再创建。
 	_, err := s.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS stockv2_embedding_config (
 			id TEXT PRIMARY KEY,
@@ -28,26 +113,6 @@ func (s *Store) ensureEmbeddingSchema(ctx context.Context) error {
 			(id, embedding_model_id, enabled, last_probe_status, updated_at)
 		VALUES
 			('stockv2-embedding-config', '', 0, 'embedding_model_not_configured', datetime('now'));
-		CREATE TABLE IF NOT EXISTS stockv2_embedding_assets (
-			id TEXT PRIMARY KEY,
-			object_type TEXT NOT NULL,
-			object_id TEXT NOT NULL,
-			text_hash TEXT NOT NULL,
-			text_summary TEXT,
-			model_id TEXT NOT NULL,
-			provider_id TEXT,
-			embedding_protocol TEXT,
-			embedding_dimensions INTEGER NOT NULL DEFAULT 0,
-			vector_ref TEXT,
-			status TEXT NOT NULL,
-			error_message TEXT,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL,
-			UNIQUE(object_type, object_id, model_id)
-		);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_object ON stockv2_embedding_assets(object_type, object_id);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_model ON stockv2_embedding_assets(model_id);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_status ON stockv2_embedding_assets(status);
 	`)
 	if err != nil {
 		return wrapError(err, "ensure embedding schema")
@@ -88,7 +153,7 @@ func (s *Store) ensureEmbeddingSchema(ctx context.Context) error {
 }
 
 func (s *Store) MarkEmbeddingAssetsStaleForModelChange(ctx context.Context, modelID string) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.marketDB.db.ExecContext(ctx, `
 		UPDATE stockv2_embedding_assets
 		SET status = ?, updated_at = ?
 		WHERE status = ? AND model_id <> ?
@@ -97,7 +162,7 @@ func (s *Store) MarkEmbeddingAssetsStaleForModelChange(ctx context.Context, mode
 }
 
 func (s *Store) MarkEmbeddingAssetsStaleForObject(ctx context.Context, objectType, objectID string) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.marketDB.db.ExecContext(ctx, `
 		UPDATE stockv2_embedding_assets
 		SET status = ?, updated_at = ?
 		WHERE object_type = ? AND object_id = ? AND status = ?
@@ -117,7 +182,7 @@ func (s *Store) CountMissingEmbeddingSourcesByType(ctx context.Context, objectTy
 		switch objectType {
 		case EmbeddingObjectStockProfile:
 			count, err = s.countMissingEmbeddingSourcesFromAssetDB(ctx, objectType, modelID, `
-				SELECT symbol
+				SELECT symbol AS id
 				FROM stockv2_stock_profiles
 				WHERE TRIM(COALESCE(symbol, '')) <> ''
 			`)
@@ -128,14 +193,40 @@ func (s *Store) CountMissingEmbeddingSourcesByType(ctx context.Context, objectTy
 				WHERE TRIM(COALESCE(source, '') || COALESCE(title, '') || COALESCE(summary, '') || COALESCE(content, '') || COALESCE(quality_status, '')) <> ''
 			`)
 		case EmbeddingObjectOpportunity:
-			err = s.db.QueryRowContext(ctx, `
-				SELECT COUNT(*)
-				FROM stockv2_opportunities o
-				LEFT JOIN stockv2_embedding_assets a
-				  ON a.object_type = ? AND a.object_id = o.id AND a.model_id = ?
-				WHERE a.id IS NULL
-				  AND TRIM(COALESCE(o.title, '') || COALESCE(o.user_thesis, '')) <> ''
-			`, objectType, modelID).Scan(&count)
+			// opportunities 在 ops DB，embedding_assets 已迁到 market DB，分两步计算
+			rows, qErr := s.db.QueryContext(ctx, `
+				SELECT id FROM stockv2_opportunities
+				WHERE TRIM(COALESCE(title, '') || COALESCE(user_thesis, '')) <> ''
+			`)
+			if qErr != nil {
+				err = qErr
+				break
+			}
+			oppIDs := make([]string, 0, 64)
+			for rows.Next() {
+				var id string
+				if sErr := rows.Scan(&id); sErr != nil {
+					err = sErr
+					break
+				}
+				if id = strings.TrimSpace(id); id != "" {
+					oppIDs = append(oppIDs, id)
+				}
+			}
+			rows.Close()
+			if err != nil {
+				break
+			}
+			if eErr := rows.Err(); eErr != nil {
+				err = eErr
+				break
+			}
+			existing, cErr := s.countEmbeddingAssetsForObjectIDs(ctx, objectType, modelID, oppIDs)
+			if cErr != nil {
+				err = cErr
+				break
+			}
+			count = len(oppIDs) - existing
 		}
 		if err != nil {
 			return nil, wrapError(err, "count missing embedding sources "+objectType)
@@ -146,31 +237,20 @@ func (s *Store) CountMissingEmbeddingSourcesByType(ctx context.Context, objectTy
 }
 
 func (s *Store) countMissingEmbeddingSourcesFromAssetDB(ctx context.Context, objectType, modelID, sourceIDSQL string) (int, error) {
-	// ponytail: source rows live in DuckDB and embedding assets live in SQLite; batch IDs here
-	// instead of introducing cross-db attach or a mirrored queue table.
-	rows, err := s.assetDB().QueryContext(ctx, sourceIDSQL)
+	// 迁移后：source 表和 embedding_assets 表都在 market DB，可单条 SQL 完成
+	// ponytail: DuckDB 单连接，子查询 + LEFT JOIN 比 Go 层分批更高效且原子
+	var count int
+	err := s.marketDB.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM (`+sourceIDSQL+`) AS src
+		LEFT JOIN stockv2_embedding_assets a
+		  ON a.object_type = ? AND a.object_id = src.id AND a.model_id = ?
+		WHERE a.id IS NULL
+	`, objectType, modelID).Scan(&count)
 	if err != nil {
-		return 0, err
+		return 0, wrapError(err, "count missing embedding sources from asset db")
 	}
-	defer rows.Close()
-	ids := make([]string, 0, 256)
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return 0, err
-		}
-		if id = strings.TrimSpace(id); id != "" {
-			ids = append(ids, id)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	existing, err := s.countEmbeddingAssetsForObjectIDs(ctx, objectType, modelID, ids)
-	if err != nil {
-		return 0, err
-	}
-	return len(ids) - existing, nil
+	return count, nil
 }
 
 func (s *Store) countEmbeddingAssetsForObjectIDs(ctx context.Context, objectType, modelID string, ids []string) (int, error) {
@@ -193,13 +273,13 @@ func (s *Store) countEmbeddingAssetsForObjectIDs(ctx context.Context, objectType
 			args = append(args, id)
 		}
 		var count int
-		err := s.db.QueryRowContext(ctx, `
+		err := s.marketDB.db.QueryRowContext(ctx, `
 			SELECT COUNT(*)
 			FROM stockv2_embedding_assets
 			WHERE object_type = ? AND model_id = ? AND object_id IN (`+strings.Join(placeholders, ",")+`)
 		`, args...).Scan(&count)
 		if err != nil {
-			return 0, err
+			return 0, wrapError(err, "count embedding assets for object ids")
 		}
 		total += count
 	}

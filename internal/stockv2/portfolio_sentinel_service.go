@@ -203,6 +203,10 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 		SuppressedLowPrioritySymbols: map[string]int{},
 	}
 
+	// 预取窗口内所有 NewsEvent，避免每个持仓重复查询。
+	// 分页加载直到窗口内全部加载完或达到合理上限。
+	windowEvents := s.prefetchWindowNewsEvents(ctx, run.WindowStartAt, run.WindowEndAt)
+
 	allSymbols := make([]string, 0)
 	for _, portfolio := range portfolios {
 		holdings, err := s.store.ListHoldings(ctx, portfolio.ID)
@@ -234,7 +238,7 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 			}
 		}
 		for _, holding := range holdings {
-			holdingNews, holdingLinks, sentinelCandidates, truncated, filterStats, err := s.portfolioSentinelHoldingNews(ctx, holding, run, cfg, selectedEventIDs, &selectedEvents)
+			holdingNews, holdingLinks, sentinelCandidates, truncated, filterStats, err := s.portfolioSentinelHoldingNews(ctx, holding, run, cfg, selectedEventIDs, &selectedEvents, windowEvents)
 			if err != nil {
 				return PortfolioSentinelContext{}, err
 			}
@@ -303,6 +307,41 @@ func (s *Service) preparePortfolioSentinelNews(ctx context.Context, run Portfoli
 	return nil
 }
 
+// prefetchWindowNewsEvents 预取窗口内全部 NewsEvent，分页加载直到窗口内全部加载完。
+// 避免每个持仓重复查询 ListNewsEvents。
+func (s *Service) prefetchWindowNewsEvents(ctx context.Context, windowStart, windowEnd time.Time) []NewsEvent {
+	const pageSize = 500
+	var all []NewsEvent
+	offset := 0
+	for {
+		events, err := s.store.ListNewsEvents(ctx, NewsEventListFilter{
+			Since:  windowStart,
+			Until:  windowEnd,
+			Limit:  pageSize,
+			Offset: offset,
+		})
+		if err != nil {
+			if s.log != nil {
+				s.log.Warn("prefetchWindowNewsEvents page failed", "offset", offset, "error", safelog.Text(err.Error(), 200))
+			}
+			break
+		}
+		if len(events) == 0 {
+			break
+		}
+		all = append(all, events...)
+		if len(events) < pageSize {
+			break
+		}
+		offset += pageSize
+		// 安全上限：避免极端情况内存膨胀
+		if len(all) >= 5000 {
+			break
+		}
+	}
+	return all
+}
+
 func (s *Service) portfolioSentinelHoldingNews(
 	ctx context.Context,
 	holding StockV2Holding,
@@ -310,6 +349,7 @@ func (s *Service) portfolioSentinelHoldingNews(
 	cfg PortfolioSentinelConfig,
 	selectedEventIDs map[string]struct{},
 	selectedEvents *[]NewsEvent,
+	windowEvents []NewsEvent,
 ) ([]NewsEvent, []NewsLinkCandidate, []SentinelNewsCandidate, bool, portfolioSentinelNewsFilterStats, error) {
 	perHoldingLimit := cfg.MaxNewsPerHolding
 	if perHoldingLimit <= 0 {
@@ -317,7 +357,7 @@ func (s *Service) portfolioSentinelHoldingNews(
 	}
 
 	// 直接从窗口 NewsEvent 召回（不再依赖 NewsLinkCandidate 作为唯一入口）
-	allCandidates, err := s.portfolioSentinelHoldingNewsDirect(ctx, holding, run, perHoldingLimit*portfolioSentinelNewsScanMultiplier)
+	allCandidates, err := s.portfolioSentinelHoldingNewsDirect(ctx, holding, run, perHoldingLimit*portfolioSentinelNewsScanMultiplier, windowEvents)
 	if err != nil {
 		return nil, nil, nil, false, portfolioSentinelNewsFilterStats{}, err
 	}
@@ -423,21 +463,16 @@ func isSentinelLowPriority(c SentinelNewsCandidate) bool {
 // portfolioSentinelHoldingNewsDirect 直接从窗口 NewsEvent 表召回新闻，
 // 对每条新闻计算与持仓的多路相关性分数，按总分排序取 TopK。
 // 不再依赖 NewsLinkCandidate 作为唯一入口 — NLC 降级为辅助信号。
+// windowEvents 是预取的窗口内全部 NewsEvent，避免每个持仓重复查询。
 func (s *Service) portfolioSentinelHoldingNewsDirect(
 	ctx context.Context,
 	holding StockV2Holding,
 	run PortfolioSentinelRun,
 	limit int,
+	windowEvents []NewsEvent,
 ) ([]SentinelNewsCandidate, error) {
-	// 1. 读取窗口内所有 NewsEvent（不按 symbol 过滤，全量打分）
-	events, err := s.store.ListNewsEvents(ctx, NewsEventListFilter{
-		Since: run.WindowStartAt,
-		Until: run.WindowEndAt,
-		Limit: 500,
-	})
-	if err != nil {
-		return nil, err
-	}
+	// 1. 使用预取的窗口 NewsEvent（BuildPortfolioSentinelContext 已一次性加载）
+	events := windowEvents
 	if len(events) == 0 {
 		return nil, nil
 	}
@@ -452,13 +487,14 @@ func (s *Service) portfolioSentinelHoldingNewsDirect(
 	candidates := make([]SentinelNewsCandidate, 0, len(events))
 	for i := range events {
 		candidate := s.scoreNewsForHolding(ctx, &events[i], holding, profile, nlcByEvent)
-		if candidate.TotalScore > 0 {
+		// 召回门：必须有"真实"召回信号（实体/关键词/NLC），来源和新鲜度只能加权
+		if hasSentinelRecallReason(candidate) {
 			candidates = append(candidates, candidate)
 		}
 	}
 
-	// 5. 语义召回：用持仓画像文本搜索 news_event embedding（反向方向）
-	semanticHits := s.semanticSearchNewsForHolding(ctx, holding, profile, run)
+	// 5. 语义召回：用持仓画像文本在窗口 event IDs 内做向量搜索
+	semanticHits := s.semanticSearchNewsForHolding(ctx, holding, profile, run, windowEvents)
 	candidates = s.mergeSemanticCandidates(candidates, semanticHits, holding)
 
 	// 6. 按总分排序，取 TopK
@@ -472,6 +508,15 @@ func (s *Service) portfolioSentinelHoldingNewsDirect(
 		candidates = candidates[:limit]
 	}
 	return candidates, nil
+}
+
+// hasSentinelRecallReason 判断候选是否有"真实"召回信号。
+// 来源质量和新鲜度只能加权排序，不能单独构成召回理由。
+func hasSentinelRecallReason(c SentinelNewsCandidate) bool {
+	return c.EntityMatchScore > 0 ||
+		c.KeywordMatchScore > 0 ||
+		c.NewsLinkCandidateScore > 0 ||
+		c.SemanticScore > 0
 }
 
 // loadNewsLinkCandidatesForHolding 预取窗口内该持仓的 NewsLinkCandidate，
@@ -703,38 +748,33 @@ func normalizeNLCSCore(rawScore float64) float64 {
 	return normalized
 }
 
-// semanticSearchNewsForHolding 使用持仓画像文本对 news_event embedding 做反向语义搜索。
+// semanticSearchNewsForHolding 使用持仓画像文本对窗口内 news_event embedding 做反向语义搜索。
 // 这是"持仓画像 → 新闻"的方向，与原来的"新闻 → 股票画像"互补。
+// 关键：先确定窗口 NewsEvent IDs，再在这些 ID 内做向量搜索，避免全库 Top20 后过滤。
 func (s *Service) semanticSearchNewsForHolding(
 	ctx context.Context,
 	holding StockV2Holding,
 	profile StockProfile,
 	run PortfolioSentinelRun,
+	windowEvents []NewsEvent,
 ) []SemanticNewsEventResult {
 	queryText := buildHoldingQueryText(profile)
-	if strings.TrimSpace(queryText) == "" {
+	if strings.TrimSpace(queryText) == "" || len(windowEvents) == 0 {
 		return nil
 	}
-	hits, err := s.SemanticSearchNewsEvents(ctx, SemanticSearchRequest{
-		Query:    queryText,
-		Limit:    20,
-		MinScore: 0.3,
-	})
+
+	// 收集窗口内所有 NewsEvent ID
+	eventIDs := make([]string, 0, len(windowEvents))
+	for _, e := range windowEvents {
+		eventIDs = append(eventIDs, e.ID)
+	}
+
+	// 在窗口 event IDs 范围内做向量搜索
+	hits, err := s.SemanticSearchNewsEventsByIDs(ctx, queryText, eventIDs, 20, 0.3)
 	if err != nil {
 		return nil
 	}
-	// 只保留窗口内的结果
-	windowStart := run.WindowStartAt
-	windowEnd := run.WindowEndAt
-	filtered := make([]SemanticNewsEventResult, 0, len(hits))
-	for _, hit := range hits {
-		if !hit.Event.EventAt.IsZero() &&
-			!hit.Event.EventAt.Before(windowStart) &&
-			hit.Event.EventAt.Before(windowEnd) {
-			filtered = append(filtered, hit)
-		}
-	}
-	return filtered
+	return hits
 }
 
 // buildHoldingQueryText 从持仓画像构造语义搜索查询文本。

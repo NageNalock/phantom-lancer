@@ -103,6 +103,13 @@ func NewStoreWithMarketDB(dbPath, marketDBPath string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate legacy daily bars: %w", err)
 	}
+	// 将 stockv2_embedding_assets 从 ops SQLite 迁入 market DuckDB，
+	// 与 stockv2_embedding_vectors_v2 同库，使向量检索可在 SQL 层 JOIN 状态过滤。
+	if err := s.migrateEmbeddingAssetsToMarketDB(context.Background()); err != nil {
+		_ = marketDB.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate embedding assets to market db: %w", err)
+	}
 	if err := s.init(context.Background()); err != nil {
 		_ = marketDB.Close()
 		_ = db.Close()
@@ -1019,26 +1026,8 @@ INSERT OR IGNORE INTO stockv2_embedding_config
     (id, embedding_model_id, enabled, last_probe_status, updated_at)
 VALUES
     ('stockv2-embedding-config', '', 0, 'embedding_model_not_configured', datetime('now'));
-CREATE TABLE IF NOT EXISTS stockv2_embedding_assets (
-    id TEXT PRIMARY KEY,
-    object_type TEXT NOT NULL,
-    object_id TEXT NOT NULL,
-    text_hash TEXT NOT NULL,
-    text_summary TEXT,
-    model_id TEXT NOT NULL,
-    provider_id TEXT,
-    embedding_protocol TEXT,
-    embedding_dimensions INTEGER NOT NULL DEFAULT 0,
-    vector_ref TEXT,
-    status TEXT NOT NULL,
-    error_message TEXT,
-    created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL,
-    UNIQUE(object_type, object_id, model_id)
-);
-CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_object ON stockv2_embedding_assets(object_type, object_id);
-CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_model ON stockv2_embedding_assets(model_id);
-CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_status ON stockv2_embedding_assets(status);
+-- stockv2_embedding_assets 已迁移到 market DB (DuckDB)，与 embedding_vectors_v2 同库。
+-- 由 MarketDataStore.init() 创建，不再在 ops SQLite 中创建。
 -- 内置监控任务默认配置(全部默认关闭,用户显式开启后才会周期执行)。
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('latest_quote_refresh', 1, 30, 'normal', 0, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('data_strategy_monitor', 0, 600, 'normal', 1800, 0, 0, datetime('now'));

@@ -751,28 +751,35 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 	successCount := 0
 	processedCount := 0
 	assetStats := AssetMaintenanceStats{}
+	var mu sync.Mutex
 	flushProgress := func(includeFailedItems bool) {
+		mu.Lock()
 		progress.ProcessedCount = processedCount
 		progress.SuccessCount = successCount
 		progress.ErrorCount = len(failedItems)
 		if len(failedItems) > 0 {
 			progress.LastError = failedItems[len(failedItems)-1].Reason
 		}
-		if err := s.store.UpdateUpdateProgress(ctx, progress); err != nil {
+		snapshotProgress := progress
+		snapshotFailed := failedItems
+		snapshotAssetStats := assetStats
+		mu.Unlock()
+
+		if err := s.store.UpdateUpdateProgress(ctx, snapshotProgress); err != nil {
 			if s.log != nil {
-				s.log.Warn("update maintenance progress failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "processed_count", processedCount, "failed_count", len(failedItems), "current_symbol", progress.CurrentSymbol, "error", safelog.Text(err.Error(), 240))
+				s.log.Warn("update maintenance progress failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "processed_count", processedCount, "failed_count", len(failedItems), "current_symbol", snapshotProgress.CurrentSymbol, "error", safelog.Text(err.Error(), 240))
 			}
 		}
 		update := StockV2UpdateJob{
 			ID:             jobID,
 			TotalCount:     totalCount,
-			ProcessedCount: processedCount,
-			SuccessCount:   successCount,
-			FailedCount:    len(failedItems),
-			AssetStats:     assetStats,
+			ProcessedCount: snapshotProgress.ProcessedCount,
+			SuccessCount:   snapshotProgress.SuccessCount,
+			FailedCount:    snapshotProgress.ErrorCount,
+			AssetStats:     snapshotAssetStats,
 		}
 		if includeFailedItems {
-			update.FailedItems = failedItems
+			update.FailedItems = snapshotFailed
 		}
 		if err := s.store.UpdateUpdateJob(ctx, update); err != nil {
 			if s.log != nil {
@@ -843,7 +850,6 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 		const maintenanceConcurrency = 4
 		const progressFlushInterval = 50 // 每 50 只 symbol flush 一次进度，减少 DuckDB 写入
 
-		var mu sync.Mutex
 		batchProcessed := progress.CurrentBatchProgress
 		sem := make(chan struct{}, maintenanceConcurrency)
 		var wg sync.WaitGroup
@@ -1021,7 +1027,8 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 		return false, nil, nil
 	}
 
-	// 使用百度财经作为主数据源（提供 amount 和 turnover_rate），一次拿全量数据
+	// 使用百度财经作为主数据源（提供 amount 和 turnover_rate），
+	// 抓取全量后按缺口区间过滤，只保留需要补的 bars，避免全量 upsert。
 	var bars []StockV2DailyBar
 	if s.baiduDailyBars != nil {
 		fetched, baiduErr := s.baiduDailyBars.FetchDailyBars(ctx, inst.Symbol, inst.Market, inst.InstrumentType)
@@ -1034,7 +1041,8 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 			for i := range fetched {
 				fetched[i].Symbol = inst.Symbol
 			}
-			bars = fetched
+			// 只保留缺口区间内的 bars，不全量 upsert
+			bars = filterBarsByRanges(fetched, ranges)
 		}
 	}
 

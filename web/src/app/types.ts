@@ -2263,6 +2263,30 @@ export interface StockV2PortfolioSentinelConfigInput {
   agentDoublecheckEnabled?: boolean;
 }
 
+// 组合哨兵对单条新闻的多路打分结果。
+// 来源：internal/stockv2/portfolio_sentinel_types.go SentinelNewsCandidate
+export interface StockV2SentinelNewsCandidate {
+  newsEventId: string;
+  newsEvent?: StockV2NewsEvent;
+  symbol: string;
+
+  // 各维度分数（可单独追溯）
+  entityMatchScore: number;       // 股票代码/名称/别名命中
+  keywordMatchScore: number;      // 主营/行业/概念/关键词命中
+  semanticScore: number;          // 持仓画像 vs news_event embedding
+  newsLinkCandidateScore: number; // 既有 NewsLinkCandidate 分数（归一化 0-1）
+  sourceQualityScore: number;     // 来源质量
+  freshnessScore: number;         // 事件新鲜度
+
+  totalScore: number;
+
+  // 分数明细（用于前端展示和可观测性）
+  scoreBreakdown?: Record<string, number>;
+
+  // 召回方式标记：["entity_match", "keyword", "semantic", "news_link"]
+  recallMethods?: string[];
+}
+
 export interface StockV2PortfolioSentinelRunDetail {
   run: StockV2PortfolioSentinelRun;
   result?: StockV2PortfolioSentinelResult;
