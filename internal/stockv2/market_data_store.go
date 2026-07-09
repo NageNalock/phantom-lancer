@@ -362,6 +362,7 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		CREATE TABLE IF NOT EXISTS stockv2_embedding_vectors_v2 (
 			vector_ref VARCHAR PRIMARY KEY,
 			vector_blob BLOB NOT NULL,
+			vector_values DOUBLE[],
 			dimensions INTEGER NOT NULL,
 			model_id VARCHAR NOT NULL,
 			object_type VARCHAR NOT NULL,
@@ -396,6 +397,7 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS medium_net_inflow DOUBLE DEFAULT 0`,
 		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS small_net_inflow DOUBLE DEFAULT 0`,
 		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS main_net_inflow_pct DOUBLE DEFAULT 0`,
+		`ALTER TABLE stockv2_embedding_vectors_v2 ADD COLUMN IF NOT EXISTS vector_values DOUBLE[]`,
 	} {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("migrate duckdb asset columns: %w", err)

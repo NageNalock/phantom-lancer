@@ -234,7 +234,7 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 			}
 		}
 		for _, holding := range holdings {
-			holdingNews, holdingLinks, truncated, filterStats, err := s.portfolioSentinelHoldingNews(ctx, holding, run, cfg, selectedEventIDs, &selectedEvents)
+			holdingNews, holdingLinks, sentinelCandidates, truncated, filterStats, err := s.portfolioSentinelHoldingNews(ctx, holding, run, cfg, selectedEventIDs, &selectedEvents)
 			if err != nil {
 				return PortfolioSentinelContext{}, err
 			}
@@ -244,10 +244,11 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 				newsTruncated = true
 			}
 			hctx := PortfolioSentinelHoldingContext{
-				Holding:   holding,
-				Freshness: map[string]any{},
-				News:      holdingNews,
-				NewsLinks: holdingLinks,
+				Holding:        holding,
+				Freshness:      map[string]any{},
+				News:           holdingNews,
+				NewsLinks:      holdingLinks,
+				NewsCandidates: sentinelCandidates,
 			}
 			if quote, ok := quoteBySymbol[holding.Symbol]; ok {
 				hctx.Quote = &quote
@@ -309,41 +310,37 @@ func (s *Service) portfolioSentinelHoldingNews(
 	cfg PortfolioSentinelConfig,
 	selectedEventIDs map[string]struct{},
 	selectedEvents *[]NewsEvent,
-) ([]NewsEvent, []NewsLinkCandidate, bool, portfolioSentinelNewsFilterStats, error) {
+) ([]NewsEvent, []NewsLinkCandidate, []SentinelNewsCandidate, bool, portfolioSentinelNewsFilterStats, error) {
 	perHoldingLimit := cfg.MaxNewsPerHolding
 	if perHoldingLimit <= 0 {
 		perHoldingLimit = 50
 	}
-	scanLimit := portfolioSentinelNewsScanLimit(perHoldingLimit)
-	candidates, err := s.store.ListNewsLinkCandidates(ctx, NewsLinkCandidateListFilter{
-		Symbol: holding.Symbol,
-		Market: holding.Market,
-		Since:  run.WindowStartAt,
-		Until:  run.WindowEndAt,
-		Limit:  scanLimit,
-	})
+
+	// 直接从窗口 NewsEvent 召回（不再依赖 NewsLinkCandidate 作为唯一入口）
+	allCandidates, err := s.portfolioSentinelHoldingNewsDirect(ctx, holding, run, perHoldingLimit*portfolioSentinelNewsScanMultiplier)
 	if err != nil {
-		return nil, nil, false, portfolioSentinelNewsFilterStats{}, err
+		return nil, nil, nil, false, portfolioSentinelNewsFilterStats{}, err
 	}
-	candidates, filterStats := portfolioSentinelSelectNewsCandidates(candidates, perHoldingLimit)
+
+	// 应用高/低优先级分桶（保留旧逻辑的噪音抑制）
+	candidates, filterStats := applySentinelCandidateBucketing(allCandidates, perHoldingLimit)
+
+	// 加载实际的 NewsLinkCandidate 行（用于兼容旧接口展示）
+	nlcByEvent := s.loadNewsLinkCandidatesForHolding(ctx, holding, run)
+
 	events := make([]NewsEvent, 0, len(candidates))
 	links := make([]NewsLinkCandidate, 0, len(candidates))
-	holdingEventIDs := make(map[string]struct{})
 	truncated := false
 	for _, candidate := range candidates {
-		if _, ok := holdingEventIDs[candidate.NewsEventID]; ok {
+		if candidate.NewsEvent == nil {
 			continue
 		}
-		event, err := s.store.GetNewsEvent(ctx, candidate.NewsEventID)
-		if err != nil {
-			if errors.Is(err, ErrNewsEventNotFound) {
-				continue
-			}
-			return nil, nil, false, filterStats, err
-		}
-		holdingEventIDs[candidate.NewsEventID] = struct{}{}
+		event := *candidate.NewsEvent
 		events = append(events, event)
-		links = append(links, candidate)
+		// 使用实际的 NewsLinkCandidate 数据（如果有）
+		if nlc, ok := nlcByEvent[event.ID]; ok {
+			links = append(links, nlc)
+		}
 		if _, ok := selectedEventIDs[event.ID]; !ok {
 			if cfg.MaxNewsItems > 0 && len(*selectedEvents) >= cfg.MaxNewsItems {
 				truncated = true
@@ -353,7 +350,500 @@ func (s *Service) portfolioSentinelHoldingNews(
 			*selectedEvents = append(*selectedEvents, event)
 		}
 	}
-	return events, links, truncated, filterStats, nil
+	return events, links, candidates, truncated, filterStats, nil
+}
+
+// applySentinelCandidateBucketing 对多路打分后的候选应用高/低优先级分桶。
+// 高优先级（实体匹配或高分 NLC）不受数量限制，低优先级限制为 10 条。
+func applySentinelCandidateBucketing(candidates []SentinelNewsCandidate, detailLimit int) ([]SentinelNewsCandidate, portfolioSentinelNewsFilterStats) {
+	stats := portfolioSentinelNewsFilterStats{
+		InputCandidates:              len(candidates),
+		SuppressedLowPriorityTerms:   map[string]int{},
+		SuppressedLowPrioritySymbols: map[string]int{},
+	}
+	if detailLimit <= 0 {
+		detailLimit = 50
+	}
+	if len(candidates) <= detailLimit && len(candidates) <= portfolioSentinelLowPriorityNewsDetailLimit {
+		stats.RetainedCandidates = len(candidates)
+		for _, c := range candidates {
+			if isSentinelLowPriority(c) {
+				stats.RetainedLowPriorityCount++
+			}
+		}
+		return candidates, stats
+	}
+	lowLimit := portfolioSentinelLowPriorityNewsDetailLimit
+	if lowLimit > detailLimit {
+		lowLimit = detailLimit
+	}
+	highLimit := detailLimit - lowLimit
+	if highLimit < 0 {
+		highLimit = 0
+	}
+	high := make([]SentinelNewsCandidate, 0, detailLimit)
+	low := make([]SentinelNewsCandidate, 0, lowLimit)
+	for _, candidate := range candidates {
+		if isSentinelLowPriority(candidate) {
+			if len(low) < lowLimit {
+				low = append(low, candidate)
+				stats.RetainedLowPriorityCount++
+			} else {
+				stats.SuppressedLowPriorityCount++
+				stats.SuppressedLowPrioritySymbols[strings.TrimSpace(candidate.Symbol)]++
+				for _, method := range candidate.RecallMethods {
+					stats.SuppressedLowPriorityTerms[method]++
+				}
+			}
+			continue
+		}
+		if len(high) < highLimit {
+			high = append(high, candidate)
+		}
+	}
+	out := make([]SentinelNewsCandidate, 0, len(high)+len(low))
+	out = append(out, high...)
+	out = append(out, low...)
+	stats.RetainedCandidates = len(out)
+	return out, stats
+}
+
+// isSentinelLowPriority 判断候选是否为低优先级。
+// 高优先级：实体匹配（代码/名称/别名）或 NLC 分数 >= 65（归一化 0.65）。
+func isSentinelLowPriority(c SentinelNewsCandidate) bool {
+	if c.EntityMatchScore > 0 {
+		return false
+	}
+	if c.NewsLinkCandidateScore >= normalizeNLCSCore(portfolioSentinelNewsHighScoreThreshold) {
+		return false
+	}
+	return true
+}
+
+// portfolioSentinelHoldingNewsDirect 直接从窗口 NewsEvent 表召回新闻，
+// 对每条新闻计算与持仓的多路相关性分数，按总分排序取 TopK。
+// 不再依赖 NewsLinkCandidate 作为唯一入口 — NLC 降级为辅助信号。
+func (s *Service) portfolioSentinelHoldingNewsDirect(
+	ctx context.Context,
+	holding StockV2Holding,
+	run PortfolioSentinelRun,
+	limit int,
+) ([]SentinelNewsCandidate, error) {
+	// 1. 读取窗口内所有 NewsEvent（不按 symbol 过滤，全量打分）
+	events, err := s.store.ListNewsEvents(ctx, NewsEventListFilter{
+		Since: run.WindowStartAt,
+		Until: run.WindowEndAt,
+		Limit: 500,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(events) == 0 {
+		return nil, nil
+	}
+
+	// 2. 获取持仓画像（用于打分）
+	profile, _ := s.store.GetStockProfile(ctx, holding.Symbol)
+
+	// 3. 预取该持仓的 NewsLinkCandidate（辅助信号）
+	nlcByEvent := s.loadNewsLinkCandidatesForHolding(ctx, holding, run)
+
+	// 4. 对每条事件计算多路分数
+	candidates := make([]SentinelNewsCandidate, 0, len(events))
+	for i := range events {
+		candidate := s.scoreNewsForHolding(ctx, &events[i], holding, profile, nlcByEvent)
+		if candidate.TotalScore > 0 {
+			candidates = append(candidates, candidate)
+		}
+	}
+
+	// 5. 语义召回：用持仓画像文本搜索 news_event embedding（反向方向）
+	semanticHits := s.semanticSearchNewsForHolding(ctx, holding, profile, run)
+	candidates = s.mergeSemanticCandidates(candidates, semanticHits, holding)
+
+	// 6. 按总分排序，取 TopK
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].TotalScore == candidates[j].TotalScore {
+			return candidates[i].NewsEventID < candidates[j].NewsEventID
+		}
+		return candidates[i].TotalScore > candidates[j].TotalScore
+	})
+	if limit > 0 && len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	return candidates, nil
+}
+
+// loadNewsLinkCandidatesForHolding 预取窗口内该持仓的 NewsLinkCandidate，
+// 作为辅助信号（不再是唯一入口）。
+func (s *Service) loadNewsLinkCandidatesForHolding(
+	ctx context.Context,
+	holding StockV2Holding,
+	run PortfolioSentinelRun,
+) map[string]NewsLinkCandidate {
+	nlcs, err := s.store.ListNewsLinkCandidates(ctx, NewsLinkCandidateListFilter{
+		Symbol: holding.Symbol,
+		Market: holding.Market,
+		Since:  run.WindowStartAt,
+		Until:  run.WindowEndAt,
+		Limit:  200,
+	})
+	if err != nil {
+		return map[string]NewsLinkCandidate{}
+	}
+	out := make(map[string]NewsLinkCandidate, len(nlcs))
+	for _, nlc := range nlcs {
+		out[nlc.NewsEventID] = nlc
+	}
+	return out
+}
+
+// scoreNewsForHolding 计算单条新闻与单个持仓的多路相关性分数。
+func (s *Service) scoreNewsForHolding(
+	ctx context.Context,
+	event *NewsEvent,
+	holding StockV2Holding,
+	profile StockProfile,
+	nlcByEvent map[string]NewsLinkCandidate,
+) SentinelNewsCandidate {
+	candidate := SentinelNewsCandidate{
+		NewsEventID:    event.ID,
+		NewsEvent:      event,
+		Symbol:         holding.Symbol,
+		ScoreBreakdown: map[string]float64{},
+	}
+
+	// 1. 实体匹配（代码/名称/别名）
+	candidate.EntityMatchScore = scoreEntityMatch(event, holding, profile)
+	if candidate.EntityMatchScore > 0 {
+		candidate.RecallMethods = append(candidate.RecallMethods, "entity_match")
+	}
+	candidate.ScoreBreakdown["entity"] = candidate.EntityMatchScore
+
+	// 2. 关键词匹配（主营/行业/概念）
+	candidate.KeywordMatchScore = scoreKeywordMatch(event, profile)
+	if candidate.KeywordMatchScore > 0 {
+		candidate.RecallMethods = append(candidate.RecallMethods, "keyword")
+	}
+	candidate.ScoreBreakdown["keyword"] = candidate.KeywordMatchScore
+
+	// 3. 既有 NewsLinkCandidate 分数（归一化到 0-1）
+	if nlc, ok := nlcByEvent[event.ID]; ok {
+		candidate.NewsLinkCandidateScore = normalizeNLCSCore(nlc.Score)
+		candidate.RecallMethods = append(candidate.RecallMethods, "news_link")
+	}
+	candidate.ScoreBreakdown["news_link"] = candidate.NewsLinkCandidateScore
+
+	// 4. 来源质量
+	candidate.SourceQualityScore = scoreSourceQuality(event.Source)
+	candidate.ScoreBreakdown["source_quality"] = candidate.SourceQualityScore
+
+	// 5. 新鲜度
+	candidate.FreshnessScore = scoreFreshness(event.EventAt)
+	candidate.ScoreBreakdown["freshness"] = candidate.FreshnessScore
+
+	// 加权合并（语义分数在 mergeSemanticCandidates 中补充）
+	candidate.TotalScore =
+		candidate.EntityMatchScore*0.35 +
+			candidate.KeywordMatchScore*0.20 +
+			candidate.NewsLinkCandidateScore*0.15 +
+			candidate.SourceQualityScore*0.15 +
+			candidate.FreshnessScore*0.15
+
+	return candidate
+}
+
+// scoreEntityMatch 检查新闻文本中是否包含股票代码、名称或别名。
+func scoreEntityMatch(event *NewsEvent, holding StockV2Holding, profile StockProfile) float64 {
+	text := strings.ToLower(event.Title + " " + event.Summary + " " + event.Content)
+	if text == " " {
+		return 0
+	}
+
+	// 股票代码匹配（如 "300750"）
+	symbol := strings.ToLower(strings.TrimSpace(holding.Symbol))
+	if symbol != "" && strings.Contains(text, symbol) {
+		return 1.0
+	}
+
+	// 名称匹配（如 "宁德时代"）
+	name := strings.ToLower(strings.TrimSpace(profile.Name))
+	if name != "" && strings.Contains(text, name) {
+		return 0.9
+	}
+
+	// 别名匹配
+	for _, alias := range profile.Aliases {
+		alias = strings.ToLower(strings.TrimSpace(alias))
+		if alias != "" && strings.Contains(text, alias) {
+			return 0.7
+		}
+	}
+	for _, alias := range profile.AliasesZh {
+		alias := strings.ToLower(strings.TrimSpace(alias))
+		if alias != "" && strings.Contains(text, alias) {
+			return 0.7
+		}
+	}
+
+	return 0
+}
+
+// scoreKeywordMatch 检查新闻文本与画像关键词/行业/概念的重叠度。
+func scoreKeywordMatch(event *NewsEvent, profile StockProfile) float64 {
+	text := strings.ToLower(event.Title + " " + event.Summary + " " + event.Content)
+	if text == " " {
+		return 0
+	}
+
+	hitCount := 0
+	totalKeywords := 0
+
+	// 行业匹配
+	if industry := strings.ToLower(strings.TrimSpace(profile.Industry)); industry != "" {
+		totalKeywords++
+		if strings.Contains(text, industry) {
+			hitCount++
+		}
+	}
+
+	// 中文关键词
+	for _, kw := range profile.KeywordsZh {
+		kw = strings.ToLower(strings.TrimSpace(kw))
+		if kw == "" {
+			continue
+		}
+		totalKeywords++
+		if strings.Contains(text, kw) {
+			hitCount++
+		}
+	}
+
+	// 概念
+	for _, concept := range profile.Concepts {
+		concept = strings.ToLower(strings.TrimSpace(concept))
+		if concept == "" {
+			continue
+		}
+		totalKeywords++
+		if strings.Contains(text, concept) {
+			hitCount++
+		}
+	}
+
+	// 标签
+	for _, tag := range profile.Tags {
+		tag = strings.ToLower(strings.TrimSpace(tag))
+		if tag == "" {
+			continue
+		}
+		totalKeywords++
+		if strings.Contains(text, tag) {
+			hitCount++
+		}
+	}
+
+	if totalKeywords == 0 || hitCount == 0 {
+		return 0
+	}
+	// 归一化：命中比例，但至少命中 2 个才给高分
+	ratio := float64(hitCount) / float64(totalKeywords)
+	if hitCount >= 3 {
+		return 0.8
+	}
+	if hitCount >= 2 {
+		return 0.5
+	}
+	return ratio * 0.3
+}
+
+// scoreSourceQuality 根据新闻来源给质量分。
+func scoreSourceQuality(source string) float64 {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "jin10", "financialjuice":
+		return 0.9
+	case "cls", "cninfo", "sse":
+		return 0.85
+	case "eastmoney", "10jqka":
+		return 0.7
+	default:
+		return 0.5
+	}
+}
+
+// scoreFreshness 根据事件时间给新鲜度分（越近越高）。
+func scoreFreshness(eventAt time.Time) float64 {
+	if eventAt.IsZero() {
+		return 0.3
+	}
+	age := time.Since(eventAt)
+	switch {
+	case age < 1*time.Hour:
+		return 1.0
+	case age < 4*time.Hour:
+		return 0.85
+	case age < 12*time.Hour:
+		return 0.65
+	case age < 24*time.Hour:
+		return 0.45
+	default:
+		return 0.25
+	}
+}
+
+// normalizeNLCSCore 将 NewsLinkCandidate 的原始分数（通常 0-100）归一化到 0-1。
+func normalizeNLCSCore(rawScore float64) float64 {
+	if rawScore <= 0 {
+		return 0
+	}
+	normalized := rawScore / 100.0
+	if normalized > 1.0 {
+		return 1.0
+	}
+	return normalized
+}
+
+// semanticSearchNewsForHolding 使用持仓画像文本对 news_event embedding 做反向语义搜索。
+// 这是"持仓画像 → 新闻"的方向，与原来的"新闻 → 股票画像"互补。
+func (s *Service) semanticSearchNewsForHolding(
+	ctx context.Context,
+	holding StockV2Holding,
+	profile StockProfile,
+	run PortfolioSentinelRun,
+) []SemanticNewsEventResult {
+	queryText := buildHoldingQueryText(profile)
+	if strings.TrimSpace(queryText) == "" {
+		return nil
+	}
+	hits, err := s.SemanticSearchNewsEvents(ctx, SemanticSearchRequest{
+		Query:    queryText,
+		Limit:    20,
+		MinScore: 0.3,
+	})
+	if err != nil {
+		return nil
+	}
+	// 只保留窗口内的结果
+	windowStart := run.WindowStartAt
+	windowEnd := run.WindowEndAt
+	filtered := make([]SemanticNewsEventResult, 0, len(hits))
+	for _, hit := range hits {
+		if !hit.Event.EventAt.IsZero() &&
+			!hit.Event.EventAt.Before(windowStart) &&
+			hit.Event.EventAt.Before(windowEnd) {
+			filtered = append(filtered, hit)
+		}
+	}
+	return filtered
+}
+
+// buildHoldingQueryText 从持仓画像构造语义搜索查询文本。
+func buildHoldingQueryText(profile StockProfile) string {
+	parts := []string{
+		profile.Name,
+		profile.Industry,
+		profile.BusinessSummaryZh,
+		strings.Join(profile.Concepts, " "),
+		strings.Join(profile.Tags, " "),
+		strings.Join(profile.KeywordsZh, " "),
+		profile.ProfileTextZh,
+	}
+	return strings.Join(nonEmptyStrings(parts), "\n")
+}
+
+// mergeSemanticCandidates 将语义搜索结果合并到已有候选列表中。
+// 如果某条新闻已在候选列表中，补充其 SemanticScore；否则新增条目。
+func (s *Service) mergeSemanticCandidates(
+	existing []SentinelNewsCandidate,
+	semanticHits []SemanticNewsEventResult,
+	holding StockV2Holding,
+) []SentinelNewsCandidate {
+	if len(semanticHits) == 0 {
+		return existing
+	}
+
+	byEventID := make(map[string]*SentinelNewsCandidate, len(existing))
+	for i := range existing {
+		byEventID[existing[i].NewsEventID] = &existing[i]
+	}
+
+	for _, hit := range semanticHits {
+		if cand, ok := byEventID[hit.Event.ID]; ok {
+			// 已存在，补充语义分数
+			cand.SemanticScore = hit.Score
+			cand.ScoreBreakdown["semantic"] = hit.Score
+			cand.RecallMethods = append(cand.RecallMethods, "semantic")
+			// 重新计算总分（加入语义维度）
+			cand.TotalScore =
+				cand.EntityMatchScore*0.30 +
+					cand.KeywordMatchScore*0.15 +
+					cand.SemanticScore*0.25 +
+					cand.NewsLinkCandidateScore*0.10 +
+					cand.SourceQualityScore*0.10 +
+					cand.FreshnessScore*0.10
+		} else {
+			// 新条目（纯语义召回）
+			event := hit.Event
+			newCand := SentinelNewsCandidate{
+				NewsEventID:       event.ID,
+				NewsEvent:         &event,
+				Symbol:            holding.Symbol,
+				SemanticScore:     hit.Score,
+				SourceQualityScore: scoreSourceQuality(event.Source),
+				FreshnessScore:    scoreFreshness(event.EventAt),
+				ScoreBreakdown:    map[string]float64{"semantic": hit.Score},
+				RecallMethods:     []string{"semantic"},
+			}
+			newCand.ScoreBreakdown["source_quality"] = newCand.SourceQualityScore
+			newCand.ScoreBreakdown["freshness"] = newCand.FreshnessScore
+			newCand.TotalScore =
+				newCand.SemanticScore*0.40 +
+					newCand.SourceQualityScore*0.30 +
+					newCand.FreshnessScore*0.30
+			existing = append(existing, newCand)
+		}
+	}
+	return existing
+}
+
+func sentinelCandidateReason(c SentinelNewsCandidate) string {
+	reasons := make([]string, 0, len(c.RecallMethods))
+	for _, m := range c.RecallMethods {
+		switch m {
+		case "entity_match":
+			reasons = append(reasons, "实体匹配")
+		case "keyword":
+			reasons = append(reasons, "关键词匹配")
+		case "semantic":
+			reasons = append(reasons, "语义相似")
+		case "news_link":
+			reasons = append(reasons, "新闻关联候选")
+		}
+	}
+	return strings.Join(reasons, ", ")
+}
+
+func sentinelCandidateMatchedTerms(c SentinelNewsCandidate) []string {
+	terms := make([]string, 0, len(c.ScoreBreakdown))
+	for dim, score := range c.ScoreBreakdown {
+		if score > 0 {
+			terms = append(terms, dim)
+		}
+	}
+	return terms
+}
+
+func countLowPrioritySentinelCandidates(candidates []SentinelNewsCandidate) int {
+	count := 0
+	for _, c := range candidates {
+		// 低优先级：只有语义或关键词匹配，没有实体或 NLC 命中
+		hasEntity := c.EntityMatchScore > 0
+		hasNLC := c.NewsLinkCandidateScore > 0
+		if !hasEntity && !hasNLC {
+			count++
+		}
+	}
+	return count
 }
 
 func portfolioSentinelNewsScanLimit(detailLimit int) int {

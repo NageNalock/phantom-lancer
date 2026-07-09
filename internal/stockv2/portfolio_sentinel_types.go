@@ -166,15 +166,16 @@ type PortfolioSentinelPortfolioContext struct {
 }
 
 type PortfolioSentinelHoldingContext struct {
-	Holding    StockV2Holding      `json:"holding"`
-	Quote      *StockV2QuoteLatest `json:"quote,omitempty"`
-	DailyBars  *DailyBarsContext   `json:"dailyBars,omitempty"`
-	MinuteBars *MinuteBarsContext  `json:"minuteBars,omitempty"`
-	Profile    *StockProfile       `json:"stockProfile,omitempty"`
-	News       []NewsEvent         `json:"news,omitempty"`
-	NewsLinks  []NewsLinkCandidate `json:"newsLinks,omitempty"`
-	RawNews    []StockV2RawNews    `json:"rawNews,omitempty"`
-	Freshness  map[string]any      `json:"freshness,omitempty"`
+	Holding        StockV2Holding            `json:"holding"`
+	Quote          *StockV2QuoteLatest       `json:"quote,omitempty"`
+	DailyBars      *DailyBarsContext         `json:"dailyBars,omitempty"`
+	MinuteBars     *MinuteBarsContext        `json:"minuteBars,omitempty"`
+	Profile        *StockProfile             `json:"stockProfile,omitempty"`
+	News           []NewsEvent               `json:"news,omitempty"`
+	NewsLinks      []NewsLinkCandidate       `json:"newsLinks,omitempty"`
+	NewsCandidates []SentinelNewsCandidate   `json:"newsCandidates,omitempty"`
+	RawNews        []StockV2RawNews          `json:"rawNews,omitempty"`
+	Freshness      map[string]any            `json:"freshness,omitempty"`
 }
 
 type PortfolioSentinelReport struct {
@@ -291,6 +292,31 @@ type PortfolioSentinelReviewRequest struct {
 	Summary      string   `json:"summary,omitempty"`
 	RiskLevel    string   `json:"risk_level,omitempty"`
 	EvidenceRefs []string `json:"evidence_refs,omitempty"`
+}
+
+// SentinelNewsCandidate 是组合哨兵对单条新闻的多路打分结果。
+// 不再依赖 NewsLinkCandidate 作为唯一入口，而是直接从窗口 NewsEvent 召回，
+// 综合实体匹配、关键词匹配、语义相似度、NLC 辅助分数等多路信号。
+type SentinelNewsCandidate struct {
+	NewsEventID string     `json:"newsEventId"`
+	NewsEvent   *NewsEvent `json:"newsEvent,omitempty"`
+	Symbol      string     `json:"symbol"`
+
+	// 各维度分数（可单独追溯）
+	EntityMatchScore       float64 `json:"entityMatchScore"`       // 股票代码/名称/别名命中
+	KeywordMatchScore      float64 `json:"keywordMatchScore"`      // 主营/行业/概念/关键词命中
+	SemanticScore          float64 `json:"semanticScore"`          // 持仓画像 vs news_event embedding
+	NewsLinkCandidateScore float64 `json:"newsLinkCandidateScore"` // 既有 NewsLinkCandidate 分数（归一化）
+	SourceQualityScore     float64 `json:"sourceQualityScore"`     // 来源质量
+	FreshnessScore         float64 `json:"freshnessScore"`         // 事件新鲜度
+
+	TotalScore float64 `json:"totalScore"`
+
+	// 分数明细（用于前端展示和可观测性）
+	ScoreBreakdown map[string]float64 `json:"scoreBreakdown,omitempty"`
+
+	// 召回方式标记：["entity_match", "keyword", "semantic", "news_link"]
+	RecallMethods []string `json:"recallMethods,omitempty"`
 }
 
 func (r *PortfolioSentinelReviewRequest) UnmarshalJSON(data []byte) error {
