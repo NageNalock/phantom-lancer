@@ -76,7 +76,6 @@ func TestInstrumentTypeRoundTrip(t *testing.T) {
 		Market:         "SH",
 		InstrumentType: InstrumentTypeExchangeFund,
 		Name:           "沪深300ETF",
-		Status:         "active",
 	}); err != nil {
 		t.Fatalf("upsert exchange fund: %v", err)
 	}
@@ -85,7 +84,6 @@ func TestInstrumentTypeRoundTrip(t *testing.T) {
 		Symbol: "000001",
 		Market: "SZ",
 		Name:   "平安银行",
-		Status: "active",
 	}); err != nil {
 		t.Fatalf("upsert stock: %v", err)
 	}
@@ -116,9 +114,9 @@ func TestInstrumentListFiltersMarketAndType(t *testing.T) {
 	defer store.Close()
 
 	for _, inst := range []StockV2Instrument{
-		{ID: "inst-510300", Symbol: "510300", Market: "SH", InstrumentType: InstrumentTypeExchangeFund, Name: "沪深300ETF", Status: "active"},
-		{ID: "inst-159915", Symbol: "159915", Market: "SZ", InstrumentType: InstrumentTypeExchangeFund, Name: "创业板ETF", Status: "active"},
-		{ID: "inst-000001", Symbol: "000001", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "平安银行", Status: "active"},
+		{ID: "inst-510300", Symbol: "510300", Market: "SH", InstrumentType: InstrumentTypeExchangeFund, Name: "沪深300ETF"},
+		{ID: "inst-159915", Symbol: "159915", Market: "SZ", InstrumentType: InstrumentTypeExchangeFund, Name: "创业板ETF"},
+		{ID: "inst-000001", Symbol: "000001", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "平安银行"},
 	} {
 		if err := store.UpsertInstrument(ctx, inst); err != nil {
 			t.Fatalf("upsert %s: %v", inst.Symbol, err)
@@ -150,8 +148,8 @@ func TestInstrumentListFiltersProfileStatus(t *testing.T) {
 	defer store.Close()
 
 	for _, inst := range []StockV2Instrument{
-		{ID: "inst-300750", Symbol: "300750", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "宁德时代", Status: "active"},
-		{ID: "inst-600519", Symbol: "600519", Market: "SH", InstrumentType: InstrumentTypeStock, Name: "贵州茅台", Status: "active"},
+		{ID: "inst-300750", Symbol: "300750", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "宁德时代"},
+		{ID: "inst-600519", Symbol: "600519", Market: "SH", InstrumentType: InstrumentTypeStock, Name: "贵州茅台"},
 	} {
 		if err := store.UpsertInstrument(ctx, inst); err != nil {
 			t.Fatalf("upsert %s: %v", inst.Symbol, err)
@@ -211,6 +209,36 @@ func TestStoreInitMigratesOldStockV2ColumnsBeforeIndexes(t *testing.T) {
 			last_update_at DATETIME,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL
+		);
+		INSERT INTO stockv2_instruments (
+			id, symbol, market, name, status, created_at, updated_at
+		) VALUES (
+			'old-inst-1', '000001', 'SZ', '平安银行', 'active', '2026-06-18 09:30:00', '2026-06-18 09:31:00'
+		);
+		CREATE TABLE stockv2_settings (
+			id TEXT PRIMARY KEY,
+			auto_update_enabled INTEGER DEFAULT 0,
+			update_interval_sec INTEGER DEFAULT 3600,
+			proxy_enabled INTEGER DEFAULT 0,
+			proxy_type TEXT,
+			proxy_host TEXT,
+			proxy_port INTEGER,
+			last_scheduled_update DATETIME,
+			daily_bars_last_run DATETIME,
+			financial_juice_enabled INTEGER DEFAULT 0,
+			financial_juice_endpoint TEXT,
+			financial_juice_cookie TEXT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		);
+		INSERT INTO stockv2_settings (
+			id, auto_update_enabled, update_interval_sec, proxy_enabled, proxy_type, proxy_host, proxy_port,
+			last_scheduled_update, daily_bars_last_run, financial_juice_enabled, financial_juice_endpoint,
+			financial_juice_cookie, created_at, updated_at
+		) VALUES (
+			'1', 1, 7200, 1, 'http', '127.0.0.1', 7890,
+			'2026-06-18 09:30:00', '2026-06-18 09:35:00', 1, 'https://example.invalid/feed',
+			'cookie=value', '2026-06-18 09:00:00', '2026-06-18 09:01:00'
 		);
 		CREATE TABLE stockv2_stock_profiles (
 			symbol TEXT PRIMARY KEY,
@@ -297,6 +325,28 @@ func TestStoreInitMigratesOldStockV2ColumnsBeforeIndexes(t *testing.T) {
 	}
 	if eventAt == "" {
 		t.Fatal("event_at was not backfilled")
+	}
+	if testColumnExists(t, store.db, "stockv2_instruments", "status") {
+		t.Fatal("stockv2_instruments.status legacy column was not removed")
+	}
+	for _, column := range []string{"update_interval_sec", "proxy_enabled", "proxy_type", "proxy_host", "proxy_port", "daily_bars_last_run"} {
+		if testColumnExists(t, store.db, "stockv2_settings", column) {
+			t.Fatalf("stockv2_settings.%s legacy column was not removed", column)
+		}
+	}
+	var instrumentName string
+	if err := store.db.QueryRow(`SELECT name FROM stockv2_instruments WHERE symbol = '000001'`).Scan(&instrumentName); err != nil {
+		t.Fatalf("query migrated instrument: %v", err)
+	}
+	if instrumentName != "平安银行" {
+		t.Fatalf("migrated instrument name = %q", instrumentName)
+	}
+	settings, err := store.GetSettings(context.Background())
+	if err != nil {
+		t.Fatalf("get migrated settings: %v", err)
+	}
+	if !settings.AutoUpdateEnabled || settings.LastScheduledUpdate.IsZero() || !settings.FinancialJuiceEnabled || settings.FinancialJuiceEndpoint == "" || !settings.FinancialJuiceCookieSet {
+		t.Fatalf("migrated settings = %+v, want active settings and financialjuice preserved", settings)
 	}
 }
 

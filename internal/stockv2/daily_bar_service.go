@@ -18,8 +18,7 @@ import (
 // 失败绝不伪造：抓取失败返回 error，不写空 bar、不伪装、不用最新价派生。
 
 const (
-	dailyBarsAgentTarget            = 250 // Agent 默认要求最近 250 个交易日
-	universeMaintenanceMaxFreshness = 24 * time.Hour
+	dailyBarsAgentTarget = 250 // Agent 默认要求最近 250 个交易日
 )
 
 func isValidDailyBarRange(r string) bool {
@@ -489,9 +488,6 @@ func (s *Service) runDailyBarsBatchJob(ctx context.Context, jobID string, req Da
 	if len(failedItems) > 0 && s.log != nil {
 		s.log.Warn("daily bar batch job completed with item failures", "job_id", jobID, "mode", mode, "range_code", rangeCode, "adjusted", adjusted, "trigger_type", req.TriggerType, "trigger_source", req.TriggerSource, "symbol", req.Symbol, "start_date", start, "end_date", end, "total_count", total, "processed_count", processed, "success_count", success, "failed_count", len(failedItems), "failure_sample", stockV2FailureSample(failedItems, 5))
 	}
-	if req.TriggerType == "scheduled" && mode == DailyBarJobModeUniverseIncremental && status == "completed" {
-		s.recordDailyBarsLastRun(ctx, endAt)
-	}
 	_ = s.store.PruneDailyBarJobs(ctx, 100)
 }
 
@@ -510,24 +506,6 @@ func (s *Service) ListRunningDailyBarJobs(ctx context.Context) ([]StockV2DailyBa
 }
 func (s *Service) GetLatestDailyBarJob(ctx context.Context) (StockV2DailyBarJob, error) {
 	return s.store.GetLatestDailyBarJob(ctx)
-}
-
-func (s *Service) recordDailyBarsLastRun(ctx context.Context, when time.Time) {
-	settings, err := s.GetSettings(ctx)
-	if err != nil {
-		if s.log != nil {
-			s.log.Warn("load settings before updating daily bars last run failed", "last_run_at", when.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 240))
-		}
-		return
-	}
-	settings.DailyBarsLastRun = when
-	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil {
-		if s.log != nil {
-			s.log.Warn("update daily bars last run failed", "last_run_at", when.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 240))
-		}
-		return
-	}
-	s.settings = settings
 }
 
 func sameDayInLoc(a, b time.Time, loc *time.Location) bool {

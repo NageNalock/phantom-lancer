@@ -17,7 +17,6 @@ func TestRunNewsStrategyMonitorHitsHolding(t *testing.T) {
 		InstrumentType: InstrumentTypeStock,
 		Name:           "宁德时代",
 		Concepts:       []string{"锂电池"},
-		Status:         "active",
 	})
 	portfolio := createStrategyTestPortfolio(t, svc.store, "portfolio-news-holding")
 	if err := svc.store.CreateHolding(ctx, StockV2Holding{
@@ -87,7 +86,6 @@ func TestRunNewsStrategyMonitorHitsActiveStrategy(t *testing.T) {
 		Market:         "SH",
 		InstrumentType: InstrumentTypeStock,
 		Name:           "中微公司",
-		Status:         "active",
 	})
 	strategy, err := svc.CreateStrategy(ctx, RequestCreateStrategy{
 		Name:      "中微公司跟踪",
@@ -134,7 +132,6 @@ func TestRunNewsStrategyMonitorSkipsHighScoreUnrelatedCandidate(t *testing.T) {
 		Market:         "SZ",
 		InstrumentType: InstrumentTypeStock,
 		Name:           "国际复材",
-		Status:         "active",
 	})
 	event := createNewsLinkEvent(t, svc, NewsEvent{Source: "test", Title: "国际复材发布异动公告"})
 	candidates, err := svc.LinkNewsEvent(ctx, event.ID)
@@ -180,7 +177,6 @@ func TestRunNewsStrategyMonitorSkipsLowQualityCandidate(t *testing.T) {
 		Market:         "SH",
 		InstrumentType: InstrumentTypeStock,
 		Name:           "浦发银行",
-		Status:         "active",
 	})
 	event := createNewsLinkEvent(t, svc, NewsEvent{Source: "test", Title: "浦发银行相关传闻", QualityStatus: NewsQualityLow})
 	candidates, err := svc.LinkNewsEvent(ctx, event.ID)
@@ -216,7 +212,6 @@ func TestNewsMonitorReviewContextIncludesNews(t *testing.T) {
 		Market:         "SZ",
 		InstrumentType: InstrumentTypeStock,
 		Name:           "比亚迪",
-		Status:         "active",
 	})
 	portfolio := createStrategyTestPortfolio(t, svc.store, "portfolio-news-context")
 	if err := svc.store.CreateHolding(ctx, StockV2Holding{

@@ -906,8 +906,6 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 	if len(failedItems) > 0 && s.log != nil {
 		s.log.Warn("stock data asset maintenance completed with item failures", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "total_count", totalCount, "processed_count", processedCount, "success_count", successCount, "failed_count", len(failedItems), "failure_sample", stockV2FailureSample(failedItems, 5))
 	}
-	s.recordDailyBarsLastRun(ctx, endAt)
-
 	// 清理过期更新历史（保留最近 100 条）
 	if err := s.store.PruneUpdateJobs(ctx, 100); err != nil {
 		s.log.Warn("prune update jobs failed", "retention_count", 100, "error", safelog.Text(err.Error(), 240))
@@ -980,17 +978,6 @@ func dailyBarsNeedsMaintenance(q DailyBarsQuality) bool {
 	return !q.HasData || !q.Meets250 || q.Stale
 }
 
-func (s *Service) universeMaintenanceFreshnessWindow() time.Duration {
-	interval := time.Duration(s.settings.UpdateIntervalSec) * time.Second
-	if interval <= 0 {
-		interval = time.Hour
-	}
-	if interval > universeMaintenanceMaxFreshness {
-		return universeMaintenanceMaxFreshness
-	}
-	return interval
-}
-
 func (s *Service) dailyBarsQualityForUniverseBatch(ctx context.Context, symbols []string) (map[string]DailyBarsQuality, error) {
 	out := make(map[string]DailyBarsQuality, len(symbols))
 	for start := 0; start < len(symbols); start += 100 {
@@ -1007,29 +994,6 @@ func (s *Service) dailyBarsQualityForUniverseBatch(ctx context.Context, symbols 
 		}
 	}
 	return out, nil
-}
-
-func (s *Service) shouldSkipFreshUniverseSymbol(ctx context.Context, symbol string, now time.Time, freshness time.Duration, quality DailyBarsQuality, hasQuality bool) (bool, error) {
-	inst, err := s.store.GetInstrument(ctx, symbol)
-	if errors.Is(err, ErrInstrumentNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if inst.UpdatedAt.IsZero() || now.Sub(inst.UpdatedAt) > freshness {
-		return false, nil
-	}
-	if !hasQuality {
-		loaded, err := s.GetDailyBarsQuality(ctx, symbol, DailyBarAdjustedNone)
-		if err != nil {
-			return false, err
-		}
-		quality = loaded
-	}
-	// ponytail: existing updated_at plus daily-bar quality is enough for v1 fast-skip;
-	// split per-source freshness if quote/profile cadences need independent SLAs.
-	return !dailyBarsNeedsMaintenance(quality), nil
 }
 
 // GetUpdateJob 获取更新任务
@@ -1060,25 +1024,9 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 		return StockV2Settings{}, err
 	}
 	prevAuto := settings.AutoUpdateEnabled
-	prevInterval := settings.UpdateIntervalSec
 	prevNewsBG := s.hasEnabledNewsSources(ctx)
 	if req.AutoUpdateEnabled != nil {
 		settings.AutoUpdateEnabled = *req.AutoUpdateEnabled
-	}
-	if req.UpdateIntervalSec != nil {
-		settings.UpdateIntervalSec = *req.UpdateIntervalSec
-	}
-	if req.ProxyEnabled != nil {
-		settings.ProxyEnabled = *req.ProxyEnabled
-	}
-	if req.ProxyType != nil {
-		settings.ProxyType = *req.ProxyType
-	}
-	if req.ProxyHost != nil {
-		settings.ProxyHost = *req.ProxyHost
-	}
-	if req.ProxyPort != nil {
-		settings.ProxyPort = *req.ProxyPort
 	}
 
 	// 保存配置
@@ -1095,8 +1043,7 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	needBG := settings.AutoUpdateEnabled || newsBG || embeddingBG
 	prevNeedBG := prevAuto || prevNewsBG || embeddingBG
 	if needBG {
-		restartBG := !prevNeedBG ||
-			(prevAuto && prevInterval != settings.UpdateIntervalSec)
+		restartBG := !prevNeedBG
 		if restartBG && prevNeedBG {
 			s.StopBackground()
 		}

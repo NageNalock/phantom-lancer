@@ -23,7 +23,6 @@ func TestRefreshLatestQuotesKeepsOldQuoteOnTencentFailure(t *testing.T) {
 		Symbol: "000001",
 		Market: "SZ",
 		Name:   "平安银行",
-		Status: "active",
 	}); err != nil {
 		t.Fatalf("seed instrument: %v", err)
 	}

@@ -643,7 +643,6 @@ function instrumentFromHolding(holding: StockV2Holding): StockV2Instrument {
     concepts: [],
     listDate: "",
     delistDate: "",
-    status: "active",
     lastUpdate: holding.lastPriceAt || "",
     createdAt: "",
     updatedAt: holding.updatedAt || "",

@@ -102,23 +102,6 @@ type StockProfileSummary struct {
 	UpdatedAt           time.Time `json:"updatedAt,omitempty"`
 }
 
-type RebuildStockProfilesResult struct {
-	Total       int             `json:"total"`
-	Success     int             `json:"success"`
-	Failed      int             `json:"failed"`
-	FailedItems []UpdateFailure `json:"failedItems,omitempty"`
-	UpdatedAt   time.Time       `json:"updatedAt"`
-}
-
-type RequestUpdateStockProfile struct {
-	Symbol        string `json:"symbol,omitempty"`
-	TriggerSource string `json:"triggerSource,omitempty"` // manual | auto
-	TriggerReason string `json:"triggerReason,omitempty"`
-	RequestedBy   string `json:"requestedBy,omitempty"`
-	ForceAI       bool   `json:"forceAI,omitempty"`
-	StrictAI      bool   `json:"strictAI,omitempty"`
-}
-
 type StockProfileSourceStatus struct {
 	Source    string    `json:"source"`
 	Status    string    `json:"status"`
@@ -153,10 +136,4 @@ type StockProfileUpdateTaskListFilter struct {
 	Symbol string
 	Limit  int
 	Offset int
-}
-
-type StockProfileUpdateResult struct {
-	Profile  StockProfile           `json:"profile"`
-	Task     StockProfileUpdateTask `json:"task"`
-	AgentRun *AgentRun              `json:"agentRun,omitempty"`
 }

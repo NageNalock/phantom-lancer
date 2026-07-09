@@ -41,11 +41,7 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/profiles/update-tasks", s.handleStockV2ListStockProfileUpdateTasks)
 	mux.HandleFunc("GET /api/stockv2/profiles/{symbol}", s.handleStockV2GetStockProfile)
 	mux.HandleFunc("POST /api/stockv2/assets/{symbol}/maintain", s.handleStockV2MaintainAsset)
-	mux.HandleFunc("POST /api/stockv2/profiles/{symbol}/update", s.handleStockV2UpdateStockProfile)
 	mux.HandleFunc("GET /api/stockv2/profiles/{symbol}/update-tasks", s.handleStockV2ListStockProfileUpdateTasks)
-	mux.HandleFunc("POST /api/stockv2/profiles/{symbol}/build", s.handleStockV2BuildStockProfile)
-	mux.HandleFunc("POST /api/stockv2/profiles/{symbol}/run-agent", s.handleStockV2RunStockProfileAgent)
-	mux.HandleFunc("POST /api/stockv2/profiles/rebuild", s.handleStockV2RebuildStockProfiles)
 
 	// 最新行情
 	mux.HandleFunc("GET /api/stockv2/quotes/latest", s.handleStockV2GetLatestQuotes)

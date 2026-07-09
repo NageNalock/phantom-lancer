@@ -18,7 +18,6 @@ func TestSnapshotReturnsInstrumentTotalWithSmallSample(t *testing.T) {
 			Symbol: symbol,
 			Market: "SZ",
 			Name:   "样本" + symbol,
-			Status: "active",
 		}); err != nil {
 			t.Fatalf("seed instrument %s: %v", symbol, err)
 		}

@@ -113,19 +113,6 @@ export function StockV2Overview({ data }: { data: AppData }) {
               最新价优先用分钟线投影，腾讯分钟线不可用时回退东方财富分钟线；场内基金日 K 缺口会回退基金净值接口。
             </p>
           </div>
-          {settings?.proxyEnabled ? (
-            <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <strong className="text-sm">代理</strong>
-                  <span className="ml-2 text-xs text-[var(--muted)]">
-                    {settings.proxyType}://{settings.proxyHost}:{settings.proxyPort}
-                  </span>
-                </div>
-                <Pill tone="warn">已启用</Pill>
-              </div>
-            </div>
-          ) : null}
         </div>
       </Panel>
     </div>

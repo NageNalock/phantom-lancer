@@ -138,63 +138,6 @@ func TestNewServiceMarksInterruptedScheduledTasksFailed(t *testing.T) {
 	}
 }
 
-func TestUniverseMaintenanceFreshSkipRequiresReadyDailyBars(t *testing.T) {
-	svc, cleanup := newStrategyTestService(t)
-	defer cleanup()
-	ctx := context.Background()
-	if err := svc.Initialize(ctx); err != nil {
-		t.Fatalf("initialize: %v", err)
-	}
-
-	if err := svc.store.UpsertInstrument(ctx, StockV2Instrument{
-		ID:             "inst-fresh",
-		Symbol:         "000001",
-		Market:         "SZ",
-		InstrumentType: InstrumentTypeStock,
-		Name:           "平安银行",
-		Status:         "active",
-	}); err != nil {
-		t.Fatalf("upsert fresh instrument: %v", err)
-	}
-	if err := svc.store.UpsertDailyBars(ctx, readyDailyBarsForTest("000001", "SZ", time.Now())); err != nil {
-		t.Fatalf("upsert ready bars: %v", err)
-	}
-
-	quality, err := svc.GetDailyBarsQuality(ctx, "000001", DailyBarAdjustedNone)
-	if err != nil {
-		t.Fatalf("get daily bar quality: %v", err)
-	}
-	skip, err := svc.shouldSkipFreshUniverseSymbol(ctx, "000001", time.Now(), svc.universeMaintenanceFreshnessWindow(), quality, true)
-	if err != nil {
-		t.Fatalf("fresh skip check: %v", err)
-	}
-	if !skip {
-		t.Fatalf("fresh ready instrument was not skipped")
-	}
-
-	if err := svc.store.UpsertInstrument(ctx, StockV2Instrument{
-		ID:             "inst-missing-bars",
-		Symbol:         "000002",
-		Market:         "SZ",
-		InstrumentType: InstrumentTypeStock,
-		Name:           "万科A",
-		Status:         "active",
-	}); err != nil {
-		t.Fatalf("upsert missing bars instrument: %v", err)
-	}
-	quality, err = svc.GetDailyBarsQuality(ctx, "000002", DailyBarAdjustedNone)
-	if err != nil {
-		t.Fatalf("get missing daily bar quality: %v", err)
-	}
-	skip, err = svc.shouldSkipFreshUniverseSymbol(ctx, "000002", time.Now(), svc.universeMaintenanceFreshnessWindow(), quality, true)
-	if err != nil {
-		t.Fatalf("missing bars skip check: %v", err)
-	}
-	if skip {
-		t.Fatalf("instrument with missing daily bars was skipped")
-	}
-}
-
 func TestScheduledUniverseUpdateSkipsWhenRecentJobCompleted(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
@@ -207,7 +150,6 @@ func TestScheduledUniverseUpdateSkipsWhenRecentJobCompleted(t *testing.T) {
 	now := time.Date(2026, 6, 30, 23, 5, 0, 0, loc)
 	settings := svc.settings
 	settings.AutoUpdateEnabled = true
-	settings.UpdateIntervalSec = 3600
 	settings.LastScheduledUpdate = now.AddDate(0, 0, -1)
 	if err := svc.store.CreateOrUpdateSettings(ctx, settings); err != nil {
 		t.Fatalf("save settings: %v", err)

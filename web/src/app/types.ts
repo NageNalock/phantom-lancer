@@ -1161,7 +1161,6 @@ export interface StockV2Instrument {
   concepts: string[];
   listDate: string;
   delistDate: string;
-  status: string; // active, delisted, suspended
   lastUpdate: string;
   createdAt: string;
   updatedAt: string;
@@ -1327,12 +1326,6 @@ export interface StockV2StockProfileUpdateTask {
   updatedAt: string;
 }
 
-export interface StockV2StockProfileUpdateResult {
-  profile: StockV2StockProfile;
-  task: StockV2StockProfileUpdateTask;
-  agentRun?: StockV2AgentRun;
-}
-
 export interface StockV2Portfolio {
   id: string;
   name: string;
@@ -1490,13 +1483,7 @@ export interface StockV2UpdateProgress {
 export interface StockV2Settings {
   id: string;
   autoUpdateEnabled: boolean;
-  updateIntervalSec: number;
-  proxyEnabled: boolean;
-  proxyType: string;
-  proxyHost: string;
-  proxyPort: number;
   lastScheduledUpdate: string;
-  dailyBarsLastRun: string;
   createdAt: string;
   updatedAt: string;
 }

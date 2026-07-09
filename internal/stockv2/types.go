@@ -25,7 +25,6 @@ type StockV2Instrument struct {
 	Concepts       []string  `json:"concepts"` // 概念信息数组
 	ListDate       string    `json:"listDate"`
 	DelistDate     string    `json:"delistDate"`
-	Status         string    `json:"status"` // active, delisted, suspended
 	LastUpdate     time.Time `json:"lastUpdate"`
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
@@ -160,13 +159,7 @@ type StockV2UpdateProgress struct {
 type StockV2Settings struct {
 	ID                      string    `json:"id"`
 	AutoUpdateEnabled       bool      `json:"autoUpdateEnabled"`
-	UpdateIntervalSec       int       `json:"updateIntervalSec"`
-	ProxyEnabled            bool      `json:"proxyEnabled"`
-	ProxyType               string    `json:"proxyType"`
-	ProxyHost               string    `json:"proxyHost"`
-	ProxyPort               int       `json:"proxyPort"`
 	LastScheduledUpdate     time.Time `json:"lastScheduledUpdate"`
-	DailyBarsLastRun        time.Time `json:"dailyBarsLastRun"` // 最近一次统一维护或手动日 K 批任务完成时间
 	FinancialJuiceEnabled   bool      `json:"-"`
 	FinancialJuiceEndpoint  string    `json:"-"`
 	FinancialJuiceCookie    string    `json:"-"`
@@ -177,12 +170,7 @@ type StockV2Settings struct {
 
 // StockV2SettingsPatch 配置更新补丁
 type StockV2SettingsPatch struct {
-	AutoUpdateEnabled *bool   `json:"autoUpdateEnabled,omitempty"`
-	UpdateIntervalSec *int    `json:"updateIntervalSec,omitempty"`
-	ProxyEnabled      *bool   `json:"proxyEnabled,omitempty"`
-	ProxyType         *string `json:"proxyType,omitempty"`
-	ProxyHost         *string `json:"proxyHost,omitempty"`
-	ProxyPort         *int    `json:"proxyPort,omitempty"`
+	AutoUpdateEnabled *bool `json:"autoUpdateEnabled,omitempty"`
 }
 
 // Repository 接口定义
@@ -313,12 +301,7 @@ type RequestRecordTransaction struct {
 
 // RequestCreateOrUpdateSettings 配置请求
 type RequestCreateOrUpdateSettings struct {
-	AutoUpdateEnabled *bool   `json:"autoUpdateEnabled,omitempty"`
-	UpdateIntervalSec *int    `json:"updateIntervalSec,omitempty"`
-	ProxyEnabled      *bool   `json:"proxyEnabled,omitempty"`
-	ProxyType         *string `json:"proxyType,omitempty"`
-	ProxyHost         *string `json:"proxyHost,omitempty"`
-	ProxyPort         *int    `json:"proxyPort,omitempty"`
+	AutoUpdateEnabled *bool `json:"autoUpdateEnabled,omitempty"`
 }
 
 // 错误定义

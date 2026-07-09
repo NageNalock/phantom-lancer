@@ -7,9 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestBuildStockProfileForStock(t *testing.T) {
+func TestAssetBaseProfileForStock(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStockProfileTestService(t)
 	defer cleanup()
@@ -23,15 +24,11 @@ func TestBuildStockProfileForStock(t *testing.T) {
 		Industry:       "电力设备",
 		Sector:         "新能源",
 		Concepts:       []string{"锂电池", "储能"},
-		Status:         "active",
 	}); err != nil {
 		t.Fatalf("upsert instrument: %v", err)
 	}
 
-	profile, err := svc.BuildStockProfile(ctx, "300750")
-	if err != nil {
-		t.Fatalf("build profile: %v", err)
-	}
+	profile := refreshAssetBaseProfileForTest(t, svc, ctx, "300750")
 	if profile.Symbol != "300750" || profile.Name != "宁德时代" || profile.Industry != "电力设备" {
 		t.Fatalf("profile = %+v, want stock identity fields", profile)
 	}
@@ -48,7 +45,7 @@ func TestBuildStockProfileForStock(t *testing.T) {
 	}
 }
 
-func TestBuildStockProfileForExchangeFund(t *testing.T) {
+func TestAssetBaseProfileForExchangeFund(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStockProfileTestService(t)
 	defer cleanup()
@@ -59,15 +56,11 @@ func TestBuildStockProfileForExchangeFund(t *testing.T) {
 		Market:         "SH",
 		InstrumentType: InstrumentTypeExchangeFund,
 		Name:           "沪深300ETF",
-		Status:         "active",
 	}); err != nil {
 		t.Fatalf("upsert instrument: %v", err)
 	}
 
-	profile, err := svc.BuildStockProfile(ctx, "sh510300")
-	if err != nil {
-		t.Fatalf("build profile: %v", err)
-	}
+	profile := refreshAssetBaseProfileForTest(t, svc, ctx, "sh510300")
 	if profile.FundType != "ETF" || profile.TrackingIndex != "沪深300" || profile.Theme != "宽基指数" {
 		t.Fatalf("fund profile = %+v, want ETF fields", profile)
 	}
@@ -78,7 +71,7 @@ func TestBuildStockProfileForExchangeFund(t *testing.T) {
 	}
 }
 
-func TestBuildStockProfileEnrichesStockFromPublicF10(t *testing.T) {
+func TestAssetBaseProfileEnrichesStockFromPublicF10(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStockProfileTestServiceWithClient(t, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Path {
@@ -100,15 +93,11 @@ func TestBuildStockProfileEnrichesStockFromPublicF10(t *testing.T) {
 		Market:         "SZ",
 		InstrumentType: InstrumentTypeStock,
 		Name:           "宁德时代",
-		Status:         "active",
 	}); err != nil {
 		t.Fatalf("upsert instrument: %v", err)
 	}
 
-	profile, err := svc.BuildStockProfile(ctx, "300750")
-	if err != nil {
-		t.Fatalf("build profile: %v", err)
-	}
+	profile := refreshAssetBaseProfileForTest(t, svc, ctx, "300750")
 	for _, want := range []string{"全球领先", "动力电池系统", "储能电池系统", "储能概念", "新能源车渗透率"} {
 		if !strings.Contains(profile.ProfileText, want) {
 			t.Fatalf("profile text %q missing %q; profile=%+v", profile.ProfileText, want, profile)
@@ -119,7 +108,7 @@ func TestBuildStockProfileEnrichesStockFromPublicF10(t *testing.T) {
 	}
 }
 
-func TestBuildStockProfileEnrichesFundFromPublicF10(t *testing.T) {
+func TestAssetBaseProfileEnrichesFundFromPublicF10(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStockProfileTestServiceWithClient(t, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Path {
@@ -146,15 +135,11 @@ func TestBuildStockProfileEnrichesFundFromPublicF10(t *testing.T) {
 		Market:         "SZ",
 		InstrumentType: InstrumentTypeExchangeFund,
 		Name:           "浙商鼎盈LOF",
-		Status:         "active",
 	}); err != nil {
 		t.Fatalf("upsert instrument: %v", err)
 	}
 
-	profile, err := svc.BuildStockProfile(ctx, "169201")
-	if err != nil {
-		t.Fatalf("build profile: %v", err)
-	}
+	profile := refreshAssetBaseProfileForTest(t, svc, ctx, "169201")
 	for _, want := range []string{"混合型-灵活", "事件驱动", "中微公司", "思瑞浦", "前十大持仓"} {
 		if !strings.Contains(profile.ProfileText, want) && !strings.Contains(profile.ConstituentHint, want) {
 			t.Fatalf("profile missing %q: %+v", want, profile)
@@ -162,35 +147,7 @@ func TestBuildStockProfileEnrichesFundFromPublicF10(t *testing.T) {
 	}
 }
 
-func TestRebuildStockProfilesDoesNotCallPublicF10(t *testing.T) {
-	ctx := context.Background()
-	sourceCalls := 0
-	svc, cleanup := newStockProfileTestServiceWithClient(t, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		sourceCalls++
-		return stringResponse(http.StatusOK, "{}"), nil
-	})})
-	defer cleanup()
-
-	if err := svc.store.UpsertInstrument(ctx, StockV2Instrument{
-		ID:             "inst-300750",
-		Symbol:         "300750",
-		Market:         "SZ",
-		InstrumentType: InstrumentTypeStock,
-		Name:           "宁德时代",
-		Status:         "active",
-	}); err != nil {
-		t.Fatalf("upsert instrument: %v", err)
-	}
-
-	if _, err := svc.RebuildStockProfiles(ctx); err != nil {
-		t.Fatalf("rebuild profiles: %v", err)
-	}
-	if sourceCalls != 0 {
-		t.Fatalf("rebuild made %d public source calls, want 0", sourceCalls)
-	}
-}
-
-func TestUpdateStockProfileSkipsAIWhenInputUnchanged(t *testing.T) {
+func TestAssetProfileAISkipsWhenInputUnchanged(t *testing.T) {
 	ctx := context.Background()
 	businessLine := "动力电池系统"
 	svc, cleanup := newStockProfileTestServiceWithClient(t, stockProfileF10TestClient(&businessLine))
@@ -208,10 +165,7 @@ func TestUpdateStockProfileSkipsAIWhenInputUnchanged(t *testing.T) {
 		},
 	}
 
-	first, err := svc.UpdateStockProfile(ctx, RequestUpdateStockProfile{Symbol: "300750", TriggerSource: StockProfileUpdateTriggerManual, RequestedBy: "test"})
-	if err != nil {
-		t.Fatalf("first update profile: %v", err)
-	}
+	first := runAssetProfileAIForTest(t, svc, ctx, "300750", false)
 	if !first.Task.BaseInputChanged || first.Task.AIDecision != StockProfileAIDecisionCalled || first.AgentRun == nil {
 		t.Fatalf("first result = %+v, want changed and ai called", first)
 	}
@@ -227,10 +181,7 @@ func TestUpdateStockProfileSkipsAIWhenInputUnchanged(t *testing.T) {
 		t.Fatalf("first persisted task = %+v, want completed with ai ready", firstTasks)
 	}
 
-	second, err := svc.UpdateStockProfile(ctx, RequestUpdateStockProfile{Symbol: "300750", TriggerSource: StockProfileUpdateTriggerManual, RequestedBy: "test"})
-	if err != nil {
-		t.Fatalf("second update profile: %v", err)
-	}
+	second := runAssetProfileAIForTest(t, svc, ctx, "300750", false)
 	if second.Task.BaseInputChanged || second.Task.AIDecision != StockProfileAIDecisionSkippedUnchanged || second.AgentRun != nil {
 		t.Fatalf("second result = %+v, want unchanged and ai skipped", second)
 	}
@@ -241,12 +192,12 @@ func TestUpdateStockProfileSkipsAIWhenInputUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list profile update tasks: %v", err)
 	}
-	if len(tasks) != 2 {
-		t.Fatalf("tasks len = %d, want 2", len(tasks))
+	if len(tasks) != 3 {
+		t.Fatalf("tasks len = %d, want 3", len(tasks))
 	}
 }
 
-func TestUpdateStockProfileCallsAIWhenInputChanges(t *testing.T) {
+func TestAssetProfileAICallsWhenInputChanges(t *testing.T) {
 	ctx := context.Background()
 	businessLine := "动力电池系统"
 	svc, cleanup := newStockProfileTestServiceWithClient(t, stockProfileF10TestClient(&businessLine))
@@ -264,20 +215,14 @@ func TestUpdateStockProfileCallsAIWhenInputChanges(t *testing.T) {
 		},
 	}
 
-	first, err := svc.UpdateStockProfile(ctx, RequestUpdateStockProfile{Symbol: "300750", TriggerSource: StockProfileUpdateTriggerManual, RequestedBy: "test"})
-	if err != nil {
-		t.Fatalf("first update profile: %v", err)
-	}
+	first := runAssetProfileAIForTest(t, svc, ctx, "300750", false)
 	if first.AgentRun == nil {
 		t.Fatalf("first result = %+v, want ai run", first)
 	}
 	_ = waitAgentRunTerminal(t, svc, first.AgentRun.ID)
 
 	businessLine = "麒麟电池系统"
-	second, err := svc.UpdateStockProfile(ctx, RequestUpdateStockProfile{Symbol: "300750", TriggerSource: StockProfileUpdateTriggerAuto, RequestedBy: "test"})
-	if err != nil {
-		t.Fatalf("second update profile: %v", err)
-	}
+	second := runAssetProfileAIForTest(t, svc, ctx, "300750", false)
 	if !second.Task.BaseInputChanged || second.Task.AIDecision != StockProfileAIDecisionCalled || second.AgentRun == nil {
 		t.Fatalf("second result = %+v, want changed and ai called", second)
 	}
@@ -292,7 +237,6 @@ func TestStockProfileDedupesAliasesAndTags(t *testing.T) {
 		Industry:       "银行",
 		Sector:         " 银行 ",
 		Concepts:       []string{"金融", "金融", " 银行 "},
-		Status:         "active",
 	})
 	if countProfileString(profile.Tags, "银行") != 1 {
 		t.Fatalf("tags = %#v, want 银行 once", profile.Tags)
@@ -318,7 +262,6 @@ func TestUpsertInstrumentWithProfileMaintainsProfile(t *testing.T) {
 		Name:           "翰博高新",
 		Industry:       "光学光电子",
 		Sector:         "消费电子",
-		Status:         "active",
 	}
 	if err := svc.upsertInstrumentWithProfile(ctx, inst); err != nil {
 		t.Fatalf("upsert instrument with profile: %v", err)
@@ -365,7 +308,7 @@ func TestListStockProfileSummariesReturnsBatchAndMissing(t *testing.T) {
 	}
 }
 
-func TestRunAgentStockProfileSummaryUpdatesBilingualFields(t *testing.T) {
+func TestAssetProfileAIUpdatesBilingualFields(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStockProfileTestService(t)
 	defer cleanup()
@@ -379,7 +322,6 @@ func TestRunAgentStockProfileSummaryUpdatesBilingualFields(t *testing.T) {
 		Industry:       "电力设备",
 		Sector:         "新能源",
 		Concepts:       []string{"锂电池"},
-		Status:         "active",
 	}); err != nil {
 		t.Fatalf("upsert instrument: %v", err)
 	}
@@ -408,11 +350,11 @@ func TestRunAgentStockProfileSummaryUpdatesBilingualFields(t *testing.T) {
 		},
 	}
 
-	run, err := svc.RunAgentStockProfileSummary(ctx, "300750", "test")
-	if err != nil {
-		t.Fatalf("run profile agent: %v", err)
+	result := runAssetProfileAIForTest(t, svc, ctx, "300750", true)
+	if result.AgentRun == nil {
+		t.Fatalf("profile ai result = %+v, want agent run", result)
 	}
-	run = waitAgentRunTerminal(t, svc, run.ID)
+	run := waitAgentRunTerminal(t, svc, result.AgentRun.ID)
 	if run.Status != AgentRunStatusCompleted {
 		t.Fatalf("run status = %s error=%s", run.Status, run.ErrorMessage)
 	}
@@ -423,12 +365,13 @@ func TestRunAgentStockProfileSummaryUpdatesBilingualFields(t *testing.T) {
 	if profile.AIProfileStatus != StockProfileAIStatusReady || profile.BusinessSummaryEn == "" {
 		t.Fatalf("profile ai fields = %+v", profile)
 	}
-	tasks, err := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Symbol: "300750", Limit: 1})
+	tasks, err := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Symbol: "300750", Limit: 10})
 	if err != nil {
 		t.Fatalf("list profile update tasks: %v", err)
 	}
-	if len(tasks) != 1 || tasks[0].Status != StockProfileUpdateStatusCompleted || tasks[0].AIProfileStatus != StockProfileAIStatusReady {
-		t.Fatalf("profile update task = %+v, want completed with ai ready", tasks)
+	aiTask := stockProfileUpdateTaskByAgentRun(tasks, run.ID)
+	if aiTask == nil || aiTask.Status != StockProfileUpdateStatusCompleted || aiTask.AIProfileStatus != StockProfileAIStatusReady {
+		t.Fatalf("profile update task = %+v, want completed with ai ready for run %s", tasks, run.ID)
 	}
 	for _, keyword := range []string{"CATL", "lithium battery", "EV batteries"} {
 		if !strings.Contains(profile.ProfileText, keyword) {
@@ -437,7 +380,7 @@ func TestRunAgentStockProfileSummaryUpdatesBilingualFields(t *testing.T) {
 	}
 }
 
-func TestRunAgentStockProfileSummaryMarksProfileFailedOnAgentError(t *testing.T) {
+func TestAssetProfileAIMarksProfileFailedOnAgentError(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStockProfileTestService(t)
 	defer cleanup()
@@ -449,7 +392,6 @@ func TestRunAgentStockProfileSummaryMarksProfileFailedOnAgentError(t *testing.T)
 		InstrumentType: InstrumentTypeStock,
 		Name:           "宁德时代",
 		Industry:       "电力设备",
-		Status:         "active",
 	}); err != nil {
 		t.Fatalf("upsert instrument: %v", err)
 	}
@@ -460,11 +402,11 @@ func TestRunAgentStockProfileSummaryMarksProfileFailedOnAgentError(t *testing.T)
 		execErr: errors.New("process exited (code 2) without submitting result"),
 	}
 
-	run, err := svc.RunAgentStockProfileSummary(ctx, "300750", "test")
-	if err != nil {
-		t.Fatalf("run profile agent: %v", err)
+	result := runAssetProfileAIForTest(t, svc, ctx, "300750", true)
+	if result.AgentRun == nil {
+		t.Fatalf("profile ai result = %+v, want agent run", result)
 	}
-	run = waitAgentRunTerminal(t, svc, run.ID)
+	run := waitAgentRunTerminal(t, svc, result.AgentRun.ID)
 	if run.Status != AgentRunStatusFailed {
 		t.Fatalf("run status = %s, want failed", run.Status)
 	}
@@ -475,12 +417,13 @@ func TestRunAgentStockProfileSummaryMarksProfileFailedOnAgentError(t *testing.T)
 	if profile.AIProfileStatus != StockProfileAIStatusFailed || !strings.Contains(profile.AIProfileError, "code 2") {
 		t.Fatalf("profile ai status/error = %q/%q, want failed with code 2", profile.AIProfileStatus, profile.AIProfileError)
 	}
-	tasks, err := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Symbol: "300750", Limit: 1})
+	tasks, err := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Symbol: "300750", Limit: 10})
 	if err != nil {
 		t.Fatalf("list profile update tasks: %v", err)
 	}
-	if len(tasks) != 1 || tasks[0].Status != StockProfileUpdateStatusPartial || tasks[0].AIProfileStatus != StockProfileAIStatusFailed || !strings.Contains(tasks[0].AIProfileError, "code 2") {
-		t.Fatalf("profile update task = %+v, want partial with ai failed", tasks)
+	aiTask := stockProfileUpdateTaskByAgentRun(tasks, run.ID)
+	if aiTask == nil || aiTask.Status != StockProfileUpdateStatusPartial || aiTask.AIProfileStatus != StockProfileAIStatusFailed || !strings.Contains(aiTask.AIProfileError, "code 2") {
+		t.Fatalf("profile update task = %+v, want partial with ai failed for run %s", tasks, run.ID)
 	}
 }
 
@@ -497,7 +440,6 @@ func TestListStockProfilesCanSearchProfileText(t *testing.T) {
 			InstrumentType: InstrumentTypeStock,
 			Name:           "宁德时代",
 			Concepts:       []string{"锂电池"},
-			Status:         "active",
 		},
 		{
 			ID:             "inst-600000",
@@ -506,15 +448,12 @@ func TestListStockProfilesCanSearchProfileText(t *testing.T) {
 			InstrumentType: InstrumentTypeStock,
 			Name:           "浦发银行",
 			Industry:       "银行",
-			Status:         "active",
 		},
 	} {
 		if err := svc.store.UpsertInstrument(ctx, inst); err != nil {
 			t.Fatalf("upsert instrument: %v", err)
 		}
-	}
-	if _, err := svc.RebuildStockProfiles(ctx); err != nil {
-		t.Fatalf("rebuild profiles: %v", err)
+		_ = refreshAssetBaseProfileForTest(t, svc, ctx, inst.Symbol)
 	}
 
 	items, err := svc.ListStockProfiles(ctx, StockProfileListFilter{Keyword: "锂电池", Limit: 10})
@@ -524,6 +463,90 @@ func TestListStockProfilesCanSearchProfileText(t *testing.T) {
 	if len(items) != 1 || items[0].Symbol != "300750" {
 		t.Fatalf("items = %+v, want only 300750", items)
 	}
+}
+
+type assetProfileAIResult struct {
+	Profile  StockProfile
+	Task     StockProfileUpdateTask
+	AgentRun *AgentRun
+}
+
+func refreshAssetBaseProfileForTest(t *testing.T, svc *Service, ctx context.Context, symbol string) StockProfile {
+	t.Helper()
+	normalized, _ := normalizeQuoteSymbolInput(symbol)
+	if normalized == "" {
+		normalized = strings.TrimSpace(symbol)
+	}
+	inst, err := svc.store.GetInstrument(ctx, normalized)
+	if err != nil {
+		t.Fatalf("get instrument %s: %v", symbol, err)
+	}
+	profile, _, _, err := svc.refreshAssetBaseProfile(ctx, inst)
+	if err != nil {
+		t.Fatalf("refresh asset base profile %s: %v", symbol, err)
+	}
+	return profile
+}
+
+func runAssetProfileAIForTest(t *testing.T, svc *Service, ctx context.Context, symbol string, force bool) assetProfileAIResult {
+	t.Helper()
+	normalized, _ := normalizeQuoteSymbolInput(symbol)
+	if normalized == "" {
+		normalized = strings.TrimSpace(symbol)
+	}
+	inst, err := svc.store.GetInstrument(ctx, normalized)
+	if err != nil {
+		t.Fatalf("get instrument %s: %v", symbol, err)
+	}
+	profile, previous, sourceStatuses, err := svc.refreshAssetBaseProfile(ctx, inst)
+	if err != nil {
+		t.Fatalf("refresh asset base profile %s: %v", symbol, err)
+	}
+	item := AssetMaintenanceItem{
+		Symbol:                profile.Symbol,
+		Market:                profile.Market,
+		InstrumentType:        profile.InstrumentType,
+		Name:                  profile.Name,
+		BaseProfileHashBefore: previous.BaseProfileHash,
+		BaseProfileHashAfter:  profile.BaseProfileHash,
+		BaseProfileChanged:    previous.BaseProfileHash == "" || previous.BaseProfileHash != profile.BaseProfileHash,
+		StartedAt:             time.Now(),
+	}
+	agentRun, _, _, err := svc.maybeRunAssetProfileAI(ctx, profile, previous, item, nil, sourceStatuses, assetMaintenanceOptions{
+		TriggerSource: StockProfileUpdateTriggerManual,
+		RequestedBy:   "test",
+		ForceAI:       force,
+		Budget:        &assetMaintenanceBudget{AIRemaining: 1},
+	})
+	if err != nil && agentRun == nil {
+		t.Fatalf("run asset profile ai %s: %v", symbol, err)
+	}
+	tasks, err := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Symbol: normalized, Limit: 10})
+	if err != nil {
+		t.Fatalf("list profile update tasks %s: %v", symbol, err)
+	}
+	if len(tasks) == 0 {
+		t.Fatalf("profile update tasks missing for %s", symbol)
+	}
+	task := tasks[0]
+	if agentRun != nil {
+		for _, candidate := range tasks {
+			if candidate.AgentRunID == agentRun.ID {
+				task = candidate
+				break
+			}
+		}
+	}
+	return assetProfileAIResult{Profile: profile, Task: task, AgentRun: agentRun}
+}
+
+func stockProfileUpdateTaskByAgentRun(tasks []StockProfileUpdateTask, runID string) *StockProfileUpdateTask {
+	for i := range tasks {
+		if tasks[i].AgentRunID == runID {
+			return &tasks[i]
+		}
+	}
+	return nil
 }
 
 func newStockProfileTestService(t *testing.T) (*Service, func()) {
@@ -553,7 +576,6 @@ func seedProfileInstrument(t *testing.T, svc *Service, ctx context.Context) {
 		Market:         "SZ",
 		InstrumentType: InstrumentTypeStock,
 		Name:           "宁德时代",
-		Status:         "active",
 	}); err != nil {
 		t.Fatalf("upsert instrument: %v", err)
 	}
@@ -568,7 +590,6 @@ func seedProfileInstruments(t *testing.T, svc *Service, ctx context.Context, sym
 			Market:         "SZ",
 			InstrumentType: InstrumentTypeStock,
 			Name:           "测试标的" + symbol,
-			Status:         "active",
 		}); err != nil {
 			t.Fatalf("upsert instrument %s: %v", symbol, err)
 		}

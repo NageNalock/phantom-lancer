@@ -296,7 +296,6 @@ func (uds *UniverseDataSource) parseTencentLine(line string, metaMap map[string]
 		Market:         market,
 		InstrumentType: instrumentType,
 		Name:           name,
-		Status:         "unknown",
 		LastUpdate:     time.Now(),
 	}
 
@@ -339,7 +338,6 @@ func (uds *UniverseDataSource) MockDataForTest() []StockV2Instrument {
 			Name:           "平安银行",
 			Industry:       "银行",
 			Sector:         "金融",
-			Status:         "unknown",
 			LastUpdate:     time.Now(),
 		},
 		{
@@ -350,7 +348,6 @@ func (uds *UniverseDataSource) MockDataForTest() []StockV2Instrument {
 			Name:           "万科A",
 			Industry:       "房地产",
 			Sector:         "地产",
-			Status:         "unknown",
 			LastUpdate:     time.Now(),
 		},
 		{
@@ -361,7 +358,6 @@ func (uds *UniverseDataSource) MockDataForTest() []StockV2Instrument {
 			Name:           "浦发银行",
 			Industry:       "银行",
 			Sector:         "金融",
-			Status:         "unknown",
 			LastUpdate:     time.Now(),
 		},
 		{
@@ -372,7 +368,6 @@ func (uds *UniverseDataSource) MockDataForTest() []StockV2Instrument {
 			Name:           "招商银行",
 			Industry:       "银行",
 			Sector:         "金融",
-			Status:         "unknown",
 			LastUpdate:     time.Now(),
 		},
 	}

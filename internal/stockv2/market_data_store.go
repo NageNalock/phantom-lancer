@@ -120,7 +120,6 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 			concepts VARCHAR,
 			list_date VARCHAR,
 			delist_date VARCHAR,
-			status VARCHAR DEFAULT 'active',
 			last_update_at TIMESTAMP,
 			created_at TIMESTAMP NOT NULL,
 			updated_at TIMESTAMP NOT NULL,
@@ -128,7 +127,6 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_symbol ON stockv2_instruments(symbol);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_market ON stockv2_instruments(market);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_status ON stockv2_instruments(status);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_type ON stockv2_instruments(instrument_type);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_created_at ON stockv2_instruments(created_at);
 
@@ -366,6 +364,9 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("init duckdb daily bars schema: %w", err)
 	}
+	if err := s.cleanupInstrumentSchema(ctx); err != nil {
+		return err
+	}
 	if err := s.backfillDailyBarQuality(ctx); err != nil {
 		return err
 	}
@@ -393,6 +394,54 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *MarketDataStore) cleanupInstrumentSchema(ctx context.Context) error {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM information_schema.columns
+		WHERE table_name = 'stockv2_instruments' AND column_name = 'status'
+	`).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		DROP TABLE IF EXISTS stockv2_instruments_clean;
+		CREATE TABLE stockv2_instruments_clean (
+			id VARCHAR,
+			symbol VARCHAR NOT NULL UNIQUE,
+			market VARCHAR NOT NULL,
+			instrument_type VARCHAR NOT NULL DEFAULT 'stock',
+			name VARCHAR,
+			industry VARCHAR,
+			sector VARCHAR,
+			concepts VARCHAR,
+			list_date VARCHAR,
+			delist_date VARCHAR,
+			last_update_at TIMESTAMP,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			PRIMARY KEY(id)
+		);
+		INSERT INTO stockv2_instruments_clean (
+			id, symbol, market, instrument_type, name, industry, sector, concepts,
+			list_date, delist_date, last_update_at, created_at, updated_at
+		)
+		SELECT
+			id, symbol, market, COALESCE(instrument_type, 'stock'), name, industry, sector, concepts,
+			list_date, delist_date, last_update_at, created_at, updated_at
+		FROM stockv2_instruments;
+		DROP TABLE stockv2_instruments;
+		ALTER TABLE stockv2_instruments_clean RENAME TO stockv2_instruments;
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_symbol ON stockv2_instruments(symbol);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_market ON stockv2_instruments(market);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_type ON stockv2_instruments(instrument_type);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_created_at ON stockv2_instruments(created_at);
+	`)
+	return err
 }
 
 func (s *MarketDataStore) backfillDailyBarQuality(ctx context.Context) error {

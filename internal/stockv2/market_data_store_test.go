@@ -164,7 +164,6 @@ func TestStoreDataAssetsWriteToDuckDB(t *testing.T) {
 		Market:         "SZ",
 		InstrumentType: InstrumentTypeStock,
 		Name:           "中航成飞",
-		Status:         "active",
 	}); err != nil {
 		t.Fatalf("upsert instrument: %v", err)
 	}
@@ -239,6 +238,60 @@ func TestStoreDataAssetsWriteToDuckDB(t *testing.T) {
 	}
 }
 
+func TestMarketDataStoreRemovesLegacyInstrumentStatus(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stock_market.duckdb")
+	db, err := sql.Open("duckdb", path)
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+		CREATE TABLE stockv2_instruments (
+			id VARCHAR,
+			symbol VARCHAR NOT NULL UNIQUE,
+			market VARCHAR NOT NULL,
+			instrument_type VARCHAR NOT NULL DEFAULT 'stock',
+			name VARCHAR,
+			industry VARCHAR,
+			sector VARCHAR,
+			concepts VARCHAR,
+			list_date VARCHAR,
+			delist_date VARCHAR,
+			status VARCHAR DEFAULT 'active',
+			last_update_at TIMESTAMP,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			PRIMARY KEY(id)
+		);
+		CREATE INDEX idx_stockv2_market_instruments_status ON stockv2_instruments(status);
+		INSERT INTO stockv2_instruments (id, symbol, market, instrument_type, name, status, created_at, updated_at)
+		VALUES ('inst-1', '000001', 'SZ', 'stock', '平安银行', 'active', now(), now());
+	`)
+	if closeErr := db.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("seed legacy duckdb instrument schema: %v", err)
+	}
+
+	store, err := NewMarketDataStore(path)
+	if err != nil {
+		t.Fatalf("new market store: %v", err)
+	}
+	defer store.Close()
+
+	if duckDBColumnExists(t, store.db, "stockv2_instruments", "status") {
+		t.Fatal("duckdb stockv2_instruments.status legacy column was not removed")
+	}
+	var name string
+	if err := store.db.QueryRowContext(ctx, `SELECT name FROM stockv2_instruments WHERE symbol = '000001'`).Scan(&name); err != nil {
+		t.Fatalf("query migrated duckdb instrument: %v", err)
+	}
+	if name != "平安银行" {
+		t.Fatalf("migrated duckdb instrument name = %q", name)
+	}
+}
+
 func countRowsForTest(t *testing.T, db *sql.DB, table string) int {
 	t.Helper()
 	var count int
@@ -246,4 +299,17 @@ func countRowsForTest(t *testing.T, db *sql.DB, table string) int {
 		t.Fatalf("count %s: %v", table, err)
 	}
 	return count
+}
+
+func duckDBColumnExists(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`
+		SELECT COUNT(*)
+		FROM information_schema.columns
+		WHERE table_name = ? AND column_name = ?
+	`, table, column).Scan(&count); err != nil {
+		t.Fatalf("check duckdb column %s.%s: %v", table, column, err)
+	}
+	return count > 0
 }

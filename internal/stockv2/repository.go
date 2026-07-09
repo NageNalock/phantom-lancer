@@ -179,7 +179,6 @@ CREATE TABLE IF NOT EXISTS stockv2_instruments (
     concepts TEXT,
     list_date TEXT,
     delist_date TEXT,
-    status TEXT DEFAULT 'active',
     last_update_at DATETIME,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
@@ -596,13 +595,7 @@ CREATE TABLE IF NOT EXISTS stockv2_update_progress (
 CREATE TABLE IF NOT EXISTS stockv2_settings (
     id TEXT PRIMARY KEY,
     auto_update_enabled INTEGER DEFAULT 0,
-    update_interval_sec INTEGER DEFAULT 3600,
-    proxy_enabled INTEGER DEFAULT 0,
-    proxy_type TEXT,
-    proxy_host TEXT,
-    proxy_port INTEGER,
     last_scheduled_update DATETIME,
-    daily_bars_last_run DATETIME,
     financial_juice_enabled INTEGER DEFAULT 0,
     financial_juice_endpoint TEXT,
     financial_juice_cookie TEXT,
@@ -612,7 +605,6 @@ CREATE TABLE IF NOT EXISTS stockv2_settings (
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_symbol ON stockv2_instruments(symbol);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_market ON stockv2_instruments(market);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_industry ON stockv2_instruments(industry);
-CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_status ON stockv2_instruments(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_created_at ON stockv2_instruments(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_market ON stockv2_stock_profiles(market);
 CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_updated_at ON stockv2_stock_profiles(updated_at);
@@ -648,8 +640,8 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_created_at ON stockv2_update_
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_status_created ON stockv2_update_jobs(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stockv2_asset_items_job ON stockv2_asset_maintenance_items(job_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stockv2_asset_items_symbol ON stockv2_asset_maintenance_items(symbol, created_at DESC);
-INSERT OR IGNORE INTO stockv2_settings (id, auto_update_enabled, update_interval_sec, created_at, updated_at)
-VALUES ('1', 0, 3600, datetime('now'), datetime('now'));
+INSERT OR IGNORE INTO stockv2_settings (id, auto_update_enabled, created_at, updated_at)
+VALUES ('1', 0, datetime('now'), datetime('now'));
 
 -- 日 K 任务记录（语义独立于主数据 update job）
 CREATE TABLE IF NOT EXISTS stockv2_daily_bar_jobs (
@@ -1332,8 +1324,11 @@ func (s *Store) init(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "stockv2_instruments", "instrument_type", "TEXT NOT NULL DEFAULT 'stock'"); err != nil {
 		return fmt.Errorf("add instrument_type column: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_type ON stockv2_instruments(instrument_type)`); err != nil {
-		return fmt.Errorf("create instrument type index: %w", err)
+	if err := s.cleanupSQLiteInstrumentsSchema(ctx); err != nil {
+		return fmt.Errorf("cleanup instruments schema: %w", err)
+	}
+	if err := s.ensureSQLiteInstrumentIndexes(ctx); err != nil {
+		return fmt.Errorf("create instrument indexes: %w", err)
 	}
 	if err := s.ensureColumn(ctx, "stockv2_stock_profiles", "instrument_type", "TEXT NOT NULL DEFAULT 'stock'"); err != nil {
 		return fmt.Errorf("add stock profile instrument_type column: %w", err)
@@ -1411,10 +1406,6 @@ func (s *Store) init(ctx context.Context) error {
 		return fmt.Errorf("add asset_stats_json column: %w", err)
 	}
 
-	// 增量迁移：legacy 独立日 K 调度开关与最近日 K 维护时间
-	if err := s.ensureColumn(ctx, "stockv2_settings", "daily_bars_last_run", "DATETIME"); err != nil {
-		return fmt.Errorf("add daily_bars_last_run column: %w", err)
-	}
 	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_enabled", "INTEGER DEFAULT 0"); err != nil {
 		return fmt.Errorf("add financial_juice_enabled column: %w", err)
 	}
@@ -1423,6 +1414,9 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_cookie", "TEXT"); err != nil {
 		return fmt.Errorf("add financial_juice_cookie column: %w", err)
+	}
+	if err := s.cleanupSQLiteSettingsSchema(ctx); err != nil {
+		return fmt.Errorf("cleanup settings schema: %w", err)
 	}
 	if err := s.ensureColumn(ctx, "stockv2_raw_news", "url", "TEXT"); err != nil {
 		return fmt.Errorf("add raw news url column: %w", err)
@@ -1584,17 +1578,148 @@ func (s *Store) init(ctx context.Context) error {
 
 // ensureColumn 确保指定表有指定列，没有就 ALTER TABLE ADD
 func (s *Store) ensureColumn(ctx context.Context, table, column, colType string) error {
+	exists, err := s.sqliteColumnExists(ctx, table, column)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, colType))
+	return err
+}
+
+func (s *Store) sqliteColumnExists(ctx context.Context, table, column string) (bool, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?
 	`, table, column).Scan(&count)
 	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *Store) sqliteAnyColumnExists(ctx context.Context, table string, columns ...string) (bool, error) {
+	for _, column := range columns {
+		exists, err := s.sqliteColumnExists(ctx, table, column)
+		if err != nil {
+			return false, err
+		}
+		if exists {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Store) cleanupSQLiteSettingsSchema(ctx context.Context) error {
+	hasLegacy, err := s.sqliteAnyColumnExists(ctx, "stockv2_settings",
+		"update_interval_sec", "proxy_enabled", "proxy_type", "proxy_host", "proxy_port", "daily_bars_last_run")
+	if err != nil || !hasLegacy {
 		return err
 	}
-	if count > 0 {
-		return nil
+	return s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			CREATE TABLE stockv2_settings_clean (
+				id TEXT PRIMARY KEY,
+				auto_update_enabled INTEGER DEFAULT 0,
+				last_scheduled_update DATETIME,
+				financial_juice_enabled INTEGER DEFAULT 0,
+				financial_juice_endpoint TEXT,
+				financial_juice_cookie TEXT,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL
+			)
+		`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO stockv2_settings_clean (
+				id, auto_update_enabled, last_scheduled_update,
+				financial_juice_enabled, financial_juice_endpoint, financial_juice_cookie,
+				created_at, updated_at
+			)
+			SELECT
+				COALESCE(id, '1'), COALESCE(auto_update_enabled, 0), last_scheduled_update,
+				COALESCE(financial_juice_enabled, 0), financial_juice_endpoint, financial_juice_cookie,
+				COALESCE(created_at, datetime('now')), COALESCE(updated_at, datetime('now'))
+			FROM stockv2_settings
+			LIMIT 1
+		`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DROP TABLE stockv2_settings`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE stockv2_settings_clean RENAME TO stockv2_settings`); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO stockv2_settings (id, auto_update_enabled, created_at, updated_at)
+			VALUES ('1', 0, datetime('now'), datetime('now'))
+		`)
+		return err
+	})
+}
+
+func (s *Store) cleanupSQLiteInstrumentsSchema(ctx context.Context) error {
+	hasStatus, err := s.sqliteColumnExists(ctx, "stockv2_instruments", "status")
+	if err != nil || !hasStatus {
+		return err
 	}
-	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, colType))
+	if _, err := s.db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_stockv2_instruments_status`); err != nil {
+		return err
+	}
+	return s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			CREATE TABLE stockv2_instruments_clean (
+				id TEXT PRIMARY KEY,
+				symbol TEXT NOT NULL UNIQUE,
+				market TEXT NOT NULL,
+				instrument_type TEXT NOT NULL DEFAULT 'stock',
+				name TEXT,
+				industry TEXT,
+				sector TEXT,
+				concepts TEXT,
+				list_date TEXT,
+				delist_date TEXT,
+				last_update_at DATETIME,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL
+			)
+		`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO stockv2_instruments_clean (
+				id, symbol, market, instrument_type, name, industry, sector, concepts,
+				list_date, delist_date, last_update_at, created_at, updated_at
+			)
+			SELECT
+				id, symbol, market, COALESCE(instrument_type, 'stock'), name, industry, sector, concepts,
+				list_date, delist_date, last_update_at,
+				COALESCE(created_at, datetime('now')), COALESCE(updated_at, datetime('now'))
+			FROM stockv2_instruments
+		`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DROP TABLE stockv2_instruments`); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `ALTER TABLE stockv2_instruments_clean RENAME TO stockv2_instruments`)
+		return err
+	})
+}
+
+func (s *Store) ensureSQLiteInstrumentIndexes(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_symbol ON stockv2_instruments(symbol);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_market ON stockv2_instruments(market);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_industry ON stockv2_instruments(industry);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_type ON stockv2_instruments(instrument_type);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_created_at ON stockv2_instruments(created_at DESC);
+	`)
 	return err
 }
 
@@ -1960,8 +2085,7 @@ func scanHolding(row rowScanner) (StockV2Holding, error) {
 
 const instrumentSelectSQL = `
 	SELECT id, symbol, market, COALESCE(instrument_type,'stock'), COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
-	       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), COALESCE(status,'unknown'),
-	       last_update_at, created_at, updated_at
+	       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), last_update_at, created_at, updated_at
 	FROM stockv2_instruments
 `
 
@@ -1971,8 +2095,8 @@ func (s *Store) UpsertInstrument(ctx context.Context, instrument StockV2Instrume
 	query := `
 		INSERT INTO stockv2_instruments (
 			id, symbol, market, instrument_type, name, industry, sector, concepts,
-			list_date, delist_date, status, last_update_at, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			list_date, delist_date, last_update_at, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(symbol) DO UPDATE SET
 			market = excluded.market,
 			instrument_type = excluded.instrument_type,
@@ -1982,7 +2106,6 @@ func (s *Store) UpsertInstrument(ctx context.Context, instrument StockV2Instrume
 			concepts = excluded.concepts,
 			list_date = excluded.list_date,
 			delist_date = excluded.delist_date,
-			status = excluded.status,
 			last_update_at = excluded.last_update_at,
 			updated_at = excluded.updated_at
 	`
@@ -2009,7 +2132,6 @@ func (s *Store) UpsertInstrument(ctx context.Context, instrument StockV2Instrume
 		string(conceptsJSON),
 		instrument.ListDate,
 		instrument.DelistDate,
-		instrument.Status,
 		now,
 		instrument.CreatedAt,
 		instrument.UpdatedAt,
@@ -2092,8 +2214,7 @@ func (s *Store) SearchInstrumentsFiltered(ctx context.Context, keyword, market, 
 func instrumentSelectFilteredSQL(profileStatus string) string {
 	return `
 	SELECT i.id, i.symbol, i.market, COALESCE(i.instrument_type,'stock'), COALESCE(i.name,''), COALESCE(i.industry,''), COALESCE(i.sector,''),
-	       i.concepts, COALESCE(i.list_date,''), COALESCE(i.delist_date,''), COALESCE(i.status,'active'),
-	       i.last_update_at, i.created_at, i.updated_at
+	       i.concepts, COALESCE(i.list_date,''), COALESCE(i.delist_date,''), i.last_update_at, i.created_at, i.updated_at
 	FROM stockv2_instruments i
 ` + instrumentProfileJoinSQL(profileStatus)
 }
@@ -2167,7 +2288,7 @@ func scanInstrument(row rowScanner) (StockV2Instrument, error) {
 	err := row.Scan(
 		&inst.ID, &inst.Symbol, &inst.Market, &inst.InstrumentType, &inst.Name,
 		&inst.Industry, &inst.Sector, &conceptsJSON, &inst.ListDate, &inst.DelistDate,
-		&inst.Status, &lastUpdate, &inst.CreatedAt, &inst.UpdatedAt,
+		&lastUpdate, &inst.CreatedAt, &inst.UpdatedAt,
 	)
 	if lastUpdate.Valid {
 		inst.LastUpdate = lastUpdate.Time
@@ -2184,7 +2305,7 @@ func (s *Store) UpdateInstrument(ctx context.Context, instrument StockV2Instrume
 	query := `
 		UPDATE stockv2_instruments
 		SET instrument_type = ?, name = ?, industry = ?, sector = ?, concepts = ?,
-		    list_date = ?, delist_date = ?, status = ?, last_update_at = ?, updated_at = ?
+		    list_date = ?, delist_date = ?, last_update_at = ?, updated_at = ?
 		WHERE id = ?
 	`
 
@@ -2203,7 +2324,6 @@ func (s *Store) UpdateInstrument(ctx context.Context, instrument StockV2Instrume
 		string(conceptsJSON),
 		instrument.ListDate,
 		instrument.DelistDate,
-		instrument.Status,
 		now,
 		instrument.UpdatedAt,
 		instrument.ID,
@@ -2443,12 +2563,10 @@ func (s *Store) UpdateUpdateProgress(ctx context.Context, progress StockV2Update
 func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Settings) error {
 	query := `
 		INSERT OR REPLACE INTO stockv2_settings (
-			id, auto_update_enabled, update_interval_sec, proxy_enabled,
-			proxy_type, proxy_host, proxy_port, last_scheduled_update,
-			daily_bars_last_run,
+			id, auto_update_enabled, last_scheduled_update,
 			financial_juice_enabled, financial_juice_endpoint, financial_juice_cookie,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	now := time.Now()
@@ -2457,21 +2575,10 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 	}
 	settings.UpdatedAt = now
 
-	var dailyBarsLastRun any
-	if !settings.DailyBarsLastRun.IsZero() {
-		dailyBarsLastRun = settings.DailyBarsLastRun
-	}
-
 	_, err := s.db.ExecContext(ctx, query,
 		settings.ID,
 		settings.AutoUpdateEnabled,
-		settings.UpdateIntervalSec,
-		settings.ProxyEnabled,
-		settings.ProxyType,
-		settings.ProxyHost,
-		settings.ProxyPort,
 		settings.LastScheduledUpdate,
-		dailyBarsLastRun,
 		settings.FinancialJuiceEnabled,
 		nullableString(settings.FinancialJuiceEndpoint),
 		nullableString(settings.FinancialJuiceCookie),
@@ -2538,9 +2645,7 @@ func scanUpdateJob(row rowScanner) (StockV2UpdateJob, error) {
 // GetSettings 获取配置
 func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	query := `
-		SELECT id, auto_update_enabled, update_interval_sec, proxy_enabled,
-		       COALESCE(proxy_type,''), COALESCE(proxy_host,''), COALESCE(proxy_port, 0), last_scheduled_update,
-		       daily_bars_last_run,
+		SELECT id, auto_update_enabled, last_scheduled_update,
 		       COALESCE(financial_juice_enabled, 0), COALESCE(financial_juice_endpoint, ''), COALESCE(financial_juice_cookie, ''),
 		       created_at, updated_at
 		FROM stockv2_settings
@@ -2551,17 +2656,10 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 
 	var settings StockV2Settings
 	var lastScheduledUpdate sql.NullTime
-	var dailyBarsLastRun sql.NullTime
 	err := row.Scan(
 		&settings.ID,
 		&settings.AutoUpdateEnabled,
-		&settings.UpdateIntervalSec,
-		&settings.ProxyEnabled,
-		&settings.ProxyType,
-		&settings.ProxyHost,
-		&settings.ProxyPort,
 		&lastScheduledUpdate,
-		&dailyBarsLastRun,
 		&settings.FinancialJuiceEnabled,
 		&settings.FinancialJuiceEndpoint,
 		&settings.FinancialJuiceCookie,
@@ -2575,11 +2673,6 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 			return StockV2Settings{
 				ID:                "1",
 				AutoUpdateEnabled: false,
-				UpdateIntervalSec: 3600,
-				ProxyEnabled:      false,
-				ProxyType:         "http",
-				ProxyHost:         "",
-				ProxyPort:         8080,
 				CreatedAt:         time.Now(),
 				UpdatedAt:         time.Now(),
 			}, nil
@@ -2588,9 +2681,6 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	}
 
 	settings.LastScheduledUpdate = nullTimeDefault(lastScheduledUpdate, settings.CreatedAt)
-	if dailyBarsLastRun.Valid {
-		settings.DailyBarsLastRun = dailyBarsLastRun.Time
-	}
 	settings.FinancialJuiceCookieSet = strings.TrimSpace(settings.FinancialJuiceCookie) != "" || financialJuiceEndpointHasCredential(settings.FinancialJuiceEndpoint)
 
 	return settings, nil

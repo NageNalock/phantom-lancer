@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AppActions } from "../../app/App";
 import type { AppData, StockV2Settings } from "../../app/types";
-import { Button, Field, Notice, Panel, Pill, Toggle } from "../../components/ui";
+import { Button, Notice, Panel, Pill, Toggle } from "../../components/ui";
 import { formatMeaningfulDateTime as formatTime } from "./time";
 
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
@@ -27,11 +27,6 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
     await runAction("保存设置", async () => {
       const body: Record<string, unknown> = {
         autoUpdateEnabled: !!form.autoUpdateEnabled,
-        updateIntervalSec: Number(form.updateIntervalSec ?? 3600),
-        proxyEnabled: !!form.proxyEnabled,
-        proxyType: form.proxyType || "http",
-        proxyHost: form.proxyHost || "",
-        proxyPort: Number(form.proxyPort ?? 0),
       };
       await actions.api("/api/stockv2/settings", {
         method: "PUT",
@@ -78,16 +73,6 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
             onChange={(checked) => update("autoUpdateEnabled", checked)}
           />
 
-          <Field label="数据新鲜度窗口 (秒)" help="不控制自动维护触发时间；旧兼容字段，统一维护会让各子步骤自行判断是否需要补齐。">
-            <input
-              type="number"
-              min={300}
-              step={60}
-              value={form.updateIntervalSec ?? 3600}
-              onChange={(e) => update("updateIntervalSec", Number(e.target.value))}
-            />
-          </Field>
-
           <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-sm">
             <div className="flex items-center justify-between">
               <span className="text-[var(--muted)]">当前状态</span>
@@ -96,7 +81,7 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
               </Pill>
             </div>
             <p className="muted mt-2 text-xs">
-              调度窗口：Asia/Shanghai 23:00-06:00；新鲜度窗口：{formatInterval(Number(form.updateIntervalSec ?? 3600))}
+              调度窗口：Asia/Shanghai 23:00-06:00；维护时各子步骤按真实数据覆盖情况自行判断是否补齐。
             </p>
             {settings.lastScheduledUpdate ? (
               <p className="muted mt-2 text-xs">
@@ -105,60 +90,9 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
             ) : null}
             <ul className="muted mt-2 list-inside list-disc text-xs">
               <li>标的不存在或信息需要更新时，会刷新该标的主数据与最新价</li>
-              <li>日 K 不存在、不足 250 根或超过新鲜度窗口时，会单独补拉该标的</li>
+              <li>日 K 不存在、不足 250 根或数据陈旧时，会单独补拉该标的</li>
               <li>已满足覆盖的标的只做检查并跳过，批次内仍带随机打散</li>
             </ul>
-          </div>
-        </div>
-      </Panel>
-
-      {/* 代理配置 */}
-      <Panel
-        title="代理配置"
-        subtitle="海外部署优化网络连接"
-      >
-        <div className="grid gap-4">
-          <Toggle
-            checked={!!form.proxyEnabled}
-            label={
-              <div>
-                <div>启用代理</div>
-                <div className="muted mt-0.5 text-xs">所有股票数据请求通过代理发送</div>
-              </div>
-            }
-            onChange={(checked) => update("proxyEnabled", checked)}
-          />
-
-          <div className={`grid grid-cols-3 gap-3 ${!form.proxyEnabled ? "opacity-50" : ""}`}>
-            <Field label="代理类型">
-              <select
-                value={form.proxyType || "http"}
-                onChange={(e) => update("proxyType", e.target.value)}
-                disabled={!form.proxyEnabled}
-              >
-                <option value="http">HTTP</option>
-                <option value="https">HTTPS</option>
-                <option value="socks5">SOCKS5</option>
-              </select>
-            </Field>
-            <Field label="代理地址">
-              <input
-                type="text"
-                placeholder="127.0.0.1"
-                value={form.proxyHost || ""}
-                onChange={(e) => update("proxyHost", e.target.value)}
-                disabled={!form.proxyEnabled}
-              />
-            </Field>
-            <Field label="端口">
-              <input
-                type="number"
-                placeholder="7890"
-                value={form.proxyPort ?? 0}
-                onChange={(e) => update("proxyPort", Number(e.target.value))}
-                disabled={!form.proxyEnabled}
-              />
-            </Field>
           </div>
         </div>
       </Panel>
@@ -228,11 +162,4 @@ export function StockV2Settings({ actions, data, runAction }: { actions: AppActi
       </div>
     </div>
   );
-}
-
-function formatInterval(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) return "-";
-  if (seconds % 3600 === 0) return `${seconds / 3600} 小时`;
-  if (seconds % 60 === 0) return `${seconds / 60} 分钟`;
-  return `${seconds} 秒`;
 }
