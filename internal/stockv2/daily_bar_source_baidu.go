@@ -1,6 +1,7 @@
 package stockv2
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -102,15 +103,17 @@ func (b *BaiduDailyBarsSource) FetchDailyBars(ctx context.Context, symbol, marke
 
 // baiduAPIResponse 百度财经 API 响应结构
 type baiduAPIResponse struct {
-	QueryID    string `json:"QueryID"`
-	ResultCode string `json:"ResultCode"`
-	Result     struct {
-		NewMarketData struct {
-			Headers    []string `json:"headers"`
-			Keys       []string `json:"keys"`
-			MarketData string   `json:"marketData"` // 分号分隔行，逗号分隔字段
-		} `json:"newMarketData"`
-	} `json:"Result"`
+	QueryID    string          `json:"QueryID"`
+	ResultCode string          `json:"ResultCode"`
+	Result     json.RawMessage `json:"Result"`
+}
+
+type baiduMarketDataResult struct {
+	NewMarketData struct {
+		Headers    []string `json:"headers"`
+		Keys       []string `json:"keys"`
+		MarketData string   `json:"marketData"` // 分号分隔行，逗号分隔字段
+	} `json:"newMarketData"`
 }
 
 // parseBaiduMarketData 解析百度返回的 marketData 字符串
@@ -123,7 +126,10 @@ func parseBaiduMarketData(body []byte, symbol, market string) ([]StockV2DailyBar
 		return nil, fmt.Errorf("baidu ResultCode=%s", resp.ResultCode)
 	}
 
-	md := resp.Result.NewMarketData.MarketData
+	md, err := extractBaiduMarketData(resp.Result)
+	if err != nil {
+		return nil, err
+	}
 	if md == "" {
 		return nil, fmt.Errorf("empty marketData")
 	}
@@ -189,6 +195,37 @@ func parseBaiduMarketData(body []byte, symbol, market string) ([]StockV2DailyBar
 	}
 
 	return bars, nil
+}
+
+func extractBaiduMarketData(raw json.RawMessage) (string, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return "", fmt.Errorf("empty Result")
+	}
+
+	var results []baiduMarketDataResult
+	switch raw[0] {
+	case '{':
+		var result baiduMarketDataResult
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return "", fmt.Errorf("unmarshal baidu Result object: %w", err)
+		}
+		results = append(results, result)
+	case '[':
+		if err := json.Unmarshal(raw, &results); err != nil {
+			return "", fmt.Errorf("unmarshal baidu Result array: %w", err)
+		}
+	default:
+		return "", fmt.Errorf("unsupported baidu Result shape")
+	}
+
+	for _, result := range results {
+		md := strings.TrimSpace(result.NewMarketData.MarketData)
+		if md != "" {
+			return md, nil
+		}
+	}
+	return "", fmt.Errorf("empty marketData")
 }
 
 // parseFloatBaidu 解析百度数据中的数值字段，处理 "--" 等无效值
