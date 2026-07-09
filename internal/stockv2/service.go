@@ -1036,6 +1036,9 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 		baiduTried = true
 		fetched, baiduErr := s.baiduDailyBars.FetchDailyBars(ctx, inst.Symbol, inst.Market, inst.InstrumentType)
 		if baiduErr != nil {
+			if errors.Is(baiduErr, errBaiduDailyBarsAccessDenied) {
+				return true, nil, baiduErr
+			}
 			// 百度失败时回退到腾讯 fqkline
 			if s.log != nil {
 				s.log.Warn("baidu daily bars failed, falling back to tencent", "symbol", inst.Symbol, "error", safelog.Text(baiduErr.Error(), 200))

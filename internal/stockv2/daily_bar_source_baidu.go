@@ -4,14 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+const baiduDailyBarsDefaultMinInterval = 750 * time.Millisecond
+
+var errBaiduDailyBarsAccessDenied = errors.New("baidu daily bars access denied")
 
 // BaiduDailyBarsSource 百度财经日 K 数据源。
 //
@@ -25,12 +31,18 @@ import (
 // 相比腾讯 fqkline，百度提供了 amount（成交额）和 turnoverratio（换手率），
 // 但仅返回不复权数据。全量返回 ~2000 条/250KB，upsert 幂等写入。
 type BaiduDailyBarsSource struct {
-	httpClient *http.Client
+	httpClient    *http.Client
+	throttleMu    sync.Mutex
+	lastRequestAt time.Time
+	minInterval   time.Duration
 }
 
 // NewBaiduDailyBarsSource 创建百度日 K 数据源
 func NewBaiduDailyBarsSource(client *http.Client) *BaiduDailyBarsSource {
-	return &BaiduDailyBarsSource{httpClient: client}
+	return &BaiduDailyBarsSource{
+		httpClient:  client,
+		minInterval: baiduDailyBarsDefaultMinInterval,
+	}
 }
 
 // FetchDailyBars 抓取指定标的全量日 K 数据。
@@ -75,6 +87,9 @@ func (b *BaiduDailyBarsSource) FetchDailyBars(ctx context.Context, symbol, marke
 	client := b.httpClient
 	if client == nil {
 		client = http.DefaultClient
+	}
+	if err := b.waitRequestTurn(ctx); err != nil {
+		return nil, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -123,6 +138,9 @@ func parseBaiduMarketData(body []byte, symbol, market string) ([]StockV2DailyBar
 		return nil, fmt.Errorf("unmarshal baidu response: %w", err)
 	}
 	if resp.ResultCode != "0" {
+		if resp.ResultCode == "403" {
+			return nil, fmt.Errorf("%w: ResultCode=%s", errBaiduDailyBarsAccessDenied, resp.ResultCode)
+		}
 		return nil, fmt.Errorf("baidu ResultCode=%s", resp.ResultCode)
 	}
 
@@ -195,6 +213,31 @@ func parseBaiduMarketData(body []byte, symbol, market string) ([]StockV2DailyBar
 	}
 
 	return bars, nil
+}
+
+func (b *BaiduDailyBarsSource) waitRequestTurn(ctx context.Context) error {
+	interval := b.minInterval
+	if interval <= 0 {
+		interval = baiduDailyBarsDefaultMinInterval
+	}
+
+	b.throttleMu.Lock()
+	defer b.throttleMu.Unlock()
+
+	if !b.lastRequestAt.IsZero() {
+		wait := interval - time.Since(b.lastRequestAt)
+		if wait > 0 {
+			timer := time.NewTimer(wait)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			}
+		}
+	}
+	b.lastRequestAt = time.Now()
+	return nil
 }
 
 func extractBaiduMarketData(raw json.RawMessage) (string, error) {
