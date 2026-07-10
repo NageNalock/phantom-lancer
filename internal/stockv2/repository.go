@@ -185,6 +185,7 @@ func (s *Store) assetDB() *sql.DB {
 //   - stockv2_instruments
 //   - stockv2_stock_profiles
 //   - stockv2_announcements
+//
 // SQLite 中的这些表仅作为 DuckDB 不可用时的 fallback（如空路径测试），
 // 正常运行时始终为空。所有读写必须通过 assetDB() 而非 s.db。
 const initSchemaSQL = `
@@ -233,12 +234,14 @@ CREATE TABLE IF NOT EXISTS stockv2_stock_profiles (
     ai_profile_confidence REAL NOT NULL DEFAULT 0,
     ai_profile_error TEXT,
     ai_profile_updated_at DATETIME,
+    ai_profile_attempted_at DATETIME,
     fund_type TEXT,
     tracking_index TEXT,
     theme TEXT,
     constituent_hint TEXT,
     base_profile_hash TEXT,
     base_profile_updated_at DATETIME,
+    base_profile_checked_at DATETIME,
     profile_version INTEGER NOT NULL DEFAULT 1,
     updated_at DATETIME NOT NULL
 );
@@ -261,6 +264,28 @@ CREATE TABLE IF NOT EXISTS stockv2_stock_profile_update_tasks (
     error_message TEXT,
     started_at DATETIME NOT NULL,
     finished_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_stock_profile_ai_queue (
+    symbol TEXT PRIMARY KEY,
+    market TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    trigger_reason TEXT NOT NULL,
+    requested_by TEXT,
+    desired_input_version TEXT NOT NULL,
+    claimed_input_version TEXT,
+    payload_json TEXT NOT NULL,
+    current_agent_run_id TEXT UNIQUE,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    available_at DATETIME NOT NULL,
+    lease_owner TEXT,
+    lease_token TEXT,
+    lease_expires_at DATETIME,
+    completed_input_version TEXT,
+    completed_at DATETIME,
+    last_error TEXT,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
 );
@@ -318,6 +343,21 @@ CREATE TABLE IF NOT EXISTS stockv2_announcements (
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     UNIQUE(source, symbol, content_hash)
+);
+CREATE TABLE IF NOT EXISTS stockv2_announcement_sync_states (
+    source TEXT NOT NULL,
+    market TEXT NOT NULL,
+    covered_through DATETIME NOT NULL,
+    latest_published_at DATETIME,
+    last_success_at DATETIME NOT NULL,
+    last_window_start DATETIME,
+    last_window_end DATETIME,
+    last_page_count INTEGER NOT NULL DEFAULT 0,
+    last_fetched_count INTEGER NOT NULL DEFAULT 0,
+    last_inserted_count INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (source, market)
 );
 -- === 以上表由 assetDB() 路由到 DuckDB；以下表仅存在于 SQLite ===
 CREATE TABLE IF NOT EXISTS stockv2_portfolios (
@@ -592,6 +632,7 @@ CREATE TABLE IF NOT EXISTS stockv2_asset_maintenance_items (
     major_announcements_new INTEGER DEFAULT 0,
     ai_decision TEXT,
     ai_profile_status TEXT,
+    ai_queue_status TEXT,
     agent_run_id TEXT,
     error_message TEXT,
     source_statuses_json TEXT,
@@ -601,6 +642,25 @@ CREATE TABLE IF NOT EXISTS stockv2_asset_maintenance_items (
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     FOREIGN KEY (job_id) REFERENCES stockv2_update_jobs(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS stockv2_asset_maintenance_cursors (
+    scope TEXT PRIMARY KEY,
+    cursor_symbol TEXT NOT NULL DEFAULT '',
+    updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_universe_discovery_symbols (
+    symbol TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    first_seen_at DATETIME NOT NULL,
+    last_seen_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_daily_bar_gap_checks (
+    symbol TEXT NOT NULL,
+    adjusted TEXT NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    checked_at DATETIME NOT NULL,
+    PRIMARY KEY (symbol, adjusted, start_date, end_date)
 );
 CREATE TABLE IF NOT EXISTS stockv2_update_progress (
     update_job_id TEXT PRIMARY KEY,
@@ -633,6 +693,13 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_updated_at ON stockv2_stoc
 CREATE INDEX IF NOT EXISTS idx_stockv2_profile_update_tasks_symbol ON stockv2_stock_profile_update_tasks(symbol);
 CREATE INDEX IF NOT EXISTS idx_stockv2_profile_update_tasks_created_at ON stockv2_stock_profile_update_tasks(created_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_profile_update_tasks_status ON stockv2_stock_profile_update_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_stockv2_profile_ai_queue_claim
+    ON stockv2_stock_profile_ai_queue(status, available_at, priority DESC, updated_at);
+CREATE INDEX IF NOT EXISTS idx_stockv2_profile_ai_queue_lease
+    ON stockv2_stock_profile_ai_queue(lease_expires_at)
+    WHERE status = 'running';
+CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bar_gap_checks_symbol
+    ON stockv2_daily_bar_gap_checks(symbol, adjusted, start_date, end_date);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_event ON stockv2_news_link_candidates(news_event_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_score ON stockv2_news_link_candidates(score);
@@ -1380,13 +1447,32 @@ func (s *Store) init(ctx context.Context) error {
 		{"ai_profile_confidence", "REAL NOT NULL DEFAULT 0"},
 		{"ai_profile_error", "TEXT"},
 		{"ai_profile_updated_at", "DATETIME"},
+		{"ai_profile_attempted_at", "DATETIME"},
 		{"base_profile_hash", "TEXT"},
 		{"base_profile_updated_at", "DATETIME"},
+		{"base_profile_checked_at", "DATETIME"},
 	}
 	for _, column := range profileColumns {
 		if err := s.ensureColumn(ctx, "stockv2_stock_profiles", column.name, column.colType); err != nil {
 			return fmt.Errorf("add stock profile %s column: %w", column.name, err)
 		}
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_stock_profiles
+		SET ai_profile_attempted_at = ai_profile_updated_at,
+			ai_profile_updated_at = NULL
+		WHERE ai_profile_attempted_at IS NULL
+		  AND ai_profile_updated_at IS NOT NULL
+		  AND ai_profile_status IN ('failed', 'not_configured')
+	`); err != nil {
+		return fmt.Errorf("migrate sqlite stock profile ai attempt timestamps: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_stock_profiles
+		SET base_profile_checked_at = base_profile_updated_at
+		WHERE base_profile_checked_at IS NULL AND base_profile_updated_at IS NOT NULL
+	`); err != nil {
+		return fmt.Errorf("migrate sqlite stock profile base check timestamps: %w", err)
 	}
 	profileTaskColumns := []struct {
 		name    string
@@ -1408,6 +1494,9 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureColumn(ctx, "stockv2_update_jobs", "asset_stats_json", "TEXT"); err != nil {
 		return fmt.Errorf("add asset_stats_json column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_asset_maintenance_items", "ai_queue_status", "TEXT"); err != nil {
+		return fmt.Errorf("add asset maintenance ai_queue_status column: %w", err)
 	}
 
 	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_enabled", "INTEGER DEFAULT 0"); err != nil {
@@ -2155,6 +2244,24 @@ func (s *Store) GetInstrument(ctx context.Context, symbol string) (StockV2Instru
 	}
 
 	return instrument, nil
+}
+
+func (s *Store) GetInstrumentsBySymbols(ctx context.Context, symbols []string) ([]StockV2Instrument, error) {
+	symbols = compactStringList(symbols, 1000)
+	if len(symbols) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(symbols))
+	for _, symbol := range symbols {
+		args = append(args, symbol)
+	}
+	rows, err := s.assetDB().QueryContext(ctx, instrumentSelectSQL+`
+		WHERE symbol IN (`+sqlPlaceholders(len(symbols))+`)
+	`, args...)
+	if err != nil {
+		return nil, wrapError(err, "get instruments by symbols")
+	}
+	return scanRows(rows, scanInstrument, "scan instrument by symbol", "iterate instruments by symbols")
 }
 
 // GetInstruments 获取标的主数据列表（分页）

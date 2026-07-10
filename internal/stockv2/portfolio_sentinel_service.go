@@ -276,8 +276,13 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 			}
 			hctx.DailyBars = s.buildDailyBarsContext(ctx, holding.Symbol)
 			hctx.MinuteBars = s.buildMinuteBarsContext(ctx, holding.Symbol)
+			hctx.Freshness["dailyBars"] = dailyBarsFreshnessSummary(hctx.DailyBars)
+			hctx.Freshness["minuteBars"] = minuteBarsFreshnessSummary(hctx.MinuteBars)
 			if profile, err := s.store.GetStockProfile(ctx, holding.Symbol); err == nil {
 				hctx.Profile = &profile
+				hctx.Freshness["stockProfile"] = stockProfileFreshnessSummary(profile, time.Now())
+			} else if errors.Is(err, ErrStockProfileNotFound) {
+				hctx.Freshness["stockProfile"] = map[string]any{"status": "missing", "ready": false}
 			} else if !errors.Is(err, ErrStockProfileNotFound) {
 				return PortfolioSentinelContext{}, err
 			}
@@ -317,25 +322,25 @@ func buildHoldingNewsCandidateSummary(pack PortfolioSentinelContext) map[string]
 			candidates := make([]map[string]any, 0, len(h.NewsCandidates))
 			for _, c := range h.NewsCandidates {
 				cand := map[string]any{
-					"newsEventId":       c.NewsEventID,
-					"totalScore":        c.TotalScore,
-					"scoreBreakdown":    c.ScoreBreakdown,
-					"recallMethods":     c.RecallMethods,
-					"entityMatchScore":  c.EntityMatchScore,
-					"keywordMatchScore": c.KeywordMatchScore,
-					"semanticScore":     c.SemanticScore,
-					"nlcScore":          c.NewsLinkCandidateScore,
+					"newsEventId":        c.NewsEventID,
+					"totalScore":         c.TotalScore,
+					"scoreBreakdown":     c.ScoreBreakdown,
+					"recallMethods":      c.RecallMethods,
+					"entityMatchScore":   c.EntityMatchScore,
+					"keywordMatchScore":  c.KeywordMatchScore,
+					"semanticScore":      c.SemanticScore,
+					"nlcScore":           c.NewsLinkCandidateScore,
 					"sourceQualityScore": c.SourceQualityScore,
-					"freshnessScore":    c.FreshnessScore,
+					"freshnessScore":     c.FreshnessScore,
 				}
 				if c.NewsEvent != nil {
 					cand["newsEvent"] = map[string]any{
-						"id":       c.NewsEvent.ID,
-						"title":    c.NewsEvent.Title,
-						"source":   c.NewsEvent.Source,
-						"summary":  c.NewsEvent.Summary,
-						"eventAt":  c.NewsEvent.EventAt,
-						"url":      c.NewsEvent.URL,
+						"id":      c.NewsEvent.ID,
+						"title":   c.NewsEvent.Title,
+						"source":  c.NewsEvent.Source,
+						"summary": c.NewsEvent.Summary,
+						"eventAt": c.NewsEvent.EventAt,
+						"url":     c.NewsEvent.URL,
 					}
 				}
 				candidates = append(candidates, cand)
@@ -343,11 +348,11 @@ func buildHoldingNewsCandidateSummary(pack PortfolioSentinelContext) map[string]
 			symbol := h.Holding.Symbol
 			name := h.Holding.Name
 			holdings = append(holdings, map[string]any{
-				"symbol":       symbol,
-				"name":         name,
-				"portfolioId":  p.Portfolio.ID,
+				"symbol":        symbol,
+				"name":          name,
+				"portfolioId":   p.Portfolio.ID,
 				"portfolioName": p.Portfolio.Name,
-				"candidates":   candidates,
+				"candidates":    candidates,
 			})
 		}
 	}
@@ -890,14 +895,14 @@ func (s *Service) mergeSemanticCandidates(
 			// 新条目（纯语义召回）
 			event := hit.Event
 			newCand := SentinelNewsCandidate{
-				NewsEventID:       event.ID,
-				NewsEvent:         &event,
-				Symbol:            holding.Symbol,
-				SemanticScore:     hit.Score,
+				NewsEventID:        event.ID,
+				NewsEvent:          &event,
+				Symbol:             holding.Symbol,
+				SemanticScore:      hit.Score,
 				SourceQualityScore: scoreSourceQuality(event.Source),
-				FreshnessScore:    scoreFreshness(event.EventAt),
-				ScoreBreakdown:    map[string]float64{"semantic": hit.Score},
-				RecallMethods:     []string{"semantic"},
+				FreshnessScore:     scoreFreshness(event.EventAt),
+				ScoreBreakdown:     map[string]float64{"semantic": hit.Score},
+				RecallMethods:      []string{"semantic"},
 			}
 			newCand.ScoreBreakdown["source_quality"] = newCand.SourceQualityScore
 			newCand.ScoreBreakdown["freshness"] = newCand.FreshnessScore

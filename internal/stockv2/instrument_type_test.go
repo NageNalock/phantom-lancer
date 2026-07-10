@@ -19,6 +19,7 @@ func TestInferInstrumentMarketAndTypeSupportsExchangeFunds(t *testing.T) {
 		{"600000", "SH", InstrumentTypeStock},
 		{"000001", "SZ", InstrumentTypeStock},
 		{"839008", "BJ", InstrumentTypeStock},
+		{"920008", "BJ", InstrumentTypeStock},
 	}
 
 	for _, tc := range cases {

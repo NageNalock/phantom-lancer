@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,16 +17,19 @@ import (
 
 type AnnouncementSource struct {
 	httpClient *http.Client
+	queryURL   string
 	mu         sync.Mutex
 	orgCache   map[string]string
 	loadedURLs map[string]bool
 }
 
+const cninfoAnnouncementQueryURL = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
+
 func NewAnnouncementSource(httpClient *http.Client) *AnnouncementSource {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &AnnouncementSource{httpClient: httpClient, orgCache: map[string]string{}, loadedURLs: map[string]bool{}}
+	return &AnnouncementSource{httpClient: httpClient, queryURL: cninfoAnnouncementQueryURL, orgCache: map[string]string{}, loadedURLs: map[string]bool{}}
 }
 
 func (s *AnnouncementSource) FetchAnnouncements(ctx context.Context, inst StockV2Instrument, limit int) ([]StockV2Announcement, AssetMaintenanceSourceStatus, error) {
@@ -59,7 +63,7 @@ func (s *AnnouncementSource) FetchAnnouncements(ctx context.Context, inst StockV
 	form.Set("isHLtitle", "true")
 	form.Set("sortName", "time")
 	form.Set("sortType", "desc")
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://www.cninfo.com.cn/new/hisAnnouncement/query", strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.announcementQueryURL(), strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, status, err
 	}
@@ -91,6 +95,96 @@ func (s *AnnouncementSource) FetchAnnouncements(ctx context.Context, inst StockV
 		return nil, status, err
 	}
 	return items, status, nil
+}
+
+// FetchMarketAnnouncementsPage fetches one exchange-wide page without issuing
+// one request per symbol. Callers own pagination and durable checkpointing.
+func (s *AnnouncementSource) FetchMarketAnnouncementsPage(
+	ctx context.Context,
+	market string,
+	page int,
+	pageSize int,
+	startAt time.Time,
+	endAt time.Time,
+) (AnnouncementMarketPage, error) {
+	if s == nil || s.httpClient == nil {
+		return AnnouncementMarketPage{}, fmt.Errorf("announcement source not configured")
+	}
+	market, err := normalizeCninfoMarket(market)
+	if err != nil {
+		return AnnouncementMarketPage{}, err
+	}
+	if page <= 0 {
+		return AnnouncementMarketPage{}, fmt.Errorf("invalid announcement page %d", page)
+	}
+	if pageSize <= 0 {
+		pageSize = announcementSyncDefaultPageSize
+	}
+	if pageSize > announcementSyncMaxPageSize {
+		pageSize = announcementSyncMaxPageSize
+	}
+	if !startAt.IsZero() && !endAt.IsZero() && startAt.After(endAt) {
+		return AnnouncementMarketPage{}, fmt.Errorf("announcement window start is after end")
+	}
+
+	form := url.Values{}
+	form.Set("tabName", "fulltext")
+	form.Set("pageSize", strconv.Itoa(pageSize))
+	form.Set("pageNum", strconv.Itoa(page))
+	form.Set("column", cninfoColumn(market))
+	form.Set("plate", cninfoPlate(market))
+	form.Set("isHLtitle", "true")
+	form.Set("sortName", "time")
+	form.Set("sortType", "desc")
+	if !startAt.IsZero() || !endAt.IsZero() {
+		startDate := startAt
+		if startDate.IsZero() {
+			startDate = endAt
+		}
+		endDate := endAt
+		if endDate.IsZero() {
+			endDate = startAt
+		}
+		form.Set("seDate", startDate.Format("2006-01-02")+"~"+endDate.Format("2006-01-02"))
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.announcementQueryURL(), strings.NewReader(form.Encode()))
+	if err != nil {
+		return AnnouncementMarketPage{}, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	req.Header.Set("Referer", "https://www.cninfo.com.cn/new/commonUrl/pageOfSearch?url=disclosure/list/search")
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return AnnouncementMarketPage{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return AnnouncementMarketPage{}, fmt.Errorf("cninfo status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return AnnouncementMarketPage{}, err
+	}
+	return parseCninfoMarketAnnouncementsPage(body, market, page, pageSize)
+}
+
+func (s *AnnouncementSource) announcementQueryURL() string {
+	if s != nil && strings.TrimSpace(s.queryURL) != "" {
+		return s.queryURL
+	}
+	return cninfoAnnouncementQueryURL
+}
+
+func normalizeCninfoMarket(market string) (string, error) {
+	market = strings.ToUpper(strings.TrimSpace(market))
+	switch market {
+	case "SH", "SZ", "BJ":
+		return market, nil
+	default:
+		return "", fmt.Errorf("unsupported announcement market %q", market)
+	}
 }
 
 func (s *AnnouncementSource) lookupOrgID(ctx context.Context, inst StockV2Instrument) (string, error) {
@@ -223,53 +317,126 @@ func collectCninfoOrgIDs(v any, out map[string]string) {
 	}
 }
 
+type cninfoAnnouncementsPayload struct {
+	Announcements     []map[string]any `json:"announcements"`
+	TotalAnnouncement any              `json:"totalAnnouncement"`
+	TotalRecordNum    any              `json:"totalRecordNum"`
+}
+
 func parseCninfoAnnouncements(body []byte, inst StockV2Instrument, orgID string) ([]StockV2Announcement, error) {
-	var payload struct {
-		Announcements []map[string]any `json:"announcements"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
+	payload, err := decodeCninfoAnnouncements(body)
+	if err != nil {
 		return nil, err
 	}
 	out := make([]StockV2Announcement, 0, len(payload.Announcements))
-	now := time.Now()
 	for _, raw := range payload.Announcements {
-		title := cleanAnnouncementTitle(firstJSONText(raw, "announcementTitle", "title"))
-		if title == "" {
-			continue
+		if item, ok := cninfoAnnouncementFromRaw(raw, inst.Symbol, inst.Market, orgID); ok {
+			out = append(out, item)
 		}
-		category := firstJSONText(raw, "category", "announcementTypeName", "categoryName")
-		announcementID := firstJSONText(raw, "announcementId", "id")
-		adjunctURL := firstJSONText(raw, "adjunctUrl", "adjunctURL")
-		pdfURL := adjunctURL
-		if pdfURL != "" && !strings.HasPrefix(pdfURL, "http") {
-			pdfURL = "https://static.cninfo.com.cn/" + strings.TrimLeft(pdfURL, "/")
-		}
-		publishedAt := parseCninfoTime(raw["announcementTime"])
-		if publishedAt.IsZero() {
-			publishedAt = parseCninfoDate(firstJSONText(raw, "announcementTime", "publishTime", "date"))
-		}
-		major, reason := classifyMajorAnnouncement(title, category)
-		hash := announcementContentHash(inst.Symbol, title, category, pdfURL, publishedAt)
-		out = append(out, StockV2Announcement{
-			ID:             generateID(),
-			Source:         StockV2AnnouncementSourceCninfo,
-			Symbol:         inst.Symbol,
-			Market:         inst.Market,
-			OrgID:          orgID,
-			Title:          title,
-			Category:       category,
-			AnnouncementID: announcementID,
-			PDFURL:         pdfURL,
-			ContentHash:    hash,
-			Major:          major,
-			MajorReason:    reason,
-			PublishedAt:    publishedAt,
-			FetchedAt:      now,
-			CreatedAt:      now,
-			UpdatedAt:      now,
-		})
 	}
 	return out, nil
+}
+
+func parseCninfoMarketAnnouncementsPage(body []byte, market string, page, pageSize int) (AnnouncementMarketPage, error) {
+	payload, err := decodeCninfoAnnouncements(body)
+	if err != nil {
+		return AnnouncementMarketPage{}, err
+	}
+	items := make([]StockV2Announcement, 0, len(payload.Announcements))
+	for index, raw := range payload.Announcements {
+		symbol := stockCodeOnly(firstJSONText(raw, "secCode", "stockCode", "code", "SECURITY_CODE"))
+		orgID := firstJSONText(raw, "orgId", "orgID", "orgid", "org_id")
+		item, ok := cninfoAnnouncementFromRaw(raw, symbol, market, orgID)
+		if !ok {
+			return AnnouncementMarketPage{}, fmt.Errorf("invalid cninfo announcement at page %d item %d", page, index+1)
+		}
+		items = append(items, item)
+	}
+	total := cninfoInt(payload.TotalAnnouncement)
+	if candidate := cninfoInt(payload.TotalRecordNum); candidate > total {
+		total = candidate
+	}
+	rawCount := len(payload.Announcements)
+	if total < rawCount {
+		total = rawCount
+	}
+	hasMore := total > page*pageSize
+	if cninfoInt(payload.TotalAnnouncement) == 0 && cninfoInt(payload.TotalRecordNum) == 0 {
+		hasMore = rawCount >= pageSize
+	}
+	return AnnouncementMarketPage{
+		Market:        market,
+		Page:          page,
+		PageSize:      pageSize,
+		Total:         total,
+		RawCount:      rawCount,
+		HasMore:       hasMore,
+		Announcements: items,
+	}, nil
+}
+
+func decodeCninfoAnnouncements(body []byte) (cninfoAnnouncementsPayload, error) {
+	var payload cninfoAnnouncementsPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return cninfoAnnouncementsPayload{}, err
+	}
+	return payload, nil
+}
+
+func cninfoAnnouncementFromRaw(raw map[string]any, symbol, market, orgID string) (StockV2Announcement, bool) {
+	symbol = stockCodeOnly(symbol)
+	title := cleanAnnouncementTitle(firstJSONText(raw, "announcementTitle", "title"))
+	if symbol == "" || title == "" {
+		return StockV2Announcement{}, false
+	}
+	if value := firstJSONText(raw, "orgId", "orgID", "orgid", "org_id"); value != "" {
+		orgID = value
+	}
+	category := firstJSONText(raw, "category", "announcementTypeName", "categoryName")
+	announcementID := firstJSONText(raw, "announcementId", "id")
+	pdfURL := firstJSONText(raw, "adjunctUrl", "adjunctURL")
+	if pdfURL != "" && !strings.HasPrefix(pdfURL, "http") {
+		pdfURL = "https://static.cninfo.com.cn/" + strings.TrimLeft(pdfURL, "/")
+	}
+	publishedAt := parseCninfoTime(raw["announcementTime"])
+	if publishedAt.IsZero() {
+		publishedAt = parseCninfoDate(firstJSONText(raw, "announcementTime", "publishTime", "date"))
+	}
+	major, reason := classifyMajorAnnouncement(title, category)
+	now := time.Now()
+	return StockV2Announcement{
+		ID:             generateID(),
+		Source:         StockV2AnnouncementSourceCninfo,
+		Symbol:         symbol,
+		Market:         market,
+		OrgID:          orgID,
+		Title:          title,
+		Category:       category,
+		AnnouncementID: announcementID,
+		PDFURL:         pdfURL,
+		ContentHash:    announcementContentHash(symbol, title, category, pdfURL, publishedAt),
+		Major:          major,
+		MajorReason:    reason,
+		PublishedAt:    publishedAt,
+		FetchedAt:      now,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}, true
+}
+
+func cninfoInt(value any) int {
+	switch typed := value.(type) {
+	case float64:
+		return int(typed)
+	case json.Number:
+		parsed, _ := strconv.Atoi(typed.String())
+		return parsed
+	case string:
+		parsed, _ := strconv.Atoi(strings.TrimSpace(typed))
+		return parsed
+	default:
+		return 0
+	}
 }
 
 func firstJSONText(m map[string]any, keys ...string) string {

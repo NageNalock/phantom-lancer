@@ -12,6 +12,8 @@ var (
 
 const (
 	StockProfileAIStatusMissing       = "missing"
+	StockProfileAIStatusQueued        = "queued"
+	StockProfileAIStatusRunning       = "running"
 	StockProfileAIStatusReady         = "ready"
 	StockProfileAIStatusFailed        = "failed"
 	StockProfileAIStatusNotConfigured = "not_configured"
@@ -21,6 +23,7 @@ const (
 	StockProfileUpdateTriggerManual = "manual"
 	StockProfileUpdateTriggerAuto   = "auto"
 
+	StockProfileUpdateStatusQueued    = "queued"
 	StockProfileUpdateStatusRunning   = "running"
 	StockProfileUpdateStatusCompleted = "completed"
 	StockProfileUpdateStatusPartial   = "partial"
@@ -29,6 +32,7 @@ const (
 	StockProfileUpdateBaseStatusReady  = "ready"
 	StockProfileUpdateBaseStatusFailed = "failed"
 
+	StockProfileUpdateAIStatusQueued  = "queued"
 	StockProfileUpdateAIStatusRunning = "running"
 
 	StockProfileAIDecisionCalled               = "called"
@@ -40,6 +44,14 @@ const (
 	StockProfileSourceStatusSuccess = "success"
 	StockProfileSourceStatusFailed  = "failed"
 	StockProfileSourceStatusSkipped = "skipped"
+)
+
+const (
+	StockProfileAIQueueStatusReady     = "ready"
+	StockProfileAIQueueStatusRunning   = "running"
+	StockProfileAIQueueStatusRetryWait = "retry_wait"
+	StockProfileAIQueueStatusCompleted = "completed"
+	StockProfileAIQueueStatusFailed    = "failed"
 )
 
 // StockProfile 是消息面高召回关联使用的静态文本资产。
@@ -73,12 +85,14 @@ type StockProfile struct {
 	AIProfileConfidence  float64   `json:"aiProfileConfidence,omitempty"`
 	AIProfileError       string    `json:"aiProfileError,omitempty"`
 	AIProfileUpdatedAt   time.Time `json:"aiProfileUpdatedAt,omitempty"`
+	AIProfileAttemptedAt time.Time `json:"aiProfileAttemptedAt,omitempty"`
 	FundType             string    `json:"fundType,omitempty"`
 	TrackingIndex        string    `json:"trackingIndex,omitempty"`
 	Theme                string    `json:"theme,omitempty"`
 	ConstituentHint      string    `json:"constituentHint,omitempty"`
 	BaseProfileHash      string    `json:"baseProfileHash,omitempty"`
 	BaseProfileUpdatedAt time.Time `json:"baseProfileUpdatedAt,omitempty"`
+	BaseProfileCheckedAt time.Time `json:"baseProfileCheckedAt,omitempty"`
 	ProfileVersion       int       `json:"profileVersion"`
 	UpdatedAt            time.Time `json:"updatedAt"`
 }
@@ -92,14 +106,18 @@ type StockProfileListFilter struct {
 }
 
 type StockProfileSummary struct {
-	Symbol              string    `json:"symbol"`
-	Status              string    `json:"status"`
-	BusinessSummary     string    `json:"businessSummary,omitempty"`
-	AIProfileStatus     string    `json:"aiProfileStatus,omitempty"`
-	AIProfileModel      string    `json:"aiProfileModel,omitempty"`
-	AIProfileConfidence float64   `json:"aiProfileConfidence,omitempty"`
-	AIProfileUpdatedAt  time.Time `json:"aiProfileUpdatedAt,omitempty"`
-	UpdatedAt           time.Time `json:"updatedAt,omitempty"`
+	Symbol               string    `json:"symbol"`
+	Market               string    `json:"market,omitempty"`
+	InstrumentType       string    `json:"instrumentType,omitempty"`
+	Status               string    `json:"status"`
+	BusinessSummary      string    `json:"businessSummary,omitempty"`
+	BaseProfileUpdatedAt time.Time `json:"baseProfileUpdatedAt,omitempty"`
+	BaseProfileCheckedAt time.Time `json:"baseProfileCheckedAt,omitempty"`
+	AIProfileStatus      string    `json:"aiProfileStatus,omitempty"`
+	AIProfileModel       string    `json:"aiProfileModel,omitempty"`
+	AIProfileConfidence  float64   `json:"aiProfileConfidence,omitempty"`
+	AIProfileUpdatedAt   time.Time `json:"aiProfileUpdatedAt,omitempty"`
+	UpdatedAt            time.Time `json:"updatedAt,omitempty"`
 }
 
 type StockProfileSourceStatus struct {
@@ -136,4 +154,42 @@ type StockProfileUpdateTaskListFilter struct {
 	Symbol string
 	Limit  int
 	Offset int
+}
+
+// StockProfileAIQueueItem is the durable, coalescing work record for one symbol.
+// A single row per symbol prevents duplicate Agent executions while allowing a
+// newer input version to supersede work that is already running.
+type StockProfileAIQueueItem struct {
+	Symbol                string    `json:"symbol"`
+	Market                string    `json:"market,omitempty"`
+	Status                string    `json:"status"`
+	Priority              int       `json:"priority"`
+	TriggerReason         string    `json:"triggerReason,omitempty"`
+	RequestedBy           string    `json:"requestedBy,omitempty"`
+	DesiredInputVersion   string    `json:"desiredInputVersion"`
+	ClaimedInputVersion   string    `json:"claimedInputVersion,omitempty"`
+	CompletedInputVersion string    `json:"completedInputVersion,omitempty"`
+	PayloadJSON           string    `json:"-"`
+	CurrentAgentRunID     string    `json:"currentAgentRunId,omitempty"`
+	AttemptCount          int       `json:"attemptCount"`
+	AvailableAt           time.Time `json:"availableAt"`
+	LeaseOwner            string    `json:"leaseOwner,omitempty"`
+	LeaseToken            string    `json:"-"`
+	LeaseExpiresAt        time.Time `json:"leaseExpiresAt,omitempty"`
+	CompletedAt           time.Time `json:"completedAt,omitempty"`
+	LastError             string    `json:"lastError,omitempty"`
+	CreatedAt             time.Time `json:"createdAt"`
+	UpdatedAt             time.Time `json:"updatedAt"`
+}
+
+type StockProfileAIQueueLease struct {
+	StockProfileAIQueueItem
+}
+
+type StockProfileAIQueueStats struct {
+	Ready     int `json:"ready"`
+	Running   int `json:"running"`
+	Retrying  int `json:"retrying"`
+	Completed int `json:"completed"`
+	Failed    int `json:"failed"`
 }

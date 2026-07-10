@@ -10,6 +10,7 @@ import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, ContextList, CopyButton, Drawer, Notice, Pill } from "../../components/ui";
 import {
   formatDate,
+  stockV2AgentRunTerminal,
   stockV2AgentRunStatusLabel,
   stockV2AgentRunStatusTone,
   stockV2AgentTaskTypeLabel,
@@ -388,7 +389,7 @@ function AgentPagination({
 }
 
 function formatAgentRunFinishedAt(run: StockV2AgentRun): string {
-  if (run.status !== "completed" && run.status !== "failed") return "-";
+  if (!stockV2AgentRunTerminal(run.status)) return "-";
   if (!run.finishedAt || run.finishedAt.startsWith("0001-01-01")) return "-";
   return formatDate(run.finishedAt) || "-";
 }

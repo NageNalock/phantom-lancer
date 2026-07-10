@@ -147,6 +147,47 @@ func TestAssetBaseProfileEnrichesFundFromPublicF10(t *testing.T) {
 	}
 }
 
+func TestStockProfileF10AvailabilityFailureStartsSharedCooldown(t *testing.T) {
+	ctx := context.Background()
+	requests := 0
+	svc, cleanup := newStockProfileTestServiceWithClient(t, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		return stringResponse(http.StatusServiceUnavailable, "unavailable"), nil
+	})})
+	defer cleanup()
+	inst := StockV2Instrument{Symbol: "300750", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "宁德时代"}
+	profile := buildStockProfileFromInstrument(inst)
+	_, firstStatuses := svc.enrichStockProfileFromPublicSources(ctx, profile, inst)
+	if requests != 1 || len(firstStatuses) != 1 || firstStatuses[0].Status != StockProfileSourceStatusFailed {
+		t.Fatalf("first failure requests=%d statuses=%+v", requests, firstStatuses)
+	}
+	inst.Symbol = "600000"
+	inst.Market = "SH"
+	profile = buildStockProfileFromInstrument(inst)
+	_, secondStatuses := svc.enrichStockProfileFromPublicSources(ctx, profile, inst)
+	if requests != 1 || len(secondStatuses) != 1 || secondStatuses[0].Status != StockProfileSourceStatusFailed ||
+		!strings.Contains(secondStatuses[0].Message, "cooldown") {
+		t.Fatalf("cooldown requests=%d statuses=%+v", requests, secondStatuses)
+	}
+}
+
+func TestStockProfileF10BackoffClassification(t *testing.T) {
+	for _, code := range []int{http.StatusForbidden, http.StatusTooManyRequests, http.StatusInternalServerError} {
+		if !stockProfileF10ShouldBackoff(stockProfileHTTPStatusError{StatusCode: code}) {
+			t.Fatalf("status %d did not start backoff", code)
+		}
+	}
+	if stockProfileF10ShouldBackoff(stockProfileHTTPStatusError{StatusCode: http.StatusNotFound}) {
+		t.Fatal("symbol-specific 404 started provider-wide backoff")
+	}
+	if !stockProfileF10ShouldBackoff(context.DeadlineExceeded) {
+		t.Fatal("network timeout did not start backoff")
+	}
+	if stockProfileF10ShouldBackoff(context.Canceled) {
+		t.Fatal("caller cancellation started provider-wide backoff")
+	}
+}
+
 func TestAssetProfileAISkipsWhenInputUnchanged(t *testing.T) {
 	ctx := context.Background()
 	businessLine := "动力电池系统"
@@ -169,10 +210,9 @@ func TestAssetProfileAISkipsWhenInputUnchanged(t *testing.T) {
 	if !first.Task.BaseInputChanged || first.Task.AIDecision != StockProfileAIDecisionCalled || first.AgentRun == nil {
 		t.Fatalf("first result = %+v, want changed and ai called", first)
 	}
-	if first.Task.Status != StockProfileUpdateStatusRunning || first.Task.BaseProfileStatus != StockProfileUpdateBaseStatusReady || first.Task.AIProfileStatus != StockProfileUpdateAIStatusRunning {
-		t.Fatalf("first task status = %+v, want base ready and ai running", first.Task)
+	if first.Task.Status != StockProfileUpdateStatusCompleted || first.Task.BaseProfileStatus != StockProfileUpdateBaseStatusReady || first.Task.AIProfileStatus != StockProfileAIStatusReady {
+		t.Fatalf("first task status = %+v, want base and ai completed", first.Task)
 	}
-	_ = waitAgentRunTerminal(t, svc, first.AgentRun.ID)
 	firstTasks, err := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Symbol: "300750", Limit: 1})
 	if err != nil {
 		t.Fatalf("list first profile update task: %v", err)
@@ -219,7 +259,6 @@ func TestAssetProfileAICallsWhenInputChanges(t *testing.T) {
 	if first.AgentRun == nil {
 		t.Fatalf("first result = %+v, want ai run", first)
 	}
-	_ = waitAgentRunTerminal(t, svc, first.AgentRun.ID)
 
 	businessLine = "麒麟电池系统"
 	second := runAssetProfileAIForTest(t, svc, ctx, "300750", false)
@@ -414,16 +453,137 @@ func TestAssetProfileAIMarksProfileFailedOnAgentError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get profile: %v", err)
 	}
-	if profile.AIProfileStatus != StockProfileAIStatusFailed || !strings.Contains(profile.AIProfileError, "code 2") {
-		t.Fatalf("profile ai status/error = %q/%q, want failed with code 2", profile.AIProfileStatus, profile.AIProfileError)
+	if result.Queue.Status != StockProfileAIQueueStatusRetryWait || profile.AIProfileStatus != StockProfileAIStatusQueued {
+		t.Fatalf("queue/profile status = %q/%q, want retry_wait/queued", result.Queue.Status, profile.AIProfileStatus)
 	}
 	tasks, err := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Symbol: "300750", Limit: 10})
 	if err != nil {
 		t.Fatalf("list profile update tasks: %v", err)
 	}
-	aiTask := stockProfileUpdateTaskByAgentRun(tasks, run.ID)
-	if aiTask == nil || aiTask.Status != StockProfileUpdateStatusPartial || aiTask.AIProfileStatus != StockProfileAIStatusFailed || !strings.Contains(aiTask.AIProfileError, "code 2") {
-		t.Fatalf("profile update task = %+v, want partial with ai failed for run %s", tasks, run.ID)
+	aiTask := &tasks[0]
+	if aiTask.Status != StockProfileUpdateStatusQueued || aiTask.AIProfileStatus != StockProfileAIStatusQueued || !strings.Contains(aiTask.AIProfileError, "code 2") {
+		t.Fatalf("profile update task = %+v, want queued retry after run %s", tasks, run.ID)
+	}
+}
+
+func TestRefreshAssetBaseProfileDoesNotAdvanceFreshnessOnSourceFailure(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestServiceWithClient(t, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return stringResponse(http.StatusServiceUnavailable, "unavailable"), nil
+	})})
+	defer cleanup()
+	seedProfileInstrument(t, svc, ctx)
+	oldCheckedAt := time.Now().Add(-10 * 24 * time.Hour).Truncate(time.Second)
+	if _, err := svc.store.UpsertStockProfile(ctx, StockProfile{
+		Symbol:               "300750",
+		Market:               "SZ",
+		InstrumentType:       InstrumentTypeStock,
+		Name:                 "宁德时代",
+		ProfileText:          "existing",
+		BaseProfileHash:      "existing-hash",
+		BaseProfileUpdatedAt: oldCheckedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	inst, err := svc.store.GetInstrument(ctx, "300750")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := svc.refreshAssetBaseProfile(ctx, inst); err == nil {
+		t.Fatal("refresh succeeded despite all F10 sources failing")
+	}
+	stored, err := svc.store.GetStockProfile(ctx, "300750")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.BaseProfileUpdatedAt.Equal(oldCheckedAt) || stored.BaseProfileHash != "existing-hash" {
+		t.Fatalf("failed refresh advanced base freshness: %+v", stored)
+	}
+}
+
+func TestMergeStockProfileAIFieldsKeepsFreshBaseSummary(t *testing.T) {
+	baseUpdatedAt := time.Now().Add(-24 * time.Hour)
+	baseCheckedAt := time.Now().Add(-time.Hour)
+	base := StockProfile{
+		Symbol: "300750", BusinessSummary: "最新 F10 主营业务", BusinessSummaryZh: "最新 F10 主营业务",
+	}
+	existing := StockProfile{
+		Symbol: "300750", BusinessSummary: "旧基础内容", BusinessSummaryZh: "上次 AI 画像总结",
+		AIProfileStatus:      StockProfileAIStatusReady,
+		BaseProfileHash:      "base-v1",
+		BaseProfileUpdatedAt: baseUpdatedAt,
+		BaseProfileCheckedAt: baseCheckedAt,
+	}
+	merged := mergeStockProfileAIFields(base, existing)
+	if merged.BusinessSummary != base.BusinessSummary {
+		t.Fatalf("base summary = %q, want fresh %q", merged.BusinessSummary, base.BusinessSummary)
+	}
+	if merged.BusinessSummaryZh != existing.BusinessSummaryZh {
+		t.Fatalf("previous AI summary = %q, want %q", merged.BusinessSummaryZh, existing.BusinessSummaryZh)
+	}
+	if merged.BaseProfileHash != existing.BaseProfileHash ||
+		!merged.BaseProfileUpdatedAt.Equal(baseUpdatedAt) || !merged.BaseProfileCheckedAt.Equal(baseCheckedAt) {
+		t.Fatalf("base profile metadata was not preserved: %+v", merged)
+	}
+}
+
+func TestRefreshAssetBaseProfileUnchangedAdvancesCheckOnly(t *testing.T) {
+	ctx := context.Background()
+	businessLine := "动力电池系统"
+	svc, cleanup := newStockProfileTestServiceWithClient(t, stockProfileF10TestClient(&businessLine))
+	defer cleanup()
+	seedProfileInstrument(t, svc, ctx)
+	first := refreshAssetBaseProfileForTest(t, svc, ctx, "300750")
+	if first.BaseProfileUpdatedAt.IsZero() || first.BaseProfileCheckedAt.IsZero() {
+		t.Fatalf("first timestamps = updated %v checked %v", first.BaseProfileUpdatedAt, first.BaseProfileCheckedAt)
+	}
+	time.Sleep(5 * time.Millisecond)
+	second := refreshAssetBaseProfileForTest(t, svc, ctx, "300750")
+	if second.BaseProfileUpdatedAt.UnixMicro() != first.BaseProfileUpdatedAt.UnixMicro() {
+		t.Fatalf("unchanged base content version advanced: first=%v second=%v", first.BaseProfileUpdatedAt, second.BaseProfileUpdatedAt)
+	}
+	if !second.BaseProfileCheckedAt.After(first.BaseProfileCheckedAt) {
+		t.Fatalf("base check did not advance: first=%v second=%v", first.BaseProfileCheckedAt, second.BaseProfileCheckedAt)
+	}
+}
+
+func TestRefreshAssetBaseProfileCachePreservesEnrichedBase(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	inst := StockV2Instrument{
+		ID: "inst-300750", Symbol: "300750", Market: "SZ", InstrumentType: InstrumentTypeStock,
+		Name: "宁德时代", Industry: "电力设备", Concepts: []string{"锂电池"},
+	}
+	if err := svc.store.UpsertInstrument(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
+	checkedAt := time.Now().Add(-time.Hour).Truncate(time.Microsecond)
+	existing, err := svc.store.UpsertStockProfile(ctx, StockProfile{
+		Symbol: inst.Symbol, Market: inst.Market, InstrumentType: inst.InstrumentType,
+		Name: inst.Name, Industry: inst.Industry, Concepts: inst.Concepts,
+		BusinessSummary: "F10 丰富主营业务", BusinessSummaryZh: "AI 上次总结",
+		ProfileText: "已持久化画像", BaseProfileHash: "base-v1",
+		BaseProfileUpdatedAt: checkedAt.Add(-24 * time.Hour), BaseProfileCheckedAt: checkedAt,
+		AIProfileStatus: StockProfileAIStatusReady, AIProfileUpdatedAt: checkedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, before, statuses, err := svc.refreshAssetBaseProfileWithCache(ctx, inst, assetMaintenanceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.BusinessSummary != existing.BusinessSummary || profile.BusinessSummaryZh != existing.BusinessSummaryZh {
+		t.Fatalf("cached enriched base was replaced: %+v", profile)
+	}
+	if profile.BaseProfileHash != existing.BaseProfileHash ||
+		profile.BaseProfileCheckedAt.UnixMicro() != existing.BaseProfileCheckedAt.UnixMicro() ||
+		before.BaseProfileHash != existing.BaseProfileHash {
+		t.Fatalf("cached base metadata changed: profile=%+v before=%+v", profile, before)
+	}
+	if len(statuses) != 1 || statuses[0].Source != "f10_cache" {
+		t.Fatalf("cache statuses = %+v", statuses)
 	}
 }
 
@@ -469,6 +629,7 @@ type assetProfileAIResult struct {
 	Profile  StockProfile
 	Task     StockProfileUpdateTask
 	AgentRun *AgentRun
+	Queue    StockProfileAIQueueItem
 }
 
 func refreshAssetBaseProfileForTest(t *testing.T, svc *Service, ctx context.Context, symbol string) StockProfile {
@@ -512,13 +673,38 @@ func runAssetProfileAIForTest(t *testing.T, svc *Service, ctx context.Context, s
 		BaseProfileChanged:    previous.BaseProfileHash == "" || previous.BaseProfileHash != profile.BaseProfileHash,
 		StartedAt:             time.Now(),
 	}
-	agentRun, _, _, err := svc.maybeRunAssetProfileAI(ctx, profile, previous, item, nil, sourceStatuses, assetMaintenanceOptions{
+	agentRun, _, aiStatus, err := svc.maybeRunAssetProfileAI(ctx, profile, previous, item, nil, sourceStatuses, assetMaintenanceOptions{
 		TriggerSource: StockProfileUpdateTriggerManual,
 		RequestedBy:   "test",
 		ForceAI:       force,
 	})
 	if err != nil && agentRun == nil {
 		t.Fatalf("run asset profile ai %s: %v", symbol, err)
+	}
+	var queue StockProfileAIQueueItem
+	if aiStatus == StockProfileAIStatusQueued {
+		if err := svc.processNextStockProfileAIQueueItem(ctx, "test-worker"); err != nil {
+			t.Fatalf("process queued profile ai %s: %v", symbol, err)
+		}
+		queue, err = svc.store.GetStockProfileAIQueueItem(ctx, normalized)
+		if err != nil {
+			t.Fatalf("get profile ai queue %s: %v", symbol, err)
+		}
+		runs, listErr := svc.store.ListAgentRuns(ctx, AgentRunListFilter{
+			TaskType:          AgentTaskTypeStockProfileSummary,
+			TriggerObjectType: "stock_profile",
+			TriggerObjectID:   normalized,
+			Limit:             1,
+		})
+		if listErr != nil {
+			t.Fatalf("list profile ai runs %s: %v", symbol, listErr)
+		}
+		if len(runs) > 0 {
+			agentRun = &runs[0]
+		}
+		if latest, getErr := svc.store.GetStockProfile(ctx, normalized); getErr == nil {
+			profile = latest
+		}
 	}
 	tasks, err := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Symbol: normalized, Limit: 10})
 	if err != nil {
@@ -536,7 +722,7 @@ func runAssetProfileAIForTest(t *testing.T, svc *Service, ctx context.Context, s
 			}
 		}
 	}
-	return assetProfileAIResult{Profile: profile, Task: task, AgentRun: agentRun}
+	return assetProfileAIResult{Profile: profile, Task: task, AgentRun: agentRun, Queue: queue}
 }
 
 func stockProfileUpdateTaskByAgentRun(tasks []StockProfileUpdateTask, runID string) *StockProfileUpdateTask {

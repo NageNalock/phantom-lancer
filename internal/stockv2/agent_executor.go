@@ -962,6 +962,14 @@ func buildStockProfileSummaryPrompt(taskID string, pack StockProfileSummaryConte
 	}
 	b.WriteString("\n")
 
+	b.WriteString("## Previous AI Summary\n\n")
+	b.WriteString("Treat this as the prior version: preserve still-valid facts and revise it only where the new base data or announcements require a change.\n\n```json\n")
+	previousRaw, _ := json.MarshalIndent(pack.PreviousSummary, "", "  ")
+	// ponytail: keep the previous summary ahead of the large current profile so
+	// global prompt truncation cannot silently remove the requested continuity.
+	b.WriteString(truncatePromptUTF8(string(previousRaw), 1800, 600))
+	b.WriteString("\n```\n\n")
+
 	b.WriteString("## Profile Summary Context\n\n```json\n")
 	raw, _ := json.MarshalIndent(pack, "", "  ")
 	b.Write(raw)

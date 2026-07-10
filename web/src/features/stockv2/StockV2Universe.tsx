@@ -14,6 +14,7 @@ import {
 } from "../../domain/labels";
 import { StockV2DailyBarsMaintenance } from "./StockV2DailyBars";
 import { StockV2InstrumentDetail } from "./StockV2InstrumentDetail";
+import { StockV2MaintenanceProgress, stockV2AIProgressActive } from "./StockV2MaintenanceProgress";
 import { StockV2ProfileRecords } from "./StockV2ProfileWorkbench";
 import { StockV2Settings } from "./StockV2Settings";
 
@@ -90,6 +91,8 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   const stockv2 = data.stockv2;
   const jobs = stockv2.updateJobs || [];
   const runningJob = jobs.find(j => j.status === "running");
+  const latestJob = jobs[0];
+  const aiProgressActive = jobs.some(stockV2AIProgressActive);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [page, setPage] = useState(0);
   const [instrumentsPage, setInstrumentsPage] = useState<InstrumentsPage | null>(null);
@@ -111,10 +114,6 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   const isSearching = searchQuery.trim().length > 0;
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
-  const progressPct = runningJob
-    ? Math.min(100, Math.round(((runningJob.processedCount || 0) / (runningJob.totalCount || runningJob.processedCount || 1)) * 100))
-    : 0;
-
   function handleJump() {
     const n = parseInt(jumpInput, 10);
     if (!isNaN(n) && n >= 1 && n <= totalPages) {
@@ -248,20 +247,21 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
     wasRunningRef.current = isRunning;
   }, [runningJob]);
 
-  // 轮询进度
+  // 基础维护运行时保持原有实时轮询；基础完成后若 AI 队列仍活跃，
+  // 复用同一 snapshot 低频刷新，不增加逐任务或逐标的请求。
   useEffect(() => {
-    if (!runningJob) {
-      return;
-    }
+    const progressVisible = masterDataView === "overview" || masterDataView === "maintenance";
+    const intervalMs = runningJob ? 2_000 : aiProgressActive && progressVisible ? 30_000 : 0;
+    if (intervalMs === 0) return;
     const timer = setInterval(async () => {
       try {
         await actions.refreshStockV2();
       } catch {
         // 静默
       }
-    }, 2000);
+    }, intervalMs);
     return () => clearInterval(timer);
-  }, [runningJob?.id, actions]);
+  }, [runningJob?.id, aiProgressActive, masterDataView, actions]);
 
   async function handleTriggerUpdate() {
     const req: StockV2UniverseUpdateRequest = {
@@ -313,9 +313,11 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         title="数据资产维护进度"
         subtitle={
           runningJob
-            ? `正在维护 ${runningJob.totalCount || runningJob.processedCount} 只标的 · ${stockV2TriggerTypeLabel(runningJob.triggerType)}`
-            : jobs[0]
-              ? `上次维护：${stockV2UpdateStatusLabel(jobs[0])} · ${stockV2TriggerTypeLabel(jobs[0].triggerType)} · ${formatCompactTime(jobs[0].startAt)}`
+            ? `基础数据正在维护 ${runningJob.totalCount || runningJob.processedCount} 只标的，${stockV2TriggerTypeLabel(runningJob.triggerType)}`
+            : latestJob && stockV2AIProgressActive(latestJob)
+              ? `基础维护已结束，AI 画像队列继续处理，${formatCompactTime(latestJob.startAt)}`
+              : latestJob
+                ? `上次基础维护：${stockV2UpdateStatusLabel(latestJob)}，${stockV2TriggerTypeLabel(latestJob.triggerType)}，${formatCompactTime(latestJob.startAt)}`
               : "尚未执行过维护"
         }
         actions={
@@ -331,27 +333,11 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
           </div>
         }
       >
-        <div className="space-y-2">
-          <div className="h-2 overflow-hidden rounded-full bg-[var(--line)]">
-            <div
-              className="h-full rounded-full transition-all duration-500"
-              style={{
-                width: `${progressPct}%`,
-                backgroundColor: runningJob ? "var(--accent)" : "var(--muted)",
-              }}
-            />
-          </div>
-          <div className="flex justify-between text-xs text-[var(--muted)]">
-            <span>
-              已处理 <strong className="text-[var(--text)]">{runningJob?.processedCount || 0}</strong> / {runningJob?.totalCount || "-"}
-            </span>
-            <span>
-              成功 <strong className="text-[var(--good)]">{runningJob?.successCount || 0}</strong>
-              <span className="mx-2">|</span>
-              失败 <strong className="text-[var(--danger)]">{runningJob?.failedCount || 0}</strong>
-            </span>
-          </div>
-        </div>
+        {runningJob || latestJob ? (
+          <StockV2MaintenanceProgress job={runningJob || latestJob} />
+        ) : (
+          <div className="text-sm text-[var(--muted)]">首次运行后，这里会分别显示基础数据和 AI 画像进度。</div>
+        )}
       </Panel>
 
       {/* 标的列表 */}
@@ -668,12 +654,15 @@ function StockV2MaintenanceTasks({
                       </span>
                       {job.endAt ? <span>耗时 {formatDuration(job.startAt, job.endAt)}</span> : null}
                     </div>
+                    <div className="mt-3">
+                      <StockV2MaintenanceProgress job={job} compact />
+                    </div>
                     {job.assetStats ? (
                       <div className="mt-2 flex flex-wrap gap-1">
                         <Pill tone="neutral">日 K {job.assetStats.dailyBarFetched}</Pill>
                         <Pill tone="neutral">基础更新 {job.assetStats.baseProfileUpdated}</Pill>
+                        <Pill tone="neutral">新公告 {job.assetStats.announcementsNew}</Pill>
                         <Pill tone={job.assetStats.majorAnnouncementsNew > 0 ? "warn" : "neutral"}>重大 {job.assetStats.majorAnnouncementsNew}</Pill>
-                        <Pill tone="neutral">AI {job.assetStats.aiCalled}</Pill>
                       </div>
                     ) : null}
                   </div>
@@ -711,11 +700,12 @@ function StockV2MaintenanceTasks({
                                 <td className="py-2 pr-3">{item.announcementsNew}</td>
                                 <td className="py-2 pr-3">{item.majorAnnouncementsNew}</td>
                                 <td className="py-2 pr-3">
-                                  {item.agentRunId ? (
-                                    <span className="font-mono">{item.aiDecision || "called"}</span>
-                                  ) : (
-                                    item.aiDecision || "-"
-                                  )}
+                                  <div className="grid gap-0.5">
+                                    <span className={item.agentRunId ? "font-mono" : ""}>{item.aiDecision || "-"}</span>
+                                    {item.aiQueueStatus || item.aiProfileStatus ? (
+                                      <span className="text-[var(--muted)]">{assetAIItemStatusLabel(item)}</span>
+                                    ) : null}
+                                  </div>
                                 </td>
                                 <td className="py-2 pr-3">{formatMs(item.durationMs)}</td>
                                 <td className="max-w-[280px] truncate py-2 pr-0 text-[var(--danger)]">{item.errorMessage || ""}</td>
@@ -891,6 +881,7 @@ function StockRow({
   const profile = summary?.profileSummary;
   const profileTone = profile?.status === "ready" ? "good" : profile?.status === "partial" ? "warn" : "neutral";
   const aiTone = profile?.aiProfileStatus === "ready" ? "good" : profile?.aiProfileStatus === "failed" ? "danger" : "neutral";
+  const readiness = summary?.readiness;
   const dailyTone = stockV2DailyBarsQualityTone(dailyQuality);
   const majorCount = summary?.majorAnnouncementCount ?? 0;
   const announcementCount = summary?.announcementCount ?? 0;
@@ -946,6 +937,11 @@ function StockRow({
             {profile ? profile.status === "ready" ? "基础就绪" : profile.status === "partial" ? "基础部分" : "基础缺失" : supplementLoading ? "读取中" : "基础缺失"}
           </Pill>
           <Pill tone={profile ? aiTone : "neutral"}>AI {profile?.aiProfileStatus || (supplementLoading ? "读取中" : "missing")}</Pill>
+          {readiness ? (
+            <Pill tone={readiness.ready ? "good" : readiness.dataReady ? "warn" : "neutral"}>
+              {readiness.ready ? "资产可用" : readiness.dataReady ? "AI 待完成" : "数据待刷新"}
+            </Pill>
+          ) : null}
         </div>
       </td>
       <td className="py-2 pr-4 text-xs text-[var(--muted)]">
@@ -1102,6 +1098,24 @@ function AddHoldingDialog({
   );
 }
 
+function assetAIItemStatusLabel(item: StockV2AssetMaintenanceItem): string {
+  switch (item.aiQueueStatus) {
+    case "ready": return "排队中";
+    case "running": return "运行中";
+    case "retry_wait": return "等待重试";
+    case "completed": return "已完成";
+    case "failed": return "失败";
+  }
+  switch (item.aiProfileStatus) {
+    case "queued": return "排队中";
+    case "running": return "运行中";
+    case "ready": return "已完成";
+    case "failed": return "失败";
+    case "not_configured": return "未配置";
+    default: return item.aiProfileStatus || "";
+  }
+}
+
 function UpdateHistoryDialog({ jobs, onClose }: { jobs: StockV2UpdateJob[]; onClose: () => void }) {
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
 
@@ -1157,7 +1171,7 @@ function UpdateHistoryDialog({ jobs, onClose }: { jobs: StockV2UpdateJob[]; onCl
                         {stockV2TriggerTypeLabel(job.triggerType)}
                       </span>
                       {job.triggerSource ? (
-                        <span className="text-xs text-[var(--muted)]">· {job.triggerSource}</span>
+                        <span className="text-xs text-[var(--muted)]">{job.triggerSource}</span>
                       ) : null}
                     </div>
                     <span className="text-xs text-[var(--muted)]">
@@ -1165,34 +1179,19 @@ function UpdateHistoryDialog({ jobs, onClose }: { jobs: StockV2UpdateJob[]; onCl
                     </span>
                   </div>
 
-                  <div className="mt-3 grid grid-cols-4 gap-3 text-sm">
-                    <div>
-                      <div className="text-xs text-[var(--muted)]">总计</div>
-                      <div className="font-semibold">{job.totalCount || job.processedCount}</div>
-                    </div>
-                    <div>
-                      <div className="text-xs text-[var(--muted)]">已处理</div>
-                      <div className="font-semibold">{job.processedCount}</div>
-                    </div>
-                    <div>
-                      <div className="text-xs text-[var(--good)]">成功</div>
-                      <div className="font-semibold text-[var(--good)]">{job.successCount}</div>
-                    </div>
-                    <div>
-                      <div className="text-xs text-[var(--danger)]">失败</div>
-                      {job.failedCount > 0 && job.failedItems?.length ? (
-                        <button
-                          onClick={() => toggleFailed(job)}
-                          className="text-left font-semibold text-[var(--danger)] underline decoration-dotted underline-offset-2 hover:text-[var(--danger)]"
-                          title="点击查看失败详情"
-                        >
-                          {job.failedCount}
-                        </button>
-                      ) : (
-                        <div className="font-semibold text-[var(--danger)]">{job.failedCount}</div>
-                      )}
-                    </div>
+                  <div className="mt-3">
+                    <StockV2MaintenanceProgress job={job} compact />
                   </div>
+                  {job.failedCount > 0 && job.failedItems?.length ? (
+                    <button
+                      onClick={() => toggleFailed(job)}
+                      className="mt-2 text-left text-xs font-semibold text-[var(--danger)] underline decoration-dotted underline-offset-2"
+                      title="点击查看基础维护失败详情"
+                      type="button"
+                    >
+                      {expandedJobId === job.id ? "收起基础维护失败详情" : `查看基础维护失败详情 (${job.failedCount})`}
+                    </button>
+                  ) : null}
 
                   {expandedJobId === job.id && job.failedItems?.length ? (
                     <div className="mt-3 rounded border border-[var(--danger-soft)] bg-[var(--danger-soft)/20] p-3">

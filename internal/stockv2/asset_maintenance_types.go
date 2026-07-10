@@ -31,6 +31,11 @@ const (
 	AssetAIDecisionFailed          = "failed"
 
 	StockV2AnnouncementSourceCninfo = "cninfo"
+
+	AssetAIProgressStatusNotRequired           = "not_required"
+	AssetAIProgressStatusActive                = "active"
+	AssetAIProgressStatusCompleted             = "completed"
+	AssetAIProgressStatusCompletedWithFailures = "completed_with_failures"
 )
 
 type AssetMaintenanceStats struct {
@@ -42,6 +47,40 @@ type AssetMaintenanceStats struct {
 	MajorAnnouncementsNew int `json:"majorAnnouncementsNew"`
 	AICalled              int `json:"aiCalled"`
 	AISkipped             int `json:"aiSkipped"`
+	AIQueued              int `json:"aiQueued"`
+	AIRunning             int `json:"aiRunning"`
+	AICompleted           int `json:"aiCompleted"`
+	AIFailed              int `json:"aiFailed"`
+}
+
+// AssetMaintenanceJobProgress keeps the deterministic data pipeline separate
+// from the asynchronous AI profile queue. The parent update job status only
+// describes Base; AIProfile may remain active after Base has completed.
+type AssetMaintenanceJobProgress struct {
+	Base      AssetMaintenanceBaseProgress `json:"base"`
+	AIProfile AssetMaintenanceAIProgress   `json:"aiProfile"`
+}
+
+type AssetMaintenanceBaseProgress struct {
+	Status    string `json:"status"`
+	Total     int    `json:"total"`
+	Processed int    `json:"processed"`
+	Succeeded int    `json:"succeeded"`
+	Failed    int    `json:"failed"`
+	Pending   int    `json:"pending"`
+}
+
+type AssetMaintenanceAIProgress struct {
+	Status      string `json:"status"`
+	Requested   int    `json:"requested"`
+	Pending     int    `json:"pending"`
+	Queued      int    `json:"queued"`
+	Running     int    `json:"running"`
+	Retrying    int    `json:"retrying"`
+	Completed   int    `json:"completed"`
+	Failed      int    `json:"failed"`
+	Skipped     int    `json:"skipped"`
+	Outstanding int    `json:"outstanding"`
 }
 
 type AssetMaintenanceSourceStatus struct {
@@ -72,6 +111,7 @@ type AssetMaintenanceItem struct {
 	MajorAnnouncementsNew int                            `json:"majorAnnouncementsNew"`
 	AIDecision            string                         `json:"aiDecision,omitempty"`
 	AIProfileStatus       string                         `json:"aiProfileStatus,omitempty"`
+	AIQueueStatus         string                         `json:"aiQueueStatus,omitempty"`
 	AgentRunID            string                         `json:"agentRunId,omitempty"`
 	ErrorMessage          string                         `json:"errorMessage,omitempty"`
 	SourceStatuses        []AssetMaintenanceSourceStatus `json:"sourceStatuses,omitempty"`
@@ -116,14 +156,28 @@ type AnnouncementListFilter struct {
 }
 
 type StockV2AssetSummary struct {
-	Symbol                  string               `json:"symbol"`
-	DailyBarQuality         DailyBarsQuality     `json:"dailyBarQuality"`
-	ProfileSummary          StockProfileSummary  `json:"profileSummary"`
-	LatestAnnouncementAt    time.Time            `json:"latestAnnouncementAt,omitempty"`
-	LatestAnnouncementTitle string               `json:"latestAnnouncementTitle,omitempty"`
-	AnnouncementCount       int                  `json:"announcementCount"`
-	MajorAnnouncementCount  int                  `json:"majorAnnouncementCount"`
-	LatestMaintenance       AssetMaintenanceItem `json:"latestMaintenance,omitempty"`
+	Symbol                      string                `json:"symbol"`
+	DailyBarQuality             DailyBarsQuality      `json:"dailyBarQuality"`
+	ProfileSummary              StockProfileSummary   `json:"profileSummary"`
+	LatestAnnouncementAt        time.Time             `json:"latestAnnouncementAt,omitempty"`
+	LatestAnnouncementFetchedAt time.Time             `json:"latestAnnouncementFetchedAt,omitempty"`
+	LatestAnnouncementTitle     string                `json:"latestAnnouncementTitle,omitempty"`
+	AnnouncementCount           int                   `json:"announcementCount"`
+	MajorAnnouncementCount      int                   `json:"majorAnnouncementCount"`
+	LatestMaintenance           AssetMaintenanceItem  `json:"latestMaintenance,omitempty"`
+	Readiness                   StockV2AssetReadiness `json:"readiness"`
+}
+
+type StockV2AssetReadiness struct {
+	Ready              bool      `json:"ready"`
+	DataReady          bool      `json:"dataReady"`
+	DailyBarReady      bool      `json:"dailyBarReady"`
+	BaseProfileReady   bool      `json:"baseProfileReady"`
+	AnnouncementReady  bool      `json:"announcementReady"`
+	AIProfileReady     bool      `json:"aiProfileReady"`
+	Reasons            []string  `json:"reasons,omitempty"`
+	AnnouncementSyncAt time.Time `json:"announcementSyncAt,omitempty"`
+	EvaluatedAt        time.Time `json:"evaluatedAt"`
 }
 
 type AssetMaintainSymbolRequest struct {

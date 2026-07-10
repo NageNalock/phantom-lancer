@@ -46,10 +46,60 @@ func TestParseBaiduMarketDataAcceptsResultArray(t *testing.T) {
 	assertParsedBaiduBar(t, bars)
 }
 
+func TestParseBaiduMarketDataAcceptsNumericResultCode(t *testing.T) {
+	body := []byte(`{
+		"ResultCode": 0,
+		"Result": {"newMarketData": {"marketData": "1783526400,2026-07-09,15.16,15.06,63297016,15.37,14.59,946834366,-0.42,-2.71,18.99,15.48"}}
+	}`)
+	bars, err := parseBaiduMarketData(body, "002457", "SZ")
+	if err != nil {
+		t.Fatalf("parse numeric Baidu ResultCode: %v", err)
+	}
+	assertParsedBaiduBar(t, bars)
+}
+
 func TestParseBaiduMarketDataReturnsAccessDeniedSentinel(t *testing.T) {
 	_, err := parseBaiduMarketData([]byte(`{"ResultCode":"403","Result":{}}`), "002457", "SZ")
 	if !errors.Is(err, errBaiduDailyBarsAccessDenied) {
 		t.Fatalf("err = %v, want errBaiduDailyBarsAccessDenied", err)
+	}
+}
+
+func TestParseBaiduMarketDataPreservesMissingFacetPresence(t *testing.T) {
+	body := []byte(`{
+		"ResultCode":"0",
+		"Result":{"newMarketData":{"marketData":"1783555200,2026-07-09,15.16,15.06,63297016,15.37,14.59,--,-0.42,-2.713,,15.48"}}
+	}`)
+	bars, err := parseBaiduMarketData(body, "002457", "SZ")
+	if err != nil || len(bars) != 1 {
+		t.Fatalf("bars=%+v err=%v", bars, err)
+	}
+	if bars[0].AmountPresent || bars[0].TurnoverRatePresent || bars[0].Quality != DailyBarQualityPartial {
+		t.Fatalf("missing Baidu facets were claimed present: %+v", bars[0])
+	}
+}
+
+func TestBaiduDailyBarsSourceStopsNetworkRequestsDuringAccessDeniedCooldown(t *testing.T) {
+	requests := 0
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"ResultCode":"403","Result":{}}`)),
+			Request:    req,
+		}, nil
+	})}
+	source := NewBaiduDailyBarsSource(client)
+	source.minInterval = time.Millisecond
+	for i := 0; i < 2; i++ {
+		_, err := source.FetchDailyBars(context.Background(), "002457", "SZ", InstrumentTypeStock)
+		if !errors.Is(err, errBaiduDailyBarsAccessDenied) {
+			t.Fatalf("call %d err = %v, want access denied", i+1, err)
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("network requests = %d, want 1 during cooldown", requests)
 	}
 }
 

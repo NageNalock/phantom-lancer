@@ -389,9 +389,7 @@ function dedupeChartBars(
 }
 
 function chartBarRank(bar: StockV2DailyBar | StockV2MinuteBar): number {
-  const source = "source" in bar ? bar.source || "" : "";
   let rank = 0;
-  if (source === "baidu_kline") rank += 100;
   if ("amount" in bar && (bar.amount ?? 0) > 0) rank += 10;
   if ("turnoverRate" in bar && (bar.turnoverRate ?? 0) > 0) rank += 5;
   if ((bar.volume ?? 0) > 0) rank += 1;

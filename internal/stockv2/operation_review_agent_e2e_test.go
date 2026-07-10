@@ -388,6 +388,16 @@ func (f fakeOperationReviewExecutor) ExecuteOperationReview(ctx context.Context,
 }
 
 func (f fakeOperationReviewExecutor) ExecuteStockProfileSummary(ctx context.Context, taskID string, pack StockProfileSummaryContext, modelName string) (*AgentExecutorOutput, error) {
+	if f.started != nil {
+		f.started <- taskID
+	}
+	if f.release != nil {
+		select {
+		case <-f.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	profile := pack.Profile
 	result := f.result
 	if result == nil {

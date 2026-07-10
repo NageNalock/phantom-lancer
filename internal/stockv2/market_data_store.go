@@ -88,10 +88,14 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 			volume DOUBLE,
 			amount DOUBLE,
 			pct_change DOUBLE,
-			turnover_rate DOUBLE,
-			net_inflow DOUBLE,
-			main_net_inflow DOUBLE,
-			data_payload_json VARCHAR,
+				turnover_rate DOUBLE,
+				net_inflow DOUBLE,
+				main_net_inflow DOUBLE,
+				amount_present BOOLEAN NOT NULL DEFAULT FALSE,
+				turnover_rate_present BOOLEAN NOT NULL DEFAULT FALSE,
+				net_inflow_present BOOLEAN NOT NULL DEFAULT FALSE,
+				main_net_inflow_present BOOLEAN NOT NULL DEFAULT FALSE,
+				data_payload_json VARCHAR,
 			adjusted VARCHAR NOT NULL DEFAULT 'none',
 			source VARCHAR,
 			fetched_at TIMESTAMP,
@@ -105,12 +109,17 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		DROP INDEX IF EXISTS idx_stockv2_daily_bars_symbol_adjusted;
 		CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bars_symbol_adjusted_date
 			ON stockv2_daily_bars(symbol, adjusted, trade_date);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bars_symbol_adjusted_fetched
-			ON stockv2_daily_bars(symbol, adjusted, fetched_at);
-		CREATE TABLE IF NOT EXISTS stockv2_daily_bar_quality (
+			CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bars_symbol_adjusted_fetched
+				ON stockv2_daily_bars(symbol, adjusted, fetched_at);
+			CREATE TABLE IF NOT EXISTS stockv2_trading_calendar (
+				trade_date DATE PRIMARY KEY,
+				observed_at TIMESTAMP NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS stockv2_daily_bar_quality (
 			symbol VARCHAR NOT NULL,
 			adjusted VARCHAR NOT NULL,
 			row_count BIGINT NOT NULL,
+			incomplete_count BIGINT NOT NULL DEFAULT 0,
 			earliest_date VARCHAR,
 			latest_date VARCHAR,
 			source VARCHAR,
@@ -255,12 +264,14 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 			ai_profile_confidence DOUBLE NOT NULL DEFAULT 0,
 			ai_profile_error VARCHAR,
 			ai_profile_updated_at TIMESTAMP,
+			ai_profile_attempted_at TIMESTAMP,
 			fund_type VARCHAR,
 			tracking_index VARCHAR,
 			theme VARCHAR,
 			constituent_hint VARCHAR,
 			base_profile_hash VARCHAR,
 			base_profile_updated_at TIMESTAMP,
+			base_profile_checked_at TIMESTAMP,
 			profile_version INTEGER NOT NULL DEFAULT 1,
 			updated_at TIMESTAMP NOT NULL
 		);
@@ -359,6 +370,22 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_stockv2_announcements_major
 			ON stockv2_announcements(major, published_at);
 
+		CREATE TABLE IF NOT EXISTS stockv2_announcement_sync_states (
+			source VARCHAR NOT NULL,
+			market VARCHAR NOT NULL,
+			covered_through TIMESTAMP NOT NULL,
+			latest_published_at TIMESTAMP,
+			last_success_at TIMESTAMP NOT NULL,
+			last_window_start TIMESTAMP,
+			last_window_end TIMESTAMP,
+			last_page_count INTEGER NOT NULL DEFAULT 0,
+			last_fetched_count INTEGER NOT NULL DEFAULT 0,
+			last_inserted_count INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			PRIMARY KEY (source, market)
+		);
+
 		CREATE TABLE IF NOT EXISTS stockv2_embedding_vectors_v2 (
 			vector_ref VARCHAR PRIMARY KEY,
 			vector_blob BLOB NOT NULL,
@@ -402,16 +429,20 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 	if err := s.cleanupInstrumentSchema(ctx); err != nil {
 		return err
 	}
-	if err := s.backfillDailyBarQuality(ctx); err != nil {
-		return err
-	}
 	for _, stmt := range []string{
 		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS turnover_rate DOUBLE DEFAULT 0`,
 		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS net_inflow DOUBLE DEFAULT 0`,
 		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS main_net_inflow DOUBLE DEFAULT 0`,
+		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS amount_present BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS turnover_rate_present BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS net_inflow_present BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS main_net_inflow_present BOOLEAN DEFAULT FALSE`,
 		`ALTER TABLE stockv2_daily_bars ADD COLUMN IF NOT EXISTS data_payload_json VARCHAR`,
+		`ALTER TABLE stockv2_daily_bar_quality ADD COLUMN IF NOT EXISTS incomplete_count BIGINT DEFAULT -1`,
 		`ALTER TABLE stockv2_stock_profiles ADD COLUMN IF NOT EXISTS base_profile_hash VARCHAR`,
 		`ALTER TABLE stockv2_stock_profiles ADD COLUMN IF NOT EXISTS base_profile_updated_at TIMESTAMP`,
+		`ALTER TABLE stockv2_stock_profiles ADD COLUMN IF NOT EXISTS base_profile_checked_at TIMESTAMP`,
+		`ALTER TABLE stockv2_stock_profiles ADD COLUMN IF NOT EXISTS ai_profile_attempted_at TIMESTAMP`,
 		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS amplitude DOUBLE DEFAULT 0`,
 		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS turnover_rate DOUBLE DEFAULT 0`,
 		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS volume_ratio DOUBLE DEFAULT 0`,
@@ -426,6 +457,29 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("migrate duckdb asset columns: %w", err)
 		}
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_stock_profiles
+		SET ai_profile_attempted_at = ai_profile_updated_at,
+			ai_profile_updated_at = NULL
+		WHERE ai_profile_attempted_at IS NULL
+		  AND ai_profile_updated_at IS NOT NULL
+		  AND ai_profile_status IN ('failed', 'not_configured')
+	`); err != nil {
+		return fmt.Errorf("migrate stock profile ai attempt timestamps: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_stock_profiles
+		SET base_profile_checked_at = base_profile_updated_at
+		WHERE base_profile_checked_at IS NULL AND base_profile_updated_at IS NOT NULL
+	`); err != nil {
+		return fmt.Errorf("migrate stock profile base check timestamps: %w", err)
+	}
+	if err := s.backfillDailyBarQuality(ctx); err != nil {
+		return err
+	}
+	if err := s.backfillTradingCalendar(ctx); err != nil {
+		return err
 	}
 	return nil
 }
@@ -484,7 +538,17 @@ func (s *MarketDataStore) backfillDailyBarQuality(ctx context.Context) error {
 		return wrapError(err, "count duckdb daily bar quality")
 	}
 	if qualityCount > 0 {
-		return nil
+		var invalidCount int
+		if err := s.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM stockv2_daily_bar_quality
+			WHERE row_count <= 0 OR COALESCE(incomplete_count, -1) < 0
+			   OR COALESCE(earliest_date, '') = '' OR COALESCE(latest_date, '') = ''
+		`).Scan(&invalidCount); err != nil {
+			return wrapError(err, "check duckdb daily bar quality")
+		}
+		if invalidCount == 0 {
+			return nil
+		}
 	}
 	var barCount int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_daily_bars`).Scan(&barCount); err != nil {
@@ -495,24 +559,90 @@ func (s *MarketDataStore) backfillDailyBarQuality(ctx context.Context) error {
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT OR REPLACE INTO stockv2_daily_bar_quality (
-			symbol, adjusted, row_count, earliest_date, latest_date, source, last_error, updated_at
+				symbol, adjusted, row_count, incomplete_count, earliest_date, latest_date, source, last_error, updated_at
+		)
+		WITH selected AS (
+			SELECT *
+			FROM (
+				SELECT *,
+					ROW_NUMBER() OVER (
+						PARTITION BY symbol, adjusted, trade_date
+						ORDER BY
+							CASE WHEN COALESCE(amount_present, FALSE) OR COALESCE(amount, 0) != 0 THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(turnover_rate_present, FALSE) OR COALESCE(turnover_rate, 0) != 0 THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(main_net_inflow_present, FALSE) OR COALESCE(main_net_inflow, 0) != 0 THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(net_inflow_present, FALSE) OR COALESCE(net_inflow, 0) != 0 THEN 0 ELSE 1 END,
+							fetched_at DESC
+					) AS rn
+				FROM stockv2_daily_bars
+			)
+			WHERE rn = 1
+		),
+		agg AS (
+			SELECT
+					symbol,
+					adjusted,
+					COUNT(*) AS row_count,
+					SUM(CASE WHEN
+						(COALESCE(amount_present, FALSE) OR COALESCE(amount, 0) != 0) AND
+						(COALESCE(turnover_rate_present, FALSE) OR COALESCE(turnover_rate, 0) != 0) AND
+						(
+							COALESCE((SELECT instrument_type FROM stockv2_instruments i WHERE i.symbol = selected.symbol LIMIT 1), 'stock') = 'exchange_fund' OR
+							((COALESCE(net_inflow_present, FALSE) OR COALESCE(net_inflow, 0) != 0) AND
+							 (COALESCE(main_net_inflow_present, FALSE) OR COALESCE(main_net_inflow, 0) != 0))
+						)
+					THEN 0 ELSE 1 END) AS incomplete_count,
+					COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'), '') AS earliest_date,
+				COALESCE(strftime(MAX(trade_date), '%Y-%m-%d'), '') AS latest_date
+			FROM selected
+			GROUP BY symbol, adjusted
+		),
+		latest_source AS (
+			SELECT symbol, adjusted, source,
+				ROW_NUMBER() OVER (PARTITION BY symbol, adjusted ORDER BY trade_date DESC, fetched_at DESC) AS rn
+			FROM selected
+		),
+		latest_error AS (
+			SELECT symbol, adjusted, error_message,
+				ROW_NUMBER() OVER (PARTITION BY symbol, adjusted ORDER BY fetched_at DESC) AS rn
+			FROM stockv2_daily_bars
+			WHERE COALESCE(error_message, '') != ''
 		)
 		SELECT
-			symbol,
-			adjusted,
-			COUNT(*),
-			COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'), ''),
-			COALESCE(strftime(MAX(trade_date), '%Y-%m-%d'), ''),
-			'',
-			'',
+			a.symbol,
+				a.adjusted,
+				a.row_count,
+				a.incomplete_count,
+				a.earliest_date,
+			a.latest_date,
+			COALESCE(ls.source, ''),
+			COALESCE(le.error_message, ''),
 			?
-		FROM stockv2_daily_bars
-		GROUP BY symbol, adjusted
+		FROM agg a
+		LEFT JOIN latest_source ls ON ls.symbol = a.symbol AND ls.adjusted = a.adjusted AND ls.rn = 1
+		LEFT JOIN latest_error le ON le.symbol = a.symbol AND le.adjusted = a.adjusted AND le.rn = 1
 	`, time.Now())
 	if err != nil {
 		return wrapError(err, "backfill duckdb daily bar quality")
 	}
 	return nil
+}
+
+func (s *MarketDataStore) backfillTradingCalendar(ctx context.Context) error {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_trading_calendar`).Scan(&count); err != nil {
+		return wrapError(err, "count duckdb trading calendar")
+	}
+	if count > 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO stockv2_trading_calendar (trade_date, observed_at)
+		SELECT DISTINCT trade_date, ?
+		FROM stockv2_daily_bars
+		WHERE COALESCE(close, 0) > 0
+	`, time.Now())
+	return wrapError(err, "backfill duckdb trading calendar")
 }
 
 // UpsertDailyBars writes daily bars into DuckDB. DuckDB does not support the
@@ -545,9 +675,10 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 			INSERT INTO stockv2_daily_bars_stage (
 				id, symbol, market, trade_date, open, high, low, close, prev_close,
 				volume, amount, pct_change, turnover_rate, net_inflow, main_net_inflow,
+				amount_present, turnover_rate_present, net_inflow_present, main_net_inflow_present,
 				data_payload_json, adjusted, source, fetched_at,
 				quality, error_message, created_at, updated_at
-			) VALUES (?, ?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	stmt, err := tx.PrepareContext(ctx, q)
 	if err != nil {
@@ -559,6 +690,10 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 	affected := map[string]StockV2DailyBar{}
 	for i := range bars {
 		b := bars[i]
+		applyDailyBarPresenceCompatibility(&b)
+		if b.Quality == DailyBarQualityOK && !dailyBarFacetsComplete(b) {
+			b.Quality = DailyBarQualityPartial
+		}
 		if b.ID == "" {
 			b.ID = generateID()
 		}
@@ -574,6 +709,7 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 			b.ID, b.Symbol, b.Market, b.TradeDate,
 			b.Open, b.High, b.Low, b.Close, b.PrevClose,
 			b.Volume, b.Amount, b.PctChange, b.TurnoverRate, b.NetInflow, b.MainNetInflow,
+			b.AmountPresent, b.TurnoverRatePresent, b.NetInflowPresent, b.MainNetInflowPresent,
 			b.DataPayload, b.Adjusted, b.Source,
 			nullableTime(b.FetchedAt), b.Quality, b.ErrorMessage,
 			b.CreatedAt, b.UpdatedAt,
@@ -588,6 +724,14 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 		SELECT * FROM stockv2_daily_bars_stage
 	`); err != nil {
 		return wrapError(err, "merge duckdb daily bar stage")
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR REPLACE INTO stockv2_trading_calendar (trade_date, observed_at)
+		SELECT DISTINCT trade_date, ?
+		FROM stockv2_daily_bars_stage
+		WHERE COALESCE(close, 0) > 0
+	`, now); err != nil {
+		return wrapError(err, "update duckdb trading calendar")
 	}
 
 	// 批量刷新所有受影响 symbol 的 quality（一次查询代替 N 次）
@@ -604,7 +748,7 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 func refreshDailyBarQualityWithTx(ctx context.Context, tx *sql.Tx, symbol, adjusted string, updatedAt time.Time) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT OR REPLACE INTO stockv2_daily_bar_quality (
-			symbol, adjusted, row_count, earliest_date, latest_date, source, last_error, updated_at
+				symbol, adjusted, row_count, incomplete_count, earliest_date, latest_date, source, last_error, updated_at
 		)
 		WITH selected AS (
 			SELECT *
@@ -613,25 +757,34 @@ func refreshDailyBarQualityWithTx(ctx context.Context, tx *sql.Tx, symbol, adjus
 					ROW_NUMBER() OVER (
 						PARTITION BY symbol, adjusted, trade_date
 						ORDER BY
-							CASE WHEN source = 'baidu_kline' THEN 0 ELSE 1 END,
-							CASE WHEN COALESCE(amount, 0) > 0 THEN 0 ELSE 1 END,
-							CASE WHEN COALESCE(turnover_rate, 0) > 0 THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(amount_present, FALSE) OR COALESCE(amount, 0) != 0 THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(turnover_rate_present, FALSE) OR COALESCE(turnover_rate, 0) != 0 THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(main_net_inflow_present, FALSE) OR COALESCE(main_net_inflow, 0) != 0 THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(net_inflow_present, FALSE) OR COALESCE(net_inflow, 0) != 0 THEN 0 ELSE 1 END,
 							fetched_at DESC
 					) AS rn
 				FROM stockv2_daily_bars
 				WHERE symbol = ? AND adjusted = ?
-				  AND (source != 'tencent_fqkline' OR COALESCE(amount, 0) > 0 OR COALESCE(turnover_rate, 0) > 0)
 			)
 			WHERE rn = 1
 		)
 		SELECT
-			?,
-			?,
-			COUNT(*),
-			COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'), ''),
+				?,
+				?,
+				COUNT(*),
+				SUM(CASE WHEN
+					(COALESCE(amount_present, FALSE) OR COALESCE(amount, 0) != 0) AND
+					(COALESCE(turnover_rate_present, FALSE) OR COALESCE(turnover_rate, 0) != 0) AND
+					(
+						COALESCE((SELECT instrument_type FROM stockv2_instruments i WHERE i.symbol = selected.symbol LIMIT 1), 'stock') = 'exchange_fund' OR
+						((COALESCE(net_inflow_present, FALSE) OR COALESCE(net_inflow, 0) != 0) AND
+						 (COALESCE(main_net_inflow_present, FALSE) OR COALESCE(main_net_inflow, 0) != 0))
+					)
+				THEN 0 ELSE 1 END),
+				COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'), ''),
 			COALESCE(strftime(MAX(trade_date), '%Y-%m-%d'), ''),
 			COALESCE((SELECT source FROM selected
-			          ORDER BY fetched_at DESC LIMIT 1), ''),
+			          ORDER BY trade_date DESC, fetched_at DESC LIMIT 1), ''),
 			COALESCE((SELECT error_message FROM stockv2_daily_bars
 			          WHERE symbol = ? AND adjusted = ? AND COALESCE(error_message, '') != ''
 			          ORDER BY fetched_at DESC LIMIT 1), ''),
@@ -670,7 +823,7 @@ func batchRefreshDailyBarQualityWithTx(ctx context.Context, tx *sql.Tx, affected
 	// 使用窗口函数一次查询所有 symbol 的质量统计
 	query := `
 		INSERT OR REPLACE INTO stockv2_daily_bar_quality (
-			symbol, adjusted, row_count, earliest_date, latest_date, source, last_error, updated_at
+				symbol, adjusted, row_count, incomplete_count, earliest_date, latest_date, source, last_error, updated_at
 		)
 		WITH selected AS (
 			SELECT *
@@ -679,30 +832,39 @@ func batchRefreshDailyBarQualityWithTx(ctx context.Context, tx *sql.Tx, affected
 					ROW_NUMBER() OVER (
 						PARTITION BY symbol, adjusted, trade_date
 						ORDER BY
-							CASE WHEN source = 'baidu_kline' THEN 0 ELSE 1 END,
-							CASE WHEN COALESCE(amount, 0) > 0 THEN 0 ELSE 1 END,
-							CASE WHEN COALESCE(turnover_rate, 0) > 0 THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(amount_present, FALSE) OR COALESCE(amount, 0) != 0 THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(turnover_rate_present, FALSE) OR COALESCE(turnover_rate, 0) != 0 THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(main_net_inflow_present, FALSE) OR COALESCE(main_net_inflow, 0) != 0 THEN 0 ELSE 1 END,
+							CASE WHEN COALESCE(net_inflow_present, FALSE) OR COALESCE(net_inflow, 0) != 0 THEN 0 ELSE 1 END,
 							fetched_at DESC
 					) AS rn
 				FROM stockv2_daily_bars
 				WHERE (symbol, adjusted) IN (` + strings.Join(placeholders, ",") + `)
-				  AND (source != 'tencent_fqkline' OR COALESCE(amount, 0) > 0 OR COALESCE(turnover_rate, 0) > 0)
 			)
 			WHERE rn = 1
 		),
 		agg AS (
 			SELECT
-				symbol,
-				adjusted,
-				COUNT(*) AS row_count,
-				COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'), '') AS earliest_date,
+					symbol,
+					adjusted,
+					COUNT(*) AS row_count,
+					SUM(CASE WHEN
+						(COALESCE(amount_present, FALSE) OR COALESCE(amount, 0) != 0) AND
+						(COALESCE(turnover_rate_present, FALSE) OR COALESCE(turnover_rate, 0) != 0) AND
+						(
+							COALESCE((SELECT instrument_type FROM stockv2_instruments i WHERE i.symbol = selected.symbol LIMIT 1), 'stock') = 'exchange_fund' OR
+							((COALESCE(net_inflow_present, FALSE) OR COALESCE(net_inflow, 0) != 0) AND
+							 (COALESCE(main_net_inflow_present, FALSE) OR COALESCE(main_net_inflow, 0) != 0))
+						)
+					THEN 0 ELSE 1 END) AS incomplete_count,
+					COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'), '') AS earliest_date,
 				COALESCE(strftime(MAX(trade_date), '%Y-%m-%d'), '') AS latest_date
 			FROM selected
 			GROUP BY symbol, adjusted
 		),
 		latest_source AS (
 			SELECT symbol, adjusted, source,
-				ROW_NUMBER() OVER (PARTITION BY symbol, adjusted ORDER BY fetched_at DESC) AS rn
+				ROW_NUMBER() OVER (PARTITION BY symbol, adjusted ORDER BY trade_date DESC, fetched_at DESC) AS rn
 			FROM selected
 		),
 		latest_error AS (
@@ -714,9 +876,10 @@ func batchRefreshDailyBarQualityWithTx(ctx context.Context, tx *sql.Tx, affected
 		)
 		SELECT
 			a.symbol,
-			a.adjusted,
-			a.row_count,
-			a.earliest_date,
+				a.adjusted,
+				a.row_count,
+				a.incomplete_count,
+				a.earliest_date,
 			a.latest_date,
 			COALESCE(ls.source, '') AS source,
 			COALESCE(le.error_message, '') AS last_error,
@@ -749,6 +912,7 @@ func (s *MarketDataStore) GetDailyBars(ctx context.Context, symbol, adjusted, st
 		WITH selected AS (
 			SELECT id, symbol, market, trade_date, open, high, low, close, prev_close,
 			       volume, amount, pct_change, turnover_rate, net_inflow, main_net_inflow,
+			       amount_present, turnover_rate_present, net_inflow_present, main_net_inflow_present,
 			       data_payload_json, adjusted, source, fetched_at, quality, error_message,
 			       created_at, updated_at
 			FROM (
@@ -756,10 +920,11 @@ func (s *MarketDataStore) GetDailyBars(ctx context.Context, symbol, adjusted, st
 					ROW_NUMBER() OVER (
 						PARTITION BY symbol, adjusted, trade_date
 						ORDER BY
-							CASE WHEN source = 'baidu_kline' THEN 0 ELSE 1 END,
-							CASE WHEN COALESCE(amount, 0) > 0 THEN 0 ELSE 1 END,
-							CASE WHEN COALESCE(turnover_rate, 0) > 0 THEN 0 ELSE 1 END,
-							fetched_at DESC
+								CASE WHEN COALESCE(amount_present, FALSE) OR COALESCE(amount, 0) != 0 THEN 0 ELSE 1 END,
+								CASE WHEN COALESCE(turnover_rate_present, FALSE) OR COALESCE(turnover_rate, 0) != 0 THEN 0 ELSE 1 END,
+								CASE WHEN COALESCE(main_net_inflow_present, FALSE) OR COALESCE(main_net_inflow, 0) != 0 THEN 0 ELSE 1 END,
+								CASE WHEN COALESCE(net_inflow_present, FALSE) OR COALESCE(net_inflow, 0) != 0 THEN 0 ELSE 1 END,
+								fetched_at DESC
 					) AS rn
 				FROM stockv2_daily_bars
 				WHERE symbol = ? AND adjusted = ?
@@ -781,6 +946,8 @@ func (s *MarketDataStore) GetDailyBars(ctx context.Context, symbol, adjusted, st
 		       COALESCE(open,0), COALESCE(high,0), COALESCE(low,0), COALESCE(close,0),
 		       COALESCE(prev_close,0), COALESCE(volume,0), COALESCE(amount,0), COALESCE(pct_change,0),
 		       COALESCE(turnover_rate,0), COALESCE(net_inflow,0), COALESCE(main_net_inflow,0),
+		       COALESCE(amount_present,FALSE), COALESCE(turnover_rate_present,FALSE),
+		       COALESCE(net_inflow_present,FALSE), COALESCE(main_net_inflow_present,FALSE),
 		       COALESCE(data_payload_json,''),
 		       adjusted, COALESCE(source,''), fetched_at, COALESCE(quality,''), COALESCE(error_message,''),
 		       created_at, updated_at
@@ -807,7 +974,6 @@ func (s *MarketDataStore) GetDailyBarDates(ctx context.Context, symbol, adjusted
 		SELECT DISTINCT strftime(trade_date, '%Y-%m-%d') AS trade_date
 		FROM stockv2_daily_bars
 		WHERE symbol = ? AND adjusted = ?
-		  AND (source != 'tencent_fqkline' OR COALESCE(amount, 0) > 0 OR COALESCE(turnover_rate, 0) > 0)
 	`
 	args := []any{symbol, adjusted}
 	if startDate != "" {
@@ -838,30 +1004,210 @@ func (s *MarketDataStore) GetDailyBarDates(ctx context.Context, symbol, adjusted
 	return out, nil
 }
 
-func (s *MarketDataStore) GetDailyBarsStats(ctx context.Context, symbol, adjusted string) (rowCount int, earliest, latest, source, lastError string, err error) {
+// GetCompleteDailyBarDates returns only dates whose selected row contains all
+// data facets required by downstream analysis. A partial row remains queryable,
+// but deliberately stays outside gap coverage so the next maintenance pass can
+// repair it.
+func (s *MarketDataStore) GetCompleteDailyBarDates(ctx context.Context, symbol, adjusted, startDate, endDate string, requireFlow bool) ([]string, error) {
 	if s == nil || s.db == nil {
-		return 0, "", "", "", "", fmt.Errorf("market data store is not initialized")
+		return nil, fmt.Errorf("market data store is not initialized")
 	}
-	err = s.db.QueryRowContext(ctx, `
-		SELECT row_count, COALESCE(earliest_date,''), COALESCE(latest_date,''),
+	query := `
+		SELECT strftime(trade_date, '%Y-%m-%d') AS trade_date
+		FROM (
+			SELECT *, ROW_NUMBER() OVER (
+				PARTITION BY symbol, adjusted, trade_date
+				ORDER BY
+					CASE WHEN COALESCE(amount_present, FALSE) OR COALESCE(amount, 0) != 0 THEN 0 ELSE 1 END,
+					CASE WHEN COALESCE(turnover_rate_present, FALSE) OR COALESCE(turnover_rate, 0) != 0 THEN 0 ELSE 1 END,
+					CASE WHEN COALESCE(main_net_inflow_present, FALSE) OR COALESCE(main_net_inflow, 0) != 0 THEN 0 ELSE 1 END,
+					CASE WHEN COALESCE(net_inflow_present, FALSE) OR COALESCE(net_inflow, 0) != 0 THEN 0 ELSE 1 END,
+					fetched_at DESC
+			) AS rn
+			FROM stockv2_daily_bars
+			WHERE symbol = ? AND adjusted = ?
+	`
+	args := []any{symbol, adjusted}
+	if startDate != "" {
+		query += " AND trade_date >= CAST(? AS DATE)"
+		args = append(args, startDate)
+	}
+	if endDate != "" {
+		query += " AND trade_date <= CAST(? AS DATE)"
+		args = append(args, endDate)
+	}
+	query += `
+		)
+		WHERE rn = 1
+		  AND (COALESCE(amount_present, FALSE) OR COALESCE(amount, 0) != 0)
+		  AND (COALESCE(turnover_rate_present, FALSE) OR COALESCE(turnover_rate, 0) != 0)
+	`
+	if requireFlow {
+		query += `
+		  AND (COALESCE(net_inflow_present, FALSE) OR COALESCE(net_inflow, 0) != 0)
+		  AND (COALESCE(main_net_inflow_present, FALSE) OR COALESCE(main_net_inflow, 0) != 0)
+		`
+	}
+	query += " ORDER BY trade_date"
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, wrapError(err, "get complete duckdb daily bar dates")
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var tradeDate string
+		if err := rows.Scan(&tradeDate); err != nil {
+			return nil, wrapError(err, "scan complete daily bar date")
+		}
+		out = append(out, tradeDate)
+	}
+	return out, wrapError(rows.Err(), "iterate complete daily bar dates")
+}
+
+func (s *MarketDataStore) GetObservedTradingDates(ctx context.Context, startDate, endDate string) ([]string, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("market data store is not initialized")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT strftime(trade_date, '%Y-%m-%d')
+		FROM stockv2_trading_calendar
+		WHERE trade_date >= CAST(? AS DATE) AND trade_date <= CAST(? AS DATE)
+		ORDER BY trade_date
+	`, startDate, endDate)
+	if err != nil {
+		return nil, wrapError(err, "get duckdb observed trading dates")
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var tradeDate string
+		if err := rows.Scan(&tradeDate); err != nil {
+			return nil, wrapError(err, "scan duckdb observed trading date")
+		}
+		out = append(out, tradeDate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(err, "iterate duckdb observed trading dates")
+	}
+	return out, nil
+}
+
+func (s *MarketDataStore) UpsertObservedTradingDates(ctx context.Context, dates []string, observedAt time.Time) error {
+	if len(dates) == 0 {
+		return nil
+	}
+	if s == nil || s.db == nil {
+		return fmt.Errorf("market data store is not initialized")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return wrapError(err, "begin upsert duckdb trading calendar")
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR REPLACE INTO stockv2_trading_calendar (trade_date, observed_at)
+		VALUES (CAST(? AS DATE), ?)
+	`)
+	if err != nil {
+		return wrapError(err, "prepare upsert duckdb trading calendar")
+	}
+	defer stmt.Close()
+	seen := make(map[string]struct{}, len(dates))
+	for _, tradeDate := range dates {
+		tradeDate = strings.TrimSpace(tradeDate)
+		if _, err := time.Parse("2006-01-02", tradeDate); err != nil {
+			continue
+		}
+		if _, ok := seen[tradeDate]; ok {
+			continue
+		}
+		seen[tradeDate] = struct{}{}
+		if _, err := stmt.ExecContext(ctx, tradeDate, observedAt); err != nil {
+			return wrapError(err, "upsert duckdb trading calendar date")
+		}
+	}
+	return wrapError(tx.Commit(), "commit duckdb trading calendar")
+}
+
+func (s *MarketDataStore) GetDailyBarSymbolCoverage(ctx context.Context, symbols []string, adjusted, tradeDate string) (map[string]bool, error) {
+	out := make(map[string]bool, len(symbols))
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("market data store is not initialized")
+	}
+	symbols = compactStringList(symbols, 0)
+	if len(symbols) == 0 {
+		return out, nil
+	}
+	query := `
+		SELECT DISTINCT symbol
+		FROM stockv2_daily_bars
+		WHERE adjusted = ? AND trade_date = CAST(? AS DATE)
+		  AND symbol IN (` + sqlPlaceholders(len(symbols)) + `)
+		  AND (COALESCE(amount_present, FALSE) OR COALESCE(amount, 0) != 0)
+		  AND (COALESCE(turnover_rate_present, FALSE) OR COALESCE(turnover_rate, 0) != 0)
+	`
+	args := make([]any, 0, len(symbols)+2)
+	args = append(args, adjusted, tradeDate)
+	for _, symbol := range symbols {
+		args = append(args, symbol)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, wrapError(err, "get duckdb daily bar symbol coverage")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var symbol string
+		if err := rows.Scan(&symbol); err != nil {
+			return nil, wrapError(err, "scan duckdb daily bar symbol coverage")
+		}
+		out[symbol] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(err, "iterate duckdb daily bar symbol coverage")
+	}
+	return out, nil
+}
+
+func (s *MarketDataStore) GetDailyBarsStats(ctx context.Context, symbol, adjusted string) (rowCount int, earliest, latest, source, lastError string, err error) {
+	stats, err := s.GetDailyBarsStatsDetailed(ctx, symbol, adjusted)
+	return stats.RowCount, stats.Earliest, stats.Latest, stats.Source, stats.LastError, err
+}
+
+func (s *MarketDataStore) GetDailyBarsStatsDetailed(ctx context.Context, symbol, adjusted string) (dailyBarsStats, error) {
+	if s == nil || s.db == nil {
+		return dailyBarsStats{}, fmt.Errorf("market data store is not initialized")
+	}
+	stats := dailyBarsStats{Symbol: symbol}
+	err := s.db.QueryRowContext(ctx, `
+		SELECT row_count, COALESCE(incomplete_count, row_count),
+		       COALESCE(earliest_date,''), COALESCE(latest_date,''),
 		       COALESCE(source,''), COALESCE(last_error,'')
 		FROM stockv2_daily_bar_quality
 		WHERE symbol = ? AND adjusted = ?
-	`, symbol, adjusted).Scan(&rowCount, &earliest, &latest, &source, &lastError)
+	`, symbol, adjusted).Scan(
+		&stats.RowCount,
+		&stats.IncompleteCount,
+		&stats.Earliest,
+		&stats.Latest,
+		&stats.Source,
+		&stats.LastError,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, "", "", "", "", nil
+		return stats, nil
 	}
 	if err != nil {
-		return 0, "", "", "", "", wrapError(err, "get duckdb daily bars stats")
+		return dailyBarsStats{}, wrapError(err, "get duckdb daily bars stats")
 	}
-	return rowCount, earliest, latest, source, lastError, nil
+	return stats, nil
 }
 
 func (s *MarketDataStore) GetDailyBarsStatsBatch(ctx context.Context, symbols []string, adjusted string) (map[string]dailyBarsStats, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("market data store is not initialized")
 	}
-	symbols = compactStringList(symbols, 100)
+	symbols = compactStringList(symbols, 200)
 	if len(symbols) == 0 {
 		return map[string]dailyBarsStats{}, nil
 	}
@@ -871,7 +1217,8 @@ func (s *MarketDataStore) GetDailyBarsStatsBatch(ctx context.Context, symbols []
 		args = append(args, symbol)
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT symbol, row_count, COALESCE(earliest_date,''), COALESCE(latest_date,''),
+		SELECT symbol, row_count, COALESCE(incomplete_count, row_count),
+		       COALESCE(earliest_date,''), COALESCE(latest_date,''),
 		       COALESCE(source,''), COALESCE(last_error,'')
 		FROM stockv2_daily_bar_quality
 		WHERE adjusted = ? AND symbol IN (`+sqlPlaceholders(len(symbols))+`)
@@ -887,6 +1234,7 @@ func (s *MarketDataStore) GetDailyBarsStatsBatch(ctx context.Context, symbols []
 		if err := rows.Scan(
 			&item.Symbol,
 			&item.RowCount,
+			&item.IncompleteCount,
 			&item.Earliest,
 			&item.Latest,
 			&item.Source,
@@ -916,11 +1264,24 @@ func (s *MarketDataStore) CountDailyBars(ctx context.Context) (int, error) {
 func scanDailyBarsRows(rows *sql.Rows) ([]StockV2DailyBar, error) {
 	var out []StockV2DailyBar
 	columns, _ := rows.Columns()
+	withFieldPresence := len(columns) >= 27
 	withDataFacets := len(columns) >= 23
 	for rows.Next() {
 		var b StockV2DailyBar
 		var fetchedAt sql.NullTime
-		if withDataFacets {
+		if withFieldPresence {
+			if err := rows.Scan(
+				&b.ID, &b.Symbol, &b.Market, &b.TradeDate,
+				&b.Open, &b.High, &b.Low, &b.Close,
+				&b.PrevClose, &b.Volume, &b.Amount, &b.PctChange,
+				&b.TurnoverRate, &b.NetInflow, &b.MainNetInflow,
+				&b.AmountPresent, &b.TurnoverRatePresent, &b.NetInflowPresent, &b.MainNetInflowPresent,
+				&b.DataPayload, &b.Adjusted, &b.Source, &fetchedAt, &b.Quality, &b.ErrorMessage,
+				&b.CreatedAt, &b.UpdatedAt,
+			); err != nil {
+				return nil, wrapError(err, "scan daily bar")
+			}
+		} else if withDataFacets {
 			if err := rows.Scan(
 				&b.ID, &b.Symbol, &b.Market, &b.TradeDate,
 				&b.Open, &b.High, &b.Low, &b.Close,
@@ -945,10 +1306,29 @@ func scanDailyBarsRows(rows *sql.Rows) ([]StockV2DailyBar, error) {
 		if fetchedAt.Valid {
 			b.FetchedAt = fetchedAt.Time
 		}
+		applyDailyBarPresenceCompatibility(&b)
 		out = append(out, b)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, wrapError(err, "iterate daily bars")
 	}
 	return out, nil
+}
+
+func applyDailyBarPresenceCompatibility(bar *StockV2DailyBar) {
+	if bar == nil {
+		return
+	}
+	if !bar.AmountPresent && bar.Amount != 0 {
+		bar.AmountPresent = true
+	}
+	if !bar.TurnoverRatePresent && bar.TurnoverRate != 0 {
+		bar.TurnoverRatePresent = true
+	}
+	if !bar.NetInflowPresent && bar.NetInflow != 0 {
+		bar.NetInflowPresent = true
+	}
+	if !bar.MainNetInflowPresent && bar.MainNetInflow != 0 {
+		bar.MainNetInflowPresent = true
+	}
 }

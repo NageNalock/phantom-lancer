@@ -182,6 +182,10 @@ func (s *Server) handleStockV2Snapshot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if err := s.stockV2.PopulateAssetMaintenanceProgress(ctx, snapshot.UpdateJobs); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	s.writeJSON(w, snapshot)
 }
@@ -509,6 +513,12 @@ func (s *Server) handleGetLatestUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	jobs := []stockv2.StockV2UpdateJob{job}
+	if err := s.stockV2.PopulateAssetMaintenanceProgress(ctx, jobs); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	job = jobs[0]
 
 	response := map[string]interface{}{
 		"job":      job,
@@ -534,6 +544,10 @@ func (s *Server) handleGetUpdateHistory(w http.ResponseWriter, r *http.Request) 
 
 	jobs, err := s.stockV2.ListUpdateJobs(ctx, limit)
 	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.stockV2.PopulateAssetMaintenanceProgress(ctx, jobs); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -19,27 +21,57 @@ import (
 const (
 	stockProfileF10Timeout      = 8 * time.Second
 	stockProfileF10MaxBodyBytes = 3 << 20
+	stockProfileF10BackoffKey   = "profile:eastmoney_f10"
+	stockProfileF10Backoff      = 10 * time.Minute
 )
+
+type stockProfileHTTPStatusError struct {
+	StatusCode int
+}
+
+func (e stockProfileHTTPStatusError) Error() string {
+	return fmt.Sprintf("stock profile source returned %d", e.StatusCode)
+}
 
 func (s *Service) enrichStockProfileFromPublicSources(ctx context.Context, profile StockProfile, instrument StockV2Instrument) (StockProfile, []StockProfileSourceStatus) {
 	if s == nil || s.httpClient == nil {
 		return profile, []StockProfileSourceStatus{stockProfileSourceStatus("public_f10", StockProfileSourceStatusSkipped, "http client unavailable")}
 	}
+	if until, blocked := s.assetSourceBackoffUntil(stockProfileF10BackoffKey, time.Now()); blocked {
+		return profile, []StockProfileSourceStatus{stockProfileSourceStatus(
+			"eastmoney_f10", StockProfileSourceStatusFailed, "source cooldown until "+until.Format(time.RFC3339),
+		)}
+	}
 	ctx, cancel := context.WithTimeout(ctx, stockProfileF10Timeout)
 	defer cancel()
 
 	statuses := make([]StockProfileSourceStatus, 0, 3)
+	backedOff := false
+	runSource := func(source string, fetch func() error) {
+		if backedOff {
+			return
+		}
+		err := fetch()
+		statuses = append(statuses, stockProfileSourceStatusFromError(source, err))
+		if err != nil && stockProfileF10ShouldBackoff(err) {
+			// ponytail: all endpoints share one public provider. Stop after its
+			// first availability/rate-limit failure so a universe pass cannot
+			// amplify one outage into three requests for every symbol.
+			s.recordAssetSourceBackoff(stockProfileF10BackoffKey, stockProfileF10Backoff)
+			backedOff = true
+		}
+	}
 	if instrument.InstrumentType == InstrumentTypeExchangeFund || looksLikeExchangeFund(instrument.Name) {
-		statuses = append(statuses, stockProfileSourceStatusFromError("eastmoney_fund_basic", s.enrichFundProfileBasics(ctx, &profile)))
-		statuses = append(statuses, stockProfileSourceStatusFromError("eastmoney_fund_holdings", s.enrichFundProfileHoldings(ctx, &profile)))
+		runSource("eastmoney_fund_basic", func() error { return s.enrichFundProfileBasics(ctx, &profile) })
+		runSource("eastmoney_fund_holdings", func() error { return s.enrichFundProfileHoldings(ctx, &profile) })
 	} else {
 		code := eastmoneyF10Code(profile.Market, profile.Symbol)
 		if code == "" {
 			statuses = append(statuses, stockProfileSourceStatus("eastmoney_f10", StockProfileSourceStatusSkipped, "empty code"))
 		} else {
-			statuses = append(statuses, stockProfileSourceStatusFromError("eastmoney_company_survey", s.enrichStockProfileCompanySurvey(ctx, &profile, code)))
-			statuses = append(statuses, stockProfileSourceStatusFromError("eastmoney_business_analysis", s.enrichStockProfileBusinessAnalysis(ctx, &profile, code)))
-			statuses = append(statuses, stockProfileSourceStatusFromError("eastmoney_core_conception", s.enrichStockProfileCoreConception(ctx, &profile, code)))
+			runSource("eastmoney_company_survey", func() error { return s.enrichStockProfileCompanySurvey(ctx, &profile, code) })
+			runSource("eastmoney_business_analysis", func() error { return s.enrichStockProfileBusinessAnalysis(ctx, &profile, code) })
+			runSource("eastmoney_core_conception", func() error { return s.enrichStockProfileCoreConception(ctx, &profile, code) })
 		}
 	}
 	if profile.BusinessSummaryZh != "" {
@@ -248,12 +280,27 @@ func (s *Service) fetchStockProfileBody(ctx context.Context, endpoint string) ([
 		return nil, fmt.Errorf("stock profile source response too large")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("stock profile source returned %d", resp.StatusCode)
+		return nil, stockProfileHTTPStatusError{StatusCode: resp.StatusCode}
 	}
 	if stockProfileResponseLooksHTML(body) && !strings.Contains(endpoint, "fundf10.eastmoney.com") {
 		return nil, fmt.Errorf("stock profile source returned html")
 	}
 	return body, nil
+}
+
+func stockProfileF10ShouldBackoff(err error) bool {
+	if err == nil || (errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)) {
+		return false
+	}
+	var statusErr stockProfileHTTPStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.StatusCode == http.StatusForbidden || statusErr.StatusCode == http.StatusTooManyRequests || statusErr.StatusCode >= 500
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var networkErr net.Error
+	return errors.As(err, &networkErr)
 }
 
 type eastmoneyCompanySurveyResponse struct {

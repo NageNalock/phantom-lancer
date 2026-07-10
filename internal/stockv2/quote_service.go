@@ -529,21 +529,22 @@ func (s *Service) projectLatestQuoteFromMinuteBars(ctx context.Context, spec quo
 		pctChange = (last.Close - prevClose) / prevClose * 100
 	}
 	quote := StockV2QuoteLatest{
-		Symbol:    spec.Symbol,
-		Market:    spec.Market,
-		Name:      name,
-		LastPrice: last.Close,
-		PrevClose: prevClose,
-		OpenPrice: open,
-		HighPrice: high,
-		LowPrice:  low,
-		Volume:    volume,
-		Amount:    amount,
-		PctChange: pctChange,
-		QuoteAt:   last.MinuteAt,
-		FetchedAt: fetchedAt,
-		Source:    firstNonEmpty(last.Source, QuoteSourceEastmoneyMinute),
-		Status:    QuoteStatusFresh,
+		Symbol:        spec.Symbol,
+		Market:        spec.Market,
+		Name:          name,
+		LastPrice:     last.Close,
+		PrevClose:     prevClose,
+		OpenPrice:     open,
+		HighPrice:     high,
+		LowPrice:      low,
+		Volume:        volume,
+		Amount:        amount,
+		PctChange:     pctChange,
+		QuoteAt:       last.MinuteAt,
+		FetchedAt:     fetchedAt,
+		Source:        firstNonEmpty(last.Source, QuoteSourceEastmoneyMinute),
+		Status:        QuoteStatusFresh,
+		amountPresent: true,
 	}
 	if hasSupplemental {
 		quote.Amplitude = supplemental.Amplitude
@@ -555,6 +556,9 @@ func (s *Service) projectLatestQuoteFromMinuteBars(ctx context.Context, spec quo
 		quote.MediumNetInflow = supplemental.MediumNetInflow
 		quote.SmallNetInflow = supplemental.SmallNetInflow
 		quote.MainNetInflowPct = supplemental.MainNetInflowPct
+		quote.turnoverRatePresent = supplemental.turnoverRatePresent
+		quote.netInflowPresent = supplemental.netInflowPresent
+		quote.mainNetInflowPresent = supplemental.mainNetInflowPresent
 		if quote.OpenPrice == 0 {
 			quote.OpenPrice = supplemental.OpenPrice
 		}
@@ -670,6 +674,7 @@ func (s *Service) fetchLatestQuotesForSpecs(ctx context.Context, specs []quoteSy
 
 func (s *Service) fetchLatestQuotesForSpecsWithFailures(ctx context.Context, specs []quoteSymbol) ([]StockV2QuoteLatest, []UpdateFailure) {
 	const batchSize = 80
+	const eastmoneyBatchBackoffKey = "quote:eastmoney_batch"
 
 	var quotes []StockV2QuoteLatest
 	var failures []UpdateFailure
@@ -680,7 +685,16 @@ func (s *Service) fetchLatestQuotesForSpecsWithFailures(ctx context.Context, spe
 		}
 
 		batch := specs[start:end]
-		batchQuotes, err := s.fetchEastmoneyLatestQuoteBatch(ctx, batch)
+		var batchQuotes []StockV2QuoteLatest
+		var err error
+		if _, blocked := s.assetSourceBackoffUntil(eastmoneyBatchBackoffKey, time.Now()); !blocked {
+			batchQuotes, err = s.fetchEastmoneyLatestQuoteBatch(ctx, batch)
+			if err != nil {
+				s.recordAssetSourceBackoff(eastmoneyBatchBackoffKey, 10*time.Minute)
+			} else if len(batchQuotes) > 0 {
+				s.clearAssetSourceBackoff(eastmoneyBatchBackoffKey)
+			}
+		}
 		if err != nil || len(batchQuotes) == 0 {
 			batchQuotes, err = s.fetchTencentLatestQuoteBatch(ctx, batch)
 			if err != nil {
@@ -896,7 +910,7 @@ func inferInstrumentMarketAndType(symbol string) (string, string) {
 		return "SH", InstrumentTypeStock
 	case strings.HasPrefix(symbol, "0"), strings.HasPrefix(symbol, "3"):
 		return "SZ", InstrumentTypeStock
-	case strings.HasPrefix(symbol, "8"), strings.HasPrefix(symbol, "4"):
+	case strings.HasPrefix(symbol, "8"), strings.HasPrefix(symbol, "4"), strings.HasPrefix(symbol, "92"):
 		return "BJ", InstrumentTypeStock
 	default:
 		return "", ""
@@ -951,31 +965,47 @@ func parseEastmoneyQuoteItem(item map[string]any, specBySecID map[string]quoteSy
 		quoteAt = time.Unix(ts, 0).In(chinaMarketTZ)
 	}
 	return StockV2QuoteLatest{
-		Symbol:           symbol,
-		Market:           spec.Market,
-		Name:             strings.TrimSpace(eastmoneyString(item["f14"])),
-		LastPrice:        lastPrice,
-		PrevClose:        prevClose,
-		OpenPrice:        eastmoneyFloat(item["f17"]) / scale,
-		HighPrice:        eastmoneyFloat(item["f15"]) / scale,
-		LowPrice:         eastmoneyFloat(item["f16"]) / scale,
-		Volume:           eastmoneyFloat(item["f5"]),
-		Amount:           eastmoneyFloat(item["f6"]),
-		PctChange:        eastmoneyFloat(item["f3"]) / 100,
-		Amplitude:        eastmoneyFloat(item["f7"]) / 100,
-		TurnoverRate:     eastmoneyFloat(item["f8"]) / 100,
-		VolumeRatio:      eastmoneyFloat(item["f10"]) / 100,
-		MainNetInflow:    eastmoneyFloat(item["f62"]),
-		SuperNetInflow:   eastmoneyFloat(item["f66"]),
-		LargeNetInflow:   eastmoneyFloat(item["f72"]),
-		MediumNetInflow:  eastmoneyFloat(item["f78"]),
-		SmallNetInflow:   eastmoneyFloat(item["f84"]),
-		MainNetInflowPct: eastmoneyFloat(item["f184"]) / 100,
-		QuoteAt:          quoteAt,
-		FetchedAt:        fetchedAt,
-		Source:           QuoteSourceEastmoney,
-		Status:           QuoteStatusFresh,
+		Symbol:               symbol,
+		Market:               spec.Market,
+		Name:                 strings.TrimSpace(eastmoneyString(item["f14"])),
+		LastPrice:            lastPrice,
+		PrevClose:            prevClose,
+		OpenPrice:            eastmoneyFloat(item["f17"]) / scale,
+		HighPrice:            eastmoneyFloat(item["f15"]) / scale,
+		LowPrice:             eastmoneyFloat(item["f16"]) / scale,
+		Volume:               eastmoneyFloat(item["f5"]),
+		Amount:               eastmoneyFloat(item["f6"]),
+		PctChange:            eastmoneyFloat(item["f3"]) / 100,
+		Amplitude:            eastmoneyFloat(item["f7"]) / 100,
+		TurnoverRate:         eastmoneyFloat(item["f8"]) / 100,
+		VolumeRatio:          eastmoneyFloat(item["f10"]) / 100,
+		MainNetInflow:        eastmoneyFloat(item["f62"]),
+		SuperNetInflow:       eastmoneyFloat(item["f66"]),
+		LargeNetInflow:       eastmoneyFloat(item["f72"]),
+		MediumNetInflow:      eastmoneyFloat(item["f78"]),
+		SmallNetInflow:       eastmoneyFloat(item["f84"]),
+		MainNetInflowPct:     eastmoneyFloat(item["f184"]) / 100,
+		QuoteAt:              quoteAt,
+		FetchedAt:            fetchedAt,
+		Source:               QuoteSourceEastmoney,
+		Status:               QuoteStatusFresh,
+		amountPresent:        marketNumberFieldPresent(item["f6"]),
+		turnoverRatePresent:  marketNumberFieldPresent(item["f8"]),
+		mainNetInflowPresent: marketNumberFieldPresent(item["f62"]),
+		netInflowPresent:     marketNumberFieldPresent(item["f62"]) && marketNumberFieldPresent(item["f78"]) && marketNumberFieldPresent(item["f84"]),
 	}, nil
+}
+
+func marketNumberFieldPresent(value any) bool {
+	if value == nil {
+		return false
+	}
+	switch value.(type) {
+	case json.Number, float64, float32, int, int32, int64, uint, uint32, uint64:
+		return true
+	}
+	text := strings.TrimSpace(fmt.Sprint(value))
+	return text != "" && text != "-" && text != "--" && text != "—" && text != "<nil>"
 }
 
 func eastmoneyFloat(value any) float64 {
@@ -1083,22 +1113,33 @@ func parseTencentLatestQuoteLine(line string, specByCode map[string]quoteSymbol,
 
 	quoteAt := parseTencentQuoteTime(fieldAt(fields, 30), fetchedAt)
 	return StockV2QuoteLatest{
-		Symbol:    symbol,
-		Market:    spec.Market,
-		Name:      strings.TrimSpace(fieldAt(fields, 1)),
-		LastPrice: lastPrice,
-		PrevClose: prevClose,
-		OpenPrice: parseFloatTencent(fieldAt(fields, 5)),
-		HighPrice: parseFloatTencent(fieldAt(fields, 33)),
-		LowPrice:  parseFloatTencent(fieldAt(fields, 34)),
-		Volume:    parseTencentQuoteVolume(fields),
-		Amount:    parseFloatTencent(fieldAt(fields, 37)),
-		PctChange: pctChange,
-		QuoteAt:   quoteAt,
-		FetchedAt: fetchedAt,
-		Source:    QuoteSourceTencent,
-		Status:    QuoteStatusFresh,
+		Symbol:              symbol,
+		Market:              spec.Market,
+		Name:                strings.TrimSpace(fieldAt(fields, 1)),
+		LastPrice:           lastPrice,
+		PrevClose:           prevClose,
+		OpenPrice:           parseFloatTencent(fieldAt(fields, 5)),
+		HighPrice:           parseFloatTencent(fieldAt(fields, 33)),
+		LowPrice:            parseFloatTencent(fieldAt(fields, 34)),
+		Volume:              parseTencentQuoteVolume(fields),
+		Amount:              parseFloatTencent(fieldAt(fields, 37)),
+		PctChange:           pctChange,
+		TurnoverRate:        parseFloatTencent(fieldAt(fields, 38)),
+		QuoteAt:             quoteAt,
+		FetchedAt:           fetchedAt,
+		Source:              QuoteSourceTencent,
+		Status:              QuoteStatusFresh,
+		amountPresent:       tencentFieldPresent(fields, 37),
+		turnoverRatePresent: tencentFieldPresent(fields, 38),
 	}, nil
+}
+
+func tencentFieldPresent(fields []string, index int) bool {
+	if index < 0 || index >= len(fields) {
+		return false
+	}
+	value := strings.TrimSpace(fields[index])
+	return value != "" && value != "-" && value != "--" && value != "—"
 }
 
 func fieldAt(fields []string, index int) string {

@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const dailyBarGapCheckTTL = 30 * 24 * time.Hour
+
 // UpsertDailyBars 批量落盘日 K（按 symbol+trade_date+adjusted+source 去重 upsert）。
 // 明细数据写入本地 DuckDB market store；SQLite Store 只保留任务/设置等操作状态。
 func (s *Store) UpsertDailyBars(ctx context.Context, bars []StockV2DailyBar) error {
@@ -26,23 +28,99 @@ func (s *Store) GetDailyBarDates(ctx context.Context, symbol, adjusted, startDat
 	return s.marketDB.GetDailyBarDates(ctx, symbol, adjusted, startDate, endDate)
 }
 
+func (s *Store) GetCompleteDailyBarDates(ctx context.Context, symbol, adjusted, startDate, endDate string, requireFlow bool) ([]string, error) {
+	return s.marketDB.GetCompleteDailyBarDates(ctx, symbol, adjusted, startDate, endDate, requireFlow)
+}
+
+func (s *Store) GetObservedTradingDates(ctx context.Context, startDate, endDate string) ([]string, error) {
+	return s.marketDB.GetObservedTradingDates(ctx, startDate, endDate)
+}
+
+func (s *Store) UpsertObservedTradingDates(ctx context.Context, dates []string, observedAt time.Time) error {
+	return s.marketDB.UpsertObservedTradingDates(ctx, dates, observedAt)
+}
+
+func (s *Store) GetDailyBarSymbolCoverage(ctx context.Context, symbols []string, adjusted, tradeDate string) (map[string]bool, error) {
+	return s.marketDB.GetDailyBarSymbolCoverage(ctx, symbols, adjusted, tradeDate)
+}
+
+func (s *Store) ListDailyBarGapChecks(ctx context.Context, symbol, adjusted, startDate, endDate string) ([]dailyBarMissingRange, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT start_date, end_date
+		FROM stockv2_daily_bar_gap_checks
+		WHERE symbol = ? AND adjusted = ? AND end_date >= ? AND start_date <= ?
+		  AND checked_at >= ?
+		ORDER BY start_date, end_date
+	`, strings.TrimSpace(symbol), strings.TrimSpace(adjusted), startDate, endDate, time.Now().Add(-dailyBarGapCheckTTL))
+	if err != nil {
+		return nil, wrapError(err, "list daily bar gap checks")
+	}
+	defer rows.Close()
+	var ranges []dailyBarMissingRange
+	for rows.Next() {
+		var item dailyBarMissingRange
+		if err := rows.Scan(&item.Start, &item.End); err != nil {
+			return nil, wrapError(err, "scan daily bar gap check")
+		}
+		ranges = append(ranges, item)
+	}
+	return ranges, wrapError(rows.Err(), "iterate daily bar gap checks")
+}
+
+func (s *Store) RecordDailyBarGapChecks(ctx context.Context, symbol, adjusted string, ranges []dailyBarMissingRange) error {
+	if len(ranges) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return wrapError(err, "begin record daily bar gap checks")
+	}
+	defer tx.Rollback()
+	now := time.Now()
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM stockv2_daily_bar_gap_checks
+		WHERE symbol = ? AND adjusted = ? AND checked_at < ?
+	`, strings.TrimSpace(symbol), strings.TrimSpace(adjusted), now.Add(-dailyBarGapCheckTTL)); err != nil {
+		return wrapError(err, "prune expired daily bar gap checks")
+	}
+	for _, item := range ranges {
+		if item.Start == "" || item.End == "" || item.Start > item.End {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO stockv2_daily_bar_gap_checks (symbol, adjusted, start_date, end_date, checked_at)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(symbol, adjusted, start_date, end_date)
+			DO UPDATE SET checked_at = excluded.checked_at
+		`, strings.TrimSpace(symbol), strings.TrimSpace(adjusted), item.Start, item.End, now); err != nil {
+			return wrapError(err, "record daily bar gap check")
+		}
+	}
+	return wrapError(tx.Commit(), "commit daily bar gap checks")
+}
+
 // GetDailyBarsStats 返回本地日 K 统计，供质量评估使用。
 // rowCount=0 表示本地无数据。
 func (s *Store) GetDailyBarsStats(ctx context.Context, symbol, adjusted string) (rowCount int, earliest, latest, source, lastError string, err error) {
 	return s.marketDB.GetDailyBarsStats(ctx, symbol, adjusted)
 }
 
+func (s *Store) GetDailyBarsStatsDetailed(ctx context.Context, symbol, adjusted string) (dailyBarsStats, error) {
+	return s.marketDB.GetDailyBarsStatsDetailed(ctx, symbol, adjusted)
+}
+
 type dailyBarsStats struct {
-	Symbol    string
-	RowCount  int
-	Earliest  string
-	Latest    string
-	Source    string
-	LastError string
+	Symbol          string
+	RowCount        int
+	IncompleteCount int
+	Earliest        string
+	Latest          string
+	Source          string
+	LastError       string
 }
 
 func (s *Store) GetDailyBarsStatsBatch(ctx context.Context, symbols []string, adjusted string) (map[string]dailyBarsStats, error) {
-	symbols = compactStringList(symbols, 100)
+	symbols = compactStringList(symbols, 200)
 	if len(symbols) == 0 {
 		return map[string]dailyBarsStats{}, nil
 	}

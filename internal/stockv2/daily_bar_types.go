@@ -49,29 +49,35 @@ const (
 
 // StockV2DailyBar 单个交易日的日 K 行情
 type StockV2DailyBar struct {
-	ID            string    `json:"id"`
-	Symbol        string    `json:"symbol"`
-	Market        string    `json:"market,omitempty"` // SH / SZ / BJ
-	TradeDate     string    `json:"tradeDate"`        // "2006-01-02"
-	Open          float64   `json:"open"`
-	High          float64   `json:"high"`
-	Low           float64   `json:"low"`
-	Close         float64   `json:"close"`
-	PrevClose     float64   `json:"prevClose"` // 前一交易日收盘；首条无前日时为 0
-	Volume        float64   `json:"volume"`    // 单位：手（数据源原值，未换算）
-	Amount        float64   `json:"amount"`    // 成交额；当前数据源不提供时为 0
-	PctChange     float64   `json:"pctChange"` // 涨跌幅 %，prevClose<=0 时为 0
-	TurnoverRate  float64   `json:"turnoverRate,omitempty"`
-	NetInflow     float64   `json:"netInflow,omitempty"`
-	MainNetInflow float64   `json:"mainNetInflow,omitempty"`
-	DataPayload   string    `json:"dataPayload,omitempty"`
-	Adjusted      string    `json:"adjusted"` // none | qfq | hfq
-	Source        string    `json:"source"`   // 如 tencent_fqkline
-	FetchedAt     time.Time `json:"fetchedAt"`
-	Quality       string    `json:"quality"` // ok | partial | stale | failed
-	ErrorMessage  string    `json:"errorMessage,omitempty"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	ID            string  `json:"id"`
+	Symbol        string  `json:"symbol"`
+	Market        string  `json:"market,omitempty"` // SH / SZ / BJ
+	TradeDate     string  `json:"tradeDate"`        // "2006-01-02"
+	Open          float64 `json:"open"`
+	High          float64 `json:"high"`
+	Low           float64 `json:"low"`
+	Close         float64 `json:"close"`
+	PrevClose     float64 `json:"prevClose"` // 前一交易日收盘；首条无前日时为 0
+	Volume        float64 `json:"volume"`    // 单位：手（数据源原值，未换算）
+	Amount        float64 `json:"amount"`    // 成交额；当前数据源不提供时为 0
+	PctChange     float64 `json:"pctChange"` // 涨跌幅 %，prevClose<=0 时为 0
+	TurnoverRate  float64 `json:"turnoverRate,omitempty"`
+	NetInflow     float64 `json:"netInflow,omitempty"`
+	MainNetInflow float64 `json:"mainNetInflow,omitempty"`
+	// Present flags distinguish a legitimate zero from a source that did not
+	// provide the field. Numeric zero alone is not a completeness signal.
+	AmountPresent        bool      `json:"amountPresent"`
+	TurnoverRatePresent  bool      `json:"turnoverRatePresent"`
+	NetInflowPresent     bool      `json:"netInflowPresent"`
+	MainNetInflowPresent bool      `json:"mainNetInflowPresent"`
+	DataPayload          string    `json:"dataPayload,omitempty"`
+	Adjusted             string    `json:"adjusted"` // none | qfq | hfq
+	Source               string    `json:"source"`   // 如 tencent_fqkline
+	FetchedAt            time.Time `json:"fetchedAt"`
+	Quality              string    `json:"quality"` // ok | partial | stale | failed
+	ErrorMessage         string    `json:"errorMessage,omitempty"`
+	CreatedAt            time.Time `json:"createdAt"`
+	UpdatedAt            time.Time `json:"updatedAt"`
 }
 
 // DailyBarsQuality 日 K 数据质量评估
@@ -80,6 +86,8 @@ type DailyBarsQuality struct {
 	Adjusted         string    `json:"adjusted"`
 	HasData          bool      `json:"hasData"`
 	RowCount         int       `json:"rowCount"`
+	IncompleteCount  int       `json:"incompleteCount"`
+	FacetsComplete   bool      `json:"facetsComplete"`
 	EarliestDate     string    `json:"earliestDate"` // 本地最早 tradeDate
 	LatestDate       string    `json:"latestDate"`   // 本地最近 tradeDate
 	Stale            bool      `json:"stale"`        // 最近一条距今超出容忍窗口

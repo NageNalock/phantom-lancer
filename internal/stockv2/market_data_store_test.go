@@ -175,8 +175,106 @@ func TestMarketDataStoreGetDailyBarsDedupesSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get dates: %v", err)
 	}
-	if strings.Join(dates, ",") != "2026-07-08,2026-07-09" {
-		t.Fatalf("dates = %v, want only complete baidu dates", dates)
+	if strings.Join(dates, ",") != "2026-07-08,2026-07-09,2026-07-10" {
+		t.Fatalf("dates = %v, want Tencent-only dates to count as covered", dates)
+	}
+	count, earliest, latest, source, _, err = store.GetDailyBarsStats(ctx, "002457", DailyBarAdjustedNone)
+	if err != nil {
+		t.Fatalf("stats after Tencent-only bar: %v", err)
+	}
+	if count != 3 || earliest != "2026-07-08" || latest != "2026-07-10" || source != "tencent_fqkline" {
+		t.Fatalf("unexpected stats after Tencent-only bar: count=%d earliest=%q latest=%q source=%q", count, earliest, latest, source)
+	}
+}
+
+func TestMarketDataStorePartialDailyBarRemainsRepairable(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewMarketDataStore(filepath.Join(t.TempDir(), "stock_market.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	partial := StockV2DailyBar{
+		Symbol: "600000", Market: "SH", TradeDate: "2026-07-09",
+		Open: 10, High: 11, Low: 9, Close: 10.5, Volume: 100,
+		Amount: 1_000, AmountPresent: true, TurnoverRate: 1.2, TurnoverRatePresent: true,
+		Adjusted: DailyBarAdjustedNone, Source: "10jqka_kline", FetchedAt: time.Now(), Quality: DailyBarQualityOK,
+	}
+	if err := store.UpsertDailyBars(ctx, []StockV2DailyBar{partial}); err != nil {
+		t.Fatal(err)
+	}
+	completeDates, err := store.GetCompleteDailyBarDates(ctx, "600000", DailyBarAdjustedNone, "2026-07-09", "2026-07-09", true)
+	if err != nil || len(completeDates) != 0 {
+		t.Fatalf("partial dates=%v err=%v, want repairable gap", completeDates, err)
+	}
+	stats, err := store.GetDailyBarsStatsDetailed(ctx, "600000", DailyBarAdjustedNone)
+	if err != nil || stats.IncompleteCount != 1 {
+		t.Fatalf("partial stats=%+v err=%v", stats, err)
+	}
+
+	partial.NetInflowPresent = true
+	partial.MainNetInflowPresent = true
+	partial.FetchedAt = partial.FetchedAt.Add(time.Minute)
+	partial.Source = "10jqka_kline_repaired"
+	if err := store.UpsertDailyBars(ctx, []StockV2DailyBar{partial}); err != nil {
+		t.Fatal(err)
+	}
+	completeDates, err = store.GetCompleteDailyBarDates(ctx, "600000", DailyBarAdjustedNone, "2026-07-09", "2026-07-09", true)
+	if err != nil || strings.Join(completeDates, ",") != "2026-07-09" {
+		t.Fatalf("repaired dates=%v err=%v", completeDates, err)
+	}
+	stats, err = store.GetDailyBarsStatsDetailed(ctx, "600000", DailyBarAdjustedNone)
+	if err != nil || stats.IncompleteCount != 0 {
+		t.Fatalf("repaired stats=%+v err=%v", stats, err)
+	}
+}
+
+func TestMarketDataStoreRebuildsDailyBarQualityOnOpen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stock_market.duckdb")
+	store, err := NewMarketDataStore(path)
+	if err != nil {
+		t.Fatalf("new market store: %v", err)
+	}
+	if err := store.UpsertDailyBars(ctx, []StockV2DailyBar{{
+		Symbol:    "600000",
+		Market:    "SH",
+		TradeDate: "2026-07-09",
+		Open:      8.9,
+		High:      9.1,
+		Low:       8.8,
+		Close:     9,
+		Volume:    100,
+		Adjusted:  DailyBarAdjustedNone,
+		Source:    "tencent_fqkline",
+		FetchedAt: time.Now(),
+		Quality:   DailyBarQualityOK,
+	}}); err != nil {
+		t.Fatalf("upsert Tencent bar: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE stockv2_daily_bar_quality
+		SET row_count = 0, earliest_date = '', latest_date = '', source = ''
+		WHERE symbol = '600000' AND adjusted = 'none'
+	`); err != nil {
+		t.Fatalf("seed stale quality: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close market store: %v", err)
+	}
+
+	reopened, err := NewMarketDataStore(path)
+	if err != nil {
+		t.Fatalf("reopen market store: %v", err)
+	}
+	defer reopened.Close()
+	count, earliest, latest, source, _, err := reopened.GetDailyBarsStats(ctx, "600000", DailyBarAdjustedNone)
+	if err != nil {
+		t.Fatalf("stats after reopen: %v", err)
+	}
+	if count != 1 || earliest != "2026-07-09" || latest != "2026-07-09" || source != "tencent_fqkline" {
+		t.Fatalf("rebuilt stats = %d/%s/%s/%s", count, earliest, latest, source)
 	}
 }
 

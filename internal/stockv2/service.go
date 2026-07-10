@@ -32,12 +32,20 @@ type Service struct {
 	// move to a persisted lease only if multiple StockV2 workers are introduced.
 	newsPipelineMu  sync.Mutex
 	newsPipelineRun bool
-	quotePruneMu    sync.Mutex
-	lastQuotePrune  time.Time
-	assetBackoffMu  sync.Mutex
-	assetBackoff    map[string]time.Time
+	// ponytail: the deployment has one Go service, so a process-local lease is
+	// sufficient to prevent the two full-market entry points from duplicating
+	// the same network work. A persisted lease is only needed for multi-process.
+	bulkMaintenanceMu  sync.Mutex
+	bulkMaintenanceRun bool
+	dailyBarJobMu      sync.Mutex
+	quotePruneMu       sync.Mutex
+	lastQuotePrune     time.Time
+	assetBackoffMu     sync.Mutex
+	assetBackoff       map[string]time.Time
+	stockProfileMu     sync.Map
 
 	universeSource     *UniverseDataSource
+	thsDailyBars       *THSDailyBarsSource
 	dailyBarsSource    *DailyBarsSource
 	baiduDailyBars     *BaiduDailyBarsSource
 	announcementSource *AnnouncementSource
@@ -51,7 +59,14 @@ type Service struct {
 	agentMCPMu        sync.RWMutex
 	agentMCPServer    *http.Server
 	agentMCPURL       string
-	stockProfileAISem chan struct{}
+}
+
+func (s *Service) lockStockProfile(symbol string) func() {
+	key := strings.TrimSpace(symbol)
+	value, _ := s.stockProfileMu.LoadOrStore(key, &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // NewService 创建新的股票V2服务
@@ -62,13 +77,13 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 		log:                log,
 		httpClient:         httpClient,
 		universeSource:     NewUniverseDataSource(nil, httpClient),
+		thsDailyBars:       NewTHSDailyBarsSource(httpClient),
 		dailyBarsSource:    NewDailyBarsSource(nil, httpClient),
 		baiduDailyBars:     NewBaiduDailyBarsSource(httpClient),
 		announcementSource: NewAnnouncementSource(httpClient),
 		assetBackoff:       map[string]time.Time{},
 		newsAdapters:       map[string]NewsSourceAdapter{},
 		agentTaskPool:      pool,
-		stockProfileAISem:  make(chan struct{}, 1),
 		agentCodexCommand: func(ctx context.Context, args ...string) ([]byte, error) {
 			return exec.CommandContext(ctx, "codex", args...).CombinedOutput()
 		},
@@ -664,6 +679,11 @@ func parseTransactionExecutedAt(raw string) (time.Time, error) {
 
 // ExecuteUniverseUpdate 执行统一数据资产维护。
 func (s *Service) ExecuteUniverseUpdate(ctx context.Context, req UniverseUpdateRequest) (StockV2UpdateJob, error) {
+	s.bulkMaintenanceMu.Lock()
+	defer s.bulkMaintenanceMu.Unlock()
+	if s.bulkMaintenanceRun {
+		return StockV2UpdateJob{}, ErrUpdateJobAlreadyRunning
+	}
 	// 检查是否有正在运行的更新任务
 	recentJobs, err := s.store.ListUpdateJobs(ctx, 1)
 	if err != nil {
@@ -691,6 +711,7 @@ func (s *Service) ExecuteUniverseUpdate(ctx context.Context, req UniverseUpdateR
 	if err := s.store.CreateUpdateJob(ctx, job); err != nil {
 		return StockV2UpdateJob{}, wrapError(err, "create update job")
 	}
+	s.bulkMaintenanceRun = true
 
 	// 启动更新任务（异步，使用独立 context，不随请求结束而取消）
 	go s.runUniverseUpdate(context.Background(), job, req)
@@ -701,6 +722,11 @@ func (s *Service) ExecuteUniverseUpdate(ctx context.Context, req UniverseUpdateR
 // runUniverseUpdate 运行统一数据资产维护任务
 func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, req UniverseUpdateRequest) {
 	jobID := job.ID
+	defer func() {
+		s.bulkMaintenanceMu.Lock()
+		s.bulkMaintenanceRun = false
+		s.bulkMaintenanceMu.Unlock()
+	}()
 	defer func() {
 		if r := recover(); r != nil {
 			if s.log != nil {
@@ -752,6 +778,19 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 	processedCount := 0
 	assetStats := AssetMaintenanceStats{}
 	var mu sync.Mutex
+	announcementBatch := AnnouncementMarketsSyncResult{NewBySymbol: map[string][]StockV2Announcement{}}
+	var announcementBatchErr error
+	announcementPrefetched := totalCount >= 30
+	if announcementPrefetched {
+		announcementBatch, announcementBatchErr = s.SyncAnnouncementMarkets(ctx, AnnouncementMarketsSyncRequest{})
+		if announcementBatchErr != nil && s.log != nil {
+			s.log.Warn("stock announcement market sync failed",
+				"job_id", jobID,
+				"symbol_count", totalCount,
+				"error", safelog.Text(announcementBatchErr.Error(), 300),
+			)
+		}
+	}
 	flushProgress := func(includeFailedItems bool) {
 		mu.Lock()
 		progress.ProcessedCount = processedCount
@@ -788,6 +827,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 		}
 	}
 
+	maintenanceCtx := ctx
 	for batch := 0; batch < totalBatches; batch++ {
 		select {
 		case <-ctx.Done():
@@ -818,9 +858,37 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 		s.store.UpdateUpdateProgress(ctx, progress)
 
 		workSymbols := batchSymbols
+		recentAnnouncements := map[string][]StockV2Announcement{}
+		var recentAnnouncementsErr error
+		if announcementPrefetched {
+			recentAnnouncements, recentAnnouncementsErr = s.store.ListRecentAnnouncementsBySymbols(ctx, workSymbols, 100)
+			if recentAnnouncementsErr != nil && s.log != nil {
+				s.log.Warn("load recent announcement context failed", "job_id", jobID, "batch", batch+1, "error", safelog.Text(recentAnnouncementsErr.Error(), 240))
+			}
+		}
+		announcementContextErr := errors.Join(announcementBatchErr, recentAnnouncementsErr)
 
-		// 获取这批股票数据
-		instruments, err := s.universeSource.FetchStockUniverse(ctx, workSymbols)
+		// Existing instruments are already the durable universe cache. Only newly
+		// discovered symbols need the Tencent master-data request; the closing quote
+		// batch below refreshes current names together with daily fields.
+		instruments, err := s.store.GetInstrumentsBySymbols(ctx, workSymbols)
+		if err == nil {
+			loaded := make(map[string]struct{}, len(instruments))
+			for _, inst := range instruments {
+				loaded[inst.Symbol] = struct{}{}
+			}
+			missing := make([]string, 0, len(workSymbols)-len(instruments))
+			for _, symbol := range workSymbols {
+				if _, ok := loaded[symbol]; !ok {
+					missing = append(missing, symbol)
+				}
+			}
+			if len(missing) > 0 {
+				var fetched []StockV2Instrument
+				fetched, err = s.universeSource.FetchStockUniverse(ctx, missing)
+				instruments = append(instruments, fetched...)
+			}
+		}
 		if err != nil {
 			if s.log != nil {
 				s.log.Error("stock data asset maintenance batch fetch failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "batch", batch+1, "total_batches", totalBatches, "batch_size", len(workSymbols), "first_symbol", workSymbols[0], "last_symbol", workSymbols[len(workSymbols)-1], "error", safelog.Text(err.Error(), 300))
@@ -839,14 +907,25 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 			continue
 		}
 
-		// 构造返回结果 map，对比找失败的
+		batchCtx := maintenanceCtx
+		_, closingDate := dailyBarRangeStartEnd(DailyBarRange1Y, time.Now())
+		if nextCtx, _, prefillErr := s.prefillClosingDailyBarsBatch(maintenanceCtx, instruments, closingDate); prefillErr != nil {
+			if s.log != nil {
+				s.log.Warn("stock daily bar batch quote prefill failed", "job_id", jobID, "batch", batch+1, "symbol_count", len(instruments), "error", safelog.Text(prefillErr.Error(), 240))
+			}
+		} else {
+			maintenanceCtx = nextCtx
+			batchCtx = nextCtx
+		}
+		// 构造返回结果 map，对比找失败的。批量 quote 可能刷新名称，
+		// 因此必须在 prefill 之后复制 instrument。
 		resultMap := make(map[string]StockV2Instrument, len(instruments))
 		for _, inst := range instruments {
 			resultMap[inst.Symbol] = inst
 		}
 
 		// 保存股票数据，并把日 K、基础画像、公告和 AI 决策纳入同一个 per-symbol 管线。
-		// 使用 worker pool 并发处理（4 路），5000+ 股票可在维护时间窗内完成。
+		// 使用 4 路 worker pool 并发处理完整本地 universe。
 		const maintenanceConcurrency = 4
 		const progressFlushInterval = 50 // 每 50 只 symbol flush 一次进度，减少 DuckDB 写入
 
@@ -860,7 +939,6 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 				ctxCancelled = true
 				break
 			}
-
 			wg.Add(1)
 			select {
 			case sem <- struct{}{}: // acquire worker slot
@@ -901,11 +979,16 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 					return
 				}
 
-				result, maintainErr := s.maintainAssetForInstrument(ctx, inst, assetMaintenanceOptions{
-					JobID:         jobID,
-					TriggerSource: job.TriggerSource,
-					RequestedBy:   "system",
-					ForceAI:       req.ForceAI,
+				result, maintainErr := s.maintainAssetForInstrument(batchCtx, inst, assetMaintenanceOptions{
+					JobID:                     jobID,
+					TriggerSource:             job.TriggerSource,
+					RequestedBy:               "system",
+					ForceAI:                   req.ForceAI,
+					AnnouncementsPrefetched:   announcementPrefetched,
+					PrefetchedAnnouncements:   announcementBatch.NewBySymbol[symbol],
+					RecentAnnouncements:       recentAnnouncements[symbol],
+					AnnouncementPrefetchError: announcementContextErr,
+					AnnouncementCheckedAt:     announcementBatch.FinishedAt,
 				})
 
 				mu.Lock()
@@ -924,13 +1007,14 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 				processedCount++
 				batchProcessed++
 				progress.CurrentBatchProgress = batchProcessed
-				needFlush := processedCount%progressFlushInterval == 0 || len(failedItems) != failedBefore
+				failedChanged := len(failedItems) != failedBefore
+				needFlush := processedCount%progressFlushInterval == 0 || failedChanged
 				mu.Unlock()
 				if needFlush {
-					flushProgress(len(failedItems) != failedBefore)
+					flushProgress(failedChanged)
 				}
 
-				if inst.Symbol != "" {
+				if assetMaintenanceUsedRemoteProfile(result.Item.SourceStatuses) {
 					if err := sleepJitter(ctx, 80*time.Millisecond, 60*time.Millisecond); err != nil {
 						return // context cancelled
 					}
@@ -982,136 +1066,153 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 	}
 }
 
-func (s *Service) maintainDailyBarsForInstrument(ctx context.Context, inst StockV2Instrument) (bool, error) {
-	quality, err := s.GetDailyBarsQuality(ctx, inst.Symbol, DailyBarAdjustedNone)
-	if err != nil {
-		return false, err
-	}
-	return s.maintainDailyBarsForInstrumentWithQuality(ctx, inst, quality, true)
-}
-
-func (s *Service) maintainDailyBarsForInstrumentWithQuality(ctx context.Context, inst StockV2Instrument, quality DailyBarsQuality, hasQuality bool) (bool, error) {
-	fetched, bars, err := s.fetchDailyBarsForInstrumentWithQuality(ctx, inst, quality, hasQuality)
-	if err != nil || !fetched {
-		return fetched, err
-	}
-	if err := s.store.UpsertDailyBars(ctx, bars); err != nil {
-		return true, err
-	}
-	return true, nil
-}
-
-func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, inst StockV2Instrument, quality DailyBarsQuality, hasQuality bool) (bool, []StockV2DailyBar, error) {
-	if !hasQuality {
-		var err error
-		quality, err = s.GetDailyBarsQuality(ctx, inst.Symbol, DailyBarAdjustedNone)
-		if err != nil {
-			return false, nil, err
+func assetMaintenanceUsedRemoteProfile(statuses []AssetMaintenanceSourceStatus) bool {
+	for _, status := range statuses {
+		switch status.Source {
+		case "eastmoney_company_survey", "eastmoney_business_analysis", "eastmoney_core_conception",
+			"eastmoney_fund_basic", "eastmoney_fund_holdings":
+			return true
 		}
 	}
-	start, end := dailyBarRangeStartEnd(DailyBarRange1Y, time.Now())
+	return false
+}
+
+func (s *Service) fetchDailyBarsForInstrument(ctx context.Context, inst StockV2Instrument) (bool, []StockV2DailyBar, []dailyBarMissingRange, error) {
+	start, end := assetMaintenanceDailyBarStartEnd(time.Now())
+	end = dailyBarBatchTargetDate(ctx, end)
+	start, end = clampDailyBarRangeToInstrument(inst, start, end)
+	if start == "" {
+		return false, nil, nil, nil
+	}
 	startTime, err := time.Parse("2006-01-02", start)
 	if err != nil {
-		return false, nil, err
+		return false, nil, nil, err
 	}
 	endTime, err := time.Parse("2006-01-02", end)
 	if err != nil {
-		return false, nil, err
+		return false, nil, nil, err
 	}
-	dates, err := s.store.GetDailyBarDates(ctx, inst.Symbol, DailyBarAdjustedNone, start, end)
+	// Best effort: flow enrichment freshness is visible through incomplete_count,
+	// but its provider must not block missing price bars from being repaired.
+	_, _ = s.repairStoredDailyBarFlowFacets(ctx, inst, start, end)
+	// Flow-only gaps were handled in one enrichment request above. The historical
+	// source chain is reserved for missing OHLC/amount/turnover rows.
+	dates, err := s.store.GetCompleteDailyBarDates(ctx, inst.Symbol, DailyBarAdjustedNone, start, end, false)
 	if err != nil {
-		return false, nil, err
+		return false, nil, nil, err
 	}
-	ranges := planDailyBarMissingRanges(dates, startTime, endTime)
+	tradingDates, err := s.observedTradingDates(ctx, start, end)
+	if err != nil {
+		return false, nil, nil, err
+	}
+	ranges := planDailyBarMissingRangesWithCalendar(dates, tradingDates, startTime, endTime)
+	ranges = excludeBatchClosingQuoteRetry(ctx, inst.Symbol, end, ranges)
+	checkedRanges, err := s.store.ListDailyBarGapChecks(ctx, inst.Symbol, DailyBarAdjustedNone, start, end)
+	if err != nil {
+		return false, nil, nil, err
+	}
+	ranges = subtractCheckedDailyBarRanges(ranges, checkedRanges)
 	if len(ranges) == 0 {
-		return false, nil, nil
+		return false, nil, nil, nil
 	}
 
-	bars, err := s.fetchDailyBarsForMissingRanges(ctx, inst, ranges)
+	bars, absencesConfirmed, err := s.fetchDailyBarsForMissingRanges(ctx, inst, ranges)
 	if err != nil {
-		return true, nil, err
+		return true, nil, nil, err
+	}
+	var checkedAbsences []dailyBarMissingRange
+	if absencesConfirmed {
+		checkedAbsences = stableDailyBarGapChecks(dailyBarRangesWithoutReturnedBars(ranges, bars), time.Now())
 	}
 
-	// 百度全量成功但缺口内没有 bar，通常是凌晨/节假日把尚未产生的交易日当成缺口。
+	// 数据源成功但目标区间没有 bar，通常是停牌或尚未产生的新交易日。
 	if len(bars) == 0 {
-		return false, nil, nil
+		return false, nil, checkedAbsences, nil
 	}
 
-	// 东财资金面 enrichment（填充 NetInflow / MainNetInflow）
+	// Historical sources do not all expose order-flow fields. Enrichment runs
+	// only when a returned row actually lacks them, so a complete batch quote
+	// never causes an extra per-symbol request.
 	_ = s.enrichDailyBarsWithDataFacets(ctx, inst, bars)
-	return true, bars, nil
+	return true, bars, checkedAbsences, nil
 }
 
-func (s *Service) fetchDailyBarsForMissingRanges(ctx context.Context, inst StockV2Instrument, ranges []dailyBarMissingRange) ([]StockV2DailyBar, error) {
+func (s *Service) fetchDailyBarsForMissingRanges(ctx context.Context, inst StockV2Instrument, ranges []dailyBarMissingRange) ([]StockV2DailyBar, bool, error) {
 	if len(ranges) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 
-	// 使用百度财经作为主数据源（提供 amount 和 turnover_rate），
-	// 抓取全量后按缺口区间过滤，只保留需要补的 bars，避免全量 upsert。
-	var bars []StockV2DailyBar
-	baiduTried := false
-	baiduSucceeded := false
-	if s.baiduDailyBars != nil {
-		baiduTried = true
-		fetched, baiduErr := s.baiduDailyBars.FetchDailyBars(ctx, inst.Symbol, inst.Market, inst.InstrumentType)
-		if baiduErr != nil {
-			if s.log != nil {
-				s.log.Warn("baidu daily bars failed", "symbol", inst.Symbol, "error", safelog.Text(baiduErr.Error(), 200))
+	// All sources are requested once for the smallest envelope covering every gap.
+	// The returned rows are then filtered locally, avoiding one request per gap.
+	startDate := ranges[0].Start
+	endDate := ranges[len(ranges)-1].End
+	var sourceErrs []error
+	var partialFallback []StockV2DailyBar
+	successfulSources := 0
+
+	if s.thsDailyBars != nil {
+		fetched, err := s.thsDailyBars.FetchDailyBars(ctx, inst.Symbol, inst.Market, startDate, endDate)
+		if err == nil {
+			successfulSources++
+			filtered := filterBarsByRanges(fetched, ranges)
+			coreComplete := len(filtered) > 0
+			for _, bar := range filtered {
+				if !dailyBarCoreFacetsComplete(bar) {
+					coreComplete = false
+					break
+				}
 			}
-			return nil, baiduErr
+			if coreComplete {
+				return filtered, false, nil
+			}
+			if len(filtered) > 0 {
+				partialFallback = filtered
+			}
 		} else {
+			sourceErrs = append(sourceErrs, err)
+		}
+	}
+
+	if s.dailyBarsSource != nil {
+		fetched, err := s.dailyBarsSource.FetchDailyBars(ctx, inst.Symbol, inst.Market, startDate, endDate, DailyBarAdjustedNone, 1800)
+		if err == nil {
+			successfulSources++
 			for i := range fetched {
 				fetched[i].Symbol = inst.Symbol
 			}
-			// 只保留缺口区间内的 bars，不全量 upsert
-			bars = filterBarsByRanges(fetched, ranges)
-			baiduSucceeded = true
+			filtered := filterBarsByRanges(fetched, ranges)
+			if len(filtered) > 0 && len(partialFallback) == 0 {
+				partialFallback = filtered
+			}
+		} else {
+			sourceErrs = append(sourceErrs, err)
 		}
 	}
 
-	// 百度全量成功但缺口内没有 bar，这不是源失败，不能再回退腾讯并把 0 条当错误。
-	if baiduSucceeded {
-		return bars, nil
-	}
-
-	// 如果百度未使用或失败，使用腾讯源按缺口区间抓取。
-	if !baiduTried || !baiduSucceeded {
-		bars = make([]StockV2DailyBar, 0, 256)
-		for _, r := range ranges {
-			fetched, fetchErr := s.dailyBarsSource.FetchDailyBars(ctx, inst.Symbol, inst.Market, r.Start, r.End, DailyBarAdjustedNone, 1800)
-			if fetchErr != nil {
-				return nil, fetchErr
-			}
+	if s.baiduDailyBars != nil {
+		fetched, err := s.baiduDailyBars.FetchDailyBars(ctx, inst.Symbol, inst.Market, inst.InstrumentType)
+		if err == nil {
+			successfulSources++
 			for i := range fetched {
 				fetched[i].Symbol = inst.Symbol
 			}
-			bars = append(bars, fetched...)
+			filtered := filterBarsByRanges(fetched, ranges)
+			if len(filtered) > 0 {
+				return filtered, successfulSources >= 2, nil
+			}
 		}
+		sourceErrs = append(sourceErrs, err)
 	}
-	return bars, nil
-}
-
-func dailyBarsNeedsMaintenance(q DailyBarsQuality) bool {
-	return !q.HasData || !q.Meets250 || q.Stale
-}
-
-func (s *Service) dailyBarsQualityForUniverseBatch(ctx context.Context, symbols []string) (map[string]DailyBarsQuality, error) {
-	out := make(map[string]DailyBarsQuality, len(symbols))
-	for start := 0; start < len(symbols); start += 100 {
-		end := start + 100
-		if end > len(symbols) {
-			end = len(symbols)
-		}
-		qualities, err := s.GetDailyBarsQualityBatch(ctx, symbols[start:end], DailyBarAdjustedNone)
-		if err != nil {
-			return nil, err
-		}
-		for symbol, quality := range qualities {
-			out[symbol] = quality
-		}
+	if len(partialFallback) > 0 {
+		return partialFallback, successfulSources >= 2, nil
 	}
-	return out, nil
+	if successfulSources >= 2 {
+		return nil, true, nil
+	}
+	if joined := errors.Join(sourceErrs...); joined != nil {
+		return nil, false, fmt.Errorf("daily bar absence was not confirmed by two sources: %w", joined)
+	}
+	return nil, false, errors.New("daily bar absence was not confirmed by two sources")
 }
 
 // GetUpdateJob 获取更新任务
@@ -1234,6 +1335,12 @@ func (s *Service) StartBackground(ctx context.Context) {
 
 	bgCtx, cancel := context.WithCancel(ctx)
 	s.bgCancel = cancel
+
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runStockProfileAIQueueBackground(bgCtx)
+	}()
 
 	s.bgWg.Add(1)
 	go func() {

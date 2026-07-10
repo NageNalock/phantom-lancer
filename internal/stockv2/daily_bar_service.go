@@ -18,7 +18,8 @@ import (
 // 失败绝不伪造：抓取失败返回 error，不写空 bar、不伪装、不用最新价派生。
 
 const (
-	dailyBarsAgentTarget = 250 // Agent 默认要求最近 250 个交易日
+	dailyBarsAgentTarget               = 250 // Agent 默认要求最近 250 个交易日
+	assetMaintenanceDailyBarWindowDays = 420 // natural days; stably covers >=250 trading sessions
 )
 
 func isValidDailyBarRange(r string) bool {
@@ -76,6 +77,16 @@ func dailyBarRangeStartEnd(r string, now time.Time) (string, string) {
 	return start.Format("2006-01-02"), end.Format("2006-01-02")
 }
 
+func assetMaintenanceDailyBarStartEnd(now time.Time) (string, string) {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		loc = time.Local
+	}
+	end := effectiveDailyBarEnd(now.In(loc), loc)
+	start := end.AddDate(0, 0, -assetMaintenanceDailyBarWindowDays)
+	return start.Format("2006-01-02"), end.Format("2006-01-02")
+}
+
 func effectiveDailyBarEnd(now time.Time, loc *time.Location) time.Time {
 	if loc == nil {
 		loc = time.Local
@@ -121,10 +132,11 @@ func (s *Service) GetDailyBars(ctx context.Context, symbol string, limit int, st
 // GetDailyBarsQuality 评估本地日 K 数据质量。
 func (s *Service) GetDailyBarsQuality(ctx context.Context, symbol, adjusted string) (DailyBarsQuality, error) {
 	adjusted = normalizeDailyBarAdjusted(adjusted)
-	rowCount, earliest, latest, source, lastErr, err := s.store.GetDailyBarsStats(ctx, symbol, adjusted)
+	stats, err := s.store.GetDailyBarsStatsDetailed(ctx, symbol, adjusted)
 	if err != nil {
 		return DailyBarsQuality{}, err
 	}
+	lastErr := stats.LastError
 	if lastErr == "" {
 		jobErr, err := s.store.GetLatestDailyBarJobError(ctx, symbol, adjusted)
 		if err != nil {
@@ -136,19 +148,13 @@ func (s *Service) GetDailyBarsQuality(ctx context.Context, symbol, adjusted stri
 		}
 	}
 
-	return dailyBarsQualityFromStats(symbol, adjusted, dailyBarsStats{
-		Symbol:    symbol,
-		RowCount:  rowCount,
-		Earliest:  earliest,
-		Latest:    latest,
-		Source:    source,
-		LastError: lastErr,
-	}, time.Now()), nil
+	stats.LastError = lastErr
+	return dailyBarsQualityFromStats(symbol, adjusted, stats, time.Now()), nil
 }
 
 func (s *Service) GetDailyBarsQualityBatch(ctx context.Context, symbols []string, adjusted string) (map[string]DailyBarsQuality, error) {
 	adjusted = normalizeDailyBarAdjusted(adjusted)
-	symbols = compactStringList(symbols, 100)
+	symbols = compactStringList(symbols, 200)
 	out := make(map[string]DailyBarsQuality, len(symbols))
 	if len(symbols) == 0 {
 		return out, nil
@@ -182,6 +188,8 @@ func dailyBarsQualityFromStats(symbol, adjusted string, stats dailyBarsStats, ch
 		Adjusted:         adjusted,
 		HasData:          stats.RowCount > 0,
 		RowCount:         stats.RowCount,
+		IncompleteCount:  stats.IncompleteCount,
+		FacetsComplete:   stats.RowCount > 0 && stats.IncompleteCount == 0,
 		EarliestDate:     stats.Earliest,
 		LatestDate:       stats.Latest,
 		LastErrorMessage: stats.LastError,
@@ -201,7 +209,12 @@ func dailyBarsQualityFromStats(symbol, adjusted string, stats dailyBarsStats, ch
 func (s *Service) ensureOneSymbol(ctx context.Context, inst StockV2Instrument, startDate, endDate, adjusted string) (int, error) {
 	symbol := inst.Symbol
 	market := inst.Market
+	startDate, endDate = clampDailyBarRangeToInstrument(inst, startDate, endDate)
+	if startDate == "" {
+		return 0, nil
+	}
 	if adjusted == DailyBarAdjustedNone {
+		endDate = dailyBarBatchTargetDate(ctx, endDate)
 		startTime, err := time.Parse("2006-01-02", startDate)
 		if err != nil {
 			return 0, err
@@ -210,17 +223,42 @@ func (s *Service) ensureOneSymbol(ctx context.Context, inst StockV2Instrument, s
 		if err != nil {
 			return 0, err
 		}
-		dates, err := s.store.GetDailyBarDates(ctx, symbol, adjusted, startDate, endDate)
+		// Best effort: a temporary flow-provider failure must not block genuine
+		// OHLC/amount/turnover gaps from being repaired below.
+		_, _ = s.repairStoredDailyBarFlowFacets(ctx, inst, startDate, endDate)
+		// Historical OHLC is fetched only when amount/turnover are missing. Stock
+		// rows that only lack flow facets are retried above with one Eastmoney call.
+		dates, err := s.store.GetCompleteDailyBarDates(ctx, symbol, adjusted, startDate, endDate, false)
 		if err != nil {
 			return 0, err
 		}
-		ranges := planDailyBarMissingRanges(dates, startTime, endTime)
-		bars, err := s.fetchDailyBarsForMissingRanges(ctx, inst, ranges)
+		tradingDates, err := s.observedTradingDates(ctx, startDate, endDate)
 		if err != nil {
 			return 0, err
+		}
+		ranges := planDailyBarMissingRangesWithCalendar(dates, tradingDates, startTime, endTime)
+		ranges = excludeBatchClosingQuoteRetry(ctx, symbol, endDate, ranges)
+		checkedRanges, err := s.store.ListDailyBarGapChecks(ctx, symbol, adjusted, startDate, endDate)
+		if err != nil {
+			return 0, err
+		}
+		ranges = subtractCheckedDailyBarRanges(ranges, checkedRanges)
+		if len(ranges) == 0 {
+			return 0, nil
+		}
+		bars, absencesConfirmed, err := s.fetchDailyBarsForMissingRanges(ctx, inst, ranges)
+		if err != nil {
+			return 0, err
+		}
+		var checkedAbsences []dailyBarMissingRange
+		if absencesConfirmed {
+			checkedAbsences = stableDailyBarGapChecks(dailyBarRangesWithoutReturnedBars(ranges, bars), time.Now())
 		}
 		_ = s.enrichDailyBarsWithDataFacets(ctx, inst, bars)
 		if err := s.store.UpsertDailyBars(ctx, bars); err != nil {
+			return 0, err
+		}
+		if err := s.store.RecordDailyBarGapChecks(ctx, symbol, adjusted, checkedAbsences); err != nil {
 			return 0, err
 		}
 		return len(bars), nil
@@ -261,7 +299,7 @@ func (s *Service) EnsureDailyBars(ctx context.Context, symbol, rangeCode, adjust
 	}
 
 	// 本地已覆盖请求起点且数据不 stale → 直接跳过，不重复抓取
-	if quality.HasData && !quality.Stale && quality.EarliestDate <= start {
+	if quality.HasData && quality.FacetsComplete && !quality.Stale && quality.EarliestDate <= start {
 		result.Skipped = true
 		return result, nil
 	}
@@ -375,6 +413,16 @@ func (s *Service) RunDailyBarsJob(ctx context.Context, req DailyBarsJobRequest) 
 	if mode == DailyBarJobModeSymbol && req.Symbol == "" {
 		return StockV2DailyBarJob{}, errors.New("symbol is required for symbol mode")
 	}
+	if mode == DailyBarJobModeSymbol {
+		s.dailyBarJobMu.Lock()
+		defer s.dailyBarJobMu.Unlock()
+	} else {
+		s.bulkMaintenanceMu.Lock()
+		defer s.bulkMaintenanceMu.Unlock()
+		if s.bulkMaintenanceRun {
+			return StockV2DailyBarJob{}, ErrDailyBarJobAlreadyRunning
+		}
+	}
 
 	if mode == DailyBarJobModeSymbol {
 		if running, err := s.store.FindRunningDailyBarJob(ctx, DailyBarJobModeSymbol, req.Symbol, rangeCode, adjusted); err == nil {
@@ -384,7 +432,11 @@ func (s *Service) RunDailyBarsJob(ctx context.Context, req DailyBarsJobRequest) 
 		}
 	} else {
 		// 批量模式（hot / universe）全局去重，避免多个大任务同时打数据源。
-		if running, _ := s.store.HasRunningDailyBarJob(ctx); running {
+		running, err := s.store.HasRunningDailyBarJob(ctx)
+		if err != nil {
+			return StockV2DailyBarJob{}, err
+		}
+		if running {
 			return StockV2DailyBarJob{}, ErrDailyBarJobAlreadyRunning
 		}
 	}
@@ -410,6 +462,9 @@ func (s *Service) RunDailyBarsJob(ctx context.Context, req DailyBarsJobRequest) 
 	if err := s.store.CreateDailyBarJob(ctx, job); err != nil {
 		return StockV2DailyBarJob{}, wrapError(err, "create daily bar job")
 	}
+	if mode != DailyBarJobModeSymbol {
+		s.bulkMaintenanceRun = true
+	}
 
 	go s.runDailyBarsBatchJob(context.Background(), job.ID, req, mode, rangeCode, adjusted)
 	return job, nil
@@ -417,6 +472,13 @@ func (s *Service) RunDailyBarsJob(ctx context.Context, req DailyBarsJobRequest) 
 
 // runDailyBarsBatchJob 异步执行批量日 K 任务（symbol/hot/universe_incremental）。
 func (s *Service) runDailyBarsBatchJob(ctx context.Context, jobID string, req DailyBarsJobRequest, mode, rangeCode, adjusted string) {
+	if mode != DailyBarJobModeSymbol {
+		defer func() {
+			s.bulkMaintenanceMu.Lock()
+			s.bulkMaintenanceRun = false
+			s.bulkMaintenanceMu.Unlock()
+		}()
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			if s.log != nil {
@@ -438,7 +500,7 @@ func (s *Service) runDailyBarsBatchJob(ctx context.Context, jobID string, req Da
 		if err != nil {
 			loc = time.Local
 		}
-		endT := time.Now().In(loc)
+		endT := effectiveDailyBarEnd(time.Now().In(loc), loc)
 		startT := endT.AddDate(0, 0, -10) // 最近 ~10 个自然日，覆盖最近几个交易日
 		start, end = startT.Format("2006-01-02"), endT.Format("2006-01-02")
 	} else {
@@ -469,8 +531,46 @@ func (s *Service) runDailyBarsBatchJob(ctx context.Context, jobID string, req Da
 		return
 	}
 
+	// GetInstrumentsBySymbols caps one query at 1000 symbols. Chunk this local
+	// lookup so the full-market job retains persisted fund/stock types and
+	// listing bounds without adding one database request per symbol.
+	instrumentBySymbol := make(map[string]StockV2Instrument, len(symbols))
+	for offset := 0; offset < len(symbols); offset += 1000 {
+		endOffset := min(offset+1000, len(symbols))
+		instruments, err := s.store.GetInstrumentsBySymbols(ctx, symbols[offset:endOffset])
+		if err != nil {
+			if s.log != nil {
+				s.log.Warn("daily bar batch load instruments failed", "job_id", jobID, "mode", mode, "symbol_count", len(symbols), "error", safelog.Text(err.Error(), 240))
+			}
+			_ = s.store.UpdateDailyBarJob(ctx, StockV2DailyBarJob{
+				ID: jobID, Status: "failed", EndAt: time.Now(),
+				ErrorMessage: truncateDailyBarErr(err.Error()),
+			})
+			return
+		}
+		for _, instrument := range instruments {
+			instrumentBySymbol[instrument.Symbol] = instrument
+		}
+	}
+
 	total := len(symbols)
 	_ = s.store.UpdateDailyBarJob(ctx, StockV2DailyBarJob{ID: jobID, TotalCount: total})
+	workCtx := ctx
+	if mode == DailyBarJobModeUniverseIncremental && adjusted == DailyBarAdjustedNone {
+		instruments := make([]StockV2Instrument, 0, len(symbols))
+		for _, symbol := range symbols {
+			instruments = append(instruments, dailyBarBatchInstrument(symbol, instrumentBySymbol))
+		}
+		var prefillErr error
+		workCtx, _, prefillErr = s.prefillClosingDailyBarsBatch(ctx, instruments, end)
+		if prefillErr != nil {
+			_ = s.store.UpdateDailyBarJob(ctx, StockV2DailyBarJob{
+				ID: jobID, Status: "failed", EndAt: time.Now(),
+				ErrorMessage: truncateDailyBarErr(prefillErr.Error()),
+			})
+			return
+		}
+	}
 
 	processed := 0
 	success := 0
@@ -489,10 +589,23 @@ func (s *Service) runDailyBarsBatchJob(ctx context.Context, jobID string, req Da
 		}
 
 		processed++
-		inst := StockV2Instrument{Symbol: sym, InstrumentType: InstrumentTypeStock}
-		_, err := s.ensureOneSymbol(ctx, inst, start, end, adjusted)
+		inst := dailyBarBatchInstrument(sym, instrumentBySymbol)
+		_, err := s.ensureOneSymbol(workCtx, inst, start, end, adjusted)
 		if err != nil {
 			failedItems = append(failedItems, UpdateFailure{Symbol: sym, Reason: safelog.Text(truncateDailyBarErr(err.Error()), 240)})
+			if errors.Is(err, errBaiduDailyBarsAccessDenied) {
+				_ = s.store.UpdateDailyBarJob(ctx, StockV2DailyBarJob{
+					ID:             jobID,
+					Status:         "failed",
+					EndAt:          time.Now(),
+					ProcessedCount: processed,
+					SuccessCount:   success,
+					FailedCount:    len(failedItems),
+					ErrorMessage:   truncateDailyBarErr(err.Error()),
+					FailedItems:    failedItems,
+				})
+				return
+			}
 		} else {
 			success++
 		}
@@ -534,6 +647,22 @@ func (s *Service) runDailyBarsBatchJob(ctx context.Context, jobID string, req Da
 		s.log.Warn("daily bar batch job completed with item failures", "job_id", jobID, "mode", mode, "range_code", rangeCode, "adjusted", adjusted, "trigger_type", req.TriggerType, "trigger_source", req.TriggerSource, "symbol", req.Symbol, "start_date", start, "end_date", end, "total_count", total, "processed_count", processed, "success_count", success, "failed_count", len(failedItems), "failure_sample", stockV2FailureSample(failedItems, 5))
 	}
 	_ = s.store.PruneDailyBarJobs(ctx, 100)
+}
+
+func dailyBarBatchInstrument(symbol string, instrumentBySymbol map[string]StockV2Instrument) StockV2Instrument {
+	market, instrumentType := inferInstrumentMarketAndType(symbol)
+	instrument, ok := instrumentBySymbol[symbol]
+	if !ok {
+		return StockV2Instrument{Symbol: symbol, Market: market, InstrumentType: instrumentType}
+	}
+	instrument.Symbol = symbol
+	if instrument.Market == "" {
+		instrument.Market = market
+	}
+	if instrument.InstrumentType == "" {
+		instrument.InstrumentType = instrumentType
+	}
+	return instrument
 }
 
 // GetDailyBarJob / ListDailyBarJobs / GetLatestDailyBarJob 透传 store

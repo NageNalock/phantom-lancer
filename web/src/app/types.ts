@@ -1169,12 +1169,17 @@ export interface StockV2Instrument {
 
 export interface StockV2StockProfileSummary {
   symbol: string;
+  market?: string;
+  instrumentType?: string;
   status: string;
   businessSummary?: string;
+  baseProfileUpdatedAt?: string;
+  baseProfileCheckedAt?: string;
   aiProfileStatus?: string;
   aiProfileModel?: string;
   aiProfileConfidence?: number;
   aiProfileUpdatedAt?: string;
+  aiProfileAttemptedAt?: string;
   updatedAt?: string;
 }
 
@@ -1207,6 +1212,7 @@ export interface StockV2StockProfile extends StockV2StockProfileSummary {
   constituentHint?: string;
   baseProfileHash?: string;
   baseProfileUpdatedAt?: string;
+  baseProfileCheckedAt?: string;
   profileVersion?: number;
 }
 
@@ -1219,6 +1225,33 @@ export interface StockV2AssetMaintenanceStats {
   majorAnnouncementsNew: number;
   aiCalled: number;
   aiSkipped: number;
+  aiQueued?: number;
+  aiRunning?: number;
+  aiCompleted?: number;
+  aiFailed?: number;
+}
+
+export interface StockV2AssetMaintenanceJobProgress {
+  base: {
+    status: string;
+    total: number;
+    processed: number;
+    succeeded: number;
+    failed: number;
+    pending: number;
+  };
+  aiProfile: {
+    status: "not_required" | "active" | "completed" | "completed_with_failures" | string;
+    requested: number;
+    pending: number;
+    queued: number;
+    running: number;
+    retrying: number;
+    completed: number;
+    failed: number;
+    skipped: number;
+    outstanding: number;
+  };
 }
 
 export interface StockV2AssetMaintenanceSourceStatus {
@@ -1249,6 +1282,7 @@ export interface StockV2AssetMaintenanceItem {
   majorAnnouncementsNew: number;
   aiDecision?: string;
   aiProfileStatus?: string;
+  aiQueueStatus?: string;
   agentRunId?: string;
   errorMessage?: string;
   sourceStatuses?: StockV2AssetMaintenanceSourceStatus[];
@@ -1283,10 +1317,22 @@ export interface StockV2AssetSummary {
   dailyBarQuality: StockV2DailyBarsQuality;
   profileSummary: StockV2StockProfileSummary;
   latestAnnouncementAt?: string;
+  latestAnnouncementFetchedAt?: string;
   latestAnnouncementTitle?: string;
   announcementCount: number;
   majorAnnouncementCount: number;
   latestMaintenance?: StockV2AssetMaintenanceItem;
+  readiness: {
+    ready: boolean;
+    dataReady: boolean;
+    dailyBarReady: boolean;
+    baseProfileReady: boolean;
+    announcementReady: boolean;
+    aiProfileReady: boolean;
+    reasons?: string[];
+    announcementSyncAt?: string;
+    evaluatedAt: string;
+  };
 }
 
 export interface StockV2MaintainSymbolResult {
@@ -1457,6 +1503,7 @@ export interface StockV2UpdateJob {
   failedCount: number;
   failedItems?: UpdateFailure[];
   assetStats?: StockV2AssetMaintenanceStats;
+  maintenanceProgress?: StockV2AssetMaintenanceJobProgress;
   startAt: string;
   endAt: string;
   errorMessage: string;
@@ -1683,6 +1730,8 @@ export interface StockV2DailyBarsQuality {
   adjusted: string;
   hasData: boolean;
   rowCount: number;
+  incompleteCount: number;
+  facetsComplete: boolean;
   earliestDate: string;
   latestDate: string;
   stale: boolean;
@@ -2412,7 +2461,7 @@ export interface StockV2AgentMCPStatus {
   requiredTools: string[];
 }
 
-export type StockV2AgentRunStatus = "pending" | "ready" | "running" | "completed" | "failed";
+export type StockV2AgentRunStatus = "pending" | "ready" | "running" | "completed" | "failed" | "superseded";
 
 export interface StockV2AgentRun {
   id: string;

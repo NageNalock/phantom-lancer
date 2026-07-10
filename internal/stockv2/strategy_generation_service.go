@@ -183,7 +183,7 @@ func (s *Service) strategyGenerationInstrumentContext(ctx context.Context, targe
 	}
 	if profile, err := s.store.GetStockProfile(ctx, instrument.Symbol); err == nil {
 		item.Profile = &profile
-		item.DataFreshness["profileUpdatedAt"] = profile.UpdatedAt.Format(time.RFC3339)
+		item.DataFreshness["stockProfile"] = stockProfileFreshnessSummary(profile, time.Now())
 	} else {
 		item.DataFreshness["profileMissing"] = true
 	}
@@ -369,7 +369,7 @@ func (s *Service) buildStrategyGenerationHoldingContext(
 
 	if profile, err := s.store.GetStockProfile(ctx, hctx.Symbol); err == nil {
 		hctx.Profile = &profile
-		hctx.Freshness["stockProfile"] = map[string]any{"status": "present", "profileVersion": profile.ProfileVersion}
+		hctx.Freshness["stockProfile"] = stockProfileFreshnessSummary(profile, time.Now())
 	} else if errors.Is(err, ErrStockProfileNotFound) {
 		*missing = append(*missing, "stockProfile:"+hctx.Symbol)
 		hctx.Freshness["stockProfile"] = map[string]any{"status": "missing"}

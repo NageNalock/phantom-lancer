@@ -447,6 +447,7 @@ export function stockV2UpdateStatusLabel(job?: StockV2UpdateJob): string {
     case "running": return "进行中";
     case "completed": return "已完成";
     case "failed": return "失败";
+    case "superseded": return "已被新版本取代";
     case "cancelled": return "已取消";
     default: return job.status;
   }
@@ -458,6 +459,7 @@ export function stockV2UpdateStatusTone(job?: StockV2UpdateJob): "good" | "warn"
     case "completed": return "good";
     case "running": return "warn";
     case "failed": return "danger";
+    case "superseded": return "neutral";
     case "cancelled": return "neutral";
     default: return "neutral";
   }
@@ -524,6 +526,7 @@ export function stockV2DailyBarsQualityLabel(q?: StockV2DailyBarsQuality): strin
   if (!q.hasData) return "无数据";
   if (q.rowCount <= 0) return "空";
   if (q.stale) return `陈旧 · ${q.latestDate || "?"}`;
+  if (!q.facetsComplete) return `数据面待补 · ${q.incompleteCount}根`;
   if (!q.meets250) return `部分覆盖 · ${q.rowCount}根`;
   return `正常 · ${q.rowCount}根`;
 }
@@ -533,6 +536,7 @@ export function stockV2DailyBarsQualityTone(q?: StockV2DailyBarsQuality): "good"
   if (!q.hasData || q.rowCount <= 0) return "danger";
   if (q.lastErrorMessage) return "danger";
   if (q.stale) return "warn";
+  if (!q.facetsComplete) return "warn";
   if (!q.meets250) return "warn";
   return "good";
 }
@@ -997,6 +1001,7 @@ export function stockV2AgentRunStatusLabel(status?: string): string {
     case "running": return "运行中";
     case "completed": return "已完成";
     case "failed": return "失败";
+    case "superseded": return "已被新任务替代";
     default: return status || "未知";
   }
 }
@@ -1008,8 +1013,13 @@ export function stockV2AgentRunStatusTone(status?: string): "good" | "warn" | "d
     case "ready": return "neutral";
     case "pending": return "warn";
     case "failed": return "danger";
+    case "superseded": return "neutral";
     default: return "neutral";
   }
+}
+
+export function stockV2AgentRunTerminal(status?: string): boolean {
+  return status === "completed" || status === "failed" || status === "superseded";
 }
 
 export function stockV2GuardrailsStatusLabel(status?: string): string {

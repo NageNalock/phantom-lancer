@@ -45,9 +45,9 @@ func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (S
 				business_summary_zh, business_summary_en, business_lines_zh_json,
 				business_lines_en_json, risk_tags_zh_json, risk_tags_en_json,
 				profile_text_zh, profile_text_en, ai_profile_status, ai_profile_model,
-				ai_profile_confidence, ai_profile_error, ai_profile_updated_at,
-				base_profile_hash, base_profile_updated_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				ai_profile_confidence, ai_profile_error, ai_profile_updated_at, ai_profile_attempted_at,
+				base_profile_hash, base_profile_updated_at, base_profile_checked_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(symbol) DO UPDATE SET
 				market = excluded.market,
 				instrument_type = excluded.instrument_type,
@@ -81,8 +81,10 @@ func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (S
 				ai_profile_confidence = excluded.ai_profile_confidence,
 				ai_profile_error = excluded.ai_profile_error,
 				ai_profile_updated_at = excluded.ai_profile_updated_at,
+				ai_profile_attempted_at = excluded.ai_profile_attempted_at,
 				base_profile_hash = excluded.base_profile_hash,
 				base_profile_updated_at = excluded.base_profile_updated_at,
+				base_profile_checked_at = excluded.base_profile_checked_at,
 				updated_at = excluded.updated_at
 		`, profile.Symbol, profile.Market, profile.InstrumentType, profile.Name, aliasesJSON,
 			profile.Industry, sectorsJSON, conceptsJSON, tagsJSON, profile.BusinessSummary,
@@ -91,8 +93,8 @@ func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (S
 			keywordsZhJSON, keywordsEnJSON, profile.BusinessSummaryZh, profile.BusinessSummaryEn,
 			businessLinesZhJSON, businessLinesEnJSON, riskTagsZhJSON, riskTagsEnJSON,
 			profile.ProfileTextZh, profile.ProfileTextEn, profile.AIProfileStatus, profile.AIProfileModel,
-			profile.AIProfileConfidence, profile.AIProfileError, nullableTime(profile.AIProfileUpdatedAt),
-			profile.BaseProfileHash, nullableTime(profile.BaseProfileUpdatedAt),
+			profile.AIProfileConfidence, profile.AIProfileError, nullableTime(profile.AIProfileUpdatedAt), nullableTime(profile.AIProfileAttemptedAt),
+			profile.BaseProfileHash, nullableTime(profile.BaseProfileUpdatedAt), nullableTime(profile.BaseProfileCheckedAt),
 			profile.UpdatedAt)
 		return execErr
 	})
@@ -114,6 +116,28 @@ func (s *Store) GetStockProfile(ctx context.Context, symbol string) (StockProfil
 	return profile, nil
 }
 
+func (s *Store) UpdateStockProfileAIState(ctx context.Context, symbol, status, message string, markAttempt bool) error {
+	now := time.Now()
+	result, err := s.assetDB().ExecContext(ctx, `
+		UPDATE stockv2_stock_profiles
+		SET ai_profile_status = ?, ai_profile_error = ?,
+			ai_profile_attempted_at = CASE WHEN ? THEN ? ELSE ai_profile_attempted_at END,
+			updated_at = ?
+		WHERE symbol = ?
+	`, status, safelog.Text(message, 500), markAttempt, now, now, strings.TrimSpace(symbol))
+	if err != nil {
+		return wrapError(err, "update stock profile ai state")
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrStockProfileNotFound
+	}
+	return nil
+}
+
 func (s *Store) ListStockProfiles(ctx context.Context, filter StockProfileListFilter) ([]StockProfile, error) {
 	where, args := stockProfileWhere(filter)
 	args = append(args, normalizedPageLimit(filter.Limit, 500), normalizedPageOffset(filter.Offset))
@@ -132,7 +156,7 @@ func (s *Store) CountStockProfiles(ctx context.Context, filter StockProfileListF
 }
 
 func (s *Store) ListStockProfileSummaries(ctx context.Context, symbols []string) (map[string]StockProfileSummary, error) {
-	symbols = compactStringList(symbols, 100)
+	symbols = compactStringList(symbols, 200)
 	if len(symbols) == 0 {
 		return map[string]StockProfileSummary{}, nil
 	}
@@ -141,10 +165,12 @@ func (s *Store) ListStockProfileSummaries(ctx context.Context, symbols []string)
 		args = append(args, symbol)
 	}
 	rows, err := s.assetDB().QueryContext(ctx, `
-		SELECT symbol, COALESCE(profile_text,''), COALESCE(business_summary_zh,''),
+		SELECT symbol, COALESCE(market,''), COALESCE(instrument_type,'stock'),
+		       COALESCE(profile_text,''), COALESCE(business_summary_zh,''),
 		       COALESCE(business_summary,''), COALESCE(business_summary_en,''),
 		       COALESCE(ai_profile_status,'missing'), COALESCE(ai_profile_model,''),
-		       COALESCE(ai_profile_confidence,0), ai_profile_updated_at, updated_at
+		       COALESCE(ai_profile_confidence,0), base_profile_updated_at, base_profile_checked_at,
+		       ai_profile_updated_at, updated_at
 		FROM stockv2_stock_profiles
 		WHERE symbol IN (`+sqlPlaceholders(len(symbols))+`)
 	`, args...)
@@ -157,9 +183,11 @@ func (s *Store) ListStockProfileSummaries(ctx context.Context, symbols []string)
 	for rows.Next() {
 		var item StockProfileSummary
 		var profileText, summaryZh, summary, summaryEn string
-		var aiUpdatedAt sql.NullTime
+		var baseUpdatedAt, baseCheckedAt, aiUpdatedAt sql.NullTime
 		if err := rows.Scan(
 			&item.Symbol,
+			&item.Market,
+			&item.InstrumentType,
 			&profileText,
 			&summaryZh,
 			&summary,
@@ -167,6 +195,8 @@ func (s *Store) ListStockProfileSummaries(ctx context.Context, symbols []string)
 			&item.AIProfileStatus,
 			&item.AIProfileModel,
 			&item.AIProfileConfidence,
+			&baseUpdatedAt,
+			&baseCheckedAt,
 			&aiUpdatedAt,
 			&item.UpdatedAt,
 		); err != nil {
@@ -177,6 +207,12 @@ func (s *Store) ListStockProfileSummaries(ctx context.Context, symbols []string)
 			item.Status = "partial"
 		}
 		item.BusinessSummary = firstNonEmpty(summaryZh, summary, summaryEn)
+		if baseUpdatedAt.Valid {
+			item.BaseProfileUpdatedAt = baseUpdatedAt.Time
+		}
+		if baseCheckedAt.Valid {
+			item.BaseProfileCheckedAt = baseCheckedAt.Time
+		}
 		if aiUpdatedAt.Valid {
 			item.AIProfileUpdatedAt = aiUpdatedAt.Time
 		}
@@ -205,7 +241,8 @@ func (s *Store) CreateStockProfileUpdateTask(ctx context.Context, task StockProf
 	if task.StartedAt.IsZero() {
 		task.StartedAt = now
 	}
-	if task.FinishedAt.IsZero() && task.Status != "" && task.Status != StockProfileUpdateStatusRunning {
+	if task.FinishedAt.IsZero() && (task.Status == StockProfileUpdateStatusCompleted ||
+		task.Status == StockProfileUpdateStatusPartial || task.Status == StockProfileUpdateStatusFailed) {
 		task.FinishedAt = now
 	}
 	if task.CreatedAt.IsZero() {
@@ -259,6 +296,20 @@ func (s *Store) ListStockProfileUpdateTasks(ctx context.Context, filter StockPro
 	return scanRows(rows, scanStockProfileUpdateTask, "scan stock profile update task", "iterate stock profile update tasks")
 }
 
+func (s *Store) HasPendingStockProfileUpdateTask(ctx context.Context, symbol string) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM stockv2_stock_profile_update_tasks
+			WHERE symbol = ? AND status IN ('queued', 'running')
+		)
+	`, strings.TrimSpace(symbol)).Scan(&exists)
+	if err != nil {
+		return false, wrapError(err, "check pending stock profile update task")
+	}
+	return exists == 1, nil
+}
+
 func (s *Store) UpdateStockProfileUpdateTaskAIResultByAgentRunID(ctx context.Context, agentRunID, taskStatus, aiStatus, aiError string) error {
 	agentRunID = strings.TrimSpace(agentRunID)
 	if agentRunID == "" {
@@ -298,7 +349,8 @@ func stockProfileSelectSQL() string {
 		       COALESCE(profile_text_zh,''), COALESCE(profile_text_en,''),
 		       COALESCE(ai_profile_status,'missing'), COALESCE(ai_profile_model,''),
 		       COALESCE(ai_profile_confidence,0), COALESCE(ai_profile_error,''),
-		       ai_profile_updated_at, COALESCE(base_profile_hash,''), base_profile_updated_at, updated_at
+		       ai_profile_updated_at, ai_profile_attempted_at,
+		       COALESCE(base_profile_hash,''), base_profile_updated_at, base_profile_checked_at, updated_at
 		FROM stockv2_stock_profiles`
 }
 
@@ -329,7 +381,7 @@ func scanStockProfile(scanner rowScanner) (StockProfile, error) {
 	var aliasesJSON, sectorsJSON, conceptsJSON, tagsJSON string
 	var aliasesZhJSON, aliasesEnJSON, keywordsZhJSON, keywordsEnJSON string
 	var businessLinesZhJSON, businessLinesEnJSON, riskTagsZhJSON, riskTagsEnJSON string
-	var aiProfileUpdatedAt, baseProfileUpdatedAt sql.NullTime
+	var aiProfileUpdatedAt, aiProfileAttemptedAt, baseProfileUpdatedAt, baseProfileCheckedAt sql.NullTime
 	if err := scanner.Scan(
 		&profile.Symbol,
 		&profile.Market,
@@ -364,8 +416,10 @@ func scanStockProfile(scanner rowScanner) (StockProfile, error) {
 		&profile.AIProfileConfidence,
 		&profile.AIProfileError,
 		&aiProfileUpdatedAt,
+		&aiProfileAttemptedAt,
 		&profile.BaseProfileHash,
 		&baseProfileUpdatedAt,
+		&baseProfileCheckedAt,
 		&profile.UpdatedAt,
 	); err != nil {
 		return StockProfile{}, err
@@ -386,8 +440,14 @@ func scanStockProfile(scanner rowScanner) (StockProfile, error) {
 	if aiProfileUpdatedAt.Valid {
 		profile.AIProfileUpdatedAt = aiProfileUpdatedAt.Time
 	}
+	if aiProfileAttemptedAt.Valid {
+		profile.AIProfileAttemptedAt = aiProfileAttemptedAt.Time
+	}
 	if baseProfileUpdatedAt.Valid {
 		profile.BaseProfileUpdatedAt = baseProfileUpdatedAt.Time
+	}
+	if baseProfileCheckedAt.Valid {
+		profile.BaseProfileCheckedAt = baseProfileCheckedAt.Time
 	}
 	if profile.ProfileVersion <= 0 {
 		profile.ProfileVersion = 1

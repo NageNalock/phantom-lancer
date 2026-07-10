@@ -82,13 +82,14 @@ const (
 )
 
 // AgentRun 状态机。CreateAgentRunRecord 先产出 ready;有 executor 时
-// 后续推进 running/completed/failed。
+// 后续推进 running/completed/failed；输入版本被替换时进入 superseded 终态。
 const (
-	AgentRunStatusPending   = "pending"
-	AgentRunStatusReady     = "ready"
-	AgentRunStatusRunning   = "running"
-	AgentRunStatusCompleted = "completed"
-	AgentRunStatusFailed    = "failed"
+	AgentRunStatusPending    = "pending"
+	AgentRunStatusReady      = "ready"
+	AgentRunStatusRunning    = "running"
+	AgentRunStatusCompleted  = "completed"
+	AgentRunStatusFailed     = "failed"
+	AgentRunStatusSuperseded = "superseded"
 )
 
 // ResolveAgentTask 解析结果状态。

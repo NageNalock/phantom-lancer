@@ -15,7 +15,10 @@ import (
 	"time"
 )
 
-const baiduDailyBarsDefaultMinInterval = 750 * time.Millisecond
+const (
+	baiduDailyBarsDefaultMinInterval = 750 * time.Millisecond
+	baiduDailyBarsBlockedFor         = 10 * time.Minute
+)
 
 var errBaiduDailyBarsAccessDenied = errors.New("baidu daily bars access denied")
 
@@ -35,6 +38,8 @@ type BaiduDailyBarsSource struct {
 	throttleMu    sync.Mutex
 	lastRequestAt time.Time
 	minInterval   time.Duration
+	blockedMu     sync.Mutex
+	blockedUntil  time.Time
 }
 
 // NewBaiduDailyBarsSource 创建百度日 K 数据源
@@ -57,7 +62,8 @@ func (b *BaiduDailyBarsSource) FetchDailyBars(ctx context.Context, symbol, marke
 	isStock := "true"
 	isFutures := "false"
 	typ := normalizeInstrumentType(instrumentType)
-	if typ == InstrumentTypeExchangeFund || looksLikeExchangeFund("") {
+	_, inferredType := inferInstrumentMarketAndType(symbol)
+	if typ == InstrumentTypeExchangeFund || inferredType == InstrumentTypeExchangeFund {
 		isStock = "false"
 		isFutures = "true"
 	}
@@ -83,12 +89,21 @@ func (b *BaiduDailyBarsSource) FetchDailyBars(ctx context.Context, symbol, marke
 		return nil, fmt.Errorf("build baidu request: %w", err)
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "application/vnd.finance-web.v1+json")
+	req.Header.Set("Origin", "https://gushitong.baidu.com")
+	req.Header.Set("Referer", "https://gushitong.baidu.com/")
 
 	client := b.httpClient
 	if client == nil {
 		client = http.DefaultClient
 	}
+	if err := b.checkBlocked(); err != nil {
+		return nil, err
+	}
 	if err := b.waitRequestTurn(ctx); err != nil {
+		return nil, err
+	}
+	if err := b.checkBlocked(); err != nil {
 		return nil, err
 	}
 	resp, err := client.Do(req)
@@ -97,6 +112,10 @@ func (b *BaiduDailyBarsSource) FetchDailyBars(ctx context.Context, symbol, marke
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+		b.block()
+		return nil, fmt.Errorf("%w: HTTP %d", errBaiduDailyBarsAccessDenied, resp.StatusCode)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("baidu http error: %d", resp.StatusCode)
 	}
@@ -108,6 +127,9 @@ func (b *BaiduDailyBarsSource) FetchDailyBars(ctx context.Context, symbol, marke
 
 	bars, err := parseBaiduMarketData(body, symbol, market)
 	if err != nil {
+		if errors.Is(err, errBaiduDailyBarsAccessDenied) {
+			b.block()
+		}
 		return nil, fmt.Errorf("parse baidu response: %w", err)
 	}
 	if len(bars) == 0 {
@@ -119,7 +141,7 @@ func (b *BaiduDailyBarsSource) FetchDailyBars(ctx context.Context, symbol, marke
 // baiduAPIResponse 百度财经 API 响应结构
 type baiduAPIResponse struct {
 	QueryID    string          `json:"QueryID"`
-	ResultCode string          `json:"ResultCode"`
+	ResultCode json.RawMessage `json:"ResultCode"`
 	Result     json.RawMessage `json:"Result"`
 }
 
@@ -137,11 +159,12 @@ func parseBaiduMarketData(body []byte, symbol, market string) ([]StockV2DailyBar
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("unmarshal baidu response: %w", err)
 	}
-	if resp.ResultCode != "0" {
-		if resp.ResultCode == "403" {
-			return nil, fmt.Errorf("%w: ResultCode=%s", errBaiduDailyBarsAccessDenied, resp.ResultCode)
+	resultCode := parseBaiduResultCode(resp.ResultCode)
+	if resultCode != "0" {
+		if resultCode == "403" {
+			return nil, fmt.Errorf("%w: ResultCode=%s", errBaiduDailyBarsAccessDenied, resultCode)
 		}
-		return nil, fmt.Errorf("baidu ResultCode=%s", resp.ResultCode)
+		return nil, fmt.Errorf("baidu ResultCode=%s", resultCode)
 	}
 
 	md, err := extractBaiduMarketData(resp.Result)
@@ -173,9 +196,9 @@ func parseBaiduMarketData(body []byte, symbol, market string) ([]StockV2DailyBar
 		volume := parseFloatBaidu(parts[4])
 		high := parseFloatBaidu(parts[5])
 		low := parseFloatBaidu(parts[6])
-		amount := parseFloatBaidu(parts[7])
+		amount, amountPresent := parseDailyBarFloatWithPresence(parts[7])
 		// parts[8] = range (涨跌额), parts[9] = ratio (涨跌幅%)
-		turnoverRate := parseFloatBaidu(parts[10])
+		turnoverRate, turnoverRatePresent := parseDailyBarFloatWithPresence(parts[10])
 		preClose := parseFloatBaidu(parts[11])
 
 		// 价格无效则丢弃，绝不写入坏数据
@@ -191,28 +214,57 @@ func parseBaiduMarketData(body []byte, symbol, market string) ([]StockV2DailyBar
 			pct = (closeP - preClose) / preClose * 100
 		}
 
+		quality := DailyBarQualityOK
+		if !amountPresent || !turnoverRatePresent {
+			quality = DailyBarQualityPartial
+		}
 		bars = append(bars, StockV2DailyBar{
-			ID:           generateID(),
-			Symbol:       "", // 由调用方按上下文回填
-			Market:       market,
-			TradeDate:    date,
-			Open:         open,
-			High:         high,
-			Low:          low,
-			Close:        closeP,
-			PrevClose:    preClose,
-			Volume:       volume,
-			Amount:       amount,
-			PctChange:    pct,
-			TurnoverRate: turnoverRate,
-			Adjusted:     DailyBarAdjustedNone, // 百度仅提供不复权
-			Source:       "baidu_kline",
-			FetchedAt:    now,
-			Quality:      DailyBarQualityOK,
+			ID:                  generateID(),
+			Symbol:              "", // 由调用方按上下文回填
+			Market:              market,
+			TradeDate:           date,
+			Open:                open,
+			High:                high,
+			Low:                 low,
+			Close:               closeP,
+			PrevClose:           preClose,
+			Volume:              volume,
+			Amount:              amount,
+			PctChange:           pct,
+			TurnoverRate:        turnoverRate,
+			AmountPresent:       amountPresent,
+			TurnoverRatePresent: turnoverRatePresent,
+			Adjusted:            DailyBarAdjustedNone, // 百度仅提供不复权
+			Source:              "baidu_kline",
+			FetchedAt:           now,
+			Quality:             quality,
 		})
 	}
 
 	return bars, nil
+}
+
+func parseBaiduResultCode(raw json.RawMessage) string {
+	text := strings.TrimSpace(string(raw))
+	if unquoted, err := strconv.Unquote(text); err == nil {
+		return strings.TrimSpace(unquoted)
+	}
+	return text
+}
+
+func (b *BaiduDailyBarsSource) checkBlocked() error {
+	b.blockedMu.Lock()
+	defer b.blockedMu.Unlock()
+	if time.Now().Before(b.blockedUntil) {
+		return fmt.Errorf("%w: cooldown active", errBaiduDailyBarsAccessDenied)
+	}
+	return nil
+}
+
+func (b *BaiduDailyBarsSource) block() {
+	b.blockedMu.Lock()
+	b.blockedUntil = time.Now().Add(baiduDailyBarsBlockedFor)
+	b.blockedMu.Unlock()
 }
 
 func (b *BaiduDailyBarsSource) waitRequestTurn(ctx context.Context) error {

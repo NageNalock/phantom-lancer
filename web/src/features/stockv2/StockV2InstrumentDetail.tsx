@@ -19,6 +19,7 @@ import type { AppActions } from "../../app/App";
 import {
   stockV2AdjustedLabel,
   stockV2AgentRunStatusLabel,
+  stockV2AgentRunTerminal,
   stockV2AgentRunStatusTone,
   stockV2DailyBarJobStatusLabel,
   stockV2DailyBarJobStatusTone,
@@ -315,7 +316,7 @@ export function StockV2InstrumentDetail({
       try {
         const run = await actions.api<StockV2AgentRun>(`/api/stockv2/agent/runs/${encodeURIComponent(runID)}`);
         setProfileRun(run);
-        if (run.status === "completed" || run.status === "failed") {
+        if (stockV2AgentRunTerminal(run.status)) {
           setProfileBusy(false);
           await loadProfile();
           await loadProfileTasks();
@@ -346,7 +347,7 @@ export function StockV2InstrumentDetail({
       await Promise.all([load(), loadProfile(), loadProfileTasks()]);
       if (result.agentRun) {
         actions.setToast("数据资产已维护，AI 画像总结已发起", "good");
-        if (result.agentRun.status === "completed" || result.agentRun.status === "failed") {
+        if (stockV2AgentRunTerminal(result.agentRun.status)) {
           setProfileBusy(false);
         } else {
           pollProfileRun(result.agentRun.id);

@@ -30,6 +30,12 @@ func (s *Service) GetStockProfile(ctx context.Context, symbol string) (StockProf
 	return s.store.GetStockProfile(ctx, normalizedSymbol)
 }
 
+func (s *Service) updateStockProfileAIState(ctx context.Context, symbol, status, message string, markAttempt bool) error {
+	unlock := s.lockStockProfile(symbol)
+	defer unlock()
+	return s.store.UpdateStockProfileAIState(ctx, symbol, status, message, markAttempt)
+}
+
 func (s *Service) ListStockProfiles(ctx context.Context, filter StockProfileListFilter) ([]StockProfile, error) {
 	filter.Limit = normalizedPageLimit(filter.Limit, 500)
 	filter.Offset = normalizedPageOffset(filter.Offset)
@@ -47,7 +53,7 @@ func (s *Service) CountStockProfiles(ctx context.Context, filter StockProfileLis
 }
 
 func (s *Service) ListStockProfileSummaries(ctx context.Context, symbols []string) (map[string]StockProfileSummary, error) {
-	symbols = compactStringList(symbols, 100)
+	symbols = compactStringList(symbols, 200)
 	out, err := s.store.ListStockProfileSummaries(ctx, symbols)
 	if err != nil {
 		return nil, err
@@ -68,9 +74,7 @@ func (s *Service) prepareStockProfileSummaryAgentRun(ctx context.Context, pack S
 	}
 	model, err := s.resolveModel(ctx, taskProfile)
 	if err != nil {
-		profile.AIProfileStatus = StockProfileAIStatusNotConfigured
-		profile.AIProfileError = err.Error()
-		_, _ = s.store.UpsertStockProfile(ctx, profile)
+		_ = s.updateStockProfileAIState(ctx, profile.Symbol, StockProfileAIStatusNotConfigured, err.Error(), false)
 		return AgentRun{}, AgentDecisionLedger{}, "", err
 	}
 	if s.agentExecutor == nil {
@@ -96,7 +100,7 @@ func (s *Service) prepareStockProfileSummaryAgentRun(ctx context.Context, pack S
 	return run, ledger, model.ModelName, nil
 }
 
-func (s *Service) startStockProfileAgentRunAsync(ctx context.Context, run AgentRun, ledger AgentDecisionLedger, pack StockProfileSummaryContext, modelName string) {
+func (s *Service) executeStockProfileAgentRun(ctx context.Context, run AgentRun, ledger AgentDecisionLedger, pack StockProfileSummaryContext, modelName string) {
 	profile := pack.Profile
 	defer func() {
 		if r := recover(); r != nil {
@@ -110,15 +114,6 @@ func (s *Service) startStockProfileAgentRunAsync(ctx context.Context, run AgentR
 		s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("no executor configured"))
 		return
 	}
-	if s.stockProfileAISem != nil {
-		select {
-		case s.stockProfileAISem <- struct{}{}:
-			defer func() { <-s.stockProfileAISem }()
-		case <-ctx.Done():
-			s.finalizeAgentRun(ctx, run.ID, nil, ctx.Err())
-			return
-		}
-	}
 	running := run
 	running.Status = AgentRunStatusRunning
 	if _, err := s.store.UpdateAgentRun(ctx, running); err != nil && s.log != nil {
@@ -130,14 +125,27 @@ func (s *Service) startStockProfileAgentRunAsync(ctx context.Context, run AgentR
 }
 
 func (s *Service) applyStockProfileEnhancementResult(ctx context.Context, symbol string, result map[string]any, modelName string, confidence float64) (StockProfile, error) {
+	return s.applyStockProfileEnhancementResultForRun(ctx, symbol, "", result, modelName, confidence)
+}
+
+func (s *Service) applyStockProfileEnhancementResultForRun(ctx context.Context, symbol, runID string, result map[string]any, modelName string, confidence float64) (StockProfile, error) {
+	unlock := s.lockStockProfile(symbol)
+	defer unlock()
+	if strings.TrimSpace(runID) != "" {
+		exists, current, err := s.store.StockProfileAIQueueRunCurrent(ctx, symbol, runID)
+		if err != nil {
+			return StockProfile{}, err
+		}
+		if exists && !current {
+			return StockProfile{}, ErrStockProfileAIQueueLeaseStale
+		}
+	}
 	profile, err := s.store.GetStockProfile(ctx, strings.TrimSpace(symbol))
 	if err != nil {
 		return StockProfile{}, err
 	}
 	if len(result) == 0 {
-		profile.AIProfileStatus = StockProfileAIStatusFailed
-		profile.AIProfileError = ErrInvalidStockProfileEnhancement.Error()
-		_, _ = s.store.UpsertStockProfile(ctx, profile)
+		_ = s.store.UpdateStockProfileAIState(ctx, profile.Symbol, StockProfileAIStatusFailed, ErrInvalidStockProfileEnhancement.Error(), true)
 		return StockProfile{}, ErrInvalidStockProfileEnhancement
 	}
 	profile.BusinessSummaryZh = firstProfileResultString(result, "summaryZh", "businessSummaryZh")
@@ -163,6 +171,7 @@ func (s *Service) applyStockProfileEnhancementResult(ctx context.Context, symbol
 	profile.AIProfileConfidence = confidence
 	profile.AIProfileError = ""
 	profile.AIProfileUpdatedAt = time.Now()
+	profile.AIProfileAttemptedAt = profile.AIProfileUpdatedAt
 	updated, err := s.store.UpsertStockProfile(ctx, profile)
 	if err != nil {
 		return StockProfile{}, err
@@ -171,24 +180,30 @@ func (s *Service) applyStockProfileEnhancementResult(ctx context.Context, symbol
 	return updated, nil
 }
 
-func (s *Service) markStockProfileAIEnhancementFailed(ctx context.Context, run AgentRun, message string) {
+// markStockProfileAIEnhancementFailed returns true when the run no longer owns
+// the symbol's desired input version. Queue enqueues use the same per-symbol
+// lock, so the ownership check and profile state write cannot race each other.
+func (s *Service) markStockProfileAIEnhancementFailed(ctx context.Context, run AgentRun, message string) bool {
 	if run.TaskType != AgentTaskTypeStockProfileSummary || run.TriggerObjectType != "stock_profile" || strings.TrimSpace(run.TriggerObjectID) == "" {
-		return
+		return false
 	}
-	profile, err := s.store.GetStockProfile(ctx, strings.TrimSpace(run.TriggerObjectID))
-	if err != nil {
+	unlock := s.lockStockProfile(run.TriggerObjectID)
+	defer unlock()
+	exists, current, currentErr := s.store.StockProfileAIQueueRunCurrent(ctx, run.TriggerObjectID, run.ID)
+	if currentErr != nil {
 		if s.log != nil {
-			s.log.Warn("mark stock profile ai failed: get profile failed", "run_id", run.ID, "task_type", run.TaskType, "symbol", run.TriggerObjectID, "error", safelog.Text(err.Error(), 240))
+			s.log.Warn("mark stock profile ai failed: validate queue owner failed", "run_id", run.ID, "symbol", run.TriggerObjectID, "error", safelog.Text(currentErr.Error(), 240))
 		}
-		return
+		return false
 	}
-	profile.AIProfileStatus = StockProfileAIStatusFailed
-	profile.AIProfileError = safelog.Text(message, 500)
-	profile.AIProfileUpdatedAt = time.Now()
-	if _, err := s.store.UpsertStockProfile(ctx, profile); err != nil && s.log != nil {
+	if exists && !current {
+		return true
+	}
+	if err := s.store.UpdateStockProfileAIState(ctx, run.TriggerObjectID, StockProfileAIStatusFailed, message, true); err != nil && s.log != nil {
 		s.log.Warn("mark stock profile ai failed: save profile failed", "run_id", run.ID, "task_type", run.TaskType, "symbol", run.TriggerObjectID, "error", safelog.Text(err.Error(), 240))
 	}
 	s.markStockProfileUpdateTaskAIResult(ctx, run.ID, StockProfileUpdateStatusPartial, StockProfileAIStatusFailed, message)
+	return false
 }
 
 func (s *Service) markStockProfileUpdateTaskAIResult(ctx context.Context, agentRunID, taskStatus, aiStatus, message string) {
@@ -246,6 +261,8 @@ func (s *Service) upsertInstrumentWithProfile(ctx context.Context, instrument St
 	if err := s.store.UpsertInstrument(ctx, instrument); err != nil {
 		return err
 	}
+	unlock := s.lockStockProfile(instrument.Symbol)
+	defer unlock()
 	profile, err := s.store.UpsertStockProfile(ctx, s.stockProfileFromInstrument(ctx, instrument, false))
 	if err != nil {
 		return err
@@ -339,6 +356,9 @@ func buildStockProfileFromInstrument(instrument StockV2Instrument) StockProfile 
 }
 
 func mergeStockProfileAIFields(base, existing StockProfile) StockProfile {
+	base.BaseProfileHash = existing.BaseProfileHash
+	base.BaseProfileUpdatedAt = existing.BaseProfileUpdatedAt
+	base.BaseProfileCheckedAt = existing.BaseProfileCheckedAt
 	base.BusinessSummaryEn = existing.BusinessSummaryEn
 	base.BusinessLinesZh = appendProfileTerms(base.BusinessLinesZh, existing.BusinessLinesZh...)
 	base.BusinessLinesEn = appendProfileTerms(base.BusinessLinesEn, existing.BusinessLinesEn...)
@@ -349,6 +369,7 @@ func mergeStockProfileAIFields(base, existing StockProfile) StockProfile {
 	base.AIProfileConfidence = existing.AIProfileConfidence
 	base.AIProfileError = existing.AIProfileError
 	base.AIProfileUpdatedAt = existing.AIProfileUpdatedAt
+	base.AIProfileAttemptedAt = existing.AIProfileAttemptedAt
 	base.AliasesZh = appendProfileTerms(base.AliasesZh, existing.AliasesZh...)
 	base.AliasesEn = appendProfileTerms(base.AliasesEn, existing.AliasesEn...)
 	base.KeywordsZh = appendProfileTerms(base.KeywordsZh, existing.KeywordsZh...)
@@ -356,9 +377,9 @@ func mergeStockProfileAIFields(base, existing StockProfile) StockProfile {
 	if existing.BusinessSummaryZh != "" && (existing.AIProfileStatus == StockProfileAIStatusReady || stockProfileSummaryLooksBasic(base.BusinessSummaryZh)) {
 		base.BusinessSummaryZh = existing.BusinessSummaryZh
 	}
-	if base.BusinessSummaryZh != "" {
-		base.BusinessSummary = base.BusinessSummaryZh
-	}
+	// ponytail: BusinessSummary is the freshly fetched base/F10 text. Keep the
+	// previous AI summary in BusinessSummaryZh so the next run can compare both
+	// inputs without replacing current source data with stale generated text.
 	if base.FundType == "" {
 		base.FundType = existing.FundType
 	}
@@ -594,10 +615,39 @@ func normalizeStockProfileAIStatus(status string) string {
 		return StockProfileAIStatusFailed
 	case StockProfileAIStatusNotConfigured:
 		return StockProfileAIStatusNotConfigured
-	case StockProfileUpdateAIStatusRunning:
-		return StockProfileUpdateAIStatusRunning
+	case StockProfileAIStatusQueued:
+		return StockProfileAIStatusQueued
+	case StockProfileAIStatusRunning:
+		return StockProfileAIStatusRunning
 	default:
 		return StockProfileAIStatusMissing
+	}
+}
+
+func stockProfileFreshnessSummary(profile StockProfile, now time.Time) map[string]any {
+	baseCheckedAt := profile.BaseProfileCheckedAt
+	if baseCheckedAt.IsZero() {
+		baseCheckedAt = profile.BaseProfileUpdatedAt
+	}
+	baseFresh := !baseCheckedAt.IsZero() &&
+		now.Sub(baseCheckedAt) <= baseProfileRefreshInterval+24*time.Hour
+	aiReady := normalizeStockProfileAIStatus(profile.AIProfileStatus) == StockProfileAIStatusReady &&
+		!profile.AIProfileUpdatedAt.IsZero() &&
+		!profile.AIProfileUpdatedAt.Before(profile.BaseProfileUpdatedAt)
+	status := "ready"
+	if !baseFresh {
+		status = "base_stale"
+	} else if !aiReady {
+		status = "ai_pending"
+	}
+	return map[string]any{
+		"status":               status,
+		"profileVersion":       profile.ProfileVersion,
+		"baseProfileUpdatedAt": profile.BaseProfileUpdatedAt,
+		"baseProfileCheckedAt": baseCheckedAt,
+		"aiProfileStatus":      normalizeStockProfileAIStatus(profile.AIProfileStatus),
+		"aiProfileUpdatedAt":   profile.AIProfileUpdatedAt,
+		"ready":                baseFresh && aiReady,
 	}
 }
 

@@ -7,27 +7,6 @@ import (
 	"time"
 )
 
-func TestDailyBarsNeedsMaintenance(t *testing.T) {
-	tests := []struct {
-		name string
-		q    DailyBarsQuality
-		want bool
-	}{
-		{name: "missing", q: DailyBarsQuality{}, want: true},
-		{name: "partial", q: DailyBarsQuality{HasData: true, RowCount: 120, Meets250: false}, want: true},
-		{name: "stale", q: DailyBarsQuality{HasData: true, RowCount: 260, Meets250: true, Stale: true}, want: true},
-		{name: "ready", q: DailyBarsQuality{HasData: true, RowCount: 260, Meets250: true, Stale: false}, want: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := dailyBarsNeedsMaintenance(tt.q); got != tt.want {
-				t.Fatalf("dailyBarsNeedsMaintenance() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestDailyBarRangeStartEndUsesAvailableTradeDate(t *testing.T) {
 	loc, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
@@ -66,6 +45,26 @@ func TestDailyBarRangeStartEndUsesAvailableTradeDate(t *testing.T) {
 				t.Fatalf("end=%s, want %s", gotEnd, tt.wantEnd)
 			}
 		})
+	}
+}
+
+func TestAssetMaintenanceDailyBarWindowCanReachTwoHundredFiftySessions(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 10, 18, 0, 0, 0, loc)
+	start, end := assetMaintenanceDailyBarStartEnd(now)
+	startAt, err := time.ParseInLocation("2006-01-02", start, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endAt, err := time.ParseInLocation("2006-01-02", end, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if days := int(endAt.Sub(startAt).Hours() / 24); days != assetMaintenanceDailyBarWindowDays || days <= dailyBarRangeDays(DailyBarRange1Y) {
+		t.Fatalf("maintenance window=%d days (%s..%s), want %d and wider than UI 1y", days, start, end, assetMaintenanceDailyBarWindowDays)
 	}
 }
 
@@ -111,5 +110,33 @@ func TestGetDailyBarsQualityBatchReturnsDataAndJobErrors(t *testing.T) {
 	}
 	if got["600519"].HasData || got["600519"].LastErrorMessage != "fetch failed" {
 		t.Fatalf("quality for 600519 = %+v", got["600519"])
+	}
+}
+
+func TestExchangeFundQualityDoesNotRequireStockFlowFacets(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	inst := StockV2Instrument{ID: generateID(), Symbol: "510300", Market: "SH", InstrumentType: InstrumentTypeExchangeFund}
+	if err := store.UpsertInstrument(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertDailyBars(ctx, []StockV2DailyBar{{
+		Symbol: "510300", Market: "SH", TradeDate: time.Now().Format("2006-01-02"),
+		Open: 4, High: 4.1, Low: 3.9, Close: 4, Volume: 100,
+		AmountPresent: true, TurnoverRatePresent: true,
+		Adjusted: DailyBarAdjustedNone, Source: "fund_test", FetchedAt: time.Now(), Quality: DailyBarQualityOK,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	quality, err := NewService(store, nil, nil).GetDailyBarsQuality(ctx, "510300", DailyBarAdjustedNone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !quality.FacetsComplete || quality.IncompleteCount != 0 {
+		t.Fatalf("fund quality=%+v, want core facets complete without stock flow", quality)
 	}
 }

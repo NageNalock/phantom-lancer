@@ -160,15 +160,13 @@ func (s *Service) BuildAgentContextPack(ctx context.Context, hit MonitorHit) (Ag
 		freshness["dailyBars"] = dailyBarsFreshnessSummary(pack.DailyBars)
 		pack.MinuteBars = s.buildMinuteBarsContext(ctx, symbol)
 		freshness["minuteBars"] = minuteBarsFreshnessSummary(pack.MinuteBars)
-		if pack.NewsEvent != nil {
-			if profile, err := s.store.GetStockProfile(ctx, symbol); err == nil {
-				pack.Profile = &profile
-				freshness["stockProfile"] = map[string]any{"status": "present", "profileVersion": profile.ProfileVersion}
-			} else if errors.Is(err, ErrStockProfileNotFound) {
-				freshness["stockProfile"] = map[string]any{"status": "missing"}
-			} else {
-				return AgentContextPack{}, err
-			}
+		if profile, err := s.store.GetStockProfile(ctx, symbol); err == nil {
+			pack.Profile = &profile
+			freshness["stockProfile"] = stockProfileFreshnessSummary(profile, time.Now())
+		} else if errors.Is(err, ErrStockProfileNotFound) {
+			freshness["stockProfile"] = map[string]any{"status": "missing", "ready": false}
+		} else {
+			return AgentContextPack{}, err
 		}
 	}
 

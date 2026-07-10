@@ -1897,10 +1897,15 @@ func (s *Service) finalizeAgentRunWithOutput(
 		run.ErrorMessage = agentRunFailureMessage(execErr.Error(), execOutput)
 		now := time.Now()
 		run.FinishedAt = now
-		s.markStockProfileAIEnhancementFailed(ctx, run, run.ErrorMessage)
-		_ = s.store.UpdateAssetMaintenanceItemByAgentRun(ctx, run.ID, AssetMaintenanceItemStatusFailed, StockProfileAIStatusFailed, run.ErrorMessage, now)
-		s.markOpportunityDiscoveryRunFailed(ctx, run, run.ErrorMessage)
-		s.markPortfolioSentinelAgentRunFailed(ctx, run, run.ErrorMessage)
+		if s.markStockProfileAIEnhancementFailed(ctx, run, run.ErrorMessage) {
+			run.Status = AgentRunStatusSuperseded
+			run.ErrorMessage = "superseded by newer stock profile input"
+			ledger.StructuredOutput = map[string]any{"superseded": true}
+		} else {
+			_ = s.store.UpdateAssetMaintenanceItemByAgentRun(ctx, run.ID, AssetMaintenanceItemStatusFailed, StockProfileAIStatusFailed, run.ErrorMessage, now)
+			s.markOpportunityDiscoveryRunFailed(ctx, run, run.ErrorMessage)
+			s.markPortfolioSentinelAgentRunFailed(ctx, run, run.ErrorMessage)
+		}
 
 		ledger.OutputArtifactSummary = safelog.Text(outputArtifact.String(), 16384)
 		if s.log != nil {
@@ -1922,10 +1927,15 @@ func (s *Service) finalizeAgentRunWithOutput(
 		run.Status = AgentRunStatusFailed
 		run.ErrorMessage = agentRunFailureMessage("no valid result submitted", execOutput)
 		run.FinishedAt = time.Now()
-		s.markStockProfileAIEnhancementFailed(ctx, run, run.ErrorMessage)
-		_ = s.store.UpdateAssetMaintenanceItemByAgentRun(ctx, run.ID, AssetMaintenanceItemStatusFailed, StockProfileAIStatusFailed, run.ErrorMessage, run.FinishedAt)
-		s.markOpportunityDiscoveryRunFailed(ctx, run, run.ErrorMessage)
-		s.markPortfolioSentinelAgentRunFailed(ctx, run, run.ErrorMessage)
+		if s.markStockProfileAIEnhancementFailed(ctx, run, run.ErrorMessage) {
+			run.Status = AgentRunStatusSuperseded
+			run.ErrorMessage = "superseded by newer stock profile input"
+			ledger.StructuredOutput = map[string]any{"superseded": true}
+		} else {
+			_ = s.store.UpdateAssetMaintenanceItemByAgentRun(ctx, run.ID, AssetMaintenanceItemStatusFailed, StockProfileAIStatusFailed, run.ErrorMessage, run.FinishedAt)
+			s.markOpportunityDiscoveryRunFailed(ctx, run, run.ErrorMessage)
+			s.markPortfolioSentinelAgentRunFailed(ctx, run, run.ErrorMessage)
+		}
 		ledger.OutputArtifactSummary = safelog.Text(outputArtifact.String(), 16384)
 		if s.log != nil {
 			s.log.Warn("agent run finalized without valid result", "run_id", run.ID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "status", run.Status, "error", safelog.Text(run.ErrorMessage, 300))
@@ -1937,6 +1947,35 @@ func (s *Service) finalizeAgentRunWithOutput(
 			s.log.Warn("finalize: update ledger after missing result failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "error", safelog.Text(err.Error(), 240))
 		}
 		return
+	}
+
+	if run.TaskType == AgentTaskTypeStockProfileSummary && run.TriggerObjectType == "stock_profile" && run.TriggerObjectID != "" {
+		exists, current, currentErr := s.store.StockProfileAIQueueRunCurrent(ctx, run.TriggerObjectID, run.ID)
+		if currentErr != nil {
+			run.Status = AgentRunStatusFailed
+			run.ErrorMessage = safelog.Text("validate stock profile ai input version failed: "+currentErr.Error(), 500)
+			run.FinishedAt = time.Now()
+			ledger.OutputArtifactSummary = safelog.Text(outputArtifact.String(), 16384)
+			_, _ = s.store.UpdateAgentDecisionLedger(ctx, ledger)
+			_, _ = s.store.UpdateAgentRun(ctx, run)
+			return
+		}
+		if exists && !current {
+			// ponytail: a newer durable queue version owns the symbol now; retain this
+			// run for audit without allowing its stale output to overwrite the profile.
+			run.Status = AgentRunStatusSuperseded
+			run.ErrorMessage = "superseded by newer stock profile input"
+			run.FinishedAt = time.Now()
+			ledger.OutputArtifactSummary = safelog.Text(outputArtifact.String(), 16384)
+			ledger.StructuredOutput = map[string]any{
+				"outputType":    submitted.OutputType,
+				"resultSummary": submitted.ResultSummary,
+				"superseded":    true,
+			}
+			_, _ = s.store.UpdateAgentDecisionLedger(ctx, ledger)
+			_, _ = s.store.UpdateAgentRun(ctx, run)
+			return
+		}
 	}
 
 	// 有合法 result
@@ -1989,7 +2028,20 @@ func (s *Service) finalizeAgentRunWithOutput(
 	}
 	if run.TaskType == AgentTaskTypeStockProfileSummary && run.TriggerObjectType == "stock_profile" && run.TriggerObjectID != "" {
 		modelName := s.agentRunModelName(ctx, run)
-		if _, err := s.applyStockProfileEnhancementResult(ctx, run.TriggerObjectID, submitted.Result, modelName, submitted.Confidence); err != nil {
+		if _, err := s.applyStockProfileEnhancementResultForRun(ctx, run.TriggerObjectID, run.ID, submitted.Result, modelName, submitted.Confidence); err != nil {
+			if errors.Is(err, ErrStockProfileAIQueueLeaseStale) {
+				run.Status = AgentRunStatusSuperseded
+				run.ErrorMessage = "superseded by newer stock profile input"
+				run.FinishedAt = time.Now()
+				ledger.StructuredOutput = map[string]any{
+					"outputType":    submitted.OutputType,
+					"resultSummary": submitted.ResultSummary,
+					"superseded":    true,
+				}
+				_, _ = s.store.UpdateAgentDecisionLedger(ctx, ledger)
+				_, _ = s.store.UpdateAgentRun(ctx, run)
+				return
+			}
 			run.Status = AgentRunStatusFailed
 			run.ErrorMessage = safelog.Text("save stock profile enhancement failed: "+err.Error(), 500)
 			s.markStockProfileUpdateTaskAIResult(ctx, run.ID, StockProfileUpdateStatusPartial, StockProfileAIStatusFailed, run.ErrorMessage)

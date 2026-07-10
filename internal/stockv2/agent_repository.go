@@ -582,6 +582,18 @@ func (s *Store) ListAgentRuns(ctx context.Context, filter AgentRunListFilter) ([
 	return scanRows(rows, scanAgentRun, "scan agent run", "iterate agent runs")
 }
 
+func (s *Store) ListActiveStockProfileAgentRuns(ctx context.Context) ([]AgentRun, error) {
+	rows, err := s.db.QueryContext(ctx, agentRunSelectSQL+`
+		WHERE task_type = ? AND trigger_object_type = 'stock_profile'
+		  AND status IN ('ready', 'running')
+		ORDER BY created_at ASC
+	`, AgentTaskTypeStockProfileSummary)
+	if err != nil {
+		return nil, wrapError(err, "list active stock profile agent runs")
+	}
+	return scanRows(rows, scanAgentRun, "scan active stock profile agent run", "iterate active stock profile agent runs")
+}
+
 func (s *Store) CountAgentRuns(ctx context.Context, filter AgentRunListFilter) (int, error) {
 	where, args := agentRunFilterSQL(filter)
 	var count int
