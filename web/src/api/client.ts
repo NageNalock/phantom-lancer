@@ -93,6 +93,7 @@ export function friendlyError(error: unknown): string {
   if (err.message === "embedding_model_not_configured") return "未绑定嵌入模型";
   if (err.message === "embedding_model_unavailable") return "嵌入模型不可用（已禁用或状态非 available）";
   if (err.message === "embedding_asset_not_ready") return "向量资产未就绪，请先维护向量化";
+  if (err.code === "stockv2_assets_not_ready") return "数据资产未达到最新版本，策略生成已按严格模式阻止；请先完成数据维护，或明确使用降级模式。";
   if (err.message.includes("modelType=embedding")) return "该模型不是可用的 embedding 类型";
   return err.message || "请求失败";
 }

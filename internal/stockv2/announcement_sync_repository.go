@@ -15,7 +15,8 @@ func (s *Store) GetAnnouncementSyncState(ctx context.Context, source, market str
 	row := s.assetDB().QueryRowContext(ctx, `
 		SELECT source, market, covered_through, latest_published_at, last_success_at,
 		       last_window_start, last_window_end, last_page_count, last_fetched_count,
-		       last_inserted_count, created_at, updated_at
+		       last_inserted_count, late_recheck_started_at, late_recheck_covered_through,
+		       last_late_recheck_at, created_at, updated_at
 		FROM stockv2_announcement_sync_states
 		WHERE source = ? AND market = ?
 	`, source, market)
@@ -44,63 +45,11 @@ func (s *Store) CommitAnnouncementSyncBatch(
 	defer func() { _ = tx.Rollback() }()
 
 	now := time.Now()
-	newItems := make([]StockV2Announcement, 0, len(items))
-	seen := make(map[string]struct{}, len(items))
-	for i := range items {
-		item := items[i]
-		item.Source = firstNonEmpty(strings.TrimSpace(item.Source), StockV2AnnouncementSourceCninfo)
-		item.Symbol = stockCodeOnly(item.Symbol)
-		item.Market = strings.ToUpper(strings.TrimSpace(item.Market))
-		if item.Symbol == "" || strings.TrimSpace(item.ContentHash) == "" || strings.TrimSpace(item.Title) == "" {
-			return nil, fmt.Errorf("invalid announcement sync item")
-		}
-		key := strings.Join([]string{item.Source, item.Symbol, item.ContentHash}, "\x00")
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		if item.ID == "" {
-			item.ID = generateID()
-		}
-		if item.FetchedAt.IsZero() {
-			item.FetchedAt = now
-		}
-		if item.CreatedAt.IsZero() {
-			item.CreatedAt = now
-		}
-		item.UpdatedAt = now
-
-		var storedID string
-		// FetchedAt is the durable first-ingestion watermark used to decide whether
-		// an already-published announcement is newer than the last AI summary.
-		err = tx.QueryRowContext(ctx, `
-			INSERT INTO stockv2_announcements (
-				id, source, symbol, market, org_id, title, category, announcement_id,
-				pdf_url, content_hash, major, major_reason, published_at,
-				fetched_at, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(source, symbol, content_hash) DO UPDATE SET
-				market = EXCLUDED.market,
-				org_id = EXCLUDED.org_id,
-				title = EXCLUDED.title,
-				category = EXCLUDED.category,
-				announcement_id = EXCLUDED.announcement_id,
-				pdf_url = EXCLUDED.pdf_url,
-				major = EXCLUDED.major,
-				major_reason = EXCLUDED.major_reason,
-				published_at = EXCLUDED.published_at,
-				updated_at = EXCLUDED.updated_at
-			RETURNING id
-		`, item.ID, item.Source, item.Symbol, item.Market, item.OrgID, item.Title,
-			item.Category, item.AnnouncementID, item.PDFURL, item.ContentHash, item.Major,
-			item.MajorReason, nullableTime(item.PublishedAt), item.FetchedAt, item.CreatedAt, item.UpdatedAt).Scan(&storedID)
-		if err != nil {
-			return nil, wrapError(err, "upsert announcement sync item")
-		}
-		if storedID == item.ID {
-			newItems = append(newItems, item)
-		}
+	upsertResult, err := upsertAnnouncementsWithTx(ctx, tx, items, now)
+	if err != nil {
+		return nil, err
 	}
+	newItems := upsertResult.Inserted
 
 	insertedByMarket := make(map[string]int, len(states))
 	for _, item := range newItems {
@@ -125,8 +74,9 @@ func (s *Store) CommitAnnouncementSyncBatch(
 			INSERT INTO stockv2_announcement_sync_states (
 				source, market, covered_through, latest_published_at, last_success_at,
 				last_window_start, last_window_end, last_page_count, last_fetched_count,
-				last_inserted_count, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				last_inserted_count, late_recheck_started_at, late_recheck_covered_through,
+				last_late_recheck_at, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(source, market) DO UPDATE SET
 				covered_through = EXCLUDED.covered_through,
 				latest_published_at = EXCLUDED.latest_published_at,
@@ -136,11 +86,25 @@ func (s *Store) CommitAnnouncementSyncBatch(
 				last_page_count = EXCLUDED.last_page_count,
 				last_fetched_count = EXCLUDED.last_fetched_count,
 				last_inserted_count = EXCLUDED.last_inserted_count,
+				late_recheck_started_at = COALESCE(
+					stockv2_announcement_sync_states.late_recheck_started_at,
+					EXCLUDED.late_recheck_started_at
+				),
+				late_recheck_covered_through = COALESCE(
+					EXCLUDED.late_recheck_covered_through,
+					stockv2_announcement_sync_states.late_recheck_covered_through
+				),
+				last_late_recheck_at = COALESCE(
+					EXCLUDED.last_late_recheck_at,
+					stockv2_announcement_sync_states.last_late_recheck_at
+				),
 				updated_at = EXCLUDED.updated_at
 			WHERE EXCLUDED.covered_through >= stockv2_announcement_sync_states.covered_through
 		`, state.Source, state.Market, state.CoveredThrough, nullableTime(state.LatestPublishedAt),
 			state.LastSuccessAt, nullableTime(state.LastWindowStart), nullableTime(state.LastWindowEnd),
-			state.LastPageCount, state.LastFetchedCount, state.LastInsertedCount, state.CreatedAt, state.UpdatedAt)
+			state.LastPageCount, state.LastFetchedCount, state.LastInsertedCount,
+			nullableTime(state.LateRecheckStartedAt), nullableTime(state.LateRecheckCoveredThrough),
+			nullableTime(state.LastLateRecheckAt), state.CreatedAt, state.UpdatedAt)
 		if err != nil {
 			return nil, wrapError(err, "upsert announcement sync state")
 		}
@@ -155,10 +119,12 @@ func scanAnnouncementSyncState(row rowScanner) (AnnouncementSyncState, error) {
 	var state AnnouncementSyncState
 	var coveredThrough, latestPublishedAt, lastSuccessAt sql.NullTime
 	var lastWindowStart, lastWindowEnd sql.NullTime
+	var lateRecheckStartedAt, lateRecheckCoveredThrough, lastLateRecheckAt sql.NullTime
 	if err := row.Scan(
 		&state.Source, &state.Market, &coveredThrough, &latestPublishedAt, &lastSuccessAt,
 		&lastWindowStart, &lastWindowEnd, &state.LastPageCount, &state.LastFetchedCount,
-		&state.LastInsertedCount, &state.CreatedAt, &state.UpdatedAt,
+		&state.LastInsertedCount, &lateRecheckStartedAt, &lateRecheckCoveredThrough,
+		&lastLateRecheckAt, &state.CreatedAt, &state.UpdatedAt,
 	); err != nil {
 		return AnnouncementSyncState{}, err
 	}
@@ -176,6 +142,15 @@ func scanAnnouncementSyncState(row rowScanner) (AnnouncementSyncState, error) {
 	}
 	if lastWindowEnd.Valid {
 		state.LastWindowEnd = lastWindowEnd.Time
+	}
+	if lateRecheckStartedAt.Valid {
+		state.LateRecheckStartedAt = lateRecheckStartedAt.Time
+	}
+	if lateRecheckCoveredThrough.Valid {
+		state.LateRecheckCoveredThrough = lateRecheckCoveredThrough.Time
+	}
+	if lastLateRecheckAt.Valid {
+		state.LastLateRecheckAt = lastLateRecheckAt.Time
 	}
 	return state, nil
 }

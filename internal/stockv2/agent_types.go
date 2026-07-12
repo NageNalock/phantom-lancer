@@ -189,21 +189,22 @@ type AgentTaskProfile struct {
 // AgentRun 一次 Agent 任务运行记录。创建后先进入 ready;真实 executor
 // 启动后推进 running/completed/failed。Output 只保存真实执行输出摘要。
 type AgentRun struct {
-	ID                string         `json:"id"`
-	TaskType          string         `json:"taskType"`
-	ProviderID        string         `json:"providerId,omitempty"`
-	ModelID           string         `json:"modelId,omitempty"`
-	TriggerObjectType string         `json:"triggerObjectType"`
-	TriggerObjectID   string         `json:"triggerObjectId"`
-	Status            string         `json:"status"`
-	CostEstimate      map[string]any `json:"costEstimate,omitempty"`
-	ErrorMessage      string         `json:"errorMessage,omitempty"` // 已脱敏
-	Output            string         `json:"output,omitempty"`
-	DecisionLedgerID  string         `json:"decisionLedgerId,omitempty"`
-	StartedAt         time.Time      `json:"startedAt,omitempty"`
-	FinishedAt        time.Time      `json:"finishedAt,omitempty"`
-	CreatedAt         time.Time      `json:"createdAt"`
-	UpdatedAt         time.Time      `json:"updatedAt"`
+	ID                string                  `json:"id"`
+	TaskType          string                  `json:"taskType"`
+	ProviderID        string                  `json:"providerId,omitempty"`
+	ModelID           string                  `json:"modelId,omitempty"`
+	TriggerObjectType string                  `json:"triggerObjectType"`
+	TriggerObjectID   string                  `json:"triggerObjectId"`
+	Status            string                  `json:"status"`
+	CostEstimate      map[string]any          `json:"costEstimate,omitempty"`
+	ErrorMessage      string                  `json:"errorMessage,omitempty"` // 已脱敏
+	Output            string                  `json:"output,omitempty"`
+	DecisionLedgerID  string                  `json:"decisionLedgerId,omitempty"`
+	ReadinessDecision *AssetReadinessDecision `json:"readinessDecision,omitempty"`
+	StartedAt         time.Time               `json:"startedAt,omitempty"`
+	FinishedAt        time.Time               `json:"finishedAt,omitempty"`
+	CreatedAt         time.Time               `json:"createdAt"`
+	UpdatedAt         time.Time               `json:"updatedAt"`
 }
 
 // AgentDecisionLedger 决策留痕。写入前经 safelog 脱敏裁剪,不记录 secret。

@@ -1232,13 +1232,24 @@ export interface StockV2AssetMaintenanceStats {
 }
 
 export interface StockV2AssetMaintenanceJobProgress {
-  base: {
+  coverage: {
     status: string;
-    total: number;
-    processed: number;
-    succeeded: number;
-    failed: number;
+    target: number;
+    checked: number;
     pending: number;
+    retrying: number;
+    failed: number;
+    universeHash?: string;
+    cutoffDate?: string;
+  };
+  assets: {
+    status: string;
+    marketFresh: number;
+    messageFresh: number;
+    fresh: number;
+    stale: number;
+    retrying: number;
+    failed: number;
   };
   aiProfile: {
     status: "not_required" | "active" | "completed" | "completed_with_failures" | string;
@@ -1269,7 +1280,15 @@ export interface StockV2AssetMaintenanceItem {
   instrumentType?: string;
   name?: string;
   status: string;
+  priorityReason?: string;
+  attemptCount?: number;
+  nextRetryAt?: string;
+  checkedAt?: string;
+  expectedLatestTradeDate?: string;
   dailyBarStatus?: string;
+  dailyBarGapCount?: number;
+  dailyBarMissingFacetCount?: number;
+  dailyFlowStatus?: string;
   dailyBarFetched: number;
   dailyBarStart?: string;
   dailyBarEnd?: string;
@@ -1283,6 +1302,7 @@ export interface StockV2AssetMaintenanceItem {
   aiDecision?: string;
   aiProfileStatus?: string;
   aiQueueStatus?: string;
+  aiDesiredInputVersion?: string;
   agentRunId?: string;
   errorMessage?: string;
   sourceStatuses?: StockV2AssetMaintenanceSourceStatus[];
@@ -1304,10 +1324,19 @@ export interface StockV2Announcement {
   announcementId?: string;
   pdfUrl?: string;
   contentHash: string;
+  dedupeKey?: string;
+  symbolRevision?: number;
   major: boolean;
   majorReason?: string;
   publishedAt?: string;
   fetchedAt: string;
+  firstFetchedAt?: string;
+  lastSeenAt?: string;
+  bodyStatus?: string;
+  bodyTextExcerpt?: string;
+  bodyHash?: string;
+  bodyCheckedAt?: string;
+  bodyError?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -1321,6 +1350,7 @@ export interface StockV2AssetSummary {
   latestAnnouncementTitle?: string;
   announcementCount: number;
   majorAnnouncementCount: number;
+  majorAnnouncementContentUnavailableCount: number;
   latestMaintenance?: StockV2AssetMaintenanceItem;
   readiness: {
     ready: boolean;
@@ -1333,6 +1363,70 @@ export interface StockV2AssetSummary {
     announcementSyncAt?: string;
     evaluatedAt: string;
   };
+}
+
+export interface StockV2AssetReadinessReason {
+  symbol?: string;
+  domain: "market" | "message" | "analysis" | string;
+  code: string;
+  retryable?: boolean;
+  retryAt?: string;
+}
+
+export interface StockV2UnifiedAssetReadiness {
+  symbol: string;
+  market?: string;
+  instrumentType?: string;
+  marketReady: boolean;
+  messageReady: boolean;
+  analysisReady: boolean;
+  dailyBarReady: boolean;
+  baseProfileReady: boolean;
+  announcementReady: boolean;
+  aiProfileReady: boolean;
+  expectedTradeDate?: string;
+  marketAsOf?: string;
+  messageAsOf?: string;
+  announcementSyncAt?: string;
+  desiredInputVersion?: string;
+  appliedInputVersion?: string;
+  reasons?: StockV2AssetReadinessReason[];
+  limitations?: string[];
+  evaluatedAt: string;
+}
+
+export interface StockV2AssetReadinessOverview {
+  targetCount: number;
+  evaluatedCount: number;
+  marketReadyCount: number;
+  messageReadyCount: number;
+  analysisReadyCount: number;
+  expectedTradeDate?: string;
+  limitationCounts?: Record<string, number>;
+  reasonCounts?: Record<string, number>;
+  announcementBodyParserAvailable: boolean;
+  aiQueue: {
+    ready: number;
+    running: number;
+    retrying: number;
+    applying: number;
+    completed: number;
+    failed: number;
+  };
+  resourceGate: {
+    state: "normal" | "throttled" | "paused" | string;
+    reasons?: string[];
+    diagnostics?: string[];
+    metrics: {
+      memAvailableBytes?: number;
+      memoryKnown: boolean;
+      load1?: number;
+      loadKnown: boolean;
+      diskAvailableBytes?: number;
+      diskKnown: boolean;
+    };
+  };
+  evaluatedAt: string;
 }
 
 export interface StockV2MaintainSymbolResult {
@@ -1497,15 +1591,30 @@ export interface StockV2UpdateJob {
   triggerType: string; // manual, scheduled
   triggerSource: string;
   status: string; // running, completed, failed, cancelled
+  scope: string;
+  slotStart?: string;
+  universeSnapshotId?: string;
+  universeHash?: string;
+  expectedLatestTradeDate?: string;
+  messageCutoffAt?: string;
+  coverageStatus: string;
+  freshnessStatus: string;
   totalCount: number;
+  checkedCount: number;
   processedCount: number;
   successCount: number;
+  freshCount: number;
+  staleCount: number;
+  retryCount: number;
   failedCount: number;
   failedItems?: UpdateFailure[];
   assetStats?: StockV2AssetMaintenanceStats;
-  maintenanceProgress?: StockV2AssetMaintenanceJobProgress;
+  maintenanceProgress: StockV2AssetMaintenanceJobProgress;
   startAt: string;
   endAt: string;
+  writeBytesStart?: number;
+  writeBytesEnd?: number;
+  peakRssBytes?: number;
   errorMessage: string;
   createdAt: string;
 }
@@ -1732,6 +1841,15 @@ export interface StockV2DailyBarsQuality {
   rowCount: number;
   incompleteCount: number;
   facetsComplete: boolean;
+  coverageKnown: boolean;
+  expectedDateCount: number;
+  coveredDateCount: number;
+  dateGapCount: number;
+  coreGapCount: number;
+  flowGapCount: number;
+  verifiedNoTradeCount: number;
+  expectedLatestDate?: string;
+  coverageCheckedAt?: string;
   earliestDate: string;
   latestDate: string;
   stale: boolean;
@@ -1951,9 +2069,22 @@ export interface StockV2StrategyGenerationTargetInstrument {
   userNote?: string;
 }
 
+export type StockV2AssetReadinessMode = "strict" | "allow_degraded";
+
+export interface StockV2AssetReadinessDecision {
+  status: "ready" | "degraded" | "blocked" | string;
+  requirement: "market" | "message" | "analysis" | string;
+  mode: StockV2AssetReadinessMode;
+  targetCount: number;
+  readyCount: number;
+  failedSymbols?: string[];
+  reasons?: StockV2AssetReadinessReason[];
+}
+
 export interface StockV2StrategyGenerationInput {
   schemaVersion?: string;
   mode: StockV2StrategyGenerationMode;
+  readinessMode?: StockV2AssetReadinessMode;
   userGoal?: string;
   userIntent?: string;
   portfolioId?: string;
@@ -2475,6 +2606,7 @@ export interface StockV2AgentRun {
   errorMessage?: string;
   output?: string;
   decisionLedgerId?: string;
+  readinessDecision?: StockV2AssetReadinessDecision;
   startedAt?: string;
   finishedAt?: string;
   createdAt?: string;

@@ -9,6 +9,77 @@ import (
 	"time"
 )
 
+func TestRunStrategyGenerationStrictBlocksStaleAssetsBeforeCreatingRun(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedStrategyGenerationInstrument(t, svc, ctx, "300750")
+
+	_, err := svc.RunStrategyGeneration(ctx, StrategyGenerationInput{
+		Mode: StrategyGenerationModeSingleInstrument,
+		TargetInstruments: []StrategyGenerationTargetInstrument{{
+			Symbol: "300750",
+		}},
+	})
+	var readinessErr *StrategyGenerationReadinessError
+	if !errors.As(err, &readinessErr) {
+		t.Fatalf("error = %v, want StrategyGenerationReadinessError", err)
+	}
+	if readinessErr.Decision.Status != AssetReadinessDecisionBlocked || readinessErr.Decision.Mode != AssetReadinessModeStrict {
+		t.Fatalf("decision = %+v", readinessErr.Decision)
+	}
+	if len(readinessErr.Decision.FailedSymbols) != 1 || readinessErr.Decision.FailedSymbols[0] != "300750" {
+		t.Fatalf("failed symbols = %v", readinessErr.Decision.FailedSymbols)
+	}
+	count, countErr := svc.CountAgentRuns(ctx, AgentRunListFilter{TaskType: AgentTaskTypeStrategyGeneration})
+	if countErr != nil {
+		t.Fatalf("count agent runs: %v", countErr)
+	}
+	if count != 0 {
+		t.Fatalf("agent run count = %d, want 0", count)
+	}
+}
+
+func TestRunStrategyGenerationDegradedPersistsReadinessDecision(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedStrategyGenerationInstrument(t, svc, ctx, "300750")
+	configureStrategyGenerationModel(t, svc, ctx)
+
+	run, err := svc.RunStrategyGeneration(ctx, StrategyGenerationInput{
+		Mode:          StrategyGenerationModeSingleInstrument,
+		ReadinessMode: AssetReadinessModeAllowDegraded,
+		TargetInstruments: []StrategyGenerationTargetInstrument{{
+			Symbol: "300750",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("run strategy generation: %v", err)
+	}
+	if run.ReadinessDecision == nil || run.ReadinessDecision.Status != AssetReadinessDecisionDegraded ||
+		run.ReadinessDecision.Mode != AssetReadinessModeAllowDegraded {
+		t.Fatalf("response readiness decision = %+v", run.ReadinessDecision)
+	}
+	ledger, err := svc.GetAgentDecisionLedger(ctx, run.DecisionLedgerID)
+	if err != nil {
+		t.Fatalf("get decision ledger: %v", err)
+	}
+	var artifact map[string]any
+	if err := json.Unmarshal([]byte(ledger.InputArtifactSummary), &artifact); err != nil {
+		t.Fatalf("decode input artifact: %v; artifact=%q", err, ledger.InputArtifactSummary)
+	}
+	freshness := mapFromAny(artifact["freshnessSummary"])
+	decision := mapFromAny(freshness["assetReadiness"])
+	if decision["status"] != AssetReadinessDecisionDegraded || decision["mode"] != AssetReadinessModeAllowDegraded {
+		t.Fatalf("persisted readiness decision = %#v", decision)
+	}
+	input := mapFromAny(artifact["input"])
+	if input["readinessMode"] != AssetReadinessModeAllowDegraded {
+		t.Fatalf("persisted normalized input = %#v", input)
+	}
+}
+
 func TestStrategyGenerationFinalizeCreatesDraftStrategy(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
@@ -38,9 +109,10 @@ func TestStrategyGenerationFinalizeCreatesDraftStrategy(t *testing.T) {
 	}
 
 	run, err := svc.RunStrategyGeneration(ctx, StrategyGenerationInput{
-		Mode:        StrategyGenerationModeManualTarget,
-		UserGoal:    "生成中航成飞观察策略",
-		PortfolioID: portfolio.ID,
+		Mode:          StrategyGenerationModeManualTarget,
+		ReadinessMode: AssetReadinessModeAllowDegraded,
+		UserGoal:      "生成中航成飞观察策略",
+		PortfolioID:   portfolio.ID,
 		TargetInstruments: []StrategyGenerationTargetInstrument{{
 			Symbol: "302132",
 		}},
@@ -307,9 +379,10 @@ func TestPortfolioStrategyDiagnosisEmptyHoldingsNoDrafts(t *testing.T) {
 	configureStrategyGenerationModel(t, svc, ctx)
 
 	run, err := svc.RunStrategyGeneration(ctx, StrategyGenerationInput{
-		Mode:        StrategyGenerationModePortfolio,
-		UserGoal:    "诊断当前组合",
-		PortfolioID: portfolio.ID,
+		Mode:          StrategyGenerationModePortfolio,
+		ReadinessMode: AssetReadinessModeAllowDegraded,
+		UserGoal:      "诊断当前组合",
+		PortfolioID:   portfolio.ID,
 	})
 	if err != nil {
 		t.Fatalf("run strategy generation: %v", err)
@@ -416,8 +489,9 @@ func TestStrategyGenerationDraftActivationFeedsDataMonitor(t *testing.T) {
 	configureStrategyGenerationModel(t, svc, ctx)
 
 	run, err := svc.RunStrategyGeneration(ctx, StrategyGenerationInput{
-		Mode:     StrategyGenerationModeManualTarget,
-		UserGoal: "生成宁德时代突破策略",
+		Mode:          StrategyGenerationModeManualTarget,
+		ReadinessMode: AssetReadinessModeAllowDegraded,
+		UserGoal:      "生成宁德时代突破策略",
 		TargetInstruments: []StrategyGenerationTargetInstrument{{
 			Symbol: "300750",
 			Market: "SZ",
@@ -534,9 +608,10 @@ func TestPortfolioStrategyDiagnosisCreatesDraftOnlyForMissingCoverage(t *testing
 	configureStrategyGenerationModel(t, svc, ctx)
 
 	run, err := svc.RunStrategyGeneration(ctx, StrategyGenerationInput{
-		Mode:        StrategyGenerationModePortfolio,
-		UserGoal:    "诊断当前组合",
-		PortfolioID: portfolio.ID,
+		Mode:          StrategyGenerationModePortfolio,
+		ReadinessMode: AssetReadinessModeAllowDegraded,
+		UserGoal:      "诊断当前组合",
+		PortfolioID:   portfolio.ID,
 	})
 	if err != nil {
 		t.Fatalf("run strategy generation: %v", err)

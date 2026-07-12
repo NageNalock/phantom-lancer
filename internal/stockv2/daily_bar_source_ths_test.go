@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -85,7 +86,9 @@ func TestTHSDailyBarsSourceStopsNetworkRequestsDuringAccessDeniedCooldown(t *tes
 
 func TestFetchDailyBarsForMissingRangesUsesOneTHSRequest(t *testing.T) {
 	var thsCalls, tencentCalls, baiduCalls int
+	var order []string
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		order = append(order, req.URL.Host)
 		switch req.URL.Host {
 		case "d.10jqka.com.cn":
 			thsCalls++
@@ -100,12 +103,15 @@ func TestFetchDailyBarsForMissingRangesUsesOneTHSRequest(t *testing.T) {
 	svc := NewService(nil, nil, client)
 	bars, _, err := svc.fetchDailyBarsForMissingRanges(context.Background(), StockV2Instrument{
 		Symbol: "002457", Market: "SZ", InstrumentType: InstrumentTypeStock,
-	}, []dailyBarMissingRange{{Start: "2026-07-08", End: "2026-07-08"}, {Start: "2026-07-10", End: "2026-07-10"}})
+	}, []dailyBarMissingRange{{Start: "2026-07-08", End: "2026-07-08"}, {Start: "2026-07-10", End: "2026-07-10"}}, []string{"2026-07-08", "2026-07-10"})
 	if err != nil {
 		t.Fatalf("fetch missing ranges: %v", err)
 	}
 	if thsCalls != 1 || tencentCalls != 0 || baiduCalls != 0 {
 		t.Fatalf("calls = 10jqka:%d Tencent:%d Baidu:%d", thsCalls, tencentCalls, baiduCalls)
+	}
+	if got := strings.Join(order, ">"); got != "d.10jqka.com.cn" {
+		t.Fatalf("provider order=%q, want THS only with no Baidu request", got)
 	}
 	if len(bars) != 2 || bars[0].TradeDate != "2026-07-08" || bars[1].TradeDate != "2026-07-10" {
 		t.Fatalf("filtered bars = %+v", bars)
@@ -114,7 +120,9 @@ func TestFetchDailyBarsForMissingRangesUsesOneTHSRequest(t *testing.T) {
 
 func TestFetchDailyBarsForMissingRangesFallsBackInOrder(t *testing.T) {
 	var thsCalls, tencentCalls, baiduCalls int
+	var order []string
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		order = append(order, req.URL.Host)
 		switch req.URL.Host {
 		case "d.10jqka.com.cn":
 			thsCalls++
@@ -133,12 +141,15 @@ func TestFetchDailyBarsForMissingRangesFallsBackInOrder(t *testing.T) {
 	svc := NewService(nil, nil, client)
 	bars, _, err := svc.fetchDailyBarsForMissingRanges(context.Background(), StockV2Instrument{
 		Symbol: "002457", Market: "SZ", InstrumentType: InstrumentTypeStock,
-	}, []dailyBarMissingRange{{Start: "2026-07-10", End: "2026-07-10"}})
+	}, []dailyBarMissingRange{{Start: "2026-07-10", End: "2026-07-10"}}, []string{"2026-07-10"})
 	if err != nil {
 		t.Fatalf("fetch with fallbacks: %v", err)
 	}
 	if thsCalls != 1 || tencentCalls != 1 || baiduCalls != 1 {
 		t.Fatalf("calls = 10jqka:%d Tencent:%d Baidu:%d", thsCalls, tencentCalls, baiduCalls)
+	}
+	if got := strings.Join(order, ">"); got != "d.10jqka.com.cn>web.ifzq.gtimg.cn>finance.pae.baidu.com" {
+		t.Fatalf("provider order=%q, want THS>Tencent>Baidu", got)
 	}
 	if len(bars) != 1 || bars[0].Source != "baidu_kline" {
 		t.Fatalf("fallback bars = %+v", bars)
@@ -163,7 +174,7 @@ func TestFetchDailyBarsForMissingRangesKeepsTencentWhenBaiduCompletionFails(t *t
 	svc := NewService(nil, nil, client)
 	bars, _, err := svc.fetchDailyBarsForMissingRanges(context.Background(), StockV2Instrument{
 		Symbol: "002457", Market: "SZ", InstrumentType: InstrumentTypeStock,
-	}, []dailyBarMissingRange{{Start: "2026-07-10", End: "2026-07-10"}})
+	}, []dailyBarMissingRange{{Start: "2026-07-10", End: "2026-07-10"}}, []string{"2026-07-10"})
 	if err != nil {
 		t.Fatalf("fetch with Tencent fallback: %v", err)
 	}
@@ -172,6 +183,107 @@ func TestFetchDailyBarsForMissingRangesKeepsTencentWhenBaiduCompletionFails(t *t
 	}
 	if len(bars) != 1 || bars[0].Source != "tencent_fqkline" || bars[0].Amount != 0 || bars[0].TurnoverRate != 0 {
 		t.Fatalf("Tencent fallback bars = %+v", bars)
+	}
+}
+
+func TestFetchDailyBarsForMissingRangesMergesComplementarySourceDates(t *testing.T) {
+	var thsCalls, tencentCalls, baiduCalls int
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Host {
+		case "d.10jqka.com.cn":
+			thsCalls++
+			return dailyBarHTTPResponse(req, http.StatusOK, `callback({"data":"20260708,10,11,9,10.5,100,1000,1"})`), nil
+		case "web.ifzq.gtimg.cn":
+			tencentCalls++
+			return dailyBarHTTPResponse(req, http.StatusBadGateway, ""), nil
+		case "finance.pae.baidu.com":
+			baiduCalls++
+			return dailyBarHTTPResponse(req, http.StatusOK, `{"ResultCode":"0","Result":{"newMarketData":{"marketData":"1783612800,2026-07-10,10,10.5,100,11,9,1000,0,0,1,10"}}}`), nil
+		default:
+			return nil, errors.New("unexpected host")
+		}
+	})}
+	ranges := []dailyBarMissingRange{
+		{Start: "2026-07-08", End: "2026-07-08"},
+		{Start: "2026-07-10", End: "2026-07-10"},
+	}
+	bars, _, err := NewService(nil, nil, client).fetchDailyBarsForMissingRanges(
+		context.Background(),
+		StockV2Instrument{Symbol: "002457", Market: "SZ", InstrumentType: InstrumentTypeStock},
+		ranges,
+		[]string{"2026-07-08", "2026-07-10"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thsCalls != 1 || tencentCalls != 1 || baiduCalls != 1 {
+		t.Fatalf("calls=THS:%d Tencent:%d Baidu:%d, want one request per required source", thsCalls, tencentCalls, baiduCalls)
+	}
+	if len(bars) != 2 || bars[0].TradeDate != "2026-07-08" || bars[0].Source != "10jqka_kline" ||
+		bars[1].TradeDate != "2026-07-10" || bars[1].Source != "baidu_kline" {
+		t.Fatalf("merged bars=%+v", bars)
+	}
+}
+
+func TestEnsureOneSymbolRequestsOneEnvelopeForSeparateGaps(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	inst := StockV2Instrument{ID: generateID(), Symbol: "600000", Market: "SH", InstrumentType: InstrumentTypeStock}
+	if err := store.UpsertInstrument(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
+	calendar := []string{"2026-07-01", "2026-07-02", "2026-07-03", "2026-07-06", "2026-07-07"}
+	if err := store.UpsertObservedTradingDates(ctx, calendar, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	seed := make([]StockV2DailyBar, 0, 3)
+	for _, tradeDate := range []string{"2026-07-01", "2026-07-03", "2026-07-07"} {
+		seed = append(seed, StockV2DailyBar{
+			Symbol: "600000", Market: "SH", TradeDate: tradeDate,
+			Open: 10, High: 11, Low: 9, Close: 10.5, Volume: 100,
+			AmountPresent: true, TurnoverRatePresent: true,
+			NetInflowPresent: true, MainNetInflowPresent: true,
+			Adjusted: DailyBarAdjustedNone, Source: "seed", FetchedAt: time.Now(), Quality: DailyBarQualityOK,
+		})
+	}
+	if err := store.UpsertDailyBars(ctx, seed); err != nil {
+		t.Fatal(err)
+	}
+
+	thsBody := `callback({"data":"20260702,10,11,9,10.5,100,1000,1;20260706,10,11,9,10.5,100,1000,1"})`
+	var thsCalls, tencentCalls, baiduCalls int
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Host {
+		case "d.10jqka.com.cn":
+			thsCalls++
+			return dailyBarHTTPResponse(req, http.StatusOK, thsBody), nil
+		case "web.ifzq.gtimg.cn":
+			tencentCalls++
+		case "finance.pae.baidu.com":
+			baiduCalls++
+		}
+		return dailyBarHTTPResponse(req, http.StatusInternalServerError, ""), nil
+	})}
+	fetched, err := NewService(store, nil, client).ensureOneSymbol(
+		ctx,
+		inst,
+		"2026-07-01",
+		"2026-07-07",
+		DailyBarAdjustedNone,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fetched != 2 || thsCalls != 1 || tencentCalls != 0 || baiduCalls != 0 {
+		t.Fatalf("fetched=%d calls=THS:%d Tencent:%d Baidu:%d, want one envelope THS request", fetched, thsCalls, tencentCalls, baiduCalls)
+	}
+	stored, err := store.GetDailyBars(ctx, "600000", DailyBarAdjustedNone, "2026-07-01", "2026-07-07", 0)
+	if err != nil || len(stored) != 5 {
+		t.Fatalf("stored bars=%d err=%v, want five trading dates", len(stored), err)
 	}
 }
 
@@ -188,7 +300,7 @@ func TestFetchDailyBarsForMissingRangesPreservesBaiduAccessDenied(t *testing.T) 
 	svc := NewService(nil, nil, client)
 	_, _, err := svc.fetchDailyBarsForMissingRanges(context.Background(), StockV2Instrument{
 		Symbol: "002457", Market: "SZ", InstrumentType: InstrumentTypeStock,
-	}, []dailyBarMissingRange{{Start: "2026-07-10", End: "2026-07-10"}})
+	}, []dailyBarMissingRange{{Start: "2026-07-10", End: "2026-07-10"}}, []string{"2026-07-10"})
 	if !errors.Is(err, errBaiduDailyBarsAccessDenied) {
 		t.Fatalf("err = %v, want Baidu access denied sentinel", err)
 	}
@@ -208,11 +320,16 @@ func TestFetchDailyBarsForMissingRangesRequiresTwoSourcesForNegativeCoverage(t *
 				return nil, errors.New("unexpected host")
 			}
 		})}
-		_, confirmed, err := NewService(nil, nil, client).fetchDailyBarsForMissingRanges(context.Background(), StockV2Instrument{
+		_, observations, err := NewService(nil, nil, client).fetchDailyBarsForMissingRanges(context.Background(), StockV2Instrument{
 			Symbol: "600000", Market: "SH", InstrumentType: InstrumentTypeStock,
-		}, []dailyBarMissingRange{{Start: "2026-07-10", End: "2026-07-10"}})
-		if err == nil || confirmed {
-			t.Fatalf("confirmed=%v err=%v, want unconfirmed error", confirmed, err)
+		}, []dailyBarMissingRange{{Start: "2026-07-10", End: "2026-07-10"}}, []string{"2026-07-10"})
+		verified := verifyDailyBarNoTradeCoverage(
+			[]string{"2026-07-10"}, observations,
+			[]dailyBarMissingRange{{Start: "2026-07-10", End: "2026-07-10"}},
+			time.Date(2026, 7, 13, 17, 0, 0, 0, chinaMarketTZ),
+		)
+		if err == nil || len(verified) != 0 {
+			t.Fatalf("observations=%v verified=%v err=%v, want unconfirmed error", observations, verified, err)
 		}
 	})
 	t.Run("two independent empty successes allow negative coverage", func(t *testing.T) {
@@ -228,11 +345,24 @@ func TestFetchDailyBarsForMissingRangesRequiresTwoSourcesForNegativeCoverage(t *
 				return nil, errors.New("unexpected host")
 			}
 		})}
-		bars, confirmed, err := NewService(nil, nil, client).fetchDailyBarsForMissingRanges(context.Background(), StockV2Instrument{
+		bars, observations, err := NewService(nil, nil, client).fetchDailyBarsForMissingRanges(context.Background(), StockV2Instrument{
 			Symbol: "600000", Market: "SH", InstrumentType: InstrumentTypeStock,
-		}, []dailyBarMissingRange{{Start: "2026-07-10", End: "2026-07-10"}})
-		if err != nil || !confirmed || len(bars) != 0 {
-			t.Fatalf("bars=%v confirmed=%v err=%v", bars, confirmed, err)
+		}, []dailyBarMissingRange{{Start: "2026-07-10", End: "2026-07-10"}}, []string{"2026-07-10"})
+		verified := verifyDailyBarNoTradeCoverage(
+			[]string{"2026-07-10"}, observations,
+			[]dailyBarMissingRange{{Start: "2026-07-10", End: "2026-07-10"}},
+			time.Date(2026, 7, 13, 17, 0, 0, 0, chinaMarketTZ),
+		)
+		if err != nil || len(verified) != 1 || len(bars) != 0 {
+			t.Fatalf("bars=%v observations=%v verified=%v err=%v", bars, observations, verified, err)
+		}
+		tooRecent := verifyDailyBarNoTradeCoverage(
+			[]string{"2026-07-10"}, observations,
+			[]dailyBarMissingRange{{Start: "2026-07-10", End: "2026-07-10"}},
+			time.Date(2026, 7, 12, 17, 0, 0, 0, chinaMarketTZ),
+		)
+		if len(tooRecent) != 0 {
+			t.Fatalf("T-2 date must not become stable no-trade coverage: %v", tooRecent)
 		}
 	})
 }

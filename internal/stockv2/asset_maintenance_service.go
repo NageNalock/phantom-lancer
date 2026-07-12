@@ -3,9 +3,9 @@ package stockv2
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"strings"
 	"time"
@@ -16,10 +16,10 @@ import (
 const (
 	assetAIBackoff             = 6 * time.Hour
 	baseProfileRefreshInterval = 7 * 24 * time.Hour
-	// ponytail: the full Sina universe currently costs dozens of paginated
-	// requests. Persist it for seven days; daily jobs still scan every cached
-	// symbol, while manual symbols can introduce a new listing immediately.
-	assetUniverseDiscoveryRefreshInterval = 7 * 24 * time.Hour
+	// ponytail: one daily paginated discovery is the minimum that can include new
+	// listings in the same day's full-universe guarantee; all later work uses the
+	// persisted snapshot and never rediscovers per symbol.
+	assetUniverseDiscoveryRefreshInterval = 24 * time.Hour
 	// ponytail: a small result is the built-in outage fallback, not a complete
 	// universe snapshot. Keep serving the existing cache but retry discovery
 	// sooner so a transient Sina failure cannot hide new listings for a week.
@@ -28,6 +28,9 @@ const (
 
 type assetMaintenanceOptions struct {
 	JobID                     string
+	ItemID                    string
+	AttemptCount              int
+	ExpectedLatestDate        string
 	TriggerSource             string
 	RequestedBy               string
 	ForceAI                   bool
@@ -36,6 +39,7 @@ type assetMaintenanceOptions struct {
 	RecentAnnouncements       []StockV2Announcement
 	AnnouncementPrefetchError error
 	AnnouncementCheckedAt     time.Time
+	QuotePrefetchError        error
 }
 
 func (s *Service) MaintainAssetForSymbol(ctx context.Context, symbol string, req AssetMaintainSymbolRequest) (AssetMaintainSymbolResult, error) {
@@ -60,16 +64,18 @@ func (s *Service) MaintainAssetForSymbol(ctx context.Context, symbol string, req
 func (s *Service) maintainAssetForInstrument(ctx context.Context, inst StockV2Instrument, opts assetMaintenanceOptions) (AssetMaintainSymbolResult, error) {
 	startedAt := time.Now()
 	item := AssetMaintenanceItem{
-		ID:             generateID(),
-		JobID:          strings.TrimSpace(opts.JobID),
-		Symbol:         inst.Symbol,
-		Market:         inst.Market,
-		InstrumentType: normalizeInstrumentType(inst.InstrumentType),
-		Name:           inst.Name,
-		Status:         AssetMaintenanceItemStatusRunning,
-		StartedAt:      startedAt,
-		CreatedAt:      startedAt,
-		UpdatedAt:      startedAt,
+		ID:                 firstNonEmpty(strings.TrimSpace(opts.ItemID), generateID()),
+		JobID:              strings.TrimSpace(opts.JobID),
+		Symbol:             inst.Symbol,
+		Market:             inst.Market,
+		InstrumentType:     normalizeInstrumentType(inst.InstrumentType),
+		Name:               inst.Name,
+		Status:             AssetMaintenanceItemStatusRunning,
+		AttemptCount:       opts.AttemptCount,
+		ExpectedLatestDate: strings.TrimSpace(opts.ExpectedLatestDate),
+		StartedAt:          startedAt,
+		CreatedAt:          startedAt,
+		UpdatedAt:          startedAt,
 	}
 	item, _ = s.store.UpsertAssetMaintenanceItem(ctx, item)
 	var result AssetMaintainSymbolResult
@@ -77,6 +83,13 @@ func (s *Service) maintainAssetForInstrument(ctx context.Context, inst StockV2In
 	var aiErrorMessage string
 	var dailyBarsErr error
 	var sourceStatuses []AssetMaintenanceSourceStatus
+	if opts.QuotePrefetchError != nil {
+		errMessage := safelog.Text(opts.QuotePrefetchError.Error(), 300)
+		errs = append(errs, "closing quote: "+errMessage)
+		sourceStatuses = append(sourceStatuses, AssetMaintenanceSourceStatus{
+			Source: "closing_quote_batch", Status: "failed", Message: errMessage, CheckedAt: startedAt,
+		})
+	}
 
 	if err := s.store.UpsertInstrument(ctx, inst); err != nil {
 		errs = append(errs, "instrument: "+err.Error())
@@ -96,20 +109,48 @@ func (s *Service) maintainAssetForInstrument(ctx context.Context, inst StockV2In
 			if saveErr := s.store.UpsertDailyBars(ctx, bars); saveErr != nil {
 				item.DailyBarStatus = AssetDailyBarStatusFailed
 				errs = append(errs, "daily bars save: "+truncateDailyBarErr(saveErr.Error()))
-			} else if checkErr := s.store.RecordDailyBarGapChecks(ctx, inst.Symbol, DailyBarAdjustedNone, checkedDailyGaps); checkErr != nil {
+			} else if checkErr := s.store.RecordVerifiedDailyBarNoTradeCoverage(ctx, inst.Symbol, DailyBarAdjustedNone, checkedDailyGaps); checkErr != nil {
 				item.DailyBarStatus = AssetDailyBarStatusFailed
 				errs = append(errs, "daily gap check save: "+truncateDailyBarErr(checkErr.Error()))
 			}
 		}
 	} else {
 		item.DailyBarStatus = AssetDailyBarStatusSkipped
-		if checkErr := s.store.RecordDailyBarGapChecks(ctx, inst.Symbol, DailyBarAdjustedNone, checkedDailyGaps); checkErr != nil {
+		if checkErr := s.store.RecordVerifiedDailyBarNoTradeCoverage(ctx, inst.Symbol, DailyBarAdjustedNone, checkedDailyGaps); checkErr != nil {
 			item.DailyBarStatus = AssetDailyBarStatusFailed
 			errs = append(errs, "daily gap check save: "+truncateDailyBarErr(checkErr.Error()))
 		}
 	}
+	if dailyBarsErr == nil && item.DailyBarStatus != AssetDailyBarStatusFailed {
+		coverageStart, coverageEnd := assetMaintenanceDailyBarStartEnd(time.Now())
+		coverageEnd = dailyBarBatchTargetDate(ctx, coverageEnd)
+		coverageStart, coverageEnd = clampDailyBarRangeToInstrument(inst, coverageStart, coverageEnd)
+		if coverageStart != "" {
+			if quality, qualityErr := s.store.RefreshDailyBarCoverageQuality(
+				ctx, inst, DailyBarAdjustedNone, coverageStart, coverageEnd,
+			); qualityErr != nil {
+				item.DailyBarStatus = AssetDailyBarStatusFailed
+				errs = append(errs, "daily bar quality: "+truncateDailyBarErr(qualityErr.Error()))
+			} else {
+				item.DailyBarGapCount = quality.DateGapCount
+				item.DailyBarMissingFacets = quality.CoreGapCount
+				if coverageErr := dailyBarCoreCoverageRetryError(quality); coverageErr != nil {
+					item.DailyBarStatus = AssetDailyBarStatusIncomplete
+					errs = append(errs, coverageErr.Error())
+				}
+				if normalizeInstrumentType(inst.InstrumentType) != InstrumentTypeStock {
+					item.DailyFlowStatus = AssetDailyFlowStatusNotRequired
+				} else if quality.FlowGapCount > 0 {
+					item.DailyFlowStatus = AssetDailyFlowStatusIncomplete
+				} else {
+					item.DailyFlowStatus = AssetDailyFlowStatusReady
+				}
+			}
+		}
+	}
 
-	// F10 基础画像刷新缓存：7 天内已刷新过则跳过 F10 抓取（节省 3 次 HTTP 请求/股票）
+	// Deep F10 refreshes use a stable weekly symbol phase, spreading the public
+	// provider workload across the week instead of creating a 7-day thundering herd.
 	profile, profileBefore, profileSourceStatuses, err := s.refreshAssetBaseProfileWithCache(ctx, inst, opts)
 	sourceStatuses = append(sourceStatuses, profileSourceStatuses...)
 	if err != nil {
@@ -161,15 +202,26 @@ func (s *Service) maintainAssetForInstrument(ctx context.Context, inst StockV2In
 	if aiErr != nil && aiDecision != AssetAIDecisionSkippedConfig {
 		aiErrorMessage = "ai: " + aiErr.Error()
 		item.AIQueueStatus = StockProfileAIQueueStatusFailed
+		var outboxErr *stockProfileAIOutboxEnqueueError
+		if errors.As(aiErr, &outboxErr) {
+			item.AIDesiredInputVersion = outboxErr.DesiredInputVersion
+		}
 	}
 
 	item.SourceStatuses = sourceStatuses
 	item.DurationMs = time.Since(startedAt).Milliseconds()
 	item.FinishedAt = time.Now()
+	item.CheckedAt = item.FinishedAt
 	item.UpdatedAt = item.FinishedAt
 	if len(errs) > 0 {
 		item.ErrorMessage = safelog.Text(strings.Join(errs, "; "), 800)
-		item.Status = AssetMaintenanceItemStatusFailed
+		item.AttemptCount++
+		if item.AttemptCount >= assetMaintenanceRetryMaxAttempts {
+			item.Status = AssetMaintenanceItemStatusFailed
+		} else {
+			item.Status = AssetMaintenanceItemStatusRetryWait
+			item.NextRetryAt = item.FinishedAt.Add(assetMaintenanceRetryDelay(item.AttemptCount))
+		}
 	} else {
 		item.Status = AssetMaintenanceItemStatusCompleted
 	}
@@ -193,6 +245,16 @@ func (s *Service) maintainAssetForInstrument(ctx context.Context, inst StockV2In
 		return result, fmt.Errorf("%s", item.ErrorMessage)
 	}
 	return result, nil
+}
+
+func dailyBarCoreCoverageRetryError(quality DailyBarCoverageQuality) error {
+	if quality.ExpectedDateCount > 0 && quality.DateGapCount == 0 && quality.CoreGapCount == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"daily bar coverage incomplete: expected=%d date_gaps=%d core_gaps=%d",
+		quality.ExpectedDateCount, quality.DateGapCount, quality.CoreGapCount,
+	)
 }
 
 func assetAIDecisionCalled(decision string) bool {
@@ -258,7 +320,11 @@ func (s *Service) refreshAssetBaseProfile(ctx context.Context, inst StockV2Instr
 	}
 	profile := baseProfile
 	if existing.Symbol != "" {
-		profile = mergeStockProfileAIFields(baseProfile, existing)
+		merged, mergeErr := s.mergeStockProfileWithAppliedAI(ctx, baseProfile, existing)
+		if mergeErr != nil {
+			return StockProfile{}, existing, stockProfileSourceStatusesToAsset(profileStatuses), mergeErr
+		}
+		profile = merged
 	}
 	hash := stockProfileAIInputHash(baseProfile)
 	profile.BaseProfileHash = hash
@@ -309,8 +375,8 @@ func stockProfileSourceFailure(statuses []StockProfileSourceStatus) error {
 	return errors.New(safelog.Text(strings.Join(failures, "; "), 600))
 }
 
-// refreshAssetBaseProfileWithCache 在批量维护管线中调用，带 F10 缓存逻辑。
-// 如果基础画像在 7 天内已刷新过，则跳过 F10 抓取（节省 3 次 HTTP 请求/股票）。
+// refreshAssetBaseProfileWithCache runs a cheap instrument comparison every
+// pass and spreads deep F10 checks across a stable seven-day symbol phase.
 // instrument 发生变化时直接刷新 F10；未变化时返回已持久化画像，避免用粗略的
 // instrument 摘要覆盖缓存中更完整的 F10 内容。
 func (s *Service) refreshAssetBaseProfileWithCache(ctx context.Context, inst StockV2Instrument, opts assetMaintenanceOptions) (StockProfile, StockProfile, []AssetMaintenanceSourceStatus, error) {
@@ -326,12 +392,12 @@ func (s *Service) refreshAssetBaseProfileWithCache(ctx context.Context, inst Sto
 		return StockProfile{}, StockProfile{}, nil, err
 	}
 
-	// 缓存命中：7 天内已刷新过 F10，跳过 F10 抓取
+	// Cache hit: the stable weekly phase has not become due yet.
 	baseCheckedAt := existing.BaseProfileCheckedAt
 	if baseCheckedAt.IsZero() {
 		baseCheckedAt = existing.BaseProfileUpdatedAt
 	}
-	if !baseCheckedAt.IsZero() && time.Since(baseCheckedAt) < baseProfileRefreshInterval {
+	if !baseCheckedAt.IsZero() && !stockProfileDeepRefreshDue(existing.Symbol, baseCheckedAt, time.Now()) {
 		baseProfile := buildStockProfileFromInstrument(inst)
 		if stockProfileInstrumentFieldsChanged(existing, baseProfile) {
 			// A cheap universe/instrument comparison runs every maintenance pass.
@@ -349,7 +415,7 @@ func (s *Service) refreshAssetBaseProfileWithCache(ctx context.Context, inst Sto
 		if latestCheckedAt.IsZero() {
 			latestCheckedAt = existing.BaseProfileUpdatedAt
 		}
-		cacheStillFresh := !latestCheckedAt.IsZero() && time.Since(latestCheckedAt) < baseProfileRefreshInterval
+		cacheStillFresh := !latestCheckedAt.IsZero() && !stockProfileDeepRefreshDue(existing.Symbol, latestCheckedAt, time.Now())
 		instrumentStillUnchanged := !stockProfileInstrumentFieldsChanged(existing, baseProfile)
 		if !cacheStillFresh || !instrumentStillUnchanged {
 			unlock()
@@ -372,6 +438,32 @@ func (s *Service) refreshAssetBaseProfileWithCache(ctx context.Context, inst Sto
 	return s.refreshAssetBaseProfile(ctx, inst)
 }
 
+func stockProfileDeepRefreshDue(symbol string, checkedAt, now time.Time) bool {
+	if checkedAt.IsZero() {
+		return true
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if checkedAt.After(now.Add(5 * time.Minute)) {
+		return true
+	}
+	age := now.Sub(checkedAt)
+	if age < 24*time.Hour {
+		return false
+	}
+	if age >= baseProfileRefreshInterval {
+		return true
+	}
+	return now.In(chinaMarketTZ).Weekday() == stockProfileDeepRefreshWeekday(symbol)
+}
+
+func stockProfileDeepRefreshWeekday(symbol string) time.Weekday {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.TrimSpace(symbol)))
+	return time.Weekday(h.Sum32() % 7)
+}
+
 func stockProfileSourceStatusesToAsset(items []StockProfileSourceStatus) []AssetMaintenanceSourceStatus {
 	out := make([]AssetMaintenanceSourceStatus, 0, len(items))
 	for _, item := range items {
@@ -391,7 +483,11 @@ func (s *Service) fetchAndStoreAnnouncements(ctx context.Context, inst StockV2In
 	}
 	backoffKey := "announcement:" + StockV2AnnouncementSourceCninfo + ":" + strings.ToUpper(inst.Market)
 	if until, ok := s.assetSourceBackoffUntil(backoffKey, time.Now()); ok {
-		return nil, AssetMaintenanceSourceStatus{Source: StockV2AnnouncementSourceCninfo, Status: AssetAnnouncementStatusSkipped, CheckedAt: time.Now(), Message: "backoff until " + until.Format(time.RFC3339)}, nil
+		message := "backoff until " + until.Format(time.RFC3339)
+		return nil, AssetMaintenanceSourceStatus{
+			Source: StockV2AnnouncementSourceCninfo, Status: AssetAnnouncementStatusFailed,
+			CheckedAt: time.Now(), Message: message,
+		}, fmt.Errorf("announcement source %s", message)
 	}
 	items, status, err := s.announcementSource.FetchAnnouncements(ctx, inst, 20)
 	if err != nil || len(items) == 0 {
@@ -563,18 +659,29 @@ func (s *Service) maybeRunAssetProfileAI(
 }
 
 func (s *Service) stockProfileAIQueueContextFailed(ctx context.Context, symbol string) (bool, error) {
-	item, err := s.store.GetStockProfileAIQueueItem(ctx, symbol)
+	_, err := s.store.GetStockProfileAIQueueItem(ctx, symbol)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
 		return false, err
 	}
-	var pack StockProfileSummaryContext
-	if err := json.Unmarshal([]byte(item.PayloadJSON), &pack); err != nil {
-		return true, nil
+	profile, err := s.store.GetStockProfile(ctx, symbol)
+	if err != nil {
+		return false, err
 	}
-	return assetMaintenanceSourceFailed(pack.SourceStatuses, StockV2AnnouncementSourceCninfo), nil
+	if normalizeInstrumentType(profile.InstrumentType) != InstrumentTypeStock {
+		return false, nil
+	}
+	state, exists, err := s.store.GetStockProfileAIState(ctx, symbol)
+	if err != nil || !exists || state.RequiredMessageCutoffAt.IsZero() {
+		return false, err
+	}
+	syncState, exists, err := s.store.GetAnnouncementSyncState(ctx, StockV2AnnouncementSourceCninfo, profile.Market)
+	if err != nil {
+		return false, err
+	}
+	return !exists || syncState.CoveredThrough.Before(state.RequiredMessageCutoffAt), nil
 }
 
 func assetMaintenanceSourceFailed(statuses []AssetMaintenanceSourceStatus, source string) bool {
@@ -660,16 +767,27 @@ func stockProfileInstrumentFieldsChanged(existing, current StockProfile) bool {
 	if value := strings.TrimSpace(current.Industry); value != "" && value != strings.TrimSpace(existing.Industry) {
 		return true
 	}
-	return !profileTermsContainAll(existing.Sectors, current.Sectors) ||
-		!profileTermsContainAll(existing.Concepts, current.Concepts)
+	// Tencent's cheap master-data/quote response does not provide deep F10
+	// terms. An empty current set therefore means "not observed", not "removed";
+	// authoritative removals are detected by the scheduled full F10 refresh.
+	if len(cleanProfileTerms(current.Sectors)) > 0 && !profileTermsEqual(existing.Sectors, current.Sectors) {
+		return true
+	}
+	return len(cleanProfileTerms(current.Concepts)) > 0 &&
+		!profileTermsEqual(existing.Concepts, current.Concepts)
 }
 
-func profileTermsContainAll(existing, current []string) bool {
-	seen := make(map[string]struct{}, len(existing))
-	for _, term := range cleanProfileTerms(existing) {
+func profileTermsEqual(left, right []string) bool {
+	left = cleanProfileTerms(left)
+	right = cleanProfileTerms(right)
+	if len(left) != len(right) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(left))
+	for _, term := range left {
 		seen[strings.ToLower(term)] = struct{}{}
 	}
-	for _, term := range cleanProfileTerms(current) {
+	for _, term := range right {
 		if _, ok := seen[strings.ToLower(term)]; !ok {
 			return false
 		}
@@ -750,7 +868,10 @@ func (s *Service) stockProfileDailySummary(ctx context.Context, symbol string) S
 	return summary
 }
 
-func (s *Service) selectAssetMaintenanceSymbols(ctx context.Context, req UniverseUpdateRequest) ([]string, error) {
+func (s *Service) selectAssetMaintenanceSymbols(ctx context.Context, req *UniverseUpdateRequest) ([]string, error) {
+	if req == nil {
+		return nil, errors.New("asset maintenance request is required")
+	}
 	maxSymbols := req.MaxSymbols
 	if len(req.Symbols) > 0 {
 		return limitStrings(compactStringList(req.Symbols, maxSymbols), maxSymbols), nil
@@ -775,8 +896,9 @@ func (s *Service) selectAssetMaintenanceSymbols(ctx context.Context, req Univers
 		return out
 	}
 	var priority []string
+	var protectedPriority []string
 	if holdings, err := s.store.ListHoldingSymbols(ctx); err == nil {
-		priority = append(priority, holdings...)
+		protectedPriority = append(protectedPriority, holdings...)
 	}
 	if strategySymbols, err := s.activeStrategySymbols(ctx); err == nil {
 		items := make([]string, 0, len(strategySymbols))
@@ -784,8 +906,10 @@ func (s *Service) selectAssetMaintenanceSymbols(ctx context.Context, req Univers
 			items = append(items, symbol)
 		}
 		sort.Strings(items)
-		priority = append(priority, items...)
+		protectedPriority = append(protectedPriority, items...)
 	}
+	protectedPriority = normalize(protectedPriority)
+	priority = append(priority, protectedPriority...)
 	stale, err := s.store.ListAssetMaintenancePrioritySymbols(
 		ctx,
 		time.Now().Add(-baseProfileRefreshInterval),
@@ -813,33 +937,65 @@ func (s *Service) selectAssetMaintenanceSymbols(ctx context.Context, req Univers
 		return nil, err
 	}
 	discoveryRefreshInterval := assetUniverseDiscoveryRefreshIntervalFor(discoveryMarker, len(discovered))
-	if s.universeSource != nil && (len(discovered) == 0 || lastDiscovery.IsZero() || time.Since(lastDiscovery) >= discoveryRefreshInterval) {
-		fresh := normalize(s.universeSource.GetDefaultSymbols())
-		if len(fresh) >= 1000 {
-			if err := s.store.CacheDiscoveredUniverseSymbols(ctx, "public_universe", fresh); err != nil {
-				return nil, err
-			}
-			discovered = fresh
-			if err := s.store.SetAssetMaintenanceCursor(ctx, assetUniverseDiscoveryCursorScope, fmt.Sprintf("full:%d", len(fresh))); err != nil {
-				return nil, err
-			}
-		} else {
-			// Never replace an existing full cache with the outage sample. On first
-			// boot the sample remains useful, but its fallback marker forces a short
-			// retry interval rather than treating it as fresh for seven days.
-			if len(discovered) == 0 && len(fresh) > 0 {
-				if err := s.store.CacheDiscoveredUniverseSymbols(ctx, "public_universe", fresh); err != nil {
+	req.universeVerified = s.universeSource == nil
+	if s.universeSource != nil {
+		fullMarker := strings.HasPrefix(discoveryMarker, "full:")
+		fallbackMarker := strings.HasPrefix(discoveryMarker, "fallback:")
+		legacyNeedsVerification := discoveryMarker != "" && !fullMarker && !fallbackMarker
+		refreshDue := len(discovered) == 0 || lastDiscovery.IsZero() ||
+			time.Since(lastDiscovery) >= discoveryRefreshInterval || legacyNeedsVerification
+		if refreshDue {
+			fresh, discoverErr := s.universeSource.GetDefaultSymbols()
+			fresh = normalize(fresh)
+			if discoverErr == nil && len(fresh) >= 1000 {
+				if err := s.store.ReplaceDiscoveredUniverseSymbols(ctx, assetUniverseSnapshotSourceLive, fresh); err != nil {
 					return nil, err
 				}
 				discovered = fresh
+				req.universeVerified = true
+				if err := s.store.SetAssetMaintenanceCursor(ctx, assetUniverseDiscoveryCursorScope, fmt.Sprintf("full:%d", len(fresh))); err != nil {
+					return nil, err
+				}
+			} else {
+				if discoverErr == nil {
+					discoverErr = fmt.Errorf("public universe returned only %d symbols", len(fresh))
+				}
+				req.universeError = safelog.Text(discoverErr.Error(), 600)
+				if err := s.store.SetAssetMaintenanceCursor(ctx, assetUniverseDiscoveryCursorScope, fmt.Sprintf("fallback:%d", len(fresh))); err != nil {
+					return nil, err
+				}
 			}
-			if err := s.store.SetAssetMaintenanceCursor(ctx, assetUniverseDiscoveryCursorScope, fmt.Sprintf("fallback:%d", len(fresh))); err != nil {
-				return nil, err
-			}
+		} else if fullMarker && len(discovered) >= 1000 {
+			req.universeVerified = true
+		} else {
+			req.universeError = "public universe discovery is awaiting verified retry"
 		}
 	}
-	universe := normalize(append(stored, discovered...))
+	universe := discovered
+	if len(universe) == 0 {
+		universe = stored
+	}
+	universe = normalize(universe)
 	sort.Strings(universe)
+	if s.universeSource != nil && len(universe) > 0 {
+		universeSet := make(map[string]struct{}, len(universe))
+		for _, symbol := range universe {
+			universeSet[symbol] = struct{}{}
+		}
+		protectedSet := make(map[string]struct{}, len(protectedPriority))
+		for _, symbol := range protectedPriority {
+			protectedSet[symbol] = struct{}{}
+		}
+		filtered := priority[:0]
+		for _, symbol := range priority {
+			_, inUniverse := universeSet[symbol]
+			_, protected := protectedSet[symbol]
+			if inUniverse || protected {
+				filtered = append(filtered, symbol)
+			}
+		}
+		priority = filtered
+	}
 
 	seen := make(map[string]struct{}, len(priority)+len(universe))
 	out := make([]string, 0, len(priority)+len(universe))
@@ -864,9 +1020,21 @@ func (s *Service) selectAssetMaintenanceSymbols(ctx context.Context, req Univers
 		return out, nil
 	}
 
+	// Holdings and active strategies are the safety-critical head of a capped
+	// maintenance run. Add them before reserving capacity for the rotating tails;
+	// otherwise MaxSymbols=1 could select an unrelated universe symbol first.
+	addUntil(protectedPriority, maxSymbols)
+	if len(out) >= maxSymbols {
+		return out, nil
+	}
+
+	remainingCapacity := maxSymbols - len(out)
 	reserveForCursor := maxSymbols / 4
 	if reserveForCursor < 1 {
 		reserveForCursor = 1
+	}
+	if reserveForCursor > remainingCapacity {
+		reserveForCursor = remainingCapacity
 	}
 	priorityBudget := maxSymbols - reserveForCursor
 	priorityCursor, err := s.store.GetAssetMaintenanceCursor(ctx, assetMaintenancePriorityCursorScope)
@@ -875,18 +1043,14 @@ func (s *Service) selectAssetMaintenanceSymbols(ctx context.Context, req Univers
 	}
 	rotatedPriority := rotateSymbolsAfterExactCursor(priority, priorityCursor)
 	if last := addUntil(rotatedPriority, priorityBudget); last != "" {
-		if err := s.store.SetAssetMaintenanceCursor(ctx, assetMaintenancePriorityCursorScope, last); err != nil {
-			return nil, err
-		}
+		req.priorityCursorNext = last
 	}
 	universeCursor, err := s.store.GetAssetMaintenanceCursor(ctx, assetMaintenanceUniverseCursorScope)
 	if err != nil {
 		return nil, err
 	}
 	if last := addUntil(rotateSymbolsAfterCursor(universe, universeCursor), maxSymbols); last != "" {
-		if err := s.store.SetAssetMaintenanceCursor(ctx, assetMaintenanceUniverseCursorScope, last); err != nil {
-			return nil, err
-		}
+		req.universeCursorNext = last
 	}
 	if len(out) < maxSymbols {
 		lastPriority, err := s.store.GetAssetMaintenanceCursor(ctx, assetMaintenancePriorityCursorScope)
@@ -894,9 +1058,7 @@ func (s *Service) selectAssetMaintenanceSymbols(ctx context.Context, req Univers
 			return nil, err
 		}
 		if last := addUntil(rotateSymbolsAfterExactCursor(priority, lastPriority), maxSymbols); last != "" {
-			if err := s.store.SetAssetMaintenanceCursor(ctx, assetMaintenancePriorityCursorScope, last); err != nil {
-				return nil, err
-			}
+			req.priorityCursorNext = last
 		}
 	}
 	return out, nil
@@ -982,78 +1144,42 @@ func (s *Service) ListAssetSummaries(ctx context.Context, symbols []string) (map
 	if len(symbols) == 0 {
 		return map[string]StockV2AssetSummary{}, nil
 	}
-	profiles, err := s.ListStockProfileSummaries(ctx, symbols)
+	summaries, err := s.assetReadinessSummaries(ctx, symbols)
 	if err != nil {
 		return nil, err
-	}
-	qualities, err := s.GetDailyBarsQualityBatch(ctx, symbols, DailyBarAdjustedNone)
-	if err != nil {
-		return nil, err
-	}
-	announcementStats, err := s.store.LatestAnnouncementStats(ctx, symbols)
-	if err != nil {
-		return nil, err
-	}
-	latestItems, err := s.store.LatestAssetMaintenanceItems(ctx, symbols)
-	if err != nil {
-		return nil, err
-	}
-	announcementSync := make(map[string]AnnouncementSyncState, 3)
-	for _, market := range []string{"SH", "SZ", "BJ"} {
-		state, exists, stateErr := s.store.GetAnnouncementSyncState(ctx, StockV2AnnouncementSourceCninfo, market)
-		if stateErr != nil {
-			return nil, stateErr
-		}
-		if exists {
-			announcementSync[market] = state
-		}
 	}
 	evaluatedAt := time.Now()
+	environment, err := s.loadAssetReadinessEnvironment(ctx, evaluatedAt)
+	if err != nil {
+		return nil, err
+	}
+	readinessBySymbol, err := s.evaluateAssetReadinessSummaryChunk(ctx, symbols, summaries, environment)
+	if err != nil {
+		return nil, err
+	}
 	out := make(map[string]StockV2AssetSummary, len(symbols))
 	for _, symbol := range symbols {
-		item := announcementStats[symbol]
-		item.Symbol = symbol
-		item.ProfileSummary = profiles[symbol]
-		item.DailyBarQuality = qualities[symbol]
-		item.LatestMaintenance = latestItems[symbol]
-		item.Readiness = evaluateStockV2AssetReadiness(item, announcementSync[item.ProfileSummary.Market], evaluatedAt)
+		item := summaries[symbol]
+		item.Readiness = legacyStockV2AssetReadiness(readinessBySymbol[symbol])
 		out[symbol] = item
 	}
 	return out, nil
 }
 
-func evaluateStockV2AssetReadiness(item StockV2AssetSummary, announcementSync AnnouncementSyncState, now time.Time) StockV2AssetReadiness {
-	readiness := StockV2AssetReadiness{EvaluatedAt: now, AnnouncementSyncAt: announcementSync.LastSuccessAt}
-	readiness.DailyBarReady = item.DailyBarQuality.HasData && item.DailyBarQuality.Meets250 &&
-		item.DailyBarQuality.IncompleteCount == 0 && !item.DailyBarQuality.Stale
-	baseCheckedAt := item.ProfileSummary.BaseProfileCheckedAt
-	if baseCheckedAt.IsZero() {
-		baseCheckedAt = item.ProfileSummary.BaseProfileUpdatedAt
+func legacyStockV2AssetReadiness(item UnifiedAssetReadiness) StockV2AssetReadiness {
+	reasons := make([]string, 0, len(item.Reasons))
+	for _, reason := range item.Reasons {
+		reasons = append(reasons, reason.Code)
 	}
-	readiness.BaseProfileReady = item.ProfileSummary.Status == "ready" &&
-		!baseCheckedAt.IsZero() &&
-		now.Sub(baseCheckedAt) <= baseProfileRefreshInterval+24*time.Hour
-	readiness.AnnouncementReady = normalizeInstrumentType(item.ProfileSummary.InstrumentType) != InstrumentTypeStock ||
-		(!announcementSync.LastSuccessAt.IsZero() && now.Sub(announcementSync.LastSuccessAt) <= 36*time.Hour &&
-			!announcementSync.CoveredThrough.Before(now.Add(-36*time.Hour)))
-	readiness.AIProfileReady = item.ProfileSummary.AIProfileStatus == StockProfileAIStatusReady &&
-		!item.ProfileSummary.AIProfileUpdatedAt.IsZero() &&
-		!item.ProfileSummary.AIProfileUpdatedAt.Before(item.ProfileSummary.BaseProfileUpdatedAt) &&
-		(item.LatestAnnouncementAt.IsZero() || !item.ProfileSummary.AIProfileUpdatedAt.Before(item.LatestAnnouncementAt)) &&
-		(item.LatestAnnouncementFetchedAt.IsZero() || !item.ProfileSummary.AIProfileUpdatedAt.Before(item.LatestAnnouncementFetchedAt))
-	readiness.DataReady = readiness.DailyBarReady && readiness.BaseProfileReady && readiness.AnnouncementReady
-	readiness.Ready = readiness.DataReady && readiness.AIProfileReady
-	if !readiness.DailyBarReady {
-		readiness.Reasons = append(readiness.Reasons, "daily_bar_missing_or_stale")
+	return StockV2AssetReadiness{
+		Ready:              item.AnalysisReady,
+		DataReady:          item.MarketReady && item.MessageReady,
+		DailyBarReady:      item.DailyBarReady,
+		BaseProfileReady:   item.BaseProfileReady,
+		AnnouncementReady:  item.AnnouncementReady,
+		AIProfileReady:     item.AIProfileReady,
+		Reasons:            reasons,
+		AnnouncementSyncAt: item.AnnouncementSyncAt,
+		EvaluatedAt:        item.EvaluatedAt,
 	}
-	if !readiness.BaseProfileReady {
-		readiness.Reasons = append(readiness.Reasons, "base_profile_missing_or_stale")
-	}
-	if !readiness.AnnouncementReady {
-		readiness.Reasons = append(readiness.Reasons, "announcement_coverage_missing_or_stale")
-	}
-	if !readiness.AIProfileReady {
-		readiness.Reasons = append(readiness.Reasons, "ai_profile_missing_or_outdated")
-	}
-	return readiness
 }

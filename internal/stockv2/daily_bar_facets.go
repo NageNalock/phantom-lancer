@@ -35,6 +35,9 @@ func (s *Service) repairStoredDailyBarFlowFacets(ctx context.Context, inst Stock
 	if len(candidates) == 0 {
 		return false, nil
 	}
+	if until, blocked := s.assetSourceBackoffUntil(eastmoneyDailyFlowBackoffKey, time.Now()); blocked {
+		return false, fmt.Errorf("eastmoney daily flow cooldown until %s", until.Format(time.RFC3339))
+	}
 	statuses := s.enrichDailyBarsWithDataFacets(ctx, inst, candidates)
 	for _, status := range statuses {
 		if status.Status == "failed" {
@@ -53,7 +56,7 @@ func (s *Service) enrichDailyBarsWithDataFacets(ctx context.Context, inst StockV
 	}
 	needsFlow := false
 	for _, bar := range bars {
-		if !bar.NetInflowPresent || !bar.MainNetInflowPresent {
+		if !dailyBarNetInflowPresent(bar) || !dailyBarMainNetInflowPresent(bar) {
 			needsFlow = true
 			break
 		}

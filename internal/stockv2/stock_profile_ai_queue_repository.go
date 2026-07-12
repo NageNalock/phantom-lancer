@@ -11,7 +11,7 @@ import (
 	"phantom-lancer/internal/safelog"
 )
 
-const stockProfileAIQueuePayloadMaxBytes = 256 << 10
+const stockProfileAIQueueResultMaxBytes = 64 << 10
 
 var (
 	ErrStockProfileAIQueueEmpty      = errors.New("stock profile ai queue empty")
@@ -22,21 +22,22 @@ func (s *Store) EnqueueStockProfileAI(ctx context.Context, item StockProfileAIQu
 	return s.enqueueStockProfileAI(ctx, item, false)
 }
 
-// EnqueueStockProfileAIIfAbsent is reserved for upgrading pre-queue AgentRuns.
-// A concurrently created queue row always wins, so recovery cannot replace a
-// newer announcement or base-profile payload.
-func (s *Store) EnqueueStockProfileAIIfAbsent(ctx context.Context, item StockProfileAIQueueItem) (StockProfileAIQueueItem, error) {
+// ReviveStockProfileAI is the explicit same-version retry path used after the
+// maintenance backoff or an owner action. Ordinary outbox reconciliation must
+// never reset a terminal attempt counter.
+func (s *Store) ReviveStockProfileAI(ctx context.Context, item StockProfileAIQueueItem) (StockProfileAIQueueItem, error) {
 	return s.enqueueStockProfileAI(ctx, item, true)
 }
 
-func (s *Store) enqueueStockProfileAI(ctx context.Context, item StockProfileAIQueueItem, insertOnly bool) (StockProfileAIQueueItem, error) {
+func (s *Store) enqueueStockProfileAI(
+	ctx context.Context,
+	item StockProfileAIQueueItem,
+	reviveFailed bool,
+) (StockProfileAIQueueItem, error) {
 	item.Symbol = strings.TrimSpace(item.Symbol)
 	item.DesiredInputVersion = strings.TrimSpace(item.DesiredInputVersion)
 	if item.Symbol == "" || item.DesiredInputVersion == "" {
 		return StockProfileAIQueueItem{}, errors.New("stock profile ai queue requires symbol and input version")
-	}
-	if len(item.PayloadJSON) == 0 || len(item.PayloadJSON) > stockProfileAIQueuePayloadMaxBytes {
-		return StockProfileAIQueueItem{}, fmt.Errorf("stock profile ai queue payload must be 1-%d bytes", stockProfileAIQueuePayloadMaxBytes)
 	}
 	now := time.Now()
 	if item.Status == "" {
@@ -52,6 +53,10 @@ func (s *Store) enqueueStockProfileAI(ctx context.Context, item StockProfileAIQu
 	if item.TriggerReason == "" {
 		item.TriggerReason = AssetAIDecisionMissing
 	}
+	reviveFailedInt := 0
+	if reviveFailed {
+		reviveFailedInt = 1
+	}
 
 	conflictClause := `
 		ON CONFLICT(symbol) DO UPDATE SET
@@ -64,48 +69,85 @@ func (s *Store) enqueueStockProfileAI(ctx context.Context, item StockProfileAIQu
 			trigger_reason = excluded.trigger_reason,
 			requested_by = excluded.requested_by,
 			desired_input_version = excluded.desired_input_version,
-			payload_json = excluded.payload_json,
 			status = CASE
 				WHEN stockv2_stock_profile_ai_queue.status = 'running' THEN 'running'
+				WHEN stockv2_stock_profile_ai_queue.status = 'failed'
+					AND stockv2_stock_profile_ai_queue.desired_input_version = excluded.desired_input_version
+					AND ? = 0
+				THEN 'failed'
+				WHEN stockv2_stock_profile_ai_queue.status IN ('apply_pending','applying')
+					AND stockv2_stock_profile_ai_queue.desired_input_version = excluded.desired_input_version
+				THEN stockv2_stock_profile_ai_queue.status
 				WHEN stockv2_stock_profile_ai_queue.desired_input_version = excluded.desired_input_version
-					AND stockv2_stock_profile_ai_queue.status IN ('ready', 'retry_wait', 'completed')
+					AND stockv2_stock_profile_ai_queue.status IN ('ready', 'retry_wait')
 				THEN stockv2_stock_profile_ai_queue.status
 				ELSE excluded.status
 			END,
 			available_at = CASE
+				WHEN stockv2_stock_profile_ai_queue.status = 'failed'
+					AND stockv2_stock_profile_ai_queue.desired_input_version = excluded.desired_input_version
+					AND ? = 0
+				THEN stockv2_stock_profile_ai_queue.available_at
 				WHEN stockv2_stock_profile_ai_queue.status = 'running'
 					AND stockv2_stock_profile_ai_queue.desired_input_version = excluded.desired_input_version
 				THEN stockv2_stock_profile_ai_queue.available_at
 				WHEN stockv2_stock_profile_ai_queue.status = 'running' THEN excluded.available_at
 				WHEN stockv2_stock_profile_ai_queue.desired_input_version = excluded.desired_input_version
-					AND stockv2_stock_profile_ai_queue.status IN ('ready', 'retry_wait', 'completed')
+					AND stockv2_stock_profile_ai_queue.status IN ('ready', 'retry_wait')
 				THEN stockv2_stock_profile_ai_queue.available_at
 				ELSE excluded.available_at
 			END,
 			attempt_count = CASE
 				WHEN stockv2_stock_profile_ai_queue.status = 'running' THEN stockv2_stock_profile_ai_queue.attempt_count
+				WHEN stockv2_stock_profile_ai_queue.status = 'failed'
+					AND stockv2_stock_profile_ai_queue.desired_input_version = excluded.desired_input_version
+					AND ? = 0
+				THEN stockv2_stock_profile_ai_queue.attempt_count
 				WHEN stockv2_stock_profile_ai_queue.desired_input_version = excluded.desired_input_version
-					AND stockv2_stock_profile_ai_queue.status != 'failed'
+					AND stockv2_stock_profile_ai_queue.status IN ('ready', 'retry_wait')
 				THEN stockv2_stock_profile_ai_queue.attempt_count
 				ELSE 0
 			END,
-			current_agent_run_id = CASE WHEN stockv2_stock_profile_ai_queue.status = 'running' THEN stockv2_stock_profile_ai_queue.current_agent_run_id ELSE NULL END,
-			last_error = CASE WHEN stockv2_stock_profile_ai_queue.status = 'running' THEN stockv2_stock_profile_ai_queue.last_error ELSE NULL END,
+			current_agent_run_id = CASE
+				WHEN stockv2_stock_profile_ai_queue.status = 'running' THEN stockv2_stock_profile_ai_queue.current_agent_run_id
+				WHEN stockv2_stock_profile_ai_queue.status IN ('apply_pending','applying')
+					AND stockv2_stock_profile_ai_queue.desired_input_version = excluded.desired_input_version
+				THEN stockv2_stock_profile_ai_queue.current_agent_run_id ELSE NULL END,
+			result_json = CASE WHEN stockv2_stock_profile_ai_queue.status IN ('apply_pending','applying')
+				AND stockv2_stock_profile_ai_queue.desired_input_version = excluded.desired_input_version
+				THEN stockv2_stock_profile_ai_queue.result_json ELSE NULL END,
+			result_hash = CASE WHEN stockv2_stock_profile_ai_queue.status IN ('apply_pending','applying')
+				AND stockv2_stock_profile_ai_queue.desired_input_version = excluded.desired_input_version
+				THEN stockv2_stock_profile_ai_queue.result_hash ELSE NULL END,
+			result_model = CASE WHEN stockv2_stock_profile_ai_queue.status IN ('apply_pending','applying')
+				AND stockv2_stock_profile_ai_queue.desired_input_version = excluded.desired_input_version
+				THEN stockv2_stock_profile_ai_queue.result_model ELSE NULL END,
+			result_confidence = CASE WHEN stockv2_stock_profile_ai_queue.status IN ('apply_pending','applying')
+				AND stockv2_stock_profile_ai_queue.desired_input_version = excluded.desired_input_version
+				THEN stockv2_stock_profile_ai_queue.result_confidence ELSE 0 END,
+			last_error = CASE
+				WHEN stockv2_stock_profile_ai_queue.status IN ('running','apply_pending','applying')
+				THEN stockv2_stock_profile_ai_queue.last_error
+				WHEN stockv2_stock_profile_ai_queue.status = 'failed'
+					AND stockv2_stock_profile_ai_queue.desired_input_version = excluded.desired_input_version
+					AND ? = 0
+				THEN stockv2_stock_profile_ai_queue.last_error
+				ELSE NULL
+			END,
 			updated_at = excluded.updated_at`
-	if insertOnly {
-		conflictClause = `ON CONFLICT(symbol) DO NOTHING`
-	}
-
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO stockv2_stock_profile_ai_queue (
 			symbol, market, status, priority, trigger_reason, requested_by,
-			desired_input_version, claimed_input_version, payload_json,
+			desired_input_version, claimed_input_version,
 			current_agent_run_id, attempt_count, available_at,
 			lease_owner, lease_token, lease_expires_at,
-			completed_input_version, completed_at, last_error, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, 0, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
+			completed_input_version, completed_at, result_json, result_hash,
+			result_model, result_confidence, last_error, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, ?, NULL, NULL, NULL,
+		          NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?)
 	`+conflictClause, item.Symbol, item.Market, item.Status, item.Priority, item.TriggerReason, item.RequestedBy,
-		item.DesiredInputVersion, item.PayloadJSON, item.AvailableAt, item.CreatedAt, item.UpdatedAt)
+		item.DesiredInputVersion, item.AvailableAt, item.CreatedAt, item.UpdatedAt,
+		reviveFailedInt, reviveFailedInt, reviveFailedInt, reviveFailedInt)
 	if err != nil {
 		return StockProfileAIQueueItem{}, wrapError(err, "enqueue stock profile ai")
 	}
@@ -180,7 +222,8 @@ func (s *Store) BindStockProfileAIRun(ctx context.Context, lease StockProfileAIQ
 		UPDATE stockv2_asset_maintenance_items
 		SET agent_run_id = ?, ai_profile_status = 'running', ai_queue_status = 'running', updated_at = ?
 		WHERE symbol = ? AND ai_queue_status IN ('ready', 'retry_wait') AND COALESCE(agent_run_id, '') = ''
-	`, runID, now, lease.Symbol); err != nil {
+		  AND ai_desired_input_version = ?
+	`, runID, now, lease.Symbol, lease.ClaimedInputVersion); err != nil {
 		return wrapError(err, "bind asset maintenance items to ai run")
 	}
 	return wrapError(tx.Commit(), "commit bound stock profile ai run")
@@ -192,6 +235,8 @@ func (s *Store) SyncStockProfileUpdateTaskAIQueue(ctx context.Context, taskID, s
 		UPDATE stockv2_stock_profile_update_tasks
 		SET status = CASE (SELECT status FROM stockv2_stock_profile_ai_queue WHERE symbol = ?)
 				WHEN 'running' THEN 'running'
+				WHEN 'apply_pending' THEN 'running'
+				WHEN 'applying' THEN 'running'
 				WHEN 'completed' THEN 'completed'
 				WHEN 'failed' THEN 'partial'
 				ELSE 'queued'
@@ -199,6 +244,8 @@ func (s *Store) SyncStockProfileUpdateTaskAIQueue(ctx context.Context, taskID, s
 			agent_run_id = (SELECT current_agent_run_id FROM stockv2_stock_profile_ai_queue WHERE symbol = ?),
 			ai_profile_status = CASE (SELECT status FROM stockv2_stock_profile_ai_queue WHERE symbol = ?)
 				WHEN 'running' THEN 'running'
+				WHEN 'apply_pending' THEN 'running'
+				WHEN 'applying' THEN 'running'
 				WHEN 'completed' THEN 'ready'
 				WHEN 'failed' THEN 'failed'
 				ELSE 'queued'
@@ -212,96 +259,6 @@ func (s *Store) SyncStockProfileUpdateTaskAIQueue(ctx context.Context, taskID, s
 		  AND EXISTS (SELECT 1 FROM stockv2_stock_profile_ai_queue WHERE symbol = ?)
 	`, symbol, symbol, symbol, symbol, now, now, taskID, symbol)
 	return wrapError(err, "sync stock profile update task ai queue")
-}
-
-// FinalizeLegacyStockProfileAIRunMigration moves records that referenced an
-// in-memory pre-queue AgentRun onto the durable queue state and supersedes the
-// old run in one SQLite transaction. targetQueueStatus is only used when the
-// old run is already satisfied or cannot be recovered; otherwise the queue row
-// is read inside the transaction so a completed item cannot be reset to queued.
-func (s *Store) FinalizeLegacyStockProfileAIRunMigration(
-	ctx context.Context,
-	runID, symbol, targetQueueStatus, reason string,
-) (string, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return "", wrapError(err, "begin legacy stock profile ai migration")
-	}
-	defer tx.Rollback()
-
-	queueStatus := strings.TrimSpace(targetQueueStatus)
-	currentRunID := ""
-	queueError := ""
-	if queueStatus == "" {
-		err = tx.QueryRowContext(ctx, `
-			SELECT status, COALESCE(current_agent_run_id, ''), COALESCE(last_error, '')
-			FROM stockv2_stock_profile_ai_queue WHERE symbol = ?
-		`, strings.TrimSpace(symbol)).Scan(&queueStatus, &currentRunID, &queueError)
-		if err != nil {
-			return "", wrapError(err, "read queue state for legacy stock profile ai migration")
-		}
-	}
-
-	taskStatus := StockProfileUpdateStatusQueued
-	aiStatus := StockProfileAIStatusQueued
-	taskRunID := any(nil)
-	finishedAt := any(nil)
-	switch queueStatus {
-	case StockProfileAIQueueStatusReady, StockProfileAIQueueStatusRetryWait:
-	case StockProfileAIQueueStatusRunning:
-		taskStatus = StockProfileUpdateStatusRunning
-		aiStatus = StockProfileAIStatusRunning
-		taskRunID = nullableString(currentRunID)
-	case StockProfileAIQueueStatusCompleted:
-		taskStatus = StockProfileUpdateStatusCompleted
-		aiStatus = StockProfileAIStatusReady
-		finishedAt = time.Now()
-	case StockProfileAIQueueStatusFailed:
-		taskStatus = StockProfileUpdateStatusPartial
-		aiStatus = StockProfileAIStatusFailed
-		finishedAt = time.Now()
-		if queueError == "" {
-			queueError = reason
-		}
-	default:
-		return "", fmt.Errorf("invalid stock profile ai queue status %q", queueStatus)
-	}
-
-	now := time.Now()
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE stockv2_stock_profile_update_tasks
-		SET status = ?, agent_run_id = ?, ai_profile_status = ?, ai_profile_error = ?,
-			finished_at = ?, updated_at = ?
-		WHERE symbol = ? AND agent_run_id = ?
-	`, taskStatus, taskRunID, aiStatus, nullableString(safelog.Text(queueError, 500)), finishedAt, now, symbol, runID); err != nil {
-		return "", wrapError(err, "rebind legacy stock profile update task")
-	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE stockv2_asset_maintenance_items
-		SET agent_run_id = ?, ai_profile_status = ?, ai_queue_status = ?, updated_at = ?
-		WHERE symbol = ? AND agent_run_id = ?
-	`, taskRunID, aiStatus, queueStatus, now, symbol, runID); err != nil {
-		return "", wrapError(err, "rebind legacy asset maintenance item")
-	}
-	result, err := tx.ExecContext(ctx, `
-		UPDATE stockv2_agent_runs
-		SET status = 'superseded', error_message = ?, finished_at = ?, updated_at = ?
-		WHERE id = ? AND status IN ('ready', 'running')
-	`, safelog.Text(reason, 500), now, now, runID)
-	if err != nil {
-		return "", wrapError(err, "supersede migrated stock profile agent run")
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return "", err
-	}
-	if affected != 1 {
-		return "", fmt.Errorf("legacy stock profile agent run %s is no longer active", runID)
-	}
-	if err := tx.Commit(); err != nil {
-		return "", wrapError(err, "commit legacy stock profile ai migration")
-	}
-	return queueStatus, nil
 }
 
 func updateBoundStockProfileAIRecordsWithTx(
@@ -319,7 +276,7 @@ func updateBoundStockProfileAIRecordsWithTx(
 	case StockProfileAIQueueStatusReady:
 	case StockProfileAIQueueStatusRetryWait:
 		aiError = safelog.Text(message, 500)
-	case StockProfileAIQueueStatusRunning:
+	case StockProfileAIQueueStatusRunning, StockProfileAIQueueStatusApplyPending, StockProfileAIQueueStatusApplying:
 		taskStatus = StockProfileUpdateStatusRunning
 		aiStatus = StockProfileAIStatusRunning
 		boundRunID = nullableString(runID)
@@ -380,39 +337,169 @@ func (s *Store) RenewStockProfileAILease(ctx context.Context, lease StockProfile
 	return requireStockProfileAIQueueLease(result)
 }
 
-func (s *Store) CompleteStockProfileAI(ctx context.Context, lease StockProfileAIQueueLease) (bool, error) {
+func (s *Store) StageStockProfileAIResult(
+	ctx context.Context,
+	symbol, runID, resultJSON, resultHash, model string,
+	confidence float64,
+) error {
+	if len(resultJSON) == 0 || len(resultJSON) > stockProfileAIQueueResultMaxBytes {
+		return fmt.Errorf("stock profile AI result must be 1-%d bytes", stockProfileAIQueueResultMaxBytes)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return wrapError(err, "begin staging stock profile AI result")
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE stockv2_stock_profile_ai_queue
+		SET status = 'apply_pending', result_json = ?, result_hash = ?,
+			result_model = ?, result_confidence = ?, available_at = ?,
+			lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+			last_error = NULL, updated_at = ?
+		WHERE symbol = ? AND status = 'running' AND current_agent_run_id = ?
+		  AND desired_input_version = claimed_input_version
+	`, resultJSON, strings.TrimSpace(resultHash), strings.TrimSpace(model), confidence,
+		time.Now(), time.Now(), strings.TrimSpace(symbol), strings.TrimSpace(runID))
+	if err != nil {
+		return wrapError(err, "stage stock profile AI result")
+	}
+	if err := requireStockProfileAIQueueLease(result); err != nil {
+		return err
+	}
+	if err := updateBoundStockProfileAIRecordsWithTx(
+		ctx, tx, strings.TrimSpace(symbol), strings.TrimSpace(runID),
+		StockProfileAIQueueStatusApplyPending, "",
+	); err != nil {
+		return err
+	}
+	// ponytail: staging is the durable completion point for a profile AgentRun.
+	// Mark it completed in the same SQLite transaction so a process crash cannot
+	// leave an applied/recoverable result attached to a permanently running run.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE stockv2_agent_runs
+		SET status = 'completed', finished_at = COALESCE(finished_at, ?), updated_at = ?
+		WHERE id = ? AND status IN ('ready', 'running', 'completed')
+	`, time.Now(), time.Now(), strings.TrimSpace(runID)); err != nil {
+		return wrapError(err, "complete staged stock profile AI run")
+	}
+	return wrapError(tx.Commit(), "commit staged stock profile AI result")
+}
+
+func (s *Store) ClaimStockProfileAIApply(
+	ctx context.Context,
+	workerID string,
+	now time.Time,
+	leaseTTL time.Duration,
+) (StockProfileAIQueueLease, error) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if leaseTTL <= 0 {
+		leaseTTL = 2 * time.Minute
+	}
+	leaseToken := generateID()
+	item, err := scanStockProfileAIQueueItem(s.db.QueryRowContext(ctx, `
+		UPDATE stockv2_stock_profile_ai_queue
+		SET status = 'applying', lease_owner = ?, lease_token = ?, lease_expires_at = ?, updated_at = ?
+		WHERE symbol = (
+			SELECT symbol FROM stockv2_stock_profile_ai_queue
+			WHERE status = 'apply_pending' AND available_at <= ?
+			ORDER BY priority DESC, available_at, updated_at LIMIT 1
+		)
+		RETURNING `+stockProfileAIQueueColumns,
+		workerID, leaseToken, now.Add(leaseTTL), now, now))
+	if errors.Is(err, sql.ErrNoRows) {
+		return StockProfileAIQueueLease{}, ErrStockProfileAIQueueEmpty
+	}
+	if err != nil {
+		return StockProfileAIQueueLease{}, wrapError(err, "claim stock profile AI apply")
+	}
+	return StockProfileAIQueueLease{StockProfileAIQueueItem: item}, nil
+}
+
+func (s *Store) CompleteStockProfileAIApply(ctx context.Context, lease StockProfileAIQueueLease) (bool, error) {
 	now := time.Now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, wrapError(err, "begin complete stock profile ai")
+		return false, wrapError(err, "begin complete stock profile AI apply")
 	}
 	defer tx.Rollback()
-	row := tx.QueryRowContext(ctx, `
+	var status string
+	err = tx.QueryRowContext(ctx, `
 		UPDATE stockv2_stock_profile_ai_queue
 		SET status = CASE WHEN desired_input_version = claimed_input_version THEN 'completed' ELSE 'ready' END,
 			completed_input_version = CASE WHEN desired_input_version = claimed_input_version THEN claimed_input_version ELSE completed_input_version END,
 			completed_at = CASE WHEN desired_input_version = claimed_input_version THEN ? ELSE completed_at END,
-			available_at = available_at,
 			attempt_count = CASE WHEN desired_input_version = claimed_input_version THEN attempt_count ELSE 0 END,
 			current_agent_run_id = NULL,
 			lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+			result_json = NULL, result_hash = NULL, result_model = NULL, result_confidence = 0,
 			last_error = NULL, updated_at = ?
-		WHERE symbol = ? AND status = 'running' AND lease_token = ?
+		WHERE symbol = ? AND status = 'applying' AND lease_token = ?
 		RETURNING status
-	`, now, now, lease.Symbol, lease.LeaseToken)
-	var status string
-	if err := row.Scan(&status); errors.Is(err, sql.ErrNoRows) {
+	`, now, now, lease.Symbol, lease.LeaseToken).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, ErrStockProfileAIQueueLeaseStale
-	} else if err != nil {
-		return false, wrapError(err, "complete stock profile ai")
+	}
+	if err != nil {
+		return false, wrapError(err, "complete stock profile AI apply")
 	}
 	if err := updateBoundStockProfileAIRecordsWithTx(ctx, tx, lease.Symbol, lease.CurrentAgentRunID, status, ""); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return false, wrapError(err, "commit completed stock profile ai")
+		return false, wrapError(err, "commit completed stock profile AI apply")
 	}
 	return status == StockProfileAIQueueStatusReady, nil
+}
+
+func (s *Store) RetryStockProfileAIApply(
+	ctx context.Context,
+	lease StockProfileAIQueueLease,
+	availableAt time.Time,
+	message string,
+) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_stock_profile_ai_queue
+		SET status = CASE WHEN desired_input_version = claimed_input_version THEN 'apply_pending' ELSE 'ready' END,
+			available_at = ?, lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+			last_error = ?, updated_at = ?
+		WHERE symbol = ? AND status = 'applying' AND lease_token = ?
+	`, availableAt, safelog.Text(message, 500), time.Now(), lease.Symbol, lease.LeaseToken)
+	if err != nil {
+		return wrapError(err, "retry stock profile AI apply")
+	}
+	return requireStockProfileAIQueueLease(result)
+}
+
+func (s *Store) SupersedeStockProfileAIRun(ctx context.Context, lease StockProfileAIQueueLease) error {
+	now := time.Now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return wrapError(err, "begin supersede stock profile AI run")
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE stockv2_stock_profile_ai_queue
+		SET status = 'ready', available_at = ?, attempt_count = 0,
+			current_agent_run_id = NULL,
+			lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+			last_error = NULL, updated_at = ?
+		WHERE symbol = ? AND status = 'running' AND lease_token = ?
+	`, now, now, lease.Symbol, lease.LeaseToken)
+	if err != nil {
+		return wrapError(err, "supersede stock profile AI run")
+	}
+	if err := requireStockProfileAIQueueLease(result); err != nil {
+		return err
+	}
+	if err := updateBoundStockProfileAIRecordsWithTx(ctx, tx, lease.Symbol, lease.CurrentAgentRunID, StockProfileAIQueueStatusReady, ""); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return wrapError(err, "commit superseded stock profile AI run")
+	}
+	return nil
 }
 
 func (s *Store) RetryStockProfileAI(ctx context.Context, lease StockProfileAIQueueLease, availableAt time.Time, message string, terminal bool) error {
@@ -500,14 +587,14 @@ func (s *Store) recoverStockProfileAILeases(ctx context.Context, now time.Time, 
 	}
 	defer tx.Rollback()
 
-	where := "status = 'running' AND lease_expires_at < ?"
+	where := "status IN ('running','applying') AND lease_expires_at < ?"
 	args := []any{now}
 	if all {
-		where = "status = 'running'"
+		where = "status IN ('running','applying')"
 		args = nil
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT symbol, COALESCE(current_agent_run_id, '')
+		SELECT symbol, COALESCE(current_agent_run_id, ''), status
 		FROM stockv2_stock_profile_ai_queue
 		WHERE `+where, args...)
 	if err != nil {
@@ -516,17 +603,18 @@ func (s *Store) recoverStockProfileAILeases(ctx context.Context, now time.Time, 
 	type recoveredLease struct {
 		symbol string
 		runID  string
+		status string
 	}
 	var recovered []recoveredLease
 	var runIDs []string
 	for rows.Next() {
 		var item recoveredLease
-		if err := rows.Scan(&item.symbol, &item.runID); err != nil {
+		if err := rows.Scan(&item.symbol, &item.runID, &item.status); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		recovered = append(recovered, item)
-		if strings.TrimSpace(item.runID) != "" {
+		if item.status == StockProfileAIQueueStatusRunning && strings.TrimSpace(item.runID) != "" {
 			runIDs = append(runIDs, item.runID)
 		}
 	}
@@ -542,13 +630,18 @@ func (s *Store) recoverStockProfileAILeases(ctx context.Context, now time.Time, 
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE stockv2_stock_profile_ai_queue
-		SET status = 'ready', available_at = ?, current_agent_run_id = NULL,
+		SET status = CASE WHEN status = 'applying' THEN 'apply_pending' ELSE 'ready' END,
+			available_at = ?,
+			current_agent_run_id = CASE WHEN status = 'applying' THEN current_agent_run_id ELSE NULL END,
 			lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
 			last_error = 'worker lease expired', updated_at = ?
 		WHERE `+where, updateArgs...); err != nil {
 		return nil, wrapError(err, "recover expired stock profile ai leases")
 	}
 	for _, item := range recovered {
+		if item.status == StockProfileAIQueueStatusApplying {
+			continue
+		}
 		if strings.TrimSpace(item.runID) == "" {
 			continue
 		}
@@ -584,7 +677,15 @@ func (s *Store) StockProfileAIQueueRunCurrent(ctx context.Context, symbol, runID
 	if err != nil {
 		return false, false, err
 	}
-	return true, desired != "" && desired == claimed && currentRun == strings.TrimSpace(runID), nil
+	current = desired != "" && desired == claimed && currentRun == strings.TrimSpace(runID)
+	if !current {
+		return true, false, nil
+	}
+	targetCurrent, err := s.StockProfileAITargetCurrent(ctx, symbol, claimed)
+	if err != nil {
+		return true, false, err
+	}
+	return true, targetCurrent, nil
 }
 
 func (s *Store) GetStockProfileAIQueueStats(ctx context.Context) (StockProfileAIQueueStats, error) {
@@ -605,6 +706,8 @@ func (s *Store) GetStockProfileAIQueueStats(ctx context.Context) (StockProfileAI
 			stats.Ready = count
 		case StockProfileAIQueueStatusRunning:
 			stats.Running = count
+		case StockProfileAIQueueStatusApplyPending, StockProfileAIQueueStatusApplying:
+			stats.Applying += count
 		case StockProfileAIQueueStatusRetryWait:
 			stats.Retrying = count
 		case StockProfileAIQueueStatusCompleted:
@@ -630,9 +733,11 @@ func requireStockProfileAIQueueLease(result sql.Result) error {
 const stockProfileAIQueueColumns = `
 	symbol, market, status, priority, trigger_reason, COALESCE(requested_by, ''),
 	desired_input_version, COALESCE(claimed_input_version, ''), COALESCE(completed_input_version, ''),
-	payload_json, COALESCE(current_agent_run_id, ''), attempt_count, available_at,
+	COALESCE(current_agent_run_id, ''), attempt_count, available_at,
 	COALESCE(lease_owner, ''), COALESCE(lease_token, ''), lease_expires_at,
-	completed_at, COALESCE(last_error, ''), created_at, updated_at`
+	completed_at, COALESCE(result_json, ''), COALESCE(result_hash, ''),
+	COALESCE(result_model, ''), COALESCE(result_confidence, 0),
+	COALESCE(last_error, ''), created_at, updated_at`
 
 const stockProfileAIQueueSelect = `SELECT ` + stockProfileAIQueueColumns + ` FROM stockv2_stock_profile_ai_queue`
 
@@ -642,9 +747,10 @@ func scanStockProfileAIQueueItem(row rowScanner) (StockProfileAIQueueItem, error
 	err := row.Scan(
 		&item.Symbol, &item.Market, &item.Status, &item.Priority, &item.TriggerReason, &item.RequestedBy,
 		&item.DesiredInputVersion, &item.ClaimedInputVersion, &item.CompletedInputVersion,
-		&item.PayloadJSON, &item.CurrentAgentRunID, &item.AttemptCount, &item.AvailableAt,
+		&item.CurrentAgentRunID, &item.AttemptCount, &item.AvailableAt,
 		&item.LeaseOwner, &item.LeaseToken, &leaseExpiresAt,
-		&completedAt, &item.LastError, &item.CreatedAt, &item.UpdatedAt,
+		&completedAt, &item.ResultJSON, &item.ResultHash, &item.ResultModel,
+		&item.ResultConfidence, &item.LastError, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if err != nil {
 		return StockProfileAIQueueItem{}, err

@@ -2,6 +2,7 @@ package stockv2
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -70,7 +71,8 @@ func TestSelectAssetMaintenanceSymbolsHasNoImplicitFiveThousandCap(t *testing.T)
 	}
 	svc := NewService(store, nil, nil)
 	svc.universeSource = nil
-	got, err := svc.selectAssetMaintenanceSymbols(ctx, UniverseUpdateRequest{})
+	req := UniverseUpdateRequest{}
+	got, err := svc.selectAssetMaintenanceSymbols(ctx, &req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,11 +105,19 @@ func TestSelectAssetMaintenanceSymbolsReservesCursorCapacity(t *testing.T) {
 	}
 	svc := NewService(store, nil, nil)
 	svc.universeSource = nil
-	first, err := svc.selectAssetMaintenanceSymbols(ctx, UniverseUpdateRequest{MaxSymbols: 4})
+	firstReq := UniverseUpdateRequest{MaxSymbols: 4}
+	first, err := svc.selectAssetMaintenanceSymbols(ctx, &firstReq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := svc.selectAssetMaintenanceSymbols(ctx, UniverseUpdateRequest{MaxSymbols: 4})
+	if cursor, err := store.GetAssetMaintenanceCursor(ctx, assetMaintenanceUniverseCursorScope); err != nil || cursor != "" {
+		t.Fatalf("cursor advanced before targets were persisted: cursor=%q err=%v", cursor, err)
+	}
+	if err := store.CommitAssetMaintenanceSelectionCursors(ctx, firstReq.priorityCursorNext, firstReq.universeCursorNext); err != nil {
+		t.Fatal(err)
+	}
+	secondReq := UniverseUpdateRequest{MaxSymbols: 4}
+	second, err := svc.selectAssetMaintenanceSymbols(ctx, &secondReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,12 +150,52 @@ func TestSelectAssetMaintenanceSymbolsHonorsSingleSymbolLimit(t *testing.T) {
 	}
 	svc := NewService(store, nil, nil)
 	svc.universeSource = nil
-	got, err := svc.selectAssetMaintenanceSymbols(ctx, UniverseUpdateRequest{MaxSymbols: 1})
+	req := UniverseUpdateRequest{MaxSymbols: 1}
+	got, err := svc.selectAssetMaintenanceSymbols(ctx, &req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 {
 		t.Fatalf("selected symbols = %v, want exactly one", got)
+	}
+}
+
+func TestSelectAssetMaintenanceSymbolsKeepsHoldingFirstWithSingleSymbolLimit(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	now := time.Now()
+	for _, symbol := range []string{"000001", "600000"} {
+		market := "SZ"
+		if symbol == "600000" {
+			market = "SH"
+		}
+		if err := store.UpsertInstrument(ctx, StockV2Instrument{
+			ID: generateID(), Symbol: symbol, Market: market,
+			InstrumentType: InstrumentTypeStock, Name: symbol,
+			CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.CreateHolding(ctx, StockV2Holding{
+		ID: generateID(), PortfolioID: "portfolio-test", Symbol: "600000",
+		Quantity: 100, CostPrice: 10, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, nil, nil)
+	svc.universeSource = nil
+	req := UniverseUpdateRequest{MaxSymbols: 1}
+	got, err := svc.selectAssetMaintenanceSymbols(ctx, &req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "600000" {
+		t.Fatalf("selected symbols=%v, want the holding first", got)
 	}
 }
 
@@ -158,6 +208,28 @@ func TestAssetUniverseDiscoveryFallbackUsesShortRetry(t *testing.T) {
 	}
 	if got := assetUniverseDiscoveryRefreshIntervalFor("full:5200", 5200); got != assetUniverseDiscoveryRefreshInterval {
 		t.Fatalf("full interval = %v, want %v", got, assetUniverseDiscoveryRefreshInterval)
+	}
+}
+
+func TestReplaceDiscoveredUniverseSymbolsRemovesPreviousGenerationMembers(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	if err := store.ReplaceDiscoveredUniverseSymbols(ctx, assetUniverseSnapshotSourceLive, []string{"000001", "000002"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceDiscoveredUniverseSymbols(ctx, assetUniverseSnapshotSourceLive, []string{"000002", "000003"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.ListDiscoveredUniverseSymbols(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(got) != "[000002 000003]" {
+		t.Fatalf("current discovery generation = %v", got)
 	}
 }
 
@@ -212,18 +284,23 @@ func TestSelectAssetMaintenanceSymbolsRotatesDiscoveredSymbolsNotYetStored(t *te
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	ctx := context.Background()
-	if err := store.CacheDiscoveredUniverseSymbols(ctx, "test", []string{
+	if err := store.ReplaceDiscoveredUniverseSymbols(ctx, "test", []string{
 		"000001", "000002", "000003", "000004", "000005", "000006",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	svc := NewService(store, nil, nil)
 	svc.universeSource = nil
-	first, err := svc.selectAssetMaintenanceSymbols(ctx, UniverseUpdateRequest{MaxSymbols: 3})
+	firstReq := UniverseUpdateRequest{MaxSymbols: 3}
+	first, err := svc.selectAssetMaintenanceSymbols(ctx, &firstReq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := svc.selectAssetMaintenanceSymbols(ctx, UniverseUpdateRequest{MaxSymbols: 3})
+	if err := store.CommitAssetMaintenanceSelectionCursors(ctx, firstReq.priorityCursorNext, firstReq.universeCursorNext); err != nil {
+		t.Fatal(err)
+	}
+	secondReq := UniverseUpdateRequest{MaxSymbols: 3}
+	second, err := svc.selectAssetMaintenanceSymbols(ctx, &secondReq)
 	if err != nil {
 		t.Fatal(err)
 	}

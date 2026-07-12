@@ -445,6 +445,7 @@ export function stockV2UpdateStatusLabel(job?: StockV2UpdateJob): string {
   if (!job) return "无记录";
   switch (job.status) {
     case "running": return "进行中";
+    case "paused": return "资源不足，已暂停";
     case "completed": return "已完成";
     case "failed": return "失败";
     case "superseded": return "已被新版本取代";
@@ -458,6 +459,7 @@ export function stockV2UpdateStatusTone(job?: StockV2UpdateJob): "good" | "warn"
   switch (job.status) {
     case "completed": return "good";
     case "running": return "warn";
+    case "paused": return "warn";
     case "failed": return "danger";
     case "superseded": return "neutral";
     case "cancelled": return "neutral";

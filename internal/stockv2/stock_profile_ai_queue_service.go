@@ -2,12 +2,9 @@ package stockv2
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -15,58 +12,24 @@ import (
 )
 
 const (
-	// ponytail: three workers are a bounded middle ground for the single-owner
-	// server. Promote this to a provider budget setting only when models differ.
-	stockProfileAIWorkerCount  = 3
-	stockProfileAILeaseTTL     = 2 * time.Minute
-	stockProfileAILeaseRenewal = 30 * time.Second
-	stockProfileAIQueuePoll    = 2 * time.Second
-	stockProfileAIMaxAttempts  = 5
+	// ponytail: one worker is the safe default on the deployed two-vCPU/3.5 GiB
+	// host. A second worker requires a later resource-aware claim gate.
+	stockProfileAIWorkerCount          = 1
+	stockProfileAILeaseTTL             = 2 * time.Minute
+	stockProfileAILeaseRenewal         = 30 * time.Second
+	stockProfileAIQueuePoll            = 2 * time.Second
+	stockProfileAIMaxAttempts          = 5
+	stockProfileAIReconcileBatchSize   = 500
+	stockProfileAIReconcileCursorScope = "stock_profile_ai_reconcile"
 )
 
-func stockProfileSummaryInputVersion(pack StockProfileSummaryContext, force bool) string {
-	announcementHashes := make([]string, 0, len(pack.NewAnnouncements))
-	for _, item := range pack.NewAnnouncements {
-		fingerprint := firstNonEmpty(
-			strings.TrimSpace(item.ContentHash),
-			strings.TrimSpace(item.AnnouncementID),
-			strings.TrimSpace(item.ID),
-			strings.TrimSpace(item.Title)+"|"+item.PublishedAt.UTC().Format(time.RFC3339Nano),
-		)
-		announcementHashes = append(announcementHashes, fingerprint)
-	}
-	sort.Strings(announcementHashes)
-	previousRaw, _ := json.Marshal(pack.PreviousSummary)
-	previousHash := sha256.Sum256(previousRaw)
-	baseHash := strings.TrimSpace(pack.Profile.BaseProfileHash)
-	if baseHash == "" {
-		baseHash = stockProfileAIInputHash(pack.Profile)
-	}
-	input := struct {
-		Schema                int      `json:"schema"`
-		Symbol                string   `json:"symbol"`
-		BaseProfileHash       string   `json:"baseProfileHash"`
-		AnnouncementHashes    []string `json:"announcementHashes"`
-		PreviousSummaryHash   string   `json:"previousSummaryHash"`
-		DailyLatestDate       string   `json:"dailyLatestDate"`
-		DailyMainNetInflow    float64  `json:"dailyMainNetInflow"`
-		ForceMaintenanceToken string   `json:"forceMaintenanceToken,omitempty"`
-	}{
-		Schema:              1,
-		Symbol:              pack.Profile.Symbol,
-		BaseProfileHash:     baseHash,
-		AnnouncementHashes:  announcementHashes,
-		PreviousSummaryHash: hex.EncodeToString(previousHash[:]),
-		DailyLatestDate:     pack.DailySummary.LatestDate,
-		DailyMainNetInflow:  pack.DailySummary.MainNetInflow,
-	}
-	if force {
-		input.ForceMaintenanceToken = generateID()
-	}
-	raw, _ := json.Marshal(input)
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:])
+type stockProfileAIOutboxEnqueueError struct {
+	DesiredInputVersion string
+	Err                 error
 }
+
+func (e *stockProfileAIOutboxEnqueueError) Error() string { return e.Err.Error() }
+func (e *stockProfileAIOutboxEnqueueError) Unwrap() error { return e.Err }
 
 func stockProfileAIQueuePriority(decision string) int {
 	switch decision {
@@ -105,24 +68,62 @@ func (s *Service) enqueueStockProfileAIWithState(
 	queueStatus string,
 	availableAt time.Time,
 ) (StockProfileAIQueueItem, error) {
-	queueInput, err := newStockProfileAIQueueItem(pack, decision, requestedBy, force)
+	unlock := s.lockStockProfile(pack.Profile.Symbol)
+	defer unlock()
+	baseHash := strings.TrimSpace(pack.Profile.BaseProfileHash)
+	if baseHash == "" {
+		baseHash = stockProfileAIInputHash(pack.Profile)
+	}
+	var requiredCutoff time.Time
+	for _, status := range pack.SourceStatuses {
+		if status.Source == StockV2AnnouncementSourceCninfo &&
+			strings.Contains(status.Message, "exchange-wide") && status.CheckedAt.After(requiredCutoff) {
+			requiredCutoff = status.CheckedAt
+		}
+	}
+	dataSummaryVersion, err := stockProfileDataSummaryVersionWithQuerier(
+		ctx, s.store.assetDB(), pack.Profile.Symbol,
+	)
 	if err != nil {
 		return StockProfileAIQueueItem{}, err
 	}
-	queueInput.Status = queueStatus
-	queueInput.AvailableAt = availableAt
-	// Serialize queue-version changes with AI result application for the same
-	// symbol. This makes the current-version check immediately before profile
-	// persistence meaningful, while retaining parallelism across symbols.
-	unlock := s.lockStockProfile(pack.Profile.Symbol)
-	defer unlock()
+	target, err := s.store.EnsureStockProfileAITarget(
+		ctx, pack.Profile.Symbol, baseHash, dataSummaryVersion, decision, force, requiredCutoff,
+	)
+	if err != nil {
+		return StockProfileAIQueueItem{}, err
+	}
+	queueInput := StockProfileAIQueueItem{
+		Symbol:              pack.Profile.Symbol,
+		Market:              pack.Profile.Market,
+		Status:              queueStatus,
+		Priority:            target.DesiredPriority,
+		TriggerReason:       target.DesiredTriggerReason,
+		RequestedBy:         firstNonEmpty(requestedBy, "system"),
+		DesiredInputVersion: target.DesiredInputVersion,
+		AvailableAt:         availableAt,
+	}
+	if target.DesiredInputVersion == target.AppliedInputVersion {
+		_ = s.store.UpdateStockProfileAIState(ctx, pack.Profile.Symbol, StockProfileAIStatusReady, "", false)
+		queueInput.Status = StockProfileAIQueueStatusCompleted
+		queueInput.CompletedInputVersion = target.AppliedInputVersion
+		return queueInput, nil
+	}
 	if err := s.store.UpdateStockProfileAIState(ctx, pack.Profile.Symbol, StockProfileAIStatusQueued, "", false); err != nil {
 		return StockProfileAIQueueItem{}, err
 	}
-	item, err := s.store.EnqueueStockProfileAI(ctx, queueInput)
+	enqueue := s.store.EnqueueStockProfileAI
+	if decision == AssetAIDecisionRetry {
+		enqueue = s.store.ReviveStockProfileAI
+	}
+	item, err := enqueue(ctx, queueInput)
 	if err != nil {
-		_ = s.store.UpdateStockProfileAIState(ctx, pack.Profile.Symbol, pack.Profile.AIProfileStatus, pack.Profile.AIProfileError, false)
-		return StockProfileAIQueueItem{}, err
+		// DuckDB target is the outbox; the reconciler repairs a transient SQLite
+		// enqueue failure without losing the requested version.
+		return StockProfileAIQueueItem{}, &stockProfileAIOutboxEnqueueError{
+			DesiredInputVersion: target.DesiredInputVersion,
+			Err:                 err,
+		}
 	}
 	if item.Status == StockProfileAIQueueStatusCompleted && item.CompletedInputVersion == item.DesiredInputVersion {
 		_ = s.store.UpdateStockProfileAIState(ctx, pack.Profile.Symbol, StockProfileAIStatusReady, "", false)
@@ -134,30 +135,9 @@ func (s *Service) enqueueStockProfileAIWithState(
 	return item, nil
 }
 
-func newStockProfileAIQueueItem(
-	pack StockProfileSummaryContext,
-	decision, requestedBy string,
-	force bool,
-) (StockProfileAIQueueItem, error) {
-	payload, err := json.Marshal(pack)
-	if err != nil {
-		return StockProfileAIQueueItem{}, err
-	}
-	return StockProfileAIQueueItem{
-		Symbol:              pack.Profile.Symbol,
-		Market:              pack.Profile.Market,
-		Status:              StockProfileAIQueueStatusReady,
-		Priority:            stockProfileAIQueuePriority(decision),
-		TriggerReason:       decision,
-		RequestedBy:         firstNonEmpty(requestedBy, "system"),
-		DesiredInputVersion: stockProfileSummaryInputVersion(pack, force),
-		PayloadJSON:         string(payload),
-	}, nil
-}
-
 func stockProfileAIQueueState(item StockProfileAIQueueItem) (string, string) {
 	switch item.Status {
-	case StockProfileAIQueueStatusRunning:
+	case StockProfileAIQueueStatusRunning, StockProfileAIQueueStatusApplyPending, StockProfileAIQueueStatusApplying:
 		return StockProfileAIStatusRunning, ""
 	case StockProfileAIQueueStatusCompleted:
 		return StockProfileAIStatusReady, ""
@@ -172,9 +152,11 @@ func (s *Service) runStockProfileAIQueueWorker(ctx context.Context, workerID str
 	ticker := time.NewTicker(stockProfileAIQueuePoll)
 	defer ticker.Stop()
 	for {
-		if err := s.processNextStockProfileAIQueueItem(ctx, workerID); err != nil &&
-			!errors.Is(err, ErrStockProfileAIQueueEmpty) && !errors.Is(err, context.Canceled) && s.log != nil {
-			s.log.Warn("stock profile ai queue worker failed", "worker", workerID, "error", safelog.Text(err.Error(), 300))
+		if s.currentResourceGate().State == ResourceGateNormal {
+			if err := s.processNextStockProfileAIQueueItem(ctx, workerID); err != nil &&
+				!errors.Is(err, ErrStockProfileAIQueueEmpty) && !errors.Is(err, context.Canceled) && s.log != nil {
+				s.log.Warn("stock profile ai queue worker failed", "worker", workerID, "error", safelog.Text(err.Error(), 300))
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -185,11 +167,8 @@ func (s *Service) runStockProfileAIQueueWorker(ctx context.Context, workerID str
 }
 
 func (s *Service) runStockProfileAIQueueBackground(ctx context.Context) {
-	// Recovery and the one-time legacy migration finish before workers create new
-	// AgentRuns. This removes the prepare/bind race without delaying HTTP or the
-	// other background schedulers.
 	s.recoverStockProfileAIQueueLeases(ctx, true)
-	s.migrateLegacyStockProfileAIRuns(ctx)
+	s.reconcileStockProfileAIQueue(ctx)
 
 	workerDone := make(chan struct{}, stockProfileAIWorkerCount)
 	for worker := 0; worker < stockProfileAIWorkerCount; worker++ {
@@ -199,8 +178,10 @@ func (s *Service) runStockProfileAIQueueBackground(ctx context.Context) {
 			workerDone <- struct{}{}
 		}()
 	}
-	ticker := time.NewTicker(stockProfileAILeaseTTL)
-	defer ticker.Stop()
+	leaseTicker := time.NewTicker(stockProfileAILeaseTTL)
+	reconcileTicker := time.NewTicker(15 * time.Second)
+	defer leaseTicker.Stop()
+	defer reconcileTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -208,10 +189,66 @@ func (s *Service) runStockProfileAIQueueBackground(ctx context.Context) {
 				<-workerDone
 			}
 			return
-		case <-ticker.C:
+		case <-leaseTicker.C:
 			s.recoverStockProfileAIQueueLeases(ctx, false)
+		case <-reconcileTicker.C:
+			s.reconcileStockProfileAIQueue(ctx)
 		}
 	}
+}
+
+func (s *Service) reconcileStockProfileAIQueue(ctx context.Context) {
+	if s.store == nil {
+		return
+	}
+	if err := s.reconcileStockProfileAIQueueBatch(ctx, stockProfileAIReconcileBatchSize); err != nil && s.log != nil {
+		s.log.Warn("reconcile stock profile AI targets failed", "error", safelog.Text(err.Error(), 240))
+	}
+}
+
+func (s *Service) reconcileStockProfileAIQueueBatch(ctx context.Context, limit int) error {
+	cursor, err := s.store.GetAssetMaintenanceCursor(ctx, stockProfileAIReconcileCursorScope)
+	if err != nil {
+		return err
+	}
+	targets, err := s.store.ListPendingStockProfileAITargetsAfter(ctx, cursor, limit)
+	if err != nil {
+		return err
+	}
+	targets, err = s.store.RefreshPendingStockProfileAIDataSummaries(ctx, targets)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if target.DesiredInputVersion == target.AppliedInputVersion {
+			continue
+		}
+		_, err = s.store.EnqueueStockProfileAI(ctx, StockProfileAIQueueItem{
+			Symbol:              target.Symbol,
+			Status:              StockProfileAIQueueStatusReady,
+			Priority:            target.DesiredPriority,
+			TriggerReason:       firstNonEmpty(target.DesiredTriggerReason, AssetAIDecisionMissing),
+			RequestedBy:         "state-reconciler",
+			DesiredInputVersion: target.DesiredInputVersion,
+		})
+		if err != nil {
+			return fmt.Errorf("reconcile stock profile AI queue item %s: %w", target.Symbol, err)
+		}
+		if err := s.store.SyncAssetMaintenanceItemsAIQueueByVersion(
+			ctx, target.Symbol, target.DesiredInputVersion,
+		); err != nil {
+			return err
+		}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	// ponytail: advance only after the whole idempotent batch is present in
+	// SQLite. A crash before this write merely repeats the batch; it cannot skip it.
+	return s.store.SetAssetMaintenanceCursor(ctx, stockProfileAIReconcileCursorScope, targets[len(targets)-1].Symbol)
 }
 
 func (s *Service) recoverStockProfileAIQueueLeases(ctx context.Context, all bool) {
@@ -243,120 +280,27 @@ func (s *Service) recoverStockProfileAIQueueLeases(ctx context.Context, all bool
 	}
 }
 
-func (s *Service) migrateLegacyStockProfileAIRuns(ctx context.Context) {
-	if s.store == nil {
-		return
-	}
-	runs, err := s.store.ListActiveStockProfileAgentRuns(ctx)
-	if err != nil {
-		if s.log != nil {
-			s.log.Warn("list legacy stock profile ai runs failed", "error", safelog.Text(err.Error(), 240))
-		}
-		return
-	}
-	grouped := make(map[string][]AgentRun)
-	order := make([]string, 0, len(runs))
-	for _, run := range runs {
-		if _, ok := grouped[run.TriggerObjectID]; !ok {
-			order = append(order, run.TriggerObjectID)
-		}
-		grouped[run.TriggerObjectID] = append(grouped[run.TriggerObjectID], run)
-	}
-	for _, symbol := range order {
-		if ctx.Err() != nil {
-			return
-		}
-		symbolRuns := grouped[symbol]
-		profile, profileErr := s.store.GetStockProfile(ctx, symbol)
-		if profileErr != nil {
-			if errors.Is(profileErr, ErrStockProfileNotFound) {
-				for _, run := range symbolRuns {
-					_, _ = s.store.FinalizeLegacyStockProfileAIRunMigration(
-						ctx, run.ID, symbol, StockProfileAIQueueStatusFailed,
-						"cannot migrate stock profile ai run: stock profile is unavailable",
-					)
-				}
-			} else if s.log != nil {
-				s.log.Warn("load stock profile for legacy ai migration failed", "symbol", symbol, "error", safelog.Text(profileErr.Error(), 240))
-			}
-			continue
-		}
-		newestRunCreatedAt := symbolRuns[len(symbolRuns)-1].CreatedAt
-		if profile.AIProfileStatus == StockProfileAIStatusReady &&
-			!profile.AIProfileUpdatedAt.IsZero() && !profile.AIProfileUpdatedAt.Before(newestRunCreatedAt) {
-			for _, run := range symbolRuns {
-				if _, finalizeErr := s.store.FinalizeLegacyStockProfileAIRunMigration(
-					ctx, run.ID, symbol, StockProfileAIQueueStatusCompleted, "satisfied by a newer stock profile",
-				); finalizeErr != nil && s.log != nil {
-					s.log.Warn("finalize satisfied legacy stock profile ai run failed", "run_id", run.ID, "symbol", symbol, "error", safelog.Text(finalizeErr.Error(), 240))
-				}
-			}
-			continue
-		}
-		recentBySymbol, recentErr := s.store.ListRecentAnnouncementsBySymbols(ctx, []string{profile.Symbol}, 100)
-		recent := recentBySymbol[profile.Symbol]
-		sourceStatuses := []AssetMaintenanceSourceStatus{{Source: "restart_recovery", Status: "success", CheckedAt: time.Now()}}
-		if recentErr != nil {
-			recent = nil
-			sourceStatuses = append(sourceStatuses, AssetMaintenanceSourceStatus{
-				Source: "restart_recovery_announcements", Status: "failed", Message: safelog.Text(recentErr.Error(), 240), CheckedAt: time.Now(),
-			})
-		}
-		decision := AssetAIDecisionRetry
-		if normalizeStockProfileAIStatus(profile.AIProfileStatus) == StockProfileAIStatusMissing ||
-			strings.TrimSpace(profile.ProfileTextZh+profile.ProfileTextEn) == "" {
-			decision = AssetAIDecisionMissing
-		}
-		item := AssetMaintenanceItem{
-			Symbol:                profile.Symbol,
-			Market:                profile.Market,
-			InstrumentType:        profile.InstrumentType,
-			Name:                  profile.Name,
-			BaseProfileHashBefore: profile.BaseProfileHash,
-			BaseProfileHashAfter:  profile.BaseProfileHash,
-			StartedAt:             time.Now(),
-		}
-		pack := s.buildStockProfileSummaryContext(
-			ctx, profile, profile, item,
-			announcementsAfterAIProfile(recent, profile.AIProfileUpdatedAt),
-			sourceStatuses,
-		)
-		queueInput, queueInputErr := newStockProfileAIQueueItem(pack, decision, "restart-recovery", false)
-		if queueInputErr != nil {
-			continue
-		}
-		if _, enqueueErr := s.store.EnqueueStockProfileAIIfAbsent(ctx, queueInput); enqueueErr != nil {
-			if s.log != nil {
-				s.log.Warn("enqueue legacy stock profile ai run failed", "symbol", symbol, "error", safelog.Text(enqueueErr.Error(), 240))
-			}
-			continue
-		}
-		for _, run := range symbolRuns {
-			if _, finalizeErr := s.store.FinalizeLegacyStockProfileAIRunMigration(
-				ctx, run.ID, symbol, "", "migrated to durable stock profile ai queue",
-			); finalizeErr != nil && s.log != nil {
-				s.log.Warn("finalize legacy stock profile ai run failed", "run_id", run.ID, "symbol", symbol, "error", safelog.Text(finalizeErr.Error(), 240))
-			}
-		}
-		if latestQueue, getQueueErr := s.store.GetStockProfileAIQueueItem(ctx, symbol); getQueueErr == nil {
-			status, message := stockProfileAIQueueState(latestQueue)
-			_ = s.updateStockProfileAIState(ctx, symbol, status, message, false)
-		}
-	}
-}
-
 func (s *Service) processNextStockProfileAIQueueItem(ctx context.Context, workerID string) error {
 	if s.store == nil {
 		return ErrStockProfileAIQueueEmpty
+	}
+	if err := s.processNextStockProfileAIApply(ctx, workerID); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrStockProfileAIQueueEmpty) {
+		return err
 	}
 	lease, err := s.store.ClaimStockProfileAI(ctx, workerID, time.Now(), stockProfileAILeaseTTL)
 	if err != nil {
 		return err
 	}
-	var pack StockProfileSummaryContext
-	if err := json.Unmarshal([]byte(lease.PayloadJSON), &pack); err != nil {
-		_ = s.retryStockProfileAI(ctx, lease, time.Now(), "invalid persisted queue payload", true)
-		return fmt.Errorf("decode stock profile ai queue payload for %s: %w", lease.Symbol, err)
+	pack, err := s.buildStockProfileAIContextForLease(ctx, lease)
+	if err != nil {
+		if errors.Is(err, ErrStockProfileAIQueueLeaseStale) {
+			_ = s.store.SupersedeStockProfileAIRun(ctx, lease)
+			return nil
+		}
+		_ = s.retryStockProfileAI(ctx, lease, time.Now().Add(time.Minute), err.Error(), false)
+		return err
 	}
 	if assetMaintenanceSourceFailed(pack.SourceStatuses, StockV2AnnouncementSourceCninfo) {
 		if err := s.store.DeferStockProfileAI(ctx, lease, time.Now().Add(time.Hour), "announcement context is not fresh"); err != nil {
@@ -395,21 +339,177 @@ func (s *Service) processNextStockProfileAIQueueItem(ctx context.Context, worker
 		_ = s.retryStockProfileAI(ctx, lease, time.Now().Add(time.Minute), getErr.Error(), false)
 		return getErr
 	}
-	if finished.Status == AgentRunStatusCompleted || finished.Status == AgentRunStatusSuperseded {
-		requeued, completeErr := s.store.CompleteStockProfileAI(ctx, lease)
-		if completeErr != nil {
-			return completeErr
-		}
-		if requeued {
-			s.markStockProfileAIQueued(ctx, lease.Symbol)
+	if finished.Status == AgentRunStatusCompleted {
+		if applyErr := s.processNextStockProfileAIApply(ctx, workerID); applyErr != nil &&
+			!errors.Is(applyErr, ErrStockProfileAIQueueEmpty) {
+			return applyErr
 		}
 		return nil
+	}
+	if finished.Status == AgentRunStatusSuperseded {
+		return s.store.SupersedeStockProfileAIRun(ctx, lease)
 	}
 	terminal := lease.AttemptCount >= stockProfileAIMaxAttempts
 	if err := s.retryStockProfileAI(ctx, lease, time.Now().Add(stockProfileAIRetryDelay(lease.AttemptCount)), finished.ErrorMessage, terminal); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (s *Service) buildStockProfileAIContextForLease(
+	ctx context.Context,
+	lease StockProfileAIQueueLease,
+) (StockProfileSummaryContext, error) {
+	if _, _, err := s.store.RefreshPendingStockProfileAIDataSummary(ctx, lease.Symbol); err != nil {
+		return StockProfileSummaryContext{}, err
+	}
+	current, err := s.store.StockProfileAITargetCurrent(ctx, lease.Symbol, lease.ClaimedInputVersion)
+	if err != nil {
+		return StockProfileSummaryContext{}, err
+	}
+	if !current {
+		return StockProfileSummaryContext{}, ErrStockProfileAIQueueLeaseStale
+	}
+	profile, err := s.store.GetStockProfile(ctx, lease.Symbol)
+	if err != nil {
+		return StockProfileSummaryContext{}, err
+	}
+	state, exists, err := s.store.GetStockProfileAIState(ctx, lease.Symbol)
+	if err != nil || !exists {
+		if err == nil {
+			err = ErrStockProfileAIQueueLeaseStale
+		}
+		return StockProfileSummaryContext{}, err
+	}
+	previousSummary := StockProfilePreviousSummary{}
+	if state.AppliedInputVersion != "" {
+		version, found, versionErr := s.store.GetStockProfileAIVersion(
+			ctx, lease.Symbol, state.AppliedInputVersion,
+		)
+		if versionErr != nil {
+			return StockProfileSummaryContext{}, versionErr
+		}
+		if !found {
+			return StockProfileSummaryContext{}, fmt.Errorf(
+				"applied stock profile AI version %s is missing", state.AppliedInputVersion,
+			)
+		}
+		previousSummary, err = stockProfilePreviousSummaryFromVersion(version)
+		if err != nil {
+			return StockProfileSummaryContext{}, err
+		}
+	}
+	bySymbol, err := s.store.ListRecentAnnouncementsBySymbols(ctx, []string{lease.Symbol}, 100)
+	if err != nil {
+		return StockProfileSummaryContext{}, err
+	}
+	sourceStatuses := []AssetMaintenanceSourceStatus{{
+		Source: "durable_context", Status: "success", CheckedAt: time.Now(),
+	}}
+	if normalizeInstrumentType(profile.InstrumentType) == InstrumentTypeStock && !state.RequiredMessageCutoffAt.IsZero() {
+		syncState, synced, syncErr := s.store.GetAnnouncementSyncState(
+			ctx, StockV2AnnouncementSourceCninfo, profile.Market,
+		)
+		if syncErr != nil {
+			return StockProfileSummaryContext{}, syncErr
+		}
+		if !synced || syncState.CoveredThrough.Before(state.RequiredMessageCutoffAt) {
+			sourceStatuses = append(sourceStatuses, AssetMaintenanceSourceStatus{
+				Source: StockV2AnnouncementSourceCninfo, Status: AssetAnnouncementStatusFailed,
+				Message: "announcement cursor has not reached the required AI cutoff", CheckedAt: time.Now(),
+			})
+		}
+	}
+	item := AssetMaintenanceItem{
+		Symbol: profile.Symbol, Market: profile.Market, InstrumentType: profile.InstrumentType,
+		Name: profile.Name, BaseProfileHashBefore: state.BaseProfileHash,
+		BaseProfileHashAfter: state.BaseProfileHash, StartedAt: time.Now(),
+	}
+	pack := s.buildStockProfileSummaryContext(
+		ctx, profile, profile, item, bySymbol[lease.Symbol], sourceStatuses,
+	)
+	pack.PreviousSummary = previousSummary
+	return pack, nil
+}
+
+func stockProfilePreviousSummaryFromVersion(version StockProfileAIVersion) (StockProfilePreviousSummary, error) {
+	var result map[string]any
+	if err := json.Unmarshal([]byte(version.ResultJSON), &result); err != nil {
+		return StockProfilePreviousSummary{}, wrapError(err, "decode previous stock profile AI version")
+	}
+	return StockProfilePreviousSummary{
+		BusinessSummaryZh: firstProfileResultString(result, "summaryZh", "businessSummaryZh"),
+		BusinessSummaryEn: firstProfileResultString(result, "summaryEn", "businessSummaryEn"),
+		AIProfileModel:    version.ModelName,
+		UpdatedAt:         version.CreatedAt,
+	}, nil
+}
+
+func (s *Service) processNextStockProfileAIApply(ctx context.Context, workerID string) error {
+	lease, err := s.store.ClaimStockProfileAIApply(ctx, workerID, time.Now(), stockProfileAILeaseTTL)
+	if err != nil {
+		return err
+	}
+	requeued, err := s.applyStockProfileAILease(ctx, lease)
+	if errors.Is(err, ErrStockProfileAIQueueLeaseStale) {
+		s.reconcileStockProfileAIQueue(ctx)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if requeued {
+		s.markStockProfileAIQueued(ctx, lease.Symbol)
+	}
+	return nil
+}
+
+func (s *Service) applyStockProfileAILease(ctx context.Context, lease StockProfileAIQueueLease) (bool, error) {
+	unlock := s.lockStockProfile(lease.Symbol)
+	defer unlock()
+	var result map[string]any
+	if err := json.Unmarshal([]byte(lease.ResultJSON), &result); err != nil || len(result) == 0 {
+		_ = s.store.RetryStockProfileAIApply(ctx, lease, time.Now().Add(6*time.Hour), "invalid staged AI result")
+		return false, ErrInvalidStockProfileEnhancement
+	}
+	profile, err := s.store.GetStockProfile(ctx, lease.Symbol)
+	if err != nil {
+		_ = s.store.RetryStockProfileAIApply(ctx, lease, time.Now().Add(time.Minute), err.Error())
+		return false, err
+	}
+	profile, err = s.stockProfileWithoutAppliedAI(ctx, profile)
+	if err != nil {
+		_ = s.store.RetryStockProfileAIApply(ctx, lease, time.Now().Add(time.Minute), err.Error())
+		return false, err
+	}
+	baseTerms := stockProfileAIBaseTermsFromProfile(profile)
+	profile, err = stockProfileWithEnhancement(profile, result, lease.ResultModel, lease.ResultConfidence, time.Now())
+	if err != nil {
+		_ = s.store.RetryStockProfileAIApply(ctx, lease, time.Now().Add(6*time.Hour), err.Error())
+		return false, err
+	}
+	state, _, _ := s.store.GetStockProfileAIState(ctx, lease.Symbol)
+	manifest, _ := json.Marshal(map[string]any{
+		"schema":                  stockProfileAIInputSchemaVersion,
+		"baseProfileHash":         state.BaseProfileHash,
+		"announcementRevision":    state.AnnouncementRevision,
+		"dataSummaryVersion":      state.DataSummaryVersion,
+		"requiredMessageCutoffAt": state.RequiredMessageCutoffAt,
+		"baseTerms":               baseTerms,
+	})
+	if _, err := s.store.ApplyStockProfileAIResult(ctx, lease, profile, string(manifest)); err != nil {
+		if errors.Is(err, ErrStockProfileAIQueueLeaseStale) {
+			return false, err
+		}
+		_ = s.store.RetryStockProfileAIApply(ctx, lease, time.Now().Add(time.Minute), err.Error())
+		return false, err
+	}
+	s.markStockProfileEmbeddingStale(ctx, lease.Symbol)
+	requeued, err := s.store.CompleteStockProfileAIApply(ctx, lease)
+	if err != nil {
+		return false, err
+	}
+	return requeued, nil
 }
 
 func (s *Service) retryStockProfileAI(

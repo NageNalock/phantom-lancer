@@ -384,42 +384,20 @@ func (uds *UniverseDataSource) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
-// GetDefaultSymbols 获取默认标的代码列表。
-// 优先从新浪行情接口拉取 A 股股票 + ETF/LOF 场内基金，失败时回退到核心龙头样本。
-func (uds *UniverseDataSource) GetDefaultSymbols() []string {
+// GetDefaultSymbols returns a complete public-universe generation. Partial
+// node/page results are errors: callers must retain the previous generation and
+// must not certify the current maintenance slot as full-universe coverage.
+func (uds *UniverseDataSource) GetDefaultSymbols() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	symbols, err := uds.fetchSinaUniverseSymbols(ctx)
-	if err == nil && len(symbols) > 0 {
+	if err == nil {
 		uds.service.log.Info("fetched full A-share universe from sina", "count", len(symbols))
-		return symbols
+		return symbols, nil
 	}
-
-	uds.service.log.Warn("fallback to sample universe", "error", safelog.Text(err.Error(), 300), "sample_count", len(uds.sampleUniverseSymbols()))
-	return uds.sampleUniverseSymbols()
-}
-
-// sampleUniverseSymbols 核心龙头样本（仅作降级兜底）
-func (uds *UniverseDataSource) sampleUniverseSymbols() []string {
-	return []string{
-		// 沪市主板
-		"600000", "600036", "600016", "600030", "600519", "601318",
-		"601398", "601288", "601988", "600028", "601857", "600900",
-		"600276", "600887", "600690", "600585", "601012", "600089",
-		"601138", "600050", "600941", "601728", "601390", "601668",
-		// 深市主板 / 中小板
-		"000001", "000002", "000858", "000333", "002415", "002142",
-		"000651", "000725", "000063", "002352", "000538", "000568",
-		"000799", "000895", "002304", "002230", "002049", "002714",
-		// 创业板
-		"300750", "300033", "300059", "300015", "300760", "300124",
-		"300274", "300751", "300770", "300014", "300433", "300450",
-		// 北交所
-		"839008", "830799", "834765", "835179", "833819",
-		// 场内基金
-		"510300", "510500", "159915", "159949", "161725",
-	}
+	uds.service.log.Warn("full A-share universe discovery failed", "error", safelog.Text(err.Error(), 300))
+	return nil, err
 }
 
 // fetchSinaUniverseSymbols 从新浪行情接口拉取 A 股与主要场内基金代码列表，自动分页。
@@ -438,6 +416,7 @@ func (uds *UniverseDataSource) fetchSinaUniverseSymbols(ctx context.Context) ([]
 		}
 
 		nodeCount := 0
+		completed := false
 		for page := 1; page <= maxPages; page++ {
 			url := "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData" +
 				"?page=" + strconv.Itoa(page) +
@@ -448,30 +427,27 @@ func (uds *UniverseDataSource) fetchSinaUniverseSymbols(ctx context.Context) ([]
 
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 			if err != nil {
-				uds.service.log.Warn("sina universe request build failed", "node", node, "page", page, "error", safelog.Text(err.Error(), 240))
-				break
+				return nil, fmt.Errorf("build sina universe node=%s page=%d: %w", node, page, err)
 			}
 			req.Header.Set("Referer", "https://finance.sina.com.cn/")
 			req.Header.Set("User-Agent", pickSinaUA(page+i))
 
 			resp, err := uds.httpClient.Do(req)
 			if err != nil {
-				uds.service.log.Warn("sina universe fetch failed", "node", node, "page", page, "error", safelog.Text(err.Error(), 240))
-				break
+				return nil, fmt.Errorf("fetch sina universe node=%s page=%d: %w", node, page, err)
 			}
 			body, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
 			resp.Body.Close()
 			if err != nil {
-				uds.service.log.Warn("sina universe read failed", "node", node, "page", page, "error", safelog.Text(err.Error(), 240))
-				break
+				return nil, fmt.Errorf("read sina universe node=%s page=%d: %w", node, page, err)
 			}
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				uds.service.log.Warn("sina universe http error", "node", node, "page", page, "status", resp.StatusCode)
-				break
+				return nil, fmt.Errorf("fetch sina universe node=%s page=%d: HTTP %d", node, page, resp.StatusCode)
 			}
 
 			symbols := parseSinaSymbolList(body)
 			if len(symbols) == 0 {
+				completed = true
 				break // 空页 = 已经拉完
 			}
 			for _, symbol := range symbols {
@@ -483,14 +459,19 @@ func (uds *UniverseDataSource) fetchSinaUniverseSymbols(ctx context.Context) ([]
 				nodeCount++
 			}
 
-			if len(symbols) < pageSize {
-				break // 不满一页 = 最后一页
-			}
-
+			// Only an explicit empty page proves pagination completion. A short
+			// non-empty response may be a transient truncation and must not certify
+			// a partial generation as full.
 			// 页间抖动
 			if err := sleepJitter(ctx, 50*time.Millisecond, 100*time.Millisecond); err != nil {
 				return all, err
 			}
+		}
+		if !completed {
+			return nil, fmt.Errorf("sina universe node=%s exceeded %d pages", node, maxPages)
+		}
+		if nodeCount == 0 {
+			return nil, fmt.Errorf("sina universe node=%s returned 0 symbols", node)
 		}
 
 		uds.service.log.Info("sina universe node fetched", "node", node, "count", nodeCount)

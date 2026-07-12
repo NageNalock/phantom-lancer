@@ -149,7 +149,11 @@ func (s *Service) GetDailyBarsQuality(ctx context.Context, symbol, adjusted stri
 	}
 
 	stats.LastError = lastErr
-	return dailyBarsQualityFromStats(symbol, adjusted, stats, time.Now()), nil
+	coverage, err := s.store.GetDailyBarCoverageQuality(ctx, symbol, adjusted)
+	if err != nil {
+		return DailyBarsQuality{}, err
+	}
+	return dailyBarsQualityFromStats(symbol, adjusted, stats, coverage, time.Now()), nil
 }
 
 func (s *Service) GetDailyBarsQualityBatch(ctx context.Context, symbols []string, adjusted string) (map[string]DailyBarsQuality, error) {
@@ -170,6 +174,10 @@ func (s *Service) GetDailyBarsQualityBatch(ctx context.Context, symbols []string
 		}
 		jobErrors = map[string]string{}
 	}
+	coverage, err := s.store.GetDailyBarCoverageQualityBatch(ctx, symbols, adjusted)
+	if err != nil {
+		return nil, err
+	}
 	checkedAt := time.Now()
 	for _, symbol := range symbols {
 		stat := stats[symbol]
@@ -177,12 +185,12 @@ func (s *Service) GetDailyBarsQualityBatch(ctx context.Context, symbols []string
 		if stat.LastError == "" {
 			stat.LastError = jobErrors[symbol]
 		}
-		out[symbol] = dailyBarsQualityFromStats(symbol, adjusted, stat, checkedAt)
+		out[symbol] = dailyBarsQualityFromStats(symbol, adjusted, stat, coverage[symbol], checkedAt)
 	}
 	return out, nil
 }
 
-func dailyBarsQualityFromStats(symbol, adjusted string, stats dailyBarsStats, checkedAt time.Time) DailyBarsQuality {
+func dailyBarsQualityFromStats(symbol, adjusted string, stats dailyBarsStats, coverage DailyBarCoverageQuality, checkedAt time.Time) DailyBarsQuality {
 	q := DailyBarsQuality{
 		Symbol:           symbol,
 		Adjusted:         adjusted,
@@ -195,6 +203,19 @@ func dailyBarsQualityFromStats(symbol, adjusted string, stats dailyBarsStats, ch
 		LastErrorMessage: stats.LastError,
 		Source:           stats.Source,
 		CheckedAt:        checkedAt,
+	}
+	if !coverage.CheckedAt.IsZero() {
+		q.CoverageKnown = coverage.ExpectedDateCount > 0
+		q.ExpectedDateCount = coverage.ExpectedDateCount
+		q.CoveredDateCount = coverage.CoveredDateCount
+		q.DateGapCount = coverage.DateGapCount
+		q.CoreGapCount = coverage.CoreGapCount
+		q.FlowGapCount = coverage.FlowGapCount
+		q.VerifiedNoTradeCount = coverage.VerifiedNoTradeCount
+		q.ExpectedLatestDate = coverage.ExpectedLatestDate
+		q.CoverageCheckedAt = coverage.CheckedAt
+		q.IncompleteCount = coverage.DateGapCount + coverage.CoreGapCount + coverage.FlowGapCount
+		q.FacetsComplete = q.CoverageKnown && q.IncompleteCount == 0
 	}
 	if stats.RowCount > 0 {
 		q.Meets250 = stats.RowCount >= dailyBarsAgentTarget
@@ -226,39 +247,62 @@ func (s *Service) ensureOneSymbol(ctx context.Context, inst StockV2Instrument, s
 		// Best effort: a temporary flow-provider failure must not block genuine
 		// OHLC/amount/turnover gaps from being repaired below.
 		_, _ = s.repairStoredDailyBarFlowFacets(ctx, inst, startDate, endDate)
-		// Historical OHLC is fetched only when amount/turnover are missing. Stock
-		// rows that only lack flow facets are retried above with one Eastmoney call.
-		dates, err := s.store.GetCompleteDailyBarDates(ctx, symbol, adjusted, startDate, endDate, false)
-		if err != nil {
-			return 0, err
-		}
 		tradingDates, err := s.observedTradingDates(ctx, startDate, endDate)
 		if err != nil {
 			return 0, err
 		}
-		ranges := planDailyBarMissingRangesWithCalendar(dates, tradingDates, startTime, endTime)
-		ranges = excludeBatchClosingQuoteRetry(ctx, symbol, endDate, ranges)
 		checkedRanges, err := s.store.ListDailyBarGapChecks(ctx, symbol, adjusted, startDate, endDate)
 		if err != nil {
 			return 0, err
 		}
-		ranges = subtractCheckedDailyBarRanges(ranges, checkedRanges)
-		if len(ranges) == 0 {
-			return 0, nil
-		}
-		bars, absencesConfirmed, err := s.fetchDailyBarsForMissingRanges(ctx, inst, ranges)
+
+		storedBars, err := s.store.GetDailyBars(ctx, symbol, adjusted, startDate, endDate, 0)
 		if err != nil {
 			return 0, err
 		}
-		var checkedAbsences []dailyBarMissingRange
-		if absencesConfirmed {
-			checkedAbsences = stableDailyBarGapChecks(dailyBarRangesWithoutReturnedBars(ranges, bars), time.Now())
+		coverage := planDailyBarCoverageWithCalendar(
+			storedBars,
+			tradingDates,
+			checkedRanges,
+			inst.InstrumentType,
+			startDate,
+			endDate,
+		)
+		ranges := coverage.historicalKFetchRanges(tradingDates)
+		if len(tradingDates) == 0 {
+			// ponytail: retain the safe leading/tail fallback when the exchange
+			// calendar is unavailable; middle-gap repair waits for calendar proof.
+			dates := make([]string, 0, len(storedBars))
+			for _, bar := range storedBars {
+				if dailyBarCoreFacetsComplete(bar) {
+					dates = append(dates, bar.TradeDate)
+				}
+			}
+			ranges = planDailyBarMissingRanges(dates, startTime, endTime)
+			ranges = subtractCheckedDailyBarRanges(ranges, checkedRanges)
 		}
+		ranges = excludeBatchClosingQuoteRetry(ctx, symbol, endDate, ranges)
+		if len(ranges) == 0 {
+			_, err := s.store.RefreshDailyBarCoverageQuality(ctx, inst, adjusted, startDate, endDate)
+			return 0, err
+		}
+
+		// One source request covers the smallest envelope containing all gaps;
+		// complete rows inside that envelope are filtered locally and never written.
+		requestedTradingDates := dailyBarRequestedTradingDates(tradingDates, ranges)
+		bars, observations, fetchErr := s.fetchDailyBarsForMissingRanges(ctx, inst, ranges, requestedTradingDates)
+		if fetchErr != nil {
+			return 0, fetchErr
+		}
+		checkedAbsences := verifyDailyBarNoTradeCoverage(tradingDates, observations, ranges, time.Now())
 		_ = s.enrichDailyBarsWithDataFacets(ctx, inst, bars)
 		if err := s.store.UpsertDailyBars(ctx, bars); err != nil {
 			return 0, err
 		}
-		if err := s.store.RecordDailyBarGapChecks(ctx, symbol, adjusted, checkedAbsences); err != nil {
+		if err := s.store.RecordVerifiedDailyBarNoTradeCoverage(ctx, symbol, adjusted, checkedAbsences); err != nil {
+			return 0, err
+		}
+		if _, err := s.store.RefreshDailyBarCoverageQuality(ctx, inst, adjusted, startDate, endDate); err != nil {
 			return 0, err
 		}
 		return len(bars), nil

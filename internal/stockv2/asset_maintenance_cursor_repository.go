@@ -36,6 +36,32 @@ func (s *Store) SetAssetMaintenanceCursor(ctx context.Context, scope, symbol str
 	return wrapError(err, "set asset maintenance cursor")
 }
 
+func (s *Store) CommitAssetMaintenanceSelectionCursors(ctx context.Context, prioritySymbol, universeSymbol string) error {
+	values := []struct{ scope, symbol string }{
+		{assetMaintenancePriorityCursorScope, strings.TrimSpace(prioritySymbol)},
+		{assetMaintenanceUniverseCursorScope, strings.TrimSpace(universeSymbol)},
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return wrapError(err, "begin asset maintenance cursor commit")
+	}
+	defer tx.Rollback()
+	now := time.Now()
+	for _, value := range values {
+		if value.symbol == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO stockv2_asset_maintenance_cursors (scope, cursor_symbol, updated_at)
+			VALUES (?, ?, ?)
+			ON CONFLICT(scope) DO UPDATE SET cursor_symbol = excluded.cursor_symbol, updated_at = excluded.updated_at
+		`, value.scope, value.symbol, now); err != nil {
+			return wrapError(err, "commit asset maintenance cursor")
+		}
+	}
+	return wrapError(tx.Commit(), "commit asset maintenance cursors")
+}
+
 func (s *Store) GetAssetMaintenanceCursorUpdatedAt(ctx context.Context, scope string) (time.Time, error) {
 	var updatedAt time.Time
 	err := s.db.QueryRowContext(ctx, `
@@ -50,27 +76,38 @@ func (s *Store) GetAssetMaintenanceCursorUpdatedAt(ctx context.Context, scope st
 	return updatedAt, nil
 }
 
-func (s *Store) CacheDiscoveredUniverseSymbols(ctx context.Context, source string, symbols []string) error {
+// ReplaceDiscoveredUniverseSymbols atomically publishes one complete discovery
+// generation. Rows absent from the new generation are removed in the same
+// transaction, so delisted or previously misclassified symbols do not remain in
+// the daily network workload forever.
+func (s *Store) ReplaceDiscoveredUniverseSymbols(ctx context.Context, source string, symbols []string) error {
 	symbols = compactStringList(symbols, len(symbols))
 	if len(symbols) == 0 {
-		return nil
+		return errors.New("discovered universe generation is empty")
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return errors.New("discovered universe source is required")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return wrapError(err, "begin cache discovered universe symbols")
+		return wrapError(err, "begin replace discovered universe symbols")
 	}
 	defer tx.Rollback()
 	now := time.Now()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_universe_discovery_symbols`); err != nil {
+		return wrapError(err, "clear previous discovered universe generation")
+	}
 	for _, symbol := range symbols {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO stockv2_universe_discovery_symbols (symbol, source, first_seen_at, last_seen_at)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT(symbol) DO UPDATE SET source = excluded.source, last_seen_at = excluded.last_seen_at
-		`, symbol, strings.TrimSpace(source), now, now); err != nil {
-			return wrapError(err, "cache discovered universe symbol")
+				INSERT INTO stockv2_universe_discovery_symbols (symbol, source, first_seen_at, last_seen_at)
+				VALUES (?, ?, ?, ?)
+				ON CONFLICT(symbol) DO UPDATE SET source = excluded.source, last_seen_at = excluded.last_seen_at
+			`, symbol, source, now, now); err != nil {
+			return wrapError(err, "replace discovered universe symbol")
 		}
 	}
-	return wrapError(tx.Commit(), "commit discovered universe symbols")
+	return wrapError(tx.Commit(), "commit discovered universe generation")
 }
 
 func (s *Store) ListDiscoveredUniverseSymbols(ctx context.Context) ([]string, error) {

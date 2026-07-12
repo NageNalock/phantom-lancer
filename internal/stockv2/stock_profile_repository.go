@@ -22,6 +22,31 @@ func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (S
 		profile.Name = profile.Symbol
 	}
 
+	err := retryStockV2TransientWriteConflict(ctx, func() error {
+		tx, beginErr := s.assetDB().BeginTx(ctx, nil)
+		if beginErr != nil {
+			return beginErr
+		}
+		defer tx.Rollback()
+		if err := upsertStockProfileWithExecer(ctx, tx, profile); err != nil {
+			return err
+		}
+		if err := syncStockProfileAIBaseWithTx(ctx, tx, profile.Symbol, profile.BaseProfileHash, now); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+	if err != nil {
+		return StockProfile{}, wrapError(err, "upsert stock profile")
+	}
+	return profile, nil
+}
+
+type stockProfileExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func upsertStockProfileWithExecer(ctx context.Context, exec stockProfileExecer, profile StockProfile) error {
 	aliasesJSON := marshalProfileStrings(profile.Aliases)
 	sectorsJSON := marshalProfileStrings(profile.Sectors)
 	conceptsJSON := marshalProfileStrings(profile.Concepts)
@@ -34,74 +59,53 @@ func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (S
 	businessLinesEnJSON := marshalProfileStrings(profile.BusinessLinesEn)
 	riskTagsZhJSON := marshalProfileStrings(profile.RiskTagsZh)
 	riskTagsEnJSON := marshalProfileStrings(profile.RiskTagsEn)
-
-	err := retryStockV2TransientWriteConflict(ctx, func() error {
-		_, execErr := s.assetDB().ExecContext(ctx, `
-			INSERT INTO stockv2_stock_profiles (
-				symbol, market, instrument_type, name, aliases_json, industry, sectors_json,
-				concepts_json, tags_json, business_summary, profile_text, fund_type,
-				tracking_index, theme, constituent_hint, profile_version,
-				aliases_zh_json, aliases_en_json, keywords_zh_json, keywords_en_json,
-				business_summary_zh, business_summary_en, business_lines_zh_json,
-				business_lines_en_json, risk_tags_zh_json, risk_tags_en_json,
-				profile_text_zh, profile_text_en, ai_profile_status, ai_profile_model,
-				ai_profile_confidence, ai_profile_error, ai_profile_updated_at, ai_profile_attempted_at,
-				base_profile_hash, base_profile_updated_at, base_profile_checked_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(symbol) DO UPDATE SET
-				market = excluded.market,
-				instrument_type = excluded.instrument_type,
-				name = excluded.name,
-				aliases_json = excluded.aliases_json,
-				industry = excluded.industry,
-				sectors_json = excluded.sectors_json,
-				concepts_json = excluded.concepts_json,
-				tags_json = excluded.tags_json,
-				business_summary = excluded.business_summary,
-				profile_text = excluded.profile_text,
-				fund_type = excluded.fund_type,
-				tracking_index = excluded.tracking_index,
-				theme = excluded.theme,
-				constituent_hint = excluded.constituent_hint,
-				profile_version = excluded.profile_version,
-				aliases_zh_json = excluded.aliases_zh_json,
-				aliases_en_json = excluded.aliases_en_json,
-				keywords_zh_json = excluded.keywords_zh_json,
-				keywords_en_json = excluded.keywords_en_json,
-				business_summary_zh = excluded.business_summary_zh,
-				business_summary_en = excluded.business_summary_en,
-				business_lines_zh_json = excluded.business_lines_zh_json,
-				business_lines_en_json = excluded.business_lines_en_json,
-				risk_tags_zh_json = excluded.risk_tags_zh_json,
-				risk_tags_en_json = excluded.risk_tags_en_json,
-				profile_text_zh = excluded.profile_text_zh,
-				profile_text_en = excluded.profile_text_en,
-				ai_profile_status = excluded.ai_profile_status,
-				ai_profile_model = excluded.ai_profile_model,
-				ai_profile_confidence = excluded.ai_profile_confidence,
-				ai_profile_error = excluded.ai_profile_error,
-				ai_profile_updated_at = excluded.ai_profile_updated_at,
-				ai_profile_attempted_at = excluded.ai_profile_attempted_at,
-				base_profile_hash = excluded.base_profile_hash,
-				base_profile_updated_at = excluded.base_profile_updated_at,
-				base_profile_checked_at = excluded.base_profile_checked_at,
-				updated_at = excluded.updated_at
-		`, profile.Symbol, profile.Market, profile.InstrumentType, profile.Name, aliasesJSON,
-			profile.Industry, sectorsJSON, conceptsJSON, tagsJSON, profile.BusinessSummary,
-			profile.ProfileText, profile.FundType, profile.TrackingIndex, profile.Theme,
-			profile.ConstituentHint, profile.ProfileVersion, aliasesZhJSON, aliasesEnJSON,
-			keywordsZhJSON, keywordsEnJSON, profile.BusinessSummaryZh, profile.BusinessSummaryEn,
-			businessLinesZhJSON, businessLinesEnJSON, riskTagsZhJSON, riskTagsEnJSON,
-			profile.ProfileTextZh, profile.ProfileTextEn, profile.AIProfileStatus, profile.AIProfileModel,
-			profile.AIProfileConfidence, profile.AIProfileError, nullableTime(profile.AIProfileUpdatedAt), nullableTime(profile.AIProfileAttemptedAt),
-			profile.BaseProfileHash, nullableTime(profile.BaseProfileUpdatedAt), nullableTime(profile.BaseProfileCheckedAt),
-			profile.UpdatedAt)
-		return execErr
-	})
-	if err != nil {
-		return StockProfile{}, wrapError(err, "upsert stock profile")
-	}
-	return profile, nil
+	_, err := exec.ExecContext(ctx, `
+		INSERT INTO stockv2_stock_profiles (
+			symbol, market, instrument_type, name, aliases_json, industry, sectors_json,
+			concepts_json, tags_json, business_summary, profile_text, fund_type,
+			tracking_index, theme, constituent_hint, profile_version,
+			aliases_zh_json, aliases_en_json, keywords_zh_json, keywords_en_json,
+			business_summary_zh, business_summary_en, business_lines_zh_json,
+			business_lines_en_json, risk_tags_zh_json, risk_tags_en_json,
+			profile_text_zh, profile_text_en, ai_profile_status, ai_profile_model,
+			ai_profile_confidence, ai_profile_error, ai_profile_updated_at, ai_profile_attempted_at,
+			base_profile_hash, base_profile_updated_at, base_profile_checked_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(symbol) DO UPDATE SET
+			market = excluded.market, instrument_type = excluded.instrument_type,
+			name = excluded.name, aliases_json = excluded.aliases_json,
+			industry = excluded.industry, sectors_json = excluded.sectors_json,
+			concepts_json = excluded.concepts_json, tags_json = excluded.tags_json,
+			business_summary = excluded.business_summary, profile_text = excluded.profile_text,
+			fund_type = excluded.fund_type, tracking_index = excluded.tracking_index,
+			theme = excluded.theme, constituent_hint = excluded.constituent_hint,
+			profile_version = excluded.profile_version,
+			aliases_zh_json = excluded.aliases_zh_json, aliases_en_json = excluded.aliases_en_json,
+			keywords_zh_json = excluded.keywords_zh_json, keywords_en_json = excluded.keywords_en_json,
+			business_summary_zh = excluded.business_summary_zh, business_summary_en = excluded.business_summary_en,
+			business_lines_zh_json = excluded.business_lines_zh_json,
+			business_lines_en_json = excluded.business_lines_en_json,
+			risk_tags_zh_json = excluded.risk_tags_zh_json, risk_tags_en_json = excluded.risk_tags_en_json,
+			profile_text_zh = excluded.profile_text_zh, profile_text_en = excluded.profile_text_en,
+			ai_profile_status = excluded.ai_profile_status, ai_profile_model = excluded.ai_profile_model,
+			ai_profile_confidence = excluded.ai_profile_confidence, ai_profile_error = excluded.ai_profile_error,
+			ai_profile_updated_at = excluded.ai_profile_updated_at,
+			ai_profile_attempted_at = excluded.ai_profile_attempted_at,
+			base_profile_hash = excluded.base_profile_hash,
+			base_profile_updated_at = excluded.base_profile_updated_at,
+			base_profile_checked_at = excluded.base_profile_checked_at,
+			updated_at = excluded.updated_at
+	`, profile.Symbol, profile.Market, profile.InstrumentType, profile.Name, aliasesJSON,
+		profile.Industry, sectorsJSON, conceptsJSON, tagsJSON, profile.BusinessSummary,
+		profile.ProfileText, profile.FundType, profile.TrackingIndex, profile.Theme,
+		profile.ConstituentHint, profile.ProfileVersion, aliasesZhJSON, aliasesEnJSON,
+		keywordsZhJSON, keywordsEnJSON, profile.BusinessSummaryZh, profile.BusinessSummaryEn,
+		businessLinesZhJSON, businessLinesEnJSON, riskTagsZhJSON, riskTagsEnJSON,
+		profile.ProfileTextZh, profile.ProfileTextEn, profile.AIProfileStatus, profile.AIProfileModel,
+		profile.AIProfileConfidence, profile.AIProfileError, nullableTime(profile.AIProfileUpdatedAt),
+		nullableTime(profile.AIProfileAttemptedAt), profile.BaseProfileHash,
+		nullableTime(profile.BaseProfileUpdatedAt), nullableTime(profile.BaseProfileCheckedAt), profile.UpdatedAt)
+	return wrapError(err, "upsert stock profile row")
 }
 
 func (s *Store) GetStockProfile(ctx context.Context, symbol string) (StockProfile, error) {
@@ -170,7 +174,9 @@ func (s *Store) ListStockProfileSummaries(ctx context.Context, symbols []string)
 		       COALESCE(business_summary,''), COALESCE(business_summary_en,''),
 		       COALESCE(ai_profile_status,'missing'), COALESCE(ai_profile_model,''),
 		       COALESCE(ai_profile_confidence,0), base_profile_updated_at, base_profile_checked_at,
-		       ai_profile_updated_at, updated_at
+		       ai_profile_updated_at, updated_at,
+		       COALESCE((SELECT desired_input_version FROM stockv2_stock_profile_ai_states a WHERE a.symbol = stockv2_stock_profiles.symbol), ''),
+		       COALESCE((SELECT applied_input_version FROM stockv2_stock_profile_ai_states a WHERE a.symbol = stockv2_stock_profiles.symbol), '')
 		FROM stockv2_stock_profiles
 		WHERE symbol IN (`+sqlPlaceholders(len(symbols))+`)
 	`, args...)
@@ -199,6 +205,8 @@ func (s *Store) ListStockProfileSummaries(ctx context.Context, symbols []string)
 			&baseCheckedAt,
 			&aiUpdatedAt,
 			&item.UpdatedAt,
+			&item.AIDesiredInputVersion,
+			&item.AIAppliedInputVersion,
 		); err != nil {
 			return nil, wrapError(err, "scan stock profile summary")
 		}

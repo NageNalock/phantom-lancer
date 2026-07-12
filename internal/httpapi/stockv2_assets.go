@@ -7,9 +7,19 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"phantom-lancer/internal/stockv2"
 )
+
+const (
+	stockV2AssetReadinessMaxSymbols = 500
+	stockV2AssetReadinessBodyBytes  = 64 << 10
+)
+
+type stockV2AssetReadinessEvaluateRequest struct {
+	Symbols []string `json:"symbols"`
+}
 
 func (s *Server) handleStockV2ListUpdateJobItems(w http.ResponseWriter, r *http.Request) {
 	jobID := strings.TrimSpace(r.PathValue("jobId"))
@@ -57,6 +67,54 @@ func (s *Server) handleStockV2ListAssetSummaries(w http.ResponseWriter, r *http.
 		return
 	}
 	s.writeJSON(w, map[string]any{"items": items})
+}
+
+func (s *Server) handleStockV2EvaluateAssetReadiness(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, stockV2AssetReadinessBodyBytes)
+	defer r.Body.Close()
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var req stockV2AssetReadinessEvaluateRequest
+	if err := decoder.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_body", "invalid request body")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid_request_body", "invalid request body")
+		return
+	}
+	if len(req.Symbols) == 0 {
+		writeError(w, http.StatusBadRequest, "symbols_required", "symbols are required")
+		return
+	}
+	if len(req.Symbols) > stockV2AssetReadinessMaxSymbols {
+		writeError(w, http.StatusBadRequest, "too_many_symbols", "symbols must contain at most 500 items")
+		return
+	}
+	symbols, err := stockv2.NormalizeAssetReadinessSymbols(req.Symbols)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_symbol", "symbols contain an invalid stock symbol")
+		return
+	}
+	itemsBySymbol, err := s.stockV2.EvaluateAssetReadinessBatch(r.Context(), symbols, time.Time{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "asset_readiness_evaluation_failed", "failed to evaluate asset readiness")
+		return
+	}
+	items := make([]stockv2.UnifiedAssetReadiness, 0, len(symbols))
+	for _, symbol := range symbols {
+		items = append(items, itemsBySymbol[symbol])
+	}
+	s.writeJSON(w, map[string]any{"items": items, "count": len(items)})
+}
+
+func (s *Server) handleStockV2GetAssetReadinessOverview(w http.ResponseWriter, r *http.Request) {
+	overview, err := s.stockV2.GetAssetReadinessOverview(r.Context(), time.Time{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "asset_readiness_overview_failed", "failed to evaluate asset readiness overview")
+		return
+	}
+	s.writeJSON(w, overview)
 }
 
 func (s *Server) handleStockV2ListAnnouncements(w http.ResponseWriter, r *http.Request) {

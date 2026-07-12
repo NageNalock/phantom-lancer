@@ -501,6 +501,64 @@ func TestRefreshAssetBaseProfileDoesNotAdvanceFreshnessOnSourceFailure(t *testin
 	}
 }
 
+func TestRefreshAssetBaseProfileRejectsSoftEmptyF10Payloads(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestServiceWithClient(t, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return stringResponse(http.StatusOK, `{}`), nil
+	})})
+	defer cleanup()
+	seedProfileInstrument(t, svc, ctx)
+	oldCheckedAt := time.Now().Add(-10 * 24 * time.Hour).Truncate(time.Second)
+	if _, err := svc.store.UpsertStockProfile(ctx, StockProfile{
+		Symbol: "300750", Market: "SZ", InstrumentType: InstrumentTypeStock,
+		Name: "宁德时代", Industry: "电池", Concepts: []string{"储能"},
+		ProfileText: "existing", BaseProfileHash: "existing-hash",
+		BaseProfileUpdatedAt: oldCheckedAt, BaseProfileCheckedAt: oldCheckedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	inst, err := svc.store.GetInstrument(ctx, "300750")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := svc.refreshAssetBaseProfile(ctx, inst); err == nil {
+		t.Fatal("refresh succeeded with structurally empty HTTP 200 F10 payloads")
+	}
+	stored, err := svc.store.GetStockProfile(ctx, "300750")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.BaseProfileHash != "existing-hash" || !stored.BaseProfileCheckedAt.Equal(oldCheckedAt) || stored.Industry != "电池" {
+		t.Fatalf("soft-empty refresh overwrote the old profile: %+v", stored)
+	}
+}
+
+func TestStockProfileDeepRefreshUsesStableWeeklyPhaseAndSevenDayFallback(t *testing.T) {
+	loc := chinaMarketTZ
+	symbol := "300750"
+	phase := stockProfileDeepRefreshWeekday(symbol)
+	phaseNow := time.Date(2026, 7, 6, 12, 0, 0, 0, loc)
+	for phaseNow.Weekday() != phase {
+		phaseNow = phaseNow.AddDate(0, 0, 1)
+	}
+	if !stockProfileDeepRefreshDue(symbol, phaseNow.Add(-48*time.Hour), phaseNow) {
+		t.Fatal("symbol was not refreshed on its stable weekly phase")
+	}
+	offPhase := phaseNow.AddDate(0, 0, 1)
+	if stockProfileDeepRefreshDue(symbol, offPhase.Add(-48*time.Hour), offPhase) {
+		t.Fatal("symbol refreshed off phase before the seven-day fallback")
+	}
+	if stockProfileDeepRefreshDue(symbol, phaseNow.Add(-23*time.Hour), phaseNow) {
+		t.Fatal("symbol refreshed again within 24 hours")
+	}
+	if !stockProfileDeepRefreshDue(symbol, phaseNow.Add(-7*24*time.Hour), phaseNow) {
+		t.Fatal("seven-day fallback did not force a refresh")
+	}
+	if !stockProfileDeepRefreshDue(symbol, phaseNow.Add(time.Hour), phaseNow) {
+		t.Fatal("future checked_at suppressed refresh after a clock rollback")
+	}
+}
+
 func TestMergeStockProfileAIFieldsKeepsFreshBaseSummary(t *testing.T) {
 	baseUpdatedAt := time.Now().Add(-24 * time.Hour)
 	baseCheckedAt := time.Now().Add(-time.Hour)
@@ -524,6 +582,72 @@ func TestMergeStockProfileAIFieldsKeepsFreshBaseSummary(t *testing.T) {
 	if merged.BaseProfileHash != existing.BaseProfileHash ||
 		!merged.BaseProfileUpdatedAt.Equal(baseUpdatedAt) || !merged.BaseProfileCheckedAt.Equal(baseCheckedAt) {
 		t.Fatalf("base profile metadata was not preserved: %+v", merged)
+	}
+}
+
+func TestMergeStockProfileAIFieldsFromVersionDropsSupersededTerms(t *testing.T) {
+	base := StockProfile{
+		Symbol: "300750", BusinessSummary: "最新 F10", BusinessSummaryZh: "最新 F10",
+		AliasesZh: []string{"宁德时代"}, KeywordsZh: []string{"动力电池"},
+		BusinessLinesZh: []string{"电池系统"},
+	}
+	existing := StockProfile{
+		Symbol: "300750", AIProfileStatus: StockProfileAIStatusQueued,
+		AliasesZh: []string{"宁德时代", "旧 AI 别名"}, KeywordsZh: []string{"动力电池", "旧 AI 关键词"},
+		BusinessLinesZh: []string{"电池系统", "旧 AI 业务"}, RiskTagsZh: []string{"旧 AI 风险"},
+		AIProfileUpdatedAt: time.Now().Add(-time.Hour),
+	}
+	version := StockProfileAIVersion{ModelName: "model", Confidence: 0.9, CreatedAt: time.Now()}
+	merged := mergeStockProfileAIFieldsFromVersion(base, existing, version, map[string]any{
+		"summaryZh":       "新 AI 总结",
+		"aliasesZh":       []any{"新 AI 别名"},
+		"keywordsZh":      []any{"新 AI 关键词"},
+		"businessLinesZh": []any{"新 AI 业务"},
+		"riskTagsZh":      []any{"新 AI 风险"},
+	})
+	for _, stale := range []string{"旧 AI 别名", "旧 AI 关键词", "旧 AI 业务", "旧 AI 风险"} {
+		if strings.Contains(merged.ProfileTextZh, stale) {
+			t.Fatalf("superseded term %q survived immutable merge: %+v", stale, merged)
+		}
+	}
+	for _, current := range []string{"动力电池", "电池系统", "新 AI 别名", "新 AI 关键词", "新 AI 业务", "新 AI 风险"} {
+		if !strings.Contains(merged.ProfileTextZh, current) {
+			t.Fatalf("current term %q missing after immutable merge: %+v", current, merged)
+		}
+	}
+	if merged.BusinessSummaryZh != "新 AI 总结" || merged.AIProfileStatus != StockProfileAIStatusQueued {
+		t.Fatalf("immutable merged profile=%+v", merged)
+	}
+}
+
+func TestProfileTermsEqualDetectsRemovedInstrumentTerm(t *testing.T) {
+	if !profileTermsEqual([]string{"储能", "锂电池"}, []string{"锂电池", "储能"}) {
+		t.Fatal("equal normalized sets were reported changed")
+	}
+	if profileTermsEqual([]string{"储能", "锂电池"}, []string{"储能"}) {
+		t.Fatal("removed instrument term was not detected")
+	}
+}
+
+func TestStockProfileInstrumentFieldsChangedIgnoresUnavailableDeepTerms(t *testing.T) {
+	existing := StockProfile{
+		Symbol: "300750", Market: "SZ", InstrumentType: InstrumentTypeStock,
+		Name: "宁德时代", Industry: "电池", Sectors: []string{"新能源"}, Concepts: []string{"储能", "锂电池"},
+	}
+	cheap := StockProfile{
+		Symbol: "300750", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "宁德时代",
+	}
+	if stockProfileInstrumentFieldsChanged(existing, cheap) {
+		t.Fatal("missing Tencent deep fields were treated as authoritative removals")
+	}
+	cheap.Name = "宁德时代股份"
+	if !stockProfileInstrumentFieldsChanged(existing, cheap) {
+		t.Fatal("cheap instrument name change was not detected")
+	}
+	cheap.Name = existing.Name
+	cheap.Concepts = []string{"储能"}
+	if !stockProfileInstrumentFieldsChanged(existing, cheap) {
+		t.Fatal("available instrument concept change was not detected")
 	}
 }
 
@@ -553,7 +677,7 @@ func TestRefreshAssetBaseProfileCachePreservesEnrichedBase(t *testing.T) {
 	defer cleanup()
 	inst := StockV2Instrument{
 		ID: "inst-300750", Symbol: "300750", Market: "SZ", InstrumentType: InstrumentTypeStock,
-		Name: "宁德时代", Industry: "电力设备", Concepts: []string{"锂电池"},
+		Name: "宁德时代",
 	}
 	if err := svc.store.UpsertInstrument(ctx, inst); err != nil {
 		t.Fatal(err)
@@ -561,7 +685,7 @@ func TestRefreshAssetBaseProfileCachePreservesEnrichedBase(t *testing.T) {
 	checkedAt := time.Now().Add(-time.Hour).Truncate(time.Microsecond)
 	existing, err := svc.store.UpsertStockProfile(ctx, StockProfile{
 		Symbol: inst.Symbol, Market: inst.Market, InstrumentType: inst.InstrumentType,
-		Name: inst.Name, Industry: inst.Industry, Concepts: inst.Concepts,
+		Name: inst.Name, Industry: "电力设备", Sectors: []string{"新能源"}, Concepts: []string{"锂电池"},
 		BusinessSummary: "F10 丰富主营业务", BusinessSummaryZh: "AI 上次总结",
 		ProfileText: "已持久化画像", BaseProfileHash: "base-v1",
 		BaseProfileUpdatedAt: checkedAt.Add(-24 * time.Hour), BaseProfileCheckedAt: checkedAt,

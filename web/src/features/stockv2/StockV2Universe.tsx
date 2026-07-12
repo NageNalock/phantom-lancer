@@ -1,7 +1,7 @@
 import { ArrowClockwise, CaretLeft, CaretRight, Clock, ClockCounterClockwise, MagnifyingGlass, Plus, X } from "@phosphor-icons/react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppActions } from "../../app/App";
-import type { AppData, StockV2Announcement, StockV2AssetMaintenanceItem, StockV2AssetSummary, StockV2Instrument, StockV2UpdateJob, StockV2UniverseUpdateRequest } from "../../app/types";
+import type { AppData, StockV2Announcement, StockV2AssetMaintenanceItem, StockV2AssetReadinessOverview, StockV2AssetSummary, StockV2Instrument, StockV2UpdateJob, StockV2UniverseUpdateRequest } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, Field, Panel, Pill, SubTabs } from "../../components/ui";
 import {
@@ -14,12 +14,13 @@ import {
 } from "../../domain/labels";
 import { StockV2DailyBarsMaintenance } from "./StockV2DailyBars";
 import { StockV2InstrumentDetail } from "./StockV2InstrumentDetail";
-import { StockV2MaintenanceProgress, stockV2AIProgressActive } from "./StockV2MaintenanceProgress";
+import { StockV2MaintenanceProgress, StockV2ReadinessOverview, stockV2AIProgressActive } from "./StockV2MaintenanceProgress";
 import { StockV2ProfileRecords } from "./StockV2ProfileWorkbench";
 import { StockV2Settings } from "./StockV2Settings";
 
 const PAGE_SIZE = 50;
 const SUPPLEMENT_CACHE_TTL_MS = 60_000;
+const READINESS_REFRESH_MIN_INTERVAL_MS = 30_000;
 type MasterDataView = "overview" | "maintenance" | "maintenanceSettings" | "announcements" | "profileRecords";
 type SupplementCacheEntry<T> = { value: T; expiresAt: number };
 
@@ -93,6 +94,10 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   const runningJob = jobs.find(j => j.status === "running");
   const latestJob = jobs[0];
   const aiProgressActive = jobs.some(stockV2AIProgressActive);
+  const aiProgressSignature = jobs.map((job) => {
+    const progress = job.maintenanceProgress?.aiProfile;
+    return [job.id, progress?.status, progress?.queued, progress?.running, progress?.retrying, progress?.completed, progress?.failed, progress?.outstanding].join(":");
+  }).join("|");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [page, setPage] = useState(0);
   const [instrumentsPage, setInstrumentsPage] = useState<InstrumentsPage | null>(null);
@@ -108,12 +113,52 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
   const [selectedInst, setSelectedInst] = useState<StockV2Instrument | null>(null);
   const [assetSummaries, setAssetSummaries] = useState<Record<string, StockV2AssetSummary>>({});
   const [supplementLoading, setSupplementLoading] = useState(false);
+  const [readinessOverview, setReadinessOverview] = useState<StockV2AssetReadinessOverview | null>(null);
+  const [readinessOverviewLoading, setReadinessOverviewLoading] = useState(false);
+  const [readinessOverviewError, setReadinessOverviewError] = useState("");
   const supplementRequestRef = useRef(0);
+  const readinessRequestRef = useRef(0);
+  const readinessLoadingRef = useRef(false);
+  const readinessLastLoadedAtRef = useRef(0);
+  const readinessRefreshTimerRef = useRef<number | null>(null);
 
   const portfolios = stockv2.portfolios || [];
   const isSearching = searchQuery.trim().length > 0;
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+
+  const loadReadinessOverview = useCallback(async () => {
+    if (readinessLoadingRef.current) return;
+    readinessLoadingRef.current = true;
+    const requestID = ++readinessRequestRef.current;
+    setReadinessOverviewLoading(true);
+    setReadinessOverviewError("");
+    try {
+      const overview = await actions.api<StockV2AssetReadinessOverview>("/api/stockv2/assets/readiness/overview");
+      if (requestID === readinessRequestRef.current) {
+        setReadinessOverview(overview);
+      }
+    } catch (error) {
+      if (requestID === readinessRequestRef.current) {
+        setReadinessOverviewError(`资产就绪度刷新失败：${friendlyError(error)}`);
+      }
+    } finally {
+      readinessLoadingRef.current = false;
+      if (requestID === readinessRequestRef.current) {
+        readinessLastLoadedAtRef.current = Date.now();
+        setReadinessOverviewLoading(false);
+      }
+    }
+  }, [actions]);
+
+  function handleReadinessOverviewRefresh() {
+    if (readinessRefreshTimerRef.current !== null) {
+      window.clearTimeout(readinessRefreshTimerRef.current);
+      readinessRefreshTimerRef.current = null;
+    }
+    void loadReadinessOverview();
+  }
+
   function handleJump() {
     const n = parseInt(jumpInput, 10);
     if (!isNaN(n) && n >= 1 && n <= totalPages) {
@@ -263,6 +308,26 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
     return () => clearInterval(timer);
   }, [runningJob?.id, aiProgressActive, masterDataView, actions]);
 
+  // readiness 汇总跟随任务和 AI 计数变化，但最多每 30 秒重算一次；
+  // 维护中的 2 秒 snapshot 轮询不会放大全市场本地查询。
+  useEffect(() => {
+    if (masterDataView !== "overview") return;
+    const elapsed = Date.now() - readinessLastLoadedAtRef.current;
+    const delay = readinessLastLoadedAtRef.current === 0
+      ? 0
+      : Math.max(0, READINESS_REFRESH_MIN_INTERVAL_MS - elapsed);
+    readinessRefreshTimerRef.current = window.setTimeout(() => {
+      readinessRefreshTimerRef.current = null;
+      void loadReadinessOverview();
+    }, delay);
+    return () => {
+      if (readinessRefreshTimerRef.current !== null) {
+        window.clearTimeout(readinessRefreshTimerRef.current);
+        readinessRefreshTimerRef.current = null;
+      }
+    };
+  }, [masterDataView, latestJob?.id, latestJob?.status, aiProgressSignature, loadReadinessOverview]);
+
   async function handleTriggerUpdate() {
     const req: StockV2UniverseUpdateRequest = {
       triggerType: "manual",
@@ -338,6 +403,12 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
         ) : (
           <div className="text-sm text-[var(--muted)]">首次运行后，这里会分别显示基础数据和 AI 画像进度。</div>
         )}
+        <StockV2ReadinessOverview
+          error={readinessOverviewError}
+          loading={readinessOverviewLoading}
+          onRefresh={handleReadinessOverviewRefresh}
+          overview={readinessOverview}
+        />
       </Panel>
 
       {/* 标的列表 */}

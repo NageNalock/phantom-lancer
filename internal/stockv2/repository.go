@@ -83,8 +83,8 @@ func NewStoreWithMarketDB(dbPath, marketDBPath string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open stockv2 db: %w", err)
 	}
-	db.SetMaxOpenConns(8)
-	db.SetMaxIdleConns(4)
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
 	if err := configureSQLite(context.Background(), db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("configure stockv2 sqlite: %w", err)
@@ -96,8 +96,7 @@ func NewStoreWithMarketDB(dbPath, marketDBPath string) (*Store, error) {
 	}
 
 	s := &Store{db: db, dbPath: dbPath, marketDB: marketDB}
-	// 旧版本曾把日 K 明细写入 SQLite；在任何 schema rebuild 发生前先迁入
-	// DuckDB，避免开发期旧表重建逻辑误删历史行情资产。
+	// 旧版本曾把日 K 明细写入 SQLite；先迁入 DuckDB，再初始化操作状态表。
 	if err := s.migrateLegacyDailyBars(context.Background()); err != nil {
 		_ = marketDB.Close()
 		_ = db.Close()
@@ -114,6 +113,11 @@ func NewStoreWithMarketDB(dbPath, marketDBPath string) (*Store, error) {
 		_ = marketDB.Close()
 		_ = db.Close()
 		return nil, fmt.Errorf("init stockv2 schema: %w", err)
+	}
+	if _, err := s.BackfillStockProfileAIStates(context.Background()); err != nil {
+		_ = marketDB.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("backfill stock profile ai state: %w", err)
 	}
 	return s, nil
 }
@@ -267,6 +271,38 @@ CREATE TABLE IF NOT EXISTS stockv2_stock_profile_update_tasks (
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
 );
+CREATE TABLE IF NOT EXISTS stockv2_stock_profile_ai_states (
+    symbol TEXT PRIMARY KEY,
+    profile_schema_version INTEGER NOT NULL,
+    base_profile_hash TEXT NOT NULL,
+    announcement_revision INTEGER NOT NULL DEFAULT 0,
+    manual_generation INTEGER NOT NULL DEFAULT 0,
+    required_message_cutoff_at DATETIME,
+    desired_input_version TEXT,
+    desired_trigger_reason TEXT,
+    desired_priority INTEGER NOT NULL DEFAULT 0,
+    desired_at DATETIME,
+    applied_input_version TEXT,
+    applied_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_stock_profile_ai_versions (
+    symbol TEXT NOT NULL,
+    input_version TEXT NOT NULL,
+    base_profile_hash TEXT NOT NULL,
+    announcement_revision INTEGER NOT NULL DEFAULT 0,
+    announcement_cutoff_at DATETIME,
+    previous_input_version TEXT,
+    input_manifest_json TEXT NOT NULL DEFAULT '{}',
+    result_json TEXT NOT NULL,
+    result_hash TEXT NOT NULL,
+    model_name TEXT,
+    confidence REAL NOT NULL DEFAULT 0,
+    agent_run_id TEXT UNIQUE,
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY(symbol, input_version)
+);
 CREATE TABLE IF NOT EXISTS stockv2_stock_profile_ai_queue (
     symbol TEXT PRIMARY KEY,
     market TEXT NOT NULL DEFAULT '',
@@ -276,7 +312,6 @@ CREATE TABLE IF NOT EXISTS stockv2_stock_profile_ai_queue (
     requested_by TEXT,
     desired_input_version TEXT NOT NULL,
     claimed_input_version TEXT,
-    payload_json TEXT NOT NULL,
     current_agent_run_id TEXT UNIQUE,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     available_at DATETIME NOT NULL,
@@ -285,6 +320,10 @@ CREATE TABLE IF NOT EXISTS stockv2_stock_profile_ai_queue (
     lease_expires_at DATETIME,
     completed_input_version TEXT,
     completed_at DATETIME,
+    result_json TEXT,
+    result_hash TEXT,
+    result_model TEXT,
+    result_confidence REAL NOT NULL DEFAULT 0,
     last_error TEXT,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
@@ -336,13 +375,32 @@ CREATE TABLE IF NOT EXISTS stockv2_announcements (
     announcement_id TEXT,
     pdf_url TEXT,
     content_hash TEXT NOT NULL,
+    dedupe_key TEXT UNIQUE,
+    symbol_revision INTEGER NOT NULL DEFAULT 0,
     major INTEGER NOT NULL DEFAULT 0,
     major_reason TEXT,
     published_at DATETIME,
     fetched_at DATETIME NOT NULL,
+    first_fetched_at DATETIME,
+    last_seen_at DATETIME,
+    body_status TEXT NOT NULL DEFAULT 'metadata_only',
+    body_text_excerpt TEXT,
+    body_hash TEXT,
+    body_checked_at DATETIME,
+    body_error TEXT,
+    body_attempt_count INTEGER NOT NULL DEFAULT 0,
+    body_next_attempt_at DATETIME,
+    body_content_bytes INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     UNIQUE(source, symbol, content_hash)
+);
+CREATE TABLE IF NOT EXISTS stockv2_announcement_body_budgets (
+    budget_date TEXT PRIMARY KEY,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    byte_budget_used INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL
 );
 CREATE TABLE IF NOT EXISTS stockv2_announcement_sync_states (
     source TEXT NOT NULL,
@@ -355,6 +413,9 @@ CREATE TABLE IF NOT EXISTS stockv2_announcement_sync_states (
     last_page_count INTEGER NOT NULL DEFAULT 0,
     last_fetched_count INTEGER NOT NULL DEFAULT 0,
     last_inserted_count INTEGER NOT NULL DEFAULT 0,
+    late_recheck_started_at DATETIME,
+    late_recheck_covered_through DATETIME,
+    last_late_recheck_at DATETIME,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     PRIMARY KEY (source, market)
@@ -600,14 +661,30 @@ CREATE TABLE IF NOT EXISTS stockv2_update_jobs (
     trigger_type TEXT NOT NULL,
     trigger_source TEXT,
     status TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'legacy_unknown',
+    slot_start DATETIME,
+	    universe_snapshot_id TEXT,
+	    universe_hash TEXT,
+	    universe_verified INTEGER NOT NULL DEFAULT 0,
+    expected_latest_trade_date TEXT,
+    message_cutoff_at DATETIME,
+    coverage_status TEXT NOT NULL DEFAULT 'incomplete',
+    freshness_status TEXT NOT NULL DEFAULT 'pending',
     total_count INTEGER DEFAULT 0,
+    checked_count INTEGER DEFAULT 0,
     processed_count INTEGER DEFAULT 0,
     success_count INTEGER DEFAULT 0,
+    fresh_count INTEGER DEFAULT 0,
+    stale_count INTEGER DEFAULT 0,
+    retry_count INTEGER DEFAULT 0,
     failed_count INTEGER DEFAULT 0,
     failed_items TEXT,
     asset_stats_json TEXT,
     start_at DATETIME,
     end_at DATETIME,
+    write_bytes_start INTEGER DEFAULT 0,
+    write_bytes_end INTEGER DEFAULT 0,
+    peak_rss_bytes INTEGER DEFAULT 0,
     error_message TEXT,
     created_at DATETIME NOT NULL
 );
@@ -619,7 +696,15 @@ CREATE TABLE IF NOT EXISTS stockv2_asset_maintenance_items (
     instrument_type TEXT,
     name TEXT,
     status TEXT NOT NULL,
+    priority_reason TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_retry_at DATETIME,
+    checked_at DATETIME,
+    expected_latest_trade_date TEXT,
     daily_bar_status TEXT,
+    daily_bar_gap_count INTEGER NOT NULL DEFAULT 0,
+    daily_bar_missing_facet_count INTEGER NOT NULL DEFAULT 0,
+    daily_flow_status TEXT,
     daily_bar_fetched INTEGER DEFAULT 0,
     daily_bar_start TEXT,
     daily_bar_end TEXT,
@@ -633,6 +718,7 @@ CREATE TABLE IF NOT EXISTS stockv2_asset_maintenance_items (
     ai_decision TEXT,
     ai_profile_status TEXT,
     ai_queue_status TEXT,
+    ai_desired_input_version TEXT,
     agent_run_id TEXT,
     error_message TEXT,
     source_statuses_json TEXT,
@@ -648,6 +734,50 @@ CREATE TABLE IF NOT EXISTS stockv2_asset_maintenance_cursors (
     cursor_symbol TEXT NOT NULL DEFAULT '',
     updated_at DATETIME NOT NULL
 );
+CREATE TABLE IF NOT EXISTS stockv2_daily_bar_flow_repair_states (
+    symbol TEXT PRIMARY KEY,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_retry_at DATETIME,
+    last_attempt_at DATETIME,
+    last_error TEXT,
+    updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_universe_snapshots (
+    id TEXT PRIMARY KEY,
+    universe_hash TEXT NOT NULL,
+    status TEXT NOT NULL,
+    source TEXT NOT NULL,
+    target_count INTEGER NOT NULL,
+    created_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stockv2_universe_snapshot_members (
+    snapshot_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    PRIMARY KEY(snapshot_id, symbol),
+    FOREIGN KEY(snapshot_id) REFERENCES stockv2_universe_snapshots(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS stockv2_universe_state (
+    id TEXT PRIMARY KEY,
+    active_snapshot_id TEXT NOT NULL,
+    updated_at DATETIME NOT NULL,
+    FOREIGN KEY(active_snapshot_id) REFERENCES stockv2_universe_snapshots(id)
+);
+CREATE TABLE IF NOT EXISTS stockv2_maintenance_slots (
+    slot_start DATETIME PRIMARY KEY,
+    slot_end DATETIME NOT NULL,
+    expected_latest_trade_date TEXT,
+    universe_snapshot_id TEXT NOT NULL,
+    universe_hash TEXT NOT NULL,
+    target_count INTEGER NOT NULL,
+    job_id TEXT,
+    status TEXT NOT NULL,
+    covered_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    FOREIGN KEY(universe_snapshot_id) REFERENCES stockv2_universe_snapshots(id),
+    FOREIGN KEY(job_id) REFERENCES stockv2_update_jobs(id) ON DELETE SET NULL
+);
 CREATE TABLE IF NOT EXISTS stockv2_universe_discovery_symbols (
     symbol TEXT PRIMARY KEY,
     source TEXT NOT NULL,
@@ -660,6 +790,14 @@ CREATE TABLE IF NOT EXISTS stockv2_daily_bar_gap_checks (
     start_date TEXT NOT NULL,
     end_date TEXT NOT NULL,
     checked_at DATETIME NOT NULL,
+    source_a TEXT NOT NULL DEFAULT '',
+    source_b TEXT NOT NULL DEFAULT '',
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'legacy_unverified',
+    expires_at DATETIME,
+    next_retry_at DATETIME,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
     PRIMARY KEY (symbol, adjusted, start_date, end_date)
 );
 CREATE TABLE IF NOT EXISTS stockv2_update_progress (
@@ -687,6 +825,7 @@ CREATE TABLE IF NOT EXISTS stockv2_settings (
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_symbol ON stockv2_instruments(symbol);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_market ON stockv2_instruments(market);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_industry ON stockv2_instruments(industry);
+CREATE INDEX IF NOT EXISTS idx_stockv2_flow_repair_due ON stockv2_daily_bar_flow_repair_states(next_retry_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_created_at ON stockv2_instruments(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_market ON stockv2_stock_profiles(market);
 CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_updated_at ON stockv2_stock_profiles(updated_at);
@@ -697,7 +836,7 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_profile_ai_queue_claim
     ON stockv2_stock_profile_ai_queue(status, available_at, priority DESC, updated_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_profile_ai_queue_lease
     ON stockv2_stock_profile_ai_queue(lease_expires_at)
-    WHERE status = 'running';
+    WHERE status IN ('running','applying');
 CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bar_gap_checks_symbol
     ON stockv2_daily_bar_gap_checks(symbol, adjusted, start_date, end_date);
 CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_event ON stockv2_news_link_candidates(news_event_id);
@@ -729,6 +868,16 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_created_at ON stockv2_update_
 CREATE INDEX IF NOT EXISTS idx_stockv2_update_jobs_status_created ON stockv2_update_jobs(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stockv2_asset_items_job ON stockv2_asset_maintenance_items(job_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stockv2_asset_items_symbol ON stockv2_asset_maintenance_items(symbol, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stockv2_asset_items_job_symbol
+    ON stockv2_asset_maintenance_items(job_id, symbol)
+    WHERE job_id IS NOT NULL AND job_id <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stockv2_universe_snapshots_hash_full
+    ON stockv2_universe_snapshots(universe_hash)
+    WHERE status = 'full';
+CREATE INDEX IF NOT EXISTS idx_stockv2_universe_members_position
+    ON stockv2_universe_snapshot_members(snapshot_id, position);
+CREATE INDEX IF NOT EXISTS idx_stockv2_maintenance_slots_status
+    ON stockv2_maintenance_slots(status, slot_start DESC);
 INSERT OR IGNORE INTO stockv2_settings (id, auto_update_enabled, created_at, updated_at)
 VALUES ('1', 0, datetime('now'), datetime('now'));
 
@@ -1363,24 +1512,20 @@ INSERT OR IGNORE INTO stockv2_agent_task_profiles (id, task_type, primary_model_
     ('agent-task-bull-bear-debate', 'bull_bear_debate', '', '', 0, datetime('now'), datetime('now'));
 `
 
-// init 初始化 V2 表结构。如果检测到旧 schema（例如时间列是 TEXT 类型），
-// 会先 DROP 所有 V2 表再重建（开发阶段数据无价值，保证 schema 最新）。
+// init 初始化 V2 表结构。迁移必须保留已有业务数据；schema 漂移不能触发
+// 开发期式的全库清空。
 func (s *Store) init(ctx context.Context) error {
-	// 检查是否需要重建（开发阶段，避免 schema 变更后残留旧表）
-	needsRebuild, err := s.needsRebuild(ctx)
-	if err != nil {
-		return fmt.Errorf("check schema: %w", err)
-	}
-	if needsRebuild {
-		if err := s.dropAllV2Tables(ctx); err != nil {
-			return fmt.Errorf("drop old v2 tables: %w", err)
-		}
-	}
-	if _, err := s.db.ExecContext(ctx, "DROP TABLE IF EXISTS stockv2_agent_authorizations"); err != nil {
-		return fmt.Errorf("drop old agent authorization table: %w", err)
-	}
 	if _, err := s.db.ExecContext(ctx, initSchemaSQL); err != nil {
 		return fmt.Errorf("exec init schema: %w", err)
+	}
+	if err := s.ensureDailyBarCoverageSchema(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureAnnouncementSyncIntegritySchema(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureStockProfileAIQueueSchema(ctx); err != nil {
+		return fmt.Errorf("migrate stock profile ai queue: %w", err)
 	}
 	if err := s.ensureEmbeddingSchema(ctx); err != nil {
 		return fmt.Errorf("ensure embedding schema: %w", err)
@@ -1495,8 +1640,66 @@ func (s *Store) init(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "stockv2_update_jobs", "asset_stats_json", "TEXT"); err != nil {
 		return fmt.Errorf("add asset_stats_json column: %w", err)
 	}
-	if err := s.ensureColumn(ctx, "stockv2_asset_maintenance_items", "ai_queue_status", "TEXT"); err != nil {
-		return fmt.Errorf("add asset maintenance ai_queue_status column: %w", err)
+	updateJobColumns := []struct {
+		name    string
+		colType string
+	}{
+		{"scope", "TEXT NOT NULL DEFAULT 'legacy_unknown'"},
+		{"slot_start", "DATETIME"},
+		{"universe_snapshot_id", "TEXT"},
+		{"universe_hash", "TEXT"},
+		{"universe_verified", "INTEGER NOT NULL DEFAULT 0"},
+		{"expected_latest_trade_date", "TEXT"},
+		{"message_cutoff_at", "DATETIME"},
+		{"coverage_status", "TEXT NOT NULL DEFAULT 'incomplete'"},
+		{"freshness_status", "TEXT NOT NULL DEFAULT 'pending'"},
+		{"checked_count", "INTEGER DEFAULT 0"},
+		{"fresh_count", "INTEGER DEFAULT 0"},
+		{"stale_count", "INTEGER DEFAULT 0"},
+		{"retry_count", "INTEGER DEFAULT 0"},
+		{"write_bytes_start", "INTEGER DEFAULT 0"},
+		{"write_bytes_end", "INTEGER DEFAULT 0"},
+		{"peak_rss_bytes", "INTEGER DEFAULT 0"},
+	}
+	for _, column := range updateJobColumns {
+		if err := s.ensureColumn(ctx, "stockv2_update_jobs", column.name, column.colType); err != nil {
+			return fmt.Errorf("add update job %s column: %w", column.name, err)
+		}
+	}
+	assetItemColumns := []struct {
+		name    string
+		colType string
+	}{
+		{"ai_queue_status", "TEXT"},
+		{"priority_reason", "TEXT"},
+		{"attempt_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"next_retry_at", "DATETIME"},
+		{"checked_at", "DATETIME"},
+		{"expected_latest_trade_date", "TEXT"},
+		{"daily_bar_gap_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"daily_bar_missing_facet_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"daily_flow_status", "TEXT"},
+		{"ai_desired_input_version", "TEXT"},
+	}
+	for _, column := range assetItemColumns {
+		if err := s.ensureColumn(ctx, "stockv2_asset_maintenance_items", column.name, column.colType); err != nil {
+			return fmt.Errorf("add asset maintenance item %s column: %w", column.name, err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_update_jobs
+		SET scope = 'legacy_unknown', coverage_status = 'incomplete'
+		WHERE COALESCE(scope, '') = ''
+		   OR COALESCE(coverage_status, '') = '';
+		UPDATE stockv2_asset_maintenance_items
+		SET checked_at = COALESCE(finished_at, updated_at)
+		WHERE checked_at IS NULL
+		  AND status IN ('completed','retry_wait','failed');
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_stockv2_asset_items_job_symbol
+		    ON stockv2_asset_maintenance_items(job_id, symbol)
+		    WHERE job_id IS NOT NULL AND job_id <> '';
+	`); err != nil {
+		return fmt.Errorf("migrate asset maintenance control state: %w", err)
 	}
 
 	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_enabled", "INTEGER DEFAULT 0"); err != nil {
@@ -1706,6 +1909,9 @@ func (s *Store) sqliteAnyColumnExists(ctx context.Context, table string, columns
 	return false, nil
 }
 
+// cleanupSQLiteSettingsSchema is a data-preserving table-copy migration. The
+// source table is replaced only inside a transaction after every retained row
+// has been copied into the current schema.
 func (s *Store) cleanupSQLiteSettingsSchema(ctx context.Context) error {
 	hasLegacy, err := s.sqliteAnyColumnExists(ctx, "stockv2_settings",
 		"update_interval_sec", "proxy_enabled", "proxy_type", "proxy_host", "proxy_port", "daily_bars_last_run")
@@ -1756,6 +1962,8 @@ func (s *Store) cleanupSQLiteSettingsSchema(ctx context.Context) error {
 	})
 }
 
+// cleanupSQLiteInstrumentsSchema is a data-preserving table-copy migration for
+// SQLite versions that cannot remove the retired status column in place.
 func (s *Store) cleanupSQLiteInstrumentsSchema(ctx context.Context) error {
 	hasStatus, err := s.sqliteColumnExists(ctx, "stockv2_instruments", "status")
 	if err != nil || !hasStatus {
@@ -1814,68 +2022,6 @@ func (s *Store) ensureSQLiteInstrumentIndexes(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_created_at ON stockv2_instruments(created_at DESC);
 	`)
 	return err
-}
-
-// needsRebuild 检测 V2 表是否是旧 schema。
-func (s *Store) needsRebuild(ctx context.Context) (bool, error) {
-	// 检查表是否存在
-	var count int
-	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM sqlite_master
-		WHERE type='table' AND name='stockv2_portfolios'
-	`).Scan(&count)
-	if err != nil {
-		return false, err
-	}
-	if count == 0 {
-		return false, nil // 表不存在，不需要重建，直接新建
-	}
-
-	// 检查 created_at 列的类型
-	var colType string
-	err = s.db.QueryRowContext(ctx, `
-		SELECT type FROM pragma_table_info('stockv2_portfolios')
-		WHERE name='created_at'
-	`).Scan(&colType)
-	if err != nil {
-		return false, err
-	}
-	// 旧 schema 用 TEXT，新 schema 用 DATETIME
-	if colType == "TEXT" {
-		return true, nil
-	}
-	return false, nil
-}
-
-// dropAllV2Tables 删除所有 stockv2_ 前缀的表
-func (s *Store) dropAllV2Tables(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT name FROM sqlite_master
-		WHERE type='table' AND name LIKE 'stockv2_%'
-	`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	var tables []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return err
-		}
-		tables = append(tables, name)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	for _, t := range tables {
-		if _, err := s.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+t); err != nil {
-			return fmt.Errorf("drop %s: %w", t, err)
-		}
-	}
-	return nil
 }
 
 const portfolioSelectSQL = `
@@ -2457,12 +2603,24 @@ func (s *Store) UpdateInstrument(ctx context.Context, instrument StockV2Instrume
 }
 
 func (s *Store) CreateUpdateJob(ctx context.Context, job StockV2UpdateJob) error {
+	if job.Scope == "" {
+		job.Scope = AssetMaintenanceScopeLegacyUnknown
+	}
+	if job.CoverageStatus == "" {
+		job.CoverageStatus = AssetMaintenanceCoveragePending
+	}
+	if job.FreshnessStatus == "" {
+		job.FreshnessStatus = AssetMaintenanceFreshnessPending
+	}
 	query := `
 		INSERT INTO stockv2_update_jobs (
-			id, trigger_type, trigger_source, status, total_count,
-			processed_count, success_count, failed_count, asset_stats_json, start_at, end_at,
-			error_message, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			id, trigger_type, trigger_source, status, scope, slot_start,
+			universe_snapshot_id, universe_hash, universe_verified, expected_latest_trade_date, message_cutoff_at,
+			coverage_status, freshness_status, total_count, checked_count,
+			processed_count, success_count, fresh_count, stale_count, retry_count, failed_count,
+			asset_stats_json, start_at, end_at, write_bytes_start, write_bytes_end,
+			peak_rss_bytes, error_message, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	now := time.Now()
@@ -2474,13 +2632,29 @@ func (s *Store) CreateUpdateJob(ctx context.Context, job StockV2UpdateJob) error
 		job.TriggerType,
 		job.TriggerSource,
 		job.Status,
+		job.Scope,
+		nullableTime(job.SlotStart),
+		nullableString(job.UniverseSnapshotID),
+		nullableString(job.UniverseHash),
+		job.UniverseVerified,
+		nullableString(job.ExpectedLatestDate),
+		nullableTime(job.MessageCutoffAt),
+		job.CoverageStatus,
+		job.FreshnessStatus,
 		job.TotalCount,
+		job.CheckedCount,
 		job.ProcessedCount,
 		job.SuccessCount,
+		job.FreshCount,
+		job.StaleCount,
+		job.RetryCount,
 		job.FailedCount,
 		string(statsJSON),
-		job.StartAt,
-		job.EndAt,
+		nullableTime(job.StartAt),
+		nullableTime(job.EndAt),
+		job.WriteBytesStart,
+		job.WriteBytesEnd,
+		job.PeakRSSBytes,
 		job.ErrorMessage,
 		job.CreatedAt,
 	)
@@ -2489,9 +2663,16 @@ func (s *Store) CreateUpdateJob(ctx context.Context, job StockV2UpdateJob) error
 }
 
 const updateJobSelectSQL = `
-	SELECT id, trigger_type, COALESCE(trigger_source,''), status, total_count,
-	       processed_count, success_count, failed_count, COALESCE(failed_items,''),
-	       COALESCE(asset_stats_json,''), start_at, end_at, COALESCE(error_message,''), created_at
+	SELECT id, trigger_type, COALESCE(trigger_source,''), status,
+	       COALESCE(scope,'legacy_unknown'), slot_start,
+	       COALESCE(universe_snapshot_id,''), COALESCE(universe_hash,''), COALESCE(universe_verified,0),
+	       COALESCE(expected_latest_trade_date,''), message_cutoff_at,
+	       COALESCE(coverage_status,'incomplete'), COALESCE(freshness_status,'pending'),
+	       total_count, COALESCE(checked_count,0), processed_count, success_count,
+	       COALESCE(fresh_count,0), COALESCE(stale_count,0), COALESCE(retry_count,0), failed_count,
+	       COALESCE(failed_items,''), COALESCE(asset_stats_json,''), start_at, end_at,
+	       COALESCE(write_bytes_start,0), COALESCE(write_bytes_end,0), COALESCE(peak_rss_bytes,0),
+	       COALESCE(error_message,''), created_at
 	FROM stockv2_update_jobs
 `
 
@@ -2518,6 +2699,22 @@ func (s *Store) GetLatestUpdateJob(ctx context.Context) (StockV2UpdateJob, error
 	return job, nil
 }
 
+func (s *Store) GetLatestUniverseUpdateJobForSlot(ctx context.Context, slotStart time.Time) (StockV2UpdateJob, error) {
+	job, err := scanUpdateJob(s.db.QueryRowContext(
+		ctx,
+		updateJobSelectSQL+" WHERE scope = ? AND slot_start = ? ORDER BY created_at DESC LIMIT 1",
+		AssetMaintenanceScopeFullUniverse,
+		slotStart,
+	))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return StockV2UpdateJob{}, ErrUpdateJobNotFound
+		}
+		return StockV2UpdateJob{}, wrapError(err, "get latest universe update job for slot")
+	}
+	return job, nil
+}
+
 // UpdateUpdateJob 增量更新更新任务（只更新非零值字段）
 func (s *Store) UpdateUpdateJob(ctx context.Context, job StockV2UpdateJob) error {
 	var sets []string
@@ -2527,6 +2724,17 @@ func (s *Store) UpdateUpdateJob(ctx context.Context, job StockV2UpdateJob) error
 		sets = append(sets, "status = ?")
 		args = append(args, job.Status)
 	}
+	if job.CoverageStatus != "" {
+		sets = append(sets, "coverage_status = ?")
+		args = append(args, job.CoverageStatus)
+	}
+	if job.FreshnessStatus != "" {
+		sets = append(sets, "freshness_status = ?")
+		args = append(args, job.FreshnessStatus)
+	}
+	if job.UniverseVerified {
+		sets = append(sets, "universe_verified = 1")
+	}
 	if job.TotalCount > 0 {
 		sets = append(sets, "total_count = ?")
 		args = append(args, job.TotalCount)
@@ -2535,6 +2743,10 @@ func (s *Store) UpdateUpdateJob(ctx context.Context, job StockV2UpdateJob) error
 		sets = append(sets, "processed_count = ?")
 		args = append(args, job.ProcessedCount)
 	}
+	if job.CheckedCount > 0 || job.TotalCount > 0 {
+		sets = append(sets, "checked_count = ?")
+		args = append(args, job.CheckedCount)
+	}
 	if job.SuccessCount > 0 || job.TotalCount > 0 {
 		sets = append(sets, "success_count = ?")
 		args = append(args, job.SuccessCount)
@@ -2542,6 +2754,18 @@ func (s *Store) UpdateUpdateJob(ctx context.Context, job StockV2UpdateJob) error
 	if job.FailedCount > 0 || job.TotalCount > 0 {
 		sets = append(sets, "failed_count = ?")
 		args = append(args, job.FailedCount)
+	}
+	if job.FreshCount > 0 || job.TotalCount > 0 {
+		sets = append(sets, "fresh_count = ?")
+		args = append(args, job.FreshCount)
+	}
+	if job.StaleCount > 0 || job.TotalCount > 0 {
+		sets = append(sets, "stale_count = ?")
+		args = append(args, job.StaleCount)
+	}
+	if job.RetryCount > 0 || job.TotalCount > 0 {
+		sets = append(sets, "retry_count = ?")
+		args = append(args, job.RetryCount)
 	}
 	if len(job.FailedItems) > 0 {
 		// 序列化失败详情
@@ -2715,7 +2939,7 @@ type rowScanner interface {
 
 func scanUpdateJob(row rowScanner) (StockV2UpdateJob, error) {
 	var job StockV2UpdateJob
-	var startAt, endAt sql.NullTime
+	var slotStart, messageCutoffAt, startAt, endAt sql.NullTime
 	var failedItemsJSON string
 	var assetStatsJSON string
 
@@ -2724,14 +2948,30 @@ func scanUpdateJob(row rowScanner) (StockV2UpdateJob, error) {
 		&job.TriggerType,
 		&job.TriggerSource,
 		&job.Status,
+		&job.Scope,
+		&slotStart,
+		&job.UniverseSnapshotID,
+		&job.UniverseHash,
+		&job.UniverseVerified,
+		&job.ExpectedLatestDate,
+		&messageCutoffAt,
+		&job.CoverageStatus,
+		&job.FreshnessStatus,
 		&job.TotalCount,
+		&job.CheckedCount,
 		&job.ProcessedCount,
 		&job.SuccessCount,
+		&job.FreshCount,
+		&job.StaleCount,
+		&job.RetryCount,
 		&job.FailedCount,
 		&failedItemsJSON,
 		&assetStatsJSON,
 		&startAt,
 		&endAt,
+		&job.WriteBytesStart,
+		&job.WriteBytesEnd,
+		&job.PeakRSSBytes,
 		&job.ErrorMessage,
 		&job.CreatedAt,
 	)
@@ -2739,8 +2979,16 @@ func scanUpdateJob(row rowScanner) (StockV2UpdateJob, error) {
 		return job, err
 	}
 
+	if slotStart.Valid {
+		job.SlotStart = slotStart.Time
+	}
+	if messageCutoffAt.Valid {
+		job.MessageCutoffAt = messageCutoffAt.Time
+	}
 	job.StartAt = nullTimeDefault(startAt, job.CreatedAt)
-	job.EndAt = nullTimeDefault(endAt, job.CreatedAt)
+	if endAt.Valid {
+		job.EndAt = endAt.Time
+	}
 
 	// 解析失败详情 JSON
 	if failedItemsJSON != "" && failedItemsJSON != "[]" {

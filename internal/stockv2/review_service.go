@@ -178,6 +178,29 @@ func (s *Service) BuildAgentContextPack(ctx context.Context, hit MonitorHit) (Ag
 		pack.Portfolio = portfolioCtx
 		freshness["portfolio"] = status
 	}
+	if symbol != "" {
+		normalizedSymbols, err := NormalizeAssetReadinessSymbols([]string{symbol})
+		if err != nil {
+			return AgentContextPack{}, err
+		}
+		readinessBySymbol, err := s.EvaluateAssetReadinessBatch(ctx, normalizedSymbols, pack.BuiltAt)
+		if err != nil {
+			return AgentContextPack{}, err
+		}
+		readiness := readinessBySymbol[normalizedSymbols[0]]
+		decision, err := DecideAssetReadiness(
+			[]UnifiedAssetReadiness{readiness},
+			AssetReadinessRequirementAnalysis,
+			AssetReadinessModeAllowDegraded,
+		)
+		if err != nil {
+			return AgentContextPack{}, err
+		}
+		// Operation reviews are risk-monitoring continuations: they stay available
+		// in explicitly degraded mode, and the persisted input records every reason.
+		freshness["assetReadiness"] = readiness
+		freshness["assetReadinessDecision"] = decision
+	}
 
 	return pack, nil
 }
