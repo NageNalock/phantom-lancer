@@ -82,19 +82,28 @@ type StockV2DailyBar struct {
 
 // DailyBarsQuality 日 K 数据质量评估
 type DailyBarsQuality struct {
-	Symbol           string    `json:"symbol"`
-	Adjusted         string    `json:"adjusted"`
-	HasData          bool      `json:"hasData"`
-	RowCount         int       `json:"rowCount"`
-	IncompleteCount  int       `json:"incompleteCount"`
-	FacetsComplete   bool      `json:"facetsComplete"`
-	EarliestDate     string    `json:"earliestDate"` // 本地最早 tradeDate
-	LatestDate       string    `json:"latestDate"`   // 本地最近 tradeDate
-	Stale            bool      `json:"stale"`        // 最近一条距今超出容忍窗口
-	Meets250         bool      `json:"meets250"`     // 行数是否满足最近 ~250 个交易日
-	LastErrorMessage string    `json:"lastErrorMessage,omitempty"`
-	Source           string    `json:"source,omitempty"`
-	CheckedAt        time.Time `json:"checkedAt"`
+	Symbol               string    `json:"symbol"`
+	Adjusted             string    `json:"adjusted"`
+	HasData              bool      `json:"hasData"`
+	RowCount             int       `json:"rowCount"`
+	IncompleteCount      int       `json:"incompleteCount"`
+	FacetsComplete       bool      `json:"facetsComplete"`
+	CoverageKnown        bool      `json:"coverageKnown"`
+	ExpectedDateCount    int       `json:"expectedDateCount"`
+	CoveredDateCount     int       `json:"coveredDateCount"`
+	DateGapCount         int       `json:"dateGapCount"`
+	CoreGapCount         int       `json:"coreGapCount"`
+	FlowGapCount         int       `json:"flowGapCount"`
+	VerifiedNoTradeCount int       `json:"verifiedNoTradeCount"`
+	ExpectedLatestDate   string    `json:"expectedLatestDate,omitempty"`
+	CoverageCheckedAt    time.Time `json:"coverageCheckedAt,omitempty"`
+	EarliestDate         string    `json:"earliestDate"` // 本地最早 tradeDate
+	LatestDate           string    `json:"latestDate"`   // 本地最近 tradeDate
+	Stale                bool      `json:"stale"`        // 最近一条距今超出容忍窗口
+	Meets250             bool      `json:"meets250"`     // 行数是否满足最近 ~250 个交易日
+	LastErrorMessage     string    `json:"lastErrorMessage,omitempty"`
+	Source               string    `json:"source,omitempty"`
+	CheckedAt            time.Time `json:"checkedAt"`
 }
 
 // DailyBarsEnsureResult 按需补拉结果

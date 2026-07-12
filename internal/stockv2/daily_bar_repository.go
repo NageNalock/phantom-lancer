@@ -40,18 +40,31 @@ func (s *Store) UpsertObservedTradingDates(ctx context.Context, dates []string, 
 	return s.marketDB.UpsertObservedTradingDates(ctx, dates, observedAt)
 }
 
+func (s *Store) UpsertReferenceTradingDates(ctx context.Context, dates []string, observedAt time.Time) error {
+	return s.marketDB.UpsertReferenceTradingDates(ctx, dates, observedAt)
+}
+
+func (s *Store) TradingCalendarDateAuthoritative(ctx context.Context, tradeDate string) (bool, error) {
+	return s.marketDB.TradingCalendarDateAuthoritative(ctx, tradeDate)
+}
+
+func (s *Store) TradingCalendarDateProvenance(ctx context.Context, tradeDate string) (bool, time.Time, error) {
+	return s.marketDB.TradingCalendarDateProvenance(ctx, tradeDate)
+}
+
 func (s *Store) GetDailyBarSymbolCoverage(ctx context.Context, symbols []string, adjusted, tradeDate string) (map[string]bool, error) {
 	return s.marketDB.GetDailyBarSymbolCoverage(ctx, symbols, adjusted, tradeDate)
 }
 
 func (s *Store) ListDailyBarGapChecks(ctx context.Context, symbol, adjusted, startDate, endDate string) ([]dailyBarMissingRange, error) {
+	now := time.Now()
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT start_date, end_date
 		FROM stockv2_daily_bar_gap_checks
 		WHERE symbol = ? AND adjusted = ? AND end_date >= ? AND start_date <= ?
-		  AND checked_at >= ?
+		  AND status = ? AND expires_at > ?
 		ORDER BY start_date, end_date
-	`, strings.TrimSpace(symbol), strings.TrimSpace(adjusted), startDate, endDate, time.Now().Add(-dailyBarGapCheckTTL))
+	`, strings.TrimSpace(symbol), strings.TrimSpace(adjusted), startDate, endDate, dailyBarNoTradeStatusVerified, now)
 	if err != nil {
 		return nil, wrapError(err, "list daily bar gap checks")
 	}
@@ -67,8 +80,8 @@ func (s *Store) ListDailyBarGapChecks(ctx context.Context, symbol, adjusted, sta
 	return ranges, wrapError(rows.Err(), "iterate daily bar gap checks")
 }
 
-func (s *Store) RecordDailyBarGapChecks(ctx context.Context, symbol, adjusted string, ranges []dailyBarMissingRange) error {
-	if len(ranges) == 0 {
+func (s *Store) RecordVerifiedDailyBarNoTradeCoverage(ctx context.Context, symbol, adjusted string, coverage []dailyBarNoTradeCoverage) error {
+	if len(coverage) == 0 {
 		return nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -76,27 +89,46 @@ func (s *Store) RecordDailyBarGapChecks(ctx context.Context, symbol, adjusted st
 		return wrapError(err, "begin record daily bar gap checks")
 	}
 	defer tx.Rollback()
-	now := time.Now()
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM stockv2_daily_bar_gap_checks
-		WHERE symbol = ? AND adjusted = ? AND checked_at < ?
-	`, strings.TrimSpace(symbol), strings.TrimSpace(adjusted), now.Add(-dailyBarGapCheckTTL)); err != nil {
-		return wrapError(err, "prune expired daily bar gap checks")
-	}
-	for _, item := range ranges {
-		if item.Start == "" || item.End == "" || item.Start > item.End {
+	for _, item := range coverage {
+		if item.Range.Start == "" || item.Range.End == "" || item.Range.Start > item.Range.End || len(item.Sources) < 2 {
 			continue
 		}
+		sources := normalizeDailyBarEvidenceSources(item.Sources)
+		if len(sources) < 2 || sources[0] == sources[1] {
+			continue
+		}
+		checkedAt := item.CheckedAt
+		if checkedAt.IsZero() {
+			checkedAt = time.Now()
+		}
+		expiresAt := checkedAt.Add(dailyBarGapCheckTTL)
+		evidenceJSON, err := json.Marshal(sources)
+		if err != nil {
+			return wrapError(err, "encode daily bar no-trade evidence")
+		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO stockv2_daily_bar_gap_checks (symbol, adjusted, start_date, end_date, checked_at)
-			VALUES (?, ?, ?, ?, ?)
+			INSERT INTO stockv2_daily_bar_gap_checks (
+				symbol, adjusted, start_date, end_date, checked_at,
+				source_a, source_b, evidence_json, status, expires_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(symbol, adjusted, start_date, end_date)
-			DO UPDATE SET checked_at = excluded.checked_at
-		`, strings.TrimSpace(symbol), strings.TrimSpace(adjusted), item.Start, item.End, now); err != nil {
-			return wrapError(err, "record daily bar gap check")
+			DO UPDATE SET
+				checked_at = excluded.checked_at,
+				source_a = excluded.source_a,
+				source_b = excluded.source_b,
+				evidence_json = excluded.evidence_json,
+				status = excluded.status,
+				expires_at = excluded.expires_at
+		`,
+			strings.TrimSpace(symbol), strings.TrimSpace(adjusted),
+			item.Range.Start, item.Range.End, checkedAt,
+			sources[0], sources[1], string(evidenceJSON), dailyBarNoTradeStatusVerified,
+			expiresAt,
+		); err != nil {
+			return wrapError(err, "record verified daily bar no-trade coverage")
 		}
 	}
-	return wrapError(tx.Commit(), "commit daily bar gap checks")
+	return wrapError(tx.Commit(), "commit daily bar no-trade coverage")
 }
 
 // GetDailyBarsStats 返回本地日 K 统计，供质量评估使用。

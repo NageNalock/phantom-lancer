@@ -8,14 +8,61 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"phantom-lancer/internal/safelog"
 )
 
 const (
-	dailyBarSourceEastmoneyClosingQuote = "eastmoney_closing_quote"
-	dailyBarSourceTencentClosingQuote   = "tencent_closing_quote"
-	dailyBarCalendarAnchorSymbol        = "000001"
-	dailyBarCalendarAnchorCount         = 500
+	dailyBarSourceEastmoneyClosingQuote      = "eastmoney_closing_quote"
+	dailyBarSourceTencentClosingQuote        = "tencent_closing_quote"
+	dailyBarCalendarAnchorSymbol             = "000001"
+	dailyBarCalendarAnchorCount              = 500
+	dailyBarReferenceCalendarRefreshInterval = 10 * time.Minute
+	dailyBarReferenceCalendarProviderBackoff = 15 * time.Minute
+	dailyBarReferenceCalendarRetryInterval   = 15 * time.Minute
+	dailyBarReferenceCalendarRetryCursor     = "reference_trading_calendar_retry"
 )
+
+func (s *Service) runReferenceTradingCalendarScheduler(ctx context.Context) {
+	ticker := time.NewTicker(dailyBarReferenceCalendarRetryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if s.currentResourceGate().State == ResourceGatePaused {
+				continue
+			}
+			if err := s.retryReferenceTradingCalendar(ctx); err != nil && s.log != nil {
+				s.log.Warn("refresh reference trading calendar failed", "error", safelog.Error(err, 240))
+			}
+		}
+	}
+}
+
+func (s *Service) retryReferenceTradingCalendar(ctx context.Context) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	endDate, err := s.store.GetAssetMaintenanceCursor(ctx, dailyBarReferenceCalendarRetryCursor)
+	if err != nil || strings.TrimSpace(endDate) == "" {
+		return err
+	}
+	backoffActive, err := s.referenceTradingCalendarRetryCursorBackoffActive(ctx, time.Now())
+	if err != nil || backoffActive {
+		return err
+	}
+	// Persist the attempt before network I/O so a failed call or process crash
+	// starts one shared cooldown for the scheduler and foreground maintenance.
+	if err := s.store.SetAssetMaintenanceCursor(ctx, dailyBarReferenceCalendarRetryCursor, endDate); err != nil {
+		return err
+	}
+	if err := s.refreshReferenceTradingCalendar(ctx, endDate); err != nil {
+		return err
+	}
+	return s.store.SetAssetMaintenanceCursor(ctx, dailyBarReferenceCalendarRetryCursor, "")
+}
 
 type dailyBarQuoteBatchResult struct {
 	Attempted int
@@ -32,6 +79,7 @@ type dailyBarQuoteBatchState struct {
 	probeFailed  bool
 	attempted    map[string]struct{}
 	bars         map[string]StockV2DailyBar
+	failures     map[string]string
 }
 
 type dailyBarQuoteBatchContextKey struct{}
@@ -44,6 +92,7 @@ func (s *Service) prefillClosingDailyBarsBatch(ctx context.Context, instruments 
 		tradeDate: strings.TrimSpace(tradeDate),
 		attempted: make(map[string]struct{}, len(instruments)),
 		bars:      make(map[string]StockV2DailyBar, len(instruments)),
+		failures:  make(map[string]string),
 	}
 	if state.tradeDate == "" || s == nil || s.store == nil {
 		return ctx, dailyBarQuoteBatchResult{}, nil
@@ -58,6 +107,9 @@ func (s *Service) prefillClosingDailyBarsBatch(ctx context.Context, instruments 
 		state.calendarFrom = previousState.calendarFrom
 		state.tradingDates = append([]string(nil), previousState.tradingDates...)
 		state.probeFailed = previousState.probeFailed
+		for symbol, message := range previousState.failures {
+			state.failures[symbol] = message
+		}
 	}
 
 	specs := make([]quoteSymbol, 0, len(instruments))
@@ -105,6 +157,9 @@ func (s *Service) prefillClosingDailyBarsBatch(ctx context.Context, instruments 
 		probeEnd = min(len(specs), 80)
 		var probeFailures []UpdateFailure
 		probeQuotes, probeFailures = s.fetchLatestQuotesForSpecsWithFailures(ctx, specs[:probeEnd])
+		for _, failure := range probeFailures {
+			state.failures[failure.Symbol] = failure.Reason
+		}
 		result.Fetched = len(probeQuotes)
 		result.Failed = len(probeFailures)
 		actualTradeDate := closingQuoteDateMode(probeQuotes, state.tradeDate)
@@ -116,7 +171,15 @@ func (s *Service) prefillClosingDailyBarsBatch(ctx context.Context, instruments 
 		// One independent index K-line request per batch prevents a market-wide
 		// stock-source outage from erasing that trading day from the observed calendar.
 		// Failure is intentionally non-fatal; loadObservedTradingCalendar remains the fallback.
-		_ = s.refreshReferenceTradingCalendar(ctx, state.tradeDate)
+		// A full-maintenance preflight persists its failed attempt before reaching this
+		// path, so honor that shared cooldown instead of immediately repeating it.
+		calendarBackoff, backoffErr := s.referenceTradingCalendarRetryCursorBackoffActive(ctx, time.Now())
+		if backoffErr != nil {
+			return ctx, result, backoffErr
+		}
+		if !calendarBackoff {
+			_ = s.refreshReferenceTradingCalendar(ctx, state.tradeDate)
+		}
 	}
 	if state.probeFailed {
 		// The two batch providers were already attempted. Preserve the attempted
@@ -163,6 +226,9 @@ func (s *Service) prefillClosingDailyBarsBatch(ctx context.Context, instruments 
 	}
 	if len(remaining) > 0 {
 		quotes, failures := s.fetchLatestQuotesForSpecsWithFailures(ctx, remaining)
+		for _, failure := range failures {
+			state.failures[failure.Symbol] = failure.Reason
+		}
 		result.Fetched += len(quotes)
 		result.Failed += len(failures)
 		addQuotes(quotes)
@@ -224,7 +290,96 @@ func (s *Service) refreshReferenceTradingCalendar(ctx context.Context, endDate s
 	if len(dates) == 0 {
 		return errors.New("Tencent index calendar returned no dates")
 	}
-	return s.store.UpsertObservedTradingDates(ctx, dates, time.Now())
+	return s.store.UpsertReferenceTradingDates(ctx, dates, time.Now())
+}
+
+// prepareReferenceTradingCalendar establishes the authoritative cutoff before a
+// full maintenance job freezes its target set. The persisted observation time is
+// also the cross-process cooldown, so the first quote batch can reuse this state
+// without issuing a second index request.
+func (s *Service) prepareReferenceTradingCalendar(
+	ctx context.Context,
+	endDate string,
+	now time.Time,
+) (context.Context, string, error) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	state, authoritative, observedAt, err := s.referenceTradingCalendarState(ctx, endDate)
+	if err != nil {
+		return ctx, "", err
+	}
+	fresh := authoritative && !observedAt.IsZero() &&
+		!observedAt.After(now.Add(assetReadinessCalendarClockSkew)) &&
+		now.Sub(observedAt) <= dailyBarReferenceCalendarRefreshInterval
+	if !fresh {
+		if err := s.refreshReferenceTradingCalendar(ctx, endDate); err != nil {
+			return ctx, "", err
+		}
+		state, authoritative, observedAt, err = s.referenceTradingCalendarState(ctx, endDate)
+		if err != nil {
+			return ctx, "", err
+		}
+	}
+	if state.tradeDate == "" || !authoritative || observedAt.IsZero() ||
+		observedAt.After(now.Add(assetReadinessCalendarClockSkew)) ||
+		now.Sub(observedAt) > dailyBarReferenceCalendarRefreshInterval {
+		return ctx, "", errors.New("authoritative trading calendar is unavailable or stale")
+	}
+	return context.WithValue(ctx, dailyBarQuoteBatchContextKey{}, state), state.tradeDate, nil
+}
+
+func (s *Service) referenceTradingCalendarRetryCursorBackoffActive(ctx context.Context, now time.Time) (bool, error) {
+	if s == nil || s.store == nil {
+		return false, nil
+	}
+	retryDate, err := s.store.GetAssetMaintenanceCursor(ctx, dailyBarReferenceCalendarRetryCursor)
+	if err != nil || strings.TrimSpace(retryDate) == "" {
+		return false, err
+	}
+	updatedAt, err := s.store.GetAssetMaintenanceCursorUpdatedAt(ctx, dailyBarReferenceCalendarRetryCursor)
+	if err != nil || updatedAt.IsZero() {
+		return false, err
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return now.Before(updatedAt.Add(dailyBarReferenceCalendarProviderBackoff)), nil
+}
+
+func referenceTradingCalendarProviderBackoffActive(
+	job StockV2UpdateJob,
+	slotStart time.Time,
+	now time.Time,
+) bool {
+	return job.Status == "failed" && job.Scope == AssetMaintenanceScopeFullUniverse &&
+		job.SlotStart.Equal(slotStart) &&
+		strings.HasPrefix(strings.TrimSpace(job.ErrorMessage), "trading_calendar_unavailable:") &&
+		!job.EndAt.IsZero() && now.Before(job.EndAt.Add(dailyBarReferenceCalendarProviderBackoff))
+}
+
+func (s *Service) referenceTradingCalendarState(
+	ctx context.Context,
+	endDate string,
+) (dailyBarQuoteBatchState, bool, time.Time, error) {
+	end, err := time.Parse("2006-01-02", strings.TrimSpace(endDate))
+	if err != nil {
+		return dailyBarQuoteBatchState{}, false, time.Time{}, err
+	}
+	state := dailyBarQuoteBatchState{
+		tradeDate:    strings.TrimSpace(endDate),
+		calendarFrom: end.AddDate(-1, 0, -7).Format("2006-01-02"),
+		attempted:    map[string]struct{}{},
+		bars:         map[string]StockV2DailyBar{},
+		failures:     map[string]string{},
+	}
+	state.tradingDates, err = s.store.GetObservedTradingDates(ctx, state.calendarFrom, state.tradeDate)
+	if err != nil || len(state.tradingDates) == 0 {
+		return state, false, time.Time{}, err
+	}
+	state.tradeDate = state.tradingDates[len(state.tradingDates)-1]
+	authoritative, observedAt, err := s.store.TradingCalendarDateProvenance(ctx, state.tradeDate)
+	return state, authoritative, observedAt, err
 }
 
 func closingQuoteDateMode(quotes []StockV2QuoteLatest, maxDate string) string {
@@ -342,6 +497,14 @@ func dailyBarQuoteBatchStatus(ctx context.Context, symbol, tradeDate string) (St
 	_, attempted := state.attempted[symbol]
 	bar, hasBar := state.bars[symbol]
 	return bar, hasBar, attempted
+}
+
+func dailyBarQuoteBatchFailure(ctx context.Context, symbol string) string {
+	state, ok := ctx.Value(dailyBarQuoteBatchContextKey{}).(dailyBarQuoteBatchState)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(state.failures[symbol])
 }
 
 func dailyBarBatchTargetDate(ctx context.Context, fallback string) string {

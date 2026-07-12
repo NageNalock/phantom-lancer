@@ -329,6 +329,19 @@ func (s *Server) handleStockV2RunStrategyGeneration(w http.ResponseWriter, r *ht
 	}
 	result, err := s.stockV2.RunStrategyGeneration(r.Context(), req)
 	if err != nil {
+		var readinessErr *stockv2.StrategyGenerationReadinessError
+		if errors.As(err, &readinessErr) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]string{
+					"code":    "stockv2_assets_not_ready",
+					"message": stockv2.ErrStrategyGenerationAssetsNotReady.Error(),
+				},
+				"decision": readinessErr.Decision,
+			})
+			return
+		}
 		http.Error(w, err.Error(), stockV2AgentHTTPStatus(err))
 		return
 	}
@@ -484,7 +497,8 @@ func stockV2AgentHTTPStatus(err error) int {
 		errors.Is(err, stockv2.ErrAgentProviderProtected),
 		errors.Is(err, stockv2.ErrEmbeddingModelNotConfigured),
 		errors.Is(err, stockv2.ErrEmbeddingModelUnavailable),
-		errors.Is(err, stockv2.ErrEmbeddingAssetNotReady):
+		errors.Is(err, stockv2.ErrEmbeddingAssetNotReady),
+		errors.Is(err, stockv2.ErrStrategyGenerationAssetsNotReady):
 		return http.StatusConflict
 	case errors.Is(err, stockv2.ErrInvalidAgentProviderType),
 		errors.Is(err, stockv2.ErrInvalidAgentProviderConfigState),

@@ -170,12 +170,60 @@ func TestBatchQuoteFailureDoesNotRetryCurrentDayPerSymbol(t *testing.T) {
 	if result.Failed != 1 || requests != 3 {
 		t.Fatalf("batch result=%+v requests=%d", result, requests)
 	}
+	if message := dailyBarQuoteBatchFailure(batchCtx, inst.Symbol); message == "" {
+		t.Fatal("batch provider failure was not attached to the affected symbol")
+	}
 	fetched, err := svc.ensureOneSymbol(batchCtx, inst, "2026-07-10", "2026-07-10", DailyBarAdjustedNone)
 	if err != nil || fetched != 0 {
 		t.Fatalf("ensure after batch failure = fetched:%d err:%v", fetched, err)
 	}
 	if requests != 3 {
 		t.Fatalf("current-day miss triggered %d requests, want two batch attempts plus one calendar anchor", requests)
+	}
+}
+
+func TestPrefillClosingDailyBarsBatchHonorsPersistedCalendarRetryBackoff(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.SetAssetMaintenanceCursor(ctx, dailyBarReferenceCalendarRetryCursor, "2026-07-10"); err != nil {
+		t.Fatalf("set calendar retry cursor: %v", err)
+	}
+
+	fields := make([]string, 39)
+	fields[1] = "浦发银行"
+	fields[2] = "600000"
+	fields[3], fields[4], fields[5] = "10", "10", "10"
+	fields[30] = "20260710170000"
+	fields[33], fields[34], fields[36], fields[37], fields[38] = "10", "10", "100", "1", "0"
+	tencentBody := `v_sh600000="` + strings.Join(fields, "~") + `";`
+	calendarRequests := 0
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Host {
+		case "push2his.eastmoney.com":
+			return stringResponse(http.StatusBadGateway, "unavailable"), nil
+		case "qt.gtimg.cn":
+			return stringResponse(http.StatusOK, tencentBody), nil
+		case "web.ifzq.gtimg.cn":
+			calendarRequests++
+			return stringResponse(http.StatusOK, tencentIndexCalendarBody("2026-07-10")), nil
+		default:
+			t.Fatalf("unexpected endpoint %q", req.URL.Host)
+			return nil, nil
+		}
+	})}
+	svc := NewService(store, nil, client)
+	_, result, err := svc.prefillClosingDailyBarsBatch(ctx, []StockV2Instrument{{
+		Symbol: "600000", Market: "SH", InstrumentType: InstrumentTypeStock,
+	}}, "2026-07-10")
+	if err != nil {
+		t.Fatalf("prefill during calendar backoff: %v", err)
+	}
+	if result.Upserted != 1 || calendarRequests != 0 {
+		t.Fatalf("result=%+v calendar requests=%d, want quote upsert without duplicate index request", result, calendarRequests)
 	}
 }
 
@@ -290,6 +338,88 @@ func TestReferenceIndexCalendarPersistsWithoutStockBars(t *testing.T) {
 	dates, err := store.GetObservedTradingDates(ctx, "2026-07-01", "2026-07-10")
 	if err != nil || strings.Join(dates, ",") != "2026-07-08,2026-07-09,2026-07-10" || requests != 1 {
 		t.Fatalf("calendar=%v requests=%d err=%v", dates, requests, err)
+	}
+}
+
+func TestPrepareReferenceTradingCalendarUsesPersistentCooldown(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	requests := 0
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		return stringResponse(http.StatusOK, tencentIndexCalendarBody("2026-07-08", "2026-07-09", "2026-07-10")), nil
+	})}
+	svc := NewService(store, nil, client)
+	now := time.Now()
+	prepared, latest, err := svc.prepareReferenceTradingCalendar(ctx, "2026-07-10", now)
+	if err != nil || latest != "2026-07-10" || requests != 1 {
+		t.Fatalf("first calendar prepare latest=%q requests=%d err=%v", latest, requests, err)
+	}
+	if got := dailyBarBatchTargetDate(prepared, "2026-07-10"); got != latest {
+		t.Fatalf("prepared context target = %q, want %q", got, latest)
+	}
+	_, latest, err = svc.prepareReferenceTradingCalendar(ctx, "2026-07-10", now.Add(time.Minute))
+	if err != nil || latest != "2026-07-10" || requests != 1 {
+		t.Fatalf("cached calendar prepare latest=%q requests=%d err=%v", latest, requests, err)
+	}
+}
+
+func TestPrepareReferenceTradingCalendarRejectsFailedRefresh(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.UpsertObservedTradingDates(ctx, []string{"2026-07-10"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return stringResponse(http.StatusServiceUnavailable, "unavailable"), nil
+	})}
+	if _, _, err := NewService(store, nil, client).prepareReferenceTradingCalendar(
+		ctx, "2026-07-10", time.Now(),
+	); err == nil {
+		t.Fatal("observed-only calendar survived a failed authoritative refresh")
+	}
+}
+
+func TestRetryReferenceTradingCalendarOnlyRunsForPersistedFailure(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	requests := 0
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		return stringResponse(http.StatusOK, tencentIndexCalendarBody("2026-07-10")), nil
+	})}
+	svc := NewService(store, nil, client)
+	if err := svc.retryReferenceTradingCalendar(ctx); err != nil || requests != 0 {
+		t.Fatalf("idle retry requests=%d err=%v", requests, err)
+	}
+	if err := store.SetAssetMaintenanceCursor(ctx, dailyBarReferenceCalendarRetryCursor, "2026-07-10"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.retryReferenceTradingCalendar(ctx); err != nil || requests != 0 {
+		t.Fatalf("fresh retry cursor requests=%d err=%v, want cooldown", requests, err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE stockv2_asset_maintenance_cursors SET updated_at = ? WHERE scope = ?
+	`, time.Now().Add(-dailyBarReferenceCalendarProviderBackoff), dailyBarReferenceCalendarRetryCursor); err != nil {
+		t.Fatalf("expire calendar retry cursor: %v", err)
+	}
+	if err := svc.retryReferenceTradingCalendar(ctx); err != nil || requests != 1 {
+		t.Fatalf("expired retry requests=%d err=%v", requests, err)
+	}
+	if cursor, err := store.GetAssetMaintenanceCursor(ctx, dailyBarReferenceCalendarRetryCursor); err != nil || cursor != "" {
+		t.Fatalf("retry cursor=%q err=%v", cursor, err)
 	}
 }
 

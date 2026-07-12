@@ -2,11 +2,28 @@ package stockv2
 
 import (
 	"context"
+	"io"
+	"log/slog"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestSinaUniverseShortPageRequiresExplicitEmptyCompletion(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Query().Get("page") == "1" {
+			return stringResponse(http.StatusOK, `[{"code":"600000"}]`), nil
+		}
+		return stringResponse(http.StatusServiceUnavailable, "temporary truncation"), nil
+	})}
+	svc := &Service{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	source := NewUniverseDataSource(svc, client)
+	if symbols, err := source.fetchSinaUniverseSymbols(context.Background()); err == nil {
+		t.Fatalf("partial universe was accepted as complete: %v", symbols)
+	}
+}
 
 func TestNewServiceMarksInterruptedUniverseUpdateJobFailed(t *testing.T) {
 	ctx := context.Background()
@@ -138,7 +155,7 @@ func TestNewServiceMarksInterruptedScheduledTasksFailed(t *testing.T) {
 	}
 }
 
-func TestScheduledUniverseUpdateSkipsWhenRecentJobCompleted(t *testing.T) {
+func TestScheduledUniverseUpdateDoesNotTreatGenericCompletedJobAsDailyCoverage(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -170,22 +187,30 @@ func TestScheduledUniverseUpdateSkipsWhenRecentJobCompleted(t *testing.T) {
 		t.Fatalf("create completed job: %v", err)
 	}
 
-	before := now.Add(-time.Second)
 	svc.checkAndExecuteScheduledUpdateAt(ctx, now)
 
 	jobs, err := svc.store.ListUpdateJobs(ctx, 10)
 	if err != nil {
 		t.Fatalf("list jobs: %v", err)
 	}
-	if len(jobs) != 1 {
-		t.Fatalf("job count = %d, want 1", len(jobs))
+	if len(jobs) != 2 {
+		t.Fatalf("job count = %d, want the generic job plus a full-universe slot job", len(jobs))
+	}
+	foundDailySlot := false
+	for _, job := range jobs {
+		if job.Scope == AssetMaintenanceScopeFullUniverse && job.SlotStart.Equal(time.Date(2026, 6, 30, 23, 0, 0, 0, loc)) {
+			foundDailySlot = true
+		}
+	}
+	if !foundDailySlot {
+		t.Fatalf("jobs = %+v, want a full-universe job bound to the current daily slot", jobs)
 	}
 	gotSettings, err := svc.GetSettings(ctx)
 	if err != nil {
 		t.Fatalf("get settings: %v", err)
 	}
-	if gotSettings.LastScheduledUpdate.Before(before.Add(-time.Second)) {
-		t.Fatalf("last scheduled update = %v, want refreshed after %v", gotSettings.LastScheduledUpdate, before)
+	if !gotSettings.LastScheduledUpdate.Equal(settings.LastScheduledUpdate) {
+		t.Fatalf("last scheduled update = %v, want unchanged until the slot is covered", gotSettings.LastScheduledUpdate)
 	}
 }
 
@@ -215,14 +240,99 @@ func TestScheduledUniverseUpdateDecisionRetriesFailedCurrentSlot(t *testing.T) {
 	slotStart := time.Date(2026, 6, 30, 23, 0, 0, 0, loc)
 	now := slotStart.Add(48 * time.Minute)
 	latest := StockV2UpdateJob{
-		Status:    "failed",
-		CreatedAt: slotStart.Add(30 * time.Second),
-		EndAt:     now.Add(-time.Minute),
+		Status:           "failed",
+		Scope:            AssetMaintenanceScopeFullUniverse,
+		UniverseVerified: true,
+		CoverageStatus:   AssetMaintenanceCoverageIncomplete,
+		SlotStart:        slotStart,
+		CreatedAt:        slotStart.Add(30 * time.Second),
+		EndAt:            now.Add(-time.Minute),
 	}
 
 	decision, _ := decideScheduledUniverseUpdate(slotStart.Add(30*time.Second), latest, true, now)
 	if decision != scheduledUniverseUpdateStart {
 		t.Fatalf("decision = %s, want start", decision)
+	}
+}
+
+func TestUnverifiedUniverseWaitsForPersistedDiscoveryRetryWindow(t *testing.T) {
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+	slotStart := time.Date(2026, 7, 12, 23, 0, 0, 0, loc)
+	lastAttempt := slotStart.Add(10 * time.Minute)
+	job := StockV2UpdateJob{
+		Scope: AssetMaintenanceScopeFullUniverse, SlotStart: slotStart,
+		UniverseVerified: false, Status: "failed", CoverageStatus: AssetMaintenanceCoverageIncomplete,
+	}
+	if !shouldWaitForUniverseDiscoveryRetry(job, slotStart, lastAttempt, lastAttempt.Add(5*time.Hour)) {
+		t.Fatal("unverified cached generation did not wait for its persisted retry window")
+	}
+	if shouldWaitForUniverseDiscoveryRetry(job, slotStart, lastAttempt, lastAttempt.Add(6*time.Hour)) {
+		t.Fatal("universe discovery remained blocked after the retry window")
+	}
+}
+
+func TestScheduledUniverseUpdateDecisionBacksOffReferenceCalendarFailure(t *testing.T) {
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+	slotStart := time.Date(2026, 6, 30, 23, 0, 0, 0, loc)
+	failedAt := slotStart.Add(5 * time.Minute)
+	latest := StockV2UpdateJob{
+		Status:           "failed",
+		Scope:            AssetMaintenanceScopeFullUniverse,
+		UniverseVerified: true,
+		CoverageStatus:   AssetMaintenanceCoverageIncomplete,
+		SlotStart:        slotStart,
+		EndAt:            failedAt,
+		ErrorMessage:     "trading_calendar_unavailable: provider timeout",
+	}
+	decision, _ := decideScheduledUniverseUpdate(
+		slotStart.Add(-24*time.Hour), latest, true, failedAt.Add(dailyBarReferenceCalendarProviderBackoff-time.Second),
+	)
+	if decision != scheduledUniverseUpdateWait {
+		t.Fatalf("decision before calendar backoff expiry = %s, want wait", decision)
+	}
+	decision, _ = decideScheduledUniverseUpdate(
+		slotStart.Add(-24*time.Hour), latest, true, failedAt.Add(dailyBarReferenceCalendarProviderBackoff),
+	)
+	if decision != scheduledUniverseUpdateStart {
+		t.Fatalf("decision at calendar backoff expiry = %s, want start", decision)
+	}
+}
+
+func TestScheduledUniverseUpdateDoesNotDuplicateCalendarFailureDuringBackoff(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+	slotStart := time.Date(2026, 6, 30, 23, 0, 0, 0, loc)
+	failedAt := slotStart.Add(3 * time.Minute)
+	job := testAssetMaintenanceJob("job-calendar-backoff", AssetMaintenanceScopeFullUniverse, slotStart)
+	job.Status = "failed"
+	job.CoverageStatus = AssetMaintenanceCoverageIncomplete
+	job.FreshnessStatus = AssetMaintenanceFreshnessRetrying
+	job.EndAt = failedAt
+	job.ErrorMessage = "trading_calendar_unavailable: provider timeout"
+	if err := store.CreateUpdateJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	newerUnrelated := testAssetMaintenanceJob("job-newer-explicit", AssetMaintenanceScopeExplicit, time.Time{})
+	newerUnrelated.Status = "completed"
+	if err := store.CreateUpdateJob(ctx, newerUnrelated); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, nil, nil)
+	svc.resourceGateReader = func() ResourceGateStatus {
+		return ResourceGateStatus{State: ResourceGateNormal}
+	}
+	svc.checkAndExecuteScheduledUpdateAt(ctx, failedAt.Add(time.Minute))
+	jobs, err := store.ListUpdateJobs(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("calendar backoff created duplicate jobs: %+v", jobs)
 	}
 }
 

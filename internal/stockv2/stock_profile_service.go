@@ -144,8 +144,32 @@ func (s *Service) applyStockProfileEnhancementResultForRun(ctx context.Context, 
 	if err != nil {
 		return StockProfile{}, err
 	}
+	profile, err = s.stockProfileWithoutAppliedAI(ctx, profile)
+	if err != nil {
+		return StockProfile{}, err
+	}
+	enhanced, err := stockProfileWithEnhancement(profile, result, modelName, confidence, time.Now())
+	if err != nil {
+		_ = s.store.UpdateStockProfileAIState(ctx, profile.Symbol, StockProfileAIStatusFailed, err.Error(), true)
+		return StockProfile{}, err
+	}
+	profile = enhanced
+	updated, err := s.store.UpsertStockProfile(ctx, profile)
+	if err != nil {
+		return StockProfile{}, err
+	}
+	s.markStockProfileEmbeddingStale(ctx, updated.Symbol)
+	return updated, nil
+}
+
+func stockProfileWithEnhancement(
+	profile StockProfile,
+	result map[string]any,
+	modelName string,
+	confidence float64,
+	appliedAt time.Time,
+) (StockProfile, error) {
 	if len(result) == 0 {
-		_ = s.store.UpdateStockProfileAIState(ctx, profile.Symbol, StockProfileAIStatusFailed, ErrInvalidStockProfileEnhancement.Error(), true)
 		return StockProfile{}, ErrInvalidStockProfileEnhancement
 	}
 	profile.BusinessSummaryZh = firstProfileResultString(result, "summaryZh", "businessSummaryZh")
@@ -170,14 +194,149 @@ func (s *Service) applyStockProfileEnhancementResultForRun(ctx context.Context, 
 	profile.AIProfileModel = modelName
 	profile.AIProfileConfidence = confidence
 	profile.AIProfileError = ""
-	profile.AIProfileUpdatedAt = time.Now()
+	if appliedAt.IsZero() {
+		appliedAt = time.Now()
+	}
+	profile.AIProfileUpdatedAt = appliedAt
 	profile.AIProfileAttemptedAt = profile.AIProfileUpdatedAt
-	updated, err := s.store.UpsertStockProfile(ctx, profile)
+	profile.UpdatedAt = appliedAt
+	return profile, nil
+}
+
+type stockProfileAIBaseTerms struct {
+	AliasesZh       []string `json:"aliasesZh,omitempty"`
+	AliasesEn       []string `json:"aliasesEn,omitempty"`
+	KeywordsZh      []string `json:"keywordsZh,omitempty"`
+	KeywordsEn      []string `json:"keywordsEn,omitempty"`
+	BusinessLinesZh []string `json:"businessLinesZh,omitempty"`
+	BusinessLinesEn []string `json:"businessLinesEn,omitempty"`
+	RiskTagsZh      []string `json:"riskTagsZh,omitempty"`
+	RiskTagsEn      []string `json:"riskTagsEn,omitempty"`
+}
+
+func stockProfileAIBaseTermsFromProfile(profile StockProfile) stockProfileAIBaseTerms {
+	return stockProfileAIBaseTerms{
+		AliasesZh:       cleanProfileTerms(profile.AliasesZh),
+		AliasesEn:       cleanProfileTerms(profile.AliasesEn),
+		KeywordsZh:      cleanProfileTerms(profile.KeywordsZh),
+		KeywordsEn:      cleanProfileTerms(profile.KeywordsEn),
+		BusinessLinesZh: cleanProfileTerms(profile.BusinessLinesZh),
+		BusinessLinesEn: cleanProfileTerms(profile.BusinessLinesEn),
+		RiskTagsZh:      cleanProfileTerms(profile.RiskTagsZh),
+		RiskTagsEn:      cleanProfileTerms(profile.RiskTagsEn),
+	}
+}
+
+func (s *Service) stockProfileWithoutAppliedAI(ctx context.Context, profile StockProfile) (StockProfile, error) {
+	state, exists, err := s.store.GetStockProfileAIState(ctx, profile.Symbol)
+	if err != nil || !exists || strings.TrimSpace(state.AppliedInputVersion) == "" {
+		return profile, err
+	}
+	version, found, err := s.store.GetStockProfileAIVersion(ctx, profile.Symbol, state.AppliedInputVersion)
 	if err != nil {
 		return StockProfile{}, err
 	}
-	s.markStockProfileEmbeddingStale(ctx, updated.Symbol)
-	return updated, nil
+	if !found {
+		return StockProfile{}, fmt.Errorf("applied stock profile AI version %s is missing", state.AppliedInputVersion)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(version.ResultJSON), &result); err != nil {
+		return StockProfile{}, wrapError(err, "decode applied stock profile AI result for replacement")
+	}
+	profile = removeStockProfileAIResult(profile, result)
+	if version.BaseProfileHash == profile.BaseProfileHash {
+		var manifest struct {
+			BaseTerms stockProfileAIBaseTerms `json:"baseTerms"`
+		}
+		if json.Unmarshal([]byte(version.InputManifestJSON), &manifest) == nil {
+			profile = restoreStockProfileAIBaseTerms(profile, manifest.BaseTerms)
+		}
+	}
+	return restoreStockProfileStableBaseTerms(profile), nil
+}
+
+func removeStockProfileAIResult(profile StockProfile, result map[string]any) StockProfile {
+	aliasesZh := profileResultStrings(result, "aliasesZh", "aliasZh")
+	aliasesEn := profileResultStrings(result, "aliasesEn", "aliasEn")
+	profile.AliasesZh = removeProfileTerms(profile.AliasesZh, aliasesZh)
+	profile.AliasesEn = removeProfileTerms(profile.AliasesEn, aliasesEn)
+	profile.KeywordsZh = removeProfileTerms(profile.KeywordsZh, profileResultStrings(result, "keywordsZh", "keywordZh"))
+	profile.KeywordsEn = removeProfileTerms(profile.KeywordsEn, profileResultStrings(result, "keywordsEn", "keywordEn"))
+	profile.BusinessLinesZh = removeProfileTerms(profile.BusinessLinesZh, profileResultStrings(result, "businessLinesZh", "businessLineZh"))
+	profile.BusinessLinesEn = removeProfileTerms(profile.BusinessLinesEn, profileResultStrings(result, "businessLinesEn", "businessLineEn"))
+	profile.RiskTagsZh = removeProfileTerms(profile.RiskTagsZh, profileResultStrings(result, "riskTagsZh", "riskTagZh"))
+	profile.RiskTagsEn = removeProfileTerms(profile.RiskTagsEn, profileResultStrings(result, "riskTagsEn", "riskTagEn"))
+	profile.Aliases = removeProfileTerms(profile.Aliases, append(aliasesZh, aliasesEn...))
+	profile.Aliases = appendProfileTerms(profile.Aliases,
+		profile.Symbol, profile.Market+profile.Symbol, profile.Symbol+"."+profile.Market, profile.Name,
+	)
+	profile.Aliases = appendProfileTerms(profile.Aliases, profile.AliasesZh...)
+	profile.Aliases = appendProfileTerms(profile.Aliases, profile.AliasesEn...)
+	profile.BusinessSummaryZh = profile.BusinessSummary
+	profile.BusinessSummaryEn = ""
+	profile.ProfileTextZh = buildProfileTextZh(profile)
+	profile.ProfileTextEn = buildProfileTextEn(profile)
+	profile.ProfileText = buildProfileText(profile)
+	return profile
+}
+
+func restoreStockProfileAIBaseTerms(profile StockProfile, base stockProfileAIBaseTerms) StockProfile {
+	profile.AliasesZh = appendProfileTerms(profile.AliasesZh, base.AliasesZh...)
+	profile.AliasesEn = appendProfileTerms(profile.AliasesEn, base.AliasesEn...)
+	profile.KeywordsZh = appendProfileTerms(profile.KeywordsZh, base.KeywordsZh...)
+	profile.KeywordsEn = appendProfileTerms(profile.KeywordsEn, base.KeywordsEn...)
+	profile.BusinessLinesZh = appendProfileTerms(profile.BusinessLinesZh, base.BusinessLinesZh...)
+	profile.BusinessLinesEn = appendProfileTerms(profile.BusinessLinesEn, base.BusinessLinesEn...)
+	profile.RiskTagsZh = appendProfileTerms(profile.RiskTagsZh, base.RiskTagsZh...)
+	profile.RiskTagsEn = appendProfileTerms(profile.RiskTagsEn, base.RiskTagsEn...)
+	return rebuildStockProfileSearchText(profile)
+}
+
+func restoreStockProfileStableBaseTerms(profile StockProfile) StockProfile {
+	// These fields have independent master-data/F10 provenance, so an AI result
+	// containing the same term must never make their search contribution vanish.
+	keywordsZh := []string{profile.Industry}
+	keywordsZh = append(keywordsZh, profile.Sectors...)
+	keywordsZh = append(keywordsZh, profile.Concepts...)
+	keywordsZh = append(keywordsZh, profile.Tags...)
+	profile.KeywordsZh = appendProfileTerms(
+		profile.KeywordsZh, keywordsZh...,
+	)
+	profile.KeywordsZh = appendProfileTerms(
+		profile.KeywordsZh,
+		profile.FundType, profile.TrackingIndex, profile.Theme, profile.ConstituentHint,
+	)
+	profile.KeywordsEn = appendProfileTerms(
+		profile.KeywordsEn,
+		profile.Symbol, profile.Market, profile.Market+profile.Symbol, profile.Symbol+"."+profile.Market,
+	)
+	return rebuildStockProfileSearchText(profile)
+}
+
+func rebuildStockProfileSearchText(profile StockProfile) StockProfile {
+	profile.Aliases = appendProfileTerms(profile.Aliases, profile.AliasesZh...)
+	profile.Aliases = appendProfileTerms(profile.Aliases, profile.AliasesEn...)
+	profile.ProfileTextZh = buildProfileTextZh(profile)
+	profile.ProfileTextEn = buildProfileTextEn(profile)
+	profile.ProfileText = buildProfileText(profile)
+	return profile
+}
+
+func removeProfileTerms(items, removed []string) []string {
+	if len(items) == 0 || len(removed) == 0 {
+		return cleanProfileTerms(items)
+	}
+	removedSet := make(map[string]struct{}, len(removed))
+	for _, item := range cleanProfileTerms(removed) {
+		removedSet[strings.ToLower(item)] = struct{}{}
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range cleanProfileTerms(items) {
+		if _, remove := removedSet[strings.ToLower(item)]; !remove {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // markStockProfileAIEnhancementFailed returns true when the run no longer owns
@@ -305,8 +464,13 @@ func (s *Service) mergeStockProfileExisting(ctx context.Context, base StockProfi
 	if err != nil {
 		return base
 	}
-	// ponytail: profile_update_tasks 保存基础输入 hash;这里仅合并既有 AI 增强与兼容字段。
-	return mergeStockProfileAIFields(base, existing)
+	merged, err := s.mergeStockProfileWithAppliedAI(ctx, base, existing)
+	if err != nil {
+		// Existing data is safer than silently deleting the last successful AI
+		// fields when an immutable-version read has a transient failure.
+		return mergeStockProfileAIFields(base, existing)
+	}
+	return merged
 }
 
 func buildStockProfileFromInstrument(instrument StockV2Instrument) StockProfile {
@@ -374,12 +538,94 @@ func mergeStockProfileAIFields(base, existing StockProfile) StockProfile {
 	base.AliasesEn = appendProfileTerms(base.AliasesEn, existing.AliasesEn...)
 	base.KeywordsZh = appendProfileTerms(base.KeywordsZh, existing.KeywordsZh...)
 	base.KeywordsEn = appendProfileTerms(base.KeywordsEn, existing.KeywordsEn...)
-	if existing.BusinessSummaryZh != "" && (existing.AIProfileStatus == StockProfileAIStatusReady || stockProfileSummaryLooksBasic(base.BusinessSummaryZh)) {
+	if existing.BusinessSummaryZh != "" && (!existing.AIProfileUpdatedAt.IsZero() ||
+		existing.AIProfileStatus == StockProfileAIStatusReady || stockProfileSummaryLooksBasic(base.BusinessSummaryZh)) {
 		base.BusinessSummaryZh = existing.BusinessSummaryZh
 	}
 	// ponytail: BusinessSummary is the freshly fetched base/F10 text. Keep the
 	// previous AI summary in BusinessSummaryZh so the next run can compare both
 	// inputs without replacing current source data with stale generated text.
+	if base.FundType == "" {
+		base.FundType = existing.FundType
+	}
+	if base.TrackingIndex == "" {
+		base.TrackingIndex = existing.TrackingIndex
+	}
+	if base.Theme == "" {
+		base.Theme = existing.Theme
+	}
+	if base.ConstituentHint == "" {
+		base.ConstituentHint = existing.ConstituentHint
+	}
+	base.Aliases = appendProfileTerms(base.Aliases, base.AliasesZh...)
+	base.Aliases = appendProfileTerms(base.Aliases, base.AliasesEn...)
+	base.ProfileTextZh = buildProfileTextZh(base)
+	base.ProfileTextEn = buildProfileTextEn(base)
+	base.ProfileText = buildProfileText(base)
+	return base
+}
+
+func (s *Service) mergeStockProfileWithAppliedAI(
+	ctx context.Context,
+	base, existing StockProfile,
+) (StockProfile, error) {
+	state, exists, err := s.store.GetStockProfileAIState(ctx, existing.Symbol)
+	if err != nil {
+		return StockProfile{}, err
+	}
+	if !exists || strings.TrimSpace(state.AppliedInputVersion) == "" {
+		return mergeStockProfileAIFields(base, existing), nil
+	}
+	version, found, err := s.store.GetStockProfileAIVersion(ctx, existing.Symbol, state.AppliedInputVersion)
+	if err != nil {
+		return StockProfile{}, err
+	}
+	if !found {
+		return StockProfile{}, fmt.Errorf("applied stock profile AI version %s is missing", state.AppliedInputVersion)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(version.ResultJSON), &result); err != nil {
+		return StockProfile{}, wrapError(err, "decode applied stock profile AI result")
+	}
+	return mergeStockProfileAIFieldsFromVersion(base, existing, version, result), nil
+}
+
+func mergeStockProfileAIFieldsFromVersion(
+	base, existing StockProfile,
+	version StockProfileAIVersion,
+	result map[string]any,
+) StockProfile {
+	base.BaseProfileHash = existing.BaseProfileHash
+	base.BaseProfileUpdatedAt = existing.BaseProfileUpdatedAt
+	base.BaseProfileCheckedAt = existing.BaseProfileCheckedAt
+	base.AIProfileStatus = existing.AIProfileStatus
+	base.AIProfileModel = firstNonEmpty(version.ModelName, existing.AIProfileModel)
+	base.AIProfileConfidence = version.Confidence
+	base.AIProfileError = existing.AIProfileError
+	base.AIProfileUpdatedAt = version.CreatedAt
+	base.AIProfileAttemptedAt = existing.AIProfileAttemptedAt
+	if base.AIProfileAttemptedAt.Before(version.CreatedAt) {
+		base.AIProfileAttemptedAt = version.CreatedAt
+	}
+
+	if summary := firstProfileResultString(result, "summaryZh", "businessSummaryZh"); summary != "" {
+		base.BusinessSummaryZh = summary
+	}
+	if summary := firstProfileResultString(result, "summaryEn", "businessSummaryEn"); summary != "" {
+		base.BusinessSummaryEn = summary
+	}
+	// The immutable result contains only generated terms. Merge that one version
+	// with the freshly rebuilt base so removed source or old-AI terms do not
+	// accumulate across maintenance passes.
+	base.AliasesZh = appendProfileTerms(base.AliasesZh, profileResultStrings(result, "aliasesZh", "aliasZh")...)
+	base.AliasesEn = appendProfileTerms(base.AliasesEn, profileResultStrings(result, "aliasesEn", "aliasEn")...)
+	base.KeywordsZh = appendProfileTerms(base.KeywordsZh, profileResultStrings(result, "keywordsZh", "keywordZh")...)
+	base.KeywordsEn = appendProfileTerms(base.KeywordsEn, profileResultStrings(result, "keywordsEn", "keywordEn")...)
+	base.BusinessLinesZh = appendProfileTerms(base.BusinessLinesZh, profileResultStrings(result, "businessLinesZh", "businessLineZh")...)
+	base.BusinessLinesEn = appendProfileTerms(base.BusinessLinesEn, profileResultStrings(result, "businessLinesEn", "businessLineEn")...)
+	base.RiskTagsZh = appendProfileTerms(base.RiskTagsZh, profileResultStrings(result, "riskTagsZh", "riskTagZh")...)
+	base.RiskTagsEn = appendProfileTerms(base.RiskTagsEn, profileResultStrings(result, "riskTagsEn", "riskTagEn")...)
+
 	if base.FundType == "" {
 		base.FundType = existing.FundType
 	}

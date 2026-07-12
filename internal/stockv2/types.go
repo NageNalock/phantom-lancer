@@ -123,16 +123,32 @@ type StockV2UpdateJob struct {
 	ID                  string                      `json:"id"`
 	TriggerType         string                      `json:"triggerType"`   // manual, scheduled
 	TriggerSource       string                      `json:"triggerSource"` // user, system
-	Status              string                      `json:"status"`        // running, completed, failed, cancelled
+	Status              string                      `json:"status"`        // running, paused, completed, failed, cancelled
+	Scope               string                      `json:"scope"`
+	SlotStart           time.Time                   `json:"slotStart,omitempty"`
+	UniverseSnapshotID  string                      `json:"universeSnapshotId,omitempty"`
+	UniverseHash        string                      `json:"universeHash,omitempty"`
+	UniverseVerified    bool                        `json:"universeVerified"`
+	ExpectedLatestDate  string                      `json:"expectedLatestTradeDate,omitempty"`
+	MessageCutoffAt     time.Time                   `json:"messageCutoffAt,omitempty"`
+	CoverageStatus      string                      `json:"coverageStatus"`
+	FreshnessStatus     string                      `json:"freshnessStatus"`
 	TotalCount          int                         `json:"totalCount"`
+	CheckedCount        int                         `json:"checkedCount"`
 	ProcessedCount      int                         `json:"processedCount"`
 	SuccessCount        int                         `json:"successCount"`
+	FreshCount          int                         `json:"freshCount"`
+	StaleCount          int                         `json:"staleCount"`
+	RetryCount          int                         `json:"retryCount"`
 	FailedCount         int                         `json:"failedCount"`
 	FailedItems         []UpdateFailure             `json:"failedItems,omitempty"` // 失败详情
 	AssetStats          AssetMaintenanceStats       `json:"assetStats,omitempty"`
 	MaintenanceProgress AssetMaintenanceJobProgress `json:"maintenanceProgress"`
 	StartAt             time.Time                   `json:"startAt"`
 	EndAt               time.Time                   `json:"endAt"`
+	WriteBytesStart     uint64                      `json:"writeBytesStart,omitempty"`
+	WriteBytesEnd       uint64                      `json:"writeBytesEnd,omitempty"`
+	PeakRSSBytes        uint64                      `json:"peakRssBytes,omitempty"`
 	ErrorMessage        string                      `json:"errorMessage,omitempty"`
 	CreatedAt           time.Time                   `json:"createdAt"`
 }
@@ -239,11 +255,16 @@ type Snapshot struct {
 
 // UniverseUpdateRequest 标的主数据更新请求
 type UniverseUpdateRequest struct {
-	TriggerType   string   `json:"triggerType"`   // manual, scheduled
-	TriggerSource string   `json:"triggerSource"` // user, system
-	Symbols       []string `json:"symbols"`       // 可选，为空则更新全部
-	MaxSymbols    int      `json:"maxSymbols,omitempty"`
-	ForceAI       bool     `json:"forceAi,omitempty"`
+	TriggerType        string    `json:"triggerType"`   // manual, scheduled
+	TriggerSource      string    `json:"triggerSource"` // user, system
+	Symbols            []string  `json:"symbols"`       // 可选，为空则更新全部
+	MaxSymbols         int       `json:"maxSymbols,omitempty"`
+	ForceAI            bool      `json:"forceAi,omitempty"`
+	ScheduledSlotStart time.Time `json:"-"`
+	priorityCursorNext string
+	universeCursorNext string
+	universeVerified   bool
+	universeError      string
 }
 
 // UniverseUpdateResponse 更新响应

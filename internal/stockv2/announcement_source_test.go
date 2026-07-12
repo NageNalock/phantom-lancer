@@ -20,6 +20,7 @@ func TestParseCninfoOrgID(t *testing.T) {
 
 func TestParseCninfoAnnouncementsClassifiesMajor(t *testing.T) {
 	body := []byte(`{
+		"totalAnnouncement":1,
 		"announcements":[{
 			"announcementId":"121",
 			"announcementTitle":"关于重大资产重组停牌的公告",
@@ -41,6 +42,69 @@ func TestParseCninfoAnnouncementsClassifiesMajor(t *testing.T) {
 	}
 	if got.ContentHash == "" || !strings.HasPrefix(got.PDFURL, "https://static.cninfo.com.cn/") {
 		t.Fatalf("hash=%q pdf=%q", got.ContentHash, got.PDFURL)
+	}
+}
+
+func TestClassifyMajorAnnouncementCoverage(t *testing.T) {
+	tests := []struct {
+		name     string
+		title    string
+		category string
+	}{
+		{name: "winning bid", title: "关于收到项目中标通知书的公告"},
+		{name: "regulatory penalty", title: "关于收到行政处罚决定书的公告"},
+		{name: "external guarantee", title: "关于新增对外担保额度的公告"},
+		{name: "major investment", title: "关于重大投资项目进展的公告"},
+		{name: "exchange inquiry", title: "关于收到上海证券交易所问询函的公告"},
+		{name: "regulatory letter", title: "关于收到监管函的公告"},
+		{name: "inquiry response", title: "关于审核问询函回复的公告"},
+		{name: "regulatory response", title: "关于监管问询事项的回复公告"},
+		{name: "executive change", title: "关于高级管理人员变动的公告"},
+		{name: "manager resignation", title: "关于总经理辞职暨聘任总经理的公告"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			major, reason := classifyMajorAnnouncement(tt.title, tt.category)
+			if !major || reason == "" {
+				t.Fatalf("classifyMajorAnnouncement(%q, %q) = %v, %q", tt.title, tt.category, major, reason)
+			}
+		})
+	}
+}
+
+func TestCninfoAnnouncementUpgradesOfficialPDFURLToHTTPS(t *testing.T) {
+	item, ok := cninfoAnnouncementFromRaw(map[string]any{
+		"secCode":           "000001",
+		"announcementId":    "pdf-1",
+		"announcementTitle": "测试公告",
+		"announcementTime":  "2026-07-12 10:00:00",
+		"adjunctUrl":        "http://static.cninfo.com.cn/finalpage/2026-07-12/test.pdf",
+	}, "000001", "SZ", "org-1")
+	if !ok || item.PDFURL != "https://static.cninfo.com.cn/finalpage/2026-07-12/test.pdf" {
+		t.Fatalf("announcement = %+v, ok=%v", item, ok)
+	}
+}
+
+func TestParseCninfoAnnouncementsFailsClosedOnUnknownEnvelope(t *testing.T) {
+	for name, body := range map[string][]byte{
+		"empty":                nil,
+		"empty object":         []byte(`{}`),
+		"unknown object":       []byte(`{"data":[]}`),
+		"announcements object": []byte(`{"announcements":{}}`),
+		"announcements null":   []byte(`{"totalAnnouncement":0,"announcements":null}`),
+		"missing total":        []byte(`{"announcements":[]}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseCninfoMarketAnnouncementsPage(body, "SZ", 1, 30); err == nil {
+				t.Fatal("unknown CNINFO response was accepted")
+			}
+		})
+	}
+	page, err := parseCninfoMarketAnnouncementsPage(
+		[]byte(`{"totalAnnouncement":0,"announcements":[]}`), "SZ", 1, 30,
+	)
+	if err != nil || page.RawCount != 0 || page.HasMore {
+		t.Fatalf("valid empty page = %+v, err=%v", page, err)
 	}
 }
 
@@ -107,7 +171,7 @@ func TestFetchAnnouncementsKeepsSingleSymbolPath(t *testing.T) {
 		if got := r.Form.Get("stock"); got != "000001,gssz0000001" {
 			t.Fatalf("stock=%q", got)
 		}
-		_, _ = w.Write([]byte(`{"announcements":[{"announcementId":"manual-1","announcementTitle":"手动路径公告","announcementTime":"2026-07-10"}]}`))
+		_, _ = w.Write([]byte(`{"totalAnnouncement":1,"announcements":[{"announcementId":"manual-1","announcementTitle":"手动路径公告","announcementTime":"2026-07-10"}]}`))
 	}))
 	defer server.Close()
 
@@ -120,5 +184,21 @@ func TestFetchAnnouncementsKeepsSingleSymbolPath(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Symbol != "000001" || items[0].AnnouncementID != "manual-1" {
 		t.Fatalf("unexpected items: %+v", items)
+	}
+}
+
+func TestAnnouncementSourceBackoffRemainsFailedAndRetryable(t *testing.T) {
+	svc := &Service{
+		announcementSource: NewAnnouncementSource(nil),
+		assetBackoff: map[string]time.Time{
+			"announcement:cninfo:SZ": time.Now().Add(time.Hour),
+		},
+	}
+	_, status, err := svc.fetchAndStoreAnnouncements(
+		context.Background(),
+		StockV2Instrument{Symbol: "000001", Market: "SZ", InstrumentType: InstrumentTypeStock},
+	)
+	if err == nil || status.Status != AssetAnnouncementStatusFailed {
+		t.Fatalf("backoff status = %+v, err=%v", status, err)
 	}
 }

@@ -105,10 +105,16 @@ func (s *Service) enrichStockProfileFromEastmoney(ctx context.Context, profile *
 
 func (s *Service) enrichStockProfileCompanySurvey(ctx context.Context, profile *StockProfile, code string) error {
 	var payload eastmoneyCompanySurveyResponse
-	if err := s.fetchStockProfileJSON(ctx, "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/CompanySurveyAjax?code="+url.QueryEscape(code), &payload); err != nil {
+	if err := s.fetchStockProfileJSONWithEnvelope(ctx, "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/CompanySurveyAjax?code="+url.QueryEscape(code), []string{"jbzl"}, &payload); err != nil {
 		return err
 	}
 	item := payload.Company
+	if strings.TrimSpace(item.Name) == "" && strings.TrimSpace(item.Abbr) == "" &&
+		strings.TrimSpace(item.EnglishName) == "" && strings.TrimSpace(item.Industry) == "" &&
+		strings.TrimSpace(item.CSRCIndustry) == "" && strings.TrimSpace(item.Summary) == "" &&
+		strings.TrimSpace(item.BusinessScope) == "" {
+		return errors.New("eastmoney company survey returned an empty payload")
+	}
 	if strings.TrimSpace(item.Name) != "" {
 		profile.AliasesZh = appendProfileTerms(profile.AliasesZh, item.Name)
 	}
@@ -133,7 +139,7 @@ func (s *Service) enrichStockProfileCompanySurvey(ctx context.Context, profile *
 
 func (s *Service) enrichStockProfileBusinessAnalysis(ctx context.Context, profile *StockProfile, code string) error {
 	var payload eastmoneyBusinessAnalysisResponse
-	if err := s.fetchStockProfileJSON(ctx, "https://emweb.securities.eastmoney.com/PC_HSF10/BusinessAnalysis/PageAjax?code="+url.QueryEscape(code), &payload); err != nil {
+	if err := s.fetchStockProfileJSONWithEnvelope(ctx, "https://emweb.securities.eastmoney.com/PC_HSF10/BusinessAnalysis/PageAjax?code="+url.QueryEscape(code), []string{"zygcfx"}, &payload); err != nil {
 		return err
 	}
 	lines := latestBusinessLines(payload.BusinessItems, 8)
@@ -147,7 +153,7 @@ func (s *Service) enrichStockProfileBusinessAnalysis(ctx context.Context, profil
 
 func (s *Service) enrichStockProfileCoreConception(ctx context.Context, profile *StockProfile, code string) error {
 	var payload eastmoneyCoreConceptionResponse
-	if err := s.fetchStockProfileJSON(ctx, "https://emweb.securities.eastmoney.com/PC_HSF10/CoreConception/PageAjax?code="+url.QueryEscape(code), &payload); err != nil {
+	if err := s.fetchStockProfileJSONWithEnvelope(ctx, "https://emweb.securities.eastmoney.com/PC_HSF10/CoreConception/PageAjax?code="+url.QueryEscape(code), []string{"ssbk", "hxtc"}, &payload); err != nil {
 		return err
 	}
 	for _, board := range payload.Boards {
@@ -196,17 +202,22 @@ func (s *Service) enrichFundProfileBasics(ctx context.Context, profile *StockPro
 	if fullName != "" {
 		profile.AliasesZh = appendProfileTerms(profile.AliasesZh, fullName)
 	}
-	if fundType := stockProfileHTMLCell(body, "基金类型"); fundType != "" {
+	fundType := stockProfileHTMLCell(body, "基金类型")
+	if fundType != "" {
 		profile.FundType = fundType
 		profile.Tags = appendProfileTerms(profile.Tags, fundType)
 		profile.KeywordsZh = appendProfileTerms(profile.KeywordsZh, fundType)
 	}
-	if benchmark := stockProfileHTMLCell(body, "业绩比较基准"); benchmark != "" {
+	benchmark := stockProfileHTMLCell(body, "业绩比较基准")
+	if benchmark != "" {
 		profile.KeywordsZh = appendProfileTerms(profile.KeywordsZh, stockProfileTermsFromText(benchmark, 8)...)
 	}
 	target := stockProfileHTMLSection(body, "投资目标")
 	rangeText := stockProfileHTMLSection(body, "投资范围")
 	risk := stockProfileHTMLSection(body, "风险收益特征")
+	if fullName == "" && fundType == "" && benchmark == "" && target == "" && rangeText == "" && risk == "" {
+		return errors.New("eastmoney fund basics returned an unrecognized payload")
+	}
 	profile.BusinessLinesZh = appendProfileTerms(profile.BusinessLinesZh, stockProfileTermsFromText(target, 8)...)
 	profile.BusinessLinesZh = appendProfileTerms(profile.BusinessLinesZh, stockProfileTermsFromText(rangeText, 8)...)
 	profile.RiskTagsZh = appendProfileTerms(profile.RiskTagsZh, stockProfileTermsFromText(risk, 6)...)
@@ -243,10 +254,24 @@ func (s *Service) enrichFundProfileHoldings(ctx context.Context, profile *StockP
 	return nil
 }
 
-func (s *Service) fetchStockProfileJSON(ctx context.Context, endpoint string, target any) error {
+func (s *Service) fetchStockProfileJSONWithEnvelope(ctx context.Context, endpoint string, anyKey []string, target any) error {
 	body, err := s.fetchStockProfileBody(ctx, endpoint)
 	if err != nil {
 		return err
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return err
+	}
+	found := false
+	for _, key := range anyKey {
+		if value, ok := envelope[key]; ok && len(bytes.TrimSpace(value)) > 0 && !bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("stock profile source missing expected envelope")
 	}
 	return json.Unmarshal(body, target)
 }

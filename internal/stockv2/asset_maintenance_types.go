@@ -3,14 +3,35 @@ package stockv2
 import "time"
 
 const (
+	AssetMaintenanceScopeFullUniverse   = "full_universe"
+	AssetMaintenanceScopeExplicit       = "explicit_symbols"
+	AssetMaintenanceScopeCappedRotation = "capped_rotation"
+	AssetMaintenanceScopeLegacyUnknown  = "legacy_unknown"
+
+	AssetMaintenanceCoveragePending    = "pending"
+	AssetMaintenanceCoverageCovered    = "covered"
+	AssetMaintenanceCoverageIncomplete = "incomplete"
+
+	AssetMaintenanceFreshnessPending  = "pending"
+	AssetMaintenanceFreshnessReady    = "ready"
+	AssetMaintenanceFreshnessStale    = "stale"
+	AssetMaintenanceFreshnessRetrying = "retrying"
+	AssetMaintenanceFreshnessFailed   = "failed"
+
+	AssetMaintenanceItemStatusPending   = "pending"
 	AssetMaintenanceItemStatusRunning   = "running"
 	AssetMaintenanceItemStatusCompleted = "completed"
-	AssetMaintenanceItemStatusPartial   = "partial"
+	AssetMaintenanceItemStatusRetryWait = "retry_wait"
 	AssetMaintenanceItemStatusFailed    = "failed"
 
-	AssetDailyBarStatusSkipped = "skipped"
-	AssetDailyBarStatusFetched = "fetched"
-	AssetDailyBarStatusFailed  = "failed"
+	AssetDailyBarStatusSkipped    = "skipped"
+	AssetDailyBarStatusFetched    = "fetched"
+	AssetDailyBarStatusIncomplete = "incomplete"
+	AssetDailyBarStatusFailed     = "failed"
+
+	AssetDailyFlowStatusReady       = "ready"
+	AssetDailyFlowStatusIncomplete  = "incomplete"
+	AssetDailyFlowStatusNotRequired = "not_required"
 
 	AssetBaseProfileStatusSkipped   = "skipped"
 	AssetBaseProfileStatusUpdated   = "updated"
@@ -30,7 +51,12 @@ const (
 	AssetAIDecisionSkippedConfig   = "skipped_not_configured"
 	AssetAIDecisionFailed          = "failed"
 
-	StockV2AnnouncementSourceCninfo = "cninfo"
+	StockV2AnnouncementSourceCninfo    = "cninfo"
+	AnnouncementBodyStatusMetadataOnly = "metadata_only"
+	AnnouncementBodyStatusProcessing   = "processing"
+	AnnouncementBodyStatusRetryWait    = "retry_wait"
+	AnnouncementBodyStatusTextReady    = "text_ready"
+	AnnouncementBodyStatusFailed       = "failed_terminal"
 
 	AssetAIProgressStatusNotRequired           = "not_required"
 	AssetAIProgressStatusActive                = "active"
@@ -57,17 +83,30 @@ type AssetMaintenanceStats struct {
 // from the asynchronous AI profile queue. The parent update job status only
 // describes Base; AIProfile may remain active after Base has completed.
 type AssetMaintenanceJobProgress struct {
-	Base      AssetMaintenanceBaseProgress `json:"base"`
-	AIProfile AssetMaintenanceAIProgress   `json:"aiProfile"`
+	Coverage  AssetMaintenanceCoverageProgress `json:"coverage"`
+	Assets    AssetMaintenanceAssetsProgress   `json:"assets"`
+	AIProfile AssetMaintenanceAIProgress       `json:"aiProfile"`
 }
 
-type AssetMaintenanceBaseProgress struct {
-	Status    string `json:"status"`
-	Total     int    `json:"total"`
-	Processed int    `json:"processed"`
-	Succeeded int    `json:"succeeded"`
-	Failed    int    `json:"failed"`
-	Pending   int    `json:"pending"`
+type AssetMaintenanceCoverageProgress struct {
+	Status       string `json:"status"`
+	Target       int    `json:"target"`
+	Checked      int    `json:"checked"`
+	Pending      int    `json:"pending"`
+	Retrying     int    `json:"retrying"`
+	Failed       int    `json:"failed"`
+	UniverseHash string `json:"universeHash,omitempty"`
+	CutoffDate   string `json:"cutoffDate,omitempty"`
+}
+
+type AssetMaintenanceAssetsProgress struct {
+	Status       string `json:"status"`
+	MarketFresh  int    `json:"marketFresh"`
+	MessageFresh int    `json:"messageFresh"`
+	Fresh        int    `json:"fresh"`
+	Stale        int    `json:"stale"`
+	Retrying     int    `json:"retrying"`
+	Failed       int    `json:"failed"`
 }
 
 type AssetMaintenanceAIProgress struct {
@@ -98,7 +137,15 @@ type AssetMaintenanceItem struct {
 	InstrumentType        string                         `json:"instrumentType,omitempty"`
 	Name                  string                         `json:"name,omitempty"`
 	Status                string                         `json:"status"`
+	PriorityReason        string                         `json:"priorityReason,omitempty"`
+	AttemptCount          int                            `json:"attemptCount"`
+	NextRetryAt           time.Time                      `json:"nextRetryAt,omitempty"`
+	CheckedAt             time.Time                      `json:"checkedAt,omitempty"`
+	ExpectedLatestDate    string                         `json:"expectedLatestTradeDate,omitempty"`
 	DailyBarStatus        string                         `json:"dailyBarStatus,omitempty"`
+	DailyBarGapCount      int                            `json:"dailyBarGapCount"`
+	DailyBarMissingFacets int                            `json:"dailyBarMissingFacetCount"`
+	DailyFlowStatus       string                         `json:"dailyFlowStatus,omitempty"`
 	DailyBarFetched       int                            `json:"dailyBarFetched"`
 	DailyBarStart         string                         `json:"dailyBarStart,omitempty"`
 	DailyBarEnd           string                         `json:"dailyBarEnd,omitempty"`
@@ -112,6 +159,7 @@ type AssetMaintenanceItem struct {
 	AIDecision            string                         `json:"aiDecision,omitempty"`
 	AIProfileStatus       string                         `json:"aiProfileStatus,omitempty"`
 	AIQueueStatus         string                         `json:"aiQueueStatus,omitempty"`
+	AIDesiredInputVersion string                         `json:"aiDesiredInputVersion,omitempty"`
 	AgentRunID            string                         `json:"agentRunId,omitempty"`
 	ErrorMessage          string                         `json:"errorMessage,omitempty"`
 	SourceStatuses        []AssetMaintenanceSourceStatus `json:"sourceStatuses,omitempty"`
@@ -122,6 +170,29 @@ type AssetMaintenanceItem struct {
 	UpdatedAt             time.Time                      `json:"updatedAt"`
 }
 
+type AssetMaintenanceSlot struct {
+	SlotStart               time.Time `json:"slotStart"`
+	SlotEnd                 time.Time `json:"slotEnd"`
+	ExpectedLatestTradeDate string    `json:"expectedLatestTradeDate,omitempty"`
+	UniverseSnapshotID      string    `json:"universeSnapshotId"`
+	UniverseHash            string    `json:"universeHash"`
+	TargetCount             int       `json:"targetCount"`
+	JobID                   string    `json:"jobId,omitempty"`
+	Status                  string    `json:"status"`
+	CoveredAt               time.Time `json:"coveredAt,omitempty"`
+	CreatedAt               time.Time `json:"createdAt"`
+	UpdatedAt               time.Time `json:"updatedAt"`
+}
+
+type AssetUniverseSnapshot struct {
+	ID           string    `json:"id"`
+	UniverseHash string    `json:"universeHash"`
+	Status       string    `json:"status"`
+	Source       string    `json:"source"`
+	TargetCount  int       `json:"targetCount"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
 type AssetMaintenanceItemListFilter struct {
 	JobID  string
 	Symbol string
@@ -130,22 +201,34 @@ type AssetMaintenanceItemListFilter struct {
 }
 
 type StockV2Announcement struct {
-	ID             string    `json:"id"`
-	Source         string    `json:"source"`
-	Symbol         string    `json:"symbol"`
-	Market         string    `json:"market,omitempty"`
-	OrgID          string    `json:"orgId,omitempty"`
-	Title          string    `json:"title"`
-	Category       string    `json:"category,omitempty"`
-	AnnouncementID string    `json:"announcementId,omitempty"`
-	PDFURL         string    `json:"pdfUrl,omitempty"`
-	ContentHash    string    `json:"contentHash"`
-	Major          bool      `json:"major"`
-	MajorReason    string    `json:"majorReason,omitempty"`
-	PublishedAt    time.Time `json:"publishedAt,omitempty"`
-	FetchedAt      time.Time `json:"fetchedAt"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	ID                string    `json:"id"`
+	Source            string    `json:"source"`
+	Symbol            string    `json:"symbol"`
+	Market            string    `json:"market,omitempty"`
+	OrgID             string    `json:"orgId,omitempty"`
+	Title             string    `json:"title"`
+	Category          string    `json:"category,omitempty"`
+	AnnouncementID    string    `json:"announcementId,omitempty"`
+	PDFURL            string    `json:"pdfUrl,omitempty"`
+	ContentHash       string    `json:"contentHash"`
+	DedupeKey         string    `json:"dedupeKey,omitempty"`
+	SymbolRevision    int64     `json:"symbolRevision,omitempty"`
+	Major             bool      `json:"major"`
+	MajorReason       string    `json:"majorReason,omitempty"`
+	PublishedAt       time.Time `json:"publishedAt,omitempty"`
+	FetchedAt         time.Time `json:"fetchedAt"`
+	FirstFetchedAt    time.Time `json:"firstFetchedAt,omitempty"`
+	LastSeenAt        time.Time `json:"lastSeenAt,omitempty"`
+	BodyStatus        string    `json:"bodyStatus,omitempty"`
+	BodyTextExcerpt   string    `json:"bodyTextExcerpt,omitempty"`
+	BodyHash          string    `json:"bodyHash,omitempty"`
+	BodyCheckedAt     time.Time `json:"bodyCheckedAt,omitempty"`
+	BodyError         string    `json:"bodyError,omitempty"`
+	BodyAttemptCount  int       `json:"bodyAttemptCount"`
+	BodyNextAttemptAt time.Time `json:"bodyNextAttemptAt,omitempty"`
+	BodyContentBytes  int64     `json:"bodyContentBytes"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
 type AnnouncementListFilter struct {
@@ -156,18 +239,22 @@ type AnnouncementListFilter struct {
 }
 
 type StockV2AssetSummary struct {
-	Symbol                      string                `json:"symbol"`
-	DailyBarQuality             DailyBarsQuality      `json:"dailyBarQuality"`
-	ProfileSummary              StockProfileSummary   `json:"profileSummary"`
-	LatestAnnouncementAt        time.Time             `json:"latestAnnouncementAt,omitempty"`
-	LatestAnnouncementFetchedAt time.Time             `json:"latestAnnouncementFetchedAt,omitempty"`
-	LatestAnnouncementTitle     string                `json:"latestAnnouncementTitle,omitempty"`
-	AnnouncementCount           int                   `json:"announcementCount"`
-	MajorAnnouncementCount      int                   `json:"majorAnnouncementCount"`
-	LatestMaintenance           AssetMaintenanceItem  `json:"latestMaintenance,omitempty"`
-	Readiness                   StockV2AssetReadiness `json:"readiness"`
+	Symbol                                   string                `json:"symbol"`
+	DailyBarQuality                          DailyBarsQuality      `json:"dailyBarQuality"`
+	ProfileSummary                           StockProfileSummary   `json:"profileSummary"`
+	LatestAnnouncementAt                     time.Time             `json:"latestAnnouncementAt,omitempty"`
+	LatestAnnouncementFetchedAt              time.Time             `json:"latestAnnouncementFetchedAt,omitempty"`
+	LatestAnnouncementTitle                  string                `json:"latestAnnouncementTitle,omitempty"`
+	AnnouncementCount                        int                   `json:"announcementCount"`
+	MajorAnnouncementCount                   int                   `json:"majorAnnouncementCount"`
+	MajorAnnouncementContentUnavailableCount int                   `json:"majorAnnouncementContentUnavailableCount"`
+	LatestMaintenance                        AssetMaintenanceItem  `json:"latestMaintenance,omitempty"`
+	Readiness                                StockV2AssetReadiness `json:"readiness"`
 }
 
+// StockV2AssetReadiness is the legacy shape embedded by the asset-summary API.
+// DEPRECATED: remove after 2026-08-31, once the bundled web client has used the
+// unified market/message/analysis readiness API for two releases.
 type StockV2AssetReadiness struct {
 	Ready              bool      `json:"ready"`
 	DataReady          bool      `json:"dataReady"`

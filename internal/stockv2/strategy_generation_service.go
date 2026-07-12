@@ -17,6 +17,13 @@ func (s *Service) RunStrategyGeneration(ctx context.Context, input StrategyGener
 	if err != nil {
 		return AgentRun{}, err
 	}
+	readiness, err := s.evaluateStrategyGenerationReadiness(ctx, normalized, time.Now())
+	if err != nil {
+		return AgentRun{}, err
+	}
+	if readiness.Status == AssetReadinessDecisionBlocked {
+		return AgentRun{}, &StrategyGenerationReadinessError{Decision: readiness}
+	}
 	taskProfile, err := s.store.GetAgentTaskProfileByType(ctx, AgentTaskTypeStrategyGeneration)
 	if err != nil {
 		return AgentRun{}, err
@@ -29,6 +36,7 @@ func (s *Service) RunStrategyGeneration(ctx context.Context, input StrategyGener
 	if err != nil {
 		return AgentRun{}, err
 	}
+	genCtx.FreshnessSummary["assetReadiness"] = readiness
 	artifact, _ := json.Marshal(genCtx)
 	triggerID := strategyGenerationTriggerID(normalized)
 	run, ledger, err := s.CreateAgentRunRecord(ctx, AgentRunRecordParams{
@@ -47,7 +55,36 @@ func (s *Service) RunStrategyGeneration(ctx context.Context, input StrategyGener
 	if s.agentExecutor != nil {
 		go s.startStrategyGenerationRunAsync(context.Background(), run, ledger, genCtx, model.ModelName)
 	}
+	run.ReadinessDecision = &readiness
 	return run, nil
+}
+
+func (s *Service) evaluateStrategyGenerationReadiness(ctx context.Context, input StrategyGenerationInput, cutoffAt time.Time) (AssetReadinessDecision, error) {
+	symbols := make([]string, 0, len(input.TargetInstruments))
+	if input.Mode == StrategyGenerationModePortfolio {
+		holdings, err := s.store.ListHoldings(ctx, input.PortfolioID)
+		if err != nil {
+			return AssetReadinessDecision{}, err
+		}
+		symbols = holdingSymbols(holdings)
+	} else {
+		for _, target := range input.TargetInstruments {
+			symbols = append(symbols, target.Symbol)
+		}
+	}
+	normalizedSymbols, err := NormalizeAssetReadinessSymbols(symbols)
+	if err != nil {
+		return AssetReadinessDecision{}, ErrInvalidStrategyGenerationInput
+	}
+	bySymbol, err := s.EvaluateAssetReadinessBatch(ctx, normalizedSymbols, cutoffAt)
+	if err != nil {
+		return AssetReadinessDecision{}, err
+	}
+	items := make([]UnifiedAssetReadiness, 0, len(normalizedSymbols))
+	for _, symbol := range normalizedSymbols {
+		items = append(items, bySymbol[symbol])
+	}
+	return DecideAssetReadiness(items, AssetReadinessRequirementAnalysis, input.ReadinessMode)
 }
 
 func (s *Service) BuildStrategyGenerationContext(ctx context.Context, input StrategyGenerationInput) (StrategyGenerationContext, error) {
@@ -393,6 +430,13 @@ func normalizeStrategyGenerationInput(input StrategyGenerationInput) (StrategyGe
 		input.Mode = StrategyGenerationModeManualTarget
 	}
 	if !validStrategyGenerationMode(input.Mode) {
+		return StrategyGenerationInput{}, ErrInvalidStrategyGenerationInput
+	}
+	input.ReadinessMode = strings.TrimSpace(input.ReadinessMode)
+	if input.ReadinessMode == "" {
+		input.ReadinessMode = AssetReadinessModeStrict
+	}
+	if input.ReadinessMode != AssetReadinessModeStrict && input.ReadinessMode != AssetReadinessModeAllowDegraded {
 		return StrategyGenerationInput{}, ErrInvalidStrategyGenerationInput
 	}
 	input.UserGoal = strings.TrimSpace(input.UserGoal)

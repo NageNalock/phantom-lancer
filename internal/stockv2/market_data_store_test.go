@@ -230,6 +230,112 @@ func TestMarketDataStorePartialDailyBarRemainsRepairable(t *testing.T) {
 	}
 }
 
+func TestMarketDataStorePartialRefreshDoesNotEraseExistingFacets(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewMarketDataStore(filepath.Join(t.TempDir(), "stock_market.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	complete := StockV2DailyBar{
+		Symbol: "600000", Market: "SH", TradeDate: "2026-07-10",
+		Open: 10, High: 11, Low: 9, Close: 10.5, PrevClose: 10, Volume: 100,
+		Amount: 1_000, AmountPresent: true, TurnoverRate: 1.2, TurnoverRatePresent: true,
+		NetInflow: 20, NetInflowPresent: true, MainNetInflow: 12, MainNetInflowPresent: true,
+		Adjusted: DailyBarAdjustedNone, Source: "10jqka_kline", FetchedAt: time.Now(), Quality: DailyBarQualityOK,
+	}
+	if err := store.UpsertDailyBars(ctx, []StockV2DailyBar{complete}); err != nil {
+		t.Fatal(err)
+	}
+	partial := complete
+	partial.Close = 10.8
+	partial.Amount, partial.TurnoverRate, partial.NetInflow, partial.MainNetInflow = 0, 0, 0, 0
+	partial.AmountPresent, partial.TurnoverRatePresent = false, false
+	partial.NetInflowPresent, partial.MainNetInflowPresent = false, false
+	partial.Quality = DailyBarQualityPartial
+	partial.FetchedAt = partial.FetchedAt.Add(time.Minute)
+	if err := store.UpsertDailyBars(ctx, []StockV2DailyBar{partial}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.GetDailyBars(ctx, complete.Symbol, complete.Adjusted, complete.TradeDate, complete.TradeDate, 1)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("get merged bar=%+v err=%v", got, err)
+	}
+	bar := got[0]
+	if bar.Close != partial.Close || !bar.AmountPresent || bar.Amount != complete.Amount ||
+		!bar.TurnoverRatePresent || bar.TurnoverRate != complete.TurnoverRate ||
+		!bar.NetInflowPresent || bar.NetInflow != complete.NetInflow ||
+		!bar.MainNetInflowPresent || bar.MainNetInflow != complete.MainNetInflow ||
+		bar.Quality != DailyBarQualityOK {
+		t.Fatalf("partial refresh degraded stored facets: %+v", bar)
+	}
+}
+
+func TestMarketDataStoreInvalidCoreRefreshDoesNotReplaceValidSameSource(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewMarketDataStore(filepath.Join(t.TempDir(), "stock_market.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	valid := StockV2DailyBar{
+		Symbol: "600000", Market: "SH", TradeDate: "2026-07-10",
+		Open: 10, High: 11, Low: 9, Close: 10.5, Volume: 100,
+		AmountPresent: true, TurnoverRatePresent: true, NetInflowPresent: true, MainNetInflowPresent: true,
+		Adjusted: DailyBarAdjustedNone, Source: "same-source", FetchedAt: time.Now(), Quality: DailyBarQualityOK,
+	}
+	if err := store.UpsertDailyBars(ctx, []StockV2DailyBar{valid}); err != nil {
+		t.Fatal(err)
+	}
+	invalid := valid
+	invalid.Open, invalid.High, invalid.Low, invalid.Close, invalid.Volume = 20, 19, 21, 20, 0
+	invalid.FetchedAt = invalid.FetchedAt.Add(time.Minute)
+	if err := store.UpsertDailyBars(ctx, []StockV2DailyBar{invalid}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetDailyBars(ctx, valid.Symbol, valid.Adjusted, valid.TradeDate, valid.TradeDate, 1)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("get preserved bar=%+v err=%v", got, err)
+	}
+	if got[0].Open != valid.Open || got[0].High != valid.High || got[0].Low != valid.Low ||
+		got[0].Close != valid.Close || got[0].Volume != valid.Volume {
+		t.Fatalf("invalid same-source core replaced valid row: %+v", got[0])
+	}
+}
+
+func TestMarketDataStoreReadPrefersValidCoreOverNewerInvalidSource(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewMarketDataStore(filepath.Join(t.TempDir(), "stock_market.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fetchedAt := time.Now()
+	valid := StockV2DailyBar{
+		Symbol: "600000", Market: "SH", TradeDate: "2026-07-10",
+		Open: 10, High: 11, Low: 9, Close: 10.5, Volume: 100,
+		Amount: 1_000, AmountPresent: true, TurnoverRate: 1.2, TurnoverRatePresent: true,
+		NetInflowPresent: true, MainNetInflowPresent: true,
+		Adjusted: DailyBarAdjustedNone, Source: "valid", FetchedAt: fetchedAt, Quality: DailyBarQualityOK,
+	}
+	invalid := valid
+	invalid.Source = "invalid-newer"
+	invalid.Open, invalid.High, invalid.Low, invalid.Close = 0, 0, 0, 0
+	invalid.FetchedAt = fetchedAt.Add(time.Hour)
+	if err := store.UpsertDailyBars(ctx, []StockV2DailyBar{valid, invalid}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetDailyBars(ctx, valid.Symbol, valid.Adjusted, valid.TradeDate, valid.TradeDate, 1)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("get selected bar=%+v err=%v", got, err)
+	}
+	if got[0].Source != valid.Source || got[0].Close != valid.Close {
+		t.Fatalf("invalid newer row won selection: %+v", got[0])
+	}
+}
+
 func TestMarketDataStoreRebuildsDailyBarQualityOnOpen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "stock_market.duckdb")
@@ -492,6 +598,116 @@ func TestMarketDataStoreRemovesLegacyInstrumentStatus(t *testing.T) {
 	}
 	if name != "平安银行" {
 		t.Fatalf("migrated duckdb instrument name = %q", name)
+	}
+}
+
+func TestMarketDataStoreInitializesAnnouncementRevisionSchema(t *testing.T) {
+	store, err := NewMarketDataStore(filepath.Join(t.TempDir(), "stock_market.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	for _, column := range []string{
+		"dedupe_key", "symbol_revision", "body_status", "body_attempt_count",
+		"body_next_attempt_at", "body_content_bytes",
+	} {
+		if !duckDBColumnExists(t, store.db, "stockv2_announcements", column) {
+			t.Fatalf("announcement column %q was not initialized", column)
+		}
+	}
+}
+
+func TestMarketDataStoreMigratesAnnouncementBodyColumnsBeforeCreatingIndex(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stock_market.duckdb")
+	db, err := sql.Open("duckdb", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(ctx, `
+		CREATE TABLE stockv2_announcements (
+			id VARCHAR PRIMARY KEY,
+			source VARCHAR NOT NULL,
+			symbol VARCHAR NOT NULL,
+			market VARCHAR,
+			org_id VARCHAR,
+			title VARCHAR NOT NULL,
+			category VARCHAR,
+			announcement_id VARCHAR,
+			pdf_url VARCHAR,
+			content_hash VARCHAR NOT NULL,
+			major BOOLEAN NOT NULL DEFAULT FALSE,
+			major_reason VARCHAR,
+			published_at TIMESTAMP,
+			fetched_at TIMESTAMP NOT NULL,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL
+		);
+		INSERT INTO stockv2_announcements (
+			id, source, symbol, title, content_hash, major, fetched_at, created_at, updated_at
+		) VALUES ('legacy-ann', 'cninfo', '000001', '重大合同公告', 'legacy-hash', TRUE, now(), now(), now());
+	`)
+	if closeErr := db.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("seed legacy announcement schema: %v", err)
+	}
+
+	store, err := NewMarketDataStore(path)
+	if err != nil {
+		t.Fatalf("migrate legacy announcement schema: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for _, column := range []string{"body_status", "body_next_attempt_at", "body_content_bytes"} {
+		if !duckDBColumnExists(t, store.db, "stockv2_announcements", column) {
+			t.Fatalf("announcement column %q was not migrated", column)
+		}
+	}
+	var indexCount int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM duckdb_indexes()
+		WHERE index_name = 'idx_stockv2_announcements_body_pending'
+	`).Scan(&indexCount); err != nil || indexCount != 1 {
+		t.Fatalf("body pending index count=%d err=%v", indexCount, err)
+	}
+}
+
+func TestTradingCalendarReferenceProvenanceIsNotDowngradedByObservedBars(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewMarketDataStore(filepath.Join(t.TempDir(), "stock_market.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	tradeDate := "2026-07-10"
+	observedAt := time.Date(2026, 7, 10, 15, 5, 0, 0, time.UTC)
+	if err := store.UpsertObservedTradingDates(ctx, []string{tradeDate}, observedAt); err != nil {
+		t.Fatal(err)
+	}
+	if authoritative, err := store.TradingCalendarDateAuthoritative(ctx, tradeDate); err != nil || authoritative {
+		t.Fatalf("observed provenance authoritative=%v err=%v", authoritative, err)
+	}
+	referenceAt := observedAt.Add(time.Hour)
+	if err := store.UpsertReferenceTradingDates(ctx, []string{tradeDate}, referenceAt); err != nil {
+		t.Fatal(err)
+	}
+	observedRefreshAt := referenceAt.Add(2 * time.Hour)
+	if err := store.UpsertDailyBars(ctx, []StockV2DailyBar{{
+		Symbol: "600000", Market: "SH", TradeDate: tradeDate,
+		Open: 10, High: 11, Low: 9, Close: 10, Volume: 1,
+		AmountPresent: true, TurnoverRatePresent: true,
+		Adjusted: DailyBarAdjustedNone, Source: "test", FetchedAt: observedRefreshAt,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if authoritative, err := store.TradingCalendarDateAuthoritative(ctx, tradeDate); err != nil || !authoritative {
+		t.Fatalf("reference provenance authoritative=%v err=%v", authoritative, err)
+	}
+	authoritative, gotObservedAt, err := store.TradingCalendarDateProvenance(ctx, tradeDate)
+	if err != nil || !authoritative || !gotObservedAt.Equal(referenceAt) {
+		t.Fatalf("calendar provenance authoritative=%v observedAt=%v err=%v", authoritative, gotObservedAt, err)
 	}
 }
 

@@ -758,6 +758,7 @@ func (s *Service) GenerateStrategyFromOpportunityCandidate(ctx context.Context, 
 	run, err := s.RunStrategyGeneration(ctx, StrategyGenerationInput{
 		SchemaVersion: StrategyGenerationInputSchemaVersion,
 		Mode:          StrategyGenerationModeOpportunity,
+		ReadinessMode: strings.TrimSpace(req.ReadinessMode),
 		UserGoal:      goal,
 		RequestedBy:   req.RequestedBy,
 		OpportunityID: candidate.OpportunityID,

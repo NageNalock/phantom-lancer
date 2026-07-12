@@ -3,7 +3,7 @@ package stockv2
 import "context"
 
 // PopulateAssetMaintenanceProgress decorates the lightweight job snapshot with
-// two independent views: deterministic base work and asynchronous AI work.
+// independent coverage, deterministic freshness, and asynchronous AI views.
 func (s *Service) PopulateAssetMaintenanceProgress(ctx context.Context, jobs []StockV2UpdateJob) error {
 	jobIDs := make([]string, 0, len(jobs))
 	for _, job := range jobs {
@@ -15,8 +15,16 @@ func (s *Service) PopulateAssetMaintenanceProgress(ctx context.Context, jobs []S
 	if err != nil {
 		return err
 	}
+	assetsByJob, err := s.store.GetAssetMaintenanceAssetsProgressByJobIDs(ctx, jobIDs)
+	if err != nil {
+		return err
+	}
 	for i := range jobs {
-		pending := jobs[i].TotalCount - jobs[i].ProcessedCount
+		checked := jobs[i].CheckedCount
+		if checked == 0 && jobs[i].ProcessedCount > 0 {
+			checked = jobs[i].ProcessedCount
+		}
+		pending := jobs[i].TotalCount - checked
 		if pending < 0 {
 			pending = 0
 		}
@@ -24,15 +32,21 @@ func (s *Service) PopulateAssetMaintenanceProgress(ctx context.Context, jobs []S
 		if aiProgress.Status == "" {
 			aiProgress.Status = AssetAIProgressStatusNotRequired
 		}
+		assetsProgress := assetsByJob[jobs[i].ID]
+		assetsProgress.Status = jobs[i].FreshnessStatus
+		assetsProgress.Stale = jobs[i].StaleCount
 		jobs[i].MaintenanceProgress = AssetMaintenanceJobProgress{
-			Base: AssetMaintenanceBaseProgress{
-				Status:    jobs[i].Status,
-				Total:     jobs[i].TotalCount,
-				Processed: jobs[i].ProcessedCount,
-				Succeeded: jobs[i].SuccessCount,
-				Failed:    jobs[i].FailedCount,
-				Pending:   pending,
+			Coverage: AssetMaintenanceCoverageProgress{
+				Status:       jobs[i].CoverageStatus,
+				Target:       jobs[i].TotalCount,
+				Checked:      checked,
+				Pending:      pending,
+				Retrying:     jobs[i].RetryCount,
+				Failed:       jobs[i].FailedCount,
+				UniverseHash: jobs[i].UniverseHash,
+				CutoffDate:   jobs[i].ExpectedLatestDate,
 			},
+			Assets:    assetsProgress,
 			AIProfile: aiProgress,
 		}
 	}

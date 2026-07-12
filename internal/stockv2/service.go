@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,7 @@ type Service struct {
 	assetBackoffMu     sync.Mutex
 	assetBackoff       map[string]time.Time
 	stockProfileMu     sync.Map
+	resourceGateReader func() ResourceGateStatus
 
 	universeSource     *UniverseDataSource
 	thsDailyBars       *THSDailyBarsSource
@@ -100,11 +102,29 @@ func (s *Service) markInterruptedRunningTasks(ctx context.Context) {
 		return
 	}
 	reason := "interrupted by service restart before completion"
+	jobIDs, recoverErr := s.store.RecoverInterruptedAssetMaintenanceJobs(ctx, reason, time.Now())
+	if recoverErr != nil {
+		if s.log != nil {
+			s.log.Warn("recover interrupted stock data asset maintenance failed", "error", safelog.Text(recoverErr.Error(), 240))
+		}
+	} else {
+		for _, jobID := range jobIDs {
+			job, err := s.store.GetUpdateJob(ctx, jobID)
+			if err != nil {
+				continue
+			}
+			if _, err := s.store.finalizeAssetMaintenanceJob(ctx, jobID, job.AssetStats, nil, job.WriteBytesEnd, job.PeakRSSBytes); err != nil && s.log != nil {
+				s.log.Warn("finalize interrupted stock data asset maintenance failed", "job_id", jobID, "error", safelog.Text(err.Error(), 240))
+			}
+		}
+	}
 	failures := []struct {
 		name string
 		fn   func(context.Context, string) (int64, error)
 	}{
-		{name: "stock data asset maintenance", fn: s.store.FailRunningUpdateJobs},
+		// Any legacy job without frozen targets, or a job whose recovery finalization
+		// failed, is still made terminal here. Frozen retry items remain claimable.
+		{name: "stock data asset maintenance fallback", fn: s.store.FailRunningUpdateJobs},
 		{name: "daily bar jobs", fn: s.store.FailRunningDailyBarJobs},
 		{name: "quote refresh task", fn: s.store.FailRunningQuoteRefreshTasks},
 		{name: "monitor runs", fn: s.store.FailRunningMonitorRuns},
@@ -694,22 +714,40 @@ func (s *Service) ExecuteUniverseUpdate(ctx context.Context, req UniverseUpdateR
 		return StockV2UpdateJob{}, ErrUpdateJobAlreadyRunning
 	}
 
+	gate := s.currentResourceGate()
+	maintenanceConcurrency := maintenanceConcurrencyForResourceGate(gate)
+
 	// 创建更新任务
+	now := time.Now()
 	job := StockV2UpdateJob{
-		ID:             generateID(),
-		TriggerType:    firstNonEmpty(req.TriggerType, "manual"),
-		TriggerSource:  firstNonEmpty(req.TriggerSource, "user"),
-		Status:         "running",
-		TotalCount:     0,
-		ProcessedCount: 0,
-		SuccessCount:   0,
-		FailedCount:    0,
-		StartAt:        time.Now(),
-		CreatedAt:      time.Now(),
+		ID:              generateID(),
+		TriggerType:     firstNonEmpty(req.TriggerType, "manual"),
+		TriggerSource:   firstNonEmpty(req.TriggerSource, "user"),
+		Status:          "running",
+		Scope:           assetMaintenanceScope(req),
+		SlotStart:       req.ScheduledSlotStart,
+		CoverageStatus:  AssetMaintenanceCoveragePending,
+		FreshnessStatus: AssetMaintenanceFreshnessPending,
+		TotalCount:      0,
+		ProcessedCount:  0,
+		SuccessCount:    0,
+		FailedCount:     0,
+		StartAt:         now,
+		CreatedAt:       now,
+	}
+	if maintenanceConcurrency == 0 {
+		job.Status = "paused"
+		job.CoverageStatus = AssetMaintenanceCoverageIncomplete
+		job.FreshnessStatus = AssetMaintenanceFreshnessRetrying
+		job.EndAt = now
+		job.ErrorMessage = resourceGatePauseMessage(gate)
 	}
 
 	if err := s.store.CreateUpdateJob(ctx, job); err != nil {
 		return StockV2UpdateJob{}, wrapError(err, "create update job")
+	}
+	if maintenanceConcurrency == 0 {
+		return job, nil
 	}
 	s.bulkMaintenanceRun = true
 
@@ -748,7 +786,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 	}
 
 	// 获取本轮维护标的。
-	symbols, selectErr := s.selectAssetMaintenanceSymbols(ctx, req)
+	symbols, selectErr := s.selectAssetMaintenanceSymbols(ctx, &req)
 	if selectErr != nil {
 		s.store.UpdateUpdateJob(ctx, StockV2UpdateJob{
 			ID:           jobID,
@@ -758,16 +796,98 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 		})
 		return
 	}
+	if job.Scope == AssetMaintenanceScopeFullUniverse && !req.universeVerified && len(symbols) == 0 {
+		reason := firstNonEmpty(req.universeError, "public universe discovery was not verified")
+		s.store.UpdateUpdateJob(ctx, StockV2UpdateJob{
+			ID:              jobID,
+			Status:          "failed",
+			CoverageStatus:  AssetMaintenanceCoverageIncomplete,
+			FreshnessStatus: AssetMaintenanceFreshnessFailed,
+			EndAt:           time.Now(),
+			ErrorMessage:    "universe_unverified: " + reason,
+		})
+		return
+	}
 	totalCount := len(symbols)
-
-	// 更新任务总数量
-	if err := s.store.UpdateUpdateJob(ctx, StockV2UpdateJob{
-		ID:         jobID,
-		TotalCount: totalCount,
-	}); err != nil {
-		if s.log != nil {
-			s.log.Error("update job total count failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "total_count", totalCount, "error", safelog.Text(err.Error(), 240))
+	job.UniverseVerified = req.universeVerified
+	if job.Scope == AssetMaintenanceScopeFullUniverse && !job.UniverseVerified {
+		job.ErrorMessage = "universe_unverified: " + firstNonEmpty(req.universeError, "using the last cached generation")
+	}
+	calendarCheckedAt := time.Now()
+	_, expectedLatestDate := assetMaintenanceDailyBarStartEnd(calendarCheckedAt)
+	maintenanceCtx, authoritativeLatestDate, calendarErr := s.prepareReferenceTradingCalendar(
+		ctx, expectedLatestDate, calendarCheckedAt,
+	)
+	if calendarErr != nil {
+		// Calendar failure blocks the market facet, not independent F10 and
+		// announcement maintenance. Keep the target freeze and make the task
+		// freshness retryable while the low-cost calendar scheduler recovers.
+		job.ExpectedLatestDate = expectedLatestDate
+		if observed, _, _, observedErr := s.referenceTradingCalendarState(ctx, expectedLatestDate); observedErr == nil && observed.tradeDate != "" {
+			job.ExpectedLatestDate = observed.tradeDate
 		}
+		calendarMessage := "trading_calendar_unavailable: " + calendarErr.Error()
+		if job.ErrorMessage == "" {
+			job.ErrorMessage = calendarMessage
+		} else {
+			job.ErrorMessage += "; " + calendarMessage
+		}
+		if err := s.store.SetAssetMaintenanceCursor(ctx, dailyBarReferenceCalendarRetryCursor, expectedLatestDate); err != nil && s.log != nil {
+			s.log.Warn("persist reference calendar retry failed", "error", safelog.Error(err, 240))
+		}
+	} else {
+		job.ExpectedLatestDate = authoritativeLatestDate
+		_ = s.store.SetAssetMaintenanceCursor(ctx, dailyBarReferenceCalendarRetryCursor, "")
+	}
+	job.MessageCutoffAt = calendarCheckedAt
+	snapshot := AssetUniverseSnapshot{
+		UniverseHash: assetUniverseHash(symbols),
+		TargetCount:  totalCount,
+	}
+	if job.Scope == AssetMaintenanceScopeFullUniverse {
+		if job.UniverseVerified {
+			snapshot, selectErr = s.store.EnsureAssetUniverseSnapshot(ctx, symbols, assetUniverseSnapshotSourceLive)
+		} else {
+			snapshot, selectErr = s.store.EnsureUnverifiedAssetUniverseSnapshot(ctx, symbols, "cached_public_universe")
+		}
+		if selectErr != nil {
+			s.store.UpdateUpdateJob(ctx, StockV2UpdateJob{
+				ID:              jobID,
+				Status:          "failed",
+				CoverageStatus:  AssetMaintenanceCoverageIncomplete,
+				FreshnessStatus: AssetMaintenanceFreshnessFailed,
+				EndAt:           time.Now(),
+				ErrorMessage:    selectErr.Error(),
+			})
+			return
+		}
+	}
+	job.UniverseSnapshotID = snapshot.ID
+	job.UniverseHash = snapshot.UniverseHash
+	job.TotalCount = totalCount
+	if err := s.store.PrepareAssetMaintenanceJob(ctx, job, snapshot, symbols); err != nil {
+		s.store.UpdateUpdateJob(ctx, StockV2UpdateJob{
+			ID:              jobID,
+			Status:          "failed",
+			CoverageStatus:  AssetMaintenanceCoverageIncomplete,
+			FreshnessStatus: AssetMaintenanceFreshnessFailed,
+			EndAt:           time.Now(),
+			ErrorMessage:    err.Error(),
+		})
+		return
+	}
+	if err := s.store.CommitAssetMaintenanceSelectionCursors(
+		ctx, req.priorityCursorNext, req.universeCursorNext,
+	); err != nil {
+		s.store.UpdateUpdateJob(ctx, StockV2UpdateJob{
+			ID:              jobID,
+			Status:          "failed",
+			CoverageStatus:  AssetMaintenanceCoverageIncomplete,
+			FreshnessStatus: AssetMaintenanceFreshnessFailed,
+			EndAt:           time.Now(),
+			ErrorMessage:    err.Error(),
+		})
+		return
 	}
 
 	// 分批更新股票
@@ -812,6 +932,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 		update := StockV2UpdateJob{
 			ID:             jobID,
 			TotalCount:     totalCount,
+			CheckedCount:   snapshotProgress.ProcessedCount,
 			ProcessedCount: snapshotProgress.ProcessedCount,
 			SuccessCount:   snapshotProgress.SuccessCount,
 			FailedCount:    snapshotProgress.ErrorCount,
@@ -827,7 +948,6 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 		}
 	}
 
-	maintenanceCtx := ctx
 	for batch := 0; batch < totalBatches; batch++ {
 		select {
 		case <-ctx.Done():
@@ -841,6 +961,32 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 			return
 		default:
 			// 继续处理
+		}
+		gate := s.currentResourceGate()
+		maintenanceConcurrency := maintenanceConcurrencyForResourceGate(gate)
+		if maintenanceConcurrency == 0 {
+			flushProgress(true)
+			pauseErr := s.store.PauseAssetMaintenanceJob(
+				ctx, jobID, resourceGatePauseMessage(gate), time.Now(),
+			)
+			if pauseErr != nil {
+				if s.log != nil {
+					s.log.Warn("pause stock data asset maintenance failed", "job_id", jobID, "error", safelog.Text(pauseErr.Error(), 240))
+				}
+				// Preserve the frozen tail even if the richer paused-state transaction
+				// failed. Recovery makes pending work claimable and finalization keeps
+				// coverage incomplete instead of silently advancing the cursor tail.
+				if _, recoverErr := s.store.RecoverInterruptedAssetMaintenanceJobs(
+					ctx, "resource pause persistence failed: "+pauseErr.Error(), time.Now(),
+				); recoverErr != nil {
+					if s.log != nil {
+						s.log.Error("recover stock maintenance tail after pause failure", "job_id", jobID, "error", safelog.Text(recoverErr.Error(), 240))
+					}
+				} else if _, finalizeErr := s.store.finalizeAssetMaintenanceJob(ctx, jobID, assetStats, failedItems, 0, 0); finalizeErr != nil && s.log != nil {
+					s.log.Error("finalize recovered stock maintenance pause", "job_id", jobID, "error", safelog.Text(finalizeErr.Error(), 240))
+				}
+			}
+			return
 		}
 
 		start := batch * batchSize
@@ -901,6 +1047,9 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 				})
 			}
 			processedCount += len(workSymbols)
+			if markErr := s.store.MarkAssetMaintenanceItemsRetryWait(ctx, jobID, workSymbols, err.Error()); markErr != nil && s.log != nil {
+				s.log.Warn("persist maintenance batch retry state failed", "job_id", jobID, "batch", batch+1, "error", safelog.Text(markErr.Error(), 240))
+			}
 			progress.CurrentBatchProgress = len(batchSymbols)
 			progress.CurrentSymbol = workSymbols[len(workSymbols)-1]
 			flushProgress(true)
@@ -908,8 +1057,10 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 		}
 
 		batchCtx := maintenanceCtx
+		quoteBatchError := ""
 		_, closingDate := dailyBarRangeStartEnd(DailyBarRange1Y, time.Now())
 		if nextCtx, _, prefillErr := s.prefillClosingDailyBarsBatch(maintenanceCtx, instruments, closingDate); prefillErr != nil {
+			quoteBatchError = safelog.Text(prefillErr.Error(), 300)
 			if s.log != nil {
 				s.log.Warn("stock daily bar batch quote prefill failed", "job_id", jobID, "batch", batch+1, "symbol_count", len(instruments), "error", safelog.Text(prefillErr.Error(), 240))
 			}
@@ -925,8 +1076,8 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 		}
 
 		// 保存股票数据，并把日 K、基础画像、公告和 AI 决策纳入同一个 per-symbol 管线。
-		// 使用 4 路 worker pool 并发处理完整本地 universe。
-		const maintenanceConcurrency = 4
+		// ponytail: resource pressure reduces this to one worker; normal hosts use
+		// two for network overlap without competing with the single DuckDB writer.
 		const progressFlushInterval = 50 // 每 50 只 symbol flush 一次进度，减少 DuckDB 写入
 
 		batchProcessed := progress.CurrentBatchProgress
@@ -973,14 +1124,27 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 					progress.CurrentBatchProgress = batchProcessed
 					needFlush := processedCount%progressFlushInterval == 0
 					mu.Unlock()
+					if markErr := s.store.MarkAssetMaintenanceItemsRetryWait(ctx, jobID, []string{symbol}, "instrument missing from batch source"); markErr != nil && s.log != nil {
+						s.log.Warn("persist missing maintenance instrument retry failed", "job_id", jobID, "symbol", symbol, "error", safelog.Text(markErr.Error(), 240))
+					}
 					if needFlush {
 						flushProgress(true)
 					}
 					return
 				}
 
+				quoteError := quoteBatchError
+				if quoteError == "" {
+					quoteError = dailyBarQuoteBatchFailure(batchCtx, symbol)
+				}
+				var quotePrefetchErr error
+				if quoteError != "" {
+					quotePrefetchErr = errors.New(quoteError)
+				}
 				result, maintainErr := s.maintainAssetForInstrument(batchCtx, inst, assetMaintenanceOptions{
 					JobID:                     jobID,
+					ItemID:                    assetMaintenanceItemID(jobID, symbol),
+					ExpectedLatestDate:        job.ExpectedLatestDate,
 					TriggerSource:             job.TriggerSource,
 					RequestedBy:               "system",
 					ForceAI:                   req.ForceAI,
@@ -989,14 +1153,12 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 					RecentAnnouncements:       recentAnnouncements[symbol],
 					AnnouncementPrefetchError: announcementContextErr,
 					AnnouncementCheckedAt:     announcementBatch.FinishedAt,
+					QuotePrefetchError:        quotePrefetchErr,
 				})
 
 				mu.Lock()
 				assetStats = mergeAssetMaintenanceStats(assetStats, result.Item)
 				if maintainErr != nil {
-					if s.log != nil {
-						s.log.Warn("stock data asset maintenance item partial", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol", inst.Symbol, "market", inst.Market, "instrument_type", inst.InstrumentType, "error", safelog.Text(maintainErr.Error(), 300))
-					}
 					failedItems = append(failedItems, UpdateFailure{
 						Symbol: symbol,
 						Reason: safelog.Text(maintainErr.Error(), 240),
@@ -1044,25 +1206,15 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob, r
 		}
 	}
 
-	endAt := time.Now()
-	// 完成更新
-	s.store.UpdateUpdateJob(ctx, StockV2UpdateJob{
-		ID:             jobID,
-		Status:         "completed",
-		TotalCount:     totalCount,
-		ProcessedCount: processedCount,
-		SuccessCount:   successCount,
-		FailedCount:    len(failedItems),
-		EndAt:          endAt,
-		FailedItems:    failedItems,
-		AssetStats:     assetStats,
-	})
+	// 完成更新。coverage 与 freshness 独立结算，第三方失败不会伪装成绿色完成。
+	if _, err := s.store.finalizeAssetMaintenanceJob(ctx, jobID, assetStats, failedItems, 0, 0); err != nil && s.log != nil {
+		s.log.Error("finalize stock data asset maintenance failed", "job_id", jobID, "error", safelog.Text(err.Error(), 300))
+	}
 	if len(failedItems) > 0 && s.log != nil {
 		s.log.Warn("stock data asset maintenance completed with item failures", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "total_count", totalCount, "processed_count", processedCount, "success_count", successCount, "failed_count", len(failedItems), "failure_sample", stockV2FailureSample(failedItems, 5))
 	}
-	// 清理过期更新历史（保留最近 100 条）
-	if err := s.store.PruneUpdateJobs(ctx, 100); err != nil {
-		s.log.Warn("prune update jobs failed", "retention_count", 100, "error", safelog.Text(err.Error(), 240))
+	if err := s.store.PruneAssetMaintenanceHistory(ctx, time.Now()); err != nil && s.log != nil {
+		s.log.Warn("prune asset maintenance history failed", "error", safelog.Text(err.Error(), 240))
 	}
 }
 
@@ -1077,7 +1229,7 @@ func assetMaintenanceUsedRemoteProfile(statuses []AssetMaintenanceSourceStatus) 
 	return false
 }
 
-func (s *Service) fetchDailyBarsForInstrument(ctx context.Context, inst StockV2Instrument) (bool, []StockV2DailyBar, []dailyBarMissingRange, error) {
+func (s *Service) fetchDailyBarsForInstrument(ctx context.Context, inst StockV2Instrument) (bool, []StockV2DailyBar, []dailyBarNoTradeCoverage, error) {
 	start, end := assetMaintenanceDailyBarStartEnd(time.Now())
 	end = dailyBarBatchTargetDate(ctx, end)
 	start, end = clampDailyBarRangeToInstrument(inst, start, end)
@@ -1092,54 +1244,63 @@ func (s *Service) fetchDailyBarsForInstrument(ctx context.Context, inst StockV2I
 	if err != nil {
 		return false, nil, nil, err
 	}
-	// Best effort: flow enrichment freshness is visible through incomplete_count,
-	// but its provider must not block missing price bars from being repaired.
-	_, _ = s.repairStoredDailyBarFlowFacets(ctx, inst, start, end)
-	// Flow-only gaps were handled in one enrichment request above. The historical
-	// source chain is reserved for missing OHLC/amount/turnover rows.
-	dates, err := s.store.GetCompleteDailyBarDates(ctx, inst.Symbol, DailyBarAdjustedNone, start, end, false)
-	if err != nil {
-		return false, nil, nil, err
-	}
 	tradingDates, err := s.observedTradingDates(ctx, start, end)
 	if err != nil {
 		return false, nil, nil, err
 	}
-	ranges := planDailyBarMissingRangesWithCalendar(dates, tradingDates, startTime, endTime)
-	ranges = excludeBatchClosingQuoteRetry(ctx, inst.Symbol, end, ranges)
 	checkedRanges, err := s.store.ListDailyBarGapChecks(ctx, inst.Symbol, DailyBarAdjustedNone, start, end)
 	if err != nil {
 		return false, nil, nil, err
 	}
-	ranges = subtractCheckedDailyBarRanges(ranges, checkedRanges)
+	storedBars, err := s.store.GetDailyBars(ctx, inst.Symbol, DailyBarAdjustedNone, start, end, 0)
+	if err != nil {
+		return false, nil, nil, err
+	}
+	coverage := planDailyBarCoverageWithCalendar(
+		storedBars, tradingDates, checkedRanges, inst.InstrumentType, start, end,
+	)
+	ranges := coverage.historicalKFetchRanges(tradingDates)
+	if len(tradingDates) == 0 {
+		dates := make([]string, 0, len(storedBars))
+		for _, bar := range storedBars {
+			if dailyBarCoreFacetsComplete(bar) {
+				dates = append(dates, bar.TradeDate)
+			}
+		}
+		ranges = planDailyBarMissingRanges(dates, startTime, endTime)
+		ranges = subtractCheckedDailyBarRanges(ranges, checkedRanges)
+	}
+	ranges = excludeBatchClosingQuoteRetry(ctx, inst.Symbol, end, ranges)
 	if len(ranges) == 0 {
 		return false, nil, nil, nil
 	}
 
-	bars, absencesConfirmed, err := s.fetchDailyBarsForMissingRanges(ctx, inst, ranges)
-	if err != nil {
-		return true, nil, nil, err
+	requestedTradingDates := dailyBarRequestedTradingDates(tradingDates, ranges)
+	bars, observations, fetchErr := s.fetchDailyBarsForMissingRanges(ctx, inst, ranges, requestedTradingDates)
+	if fetchErr != nil {
+		return true, nil, nil, fetchErr
 	}
-	var checkedAbsences []dailyBarMissingRange
-	if absencesConfirmed {
-		checkedAbsences = stableDailyBarGapChecks(dailyBarRangesWithoutReturnedBars(ranges, bars), time.Now())
-	}
+	checkedAbsences := verifyDailyBarNoTradeCoverage(tradingDates, observations, ranges, time.Now())
 
 	// 数据源成功但目标区间没有 bar，通常是停牌或尚未产生的新交易日。
 	if len(bars) == 0 {
 		return false, nil, checkedAbsences, nil
 	}
 
-	// Historical sources do not all expose order-flow fields. Enrichment runs
-	// only when a returned row actually lacks them, so a complete batch quote
-	// never causes an extra per-symbol request.
-	_ = s.enrichDailyBarsWithDataFacets(ctx, inst, bars)
+	// ponytail: the full-universe path stores price/core facets now and leaves
+	// historical flow to its bounded enrichment queue. Per-symbol Eastmoney flow
+	// calls here would multiply a normal daily scan into thousands of requests.
 	return true, bars, checkedAbsences, nil
 }
 
-func (s *Service) fetchDailyBarsForMissingRanges(ctx context.Context, inst StockV2Instrument, ranges []dailyBarMissingRange) ([]StockV2DailyBar, bool, error) {
+func (s *Service) fetchDailyBarsForMissingRanges(
+	ctx context.Context,
+	inst StockV2Instrument,
+	ranges []dailyBarMissingRange,
+	expectedDates []string,
+) ([]StockV2DailyBar, []dailyBarSourceRangeObservation, error) {
 	if len(ranges) == 0 {
-		return nil, false, nil
+		return nil, nil, nil
 	}
 
 	// All sources are requested once for the smallest envelope covering every gap.
@@ -1147,26 +1308,74 @@ func (s *Service) fetchDailyBarsForMissingRanges(ctx context.Context, inst Stock
 	startDate := ranges[0].Start
 	endDate := ranges[len(ranges)-1].End
 	var sourceErrs []error
-	var partialFallback []StockV2DailyBar
-	successfulSources := 0
+	observations := make([]dailyBarSourceRangeObservation, 0, 3)
+	bestByDate := make(map[string]StockV2DailyBar)
+	observedRange := dailyBarMissingRange{Start: startDate, End: endDate}
+	recordSuccess := func(source string, bars []StockV2DailyBar) {
+		returnedDates := make([]string, 0, len(bars))
+		for _, bar := range bars {
+			if bar.TradeDate != "" {
+				returnedDates = append(returnedDates, bar.TradeDate)
+			}
+		}
+		observations = append(observations, dailyBarSourceRangeObservation{
+			Source: source, Range: observedRange, Succeeded: true, ReturnedDates: returnedDates,
+		})
+	}
+	mergeFetched := func(bars []StockV2DailyBar) {
+		for _, bar := range filterBarsByRanges(bars, ranges) {
+			if strings.TrimSpace(bar.Symbol) == "" {
+				bar.Symbol = inst.Symbol
+			}
+			current, exists := bestByDate[bar.TradeDate]
+			if !exists || dailyBarFetchedRowScore(bar) > dailyBarFetchedRowScore(current) {
+				bestByDate[bar.TradeDate] = bar
+			}
+		}
+	}
+	result := func() []StockV2DailyBar {
+		bars := make([]StockV2DailyBar, 0, len(bestByDate))
+		for _, bar := range bestByDate {
+			bars = append(bars, bar)
+		}
+		sort.Slice(bars, func(i, j int) bool { return bars[i].TradeDate < bars[j].TradeDate })
+		return bars
+	}
+	complete := func() bool {
+		if len(expectedDates) > 0 {
+			for _, tradeDate := range expectedDates {
+				bar, ok := bestByDate[tradeDate]
+				if !ok || !dailyBarCoreFacetsComplete(bar) {
+					return false
+				}
+			}
+			return true
+		}
+		// ponytail: without an authoritative calendar, one complete row in each
+		// requested gap is only an optimization signal. Strict readiness remains
+		// blocked by the independent calendar gate until that calendar recovers.
+		for _, requested := range ranges {
+			covered := false
+			for tradeDate, bar := range bestByDate {
+				if tradeDate >= requested.Start && tradeDate <= requested.End && dailyBarCoreFacetsComplete(bar) {
+					covered = true
+					break
+				}
+			}
+			if !covered {
+				return false
+			}
+		}
+		return true
+	}
 
 	if s.thsDailyBars != nil {
 		fetched, err := s.thsDailyBars.FetchDailyBars(ctx, inst.Symbol, inst.Market, startDate, endDate)
 		if err == nil {
-			successfulSources++
-			filtered := filterBarsByRanges(fetched, ranges)
-			coreComplete := len(filtered) > 0
-			for _, bar := range filtered {
-				if !dailyBarCoreFacetsComplete(bar) {
-					coreComplete = false
-					break
-				}
-			}
-			if coreComplete {
-				return filtered, false, nil
-			}
-			if len(filtered) > 0 {
-				partialFallback = filtered
+			recordSuccess("10jqka_kline", fetched)
+			mergeFetched(fetched)
+			if complete() {
+				return result(), observations, nil
 			}
 		} else {
 			sourceErrs = append(sourceErrs, err)
@@ -1176,13 +1385,15 @@ func (s *Service) fetchDailyBarsForMissingRanges(ctx context.Context, inst Stock
 	if s.dailyBarsSource != nil {
 		fetched, err := s.dailyBarsSource.FetchDailyBars(ctx, inst.Symbol, inst.Market, startDate, endDate, DailyBarAdjustedNone, 1800)
 		if err == nil {
-			successfulSources++
 			for i := range fetched {
 				fetched[i].Symbol = inst.Symbol
 			}
-			filtered := filterBarsByRanges(fetched, ranges)
-			if len(filtered) > 0 && len(partialFallback) == 0 {
-				partialFallback = filtered
+			recordSuccess("tencent_fqkline", fetched)
+			mergeFetched(fetched)
+			if complete() {
+				// Tencent satisfied the requested core facet gap; Baidu remains the
+				// final fallback and is not contacted on this successful path.
+				return result(), observations, nil
 			}
 		} else {
 			sourceErrs = append(sourceErrs, err)
@@ -1192,27 +1403,45 @@ func (s *Service) fetchDailyBarsForMissingRanges(ctx context.Context, inst Stock
 	if s.baiduDailyBars != nil {
 		fetched, err := s.baiduDailyBars.FetchDailyBars(ctx, inst.Symbol, inst.Market, inst.InstrumentType)
 		if err == nil {
-			successfulSources++
 			for i := range fetched {
 				fetched[i].Symbol = inst.Symbol
 			}
-			filtered := filterBarsByRanges(fetched, ranges)
-			if len(filtered) > 0 {
-				return filtered, successfulSources >= 2, nil
-			}
+			recordSuccess("baidu_kline", fetched)
+			mergeFetched(fetched)
+		} else {
+			sourceErrs = append(sourceErrs, err)
 		}
-		sourceErrs = append(sourceErrs, err)
 	}
-	if len(partialFallback) > 0 {
-		return partialFallback, successfulSources >= 2, nil
+	if len(bestByDate) > 0 {
+		return result(), observations, nil
 	}
-	if successfulSources >= 2 {
-		return nil, true, nil
+	if len(observations) >= 2 {
+		return nil, observations, nil
 	}
 	if joined := errors.Join(sourceErrs...); joined != nil {
-		return nil, false, fmt.Errorf("daily bar absence was not confirmed by two sources: %w", joined)
+		return nil, observations, fmt.Errorf("daily bar absence was not confirmed by two sources: %w", joined)
 	}
-	return nil, false, errors.New("daily bar absence was not confirmed by two sources")
+	return nil, observations, errors.New("daily bar absence was not confirmed by two sources")
+}
+
+func dailyBarFetchedRowScore(bar StockV2DailyBar) int {
+	score := 0
+	if dailyBarOHLCVComplete(bar) {
+		score += 8
+	}
+	if dailyBarAmountPresent(bar) {
+		score += 2
+	}
+	if dailyBarTurnoverPresent(bar) {
+		score += 2
+	}
+	if dailyBarNetInflowPresent(bar) {
+		score++
+	}
+	if dailyBarMainNetInflowPresent(bar) {
+		score++
+	}
+	return score
 }
 
 // GetUpdateJob 获取更新任务
@@ -1345,6 +1574,30 @@ func (s *Service) StartBackground(ctx context.Context) {
 	s.bgWg.Add(1)
 	go func() {
 		defer s.bgWg.Done()
+		s.runDailyBarFlowRepairScheduler(bgCtx)
+	}()
+
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runAssetMaintenanceRetryScheduler(bgCtx)
+	}()
+
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runMajorAnnouncementBodyScheduler(bgCtx)
+	}()
+
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runReferenceTradingCalendarScheduler(bgCtx)
+	}()
+
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
 		s.runScheduledUpdater(bgCtx)
 	}()
 
@@ -1449,8 +1702,26 @@ const (
 )
 
 func (s *Service) checkAndExecuteScheduledUpdateAt(ctx context.Context, now time.Time) {
-	latest, latestOK := s.latestUniverseUpdateJob(ctx)
-	decision, slotStart := decideScheduledUniverseUpdate(s.settings.LastScheduledUpdate, latest, latestOK, now)
+	due, slotStart := shouldRunDailyUniverseUpdate(s.settings.LastScheduledUpdate, now)
+	if !due {
+		return
+	}
+	latest, latestOK := s.currentUniverseUpdateJob(ctx, slotStart)
+	gate := s.currentResourceGate()
+	if latestOK && latest.Status == "paused" && latest.SlotStart.Equal(slotStart) &&
+		(latest.TotalCount > 0 || gate.State == ResourceGatePaused) {
+		return
+	}
+	if latestOK && referenceTradingCalendarProviderBackoffActive(latest, slotStart, now) {
+		return
+	}
+	if latestOK && !latest.UniverseVerified {
+		lastDiscoveryAttempt, err := s.store.GetAssetMaintenanceCursorUpdatedAt(ctx, assetUniverseDiscoveryCursorScope)
+		if err == nil && shouldWaitForUniverseDiscoveryRetry(latest, slotStart, lastDiscoveryAttempt, now) {
+			return
+		}
+	}
+	decision, _ := decideScheduledUniverseUpdate(s.settings.LastScheduledUpdate, latest, latestOK, now)
 	switch decision {
 	case scheduledUniverseUpdateSkip, scheduledUniverseUpdateWait:
 		return
@@ -1463,7 +1734,9 @@ func (s *Service) checkAndExecuteScheduledUpdateAt(ctx context.Context, now time
 	if s.log != nil {
 		s.log.Info("executing scheduled stock data asset maintenance", "trigger_type", "scheduled", "trigger_source", "auto-updater", "schedule", "daily_23:00", "slot_start", slotStart.Format(time.RFC3339Nano), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano))
 	}
-	if _, err := s.ExecuteUniverseUpdate(ctx, UniverseUpdateRequest{TriggerType: "scheduled", TriggerSource: "auto-updater"}); err != nil {
+	if _, err := s.ExecuteUniverseUpdate(ctx, UniverseUpdateRequest{
+		TriggerType: "scheduled", TriggerSource: "auto-updater", ScheduledSlotStart: slotStart,
+	}); err != nil {
 		if s.log != nil {
 			s.log.Error("scheduled update failed", "trigger_type", "scheduled", "trigger_source", "auto-updater", "schedule", "daily_23:00", "slot_start", slotStart.Format(time.RFC3339Nano), "last_scheduled_update", s.settings.LastScheduledUpdate.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 300))
 		}
@@ -1473,16 +1746,29 @@ func (s *Service) checkAndExecuteScheduledUpdateAt(ctx context.Context, now time
 
 func decideScheduledUniverseUpdate(lastScheduled time.Time, latest StockV2UpdateJob, latestOK bool, now time.Time) (scheduledUniverseUpdateDecision, time.Time) {
 	due, slotStart := shouldRunDailyUniverseUpdate(lastScheduled, now)
-	if !due && !shouldRetryFailedUniverseUpdateSlot(latest, latestOK, slotStart, now) {
+	retryIncompleteSlot := latestOK && latest.Status == "failed" &&
+		latest.Scope == AssetMaintenanceScopeFullUniverse &&
+		latest.CoverageStatus != AssetMaintenanceCoverageCovered && latest.SlotStart.Equal(slotStart)
+	if !due && !retryIncompleteSlot {
 		return scheduledUniverseUpdateSkip, slotStart
 	}
 	if latestOK && latest.Status == "running" {
 		return scheduledUniverseUpdateWait, slotStart
 	}
-	if latestOK && isRecentCompletedUniverseUpdate(latest, now, 24*time.Hour) {
+	if latestOK && referenceTradingCalendarProviderBackoffActive(latest, slotStart, now) {
+		return scheduledUniverseUpdateWait, slotStart
+	}
+	if latestOK && latest.Scope == AssetMaintenanceScopeFullUniverse &&
+		latest.CoverageStatus == AssetMaintenanceCoverageCovered && latest.SlotStart.Equal(slotStart) {
 		return scheduledUniverseUpdateConfirm, slotStart
 	}
 	return scheduledUniverseUpdateStart, slotStart
+}
+
+func shouldWaitForUniverseDiscoveryRetry(latest StockV2UpdateJob, slotStart, lastAttempt, now time.Time) bool {
+	return latest.Scope == AssetMaintenanceScopeFullUniverse && !latest.UniverseVerified &&
+		latest.SlotStart.Equal(slotStart) && !lastAttempt.IsZero() &&
+		now.Before(lastAttempt.Add(assetUniverseDiscoveryFallbackRetryInterval))
 }
 
 func shouldRunDailyUniverseUpdate(lastScheduled, now time.Time) (bool, time.Time) {
@@ -1508,7 +1794,30 @@ func shouldRunDailyUniverseUpdate(lastScheduled, now time.Time) (bool, time.Time
 	return lastScheduled.In(loc).Before(slotStart), slotStart
 }
 
-func (s *Service) latestUniverseUpdateJob(ctx context.Context) (StockV2UpdateJob, bool) {
+func (s *Service) currentUniverseUpdateJob(ctx context.Context, slotStart time.Time) (StockV2UpdateJob, bool) {
+	slot, exists, err := s.store.GetAssetMaintenanceSlot(ctx, slotStart)
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("check stock data maintenance slot failed", "slot_start", slotStart.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 240))
+		}
+		return StockV2UpdateJob{}, false
+	}
+	if exists && slot.JobID != "" {
+		job, jobErr := s.store.GetUpdateJob(ctx, slot.JobID)
+		if jobErr == nil {
+			return job, true
+		}
+		if !errors.Is(jobErr, ErrUpdateJobNotFound) && s.log != nil {
+			s.log.Warn("check stock data maintenance slot job failed", "job_id", slot.JobID, "error", safelog.Text(jobErr.Error(), 240))
+		}
+	}
+	slotJob, err := s.store.GetLatestUniverseUpdateJobForSlot(ctx, slotStart)
+	if err == nil {
+		return slotJob, true
+	}
+	if !errors.Is(err, ErrUpdateJobNotFound) && s.log != nil {
+		s.log.Warn("check stock data maintenance slot update job failed", "slot_start", slotStart.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 240))
+	}
 	latest, err := s.store.GetLatestUpdateJob(ctx)
 	if errors.Is(err, ErrUpdateJobNotFound) {
 		return StockV2UpdateJob{}, false
@@ -1519,25 +1828,10 @@ func (s *Service) latestUniverseUpdateJob(ctx context.Context) (StockV2UpdateJob
 		}
 		return StockV2UpdateJob{}, false
 	}
-	return latest, true
-}
-
-func isRecentCompletedUniverseUpdate(latest StockV2UpdateJob, now time.Time, interval time.Duration) bool {
-	if interval <= 0 {
-		interval = time.Hour
+	if latest.Status == "running" {
+		return latest, true
 	}
-	if latest.Status != "completed" {
-		return false
-	}
-	return !latest.EndAt.IsZero() && now.Sub(latest.EndAt) >= 0 && now.Sub(latest.EndAt) < interval
-}
-
-func shouldRetryFailedUniverseUpdateSlot(latest StockV2UpdateJob, ok bool, slotStart, now time.Time) bool {
-	if !ok || latest.Status != "failed" || slotStart.IsZero() {
-		return false
-	}
-	createdAt := latest.CreatedAt.In(slotStart.Location())
-	return !createdAt.Before(slotStart) && !createdAt.After(now.In(slotStart.Location()))
+	return StockV2UpdateJob{}, false
 }
 
 func (s *Service) markScheduledUpdateChecked(ctx context.Context, at time.Time) {

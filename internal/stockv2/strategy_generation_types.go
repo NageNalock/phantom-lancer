@@ -44,11 +44,13 @@ var (
 	ErrInvalidStrategyGenerationInput      = errors.New("invalid strategy generation input")
 	ErrInvalidStrategyGenerationResult     = errors.New("invalid strategy generation result")
 	ErrStrategyGenerationPortfolioRequired = errors.New("portfolioId is required for portfolio_strategy_diagnosis")
+	ErrStrategyGenerationAssetsNotReady    = errors.New("strategy generation assets are not ready")
 )
 
 type StrategyGenerationInput struct {
 	SchemaVersion     string                               `json:"schemaVersion,omitempty"`
 	Mode              string                               `json:"mode"`
+	ReadinessMode     string                               `json:"readinessMode,omitempty"`
 	UserGoal          string                               `json:"userGoal,omitempty"`
 	UserIntent        string                               `json:"userIntent,omitempty"`
 	PortfolioID       string                               `json:"portfolioId,omitempty"`
@@ -59,6 +61,18 @@ type StrategyGenerationInput struct {
 	TimeHorizon       string                               `json:"timeHorizon,omitempty"`
 	AllowedActions    []string                             `json:"allowedActions,omitempty"`
 	EvidenceScope     map[string]bool                      `json:"evidenceScope,omitempty"`
+}
+
+type StrategyGenerationReadinessError struct {
+	Decision AssetReadinessDecision `json:"decision"`
+}
+
+func (e *StrategyGenerationReadinessError) Error() string {
+	return ErrStrategyGenerationAssetsNotReady.Error()
+}
+
+func (e *StrategyGenerationReadinessError) Unwrap() error {
+	return ErrStrategyGenerationAssetsNotReady
 }
 
 type StrategyGenerationTargetInstrument struct {

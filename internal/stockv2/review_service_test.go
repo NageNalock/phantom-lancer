@@ -45,6 +45,10 @@ func TestCreateReviewFromMonitorHitBuildsContextPack(t *testing.T) {
 	if reloaded.InputContext.Portfolio.Snapshot.TotalAssetValue != 10000 {
 		t.Fatalf("snapshot total = %.2f, want 10000", reloaded.InputContext.Portfolio.Snapshot.TotalAssetValue)
 	}
+	decision, ok := reloaded.InputContext.Freshness["assetReadinessDecision"].(map[string]any)
+	if !ok || decision["mode"] != AssetReadinessModeAllowDegraded || decision["status"] != AssetReadinessDecisionDegraded {
+		t.Fatalf("persisted review readiness decision = %#v", reloaded.InputContext.Freshness["assetReadinessDecision"])
+	}
 }
 
 func TestCreateReviewFromMonitorHitIsIdempotentWhileActive(t *testing.T) {

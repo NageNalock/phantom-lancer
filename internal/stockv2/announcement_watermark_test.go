@@ -65,6 +65,78 @@ func TestAnnouncementsAfterAIProfileIncludesDelayedPublication(t *testing.T) {
 	}
 }
 
+func TestAnnouncementSyncAdvancesAIRevisionAtomicallyOnMaterialChange(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	profile, err := svc.store.UpsertStockProfile(ctx, StockProfile{
+		Symbol: "000001", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "平安银行",
+		ProfileText: "基础画像", ProfileTextZh: "基础画像", BaseProfileHash: "base-v1",
+		BaseProfileUpdatedAt: time.Now().Add(-time.Hour), AIProfileStatus: StockProfileAIStatusMissing,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, exists, err := svc.store.GetStockProfileAIState(ctx, profile.Symbol)
+	if err != nil || !exists {
+		t.Fatalf("initial state exists=%v err=%v", exists, err)
+	}
+	now := time.Now()
+	item := StockV2Announcement{
+		Source: StockV2AnnouncementSourceCninfo, Symbol: profile.Symbol, Market: profile.Market,
+		AnnouncementID: "ann-1", Title: "重大合同公告", ContentHash: "hash-v1", FetchedAt: now,
+	}
+	state := AnnouncementSyncState{
+		Source: StockV2AnnouncementSourceCninfo, Market: profile.Market,
+		CoveredThrough: now, LastSuccessAt: now,
+	}
+	if inserted, err := svc.store.CommitAnnouncementSyncBatch(ctx, []StockV2Announcement{item}, []AnnouncementSyncState{state}); err != nil || len(inserted) != 1 {
+		t.Fatalf("first sync inserted=%d err=%v", len(inserted), err)
+	}
+	afterFirst, _, err := svc.store.GetStockProfileAIState(ctx, profile.Symbol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterFirst.AnnouncementRevision != before.AnnouncementRevision+1 || afterFirst.DesiredInputVersion == before.DesiredInputVersion {
+		t.Fatalf("first revision before=%+v after=%+v", before, afterFirst)
+	}
+
+	item.FetchedAt = now.Add(time.Minute)
+	if inserted, err := svc.store.CommitAnnouncementSyncBatch(ctx, []StockV2Announcement{item}, []AnnouncementSyncState{state}); err != nil || len(inserted) != 0 {
+		t.Fatalf("duplicate sync inserted=%d err=%v", len(inserted), err)
+	}
+	afterDuplicate, _, _ := svc.store.GetStockProfileAIState(ctx, profile.Symbol)
+	if afterDuplicate.AnnouncementRevision != afterFirst.AnnouncementRevision {
+		t.Fatalf("duplicate advanced revision: first=%d duplicate=%d", afterFirst.AnnouncementRevision, afterDuplicate.AnnouncementRevision)
+	}
+
+	item.Title = "重大合同公告（更正）"
+	if _, err := svc.store.CommitAnnouncementSyncBatch(ctx, []StockV2Announcement{item}, []AnnouncementSyncState{state}); err != nil {
+		t.Fatal(err)
+	}
+	afterChange, _, _ := svc.store.GetStockProfileAIState(ctx, profile.Symbol)
+	if afterChange.AnnouncementRevision != afterFirst.AnnouncementRevision+1 {
+		t.Fatalf("material change revision=%d, want %d", afterChange.AnnouncementRevision, afterFirst.AnnouncementRevision+1)
+	}
+
+	rollbackItem := item
+	rollbackItem.AnnouncementID = "ann-rollback"
+	rollbackItem.ContentHash = "hash-rollback"
+	if _, err := svc.store.CommitAnnouncementSyncBatch(ctx, []StockV2Announcement{rollbackItem}, []AnnouncementSyncState{{
+		Source: StockV2AnnouncementSourceCninfo,
+	}}); err == nil {
+		t.Fatal("invalid cursor state unexpectedly committed")
+	}
+	afterRollback, _, _ := svc.store.GetStockProfileAIState(ctx, profile.Symbol)
+	if afterRollback.AnnouncementRevision != afterChange.AnnouncementRevision {
+		t.Fatalf("rolled-back sync advanced revision: before=%d after=%d", afterChange.AnnouncementRevision, afterRollback.AnnouncementRevision)
+	}
+	count, err := svc.store.CountAnnouncements(ctx, AnnouncementListFilter{Symbol: profile.Symbol})
+	if err != nil || count != 1 {
+		t.Fatalf("rolled-back announcement count=%d err=%v", count, err)
+	}
+}
+
 func TestRecentAnnouncementsBySymbolsKeepsBacklogBeyondTwenty(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStockProfileTestService(t)

@@ -11,6 +11,274 @@ type dailyBarMissingRange struct {
 	End   string
 }
 
+// dailyBarCoveragePlan separates a missing trading date from a stored row whose
+// required fields are incomplete. Historical K sources repair DateGaps and
+// CoreFacetGaps; the rate-limited fund-flow source repairs FlowFacetGaps only.
+type dailyBarCoveragePlan struct {
+	DateGaps      []dailyBarMissingRange
+	CoreFacetGaps []dailyBarMissingRange
+	FlowFacetGaps []dailyBarMissingRange
+}
+
+type dailyBarSourceRangeObservation struct {
+	Source        string
+	Range         dailyBarMissingRange
+	Succeeded     bool
+	ReturnedDates []string
+}
+
+// dailyBarNoTradeCoverage is evidence that two independent successful source
+// checks returned no bar for a trading-date range. It is not a synthetic bar.
+type dailyBarNoTradeCoverage struct {
+	Range     dailyBarMissingRange
+	Sources   []string
+	CheckedAt time.Time
+}
+
+func planDailyBarCoverageWithCalendar(
+	bars []StockV2DailyBar,
+	tradingDates []string,
+	verifiedNoTrade []dailyBarMissingRange,
+	instrumentType string,
+	startDate string,
+	endDate string,
+) dailyBarCoveragePlan {
+	calendar := dailyBarDatesInWindow(tradingDates, startDate, endDate)
+	if len(calendar) == 0 {
+		return dailyBarCoveragePlan{}
+	}
+
+	barsByDate := make(map[string][]StockV2DailyBar, len(bars))
+	for _, bar := range bars {
+		if bar.TradeDate < startDate || bar.TradeDate > endDate {
+			continue
+		}
+		barsByDate[bar.TradeDate] = append(barsByDate[bar.TradeDate], bar)
+	}
+
+	dateMissing := make(map[string]struct{})
+	coreMissing := make(map[string]struct{})
+	flowMissing := make(map[string]struct{})
+	requireFlow := normalizeInstrumentType(instrumentType) == InstrumentTypeStock
+	for _, tradeDate := range calendar {
+		if dailyBarDateInRanges(tradeDate, verifiedNoTrade) {
+			continue
+		}
+		rows := barsByDate[tradeDate]
+		if len(rows) == 0 {
+			dateMissing[tradeDate] = struct{}{}
+			continue
+		}
+		coreComplete := false
+		analysisComplete := false
+		for _, bar := range rows {
+			if dailyBarCoreFacetsComplete(bar) {
+				coreComplete = true
+			}
+			if dailyBarAnalysisFacetsComplete(bar, instrumentType) {
+				analysisComplete = true
+			}
+		}
+		if !coreComplete {
+			coreMissing[tradeDate] = struct{}{}
+			continue
+		}
+		if requireFlow && !analysisComplete {
+			flowMissing[tradeDate] = struct{}{}
+		}
+	}
+
+	return dailyBarCoveragePlan{
+		DateGaps:      dailyBarRangesForDateSet(calendar, dateMissing),
+		CoreFacetGaps: dailyBarRangesForDateSet(calendar, coreMissing),
+		FlowFacetGaps: dailyBarRangesForDateSet(calendar, flowMissing),
+	}
+}
+
+func (p dailyBarCoveragePlan) historicalKFetchRanges(tradingDates []string) []dailyBarMissingRange {
+	return mergeDailyBarRangesByTradingCalendar(
+		append(append([]dailyBarMissingRange(nil), p.DateGaps...), p.CoreFacetGaps...),
+		tradingDates,
+	)
+}
+
+func mergeDailyBarRangesByTradingCalendar(ranges []dailyBarMissingRange, tradingDates []string) []dailyBarMissingRange {
+	calendar := dailyBarDatesInWindow(tradingDates, "", "")
+	selected := make(map[string]struct{})
+	for _, tradeDate := range calendar {
+		if dailyBarDateInRanges(tradeDate, ranges) {
+			selected[tradeDate] = struct{}{}
+		}
+	}
+	return dailyBarRangesForDateSet(calendar, selected)
+}
+
+func verifyDailyBarNoTradeCoverage(
+	tradingDates []string,
+	observations []dailyBarSourceRangeObservation,
+	requestedRanges []dailyBarMissingRange,
+	now time.Time,
+) []dailyBarNoTradeCoverage {
+	calendar := dailyBarDatesInWindow(tradingDates, "", "")
+	cutoff := now.In(chinaMarketTZ).AddDate(0, 0, -3).Format("2006-01-02")
+	type verifiedDate struct {
+		date    string
+		sources []string
+	}
+	verified := make([]verifiedDate, 0, len(calendar))
+	for _, tradeDate := range calendar {
+		if tradeDate > cutoff || !dailyBarDateInRanges(tradeDate, requestedRanges) {
+			continue
+		}
+		sourceSet := make(map[string]struct{})
+		for _, observation := range observations {
+			source := strings.TrimSpace(observation.Source)
+			if !observation.Succeeded || source == "" ||
+				tradeDate < observation.Range.Start || tradeDate > observation.Range.End ||
+				dailyBarDateInList(tradeDate, observation.ReturnedDates) {
+				continue
+			}
+			sourceSet[source] = struct{}{}
+		}
+		if len(sourceSet) < 2 {
+			continue
+		}
+		sources := make([]string, 0, len(sourceSet))
+		for source := range sourceSet {
+			sources = append(sources, source)
+		}
+		sort.Strings(sources)
+		verified = append(verified, verifiedDate{date: tradeDate, sources: sources})
+	}
+
+	out := make([]dailyBarNoTradeCoverage, 0, len(verified))
+	for _, item := range verified {
+		if len(out) > 0 &&
+			dailyBarStringSlicesEqual(out[len(out)-1].Sources, item.sources) &&
+			dailyBarDatesAdjacentInCalendar(out[len(out)-1].Range.End, item.date, calendar) {
+			out[len(out)-1].Range.End = item.date
+			continue
+		}
+		out = append(out, dailyBarNoTradeCoverage{
+			Range:     dailyBarMissingRange{Start: item.date, End: item.date},
+			Sources:   item.sources,
+			CheckedAt: now,
+		})
+	}
+	return out
+}
+
+func dailyBarRequestedTradingDates(tradingDates []string, ranges []dailyBarMissingRange) []string {
+	dates := dailyBarDatesInWindow(tradingDates, "", "")
+	out := make([]string, 0, len(dates))
+	for _, tradeDate := range dates {
+		if dailyBarDateInRanges(tradeDate, ranges) {
+			out = append(out, tradeDate)
+		}
+	}
+	return out
+}
+
+func dailyBarDatesInWindow(dates []string, startDate, endDate string) []string {
+	seen := make(map[string]struct{}, len(dates))
+	out := make([]string, 0, len(dates))
+	for _, tradeDate := range dates {
+		tradeDate = strings.TrimSpace(tradeDate)
+		if _, err := time.Parse("2006-01-02", tradeDate); err != nil ||
+			(startDate != "" && tradeDate < startDate) ||
+			(endDate != "" && tradeDate > endDate) {
+			continue
+		}
+		if _, ok := seen[tradeDate]; ok {
+			continue
+		}
+		seen[tradeDate] = struct{}{}
+		out = append(out, tradeDate)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func dailyBarRangesForDateSet(calendar []string, selected map[string]struct{}) []dailyBarMissingRange {
+	var out []dailyBarMissingRange
+	start := ""
+	end := ""
+	for _, tradeDate := range calendar {
+		if _, ok := selected[tradeDate]; !ok {
+			if start != "" {
+				out = append(out, dailyBarMissingRange{Start: start, End: end})
+				start, end = "", ""
+			}
+			continue
+		}
+		if start == "" {
+			start = tradeDate
+		}
+		end = tradeDate
+	}
+	if start != "" {
+		out = append(out, dailyBarMissingRange{Start: start, End: end})
+	}
+	return out
+}
+
+func dailyBarDateInRanges(tradeDate string, ranges []dailyBarMissingRange) bool {
+	for _, item := range ranges {
+		if item.Start <= tradeDate && tradeDate <= item.End {
+			return true
+		}
+	}
+	return false
+}
+
+func dailyBarDateInList(tradeDate string, dates []string) bool {
+	for _, item := range dates {
+		if strings.TrimSpace(item) == tradeDate {
+			return true
+		}
+	}
+	return false
+}
+
+func dailyBarStringSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeDailyBarEvidenceSources(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func dailyBarDatesAdjacentInCalendar(left, right string, calendar []string) bool {
+	for index := 1; index < len(calendar); index++ {
+		if calendar[index-1] == left && calendar[index] == right {
+			return true
+		}
+	}
+	return false
+}
+
 func clampDailyBarRangeToInstrument(inst StockV2Instrument, startDate, endDate string) (string, string) {
 	if listDate := normalizedInstrumentBoundaryDate(inst.ListDate); listDate != "" && (startDate == "" || listDate > startDate) {
 		startDate = listDate

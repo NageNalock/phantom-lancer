@@ -2,7 +2,7 @@
 
 > 文档日期：2026-07-08
 >
-> 状态：V2 数据资产维护重构设计
+> 状态：V2 数据资产维护重构已实现，按 2026-07-12 的本机资源约束验收
 >
 > REPLACES：当前“统一数据资产维护 + 独立画像自动维护 / 深度画像队列”的并行实现思路。后续实现应以本文为准，将画像基础更新、公告/重大事项增量和 AI 画像总结并入统一数据资产维护管线。
 >
@@ -57,7 +57,7 @@
 - 自动修改持仓。
 - 用 Agent 替代确定性数据采集。
 - 把外部网页搜索能力做进主程序。外部研究仍由 Codex CLI 在 Agent 任务中按需完成。
-- 一次性建成完整公告全文解析、财报解析和产业知识图谱。
+- 一次性建成公告 OCR、版面 / 表格结构化抽取、完整全文语义解析、财报解析和产业知识图谱。当前只提供受限的 PDF 文本摘录，不把扫描件或复杂版式描述成已完成全文理解。
 
 第一版应先做稳定的增量资产维护和触发机制，再扩展更复杂的信息抽取。
 
@@ -228,7 +228,8 @@
 - 中间缺口：按缺口段抓取。
 
 每轮批量维护额外只请求一次腾讯上证指数 K 线作为独立交易日历锚，并持久化日期；失败时回退到本地已观测日历，
-不会为每个标的重复请求日历。
+不会为每个标的重复请求日历。权威日历失败时不再中止独立的 F10 / 公告检查，但本轮 market freshness 保持
+`retrying`；失败尝试和 15 分钟共享退避持久化，由低成本日历重试器恢复，不能用普通日 K 观测洗成权威 ready。
 
 ### 7.1 数据源
 
@@ -236,11 +237,11 @@
 
 1. 同花顺 line（`d.10jqka.com.cn/v6/line`）作为不复权主源，一次返回目标窗口所需的 OHLCV、`amount`（成交额）和 `turnover_rate`（换手率）。
 2. 腾讯 fqkline 作为第二源；它不含 amount/turnover_rate，因此先保留为 OHLCV 部分兜底，同时继续尝试最终字段完整兜底。
-3. 百度财经（`finance.pae.baidu.com/selfselect/getstockquotation`）仅在同花顺失败后尝试；百度仍失败时保留已成功的腾讯 OHLCV，不因补充字段失败丢弃行情。
+3. 百度财经（`finance.pae.baidu.com/selfselect/getstockquotation`）仅在前两源仍未完整覆盖目标交易日时尝试；百度仍失败时保留已成功的同花顺 / 腾讯日期，不因补充字段失败丢弃行情。
 
 当前交易日先使用批量收盘行情（每批最多 80 个标的），东财提供成交额、换手率和分档净流入，失败时整批降级腾讯。整个维护任务只用首批探测一次 `QuoteAt` 众数以确定真实交易日；法定休市时复用本地最近交易日，不会对全市场发无效请求，也不会退化为逐股请求。
 
-历史缺口继续按同花顺 → 腾讯/百度字段补全顺序逐标的补齐。同一标的存在多个缺口时，以最早开始日和最晚结束日组成一个请求区间，响应在本地过滤，避免按缺口逐段请求。请求窗口按上市日/退市日裁剪；T-3 以前的空档必须至少两个独立源都成功返回空结果才写入持久化 negative coverage，且 30 天后重新验证，避免供应商漏行被永久缓存。最近三天始终允许延迟修正。每次成功落盘或指数锚确认的交易日会进入 `stockv2_trading_calendar`，中间缺口不把春节、国庆等休市日期当成缺口。百度仅是最终兜底，403 会进入冷却，不中断其他标的的基础维护。
+历史缺口继续按同花顺 → 腾讯 → 百度顺序逐标的补齐。同一标的存在多个缺口时，以最早开始日和最晚结束日组成一个请求区间，响应在本地过滤，并按交易日择优合并多个源的互补结果，避免按缺口逐段请求或被某个源的部分响应提前截断。请求窗口按上市日/退市日裁剪；T-3 以前的空档必须至少两个独立源都成功返回空结果才写入持久化 negative coverage，且 30 天后重新验证，避免供应商漏行被永久缓存。包络内不属于本次缺口的日期不能扩大成无成交证据；最近三天始终允许延迟修正。每次成功落盘或指数锚确认的交易日会进入 `stockv2_trading_calendar`，中间缺口不把春节、国庆等休市日期当成缺口。百度仅是最终兜底，403 会进入冷却，不中断其他标的的基础维护。
 
 - 东财资金流端点（`push2his.eastmoney.com/api/qt/stock/fflow/daykline/get`）仅在股票行缺少资金流字段时提供 `NetInflow`/`MainNetInflow` enrichment；只缺资金流时直接修复本地行，不重拉历史 K。首个失败触发 10 分钟共享冷却，避免外部故障放大为全市场逐股请求。
 
@@ -281,7 +282,7 @@ base_profile_hash = hash(normalized_base_profile_input)
 每天仍用批量行情和 instrument 做名称/市场/类型及本地基础字段比较；发现变化才提前绕过缓存。
 `base_profile_updated_at` 只表示基础内容版本变化时间，`base_profile_checked_at` 表示最近一次完整 F10 成功检查时间；
 内容未变只推进 checked，AI 新鲜度仍与 updated 内容版本比较。完整 F10 刷新失败时两个时间都不推进。
-首个网络超时、403、429 或 5xx 会触发 10 分钟 provider 级冷却，避免故障时继续执行 `5000 × 3` 请求。
+首个网络超时、403、429 或 5xx 会触发 10 分钟 provider 级冷却，避免故障时继续执行“全市场标的数 × 3”请求。
 
 - 节省：每只股票 3 次 HTTP 请求（日常维护中大部分股票命中缓存）
 - 代价：F10 级别变化（如经营范围变更）最多延迟 7 天检测
@@ -295,13 +296,14 @@ base_profile_hash = hash(normalized_base_profile_input)
 
 1. 按 SH / SZ / BJ 三个市场读取持久化 `covered_through`。
 2. 使用 6 小时重叠窗口分页拉取巨潮全市场公告，不再逐股请求。
-3. 所有市场、所有分页成功后，一次事务完成精确去重、公告落库和 cursor 推进。
-4. 任一分页失败时不落部分批次、不推进 cursor，且不退化为数千次单股请求。
-5. 新公告在内存中按 symbol 分发；本地一次批量查询补充“上次 AI 之后”的公告上下文。
-6. 标记重大事项并统计 `announcement_new_count` / `major_event_new_count`，再进入 AI 触发判断。
+3. CNINFO HTTP 200 仍必须校验响应 envelope：`announcements` 必须是数组，并且至少存在一个合法的总数字段；空响应、`null`、未知 shape 或字段漂移全部 fail-closed。
+4. 所有市场、所有分页以及当日历史复核桶成功后，一次事务完成精确去重、公告落库和 cursor 推进。
+5. 任一分页或 envelope 校验失败时不落部分批次、不推进任何 cursor，且不退化为数千次单股请求。
+6. 除 6 小时增量窗口外，每个市场每个上海自然日最多复核一个历史日期桶。`late_recheck_started_at`、`late_recheck_covered_through` 和 `last_late_recheck_at` 持久化该进度；手动维护和失败重试不能在同一天连续推进多个桶。
+7. 新公告在内存中按 symbol 分发；本地一次批量查询补充“上次 AI 之后”的公告上下文。
+8. 标记重大事项并统计 `announcement_new_count` / `major_event_new_count`，再进入 AI 触发判断。
 
-公告水位同时比较 `published_at` 和首次 `fetched_at`，因此延迟披露 / 延迟入库不会被旧发布时间吞掉；
-每标的最近上下文上限为 100 条，不再因旧的 20 条限制漏掉常见积压。
+历史复核从首次启用日的 D-30 桶开始，每个成功的上海自然日向前推进一个日期桶。首次严格 warm-up 约需 30 个成功维护日；完成前 `message_ready` / `analysis_ready` 保持 false，并返回 message reason `announcement_late_recheck_incomplete`，只有调用方显式选择 degraded 模式才能继续。warm-up 后维持约 30 天的迟到发现上界：已入库公告仍同时保留 `published_at` 和首次 `fetched_at`，所以旧发布时间的迟到记录也会触发新版 AI；但第三方持续失败或公告迟到超过 30 天时不能承诺发现。每标的最近上下文上限为 100 条，不再因旧的 20 条限制漏掉常见积压。
 
 单股手动维护仍保留单股巨潮查询路径。
 
@@ -310,6 +312,10 @@ base_profile_hash = hash(normalized_base_profile_input)
 - 公告是强信息面资产，来源明确、可追溯、可长期保存。
 - 新闻事件是消息面候选资产，用于高召回监控和主题发现。
 - 两者可以共同进入 Agent Context Pack，但不应混在同一张表里。
+
+当前版本持久化官方公告 ID、标题、分类、发布时间、重大事项规则、版本号和官方 PDF URL，并以这些强来源元数据触发 AI 重建。重大公告正文由可选的 Poppler `pdftotext` worker 处理：只允许巨潮官方 HTTPS PDF，单 PDF 上限 8 MiB，只抽取前 8 页并保存最多 24 KiB 摘录；worker 每 5 分钟运行一次、每批最多 4 份，上海自然日预算为 20 次请求和 64 MiB，claim、lease、重试和预算均持久化。
+
+部署机找不到 `pdftotext` 时，worker 不 claim、也不发起 PDF 网络请求，公告保持 `metadata_only`，readiness overview 通过 `announcementBodyParserAvailable=false` 明确暴露部署缺口。存在正文尚未达到 `text_ready` 的重大公告时，严格 analysis readiness 必须阻止消费，返回 limitation `major_announcement_content_status_unavailable` 和 analysis reason `major_announcement_content_unavailable`；显式 degraded 模式可以继续，但必须展示该限制。扫描 PDF 的 OCR、复杂版面 / 表格结构化抽取和完整全文语义解析仍是非目标，空文本或仅扫描件不能被洗成 ready。
 
 ## 10. AI 画像总结触发
 
@@ -341,7 +347,9 @@ AI prompt 必须包含：
 
 AI 输出仍只更新画像总结和检索辅助字段，不生成交易建议。
 
-AI 任务写入 `stockv2_stock_profile_ai_queue`：同一 symbol 只有一行，输入版本相同则合并，运行中出现新输入则保留新版本并在旧运行结束后重新排队。worker 使用 lease、心跳和退避，服务重启时恢复未完成任务；旧版本结果在写画像前再次校验版本，不能覆盖新输入。公告上下文失败时队列进入 `retry_wait`，不会使用不完整上下文生成；后续公告同步成功会刷新持久化 payload。上一版 AI 总结位于 prompt 前部，整体截断时仍会保留。
+AI 任务写入 `stockv2_stock_profile_ai_queue`：同一 symbol 只有一行，输入版本相同则合并，运行中出现新输入则保留新版本并在旧运行结束后重新排队。SQLite 队列只保存 symbol、目标版本、优先级和 lease 等引用状态，不保存可陈旧的序列化 prompt/payload；worker 每次从 DuckDB 权威状态重建最新上下文。worker 使用 lease、心跳和退避，服务重启时恢复未完成任务；旧版本结果在写画像前再次校验版本，不能覆盖新输入。公告上下文失败时队列进入 `retry_wait`，不会使用不完整上下文生成；后续公告同步成功会按最新权威版本重新协调入队。上一版 AI 总结从不可变的已应用版本读取并位于 prompt 前部，整体截断时仍会保留。
+
+权威目标版本为 `base_profile_hash + announcement_revision + data_summary_version + manual_generation` 的稳定摘要。最近 5 根日 K 的数据摘要只会刷新已经 pending / running 的目标，防止执行期间行情变化让旧结果落库；一个已 ready 且基础画像、公告均未变化的标的不会仅因每日行情滚动而每天重跑 AI。应用新版本前会移除上一不可变版本贡献的 AI 标签，再合并新结果，同时保留 F10 与 AI 同名的基础字段，避免画像标签永久累积或误删基础数据。
 
 `ai_profile_updated_at` 只表示最后一次成功画像时间，`ai_profile_attempted_at` 单独记录失败尝试并用于退避。因此失败重试仍会携带“最后成功画像之后”的全部公告。基础画像合并与 AI 结果落库按 symbol 串行，避免异步 worker 与基础刷新互相覆盖字段。
 
@@ -354,7 +362,7 @@ AI 任务写入 `stockv2_stock_profile_ai_queue`：同一 symbol 只有一行，
 建议配置：
 
 - 默认维护本地和已发现 universe 的全部 symbol，不再隐式截断为 5000。
-- 显式设置每轮最大 symbol 数时，持仓/策略与缺失/过期标的使用独立持久化 priority cursor，且至少保留 25% 容量给全 universe cursor；尚未写入 instrument 的已发现标的也参与轮转。
+- 显式设置每轮最大 symbol 数时，先放入持仓 / 活跃策略标的，再对剩余容量分配缺失/过期 priority cursor 和全 universe cursor；通常为全 universe 保留至少 25% 总容量，但安全优先标的已经占满显式上限时除外。尚未写入 instrument 的已发现标的也参与轮转。
 - 每轮最大持仓 / 策略高优先级 symbol 数。
 - 每轮最大公告检查数。
 - 每轮最大日 K 缺口抓取数。
@@ -367,18 +375,21 @@ AI 任务写入 `stockv2_stock_profile_ai_queue`：同一 symbol 只有一行，
 
 实现配置：
 
-- 标的维护管线并发：4 worker；命中本地/F10 缓存的标的不再做固定逐股 sleep。
+- 标的维护管线并发：本机资源正常时 2 worker，受限时降为 1 worker；命中本地/F10 缓存的标的不再做固定逐股 sleep。
 - 当前交易日：真实交易日单次 probe + 80 标的一批的东财/腾讯行情；东财首个批次失败后进入 10 分钟冷却，其余批次直接走腾讯。批量结果只落盘一次，后续逐标的管线不重复写。
 - 历史日 K：同花顺单请求主源；失败后腾讯提供 OHLCV 部分兜底，百度只负责最终字段完整兜底。稳定空档持久化，最近三天可重试。
-- 成功的全量 universe 发现结果持久缓存 7 天；若新浪发现失败并降级到内置样本，则标记为 `fallback`、保留已有完整缓存并在 6 小时后重试，不会把降级样本误当成 7 天有效的全市场结果。日常任务直接读本地主数据，仅对新发现、尚未入库的 symbol 请求腾讯主数据。
-- 公告：巨潮按市场分页增量同步，6 小时 overlap；不逐股拉取。
+- 成功的全量 universe 发现结果按 generation 持久缓存 24 小时；任一市场节点或分页失败都不能提交为完整 generation。失败时保留已有完整缓存、将当前任务标记为 universe unverified，并在 6 小时后重试，不会把部分结果或内置样本误当完整市场。日常任务直接读本地主数据，仅对新发现、尚未入库的 symbol 请求腾讯主数据。
+- 公告：巨潮按市场分页增量同步，6 小时 overlap；每市场每上海自然日额外复核最多一个历史日期桶，首次严格 warm-up 约 30 个成功维护日，不逐股拉取。
+- 重大公告正文：仅在部署机存在 `pdftotext` 且资源门禁为 normal 时运行；每 5 分钟最多 4 份、每日最多 20 次请求 / 64 MiB、单 PDF 最大 8 MiB。解析器缺失时零下载，严格 analysis readiness 保持 blocked。
 - 进度 flush：每 50 个 symbol 批量写入一次（减少 DuckDB 写入次数）。
 - DuckDB 写入：单 writer（`SetMaxOpenConns(1)`），批量 upsert。
 - 全市场 Universe 维护与全市场日 K 任务共享进程内 single-flight，check/create 原子化；同一服务进程不会同时发起两套重复全市场请求。
-- AI 总结并发：3 个持久队列 worker，单 symbol 在途去重，lease 超时自动恢复。
-- DuckDB 资源：`memory_limit = '2GB'`，`threads = 2`。
+- 历史资金流修补：每 5 分钟最多 10 个候选、每天最多 300 次真实联网请求；预算在联网前持久化预占，重启不会突破上限，持仓/策略保留优先份额但不能饿死游标队列。
+- AI 总结并发：当前 2 vCPU / 3.5 GiB 主机使用 1 个持久队列 worker，单 symbol 在途去重，lease 超时自动恢复；资源门禁为 `normal` 才启动新任务。
+- DuckDB 资源：`memory_limit = '768MB'`，`threads = 1`，单 writer；SQLite 连接上限为 4、空闲连接为 2。
+- 资源门禁：内存、load1 或磁盘进入受限状态时降低或暂停后台重任务；门禁状态通过 readiness overview 暴露，不把资源暂停误报为维护成功。
 
-任务进度明确拆为 `maintenanceProgress.base` 和 `maintenanceProgress.aiProfile`。基础维护完成后，AI 可以继续显示 queued/running/retry；前端只复用 Snapshot 做 30 秒低频轮询，不增加逐任务或逐标的请求。
+任务进度明确拆为 `maintenanceProgress.coverage`、`maintenanceProgress.assets` 和 `maintenanceProgress.aiProfile`。覆盖检查完成后，基础资产仍可显示 stale/retrying，AI 也可继续显示 queued/running/retry；前端复用任务快照，不增加逐标的请求。
 
 ### 11.3 DuckDB 写入策略
 
@@ -544,6 +555,16 @@ Agent 负责：
 - 基于已提供上下文更新长期画像总结。
 - 输出关键词、业务线、风险标签和 source notes。
 - 明确不确定性。
+
+### 13.4 下游可用性门禁
+
+下游不能再以“记录存在”代替“资产新鲜”。统一 readiness 分为：
+
+- `market_ready`：权威交易日历新鲜，最近已收盘交易日及日 K 核心 / 股票资金流字段完整。
+- `message_ready`：基础画像复核未过期，公告增量 cursor 新鲜且迟到公告复核完成 warm-up。
+- `analysis_ready`：前两项满足，AI 已应用最新目标版本，重大公告正文不存在未完成状态。
+
+策略生成默认使用 strict analysis 门禁；显式 `allow_degraded` 才可继续，并把失败标的、原因和限制写入返回值与持久化运行记录。组合哨兵和操作复盘同样持久化其 degraded 决策，不能静默消费陈旧资产。第三方失败、资源门禁暂停或本机缺少正文解析器时保持 blocked / stale / retrying，而不是标记维护成功。
 
 ## 14. 迁移计划
 

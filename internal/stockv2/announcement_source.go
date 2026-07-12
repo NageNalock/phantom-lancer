@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -376,11 +377,54 @@ func parseCninfoMarketAnnouncementsPage(body []byte, market string, page, pageSi
 }
 
 func decodeCninfoAnnouncements(body []byte) (cninfoAnnouncementsPayload, error) {
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return cninfoAnnouncementsPayload{}, errors.New("empty cninfo announcement response")
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return cninfoAnnouncementsPayload{}, err
+	}
+	announcements, ok := envelope["announcements"]
+	if !ok {
+		return cninfoAnnouncementsPayload{}, errors.New("cninfo announcement response is missing announcements")
+	}
+	trimmedAnnouncements := strings.TrimSpace(string(announcements))
+	if !strings.HasPrefix(trimmedAnnouncements, "[") {
+		return cninfoAnnouncementsPayload{}, errors.New("cninfo announcements field is not an array")
+	}
+	totalAnnouncement, hasTotalAnnouncement := envelope["totalAnnouncement"]
+	totalRecordNum, hasTotalRecordNum := envelope["totalRecordNum"]
+	if (!hasTotalAnnouncement || !validCninfoTotal(totalAnnouncement)) &&
+		(!hasTotalRecordNum || !validCninfoTotal(totalRecordNum)) {
+		return cninfoAnnouncementsPayload{}, errors.New("cninfo announcement response has no valid total")
+	}
 	var payload cninfoAnnouncementsPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return cninfoAnnouncementsPayload{}, err
 	}
 	return payload, nil
+}
+
+func validCninfoTotal(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var value any
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return false
+	}
+	switch typed := value.(type) {
+	case json.Number:
+		parsed, err := strconv.Atoi(typed.String())
+		return err == nil && parsed >= 0
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(typed))
+		return err == nil && parsed >= 0
+	default:
+		return false
+	}
 }
 
 func cninfoAnnouncementFromRaw(raw map[string]any, symbol, market, orgID string) (StockV2Announcement, bool) {
@@ -397,6 +441,10 @@ func cninfoAnnouncementFromRaw(raw map[string]any, symbol, market, orgID string)
 	pdfURL := firstJSONText(raw, "adjunctUrl", "adjunctURL")
 	if pdfURL != "" && !strings.HasPrefix(pdfURL, "http") {
 		pdfURL = "https://static.cninfo.com.cn/" + strings.TrimLeft(pdfURL, "/")
+	} else if parsed, err := url.Parse(pdfURL); err == nil &&
+		strings.EqualFold(parsed.Scheme, "http") && strings.EqualFold(parsed.Hostname(), "static.cninfo.com.cn") {
+		parsed.Scheme = "https"
+		pdfURL = parsed.String()
 	}
 	publishedAt := parseCninfoTime(raw["announcementTime"])
 	if publishedAt.IsZero() {
@@ -504,11 +552,20 @@ func classifyMajorAnnouncement(title, category string) (bool, string) {
 		"停牌", "复牌", "业绩预告", "业绩快报", "利润分配", "分红", "回购",
 		"定增", "非公开发行", "发行股份", "股权激励", "重大合同", "诉讼",
 		"仲裁", "违规", "退市", "风险警示", "减持", "增持", "质押",
+		"中标", "行政处罚", "监管处罚", "纪律处分", "对外担保", "重大投资", "对外投资",
+		"问询函", "监管函", "关注函", "问询回复", "回复问询", "监管回复",
+		"董事长变动", "董事变动", "监事变动", "高管变动", "高级管理人员变动",
+		"董事长辞职", "董事辞职", "监事辞职", "高级管理人员辞职", "总经理辞职",
+		"聘任董事长", "聘任董事", "聘任监事", "聘任高级管理人员", "聘任总经理",
 	}
 	for _, rule := range rules {
 		if strings.Contains(text, strings.ToLower(rule)) {
 			return true, rule
 		}
+	}
+	if strings.Contains(text, "回复") &&
+		(strings.Contains(text, "问询") || strings.Contains(text, "监管")) {
+		return true, "问询/监管回复"
 	}
 	return false, ""
 }

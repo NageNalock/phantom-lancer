@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func TestPopulateAssetMaintenanceProgressSeparatesBaseAndAI(t *testing.T) {
+func TestPopulateAssetMaintenanceProgressSeparatesCoverageAssetsAndAI(t *testing.T) {
 	ctx := context.Background()
 	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
 	if err != nil {
@@ -17,16 +17,19 @@ func TestPopulateAssetMaintenanceProgressSeparatesBaseAndAI(t *testing.T) {
 
 	now := time.Now()
 	job := StockV2UpdateJob{
-		ID:             "maintenance-progress-job",
-		TriggerType:    "manual",
-		TriggerSource:  "test",
-		Status:         "completed",
-		TotalCount:     9,
-		ProcessedCount: 9,
-		SuccessCount:   8,
-		FailedCount:    1,
-		StartAt:        now,
-		EndAt:          now.Add(time.Minute),
+		ID:              "maintenance-progress-job",
+		TriggerType:     "manual",
+		TriggerSource:   "test",
+		Status:          "completed",
+		CoverageStatus:  AssetMaintenanceCoverageCovered,
+		FreshnessStatus: AssetMaintenanceFreshnessRetrying,
+		TotalCount:      9,
+		CheckedCount:    9,
+		ProcessedCount:  9,
+		SuccessCount:    8,
+		FailedCount:     1,
+		StartAt:         now,
+		EndAt:           now.Add(time.Minute),
 	}
 	if err := store.CreateUpdateJob(ctx, job); err != nil {
 		t.Fatalf("create update job: %v", err)
@@ -48,6 +51,10 @@ func TestPopulateAssetMaintenanceProgressSeparatesBaseAndAI(t *testing.T) {
 		items[i].ID = "maintenance-progress-item-" + items[i].Symbol
 		items[i].JobID = job.ID
 		items[i].Status = AssetMaintenanceItemStatusCompleted
+		items[i].DailyBarStatus = AssetDailyBarStatusSkipped
+		items[i].DailyFlowStatus = AssetDailyFlowStatusReady
+		items[i].BaseProfileStatus = AssetBaseProfileStatusUnchanged
+		items[i].AnnouncementStatus = AssetAnnouncementStatusChecked
 		items[i].StartedAt = now
 		items[i].FinishedAt = now.Add(time.Second)
 		items[i].CreatedAt = now
@@ -62,8 +69,11 @@ func TestPopulateAssetMaintenanceProgressSeparatesBaseAndAI(t *testing.T) {
 		t.Fatalf("populate maintenance progress: %v", err)
 	}
 	got := jobs[0].MaintenanceProgress
-	if got.Base.Status != "completed" || got.Base.Total != 9 || got.Base.Processed != 9 || got.Base.Succeeded != 8 || got.Base.Failed != 1 || got.Base.Pending != 0 {
-		t.Fatalf("base progress = %+v", got.Base)
+	if got.Coverage.Status != AssetMaintenanceCoverageCovered || got.Coverage.Target != 9 || got.Coverage.Checked != 9 || got.Coverage.Pending != 0 || got.Coverage.Failed != 1 {
+		t.Fatalf("coverage progress = %+v", got.Coverage)
+	}
+	if got.Assets.Status != AssetMaintenanceFreshnessRetrying || got.Assets.Fresh != 9 || got.Assets.MarketFresh != 9 || got.Assets.MessageFresh != 9 {
+		t.Fatalf("asset progress = %+v", got.Assets)
 	}
 	if got.AIProfile.Status != AssetAIProgressStatusActive ||
 		got.AIProfile.Requested != 7 || got.AIProfile.Pending != 1 ||

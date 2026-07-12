@@ -296,6 +296,38 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 		}
 	}
 	out.NewsEvents = selectedEvents
+	allSymbols, err = NormalizeAssetReadinessSymbols(allSymbols)
+	if err != nil {
+		return PortfolioSentinelContext{}, err
+	}
+	if len(allSymbols) > 0 {
+		readinessBySymbol, err := s.EvaluateAssetReadinessBatch(ctx, allSymbols, time.Now())
+		if err != nil {
+			return PortfolioSentinelContext{}, err
+		}
+		readinessItems := make([]UnifiedAssetReadiness, 0, len(allSymbols))
+		for _, symbol := range allSymbols {
+			readinessItems = append(readinessItems, readinessBySymbol[symbol])
+		}
+		decision, err := DecideAssetReadiness(
+			readinessItems,
+			AssetReadinessRequirementAnalysis,
+			AssetReadinessModeAllowDegraded,
+		)
+		if err != nil {
+			return PortfolioSentinelContext{}, err
+		}
+		// A sentinel must not go dark when data is stale; it instead records and
+		// passes an explicit degraded decision to the Agent and historical result.
+		out.DataFreshness["assetReadinessDecision"] = decision
+		for portfolioIndex := range out.Portfolios {
+			for holdingIndex := range out.Portfolios[portfolioIndex].Holdings {
+				holding := &out.Portfolios[portfolioIndex].Holdings[holdingIndex]
+				symbol, _ := normalizeQuoteSymbolInput(holding.Holding.Symbol)
+				holding.Freshness["assetReadiness"] = readinessBySymbol[symbol]
+			}
+		}
+	}
 	if len(allSymbols) > 0 {
 		reviews, err := s.store.ListOperationReviews(ctx, OperationReviewListFilter{Limit: 50})
 		if err != nil {
@@ -358,6 +390,7 @@ func buildHoldingNewsCandidateSummary(pack PortfolioSentinelContext) map[string]
 	}
 	return map[string]any{
 		"holdingNewsCandidates": holdings,
+		"dataFreshness":         pack.DataFreshness,
 	}
 }
 

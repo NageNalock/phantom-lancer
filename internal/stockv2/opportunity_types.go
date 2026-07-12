@@ -259,9 +259,10 @@ type RequestUpdateOpportunityCandidate struct {
 }
 
 type RequestGenerateStrategyFromOpportunityCandidate struct {
-	RequestedBy string `json:"requestedBy,omitempty"`
-	UserGoal    string `json:"userGoal,omitempty"`
-	TimeHorizon string `json:"timeHorizon,omitempty"`
+	RequestedBy   string `json:"requestedBy,omitempty"`
+	UserGoal      string `json:"userGoal,omitempty"`
+	TimeHorizon   string `json:"timeHorizon,omitempty"`
+	ReadinessMode string `json:"readinessMode,omitempty"`
 }
 
 type RequestUpdateEmbeddingConfig struct {

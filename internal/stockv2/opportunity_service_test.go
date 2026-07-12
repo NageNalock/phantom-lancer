@@ -110,8 +110,9 @@ func TestOpportunityServiceSubmitResultValidatesCandidatesAndStrategyEntry(t *te
 		t.Fatalf("bind strategy generation model: %v", err)
 	}
 	strategyRun, err := svc.GenerateStrategyFromOpportunityCandidate(ctx, candidates[0].ID, RequestGenerateStrategyFromOpportunityCandidate{
-		RequestedBy: "tester",
-		UserGoal:    "turn this candidate into a quiet watch strategy",
+		RequestedBy:   "tester",
+		UserGoal:      "turn this candidate into a quiet watch strategy",
+		ReadinessMode: AssetReadinessModeAllowDegraded,
 	})
 	if err != nil {
 		t.Fatalf("generate strategy from candidate: %v", err)

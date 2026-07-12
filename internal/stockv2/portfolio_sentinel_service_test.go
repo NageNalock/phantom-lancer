@@ -101,6 +101,13 @@ func TestBuildPortfolioSentinelContextIncludesHoldingsAndWindowNews(t *testing.T
 	if len(pack.RawNews) != 0 || len(pack.NewsEvents) != 1 {
 		t.Fatalf("pack raw=%d events=%d, want no raw and one event", len(pack.RawNews), len(pack.NewsEvents))
 	}
+	decision, ok := pack.DataFreshness["assetReadinessDecision"].(AssetReadinessDecision)
+	if !ok || decision.Mode != AssetReadinessModeAllowDegraded || decision.Status != AssetReadinessDecisionDegraded {
+		t.Fatalf("sentinel readiness decision = %#v", pack.DataFreshness["assetReadinessDecision"])
+	}
+	if _, ok := holding.Freshness["assetReadiness"].(UnifiedAssetReadiness); !ok {
+		t.Fatalf("holding readiness = %#v", holding.Freshness["assetReadiness"])
+	}
 }
 
 func TestBuildPortfolioSentinelContextSuppressesLowPriorityNewsCandidates(t *testing.T) {

@@ -705,6 +705,15 @@ func (s *Service) fetchLatestQuotesForSpecsWithFailures(ctx context.Context, spe
 				continue
 			}
 			quotes = append(quotes, batchQuotes...)
+			seen := make(map[string]struct{}, len(batchQuotes))
+			for _, quote := range batchQuotes {
+				seen[quote.Symbol] = struct{}{}
+			}
+			for _, spec := range batch {
+				if _, ok := seen[spec.Symbol]; !ok {
+					failures = append(failures, UpdateFailure{Symbol: spec.Symbol, Reason: "no quote returned by batch providers"})
+				}
+			}
 			continue
 		}
 
@@ -728,6 +737,15 @@ func (s *Service) fetchLatestQuotesForSpecsWithFailures(ctx context.Context, spe
 				}
 			} else {
 				quotes = append(quotes, fallback...)
+				fallbackSeen := make(map[string]struct{}, len(fallback))
+				for _, quote := range fallback {
+					fallbackSeen[quote.Symbol] = struct{}{}
+				}
+				for _, spec := range missing {
+					if _, ok := fallbackSeen[spec.Symbol]; !ok {
+						failures = append(failures, UpdateFailure{Symbol: spec.Symbol, Reason: "no quote returned by batch providers"})
+					}
+				}
 			}
 		}
 	}
