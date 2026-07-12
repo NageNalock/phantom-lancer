@@ -33,6 +33,10 @@ type Service struct {
 	// move to a persisted lease only if multiple StockV2 workers are introduced.
 	newsPipelineMu  sync.Mutex
 	newsPipelineRun bool
+	newsContextMu   sync.Mutex
+	newsContextRun  bool
+	newsCleanupMu   sync.Mutex
+	newsCleanupRun  bool
 	quotePruneMu    sync.Mutex
 	lastQuotePrune  time.Time
 
@@ -42,12 +46,13 @@ type Service struct {
 	newsLinker      NewsEventLinker
 
 	// Agent 执行相关
-	agentTaskPool     *agentTaskPool
-	agentExecutor     AgentExecutor
-	agentCodexCommand func(ctx context.Context, args ...string) ([]byte, error)
-	agentMCPMu        sync.RWMutex
-	agentMCPServer    *http.Server
-	agentMCPURL       string
+	agentTaskPool       *agentTaskPool
+	agentExecutor       AgentExecutor
+	newsContextExecutor NewsContextAgentExecutor
+	agentCodexCommand   func(ctx context.Context, args ...string) ([]byte, error)
+	agentMCPMu          sync.RWMutex
+	agentMCPServer      *http.Server
+	agentMCPURL         string
 }
 
 // NewService 创建新的股票V2服务
@@ -86,6 +91,8 @@ func (s *Service) markInterruptedRunningTasks(ctx context.Context) {
 		{name: "quote refresh task", fn: s.store.FailRunningQuoteRefreshTasks},
 		{name: "monitor runs", fn: s.store.FailRunningMonitorRuns},
 		{name: "news source runs", fn: s.store.FailRunningNewsSourceStates},
+		{name: "news context runs", fn: s.store.FailRunningNewsContextRuns},
+		{name: "news context cleanup runs", fn: s.store.FailRunningNewsContextCleanupRuns},
 	}
 	for _, failure := range failures {
 		count, err := failure.fn(ctx, reason)
@@ -127,14 +134,27 @@ type AgentExecutor interface {
 	ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error)
 }
 
+// NewsContextAgentExecutor 单独承载消息脉络归纳，避免扩大既有 AgentExecutor
+// 后迫使所有已有测试替身实现一个与其场景无关的方法。
+type NewsContextAgentExecutor interface {
+	ExecuteNewsContextAggregation(ctx context.Context, taskID string, pack NewsContextAggregationPack, modelName string) (*AgentExecutorOutput, error)
+}
+
 // WithCodexCLIExecutor 注入 Codex CLI 执行器。
 func (s *Service) WithCodexCLIExecutor(binary, codexHome, mcpURL string) *Service {
-	s.agentExecutor = newCodexCLIExecutor(s.log, binary, codexHome, mcpURL, s.agentTaskPool)
+	executor := newCodexCLIExecutor(s.log, binary, codexHome, mcpURL, s.agentTaskPool)
+	s.agentExecutor = executor
+	s.newsContextExecutor = executor
 	if trimmed := strings.TrimSpace(binary); trimmed != "" {
 		s.agentCodexCommand = func(ctx context.Context, args ...string) ([]byte, error) {
 			return exec.CommandContext(ctx, trimmed, args...).CombinedOutput()
 		}
 	}
+	return s
+}
+
+func (s *Service) WithNewsContextAgentExecutor(executor NewsContextAgentExecutor) *Service {
+	s.newsContextExecutor = executor
 	return s
 }
 
@@ -1327,6 +1347,13 @@ func (s *Service) StartBackground(ctx context.Context) {
 	go func() {
 		defer s.bgWg.Done()
 		s.runEmbeddingMaintenanceScheduler(bgCtx)
+	}()
+
+	// 消息脉络按小时、四小时、每日三级归纳；同一进程内保持单飞，运行位置持久化。
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runNewsContextScheduler(bgCtx)
 	}()
 
 	// 组合哨兵按固定交易决策窗口触发,不复用旧 monitor runner。

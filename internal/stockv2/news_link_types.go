@@ -86,14 +86,15 @@ type NewsLinkCandidateListFilter struct {
 }
 
 type NewsEventListFilter struct {
-	Source        string
-	LinkStatus    string
-	QualityStatus string
-	Query         string
-	Since         time.Time
-	Until         time.Time
-	Limit         int
-	Offset        int
+	Source           string
+	LinkStatus       string
+	QualityStatus    string
+	Query            string
+	Since            time.Time
+	Until            time.Time
+	ExcludeCompacted bool
+	Limit            int
+	Offset           int
 }
 
 type LinkNewsEventsBatchResult struct {

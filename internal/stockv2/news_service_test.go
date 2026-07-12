@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -187,7 +188,7 @@ func TestCreateRawNewsClampsFuturePublishedAt(t *testing.T) {
 	}
 }
 
-func TestTruncateRawNewsBeforeDeletesOldEffectiveTime(t *testing.T) {
+func TestTruncateRawNewsBeforeDeletesProcessedOrIgnoredOldEffectiveTime(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -199,8 +200,8 @@ func TestTruncateRawNewsBeforeDeletesOldEffectiveTime(t *testing.T) {
 		t.Fatalf("seed financialjuice state: %v", err)
 	}
 	for _, req := range []RequestCreateRawNews{
-		{Source: "jin10", SourceID: "truncate-old-published", Title: "old published", PublishedAt: base.Add(-2 * time.Hour), FetchedAt: base},
-		{Source: "financialjuice", SourceID: "truncate-old-fetched", Title: "old fetched", FetchedAt: base.Add(-90 * time.Minute)},
+		{Source: "jin10", SourceID: "truncate-old-published", Title: "old published", PublishedAt: base.Add(-2 * time.Hour), FetchedAt: base, Status: NewsStatusProcessed},
+		{Source: "financialjuice", SourceID: "truncate-old-fetched", Title: "old fetched", FetchedAt: base.Add(-90 * time.Minute), Status: NewsStatusIgnored},
 		{Source: "jin10", SourceID: "truncate-keep", Title: "keep", PublishedAt: base.Add(-30 * time.Minute), FetchedAt: base.Add(-30 * time.Minute)},
 	} {
 		if _, err := svc.CreateRawNews(ctx, req); err != nil {
@@ -257,15 +258,15 @@ func TestPruneRawNewsRetentionProcessesAndDeletesOlderThanWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prune raw news retention: %v", err)
 	}
-	if result.DeletedCount != 2 || result.ProcessedBeforePrune != 2 {
-		t.Fatalf("retention result = %#v, want delete 2 process 2", result)
+	if result.DeletedCount != 1 || result.ProcessedBeforePrune != 2 {
+		t.Fatalf("retention result = %#v, want delete 1 process 2", result)
 	}
 	remaining, err := svc.ListRawNews(ctx, RawNewsListFilter{Limit: 10})
 	if err != nil {
 		t.Fatalf("list raw news: %v", err)
 	}
-	if len(remaining) != 1 || remaining[0].SourceID != "retention-recent" {
-		t.Fatalf("remaining raw news = %+v, want recent only", remaining)
+	if len(remaining) != 2 || remaining[0].SourceID != "retention-recent" || remaining[1].SourceID != "retention-old-failed" {
+		t.Fatalf("remaining raw news = %+v, want recent and failed item protected", remaining)
 	}
 	events, err := svc.ListNewsEvents(ctx, NewsEventListFilter{Source: "jin10", Query: "旧消息先转事件", Limit: 10})
 	if err != nil {
@@ -312,6 +313,50 @@ func TestNewsEventDedupeSurvivesRawNewsRetention(t *testing.T) {
 	}
 	if len(events) != 1 {
 		t.Fatalf("events len = %d, want deduped event after raw prune", len(events))
+	}
+}
+
+func TestPruneRawNewsRetentionDrainsMoreThanOneBatchBeforeDelete(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 4, 10, 0, 0, 0, time.UTC)
+	const total = 205
+	if err := svc.store.UpsertNewsSourceState(ctx, NewsSourceState{Source: NewsSourceJin10, Status: NewsSourceStatusIdle, RawNewsCount: total}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	for i := 0; i < total; i++ {
+		if _, err := svc.CreateRawNews(ctx, RequestCreateRawNews{
+			Source:      NewsSourceJin10,
+			SourceID:    fmt.Sprintf("retention-batch-%03d", i),
+			Title:       fmt.Sprintf("积压消息 %03d", i),
+			PublishedAt: now.Add(-5*time.Hour - time.Duration(i)*time.Second),
+			FetchedAt:   now.Add(-5*time.Hour - time.Duration(i)*time.Second),
+		}); err != nil {
+			t.Fatalf("create raw news %d: %v", i, err)
+		}
+	}
+
+	result, err := svc.PruneRawNewsRetention(ctx, now)
+	if err != nil {
+		t.Fatalf("prune raw news retention: %v", err)
+	}
+	if result.ProcessedBeforePrune != total || result.DeletedCount != total {
+		t.Fatalf("retention result = %#v, want process and delete %d", result, total)
+	}
+	remaining, err := svc.CountRawNews(ctx, RawNewsListFilter{Source: NewsSourceJin10})
+	if err != nil {
+		t.Fatalf("count remaining raw news: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("remaining raw news = %d, want 0", remaining)
+	}
+	events, err := svc.CountNewsEvents(ctx, NewsEventListFilter{Source: NewsSourceJin10})
+	if err != nil {
+		t.Fatalf("count news events: %v", err)
+	}
+	if events != total {
+		t.Fatalf("news events = %d, want %d", events, total)
 	}
 }
 

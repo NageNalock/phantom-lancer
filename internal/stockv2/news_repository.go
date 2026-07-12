@@ -120,9 +120,9 @@ func (s *Store) TruncateRawNewsBefore(ctx context.Context, before time.Time) (in
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT source, COUNT(*)
 		FROM stockv2_raw_news
-		WHERE %s < ?
+		WHERE %s < ? AND status IN (?, ?)
 		GROUP BY source
-	`, rawNewsTimeSQL), before)
+	`, rawNewsTimeSQL), before, NewsStatusProcessed, NewsStatusIgnored)
 	if err != nil {
 		return 0, wrapError(err, "count raw news truncate by source")
 	}
@@ -144,8 +144,8 @@ func (s *Store) TruncateRawNewsBefore(ctx context.Context, before time.Time) (in
 
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		DELETE FROM stockv2_raw_news
-		WHERE %s < ?
-	`, rawNewsTimeSQL), before)
+		WHERE %s < ? AND status IN (?, ?)
+	`, rawNewsTimeSQL), before, NewsStatusProcessed, NewsStatusIgnored)
 	if err != nil {
 		return 0, wrapError(err, "truncate raw news")
 	}
@@ -153,19 +153,48 @@ func (s *Store) TruncateRawNewsBefore(ctx context.Context, before time.Time) (in
 	if err != nil {
 		return 0, wrapError(err, "check truncated raw news rows")
 	}
-	now := time.Now()
-	for source, count := range deletedBySource {
-		if _, err := s.db.ExecContext(ctx, `
-			UPDATE stockv2_news_source_states
-			SET raw_news_count = CASE WHEN raw_news_count > ? THEN raw_news_count - ? ELSE 0 END,
-			    updated_at = ?
-			WHERE source = ?
-		`, count, count, now, source); err != nil {
-			return 0, wrapError(err, "sync raw news source count after truncate")
-		}
-	}
 	if err := tx.Commit(); err != nil {
 		return 0, wrapError(err, "commit truncate raw news")
+	}
+	// ponytail: SQLite and DuckDB cannot share a transaction. Recount after the
+	// asset commit instead of decrementing optimistically, so a retry repairs any
+	// state left by an interruption between the two databases.
+	now := time.Now()
+	sourcesToSync := make(map[string]struct{}, len(deletedBySource))
+	for source := range deletedBySource {
+		sourcesToSync[source] = struct{}{}
+	}
+	stateRows, err := s.db.QueryContext(ctx, `SELECT source FROM stockv2_news_source_states`)
+	if err != nil {
+		return int(deleted), wrapError(err, "list news sources after truncate")
+	}
+	for stateRows.Next() {
+		var source string
+		if err := stateRows.Scan(&source); err != nil {
+			stateRows.Close()
+			return int(deleted), wrapError(err, "scan news source after truncate")
+		}
+		sourcesToSync[source] = struct{}{}
+	}
+	if err := stateRows.Err(); err != nil {
+		stateRows.Close()
+		return int(deleted), wrapError(err, "iterate news sources after truncate")
+	}
+	stateRows.Close()
+	for source := range sourcesToSync {
+		var remaining int
+		if err := s.assetDB().QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM stockv2_raw_news WHERE source = ?
+		`, source).Scan(&remaining); err != nil {
+			return int(deleted), wrapError(err, "recount raw news after truncate")
+		}
+		if _, err := s.db.ExecContext(ctx, `
+			UPDATE stockv2_news_source_states
+			SET raw_news_count = ?, updated_at = ?
+			WHERE source = ?
+		`, remaining, now, source); err != nil {
+			return int(deleted), wrapError(err, "sync raw news source count after truncate")
+		}
 	}
 	return int(deleted), nil
 }

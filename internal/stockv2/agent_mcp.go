@@ -163,6 +163,12 @@ func (p *agentTaskPool) mcpToolsCall(params json.RawMessage) (any, *mcpError) {
 		return p.mcpSearchNewsEvents(callParams.Arguments)
 	case "stock_agent.semantic_search_news_events":
 		return p.mcpSemanticSearchNewsEvents(callParams.Arguments)
+	case mcpToolSemanticSearchNewsThreads:
+		return p.mcpSemanticSearchNewsThreads(callParams.Arguments)
+	case mcpToolGetNewsThread:
+		return p.mcpGetNewsThread(callParams.Arguments)
+	case mcpToolListNewsContextChanges:
+		return p.mcpListNewsContextChanges(callParams.Arguments)
 	case "stock_agent.search_news_link_candidates":
 		return p.mcpSearchNewsLinkCandidates(callParams.Arguments)
 	case "stock_agent.list_existing_strategies":

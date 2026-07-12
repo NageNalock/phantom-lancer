@@ -18,6 +18,9 @@ const (
 	mcpToolGetDailyBarsSummary         = "stock_agent.get_daily_bars_summary"
 	mcpToolSearchNewsEvents            = "stock_agent.search_news_events"
 	mcpToolSemanticSearchNewsEvents    = "stock_agent.semantic_search_news_events"
+	mcpToolSemanticSearchNewsThreads   = "stock_agent.semantic_search_news_threads"
+	mcpToolGetNewsThread               = "stock_agent.get_news_thread"
+	mcpToolListNewsContextChanges      = "stock_agent.list_news_context_changes"
 	mcpToolSearchNewsLinkCandidates    = "stock_agent.search_news_link_candidates"
 	mcpToolListExistingStrategies      = "stock_agent.list_existing_strategies"
 	mcpToolGetPortfolioContext         = "stock_agent.get_portfolio_context"
@@ -42,6 +45,9 @@ func stockAgentMCPRequiredTools() []string {
 		mcpToolGetDailyBarsSummary,
 		mcpToolSearchNewsEvents,
 		mcpToolSemanticSearchNewsEvents,
+		mcpToolSemanticSearchNewsThreads,
+		mcpToolGetNewsThread,
+		mcpToolListNewsContextChanges,
 		mcpToolSearchNewsLinkCandidates,
 		mcpToolListExistingStrategies,
 		mcpToolGetPortfolioContext,
@@ -100,21 +106,61 @@ func (s *Service) mcpToolsList(params json.RawMessage) (any, *mcpError) {
 		tools = append(tools, mcpTool{
 			Name:        name,
 			Description: stockAgentMCPToolDescription(name),
-			InputSchema: map[string]any{
-				"type":                 "object",
-				"additionalProperties": true,
-			},
+			InputSchema: stockAgentMCPToolInputSchema(name),
 		})
 	}
 	return map[string]any{"tools": tools}, nil
+}
+
+func stockAgentMCPToolInputSchema(name string) map[string]any {
+	properties := map[string]any{}
+	required := []string(nil)
+	additionalProperties := true
+	switch name {
+	case mcpToolSemanticSearchNewsThreads:
+		properties = map[string]any{
+			"query":    map[string]any{"type": "string", "description": "Theme, event, sector, or rotation question."},
+			"limit":    map[string]any{"type": "integer", "minimum": 1, "maximum": 50},
+			"minScore": map[string]any{"type": "number", "minimum": -1, "maximum": 1},
+		}
+		required = []string{"query"}
+		additionalProperties = false
+	case mcpToolGetNewsThread:
+		properties = map[string]any{
+			"threadId": map[string]any{"type": "string", "description": "Stable message-thread id."},
+		}
+		required = []string{"threadId"}
+		additionalProperties = false
+	case mcpToolListNewsContextChanges:
+		properties = map[string]any{
+			"runId":  map[string]any{"type": "string", "description": "Aggregation run id."},
+			"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 50},
+			"offset": map[string]any{"type": "integer", "minimum": 0},
+		}
+		required = []string{"runId"}
+		additionalProperties = false
+	}
+	schema := map[string]any{
+		"type":                 "object",
+		"properties":           properties,
+		"additionalProperties": additionalProperties,
+	}
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+	return schema
 }
 
 func stockAgentMCPToolDescription(name string) string {
 	switch name {
 	case codexSubmitResultTool:
 		return "Submit the final structured result of a stock agent task to the main program. The main program validates before persistence."
-	case mcpToolSemanticSearchStockProfiles, mcpToolSemanticSearchNewsEvents:
+	case mcpToolSemanticSearchStockProfiles, mcpToolSemanticSearchNewsEvents, mcpToolSemanticSearchNewsThreads:
 		return "Semantic vector search over StockV2 assets. Fails clearly when embedding is not configured, unavailable, or assets are not ready."
+	case mcpToolGetNewsThread:
+		return "Read one complete StockV2 message thread, including its current version, history, evidence, relationships, review, and index state."
+	case mcpToolListNewsContextChanges:
+		return "Page through every message-thread change produced by one aggregation run. Use this for complete review coverage; semantic search cannot replace it."
 	case mcpToolRecordExternalSource:
 		return "Record an external public source summary for the current opportunity discovery run. URL query and fragment are stripped."
 	case mcpToolRecordEvidence, mcpToolRecordCandidate, mcpToolUpdateCandidate:
@@ -151,6 +197,12 @@ func (s *Service) mcpToolsCall(params json.RawMessage) (any, *mcpError) {
 		return s.mcpSearchNewsEvents(callParams.Arguments)
 	case mcpToolSemanticSearchNewsEvents:
 		return s.mcpSemanticSearch(callParams.Arguments, EmbeddingObjectNewsEvent)
+	case mcpToolSemanticSearchNewsThreads:
+		return s.mcpSemanticSearchNewsThreads(callParams.Arguments)
+	case mcpToolGetNewsThread:
+		return s.mcpGetNewsThread(callParams.Arguments)
+	case mcpToolListNewsContextChanges:
+		return s.mcpListNewsContextChanges(callParams.Arguments)
 	case mcpToolSearchNewsLinkCandidates:
 		return s.mcpSearchNewsLinkCandidates(callParams.Arguments)
 	case mcpToolListExistingStrategies:
@@ -333,6 +385,80 @@ func (s *Service) mcpSearchNewsEvents(args json.RawMessage) (any, *mcpError) {
 		out = append(out, mcpNewsEventSummary(item))
 	}
 	return mcpJSONResult(out), nil
+}
+
+func (s *Service) mcpSemanticSearchNewsThreads(args json.RawMessage) (any, *mcpError) {
+	var req SemanticSearchRequest
+	if err := json.Unmarshal(args, &req); err != nil || strings.TrimSpace(req.Query) == "" {
+		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "query is required"}
+	}
+	req.Query = strings.TrimSpace(req.Query)
+	req.Limit = normalizedMCPLimit(req.Limit)
+	items, err := s.SemanticSearchNewsThreads(contextFromMCP(), req)
+	if err != nil {
+		return nil, mcpErrorFromError(err)
+	}
+	return mcpJSONResult(map[string]any{
+		"items":      items,
+		"count":      len(items),
+		"searchType": "semantic_vector",
+		"notice":     "Similarity is retrieval only; it is not evidence of identity, causality, support, contradiction, or a trading conclusion.",
+	}), nil
+}
+
+func (s *Service) mcpGetNewsThread(args json.RawMessage) (any, *mcpError) {
+	var p struct {
+		ID       string `json:"id"`
+		ThreadID string `json:"threadId"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "Invalid arguments"}
+	}
+	id := strings.TrimSpace(firstNonEmptyOpportunity(p.ThreadID, p.ID))
+	if id == "" {
+		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "threadId is required"}
+	}
+	detail, err := s.GetNewsThreadDetail(contextFromMCP(), id)
+	if err != nil {
+		return nil, mcpErrorFromError(err)
+	}
+	return mcpJSONResult(mcpNewsThreadDetail(detail)), nil
+}
+
+func (s *Service) mcpListNewsContextChanges(args json.RawMessage) (any, *mcpError) {
+	var p struct {
+		RunID  string `json:"runId"`
+		Limit  int    `json:"limit"`
+		Offset int    `json:"offset"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "Invalid arguments"}
+	}
+	p.RunID = strings.TrimSpace(p.RunID)
+	if p.RunID == "" {
+		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "runId is required"}
+	}
+	p.Limit = normalizedMCPLimit(p.Limit)
+	p.Offset = normalizedPageOffset(p.Offset)
+	items, total, err := s.ListNewsContextChangedThreads(contextFromMCP(), p.RunID, p.Limit, p.Offset)
+	if err != nil {
+		return nil, mcpErrorFromError(err)
+	}
+	return mcpJSONResult(map[string]any{
+		"items":      items,
+		"total":      total,
+		"limit":      p.Limit,
+		"offset":     p.Offset,
+		"nextOffset": nextMCPPageOffset(p.Offset, p.Limit, len(items), total),
+	}), nil
+}
+
+func nextMCPPageOffset(offset, limit, count, total int) any {
+	next := offset + count
+	if count == 0 || next >= total || limit <= 0 {
+		return nil
+	}
+	return next
 }
 
 func (s *Service) mcpSearchNewsLinkCandidates(args json.RawMessage) (any, *mcpError) {
@@ -652,6 +778,11 @@ func mcpErrorFromError(err error) *mcpError {
 		errors.Is(err, ErrDiscoveryRunNotFound) ||
 		errors.Is(err, ErrDiscoveryStepNotFound) ||
 		errors.Is(err, ErrOpportunityCandidateNotFound) {
+		code = mcpErrInvalidParams
+	}
+	if errors.Is(err, ErrNewsThreadNotFound) ||
+		errors.Is(err, ErrNewsContextRunNotFound) ||
+		errors.Is(err, ErrInvalidNewsContextInput) {
 		code = mcpErrInvalidParams
 	}
 	return &mcpError{Code: code, Message: err.Error(), Data: mcpErrorData(err)}

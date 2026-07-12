@@ -639,7 +639,7 @@ func TestResolveAgentTaskOperationReviewDefaultModel(t *testing.T) {
 	}
 }
 
-func TestAgentTaskProfilesSeedFutureTasksAndStrategyGenerationConfigurable(t *testing.T) {
+func TestAgentTaskProfilesSeedTasksAndExposeConfigurableTasks(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -728,9 +728,24 @@ func TestAgentTaskProfilesSeedFutureTasksAndStrategyGenerationConfigurable(t *te
 	if opportunityResolution.Status != AgentResolutionStatusAuthorized || opportunityResolution.Run == nil {
 		t.Fatalf("opportunity resolution = %+v, want authorized run", opportunityResolution)
 	}
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeNewsEventReview, RequestUpdateAgentTaskProfile{}); err != nil {
+		t.Fatalf("update news context task: %v", err)
+	}
+	if _, err := svc.ResolveAgentTask(ctx, AgentTaskTypeNewsEventReview, "news_context_run", "x", "tester"); !errors.Is(err, ErrAgentModelNotAvailable) {
+		t.Fatalf("resolve unbound news context task error = %v, want ErrAgentModelNotAvailable", err)
+	}
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeNewsEventReview, RequestUpdateAgentTaskProfile{PrimaryModelID: &modelID}); err != nil {
+		t.Fatalf("bind news context task profile: %v", err)
+	}
+	newsResolution, err := svc.ResolveAgentTask(ctx, AgentTaskTypeNewsEventReview, "news_context_run", "x", "tester")
+	if err != nil {
+		t.Fatalf("resolve news context task: %v", err)
+	}
+	if newsResolution.Status != AgentResolutionStatusAuthorized || newsResolution.Run == nil {
+		t.Fatalf("news context resolution = %+v, want authorized run", newsResolution)
+	}
 
 	for _, taskType := range []string{
-		AgentTaskTypeNewsEventReview,
 		AgentTaskTypePortfolioRiskReview,
 		AgentTaskTypeBullBearDebate,
 	} {

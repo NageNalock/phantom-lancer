@@ -1305,6 +1305,9 @@ func (s *Store) init(ctx context.Context) error {
 	if err := s.ensureEmbeddingSchema(ctx); err != nil {
 		return fmt.Errorf("ensure embedding schema: %w", err)
 	}
+	if err := s.ensureNewsContextSchema(ctx); err != nil {
+		return fmt.Errorf("ensure news context schema: %w", err)
+	}
 	if _, err := s.db.ExecContext(ctx, `
 		UPDATE stockv2_monitor_task_configs
 		SET enabled = 1, interval_seconds = 30, updated_at = datetime('now')

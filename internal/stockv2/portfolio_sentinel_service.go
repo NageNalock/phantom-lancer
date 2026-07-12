@@ -79,7 +79,7 @@ func (s *Service) RunPortfolioSentinel(ctx context.Context, req RequestRunPortfo
 	if err != nil {
 		return PortfolioSentinelRun{}, err
 	}
-	return s.startPortfolioSentinelRun(ctx, PortfolioSentinelTriggerManual, windowType, strings.TrimSpace(req.PortfolioID), startAt, endAt, strings.TrimSpace(req.Note), true)
+	return s.startPortfolioSentinelRunForNewsContext(ctx, PortfolioSentinelTriggerManual, windowType, strings.TrimSpace(req.PortfolioID), startAt, endAt, strings.TrimSpace(req.Note), strings.TrimSpace(req.NewsContextRunID), true)
 }
 
 func (s *Service) RunScheduledPortfolioSentinel(ctx context.Context, windowType string, now time.Time) (PortfolioSentinelRun, error) {
@@ -98,6 +98,10 @@ func (s *Service) RunScheduledPortfolioSentinel(ctx context.Context, windowType 
 }
 
 func (s *Service) startPortfolioSentinelRun(ctx context.Context, triggerType, windowType, portfolioID string, startAt, endAt time.Time, note string, async bool) (PortfolioSentinelRun, error) {
+	return s.startPortfolioSentinelRunForNewsContext(ctx, triggerType, windowType, portfolioID, startAt, endAt, note, "", async)
+}
+
+func (s *Service) startPortfolioSentinelRunForNewsContext(ctx context.Context, triggerType, windowType, portfolioID string, startAt, endAt time.Time, note, newsContextRunID string, async bool) (PortfolioSentinelRun, error) {
 	if !validPortfolioSentinelWindowType(windowType) || startAt.IsZero() || endAt.IsZero() || !endAt.After(startAt) {
 		return PortfolioSentinelRun{}, ErrInvalidPortfolioSentinelInput
 	}
@@ -123,11 +127,16 @@ func (s *Service) startPortfolioSentinelRun(ctx context.Context, triggerType, wi
 	if err != nil {
 		return PortfolioSentinelRun{}, err
 	}
+	if strings.TrimSpace(newsContextRunID) != "" {
+		if _, err := s.store.BeginNewsContextReview(ctx, newsContextRunID, run.ID); err != nil {
+			return s.failPortfolioSentinelRun(ctx, run, err)
+		}
+	}
 
 	if err := s.preparePortfolioSentinelNews(ctx, run); err != nil && s.log != nil {
 		s.log.Warn("portfolio sentinel news refresh skipped", "run_id", run.ID, "error", safelog.Text(err.Error(), 240))
 	}
-	contextPack, err := s.BuildPortfolioSentinelContext(ctx, run, note)
+	contextPack, err := s.buildPortfolioSentinelContext(ctx, run, note, newsContextRunID)
 	if err != nil {
 		return s.failPortfolioSentinelRun(ctx, run, err)
 	}
@@ -165,6 +174,10 @@ func (s *Service) startPortfolioSentinelRun(ctx context.Context, triggerType, wi
 }
 
 func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run PortfolioSentinelRun, note string) (PortfolioSentinelContext, error) {
+	return s.buildPortfolioSentinelContext(ctx, run, note, "")
+}
+
+func (s *Service) buildPortfolioSentinelContext(ctx context.Context, run PortfolioSentinelRun, note, newsContextRunID string) (PortfolioSentinelContext, error) {
 	cfg, _ := s.GetPortfolioSentinelConfig(ctx)
 	portfolios, err := s.store.ListPortfolios(ctx)
 	if err != nil {
@@ -193,6 +206,22 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 		DataFreshness: map[string]any{},
 		ContextStats:  map[string]any{},
 		Note:          note,
+	}
+	if strings.TrimSpace(newsContextRunID) != "" {
+		contextRun, err := s.store.GetNewsContextRun(ctx, newsContextRunID)
+		if err != nil {
+			return PortfolioSentinelContext{}, err
+		}
+		_, changedCount, err := s.ListNewsContextChangedThreads(ctx, newsContextRunID, 1, 0)
+		if err != nil {
+			return PortfolioSentinelContext{}, err
+		}
+		out.NewsContext = &PortfolioSentinelNewsContext{
+			RunID:               contextRun.ID,
+			ChangedThreadCount:  changedCount,
+			MaterialChangeCount: contextRun.MaterialChangeCount,
+			RequiredMCPTool:     "stock_agent.list_news_context_changes",
+		}
 	}
 	selectedEvents := make([]NewsEvent, 0, cfg.MaxNewsItems)
 	selectedEventIDs := make(map[string]struct{})
@@ -278,6 +307,20 @@ func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run Portfol
 			return PortfolioSentinelContext{}, err
 		}
 		out.RecentReviews = reviews
+	}
+	if out.NewsContext != nil {
+		// The aggregation already persisted compact themes and evidence. Re-copying
+		// raw news bodies into the review ledger would defeat later source cleanup;
+		// the agent must page through the complete changed-theme manifest via MCP.
+		out.NewsEvents = nil
+		out.RawNews = nil
+		for portfolioIndex := range out.Portfolios {
+			for holdingIndex := range out.Portfolios[portfolioIndex].Holdings {
+				out.Portfolios[portfolioIndex].Holdings[holdingIndex].News = nil
+				out.Portfolios[portfolioIndex].Holdings[holdingIndex].NewsLinks = nil
+				out.Portfolios[portfolioIndex].Holdings[holdingIndex].RawNews = nil
+			}
+		}
 	}
 	out.ContextStats = portfolioSentinelContextStats(out)
 	out.ContextStats["newsLinkCount"] = newsLinkCount
@@ -539,6 +582,15 @@ func (s *Service) ProcessPortfolioSentinelSubmittedResult(ctx context.Context, r
 		run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
 		return PortfolioSentinelResult{}, err
 	}
+	if contextRun, found, lookupErr := s.newsContextRunForPortfolioReview(ctx, run.ID); lookupErr != nil {
+		run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, lookupErr))
+		return PortfolioSentinelResult{}, lookupErr
+	} else if found {
+		if err := s.validatePortfolioSentinelNewsContextCoverage(ctx, contextRun.ID, report.CheckedNewsThreadVersionIDs); err != nil {
+			run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
+			return PortfolioSentinelResult{}, err
+		}
+	}
 	result := PortfolioSentinelResult{
 		RunID:          run.ID,
 		SchemaVersion:  report.SchemaVersion,
@@ -571,6 +623,49 @@ func (s *Service) ProcessPortfolioSentinelSubmittedResult(ctx context.Context, r
 		return PortfolioSentinelResult{}, err
 	}
 	return result, nil
+}
+
+func (s *Service) newsContextRunForPortfolioReview(ctx context.Context, sentinelRunID string) (NewsContextRun, bool, error) {
+	return s.store.FindNewsContextRunByReviewRunID(ctx, sentinelRunID)
+}
+
+func (s *Service) validatePortfolioSentinelNewsContextCoverage(ctx context.Context, contextRunID string, checkedVersionIDs []string) error {
+	const pageSize = 200
+	expected := map[string]struct{}{}
+	for offset := 0; ; offset += pageSize {
+		changes, _, err := s.ListNewsContextChangedThreads(ctx, contextRunID, pageSize, offset)
+		if err != nil {
+			return err
+		}
+		for _, change := range changes {
+			if id := strings.TrimSpace(change.VersionID); id != "" {
+				expected[id] = struct{}{}
+			}
+		}
+		if len(changes) < pageSize {
+			break
+		}
+	}
+	checked := map[string]struct{}{}
+	for _, id := range checkedVersionIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, duplicate := checked[id]; duplicate {
+			return fmt.Errorf("%w: duplicate checked news thread version", ErrInvalidPortfolioSentinelResult)
+		}
+		checked[id] = struct{}{}
+	}
+	if len(expected) != len(checked) {
+		return fmt.Errorf("%w: checked %d of %d changed news thread versions", ErrInvalidPortfolioSentinelResult, len(checked), len(expected))
+	}
+	for id := range expected {
+		if _, ok := checked[id]; !ok {
+			return fmt.Errorf("%w: changed news thread version was not reviewed", ErrInvalidPortfolioSentinelResult)
+		}
+	}
+	return nil
 }
 
 type portfolioSentinelDerivedObjects struct {

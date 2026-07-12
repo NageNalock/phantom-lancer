@@ -136,6 +136,19 @@ func (e *codexCLIExecutor) ExecuteOpportunityDiscovery(
 	return e.executePrompt(ctx, taskID, prompt, modelName)
 }
 
+func (e *codexCLIExecutor) ExecuteNewsContextAggregation(
+	ctx context.Context,
+	taskID string,
+	pack NewsContextAggregationPack,
+	modelName string,
+) (*AgentExecutorOutput, error) {
+	if e.binary == "" {
+		return nil, fmt.Errorf("codex binary path not configured")
+	}
+	prompt := buildNewsContextAggregationPrompt(taskID, pack, e.mcpURL)
+	return e.executePrompt(ctx, taskID, prompt, modelName)
+}
+
 func (e *codexCLIExecutor) ExecutePortfolioSentinel(
 	ctx context.Context,
 	taskID string,
@@ -892,6 +905,49 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 	return b.String()
 }
 
+func buildNewsContextAggregationPrompt(taskID string, pack NewsContextAggregationPack, mcpURL string) string {
+	var b strings.Builder
+	b.WriteString("# News Context Aggregation Task\n\n")
+	b.WriteString("System role: you maintain StockV2 message threads by compressing normalized news into durable, reviewable market themes. You are not a trading executor.\n")
+	b.WriteString("Process every input news item exactly once. Do not impose a target count for events, threads, or changes, and do not merge unrelated facts merely to reduce storage.\n")
+	b.WriteString("A four-hour or daily batch may have no new news and still has to review every InputThreads item. A daily batch must produce a stage conclusion for each reviewed thread and cannot skip review merely because no new article arrived.\n")
+	b.WriteString("Separate confirmed facts, inferences, contrary evidence, conflicts, and unresolved questions. Similarity is recall only; it is never proof of identity, causality, support, or contradiction.\n")
+	b.WriteString("Before updating an existing thread, use stock_agent.semantic_search_news_threads to recall candidates and stock_agent.get_news_thread to read the selected candidate in full. Do not silently replace semantic search with keyword matching.\n")
+	b.WriteString("Actively use Codex CLI public search/browse to verify important conclusions. Public verification is mandatory for high-impact portfolio or strategy effects, conflicting sources, material single-source claims, insufficient evidence for stage/impact, and policy, filing, or supply-chain facts.\n")
+	b.WriteString("When RequiredResearch is true, public verification is mandatory and every ResearchReasons item must be addressed in `search_audit`.\n")
+	b.WriteString("For every public verification, record the question, sources checked, supported/weakened/refuted conclusions, unresolved questions, and any unavailable/failed reason. Search failure must remain explicit and must lower confidence; never present it as verified.\n")
+	b.WriteString("Do not place orders, modify holdings or strategies, delete news, expose credentials, or claim that persistence/indexing/review/deletion has completed. The main program validates and applies the result.\n")
+	b.WriteString("Submit the final result exactly once with stock_agent.submit_result. Do not use shell commands or curl to submit it.\n\n")
+
+	b.WriteString("## Task Information\n\n")
+	fmt.Fprintf(&b, "- Task ID: `%s`\n", taskID)
+	fmt.Fprintf(&b, "- Task Type: `%s`\n", AgentTaskTypeNewsEventReview)
+	fmt.Fprintf(&b, "- Aggregation Run ID: `%s`\n", pack.RunID)
+	fmt.Fprintf(&b, "- Window Type: `%s`\n", pack.WindowType)
+	if mcpURL != "" {
+		fmt.Fprintf(&b, "- MCP Server Name: `%s`\n", codexStockAgentMCPName)
+		fmt.Fprintf(&b, "- MCP Server: `%s`\n", mcpURL)
+	}
+	b.WriteString("\n## Aggregation Context\n\n```json\n")
+	raw, _ := json.MarshalIndent(pack, "", "  ")
+	b.Write(raw)
+	b.WriteString("\n```\n\n")
+
+	b.WriteString("## Required Result Contract\n\n")
+	b.WriteString("Return one result with outputType `news_context_result`. The inner result must use schema_version `news-context-result/v1` and repeat the exact aggregation run id and window type.\n")
+	b.WriteString("Include every input news id in `processed_news_ids` exactly once and give every item a disposition such as create, update, support, contradict, background, duplicate, noise, or defer. Deferred items must state why and must remain protected from deletion.\n")
+	b.WriteString("Include `reviewed_thread_ids` and `unchanged_thread_ids`. Together with every source/target thread referenced by `thread_changes`, they must cover all InputThreads exactly once: these three outcome sets are mutually exclusive. Daily runs require every InputThread to appear in unchanged_thread_ids or thread_changes so the service can persist an explicit daily stage conclusion.\n")
+	b.WriteString("Each thread change must use action create, update, merge, split, or restart. create must omit thread_id; every other action must use a stable existing thread_id. stage must be one of emerging, spreading, accelerating, overheated, diverging, retreating, dormant, or restarting. Also include whether the change is material, facts, inferences, contrary evidence, unresolved questions, affected sectors/instruments, catalysts, invalidation conditions, rotation clues, evidence news ids, and merge/split reasoning when applicable.\n")
+	b.WriteString("Include `search_audit` even when no search was required. If mandatory research could not run, record status unavailable or failed with the reason.\n")
+	b.WriteString("Example envelope:\n```json\n")
+	fmt.Fprintf(&b, "{\"taskID\":%q,\"taskType\":%q,\"result\":{\"outputType\":\"news_context_result\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"news-context-result/v1\",\"run_id\":%q,\"window_type\":%q,\"processed_news_ids\":[],\"reviewed_thread_ids\":[],\"unchanged_thread_ids\":[],\"news_decisions\":[],\"thread_changes\":[],\"search_audit\":[]}}}\n", taskID, AgentTaskTypeNewsEventReview, pack.RunID, pack.WindowType)
+	b.WriteString("```\n")
+
+	// ponytail: the service paginates large windows into complete batches; truncating here
+	// would silently drop news ids and violate the aggregation coverage contract.
+	return b.String()
+}
+
 func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, mcpURL string) string {
 	var b strings.Builder
 	b.WriteString("# Portfolio Sentinel Task\n\n")
@@ -918,6 +974,9 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	b.WriteString("\n```\n\n")
 
 	b.WriteString("## Required Review Workflow\n\n")
+	if pack.NewsContext != nil {
+		fmt.Fprintf(&b, "0. The newsContext block is mandatory review input. Page through `stock_agent.list_news_context_changes` with runId `%s` until all %d changed threads have been read; do not stop after the first page. Collect every returned non-empty versionId exactly once and return the complete set as `checked_news_thread_version_ids`. After reading all changes, use `stock_agent.semantic_search_news_threads` to inspect adjacent or related threads before judging portfolio impact.\n", pack.NewsContext.RunID, pack.NewsContext.ChangedThreadCount)
+	}
 	b.WriteString("1. Check data freshness for quotes, bars, portfolio snapshots, and news timestamps.\n")
 	b.WriteString("2. Separate broad-market moves, overseas/overnight peer moves, sector/theme shocks, company-specific news, stale data, and unrelated noise.\n")
 	b.WriteString("3. Evaluate impact against current holdings and portfolio permissions. Aggressive portfolio risk tolerance does not excuse ignoring material information shocks.\n")
@@ -927,13 +986,16 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	b.WriteString("## Output Requirements\n\n")
 	b.WriteString("Submit exactly ONE result. The `outputType` must be `portfolio_sentinel`.\n")
 	b.WriteString("The result object must use schema_version `portfolio-sentinel-report/v1`.\n")
+	if pack.NewsContext != nil {
+		b.WriteString("`checked_news_thread_version_ids` is required and must contain exactly the complete, duplicate-free versionId set returned by all pages of `stock_agent.list_news_context_changes` for the newsContext run.\n")
+	}
 	b.WriteString("Allowed overall_risk_level values: low, medium, high, critical.\n")
 	b.WriteString("Use `portfolio_actions[]` only for concrete follow-up. For a pending operation, set output_type=`proposed_operation` and include proposed_operation with action, portfolioId, symbol, market, and at least one of quantity/amount. Do not use targetWeight; the current execution guardrails do not support it.\n")
 	b.WriteString("For watch-only risk, use output_type=`continue_monitoring` or create review_requests[].\n")
 	b.WriteString("Keep one portfolio_actions item to one symbol. Do not bundle several symbols into one proposed operation.\n\n")
 	b.WriteString("Example submit_result shape:\n")
 	b.WriteString("```json\n")
-	fmt.Fprintf(&b, "{\"taskID\":\"%s\",\"taskType\":\"%s\",\"result\":{\"outputType\":\"%s\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"%s\",\"overall_risk_level\":\"high\",\"run_summary\":\"...\",\"negative_items\":[],\"positive_items\":[],\"noise_items\":[],\"affected_holdings\":[{\"symbol\":\"000000\",\"market\":\"SZ\",\"name\":\"示例\",\"risk_level\":\"high\",\"direction\":\"negative\",\"reasons\":[\"...\"]}],\"portfolio_actions\":[{\"symbol\":\"000000\",\"market\":\"SZ\",\"portfolio_id\":\"...\",\"output_type\":\"proposed_operation\",\"result_summary\":\"...\",\"proposed_operation\":{\"action\":\"reduce\",\"symbol\":\"000000\",\"market\":\"SZ\",\"portfolioId\":\"...\",\"quantity\":100},\"reason\":\"...\",\"risk_notes\":\"...\",\"confidence\":0.72}],\"review_requests\":[],\"data_quality_notes\":[],\"next_watch_focus\":[]}}}\n", taskID, AgentTaskTypePortfolioSentinel, PortfolioSentinelOutputType, PortfolioSentinelReportSchemaVersion)
+	fmt.Fprintf(&b, "{\"taskID\":\"%s\",\"taskType\":\"%s\",\"result\":{\"outputType\":\"%s\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"%s\",\"overall_risk_level\":\"high\",\"run_summary\":\"...\",\"negative_items\":[],\"positive_items\":[],\"noise_items\":[],\"affected_holdings\":[{\"symbol\":\"000000\",\"market\":\"SZ\",\"name\":\"示例\",\"risk_level\":\"high\",\"direction\":\"negative\",\"reasons\":[\"...\"]}],\"portfolio_actions\":[{\"symbol\":\"000000\",\"market\":\"SZ\",\"portfolio_id\":\"...\",\"output_type\":\"proposed_operation\",\"result_summary\":\"...\",\"proposed_operation\":{\"action\":\"reduce\",\"symbol\":\"000000\",\"market\":\"SZ\",\"portfolioId\":\"...\",\"quantity\":100},\"reason\":\"...\",\"risk_notes\":\"...\",\"confidence\":0.72}],\"review_requests\":[],\"data_quality_notes\":[],\"next_watch_focus\":[],\"checked_news_thread_version_ids\":[]}}}\n", taskID, AgentTaskTypePortfolioSentinel, PortfolioSentinelOutputType, PortfolioSentinelReportSchemaVersion)
 	b.WriteString("```\n\n")
 	b.WriteString("Important: If evidence is insufficient for action, do not force a proposed_operation. Use high/medium risk with review_requests or continue_monitoring instead.\n")
 

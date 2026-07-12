@@ -35,7 +35,8 @@ func TestAgentMCPServerUsesLoopbackHTTP(t *testing.T) {
 	var decoded struct {
 		Result struct {
 			Tools []struct {
-				Name string `json:"name"`
+				Name        string         `json:"name"`
+				InputSchema map[string]any `json:"inputSchema"`
 			} `json:"tools"`
 		} `json:"result"`
 	}
@@ -43,13 +44,42 @@ func TestAgentMCPServerUsesLoopbackHTTP(t *testing.T) {
 		t.Fatalf("decode tools/list: %v", err)
 	}
 	toolNames := map[string]bool{}
+	toolSchemas := map[string]map[string]any{}
 	for _, tool := range decoded.Result.Tools {
 		toolNames[tool.Name] = true
+		toolSchemas[tool.Name] = tool.InputSchema
 	}
-	for _, want := range []string{codexSubmitResultTool, "stock_agent.search_instruments", "stock_agent.record_candidate", "stock_agent.semantic_search_stock_profiles"} {
+	for _, want := range []string{
+		codexSubmitResultTool,
+		"stock_agent.search_instruments",
+		"stock_agent.record_candidate",
+		"stock_agent.semantic_search_stock_profiles",
+		mcpToolSemanticSearchNewsThreads,
+		mcpToolGetNewsThread,
+		mcpToolListNewsContextChanges,
+	} {
 		if !toolNames[want] {
 			t.Fatalf("tools = %+v, missing %s", decoded.Result.Tools, want)
 		}
+	}
+	for name, requiredField := range map[string]string{
+		mcpToolSemanticSearchNewsThreads: "query",
+		mcpToolGetNewsThread:             "threadId",
+		mcpToolListNewsContextChanges:    "runId",
+	} {
+		required, _ := toolSchemas[name]["required"].([]any)
+		if len(required) != 1 || required[0] != requiredField {
+			t.Fatalf("tool %s schema = %#v, want required %s", name, toolSchemas[name], requiredField)
+		}
+	}
+}
+
+func TestNextMCPPageOffset(t *testing.T) {
+	if got := nextMCPPageOffset(0, 50, 50, 120); got != 50 {
+		t.Fatalf("next offset = %#v, want 50", got)
+	}
+	if got := nextMCPPageOffset(100, 50, 20, 120); got != nil {
+		t.Fatalf("last page next offset = %#v, want nil", got)
 	}
 }
 

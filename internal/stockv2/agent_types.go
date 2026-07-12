@@ -68,8 +68,10 @@ const (
 )
 
 // Agent 任务类型。常量值是 API/DB 稳定 key;前端展示中文名称。
-// operation_review / strategy_generation / stock_profile_summary 已可配置并执行,
-// 其余任务只作为未来能力展示。
+// operation_review / strategy_generation / opportunity_discovery /
+// portfolio_sentinel / news_event_review / stock_profile_summary 已可配置并执行,
+// 其余任务只作为未来能力展示。news_event_review 当前承载
+// “消息脉络归纳”，保留稳定 key 以复用已有任务绑定。
 const (
 	AgentTaskTypeOperationReview      = "operation_review"
 	AgentTaskTypeStrategyGeneration   = "strategy_generation"
@@ -476,6 +478,7 @@ func executableAgentTaskType(v string) bool {
 		v == AgentTaskTypeStrategyGeneration ||
 		v == AgentTaskTypeOpportunityDiscovery ||
 		v == AgentTaskTypePortfolioSentinel ||
+		v == AgentTaskTypeNewsEventReview ||
 		v == AgentTaskTypeStockProfileSummary
 }
 
@@ -489,6 +492,8 @@ func validAgentTaskOutputType(taskType, outputType string) bool {
 		return outputType == OpportunityDiscoveryOutputType
 	case AgentTaskTypePortfolioSentinel:
 		return outputType == PortfolioSentinelOutputType
+	case AgentTaskTypeNewsEventReview:
+		return outputType == NewsContextOutputType
 	case AgentTaskTypeStockProfileSummary:
 		return outputType == AgentTaskTypeStockProfileSummary
 	default:

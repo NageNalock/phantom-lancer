@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestEmbeddingEntrypointsRequireConfiguredAvailableEmbeddingModel(t *testing.T) {
@@ -93,6 +94,173 @@ func TestEmbeddingEntrypointsRequireConfiguredAvailableEmbeddingModel(t *testing
 	}
 }
 
+func TestNewsThreadSemanticMCPFailsWithoutEmbeddingInsteadOfKeywordFallback(t *testing.T) {
+	store := newTestStore(t)
+	svc := NewService(store, nil, nil)
+	defer svc.Close()
+
+	resp := svc.AgentTaskPool().HandleMCPRequest(mustJSON(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": mcpToolSemanticSearchNewsThreads,
+			"arguments": map[string]any{
+				"query": "板块轮换",
+				"limit": 5,
+			},
+		},
+	}))
+	text := string(resp)
+	if !strings.Contains(text, EmbeddingStatusModelNotConfigured) {
+		t.Fatalf("response=%s, want explicit embedding not configured error", text)
+	}
+	if strings.Contains(text, "keyword") || strings.Contains(text, `"isError":false`) {
+		t.Fatalf("response=%s, semantic failure must not fall back to keyword success", text)
+	}
+}
+
+func TestSemanticSearchNewsThreadsReturnsOnlyActiveThreads(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	configureEmbeddingModel(t, svc, "embed-v1")
+
+	thread, err := svc.store.CreateNewsThread(ctx, NewsThread{
+		Title:      "动力电池扩产脉络",
+		CoreThesis: "动力电池供应链进入扩产阶段",
+		Status:     NewsThreadStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("create news thread: %v", err)
+	}
+	if _, err := svc.RebuildEmbeddingAssets(ctx, RequestRebuildEmbeddingAssets{ObjectTypes: []string{EmbeddingObjectNewsThread}}); err != nil {
+		t.Fatalf("rebuild news thread embedding: %v", err)
+	}
+	active, err := svc.SemanticSearchNewsThreads(ctx, SemanticSearchRequest{Query: "动力电池", Limit: 5})
+	if err != nil {
+		t.Fatalf("search active news thread: %v", err)
+	}
+	if len(active) != 1 || active[0].Thread.ID != thread.ID {
+		t.Fatalf("active results=%#v, want thread %s", active, thread.ID)
+	}
+
+	thread.Status = NewsThreadStatusDormant
+	if _, err := svc.store.UpdateNewsThread(ctx, thread); err != nil {
+		t.Fatalf("mark news thread dormant: %v", err)
+	}
+	inactive, err := svc.SemanticSearchNewsThreads(ctx, SemanticSearchRequest{Query: "动力电池", Limit: 5})
+	if !errors.Is(err, ErrEmbeddingAssetNotReady) {
+		t.Fatalf("search with dormant vector error=%v, want asset not ready", err)
+	}
+	if len(inactive) != 0 {
+		t.Fatalf("inactive results=%#v, want no non-active thread", inactive)
+	}
+}
+
+func TestNewsThreadRefreshFailureKeepsPreviousVectorMCPReadable(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	svc.agentMCPServer = &http.Server{}
+	svc.agentMCPURL = "http://127.0.0.1/stockv2-test-mcp"
+	ctx := context.Background()
+	model := configureEmbeddingModel(t, svc, "embed-v1")
+
+	thread, err := svc.store.CreateNewsThread(ctx, NewsThread{
+		Title:      "动力电池扩产脉络",
+		CoreThesis: "动力电池供应链进入扩产阶段",
+		Stage:      NewsThreadStageEmerging,
+		Status:     NewsThreadStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("create news thread: %v", err)
+	}
+	if _, err := svc.RebuildEmbeddingAssets(ctx, RequestRebuildEmbeddingAssets{ObjectTypes: []string{EmbeddingObjectNewsThread}}); err != nil {
+		t.Fatalf("build initial news thread embedding: %v", err)
+	}
+	before, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectNewsThread, thread.ID, model.ID)
+	if err != nil {
+		t.Fatalf("get initial news thread embedding: %v", err)
+	}
+
+	now := time.Now()
+	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowHourly, TriggerType: NewsContextTriggerManual,
+		Status: NewsContextRunStatusRunning, WindowStart: now.Add(-time.Hour), WindowEnd: now,
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatalf("create news context run: %v", err)
+	}
+	_, err = svc.store.ApplyNewsContextBatch(ctx, run.ID, "agent-refresh-failure", run.WindowType, NewsContextReport{
+		RunID: run.ID, WindowType: run.WindowType,
+		ThreadChanges: []NewsContextThreadChange{{
+			Action: "update", ThreadID: thread.ID, Title: thread.Title,
+			CoreThesis: "动力电池供应链出现扩产新证据", Stage: NewsThreadStageSpreading,
+			LatestChange: "新增扩产证据", MaterialChange: true, Confidence: 0.8,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("apply news thread update: %v", err)
+	}
+	stillReady, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectNewsThread, thread.ID, model.ID)
+	if err != nil {
+		t.Fatalf("get previous embedding after topic update: %v", err)
+	}
+	if stillReady.Status != EmbeddingAssetStatusReady || stillReady.VectorRef != before.VectorRef {
+		t.Fatalf("previous embedding became unavailable before replacement: before=%#v after=%#v", before, stillReady)
+	}
+	pendingDetail, err := svc.GetNewsThreadDetail(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("get pending thread detail: %v", err)
+	}
+	if pendingDetail.IndexStatus != NewsContextIndexStale || !pendingDetail.MCPReadable {
+		t.Fatalf("pending detail=%#v, want stale current content with previous MCP vector readable", pendingDetail)
+	}
+
+	svc.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, err
+		}
+		if strings.Contains(stringFromAny(payload["input"]), "新证据") {
+			return nil, errors.New("embedding provider unavailable for refreshed topic")
+		}
+		raw, _ := json.Marshal(map[string]any{"data": []map[string]any{{"embedding": []float64{1, 0, 0}}}})
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader(string(raw)))}, nil
+	})}
+	result, err := svc.RunEmbeddingMaintenanceBatch(ctx, RequestRebuildEmbeddingAssets{ObjectTypes: []string{EmbeddingObjectNewsThread}})
+	if err != nil {
+		t.Fatalf("failed refresh should return observable result: %v", err)
+	}
+	if result.Failed != 1 || result.Success != 0 {
+		t.Fatalf("refresh result=%#v, want one failure", result)
+	}
+	afterFailure, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectNewsThread, thread.ID, model.ID)
+	if err != nil {
+		t.Fatalf("get embedding after failed refresh: %v", err)
+	}
+	if afterFailure.Status != EmbeddingAssetStatusReady || afterFailure.VectorRef != before.VectorRef || afterFailure.TextHash != before.TextHash {
+		t.Fatalf("failed refresh replaced previous embedding: before=%#v after=%#v", before, afterFailure)
+	}
+	failedDetail, err := svc.GetNewsThreadDetail(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("get failed thread detail: %v", err)
+	}
+	if failedDetail.IndexStatus != NewsContextIndexFailed || !failedDetail.MCPReadable || failedDetail.IndexError == "" {
+		t.Fatalf("failed detail=%#v, want visible failure with previous MCP vector readable", failedDetail)
+	}
+
+	response := string(svc.HandleMCPRequest(mustJSON(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": mcpToolSemanticSearchNewsThreads, "arguments": map[string]any{"query": "动力电池", "limit": 5}},
+	})))
+	if !strings.Contains(response, `"isError":false`) || !strings.Contains(response, thread.ID) || !strings.Contains(response, before.VectorRef) {
+		t.Fatalf("MCP response lost previous ready vector after failed refresh: %s", response)
+	}
+}
+
 func TestEmbeddingRebuildAndSemanticSearchUseRealVectors(t *testing.T) {
 	svc, cleanup := newEmbeddingTestService(t)
 	defer cleanup()
@@ -146,6 +314,80 @@ func TestEmbeddingRebuildDoesNotSelectUnchangedOptionalDimensionAssets(t *testin
 	}
 	if second.Total != 0 || second.Success != 0 || second.Skipped != 0 {
 		t.Fatalf("second rebuild result=%#v, want unchanged ready asset not selected", second)
+	}
+}
+
+func TestEmbeddingRefreshSwapsVectorThenRemovesOldVector(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	model := configureEmbeddingModel(t, svc, "embed-v1")
+
+	upsertEmbeddingTestProfile(t, svc, "300750", "宁德时代", "动力电池")
+	if _, err := svc.RebuildEmbeddingAssets(ctx, RequestRebuildEmbeddingAssets{ObjectTypes: []string{EmbeddingObjectStockProfile}}); err != nil {
+		t.Fatalf("first rebuild: %v", err)
+	}
+	before, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectStockProfile, "300750", model.ID)
+	if err != nil {
+		t.Fatalf("get first asset: %v", err)
+	}
+
+	upsertEmbeddingTestProfile(t, svc, "300750", "宁德时代", "动力电池 储能订单更新")
+	result, err := svc.RebuildEmbeddingAssets(ctx, RequestRebuildEmbeddingAssets{ObjectTypes: []string{EmbeddingObjectStockProfile}})
+	if err != nil {
+		t.Fatalf("second rebuild: %v", err)
+	}
+	if result.Success != 1 || result.Failed != 0 {
+		t.Fatalf("second rebuild result=%#v, want one success", result)
+	}
+	after, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectStockProfile, "300750", model.ID)
+	if err != nil {
+		t.Fatalf("get refreshed asset: %v", err)
+	}
+	if after.VectorRef == before.VectorRef || after.TextHash == before.TextHash {
+		t.Fatalf("asset was not swapped: before=%#v after=%#v", before, after)
+	}
+	var oldCount int
+	if err := svc.store.marketDB.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_embedding_vectors_v2 WHERE vector_ref = ?`, before.VectorRef).Scan(&oldCount); err != nil {
+		t.Fatalf("count old vector: %v", err)
+	}
+	if oldCount != 0 {
+		t.Fatalf("old vector count=%d, want 0", oldCount)
+	}
+}
+
+func TestEmbeddingRefreshFailurePreservesLastReadyAsset(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	model := configureEmbeddingModel(t, svc, "embed-v1")
+
+	upsertEmbeddingTestProfile(t, svc, "300750", "宁德时代", "动力电池")
+	if _, err := svc.RebuildEmbeddingAssets(ctx, RequestRebuildEmbeddingAssets{ObjectTypes: []string{EmbeddingObjectStockProfile}}); err != nil {
+		t.Fatalf("first rebuild: %v", err)
+	}
+	before, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectStockProfile, "300750", model.ID)
+	if err != nil {
+		t.Fatalf("get first asset: %v", err)
+	}
+
+	upsertEmbeddingTestProfile(t, svc, "300750", "宁德时代", "动力电池 新证据")
+	svc.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("embedding provider unavailable")
+	})}
+	result, err := svc.RebuildEmbeddingAssets(ctx, RequestRebuildEmbeddingAssets{ObjectTypes: []string{EmbeddingObjectStockProfile}})
+	if err != nil {
+		t.Fatalf("failed refresh should return observable batch result: %v", err)
+	}
+	if result.Failed != 1 || result.Success != 0 {
+		t.Fatalf("failed refresh result=%#v, want one failure", result)
+	}
+	after, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectStockProfile, "300750", model.ID)
+	if err != nil {
+		t.Fatalf("get preserved asset: %v", err)
+	}
+	if after.Status != EmbeddingAssetStatusReady || after.VectorRef != before.VectorRef || after.TextHash != before.TextHash {
+		t.Fatalf("last ready asset was overwritten: before=%#v after=%#v", before, after)
 	}
 }
 

@@ -8,7 +8,7 @@
 >
 > 本文只记录 V2 的核心系统思路，不展开 API、表结构、页面细节和交付拆分。
 >
-> 相关补充设计：`docs/stock-v2-strategy-generation-design-2026-06-26.md` 定义 `strategy_generation`、组合持仓诊断模式和策略草案确认流程；`docs/stock-v2-opportunity-discovery-technical-design-2026-06-26.md` 定义主题机会发现、Codex CLI 研究执行、MCP 资料查询与可观测性方案。
+> 相关补充设计：`docs/stock-v2-strategy-generation-design-2026-06-26.md` 定义 `strategy_generation`、组合持仓诊断模式和策略草案确认流程；`docs/stock-v2-opportunity-discovery-technical-design-2026-06-26.md` 定义主题机会发现、Codex CLI 研究执行、MCP 资料查询与可观测性方案；`docs/stock-v2-news-context-feature-design-2026-07-12.md` 定义消息脉络、三级新闻归纳、安全清理、主题演进、轮换线索、向量索引和 MCP 检索方案。
 
 ## 1. 核心定位
 

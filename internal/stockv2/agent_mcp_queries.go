@@ -37,6 +37,9 @@ func (p *agentTaskPool) mcpDataTools() []mcpTool {
 		{Name: "stock_agent.get_daily_bars_summary", Description: "Get a compact daily bar summary for one symbol.", InputSchema: simpleSchema(map[string]any{"symbol": stringProp("Instrument symbol."), "adjusted": stringProp("none, qfq, or hfq."), "limit": limitProp})},
 		{Name: "stock_agent.search_news_events", Description: "Keyword search StockV2 normalized news events. This is not semantic vector search.", InputSchema: simpleSchema(map[string]any{"query": stringProp("Keyword."), "source": stringProp("Optional source."), "limit": limitProp})},
 		{Name: "stock_agent.semantic_search_news_events", Description: "Semantic vector search over ready news event embeddings. Fails if embedding is not configured or assets are not ready.", InputSchema: simpleSchema(map[string]any{"query": stringProp("Theme or event text."), "limit": limitProp, "minScore": map[string]any{"type": "number"}})},
+		{Name: mcpToolSemanticSearchNewsThreads, Description: "Semantic vector recall over ready current message-thread embeddings. Similarity is not a factual or causal relationship.", InputSchema: simpleSchema(map[string]any{"query": stringProp("Theme, event, sector, or rotation question."), "limit": limitProp, "minScore": map[string]any{"type": "number"}})},
+		{Name: mcpToolGetNewsThread, Description: "Read one complete message thread and its history, evidence, relationships, review, and index state.", InputSchema: simpleSchema(map[string]any{"threadId": stringProp("Stable message-thread id.")})},
+		{Name: mcpToolListNewsContextChanges, Description: "Page through every changed message thread in one aggregation run for complete review coverage.", InputSchema: simpleSchema(map[string]any{"runId": stringProp("Aggregation run id."), "limit": limitProp, "offset": map[string]any{"type": "integer", "minimum": 0}})},
 		{Name: "stock_agent.search_news_link_candidates", Description: "Search news-to-instrument link candidates.", InputSchema: simpleSchema(map[string]any{"query": stringProp("Keyword."), "symbol": stringProp("Optional symbol."), "market": stringProp("Optional market."), "limit": limitProp})},
 		{Name: "stock_agent.list_existing_strategies", Description: "List existing StockV2 strategies and active strategy versions.", InputSchema: simpleSchema(map[string]any{"symbol": stringProp("Optional symbol."), "status": stringProp("Optional status."), "source": stringProp("Optional source."), "limit": limitProp})},
 		{Name: "stock_agent.get_portfolio_context", Description: "Get portfolio, holding, and latest snapshot context. Does not expose credentials.", InputSchema: simpleSchema(map[string]any{"portfolioId": stringProp("Optional portfolio id.")})},
@@ -249,6 +252,89 @@ func (p *agentTaskPool) mcpSemanticSearchNewsEvents(args json.RawMessage) (any, 
 	return mcpJSONContent(map[string]any{"items": out, "count": len(out), "searchType": "semantic_vector"})
 }
 
+func (p *agentTaskPool) mcpSemanticSearchNewsThreads(args json.RawMessage) (any, *mcpError) {
+	svc, errResp := p.mcpService()
+	if errResp != nil {
+		return nil, errResp
+	}
+	var req SemanticSearchRequest
+	if err := json.Unmarshal(args, &req); err != nil {
+		return nil, mcpInvalidArgs(err)
+	}
+	req.Query = strings.TrimSpace(req.Query)
+	if req.Query == "" {
+		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "query is required"}
+	}
+	req.Limit = mcpLimit(req.Limit, 10, 50)
+	items, err := svc.SemanticSearchNewsThreads(context.Background(), req)
+	if err != nil {
+		return nil, mcpEmbeddingError(err)
+	}
+	return mcpJSONContent(map[string]any{
+		"items":      items,
+		"count":      len(items),
+		"searchType": "semantic_vector",
+		"notice":     "Similarity is retrieval only; it is not evidence of identity, causality, support, contradiction, or a trading conclusion.",
+	})
+}
+
+func (p *agentTaskPool) mcpGetNewsThread(args json.RawMessage) (any, *mcpError) {
+	svc, errResp := p.mcpService()
+	if errResp != nil {
+		return nil, errResp
+	}
+	var req struct {
+		ID       string `json:"id"`
+		ThreadID string `json:"threadId"`
+	}
+	if err := json.Unmarshal(args, &req); err != nil {
+		return nil, mcpInvalidArgs(err)
+	}
+	id := strings.TrimSpace(firstNonEmptyOpportunity(req.ThreadID, req.ID))
+	if id == "" {
+		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "threadId is required"}
+	}
+	item, err := svc.GetNewsThreadDetail(context.Background(), id)
+	if err != nil {
+		return nil, mcpErrorFromError(err)
+	}
+	return mcpJSONContent(mcpNewsThreadDetail(item))
+}
+
+func (p *agentTaskPool) mcpListNewsContextChanges(args json.RawMessage) (any, *mcpError) {
+	svc, errResp := p.mcpService()
+	if errResp != nil {
+		return nil, errResp
+	}
+	var req struct {
+		RunID  string `json:"runId"`
+		Limit  int    `json:"limit"`
+		Offset int    `json:"offset"`
+	}
+	if err := json.Unmarshal(args, &req); err != nil {
+		return nil, mcpInvalidArgs(err)
+	}
+	req.RunID = strings.TrimSpace(req.RunID)
+	if req.RunID == "" {
+		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "runId is required"}
+	}
+	req.Limit = mcpLimit(req.Limit, 50, 50)
+	if req.Offset < 0 {
+		req.Offset = 0
+	}
+	items, total, err := svc.ListNewsContextChangedThreads(context.Background(), req.RunID, req.Limit, req.Offset)
+	if err != nil {
+		return nil, mcpErrorFromError(err)
+	}
+	return mcpJSONContent(map[string]any{
+		"items":      items,
+		"total":      total,
+		"limit":      req.Limit,
+		"offset":     req.Offset,
+		"nextOffset": nextMCPPageOffset(req.Offset, req.Limit, len(items), total),
+	})
+}
+
 func (p *agentTaskPool) mcpSearchNewsLinkCandidates(args json.RawMessage) (any, *mcpError) {
 	svc, errResp := p.mcpService()
 	if errResp != nil {
@@ -444,6 +530,20 @@ func mcpNewsEventSummary(event NewsEvent) map[string]any {
 		"url":            safelog.URLLabel(event.URL), "qualityStatus": event.QualityStatus,
 		"linkStatus": event.LinkStatus, "eventAt": event.EventAt,
 	}
+}
+
+func mcpNewsThreadDetail(detail NewsThreadDetail) NewsThreadDetail {
+	detail.Theme.IndexError = safelog.Text(detail.Theme.IndexError, 500)
+	detail.IndexError = safelog.Text(detail.IndexError, 500)
+	detail.Versions = append([]NewsThreadVersion(nil), detail.Versions...)
+	for i := range detail.Versions {
+		detail.Versions[i].IndexError = safelog.Text(detail.Versions[i].IndexError, 500)
+	}
+	detail.Evidence = append([]NewsThreadEvidence(nil), detail.Evidence...)
+	for i := range detail.Evidence {
+		detail.Evidence[i].URL = sanitizeOpportunityURL(detail.Evidence[i].URL)
+	}
+	return detail
 }
 
 func mcpEmbeddingAssetSummary(asset EmbeddingAsset) map[string]any {

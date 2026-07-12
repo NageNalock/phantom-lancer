@@ -411,6 +411,10 @@ func newsEventWhere(filter NewsEventListFilter) (string, []any) {
 	add("source", filter.Source)
 	add("link_status", filter.LinkStatus)
 	add("quality_status", filter.QualityStatus)
+	if filter.ExcludeCompacted {
+		parts = append(parts, "COALESCE(context_status, 'pending') <> ?")
+		args = append(args, NewsEventContextCompacted)
+	}
 	addNewsTimeWindow(&parts, &args, newsEventTimeSQL, filter.Since, filter.Until)
 	if q := strings.TrimSpace(filter.Query); q != "" {
 		pattern := "%" + strings.ToLower(q) + "%"

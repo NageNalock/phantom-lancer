@@ -8,7 +8,8 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test:news-context": "node --experimental-strip-types tests/news-context-model.test.mjs"
   },
   "devDependencies": {
     "@types/react": "^19.2.16",

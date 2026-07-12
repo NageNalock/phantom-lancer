@@ -93,16 +93,42 @@ func (s *Store) MarkEmbeddingAssetsStaleForModelChange(ctx context.Context, mode
 		SET status = ?, updated_at = ?
 		WHERE status = ? AND model_id <> ?
 	`, EmbeddingAssetStatusStale, time.Now(), EmbeddingAssetStatusReady, strings.TrimSpace(modelID))
-	return wrapError(err, "mark embedding assets stale for model change")
+	if err != nil {
+		return wrapError(err, "mark embedding assets stale for model change")
+	}
+	if _, err := s.assetDB().ExecContext(ctx, `UPDATE stockv2_news_threads SET index_status=?, index_error=NULL, updated_at=?`, NewsContextIndexStale, time.Now()); err != nil {
+		return wrapError(err, "mark news thread indexes stale for model change")
+	}
+	if _, err := s.assetDB().ExecContext(ctx, `UPDATE stockv2_news_thread_versions SET index_status=?, index_error=NULL`, NewsContextIndexStale); err != nil {
+		return wrapError(err, "mark news thread version indexes stale for model change")
+	}
+	return nil
 }
 
 func (s *Store) MarkEmbeddingAssetsStaleForObject(ctx context.Context, objectType, objectID string) error {
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 		UPDATE stockv2_embedding_assets
 		SET status = ?, updated_at = ?
 		WHERE object_type = ? AND object_id = ? AND status = ?
 	`, EmbeddingAssetStatusStale, time.Now(), strings.TrimSpace(objectType), strings.TrimSpace(objectID), EmbeddingAssetStatusReady)
-	return wrapError(err, "mark embedding assets stale for object")
+	if err != nil {
+		return wrapError(err, "mark embedding assets stale for object")
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return wrapError(err, "check stale embedding asset rows")
+	}
+	if rows == 0 {
+		return nil
+	}
+	switch strings.TrimSpace(objectType) {
+	case EmbeddingObjectNewsThread:
+		return s.UpdateNewsThreadIndexStatus(ctx, objectID, NewsContextIndexStale, "")
+	case EmbeddingObjectNewsThreadVersion:
+		return s.UpdateNewsThreadVersionIndexStatus(ctx, objectID, NewsContextIndexStale, "")
+	default:
+		return nil
+	}
 }
 
 func (s *Store) CountMissingEmbeddingSourcesByType(ctx context.Context, objectTypes []string, modelID string) (map[string]int, error) {
@@ -125,8 +151,21 @@ func (s *Store) CountMissingEmbeddingSourcesByType(ctx context.Context, objectTy
 			count, err = s.countMissingEmbeddingSourcesFromAssetDB(ctx, objectType, modelID, `
 				SELECT id
 				FROM stockv2_news_events
-				WHERE TRIM(COALESCE(source, '') || COALESCE(title, '') || COALESCE(summary, '') || COALESCE(content, '') || COALESCE(quality_status, '')) <> ''
+				WHERE COALESCE(context_status, 'pending') <> 'compacted'
+				  AND TRIM(COALESCE(source, '') || COALESCE(title, '') || COALESCE(summary, '') || COALESCE(content, '') || COALESCE(quality_status, '')) <> ''
 			`)
+		case EmbeddingObjectNewsThread:
+			var ids []string
+			ids, err = s.listNewsThreadEmbeddingSourceIDs(ctx)
+			if err == nil {
+				count, err = s.countMissingEmbeddingSourcesForIDs(ctx, objectType, modelID, ids)
+			}
+		case EmbeddingObjectNewsThreadVersion:
+			var ids []string
+			ids, err = s.listNewsThreadVersionEmbeddingSourceIDs(ctx)
+			if err == nil {
+				count, err = s.countMissingEmbeddingSourcesForIDs(ctx, objectType, modelID, ids)
+			}
 		case EmbeddingObjectOpportunity:
 			err = s.db.QueryRowContext(ctx, `
 				SELECT COUNT(*)
@@ -143,6 +182,52 @@ func (s *Store) CountMissingEmbeddingSourcesByType(ctx context.Context, objectTy
 		out[objectType] = count
 	}
 	return out, nil
+}
+
+func (s *Store) listNewsThreadEmbeddingSourceIDs(ctx context.Context) ([]string, error) {
+	const pageSize = 200
+	ids := make([]string, 0, pageSize)
+	for offset := 0; ; offset += pageSize {
+		items, err := s.ListNewsThreads(ctx, NewsThreadListFilter{Limit: pageSize, Offset: offset})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			if id := strings.TrimSpace(item.ID); id != "" && newsThreadEmbeddingIndexable(item) {
+				ids = append(ids, id)
+			}
+		}
+		if len(items) < pageSize {
+			return ids, nil
+		}
+	}
+}
+
+func (s *Store) listNewsThreadVersionEmbeddingSourceIDs(ctx context.Context) ([]string, error) {
+	const pageSize = 200
+	ids := make([]string, 0, pageSize)
+	for offset := 0; ; offset += pageSize {
+		items, err := s.ListNewsThreadVersions(ctx, NewsThreadVersionListFilter{Limit: pageSize, Offset: offset})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range items {
+			if id := strings.TrimSpace(item.ID); id != "" && newsThreadVersionEmbeddingIndexable(item) {
+				ids = append(ids, id)
+			}
+		}
+		if len(items) < pageSize {
+			return ids, nil
+		}
+	}
+}
+
+func (s *Store) countMissingEmbeddingSourcesForIDs(ctx context.Context, objectType, modelID string, ids []string) (int, error) {
+	existing, err := s.countEmbeddingAssetsForObjectIDs(ctx, objectType, modelID, ids)
+	if err != nil {
+		return 0, err
+	}
+	return len(ids) - existing, nil
 }
 
 func (s *Store) countMissingEmbeddingSourcesFromAssetDB(ctx context.Context, objectType, modelID, sourceIDSQL string) (int, error) {

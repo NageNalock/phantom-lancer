@@ -142,6 +142,63 @@ func TestBuildStockProfileSummaryPromptTruncatesUTF8Safely(t *testing.T) {
 	}
 }
 
+func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing.T) {
+	prompt := buildNewsContextAggregationPrompt("task-news-context", NewsContextAggregationPack{
+		RunID:      "context-run-1",
+		WindowType: "daily",
+	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
+
+	for _, want := range []string{
+		"task-news-context",
+		"context-run-1",
+		"news_context_result",
+		"processed_news_ids",
+		"reviewed_thread_ids",
+		"unchanged_thread_ids",
+		"every InputThreads item",
+		"daily batch must produce a stage conclusion",
+		"stock_agent.semantic_search_news_threads",
+		"stock_agent.get_news_thread",
+		"Public verification is mandatory",
+		"every ResearchReasons item",
+		"stock_agent.submit_result",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q: %s", want, prompt)
+		}
+	}
+	if !validAgentTaskOutputType(AgentTaskTypeNewsEventReview, "news_context_result") {
+		t.Fatal("news context result must be accepted for news_event_review")
+	}
+	if validAgentTaskOutputType(AgentTaskTypeNewsEventReview, AgentTaskTypeNewsEventReview) {
+		t.Fatal("legacy task key must not be accepted as a result type")
+	}
+}
+
+func TestBuildPortfolioSentinelPromptRequiresCompleteNewsContextReview(t *testing.T) {
+	prompt := buildPortfolioSentinelPrompt("task-sentinel", PortfolioSentinelContext{
+		NewsContext: &PortfolioSentinelNewsContext{
+			RunID:              "context-run-1",
+			ChangedThreadCount: 123,
+		},
+	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
+
+	for _, want := range []string{
+		"stock_agent.list_news_context_changes",
+		"context-run-1",
+		"all 123 changed threads",
+		"do not stop after the first page",
+		"checked_news_thread_version_ids",
+		"complete, duplicate-free versionId set",
+		"stock_agent.semantic_search_news_threads",
+		"adjacent or related threads",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q: %s", want, prompt)
+		}
+	}
+}
+
 func TestTruncatePromptUTF8KeepsValidUTF8AtByteBoundary(t *testing.T) {
 	value := strings.Repeat("中", 3000) + strings.Repeat("尾", 1000)
 	got := truncatePromptUTF8(value, 6000, 2000)

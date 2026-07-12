@@ -1503,11 +1503,6 @@ export interface StockV2RawNews {
   updatedAt: string;
 }
 
-export interface StockV2RawNewsTruncateResult {
-  before: string;
-  deletedCount: number;
-}
-
 export interface StockV2NewsEvent {
   id: string;
   rawNewsId?: string;
@@ -1549,6 +1544,230 @@ export interface StockV2NewsLinkCandidate {
 
 export interface StockV2PagedResponse<T> {
   items: T[];
+  total?: number;
+  limit?: number;
+  offset?: number;
+}
+
+// ===== 消息脉络 =====
+
+export type StockV2NewsContextView = "themes" | "rotation" | "aggregation" | "cleanup";
+
+export interface StockV2NewsContextConfig {
+  id: string;
+  enabled: boolean;
+  autoCleanupEnabled: boolean;
+  hourlyEnabled: boolean;
+  fourHourEnabled: boolean;
+  dailyEnabled: boolean;
+  batchSize: number;
+  nextHourlyAt?: string;
+  nextFourHourAt?: string;
+  nextDailyAt?: string;
+}
+
+export interface StockV2NewsContextSummary {
+  config?: StockV2NewsContextConfig;
+  themeCount?: number;
+  activeThemeCount?: number;
+  changedThemeCount?: number;
+  pendingReviewCount?: number;
+  currentNewsCount?: number;
+  historicalProcessedCount?: number;
+  compressedNewsCount?: number;
+  pendingCleanupCount?: number;
+  protectedNewsCount?: number;
+  releasedBytes?: number;
+  indexReadyCount?: number;
+  indexMissingCount?: number;
+  indexStaleCount?: number;
+  indexFailedCount?: number;
+  indexStatus?: string;
+  indexError?: string;
+  mcpAvailable?: boolean;
+  mcpToolsReady?: boolean;
+  mcpLastVerifiedAt?: string;
+  mcpVerificationStatus?: string;
+  mcpError?: string;
+  latestAggregationAt?: string;
+  latestCleanupAt?: string;
+  updatedAt?: string;
+}
+
+export interface StockV2NewsContextNamedObject {
+  id?: string;
+  symbol?: string;
+  name?: string;
+  title?: string;
+  relation?: string;
+  summary?: string;
+}
+
+export interface StockV2NewsContextRelation {
+  id?: string;
+  targetThemeId?: string;
+  targetThemeTitle?: string;
+  relationType?: string;
+  summary?: string;
+  evidenceSummary?: string;
+  confidence?: number;
+}
+
+export interface StockV2NewsContextTheme {
+  id: string;
+  currentVersionId?: string;
+  title?: string;
+  name?: string;
+  coreThesis?: string;
+  coreLogic?: string;
+  currentConclusion?: string;
+  stage?: string;
+  latestChange?: string;
+  materialChange?: boolean;
+  confirmedFacts?: string[];
+  inferences?: string[];
+  counterEvidence?: string[];
+  conflicts?: string[];
+  openQuestions?: string[];
+  catalysts?: string[];
+  invalidationConditions?: string[];
+  industries?: string[];
+  sectors?: string[];
+  symbols?: Array<string | StockV2NewsContextNamedObject>;
+  funds?: Array<string | StockV2NewsContextNamedObject>;
+  leaders?: Array<string | StockV2NewsContextNamedObject>;
+  followers?: Array<string | StockV2NewsContextNamedObject>;
+  laggards?: Array<string | StockV2NewsContextNamedObject>;
+  relayCandidates?: Array<string | StockV2NewsContextNamedObject>;
+  relations?: StockV2NewsContextRelation[];
+  supportingEvidenceSummary?: string;
+  weakeningEvidenceSummary?: string;
+  confidence?: number;
+  freshness?: string;
+  dataConfirmation?: string;
+  reviewStatus?: string;
+  lastReviewedAt?: string;
+  indexStatus?: string;
+  indexUpdatedAt?: string;
+  lastUsedBy?: string[];
+  firstSeenAt?: string;
+  lastChangedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface StockV2NewsContextThemeVersion {
+  id: string;
+  themeId?: string;
+  versionNo?: number;
+  windowType?: string;
+  stage?: string;
+  changeType?: string;
+  changeSummary?: string;
+  conclusion?: string;
+  confidence?: number;
+  materialChange?: boolean;
+  researchStatus?: string;
+  reviewStatus?: string;
+  indexStatus?: string;
+  indexError?: string;
+  createdAt?: string;
+}
+
+export interface StockV2NewsContextEvidence {
+  id: string;
+  themeId?: string;
+  themeVersionId?: string;
+  source?: string;
+  title?: string;
+  summary?: string;
+  url?: string;
+  evidenceRole?: string;
+  publishedAt?: string;
+  originalNewsDeleted?: boolean;
+  protected?: boolean;
+  protectedReason?: string;
+  createdAt?: string;
+}
+
+export interface StockV2NewsContextThemeDetail {
+  theme: StockV2NewsContextTheme;
+  versions?: StockV2NewsContextThemeVersion[];
+  evidence?: StockV2NewsContextEvidence[];
+  indexStatus?: string;
+  indexUpdatedAt?: string;
+  indexError?: string;
+  mcpReadable?: boolean;
+  mcpError?: string;
+  protectedReasons?: string[];
+  relatedAlerts?: StockV2NewsContextNamedObject[];
+  relatedReviews?: StockV2NewsContextNamedObject[];
+  relatedOpportunities?: StockV2NewsContextNamedObject[];
+  relatedStrategies?: StockV2NewsContextNamedObject[];
+}
+
+export interface StockV2NewsContextRotationItem {
+  id?: string;
+  themeId?: string;
+  title?: string;
+  summary?: string;
+  stage?: string;
+  confidence?: number;
+  dataConfirmation?: string;
+  industries?: string[];
+  symbols?: Array<string | StockV2NewsContextNamedObject>;
+  reasons?: string[];
+  confirmationSignals?: string[];
+  invalidationSignals?: string[];
+}
+
+export interface StockV2NewsContextRotationSignals {
+  asOf?: string;
+  dataStatus?: string;
+  summary?: string;
+  mainThemes?: StockV2NewsContextRotationItem[];
+  acceleratingThemes?: StockV2NewsContextRotationItem[];
+  fadingThemes?: StockV2NewsContextRotationItem[];
+  relayCandidates?: StockV2NewsContextRotationItem[];
+  confirmationSignals?: string[];
+  invalidationSignals?: string[];
+  updatedAt?: string;
+}
+
+export interface StockV2NewsContextRun {
+  id: string;
+  kind?: "aggregation" | "cleanup" | string;
+  windowType?: string;
+  status?: string;
+  coverageStatus?: string;
+  progress?: number;
+  windowStart?: string;
+  windowEnd?: string;
+  processedNewsCount?: number;
+  totalNewsCount?: number;
+  createdThemeCount?: number;
+  updatedThemeCount?: number;
+  unchangedThemeCount?: number;
+  conflictThemeCount?: number;
+  pendingThemeCount?: number;
+  materialThemeCount?: number;
+  externalResearchStatus?: string;
+  deletedNewsCount?: number;
+  retainedNewsCount?: number;
+  pendingCleanupCount?: number;
+  protectedNewsCount?: number;
+  releasedBytes?: number;
+  failedStage?: string;
+  errorMessage?: string;
+  retryable?: boolean;
+  startedAt?: string;
+  finishedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface StockV2NewsContextRunListResponse {
+  items: StockV2NewsContextRun[];
   total?: number;
   limit?: number;
   offset?: number;
@@ -2774,8 +2993,9 @@ export interface StockV2OpportunityResult {
 export type StockV2EmbeddingObjectType =
   | "stock_profile"
   | "news_event"
+  | "news_thread"
+  | "news_thread_version"
   | "opportunity"
-  | "theme"
   | "external_source";
 
 export type StockV2EmbeddingAssetStatus = "ready" | "stale" | "failed";

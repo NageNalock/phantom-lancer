@@ -33,6 +33,21 @@ func (s *Store) DeleteEmbeddingVector(ctx context.Context, vectorRef string) err
 	return s.marketDB.DeleteEmbeddingVector(ctx, vectorRef)
 }
 
+func (s *Store) HasEmbeddingVector(ctx context.Context, vectorRef string) (bool, error) {
+	if s == nil || s.marketDB == nil || s.marketDB.db == nil || vectorRef == "" {
+		return false, nil
+	}
+	var found int
+	err := s.marketDB.db.QueryRowContext(ctx, `SELECT 1 FROM stockv2_embedding_vectors_v2 WHERE vector_ref = ? LIMIT 1`, vectorRef).Scan(&found)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, wrapError(err, "check embedding vector v2")
+	}
+	return found == 1, nil
+}
+
 func (s *Store) SearchEmbeddingVectors(ctx context.Context, modelID, objectType string, query []float64, limit int) ([]EmbeddingVectorSearchHit, error) {
 	if len(query) == 0 {
 		return nil, ErrEmbeddingAssetNotReady

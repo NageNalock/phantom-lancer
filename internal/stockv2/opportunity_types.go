@@ -59,11 +59,13 @@ const (
 	EmbeddingAssetStatusStale  = "stale"
 	EmbeddingAssetStatusFailed = "failed"
 
-	EmbeddingObjectStockProfile   = "stock_profile"
-	EmbeddingObjectNewsEvent      = "news_event"
-	EmbeddingObjectRawNews        = "raw_news"
-	EmbeddingObjectOpportunity    = "opportunity"
-	EmbeddingObjectExternalSource = "external_source"
+	EmbeddingObjectStockProfile      = "stock_profile"
+	EmbeddingObjectNewsEvent         = "news_event"
+	EmbeddingObjectNewsThread        = "news_thread"
+	EmbeddingObjectNewsThreadVersion = "news_thread_version"
+	EmbeddingObjectRawNews           = "raw_news"
+	EmbeddingObjectOpportunity       = "opportunity"
+	EmbeddingObjectExternalSource    = "external_source"
 
 	EmbeddingStatusReady              = "ready"
 	EmbeddingStatusDisabled           = "disabled"
@@ -441,6 +443,12 @@ type SemanticNewsEventResult struct {
 	Score float64        `json:"score"`
 	Event NewsEvent      `json:"event"`
 	Asset EmbeddingAsset `json:"asset"`
+}
+
+type SemanticNewsThreadResult struct {
+	Score  float64        `json:"score"`
+	Thread NewsThread     `json:"thread"`
+	Asset  EmbeddingAsset `json:"asset"`
 }
 
 func validOpportunityStatus(v string) bool {

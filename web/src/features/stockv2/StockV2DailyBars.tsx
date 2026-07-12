@@ -10,7 +10,8 @@ import type {
   StockV2DailyBarsQuality,
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
-import { Button, CollapsibleSection, Field, Notice, Pill } from "../../components/ui";
+import { Button, CollapsibleSection, Field, Notice, Pill, SubTabs } from "../../components/ui";
+import { useQueryParamState } from "../../hooks/useQueryParamState";
 import {
   stockV2AdjustedLabel,
   stockV2DailyBarJobStatusLabel,
@@ -19,12 +20,13 @@ import {
   stockV2RangeLabel,
 } from "../../domain/labels";
 import { StockV2Monitor } from "./StockV2Monitor";
-import { StockV2NewsWorkbench } from "./StockV2NewsWorkbench";
+import { StockV2NewsArea } from "./StockV2NewsArea";
 import { formatCompactMeaningfulTime as formatCompactTime, hasMeaningfulTime } from "./time";
 
 type RunAction = (label: string, fn: () => Promise<void>) => Promise<void>;
 type MarketView = "monitor" | "news";
 
+const MARKET_VIEWS: readonly MarketView[] = ["monitor", "news"];
 const RANGES: DailyBarRange[] = ["6m", "1y", "3y", "5y"];
 const ADJUSTEDS: DailyBarAdjusted[] = ["none", "qfq", "hfq"];
 const JOB_PAGE_SIZE = 10;
@@ -38,32 +40,27 @@ interface JobsResponse {
 }
 
 export function StockV2DailyBars({ actions }: { actions: AppActions; data: AppData; runAction: RunAction }) {
-  const [marketView, setMarketView] = useState<MarketView>("monitor");
+  const [marketView, setMarketView, marketViewHref] = useQueryParamState<MarketView>(
+    "stockv2Market",
+    MARKET_VIEWS,
+    "monitor",
+    { clearKeys: ["stockv2News", "stockv2NewsContext", "stockv2NewsTheme"] },
+  );
 
   return (
     <div className="grid gap-4">
-      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--line)] pb-3">
-        {[
-          { id: "monitor" as const, label: "监控任务" },
-          { id: "news" as const, label: "消息面" },
-        ].map((tab) => (
-          <button
-            className={`rounded-md border px-3 py-1.5 text-sm ${
-              marketView === tab.id
-                ? "border-[var(--accent)] bg-[var(--surface-strong)] text-[var(--text)]"
-                : "border-[var(--line)] text-[var(--muted-strong)] hover:bg-[var(--surface-soft)]"
-            }`}
-            key={tab.id}
-            onClick={() => setMarketView(tab.id)}
-            type="button"
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
+      <SubTabs
+        activeId={marketView}
+        ariaLabel="监控与消息视图"
+        onChange={(id) => setMarketView(id as MarketView)}
+        tabs={[
+          { id: "monitor", label: "监控任务", href: marketViewHref("monitor") },
+          { id: "news", label: "消息面", href: marketViewHref("news") },
+        ]}
+      />
 
       {marketView === "monitor" ? <StockV2Monitor actions={actions} /> : null}
-      {marketView === "news" ? <StockV2NewsWorkbench actions={actions} /> : null}
+      {marketView === "news" ? <StockV2NewsArea actions={actions} /> : null}
     </div>
   );
 }

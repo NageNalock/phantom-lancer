@@ -829,6 +829,19 @@ func (s *Store) GetEmbeddingAssetByVectorRef(ctx context.Context, vectorRef stri
 	return item, nil
 }
 
+func (s *Store) DeleteEmbeddingAsset(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM stockv2_embedding_assets WHERE id = ?`, strings.TrimSpace(id))
+	if err != nil {
+		return wrapError(err, "delete embedding asset")
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return wrapError(rowsErr, "check deleted embedding asset rows")
+	} else if rows == 0 {
+		return ErrEmbeddingAssetNotFound
+	}
+	return nil
+}
+
 func embeddingAssetWhere(filter EmbeddingAssetListFilter) (string, []any) {
 	where := []string{"1=1"}
 	args := make([]any, 0)

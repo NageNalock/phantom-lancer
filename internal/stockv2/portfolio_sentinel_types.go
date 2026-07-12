@@ -110,11 +110,12 @@ type PortfolioSentinelRunListFilter struct {
 }
 
 type RequestRunPortfolioSentinel struct {
-	PortfolioID string `json:"portfolioId,omitempty"`
-	WindowType  string `json:"windowType,omitempty"`
-	StartAt     string `json:"startAt,omitempty"`
-	EndAt       string `json:"endAt,omitempty"`
-	Note        string `json:"note,omitempty"`
+	PortfolioID      string `json:"portfolioId,omitempty"`
+	WindowType       string `json:"windowType,omitempty"`
+	StartAt          string `json:"startAt,omitempty"`
+	EndAt            string `json:"endAt,omitempty"`
+	Note             string `json:"note,omitempty"`
+	NewsContextRunID string `json:"newsContextRunId,omitempty"`
 }
 
 type RequestUpdatePortfolioSentinelConfig struct {
@@ -148,7 +149,15 @@ type PortfolioSentinelContext struct {
 	Transactions  []StockV2Transaction                `json:"recentTransactions,omitempty"`
 	DataFreshness map[string]any                      `json:"dataFreshness,omitempty"`
 	ContextStats  map[string]any                      `json:"contextStats,omitempty"`
+	NewsContext   *PortfolioSentinelNewsContext       `json:"newsContext,omitempty"`
 	Note          string                              `json:"note,omitempty"`
+}
+
+type PortfolioSentinelNewsContext struct {
+	RunID               string `json:"runId"`
+	ChangedThreadCount  int    `json:"changedThreadCount"`
+	MaterialChangeCount int    `json:"materialChangeCount"`
+	RequiredMCPTool     string `json:"requiredMcpTool"`
 }
 
 type PortfolioSentinelWindowContext struct {
@@ -178,17 +187,18 @@ type PortfolioSentinelHoldingContext struct {
 }
 
 type PortfolioSentinelReport struct {
-	SchemaVersion    string                             `json:"schema_version"`
-	OverallRiskLevel string                             `json:"overall_risk_level"`
-	RunSummary       string                             `json:"run_summary"`
-	PositiveItems    []map[string]any                   `json:"positive_items,omitempty"`
-	NegativeItems    []map[string]any                   `json:"negative_items,omitempty"`
-	NoiseItems       []map[string]any                   `json:"noise_items,omitempty"`
-	AffectedHoldings []PortfolioSentinelAffectedHolding `json:"affected_holdings,omitempty"`
-	PortfolioActions []PortfolioSentinelAction          `json:"portfolio_actions,omitempty"`
-	ReviewRequests   []PortfolioSentinelReviewRequest   `json:"review_requests,omitempty"`
-	DataQualityNotes []string                           `json:"data_quality_notes,omitempty"`
-	NextWatchFocus   []string                           `json:"next_watch_focus,omitempty"`
+	SchemaVersion               string                             `json:"schema_version"`
+	OverallRiskLevel            string                             `json:"overall_risk_level"`
+	RunSummary                  string                             `json:"run_summary"`
+	PositiveItems               []map[string]any                   `json:"positive_items,omitempty"`
+	NegativeItems               []map[string]any                   `json:"negative_items,omitempty"`
+	NoiseItems                  []map[string]any                   `json:"noise_items,omitempty"`
+	AffectedHoldings            []PortfolioSentinelAffectedHolding `json:"affected_holdings,omitempty"`
+	PortfolioActions            []PortfolioSentinelAction          `json:"portfolio_actions,omitempty"`
+	ReviewRequests              []PortfolioSentinelReviewRequest   `json:"review_requests,omitempty"`
+	DataQualityNotes            []string                           `json:"data_quality_notes,omitempty"`
+	NextWatchFocus              []string                           `json:"next_watch_focus,omitempty"`
+	CheckedNewsThreadVersionIDs []string                           `json:"checked_news_thread_version_ids,omitempty"`
 }
 
 func (r *PortfolioSentinelReport) UnmarshalJSON(data []byte) error {
@@ -227,6 +237,7 @@ func (r *PortfolioSentinelReport) UnmarshalJSON(data []byte) error {
 	}
 	parsed.DataQualityNotes = agentStringListFromRaw(raw["data_quality_notes"])
 	parsed.NextWatchFocus = agentStringListFromRaw(raw["next_watch_focus"])
+	parsed.CheckedNewsThreadVersionIDs = agentStringListFromRaw(raw["checked_news_thread_version_ids"])
 	*r = PortfolioSentinelReport(parsed)
 	return nil
 }

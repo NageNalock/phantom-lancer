@@ -1856,7 +1856,18 @@ func (s *Service) finalizeAgentRunWithOutput(
 	var outputArtifact strings.Builder
 	if execOutput != nil {
 		if strings.TrimSpace(execOutput.Prompt) != "" {
-			ledger.Prompt = safelog.Text(execOutput.Prompt, 16384)
+			if run.TaskType == AgentTaskTypeNewsEventReview && run.TriggerObjectType == "news_context_run" {
+				// ponytail: the durable theme/version/evidence objects are the audit
+				// artifact. Retaining the full batch prompt would copy news bodies back
+				// into SQLite after the source asset passes safe compaction.
+				ledger.Prompt = "消息脉络归纳使用固定系统约束执行；批次新闻正文不长期保留，完整覆盖结果见结构化输出。"
+				if ledger.RedactionSummary == nil {
+					ledger.RedactionSummary = map[string]any{}
+				}
+				ledger.RedactionSummary["promptCompacted"] = true
+			} else {
+				ledger.Prompt = safelog.Text(execOutput.Prompt, 16384)
+			}
 			if ledger.RedactionSummary == nil {
 				ledger.RedactionSummary = map[string]any{}
 			}
@@ -1873,13 +1884,14 @@ func (s *Service) finalizeAgentRunWithOutput(
 			outputArtifact.WriteString("timed_out: true\n")
 		}
 		includeEmptyTails := execErr != nil || execOutput.ExitCode != 0 || execOutput.TimedOut
-		if execOutput.StdoutTail != "" {
+		retainTails := run.TaskType != AgentTaskTypeNewsEventReview || run.TriggerObjectType != "news_context_run" || includeEmptyTails
+		if retainTails && execOutput.StdoutTail != "" {
 			outputArtifact.WriteString("stdout_tail:\n")
 			outputArtifact.WriteString(execOutput.StdoutTail)
 		} else if includeEmptyTails {
 			outputArtifact.WriteString("stdout_tail: (empty)\n")
 		}
-		if execOutput.StderrTail != "" {
+		if retainTails && execOutput.StderrTail != "" {
 			outputArtifact.WriteString("stderr_tail:\n")
 			outputArtifact.WriteString(execOutput.StderrTail)
 		} else if includeEmptyTails {
@@ -2074,6 +2086,24 @@ func (s *Service) finalizeAgentRunWithOutput(
 			return
 		}
 		ledger.StructuredOutput["opportunityResultId"] = result.ID
+	}
+	if run.TaskType == AgentTaskTypeNewsEventReview && run.TriggerObjectType == "news_context_run" && run.TriggerObjectID != "" {
+		result, err := s.ProcessNewsContextSubmittedResult(ctx, run.TriggerObjectID, run.ID, *submitted)
+		if err != nil {
+			run.Status = AgentRunStatusFailed
+			run.ErrorMessage = safelog.Text("save news context result failed: "+err.Error(), 500)
+			if s.log != nil {
+				s.log.Warn("finalize: save news context result failed", "run_id", runID, "ledger_id", ledger.ID, "news_context_run_id", run.TriggerObjectID, "error", safelog.Text(err.Error(), 300))
+			}
+			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
+				s.log.Warn("finalize: update run after news context save failed", "run_id", runID, "error", safelog.Text(updateErr.Error(), 240))
+			}
+			if _, ledgerErr := s.store.UpdateAgentDecisionLedger(ctx, ledger); ledgerErr != nil && s.log != nil {
+				s.log.Warn("finalize: update ledger after news context save failed", "run_id", runID, "ledger_id", ledger.ID, "error", safelog.Text(ledgerErr.Error(), 240))
+			}
+			return
+		}
+		ledger.StructuredOutput["newsContextApplyResult"] = result
 	}
 	if run.TaskType == AgentTaskTypePortfolioSentinel && run.TriggerObjectType == "portfolio_sentinel_run" && run.TriggerObjectID != "" {
 		result, err := s.ProcessPortfolioSentinelSubmittedResult(ctx, run.TriggerObjectID, *submitted)

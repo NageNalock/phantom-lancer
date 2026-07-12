@@ -126,6 +126,18 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/news/events", s.handleStockV2ListNewsEvents)
 	mux.HandleFunc("GET /api/stockv2/news/link-candidates", s.handleStockV2ListNewsLinkCandidates)
 
+	// 消息脉络：主题、轮换线索、归纳记录与安全清理记录。
+	mux.HandleFunc("GET /api/stockv2/news-context/summary", s.handleStockV2GetNewsContextSummary)
+	mux.HandleFunc("GET /api/stockv2/news-context/config", s.handleStockV2GetNewsContextConfig)
+	mux.HandleFunc("PATCH /api/stockv2/news-context/config", s.handleStockV2UpdateNewsContextConfig)
+	mux.HandleFunc("GET /api/stockv2/news-context/themes", s.handleStockV2ListNewsThreads)
+	mux.HandleFunc("GET /api/stockv2/news-context/themes/{id}", s.handleStockV2GetNewsThread)
+	mux.HandleFunc("GET /api/stockv2/news-context/rotation-signals", s.handleStockV2GetNewsContextRotationSignals)
+	mux.HandleFunc("GET /api/stockv2/news-context/runs", s.handleStockV2ListNewsContextRuns)
+	mux.HandleFunc("POST /api/stockv2/news-context/runs", s.handleStockV2StartNewsContextRun)
+	mux.HandleFunc("POST /api/stockv2/news-context/runs/{id}/retry", s.handleStockV2RetryNewsContextRun)
+	mux.HandleFunc("POST /api/stockv2/news-context/cleanup-runs", s.handleStockV2StartNewsContextCleanupRun)
+
 	// 主题机会发现
 	mux.HandleFunc("GET /api/stockv2/opportunities", s.handleStockV2ListOpportunities)
 	mux.HandleFunc("POST /api/stockv2/opportunities", s.handleStockV2CreateOpportunity)

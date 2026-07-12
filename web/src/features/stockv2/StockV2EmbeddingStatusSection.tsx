@@ -274,6 +274,8 @@ function embeddingBreakdownLabel(category: string): string {
       return "股票画像";
     case "news_event":
       return "新闻事件";
+	case "news_thread":
+		return "消息脉络主题与历史阶段";
     case "other":
       return "其他";
     default:
@@ -312,8 +314,9 @@ const TYPE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "", label: "全部类型" },
   { value: "stock_profile", label: "股票画像" },
   { value: "news_event", label: "新闻事件" },
+  { value: "news_thread", label: "消息脉络主题" },
+  { value: "news_thread_version", label: "主题历史阶段" },
   { value: "opportunity", label: "机会主题" },
-  { value: "theme", label: "主题" },
   { value: "external_source", label: "外部来源" },
 ];
 

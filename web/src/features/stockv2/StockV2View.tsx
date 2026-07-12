@@ -40,6 +40,7 @@ export function StockV2View({ actions, data }: { actions: AppActions; data: AppD
   );
   const stockv2 = data.stockv2;
   const runningJob = stockv2.updateJobs?.find(j => j.status === "running");
+  const showOverviewAside = activeTab !== "dailyBars";
 
   async function runAction(label: string, fn: () => Promise<void>) {
     try {
@@ -52,7 +53,7 @@ export function StockV2View({ actions, data }: { actions: AppActions; data: AppD
   }
 
   return (
-    <div className="grid min-h-[calc(100dvh-104px)] grid-cols-[minmax(0,1fr)_340px] max-xl:grid-cols-1">
+    <div className={`grid min-h-[calc(100dvh-104px)] ${showOverviewAside ? "grid-cols-[minmax(0,1fr)_340px] max-xl:grid-cols-1" : "grid-cols-1"}`}>
       <div className="grid content-start gap-4 p-5">
         <SubTabs
           activeId={activeTab}
@@ -79,7 +80,7 @@ export function StockV2View({ actions, data }: { actions: AppActions; data: AppD
         {activeTab === "agent" ? <StockV2AgentPage actions={actions} /> : null}
       </div>
 
-      <aside className="border-l border-[var(--line)] bg-[var(--surface-soft)] p-5 max-xl:border-l-0 max-xl:border-t">
+      {showOverviewAside ? <aside className="border-l border-[var(--line)] bg-[var(--surface-soft)] p-5 max-xl:border-l-0 max-xl:border-t">
         <Panel title="V2 概览">
           <div className="grid gap-3 text-sm">
             <div className="flex items-center justify-between">
@@ -131,7 +132,7 @@ export function StockV2View({ actions, data }: { actions: AppActions; data: AppD
             </div>
           </Panel>
         </div>
-      </aside>
+      </aside> : null}
     </div>
   );
 }

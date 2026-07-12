@@ -2,6 +2,7 @@ package stockv2
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"phantom-lancer/internal/safelog"
@@ -62,11 +63,35 @@ func (s *Service) PruneRawNewsRetention(ctx context.Context, now time.Time) (Raw
 	defer s.finishNewsPipelineRun()
 
 	for _, source := range []string{NewsSourceJin10, NewsSourceFinancialJuice} {
-		process, err := s.RunNewsProcessingBatch(ctx, source, 200, 200)
-		if err != nil {
-			return result, err
+		for {
+			pendingBefore, err := s.store.CountRawNews(ctx, RawNewsListFilter{
+				Source: source,
+				Status: NewsStatusNew,
+				Until:  result.Cutoff,
+			})
+			if err != nil {
+				return result, err
+			}
+			if pendingBefore == 0 {
+				break
+			}
+			process, err := s.RunNewsProcessingBatch(ctx, source, 200, 200)
+			if err != nil {
+				return result, err
+			}
+			result.ProcessedBeforePrune += process.NormalizedCount
+			pendingAfter, err := s.store.CountRawNews(ctx, RawNewsListFilter{
+				Source: source,
+				Status: NewsStatusNew,
+				Until:  result.Cutoff,
+			})
+			if err != nil {
+				return result, err
+			}
+			if pendingAfter >= pendingBefore {
+				return result, fmt.Errorf("raw news retention made no progress for source %s: %d items remain", source, pendingAfter)
+			}
 		}
-		result.ProcessedBeforePrune += process.NormalizedCount
 	}
 	deleted, err := s.TruncateRawNewsBefore(ctx, result.Cutoff)
 	if err != nil {

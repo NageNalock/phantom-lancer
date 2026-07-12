@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowClockwise, GearSix, Newspaper, PlayCircle, Trash, X } from "@phosphor-icons/react";
+import { ArrowClockwise, GearSix, Newspaper, PlayCircle, X } from "@phosphor-icons/react";
 import type { AppActions } from "../../app/App";
 import type {
   StockV2NewsEvent,
@@ -8,7 +8,6 @@ import type {
   StockV2NewsSourceOverview,
   StockV2PagedResponse,
   StockV2RawNews,
-  StockV2RawNewsTruncateResult,
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, Field, Notice, Panel, Pill } from "../../components/ui";
@@ -19,9 +18,9 @@ type DetailItem = StockV2RawNews | StockV2NewsEvent | StockV2NewsLinkCandidate |
 
 const PAGE_SIZE = 20;
 const ASSET_TABS: Array<{ id: NewsAssetKind; label: string }> = [
-  { id: "raw", label: "RawNews" },
-  { id: "events", label: "NewsEvent" },
-  { id: "candidates", label: "Candidate" },
+  { id: "raw", label: "原始消息" },
+  { id: "events", label: "标准消息" },
+  { id: "candidates", label: "关联候选" },
 ];
 
 export function StockV2NewsWorkbench({ actions }: { actions: AppActions }) {
@@ -37,7 +36,6 @@ export function StockV2NewsWorkbench({ actions }: { actions: AppActions }) {
   const [sourceLoading, setSourceLoading] = useState(false);
   const [detail, setDetail] = useState<DetailItem>(null);
   const [configSource, setConfigSource] = useState<StockV2NewsSourceOverview | null>(null);
-  const [truncateOpen, setTruncateOpen] = useState(false);
   const [lastRun, setLastRun] = useState<StockV2NewsPipelineRunResult | null>(null);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -159,7 +157,7 @@ export function StockV2NewsWorkbench({ actions }: { actions: AppActions }) {
           <Notice tone={lastRun.status === "failed" ? "danger" : "warn"}>
             <span className="text-xs">
               最近执行：{lastRun.source} · {sourceStatusLabel(lastRun.status)} · 抓取 {lastRun.fetchedCount} 条，
-              新增 Raw {lastRun.rawInsertedCount}，归一化 {lastRun.normalizedCount}，候选 {lastRun.linkCandidateCount}
+              新增原始消息 {lastRun.rawInsertedCount}，归一化 {lastRun.normalizedCount}，候选 {lastRun.linkCandidateCount}
               {lastRun.errorMessage ? ` · ${lastRun.errorMessage}` : ""}
             </span>
           </Notice>
@@ -168,20 +166,12 @@ export function StockV2NewsWorkbench({ actions }: { actions: AppActions }) {
 
       <Panel
         title="消息面数据资产"
-        subtitle="RawNews -> NewsEvent -> NewsLinkCandidate 的可检查列表"
+        subtitle="近期原始消息、标准消息和关联候选的可检查列表；长期历史由消息脉络承载"
         actions={
-          <>
-            {assetKind === "raw" ? (
-              <Button onClick={() => setTruncateOpen(true)} tone="danger">
-                <Trash size={14} className="mr-1.5" />
-                截断 RawNews
-              </Button>
-            ) : null}
-            <Button onClick={() => void loadAssets(page)} disabled={loading}>
-              <ArrowClockwise size={14} className="mr-1.5" />
-              {loading ? "加载中" : "刷新列表"}
-            </Button>
-          </>
+          <Button onClick={() => void loadAssets(page)} disabled={loading}>
+            <ArrowClockwise size={14} className="mr-1.5" />
+            {loading ? "加载中" : "刷新列表"}
+          </Button>
         }
       >
         <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -229,17 +219,6 @@ export function StockV2NewsWorkbench({ actions }: { actions: AppActions }) {
       </Panel>
 
       {detail ? <NewsDetailDrawer item={detail} onClose={() => setDetail(null)} /> : null}
-      {truncateOpen ? (
-        <RawNewsTruncateDrawer
-          actions={actions}
-          onClose={() => setTruncateOpen(false)}
-          onDone={async () => {
-            setTruncateOpen(false);
-            await loadSources();
-            await loadAssets(1);
-          }}
-        />
-      ) : null}
       {configSource ? (
         <NewsSourceConfigDrawer
           actions={actions}
@@ -251,87 +230,6 @@ export function StockV2NewsWorkbench({ actions }: { actions: AppActions }) {
           }}
         />
       ) : null}
-    </div>
-  );
-}
-
-function RawNewsTruncateDrawer({
-  actions,
-  onClose,
-  onDone,
-}: {
-  actions: AppActions;
-  onClose: () => void;
-  onDone: () => Promise<void>;
-}) {
-  const [before, setBefore] = useState("");
-  const [confirm, setConfirm] = useState("");
-  const [saving, setSaving] = useState(false);
-  const canSubmit = before.trim() !== "" && confirm.trim() === "DELETE" && !saving;
-
-  async function submit() {
-    const beforeISO = datetimeLocalToISOString(before);
-    if (!beforeISO) {
-      actions.setToast("请选择有效的截止时间", "danger");
-      return;
-    }
-    setSaving(true);
-    try {
-      const result = await actions.api<StockV2RawNewsTruncateResult>("/api/stockv2/news/raw/truncate", {
-        method: "POST",
-        body: { before: beforeISO },
-        csrf: actions.csrf,
-      });
-      actions.setToast(`已删除 ${result.deletedCount} 条 RawNews`, "good");
-      await onDone();
-    } catch (error) {
-      actions.setToast(`截断 RawNews 失败：${friendlyError(error)}`, "danger");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 z-50" role="presentation" onClick={saving ? undefined : onClose}>
-      <div className="absolute inset-0 bg-[rgba(16,18,22,0.56)]" />
-      <aside className="absolute right-0 top-0 flex h-full w-[min(520px,100vw)] flex-col border-l border-[var(--line)] bg-[var(--surface)] shadow-[var(--shadow)]" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="raw-news-truncate-title">
-        <header className="flex items-start gap-3 border-b border-[var(--line)] p-4">
-          <Trash size={18} className="mt-0.5 text-[var(--danger)]" />
-          <div className="min-w-0 flex-1">
-            <h3 className="m-0 text-base font-semibold" id="raw-news-truncate-title">截断 RawNews</h3>
-            <p className="muted mt-1 mb-0 text-xs">删除有效时间早于截止点的 RawNews；NewsEvent 和 Candidate 会保留。</p>
-          </div>
-          <Button aria-label="关闭" className="px-2 py-1 text-xs" disabled={saving} onClick={onClose}><X size={16} /></Button>
-        </header>
-        <div className="flex-1 overflow-y-auto p-4">
-          <div className="grid gap-4">
-            <Notice tone="warn">
-              <span className="text-xs">这是不可恢复的批量删除。有效时间为 published_at，缺失时使用 fetched_at。</span>
-            </Notice>
-            <Field label="删除此时间之前的 RawNews">
-              <input
-                className="input"
-                max={datetimeLocalValue(new Date())}
-                onChange={(event) => setBefore(event.target.value)}
-                type="datetime-local"
-                value={before}
-              />
-            </Field>
-            <Field label="输入 DELETE 确认">
-              <input
-                className="input font-mono"
-                onChange={(event) => setConfirm(event.target.value)}
-                placeholder="DELETE"
-                value={confirm}
-              />
-            </Field>
-          </div>
-        </div>
-        <footer className="flex justify-end gap-2 border-t border-[var(--line)] p-4">
-          <Button disabled={saving} onClick={onClose}>取消</Button>
-          <Button disabled={!canSubmit} onClick={() => void submit()} tone="danger">{saving ? "删除中" : "确认删除"}</Button>
-        </footer>
-      </aside>
     </div>
   );
 }
@@ -360,9 +258,9 @@ function SourceCard({ item, onConfig, onRun }: { item: StockV2NewsSourceOverview
         </div>
       </div>
       <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-        <Metric label="Raw" value={state.rawNewsCount} />
-        <Metric label="Event" value={state.newsEventCount} />
-        <Metric label="Candidate" value={state.linkCandidateCount} />
+        <Metric label="原始" value={state.rawNewsCount} />
+        <Metric label="标准" value={state.newsEventCount} />
+        <Metric label="候选" value={state.linkCandidateCount} />
       </div>
       <div className="mt-3 grid gap-1 text-[11px] text-[var(--muted-strong)]">
         <div>下次：{formatTime(state.nextRunAt)}</div>
@@ -630,7 +528,7 @@ function NewsDetailDrawer({ item, onClose }: { item: DetailItem; onClose: () => 
           </pre>
           {payload ? (
             <details className="mt-4 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
-              <summary className="cursor-pointer text-sm font-medium">Raw payload（已裁剪脱敏）</summary>
+              <summary className="cursor-pointer text-sm font-medium">原始载荷（已裁剪脱敏）</summary>
               <pre className="mt-3 max-h-[36vh] overflow-auto whitespace-pre-wrap break-words rounded border border-[var(--line)] bg-[var(--surface)] p-3 text-xs text-[var(--muted-strong)]">
                 {safeJSONString(payload)}
               </pre>
@@ -730,17 +628,6 @@ function formatTime(iso?: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
   return d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-}
-
-function datetimeLocalValue(date: Date): string {
-  const offsetMs = date.getTimezoneOffset() * 60 * 1000;
-  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
-}
-
-function datetimeLocalToISOString(value: string): string {
-  const date = new Date(value);
-  if (isNaN(date.getTime())) return "";
-  return date.toISOString();
 }
 
 function boundedDisplayTime(primary?: string, fallback?: string): string | undefined {

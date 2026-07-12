@@ -14,6 +14,8 @@ import { CheckLabel } from "../../components/ui";
 const OBJECT_TYPES: Array<{ value: StockV2EmbeddingObjectType; label: string }> = [
   { value: "stock_profile", label: "股票画像" },
   { value: "news_event", label: "新闻事件" },
+  { value: "news_thread", label: "消息脉络主题" },
+  { value: "news_thread_version", label: "主题历史阶段" },
   { value: "opportunity", label: "机会主题" },
 ];
 
