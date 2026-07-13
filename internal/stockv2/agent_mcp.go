@@ -275,10 +275,8 @@ func validateNewsContextSubmittedResult(value map[string]any) error {
 			return fmt.Errorf("thread_changes[%d] requires action, title, core_thesis, and stage", index)
 		}
 	}
-	for index, audit := range report.SearchAudit {
-		if strings.TrimSpace(audit.Question) == "" || strings.TrimSpace(audit.Status) == "" {
-			return fmt.Errorf("search_audit[%d] requires question and status", index)
-		}
+	if err := validateNewsContextSearchAudit(report.SearchAudit); err != nil {
+		return err
 	}
 	return nil
 }

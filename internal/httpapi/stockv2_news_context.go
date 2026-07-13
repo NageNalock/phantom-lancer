@@ -453,12 +453,31 @@ func writeStockV2NewsContextError(w http.ResponseWriter, code string, err error)
 	status := stockV2NewsContextHTTPStatus(err)
 	message := err.Error()
 	if errors.Is(err, stockv2.ErrNewsContextPrerequisite) {
-		message = "消息脉络运行条件未满足，请检查模型、向量、历史补处理、每日复核和命令行检索状态"
+		message = stockV2NewsContextPrerequisiteMessage(err)
 	}
 	if status == http.StatusInternalServerError {
 		message = "消息脉络服务暂时不可用"
 	}
 	writeError(w, status, code, message)
+}
+
+func stockV2NewsContextPrerequisiteMessage(err error) string {
+	const fallback = "消息脉络运行条件未满足，请检查模型、向量、历史补处理、每日复核和命令行检索状态"
+	detail := strings.TrimSpace(strings.TrimPrefix(err.Error(), stockv2.ErrNewsContextPrerequisite.Error()))
+	detail = strings.TrimSpace(strings.TrimPrefix(detail, ":"))
+	translated := map[string]string{
+		"required review model is not configured":                   "必需的复核模型尚未配置",
+		"required review model is unavailable":                      "必需的复核模型当前不可用",
+		"theme embedding is unavailable":                            "主题向量模型当前不可用",
+		"historical news backfill is incomplete":                    "历史新闻补处理尚未完成",
+		"no completed daily aggregation and impact review":          "尚无已完成的每日归纳和影响复核",
+		"some covered news lacks a valid cleanup checkpoint":        "部分已覆盖新闻缺少有效清理检查点",
+		"historical news backfill changed during safety validation": "安全校验期间历史补处理状态发生变化",
+	}
+	if message := translated[detail]; message != "" {
+		return "消息脉络运行条件未满足：" + message
+	}
+	return fallback
 }
 
 func stockV2NewsContextHTTPStatus(err error) int {

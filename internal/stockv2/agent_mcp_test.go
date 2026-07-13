@@ -235,6 +235,97 @@ func TestMCP_SubmitNewsContextResultRejectsInventedFieldNames(t *testing.T) {
 	}
 }
 
+func TestMCP_SubmitNewsContextResultRejectsInvalidSearchAuditWithoutConsumingSlot(t *testing.T) {
+	tests := []struct {
+		name      string
+		audit     map[string]any
+		wantError string
+	}{
+		{
+			name:      "unsupported status",
+			audit:     map[string]any{"question": "核实订单", "status": "partially_verified", "sources": []string{"https://example.com/source"}},
+			wantError: "status must be completed, verified, failed, or unavailable",
+		},
+		{
+			name:      "successful status without source",
+			audit:     map[string]any{"question": "核实订单", "status": "verified", "sources": []string{}},
+			wantError: `status \"verified\" requires sources`,
+		},
+		{
+			name:      "failed status without reason",
+			audit:     map[string]any{"question": "核实订单", "status": "failed"},
+			wantError: `status \"failed\" requires failure_reason`,
+		},
+		{
+			name:      "unavailable status without reason",
+			audit:     map[string]any{"question": "核实订单", "status": "unavailable"},
+			wantError: `status \"unavailable\" requires failure_reason`,
+		},
+		{
+			name: "invented audit aliases",
+			audit: map[string]any{
+				"question": "核实订单", "status": "verified", "sources": []string{"https://example.com/source"},
+				"weakened": []string{"旧结论"},
+			},
+			wantError: `unknown field \"weakened\"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newAgentTaskPool(defaultCleanupInterval)
+			defer p.Close()
+			taskID, entry := p.createTask(AgentTaskTypeNewsEventReview, "run-news-context", "", 5*time.Minute)
+
+			resp := submitNewsContextResultForTest(p, taskID, tt.audit)
+			if !strings.Contains(string(resp), tt.wantError) {
+				t.Fatalf("response=%s, want error containing %q", resp, tt.wantError)
+			}
+			entry.mu.Lock()
+			if entry.status != agentTaskStatusWaiting || entry.submittedResult != nil {
+				entry.mu.Unlock()
+				t.Fatalf("rejected result consumed task slot: %+v", entry)
+			}
+			entry.mu.Unlock()
+
+			corrected := map[string]any{
+				"question": "核实订单", "status": "verified", "sources": []string{"https://example.com/source"},
+				"supported": []string{"订单已披露"}, "weakened_or_refuted": []string{}, "unresolved": []string{"交付时间待确认"},
+			}
+			resp = submitNewsContextResultForTest(p, taskID, corrected)
+			if strings.Contains(string(resp), `"error"`) {
+				t.Fatalf("corrected response=%s, want accepted result", resp)
+			}
+			entry.mu.Lock()
+			defer entry.mu.Unlock()
+			if entry.status != agentTaskStatusSubmitted || entry.submittedResult == nil {
+				t.Fatalf("corrected result was not submitted: %+v", entry)
+			}
+		})
+	}
+}
+
+func submitNewsContextResultForTest(p *agentTaskPool, taskID string, audit map[string]any) json.RawMessage {
+	return p.HandleMCPRequest(mustJSON(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": codexSubmitResultTool,
+			"arguments": map[string]any{
+				"taskID": taskID, "taskType": AgentTaskTypeNewsEventReview,
+				"result": map[string]any{
+					"outputType": NewsContextOutputType,
+					"result": map[string]any{
+						"schema_version": NewsContextResultSchemaVersion, "run_id": "run-news-context", "window_type": NewsContextWindowHourly,
+						"processed_news_ids": []string{}, "reviewed_thread_ids": []string{}, "unchanged_thread_ids": []string{},
+						"news_decisions": []any{}, "thread_changes": []any{}, "search_audit": []any{audit},
+					},
+				},
+			},
+		},
+	}))
+}
+
 func TestMCP_SubmitResult_InvalidTaskID(t *testing.T) {
 	p := newAgentTaskPool(defaultCleanupInterval)
 	defer p.Close()

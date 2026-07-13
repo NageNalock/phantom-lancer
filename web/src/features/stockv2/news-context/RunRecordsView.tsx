@@ -302,17 +302,21 @@ function RunRow({
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--muted-strong)]">
           {kind === "aggregation" ? (
-            <>
-              <span>总新闻 {coverage.total}</span>
-              <span>覆盖 {coverage.covered}</span>
-              <span>噪音 {coverage.noise}</span>
-              <span>延后 {coverage.deferred}</span>
-              <span>遗漏/等待 {coverage.waiting}</span>
-              <span>覆盖率 {coverage.percent}%</span>
-              <span>新建 {run.createdThemeCount ?? 0}</span>
-              <span>更新 {run.updatedThemeCount ?? 0}</span>
-              <span>冲突 {run.conflictThemeCount ?? 0}</span>
-            </>
+            coverage.empty ? (
+              <span>空窗口，无需处理</span>
+            ) : (
+              <>
+                <span>总新闻 {coverage.total}</span>
+                <span>覆盖 {coverage.covered}</span>
+                <span>噪音 {coverage.noise}</span>
+                <span>延后 {coverage.deferred}</span>
+                <span>遗漏/等待 {coverage.waiting}</span>
+                <span>覆盖率 {coverage.percent}%</span>
+                <span>新建 {run.createdThemeCount ?? 0}</span>
+                <span>更新 {run.updatedThemeCount ?? 0}</span>
+                <span>冲突 {run.conflictThemeCount ?? 0}</span>
+              </>
+            )
           ) : (
             <>
               <span>处理 {run.processedNewsCount ?? 0}{run.totalNewsCount ? ` / ${run.totalNewsCount}` : ""} 条</span>
@@ -325,7 +329,9 @@ function RunRow({
           )}
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <Pill tone={coverageStatusTone(run.coverageStatus)}>{coverageStatusLabel(run.coverageStatus)}</Pill>
+          <Pill tone={coverage.empty ? "neutral" : coverageStatusTone(run.coverageStatus)}>
+            {coverage.empty ? "无需处理" : coverageStatusLabel(run.coverageStatus)}
+          </Pill>
           {run.failedStage ? <span className="text-xs text-[var(--danger)]">失败阶段：{run.failedStage}</span> : null}
           {run.errorMessage ? <span className="max-w-xl truncate text-xs text-[var(--danger)]">{run.errorMessage}</span> : null}
         </div>
@@ -353,20 +359,24 @@ function RunDetailDrawer({ kind, run, onClose }: { kind: RunKind; run: StockV2Ne
     ["完成", formatNewsContextTime(run.finishedAt)],
   ];
   if (kind === "aggregation") {
-    rows.push(
-      ["总新闻", coverage.total],
-      ["已覆盖", coverage.covered],
-      ["重复噪音", coverage.noise],
-      ["受保护延后", coverage.deferred],
-      ["遗漏或等待", coverage.waiting],
-      ["覆盖率", `${coverage.percent}%`],
-      ["新建主题", run.createdThemeCount ?? 0],
-      ["更新主题", run.updatedThemeCount ?? 0],
-      ["保持不变", run.unchangedThemeCount ?? 0],
-      ["存在冲突", run.conflictThemeCount ?? 0],
-      ["实质变化", run.materialThemeCount ?? 0],
-      ["公开资料核实", run.externalResearchStatus === "recorded" ? "已留痕" : run.externalResearchStatus === "not_required" ? "本次无需核实" : run.externalResearchStatus || "未记录"],
-    );
+    if (coverage.empty) {
+      rows.push(["总新闻", 0], ["处理结果", "空窗口，无需处理"]);
+    } else {
+      rows.push(
+        ["总新闻", coverage.total],
+        ["已覆盖", coverage.covered],
+        ["重复噪音", coverage.noise],
+        ["受保护延后", coverage.deferred],
+        ["遗漏或等待", coverage.waiting],
+        ["覆盖率", `${coverage.percent}%`],
+        ["新建主题", run.createdThemeCount ?? 0],
+        ["更新主题", run.updatedThemeCount ?? 0],
+        ["保持不变", run.unchangedThemeCount ?? 0],
+        ["存在冲突", run.conflictThemeCount ?? 0],
+        ["实质变化", run.materialThemeCount ?? 0],
+        ["公开资料核实", run.externalResearchStatus === "recorded" ? "已留痕" : run.externalResearchStatus === "not_required" ? "本次无需核实" : run.externalResearchStatus || "未记录"],
+      );
+    }
   } else {
     rows.push(
       ["消息处理", `${run.processedNewsCount ?? 0}${run.totalNewsCount ? ` / ${run.totalNewsCount}` : ""}`],

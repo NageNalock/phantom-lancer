@@ -57,6 +57,14 @@ func TestOpenConfiguresSQLiteForForegroundReads(t *testing.T) {
 	if busyTimeout != 5000 {
 		t.Fatalf("busy_timeout = %d, want 5000", busyTimeout)
 	}
+
+	var foreignKeys int
+	if err := store.db.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+		t.Fatalf("foreign keys: %v", err)
+	}
+	if foreignKeys != 1 {
+		t.Fatalf("foreign_keys = %d, want 1", foreignKeys)
+	}
 }
 
 func TestBackupDatabaseDoesNotWaitForMainPoolConnection(t *testing.T) {

@@ -207,7 +207,7 @@ func (s *Store) CreateAlert(ctx context.Context, alert StockV2Alert) (StockV2Ale
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		alert.ID,
-		alert.WatchID,
+		nullableString(alert.WatchID),
 		nullableString(alert.MonitorHitID),
 		nullableString(alert.MonitorRunID),
 		nullableString(alert.TaskType),
@@ -297,7 +297,7 @@ func (s *Store) UpdateAlert(ctx context.Context, alert StockV2Alert) (StockV2Ale
 		    updated_at = ?
 		WHERE id = ?
 	`,
-		alert.WatchID,
+		nullableString(alert.WatchID),
 		nullableString(alert.MonitorHitID),
 		nullableString(alert.MonitorRunID),
 		nullableString(alert.TaskType),

@@ -67,6 +67,7 @@ export function resolveAvailableTaskModel(
 }
 
 export function newsContextRunCoverage(run: StockV2NewsContextRun): {
+  empty: boolean;
   total: number;
   covered: number;
   noise: number;
@@ -74,12 +75,15 @@ export function newsContextRunCoverage(run: StockV2NewsContextRun): {
   waiting: number;
   percent: number;
 } {
-  const total = Math.max(0, run.totalNewsCount ?? 0);
+  const hasTotal = typeof run.totalNewsCount === "number" && Number.isFinite(run.totalNewsCount);
+  const total = hasTotal ? Math.max(0, Number(run.totalNewsCount)) : 0;
   const processed = Math.max(0, run.processedNewsCount ?? 0);
-  const rawProgress = typeof run.progress === "number" && Number.isFinite(run.progress)
+  const empty = Boolean(run.windowType) && run.status === "completed" && hasTotal && total === 0;
+  const rawProgress = empty ? 0 : typeof run.progress === "number" && Number.isFinite(run.progress)
     ? run.progress
-    : total > 0 ? processed / total : run.coverageStatus === "complete" ? 1 : 0;
+    : total > 0 ? processed / total : 0;
   return {
+    empty,
     total,
     covered: Math.max(0, run.coveredCount ?? 0),
     noise: Math.max(0, run.noiseCount ?? 0),

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -258,6 +259,11 @@ func TestStockV2NewsContextHTTPStatus(t *testing.T) {
 	writeStockV2NewsContextError(rec, "failed", errors.New("storage /private/path failed"))
 	if rec.Code != http.StatusInternalServerError || strings.Contains(rec.Body.String(), "/private/path") {
 		t.Fatalf("internal response status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	writeStockV2NewsContextError(rec, "blocked", fmt.Errorf("%w: historical news backfill is incomplete", stockv2.ErrNewsContextPrerequisite))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "历史新闻补处理尚未完成") || strings.Contains(rec.Body.String(), "historical news") {
+		t.Fatalf("prerequisite response status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

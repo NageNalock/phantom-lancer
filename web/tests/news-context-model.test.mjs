@@ -50,7 +50,16 @@ assert.deepEqual(newsContextRunCoverage({
   noiseCount: 20,
   deferredCount: 6,
   pendingThemeCount: 4,
-}), { total: 100, covered: 70, noise: 20, deferred: 6, waiting: 4, percent: 96 });
+}), { empty: false, total: 100, covered: 70, noise: 20, deferred: 6, waiting: 4, percent: 96 });
+assert.deepEqual(newsContextRunCoverage({
+	id: "empty-run",
+	status: "completed",
+	windowType: "hourly",
+	totalNewsCount: 0,
+	processedNewsCount: 0,
+	coverageStatus: "complete",
+	progress: 1,
+}), { empty: true, total: 0, covered: 0, noise: 0, deferred: 0, waiting: 0, percent: 0 });
 assert.equal(newsContextBackfillNeedsRetry({
   id: "backfill",
   status: "completed",

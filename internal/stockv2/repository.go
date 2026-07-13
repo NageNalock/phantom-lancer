@@ -116,7 +116,7 @@ func sqliteDSN(dbPath string) string {
 	if strings.Contains(dbPath, "?") {
 		separator = "&"
 	}
-	return fmt.Sprintf("%s%s_parse_time=true&_loc=Local&_busy_timeout=5000", dbPath, separator)
+	return fmt.Sprintf("%s%s_parse_time=true&_loc=Local&_busy_timeout=5000&_foreign_keys=on", dbPath, separator)
 }
 
 func configureSQLite(ctx context.Context, db *sql.DB) error {
@@ -1310,6 +1310,9 @@ func (s *Store) init(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, initSchemaSQL); err != nil {
 		return fmt.Errorf("exec init schema: %w", err)
 	}
+	if err := s.repairDanglingAlertWatchRefs(ctx); err != nil {
+		return fmt.Errorf("repair dangling alert watch references: %w", err)
+	}
 	if err := s.migratePortfolioSentinelPublishedRunState(ctx); err != nil {
 		return fmt.Errorf("migrate portfolio sentinel published runs: %w", err)
 	}
@@ -1610,6 +1613,20 @@ func (s *Store) init(ctx context.Context) error {
 	return nil
 }
 
+func (s *Store) repairDanglingAlertWatchRefs(ctx context.Context) error {
+	// ponytail: alerts remain useful audit evidence after a watch is gone, so repair
+	// only the invalid optional reference and let future deletes use ON DELETE SET NULL.
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_alerts
+		SET watch_id = NULL
+		WHERE watch_id IS NOT NULL
+		  AND NOT EXISTS (
+			SELECT 1 FROM stockv2_watches WHERE stockv2_watches.id = stockv2_alerts.watch_id
+		  )
+	`)
+	return err
+}
+
 // ensureColumn 确保指定表有指定列，没有就 ALTER TABLE ADD
 func (s *Store) ensureColumn(ctx context.Context, table, column, colType string) error {
 	var count int
@@ -1659,7 +1676,16 @@ func (s *Store) needsRebuild(ctx context.Context) (bool, error) {
 
 // dropAllV2Tables 删除所有 stockv2_ 前缀的表
 func (s *Store) dropAllV2Tables(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return err
+	}
+	defer conn.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`)
+	rows, err := conn.QueryContext(ctx, `
 		SELECT name FROM sqlite_master
 		WHERE type='table' AND name LIKE 'stockv2_%'
 	`)
@@ -1679,9 +1705,12 @@ func (s *Store) dropAllV2Tables(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
 
 	for _, t := range tables {
-		if _, err := s.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+t); err != nil {
+		if _, err := conn.ExecContext(ctx, "DROP TABLE IF EXISTS "+t); err != nil {
 			return fmt.Errorf("drop %s: %w", t, err)
 		}
 	}

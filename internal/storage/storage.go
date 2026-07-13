@@ -535,9 +535,9 @@ func Open(ctx context.Context, path string, log *slog.Logger) (*Store, error) {
 
 func sqliteDSN(path string) string {
 	if strings.Contains(path, "?") {
-		return path + "&_busy_timeout=5000"
+		return path + "&_busy_timeout=5000&_foreign_keys=on"
 	}
-	return path + "?_busy_timeout=5000"
+	return path + "?_busy_timeout=5000&_foreign_keys=on"
 }
 
 func configureSQLite(ctx context.Context, db *sql.DB) error {

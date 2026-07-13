@@ -1150,6 +1150,9 @@ func (s *Service) listAllNewsContextRunItems(ctx context.Context, filter NewsCon
 }
 
 func (s *Service) validateNewsContextResearchAudit(ctx context.Context, items []NewsContextRunItem, report NewsContextReport) error {
+	if err := validateNewsContextSearchAudit(report.SearchAudit); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidNewsContextResult, err)
+	}
 	required := false
 	for _, change := range report.ThreadChanges {
 		if change.MaterialChange || len(change.CounterEvidence) > 0 {
@@ -1178,19 +1181,38 @@ func (s *Service) validateNewsContextResearchAudit(ctx context.Context, items []
 	if len(report.SearchAudit) == 0 {
 		return fmt.Errorf("%w: public research audit is required", ErrInvalidNewsContextResult)
 	}
-	for _, audit := range report.SearchAudit {
+	return nil
+}
+
+func validateNewsContextSearchAudit(audits []NewsContextSearchAudit) error {
+	for index, audit := range audits {
+		if strings.TrimSpace(audit.Question) == "" {
+			return fmt.Errorf("search_audit[%d] requires question", index)
+		}
 		status := strings.TrimSpace(audit.Status)
-		if strings.TrimSpace(audit.Question) == "" || (status != "completed" && status != "verified" && status != "failed" && status != "unavailable") {
-			return fmt.Errorf("%w: invalid public research audit", ErrInvalidNewsContextResult)
-		}
-		if (status == "completed" || status == "verified") && len(audit.Sources) == 0 {
-			return fmt.Errorf("%w: successful public research requires sources", ErrInvalidNewsContextResult)
-		}
-		if (status == "failed" || status == "unavailable") && strings.TrimSpace(audit.FailureReason) == "" {
-			return fmt.Errorf("%w: failed public research requires a reason", ErrInvalidNewsContextResult)
+		switch status {
+		case "completed", "verified":
+			if !hasNonEmptyNewsContextAuditSource(audit.Sources) {
+				return fmt.Errorf("search_audit[%d] status %q requires sources", index, status)
+			}
+		case "failed", "unavailable":
+			if strings.TrimSpace(audit.FailureReason) == "" {
+				return fmt.Errorf("search_audit[%d] status %q requires failure_reason", index, status)
+			}
+		default:
+			return fmt.Errorf("search_audit[%d] status must be completed, verified, failed, or unavailable", index)
 		}
 	}
 	return nil
+}
+
+func hasNonEmptyNewsContextAuditSource(sources []string) bool {
+	for _, source := range sources {
+		if strings.TrimSpace(source) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func validateNewsContextReport(run NewsContextRun, items []NewsContextRunItem, report NewsContextReport) error {
