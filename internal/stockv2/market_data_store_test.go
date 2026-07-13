@@ -75,6 +75,69 @@ func TestMarketDataStoreUpsertQueryStats(t *testing.T) {
 	}
 }
 
+func TestMarketDataStoreSelectsOneCompleteBarPerTradeDate(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "stock_market.duckdb")
+	store, err := NewMarketDataStore(path)
+	if err != nil {
+		t.Fatalf("new market store: %v", err)
+	}
+	defer store.Close()
+
+	day := "2026-07-10"
+	if err := store.UpsertDailyBars(ctx, []StockV2DailyBar{
+		{Symbol: "600276", Market: "SH", TradeDate: day, Open: 54.6, High: 57.48, Low: 54.55, Close: 55.75, Volume: 1336189, Amount: 0, Adjusted: DailyBarAdjustedNone, Source: "tencent_fqkline", FetchedAt: time.Now(), Quality: DailyBarQualityOK},
+		{Symbol: "600276", Market: "SH", TradeDate: day, Open: 54.6, High: 57.48, Low: 54.55, Close: 55.75, Volume: 133618942, Amount: 7492062000, Adjusted: DailyBarAdjustedNone, Source: "10jqka_kline", FetchedAt: time.Now().Add(-time.Minute), Quality: DailyBarQualityOK},
+	}); err != nil {
+		t.Fatalf("upsert multi-source bars: %v", err)
+	}
+
+	got, err := store.GetDailyBars(ctx, "600276", DailyBarAdjustedNone, "", "", 0)
+	if err != nil {
+		t.Fatalf("get bars: %v", err)
+	}
+	if len(got) != 1 || got[0].Source != "10jqka_kline" || got[0].Amount != 7492062000 {
+		t.Fatalf("canonical bar = %+v, want complete 10jqka bar", got)
+	}
+	count, _, _, source, _, err := store.GetDailyBarsStats(ctx, "600276", DailyBarAdjustedNone)
+	if err != nil {
+		t.Fatalf("get stats: %v", err)
+	}
+	if count != 1 || source != "10jqka_kline" {
+		t.Fatalf("logical stats count=%d source=%q, want 1 and 10jqka_kline", count, source)
+	}
+
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE stockv2_daily_bar_quality
+		SET row_count = 2
+		WHERE symbol = '600276' AND adjusted = 'none'
+	`); err != nil {
+		t.Fatalf("poison legacy quality row: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		DELETE FROM stockv2_market_schema_migrations
+		WHERE id = ?
+	`, dailyBarLogicalQualityMigration); err != nil {
+		t.Fatalf("remove migration marker: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store before migration: %v", err)
+	}
+
+	store, err = NewMarketDataStore(path)
+	if err != nil {
+		t.Fatalf("reopen market store: %v", err)
+	}
+	defer store.Close()
+	count, _, _, source, _, err = store.GetDailyBarsStats(ctx, "600276", DailyBarAdjustedNone)
+	if err != nil {
+		t.Fatalf("get migrated stats: %v", err)
+	}
+	if count != 1 || source != "10jqka_kline" {
+		t.Fatalf("migrated logical stats count=%d source=%q, want 1 and 10jqka_kline", count, source)
+	}
+}
+
 func TestNewStoreWithMarketDBMigratesLegacySQLiteDailyBars(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

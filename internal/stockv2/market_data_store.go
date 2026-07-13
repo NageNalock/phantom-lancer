@@ -91,6 +91,10 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 			ON stockv2_daily_bars(symbol, adjusted, trade_date);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bars_symbol_adjusted_fetched
 			ON stockv2_daily_bars(symbol, adjusted, fetched_at);
+		CREATE TABLE IF NOT EXISTS stockv2_market_schema_migrations (
+			id VARCHAR PRIMARY KEY,
+			applied_at TIMESTAMP NOT NULL
+		);
 		CREATE TABLE IF NOT EXISTS stockv2_daily_bar_quality (
 			symbol VARCHAR NOT NULL,
 			adjusted VARCHAR NOT NULL,
@@ -334,7 +338,7 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("init duckdb daily bars schema: %w", err)
 	}
-	if err := s.backfillDailyBarQuality(ctx); err != nil {
+	if err := s.migrateDailyBarLogicalQuality(ctx); err != nil {
 		return err
 	}
 	for _, stmt := range []string{
@@ -355,39 +359,85 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 	return nil
 }
 
-func (s *MarketDataStore) backfillDailyBarQuality(ctx context.Context) error {
-	var qualityCount int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_daily_bar_quality`).Scan(&qualityCount); err != nil {
-		return wrapError(err, "count duckdb daily bar quality")
+const dailyBarLogicalQualityMigration = "daily-bar-logical-quality-v1"
+
+func (s *MarketDataStore) migrateDailyBarLogicalQuality(ctx context.Context) error {
+	var applied int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM stockv2_market_schema_migrations WHERE id = ?
+	`, dailyBarLogicalQualityMigration).Scan(&applied); err != nil {
+		return wrapError(err, "check duckdb daily bar logical quality migration")
 	}
-	if qualityCount > 0 {
+	if applied > 0 {
 		return nil
 	}
-	var barCount int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_daily_bars`).Scan(&barCount); err != nil {
-		return wrapError(err, "count duckdb daily bars for quality backfill")
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return wrapError(err, "begin duckdb daily bar logical quality migration")
 	}
-	if barCount == 0 {
-		return nil
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_daily_bar_quality`); err != nil {
+		return wrapError(err, "clear duckdb daily bar quality")
 	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT OR REPLACE INTO stockv2_daily_bar_quality (
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO stockv2_daily_bar_quality (
 			symbol, adjusted, row_count, earliest_date, latest_date, source, last_error, updated_at
 		)
-		SELECT
-			symbol,
-			adjusted,
-			COUNT(*),
-			COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'), ''),
-			COALESCE(strftime(MAX(trade_date), '%Y-%m-%d'), ''),
-			'',
-			'',
-			?
-		FROM stockv2_daily_bars
-		GROUP BY symbol, adjusted
-	`, time.Now())
-	if err != nil {
-		return wrapError(err, "backfill duckdb daily bar quality")
+		WITH selected AS (
+			SELECT * EXCLUDE (rn)
+			FROM (
+				SELECT *, ROW_NUMBER() OVER (
+					PARTITION BY symbol, adjusted, trade_date
+					ORDER BY
+						CASE WHEN open > 0 AND high >= greatest(open, close, low)
+							AND low <= least(open, close, high) AND close > 0 AND volume > 0
+							THEN 0 ELSE 1 END,
+						CASE WHEN amount > 0 THEN 0 ELSE 1 END,
+						fetched_at DESC NULLS LAST,
+						updated_at DESC,
+						source ASC
+				) AS rn
+				FROM stockv2_daily_bars
+			)
+			WHERE rn = 1
+		), latest_source AS (
+			SELECT symbol, adjusted, source
+			FROM (
+				SELECT symbol, adjusted, source, ROW_NUMBER() OVER (
+					PARTITION BY symbol, adjusted ORDER BY trade_date DESC, fetched_at DESC NULLS LAST
+				) AS rn
+				FROM selected
+			)
+			WHERE rn = 1
+		), latest_error AS (
+			SELECT symbol, adjusted, error_message
+			FROM (
+				SELECT symbol, adjusted, error_message, ROW_NUMBER() OVER (
+					PARTITION BY symbol, adjusted ORDER BY fetched_at DESC NULLS LAST, updated_at DESC
+				) AS rn
+				FROM stockv2_daily_bars
+				WHERE COALESCE(error_message, '') != ''
+			)
+			WHERE rn = 1
+		)
+		SELECT s.symbol, s.adjusted, COUNT(*),
+			COALESCE(strftime(MIN(s.trade_date), '%Y-%m-%d'), ''),
+			COALESCE(strftime(MAX(s.trade_date), '%Y-%m-%d'), ''),
+			COALESCE(ls.source, ''), COALESCE(le.error_message, ''), ?
+		FROM selected s
+		LEFT JOIN latest_source ls ON ls.symbol = s.symbol AND ls.adjusted = s.adjusted
+		LEFT JOIN latest_error le ON le.symbol = s.symbol AND le.adjusted = s.adjusted
+		GROUP BY s.symbol, s.adjusted, ls.source, le.error_message
+	`, time.Now()); err != nil {
+		return wrapError(err, "rebuild duckdb daily bar logical quality")
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO stockv2_market_schema_migrations (id, applied_at) VALUES (?, ?)
+	`, dailyBarLogicalQualityMigration, time.Now()); err != nil {
+		return wrapError(err, "record duckdb daily bar logical quality migration")
+	}
+	if err := tx.Commit(); err != nil {
+		return wrapError(err, "commit duckdb daily bar logical quality migration")
 	}
 	return nil
 }
@@ -482,22 +532,39 @@ func refreshDailyBarQualityWithTx(ctx context.Context, tx *sql.Tx, symbol, adjus
 		INSERT OR REPLACE INTO stockv2_daily_bar_quality (
 			symbol, adjusted, row_count, earliest_date, latest_date, source, last_error, updated_at
 		)
+		WITH selected AS (
+			SELECT * EXCLUDE (rn)
+			FROM (
+				SELECT *, ROW_NUMBER() OVER (
+					PARTITION BY symbol, adjusted, trade_date
+					ORDER BY
+						CASE WHEN open > 0 AND high >= greatest(open, close, low)
+							AND low <= least(open, close, high) AND close > 0 AND volume > 0
+							THEN 0 ELSE 1 END,
+						CASE WHEN amount > 0 THEN 0 ELSE 1 END,
+						fetched_at DESC NULLS LAST,
+						updated_at DESC,
+						source ASC
+				) AS rn
+				FROM stockv2_daily_bars
+				WHERE symbol = ? AND adjusted = ?
+			)
+			WHERE rn = 1
+		)
 		SELECT
 			?,
 			?,
 			COUNT(*),
 			COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'), ''),
 			COALESCE(strftime(MAX(trade_date), '%Y-%m-%d'), ''),
-			COALESCE((SELECT source FROM stockv2_daily_bars
-			          WHERE symbol = ? AND adjusted = ?
-			          ORDER BY fetched_at DESC LIMIT 1), ''),
+			COALESCE((SELECT source FROM selected
+			          ORDER BY trade_date DESC, fetched_at DESC NULLS LAST LIMIT 1), ''),
 			COALESCE((SELECT error_message FROM stockv2_daily_bars
 			          WHERE symbol = ? AND adjusted = ? AND COALESCE(error_message, '') != ''
-			          ORDER BY fetched_at DESC LIMIT 1), ''),
+			          ORDER BY fetched_at DESC NULLS LAST, updated_at DESC LIMIT 1), ''),
 			?
-		FROM stockv2_daily_bars
-		WHERE symbol = ? AND adjusted = ?
-	`, symbol, adjusted, symbol, adjusted, symbol, adjusted, updatedAt, symbol, adjusted)
+		FROM selected
+	`, symbol, adjusted, symbol, adjusted, symbol, adjusted, updatedAt)
 	if err != nil {
 		return wrapError(err, fmt.Sprintf("refresh duckdb daily bar quality %s %s", symbol, adjusted))
 	}
@@ -509,13 +576,22 @@ func (s *MarketDataStore) GetDailyBars(ctx context.Context, symbol, adjusted, st
 		return nil, fmt.Errorf("market data store is not initialized")
 	}
 	baseQuery := `
-		SELECT id, symbol, COALESCE(market,''), strftime(trade_date, '%Y-%m-%d') AS trade_date,
-		       COALESCE(open,0), COALESCE(high,0), COALESCE(low,0), COALESCE(close,0),
-		       COALESCE(prev_close,0), COALESCE(volume,0), COALESCE(amount,0), COALESCE(pct_change,0),
-		       adjusted, COALESCE(source,''), fetched_at, COALESCE(quality,''), COALESCE(error_message,''),
-		       created_at, updated_at
-		FROM stockv2_daily_bars
-		WHERE symbol = ? AND adjusted = ?
+		WITH selected AS (
+			SELECT * EXCLUDE (rn)
+			FROM (
+				SELECT *, ROW_NUMBER() OVER (
+					PARTITION BY symbol, adjusted, trade_date
+					ORDER BY
+						CASE WHEN open > 0 AND high >= greatest(open, close, low)
+							AND low <= least(open, close, high) AND close > 0 AND volume > 0
+							THEN 0 ELSE 1 END,
+						CASE WHEN amount > 0 THEN 0 ELSE 1 END,
+						fetched_at DESC NULLS LAST,
+						updated_at DESC,
+						source ASC
+				) AS rn
+				FROM stockv2_daily_bars
+				WHERE symbol = ? AND adjusted = ?
 	`
 	args := []any{symbol, adjusted}
 	if startDate != "" {
@@ -526,6 +602,17 @@ func (s *MarketDataStore) GetDailyBars(ctx context.Context, symbol, adjusted, st
 		baseQuery += " AND trade_date <= CAST(? AS DATE)"
 		args = append(args, endDate)
 	}
+	baseQuery += `
+			)
+			WHERE rn = 1
+		)
+		SELECT id, symbol, COALESCE(market,''), strftime(trade_date, '%Y-%m-%d') AS trade_date,
+		       COALESCE(open,0), COALESCE(high,0), COALESCE(low,0), COALESCE(close,0),
+		       COALESCE(prev_close,0), COALESCE(volume,0), COALESCE(amount,0), COALESCE(pct_change,0),
+		       adjusted, COALESCE(source,''), fetched_at, COALESCE(quality,''), COALESCE(error_message,''),
+		       created_at, updated_at
+		FROM selected
+	`
 	query := baseQuery + " ORDER BY trade_date ASC"
 	if limit > 0 {
 		query = "SELECT * FROM (" + baseQuery + " ORDER BY trade_date DESC LIMIT ?) ORDER BY trade_date ASC"

@@ -1091,6 +1091,7 @@ export function stockV2AgentTaskTypeLabel(taskType?: string): string {
     case "operation_review": return "操作复核";
     case "strategy_generation": return "策略生成";
     case "opportunity_discovery": return "机会发现";
+    case "portfolio_sentinel": return "组合哨兵";
     case "news_event_review": return "消息面研判";
     case "portfolio_risk_review": return "组合风险审查";
     case "stock_profile_summary": return "股票画像生成";
@@ -1100,7 +1101,7 @@ export function stockV2AgentTaskTypeLabel(taskType?: string): string {
 }
 
 export function stockV2AgentTaskConfigurable(taskType?: string): boolean {
-  return taskType === "operation_review" || taskType === "strategy_generation" || taskType === "opportunity_discovery" || taskType === "stock_profile_summary";
+	return taskType === "operation_review" || taskType === "strategy_generation" || taskType === "opportunity_discovery" || taskType === "portfolio_sentinel" || taskType === "news_event_review" || taskType === "stock_profile_summary";
 }
 
 export function stockV2AgentRunStatusLabel(status?: string): string {

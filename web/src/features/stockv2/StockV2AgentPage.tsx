@@ -52,8 +52,8 @@ const AGENT_TASKS: AgentTaskDefinition[] = [
   { taskType: "operation_review", description: "监控命中后的操作复核与建议生成。" },
   { taskType: "strategy_generation", description: "基于股票/组合上下文生成策略草案。" },
   { taskType: "opportunity_discovery", description: "从数据面与信息面筛选机会候选。" },
+  { taskType: "portfolio_sentinel", description: "周期复核组合风险，并消费消息脉络产生的实质变化。" },
   { taskType: "news_event_review", description: "定期归纳新闻、持续完善消息脉络主题并触发影响复核。" },
-  { taskType: "portfolio_risk_review", description: "审查组合风险、暴露与约束冲突。" },
   { taskType: "stock_profile_summary", description: "生成股票画像与长期跟踪摘要。" },
   { taskType: "bull_bear_debate", description: "多空视角辩论与证据交叉检查。" },
 ];

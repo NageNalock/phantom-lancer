@@ -2636,6 +2636,7 @@ export type StockV2AgentTaskType =
   | "operation_review"
   | "strategy_generation"
   | "opportunity_discovery"
+  | "portfolio_sentinel"
   | "news_event_review"
   | "portfolio_risk_review"
   | "stock_profile_summary"
