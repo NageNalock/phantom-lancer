@@ -166,8 +166,18 @@ func TestMCP_SubmitNewsContextResult(t *testing.T) {
 				"result": map[string]any{
 					"outputType":    NewsContextOutputType,
 					"resultSummary": "消息脉络归纳完成",
-					"result":        map[string]any{"schema_version": "news-context-result/v1"},
-					"confidence":    0.8,
+					"result": map[string]any{
+						"schema_version":       NewsContextResultSchemaVersion,
+						"run_id":               "run-news-context",
+						"window_type":          NewsContextWindowHourly,
+						"processed_news_ids":   []string{},
+						"reviewed_thread_ids":  []string{},
+						"unchanged_thread_ids": []string{},
+						"news_decisions":       []any{},
+						"thread_changes":       []any{},
+						"search_audit":         []any{},
+					},
+					"confidence": 0.8,
 				},
 			},
 		},
@@ -179,6 +189,49 @@ func TestMCP_SubmitNewsContextResult(t *testing.T) {
 	defer entry.mu.Unlock()
 	if entry.status != agentTaskStatusSubmitted || entry.submittedResult == nil || entry.submittedResult.OutputType != NewsContextOutputType {
 		t.Fatalf("entry=%+v, want submitted news context result", entry)
+	}
+}
+
+func TestMCP_SubmitNewsContextResultRejectsInventedFieldNames(t *testing.T) {
+	p := newAgentTaskPool(defaultCleanupInterval)
+	defer p.Close()
+
+	taskID, entry := p.createTask(AgentTaskTypeNewsEventReview, "run-news-context", "", 5*time.Minute)
+	resp := p.HandleMCPRequest(mustJSON(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": codexSubmitResultTool,
+			"arguments": map[string]any{
+				"taskID":   taskID,
+				"taskType": AgentTaskTypeNewsEventReview,
+				"result": map[string]any{
+					"outputType": NewsContextOutputType,
+					"result": map[string]any{
+						"schema_version":       NewsContextResultSchemaVersion,
+						"run_id":               "run-news-context",
+						"window_type":          NewsContextWindowHourly,
+						"processed_news_ids":   []string{"news-1"},
+						"reviewed_thread_ids":  []string{},
+						"unchanged_thread_ids": []string{},
+						"news_decisions": []map[string]any{{
+							"news_id": "news-1", "disposition": "noise",
+						}},
+						"thread_changes": []any{},
+						"search_audit":   []any{},
+					},
+				},
+			},
+		},
+	}))
+	if !strings.Contains(string(resp), `unknown field \"news_id\"`) {
+		t.Fatalf("response=%s, want actionable unknown-field error", resp)
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.status != agentTaskStatusWaiting || entry.submittedResult != nil {
+		t.Fatalf("rejected result consumed task slot: %+v", entry)
 	}
 }
 

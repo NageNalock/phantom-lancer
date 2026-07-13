@@ -1,8 +1,10 @@
 package stockv2
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -204,6 +206,11 @@ func (p *agentTaskPool) mcpSubmitResult(args json.RawMessage) (any, *mcpError) {
 	if !validAgentTaskOutputType(params.TaskType, params.Result.OutputType) {
 		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "invalid result.outputType"}
 	}
+	if params.TaskType == AgentTaskTypeNewsEventReview {
+		if err := validateNewsContextSubmittedResult(params.Result.Result); err != nil {
+			return nil, &mcpError{Code: mcpErrInvalidParams, Message: "invalid news context result: " + err.Error()}
+		}
+	}
 
 	result := AgentTaskSubmittedResult{
 		OutputType:    params.Result.OutputType,
@@ -234,6 +241,46 @@ func (p *agentTaskPool) mcpSubmitResult(args json.RawMessage) (any, *mcpError) {
 		},
 		"isError": false,
 	}, nil
+}
+
+func validateNewsContextSubmittedResult(value map[string]any) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	var report NewsContextReport
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&report); err != nil {
+		return err
+	}
+	if report.SchemaVersion != NewsContextResultSchemaVersion {
+		return fmt.Errorf("schema_version must be %q", NewsContextResultSchemaVersion)
+	}
+	if strings.TrimSpace(report.RunID) == "" || strings.TrimSpace(report.WindowType) == "" {
+		return errors.New("run_id and window_type are required")
+	}
+	if report.ProcessedNewsIDs == nil || report.ReviewedThreadIDs == nil || report.UnchangedThreadIDs == nil ||
+		report.NewsDecisions == nil || report.ThreadChanges == nil || report.SearchAudit == nil {
+		return errors.New("all result arrays must be present; use [] when empty")
+	}
+	for index, decision := range report.NewsDecisions {
+		if strings.TrimSpace(decision.NewsEventID) == "" || strings.TrimSpace(decision.Disposition) == "" {
+			return fmt.Errorf("news_decisions[%d] requires news_event_id and disposition", index)
+		}
+	}
+	for index, change := range report.ThreadChanges {
+		if strings.TrimSpace(change.Action) == "" || strings.TrimSpace(change.Title) == "" ||
+			strings.TrimSpace(change.CoreThesis) == "" || strings.TrimSpace(change.Stage) == "" {
+			return fmt.Errorf("thread_changes[%d] requires action, title, core_thesis, and stage", index)
+		}
+	}
+	for index, audit := range report.SearchAudit {
+		if strings.TrimSpace(audit.Question) == "" || strings.TrimSpace(audit.Status) == "" {
+			return fmt.Errorf("search_audit[%d] requires question and status", index)
+		}
+	}
+	return nil
 }
 
 func mcpSuccessResponse(id any, result any) json.RawMessage {

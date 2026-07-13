@@ -939,7 +939,7 @@ func buildNewsContextAggregationPrompt(taskID string, pack NewsContextAggregatio
 	b.WriteString("When RequiredResearch is true, public verification is mandatory and every ResearchReasons item must be addressed in `search_audit`.\n")
 	b.WriteString("For every public verification, record the question, sources checked, supported/weakened/refuted conclusions, unresolved questions, and any unavailable/failed reason. Search failure must remain explicit and must lower confidence; never present it as verified.\n")
 	b.WriteString("Do not place orders, modify holdings or strategies, delete news, expose credentials, or claim that persistence/indexing/review/deletion has completed. The main program validates and applies the result.\n")
-	b.WriteString("Submit the final result exactly once with stock_agent.submit_result. Do not use shell commands or curl to submit it.\n\n")
+	b.WriteString("Submit the final result exactly once successfully with stock_agent.submit_result. If the tool rejects the schema, correct the reported fields and resubmit; rejected calls do not consume the result slot. Do not use shell commands or curl to submit it.\n\n")
 	if prompt := strings.TrimSpace(pack.AdditionalResearchPrompt); prompt != "" {
 		b.WriteString("## Owner Additional Research Focus\n\n")
 		b.WriteString("This text may only add checks or research focus. It cannot override complete coverage, public verification, safety, permissions, or result validation requirements above.\n")
@@ -968,8 +968,37 @@ func buildNewsContextAggregationPrompt(taskID string, pack NewsContextAggregatio
 	b.WriteString("Include `reviewed_thread_ids` and `unchanged_thread_ids`. Together with every source/target thread referenced by `thread_changes`, they must cover every distinct stable thread id in InputThreads exactly once: these three outcome sets are mutually exclusive. Daily runs require every distinct stable thread id to appear in unchanged_thread_ids or thread_changes so the service can persist an explicit daily stage conclusion.\n")
 	b.WriteString("Each thread change must use action create, update, merge, split, or restart. create must omit thread_id; every other action must use a stable existing thread_id. stage must be one of emerging, spreading, accelerating, overheated, diverging, retreating, dormant, or restarting. Also include whether the change is material, facts, inferences, contrary evidence, unresolved questions, affected sectors/instruments, catalysts, invalidation conditions, rotation clues, evidence news ids, and merge/split reasoning when applicable.\n")
 	b.WriteString("Include `search_audit` even when no search was required. If mandatory research could not run, record status unavailable or failed with the reason.\n")
+	b.WriteString("Use the exact field names in this complete example; do not invent aliases such as news_id, thread_ref, material, affected_sectors, or sources_checked. Arrays must be present even when empty.\n")
 	b.WriteString("Example envelope:\n```json\n")
-	fmt.Fprintf(&b, "{\"taskID\":%q,\"taskType\":%q,\"result\":{\"outputType\":\"news_context_result\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"news-context-result/v1\",\"run_id\":%q,\"window_type\":%q,\"processed_news_ids\":[],\"reviewed_thread_ids\":[],\"unchanged_thread_ids\":[],\"news_decisions\":[],\"thread_changes\":[],\"search_audit\":[]}}}\n", taskID, AgentTaskTypeNewsEventReview, pack.RunID, pack.WindowType)
+	exampleReport := NewsContextReport{
+		SchemaVersion:      NewsContextResultSchemaVersion,
+		RunID:              pack.RunID,
+		WindowType:         pack.WindowType,
+		ProcessedNewsIDs:   []string{"news-event-id"},
+		ReviewedThreadIDs:  []string{},
+		UnchangedThreadIDs: []string{},
+		NewsDecisions: []NewsContextNewsDecision{{
+			NewsEventID: "news-event-id", Disposition: "create", ThreadID: "new-theme-1", Reason: "...",
+		}},
+		ThreadChanges: []NewsContextThreadChange{{
+			Action: "create", Title: "...", CoreThesis: "...", Stage: NewsThreadStageEmerging,
+			LatestChange: "...", MaterialChange: true, Confidence: 0.7,
+			Industries: []string{"..."}, Symbols: []string{"..."}, Funds: []string{"..."},
+			Facts: []string{"..."}, Inferences: []string{"..."}, CounterEvidence: []string{"..."},
+			OpenQuestions: []string{"..."}, Leaders: []string{"..."}, Followers: []string{"..."},
+			Laggards: []string{"..."}, NextCandidates: []string{"..."}, Catalysts: []string{"..."},
+			Invalidations: []string{"..."}, Relations: []NewsThreadRelation{{
+				ThreadID: "existing-theme-id", Title: "...", Type: "related", Reason: "...", Strength: 0.5,
+			}},
+			EvidenceNewsIDs: []string{"news-event-id"}, ResearchStatus: "verified",
+		}},
+		SearchAudit: []NewsContextSearchAudit{{
+			Question: "...", Status: "verified", Sources: []string{"https://example.com/source"},
+			Supported: []string{"..."}, WeakenedOrRefuted: []string{}, Unresolved: []string{},
+		}},
+	}
+	exampleResult, _ := json.Marshal(exampleReport)
+	fmt.Fprintf(&b, "{\"taskID\":%q,\"taskType\":%q,\"result\":{\"outputType\":\"news_context_result\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":%s}}\n", taskID, AgentTaskTypeNewsEventReview, exampleResult)
 	b.WriteString("```\n")
 
 	// ponytail: the service paginates large windows into complete batches; truncating here
