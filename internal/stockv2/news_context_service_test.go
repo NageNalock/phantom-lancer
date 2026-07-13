@@ -18,6 +18,7 @@ func TestApplyNewsContextBatchIsIdempotentAndPersistsEvidence(t *testing.T) {
 		t.Fatalf("mark run item running: %v", err)
 	}
 	report := newsContextCreateThreadReport(run, event)
+	report.NewsDecisions[0].ThreadID = "temporary-new-theme"
 
 	first, err := svc.store.ApplyNewsContextBatch(ctx, run.ID, agentRunID, run.WindowType, report)
 	if err != nil {
@@ -48,7 +49,8 @@ func TestApplyNewsContextBatchIsIdempotentAndPersistsEvidence(t *testing.T) {
 		t.Fatalf("evidence=%+v err=%v", evidence, err)
 	}
 	items, err := svc.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{RunID: run.ID, Limit: 10})
-	if err != nil || len(items) != 1 || items[0].Status != NewsContextRunItemCompleted {
+	if err != nil || len(items) != 1 || items[0].Status != NewsContextRunItemCompleted ||
+		items[0].ThreadID != threads[0].ID || items[0].ThreadID == "temporary-new-theme" {
 		t.Fatalf("run items=%+v err=%v", items, err)
 	}
 	storedRun, err := svc.store.GetNewsContextRun(ctx, run.ID)
@@ -74,8 +76,90 @@ func TestValidateNewsContextReportRejectsIncompleteCoverage(t *testing.T) {
 		t.Fatalf("incomplete thread coverage error = %v", err)
 	}
 	report.UnchangedThreadIDs = []string{"thread-1"}
+	report.NewsDecisions[0].Disposition = "noise"
 	if err := validateNewsContextReport(run, items, report); err != nil {
 		t.Fatalf("complete coverage rejected: %v", err)
+	}
+	report.NewsDecisions[0].Disposition = "anything"
+	if err := validateNewsContextReport(run, items, report); !errors.Is(err, ErrInvalidNewsContextResult) {
+		t.Fatalf("unknown disposition error = %v", err)
+	}
+}
+
+func TestValidateNewsContextReportRequiresOneMatchingThemeEvidencePerCoveredNews(t *testing.T) {
+	run := NewsContextRun{ID: "context-run", WindowType: NewsContextWindowHourly}
+	newsItem := NewsContextRunItem{ObjectType: NewsContextRunItemNewsEvent, ObjectID: "news-1"}
+	change := func(action, threadID string, evidence ...string) NewsContextThreadChange {
+		return NewsContextThreadChange{
+			Action: action, ThreadID: threadID, Title: "主题", CoreThesis: "主题结论",
+			Stage: NewsThreadStageEmerging, Confidence: 0.8, EvidenceNewsIDs: evidence,
+		}
+	}
+	report := func(decisionThreadID string, changes ...NewsContextThreadChange) NewsContextReport {
+		return NewsContextReport{
+			SchemaVersion: NewsContextResultSchemaVersion, RunID: run.ID, WindowType: run.WindowType,
+			ProcessedNewsIDs: []string{"news-1"},
+			NewsDecisions: []NewsContextNewsDecision{{
+				NewsEventID: "news-1", Disposition: "support", ThreadID: decisionThreadID,
+			}},
+			ThreadChanges: changes,
+		}
+	}
+	for _, tt := range []struct {
+		name    string
+		items   []NewsContextRunItem
+		report  NewsContextReport
+		wantErr bool
+	}{
+		{name: "support without change or evidence", items: []NewsContextRunItem{newsItem}, report: report(""), wantErr: true},
+		{name: "wrong existing thread", items: []NewsContextRunItem{newsItem, {
+			ObjectType: NewsContextRunItemThread, ObjectID: "thread-old", ThreadID: "thread-old",
+		}}, report: report("thread-wrong", change("update", "thread-old", "news-1")), wantErr: true},
+		{name: "cross fragment evidence", items: []NewsContextRunItem{newsItem}, report: report("temp-new", change("create", "", "news-2")), wantErr: true},
+		{name: "duplicate evidence", items: []NewsContextRunItem{newsItem}, report: report("", change("create", "", "news-1"), change("create", "", "news-1")), wantErr: true},
+		{name: "noise cannot be evidence", items: []NewsContextRunItem{newsItem}, report: func() NewsContextReport {
+			value := report("", change("create", "", "news-1"))
+			value.NewsDecisions[0].Disposition = "noise"
+			return value
+		}(), wantErr: true},
+		{name: "valid new thread temporary identity", items: []NewsContextRunItem{newsItem}, report: report("temp-new", change("create", "", "news-1"))},
+		{name: "valid existing thread", items: []NewsContextRunItem{newsItem, {
+			ObjectType: NewsContextRunItemThread, ObjectID: "thread-old", ThreadID: "thread-old",
+		}}, report: report("thread-old", change("update", "thread-old", "news-1"))},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateNewsContextReport(run, tt.items, tt.report)
+			if tt.wantErr && !errors.Is(err, ErrInvalidNewsContextResult) {
+				t.Fatalf("validation error=%v, want invalid result", err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("valid evidence mapping rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestApplyNewsContextBatchDefensivelyRejectsCrossFragmentEvidence(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	run, event := seedNewsContextEventRun(t, svc, ctx)
+	outside, err := svc.CreateNewsEvent(ctx, NewsEvent{Source: "test", Title: "另一分片", EventAt: run.WindowEnd})
+	if err != nil {
+		t.Fatalf("create outside news: %v", err)
+	}
+	const agentRunID = "defensive-evidence-agent"
+	if _, err := svc.store.MarkNewsContextRunItemsRunning(ctx, run.ID, agentRunID, []string{event.ID}); err != nil {
+		t.Fatalf("mark input running: %v", err)
+	}
+	report := newsContextCreateThreadReport(run, event)
+	report.ThreadChanges[0].EvidenceNewsIDs = []string{outside.ID}
+	if _, err := svc.store.ApplyNewsContextBatch(ctx, run.ID, agentRunID, run.WindowType, report); !errors.Is(err, ErrInvalidNewsContextResult) {
+		t.Fatalf("repository accepted cross-fragment evidence: %v", err)
+	}
+	items, err := svc.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{RunID: run.ID, Limit: 10})
+	if err != nil || len(items) != 1 || items[0].Status != NewsContextRunItemRunning {
+		t.Fatalf("rejected batch mutated checklist: items=%+v err=%v", items, err)
 	}
 }
 

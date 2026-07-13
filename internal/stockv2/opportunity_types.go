@@ -431,6 +431,7 @@ type SemanticSearchRequest struct {
 	Query    string  `json:"query"`
 	Limit    int     `json:"limit,omitempty"`
 	MinScore float64 `json:"minScore,omitempty"`
+	AsOf     string  `json:"asOf,omitempty"`
 }
 
 type SemanticStockProfileResult struct {
@@ -446,9 +447,11 @@ type SemanticNewsEventResult struct {
 }
 
 type SemanticNewsThreadResult struct {
-	Score  float64        `json:"score"`
-	Thread NewsThread     `json:"thread"`
-	Asset  EmbeddingAsset `json:"asset"`
+	Score              float64            `json:"score"`
+	Thread             NewsThread         `json:"thread"`
+	Version            *NewsThreadVersion `json:"version,omitempty"`
+	RetrievalVersionID string             `json:"retrievalVersionId,omitempty"`
+	Asset              EmbeddingAsset     `json:"asset"`
 }
 
 func validOpportunityStatus(v string) bool {

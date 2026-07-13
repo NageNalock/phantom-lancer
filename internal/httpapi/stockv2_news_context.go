@@ -18,6 +18,9 @@ const (
 )
 
 func (s *Server) handleStockV2GetNewsContextSummary(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAuth(w, r); !ok {
+		return
+	}
 	result, err := s.stockV2.GetNewsContextSummary(r.Context())
 	if err != nil {
 		writeStockV2NewsContextError(w, "stockv2_news_context_summary_failed", err)
@@ -27,6 +30,9 @@ func (s *Server) handleStockV2GetNewsContextSummary(w http.ResponseWriter, r *ht
 }
 
 func (s *Server) handleStockV2GetNewsContextConfig(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAuth(w, r); !ok {
+		return
+	}
 	result, err := s.stockV2.GetNewsContextConfig(r.Context())
 	if err != nil {
 		writeStockV2NewsContextError(w, "stockv2_news_context_config_failed", err)
@@ -46,19 +52,53 @@ func (s *Server) handleStockV2UpdateNewsContextConfig(w http.ResponseWriter, r *
 		writeError(w, http.StatusBadRequest, "invalid_request_body", "invalid request body")
 		return
 	}
+	previous, err := s.stockV2.GetNewsContextConfig(r.Context())
+	if err != nil {
+		writeStockV2NewsContextError(w, "stockv2_news_context_config_failed", err)
+		return
+	}
 	result, err := s.stockV2.PatchNewsContextConfig(r.Context(), req)
 	if err != nil {
 		writeStockV2NewsContextError(w, "stockv2_news_context_config_failed", err)
 		return
 	}
+	changes := map[string]any{}
+	if previous.Enabled != result.Enabled {
+		changes["自动归纳"] = result.Enabled
+	}
+	if previous.HourlyEnabled != result.HourlyEnabled {
+		changes["小时归纳"] = result.HourlyEnabled
+	}
+	if previous.FourHourEnabled != result.FourHourEnabled {
+		changes["四小时归纳"] = result.FourHourEnabled
+	}
+	if previous.DailyEnabled != result.DailyEnabled {
+		changes["每日归纳"] = result.DailyEnabled
+	}
+	if previous.AutoCleanupEnabled != result.AutoCleanupEnabled {
+		changes["自动清理"] = result.AutoCleanupEnabled
+	}
+	if previous.CleanupGraceSeconds != result.CleanupGraceSeconds {
+		changes["清理等待秒数"] = result.CleanupGraceSeconds
+	}
+	if previous.AdditionalResearchPrompt != result.AdditionalResearchPrompt {
+		changes["附加研究要求"] = map[string]any{"changed": true, "length": len([]rune(result.AdditionalResearchPrompt))}
+	}
+	risk := "medium"
+	if (!previous.AutoCleanupEnabled && result.AutoCleanupEnabled) || result.CleanupGraceSeconds < previous.CleanupGraceSeconds {
+		risk = "high"
+	}
 	_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
-		EventType: "stockv2_news_context_config_updated", RiskLevel: "medium", Summary: "更新消息脉络定时归纳与安全清理配置",
-		Payload: map[string]any{"ownerId": session.Session.OwnerID, "enabled": result.Enabled, "autoCleanupEnabled": result.AutoCleanupEnabled},
+		EventType: "stockv2_news_context_config_updated", RiskLevel: risk, Summary: "更新消息脉络定时归纳与安全清理配置",
+		Payload: map[string]any{"ownerId": session.Session.OwnerID, "changes": changes},
 	})
 	s.writeJSON(w, result)
 }
 
 func (s *Server) handleStockV2ListNewsThreads(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAuth(w, r); !ok {
+		return
+	}
 	filter, err := stockV2NewsThreadFilterFromRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_filter", err.Error())
@@ -78,6 +118,9 @@ func (s *Server) handleStockV2ListNewsThreads(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleStockV2GetNewsThread(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAuth(w, r); !ok {
+		return
+	}
 	id := strings.TrimSpace(r.PathValue("id"))
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "invalid_theme_id", "theme id is required")
@@ -92,6 +135,9 @@ func (s *Server) handleStockV2GetNewsThread(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleStockV2GetNewsContextRotationSignals(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAuth(w, r); !ok {
+		return
+	}
 	result, err := s.stockV2.NewsContextRotationSignals(r.Context())
 	if err != nil {
 		writeStockV2NewsContextError(w, "stockv2_news_context_rotation_failed", err)
@@ -101,6 +147,9 @@ func (s *Server) handleStockV2GetNewsContextRotationSignals(w http.ResponseWrite
 }
 
 func (s *Server) handleStockV2ListNewsContextRuns(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAuth(w, r); !ok {
+		return
+	}
 	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
 	if kind == "" {
 		kind = stockV2NewsContextRunKindAggregation
@@ -279,7 +328,7 @@ func stockV2NewsContextRunFilterFromRequest(r *http.Request) (stockv2.NewsContex
 		return stockv2.NewsContextRunListFilter{}, errors.New("invalid window type")
 	}
 	triggerType := strings.TrimSpace(query.Get("triggerType"))
-	if triggerType != "" && !stockV2HTTPValueIn(triggerType, stockv2.NewsContextTriggerScheduled, stockv2.NewsContextTriggerManual, stockv2.NewsContextTriggerRetry) {
+	if triggerType != "" && !stockV2HTTPValueIn(triggerType, stockv2.NewsContextTriggerScheduled, stockv2.NewsContextTriggerManual, stockv2.NewsContextTriggerRetry, stockv2.NewsContextTriggerBackfill) {
 		return stockv2.NewsContextRunListFilter{}, errors.New("invalid trigger type")
 	}
 	status := strings.TrimSpace(query.Get("status"))
@@ -404,7 +453,7 @@ func writeStockV2NewsContextError(w http.ResponseWriter, code string, err error)
 	status := stockV2NewsContextHTTPStatus(err)
 	message := err.Error()
 	if errors.Is(err, stockv2.ErrNewsContextPrerequisite) {
-		message = "请先为消息脉络归纳、组合复核和主题向量配置可用模型"
+		message = "消息脉络运行条件未满足，请检查模型、向量、历史补处理、每日复核和命令行检索状态"
 	}
 	if status == http.StatusInternalServerError {
 		message = "消息脉络服务暂时不可用"
@@ -416,11 +465,14 @@ func stockV2NewsContextHTTPStatus(err error) int {
 	switch {
 	case errors.Is(err, stockv2.ErrNewsThreadNotFound),
 		errors.Is(err, stockv2.ErrNewsContextRunNotFound),
-		errors.Is(err, stockv2.ErrNewsContextCleanupNotFound):
+		errors.Is(err, stockv2.ErrNewsContextCleanupNotFound),
+		errors.Is(err, stockv2.ErrNewsContextBackfillNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, stockv2.ErrNewsContextAlreadyRunning),
 		errors.Is(err, stockv2.ErrNewsContextCleanupRunning),
-		errors.Is(err, stockv2.ErrNewsContextReviewIncomplete):
+		errors.Is(err, stockv2.ErrNewsContextReviewIncomplete),
+		errors.Is(err, stockv2.ErrNewsContextBackfillAlreadyRunning),
+		errors.Is(err, stockv2.ErrNewsContextBackfillState):
 		return http.StatusConflict
 	case errors.Is(err, stockv2.ErrNewsContextPrerequisite):
 		return http.StatusConflict

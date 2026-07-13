@@ -10,28 +10,29 @@ import (
 )
 
 const (
-	mcpToolSearchInstruments           = "stock_agent.search_instruments"
-	mcpToolSearchStockProfiles         = "stock_agent.search_stock_profiles"
-	mcpToolSemanticSearchStockProfiles = "stock_agent.semantic_search_stock_profiles"
-	mcpToolGetStockProfile             = "stock_agent.get_stock_profile"
-	mcpToolGetLatestQuotes             = "stock_agent.get_latest_quotes"
-	mcpToolGetDailyBarsSummary         = "stock_agent.get_daily_bars_summary"
-	mcpToolSearchNewsEvents            = "stock_agent.search_news_events"
-	mcpToolSemanticSearchNewsEvents    = "stock_agent.semantic_search_news_events"
-	mcpToolSemanticSearchNewsThreads   = "stock_agent.semantic_search_news_threads"
-	mcpToolGetNewsThread               = "stock_agent.get_news_thread"
-	mcpToolListNewsContextChanges      = "stock_agent.list_news_context_changes"
-	mcpToolSearchNewsLinkCandidates    = "stock_agent.search_news_link_candidates"
-	mcpToolListExistingStrategies      = "stock_agent.list_existing_strategies"
-	mcpToolGetPortfolioContext         = "stock_agent.get_portfolio_context"
-	mcpToolGetEmbeddingStatus          = "stock_agent.get_embedding_status"
-	mcpToolStartDiscoveryStep          = "stock_agent.start_discovery_step"
-	mcpToolFinishDiscoveryStep         = "stock_agent.finish_discovery_step"
-	mcpToolFailDiscoveryStep           = "stock_agent.fail_discovery_step"
-	mcpToolRecordExternalSource        = "stock_agent.record_external_source"
-	mcpToolRecordEvidence              = "stock_agent.record_evidence"
-	mcpToolRecordCandidate             = "stock_agent.record_candidate"
-	mcpToolUpdateCandidate             = "stock_agent.update_candidate"
+	mcpToolSearchInstruments                      = "stock_agent.search_instruments"
+	mcpToolSearchStockProfiles                    = "stock_agent.search_stock_profiles"
+	mcpToolSemanticSearchStockProfiles            = "stock_agent.semantic_search_stock_profiles"
+	mcpToolGetStockProfile                        = "stock_agent.get_stock_profile"
+	mcpToolGetLatestQuotes                        = "stock_agent.get_latest_quotes"
+	mcpToolGetDailyBarsSummary                    = "stock_agent.get_daily_bars_summary"
+	mcpToolSearchNewsEvents                       = "stock_agent.search_news_events"
+	mcpToolSemanticSearchNewsEvents               = "stock_agent.semantic_search_news_events"
+	mcpToolSemanticSearchNewsThreads              = "stock_agent.semantic_search_news_threads"
+	mcpToolGetNewsThread                          = "stock_agent.get_news_thread"
+	mcpToolListNewsContextChanges                 = "stock_agent.list_news_context_changes"
+	mcpToolListPortfolioSentinelImpactReviewScope = "stock_agent.list_portfolio_sentinel_impact_review_scope"
+	mcpToolSearchNewsLinkCandidates               = "stock_agent.search_news_link_candidates"
+	mcpToolListExistingStrategies                 = "stock_agent.list_existing_strategies"
+	mcpToolGetPortfolioContext                    = "stock_agent.get_portfolio_context"
+	mcpToolGetEmbeddingStatus                     = "stock_agent.get_embedding_status"
+	mcpToolStartDiscoveryStep                     = "stock_agent.start_discovery_step"
+	mcpToolFinishDiscoveryStep                    = "stock_agent.finish_discovery_step"
+	mcpToolFailDiscoveryStep                      = "stock_agent.fail_discovery_step"
+	mcpToolRecordExternalSource                   = "stock_agent.record_external_source"
+	mcpToolRecordEvidence                         = "stock_agent.record_evidence"
+	mcpToolRecordCandidate                        = "stock_agent.record_candidate"
+	mcpToolUpdateCandidate                        = "stock_agent.update_candidate"
 )
 
 func stockAgentMCPRequiredTools() []string {
@@ -48,6 +49,7 @@ func stockAgentMCPRequiredTools() []string {
 		mcpToolSemanticSearchNewsThreads,
 		mcpToolGetNewsThread,
 		mcpToolListNewsContextChanges,
+		mcpToolListPortfolioSentinelImpactReviewScope,
 		mcpToolSearchNewsLinkCandidates,
 		mcpToolListExistingStrategies,
 		mcpToolGetPortfolioContext,
@@ -122,12 +124,14 @@ func stockAgentMCPToolInputSchema(name string) map[string]any {
 			"query":    map[string]any{"type": "string", "description": "Theme, event, sector, or rotation question."},
 			"limit":    map[string]any{"type": "integer", "minimum": 1, "maximum": 50},
 			"minScore": map[string]any{"type": "number", "minimum": -1, "maximum": 1},
+			"asOf":     map[string]any{"type": "string", "description": "Optional RFC3339 cutoff. Returns the actual latest theme snapshot at that time; ranking may use its nearest retained historical vector."},
 		}
 		required = []string{"query"}
 		additionalProperties = false
 	case mcpToolGetNewsThread:
 		properties = map[string]any{
 			"threadId": map[string]any{"type": "string", "description": "Stable message-thread id."},
+			"asOf":     map[string]any{"type": "string", "description": "Optional RFC3339 cutoff. Returns only the theme state, versions, and evidence effective at or before this time."},
 		}
 		required = []string{"threadId"}
 		additionalProperties = false
@@ -138,6 +142,15 @@ func stockAgentMCPToolInputSchema(name string) map[string]any {
 			"offset": map[string]any{"type": "integer", "minimum": 0},
 		}
 		required = []string{"runId"}
+		additionalProperties = false
+	case mcpToolListPortfolioSentinelImpactReviewScope:
+		properties = map[string]any{
+			"runId":      map[string]any{"type": "string", "description": "Portfolio sentinel run id."},
+			"objectType": map[string]any{"type": "string", "enum": []string{portfolioSentinelImpactObjectHoldings, portfolioSentinelImpactObjectMonitors, portfolioSentinelImpactObjectAlerts, portfolioSentinelImpactObjectOpportunities, portfolioSentinelImpactObjectStrategies}},
+			"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
+			"offset":     map[string]any{"type": "integer", "minimum": 0},
+		}
+		required = []string{"runId", "objectType"}
 		additionalProperties = false
 	}
 	schema := map[string]any{
@@ -161,6 +174,8 @@ func stockAgentMCPToolDescription(name string) string {
 		return "Read one complete StockV2 message thread, including its current version, history, evidence, relationships, review, and index state."
 	case mcpToolListNewsContextChanges:
 		return "Page through every message-thread change produced by one aggregation run. Use this for complete review coverage; semantic search cannot replace it."
+	case mcpToolListPortfolioSentinelImpactReviewScope:
+		return "Page through the immutable identifiers in one final impact-review scope. Read all five object types and report every identifier exactly once."
 	case mcpToolRecordExternalSource:
 		return "Record an external public source summary for the current opportunity discovery run. URL query and fragment are stripped."
 	case mcpToolRecordEvidence, mcpToolRecordCandidate, mcpToolUpdateCandidate:
@@ -203,6 +218,8 @@ func (s *Service) mcpToolsCall(params json.RawMessage) (any, *mcpError) {
 		return s.mcpGetNewsThread(callParams.Arguments)
 	case mcpToolListNewsContextChanges:
 		return s.mcpListNewsContextChanges(callParams.Arguments)
+	case mcpToolListPortfolioSentinelImpactReviewScope:
+		return s.mcpListPortfolioSentinelImpactReviewScope(callParams.Arguments)
 	case mcpToolSearchNewsLinkCandidates:
 		return s.mcpSearchNewsLinkCandidates(callParams.Arguments)
 	case mcpToolListExistingStrategies:
@@ -402,6 +419,7 @@ func (s *Service) mcpSemanticSearchNewsThreads(args json.RawMessage) (any, *mcpE
 		"items":      items,
 		"count":      len(items),
 		"searchType": "semantic_vector",
+		"asOf":       strings.TrimSpace(req.AsOf),
 		"notice":     "Similarity is retrieval only; it is not evidence of identity, causality, support, contradiction, or a trading conclusion.",
 	}), nil
 }
@@ -410,6 +428,7 @@ func (s *Service) mcpGetNewsThread(args json.RawMessage) (any, *mcpError) {
 	var p struct {
 		ID       string `json:"id"`
 		ThreadID string `json:"threadId"`
+		AsOf     string `json:"asOf"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "Invalid arguments"}
@@ -418,7 +437,7 @@ func (s *Service) mcpGetNewsThread(args json.RawMessage) (any, *mcpError) {
 	if id == "" {
 		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "threadId is required"}
 	}
-	detail, err := s.GetNewsThreadDetail(contextFromMCP(), id)
+	detail, err := s.GetNewsThreadDetailAsOf(contextFromMCP(), id, p.AsOf)
 	if err != nil {
 		return nil, mcpErrorFromError(err)
 	}
@@ -451,6 +470,162 @@ func (s *Service) mcpListNewsContextChanges(args json.RawMessage) (any, *mcpErro
 		"offset":     p.Offset,
 		"nextOffset": nextMCPPageOffset(p.Offset, p.Limit, len(items), total),
 	}), nil
+}
+
+func (s *Service) mcpListPortfolioSentinelImpactReviewScope(args json.RawMessage) (any, *mcpError) {
+	var p struct {
+		RunID      string `json:"runId"`
+		ObjectType string `json:"objectType"`
+		Limit      int    `json:"limit"`
+		Offset     int    `json:"offset"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "Invalid arguments"}
+	}
+	p.RunID = strings.TrimSpace(p.RunID)
+	p.ObjectType = strings.TrimSpace(p.ObjectType)
+	if p.RunID == "" || !validPortfolioSentinelImpactObjectType(p.ObjectType) {
+		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "runId and a valid objectType are required"}
+	}
+	p.Limit = mcpLimit(p.Limit, 100, 100)
+	p.Offset = normalizedPageOffset(p.Offset)
+	items, total, err := s.portfolioSentinelImpactReviewScopePage(contextFromMCP(), p.RunID, p.ObjectType, p.Limit, p.Offset)
+	if err != nil {
+		return nil, mcpErrorFromError(err)
+	}
+	return mcpJSONResult(map[string]any{
+		"objectType": p.ObjectType,
+		"items":      items,
+		"total":      total,
+		"limit":      p.Limit,
+		"offset":     p.Offset,
+		"nextOffset": nextMCPPageOffset(p.Offset, p.Limit, len(items), total),
+	}), nil
+}
+
+func (s *Service) portfolioSentinelImpactReviewScopePage(ctx context.Context, runID, objectType string, limit, offset int) ([]map[string]any, int, error) {
+	ids, total, err := s.store.ListPortfolioSentinelImpactReviewScope(ctx, runID, objectType, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	items := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		item := map[string]any{"id": id, "available": true}
+		switch objectType {
+		case portfolioSentinelImpactObjectHoldings:
+			value, err := s.store.GetHolding(ctx, id)
+			if errors.Is(err, ErrHoldingNotFound) {
+				item["available"] = false
+			} else if err != nil {
+				return nil, 0, err
+			} else {
+				item["portfolioId"] = value.PortfolioID
+				item["symbol"] = value.Symbol
+				item["market"] = value.Market
+				item["name"] = value.Name
+				item["quantity"] = value.Quantity
+				item["marketValue"] = value.MarketValue
+				item["pnl"] = value.PnL
+			}
+		case portfolioSentinelImpactObjectMonitors:
+			if taskType, ok := strings.CutPrefix(id, "task:"); ok {
+				value, err := s.GetMonitorTask(ctx, taskType)
+				if errors.Is(err, ErrInvalidMonitorTaskType) || errors.Is(err, ErrMonitorTaskNotFound) {
+					item["available"] = false
+				} else if err != nil {
+					return nil, 0, err
+				} else {
+					item["kind"] = "system_task"
+					item["label"] = value.Definition.Label
+					item["description"] = value.Definition.Description
+					item["category"] = value.Definition.Category
+					item["runnable"] = value.Definition.Runnable
+					item["enabled"] = value.Config.Enabled
+					item["intervalSeconds"] = value.Config.IntervalSeconds
+					item["scope"] = value.Config.Scope
+					item["sensitivity"] = value.Config.Sensitivity
+					item["cooldownSeconds"] = value.Config.CooldownSeconds
+					item["agentDoublecheckEnabled"] = value.Config.AgentDoublecheckEnabled
+				}
+			} else if watchID, ok := strings.CutPrefix(id, "watch:"); ok {
+				value, err := s.store.GetWatch(ctx, watchID)
+				if errors.Is(err, ErrWatchNotFound) {
+					item["available"] = false
+				} else if err != nil {
+					return nil, 0, err
+				} else {
+					item["kind"] = "watch"
+					item["name"] = value.Name
+					item["status"] = value.Status
+					item["source"] = value.Source
+					item["symbol"] = value.Symbol
+					item["market"] = value.Market
+					item["portfolioId"] = value.PortfolioID
+					item["strategyId"] = value.StrategyID
+					item["strategyVersionId"] = value.StrategyVersionID
+					item["triggerPolicy"] = value.TriggerPolicy
+					item["triggerConfig"] = value.TriggerConfig
+					item["scheduleKind"] = value.ScheduleKind
+					item["cooldownSeconds"] = value.CooldownSeconds
+				}
+			} else {
+				item["available"] = false
+			}
+		case portfolioSentinelImpactObjectAlerts:
+			value, err := s.store.GetAlert(ctx, id)
+			if errors.Is(err, ErrAlertNotFound) {
+				item["available"] = false
+			} else if err != nil {
+				return nil, 0, err
+			} else {
+				item["status"] = value.Status
+				item["level"] = value.Level
+				item["title"] = value.Title
+				item["summary"] = value.Summary
+				item["watchId"] = value.WatchID
+				item["portfolioId"] = value.PortfolioID
+				item["strategyId"] = value.StrategyID
+				item["symbol"] = value.Symbol
+				item["market"] = value.Market
+			}
+		case portfolioSentinelImpactObjectOpportunities:
+			value, err := s.store.GetOpportunity(ctx, id)
+			if errors.Is(err, ErrOpportunityNotFound) {
+				item["available"] = false
+			} else if err != nil {
+				return nil, 0, err
+			} else {
+				item["title"] = value.Title
+				item["userThesis"] = value.UserThesis
+				item["status"] = value.Status
+				item["marketScope"] = value.MarketScope
+				item["instrumentScope"] = value.InstrumentScope
+			}
+		case portfolioSentinelImpactObjectStrategies:
+			value, err := s.store.GetStrategy(ctx, id)
+			if errors.Is(err, ErrStrategyNotFound) {
+				item["available"] = false
+			} else if err != nil {
+				return nil, 0, err
+			} else {
+				item["name"] = value.Strategy.Name
+				item["status"] = value.Strategy.Status
+				item["kind"] = value.Strategy.Kind
+				item["scope"] = value.Strategy.Scope
+				item["symbol"] = value.Strategy.Symbol
+				item["market"] = value.Strategy.Market
+				item["portfolioId"] = value.Strategy.PortfolioID
+				item["activeVersionId"] = value.Strategy.ActiveVersionID
+				if value.ActiveVersion != nil {
+					item["direction"] = value.ActiveVersion.Direction
+					item["thesis"] = value.ActiveVersion.Thesis
+					item["riskNotes"] = value.ActiveVersion.RiskNotes
+				}
+			}
+		}
+		items = append(items, item)
+	}
+	return items, total, nil
 }
 
 func nextMCPPageOffset(offset, limit, count, total int) any {
@@ -765,7 +940,8 @@ func mcpErrorFromError(err error) *mcpError {
 		errors.Is(err, ErrEmbeddingModelUnavailable) ||
 		errors.Is(err, ErrEmbeddingModelInvalid) ||
 		errors.Is(err, ErrEmbeddingDimensionsMismatch) ||
-		errors.Is(err, ErrEmbeddingAssetNotReady) {
+		errors.Is(err, ErrEmbeddingAssetNotReady) ||
+		errors.Is(err, ErrInvalidEmbeddingRequest) {
 		code = mcpErrInvalidParams
 	}
 	if errors.Is(err, ErrInvalidOpportunityInput) ||
@@ -782,7 +958,9 @@ func mcpErrorFromError(err error) *mcpError {
 	}
 	if errors.Is(err, ErrNewsThreadNotFound) ||
 		errors.Is(err, ErrNewsContextRunNotFound) ||
-		errors.Is(err, ErrInvalidNewsContextInput) {
+		errors.Is(err, ErrInvalidNewsContextInput) ||
+		errors.Is(err, ErrPortfolioSentinelRunNotFound) ||
+		errors.Is(err, ErrInvalidPortfolioSentinelInput) {
 		code = mcpErrInvalidParams
 	}
 	return &mcpError{Code: code, Message: err.Error(), Data: mcpErrorData(err)}

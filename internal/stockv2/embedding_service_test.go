@@ -158,6 +158,210 @@ func TestSemanticSearchNewsThreadsReturnsOnlyActiveThreads(t *testing.T) {
 	}
 }
 
+func TestSyncNewsContextEmbeddingObjectsIndexesExactFragment(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	model := configureEmbeddingModel(t, svc, "embed-fragment")
+	zero := 0
+	if _, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{MaintainRateLimitMs: &zero}); err != nil {
+		t.Fatalf("disable test rate delay: %v", err)
+	}
+	thread, err := svc.store.CreateNewsThread(ctx, NewsThread{
+		Title: "算力建设脉络", CoreThesis: "数据中心扩建带动算力产业链", Stage: NewsThreadStageEmerging,
+		Status: NewsThreadStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	version, err := svc.store.CreateNewsThreadVersion(ctx, NewsThreadVersion{
+		ThreadID: thread.ID, RunID: "fragment-run", AgentRunID: "fragment-agent", WindowType: NewsContextWindowHourly,
+		VersionNo: 1, Title: thread.Title, CoreThesis: thread.CoreThesis, Stage: thread.Stage,
+		ReviewStatus: NewsContextReviewNotRequired,
+	})
+	if err != nil {
+		t.Fatalf("create version: %v", err)
+	}
+	if err := svc.SyncNewsContextEmbeddingObjects(ctx, []string{thread.ID}, []string{version.ID}); err != nil {
+		t.Fatalf("sync fragment embeddings: %v", err)
+	}
+	for _, expected := range []struct {
+		objectType string
+		objectID   string
+		text       string
+	}{
+		{EmbeddingObjectNewsThread, thread.ID, NewsThreadEmbeddingText(thread)},
+		{EmbeddingObjectNewsThreadVersion, version.ID, NewsThreadVersionEmbeddingText(version)},
+	} {
+		asset, err := svc.store.GetEmbeddingAssetByObject(ctx, expected.objectType, expected.objectID, model.ID)
+		if err != nil {
+			t.Fatalf("get synced asset %s: %v", expected.objectID, err)
+		}
+		if asset.Status != EmbeddingAssetStatusReady || asset.TextHash != hashEmbeddingText(expected.text) || asset.VectorRef == "" {
+			t.Fatalf("synced asset=%+v, want exact ready content", asset)
+		}
+		if ready, err := svc.store.HasEmbeddingVector(ctx, asset.VectorRef); err != nil || !ready {
+			t.Fatalf("synced vector ready=%v err=%v", ready, err)
+		}
+	}
+}
+
+func TestSemanticSearchNewsThreadsAsOfReturnsLatestEligibleHistoricalVersion(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	configureEmbeddingModel(t, svc, "embed-history")
+	zero := 0
+	if _, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{MaintainRateLimitMs: &zero}); err != nil {
+		t.Fatalf("disable test rate delay: %v", err)
+	}
+	thread, err := svc.store.CreateNewsThread(ctx, NewsThread{
+		Title: "动力电池脉络", CoreThesis: "动力电池处于扩产初期", Stage: NewsThreadStageEmerging,
+		Status: NewsThreadStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("create historical thread: %v", err)
+	}
+	firstAt := time.Date(2026, 7, 10, 12, 0, 0, 0, time.Local)
+	first, err := svc.store.CreateNewsThreadVersion(ctx, NewsThreadVersion{
+		ThreadID: thread.ID, RunID: "history-day-1", AgentRunID: "history-agent-1", WindowType: NewsContextWindowDaily,
+		VersionNo: 1, Title: thread.Title, CoreThesis: thread.CoreThesis, Stage: NewsThreadStageEmerging,
+		ReviewStatus: NewsContextReviewCompleted, EffectiveAt: firstAt, CreatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("create first historical version: %v", err)
+	}
+	secondAt := firstAt.Add(24 * time.Hour)
+	second, err := svc.store.CreateNewsThreadVersion(ctx, NewsThreadVersion{
+		ThreadID: thread.ID, RunID: "history-day-2", AgentRunID: "history-agent-2", WindowType: NewsContextWindowDaily,
+		VersionNo: 2, Title: thread.Title, CoreThesis: "动力电池扩产进入加速阶段", Stage: NewsThreadStageAccelerating,
+		ReviewStatus: NewsContextReviewCompleted, EffectiveAt: secondAt, CreatedAt: time.Now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("create second historical version: %v", err)
+	}
+	thread.CoreThesis = second.CoreThesis
+	thread.Stage = second.Stage
+	thread.CurrentVersion = second.VersionNo
+	thread.CurrentVersionID = second.ID
+	if _, err := svc.store.UpdateNewsThread(ctx, thread); err != nil {
+		t.Fatalf("update current historical thread: %v", err)
+	}
+	if err := svc.SyncNewsContextEmbeddingObjects(ctx, []string{thread.ID}, []string{first.ID, second.ID}); err != nil {
+		t.Fatalf("sync historical embeddings: %v", err)
+	}
+	cutoff := firstAt.Add(12 * time.Hour).Format(time.RFC3339Nano)
+	items, err := svc.SemanticSearchNewsThreads(ctx, SemanticSearchRequest{Query: "动力电池", Limit: 5, AsOf: cutoff})
+	if err != nil {
+		t.Fatalf("historical semantic search: %v", err)
+	}
+	if len(items) != 1 || items[0].Version == nil || items[0].Version.ID != first.ID || items[0].Thread.CurrentVersionID != first.ID {
+		t.Fatalf("historical items=%+v, want first version only", items)
+	}
+	if _, err := svc.SemanticSearchNewsThreads(ctx, SemanticSearchRequest{Query: "动力电池", AsOf: "invalid"}); !errors.Is(err, ErrInvalidEmbeddingRequest) {
+		t.Fatalf("invalid asOf error=%v, want invalid request", err)
+	}
+}
+
+func TestSemanticSearchNewsThreadsAsOfHydratesLatestVersionAfterTransientIndexPruned(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	configureEmbeddingModel(t, svc, "embed-history-pruned")
+	zero := 0
+	if _, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{MaintainRateLimitMs: &zero}); err != nil {
+		t.Fatalf("disable test rate delay: %v", err)
+	}
+	thread, err := svc.store.CreateNewsThread(ctx, NewsThread{
+		ID: "history-pruned-thread", Title: "机器人脉络", CoreThesis: "机器人进入量产准备期",
+		Stage: NewsThreadStageEmerging, Status: NewsThreadStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	dayAt := time.Date(2026, 7, 10, 0, 0, 0, 0, time.Local)
+	daily, err := svc.store.CreateNewsThreadVersion(ctx, NewsThreadVersion{
+		ID: "history-pruned-daily", ThreadID: thread.ID, RunID: "history-pruned-run-daily",
+		WindowType: NewsContextWindowDaily, VersionNo: 1, Title: thread.Title,
+		CoreThesis: thread.CoreThesis, Stage: thread.Stage, ReviewStatus: NewsContextReviewCompleted,
+		EffectiveAt: dayAt,
+	})
+	if err != nil {
+		t.Fatalf("create daily version: %v", err)
+	}
+	hourly, err := svc.store.CreateNewsThreadVersion(ctx, NewsThreadVersion{
+		ID: "history-pruned-hourly", ThreadID: thread.ID, RunID: "history-pruned-run-hourly",
+		WindowType: NewsContextWindowHourly, VersionNo: 2, Title: thread.Title,
+		CoreThesis: "机器人量产验证出现新进展", Stage: NewsThreadStageSpreading,
+		ReviewStatus: NewsContextReviewNotRequired, EffectiveAt: dayAt.Add(6 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create hourly version: %v", err)
+	}
+	thread.CoreThesis = hourly.CoreThesis
+	thread.Stage = hourly.Stage
+	thread.CurrentVersion = hourly.VersionNo
+	thread.CurrentVersionID = hourly.ID
+	if _, err := svc.store.UpdateNewsThread(ctx, thread); err != nil {
+		t.Fatalf("update current thread: %v", err)
+	}
+	if err := svc.SyncNewsContextEmbeddingObjects(ctx, []string{thread.ID}, []string{daily.ID, hourly.ID}); err != nil {
+		t.Fatalf("sync historical versions: %v", err)
+	}
+	if err := svc.PruneTransientNewsContextEmbeddings(ctx, dayAt.Add(7*time.Hour)); err != nil {
+		t.Fatalf("prune transient version: %v", err)
+	}
+
+	asOf := dayAt.Add(7 * time.Hour).Format(time.RFC3339Nano)
+	items, err := svc.SemanticSearchNewsThreads(ctx, SemanticSearchRequest{Query: "机器人量产", Limit: 5, AsOf: asOf})
+	if err != nil {
+		t.Fatalf("historical semantic search: %v", err)
+	}
+	if len(items) != 1 || items[0].Version == nil || items[0].Version.ID != hourly.ID ||
+		items[0].Thread.CurrentVersionID != hourly.ID || items[0].RetrievalVersionID != daily.ID ||
+		items[0].Asset.ObjectID != daily.ID {
+		t.Fatalf("historical result=%+v, want latest hourly snapshot ranked by retained daily vector", items)
+	}
+	detail, err := svc.GetNewsThreadDetailAsOf(ctx, thread.ID, asOf)
+	if err != nil || detail.Theme.CurrentVersionID != items[0].Thread.CurrentVersionID {
+		t.Fatalf("historical detail=%+v err=%v, want search/detail version agreement", detail.Theme, err)
+	}
+}
+
+func TestSyncNewsContextEmbeddingObjectsStopsAfterFirstFailure(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	model := configureEmbeddingModel(t, svc, "embed-fragment-failure")
+	versions := make([]NewsThreadVersion, 0, 2)
+	for index := 0; index < 2; index++ {
+		version, err := svc.store.CreateNewsThreadVersion(ctx, NewsThreadVersion{
+			ThreadID: "fragment-failure-thread", RunID: "fragment-failure-run",
+			AgentRunID: "fragment-failure-agent-" + fmt.Sprint(index), WindowType: NewsContextWindowHourly,
+			VersionNo: index + 1, Title: "机器人主题", CoreThesis: "机器人产业链进展",
+			Stage: NewsThreadStageEmerging, ReviewStatus: NewsContextReviewNotRequired,
+		})
+		if err != nil {
+			t.Fatalf("create failure version: %v", err)
+		}
+		versions = append(versions, version)
+	}
+	svc.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("embedding provider unavailable")
+	})}
+	err := svc.SyncNewsContextEmbeddingObjects(ctx, nil, []string{versions[0].ID, versions[1].ID})
+	if err == nil {
+		t.Fatal("sync error=nil, want fragment to stop")
+	}
+	first, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectNewsThreadVersion, versions[0].ID, model.ID)
+	if err != nil || first.Status != EmbeddingAssetStatusFailed {
+		t.Fatalf("first failed asset=%+v err=%v", first, err)
+	}
+	if _, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectNewsThreadVersion, versions[1].ID, model.ID); !errors.Is(err, ErrEmbeddingAssetNotFound) {
+		t.Fatalf("second asset error=%v, want next object untouched", err)
+	}
+}
+
 func TestNewsThreadRefreshFailureKeepsPreviousVectorMCPReadable(t *testing.T) {
 	svc, cleanup := newEmbeddingTestService(t)
 	defer cleanup()

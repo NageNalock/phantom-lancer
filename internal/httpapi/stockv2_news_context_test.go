@@ -77,6 +77,10 @@ func TestStockV2NewsContextPOSTRequiresAuthAndCSRF(t *testing.T) {
 		"/api/stockv2/news-context/runs",
 		"/api/stockv2/news-context/runs/run-1/retry",
 		"/api/stockv2/news-context/cleanup-runs",
+		"/api/stockv2/news-context/backfill",
+		"/api/stockv2/news-context/backfill/pause",
+		"/api/stockv2/news-context/backfill/resume",
+		"/api/stockv2/news-context/backfill/retry",
 	}
 	for _, path := range paths {
 		t.Run(path+" unauthenticated", func(t *testing.T) {
@@ -89,6 +93,12 @@ func TestStockV2NewsContextPOSTRequiresAuthAndCSRF(t *testing.T) {
 			rec := serveStockV2NewsContextRequest(mux, path, nil, session, "")
 			if rec.Code != http.StatusForbidden {
 				t.Fatalf("status=%d body=%s, want 403", rec.Code, rec.Body.String())
+			}
+		})
+		t.Run(path+" authenticated", func(t *testing.T) {
+			rec := serveStockV2NewsContextRequest(mux, path, nil, session, csrf)
+			if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+				t.Fatalf("status=%d body=%s, authenticated request was rejected", rec.Code, rec.Body.String())
 			}
 		})
 	}
@@ -117,6 +127,17 @@ func TestStockV2NewsContextPOSTRequiresAuthAndCSRF(t *testing.T) {
 		})
 	}
 
+	t.Run("removed batch setting is rejected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPatch, "/api/stockv2/news-context/config", strings.NewReader(`{"batchSize":25}`))
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+		req.Header.Set("X-CSRF-Token", csrf)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
+		}
+	})
+
 	for _, tt := range []struct {
 		name string
 		path string
@@ -137,8 +158,67 @@ func TestStockV2NewsContextPOSTRequiresAuthAndCSRF(t *testing.T) {
 	}
 }
 
+func TestStockV2NewsContextPrivateGETRequiresAuth(t *testing.T) {
+	server, _, session, _ := newStockV2HTTPTest(t)
+	mux := http.NewServeMux()
+	server.RegisterStockV2Routes(mux)
+
+	for _, path := range []string{
+		"/api/stockv2/news-context/config",
+		"/api/stockv2/news-context/summary",
+		"/api/stockv2/news-context/themes",
+		"/api/stockv2/news-context/themes/missing-theme",
+		"/api/stockv2/news-context/rotation-signals",
+		"/api/stockv2/news-context/runs",
+	} {
+		t.Run(path+" unauthenticated", func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status=%d body=%s, want 401", rec.Code, rec.Body.String())
+			}
+		})
+		t.Run(path+" authenticated", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+				t.Fatalf("status=%d body=%s, authenticated request was rejected", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestStockV2NewsContextBackfillGETRequiresAuth(t *testing.T) {
+	server, _, session, _ := newStockV2HTTPTest(t)
+	mux := http.NewServeMux()
+	server.RegisterStockV2Routes(mux)
+	for _, path := range []string{
+		"/api/stockv2/news-context/backfill/preview",
+		"/api/stockv2/news-context/backfill",
+	} {
+		t.Run(path+" unauthenticated", func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status=%d body=%s, want 401", rec.Code, rec.Body.String())
+			}
+		})
+		t.Run(path+" authenticated", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+				t.Fatalf("status=%d body=%s, authenticated request was rejected", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestStockV2NewsContextInvalidQueryRoutes(t *testing.T) {
-	server := &Server{}
+	server, _, session, _ := newStockV2HTTPTest(t)
 	mux := http.NewServeMux()
 	server.RegisterStockV2Routes(mux)
 	for _, target := range []string{
@@ -148,8 +228,10 @@ func TestStockV2NewsContextInvalidQueryRoutes(t *testing.T) {
 		"/api/stockv2/news-context/runs?kind=cleanup&status=waiting_review",
 	} {
 		t.Run(target, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			req.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
 			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+			mux.ServeHTTP(rec, req)
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
 			}

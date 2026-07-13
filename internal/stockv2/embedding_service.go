@@ -257,26 +257,6 @@ func (s *Service) RunEmbeddingMaintenanceBatch(ctx context.Context, req RequestR
 		s.recordEmbeddingMaintenanceResult(ctx, cfg, result)
 		return result, nil
 	}
-	recordFailedAsset := func(source embeddingAssetSource, text, textHash string, failure error) {
-		s.updateNewsContextEmbeddingStatus(ctx, source, NewsContextIndexFailed, failure)
-		// Keep the last usable pointer intact. The caller still receives a failed item,
-		// while a later maintenance pass can retry the changed text.
-		if existing, getErr := s.store.GetEmbeddingAssetByObject(ctx, source.ObjectType, source.ObjectID, model.ID); getErr == nil && existing.VectorRef != "" {
-			return
-		}
-		_, _ = s.store.UpsertEmbeddingAsset(ctx, EmbeddingAsset{
-			ObjectType:          source.ObjectType,
-			ObjectID:            source.ObjectID,
-			TextHash:            textHash,
-			TextSummary:         safelog.Text(text, 500),
-			ModelID:             model.ID,
-			ProviderID:          model.ProviderID,
-			EmbeddingProtocol:   model.EmbeddingProtocol,
-			EmbeddingDimensions: model.EmbeddingDimensions,
-			Status:              EmbeddingAssetStatusFailed,
-			ErrorMessage:        safelog.Text(failure.Error(), 500),
-		})
-	}
 	for idx, source := range sources {
 		text := strings.TrimSpace(source.Text)
 		if text == "" {
@@ -284,58 +264,13 @@ func (s *Service) RunEmbeddingMaintenanceBatch(ctx context.Context, req RequestR
 			s.updateNewsContextEmbeddingStatus(ctx, source, NewsContextIndexFailed, errors.New("embedding source text is empty"))
 			continue
 		}
-		textHash := hashEmbeddingText(text)
-		vector, err := s.generateEmbedding(ctx, model, text)
-		if err != nil {
+		if err := s.syncEmbeddingSource(ctx, model, source); err != nil {
 			result.Failed++
 			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: source.ObjectID, Reason: safelog.Text(err.Error(), 240)})
-			recordFailedAsset(source, text, textHash, err)
 			continue
-		}
-		if err := validateEmbeddingDimensions(model, len(vector)); err != nil {
-			result.Failed++
-			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: source.ObjectID, Reason: safelog.Text(err.Error(), 240)})
-			recordFailedAsset(source, text, textHash, err)
-			continue
-		}
-		asset := EmbeddingAsset{
-			ObjectType:          source.ObjectType,
-			ObjectID:            source.ObjectID,
-			TextHash:            textHash,
-			TextSummary:         safelog.Text(text, 500),
-			ModelID:             model.ID,
-			ProviderID:          model.ProviderID,
-			EmbeddingProtocol:   model.EmbeddingProtocol,
-			EmbeddingDimensions: len(vector),
-			VectorRef:           "emb_" + generateID(),
-			Status:              EmbeddingAssetStatusReady,
-		}
-		oldVectorRef := ""
-		if existing, err := s.store.GetEmbeddingAssetByObject(ctx, source.ObjectType, source.ObjectID, model.ID); err == nil {
-			asset.ID = existing.ID
-			oldVectorRef = existing.VectorRef
-		}
-		if err := s.store.UpsertEmbeddingVector(ctx, asset, vector); err != nil {
-			result.Failed++
-			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: source.ObjectID, Reason: safelog.Text(err.Error(), 240)})
-			s.updateNewsContextEmbeddingStatus(ctx, source, NewsContextIndexFailed, err)
-			continue
-		}
-		if _, err := s.store.UpsertEmbeddingAsset(ctx, asset); err != nil {
-			_ = s.store.DeleteEmbeddingVector(ctx, asset.VectorRef)
-			result.Failed++
-			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: source.ObjectID, Reason: safelog.Text(err.Error(), 240)})
-			s.updateNewsContextEmbeddingStatus(ctx, source, NewsContextIndexFailed, err)
-			continue
-		}
-		if oldVectorRef != "" && oldVectorRef != asset.VectorRef {
-			if err := s.store.DeleteEmbeddingVector(ctx, oldVectorRef); err != nil && s.log != nil {
-				s.log.Warn("delete replaced stockv2 embedding vector failed", "object_type", source.ObjectType, "object_id", source.ObjectID, "model_id", model.ID, "vector_ref", oldVectorRef, "error", safelog.Text(err.Error(), 240))
-			}
 		}
 		result.Succeeded++
 		result.Success++
-		s.updateNewsContextEmbeddingStatus(ctx, source, NewsContextIndexReady, nil)
 		if cfg.MaintainRateLimitMs > 0 && idx < len(sources)-1 {
 			select {
 			case <-ctx.Done():
@@ -357,6 +292,149 @@ func (s *Service) RunEmbeddingMaintenanceBatch(ctx context.Context, req RequestR
 		s.log.Warn("stockv2 embedding maintenance completed with failures", "model_id", model.ID, "provider_id", model.ProviderID, "object_types", result.ObjectTypes, "force", req.Force, "limit", limit, "status", result.Status, "total_count", result.Total, "success_count", result.Success, "skipped_count", result.Skipped, "failed_count", result.Failed, "failure_sample", stockV2FailureSample(result.FailedItems, 5))
 	}
 	return result, nil
+}
+
+func (s *Service) syncEmbeddingSource(ctx context.Context, model AgentModelProfile, source embeddingAssetSource) error {
+	text := strings.TrimSpace(source.Text)
+	if text == "" {
+		err := errors.New("embedding source text is empty")
+		s.updateNewsContextEmbeddingStatus(ctx, source, NewsContextIndexFailed, err)
+		return err
+	}
+	textHash := hashEmbeddingText(text)
+	vector, err := s.generateEmbedding(ctx, model, text)
+	if err != nil {
+		s.recordFailedEmbeddingSource(ctx, model, source, text, textHash, err)
+		return err
+	}
+	if err := validateEmbeddingDimensions(model, len(vector)); err != nil {
+		s.recordFailedEmbeddingSource(ctx, model, source, text, textHash, err)
+		return err
+	}
+	asset := EmbeddingAsset{
+		ObjectType:          source.ObjectType,
+		ObjectID:            source.ObjectID,
+		TextHash:            textHash,
+		TextSummary:         safelog.Text(text, 500),
+		ModelID:             model.ID,
+		ProviderID:          model.ProviderID,
+		EmbeddingProtocol:   model.EmbeddingProtocol,
+		EmbeddingDimensions: len(vector),
+		VectorRef:           "emb_" + generateID(),
+		Status:              EmbeddingAssetStatusReady,
+	}
+	oldVectorRef := ""
+	if existing, getErr := s.store.GetEmbeddingAssetByObject(ctx, source.ObjectType, source.ObjectID, model.ID); getErr == nil {
+		asset.ID = existing.ID
+		oldVectorRef = existing.VectorRef
+	}
+	if err := s.store.UpsertEmbeddingVector(ctx, asset, vector); err != nil {
+		s.updateNewsContextEmbeddingStatus(ctx, source, NewsContextIndexFailed, err)
+		return err
+	}
+	if _, err := s.store.UpsertEmbeddingAsset(ctx, asset); err != nil {
+		_ = s.store.DeleteEmbeddingVector(ctx, asset.VectorRef)
+		s.updateNewsContextEmbeddingStatus(ctx, source, NewsContextIndexFailed, err)
+		return err
+	}
+	if oldVectorRef != "" && oldVectorRef != asset.VectorRef {
+		if err := s.store.DeleteEmbeddingVector(ctx, oldVectorRef); err != nil && s.log != nil {
+			s.log.Warn("delete replaced stockv2 embedding vector failed", "object_type", source.ObjectType, "object_id", source.ObjectID, "model_id", model.ID, "vector_ref", oldVectorRef, "error", safelog.Text(err.Error(), 240))
+		}
+	}
+	s.updateNewsContextEmbeddingStatus(ctx, source, NewsContextIndexReady, nil)
+	return nil
+}
+
+func (s *Service) recordFailedEmbeddingSource(ctx context.Context, model AgentModelProfile, source embeddingAssetSource, text, textHash string, failure error) {
+	s.updateNewsContextEmbeddingStatus(ctx, source, NewsContextIndexFailed, failure)
+	// Keep the last usable pointer intact. The caller still receives a failed item,
+	// while a later maintenance pass can retry the changed text.
+	if existing, err := s.store.GetEmbeddingAssetByObject(ctx, source.ObjectType, source.ObjectID, model.ID); err == nil && existing.VectorRef != "" {
+		return
+	}
+	_, _ = s.store.UpsertEmbeddingAsset(ctx, EmbeddingAsset{
+		ObjectType:          source.ObjectType,
+		ObjectID:            source.ObjectID,
+		TextHash:            textHash,
+		TextSummary:         safelog.Text(text, 500),
+		ModelID:             model.ID,
+		ProviderID:          model.ProviderID,
+		EmbeddingProtocol:   model.EmbeddingProtocol,
+		EmbeddingDimensions: model.EmbeddingDimensions,
+		Status:              EmbeddingAssetStatusFailed,
+		ErrorMessage:        safelog.Text(failure.Error(), 500),
+	})
+}
+
+// SyncNewsContextEmbeddingObjects makes the exact themes changed by one
+// aggregation fragment searchable before the scheduler advances to the next
+// fragment. It deliberately does not scan unrelated stale assets.
+func (s *Service) SyncNewsContextEmbeddingObjects(ctx context.Context, threadIDs, versionIDs []string) error {
+	threadIDs = uniqueNonEmptyStrings(threadIDs)
+	versionIDs = uniqueNonEmptyStrings(versionIDs)
+	if len(threadIDs) == 0 && len(versionIDs) == 0 {
+		return nil
+	}
+	if err := s.waitForEmbeddingMaintenanceSlot(ctx); err != nil {
+		return err
+	}
+	defer s.endEmbeddingMaintenance()
+
+	model, cfg, err := s.ensureEmbeddingModelReady(ctx)
+	if err != nil {
+		return err
+	}
+	sources := make([]embeddingAssetSource, 0, len(threadIDs)+len(versionIDs))
+	for _, id := range threadIDs {
+		thread, err := s.store.GetNewsThread(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !newsThreadEmbeddingIndexable(thread) {
+			return fmt.Errorf("%w: news thread is not indexable", ErrNewsContextPrerequisite)
+		}
+		sources = append(sources, embeddingAssetSource{ObjectType: EmbeddingObjectNewsThread, ObjectID: id, Text: NewsThreadEmbeddingText(thread)})
+	}
+	for _, id := range versionIDs {
+		version, err := s.store.GetNewsThreadVersion(ctx, id)
+		if err != nil {
+			return err
+		}
+		// Historical/hourly versions are temporary retrieval checkpoints. Daily
+		// and material-change versions remain covered by normal maintenance.
+		sources = append(sources, embeddingAssetSource{ObjectType: EmbeddingObjectNewsThreadVersion, ObjectID: id, Text: NewsThreadVersionEmbeddingText(version)})
+	}
+	for index, source := range sources {
+		if err := s.syncEmbeddingSource(ctx, model, source); err != nil {
+			return fmt.Errorf("sync news context embedding %s: %w", source.ObjectID, err)
+		}
+		if cfg.MaintainRateLimitMs > 0 && index < len(sources)-1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(cfg.MaintainRateLimitMs) * time.Millisecond):
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) waitForEmbeddingMaintenanceSlot(ctx context.Context) error {
+	// ponytail: one in-process slot matches the existing single embedding writer;
+	// introduce a durable queue only if multiple service processes are supported.
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if s.beginEmbeddingMaintenance() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s *Service) updateNewsContextEmbeddingStatus(ctx context.Context, source embeddingAssetSource, status string, cause error) {
@@ -583,6 +661,9 @@ func (s *Service) SemanticSearchNewsEvents(ctx context.Context, req SemanticSear
 }
 
 func (s *Service) SemanticSearchNewsThreads(ctx context.Context, req SemanticSearchRequest) ([]SemanticNewsThreadResult, error) {
+	if strings.TrimSpace(req.AsOf) != "" {
+		return s.semanticSearchNewsThreadsAt(ctx, req)
+	}
 	hits, err := s.SemanticSearch(ctx, EmbeddingObjectNewsThread, req.Query, req.Limit)
 	if err != nil {
 		return nil, err
@@ -1032,7 +1113,7 @@ func newsContextEmbeddingText(value any) string {
 		"windowType", "materialChange", "evidenceCount", "researchStatus",
 		"indexStatus", "embeddingStatus", "indexError", "lastIndexError",
 		"indexedVersionId", "lastIndexedAt", "reviewStatus", "lastReviewAt", "lastReviewedAt",
-		"cleanupStatus", "cleanupError", "createdAt", "updatedAt",
+		"cleanupStatus", "cleanupError", "effectiveAt", "createdAt", "updatedAt",
 	} {
 		delete(document, key)
 	}

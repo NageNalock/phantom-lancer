@@ -1560,10 +1560,18 @@ export interface StockV2NewsContextConfig {
   hourlyEnabled: boolean;
   fourHourEnabled: boolean;
   dailyEnabled: boolean;
-  batchSize: number;
+  hourlyIntervalSeconds: number;
+  fourHourIntervalSeconds: number;
+  dailyIntervalSeconds: number;
+  cleanupGraceSeconds: number;
+  additionalResearchPrompt?: string;
   nextHourlyAt?: string;
   nextFourHourAt?: string;
   nextDailyAt?: string;
+  lastRunAt?: string;
+  lastCleanupAt?: string;
+  lastError?: string;
+  updatedAt?: string;
 }
 
 export interface StockV2NewsContextSummary {
@@ -1589,8 +1597,6 @@ export interface StockV2NewsContextSummary {
   mcpLastVerifiedAt?: string;
   mcpVerificationStatus?: string;
   mcpError?: string;
-  latestAggregationAt?: string;
-  latestCleanupAt?: string;
   updatedAt?: string;
 }
 
@@ -1610,7 +1616,7 @@ export interface StockV2NewsContextRelation {
   relationType?: string;
   summary?: string;
   evidenceSummary?: string;
-  confidence?: number;
+  strength?: number;
 }
 
 export interface StockV2NewsContextTheme {
@@ -1648,8 +1654,6 @@ export interface StockV2NewsContextTheme {
   reviewStatus?: string;
   lastReviewedAt?: string;
   indexStatus?: string;
-  indexUpdatedAt?: string;
-  lastUsedBy?: string[];
   firstSeenAt?: string;
   lastChangedAt?: string;
   createdAt?: string;
@@ -1671,6 +1675,7 @@ export interface StockV2NewsContextThemeVersion {
   reviewStatus?: string;
   indexStatus?: string;
   indexError?: string;
+  effectiveAt?: string;
   createdAt?: string;
 }
 
@@ -1685,8 +1690,6 @@ export interface StockV2NewsContextEvidence {
   evidenceRole?: string;
   publishedAt?: string;
   originalNewsDeleted?: boolean;
-  protected?: boolean;
-  protectedReason?: string;
   createdAt?: string;
 }
 
@@ -1695,15 +1698,19 @@ export interface StockV2NewsContextThemeDetail {
   versions?: StockV2NewsContextThemeVersion[];
   evidence?: StockV2NewsContextEvidence[];
   indexStatus?: string;
-  indexUpdatedAt?: string;
   indexError?: string;
   mcpReadable?: boolean;
+  mcpVerified?: boolean;
+  mcpVerification?: {
+    threadId?: string;
+    versionId?: string;
+    status?: string;
+    checkedAt?: string;
+    verifiedAt?: string;
+    errorMessage?: string;
+  };
   mcpError?: string;
   protectedReasons?: string[];
-  relatedAlerts?: StockV2NewsContextNamedObject[];
-  relatedReviews?: StockV2NewsContextNamedObject[];
-  relatedOpportunities?: StockV2NewsContextNamedObject[];
-  relatedStrategies?: StockV2NewsContextNamedObject[];
 }
 
 export interface StockV2NewsContextRotationItem {
@@ -1745,6 +1752,9 @@ export interface StockV2NewsContextRun {
   windowEnd?: string;
   processedNewsCount?: number;
   totalNewsCount?: number;
+  coveredCount?: number;
+  noiseCount?: number;
+  deferredCount?: number;
   createdThemeCount?: number;
   updatedThemeCount?: number;
   unchangedThemeCount?: number;
@@ -1754,8 +1764,9 @@ export interface StockV2NewsContextRun {
   externalResearchStatus?: string;
   deletedNewsCount?: number;
   retainedNewsCount?: number;
-  pendingCleanupCount?: number;
+  eligibleCount?: number;
   protectedNewsCount?: number;
+  failedCount?: number;
   releasedBytes?: number;
   failedStage?: string;
   errorMessage?: string;
@@ -1771,6 +1782,48 @@ export interface StockV2NewsContextRunListResponse {
   total?: number;
   limit?: number;
   offset?: number;
+}
+
+export interface StockV2NewsContextBackfillPreview {
+  totalNewsCount: number;
+  pendingNewsCount: number;
+  earliestNewsAt?: string;
+  latestNewsAt?: string;
+  estimatedChunkCount?: number;
+  prerequisitesReady: boolean;
+  blockingReasons?: string[];
+}
+
+export type StockV2NewsContextBackfillStatus =
+  | "running"
+  | "paused"
+  | "failed"
+  | "completed"
+  | string;
+
+export interface StockV2NewsContextBackfillTask {
+  id: string;
+  status: StockV2NewsContextBackfillStatus;
+  phase?: string;
+  rangeStartAt?: string;
+  cutoffAt?: string;
+  totalNewsCount: number;
+  processedNewsCount: number;
+  remainingNewsCount: number;
+  missingNewsCount: number;
+  completedChunkCount: number;
+  currentWindowStart?: string;
+  currentWindowEnd?: string;
+  currentRunId?: string;
+  finalReviewRunId?: string;
+  historicalDailyOutputVersionCount?: number;
+  finalReviewLinkedVersionCount?: number;
+  finalReviewMissingVersionCount?: number;
+  errorMessage?: string;
+  requestedBy?: string;
+  startedAt?: string;
+  updatedAt?: string;
+  completedAt?: string;
 }
 
 // ===== Daily Bars (日级历史行情) =====

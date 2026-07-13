@@ -143,9 +143,11 @@ func TestBuildStockProfileSummaryPromptTruncatesUTF8Safely(t *testing.T) {
 }
 
 func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing.T) {
+	windowEnd := time.Date(2026, 7, 13, 8, 0, 0, 0, time.UTC)
 	prompt := buildNewsContextAggregationPrompt("task-news-context", NewsContextAggregationPack{
 		RunID:      "context-run-1",
 		WindowType: "daily",
+		WindowEnd:  windowEnd,
 	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
 
 	for _, want := range []string{
@@ -159,6 +161,9 @@ func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing
 		"daily batch must produce a stage conclusion",
 		"stock_agent.semantic_search_news_threads",
 		"stock_agent.get_news_thread",
+		"semantic_search_news_threads with asOf `2026-07-13T08:00:00Z`",
+		"get_news_thread with the same asOf `2026-07-13T08:00:00Z`",
+		"Both calls MUST use this exact aggregation WindowEnd cutoff",
 		"Public verification is mandatory",
 		"every ResearchReasons item",
 		"stock_agent.submit_result",
@@ -177,9 +182,15 @@ func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing
 
 func TestBuildPortfolioSentinelPromptRequiresCompleteNewsContextReview(t *testing.T) {
 	prompt := buildPortfolioSentinelPrompt("task-sentinel", PortfolioSentinelContext{
+		RunID: "sentinel-run-1",
 		NewsContext: &PortfolioSentinelNewsContext{
-			RunID:              "context-run-1",
-			ChangedThreadCount: 123,
+			RunID:                    "context-run-1",
+			ChangedThreadCount:       123,
+			RequiredMCPTool:          mcpToolListNewsContextChanges,
+			ImpactReviewRequiredTool: mcpToolListPortfolioSentinelImpactReviewScope,
+			ImpactReviewScope: PortfolioSentinelImpactReviewScopeSummary{
+				HoldingCount: 2, MonitorCount: 3, AlertCount: 4, OpportunityCount: 5, StrategyCount: 6,
+			},
 		},
 	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
 
@@ -192,9 +203,66 @@ func TestBuildPortfolioSentinelPromptRequiresCompleteNewsContextReview(t *testin
 		"complete, duplicate-free versionId set",
 		"stock_agent.semantic_search_news_threads",
 		"adjacent or related threads",
+		mcpToolListPortfolioSentinelImpactReviewScope,
+		"sentinel-run-1",
+		"objectType `holdings`, `monitors`, `alerts`, `opportunities`, and `strategies`",
+		"respectively 2, 3, 4, 5, and 6 identifiers",
+		"impact_review_coverage",
+		"holding_ids",
+		"monitor_ids",
+		"alert_ids",
+		"opportunity_ids",
+		"strategy_ids",
+		"explicit empty list",
+		"invented",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q: %s", want, prompt)
+		}
+	}
+}
+
+func TestBuildPortfolioSentinelPromptKeepsFinalReviewContractWhenContextIsOversized(t *testing.T) {
+	prompt := buildPortfolioSentinelPrompt("task-oversized", PortfolioSentinelContext{
+		RunID: "sentinel-run-oversized",
+		NewsContext: &PortfolioSentinelNewsContext{
+			RunID:                    "context-run-oversized",
+			ChangedThreadCount:       12345,
+			RequiredMCPTool:          mcpToolListNewsContextChanges,
+			ImpactReviewRequiredTool: mcpToolListPortfolioSentinelImpactReviewScope,
+			ImpactReviewScope: PortfolioSentinelImpactReviewScopeSummary{
+				HoldingCount: 101, MonitorCount: 202, AlertCount: 303, OpportunityCount: 404, StrategyCount: 505,
+			},
+		},
+		Note: strings.Repeat("这是可裁剪的超大上下文正文。", 3000),
+	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
+
+	if len(prompt) > 14000 {
+		t.Fatalf("prompt length = %d, want <= 14000", len(prompt))
+	}
+	if !utf8.ValidString(prompt) {
+		t.Fatal("prompt is invalid utf8")
+	}
+	if !strings.Contains(prompt, "... [truncated]") {
+		t.Fatal("oversized context was not truncated")
+	}
+	for _, want := range []string{
+		"task-oversized",
+		"context-run-oversized",
+		"sentinel-run-oversized",
+		mcpToolListNewsContextChanges,
+		mcpToolListPortfolioSentinelImpactReviewScope,
+		"respectively 101, 202, 303, 404, and 505 identifiers",
+		"do not stop after the first page",
+		"until every page is read",
+		"checked_news_thread_version_ids` is required",
+		"complete, duplicate-free versionId set returned by all pages",
+		"`impact_review_coverage` is required",
+		"Each list must exactly match the duplicate-free frozen identifiers returned from all pages",
+		`"holding_ids":[],"monitor_ids":[],"alert_ids":[],"opportunity_ids":[],"strategy_ids":[]`,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("oversized prompt missing %q:\n%s", want, prompt)
 		}
 	}
 }

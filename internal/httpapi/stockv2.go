@@ -137,6 +137,12 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/stockv2/news-context/runs", s.handleStockV2StartNewsContextRun)
 	mux.HandleFunc("POST /api/stockv2/news-context/runs/{id}/retry", s.handleStockV2RetryNewsContextRun)
 	mux.HandleFunc("POST /api/stockv2/news-context/cleanup-runs", s.handleStockV2StartNewsContextCleanupRun)
+	mux.HandleFunc("GET /api/stockv2/news-context/backfill/preview", s.handleStockV2PreviewNewsContextBackfill)
+	mux.HandleFunc("GET /api/stockv2/news-context/backfill", s.handleStockV2GetNewsContextBackfill)
+	mux.HandleFunc("POST /api/stockv2/news-context/backfill", s.handleStockV2StartNewsContextBackfill)
+	mux.HandleFunc("POST /api/stockv2/news-context/backfill/pause", s.handleStockV2PauseNewsContextBackfill)
+	mux.HandleFunc("POST /api/stockv2/news-context/backfill/resume", s.handleStockV2ResumeNewsContextBackfill)
+	mux.HandleFunc("POST /api/stockv2/news-context/backfill/retry", s.handleStockV2RetryNewsContextBackfill)
 
 	// 主题机会发现
 	mux.HandleFunc("GET /api/stockv2/opportunities", s.handleStockV2ListOpportunities)

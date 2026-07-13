@@ -72,6 +72,37 @@ func TestAgentMCPServerUsesLoopbackHTTP(t *testing.T) {
 			t.Fatalf("tool %s schema = %#v, want required %s", name, toolSchemas[name], requiredField)
 		}
 	}
+	properties, _ := toolSchemas[mcpToolSemanticSearchNewsThreads]["properties"].(map[string]any)
+	if _, ok := properties["asOf"]; !ok {
+		t.Fatalf("semantic theme schema = %#v, want optional asOf cutoff", toolSchemas[mcpToolSemanticSearchNewsThreads])
+	}
+	properties, _ = toolSchemas[mcpToolGetNewsThread]["properties"].(map[string]any)
+	if _, ok := properties["asOf"]; !ok {
+		t.Fatalf("theme detail schema = %#v, want optional asOf cutoff", toolSchemas[mcpToolGetNewsThread])
+	}
+}
+
+func TestAgentTaskPoolNewsThreadSchemasExposeHistoricalCutoff(t *testing.T) {
+	pool := newAgentTaskPool(defaultCleanupInterval)
+	defer pool.Close()
+	tools := pool.mcpDataTools()
+	for _, name := range []string{mcpToolSemanticSearchNewsThreads, mcpToolGetNewsThread} {
+		found := false
+		for _, tool := range tools {
+			if tool.Name != name {
+				continue
+			}
+			found = true
+			schema, _ := tool.InputSchema.(map[string]any)
+			properties, _ := schema["properties"].(map[string]any)
+			if _, ok := properties["asOf"]; !ok {
+				t.Fatalf("tool %s schema = %#v, want optional asOf cutoff", name, tool.InputSchema)
+			}
+		}
+		if !found {
+			t.Fatalf("tool %s not found", name)
+		}
+	}
 }
 
 func TestNextMCPPageOffset(t *testing.T) {

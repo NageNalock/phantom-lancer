@@ -9,15 +9,16 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"phantom-lancer/internal/safelog"
 )
 
 const (
-	newsContextSchedulerInterval = 30 * time.Second
-	newsContextSeedPageSize      = 500
-	newsContextDefaultBatchSize  = 25
-	newsContextMaxBatchSize      = 50
+	newsContextSchedulerInterval     = 30 * time.Second
+	newsContextSeedPageSize          = 500
+	newsContextInputTextLimit        = 60_000
+	newsContextAdditionalPromptLimit = 2_000
 )
 
 func defaultNewsContextConfig() NewsContextConfig {
@@ -28,7 +29,6 @@ func defaultNewsContextConfig() NewsContextConfig {
 		HourlyEnabled:           true,
 		FourHourEnabled:         true,
 		DailyEnabled:            true,
-		BatchSize:               newsContextDefaultBatchSize,
 		HourlyIntervalSeconds:   3600,
 		FourHourIntervalSeconds: 4 * 3600,
 		DailyIntervalSeconds:    24 * 3600,
@@ -41,24 +41,15 @@ func normalizeNewsContextConfig(cfg NewsContextConfig) NewsContextConfig {
 	if strings.TrimSpace(cfg.ID) == "" {
 		cfg.ID = NewsContextConfigIDDefault
 	}
-	if cfg.BatchSize <= 0 {
-		cfg.BatchSize = newsContextDefaultBatchSize
-	}
-	if cfg.BatchSize > newsContextMaxBatchSize {
-		cfg.BatchSize = newsContextMaxBatchSize
-	}
-	if cfg.HourlyIntervalSeconds <= 0 {
-		cfg.HourlyIntervalSeconds = 3600
-	}
-	if cfg.FourHourIntervalSeconds <= 0 {
-		cfg.FourHourIntervalSeconds = 4 * 3600
-	}
-	if cfg.DailyIntervalSeconds <= 0 {
-		cfg.DailyIntervalSeconds = 24 * 3600
-	}
-	if cfg.CleanupGraceSeconds < 3600 {
+	// ponytail: these values define the product's semantic hierarchy, not tuning
+	// knobs. Keeping them fixed avoids a second configurable windowing system.
+	cfg.HourlyIntervalSeconds = 3600
+	cfg.FourHourIntervalSeconds = 4 * 3600
+	cfg.DailyIntervalSeconds = 24 * 3600
+	if !validNewsContextCleanupGrace(cfg.CleanupGraceSeconds) {
 		cfg.CleanupGraceSeconds = 24 * 3600
 	}
+	cfg.AdditionalResearchPrompt = strings.TrimSpace(cfg.AdditionalResearchPrompt)
 	return cfg
 }
 
@@ -97,6 +88,8 @@ func (s *Service) PatchNewsContextConfig(ctx context.Context, req RequestUpdateN
 	if err != nil {
 		return NewsContextConfig{}, err
 	}
+	wasEnabled := cfg.Enabled
+	wasAutoCleanupEnabled := cfg.AutoCleanupEnabled
 	if req.Enabled != nil {
 		cfg.Enabled = *req.Enabled
 	}
@@ -112,13 +105,26 @@ func (s *Service) PatchNewsContextConfig(ctx context.Context, req RequestUpdateN
 	if req.DailyEnabled != nil {
 		cfg.DailyEnabled = *req.DailyEnabled
 	}
-	if req.BatchSize != nil {
-		if *req.BatchSize <= 0 || *req.BatchSize > newsContextMaxBatchSize {
+	if req.CleanupGraceSeconds != nil {
+		if !validNewsContextCleanupGrace(*req.CleanupGraceSeconds) {
 			return NewsContextConfig{}, ErrInvalidNewsContextInput
 		}
-		cfg.BatchSize = *req.BatchSize
+		cfg.CleanupGraceSeconds = *req.CleanupGraceSeconds
 	}
-	if req.Enabled != nil && *req.Enabled {
+	if req.AdditionalResearchPrompt != nil {
+		prompt := strings.TrimSpace(*req.AdditionalResearchPrompt)
+		if utf8.RuneCountInString(prompt) > newsContextAdditionalPromptLimit {
+			return NewsContextConfig{}, ErrInvalidNewsContextInput
+		}
+		cfg.AdditionalResearchPrompt = prompt
+	}
+	if cfg.Enabled && !cfg.HourlyEnabled && !cfg.FourHourEnabled && !cfg.DailyEnabled {
+		return NewsContextConfig{}, ErrInvalidNewsContextInput
+	}
+	if cfg.AutoCleanupEnabled && (!cfg.Enabled || !cfg.DailyEnabled) {
+		return NewsContextConfig{}, ErrInvalidNewsContextInput
+	}
+	if req.Enabled != nil && *req.Enabled && !wasEnabled {
 		for _, taskType := range []string{AgentTaskTypeNewsEventReview, AgentTaskTypePortfolioSentinel} {
 			profile, profileErr := s.store.GetAgentTaskProfileByType(ctx, taskType)
 			if profileErr != nil {
@@ -128,18 +134,106 @@ func (s *Service) PatchNewsContextConfig(ctx context.Context, req RequestUpdateN
 				return NewsContextConfig{}, fmt.Errorf("%w: required review model is unavailable", ErrNewsContextPrerequisite)
 			}
 		}
-		embedCfg, embedErr := s.embeddingConfigOrDefault(ctx)
-		if embedErr != nil || !embedCfg.Enabled || strings.TrimSpace(embedCfg.EmbeddingModelID) == "" {
+		if _, _, embedErr := s.ensureEmbeddingModelReady(ctx); embedErr != nil {
 			return NewsContextConfig{}, fmt.Errorf("%w: theme embedding is unavailable", ErrNewsContextPrerequisite)
 		}
 	}
-	if req.AutoCleanupEnabled != nil && *req.AutoCleanupEnabled {
-		embedCfg, embedErr := s.embeddingConfigOrDefault(ctx)
-		if embedErr != nil || !embedCfg.Enabled || strings.TrimSpace(embedCfg.EmbeddingModelID) == "" {
-			return NewsContextConfig{}, fmt.Errorf("%w: theme embedding is unavailable", ErrNewsContextPrerequisite)
+	if req.AutoCleanupEnabled != nil && *req.AutoCleanupEnabled && !wasAutoCleanupEnabled {
+		if err := s.validateNewsContextCleanupPrerequisites(ctx, true); err != nil {
+			return NewsContextConfig{}, err
 		}
 	}
 	return s.UpdateNewsContextConfig(ctx, cfg)
+}
+
+func (s *Service) validateNewsContextCleanupPrerequisites(ctx context.Context, requireVerifiedMCP bool) error {
+	if blocked, err := s.HasBlockingNewsContextBackfill(ctx); err != nil {
+		return err
+	} else if blocked {
+		return fmt.Errorf("%w: historical news backfill is incomplete", ErrNewsContextPrerequisite)
+	}
+	if _, _, err := s.ensureEmbeddingModelReady(ctx); err != nil {
+		return fmt.Errorf("%w: theme embedding is unavailable", ErrNewsContextPrerequisite)
+	}
+	covered, err := s.store.CountNewsEventsByContextStatus(ctx, NewsEventContextCovered)
+	if err != nil {
+		return err
+	}
+	noise, err := s.store.CountNewsEventsByContextStatus(ctx, NewsEventContextNoise)
+	if err != nil {
+		return err
+	}
+	if covered+noise == 0 {
+		return nil
+	}
+	daily, err := s.store.ListNewsContextRuns(ctx, NewsContextRunListFilter{
+		WindowType: NewsContextWindowDaily, Status: NewsContextRunStatusCompleted,
+		ReviewStatus: NewsContextReviewCompleted, Limit: 1,
+	})
+	if err != nil {
+		return err
+	}
+	if len(daily) == 0 {
+		return fmt.Errorf("%w: no completed daily aggregation and impact review", ErrNewsContextPrerequisite)
+	}
+	if requireVerifiedMCP {
+		return s.validateNewsContextAutoCleanupSafety(ctx, covered+noise)
+	}
+	return nil
+}
+
+func (s *Service) validateNewsContextAutoCleanupSafety(ctx context.Context, expected int) error {
+	// ponytail: reuse the exact cleanup safety decision instead of maintaining a
+	// second unlock checklist. A fresh per-request cache still forces one real
+	// semantic-search/detail round-trip for every unprotected current theme.
+	ctx = context.WithValue(ctx, newsContextMCPVerificationCacheKey{}, newsContextMCPVerificationCache{})
+	ctx = context.WithValue(ctx, newsContextCleanupBackfillPrecheckedKey{}, true)
+	afterID := ""
+	checked := 0
+	for {
+		candidates, err := s.store.ListNewsEventsForContextCleanup(ctx,
+			time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC), afterID, newsContextCleanupBatchSize)
+		if err != nil {
+			return err
+		}
+		if len(candidates) == 0 {
+			break
+		}
+		for _, candidate := range candidates {
+			afterID = candidate.Event.ID
+			checked++
+			_, _, err := s.newsContextCleanupEligibility(ctx, candidate, false)
+			if err == nil {
+				continue
+			}
+			var gateFailure newsContextCleanupGateFailure
+			if errors.As(err, &gateFailure) {
+				return fmt.Errorf("%w: %s", ErrNewsContextPrerequisite, gateFailure.Error())
+			}
+			return err
+		}
+		if len(candidates) < newsContextCleanupBatchSize {
+			break
+		}
+	}
+	if checked != expected {
+		return fmt.Errorf("%w: some covered news lacks a valid cleanup checkpoint", ErrNewsContextPrerequisite)
+	}
+	if blocked, err := s.HasBlockingNewsContextBackfill(ctx); err != nil {
+		return err
+	} else if blocked {
+		return fmt.Errorf("%w: historical news backfill changed during safety validation", ErrNewsContextPrerequisite)
+	}
+	return nil
+}
+
+func validNewsContextCleanupGrace(seconds int) bool {
+	for _, days := range []int{1, 3, 7, 14, 30} {
+		if seconds == days*24*3600 {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) tryStartNewsContextRun() bool {
@@ -175,9 +269,14 @@ func (s *Service) runNewsContextScheduler(ctx context.Context) {
 				!errors.Is(err, ErrNewsContextAlreadyRunning) && s.log != nil {
 				s.log.Warn("start scheduled news context run failed", "error", safelog.Text(err.Error(), 300))
 			}
+			if err := s.runNewsContextBackfillStep(ctx); err != nil &&
+				!errors.Is(err, ErrNewsContextAlreadyRunning) && s.log != nil {
+				s.log.Warn("advance news context backfill failed", "error", safelog.Text(err.Error(), 300))
+			}
 			if err := s.startDueNewsContextCleanup(ctx, time.Now()); err != nil &&
 				!errors.Is(err, ErrNewsContextCleanupDisabled) &&
-				!errors.Is(err, ErrNewsContextCleanupRunning) && s.log != nil {
+				!errors.Is(err, ErrNewsContextCleanupRunning) &&
+				!errors.Is(err, ErrNewsContextAlreadyRunning) && s.log != nil {
 				s.log.Warn("start scheduled news context cleanup failed", "error", safelog.Text(err.Error(), 300))
 			}
 			timer.Reset(newsContextSchedulerInterval)
@@ -210,24 +309,82 @@ func (s *Service) startDueNewsContextRun(ctx context.Context, now time.Time) err
 	if !cfg.Enabled {
 		return ErrNewsContextFeatureDisabled
 	}
+	scheduleChanged := prepareNewsContextSchedule(&cfg, now)
+	backfill, hasBlockingBackfill, err := s.store.GetBlockingNewsContextBackfill(ctx)
+	if err != nil {
+		return err
+	}
+	if hasBlockingBackfill && fastForwardNewsContextScheduleForBackfill(&cfg, backfill.CutoffAt) {
+		scheduleChanged = true
+	}
+	if scheduleChanged {
+		if cfg, err = s.store.UpsertNewsContextConfig(ctx, cfg); err != nil {
+			return err
+		}
+	}
 	if running, err := s.store.HasRunningNewsContextRun(ctx); err != nil {
 		return err
 	} else if running {
 		return ErrNewsContextAlreadyRunning
 	}
-	windowType := ""
-	switch {
-	case cfg.DailyEnabled && (cfg.NextDailyAt.IsZero() || !cfg.NextDailyAt.After(now)):
-		windowType = NewsContextWindowDaily
-	case cfg.FourHourEnabled && (cfg.NextFourHourAt.IsZero() || !cfg.NextFourHourAt.After(now)):
-		windowType = NewsContextWindowFourHour
-	case cfg.HourlyEnabled && (cfg.NextHourlyAt.IsZero() || !cfg.NextHourlyAt.After(now)):
-		windowType = NewsContextWindowHourly
-	default:
-		return nil
+	for _, windowType := range []string{NewsContextWindowDaily, NewsContextWindowFourHour, NewsContextWindowHourly} {
+		if !newsContextWindowEnabled(cfg, windowType) {
+			continue
+		}
+		endAt := newsContextNextAt(cfg, windowType)
+		if endAt.IsZero() || endAt.After(now) {
+			continue
+		}
+		startAt, ok := newsContextScheduledWindow(windowType, endAt)
+		if !ok {
+			return ErrInvalidNewsContextInput
+		}
+		ready, impossible, err := s.newsContextParentWindowReadiness(ctx, cfg, windowType, startAt, endAt)
+		if err != nil {
+			return err
+		}
+		if impossible {
+			setNewsContextNextAt(&cfg, windowType, firstCompletableNewsContextParentEnd(cfg, windowType))
+			if cfg, err = s.store.UpsertNewsContextConfig(ctx, cfg); err != nil {
+				return err
+			}
+			continue
+		}
+		if !ready {
+			continue
+		}
+		existing, err := s.store.getNewsContextRunByWindow(ctx, windowType, startAt, endAt)
+		if err == nil {
+			if existing.Status == NewsContextRunStatusCompleted || existing.Status == NewsContextRunStatusWaitingReview {
+				setNewsContextNextAt(&cfg, windowType, nextNewsContextBoundary(windowType, endAt))
+				if cfg, err = s.store.UpsertNewsContextConfig(ctx, cfg); err != nil {
+					return err
+				}
+			} else if existing.Status == NewsContextRunStatusPending {
+				_, err = s.startNewsContextRun(ctx, RequestStartNewsContextRun{
+					WindowType:  windowType,
+					StartAt:     startAt.Format(time.RFC3339Nano),
+					EndAt:       endAt.Format(time.RFC3339Nano),
+					RequestedBy: "system",
+				}, NewsContextTriggerScheduled, true)
+				return err
+			}
+			// A failed persisted window must be retried explicitly. Other due
+			// periods can still advance while that failure remains observable.
+			continue
+		}
+		if !errors.Is(err, ErrNewsContextRunNotFound) {
+			return err
+		}
+		_, err = s.startNewsContextRun(ctx, RequestStartNewsContextRun{
+			WindowType:  windowType,
+			StartAt:     startAt.Format(time.RFC3339Nano),
+			EndAt:       endAt.Format(time.RFC3339Nano),
+			RequestedBy: "system",
+		}, NewsContextTriggerScheduled, true)
+		return err
 	}
-	_, err = s.startNewsContextRun(ctx, RequestStartNewsContextRun{WindowType: windowType, RequestedBy: "system"}, NewsContextTriggerScheduled, true)
-	return err
+	return nil
 }
 
 func (s *Service) StartNewsContextRun(ctx context.Context, req RequestStartNewsContextRun) (NewsContextRun, error) {
@@ -278,7 +435,11 @@ func (s *Service) startNewsContextRun(ctx context.Context, req RequestStartNewsC
 	if err != nil {
 		return NewsContextRun{}, err
 	}
-	if err := s.seedNewsContextRunItems(ctx, &run); err != nil {
+	if run.Status != NewsContextRunStatusPending {
+		return NewsContextRun{}, ErrInvalidNewsContextInput
+	}
+	run, err = s.preparePendingNewsContextRun(ctx, run)
+	if err != nil {
 		run.Status = NewsContextRunStatusFailed
 		run.Phase = "collecting"
 		run.ErrorMessage = safelog.Text(err.Error(), 500)
@@ -287,13 +448,6 @@ func (s *Service) startNewsContextRun(ctx context.Context, req RequestStartNewsC
 		s.recordNewsContextRunFailure(ctx, run.WindowType, err)
 		return run, err
 	}
-	run.Status = NewsContextRunStatusRunning
-	run.Phase = "aggregating"
-	run.StartedAt = time.Now()
-	run, err = s.store.UpdateNewsContextRun(ctx, run)
-	if err != nil {
-		return NewsContextRun{}, err
-	}
 	release = false
 	if async {
 		go s.executeNewsContextRun(context.Background(), run.ID)
@@ -301,6 +455,34 @@ func (s *Service) startNewsContextRun(ctx context.Context, req RequestStartNewsC
 	}
 	s.executeNewsContextRun(ctx, run.ID)
 	return s.store.GetNewsContextRun(ctx, run.ID)
+}
+
+func (s *Service) preparePendingNewsContextRun(ctx context.Context, run NewsContextRun) (NewsContextRun, error) {
+	// A crash can leave a durable pending row after claims or manifest items were
+	// written but before execution. Rebuilding a collecting manifest is lossless.
+	if run.Status != NewsContextRunStatusPending {
+		return run, ErrInvalidNewsContextInput
+	}
+	if err := s.store.ReleaseNewsContextEventClaims(ctx, run.ID); err != nil {
+		return run, err
+	}
+	if err := s.store.ResetPendingNewsContextRunManifest(ctx, run.ID); err != nil {
+		return run, err
+	}
+	var err error
+	run, err = s.store.GetNewsContextRun(ctx, run.ID)
+	if err != nil {
+		return run, err
+	}
+	if err := s.seedNewsContextRunItems(ctx, &run); err != nil {
+		return run, err
+	}
+	run.Status = NewsContextRunStatusRunning
+	run.Phase = newsContextRunPhaseAggregating
+	if run.StartedAt.IsZero() {
+		run.StartedAt = time.Now()
+	}
+	return s.store.UpdateNewsContextRun(ctx, run)
 }
 
 func (s *Service) seedNewsContextRunItems(ctx context.Context, run *NewsContextRun) error {
@@ -319,31 +501,67 @@ func (s *Service) seedNewsContextRunItems(ctx context.Context, run *NewsContextR
 		items = items[:0]
 		return nil
 	}
-	// No lower bound here: late or previously failed news remains eligible and is
-	// eventually consumed instead of being stranded outside a nominal window.
-	for offset := 0; ; offset += newsContextSeedPageSize {
-		events, err := s.store.ListNewsEventsPendingContext(ctx, run.WindowEnd, newsContextSeedPageSize, offset)
+	claimedEventIDs, historicalOnlyWindow, err := s.claimRealtimeNewsContextEvents(ctx, *run)
+	if err != nil {
+		return err
+	}
+	if err := s.store.RequeueNewsContextRunEventItems(ctx, run.ID, claimedEventIDs); err != nil {
+		_ = s.store.ReleaseNewsContextEventClaims(ctx, run.ID)
+		return err
+	}
+	if _, finalReview, err := s.store.NewsContextBackfillForFinalReviewRun(ctx, run.ID); err != nil {
+		_ = s.store.ReleaseNewsContextEventClaims(ctx, run.ID)
+		return err
+	} else if finalReview {
+		if err := s.store.ValidateNewsContextFinalReviewEventManifest(ctx, run.ID, claimedEventIDs); err != nil {
+			_ = s.store.ReleaseNewsContextEventClaims(ctx, run.ID)
+			return err
+		}
+	}
+	run.InputCount += len(claimedEventIDs)
+	if historicalOnlyWindow {
+		// ponytail: a persisted empty checkpoint is enough to move the real-time
+		// hierarchy past a backfill-owned window; it must not read old themes.
+		run.PendingCount = run.InputCount
+		return nil
+	}
+	if run.WindowType != NewsContextWindowHourly {
+		cfg, err := s.GetNewsContextConfig(ctx)
 		if err != nil {
 			return err
 		}
-		for _, event := range events {
-			items = append(items, NewsContextRunItem{ObjectType: NewsContextRunItemNewsEvent, ObjectID: event.ID, Status: NewsContextRunItemPending})
+		childType := ""
+		includeCurrent := false
+		if run.TriggerType == NewsContextTriggerScheduled {
+			switch {
+			case run.WindowType == NewsContextWindowFourHour && cfg.HourlyEnabled:
+				childType = NewsContextWindowHourly
+			case run.WindowType == NewsContextWindowDaily && cfg.FourHourEnabled:
+				childType = NewsContextWindowFourHour
+				includeCurrent = true
+			}
 		}
-		if err := flush(); err != nil {
-			return err
+		if childType != "" {
+			versions, err := s.newsContextChildOutputVersions(ctx, *run, childType, includeCurrent)
+			if err != nil {
+				return err
+			}
+			for _, version := range versions {
+				items = append(items, NewsContextRunItem{
+					ObjectType: NewsContextRunItemThread, ObjectID: version.ID,
+					ThreadID: version.ThreadID, VersionID: version.ID,
+					Status: NewsContextRunItemPending, SourceAt: version.EffectiveAt,
+				})
+			}
+			if err := flush(); err != nil {
+				return err
+			}
+			run.PendingCount = run.InputCount
+			return nil
 		}
-		if len(events) < newsContextSeedPageSize {
-			break
-		}
-	}
-	if run.WindowType != NewsContextWindowHourly {
 		threadFilter := NewsThreadListFilter{
 			Status: NewsThreadStatusActive,
 			Limit:  newsContextSeedPageSize,
-		}
-		if run.WindowType == NewsContextWindowFourHour {
-			threadFilter.Since = run.WindowStart
-			threadFilter.Until = run.WindowEnd
 		}
 		for offset := 0; ; offset += newsContextSeedPageSize {
 			// ponytail: daily reuses the existing run-item table as its complete
@@ -354,7 +572,11 @@ func (s *Service) seedNewsContextRunItems(ctx context.Context, run *NewsContextR
 				return err
 			}
 			for _, thread := range threads {
-				items = append(items, NewsContextRunItem{ObjectType: NewsContextRunItemThread, ObjectID: thread.ID, Status: NewsContextRunItemPending})
+				items = append(items, NewsContextRunItem{
+					ObjectType: NewsContextRunItemThread, ObjectID: thread.ID,
+					ThreadID: thread.ID, VersionID: thread.CurrentVersionID,
+					Status: NewsContextRunItemPending, SourceAt: thread.LastChangedAt,
+				})
 			}
 			if err := flush(); err != nil {
 				return err
@@ -368,6 +590,151 @@ func (s *Service) seedNewsContextRunItems(ctx context.Context, run *NewsContextR
 	return nil
 }
 
+func (s *Service) newsContextChildOutputVersions(ctx context.Context, parent NewsContextRun, childType string, includeCurrent bool) ([]NewsThreadVersion, error) {
+	seen := make(map[string]struct{})
+	versions := make([]NewsThreadVersion, 0)
+	appendVersion := func(version NewsThreadVersion) {
+		if version.ID == "" || version.ThreadID == "" || version.EffectiveAt.After(parent.WindowEnd) {
+			return
+		}
+		if _, ok := seen[version.ID]; ok {
+			return
+		}
+		seen[version.ID] = struct{}{}
+		versions = append(versions, version)
+	}
+	for childStart := parent.WindowStart; childStart.Before(parent.WindowEnd); {
+		childEnd := nextNewsContextBoundary(childType, childStart)
+		if childEnd.After(parent.WindowEnd) {
+			return nil, ErrInvalidNewsContextInput
+		}
+		child, err := s.store.getNewsContextRunByWindow(ctx, childType, childStart, childEnd)
+		if err != nil {
+			return nil, err
+		}
+		ids, err := s.store.ListNewsContextRunOutputVersionIDs(ctx, child.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			version, err := s.store.GetNewsThreadVersion(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			appendVersion(version)
+		}
+		for offset := 0; ; offset += newsContextSeedPageSize {
+			created, err := s.store.ListNewsThreadVersions(ctx, NewsThreadVersionListFilter{
+				RunID: child.ID, Limit: newsContextSeedPageSize, Offset: offset,
+			})
+			if err != nil {
+				return nil, err
+			}
+			for _, version := range created {
+				appendVersion(version)
+			}
+			if len(created) < newsContextSeedPageSize {
+				break
+			}
+		}
+		childStart = childEnd
+	}
+	if includeCurrent {
+		for offset := 0; ; offset += newsContextSeedPageSize {
+			current, err := s.store.ListLatestNewsThreadVersionsAt(ctx, parent.WindowEnd, newsContextSeedPageSize, offset)
+			if err != nil {
+				return nil, err
+			}
+			for _, version := range current {
+				appendVersion(version)
+			}
+			if len(current) < newsContextSeedPageSize {
+				break
+			}
+		}
+	}
+	sort.Slice(versions, func(i, j int) bool {
+		if versions[i].ThreadID == versions[j].ThreadID {
+			if versions[i].EffectiveAt.Equal(versions[j].EffectiveAt) {
+				return versions[i].VersionNo < versions[j].VersionNo
+			}
+			return versions[i].EffectiveAt.Before(versions[j].EffectiveAt)
+		}
+		return versions[i].ThreadID < versions[j].ThreadID
+	})
+	return versions, nil
+}
+
+func (s *Service) claimRealtimeNewsContextEvents(ctx context.Context, run NewsContextRun) ([]string, bool, error) {
+	if _, historical, err := s.store.NewsContextBackfillForRun(ctx, run.ID); err != nil {
+		return nil, false, err
+	} else if historical {
+		ids, err := s.store.ClaimNewsContextEvents(ctx, run.ID, run.WindowStart, run.WindowEnd)
+		return ids, false, err
+	}
+	if _, finalReview, err := s.store.NewsContextBackfillForFinalReviewRun(ctx, run.ID); err != nil {
+		return nil, false, err
+	} else if finalReview {
+		ids, err := s.store.ClaimNewsContextFinalReviewEvents(ctx, run.ID, run.WindowStart, run.WindowEnd)
+		return ids, false, err
+	}
+	startAt := run.WindowStart
+	for {
+		cutoff, found, err := s.newsContextHistoricalOwnershipCutoff(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		if found {
+			if !run.WindowEnd.After(cutoff) {
+				return nil, true, nil
+			}
+			if startAt.Before(cutoff) {
+				startAt = cutoff
+			}
+		}
+		ids, err := s.store.ClaimNewsContextEvents(ctx, run.ID, startAt, run.WindowEnd)
+		if err != nil {
+			return nil, false, err
+		}
+		latest, latestFound, err := s.newsContextHistoricalOwnershipCutoff(ctx)
+		if err != nil {
+			_ = s.store.ReleaseNewsContextEventClaims(ctx, run.ID)
+			return nil, false, err
+		}
+		if latestFound && startAt.Before(latest) {
+			// The owner may start a backfill between the cutoff read and the
+			// market-data claim. Release and retry at the newer ownership boundary.
+			if err := s.store.ReleaseNewsContextEventClaims(ctx, run.ID); err != nil {
+				return nil, false, err
+			}
+			startAt = latest
+			continue
+		}
+		return ids, false, nil
+	}
+}
+
+func (s *Service) newsContextHistoricalOwnershipCutoff(ctx context.Context) (time.Time, bool, error) {
+	var cutoff time.Time
+	backfill, blocking, err := s.store.GetBlockingNewsContextBackfill(ctx)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if blocking {
+		cutoff = backfill.CutoffAt
+	}
+	completedCutoff, completed, err := s.store.GetLatestCompletedNewsContextBackfillCutoff(ctx)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if completed && (!blocking || completedCutoff.After(cutoff)) {
+		cutoff = completedCutoff
+	}
+	// ponytail: one durable high-water mark is sufficient. News before it is
+	// owned by a new backfill, while the exact cutoff remains realtime-owned.
+	return cutoff, blocking || completed, nil
+}
+
 func (s *Service) executeNewsContextRun(ctx context.Context, runID string) {
 	defer s.finishNewsContextRun()
 	run, err := s.store.GetNewsContextRun(ctx, runID)
@@ -378,26 +745,52 @@ func (s *Service) executeNewsContextRun(ctx context.Context, runID string) {
 		run.Status = NewsContextRunStatusFailed
 		run.ErrorMessage = safelog.Text(cause.Error(), 500)
 		run.FinishedAt = time.Now()
-		run.Phase = "failed"
+		if run.Phase != newsContextRunPhaseConverging {
+			run.Phase = "failed"
+		}
 		_, _ = s.store.UpdateNewsContextRun(context.Background(), run)
 		s.recordNewsContextRunFailure(context.Background(), run.WindowType, cause)
+	}
+	_, yieldAfterChunk, err := s.store.NewsContextBackfillForFinalReviewRun(ctx, run.ID)
+	if err != nil {
+		fail(err)
+		return
 	}
 	cfg, err := s.GetNewsContextConfig(ctx)
 	if err != nil {
 		fail(err)
 		return
 	}
+	if err := s.repairNewsContextRunEmbeddings(ctx, run.ID); err != nil {
+		fail(err)
+		return
+	}
 	for {
-		items, err := s.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{
-			RunID:  run.ID,
-			Status: NewsContextRunItemPending,
-			Limit:  cfg.BatchSize,
-		})
+		items, err := s.nextNewsContextRunItems(ctx, run.ID)
 		if err != nil {
 			fail(err)
 			return
 		}
 		if len(items) == 0 {
+			transitioned, err := s.beginDailyNewsContextConvergence(ctx, run)
+			if err != nil {
+				fail(err)
+				return
+			}
+			if transitioned {
+				if yieldAfterChunk {
+					if err := s.yieldNewsContextRunAfterFragment(ctx, run.ID); err != nil {
+						fail(err)
+					}
+					return
+				}
+				run, err = s.store.GetNewsContextRun(ctx, run.ID)
+				if err != nil {
+					fail(err)
+					return
+				}
+				continue
+			}
 			break
 		}
 		pack, err := s.buildNewsContextAggregationPack(ctx, run, items)
@@ -405,6 +798,7 @@ func (s *Service) executeNewsContextRun(ctx context.Context, runID string) {
 			fail(err)
 			return
 		}
+		pack.AdditionalResearchPrompt = cfg.AdditionalResearchPrompt
 		resolution, err := s.ResolveAgentTask(ctx, AgentTaskTypeNewsEventReview, "news_context_run", run.ID, "system")
 		if err != nil {
 			fail(err)
@@ -437,6 +831,13 @@ func (s *Service) executeNewsContextRun(ctx context.Context, runID string) {
 		}
 		run, err = s.store.GetNewsContextRun(ctx, run.ID)
 		if err != nil {
+			fail(err)
+			return
+		}
+		if yieldAfterChunk {
+			if err := s.yieldNewsContextRunAfterFragment(ctx, run.ID); err != nil {
+				fail(err)
+			}
 			return
 		}
 	}
@@ -445,22 +846,133 @@ func (s *Service) executeNewsContextRun(ctx context.Context, runID string) {
 	}
 }
 
-func (s *Service) recordNewsContextRunFailure(ctx context.Context, windowType string, cause error) {
+func (s *Service) yieldNewsContextRunAfterFragment(ctx context.Context, runID string) error {
+	run, err := s.store.GetNewsContextRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	run.Status = NewsContextRunStatusPending
+	run.CurrentAgentRunID = ""
+	run.ErrorMessage = ""
+	run.FinishedAt = time.Time{}
+	if run.Phase != newsContextRunPhaseConverging {
+		run.Phase = "queued"
+	}
+	_, err = s.store.UpdateNewsContextRun(ctx, run)
+	return err
+}
+
+func (s *Service) nextNewsContextRunItems(ctx context.Context, runID string) ([]NewsContextRunItem, error) {
+	items := make([]NewsContextRunItem, 0)
+	inputCharacters := 0
+	group := make([]NewsContextRunItem, 0)
+	groupCharacters := 0
+	groupKey := ""
+	flushGroup := func() bool {
+		if len(group) == 0 {
+			return false
+		}
+		if len(items) > 0 && inputCharacters+groupCharacters > newsContextInputTextLimit {
+			return true
+		}
+		items = append(items, group...)
+		inputCharacters += groupCharacters
+		group = group[:0]
+		groupCharacters = 0
+		return inputCharacters >= newsContextInputTextLimit
+	}
+	for offset := 0; ; offset += newsContextSeedPageSize {
+		page, err := s.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{
+			RunID: runID, Status: NewsContextRunItemPending,
+			Limit: newsContextSeedPageSize, Offset: offset,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range page {
+			characters, err := s.newsContextRunItemPromptCharacters(ctx, item)
+			if err != nil {
+				return nil, err
+			}
+			key := item.ObjectType + ":" + item.ObjectID
+			if item.ObjectType == NewsContextRunItemThread {
+				key = item.ObjectType + ":" + firstNonEmpty(item.ThreadID, item.ObjectID)
+			}
+			if groupKey != "" && key != groupKey && flushGroup() {
+				return items, nil
+			}
+			if len(group) == 0 {
+				groupKey = key
+			}
+			if characters > newsContextInputTextLimit {
+				return nil, fmt.Errorf("%w: compact news context item exceeds prompt safety limit", ErrInvalidNewsContextInput)
+			}
+			if len(group) > 0 && groupCharacters+characters > newsContextInputTextLimit {
+				if len(items) > 0 {
+					return items, nil
+				}
+				// The remaining versions stay pending and the next persisted slice
+				// continues the same stable theme using the prior slice via MCP.
+				return group, nil
+			}
+			group = append(group, item)
+			groupCharacters += characters
+		}
+		if len(page) < newsContextSeedPageSize {
+			_ = flushGroup()
+			return items, nil
+		}
+	}
+}
+
+func (s *Service) newsContextRunItemPromptCharacters(ctx context.Context, item NewsContextRunItem) (int, error) {
+	var value any
+	switch item.ObjectType {
+	case NewsContextRunItemNewsEvent:
+		event, err := s.store.GetNewsEvent(ctx, item.ObjectID)
+		if err != nil {
+			return 0, err
+		}
+		event.Title = safelog.Text(event.Title, 500)
+		event.Summary = safelog.Text(event.Summary, 1500)
+		event.Content = safelog.Text(event.Content, 4000)
+		event.URL = sanitizeOpportunityURL(event.URL)
+		value = event
+	case NewsContextRunItemThread:
+		if item.VersionID != "" {
+			version, err := s.store.GetNewsThreadVersion(ctx, item.VersionID)
+			if err != nil {
+				return 0, err
+			}
+			value = compactNewsThreadForPrompt(historicalNewsThreadSnapshot(version))
+		} else {
+			thread, err := s.store.GetNewsThread(ctx, item.ObjectID)
+			if err != nil {
+				return 0, err
+			}
+			value = compactNewsThreadForPrompt(thread)
+		}
+	default:
+		return 0, ErrInvalidNewsContextInput
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return 0, err
+	}
+	// ponytail: character length is a conservative, dependency-free prompt
+	// guard. The run manifest still covers every item across as many calls as needed.
+	return utf8.RuneCount(raw) + 128, nil
+}
+
+func (s *Service) recordNewsContextRunFailure(ctx context.Context, _ string, cause error) {
 	cfg, err := s.GetNewsContextConfig(ctx)
 	if err != nil {
 		return
 	}
-	now := time.Now()
-	cfg.LastRunAt = now
+	cfg.LastRunAt = time.Now()
 	cfg.LastError = safelog.Text(cause.Error(), 500)
-	switch windowType {
-	case NewsContextWindowDaily:
-		cfg.NextDailyAt = now.Add(time.Duration(cfg.DailyIntervalSeconds) * time.Second)
-	case NewsContextWindowFourHour:
-		cfg.NextFourHourAt = now.Add(time.Duration(cfg.FourHourIntervalSeconds) * time.Second)
-	default:
-		cfg.NextHourlyAt = now.Add(time.Duration(cfg.HourlyIntervalSeconds) * time.Second)
-	}
+	// Keep the failed natural window due. Skipping it would create a permanent
+	// hole in every parent window built on top of it.
 	_, _ = s.store.UpsertNewsContextConfig(ctx, cfg)
 }
 
@@ -483,10 +995,11 @@ func (s *Service) executeNewsContextAgentRun(ctx context.Context, run AgentRun, 
 
 func (s *Service) buildNewsContextAggregationPack(ctx context.Context, run NewsContextRun, items []NewsContextRunItem) (NewsContextAggregationPack, error) {
 	pack := NewsContextAggregationPack{
-		RunID:       run.ID,
-		WindowType:  run.WindowType,
-		WindowStart: run.WindowStart,
-		WindowEnd:   run.WindowEnd,
+		RunID:                  run.ID,
+		WindowType:             run.WindowType,
+		WindowStart:            run.WindowStart,
+		WindowEnd:              run.WindowEnd,
+		DailyConvergenceReview: run.WindowType == NewsContextWindowDaily && run.Phase == newsContextRunPhaseConverging,
 	}
 	for _, item := range items {
 		switch item.ObjectType {
@@ -508,17 +1021,22 @@ func (s *Service) buildNewsContextAggregationPack(ctx context.Context, run NewsC
 				pack.ResearchReasons = append(pack.ResearchReasons, "重大、政策、公告或单一来源事项需要公开资料核实")
 			}
 		case NewsContextRunItemThread:
-			thread, err := s.store.GetNewsThread(ctx, item.ObjectID)
-			if err != nil {
-				return pack, err
+			if item.VersionID != "" {
+				version, err := s.store.GetNewsThreadVersion(ctx, item.VersionID)
+				if err != nil {
+					return pack, err
+				}
+				pack.InputThreads = append(pack.InputThreads, compactNewsThreadForPrompt(historicalNewsThreadSnapshot(version)))
+			} else {
+				thread, err := s.store.GetNewsThread(ctx, item.ObjectID)
+				if err != nil {
+					return pack, err
+				}
+				pack.InputThreads = append(pack.InputThreads, compactNewsThreadForPrompt(thread))
 			}
-			pack.InputThreads = append(pack.InputThreads, thread)
 		default:
 			return pack, ErrInvalidNewsContextInput
 		}
-	}
-	if len(pack.InputThreads) == 0 && run.WindowType == NewsContextWindowHourly {
-		pack.RecentThreads, _ = s.store.ListNewsThreads(ctx, NewsThreadListFilter{Status: NewsThreadStatusActive, Limit: 50})
 	}
 	pack.ResearchReasons = uniqueNonEmptyStrings(pack.ResearchReasons)
 	return pack, nil
@@ -555,8 +1073,8 @@ func (s *Service) ProcessNewsContextSubmittedResult(ctx context.Context, logical
 	if err := json.Unmarshal(raw, &report); err != nil {
 		return NewsContextBatchApplyResult{}, fmt.Errorf("%w: %v", ErrInvalidNewsContextResult, err)
 	}
-	items, err := s.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{
-		RunID: logicalRunID, AgentRunID: agentRunID, Status: NewsContextRunItemRunning, Limit: newsContextMaxBatchSize,
+	items, err := s.listAllNewsContextRunItems(ctx, NewsContextRunItemListFilter{
+		RunID: logicalRunID, AgentRunID: agentRunID, Status: NewsContextRunItemRunning,
 	})
 	if err != nil {
 		return NewsContextBatchApplyResult{}, err
@@ -571,7 +1089,14 @@ func (s *Service) ProcessNewsContextSubmittedResult(ctx context.Context, logical
 	if err != nil {
 		return NewsContextBatchApplyResult{}, err
 	}
-	if result.UrgentReview {
+	if err := s.SyncNewsContextEmbeddingObjects(ctx, result.ChangedThreadIDs, result.ChangedVersionIDs); err != nil {
+		return result, fmt.Errorf("index news context fragment: %w", err)
+	}
+	_, historicalRun, lookupErr := s.store.NewsContextBackfillForRun(ctx, logicalRunID)
+	if lookupErr != nil {
+		return NewsContextBatchApplyResult{}, lookupErr
+	}
+	if result.UrgentReview && !historicalRun {
 		latest, getErr := s.store.GetNewsContextRun(ctx, logicalRunID)
 		if getErr != nil {
 			return NewsContextBatchApplyResult{}, getErr
@@ -582,6 +1107,46 @@ func (s *Service) ProcessNewsContextSubmittedResult(ctx context.Context, logical
 		}
 	}
 	return result, nil
+}
+
+func (s *Service) repairNewsContextRunEmbeddings(ctx context.Context, runID string) error {
+	threadIDs := make([]string, 0)
+	versionIDs := make([]string, 0)
+	for offset := 0; ; offset += newsContextSeedPageSize {
+		versions, err := s.store.ListNewsThreadVersions(ctx, NewsThreadVersionListFilter{
+			RunID: runID, Limit: newsContextSeedPageSize, Offset: offset,
+		})
+		if err != nil {
+			return err
+		}
+		for _, version := range versions {
+			if version.IndexStatus == NewsContextIndexReady {
+				continue
+			}
+			threadIDs = append(threadIDs, version.ThreadID)
+			versionIDs = append(versionIDs, version.ID)
+		}
+		if len(versions) < newsContextSeedPageSize {
+			break
+		}
+	}
+	return s.SyncNewsContextEmbeddingObjects(ctx, threadIDs, versionIDs)
+}
+
+func (s *Service) listAllNewsContextRunItems(ctx context.Context, filter NewsContextRunItemListFilter) ([]NewsContextRunItem, error) {
+	items := make([]NewsContextRunItem, 0)
+	for offset := 0; ; offset += newsContextSeedPageSize {
+		filter.Limit = newsContextSeedPageSize
+		filter.Offset = offset
+		page, err := s.store.ListNewsContextRunItems(ctx, filter)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, page...)
+		if len(page) < newsContextSeedPageSize {
+			return items, nil
+		}
+	}
 }
 
 func (s *Service) validateNewsContextResearchAudit(ctx context.Context, items []NewsContextRunItem, report NewsContextReport) error {
@@ -632,32 +1197,14 @@ func validateNewsContextReport(run NewsContextRun, items []NewsContextRunItem, r
 	if report.SchemaVersion != NewsContextResultSchemaVersion || report.RunID != run.ID || report.WindowType != run.WindowType {
 		return ErrInvalidNewsContextResult
 	}
-	expectedNews := map[string]bool{}
+	if err := validateNewsContextBatchNewsCoverage(items, report); err != nil {
+		return err
+	}
 	expectedThreads := map[string]bool{}
 	for _, item := range items {
 		switch item.ObjectType {
-		case NewsContextRunItemNewsEvent:
-			expectedNews[item.ObjectID] = false
 		case NewsContextRunItemThread:
-			expectedThreads[item.ObjectID] = false
-		}
-	}
-	for _, id := range report.ProcessedNewsIDs {
-		if _, ok := expectedNews[id]; !ok || expectedNews[id] {
-			return fmt.Errorf("%w: invalid or duplicate processed news id", ErrInvalidNewsContextResult)
-		}
-		expectedNews[id] = true
-	}
-	seenDecision := map[string]bool{}
-	for _, decision := range report.NewsDecisions {
-		if _, ok := expectedNews[decision.NewsEventID]; !ok || seenDecision[decision.NewsEventID] || strings.TrimSpace(decision.Disposition) == "" {
-			return fmt.Errorf("%w: invalid news decision coverage", ErrInvalidNewsContextResult)
-		}
-		seenDecision[decision.NewsEventID] = true
-	}
-	for id, covered := range expectedNews {
-		if !covered || !seenDecision[id] {
-			return fmt.Errorf("%w: news %s was not covered", ErrInvalidNewsContextResult, id)
+			expectedThreads[firstNonEmpty(item.ThreadID, item.ObjectID)] = false
 		}
 	}
 	threadOutcomes := make(map[string]string, len(expectedThreads))
@@ -723,7 +1270,105 @@ func validateNewsContextReport(run NewsContextRun, items []NewsContextRunItem, r
 	return nil
 }
 
-func (s *Service) completeNewsContextRun(ctx context.Context, run *NewsContextRun, cfg NewsContextConfig) error {
+func validateNewsContextBatchNewsCoverage(items []NewsContextRunItem, report NewsContextReport) error {
+	expectedNews := make(map[string]bool)
+	for _, item := range items {
+		if item.ObjectType == NewsContextRunItemNewsEvent {
+			expectedNews[item.ObjectID] = false
+		}
+	}
+	for _, id := range report.ProcessedNewsIDs {
+		if _, ok := expectedNews[id]; !ok || expectedNews[id] {
+			return fmt.Errorf("%w: invalid or duplicate processed news id", ErrInvalidNewsContextResult)
+		}
+		expectedNews[id] = true
+	}
+	decisions := make(map[string]NewsContextNewsDecision, len(report.NewsDecisions))
+	for _, decision := range report.NewsDecisions {
+		if _, valid := normalizeNewsContextDisposition(decision.Disposition); !valid {
+			return fmt.Errorf("%w: unsupported news decision disposition", ErrInvalidNewsContextResult)
+		}
+		if _, ok := expectedNews[decision.NewsEventID]; !ok || decisions[decision.NewsEventID].NewsEventID != "" {
+			return fmt.Errorf("%w: invalid news decision coverage", ErrInvalidNewsContextResult)
+		}
+		decisions[decision.NewsEventID] = decision
+	}
+	for id, processed := range expectedNews {
+		if !processed || decisions[id].NewsEventID == "" {
+			return fmt.Errorf("%w: news %s was not covered", ErrInvalidNewsContextResult, id)
+		}
+	}
+
+	changeForEvidence := make(map[string]int, len(expectedNews))
+	identityOwner := make(map[string]int)
+	createIdentity := make(map[int]string)
+	for index, change := range report.ThreadChanges {
+		if strings.TrimSpace(change.Action) == "create" {
+			continue
+		}
+		threadID := strings.TrimSpace(change.ThreadID)
+		if threadID == "" {
+			continue
+		}
+		if owner, exists := identityOwner[threadID]; exists && owner != index {
+			return fmt.Errorf("%w: thread identity is used by multiple changes", ErrInvalidNewsContextResult)
+		}
+		identityOwner[threadID] = index
+	}
+	for index, change := range report.ThreadChanges {
+		for _, eventID := range change.EvidenceNewsIDs {
+			if _, ok := expectedNews[eventID]; !ok {
+				return fmt.Errorf("%w: evidence news was not part of this batch", ErrInvalidNewsContextResult)
+			}
+			if _, duplicate := changeForEvidence[eventID]; duplicate {
+				return fmt.Errorf("%w: news evidence belongs to multiple thread changes", ErrInvalidNewsContextResult)
+			}
+			decision, ok := decisions[eventID]
+			if !ok {
+				return fmt.Errorf("%w: evidence news has no decision", ErrInvalidNewsContextResult)
+			}
+			disposition, _ := normalizeNewsContextDisposition(decision.Disposition)
+			if disposition == NewsEventContextNoise || disposition == "duplicate" || disposition == NewsEventContextDeferred {
+				return fmt.Errorf("%w: noise, duplicate, or deferred news cannot be theme evidence", ErrInvalidNewsContextResult)
+			}
+			decisionThreadID := strings.TrimSpace(decision.ThreadID)
+			if strings.TrimSpace(change.Action) == "create" {
+				if decisionThreadID != "" {
+					if current := createIdentity[index]; current != "" && current != decisionThreadID {
+						return fmt.Errorf("%w: one new thread uses multiple temporary identities", ErrInvalidNewsContextResult)
+					}
+					if owner, exists := identityOwner[decisionThreadID]; exists && owner != index {
+						return fmt.Errorf("%w: temporary thread identity maps to multiple changes", ErrInvalidNewsContextResult)
+					}
+					createIdentity[index] = decisionThreadID
+					identityOwner[decisionThreadID] = index
+				}
+			} else if decisionThreadID == "" || decisionThreadID != strings.TrimSpace(change.ThreadID) {
+				return fmt.Errorf("%w: news decision thread does not match its evidence thread", ErrInvalidNewsContextResult)
+			}
+			changeForEvidence[eventID] = index
+		}
+	}
+	for eventID, decision := range decisions {
+		disposition, _ := normalizeNewsContextDisposition(decision.Disposition)
+		_, hasEvidence := changeForEvidence[eventID]
+		if disposition == NewsEventContextNoise || disposition == "duplicate" || disposition == NewsEventContextDeferred {
+			if hasEvidence {
+				return fmt.Errorf("%w: non-theme news cannot be evidence", ErrInvalidNewsContextResult)
+			}
+			continue
+		}
+		if !hasEvidence {
+			return fmt.Errorf("%w: covered news has no theme evidence", ErrInvalidNewsContextResult)
+		}
+	}
+	return nil
+}
+
+func (s *Service) completeNewsContextRun(ctx context.Context, run *NewsContextRun, _ NewsContextConfig) error {
+	if run.WindowType == NewsContextWindowDaily && run.Phase != newsContextRunPhaseConverging {
+		return fmt.Errorf("%w: daily convergence has not completed", ErrInvalidNewsContextInput)
+	}
 	pending, err := s.store.CountNewsContextRunItems(ctx, NewsContextRunItemListFilter{RunID: run.ID, Status: NewsContextRunItemPending})
 	if err != nil {
 		return err
@@ -736,12 +1381,32 @@ func (s *Service) completeNewsContextRun(ctx context.Context, run *NewsContextRu
 	if failed > 0 || pending > 0 {
 		return fmt.Errorf("news context run has %d failed and %d pending items", failed, pending)
 	}
-	reviewRequired := run.ReviewStatus == NewsContextReviewPending || run.WindowType == NewsContextWindowDaily ||
-		(run.WindowType == NewsContextWindowFourHour && run.MaterialChangeCount > 0)
+	_, historicalRun, err := s.store.NewsContextBackfillForRun(ctx, run.ID)
+	if err != nil {
+		return err
+	}
+	finalReviewOwner, finalReviewRun, err := s.store.NewsContextBackfillForFinalReviewRun(ctx, run.ID)
+	if err != nil {
+		return err
+	}
+	deferFinalReview := finalReviewRun && finalReviewOwner.Status != NewsContextBackfillStatusCompleted
+	if !historicalRun && run.WindowType == NewsContextWindowDaily {
+		if err := s.PruneTransientNewsContextEmbeddings(ctx, run.WindowEnd); err != nil {
+			return fmt.Errorf("prune temporary news context indexes: %w", err)
+		}
+	}
+	reviewRequired := !historicalRun && !deferFinalReview && (run.ReviewStatus == NewsContextReviewPending || run.WindowType == NewsContextWindowDaily ||
+		(run.WindowType == NewsContextWindowFourHour && run.MaterialChangeCount > 0))
 	run.Phase = "completed"
 	run.Status = NewsContextRunStatusCompleted
 	run.ReviewStatus = NewsContextReviewNotRequired
-	if reviewRequired {
+	if deferFinalReview {
+		// ponytail: the parent backfill is the durable ordering cursor. Keeping the
+		// run completed-but-pending prevents the generic review reconciler from
+		// creating a sentinel before the paged index gate has finished.
+		run.Phase = newsContextBackfillPhaseIndexing
+		run.ReviewStatus = NewsContextReviewPending
+	} else if reviewRequired {
 		run.Status = NewsContextRunStatusWaitingReview
 		run.ReviewStatus = NewsContextReviewPending
 		run.Phase = "waiting_review"
@@ -753,50 +1418,44 @@ func (s *Service) completeNewsContextRun(ctx context.Context, run *NewsContextRu
 		return err
 	}
 	*run = updated
-	if !reviewRequired {
+	if !reviewRequired && !deferFinalReview {
 		if err := s.store.UpdateNewsThreadReviewStatusForRun(ctx, run.ID, NewsContextReviewNotRequired, run.FinishedAt); err != nil {
 			return err
 		}
 	}
-	cfg.LastRunAt = run.FinishedAt
-	cfg.LastError = ""
-	switch run.WindowType {
-	case NewsContextWindowHourly:
-		cfg.NextHourlyAt = run.FinishedAt.Add(time.Duration(cfg.HourlyIntervalSeconds) * time.Second)
-	case NewsContextWindowFourHour:
-		cfg.NextFourHourAt = run.FinishedAt.Add(time.Duration(cfg.FourHourIntervalSeconds) * time.Second)
-	case NewsContextWindowDaily:
-		cfg.NextDailyAt = run.FinishedAt.Add(time.Duration(cfg.DailyIntervalSeconds) * time.Second)
+	if !historicalRun {
+		latestConfig, err := s.GetNewsContextConfig(ctx)
+		if err != nil {
+			return err
+		}
+		latestConfig.LastRunAt = run.FinishedAt
+		latestConfig.LastError = ""
+		if run.TriggerType == NewsContextTriggerScheduled && newsContextRunUsesNaturalWindow(*run) {
+			currentNext := newsContextNextAt(latestConfig, run.WindowType)
+			if currentNext.IsZero() || !currentNext.After(run.WindowEnd) {
+				setNewsContextNextAt(&latestConfig, run.WindowType, nextNewsContextBoundary(run.WindowType, run.WindowEnd))
+			}
+		}
+		if _, err := s.store.UpsertNewsContextConfig(ctx, latestConfig); err != nil {
+			return err
+		}
 	}
-	_, _ = s.store.UpsertNewsContextConfig(ctx, cfg)
-	go s.maintainAllNewsContextEmbeddings(context.Background())
 	if reviewRequired {
 		s.triggerNewsContextReview(ctx, run)
 	}
 	return nil
 }
 
-func (s *Service) maintainAllNewsContextEmbeddings(ctx context.Context) {
-	for {
-		result, err := s.RunEmbeddingMaintenanceBatch(ctx, RequestRebuildEmbeddingAssets{
-			ObjectTypes: []string{EmbeddingObjectNewsThread, EmbeddingObjectNewsThreadVersion},
-			Limit:       newsContextMaxBatchSize,
-		})
-		if err != nil || result.Status == "running" || result.Total == 0 || result.Failed > 0 {
-			return
-		}
-		if result.Total < newsContextMaxBatchSize {
-			return
-		}
-	}
-}
-
 func (s *Service) triggerNewsContextReview(ctx context.Context, run *NewsContextRun) {
+	note := "复核最近一次消息脉络归纳对当前持仓、监控、提醒、机会和策略的影响。"
+	if cfg, err := s.GetNewsContextConfig(ctx); err == nil && cfg.AdditionalResearchPrompt != "" {
+		note += " 附加关注重点（只能增加检查项，不能覆盖固定安全规则）：" + cfg.AdditionalResearchPrompt
+	}
 	_, err := s.RunPortfolioSentinel(ctx, RequestRunPortfolioSentinel{
 		WindowType:       PortfolioSentinelWindowManual,
 		StartAt:          run.WindowStart.Format(time.RFC3339Nano),
 		EndAt:            run.WindowEnd.Format(time.RFC3339Nano),
-		Note:             "复核最近一次消息脉络归纳对当前持仓、监控和策略的影响。",
+		Note:             note,
 		NewsContextRunID: run.ID,
 	})
 	// The sentinel start path binds its run id before it can launch the agent.
@@ -815,6 +1474,14 @@ func (s *Service) triggerNewsContextReview(ctx context.Context, run *NewsContext
 }
 
 func (s *Service) reconcileNewsContextReviews(ctx context.Context) {
+	pending, err := s.store.ListNewsContextRuns(ctx, NewsContextRunListFilter{ReviewStatus: NewsContextReviewPending, Limit: 200})
+	if err == nil {
+		for i := range pending {
+			if pending[i].Status == NewsContextRunStatusWaitingReview && strings.TrimSpace(pending[i].ReviewRunID) == "" {
+				s.triggerNewsContextReview(ctx, &pending[i])
+			}
+		}
+	}
 	runs, err := s.store.ListNewsContextRuns(ctx, NewsContextRunListFilter{ReviewStatus: NewsContextReviewRunning, Limit: 200})
 	if err != nil {
 		return
@@ -878,7 +1545,9 @@ func (s *Service) RetryNewsContextRun(ctx context.Context, id string) (NewsConte
 	}
 	run.Status = NewsContextRunStatusRunning
 	run.TriggerType = NewsContextTriggerRetry
-	run.Phase = "aggregating"
+	if run.Phase != newsContextRunPhaseConverging {
+		run.Phase = newsContextRunPhaseAggregating
+	}
 	run.ErrorMessage = ""
 	run.FinishedAt = time.Time{}
 	run, err = s.store.UpdateNewsContextRun(ctx, run)
@@ -979,6 +1648,13 @@ func (s *Service) GetNewsThreadDetail(ctx context.Context, id string) (NewsThrea
 			detail.IndexError = asset.ErrorMessage
 		}
 	}
+	if verification, found, verificationErr := s.store.GetNewsContextMCPVerification(ctx, thread.ID); verificationErr == nil && found {
+		detail.MCPVerification = &verification
+		detail.MCPVerified = verification.Status == NewsContextMCPVerificationReady && verification.VersionID == thread.CurrentVersionID
+		if verification.VersionID == thread.CurrentVersionID && verification.Status == NewsContextMCPVerificationFailed {
+			detail.MCPError = verification.ErrorMessage
+		}
+	}
 	if detail.IndexStatus != NewsContextIndexReady {
 		detail.ProtectedReasons = append(detail.ProtectedReasons, "当前主题版本尚未完成向量索引")
 	}
@@ -994,6 +1670,8 @@ func (s *Service) GetNewsThreadDetail(ctx context.Context, id string) (NewsThrea
 	}
 	if !detail.MCPReadable {
 		detail.ProtectedReasons = append(detail.ProtectedReasons, "CLI 尚不能稳定检索并读取当前主题")
+	} else if !detail.MCPVerified {
+		detail.ProtectedReasons = append(detail.ProtectedReasons, "当前主题版本尚未通过真实 CLI 检索验证")
 	}
 	detail.ProtectedReasons = uniqueNonEmptyStrings(detail.ProtectedReasons)
 	return detail, nil
@@ -1105,11 +1783,22 @@ func (s *Service) GetNewsContextSummary(ctx context.Context) (NewsContextSummary
 	summary.MCPToolsReady = newsContextContainsString(mcp.RequiredTools, "stock_agent.semantic_search_news_threads") &&
 		newsContextContainsString(mcp.RequiredTools, "stock_agent.get_news_thread") &&
 		newsContextContainsString(mcp.RequiredTools, "stock_agent.list_news_context_changes")
-	if !summary.MCPEnabled {
-		summary.MCPError = "本地股票检索服务尚未启动"
-	} else if !summary.MCPToolsReady {
-		summary.MCPError = "消息脉络检索工具注册不完整"
+	mcpErrors := make([]string, 0, 2)
+	if verification, found, verificationErr := s.store.GetLatestNewsContextMCPVerification(ctx); verificationErr != nil {
+		mcpErrors = append(mcpErrors, safelog.Text(verificationErr.Error(), 300))
+	} else if found {
+		summary.MCPLastVerifiedAt = verification.CheckedAt
+		summary.MCPVerificationStatus = verification.Status
+		if verification.Status == NewsContextMCPVerificationFailed {
+			mcpErrors = append(mcpErrors, verification.ErrorMessage)
+		}
 	}
+	if !summary.MCPEnabled {
+		mcpErrors = append(mcpErrors, "本地股票检索服务尚未启动")
+	} else if !summary.MCPToolsReady {
+		mcpErrors = append(mcpErrors, "消息脉络检索工具注册不完整")
+	}
+	summary.MCPError = strings.Join(uniqueNonEmptyStrings(mcpErrors), "；")
 	return summary, nil
 }
 
@@ -1198,6 +1887,217 @@ func parseNewsContextTime(raw string) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+func prepareNewsContextSchedule(cfg *NewsContextConfig, now time.Time) bool {
+	if cfg == nil || now.IsZero() {
+		return false
+	}
+	changed := false
+	align := func(windowType string, value *time.Time) {
+		if value.IsZero() {
+			return
+		}
+		// Old releases persisted completion-time-plus-duration values. Replaying
+		// from the preceding full boundary is safe because claims only take still
+		// pending news; rounding upward could strand an entire natural window.
+		aligned := newsContextBoundaryAtOrBefore(windowType, *value)
+		if !aligned.Equal(*value) {
+			*value = aligned
+			changed = true
+		}
+	}
+	if cfg.HourlyEnabled {
+		align(NewsContextWindowHourly, &cfg.NextHourlyAt)
+		if cfg.NextHourlyAt.IsZero() {
+			cfg.NextHourlyAt = newsContextBoundaryAtOrBefore(NewsContextWindowHourly, now)
+			changed = true
+		}
+	}
+	if cfg.FourHourEnabled {
+		align(NewsContextWindowFourHour, &cfg.NextFourHourAt)
+		if cfg.NextFourHourAt.IsZero() {
+			if cfg.HourlyEnabled {
+				cfg.NextFourHourAt = firstCompletableNewsContextParentEnd(*cfg, NewsContextWindowFourHour)
+			} else {
+				cfg.NextFourHourAt = newsContextBoundaryAtOrBefore(NewsContextWindowFourHour, now)
+			}
+			changed = true
+		}
+	}
+	if cfg.DailyEnabled {
+		align(NewsContextWindowDaily, &cfg.NextDailyAt)
+		if cfg.NextDailyAt.IsZero() {
+			if cfg.FourHourEnabled {
+				cfg.NextDailyAt = firstCompletableNewsContextParentEnd(*cfg, NewsContextWindowDaily)
+			} else {
+				cfg.NextDailyAt = newsContextBoundaryAtOrBefore(NewsContextWindowDaily, now)
+			}
+			changed = true
+		}
+	}
+	return changed
+}
+
+func fastForwardNewsContextScheduleForBackfill(cfg *NewsContextConfig, cutoff time.Time) bool {
+	if cfg == nil || cutoff.IsZero() {
+		return false
+	}
+	changed := false
+	for _, windowType := range []string{NewsContextWindowHourly, NewsContextWindowFourHour, NewsContextWindowDaily} {
+		if !newsContextWindowEnabled(*cfg, windowType) {
+			continue
+		}
+		// ponytail: the frozen cutoff is the sole ownership boundary. Moving the
+		// existing cursors once avoids a second queue and months of empty runs.
+		firstStart := newsContextBoundaryAtOrBefore(windowType, cutoff)
+		hasSmallerCadence := (windowType == NewsContextWindowFourHour && cfg.HourlyEnabled) ||
+			(windowType == NewsContextWindowDaily && (cfg.HourlyEnabled || cfg.FourHourEnabled))
+		if hasSmallerCadence {
+			firstStart = newsContextBoundaryAtOrAfter(windowType, cutoff)
+		}
+		firstEnd := nextNewsContextBoundary(windowType, firstStart)
+		if current := newsContextNextAt(*cfg, windowType); current.IsZero() || current.Before(firstEnd) {
+			setNewsContextNextAt(cfg, windowType, firstEnd)
+			changed = true
+		}
+	}
+	return changed
+}
+
+func newsContextWindowEnabled(cfg NewsContextConfig, windowType string) bool {
+	switch windowType {
+	case NewsContextWindowDaily:
+		return cfg.DailyEnabled
+	case NewsContextWindowFourHour:
+		return cfg.FourHourEnabled
+	default:
+		return cfg.HourlyEnabled
+	}
+}
+
+func newsContextNextAt(cfg NewsContextConfig, windowType string) time.Time {
+	switch windowType {
+	case NewsContextWindowDaily:
+		return cfg.NextDailyAt
+	case NewsContextWindowFourHour:
+		return cfg.NextFourHourAt
+	default:
+		return cfg.NextHourlyAt
+	}
+}
+
+func setNewsContextNextAt(cfg *NewsContextConfig, windowType string, value time.Time) {
+	switch windowType {
+	case NewsContextWindowDaily:
+		cfg.NextDailyAt = value
+	case NewsContextWindowFourHour:
+		cfg.NextFourHourAt = value
+	default:
+		cfg.NextHourlyAt = value
+	}
+}
+
+func newsContextBoundaryAtOrBefore(windowType string, value time.Time) time.Time {
+	local := value.In(value.Location())
+	hour := local.Hour()
+	switch windowType {
+	case NewsContextWindowDaily:
+		hour = 0
+	case NewsContextWindowFourHour:
+		hour = hour / 4 * 4
+	}
+	return time.Date(local.Year(), local.Month(), local.Day(), hour, 0, 0, 0, local.Location())
+}
+
+func newsContextBoundaryAtOrAfter(windowType string, value time.Time) time.Time {
+	floor := newsContextBoundaryAtOrBefore(windowType, value)
+	if floor.Before(value) {
+		return nextNewsContextBoundary(windowType, floor)
+	}
+	return floor
+}
+
+func nextNewsContextBoundary(windowType string, boundary time.Time) time.Time {
+	local := boundary.In(boundary.Location())
+	switch windowType {
+	case NewsContextWindowDaily:
+		return time.Date(local.Year(), local.Month(), local.Day()+1, 0, 0, 0, 0, local.Location())
+	case NewsContextWindowFourHour:
+		return time.Date(local.Year(), local.Month(), local.Day(), local.Hour()+4, 0, 0, 0, local.Location())
+	default:
+		return time.Date(local.Year(), local.Month(), local.Day(), local.Hour()+1, 0, 0, 0, local.Location())
+	}
+}
+
+func previousNewsContextBoundary(windowType string, boundary time.Time) time.Time {
+	local := boundary.In(boundary.Location())
+	switch windowType {
+	case NewsContextWindowDaily:
+		return time.Date(local.Year(), local.Month(), local.Day()-1, 0, 0, 0, 0, local.Location())
+	case NewsContextWindowFourHour:
+		return time.Date(local.Year(), local.Month(), local.Day(), local.Hour()-4, 0, 0, 0, local.Location())
+	default:
+		return time.Date(local.Year(), local.Month(), local.Day(), local.Hour()-1, 0, 0, 0, local.Location())
+	}
+}
+
+func newsContextScheduledWindow(windowType string, endAt time.Time) (time.Time, bool) {
+	if !validNewsContextWindowType(windowType) || endAt.IsZero() || !newsContextBoundaryAtOrBefore(windowType, endAt).Equal(endAt) {
+		return time.Time{}, false
+	}
+	startAt := previousNewsContextBoundary(windowType, endAt)
+	return startAt, endAt.After(startAt)
+}
+
+func newsContextRunUsesNaturalWindow(run NewsContextRun) bool {
+	startAt, ok := newsContextScheduledWindow(run.WindowType, run.WindowEnd)
+	return ok && startAt.Equal(run.WindowStart)
+}
+
+func firstCompletableNewsContextParentEnd(cfg NewsContextConfig, parentType string) time.Time {
+	childType := NewsContextWindowHourly
+	if parentType == NewsContextWindowDaily {
+		childType = NewsContextWindowFourHour
+	}
+	childStart, ok := newsContextScheduledWindow(childType, newsContextNextAt(cfg, childType))
+	if !ok {
+		return time.Time{}
+	}
+	parentStart := newsContextBoundaryAtOrAfter(parentType, childStart)
+	return nextNewsContextBoundary(parentType, parentStart)
+}
+
+func (s *Service) newsContextParentWindowReadiness(ctx context.Context, cfg NewsContextConfig, parentType string, startAt, endAt time.Time) (bool, bool, error) {
+	childType := ""
+	switch {
+	case parentType == NewsContextWindowFourHour && cfg.HourlyEnabled:
+		childType = NewsContextWindowHourly
+	case parentType == NewsContextWindowDaily && cfg.FourHourEnabled:
+		childType = NewsContextWindowFourHour
+	default:
+		return true, false, nil
+	}
+	nextChildAt := newsContextNextAt(cfg, childType)
+	allComplete := true
+	for childStart := startAt; childStart.Before(endAt); {
+		childEnd := nextNewsContextBoundary(childType, childStart)
+		if childEnd.After(endAt) {
+			return false, false, ErrInvalidNewsContextInput
+		}
+		complete, err := s.store.IsNewsContextWindowComplete(ctx, childType, childStart, childEnd)
+		if err != nil {
+			return false, false, err
+		}
+		if !complete {
+			allComplete = false
+			if !nextChildAt.IsZero() && childEnd.Before(nextChildAt) {
+				return false, true, nil
+			}
+		}
+		childStart = childEnd
+	}
+	return allComplete, false, nil
 }
 
 func newsContextWindowDuration(windowType string) time.Duration {

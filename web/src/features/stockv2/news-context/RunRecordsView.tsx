@@ -9,10 +9,12 @@ import {
   coverageStatusTone,
   formatNewsContextBytes,
   formatNewsContextTime,
+  newsContextRunCoverage,
   runStatusLabel,
   runStatusTone,
   windowTypeLabel,
 } from "./model";
+import { NewsContextBackfillPanel } from "./NewsContextBackfillPanel";
 
 type RunKind = "aggregation" | "cleanup";
 type RunStatusFilter = "all" | "pending" | "running" | "waiting_review" | "partial" | "completed" | "failed";
@@ -43,7 +45,7 @@ export function RunRecordsView({
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const hasRunning = items.some((item) => item.status === "running" || item.status === "pending" || item.status === "queued");
+  const hasRunning = items.some((item) => item.status === "running" || item.status === "pending" || item.status === "queued" || item.status === "waiting_review");
 
   async function load(showLoading = false) {
     if (showLoading && items.length === 0) setLoading(true);
@@ -90,6 +92,7 @@ export function RunRecordsView({
     try {
       await actions.api<StockV2NewsContextRun>("/api/stockv2/news-context/runs", {
         method: "POST",
+        csrf: actions.csrf,
         body: { windowType },
       });
       actions.setToast(`已触发${windowTypeLabel(windowType)}归纳`, "good");
@@ -114,7 +117,7 @@ export function RunRecordsView({
     if (!confirmed) return;
     setBusy("create");
     try {
-      await actions.api<StockV2NewsContextRun>("/api/stockv2/news-context/cleanup-runs", { method: "POST" });
+      await actions.api<StockV2NewsContextRun>("/api/stockv2/news-context/cleanup-runs", { method: "POST", csrf: actions.csrf });
       actions.setToast("已触发安全清理", "good");
       if (page !== 1) setPage(1);
       else await load();
@@ -131,7 +134,7 @@ export function RunRecordsView({
     try {
       await actions.api<StockV2NewsContextRun>(
         `/api/stockv2/news-context/runs/${encodeURIComponent(run.id)}/retry`,
-        { method: "POST" },
+        { method: "POST", csrf: actions.csrf },
       );
       actions.setToast("已从失败阶段重新执行", "good");
       await load();
@@ -148,6 +151,9 @@ export function RunRecordsView({
 
   return (
     <div className="grid gap-4">
+      {kind === "aggregation" ? (
+        <NewsContextBackfillPanel actions={actions} onChanged={onChanged} refreshKey={refreshKey} />
+      ) : null}
       <section className="rounded-lg border border-[var(--line)] bg-[var(--surface)]">
         <header className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] p-4">
           <div>
@@ -155,7 +161,7 @@ export function RunRecordsView({
             <p className="mt-1 mb-0 text-xs text-[var(--muted)]">
               {kind === "aggregation"
                 ? "观察每小时、每四小时和每日的覆盖、主题变化与公开资料核实。"
-                : "区分当前存量与历史处理量，追踪释放空间、保护原因和失败阶段。"}
+                : "区分当前存量与历史处理量，追踪移除内容量、保护原因和失败阶段。"}
             </p>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
@@ -283,8 +289,7 @@ function RunRow({
   onRetry: () => void;
   run: StockV2NewsContextRun;
 }) {
-  const processed = run.processedNewsCount ?? 0;
-  const total = run.totalNewsCount ?? 0;
+  const coverage = newsContextRunCoverage(run);
   return (
     <article className="grid grid-cols-[180px_minmax(0,1fr)_auto] items-center gap-4 p-4 max-lg:grid-cols-1">
       <div>
@@ -296,18 +301,26 @@ function RunRow({
       </div>
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--muted-strong)]">
-          <span>处理 {processed}{total ? ` / ${total}` : ""} 条</span>
           {kind === "aggregation" ? (
             <>
+              <span>总新闻 {coverage.total}</span>
+              <span>覆盖 {coverage.covered}</span>
+              <span>噪音 {coverage.noise}</span>
+              <span>延后 {coverage.deferred}</span>
+              <span>遗漏/等待 {coverage.waiting}</span>
+              <span>覆盖率 {coverage.percent}%</span>
               <span>新建 {run.createdThemeCount ?? 0}</span>
               <span>更新 {run.updatedThemeCount ?? 0}</span>
               <span>冲突 {run.conflictThemeCount ?? 0}</span>
             </>
           ) : (
             <>
+              <span>处理 {run.processedNewsCount ?? 0}{run.totalNewsCount ? ` / ${run.totalNewsCount}` : ""} 条</span>
+              <span>符合条件 {run.eligibleCount ?? "未知"}</span>
               <span>删除 {run.deletedNewsCount ?? 0}</span>
               <span>保留 {run.retainedNewsCount ?? 0}</span>
-              <span>释放 {formatNewsContextBytes(run.releasedBytes)}</span>
+              <span className={typeof run.failedCount === "number" && run.failedCount > 0 ? "text-[var(--danger)]" : ""}>失败 {run.failedCount ?? "未知"}</span>
+              <span>移除内容 {formatNewsContextBytes(run.releasedBytes)}</span>
             </>
           )}
         </div>
@@ -329,6 +342,7 @@ function RunRow({
 
 function RunDetailDrawer({ kind, run, onClose }: { kind: RunKind; run: StockV2NewsContextRun; onClose: () => void }) {
   // ponytail: 列表接口已经返回完整观测字段，详情直接复用当前记录，避免再造一个只读详情请求。
+  const coverage = newsContextRunCoverage(run);
   const rows: Array<[string, string | number]> = [
     ["运行身份", run.id],
     ["运行类型", kind === "aggregation" ? windowTypeLabel(run.windowType) : "安全清理"],
@@ -337,25 +351,31 @@ function RunDetailDrawer({ kind, run, onClose }: { kind: RunKind; run: StockV2Ne
     ["时间范围", `${formatNewsContextTime(run.windowStart)} 至 ${formatNewsContextTime(run.windowEnd)}`],
     ["开始", formatNewsContextTime(run.startedAt || run.createdAt)],
     ["完成", formatNewsContextTime(run.finishedAt)],
-    ["消息处理", `${run.processedNewsCount ?? 0}${run.totalNewsCount ? ` / ${run.totalNewsCount}` : ""}`],
   ];
   if (kind === "aggregation") {
     rows.push(
+      ["总新闻", coverage.total],
+      ["已覆盖", coverage.covered],
+      ["重复噪音", coverage.noise],
+      ["受保护延后", coverage.deferred],
+      ["遗漏或等待", coverage.waiting],
+      ["覆盖率", `${coverage.percent}%`],
       ["新建主题", run.createdThemeCount ?? 0],
       ["更新主题", run.updatedThemeCount ?? 0],
       ["保持不变", run.unchangedThemeCount ?? 0],
       ["存在冲突", run.conflictThemeCount ?? 0],
-      ["等待处理", run.pendingThemeCount ?? 0],
       ["实质变化", run.materialThemeCount ?? 0],
       ["公开资料核实", run.externalResearchStatus === "recorded" ? "已留痕" : run.externalResearchStatus === "not_required" ? "本次无需核实" : run.externalResearchStatus || "未记录"],
     );
   } else {
     rows.push(
+      ["消息处理", `${run.processedNewsCount ?? 0}${run.totalNewsCount ? ` / ${run.totalNewsCount}` : ""}`],
+      ["符合清理条件", run.eligibleCount ?? "未知"],
       ["删除新闻", run.deletedNewsCount ?? 0],
       ["保留新闻", run.retainedNewsCount ?? 0],
-      ["等待清理", run.pendingCleanupCount ?? 0],
       ["受保护", run.protectedNewsCount ?? 0],
-      ["释放空间", formatNewsContextBytes(run.releasedBytes)],
+      ["处理失败", run.failedCount ?? "未知"],
+      ["移除内容量", formatNewsContextBytes(run.releasedBytes)],
     );
   }
   return (

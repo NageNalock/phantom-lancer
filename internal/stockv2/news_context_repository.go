@@ -21,11 +21,11 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 			hourly_enabled INTEGER NOT NULL DEFAULT 1,
 			four_hour_enabled INTEGER NOT NULL DEFAULT 1,
 			daily_enabled INTEGER NOT NULL DEFAULT 1,
-			batch_size INTEGER NOT NULL DEFAULT 25,
 			hourly_interval_seconds INTEGER NOT NULL DEFAULT 3600,
 			four_hour_interval_seconds INTEGER NOT NULL DEFAULT 14400,
 			daily_interval_seconds INTEGER NOT NULL DEFAULT 86400,
 			cleanup_grace_seconds INTEGER NOT NULL DEFAULT 86400,
+			additional_research_prompt TEXT NOT NULL DEFAULT '',
 			next_hourly_at DATETIME,
 			next_four_hour_at DATETIME,
 			next_daily_at DATETIME,
@@ -34,13 +34,6 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 			last_error TEXT,
 			updated_at DATETIME NOT NULL
 		);
-		INSERT OR IGNORE INTO stockv2_news_context_config
-			(id, enabled, auto_cleanup_enabled, hourly_enabled, four_hour_enabled,
-			 daily_enabled, batch_size, hourly_interval_seconds,
-			 four_hour_interval_seconds, daily_interval_seconds,
-			 cleanup_grace_seconds, updated_at)
-		VALUES (?, 0, 0, 1, 1, 1, 25, 3600, 14400, 86400, 86400, datetime('now'));
-
 		CREATE TABLE IF NOT EXISTS stockv2_news_context_runs (
 			id TEXT PRIMARY KEY,
 			window_type TEXT NOT NULL,
@@ -89,6 +82,7 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 			version_id TEXT,
 			agent_run_id TEXT,
 			error_message TEXT,
+			source_at DATETIME,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			UNIQUE(run_id, object_type, object_id),
@@ -118,8 +112,22 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_news_context_cleanup_status
 			ON stockv2_news_context_cleanup_runs(status, created_at);
-	`, NewsContextConfigIDDefault); err != nil {
+	`); err != nil {
 		return wrapError(err, "ensure news context sqlite schema")
+	}
+	if err := s.ensureNewsContextConfigColumns(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "stockv2_news_context_run_items", "source_at", "DATETIME"); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO stockv2_news_context_config
+		(id, enabled, auto_cleanup_enabled, hourly_enabled, four_hour_enabled,
+		 daily_enabled, hourly_interval_seconds, four_hour_interval_seconds,
+		 daily_interval_seconds, cleanup_grace_seconds, additional_research_prompt, updated_at)
+		VALUES (?, 0, 0, 1, 1, 1, 3600, 14400, 86400, 86400, '', datetime('now'))`,
+		NewsContextConfigIDDefault); err != nil {
+		return wrapError(err, "seed news context config")
 	}
 
 	if s.marketDB == nil || s.marketDB.db == nil {
@@ -251,15 +259,29 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 	return nil
 }
 
+func (s *Store) ensureNewsContextConfigColumns(ctx context.Context) error {
+	if err := s.ensureColumn(ctx, "stockv2_news_context_config", "additional_research_prompt", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return wrapError(err, "add news context research prompt column")
+	}
+	var legacyBatchSize int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`,
+		"stockv2_news_context_config", "batch_size").Scan(&legacyBatchSize); err != nil {
+		return wrapError(err, "inspect legacy news context batch column")
+	}
+	if legacyBatchSize == 0 {
+		return nil
+	}
+	// ponytail: the old value represented a model-call detail rather than a
+	// product limit. Drop it once so runtime code has no hidden compatibility path.
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE stockv2_news_context_config DROP COLUMN batch_size`); err != nil {
+		return wrapError(err, "remove legacy news context batch column")
+	}
+	return nil
+}
+
 func normalizeNewsContextConfigRecord(item NewsContextConfig) NewsContextConfig {
 	if item.ID == "" {
 		item.ID = NewsContextConfigIDDefault
-	}
-	if item.BatchSize <= 0 {
-		item.BatchSize = newsContextDefaultBatchSize
-	}
-	if item.BatchSize > newsContextMaxBatchSize {
-		item.BatchSize = newsContextMaxBatchSize
 	}
 	if item.HourlyIntervalSeconds <= 0 {
 		item.HourlyIntervalSeconds = 3600
@@ -270,7 +292,7 @@ func normalizeNewsContextConfigRecord(item NewsContextConfig) NewsContextConfig 
 	if item.DailyIntervalSeconds <= 0 {
 		item.DailyIntervalSeconds = 86400
 	}
-	if item.CleanupGraceSeconds <= 0 {
+	if !validNewsContextCleanupGrace(item.CleanupGraceSeconds) {
 		item.CleanupGraceSeconds = 86400
 	}
 	return item
@@ -282,15 +304,16 @@ func (s *Store) GetNewsContextConfig(ctx context.Context) (NewsContextConfig, er
 	var nextHourly, nextFourHour, nextDaily, lastRun, lastCleanup sql.NullTime
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, enabled, auto_cleanup_enabled, hourly_enabled, four_hour_enabled,
-		       daily_enabled, batch_size, hourly_interval_seconds,
+		       daily_enabled, hourly_interval_seconds,
 		       four_hour_interval_seconds, daily_interval_seconds,
-		       cleanup_grace_seconds, next_hourly_at, next_four_hour_at, next_daily_at,
+		       cleanup_grace_seconds, COALESCE(additional_research_prompt,''),
+		       next_hourly_at, next_four_hour_at, next_daily_at,
 		       last_run_at, last_cleanup_at, COALESCE(last_error,''), updated_at
 		FROM stockv2_news_context_config WHERE id = ?
 	`, NewsContextConfigIDDefault).Scan(
 		&item.ID, &enabled, &autoCleanup, &hourly, &fourHour, &daily,
-		&item.BatchSize, &item.HourlyIntervalSeconds, &item.FourHourIntervalSeconds,
-		&item.DailyIntervalSeconds, &item.CleanupGraceSeconds, &nextHourly,
+		&item.HourlyIntervalSeconds, &item.FourHourIntervalSeconds,
+		&item.DailyIntervalSeconds, &item.CleanupGraceSeconds, &item.AdditionalResearchPrompt, &nextHourly,
 		&nextFourHour, &nextDaily, &lastRun, &lastCleanup, &item.LastError, &item.UpdatedAt,
 	)
 	if err != nil {
@@ -315,27 +338,28 @@ func (s *Store) UpsertNewsContextConfig(ctx context.Context, item NewsContextCon
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO stockv2_news_context_config (
 			id, enabled, auto_cleanup_enabled, hourly_enabled, four_hour_enabled,
-			daily_enabled, batch_size, hourly_interval_seconds,
+			daily_enabled, hourly_interval_seconds,
 			four_hour_interval_seconds, daily_interval_seconds, cleanup_grace_seconds,
-			next_hourly_at, next_four_hour_at, next_daily_at, last_run_at,
+			additional_research_prompt, next_hourly_at, next_four_hour_at, next_daily_at, last_run_at,
 			last_cleanup_at, last_error, updated_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			enabled=excluded.enabled, auto_cleanup_enabled=excluded.auto_cleanup_enabled,
 			hourly_enabled=excluded.hourly_enabled, four_hour_enabled=excluded.four_hour_enabled,
-			daily_enabled=excluded.daily_enabled, batch_size=excluded.batch_size,
+			daily_enabled=excluded.daily_enabled,
 			hourly_interval_seconds=excluded.hourly_interval_seconds,
 			four_hour_interval_seconds=excluded.four_hour_interval_seconds,
 			daily_interval_seconds=excluded.daily_interval_seconds,
 			cleanup_grace_seconds=excluded.cleanup_grace_seconds,
+			additional_research_prompt=excluded.additional_research_prompt,
 			next_hourly_at=excluded.next_hourly_at, next_four_hour_at=excluded.next_four_hour_at,
 			next_daily_at=excluded.next_daily_at, last_run_at=excluded.last_run_at,
 			last_cleanup_at=excluded.last_cleanup_at, last_error=excluded.last_error,
 			updated_at=excluded.updated_at
 	`, item.ID, boolToInt(item.Enabled), boolToInt(item.AutoCleanupEnabled),
 		boolToInt(item.HourlyEnabled), boolToInt(item.FourHourEnabled), boolToInt(item.DailyEnabled),
-		item.BatchSize, item.HourlyIntervalSeconds, item.FourHourIntervalSeconds,
-		item.DailyIntervalSeconds, item.CleanupGraceSeconds, nullableTime(item.NextHourlyAt),
+		item.HourlyIntervalSeconds, item.FourHourIntervalSeconds,
+		item.DailyIntervalSeconds, item.CleanupGraceSeconds, item.AdditionalResearchPrompt, nullableTime(item.NextHourlyAt),
 		nullableTime(item.NextFourHourAt), nullableTime(item.NextDailyAt), nullableTime(item.LastRunAt),
 		nullableTime(item.LastCleanupAt), nullableString(item.LastError), item.UpdatedAt)
 	if err != nil {
@@ -445,6 +469,42 @@ func (s *Store) getNewsContextRunByWindow(ctx context.Context, windowType string
 	return item, wrapError(err, "get news context run by window")
 }
 
+func (s *Store) IsNewsContextWindowComplete(ctx context.Context, windowType string, start, end time.Time) (bool, error) {
+	if !validNewsContextWindowType(windowType) || start.IsZero() || !end.After(start) {
+		return false, ErrInvalidNewsContextInput
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_context_runs
+		WHERE window_type=? AND window_start=? AND window_end=? AND status IN (?,?)`,
+		windowType, start, end, NewsContextRunStatusCompleted, NewsContextRunStatusWaitingReview).Scan(&count)
+	return count > 0, wrapError(err, "check complete news context window")
+}
+
+func (s *Store) ResetPendingNewsContextRunManifest(ctx context.Context, runID string) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return ErrInvalidNewsContextInput
+	}
+	return s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		var status string
+		if err := tx.QueryRowContext(ctx, `SELECT status FROM stockv2_news_context_runs WHERE id=?`, runID).Scan(&status); err != nil {
+			return wrapError(err, "load pending news context run")
+		}
+		if status != NewsContextRunStatusPending {
+			return ErrInvalidNewsContextInput
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_news_context_run_items WHERE run_id=?`, runID); err != nil {
+			return wrapError(err, "reset pending news context manifest")
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE stockv2_news_context_runs SET
+			input_count=0,processed_count=0,covered_count=0,noise_count=0,deferred_count=0,
+			created_thread_count=0,updated_thread_count=0,material_change_count=0,
+			conflict_count=0,research_count=0,pending_count=0,current_agent_run_id=NULL,
+			error_message=NULL,updated_at=? WHERE id=?`, time.Now(), runID)
+		return wrapError(err, "clear pending news context counters")
+	})
+}
+
 func (s *Store) GetNewsContextRun(ctx context.Context, id string) (NewsContextRun, error) {
 	item, err := scanNewsContextRun(s.db.QueryRowContext(ctx, newsContextRunSelectSQL+` WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -489,17 +549,6 @@ func (s *Store) FindNewsContextRunByReviewRunID(ctx context.Context, reviewRunID
 	return item, err == nil, wrapError(err, "find news context run by review run id")
 }
 
-func (s *Store) HasCompletedDailyNewsContextCheckpointAfter(ctx context.Context, after time.Time) (bool, error) {
-	if after.IsZero() {
-		return false, ErrInvalidNewsContextInput
-	}
-	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_context_runs
-		WHERE window_type=? AND status=? AND review_status=? AND updated_at>=?`,
-		NewsContextWindowDaily, NewsContextRunStatusCompleted, NewsContextReviewCompleted, after).Scan(&count)
-	return count > 0, wrapError(err, "check completed daily news context checkpoint")
-}
-
 func (s *Store) UpdateNewsContextRun(ctx context.Context, item NewsContextRun) (NewsContextRun, error) {
 	item.UpdatedAt = time.Now()
 	result, err := s.db.ExecContext(ctx, `
@@ -535,22 +584,46 @@ func (s *Store) HasRunningNewsContextRun(ctx context.Context, windowTypes ...str
 	}
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_context_runs
-		WHERE status IN (?, ?) AND (? = '' OR window_type = ?)`, NewsContextRunStatusRunning,
-		NewsContextRunStatusWaitingReview, strings.TrimSpace(windowType), strings.TrimSpace(windowType)).Scan(&count)
+		WHERE status=? AND (? = '' OR window_type = ?)`, NewsContextRunStatusRunning,
+		strings.TrimSpace(windowType), strings.TrimSpace(windowType)).Scan(&count)
 	return count > 0, wrapError(err, "has running news context run")
 }
 
 func (s *Store) FailRunningNewsContextRuns(ctx context.Context, reason string) (int64, error) {
 	now := time.Now()
+	// A backfill reuses its persisted run manifest after restart. Reset only the
+	// interrupted model slice; an explicitly paused parent remains paused.
+	if _, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_run_items SET
+		status=?, agent_run_id=NULL, error_message=NULL, updated_at=?
+		WHERE status=? AND run_id IN (
+			SELECT current_run_id FROM stockv2_news_context_backfills
+			WHERE current_run_id IS NOT NULL AND status IN (?,?)
+		)`, NewsContextRunItemPending, now, NewsContextRunItemRunning,
+		NewsContextBackfillStatusRunning, NewsContextBackfillStatusPaused); err != nil {
+		return 0, wrapError(err, "recover interrupted news context backfill items")
+	}
+	recovered, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_runs SET
+		status=?, phase=CASE WHEN phase IN (?,?) THEN phase ELSE 'queued' END,
+		current_agent_run_id=NULL, error_message=NULL,
+		finished_at=NULL, updated_at=? WHERE status=? AND id IN (
+			SELECT current_run_id FROM stockv2_news_context_backfills
+			WHERE current_run_id IS NOT NULL AND status IN (?,?)
+		)`, NewsContextRunStatusPending, newsContextRunPhaseAggregating,
+		newsContextRunPhaseConverging, now, NewsContextRunStatusRunning,
+		NewsContextBackfillStatusRunning, NewsContextBackfillStatusPaused)
+	if err != nil {
+		return 0, wrapError(err, "recover interrupted news context backfill run")
+	}
 	result, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_runs
 		SET status=?, error_message=?, finished_at=?, updated_at=?
-		WHERE status IN (?, ?)`, NewsContextRunStatusFailed, nullableString(reason), now, now,
-		NewsContextRunStatusRunning, NewsContextRunStatusWaitingReview)
+		WHERE status=?`, NewsContextRunStatusFailed, nullableString(reason), now, now,
+		NewsContextRunStatusRunning)
 	if err != nil {
 		return 0, wrapError(err, "fail running news context runs")
 	}
 	rows, _ := result.RowsAffected()
-	return rows, nil
+	recoveredRows, _ := recovered.RowsAffected()
+	return rows + recoveredRows, nil
 }
 
 func newsContextRunWhere(filter NewsContextRunListFilter) (string, []any) {
@@ -598,14 +671,16 @@ func (s *Store) CountNewsContextRuns(ctx context.Context, filter NewsContextRunL
 const newsContextRunItemSelectSQL = `
 	SELECT id, run_id, object_type, object_id, status, COALESCE(disposition,''),
 	       COALESCE(thread_id,''), COALESCE(version_id,''), COALESCE(agent_run_id,''),
-	       COALESCE(error_message,''), created_at, updated_at
+	       COALESCE(error_message,''), source_at, created_at, updated_at
 	FROM stockv2_news_context_run_items`
 
 func scanNewsContextRunItem(row rowScanner) (NewsContextRunItem, error) {
 	var item NewsContextRunItem
+	var sourceAt sql.NullTime
 	err := row.Scan(&item.ID, &item.RunID, &item.ObjectType, &item.ObjectID, &item.Status,
 		&item.Disposition, &item.ThreadID, &item.VersionID, &item.AgentRunID,
-		&item.ErrorMessage, &item.CreatedAt, &item.UpdatedAt)
+		&item.ErrorMessage, &sourceAt, &item.CreatedAt, &item.UpdatedAt)
+	assignNullTime(&item.SourceAt, sourceAt)
 	return item, err
 }
 
@@ -629,13 +704,13 @@ func (s *Store) AddNewsContextRunItems(ctx context.Context, items []NewsContextR
 			_, err := tx.ExecContext(ctx, `
 				INSERT INTO stockv2_news_context_run_items
 					(id, run_id, object_type, object_id, status, disposition, thread_id,
-					 version_id, agent_run_id, error_message, created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					 version_id, agent_run_id, error_message, source_at, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(run_id, object_type, object_id) DO NOTHING
 			`, item.ID, item.RunID, item.ObjectType, item.ObjectID, item.Status,
 				nullableString(item.Disposition), nullableString(item.ThreadID),
 				nullableString(item.VersionID), nullableString(item.AgentRunID),
-				nullableString(item.ErrorMessage), item.CreatedAt, item.UpdatedAt)
+				nullableString(item.ErrorMessage), nullableTime(item.SourceAt), item.CreatedAt, item.UpdatedAt)
 			if err != nil {
 				return wrapError(err, "add news context run item")
 			}
@@ -663,7 +738,10 @@ func (s *Store) ListNewsContextRunItems(ctx context.Context, filter NewsContextR
 	where, args := newsContextRunItemWhere(filter)
 	args = append(args, normalizedPageLimit(filter.Limit, 1000), normalizedPageOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, newsContextRunItemSelectSQL+` WHERE `+where+`
-		ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?`, args...)
+		ORDER BY CASE WHEN object_type='news_event' THEN 0 ELSE 1 END,
+		CASE WHEN object_type='news_event' THEN COALESCE(source_at,created_at) END ASC,
+		CASE WHEN object_type='news_thread' THEN COALESCE(NULLIF(thread_id,''),object_id) END ASC,
+		COALESCE(source_at,created_at) ASC,id ASC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, wrapError(err, "list news context run items")
 	}
@@ -675,6 +753,28 @@ func (s *Store) CountNewsContextRunItems(ctx context.Context, filter NewsContext
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_context_run_items WHERE `+where, args...).Scan(&count)
 	return count, wrapError(err, "count news context run items")
+}
+
+func (s *Store) ListNewsContextRunOutputVersionIDs(ctx context.Context, runID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT version_id
+		FROM stockv2_news_context_run_items
+		WHERE run_id=? AND status=? AND TRIM(COALESCE(version_id,''))<>''
+		GROUP BY version_id
+		ORDER BY MIN(COALESCE(source_at,created_at)) ASC,version_id ASC`,
+		strings.TrimSpace(runID), NewsContextRunItemCompleted)
+	if err != nil {
+		return nil, wrapError(err, "list news context run output versions")
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, wrapError(err, "scan news context run output version")
+		}
+		ids = append(ids, id)
+	}
+	return ids, wrapError(rows.Err(), "iterate news context run output versions")
 }
 
 func (s *Store) CountNewsContextRunThreadDisposition(ctx context.Context, runID, disposition string) (int, error) {
@@ -1062,7 +1162,8 @@ const newsThreadVersionSelectSQL = `
 	       inferences_json, counter_evidence_json, open_questions_json, leaders_json,
 	       followers_json, laggards_json, next_candidates_json, catalysts_json,
 	       invalidations_json, relations_json, COALESCE(research_status,''), evidence_count,
-	       review_status, index_status, COALESCE(index_error,''), created_at
+	       review_status, index_status, COALESCE(index_error,''),
+	       COALESCE(effective_at, created_at), created_at
 	FROM stockv2_news_thread_versions`
 
 func scanNewsThreadVersion(row rowScanner) (NewsThreadVersion, error) {
@@ -1075,7 +1176,7 @@ func scanNewsThreadVersion(row rowScanner) (NewsThreadVersion, error) {
 		&material, &item.Confidence, &industries, &symbols, &funds, &facts, &inferences,
 		&counterEvidence, &openQuestions, &leaders, &followers, &laggards, &nextCandidates,
 		&catalysts, &invalidations, &relations, &item.ResearchStatus, &item.EvidenceCount,
-		&item.ReviewStatus, &item.IndexStatus, &item.IndexError, &item.CreatedAt)
+		&item.ReviewStatus, &item.IndexStatus, &item.IndexError, &item.EffectiveAt, &item.CreatedAt)
 	if err != nil {
 		return item, err
 	}
@@ -1110,6 +1211,9 @@ func normalizeNewsThreadVersion(item NewsThreadVersion) NewsThreadVersion {
 	if item.CreatedAt.IsZero() {
 		item.CreatedAt = time.Now()
 	}
+	if item.EffectiveAt.IsZero() {
+		item.EffectiveAt = item.CreatedAt
+	}
 	return item
 }
 
@@ -1124,7 +1228,8 @@ func newsThreadVersionArgs(item NewsThreadVersion) []any {
 		marshalStrings(item.OpenQuestions), marshalStrings(item.Leaders), marshalStrings(item.Followers),
 		marshalStrings(item.Laggards), marshalStrings(item.NextCandidates), marshalStrings(item.Catalysts),
 		marshalStrings(item.Invalidations), string(relations), nullableString(item.ResearchStatus),
-		item.EvidenceCount, item.ReviewStatus, item.IndexStatus, nullableString(item.IndexError), item.CreatedAt,
+		item.EvidenceCount, item.ReviewStatus, item.IndexStatus, nullableString(item.IndexError),
+		item.EffectiveAt, item.CreatedAt,
 	}
 }
 
@@ -1134,8 +1239,8 @@ func insertNewsThreadVersionTx(ctx context.Context, tx *sql.Tx, item NewsThreadV
 		latest_change,material_change,confidence,industries_json,symbols_json,funds_json,
 		facts_json,inferences_json,counter_evidence_json,open_questions_json,leaders_json,
 		followers_json,laggards_json,next_candidates_json,catalysts_json,invalidations_json,
-		relations_json,research_status,evidence_count,review_status,index_status,index_error,created_at
-	) VALUES (`+sqlPlaceholders(32)+`) ON CONFLICT DO NOTHING`, newsThreadVersionArgs(item)...)
+		relations_json,research_status,evidence_count,review_status,index_status,index_error,effective_at,created_at
+	) VALUES (`+sqlPlaceholders(33)+`) ON CONFLICT DO NOTHING`, newsThreadVersionArgs(item)...)
 	return err
 }
 
@@ -1186,11 +1291,11 @@ func newsThreadVersionWhere(filter NewsThreadVersionListFilter) (string, []any) 
 		args = append(args, boolToInt(*filter.MaterialChange))
 	}
 	if !filter.Since.IsZero() {
-		parts = append(parts, "created_at>=?")
+		parts = append(parts, "COALESCE(effective_at,created_at)>=?")
 		args = append(args, filter.Since)
 	}
 	if !filter.Until.IsZero() {
-		parts = append(parts, "created_at<?")
+		parts = append(parts, "COALESCE(effective_at,created_at)<?")
 		args = append(args, filter.Until)
 	}
 	return strings.Join(parts, " AND "), args
@@ -1200,11 +1305,28 @@ func (s *Store) ListNewsThreadVersions(ctx context.Context, filter NewsThreadVer
 	where, args := newsThreadVersionWhere(filter)
 	args = append(args, normalizedPageLimit(filter.Limit, 500), normalizedPageOffset(filter.Offset))
 	rows, err := s.marketDB.db.QueryContext(ctx, newsThreadVersionSelectSQL+` WHERE `+where+`
-		ORDER BY created_at DESC, version_no DESC LIMIT ? OFFSET ?`, args...)
+		ORDER BY COALESCE(effective_at,created_at) DESC, version_no DESC,
+		thread_id ASC, id ASC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, wrapError(err, "list news thread versions")
 	}
 	return scanRows(rows, scanNewsThreadVersion, "scan news thread version", "iterate news thread versions")
+}
+
+func (s *Store) ListLatestNewsThreadVersionsAt(ctx context.Context, at time.Time, limit, offset int) ([]NewsThreadVersion, error) {
+	if at.IsZero() {
+		return nil, ErrInvalidNewsContextInput
+	}
+	rows, err := s.marketDB.db.QueryContext(ctx, newsThreadVersionSelectSQL+`
+		WHERE COALESCE(effective_at,created_at)<=?
+		QUALIFY ROW_NUMBER() OVER (
+			PARTITION BY thread_id ORDER BY COALESCE(effective_at,created_at) DESC,version_no DESC,id DESC
+		)=1
+		ORDER BY thread_id ASC LIMIT ? OFFSET ?`, at, normalizedPageLimit(limit, 500), normalizedPageOffset(offset))
+	if err != nil {
+		return nil, wrapError(err, "list latest news thread versions at time")
+	}
+	return scanRows(rows, scanNewsThreadVersion, "scan latest historical news thread version", "iterate latest historical news thread versions")
 }
 
 func (s *Store) CountNewsThreadVersions(ctx context.Context, filter NewsThreadVersionListFilter) (int, error) {
@@ -1233,18 +1355,29 @@ func (s *Store) FindCompletedDailyNewsThreadVersionAfter(ctx context.Context, th
 }
 
 const newsThreadEvidenceSelectSQL = `
-	SELECT id, thread_id, version_id, run_id, COALESCE(news_event_id,''),
-	       COALESCE(source,''), title, COALESCE(summary,''), COALESCE(url,''),
-	       COALESCE(content_hash,''), COALESCE(relation,''), event_at, created_at
-	FROM stockv2_news_thread_evidence`
+	SELECT e.id, e.thread_id, e.version_id, e.run_id, COALESCE(e.news_event_id,''),
+	       COALESCE(e.source,''), e.title, COALESCE(e.summary,''), COALESCE(e.url,''),
+	       COALESCE(e.content_hash,''), COALESCE(e.relation,''), e.event_at,
+	       CASE
+	         WHEN TRIM(COALESCE(e.news_event_id,''))='' OR n.id IS NULL THEN NULL
+	         WHEN n.compacted_at IS NOT NULL OR COALESCE(n.context_status,'pending')='compacted' THEN TRUE
+	         ELSE FALSE
+	       END,
+	       e.created_at
+	FROM stockv2_news_thread_evidence e
+	LEFT JOIN stockv2_news_events n ON n.id=e.news_event_id`
 
 func scanNewsThreadEvidence(row rowScanner) (NewsThreadEvidence, error) {
 	var item NewsThreadEvidence
 	var eventAt sql.NullTime
+	var originalNewsDeleted sql.NullBool
 	err := row.Scan(&item.ID, &item.ThreadID, &item.VersionID, &item.RunID, &item.NewsEventID,
 		&item.Source, &item.Title, &item.Summary, &item.URL, &item.ContentHash,
-		&item.Relation, &eventAt, &item.CreatedAt)
+		&item.Relation, &eventAt, &originalNewsDeleted, &item.CreatedAt)
 	assignNullTime(&item.EventAt, eventAt)
+	if originalNewsDeleted.Valid {
+		item.OriginalNewsDeleted = &originalNewsDeleted.Bool
+	}
 	return item, err
 }
 
@@ -1288,8 +1421,8 @@ func newsThreadEvidenceWhere(filter NewsThreadEvidenceListFilter) (string, []any
 	parts := []string{"1=1"}
 	args := []any{}
 	for _, pair := range []struct{ column, value string }{
-		{"thread_id", filter.ThreadID}, {"version_id", filter.VersionID},
-		{"run_id", filter.RunID}, {"news_event_id", filter.NewsEventID},
+		{"e.thread_id", filter.ThreadID}, {"e.version_id", filter.VersionID},
+		{"e.run_id", filter.RunID}, {"e.news_event_id", filter.NewsEventID},
 	} {
 		if strings.TrimSpace(pair.value) != "" {
 			parts = append(parts, pair.column+"=?")
@@ -1303,7 +1436,7 @@ func (s *Store) ListNewsThreadEvidence(ctx context.Context, filter NewsThreadEvi
 	where, args := newsThreadEvidenceWhere(filter)
 	args = append(args, normalizedPageLimit(filter.Limit, 1000), normalizedPageOffset(filter.Offset))
 	rows, err := s.marketDB.db.QueryContext(ctx, newsThreadEvidenceSelectSQL+` WHERE `+where+`
-		ORDER BY created_at DESC, id ASC LIMIT ? OFFSET ?`, args...)
+		ORDER BY e.created_at DESC, e.id ASC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, wrapError(err, "list news thread evidence")
 	}
@@ -1313,7 +1446,7 @@ func (s *Store) ListNewsThreadEvidence(ctx context.Context, filter NewsThreadEvi
 func (s *Store) CountNewsThreadEvidence(ctx context.Context, filter NewsThreadEvidenceListFilter) (int, error) {
 	where, args := newsThreadEvidenceWhere(filter)
 	var count int
-	err := s.marketDB.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_thread_evidence WHERE `+where, args...).Scan(&count)
+	err := s.marketDB.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_thread_evidence e WHERE `+where, args...).Scan(&count)
 	return count, wrapError(err, "count news thread evidence")
 }
 
@@ -1352,6 +1485,43 @@ func (s *Store) ApplyNewsContextBatch(ctx context.Context, runID, agentRunID, wi
 		report.RunID != runID || report.WindowType != windowType || !validNewsContextWindowType(windowType) {
 		return result, ErrInvalidNewsContextResult
 	}
+	report.NewsDecisions = append([]NewsContextNewsDecision(nil), report.NewsDecisions...)
+	for index := range report.NewsDecisions {
+		disposition, ok := normalizeNewsContextDisposition(report.NewsDecisions[index].Disposition)
+		if !ok {
+			return result, ErrInvalidNewsContextResult
+		}
+		report.NewsDecisions[index].Disposition = disposition
+	}
+	logicalRun, err := s.GetNewsContextRun(ctx, runID)
+	if err != nil {
+		return result, err
+	}
+	batchRows, err := s.db.QueryContext(ctx, newsContextRunItemSelectSQL+`
+		WHERE run_id=? AND agent_run_id=?
+		ORDER BY COALESCE(source_at,created_at) ASC,object_id ASC`,
+		runID, agentRunID)
+	if err != nil {
+		return result, wrapError(err, "list news context batch items")
+	}
+	batchItems, err := scanRows(batchRows, scanNewsContextRunItem,
+		"scan news context batch item", "iterate news context batch items")
+	if err != nil {
+		return result, err
+	}
+	if err := validateNewsContextBatchNewsCoverage(batchItems, report); err != nil {
+		return result, err
+	}
+	inputVersionForThread := make(map[string]string)
+	for _, item := range batchItems {
+		if item.ObjectType == NewsContextRunItemThread {
+			inputVersionForThread[firstNonEmpty(item.ThreadID, item.ObjectID)] = item.VersionID
+		}
+	}
+	effectiveAt := logicalRun.WindowEnd
+	if effectiveAt.IsZero() {
+		effectiveAt = time.Now()
+	}
 	tx, err := s.marketDB.db.BeginTx(ctx, nil)
 	if err != nil {
 		return result, wrapError(err, "begin apply news context batch")
@@ -1387,7 +1557,11 @@ func (s *Store) ApplyNewsContextBatch(ctx context.Context, runID, agentRunID, wi
 			return result, wrapError(versionErr, "load idempotent news thread version")
 		}
 		if errors.Is(versionErr, sql.ErrNoRows) {
-			versionNo := existing.CurrentVersion + 1
+			var versionNo int
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version_no),0)+1
+				FROM stockv2_news_thread_versions WHERE thread_id=?`, threadID).Scan(&versionNo); err != nil {
+				return result, wrapError(err, "allocate news thread version number")
+			}
 			if versionNo <= 0 {
 				versionNo = 1
 			}
@@ -1403,6 +1577,7 @@ func (s *Store) ApplyNewsContextBatch(ctx context.Context, runID, agentRunID, wi
 				NextCandidates: change.NextCandidates, Catalysts: change.Catalysts,
 				Invalidations: change.Invalidations, Relations: change.Relations,
 				ResearchStatus: newsContextWorseResearchStatus(researchStatus, change.ResearchStatus), EvidenceCount: len(change.EvidenceNewsIDs),
+				EffectiveAt: effectiveAt,
 			})
 			if windowType == NewsContextWindowHourly && !change.MaterialChange {
 				version.ReviewStatus = NewsContextReviewNotRequired
@@ -1410,6 +1585,18 @@ func (s *Store) ApplyNewsContextBatch(ctx context.Context, runID, agentRunID, wi
 			if err := insertNewsThreadVersionTx(ctx, tx, version); err != nil {
 				return result, wrapError(err, "insert news thread version in batch")
 			}
+		}
+		promoteCurrent := errors.Is(getErr, sql.ErrNoRows) || strings.TrimSpace(existing.CurrentVersionID) == ""
+		if !promoteCurrent {
+			currentVersion, currentErr := scanNewsThreadVersion(tx.QueryRowContext(ctx, newsThreadVersionSelectSQL+` WHERE id=?`, existing.CurrentVersionID))
+			if currentErr != nil {
+				return result, wrapError(currentErr, "load current news thread version time")
+			}
+			promoteCurrent = !currentVersion.EffectiveAt.After(version.EffectiveAt)
+		}
+		firstSeenAt := existing.FirstSeenAt
+		if firstSeenAt.IsZero() {
+			firstSeenAt = effectiveAt
 		}
 		thread := normalizeNewsThread(NewsThread{
 			ID: threadID, Title: change.Title, CoreThesis: change.CoreThesis, Stage: change.Stage,
@@ -1421,20 +1608,38 @@ func (s *Store) ApplyNewsContextBatch(ctx context.Context, runID, agentRunID, wi
 			Invalidations: change.Invalidations, Relations: change.Relations,
 			CurrentVersion: version.VersionNo, CurrentVersionID: version.ID,
 			ReviewStatus: version.ReviewStatus, IndexStatus: NewsContextIndexPending,
-			FirstSeenAt: existing.FirstSeenAt, LastChangedAt: now, CreatedAt: existing.CreatedAt,
+			FirstSeenAt: firstSeenAt, LastChangedAt: effectiveAt, CreatedAt: existing.CreatedAt,
 		})
-		if err := upsertNewsThreadTx(ctx, tx, thread); err != nil {
-			return result, wrapError(err, "upsert news thread in batch")
+		if promoteCurrent {
+			if err := upsertNewsThreadTx(ctx, tx, thread); err != nil {
+				return result, wrapError(err, "upsert news thread in batch")
+			}
 		}
-		if strings.TrimSpace(change.Action) == "merge" {
+		if promoteCurrent && strings.TrimSpace(change.Action) == "merge" {
 			for _, sourceThreadID := range change.SourceThreadIDs {
 				sourceThreadID = strings.TrimSpace(sourceThreadID)
 				if sourceThreadID == "" || sourceThreadID == threadID {
 					continue
 				}
+				sourceThread, sourceErr := scanNewsThread(tx.QueryRowContext(ctx, newsThreadSelectSQL+` WHERE id=?`, sourceThreadID))
+				if errors.Is(sourceErr, sql.ErrNoRows) {
+					return result, fmt.Errorf("%w: merged source news thread does not exist", ErrInvalidNewsContextResult)
+				}
+				if sourceErr != nil {
+					return result, wrapError(sourceErr, "load merged source news thread")
+				}
+				if strings.TrimSpace(sourceThread.CurrentVersionID) != "" {
+					sourceVersion, sourceVersionErr := scanNewsThreadVersion(tx.QueryRowContext(ctx, newsThreadVersionSelectSQL+` WHERE id=?`, sourceThread.CurrentVersionID))
+					if sourceVersionErr != nil {
+						return result, wrapError(sourceVersionErr, "load merged source current version")
+					}
+					if sourceVersion.EffectiveAt.After(version.EffectiveAt) {
+						continue
+					}
+				}
 				update, err := tx.ExecContext(ctx, `UPDATE stockv2_news_threads
 					SET status=?, last_changed_at=?, updated_at=? WHERE id=?`,
-					NewsThreadStatusMerged, now, now, sourceThreadID)
+					NewsThreadStatusMerged, effectiveAt, now, sourceThreadID)
 				if err != nil {
 					return result, wrapError(err, "mark merged source news thread")
 				}
@@ -1476,44 +1681,79 @@ func (s *Store) ApplyNewsContextBatch(ctx context.Context, runID, agentRunID, wi
 			if getErr != nil {
 				return result, wrapError(getErr, "load unchanged daily news thread")
 			}
-			checkpointResearchStatus := researchStatus
+			checkpointVersionID := strings.TrimSpace(inputVersionForThread[threadID])
+			var checkpointVersion NewsThreadVersion
+			if checkpointVersionID != "" {
+				var checkpointErr error
+				checkpointVersion, checkpointErr = scanNewsThreadVersion(tx.QueryRowContext(ctx,
+					newsThreadVersionSelectSQL+` WHERE id=?`, checkpointVersionID))
+				if checkpointErr != nil {
+					return result, wrapError(checkpointErr, "load input news thread version for daily checkpoint")
+				}
+			}
 			if strings.TrimSpace(existing.CurrentVersionID) != "" {
-				currentVersion, currentErr := scanNewsThreadVersion(tx.QueryRowContext(ctx, newsThreadVersionSelectSQL+` WHERE id=?`, existing.CurrentVersionID))
+				currentVersion, currentErr := scanNewsThreadVersion(tx.QueryRowContext(ctx,
+					newsThreadVersionSelectSQL+` WHERE id=?`, existing.CurrentVersionID))
 				if currentErr != nil {
 					return result, wrapError(currentErr, "load current news thread version for daily checkpoint")
 				}
-				checkpointResearchStatus = newsContextWorseResearchStatus(checkpointResearchStatus, currentVersion.ResearchStatus)
+				if !currentVersion.EffectiveAt.After(effectiveAt) && (checkpointVersionID == "" ||
+					currentVersion.EffectiveAt.After(checkpointVersion.EffectiveAt) ||
+					(currentVersion.EffectiveAt.Equal(checkpointVersion.EffectiveAt) && currentVersion.VersionNo > checkpointVersion.VersionNo)) {
+					checkpointVersionID = currentVersion.ID
+					checkpointVersion = currentVersion
+				}
 			}
-			versionID := newsContextStableID("threadver_", runID, threadID, "daily-unchanged")
+			if checkpointVersionID == "" {
+				return result, fmt.Errorf("%w: daily checkpoint has no input theme version", ErrInvalidNewsContextResult)
+			}
+			checkpointResearchStatus := newsContextWorseResearchStatus(researchStatus, checkpointVersion.ResearchStatus)
+			versionID := newsContextStableID("threadver_", runID, threadID, checkpointVersionID, "daily-unchanged")
 			version, versionErr := scanNewsThreadVersion(tx.QueryRowContext(ctx, newsThreadVersionSelectSQL+` WHERE id=?`, versionID))
 			if versionErr != nil && !errors.Is(versionErr, sql.ErrNoRows) {
 				return result, wrapError(versionErr, "load unchanged daily news thread version")
 			}
 			if errors.Is(versionErr, sql.ErrNoRows) {
+				var versionNo int
+				if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version_no),0)+1
+					FROM stockv2_news_thread_versions WHERE thread_id=?`, threadID).Scan(&versionNo); err != nil {
+					return result, wrapError(err, "allocate unchanged daily version number")
+				}
 				version = normalizeNewsThreadVersion(NewsThreadVersion{
 					ID: versionID, ThreadID: threadID, RunID: runID, AgentRunID: agentRunID,
-					WindowType: windowType, VersionNo: existing.CurrentVersion + 1,
-					Title: existing.Title, CoreThesis: existing.CoreThesis, Stage: existing.Stage,
+					WindowType: windowType, VersionNo: versionNo,
+					Title: checkpointVersion.Title, CoreThesis: checkpointVersion.CoreThesis, Stage: checkpointVersion.Stage,
 					LatestChange: "每日复核：主题阶段保持不变", MaterialChange: false,
-					Confidence: existing.Confidence, Industries: existing.Industries,
-					Symbols: existing.Symbols, Funds: existing.Funds, Facts: existing.Facts,
-					Inferences: existing.Inferences, CounterEvidence: existing.CounterEvidence,
-					OpenQuestions: existing.OpenQuestions, Leaders: existing.Leaders,
-					Followers: existing.Followers, Laggards: existing.Laggards,
-					NextCandidates: existing.NextCandidates, Catalysts: existing.Catalysts,
-					Invalidations: existing.Invalidations, Relations: existing.Relations,
-					ResearchStatus: checkpointResearchStatus,
+					Confidence: checkpointVersion.Confidence, Industries: checkpointVersion.Industries,
+					Symbols: checkpointVersion.Symbols, Funds: checkpointVersion.Funds, Facts: checkpointVersion.Facts,
+					Inferences: checkpointVersion.Inferences, CounterEvidence: checkpointVersion.CounterEvidence,
+					OpenQuestions: checkpointVersion.OpenQuestions, Leaders: checkpointVersion.Leaders,
+					Followers: checkpointVersion.Followers, Laggards: checkpointVersion.Laggards,
+					NextCandidates: checkpointVersion.NextCandidates, Catalysts: checkpointVersion.Catalysts,
+					Invalidations: checkpointVersion.Invalidations, Relations: checkpointVersion.Relations,
+					ResearchStatus: checkpointResearchStatus, EffectiveAt: effectiveAt,
 				})
 				if err := insertNewsThreadVersionTx(ctx, tx, version); err != nil {
 					return result, wrapError(err, "insert unchanged daily news thread version")
 				}
 			}
-			if _, err := tx.ExecContext(ctx, `UPDATE stockv2_news_threads
-				SET current_version=?, current_version_id=?, review_status=?, updated_at=? WHERE id=?`,
-				version.VersionNo, version.ID, version.ReviewStatus, now, threadID); err != nil {
-				return result, wrapError(err, "update unchanged daily news thread checkpoint")
+			promoteCurrent := strings.TrimSpace(existing.CurrentVersionID) == ""
+			if !promoteCurrent {
+				currentVersion, currentErr := scanNewsThreadVersion(tx.QueryRowContext(ctx, newsThreadVersionSelectSQL+` WHERE id=?`, existing.CurrentVersionID))
+				if currentErr != nil {
+					return result, wrapError(currentErr, "load unchanged daily current version time")
+				}
+				promoteCurrent = !currentVersion.EffectiveAt.After(version.EffectiveAt)
+			}
+			if promoteCurrent {
+				if _, err := tx.ExecContext(ctx, `UPDATE stockv2_news_threads
+					SET current_version=?, current_version_id=?, review_status=?, updated_at=? WHERE id=?`,
+					version.VersionNo, version.ID, version.ReviewStatus, now, threadID); err != nil {
+					return result, wrapError(err, "update unchanged daily news thread checkpoint")
+				}
 			}
 			versionForThread[threadID] = version.ID
+			result.ChangedVersionIDs = append(result.ChangedVersionIDs, version.ID)
 		}
 	}
 
@@ -1550,9 +1790,6 @@ func (s *Store) ApplyNewsContextBatch(ctx context.Context, runID, agentRunID, wi
 			status, runID, coveredAt, protectedReason, now, eventID); err != nil {
 			return result, wrapError(err, "mark news event context in batch")
 		}
-		if decision.ThreadID != "" {
-			threadForNews[eventID] = decision.ThreadID
-		}
 		result.ProcessedCount++
 	}
 	if err := tx.Commit(); err != nil {
@@ -1565,8 +1802,8 @@ func (s *Store) ApplyNewsContextBatch(ctx context.Context, runID, agentRunID, wi
 			return nil
 		}
 		_, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_run_items
-			SET status=?, disposition='changed', thread_id=?, version_id=?, error_message=NULL, updated_at=?
-			WHERE run_id=? AND object_type=? AND object_id=? AND agent_run_id=? AND status=?`,
+			SET status=?, disposition='changed', thread_id=?, version_id=COALESCE(?,version_id), error_message=NULL, updated_at=?
+			WHERE run_id=? AND object_type=? AND COALESCE(NULLIF(thread_id,''),object_id)=? AND agent_run_id=? AND status=?`,
 			NewsContextRunItemCompleted, threadID, nullableString(versionID), time.Now(),
 			runID, NewsContextRunItemThread, threadID, agentRunID, NewsContextRunItemRunning)
 		return wrapError(err, "complete changed news context thread item")
@@ -1586,14 +1823,14 @@ func (s *Store) ApplyNewsContextBatch(ctx context.Context, runID, agentRunID, wi
 	for _, threadID := range report.UnchangedThreadIDs {
 		threadID = strings.TrimSpace(threadID)
 		update, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_run_items
-			SET status=?, disposition='unchanged', thread_id=?, version_id=?, error_message=NULL, updated_at=?
-			WHERE run_id=? AND object_type=? AND object_id=? AND agent_run_id=? AND status=?`,
+			SET status=?, disposition='unchanged', thread_id=?, version_id=COALESCE(?,version_id), error_message=NULL, updated_at=?
+			WHERE run_id=? AND object_type=? AND COALESCE(NULLIF(thread_id,''),object_id)=? AND agent_run_id=? AND status=?`,
 			NewsContextRunItemCompleted, threadID, nullableString(versionForThread[threadID]), time.Now(),
 			runID, NewsContextRunItemThread, threadID, agentRunID, NewsContextRunItemRunning)
 		if err != nil {
 			return result, wrapError(err, "complete unchanged news context thread item")
 		}
-		if rows, _ := update.RowsAffected(); rows != 1 {
+		if rows, _ := update.RowsAffected(); rows < 1 {
 			return result, ErrInvalidNewsContextResult
 		}
 	}
@@ -1625,14 +1862,14 @@ func (s *Store) refreshNewsContextRunCounts(ctx context.Context, runID string) e
 	err = s.db.QueryRowContext(ctx, `SELECT
 		COUNT(*),
 		COALESCE(SUM(CASE WHEN status=? THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN object_type=? AND status=? AND disposition NOT IN (?, ?) THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN object_type=? AND disposition=? THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN object_type=? AND status=? AND disposition NOT IN (?, ?, ?) THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN object_type=? AND disposition IN (?, ?) THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN object_type=? AND disposition=? THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN object_type=? AND status=? AND disposition='unchanged' THEN 1 ELSE 0 END),0)
 		FROM stockv2_news_context_run_items WHERE run_id=?`,
 		NewsContextRunItemCompleted,
-		NewsContextRunItemNewsEvent, NewsContextRunItemCompleted, NewsEventContextNoise, NewsEventContextDeferred,
-		NewsContextRunItemNewsEvent, NewsEventContextNoise,
+		NewsContextRunItemNewsEvent, NewsContextRunItemCompleted, NewsEventContextNoise, "duplicate", NewsEventContextDeferred,
+		NewsContextRunItemNewsEvent, NewsEventContextNoise, "duplicate",
 		NewsContextRunItemNewsEvent, NewsEventContextDeferred,
 		NewsContextRunItemThread, NewsContextRunItemCompleted,
 		runID).Scan(&run.InputCount, &run.ProcessedCount,
@@ -1766,9 +2003,13 @@ func (s *Store) ProtectNewsEventForCleanup(ctx context.Context, eventID, reason 
 	return nil
 }
 
-func (s *Store) NewsEventCleanupProtected(ctx context.Context, eventID string) (bool, string, error) {
+type newsContextCleanupQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func newsEventCleanupProtected(ctx context.Context, queryer newsContextCleanupQueryer, eventID string) (bool, string, error) {
 	var status, linkStatus string
-	err := s.marketDB.db.QueryRowContext(ctx, `SELECT COALESCE(context_status,'pending'), COALESCE(link_status,'pending')
+	err := queryer.QueryRowContext(ctx, `SELECT COALESCE(context_status,'pending'), COALESCE(link_status,'pending')
 		FROM stockv2_news_events WHERE id=?`, eventID).Scan(&status, &linkStatus)
 	if errors.Is(err, sql.ErrNoRows) {
 		return true, "消息不存在", nil
@@ -1786,7 +2027,7 @@ func (s *Store) NewsEventCleanupProtected(ctx context.Context, eventID string) (
 		return true, "消息的股票关联尚未完成", nil
 	}
 	var activeCandidates int
-	err = s.marketDB.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_link_candidates
+	err = queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_link_candidates
 		WHERE news_event_id=? AND COALESCE(monitor_status,'pending') IN (?, ?)`, eventID,
 		NewsLinkMonitorStatusPending, NewsLinkMonitorStatusFailed).Scan(&activeCandidates)
 	if err != nil {
@@ -1798,24 +2039,23 @@ func (s *Store) NewsEventCleanupProtected(ctx context.Context, eventID string) (
 	return false, "", nil
 }
 
-func (s *Store) DeleteNewsLinkCandidatesByEvent(ctx context.Context, eventID string) error {
-	_, err := s.marketDB.db.ExecContext(ctx, `DELETE FROM stockv2_news_link_candidates WHERE news_event_id=?`, eventID)
-	return wrapError(err, "delete news link candidates by event")
+func (s *Store) NewsEventCleanupProtected(ctx context.Context, eventID string) (bool, string, error) {
+	return newsEventCleanupProtected(ctx, s.marketDB.db, eventID)
 }
 
 func (s *Store) CompactNewsEvent(ctx context.Context, eventID string) (int64, error) {
-	protected, reason, err := s.NewsEventCleanupProtected(ctx, eventID)
+	tx, err := s.marketDB.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, wrapError(err, "begin compact news event")
+	}
+	defer tx.Rollback()
+	protected, reason, err := newsEventCleanupProtected(ctx, tx, eventID)
 	if err != nil {
 		return 0, err
 	}
 	if protected {
 		return 0, fmt.Errorf("%w: %s", ErrNewsContextReviewIncomplete, reason)
 	}
-	tx, err := s.marketDB.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, wrapError(err, "begin compact news event")
-	}
-	defer tx.Rollback()
 	var event NewsEvent
 	event, err = scanNewsEvent(tx.QueryRowContext(ctx, newsEventSelectSQL()+` WHERE id=?`, eventID))
 	if err != nil {
@@ -1846,6 +2086,9 @@ func (s *Store) CompactNewsEvent(ctx context.Context, eventID string) (int64, er
 		if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_raw_news WHERE id=?`, event.RawNewsID); err != nil {
 			return 0, err
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_news_link_candidates WHERE news_event_id=?`, eventID); err != nil {
+		return 0, wrapError(err, "delete news link candidates for compact event")
 	}
 	now := time.Now()
 	result, err := tx.ExecContext(ctx, `UPDATE stockv2_news_events SET summary=NULL, content=NULL,

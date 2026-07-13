@@ -169,6 +169,8 @@ func (p *agentTaskPool) mcpToolsCall(params json.RawMessage) (any, *mcpError) {
 		return p.mcpGetNewsThread(callParams.Arguments)
 	case mcpToolListNewsContextChanges:
 		return p.mcpListNewsContextChanges(callParams.Arguments)
+	case mcpToolListPortfolioSentinelImpactReviewScope:
+		return p.mcpListPortfolioSentinelImpactReviewScope(callParams.Arguments)
 	case "stock_agent.search_news_link_candidates":
 		return p.mcpSearchNewsLinkCandidates(callParams.Arguments)
 	case "stock_agent.list_existing_strategies":

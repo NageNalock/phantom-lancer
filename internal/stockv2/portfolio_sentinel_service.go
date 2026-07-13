@@ -131,6 +131,9 @@ func (s *Service) startPortfolioSentinelRunForNewsContext(ctx context.Context, t
 		if _, err := s.store.BeginNewsContextReview(ctx, newsContextRunID, run.ID); err != nil {
 			return s.failPortfolioSentinelRun(ctx, run, err)
 		}
+		if _, err := s.store.FreezePortfolioSentinelImpactReviewScope(ctx, run.ID); err != nil {
+			return s.failPortfolioSentinelRun(ctx, run, err)
+		}
 	}
 
 	if err := s.preparePortfolioSentinelNews(ctx, run); err != nil && s.log != nil {
@@ -216,11 +219,17 @@ func (s *Service) buildPortfolioSentinelContext(ctx context.Context, run Portfol
 		if err != nil {
 			return PortfolioSentinelContext{}, err
 		}
+		impactScope, err := s.store.GetPortfolioSentinelImpactReviewScopeSummary(ctx, run.ID)
+		if err != nil {
+			return PortfolioSentinelContext{}, err
+		}
 		out.NewsContext = &PortfolioSentinelNewsContext{
-			RunID:               contextRun.ID,
-			ChangedThreadCount:  changedCount,
-			MaterialChangeCount: contextRun.MaterialChangeCount,
-			RequiredMCPTool:     "stock_agent.list_news_context_changes",
+			RunID:                    contextRun.ID,
+			ChangedThreadCount:       changedCount,
+			MaterialChangeCount:      contextRun.MaterialChangeCount,
+			RequiredMCPTool:          mcpToolListNewsContextChanges,
+			ImpactReviewScope:        impactScope,
+			ImpactReviewRequiredTool: mcpToolListPortfolioSentinelImpactReviewScope,
 		}
 	}
 	selectedEvents := make([]NewsEvent, 0, cfg.MaxNewsItems)
@@ -577,6 +586,11 @@ func (s *Service) ProcessPortfolioSentinelSubmittedResult(ctx context.Context, r
 	if err != nil {
 		return PortfolioSentinelResult{}, err
 	}
+	if existing, err := s.store.GetPortfolioSentinelResultByRunID(ctx, run.ID); err != nil {
+		return PortfolioSentinelResult{}, err
+	} else if existing != nil {
+		return *existing, nil
+	}
 	report, err := portfolioSentinelReportFromResult(submitted.Result)
 	if err != nil {
 		run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
@@ -590,36 +604,26 @@ func (s *Service) ProcessPortfolioSentinelSubmittedResult(ctx context.Context, r
 			run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
 			return PortfolioSentinelResult{}, err
 		}
+		if err := s.validatePortfolioSentinelImpactReviewCoverage(ctx, run.ID, report.ImpactReviewCoverage); err != nil {
+			run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
+			return PortfolioSentinelResult{}, err
+		}
 	}
-	result := PortfolioSentinelResult{
+	publication, err := s.preparePortfolioSentinelPublication(ctx, run, report, PortfolioSentinelResult{
 		RunID:          run.ID,
 		SchemaVersion:  report.SchemaVersion,
 		Summary:        firstNonEmpty(report.RunSummary, submitted.ResultSummary),
 		RiskLevel:      normalizePortfolioSentinelRiskLevel(report.OverallRiskLevel),
 		RawResult:      submitted.Result,
 		ContextSummary: map[string]any{"confidence": submitted.Confidence},
-	}
-	derived, err := s.derivePortfolioSentinelObjects(ctx, run, report, submitted.Result)
+	})
 	if err != nil {
 		run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
 		return PortfolioSentinelResult{}, err
 	}
-	result.DerivedAlertIDs = derived.alertIDs
-	result.DerivedMonitorHitIDs = derived.hitIDs
-	result.DerivedReviewIDs = derived.reviewIDs
-	result, err = s.store.CreatePortfolioSentinelResult(ctx, result)
+	result, err := s.store.publishPortfolioSentinelResult(ctx, publication)
 	if err != nil {
 		run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
-		return PortfolioSentinelResult{}, err
-	}
-	run.Status = PortfolioSentinelStatusCompleted
-	run.ResultRiskLevel = result.RiskLevel
-	run.GeneratedAlertCount = len(result.DerivedAlertIDs)
-	run.GeneratedHitCount = len(result.DerivedMonitorHitIDs)
-	run.GeneratedReviewCount = len(result.DerivedReviewIDs)
-	run.FinishedAt = time.Now()
-	run.ErrorMessage = ""
-	if _, err := s.store.UpdatePortfolioSentinelRun(ctx, run); err != nil {
 		return PortfolioSentinelResult{}, err
 	}
 	return result, nil
@@ -668,29 +672,103 @@ func (s *Service) validatePortfolioSentinelNewsContextCoverage(ctx context.Conte
 	return nil
 }
 
-type portfolioSentinelDerivedObjects struct {
-	alertIDs  []string
-	hitIDs    []string
-	reviewIDs []string
+func (s *Service) validatePortfolioSentinelImpactReviewCoverage(ctx context.Context, sentinelRunID string, coverage *PortfolioSentinelImpactReviewCoverage) error {
+	if coverage == nil || !coverage.hasAllExplicitFields() {
+		return fmt.Errorf("%w: all five impact review coverage lists are required", ErrInvalidPortfolioSentinelResult)
+	}
+	checks := []struct {
+		objectType string
+		checkedIDs []string
+	}{
+		{portfolioSentinelImpactObjectHoldings, *coverage.HoldingIDs},
+		{portfolioSentinelImpactObjectMonitors, *coverage.MonitorIDs},
+		{portfolioSentinelImpactObjectAlerts, *coverage.AlertIDs},
+		{portfolioSentinelImpactObjectOpportunities, *coverage.OpportunityIDs},
+		{portfolioSentinelImpactObjectStrategies, *coverage.StrategyIDs},
+	}
+	for _, check := range checks {
+		const pageSize = 200
+		expectedIDs := make([]string, 0)
+		for offset := 0; ; offset += pageSize {
+			items, total, err := s.store.ListPortfolioSentinelImpactReviewScope(ctx, sentinelRunID, check.objectType, pageSize, offset)
+			if err != nil {
+				return err
+			}
+			expectedIDs = append(expectedIDs, items...)
+			if len(expectedIDs) >= total {
+				break
+			}
+		}
+		if err := validatePortfolioSentinelExactIDSet(check.objectType, expectedIDs, check.checkedIDs); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func (s *Service) derivePortfolioSentinelObjects(ctx context.Context, run PortfolioSentinelRun, report PortfolioSentinelReport, rawResult map[string]any) (portfolioSentinelDerivedObjects, error) {
-	out := portfolioSentinelDerivedObjects{}
-	monitorRun, err := s.store.CreateMonitorRun(ctx, MonitorRun{
-		TaskType:     AgentTaskTypePortfolioSentinel,
-		Status:       MonitorRunStatusCompleted,
-		TriggerType:  run.TriggerType,
-		StartedAt:    run.StartedAt,
-		FinishedAt:   time.Now(),
-		ScopeSummary: portfolioSentinelScopeSummary(run),
-		ScannedCount: run.ScannedHoldingCount,
-		Metadata: map[string]any{
-			"portfolioSentinelRunId": run.ID,
-			"riskLevel":              report.OverallRiskLevel,
+func validatePortfolioSentinelExactIDSet(objectType string, expectedIDs, checkedIDs []string) error {
+	expected := make(map[string]struct{}, len(expectedIDs))
+	for _, rawID := range expectedIDs {
+		id := strings.TrimSpace(rawID)
+		if id != "" {
+			expected[id] = struct{}{}
+		}
+	}
+	checked := make(map[string]struct{}, len(checkedIDs))
+	for _, rawID := range checkedIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			return fmt.Errorf("%w: blank %s review identifier", ErrInvalidPortfolioSentinelResult, objectType)
+		}
+		if _, duplicate := checked[id]; duplicate {
+			return fmt.Errorf("%w: duplicate %s review identifier", ErrInvalidPortfolioSentinelResult, objectType)
+		}
+		checked[id] = struct{}{}
+	}
+	if len(expected) != len(checked) {
+		return fmt.Errorf("%w: checked %d of %d %s", ErrInvalidPortfolioSentinelResult, len(checked), len(expected), objectType)
+	}
+	for id := range expected {
+		if _, ok := checked[id]; !ok {
+			return fmt.Errorf("%w: %s object was not reviewed", ErrInvalidPortfolioSentinelResult, objectType)
+		}
+	}
+	return nil
+}
+
+type portfolioSentinelPublication struct {
+	run        PortfolioSentinelRun
+	result     PortfolioSentinelResult
+	monitorRun MonitorRun
+	items      []portfolioSentinelPublicationItem
+}
+
+type portfolioSentinelPublicationItem struct {
+	hit         MonitorHit
+	review      OperationReview
+	alertConfig MonitorTaskConfig
+}
+
+func (s *Service) preparePortfolioSentinelPublication(ctx context.Context, run PortfolioSentinelRun, report PortfolioSentinelReport, result PortfolioSentinelResult) (portfolioSentinelPublication, error) {
+	now := time.Now()
+	publication := portfolioSentinelPublication{
+		run:    run,
+		result: result,
+		monitorRun: MonitorRun{
+			ID:           generateID(),
+			TaskType:     AgentTaskTypePortfolioSentinel,
+			Status:       MonitorRunStatusCompleted,
+			TriggerType:  run.TriggerType,
+			StartedAt:    run.StartedAt,
+			FinishedAt:   now,
+			ScopeSummary: portfolioSentinelScopeSummary(run),
+			ScannedCount: run.ScannedHoldingCount,
+			Metadata: map[string]any{
+				"portfolioSentinelRunId": run.ID,
+				"riskLevel":              report.OverallRiskLevel,
+			},
+			CreatedAt: now,
 		},
-	})
-	if err != nil {
-		return out, err
 	}
 	actions := report.PortfolioActions
 	if len(actions) == 0 && shouldCreatePortfolioSentinelRiskHit(report) {
@@ -709,8 +787,9 @@ func (s *Service) derivePortfolioSentinelObjects(ctx context.Context, run Portfo
 		if outputType == "" || strings.TrimSpace(action.Symbol) == "" {
 			continue
 		}
-		hit, err := s.store.CreateMonitorHit(ctx, MonitorHit{
-			RunID:       monitorRun.ID,
+		hit := MonitorHit{
+			ID:          generateID(),
+			RunID:       publication.monitorRun.ID,
 			TaskType:    AgentTaskTypePortfolioSentinel,
 			Status:      MonitorHitStatusCandidate,
 			PortfolioID: firstNonEmpty(action.PortfolioID, run.PortfolioID),
@@ -721,39 +800,53 @@ func (s *Service) derivePortfolioSentinelObjects(ctx context.Context, run Portfo
 			Evidence: map[string]any{
 				"source":                     AgentTaskTypePortfolioSentinel,
 				"portfolioSentinelRunId":     run.ID,
-				"portfolioSentinelRawResult": rawResult,
+				"portfolioSentinelRawResult": result.RawResult,
 				"riskLevel":                  report.OverallRiskLevel,
 				"action":                     action,
 			},
-		})
-		if err != nil {
-			return out, err
+			CreatedAt: now,
 		}
-		out.hitIDs = append(out.hitIDs, hit.ID)
-		review, err := s.CreateReviewFromMonitorHit(ctx, hit.ID)
+		pack, err := s.BuildAgentContextPack(ctx, hit)
 		if err != nil {
-			return out, err
+			return portfolioSentinelPublication{}, err
 		}
-		saveReq := RequestSaveOperationReviewResult{
-			OutputType:    outputType,
-			ResultSummary: firstNonEmpty(action.ResultSummary, report.RunSummary),
-			Result:        portfolioSentinelActionReviewResult(action, outputType),
+		strategyID, portfolioID, symbol, market := reviewLinkage(hit, pack)
+		reviewResult := portfolioSentinelActionReviewResult(action, outputType)
+		review := OperationReview{
+			ID:            generateID(),
+			HitID:         hit.ID,
+			RunID:         hit.RunID,
 			Status:        OperationReviewStatusCompleted,
+			OutputType:    outputType,
+			StrategyID:    strategyID,
+			PortfolioID:   portfolioID,
+			Symbol:        symbol,
+			Market:        market,
+			InputContext:  pack,
+			ResultSummary: safelog.Text(firstNonEmpty(action.ResultSummary, report.RunSummary), 800),
+			CreatedAt:     now,
+			UpdatedAt:     now,
+			CompletedAt:   now,
 		}
-		updated, err := s.saveOperationReviewResult(ctx, review.ID, saveReq, nil)
-		if err != nil {
-			return out, err
+		if outputType == OperationReviewOutputProposedOperation {
+			reviewResult, err = s.applyProposedOperationGuardrails(ctx, review, reviewResult)
+			if err != nil {
+				return portfolioSentinelPublication{}, err
+			}
 		}
-		out.reviewIDs = append(out.reviewIDs, updated.ID)
-		if alertID := s.alertIDForReview(ctx, updated); alertID != "" {
-			out.alertIDs = append(out.alertIDs, alertID)
+		review.Result = reviewResult
+		item := portfolioSentinelPublicationItem{hit: hit, review: review}
+		if operationReviewOutputTriggersAlert(outputType) {
+			item.alertConfig, err = s.monitorAlertTaskConfig(ctx, hit.TaskType)
+			if err != nil {
+				return portfolioSentinelPublication{}, err
+			}
 		}
+		publication.items = append(publication.items, item)
 	}
-	monitorRun.HitCount = len(out.hitIDs)
-	monitorRun.ReviewCount = len(out.reviewIDs)
-	monitorRun.AlertCount = len(out.alertIDs)
-	_, _ = s.store.UpdateMonitorRun(ctx, monitorRun)
-	return out, nil
+	publication.monitorRun.HitCount = len(publication.items)
+	publication.monitorRun.ReviewCount = len(publication.items)
+	return publication, nil
 }
 
 func (s *Service) GetPortfolioSentinelRunDetail(ctx context.Context, id string) (PortfolioSentinelRunDetail, error) {

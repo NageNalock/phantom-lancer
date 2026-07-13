@@ -48,6 +48,17 @@ func (s *Store) ensureEmbeddingSchema(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_object ON stockv2_embedding_assets(object_type, object_id);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_model ON stockv2_embedding_assets(model_id);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_status ON stockv2_embedding_assets(status);
+		CREATE TABLE IF NOT EXISTS stockv2_news_context_mcp_verifications (
+			thread_id TEXT PRIMARY KEY,
+			version_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			checked_at DATETIME NOT NULL,
+			verified_at DATETIME,
+			error_message TEXT,
+			updated_at DATETIME NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_news_context_mcp_verifications_status
+			ON stockv2_news_context_mcp_verifications(status, checked_at);
 	`)
 	if err != nil {
 		return wrapError(err, "ensure embedding schema")

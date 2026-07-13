@@ -35,7 +35,8 @@ type Service struct {
 	newsPipelineRun bool
 	newsContextMu   sync.Mutex
 	newsContextRun  bool
-	newsCleanupMu   sync.Mutex
+	newsBackfillMu  sync.Mutex
+	newsBackfillRun bool
 	newsCleanupRun  bool
 	quotePruneMu    sync.Mutex
 	lastQuotePrune  time.Time
@@ -91,6 +92,7 @@ func (s *Service) markInterruptedRunningTasks(ctx context.Context) {
 		{name: "quote refresh task", fn: s.store.FailRunningQuoteRefreshTasks},
 		{name: "monitor runs", fn: s.store.FailRunningMonitorRuns},
 		{name: "news source runs", fn: s.store.FailRunningNewsSourceStates},
+		{name: "portfolio sentinel runs", fn: s.store.FailRunningPortfolioSentinelRuns},
 		{name: "news context runs", fn: s.store.FailRunningNewsContextRuns},
 		{name: "news context cleanup runs", fn: s.store.FailRunningNewsContextCleanupRuns},
 	}

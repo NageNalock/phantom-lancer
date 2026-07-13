@@ -58,6 +58,16 @@ func (s *Store) SearchEmbeddingVectors(ctx context.Context, modelID, objectType 
 	return s.marketDB.SearchEmbeddingVectors(ctx, modelID, objectType, query, limit)
 }
 
+func (s *Store) SearchEmbeddingVectorsForObjects(ctx context.Context, modelID, objectType string, objectIDs map[string]struct{}, query []float64, limit int) ([]EmbeddingVectorSearchHit, error) {
+	if len(query) == 0 || len(objectIDs) == 0 {
+		return nil, ErrEmbeddingAssetNotReady
+	}
+	if s == nil || s.marketDB == nil || s.marketDB.db == nil {
+		return nil, ErrEmbeddingAssetNotReady
+	}
+	return s.marketDB.searchEmbeddingVectors(ctx, modelID, objectType, objectIDs, query, limit)
+}
+
 func (s *MarketDataStore) UpsertEmbeddingVector(ctx context.Context, asset EmbeddingAsset, vector []float64) error {
 	if s == nil || s.db == nil {
 		return ErrEmbeddingAssetNotReady
@@ -97,6 +107,10 @@ func upsertEmbeddingVectorTx(ctx context.Context, tx *sql.Tx, asset EmbeddingAss
 }
 
 func (s *MarketDataStore) SearchEmbeddingVectors(ctx context.Context, modelID, objectType string, query []float64, limit int) ([]EmbeddingVectorSearchHit, error) {
+	return s.searchEmbeddingVectors(ctx, modelID, objectType, nil, query, limit)
+}
+
+func (s *MarketDataStore) searchEmbeddingVectors(ctx context.Context, modelID, objectType string, objectIDs map[string]struct{}, query []float64, limit int) ([]EmbeddingVectorSearchHit, error) {
 	if s == nil || s.db == nil {
 		return nil, ErrEmbeddingAssetNotReady
 	}
@@ -131,6 +145,11 @@ func (s *MarketDataStore) SearchEmbeddingVectors(ctx context.Context, modelID, o
 		var dimensions int
 		if err := rows.Scan(&vectorRef, &blob, &dimensions, &hitObjectType, &objectID); err != nil {
 			return nil, wrapError(err, "scan embedding vector v2")
+		}
+		if objectIDs != nil {
+			if _, ok := objectIDs[objectID]; !ok {
+				continue
+			}
 		}
 		vector, err := decodeEmbeddingVector(blob, dimensions)
 		if err != nil {

@@ -37,9 +37,10 @@ func (p *agentTaskPool) mcpDataTools() []mcpTool {
 		{Name: "stock_agent.get_daily_bars_summary", Description: "Get a compact daily bar summary for one symbol.", InputSchema: simpleSchema(map[string]any{"symbol": stringProp("Instrument symbol."), "adjusted": stringProp("none, qfq, or hfq."), "limit": limitProp})},
 		{Name: "stock_agent.search_news_events", Description: "Keyword search StockV2 normalized news events. This is not semantic vector search.", InputSchema: simpleSchema(map[string]any{"query": stringProp("Keyword."), "source": stringProp("Optional source."), "limit": limitProp})},
 		{Name: "stock_agent.semantic_search_news_events", Description: "Semantic vector search over ready news event embeddings. Fails if embedding is not configured or assets are not ready.", InputSchema: simpleSchema(map[string]any{"query": stringProp("Theme or event text."), "limit": limitProp, "minScore": map[string]any{"type": "number"}})},
-		{Name: mcpToolSemanticSearchNewsThreads, Description: "Semantic vector recall over ready current message-thread embeddings. Similarity is not a factual or causal relationship.", InputSchema: simpleSchema(map[string]any{"query": stringProp("Theme, event, sector, or rotation question."), "limit": limitProp, "minScore": map[string]any{"type": "number"}})},
-		{Name: mcpToolGetNewsThread, Description: "Read one complete message thread and its history, evidence, relationships, review, and index state.", InputSchema: simpleSchema(map[string]any{"threadId": stringProp("Stable message-thread id.")})},
+		{Name: mcpToolSemanticSearchNewsThreads, Description: "Semantic vector recall over ready current message-thread embeddings. With asOf, ranking can use the nearest retained historical vector but the result is hydrated to the actual latest snapshot at that cutoff. Similarity is not a factual or causal relationship.", InputSchema: simpleSchema(map[string]any{"query": stringProp("Theme, event, sector, or rotation question."), "limit": limitProp, "minScore": map[string]any{"type": "number"}, "asOf": stringProp("Optional RFC3339 historical cutoff.")})},
+		{Name: mcpToolGetNewsThread, Description: "Read one complete message thread and its history, evidence, relationships, review, and index state. Use asOf for a point-in-time view.", InputSchema: simpleSchema(map[string]any{"threadId": stringProp("Stable message-thread id."), "asOf": stringProp("Optional RFC3339 cutoff. Returns no later theme versions or evidence.")})},
 		{Name: mcpToolListNewsContextChanges, Description: "Page through every changed message thread in one aggregation run for complete review coverage.", InputSchema: simpleSchema(map[string]any{"runId": stringProp("Aggregation run id."), "limit": limitProp, "offset": map[string]any{"type": "integer", "minimum": 0}})},
+		{Name: mcpToolListPortfolioSentinelImpactReviewScope, Description: "Page through the frozen object identifiers for a final message-context impact review.", InputSchema: simpleSchema(map[string]any{"runId": stringProp("Portfolio sentinel run id."), "objectType": stringProp("holdings, monitors, alerts, opportunities, or strategies."), "limit": limitProp, "offset": map[string]any{"type": "integer", "minimum": 0}})},
 		{Name: "stock_agent.search_news_link_candidates", Description: "Search news-to-instrument link candidates.", InputSchema: simpleSchema(map[string]any{"query": stringProp("Keyword."), "symbol": stringProp("Optional symbol."), "market": stringProp("Optional market."), "limit": limitProp})},
 		{Name: "stock_agent.list_existing_strategies", Description: "List existing StockV2 strategies and active strategy versions.", InputSchema: simpleSchema(map[string]any{"symbol": stringProp("Optional symbol."), "status": stringProp("Optional status."), "source": stringProp("Optional source."), "limit": limitProp})},
 		{Name: "stock_agent.get_portfolio_context", Description: "Get portfolio, holding, and latest snapshot context. Does not expose credentials.", InputSchema: simpleSchema(map[string]any{"portfolioId": stringProp("Optional portfolio id.")})},
@@ -274,6 +275,7 @@ func (p *agentTaskPool) mcpSemanticSearchNewsThreads(args json.RawMessage) (any,
 		"items":      items,
 		"count":      len(items),
 		"searchType": "semantic_vector",
+		"asOf":       strings.TrimSpace(req.AsOf),
 		"notice":     "Similarity is retrieval only; it is not evidence of identity, causality, support, contradiction, or a trading conclusion.",
 	})
 }
@@ -286,6 +288,7 @@ func (p *agentTaskPool) mcpGetNewsThread(args json.RawMessage) (any, *mcpError) 
 	var req struct {
 		ID       string `json:"id"`
 		ThreadID string `json:"threadId"`
+		AsOf     string `json:"asOf"`
 	}
 	if err := json.Unmarshal(args, &req); err != nil {
 		return nil, mcpInvalidArgs(err)
@@ -294,7 +297,7 @@ func (p *agentTaskPool) mcpGetNewsThread(args json.RawMessage) (any, *mcpError) 
 	if id == "" {
 		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "threadId is required"}
 	}
-	item, err := svc.GetNewsThreadDetail(context.Background(), id)
+	item, err := svc.GetNewsThreadDetailAsOf(context.Background(), id, req.AsOf)
 	if err != nil {
 		return nil, mcpErrorFromError(err)
 	}
@@ -327,6 +330,43 @@ func (p *agentTaskPool) mcpListNewsContextChanges(args json.RawMessage) (any, *m
 		return nil, mcpErrorFromError(err)
 	}
 	return mcpJSONContent(map[string]any{
+		"items":      items,
+		"total":      total,
+		"limit":      req.Limit,
+		"offset":     req.Offset,
+		"nextOffset": nextMCPPageOffset(req.Offset, req.Limit, len(items), total),
+	})
+}
+
+func (p *agentTaskPool) mcpListPortfolioSentinelImpactReviewScope(args json.RawMessage) (any, *mcpError) {
+	svc, errResp := p.mcpService()
+	if errResp != nil {
+		return nil, errResp
+	}
+	var req struct {
+		RunID      string `json:"runId"`
+		ObjectType string `json:"objectType"`
+		Limit      int    `json:"limit"`
+		Offset     int    `json:"offset"`
+	}
+	if err := json.Unmarshal(args, &req); err != nil {
+		return nil, mcpInvalidArgs(err)
+	}
+	req.RunID = strings.TrimSpace(req.RunID)
+	req.ObjectType = strings.TrimSpace(req.ObjectType)
+	if req.RunID == "" || !validPortfolioSentinelImpactObjectType(req.ObjectType) {
+		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "runId and a valid objectType are required"}
+	}
+	req.Limit = mcpLimit(req.Limit, 100, 100)
+	if req.Offset < 0 {
+		req.Offset = 0
+	}
+	items, total, err := svc.portfolioSentinelImpactReviewScopePage(context.Background(), req.RunID, req.ObjectType, req.Limit, req.Offset)
+	if err != nil {
+		return nil, mcpErrorFromError(err)
+	}
+	return mcpJSONContent(map[string]any{
+		"objectType": req.ObjectType,
 		"items":      items,
 		"total":      total,
 		"limit":      req.Limit,

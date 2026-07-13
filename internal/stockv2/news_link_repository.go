@@ -157,12 +157,14 @@ func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, candidate NewsLinkC
 	}
 	candidate.UpdatedAt = now
 	err := retryStockV2TransientWriteConflict(ctx, func() error {
-		_, execErr := s.assetDB().ExecContext(ctx, `
+		result, execErr := s.assetDB().ExecContext(ctx, `
 			INSERT INTO stockv2_news_link_candidates (
 				id, news_event_id, raw_news_id, symbol, market, instrument_name,
 				match_method, score, reason, matched_terms_json, monitor_status,
 				monitor_hit_id, monitored_at, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			  FROM stockv2_news_events
+			  WHERE id=? AND COALESCE(context_status,'pending')<>?
 			ON CONFLICT(news_event_id, symbol) DO UPDATE SET
 				raw_news_id = excluded.raw_news_id,
 				market = excluded.market,
@@ -176,8 +178,16 @@ func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, candidate NewsLinkC
 			candidate.Market, candidate.InstrumentName, candidate.MatchMethod, candidate.Score,
 			candidate.Reason, marshalProfileStrings(candidate.MatchedTerms), candidate.MonitorStatus,
 			nullableString(candidate.MonitorHitID), nullableTime(candidate.MonitoredAt),
-			candidate.CreatedAt, candidate.UpdatedAt)
-		return execErr
+			candidate.CreatedAt, candidate.UpdatedAt, candidate.NewsEventID, NewsEventContextCompacted)
+		if execErr != nil {
+			return execErr
+		}
+		if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+			return rowsErr
+		} else if rows == 0 {
+			return ErrInvalidNewsLinkCandidate
+		}
+		return nil
 	})
 	if err != nil {
 		return NewsLinkCandidate{}, wrapError(err, "upsert news link candidate")
@@ -212,7 +222,9 @@ func (s *Store) UpsertNewsLinkCandidates(ctx context.Context, candidates []NewsL
 				id, news_event_id, raw_news_id, symbol, market, instrument_name,
 				match_method, score, reason, matched_terms_json, monitor_status,
 				monitor_hit_id, monitored_at, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			  FROM stockv2_news_events
+			  WHERE id=? AND COALESCE(context_status,'pending')<>?
 			ON CONFLICT(news_event_id, symbol) DO UPDATE SET
 				raw_news_id = excluded.raw_news_id,
 				market = excluded.market,
@@ -240,12 +252,18 @@ func (s *Store) UpsertNewsLinkCandidates(ctx context.Context, candidates []NewsL
 				candidate.CreatedAt = now
 			}
 			candidate.UpdatedAt = now
-			if _, err := stmt.ExecContext(ctx, candidate.ID, candidate.NewsEventID, candidate.RawNewsID, candidate.Symbol,
+			result, err := stmt.ExecContext(ctx, candidate.ID, candidate.NewsEventID, candidate.RawNewsID, candidate.Symbol,
 				candidate.Market, candidate.InstrumentName, candidate.MatchMethod, candidate.Score,
 				candidate.Reason, marshalProfileStrings(candidate.MatchedTerms), candidate.MonitorStatus,
 				nullableString(candidate.MonitorHitID), nullableTime(candidate.MonitoredAt),
-				candidate.CreatedAt, candidate.UpdatedAt); err != nil {
+				candidate.CreatedAt, candidate.UpdatedAt, candidate.NewsEventID, NewsEventContextCompacted)
+			if err != nil {
 				return err
+			}
+			if rows, err := result.RowsAffected(); err != nil {
+				return err
+			} else if rows == 0 {
+				return ErrInvalidNewsLinkCandidate
 			}
 		}
 		return tx.Commit()

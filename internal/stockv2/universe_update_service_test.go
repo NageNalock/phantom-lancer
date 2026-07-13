@@ -138,6 +138,107 @@ func TestNewServiceMarksInterruptedScheduledTasksFailed(t *testing.T) {
 	}
 }
 
+func TestNewServiceRecoversInterruptedPortfolioSentinelReviews(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	newsRun, err := store.CreateNewsContextRun(ctx, NewsContextRun{
+		ID:            "news-context-waiting-review",
+		WindowType:    NewsContextWindowDaily,
+		TriggerType:   NewsContextTriggerScheduled,
+		Status:        NewsContextRunStatusWaitingReview,
+		Phase:         "reviewing",
+		WindowStart:   now.Add(-24 * time.Hour),
+		WindowEnd:     now.Add(-time.Hour),
+		ReviewStatus:  NewsContextReviewRunning,
+		ReviewRunID:   "sentinel-bound-review",
+		CleanupStatus: NewsContextCleanupPending,
+		StartedAt:     now.Add(-2 * time.Hour),
+		FinishedAt:    now.Add(-90 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("create news context run: %v", err)
+	}
+	agentRun, ledger, err := store.CreateAgentRunWithLedger(ctx, AgentRun{
+		ID:                "agent-bound-review",
+		TaskType:          AgentTaskTypePortfolioSentinel,
+		TriggerObjectType: "portfolio_sentinel_run",
+		TriggerObjectID:   "sentinel-bound-review",
+		Status:            AgentRunStatusRunning,
+		StartedAt:         now.Add(-time.Hour),
+	}, AgentDecisionLedger{
+		ID:                "ledger-bound-review",
+		TaskType:          AgentTaskTypePortfolioSentinel,
+		TriggerObjectType: "portfolio_sentinel_run",
+		TriggerObjectID:   "sentinel-bound-review",
+	})
+	if err != nil {
+		t.Fatalf("create bound sentinel agent run: %v", err)
+	}
+	if _, err := store.CreatePortfolioSentinelRun(ctx, PortfolioSentinelRun{
+		ID:               "sentinel-bound-review",
+		AgentRunID:       agentRun.ID,
+		DecisionLedgerID: ledger.ID,
+		Status:           PortfolioSentinelStatusRunning,
+		TriggerType:      PortfolioSentinelTriggerManual,
+		WindowType:       PortfolioSentinelWindowManual,
+		WindowStartAt:    newsRun.WindowStart,
+		WindowEndAt:      newsRun.WindowEnd,
+		StartedAt:        now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("create bound sentinel: %v", err)
+	}
+	if _, err := store.CreatePortfolioSentinelRun(ctx, PortfolioSentinelRun{
+		ID:            "sentinel-unbound",
+		Status:        PortfolioSentinelStatusRunning,
+		TriggerType:   PortfolioSentinelTriggerScheduled,
+		WindowType:    PortfolioSentinelWindowPreMarket,
+		WindowStartAt: now.Add(-2 * time.Hour),
+		WindowEndAt:   now.Add(-time.Hour),
+		StartedAt:     now.Add(-2 * time.Hour),
+	}); err != nil {
+		t.Fatalf("create unbound sentinel: %v", err)
+	}
+
+	svc := NewService(store, nil, nil)
+	defer svc.agentTaskPool.Close()
+
+	recoveredNews, err := store.GetNewsContextRun(ctx, newsRun.ID)
+	if err != nil {
+		t.Fatalf("get recovered news context run: %v", err)
+	}
+	if recoveredNews.Status != NewsContextRunStatusWaitingReview || recoveredNews.ReviewStatus != NewsContextReviewPending ||
+		recoveredNews.ReviewRunID != "" || recoveredNews.Phase != "waiting_review" || recoveredNews.ErrorMessage != "" {
+		t.Fatalf("recovered news context run = %#v, want clean pending review", recoveredNews)
+	}
+	for _, id := range []string{"sentinel-bound-review", "sentinel-unbound"} {
+		run, err := store.GetPortfolioSentinelRun(ctx, id)
+		if err != nil {
+			t.Fatalf("get recovered sentinel %s: %v", id, err)
+		}
+		if run.Status != PortfolioSentinelStatusFailed || run.FinishedAt.IsZero() || !strings.Contains(run.ErrorMessage, "service restart") {
+			t.Fatalf("recovered sentinel %s = %#v, want interrupted failure", id, run)
+		}
+	}
+	recoveredAgent, err := store.GetAgentRun(ctx, agentRun.ID)
+	if err != nil {
+		t.Fatalf("get recovered sentinel agent: %v", err)
+	}
+	if recoveredAgent.Status != AgentRunStatusFailed || recoveredAgent.FinishedAt.IsZero() || !strings.Contains(recoveredAgent.ErrorMessage, "service restart") {
+		t.Fatalf("recovered sentinel agent = %#v, want interrupted failure", recoveredAgent)
+	}
+	if running, err := store.HasRunningPortfolioSentinelRun(ctx, "", ""); err != nil {
+		t.Fatalf("check running sentinels: %v", err)
+	} else if running {
+		t.Fatal("interrupted sentinel still holds the running lock")
+	}
+}
+
 func TestUniverseMaintenanceFreshSkipRequiresReadyDailyBars(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

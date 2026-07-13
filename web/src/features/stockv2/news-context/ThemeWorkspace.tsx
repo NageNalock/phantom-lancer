@@ -23,6 +23,7 @@ import {
   indexStatusLabel,
   indexStatusTone,
   namedObjectLabel,
+  originalNewsStatus,
   relationTypeLabel,
   researchStatusLabel,
   researchStatusTone,
@@ -153,7 +154,7 @@ export function ThemeWorkspace({
             <input
               className="input pl-8 text-xs"
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索主题、板块或股票"
+              placeholder="搜索主题、核心结论或变化"
               type="search"
               value={query}
             />
@@ -402,7 +403,7 @@ function RelationList({ relations }: { relations: StockV2NewsContextRelation[] }
           <div className="flex flex-wrap items-center gap-2">
             <strong className="text-sm">{relation.targetThemeTitle || relation.targetThemeId || "相关主题"}</strong>
             <Pill tone="neutral">{relationTypeLabel(relation.relationType)}</Pill>
-            {typeof relation.confidence === "number" ? <span className="text-xs text-[var(--muted)]">可信程度 {confidenceLabel(relation.confidence)}</span> : null}
+            {typeof relation.strength === "number" ? <span className="text-xs text-[var(--muted)]">关系强度 {confidenceLabel(relation.strength)}</span> : null}
           </div>
           {relation.summary || relation.evidenceSummary ? <p className="mt-1 mb-0 text-xs leading-5 text-[var(--muted-strong)]">{relation.summary || relation.evidenceSummary}</p> : null}
         </div>
@@ -417,6 +418,7 @@ function EvidenceList({ items }: { items: StockV2NewsContextEvidence[] }) {
     <div className="divide-y divide-[var(--line)] rounded-lg border border-[var(--line)] bg-[var(--surface)]">
       {items.map((item) => {
         const safeURL = sanitizedEvidenceURL(item.url);
+        const originalNews = originalNewsStatus(item.originalNewsDeleted);
         return (
           <article className="p-3" key={item.id}>
             <div className="flex flex-wrap items-start justify-between gap-2">
@@ -426,12 +428,10 @@ function EvidenceList({ items }: { items: StockV2NewsContextEvidence[] }) {
               </div>
               <div className="flex flex-wrap gap-1.5">
                 <Pill tone={item.evidenceRole === "contradict" || item.evidenceRole === "weaken" ? "warn" : "neutral"}>{evidenceRoleLabel(item.evidenceRole)}</Pill>
-                <Pill tone={item.originalNewsDeleted ? "neutral" : "good"}>{item.originalNewsDeleted ? "原文已清理" : "原文保留"}</Pill>
-                {item.protected ? <Pill tone="warn">受保护</Pill> : null}
+                <Pill tone={originalNews.tone}>{originalNews.label}</Pill>
               </div>
             </div>
             {item.summary ? <p className="mt-2 mb-0 text-xs leading-5 text-[var(--muted-strong)]">{item.summary}</p> : null}
-            {item.protectedReason ? <p className="mt-2 mb-0 text-xs text-[var(--warn)]">保护原因：{item.protectedReason}</p> : null}
             {safeURL ? <a className="mt-2 inline-block text-xs text-[var(--accent)]" href={safeURL} rel="noreferrer" target="_blank">查看公开来源</a> : null}
           </article>
         );
@@ -454,7 +454,9 @@ function VersionTimeline({ items }: { items: StockV2NewsContextThemeVersion[] })
               <strong className="text-sm">版本 {item.versionNo ?? items.length - index}</strong>
               <Pill tone={themeStageTone(item.stage)}>{themeStageLabel(item.stage)}</Pill>
               {item.windowType ? <Pill tone="neutral">{windowTypeLabel(item.windowType)}</Pill> : null}
-              <span className="text-xs text-[var(--muted)]">{formatNewsContextTime(item.createdAt)}</span>
+              <span className="text-xs text-[var(--muted)]" title="主题内容实际生效时间">
+                {formatNewsContextTime(item.effectiveAt || item.createdAt)}
+              </span>
             </div>
             <p className="mt-1 mb-0 text-xs leading-5 text-[var(--muted-strong)]">{item.changeSummary || item.conclusion || "没有变化摘要"}</p>
             <div className="mt-2 flex flex-wrap gap-1.5">
@@ -486,11 +488,17 @@ function ThemeInspector({ detail, error, loading }: { detail: StockV2NewsContext
           <InspectorRow label="最近变化"><span>{formatNewsContextTime(detail.theme.lastChangedAt || detail.theme.updatedAt)}</span></InspectorRow>
           <InspectorRow label="影响复核"><Pill tone={reviewStatusTone(detail.theme.reviewStatus)}>{reviewStatusLabel(detail.theme.reviewStatus)}</Pill></InspectorRow>
           <InspectorRow label="主题索引"><Pill tone={indexStatusTone(detail.indexStatus || detail.theme.indexStatus)}>{indexStatusLabel(detail.indexStatus || detail.theme.indexStatus)}</Pill></InspectorRow>
-          <InspectorRow label="索引更新"><span>{formatNewsContextTime(detail.indexUpdatedAt || detail.theme.indexUpdatedAt)}</span></InspectorRow>
           <InspectorRow label="CLI 检索"><Pill tone={detail.mcpReadable ? "good" : "danger"}>{detail.mcpReadable ? "可读取" : "不可读取"}</Pill></InspectorRow>
-          <InspectorRow label="下游引用"><span>{downstreamReferenceCount(detail)} 项</span></InspectorRow>
-          {detail.indexError || detail.mcpError ? (
-            <div className="py-3"><Notice tone="danger">{[detail.indexError, detail.mcpError].filter(Boolean).join("；")}</Notice></div>
+          <InspectorRow label="真实检索验证">
+            <Pill tone={detail.mcpVerified ? "good" : detail.mcpVerification?.status === "failed" ? "danger" : "warn"}>
+              {detail.mcpVerified ? "已验证" : detail.mcpVerification?.status === "failed" ? "验证失败" : "尚未验证"}
+            </Pill>
+          </InspectorRow>
+          {detail.mcpVerification?.checkedAt ? (
+            <InspectorRow label="最近验证"><span>{formatNewsContextTime(detail.mcpVerification.verifiedAt || detail.mcpVerification.checkedAt)}</span></InspectorRow>
+          ) : null}
+          {detail.indexError || detail.mcpError || detail.mcpVerification?.errorMessage ? (
+            <div className="py-3"><Notice tone="danger">{[detail.indexError, detail.mcpError, detail.mcpVerification?.errorMessage].filter(Boolean).join("；")}</Notice></div>
           ) : null}
           {detail.protectedReasons?.length ? (
             <div className="py-3">
@@ -504,12 +512,6 @@ function ThemeInspector({ detail, error, loading }: { detail: StockV2NewsContext
           ) : (
             <p className="border-t border-[var(--line)] py-3 text-xs text-[var(--muted)]">当前没有返回保护原因，是否清理由后端安全门最终决定。</p>
           )}
-          {detail.theme.lastUsedBy?.length ? (
-            <div className="border-t border-[var(--line)] pt-3">
-              <div className="text-xs text-[var(--muted)]">最近使用方</div>
-              <div className="mt-2 flex flex-wrap gap-1.5">{detail.theme.lastUsedBy.map((item) => <Pill key={item}>{item}</Pill>)}</div>
-            </div>
-          ) : null}
         </div>
       ) : null}
     </div>
@@ -523,13 +525,6 @@ function InspectorRow({ label, children }: { label: string; children: ReactNode 
       <span className="min-w-0 break-words text-right text-[var(--muted-strong)]">{children}</span>
     </div>
   );
-}
-
-function downstreamReferenceCount(detail: StockV2NewsContextThemeDetail): number {
-  return (detail.relatedAlerts?.length || 0)
-    + (detail.relatedReviews?.length || 0)
-    + (detail.relatedOpportunities?.length || 0)
-    + (detail.relatedStrategies?.length || 0);
 }
 
 function uniqueStrings(values: string[]): string[] {

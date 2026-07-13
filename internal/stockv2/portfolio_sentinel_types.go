@@ -12,6 +12,14 @@ const (
 )
 
 const (
+	portfolioSentinelImpactObjectHoldings      = "holdings"
+	portfolioSentinelImpactObjectMonitors      = "monitors"
+	portfolioSentinelImpactObjectAlerts        = "alerts"
+	portfolioSentinelImpactObjectOpportunities = "opportunities"
+	portfolioSentinelImpactObjectStrategies    = "strategies"
+)
+
+const (
 	PortfolioSentinelStatusRunning   = "running"
 	PortfolioSentinelStatusCompleted = "completed"
 	PortfolioSentinelStatusFailed    = "failed"
@@ -154,10 +162,20 @@ type PortfolioSentinelContext struct {
 }
 
 type PortfolioSentinelNewsContext struct {
-	RunID               string `json:"runId"`
-	ChangedThreadCount  int    `json:"changedThreadCount"`
-	MaterialChangeCount int    `json:"materialChangeCount"`
-	RequiredMCPTool     string `json:"requiredMcpTool"`
+	RunID                    string                                    `json:"runId"`
+	ChangedThreadCount       int                                       `json:"changedThreadCount"`
+	MaterialChangeCount      int                                       `json:"materialChangeCount"`
+	RequiredMCPTool          string                                    `json:"requiredMcpTool"`
+	ImpactReviewScope        PortfolioSentinelImpactReviewScopeSummary `json:"impactReviewScope"`
+	ImpactReviewRequiredTool string                                    `json:"impactReviewRequiredMcpTool"`
+}
+
+type PortfolioSentinelImpactReviewScopeSummary struct {
+	HoldingCount     int `json:"holdingCount"`
+	MonitorCount     int `json:"monitorCount"`
+	AlertCount       int `json:"alertCount"`
+	OpportunityCount int `json:"opportunityCount"`
+	StrategyCount    int `json:"strategyCount"`
 }
 
 type PortfolioSentinelWindowContext struct {
@@ -187,18 +205,31 @@ type PortfolioSentinelHoldingContext struct {
 }
 
 type PortfolioSentinelReport struct {
-	SchemaVersion               string                             `json:"schema_version"`
-	OverallRiskLevel            string                             `json:"overall_risk_level"`
-	RunSummary                  string                             `json:"run_summary"`
-	PositiveItems               []map[string]any                   `json:"positive_items,omitempty"`
-	NegativeItems               []map[string]any                   `json:"negative_items,omitempty"`
-	NoiseItems                  []map[string]any                   `json:"noise_items,omitempty"`
-	AffectedHoldings            []PortfolioSentinelAffectedHolding `json:"affected_holdings,omitempty"`
-	PortfolioActions            []PortfolioSentinelAction          `json:"portfolio_actions,omitempty"`
-	ReviewRequests              []PortfolioSentinelReviewRequest   `json:"review_requests,omitempty"`
-	DataQualityNotes            []string                           `json:"data_quality_notes,omitempty"`
-	NextWatchFocus              []string                           `json:"next_watch_focus,omitempty"`
-	CheckedNewsThreadVersionIDs []string                           `json:"checked_news_thread_version_ids,omitempty"`
+	SchemaVersion               string                                 `json:"schema_version"`
+	OverallRiskLevel            string                                 `json:"overall_risk_level"`
+	RunSummary                  string                                 `json:"run_summary"`
+	PositiveItems               []map[string]any                       `json:"positive_items,omitempty"`
+	NegativeItems               []map[string]any                       `json:"negative_items,omitempty"`
+	NoiseItems                  []map[string]any                       `json:"noise_items,omitempty"`
+	AffectedHoldings            []PortfolioSentinelAffectedHolding     `json:"affected_holdings,omitempty"`
+	PortfolioActions            []PortfolioSentinelAction              `json:"portfolio_actions,omitempty"`
+	ReviewRequests              []PortfolioSentinelReviewRequest       `json:"review_requests,omitempty"`
+	DataQualityNotes            []string                               `json:"data_quality_notes,omitempty"`
+	NextWatchFocus              []string                               `json:"next_watch_focus,omitempty"`
+	CheckedNewsThreadVersionIDs []string                               `json:"checked_news_thread_version_ids,omitempty"`
+	ImpactReviewCoverage        *PortfolioSentinelImpactReviewCoverage `json:"impact_review_coverage,omitempty"`
+}
+
+type PortfolioSentinelImpactReviewCoverage struct {
+	HoldingIDs     *[]string `json:"holding_ids"`
+	MonitorIDs     *[]string `json:"monitor_ids"`
+	AlertIDs       *[]string `json:"alert_ids"`
+	OpportunityIDs *[]string `json:"opportunity_ids"`
+	StrategyIDs    *[]string `json:"strategy_ids"`
+}
+
+func (c *PortfolioSentinelImpactReviewCoverage) hasAllExplicitFields() bool {
+	return c != nil && c.HoldingIDs != nil && c.MonitorIDs != nil && c.AlertIDs != nil && c.OpportunityIDs != nil && c.StrategyIDs != nil
 }
 
 func (r *PortfolioSentinelReport) UnmarshalJSON(data []byte) error {
@@ -238,6 +269,13 @@ func (r *PortfolioSentinelReport) UnmarshalJSON(data []byte) error {
 	parsed.DataQualityNotes = agentStringListFromRaw(raw["data_quality_notes"])
 	parsed.NextWatchFocus = agentStringListFromRaw(raw["next_watch_focus"])
 	parsed.CheckedNewsThreadVersionIDs = agentStringListFromRaw(raw["checked_news_thread_version_ids"])
+	if coverageRaw, ok := raw["impact_review_coverage"]; ok && string(coverageRaw) != "null" {
+		var coverage PortfolioSentinelImpactReviewCoverage
+		if err := json.Unmarshal(coverageRaw, &coverage); err != nil {
+			return errors.New("invalid impact review coverage")
+		}
+		parsed.ImpactReviewCoverage = &coverage
+	}
 	*r = PortfolioSentinelReport(parsed)
 	return nil
 }

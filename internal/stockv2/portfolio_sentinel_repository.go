@@ -187,6 +187,178 @@ func (s *Store) HasRunningPortfolioSentinelRun(ctx context.Context, portfolioID,
 	return count > 0, nil
 }
 
+func (s *Store) FreezePortfolioSentinelImpactReviewScope(ctx context.Context, runID string) (PortfolioSentinelImpactReviewScopeSummary, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return PortfolioSentinelImpactReviewScopeSummary{}, ErrPortfolioSentinelRunNotFound
+	}
+	now := time.Now()
+	err := s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		var found string
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM stockv2_portfolio_sentinel_runs WHERE id=?`, runID).Scan(&found); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrPortfolioSentinelRunNotFound
+			}
+			return wrapError(err, "get portfolio sentinel run for impact review scope")
+		}
+		// ponytail: one immutable, set-based SQLite snapshot is the smallest safe
+		// boundary for all five review domains; no copied object payload or queue is needed.
+		statements := []struct {
+			objectType string
+			selectSQL  string
+			args       []any
+		}{
+			{portfolioSentinelImpactObjectHoldings, `SELECT id FROM stockv2_holdings`, nil},
+			{portfolioSentinelImpactObjectMonitors, `
+				SELECT 'task:' || task_type AS id FROM stockv2_monitor_task_configs
+				UNION ALL
+				SELECT 'watch:' || id AS id FROM stockv2_watches WHERE status<>?`, []any{WatchStatusArchived}},
+			{portfolioSentinelImpactObjectAlerts, `SELECT id FROM stockv2_alerts WHERE status IN (?, ?)`, []any{AlertStatusOpen, AlertStatusAcknowledged}},
+			{portfolioSentinelImpactObjectOpportunities, `SELECT id FROM stockv2_opportunities WHERE status<>?`, []any{OpportunityStatusClosed}},
+			{portfolioSentinelImpactObjectStrategies, `SELECT id FROM stockv2_strategies WHERE status<>?`, []any{StrategyStatusArchived}},
+		}
+		for _, statement := range statements {
+			args := []any{runID, statement.objectType, now}
+			args = append(args, statement.args...)
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO stockv2_portfolio_sentinel_impact_review_scope
+					(run_id, object_type, object_id, created_at)
+				SELECT ?, ?, id, ? FROM (`+statement.selectSQL+`)
+			`, args...); err != nil {
+				return wrapError(err, "freeze portfolio sentinel impact review scope")
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return PortfolioSentinelImpactReviewScopeSummary{}, err
+	}
+	return s.GetPortfolioSentinelImpactReviewScopeSummary(ctx, runID)
+}
+
+func (s *Store) GetPortfolioSentinelImpactReviewScopeSummary(ctx context.Context, runID string) (PortfolioSentinelImpactReviewScopeSummary, error) {
+	runID = strings.TrimSpace(runID)
+	if _, err := s.GetPortfolioSentinelRun(ctx, runID); err != nil {
+		return PortfolioSentinelImpactReviewScopeSummary{}, err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT object_type, COUNT(*)
+		FROM stockv2_portfolio_sentinel_impact_review_scope
+		WHERE run_id=?
+		GROUP BY object_type
+	`, runID)
+	if err != nil {
+		return PortfolioSentinelImpactReviewScopeSummary{}, wrapError(err, "get portfolio sentinel impact review scope summary")
+	}
+	defer rows.Close()
+	var out PortfolioSentinelImpactReviewScopeSummary
+	for rows.Next() {
+		var objectType string
+		var count int
+		if err := rows.Scan(&objectType, &count); err != nil {
+			return PortfolioSentinelImpactReviewScopeSummary{}, wrapError(err, "scan portfolio sentinel impact review scope summary")
+		}
+		switch objectType {
+		case portfolioSentinelImpactObjectHoldings:
+			out.HoldingCount = count
+		case portfolioSentinelImpactObjectMonitors:
+			out.MonitorCount = count
+		case portfolioSentinelImpactObjectAlerts:
+			out.AlertCount = count
+		case portfolioSentinelImpactObjectOpportunities:
+			out.OpportunityCount = count
+		case portfolioSentinelImpactObjectStrategies:
+			out.StrategyCount = count
+		}
+	}
+	return out, wrapError(rows.Err(), "iterate portfolio sentinel impact review scope summary")
+}
+
+func (s *Store) ListPortfolioSentinelImpactReviewScope(ctx context.Context, runID, objectType string, limit, offset int) ([]string, int, error) {
+	runID = strings.TrimSpace(runID)
+	objectType = strings.TrimSpace(objectType)
+	if !validPortfolioSentinelImpactObjectType(objectType) {
+		return nil, 0, ErrInvalidPortfolioSentinelInput
+	}
+	if _, err := s.GetPortfolioSentinelRun(ctx, runID); err != nil {
+		return nil, 0, err
+	}
+	var total int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM stockv2_portfolio_sentinel_impact_review_scope
+		WHERE run_id=? AND object_type=?
+	`, runID, objectType).Scan(&total); err != nil {
+		return nil, 0, wrapError(err, "count portfolio sentinel impact review scope")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT object_id FROM stockv2_portfolio_sentinel_impact_review_scope
+		WHERE run_id=? AND object_type=?
+		ORDER BY object_id
+		LIMIT ? OFFSET ?
+	`, runID, objectType, normalizedPageLimit(limit, 200), normalizedPageOffset(offset))
+	if err != nil {
+		return nil, 0, wrapError(err, "list portfolio sentinel impact review scope")
+	}
+	items, err := scanRows(rows, func(row rowScanner) (string, error) {
+		var id string
+		err := row.Scan(&id)
+		return id, err
+	}, "scan portfolio sentinel impact review scope", "iterate portfolio sentinel impact review scope")
+	return items, total, err
+}
+
+func validPortfolioSentinelImpactObjectType(value string) bool {
+	switch strings.TrimSpace(value) {
+	case portfolioSentinelImpactObjectHoldings,
+		portfolioSentinelImpactObjectMonitors,
+		portfolioSentinelImpactObjectAlerts,
+		portfolioSentinelImpactObjectOpportunities,
+		portfolioSentinelImpactObjectStrategies:
+		return true
+	default:
+		return false
+	}
+}
+
+// FailRunningPortfolioSentinelRuns closes process-local executions lost during
+// restart. A linked news-context run returns to pending review so the existing
+// reconciler can create one fresh sentinel instead of treating aggregation as
+// failed.
+func (s *Store) FailRunningPortfolioSentinelRuns(ctx context.Context, reason string) (int64, error) {
+	now := time.Now()
+	var failed int64
+	err := s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		// ponytail: all three tables live in SQLite, so one set-based transaction is
+		// the smallest complete recovery boundary; no durable recovery queue is needed.
+		if _, err := tx.ExecContext(ctx, `UPDATE stockv2_agent_runs SET
+			status=?, error_message=?, finished_at=?, updated_at=?
+			WHERE id IN (
+				SELECT agent_run_id FROM stockv2_portfolio_sentinel_runs
+				WHERE status=? AND TRIM(COALESCE(agent_run_id,''))<>''
+			) AND status<>?`, AgentRunStatusFailed, nullableString(reason), now, now,
+			PortfolioSentinelStatusRunning, AgentRunStatusFailed); err != nil {
+			return wrapError(err, "fail interrupted portfolio sentinel agent runs")
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE stockv2_news_context_runs SET
+			status=?, review_status=?, review_run_id=NULL, phase=?, error_message=NULL, updated_at=?
+			WHERE status=? AND review_run_id IN (
+				SELECT id FROM stockv2_portfolio_sentinel_runs WHERE status=?
+			)`, NewsContextRunStatusWaitingReview, NewsContextReviewPending, "waiting_review", now,
+			NewsContextRunStatusWaitingReview, PortfolioSentinelStatusRunning); err != nil {
+			return wrapError(err, "reset interrupted news context reviews")
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE stockv2_portfolio_sentinel_runs SET
+			status=?, error_message=?, finished_at=?, updated_at=? WHERE status=?`,
+			PortfolioSentinelStatusFailed, nullableString(reason), now, now, PortfolioSentinelStatusRunning)
+		if err != nil {
+			return wrapError(err, "fail running portfolio sentinel runs")
+		}
+		failed, _ = result.RowsAffected()
+		return nil
+	})
+	return failed, err
+}
+
 func (s *Store) CreatePortfolioSentinelResult(ctx context.Context, result PortfolioSentinelResult) (PortfolioSentinelResult, error) {
 	if result.ID == "" {
 		result.ID = generateID()
@@ -240,6 +412,311 @@ func (s *Store) GetPortfolioSentinelResultByRunID(ctx context.Context, runID str
 		return nil, wrapError(err, "get portfolio sentinel result by run")
 	}
 	return &result, nil
+}
+
+func (s *Store) migratePortfolioSentinelPublishedRunState(ctx context.Context) error {
+	// ponytail: the former write order could leave a durable result one update
+	// ahead of its run. An idempotent startup repair is sufficient; the new
+	// publication transaction cannot create this state.
+	type repair struct {
+		runID, riskLevel            string
+		alertIDs, hitIDs, reviewIDs string
+		publishedAt                 time.Time
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,COALESCE(p.risk_level,''),
+		p.derived_alert_ids_json,p.derived_monitor_hit_ids_json,p.derived_review_ids_json,p.created_at
+		FROM stockv2_portfolio_sentinel_runs r
+		JOIN stockv2_portfolio_sentinel_results p ON p.run_id=r.id
+		WHERE r.status<>?`, PortfolioSentinelStatusCompleted)
+	if err != nil {
+		return wrapError(err, "list published portfolio sentinel run repairs")
+	}
+	repairs, err := scanRows(rows, func(row rowScanner) (repair, error) {
+		var item repair
+		err := row.Scan(&item.runID, &item.riskLevel, &item.alertIDs, &item.hitIDs, &item.reviewIDs, &item.publishedAt)
+		return item, err
+	}, "scan published portfolio sentinel run repair", "iterate published portfolio sentinel run repairs")
+	if err != nil || len(repairs) == 0 {
+		return err
+	}
+	return s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		for _, item := range repairs {
+			if _, err := tx.ExecContext(ctx, `UPDATE stockv2_portfolio_sentinel_runs SET
+				status=?,result_risk_level=?,generated_alert_count=?,generated_hit_count=?,
+				generated_review_count=?,error_message=NULL,finished_at=COALESCE(finished_at,?),updated_at=?
+				WHERE id=? AND status<>?`, PortfolioSentinelStatusCompleted, nullableString(item.riskLevel),
+				len(unmarshalStrings(item.alertIDs)), len(unmarshalStrings(item.hitIDs)), len(unmarshalStrings(item.reviewIDs)),
+				item.publishedAt, time.Now(), item.runID, PortfolioSentinelStatusCompleted); err != nil {
+				return wrapError(err, "repair published portfolio sentinel run")
+			}
+		}
+		return nil
+	})
+}
+
+// publishPortfolioSentinelResult publishes the sentinel result and every
+// derived owner-visible object in one transaction. ponytail: all affected
+// tables already share SQLite, so a durable queue or compensation layer would
+// add failure modes without adding safety.
+func (s *Store) publishPortfolioSentinelResult(ctx context.Context, publication portfolioSentinelPublication) (PortfolioSentinelResult, error) {
+	var published PortfolioSentinelResult
+	err := s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		existing, err := scanPortfolioSentinelResult(tx.QueryRowContext(ctx, portfolioSentinelResultSelectSQL+" WHERE run_id = ?", publication.run.ID))
+		if err == nil {
+			published = existing
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return wrapError(err, "get portfolio sentinel result before publish")
+		}
+
+		monitorRun := publication.monitorRun
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO stockv2_monitor_runs
+				(id, task_type, status, trigger_type, started_at, finished_at, scope_summary,
+				 scanned_count, hit_count, alert_count, review_count, success_count, failed_count,
+				 error_message, metadata_json, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, monitorRun.ID, monitorRun.TaskType, monitorRun.Status, monitorRun.TriggerType,
+			monitorRun.StartedAt, nullableTime(monitorRun.FinishedAt), nullableString(monitorRun.ScopeSummary),
+			monitorRun.ScannedCount, monitorRun.HitCount, 0, monitorRun.ReviewCount,
+			monitorRun.SuccessCount, monitorRun.FailedCount, nullableString(monitorRun.ErrorMessage),
+			marshalMap(monitorRun.Metadata), monitorRun.CreatedAt); err != nil {
+			return wrapError(err, "create portfolio sentinel monitor run")
+		}
+
+		result := publication.result
+		result.DerivedAlertIDs = nil
+		result.DerivedMonitorHitIDs = make([]string, 0, len(publication.items))
+		result.DerivedReviewIDs = make([]string, 0, len(publication.items))
+		for _, item := range publication.items {
+			if err := insertPortfolioSentinelHitTx(ctx, tx, item.hit); err != nil {
+				return err
+			}
+			if err := insertPortfolioSentinelReviewTx(ctx, tx, item.review); err != nil {
+				return err
+			}
+			result.DerivedMonitorHitIDs = append(result.DerivedMonitorHitIDs, item.hit.ID)
+			result.DerivedReviewIDs = append(result.DerivedReviewIDs, item.review.ID)
+
+			hitStatus := MonitorHitStatusReviewed
+			if item.review.OutputType == OperationReviewOutputIgnore {
+				hitStatus = MonitorHitStatusIgnored
+			}
+			alertID := ""
+			if operationReviewOutputTriggersAlert(item.review.OutputType) {
+				alert, err := publishPortfolioSentinelAlertTx(ctx, tx, item, time.Now())
+				if err != nil {
+					return err
+				}
+				alertID = alert.ID
+				result.DerivedAlertIDs = append(result.DerivedAlertIDs, alert.ID)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE stockv2_monitor_hits SET status=?, alert_id=? WHERE id=?
+			`, hitStatus, nullableString(alertID), item.hit.ID); err != nil {
+				return wrapError(err, "finish portfolio sentinel monitor hit")
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE stockv2_monitor_runs SET alert_count=? WHERE id=?`, len(result.DerivedAlertIDs), monitorRun.ID); err != nil {
+			return wrapError(err, "finish portfolio sentinel monitor run")
+		}
+
+		if result.ID == "" {
+			result.ID = generateID()
+		}
+		if result.SchemaVersion == "" {
+			result.SchemaVersion = PortfolioSentinelReportSchemaVersion
+		}
+		if result.RawResult == nil {
+			result.RawResult = map[string]any{}
+		}
+		if result.ContextSummary == nil {
+			result.ContextSummary = map[string]any{}
+		}
+		if result.CreatedAt.IsZero() {
+			result.CreatedAt = time.Now()
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO stockv2_portfolio_sentinel_results (
+				id, run_id, schema_version, summary, risk_level, raw_result_json,
+				context_summary_json, derived_alert_ids_json, derived_monitor_hit_ids_json,
+				derived_review_ids_json, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, result.ID, result.RunID, result.SchemaVersion, nullableString(result.Summary), nullableString(result.RiskLevel),
+			marshalMap(result.RawResult), marshalMap(result.ContextSummary), marshalStrings(result.DerivedAlertIDs),
+			marshalStrings(result.DerivedMonitorHitIDs), marshalStrings(result.DerivedReviewIDs), result.CreatedAt); err != nil {
+			return wrapError(err, "create portfolio sentinel result")
+		}
+
+		finishedAt := time.Now()
+		updated, err := tx.ExecContext(ctx, `
+			UPDATE stockv2_portfolio_sentinel_runs
+			SET status=?, result_risk_level=?, generated_alert_count=?, generated_hit_count=?,
+			    generated_review_count=?, error_message=NULL, finished_at=?, updated_at=?
+			WHERE id=?
+		`, PortfolioSentinelStatusCompleted, nullableString(result.RiskLevel), len(result.DerivedAlertIDs),
+			len(result.DerivedMonitorHitIDs), len(result.DerivedReviewIDs), finishedAt, finishedAt, publication.run.ID)
+		if err != nil {
+			return wrapError(err, "complete portfolio sentinel run")
+		}
+		if rows, _ := updated.RowsAffected(); rows == 0 {
+			return ErrPortfolioSentinelRunNotFound
+		}
+		published = result
+		return nil
+	})
+	if err != nil {
+		return PortfolioSentinelResult{}, err
+	}
+	return published, nil
+}
+
+func insertPortfolioSentinelHitTx(ctx context.Context, tx *sql.Tx, hit MonitorHit) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO stockv2_monitor_hits
+			(id, run_id, task_type, status, strategy_id, portfolio_id, symbol, market,
+			 title, summary, evidence_json, agent_decision_id, alert_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, hit.ID, hit.RunID, hit.TaskType, hit.Status, nullableString(hit.StrategyID),
+		nullableString(hit.PortfolioID), nullableString(hit.Symbol), nullableString(hit.Market),
+		hit.Title, nullableString(hit.Summary), marshalMap(hit.Evidence), nullableString(hit.AgentDecisionID),
+		nullableString(hit.AlertID), hit.CreatedAt)
+	return wrapError(err, "create portfolio sentinel monitor hit")
+}
+
+func insertPortfolioSentinelReviewTx(ctx context.Context, tx *sql.Tx, review OperationReview) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO stockv2_operation_reviews (
+			id, hit_id, run_id, status, output_type, strategy_id, portfolio_id, symbol, market,
+			input_context_json, result_json, result_summary, error_message,
+			created_at, updated_at, completed_at, closed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, review.ID, review.HitID, nullableString(review.RunID), review.Status, nullableString(review.OutputType),
+		nullableString(review.StrategyID), nullableString(review.PortfolioID), nullableString(review.Symbol),
+		nullableString(review.Market), marshalJSON(review.InputContext), marshalMap(review.Result),
+		nullableString(review.ResultSummary), nullableString(review.ErrorMessage), review.CreatedAt, review.UpdatedAt,
+		nullableTime(review.CompletedAt), nullableTime(review.ClosedAt))
+	return wrapError(err, "create portfolio sentinel operation review")
+}
+
+func publishPortfolioSentinelAlertTx(ctx context.Context, tx *sql.Tx, item portfolioSentinelPublicationItem, now time.Time) (StockV2Alert, error) {
+	hit, review := item.hit, item.review
+	triggerSource := AlertTriggerSourceManualReviewConfirmed
+	evidence := monitorAlertEvidence(hit, review, nil, triggerSource, "", hit.Evidence)
+	dedupeKey := monitorAlertDedupeKey(hit, evidence)
+	if dedupeKey != "" {
+		existing, err := scanAlert(tx.QueryRowContext(ctx, alertSelectSQL+`
+			WHERE dedupe_key = ?
+			ORDER BY COALESCE(last_seen_at, triggered_at) DESC, created_at DESC
+			LIMIT 1
+		`, dedupeKey))
+		if err == nil && monitorAlertWithinCooldown(existing, now, item.alertConfig.CooldownSeconds) {
+			existing.MonitorHitID = hit.ID
+			existing.MonitorRunID = hit.RunID
+			existing.TaskType = hit.TaskType
+			existing.StrategyID = hit.StrategyID
+			existing.PortfolioID = hit.PortfolioID
+			existing.Symbol = hit.Symbol
+			existing.Market = hit.Market
+			existing.ReviewID = review.ID
+			existing.ReviewStatus = review.Status
+			existing.TriggerSource = triggerSource
+			existing.Level = monitorAlertLevel(hit, triggerSource)
+			existing.Summary = hit.Summary
+			existing.OccurrenceCount++
+			existing.LastSeenAt = now
+			existing.TriggeredAt = now
+			existing.UpdatedAt = now
+			existing.Evidence = mergeMonitorAlertEvidence(existing.Evidence, evidence, hit)
+			if err := updatePortfolioSentinelAlertTx(ctx, tx, existing); err != nil {
+				return StockV2Alert{}, err
+			}
+			return existing, nil
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return StockV2Alert{}, wrapError(err, "find portfolio sentinel alert by dedupe key")
+		}
+	}
+
+	alert := StockV2Alert{
+		ID:              generateID(),
+		MonitorHitID:    hit.ID,
+		MonitorRunID:    hit.RunID,
+		TaskType:        hit.TaskType,
+		StrategyID:      hit.StrategyID,
+		PortfolioID:     hit.PortfolioID,
+		Symbol:          hit.Symbol,
+		Market:          hit.Market,
+		ReviewID:        review.ID,
+		ReviewStatus:    review.Status,
+		TriggerSource:   triggerSource,
+		Status:          AlertStatusOpen,
+		Level:           monitorAlertLevel(hit, triggerSource),
+		Title:           strings.TrimSpace(hit.Title),
+		Summary:         strings.TrimSpace(hit.Summary),
+		DedupeKey:       dedupeKey,
+		Evidence:        mergeMonitorAlertEvidence(nil, evidence, hit),
+		OccurrenceCount: 1,
+		FirstSeenAt:     now,
+		LastSeenAt:      now,
+		TriggeredAt:     now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if alert.Title == "" {
+		alert.Title = "监控提醒"
+	}
+	if err := insertPortfolioSentinelAlertTx(ctx, tx, alert); err != nil {
+		return StockV2Alert{}, err
+	}
+	return alert, nil
+}
+
+func insertPortfolioSentinelAlertTx(ctx context.Context, tx *sql.Tx, alert StockV2Alert) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO stockv2_alerts (
+			id, watch_id, monitor_hit_id, monitor_run_id, task_type, strategy_id,
+			portfolio_id, symbol, market, review_id, review_status, agent_run_id,
+			decision_ledger_id, trigger_source, status, level, title, summary,
+			dedupe_key, evidence_json, occurrence_count, first_seen_at, last_seen_at,
+			triggered_at, acknowledged_at, resolved_at, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, alert.ID, nullableString(alert.WatchID), nullableString(alert.MonitorHitID), nullableString(alert.MonitorRunID),
+		nullableString(alert.TaskType), nullableString(alert.StrategyID), nullableString(alert.PortfolioID),
+		nullableString(alert.Symbol), nullableString(alert.Market), nullableString(alert.ReviewID),
+		nullableString(alert.ReviewStatus), nullableString(alert.AgentRunID), nullableString(alert.DecisionLedgerID),
+		nullableString(alert.TriggerSource), alert.Status, alert.Level, alert.Title, nullableString(alert.Summary),
+		nullableString(alert.DedupeKey), marshalMap(alert.Evidence), alert.OccurrenceCount, nullableTime(alert.FirstSeenAt),
+		nullableTime(alert.LastSeenAt), alert.TriggeredAt, nullableTime(alert.AcknowledgedAt), nullableTime(alert.ResolvedAt),
+		alert.CreatedAt, alert.UpdatedAt)
+	return wrapError(err, "create portfolio sentinel alert")
+}
+
+func updatePortfolioSentinelAlertTx(ctx context.Context, tx *sql.Tx, alert StockV2Alert) error {
+	result, err := tx.ExecContext(ctx, `
+		UPDATE stockv2_alerts
+		SET watch_id=?, monitor_hit_id=?, monitor_run_id=?, task_type=?, strategy_id=?,
+		    portfolio_id=?, symbol=?, market=?, review_id=?, review_status=?, agent_run_id=?,
+		    decision_ledger_id=?, trigger_source=?, status=?, level=?, title=?, summary=?,
+		    dedupe_key=?, evidence_json=?, occurrence_count=?, first_seen_at=?, last_seen_at=?,
+		    triggered_at=?, acknowledged_at=?, resolved_at=?, updated_at=?
+		WHERE id=?
+	`, nullableString(alert.WatchID), nullableString(alert.MonitorHitID), nullableString(alert.MonitorRunID),
+		nullableString(alert.TaskType), nullableString(alert.StrategyID), nullableString(alert.PortfolioID),
+		nullableString(alert.Symbol), nullableString(alert.Market), nullableString(alert.ReviewID),
+		nullableString(alert.ReviewStatus), nullableString(alert.AgentRunID), nullableString(alert.DecisionLedgerID),
+		nullableString(alert.TriggerSource), alert.Status, alert.Level, alert.Title, nullableString(alert.Summary),
+		nullableString(alert.DedupeKey), marshalMap(alert.Evidence), alert.OccurrenceCount, nullableTime(alert.FirstSeenAt),
+		nullableTime(alert.LastSeenAt), alert.TriggeredAt, nullableTime(alert.AcknowledgedAt), nullableTime(alert.ResolvedAt),
+		alert.UpdatedAt, alert.ID)
+	if err != nil {
+		return wrapError(err, "update portfolio sentinel alert")
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return ErrAlertNotFound
+	}
+	return nil
 }
 
 func scanPortfolioSentinelRun(row rowScanner) (PortfolioSentinelRun, error) {

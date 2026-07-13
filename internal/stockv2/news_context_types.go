@@ -78,6 +78,18 @@ const (
 	NewsContextOutputType          = "news_context_result"
 )
 
+func normalizeNewsContextDisposition(value string) (string, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "create", "update", "support", "contradict", "background", "duplicate", "noise":
+		return value, true
+	case "defer", NewsEventContextDeferred:
+		return NewsEventContextDeferred, true
+	default:
+		return "", false
+	}
+}
+
 var (
 	ErrNewsThreadNotFound          = errors.New("news thread not found")
 	ErrNewsContextRunNotFound      = errors.New("news context run not found")
@@ -171,34 +183,38 @@ type NewsThreadVersion struct {
 	ReviewStatus    string               `json:"reviewStatus"`
 	IndexStatus     string               `json:"indexStatus"`
 	IndexError      string               `json:"indexError,omitempty"`
+	EffectiveAt     time.Time            `json:"effectiveAt"`
 	CreatedAt       time.Time            `json:"createdAt"`
 }
 
 type NewsThreadEvidence struct {
-	ID          string    `json:"id"`
-	ThreadID    string    `json:"themeId"`
-	VersionID   string    `json:"themeVersionId"`
-	RunID       string    `json:"runId"`
-	NewsEventID string    `json:"newsEventId,omitempty"`
-	Source      string    `json:"source,omitempty"`
-	Title       string    `json:"title"`
-	Summary     string    `json:"summary,omitempty"`
-	URL         string    `json:"url,omitempty"`
-	ContentHash string    `json:"contentHash,omitempty"`
-	Relation    string    `json:"evidenceRole,omitempty"`
-	EventAt     time.Time `json:"publishedAt,omitempty"`
-	CreatedAt   time.Time `json:"createdAt"`
+	ID                  string    `json:"id"`
+	ThreadID            string    `json:"themeId"`
+	VersionID           string    `json:"themeVersionId"`
+	RunID               string    `json:"runId"`
+	NewsEventID         string    `json:"newsEventId,omitempty"`
+	Source              string    `json:"source,omitempty"`
+	Title               string    `json:"title"`
+	Summary             string    `json:"summary,omitempty"`
+	URL                 string    `json:"url,omitempty"`
+	ContentHash         string    `json:"contentHash,omitempty"`
+	Relation            string    `json:"evidenceRole,omitempty"`
+	EventAt             time.Time `json:"publishedAt,omitempty"`
+	OriginalNewsDeleted *bool     `json:"originalNewsDeleted,omitempty"`
+	CreatedAt           time.Time `json:"createdAt"`
 }
 
 type NewsThreadDetail struct {
-	Theme            NewsThread           `json:"theme"`
-	Versions         []NewsThreadVersion  `json:"versions"`
-	Evidence         []NewsThreadEvidence `json:"evidence"`
-	IndexStatus      string               `json:"indexStatus"`
-	IndexError       string               `json:"indexError,omitempty"`
-	MCPReadable      bool                 `json:"mcpReadable"`
-	MCPError         string               `json:"mcpError,omitempty"`
-	ProtectedReasons []string             `json:"protectedReasons,omitempty"`
+	Theme            NewsThread                  `json:"theme"`
+	Versions         []NewsThreadVersion         `json:"versions"`
+	Evidence         []NewsThreadEvidence        `json:"evidence"`
+	IndexStatus      string                      `json:"indexStatus"`
+	IndexError       string                      `json:"indexError,omitempty"`
+	MCPReadable      bool                        `json:"mcpReadable"`
+	MCPVerified      bool                        `json:"mcpVerified"`
+	MCPVerification  *NewsContextMCPVerification `json:"mcpVerification,omitempty"`
+	MCPError         string                      `json:"mcpError,omitempty"`
+	ProtectedReasons []string                    `json:"protectedReasons,omitempty"`
 }
 
 type NewsThreadChange struct {
@@ -251,24 +267,24 @@ type NewsThreadEvidenceListFilter struct {
 }
 
 type NewsContextConfig struct {
-	ID                      string    `json:"id"`
-	Enabled                 bool      `json:"enabled"`
-	AutoCleanupEnabled      bool      `json:"autoCleanupEnabled"`
-	HourlyEnabled           bool      `json:"hourlyEnabled"`
-	FourHourEnabled         bool      `json:"fourHourEnabled"`
-	DailyEnabled            bool      `json:"dailyEnabled"`
-	BatchSize               int       `json:"batchSize"`
-	HourlyIntervalSeconds   int       `json:"hourlyIntervalSeconds"`
-	FourHourIntervalSeconds int       `json:"fourHourIntervalSeconds"`
-	DailyIntervalSeconds    int       `json:"dailyIntervalSeconds"`
-	CleanupGraceSeconds     int       `json:"cleanupGraceSeconds"`
-	NextHourlyAt            time.Time `json:"nextHourlyAt,omitempty"`
-	NextFourHourAt          time.Time `json:"nextFourHourAt,omitempty"`
-	NextDailyAt             time.Time `json:"nextDailyAt,omitempty"`
-	LastRunAt               time.Time `json:"lastRunAt,omitempty"`
-	LastCleanupAt           time.Time `json:"lastCleanupAt,omitempty"`
-	LastError               string    `json:"lastError,omitempty"`
-	UpdatedAt               time.Time `json:"updatedAt"`
+	ID                       string    `json:"id"`
+	Enabled                  bool      `json:"enabled"`
+	AutoCleanupEnabled       bool      `json:"autoCleanupEnabled"`
+	HourlyEnabled            bool      `json:"hourlyEnabled"`
+	FourHourEnabled          bool      `json:"fourHourEnabled"`
+	DailyEnabled             bool      `json:"dailyEnabled"`
+	HourlyIntervalSeconds    int       `json:"hourlyIntervalSeconds"`
+	FourHourIntervalSeconds  int       `json:"fourHourIntervalSeconds"`
+	DailyIntervalSeconds     int       `json:"dailyIntervalSeconds"`
+	CleanupGraceSeconds      int       `json:"cleanupGraceSeconds"`
+	AdditionalResearchPrompt string    `json:"additionalResearchPrompt,omitempty"`
+	NextHourlyAt             time.Time `json:"nextHourlyAt,omitempty"`
+	NextFourHourAt           time.Time `json:"nextFourHourAt,omitempty"`
+	NextDailyAt              time.Time `json:"nextDailyAt,omitempty"`
+	LastRunAt                time.Time `json:"lastRunAt,omitempty"`
+	LastCleanupAt            time.Time `json:"lastCleanupAt,omitempty"`
+	LastError                string    `json:"lastError,omitempty"`
+	UpdatedAt                time.Time `json:"updatedAt"`
 }
 
 type NewsContextRun struct {
@@ -332,6 +348,7 @@ type NewsContextRunItem struct {
 	VersionID    string    `json:"versionId,omitempty"`
 	AgentRunID   string    `json:"agentRunId,omitempty"`
 	ErrorMessage string    `json:"errorMessage,omitempty"`
+	SourceAt     time.Time `json:"sourceAt,omitempty"`
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
@@ -401,24 +418,26 @@ type RequestStartNewsContextCleanup struct {
 }
 
 type RequestUpdateNewsContextConfig struct {
-	Enabled            *bool `json:"enabled,omitempty"`
-	AutoCleanupEnabled *bool `json:"autoCleanupEnabled,omitempty"`
-	HourlyEnabled      *bool `json:"hourlyEnabled,omitempty"`
-	FourHourEnabled    *bool `json:"fourHourEnabled,omitempty"`
-	DailyEnabled       *bool `json:"dailyEnabled,omitempty"`
-	BatchSize          *int  `json:"batchSize,omitempty"`
+	Enabled                  *bool   `json:"enabled,omitempty"`
+	AutoCleanupEnabled       *bool   `json:"autoCleanupEnabled,omitempty"`
+	HourlyEnabled            *bool   `json:"hourlyEnabled,omitempty"`
+	FourHourEnabled          *bool   `json:"fourHourEnabled,omitempty"`
+	DailyEnabled             *bool   `json:"dailyEnabled,omitempty"`
+	CleanupGraceSeconds      *int    `json:"cleanupGraceSeconds,omitempty"`
+	AdditionalResearchPrompt *string `json:"additionalResearchPrompt,omitempty"`
 }
 
 type NewsContextAggregationPack struct {
-	RunID            string       `json:"runId"`
-	WindowType       string       `json:"windowType"`
-	WindowStart      time.Time    `json:"windowStart"`
-	WindowEnd        time.Time    `json:"windowEnd"`
-	InputNewsEvents  []NewsEvent  `json:"inputNewsEvents,omitempty"`
-	InputThreads     []NewsThread `json:"inputThreads,omitempty"`
-	RecentThreads    []NewsThread `json:"recentThreads,omitempty"`
-	RequiredResearch bool         `json:"requiredResearch"`
-	ResearchReasons  []string     `json:"researchReasons,omitempty"`
+	RunID                    string       `json:"runId"`
+	WindowType               string       `json:"windowType"`
+	WindowStart              time.Time    `json:"windowStart"`
+	WindowEnd                time.Time    `json:"windowEnd"`
+	DailyConvergenceReview   bool         `json:"dailyConvergenceReview,omitempty"`
+	InputNewsEvents          []NewsEvent  `json:"inputNewsEvents,omitempty"`
+	InputThreads             []NewsThread `json:"inputThreads,omitempty"`
+	RequiredResearch         bool         `json:"requiredResearch"`
+	ResearchReasons          []string     `json:"researchReasons,omitempty"`
+	AdditionalResearchPrompt string       `json:"additionalResearchPrompt,omitempty"`
 }
 
 type NewsContextNewsDecision struct {
@@ -506,30 +525,32 @@ type NewsContextRotationSignals struct {
 }
 
 type NewsContextSummary struct {
-	Config              NewsContextConfig      `json:"config"`
-	ThemeCount          int                    `json:"themeCount"`
-	ActiveThemeCount    int                    `json:"activeThemeCount"`
-	ChangedThemeCount   int                    `json:"changedThemeCount"`
-	CurrentNewsCount    int                    `json:"currentNewsCount"`
-	ProcessedNewsCount  int                    `json:"historicalProcessedCount"`
-	PendingNewsCount    int                    `json:"pendingNewsCount"`
-	CompactedNewsCount  int                    `json:"compressedNewsCount"`
-	ProtectedNewsCount  int                    `json:"protectedNewsCount"`
-	ReleasedBytes       int64                  `json:"releasedBytes"`
-	PendingReviewCount  int                    `json:"pendingReviewCount"`
-	PendingCleanupCount int                    `json:"pendingCleanupCount"`
-	ReadyIndexCount     int                    `json:"indexReadyCount"`
-	MissingIndexCount   int                    `json:"indexMissingCount"`
-	StaleIndexCount     int                    `json:"indexStaleCount"`
-	FailedIndexCount    int                    `json:"indexFailedCount"`
-	IndexStatus         string                 `json:"indexStatus,omitempty"`
-	IndexError          string                 `json:"indexError,omitempty"`
-	MCPEnabled          bool                   `json:"mcpAvailable"`
-	MCPToolsReady       bool                   `json:"mcpToolsReady"`
-	MCPError            string                 `json:"mcpError,omitempty"`
-	LatestRun           *NewsContextRun        `json:"latestRun,omitempty"`
-	LatestCleanup       *NewsContextCleanupRun `json:"latestCleanup,omitempty"`
-	UpdatedAt           time.Time              `json:"updatedAt"`
+	Config                NewsContextConfig      `json:"config"`
+	ThemeCount            int                    `json:"themeCount"`
+	ActiveThemeCount      int                    `json:"activeThemeCount"`
+	ChangedThemeCount     int                    `json:"changedThemeCount"`
+	CurrentNewsCount      int                    `json:"currentNewsCount"`
+	ProcessedNewsCount    int                    `json:"historicalProcessedCount"`
+	PendingNewsCount      int                    `json:"pendingNewsCount"`
+	CompactedNewsCount    int                    `json:"compressedNewsCount"`
+	ProtectedNewsCount    int                    `json:"protectedNewsCount"`
+	ReleasedBytes         int64                  `json:"releasedBytes"`
+	PendingReviewCount    int                    `json:"pendingReviewCount"`
+	PendingCleanupCount   int                    `json:"pendingCleanupCount"`
+	ReadyIndexCount       int                    `json:"indexReadyCount"`
+	MissingIndexCount     int                    `json:"indexMissingCount"`
+	StaleIndexCount       int                    `json:"indexStaleCount"`
+	FailedIndexCount      int                    `json:"indexFailedCount"`
+	IndexStatus           string                 `json:"indexStatus,omitempty"`
+	IndexError            string                 `json:"indexError,omitempty"`
+	MCPEnabled            bool                   `json:"mcpAvailable"`
+	MCPToolsReady         bool                   `json:"mcpToolsReady"`
+	MCPLastVerifiedAt     time.Time              `json:"mcpLastVerifiedAt,omitempty"`
+	MCPVerificationStatus string                 `json:"mcpVerificationStatus,omitempty"`
+	MCPError              string                 `json:"mcpError,omitempty"`
+	LatestRun             *NewsContextRun        `json:"latestRun,omitempty"`
+	LatestCleanup         *NewsContextCleanupRun `json:"latestCleanup,omitempty"`
+	UpdatedAt             time.Time              `json:"updatedAt"`
 }
 
 func validNewsContextWindowType(value string) bool {

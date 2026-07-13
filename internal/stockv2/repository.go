@@ -795,6 +795,14 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_sentinel_runs_status ON stockv2
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_sentinel_runs_window ON stockv2_portfolio_sentinel_runs(window_type, window_start_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_sentinel_runs_portfolio ON stockv2_portfolio_sentinel_runs(portfolio_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_sentinel_runs_agent ON stockv2_portfolio_sentinel_runs(agent_run_id);
+CREATE TABLE IF NOT EXISTS stockv2_portfolio_sentinel_impact_review_scope (
+    run_id TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (run_id, object_type, object_id),
+    FOREIGN KEY (run_id) REFERENCES stockv2_portfolio_sentinel_runs(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS stockv2_portfolio_sentinel_results (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL UNIQUE,
@@ -1302,11 +1310,17 @@ func (s *Store) init(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, initSchemaSQL); err != nil {
 		return fmt.Errorf("exec init schema: %w", err)
 	}
+	if err := s.migratePortfolioSentinelPublishedRunState(ctx); err != nil {
+		return fmt.Errorf("migrate portfolio sentinel published runs: %w", err)
+	}
 	if err := s.ensureEmbeddingSchema(ctx); err != nil {
 		return fmt.Errorf("ensure embedding schema: %w", err)
 	}
 	if err := s.ensureNewsContextSchema(ctx); err != nil {
 		return fmt.Errorf("ensure news context schema: %w", err)
+	}
+	if err := s.ensureNewsContextBackfillSchema(ctx); err != nil {
+		return fmt.Errorf("ensure news context backfill schema: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		UPDATE stockv2_monitor_task_configs

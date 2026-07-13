@@ -1,4 +1,8 @@
 import type {
+  StockV2AgentModelProfile,
+  StockV2AgentTaskProfile,
+  StockV2NewsContextBackfillTask,
+  StockV2NewsContextRun,
   StockV2NewsContextNamedObject,
   StockV2NewsContextRotationItem,
   StockV2NewsContextTheme,
@@ -40,6 +44,77 @@ export function formatNewsContextBytes(value?: number): string {
   const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   const amount = bytes / 1024 ** index;
   return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+}
+
+export function formatNewsContextInterval(value?: number): string {
+  const seconds = Number(value || 0);
+  if (!Number.isFinite(seconds) || seconds <= 0) return "-";
+  if (seconds % 86400 === 0) return `${seconds / 86400} 天`;
+  if (seconds % 3600 === 0) return `${seconds / 3600} 小时`;
+  if (seconds % 60 === 0) return `${seconds / 60} 分钟`;
+  return `${seconds} 秒`;
+}
+
+export function resolveAvailableTaskModel(
+  taskType: string,
+  taskProfiles: StockV2AgentTaskProfile[],
+  models: StockV2AgentModelProfile[],
+): StockV2AgentModelProfile | undefined {
+  const profile = taskProfiles.find((item) => item.taskType === taskType);
+  return [profile?.primaryModelId, profile?.fallbackModelId]
+    .map((id) => models.find((model) => model.id === id))
+    .find((model) => model?.enabled && model.status === "available" && model.modelType === "chat");
+}
+
+export function newsContextRunCoverage(run: StockV2NewsContextRun): {
+  total: number;
+  covered: number;
+  noise: number;
+  deferred: number;
+  waiting: number;
+  percent: number;
+} {
+  const total = Math.max(0, run.totalNewsCount ?? 0);
+  const processed = Math.max(0, run.processedNewsCount ?? 0);
+  const rawProgress = typeof run.progress === "number" && Number.isFinite(run.progress)
+    ? run.progress
+    : total > 0 ? processed / total : run.coverageStatus === "complete" ? 1 : 0;
+  return {
+    total,
+    covered: Math.max(0, run.coveredCount ?? 0),
+    noise: Math.max(0, run.noiseCount ?? 0),
+    deferred: Math.max(0, run.deferredCount ?? 0),
+    waiting: Math.max(0, run.pendingThemeCount ?? total - processed),
+    percent: Math.round(Math.max(0, Math.min(1, rawProgress)) * 100),
+  };
+}
+
+export function newsContextBackfillNeedsRetry(task?: StockV2NewsContextBackfillTask | null): boolean {
+  return task?.status === "failed" || (task?.status === "completed" && task.missingNewsCount > 0);
+}
+
+export function newsContextFinalReviewCoverage(task?: StockV2NewsContextBackfillTask | null): {
+  output: number;
+  linked: number;
+  missing: number;
+} | null {
+  const values = [
+    task?.historicalDailyOutputVersionCount,
+    task?.finalReviewLinkedVersionCount,
+    task?.finalReviewMissingVersionCount,
+  ];
+  if (!values.every((value) => typeof value === "number" && Number.isFinite(value))) return null;
+  return {
+    output: Math.max(0, values[0] as number),
+    linked: Math.max(0, values[1] as number),
+    missing: Math.max(0, values[2] as number),
+  };
+}
+
+export function originalNewsStatus(deleted?: boolean): { label: string; tone: Tone } {
+  if (deleted === true) return { label: "原文已清理", tone: "neutral" };
+  if (deleted === false) return { label: "原文保留", tone: "good" };
+  return { label: "原文状态未知", tone: "neutral" };
 }
 
 export function confidenceLabel(value?: number): string {
@@ -126,6 +201,19 @@ export function indexStatusTone(value?: string): Tone {
   return "neutral";
 }
 
+export function mcpVerificationLabel(available?: boolean, toolsReady?: boolean, status?: string): string {
+  if (!available || !toolsReady) return "不可用";
+  if (status === "ready") return "已验证";
+  if (status === "failed") return "验证失败";
+  return "待真实验证";
+}
+
+export function mcpVerificationTone(available?: boolean, toolsReady?: boolean, status?: string): Tone {
+  if (!available || !toolsReady || status === "failed") return "danger";
+  if (status === "ready") return "good";
+  return "warn";
+}
+
 export function runStatusLabel(value?: string): string {
   return ({
     pending: "等待执行",
@@ -135,6 +223,7 @@ export function runStatusLabel(value?: string): string {
     partial: "部分完成",
     completed: "已完成",
     failed: "失败",
+    paused: "已暂停",
     cancelled: "已取消",
   } as Record<string, string>)[value || ""] || value || "未知";
 }
@@ -142,6 +231,42 @@ export function runStatusLabel(value?: string): string {
 export function runStatusTone(value?: string): Tone {
   if (value === "completed") return "good";
   if (value === "pending" || value === "queued" || value === "running" || value === "waiting_review" || value === "partial") return "warn";
+  if (value === "failed") return "danger";
+  return "neutral";
+}
+
+export function backfillPhaseLabel(value?: string): string {
+  return ({
+    queued: "等待调度",
+    preflight: "运行前检查",
+    normalizing: "标准化历史消息",
+    hourly: "重建小时脉络",
+    four_hour: "重建四小时脉络",
+    daily: "重建每日脉络",
+    late_scan: "检查迟到与遗漏消息",
+    final_daily: "生成当前每日结论",
+    indexing: "完成主题索引",
+    final_review: "完成组合影响复核",
+    mcp_verification: "验证 CLI 检索",
+    finalizing: "执行最终安全校验",
+    paused: "已暂停",
+    failed: "失败",
+    completed: "全部完成",
+  } as Record<string, string>)[value || ""] || value || "等待开始";
+}
+
+export function backfillStatusLabel(value?: string): string {
+  return ({
+    running: "补处理中",
+    paused: "已暂停",
+    failed: "失败",
+    completed: "已完成",
+  } as Record<string, string>)[value || ""] || value || "尚未启动";
+}
+
+export function backfillStatusTone(value?: string): Tone {
+  if (value === "completed") return "good";
+  if (value === "running" || value === "paused") return "warn";
   if (value === "failed") return "danger";
   return "neutral";
 }
