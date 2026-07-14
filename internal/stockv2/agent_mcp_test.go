@@ -304,9 +304,10 @@ func TestMCP_SubmitNewsContextResultRejectsInvalidSearchAuditWithoutConsumingSlo
 	}
 }
 
-func TestMCP_SubmitNewsContextResultRejectsMismatchedEvidenceThreadWithoutConsumingSlot(t *testing.T) {
+func TestMCP_ServiceSubmitNewsContextResultRejectsMismatchedEvidenceThreadWithoutConsumingSlot(t *testing.T) {
 	p := newAgentTaskPool(defaultCleanupInterval)
 	defer p.Close()
+	p.service = &Service{agentTaskPool: p}
 	taskID, entry := p.createTask(AgentTaskTypeNewsEventReview, "run-news-context", "", 5*time.Minute)
 
 	resp := submitNewsContextEvidenceResultForTest(p, taskID, "thread-decision", "thread-evidence")

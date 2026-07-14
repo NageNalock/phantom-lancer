@@ -195,7 +195,7 @@ func (s *Service) mcpToolsCall(params json.RawMessage) (any, *mcpError) {
 	}
 	switch strings.TrimSpace(callParams.Name) {
 	case codexSubmitResultTool:
-		return s.mcpSubmitResult(callParams.Arguments)
+		return s.agentTaskPool.mcpSubmitResult(callParams.Arguments)
 	case mcpToolSearchInstruments:
 		return s.mcpSearchInstruments(callParams.Arguments)
 	case mcpToolSearchStockProfiles:
@@ -250,33 +250,6 @@ func (s *Service) mcpToolsCall(params json.RawMessage) (any, *mcpError) {
 
 func contextFromMCP() context.Context {
 	return context.Background()
-}
-
-func (s *Service) mcpSubmitResult(args json.RawMessage) (any, *mcpError) {
-	var params submitResultParams
-	if err := json.Unmarshal(args, &params); err != nil {
-		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "Invalid arguments: " + err.Error()}
-	}
-	params.TaskID = strings.TrimSpace(params.TaskID)
-	params.TaskType = strings.TrimSpace(params.TaskType)
-	params.Result.OutputType = strings.TrimSpace(params.Result.OutputType)
-	if params.TaskID == "" || params.TaskType == "" || params.Result.OutputType == "" {
-		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "taskID, taskType and result.outputType are required"}
-	}
-	if !validAgentTaskOutputType(params.TaskType, params.Result.OutputType) {
-		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "invalid result.outputType"}
-	}
-	result := AgentTaskSubmittedResult{
-		OutputType:    params.Result.OutputType,
-		ResultSummary: params.Result.ResultSummary,
-		Result:        params.Result.Result,
-		Confidence:    params.Result.Confidence,
-	}
-	status, err := s.agentTaskPool.submitResult(params.TaskID, params.TaskType, result)
-	if err != nil {
-		return nil, &mcpError{Code: mcpErrInvalidParams, Message: err.Error(), Data: map[string]string{"status": status}}
-	}
-	return mcpTextResult("Result accepted. The main program will validate and process it."), nil
 }
 
 func (s *Service) mcpSearchInstruments(args json.RawMessage) (any, *mcpError) {
