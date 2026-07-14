@@ -29,6 +29,9 @@ func TestNewsContextConfigPersistsVisibleSettingsWithoutBatchLimit(t *testing.T)
 	if updated.CleanupGraceSeconds != 3*24*3600 || updated.AdditionalResearchPrompt != "重点核实上游供给变化" {
 		t.Fatalf("unexpected config: %+v", updated)
 	}
+	if updated.AgentTimeoutSeconds != 1800 || updated.TimeoutRetryLimit != 2 || updated.SchedulerPollSeconds != 5 {
+		t.Fatalf("runtime policy not exposed: %+v", updated)
+	}
 	var legacyColumn int
 	if err := svc.store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`,
 		"stockv2_news_context_config", "batch_size").Scan(&legacyColumn); err != nil {

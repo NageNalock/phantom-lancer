@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -26,14 +27,15 @@ import (
 // 环境变量用 allowlist 转发, 与 codexclient 的策略对齐但不共享代码。
 
 type AgentExecutorOutput struct {
-	Command       string        `json:"command,omitempty"` // redacted, prompt omitted
-	Prompt        string        `json:"-"`
-	StdoutTail    string        `json:"stdoutTail"` // ~4KB
-	StderrTail    string        `json:"stderrTail"` // ~4KB
-	ExitCode      int           `json:"exitCode"`
-	TimedOut      bool          `json:"timedOut"`
-	Duration      time.Duration `json:"duration"`
-	RawTranscript string        `json:"rawTranscript"` // ~16KB 摘要, 用于 ledger
+	Command        string        `json:"command,omitempty"` // redacted, prompt omitted
+	Prompt         string        `json:"-"`
+	StdoutTail     string        `json:"stdoutTail"` // ~4KB
+	StderrTail     string        `json:"stderrTail"` // ~4KB
+	ExitCode       int           `json:"exitCode"`
+	TimedOut       bool          `json:"timedOut"`
+	Duration       time.Duration `json:"duration"`
+	RawTranscript  string        `json:"rawTranscript"` // ~16KB 摘要, 用于 ledger
+	ProcessGroupID int           `json:"-"`
 }
 
 type codexCLIExecutor struct {
@@ -50,6 +52,7 @@ const (
 	stderrTailMaxBytes         = 4 * 1024
 	transcriptMaxBytes         = 16 * 1024
 	executorReaderDrainTimeout = 2 * time.Second
+	executorTerminateGrace     = 5 * time.Second
 	codexStockAgentMCPName     = "stock_agent"
 	codexSubmitResultTool      = "stock_agent.submit_result"
 )
@@ -146,7 +149,7 @@ func (e *codexCLIExecutor) ExecuteNewsContextAggregation(
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
 	prompt := buildNewsContextAggregationPrompt(taskID, pack, e.mcpURL)
-	return e.executePrompt(ctx, taskID, prompt, modelName)
+	return e.executePromptWithTimeout(ctx, taskID, prompt, modelName, newsContextAgentTimeout)
 }
 
 func (e *codexCLIExecutor) ExecutePortfolioSentinel(
@@ -181,8 +184,19 @@ func (e *codexCLIExecutor) executePrompt(
 	prompt string,
 	modelName string,
 ) (*AgentExecutorOutput, error) {
-	// 超时控制
-	timeout := execDefaultTimeout
+	return e.executePromptWithTimeout(ctx, taskID, prompt, modelName, execDefaultTimeout)
+}
+
+func (e *codexCLIExecutor) executePromptWithTimeout(
+	ctx context.Context,
+	taskID string,
+	prompt string,
+	modelName string,
+	timeout time.Duration,
+) (*AgentExecutorOutput, error) {
+	if timeout <= 0 {
+		timeout = execDefaultTimeout
+	}
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -196,6 +210,20 @@ func (e *codexCLIExecutor) executePrompt(
 	args := buildCodexExecArgs(modelName, prompt, mcpServers)
 	cmd := exec.CommandContext(execCtx, e.binary, args...)
 	cmd.Env = e.buildEnv()
+	// ponytail: Codex may spawn search or MCP descendants. A dedicated process
+	// group lets timeout cleanup remove only this task without touching peers.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	cmd.WaitDelay = executorTerminateGrace
 
 	var stdoutBuf, stderrBuf, transcriptBuf ringBuffer
 	stdoutBuf.Init(stdoutTailMaxBytes)
@@ -214,6 +242,7 @@ func (e *codexCLIExecutor) executePrompt(
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start codex: %w", err)
 	}
+	processGroupID := cmd.Process.Pid
 
 	// 异步读取 stdout / stderr
 	doneCh := make(chan error, 2)
@@ -254,7 +283,7 @@ func (e *codexCLIExecutor) executePrompt(
 	var execErr error
 	waitDone := make(chan executorWaitResult, 1)
 	go func() {
-		readerErrs := waitForExecutorReaders(doneCh, 2, execDefaultTimeout+executorReaderDrainTimeout)
+		readerErrs := waitForExecutorReaders(doneCh, 2, timeout+executorTerminateGrace+executorReaderDrainTimeout)
 		waitDone <- executorWaitResult{err: cmd.Wait(), readerErrs: readerErrs}
 	}()
 
@@ -292,7 +321,7 @@ waitLoop:
 			if r.err == nil {
 				submittedResult = r.result
 				resultReceived = true
-				// result 已收到, 继续等进程正常退出或超时
+				break waitLoop
 			} else {
 				resultErr = r.err
 			}
@@ -301,6 +330,36 @@ waitLoop:
 				timedOut = true
 			}
 			break waitLoop
+		}
+	}
+
+	stopProcessGroup := func() {
+		if processDone {
+			return
+		}
+		if err := syscall.Kill(-processGroupID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+			execErr = fmt.Errorf("terminate codex process group: %w", err)
+		}
+		select {
+		case result := <-waitDone:
+			execErr = result.err
+			readerErrs = append(readerErrs, result.readerErrs...)
+			processDone = true
+			return
+		case <-time.After(executorTerminateGrace):
+		}
+		if err := syscall.Kill(-processGroupID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			execErr = fmt.Errorf("kill codex process group: %w", err)
+		}
+		select {
+		case result := <-waitDone:
+			execErr = result.err
+			readerErrs = append(readerErrs, result.readerErrs...)
+			processDone = true
+		case <-time.After(executorTerminateGrace + executorReaderDrainTimeout):
+			if execErr == nil {
+				execErr = errors.New("wait for killed codex process group timed out")
+			}
 		}
 	}
 
@@ -315,25 +374,15 @@ waitLoop:
 			readerErrs = append(readerErrs, result.readerErrs...)
 			processDone = true
 		case <-shortCtx.Done():
-			// 超时 kill
-			if cmd.Process != nil {
-				cmd.Process.Kill()
-			}
-			result := <-waitDone
-			execErr = result.err
-			readerErrs = append(readerErrs, result.readerErrs...)
-			processDone = true
+			stopProcessGroup()
 		}
 	}
-	if timedOut && !processDone {
-		select {
-		case result := <-waitDone:
-			execErr = result.err
-			readerErrs = append(readerErrs, result.readerErrs...)
-			processDone = true
-		case <-time.After(executorReaderDrainTimeout):
-		}
+	if !processDone {
+		stopProcessGroup()
 	}
+	// A descendant can outlive the main Codex process while retaining inherited
+	// pipes. Clear the task group before returning or starting a retry.
+	_ = syscall.Kill(-processGroupID, syscall.SIGKILL)
 
 	duration := time.Since(start)
 
@@ -361,14 +410,15 @@ waitLoop:
 	transcript := safelog.Text(transcriptBuf.String(), transcriptMaxBytes)
 
 	output := &AgentExecutorOutput{
-		Command:       codexCommandSummary(e.binary, args),
-		Prompt:        prompt,
-		StdoutTail:    stdoutTail,
-		StderrTail:    stderrTail,
-		ExitCode:      exitCode,
-		TimedOut:      timedOut,
-		Duration:      duration,
-		RawTranscript: transcript,
+		Command:        codexCommandSummary(e.binary, args),
+		Prompt:         prompt,
+		StdoutTail:     stdoutTail,
+		StderrTail:     stderrTail,
+		ExitCode:       exitCode,
+		TimedOut:       timedOut,
+		Duration:       duration,
+		RawTranscript:  transcript,
+		ProcessGroupID: processGroupID,
 	}
 
 	// result 没收到但进程退出了 → 失败
@@ -383,6 +433,33 @@ waitLoop:
 	}
 
 	return output, nil
+}
+
+func ensureExecutorProcessGroupStopped(processGroupID int) error {
+	if processGroupID <= 0 || !executorProcessGroupExists(processGroupID) {
+		return nil
+	}
+	// A group still alive after executePrompt returned is residual. It has
+	// already received the graceful stop window, so kill it before retrying.
+	if err := syscall.Kill(-processGroupID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("kill residual codex process group: %w", err)
+	}
+	deadline := time.Now().Add(executorReaderDrainTimeout)
+	for executorProcessGroupExists(processGroupID) {
+		if time.Now().After(deadline) {
+			return errors.New("residual codex process group is still running")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return nil
+}
+
+func executorProcessGroupExists(processGroupID int) bool {
+	if processGroupID <= 0 {
+		return false
+	}
+	err := syscall.Kill(-processGroupID, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 func buildCodexExecArgs(modelName, prompt string, mcpServers []codexMCPServerCapability) []string {
@@ -928,6 +1005,7 @@ func buildNewsContextAggregationPrompt(taskID string, pack NewsContextAggregatio
 	b.WriteString("# News Context Aggregation Task\n\n")
 	b.WriteString("System role: you maintain StockV2 message threads by compressing normalized news into durable, reviewable market themes. You are not a trading executor.\n")
 	b.WriteString("Process every input news item exactly once. Do not impose a target count for events, threads, or changes, and do not merge unrelated facts merely to reduce storage.\n")
+	b.WriteString("Write every user-facing conclusion in Simplified Chinese, including resultSummary, decision reasons, thread titles, theses, changes, facts, inferences, contrary evidence, questions, catalysts, invalidations, relation summaries, and research audit conclusions. Keep schema field names, enum values, identifiers, symbols, and source URLs unchanged.\n")
 	b.WriteString("A four-hour or daily batch may have no new news and still has to review every InputThreads item. InputThreads can contain chronological child-window snapshots with the same stable thread id; read every snapshot in order, then return exactly one consolidated outcome for that stable id. A daily batch must produce a stage conclusion for each reviewed thread and cannot skip review merely because no new article arrived.\n")
 	if pack.DailyConvergenceReview {
 		b.WriteString("This is the persisted second-stage daily convergence review after all first-pass fragments completed. Review all InputThreads together to identify and update cross-theme relationships, sector rotation, potential next relay or succession themes, and invalidation or failure clues. Do not invent a target theme count, and return exactly one final outcome for every stable theme in this convergence batch.\n")

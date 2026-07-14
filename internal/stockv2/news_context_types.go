@@ -277,6 +277,9 @@ type NewsContextConfig struct {
 	FourHourIntervalSeconds  int       `json:"fourHourIntervalSeconds"`
 	DailyIntervalSeconds     int       `json:"dailyIntervalSeconds"`
 	CleanupGraceSeconds      int       `json:"cleanupGraceSeconds"`
+	AgentTimeoutSeconds      int       `json:"agentTimeoutSeconds"`
+	TimeoutRetryLimit        int       `json:"timeoutRetryLimit"`
+	SchedulerPollSeconds     int       `json:"schedulerPollSeconds"`
 	AdditionalResearchPrompt string    `json:"additionalResearchPrompt,omitempty"`
 	NextHourlyAt             time.Time `json:"nextHourlyAt,omitempty"`
 	NextFourHourAt           time.Time `json:"nextFourHourAt,omitempty"`

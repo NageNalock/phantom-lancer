@@ -1564,6 +1564,9 @@ export interface StockV2NewsContextConfig {
   fourHourIntervalSeconds: number;
   dailyIntervalSeconds: number;
   cleanupGraceSeconds: number;
+  agentTimeoutSeconds: number;
+  timeoutRetryLimit: number;
+  schedulerPollSeconds: number;
   additionalResearchPrompt?: string;
   nextHourlyAt?: string;
   nextFourHourAt?: string;

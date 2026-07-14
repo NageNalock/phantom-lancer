@@ -15,7 +15,14 @@ import (
 )
 
 const (
-	newsContextSchedulerInterval     = 30 * time.Second
+	// ponytail: five seconds keeps the single-owner backfill moving without
+	// turning this internal scheduler cadence into a second owner-tuned queue.
+	newsContextSchedulerInterval = 5 * time.Second
+	// ponytail: news-context aggregation performs mandatory public research and
+	// emits a large audited result. Keep its deadline separate from other agents.
+	newsContextAgentTimeout          = 30 * time.Minute
+	newsContextAgentTaskTTL          = newsContextAgentTimeout + time.Minute
+	newsContextTimeoutRetryLimit     = 2
 	newsContextSeedPageSize          = 500
 	newsContextInputTextLimit        = 60_000
 	newsContextAdditionalPromptLimit = 2_000
@@ -33,6 +40,9 @@ func defaultNewsContextConfig() NewsContextConfig {
 		FourHourIntervalSeconds: 4 * 3600,
 		DailyIntervalSeconds:    24 * 3600,
 		CleanupGraceSeconds:     24 * 3600,
+		AgentTimeoutSeconds:     int(newsContextAgentTimeout / time.Second),
+		TimeoutRetryLimit:       newsContextTimeoutRetryLimit,
+		SchedulerPollSeconds:    int(newsContextSchedulerInterval / time.Second),
 		UpdatedAt:               time.Now(),
 	}
 }
@@ -46,6 +56,11 @@ func normalizeNewsContextConfig(cfg NewsContextConfig) NewsContextConfig {
 	cfg.HourlyIntervalSeconds = 3600
 	cfg.FourHourIntervalSeconds = 4 * 3600
 	cfg.DailyIntervalSeconds = 24 * 3600
+	// ponytail: these are one coherent safety policy. Making only one value
+	// editable would desynchronize process cleanup, task TTL, and retry behavior.
+	cfg.AgentTimeoutSeconds = int(newsContextAgentTimeout / time.Second)
+	cfg.TimeoutRetryLimit = newsContextTimeoutRetryLimit
+	cfg.SchedulerPollSeconds = int(newsContextSchedulerInterval / time.Second)
 	if !validNewsContextCleanupGrace(cfg.CleanupGraceSeconds) {
 		cfg.CleanupGraceSeconds = 24 * 3600
 	}
@@ -61,7 +76,8 @@ func (s *Service) GetNewsContextConfig(ctx context.Context) (NewsContextConfig, 
 	if !errors.Is(err, sql.ErrNoRows) {
 		return NewsContextConfig{}, err
 	}
-	return s.store.UpsertNewsContextConfig(ctx, defaultNewsContextConfig())
+	created, err := s.store.UpsertNewsContextConfig(ctx, defaultNewsContextConfig())
+	return normalizeNewsContextConfig(created), err
 }
 
 func (s *Service) UpdateNewsContextConfig(ctx context.Context, cfg NewsContextConfig) (NewsContextConfig, error) {
@@ -80,7 +96,7 @@ func (s *Service) UpdateNewsContextConfig(ctx context.Context, cfg NewsContextCo
 	if updated.Enabled {
 		s.StartBackground(context.Background())
 	}
-	return updated, nil
+	return normalizeNewsContextConfig(updated), nil
 }
 
 func (s *Service) PatchNewsContextConfig(ctx context.Context, req RequestUpdateNewsContextConfig) (NewsContextConfig, error) {
@@ -793,39 +809,7 @@ func (s *Service) executeNewsContextRun(ctx context.Context, runID string) {
 			}
 			break
 		}
-		pack, err := s.buildNewsContextAggregationPack(ctx, run, items)
-		if err != nil {
-			fail(err)
-			return
-		}
-		pack.AdditionalResearchPrompt = cfg.AdditionalResearchPrompt
-		resolution, err := s.ResolveAgentTask(ctx, AgentTaskTypeNewsEventReview, "news_context_run", run.ID, "system")
-		if err != nil {
-			fail(err)
-			return
-		}
-		if resolution.Run == nil || resolution.DecisionLedger == nil {
-			fail(errors.New("no news context agent run created"))
-			return
-		}
-		if _, err := s.store.MarkNewsContextRunItemsRunning(ctx, run.ID, resolution.Run.ID, newsContextRunItemObjectIDs(items)); err != nil {
-			fail(err)
-			return
-		}
-		run.CurrentAgentRunID = resolution.Run.ID
-		if run, err = s.store.UpdateNewsContextRun(ctx, run); err != nil {
-			fail(err)
-			return
-		}
-		if _, _, err := s.executeNewsContextAgentRun(ctx, *resolution.Run, *resolution.DecisionLedger, pack, resolution.ModelName); err != nil {
-			fail(err)
-			return
-		}
-		finalAgentRun, err := s.store.GetAgentRun(ctx, resolution.Run.ID)
-		if err != nil || finalAgentRun.Status != AgentRunStatusCompleted {
-			if err == nil {
-				err = errors.New(firstNonEmpty(finalAgentRun.ErrorMessage, "news context agent run failed"))
-			}
+		if err := s.executeNewsContextBatchWithRetry(ctx, &run, cfg, items); err != nil {
 			fail(err)
 			return
 		}
@@ -976,21 +960,95 @@ func (s *Service) recordNewsContextRunFailure(ctx context.Context, _ string, cau
 	_, _ = s.store.UpsertNewsContextConfig(ctx, cfg)
 }
 
-func (s *Service) executeNewsContextAgentRun(ctx context.Context, run AgentRun, ledger AgentDecisionLedger, pack NewsContextAggregationPack, modelName string) (AgentRun, AgentDecisionLedger, error) {
+func (s *Service) executeNewsContextBatchWithRetry(
+	ctx context.Context,
+	run *NewsContextRun,
+	cfg NewsContextConfig,
+	items []NewsContextRunItem,
+) error {
+	batch := items
+	for attempt := 0; attempt <= newsContextTimeoutRetryLimit; attempt++ {
+		pack, err := s.buildNewsContextAggregationPack(ctx, *run, batch)
+		if err != nil {
+			return err
+		}
+		pack.AdditionalResearchPrompt = cfg.AdditionalResearchPrompt
+		resolution, err := s.ResolveAgentTask(ctx, AgentTaskTypeNewsEventReview, "news_context_run", run.ID, "system")
+		if err != nil {
+			return err
+		}
+		if resolution.Run == nil || resolution.DecisionLedger == nil {
+			return errors.New("no news context agent run created")
+		}
+		if _, err := s.store.MarkNewsContextRunItemsRunning(ctx, run.ID, resolution.Run.ID, newsContextRunItemObjectIDs(batch)); err != nil {
+			return err
+		}
+		run.CurrentAgentRunID = resolution.Run.ID
+		if *run, err = s.store.UpdateNewsContextRun(ctx, *run); err != nil {
+			return err
+		}
+		finalAgentRun, _, output, execErr := s.executeNewsContextAgentRun(
+			ctx, *resolution.Run, *resolution.DecisionLedger, pack, resolution.ModelName,
+		)
+		attemptErr := execErr
+		if attemptErr == nil && finalAgentRun.Status != AgentRunStatusCompleted {
+			attemptErr = errors.New(firstNonEmpty(finalAgentRun.ErrorMessage, "news context agent run failed"))
+		}
+		if attemptErr == nil {
+			return nil
+		}
+		if !retryableNoSubmitTimeout(attemptErr, output) {
+			return attemptErr
+		}
+		if err := ensureExecutorProcessGroupStopped(output.ProcessGroupID); err != nil {
+			return fmt.Errorf("clean timed-out news context process: %w", err)
+		}
+		if attempt == newsContextTimeoutRetryLimit {
+			return attemptErr
+		}
+		if err := s.store.ResetNewsContextRunItemsForAgent(ctx, run.ID, resolution.Run.ID); err != nil {
+			return err
+		}
+		next := shrinkNewsContextRetryBatch(batch)
+		if s.log != nil {
+			s.log.Warn("retrying news context batch after timeout without submission",
+				"context_run_id", run.ID,
+				"agent_run_id", resolution.Run.ID,
+				"attempt", attempt+1,
+				"max_attempts", newsContextTimeoutRetryLimit+1,
+				"previous_item_count", len(batch),
+				"next_item_count", len(next),
+				"duration", outputDurationString(output),
+				"error", safelog.Text(attemptErr.Error(), 240),
+			)
+		}
+		batch = next
+	}
+	return errors.New("news context retry loop exhausted")
+}
+
+func shrinkNewsContextRetryBatch(items []NewsContextRunItem) []NewsContextRunItem {
+	if len(items) <= 1 {
+		return items
+	}
+	return items[:(len(items)+1)/2]
+}
+
+func (s *Service) executeNewsContextAgentRun(ctx context.Context, run AgentRun, ledger AgentDecisionLedger, pack NewsContextAggregationPack, modelName string) (AgentRun, AgentDecisionLedger, *AgentExecutorOutput, error) {
 	if s.newsContextExecutor == nil {
 		err := ErrAgentExecutorUnavailable
 		s.finalizeAgentRun(ctx, run.ID, nil, err)
 		finalRun, finalLedger := s.safeGetAgentRunAndLedger(ctx, run.ID, ledger.ID)
-		return finalRun, finalLedger, err
+		return finalRun, finalLedger, nil, err
 	}
 	running := run
 	running.Status = AgentRunStatusRunning
 	_, _ = s.store.UpdateAgentRun(ctx, running)
-	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
+	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", newsContextAgentTaskTTL)
 	output, execErr := s.newsContextExecutor.ExecuteNewsContextAggregation(ctx, taskID, pack, modelName)
 	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, output, execErr)
 	finalRun, finalLedger := s.safeGetAgentRunAndLedger(ctx, run.ID, ledger.ID)
-	return finalRun, finalLedger, execErr
+	return finalRun, finalLedger, output, execErr
 }
 
 func (s *Service) buildNewsContextAggregationPack(ctx context.Context, run NewsContextRun, items []NewsContextRunItem) (NewsContextAggregationPack, error) {

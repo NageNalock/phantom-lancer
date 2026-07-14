@@ -2,6 +2,7 @@ package stockv2
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -386,6 +387,137 @@ func seedNewsContextEventRun(t *testing.T, svc *Service, ctx context.Context) (N
 		t.Fatalf("update news context run: %v", err)
 	}
 	return run, event
+}
+
+func TestShrinkNewsContextRetryBatchHalvesWithoutDroppingOrder(t *testing.T) {
+	items := make([]NewsContextRunItem, 73)
+	for i := range items {
+		items[i].ObjectID = fmt.Sprintf("news-%02d", i)
+	}
+	second := shrinkNewsContextRetryBatch(items)
+	third := shrinkNewsContextRetryBatch(second)
+	if len(second) != 37 || len(third) != 19 {
+		t.Fatalf("retry sizes = %d, %d; want 37, 19", len(second), len(third))
+	}
+	for i, item := range third {
+		if item.ObjectID != items[i].ObjectID {
+			t.Fatalf("retry order changed at %d: %q != %q", i, item.ObjectID, items[i].ObjectID)
+		}
+	}
+}
+
+type retryNewsContextExecutor struct {
+	pool  *agentTaskPool
+	sizes []int
+}
+
+func (e *retryNewsContextExecutor) ExecuteNewsContextAggregation(
+	_ context.Context,
+	taskID string,
+	pack NewsContextAggregationPack,
+	_ string,
+) (*AgentExecutorOutput, error) {
+	e.sizes = append(e.sizes, len(pack.InputNewsEvents)+len(pack.InputThreads))
+	if len(e.sizes) <= newsContextTimeoutRetryLimit {
+		return &AgentExecutorOutput{TimedOut: true, ExitCode: -1, Duration: newsContextAgentTimeout},
+			fmt.Errorf("execution timed out after %s, no result submitted", newsContextAgentTimeout)
+	}
+	report := NewsContextReport{
+		SchemaVersion: NewsContextResultSchemaVersion,
+		RunID:         pack.RunID,
+		WindowType:    pack.WindowType,
+		SearchAudit: []NewsContextSearchAudit{{
+			Question: "是否需要额外公开核实", Status: NewsContextResearchCompleted,
+			Sources: []string{"https://example.com/public"}, Supported: []string{"本批仅包含测试噪音"},
+		}},
+	}
+	for _, event := range pack.InputNewsEvents {
+		report.ProcessedNewsIDs = append(report.ProcessedNewsIDs, event.ID)
+		report.NewsDecisions = append(report.NewsDecisions, NewsContextNewsDecision{
+			NewsEventID: event.ID, Disposition: NewsEventContextNoise, Reason: "测试噪音",
+		})
+	}
+	raw, _ := json.Marshal(report)
+	var result map[string]any
+	_ = json.Unmarshal(raw, &result)
+	if _, err := e.pool.submitResult(taskID, AgentTaskTypeNewsEventReview, AgentTaskSubmittedResult{
+		OutputType: NewsContextOutputType, ResultSummary: "测试归纳完成", Result: result, Confidence: 1,
+	}); err != nil {
+		return nil, err
+	}
+	return &AgentExecutorOutput{ExitCode: 0, Duration: time.Millisecond}, nil
+}
+
+func TestExecuteNewsContextBatchRetriesWithSmallerPendingSlice(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeCodexCLI, Name: "news-context-retry",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	model, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID: provider.ID, ModelName: "news-context-retry-model", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeNewsEventReview, RequestUpdateAgentTaskProfile{
+		PrimaryModelID: &model.ID,
+	}); err != nil {
+		t.Fatalf("bind task model: %v", err)
+	}
+	executor := &retryNewsContextExecutor{pool: svc.agentTaskPool}
+	svc.newsContextExecutor = executor
+
+	now := time.Now().Truncate(time.Second)
+	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowHourly, TriggerType: NewsContextTriggerManual,
+		Status: NewsContextRunStatusRunning, WindowStart: now.Add(-time.Hour), WindowEnd: now,
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatalf("create context run: %v", err)
+	}
+	runItems := make([]NewsContextRunItem, 0, 5)
+	for i := 0; i < 5; i++ {
+		event, err := svc.CreateNewsEvent(ctx, NewsEvent{
+			Source: "test", Title: fmt.Sprintf("普通测试新闻 %d", i), Summary: "无重要市场影响",
+			Content: "用于验证超时后缩小批次。", EventAt: now.Add(time.Duration(i-10) * time.Minute),
+		})
+		if err != nil {
+			t.Fatalf("create event %d: %v", i, err)
+		}
+		runItems = append(runItems, NewsContextRunItem{
+			RunID: run.ID, ObjectType: NewsContextRunItemNewsEvent, ObjectID: event.ID, Status: NewsContextRunItemPending,
+		})
+	}
+	if err := svc.store.AddNewsContextRunItems(ctx, runItems); err != nil {
+		t.Fatalf("add run items: %v", err)
+	}
+	items, err := svc.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{RunID: run.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("list run items: %v", err)
+	}
+	if err := svc.executeNewsContextBatchWithRetry(ctx, &run, defaultNewsContextConfig(), items); err != nil {
+		t.Fatalf("execute retry batch: %v", err)
+	}
+	if got := fmt.Sprint(executor.sizes); got != "[5 3 2]" {
+		t.Fatalf("attempt sizes = %s, want [5 3 2]", got)
+	}
+	pending, err := svc.store.CountNewsContextRunItems(ctx, NewsContextRunItemListFilter{RunID: run.ID, Status: NewsContextRunItemPending})
+	if err != nil {
+		t.Fatalf("count pending items: %v", err)
+	}
+	completed, err := svc.store.CountNewsContextRunItems(ctx, NewsContextRunItemListFilter{RunID: run.ID, Status: NewsContextRunItemCompleted})
+	if err != nil {
+		t.Fatalf("count completed items: %v", err)
+	}
+	if pending != 3 || completed != 2 {
+		t.Fatalf("item counts pending=%d completed=%d, want 3 and 2", pending, completed)
+	}
 }
 
 func newsContextCreateThreadReport(run NewsContextRun, event NewsEvent) NewsContextReport {

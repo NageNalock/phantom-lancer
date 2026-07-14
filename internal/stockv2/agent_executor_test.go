@@ -3,7 +3,9 @@ package stockv2
 import (
 	"context"
 	"os"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -123,6 +125,55 @@ func TestExecutePromptCapturesFastExitStderr(t *testing.T) {
 	}
 }
 
+func TestExecutePromptTimeoutKillsResidualProcessGroup(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := dir + "/child.pid"
+	script := dir + "/fake-codex"
+	body := "#!/bin/sh\n" +
+		"trap 'exit 0' TERM\n" +
+		"(trap '' TERM; sleep 30) &\n" +
+		"echo $! > " + pidFile + "\n" +
+		"wait\n"
+	if err := os.WriteFile(script, []byte(body), 0755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	pool := newAgentTaskPool(defaultCleanupInterval)
+	defer pool.Close()
+	executor := &codexCLIExecutor{
+		binary:   script,
+		taskPool: pool,
+		mcpURL:   "http://127.0.0.1:8080/api/stockv2/agent/mcp",
+	}
+	taskID, _ := pool.createTask(AgentTaskTypeNewsEventReview, "run-timeout", "", time.Minute)
+
+	output, err := executor.executePromptWithTimeout(context.Background(), taskID, "prompt", "gpt-5.5", 100*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err = %v, want timeout", err)
+	}
+	if output == nil || !output.TimedOut || output.ProcessGroupID <= 0 {
+		t.Fatalf("output = %+v, want timed out process group", output)
+	}
+	rawPID, readErr := os.ReadFile(pidFile)
+	if readErr != nil {
+		t.Fatalf("read child pid: %v", readErr)
+	}
+	childPID, parseErr := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	if parseErr != nil {
+		t.Fatalf("parse child pid: %v", parseErr)
+	}
+	defer syscall.Kill(childPID, syscall.SIGKILL)
+	deadline := time.Now().Add(executorReaderDrainTimeout)
+	for syscall.Kill(childPID, 0) == nil && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := syscall.Kill(childPID, 0); err == nil {
+		t.Fatalf("residual child process %d is still running", childPID)
+	}
+	if err := ensureExecutorProcessGroupStopped(output.ProcessGroupID); err != nil {
+		t.Fatalf("verify stopped process group: %v", err)
+	}
+}
+
 func TestBuildStockProfileSummaryPromptTruncatesUTF8Safely(t *testing.T) {
 	profile := StockProfile{
 		Symbol:            "000815",
@@ -173,6 +224,8 @@ func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing
 		"Both calls MUST use this exact aggregation WindowEnd cutoff",
 		"Public verification is mandatory",
 		"every ResearchReasons item",
+		"Write every user-facing conclusion in Simplified Chinese",
+		"Keep schema field names, enum values, identifiers, symbols, and source URLs unchanged",
 		"stock_agent.submit_result",
 	} {
 		if !strings.Contains(prompt, want) {

@@ -904,40 +904,8 @@ func (s *Service) executeNewsContextBackfillChunk(ctx context.Context, runID str
 		}
 		return
 	}
-	pack, err := s.buildNewsContextAggregationPack(ctx, run, items)
-	if err != nil {
-		fail(err)
-		return
-	}
-	if cfg, cfgErr := s.GetNewsContextConfig(ctx); cfgErr == nil {
-		pack.AdditionalResearchPrompt = cfg.AdditionalResearchPrompt
-	}
-	resolution, err := s.ResolveAgentTask(ctx, AgentTaskTypeNewsEventReview, "news_context_run", run.ID, "system")
-	if err != nil || resolution.Run == nil || resolution.DecisionLedger == nil {
-		if err == nil {
-			err = errors.New("no news context agent run created")
-		}
-		fail(err)
-		return
-	}
-	if _, err := s.store.MarkNewsContextRunItemsRunning(ctx, run.ID, resolution.Run.ID, newsContextRunItemObjectIDs(items)); err != nil {
-		fail(err)
-		return
-	}
-	run.CurrentAgentRunID = resolution.Run.ID
-	if run, err = s.store.UpdateNewsContextRun(ctx, run); err != nil {
-		fail(err)
-		return
-	}
-	if _, _, err := s.executeNewsContextAgentRun(ctx, *resolution.Run, *resolution.DecisionLedger, pack, resolution.ModelName); err != nil {
-		fail(err)
-		return
-	}
-	finalAgentRun, err := s.store.GetAgentRun(ctx, resolution.Run.ID)
-	if err != nil || finalAgentRun.Status != AgentRunStatusCompleted {
-		if err == nil {
-			err = errors.New(firstNonEmpty(finalAgentRun.ErrorMessage, "news context agent run failed"))
-		}
+	batchCfg, _ := s.GetNewsContextConfig(ctx)
+	if err := s.executeNewsContextBatchWithRetry(ctx, &run, batchCfg, items); err != nil {
 		fail(err)
 		return
 	}

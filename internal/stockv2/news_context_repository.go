@@ -831,6 +831,20 @@ func (s *Store) ResetFailedNewsContextRunItems(ctx context.Context, runID string
 	return nil
 }
 
+func (s *Store) ResetNewsContextRunItemsForAgent(ctx context.Context, runID, agentRunID string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_run_items
+		SET status=?, agent_run_id=NULL, error_message=NULL, updated_at=?
+		WHERE run_id=? AND agent_run_id=? AND status=?`, NewsContextRunItemPending, time.Now(),
+		strings.TrimSpace(runID), strings.TrimSpace(agentRunID), NewsContextRunItemRunning)
+	if err != nil {
+		return wrapError(err, "reset news context retry items")
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return ErrInvalidNewsContextInput
+	}
+	return nil
+}
+
 const newsContextCleanupSelectSQL = `
 	SELECT id, COALESCE(context_run_id,''), status, COALESCE(phase,''), cutoff,
 	       scanned_count, eligible_count, compacted_count, protected_count,
