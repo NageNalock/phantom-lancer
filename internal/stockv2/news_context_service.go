@@ -1305,18 +1305,36 @@ func validateNewsContextBatchNewsCoverage(items []NewsContextRunItem, report New
 		}
 		expectedNews[id] = true
 	}
-	decisions := make(map[string]NewsContextNewsDecision, len(report.NewsDecisions))
-	for _, decision := range report.NewsDecisions {
+	for id, processed := range expectedNews {
+		if !processed {
+			return fmt.Errorf("%w: news %s was not covered", ErrInvalidNewsContextResult, id)
+		}
+	}
+	return validateNewsContextDecisionEvidenceConsistency(report.ProcessedNewsIDs, report.NewsDecisions, report.ThreadChanges)
+}
+
+func validateNewsContextDecisionEvidenceConsistency(processedNewsIDs []string, newsDecisions []NewsContextNewsDecision, threadChanges []NewsContextThreadChange) error {
+	expectedNews := make(map[string]bool, len(processedNewsIDs))
+	for _, id := range processedNewsIDs {
+		id = strings.TrimSpace(id)
+		if id == "" || expectedNews[id] {
+			return fmt.Errorf("%w: invalid or duplicate processed news id", ErrInvalidNewsContextResult)
+		}
+		expectedNews[id] = true
+	}
+	decisions := make(map[string]NewsContextNewsDecision, len(newsDecisions))
+	for _, decision := range newsDecisions {
 		if _, valid := normalizeNewsContextDisposition(decision.Disposition); !valid {
 			return fmt.Errorf("%w: unsupported news decision disposition", ErrInvalidNewsContextResult)
 		}
-		if _, ok := expectedNews[decision.NewsEventID]; !ok || decisions[decision.NewsEventID].NewsEventID != "" {
+		decision.NewsEventID = strings.TrimSpace(decision.NewsEventID)
+		if !expectedNews[decision.NewsEventID] || decisions[decision.NewsEventID].NewsEventID != "" {
 			return fmt.Errorf("%w: invalid news decision coverage", ErrInvalidNewsContextResult)
 		}
 		decisions[decision.NewsEventID] = decision
 	}
-	for id, processed := range expectedNews {
-		if !processed || decisions[id].NewsEventID == "" {
+	for id := range expectedNews {
+		if decisions[id].NewsEventID == "" {
 			return fmt.Errorf("%w: news %s was not covered", ErrInvalidNewsContextResult, id)
 		}
 	}
@@ -1324,7 +1342,7 @@ func validateNewsContextBatchNewsCoverage(items []NewsContextRunItem, report New
 	changeForEvidence := make(map[string]int, len(expectedNews))
 	identityOwner := make(map[string]int)
 	createIdentity := make(map[int]string)
-	for index, change := range report.ThreadChanges {
+	for index, change := range threadChanges {
 		if strings.TrimSpace(change.Action) == "create" {
 			continue
 		}
@@ -1337,8 +1355,9 @@ func validateNewsContextBatchNewsCoverage(items []NewsContextRunItem, report New
 		}
 		identityOwner[threadID] = index
 	}
-	for index, change := range report.ThreadChanges {
-		for _, eventID := range change.EvidenceNewsIDs {
+	for index, change := range threadChanges {
+		for _, rawEventID := range change.EvidenceNewsIDs {
+			eventID := strings.TrimSpace(rawEventID)
 			if _, ok := expectedNews[eventID]; !ok {
 				return fmt.Errorf("%w: evidence news was not part of this batch", ErrInvalidNewsContextResult)
 			}
@@ -1365,8 +1384,8 @@ func validateNewsContextBatchNewsCoverage(items []NewsContextRunItem, report New
 					createIdentity[index] = decisionThreadID
 					identityOwner[decisionThreadID] = index
 				}
-			} else if decisionThreadID == "" || decisionThreadID != strings.TrimSpace(change.ThreadID) {
-				return fmt.Errorf("%w: news decision thread does not match its evidence thread", ErrInvalidNewsContextResult)
+			} else if evidenceThreadID := strings.TrimSpace(change.ThreadID); decisionThreadID == "" || decisionThreadID != evidenceThreadID {
+				return fmt.Errorf("%w: news %s decision thread %q does not match evidence thread %q", ErrInvalidNewsContextResult, eventID, decisionThreadID, evidenceThreadID)
 			}
 			changeForEvidence[eventID] = index
 		}

@@ -208,7 +208,11 @@ func (p *agentTaskPool) mcpSubmitResult(args json.RawMessage) (any, *mcpError) {
 	}
 	if params.TaskType == AgentTaskTypeNewsEventReview {
 		if err := validateNewsContextSubmittedResult(params.Result.Result); err != nil {
-			return nil, &mcpError{Code: mcpErrInvalidParams, Message: "invalid news context result: " + err.Error()}
+			message := err.Error()
+			if !errors.Is(err, ErrInvalidNewsContextResult) {
+				message = "invalid news context result: " + message
+			}
+			return nil, &mcpError{Code: mcpErrInvalidParams, Message: message}
 		}
 	}
 
@@ -276,6 +280,9 @@ func validateNewsContextSubmittedResult(value map[string]any) error {
 		}
 	}
 	if err := validateNewsContextSearchAudit(report.SearchAudit); err != nil {
+		return err
+	}
+	if err := validateNewsContextDecisionEvidenceConsistency(report.ProcessedNewsIDs, report.NewsDecisions, report.ThreadChanges); err != nil {
 		return err
 	}
 	return nil

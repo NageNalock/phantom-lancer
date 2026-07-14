@@ -304,6 +304,65 @@ func TestMCP_SubmitNewsContextResultRejectsInvalidSearchAuditWithoutConsumingSlo
 	}
 }
 
+func TestMCP_SubmitNewsContextResultRejectsMismatchedEvidenceThreadWithoutConsumingSlot(t *testing.T) {
+	p := newAgentTaskPool(defaultCleanupInterval)
+	defer p.Close()
+	taskID, entry := p.createTask(AgentTaskTypeNewsEventReview, "run-news-context", "", 5*time.Minute)
+
+	resp := submitNewsContextEvidenceResultForTest(p, taskID, "thread-decision", "thread-evidence")
+	for _, want := range []string{"news-1", "thread-decision", "thread-evidence"} {
+		if !strings.Contains(string(resp), want) {
+			t.Fatalf("response=%s, want actionable mismatch containing %q", resp, want)
+		}
+	}
+	entry.mu.Lock()
+	if entry.status != agentTaskStatusWaiting || entry.submittedResult != nil {
+		entry.mu.Unlock()
+		t.Fatalf("rejected result consumed task slot: %+v", entry)
+	}
+	entry.mu.Unlock()
+
+	resp = submitNewsContextEvidenceResultForTest(p, taskID, "thread-evidence", "thread-evidence")
+	if strings.Contains(string(resp), `"error"`) {
+		t.Fatalf("corrected response=%s, want accepted result", resp)
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.status != agentTaskStatusSubmitted || entry.submittedResult == nil {
+		t.Fatalf("corrected result was not submitted: %+v", entry)
+	}
+}
+
+func submitNewsContextEvidenceResultForTest(p *agentTaskPool, taskID, decisionThreadID, evidenceThreadID string) json.RawMessage {
+	return p.HandleMCPRequest(mustJSON(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": codexSubmitResultTool,
+			"arguments": map[string]any{
+				"taskID": taskID, "taskType": AgentTaskTypeNewsEventReview,
+				"result": map[string]any{
+					"outputType": NewsContextOutputType,
+					"result": map[string]any{
+						"schema_version": NewsContextResultSchemaVersion, "run_id": "run-news-context", "window_type": NewsContextWindowHourly,
+						"processed_news_ids": []string{"news-1"}, "reviewed_thread_ids": []string{}, "unchanged_thread_ids": []string{},
+						"news_decisions": []map[string]any{{
+							"news_event_id": "news-1", "disposition": "update", "thread_id": decisionThreadID,
+						}},
+						"thread_changes": []map[string]any{{
+							"action": "update", "thread_id": evidenceThreadID, "title": "主题", "core_thesis": "结论",
+							"stage": NewsThreadStageEmerging, "material_change": false, "confidence": 0.8,
+							"evidence_news_ids": []string{"news-1"},
+						}},
+						"search_audit": []any{},
+					},
+				},
+			},
+		},
+	}))
+}
+
 func submitNewsContextResultForTest(p *agentTaskPool, taskID string, audit map[string]any) json.RawMessage {
 	return p.HandleMCPRequest(mustJSON(map[string]any{
 		"jsonrpc": "2.0",
