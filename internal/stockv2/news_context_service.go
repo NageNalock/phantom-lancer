@@ -997,11 +997,13 @@ func (s *Service) executeNewsContextBatchWithRetry(
 		if attemptErr == nil {
 			return nil
 		}
-		if !retryableNoSubmitTimeout(attemptErr, output) {
+		if !retryableNewsContextBatchFailure(attemptErr, output) {
 			return attemptErr
 		}
-		if err := ensureExecutorProcessGroupStopped(output.ProcessGroupID); err != nil {
-			return fmt.Errorf("clean timed-out news context process: %w", err)
+		if output != nil {
+			if err := ensureExecutorProcessGroupStopped(output.ProcessGroupID); err != nil {
+				return fmt.Errorf("clean failed news context process: %w", err)
+			}
 		}
 		if attempt == newsContextTimeoutRetryLimit {
 			return attemptErr
@@ -1011,7 +1013,7 @@ func (s *Service) executeNewsContextBatchWithRetry(
 		}
 		next := shrinkNewsContextRetryBatch(batch)
 		if s.log != nil {
-			s.log.Warn("retrying news context batch after timeout without submission",
+			s.log.Warn("retrying news context batch after recoverable agent failure",
 				"context_run_id", run.ID,
 				"agent_run_id", resolution.Run.ID,
 				"attempt", attempt+1,
@@ -1025,6 +1027,19 @@ func (s *Service) executeNewsContextBatchWithRetry(
 		batch = next
 	}
 	return errors.New("news context retry loop exhausted")
+}
+
+func retryableNewsContextBatchFailure(err error, output *AgentExecutorOutput) bool {
+	if retryableNoSubmitTimeout(err, output) {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	// ponytail: malformed model output is safe to retry because the failed
+	// result never reached ApplyNewsContextBatch. Keep storage and dependency
+	// failures terminal instead of hiding them behind repeated Agent calls.
+	return strings.Contains(err.Error(), "save news context result failed: "+ErrInvalidNewsContextResult.Error())
 }
 
 func shrinkNewsContextRetryBatch(items []NewsContextRunItem) []NewsContextRunItem {

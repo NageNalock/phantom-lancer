@@ -206,6 +206,7 @@ func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing
 		"context-run-1",
 		"news_context_result",
 		"processed_news_ids",
+		"mechanically compare the exact ids in InputNewsEvents",
 		"news_event_id",
 		"thread_id",
 		"core_thesis",

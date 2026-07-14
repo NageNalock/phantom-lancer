@@ -452,8 +452,10 @@ func TestShrinkNewsContextRetryBatchHalvesWithoutDroppingOrder(t *testing.T) {
 }
 
 type retryNewsContextExecutor struct {
-	pool  *agentTaskPool
-	sizes []int
+	pool                    *agentTaskPool
+	sizes                   []int
+	timeoutAttempts         int
+	invalidCoverageAttempts int
 }
 
 func (e *retryNewsContextExecutor) ExecuteNewsContextAggregation(
@@ -463,7 +465,7 @@ func (e *retryNewsContextExecutor) ExecuteNewsContextAggregation(
 	_ string,
 ) (*AgentExecutorOutput, error) {
 	e.sizes = append(e.sizes, len(pack.InputNewsEvents)+len(pack.InputThreads))
-	if len(e.sizes) <= newsContextTimeoutRetryLimit {
+	if len(e.sizes) <= e.timeoutAttempts {
 		return &AgentExecutorOutput{TimedOut: true, ExitCode: -1, Duration: newsContextAgentTimeout},
 			fmt.Errorf("execution timed out after %s, no result submitted", newsContextAgentTimeout)
 	}
@@ -476,7 +478,11 @@ func (e *retryNewsContextExecutor) ExecuteNewsContextAggregation(
 			Sources: []string{"https://example.com/public"}, Supported: []string{"本批仅包含测试噪音"},
 		}},
 	}
-	for _, event := range pack.InputNewsEvents {
+	events := pack.InputNewsEvents
+	if len(e.sizes) <= e.invalidCoverageAttempts && len(events) > 0 {
+		events = events[:len(events)-1]
+	}
+	for _, event := range events {
 		report.ProcessedNewsIDs = append(report.ProcessedNewsIDs, event.ID)
 		report.NewsDecisions = append(report.NewsDecisions, NewsContextNewsDecision{
 			NewsEventID: event.ID, Disposition: NewsEventContextNoise, Reason: "测试噪音",
@@ -494,6 +500,22 @@ func (e *retryNewsContextExecutor) ExecuteNewsContextAggregation(
 }
 
 func TestExecuteNewsContextBatchRetriesWithSmallerPendingSlice(t *testing.T) {
+	for _, tt := range []struct {
+		name                    string
+		timeoutAttempts         int
+		invalidCoverageAttempts int
+	}{
+		{name: "timeout without submission", timeoutAttempts: newsContextTimeoutRetryLimit},
+		{name: "invalid submitted coverage", invalidCoverageAttempts: newsContextTimeoutRetryLimit},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			testExecuteNewsContextBatchRetriesWithSmallerPendingSlice(t, tt.timeoutAttempts, tt.invalidCoverageAttempts)
+		})
+	}
+}
+
+func testExecuteNewsContextBatchRetriesWithSmallerPendingSlice(t *testing.T, timeoutAttempts, invalidCoverageAttempts int) {
+	t.Helper()
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -514,7 +536,9 @@ func TestExecuteNewsContextBatchRetriesWithSmallerPendingSlice(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("bind task model: %v", err)
 	}
-	executor := &retryNewsContextExecutor{pool: svc.agentTaskPool}
+	executor := &retryNewsContextExecutor{
+		pool: svc.agentTaskPool, timeoutAttempts: timeoutAttempts, invalidCoverageAttempts: invalidCoverageAttempts,
+	}
 	svc.newsContextExecutor = executor
 
 	now := time.Now().Truncate(time.Second)
@@ -530,7 +554,7 @@ func TestExecuteNewsContextBatchRetriesWithSmallerPendingSlice(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		event, err := svc.CreateNewsEvent(ctx, NewsEvent{
 			Source: "test", Title: fmt.Sprintf("普通测试新闻 %d", i), Summary: "无重要市场影响",
-			Content: "用于验证超时后缩小批次。", EventAt: now.Add(time.Duration(i-10) * time.Minute),
+			Content: "用于验证失败后缩小批次。", EventAt: now.Add(time.Duration(i-10) * time.Minute),
 		})
 		if err != nil {
 			t.Fatalf("create event %d: %v", i, err)
