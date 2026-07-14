@@ -226,6 +226,8 @@ func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing
 		"every ResearchReasons item",
 		"Write every user-facing conclusion in Simplified Chinese",
 		"Keep schema field names, enum values, identifiers, symbols, and source URLs unchanged",
+		"When InputThreads is empty, both arrays must be empty",
+		"Threads discovered only through semantic search are candidates, not batch review inputs",
 		"stock_agent.submit_result",
 	} {
 		if !strings.Contains(prompt, want) {

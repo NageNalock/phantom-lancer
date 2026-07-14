@@ -87,6 +87,51 @@ func TestValidateNewsContextReportRejectsIncompleteCoverage(t *testing.T) {
 	}
 }
 
+func TestNormalizeNewsContextThreadReviewOutcomesDropsOnlyCandidatesOutsideBatch(t *testing.T) {
+	run := NewsContextRun{ID: "context-run", WindowType: NewsContextWindowHourly}
+	items := []NewsContextRunItem{{ObjectType: NewsContextRunItemNewsEvent, ObjectID: "news-1"}}
+	report := NewsContextReport{
+		SchemaVersion:      NewsContextResultSchemaVersion,
+		RunID:              run.ID,
+		WindowType:         run.WindowType,
+		ProcessedNewsIDs:   []string{"news-1"},
+		UnchangedThreadIDs: []string{"semantic-search-candidate"},
+		NewsDecisions: []NewsContextNewsDecision{{
+			NewsEventID: "news-1", Disposition: "update", ThreadID: "existing-thread",
+		}},
+		ThreadChanges: []NewsContextThreadChange{{
+			Action: "update", ThreadID: "existing-thread", Title: "既有主题", CoreThesis: "新增证据支持既有结论",
+			Stage: NewsThreadStageSpreading, Confidence: 0.8, EvidenceNewsIDs: []string{"news-1"},
+		}},
+	}
+	if ignored := normalizeNewsContextThreadReviewOutcomes(items, &report); ignored != 1 {
+		t.Fatalf("ignored outcomes = %d, want 1", ignored)
+	}
+	if len(report.UnchangedThreadIDs) != 0 {
+		t.Fatalf("outside unchanged outcomes were retained: %+v", report.UnchangedThreadIDs)
+	}
+	if err := validateNewsContextReport(run, items, report); err != nil {
+		t.Fatalf("valid news-only update rejected after normalization: %v", err)
+	}
+}
+
+func TestNormalizeNewsContextThreadReviewOutcomesKeepsManifestCoverageStrict(t *testing.T) {
+	run := NewsContextRun{ID: "daily-context-run", WindowType: NewsContextWindowDaily}
+	items := []NewsContextRunItem{{ObjectType: NewsContextRunItemThread, ObjectID: "manifest-thread"}}
+	report := NewsContextReport{
+		SchemaVersion:      NewsContextResultSchemaVersion,
+		RunID:              run.ID,
+		WindowType:         run.WindowType,
+		UnchangedThreadIDs: []string{"semantic-search-candidate"},
+	}
+	if ignored := normalizeNewsContextThreadReviewOutcomes(items, &report); ignored != 1 {
+		t.Fatalf("ignored outcomes = %d, want 1", ignored)
+	}
+	if err := validateNewsContextReport(run, items, report); !errors.Is(err, ErrInvalidNewsContextResult) {
+		t.Fatalf("missing manifest thread coverage error = %v", err)
+	}
+}
+
 func TestValidateNewsContextReportRequiresOneMatchingThemeEvidencePerCoveredNews(t *testing.T) {
 	run := NewsContextRun{ID: "context-run", WindowType: NewsContextWindowHourly}
 	newsItem := NewsContextRunItem{ObjectType: NewsContextRunItemNewsEvent, ObjectID: "news-1"}

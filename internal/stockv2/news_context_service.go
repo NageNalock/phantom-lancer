@@ -1137,6 +1137,14 @@ func (s *Service) ProcessNewsContextSubmittedResult(ctx context.Context, logical
 	if err != nil {
 		return NewsContextBatchApplyResult{}, err
 	}
+	ignoredThreadOutcomes := normalizeNewsContextThreadReviewOutcomes(items, &report)
+	if ignoredThreadOutcomes > 0 && s.log != nil {
+		s.log.Warn("ignored news context read-only thread outcomes outside batch",
+			"context_run_id", logicalRunID,
+			"agent_run_id", agentRunID,
+			"ignored_count", ignoredThreadOutcomes,
+		)
+	}
 	if err := validateNewsContextReport(logicalRun, items, report); err != nil {
 		return NewsContextBatchApplyResult{}, err
 	}
@@ -1240,6 +1248,38 @@ func (s *Service) validateNewsContextResearchAudit(ctx context.Context, items []
 		return fmt.Errorf("%w: public research audit is required", ErrInvalidNewsContextResult)
 	}
 	return nil
+}
+
+func normalizeNewsContextThreadReviewOutcomes(items []NewsContextRunItem, report *NewsContextReport) int {
+	if report == nil {
+		return 0
+	}
+	expected := make(map[string]struct{})
+	for _, item := range items {
+		if item.ObjectType == NewsContextRunItemThread {
+			expected[firstNonEmpty(item.ThreadID, item.ObjectID)] = struct{}{}
+		}
+	}
+	ignored := 0
+	filter := func(ids []string) []string {
+		kept := make([]string, 0, len(ids))
+		for _, rawID := range ids {
+			id := strings.TrimSpace(rawID)
+			if _, ok := expected[id]; !ok {
+				ignored++
+				continue
+			}
+			kept = append(kept, id)
+		}
+		return kept
+	}
+	// ponytail: these arrays only persist review dispositions for manifest
+	// thread items. A read-only semantic-search candidate cannot mutate state,
+	// so discard it instead of losing an otherwise valid news batch. The raw
+	// submitted result remains unchanged in the Agent decision ledger.
+	report.ReviewedThreadIDs = filter(report.ReviewedThreadIDs)
+	report.UnchangedThreadIDs = filter(report.UnchangedThreadIDs)
+	return ignored
 }
 
 func validateNewsContextSearchAudit(audits []NewsContextSearchAudit) error {
