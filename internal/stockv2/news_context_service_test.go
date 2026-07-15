@@ -451,10 +451,24 @@ func TestShrinkNewsContextRetryBatchHalvesWithoutDroppingOrder(t *testing.T) {
 	}
 }
 
+func TestRetryableNewsContextBatchFailureRequiresStartedNoSubmitBoundary(t *testing.T) {
+	processExit := errors.New("process exited (code 1) without submitting result")
+	if !retryableNewsContextBatchFailure(processExit, &AgentExecutorOutput{ExitCode: 1}) {
+		t.Fatal("started process exit without result must be retryable")
+	}
+	if retryableNewsContextBatchFailure(processExit, nil) {
+		t.Fatal("failure without executor output must remain terminal")
+	}
+	if retryableNewsContextBatchFailure(errors.New("store news context result: disk full"), &AgentExecutorOutput{ExitCode: 1}) {
+		t.Fatal("storage failure must remain terminal")
+	}
+}
+
 type retryNewsContextExecutor struct {
 	pool                    *agentTaskPool
 	sizes                   []int
 	timeoutAttempts         int
+	processExitAttempts     int
 	invalidCoverageAttempts int
 }
 
@@ -468,6 +482,10 @@ func (e *retryNewsContextExecutor) ExecuteNewsContextAggregation(
 	if len(e.sizes) <= e.timeoutAttempts {
 		return &AgentExecutorOutput{TimedOut: true, ExitCode: -1, Duration: newsContextAgentTimeout},
 			fmt.Errorf("execution timed out after %s, no result submitted", newsContextAgentTimeout)
+	}
+	if len(e.sizes) <= e.processExitAttempts {
+		return &AgentExecutorOutput{ExitCode: 1, Duration: time.Second},
+			errors.New("process exited (code 1) without submitting result")
 	}
 	report := NewsContextReport{
 		SchemaVersion: NewsContextResultSchemaVersion,
@@ -503,18 +521,25 @@ func TestExecuteNewsContextBatchRetriesWithSmallerPendingSlice(t *testing.T) {
 	for _, tt := range []struct {
 		name                    string
 		timeoutAttempts         int
+		processExitAttempts     int
 		invalidCoverageAttempts int
 	}{
 		{name: "timeout without submission", timeoutAttempts: newsContextTimeoutRetryLimit},
+		{name: "process exit without submission", processExitAttempts: newsContextTimeoutRetryLimit},
 		{name: "invalid submitted coverage", invalidCoverageAttempts: newsContextTimeoutRetryLimit},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			testExecuteNewsContextBatchRetriesWithSmallerPendingSlice(t, tt.timeoutAttempts, tt.invalidCoverageAttempts)
+			testExecuteNewsContextBatchRetriesWithSmallerPendingSlice(
+				t, tt.timeoutAttempts, tt.processExitAttempts, tt.invalidCoverageAttempts,
+			)
 		})
 	}
 }
 
-func testExecuteNewsContextBatchRetriesWithSmallerPendingSlice(t *testing.T, timeoutAttempts, invalidCoverageAttempts int) {
+func testExecuteNewsContextBatchRetriesWithSmallerPendingSlice(
+	t *testing.T,
+	timeoutAttempts, processExitAttempts, invalidCoverageAttempts int,
+) {
 	t.Helper()
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
@@ -537,7 +562,8 @@ func testExecuteNewsContextBatchRetriesWithSmallerPendingSlice(t *testing.T, tim
 		t.Fatalf("bind task model: %v", err)
 	}
 	executor := &retryNewsContextExecutor{
-		pool: svc.agentTaskPool, timeoutAttempts: timeoutAttempts, invalidCoverageAttempts: invalidCoverageAttempts,
+		pool: svc.agentTaskPool, timeoutAttempts: timeoutAttempts,
+		processExitAttempts: processExitAttempts, invalidCoverageAttempts: invalidCoverageAttempts,
 	}
 	svc.newsContextExecutor = executor
 

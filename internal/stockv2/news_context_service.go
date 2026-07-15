@@ -1036,6 +1036,14 @@ func retryableNewsContextBatchFailure(err error, output *AgentExecutorOutput) bo
 	if err == nil {
 		return false
 	}
+	message := strings.ToLower(err.Error())
+	if output != nil && (strings.Contains(message, "without submitting result") ||
+		strings.Contains(message, "no result submitted")) {
+		// ponytail: a started Agent process that produced no result cannot have
+		// mutated the batch. Retry only this explicit no-submit boundary; provider
+		// preflight, storage, and dependency failures remain terminal.
+		return true
+	}
 	// ponytail: malformed model output is safe to retry because the failed
 	// result never reached ApplyNewsContextBatch. Keep storage and dependency
 	// failures terminal instead of hiding them behind repeated Agent calls.

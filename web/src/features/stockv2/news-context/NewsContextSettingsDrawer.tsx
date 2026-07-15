@@ -249,7 +249,7 @@ export function NewsContextSettingsDrawer({
               <ReadOnlyRow label="四小时周期" value={formatNewsContextInterval(config.fourHourIntervalSeconds || 14400)} detail="固定产品层级；调整需修改消息脉络实现并重新部署" />
               <ReadOnlyRow label="每日周期" value={formatNewsContextInterval(config.dailyIntervalSeconds || 86400)} detail="固定产品层级；调整需修改消息脉络实现并重新部署" />
               <ReadOnlyRow label="单次归纳上限" value={formatNewsContextInterval(config.agentTimeoutSeconds || 1800)} detail="内置安全策略；超时前会清理当前任务进程组，调整需重新部署" />
-              <ReadOnlyRow label="归纳失败自动重试" value={`${config.timeoutRetryLimit ?? 2} 次`} detail="超时未提交或结果完整性校验失败时重试；重试前清理本次进程组，并将当前批次减半" />
+              <ReadOnlyRow label="归纳失败自动重试" value={`${config.timeoutRetryLimit ?? 2} 次`} detail="超时、异常退出未提交或结果完整性校验失败时重试；重试前清理本次进程组，并将当前批次减半" />
               <ReadOnlyRow label="后台轮询" value={formatNewsContextInterval(config.schedulerPollSeconds || 5)} detail="内置单机调度节奏；实时任务仍保持单飞" />
               <ReadOnlyRow label="归纳容量" value="按文字量自动分片" detail="不限制每日新闻数、主题数、轮换线索数或主题变化数" />
               <ReadOnlyRow label="下次小时归纳" value={formatNewsContextTime(config.nextHourlyAt)} />
