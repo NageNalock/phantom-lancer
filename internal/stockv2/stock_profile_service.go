@@ -90,7 +90,7 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 	}
 	task.BaseProfileStatus = StockProfileUpdateBaseStatusReady
 	task.AIProfileStatus = normalizeStockProfileAIStatus(profile.AIProfileStatus)
-	s.markStockProfileEmbeddingStale(ctx, profile.Symbol)
+	s.markStockProfileEmbeddingStale(ctx, profile)
 
 	var agentRun *AgentRun
 	var agentLedger AgentDecisionLedger
@@ -174,7 +174,8 @@ func (s *Service) RebuildStockProfiles(ctx context.Context) (RebuildStockProfile
 		}
 		for _, instrument := range instruments {
 			profile := s.stockProfileFromInstrument(ctx, instrument, false)
-			if _, err := s.store.UpsertStockProfile(ctx, profile); err != nil {
+			updated, err := s.store.UpsertStockProfile(ctx, profile)
+			if err != nil {
 				result.Failed++
 				result.FailedItems = append(result.FailedItems, UpdateFailure{
 					Symbol: instrument.Symbol,
@@ -182,7 +183,7 @@ func (s *Service) RebuildStockProfiles(ctx context.Context) (RebuildStockProfile
 				})
 				continue
 			}
-			s.markStockProfileEmbeddingStale(ctx, profile.Symbol)
+			s.markStockProfileEmbeddingStale(ctx, updated)
 			result.Success++
 		}
 	}
@@ -522,7 +523,7 @@ func (s *Service) applyStockProfileEnhancementResult(ctx context.Context, symbol
 	if err != nil {
 		return StockProfile{}, err
 	}
-	s.markStockProfileEmbeddingStale(ctx, updated.Symbol)
+	s.markStockProfileEmbeddingStale(ctx, updated)
 	return updated, nil
 }
 
@@ -605,16 +606,19 @@ func (s *Service) upsertInstrumentWithProfile(ctx context.Context, instrument St
 	if err != nil {
 		return err
 	}
-	s.markStockProfileEmbeddingStale(ctx, profile.Symbol)
+	s.markStockProfileEmbeddingStale(ctx, profile)
 	return nil
 }
 
-func (s *Service) markStockProfileEmbeddingStale(ctx context.Context, symbol string) {
-	symbol = strings.TrimSpace(symbol)
+func (s *Service) markStockProfileEmbeddingStale(ctx context.Context, profile StockProfile) {
+	symbol := strings.TrimSpace(profile.Symbol)
 	if symbol == "" {
 		return
 	}
-	if err := s.store.MarkEmbeddingAssetsStaleForObject(ctx, EmbeddingObjectStockProfile, symbol); err != nil && s.log != nil {
+	// ponytail: profile refreshes often rewrite unchanged rows; compare the exact embedding
+	// document hash so only semantic changes consume another embedding request.
+	textHash := hashEmbeddingText(stockProfileEmbeddingText(profile))
+	if err := s.store.MarkEmbeddingAssetsStaleForObjectTextHash(ctx, EmbeddingObjectStockProfile, symbol, textHash); err != nil && s.log != nil {
 		s.log.Warn("mark stock profile embedding stale failed", "symbol", safelog.Text(symbol, 80), "error", safelog.Text(err.Error(), 240))
 	}
 }

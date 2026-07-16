@@ -142,6 +142,16 @@ func (s *Store) MarkEmbeddingAssetsStaleForObject(ctx context.Context, objectTyp
 	}
 }
 
+func (s *Store) MarkEmbeddingAssetsStaleForObjectTextHash(ctx context.Context, objectType, objectID, currentTextHash string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_embedding_assets
+		SET status = ?, updated_at = ?
+		WHERE object_type = ? AND object_id = ? AND status = ? AND text_hash <> ?
+	`, EmbeddingAssetStatusStale, time.Now(), strings.TrimSpace(objectType), strings.TrimSpace(objectID),
+		EmbeddingAssetStatusReady, strings.TrimSpace(currentTextHash))
+	return wrapError(err, "mark embedding assets stale for changed object text")
+}
+
 func (s *Store) CountMissingEmbeddingSourcesByType(ctx context.Context, objectTypes []string, modelID string) (map[string]int, error) {
 	out := map[string]int{}
 	modelID = strings.TrimSpace(modelID)

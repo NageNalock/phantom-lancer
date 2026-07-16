@@ -331,6 +331,39 @@ func TestUpsertInstrumentWithProfileMaintainsProfile(t *testing.T) {
 	if profile.Name != inst.Name || !strings.Contains(profile.ProfileTextZh, "消费电子") {
 		t.Fatalf("profile = %+v, want maintained from instrument", profile)
 	}
+
+	const modelID = "embedding-model"
+	if _, err := svc.store.UpsertEmbeddingAsset(ctx, EmbeddingAsset{
+		ObjectType: EmbeddingObjectStockProfile,
+		ObjectID:   profile.Symbol,
+		TextHash:   hashEmbeddingText(stockProfileEmbeddingText(profile)),
+		ModelID:    modelID,
+		Status:     EmbeddingAssetStatusReady,
+	}); err != nil {
+		t.Fatalf("seed embedding asset: %v", err)
+	}
+	if err := svc.upsertInstrumentWithProfile(ctx, inst); err != nil {
+		t.Fatalf("repeat unchanged instrument upsert: %v", err)
+	}
+	asset, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectStockProfile, profile.Symbol, modelID)
+	if err != nil {
+		t.Fatalf("get unchanged embedding asset: %v", err)
+	}
+	if asset.Status != EmbeddingAssetStatusReady {
+		t.Fatalf("unchanged embedding asset status = %q, want ready", asset.Status)
+	}
+
+	inst.Sector = "显示面板"
+	if err := svc.upsertInstrumentWithProfile(ctx, inst); err != nil {
+		t.Fatalf("upsert changed instrument: %v", err)
+	}
+	asset, err = svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectStockProfile, profile.Symbol, modelID)
+	if err != nil {
+		t.Fatalf("get changed embedding asset: %v", err)
+	}
+	if asset.Status != EmbeddingAssetStatusStale {
+		t.Fatalf("changed embedding asset status = %q, want stale", asset.Status)
+	}
 }
 
 func TestEnableBaseProfileMaintenanceSchedulesImmediateRun(t *testing.T) {
