@@ -115,3 +115,56 @@ func TestGenerateEmbeddingRetriesTransientRateLimit(t *testing.T) {
 		t.Fatalf("calls=%d vector=%v, want two attempts and three dimensions", calls.Load(), vector)
 	}
 }
+
+func TestGenerateEmbeddingRetriesTransientALBBadRequest(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	model := configureEmbeddingModel(t, svc, "embed-alb-retry")
+	var calls atomic.Int32
+	svc.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Status:     "400 Bad Request",
+				Body: io.NopCloser(strings.NewReader(`<html>
+<head><title>400 Bad Request</title></head>
+<body><center><h1>400 Bad Request</h1></center>
+<hr><center>alb</center></body>
+</html>`)),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{"data":[{"embedding":[1,0,0]}]}`)),
+		}, nil
+	})}
+	vector, err := svc.generateEmbedding(context.Background(), model, "动力电池")
+	if err != nil {
+		t.Fatalf("generate embedding after ALB retry: %v", err)
+	}
+	if calls.Load() != 2 || len(vector) != 3 {
+		t.Fatalf("calls=%d vector=%v, want two attempts and three dimensions", calls.Load(), vector)
+	}
+}
+
+func TestGenerateEmbeddingDoesNotRetryJSONBadRequest(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	model := configureEmbeddingModel(t, svc, "embed-json-bad-request")
+	var calls atomic.Int32
+	svc.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Status:     "400 Bad Request",
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"invalid_request"}}`)),
+		}, nil
+	})}
+	if _, err := svc.generateEmbedding(context.Background(), model, "动力电池"); err == nil {
+		t.Fatal("generate embedding error = nil, want bad request failure")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("calls=%d, want one attempt", calls.Load())
+	}
+}

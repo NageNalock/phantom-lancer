@@ -1232,7 +1232,7 @@ func (s *Service) generateEmbeddingOnce(ctx context.Context, url, apiKey string,
 		return nil, true, retryAfterDuration(resp.Header.Get("Retry-After")), fmt.Errorf("%w: %s", ErrEmbeddingModelUnavailable, safelog.Text(readErr.Error(), 600))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		retryable := resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError
+		retryable := retryableEmbeddingHTTPFailure(resp.StatusCode, respBody)
 		return nil, retryable, retryAfterDuration(resp.Header.Get("Retry-After")), fmt.Errorf("%w: %s", ErrEmbeddingModelUnavailable, safelog.Text(string(respBody), 600))
 	}
 	raw, ok := embeddingRawFromResponse(respBody)
@@ -1244,6 +1244,19 @@ func (s *Service) generateEmbeddingOnce(ctx context.Context, url, apiKey string,
 		return nil, false, 0, fmt.Errorf("%w: embedding response vector is unreadable", ErrEmbeddingModelUnavailable)
 	}
 	return vector, false, 0, nil
+}
+
+func retryableEmbeddingHTTPFailure(statusCode int, responseBody []byte) bool {
+	if statusCode == http.StatusRequestTimeout || statusCode == http.StatusTooManyRequests || statusCode >= http.StatusInternalServerError {
+		return true
+	}
+	// ponytail: SiliconFlow's front ALB intermittently emits this HTML 400 for
+	// otherwise valid requests. Retry only that gateway signature; ordinary
+	// JSON 400 responses remain terminal provider/request errors.
+	body := strings.ToLower(strings.TrimSpace(string(responseBody)))
+	return statusCode == http.StatusBadRequest &&
+		strings.HasPrefix(body, "<html") &&
+		strings.Contains(body, "<center>alb</center>")
 }
 
 func retryAfterDuration(value string) time.Duration {
