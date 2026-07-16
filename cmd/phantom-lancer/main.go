@@ -36,6 +36,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == stockV2EmbeddingMigrationCommand {
+		os.Exit(runStockV2EmbeddingMigration(os.Args[2:]))
+	}
 	if wantsVersion(os.Args[1:]) {
 		fmt.Printf("phantom-lancer %s commit=%s date=%s %s/%s\n", buildinfo.Version, buildinfo.Commit, buildinfo.Date, runtime.GOOS, runtime.GOARCH)
 		return

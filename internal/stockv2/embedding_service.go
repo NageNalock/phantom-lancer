@@ -13,6 +13,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +32,8 @@ const (
 	defaultEmbeddingMaintainRateLimitMs     = 500
 	maxEmbeddingMaintainBatchSize           = 200
 	embeddingMaintenanceScanPageSize        = 200
+	embeddingRequestMaxAttempts             = 4
+	embeddingRequestMaxRetryDelay           = 60 * time.Second
 )
 
 type SemanticSearchHit struct {
@@ -1168,34 +1171,95 @@ func (s *Service) generateEmbedding(ctx context.Context, model AgentModelProfile
 		}
 	}
 	payload, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+endpoint, bytes.NewReader(payload))
+	url := strings.TrimRight(baseURL, "/") + endpoint
+	var lastErr error
+	for attempt := 1; attempt <= embeddingRequestMaxAttempts; attempt++ {
+		vector, retryable, retryAfter, err := s.generateEmbeddingOnce(ctx, url, apiKey, payload)
+		if err == nil {
+			return vector, nil
+		}
+		lastErr = err
+		if !retryable || attempt == embeddingRequestMaxAttempts {
+			return nil, err
+		}
+		// ponytail: bounded provider retries cover only transient HTTP/network
+		// boundaries. Persistent 4xx/configuration failures return immediately;
+		// add configurable retry policy only if another provider needs it.
+		delay := time.Duration(1<<(attempt-1)) * time.Second
+		if retryAfter > delay {
+			delay = retryAfter
+		}
+		if delay > embeddingRequestMaxRetryDelay {
+			delay = embeddingRequestMaxRetryDelay
+		}
+		if s.log != nil {
+			s.log.Warn("retrying transient embedding request",
+				"model_id", model.ID,
+				"provider_id", model.ProviderID,
+				"attempt", attempt+1,
+				"max_attempts", embeddingRequestMaxAttempts,
+				"delay", delay.String(),
+				"error", safelog.Text(err.Error(), 240),
+			)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	return nil, lastErr
+}
+
+func (s *Service) generateEmbeddingOnce(ctx context.Context, url, apiKey string, payload []byte) ([]float64, bool, time.Duration, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
-		return nil, err
+		return nil, false, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	resp, err := s.agentHTTPClient().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrEmbeddingModelUnavailable, safelog.Text(err.Error(), 600))
+		if ctx.Err() != nil {
+			return nil, false, 0, ctx.Err()
+		}
+		return nil, true, 0, fmt.Errorf("%w: %s", ErrEmbeddingModelUnavailable, safelog.Text(err.Error(), 600))
 	}
 	defer resp.Body.Close()
 	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, openAIProbeMaxBodyBytes))
 	if readErr != nil {
-		return nil, fmt.Errorf("%w: %s", ErrEmbeddingModelUnavailable, safelog.Text(readErr.Error(), 600))
+		return nil, true, retryAfterDuration(resp.Header.Get("Retry-After")), fmt.Errorf("%w: %s", ErrEmbeddingModelUnavailable, safelog.Text(readErr.Error(), 600))
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%w: %s", ErrEmbeddingModelUnavailable, safelog.Text(string(respBody), 600))
+		retryable := resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError
+		return nil, retryable, retryAfterDuration(resp.Header.Get("Retry-After")), fmt.Errorf("%w: %s", ErrEmbeddingModelUnavailable, safelog.Text(string(respBody), 600))
 	}
 	raw, ok := embeddingRawFromResponse(respBody)
 	if !ok {
-		return nil, fmt.Errorf("%w: embedding response missing vector", ErrEmbeddingModelUnavailable)
+		return nil, false, 0, fmt.Errorf("%w: embedding response missing vector", ErrEmbeddingModelUnavailable)
 	}
 	vector, ok := embeddingVectorFromRaw(raw)
 	if !ok {
-		return nil, fmt.Errorf("%w: embedding response vector is unreadable", ErrEmbeddingModelUnavailable)
+		return nil, false, 0, fmt.Errorf("%w: embedding response vector is unreadable", ErrEmbeddingModelUnavailable)
 	}
-	return vector, nil
+	return vector, false, 0, nil
+}
+
+func retryAfterDuration(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if deadline, err := http.ParseTime(value); err == nil {
+		if delay := time.Until(deadline); delay > 0 {
+			return delay
+		}
+	}
+	return 0
 }
 
 func embeddingVectorFromRaw(raw json.RawMessage) ([]float64, bool) {

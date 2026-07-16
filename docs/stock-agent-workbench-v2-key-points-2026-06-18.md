@@ -254,6 +254,20 @@ Agent 可以临时检索补充证据，但长期数据资产应由股票数据�
 
 向量资产只负责语义召回，不替代关键词和实体匹配。Embedding 生成必须依赖 StockV2 已绑定且可用的嵌入模型；DuckDB 只负责存储和搜索向量，不负责生成 embedding。未绑定嵌入模型时，股票画像 / 新闻 / 主题的 embedding 生成、向量索引重建和语义向量召回必须在上层入口直接拦截并展示不可用原因，不允许静默降级成“假向量召回”。
 
+### 4.1 离线向量模型迁移
+
+跨模型、跨维度切换不能复用旧向量，必须在正式服务停机并完成 SQLite、DuckDB 一致性备份后运行离线迁移命令：
+
+```bash
+./phantom-lancer stockv2-embedding-migrate \
+  --config ./configs/phantom.toml \
+  --target-model-name BAAI/bge-m3 \
+  --batch-size 200 \
+  --rate-limit-ms 500
+```
+
+命令只启动 StockV2 存储和向量客户端，不启动 HTTP、调度器或 Agent。它使用非 `force` 的 missing/failed 扫描逐批写入，进程中断后重复执行同一命令即可从已完成资产续跑。迁移完成必须逐源验证模型、维度、文本哈希、资产状态和 DuckDB `vector_ref`；验证通过前不得删除旧向量或启动正式服务。验证通过后命令删除所有非目标模型的 SQLite 资产和 DuckDB 向量、执行 checkpoint，并恢复目标模型的自动维护。迁移失败时保持自动维护关闭，避免部分索引被正式服务继续使用。
+
 ## 5. 后台监控与命中
 
 后台监控是系统内置能力，不是用户逐条创建的业务对象。
