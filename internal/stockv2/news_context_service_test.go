@@ -456,6 +456,13 @@ func TestRetryableNewsContextBatchFailureRequiresStartedNoSubmitBoundary(t *test
 	if !retryableNewsContextBatchFailure(processExit, &AgentExecutorOutput{ExitCode: 1}) {
 		t.Fatal("started process exit without result must be retryable")
 	}
+	usageLimitOutput := &AgentExecutorOutput{
+		ExitCode:   1,
+		StdoutTail: `{"type":"turn.failed","error":{"message":"You've hit your usage limit. Visit the usage page to purchase more credits."}}`,
+	}
+	if retryableNewsContextBatchFailure(processExit, usageLimitOutput) {
+		t.Fatal("provider usage limit must be terminal even when the process submitted no result")
+	}
 	if retryableNewsContextBatchFailure(processExit, nil) {
 		t.Fatal("failure without executor output must remain terminal")
 	}

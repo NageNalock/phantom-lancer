@@ -2137,7 +2137,15 @@ func agentRunFailureMessage(base string, execOutput *AgentExecutorOutput) string
 	if message == "" {
 		message = "agent run failed"
 	}
-	if execOutput == nil || strings.TrimSpace(execOutput.StderrTail) == "" {
+	if execOutput == nil {
+		return safelog.Text(message, 500)
+	}
+	if providerMessage := agentProviderFailureMessage(execOutput.StdoutTail); providerMessage != "" {
+		// ponytail: Codex --json reports provider failures on stdout. Prefer that
+		// bounded event message over incidental CLI stderr such as stdin notices.
+		return safelog.Text(message+": "+providerMessage, 500)
+	}
+	if strings.TrimSpace(execOutput.StderrTail) == "" {
 		return safelog.Text(message, 500)
 	}
 	stderr := lastNonEmptyLine(execOutput.StderrTail)
@@ -2146,6 +2154,29 @@ func agentRunFailureMessage(base string, execOutput *AgentExecutorOutput) string
 	}
 	// ponytail: Keep the run error compact; full stdout/stderr remains in the ledger detail.
 	return safelog.Text(message+": "+stderr, 500)
+}
+
+func agentProviderFailureMessage(stdout string) string {
+	lines := strings.Split(strings.ReplaceAll(stdout, "\r\n", "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		var event struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+			Error   struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal([]byte(strings.TrimSpace(lines[i])), &event) != nil {
+			continue
+		}
+		if event.Type != "error" && event.Type != "turn.failed" {
+			continue
+		}
+		if message := strings.TrimSpace(firstNonEmpty(event.Error.Message, event.Message)); message != "" {
+			return safelog.Text(message, 500)
+		}
+	}
+	return ""
 }
 
 func lastNonEmptyLine(text string) string {

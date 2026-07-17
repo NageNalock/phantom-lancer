@@ -1113,6 +1113,24 @@ func TestFinalizeAgentRunFailureIncludesStderrHint(t *testing.T) {
 	}
 }
 
+func TestAgentRunFailureMessagePrefersCodexJSONError(t *testing.T) {
+	output := &AgentExecutorOutput{
+		StdoutTail: strings.Join([]string{
+			`{"type":"thread.started","thread_id":"test"}`,
+			`{"type":"error","message":"You've hit your usage limit. Try again later."}`,
+			`{"type":"turn.failed","error":{"message":"You've hit your usage limit. Try again later."}}`,
+		}, "\n"),
+		StderrTail: "Reading additional input from stdin...\n",
+	}
+	got := agentRunFailureMessage("process exited (code 1) without submitting result", output)
+	if !strings.Contains(got, "usage limit") {
+		t.Fatalf("failure message = %q, want provider usage limit", got)
+	}
+	if strings.Contains(got, "additional input") {
+		t.Fatalf("failure message = %q, must not prefer incidental stderr", got)
+	}
+}
+
 type fakeDebugAgentExecutor struct {
 	pool *agentTaskPool
 }

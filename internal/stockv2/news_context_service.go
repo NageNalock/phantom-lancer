@@ -1030,6 +1030,9 @@ func (s *Service) executeNewsContextBatchWithRetry(
 }
 
 func retryableNewsContextBatchFailure(err error, output *AgentExecutorOutput) bool {
+	if agentProviderUsageLimitFailure(err, output) {
+		return false
+	}
 	if retryableNoSubmitTimeout(err, output) {
 		return true
 	}
@@ -1048,6 +1051,18 @@ func retryableNewsContextBatchFailure(err error, output *AgentExecutorOutput) bo
 	// result never reached ApplyNewsContextBatch. Keep storage and dependency
 	// failures terminal instead of hiding them behind repeated Agent calls.
 	return strings.Contains(err.Error(), "save news context result failed: "+ErrInvalidNewsContextResult.Error())
+}
+
+func agentProviderUsageLimitFailure(err error, output *AgentExecutorOutput) bool {
+	message := ""
+	if output != nil {
+		message = agentProviderFailureMessage(output.StdoutTail)
+	}
+	if message == "" && err != nil {
+		message = err.Error()
+	}
+	message = strings.ToLower(message)
+	return strings.Contains(message, "usage limit") || strings.Contains(message, "purchase more credits")
 }
 
 func shrinkNewsContextRetryBatch(items []NewsContextRunItem) []NewsContextRunItem {
