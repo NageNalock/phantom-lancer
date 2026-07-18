@@ -575,7 +575,7 @@ func (s *Service) executePortfolioSentinelRun(ctx context.Context, run AgentRun,
 		s.log.Warn("update portfolio sentinel run to running failed", "run_id", run.ID, "error", safelog.Text(err.Error(), 240))
 	}
 	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
-	execOutput, execErr := s.agentExecutor.ExecutePortfolioSentinel(ctx, taskID, pack, modelName)
+	execOutput, execErr := s.agentExecutor.ExecutePortfolioSentinel(ctx, taskID, pack, modelName, run.ReasoningEffort)
 	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, execOutput, execErr)
 	finalRun, finalLedger := s.safeGetAgentRunAndLedger(ctx, run.ID, ledger.ID)
 	return finalRun, finalLedger, execErr

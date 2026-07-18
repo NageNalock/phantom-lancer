@@ -89,7 +89,7 @@ func (e *codexCLIExecutor) ExecuteOperationReview(
 	ctx context.Context,
 	taskID string,
 	pack AgentContextPack,
-	modelName string,
+	modelName, reasoningEffort string,
 ) (*AgentExecutorOutput, error) {
 	if e.binary == "" {
 		return nil, fmt.Errorf("codex binary path not configured")
@@ -97,94 +97,94 @@ func (e *codexCLIExecutor) ExecuteOperationReview(
 
 	// 构建 prompt
 	prompt := buildOperationReviewPrompt(taskID, pack, e.mcpURL)
-	return e.executePrompt(ctx, taskID, prompt, modelName)
+	return e.executePrompt(ctx, taskID, prompt, modelName, reasoningEffort)
 }
 
 func (e *codexCLIExecutor) ExecuteStrategyGeneration(
 	ctx context.Context,
 	taskID string,
 	pack StrategyGenerationContext,
-	modelName string,
+	modelName, reasoningEffort string,
 ) (*AgentExecutorOutput, error) {
 	if e.binary == "" {
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
 	prompt := buildStrategyGenerationPrompt(taskID, pack, e.mcpURL)
-	return e.executePrompt(ctx, taskID, prompt, modelName)
+	return e.executePrompt(ctx, taskID, prompt, modelName, reasoningEffort)
 }
 
 func (e *codexCLIExecutor) ExecuteStrategyGenerationStep(
 	ctx context.Context,
 	taskID string,
 	pack StrategyGenerationStepPack,
-	modelName string,
+	modelName, reasoningEffort string,
 ) (*AgentExecutorOutput, error) {
 	if e.binary == "" {
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
 	prompt := buildStrategyGenerationStepPrompt(taskID, pack, e.mcpURL)
-	return e.executePrompt(ctx, taskID, prompt, modelName)
+	return e.executePrompt(ctx, taskID, prompt, modelName, reasoningEffort)
 }
 
 func (e *codexCLIExecutor) ExecuteOpportunityDiscovery(
 	ctx context.Context,
 	taskID string,
 	pack OpportunityDiscoveryContext,
-	modelName string,
+	modelName, reasoningEffort string,
 ) (*AgentExecutorOutput, error) {
 	if e.binary == "" {
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
 	prompt := buildOpportunityDiscoveryPrompt(taskID, pack, e.mcpURL)
-	return e.executePrompt(ctx, taskID, prompt, modelName)
+	return e.executePrompt(ctx, taskID, prompt, modelName, reasoningEffort)
 }
 
 func (e *codexCLIExecutor) ExecuteNewsContextAggregation(
 	ctx context.Context,
 	taskID string,
 	pack NewsContextAggregationPack,
-	modelName string,
+	modelName, reasoningEffort string,
 ) (*AgentExecutorOutput, error) {
 	if e.binary == "" {
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
 	prompt := buildNewsContextAggregationPrompt(taskID, pack, e.mcpURL)
-	return e.executePromptWithTimeout(ctx, taskID, prompt, modelName, newsContextAgentTimeout)
+	return e.executePromptWithTimeout(ctx, taskID, prompt, modelName, reasoningEffort, newsContextAgentTimeout)
 }
 
 func (e *codexCLIExecutor) ExecutePortfolioSentinel(
 	ctx context.Context,
 	taskID string,
 	pack PortfolioSentinelContext,
-	modelName string,
+	modelName, reasoningEffort string,
 ) (*AgentExecutorOutput, error) {
 	if e.binary == "" {
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
 	prompt := buildPortfolioSentinelPrompt(taskID, pack, e.mcpURL)
-	return e.executePrompt(ctx, taskID, prompt, modelName)
+	return e.executePrompt(ctx, taskID, prompt, modelName, reasoningEffort)
 }
 
 func (e *codexCLIExecutor) ExecuteStockProfileSummary(
 	ctx context.Context,
 	taskID string,
 	profile StockProfile,
-	modelName string,
+	modelName, reasoningEffort string,
 ) (*AgentExecutorOutput, error) {
 	if e.binary == "" {
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
 	prompt := buildStockProfileSummaryPrompt(taskID, profile, e.mcpURL)
-	return e.executePrompt(ctx, taskID, prompt, modelName)
+	return e.executePrompt(ctx, taskID, prompt, modelName, reasoningEffort)
 }
 
 func (e *codexCLIExecutor) executePrompt(
 	ctx context.Context,
 	taskID string,
 	prompt string,
-	modelName string,
+	modelName, reasoningEffort string,
 ) (*AgentExecutorOutput, error) {
-	return e.executePromptWithTimeout(ctx, taskID, prompt, modelName, execDefaultTimeout)
+	return e.executePromptWithTimeout(ctx, taskID, prompt, modelName, reasoningEffort, execDefaultTimeout)
 }
 
 func (e *codexCLIExecutor) executePromptWithTimeout(
@@ -192,6 +192,7 @@ func (e *codexCLIExecutor) executePromptWithTimeout(
 	taskID string,
 	prompt string,
 	modelName string,
+	reasoningEffort string,
 	timeout time.Duration,
 ) (*AgentExecutorOutput, error) {
 	if timeout <= 0 {
@@ -207,7 +208,7 @@ func (e *codexCLIExecutor) executePromptWithTimeout(
 		return nil, err
 	}
 
-	args := buildCodexExecArgs(modelName, prompt, mcpServers)
+	args := buildCodexExecArgs(modelName, reasoningEffort, prompt, mcpServers)
 	cmd := exec.CommandContext(execCtx, e.binary, args...)
 	cmd.Env = e.buildEnv()
 	// ponytail: Codex may spawn search or MCP descendants. A dedicated process
@@ -462,11 +463,14 @@ func executorProcessGroupExists(processGroupID int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-func buildCodexExecArgs(modelName, prompt string, mcpServers []codexMCPServerCapability) []string {
+func buildCodexExecArgs(modelName, reasoningEffort, prompt string, mcpServers []codexMCPServerCapability) []string {
 	// ponytail: StockV2 agent runs are owner-triggered local tasks; isolate user config so unrelated MCPs cannot pollute stderr.
 	args := []string{"exec", "--json", "--ignore-user-config", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "-c", "mcp_servers={}"}
 	for _, server := range mcpServers {
 		args = append(args, "-c", fmt.Sprintf("mcp_servers.%s.url=%s", server.Name, strconv.Quote(strings.TrimSpace(server.URL))))
+	}
+	if effort := strings.TrimSpace(reasoningEffort); effort != "" {
+		args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(effort))
 	}
 	if modelName != "" {
 		args = append(args, "--model", modelName)

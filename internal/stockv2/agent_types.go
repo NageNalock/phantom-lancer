@@ -62,6 +62,19 @@ const (
 	AgentModelTypeEmbedding = "embedding"
 )
 
+// ponytail: 直接使用 Codex CLI 当前模型目录的稳定枚举，避免复制一层
+// 模型能力配置；具体模型不支持时由 CLI 明确失败。未来若要在绑定时拦截，
+// 再把 debug models 的 supported_reasoning_levels 同步到 model profile。
+// 空串表示不覆盖模型默认值。
+const (
+	AgentReasoningEffortLow    = "low"
+	AgentReasoningEffortMedium = "medium"
+	AgentReasoningEffortHigh   = "high"
+	AgentReasoningEffortXHigh  = "xhigh"
+	AgentReasoningEffortMax    = "max"
+	AgentReasoningEffortUltra  = "ultra"
+)
+
 const (
 	AgentEmbeddingProtocolOpenAI               = "openai_embeddings"
 	AgentEmbeddingProtocolVolcengineMultimodal = "volcengine_multimodal_embeddings"
@@ -132,6 +145,7 @@ var (
 	ErrInvalidAgentModelCostLevel       = errors.New("invalid agent model cost level")
 	ErrInvalidAgentModelType            = errors.New("invalid agent model type")
 	ErrInvalidAgentModelName            = errors.New("agent model name is required")
+	ErrInvalidAgentReasoningEffort      = errors.New("invalid agent reasoning effort")
 	ErrInvalidAgentTaskType             = errors.New("invalid agent task type")
 	ErrAgentTaskNotConfigurable         = errors.New("agent task is not configurable yet")
 	ErrAgentModelTypeNotAllowed         = errors.New("agent model type is not allowed for this task")
@@ -182,6 +196,7 @@ type AgentTaskProfile struct {
 	TaskType        string    `json:"taskType"`
 	PrimaryModelID  string    `json:"primaryModelId,omitempty"`
 	FallbackModelID string    `json:"fallbackModelId,omitempty"`
+	ReasoningEffort string    `json:"reasoningEffort,omitempty"`
 	MaxBudget       int       `json:"maxBudget,omitempty"`
 	CreatedAt       time.Time `json:"createdAt"`
 	UpdatedAt       time.Time `json:"updatedAt"`
@@ -194,6 +209,7 @@ type AgentRun struct {
 	TaskType          string         `json:"taskType"`
 	ProviderID        string         `json:"providerId,omitempty"`
 	ModelID           string         `json:"modelId,omitempty"`
+	ReasoningEffort   string         `json:"reasoningEffort,omitempty"`
 	TriggerObjectType string         `json:"triggerObjectType"`
 	TriggerObjectID   string         `json:"triggerObjectId"`
 	Status            string         `json:"status"`
@@ -317,6 +333,7 @@ type AgentModelTestResult struct {
 type RequestUpdateAgentTaskProfile struct {
 	PrimaryModelID  *string `json:"primaryModelId,omitempty"`
 	FallbackModelID *string `json:"fallbackModelId,omitempty"`
+	ReasoningEffort *string `json:"reasoningEffort,omitempty"`
 	MaxBudget       *int    `json:"maxBudget,omitempty"`
 }
 
@@ -352,6 +369,7 @@ type AgentRunRecordParams struct {
 	TaskType             string
 	ProviderID           string
 	ModelID              string
+	ReasoningEffort      string
 	TriggerObjectType    string
 	TriggerObjectID      string
 	RequestedBy          string
@@ -368,6 +386,7 @@ type AgentTaskResolution struct {
 	ProviderID        string               `json:"providerId,omitempty"`
 	ModelID           string               `json:"modelId,omitempty"`
 	ModelName         string               `json:"modelName,omitempty"`
+	ReasoningEffort   string               `json:"reasoningEffort,omitempty"`
 	TriggerObjectType string               `json:"triggerObjectType"`
 	TriggerObjectID   string               `json:"triggerObjectId"`
 	RequestedBy       string               `json:"requestedBy,omitempty"`
@@ -455,6 +474,21 @@ func validAgentModelCostLevel(v string) bool {
 
 func validAgentModelType(v string) bool {
 	return v == "" || v == AgentModelTypeChat || v == AgentModelTypeEmbedding
+}
+
+func validAgentReasoningEffort(v string) bool {
+	switch v {
+	case "",
+		AgentReasoningEffortLow,
+		AgentReasoningEffortMedium,
+		AgentReasoningEffortHigh,
+		AgentReasoningEffortXHigh,
+		AgentReasoningEffortMax,
+		AgentReasoningEffortUltra:
+		return true
+	default:
+		return false
+	}
 }
 
 func knownAgentTaskType(v string) bool {

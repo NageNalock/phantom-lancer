@@ -193,6 +193,7 @@ function AgentTaskProfileSection({ actions }: { actions: AppActions }) {
             </div>
             <Row label="主模型" value={profile.primaryModelId ? profile.primaryModelId.slice(0, 12) : "(未绑定)"} />
             <Row label="备模型" value={profile.fallbackModelId ? profile.fallbackModelId.slice(0, 12) : "(未绑定)"} />
+            <Row label="推理强度" value={profile.reasoningEffort || "模型默认（不传）"} />
           </div>
         ))}
       </div>
@@ -251,6 +252,7 @@ function AgentRunSection({ actions }: { actions: AppActions }) {
               <strong className="text-sm">{stockV2AgentTaskTypeLabel(run.taskType)}</strong>
               <Pill tone={stockV2AgentRunStatusTone(run.status)}>{stockV2AgentRunStatusLabel(run.status)}</Pill>
               <span className="font-mono text-[var(--muted-strong)]">model {run.modelId?.slice(0, 8) || "-"}</span>
+              <span className="font-mono text-[var(--muted)]">reasoning {run.reasoningEffort || "default"}</span>
               <span className="text-[var(--muted)]">{formatDate(run.startedAt || run.createdAt) || "-"}</span>
               {run.triggerObjectType ? (
                 <span className="text-[var(--muted)]">{run.triggerObjectType}:{run.triggerObjectId?.slice(0, 8) || "-"}</span>

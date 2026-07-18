@@ -484,6 +484,7 @@ func (e *retryNewsContextExecutor) ExecuteNewsContextAggregation(
 	taskID string,
 	pack NewsContextAggregationPack,
 	_ string,
+	_ string,
 ) (*AgentExecutorOutput, error) {
 	e.sizes = append(e.sizes, len(pack.InputNewsEvents)+len(pack.InputThreads))
 	if len(e.sizes) <= e.timeoutAttempts {

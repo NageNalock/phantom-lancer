@@ -35,6 +35,7 @@ func (s *Service) RunStrategyGeneration(ctx context.Context, input StrategyGener
 		TaskType:             AgentTaskTypeStrategyGeneration,
 		ProviderID:           model.ProviderID,
 		ModelID:              model.ID,
+		ReasoningEffort:      taskProfile.ReasoningEffort,
 		TriggerObjectType:    "strategy_generation",
 		TriggerObjectID:      triggerID,
 		RequestedBy:          normalized.RequestedBy,

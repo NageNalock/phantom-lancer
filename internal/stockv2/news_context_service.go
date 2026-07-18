@@ -1083,7 +1083,7 @@ func (s *Service) executeNewsContextAgentRun(ctx context.Context, run AgentRun, 
 	running.Status = AgentRunStatusRunning
 	_, _ = s.store.UpdateAgentRun(ctx, running)
 	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", newsContextAgentTaskTTL)
-	output, execErr := s.newsContextExecutor.ExecuteNewsContextAggregation(ctx, taskID, pack, modelName)
+	output, execErr := s.newsContextExecutor.ExecuteNewsContextAggregation(ctx, taskID, pack, modelName, run.ReasoningEffort)
 	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, output, execErr)
 	finalRun, finalLedger := s.safeGetAgentRunAndLedger(ctx, run.ID, ledger.ID)
 	return finalRun, finalLedger, output, execErr

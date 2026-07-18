@@ -2703,6 +2703,7 @@ export interface StockV2AgentTaskProfile {
   taskType: StockV2AgentTaskType | string;
   primaryModelId?: string;
   fallbackModelId?: string;
+  reasoningEffort?: string;
   maxBudget?: number;
   createdAt?: string;
   updatedAt?: string;
@@ -2723,6 +2724,7 @@ export interface StockV2AgentRun {
   taskType: string;
   providerId?: string;
   modelId?: string;
+  reasoningEffort?: string;
   triggerObjectType?: string;
   triggerObjectId?: string;
   status: StockV2AgentRunStatus | string;
@@ -2859,6 +2861,7 @@ export interface StockV2AgentUpdateModelRequest {
 export interface StockV2AgentUpdateTaskProfileRequest {
   primaryModelId?: string;
   fallbackModelId?: string;
+  reasoningEffort?: string;
   maxBudget?: number;
 }
 

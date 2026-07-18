@@ -355,7 +355,7 @@ type fakeOperationReviewExecutor struct {
 	release    <-chan struct{}
 }
 
-func (f fakeOperationReviewExecutor) ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName string) (*AgentExecutorOutput, error) {
+func (f fakeOperationReviewExecutor) ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	if f.started != nil {
 		f.started <- taskID
 	}
@@ -387,7 +387,7 @@ func (f fakeOperationReviewExecutor) ExecuteOperationReview(ctx context.Context,
 	}, f.execErr
 }
 
-func (f fakeOperationReviewExecutor) ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error) {
+func (f fakeOperationReviewExecutor) ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	result := f.result
 	if result == nil {
 		result = map[string]any{"summaryZh": profile.BusinessSummary, "summaryEn": profile.Name}
@@ -407,7 +407,7 @@ func (f fakeOperationReviewExecutor) ExecuteStockProfileSummary(ctx context.Cont
 	}, f.execErr
 }
 
-func (f fakeOperationReviewExecutor) ExecuteStrategyGeneration(ctx context.Context, taskID string, pack StrategyGenerationContext, modelName string) (*AgentExecutorOutput, error) {
+func (f fakeOperationReviewExecutor) ExecuteStrategyGeneration(ctx context.Context, taskID string, pack StrategyGenerationContext, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	result := f.result
 	if result == nil {
 		mode := firstNonEmpty(pack.Input.Mode, pack.Mode, StrategyGenerationModePortfolio)
@@ -439,7 +439,7 @@ func (f fakeOperationReviewExecutor) ExecuteStrategyGeneration(ctx context.Conte
 	}, f.execErr
 }
 
-func (f fakeOperationReviewExecutor) ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName string) (*AgentExecutorOutput, error) {
+func (f fakeOperationReviewExecutor) ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	result := map[string]any{
 		"schema_version": StrategyGenerationStepOutputSchema,
 		"step_key":       pack.StepKey,
@@ -479,7 +479,7 @@ func (f fakeOperationReviewExecutor) ExecuteStrategyGenerationStep(ctx context.C
 	}, f.execErr
 }
 
-func (f fakeOperationReviewExecutor) ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName string) (*AgentExecutorOutput, error) {
+func (f fakeOperationReviewExecutor) ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	result := f.result
 	if result == nil {
 		result = map[string]any{
@@ -511,7 +511,7 @@ func (f fakeOperationReviewExecutor) ExecuteOpportunityDiscovery(ctx context.Con
 	}, f.execErr
 }
 
-func (f fakeOperationReviewExecutor) ExecutePortfolioSentinel(ctx context.Context, taskID string, pack PortfolioSentinelContext, modelName string) (*AgentExecutorOutput, error) {
+func (f fakeOperationReviewExecutor) ExecutePortfolioSentinel(ctx context.Context, taskID string, pack PortfolioSentinelContext, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	result := f.result
 	if result == nil {
 		result = map[string]any{

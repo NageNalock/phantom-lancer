@@ -450,6 +450,7 @@ func (s *Service) prepareStockProfileSummaryAgentRun(ctx context.Context, profil
 		TaskType:             AgentTaskTypeStockProfileSummary,
 		ProviderID:           model.ProviderID,
 		ModelID:              model.ID,
+		ReasoningEffort:      taskProfile.ReasoningEffort,
 		TriggerObjectType:    "stock_profile",
 		TriggerObjectID:      profile.Symbol,
 		RequestedBy:          requestedBy,
@@ -481,7 +482,7 @@ func (s *Service) startStockProfileAgentRunAsync(ctx context.Context, run AgentR
 		s.log.Warn("update stock profile agent run to running failed", "run_id", run.ID, "ledger_id", ledger.ID, "symbol", profile.Symbol, "market", profile.Market, "model", modelName, "error", safelog.Text(err.Error(), 240))
 	}
 	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
-	execOutput, execErr := s.agentExecutor.ExecuteStockProfileSummary(ctx, taskID, profile, modelName)
+	execOutput, execErr := s.agentExecutor.ExecuteStockProfileSummary(ctx, taskID, profile, modelName, run.ReasoningEffort)
 	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, execOutput, execErr)
 }
 

@@ -1073,6 +1073,7 @@ CREATE TABLE IF NOT EXISTS stockv2_agent_task_profiles (
     task_type TEXT NOT NULL UNIQUE,
     primary_model_id TEXT,
     fallback_model_id TEXT,
+    reasoning_effort TEXT NOT NULL DEFAULT '',
     max_budget INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
@@ -1083,6 +1084,7 @@ CREATE TABLE IF NOT EXISTS stockv2_agent_runs (
     task_type TEXT NOT NULL,
     provider_id TEXT,
     model_id TEXT,
+    reasoning_effort TEXT NOT NULL DEFAULT '',
     trigger_object_type TEXT NOT NULL,
     trigger_object_id TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'ready',
@@ -1324,6 +1326,12 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureNewsContextBackfillSchema(ctx); err != nil {
 		return fmt.Errorf("ensure news context backfill schema: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_agent_task_profiles", "reasoning_effort", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("add agent task profile reasoning_effort column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_agent_runs", "reasoning_effort", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("add agent run reasoning_effort column: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		UPDATE stockv2_monitor_task_configs

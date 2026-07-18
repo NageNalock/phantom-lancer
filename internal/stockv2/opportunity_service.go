@@ -118,6 +118,7 @@ func (s *Service) StartOpportunityDiscoveryRun(ctx context.Context, opportunityI
 		TaskType:             AgentTaskTypeOpportunityDiscovery,
 		ProviderID:           model.ProviderID,
 		ModelID:              model.ID,
+		ReasoningEffort:      taskProfile.ReasoningEffort,
 		TriggerObjectType:    "opportunity",
 		TriggerObjectID:      opp.ID,
 		RequestedBy:          req.RequestedBy,
@@ -211,7 +212,7 @@ func (s *Service) executeOpportunityDiscoveryRun(ctx context.Context, run AgentR
 	}
 	discCtx.DiscoveryRun = discoveryRun
 	taskID, _ := s.agentTaskPool.createOpportunityDiscoveryTask(run.ID, discoveryRun.ID, discoveryRun.OpportunityID, 10*time.Minute)
-	execOutput, execErr := s.agentExecutor.ExecuteOpportunityDiscovery(ctx, taskID, discCtx, modelName)
+	execOutput, execErr := s.agentExecutor.ExecuteOpportunityDiscovery(ctx, taskID, discCtx, modelName, run.ReasoningEffort)
 	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, execOutput, execErr)
 	return execErr
 }

@@ -28,6 +28,7 @@ export function StockV2AgentTaskProfileDrawer({
   const [form, setForm] = useState<StockV2AgentUpdateTaskProfileRequest>({
     primaryModelId: profile?.primaryModelId || "",
     fallbackModelId: profile?.fallbackModelId || "",
+    reasoningEffort: profile?.reasoningEffort || "",
   });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,6 +38,7 @@ export function StockV2AgentTaskProfileDrawer({
       setForm({
         primaryModelId: profile.primaryModelId || "",
         fallbackModelId: profile.fallbackModelId || "",
+        reasoningEffort: profile.reasoningEffort || "",
       });
     }
   }, [profile]);
@@ -51,6 +53,7 @@ export function StockV2AgentTaskProfileDrawer({
       const body: StockV2AgentUpdateTaskProfileRequest = {
         primaryModelId: form.primaryModelId && usableModelIds.has(form.primaryModelId) ? form.primaryModelId : "",
         fallbackModelId: form.fallbackModelId && usableModelIds.has(form.fallbackModelId) ? form.fallbackModelId : "",
+        reasoningEffort: form.reasoningEffort || "",
       };
       await actions.api(`/api/stockv2/agent/task-profiles/${taskType}`, { method: "PUT", body });
       actions.setToast("任务配置已更新", "good");
@@ -111,6 +114,22 @@ export function StockV2AgentTaskProfileDrawer({
                 {m.displayName || m.modelName}
               </option>
             ))}
+          </select>
+        </Field>
+
+        <Field label="模型推理强度" help="留空时不向 Codex CLI 传参，沿用所选模型的默认值；具体可用强度由模型决定">
+          <select
+            value={form.reasoningEffort || ""}
+            onChange={(e) => setForm({ ...form, reasoningEffort: e.target.value })}
+            className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
+          >
+            <option value="">模型默认（不传）</option>
+            <option value="low">low · 较低</option>
+            <option value="medium">medium · 中等</option>
+            <option value="high">high · 较高</option>
+            <option value="xhigh">xhigh · 超高</option>
+            <option value="max">max · 最大</option>
+            <option value="ultra">ultra · 最大并自动任务委派</option>
           </select>
         </Field>
       </div>

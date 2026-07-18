@@ -818,6 +818,13 @@ func (s *Service) UpdateAgentTaskProfile(ctx context.Context, taskType string, r
 		}
 		profile.FallbackModelID = fallbackID
 	}
+	if req.ReasoningEffort != nil {
+		reasoningEffort := strings.ToLower(strings.TrimSpace(*req.ReasoningEffort))
+		if !validAgentReasoningEffort(reasoningEffort) {
+			return AgentTaskProfile{}, ErrInvalidAgentReasoningEffort
+		}
+		profile.ReasoningEffort = reasoningEffort
+	}
 	return s.store.UpdateAgentTaskProfile(ctx, profile)
 }
 
@@ -985,6 +992,10 @@ func (s *Service) CreateAgentRunRecord(ctx context.Context, params AgentRunRecor
 	if _, err := s.ensureAgentTaskModelAllowed(ctx, params.ModelID); err != nil {
 		return AgentRun{}, AgentDecisionLedger{}, err
 	}
+	params.ReasoningEffort = strings.ToLower(strings.TrimSpace(params.ReasoningEffort))
+	if !validAgentReasoningEffort(params.ReasoningEffort) {
+		return AgentRun{}, AgentDecisionLedger{}, ErrInvalidAgentReasoningEffort
+	}
 
 	// 脱敏(信任边界,不可省):input 摘要 / prompt / input artifact 摘要。
 	inputSummary := safelog.Text(params.InputSummary, 8192)
@@ -1014,6 +1025,7 @@ func (s *Service) CreateAgentRunRecord(ctx context.Context, params AgentRunRecor
 		TaskType:          params.TaskType,
 		ProviderID:        params.ProviderID,
 		ModelID:           params.ModelID,
+		ReasoningEffort:   params.ReasoningEffort,
 		TriggerObjectType: params.TriggerObjectType,
 		TriggerObjectID:   params.TriggerObjectID,
 		Status:            AgentRunStatusReady,
@@ -1054,6 +1066,7 @@ func (s *Service) ResolveAgentTask(ctx context.Context, taskType, triggerObjectT
 		ProviderID:        model.ProviderID,
 		ModelID:           model.ID,
 		ModelName:         model.ModelName,
+		ReasoningEffort:   taskProfile.ReasoningEffort,
 		TriggerObjectType: triggerObjectType,
 		TriggerObjectID:   triggerObjectID,
 		RequestedBy:       requestedBy,
@@ -1063,6 +1076,7 @@ func (s *Service) ResolveAgentTask(ctx context.Context, taskType, triggerObjectT
 		TaskType:          taskType,
 		ProviderID:        model.ProviderID,
 		ModelID:           model.ID,
+		ReasoningEffort:   taskProfile.ReasoningEffort,
 		TriggerObjectType: triggerObjectType,
 		TriggerObjectID:   triggerObjectID,
 		RequestedBy:       requestedBy,
@@ -1446,7 +1460,7 @@ func (s *Service) executeAgentRun(
 
 	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
 
-	execOutput, execErr := s.agentExecutor.ExecuteOperationReview(ctx, taskID, pack, modelName)
+	execOutput, execErr := s.agentExecutor.ExecuteOperationReview(ctx, taskID, pack, modelName, run.ReasoningEffort)
 
 	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, execOutput, execErr)
 	finalRun, finalLedger := s.safeGetAgentRunAndLedger(ctx, run.ID, ledger.ID)
@@ -1599,7 +1613,7 @@ func (s *Service) executeStrategyGenerationStepWithRetry(
 	var taskID string
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		taskID, _ = s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
-		output, err := s.agentExecutor.ExecuteStrategyGenerationStep(ctx, taskID, pack, modelName)
+		output, err := s.agentExecutor.ExecuteStrategyGenerationStep(ctx, taskID, pack, modelName, run.ReasoningEffort)
 		lastOutput = output
 		lastErr = err
 		if err == nil || !retryableNoSubmitTimeout(err, output) || attempt == maxAttempts {

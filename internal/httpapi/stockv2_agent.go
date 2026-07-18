@@ -497,6 +497,7 @@ func stockV2AgentHTTPStatus(err error) int {
 		errors.Is(err, stockv2.ErrInvalidAgentModelCostLevel),
 		errors.Is(err, stockv2.ErrInvalidAgentModelType),
 		errors.Is(err, stockv2.ErrInvalidAgentModelName),
+		errors.Is(err, stockv2.ErrInvalidAgentReasoningEffort),
 		errors.Is(err, stockv2.ErrAgentModelTypeNotAllowed),
 		errors.Is(err, stockv2.ErrInvalidAgentTaskType),
 		errors.Is(err, stockv2.ErrInvalidEmbeddingConfig),

@@ -143,6 +143,7 @@ export function StockV2AgentExecutionSummaryList({
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[var(--muted)]">
             <span>{formatDate(detail.run.startedAt || detail.run.createdAt) || "-"}</span>
             <span>{detail.run.triggerObjectType || "-"}:{detail.run.triggerObjectId?.slice(0, 8) || "-"}</span>
+            <span>推理 {detail.run.reasoningEffort || "模型默认"}</span>
             {detail.ledger ? <span>Ledger {detail.ledger.id.slice(0, 8)}</span> : null}
             <span className="text-[var(--accent)]">查看执行上下文</span>
           </div>
@@ -209,6 +210,7 @@ export function StockV2AgentRunDetailPanel({ detail }: { detail: StockV2AgentExe
     ["结束时间", formatAgentRunFinishedAt(run)],
     ["Run ID", <span className="font-mono">{run.id}</span>],
     ["Ledger ID", <span className="font-mono">{run.decisionLedgerId || ledger?.id || "-"}</span>],
+    ["推理强度", <span className="font-mono">{run.reasoningEffort || "模型默认（未覆盖）"}</span>],
   ];
   if (review) identityItems.push(["Review", `${review.status || "-"} · ${review.id}`]);
   return (

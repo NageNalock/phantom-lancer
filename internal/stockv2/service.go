@@ -128,18 +128,18 @@ func (s *Service) WithNewsEventLinker(linker NewsEventLinker) *Service {
 
 // AgentExecutor 是 Agent 执行器接口。
 type AgentExecutor interface {
-	ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName string) (*AgentExecutorOutput, error)
-	ExecuteStrategyGeneration(ctx context.Context, taskID string, pack StrategyGenerationContext, modelName string) (*AgentExecutorOutput, error)
-	ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName string) (*AgentExecutorOutput, error)
-	ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName string) (*AgentExecutorOutput, error)
-	ExecutePortfolioSentinel(ctx context.Context, taskID string, pack PortfolioSentinelContext, modelName string) (*AgentExecutorOutput, error)
-	ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error)
+	ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error)
+	ExecuteStrategyGeneration(ctx context.Context, taskID string, pack StrategyGenerationContext, modelName, reasoningEffort string) (*AgentExecutorOutput, error)
+	ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error)
+	ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName, reasoningEffort string) (*AgentExecutorOutput, error)
+	ExecutePortfolioSentinel(ctx context.Context, taskID string, pack PortfolioSentinelContext, modelName, reasoningEffort string) (*AgentExecutorOutput, error)
+	ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName, reasoningEffort string) (*AgentExecutorOutput, error)
 }
 
 // NewsContextAgentExecutor 单独承载消息脉络归纳，避免扩大既有 AgentExecutor
 // 后迫使所有已有测试替身实现一个与其场景无关的方法。
 type NewsContextAgentExecutor interface {
-	ExecuteNewsContextAggregation(ctx context.Context, taskID string, pack NewsContextAggregationPack, modelName string) (*AgentExecutorOutput, error)
+	ExecuteNewsContextAggregation(ctx context.Context, taskID string, pack NewsContextAggregationPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error)
 }
 
 // WithCodexCLIExecutor 注入 Codex CLI 执行器。

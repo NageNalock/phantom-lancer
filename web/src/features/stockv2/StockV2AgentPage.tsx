@@ -747,6 +747,7 @@ function AgentTaskProfileSection({
               <div className="mt-2 grid gap-1">
                 <Row label="主模型" value={profile?.primaryModelId ? profile.primaryModelId.slice(0, 12) : "(未绑定)"} />
                 <Row label="备模型" value={profile?.fallbackModelId ? profile.fallbackModelId.slice(0, 12) : "(未绑定)"} />
+                <Row label="推理强度" value={profile?.reasoningEffort || "模型默认（不传）"} />
               </div>
             ) : (
               <p className="mt-2 text-[var(--muted)]">暂不允许选择模型,后续开放时再配置绑定。</p>

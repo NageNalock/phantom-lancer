@@ -12,7 +12,7 @@ import (
 )
 
 func TestBuildCodexExecArgsUsesFullAccessAndSkipsRepoCheck(t *testing.T) {
-	args := buildCodexExecArgs("id-202606222", "submit debug result", []codexMCPServerCapability{{
+	args := buildCodexExecArgs("id-202606222", "high", "submit debug result", []codexMCPServerCapability{{
 		Name:          codexStockAgentMCPName,
 		URL:           "http://127.0.0.1:8080/api/stockv2/agent/mcp",
 		RequiredTools: []string{codexSubmitResultTool},
@@ -26,6 +26,7 @@ func TestBuildCodexExecArgsUsesFullAccessAndSkipsRepoCheck(t *testing.T) {
 		"--skip-git-repo-check",
 		"-c\x00mcp_servers={}",
 		"-c\x00mcp_servers.stock_agent.url=\"http://127.0.0.1:8080/api/stockv2/agent/mcp\"",
+		"-c\x00model_reasoning_effort=\"high\"",
 		"--model\x00id-202606222",
 		"submit debug result",
 	} {
@@ -35,6 +36,13 @@ func TestBuildCodexExecArgsUsesFullAccessAndSkipsRepoCheck(t *testing.T) {
 	}
 	if strings.Contains(got, "--sandbox") {
 		t.Fatalf("stockv2 agent args should bypass sandbox, got %#v", args)
+	}
+}
+
+func TestBuildCodexExecArgsOmitsEmptyReasoningEffort(t *testing.T) {
+	args := buildCodexExecArgs("gpt-5.5", "", "prompt", nil)
+	if got := strings.Join(args, "\x00"); strings.Contains(got, "model_reasoning_effort") {
+		t.Fatalf("empty reasoning effort must not change Codex CLI args: %#v", args)
 	}
 }
 
@@ -87,7 +95,7 @@ func TestExecutePromptFailsBeforeCodexWhenMCPMissing(t *testing.T) {
 	}
 	defer executor.taskPool.Close()
 
-	output, err := executor.executePrompt(context.Background(), "task-1", "prompt", "model")
+	output, err := executor.executePrompt(context.Background(), "task-1", "prompt", "model", "")
 	if output != nil {
 		t.Fatalf("output = %+v, want nil", output)
 	}
@@ -110,7 +118,7 @@ func TestExecutePromptCapturesFastExitStderr(t *testing.T) {
 	}
 	taskID, _ := pool.createTask(AgentTaskTypeStockProfileSummary, "run-fast-exit", "", time.Minute)
 
-	output, err := executor.executePrompt(context.Background(), taskID, "prompt", "gpt-5.5")
+	output, err := executor.executePrompt(context.Background(), taskID, "prompt", "gpt-5.5", "")
 	if err == nil || !strings.Contains(err.Error(), "process exited (code 2)") {
 		t.Fatalf("err = %v, want code 2 without result", err)
 	}
@@ -146,7 +154,7 @@ func TestExecutePromptTimeoutKillsResidualProcessGroup(t *testing.T) {
 	}
 	taskID, _ := pool.createTask(AgentTaskTypeNewsEventReview, "run-timeout", "", time.Minute)
 
-	output, err := executor.executePromptWithTimeout(context.Background(), taskID, "prompt", "gpt-5.5", 100*time.Millisecond)
+	output, err := executor.executePromptWithTimeout(context.Background(), taskID, "prompt", "gpt-5.5", "", 100*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("err = %v, want timeout", err)
 	}
@@ -383,7 +391,7 @@ func TestExecutePromptReturnsAfterResultAndCleanProcessExit(t *testing.T) {
 	}, 1)
 	rawPrompt := "raw prompt body"
 	go func() {
-		output, err := executor.executePrompt(ctx, taskID, rawPrompt, "model")
+		output, err := executor.executePrompt(ctx, taskID, rawPrompt, "model", "")
 		done <- struct {
 			output *AgentExecutorOutput
 			err    error

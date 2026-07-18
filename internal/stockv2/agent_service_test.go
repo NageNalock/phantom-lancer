@@ -576,6 +576,9 @@ func TestResolveAgentTaskOperationReviewDefaultModel(t *testing.T) {
 	if profile.TaskType != AgentTaskTypeOperationReview {
 		t.Fatalf("task type = %q, want operation_review", profile.TaskType)
 	}
+	if profile.ReasoningEffort != "" {
+		t.Fatalf("seeded reasoning effort = %q, want empty", profile.ReasoningEffort)
+	}
 
 	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
 		ProviderType: AgentProviderTypeOpenAI,
@@ -594,10 +597,16 @@ func TestResolveAgentTaskOperationReviewDefaultModel(t *testing.T) {
 	}
 
 	primaryID := model.ID
-	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeOperationReview, RequestUpdateAgentTaskProfile{
-		PrimaryModelID: &primaryID,
-	}); err != nil {
+	reasoningEffort := AgentReasoningEffortHigh
+	updatedProfile, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeOperationReview, RequestUpdateAgentTaskProfile{
+		PrimaryModelID:  &primaryID,
+		ReasoningEffort: &reasoningEffort,
+	})
+	if err != nil {
 		t.Fatalf("bind primary model: %v", err)
+	}
+	if updatedProfile.ReasoningEffort != AgentReasoningEffortHigh {
+		t.Fatalf("updated reasoning effort = %q, want high", updatedProfile.ReasoningEffort)
 	}
 
 	resolution, err := svc.ResolveAgentTask(ctx, AgentTaskTypeOperationReview, "monitor_hit", "hit-1", "tester")
@@ -610,11 +619,17 @@ func TestResolveAgentTaskOperationReviewDefaultModel(t *testing.T) {
 	if resolution.ModelID != model.ID {
 		t.Fatalf("modelId = %q, want %q", resolution.ModelID, model.ID)
 	}
+	if resolution.ReasoningEffort != AgentReasoningEffortHigh {
+		t.Fatalf("resolution reasoning effort = %q, want high", resolution.ReasoningEffort)
+	}
 	if resolution.Run == nil {
 		t.Fatal("run nil, want non-nil")
 	}
 	if resolution.Run.Status != AgentRunStatusReady {
 		t.Fatalf("run status = %q, want ready", resolution.Run.Status)
+	}
+	if resolution.Run.ReasoningEffort != AgentReasoningEffortHigh {
+		t.Fatalf("run reasoning effort = %q, want high", resolution.Run.ReasoningEffort)
 	}
 	if resolution.Run.Output != "" {
 		t.Fatalf("run output = %q, want empty (no fake conclusion this round)", resolution.Run.Output)
@@ -636,6 +651,19 @@ func TestResolveAgentTaskOperationReviewDefaultModel(t *testing.T) {
 	}
 	if len(ledger.StructuredOutput) != 0 {
 		t.Fatalf("structuredOutput = %v, want empty (no fake output)", ledger.StructuredOutput)
+	}
+	persistedRun, err := svc.GetAgentRun(ctx, resolution.Run.ID)
+	if err != nil {
+		t.Fatalf("get persisted run: %v", err)
+	}
+	if persistedRun.ReasoningEffort != AgentReasoningEffortHigh {
+		t.Fatalf("persisted run reasoning effort = %q, want high", persistedRun.ReasoningEffort)
+	}
+	invalidEffort := "extreme"
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeOperationReview, RequestUpdateAgentTaskProfile{
+		ReasoningEffort: &invalidEffort,
+	}); !errors.Is(err, ErrInvalidAgentReasoningEffort) {
+		t.Fatalf("invalid reasoning effort error = %v, want ErrInvalidAgentReasoningEffort", err)
 	}
 }
 
@@ -1142,7 +1170,7 @@ type retryStrategyGenerationStepExecutor struct {
 	attempts map[string]int
 }
 
-func (f fakeDebugAgentExecutor) ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName string) (*AgentExecutorOutput, error) {
+func (f fakeDebugAgentExecutor) ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	result := map[string]any{"debug": true, "model": modelName, "hitTitle": pack.Hit.Title}
 	if pack.Hit.TaskType == "agent_cli_debug" {
 		result["googleNewsSearchStatus"] = "ok"
@@ -1180,7 +1208,7 @@ func (f fakeDebugAgentExecutor) ExecuteOperationReview(ctx context.Context, task
 	}, nil
 }
 
-func (f fakeDebugAgentExecutor) ExecuteStrategyGeneration(ctx context.Context, taskID string, pack StrategyGenerationContext, modelName string) (*AgentExecutorOutput, error) {
+func (f fakeDebugAgentExecutor) ExecuteStrategyGeneration(ctx context.Context, taskID string, pack StrategyGenerationContext, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	mode := firstNonEmpty(pack.Input.Mode, pack.Mode, StrategyGenerationModePortfolio)
 	_, err := f.pool.submitResult(taskID, AgentTaskTypeStrategyGeneration, AgentTaskSubmittedResult{
 		OutputType:    AgentTaskTypeStrategyGeneration,
@@ -1203,7 +1231,7 @@ func (f fakeDebugAgentExecutor) ExecuteStrategyGeneration(ctx context.Context, t
 	}, nil
 }
 
-func (f fakeDebugAgentExecutor) ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName string) (*AgentExecutorOutput, error) {
+func (f fakeDebugAgentExecutor) ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	result := map[string]any{
 		"schema_version": StrategyGenerationStepOutputSchema,
 		"step_key":       pack.StepKey,
@@ -1235,7 +1263,7 @@ func (f fakeDebugAgentExecutor) ExecuteStrategyGenerationStep(ctx context.Contex
 	}, nil
 }
 
-func (f *retryStrategyGenerationStepExecutor) ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName string) (*AgentExecutorOutput, error) {
+func (f *retryStrategyGenerationStepExecutor) ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	f.attempts[pack.StepKey]++
 	if pack.StepKey == f.failStep && f.attempts[pack.StepKey] == 1 {
 		if f.nonRetry {
@@ -1243,10 +1271,10 @@ func (f *retryStrategyGenerationStepExecutor) ExecuteStrategyGenerationStep(ctx 
 		}
 		return &AgentExecutorOutput{TimedOut: true, ExitCode: -1, Duration: execDefaultTimeout, StderrTail: "Reading additional input from stdin..."}, fmt.Errorf("execution timed out after %s, no result submitted", execDefaultTimeout)
 	}
-	return f.fakeDebugAgentExecutor.ExecuteStrategyGenerationStep(ctx, taskID, pack, modelName)
+	return f.fakeDebugAgentExecutor.ExecuteStrategyGenerationStep(ctx, taskID, pack, modelName, reasoningEffort)
 }
 
-func (f fakeDebugAgentExecutor) ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName string) (*AgentExecutorOutput, error) {
+func (f fakeDebugAgentExecutor) ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	_, err := f.pool.submitResult(taskID, AgentTaskTypeOpportunityDiscovery, AgentTaskSubmittedResult{
 		OutputType:    OpportunityDiscoveryOutputType,
 		ResultSummary: "opportunity discovery ok",
@@ -1269,7 +1297,7 @@ func (f fakeDebugAgentExecutor) ExecuteOpportunityDiscovery(ctx context.Context,
 	}, nil
 }
 
-func (f fakeDebugAgentExecutor) ExecutePortfolioSentinel(ctx context.Context, taskID string, pack PortfolioSentinelContext, modelName string) (*AgentExecutorOutput, error) {
+func (f fakeDebugAgentExecutor) ExecutePortfolioSentinel(ctx context.Context, taskID string, pack PortfolioSentinelContext, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	_, err := f.pool.submitResult(taskID, AgentTaskTypePortfolioSentinel, AgentTaskSubmittedResult{
 		OutputType:    PortfolioSentinelOutputType,
 		ResultSummary: "portfolio sentinel ok",
@@ -1293,7 +1321,7 @@ func (f fakeDebugAgentExecutor) ExecutePortfolioSentinel(ctx context.Context, ta
 	}, nil
 }
 
-func (f fakeDebugAgentExecutor) ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName string) (*AgentExecutorOutput, error) {
+func (f fakeDebugAgentExecutor) ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	_, err := f.pool.submitResult(taskID, AgentTaskTypeStockProfileSummary, AgentTaskSubmittedResult{
 		OutputType:    AgentTaskTypeStockProfileSummary,
 		ResultSummary: "profile ok",

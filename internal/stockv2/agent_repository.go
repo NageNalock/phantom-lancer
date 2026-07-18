@@ -432,7 +432,7 @@ func agentModelProfileFilterSQL(filter AgentModelProfileListFilter) (string, []a
 
 const agentTaskProfileSelectSQL = `
     SELECT id, task_type, COALESCE(primary_model_id,''), COALESCE(fallback_model_id,''),
-           max_budget, created_at, updated_at
+           COALESCE(reasoning_effort,''), max_budget, created_at, updated_at
     FROM stockv2_agent_task_profiles
 `
 
@@ -440,7 +440,7 @@ func scanAgentTaskProfile(row rowScanner) (AgentTaskProfile, error) {
 	var t AgentTaskProfile
 	if err := row.Scan(
 		&t.ID, &t.TaskType, &t.PrimaryModelID, &t.FallbackModelID,
-		&t.MaxBudget, &t.CreatedAt, &t.UpdatedAt,
+		&t.ReasoningEffort, &t.MaxBudget, &t.CreatedAt, &t.UpdatedAt,
 	); err != nil {
 		return t, err
 	}
@@ -493,16 +493,17 @@ func (s *Store) CountAgentTaskProfiles(ctx context.Context, filter AgentTaskProf
 	return count, nil
 }
 
-// UpdateAgentTaskProfile 只改 model 绑定/budget,task_type 为自然键不可变。
+// UpdateAgentTaskProfile 只改模型执行配置，task_type 为自然键不可变。
 func (s *Store) UpdateAgentTaskProfile(ctx context.Context, profile AgentTaskProfile) (AgentTaskProfile, error) {
 	profile.UpdatedAt = time.Now()
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE stockv2_agent_task_profiles
-		SET primary_model_id = ?, fallback_model_id = ?, max_budget = ?, updated_at = ?
+		SET primary_model_id = ?, fallback_model_id = ?, reasoning_effort = ?, max_budget = ?, updated_at = ?
 		WHERE id = ?
 	`,
 		nullableString(profile.PrimaryModelID),
 		nullableString(profile.FallbackModelID),
+		profile.ReasoningEffort,
 		profile.MaxBudget,
 		profile.UpdatedAt,
 		profile.ID,
@@ -527,7 +528,7 @@ func agentTaskProfileFilterSQL(filter AgentTaskProfileListFilter) (string, []any
 
 const agentRunSelectSQL = `
     SELECT id, task_type, COALESCE(provider_id,''), COALESCE(model_id,''),
-           trigger_object_type, trigger_object_id, status, cost_estimate_json,
+           COALESCE(reasoning_effort,''), trigger_object_type, trigger_object_id, status, cost_estimate_json,
            COALESCE(error_message,''), COALESCE(output,''), COALESCE(decision_ledger_id,''),
            started_at, finished_at, created_at, updated_at
     FROM stockv2_agent_runs
@@ -539,7 +540,7 @@ func scanAgentRun(row rowScanner) (AgentRun, error) {
 	var startedAt, finishedAt sql.NullTime
 	if err := row.Scan(
 		&r.ID, &r.TaskType, &providerID, &modelID,
-		&r.TriggerObjectType, &r.TriggerObjectID, &r.Status, &costEstimateJSON,
+		&r.ReasoningEffort, &r.TriggerObjectType, &r.TriggerObjectID, &r.Status, &costEstimateJSON,
 		&errorMessage, &output, &decisionLedgerID,
 		&startedAt, &finishedAt, &r.CreatedAt, &r.UpdatedAt,
 	); err != nil {
@@ -700,15 +701,16 @@ func (s *Store) CreateAgentRunWithLedger(ctx context.Context, run AgentRun, ledg
 func insertAgentRunWithTx(ctx context.Context, tx *sql.Tx, run AgentRun) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO stockv2_agent_runs
-			(id, task_type, provider_id, model_id, trigger_object_type, trigger_object_id,
+			(id, task_type, provider_id, model_id, reasoning_effort, trigger_object_type, trigger_object_id,
 			 status, cost_estimate_json, error_message, output, decision_ledger_id,
 			 started_at, finished_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		run.ID,
 		run.TaskType,
 		nullableString(run.ProviderID),
 		nullableString(run.ModelID),
+		run.ReasoningEffort,
 		run.TriggerObjectType,
 		run.TriggerObjectID,
 		run.Status,
