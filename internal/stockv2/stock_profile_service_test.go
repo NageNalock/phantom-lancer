@@ -626,6 +626,41 @@ func TestAutomaticDeepStockProfileUpdateUsesPerSymbolAIRounds(t *testing.T) {
 	}
 }
 
+func TestAutomaticDeepStockProfileUpdateYieldsToRunningNewsBackfill(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	seedProfileInstrument(t, svc, ctx)
+	if _, err := svc.RebuildStockProfiles(ctx); err != nil {
+		t.Fatalf("rebuild profiles: %v", err)
+	}
+	if _, err := svc.store.CreateNewsContextBackfill(ctx, NewsContextBackfill{
+		Status:   NewsContextBackfillStatusRunning,
+		Phase:    "four_hour",
+		CutoffAt: time.Now().In(time.Local).Truncate(time.Hour),
+	}); err != nil {
+		t.Fatalf("create running backfill: %v", err)
+	}
+
+	result, err := svc.runAutomaticDeepStockProfileUpdate(ctx, "test", stockProfileDeepUpdateOptions{
+		SymbolBudget: 1,
+		Now:          time.Now(),
+	})
+	if !errors.Is(err, errStockProfileMaintenanceDeferred) {
+		t.Fatalf("run automatic deep profile update error = %v, want deferred", err)
+	}
+	if result.ProcessedCount != 0 {
+		t.Fatalf("processed count = %d, want 0", result.ProcessedCount)
+	}
+	tasks, err := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("list profile update tasks: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("profile update tasks = %d, want 0", len(tasks))
+	}
+}
+
 func TestAutomaticDeepStockProfileUpdateRollsQueue(t *testing.T) {
 	ctx := context.Background()
 	businessLine := "动力电池系统"

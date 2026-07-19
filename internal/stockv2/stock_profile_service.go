@@ -226,6 +226,8 @@ type stockProfileDeepUpdateOptions struct {
 	RequestedBy       string
 }
 
+var errStockProfileMaintenanceDeferred = errors.New("stock profile maintenance deferred during news context backfill")
+
 func (s *Service) RunAutomaticDeepStockProfileUpdate(ctx context.Context, trigger string) (StockProfileDeepUpdateResult, error) {
 	settings, err := s.GetSettings(ctx)
 	if err != nil {
@@ -261,6 +263,9 @@ func (s *Service) runAutomaticDeepStockProfileUpdate(ctx context.Context, trigge
 		RateLimitMs:       int(rateLimit / time.Millisecond),
 		UpdatedAt:         now,
 	}
+	if s.shouldDeferMaintenanceForNewsContextBackfill(ctx) {
+		return result, errStockProfileMaintenanceDeferred
+	}
 	headLimit := symbolBudget * 8
 	if headLimit < symbolBudget {
 		headLimit = symbolBudget
@@ -285,9 +290,15 @@ func (s *Service) runAutomaticDeepStockProfileUpdate(ctx context.Context, trigge
 	result.CandidateCount = len(candidates)
 
 	for i, candidate := range candidates {
+		if s.shouldDeferMaintenanceForNewsContextBackfill(ctx) {
+			return result, errStockProfileMaintenanceDeferred
+		}
 		if i > 0 {
 			if err := sleepStockProfileDeepUpdate(ctx, stockProfileDeepUpdateDelay(candidate.Instrument.Symbol, rateLimit, seed)); err != nil {
 				return result, err
+			}
+			if s.shouldDeferMaintenanceForNewsContextBackfill(ctx) {
+				return result, errStockProfileMaintenanceDeferred
 			}
 		}
 		update, err := s.UpdateStockProfile(ctx, RequestUpdateStockProfile{
@@ -380,6 +391,9 @@ func (s *Service) maybeRunBaseProfileMaintenance(ctx context.Context, trigger st
 			RateLimit:         time.Duration(settings.BaseProfileDeepUpdateRateLimitMs) * time.Millisecond,
 			RequestedBy:       "system",
 		})
+	}
+	if errors.Is(deepErr, errStockProfileMaintenanceDeferred) {
+		return
 	}
 	settings.BaseProfileLastMaintainAt = now
 	settings.BaseProfileNextMaintainAt = now.Add(interval)
