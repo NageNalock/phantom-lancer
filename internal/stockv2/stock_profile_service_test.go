@@ -163,7 +163,7 @@ func TestBuildStockProfileEnrichesFundFromPublicF10(t *testing.T) {
 	}
 }
 
-func TestRebuildStockProfilesDoesNotCallPublicF10(t *testing.T) {
+func TestRebuildStockProfilesSkipsUnchangedWithoutCallingPublicF10(t *testing.T) {
 	ctx := context.Background()
 	sourceCalls := 0
 	svc, cleanup := newStockProfileTestServiceWithClient(t, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -172,14 +172,15 @@ func TestRebuildStockProfilesDoesNotCallPublicF10(t *testing.T) {
 	})})
 	defer cleanup()
 
-	if err := svc.store.UpsertInstrument(ctx, StockV2Instrument{
+	instrument := StockV2Instrument{
 		ID:             "inst-300750",
 		Symbol:         "300750",
 		Market:         "SZ",
 		InstrumentType: InstrumentTypeStock,
 		Name:           "宁德时代",
 		Status:         "active",
-	}); err != nil {
+	}
+	if err := svc.store.UpsertInstrument(ctx, instrument); err != nil {
 		t.Fatalf("upsert instrument: %v", err)
 	}
 
@@ -188,6 +189,39 @@ func TestRebuildStockProfilesDoesNotCallPublicF10(t *testing.T) {
 	}
 	if sourceCalls != 0 {
 		t.Fatalf("rebuild made %d public source calls, want 0", sourceCalls)
+	}
+	first, err := svc.store.GetStockProfile(ctx, instrument.Symbol)
+	if err != nil {
+		t.Fatalf("get first profile: %v", err)
+	}
+	expectedUnchanged := mergeStockProfileAIFields(buildStockProfileFromInstrument(instrument), first)
+	if !stockProfileContentEqual(first, expectedUnchanged) {
+		t.Fatalf("stored profile differs before unchanged rebuild:\nstored=%#v\nexpected=%#v", first, expectedUnchanged)
+	}
+	if _, err := svc.RebuildStockProfiles(ctx); err != nil {
+		t.Fatalf("rebuild unchanged profiles: %v", err)
+	}
+	unchanged, err := svc.store.GetStockProfile(ctx, instrument.Symbol)
+	if err != nil {
+		t.Fatalf("get unchanged profile: %v", err)
+	}
+	if !unchanged.UpdatedAt.Equal(first.UpdatedAt) {
+		t.Fatalf("unchanged profile updated_at = %v, want %v", unchanged.UpdatedAt, first.UpdatedAt)
+	}
+
+	instrument.Name = "宁德时代新能源"
+	if err := svc.store.UpsertInstrument(ctx, instrument); err != nil {
+		t.Fatalf("update instrument: %v", err)
+	}
+	if _, err := svc.RebuildStockProfiles(ctx); err != nil {
+		t.Fatalf("rebuild changed profiles: %v", err)
+	}
+	changed, err := svc.store.GetStockProfile(ctx, instrument.Symbol)
+	if err != nil {
+		t.Fatalf("get changed profile: %v", err)
+	}
+	if changed.Name != instrument.Name || !changed.UpdatedAt.After(unchanged.UpdatedAt) {
+		t.Fatalf("changed profile = %+v, want updated name and timestamp after %v", changed, unchanged.UpdatedAt)
 	}
 }
 

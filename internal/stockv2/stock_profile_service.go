@@ -1,6 +1,7 @@
 package stockv2
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -173,7 +174,26 @@ func (s *Service) RebuildStockProfiles(ctx context.Context) (RebuildStockProfile
 			break
 		}
 		for _, instrument := range instruments {
-			profile := s.stockProfileFromInstrument(ctx, instrument, false)
+			profile := buildStockProfileFromInstrument(instrument)
+			existing, getErr := s.store.GetStockProfile(ctx, instrument.Symbol)
+			switch {
+			case getErr == nil:
+				profile = mergeStockProfileAIFields(profile, existing)
+				// ponytail: hourly rebuilds usually see unchanged master data; skip the
+				// DuckDB write instead of adding a separate profile-diff subsystem.
+				if stockProfileContentEqual(existing, profile) {
+					result.Success++
+					continue
+				}
+			case errors.Is(getErr, ErrStockProfileNotFound):
+			default:
+				result.Failed++
+				result.FailedItems = append(result.FailedItems, UpdateFailure{
+					Symbol: instrument.Symbol,
+					Reason: stockProfileSnippet(getErr.Error(), 240),
+				})
+				continue
+			}
 			updated, err := s.store.UpsertStockProfile(ctx, profile)
 			if err != nil {
 				result.Failed++
@@ -188,6 +208,14 @@ func (s *Service) RebuildStockProfiles(ctx context.Context) (RebuildStockProfile
 		}
 	}
 	return result, nil
+}
+
+func stockProfileContentEqual(left, right StockProfile) bool {
+	left.UpdatedAt = time.Time{}
+	right.UpdatedAt = time.Time{}
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
 }
 
 type stockProfileDeepUpdateOptions struct {
