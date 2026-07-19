@@ -210,6 +210,61 @@ func (s *Store) UpsertNewsLinkCandidates(ctx context.Context, candidates []NewsL
 		return nil
 	}
 	now := time.Now()
+	var statement strings.Builder
+	statement.WriteString(`
+		INSERT INTO stockv2_news_link_candidates (
+			id, news_event_id, raw_news_id, symbol, market, instrument_name,
+			match_method, score, reason, matched_terms_json, monitor_status,
+			monitor_hit_id, monitored_at, created_at, updated_at
+		)
+		SELECT incoming.id, incoming.news_event_id, incoming.raw_news_id, incoming.symbol,
+			incoming.market, incoming.instrument_name, incoming.match_method, incoming.score,
+			incoming.reason, incoming.matched_terms_json, incoming.monitor_status,
+			incoming.monitor_hit_id, incoming.monitored_at, incoming.created_at, incoming.updated_at
+		FROM (VALUES
+	`)
+	args := make([]any, 0, len(candidates)*15+1)
+	for i := range candidates {
+		if i > 0 {
+			statement.WriteString(",")
+		}
+		statement.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		candidate := &candidates[i]
+		if candidate.ID == "" {
+			candidate.ID = generateID()
+		}
+		if candidate.MonitorStatus == "" {
+			candidate.MonitorStatus = NewsLinkMonitorStatusPending
+		}
+		if candidate.CreatedAt.IsZero() {
+			candidate.CreatedAt = now
+		}
+		candidate.UpdatedAt = now
+		args = append(args, candidate.ID, candidate.NewsEventID, candidate.RawNewsID, candidate.Symbol,
+			candidate.Market, candidate.InstrumentName, candidate.MatchMethod, candidate.Score,
+			candidate.Reason, marshalProfileStrings(candidate.MatchedTerms), candidate.MonitorStatus,
+			nullableString(candidate.MonitorHitID), nullableTime(candidate.MonitoredAt),
+			candidate.CreatedAt, candidate.UpdatedAt)
+	}
+	statement.WriteString(`
+		) AS incoming (
+			id, news_event_id, raw_news_id, symbol, market, instrument_name,
+			match_method, score, reason, matched_terms_json, monitor_status,
+			monitor_hit_id, monitored_at, created_at, updated_at
+		)
+		INNER JOIN stockv2_news_events event ON event.id = incoming.news_event_id
+		WHERE COALESCE(event.context_status, 'pending') <> ?
+		ON CONFLICT(news_event_id, symbol) DO UPDATE SET
+			raw_news_id = excluded.raw_news_id,
+			market = excluded.market,
+			instrument_name = excluded.instrument_name,
+			match_method = excluded.match_method,
+			score = excluded.score,
+			reason = excluded.reason,
+			matched_terms_json = excluded.matched_terms_json,
+			updated_at = excluded.updated_at
+	`)
+	args = append(args, NewsEventContextCompacted)
 	err := retryStockV2TransientWriteConflict(ctx, func() error {
 		tx, err := s.assetDB().BeginTx(ctx, nil)
 		if err != nil {
@@ -217,54 +272,16 @@ func (s *Store) UpsertNewsLinkCandidates(ctx context.Context, candidates []NewsL
 		}
 		defer tx.Rollback()
 
-		stmt, err := tx.PrepareContext(ctx, `
-			INSERT INTO stockv2_news_link_candidates (
-				id, news_event_id, raw_news_id, symbol, market, instrument_name,
-				match_method, score, reason, matched_terms_json, monitor_status,
-				monitor_hit_id, monitored_at, created_at, updated_at
-			) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-			  FROM stockv2_news_events
-			  WHERE id=? AND COALESCE(context_status,'pending')<>?
-			ON CONFLICT(news_event_id, symbol) DO UPDATE SET
-				raw_news_id = excluded.raw_news_id,
-				market = excluded.market,
-				instrument_name = excluded.instrument_name,
-				match_method = excluded.match_method,
-				score = excluded.score,
-				reason = excluded.reason,
-				matched_terms_json = excluded.matched_terms_json,
-				updated_at = excluded.updated_at
-		`)
+		result, err := tx.ExecContext(ctx, statement.String(), args...)
 		if err != nil {
 			return err
 		}
-		defer stmt.Close()
-
-		for i := range candidates {
-			candidate := candidates[i]
-			if candidate.ID == "" {
-				candidate.ID = generateID()
-			}
-			if candidate.MonitorStatus == "" {
-				candidate.MonitorStatus = NewsLinkMonitorStatusPending
-			}
-			if candidate.CreatedAt.IsZero() {
-				candidate.CreatedAt = now
-			}
-			candidate.UpdatedAt = now
-			result, err := stmt.ExecContext(ctx, candidate.ID, candidate.NewsEventID, candidate.RawNewsID, candidate.Symbol,
-				candidate.Market, candidate.InstrumentName, candidate.MatchMethod, candidate.Score,
-				candidate.Reason, marshalProfileStrings(candidate.MatchedTerms), candidate.MonitorStatus,
-				nullableString(candidate.MonitorHitID), nullableTime(candidate.MonitoredAt),
-				candidate.CreatedAt, candidate.UpdatedAt, candidate.NewsEventID, NewsEventContextCompacted)
-			if err != nil {
-				return err
-			}
-			if rows, err := result.RowsAffected(); err != nil {
-				return err
-			} else if rows == 0 {
-				return ErrInvalidNewsLinkCandidate
-			}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows != int64(len(candidates)) {
+			return ErrInvalidNewsLinkCandidate
 		}
 		return tx.Commit()
 	})

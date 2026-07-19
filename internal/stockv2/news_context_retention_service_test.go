@@ -288,11 +288,19 @@ func TestNewsLinkCandidateUpsertRejectsCompactedEvent(t *testing.T) {
 	if _, err := svc.store.UpsertNewsLinkCandidate(ctx, item); !errors.Is(err, ErrInvalidNewsLinkCandidate) {
 		t.Fatalf("single upsert on compacted event error=%v", err)
 	}
-	if err := svc.store.UpsertNewsLinkCandidates(ctx, []NewsLinkCandidate{item}); !errors.Is(err, ErrInvalidNewsLinkCandidate) {
+	active, err := svc.CreateNewsEvent(ctx, NewsEvent{Source: "test", Title: "未压缩消息"})
+	if err != nil {
+		t.Fatalf("create active event: %v", err)
+	}
+	valid := NewsLinkCandidate{NewsEventID: active.ID, Symbol: "VALID", MatchMethod: NewsLinkMatchExactSymbol}
+	if err := svc.store.UpsertNewsLinkCandidates(ctx, []NewsLinkCandidate{valid, item}); !errors.Is(err, ErrInvalidNewsLinkCandidate) {
 		t.Fatalf("bulk upsert on compacted event error=%v", err)
 	}
 	if items, err := svc.store.ListNewsLinkCandidates(ctx, NewsLinkCandidateListFilter{NewsEventID: event.ID, Limit: 10}); err != nil || len(items) != 0 {
 		t.Fatalf("compacted event regained link candidates: items=%+v err=%v", items, err)
+	}
+	if items, err := svc.store.ListNewsLinkCandidates(ctx, NewsLinkCandidateListFilter{NewsEventID: active.ID, Limit: 10}); err != nil || len(items) != 0 {
+		t.Fatalf("mixed batch was not rolled back: items=%+v err=%v", items, err)
 	}
 }
 

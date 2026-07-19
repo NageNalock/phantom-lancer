@@ -452,3 +452,43 @@ func TestNewsLinkCandidateBatchUpsertPreservesMonitorStatus(t *testing.T) {
 		t.Fatalf("monitor fields = status %q hit %q, want preserved hit", reloaded.MonitorStatus, reloaded.MonitorHitID)
 	}
 }
+
+func TestNewsLinkCandidateBatchUpsertPersistsLargeBatch(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	event, err := svc.CreateNewsEvent(ctx, NewsEvent{Source: "test", Title: "批量关联候选"})
+	if err != nil {
+		t.Fatalf("create event: %v", err)
+	}
+	const candidateCount = 512
+	candidates := make([]NewsLinkCandidate, 0, candidateCount)
+	for i := 0; i < candidateCount; i++ {
+		candidates = append(candidates, NewsLinkCandidate{
+			NewsEventID: event.ID,
+			Symbol:      fmt.Sprintf("%06d", i),
+			Market:      "TEST",
+			MatchMethod: NewsLinkMatchKeyword,
+			Score:       float64(i),
+			Reason:      "large batch",
+		})
+	}
+	if err := svc.store.UpsertNewsLinkCandidates(ctx, candidates); err != nil {
+		t.Fatalf("upsert large batch: %v", err)
+	}
+	for i := range candidates {
+		if candidates[i].ID == "" || candidates[i].MonitorStatus != NewsLinkMonitorStatusPending {
+			t.Fatalf("candidate %d defaults = %+v", i, candidates[i])
+		}
+	}
+	var count int
+	if err := svc.store.assetDB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM stockv2_news_link_candidates WHERE news_event_id=?`, event.ID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count large batch: %v", err)
+	}
+	if count != candidateCount {
+		t.Fatalf("candidate count = %d, want %d", count, candidateCount)
+	}
+}
