@@ -30,11 +30,16 @@ func (s *Service) LinkNewsEvent(ctx context.Context, eventID string) ([]NewsLink
 	if err != nil {
 		return nil, err
 	}
-	candidates, err := s.buildNewsLinkCandidates(ctx, event)
+	snapshot, err := s.loadNewsLinkMatchSnapshot(ctx)
 	if err != nil {
 		_ = s.store.UpdateNewsEventLinkStatus(ctx, event.ID, NewsEventLinkStatusFailed, time.Now())
 		return nil, err
 	}
+	return s.linkNewsEventWithSnapshot(ctx, event, snapshot)
+}
+
+func (s *Service) linkNewsEventWithSnapshot(ctx context.Context, event NewsEvent, snapshot newsLinkMatchSnapshot) ([]NewsLinkCandidate, error) {
+	candidates := s.buildNewsLinkCandidates(ctx, event, snapshot)
 	now := time.Now()
 	for i := range candidates {
 		if candidates[i].ID == "" {
@@ -91,31 +96,63 @@ func (s *Service) ListNewsLinkCandidates(ctx context.Context, filter NewsLinkCan
 	return s.store.ListNewsLinkCandidates(ctx, filter)
 }
 
-func (s *Service) buildNewsLinkCandidates(ctx context.Context, event NewsEvent) ([]NewsLinkCandidate, error) {
+type newsLinkMatchSnapshot struct {
+	profiles        []preparedNewsProfile
+	profileBySymbol map[string]StockProfile
+	heldSymbols     map[string]struct{}
+	strategySymbols map[string]struct{}
+}
+
+type preparedNewsProfile struct {
+	profile StockProfile
+	terms   []preparedNewsMatchTerm
+}
+
+type preparedNewsMatchTerm struct {
+	value        string
+	normalized   string
+	method       string
+	score        float64
+	reasonPrefix string
+}
+
+func (s *Service) loadNewsLinkMatchSnapshot(ctx context.Context) (newsLinkMatchSnapshot, error) {
 	profiles, err := s.listAllStockProfiles(ctx)
 	if err != nil {
-		return nil, err
+		return newsLinkMatchSnapshot{}, err
 	}
 	held, err := s.currentHoldingSymbols(ctx)
 	if err != nil {
-		return nil, err
+		return newsLinkMatchSnapshot{}, err
 	}
 	activeStrategy, err := s.activeStrategySymbols(ctx)
 	if err != nil {
-		return nil, err
+		return newsLinkMatchSnapshot{}, err
 	}
+	snapshot := newsLinkMatchSnapshot{
+		profiles:        make([]preparedNewsProfile, 0, len(profiles)),
+		profileBySymbol: make(map[string]StockProfile, len(profiles)),
+		heldSymbols:     held,
+		strategySymbols: activeStrategy,
+	}
+	for _, profile := range profiles {
+		snapshot.profiles = append(snapshot.profiles, prepareNewsProfile(profile))
+		snapshot.profileBySymbol[profile.Symbol] = profile
+	}
+	return snapshot, nil
+}
 
+func (s *Service) buildNewsLinkCandidates(ctx context.Context, event NewsEvent, snapshot newsLinkMatchSnapshot) []NewsLinkCandidate {
 	text := normalizeNewsMatchText(event.Title + " " + event.Summary + " " + event.Content)
 	accBySymbol := make(map[string]*newsCandidateAccumulator)
-	for _, profile := range profiles {
-		acc := newNewsCandidateAccumulator(event, profile)
-		matchProfileAgainstNews(text, profile, acc)
-		if !acc.hasTextEvidence() {
+	for _, prepared := range snapshot.profiles {
+		acc := matchPreparedProfileAgainstNews(text, event, prepared)
+		if acc == nil {
 			continue
 		}
-		accBySymbol[profile.Symbol] = acc
+		accBySymbol[prepared.profile.Symbol] = acc
 	}
-	s.addSemanticNewsProfileCandidates(ctx, event, profiles, accBySymbol)
+	s.addSemanticNewsProfileCandidates(ctx, event, snapshot.profileBySymbol, accBySymbol)
 
 	items := make([]NewsLinkCandidate, 0, len(accBySymbol))
 	for _, acc := range accBySymbol {
@@ -123,10 +160,10 @@ func (s *Service) buildNewsLinkCandidates(ctx context.Context, event NewsEvent) 
 			continue
 		}
 		profile := acc.profile
-		if _, ok := held[profile.Symbol]; ok {
+		if _, ok := snapshot.heldSymbols[profile.Symbol]; ok {
 			acc.addBoost(newsBoostHolding, "当前持仓 boost")
 		}
-		if _, ok := activeStrategy[profile.Symbol]; ok {
+		if _, ok := snapshot.strategySymbols[profile.Symbol]; ok {
 			acc.addBoost(newsBoostActiveStrategy, "活跃策略 boost")
 		}
 		items = append(items, acc.candidate())
@@ -137,10 +174,10 @@ func (s *Service) buildNewsLinkCandidates(ctx context.Context, event NewsEvent) 
 		}
 		return items[i].Score > items[j].Score
 	})
-	return items, nil
+	return items
 }
 
-func (s *Service) addSemanticNewsProfileCandidates(ctx context.Context, event NewsEvent, profiles []StockProfile, accBySymbol map[string]*newsCandidateAccumulator) {
+func (s *Service) addSemanticNewsProfileCandidates(ctx context.Context, event NewsEvent, profileBySymbol map[string]StockProfile, accBySymbol map[string]*newsCandidateAccumulator) {
 	query := strings.TrimSpace(newsEventEmbeddingText(event))
 	if query == "" {
 		return
@@ -148,10 +185,6 @@ func (s *Service) addSemanticNewsProfileCandidates(ctx context.Context, event Ne
 	hits, err := s.SemanticSearchStockProfiles(ctx, SemanticSearchRequest{Query: query, Limit: 12})
 	if err != nil {
 		return
-	}
-	profileBySymbol := make(map[string]StockProfile, len(profiles))
-	for _, profile := range profiles {
-		profileBySymbol[profile.Symbol] = profile
 	}
 	for _, hit := range hits {
 		if hit.Score < newsSemanticMinScore {
@@ -339,26 +372,34 @@ func (a *newsCandidateAccumulator) addReason(reason string) {
 	a.reasons = append(a.reasons, reason)
 }
 
-func matchProfileAgainstNews(text string, profile StockProfile, acc *newsCandidateAccumulator) {
+func prepareNewsProfile(profile StockProfile) preparedNewsProfile {
+	out := preparedNewsProfile{profile: profile}
+	add := func(method string, score float64, value, reasonPrefix string) {
+		value = strings.TrimSpace(value)
+		if !usefulNewsTerm(value) {
+			return
+		}
+		out.terms = append(out.terms, preparedNewsMatchTerm{
+			value:        value,
+			normalized:   strings.ToLower(value),
+			method:       method,
+			score:        score,
+			reasonPrefix: reasonPrefix,
+		})
+	}
 	for _, term := range []string{
 		profile.Symbol,
 		profile.Market + profile.Symbol,
 		profile.Symbol + "." + profile.Market,
 	} {
-		if newsTermMatched(text, term) {
-			acc.addMatch(NewsLinkMatchExactSymbol, newsScoreExactSymbol, term, "命中股票代码 "+term)
-		}
+		add(NewsLinkMatchExactSymbol, newsScoreExactSymbol, term, "命中股票代码 ")
 	}
-	if newsTermMatched(text, profile.Name) {
-		acc.addMatch(NewsLinkMatchExactName, newsScoreExactName, profile.Name, "命中标的名称 "+profile.Name)
-	}
+	add(NewsLinkMatchExactName, newsScoreExactName, profile.Name, "命中标的名称 ")
 	for _, term := range profile.Aliases {
 		if isNewsGenericTerm(term) || sameNewsTerm(term, profile.Symbol) || sameNewsTerm(term, profile.Name) {
 			continue
 		}
-		if newsTermMatched(text, term) {
-			acc.addMatch(NewsLinkMatchAlias, newsScoreAlias, term, "命中别名 "+term)
-		}
+		add(NewsLinkMatchAlias, newsScoreAlias, term, "命中别名 ")
 	}
 	keywords := []string{profile.Industry, profile.TrackingIndex, profile.Theme}
 	keywords = append(keywords, profile.Sectors...)
@@ -368,9 +409,7 @@ func matchProfileAgainstNews(text string, profile StockProfile, acc *newsCandida
 		if isNewsGenericTerm(term) {
 			continue
 		}
-		if newsTermMatched(text, term) {
-			acc.addMatch(NewsLinkMatchKeyword, newsScoreKeyword, term, "命中画像关键词 "+term)
-		}
+		add(NewsLinkMatchKeyword, newsScoreKeyword, term, "命中画像关键词 ")
 	}
 
 	// ponytail: 先复用 profile_text 的空格分词做高召回兜底;后续接 embedding/分词器时替换这里。
@@ -378,24 +417,29 @@ func matchProfileAgainstNews(text string, profile StockProfile, acc *newsCandida
 		if !usefulNewsProfileTextTerm(term) || sameNewsTerm(term, profile.Symbol) || sameNewsTerm(term, profile.Name) {
 			continue
 		}
-		if newsTermMatched(text, term) {
-			acc.addMatch(NewsLinkMatchProfileKeyword, newsScoreProfileKeyword, term, "命中画像文本 "+term)
-		}
+		add(NewsLinkMatchProfileKeyword, newsScoreProfileKeyword, term, "命中画像文本 ")
 	}
+	return out
+}
+
+func matchPreparedProfileAgainstNews(text string, event NewsEvent, prepared preparedNewsProfile) *newsCandidateAccumulator {
+	var acc *newsCandidateAccumulator
+	for _, term := range prepared.terms {
+		if !strings.Contains(text, term.normalized) {
+			continue
+		}
+		if acc == nil {
+			acc = newNewsCandidateAccumulator(event, prepared.profile)
+		}
+		acc.addMatch(term.method, term.score, term.value, term.reasonPrefix+term.value)
+	}
+	return acc
 }
 
 func normalizeNewsMatchText(text string) string {
 	text = strings.ToLower(strings.TrimSpace(text))
 	replacer := strings.NewReplacer("，", " ", ",", " ", "。", " ", ".", " ", "；", " ", ";", " ", "：", " ", ":", " ", "、", " ", "\n", " ", "\t", " ")
 	return replacer.Replace(text)
-}
-
-func newsTermMatched(normalizedText string, term string) bool {
-	term = strings.TrimSpace(term)
-	if !usefulNewsTerm(term) {
-		return false
-	}
-	return strings.Contains(normalizedText, strings.ToLower(term))
 }
 
 func usefulNewsTerm(term string) bool {

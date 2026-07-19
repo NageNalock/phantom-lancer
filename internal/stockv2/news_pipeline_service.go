@@ -155,9 +155,16 @@ func (s *Service) RunNewsProcessingBatch(ctx context.Context, source string, raw
 	if err != nil {
 		return result, err
 	}
+	var snapshot newsLinkMatchSnapshot
+	if s.newsLinker == nil && len(events) > 0 {
+		snapshot, err = s.loadNewsLinkMatchSnapshot(ctx)
+		if err != nil {
+			return result, err
+		}
+	}
 	for _, event := range events {
 		if s.newsLinker == nil {
-			candidates, linkErr := s.LinkNewsEvent(ctx, event.ID)
+			candidates, linkErr := s.linkNewsEventWithSnapshot(ctx, event, snapshot)
 			if linkErr != nil {
 				_ = s.store.UpdateNewsEventLinkStatus(ctx, event.ID, NewsEventLinkStatusFailed, time.Now())
 				if s.log != nil {
