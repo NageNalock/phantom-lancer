@@ -35,23 +35,31 @@ func (s *Service) LinkNewsEvent(ctx context.Context, eventID string) ([]NewsLink
 		_ = s.store.UpdateNewsEventLinkStatus(ctx, event.ID, NewsEventLinkStatusFailed, time.Now())
 		return nil, err
 	}
-	saved := make([]NewsLinkCandidate, 0, len(candidates))
-	for _, candidate := range candidates {
-		item, err := s.store.UpsertNewsLinkCandidate(ctx, candidate)
-		if err != nil {
-			_ = s.store.UpdateNewsEventLinkStatus(ctx, event.ID, NewsEventLinkStatusFailed, time.Now())
-			return nil, err
+	now := time.Now()
+	for i := range candidates {
+		if candidates[i].ID == "" {
+			candidates[i].ID = generateID()
 		}
-		saved = append(saved, item)
+		if candidates[i].MonitorStatus == "" {
+			candidates[i].MonitorStatus = NewsLinkMonitorStatusPending
+		}
+		if candidates[i].CreatedAt.IsZero() {
+			candidates[i].CreatedAt = now
+		}
+		candidates[i].UpdatedAt = now
+	}
+	if err := s.store.UpsertNewsLinkCandidates(ctx, candidates); err != nil {
+		_ = s.store.UpdateNewsEventLinkStatus(ctx, event.ID, NewsEventLinkStatusFailed, time.Now())
+		return nil, err
 	}
 	status := NewsEventLinkStatusLinked
-	if len(saved) == 0 {
+	if len(candidates) == 0 {
 		status = NewsEventLinkStatusNoCandidate
 	}
 	if err := s.store.UpdateNewsEventLinkStatus(ctx, event.ID, status, time.Now()); err != nil {
 		return nil, err
 	}
-	return saved, nil
+	return candidates, nil
 }
 
 func (s *Service) LinkPendingNewsEventsBatch(ctx context.Context, limit int) (LinkNewsEventsBatchResult, error) {
