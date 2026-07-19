@@ -1343,6 +1343,53 @@ func (s *Store) ListLatestNewsThreadVersionsAt(ctx context.Context, at time.Time
 	return scanRows(rows, scanNewsThreadVersion, "scan latest historical news thread version", "iterate latest historical news thread versions")
 }
 
+func (s *Store) ListLatestNewsThreadVersionsAtForSearch(ctx context.Context, at time.Time) ([]NewsThreadVersion, error) {
+	if at.IsZero() {
+		return nil, ErrInvalidNewsContextInput
+	}
+	rows, err := s.marketDB.db.QueryContext(ctx, newsThreadVersionSelectSQL+`
+		WHERE COALESCE(effective_at,created_at)<=?
+		QUALIFY ROW_NUMBER() OVER (
+			PARTITION BY thread_id ORDER BY COALESCE(effective_at,created_at) DESC,version_no DESC,id DESC
+		)=1
+		ORDER BY thread_id`, at)
+	if err != nil {
+		return nil, wrapError(err, "list latest news thread versions for historical search")
+	}
+	return scanRows(rows, scanNewsThreadVersion, "scan latest search news thread version", "iterate latest search news thread versions")
+}
+
+func (s *Store) ListNewsThreadVersionsForEmbeddingAssetsAt(ctx context.Context, at time.Time, objectIDs []string) ([]NewsThreadVersion, error) {
+	if at.IsZero() {
+		return nil, ErrInvalidNewsContextInput
+	}
+	const batchSize = 500
+	out := make([]NewsThreadVersion, 0, len(objectIDs))
+	for start := 0; start < len(objectIDs); start += batchSize {
+		end := start + batchSize
+		if end > len(objectIDs) {
+			end = len(objectIDs)
+		}
+		args := make([]any, 0, 1+end-start)
+		args = append(args, at)
+		for _, id := range objectIDs[start:end] {
+			args = append(args, id)
+		}
+		rows, err := s.marketDB.db.QueryContext(ctx, newsThreadVersionSelectSQL+`
+			WHERE COALESCE(effective_at,created_at)<=?
+			  AND id IN (`+sqlPlaceholders(end-start)+`)`, args...)
+		if err != nil {
+			return nil, wrapError(err, "list news thread versions for embedding assets")
+		}
+		page, err := scanRows(rows, scanNewsThreadVersion, "scan embedded news thread version", "iterate embedded news thread versions")
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page...)
+	}
+	return out, nil
+}
+
 func (s *Store) CountNewsThreadVersions(ctx context.Context, filter NewsThreadVersionListFilter) (int, error) {
 	where, args := newsThreadVersionWhere(filter)
 	var count int

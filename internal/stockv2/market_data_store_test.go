@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -21,6 +22,33 @@ func TestMarketDataStoreUsesOneDuckDBWorker(t *testing.T) {
 	}
 	if threads != marketDataDuckDBThreads {
 		t.Fatalf("DuckDB threads = %d, want %d", threads, marketDataDuckDBThreads)
+	}
+}
+
+func TestEmbeddingVectorSearchHandlesAllowedIDsAcrossBatches(t *testing.T) {
+	store, err := NewMarketDataStore(filepath.Join(t.TempDir(), "stock_market.duckdb"))
+	if err != nil {
+		t.Fatalf("new market store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	asset := EmbeddingAsset{
+		VectorRef: "vector-target", ModelID: "model-a",
+		ObjectType: EmbeddingObjectNewsThreadVersion, ObjectID: "target",
+	}
+	if err := store.UpsertEmbeddingVector(ctx, asset, []float64{1, 0, 0}); err != nil {
+		t.Fatalf("upsert target vector: %v", err)
+	}
+	allowed := map[string]struct{}{"target": {}}
+	for i := 0; i < 1000; i++ {
+		allowed["missing-"+fmt.Sprint(i)] = struct{}{}
+	}
+	hits, err := store.searchEmbeddingVectors(ctx, asset.ModelID, asset.ObjectType, allowed, []float64{1, 0, 0}, 5)
+	if err != nil {
+		t.Fatalf("search filtered vectors: %v", err)
+	}
+	if len(hits) != 1 || hits[0].ObjectID != asset.ObjectID {
+		t.Fatalf("hits=%+v, want only target", hits)
 	}
 }
 

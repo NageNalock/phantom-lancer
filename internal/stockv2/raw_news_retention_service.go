@@ -31,6 +31,10 @@ func (s *Service) runRawNewsRetentionScheduler(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+			if s.shouldDeferMaintenanceForNewsContextBackfill(ctx) {
+				timer.Reset(time.Minute)
+				continue
+			}
 			if !s.tryStartBackgroundHeavyWork() {
 				timer.Reset(time.Minute)
 				continue

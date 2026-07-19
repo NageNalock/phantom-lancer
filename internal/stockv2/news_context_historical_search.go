@@ -30,56 +30,42 @@ func (s *Service) semanticSearchNewsThreadsAt(ctx context.Context, req SemanticS
 		return nil, err
 	}
 
-	readyAssets := make(map[string]EmbeddingAsset)
-	for offset := 0; ; offset += 200 {
-		page, err := s.store.ListEmbeddingAssets(ctx, EmbeddingAssetListFilter{
-			ObjectType: EmbeddingObjectNewsThreadVersion,
-			ModelID:    model.ID,
-			Status:     EmbeddingAssetStatusReady,
-			Limit:      200,
-			Offset:     offset,
-		})
-		if err != nil {
-			return nil, err
-		}
-		for _, asset := range page {
-			if asset.EmbeddingDimensions == len(queryVector) && strings.TrimSpace(asset.VectorRef) != "" {
-				readyAssets[asset.ObjectID] = asset
-			}
-		}
-		if len(page) < 200 {
-			break
-		}
+	assets, err := s.store.ListReadyEmbeddingAssetsForSearch(
+		ctx, EmbeddingObjectNewsThreadVersion, model.ID, len(queryVector))
+	if err != nil {
+		return nil, err
+	}
+	readyAssets := make(map[string]EmbeddingAsset, len(assets))
+	readyAssetIDs := make([]string, 0, len(assets))
+	for _, asset := range assets {
+		readyAssets[asset.ObjectID] = asset
+		readyAssetIDs = append(readyAssetIDs, asset.ObjectID)
 	}
 	if len(readyAssets) == 0 {
 		return nil, ErrEmbeddingAssetNotReady
 	}
 
+	latest, err := s.store.ListLatestNewsThreadVersionsAtForSearch(ctx, cutoff)
+	if err != nil {
+		return nil, err
+	}
 	latestVersions := make(map[string]NewsThreadVersion)
+	for _, version := range latest {
+		latestVersions[version.ThreadID] = version
+	}
+
+	embeddedVersions, err := s.store.ListNewsThreadVersionsForEmbeddingAssetsAt(ctx, cutoff, readyAssetIDs)
+	if err != nil {
+		return nil, err
+	}
 	retrievalVersions := make(map[string]NewsThreadVersion)
-	for offset := 0; ; offset += 500 {
-		page, err := s.store.ListNewsThreadVersions(ctx, NewsThreadVersionListFilter{Limit: 500, Offset: offset})
-		if err != nil {
-			return nil, err
+	for _, version := range embeddedVersions {
+		asset, ready := readyAssets[version.ID]
+		if !ready || asset.TextHash != hashEmbeddingText(NewsThreadVersionEmbeddingText(version)) {
+			continue
 		}
-		for _, version := range page {
-			effectiveAt := newsThreadVersionEffectiveTime(version)
-			if effectiveAt.IsZero() || effectiveAt.After(cutoff) {
-				continue
-			}
-			if previous, found := latestVersions[version.ThreadID]; !found || newerNewsContextVersion(version, previous) {
-				latestVersions[version.ThreadID] = version
-			}
-			asset, ready := readyAssets[version.ID]
-			if !ready || asset.TextHash != hashEmbeddingText(NewsThreadVersionEmbeddingText(version)) {
-				continue
-			}
-			if previous, found := retrievalVersions[version.ThreadID]; !found || newerNewsContextVersion(version, previous) {
-				retrievalVersions[version.ThreadID] = version
-			}
-		}
-		if len(page) < 500 {
-			break
+		if previous, found := retrievalVersions[version.ThreadID]; !found || newerNewsContextVersion(version, previous) {
+			retrievalVersions[version.ThreadID] = version
 		}
 	}
 	if len(retrievalVersions) == 0 {

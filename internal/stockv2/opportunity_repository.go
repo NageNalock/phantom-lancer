@@ -866,6 +866,20 @@ func (s *Store) ListEmbeddingAssets(ctx context.Context, filter EmbeddingAssetLi
 	return scanRows(rows, scanEmbeddingAsset, "scan embedding asset", "iterate embedding assets")
 }
 
+func (s *Store) ListReadyEmbeddingAssetsForSearch(ctx context.Context, objectType, modelID string, dimensions int) ([]EmbeddingAsset, error) {
+	rows, err := s.db.QueryContext(ctx, embeddingAssetSelectSQL+`
+		WHERE object_type=? AND model_id=? AND status=? AND embedding_dimensions=?
+		  AND TRIM(COALESCE(vector_ref,''))<>''
+		ORDER BY object_id`,
+		strings.TrimSpace(objectType), strings.TrimSpace(modelID), EmbeddingAssetStatusReady, dimensions)
+	if err != nil {
+		return nil, wrapError(err, "list ready embedding assets for search")
+	}
+	// ponytail: one indexed pass avoids OFFSET repeatedly sorting the same
+	// historical asset set; callers need the complete set for exact as-of recall.
+	return scanRows(rows, scanEmbeddingAsset, "scan ready search embedding asset", "iterate ready search embedding assets")
+}
+
 func (s *Store) CountEmbeddingAssets(ctx context.Context, filter EmbeddingAssetListFilter) (int, error) {
 	where, args := embeddingAssetWhere(filter)
 	var total int
