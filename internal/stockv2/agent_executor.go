@@ -1048,6 +1048,9 @@ func buildNewsContextAggregationPrompt(taskID string, pack NewsContextAggregatio
 	b.WriteString("Return one result with outputType `news_context_result`. The inner result must use schema_version `news-context-result/v1` and repeat the exact aggregation run id and window type.\n")
 	b.WriteString("Include every input news id in `processed_news_ids` exactly once and give every item a disposition such as create, update, support, contradict, background, duplicate, noise, or defer. Every item except duplicate, noise, or defer must appear in exactly one thread change's evidence_news_ids; those three excluded dispositions must not appear as evidence. An existing-theme decision must use that change's stable thread_id. A new-theme decision may omit thread_id or use one consistent temporary id unique to that create change. Deferred items must state why and must remain protected from deletion.\n")
 	b.WriteString("Immediately before submission, mechanically compare the exact ids in InputNewsEvents with both processed_news_ids and news_decisions: each set must contain every input id exactly once, with identical counts and no invented ids. Do not omit an item because it is repetitive, duplicate, low-impact, or difficult to classify.\n")
+	if len(pack.InputNewsEvents) == 0 {
+		b.WriteString("This batch has no InputNewsEvents. `processed_news_ids` and `news_decisions` must both be empty arrays, and every `thread_changes[].evidence_news_ids` must be empty. Identifiers or evidence described inside InputThreads are historical context, not processable news input, and must not be copied into those fields.\n")
+	}
 	b.WriteString("Include `reviewed_thread_ids` and `unchanged_thread_ids` only for exact stable thread ids present in InputThreads. Threads discovered only through semantic search are candidates, not batch review inputs: omit an unchanged candidate from both arrays, and place it only in thread_changes when it is actually changed. When InputThreads is empty, both arrays must be empty. Together with every source/target InputThreads id referenced by `thread_changes`, these arrays must cover every distinct stable thread id in InputThreads exactly once; the three outcome sets are mutually exclusive. Daily runs require every distinct stable thread id to appear in unchanged_thread_ids or thread_changes so the service can persist an explicit daily stage conclusion.\n")
 	b.WriteString("Each thread change must use action create, update, merge, split, or restart. create must omit thread_id; every other action must use a stable existing thread_id. stage must be one of emerging, spreading, accelerating, overheated, diverging, retreating, dormant, or restarting. Also include whether the change is material, facts, inferences, contrary evidence, unresolved questions, affected sectors/instruments, catalysts, invalidation conditions, rotation clues, evidence news ids, and merge/split reasoning when applicable.\n")
 	b.WriteString("Include `search_audit` even when no search was required. Its status must be exactly completed, verified, failed, or unavailable. Never use partially_verified, weak, unsupported, stale, conflicting, or another status. Represent partial confirmation as verified with unresolved entries and lower confidence. completed and verified require non-empty sources; failed and unavailable require failure_reason.\n")
@@ -1057,13 +1060,27 @@ func buildNewsContextAggregationPrompt(taskID string, pack NewsContextAggregatio
 		SchemaVersion:      NewsContextResultSchemaVersion,
 		RunID:              pack.RunID,
 		WindowType:         pack.WindowType,
-		ProcessedNewsIDs:   []string{"news-event-id"},
+		ProcessedNewsIDs:   []string{},
 		ReviewedThreadIDs:  []string{},
 		UnchangedThreadIDs: []string{},
-		NewsDecisions: []NewsContextNewsDecision{{
+		NewsDecisions:      []NewsContextNewsDecision{},
+		ThreadChanges:      []NewsContextThreadChange{},
+		SearchAudit:        []NewsContextSearchAudit{},
+	}
+	if len(pack.InputNewsEvents) == 0 {
+		// ponytail: a batch-shaped example prevents a thread-only parent window
+		// from copying an invented news placeholder into its strict coverage set.
+		threadIDs := make([]string, 0, len(pack.InputThreads))
+		for _, thread := range pack.InputThreads {
+			threadIDs = append(threadIDs, firstNonEmpty(thread.ID, thread.ThemeID))
+		}
+		exampleReport.UnchangedThreadIDs = uniqueNonEmptyStrings(threadIDs)
+	} else {
+		exampleReport.ProcessedNewsIDs = []string{"news-event-id"}
+		exampleReport.NewsDecisions = []NewsContextNewsDecision{{
 			NewsEventID: "news-event-id", Disposition: "create", ThreadID: "new-theme-1", Reason: "...",
-		}},
-		ThreadChanges: []NewsContextThreadChange{{
+		}}
+		exampleReport.ThreadChanges = []NewsContextThreadChange{{
 			Action: "create", Title: "...", CoreThesis: "...", Stage: NewsThreadStageEmerging,
 			LatestChange: "...", MaterialChange: true, Confidence: 0.7,
 			Industries: []string{"..."}, Symbols: []string{"..."}, Funds: []string{"..."},
@@ -1074,11 +1091,11 @@ func buildNewsContextAggregationPrompt(taskID string, pack NewsContextAggregatio
 				ThreadID: "existing-theme-id", Title: "...", Type: "related", Reason: "...", Strength: 0.5,
 			}},
 			EvidenceNewsIDs: []string{"news-event-id"}, ResearchStatus: "verified",
-		}},
-		SearchAudit: []NewsContextSearchAudit{{
+		}}
+		exampleReport.SearchAudit = []NewsContextSearchAudit{{
 			Question: "...", Status: "verified", Sources: []string{"https://example.com/source"},
 			Supported: []string{"..."}, WeakenedOrRefuted: []string{}, Unresolved: []string{},
-		}},
+		}}
 	}
 	exampleResult, _ := json.Marshal(exampleReport)
 	fmt.Fprintf(&b, "{\"taskID\":%q,\"taskType\":%q,\"result\":{\"outputType\":\"news_context_result\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":%s}}\n", taskID, AgentTaskTypeNewsEventReview, exampleResult)

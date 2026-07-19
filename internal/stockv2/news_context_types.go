@@ -493,8 +493,8 @@ type NewsContextReport struct {
 	RunID              string                    `json:"run_id"`
 	WindowType         string                    `json:"window_type"`
 	ProcessedNewsIDs   []string                  `json:"processed_news_ids"`
-	ReviewedThreadIDs  []string                  `json:"reviewed_thread_ids,omitempty"`
-	UnchangedThreadIDs []string                  `json:"unchanged_thread_ids,omitempty"`
+	ReviewedThreadIDs  []string                  `json:"reviewed_thread_ids"`
+	UnchangedThreadIDs []string                  `json:"unchanged_thread_ids"`
 	NewsDecisions      []NewsContextNewsDecision `json:"news_decisions"`
 	ThreadChanges      []NewsContextThreadChange `json:"thread_changes"`
 	SearchAudit        []NewsContextSearchAudit  `json:"search_audit"`

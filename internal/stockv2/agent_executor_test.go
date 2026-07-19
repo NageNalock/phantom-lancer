@@ -204,9 +204,10 @@ func TestBuildStockProfileSummaryPromptTruncatesUTF8Safely(t *testing.T) {
 func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing.T) {
 	windowEnd := time.Date(2026, 7, 13, 8, 0, 0, 0, time.UTC)
 	prompt := buildNewsContextAggregationPrompt("task-news-context", NewsContextAggregationPack{
-		RunID:      "context-run-1",
-		WindowType: "daily",
-		WindowEnd:  windowEnd,
+		RunID:           "context-run-1",
+		WindowType:      "daily",
+		WindowEnd:       windowEnd,
+		InputNewsEvents: []NewsEvent{{ID: "news-1"}},
 	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
 
 	for _, want := range []string{
@@ -248,6 +249,36 @@ func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing
 	}
 	if validAgentTaskOutputType(AgentTaskTypeNewsEventReview, AgentTaskTypeNewsEventReview) {
 		t.Fatal("legacy task key must not be accepted as a result type")
+	}
+}
+
+func TestBuildNewsContextAggregationPromptUsesThreadOnlyExampleWithoutInventedNews(t *testing.T) {
+	prompt := buildNewsContextAggregationPrompt("task-thread-only", NewsContextAggregationPack{
+		RunID:      "context-run-thread-only",
+		WindowType: NewsContextWindowFourHour,
+		WindowEnd:  time.Date(2026, 7, 18, 20, 0, 0, 0, time.UTC),
+		InputThreads: []NewsThread{
+			{ID: "thread-stable-1", ThemeID: "thread-stable-1"},
+			{ID: "thread-stable-1", ThemeID: "thread-stable-1"},
+			{ID: "thread-stable-2", ThemeID: "thread-stable-2"},
+		},
+	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
+
+	for _, want := range []string{
+		"This batch has no InputNewsEvents",
+		`"processed_news_ids":[]`,
+		`"reviewed_thread_ids":[]`,
+		`"unchanged_thread_ids":["thread-stable-1","thread-stable-2"]`,
+		`"news_decisions":[]`,
+		`"thread_changes":[]`,
+		`"search_audit":[]`,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("thread-only prompt missing %q: %s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "news-event-id") {
+		t.Fatalf("thread-only prompt contains invented news example: %s", prompt)
 	}
 }
 
