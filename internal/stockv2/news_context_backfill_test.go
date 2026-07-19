@@ -9,6 +9,32 @@ import (
 	"time"
 )
 
+func TestRunningNewsContextBackfillDefersOptionalMaintenance(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	backfill, err := svc.store.CreateNewsContextBackfill(ctx, NewsContextBackfill{
+		Status:   NewsContextBackfillStatusRunning,
+		Phase:    "hourly",
+		CutoffAt: time.Now().In(time.Local).Truncate(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create running backfill: %v", err)
+	}
+	if !svc.shouldDeferMaintenanceForNewsContextBackfill(ctx) {
+		t.Fatalf("running backfill did not defer optional maintenance")
+	}
+
+	backfill.Status = NewsContextBackfillStatusPaused
+	if _, err := svc.store.UpdateNewsContextBackfill(ctx, backfill); err != nil {
+		t.Fatalf("pause backfill: %v", err)
+	}
+	if svc.shouldDeferMaintenanceForNewsContextBackfill(ctx) {
+		t.Fatalf("paused backfill deferred optional maintenance")
+	}
+}
+
 func TestNewsContextBackfillWorkerUpdatePreservesOwnerPause(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

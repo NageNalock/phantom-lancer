@@ -537,6 +537,9 @@ func (s *Service) maybeRunEmbeddingMaintenance(ctx context.Context) {
 	if !cfg.NextMaintainAt.IsZero() && cfg.NextMaintainAt.After(now) {
 		return
 	}
+	if s.shouldDeferMaintenanceForNewsContextBackfill(ctx) {
+		return
+	}
 	if !s.tryStartBackgroundHeavyWork() {
 		return
 	}

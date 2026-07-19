@@ -351,6 +351,9 @@ func (s *Service) maybeRunBaseProfileMaintenance(ctx context.Context, trigger st
 		s.settings = settings
 		return
 	}
+	if s.shouldDeferMaintenanceForNewsContextBackfill(ctx) {
+		return
+	}
 	if !s.tryStartBackgroundHeavyWork() {
 		return
 	}

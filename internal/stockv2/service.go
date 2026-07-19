@@ -1312,6 +1312,16 @@ func (s *Service) finishBackgroundHeavyWork() {
 	s.backgroundHeavyMu.Unlock()
 }
 
+func (s *Service) shouldDeferMaintenanceForNewsContextBackfill(ctx context.Context) bool {
+	backfill, found, err := s.store.GetBlockingNewsContextBackfill(ctx)
+	if err != nil {
+		return true
+	}
+	// ponytail: the owner-requested historical backfill has priority over
+	// optional full-market maintenance; the existing schedules remain due.
+	return found && backfill.Status == NewsContextBackfillStatusRunning
+}
+
 // StartBackground 启动后台任务
 func (s *Service) StartBackground(ctx context.Context) {
 	s.bgMu.Lock()
