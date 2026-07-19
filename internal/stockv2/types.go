@@ -351,7 +351,11 @@ var (
 
 // 生成ID的辅助函数（带随机后缀，避免批量生成时冲突）
 func generateID() string {
-	buf := make([]byte, 4)
-	rand.Read(buf)
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		// ponytail: durable record IDs must fail closed instead of silently
+		// collapsing to a timestamp-only value when the OS random source fails.
+		panic("generate random id: " + err.Error())
+	}
 	return "id-" + time.Now().Format("20060102150405-") + hex.EncodeToString(buf)
 }
