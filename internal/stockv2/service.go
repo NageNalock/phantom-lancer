@@ -29,6 +29,11 @@ type Service struct {
 	baseProfileMu sync.Mutex
 	embeddingMu   sync.Mutex
 	embeddingRun  bool
+	// ponytail: scheduled analytical jobs share one process-local gate so a small
+	// personal server cannot run several full-market scans at once. Replace this
+	// with a persisted lease only if StockV2 gains multiple worker processes.
+	backgroundHeavyMu  sync.Mutex
+	backgroundHeavyRun bool
 	// ponytail: process-local single-flight is enough for the single deployed Go service;
 	// move to a persisted lease only if multiple StockV2 workers are introduced.
 	newsPipelineMu  sync.Mutex
@@ -1289,6 +1294,22 @@ func (s *Service) SearchInstrumentsFiltered(ctx context.Context, keyword, market
 		limit = 100
 	}
 	return s.store.SearchInstrumentsFiltered(ctx, keyword, market, instrumentType, profileStatus, limit)
+}
+
+func (s *Service) tryStartBackgroundHeavyWork() bool {
+	s.backgroundHeavyMu.Lock()
+	defer s.backgroundHeavyMu.Unlock()
+	if s.backgroundHeavyRun {
+		return false
+	}
+	s.backgroundHeavyRun = true
+	return true
+}
+
+func (s *Service) finishBackgroundHeavyWork() {
+	s.backgroundHeavyMu.Lock()
+	s.backgroundHeavyRun = false
+	s.backgroundHeavyMu.Unlock()
 }
 
 // StartBackground 启动后台任务

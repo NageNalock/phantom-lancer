@@ -351,6 +351,10 @@ func (s *Service) maybeRunBaseProfileMaintenance(ctx context.Context, trigger st
 		s.settings = settings
 		return
 	}
+	if !s.tryStartBackgroundHeavyWork() {
+		return
+	}
+	defer s.finishBackgroundHeavyWork()
 
 	s.baseProfileMu.Lock()
 	defer s.baseProfileMu.Unlock()

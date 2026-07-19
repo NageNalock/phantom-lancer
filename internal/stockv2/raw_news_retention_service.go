@@ -31,7 +31,12 @@ func (s *Service) runRawNewsRetentionScheduler(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+			if !s.tryStartBackgroundHeavyWork() {
+				timer.Reset(time.Minute)
+				continue
+			}
 			result, err := s.PruneRawNewsRetention(ctx, time.Now())
+			s.finishBackgroundHeavyWork()
 			if err != nil {
 				if s.log != nil {
 					s.log.Warn("prune raw news failed", "error", safelog.Text(err.Error(), 300))

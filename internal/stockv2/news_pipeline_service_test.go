@@ -205,6 +205,23 @@ func TestNewsPipelineOnceSkipsConcurrentRun(t *testing.T) {
 	}
 }
 
+func TestBackgroundHeavyWorkGateIsSingleFlight(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+
+	if !svc.tryStartBackgroundHeavyWork() {
+		t.Fatal("first background heavy task did not acquire gate")
+	}
+	if svc.tryStartBackgroundHeavyWork() {
+		t.Fatal("concurrent background heavy task acquired gate")
+	}
+	svc.finishBackgroundHeavyWork()
+	if !svc.tryStartBackgroundHeavyWork() {
+		t.Fatal("background heavy gate was not released")
+	}
+	svc.finishBackgroundHeavyWork()
+}
+
 func TestNewsSourceConfigClampsFastPolling(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

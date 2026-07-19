@@ -21,6 +21,11 @@ type MarketDataStore struct {
 	path string
 }
 
+// ponytail: one DuckDB worker leaves a CPU core available for the owner-facing
+// service on the current small personal server; raise this constant if the
+// deployment moves to hardware where analytical throughput is the priority.
+const marketDataDuckDBThreads = 1
+
 func NewMarketDataStore(path string) (*MarketDataStore, error) {
 	if path == "" {
 		return &MarketDataStore{}, nil
@@ -30,7 +35,7 @@ func NewMarketDataStore(path string) (*MarketDataStore, error) {
 			return nil, fmt.Errorf("create market db dir: %w", err)
 		}
 	}
-	db, err := sql.Open("duckdb", path)
+	db, err := sql.Open("duckdb", fmt.Sprintf("%s?threads=%d", path, marketDataDuckDBThreads))
 	if err != nil {
 		return nil, fmt.Errorf("open duckdb: %w", err)
 	}

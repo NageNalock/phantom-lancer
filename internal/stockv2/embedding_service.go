@@ -537,6 +537,10 @@ func (s *Service) maybeRunEmbeddingMaintenance(ctx context.Context) {
 	if !cfg.NextMaintainAt.IsZero() && cfg.NextMaintainAt.After(now) {
 		return
 	}
+	if !s.tryStartBackgroundHeavyWork() {
+		return
+	}
+	defer s.finishBackgroundHeavyWork()
 	if _, err := s.RunEmbeddingMaintenanceBatch(ctx, RequestRebuildEmbeddingAssets{
 		ObjectTypes: normalizeEmbeddingObjectTypes(nil),
 		Limit:       cfg.MaintainBatchSize,

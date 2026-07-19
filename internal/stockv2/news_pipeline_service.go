@@ -499,7 +499,11 @@ func (s *Service) tickNewsSourceScheduler(ctx context.Context) {
 			_ = s.store.UpsertNewsSourceState(ctx, state)
 			continue
 		}
+		if !s.tryStartBackgroundHeavyWork() {
+			continue
+		}
 		go func(source string) {
+			defer s.finishBackgroundHeavyWork()
 			if _, err := s.RunNewsPipelineOnce(context.Background(), source); err != nil && s.log != nil {
 				s.log.Warn("scheduled news pipeline failed", "source", source, "error", safelog.Text(err.Error(), 240))
 			}

@@ -20,7 +20,12 @@ func (s *Service) runNewsLinkCandidateRetentionScheduler(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+			if !s.tryStartBackgroundHeavyWork() {
+				timer.Reset(time.Minute)
+				continue
+			}
 			result, err := s.store.PruneNewsLinkCandidates(ctx, time.Now())
+			s.finishBackgroundHeavyWork()
 			if err != nil {
 				if s.log != nil {
 					s.log.Warn("prune news link candidates failed", "error", safelog.Text(err.Error(), 300))

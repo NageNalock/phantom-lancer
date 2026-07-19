@@ -8,6 +8,22 @@ import (
 	"time"
 )
 
+func TestMarketDataStoreUsesOneDuckDBWorker(t *testing.T) {
+	store, err := NewMarketDataStore(filepath.Join(t.TempDir(), "stock_market.duckdb"))
+	if err != nil {
+		t.Fatalf("new market store: %v", err)
+	}
+	defer store.Close()
+
+	var threads int
+	if err := store.db.QueryRow(`SELECT current_setting('threads')`).Scan(&threads); err != nil {
+		t.Fatalf("read DuckDB thread setting: %v", err)
+	}
+	if threads != marketDataDuckDBThreads {
+		t.Fatalf("DuckDB threads = %d, want %d", threads, marketDataDuckDBThreads)
+	}
+}
+
 func TestMarketDataStoreUpsertQueryStats(t *testing.T) {
 	ctx := context.Background()
 	store, err := NewMarketDataStore(filepath.Join(t.TempDir(), "stock_market.duckdb"))
