@@ -216,6 +216,10 @@ func (s *Service) RunNewsProcessingBatch(ctx context.Context, source string, raw
 }
 
 func (s *Service) RunNewsPipelineOnce(ctx context.Context, source string) (NewsPipelineRunResult, error) {
+	return s.runNewsPipelineOnce(ctx, source, true)
+}
+
+func (s *Service) runNewsPipelineOnce(ctx context.Context, source string, processPending bool) (NewsPipelineRunResult, error) {
 	source = normalizeNewsSourceName(source)
 	if !s.tryStartNewsPipelineRun() {
 		return NewsPipelineRunResult{
@@ -241,6 +245,10 @@ func (s *Service) RunNewsPipelineOnce(ctx context.Context, source string) (NewsP
 		return ingest, err
 	}
 	if ingest.Status == NewsSourceStatusDisabled || ingest.Status == NewsSourceStatusBackoff || ingest.Status == NewsSourceStatusRateLimited {
+		s.recordNewsPipelineRunResult(ctx, source, ingest, nil)
+		return ingest, nil
+	}
+	if !processPending {
 		s.recordNewsPipelineRunResult(ctx, source, ingest, nil)
 		return ingest, nil
 	}
@@ -511,7 +519,10 @@ func (s *Service) tickNewsSourceScheduler(ctx context.Context) {
 		}
 		go func(source string) {
 			defer s.finishBackgroundHeavyWork()
-			if _, err := s.RunNewsPipelineOnce(context.Background(), source); err != nil && s.log != nil {
+			processPending := !s.shouldDeferMaintenanceForNewsContextBackfill(context.Background())
+			// ponytail: keep source cursors current during a historical backfill,
+			// but defer CPU-heavy normalization/linking until the owner task ends.
+			if _, err := s.runNewsPipelineOnce(context.Background(), source, processPending); err != nil && s.log != nil {
 				s.log.Warn("scheduled news pipeline failed", "source", source, "error", safelog.Text(err.Error(), 240))
 			}
 		}(source)

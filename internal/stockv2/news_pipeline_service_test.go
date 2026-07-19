@@ -164,6 +164,89 @@ func TestNewsSourceConfigSchedulesNextRun(t *testing.T) {
 	}
 }
 
+func TestNewsPipelineIngestOnlyLeavesRawNewsPending(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	adapter := &fakeNewsAdapter{
+		source: "mock_ingest_only",
+		result: NewsSourceFetchResult{
+			Items:      []map[string]any{{"id": "flash-ingest-only", "title": "等待历史回填后处理"}},
+			NextCursor: "cursor-ingest-only",
+			FetchedAt:  time.Now(),
+		},
+	}
+	svc.WithNewsSourceAdapter(adapter)
+
+	result, err := svc.runNewsPipelineOnce(ctx, adapter.source, false)
+	if err != nil {
+		t.Fatalf("run ingest-only pipeline: %v", err)
+	}
+	if result.RawInsertedCount != 1 || result.NormalizedCount != 0 || result.LinkCandidateCount != 0 {
+		t.Fatalf("ingest-only result=%+v", result)
+	}
+	rawCount, err := svc.CountRawNews(ctx, RawNewsListFilter{Source: adapter.source, Status: NewsStatusNew})
+	if err != nil || rawCount != 1 {
+		t.Fatalf("pending raw count=%d err=%v, want 1", rawCount, err)
+	}
+	eventCount, err := svc.CountNewsEvents(ctx, NewsEventListFilter{Source: adapter.source})
+	if err != nil || eventCount != 0 {
+		t.Fatalf("news event count=%d err=%v, want 0", eventCount, err)
+	}
+	state, ok, err := svc.GetNewsSourceState(ctx, adapter.source)
+	if err != nil || !ok || state.Cursor != "cursor-ingest-only" || state.LastRunStatus != NewsSourceStatusIdle || state.NextRunAt.IsZero() {
+		t.Fatalf("ingest-only source state=%+v ok=%v err=%v", state, ok, err)
+	}
+}
+
+func TestNewsSourceSchedulerDefersProcessingDuringBackfill(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	adapter := &fakeNewsAdapter{
+		source: NewsSourceJin10,
+		result: NewsSourceFetchResult{
+			Items:      []map[string]any{{"id": "flash-backfill-ingest", "title": "回填期间仅抓取"}},
+			NextCursor: "cursor-backfill-ingest",
+			FetchedAt:  time.Now(),
+		},
+	}
+	svc.WithNewsSourceAdapter(adapter)
+	state := normalizeNewsSourceStateDefaults(NewsSourceState{
+		Source: NewsSourceJin10, Enabled: true, Status: NewsSourceStatusIdle,
+		NextRunAt: time.Now().Add(-time.Second),
+	})
+	if err := svc.store.UpsertNewsSourceState(ctx, state); err != nil {
+		t.Fatalf("save due source state: %v", err)
+	}
+	if _, err := svc.store.CreateNewsContextBackfill(ctx, NewsContextBackfill{
+		Status: NewsContextBackfillStatusRunning, Phase: "four_hour", CutoffAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create running backfill: %v", err)
+	}
+
+	svc.tickNewsSourceScheduler(ctx)
+	deadline := time.Now().Add(time.Second)
+	for {
+		state, ok, err := svc.GetNewsSourceState(ctx, NewsSourceJin10)
+		if err == nil && ok && state.Cursor == "cursor-backfill-ingest" && state.Status == NewsSourceStatusIdle {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("scheduled ingest did not finish: state=%+v ok=%v err=%v", state, ok, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	rawCount, err := svc.CountRawNews(ctx, RawNewsListFilter{Source: NewsSourceJin10, Status: NewsStatusNew})
+	if err != nil || rawCount != 1 {
+		t.Fatalf("pending raw count=%d err=%v, want 1", rawCount, err)
+	}
+	eventCount, err := svc.CountNewsEvents(ctx, NewsEventListFilter{Source: NewsSourceJin10})
+	if err != nil || eventCount != 0 {
+		t.Fatalf("news event count=%d err=%v, want 0", eventCount, err)
+	}
+}
+
 func TestNewsPipelineOnceSkipsConcurrentRun(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
