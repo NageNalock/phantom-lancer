@@ -847,6 +847,11 @@ func (s *Service) yieldNewsContextRunAfterFragment(ctx context.Context, runID st
 }
 
 func (s *Service) nextNewsContextRunItems(ctx context.Context, runID string) ([]NewsContextRunItem, error) {
+	run, err := s.store.GetNewsContextRun(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	convergence := run.WindowType == NewsContextWindowDaily && run.Phase == newsContextRunPhaseConverging
 	items := make([]NewsContextRunItem, 0)
 	inputCharacters := 0
 	group := make([]NewsContextRunItem, 0)
@@ -874,7 +879,7 @@ func (s *Service) nextNewsContextRunItems(ctx context.Context, runID string) ([]
 			return nil, err
 		}
 		for _, item := range page {
-			characters, err := s.newsContextRunItemPromptCharacters(ctx, item)
+			characters, err := s.newsContextRunItemPromptCharactersForMode(ctx, item, convergence)
 			if err != nil {
 				return nil, err
 			}
@@ -910,6 +915,14 @@ func (s *Service) nextNewsContextRunItems(ctx context.Context, runID string) ([]
 }
 
 func (s *Service) newsContextRunItemPromptCharacters(ctx context.Context, item NewsContextRunItem) (int, error) {
+	return s.newsContextRunItemPromptCharactersForMode(ctx, item, false)
+}
+
+func (s *Service) newsContextRunItemPromptCharactersForMode(
+	ctx context.Context,
+	item NewsContextRunItem,
+	convergence bool,
+) (int, error) {
 	var value any
 	switch item.ObjectType {
 	case NewsContextRunItemNewsEvent:
@@ -928,13 +941,22 @@ func (s *Service) newsContextRunItemPromptCharacters(ctx context.Context, item N
 			if err != nil {
 				return 0, err
 			}
-			value = compactNewsThreadForPrompt(historicalNewsThreadSnapshot(version))
+			thread := historicalNewsThreadSnapshot(version)
+			if convergence {
+				value = compactNewsThreadForConvergencePrompt(thread)
+			} else {
+				value = compactNewsThreadForPrompt(thread)
+			}
 		} else {
 			thread, err := s.store.GetNewsThread(ctx, item.ObjectID)
 			if err != nil {
 				return 0, err
 			}
-			value = compactNewsThreadForPrompt(thread)
+			if convergence {
+				value = compactNewsThreadForConvergencePrompt(thread)
+			} else {
+				value = compactNewsThreadForPrompt(thread)
+			}
 		}
 	default:
 		return 0, ErrInvalidNewsContextInput
@@ -1097,6 +1119,10 @@ func (s *Service) buildNewsContextAggregationPack(ctx context.Context, run NewsC
 		WindowEnd:              run.WindowEnd,
 		DailyConvergenceReview: run.WindowType == NewsContextWindowDaily && run.Phase == newsContextRunPhaseConverging,
 	}
+	compactThread := compactNewsThreadForPrompt
+	if pack.DailyConvergenceReview {
+		compactThread = compactNewsThreadForConvergencePrompt
+	}
 	for _, item := range items {
 		switch item.ObjectType {
 		case NewsContextRunItemNewsEvent:
@@ -1122,13 +1148,13 @@ func (s *Service) buildNewsContextAggregationPack(ctx context.Context, run NewsC
 				if err != nil {
 					return pack, err
 				}
-				pack.InputThreads = append(pack.InputThreads, compactNewsThreadForPrompt(historicalNewsThreadSnapshot(version)))
+				pack.InputThreads = append(pack.InputThreads, compactThread(historicalNewsThreadSnapshot(version)))
 			} else {
 				thread, err := s.store.GetNewsThread(ctx, item.ObjectID)
 				if err != nil {
 					return pack, err
 				}
-				pack.InputThreads = append(pack.InputThreads, compactNewsThreadForPrompt(thread))
+				pack.InputThreads = append(pack.InputThreads, compactThread(thread))
 			}
 		default:
 			return pack, ErrInvalidNewsContextInput
@@ -1154,6 +1180,51 @@ func newsContextRunItemObjectIDs(items []NewsContextRunItem) []string {
 		ids = append(ids, item.ObjectID)
 	}
 	return ids
+}
+
+func (s *Service) validateNewsContextTaskSubmission(
+	ctx context.Context,
+	taskID string,
+	report NewsContextReport,
+) error {
+	entry, ok := s.agentTaskPool.getTask(taskID)
+	if !ok {
+		return ErrTaskNotFound
+	}
+	entry.mu.Lock()
+	taskType := entry.taskType
+	agentRunID := entry.agentRunID
+	entry.mu.Unlock()
+	if taskType != AgentTaskTypeNewsEventReview {
+		return ErrInvalidNewsContextResult
+	}
+	agentRun, err := s.store.GetAgentRun(ctx, agentRunID)
+	if err != nil {
+		return err
+	}
+	if agentRun.TaskType != AgentTaskTypeNewsEventReview ||
+		agentRun.TriggerObjectType != "news_context_run" ||
+		strings.TrimSpace(agentRun.TriggerObjectID) == "" {
+		return ErrInvalidNewsContextResult
+	}
+	logicalRun, err := s.store.GetNewsContextRun(ctx, agentRun.TriggerObjectID)
+	if err != nil {
+		return err
+	}
+	items, err := s.listAllNewsContextRunItems(ctx, NewsContextRunItemListFilter{
+		RunID: logicalRun.ID, AgentRunID: agentRun.ID, Status: NewsContextRunItemRunning,
+	})
+	if err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		return fmt.Errorf("%w: no running batch items for this task", ErrInvalidNewsContextResult)
+	}
+	normalizeNewsContextThreadReviewOutcomes(items, &report)
+	if err := validateNewsContextReport(logicalRun, items, report); err != nil {
+		return err
+	}
+	return s.validateNewsContextResearchAudit(ctx, items, report)
 }
 
 func (s *Service) ProcessNewsContextSubmittedResult(ctx context.Context, logicalRunID, agentRunID string, submitted AgentTaskSubmittedResult) (NewsContextBatchApplyResult, error) {

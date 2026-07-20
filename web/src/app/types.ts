@@ -1815,6 +1815,14 @@ export interface StockV2NewsContextBackfillStageProgress {
   currentWindowStart?: string;
   currentWindowEnd?: string;
   currentRunPhase?: string;
+  currentWindowProgress?: number;
+  overallProgress?: number;
+  elapsedSeconds?: number;
+  estimatedRemainingSeconds?: number;
+  modelDurationSeconds?: number;
+  nonModelDurationSeconds?: number;
+  agentAttemptCount?: number;
+  agentRetryCount?: number;
 }
 
 export interface StockV2NewsContextBackfillTask {

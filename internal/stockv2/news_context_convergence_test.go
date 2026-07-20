@@ -19,9 +19,11 @@ func TestDailyNewsContextConvergenceSelectsLatestAndReplacesOnlyThemeItems(t *te
 	older := createConvergenceTestVersion(t, svc, run.ID, "theme-a", "version-a-1", 1, now.Add(-time.Hour))
 	latest := createConvergenceTestVersion(t, svc, run.ID, "theme-a", "version-a-2", 2, now)
 	other := createConvergenceTestVersion(t, svc, run.ID, "theme-b", "version-b-1", 1, now)
+	carried := createConvergenceTestVersion(t, svc, "child-run", "theme-c", "version-c-1", 1, now)
 	if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{
 		{RunID: run.ID, ObjectType: NewsContextRunItemNewsEvent, ObjectID: "news-1", Status: NewsContextRunItemCompleted},
 		{RunID: run.ID, ObjectType: NewsContextRunItemThread, ObjectID: older.ID, ThreadID: older.ThreadID, VersionID: older.ID, Status: NewsContextRunItemCompleted},
+		{RunID: run.ID, ObjectType: NewsContextRunItemThread, ObjectID: carried.ID, ThreadID: carried.ThreadID, VersionID: carried.ID, Status: NewsContextRunItemCompleted, Disposition: newsContextRunItemDispositionCarried},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +32,7 @@ func TestDailyNewsContextConvergenceSelectsLatestAndReplacesOnlyThemeItems(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(versions) != 2 || versions[0].ID != latest.ID || versions[1].ID != other.ID {
+	if len(versions) != 3 || versions[0].ID != latest.ID || versions[1].ID != other.ID || versions[2].ID != carried.ID {
 		t.Fatalf("latest versions=%+v", versions)
 	}
 	transitioned, err := svc.store.BeginDailyNewsContextConvergence(ctx, run.ID, versions)
@@ -42,7 +44,7 @@ func TestDailyNewsContextConvergenceSelectsLatestAndReplacesOnlyThemeItems(t *te
 		t.Fatalf("run=%+v err=%v", stored, err)
 	}
 	items, err := svc.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{RunID: run.ID, Limit: 10})
-	if err != nil || len(items) != 3 {
+	if err != nil || len(items) != 4 {
 		t.Fatalf("items=%+v err=%v", items, err)
 	}
 	newsKept := false
@@ -57,7 +59,8 @@ func TestDailyNewsContextConvergenceSelectsLatestAndReplacesOnlyThemeItems(t *te
 			}
 		}
 	}
-	if !newsKept || themeVersions["theme-a"] != latest.ID || themeVersions["theme-b"] != other.ID {
+	if !newsKept || themeVersions["theme-a"] != latest.ID || themeVersions["theme-b"] != other.ID ||
+		themeVersions["theme-c"] != carried.ID {
 		t.Fatalf("newsKept=%v themes=%v", newsKept, themeVersions)
 	}
 	transitioned, err = svc.store.BeginDailyNewsContextConvergence(ctx, run.ID, versions)
@@ -148,6 +151,25 @@ func TestNewsContextConvergencePromptAndCompactThemeGroup(t *testing.T) {
 	longValues := make([]string, 20)
 	for i := range longValues {
 		longValues[i] = fmt.Sprintf("%02d-%s", i, strings.Repeat("很长的主题证据", 300))
+	}
+	snapshot := NewsThread{
+		ID: "compact-theme", ThemeID: "compact-theme", Title: "主题",
+		CoreThesis: strings.Repeat("核心判断", 100), LatestChange: strings.Repeat("阶段变化", 100),
+		Stage: NewsThreadStageSpreading, Facts: longValues, Inferences: longValues,
+		CounterEvidence: longValues, OpenQuestions: longValues, Industries: longValues,
+		Symbols: longValues, Funds: longValues, Leaders: longValues, Followers: longValues,
+		Laggards: longValues, NextCandidates: longValues, Catalysts: longValues,
+		Invalidations: longValues, Relations: []NewsThreadRelation{{
+			ThreadID: "related-theme", Type: "relay", Reason: strings.Repeat("关系依据", 100),
+		}},
+	}
+	regularRaw, _ := json.Marshal(compactNewsThreadForPrompt(snapshot))
+	convergenceSnapshot := compactNewsThreadForConvergencePrompt(snapshot)
+	convergenceRaw, _ := json.Marshal(convergenceSnapshot)
+	if len(convergenceRaw) >= len(regularRaw) || convergenceSnapshot.ID != snapshot.ID ||
+		convergenceSnapshot.Stage != snapshot.Stage || len(convergenceSnapshot.Relations) != 1 {
+		t.Fatalf("convergence snapshot did not become leaner without losing identity: regular=%d convergence=%d snapshot=%+v",
+			len(regularRaw), len(convergenceRaw), convergenceSnapshot)
 	}
 	items := make([]NewsContextRunItem, 0, 30)
 	for i := 0; i < 30; i++ {
@@ -426,7 +448,7 @@ func TestHistoricalThreadManifestKeepsSameThemeVersions(t *testing.T) {
 	run := createDailyConvergenceTestRun(t, svc, now)
 	first := createConvergenceTestVersion(t, svc, "child-run", "same-theme", "child-version-1", 1, now.Add(-time.Hour))
 	second := createConvergenceTestVersion(t, svc, "child-run", "same-theme", "child-version-2", 2, now)
-	if err := svc.store.ReplaceNewsContextHistoricalThreadItems(ctx, run.ID, []NewsThreadVersion{first, second}); err != nil {
+	if err := svc.store.ReplaceNewsContextHistoricalThreadItems(ctx, run.ID, []NewsThreadVersion{first, second}, nil); err != nil {
 		t.Fatal(err)
 	}
 	items, err := svc.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{RunID: run.ID, ObjectType: NewsContextRunItemThread, Limit: 10})

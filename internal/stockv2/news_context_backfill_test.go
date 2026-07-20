@@ -1356,3 +1356,55 @@ func TestFinalCurrentDailyUsesDirectActiveThemesForNonAlignedWindow(t *testing.T
 		t.Fatalf("non-aligned final daily did not seed current active theme: %+v", items)
 	}
 }
+
+func TestHistoricalDailyFirstPassCarriesThemesWithoutChildWindowChanges(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	start := time.Date(2026, 7, 10, 0, 0, 0, 0, time.Local)
+	end := start.Add(24 * time.Hour)
+	backfill, err := svc.store.CreateNewsContextBackfillWithManifest(ctx, NewsContextBackfill{
+		Status: NewsContextBackfillStatusRunning, Phase: NewsContextWindowDaily,
+		RangeStartAt: start, CutoffAt: end,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowDaily,
+		start.Add(-24*time.Hour), start, NewsContextTriggerBackfill, NewsContextRunStatusCompleted)
+	stable := createConvergenceTestVersion(t, svc, prior.ID, "stable-theme", "stable-before-day", 1, start)
+	child := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowFourHour,
+		start, start.Add(4*time.Hour), NewsContextTriggerBackfill, NewsContextRunStatusCompleted)
+	changed := createConvergenceTestVersion(t, svc, child.ID, "changed-theme", "changed-during-day", 1, child.WindowEnd)
+	if err := svc.store.LinkNewsContextBackfillRun(ctx, backfill.ID, child.ID); err != nil {
+		t.Fatal(err)
+	}
+	daily := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowDaily,
+		start, end, NewsContextTriggerBackfill, NewsContextRunStatusPending)
+	daily.Phase = "collecting"
+	if _, err := svc.store.UpdateNewsContextRun(ctx, daily); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.prepareNewsContextBackfillRun(ctx, backfill, &daily); err != nil {
+		t.Fatal(err)
+	}
+	items, err := svc.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{
+		RunID: daily.ID, ObjectType: NewsContextRunItemThread, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := make(map[string]NewsContextRunItem, len(items))
+	for _, item := range items {
+		states[item.ThreadID] = item
+	}
+	if len(items) != 2 ||
+		states[changed.ThreadID].Status != NewsContextRunItemPending ||
+		states[stable.ThreadID].Status != NewsContextRunItemCompleted ||
+		states[stable.ThreadID].Disposition != newsContextRunItemDispositionCarried {
+		t.Fatalf("daily first-pass states=%+v", states)
+	}
+	if daily.InputCount != 2 || daily.ProcessedCount != 1 || daily.PendingCount != 1 {
+		t.Fatalf("daily counters=%+v", daily)
+	}
+}

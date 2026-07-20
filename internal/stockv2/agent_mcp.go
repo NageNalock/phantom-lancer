@@ -207,7 +207,11 @@ func (p *agentTaskPool) mcpSubmitResult(args json.RawMessage) (any, *mcpError) {
 		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "invalid result.outputType"}
 	}
 	if params.TaskType == AgentTaskTypeNewsEventReview {
-		if err := validateNewsContextSubmittedResult(params.Result.Result); err != nil {
+		report, err := decodeNewsContextSubmittedResult(params.Result.Result)
+		if err == nil && p.service != nil && p.service.store != nil {
+			err = p.service.validateNewsContextTaskSubmission(contextFromMCP(), params.TaskID, report)
+		}
+		if err != nil {
 			message := err.Error()
 			if !errors.Is(err, ErrInvalidNewsContextResult) {
 				message = "invalid news context result: " + message
@@ -248,44 +252,49 @@ func (p *agentTaskPool) mcpSubmitResult(args json.RawMessage) (any, *mcpError) {
 }
 
 func validateNewsContextSubmittedResult(value map[string]any) error {
+	_, err := decodeNewsContextSubmittedResult(value)
+	return err
+}
+
+func decodeNewsContextSubmittedResult(value map[string]any) (NewsContextReport, error) {
+	var report NewsContextReport
 	raw, err := json.Marshal(value)
 	if err != nil {
-		return err
+		return report, err
 	}
-	var report NewsContextReport
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&report); err != nil {
-		return err
+		return report, err
 	}
 	if report.SchemaVersion != NewsContextResultSchemaVersion {
-		return fmt.Errorf("schema_version must be %q", NewsContextResultSchemaVersion)
+		return report, fmt.Errorf("schema_version must be %q", NewsContextResultSchemaVersion)
 	}
 	if strings.TrimSpace(report.RunID) == "" || strings.TrimSpace(report.WindowType) == "" {
-		return errors.New("run_id and window_type are required")
+		return report, errors.New("run_id and window_type are required")
 	}
 	if report.ProcessedNewsIDs == nil || report.ReviewedThreadIDs == nil || report.UnchangedThreadIDs == nil ||
 		report.NewsDecisions == nil || report.ThreadChanges == nil || report.SearchAudit == nil {
-		return errors.New("all result arrays must be present; use [] when empty")
+		return report, errors.New("all result arrays must be present; use [] when empty")
 	}
 	for index, decision := range report.NewsDecisions {
 		if strings.TrimSpace(decision.NewsEventID) == "" || strings.TrimSpace(decision.Disposition) == "" {
-			return fmt.Errorf("news_decisions[%d] requires news_event_id and disposition", index)
+			return report, fmt.Errorf("news_decisions[%d] requires news_event_id and disposition", index)
 		}
 	}
 	for index, change := range report.ThreadChanges {
 		if strings.TrimSpace(change.Action) == "" || strings.TrimSpace(change.Title) == "" ||
 			strings.TrimSpace(change.CoreThesis) == "" || strings.TrimSpace(change.Stage) == "" {
-			return fmt.Errorf("thread_changes[%d] requires action, title, core_thesis, and stage", index)
+			return report, fmt.Errorf("thread_changes[%d] requires action, title, core_thesis, and stage", index)
 		}
 	}
 	if err := validateNewsContextSearchAudit(report.SearchAudit); err != nil {
-		return err
+		return report, err
 	}
 	if err := validateNewsContextDecisionEvidenceConsistency(report.ProcessedNewsIDs, report.NewsDecisions, report.ThreadChanges); err != nil {
-		return err
+		return report, err
 	}
-	return nil
+	return report, nil
 }
 
 func mcpSuccessResponse(id any, result any) json.RawMessage {

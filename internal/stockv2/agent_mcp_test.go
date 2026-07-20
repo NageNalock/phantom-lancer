@@ -1,6 +1,7 @@
 package stockv2
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -324,6 +325,76 @@ func TestMCP_ServiceSubmitNewsContextResultRejectsMismatchedEvidenceThreadWithou
 	entry.mu.Unlock()
 
 	resp = submitNewsContextEvidenceResultForTest(p, taskID, "thread-evidence", "thread-evidence")
+	if strings.Contains(string(resp), `"error"`) {
+		t.Fatalf("corrected response=%s, want accepted result", resp)
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.status != agentTaskStatusSubmitted || entry.submittedResult == nil {
+		t.Fatalf("corrected result was not submitted: %+v", entry)
+	}
+}
+
+func TestMCP_ServiceSubmitNewsContextResultRejectsIncompleteBatchWithoutConsumingSlot(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	logicalRun := createDailyConvergenceTestRun(t, svc, time.Now())
+	if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
+		RunID: logicalRun.ID, ObjectType: NewsContextRunItemThread,
+		ObjectID: "theme-coverage", ThreadID: "theme-coverage",
+		Status: NewsContextRunItemPending,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	agentRun, _, err := svc.store.CreateAgentRunWithLedger(ctx, AgentRun{
+		TaskType: AgentTaskTypeNewsEventReview, TriggerObjectType: "news_context_run",
+		TriggerObjectID: logicalRun.ID, Status: AgentRunStatusRunning, StartedAt: time.Now(),
+	}, AgentDecisionLedger{
+		TaskType: AgentTaskTypeNewsEventReview, TriggerObjectType: "news_context_run",
+		TriggerObjectID: logicalRun.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.store.MarkNewsContextRunItemsRunning(ctx, logicalRun.ID, agentRun.ID, []string{"theme-coverage"}); err != nil {
+		t.Fatal(err)
+	}
+	taskID, entry := svc.agentTaskPool.createTask(AgentTaskTypeNewsEventReview, agentRun.ID, "", time.Minute)
+	submit := func(unchanged []string) json.RawMessage {
+		return svc.AgentTaskPool().HandleMCPRequest(mustJSON(map[string]any{
+			"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+			"params": map[string]any{
+				"name": codexSubmitResultTool,
+				"arguments": map[string]any{
+					"taskID": taskID, "taskType": AgentTaskTypeNewsEventReview,
+					"result": map[string]any{
+						"outputType": NewsContextOutputType,
+						"result": map[string]any{
+							"schema_version": NewsContextResultSchemaVersion,
+							"run_id":         logicalRun.ID, "window_type": logicalRun.WindowType,
+							"processed_news_ids": []string{}, "reviewed_thread_ids": []string{},
+							"unchanged_thread_ids": unchanged, "news_decisions": []any{},
+							"thread_changes": []any{}, "search_audit": []any{},
+						},
+					},
+				},
+			},
+		}))
+	}
+
+	resp := submit([]string{})
+	if !strings.Contains(string(resp), "thread theme-coverage was not reviewed") {
+		t.Fatalf("response=%s, want exact missing-theme error", resp)
+	}
+	entry.mu.Lock()
+	if entry.status != agentTaskStatusWaiting || entry.submittedResult != nil {
+		entry.mu.Unlock()
+		t.Fatalf("rejected result consumed task slot: %+v", entry)
+	}
+	entry.mu.Unlock()
+
+	resp = submit([]string{"theme-coverage"})
 	if strings.Contains(string(resp), `"error"`) {
 		t.Fatalf("corrected response=%s, want accepted result", resp)
 	}

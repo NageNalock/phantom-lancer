@@ -257,7 +257,7 @@ func TestBuildNewsContextAggregationPromptUsesThreadOnlyExampleWithoutInventedNe
 		RunID:      "context-run-thread-only",
 		WindowType: NewsContextWindowFourHour,
 		WindowEnd:  time.Date(2026, 7, 18, 20, 0, 0, 0, time.UTC),
-		InputThreads: []NewsThread{
+		InputThreads: []NewsContextPromptThread{
 			{ID: "thread-stable-1", ThemeID: "thread-stable-1"},
 			{ID: "thread-stable-1", ThemeID: "thread-stable-1"},
 			{ID: "thread-stable-2", ThemeID: "thread-stable-2"},

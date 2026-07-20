@@ -369,16 +369,38 @@ function BackfillStageRow({ stage }: { stage: StockV2NewsContextBackfillStagePro
   const processedItems = Math.max(0, stage.processedItemCount || 0);
   const totalItems = Math.max(0, stage.totalItemCount || 0);
   const pendingItems = Math.max(0, stage.pendingItemCount || 0);
+  const overallProgress = Math.min(1, Math.max(0, stage.overallProgress || 0));
+  const progressLabel = totalWindows > 0 ? `${Math.round(overallProgress * 100)}%` : "";
   const summary = totalWindows > 0
-    ? `${completedWindows} / ${totalWindows} 个窗口`
+    ? `${completedWindows} / ${totalWindows} 个窗口${progressLabel ? `，${progressLabel}` : ""}`
     : stage.phase === "finalizing" && totalItems > 0
       ? `${processedItems} / ${totalItems} 个每日输出`
       : backfillStageDescription(stage.phase, stage.status);
+  const itemProgress = stage.phase === "daily" && stage.currentRunPhase === "aggregating"
+    ? `首轮 ${processedItems} / ${totalItems}，日级收敛等待`
+    : stage.phase === "daily" && stage.currentRunPhase === "converging"
+      ? `首轮已完成，日级收敛 ${processedItems} / ${totalItems}`
+      : totalItems > 0
+        ? `${processedItems} / ${totalItems} 个输入，待处理 ${pendingItems}`
+        : "";
+  const timing = stage.elapsedSeconds
+    ? `已运行 ${formatBackfillDuration(stage.elapsedSeconds)}${stage.estimatedRemainingSeconds ? `，预计剩余 ${formatBackfillDuration(stage.estimatedRemainingSeconds)}` : ""}`
+    : "";
+  const execution = stage.agentAttemptCount
+    ? [
+        `模型分片 ${stage.agentAttemptCount}`,
+        `模型累计 ${formatBackfillDuration(stage.modelDurationSeconds || 0)}`,
+        stage.nonModelDurationSeconds ? `索引与调度约 ${formatBackfillDuration(stage.nonModelDurationSeconds)}` : "",
+        stage.agentRetryCount ? `失败分片 ${stage.agentRetryCount}` : "",
+      ].filter(Boolean).join("，")
+    : "";
   const detail = stage.currentWindowStart || stage.currentWindowEnd
     ? [
         `${formatNewsContextTime(stage.currentWindowStart)} 至 ${formatNewsContextTime(stage.currentWindowEnd)}`,
-        totalItems > 0 ? `${processedItems} / ${totalItems} 个输入，待处理 ${pendingItems}` : "",
+        itemProgress,
         backfillRunPhaseLabel(stage.currentRunPhase),
+        timing,
+        execution,
       ].filter(Boolean).join("，")
     : totalItems > 0 && totalWindows > 0
       ? `已处理 ${processedItems} / ${totalItems} 个输入`
@@ -398,6 +420,16 @@ function BackfillStageRow({ stage }: { stage: StockV2NewsContextBackfillStagePro
       <Pill tone={backfillStageStatusTone(stage.status)}>{backfillStageStatusLabel(stage.status)}</Pill>
     </div>
   );
+}
+
+function formatBackfillDuration(seconds: number): string {
+  const safe = Math.max(0, Math.round(seconds));
+  if (safe < 60) return `${safe} 秒`;
+  const minutes = Math.floor(safe / 60);
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours} 小时 ${remainder} 分钟` : `${hours} 小时`;
 }
 
 function backfillStageDescription(phase: string, status: string): string {

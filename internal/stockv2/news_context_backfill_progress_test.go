@@ -1,6 +1,7 @@
 package stockv2
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -26,6 +27,7 @@ func TestBuildNewsContextBackfillStageProgressShowsEveryStage(t *testing.T) {
 		NewsContextWindowDaily: {
 			CompletedWindowCount: 1,
 			ProcessedItemCount:   180, TotalItemCount: 220, PendingItemCount: 40,
+			CompletedDurationSeconds: 3600,
 		},
 	}
 	current := NewsContextRun{
@@ -33,7 +35,7 @@ func TestBuildNewsContextBackfillStageProgressShowsEveryStage(t *testing.T) {
 		TriggerType: NewsContextTriggerBackfill, Status: NewsContextRunStatusRunning,
 		Phase: newsContextRunPhaseConverging, WindowStart: start.Add(24 * time.Hour),
 		WindowEnd: start.Add(48 * time.Hour), InputCount: 220,
-		ProcessedCount: 180, PendingCount: 40,
+		ProcessedCount: 180, PendingCount: 40, StartedAt: time.Now().Add(-time.Hour),
 	}
 
 	progress := buildNewsContextBackfillStageProgress(item, windows, &current)
@@ -56,7 +58,9 @@ func TestBuildNewsContextBackfillStageProgressShowsEveryStage(t *testing.T) {
 	daily := assertStage(2, NewsContextWindowDaily, NewsContextRunStatusRunning)
 	if daily.CompletedWindowCount != 1 || daily.TotalWindowCount != 2 ||
 		daily.ProcessedItemCount != 180 || daily.TotalItemCount != 220 || daily.PendingItemCount != 40 ||
-		daily.CurrentRunPhase != newsContextRunPhaseConverging {
+		daily.CurrentRunPhase != newsContextRunPhaseConverging ||
+		daily.CurrentWindowProgress <= 0.9 || daily.OverallProgress <= 0.95 ||
+		daily.ElapsedSeconds < 3500 || daily.EstimatedRemainingSeconds <= 0 {
 		t.Fatalf("daily progress=%+v", daily)
 	}
 	for index, phase := range []string{"late_scan", "final_daily", newsContextBackfillPhaseIndexing, "final_review", "finalizing"} {
@@ -99,5 +103,31 @@ func TestBuildNewsContextBackfillStageProgressSeparatesFinalDailyAndReview(t *te
 	}
 	if progress[7].TotalItemCount != 12 || progress[7].PendingItemCount != 12 {
 		t.Fatalf("finalizing progress=%+v", progress[7])
+	}
+}
+
+func TestNewsContextBackfillAgentProgressAggregatesModelAttempts(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	started := time.Now().Add(-2 * time.Minute)
+	finished := started.Add(time.Minute)
+	if _, _, err := svc.store.CreateAgentRunWithLedger(ctx, AgentRun{
+		TaskType: AgentTaskTypeNewsEventReview, TriggerObjectType: "news_context_run",
+		TriggerObjectID: "context-progress", Status: AgentRunStatusFailed,
+		StartedAt: started, FinishedAt: finished,
+	}, AgentDecisionLedger{
+		TaskType: AgentTaskTypeNewsEventReview, TriggerObjectType: "news_context_run",
+		TriggerObjectID: "context-progress",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	progress, err := svc.store.NewsContextBackfillAgentProgress(ctx, "context-progress")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.AttemptCount != 1 || progress.FailedCount != 1 ||
+		progress.DurationSeconds < 59 || progress.DurationSeconds > 61 {
+		t.Fatalf("agent progress=%+v", progress)
 	}
 }

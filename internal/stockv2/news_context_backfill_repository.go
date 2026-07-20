@@ -580,21 +580,31 @@ func (s *Store) ListNewsContextBackfillRuns(ctx context.Context, backfillID, win
 }
 
 type newsContextBackfillWindowProgress struct {
-	CompletedWindowCount int
-	ProcessedItemCount   int
-	TotalItemCount       int
-	PendingItemCount     int
+	CompletedWindowCount     int
+	ProcessedItemCount       int
+	TotalItemCount           int
+	PendingItemCount         int
+	CompletedDurationSeconds int64
+}
+
+type newsContextBackfillAgentProgress struct {
+	AttemptCount    int
+	FailedCount     int
+	DurationSeconds int64
 }
 
 func (s *Store) NewsContextBackfillWindowProgress(ctx context.Context, backfillID string) (map[string]newsContextBackfillWindowProgress, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT r.window_type,
 		COALESCE(SUM(CASE WHEN r.status=? THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(r.processed_count),0),
-		COALESCE(SUM(r.input_count),0),COALESCE(SUM(r.pending_count),0)
+		COALESCE(SUM(r.input_count),0),COALESCE(SUM(r.pending_count),0),
+		COALESCE(SUM(CASE WHEN r.status=? AND r.started_at IS NOT NULL
+			THEN MAX(0,CAST(strftime('%s',COALESCE(r.finished_at,r.updated_at)) AS INTEGER)-
+				CAST(strftime('%s',r.started_at) AS INTEGER)) ELSE 0 END),0)
 		FROM stockv2_news_context_runs r
 		JOIN stockv2_news_context_backfill_runs b ON b.run_id=r.id
 		WHERE b.backfill_id=? AND r.trigger_type=?
-		GROUP BY r.window_type`, NewsContextRunStatusCompleted,
+		GROUP BY r.window_type`, NewsContextRunStatusCompleted, NewsContextRunStatusCompleted,
 		strings.TrimSpace(backfillID), NewsContextTriggerBackfill)
 	if err != nil {
 		return nil, wrapError(err, "get news context backfill window progress")
@@ -605,12 +615,25 @@ func (s *Store) NewsContextBackfillWindowProgress(ctx context.Context, backfillI
 		var windowType string
 		var item newsContextBackfillWindowProgress
 		if err := rows.Scan(&windowType, &item.CompletedWindowCount, &item.ProcessedItemCount,
-			&item.TotalItemCount, &item.PendingItemCount); err != nil {
+			&item.TotalItemCount, &item.PendingItemCount, &item.CompletedDurationSeconds); err != nil {
 			return nil, wrapError(err, "scan news context backfill window progress")
 		}
 		progress[windowType] = item
 	}
 	return progress, wrapError(rows.Err(), "iterate news context backfill window progress")
+}
+
+func (s *Store) NewsContextBackfillAgentProgress(ctx context.Context, runID string) (newsContextBackfillAgentProgress, error) {
+	var item newsContextBackfillAgentProgress
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),
+		COALESCE(SUM(CASE WHEN status=? THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(MAX(0,CAST(strftime('%s',COALESCE(finished_at,CURRENT_TIMESTAMP)) AS INTEGER)-
+			CAST(strftime('%s',COALESCE(started_at,created_at)) AS INTEGER))),0)
+		FROM stockv2_agent_runs
+		WHERE task_type=? AND trigger_object_type='news_context_run' AND trigger_object_id=?`,
+		AgentRunStatusFailed, AgentTaskTypeNewsEventReview, strings.TrimSpace(runID)).
+		Scan(&item.AttemptCount, &item.FailedCount, &item.DurationSeconds)
+	return item, wrapError(err, "get news context backfill agent progress")
 }
 
 func (s *Store) ListNewsContextBackfillOutputVersionIDs(ctx context.Context, backfillID, windowType string, start, end time.Time) ([]string, error) {
@@ -832,7 +855,12 @@ func (s *Store) FindNewsContextBackfillReviewedVersion(ctx context.Context, back
 	return item, err == nil, wrapError(err, "find reviewed historical daily output")
 }
 
-func (s *Store) ReplaceNewsContextHistoricalThreadItems(ctx context.Context, runID string, versions []NewsThreadVersion) error {
+func (s *Store) ReplaceNewsContextHistoricalThreadItems(
+	ctx context.Context,
+	runID string,
+	versions []NewsThreadVersion,
+	pendingThreadIDs map[string]struct{},
+) error {
 	return s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_news_context_run_items
 			WHERE run_id=? AND object_type=?`, strings.TrimSpace(runID), NewsContextRunItemThread); err != nil {
@@ -840,10 +868,18 @@ func (s *Store) ReplaceNewsContextHistoricalThreadItems(ctx context.Context, run
 		}
 		now := time.Now()
 		for _, version := range versions {
+			status := NewsContextRunItemPending
+			disposition := ""
+			if pendingThreadIDs != nil {
+				if _, changed := pendingThreadIDs[version.ThreadID]; !changed {
+					status = NewsContextRunItemCompleted
+					disposition = newsContextRunItemDispositionCarried
+				}
+			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO stockv2_news_context_run_items
-				(id,run_id,object_type,object_id,status,thread_id,version_id,source_at,created_at,updated_at)
-				VALUES (?,?,?,?,?,?,?,?,?,?)`, generateID(), strings.TrimSpace(runID),
-				NewsContextRunItemThread, version.ID, NewsContextRunItemPending,
+				(id,run_id,object_type,object_id,status,disposition,thread_id,version_id,source_at,created_at,updated_at)
+				VALUES (?,?,?,?,?,?,?,?,?,?,?)`, generateID(), strings.TrimSpace(runID),
+				NewsContextRunItemThread, version.ID, status, nullableString(disposition),
 				version.ThreadID, version.ID, version.EffectiveAt, now, now); err != nil {
 				return wrapError(err, "seed historical news context thread snapshot")
 			}

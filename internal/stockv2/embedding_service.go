@@ -384,7 +384,7 @@ func (s *Service) SyncNewsContextEmbeddingObjects(ctx context.Context, threadIDs
 	}
 	defer s.endEmbeddingMaintenance()
 
-	model, cfg, err := s.ensureEmbeddingModelReady(ctx)
+	model, _, err := s.ensureEmbeddingModelReady(ctx)
 	if err != nil {
 		return err
 	}
@@ -408,16 +408,12 @@ func (s *Service) SyncNewsContextEmbeddingObjects(ctx context.Context, threadIDs
 		// and material-change versions remain covered by normal maintenance.
 		sources = append(sources, embeddingAssetSource{ObjectType: EmbeddingObjectNewsThreadVersion, ObjectID: id, Text: NewsThreadVersionEmbeddingText(version)})
 	}
-	for index, source := range sources {
+	// ponytail: critical-path indexing remains sequential and keeps the provider
+	// retry boundary, but the maintenance-only pacing setting must not delay a
+	// completed model fragment before its next durable batch can start.
+	for _, source := range sources {
 		if err := s.syncEmbeddingSource(ctx, model, source); err != nil {
 			return fmt.Errorf("sync news context embedding %s: %w", source.ObjectID, err)
-		}
-		if cfg.MaintainRateLimitMs > 0 && index < len(sources)-1 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Duration(cfg.MaintainRateLimitMs) * time.Millisecond):
-			}
 		}
 	}
 	return nil

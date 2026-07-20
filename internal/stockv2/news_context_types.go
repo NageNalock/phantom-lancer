@@ -430,17 +430,49 @@ type RequestUpdateNewsContextConfig struct {
 	AdditionalResearchPrompt *string `json:"additionalResearchPrompt,omitempty"`
 }
 
+type NewsContextPromptThread struct {
+	ID                  string               `json:"id"`
+	ThemeID             string               `json:"themeId,omitempty"`
+	Title               string               `json:"title"`
+	Summary             string               `json:"summary,omitempty"`
+	CoreThesis          string               `json:"coreThesis"`
+	Stage               string               `json:"stage"`
+	LatestChange        string               `json:"latestChange,omitempty"`
+	Confidence          float64              `json:"confidence"`
+	Status              string               `json:"status,omitempty"`
+	Industries          []string             `json:"industries,omitempty"`
+	Symbols             []string             `json:"symbols,omitempty"`
+	Funds               []string             `json:"funds,omitempty"`
+	Facts               []string             `json:"confirmedFacts,omitempty"`
+	Inferences          []string             `json:"inferences,omitempty"`
+	CounterEvidence     []string             `json:"counterEvidence,omitempty"`
+	OpenQuestions       []string             `json:"openQuestions,omitempty"`
+	Leaders             []string             `json:"leaders,omitempty"`
+	Followers           []string             `json:"followers,omitempty"`
+	Laggards            []string             `json:"laggards,omitempty"`
+	NextCandidates      []string             `json:"relayCandidates,omitempty"`
+	Catalysts           []string             `json:"catalysts,omitempty"`
+	Invalidations       []string             `json:"invalidationConditions,omitempty"`
+	Relations           []NewsThreadRelation `json:"relations,omitempty"`
+	CurrentVersion      int                  `json:"currentVersion,omitempty"`
+	CurrentVersionID    string               `json:"currentVersionId,omitempty"`
+	EffectiveAt         string               `json:"effectiveAt,omitempty"`
+	DataConfirmation    string               `json:"dataConfirmation,omitempty"`
+	ConfirmationSignals []string             `json:"confirmationSignals,omitempty"`
+	InvalidationSignals []string             `json:"invalidationSignals,omitempty"`
+}
+
 type NewsContextAggregationPack struct {
-	RunID                    string       `json:"runId"`
-	WindowType               string       `json:"windowType"`
-	WindowStart              time.Time    `json:"windowStart"`
-	WindowEnd                time.Time    `json:"windowEnd"`
-	DailyConvergenceReview   bool         `json:"dailyConvergenceReview,omitempty"`
-	InputNewsEvents          []NewsEvent  `json:"inputNewsEvents,omitempty"`
-	InputThreads             []NewsThread `json:"inputThreads,omitempty"`
-	RequiredResearch         bool         `json:"requiredResearch"`
-	ResearchReasons          []string     `json:"researchReasons,omitempty"`
-	AdditionalResearchPrompt string       `json:"additionalResearchPrompt,omitempty"`
+	RunID                    string                    `json:"runId"`
+	WindowType               string                    `json:"windowType"`
+	WindowStart              time.Time                 `json:"windowStart"`
+	WindowEnd                time.Time                 `json:"windowEnd"`
+	DailyConvergenceReview   bool                      `json:"dailyConvergenceReview,omitempty"`
+	InputNewsEvents          []NewsEvent               `json:"inputNewsEvents,omitempty"`
+	InputThreads             []NewsContextPromptThread `json:"inputThreads,omitempty"`
+	RequiredResearch         bool                      `json:"requiredResearch"`
+	ResearchReasons          []string                  `json:"researchReasons,omitempty"`
+	AdditionalResearchPrompt string                    `json:"additionalResearchPrompt,omitempty"`
 }
 
 type NewsContextNewsDecision struct {

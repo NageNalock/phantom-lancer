@@ -62,16 +62,24 @@ type NewsContextBackfill struct {
 }
 
 type NewsContextBackfillStageProgress struct {
-	Phase                string    `json:"phase"`
-	Status               string    `json:"status"`
-	CompletedWindowCount int       `json:"completedWindowCount,omitempty"`
-	TotalWindowCount     int       `json:"totalWindowCount,omitempty"`
-	ProcessedItemCount   int       `json:"processedItemCount,omitempty"`
-	TotalItemCount       int       `json:"totalItemCount,omitempty"`
-	PendingItemCount     int       `json:"pendingItemCount,omitempty"`
-	CurrentWindowStart   time.Time `json:"currentWindowStart,omitempty"`
-	CurrentWindowEnd     time.Time `json:"currentWindowEnd,omitempty"`
-	CurrentRunPhase      string    `json:"currentRunPhase,omitempty"`
+	Phase                     string    `json:"phase"`
+	Status                    string    `json:"status"`
+	CompletedWindowCount      int       `json:"completedWindowCount,omitempty"`
+	TotalWindowCount          int       `json:"totalWindowCount,omitempty"`
+	ProcessedItemCount        int       `json:"processedItemCount,omitempty"`
+	TotalItemCount            int       `json:"totalItemCount,omitempty"`
+	PendingItemCount          int       `json:"pendingItemCount,omitempty"`
+	CurrentWindowStart        time.Time `json:"currentWindowStart,omitempty"`
+	CurrentWindowEnd          time.Time `json:"currentWindowEnd,omitempty"`
+	CurrentRunPhase           string    `json:"currentRunPhase,omitempty"`
+	CurrentWindowProgress     float64   `json:"currentWindowProgress,omitempty"`
+	OverallProgress           float64   `json:"overallProgress,omitempty"`
+	ElapsedSeconds            int64     `json:"elapsedSeconds,omitempty"`
+	EstimatedRemainingSeconds int64     `json:"estimatedRemainingSeconds,omitempty"`
+	ModelDurationSeconds      int64     `json:"modelDurationSeconds,omitempty"`
+	NonModelDurationSeconds   int64     `json:"nonModelDurationSeconds,omitempty"`
+	AgentAttemptCount         int       `json:"agentAttemptCount,omitempty"`
+	AgentRetryCount           int       `json:"agentRetryCount,omitempty"`
 }
 
 type RequestStartNewsContextBackfill struct {

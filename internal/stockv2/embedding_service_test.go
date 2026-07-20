@@ -161,11 +161,12 @@ func TestSemanticSearchNewsThreadsReturnsOnlyActiveThreads(t *testing.T) {
 func TestSyncNewsContextEmbeddingObjectsIndexesExactFragment(t *testing.T) {
 	svc, cleanup := newEmbeddingTestService(t)
 	defer cleanup()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 	model := configureEmbeddingModel(t, svc, "embed-fragment")
-	zero := 0
-	if _, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{MaintainRateLimitMs: &zero}); err != nil {
-		t.Fatalf("disable test rate delay: %v", err)
+	rateLimit := 2 * int(time.Second/time.Millisecond)
+	if _, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{MaintainRateLimitMs: &rateLimit}); err != nil {
+		t.Fatalf("set maintenance rate delay: %v", err)
 	}
 	thread, err := svc.store.CreateNewsThread(ctx, NewsThread{
 		Title: "算力建设脉络", CoreThesis: "数据中心扩建带动算力产业链", Stage: NewsThreadStageEmerging,

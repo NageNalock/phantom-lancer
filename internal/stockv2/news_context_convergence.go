@@ -49,6 +49,39 @@ func (s *Service) yieldNewsContextBackfillAfterConvergenceStart(ctx context.Cont
 
 func (s *Service) latestNewsContextRunVersions(ctx context.Context, runID string) ([]NewsThreadVersion, error) {
 	latest := make(map[string]NewsThreadVersion)
+	takeLatest := func(version NewsThreadVersion) {
+		current, found := latest[version.ThreadID]
+		if !found || version.EffectiveAt.After(current.EffectiveAt) ||
+			(version.EffectiveAt.Equal(current.EffectiveAt) && version.VersionNo > current.VersionNo) ||
+			(version.EffectiveAt.Equal(current.EffectiveAt) && version.VersionNo == current.VersionNo && version.ID > current.ID) {
+			latest[version.ThreadID] = version
+		}
+	}
+	// Daily first-pass inputs whose themes had no child-window change are
+	// completed deterministically. Carry their exact historical snapshot into
+	// convergence without asking the model to reproduce it first.
+	for offset := 0; ; offset += newsContextSeedPageSize {
+		page, err := s.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{
+			RunID: runID, ObjectType: NewsContextRunItemThread,
+			Status: NewsContextRunItemCompleted, Limit: newsContextSeedPageSize, Offset: offset,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range page {
+			if item.Disposition != newsContextRunItemDispositionCarried {
+				continue
+			}
+			version, err := s.store.GetNewsThreadVersion(ctx, item.VersionID)
+			if err != nil {
+				return nil, err
+			}
+			takeLatest(version)
+		}
+		if len(page) < newsContextSeedPageSize {
+			break
+		}
+	}
 	for offset := 0; ; offset += newsContextSeedPageSize {
 		page, err := s.store.ListNewsThreadVersions(ctx, NewsThreadVersionListFilter{
 			RunID: runID, Limit: newsContextSeedPageSize, Offset: offset,
@@ -57,12 +90,7 @@ func (s *Service) latestNewsContextRunVersions(ctx context.Context, runID string
 			return nil, err
 		}
 		for _, version := range page {
-			current, found := latest[version.ThreadID]
-			if !found || version.EffectiveAt.After(current.EffectiveAt) ||
-				(version.EffectiveAt.Equal(current.EffectiveAt) && version.VersionNo > current.VersionNo) ||
-				(version.EffectiveAt.Equal(current.EffectiveAt) && version.VersionNo == current.VersionNo && version.ID > current.ID) {
-				latest[version.ThreadID] = version
-			}
+			takeLatest(version)
 		}
 		if len(page) < newsContextSeedPageSize {
 			break
@@ -147,7 +175,7 @@ func (s *Store) BeginDailyNewsContextConvergence(ctx context.Context, runID stri
 	return transitioned, err
 }
 
-func compactNewsThreadForPrompt(thread NewsThread) NewsThread {
+func compactNewsThreadForPrompt(thread NewsThread) NewsContextPromptThread {
 	// ponytail: fixed clipping is an internal prompt-safety boundary, not a
 	// business limit. The persisted slicer keeps every version and splits an
 	// oversized stable-theme history across calls; a single clipped snapshot
@@ -186,7 +214,58 @@ func compactNewsThreadForPrompt(thread NewsThread) NewsThread {
 		thread.Relations[i].Type = safelog.Text(thread.Relations[i].Type, 40)
 		thread.Relations[i].Reason = safelog.Text(thread.Relations[i].Reason, 120)
 	}
-	return thread
+	effectiveAt := ""
+	if !thread.LastChangedAt.IsZero() {
+		effectiveAt = thread.LastChangedAt.Format(time.RFC3339)
+	}
+	return NewsContextPromptThread{
+		ID: thread.ID, ThemeID: thread.ThemeID, Title: thread.Title, Summary: thread.Summary,
+		CoreThesis: thread.CoreThesis, Stage: thread.Stage,
+		LatestChange: thread.LatestChange, Confidence: thread.Confidence,
+		Status: thread.Status, Industries: thread.Industries, Symbols: thread.Symbols,
+		Funds: thread.Funds, Facts: thread.Facts, Inferences: thread.Inferences,
+		CounterEvidence: thread.CounterEvidence, OpenQuestions: thread.OpenQuestions,
+		Leaders: thread.Leaders, Followers: thread.Followers, Laggards: thread.Laggards,
+		NextCandidates: thread.NextCandidates, Catalysts: thread.Catalysts,
+		Invalidations: thread.Invalidations, Relations: thread.Relations,
+		CurrentVersion: thread.CurrentVersion, CurrentVersionID: thread.CurrentVersionID,
+		EffectiveAt:         effectiveAt,
+		DataConfirmation:    thread.DataConfirmation,
+		ConfirmationSignals: thread.ConfirmationSignals,
+		InvalidationSignals: thread.InvalidationSignals,
+	}
+}
+
+func compactNewsThreadForConvergencePrompt(thread NewsThread) NewsContextPromptThread {
+	snapshot := compactNewsThreadForPrompt(thread)
+	// ponytail: convergence needs one decision-grade state per theme, not the
+	// full operational record already persisted by the first pass.
+	snapshot.CoreThesis = safelog.Text(snapshot.CoreThesis, 420)
+	snapshot.Summary = safelog.Text(snapshot.Summary, 240)
+	if snapshot.Summary == snapshot.CoreThesis {
+		snapshot.Summary = ""
+	}
+	snapshot.LatestChange = safelog.Text(snapshot.LatestChange, 280)
+	snapshot.DataConfirmation = safelog.Text(snapshot.DataConfirmation, 100)
+	snapshot.Industries = compactNewsContextPromptStrings(snapshot.Industries, 4, 40)
+	snapshot.Symbols = compactNewsContextPromptStrings(snapshot.Symbols, 4, 40)
+	snapshot.Funds = compactNewsContextPromptStrings(snapshot.Funds, 3, 40)
+	snapshot.Facts = compactNewsContextPromptStrings(snapshot.Facts, 2, 120)
+	snapshot.Inferences = compactNewsContextPromptStrings(snapshot.Inferences, 1, 120)
+	snapshot.CounterEvidence = compactNewsContextPromptStrings(snapshot.CounterEvidence, 2, 120)
+	snapshot.OpenQuestions = compactNewsContextPromptStrings(snapshot.OpenQuestions, 1, 120)
+	snapshot.Leaders = compactNewsContextPromptStrings(snapshot.Leaders, 3, 40)
+	snapshot.Followers = compactNewsContextPromptStrings(snapshot.Followers, 3, 40)
+	snapshot.Laggards = compactNewsContextPromptStrings(snapshot.Laggards, 3, 40)
+	snapshot.NextCandidates = compactNewsContextPromptStrings(snapshot.NextCandidates, 3, 40)
+	snapshot.Catalysts = compactNewsContextPromptStrings(snapshot.Catalysts, 2, 120)
+	snapshot.Invalidations = compactNewsContextPromptStrings(snapshot.Invalidations, 2, 120)
+	snapshot.ConfirmationSignals = compactNewsContextPromptStrings(snapshot.ConfirmationSignals, 2, 100)
+	snapshot.InvalidationSignals = compactNewsContextPromptStrings(snapshot.InvalidationSignals, 2, 100)
+	for index := range snapshot.Relations {
+		snapshot.Relations[index].Reason = safelog.Text(snapshot.Relations[index].Reason, 80)
+	}
+	return snapshot
 }
 
 func compactNewsContextPromptStrings(values []string, limit, runeLimit int) []string {
