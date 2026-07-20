@@ -9,11 +9,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"phantom-lancer/internal/auth"
+	"phantom-lancer/internal/codexclient"
 	"phantom-lancer/internal/safelog"
 	"phantom-lancer/internal/storage"
 )
@@ -26,13 +29,17 @@ const (
 )
 
 type Service struct {
-	Store     *storage.Store
-	Log       *slog.Logger
-	refreshMu sync.Mutex
-	refreshes map[string]*refreshCall
-	bgMu      sync.Mutex // guards bgCancel
-	bgCancel  context.CancelFunc
-	bgWg      sync.WaitGroup
+	Store            *storage.Store
+	Log              *slog.Logger
+	refreshMu        sync.Mutex
+	refreshes        map[string]*refreshCall
+	bgMu             sync.Mutex // guards bgCancel
+	bgCancel         context.CancelFunc
+	bgWg             sync.WaitGroup
+	localCodexBinary string
+	localCodexHome   string
+	localCodexDir    string
+	localCodexGate   chan struct{}
 }
 
 type refreshCall struct {
@@ -45,7 +52,321 @@ func NewService(store *storage.Store, logger *slog.Logger) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{Store: store, Log: logger, refreshes: map[string]*refreshCall{}}
+	return &Service{Store: store, Log: logger, refreshes: map[string]*refreshCall{}, localCodexGate: make(chan struct{}, 1)}
+}
+
+func (s *Service) WithLocalCodex(dataDir, binary, codexHome string) *Service {
+	s.localCodexBinary = strings.TrimSpace(binary)
+	if s.localCodexBinary == "" {
+		s.localCodexBinary = "codex"
+	}
+	s.localCodexHome = strings.TrimSpace(codexHome)
+	// ponytail: a fixed empty work directory keeps API turns away from user
+	// workspaces without adding another owner setting. The only future upgrade
+	// path is an explicit per-key workspace policy.
+	s.localCodexDir = filepath.Join(strings.TrimSpace(dataDir), "codex-gateway", "work")
+	return s
+}
+
+type LocalChatResult struct {
+	Content   string
+	ToolCalls json.RawMessage
+	Usage     Usage
+}
+
+func (s *Service) RunLocalChat(ctx context.Context, req ChatCompletionRequest, defaultInstructions string) (LocalChatResult, error) {
+	if s.localCodexBinary == "" || s.localCodexDir == "" {
+		return LocalChatResult{}, RouteError{Status: http.StatusServiceUnavailable, Code: "local_codex_unavailable", Message: "本地 Codex Gateway 未配置"}
+	}
+	select {
+	case s.localCodexGate <- struct{}{}:
+		defer func() { <-s.localCodexGate }()
+	case <-ctx.Done():
+		return LocalChatResult{}, ctx.Err()
+	}
+	if err := os.MkdirAll(s.localCodexDir, 0o700); err != nil {
+		return LocalChatResult{}, fmt.Errorf("prepare local Codex workdir: %w", err)
+	}
+	client, err := codexclient.StartAppServer(ctx, s.localCodexBinary, s.localCodexHome)
+	if err != nil {
+		return LocalChatResult{}, fmt.Errorf("start local Codex app-server: %w", err)
+	}
+	defer client.Close()
+	if err := client.Initialize(ctx); err != nil {
+		return LocalChatResult{}, fmt.Errorf("initialize local Codex app-server: %w", err)
+	}
+
+	threadRaw, err := client.Call(ctx, "thread/start", map[string]any{
+		"cwd":              s.localCodexDir,
+		"approvalPolicy":   "never",
+		"sandbox":          "read-only",
+		"model":            strings.TrimSpace(req.Model),
+		"ephemeral":        true,
+		"baseInstructions": localCodexBaseInstructions(defaultInstructions),
+	})
+	if err != nil {
+		return LocalChatResult{}, fmt.Errorf("local Codex thread/start: %w", err)
+	}
+	threadID := localCodexObjectID(threadRaw, "thread")
+	if threadID == "" {
+		return LocalChatResult{}, errors.New("local Codex thread/start returned no thread id")
+	}
+	params := map[string]any{
+		"threadId":       threadID,
+		"input":          []map[string]any{{"type": "text", "text": localCodexChatPrompt(req)}},
+		"approvalPolicy": "never",
+		"sandboxPolicy":  map[string]any{"type": "readOnly"},
+		"cwd":            s.localCodexDir,
+		"model":          strings.TrimSpace(req.Model),
+		"outputSchema":   localCodexOutputSchema(req),
+	}
+	if effort := strings.TrimSpace(req.ReasoningEffort); effort != "" {
+		params["effort"] = effort
+	}
+	if _, err := client.Call(ctx, "turn/start", params); err != nil {
+		return LocalChatResult{}, fmt.Errorf("local Codex turn/start: %w", err)
+	}
+	return collectLocalCodexChat(ctx, client)
+}
+
+func localCodexBaseInstructions(fallback string) string {
+	fallback = strings.TrimSpace(fallback)
+	if fallback == "" {
+		fallback = "You are a helpful assistant."
+	}
+	return fallback + "\nYou are serving an OpenAI-compatible API. Do not inspect files, execute commands, modify data, or request approvals. Return only the JSON object required by the output schema."
+}
+
+func localCodexChatPrompt(req ChatCompletionRequest) string {
+	payload := map[string]any{"messages": req.Messages}
+	if len(req.Tools) > 0 && string(req.Tools) != "null" {
+		var tools any
+		if json.Unmarshal(req.Tools, &tools) == nil {
+			payload["tools"] = tools
+		}
+	}
+	if len(req.ToolChoice) > 0 && string(req.ToolChoice) != "null" {
+		var choice any
+		if json.Unmarshal(req.ToolChoice, &choice) == nil {
+			payload["tool_choice"] = choice
+		}
+	}
+	data, _ := json.Marshal(payload)
+	return "Produce the next assistant response for this OpenAI chat request. If a supplied function is needed, return kind=tool_calls and encode its arguments as a valid JSON object string; never execute the function yourself. Otherwise return kind=message.\n\n" + string(data)
+}
+
+func localCodexOutputSchema(req ChatCompletionRequest) map[string]any {
+	names := localCodexToolNames(req.Tools)
+	kinds := []string{"message"}
+	nameSchema := map[string]any{"type": "string"}
+	if len(names) > 0 {
+		kinds = append(kinds, "tool_calls")
+		nameSchema["enum"] = names
+	}
+	properties := map[string]any{
+		"kind":    map[string]any{"type": "string", "enum": kinds},
+		"content": map[string]any{"type": "string"},
+		"tool_calls": map[string]any{
+			"type": "array",
+			"items": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id":        map[string]any{"type": "string"},
+					"name":      nameSchema,
+					"arguments": map[string]any{"type": "string", "description": "JSON-encoded function arguments object."},
+				},
+				"required":             []string{"id", "name", "arguments"},
+				"additionalProperties": false,
+			},
+		},
+	}
+	return map[string]any{
+		"type":                 "object",
+		"properties":           properties,
+		"required":             []string{"kind", "content", "tool_calls"},
+		"additionalProperties": false,
+	}
+}
+
+func localCodexToolNames(raw json.RawMessage) []string {
+	var tools []struct {
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	_ = json.Unmarshal(raw, &tools)
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if name := strings.TrimSpace(tool.Function.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func localCodexObjectID(raw json.RawMessage, key string) string {
+	var payload map[string]any
+	if json.Unmarshal(raw, &payload) != nil {
+		return ""
+	}
+	if object, ok := payload[key].(map[string]any); ok {
+		if id, ok := object["id"].(string); ok {
+			return strings.TrimSpace(id)
+		}
+	}
+	return ""
+}
+
+func collectLocalCodexChat(ctx context.Context, client *codexclient.AppServerClient) (LocalChatResult, error) {
+	var text strings.Builder
+	usage := Usage{}
+	for {
+		select {
+		case <-ctx.Done():
+			return LocalChatResult{}, ctx.Err()
+		case request, ok := <-client.Requests():
+			if ok {
+				_ = client.Respond(request.ID, map[string]any{"decision": "decline"})
+			}
+		case notification, ok := <-client.Notifications():
+			if !ok {
+				return LocalChatResult{}, errors.New("local Codex app-server closed before completion")
+			}
+			updateLocalCodexUsage(notification.Params, &usage)
+			switch notification.Method {
+			case "item/agentMessage/delta":
+				var payload map[string]any
+				if json.Unmarshal(notification.Params, &payload) == nil {
+					if delta, ok := payload["delta"].(string); ok {
+						text.WriteString(delta)
+					}
+				}
+			case "item/completed":
+				if text.Len() == 0 {
+					text.WriteString(localCodexCompletedMessage(notification.Params))
+				}
+			case "turn/completed":
+				if message := localCodexTurnFailure(notification.Params); message != "" {
+					return LocalChatResult{}, errors.New(message)
+				}
+				return parseLocalCodexEnvelope(text.String(), usage)
+			}
+		case <-client.Done():
+			return LocalChatResult{}, errors.New("local Codex app-server exited before completion")
+		}
+	}
+}
+
+func localCodexTurnFailure(raw json.RawMessage) string {
+	var payload map[string]any
+	if json.Unmarshal(raw, &payload) != nil {
+		return ""
+	}
+	turn, _ := payload["turn"].(map[string]any)
+	if turn == nil {
+		return ""
+	}
+	status, _ := turn["status"].(string)
+	if status != "failed" && status != "interrupted" {
+		return ""
+	}
+	if errValue, ok := turn["error"].(map[string]any); ok {
+		if message, ok := errValue["message"].(string); ok && strings.TrimSpace(message) != "" {
+			return "local Codex turn " + status + ": " + safelog.Text(message, 300)
+		}
+	}
+	return "local Codex turn " + status
+}
+
+func localCodexCompletedMessage(raw json.RawMessage) string {
+	var payload map[string]any
+	if json.Unmarshal(raw, &payload) != nil {
+		return ""
+	}
+	item, _ := payload["item"].(map[string]any)
+	if item == nil || item["type"] != "agentMessage" {
+		return ""
+	}
+	for _, key := range []string{"text", "content"} {
+		if value, ok := item[key].(string); ok {
+			return value
+		}
+	}
+	return ""
+}
+
+func parseLocalCodexEnvelope(raw string, usage Usage) (LocalChatResult, error) {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimPrefix(raw, "```json")
+	raw = strings.TrimPrefix(raw, "```")
+	raw = strings.TrimSuffix(raw, "```")
+	var envelope struct {
+		Kind      string `json:"kind"`
+		Content   string `json:"content"`
+		ToolCalls []struct {
+			ID        string `json:"id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"tool_calls"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &envelope); err != nil {
+		return LocalChatResult{}, fmt.Errorf("decode local Codex result: %w", err)
+	}
+	result := LocalChatResult{Content: envelope.Content, Usage: usage}
+	if envelope.Kind == "tool_calls" && len(envelope.ToolCalls) > 0 {
+		calls := make([]map[string]any, 0, len(envelope.ToolCalls))
+		for i, call := range envelope.ToolCalls {
+			id := strings.TrimSpace(call.ID)
+			if id == "" {
+				id = fmt.Sprintf("call_%d", i+1)
+			}
+			arguments := strings.TrimSpace(call.Arguments)
+			if !json.Valid([]byte(arguments)) {
+				arguments = "{}"
+			}
+			calls = append(calls, map[string]any{
+				"id":       id,
+				"type":     "function",
+				"function": map[string]any{"name": call.Name, "arguments": arguments},
+			})
+		}
+		result.ToolCalls, _ = json.Marshal(calls)
+	}
+	return result, nil
+}
+
+func updateLocalCodexUsage(raw json.RawMessage, usage *Usage) {
+	var payload any
+	if json.Unmarshal(raw, &payload) != nil {
+		return
+	}
+	var walk func(any)
+	walk = func(value any) {
+		switch typed := value.(type) {
+		case map[string]any:
+			for key, nested := range typed {
+				if numberValue, ok := nested.(float64); ok {
+					switch key {
+					case "inputTokens", "input_tokens":
+						if int(numberValue) > usage.PromptTokens {
+							usage.PromptTokens = int(numberValue)
+						}
+					case "outputTokens", "output_tokens":
+						if int(numberValue) > usage.CompletionTokens {
+							usage.CompletionTokens = int(numberValue)
+						}
+					}
+				}
+				walk(nested)
+			}
+		case []any:
+			for _, nested := range typed {
+				walk(nested)
+			}
+		}
+	}
+	walk(payload)
+	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 }
 
 func (s *Service) Ensure(ctx context.Context) error {
@@ -70,6 +391,7 @@ func (s *Service) SeedStaticModels(ctx context.Context) error {
 
 type Status struct {
 	Enabled            bool   `json:"enabled"`
+	UpstreamMode       string `json:"upstreamMode"`
 	PublicAPIKeys      int    `json:"publicApiKeys"`
 	ActiveAccounts     int    `json:"activeAccounts"`
 	TotalAccounts      int    `json:"totalAccounts"`
@@ -100,7 +422,7 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	status := Status{Enabled: settings.Enabled, Models: len(models), RecentRequestCount: total, RecentFailureCount: failed}
+	status := Status{Enabled: settings.Enabled, UpstreamMode: settings.UpstreamMode, Models: len(models), RecentRequestCount: total, RecentFailureCount: failed}
 	for _, key := range keys {
 		if key.Status == "active" {
 			status.PublicAPIKeys++

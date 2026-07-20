@@ -9,6 +9,7 @@ export interface AuthSession {
 
 export interface CodexGatewayStatus {
   enabled?: boolean;
+  upstreamMode?: "accounts" | "local_codex" | string;
   publicApiKeys?: number;
   activeAccounts?: number;
   totalAccounts?: number;
@@ -239,6 +240,7 @@ export interface SystemUpdateStatus {
 export interface CodexGatewaySettings {
   id?: string;
   enabled?: boolean;
+  upstreamMode?: "accounts" | "local_codex" | string;
   baseUrl?: string;
   oauthAuthUrl?: string;
   oauthTokenUrl?: string;
@@ -2723,6 +2725,7 @@ export type StockV2AgentTaskType =
 export interface StockV2AgentTaskProfile {
   id: string;
   taskType: StockV2AgentTaskType | string;
+  executionMode?: "cli" | "api" | string;
   primaryModelId?: string;
   fallbackModelId?: string;
   reasoningEffort?: string;
@@ -2744,6 +2747,7 @@ export type StockV2AgentRunStatus = "pending" | "ready" | "running" | "completed
 export interface StockV2AgentRun {
   id: string;
   taskType: string;
+  executionMode?: "cli" | "api" | string;
   providerId?: string;
   modelId?: string;
   reasoningEffort?: string;
@@ -2881,6 +2885,7 @@ export interface StockV2AgentUpdateModelRequest {
 }
 
 export interface StockV2AgentUpdateTaskProfileRequest {
+  executionMode?: "cli" | "api" | string;
   primaryModelId?: string;
   fallbackModelId?: string;
   reasoningEffort?: string;

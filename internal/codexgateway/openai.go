@@ -230,6 +230,81 @@ func BuildChatResponse(id, model, text string, usage Usage) ChatCompletionRespon
 	}
 }
 
+func BuildLocalChatResponse(id, model string, result LocalChatResult) ChatCompletionResponse {
+	finishReason := "stop"
+	message := ChatMessage{Role: "assistant", Content: result.Content}
+	if len(result.ToolCalls) > 0 && string(result.ToolCalls) != "null" {
+		message.ToolCalls = result.ToolCalls
+		finishReason = "tool_calls"
+	}
+	return ChatCompletionResponse{
+		ID:      id,
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []ChatChoice{{
+			Index:        0,
+			Message:      message,
+			FinishReason: finishReason,
+		}},
+		Usage: result.Usage,
+	}
+}
+
+func ResponsesToLocalChatRequest(payload map[string]any, model string) ChatCompletionRequest {
+	messages := []ChatMessage{}
+	if instructions, ok := payload["instructions"].(string); ok && strings.TrimSpace(instructions) != "" {
+		messages = append(messages, ChatMessage{Role: "system", Content: instructions})
+	}
+	inputData, _ := json.Marshal(payload["input"])
+	messages = append(messages, ChatMessage{Role: "user", Content: string(inputData)})
+	req := ChatCompletionRequest{Model: model, Messages: messages}
+	if tools, ok := payload["tools"]; ok {
+		req.Tools, _ = json.Marshal(tools)
+	}
+	if choice, ok := payload["tool_choice"]; ok {
+		req.ToolChoice, _ = json.Marshal(choice)
+	}
+	if reasoning, ok := payload["reasoning"].(map[string]any); ok {
+		req.ReasoningEffort, _ = reasoning["effort"].(string)
+	}
+	return req
+}
+
+func BuildLocalResponsesResponse(id, model string, result LocalChatResult) map[string]any {
+	output := []map[string]any{}
+	if len(result.ToolCalls) > 0 {
+		var calls []struct {
+			ID       string `json:"id"`
+			Function struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"function"`
+		}
+		if json.Unmarshal(result.ToolCalls, &calls) == nil {
+			for _, call := range calls {
+				output = append(output, map[string]any{
+					"type": "function_call", "id": call.ID, "call_id": call.ID,
+					"name": call.Function.Name, "arguments": call.Function.Arguments, "status": "completed",
+				})
+			}
+		}
+	} else {
+		output = append(output, map[string]any{
+			"type": "message", "id": "msg_" + id, "status": "completed", "role": "assistant",
+			"content": []map[string]any{{"type": "output_text", "text": result.Content, "annotations": []any{}}},
+		})
+	}
+	return map[string]any{
+		"id": id, "object": "response", "created_at": time.Now().Unix(), "status": "completed",
+		"model": model, "output": output, "output_text": result.Content,
+		"usage": map[string]any{
+			"input_tokens": result.Usage.PromptTokens, "output_tokens": result.Usage.CompletionTokens,
+			"total_tokens": result.Usage.TotalTokens,
+		},
+	}
+}
+
 func BuildChatChunk(id, model, delta string, finishReason *string) ChatCompletionChunk {
 	choice := ChatChunkChoice{Index: 0, Delta: map[string]string{}, FinishReason: finishReason}
 	if delta != "" {

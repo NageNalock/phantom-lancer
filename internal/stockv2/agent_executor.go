@@ -36,6 +36,10 @@ type AgentExecutorOutput struct {
 	Duration       time.Duration `json:"duration"`
 	RawTranscript  string        `json:"rawTranscript"` // ~16KB 摘要, 用于 ledger
 	ProcessGroupID int           `json:"-"`
+	PromptTokens   int           `json:"promptTokens,omitempty"`
+	CachedTokens   int           `json:"cachedTokens,omitempty"`
+	OutputTokens   int           `json:"outputTokens,omitempty"`
+	RequestCount   int           `json:"requestCount,omitempty"`
 }
 
 type codexCLIExecutor struct {

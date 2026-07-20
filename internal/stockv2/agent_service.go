@@ -50,7 +50,7 @@ func (s *Service) GetAgentProviderProfile(ctx context.Context, id string) (Agent
 
 func (s *Service) CreateAgentProviderProfile(ctx context.Context, req RequestCreateAgentProviderProfile) (AgentProviderProfile, error) {
 	if strings.TrimSpace(req.ProviderType) == "" {
-		req.ProviderType = AgentProviderTypeCodexCLI
+		req.ProviderType = AgentProviderTypeOpenAI
 	}
 	if !validAgentProviderType(req.ProviderType) {
 		return AgentProviderProfile{}, ErrInvalidAgentProviderType
@@ -800,6 +800,16 @@ func (s *Service) UpdateAgentTaskProfile(ctx context.Context, taskType string, r
 	if err != nil {
 		return AgentTaskProfile{}, err
 	}
+	if profile.ExecutionMode == "" {
+		profile.ExecutionMode = AgentExecutionModeCLI
+	}
+	if req.ExecutionMode != nil {
+		mode := strings.ToLower(strings.TrimSpace(*req.ExecutionMode))
+		if !validAgentExecutionMode(mode) {
+			return AgentTaskProfile{}, ErrInvalidAgentExecutionMode
+		}
+		profile.ExecutionMode = mode
+	}
 	if req.PrimaryModelID != nil {
 		primaryID := strings.TrimSpace(*req.PrimaryModelID)
 		if primaryID != "" {
@@ -818,6 +828,25 @@ func (s *Service) UpdateAgentTaskProfile(ctx context.Context, taskType string, r
 		}
 		profile.FallbackModelID = fallbackID
 	}
+	// Existing API clients predate executionMode. When they replace a binding,
+	// infer the matching mode from that model instead of rejecting the update.
+	if req.ExecutionMode == nil {
+		inferID := profile.PrimaryModelID
+		if req.PrimaryModelID == nil && req.FallbackModelID != nil {
+			inferID = profile.FallbackModelID
+		}
+		if inferID != "" {
+			if model, modelErr := s.store.GetAgentModelProfile(ctx, inferID); modelErr == nil {
+				if provider, providerErr := s.store.GetAgentProviderProfile(ctx, model.ProviderID); providerErr == nil {
+					if provider.ProviderType == AgentProviderTypeCodexCLI {
+						profile.ExecutionMode = AgentExecutionModeCLI
+					} else {
+						profile.ExecutionMode = AgentExecutionModeAPI
+					}
+				}
+			}
+		}
+	}
 	if req.ReasoningEffort != nil {
 		reasoningEffort := strings.ToLower(strings.TrimSpace(*req.ReasoningEffort))
 		if !validAgentReasoningEffort(reasoningEffort) {
@@ -825,7 +854,37 @@ func (s *Service) UpdateAgentTaskProfile(ctx context.Context, taskType string, r
 		}
 		profile.ReasoningEffort = reasoningEffort
 	}
+	if profile.ExecutionMode == AgentExecutionModeAPI && profile.ReasoningEffort == AgentReasoningEffortUltra {
+		return AgentTaskProfile{}, ErrInvalidAgentReasoningEffort
+	}
+	for _, modelID := range []string{profile.PrimaryModelID, profile.FallbackModelID} {
+		if modelID == "" {
+			continue
+		}
+		model, err := s.ensureAgentTaskModelAllowed(ctx, modelID)
+		if err != nil {
+			return AgentTaskProfile{}, err
+		}
+		if !agentModelSupportsExecutionMode(ctx, s.store, model, profile.ExecutionMode) {
+			return AgentTaskProfile{}, ErrAgentExecutionModeModelMismatch
+		}
+	}
 	return s.store.UpdateAgentTaskProfile(ctx, profile)
+}
+
+func validAgentExecutionMode(value string) bool {
+	return value == AgentExecutionModeCLI || value == AgentExecutionModeAPI
+}
+
+func agentModelSupportsExecutionMode(ctx context.Context, store *Store, model AgentModelProfile, mode string) bool {
+	provider, err := store.GetAgentProviderProfile(ctx, model.ProviderID)
+	if err != nil {
+		return false
+	}
+	if mode == AgentExecutionModeCLI {
+		return provider.ProviderType == AgentProviderTypeCodexCLI
+	}
+	return mode == AgentExecutionModeAPI && provider.ProviderType != AgentProviderTypeCodexCLI
 }
 
 func (s *Service) ensureAgentTaskModelAllowed(ctx context.Context, modelID string) (AgentModelProfile, error) {
@@ -992,6 +1051,13 @@ func (s *Service) CreateAgentRunRecord(ctx context.Context, params AgentRunRecor
 	if _, err := s.ensureAgentTaskModelAllowed(ctx, params.ModelID); err != nil {
 		return AgentRun{}, AgentDecisionLedger{}, err
 	}
+	params.ExecutionMode = strings.ToLower(strings.TrimSpace(params.ExecutionMode))
+	if params.ExecutionMode == "" {
+		params.ExecutionMode = AgentExecutionModeCLI
+	}
+	if !validAgentExecutionMode(params.ExecutionMode) {
+		return AgentRun{}, AgentDecisionLedger{}, ErrInvalidAgentExecutionMode
+	}
 	params.ReasoningEffort = strings.ToLower(strings.TrimSpace(params.ReasoningEffort))
 	if !validAgentReasoningEffort(params.ReasoningEffort) {
 		return AgentRun{}, AgentDecisionLedger{}, ErrInvalidAgentReasoningEffort
@@ -1023,6 +1089,7 @@ func (s *Service) CreateAgentRunRecord(ctx context.Context, params AgentRunRecor
 	}
 	run := AgentRun{
 		TaskType:          params.TaskType,
+		ExecutionMode:     params.ExecutionMode,
 		ProviderID:        params.ProviderID,
 		ModelID:           params.ModelID,
 		ReasoningEffort:   params.ReasoningEffort,
@@ -1063,6 +1130,7 @@ func (s *Service) ResolveAgentTask(ctx context.Context, taskType, triggerObjectT
 	resolution := AgentTaskResolution{
 		TaskType:          taskType,
 		TaskProfileID:     taskProfile.ID,
+		ExecutionMode:     taskProfile.ExecutionMode,
 		ProviderID:        model.ProviderID,
 		ModelID:           model.ID,
 		ModelName:         model.ModelName,
@@ -1074,6 +1142,7 @@ func (s *Service) ResolveAgentTask(ctx context.Context, taskType, triggerObjectT
 
 	run, ledger, err := s.CreateAgentRunRecord(ctx, AgentRunRecordParams{
 		TaskType:          taskType,
+		ExecutionMode:     taskProfile.ExecutionMode,
 		ProviderID:        model.ProviderID,
 		ModelID:           model.ID,
 		ReasoningEffort:   taskProfile.ReasoningEffort,
@@ -1101,7 +1170,8 @@ func (s *Service) resolveModel(ctx context.Context, taskProfile AgentTaskProfile
 		if err != nil {
 			return AgentModelProfile{}, false // 不存在或不可用 → 降级 fallback
 		}
-		if m.Enabled && m.Status == AgentModelStatusAvailable && m.ModelType == AgentModelTypeChat {
+		if m.Enabled && m.Status == AgentModelStatusAvailable && m.ModelType == AgentModelTypeChat &&
+			agentModelSupportsExecutionMode(ctx, s.store, m, taskProfile.ExecutionMode) {
 			return m, true
 		}
 		return AgentModelProfile{}, false
@@ -1869,6 +1939,14 @@ func (s *Service) finalizeAgentRunWithOutput(
 	// 准备 output artifact summary
 	var outputArtifact strings.Builder
 	if execOutput != nil {
+		if execOutput.RequestCount > 0 {
+			run.CostEstimate = map[string]any{
+				"requestCount": execOutput.RequestCount,
+				"inputTokens":  execOutput.PromptTokens,
+				"cachedTokens": execOutput.CachedTokens,
+				"outputTokens": execOutput.OutputTokens,
+			}
+		}
 		if strings.TrimSpace(execOutput.Prompt) != "" {
 			if run.TaskType == AgentTaskTypeNewsEventReview && run.TriggerObjectType == "news_context_run" {
 				// ponytail: the durable theme/version/evidence objects are the audit

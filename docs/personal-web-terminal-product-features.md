@@ -404,6 +404,7 @@ flowchart TD
 
 - 暴露 OpenAI-compatible `/v1/*` API（`/v1/models`、`/v1/chat/completions`、`/v1/responses`）。
 - 管理上游 Codex/OpenAI 账号凭据（OAuth / token 导入），仅保存摘要。
+- 可在导入账号转发与本机 Codex Coding Plan 登录态之间选择上游执行方式。
 - 管理 public API key，供外部客户端鉴权。
 - 维护模型目录。
 - 查看请求日志和连通性测试结果。

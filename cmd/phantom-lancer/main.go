@@ -109,7 +109,7 @@ func main() {
 	}
 
 	hub := events.NewHub()
-	codexGatewaySvc := codexgateway.NewService(store, logger)
+	codexGatewaySvc := codexgateway.NewService(store, logger).WithLocalCodex(cfg.DataDir, stockV2CodexBinary(), os.Getenv("CODEX_HOME"))
 	codexSvc := codexclient.NewService(store, hub, cfg.DataDir, func() ([]string, error) {
 		settings, err := store.GetRuntimeSettings(ctx)
 		if err != nil {

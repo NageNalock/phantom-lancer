@@ -235,6 +235,7 @@ export function defaultV2RaySettings(): Required<V2RaySettings> {
   return {
     id: "default",
     enabled: false,
+    upstreamMode: "accounts",
     startOnPhantomLaunch: false,
     assetDir: "",
     configMode: "guided",

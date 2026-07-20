@@ -191,6 +191,7 @@ function AgentTaskProfileSection({ actions }: { actions: AppActions }) {
                 {stockV2AgentTaskConfigurable(profile.taskType) ? "已开放" : "未开放"}
               </Pill>
             </div>
+            <Row label="执行模式" value={profile.executionMode === "api" ? "API" : "CLI"} />
             <Row label="主模型" value={profile.primaryModelId ? profile.primaryModelId.slice(0, 12) : "(未绑定)"} />
             <Row label="备模型" value={profile.fallbackModelId ? profile.fallbackModelId.slice(0, 12) : "(未绑定)"} />
             <Row label="推理强度" value={profile.reasoningEffort || "模型默认（不传）"} />

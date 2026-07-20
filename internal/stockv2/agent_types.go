@@ -19,6 +19,11 @@ const (
 	AgentProviderTypeLocal    = "local"
 )
 
+const (
+	AgentExecutionModeCLI = "cli"
+	AgentExecutionModeAPI = "api"
+)
+
 // Provider 配置状态:是否已完成必要配置。
 const (
 	AgentProviderConfigStateNotConfigured = "not_configured"
@@ -146,6 +151,8 @@ var (
 	ErrInvalidAgentModelType            = errors.New("invalid agent model type")
 	ErrInvalidAgentModelName            = errors.New("agent model name is required")
 	ErrInvalidAgentReasoningEffort      = errors.New("invalid agent reasoning effort")
+	ErrInvalidAgentExecutionMode        = errors.New("invalid agent execution mode")
+	ErrAgentExecutionModeModelMismatch  = errors.New("agent execution mode does not match model provider")
 	ErrInvalidAgentTaskType             = errors.New("invalid agent task type")
 	ErrAgentTaskNotConfigurable         = errors.New("agent task is not configurable yet")
 	ErrAgentModelTypeNotAllowed         = errors.New("agent model type is not allowed for this task")
@@ -194,6 +201,7 @@ type AgentModelProfile struct {
 type AgentTaskProfile struct {
 	ID              string    `json:"id"`
 	TaskType        string    `json:"taskType"`
+	ExecutionMode   string    `json:"executionMode"`
 	PrimaryModelID  string    `json:"primaryModelId,omitempty"`
 	FallbackModelID string    `json:"fallbackModelId,omitempty"`
 	ReasoningEffort string    `json:"reasoningEffort,omitempty"`
@@ -207,6 +215,7 @@ type AgentTaskProfile struct {
 type AgentRun struct {
 	ID                string         `json:"id"`
 	TaskType          string         `json:"taskType"`
+	ExecutionMode     string         `json:"executionMode"`
 	ProviderID        string         `json:"providerId,omitempty"`
 	ModelID           string         `json:"modelId,omitempty"`
 	ReasoningEffort   string         `json:"reasoningEffort,omitempty"`
@@ -331,6 +340,7 @@ type AgentModelTestResult struct {
 }
 
 type RequestUpdateAgentTaskProfile struct {
+	ExecutionMode   *string `json:"executionMode,omitempty"`
 	PrimaryModelID  *string `json:"primaryModelId,omitempty"`
 	FallbackModelID *string `json:"fallbackModelId,omitempty"`
 	ReasoningEffort *string `json:"reasoningEffort,omitempty"`
@@ -367,6 +377,7 @@ type AgentExecutionDetail struct {
 // 敏感字段由 service 脱敏后落库,store 不重复脱敏。
 type AgentRunRecordParams struct {
 	TaskType             string
+	ExecutionMode        string
 	ProviderID           string
 	ModelID              string
 	ReasoningEffort      string
@@ -383,6 +394,7 @@ type AgentRunRecordParams struct {
 type AgentTaskResolution struct {
 	TaskType          string               `json:"taskType"`
 	TaskProfileID     string               `json:"taskProfileId,omitempty"`
+	ExecutionMode     string               `json:"executionMode"`
 	ProviderID        string               `json:"providerId,omitempty"`
 	ModelID           string               `json:"modelId,omitempty"`
 	ModelName         string               `json:"modelName,omitempty"`

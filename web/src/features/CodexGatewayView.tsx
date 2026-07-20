@@ -56,12 +56,12 @@ export function CodexGatewayView({ actions, data }: { actions: AppActions; data:
 
   const activeAccounts = gateway.accounts?.filter((account) => account.status === "active").length || 0;
   const activeKeys = gateway.apiKeys?.filter((key) => key.status === "active").length || 0;
-  const gatewayReady = Boolean(status?.enabled && activeAccounts && activeKeys);
+  const gatewayReady = Boolean(status?.enabled && (settings.upstreamMode === "local_codex" || activeAccounts) && activeKeys);
   const overviewActions = [
     !status?.enabled
       ? { label: "Gateway 未启用", body: "启用 OpenAI-compatible /v1 转发入口。", action: "打开设置", tab: "settings" as GatewayTab }
       : null,
-    !activeAccounts
+    settings.upstreamMode !== "local_codex" && !activeAccounts
       ? { label: "缺少上游账号", body: "导入 OAuth 账号或 token 摘要后才能转发请求。", action: "打开账号", tab: "accounts" as GatewayTab }
       : null,
     !activeKeys
@@ -472,6 +472,20 @@ export function CodexGatewayView({ actions, data }: { actions: AppActions; data:
                   onChange={(checked) => updateSetting("enabled", checked)}
                 />
 
+                <Field label="上游执行方式">
+                  <select
+                    className="select"
+                    onChange={(event) => updateSetting("upstreamMode", event.target.value)}
+                    value={draft.upstreamMode || "accounts"}
+                  >
+                    <option value="accounts">导入账号 · 转发 ChatGPT 后端</option>
+                    <option value="local_codex">本地 Codex · 使用当前 Coding Plan 登录态</option>
+                  </select>
+                  <p className="muted m-0 mt-1 text-xs">
+                    本地模式通过只读、无审批的 Codex app-server 执行，并继续使用本页 API Key 保护公开 /v1 入口。
+                  </p>
+                </Field>
+
                 <Field label="默认指令">
                   <textarea
                     autoComplete="off"
@@ -879,6 +893,7 @@ function normalizeGatewaySettings(draft: Required<CodexGatewaySettings>): CodexG
   // changed via an admin endpoint or the database directly.
   return {
     enabled: Boolean(draft.enabled),
+    upstreamMode: draft.upstreamMode === "local_codex" ? "local_codex" : "accounts",
     defaultInstructions: draft.defaultInstructions.trim(),
   };
 }
@@ -886,6 +901,7 @@ function normalizeGatewaySettings(draft: Required<CodexGatewaySettings>): CodexG
 function changedGatewaySettings(next: CodexGatewaySettings, current: Required<CodexGatewaySettings>): CodexGatewaySettings {
   const patch: CodexGatewaySettings = {};
   if (next.enabled !== current.enabled) patch.enabled = next.enabled;
+  if (next.upstreamMode !== current.upstreamMode) patch.upstreamMode = next.upstreamMode;
   if (next.defaultInstructions !== current.defaultInstructions) patch.defaultInstructions = next.defaultInstructions;
   return patch;
 }

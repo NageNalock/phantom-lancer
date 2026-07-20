@@ -331,7 +331,7 @@ Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*`
 ### 5.2 Gateway 边界
 
 - Gateway 不绑定工作目录，不执行 shell，不修改文件。
-- Gateway 只负责账号凭据摘要、模型目录、public API key 和请求日志。
+- Gateway 负责受控上游选择、账号凭据摘要、模型目录、public API key 和请求日志。`local_codex` 上游使用固定空目录、只读 sandbox、无审批的临时 app-server 会话；不进入 owner workspace，也不执行客户端工具。
 - 上游账号登录由 OAuth / token 导入完成，不在前端回显明文。
 - Gateway 详细边界见 [codex-openai-gateway-feature-design.md](./codex-openai-gateway-feature-design.md)。
 

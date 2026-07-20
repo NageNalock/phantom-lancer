@@ -431,7 +431,7 @@ func agentModelProfileFilterSQL(filter AgentModelProfileListFilter) (string, []a
 // ============================ task profiles ============================
 
 const agentTaskProfileSelectSQL = `
-    SELECT id, task_type, COALESCE(primary_model_id,''), COALESCE(fallback_model_id,''),
+    SELECT id, task_type, COALESCE(execution_mode,'cli'), COALESCE(primary_model_id,''), COALESCE(fallback_model_id,''),
            COALESCE(reasoning_effort,''), max_budget, created_at, updated_at
     FROM stockv2_agent_task_profiles
 `
@@ -439,7 +439,7 @@ const agentTaskProfileSelectSQL = `
 func scanAgentTaskProfile(row rowScanner) (AgentTaskProfile, error) {
 	var t AgentTaskProfile
 	if err := row.Scan(
-		&t.ID, &t.TaskType, &t.PrimaryModelID, &t.FallbackModelID,
+		&t.ID, &t.TaskType, &t.ExecutionMode, &t.PrimaryModelID, &t.FallbackModelID,
 		&t.ReasoningEffort, &t.MaxBudget, &t.CreatedAt, &t.UpdatedAt,
 	); err != nil {
 		return t, err
@@ -498,9 +498,10 @@ func (s *Store) UpdateAgentTaskProfile(ctx context.Context, profile AgentTaskPro
 	profile.UpdatedAt = time.Now()
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE stockv2_agent_task_profiles
-		SET primary_model_id = ?, fallback_model_id = ?, reasoning_effort = ?, max_budget = ?, updated_at = ?
+		SET execution_mode = ?, primary_model_id = ?, fallback_model_id = ?, reasoning_effort = ?, max_budget = ?, updated_at = ?
 		WHERE id = ?
 	`,
+		profile.ExecutionMode,
 		nullableString(profile.PrimaryModelID),
 		nullableString(profile.FallbackModelID),
 		profile.ReasoningEffort,
@@ -527,7 +528,7 @@ func agentTaskProfileFilterSQL(filter AgentTaskProfileListFilter) (string, []any
 // ============================ runs + decision ledger ============================
 
 const agentRunSelectSQL = `
-    SELECT id, task_type, COALESCE(provider_id,''), COALESCE(model_id,''),
+    SELECT id, task_type, COALESCE(execution_mode,'cli'), COALESCE(provider_id,''), COALESCE(model_id,''),
            COALESCE(reasoning_effort,''), trigger_object_type, trigger_object_id, status, cost_estimate_json,
            COALESCE(error_message,''), COALESCE(output,''), COALESCE(decision_ledger_id,''),
            started_at, finished_at, created_at, updated_at
@@ -539,7 +540,7 @@ func scanAgentRun(row rowScanner) (AgentRun, error) {
 	var providerID, modelID, errorMessage, output, decisionLedgerID, costEstimateJSON string
 	var startedAt, finishedAt sql.NullTime
 	if err := row.Scan(
-		&r.ID, &r.TaskType, &providerID, &modelID,
+		&r.ID, &r.TaskType, &r.ExecutionMode, &providerID, &modelID,
 		&r.ReasoningEffort, &r.TriggerObjectType, &r.TriggerObjectID, &r.Status, &costEstimateJSON,
 		&errorMessage, &output, &decisionLedgerID,
 		&startedAt, &finishedAt, &r.CreatedAt, &r.UpdatedAt,
@@ -701,13 +702,14 @@ func (s *Store) CreateAgentRunWithLedger(ctx context.Context, run AgentRun, ledg
 func insertAgentRunWithTx(ctx context.Context, tx *sql.Tx, run AgentRun) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO stockv2_agent_runs
-			(id, task_type, provider_id, model_id, reasoning_effort, trigger_object_type, trigger_object_id,
+			(id, task_type, execution_mode, provider_id, model_id, reasoning_effort, trigger_object_type, trigger_object_id,
 			 status, cost_estimate_json, error_message, output, decision_ledger_id,
 			 started_at, finished_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		run.ID,
 		run.TaskType,
+		run.ExecutionMode,
 		nullableString(run.ProviderID),
 		nullableString(run.ModelID),
 		run.ReasoningEffort,
@@ -781,6 +783,20 @@ func (s *Store) UpdateAgentRun(ctx context.Context, run AgentRun) (AgentRun, err
 		return AgentRun{}, ErrAgentRunNotFound
 	}
 	return run, nil
+}
+
+func (s *Store) FailRunningAgentRuns(ctx context.Context, reason string) (int64, error) {
+	now := time.Now()
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_agent_runs
+		SET status=?, error_message=?, finished_at=?, updated_at=?
+		WHERE status=?
+	`, AgentRunStatusFailed, nullableString(reason), now, now, AgentRunStatusRunning)
+	if err != nil {
+		return 0, wrapError(err, "fail interrupted agent runs")
+	}
+	count, _ := result.RowsAffected()
+	return count, nil
 }
 
 func (s *Store) UpdateAgentDecisionLedger(ctx context.Context, ledger AgentDecisionLedger) (AgentDecisionLedger, error) {

@@ -98,6 +98,7 @@ func (s *Service) markInterruptedRunningTasks(ctx context.Context) {
 		{name: "monitor runs", fn: s.store.FailRunningMonitorRuns},
 		{name: "news source runs", fn: s.store.FailRunningNewsSourceStates},
 		{name: "portfolio sentinel runs", fn: s.store.FailRunningPortfolioSentinelRuns},
+		{name: "agent runs", fn: s.store.FailRunningAgentRuns},
 		{name: "news context runs", fn: s.store.FailRunningNewsContextRuns},
 		{name: "news context cleanup runs", fn: s.store.FailRunningNewsContextCleanupRuns},
 	}
@@ -149,7 +150,8 @@ type NewsContextAgentExecutor interface {
 
 // WithCodexCLIExecutor 注入 Codex CLI 执行器。
 func (s *Service) WithCodexCLIExecutor(binary, codexHome, mcpURL string) *Service {
-	executor := newCodexCLIExecutor(s.log, binary, codexHome, mcpURL, s.agentTaskPool)
+	cli := newCodexCLIExecutor(s.log, binary, codexHome, mcpURL, s.agentTaskPool)
+	executor := &agentRoutingExecutor{service: s, cli: cli, api: newAgentAPIExecutor(s)}
 	s.agentExecutor = executor
 	s.newsContextExecutor = executor
 	if trimmed := strings.TrimSpace(binary); trimmed != "" {

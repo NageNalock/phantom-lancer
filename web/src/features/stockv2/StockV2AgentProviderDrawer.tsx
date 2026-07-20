@@ -6,7 +6,7 @@ import { friendlyError } from "../../api/client";
 import { Button, Drawer, Field, Notice } from "../../components/ui";
 
 const providerTypeTip = [
-  "codex_cli: 内置 default 使用本机 Codex CLI 登录态；手动新建项仍按 OpenAI-compatible endpoint 配置。",
+  "codex_cli: 仅内置 default 使用本机 Codex CLI 登录态。",
   "openai: OpenAI 或 OpenAI-compatible 云服务。",
   "local: 本机或内网 OpenAI-compatible 服务。",
 ].join("\n");
@@ -26,7 +26,7 @@ export function StockV2AgentProviderDrawer({
 }) {
   const isEdit = provider != null;
   const [form, setForm] = useState<StockV2AgentCreateProviderRequest>({
-    providerType: provider?.providerType || "codex_cli",
+    providerType: provider?.providerType || "openai",
     displayName: provider?.displayName || "",
     baseUrl: provider?.baseUrl || "https://api.openai.com/v1",
   });
@@ -54,7 +54,7 @@ export function StockV2AgentProviderDrawer({
     setError(null);
     try {
       const body: StockV2AgentCreateProviderRequest = {
-        providerType: form.providerType || "codex_cli",
+        providerType: form.providerType || "openai",
         displayName: form.displayName?.trim(),
         baseUrl: form.baseUrl?.trim(),
       };
@@ -105,11 +105,11 @@ export function StockV2AgentProviderDrawer({
             </span>
           </div>
           <select
-            value={form.providerType || "codex_cli"}
-            disabled
-            className="w-full rounded border border-[var(--line)] bg-[var(--surface-soft)] px-2 py-1.5 text-sm text-[var(--muted-strong)]"
+            value={form.providerType || "openai"}
+            disabled={isEdit}
+            onChange={(e) => setForm({ ...form, providerType: e.target.value })}
+            className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm text-[var(--muted-strong)] disabled:bg-[var(--surface-soft)]"
           >
-            <option value="codex_cli">codex_cli</option>
             <option value="openai">openai</option>
             <option value="local">local</option>
           </select>

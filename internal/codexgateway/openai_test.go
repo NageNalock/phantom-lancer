@@ -86,3 +86,26 @@ func TestNormalizeResponsesPayloadRequiresModel(t *testing.T) {
 		t.Fatal("expected model validation error")
 	}
 }
+
+func TestParseLocalCodexEnvelopeBuildsOpenAIToolCalls(t *testing.T) {
+	result, err := parseLocalCodexEnvelope(`{
+		"kind":"tool_calls",
+		"content":"",
+		"tool_calls":[{"id":"call_1","name":"lookup","arguments":"{\"query\":\"news\"}"}]
+	}`, Usage{PromptTokens: 10, CompletionTokens: 4, TotalTokens: 14})
+	if err != nil {
+		t.Fatalf("parseLocalCodexEnvelope: %v", err)
+	}
+	response := BuildLocalChatResponse("chatcmpl_test", "gpt-test", result)
+	if len(response.Choices) != 1 || response.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("response choices = %#v", response.Choices)
+	}
+	var calls []map[string]any
+	if err := json.Unmarshal(response.Choices[0].Message.ToolCalls, &calls); err != nil {
+		t.Fatalf("decode tool calls: %v", err)
+	}
+	function, _ := calls[0]["function"].(map[string]any)
+	if function["name"] != "lookup" || function["arguments"] != `{"query":"news"}` {
+		t.Fatalf("function = %#v", function)
+	}
+}

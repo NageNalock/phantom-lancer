@@ -14,7 +14,14 @@ Reading this as: 个人服务器控制台里的 Codex API gateway，面向单 ow
 
 本模块不是营销页，也不是把 `codex-proxyv2` 作为 sidecar 服务嵌入。迁移方式是功能搬迁和架构重构，不做源码拷贝，不保留原服务的独立登录页、独立前端、独立配置文件、打包脚本或 V2Ray 代理能力。
 
-本模块是独立能力域，并与新版 Codex CLI Client 并列。Codex CLI Client 负责 Web 会话、workspace、sandbox、approval 和 transcript；Gateway 只负责 OpenAI-compatible `/v1/*` API、上游账号、模型目录、public API key 和请求日志。两者不共享数据库表、HTTP API 前缀或执行链路。
+本模块是独立能力域，并与新版 Codex CLI Client 并列。Codex CLI Client 负责 Web 会话、workspace、sandbox、approval 和 transcript；Gateway 负责 OpenAI-compatible `/v1/*` API、上游执行方式、账号、模型目录、public API key 和请求日志。两者不共享业务会话和数据库表；Gateway 的 `local_codex` 上游只复用机器当前 Codex 登录态及 app-server 协议，不进入 Codex CLI Client 的 workspace/turn 数据链路。
+
+2026-07-20 增补两种兼容上游：
+
+- `accounts`：保持原有导入 OAuth 账号、转发 ChatGPT Responses 后端的路径。
+- `local_codex`：每个公开 API 请求启动临时 Codex app-server 会话，使用当前机器的 Coding Plan 登录态。执行固定为单并发、临时 thread、只读 sandbox、无环境、无审批；任何服务端审批请求一律拒绝。
+
+Chat Completions 的 functions/tools 在本地模式下通过 `outputSchema` 约束成 OpenAI `tool_calls`，Gateway 不替客户端执行工具。公开 API key、请求日志与模型字段保持原协议兼容。
 
 ## 2. 迁移目标
 
@@ -42,7 +49,7 @@ Reading this as: 个人服务器控制台里的 Codex API gateway，面向单 ow
 - 不迁移原服务的代理设置页、代理订阅页、代理节点页和代理诊断视图。
 - 不迁移原服务的独立 dashboard token 登录。管理面复用 Phantom Lancer owner session 和 CSRF。
 - 不迁移原服务的独立前端工程、CSS、构建脚本、Linux 打包脚本和环境变量命名体系。
-- 不扩展到 Anthropic、Gemini、Ollama、多 provider 路由或 Codex app-server 桥接。
+- 不扩展到 Anthropic、Gemini、Ollama 或通用多 provider 路由。本地 Codex app-server 仅作为第二种受控上游，不开放 workspace 写入或审批代理。
 
 ## 3. 源服务功能梳理
 

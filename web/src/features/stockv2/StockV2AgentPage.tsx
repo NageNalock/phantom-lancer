@@ -217,9 +217,10 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
   }
 
   async function openTaskProfileDrawer(profile: StockV2AgentTaskProfile) {
-    if (!models) {
-      await loadModels();
-    }
+    await Promise.all([
+      models ? Promise.resolve(models) : loadModels(),
+      providers ? Promise.resolve(providers) : loadProviders(),
+    ]);
     setTaskProfileDrawer({ type: "edit", profile });
   }
 
@@ -358,6 +359,7 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
         <StockV2AgentTaskProfileDrawer
           profile={taskProfileDrawer.profile}
           models={models ?? []}
+          providers={providers ?? []}
           taskType={taskProfileDrawer.profile.taskType}
           taskLabel={stockV2AgentTaskTypeLabel(taskProfileDrawer.profile.taskType)}
           actions={actions}
@@ -745,6 +747,7 @@ function AgentTaskProfileSection({
             </div>
             {configurable ? (
               <div className="mt-2 grid gap-1">
+                <Row label="执行模式" value={profile?.executionMode === "api" ? "API" : "CLI"} />
                 <Row label="主模型" value={profile?.primaryModelId ? profile.primaryModelId.slice(0, 12) : "(未绑定)"} />
                 <Row label="备模型" value={profile?.fallbackModelId ? profile.fallbackModelId.slice(0, 12) : "(未绑定)"} />
                 <Row label="推理强度" value={profile?.reasoningEffort || "模型默认（不传）"} />

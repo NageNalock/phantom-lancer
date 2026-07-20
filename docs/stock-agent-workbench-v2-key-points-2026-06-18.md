@@ -26,6 +26,15 @@
 
 盯盘不是用户手动创建、编辑、删除的业务对象，而是系统固化的后台监控行为。用户可以暂停某类监控、调整周期、调整作用范围和 Agent 预算，但不应被要求逐个创建“单票 + 价格规则”的监控任务。
 
+### 1.1 Agent 执行模式
+
+每个可执行 Agent 任务绑定同时保存模型和执行模式，并在创建 run 时写入不可变快照：
+
+- `cli`：使用本机 Codex CLI 与 StockV2 MCP，适合需要 Codex 内建搜索、浏览或较长自主执行的任务。
+- `api`：直接调用所选 OpenAI-compatible Provider 的 `/chat/completions`，由 StockV2 在进程内执行受控 function-call 循环并校验 `stock_agent_submit_result`。适合 DeepSeek 等单次分析成本更低的模型，也可绑定本机 Codex Gateway 的 `local_codex` 上游。
+
+推理强度允许留空；留空时请求不携带对应字段，保持 Provider/模型默认行为。DeepSeek 思考模式工具调用的 `reasoning_content` 必须逐轮原样回传，API run 记录请求数、输入、缓存命中和输出 token 摘要。
+
 ## 2. 对象网络图
 
 ```mermaid

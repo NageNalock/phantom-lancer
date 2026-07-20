@@ -1073,6 +1073,7 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_agent_model_profiles_enabled ON stockv2_a
 CREATE TABLE IF NOT EXISTS stockv2_agent_task_profiles (
     id TEXT PRIMARY KEY,
     task_type TEXT NOT NULL UNIQUE,
+    execution_mode TEXT NOT NULL DEFAULT 'cli',
     primary_model_id TEXT,
     fallback_model_id TEXT,
     reasoning_effort TEXT NOT NULL DEFAULT '',
@@ -1084,6 +1085,7 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_agent_task_profiles_task_type ON stockv2_
 CREATE TABLE IF NOT EXISTS stockv2_agent_runs (
     id TEXT PRIMARY KEY,
     task_type TEXT NOT NULL,
+    execution_mode TEXT NOT NULL DEFAULT 'cli',
     provider_id TEXT,
     model_id TEXT,
     reasoning_effort TEXT NOT NULL DEFAULT '',
@@ -1331,6 +1333,22 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureColumn(ctx, "stockv2_agent_task_profiles", "reasoning_effort", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("add agent task profile reasoning_effort column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_agent_task_profiles", "execution_mode", "TEXT NOT NULL DEFAULT 'cli'"); err != nil {
+		return fmt.Errorf("add agent task profile execution_mode column: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "stockv2_agent_runs", "execution_mode", "TEXT NOT NULL DEFAULT 'cli'"); err != nil {
+		return fmt.Errorf("add agent run execution_mode column: %w", err)
+	}
+	// ponytail: old UI mislabeled every manually-created OpenAI-compatible
+	// provider as codex_cli. The fixed system provider id is the only true CLI
+	// provider, so this one-time data repair is unambiguous.
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_agent_provider_profiles
+		SET provider_type = 'openai', updated_at = datetime('now')
+		WHERE provider_type = 'codex_cli' AND id <> ?
+	`, agentProviderCodexCLIDefaultID); err != nil {
+		return fmt.Errorf("repair custom agent provider type: %w", err)
 	}
 	if err := s.ensureColumn(ctx, "stockv2_agent_runs", "reasoning_effort", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("add agent run reasoning_effort column: %w", err)

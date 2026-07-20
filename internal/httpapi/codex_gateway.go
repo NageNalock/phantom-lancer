@@ -56,6 +56,7 @@ func (s *Server) handleUpdateCodexGatewaySettings(w http.ResponseWriter, r *http
 	}
 	var req struct {
 		Enabled                           *bool   `json:"enabled"`
+		UpstreamMode                      *string `json:"upstreamMode"`
 		BaseURL                           *string `json:"baseUrl"`
 		OAuthAuthURL                      *string `json:"oauthAuthUrl"`
 		OAuthTokenURL                     *string `json:"oauthTokenUrl"`
@@ -74,6 +75,15 @@ func (s *Server) handleUpdateCodexGatewaySettings(w http.ResponseWriter, r *http
 	settings.ID = "default"
 	if req.Enabled != nil {
 		settings.Enabled = *req.Enabled
+	}
+	if req.UpstreamMode != nil {
+		switch strings.TrimSpace(*req.UpstreamMode) {
+		case "accounts", "local_codex":
+			settings.UpstreamMode = strings.TrimSpace(*req.UpstreamMode)
+		default:
+			writeError(w, http.StatusBadRequest, "invalid_upstream_mode", "Codex Gateway 上游模式不合法")
+			return
+		}
 	}
 	if req.BaseURL != nil {
 		settings.BaseURL = strings.TrimSpace(*req.BaseURL)
@@ -130,8 +140,9 @@ func (s *Server) handleUpdateCodexGatewaySettings(w http.ResponseWriter, r *http
 		RiskLevel: "medium",
 		Summary:   "已更新 Codex Gateway 设置",
 		Payload: map[string]any{
-			"enabled": updated.Enabled,
-			"baseURL": safelog.URLLabel(updated.BaseURL),
+			"enabled":      updated.Enabled,
+			"upstreamMode": updated.UpstreamMode,
+			"baseURL":      safelog.URLLabel(updated.BaseURL),
 		},
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"settings": updated})
@@ -650,6 +661,21 @@ func (s *Server) handleCodexGatewayChatCompletions(w http.ResponseWriter, r *htt
 		writeOpenAIError(w, http.StatusInternalServerError, "internal_error", "读取设置失败")
 		return
 	}
+	if settings.UpstreamMode == "local_codex" {
+		result, localErr := s.codexGateway.RunLocalChat(r.Context(), body, settings.DefaultInstructions)
+		if localErr != nil {
+			s.handleGatewayRouteError(w, r, requestID, start, "chat.completions", body.Model, "", codexgateway.UpstreamRoute{}, localErr, body.Stream, true)
+			return
+		}
+		s.logGatewayRequest(r.Context(), requestID, "chat.completions", body.Model, "local-codex", clientIP(r), http.StatusOK, "", "", "", start, body.Stream, result.Usage)
+		response := codexgateway.BuildLocalChatResponse("chatcmpl_"+requestID, body.Model, result)
+		if body.Stream {
+			writeLocalChatSSE(w, response)
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
 	payload := codexgateway.ChatToResponsesPayload(body, true, settings.DefaultInstructions)
 	route, resp, failure, err := s.codexGateway.SendResponses(r.Context(), body.Model, "", payload)
 	if err != nil {
@@ -706,6 +732,26 @@ func (s *Server) handleCodexGatewayResponses(w http.ResponseWriter, r *http.Requ
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	settings, err := s.store.GetCodexGatewaySettings(r.Context())
+	if err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "internal_error", "读取设置失败")
+		return
+	}
+	if settings.UpstreamMode == "local_codex" {
+		if stream {
+			writeOpenAIError(w, http.StatusBadRequest, "stream_unsupported", "本地 Codex 的 Responses 端点当前仅支持非流式请求")
+			return
+		}
+		localReq := codexgateway.ResponsesToLocalChatRequest(payload, model)
+		result, localErr := s.codexGateway.RunLocalChat(r.Context(), localReq, settings.DefaultInstructions)
+		if localErr != nil {
+			s.handleGatewayRouteError(w, r, requestID, start, "responses", model, "", codexgateway.UpstreamRoute{}, localErr, false, true)
+			return
+		}
+		s.logGatewayRequest(r.Context(), requestID, "responses", model, "local-codex", clientIP(r), http.StatusOK, "", "", "", start, false, result.Usage)
+		writeJSON(w, http.StatusOK, codexgateway.BuildLocalResponsesResponse("resp_"+requestID, model, result))
+		return
+	}
 	route, resp, failure, err := s.codexGateway.SendResponses(r.Context(), model, "", payload)
 	if err != nil {
 		s.handleGatewayRouteError(w, r, requestID, start, "responses", model, "", route, err, stream, true)
@@ -751,6 +797,36 @@ func contentTypeOrJSON(value string) string {
 		return "application/json; charset=utf-8"
 	}
 	return value
+}
+
+func writeLocalChatSSE(w http.ResponseWriter, response codexgateway.ChatCompletionResponse) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeOpenAIError(w, http.StatusInternalServerError, "stream_unsupported", "当前 HTTP writer 不支持流式响应")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	if len(response.Choices) > 0 {
+		choice := response.Choices[0]
+		delta := map[string]any{"role": "assistant", "content": choice.Message.Content}
+		if len(choice.Message.ToolCalls) > 0 {
+			var calls any
+			if json.Unmarshal(choice.Message.ToolCalls, &calls) == nil {
+				delta["tool_calls"] = calls
+			}
+		}
+		chunk := map[string]any{
+			"id": response.ID, "object": "chat.completion.chunk", "created": response.Created, "model": response.Model,
+			"choices": []map[string]any{{"index": 0, "delta": delta, "finish_reason": choice.FinishReason}},
+			"usage":   response.Usage,
+		}
+		data, _ := json.Marshal(chunk)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+	}
+	_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	flusher.Flush()
 }
 
 func (s *Server) handleGatewayRouteError(w http.ResponseWriter, r *http.Request, requestID string, start time.Time, apiKind, model, fallbackAccount string, route codexgateway.UpstreamRoute, err error, streamed bool, openAI bool) {

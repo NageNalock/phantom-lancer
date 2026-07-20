@@ -168,6 +168,7 @@ type SystemUpdateJob struct {
 type CodexGatewaySettings struct {
 	ID                                string `json:"id"`
 	Enabled                           bool   `json:"enabled"`
+	UpstreamMode                      string `json:"upstreamMode"`
 	BaseURL                           string `json:"baseUrl"`
 	OAuthAuthURL                      string `json:"oauthAuthUrl"`
 	OAuthTokenURL                     string `json:"oauthTokenUrl"`
@@ -975,6 +976,7 @@ CREATE TABLE IF NOT EXISTS docker_registry_tags (
 CREATE TABLE IF NOT EXISTS codex_gateway_settings (
   id TEXT PRIMARY KEY,
   enabled INTEGER NOT NULL DEFAULT 0,
+  upstream_mode TEXT NOT NULL DEFAULT 'accounts',
   base_url TEXT NOT NULL DEFAULT 'https://chatgpt.com/backend-api',
   oauth_auth_url TEXT NOT NULL DEFAULT 'https://auth.openai.com/oauth/authorize',
   oauth_token_url TEXT NOT NULL DEFAULT 'https://auth.openai.com/oauth/token',
@@ -1385,6 +1387,7 @@ CREATE INDEX IF NOT EXISTS idx_media_assets_checksum ON media_assets(checksum_sh
 		{"image_assets", "object_storage_profile_id", "TEXT NOT NULL DEFAULT ''"},
 		{"image_storage_settings", "object_storage_profile_id", "TEXT NOT NULL DEFAULT ''"},
 		{"codex_gateway_settings", "account_health_check_interval_seconds", "INTEGER NOT NULL DEFAULT 43200"},
+		{"codex_gateway_settings", "upstream_mode", "TEXT NOT NULL DEFAULT 'accounts'"},
 		{"docker_registry_credentials", "secret_ciphertext", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.ensureColumn(ctx, column.table, column.name, column.def); err != nil {
@@ -2640,6 +2643,7 @@ func syncDir(dir string) error {
 func DefaultCodexGatewaySettings() CodexGatewaySettings {
 	return CodexGatewaySettings{
 		ID:                                "default",
+		UpstreamMode:                      "accounts",
 		BaseURL:                           "https://chatgpt.com/backend-api",
 		OAuthAuthURL:                      "https://auth.openai.com/oauth/authorize",
 		OAuthTokenURL:                     "https://auth.openai.com/oauth/token",
@@ -2656,6 +2660,12 @@ func NormalizeCodexGatewaySettings(settings CodexGatewaySettings) CodexGatewaySe
 	defaults := DefaultCodexGatewaySettings()
 	if strings.TrimSpace(settings.ID) == "" {
 		settings.ID = "default"
+	}
+	switch strings.TrimSpace(settings.UpstreamMode) {
+	case "local_codex":
+		settings.UpstreamMode = "local_codex"
+	default:
+		settings.UpstreamMode = "accounts"
 	}
 	settings.BaseURL = strings.TrimRight(strings.TrimSpace(settings.BaseURL), "/")
 	if settings.BaseURL == "" {
@@ -2702,9 +2712,9 @@ func (s *Store) EnsureCodexGatewaySettings(ctx context.Context) error {
 	now := now()
 	_, err := s.db.ExecContext(ctx, `
 INSERT OR IGNORE INTO codex_gateway_settings (
-  id, enabled, base_url, oauth_auth_url, oauth_token_url, oauth_client_id, oauth_redirect_uri, request_timeout_seconds, refresh_margin_seconds, account_health_check_interval_seconds, default_instructions, installation_id, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		defaults.ID, boolInt(defaults.Enabled), defaults.BaseURL, defaults.OAuthAuthURL, defaults.OAuthTokenURL, defaults.OAuthClientID, defaults.OAuthRedirectURI, defaults.RequestTimeoutSeconds, defaults.RefreshMarginSeconds, defaults.AccountHealthCheckIntervalSeconds, defaults.DefaultInstructions, defaults.InstallationID, now, now)
+  id, enabled, upstream_mode, base_url, oauth_auth_url, oauth_token_url, oauth_client_id, oauth_redirect_uri, request_timeout_seconds, refresh_margin_seconds, account_health_check_interval_seconds, default_instructions, installation_id, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		defaults.ID, boolInt(defaults.Enabled), defaults.UpstreamMode, defaults.BaseURL, defaults.OAuthAuthURL, defaults.OAuthTokenURL, defaults.OAuthClientID, defaults.OAuthRedirectURI, defaults.RequestTimeoutSeconds, defaults.RefreshMarginSeconds, defaults.AccountHealthCheckIntervalSeconds, defaults.DefaultInstructions, defaults.InstallationID, now, now)
 	return err
 }
 
@@ -2712,7 +2722,7 @@ func (s *Store) GetCodexGatewaySettings(ctx context.Context) (CodexGatewaySettin
 	if err := s.EnsureCodexGatewaySettings(ctx); err != nil {
 		return CodexGatewaySettings{}, err
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT id, enabled, base_url, oauth_auth_url, oauth_token_url, oauth_client_id, oauth_redirect_uri, request_timeout_seconds, refresh_margin_seconds, account_health_check_interval_seconds, default_instructions, installation_id, created_at, updated_at FROM codex_gateway_settings WHERE id = 'default'`)
+	row := s.db.QueryRowContext(ctx, `SELECT id, enabled, upstream_mode, base_url, oauth_auth_url, oauth_token_url, oauth_client_id, oauth_redirect_uri, request_timeout_seconds, refresh_margin_seconds, account_health_check_interval_seconds, default_instructions, installation_id, created_at, updated_at FROM codex_gateway_settings WHERE id = 'default'`)
 	settings, err := scanCodexGatewaySettings(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DefaultCodexGatewaySettings(), nil
@@ -2734,10 +2744,11 @@ func (s *Store) UpdateCodexGatewaySettings(ctx context.Context, settings CodexGa
 	settings.UpdatedAt = now()
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO codex_gateway_settings (
-  id, enabled, base_url, oauth_auth_url, oauth_token_url, oauth_client_id, oauth_redirect_uri, request_timeout_seconds, refresh_margin_seconds, account_health_check_interval_seconds, default_instructions, installation_id, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  id, enabled, upstream_mode, base_url, oauth_auth_url, oauth_token_url, oauth_client_id, oauth_redirect_uri, request_timeout_seconds, refresh_margin_seconds, account_health_check_interval_seconds, default_instructions, installation_id, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   enabled = excluded.enabled,
+  upstream_mode = excluded.upstream_mode,
   base_url = excluded.base_url,
   oauth_auth_url = excluded.oauth_auth_url,
   oauth_token_url = excluded.oauth_token_url,
@@ -2749,7 +2760,7 @@ ON CONFLICT(id) DO UPDATE SET
   default_instructions = excluded.default_instructions,
   installation_id = excluded.installation_id,
   updated_at = excluded.updated_at`,
-		settings.ID, boolInt(settings.Enabled), settings.BaseURL, settings.OAuthAuthURL, settings.OAuthTokenURL, settings.OAuthClientID, settings.OAuthRedirectURI, settings.RequestTimeoutSeconds, settings.RefreshMarginSeconds, settings.AccountHealthCheckIntervalSeconds, settings.DefaultInstructions, settings.InstallationID, settings.CreatedAt, settings.UpdatedAt)
+		settings.ID, boolInt(settings.Enabled), settings.UpstreamMode, settings.BaseURL, settings.OAuthAuthURL, settings.OAuthTokenURL, settings.OAuthClientID, settings.OAuthRedirectURI, settings.RequestTimeoutSeconds, settings.RefreshMarginSeconds, settings.AccountHealthCheckIntervalSeconds, settings.DefaultInstructions, settings.InstallationID, settings.CreatedAt, settings.UpdatedAt)
 	if err != nil {
 		return CodexGatewaySettings{}, err
 	}
@@ -5435,7 +5446,7 @@ func scanSystemUpdateJob(row workspaceScanner) (SystemUpdateJob, error) {
 func scanCodexGatewaySettings(row workspaceScanner) (CodexGatewaySettings, error) {
 	var settings CodexGatewaySettings
 	var enabled int
-	err := row.Scan(&settings.ID, &enabled, &settings.BaseURL, &settings.OAuthAuthURL, &settings.OAuthTokenURL, &settings.OAuthClientID, &settings.OAuthRedirectURI, &settings.RequestTimeoutSeconds, &settings.RefreshMarginSeconds, &settings.AccountHealthCheckIntervalSeconds, &settings.DefaultInstructions, &settings.InstallationID, &settings.CreatedAt, &settings.UpdatedAt)
+	err := row.Scan(&settings.ID, &enabled, &settings.UpstreamMode, &settings.BaseURL, &settings.OAuthAuthURL, &settings.OAuthTokenURL, &settings.OAuthClientID, &settings.OAuthRedirectURI, &settings.RequestTimeoutSeconds, &settings.RefreshMarginSeconds, &settings.AccountHealthCheckIntervalSeconds, &settings.DefaultInstructions, &settings.InstallationID, &settings.CreatedAt, &settings.UpdatedAt)
 	if err != nil {
 		return CodexGatewaySettings{}, err
 	}
