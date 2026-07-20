@@ -1062,11 +1062,14 @@ func retryableNewsContextBatchFailure(err error, output *AgentExecutorOutput) bo
 		return false
 	}
 	message := strings.ToLower(err.Error())
-	if output != nil && strings.HasPrefix(strings.TrimSpace(output.Command), "POST ") &&
-		strings.Contains(message, "api returned http 502") {
+	apiRequest := output != nil && strings.HasPrefix(strings.TrimSpace(output.Command), "POST ")
+	if apiRequest && (strings.Contains(message, "api returned http 502") ||
+		(output.TimedOut && strings.Contains(message, "api request failed") &&
+			strings.Contains(message, "context deadline exceeded"))) {
 		// ponytail: an upstream API failure happened before the required submit
 		// tool could mutate storage. Shrinking the same pending slice gives the
-		// model room for tool results; keep non-API and post-submit failures terminal.
+		// model room for tool results; keep cancellation, non-API, and post-submit
+		// failures terminal.
 		return true
 	}
 	if output != nil && (strings.Contains(message, "without submitting result") ||

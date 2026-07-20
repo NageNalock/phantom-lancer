@@ -480,6 +480,20 @@ func TestRetryableNewsContextBatchFailureRequiresStartedNoSubmitBoundary(t *test
 	if retryableNewsContextBatchFailure(apiUpstream, &AgentExecutorOutput{Command: "codex exec", ExitCode: 1}) {
 		t.Fatal("non-API upstream-looking failure must remain terminal")
 	}
+	apiTimeout := errors.New(`API request failed: Post "https://example.com/v1/chat/completions": context deadline exceeded`)
+	if !retryableNewsContextBatchFailure(apiTimeout, &AgentExecutorOutput{
+		Command:  "POST https://example.com/v1/chat/completions",
+		ExitCode: -1,
+		TimedOut: true,
+	}) {
+		t.Fatal("API execution deadline before submission must shrink and retry")
+	}
+	if retryableNewsContextBatchFailure(apiTimeout, &AgentExecutorOutput{
+		Command:  "POST https://example.com/v1/chat/completions",
+		ExitCode: -1,
+	}) {
+		t.Fatal("API request failure without executor deadline must remain terminal")
+	}
 	if retryableNewsContextBatchFailure(errors.New("store news context result: disk full"), &AgentExecutorOutput{ExitCode: 1}) {
 		t.Fatal("storage failure must remain terminal")
 	}
