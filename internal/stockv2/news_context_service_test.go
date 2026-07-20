@@ -466,6 +466,13 @@ func TestRetryableNewsContextBatchFailureRequiresStartedNoSubmitBoundary(t *test
 	if retryableNewsContextBatchFailure(processExit, nil) {
 		t.Fatal("failure without executor output must remain terminal")
 	}
+	apiUpstream := errors.New(`API returned HTTP 502: {"error":{"code":"upstream_transport_error"}}`)
+	if !retryableNewsContextBatchFailure(apiUpstream, &AgentExecutorOutput{Command: "POST https://example.com/v1/chat/completions", ExitCode: -1}) {
+		t.Fatal("API upstream failure before submission must shrink and retry")
+	}
+	if retryableNewsContextBatchFailure(apiUpstream, &AgentExecutorOutput{Command: "codex exec", ExitCode: 1}) {
+		t.Fatal("non-API upstream-looking failure must remain terminal")
+	}
 	if retryableNewsContextBatchFailure(errors.New("store news context result: disk full"), &AgentExecutorOutput{ExitCode: 1}) {
 		t.Fatal("storage failure must remain terminal")
 	}
