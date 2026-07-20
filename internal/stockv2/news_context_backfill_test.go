@@ -5,9 +5,99 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestGetNewsContextBackfillUsesPersistedProgressSnapshot(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	cutoff := time.Now().In(time.Local).Truncate(time.Hour)
+	if _, err := svc.store.CreateNewsContextBackfill(ctx, NewsContextBackfill{
+		Status: NewsContextBackfillStatusRunning, Phase: "daily",
+		RangeStartAt: cutoff.Add(-24 * time.Hour), CutoffAt: cutoff,
+		TotalNewsCount: 42, ProcessedNewsCount: 17, RemainingNewsCount: 25,
+		CompletedChunkCount: 9,
+	}); err != nil {
+		t.Fatalf("create persisted progress snapshot: %v", err)
+	}
+
+	observed, err := svc.GetNewsContextBackfill(ctx)
+	if err != nil {
+		t.Fatalf("get persisted progress snapshot: %v", err)
+	}
+	if observed.TotalNewsCount != 42 || observed.ProcessedNewsCount != 17 ||
+		observed.RemainingNewsCount != 25 || observed.CompletedChunkCount != 9 {
+		t.Fatalf("status read recomputed persisted progress: %+v", observed)
+	}
+}
+
+func TestNewsContextBackfillRunProgressAggregatesCompletionCountsOnce(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	cutoff := time.Now().In(time.Local).Truncate(time.Hour)
+	events := make([]NewsEvent, 0, 2)
+	for index := 0; index < 2; index++ {
+		event, err := svc.CreateNewsEvent(ctx, NewsEvent{
+			Source: "test", Title: fmt.Sprintf("聚合进度-%d", index),
+			EventAt: cutoff.Add(time.Duration(index-2) * time.Minute),
+		})
+		if err != nil {
+			t.Fatalf("create news %d: %v", index, err)
+		}
+		events = append(events, event)
+	}
+	backfill, err := svc.store.CreateNewsContextBackfillWithManifest(ctx, NewsContextBackfill{
+		Status: NewsContextBackfillStatusRunning, Phase: "hourly", CutoffAt: cutoff,
+	})
+	if err != nil {
+		t.Fatalf("create backfill manifest: %v", err)
+	}
+	for runIndex := 0; runIndex < 2; runIndex++ {
+		run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+			WindowType: NewsContextWindowHourly, TriggerType: NewsContextTriggerBackfill,
+			Status:       NewsContextRunStatusCompleted,
+			WindowStart:  cutoff.Add(time.Duration(runIndex-2) * time.Hour),
+			WindowEnd:    cutoff.Add(time.Duration(runIndex-1) * time.Hour),
+			ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+		})
+		if err != nil {
+			t.Fatalf("create run %d: %v", runIndex, err)
+		}
+		if err := svc.store.LinkNewsContextBackfillRun(ctx, backfill.ID, run.ID); err != nil {
+			t.Fatalf("link run %d: %v", runIndex, err)
+		}
+		items := []NewsContextRunItem{{
+			RunID: run.ID, ObjectType: NewsContextRunItemNewsEvent,
+			ObjectID: events[1].ID, Status: NewsContextRunItemCompleted,
+		}}
+		if runIndex == 0 {
+			items = append(items, NewsContextRunItem{
+				RunID: run.ID, ObjectType: NewsContextRunItemNewsEvent,
+				ObjectID: events[0].ID, Status: NewsContextRunItemCompleted,
+			})
+		}
+		if err := svc.store.AddNewsContextRunItems(ctx, items); err != nil {
+			t.Fatalf("add run items %d: %v", runIndex, err)
+		}
+	}
+
+	processed, duplicates, err := svc.store.NewsContextBackfillRunProgress(ctx, backfill.ID)
+	if err != nil || processed != 1 || duplicates != 1 {
+		t.Fatalf("aggregated progress processed=%d duplicates=%d err=%v", processed, duplicates, err)
+	}
+	var indexSQL string
+	if err := svc.store.db.QueryRowContext(ctx, `SELECT COALESCE(sql,'') FROM sqlite_master
+		WHERE type='index' AND name='idx_stockv2_news_context_run_items_backfill_progress'`).Scan(&indexSQL); err != nil {
+		t.Fatalf("get backfill progress index: %v", err)
+	}
+	if !strings.Contains(indexSQL, "object_id") {
+		t.Fatalf("backfill progress index is not covering: %s", indexSQL)
+	}
+}
 
 func TestRunningNewsContextBackfillDefersOptionalMaintenance(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)

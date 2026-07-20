@@ -1214,27 +1214,35 @@ func (s *Service) ProcessNewsContextSubmittedResult(ctx context.Context, logical
 }
 
 func (s *Service) repairNewsContextRunEmbeddings(ctx context.Context, runID string) error {
-	threadIDs := make([]string, 0)
-	versionIDs := make([]string, 0)
-	for offset := 0; ; offset += newsContextSeedPageSize {
-		versions, err := s.store.ListNewsThreadVersions(ctx, NewsThreadVersionListFilter{
-			RunID: runID, Limit: newsContextSeedPageSize, Offset: offset,
-		})
-		if err != nil {
+	for {
+		ready, err := s.repairNewsContextRunEmbeddingsPage(ctx, runID)
+		if err != nil || ready {
 			return err
 		}
-		for _, version := range versions {
-			if version.IndexStatus == NewsContextIndexReady {
-				continue
-			}
-			threadIDs = append(threadIDs, version.ThreadID)
-			versionIDs = append(versionIDs, version.ID)
-		}
-		if len(versions) < newsContextSeedPageSize {
-			break
-		}
 	}
-	return s.SyncNewsContextEmbeddingObjects(ctx, threadIDs, versionIDs)
+}
+
+func (s *Service) repairNewsContextRunEmbeddingsPage(ctx context.Context, runID string) (bool, error) {
+	versions, err := s.store.ListNewsContextRunVersionsNeedingIndex(ctx, runID, newsContextBackfillIndexPageSize)
+	if err != nil {
+		return false, err
+	}
+	if len(versions) == 0 {
+		return true, nil
+	}
+	threadIDs := make([]string, 0, len(versions))
+	versionIDs := make([]string, 0, len(versions))
+	for _, version := range versions {
+		threadIDs = append(threadIDs, version.ThreadID)
+		versionIDs = append(versionIDs, version.ID)
+	}
+	// ponytail: index_status is the durable crash-recovery cursor. Normal
+	// batches sync only their changed IDs; the final backfill gate still checks
+	// asset hashes and vectors across the complete retained result.
+	if err := s.SyncNewsContextEmbeddingObjects(ctx, threadIDs, versionIDs); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func (s *Service) listAllNewsContextRunItems(ctx context.Context, filter NewsContextRunItemListFilter) ([]NewsContextRunItem, error) {

@@ -72,7 +72,10 @@ func (s *Service) GetNewsContextBackfill(ctx context.Context) (NewsContextBackfi
 	if err != nil {
 		return item, err
 	}
-	item, err = s.refreshNewsContextBackfillProgress(ctx, item)
+	// ponytail: high-frequency status reads use the worker's durable progress
+	// snapshot. Exact manifest reconciliation remains at state transitions and
+	// final safety gates instead of multiplying full-history work per client.
+	item, err = s.attachNewsContextBackfillReviewCoverage(ctx, item)
 	if err != nil {
 		return item, err
 	}
@@ -262,6 +265,13 @@ func (s *Service) refreshNewsContextBackfillProgress(ctx context.Context, item N
 		return item, err
 	}
 	item.CompletedChunkCount = chunks
+	return s.attachNewsContextBackfillReviewCoverage(ctx, item)
+}
+
+func (s *Service) attachNewsContextBackfillReviewCoverage(ctx context.Context, item NewsContextBackfill) (NewsContextBackfill, error) {
+	if strings.TrimSpace(item.FinalReviewRunID) == "" {
+		return item, nil
+	}
 	dailyOutputs, linkedOutputs, err := s.store.NewsContextBackfillReviewCoverage(ctx, item.ID, item.FinalReviewRunID)
 	if err != nil {
 		return item, err
@@ -451,10 +461,6 @@ func (s *Service) runNewsContextBackfillStep(ctx context.Context) error {
 	if item.Phase == "finalizing" {
 		s.startNewsContextBackfillFinalizer(item.ID)
 		return nil
-	}
-	item, err = s.refreshAndSaveNewsContextBackfill(ctx, item)
-	if err != nil {
-		return err
 	}
 	if item.Phase == newsContextBackfillPhaseIndexing {
 		return s.startNewsContextBackfillFinalIndexing(item.ID)
@@ -1035,7 +1041,7 @@ func (s *Service) executeNewsContextBackfillChunk(ctx context.Context, runID str
 			_ = s.failNewsContextBackfill(context.Background(), backfill, cause)
 		}
 	}
-	indexesReady, err := s.repairNewsContextBackfillRunEmbeddingsPage(ctx, run.ID)
+	indexesReady, err := s.repairNewsContextRunEmbeddingsPage(ctx, run.ID)
 	if err != nil {
 		fail(err)
 		return
@@ -1128,69 +1134,6 @@ func (s *Service) executeNewsContextBackfillChunk(ctx context.Context, runID str
 	if err := s.completeNewsContextRun(ctx, &run, cfg); err != nil {
 		fail(err)
 	}
-}
-
-func (s *Service) repairNewsContextBackfillRunEmbeddingsPage(ctx context.Context, runID string) (bool, error) {
-	_, cfg, err := s.ensureEmbeddingModelReady(ctx)
-	if err != nil {
-		return false, err
-	}
-	threadIDs := make([]string, 0, newsContextBackfillIndexPageSize)
-	versionIDs := make([]string, 0, newsContextBackfillIndexPageSize)
-	seenThreads := make(map[string]struct{})
-	workCount := func() int { return len(threadIDs) + len(versionIDs) }
-	for offset := 0; ; offset += newsContextSeedPageSize {
-		versions, err := s.store.ListNewsThreadVersions(ctx, NewsThreadVersionListFilter{
-			RunID: runID, Limit: newsContextSeedPageSize, Offset: offset,
-		})
-		if err != nil {
-			return false, err
-		}
-		for _, version := range versions {
-			ready, err := s.embeddingObjectCurrentAndReady(ctx, EmbeddingObjectNewsThreadVersion,
-				version.ID, NewsThreadVersionEmbeddingText(version), cfg.EmbeddingModelID)
-			if err != nil {
-				return false, err
-			}
-			if !ready {
-				versionIDs = append(versionIDs, version.ID)
-			}
-			if workCount() < newsContextBackfillIndexPageSize {
-				if _, seen := seenThreads[version.ThreadID]; !seen {
-					seenThreads[version.ThreadID] = struct{}{}
-					thread, err := s.store.GetNewsThread(ctx, version.ThreadID)
-					if err != nil {
-						return false, err
-					}
-					if newsThreadEmbeddingIndexable(thread) {
-						ready, err := s.embeddingObjectCurrentAndReady(ctx, EmbeddingObjectNewsThread,
-							thread.ID, NewsThreadEmbeddingText(thread), cfg.EmbeddingModelID)
-						if err != nil {
-							return false, err
-						}
-						if !ready {
-							threadIDs = append(threadIDs, thread.ID)
-						}
-					}
-				}
-			}
-			if workCount() >= newsContextBackfillIndexPageSize {
-				break
-			}
-		}
-		if workCount() >= newsContextBackfillIndexPageSize || len(versions) < newsContextSeedPageSize {
-			break
-		}
-	}
-	if workCount() == 0 {
-		return true, nil
-	}
-	// ponytail: a restarted historical run repairs one small index page and
-	// yields. Ready asset state is the durable cursor and realtime remains first.
-	if err := s.SyncNewsContextEmbeddingObjects(ctx, threadIDs, versionIDs); err != nil {
-		return false, err
-	}
-	return false, nil
 }
 
 func (s *Service) startNewsContextBackfillFinalReview(ctx context.Context, item NewsContextBackfill) error {

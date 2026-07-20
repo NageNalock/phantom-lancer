@@ -66,6 +66,60 @@ func TestPruneTransientNewsContextEmbeddingsKeepsDurableVersions(t *testing.T) {
 	}
 }
 
+func TestNewsContextRunEmbeddingRecoveryUsesPendingStatusAndFinalGateChecksAll(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	model := configureEmbeddingModel(t, svc, "embed-recovery-cursor")
+	zero := 0
+	if _, err := svc.UpdateEmbeddingConfig(ctx, RequestUpdateEmbeddingConfig{MaintainRateLimitMs: &zero}); err != nil {
+		t.Fatalf("disable test rate delay: %v", err)
+	}
+	thread, err := svc.store.CreateNewsThread(ctx, NewsThread{
+		Title: "恢复游标主题", CoreThesis: "分片恢复只处理未完成索引",
+		Stage: NewsThreadStageEmerging, Status: NewsThreadStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("create recovery thread: %v", err)
+	}
+	until := time.Now().Add(time.Hour)
+	readyWithoutAsset, err := svc.store.CreateNewsThreadVersion(ctx, NewsThreadVersion{
+		ThreadID: thread.ID, RunID: "embedding-recovery-run", AgentRunID: "embedding-recovery-ready",
+		WindowType: NewsContextWindowDaily, VersionNo: 1, Title: thread.Title,
+		CoreThesis: thread.CoreThesis, Stage: thread.Stage, ReviewStatus: NewsContextReviewCompleted,
+		IndexStatus: NewsContextIndexReady, EffectiveAt: until.Add(-2 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create ready recovery version: %v", err)
+	}
+	pending, err := svc.store.CreateNewsThreadVersion(ctx, NewsThreadVersion{
+		ThreadID: thread.ID, RunID: "embedding-recovery-run", AgentRunID: "embedding-recovery-pending",
+		WindowType: NewsContextWindowDaily, VersionNo: 2, Title: thread.Title,
+		CoreThesis: "未完成分片需要恢复", Stage: thread.Stage, ReviewStatus: NewsContextReviewCompleted,
+		IndexStatus: NewsContextIndexPending, EffectiveAt: until.Add(-time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create pending recovery version: %v", err)
+	}
+
+	ready, err := svc.repairNewsContextRunEmbeddingsPage(ctx, "embedding-recovery-run")
+	if err != nil || ready {
+		t.Fatalf("repair pending page ready=%v err=%v", ready, err)
+	}
+	if _, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectNewsThreadVersion, pending.ID, model.ID); err != nil {
+		t.Fatalf("pending version was not repaired: %v", err)
+	}
+	if _, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectNewsThreadVersion, readyWithoutAsset.ID, model.ID); !errors.Is(err, ErrEmbeddingAssetNotFound) {
+		t.Fatalf("ready cursor version was rescanned: %v", err)
+	}
+	if ready, err = svc.repairNewsContextRunEmbeddingsPage(ctx, "embedding-recovery-run"); err != nil || !ready {
+		t.Fatalf("completed recovery cursor ready=%v err=%v", ready, err)
+	}
+	if _, indexesReady, err := svc.verifyNewsContextBackfillFinalIndexes(ctx, until); err != nil || indexesReady {
+		t.Fatalf("final full index gate ready=%v err=%v, want missing ready-status asset detected", indexesReady, err)
+	}
+}
+
 func TestNewsContextBackfillFinalIndexesYieldInPagesAndIncludeFinalDaily(t *testing.T) {
 	svc, cleanup := newEmbeddingTestService(t)
 	defer cleanup()

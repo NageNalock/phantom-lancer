@@ -854,19 +854,20 @@ func (s *Store) ReplaceNewsContextHistoricalThreadItems(ctx context.Context, run
 
 func (s *Store) NewsContextBackfillRunProgress(ctx context.Context, backfillID string) (int, int, error) {
 	var processed, missing int
-	err := s.db.QueryRowContext(ctx, `SELECT
-		COALESCE(SUM(CASE WHEN completion_count=1 THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN completion_count>1 THEN 1 ELSE 0 END),0)
-		FROM (
-			SELECT m.news_event_id,(
-				SELECT COUNT(*) FROM stockv2_news_context_run_items i
-				JOIN stockv2_news_context_backfill_runs r ON r.run_id=i.run_id
-				WHERE r.backfill_id=m.backfill_id AND i.object_type=?
-				AND i.object_id=m.news_event_id AND i.status=?
-			) AS completion_count
-			FROM stockv2_news_context_backfill_news m WHERE m.backfill_id=?
-		) outcomes`, NewsContextRunItemNewsEvent, NewsContextRunItemCompleted,
-		strings.TrimSpace(backfillID)).Scan(&processed, &missing)
+	err := s.db.QueryRowContext(ctx, `WITH completion_counts AS (
+			SELECT i.object_id,COUNT(*) AS completion_count
+			FROM stockv2_news_context_backfill_runs r
+			JOIN stockv2_news_context_run_items i ON i.run_id=r.run_id
+			WHERE r.backfill_id=? AND i.status=? AND i.object_type=?
+			GROUP BY i.object_id
+		)
+		SELECT
+			COALESCE(SUM(CASE WHEN COALESCE(c.completion_count,0)=1 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN COALESCE(c.completion_count,0)>1 THEN 1 ELSE 0 END),0)
+		FROM stockv2_news_context_backfill_news m
+		LEFT JOIN completion_counts c ON c.object_id=m.news_event_id
+		WHERE m.backfill_id=?`, strings.TrimSpace(backfillID), NewsContextRunItemCompleted,
+		NewsContextRunItemNewsEvent, strings.TrimSpace(backfillID)).Scan(&processed, &missing)
 	if err != nil {
 		return 0, 0, wrapError(err, "get news context backfill run progress")
 	}

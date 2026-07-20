@@ -22,6 +22,7 @@ import {
   resolveAvailableTaskModel,
   themeStageLabel,
 } from "../src/features/stockv2/news-context/model.ts";
+import { startSequentialPolling } from "../src/features/stockv2/news-context/polling.ts";
 
 assert.equal(themeStageLabel("accelerating"), "加速");
 assert.equal(indexStatusTone("failed"), "danger");
@@ -101,5 +102,29 @@ assert.equal(newsContextFinalReviewCoverage({
 assert.deepEqual(originalNewsStatus(true), { label: "原文已清理", tone: "neutral" });
 assert.deepEqual(originalNewsStatus(false), { label: "原文保留", tone: "good" });
 assert.deepEqual(originalNewsStatus(), { label: "原文状态未知", tone: "neutral" });
+
+let pollingCalls = 0;
+let concurrentPollingCalls = 0;
+let maxConcurrentPollingCalls = 0;
+let releasePoll;
+const stopPolling = startSequentialPolling(async () => {
+  pollingCalls += 1;
+  concurrentPollingCalls += 1;
+  maxConcurrentPollingCalls = Math.max(maxConcurrentPollingCalls, concurrentPollingCalls);
+  await new Promise((resolve) => {
+    releasePoll = resolve;
+  });
+  concurrentPollingCalls -= 1;
+}, 1);
+await new Promise((resolve) => setTimeout(resolve, 10));
+assert.equal(pollingCalls, 1);
+releasePoll();
+await new Promise((resolve) => setTimeout(resolve, 10));
+assert.equal(pollingCalls, 2);
+stopPolling();
+releasePoll();
+await new Promise((resolve) => setTimeout(resolve, 10));
+assert.equal(maxConcurrentPollingCalls, 1);
+assert.equal(pollingCalls, 2);
 
 console.log("消息脉络前端纯函数检查通过");

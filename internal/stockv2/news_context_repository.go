@@ -88,8 +88,9 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 			UNIQUE(run_id, object_type, object_id),
 			FOREIGN KEY (run_id) REFERENCES stockv2_news_context_runs(id) ON DELETE CASCADE
 		);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_news_context_run_items_run_status
-			ON stockv2_news_context_run_items(run_id, status, object_type);
+		DROP INDEX IF EXISTS idx_stockv2_news_context_run_items_run_status;
+		CREATE INDEX IF NOT EXISTS idx_stockv2_news_context_run_items_backfill_progress
+			ON stockv2_news_context_run_items(run_id, status, object_type, object_id);
 
 		CREATE TABLE IF NOT EXISTS stockv2_news_context_cleanup_runs (
 			id TEXT PRIMARY KEY,
@@ -1325,6 +1326,18 @@ func (s *Store) ListNewsThreadVersions(ctx context.Context, filter NewsThreadVer
 		return nil, wrapError(err, "list news thread versions")
 	}
 	return scanRows(rows, scanNewsThreadVersion, "scan news thread version", "iterate news thread versions")
+}
+
+func (s *Store) ListNewsContextRunVersionsNeedingIndex(ctx context.Context, runID string, limit int) ([]NewsThreadVersion, error) {
+	rows, err := s.marketDB.db.QueryContext(ctx, newsThreadVersionSelectSQL+`
+		WHERE run_id=? AND index_status<>?
+		ORDER BY COALESCE(effective_at,created_at) ASC,version_no ASC,thread_id ASC,id ASC
+		LIMIT ?`, strings.TrimSpace(runID), NewsContextIndexReady, normalizedPageLimit(limit, 100))
+	if err != nil {
+		return nil, wrapError(err, "list news context run versions needing index")
+	}
+	return scanRows(rows, scanNewsThreadVersion,
+		"scan news context run version needing index", "iterate news context run versions needing index")
 }
 
 func (s *Store) ListLatestNewsThreadVersionsAt(ctx context.Context, at time.Time, limit, offset int) ([]NewsThreadVersion, error) {

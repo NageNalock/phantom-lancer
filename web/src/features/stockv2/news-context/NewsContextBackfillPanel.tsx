@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowClockwise, Pause, Play, Repeat } from "@phosphor-icons/react";
 import type { AppActions } from "../../../app/App";
 import type {
@@ -20,6 +20,7 @@ import {
   newsContextBackfillNeedsRetry,
   newsContextFinalReviewCoverage,
 } from "./model";
+import { startSequentialPolling } from "./polling";
 
 export function NewsContextBackfillPanel({
   actions,
@@ -36,7 +37,17 @@ export function NewsContextBackfillPanel({
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const taskRequestRef = useRef<Promise<StockV2NewsContextBackfillTask | null> | null>(null);
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
+
+  function requestTask() {
+    if (!taskRequestRef.current) {
+      taskRequestRef.current = loadBackfillTask(actions).finally(() => {
+        taskRequestRef.current = null;
+      });
+    }
+    return taskRequestRef.current;
+  }
 
   async function load(initial = false) {
     if (initial && !preview && !task) setLoading(true);
@@ -45,7 +56,7 @@ export function NewsContextBackfillPanel({
     try {
       const [nextPreview, nextTask] = await Promise.all([
         actions.api<StockV2NewsContextBackfillPreview>("/api/stockv2/news-context/backfill/preview"),
-        loadBackfillTask(actions),
+        requestTask(),
       ]);
       setPreview(nextPreview);
       setTask(nextTask);
@@ -65,8 +76,16 @@ export function NewsContextBackfillPanel({
   const taskRunning = task?.status === "running";
   useEffect(() => {
     if (!taskRunning) return;
-    const timer = window.setInterval(() => void load(), 5000);
-    return () => window.clearInterval(timer);
+    return startSequentialPolling(async (signal) => {
+      try {
+        const nextTask = await requestTask();
+        if (signal.aborted) return;
+        setTask(nextTask);
+        setError(null);
+      } catch (loadError) {
+        if (!signal.aborted) setError(friendlyError(loadError));
+      }
+    }, 5000);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskRunning]);
 
