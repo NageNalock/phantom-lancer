@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 
 import {
   backfillPhaseLabel,
+  backfillRunPhaseLabel,
+  backfillStageLabel,
+  backfillStageStatusLabel,
+  backfillStageStatusTone,
   backfillStatusTone,
   confidenceLabel,
   formatNewsContextBytes,
@@ -30,6 +34,10 @@ assert.equal(backfillPhaseLabel("final_review"), "完成组合影响复核");
 assert.equal(backfillPhaseLabel("finalizing"), "执行最终安全校验");
 assert.equal(backfillPhaseLabel("late_scan"), "检查迟到与遗漏消息");
 assert.equal(backfillStatusTone("failed"), "danger");
+assert.equal(backfillStageLabel("daily"), "日级归纳");
+assert.equal(backfillStageStatusLabel("running"), "进行中");
+assert.equal(backfillStageStatusTone("completed"), "good");
+assert.equal(backfillRunPhaseLabel("converging"), "日级收敛");
 assert.equal(mcpVerificationLabel(true, true), "待真实验证");
 assert.equal(mcpVerificationLabel(true, true, "ready"), "已验证");
 assert.equal(mcpVerificationTone(true, true, "failed"), "danger");

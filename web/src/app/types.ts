@@ -1804,6 +1804,19 @@ export type StockV2NewsContextBackfillStatus =
   | "completed"
   | string;
 
+export interface StockV2NewsContextBackfillStageProgress {
+  phase: string;
+  status: string;
+  completedWindowCount?: number;
+  totalWindowCount?: number;
+  processedItemCount?: number;
+  totalItemCount?: number;
+  pendingItemCount?: number;
+  currentWindowStart?: string;
+  currentWindowEnd?: string;
+  currentRunPhase?: string;
+}
+
 export interface StockV2NewsContextBackfillTask {
   id: string;
   status: StockV2NewsContextBackfillStatus;
@@ -1827,6 +1840,7 @@ export interface StockV2NewsContextBackfillTask {
   startedAt?: string;
   updatedAt?: string;
   completedAt?: string;
+  stageProgress?: StockV2NewsContextBackfillStageProgress[];
 }
 
 // ===== Daily Bars (日级历史行情) =====

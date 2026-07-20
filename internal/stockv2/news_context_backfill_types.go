@@ -35,29 +35,43 @@ type NewsContextBackfillPreview struct {
 }
 
 type NewsContextBackfill struct {
-	ID                  string    `json:"id"`
-	Status              string    `json:"status"`
-	Phase               string    `json:"phase"`
-	OwnerRevision       int64     `json:"-"`
-	RangeStartAt        time.Time `json:"rangeStartAt,omitempty"`
-	CutoffAt            time.Time `json:"cutoffAt"`
-	TotalNewsCount      int       `json:"totalNewsCount"`
-	ProcessedNewsCount  int       `json:"processedNewsCount"`
-	RemainingNewsCount  int       `json:"remainingNewsCount"`
-	MissingNewsCount    int       `json:"missingNewsCount"`
-	CompletedChunkCount int       `json:"completedChunkCount"`
-	CurrentWindowStart  time.Time `json:"currentWindowStart,omitempty"`
-	CurrentWindowEnd    time.Time `json:"currentWindowEnd,omitempty"`
-	CurrentRunID        string    `json:"currentRunId,omitempty"`
-	FinalReviewRunID    string    `json:"finalReviewRunId,omitempty"`
-	DailyOutputCount    int       `json:"historicalDailyOutputVersionCount"`
-	ReviewLinkedCount   int       `json:"finalReviewLinkedVersionCount"`
-	ReviewMissingCount  int       `json:"finalReviewMissingVersionCount"`
-	ErrorMessage        string    `json:"errorMessage,omitempty"`
-	RequestedBy         string    `json:"requestedBy,omitempty"`
-	StartedAt           time.Time `json:"startedAt,omitempty"`
-	UpdatedAt           time.Time `json:"updatedAt"`
-	CompletedAt         time.Time `json:"completedAt,omitempty"`
+	ID                  string                             `json:"id"`
+	Status              string                             `json:"status"`
+	Phase               string                             `json:"phase"`
+	OwnerRevision       int64                              `json:"-"`
+	RangeStartAt        time.Time                          `json:"rangeStartAt,omitempty"`
+	CutoffAt            time.Time                          `json:"cutoffAt"`
+	TotalNewsCount      int                                `json:"totalNewsCount"`
+	ProcessedNewsCount  int                                `json:"processedNewsCount"`
+	RemainingNewsCount  int                                `json:"remainingNewsCount"`
+	MissingNewsCount    int                                `json:"missingNewsCount"`
+	CompletedChunkCount int                                `json:"completedChunkCount"`
+	CurrentWindowStart  time.Time                          `json:"currentWindowStart,omitempty"`
+	CurrentWindowEnd    time.Time                          `json:"currentWindowEnd,omitempty"`
+	CurrentRunID        string                             `json:"currentRunId,omitempty"`
+	FinalReviewRunID    string                             `json:"finalReviewRunId,omitempty"`
+	DailyOutputCount    int                                `json:"historicalDailyOutputVersionCount"`
+	ReviewLinkedCount   int                                `json:"finalReviewLinkedVersionCount"`
+	ReviewMissingCount  int                                `json:"finalReviewMissingVersionCount"`
+	ErrorMessage        string                             `json:"errorMessage,omitempty"`
+	RequestedBy         string                             `json:"requestedBy,omitempty"`
+	StartedAt           time.Time                          `json:"startedAt,omitempty"`
+	UpdatedAt           time.Time                          `json:"updatedAt"`
+	CompletedAt         time.Time                          `json:"completedAt,omitempty"`
+	StageProgress       []NewsContextBackfillStageProgress `json:"stageProgress,omitempty"`
+}
+
+type NewsContextBackfillStageProgress struct {
+	Phase                string    `json:"phase"`
+	Status               string    `json:"status"`
+	CompletedWindowCount int       `json:"completedWindowCount,omitempty"`
+	TotalWindowCount     int       `json:"totalWindowCount,omitempty"`
+	ProcessedItemCount   int       `json:"processedItemCount,omitempty"`
+	TotalItemCount       int       `json:"totalItemCount,omitempty"`
+	PendingItemCount     int       `json:"pendingItemCount,omitempty"`
+	CurrentWindowStart   time.Time `json:"currentWindowStart,omitempty"`
+	CurrentWindowEnd     time.Time `json:"currentWindowEnd,omitempty"`
+	CurrentRunPhase      string    `json:"currentRunPhase,omitempty"`
 }
 
 type RequestStartNewsContextBackfill struct {

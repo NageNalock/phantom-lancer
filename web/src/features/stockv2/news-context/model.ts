@@ -275,6 +275,50 @@ export function backfillStatusTone(value?: string): Tone {
   return "neutral";
 }
 
+export function backfillStageLabel(value?: string): string {
+  return ({
+    hourly: "小时级归纳",
+    four_hour: "四小时级归纳",
+    daily: "日级归纳",
+    late_scan: "迟到与遗漏扫描",
+    final_daily: "当前日结论",
+    indexing: "主题索引",
+    final_review: "组合影响复核",
+    finalizing: "最终安全校验",
+  } as Record<string, string>)[value || ""] || value || "未知阶段";
+}
+
+export function backfillStageStatusLabel(value?: string): string {
+  return ({
+    pending: "待开始",
+    queued: "排队中",
+    running: "进行中",
+    paused: "已暂停",
+    failed: "失败",
+    completed: "已完成",
+  } as Record<string, string>)[value || ""] || value || "未知";
+}
+
+export function backfillStageStatusTone(value?: string): Tone {
+  if (value === "completed") return "good";
+  if (value === "running" || value === "queued" || value === "paused") return "warn";
+  if (value === "failed") return "danger";
+  return "neutral";
+}
+
+export function backfillRunPhaseLabel(value?: string): string {
+  return ({
+    collecting: "收集输入",
+    aggregating: "分批归纳",
+    queued: "等待下一批",
+    converging: "日级收敛",
+    indexing: "更新索引",
+    waiting_review: "等待复核",
+    completed: "已完成",
+    failed: "失败",
+  } as Record<string, string>)[value || ""] || value || "";
+}
+
 export function coverageStatusLabel(value?: string): string {
   return ({
     complete: "覆盖完整",

@@ -579,6 +579,40 @@ func (s *Store) ListNewsContextBackfillRuns(ctx context.Context, backfillID, win
 	return scanRows(rows, scanNewsContextRun, "scan news context backfill run", "iterate news context backfill runs")
 }
 
+type newsContextBackfillWindowProgress struct {
+	CompletedWindowCount int
+	ProcessedItemCount   int
+	TotalItemCount       int
+	PendingItemCount     int
+}
+
+func (s *Store) NewsContextBackfillWindowProgress(ctx context.Context, backfillID string) (map[string]newsContextBackfillWindowProgress, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT r.window_type,
+		COALESCE(SUM(CASE WHEN r.status=? THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(r.processed_count),0),
+		COALESCE(SUM(r.input_count),0),COALESCE(SUM(r.pending_count),0)
+		FROM stockv2_news_context_runs r
+		JOIN stockv2_news_context_backfill_runs b ON b.run_id=r.id
+		WHERE b.backfill_id=? AND r.trigger_type=?
+		GROUP BY r.window_type`, NewsContextRunStatusCompleted,
+		strings.TrimSpace(backfillID), NewsContextTriggerBackfill)
+	if err != nil {
+		return nil, wrapError(err, "get news context backfill window progress")
+	}
+	defer rows.Close()
+	progress := make(map[string]newsContextBackfillWindowProgress, 3)
+	for rows.Next() {
+		var windowType string
+		var item newsContextBackfillWindowProgress
+		if err := rows.Scan(&windowType, &item.CompletedWindowCount, &item.ProcessedItemCount,
+			&item.TotalItemCount, &item.PendingItemCount); err != nil {
+			return nil, wrapError(err, "scan news context backfill window progress")
+		}
+		progress[windowType] = item
+	}
+	return progress, wrapError(rows.Err(), "iterate news context backfill window progress")
+}
+
 func (s *Store) ListNewsContextBackfillOutputVersionIDs(ctx context.Context, backfillID, windowType string, start, end time.Time) ([]string, error) {
 	runRows, err := s.db.QueryContext(ctx, `SELECT r.id
 		FROM stockv2_news_context_runs r

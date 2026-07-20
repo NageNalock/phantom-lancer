@@ -72,7 +72,11 @@ func (s *Service) GetNewsContextBackfill(ctx context.Context) (NewsContextBackfi
 	if err != nil {
 		return item, err
 	}
-	return s.refreshNewsContextBackfillProgress(ctx, item)
+	item, err = s.refreshNewsContextBackfillProgress(ctx, item)
+	if err != nil {
+		return item, err
+	}
+	return s.attachNewsContextBackfillStageProgress(ctx, item)
 }
 
 func (s *Service) StartNewsContextBackfill(ctx context.Context, req RequestStartNewsContextBackfill) (NewsContextBackfill, error) {
@@ -98,18 +102,17 @@ func (s *Service) StartNewsContextBackfill(ctx context.Context, req RequestStart
 		return NewsContextBackfill{}, fmt.Errorf("%w: %s", ErrNewsContextPrerequisite, strings.Join(preview.BlockingReasons, "；"))
 	}
 	now := time.Now()
-	item, err := s.store.CreateNewsContextBackfillWithManifest(ctx, NewsContextBackfill{
+	if _, err := s.store.CreateNewsContextBackfillWithManifest(ctx, NewsContextBackfill{
 		Status:      NewsContextBackfillStatusRunning,
 		Phase:       "hourly",
 		CutoffAt:    newsContextBackfillCutoff(now),
 		RequestedBy: strings.TrimSpace(req.RequestedBy),
 		StartedAt:   now,
-	})
-	if err != nil {
+	}); err != nil {
 		return NewsContextBackfill{}, err
 	}
 	s.StartBackground(context.Background())
-	return item, nil
+	return s.GetNewsContextBackfill(ctx)
 }
 
 func (s *Service) PauseNewsContextBackfill(ctx context.Context) (NewsContextBackfill, error) {
@@ -122,7 +125,11 @@ func (s *Service) PauseNewsContextBackfill(ctx context.Context) (NewsContextBack
 	}
 	item.Status = NewsContextBackfillStatusPaused
 	item.ErrorMessage = ""
-	return s.refreshAndSaveNewsContextBackfillOwner(ctx, item)
+	item, err = s.refreshAndSaveNewsContextBackfillOwner(ctx, item)
+	if err != nil {
+		return item, err
+	}
+	return s.attachNewsContextBackfillStageProgress(ctx, item)
 }
 
 func (s *Service) ResumeNewsContextBackfill(ctx context.Context) (NewsContextBackfill, error) {
@@ -140,7 +147,10 @@ func (s *Service) ResumeNewsContextBackfill(ctx context.Context) (NewsContextBac
 	if err == nil {
 		s.StartBackground(context.Background())
 	}
-	return item, err
+	if err != nil {
+		return item, err
+	}
+	return s.attachNewsContextBackfillStageProgress(ctx, item)
 }
 
 func (s *Service) RetryNewsContextBackfill(ctx context.Context) (NewsContextBackfill, error) {
@@ -181,7 +191,10 @@ func (s *Service) RetryNewsContextBackfill(ctx context.Context) (NewsContextBack
 	if err == nil {
 		s.StartBackground(context.Background())
 	}
-	return item, err
+	if err != nil {
+		return item, err
+	}
+	return s.attachNewsContextBackfillStageProgress(ctx, item)
 }
 
 func newsContextBackfillResumePhase(item NewsContextBackfill) string {
@@ -260,6 +273,169 @@ func (s *Service) refreshNewsContextBackfillProgress(ctx context.Context, item N
 		item.ReviewMissingCount = 0
 	}
 	return item, nil
+}
+
+func (s *Service) attachNewsContextBackfillStageProgress(ctx context.Context, item NewsContextBackfill) (NewsContextBackfill, error) {
+	windows, err := s.store.NewsContextBackfillWindowProgress(ctx, item.ID)
+	if err != nil {
+		return item, err
+	}
+	var currentRun *NewsContextRun
+	if strings.TrimSpace(item.CurrentRunID) != "" {
+		run, runErr := s.store.GetNewsContextRun(ctx, item.CurrentRunID)
+		if runErr != nil {
+			return item, runErr
+		}
+		currentRun = &run
+	}
+	item.StageProgress = buildNewsContextBackfillStageProgress(item, windows, currentRun)
+	return item, nil
+}
+
+func buildNewsContextBackfillStageProgress(
+	item NewsContextBackfill,
+	windows map[string]newsContextBackfillWindowProgress,
+	currentRun *NewsContextRun,
+) []NewsContextBackfillStageProgress {
+	progress := make([]NewsContextBackfillStageProgress, 0, 8)
+	for _, window := range []struct {
+		phase    string
+		duration time.Duration
+	}{
+		{NewsContextWindowHourly, time.Hour},
+		{NewsContextWindowFourHour, 4 * time.Hour},
+		{NewsContextWindowDaily, 24 * time.Hour},
+	} {
+		counts := windows[window.phase]
+		stage := NewsContextBackfillStageProgress{
+			Phase:                window.phase,
+			CompletedWindowCount: counts.CompletedWindowCount,
+			TotalWindowCount:     newsContextBackfillExpectedChildren(item.RangeStartAt, item.CutoffAt, window.duration),
+			ProcessedItemCount:   counts.ProcessedItemCount,
+			TotalItemCount:       counts.TotalItemCount,
+			PendingItemCount:     counts.PendingItemCount,
+		}
+		stage.Status = newsContextBackfillWindowStageStatus(item, stage)
+		if currentRun != nil && currentRun.TriggerType == NewsContextTriggerBackfill &&
+			currentRun.WindowType == window.phase {
+			attachNewsContextBackfillCurrentRun(&stage, *currentRun)
+		}
+		progress = append(progress, stage)
+	}
+
+	lateScan := NewsContextBackfillStageProgress{Phase: "late_scan"}
+	switch item.Phase {
+	case "late_scan":
+		lateScan.Status = newsContextBackfillActiveStageStatus(item)
+	case "final_review", newsContextBackfillPhaseIndexing, "finalizing", "completed":
+		lateScan.Status = NewsContextRunStatusCompleted
+	default:
+		lateScan.Status = NewsContextRunStatusPending
+	}
+	progress = append(progress, lateScan)
+
+	finalDaily := NewsContextBackfillStageProgress{Phase: "final_daily", Status: NewsContextRunStatusPending}
+	if currentRun != nil && currentRun.ID == item.FinalReviewRunID {
+		attachNewsContextBackfillCurrentRun(&finalDaily, *currentRun)
+		switch {
+		case currentRun.Status == NewsContextRunStatusWaitingReview ||
+			currentRun.ReviewStatus == NewsContextReviewRunning ||
+			currentRun.ReviewStatus == NewsContextReviewCompleted ||
+			currentRun.ReviewStatus == NewsContextReviewFailed:
+			finalDaily.Status = NewsContextRunStatusCompleted
+		case currentRun.Status == NewsContextRunStatusCompleted:
+			finalDaily.Status = NewsContextRunStatusCompleted
+		case currentRun.Status == NewsContextRunStatusFailed:
+			finalDaily.Status = NewsContextRunStatusFailed
+		default:
+			finalDaily.Status = newsContextBackfillActiveStageStatus(item)
+		}
+	} else if item.Phase == "final_review" && strings.TrimSpace(item.FinalReviewRunID) == "" {
+		finalDaily.Status = newsContextBackfillActiveStageStatus(item)
+	} else if item.Phase == newsContextBackfillPhaseIndexing || item.Phase == "finalizing" || item.Phase == "completed" {
+		finalDaily.Status = NewsContextRunStatusCompleted
+	}
+	progress = append(progress, finalDaily)
+
+	indexing := NewsContextBackfillStageProgress{Phase: newsContextBackfillPhaseIndexing, Status: NewsContextRunStatusPending}
+	switch {
+	case item.Phase == newsContextBackfillPhaseIndexing:
+		indexing.Status = newsContextBackfillActiveStageStatus(item)
+	case item.Phase == "finalizing" || item.Phase == "completed":
+		indexing.Status = NewsContextRunStatusCompleted
+	case currentRun != nil && currentRun.ID == item.FinalReviewRunID &&
+		(currentRun.Status == NewsContextRunStatusWaitingReview ||
+			currentRun.ReviewStatus == NewsContextReviewRunning ||
+			currentRun.ReviewStatus == NewsContextReviewCompleted ||
+			currentRun.ReviewStatus == NewsContextReviewFailed):
+		indexing.Status = NewsContextRunStatusCompleted
+	}
+	progress = append(progress, indexing)
+
+	finalReview := NewsContextBackfillStageProgress{Phase: "final_review", Status: NewsContextRunStatusPending}
+	if item.Phase == "finalizing" || item.Phase == "completed" {
+		finalReview.Status = NewsContextRunStatusCompleted
+	} else if currentRun != nil && currentRun.ID == item.FinalReviewRunID {
+		switch currentRun.ReviewStatus {
+		case NewsContextReviewCompleted:
+			finalReview.Status = NewsContextRunStatusCompleted
+		case NewsContextReviewFailed:
+			finalReview.Status = NewsContextRunStatusFailed
+		case NewsContextReviewPending, NewsContextReviewRunning:
+			if currentRun.Status == NewsContextRunStatusWaitingReview || strings.TrimSpace(currentRun.ReviewRunID) != "" {
+				finalReview.Status = newsContextBackfillActiveStageStatus(item)
+			}
+		}
+	}
+	progress = append(progress, finalReview)
+
+	finalizing := NewsContextBackfillStageProgress{
+		Phase:              "finalizing",
+		Status:             NewsContextRunStatusPending,
+		ProcessedItemCount: item.ReviewLinkedCount,
+		TotalItemCount:     item.DailyOutputCount,
+		PendingItemCount:   item.ReviewMissingCount,
+	}
+	if item.Phase == "finalizing" {
+		finalizing.Status = newsContextBackfillActiveStageStatus(item)
+	} else if item.Phase == "completed" || item.Status == NewsContextBackfillStatusCompleted {
+		finalizing.Status = NewsContextRunStatusCompleted
+	}
+	progress = append(progress, finalizing)
+	return progress
+}
+
+func newsContextBackfillWindowStageStatus(item NewsContextBackfill, stage NewsContextBackfillStageProgress) string {
+	if item.Status == NewsContextBackfillStatusCompleted ||
+		(stage.TotalWindowCount > 0 && stage.CompletedWindowCount >= stage.TotalWindowCount) {
+		return NewsContextRunStatusCompleted
+	}
+	if item.Phase == stage.Phase {
+		return newsContextBackfillActiveStageStatus(item)
+	}
+	return NewsContextRunStatusPending
+}
+
+func newsContextBackfillActiveStageStatus(item NewsContextBackfill) string {
+	switch item.Status {
+	case NewsContextBackfillStatusPaused:
+		return NewsContextBackfillStatusPaused
+	case NewsContextBackfillStatusFailed:
+		return NewsContextRunStatusFailed
+	case NewsContextBackfillStatusCompleted:
+		return NewsContextRunStatusCompleted
+	default:
+		return NewsContextRunStatusRunning
+	}
+}
+
+func attachNewsContextBackfillCurrentRun(stage *NewsContextBackfillStageProgress, run NewsContextRun) {
+	stage.ProcessedItemCount = run.ProcessedCount
+	stage.TotalItemCount = run.InputCount
+	stage.PendingItemCount = run.PendingCount
+	stage.CurrentWindowStart = run.WindowStart
+	stage.CurrentWindowEnd = run.WindowEnd
+	stage.CurrentRunPhase = run.Phase
 }
 
 // runNewsContextBackfillStep is called only after scheduled daily, four-hour

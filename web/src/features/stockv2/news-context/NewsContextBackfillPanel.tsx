@@ -1,11 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowClockwise, Pause, Play, Repeat } from "@phosphor-icons/react";
 import type { AppActions } from "../../../app/App";
-import type { StockV2NewsContextBackfillPreview, StockV2NewsContextBackfillTask } from "../../../app/types";
+import type {
+  StockV2NewsContextBackfillPreview,
+  StockV2NewsContextBackfillStageProgress,
+  StockV2NewsContextBackfillTask,
+} from "../../../app/types";
 import { friendlyError } from "../../../api/client";
 import { Button, EmptyState, Notice, Pill, useDangerConfirm } from "../../../components/ui";
 import {
   backfillPhaseLabel,
+  backfillRunPhaseLabel,
+  backfillStageLabel,
+  backfillStageStatusLabel,
+  backfillStageStatusTone,
   backfillStatusLabel,
   backfillStatusTone,
   formatNewsContextTime,
@@ -115,6 +123,7 @@ export function NewsContextBackfillPanel({
   const blockingReasons = preview?.blockingReasons || [];
   const needsRetry = newsContextBackfillNeedsRetry(task);
   const finalReviewCoverage = newsContextFinalReviewCoverage(task);
+  const currentStage = task?.stageProgress?.find((stage) => stage.status === "running" || stage.status === "paused");
 
   return (
     <>
@@ -124,7 +133,7 @@ export function NewsContextBackfillPanel({
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="m-0 text-sm font-semibold">历史新闻补处理</h2>
               {task ? <Pill tone={backfillStatusTone(task.status)}>{backfillStatusLabel(task.status)}</Pill> : null}
-              {task?.phase ? <Pill tone="neutral">{backfillPhaseLabel(task.phase)}</Pill> : null}
+              {task?.phase ? <Pill tone="neutral">{currentStage ? backfillStageLabel(currentStage.phase) : backfillPhaseLabel(task.phase)}</Pill> : null}
             </div>
             <p className="mt-1 mb-0 text-xs text-[var(--muted)]">从旧到新重建消息脉络，不限制新闻和主题总量，实时定时任务始终优先。</p>
           </div>
@@ -185,11 +194,13 @@ export function NewsContextBackfillPanel({
         {preview || task ? (
           <div>
             <div className="grid grid-cols-4 divide-x divide-[var(--line)] border-b border-[var(--line)] max-lg:grid-cols-2 max-lg:divide-x-0">
-              <BackfillMetric label="任务总量" value={counts.total} />
-              <BackfillMetric label="已覆盖" value={counts.processed} />
-              <BackfillMetric label="剩余" value={counts.remaining} tone={counts.remaining ? "warn" : "neutral"} />
-              <BackfillMetric label="遗漏" value={counts.missing} tone={counts.missing ? "danger" : "neutral"} />
+              <BackfillMetric label="原始新闻总量" value={counts.total} />
+              <BackfillMetric label="小时级已覆盖" value={counts.processed} />
+              <BackfillMetric label="小时级待覆盖" value={counts.remaining} tone={counts.remaining ? "warn" : "neutral"} />
+              <BackfillMetric label="覆盖异常" value={counts.missing} tone={counts.missing ? "danger" : "neutral"} />
             </div>
+
+            {task?.stageProgress?.length ? <BackfillStageProgressSection stages={task.stageProgress} /> : null}
 
             <div className="grid grid-cols-2 gap-x-8 gap-y-2 px-4 py-3 text-xs max-lg:grid-cols-1">
               <BackfillDetail
@@ -294,4 +305,94 @@ function BackfillDetail({ label, value }: { label: string; value: string }) {
       <span className="min-w-0 break-words text-[var(--muted-strong)]">{value}</span>
     </div>
   );
+}
+
+function BackfillStageProgressSection({ stages }: { stages: StockV2NewsContextBackfillStageProgress[] }) {
+  const aggregationStages = stages.filter((stage) => ["hourly", "four_hour", "daily"].includes(stage.phase));
+  const completionStages = stages.filter((stage) => !["hourly", "four_hour", "daily"].includes(stage.phase));
+  return (
+    <section aria-label="历史补处理分阶段进度" className="border-b border-[var(--line)] px-4 py-3">
+      <div className="mb-3">
+        <h3 className="m-0 text-xs font-semibold text-[var(--text)]">分阶段进度</h3>
+        <p className="mt-1 mb-0 text-xs text-[var(--muted)]">
+          原始新闻覆盖完成后，还会继续执行四小时、日级归纳和最终检查。
+        </p>
+      </div>
+      <div className="grid grid-cols-[minmax(0,1.3fr)_minmax(300px,1fr)] gap-5 max-lg:grid-cols-1">
+        <BackfillStageGroup stages={aggregationStages} title="分层归纳" />
+        <BackfillStageGroup stages={completionStages} title="收尾检查" />
+      </div>
+    </section>
+  );
+}
+
+function BackfillStageGroup({
+  stages,
+  title,
+}: {
+  stages: StockV2NewsContextBackfillStageProgress[];
+  title: string;
+}) {
+  return (
+    <div>
+      <h4 className="m-0 border-b border-[var(--line)] pb-2 text-[11px] font-medium text-[var(--muted)]">{title}</h4>
+      <div>
+        {stages.map((stage) => <BackfillStageRow key={stage.phase} stage={stage} />)}
+      </div>
+    </div>
+  );
+}
+
+function BackfillStageRow({ stage }: { stage: StockV2NewsContextBackfillStageProgress }) {
+  const active = stage.status === "running" || stage.status === "queued" || stage.status === "paused";
+  const completedWindows = Math.max(0, stage.completedWindowCount || 0);
+  const totalWindows = Math.max(0, stage.totalWindowCount || 0);
+  const processedItems = Math.max(0, stage.processedItemCount || 0);
+  const totalItems = Math.max(0, stage.totalItemCount || 0);
+  const pendingItems = Math.max(0, stage.pendingItemCount || 0);
+  const summary = totalWindows > 0
+    ? `${completedWindows} / ${totalWindows} 个窗口`
+    : stage.phase === "finalizing" && totalItems > 0
+      ? `${processedItems} / ${totalItems} 个每日输出`
+      : backfillStageDescription(stage.phase, stage.status);
+  const detail = stage.currentWindowStart || stage.currentWindowEnd
+    ? [
+        `${formatNewsContextTime(stage.currentWindowStart)} 至 ${formatNewsContextTime(stage.currentWindowEnd)}`,
+        totalItems > 0 ? `${processedItems} / ${totalItems} 个输入，待处理 ${pendingItems}` : "",
+        backfillRunPhaseLabel(stage.currentRunPhase),
+      ].filter(Boolean).join("，")
+    : totalItems > 0 && totalWindows > 0
+      ? `已处理 ${processedItems} / ${totalItems} 个输入`
+      : "";
+  return (
+    <div
+      aria-current={active ? "step" : undefined}
+      className={`grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-[var(--line)] py-2.5 last:border-b-0 ${active ? "-mx-2 bg-[var(--surface-soft)] px-2" : ""}`}
+    >
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+          <span className="text-xs font-medium text-[var(--text)]">{backfillStageLabel(stage.phase)}</span>
+          <span className="font-mono text-[11px] text-[var(--muted-strong)]">{summary}</span>
+        </div>
+        {detail ? <div className="mt-1 break-words font-mono text-[11px] text-[var(--muted)]">{detail}</div> : null}
+      </div>
+      <Pill tone={backfillStageStatusTone(stage.status)}>{backfillStageStatusLabel(stage.status)}</Pill>
+    </div>
+  );
+}
+
+function backfillStageDescription(phase: string, status: string): string {
+  const descriptions = {
+    late_scan: { pending: "等待分层归纳完成", active: "正在扫描", completed: "扫描完成" },
+    final_daily: { pending: "等待生成当前结论", active: "正在生成当前结论", completed: "当前结论已生成" },
+    indexing: { pending: "等待更新可检索索引", active: "正在更新索引", completed: "索引已就绪" },
+    final_review: { pending: "等待组合影响复核", active: "正在复核组合影响", completed: "组合影响已复核" },
+    finalizing: { pending: "等待安全校验", active: "正在执行安全校验", completed: "安全校验完成" },
+  } as Record<string, { pending: string; active: string; completed: string }>;
+  const group = descriptions[phase];
+  if (!group) return "等待执行";
+  if (status === "completed") return group.completed;
+  if (status === "failed") return "阶段执行失败";
+  if (status === "running" || status === "queued" || status === "paused") return group.active;
+  return group.pending;
 }
