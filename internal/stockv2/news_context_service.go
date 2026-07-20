@@ -1070,6 +1070,7 @@ func retryableNewsContextBatchFailure(err error, output *AgentExecutorOutput) bo
 		return true
 	}
 	if output != nil && (strings.Contains(message, "without submitting result") ||
+		strings.Contains(message, "without submitting a result") ||
 		strings.Contains(message, "no result submitted")) {
 		// ponytail: a started Agent process that produced no result cannot have
 		// mutated the batch. Retry only this explicit no-submit boundary; provider

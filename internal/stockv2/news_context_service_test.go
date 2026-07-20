@@ -466,6 +466,13 @@ func TestRetryableNewsContextBatchFailureRequiresStartedNoSubmitBoundary(t *test
 	if retryableNewsContextBatchFailure(processExit, nil) {
 		t.Fatal("failure without executor output must remain terminal")
 	}
+	apiMaxTurns := errors.New("API model exceeded 16 tool-call turns without submitting a result")
+	if !retryableNewsContextBatchFailure(apiMaxTurns, &AgentExecutorOutput{
+		Command:  "POST http://127.0.0.1:8080/v1/chat/completions",
+		ExitCode: -1,
+	}) {
+		t.Fatal("API max-turn failure before submission must shrink and retry")
+	}
 	apiUpstream := errors.New(`API returned HTTP 502: {"error":{"code":"upstream_transport_error"}}`)
 	if !retryableNewsContextBatchFailure(apiUpstream, &AgentExecutorOutput{Command: "POST https://example.com/v1/chat/completions", ExitCode: -1}) {
 		t.Fatal("API upstream failure before submission must shrink and retry")
