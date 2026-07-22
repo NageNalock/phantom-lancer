@@ -140,7 +140,14 @@ export function StockV2AgentTaskProfileDrawer({
           </select>
         </Field>
 
-        <Field label="模型推理强度" help={`留空时不传参数，沿用模型默认值；${executionMode === "api" ? "API Provider" : "Codex CLI"} 决定支持范围`}>
+        <Field
+          label="模型推理强度"
+          help={
+            executionMode === "api"
+              ? "留空时不传参数，沿用模型默认值；DeepSeek 中 low 关闭思考，medium/high 使用 high，xhigh/max 使用 max"
+              : "留空时不传参数，沿用模型默认值；Codex CLI 决定支持范围"
+          }
+        >
           <select
             value={form.reasoningEffort || ""}
             onChange={(e) => setForm({ ...form, reasoningEffort: e.target.value })}

@@ -26,6 +26,12 @@ const (
 	newsContextSeedPageSize          = 500
 	newsContextInputTextLimit        = 60_000
 	newsContextAdditionalPromptLimit = 2_000
+	// ponytail: DeepSeek tool-call output becomes unreliable on the observed
+	// larger news batches. These fixed protocol safety limits complement the
+	// existing character cap without adding owner-facing tuning knobs. Replace
+	// them with measured adaptive sizing only if another API model needs it.
+	newsContextDeepSeekEventBatchSize  = 24
+	newsContextDeepSeekThreadBatchSize = 12
 )
 
 func defaultNewsContextConfig() NewsContextConfig {
@@ -787,6 +793,11 @@ func (s *Service) executeNewsContextRun(ctx context.Context, runID string) {
 			fail(err)
 			return
 		}
+		items, err = s.limitNewsContextBatchForProvider(ctx, items)
+		if err != nil {
+			fail(err)
+			return
+		}
 		if len(items) == 0 {
 			transitioned, err := s.beginDailyNewsContextConvergence(ctx, run)
 			if err != nil {
@@ -828,6 +839,35 @@ func (s *Service) executeNewsContextRun(ctx context.Context, runID string) {
 	if err := s.completeNewsContextRun(ctx, &run, cfg); err != nil {
 		fail(err)
 	}
+}
+
+func (s *Service) limitNewsContextBatchForProvider(ctx context.Context, items []NewsContextRunItem) ([]NewsContextRunItem, error) {
+	if len(items) == 0 {
+		return items, nil
+	}
+	profile, err := s.store.GetAgentTaskProfileByType(ctx, AgentTaskTypeNewsEventReview)
+	if err != nil {
+		return nil, err
+	}
+	if profile.ExecutionMode != AgentExecutionModeAPI {
+		return items, nil
+	}
+	model, err := s.resolveModel(ctx, profile)
+	if err != nil {
+		return nil, err
+	}
+	provider, err := s.store.GetAgentProviderProfile(ctx, model.ProviderID)
+	if err != nil {
+		return nil, err
+	}
+	if !isDeepSeekAPI(agentProviderBaseURL(provider), model.ModelName) {
+		return items, nil
+	}
+	limit := newsContextDeepSeekEventBatchSize
+	if items[0].ObjectType == NewsContextRunItemThread {
+		limit = newsContextDeepSeekThreadBatchSize
+	}
+	return limitNewsContextBatchItems(items, limit), nil
 }
 
 func (s *Service) yieldNewsContextRunAfterFragment(ctx context.Context, runID string) error {
@@ -883,10 +923,7 @@ func (s *Service) nextNewsContextRunItems(ctx context.Context, runID string) ([]
 			if err != nil {
 				return nil, err
 			}
-			key := item.ObjectType + ":" + item.ObjectID
-			if item.ObjectType == NewsContextRunItemThread {
-				key = item.ObjectType + ":" + firstNonEmpty(item.ThreadID, item.ObjectID)
-			}
+			key := newsContextRunItemGroupKey(item)
 			if groupKey != "" && key != groupKey && flushGroup() {
 				return items, nil
 			}
@@ -1102,7 +1139,41 @@ func shrinkNewsContextRetryBatch(items []NewsContextRunItem) []NewsContextRunIte
 	if len(items) <= 1 {
 		return items
 	}
-	return items[:(len(items)+1)/2]
+	end := (len(items) + 1) / 2
+	boundaryKey := newsContextRunItemGroupKey(items[end-1])
+	if newsContextRunItemGroupKey(items[end]) != boundaryKey {
+		return items[:end]
+	}
+	start := end - 1
+	for start > 0 && newsContextRunItemGroupKey(items[start-1]) == boundaryKey {
+		start--
+	}
+	if start > 0 {
+		return items[:start]
+	}
+	for end < len(items) && newsContextRunItemGroupKey(items[end]) == boundaryKey {
+		end++
+	}
+	return items[:end]
+}
+
+func limitNewsContextBatchItems(items []NewsContextRunItem, limit int) []NewsContextRunItem {
+	if limit <= 0 || len(items) <= limit {
+		return items
+	}
+	end := limit
+	boundaryKey := newsContextRunItemGroupKey(items[end-1])
+	for end < len(items) && newsContextRunItemGroupKey(items[end]) == boundaryKey {
+		end++
+	}
+	return items[:end]
+}
+
+func newsContextRunItemGroupKey(item NewsContextRunItem) string {
+	if item.ObjectType == NewsContextRunItemThread {
+		return item.ObjectType + ":" + firstNonEmpty(item.ThreadID, item.ObjectID)
+	}
+	return item.ObjectType + ":" + item.ObjectID
 }
 
 func (s *Service) executeNewsContextAgentRun(ctx context.Context, run AgentRun, ledger AgentDecisionLedger, pack NewsContextAggregationPack, modelName string) (AgentRun, AgentDecisionLedger, *AgentExecutorOutput, error) {

@@ -451,6 +451,44 @@ func TestShrinkNewsContextRetryBatchHalvesWithoutDroppingOrder(t *testing.T) {
 	}
 }
 
+func TestLimitNewsContextBatchItemsPreservesStableThreadGroup(t *testing.T) {
+	items := make([]NewsContextRunItem, 0, 23)
+	for index := 0; index < 11; index++ {
+		items = append(items, NewsContextRunItem{
+			ObjectType: NewsContextRunItemThread,
+			ObjectID:   fmt.Sprintf("version-%02d", index),
+			ThreadID:   fmt.Sprintf("thread-%02d", index),
+		})
+	}
+	items = append(items,
+		NewsContextRunItem{ObjectType: NewsContextRunItemThread, ObjectID: "version-boundary-1", ThreadID: "thread-boundary"},
+		NewsContextRunItem{ObjectType: NewsContextRunItemThread, ObjectID: "version-boundary-2", ThreadID: "thread-boundary"},
+	)
+	for index := 0; index < 10; index++ {
+		items = append(items, NewsContextRunItem{
+			ObjectType: NewsContextRunItemThread,
+			ObjectID:   fmt.Sprintf("version-after-%02d", index),
+			ThreadID:   fmt.Sprintf("thread-after-%02d", index),
+		})
+	}
+
+	limited := limitNewsContextBatchItems(items, 12)
+	if len(limited) != 13 {
+		t.Fatalf("limited items = %d; want complete 13-item boundary group", len(limited))
+	}
+	if limited[len(limited)-1].ObjectID != "version-boundary-2" {
+		t.Fatalf("boundary group was split: %#v", limited[len(limited)-1])
+	}
+
+	retry := shrinkNewsContextRetryBatch(items)
+	if len(retry) != 11 {
+		t.Fatalf("retry items = %d; want 11 before the boundary group", len(retry))
+	}
+	if retry[len(retry)-1].ThreadID != "thread-10" {
+		t.Fatalf("retry ended at %#v", retry[len(retry)-1])
+	}
+}
+
 func TestRetryableNewsContextBatchFailureRequiresStartedNoSubmitBoundary(t *testing.T) {
 	processExit := errors.New("process exited (code 1) without submitting result")
 	if !retryableNewsContextBatchFailure(processExit, &AgentExecutorOutput{ExitCode: 1}) {

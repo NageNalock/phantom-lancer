@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -15,9 +16,17 @@ import (
 )
 
 const (
-	agentAPIMaxTurns     = 16
-	agentAPIResponseSize = 4 << 20
+	agentAPIMaxTurns             = 16
+	agentAPIDeepSeekNewsMaxTurns = 8
+	agentAPIDeepSeekSubmitTurns  = 4
+	agentAPIResponseSize         = 4 << 20
 )
+
+type agentAPIExecutionOptions struct {
+	toolNames          []string
+	submitResultSchema map[string]any
+	forceSubmit        bool
+}
 
 type agentAPIExecutor struct {
 	service *Service
@@ -28,31 +37,42 @@ func newAgentAPIExecutor(service *Service) *agentAPIExecutor {
 }
 
 func (e *agentAPIExecutor) ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
-	return e.executePrompt(ctx, taskID, buildOperationReviewPrompt(taskID, pack, ""), modelName, reasoningEffort, execDefaultTimeout)
+	return e.executePrompt(ctx, taskID, buildOperationReviewPrompt(taskID, pack, ""), modelName, reasoningEffort, execDefaultTimeout, agentAPIExecutionOptions{})
 }
 
 func (e *agentAPIExecutor) ExecuteStrategyGeneration(ctx context.Context, taskID string, pack StrategyGenerationContext, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
-	return e.executePrompt(ctx, taskID, buildStrategyGenerationPrompt(taskID, pack, ""), modelName, reasoningEffort, execDefaultTimeout)
+	return e.executePrompt(ctx, taskID, buildStrategyGenerationPrompt(taskID, pack, ""), modelName, reasoningEffort, execDefaultTimeout, agentAPIExecutionOptions{})
 }
 
 func (e *agentAPIExecutor) ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
-	return e.executePrompt(ctx, taskID, buildStrategyGenerationStepPrompt(taskID, pack, ""), modelName, reasoningEffort, execDefaultTimeout)
+	return e.executePrompt(ctx, taskID, buildStrategyGenerationStepPrompt(taskID, pack, ""), modelName, reasoningEffort, execDefaultTimeout, agentAPIExecutionOptions{})
 }
 
 func (e *agentAPIExecutor) ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
-	return e.executePrompt(ctx, taskID, buildOpportunityDiscoveryPrompt(taskID, pack, ""), modelName, reasoningEffort, execDefaultTimeout)
+	return e.executePrompt(ctx, taskID, buildOpportunityDiscoveryPrompt(taskID, pack, ""), modelName, reasoningEffort, execDefaultTimeout, agentAPIExecutionOptions{})
 }
 
 func (e *agentAPIExecutor) ExecuteNewsContextAggregation(ctx context.Context, taskID string, pack NewsContextAggregationPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
-	return e.executePrompt(ctx, taskID, buildNewsContextAggregationPrompt(taskID, pack, ""), modelName, reasoningEffort, newsContextAgentTimeout)
+	toolNames := []string{codexSubmitResultTool}
+	if len(pack.InputNewsEvents) > 0 {
+		toolNames = []string{mcpToolSemanticSearchNewsThreads, mcpToolGetNewsThread, codexSubmitResultTool}
+	}
+	return e.executePrompt(
+		ctx, taskID, buildNewsContextAggregationPrompt(taskID, pack, ""), modelName, reasoningEffort,
+		newsContextAgentTimeout, agentAPIExecutionOptions{
+			toolNames:          toolNames,
+			submitResultSchema: agentAPINewsContextSubmitResultSchema(taskID, pack),
+			forceSubmit:        len(toolNames) == 1,
+		},
+	)
 }
 
 func (e *agentAPIExecutor) ExecutePortfolioSentinel(ctx context.Context, taskID string, pack PortfolioSentinelContext, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
-	return e.executePrompt(ctx, taskID, buildPortfolioSentinelPrompt(taskID, pack, ""), modelName, reasoningEffort, execDefaultTimeout)
+	return e.executePrompt(ctx, taskID, buildPortfolioSentinelPrompt(taskID, pack, ""), modelName, reasoningEffort, execDefaultTimeout, agentAPIExecutionOptions{})
 }
 
 func (e *agentAPIExecutor) ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
-	return e.executePrompt(ctx, taskID, buildStockProfileSummaryPrompt(taskID, profile, ""), modelName, reasoningEffort, execDefaultTimeout)
+	return e.executePrompt(ctx, taskID, buildStockProfileSummaryPrompt(taskID, profile, ""), modelName, reasoningEffort, execDefaultTimeout, agentAPIExecutionOptions{})
 }
 
 type agentAPIChatResponse struct {
@@ -81,7 +101,12 @@ type agentAPIToolCall struct {
 	} `json:"function"`
 }
 
-func (e *agentAPIExecutor) executePrompt(ctx context.Context, taskID, prompt, modelName, reasoningEffort string, timeout time.Duration) (*AgentExecutorOutput, error) {
+func (e *agentAPIExecutor) executePrompt(
+	ctx context.Context,
+	taskID, prompt, modelName, reasoningEffort string,
+	timeout time.Duration,
+	options agentAPIExecutionOptions,
+) (*AgentExecutorOutput, error) {
 	if e == nil || e.service == nil {
 		return nil, ErrAgentExecutorUnavailable
 	}
@@ -101,6 +126,7 @@ func (e *agentAPIExecutor) executePrompt(ctx context.Context, taskID, prompt, mo
 	if err != nil {
 		return nil, err
 	}
+	deepSeek := isDeepSeekAPI(baseURL, modelName)
 
 	prompt = agentAPIModePrompt(prompt)
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -110,7 +136,14 @@ func (e *agentAPIExecutor) executePrompt(ctx context.Context, taskID, prompt, mo
 		{"role": "system", "content": "You execute one StockV2 analysis task. Use the provided functions for project data and submit the final structured result with stock_agent_submit_result. Do not claim access to Codex CLI browsing in API mode."},
 		{"role": "user", "content": prompt + "\n\nAPI execution mode: call the provided OpenAI functions. Function names use underscores instead of dots; stock_agent_submit_result is the required final submission."},
 	}
-	tools := agentAPITools()
+	tools := agentAPITools(options.toolNames, options.submitResultSchema)
+	maxTurns := agentAPIMaxTurns
+	if deepSeek && run.TaskType == AgentTaskTypeNewsEventReview {
+		maxTurns = agentAPIDeepSeekNewsMaxTurns
+		if options.forceSubmit {
+			maxTurns = agentAPIDeepSeekSubmitTurns
+		}
+	}
 	output := &AgentExecutorOutput{
 		Command:  "POST " + safelog.URLLabel(strings.TrimRight(baseURL, "/")+"/chat/completions"),
 		Prompt:   prompt,
@@ -118,7 +151,7 @@ func (e *agentAPIExecutor) executePrompt(ctx context.Context, taskID, prompt, mo
 	}
 	var transcript strings.Builder
 
-	for turn := 0; turn < agentAPIMaxTurns; turn++ {
+	for turn := 0; turn < maxTurns; turn++ {
 		body := map[string]any{
 			"model":       modelName,
 			"messages":    messages,
@@ -126,11 +159,10 @@ func (e *agentAPIExecutor) executePrompt(ctx context.Context, taskID, prompt, mo
 			"tool_choice": "auto",
 			"stream":      false,
 		}
-		if effort := strings.TrimSpace(reasoningEffort); effort != "" {
-			body["reasoning_effort"] = effort
-			if strings.Contains(strings.ToLower(baseURL), "deepseek") {
-				body["thinking"] = map[string]string{"type": "enabled"}
-			}
+		applyAgentAPIReasoning(body, deepSeek, reasoningEffort)
+		if deepSeek && run.TaskType == AgentTaskTypeNewsEventReview &&
+			(options.forceSubmit || turn >= maxTurns-2) {
+			body["tool_choice"] = agentAPIRequiredSubmitToolChoice()
 		}
 		response, requestCount, err := e.chatCompletion(execCtx, baseURL, apiKey, body)
 		output.RequestCount += requestCount
@@ -208,7 +240,52 @@ func (e *agentAPIExecutor) executePrompt(ctx context.Context, taskID, prompt, mo
 	}
 	output.Duration = time.Since(started)
 	output.RawTranscript = safelog.Text(transcript.String(), transcriptMaxBytes)
-	return output, fmt.Errorf("API model exceeded %d tool-call turns without submitting a result", agentAPIMaxTurns)
+	return output, fmt.Errorf("API model exceeded %d tool-call turns without submitting a result", maxTurns)
+}
+
+func applyAgentAPIReasoning(body map[string]any, deepSeek bool, reasoningEffort string) {
+	effort := strings.ToLower(strings.TrimSpace(reasoningEffort))
+	if effort == "" {
+		return
+	}
+	if !deepSeek {
+		body["reasoning_effort"] = effort
+		return
+	}
+	if effort == AgentReasoningEffortLow {
+		// ponytail: DeepSeek maps low to high while thinking is enabled. The
+		// existing low binding is the only compatible way to request its binary
+		// non-thinking mode without adding a second provider-specific setting.
+		body["thinking"] = map[string]string{"type": "disabled"}
+		return
+	}
+	body["thinking"] = map[string]string{"type": "enabled"}
+	if effort == AgentReasoningEffortXHigh || effort == AgentReasoningEffortMax {
+		body["reasoning_effort"] = "max"
+		return
+	}
+	body["reasoning_effort"] = "high"
+}
+
+func isDeepSeekAPI(baseURL, modelName string) bool {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelName)), "deepseek-") {
+		return true
+	}
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "deepseek.com" || strings.HasSuffix(host, ".deepseek.com")
+}
+
+func agentAPIRequiredSubmitToolChoice() map[string]any {
+	return map[string]any{
+		"type": "function",
+		"function": map[string]string{
+			"name": agentAPIToolName(codexSubmitResultTool),
+		},
+	}
 }
 
 func agentAPIModePrompt(prompt string) string {
@@ -266,15 +343,22 @@ func (e *agentAPIExecutor) chatCompletion(ctx context.Context, baseURL, apiKey s
 	return agentAPIChatResponse{}, 3, errors.New("API request retries exhausted")
 }
 
-func agentAPITools() []map[string]any {
-	tools := make([]map[string]any, 0, len(stockAgentMCPRequiredTools()))
-	for _, name := range stockAgentMCPRequiredTools() {
+func agentAPITools(names []string, submitResultSchema map[string]any) []map[string]any {
+	if len(names) == 0 {
+		names = stockAgentMCPRequiredTools()
+	}
+	tools := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		parameters := stockAgentMCPToolInputSchema(name)
+		if name == codexSubmitResultTool && submitResultSchema != nil {
+			parameters = submitResultSchema
+		}
 		tools = append(tools, map[string]any{
 			"type": "function",
 			"function": map[string]any{
 				"name":        agentAPIToolName(name),
 				"description": stockAgentMCPToolDescription(name),
-				"parameters":  stockAgentMCPToolInputSchema(name),
+				"parameters":  parameters,
 			},
 		})
 	}

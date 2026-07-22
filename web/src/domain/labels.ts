@@ -235,7 +235,6 @@ export function defaultV2RaySettings(): Required<V2RaySettings> {
   return {
     id: "default",
     enabled: false,
-    upstreamMode: "accounts",
     startOnPhantomLaunch: false,
     assetDir: "",
     configMode: "guided",
@@ -276,6 +275,7 @@ export function defaultCodexGatewaySettings(): Required<CodexGatewaySettings> {
   return {
     id: "default",
     enabled: false,
+    upstreamMode: "accounts",
     baseUrl: "https://chatgpt.com/backend-api",
     oauthAuthUrl: "https://auth.openai.com/oauth/authorize",
     oauthTokenUrl: "https://auth.openai.com/oauth/token",

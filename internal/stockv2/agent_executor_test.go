@@ -250,6 +250,27 @@ func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing
 	if validAgentTaskOutputType(AgentTaskTypeNewsEventReview, AgentTaskTypeNewsEventReview) {
 		t.Fatal("legacy task key must not be accepted as a result type")
 	}
+
+	apiPrompt := buildNewsContextAggregationPrompt("task-news-context", NewsContextAggregationPack{
+		RunID:           "context-run-1",
+		WindowType:      "daily",
+		WindowEnd:       windowEnd,
+		InputNewsEvents: []NewsEvent{{ID: "news-1"}},
+		InputThreads:    []NewsContextPromptThread{{ID: "thread-1", ThemeID: "thread-1"}},
+	}, "")
+	for _, want := range []string{
+		"InputThreads already contains the authoritative point-in-time snapshot",
+		"do not search for or fetch the same themes again",
+		"This API execution has no public search or browsing capability",
+		"search_audit status unavailable",
+	} {
+		if !strings.Contains(apiPrompt, want) {
+			t.Fatalf("API prompt missing %q: %s", want, apiPrompt)
+		}
+	}
+	if strings.Contains(apiPrompt, "Actively use Codex CLI public search/browse") {
+		t.Fatalf("API prompt incorrectly requires Codex CLI browsing: %s", apiPrompt)
+	}
 }
 
 func TestBuildNewsContextAggregationPromptUsesThreadOnlyExampleWithoutInventedNews(t *testing.T) {
