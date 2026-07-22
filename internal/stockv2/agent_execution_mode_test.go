@@ -2,8 +2,10 @@ package stockv2
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,6 +62,30 @@ func TestAgentAPIToolNamesAreOpenAICompatible(t *testing.T) {
 	}
 	if original, ok := agentAPIToolOriginalName(name); !ok || original != codexSubmitResultTool {
 		t.Fatalf("reverse tool name = %q, %v", original, ok)
+	}
+}
+
+func TestAgentAPIToolCallParamsRejectsMalformedArguments(t *testing.T) {
+	if _, toolErr := agentAPIToolCallParams(codexSubmitResultTool, `{"taskID":`); toolErr == nil ||
+		toolErr.Code != mcpErrInvalidParams ||
+		!strings.Contains(toolErr.Message, "arguments must be valid JSON") ||
+		!strings.Contains(toolErr.Message, "10 bytes") {
+		t.Fatalf("malformed arguments error = %#v", toolErr)
+	}
+
+	params, toolErr := agentAPIToolCallParams(codexSubmitResultTool, `{"taskID":"task-1"}`)
+	if toolErr != nil {
+		t.Fatalf("valid arguments: %v", toolErr)
+	}
+	var call struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(params, &call); err != nil {
+		t.Fatalf("decode params: %v", err)
+	}
+	if call.Name != codexSubmitResultTool || string(call.Arguments) != `{"taskID":"task-1"}` {
+		t.Fatalf("params = %#v", call)
 	}
 }
 

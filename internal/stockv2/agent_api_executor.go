@@ -210,11 +210,12 @@ func (e *agentAPIExecutor) executePrompt(
 			if !ok {
 				toolErr = &mcpError{Code: mcpErrMethodNotFound, Message: "unknown function"}
 			} else {
-				params, _ := json.Marshal(map[string]any{
-					"name":      originalName,
-					"arguments": json.RawMessage(call.Function.Arguments),
-				})
-				toolResult, toolErr = e.service.mcpToolsCall(params)
+				params, paramsErr := agentAPIToolCallParams(originalName, call.Function.Arguments)
+				if paramsErr != nil {
+					toolErr = paramsErr
+				} else {
+					toolResult, toolErr = e.service.mcpToolsCall(params)
+				}
 			}
 			content := ""
 			if toolErr != nil {
@@ -247,6 +248,23 @@ func (e *agentAPIExecutor) executePrompt(
 		return output, fmt.Errorf("API model exceeded %d tool-call turns without submitting a result; last tool error: %s", maxTurns, lastToolError)
 	}
 	return output, fmt.Errorf("API model exceeded %d tool-call turns without submitting a result", maxTurns)
+}
+
+func agentAPIToolCallParams(name, arguments string) ([]byte, *mcpError) {
+	var raw json.RawMessage
+	if err := json.Unmarshal([]byte(arguments), &raw); err != nil {
+		// ponytail: return only the parser position and byte count. The model gets
+		// enough feedback to correct its next call without logging argument data.
+		return nil, &mcpError{
+			Code:    mcpErrInvalidParams,
+			Message: fmt.Sprintf("arguments must be valid JSON (%d bytes): %s", len(arguments), safelog.Text(err.Error(), 240)),
+		}
+	}
+	params, err := json.Marshal(map[string]any{"name": name, "arguments": raw})
+	if err != nil {
+		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "could not encode tool arguments"}
+	}
+	return params, nil
 }
 
 func applyAgentAPIReasoning(body map[string]any, deepSeek bool, reasoningEffort string) {
