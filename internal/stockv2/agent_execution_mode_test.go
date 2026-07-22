@@ -66,14 +66,14 @@ func TestAgentAPIToolNamesAreOpenAICompatible(t *testing.T) {
 }
 
 func TestAgentAPIToolCallParamsRejectsMalformedArguments(t *testing.T) {
-	if _, toolErr := agentAPIToolCallParams(codexSubmitResultTool, `{"taskID":`); toolErr == nil ||
+	if _, toolErr := agentAPIToolCallParams(codexSubmitResultTool, `{"taskID":`, "task-1"); toolErr == nil ||
 		toolErr.Code != mcpErrInvalidParams ||
 		!strings.Contains(toolErr.Message, "arguments must be valid JSON") ||
 		!strings.Contains(toolErr.Message, "10 bytes") {
 		t.Fatalf("malformed arguments error = %#v", toolErr)
 	}
 
-	params, toolErr := agentAPIToolCallParams(codexSubmitResultTool, `{"taskID":"task-1"}`)
+	params, toolErr := agentAPIToolCallParams(codexSubmitResultTool, `{"taskID":"task-1"}`, "task-1")
 	if toolErr != nil {
 		t.Fatalf("valid arguments: %v", toolErr)
 	}
@@ -88,15 +88,29 @@ func TestAgentAPIToolCallParamsRejectsMalformedArguments(t *testing.T) {
 		t.Fatalf("params = %#v", call)
 	}
 
-	params, toolErr = agentAPIToolCallParams(codexSubmitResultTool, `{"taskID":"task-1"}, `)
+	params, toolErr = agentAPIToolCallParams(codexSubmitResultTool, `{"taskID":"task-1"}, `, "task-1")
 	if toolErr != nil {
 		t.Fatalf("trailing separator arguments: %v", toolErr)
 	}
 	if err := json.Unmarshal(params, &call); err != nil || string(call.Arguments) != `{"taskID":"task-1"}` {
 		t.Fatalf("trailing separator params = %#v, err=%v", call, err)
 	}
-	if _, toolErr := agentAPIToolCallParams(codexSubmitResultTool, `{"taskID":"task-1"}, {"extra":true}`); toolErr == nil {
+	if _, toolErr := agentAPIToolCallParams(codexSubmitResultTool, `{"taskID":"task-1"}, {"extra":true}`, "task-1"); toolErr == nil {
 		t.Fatal("multiple top-level objects were accepted")
+	}
+
+	params, toolErr = agentAPIToolCallParams(codexSubmitResultTool, `{"result":{},"taskID":"wrong-task"}`, "task-1")
+	if toolErr != nil {
+		t.Fatalf("bind submit task id: %v", toolErr)
+	}
+	if err := json.Unmarshal(params, &call); err != nil {
+		t.Fatalf("decode bound params: %v", err)
+	}
+	var arguments struct {
+		TaskID string `json:"taskID"`
+	}
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil || arguments.TaskID != "task-1" {
+		t.Fatalf("bound task id = %q, err=%v", arguments.TaskID, err)
 	}
 }
 

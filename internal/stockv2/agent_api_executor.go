@@ -210,7 +210,7 @@ func (e *agentAPIExecutor) executePrompt(
 			if !ok {
 				toolErr = &mcpError{Code: mcpErrMethodNotFound, Message: "unknown function"}
 			} else {
-				params, paramsErr := agentAPIToolCallParams(originalName, call.Function.Arguments)
+				params, paramsErr := agentAPIToolCallParams(originalName, call.Function.Arguments, taskID)
 				if paramsErr != nil {
 					toolErr = paramsErr
 				} else {
@@ -250,7 +250,7 @@ func (e *agentAPIExecutor) executePrompt(
 	return output, fmt.Errorf("API model exceeded %d tool-call turns without submitting a result", maxTurns)
 }
 
-func agentAPIToolCallParams(name, arguments string) ([]byte, *mcpError) {
+func agentAPIToolCallParams(name, arguments, taskID string) ([]byte, *mcpError) {
 	argumentBytes := bytes.TrimSpace([]byte(arguments))
 	var raw json.RawMessage
 	err := json.Unmarshal(argumentBytes, &raw)
@@ -269,6 +269,15 @@ func agentAPIToolCallParams(name, arguments string) ([]byte, *mcpError) {
 		return nil, &mcpError{
 			Code:    mcpErrInvalidParams,
 			Message: fmt.Sprintf("arguments must be valid JSON (%d bytes): %s", len(arguments), safelog.Text(err.Error(), 240)),
+		}
+	}
+	if name == codexSubmitResultTool && strings.TrimSpace(taskID) != "" {
+		var object map[string]json.RawMessage
+		if json.Unmarshal(raw, &object) == nil && object != nil {
+			// ponytail: task identity belongs to the executor trust boundary, not
+			// to model output. Always bind submissions to the task being executed.
+			object["taskID"], _ = json.Marshal(taskID)
+			raw, _ = json.Marshal(object)
 		}
 	}
 	params, err := json.Marshal(map[string]any{"name": name, "arguments": raw})
