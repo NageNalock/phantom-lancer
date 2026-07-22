@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -177,6 +178,9 @@ func TestValidateNewsContextReportRequiresOneMatchingThemeEvidencePerCoveredNews
 			err := validateNewsContextReport(run, tt.items, tt.report)
 			if tt.wantErr && !errors.Is(err, ErrInvalidNewsContextResult) {
 				t.Fatalf("validation error=%v, want invalid result", err)
+			}
+			if tt.name == "support without change or evidence" && !strings.Contains(err.Error(), newsItem.ObjectID) {
+				t.Fatalf("validation error=%v, want missing news id", err)
 			}
 			if !tt.wantErr && err != nil {
 				t.Fatalf("valid evidence mapping rejected: %v", err)

@@ -1697,7 +1697,7 @@ func validateNewsContextDecisionEvidenceConsistency(processedNewsIDs []string, n
 			continue
 		}
 		if !hasEvidence {
-			return fmt.Errorf("%w: covered news has no theme evidence", ErrInvalidNewsContextResult)
+			return fmt.Errorf("%w: covered news %s has no theme evidence", ErrInvalidNewsContextResult, eventID)
 		}
 	}
 	return nil
