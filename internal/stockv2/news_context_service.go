@@ -30,7 +30,7 @@ const (
 	// larger news batches. These fixed protocol safety limits complement the
 	// existing character cap without adding owner-facing tuning knobs. Replace
 	// them with measured adaptive sizing only if another API model needs it.
-	newsContextDeepSeekEventBatchSize  = 24
+	newsContextDeepSeekEventBatchSize  = 12
 	newsContextDeepSeekThreadBatchSize = 12
 )
 

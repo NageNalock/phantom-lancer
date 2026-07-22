@@ -263,6 +263,8 @@ func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing
 		"do not search for or fetch the same themes again",
 		"This API execution has no public search or browsing capability",
 		"search_audit status unavailable",
+		"issue all needed semantic searches together in the first tool response",
+		"fetch the selected candidates together in the next response",
 	} {
 		if !strings.Contains(apiPrompt, want) {
 			t.Fatalf("API prompt missing %q: %s", want, apiPrompt)

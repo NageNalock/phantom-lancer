@@ -1025,6 +1025,9 @@ func buildNewsContextAggregationPrompt(taskID string, pack NewsContextAggregatio
 		b.WriteString("Actively use Codex CLI public search/browse to verify important conclusions. Public verification is mandatory for high-impact portfolio or strategy effects, conflicting sources, material single-source claims, insufficient evidence for stage/impact, and policy, filing, or supply-chain facts.\n")
 	} else {
 		b.WriteString("This API execution has no public search or browsing capability. When public verification would be mandatory, record search_audit status unavailable with a concrete failure_reason, lower confidence, and preserve the affected news for later verification.\n")
+		if len(pack.InputNewsEvents) > 0 {
+			b.WriteString("Keep API tool calls bounded: issue all needed semantic searches together in the first tool response, fetch the selected candidates together in the next response, then submit the result. Do not repeat equivalent lookups.\n")
+		}
 	}
 	b.WriteString("When RequiredResearch is true, public verification is mandatory and every ResearchReasons item must be addressed in `search_audit`.\n")
 	b.WriteString("For every public verification, use exactly these search_audit fields: question, status, sources, supported, weakened_or_refuted, unresolved, and failure_reason. Search failure must remain explicit and must lower confidence; never present it as verified.\n")

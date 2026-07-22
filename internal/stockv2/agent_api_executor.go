@@ -17,7 +17,7 @@ import (
 
 const (
 	agentAPIMaxTurns             = 16
-	agentAPIDeepSeekNewsMaxTurns = 8
+	agentAPIDeepSeekNewsMaxTurns = 4
 	agentAPIDeepSeekSubmitTurns  = 4
 	agentAPIResponseSize         = 4 << 20
 )
@@ -150,6 +150,7 @@ func (e *agentAPIExecutor) executePrompt(
 		ExitCode: -1,
 	}
 	var transcript strings.Builder
+	lastToolError := ""
 
 	for turn := 0; turn < maxTurns; turn++ {
 		body := map[string]any{
@@ -217,6 +218,7 @@ func (e *agentAPIExecutor) executePrompt(
 			}
 			content := ""
 			if toolErr != nil {
+				lastToolError = safelog.Text(call.Function.Name+": "+toolErr.Message, stderrTailMaxBytes)
 				data, _ := json.Marshal(map[string]any{"error": toolErr.Message, "code": toolErr.Code})
 				content = string(data)
 			} else {
@@ -240,6 +242,10 @@ func (e *agentAPIExecutor) executePrompt(
 	}
 	output.Duration = time.Since(started)
 	output.RawTranscript = safelog.Text(transcript.String(), transcriptMaxBytes)
+	if lastToolError != "" {
+		output.StderrTail = lastToolError
+		return output, fmt.Errorf("API model exceeded %d tool-call turns without submitting a result; last tool error: %s", maxTurns, lastToolError)
+	}
 	return output, fmt.Errorf("API model exceeded %d tool-call turns without submitting a result", maxTurns)
 }
 
