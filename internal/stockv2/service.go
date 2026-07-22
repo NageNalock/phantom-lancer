@@ -1320,8 +1320,17 @@ func (s *Service) shouldDeferMaintenanceForNewsContextBackfill(ctx context.Conte
 		return true
 	}
 	// ponytail: the owner-requested historical backfill has priority over
-	// optional full-market maintenance; the existing schedules remain due.
-	return found && backfill.Status == NewsContextBackfillStatusRunning
+	// optional full-market maintenance; the existing schedules remain due. A
+	// pause does not cancel an in-flight model batch, so keep the gate closed
+	// until that linked run reaches its durable pending boundary.
+	if !found || strings.TrimSpace(backfill.CurrentRunID) == "" {
+		return found && backfill.Status == NewsContextBackfillStatusRunning
+	}
+	if backfill.Status == NewsContextBackfillStatusRunning {
+		return true
+	}
+	run, err := s.store.GetNewsContextRun(ctx, backfill.CurrentRunID)
+	return err != nil || run.Status == NewsContextRunStatusRunning
 }
 
 // StartBackground 启动后台任务

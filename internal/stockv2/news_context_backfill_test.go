@@ -117,11 +117,37 @@ func TestRunningNewsContextBackfillDefersOptionalMaintenance(t *testing.T) {
 	}
 
 	backfill.Status = NewsContextBackfillStatusPaused
-	if _, err := svc.store.UpdateNewsContextBackfill(ctx, backfill); err != nil {
+	backfill, err = svc.store.UpdateNewsContextBackfill(ctx, backfill)
+	if err != nil {
 		t.Fatalf("pause backfill: %v", err)
 	}
 	if svc.shouldDeferMaintenanceForNewsContextBackfill(ctx) {
 		t.Fatalf("paused backfill deferred optional maintenance")
+	}
+
+	now := time.Now().In(time.Local).Truncate(time.Second)
+	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowDaily, TriggerType: NewsContextTriggerBackfill,
+		Status: NewsContextRunStatusRunning, Phase: newsContextRunPhaseAggregating,
+		WindowStart: now.Add(-24 * time.Hour), WindowEnd: now,
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatalf("create draining context run: %v", err)
+	}
+	backfill.CurrentRunID = run.ID
+	if _, err := svc.store.UpdateNewsContextBackfill(ctx, backfill); err != nil {
+		t.Fatalf("link draining context run: %v", err)
+	}
+	if !svc.shouldDeferMaintenanceForNewsContextBackfill(ctx) {
+		t.Fatal("paused backfill with an in-flight run did not defer optional maintenance")
+	}
+	run.Status = NewsContextRunStatusPending
+	if _, err := svc.store.UpdateNewsContextRun(ctx, run); err != nil {
+		t.Fatalf("finish draining context run: %v", err)
+	}
+	if svc.shouldDeferMaintenanceForNewsContextBackfill(ctx) {
+		t.Fatal("paused backfill kept deferring maintenance after its run reached a safe boundary")
 	}
 }
 
