@@ -251,8 +251,19 @@ func (e *agentAPIExecutor) executePrompt(
 }
 
 func agentAPIToolCallParams(name, arguments string) ([]byte, *mcpError) {
+	argumentBytes := bytes.TrimSpace([]byte(arguments))
 	var raw json.RawMessage
-	if err := json.Unmarshal([]byte(arguments), &raw); err != nil {
+	err := json.Unmarshal(argumentBytes, &raw)
+	// ponytail: DeepSeek occasionally appends one separator after an otherwise
+	// complete tool-call object. Accept only that exact, lossless repair; every
+	// other malformed payload still goes back to the model for correction.
+	if err != nil && len(argumentBytes) > 0 && argumentBytes[len(argumentBytes)-1] == ',' {
+		candidate := bytes.TrimSpace(argumentBytes[:len(argumentBytes)-1])
+		if candidateErr := json.Unmarshal(candidate, &raw); candidateErr == nil {
+			err = nil
+		}
+	}
+	if err != nil {
 		// ponytail: return only the parser position and byte count. The model gets
 		// enough feedback to correct its next call without logging argument data.
 		return nil, &mcpError{

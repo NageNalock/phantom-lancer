@@ -87,6 +87,17 @@ func TestAgentAPIToolCallParamsRejectsMalformedArguments(t *testing.T) {
 	if call.Name != codexSubmitResultTool || string(call.Arguments) != `{"taskID":"task-1"}` {
 		t.Fatalf("params = %#v", call)
 	}
+
+	params, toolErr = agentAPIToolCallParams(codexSubmitResultTool, `{"taskID":"task-1"}, `)
+	if toolErr != nil {
+		t.Fatalf("trailing separator arguments: %v", toolErr)
+	}
+	if err := json.Unmarshal(params, &call); err != nil || string(call.Arguments) != `{"taskID":"task-1"}` {
+		t.Fatalf("trailing separator params = %#v, err=%v", call, err)
+	}
+	if _, toolErr := agentAPIToolCallParams(codexSubmitResultTool, `{"taskID":"task-1"}, {"extra":true}`); toolErr == nil {
+		t.Fatal("multiple top-level objects were accepted")
+	}
 }
 
 func TestAgentAPINewsContextToolsAndSchemaAreTaskSpecific(t *testing.T) {
