@@ -103,6 +103,38 @@ func TestBuildPortfolioSentinelContextIncludesHoldingsAndWindowNews(t *testing.T
 	}
 }
 
+func TestPreparePortfolioSentinelNewsDefersDuringBackfill(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := svc.CreateRawNews(ctx, RequestCreateRawNews{
+		Source: NewsSourceJin10, SourceID: "sentinel-deferred-news",
+		Title: "历史补处理期间暂不重建新闻链接",
+	}); err != nil {
+		t.Fatalf("create pending news: %v", err)
+	}
+	if _, err := svc.store.CreateNewsContextBackfill(ctx, NewsContextBackfill{
+		Status: NewsContextBackfillStatusRunning, Phase: "final_review", CutoffAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create running backfill: %v", err)
+	}
+
+	if err := svc.preparePortfolioSentinelNews(ctx, PortfolioSentinelRun{}); err != nil {
+		t.Fatalf("prepare sentinel news: %v", err)
+	}
+	pending, err := svc.CountRawNews(ctx, RawNewsListFilter{Source: NewsSourceJin10, Status: NewsStatusNew})
+	if err != nil {
+		t.Fatalf("count pending news: %v", err)
+	}
+	events, err := svc.CountNewsEvents(ctx, NewsEventListFilter{Source: NewsSourceJin10})
+	if err != nil {
+		t.Fatalf("count news events: %v", err)
+	}
+	if pending != 1 || events != 0 {
+		t.Fatalf("sentinel processed deferred news: pending=%d events=%d", pending, events)
+	}
+}
+
 func TestBuildPortfolioSentinelContextSuppressesLowPriorityNewsCandidates(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

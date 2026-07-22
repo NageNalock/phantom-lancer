@@ -342,6 +342,13 @@ func (s *Service) preparePortfolioSentinelNews(ctx context.Context, run Portfoli
 	if s == nil || s.store == nil {
 		return nil
 	}
+	// ponytail: a sentinel run can use already persisted links while the
+	// owner-requested historical backfill has priority. Rebuilding the full
+	// market link snapshot here would otherwise overlap the backfill's
+	// historical semantic search and exceed this host's memory headroom.
+	if s.shouldDeferMaintenanceForNewsContextBackfill(ctx) {
+		return nil
+	}
 	if !s.tryStartNewsPipelineRun() {
 		return nil
 	}
