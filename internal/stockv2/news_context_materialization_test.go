@@ -202,6 +202,37 @@ func TestLegacyHourlyCoverageMovesBackToPendingForFourHourAggregation(t *testing
 	}
 }
 
+func TestLegacyHourlyReviewBecomesCompletedCheckpoint(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	end := time.Now().Truncate(time.Hour)
+	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowHourly, TriggerType: NewsContextTriggerScheduled,
+		Status: NewsContextRunStatusWaitingReview, Phase: "review_failed",
+		WindowStart: end.Add(-time.Hour), WindowEnd: end,
+		InputCount: 82, ProcessedCount: 82, PendingCount: 0,
+		ReviewStatus: NewsContextReviewFailed, ReviewRunID: "legacy-review",
+		ErrorMessage:  "legacy model result failed",
+		CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.migrateLegacyHourlyNewsContextReviews(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := svc.store.GetNewsContextRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != NewsContextRunStatusCompleted || stored.Phase != "checkpointed" ||
+		stored.ReviewStatus != NewsContextReviewNotRequired || stored.ReviewRunID != "" ||
+		stored.ErrorMessage != "" || stored.ProcessedCount != stored.InputCount {
+		t.Fatalf("migrated hourly review=%+v", stored)
+	}
+}
+
 func TestManualDailyInputIncludesOnlyThemesChangedInWindow(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

@@ -267,7 +267,10 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 	`); err != nil {
 		return wrapError(err, "ensure news event context indexes")
 	}
-	return s.migrateLegacyHourlyNewsContextCoverage(ctx)
+	if err := s.migrateLegacyHourlyNewsContextCoverage(ctx); err != nil {
+		return err
+	}
+	return s.migrateLegacyHourlyNewsContextReviews(ctx)
 }
 
 func (s *Store) migrateLegacyHourlyNewsContextCoverage(ctx context.Context) error {
@@ -336,6 +339,23 @@ func (s *Store) migrateLegacyHourlyNewsContextCoverage(ctx context.Context) erro
 		}
 		return nil
 	})
+}
+
+func (s *Store) migrateLegacyHourlyNewsContextReviews(ctx context.Context) error {
+	// DEPRECATED: releases before 2026-07 could leave a fully processed hourly
+	// model run waiting on a portfolio review. Hourly windows are deterministic
+	// checkpoints now; remove this migration after all deployed databases have
+	// crossed that release boundary.
+	now := time.Now()
+	_, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_runs SET
+		status=?,phase='checkpointed',review_status=?,review_run_id=NULL,
+		current_agent_run_id=NULL,error_message='',finished_at=COALESCE(finished_at,?),updated_at=?
+		WHERE window_type=? AND pending_count=0 AND processed_count>=input_count
+		AND (status=? OR review_status IN (?,?,?))`,
+		NewsContextRunStatusCompleted, NewsContextReviewNotRequired, now, now,
+		NewsContextWindowHourly, NewsContextRunStatusWaitingReview,
+		NewsContextReviewPending, NewsContextReviewRunning, NewsContextReviewFailed)
+	return wrapError(err, "migrate legacy hourly news context reviews")
 }
 
 func (s *Store) ensureNewsContextConfigColumns(ctx context.Context) error {
