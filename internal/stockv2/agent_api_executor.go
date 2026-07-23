@@ -19,6 +19,7 @@ const (
 	agentAPIMaxTurns             = 16
 	agentAPIDeepSeekNewsMaxTurns = 4
 	agentAPIDeepSeekSubmitTurns  = 4
+	agentAPIDeepSeekMaxTokens    = 32 << 10
 	agentAPIResponseSize         = 4 << 20
 )
 
@@ -132,8 +133,14 @@ func (e *agentAPIExecutor) executePrompt(
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	started := time.Now()
+	systemPrompt := "You execute one StockV2 analysis task. Use the provided functions for project data and submit the final structured result with stock_agent_submit_result. Do not claim access to Codex CLI browsing in API mode."
+	if deepSeek {
+		// ponytail: DeepSeek JSON Output requires an explicit JSON instruction and
+		// example. Final persistence still crosses the validated submit tool.
+		systemPrompt += ` DeepSeek JSON mode is enabled. Any assistant message content must be exactly one JSON object, for example {"message":"continuing_with_tool_calls"}. Do not put the final task result only in message content; call stock_agent_submit_result.`
+	}
 	messages := []map[string]any{
-		{"role": "system", "content": "You execute one StockV2 analysis task. Use the provided functions for project data and submit the final structured result with stock_agent_submit_result. Do not claim access to Codex CLI browsing in API mode."},
+		{"role": "system", "content": systemPrompt},
 		{"role": "user", "content": prompt + "\n\nAPI execution mode: call the provided OpenAI functions. Function names use underscores instead of dots; stock_agent_submit_result is the required final submission."},
 	}
 	tools := agentAPITools(options.toolNames, options.submitResultSchema)
@@ -161,7 +168,11 @@ func (e *agentAPIExecutor) executePrompt(
 			"stream":      false,
 		}
 		applyAgentAPIReasoning(body, deepSeek, reasoningEffort)
+		if deepSeek {
+			applyDeepSeekAPICompatibility(body, reasoningEffort)
+		}
 		if deepSeek && run.TaskType == AgentTaskTypeNewsEventReview &&
+			!deepSeekThinkingEnabled(reasoningEffort) &&
 			(options.forceSubmit || turn >= maxTurns-2) {
 			body["tool_choice"] = agentAPIRequiredSubmitToolChoice()
 		}
@@ -309,6 +320,22 @@ func applyAgentAPIReasoning(body map[string]any, deepSeek bool, reasoningEffort 
 		return
 	}
 	body["reasoning_effort"] = "high"
+}
+
+func applyDeepSeekAPICompatibility(body map[string]any, reasoningEffort string) {
+	body["response_format"] = map[string]string{"type": "json_object"}
+	body["max_tokens"] = agentAPIDeepSeekMaxTokens
+	if deepSeekThinkingEnabled(reasoningEffort) {
+		// DeepSeek V4 thinking mode supports tools but rejects tool_choice,
+		// including the otherwise harmless "auto" value.
+		delete(body, "tool_choice")
+	}
+}
+
+func deepSeekThinkingEnabled(reasoningEffort string) bool {
+	// DeepSeek defaults to thinking mode when the field is omitted. This project
+	// maps only the existing low option to its binary non-thinking mode.
+	return strings.ToLower(strings.TrimSpace(reasoningEffort)) != AgentReasoningEffortLow
 }
 
 func isDeepSeekAPI(baseURL, modelName string) bool {

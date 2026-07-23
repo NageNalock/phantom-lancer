@@ -15,6 +15,10 @@ import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, Drawer, Field, Notice, Pill, useDangerConfirm } from "../../components/ui";
 import {
   formatDate,
+  stockV2AgentAvailabilityLabel,
+  stockV2AgentAvailabilityTone,
+  stockV2AgentModelStatusLabel,
+  stockV2AgentModelStatusTone,
   stockV2AgentTaskConfigurable,
   stockV2AgentTaskTypeLabel,
   stockV2AgentProviderTypeLabel,
@@ -329,6 +333,7 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
         <AgentTaskProfileSection
           loading={tLoading || taskProfiles === null}
           error={tError}
+          models={models ?? []}
           profiles={taskProfiles}
           onRetry={loadTaskProfiles}
           onEdit={(profile) => void openTaskProfileDrawer(profile)}
@@ -520,6 +525,9 @@ function AgentProviderSection({
               ) : (
                 <Pill tone={p.apiKeySet ? "good" : "warn"}>{p.apiKeySet ? "Token 已设置" : "Token 未设置"}</Pill>
               )}
+              <Pill tone={stockV2AgentAvailabilityTone(p.availability)}>
+                {stockV2AgentAvailabilityLabel(p.availability)}
+              </Pill>
             </div>
             <p className="mt-1 break-words font-mono text-[var(--muted)]">
               {isDefaultProvider ? "codex login session on this host" : p.baseUrl || "-"}
@@ -662,6 +670,7 @@ function AgentModelGroup({
             <strong className="text-sm">{m.displayName || m.modelName}</strong>
             <span className="font-mono text-[var(--muted-strong)]">{m.modelName}</span>
             <Pill tone="neutral">{stockV2AgentModelTypeLabel(m.modelType || "chat")}</Pill>
+            <Pill tone={stockV2AgentModelStatusTone(m.status)}>{stockV2AgentModelStatusLabel(m.status)}</Pill>
             <button
               type="button"
               disabled={toggleBusy === m.id}
@@ -698,12 +707,14 @@ function AgentModelGroup({
 function AgentTaskProfileSection({
   loading,
   error,
+  models,
   profiles,
   onRetry,
   onEdit,
 }: {
   loading: boolean;
   error: string | null;
+  models: StockV2AgentModelProfile[];
   profiles: StockV2AgentTaskProfile[] | null;
   onRetry: () => Promise<StockV2AgentTaskProfile[]>;
   onEdit: (profile: StockV2AgentTaskProfile) => void;
@@ -719,6 +730,14 @@ function AgentTaskProfileSection({
   }
   if (!profiles || profiles.length === 0) return <p className="text-xs text-[var(--muted)]">暂无任务配置。</p>;
   const profileByType = new Map(profiles.map((item) => [item.taskType, item]));
+  const modelByID = new Map(models.map((item) => [item.id, item]));
+  const bindingLabel = (modelID?: string) => {
+    if (!modelID) return "(未绑定)";
+    const model = modelByID.get(modelID);
+    if (!model) return `${modelID.slice(0, 12)} (模型不存在)`;
+    const status = model.enabled ? stockV2AgentModelStatusLabel(model.status) : "未启用";
+    return `${model.displayName || model.modelName} (${status})`;
+  };
   return (
     <div className="grid gap-2">
       {AGENT_TASKS.map((task) => {
@@ -748,8 +767,8 @@ function AgentTaskProfileSection({
             {configurable ? (
               <div className="mt-2 grid gap-1">
                 <Row label="执行模式" value={profile?.executionMode === "api" ? "API" : "CLI"} />
-                <Row label="主模型" value={profile?.primaryModelId ? profile.primaryModelId.slice(0, 12) : "(未绑定)"} />
-                <Row label="备模型" value={profile?.fallbackModelId ? profile.fallbackModelId.slice(0, 12) : "(未绑定)"} />
+                <Row label="主模型" value={bindingLabel(profile?.primaryModelId)} />
+                <Row label="备模型" value={bindingLabel(profile?.fallbackModelId)} />
                 <Row label="推理强度" value={profile?.reasoningEffort || "模型默认（不传）"} />
               </div>
             ) : (

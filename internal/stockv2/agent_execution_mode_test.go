@@ -216,6 +216,41 @@ func TestApplyAgentAPIReasoningMapsDeepSeekThinkingMode(t *testing.T) {
 	}
 }
 
+func TestApplyDeepSeekAPICompatibilityUsesJSONWithoutThinkingToolChoice(t *testing.T) {
+	body := map[string]any{"tool_choice": "auto"}
+	applyAgentAPIReasoning(body, true, AgentReasoningEffortMedium)
+	applyDeepSeekAPICompatibility(body, AgentReasoningEffortMedium)
+	want := map[string]any{
+		"thinking":         map[string]string{"type": "enabled"},
+		"reasoning_effort": "high",
+		"response_format":  map[string]string{"type": "json_object"},
+		"max_tokens":       agentAPIDeepSeekMaxTokens,
+	}
+	if !reflect.DeepEqual(body, want) {
+		t.Fatalf("body = %#v; want %#v", body, want)
+	}
+
+	nonThinking := map[string]any{"tool_choice": "auto"}
+	applyAgentAPIReasoning(nonThinking, true, AgentReasoningEffortLow)
+	applyDeepSeekAPICompatibility(nonThinking, AgentReasoningEffortLow)
+	if nonThinking["tool_choice"] != "auto" {
+		t.Fatalf("non-thinking tool_choice = %#v; want auto", nonThinking["tool_choice"])
+	}
+	if !reflect.DeepEqual(nonThinking["response_format"], map[string]string{"type": "json_object"}) ||
+		nonThinking["max_tokens"] != agentAPIDeepSeekMaxTokens {
+		t.Fatalf("non-thinking JSON options = %#v", nonThinking)
+	}
+}
+
+func TestDeepSeekThinkingDefaultsEnabled(t *testing.T) {
+	if !deepSeekThinkingEnabled("") || !deepSeekThinkingEnabled(AgentReasoningEffortMedium) {
+		t.Fatal("empty and medium efforts must use DeepSeek thinking mode")
+	}
+	if deepSeekThinkingEnabled(AgentReasoningEffortLow) {
+		t.Fatal("low effort must disable DeepSeek thinking mode")
+	}
+}
+
 func TestIsDeepSeekAPIUsesModelOrExactHostBoundary(t *testing.T) {
 	for _, test := range []struct {
 		baseURL string

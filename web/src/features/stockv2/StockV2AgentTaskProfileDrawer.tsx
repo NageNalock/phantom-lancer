@@ -8,6 +8,7 @@ import type {
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, Drawer, Field, Notice } from "../../components/ui";
+import { stockV2AgentModelStatusLabel } from "../../domain/labels";
 
 export function StockV2AgentTaskProfileDrawer({
   profile,
@@ -50,11 +51,19 @@ export function StockV2AgentTaskProfileDrawer({
 
   const providerByID = new Map(providers.map((provider) => [provider.id, provider]));
   const executionMode = form.executionMode === "api" ? "api" : "cli";
-  const enabledModels = models.filter((m) => {
-    if (!m.enabled || m.status !== "available" || (m.modelType || "chat") !== "chat") return false;
+  const compatibleModels = models.filter((m) => {
+    if ((m.modelType || "chat") !== "chat") return false;
     const provider = providerByID.get(m.providerId);
-    return executionMode === "cli" ? provider?.providerType === "codex_cli" : provider?.providerType !== "codex_cli";
+    if (!provider) return false;
+    return executionMode === "cli" ? provider.providerType === "codex_cli" : provider.providerType !== "codex_cli";
   });
+  const enabledModels = compatibleModels.filter((model) => model.enabled && model.status === "available");
+  const modelOptionLabel = (model: StockV2AgentModelProfile) => {
+    const name = model.displayName || model.modelName;
+    if (!model.enabled) return `${name} (未启用)`;
+    if (model.status !== "available") return `${name} (${stockV2AgentModelStatusLabel(model.status)})`;
+    return name;
+  };
 
   async function handleSubmit() {
     setSubmitting(true);
@@ -98,6 +107,9 @@ export function StockV2AgentTaskProfileDrawer({
         {enabledModels.length === 0 ? (
           <Notice tone="warn">当前执行模式下暂无可用对话模型。CLI 仅使用内置 Codex Provider；API 使用 OpenAI-compatible Provider。</Notice>
         ) : null}
+        {compatibleModels.length > enabledModels.length ? (
+          <p className="m-0 text-xs text-[var(--muted)]">不可用模型保留显示并注明状态，但不能保存为任务绑定。</p>
+        ) : null}
 
         <Field label="执行模式" help="CLI 使用本机 Codex 会话与 MCP；API 直接请求所选 Provider，并在服务内完成函数调用循环">
           <select
@@ -110,16 +122,16 @@ export function StockV2AgentTaskProfileDrawer({
           </select>
         </Field>
 
-        <Field label="主模型" help="优先调用的模型，必须已启用">
+        <Field label="主模型" help="优先调用的模型，必须已启用且测试可用">
           <select
             value={form.primaryModelId || ""}
             onChange={(e) => setForm({ ...form, primaryModelId: e.target.value })}
             className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
           >
             <option value="">(未绑定)</option>
-            {enabledModels.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.displayName || m.modelName}
+            {compatibleModels.map((m) => (
+              <option disabled={!m.enabled || m.status !== "available"} key={m.id} value={m.id}>
+                {modelOptionLabel(m)}
               </option>
             ))}
           </select>
@@ -132,9 +144,9 @@ export function StockV2AgentTaskProfileDrawer({
             className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
           >
             <option value="">(无)</option>
-            {enabledModels.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.displayName || m.modelName}
+            {compatibleModels.map((m) => (
+              <option disabled={!m.enabled || m.status !== "available"} key={m.id} value={m.id}>
+                {modelOptionLabel(m)}
               </option>
             ))}
           </select>
