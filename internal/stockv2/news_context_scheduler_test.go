@@ -2,6 +2,7 @@ package stockv2
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -158,7 +159,6 @@ func TestStartDueNewsContextRunDirectCadenceClaimsPostCutoffPartialWindowOnce(t 
 		name            string
 		windowType      string
 		fourHourEnabled bool
-		dailyEnabled    bool
 		now             time.Time
 		wantStart       time.Time
 		wantEnd         time.Time
@@ -168,12 +168,6 @@ func TestStartDueNewsContextRunDirectCadenceClaimsPostCutoffPartialWindowOnce(t 
 			now:       cutoff.Add(2*time.Hour + 30*time.Minute),
 			wantStart: time.Date(2026, 7, 13, 8, 0, 0, 0, time.Local),
 			wantEnd:   time.Date(2026, 7, 13, 12, 0, 0, 0, time.Local),
-		},
-		{
-			name: "daily direct", windowType: NewsContextWindowDaily, dailyEnabled: true,
-			now:       time.Date(2026, 7, 14, 0, 30, 0, 0, time.Local),
-			wantStart: time.Date(2026, 7, 13, 0, 0, 0, 0, time.Local),
-			wantEnd:   time.Date(2026, 7, 14, 0, 0, 0, 0, time.Local),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -196,7 +190,7 @@ func TestStartDueNewsContextRunDirectCadenceClaimsPostCutoffPartialWindowOnce(t 
 			cfg.Enabled = true
 			cfg.HourlyEnabled = false
 			cfg.FourHourEnabled = tt.fourHourEnabled
-			cfg.DailyEnabled = tt.dailyEnabled
+			cfg.DailyEnabled = false
 			stale := cutoff.AddDate(0, -3, 0)
 			cfg.NextFourHourAt = stale
 			cfg.NextDailyAt = stale
@@ -392,77 +386,41 @@ func TestStartDueNewsContextRunRecoversPersistedPendingManifest(t *testing.T) {
 	}
 }
 
-func TestSeedFourHourUsesEveryInterleavedHourlyOutputVersionAndGroupsStableThemes(t *testing.T) {
+func TestSeedFourHourIgnoresLegacyHourlyThemeOutputs(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
 	start := time.Date(2026, 7, 13, 8, 0, 0, 0, time.Local)
 	end := time.Date(2026, 7, 13, 12, 0, 0, 0, time.Local)
-	cfg := defaultNewsContextConfig()
-	if _, err := svc.store.UpsertNewsContextConfig(ctx, cfg); err != nil {
-		t.Fatalf("save config: %v", err)
+	thread, err := svc.store.CreateNewsThread(ctx, NewsThread{
+		Title: "旧小时主题", CoreThesis: "不再作为四小时输入", Stage: NewsThreadStageEmerging,
+	})
+	if err != nil {
+		t.Fatalf("create legacy hourly theme: %v", err)
 	}
-	versions := make([]NewsThreadVersion, 0, 8)
-	for index, childStart := range []time.Time{start, start.Add(time.Hour), start.Add(2 * time.Hour), start.Add(3 * time.Hour)} {
-		childEnd := childStart.Add(time.Hour)
-		child := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowHourly, childStart, childEnd,
-			NewsContextTriggerScheduled, NewsContextRunStatusCompleted)
-		for _, theme := range []string{"stable-theme-a", "stable-theme-b"} {
-			version, err := svc.store.CreateNewsThreadVersion(ctx, NewsThreadVersion{
-				ThreadID: theme, RunID: child.ID, AgentRunID: "hour-agent-" + child.ID,
-				WindowType: NewsContextWindowHourly, VersionNo: index + 1,
-				Title: theme, CoreThesis: "连续小时变化", Stage: NewsThreadStageEmerging,
-				LatestChange: "小时变化", ReviewStatus: NewsContextReviewNotRequired,
-				EffectiveAt: childEnd,
-			})
-			if err != nil {
-				t.Fatalf("create child version: %v", err)
-			}
-			versions = append(versions, version)
-			if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
-				RunID: child.ID, ObjectType: NewsContextRunItemNewsEvent,
-				ObjectID: "child-event-" + theme + child.ID, Status: NewsContextRunItemCompleted,
-				ThreadID: version.ThreadID, VersionID: version.ID, SourceAt: childEnd,
-			}}); err != nil {
-				t.Fatalf("record child output: %v", err)
-			}
-		}
+	child := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowHourly, start, start.Add(time.Hour),
+		NewsContextTriggerScheduled, NewsContextRunStatusCompleted)
+	if _, err := svc.store.CreateNewsThreadVersion(ctx, NewsThreadVersion{
+		ThreadID: thread.ID, RunID: child.ID, AgentRunID: "legacy-hour-agent",
+		WindowType: NewsContextWindowHourly, VersionNo: 1, Title: thread.Title,
+		CoreThesis: thread.CoreThesis, Stage: thread.Stage, EffectiveAt: child.WindowEnd,
+	}); err != nil {
+		t.Fatalf("create legacy hourly output: %v", err)
 	}
 	parent := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowFourHour, start, end,
 		NewsContextTriggerScheduled, NewsContextRunStatusPending)
 	if err := svc.seedNewsContextRunItems(ctx, &parent); err != nil {
-		t.Fatalf("seed parent versions: %v", err)
+		t.Fatalf("seed four-hour run: %v", err)
 	}
-	items, err := svc.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{
-		RunID: parent.ID, ObjectType: NewsContextRunItemThread, Limit: 10,
+	count, err := svc.store.CountNewsContextRunItems(ctx, NewsContextRunItemListFilter{
+		RunID: parent.ID,
 	})
-	if err != nil || len(items) != len(versions) {
-		t.Fatalf("parent items=%+v err=%v", items, err)
-	}
-	selected, err := svc.nextNewsContextRunItems(ctx, parent.ID)
-	if err != nil || len(selected) != len(versions) {
-		t.Fatalf("selected stable-theme histories=%+v err=%v", selected, err)
-	}
-	seenSecondTheme := false
-	for _, item := range selected {
-		if item.ThreadID == "stable-theme-b" {
-			seenSecondTheme = true
-		}
-		if seenSecondTheme && item.ThreadID == "stable-theme-a" {
-			t.Fatalf("interleaved child output was not grouped by stable theme: %+v", selected)
-		}
-	}
-	report := NewsContextReport{
-		SchemaVersion: NewsContextResultSchemaVersion, RunID: parent.ID,
-		WindowType: parent.WindowType, UnchangedThreadIDs: []string{"stable-theme-a", "stable-theme-b"},
-		NewsDecisions: []NewsContextNewsDecision{}, SearchAudit: []NewsContextSearchAudit{},
-	}
-	if err := validateNewsContextReport(parent, selected, report); err != nil {
-		t.Fatalf("stable theme snapshots were not grouped as one outcome: %v", err)
+	if err != nil || count != 0 {
+		t.Fatalf("four-hour run consumed legacy hourly output count=%d err=%v", count, err)
 	}
 }
 
-func TestSeedFourHourWithoutHourlyUsesAllAvailableThemes(t *testing.T) {
+func TestSeedFourHourWithoutHourlyClaimsRawNewsOnly(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -476,7 +434,7 @@ func TestSeedFourHourWithoutHourlyUsesAllAvailableThemes(t *testing.T) {
 	end := newsContextBoundaryAtOrBefore(NewsContextWindowFourHour, time.Now())
 	start := previousNewsContextBoundary(NewsContextWindowFourHour, end)
 	oldThread, err := svc.store.CreateNewsThread(ctx, NewsThread{
-		Title: "既有主题", CoreThesis: "四小时直跑仍需读取完整可用主题", Stage: NewsThreadStageEmerging,
+		Title: "既有主题", CoreThesis: "仅通过语义检索按需读取", Stage: NewsThreadStageEmerging,
 		LastChangedAt: start.Add(-24 * time.Hour),
 	})
 	if err != nil {
@@ -495,18 +453,21 @@ func TestSeedFourHourWithoutHourlyUsesAllAvailableThemes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list direct four-hour items: %v", err)
 	}
-	want := map[string]bool{oldThread.ID: false, event.ID: false}
+	foundEvent := false
 	for _, item := range items {
-		if _, ok := want[item.ObjectID]; ok {
-			want[item.ObjectID] = true
+		if item.ObjectID == oldThread.ID || item.ObjectType == NewsContextRunItemThread {
+			t.Fatalf("four-hour manifest eagerly included existing theme: %+v", items)
+		}
+		if item.ObjectID == event.ID && item.ObjectType == NewsContextRunItemNewsEvent {
+			foundEvent = true
 		}
 	}
-	if !want[oldThread.ID] || !want[event.ID] {
-		t.Fatalf("direct four-hour manifest missing inputs: items=%+v", items)
+	if !foundEvent || len(items) != 1 {
+		t.Fatalf("direct four-hour manifest did not claim only raw news: items=%+v", items)
 	}
 }
 
-func TestSeedDailyUsesEveryCompleteFourHourOutputVersion(t *testing.T) {
+func TestSeedDailyMaterializesLatestCompleteFourHourVersionPerTheme(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -515,21 +476,28 @@ func TestSeedDailyUsesEveryCompleteFourHourOutputVersion(t *testing.T) {
 	if _, err := svc.store.UpsertNewsContextConfig(ctx, defaultNewsContextConfig()); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	versionIDs := make(map[string]bool)
+	thread, err := svc.store.CreateNewsThread(ctx, NewsThread{
+		ID: "daily-stable-theme", Title: "跨日主题", CoreThesis: "保留最新四小时变化",
+		Stage: NewsThreadStageSpreading, FirstSeenAt: start,
+	})
+	if err != nil {
+		t.Fatalf("create stable theme: %v", err)
+	}
+	latestVersionID := ""
 	for index, childStart := 0, start; childStart.Before(end); index, childStart = index+1, childStart.Add(4*time.Hour) {
 		childEnd := childStart.Add(4 * time.Hour)
 		child := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowFourHour, childStart, childEnd,
 			NewsContextTriggerScheduled, NewsContextRunStatusCompleted)
 		version, err := svc.store.CreateNewsThreadVersion(ctx, NewsThreadVersion{
-			ThreadID: "daily-stable-theme", RunID: child.ID, AgentRunID: "four-hour-agent-" + child.ID,
+			ThreadID: thread.ID, RunID: child.ID, AgentRunID: "four-hour-agent-" + child.ID,
 			WindowType: NewsContextWindowFourHour, VersionNo: index + 1,
 			Title: "跨日主题", CoreThesis: "保留每个四小时变化", Stage: NewsThreadStageSpreading,
-			LatestChange: "四小时变化", ReviewStatus: NewsContextReviewNotRequired, EffectiveAt: childEnd,
+			LatestChange: fmt.Sprintf("四小时变化 %d", index), ReviewStatus: NewsContextReviewNotRequired, EffectiveAt: childEnd,
 		})
 		if err != nil {
 			t.Fatalf("create four-hour output: %v", err)
 		}
-		versionIDs[version.ID] = false
+		latestVersionID = version.ID
 		if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
 			RunID: child.ID, ObjectType: NewsContextRunItemThread, ObjectID: "input-" + child.ID,
 			Status: NewsContextRunItemCompleted, ThreadID: version.ThreadID, VersionID: version.ID,
@@ -549,15 +517,13 @@ func TestSeedDailyUsesEveryCompleteFourHourOutputVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list daily parent inputs: %v", err)
 	}
-	for _, item := range items {
-		if _, ok := versionIDs[item.VersionID]; ok {
-			versionIDs[item.VersionID] = true
-		}
+	if len(items) != 1 || items[0].ThreadID != thread.ID || items[0].VersionID == latestVersionID {
+		t.Fatalf("daily materialization items=%+v latest source=%s", items, latestVersionID)
 	}
-	for id, found := range versionIDs {
-		if !found {
-			t.Fatalf("daily parent omitted four-hour output version %s: %+v", id, items)
-		}
+	materialized, err := svc.store.GetNewsThreadVersion(ctx, items[0].VersionID)
+	if err != nil || materialized.RunID != parent.ID || materialized.AgentRunID != "" ||
+		materialized.WindowType != NewsContextWindowDaily || materialized.LatestChange != "四小时变化 5" {
+		t.Fatalf("daily materialized version=%+v err=%v", materialized, err)
 	}
 }
 
@@ -675,6 +641,87 @@ func TestSeedRealtimeNewsContextRunHonorsCompletedBackfillWatermark(t *testing.T
 	}
 	if oldStatus != NewsEventContextPending || oldRunID != "" {
 		t.Fatalf("pre-watermark event was claimed status=%q run=%q", oldStatus, oldRunID)
+	}
+}
+
+func TestScheduledFourHourRunSweepsRecentPendingAndRetriesDeferralOnce(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	cutoff := time.Date(2026, 7, 13, 10, 0, 0, 0, time.Local)
+	if _, err := svc.store.CreateNewsContextBackfill(ctx, NewsContextBackfill{
+		Status: NewsContextBackfillStatusCompleted, Phase: "completed", CutoffAt: cutoff,
+		CompletedAt: cutoff.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("create completed backfill: %v", err)
+	}
+	preCutoff, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source: "test", Title: "仍归历史补处理所有", EventAt: cutoff.Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("create pre-cutoff event: %v", err)
+	}
+	latePending, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source: "test", Title: "前一窗口迟到消息", EventAt: cutoff.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("create late pending event: %v", err)
+	}
+	firstOwner := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowFourHour,
+		cutoff, cutoff.Add(time.Hour), NewsContextTriggerScheduled, NewsContextRunStatusCompleted)
+	deferred, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source: "test", Title: "首次暂缓消息", EventAt: cutoff.Add(20 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("create deferred event: %v", err)
+	}
+	if err := svc.store.MarkNewsEventContext(ctx, deferred.ID, NewsEventContextDeferred,
+		firstOwner.ID, "缺少一次关键核验", time.Time{}); err != nil {
+		t.Fatalf("mark first deferral: %v", err)
+	}
+
+	run := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowFourHour,
+		cutoff.Add(time.Hour), cutoff.Add(2*time.Hour), NewsContextTriggerScheduled, NewsContextRunStatusPending)
+	if err := svc.seedNewsContextRunItems(ctx, &run); err != nil {
+		t.Fatalf("seed catch-up run: %v", err)
+	}
+	items, err := svc.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{
+		RunID: run.ID, ObjectType: NewsContextRunItemNewsEvent, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("list catch-up inputs: %v", err)
+	}
+	got := make(map[string]bool, len(items))
+	for _, item := range items {
+		got[item.ObjectID] = true
+	}
+	if got[preCutoff.ID] || !got[latePending.ID] || !got[deferred.ID] || len(got) != 2 {
+		t.Fatalf("catch-up ownership mismatch: %+v", items)
+	}
+	var retryCount int
+	if err := svc.store.marketDB.db.QueryRowContext(ctx, `SELECT COALESCE(context_defer_retry_count,0)
+		FROM stockv2_news_events WHERE id=?`, deferred.ID).Scan(&retryCount); err != nil || retryCount != 1 {
+		t.Fatalf("deferred retry count=%d err=%v", retryCount, err)
+	}
+
+	if err := svc.store.MarkNewsEventContext(ctx, latePending.ID, NewsEventContextNoise,
+		run.ID, "", time.Now()); err != nil {
+		t.Fatalf("complete late pending event: %v", err)
+	}
+	if err := svc.store.MarkNewsEventContext(ctx, deferred.ID, NewsEventContextDeferred,
+		run.ID, "第二次仍缺少核验", time.Time{}); err != nil {
+		t.Fatalf("mark second deferral: %v", err)
+	}
+	next := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowFourHour,
+		cutoff.Add(2*time.Hour), cutoff.Add(3*time.Hour), NewsContextTriggerScheduled, NewsContextRunStatusPending)
+	if err := svc.seedNewsContextRunItems(ctx, &next); err != nil {
+		t.Fatalf("seed post-retry run: %v", err)
+	}
+	count, err := svc.store.CountNewsContextRunItems(ctx, NewsContextRunItemListFilter{
+		RunID: next.ID, ObjectType: NewsContextRunItemNewsEvent,
+	})
+	if err != nil || count != 0 {
+		t.Fatalf("second deferral was retried again count=%d err=%v", count, err)
 	}
 }
 

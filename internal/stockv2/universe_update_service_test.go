@@ -42,6 +42,60 @@ func TestNewServiceMarksInterruptedUniverseUpdateJobFailed(t *testing.T) {
 	}
 }
 
+func TestNewServiceMarksInterruptedStockProfileUpdateTaskPartial(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	startedAt := time.Now().Add(-time.Hour)
+	running, err := store.CreateStockProfileUpdateTask(ctx, StockProfileUpdateTask{
+		ID: "profile-interrupted", Symbol: "300750", TriggerSource: StockProfileUpdateTriggerAuto,
+		Status: StockProfileUpdateStatusRunning, BaseProfileStatus: StockProfileUpdateBaseStatusReady,
+		AIDecision: StockProfileAIDecisionCalled, AgentRunID: "agent-interrupted",
+		AIProfileStatus: StockProfileUpdateAIStatusRunning, StartedAt: startedAt, CreatedAt: startedAt,
+	})
+	if err != nil {
+		t.Fatalf("create running profile task: %v", err)
+	}
+	completedAt := startedAt.Add(time.Minute)
+	completed, err := store.CreateStockProfileUpdateTask(ctx, StockProfileUpdateTask{
+		ID: "profile-completed", Symbol: "000001", TriggerSource: StockProfileUpdateTriggerAuto,
+		Status: StockProfileUpdateStatusCompleted, BaseProfileStatus: StockProfileUpdateBaseStatusReady,
+		AIDecision: StockProfileAIDecisionSkippedUnchanged, AIProfileStatus: StockProfileAIStatusReady,
+		StartedAt: startedAt, FinishedAt: completedAt, CreatedAt: startedAt,
+	})
+	if err != nil {
+		t.Fatalf("create completed profile task: %v", err)
+	}
+
+	svc := NewService(store, nil, nil)
+	defer svc.StopBackground()
+
+	tasks, err := store.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("list profile tasks: %v", err)
+	}
+	byID := make(map[string]StockProfileUpdateTask, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	recovered := byID[running.ID]
+	if recovered.Status != StockProfileUpdateStatusPartial ||
+		recovered.AIProfileStatus != StockProfileAIStatusFailed ||
+		recovered.FinishedAt.IsZero() ||
+		!strings.Contains(recovered.ErrorMessage, "service restart") ||
+		!strings.Contains(recovered.AIProfileError, "service restart") {
+		t.Fatalf("recovered profile task = %#v", recovered)
+	}
+	unchanged := byID[completed.ID]
+	if unchanged.Status != StockProfileUpdateStatusCompleted || !unchanged.FinishedAt.Equal(completedAt) {
+		t.Fatalf("completed profile task changed = %#v", unchanged)
+	}
+}
+
 func TestNewServiceMarksInterruptedScheduledTasksFailed(t *testing.T) {
 	ctx := context.Background()
 	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))

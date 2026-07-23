@@ -29,6 +29,40 @@ func TestNewsContextCleanupDoesNotStartDuringAggregation(t *testing.T) {
 	}
 }
 
+func TestDueNewsContextCleanupThrottlesBlockedAttempts(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	cfg, err := svc.GetNewsContextConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Enabled = true
+	cfg.AutoCleanupEnabled = true
+	cfg.LastCleanupAt = now.Add(-2 * time.Hour)
+	if _, err := svc.store.UpsertNewsContextConfig(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.store.CreateNewsContextBackfill(ctx, NewsContextBackfill{
+		Status: NewsContextBackfillStatusRunning, Phase: NewsContextWindowHourly,
+		CutoffAt: now, StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.startDueNewsContextCleanup(ctx, now); !errors.Is(err, ErrNewsContextReviewIncomplete) {
+		t.Fatalf("first cleanup attempt error=%v, want review incomplete", err)
+	}
+	if err := svc.startDueNewsContextCleanup(ctx, now.Add(time.Minute)); err != nil {
+		t.Fatalf("throttled cleanup attempt error=%v", err)
+	}
+	if count, err := svc.store.CountNewsContextCleanupRuns(ctx, NewsContextCleanupRunListFilter{}); err != nil || count != 0 {
+		t.Fatalf("blocked cleanup runs=%d err=%v", count, err)
+	}
+}
+
 func TestNewsContextCleanupStartRejectsMissingSafetyValidation(t *testing.T) {
 	svc, cleanup := newEmbeddingTestService(t)
 	defer cleanup()
@@ -61,7 +95,8 @@ func TestNewsContextCleanupRechecksThemeChangeBeforeCompaction(t *testing.T) {
 	ctx := context.WithValue(context.Background(), newsContextMCPVerificationCacheKey{}, newsContextMCPVerificationCache{})
 	seed := seedNewsContextRetentionEvent(t, svc, ctx, verifiedRetentionAudit(), nil, nil, "support")
 	candidate := retentionCleanupCandidate(t, svc, ctx, seed.event.ID)
-	daily := seedReviewedDailyRetentionVersion(t, svc, ctx, seed.thread, candidate.ContextCoveredAt, nil, nil, NewsContextResearchCompleted)
+	daily := seedReviewedDailyRetentionVersion(t, svc, ctx, seed.thread, candidate.ContextCoveredAt,
+		[]string{"已写入每日主题结论的反证"}, []string{"已写入每日主题结论的后续验证问题"}, NewsContextResearchCompleted)
 	configureRetentionIndexes(t, svc, ctx, seed.thread.ID, daily)
 	if eligible, reason, err := svc.newsContextCleanupEligible(ctx, candidate); err != nil || !eligible {
 		t.Fatalf("initial cleanup check eligible=%v reason=%q err=%v", eligible, reason, err)
@@ -490,7 +525,7 @@ func TestNewsContextCleanupCutoffCannotBypassGrace(t *testing.T) {
 	}
 }
 
-func TestNewsContextResearchFailureDefersNewsAndPersistsReason(t *testing.T) {
+func TestNewsContextResearchFailureProtectsVersionWithoutDeferringWholeBatch(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		audit  NewsContextSearchAudit
@@ -504,27 +539,43 @@ func TestNewsContextResearchFailureDefersNewsAndPersistsReason(t *testing.T) {
 			svc, cleanup := newStrategyTestService(t)
 			defer cleanup()
 			ctx := context.Background()
-			seed := seedNewsContextRetentionEvent(t, svc, ctx, []NewsContextSearchAudit{tt.audit}, nil, nil, "support")
-			if seed.apply.DeferredCount != 1 || seed.apply.CoveredCount != 0 {
-				t.Fatalf("apply result=%+v, want research-gated deferral", seed.apply)
+			seed := seedNewsContextRetentionEventWithResearchStatus(t, svc, ctx, []NewsContextSearchAudit{tt.audit}, nil, nil, "support", tt.status)
+			if seed.apply.DeferredCount != 0 || seed.apply.CoveredCount != 1 {
+				t.Fatalf("apply result=%+v, want covered news with version-level protection", seed.apply)
 			}
 			var status, reason string
 			if err := svc.store.marketDB.db.QueryRowContext(ctx, `SELECT COALESCE(context_status,''), COALESCE(protected_reason,'')
 				FROM stockv2_news_events WHERE id=?`, seed.event.ID).Scan(&status, &reason); err != nil {
 				t.Fatalf("read research gate: %v", err)
 			}
-			if status != NewsEventContextDeferred || reason == "" {
-				t.Fatalf("event status=%q reason=%q, want durable protection", status, reason)
+			if status != NewsEventContextCovered || reason != "" {
+				t.Fatalf("event status=%q reason=%q, want covered news without batch-wide deferral", status, reason)
 			}
 			versions, err := svc.store.ListNewsThreadVersions(ctx, NewsThreadVersionListFilter{ThreadID: seed.thread.ID, Limit: 10})
 			if err != nil || len(versions) != 1 || versions[0].ResearchStatus != tt.status {
 				t.Fatalf("versions=%+v err=%v, want research status %q", versions, err, tt.status)
 			}
+			if protection := newsContextVersionProtectionReason(versions[0]); protection == "" {
+				t.Fatalf("research status %q did not protect its theme version", tt.status)
+			}
 			candidates, err := svc.store.ListNewsEventsForContextCleanup(ctx, time.Now().Add(time.Hour), "", 10)
-			if err != nil || len(candidates) != 0 {
-				t.Fatalf("research-gated cleanup candidates=%+v err=%v", candidates, err)
+			if err != nil || len(candidates) != 1 {
+				t.Fatalf("covered cleanup candidates=%+v err=%v", candidates, err)
 			}
 		})
+	}
+}
+
+func TestNewsContextResearchFailureDoesNotTaintUnrelatedVerifiedChange(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	seed := seedNewsContextRetentionEventWithResearchStatus(t, svc, ctx, []NewsContextSearchAudit{{
+		Question: "核实另一主题", Status: NewsContextResearchFailed, FailureReason: "search failed",
+	}}, nil, nil, "support", NewsContextResearchCompleted)
+	versions, err := svc.store.ListNewsThreadVersions(ctx, NewsThreadVersionListFilter{ThreadID: seed.thread.ID, Limit: 10})
+	if err != nil || len(versions) != 1 || versions[0].ResearchStatus != NewsContextResearchCompleted {
+		t.Fatalf("versions=%+v err=%v, want per-change verified status", versions, err)
 	}
 }
 
@@ -561,32 +612,17 @@ func TestNewsContextCleanupRequiresReviewedDailyConclusion(t *testing.T) {
 	}
 }
 
-func TestNewsContextCleanupProtectsUnresolvedDailyOrCurrentTheme(t *testing.T) {
-	for _, tt := range []struct {
-		name             string
-		dailyCounter     []string
-		dailyQuestions   []string
-		newerCurrentOnly bool
-	}{
-		{name: "daily conflict", dailyCounter: []string{"官方与媒体口径冲突"}},
-		{name: "daily open question", dailyQuestions: []string{"仍需原文确认监管范围"}},
-		{name: "newer current question", newerCurrentOnly: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			svc, cleanup := newStrategyTestService(t)
-			defer cleanup()
-			ctx := context.Background()
-			seed := seedNewsContextRetentionEvent(t, svc, ctx, verifiedRetentionAudit(), nil, nil, "support")
-			candidate := retentionCleanupCandidate(t, svc, ctx, seed.event.ID)
-			daily := seedReviewedDailyRetentionVersion(t, svc, ctx, seed.thread, candidate.ContextCoveredAt, tt.dailyCounter, tt.dailyQuestions, NewsContextResearchCompleted)
-			if tt.newerCurrentOnly {
-				seedNewerUnresolvedCurrentVersion(t, svc, ctx, seed.thread.ID, daily)
-			}
-			eligible, reason, err := svc.newsContextCleanupEligible(ctx, candidate)
-			if err != nil || eligible || reason == "" {
-				t.Fatalf("eligible=%v reason=%q err=%v, want protected original", eligible, reason, err)
-			}
-		})
+func TestNewsContextCleanupProtectsThemeChangeAfterReviewedDailyConclusion(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	seed := seedNewsContextRetentionEvent(t, svc, ctx, verifiedRetentionAudit(), nil, nil, "support")
+	candidate := retentionCleanupCandidate(t, svc, ctx, seed.event.ID)
+	daily := seedReviewedDailyRetentionVersion(t, svc, ctx, seed.thread, candidate.ContextCoveredAt, nil, nil, NewsContextResearchCompleted)
+	seedNewerUnresolvedCurrentVersion(t, svc, ctx, seed.thread.ID, daily)
+	eligible, reason, err := svc.newsContextCleanupEligible(ctx, candidate)
+	if err != nil || eligible || !strings.Contains(reason, "最新主题变化") {
+		t.Fatalf("eligible=%v reason=%q err=%v, want newer-than-daily protection", eligible, reason, err)
 	}
 }
 
@@ -782,6 +818,10 @@ type newsContextRetentionSeed struct {
 }
 
 func seedNewsContextRetentionEvent(t *testing.T, svc *Service, ctx context.Context, audits []NewsContextSearchAudit, counterEvidence, openQuestions []string, disposition string) newsContextRetentionSeed {
+	return seedNewsContextRetentionEventWithResearchStatus(t, svc, ctx, audits, counterEvidence, openQuestions, disposition, NewsContextResearchCompleted)
+}
+
+func seedNewsContextRetentionEventWithResearchStatus(t *testing.T, svc *Service, ctx context.Context, audits []NewsContextSearchAudit, counterEvidence, openQuestions []string, disposition, researchStatus string) newsContextRetentionSeed {
 	t.Helper()
 	now := time.Now()
 	event, err := svc.CreateNewsEvent(ctx, NewsEvent{
@@ -815,7 +855,7 @@ func seedNewsContextRetentionEvent(t *testing.T, svc *Service, ctx context.Conte
 		ThreadChanges: []NewsContextThreadChange{{
 			Action: "create", Title: "半导体设备景气", CoreThesis: "订单改善推动景气", Stage: NewsThreadStageEmerging,
 			Confidence: 0.8, Facts: []string{"订单改善"}, CounterEvidence: counterEvidence, OpenQuestions: openQuestions,
-			EvidenceNewsIDs: []string{event.ID},
+			EvidenceNewsIDs: []string{event.ID}, ResearchStatus: researchStatus,
 		}},
 	}
 	apply, err := svc.store.ApplyNewsContextBatch(ctx, run.ID, agentRunID, run.WindowType, report)

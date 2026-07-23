@@ -143,6 +143,11 @@ export function NewsContextBackfillPanel({
   const needsRetry = newsContextBackfillNeedsRetry(task);
   const finalReviewCoverage = newsContextFinalReviewCoverage(task);
   const currentStage = task?.stageProgress?.find((stage) => stage.status === "running" || stage.status === "paused");
+  const modelTotals = useMemo(() => (task?.stageProgress || []).reduce((total, stage) => ({
+    attempts: total.attempts + (stage.agentAttemptCount || 0),
+    failures: total.failures + (stage.agentRetryCount || 0),
+    seconds: total.seconds + (stage.modelDurationSeconds || 0),
+  }), { attempts: 0, failures: 0, seconds: 0 }), [task?.stageProgress]);
 
   return (
     <>
@@ -154,7 +159,7 @@ export function NewsContextBackfillPanel({
               {task ? <Pill tone={backfillStatusTone(task.status)}>{backfillStatusLabel(task.status)}</Pill> : null}
               {task?.phase ? <Pill tone="neutral">{currentStage ? backfillStageLabel(currentStage.phase) : backfillPhaseLabel(task.phase)}</Pill> : null}
             </div>
-            <p className="mt-1 mb-0 text-xs text-[var(--muted)]">从旧到新重建消息脉络，不限制新闻和主题总量，实时定时任务始终优先。</p>
+            <p className="mt-1 mb-0 text-xs text-[var(--muted)]">从旧到新按四小时窗口归纳新闻，小时检查点与日级结论不再重复调用模型。</p>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
             {taskRunning ? (
@@ -206,7 +211,7 @@ export function NewsContextBackfillPanel({
 
         {!loading && preview && !task && preview.pendingNewsCount === 0 ? (
           <div className="p-4">
-            <EmptyState title="没有待补处理的历史新闻" body="新新闻继续由小时、四小时和每日定时归纳处理。" />
+            <EmptyState title="没有待补处理的历史新闻" body="新新闻继续由四小时模型归纳，小时和日级状态由系统确定性维护。" />
           </div>
         ) : null}
 
@@ -214,8 +219,8 @@ export function NewsContextBackfillPanel({
           <div>
             <div className="grid grid-cols-4 divide-x divide-[var(--line)] border-b border-[var(--line)] max-lg:grid-cols-2 max-lg:divide-x-0">
               <BackfillMetric label="原始新闻总量" value={counts.total} />
-              <BackfillMetric label="小时级已覆盖" value={counts.processed} />
-              <BackfillMetric label="小时级待覆盖" value={counts.remaining} tone={counts.remaining ? "warn" : "neutral"} />
+              <BackfillMetric label="已形成终态" value={counts.processed} />
+              <BackfillMetric label="待形成终态" value={counts.remaining} tone={counts.remaining ? "warn" : "neutral"} />
               <BackfillMetric label="覆盖异常" value={counts.missing} tone={counts.missing ? "danger" : "neutral"} />
             </div>
 
@@ -238,6 +243,7 @@ export function NewsContextBackfillPanel({
               />
               <BackfillDetail label="最近更新" value={formatNewsContextTime(task?.updatedAt)} />
               {task ? <BackfillDetail label="分片进度" value={`已完成 ${task.completedChunkCount || 0} 个自动分片`} /> : null}
+              {task ? <BackfillDetail label="模型调用" value={`${modelTotals.attempts} 次，失败 ${modelTotals.failures} 次，累计 ${formatBackfillDuration(modelTotals.seconds)}`} /> : null}
               {preview?.estimatedChunkCount ? <BackfillDetail label="预计自动分片" value={`${preview.estimatedChunkCount} 个，仅用于运行稳定性`} /> : null}
               {task?.currentRunId ? <BackfillDetail label="当前归纳运行" value={task.currentRunId} /> : null}
               {task?.finalReviewRunId ? <BackfillDetail label="最终复核运行" value={task.finalReviewRunId} /> : null}
@@ -334,11 +340,11 @@ function BackfillStageProgressSection({ stages }: { stages: StockV2NewsContextBa
       <div className="mb-3">
         <h3 className="m-0 text-xs font-semibold text-[var(--text)]">分阶段进度</h3>
         <p className="mt-1 mb-0 text-xs text-[var(--muted)]">
-          原始新闻覆盖完成后，还会继续执行四小时、日级归纳和最终检查。
+          四小时窗口负责模型归纳；小时检查点、日级结论、索引与最终影响复核分别显示独立进度。
         </p>
       </div>
       <div className="grid grid-cols-[minmax(0,1.3fr)_minmax(300px,1fr)] gap-5 max-lg:grid-cols-1">
-        <BackfillStageGroup stages={aggregationStages} title="分层归纳" />
+        <BackfillStageGroup stages={aggregationStages} title="检查点、模型与物化" />
         <BackfillStageGroup stages={completionStages} title="收尾检查" />
       </div>
     </section>
@@ -376,13 +382,9 @@ function BackfillStageRow({ stage }: { stage: StockV2NewsContextBackfillStagePro
     : stage.phase === "finalizing" && totalItems > 0
       ? `${processedItems} / ${totalItems} 个每日输出`
       : backfillStageDescription(stage.phase, stage.status);
-  const itemProgress = stage.phase === "daily" && stage.currentRunPhase === "aggregating"
-    ? `首轮 ${processedItems} / ${totalItems}，日级收敛等待`
-    : stage.phase === "daily" && stage.currentRunPhase === "converging"
-      ? `首轮已完成，日级收敛 ${processedItems} / ${totalItems}`
-      : totalItems > 0
-        ? `${processedItems} / ${totalItems} 个输入，待处理 ${pendingItems}`
-        : "";
+  const itemProgress = totalItems > 0
+    ? `${processedItems} / ${totalItems} 个输入，待处理 ${pendingItems}`
+    : "";
   const timing = stage.elapsedSeconds
     ? `已运行 ${formatBackfillDuration(stage.elapsedSeconds)}${stage.estimatedRemainingSeconds ? `，预计剩余 ${formatBackfillDuration(stage.estimatedRemainingSeconds)}` : ""}`
     : "";
@@ -435,7 +437,7 @@ function formatBackfillDuration(seconds: number): string {
 function backfillStageDescription(phase: string, status: string): string {
   const descriptions = {
     late_scan: { pending: "等待分层归纳完成", active: "正在扫描", completed: "扫描完成" },
-    final_daily: { pending: "等待生成当前结论", active: "正在生成当前结论", completed: "当前结论已生成" },
+    final_daily: { pending: "等待物化受影响主题", active: "正在增量物化", completed: "当前结论已物化" },
     indexing: { pending: "等待更新可检索索引", active: "正在更新索引", completed: "索引已就绪" },
     final_review: { pending: "等待组合影响复核", active: "正在复核组合影响", completed: "组合影响已复核" },
     finalizing: { pending: "等待安全校验", active: "正在执行安全校验", completed: "安全校验完成" },

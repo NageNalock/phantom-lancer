@@ -100,8 +100,8 @@ export function NewsContextSettingsDrawer({
 
   const promptLength = Array.from(draft.additionalResearchPrompt).length;
   const validationError = useMemo(() => {
-    if (draft.enabled && !draft.hourlyEnabled && !draft.fourHourEnabled && !draft.dailyEnabled) {
-      return "启用自动归纳时，至少需要开启一种归纳周期。";
+    if (draft.enabled && !draft.fourHourEnabled) {
+      return "自动归纳必须开启四小时模型归纳；小时与日级只负责确定性检查点和物化。";
     }
     if (draft.autoCleanupEnabled && !draft.enabled) {
       return "自动安全清理依赖自动归纳，请先开启自动归纳。";
@@ -185,7 +185,7 @@ export function NewsContextSettingsDrawer({
           <section className="grid gap-2" aria-labelledby="news-context-schedule-settings">
             <div>
               <h3 className="m-0 text-sm font-semibold" id="news-context-schedule-settings">归纳与清理</h3>
-              <p className="mt-1 mb-0 text-xs text-[var(--muted)]">一个周期内的全部新闻都会处理，系统根据整理后的文字量自动分片。</p>
+              <p className="mt-1 mb-0 text-xs text-[var(--muted)]">四小时窗口完整处理新增新闻；小时与日级只写确定性状态，不重复调用模型。</p>
             </div>
             <Toggle
               checked={draft.enabled}
@@ -196,21 +196,22 @@ export function NewsContextSettingsDrawer({
             <div className="grid grid-cols-3 gap-2">
               <Toggle
                 checked={draft.hourlyEnabled}
-                label={<SettingLabel title="小时归纳" detail="完整处理小时窗口" />}
+                label={<SettingLabel title="小时检查点" detail="记录窗口完成状态，不调用模型" />}
                 name="news_context_hourly_enabled"
                 onChange={(hourlyEnabled) => setDraft((current) => ({ ...current, hourlyEnabled }))}
                 variant="row"
               />
               <Toggle
                 checked={draft.fourHourEnabled}
-                label={<SettingLabel title="四小时归纳" detail="汇总小时主题变化" />}
+                disabled={draft.enabled}
+                label={<SettingLabel title="四小时模型归纳" detail="唯一常规模型层；自动归纳启用时必开" />}
                 name="news_context_four_hour_enabled"
                 onChange={(fourHourEnabled) => setDraft((current) => ({ ...current, fourHourEnabled }))}
                 variant="row"
               />
               <Toggle
                 checked={draft.dailyEnabled}
-                label={<SettingLabel title="每日归纳" detail="形成每日完整结论" />}
+                label={<SettingLabel title="日级增量物化" detail="只物化当天发生变化的稳定主题" />}
                 name="news_context_daily_enabled"
                 onChange={(dailyEnabled) => setDraft((current) => ({ ...current, dailyEnabled }))}
                 variant="row"
@@ -252,9 +253,9 @@ export function NewsContextSettingsDrawer({
               <ReadOnlyRow label="归纳失败自动重试" value={`${config.timeoutRetryLimit ?? 2} 次`} detail="超时、异常退出未提交或结果完整性校验失败时重试；重试前清理本次进程组，并将当前批次减半" />
               <ReadOnlyRow label="后台轮询" value={formatNewsContextInterval(config.schedulerPollSeconds || 5)} detail="内置单机调度节奏；实时任务仍保持单飞" />
               <ReadOnlyRow label="归纳容量" value="按文字量自动分片" detail="不限制每日新闻数、主题数、轮换线索数或主题变化数" />
-              <ReadOnlyRow label="下次小时归纳" value={formatNewsContextTime(config.nextHourlyAt)} />
-              <ReadOnlyRow label="下次四小时归纳" value={formatNewsContextTime(config.nextFourHourAt)} />
-              <ReadOnlyRow label="下次每日归纳" value={formatNewsContextTime(config.nextDailyAt)} />
+              <ReadOnlyRow label="下次小时检查点" value={formatNewsContextTime(config.nextHourlyAt)} />
+              <ReadOnlyRow label="下次四小时模型归纳" value={formatNewsContextTime(config.nextFourHourAt)} />
+              <ReadOnlyRow label="下次日级增量物化" value={formatNewsContextTime(config.nextDailyAt)} />
               <ReadOnlyRow label="上次归纳" value={formatNewsContextTime(config.lastRunAt)} />
               <ReadOnlyRow label="上次清理" value={formatNewsContextTime(config.lastCleanupAt)} />
               <ReadOnlyRow

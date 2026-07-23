@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -130,6 +131,14 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 		NewsContextConfigIDDefault); err != nil {
 		return wrapError(err, "seed news context config")
 	}
+	// ponytail: four-hour aggregation is the sole regular model boundary. Migrate
+	// enabled legacy configurations once so they cannot keep producing hourly
+	// checkpoints without ever consuming their pending news.
+	if _, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_config
+		SET four_hour_enabled=1,updated_at=datetime('now')
+		WHERE enabled=1 AND four_hour_enabled=0`); err != nil {
+		return wrapError(err, "require four-hour news context aggregation")
+	}
 
 	if s.marketDB == nil || s.marketDB.db == nil {
 		return errors.New("stockv2 market database is not configured")
@@ -244,6 +253,7 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 		`ALTER TABLE stockv2_news_events ADD COLUMN IF NOT EXISTS compacted_at TIMESTAMP`,
 		`ALTER TABLE stockv2_news_events ADD COLUMN IF NOT EXISTS compacted_bytes BIGINT DEFAULT 0`,
 		`ALTER TABLE stockv2_news_events ADD COLUMN IF NOT EXISTS protected_reason VARCHAR`,
+		`ALTER TABLE stockv2_news_events ADD COLUMN IF NOT EXISTS context_defer_retry_count INTEGER DEFAULT 0`,
 	} {
 		if _, err := s.marketDB.db.ExecContext(ctx, stmt); err != nil {
 			return wrapError(err, "ensure news event context column")
@@ -257,7 +267,75 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 	`); err != nil {
 		return wrapError(err, "ensure news event context indexes")
 	}
-	return nil
+	return s.migrateLegacyHourlyNewsContextCoverage(ctx)
+}
+
+func (s *Store) migrateLegacyHourlyNewsContextCoverage(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT i.id,i.object_id,r.id
+		FROM stockv2_news_context_run_items i
+		JOIN stockv2_news_context_runs r ON r.id=i.run_id
+		WHERE r.window_type=? AND i.object_type=? AND i.status=?
+		AND NOT EXISTS (
+			SELECT 1 FROM stockv2_news_context_run_items parent_item
+			JOIN stockv2_news_context_runs parent_run ON parent_run.id=parent_item.run_id
+			WHERE parent_item.object_id=i.object_id AND parent_item.object_type=?
+			AND parent_item.status=? AND parent_run.window_type=?
+		) ORDER BY r.window_end,i.object_id`, NewsContextWindowHourly,
+		NewsContextRunItemNewsEvent, NewsContextRunItemCompleted,
+		NewsContextRunItemNewsEvent, NewsContextRunItemCompleted, NewsContextWindowFourHour)
+	if err != nil {
+		return wrapError(err, "list legacy hourly news context coverage")
+	}
+	type legacyItem struct{ itemID, eventID, runID string }
+	items := make([]legacyItem, 0)
+	for rows.Next() {
+		var item legacyItem
+		if err := rows.Scan(&item.itemID, &item.eventID, &item.runID); err != nil {
+			rows.Close()
+			return wrapError(err, "scan legacy hourly news context coverage")
+		}
+		items = append(items, item)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	marketTx, err := s.marketDB.db.BeginTx(ctx, nil)
+	if err != nil {
+		return wrapError(err, "begin legacy hourly news context migration")
+	}
+	defer marketTx.Rollback()
+	migrated := make([]string, 0, len(items))
+	now := time.Now()
+	for _, item := range items {
+		result, err := marketTx.ExecContext(ctx, `UPDATE stockv2_news_events SET
+			context_status=?,context_run_id=NULL,context_covered_at=NULL,protected_reason=NULL,updated_at=?
+			WHERE id=? AND context_run_id=? AND context_status IN (?,?)`,
+			NewsEventContextPending, now, item.eventID, item.runID,
+			NewsEventContextCovered, NewsEventContextNoise)
+		if err != nil {
+			return wrapError(err, "release legacy hourly news context coverage")
+		}
+		if affected, _ := result.RowsAffected(); affected == 1 {
+			migrated = append(migrated, item.itemID)
+		}
+	}
+	if err := marketTx.Commit(); err != nil {
+		return wrapError(err, "commit legacy hourly news context migration")
+	}
+	if len(migrated) == 0 {
+		return nil
+	}
+	return s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		for _, itemID := range migrated {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_news_context_run_items WHERE id=?`, itemID); err != nil {
+				return wrapError(err, "remove migrated hourly news context item")
+			}
+		}
+		return nil
+	})
 }
 
 func (s *Store) ensureNewsContextConfigColumns(ctx context.Context) error {
@@ -603,14 +681,17 @@ func (s *Store) FailRunningNewsContextRuns(ctx context.Context, reason string) (
 		NewsContextBackfillStatusRunning, NewsContextBackfillStatusPaused); err != nil {
 		return 0, wrapError(err, "recover interrupted news context backfill items")
 	}
+	// DEPRECATED: translate the persisted pre-2026-07 convergence phase once;
+	// new runs never write it and resume through the deterministic daily path.
 	recovered, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_runs SET
-		status=?, phase=CASE WHEN phase IN (?,?) THEN phase ELSE 'queued' END,
+		status=?, phase=CASE WHEN phase='converging' THEN 'collecting'
+			WHEN phase IN (?,?,?) THEN phase ELSE 'queued' END,
 		current_agent_run_id=NULL, error_message=NULL,
 		finished_at=NULL, updated_at=? WHERE status=? AND id IN (
 			SELECT current_run_id FROM stockv2_news_context_backfills
 			WHERE current_run_id IS NOT NULL AND status IN (?,?)
 		)`, NewsContextRunStatusPending, newsContextRunPhaseAggregating,
-		newsContextRunPhaseConverging, now, NewsContextRunStatusRunning,
+		newsContextRunPhaseCheckpoint, newsContextRunPhaseMaterialize, now, NewsContextRunStatusRunning,
 		NewsContextBackfillStatusRunning, NewsContextBackfillStatusPaused)
 	if err != nil {
 		return 0, wrapError(err, "recover interrupted news context backfill run")
@@ -1280,6 +1361,92 @@ func (s *Store) CreateNewsThreadVersion(ctx context.Context, item NewsThreadVers
 	return scanNewsThreadVersion(row)
 }
 
+// MaterializeNewsContextDailyVersions copies one latest changed-theme snapshot
+// per stable theme into an explicit daily checkpoint. The source version is
+// part of the stable id: a restart is idempotent, while a late four-hour change
+// creates a new immutable daily version when the same window is rebuilt.
+func (s *Store) MaterializeNewsContextDailyVersions(
+	ctx context.Context,
+	runID string,
+	effectiveAt time.Time,
+	sources []NewsThreadVersion,
+) ([]NewsThreadVersion, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" || effectiveAt.IsZero() {
+		return nil, ErrInvalidNewsContextInput
+	}
+	tx, err := s.marketDB.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, wrapError(err, "begin materialize daily news context versions")
+	}
+	defer tx.Rollback()
+	now := time.Now()
+	materialized := make([]NewsThreadVersion, 0, len(sources))
+	seen := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		threadID := strings.TrimSpace(source.ThreadID)
+		if threadID == "" {
+			return nil, ErrInvalidNewsContextInput
+		}
+		if _, exists := seen[threadID]; exists {
+			return nil, fmt.Errorf("%w: duplicate daily checkpoint theme", ErrInvalidNewsContextInput)
+		}
+		seen[threadID] = struct{}{}
+		versionID := newsContextStableID("threadver_daily_", runID, threadID, source.ID)
+		version, versionErr := scanNewsThreadVersion(tx.QueryRowContext(ctx,
+			newsThreadVersionSelectSQL+` WHERE id=?`, versionID))
+		if versionErr != nil && !errors.Is(versionErr, sql.ErrNoRows) {
+			return nil, wrapError(versionErr, "load materialized daily news context version")
+		}
+		if errors.Is(versionErr, sql.ErrNoRows) {
+			var versionNo int
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version_no),0)+1
+				FROM stockv2_news_thread_versions WHERE thread_id=?`, threadID).Scan(&versionNo); err != nil {
+				return nil, wrapError(err, "allocate materialized daily version number")
+			}
+			version = source
+			version.ID = versionID
+			version.RunID = runID
+			version.AgentRunID = ""
+			version.WindowType = NewsContextWindowDaily
+			version.VersionNo = versionNo
+			version.MaterialChange = false
+			version.ReviewStatus = NewsContextReviewPending
+			version.IndexStatus = NewsContextIndexPending
+			version.IndexError = ""
+			version.EffectiveAt = effectiveAt
+			version.CreatedAt = now
+			version = normalizeNewsThreadVersion(version)
+			if err := insertNewsThreadVersionTx(ctx, tx, version); err != nil {
+				return nil, wrapError(err, "insert materialized daily news context version")
+			}
+		}
+		current, currentErr := scanNewsThreadVersion(tx.QueryRowContext(ctx,
+			newsThreadVersionSelectSQL+` WHERE id=(SELECT current_version_id FROM stockv2_news_threads WHERE id=?)`, threadID))
+		if currentErr != nil && !errors.Is(currentErr, sql.ErrNoRows) {
+			return nil, wrapError(currentErr, "load current version before daily materialization")
+		}
+		if errors.Is(currentErr, sql.ErrNoRows) || !current.EffectiveAt.After(version.EffectiveAt) {
+			result, err := tx.ExecContext(ctx, `UPDATE stockv2_news_threads SET
+				current_version=?,current_version_id=?,review_status=?,index_status=?,index_error=NULL,updated_at=?
+				WHERE id=?`, version.VersionNo, version.ID, version.ReviewStatus,
+				version.IndexStatus, now, threadID)
+			if err != nil {
+				return nil, wrapError(err, "promote materialized daily news context version")
+			}
+			if rows, _ := result.RowsAffected(); rows == 0 {
+				return nil, ErrNewsThreadNotFound
+			}
+		}
+		materialized = append(materialized, version)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, wrapError(err, "commit materialized daily news context versions")
+	}
+	sort.Slice(materialized, func(i, j int) bool { return materialized[i].ThreadID < materialized[j].ThreadID })
+	return materialized, nil
+}
+
 func (s *Store) GetNewsThreadVersion(ctx context.Context, id string) (NewsThreadVersion, error) {
 	item, err := scanNewsThreadVersion(s.marketDB.db.QueryRowContext(ctx, newsThreadVersionSelectSQL+` WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1586,12 +1753,6 @@ func (s *Store) ApplyNewsContextBatch(ctx context.Context, runID, agentRunID, wi
 	if err := validateNewsContextBatchNewsCoverage(batchItems, report); err != nil {
 		return result, err
 	}
-	inputVersionForThread := make(map[string]string)
-	for _, item := range batchItems {
-		if item.ObjectType == NewsContextRunItemThread {
-			inputVersionForThread[firstNonEmpty(item.ThreadID, item.ObjectID)] = item.VersionID
-		}
-	}
 	effectiveAt := logicalRun.WindowEnd
 	if effectiveAt.IsZero() {
 		effectiveAt = time.Now()
@@ -1604,8 +1765,6 @@ func (s *Store) ApplyNewsContextBatch(ctx context.Context, runID, agentRunID, wi
 	now := time.Now()
 	threadForNews := make(map[string]string)
 	versionForThread := make(map[string]string)
-	researchStatus, researchProtectionReason := newsContextReportResearchGate(report)
-
 	for index, change := range report.ThreadChanges {
 		threadID := strings.TrimSpace(change.ThreadID)
 		existingTarget := threadID != ""
@@ -1650,7 +1809,7 @@ func (s *Store) ApplyNewsContextBatch(ctx context.Context, runID, agentRunID, wi
 				Leaders: change.Leaders, Followers: change.Followers, Laggards: change.Laggards,
 				NextCandidates: change.NextCandidates, Catalysts: change.Catalysts,
 				Invalidations: change.Invalidations, Relations: change.Relations,
-				ResearchStatus: newsContextWorseResearchStatus(researchStatus, change.ResearchStatus), EvidenceCount: len(change.EvidenceNewsIDs),
+				ResearchStatus: newsContextWorseResearchStatus(NewsContextResearchNotRequired, change.ResearchStatus), EvidenceCount: len(change.EvidenceNewsIDs),
 				EffectiveAt: effectiveAt,
 			})
 			if windowType == NewsContextWindowHourly && !change.MaterialChange {
@@ -1748,100 +1907,12 @@ func (s *Store) ApplyNewsContextBatch(ctx context.Context, runID, agentRunID, wi
 			threadForNews[event.ID] = threadID
 		}
 	}
-	if windowType == NewsContextWindowDaily {
-		for _, threadID := range report.UnchangedThreadIDs {
-			threadID = strings.TrimSpace(threadID)
-			existing, getErr := scanNewsThread(tx.QueryRowContext(ctx, newsThreadSelectSQL+` WHERE id=?`, threadID))
-			if getErr != nil {
-				return result, wrapError(getErr, "load unchanged daily news thread")
-			}
-			checkpointVersionID := strings.TrimSpace(inputVersionForThread[threadID])
-			var checkpointVersion NewsThreadVersion
-			if checkpointVersionID != "" {
-				var checkpointErr error
-				checkpointVersion, checkpointErr = scanNewsThreadVersion(tx.QueryRowContext(ctx,
-					newsThreadVersionSelectSQL+` WHERE id=?`, checkpointVersionID))
-				if checkpointErr != nil {
-					return result, wrapError(checkpointErr, "load input news thread version for daily checkpoint")
-				}
-			}
-			if strings.TrimSpace(existing.CurrentVersionID) != "" {
-				currentVersion, currentErr := scanNewsThreadVersion(tx.QueryRowContext(ctx,
-					newsThreadVersionSelectSQL+` WHERE id=?`, existing.CurrentVersionID))
-				if currentErr != nil {
-					return result, wrapError(currentErr, "load current news thread version for daily checkpoint")
-				}
-				if !currentVersion.EffectiveAt.After(effectiveAt) && (checkpointVersionID == "" ||
-					currentVersion.EffectiveAt.After(checkpointVersion.EffectiveAt) ||
-					(currentVersion.EffectiveAt.Equal(checkpointVersion.EffectiveAt) && currentVersion.VersionNo > checkpointVersion.VersionNo)) {
-					checkpointVersionID = currentVersion.ID
-					checkpointVersion = currentVersion
-				}
-			}
-			if checkpointVersionID == "" {
-				return result, fmt.Errorf("%w: daily checkpoint has no input theme version", ErrInvalidNewsContextResult)
-			}
-			checkpointResearchStatus := newsContextWorseResearchStatus(researchStatus, checkpointVersion.ResearchStatus)
-			versionID := newsContextStableID("threadver_", runID, threadID, checkpointVersionID, "daily-unchanged")
-			version, versionErr := scanNewsThreadVersion(tx.QueryRowContext(ctx, newsThreadVersionSelectSQL+` WHERE id=?`, versionID))
-			if versionErr != nil && !errors.Is(versionErr, sql.ErrNoRows) {
-				return result, wrapError(versionErr, "load unchanged daily news thread version")
-			}
-			if errors.Is(versionErr, sql.ErrNoRows) {
-				var versionNo int
-				if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version_no),0)+1
-					FROM stockv2_news_thread_versions WHERE thread_id=?`, threadID).Scan(&versionNo); err != nil {
-					return result, wrapError(err, "allocate unchanged daily version number")
-				}
-				version = normalizeNewsThreadVersion(NewsThreadVersion{
-					ID: versionID, ThreadID: threadID, RunID: runID, AgentRunID: agentRunID,
-					WindowType: windowType, VersionNo: versionNo,
-					Title: checkpointVersion.Title, CoreThesis: checkpointVersion.CoreThesis, Stage: checkpointVersion.Stage,
-					LatestChange: "每日复核：主题阶段保持不变", MaterialChange: false,
-					Confidence: checkpointVersion.Confidence, Industries: checkpointVersion.Industries,
-					Symbols: checkpointVersion.Symbols, Funds: checkpointVersion.Funds, Facts: checkpointVersion.Facts,
-					Inferences: checkpointVersion.Inferences, CounterEvidence: checkpointVersion.CounterEvidence,
-					OpenQuestions: checkpointVersion.OpenQuestions, Leaders: checkpointVersion.Leaders,
-					Followers: checkpointVersion.Followers, Laggards: checkpointVersion.Laggards,
-					NextCandidates: checkpointVersion.NextCandidates, Catalysts: checkpointVersion.Catalysts,
-					Invalidations: checkpointVersion.Invalidations, Relations: checkpointVersion.Relations,
-					ResearchStatus: checkpointResearchStatus, EffectiveAt: effectiveAt,
-				})
-				if err := insertNewsThreadVersionTx(ctx, tx, version); err != nil {
-					return result, wrapError(err, "insert unchanged daily news thread version")
-				}
-			}
-			promoteCurrent := strings.TrimSpace(existing.CurrentVersionID) == ""
-			if !promoteCurrent {
-				currentVersion, currentErr := scanNewsThreadVersion(tx.QueryRowContext(ctx, newsThreadVersionSelectSQL+` WHERE id=?`, existing.CurrentVersionID))
-				if currentErr != nil {
-					return result, wrapError(currentErr, "load unchanged daily current version time")
-				}
-				promoteCurrent = !currentVersion.EffectiveAt.After(version.EffectiveAt)
-			}
-			if promoteCurrent {
-				if _, err := tx.ExecContext(ctx, `UPDATE stockv2_news_threads
-					SET current_version=?, current_version_id=?, review_status=?, updated_at=? WHERE id=?`,
-					version.VersionNo, version.ID, version.ReviewStatus, now, threadID); err != nil {
-					return result, wrapError(err, "update unchanged daily news thread checkpoint")
-				}
-			}
-			versionForThread[threadID] = version.ID
-			result.ChangedVersionIDs = append(result.ChangedVersionIDs, version.ID)
-		}
-	}
-
 	decisionByID := make(map[string]NewsContextNewsDecision, len(report.NewsDecisions))
 	for _, decision := range report.NewsDecisions {
 		decisionByID[decision.NewsEventID] = decision
 	}
 	for _, eventID := range report.ProcessedNewsIDs {
 		decision := decisionByID[eventID]
-		if researchProtectionReason != "" {
-			decision.Disposition = NewsEventContextDeferred
-			decision.Reason = researchProtectionReason
-			decisionByID[eventID] = decision
-		}
 		status := NewsEventContextCovered
 		switch strings.TrimSpace(decision.Disposition) {
 		case NewsEventContextNoise, "duplicate":

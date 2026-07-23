@@ -213,29 +213,17 @@ func TestApplyNewsContextBatchDefensivelyRejectsCrossFragmentEvidence(t *testing
 	}
 }
 
-func TestSeedDailyNewsContextRunItemsPagesEveryActiveThreadWithoutNews(t *testing.T) {
+func TestSeedDailyNewsContextRunItemsIgnoresUnchangedActiveThreads(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
 	now := time.Now()
-	tx, err := svc.store.marketDB.db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("begin thread seed: %v", err)
-	}
-	for i := 0; i < newsContextSeedPageSize+1; i++ {
-		thread := normalizeNewsThread(NewsThread{
-			ID: fmt.Sprintf("daily-thread-%04d", i), Title: fmt.Sprintf("每日主题 %d", i),
-			CoreThesis: "验证每日全量分页复核", Stage: NewsThreadStageDormant,
-			Status: NewsThreadStatusActive, FirstSeenAt: now.Add(-72 * time.Hour),
-			LastChangedAt: now.Add(-48 * time.Hour), CreatedAt: now.Add(-72 * time.Hour),
-		})
-		if err := upsertNewsThreadTx(ctx, tx, thread); err != nil {
-			_ = tx.Rollback()
-			t.Fatalf("seed active thread %d: %v", i, err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit thread seed: %v", err)
+	if _, err := svc.store.CreateNewsThread(ctx, NewsThread{
+		Title: "未变化主题", CoreThesis: "日级只物化窗口内发生变化的主题",
+		Stage: NewsThreadStageDormant, FirstSeenAt: now.Add(-72 * time.Hour),
+		LastChangedAt: now.Add(-48 * time.Hour),
+	}); err != nil {
+		t.Fatalf("seed unchanged active thread: %v", err)
 	}
 	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
 		WindowType: NewsContextWindowDaily, TriggerType: NewsContextTriggerManual,
@@ -251,19 +239,19 @@ func TestSeedDailyNewsContextRunItemsPagesEveryActiveThreadWithoutNews(t *testin
 	count, err := svc.store.CountNewsContextRunItems(ctx, NewsContextRunItemListFilter{
 		RunID: run.ID, ObjectType: NewsContextRunItemThread,
 	})
-	if err != nil || count != newsContextSeedPageSize+1 {
+	if err != nil || count != 0 {
 		t.Fatalf("daily thread item count=%d err=%v", count, err)
 	}
-	if run.InputCount != newsContextSeedPageSize+1 {
-		t.Fatalf("daily input count=%d, want %d", run.InputCount, newsContextSeedPageSize+1)
+	if run.InputCount != 0 {
+		t.Fatalf("daily input count=%d, want 0", run.InputCount)
 	}
 }
 
-func TestDailyUnchangedThreadCreatesReviewedCheckpoint(t *testing.T) {
+func TestDailyMaterializationCreatesReviewedCheckpoint(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
-	run, thread, snapshot := seedDailyUnchangedNewsThreadRun(t, svc, ctx)
+	run, thread, snapshot := seedDailyMaterializedNewsThreadRun(t, svc, ctx)
 
 	if snapshot.WindowType != NewsContextWindowDaily || snapshot.MaterialChange || snapshot.Stage != thread.Stage {
 		t.Fatalf("daily snapshot=%+v", snapshot)
@@ -296,8 +284,9 @@ func TestDailyUnchangedThreadCreatesReviewedCheckpoint(t *testing.T) {
 	if err := svc.decorateNewsContextRun(ctx, &storedRun); err != nil {
 		t.Fatalf("decorate daily run: %v", err)
 	}
-	if storedRun.UpdatedThreadCount != 0 || storedRun.UnchangedThreadCount != 1 {
-		t.Fatalf("daily run counts updated=%d unchanged=%d", storedRun.UpdatedThreadCount, storedRun.UnchangedThreadCount)
+	if storedRun.ProcessedCount != 1 || storedRun.UpdatedThreadCount != 0 || storedRun.UnchangedThreadCount != 0 {
+		t.Fatalf("daily run counts processed=%d updated=%d unchanged=%d", storedRun.ProcessedCount,
+			storedRun.UpdatedThreadCount, storedRun.UnchangedThreadCount)
 	}
 }
 
@@ -305,7 +294,7 @@ func TestPortfolioReviewBindsContextBeforeImmediateSubmission(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
-	run, _, _ := seedDailyUnchangedNewsThreadRun(t, svc, ctx)
+	run, _, _ := seedDailyMaterializedNewsThreadRun(t, svc, ctx)
 	run.Status = NewsContextRunStatusWaitingReview
 	run.ReviewStatus = NewsContextReviewPending
 	run, err := svc.store.UpdateNewsContextRun(ctx, run)
@@ -336,7 +325,7 @@ func TestPortfolioReviewBindsContextBeforeImmediateSubmission(t *testing.T) {
 	}
 }
 
-func seedDailyUnchangedNewsThreadRun(t *testing.T, svc *Service, ctx context.Context) (NewsContextRun, NewsThread, NewsThreadVersion) {
+func seedDailyMaterializedNewsThreadRun(t *testing.T, svc *Service, ctx context.Context) (NewsContextRun, NewsThread, NewsThreadVersion) {
 	t.Helper()
 	now := time.Now()
 	baseVersion, err := svc.store.CreateNewsThreadVersion(ctx, NewsThreadVersion{
@@ -370,38 +359,20 @@ func seedDailyUnchangedNewsThreadRun(t *testing.T, svc *Service, ctx context.Con
 	if err != nil {
 		t.Fatalf("create daily context run: %v", err)
 	}
-	if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
-		RunID: run.ID, ObjectType: NewsContextRunItemThread, ObjectID: thread.ID, Status: NewsContextRunItemPending,
-	}}); err != nil {
-		t.Fatalf("add daily thread item: %v", err)
-	}
-	const agentRunID = "daily-agent-run"
-	if _, err := svc.store.MarkNewsContextRunItemsRunning(ctx, run.ID, agentRunID, []string{thread.ID}); err != nil {
-		t.Fatalf("mark daily thread running: %v", err)
-	}
-	report := NewsContextReport{
-		SchemaVersion: NewsContextResultSchemaVersion, RunID: run.ID, WindowType: run.WindowType,
-		UnchangedThreadIDs: []string{thread.ID}, NewsDecisions: []NewsContextNewsDecision{}, SearchAudit: []NewsContextSearchAudit{},
-	}
-	items, err := svc.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{
-		RunID: run.ID, AgentRunID: agentRunID, Status: NewsContextRunItemRunning, Limit: 10,
-	})
-	if err != nil || len(items) != 1 {
-		t.Fatalf("daily running items=%+v err=%v", items, err)
-	}
-	if err := validateNewsContextReport(run, items, report); err != nil {
-		t.Fatalf("validate daily unchanged report: %v", err)
-	}
-	if _, err := svc.store.ApplyNewsContextBatch(ctx, run.ID, agentRunID, run.WindowType, report); err != nil {
-		t.Fatalf("apply daily unchanged report: %v", err)
-	}
-	versions, err := svc.store.ListNewsThreadVersions(ctx, NewsThreadVersionListFilter{ThreadID: thread.ID, RunID: run.ID, Limit: 10})
+	versions, err := svc.store.MaterializeNewsContextDailyVersions(ctx, run.ID, run.WindowEnd, []NewsThreadVersion{baseVersion})
 	if err != nil || len(versions) != 1 {
-		t.Fatalf("daily snapshot versions=%+v err=%v", versions, err)
+		t.Fatalf("materialize daily snapshot=%+v err=%v", versions, err)
 	}
-	run, err = svc.store.GetNewsContextRun(ctx, run.ID)
+	if err := svc.store.ReplaceNewsContextMaterializedThreadItems(ctx, run.ID, versions); err != nil {
+		t.Fatalf("record materialized daily snapshot: %v", err)
+	}
+	run.InputCount = 1
+	run.ProcessedCount = 1
+	run.PendingCount = 0
+	run.Phase = "materialized"
+	run, err = svc.store.UpdateNewsContextRun(ctx, run)
 	if err != nil {
-		t.Fatalf("reload daily context run: %v", err)
+		t.Fatalf("update daily context run: %v", err)
 	}
 	return run, thread, versions[0]
 }

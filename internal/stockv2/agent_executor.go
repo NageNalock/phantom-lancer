@@ -1010,18 +1010,26 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 
 func buildNewsContextAggregationPrompt(taskID string, pack NewsContextAggregationPack, mcpURL string) string {
 	var b strings.Builder
+	snapshotOnly := len(pack.InputNewsEvents) == 0 && len(pack.InputThreads) > 0
 	b.WriteString("# News Context Aggregation Task\n\n")
 	b.WriteString("System role: you maintain StockV2 message threads by compressing normalized news into durable, reviewable market themes. You are not a trading executor.\n")
 	b.WriteString("Process every input news item exactly once. Do not impose a target count for events, threads, or changes, and do not merge unrelated facts merely to reduce storage.\n")
 	b.WriteString("Write every user-facing conclusion in Simplified Chinese, including resultSummary, decision reasons, thread titles, theses, changes, facts, inferences, contrary evidence, questions, catalysts, invalidations, relation summaries, and research audit conclusions. Keep schema field names, enum values, identifiers, symbols, and source URLs unchanged.\n")
-	b.WriteString("A four-hour or daily batch may have no new news and still has to review every InputThreads item. InputThreads can contain chronological child-window snapshots with the same stable thread id; read every snapshot in order, then return exactly one consolidated outcome for that stable id. A daily batch must produce a stage conclusion for each reviewed thread and cannot skip review merely because no new article arrived.\n")
-	if pack.DailyConvergenceReview {
-		b.WriteString("This is the persisted second-stage daily convergence review after all first-pass fragments completed. Review all InputThreads together to identify and update cross-theme relationships, sector rotation, potential next relay or succession themes, and invalidation or failure clues. Do not invent a target theme count, and return exactly one final outcome for every stable theme in this convergence batch.\n")
-	}
+	b.WriteString("The four-hour window is the sole regular model aggregation boundary. Use InputThreads only when explicitly assigned; do not request or reproduce an all-theme daily conclusion.\n")
 	b.WriteString("Separate confirmed facts, inferences, contrary evidence, conflicts, and unresolved questions. Similarity is recall only; it is never proof of identity, causality, support, or contradiction.\n")
 	asOf := pack.WindowEnd.Format(time.RFC3339Nano)
 	fmt.Fprintf(&b, "InputThreads already contains the authoritative point-in-time snapshot for every theme explicitly assigned to this batch; review those snapshots directly and do not search for or fetch the same themes again. When linking an InputNewsEvents item to an existing theme that is not in InputThreads, use stock_agent.semantic_search_news_threads with asOf `%s` to recall candidates and stock_agent.get_news_thread with the same asOf `%s` to read the selected candidate in full. Both calls MUST use this exact aggregation WindowEnd cutoff so this run cannot read future theme versions or evidence. Do not silently replace semantic search with keyword matching.\n", asOf, asOf)
-	if mcpURL != "" {
+	if pack.HistoricalReconstruction {
+		// ponytail: backfill cost is bounded by the frozen manifest. Semantic
+		// lookup remains available for stable-theme identity, while routine public
+		// browsing is reserved for realtime follow-up instead of blocking history.
+		b.WriteString("This is historical reconstruction. Do not perform public search/browse, shell commands, or any external lookup other than the point-in-time semantic theme search/detail tools described above. Use those semantic tools only when needed to attach an input news item to an existing stable theme. Preserve unresolved uncertainty explicitly and return an empty `search_audit` array.\n")
+	} else if snapshotOnly {
+		// ponytail: a parent window consumes already researched child snapshots.
+		// Re-researching them adds no evidence coverage and was observed to turn an
+		// eight-theme four-hour batch into many shell/search turns.
+		b.WriteString("Do not perform new public search/browse or semantic theme lookup during this thread-only parent aggregation. Do not use shell commands or any other external lookup. The persisted InputThreads are the complete evidence boundary for this stage. Preserve unresolved uncertainty from those snapshots, perform only parent-window synthesis, and return an empty `search_audit` array.\n")
+	} else if mcpURL != "" {
 		b.WriteString("Actively use Codex CLI public search/browse to verify important conclusions. Public verification is mandatory for high-impact portfolio or strategy effects, conflicting sources, material single-source claims, insufficient evidence for stage/impact, and policy, filing, or supply-chain facts.\n")
 	} else {
 		b.WriteString("This API execution has no public search or browsing capability. When public verification would be mandatory, record search_audit status unavailable with a concrete failure_reason, lower confidence, and preserve the affected news for later verification.\n")
@@ -1029,13 +1037,19 @@ func buildNewsContextAggregationPrompt(taskID string, pack NewsContextAggregatio
 			b.WriteString("Keep API tool calls bounded: issue all needed semantic searches together in the first tool response, fetch the selected candidates together in the next response, then submit the result. Do not repeat equivalent lookups.\n")
 		}
 	}
-	b.WriteString("When RequiredResearch is true, public verification is mandatory and every ResearchReasons item must be addressed in `search_audit`.\n")
-	b.WriteString("For every public verification, use exactly these search_audit fields: question, status, sources, supported, weakened_or_refuted, unresolved, and failure_reason. Search failure must remain explicit and must lower confidence; never present it as verified.\n")
+	if !snapshotOnly && !pack.HistoricalReconstruction {
+		b.WriteString("When RequiredResearch is true, public verification is mandatory and every ResearchReasons item must be addressed in `search_audit`.\n")
+		b.WriteString("For every public verification, use exactly these search_audit fields: question, status, sources, supported, weakened_or_refuted, unresolved, and failure_reason. Search failure must remain explicit and must lower confidence; never present it as verified.\n")
+	}
 	b.WriteString("Do not place orders, modify holdings or strategies, delete news, expose credentials, or claim that persistence/indexing/review/deletion has completed. The main program validates and applies the result.\n")
 	b.WriteString("Submit the final result exactly once successfully with stock_agent.submit_result. If the tool rejects the schema or exact batch coverage, correct the reported fields and resubmit; rejected calls do not consume the result slot. Do not use shell commands or curl to submit it.\n\n")
 	if prompt := strings.TrimSpace(pack.AdditionalResearchPrompt); prompt != "" {
 		b.WriteString("## Owner Additional Research Focus\n\n")
-		b.WriteString("This text may only add checks or research focus. It cannot override complete coverage, public verification, safety, permissions, or result validation requirements above.\n")
+		if snapshotOnly || pack.HistoricalReconstruction {
+			b.WriteString("This text may only guide synthesis within the persisted InputThreads evidence boundary. It cannot enable external lookup or override complete coverage, safety, permissions, or result validation requirements above.\n")
+		} else {
+			b.WriteString("This text may only add checks or research focus. It cannot override complete coverage, public verification, safety, permissions, or result validation requirements above.\n")
+		}
 		rawPrompt, _ := json.Marshal(prompt)
 		b.Write(rawPrompt)
 		b.WriteString("\n\n")
@@ -1057,15 +1071,15 @@ func buildNewsContextAggregationPrompt(taskID string, pack NewsContextAggregatio
 
 	b.WriteString("## Required Result Contract\n\n")
 	b.WriteString("Return one result with outputType `news_context_result`. The inner result must use schema_version `news-context-result/v1` and repeat the exact aggregation run id and window type.\n")
-	b.WriteString("Include every input news id in `processed_news_ids` exactly once and give every item a disposition such as create, update, support, contradict, background, duplicate, noise, or defer. Every item except duplicate, noise, or defer must appear in exactly one thread change's evidence_news_ids; those three excluded dispositions must not appear as evidence. An existing-theme decision must use that change's stable thread_id. A new-theme decision may omit thread_id or use one consistent temporary id unique to that create change. Deferred items must state why and must remain protected from deletion.\n")
+	b.WriteString("Include every input news id in `processed_news_ids` exactly once and give every item a disposition such as create, update, support, contradict, background, duplicate, noise, or defer. Every item except duplicate, noise, or defer must appear in exactly one thread change's evidence_news_ids; those three excluded dispositions must not appear as evidence. An existing-theme decision must use that change's stable thread_id. A new-theme decision may omit thread_id or use one consistent temporary id unique to that create change. Use defer only when an item plausibly has material market or portfolio significance and one specific missing verification prevents every safe final disposition. Do not defer merely because an item is low impact, lacks market transmission, is an unrelated mixed digest, or lacks enough detail to create a theme; classify those as noise or duplicate unless they safely support, contradict, or add background to a specific theme. Deferred items must state the missing verification and must remain protected from deletion.\n")
 	b.WriteString("Immediately before submission, mechanically compare the exact ids in InputNewsEvents with both processed_news_ids and news_decisions: each set must contain every input id exactly once, with identical counts and no invented ids. Do not omit an item because it is repetitive, duplicate, low-impact, or difficult to classify.\n")
 	if len(pack.InputNewsEvents) == 0 {
 		b.WriteString("This batch has no InputNewsEvents. `processed_news_ids` and `news_decisions` must both be empty arrays, and every `thread_changes[].evidence_news_ids` must be empty. Identifiers or evidence described inside InputThreads are historical context, not processable news input, and must not be copied into those fields.\n")
 	}
-	b.WriteString("Include `reviewed_thread_ids` and `unchanged_thread_ids` only for exact stable thread ids present in InputThreads. Threads discovered only through semantic search are candidates, not batch review inputs: omit an unchanged candidate from both arrays, and place it only in thread_changes when it is actually changed. When InputThreads is empty, both arrays must be empty. Together with every source/target InputThreads id referenced by `thread_changes`, these arrays must cover every distinct stable thread id in InputThreads exactly once; the three outcome sets are mutually exclusive. Daily runs require every distinct stable thread id to appear in unchanged_thread_ids or thread_changes so the service can persist an explicit daily stage conclusion.\n")
-	b.WriteString("Each thread change must use action create, update, merge, split, or restart. create must omit thread_id; every other action must use a stable existing thread_id. stage must be one of emerging, spreading, accelerating, overheated, diverging, retreating, dormant, or restarting. Also include whether the change is material, facts, inferences, contrary evidence, unresolved questions, affected sectors/instruments, catalysts, invalidation conditions, rotation clues, evidence news ids, and merge/split reasoning when applicable.\n")
+	b.WriteString("Include `reviewed_thread_ids` and `unchanged_thread_ids` only for exact stable thread ids present in InputThreads. Threads discovered only through semantic search are candidates, not batch review inputs: omit an unchanged candidate from both arrays, and place it only in thread_changes when it is actually changed. When InputThreads is empty, both arrays must be empty. Together with every source/target InputThreads id referenced by `thread_changes`, these arrays must cover every distinct stable thread id in InputThreads exactly once; the three outcome sets are mutually exclusive.\n")
+	b.WriteString("Each thread change must use action create, update, merge, split, or restart. create must omit thread_id; every other action must use a stable existing thread_id. stage must be one of emerging, spreading, accelerating, overheated, diverging, retreating, dormant, or restarting. Use only the canonical thread-change fields shown in the example: material_change, industries, symbols, funds, facts, inferences, counter_evidence, open_questions, leaders, followers, laggards, next_candidates, catalysts, invalidations, relations, evidence_news_ids, research_status, and source_thread_ids when applicable. Put sectors in industries, instruments in symbols or funds, rotation clues in relations, and merge/split rationale in latest_change or relation summaries; do not add fields for those concepts.\n")
 	b.WriteString("Include `search_audit` even when no search was required. Its status must be exactly completed, verified, failed, or unavailable. Never use partially_verified, weak, unsupported, stale, conflicting, or another status. Represent partial confirmation as verified with unresolved entries and lower confidence. completed and verified require non-empty sources; failed and unavailable require failure_reason.\n")
-	b.WriteString("Use the exact field names in this complete example; do not invent aliases such as news_id, thread_ref, material, affected_sectors, or sources_checked. Arrays must be present even when empty.\n")
+	b.WriteString("Use the exact field names in this complete example; do not invent aliases such as news_id, thread_ref, material, affected_sectors, affected_instruments, invalidation_conditions, rotation_clues, merge_reason, split_reason, or sources_checked. Arrays must be present even when empty.\n")
 	b.WriteString("Example envelope:\n```json\n")
 	exampleReport := NewsContextReport{
 		SchemaVersion:      NewsContextResultSchemaVersion,

@@ -63,6 +63,7 @@ func (s *Store) ensureNewsContextBackfillSchema(ctx context.Context) error {
 			news_event_id TEXT NOT NULL,
 			event_at DATETIME NOT NULL,
 			event_unix_nano INTEGER NOT NULL,
+			defer_retry_count INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL,
 			PRIMARY KEY (backfill_id, news_event_id),
 			FOREIGN KEY (backfill_id) REFERENCES stockv2_news_context_backfills(id) ON DELETE CASCADE
@@ -92,6 +93,9 @@ func (s *Store) ensureNewsContextBackfillSchema(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "stockv2_news_context_backfill_news", "event_unix_nano", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "stockv2_news_context_backfill_news", "defer_retry_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT backfill_id,news_event_id,event_at
@@ -534,7 +538,11 @@ func (s *Store) BeginNewsContextBackfillFragment(ctx context.Context, backfillID
 			}
 			return wrapError(err, "read pending news context backfill fragment")
 		}
-		if phase != "collecting" && phase != newsContextRunPhaseConverging {
+		if phase == "converging" {
+			// DEPRECATED: rebuild an interrupted pre-materialization daily run once;
+			// the model convergence path was removed in 2026-07.
+			phase = "collecting"
+		} else if phase != "collecting" && phase != newsContextRunPhaseCheckpoint && phase != newsContextRunPhaseMaterialize {
 			phase = newsContextRunPhaseAggregating
 		}
 		result, err := tx.ExecContext(ctx, `UPDATE stockv2_news_context_runs SET
@@ -585,27 +593,39 @@ type newsContextBackfillWindowProgress struct {
 	TotalItemCount           int
 	PendingItemCount         int
 	CompletedDurationSeconds int64
-}
-
-type newsContextBackfillAgentProgress struct {
-	AttemptCount    int
-	FailedCount     int
-	DurationSeconds int64
+	AgentAttemptCount        int
+	AgentFailedCount         int
+	ModelDurationSeconds     int64
 }
 
 func (s *Store) NewsContextBackfillWindowProgress(ctx context.Context, backfillID string) (map[string]newsContextBackfillWindowProgress, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT r.window_type,
+	rows, err := s.db.QueryContext(ctx, `WITH runs AS (
+		SELECT r.* FROM stockv2_news_context_runs r
+		JOIN stockv2_news_context_backfill_runs b ON b.run_id=r.id
+		WHERE b.backfill_id=? AND r.trigger_type=?
+	), window_progress AS (
+		SELECT r.window_type,
 		COALESCE(SUM(CASE WHEN r.status=? THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(r.processed_count),0),
 		COALESCE(SUM(r.input_count),0),COALESCE(SUM(r.pending_count),0),
 		COALESCE(SUM(CASE WHEN r.status=? AND r.started_at IS NOT NULL
 			THEN MAX(0,CAST(strftime('%s',COALESCE(r.finished_at,r.updated_at)) AS INTEGER)-
 				CAST(strftime('%s',r.started_at) AS INTEGER)) ELSE 0 END),0)
-		FROM stockv2_news_context_runs r
-		JOIN stockv2_news_context_backfill_runs b ON b.run_id=r.id
-		WHERE b.backfill_id=? AND r.trigger_type=?
-		GROUP BY r.window_type`, NewsContextRunStatusCompleted, NewsContextRunStatusCompleted,
-		strings.TrimSpace(backfillID), NewsContextTriggerBackfill)
+		FROM runs r GROUP BY r.window_type
+	), agent_progress AS (
+		SELECT r.window_type,COUNT(a.id) AS attempt_count,
+		COALESCE(SUM(CASE WHEN a.status=? THEN 1 ELSE 0 END),0) AS failed_count,
+		COALESCE(SUM(MAX(0,CAST(strftime('%s',COALESCE(a.finished_at,CURRENT_TIMESTAMP)) AS INTEGER)-
+			CAST(strftime('%s',COALESCE(a.started_at,a.created_at)) AS INTEGER))),0) AS duration_seconds
+		FROM runs r JOIN stockv2_agent_runs a
+		ON a.trigger_object_type='news_context_run' AND a.trigger_object_id=r.id
+		AND a.task_type=? GROUP BY r.window_type
+	)
+	SELECT w.*,COALESCE(a.attempt_count,0),COALESCE(a.failed_count,0),COALESCE(a.duration_seconds,0)
+	FROM window_progress w LEFT JOIN agent_progress a ON a.window_type=w.window_type`,
+		strings.TrimSpace(backfillID), NewsContextTriggerBackfill,
+		NewsContextRunStatusCompleted, NewsContextRunStatusCompleted,
+		AgentRunStatusFailed, AgentTaskTypeNewsEventReview)
 	if err != nil {
 		return nil, wrapError(err, "get news context backfill window progress")
 	}
@@ -615,25 +635,13 @@ func (s *Store) NewsContextBackfillWindowProgress(ctx context.Context, backfillI
 		var windowType string
 		var item newsContextBackfillWindowProgress
 		if err := rows.Scan(&windowType, &item.CompletedWindowCount, &item.ProcessedItemCount,
-			&item.TotalItemCount, &item.PendingItemCount, &item.CompletedDurationSeconds); err != nil {
+			&item.TotalItemCount, &item.PendingItemCount, &item.CompletedDurationSeconds,
+			&item.AgentAttemptCount, &item.AgentFailedCount, &item.ModelDurationSeconds); err != nil {
 			return nil, wrapError(err, "scan news context backfill window progress")
 		}
 		progress[windowType] = item
 	}
 	return progress, wrapError(rows.Err(), "iterate news context backfill window progress")
-}
-
-func (s *Store) NewsContextBackfillAgentProgress(ctx context.Context, runID string) (newsContextBackfillAgentProgress, error) {
-	var item newsContextBackfillAgentProgress
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),
-		COALESCE(SUM(CASE WHEN status=? THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(MAX(0,CAST(strftime('%s',COALESCE(finished_at,CURRENT_TIMESTAMP)) AS INTEGER)-
-			CAST(strftime('%s',COALESCE(started_at,created_at)) AS INTEGER))),0)
-		FROM stockv2_agent_runs
-		WHERE task_type=? AND trigger_object_type='news_context_run' AND trigger_object_id=?`,
-		AgentRunStatusFailed, AgentTaskTypeNewsEventReview, strings.TrimSpace(runID)).
-		Scan(&item.AttemptCount, &item.FailedCount, &item.DurationSeconds)
-	return item, wrapError(err, "get news context backfill agent progress")
 }
 
 func (s *Store) ListNewsContextBackfillOutputVersionIDs(ctx context.Context, backfillID, windowType string, start, end time.Time) ([]string, error) {
@@ -855,12 +863,7 @@ func (s *Store) FindNewsContextBackfillReviewedVersion(ctx context.Context, back
 	return item, err == nil, wrapError(err, "find reviewed historical daily output")
 }
 
-func (s *Store) ReplaceNewsContextHistoricalThreadItems(
-	ctx context.Context,
-	runID string,
-	versions []NewsThreadVersion,
-	pendingThreadIDs map[string]struct{},
-) error {
+func (s *Store) ReplaceNewsContextMaterializedThreadItems(ctx context.Context, runID string, versions []NewsThreadVersion) error {
 	return s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_news_context_run_items
 			WHERE run_id=? AND object_type=?`, strings.TrimSpace(runID), NewsContextRunItemThread); err != nil {
@@ -868,20 +871,12 @@ func (s *Store) ReplaceNewsContextHistoricalThreadItems(
 		}
 		now := time.Now()
 		for _, version := range versions {
-			status := NewsContextRunItemPending
-			disposition := ""
-			if pendingThreadIDs != nil {
-				if _, changed := pendingThreadIDs[version.ThreadID]; !changed {
-					status = NewsContextRunItemCompleted
-					disposition = newsContextRunItemDispositionCarried
-				}
-			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO stockv2_news_context_run_items
 				(id,run_id,object_type,object_id,status,disposition,thread_id,version_id,source_at,created_at,updated_at)
 				VALUES (?,?,?,?,?,?,?,?,?,?,?)`, generateID(), strings.TrimSpace(runID),
-				NewsContextRunItemThread, version.ID, status, nullableString(disposition),
+				NewsContextRunItemThread, version.ID, NewsContextRunItemCompleted, "materialized",
 				version.ThreadID, version.ID, version.EffectiveAt, now, now); err != nil {
-				return wrapError(err, "seed historical news context thread snapshot")
+				return wrapError(err, "seed materialized news context thread checkpoint")
 			}
 		}
 		return nil
@@ -908,6 +903,70 @@ func (s *Store) NewsContextBackfillRunProgress(ctx context.Context, backfillID s
 		return 0, 0, wrapError(err, "get news context backfill run progress")
 	}
 	return processed, missing, nil
+}
+
+// RequeueFirstNewsContextBackfillDeferrals turns the first deferred decision for
+// a frozen news item back into unfinished work. A second deferred decision is
+// left completed and protected, which gives ambiguous news one bounded retry
+// without making the historical backfill loop forever.
+func (s *Store) RequeueFirstNewsContextBackfillDeferrals(ctx context.Context, backfillID string) (int, error) {
+	backfillID = strings.TrimSpace(backfillID)
+	if backfillID == "" {
+		return 0, ErrInvalidNewsContextInput
+	}
+	if err := s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `SELECT DISTINCT m.news_event_id
+			FROM stockv2_news_context_backfill_news m
+			JOIN stockv2_news_context_backfill_runs r ON r.backfill_id=m.backfill_id
+			JOIN stockv2_news_context_run_items i ON i.run_id=r.run_id AND i.object_id=m.news_event_id
+			WHERE m.backfill_id=? AND m.defer_retry_count=0
+			AND i.object_type=? AND i.status=? AND i.disposition=?
+			ORDER BY m.event_unix_nano,m.news_event_id`, backfillID, NewsContextRunItemNewsEvent,
+			NewsContextRunItemCompleted, NewsEventContextDeferred)
+		if err != nil {
+			return wrapError(err, "list first deferred historical news")
+		}
+		ids := make([]string, 0)
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return wrapError(err, "scan first deferred historical news")
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		now := time.Now()
+		for _, id := range ids {
+			if _, err := tx.ExecContext(ctx, `UPDATE stockv2_news_context_backfill_news
+				SET defer_retry_count=1 WHERE backfill_id=? AND news_event_id=? AND defer_retry_count=0`,
+				backfillID, id); err != nil {
+				return wrapError(err, "mark deferred historical news retry")
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE stockv2_news_context_run_items
+				SET status=?,updated_at=? WHERE object_type=? AND object_id=? AND status=? AND disposition=?
+				AND run_id IN (SELECT run_id FROM stockv2_news_context_backfill_runs WHERE backfill_id=?)`,
+				NewsContextRunItemDeferred, now, NewsContextRunItemNewsEvent, id,
+				NewsContextRunItemCompleted, NewsEventContextDeferred, backfillID); err != nil {
+				return wrapError(err, "requeue first deferred historical news")
+			}
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	var pending int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*)
+		FROM stockv2_news_context_backfill_news m
+		WHERE m.backfill_id=? AND m.defer_retry_count=1 AND NOT EXISTS (
+			SELECT 1 FROM stockv2_news_context_backfill_runs r
+			JOIN stockv2_news_context_run_items i ON i.run_id=r.run_id
+			WHERE r.backfill_id=m.backfill_id AND i.object_type=?
+			AND i.object_id=m.news_event_id AND i.status=?
+		)`, backfillID, NewsContextRunItemNewsEvent, NewsContextRunItemCompleted).Scan(&pending)
+	return pending, wrapError(err, "count requeued first deferred historical news")
 }
 
 func (s *Store) CountNewsContextBackfillCoveredWithoutEvidence(ctx context.Context, backfillID string) (int, error) {
@@ -1054,36 +1113,72 @@ func (s *Store) NewsContextBackfillSourceStats(ctx context.Context, cutoff time.
 // run manifest is created. The caller releases the claim if the SQLite write
 // fails. The ordinary path never transfers another run's ownership.
 func (s *Store) ClaimNewsContextEvents(ctx context.Context, runID string, start, end time.Time) ([]string, error) {
-	return s.claimNewsContextEvents(ctx, runID, start, end, false)
+	return s.claimNewsContextEvents(ctx, runID, start, end, false, false)
+}
+
+// ClaimRealtimeNewsContextEvents also reclaims one explicitly deferred result.
+// The durable event counter makes the retry bounded across restarts and across
+// the overlapping hourly/four-hour/daily scheduled windows.
+func (s *Store) ClaimRealtimeNewsContextEvents(ctx context.Context, runID string, start, end time.Time) ([]string, error) {
+	return s.claimNewsContextEvents(ctx, runID, start, end, false, true)
 }
 
 func (s *Store) ClaimNewsContextFinalReviewEvents(ctx context.Context, runID string, start, end time.Time) ([]string, error) {
-	return s.claimNewsContextEvents(ctx, runID, start, end, true)
+	return s.claimNewsContextEvents(ctx, runID, start, end, true, false)
 }
 
-func (s *Store) claimNewsContextEvents(ctx context.Context, runID string, start, end time.Time, reclaimInactive bool) ([]string, error) {
+func (s *Store) claimNewsContextEvents(ctx context.Context, runID string, start, end time.Time, reclaimInactive, retryFirstDeferral bool) ([]string, error) {
 	if strings.TrimSpace(runID) == "" || start.IsZero() || !end.After(start) {
 		return nil, ErrInvalidNewsContextInput
 	}
-	rows, err := s.marketDB.db.QueryContext(ctx, `SELECT id,COALESCE(context_status,'pending'),COALESCE(context_run_id,'')
+	rows, err := s.marketDB.db.QueryContext(ctx, `SELECT id,COALESCE(context_status,'pending'),COALESCE(context_run_id,''),
+		COALESCE(context_defer_retry_count,0)
 		FROM stockv2_news_events
 		WHERE event_at>=? AND event_at<? AND (COALESCE(context_status,'pending')=? OR
 		(COALESCE(context_status,'pending')=? AND TRIM(COALESCE(context_run_id,''))='') OR
+		(?=1 AND COALESCE(context_status,'pending')=? AND TRIM(COALESCE(context_run_id,''))<>''
+			AND COALESCE(context_defer_retry_count,0)=0) OR
 		(?=1 AND COALESCE(context_status,'pending')=?))
 		ORDER BY event_at ASC, id ASC`, start, end, NewsEventContextPending, NewsEventContextDeferred,
+		boolToInt(retryFirstDeferral), NewsEventContextDeferred,
 		boolToInt(reclaimInactive), NewsEventContextClaimed)
 	if err != nil {
 		return nil, wrapError(err, "list news context events to claim")
 	}
 	ids := make([]string, 0)
 	staleOwners := make(map[string]string)
+	retryOwners := make(map[string]string)
 	for rows.Next() {
 		var id, status, owner string
-		if err := rows.Scan(&id, &status, &owner); err != nil {
+		var deferRetryCount int
+		if err := rows.Scan(&id, &status, &owner, &deferRetryCount); err != nil {
 			rows.Close()
 			return nil, wrapError(err, "scan news context event claim")
 		}
 		ids = append(ids, id)
+		if status == NewsEventContextDeferred && owner != "" {
+			if !retryFirstDeferral || deferRetryCount != 0 {
+				rows.Close()
+				return nil, ErrInvalidNewsContextInput
+			}
+			ownerRun, err := s.GetNewsContextRun(ctx, owner)
+			if errors.Is(err, ErrNewsContextRunNotFound) {
+				retryOwners[id] = owner
+				continue
+			}
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			switch ownerRun.Status {
+			case NewsContextRunStatusCompleted, NewsContextRunStatusFailed, NewsContextRunStatusWaitingReview:
+				retryOwners[id] = owner
+				continue
+			default:
+				rows.Close()
+				return nil, ErrNewsContextAlreadyRunning
+			}
+		}
 		if status != NewsEventContextClaimed {
 			continue
 		}
@@ -1125,13 +1220,20 @@ func (s *Store) claimNewsContextEvents(ctx context.Context, runID string, start,
 	now := time.Now()
 	for _, id := range ids {
 		staleOwner := staleOwners[id]
+		retryOwner := retryOwners[id]
+		retryDeferral := retryOwner != ""
 		result, err := tx.ExecContext(ctx, `UPDATE stockv2_news_events SET
 			context_status=?, context_run_id=?, context_covered_at=NULL,
-			protected_reason=NULL, updated_at=? WHERE id=?
+			protected_reason=NULL,
+			context_defer_retry_count=CASE WHEN ?=1 THEN 1 ELSE COALESCE(context_defer_retry_count,0) END,
+			updated_at=? WHERE id=?
 			AND (COALESCE(context_status,'pending')=? OR
 			(COALESCE(context_status,'pending')=? AND TRIM(COALESCE(context_run_id,''))='') OR
+			(?=1 AND COALESCE(context_status,'pending')=? AND context_run_id=?
+				AND COALESCE(context_defer_retry_count,0)=0) OR
 			(?=1 AND COALESCE(context_status,'pending')=? AND COALESCE(context_run_id,'') IN (?,?)))`, NewsEventContextClaimed,
-			runID, now, id, NewsEventContextPending, NewsEventContextDeferred,
+			runID, boolToInt(retryDeferral), now, id, NewsEventContextPending, NewsEventContextDeferred,
+			boolToInt(retryDeferral), NewsEventContextDeferred, retryOwner,
 			boolToInt(reclaimInactive), NewsEventContextClaimed, runID, staleOwner)
 		if err != nil {
 			return nil, wrapError(err, "claim news context event")
@@ -1184,6 +1286,28 @@ func (s *Store) ClaimNewsContextBackfillEvents(ctx context.Context, backfillID, 
 			COALESCE(context_run_id,'') FROM stockv2_news_events WHERE id=?`, id).Scan(&status, &owner); err != nil {
 			return nil, wrapError(err, "read frozen news context event owner")
 		}
+		if status == NewsEventContextDeferred {
+			if owner == "" || owner == runID {
+				continue
+			}
+			var requeued int
+			if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*)
+				FROM stockv2_news_context_backfill_runs r
+				JOIN stockv2_news_context_run_items i ON i.run_id=r.run_id
+				JOIN stockv2_news_context_backfill_news m
+					ON m.backfill_id=r.backfill_id AND m.news_event_id=i.object_id
+				WHERE r.backfill_id=? AND i.run_id=? AND i.object_type=? AND i.object_id=?
+				AND m.defer_retry_count=1 AND i.status=? AND i.disposition=?`, strings.TrimSpace(backfillID), owner,
+				NewsContextRunItemNewsEvent, id, NewsContextRunItemDeferred,
+				NewsEventContextDeferred).Scan(&requeued); err != nil {
+				return nil, wrapError(err, "verify requeued deferred historical news owner")
+			}
+			if requeued != 1 {
+				return nil, ErrNewsContextAlreadyRunning
+			}
+			staleOwners[id] = owner
+			continue
+		}
 		if status != NewsEventContextClaimed || owner == "" || owner == runID {
 			continue
 		}
@@ -1208,10 +1332,10 @@ func (s *Store) ClaimNewsContextBackfillEvents(ctx context.Context, backfillID, 
 			context_status=?,context_run_id=?,context_covered_at=NULL,
 			protected_reason=NULL,updated_at=? WHERE id=? AND (
 			COALESCE(context_status,'pending')=? OR
-			(COALESCE(context_status,'pending')=? AND TRIM(COALESCE(context_run_id,''))='') OR
+			(COALESCE(context_status,'pending')=? AND (TRIM(COALESCE(context_run_id,''))='' OR context_run_id=? OR context_run_id=?)) OR
 			(COALESCE(context_status,'pending')=? AND (context_run_id=? OR context_run_id=?))
 		)`, NewsEventContextClaimed, runID, now, id, NewsEventContextPending, NewsEventContextDeferred,
-			NewsEventContextClaimed, runID, staleOwner)
+			runID, staleOwner, NewsEventContextClaimed, runID, staleOwner)
 		if err != nil {
 			return nil, wrapError(err, "claim frozen news context event")
 		}

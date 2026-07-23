@@ -221,12 +221,17 @@ func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing
 		"core_thesis",
 		"material_change",
 		"counter_evidence",
+		"Use only the canonical thread-change fields shown in the example",
+		"Put sectors in industries, instruments in symbols or funds, rotation clues in relations",
+		"affected_instruments",
+		"invalidation_conditions",
+		"rotation_clues",
 		"sources",
 		"do not invent aliases",
 		"reviewed_thread_ids",
 		"unchanged_thread_ids",
-		"every InputThreads item",
-		"daily batch must produce a stage conclusion",
+		"four-hour window is the sole regular model aggregation boundary",
+		"do not request or reproduce an all-theme daily conclusion",
 		"stock_agent.semantic_search_news_threads",
 		"stock_agent.get_news_thread",
 		"semantic_search_news_threads with asOf `2026-07-13T08:00:00Z`",
@@ -238,6 +243,7 @@ func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing
 		"Keep schema field names, enum values, identifiers, symbols, and source URLs unchanged",
 		"When InputThreads is empty, both arrays must be empty",
 		"Threads discovered only through semantic search are candidates, not batch review inputs",
+		"Do not defer merely because an item is low impact",
 		"stock_agent.submit_result",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -246,6 +252,9 @@ func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing
 	}
 	if !validAgentTaskOutputType(AgentTaskTypeNewsEventReview, "news_context_result") {
 		t.Fatal("news context result must be accepted for news_event_review")
+	}
+	if strings.Contains(prompt, "affected sectors/instruments") {
+		t.Fatalf("prompt requests fields rejected by the strict result schema: %s", prompt)
 	}
 	if validAgentTaskOutputType(AgentTaskTypeNewsEventReview, AgentTaskTypeNewsEventReview) {
 		t.Fatal("legacy task key must not be accepted as a result type")
@@ -289,6 +298,10 @@ func TestBuildNewsContextAggregationPromptUsesThreadOnlyExampleWithoutInventedNe
 
 	for _, want := range []string{
 		"This batch has no InputNewsEvents",
+		"Do not perform new public search/browse or semantic theme lookup during this thread-only parent aggregation",
+		"Do not use shell commands or any other external lookup",
+		"persisted InputThreads are the complete evidence boundary",
+		"perform only parent-window synthesis",
 		`"processed_news_ids":[]`,
 		`"reviewed_thread_ids":[]`,
 		`"unchanged_thread_ids":["thread-stable-1","thread-stable-2"]`,
@@ -302,6 +315,14 @@ func TestBuildNewsContextAggregationPromptUsesThreadOnlyExampleWithoutInventedNe
 	}
 	if strings.Contains(prompt, "news-event-id") {
 		t.Fatalf("thread-only prompt contains invented news example: %s", prompt)
+	}
+	for _, forbidden := range []string{
+		"Actively use Codex CLI public search/browse", "This API execution has no public search or browsing capability",
+		"When RequiredResearch is true", "For every public verification",
+	} {
+		if strings.Contains(prompt, forbidden) {
+			t.Fatalf("thread-only prompt must not contain %q", forbidden)
+		}
 	}
 }
 

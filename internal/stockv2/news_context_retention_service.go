@@ -93,8 +93,10 @@ func (s *Service) StartNewsContextCleanupRun(ctx context.Context, req RequestSta
 	if err != nil {
 		return NewsContextCleanupRun{}, err
 	}
+	if !s.launchNewsContextWorker(run.ID, s.executeNewsContextCleanup) {
+		return NewsContextCleanupRun{}, context.Canceled
+	}
 	release = false
-	go s.executeNewsContextCleanup(context.Background(), run.ID)
 	return run, nil
 }
 
@@ -108,6 +110,9 @@ func (s *Service) executeNewsContextCleanup(ctx context.Context, id string) {
 		return
 	}
 	fail := func(cause error) {
+		if s.newsContextWorkerShutdownCanceled(ctx) {
+			return
+		}
 		run.Status = NewsContextCleanupFailed
 		run.Phase = "failed"
 		run.ErrorMessage = safelog.Text(cause.Error(), 500)
@@ -631,6 +636,10 @@ func (s *Service) compactNewsContextCandidate(ctx context.Context, candidate New
 	// A cache miss means the theme changed, so the next cleanup run verifies it.
 	eligible, reason, err := s.newsContextCleanupEligibility(ctx, candidate, true)
 	if err != nil {
+		var gateFailure newsContextCleanupGateFailure
+		if errors.As(err, &gateFailure) {
+			return protect(firstNonEmpty(reason, gateFailure.reason))
+		}
 		return 0, false, reason, err
 	}
 	if !eligible {
@@ -673,12 +682,11 @@ func newsContextVersionProtectionReason(version NewsThreadVersion) string {
 	default:
 		return "主题公开资料核实尚未完成"
 	}
-	if len(version.CounterEvidence) > 0 {
-		return "主题仍有未解决的重大来源冲突"
-	}
-	if len(version.OpenQuestions) > 0 {
-		return "主题仍有需要原文的重要未决问题"
-	}
+	// ponytail: reviewed theme versions and compact evidence retain counter
+	// evidence and open questions themselves. Treating any non-empty array as a
+	// raw-news lock made every observed model result permanently uncleanable;
+	// research status and the newer-than-daily gate above remain the safety
+	// boundaries for unresolved or newly changed conclusions.
 	return ""
 }
 

@@ -274,11 +274,57 @@ func TestLimitNewsContextBatchForDeepSeekAPI(t *testing.T) {
 	}
 }
 
-func TestFailRunningAgentRunsMarksOnlyActiveRuns(t *testing.T) {
+func TestLimitNewsContextBatchForCodexCLI(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeCodexCLI,
+		Name:         "codex-cli",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	model, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID: provider.ID,
+		ModelName:  "test-model",
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeNewsEventReview, RequestUpdateAgentTaskProfile{
+		PrimaryModelID: &model.ID,
+	}); err != nil {
+		t.Fatalf("bind model: %v", err)
+	}
+	items := make([]NewsContextRunItem, 40)
+	for index := range items {
+		items[index] = NewsContextRunItem{ObjectType: NewsContextRunItemNewsEvent, ObjectID: generateID()}
+	}
+	limited, err := svc.limitNewsContextBatchForProvider(ctx, items)
+	if err != nil {
+		t.Fatalf("limit batch: %v", err)
+	}
+	if len(limited) != newsContextCLIEventBatchSize {
+		t.Fatalf("limited items = %d; want %d", len(limited), newsContextCLIEventBatchSize)
+	}
+}
+
+func TestFailActiveAgentRunsMarksReadyAndRunning(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
 	now := time.Now()
+	ready, _, err := svc.store.CreateAgentRunWithLedger(ctx, AgentRun{
+		TaskType: AgentTaskTypeNewsEventReview, ExecutionMode: AgentExecutionModeAPI,
+		TriggerObjectType: "test", TriggerObjectID: "ready", Status: AgentRunStatusReady,
+	}, AgentDecisionLedger{
+		TaskType: AgentTaskTypeNewsEventReview, TriggerObjectType: "test", TriggerObjectID: "ready",
+	})
+	if err != nil {
+		t.Fatalf("create ready run: %v", err)
+	}
 	running, _, err := svc.store.CreateAgentRunWithLedger(ctx, AgentRun{
 		TaskType: AgentTaskTypeNewsEventReview, ExecutionMode: AgentExecutionModeAPI,
 		TriggerObjectType: "test", TriggerObjectID: "running", Status: AgentRunStatusRunning,
@@ -297,11 +343,15 @@ func TestFailRunningAgentRunsMarksOnlyActiveRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create completed run: %v", err)
 	}
-	if count, err := svc.store.FailRunningAgentRuns(ctx, "restart"); err != nil || count != 1 {
-		t.Fatalf("FailRunningAgentRuns = %d, %v", count, err)
+	if count, err := svc.store.FailActiveAgentRuns(ctx, "restart"); err != nil || count != 2 {
+		t.Fatalf("FailActiveAgentRuns = %d, %v", count, err)
 	}
+	gotReady, _ := svc.store.GetAgentRun(ctx, ready.ID)
 	gotRunning, _ := svc.store.GetAgentRun(ctx, running.ID)
 	gotCompleted, _ := svc.store.GetAgentRun(ctx, completed.ID)
+	if gotReady.Status != AgentRunStatusFailed || gotReady.ErrorMessage != "restart" || gotReady.FinishedAt.IsZero() {
+		t.Fatalf("ready run = %#v", gotReady)
+	}
 	if gotRunning.Status != AgentRunStatusFailed || gotRunning.ErrorMessage != "restart" || gotRunning.FinishedAt.IsZero() {
 		t.Fatalf("running run = %#v", gotRunning)
 	}

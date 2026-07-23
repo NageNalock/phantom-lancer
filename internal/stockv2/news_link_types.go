@@ -11,10 +11,12 @@ const (
 	NewsEventLinkStatusNoCandidate = "no_candidate"
 	NewsEventLinkStatusFailed      = "failed"
 
-	NewsLinkMatchExactSymbol     = "exact_symbol"
-	NewsLinkMatchExactName       = "exact_name"
-	NewsLinkMatchAlias           = "alias"
-	NewsLinkMatchKeyword         = "keyword"
+	NewsLinkMatchExactSymbol = "exact_symbol"
+	NewsLinkMatchExactName   = "exact_name"
+	NewsLinkMatchAlias       = "alias"
+	NewsLinkMatchKeyword     = "keyword"
+	// DEPRECATED: retained only so the retention job can remove rows produced by
+	// the deleted profile-text substring matcher. Remove after 2026-08-15.
 	NewsLinkMatchProfileKeyword  = "profile_keyword"
 	NewsLinkMatchSemanticProfile = "semantic_profile"
 	NewsLinkMatchBoosted         = "boosted"

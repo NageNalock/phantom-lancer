@@ -33,9 +33,9 @@ func TestBuildNewsContextBackfillStageProgressShowsEveryStage(t *testing.T) {
 	current := NewsContextRun{
 		ID: "daily-current", WindowType: NewsContextWindowDaily,
 		TriggerType: NewsContextTriggerBackfill, Status: NewsContextRunStatusRunning,
-		Phase: newsContextRunPhaseConverging, WindowStart: start.Add(24 * time.Hour),
+		Phase: newsContextRunPhaseMaterialize, WindowStart: start.Add(24 * time.Hour),
 		WindowEnd: start.Add(48 * time.Hour), InputCount: 220,
-		ProcessedCount: 180, PendingCount: 40, StartedAt: time.Now().Add(-time.Hour),
+		ProcessedCount: 220, PendingCount: 0, StartedAt: time.Now().Add(-time.Hour),
 	}
 
 	progress := buildNewsContextBackfillStageProgress(item, windows, &current)
@@ -57,10 +57,9 @@ func TestBuildNewsContextBackfillStageProgressShowsEveryStage(t *testing.T) {
 	assertStage(1, NewsContextWindowFourHour, NewsContextRunStatusCompleted)
 	daily := assertStage(2, NewsContextWindowDaily, NewsContextRunStatusRunning)
 	if daily.CompletedWindowCount != 1 || daily.TotalWindowCount != 2 ||
-		daily.ProcessedItemCount != 180 || daily.TotalItemCount != 220 || daily.PendingItemCount != 40 ||
-		daily.CurrentRunPhase != newsContextRunPhaseConverging ||
-		daily.CurrentWindowProgress <= 0.9 || daily.OverallProgress <= 0.95 ||
-		daily.ElapsedSeconds < 3500 || daily.EstimatedRemainingSeconds <= 0 {
+		daily.ProcessedItemCount != 220 || daily.TotalItemCount != 220 || daily.PendingItemCount != 0 ||
+		daily.CurrentRunPhase != newsContextRunPhaseMaterialize ||
+		daily.CurrentWindowProgress != 1 || daily.OverallProgress != 1 || daily.ElapsedSeconds < 3500 {
 		t.Fatalf("daily progress=%+v", daily)
 	}
 	for index, phase := range []string{"late_scan", "final_daily", newsContextBackfillPhaseIndexing, "final_review", "finalizing"} {
@@ -112,6 +111,27 @@ func TestNewsContextBackfillAgentProgressAggregatesModelAttempts(t *testing.T) {
 	ctx := context.Background()
 	started := time.Now().Add(-2 * time.Minute)
 	finished := started.Add(time.Minute)
+	windowEnd := time.Now().Truncate(time.Hour)
+	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		ID: "context-progress", WindowType: NewsContextWindowFourHour,
+		TriggerType: NewsContextTriggerBackfill, Status: NewsContextRunStatusCompleted,
+		Phase: "completed", WindowStart: windowEnd.Add(-4 * time.Hour), WindowEnd: windowEnd,
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+		StartedAt: started, FinishedAt: finished,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backfill, err := svc.store.CreateNewsContextBackfill(ctx, NewsContextBackfill{
+		Status: NewsContextBackfillStatusRunning, Phase: "four_hour",
+		RangeStartAt: run.WindowStart, CutoffAt: windowEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.LinkNewsContextBackfillRun(ctx, backfill.ID, run.ID); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := svc.store.CreateAgentRunWithLedger(ctx, AgentRun{
 		TaskType: AgentTaskTypeNewsEventReview, TriggerObjectType: "news_context_run",
 		TriggerObjectID: "context-progress", Status: AgentRunStatusFailed,
@@ -122,12 +142,13 @@ func TestNewsContextBackfillAgentProgressAggregatesModelAttempts(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	progress, err := svc.store.NewsContextBackfillAgentProgress(ctx, "context-progress")
+	progress, err := svc.store.NewsContextBackfillWindowProgress(ctx, backfill.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if progress.AttemptCount != 1 || progress.FailedCount != 1 ||
-		progress.DurationSeconds < 59 || progress.DurationSeconds > 61 {
-		t.Fatalf("agent progress=%+v", progress)
+	fourHour := progress[NewsContextWindowFourHour]
+	if fourHour.AgentAttemptCount != 1 || fourHour.AgentFailedCount != 1 ||
+		fourHour.ModelDurationSeconds < 59 || fourHour.ModelDurationSeconds > 61 {
+		t.Fatalf("agent progress=%+v", fourHour)
 	}
 }

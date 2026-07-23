@@ -43,8 +43,20 @@ type Service struct {
 	newsBackfillMu  sync.Mutex
 	newsBackfillRun bool
 	newsCleanupRun  bool
-	quotePruneMu    sync.Mutex
-	lastQuotePrune  time.Time
+	// ponytail: cleanup needs no second persisted scheduler cursor. One in-memory
+	// attempt timestamp prevents a blocked hourly check from becoming a five-second
+	// DuckDB scan and warning loop; restart deliberately permits an immediate check.
+	newsCleanupLastAttemptAt time.Time
+	// ponytail: one lifecycle context and wait group cover the three asynchronous
+	// news-context workers. This keeps shutdown from closing SQLite underneath an
+	// active aggregation or cleanup without adding a generic job framework.
+	newsContextWorkerMu      sync.Mutex
+	newsContextWorkerCtx     context.Context
+	newsContextWorkerCancel  context.CancelFunc
+	newsContextWorkerWg      sync.WaitGroup
+	newsContextWorkerClosing bool
+	quotePruneMu             sync.Mutex
+	lastQuotePrune           time.Time
 
 	universeSource  *UniverseDataSource
 	dailyBarsSource *DailyBarsSource
@@ -64,14 +76,17 @@ type Service struct {
 // NewService 创建新的股票V2服务
 func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Service {
 	pool := newAgentTaskPool(defaultCleanupInterval)
+	newsContextWorkerCtx, newsContextWorkerCancel := context.WithCancel(context.Background())
 	svc := &Service{
-		store:           store,
-		log:             log,
-		httpClient:      httpClient,
-		universeSource:  NewUniverseDataSource(nil, httpClient),
-		dailyBarsSource: NewDailyBarsSource(nil, httpClient),
-		newsAdapters:    map[string]NewsSourceAdapter{},
-		agentTaskPool:   pool,
+		store:                   store,
+		log:                     log,
+		httpClient:              httpClient,
+		newsContextWorkerCtx:    newsContextWorkerCtx,
+		newsContextWorkerCancel: newsContextWorkerCancel,
+		universeSource:          NewUniverseDataSource(nil, httpClient),
+		dailyBarsSource:         NewDailyBarsSource(nil, httpClient),
+		newsAdapters:            map[string]NewsSourceAdapter{},
+		agentTaskPool:           pool,
 		agentCodexCommand: func(ctx context.Context, args ...string) ([]byte, error) {
 			return exec.CommandContext(ctx, "codex", args...).CombinedOutput()
 		},
@@ -81,6 +96,50 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 	svc.newsAdapters[NewsSourceFinancialJuice] = financialJuiceNewsSourceAdapter{service: svc}
 	svc.markInterruptedRunningTasks(context.Background())
 	return svc
+}
+
+func (s *Service) launchNewsContextWorker(runID string, execute func(context.Context, string)) bool {
+	if s == nil || execute == nil {
+		return false
+	}
+	s.newsContextWorkerMu.Lock()
+	if s.newsContextWorkerClosing || s.newsContextWorkerCtx == nil {
+		s.newsContextWorkerMu.Unlock()
+		return false
+	}
+	ctx := s.newsContextWorkerCtx
+	s.newsContextWorkerWg.Add(1)
+	s.newsContextWorkerMu.Unlock()
+	go func() {
+		defer s.newsContextWorkerWg.Done()
+		execute(ctx, runID)
+	}()
+	return true
+}
+
+func (s *Service) newsContextWorkerShutdownCanceled(ctx context.Context) bool {
+	if ctx == nil || ctx.Err() == nil {
+		return false
+	}
+	s.newsContextWorkerMu.Lock()
+	closing := s.newsContextWorkerClosing
+	s.newsContextWorkerMu.Unlock()
+	return closing
+}
+
+func (s *Service) stopNewsContextWorkers() {
+	if s == nil {
+		return
+	}
+	s.newsContextWorkerMu.Lock()
+	if !s.newsContextWorkerClosing {
+		s.newsContextWorkerClosing = true
+		if s.newsContextWorkerCancel != nil {
+			s.newsContextWorkerCancel()
+		}
+	}
+	s.newsContextWorkerMu.Unlock()
+	s.newsContextWorkerWg.Wait()
 }
 
 func (s *Service) markInterruptedRunningTasks(ctx context.Context) {
@@ -98,7 +157,8 @@ func (s *Service) markInterruptedRunningTasks(ctx context.Context) {
 		{name: "monitor runs", fn: s.store.FailRunningMonitorRuns},
 		{name: "news source runs", fn: s.store.FailRunningNewsSourceStates},
 		{name: "portfolio sentinel runs", fn: s.store.FailRunningPortfolioSentinelRuns},
-		{name: "agent runs", fn: s.store.FailRunningAgentRuns},
+		{name: "stock profile update tasks", fn: s.store.FailRunningStockProfileUpdateTasks},
+		{name: "agent runs", fn: s.store.FailActiveAgentRuns},
 		{name: "news context runs", fn: s.store.FailRunningNewsContextRuns},
 		{name: "news context cleanup runs", fn: s.store.FailRunningNewsContextCleanupRuns},
 	}
@@ -1736,6 +1796,15 @@ func (s *Service) Close() error {
 		s.bgWg.Wait()
 	}
 	s.bgMu.Unlock()
+	s.stopNewsContextWorkers()
+	if s.store != nil {
+		if _, err := s.store.FailRunningNewsContextRuns(context.Background(), "interrupted by service shutdown before completion"); err != nil && s.log != nil {
+			s.log.Warn("recover news context runs during shutdown failed", "error", safelog.Text(err.Error(), 240))
+		}
+		if _, err := s.store.FailRunningNewsContextCleanupRuns(context.Background(), "interrupted by service shutdown before completion"); err != nil && s.log != nil {
+			s.log.Warn("close news context cleanup runs during shutdown failed", "error", safelog.Text(err.Error(), 240))
+		}
+	}
 	s.agentMCPMu.Lock()
 	mcpServer := s.agentMCPServer
 	s.agentMCPServer = nil

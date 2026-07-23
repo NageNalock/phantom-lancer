@@ -1751,6 +1751,7 @@ export interface StockV2NewsContextRun {
   kind?: "aggregation" | "cleanup" | string;
   windowType?: string;
   status?: string;
+  phase?: string;
   coverageStatus?: string;
   progress?: number;
   windowStart?: string;

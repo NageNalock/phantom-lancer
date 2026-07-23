@@ -51,7 +51,7 @@ func TestNewsContextBackfillRunProgressAggregatesCompletionCountsOnce(t *testing
 		events = append(events, event)
 	}
 	backfill, err := svc.store.CreateNewsContextBackfillWithManifest(ctx, NewsContextBackfill{
-		Status: NewsContextBackfillStatusRunning, Phase: "hourly", CutoffAt: cutoff,
+		Status: NewsContextBackfillStatusRunning, Phase: "four_hour", CutoffAt: cutoff,
 	})
 	if err != nil {
 		t.Fatalf("create backfill manifest: %v", err)
@@ -363,7 +363,7 @@ func TestNewsContextBackfillPrepareFailureDoesNotLeaveRunningChild(t *testing.T)
 	if err := svc.store.marketDB.Close(); err != nil {
 		t.Fatalf("close market db: %v", err)
 	}
-	if err := svc.startNewsContextBackfillWindow(ctx, backfill, NewsContextWindowHourly, start, cutoff); err == nil {
+	if err := svc.startNewsContextBackfillWindow(ctx, backfill, NewsContextWindowFourHour, start, cutoff); err == nil {
 		t.Fatal("start historical window unexpectedly succeeded")
 	}
 	stored, err := svc.store.GetNewsContextBackfill(ctx, backfill.ID)
@@ -385,7 +385,7 @@ func TestNewsContextBackfillPrepareFailureDoesNotLeaveRunningChild(t *testing.T)
 	}
 }
 
-func TestNewsContextBackfillFinalDailyIsReservedBeforeItCanYield(t *testing.T) {
+func TestNewsContextBackfillFinalDailyIsReservedBeforePreparation(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -416,115 +416,6 @@ func TestNewsContextBackfillFinalDailyIsReservedBeforeItCanYield(t *testing.T) {
 	if _, historical, err := svc.store.NewsContextBackfillForRun(ctx, run.ID); err != nil || historical {
 		t.Fatalf("final current daily must retain realtime review semantics: historical=%v err=%v", historical, err)
 	}
-	run.Status = NewsContextRunStatusRunning
-	run.CurrentAgentRunID = "completed-fragment"
-	if _, err := svc.store.UpdateNewsContextRun(ctx, run); err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.yieldNewsContextRunAfterFragment(ctx, run.ID); err != nil {
-		t.Fatalf("yield final daily fragment: %v", err)
-	}
-	yielded, err := svc.store.GetNewsContextRun(ctx, run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if yielded.Status != NewsContextRunStatusPending || yielded.Phase != "queued" || yielded.CurrentAgentRunID != "" {
-		t.Fatalf("yielded final daily=%+v", yielded)
-	}
-}
-
-func TestNewsContextBackfillFinalDailyReclaimsOnlyInactiveRealtimeClaims(t *testing.T) {
-	svc, cleanup := newStrategyTestService(t)
-	defer cleanup()
-	ctx := context.Background()
-	cutoff := time.Now().In(time.Local).Add(-time.Hour).Truncate(time.Minute)
-	failedOwner, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
-		WindowType: NewsContextWindowHourly, TriggerType: NewsContextTriggerScheduled,
-		Status: NewsContextRunStatusFailed, WindowStart: cutoff, WindowEnd: cutoff.Add(10 * time.Minute),
-		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	activeOwner, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
-		WindowType: NewsContextWindowHourly, TriggerType: NewsContextTriggerScheduled,
-		Status: NewsContextRunStatusPending, WindowStart: cutoff.Add(10 * time.Minute), WindowEnd: cutoff.Add(20 * time.Minute),
-		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	events := make([]NewsEvent, 0, 3)
-	for index, owner := range []string{failedOwner.ID, activeOwner.ID, "missing-realtime-owner"} {
-		event, err := svc.CreateNewsEvent(ctx, NewsEvent{
-			Source: "test", Title: fmt.Sprintf("遗留认领-%d", index),
-			EventAt: cutoff.Add(time.Duration(25+index) * time.Minute),
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := svc.store.marketDB.db.ExecContext(ctx, `UPDATE stockv2_news_events
-			SET context_status=?,context_run_id=? WHERE id=?`, NewsEventContextClaimed, owner, event.ID); err != nil {
-			t.Fatal(err)
-		}
-		events = append(events, event)
-	}
-	backfill, err := svc.store.CreateNewsContextBackfill(ctx, NewsContextBackfill{
-		Status: NewsContextBackfillStatusRunning, Phase: "final_review", CutoffAt: cutoff,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.startNewsContextBackfillFinalReview(ctx, backfill); !errors.Is(err, ErrNewsContextAlreadyRunning) {
-		t.Fatalf("active realtime owner error=%v", err)
-	}
-	backfill, err = svc.store.GetNewsContextBackfill(ctx, backfill.ID)
-	if err != nil || backfill.Status != NewsContextBackfillStatusRunning || backfill.CurrentRunID == "" {
-		t.Fatalf("backfill waiting for active owner=%+v err=%v", backfill, err)
-	}
-	finalRun, err := svc.store.GetNewsContextRun(ctx, backfill.CurrentRunID)
-	if err != nil || finalRun.Status != NewsContextRunStatusPending || finalRun.Phase != "collecting" {
-		t.Fatalf("final run while yielding=%+v err=%v", finalRun, err)
-	}
-	for index, event := range events {
-		var owner string
-		if err := svc.store.marketDB.db.QueryRowContext(ctx, `SELECT COALESCE(context_run_id,'')
-			FROM stockv2_news_events WHERE id=?`, event.ID).Scan(&owner); err != nil {
-			t.Fatal(err)
-		}
-		want := []string{failedOwner.ID, activeOwner.ID, "missing-realtime-owner"}[index]
-		if owner != want {
-			t.Fatalf("claim transferred before active owner yielded event=%s owner=%s want=%s", event.ID, owner, want)
-		}
-	}
-	activeOwner.Status = NewsContextRunStatusFailed
-	if _, err := svc.store.UpdateNewsContextRun(ctx, activeOwner); err != nil {
-		t.Fatal(err)
-	}
-	finalRun, err = svc.preparePendingNewsContextRun(ctx, finalRun)
-	if err != nil {
-		t.Fatalf("prepare final run after owners stopped: %v", err)
-	}
-	items, err := svc.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{
-		RunID: finalRun.ID, ObjectType: NewsContextRunItemNewsEvent, Limit: 10,
-	})
-	if err != nil || len(items) != len(events) {
-		t.Fatalf("final current manifest items=%+v err=%v", items, err)
-	}
-	for _, event := range events {
-		var status, owner string
-		if err := svc.store.marketDB.db.QueryRowContext(ctx, `SELECT COALESCE(context_status,'pending'),COALESCE(context_run_id,'')
-			FROM stockv2_news_events WHERE id=?`, event.ID).Scan(&status, &owner); err != nil {
-			t.Fatal(err)
-		}
-		if status != NewsEventContextClaimed || owner != finalRun.ID {
-			t.Fatalf("final current claim event=%s status=%s owner=%s", event.ID, status, owner)
-		}
-	}
-	if err := svc.store.ValidateNewsContextFinalReviewEventManifest(ctx, finalRun.ID,
-		[]string{events[0].ID, events[1].ID, events[2].ID}); err != nil {
-		t.Fatalf("verify final current event coverage: %v", err)
-	}
 }
 
 func TestNewsContextBackfillFinalDailyCompletionPersistsIndexingBeforeReview(t *testing.T) {
@@ -534,7 +425,7 @@ func TestNewsContextBackfillFinalDailyCompletionPersistsIndexingBeforeReview(t *
 	end := time.Now().In(time.Local).Truncate(time.Minute)
 	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
 		WindowType: NewsContextWindowDaily, TriggerType: NewsContextTriggerManual,
-		Status: NewsContextRunStatusRunning, Phase: newsContextRunPhaseConverging,
+		Status: NewsContextRunStatusRunning, Phase: newsContextRunPhaseMaterialize,
 		WindowStart: end.Add(-24 * time.Hour), WindowEnd: end,
 		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
 	})
@@ -759,9 +650,10 @@ func TestOrdinaryDailyCompletionStillCreatesImpactReviewImmediately(t *testing.T
 	end := time.Now().Truncate(time.Minute)
 	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
 		WindowType: NewsContextWindowDaily, TriggerType: NewsContextTriggerManual,
-		Status: NewsContextRunStatusRunning, Phase: newsContextRunPhaseConverging,
+		Status: NewsContextRunStatusRunning, Phase: newsContextRunPhaseMaterialize,
 		WindowStart: end.Add(-24 * time.Hour), WindowEnd: end,
 		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+		InputCount: 1, ProcessedCount: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -820,6 +712,127 @@ func TestNewsContextBackfillFinalizationDoesNotRescanAfterImpactReview(t *testin
 	svc.newsBackfillMu.Unlock()
 	if finalizerRunning {
 		t.Fatal("finalizer bypassed the occupied realtime execution slot")
+	}
+}
+
+func TestNewsContextBackfillLateScanRetriesFirstDeferralOnce(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	cutoff := time.Now().In(time.Local).Truncate(time.Hour)
+	windowStart := cutoff.Add(-time.Hour)
+	events := make([]NewsEvent, 0, 2)
+	for _, title := range []string{"首次延后后可判噪音", "二次仍需延后"} {
+		event, err := svc.CreateNewsEvent(ctx, NewsEvent{
+			Source: "test", Title: title, EventAt: cutoff.Add(-30 * time.Minute),
+		})
+		if err != nil {
+			t.Fatalf("create deferred news %q: %v", title, err)
+		}
+		events = append(events, event)
+	}
+	backfill, err := svc.store.CreateNewsContextBackfillWithManifest(ctx, NewsContextBackfill{
+		Status: NewsContextBackfillStatusRunning, Phase: "late_scan", CutoffAt: cutoff,
+	})
+	if err != nil {
+		t.Fatalf("create backfill: %v", err)
+	}
+	original, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowFourHour, TriggerType: NewsContextTriggerBackfill,
+		Status: NewsContextRunStatusCompleted, Phase: "completed",
+		WindowStart: windowStart, WindowEnd: cutoff,
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatalf("create original run: %v", err)
+	}
+	if err := svc.store.LinkNewsContextBackfillRun(ctx, backfill.ID, original.ID); err != nil {
+		t.Fatalf("link original run: %v", err)
+	}
+	claimed, err := svc.store.ClaimNewsContextBackfillEvents(ctx, backfill.ID, original.ID, windowStart, cutoff)
+	if err != nil || len(claimed) != len(events) {
+		t.Fatalf("claim original events=%v err=%v", claimed, err)
+	}
+	if err := svc.store.RequeueNewsContextRunEventItems(ctx, original.ID, claimed); err != nil {
+		t.Fatalf("seed original items: %v", err)
+	}
+	for _, event := range events {
+		if err := svc.store.CompleteNewsContextRunItem(ctx, original.ID, event.ID,
+			NewsEventContextDeferred, "", ""); err != nil {
+			t.Fatalf("complete first deferral %s: %v", event.ID, err)
+		}
+		if err := svc.store.MarkNewsEventContext(ctx, event.ID, NewsEventContextDeferred,
+			original.ID, "等待一次最终复核", time.Time{}); err != nil {
+			t.Fatalf("mark first deferral %s: %v", event.ID, err)
+		}
+	}
+	if err := svc.scanLateNewsContextBackfillEvents(ctx, backfill); err != nil {
+		t.Fatalf("requeue first deferrals: %v", err)
+	}
+	backfill, err = svc.store.GetNewsContextBackfill(ctx, backfill.ID)
+	if err != nil || backfill.Phase != "four_hour" {
+		t.Fatalf("backfill after first deferral scan=%+v err=%v", backfill, err)
+	}
+	if count, err := svc.store.CountNewsContextRunItems(ctx, NewsContextRunItemListFilter{
+		RunID: original.ID, ObjectType: NewsContextRunItemNewsEvent, Status: NewsContextRunItemDeferred,
+	}); err != nil || count != len(events) {
+		t.Fatalf("requeued original items=%d err=%v", count, err)
+	}
+
+	retry, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowFourHour, TriggerType: NewsContextTriggerBackfill,
+		Status: NewsContextRunStatusCompleted, Phase: "completed",
+		WindowStart: windowStart, WindowEnd: cutoff,
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatalf("create retry run: %v", err)
+	}
+	if err := svc.store.LinkNewsContextBackfillRun(ctx, backfill.ID, retry.ID); err != nil {
+		t.Fatalf("link retry run: %v", err)
+	}
+	claimed, err = svc.store.ClaimNewsContextBackfillEvents(ctx, backfill.ID, retry.ID, windowStart, cutoff)
+	if err != nil || len(claimed) != len(events) {
+		t.Fatalf("claim requeued events=%v err=%v", claimed, err)
+	}
+	if err := svc.store.RequeueNewsContextRunEventItems(ctx, retry.ID, claimed); err != nil {
+		t.Fatalf("seed retry items: %v", err)
+	}
+	if err := svc.store.CompleteNewsContextRunItem(ctx, retry.ID, events[0].ID,
+		NewsEventContextNoise, "", ""); err != nil {
+		t.Fatalf("complete retry as noise: %v", err)
+	}
+	if err := svc.store.MarkNewsEventContext(ctx, events[0].ID, NewsEventContextNoise,
+		retry.ID, "", time.Time{}); err != nil {
+		t.Fatalf("mark retry noise: %v", err)
+	}
+	if err := svc.store.CompleteNewsContextRunItem(ctx, retry.ID, events[1].ID,
+		NewsEventContextDeferred, "", ""); err != nil {
+		t.Fatalf("complete second deferral: %v", err)
+	}
+	if err := svc.store.MarkNewsEventContext(ctx, events[1].ID, NewsEventContextDeferred,
+		retry.ID, "仍缺少关键核验", time.Time{}); err != nil {
+		t.Fatalf("mark second deferral: %v", err)
+	}
+	if pending, err := svc.store.RequeueFirstNewsContextBackfillDeferrals(ctx, backfill.ID); err != nil || pending != 0 {
+		t.Fatalf("second deferral requeued pending=%d err=%v", pending, err)
+	}
+	processed, duplicate, err := svc.store.NewsContextBackfillRunProgress(ctx, backfill.ID)
+	if err != nil || processed != len(events) || duplicate != 0 {
+		t.Fatalf("retry coverage processed=%d duplicate=%d err=%v", processed, duplicate, err)
+	}
+	backfill.Phase = "late_scan"
+	backfill.CurrentRunID = ""
+	backfill, err = svc.store.UpdateNewsContextBackfill(ctx, backfill)
+	if err != nil {
+		t.Fatalf("restore late scan: %v", err)
+	}
+	if err := svc.scanLateNewsContextBackfillEvents(ctx, backfill); err != nil {
+		t.Fatalf("finish bounded deferral scan: %v", err)
+	}
+	backfill, err = svc.store.GetNewsContextBackfill(ctx, backfill.ID)
+	if err != nil || backfill.Phase != "final_review" {
+		t.Fatalf("backfill after bounded retry=%+v err=%v", backfill, err)
 	}
 }
 
@@ -1225,28 +1238,9 @@ func TestHistoricalThreadSnapshotDoesNotReadOrReplaceFutureCurrentVersion(t *tes
 	if err := svc.store.LinkNewsContextBackfillRun(ctx, backfill.ID, run.ID); err != nil {
 		t.Fatalf("link historical daily: %v", err)
 	}
-	if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
-		RunID: run.ID, ObjectType: NewsContextRunItemThread, ObjectID: thread.ID,
-		ThreadID: thread.ID, VersionID: oldVersion.ID, Status: NewsContextRunItemPending,
-	}}); err != nil {
-		t.Fatalf("add historical input: %v", err)
-	}
-	agentRunID := "historical-daily-agent"
-	if _, err := svc.store.MarkNewsContextRunItemsRunning(ctx, run.ID, agentRunID, []string{thread.ID}); err != nil {
-		t.Fatalf("mark historical input: %v", err)
-	}
-	pack, err := svc.buildNewsContextAggregationPack(ctx, run, []NewsContextRunItem{{
-		ObjectType: NewsContextRunItemThread, ObjectID: thread.ID, VersionID: oldVersion.ID,
-	}})
-	if err != nil || len(pack.InputThreads) != 1 || pack.InputThreads[0].Title != oldVersion.Title {
-		t.Fatalf("historical pack=%+v err=%v", pack.InputThreads, err)
-	}
-	_, err = svc.store.ApplyNewsContextBatch(ctx, run.ID, agentRunID, NewsContextWindowDaily, NewsContextReport{
-		SchemaVersion: NewsContextResultSchemaVersion, RunID: run.ID, WindowType: NewsContextWindowDaily,
-		UnchangedThreadIDs: []string{thread.ID},
-	})
-	if err != nil {
-		t.Fatalf("apply historical unchanged: %v", err)
+	materialized, err := svc.store.MaterializeNewsContextDailyVersions(ctx, run.ID, run.WindowEnd, []NewsThreadVersion{oldVersion})
+	if err != nil || len(materialized) != 1 {
+		t.Fatalf("materialize historical checkpoint=%+v err=%v", materialized, err)
 	}
 	versions, err := svc.store.ListNewsThreadVersions(ctx, NewsThreadVersionListFilter{RunID: run.ID, Limit: 10})
 	if err != nil || len(versions) != 1 || versions[0].Title != oldVersion.Title || versions[0].CoreThesis != oldVersion.CoreThesis {
@@ -1349,41 +1343,7 @@ func TestNewsContextBackfillPersistsEveryEmptyHierarchyWindow(t *testing.T) {
 	}
 }
 
-func TestFinalCurrentDailyUsesDirectActiveThemesForNonAlignedWindow(t *testing.T) {
-	svc, cleanup := newStrategyTestService(t)
-	defer cleanup()
-	ctx := context.Background()
-	thread, err := svc.store.CreateNewsThread(ctx, NewsThread{
-		Title: "当前主题", CoreThesis: "最终完整复核必须读取当前主题", Stage: NewsThreadStageEmerging,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	end := time.Now().Truncate(time.Minute).Add(37 * time.Second)
-	start := end.Add(-3*time.Hour - 17*time.Minute)
-	run, err := svc.startNewsContextRun(ctx, RequestStartNewsContextRun{
-		WindowType: NewsContextWindowDaily, StartAt: start.Format(time.RFC3339Nano),
-		EndAt: end.Format(time.RFC3339Nano), RequestedBy: "system",
-	}, NewsContextTriggerManual, false)
-	if err != nil {
-		t.Fatalf("start non-aligned final daily: %v", err)
-	}
-	items, err := svc.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{RunID: run.ID, Limit: 10})
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, item := range items {
-		if item.ObjectType == NewsContextRunItemThread && (item.ObjectID == thread.ID || item.ThreadID == thread.ID) {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("non-aligned final daily did not seed current active theme: %+v", items)
-	}
-}
-
-func TestHistoricalDailyFirstPassCarriesThemesWithoutChildWindowChanges(t *testing.T) {
+func TestHistoricalDailyMaterializesOnlyThemesChangedByFourHourChildren(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -1398,7 +1358,7 @@ func TestHistoricalDailyFirstPassCarriesThemesWithoutChildWindowChanges(t *testi
 	}
 	prior := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowDaily,
 		start.Add(-24*time.Hour), start, NewsContextTriggerBackfill, NewsContextRunStatusCompleted)
-	stable := createConvergenceTestVersion(t, svc, prior.ID, "stable-theme", "stable-before-day", 1, start)
+	createConvergenceTestVersion(t, svc, prior.ID, "stable-theme", "stable-before-day", 1, start)
 	child := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowFourHour,
 		start, start.Add(4*time.Hour), NewsContextTriggerBackfill, NewsContextRunStatusCompleted)
 	changed := createConvergenceTestVersion(t, svc, child.ID, "changed-theme", "changed-during-day", 1, child.WindowEnd)
@@ -1424,13 +1384,11 @@ func TestHistoricalDailyFirstPassCarriesThemesWithoutChildWindowChanges(t *testi
 	for _, item := range items {
 		states[item.ThreadID] = item
 	}
-	if len(items) != 2 ||
-		states[changed.ThreadID].Status != NewsContextRunItemPending ||
-		states[stable.ThreadID].Status != NewsContextRunItemCompleted ||
-		states[stable.ThreadID].Disposition != newsContextRunItemDispositionCarried {
-		t.Fatalf("daily first-pass states=%+v", states)
+	if len(items) != 1 || states[changed.ThreadID].Status != NewsContextRunItemCompleted ||
+		states[changed.ThreadID].Disposition != "materialized" {
+		t.Fatalf("daily materialized states=%+v", states)
 	}
-	if daily.InputCount != 2 || daily.ProcessedCount != 1 || daily.PendingCount != 1 {
+	if daily.InputCount != 1 || daily.ProcessedCount != 1 || daily.PendingCount != 0 {
 		t.Fatalf("daily counters=%+v", daily)
 	}
 }

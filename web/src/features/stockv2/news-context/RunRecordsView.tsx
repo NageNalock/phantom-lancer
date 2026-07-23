@@ -5,6 +5,7 @@ import type { StockV2NewsContextRun, StockV2NewsContextRunListResponse } from ".
 import { friendlyError } from "../../../api/client";
 import { Button, Drawer, EmptyState, Notice, Pill, useDangerConfirm } from "../../../components/ui";
 import {
+  backfillRunPhaseLabel,
   coverageStatusLabel,
   coverageStatusTone,
   formatNewsContextBytes,
@@ -36,7 +37,7 @@ export function RunRecordsView({
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState<RunStatusFilter>("all");
-  const [windowType, setWindowType] = useState("hourly");
+  const [windowType, setWindowType] = useState("four_hour");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -160,7 +161,7 @@ export function RunRecordsView({
             <h2 className="m-0 text-sm font-semibold">{kind === "aggregation" ? "归纳运行记录" : "新闻清理记录"}</h2>
             <p className="mt-1 mb-0 text-xs text-[var(--muted)]">
               {kind === "aggregation"
-                ? "观察每小时、每四小时和每日的覆盖、主题变化与公开资料核实。"
+                ? "观察小时检查点、四小时模型归纳、日级增量物化与公开资料核实。"
                 : "区分当前存量与历史处理量，追踪移除内容量、保护原因和失败阶段。"}
             </p>
           </div>
@@ -170,14 +171,14 @@ export function RunRecordsView({
                 <label>
                   <span className="sr-only">归纳周期</span>
                   <select aria-label="归纳周期" className="select h-9 text-xs" disabled={busy === "create"} onChange={(event) => setWindowType(event.target.value)} value={windowType}>
-                    <option value="hourly">每小时</option>
-                    <option value="four_hour">每四小时</option>
-                    <option value="daily">每日</option>
+                    <option value="hourly">小时检查点</option>
+                    <option value="four_hour">四小时模型归纳</option>
+                    <option value="daily">日级增量物化</option>
                   </select>
                 </label>
                 <Button disabled={busy === "create"} onClick={() => void createAggregationRun()} tone="primary">
                   <PlayCircle size={14} />
-                  {busy === "create" ? "触发中" : "立即归纳"}
+                  {busy === "create" ? "触发中" : "立即执行"}
                 </Button>
               </>
             ) : (
@@ -296,12 +297,21 @@ function RunRow({
         <div className="flex flex-wrap items-center gap-2">
           <strong className="text-sm">{kind === "aggregation" ? windowTypeLabel(run.windowType) : "安全清理"}</strong>
           <Pill tone={runStatusTone(run.status)}>{runStatusLabel(run.status)}</Pill>
+          {run.phase ? <Pill tone="neutral">{backfillRunPhaseLabel(run.phase)}</Pill> : null}
         </div>
         <div className="mt-1 text-xs text-[var(--muted)]">{formatNewsContextTime(run.startedAt || run.createdAt)}</div>
       </div>
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--muted-strong)]">
-          {kind === "aggregation" ? (
+          {kind === "aggregation" && run.windowType === "hourly" ? (
+            <span>确定性检查点，不调用模型</span>
+          ) : kind === "aggregation" && run.windowType === "daily" ? (
+            <>
+              <span>已物化主题 {run.processedNewsCount ?? 0}</span>
+              <span>待物化 {run.pendingThemeCount ?? 0}</span>
+              <span>实质变化沿用四小时结论</span>
+            </>
+          ) : kind === "aggregation" ? (
             coverage.empty ? (
               <span>空窗口，无需处理</span>
             ) : (
@@ -353,13 +363,22 @@ function RunDetailDrawer({ kind, run, onClose }: { kind: RunKind; run: StockV2Ne
     ["运行身份", run.id],
     ["运行类型", kind === "aggregation" ? windowTypeLabel(run.windowType) : "安全清理"],
     ["状态", runStatusLabel(run.status)],
+    ["执行阶段", backfillRunPhaseLabel(run.phase) || "-"],
     ["覆盖", coverageStatusLabel(run.coverageStatus)],
     ["时间范围", `${formatNewsContextTime(run.windowStart)} 至 ${formatNewsContextTime(run.windowEnd)}`],
     ["开始", formatNewsContextTime(run.startedAt || run.createdAt)],
     ["完成", formatNewsContextTime(run.finishedAt)],
   ];
   if (kind === "aggregation") {
-    if (coverage.empty) {
+    if (run.windowType === "hourly") {
+      rows.push(["处理方式", "确定性检查点，不调用模型"]);
+    } else if (run.windowType === "daily") {
+      rows.push(
+        ["处理方式", "只增量物化四小时窗口中发生变化的稳定主题"],
+        ["已物化主题", run.processedNewsCount ?? 0],
+        ["待物化主题", run.pendingThemeCount ?? 0],
+      );
+    } else if (coverage.empty) {
       rows.push(["总新闻", 0], ["处理结果", "空窗口，无需处理"]);
     } else {
       rows.push(

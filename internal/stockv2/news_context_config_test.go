@@ -199,6 +199,48 @@ func TestNewsContextConfigValidationIsAtomic(t *testing.T) {
 	if validNewsContextCleanupGrace(2 * 24 * 3600) {
 		t.Fatalf("unsupported cleanup grace accepted")
 	}
+	enabled := true
+	disabled := false
+	if _, err := svc.PatchNewsContextConfig(ctx, RequestUpdateNewsContextConfig{
+		Enabled: &enabled, FourHourEnabled: &disabled,
+	}); !errors.Is(err, ErrInvalidNewsContextInput) {
+		t.Fatalf("automatic aggregation without four-hour model boundary error=%v", err)
+	}
+}
+
+func TestNewsContextConfigMigratesEnabledLegacyModeToFourHourAggregation(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	sqlitePath := filepath.Join(dir, "stockv2.db")
+	marketPath := filepath.Join(dir, "stockv2-market.duckdb")
+	store, err := NewStoreWithMarketDB(sqlitePath, marketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := store.GetNewsContextConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Enabled = true
+	cfg.FourHourEnabled = false
+	if _, err := store.UpsertNewsContextConfig(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = NewStoreWithMarketDB(sqlitePath, marketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	migrated, err := store.GetNewsContextConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !migrated.Enabled || !migrated.FourHourEnabled {
+		t.Fatalf("migrated config=%+v", migrated)
+	}
 }
 
 func TestNewsContextConfigOnlyRequiresModelsWhenAutomaticAggregationIsEnabled(t *testing.T) {

@@ -785,15 +785,16 @@ func (s *Store) UpdateAgentRun(ctx context.Context, run AgentRun) (AgentRun, err
 	return run, nil
 }
 
-func (s *Store) FailRunningAgentRuns(ctx context.Context, reason string) (int64, error) {
+func (s *Store) FailActiveAgentRuns(ctx context.Context, reason string) (int64, error) {
 	now := time.Now()
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE stockv2_agent_runs
 		SET status=?, error_message=?, finished_at=?, updated_at=?
-		WHERE status=?
-	`, AgentRunStatusFailed, nullableString(reason), now, now, AgentRunStatusRunning)
+		WHERE status IN (?, ?)
+	`, AgentRunStatusFailed, nullableString(reason), now, now,
+		AgentRunStatusReady, AgentRunStatusRunning)
 	if err != nil {
-		return 0, wrapError(err, "fail interrupted agent runs")
+		return 0, wrapError(err, "fail interrupted active agent runs")
 	}
 	count, _ := result.RowsAffected()
 	return count, nil

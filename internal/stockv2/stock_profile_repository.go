@@ -273,6 +273,23 @@ func (s *Store) UpdateStockProfileUpdateTaskAIResultByAgentRunID(ctx context.Con
 	return nil
 }
 
+func (s *Store) FailRunningStockProfileUpdateTasks(ctx context.Context, reason string) (int64, error) {
+	now := time.Now()
+	reason = safelog.Text(reason, 500)
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_stock_profile_update_tasks
+		SET status = ?, ai_profile_status = ?, ai_profile_error = ?,
+			error_message = ?, finished_at = ?, updated_at = ?
+		WHERE status = ?
+	`, StockProfileUpdateStatusPartial, StockProfileAIStatusFailed,
+		nullableString(reason), nullableString(reason), now, now, StockProfileUpdateStatusRunning)
+	if err != nil {
+		return 0, wrapError(err, "fail running stock profile update tasks")
+	}
+	count, err := result.RowsAffected()
+	return count, wrapError(err, "count failed running stock profile update tasks")
+}
+
 func (s *Store) CountStockProfileUpdateTasks(ctx context.Context, filter StockProfileUpdateTaskListFilter) (int, error) {
 	where, args := stockProfileUpdateTaskWhere(filter)
 	var total int

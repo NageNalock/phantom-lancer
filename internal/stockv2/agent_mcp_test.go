@@ -339,7 +339,7 @@ func TestMCP_ServiceSubmitNewsContextResultRejectsIncompleteBatchWithoutConsumin
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
-	logicalRun := createDailyConvergenceTestRun(t, svc, time.Now())
+	logicalRun := createDailyMaterializationTestRun(t, svc, time.Now())
 	if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
 		RunID: logicalRun.ID, ObjectType: NewsContextRunItemThread,
 		ObjectID: "theme-coverage", ThreadID: "theme-coverage",

@@ -14,11 +14,13 @@ const (
 	newsScoreExactName      = 95
 	newsScoreAlias          = 85
 	newsScoreKeyword        = 55
-	newsScoreProfileKeyword = 40
 	newsBoostHolding        = 10
 	newsBoostActiveStrategy = 8
 	newsSemanticMinScore    = 0.45
-	newsProfileEnglishMin   = 4
+	// ponytail: a bounded association set prevents broad sector terms from
+	// multiplying one market-wide article into thousands of persisted rows.
+	// Raise this only if a measured downstream consumer needs deeper recall.
+	newsLinkCandidateLimit = 50
 )
 
 func (s *Service) CreateNewsEvent(ctx context.Context, event NewsEvent) (NewsEvent, error) {
@@ -46,7 +48,14 @@ func (s *Service) linkNewsEventWithSnapshot(ctx context.Context, event NewsEvent
 			candidates[i].ID = generateID()
 		}
 		if candidates[i].MonitorStatus == "" {
-			candidates[i].MonitorStatus = NewsLinkMonitorStatusPending
+			_, held := snapshot.heldSymbols[candidates[i].Symbol]
+			_, active := snapshot.strategySymbols[candidates[i].Symbol]
+			if held || active {
+				candidates[i].MonitorStatus = NewsLinkMonitorStatusPending
+			} else {
+				candidates[i].MonitorStatus = NewsLinkMonitorStatusSkipped
+				candidates[i].MonitoredAt = now
+			}
 		}
 		if candidates[i].CreatedAt.IsZero() {
 			candidates[i].CreatedAt = now
@@ -174,6 +183,9 @@ func (s *Service) buildNewsLinkCandidates(ctx context.Context, event NewsEvent, 
 		}
 		return items[i].Score > items[j].Score
 	})
+	if len(items) > newsLinkCandidateLimit {
+		items = items[:newsLinkCandidateLimit]
+	}
 	return items
 }
 
@@ -412,13 +424,6 @@ func prepareNewsProfile(profile StockProfile) preparedNewsProfile {
 		add(NewsLinkMatchKeyword, newsScoreKeyword, term, "命中画像关键词 ")
 	}
 
-	// ponytail: 先复用 profile_text 的空格分词做高召回兜底;后续接 embedding/分词器时替换这里。
-	for _, term := range strings.Fields(profile.ProfileText) {
-		if !usefulNewsProfileTextTerm(term) || sameNewsTerm(term, profile.Symbol) || sameNewsTerm(term, profile.Name) {
-			continue
-		}
-		add(NewsLinkMatchProfileKeyword, newsScoreProfileKeyword, term, "命中画像文本 ")
-	}
 	return out
 }
 
@@ -456,17 +461,6 @@ func usefulNewsTerm(term string) bool {
 	return true
 }
 
-func usefulNewsProfileTextTerm(term string) bool {
-	term = strings.TrimSpace(term)
-	if !usefulNewsTerm(term) {
-		return false
-	}
-	if isASCIIAlpha(term) && len(term) < newsProfileEnglishMin {
-		return false
-	}
-	return true
-}
-
 func isNewsGenericTerm(term string) bool {
 	switch strings.ToLower(strings.TrimSpace(term)) {
 	case "", "sh", "sz", "bj", "etf", "lof", "股票", "股票标的", "基金", "场内基金", "市场",
@@ -477,18 +471,6 @@ func isNewsGenericTerm(term string) bool {
 	default:
 		return false
 	}
-}
-
-func isASCIIAlpha(term string) bool {
-	if term == "" {
-		return false
-	}
-	for _, r := range term {
-		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') {
-			return false
-		}
-	}
-	return true
 }
 
 func sameNewsTerm(a, b string) bool {

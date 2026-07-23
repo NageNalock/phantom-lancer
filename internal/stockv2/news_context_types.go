@@ -467,7 +467,7 @@ type NewsContextAggregationPack struct {
 	WindowType               string                    `json:"windowType"`
 	WindowStart              time.Time                 `json:"windowStart"`
 	WindowEnd                time.Time                 `json:"windowEnd"`
-	DailyConvergenceReview   bool                      `json:"dailyConvergenceReview,omitempty"`
+	HistoricalReconstruction bool                      `json:"historicalReconstruction,omitempty"`
 	InputNewsEvents          []NewsEvent               `json:"inputNewsEvents,omitempty"`
 	InputThreads             []NewsContextPromptThread `json:"inputThreads,omitempty"`
 	RequiredResearch         bool                      `json:"requiredResearch"`
@@ -605,29 +605,6 @@ func validNewsThreadStage(value string) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-func newsContextReportResearchGate(report NewsContextReport) (string, string) {
-	status := NewsContextResearchNotRequired
-	for _, audit := range report.SearchAudit {
-		status = newsContextWorseResearchStatus(status, audit.Status)
-		if len(audit.Unresolved) > 0 {
-			status = newsContextWorseResearchStatus(status, NewsContextResearchUnresolved)
-		}
-	}
-	for _, change := range report.ThreadChanges {
-		status = newsContextWorseResearchStatus(status, change.ResearchStatus)
-	}
-	switch status {
-	case NewsContextResearchFailed:
-		return status, "公开搜索失败，保留原文等待重试"
-	case NewsContextResearchUnavailable:
-		return status, "公开搜索不可用，保留原文等待核实"
-	case NewsContextResearchUnresolved:
-		return status, "公开搜索仍有未解决问题，保留原文"
-	default:
-		return status, ""
 	}
 }
 

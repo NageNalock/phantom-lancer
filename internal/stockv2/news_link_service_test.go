@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -142,7 +143,7 @@ func TestLinkNewsEventIgnoresGenericEnglishProfileTextTerms(t *testing.T) {
 	}
 }
 
-func TestLinkNewsEventKeepsSpecificEnglishProfileTextTerm(t *testing.T) {
+func TestLinkNewsEventDoesNotUseUnboundedProfileTextTerms(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStockProfileTestService(t)
 	defer cleanup()
@@ -161,8 +162,49 @@ func TestLinkNewsEventKeepsSpecificEnglishProfileTextTerm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("link news event: %v", err)
 	}
-	if len(candidates) != 1 || candidates[0].MatchMethod != NewsLinkMatchProfileKeyword || !newsTestContains(candidates[0].MatchedTerms, "semiconductor") {
-		t.Fatalf("candidates = %+v, want specific English profile keyword", candidates)
+	if len(candidates) != 0 {
+		t.Fatalf("candidates = %+v, want profile text excluded from lexical matching", candidates)
+	}
+}
+
+func TestLinkNewsEventBoundsCandidatesAndQueuesOnlyRelevantSymbols(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	snapshot := newsLinkMatchSnapshot{
+		profileBySymbol: map[string]StockProfile{},
+		heldSymbols:     map[string]struct{}{"600059": {}},
+		strategySymbols: map[string]struct{}{},
+	}
+	for index := 0; index < 60; index++ {
+		symbol := fmt.Sprintf("600%03d", index)
+		profile := StockProfile{Symbol: symbol, Market: "SH", Name: "测试标的" + symbol, Concepts: []string{"人工智能"}}
+		snapshot.profiles = append(snapshot.profiles, prepareNewsProfile(profile))
+		snapshot.profileBySymbol[symbol] = profile
+	}
+	event := createNewsLinkEvent(t, svc, NewsEvent{Source: "test", Title: "人工智能产业政策更新"})
+	candidates, err := svc.linkNewsEventWithSnapshot(ctx, event, snapshot)
+	if err != nil {
+		t.Fatalf("link news event: %v", err)
+	}
+	if len(candidates) != newsLinkCandidateLimit {
+		t.Fatalf("candidate count = %d, want %d", len(candidates), newsLinkCandidateLimit)
+	}
+	foundHeld := false
+	for _, candidate := range candidates {
+		if candidate.Symbol == "600059" {
+			foundHeld = true
+			if candidate.MonitorStatus != NewsLinkMonitorStatusPending {
+				t.Fatalf("held candidate status = %q, want pending", candidate.MonitorStatus)
+			}
+			continue
+		}
+		if candidate.MonitorStatus != NewsLinkMonitorStatusSkipped || candidate.MonitoredAt.IsZero() {
+			t.Fatalf("unrelated candidate = %+v, want monitored skipped", candidate)
+		}
+	}
+	if !foundHeld {
+		t.Fatal("bounded candidates omitted boosted holding")
 	}
 }
 
@@ -178,7 +220,7 @@ func TestListPendingNewsLinkCandidatesPrioritizesHighConfidence(t *testing.T) {
 			Market:         "SH",
 			InstrumentName: "低分噪音",
 			MatchMethod:    NewsLinkMatchProfileKeyword,
-			Score:          newsScoreProfileKeyword,
+			Score:          40,
 			Reason:         "低分画像文本",
 			MatchedTerms:   []string{"market"},
 		},
