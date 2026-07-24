@@ -19,6 +19,7 @@ import { NewsContextBackfillPanel } from "./NewsContextBackfillPanel";
 
 type RunKind = "aggregation" | "cleanup";
 type RunStatusFilter = "all" | "pending" | "running" | "waiting_review" | "partial" | "completed" | "failed";
+type WindowTypeFilter = "all" | "hourly" | "four_hour" | "daily";
 
 const PAGE_SIZE = 20;
 
@@ -35,9 +36,12 @@ export function RunRecordsView({
 }) {
   const [items, setItems] = useState<StockV2NewsContextRun[]>([]);
   const [total, setTotal] = useState(0);
+  const [failedItems, setFailedItems] = useState<StockV2NewsContextRun[]>([]);
+  const [failedTotal, setFailedTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState<RunStatusFilter>("all");
-  const [windowType, setWindowType] = useState("four_hour");
+  const [windowType, setWindowType] = useState<WindowTypeFilter>("all");
+  const [triggerWindowType, setTriggerWindowType] = useState("four_hour");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,7 +50,10 @@ export function RunRecordsView({
   const { confirmDanger, dangerConfirmDialog } = useDangerConfirm();
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const hasRunning = items.some((item) => item.status === "running" || item.status === "pending" || item.status === "queued" || item.status === "waiting_review");
+  const hasRunning = [...items, ...failedItems].some((item) =>
+    item.status === "running" || item.status === "pending" || item.status === "queued" ||
+    (item.status === "waiting_review" && item.reviewStatus !== "failed") || Boolean(item.nextRetryAt),
+  );
 
   async function load(showLoading = false) {
     if (showLoading && items.length === 0) setLoading(true);
@@ -59,11 +66,17 @@ export function RunRecordsView({
         offset: String((page - 1) * PAGE_SIZE),
       });
       if (status !== "all") params.set("status", status);
-      const result = await actions.api<StockV2NewsContextRunListResponse>(
-        `/api/stockv2/news-context/runs?${params.toString()}`,
-      );
+      if (kind === "aggregation" && windowType !== "all") params.set("windowType", windowType);
+      const [result, failures] = await Promise.all([
+        actions.api<StockV2NewsContextRunListResponse>(`/api/stockv2/news-context/runs?${params.toString()}`),
+        kind === "aggregation"
+          ? actions.api<StockV2NewsContextRunListResponse>("/api/stockv2/news-context/runs?kind=aggregation&status=failed&limit=5&offset=0")
+          : Promise.resolve<StockV2NewsContextRunListResponse>({ items: [], total: 0 }),
+      ]);
       setItems(result.items || []);
       setTotal(result.total ?? result.items?.length ?? 0);
+      setFailedItems(failures?.items || []);
+      setFailedTotal(failures?.total ?? failures?.items?.length ?? 0);
     } catch (loadError) {
       setError(friendlyError(loadError));
     } finally {
@@ -75,7 +88,7 @@ export function RunRecordsView({
   useEffect(() => {
     void load(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kind, page, status, refreshKey]);
+  }, [kind, page, status, windowType, refreshKey]);
 
   useEffect(() => {
     if ((kind === "aggregation" && status === "partial") || (kind === "cleanup" && status === "waiting_review")) setStatus("all");
@@ -86,7 +99,7 @@ export function RunRecordsView({
     const timer = window.setInterval(() => void load(), 5000);
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasRunning, kind, page, status]);
+  }, [hasRunning, kind, page, status, windowType]);
 
   async function createAggregationRun() {
     setBusy("create");
@@ -94,9 +107,9 @@ export function RunRecordsView({
       await actions.api<StockV2NewsContextRun>("/api/stockv2/news-context/runs", {
         method: "POST",
         csrf: actions.csrf,
-        body: { windowType },
+        body: { windowType: triggerWindowType },
       });
-      actions.setToast(`已触发${windowTypeLabel(windowType)}归纳`, "good");
+      actions.setToast(`已触发${windowTypeLabel(triggerWindowType)}归纳`, "good");
       if (page !== 1) setPage(1);
       else await load();
       onChanged();
@@ -169,8 +182,8 @@ export function RunRecordsView({
             {kind === "aggregation" ? (
               <>
                 <label>
-                  <span className="sr-only">归纳周期</span>
-                  <select aria-label="归纳周期" className="select h-9 text-xs" disabled={busy === "create"} onChange={(event) => setWindowType(event.target.value)} value={windowType}>
+                  <span className="sr-only">立即执行周期</span>
+                  <select aria-label="立即执行周期" className="select h-9 text-xs" disabled={busy === "create"} onChange={(event) => setTriggerWindowType(event.target.value)} value={triggerWindowType}>
                     <option value="hourly">小时检查点</option>
                     <option value="four_hour">四小时模型归纳</option>
                     <option value="daily">日级增量物化</option>
@@ -201,19 +214,42 @@ export function RunRecordsView({
             <span className={failedCount ? "text-[var(--danger)]" : ""}>当前页异常 {failedCount}</span>
             {hasRunning ? <Pill tone="warn">自动刷新中</Pill> : null}
           </div>
-          <label className="flex items-center gap-2">
-            <span className="text-[var(--muted)]">状态</span>
-            <select className="select h-8 text-xs" onChange={(event) => { setStatus(event.target.value as RunStatusFilter); setPage(1); }} value={status}>
-              <option value="all">全部</option>
-              <option value="pending">等待执行</option>
-              <option value="running">执行中</option>
-              {kind === "aggregation" ? <option value="waiting_review">等待复核</option> : null}
-              {kind === "cleanup" ? <option value="partial">部分完成</option> : null}
-              <option value="completed">已完成</option>
-              <option value="failed">失败</option>
-            </select>
-          </label>
+          <div className="flex flex-wrap items-center gap-3">
+            {kind === "aggregation" ? (
+              <label className="flex items-center gap-2">
+                <span className="text-[var(--muted)]">周期</span>
+                <select className="select h-8 text-xs" onChange={(event) => { setWindowType(event.target.value as WindowTypeFilter); setPage(1); }} value={windowType}>
+                  <option value="all">全部</option>
+                  <option value="hourly">小时检查点</option>
+                  <option value="four_hour">四小时模型归纳</option>
+                  <option value="daily">日级增量物化</option>
+                </select>
+              </label>
+            ) : null}
+            <label className="flex items-center gap-2">
+              <span className="text-[var(--muted)]">状态</span>
+              <select className="select h-8 text-xs" onChange={(event) => { setStatus(event.target.value as RunStatusFilter); setPage(1); }} value={status}>
+                <option value="all">全部</option>
+                <option value="pending">等待执行</option>
+                <option value="running">执行中</option>
+                {kind === "aggregation" ? <option value="waiting_review">等待复核</option> : null}
+                {kind === "cleanup" ? <option value="partial">部分完成</option> : null}
+                <option value="completed">已完成</option>
+                <option value="failed">失败</option>
+              </select>
+            </label>
+          </div>
         </div>
+
+        {kind === "aggregation" && failedItems.length ? (
+          <LatestFailureNotice
+            busy={busy === failedItems[0].id}
+            failedCount={failedTotal}
+            onOpen={() => setSelected(failedItems[0])}
+            onRetry={() => void retry(failedItems[0])}
+            run={failedItems[0]}
+          />
+        ) : null}
 
         {error ? (
           <div className="p-4">
@@ -291,12 +327,13 @@ function RunRow({
   run: StockV2NewsContextRun;
 }) {
   const coverage = newsContextRunCoverage(run);
+  const status = run.reviewStatus === "failed" ? "failed" : run.status;
   return (
     <article className="grid grid-cols-[180px_minmax(0,1fr)_auto] items-center gap-4 p-4 max-lg:grid-cols-1">
       <div>
         <div className="flex flex-wrap items-center gap-2">
           <strong className="text-sm">{kind === "aggregation" ? windowTypeLabel(run.windowType) : "安全清理"}</strong>
-          <Pill tone={runStatusTone(run.status)}>{runStatusLabel(run.status)}</Pill>
+          <Pill tone={runStatusTone(status)}>{runStatusLabel(status)}</Pill>
           {run.phase ? <Pill tone="neutral">{backfillRunPhaseLabel(run.phase)}</Pill> : null}
         </div>
         <div className="mt-1 text-xs text-[var(--muted)]">{formatNewsContextTime(run.startedAt || run.createdAt)}</div>
@@ -343,6 +380,9 @@ function RunRow({
             {coverage.empty ? "无需处理" : coverageStatusLabel(run.coverageStatus)}
           </Pill>
           {run.failedStage ? <span className="text-xs text-[var(--danger)]">失败阶段：{run.failedStage}</span> : null}
+          {run.nextRetryAt ? <span className="text-xs text-[var(--warn)]">下次自动重试：{formatNewsContextTime(run.nextRetryAt)}</span> : null}
+          {run.autoRetryExhausted ? <span className="text-xs text-[var(--danger)]">不会再自动重试</span> : null}
+          {(run.retryCount ?? 0) > 0 ? <span className="font-mono text-xs text-[var(--muted)]">重试 {run.retryCount} / {run.retryLimit ?? 2}</span> : null}
           {run.errorMessage ? <span className="max-w-xl truncate text-xs text-[var(--danger)]">{run.errorMessage}</span> : null}
         </div>
       </div>
@@ -359,16 +399,20 @@ function RunRow({
 function RunDetailDrawer({ kind, run, onClose }: { kind: RunKind; run: StockV2NewsContextRun; onClose: () => void }) {
   // ponytail: 列表接口已经返回完整观测字段，详情直接复用当前记录，避免再造一个只读详情请求。
   const coverage = newsContextRunCoverage(run);
+  const status = run.reviewStatus === "failed" ? "failed" : run.status;
   const rows: Array<[string, string | number]> = [
     ["运行身份", run.id],
     ["运行类型", kind === "aggregation" ? windowTypeLabel(run.windowType) : "安全清理"],
-    ["状态", runStatusLabel(run.status)],
+    ["状态", runStatusLabel(status)],
     ["执行阶段", backfillRunPhaseLabel(run.phase) || "-"],
     ["覆盖", coverageStatusLabel(run.coverageStatus)],
     ["时间范围", `${formatNewsContextTime(run.windowStart)} 至 ${formatNewsContextTime(run.windowEnd)}`],
     ["开始", formatNewsContextTime(run.startedAt || run.createdAt)],
     ["完成", formatNewsContextTime(run.finishedAt)],
+    ["自动重试", `${run.retryCount ?? 0} / ${run.retryLimit ?? 2}`],
   ];
+  if (run.nextRetryAt) rows.push(["下次自动重试", formatNewsContextTime(run.nextRetryAt)]);
+  if (run.autoRetryExhausted) rows.push(["自动重试状态", "已停止，保留手动重试入口"]);
   if (kind === "aggregation") {
     if (run.windowType === "hourly") {
       rows.push(["处理方式", "确定性检查点，不调用模型"]);
@@ -422,5 +466,43 @@ function RunDetailDrawer({ kind, run, onClose }: { kind: RunKind; run: StockV2Ne
         {run.failedStage ? <Notice tone="warn"><strong>可恢复阶段：</strong>{run.failedStage}</Notice> : null}
       </div>
     </Drawer>
+  );
+}
+
+function LatestFailureNotice({
+  busy,
+  failedCount,
+  onOpen,
+  onRetry,
+  run,
+}: {
+  busy: boolean;
+  failedCount: number;
+  onOpen: () => void;
+  onRetry: () => void;
+  run: StockV2NewsContextRun;
+}) {
+  const waitingForRetry = Boolean(run.nextRetryAt) && !run.autoRetryExhausted;
+  return (
+    <div aria-live="polite" className="border-b border-[var(--line)] p-4" role="status">
+      <Notice tone={waitingForRetry ? "warn" : "danger"}>
+        <span className="flex flex-wrap items-center justify-between gap-3">
+          <span className="min-w-0">
+            <strong>{windowTypeLabel(run.windowType)}{waitingForRetry ? "失败，等待自动重试" : "最终失败"}</strong>
+            <span className="mt-1 block text-xs">
+              {formatNewsContextTime(run.windowStart)} 至 {formatNewsContextTime(run.windowEnd)}
+              {`，已自动重试 ${run.retryCount ?? 0} / ${run.retryLimit ?? 2} 次`}
+              {run.nextRetryAt ? `，下次 ${formatNewsContextTime(run.nextRetryAt)}` : ""}
+              {failedCount > 1 ? `，另有 ${failedCount - 1} 条失败记录` : ""}
+            </span>
+            {run.errorMessage ? <span className="mt-1 block max-w-4xl break-words text-xs">{run.errorMessage}</span> : null}
+          </span>
+          <span className="flex shrink-0 gap-2">
+            <Button onClick={onOpen}>查看详情</Button>
+            <Button disabled={busy} onClick={onRetry}>{busy ? "重试中" : "立即重试"}</Button>
+          </span>
+        </span>
+      </Notice>
+    </div>
   );
 }

@@ -59,6 +59,8 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 			conflict_count INTEGER NOT NULL DEFAULT 0,
 			research_count INTEGER NOT NULL DEFAULT 0,
 			pending_count INTEGER NOT NULL DEFAULT 0,
+			retry_count INTEGER NOT NULL DEFAULT 0,
+			next_retry_at DATETIME,
 			error_message TEXT,
 			requested_by TEXT,
 			started_at DATETIME,
@@ -119,6 +121,12 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 	}
 	if err := s.ensureNewsContextConfigColumns(ctx); err != nil {
 		return err
+	}
+	if err := s.ensureColumn(ctx, "stockv2_news_context_runs", "retry_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return wrapError(err, "add news context retry count column")
+	}
+	if err := s.ensureColumn(ctx, "stockv2_news_context_runs", "next_retry_at", "DATETIME"); err != nil {
+		return wrapError(err, "add news context next retry column")
 	}
 	if err := s.ensureColumn(ctx, "stockv2_news_context_run_items", "source_at", "DATETIME"); err != nil {
 		return err
@@ -479,22 +487,25 @@ const newsContextRunSelectSQL = `
 	       COALESCE(review_run_id,''), cleanup_status, COALESCE(cleanup_run_id,''),
 	       input_count, processed_count, covered_count, noise_count, deferred_count,
 	       created_thread_count, updated_thread_count, material_change_count,
-	       conflict_count, research_count, pending_count, COALESCE(error_message,''),
+	       conflict_count, research_count, pending_count, retry_count, next_retry_at,
+	       COALESCE(error_message,''),
 	       COALESCE(requested_by,''), started_at, finished_at, created_at, updated_at
 	FROM stockv2_news_context_runs`
 
 func scanNewsContextRun(row rowScanner) (NewsContextRun, error) {
 	var item NewsContextRun
-	var startedAt, finishedAt sql.NullTime
+	var nextRetryAt, startedAt, finishedAt sql.NullTime
 	err := row.Scan(
 		&item.ID, &item.WindowType, &item.TriggerType, &item.Status, &item.Phase,
 		&item.WindowStart, &item.WindowEnd, &item.CurrentAgentRunID, &item.ReviewStatus,
 		&item.ReviewRunID, &item.CleanupStatus, &item.CleanupRunID, &item.InputCount,
 		&item.ProcessedCount, &item.CoveredCount, &item.NoiseCount, &item.DeferredCount,
 		&item.CreatedThreadCount, &item.UpdatedThreadCount, &item.MaterialChangeCount,
-		&item.ConflictCount, &item.ResearchCount, &item.PendingCount, &item.ErrorMessage,
+		&item.ConflictCount, &item.ResearchCount, &item.PendingCount, &item.RetryCount,
+		&nextRetryAt, &item.ErrorMessage,
 		&item.RequestedBy, &startedAt, &finishedAt, &item.CreatedAt, &item.UpdatedAt,
 	)
+	assignNullTime(&item.NextRetryAt, nextRetryAt)
 	assignNullTime(&item.StartedAt, startedAt)
 	assignNullTime(&item.FinishedAt, finishedAt)
 	return item, err
@@ -536,8 +547,9 @@ func (s *Store) CreateNewsContextRun(ctx context.Context, item NewsContextRun) (
 			cleanup_run_id, input_count, processed_count, covered_count, noise_count,
 			deferred_count, created_thread_count, updated_thread_count,
 			material_change_count, conflict_count, research_count, pending_count,
+			retry_count, next_retry_at,
 			error_message, requested_by, started_at, finished_at, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(window_type, window_start, window_end) DO NOTHING
 	`, newsContextRunArgs(item)...)
 	if err != nil {
@@ -553,7 +565,8 @@ func newsContextRunArgs(item NewsContextRun) []any {
 		nullableString(item.ReviewRunID), item.CleanupStatus, nullableString(item.CleanupRunID),
 		item.InputCount, item.ProcessedCount, item.CoveredCount, item.NoiseCount, item.DeferredCount,
 		item.CreatedThreadCount, item.UpdatedThreadCount, item.MaterialChangeCount,
-		item.ConflictCount, item.ResearchCount, item.PendingCount, nullableString(item.ErrorMessage),
+		item.ConflictCount, item.ResearchCount, item.PendingCount, item.RetryCount,
+		nullableTime(item.NextRetryAt), nullableString(item.ErrorMessage),
 		nullableString(item.RequestedBy), nullableTime(item.StartedAt), nullableTime(item.FinishedAt),
 		item.CreatedAt, item.UpdatedAt,
 	}
@@ -656,7 +669,8 @@ func (s *Store) UpdateNewsContextRun(ctx context.Context, item NewsContextRun) (
 			review_run_id=?, cleanup_status=?, cleanup_run_id=?, input_count=?,
 			processed_count=?, covered_count=?, noise_count=?, deferred_count=?,
 			created_thread_count=?, updated_thread_count=?, material_change_count=?,
-			conflict_count=?, research_count=?, pending_count=?, error_message=?,
+			conflict_count=?, research_count=?, pending_count=?, retry_count=?,
+			next_retry_at=?, error_message=?,
 			requested_by=?, started_at=?, finished_at=?, updated_at=?
 		WHERE id=?
 	`, item.TriggerType, item.Status, nullableString(item.Phase), nullableString(item.CurrentAgentRunID),
@@ -664,7 +678,8 @@ func (s *Store) UpdateNewsContextRun(ctx context.Context, item NewsContextRun) (
 		nullableString(item.CleanupRunID), item.InputCount, item.ProcessedCount,
 		item.CoveredCount, item.NoiseCount, item.DeferredCount, item.CreatedThreadCount,
 		item.UpdatedThreadCount, item.MaterialChangeCount, item.ConflictCount,
-		item.ResearchCount, item.PendingCount, nullableString(item.ErrorMessage),
+		item.ResearchCount, item.PendingCount, item.RetryCount, nullableTime(item.NextRetryAt),
+		nullableString(item.ErrorMessage),
 		nullableString(item.RequestedBy), nullableTime(item.StartedAt), nullableTime(item.FinishedAt),
 		item.UpdatedAt, item.ID)
 	if err != nil {
@@ -739,7 +754,12 @@ func newsContextRunWhere(filter NewsContextRunListFilter) (string, []any) {
 	}
 	add("window_type", filter.WindowType)
 	add("trigger_type", filter.TriggerType)
-	add("status", filter.Status)
+	if strings.TrimSpace(filter.Status) == NewsContextRunStatusFailed {
+		parts = append(parts, "(status = ? OR review_status = ?)")
+		args = append(args, NewsContextRunStatusFailed, NewsContextReviewFailed)
+	} else {
+		add("status", filter.Status)
+	}
 	add("review_status", filter.ReviewStatus)
 	if !filter.Since.IsZero() {
 		parts = append(parts, "window_start >= ?")

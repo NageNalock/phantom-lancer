@@ -725,6 +725,96 @@ func TestScheduledFourHourRunSweepsRecentPendingAndRetriesDeferralOnce(t *testin
 	}
 }
 
+func TestStartDueNewsContextRunAutomaticallyRetriesFourHourAndDaily(t *testing.T) {
+	for _, windowType := range []string{NewsContextWindowFourHour, NewsContextWindowDaily} {
+		t.Run(windowType, func(t *testing.T) {
+			svc, cleanup := newStrategyTestService(t)
+			defer cleanup()
+			ctx := context.Background()
+			end := newsContextBoundaryAtOrBefore(windowType, time.Now())
+			start := previousNewsContextBoundary(windowType, end)
+			cfg := defaultNewsContextConfig()
+			cfg.Enabled = true
+			cfg.HourlyEnabled = false
+			cfg.FourHourEnabled = true
+			cfg.DailyEnabled = windowType == NewsContextWindowDaily
+			setNewsContextNextAt(&cfg, windowType, end)
+			if windowType == NewsContextWindowDaily {
+				cfg.NextFourHourAt = nextNewsContextBoundary(
+					NewsContextWindowFourHour,
+					newsContextBoundaryAtOrBefore(NewsContextWindowFourHour, time.Now()),
+				)
+				for childStart := start; childStart.Before(end); childStart = nextNewsContextBoundary(NewsContextWindowFourHour, childStart) {
+					createCompletedNewsContextTestWindow(t, svc, NewsContextWindowFourHour,
+						childStart, nextNewsContextBoundary(NewsContextWindowFourHour, childStart),
+						NewsContextTriggerScheduled, NewsContextRunStatusCompleted)
+				}
+			}
+			if _, err := svc.store.UpsertNewsContextConfig(ctx, cfg); err != nil {
+				t.Fatalf("save config: %v", err)
+			}
+			run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+				WindowType: windowType, TriggerType: NewsContextTriggerScheduled,
+				Status: NewsContextRunStatusFailed, Phase: "failed",
+				WindowStart: start, WindowEnd: end,
+				ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+				ErrorMessage: "API model stopped without submitting a result",
+				NextRetryAt:  time.Now().Add(-time.Second),
+			})
+			if err != nil {
+				t.Fatalf("create failed run: %v", err)
+			}
+			if err := svc.startDueNewsContextRun(ctx, time.Now()); err != nil {
+				t.Fatalf("start automatic retry: %v", err)
+			}
+			waitForNewsContextRunTerminal(t, svc, run.ID)
+			reloaded, err := svc.store.GetNewsContextRun(ctx, run.ID)
+			if err != nil || reloaded.Status != NewsContextRunStatusCompleted || reloaded.RetryCount != 1 ||
+				!reloaded.NextRetryAt.IsZero() {
+				t.Fatalf("automatic retry result = %+v, err=%v", reloaded, err)
+			}
+		})
+	}
+}
+
+func TestNewsContextAutomaticRetryStopsAfterLimit(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	end := newsContextBoundaryAtOrBefore(NewsContextWindowFourHour, time.Now())
+	start := previousNewsContextBoundary(NewsContextWindowFourHour, end)
+	cfg := defaultNewsContextConfig()
+	cfg.Enabled = true
+	cfg.HourlyEnabled = false
+	cfg.DailyEnabled = false
+	cfg.NextFourHourAt = end
+	if _, err := svc.store.UpsertNewsContextConfig(ctx, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowFourHour, TriggerType: NewsContextTriggerScheduled,
+		Status: NewsContextRunStatusFailed, Phase: "failed",
+		WindowStart: start, WindowEnd: end,
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+		ErrorMessage: "API model stopped without submitting a result",
+		RetryCount:   newsContextTimeoutRetryLimit,
+	})
+	if err != nil {
+		t.Fatalf("create exhausted run: %v", err)
+	}
+	if err := svc.startDueNewsContextRun(ctx, time.Now()); err != nil {
+		t.Fatalf("inspect exhausted run: %v", err)
+	}
+	reloaded, err := svc.store.GetNewsContextRun(ctx, run.ID)
+	if err == nil {
+		err = svc.decorateNewsContextRun(ctx, &reloaded)
+	}
+	if err != nil || reloaded.Status != NewsContextRunStatusFailed || !reloaded.AutoRetryExhausted ||
+		!reloaded.NextRetryAt.IsZero() {
+		t.Fatalf("exhausted run = %+v, err=%v", reloaded, err)
+	}
+}
+
 func createCompletedNewsContextTestWindow(t *testing.T, svc *Service, windowType string, start, end time.Time, trigger, status string) NewsContextRun {
 	t.Helper()
 	run, err := svc.store.CreateNewsContextRun(context.Background(), NewsContextRun{

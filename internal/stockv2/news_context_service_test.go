@@ -664,6 +664,94 @@ func testExecuteNewsContextBatchRetriesWithSmallerPendingSlice(
 	}
 }
 
+func TestNewsContextReviewFailureSchedulesRetryAndExposesExhaustion(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowDaily, TriggerType: NewsContextTriggerScheduled,
+		Status: NewsContextRunStatusWaitingReview, Phase: "reviewing",
+		WindowStart: now.Add(-24 * time.Hour), WindowEnd: now,
+		InputCount: 1, ProcessedCount: 1,
+		ReviewStatus: NewsContextReviewRunning, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatalf("create reviewing run: %v", err)
+	}
+	svc.failNewsContextReview(ctx, &run, errors.New("invalid portfolio sentinel result"))
+	reloaded, err := svc.store.GetNewsContextRun(ctx, run.ID)
+	if err == nil {
+		err = svc.decorateNewsContextRun(ctx, &reloaded)
+	}
+	if err != nil || reloaded.ReviewStatus != NewsContextReviewFailed ||
+		reloaded.NextRetryAt.IsZero() || reloaded.AutoRetryExhausted {
+		t.Fatalf("retryable review failure = %+v, err=%v", reloaded, err)
+	}
+	reloaded.RetryCount = newsContextTimeoutRetryLimit
+	if reloaded, err = svc.store.UpdateNewsContextRun(ctx, reloaded); err != nil {
+		t.Fatalf("set retry limit: %v", err)
+	}
+	svc.failNewsContextReview(ctx, &reloaded, errors.New("invalid portfolio sentinel result"))
+	final, err := svc.store.GetNewsContextRun(ctx, run.ID)
+	if err == nil {
+		err = svc.decorateNewsContextRun(ctx, &final)
+	}
+	if err != nil || !final.NextRetryAt.IsZero() || !final.AutoRetryExhausted || !final.Retryable {
+		t.Fatalf("exhausted review failure = %+v, err=%v", final, err)
+	}
+}
+
+func TestCompleteNewsContextRunResetsRetryBudgetBeforeReview(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowFourHour, TriggerType: NewsContextTriggerScheduled,
+		Status: NewsContextRunStatusRunning, Phase: newsContextRunPhaseAggregating,
+		WindowStart: now.Add(-4 * time.Hour), WindowEnd: now,
+		MaterialChangeCount: 1, RetryCount: newsContextTimeoutRetryLimit,
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatalf("create completed aggregation: %v", err)
+	}
+	if err := svc.completeNewsContextRun(ctx, &run, defaultNewsContextConfig()); err != nil {
+		t.Fatalf("complete aggregation: %v", err)
+	}
+	reloaded, err := svc.store.GetNewsContextRun(ctx, run.ID)
+	if err != nil || reloaded.RetryCount != 0 {
+		t.Fatalf("review retry budget = %+v, err=%v", reloaded, err)
+	}
+}
+
+func TestRetryableNewsContextAttemptFailureSeparatesTransientAndQuotaErrors(t *testing.T) {
+	for _, message := range []string{
+		"context deadline exceeded",
+		"API request failed: connection reset by peer",
+		"API returned HTTP 429: retry later",
+		"API returned HTTP 502: upstream unavailable",
+		`API model stopped with "stop" without submitting a result`,
+		"invalid portfolio sentinel result",
+		"interrupted by service restart before completion",
+	} {
+		if !retryableNewsContextAttemptFailure(errors.New(message)) {
+			t.Fatalf("transient failure was not retryable: %s", message)
+		}
+	}
+	for _, message := range []string{
+		"usage limit reached; purchase more credits",
+		"insufficient balance",
+		"required review model is not configured",
+		"save news context result failed: disk is read-only",
+	} {
+		if retryableNewsContextAttemptFailure(errors.New(message)) {
+			t.Fatalf("terminal failure was retryable: %s", message)
+		}
+	}
+}
+
 func newsContextCreateThreadReport(run NewsContextRun, event NewsEvent) NewsContextReport {
 	return NewsContextReport{
 		SchemaVersion: NewsContextResultSchemaVersion, RunID: run.ID, WindowType: run.WindowType,

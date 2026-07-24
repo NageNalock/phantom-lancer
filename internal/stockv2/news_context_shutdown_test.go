@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -144,5 +145,71 @@ func TestServiceCloseWaitsForNewsContextWorkerBeforeClosingStore(t *testing.T) {
 	recoveredBackfill, err := reopened.GetNewsContextBackfill(ctx, backfill.ID)
 	if err != nil || recoveredBackfill.Status != NewsContextBackfillStatusRunning || recoveredBackfill.ErrorMessage != "" {
 		t.Fatalf("recovered backfill = %+v, err=%v", recoveredBackfill, err)
+	}
+}
+
+func TestFourHourNewsContextAttemptTimeoutPersistsAutomaticRetry(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeCodexCLI, Name: "attempt-timeout-test",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	model, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID: provider.ID, ModelName: "attempt-timeout-model", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeNewsEventReview, RequestUpdateAgentTaskProfile{
+		PrimaryModelID: &model.ID,
+	}); err != nil {
+		t.Fatalf("bind model: %v", err)
+	}
+	now := time.Now().Truncate(time.Second)
+	event, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source: "test", Title: "整轮超时测试消息", Content: "验证四小时窗口整轮截止线。",
+		EventAt: now.Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("create event: %v", err)
+	}
+	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowFourHour, TriggerType: NewsContextTriggerScheduled,
+		Status: NewsContextRunStatusRunning, Phase: newsContextRunPhaseAggregating,
+		WindowStart: now.Add(-4 * time.Hour), WindowEnd: now,
+		InputCount: 1, PendingCount: 1,
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
+		RunID: run.ID, ObjectType: NewsContextRunItemNewsEvent, ObjectID: event.ID,
+		Status: NewsContextRunItemPending, SourceAt: event.EventAt,
+	}}); err != nil {
+		t.Fatalf("add run item: %v", err)
+	}
+	executor := &shutdownBlockingNewsContextExecutor{
+		started: make(chan struct{}),
+		stopped: make(chan struct{}),
+	}
+	svc.newsContextExecutor = executor
+	if !svc.tryStartNewsContextRun() {
+		t.Fatal("reserve news context execution")
+	}
+	startedAt := time.Now()
+	svc.executeNewsContextRunWithTimeout(ctx, run.ID, 20*time.Millisecond)
+	reloaded, err := svc.store.GetNewsContextRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("reload timed out run: %v", err)
+	}
+	if reloaded.Status != NewsContextRunStatusFailed ||
+		!strings.Contains(reloaded.ErrorMessage, "timed out") ||
+		reloaded.NextRetryAt.Before(startedAt.Add(newsContextAutoRetryBaseDelay)) {
+		t.Fatalf("timed out run = %+v", reloaded)
 	}
 }

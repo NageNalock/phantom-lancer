@@ -279,6 +279,8 @@ type NewsContextConfig struct {
 	CleanupGraceSeconds      int       `json:"cleanupGraceSeconds"`
 	AgentTimeoutSeconds      int       `json:"agentTimeoutSeconds"`
 	TimeoutRetryLimit        int       `json:"timeoutRetryLimit"`
+	RetryBackoffSeconds      int       `json:"retryBackoffSeconds"`
+	ReviewTimeoutSeconds     int       `json:"reviewTimeoutSeconds"`
 	SchedulerPollSeconds     int       `json:"schedulerPollSeconds"`
 	AdditionalResearchPrompt string    `json:"additionalResearchPrompt,omitempty"`
 	NextHourlyAt             time.Time `json:"nextHourlyAt,omitempty"`
@@ -301,6 +303,10 @@ type NewsContextRun struct {
 	CoverageStatus         string    `json:"coverageStatus,omitempty"`
 	Progress               float64   `json:"progress,omitempty"`
 	Retryable              bool      `json:"retryable,omitempty"`
+	RetryCount             int       `json:"retryCount"`
+	RetryLimit             int       `json:"retryLimit"`
+	NextRetryAt            time.Time `json:"nextRetryAt,omitempty,omitzero"`
+	AutoRetryExhausted     bool      `json:"autoRetryExhausted,omitempty"`
 	WindowStart            time.Time `json:"windowStart"`
 	WindowEnd              time.Time `json:"windowEnd"`
 	CurrentAgentRunID      string    `json:"currentAgentRunId,omitempty"`

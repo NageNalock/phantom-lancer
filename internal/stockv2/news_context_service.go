@@ -20,9 +20,12 @@ const (
 	newsContextSchedulerInterval = 5 * time.Second
 	// ponytail: news-context aggregation performs mandatory public research and
 	// emits a large audited result. Keep its deadline separate from other agents.
-	newsContextAgentTimeout          = 30 * time.Minute
-	newsContextAgentTaskTTL          = newsContextAgentTimeout + time.Minute
-	newsContextTimeoutRetryLimit     = 2
+	newsContextAgentTimeout      = 30 * time.Minute
+	newsContextAgentTaskTTL      = newsContextAgentTimeout + time.Minute
+	newsContextTimeoutRetryLimit = 2
+	// ponytail: two short exponential waits absorb transient provider failures
+	// without turning one bad window into a hot retry loop.
+	newsContextAutoRetryBaseDelay    = time.Minute
 	newsContextSeedPageSize          = 500
 	newsContextInputTextLimit        = 60_000
 	newsContextAdditionalPromptLimit = 2_000
@@ -60,6 +63,8 @@ func defaultNewsContextConfig() NewsContextConfig {
 		CleanupGraceSeconds:     24 * 3600,
 		AgentTimeoutSeconds:     int(newsContextAgentTimeout / time.Second),
 		TimeoutRetryLimit:       newsContextTimeoutRetryLimit,
+		RetryBackoffSeconds:     int(newsContextAutoRetryBaseDelay / time.Second),
+		ReviewTimeoutSeconds:    int(execDefaultTimeout / time.Second),
 		SchedulerPollSeconds:    int(newsContextSchedulerInterval / time.Second),
 		UpdatedAt:               time.Now(),
 	}
@@ -78,6 +83,8 @@ func normalizeNewsContextConfig(cfg NewsContextConfig) NewsContextConfig {
 	// editable would desynchronize process cleanup, task TTL, and retry behavior.
 	cfg.AgentTimeoutSeconds = int(newsContextAgentTimeout / time.Second)
 	cfg.TimeoutRetryLimit = newsContextTimeoutRetryLimit
+	cfg.RetryBackoffSeconds = int(newsContextAutoRetryBaseDelay / time.Second)
+	cfg.ReviewTimeoutSeconds = int(execDefaultTimeout / time.Second)
 	cfg.SchedulerPollSeconds = int(newsContextSchedulerInterval / time.Second)
 	if !validNewsContextCleanupGrace(cfg.CleanupGraceSeconds) {
 		cfg.CleanupGraceSeconds = 24 * 3600
@@ -415,9 +422,18 @@ func (s *Service) startDueNewsContextRun(ctx context.Context, now time.Time) err
 					RequestedBy: "system",
 				}, NewsContextTriggerScheduled, true)
 				return err
+			} else if existing.Status == NewsContextRunStatusFailed {
+				due, scheduleErr := s.ensureNewsContextAutoRetryScheduled(ctx, &existing, now)
+				if scheduleErr != nil {
+					return scheduleErr
+				}
+				if due {
+					_, err = s.retryNewsContextRun(ctx, existing.ID, true)
+					return err
+				}
 			}
-			// A failed persisted window must be retried explicitly. Other due
-			// periods can still advance while that failure remains observable.
+			// A terminal failure remains on its natural boundary so the missing
+			// child window cannot be mistaken for completed parent coverage.
 			continue
 		}
 		if !errors.Is(err, ErrNewsContextRunNotFound) {
@@ -491,6 +507,7 @@ func (s *Service) startNewsContextRun(ctx context.Context, req RequestStartNewsC
 		run.Phase = "collecting"
 		run.ErrorMessage = safelog.Text(err.Error(), 500)
 		run.FinishedAt = time.Now()
+		s.scheduleNewsContextAutoRetry(context.Background(), &run, err, run.FinishedAt)
 		_, _ = s.store.UpdateNewsContextRun(ctx, run)
 		s.recordNewsContextRunFailure(ctx, run.WindowType, err)
 		return run, err
@@ -800,19 +817,33 @@ func (s *Service) newsContextHistoricalOwnershipCutoff(ctx context.Context) (tim
 }
 
 func (s *Service) executeNewsContextRun(ctx context.Context, runID string) {
+	s.executeNewsContextRunWithTimeout(ctx, runID, newsContextAgentTimeout)
+}
+
+func (s *Service) executeNewsContextRunWithTimeout(ctx context.Context, runID string, timeout time.Duration) {
 	defer s.finishNewsContextRun()
 	run, err := s.store.GetNewsContextRun(ctx, runID)
 	if err != nil {
 		return
 	}
+	if run.WindowType == NewsContextWindowFourHour || run.WindowType == NewsContextWindowDaily {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	fail := func(cause error) {
 		if s.newsContextWorkerShutdownCanceled(ctx) {
 			return
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			cause = fmt.Errorf("%s news context attempt timed out after %s: %w",
+				run.WindowType, timeout, context.DeadlineExceeded)
 		}
 		run.Status = NewsContextRunStatusFailed
 		run.ErrorMessage = safelog.Text(cause.Error(), 500)
 		run.FinishedAt = time.Now()
 		run.Phase = "failed"
+		s.scheduleNewsContextAutoRetry(context.Background(), &run, cause, run.FinishedAt)
 		_, _ = s.store.UpdateNewsContextRun(context.Background(), run)
 		s.recordNewsContextRunFailure(context.Background(), run.WindowType, cause)
 	}
@@ -1043,6 +1074,9 @@ func (s *Service) executeNewsContextBatchWithRetry(
 ) error {
 	batch := items
 	for attempt := 0; attempt <= newsContextTimeoutRetryLimit; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		pack, err := s.buildNewsContextAggregationPack(ctx, *run, batch)
 		if err != nil {
 			return err
@@ -1071,6 +1105,9 @@ func (s *Service) executeNewsContextBatchWithRetry(
 		}
 		if attemptErr == nil {
 			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if !retryableNewsContextBatchFailure(attemptErr, output) {
 			return attemptErr
@@ -1149,6 +1186,81 @@ func agentProviderUsageLimitFailure(err error, output *AgentExecutorOutput) bool
 	}
 	message = strings.ToLower(message)
 	return strings.Contains(message, "usage limit") || strings.Contains(message, "purchase more credits")
+}
+
+func newsContextAutoRetryDelay(retryCount int) time.Duration {
+	delay := newsContextAutoRetryBaseDelay
+	for index := 0; index < retryCount && index < newsContextTimeoutRetryLimit; index++ {
+		delay *= 2
+	}
+	return delay
+}
+
+func retryableNewsContextAttemptFailure(cause error) bool {
+	if cause == nil {
+		return false
+	}
+	message := strings.ToLower(cause.Error())
+	if strings.Contains(message, "usage limit") || strings.Contains(message, "purchase more credits") ||
+		strings.Contains(message, "insufficient balance") || strings.Contains(message, "insufficient quota") {
+		return false
+	}
+	return errors.Is(cause, context.DeadlineExceeded) ||
+		strings.Contains(message, "timed out") ||
+		strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "without submitting") ||
+		strings.Contains(message, "no result submitted") ||
+		strings.Contains(message, "invalid news context result") ||
+		strings.Contains(message, "invalid portfolio sentinel result") ||
+		strings.Contains(message, "already running") ||
+		strings.Contains(message, "interrupted by service restart") ||
+		strings.Contains(message, "interrupted by service shutdown") ||
+		strings.Contains(message, "api request failed") ||
+		strings.Contains(message, "decode api response") ||
+		strings.Contains(message, "response has no choices") ||
+		strings.Contains(message, "api returned http 408") ||
+		strings.Contains(message, "api returned http 429") ||
+		strings.Contains(message, "api returned http 5")
+}
+
+func (s *Service) newsContextRunEligibleForAutoRetry(ctx context.Context, run NewsContextRun, cause error) bool {
+	if run.RetryCount >= newsContextTimeoutRetryLimit || !retryableNewsContextAttemptFailure(cause) {
+		return false
+	}
+	if _, historical, err := s.store.NewsContextBackfillForRun(ctx, run.ID); err != nil || historical {
+		return false
+	}
+	if _, finalReview, err := s.store.NewsContextBackfillForFinalReviewRun(ctx, run.ID); err != nil || finalReview {
+		return false
+	}
+	return true
+}
+
+func (s *Service) scheduleNewsContextAutoRetry(ctx context.Context, run *NewsContextRun, cause error, now time.Time) {
+	run.NextRetryAt = time.Time{}
+	if s.newsContextRunEligibleForAutoRetry(ctx, *run, cause) {
+		run.NextRetryAt = now.Add(newsContextAutoRetryDelay(run.RetryCount))
+	}
+}
+
+func (s *Service) ensureNewsContextAutoRetryScheduled(ctx context.Context, run *NewsContextRun, now time.Time) (bool, error) {
+	if !run.NextRetryAt.IsZero() {
+		return !run.NextRetryAt.After(now), nil
+	}
+	// ponytail: pre-migration failed rows have no retry timestamp. Only the
+	// current natural boundary is inspected here, so one transient legacy
+	// failure is resumed without scanning or reviving unrelated history.
+	cause := errors.New(firstNonEmpty(run.ErrorMessage, "news context attempt failed"))
+	if !s.newsContextRunEligibleForAutoRetry(ctx, *run, cause) {
+		return false, nil
+	}
+	run.NextRetryAt = now
+	updated, err := s.store.UpdateNewsContextRun(ctx, *run)
+	if err != nil {
+		return false, err
+	}
+	*run = updated
+	return true, nil
 }
 
 func shrinkNewsContextRetryBatch(items []NewsContextRunItem) []NewsContextRunItem {
@@ -1777,9 +1889,13 @@ func (s *Service) completeNewsContextRun(ctx context.Context, run *NewsContextRu
 		run.Status = NewsContextRunStatusWaitingReview
 		run.ReviewStatus = NewsContextReviewPending
 		run.Phase = "waiting_review"
+		// The aggregation/materialization attempt and its downstream impact
+		// review each receive the same bounded retry budget.
+		run.RetryCount = 0
 	}
 	run.FinishedAt = time.Now()
 	run.CurrentAgentRunID = ""
+	run.NextRetryAt = time.Time{}
 	updated, err := s.store.UpdateNewsContextRun(ctx, *run)
 	if err != nil {
 		return err
@@ -1832,12 +1948,19 @@ func (s *Service) triggerNewsContextReview(ctx context.Context, run *NewsContext
 		*run = latest
 	}
 	if err != nil {
-		run.ReviewStatus = NewsContextReviewFailed
-		run.Phase = "review_failed"
-		run.ErrorMessage = safelog.Text("start portfolio review failed: "+err.Error(), 500)
-		_, _ = s.store.UpdateNewsContextRun(context.Background(), *run)
+		s.failNewsContextReview(context.Background(), run, fmt.Errorf("start portfolio review failed: %w", err))
 		return
 	}
+}
+
+func (s *Service) failNewsContextReview(ctx context.Context, run *NewsContextRun, cause error) {
+	run.ReviewStatus = NewsContextReviewFailed
+	run.Status = NewsContextRunStatusWaitingReview
+	run.Phase = "review_failed"
+	run.ErrorMessage = safelog.Text(cause.Error(), 500)
+	s.scheduleNewsContextAutoRetry(ctx, run, cause, time.Now())
+	_ = s.store.UpdateNewsThreadReviewStatusForRun(ctx, run.ID, NewsContextReviewFailed, time.Now())
+	_, _ = s.store.UpdateNewsContextRun(ctx, *run)
 }
 
 func (s *Service) reconcileNewsContextReviews(ctx context.Context) {
@@ -1868,22 +1991,22 @@ func (s *Service) reconcileNewsContextReviews(ctx context.Context) {
 			run.Phase = "completed"
 			run.ErrorMessage = ""
 			if err := s.store.UpdateNewsThreadReviewStatusForRun(ctx, run.ID, NewsContextReviewCompleted, time.Now()); err != nil {
-				run.ReviewStatus = NewsContextReviewFailed
-				run.Status = NewsContextRunStatusWaitingReview
-				run.ErrorMessage = safelog.Text("update theme review status failed: "+err.Error(), 500)
+				s.failNewsContextReview(ctx, &run, fmt.Errorf("update theme review status failed: %w", err))
+				continue
 			}
 			_, _ = s.store.UpdateNewsContextRun(ctx, run)
 		case PortfolioSentinelStatusFailed:
-			run.ReviewStatus = NewsContextReviewFailed
-			run.Phase = "review_failed"
-			run.ErrorMessage = safelog.Text(sentinel.ErrorMessage, 500)
-			_ = s.store.UpdateNewsThreadReviewStatusForRun(ctx, run.ID, NewsContextReviewFailed, time.Now())
-			_, _ = s.store.UpdateNewsContextRun(ctx, run)
+			s.failNewsContextReview(ctx, &run, errors.New(firstNonEmpty(sentinel.ErrorMessage, "portfolio review failed")))
 		}
 	}
+	s.retryDueNewsContextReviews(ctx, time.Now())
 }
 
 func (s *Service) RetryNewsContextRun(ctx context.Context, id string) (NewsContextRun, error) {
+	return s.retryNewsContextRun(ctx, id, false)
+}
+
+func (s *Service) retryNewsContextRun(ctx context.Context, id string, automatic bool) (NewsContextRun, error) {
 	run, err := s.store.GetNewsContextRun(ctx, strings.TrimSpace(id))
 	if err != nil {
 		return NewsContextRun{}, err
@@ -1891,6 +2014,13 @@ func (s *Service) RetryNewsContextRun(ctx context.Context, id string) (NewsConte
 	if run.Status != NewsContextRunStatusFailed && run.ReviewStatus != NewsContextReviewFailed {
 		return NewsContextRun{}, ErrInvalidNewsContextInput
 	}
+	if automatic {
+		if run.RetryCount >= newsContextTimeoutRetryLimit || run.NextRetryAt.IsZero() || run.NextRetryAt.After(time.Now()) {
+			return NewsContextRun{}, ErrInvalidNewsContextInput
+		}
+		run.RetryCount++
+	}
+	run.NextRetryAt = time.Time{}
 	if run.ReviewStatus == NewsContextReviewFailed && run.ProcessedCount >= run.InputCount {
 		run.ReviewStatus = NewsContextReviewPending
 		run.ReviewRunID = ""
@@ -1917,6 +2047,12 @@ func (s *Service) RetryNewsContextRun(ctx context.Context, id string) (NewsConte
 		}
 		run, err = s.preparePendingNewsContextRun(ctx, run)
 		if err != nil {
+			run.Status = NewsContextRunStatusFailed
+			run.Phase = "collecting"
+			run.ErrorMessage = safelog.Text(err.Error(), 500)
+			run.FinishedAt = time.Now()
+			s.scheduleNewsContextAutoRetry(context.Background(), &run, err, run.FinishedAt)
+			_, _ = s.store.UpdateNewsContextRun(context.Background(), run)
 			s.finishNewsContextRun()
 			return NewsContextRun{}, err
 		}
@@ -1945,6 +2081,36 @@ func (s *Service) RetryNewsContextRun(ctx context.Context, id string) (NewsConte
 		return run, context.Canceled
 	}
 	return run, nil
+}
+
+func (s *Service) retryDueNewsContextReviews(ctx context.Context, now time.Time) {
+	for offset := 0; ; offset += 200 {
+		failed, err := s.store.ListNewsContextRuns(ctx, NewsContextRunListFilter{
+			ReviewStatus: NewsContextReviewFailed,
+			Limit:        200,
+			Offset:       offset,
+		})
+		if err != nil {
+			return
+		}
+		for index := range failed {
+			due, scheduleErr := s.ensureNewsContextAutoRetryScheduled(ctx, &failed[index], now)
+			if scheduleErr != nil || !due {
+				continue
+			}
+			if _, retryErr := s.retryNewsContextRun(ctx, failed[index].ID, true); retryErr != nil && s.log != nil {
+				s.log.Warn("retry failed news context review failed",
+					"context_run_id", failed[index].ID,
+					"error", safelog.Text(retryErr.Error(), 240),
+				)
+			}
+			// Portfolio impact reviews are single-flight. Start at most one per tick.
+			return
+		}
+		if len(failed) < 200 {
+			return
+		}
+	}
 }
 
 func (s *Service) GetNewsThread(ctx context.Context, id string) (NewsThread, error) {
@@ -2219,6 +2385,9 @@ func (s *Service) decorateNewsContextRun(ctx context.Context, run *NewsContextRu
 		run.Retryable = true
 		run.FailedStage = run.Phase
 	}
+	run.RetryLimit = newsContextTimeoutRetryLimit
+	failed := run.Status == NewsContextRunStatusFailed || run.ReviewStatus == NewsContextReviewFailed
+	run.AutoRetryExhausted = failed && run.NextRetryAt.IsZero()
 	return nil
 }
 

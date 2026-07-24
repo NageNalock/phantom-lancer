@@ -1568,6 +1568,8 @@ export interface StockV2NewsContextConfig {
   cleanupGraceSeconds: number;
   agentTimeoutSeconds: number;
   timeoutRetryLimit: number;
+  retryBackoffSeconds: number;
+  reviewTimeoutSeconds: number;
   schedulerPollSeconds: number;
   additionalResearchPrompt?: string;
   nextHourlyAt?: string;
@@ -1751,6 +1753,7 @@ export interface StockV2NewsContextRun {
   kind?: "aggregation" | "cleanup" | string;
   windowType?: string;
   status?: string;
+  reviewStatus?: string;
   phase?: string;
   coverageStatus?: string;
   progress?: number;
@@ -1777,6 +1780,10 @@ export interface StockV2NewsContextRun {
   failedStage?: string;
   errorMessage?: string;
   retryable?: boolean;
+  retryCount?: number;
+  retryLimit?: number;
+  nextRetryAt?: string;
+  autoRetryExhausted?: boolean;
   startedAt?: string;
   finishedAt?: string;
   createdAt?: string;

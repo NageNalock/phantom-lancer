@@ -208,6 +208,31 @@ func (e *agentAPIExecutor) executePrompt(
 			transcript.WriteByte('\n')
 		}
 		if len(choice.Message.ToolCalls) == 0 {
+			if deepSeek {
+				if content, ok := agentAPIJSONSubmissionContent(choice.Message.Content); ok {
+					params, paramsErr := agentAPIToolCallParams(codexSubmitResultTool, content, taskID)
+					if paramsErr == nil {
+						toolResult, toolErr := e.service.mcpToolsCall(params)
+						if toolErr == nil {
+							data, _ := json.Marshal(toolResult)
+							fmt.Fprintf(&transcript, "content %s: %s\n", agentAPIToolName(codexSubmitResultTool), safelog.Text(string(data), 1000))
+							output.ExitCode = 0
+							output.Duration = time.Since(started)
+							output.RawTranscript = safelog.Text(transcript.String(), transcriptMaxBytes)
+							output.StdoutTail = safelog.Text(string(data), stdoutTailMaxBytes)
+							return output, nil
+						}
+						lastToolError = safelog.Text(agentAPIToolName(codexSubmitResultTool)+": "+toolErr.Message, stderrTailMaxBytes)
+					} else {
+						lastToolError = safelog.Text(agentAPIToolName(codexSubmitResultTool)+": "+paramsErr.Message, stderrTailMaxBytes)
+					}
+					output.Duration = time.Since(started)
+					output.RawTranscript = safelog.Text(transcript.String(), transcriptMaxBytes)
+					output.StdoutTail = safelog.Text(choice.Message.Content, stdoutTailMaxBytes)
+					output.StderrTail = lastToolError
+					return output, fmt.Errorf("API model stopped with %q without submitting a valid result: %s", choice.FinishReason, lastToolError)
+				}
+			}
 			output.Duration = time.Since(started)
 			output.RawTranscript = safelog.Text(transcript.String(), transcriptMaxBytes)
 			output.StdoutTail = safelog.Text(choice.Message.Content, stdoutTailMaxBytes)
@@ -259,6 +284,24 @@ func (e *agentAPIExecutor) executePrompt(
 		return output, fmt.Errorf("API model exceeded %d tool-call turns without submitting a result; last tool error: %s", maxTurns, lastToolError)
 	}
 	return output, fmt.Errorf("API model exceeded %d tool-call turns without submitting a result", maxTurns)
+}
+
+func agentAPIJSONSubmissionContent(content string) (string, bool) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "", false
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal([]byte(content), &object) != nil || object == nil {
+		return "", false
+	}
+	// ponytail: accept only the exact submit-tool envelope. JSON-mode status
+	// messages and arbitrary model objects remain non-submissions, while the
+	// accepted path still crosses the normal MCP validation and persistence gate.
+	if len(object["taskType"]) == 0 || len(object["result"]) == 0 {
+		return "", false
+	}
+	return content, true
 }
 
 func agentAPIToolCallParams(name, arguments, taskID string) ([]byte, *mcpError) {

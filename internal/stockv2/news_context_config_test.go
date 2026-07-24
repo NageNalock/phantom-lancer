@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -29,7 +30,9 @@ func TestNewsContextConfigPersistsVisibleSettingsWithoutBatchLimit(t *testing.T)
 	if updated.CleanupGraceSeconds != 3*24*3600 || updated.AdditionalResearchPrompt != "重点核实上游供给变化" {
 		t.Fatalf("unexpected config: %+v", updated)
 	}
-	if updated.AgentTimeoutSeconds != 1800 || updated.TimeoutRetryLimit != 2 || updated.SchedulerPollSeconds != 5 {
+	if updated.AgentTimeoutSeconds != 1800 || updated.TimeoutRetryLimit != 2 ||
+		updated.RetryBackoffSeconds != 60 || updated.ReviewTimeoutSeconds != 600 ||
+		updated.SchedulerPollSeconds != 5 {
 		t.Fatalf("runtime policy not exposed: %+v", updated)
 	}
 	var legacyColumn int
@@ -39,6 +42,65 @@ func TestNewsContextConfigPersistsVisibleSettingsWithoutBatchLimit(t *testing.T)
 	}
 	if legacyColumn != 0 {
 		t.Fatalf("legacy batch column still exists")
+	}
+}
+
+func TestNewsContextRunRetryStatePersistsAndFailedFilterIncludesReviewFailure(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+	nextRetryAt := now.Add(time.Minute)
+	failed, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowFourHour, TriggerType: NewsContextTriggerScheduled,
+		Status: NewsContextRunStatusFailed, Phase: "failed",
+		WindowStart: now.Add(-8 * time.Hour), WindowEnd: now.Add(-4 * time.Hour),
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+		RetryCount: 1, NextRetryAt: nextRetryAt,
+	})
+	if err != nil {
+		t.Fatalf("create failed run: %v", err)
+	}
+	reviewFailed, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowDaily, TriggerType: NewsContextTriggerScheduled,
+		Status: NewsContextRunStatusWaitingReview, Phase: "review_failed",
+		WindowStart: now.Add(-24 * time.Hour), WindowEnd: now,
+		ReviewStatus: NewsContextReviewFailed, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatalf("create failed review: %v", err)
+	}
+	reloaded, err := svc.store.GetNewsContextRun(ctx, failed.ID)
+	if err != nil || reloaded.RetryCount != 1 || !reloaded.NextRetryAt.Equal(nextRetryAt) {
+		t.Fatalf("persisted retry state = %+v, err=%v", reloaded, err)
+	}
+	items, err := svc.ListNewsContextRuns(ctx, NewsContextRunListFilter{
+		Status: NewsContextRunStatusFailed,
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("list failed runs: %v", err)
+	}
+	got := make(map[string]bool, len(items))
+	for _, item := range items {
+		got[item.ID] = true
+	}
+	if !got[failed.ID] || !got[reviewFailed.ID] || len(got) != 2 {
+		t.Fatalf("failed filter returned %+v", items)
+	}
+}
+
+func TestNewsContextRunOmitsZeroNextRetryTimeFromAPI(t *testing.T) {
+	data, err := json.Marshal(NewsContextRun{})
+	if err != nil {
+		t.Fatalf("marshal run: %v", err)
+	}
+	if strings.Contains(string(data), `"nextRetryAt"`) {
+		t.Fatalf("zero retry time leaked into API JSON: %s", data)
+	}
+	data, err = json.Marshal(NewsContextRun{NextRetryAt: time.Now()})
+	if err != nil || !strings.Contains(string(data), `"nextRetryAt"`) {
+		t.Fatalf("scheduled retry missing from API JSON: %s, err=%v", data, err)
 	}
 }
 

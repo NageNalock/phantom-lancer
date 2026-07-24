@@ -394,3 +394,23 @@ func TestFailActiveAgentRunsMarksReadyAndRunning(t *testing.T) {
 		t.Fatalf("completed run status = %q", gotCompleted.Status)
 	}
 }
+
+func TestAgentAPIJSONSubmissionContentAcceptsOnlyResultEnvelope(t *testing.T) {
+	valid := `{"taskType":"news_event_review","result":{"schema_version":"1"}}`
+	content, ok := agentAPIJSONSubmissionContent(valid)
+	if !ok || content != valid {
+		t.Fatalf("valid JSON submission = %q, %v", content, ok)
+	}
+	for _, invalid := range []string{
+		"",
+		`not-json`,
+		`[]`,
+		`{"message":"done"}`,
+		`{"taskType":"news_event_review"}`,
+		`{"result":{}}`,
+	} {
+		if _, ok := agentAPIJSONSubmissionContent(invalid); ok {
+			t.Fatalf("accepted non-submission JSON %q", invalid)
+		}
+	}
+}
