@@ -446,6 +446,20 @@ func TestDeepSeekNewsExecutionRetriesEmptyJSONResponseInSameConversation(t *test
 	svc.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requestCount++
 		body, _ := io.ReadAll(req.Body)
+		var request map[string]any
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatalf("decode API request: %v", err)
+		}
+		tools, ok := request["tools"].([]any)
+		if !ok || len(tools) != 2 {
+			t.Fatalf("DeepSeek news lookup tools = %#v; want two lookup tools", request["tools"])
+		}
+		for _, rawTool := range tools {
+			function := rawTool.(map[string]any)["function"].(map[string]any)
+			if function["name"] == agentAPIToolName(codexSubmitResultTool) {
+				t.Fatalf("DeepSeek news content submission exposed the submit tool: %s", body)
+			}
+		}
 		if requestCount > 1 && !strings.Contains(string(body), "The previous response did not submit") {
 			t.Fatalf("retry request does not contain the same-conversation submit reminder: %s", body)
 		}
@@ -460,7 +474,11 @@ func TestDeepSeekNewsExecutionRetriesEmptyJSONResponseInSameConversation(t *test
 
 	output, err := newAgentAPIExecutor(svc).executePrompt(
 		ctx, taskID, "return JSON", "deepseek-v4-pro", AgentReasoningEffortMedium,
-		time.Second, agentAPIExecutionOptions{toolNames: []string{codexSubmitResultTool}},
+		time.Second, agentAPIExecutionOptions{toolNames: []string{
+			mcpToolSemanticSearchNewsThreads,
+			mcpToolGetNewsThread,
+			codexSubmitResultTool,
+		}},
 	)
 	if err == nil || !strings.Contains(err.Error(), `stopped with "stop"`) {
 		t.Fatalf("execute error = %v; want exhausted no-submit failure", err)

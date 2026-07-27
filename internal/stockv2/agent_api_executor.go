@@ -128,22 +128,44 @@ func (e *agentAPIExecutor) executePrompt(
 		return nil, err
 	}
 	deepSeek := isDeepSeekAPI(baseURL, modelName)
+	contentSubmission := deepSeek && run.TaskType == AgentTaskTypeNewsEventReview
 
-	prompt = agentAPIModePrompt(prompt)
+	prompt = agentAPIModePrompt(prompt, contentSubmission)
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	started := time.Now()
 	systemPrompt := "You execute one StockV2 analysis task. Use the provided functions for project data and submit the final structured result with stock_agent_submit_result. Do not claim access to Codex CLI browsing in API mode."
-	if deepSeek {
+	if contentSubmission {
+		// ponytail: response_format validates normal JSON content, not tool-call
+		// arguments. Keep lookup tools, then pass the final content through the
+		// same submit_result validation and persistence boundary locally.
+		systemPrompt = `You execute one StockV2 news analysis task. Use the provided functions only for project data lookup. Return the final result as exactly one JSON object matching the stock_agent_submit_result arguments, for example {"taskID":"task-id","taskType":"news_event_review","result":{"outputType":"news_context_aggregation","result":{}}}. Do not call stock_agent_submit_result. Do not claim access to Codex CLI browsing in API mode.`
+	} else if deepSeek {
 		// ponytail: DeepSeek JSON Output requires an explicit JSON instruction and
 		// example. Final persistence still crosses the validated submit tool.
 		systemPrompt += ` DeepSeek JSON mode is enabled. Any assistant message content must be exactly one JSON object, for example {"message":"continuing_with_tool_calls"}. Do not put the final task result only in message content; call stock_agent_submit_result.`
 	}
+	userSuffix := "\n\nAPI execution mode: call the provided OpenAI functions. Function names use underscores instead of dots; stock_agent_submit_result is the required final submission."
+	if contentSubmission {
+		userSuffix = "\n\nAPI execution mode: use the provided OpenAI functions only for lookup. Return the complete final submission as one valid JSON object in message content; do not call stock_agent_submit_result."
+	}
 	messages := []map[string]any{
 		{"role": "system", "content": systemPrompt},
-		{"role": "user", "content": prompt + "\n\nAPI execution mode: call the provided OpenAI functions. Function names use underscores instead of dots; stock_agent_submit_result is the required final submission."},
+		{"role": "user", "content": prompt + userSuffix},
 	}
-	tools := agentAPITools(options.toolNames, options.submitResultSchema)
+	toolNames := options.toolNames
+	if contentSubmission {
+		toolNames = make([]string, 0, len(options.toolNames))
+		for _, name := range options.toolNames {
+			if name != codexSubmitResultTool {
+				toolNames = append(toolNames, name)
+			}
+		}
+	}
+	tools := agentAPITools(toolNames, options.submitResultSchema)
+	if contentSubmission && len(toolNames) == 0 {
+		tools = nil
+	}
 	maxTurns := agentAPIMaxTurns
 	if deepSeek && run.TaskType == AgentTaskTypeNewsEventReview {
 		maxTurns = agentAPIDeepSeekNewsMaxTurns
@@ -161,17 +183,20 @@ func (e *agentAPIExecutor) executePrompt(
 
 	for turn := 0; turn < maxTurns; turn++ {
 		body := map[string]any{
-			"model":       modelName,
-			"messages":    messages,
-			"tools":       tools,
-			"tool_choice": "auto",
-			"stream":      false,
+			"model":    modelName,
+			"messages": messages,
+			"stream":   false,
+		}
+		if len(tools) > 0 {
+			body["tools"] = tools
+			body["tool_choice"] = "auto"
 		}
 		applyAgentAPIReasoning(body, deepSeek, reasoningEffort)
 		if deepSeek {
 			applyDeepSeekAPICompatibility(body, reasoningEffort)
 		}
 		if deepSeek && run.TaskType == AgentTaskTypeNewsEventReview &&
+			!contentSubmission &&
 			!deepSeekThinkingEnabled(reasoningEffort) &&
 			(options.forceSubmit || turn >= maxTurns-2) {
 			body["tool_choice"] = agentAPIRequiredSubmitToolChoice()
@@ -226,6 +251,14 @@ func (e *agentAPIExecutor) executePrompt(
 					} else {
 						lastToolError = safelog.Text(agentAPIToolName(codexSubmitResultTool)+": "+paramsErr.Message, stderrTailMaxBytes)
 					}
+					if contentSubmission && turn < maxTurns-1 {
+						messages = append(messages, map[string]any{
+							"role": "user",
+							"content": "The previous final JSON was rejected: " + lastToolError +
+								". Correct it and return exactly one complete valid JSON submission object.",
+						})
+						continue
+					}
 					output.Duration = time.Since(started)
 					output.RawTranscript = safelog.Text(transcript.String(), transcriptMaxBytes)
 					output.StdoutTail = safelog.Text(choice.Message.Content, stdoutTailMaxBytes)
@@ -239,7 +272,7 @@ func (e *agentAPIExecutor) executePrompt(
 				// conversation instead of restarting the full news batch.
 				messages = append(messages, map[string]any{
 					"role":    "user",
-					"content": `The previous response did not submit the task result. Continue this same task now and call stock_agent_submit_result with one valid JSON result covering the complete requested batch.`,
+					"content": `The previous response did not submit the task result. Continue this same task and return exactly one complete valid JSON submission object covering the complete requested batch.`,
 				})
 				continue
 			}
@@ -412,13 +445,17 @@ func agentAPIRequiredSubmitToolChoice() map[string]any {
 	}
 }
 
-func agentAPIModePrompt(prompt string) string {
+func agentAPIModePrompt(prompt string, contentSubmission bool) string {
 	// The shared task prompts describe the richer CLI surface. This explicit
 	// tail is authoritative for API runs and prevents false browsing claims.
+	submissionInstruction := "Call stock_agent_submit_result for the final submission."
+	if contentSubmission {
+		submissionInstruction = "Return the complete final submission as exactly one JSON object in message content; do not call stock_agent_submit_result."
+	}
 	return prompt + "\n\n## API mode capability boundary\n" +
 		"This run has no Codex CLI, shell, browser, web search, or web fetch capability. " +
 		"Use only the supplied context and OpenAI functions. If external verification would be required, record it as unavailable and reduce confidence; never fabricate verification or sources. " +
-		"Call stock_agent_submit_result for the final submission.\n"
+		submissionInstruction + "\n"
 }
 
 func (e *agentAPIExecutor) chatCompletion(ctx context.Context, baseURL, apiKey string, body map[string]any) (agentAPIChatResponse, int, error) {
