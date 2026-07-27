@@ -512,6 +512,93 @@ func TestDeepSeekNewsExecutionRetriesEmptyJSONResponseInSameConversation(t *test
 	}
 }
 
+func TestDeepSeekNewsCorrectionTurnOmitsLookupTools(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeOpenAI,
+		Name:         "deepseek-correct-json",
+		BaseURL:      "https://api.deepseek.com",
+		APIKey:       "test-token",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	run, _, err := svc.store.CreateAgentRunWithLedger(ctx, AgentRun{
+		TaskType: AgentTaskTypeNewsEventReview, ExecutionMode: AgentExecutionModeAPI,
+		ProviderID: provider.ID, TriggerObjectType: "test", TriggerObjectID: "correct-json",
+		Status: AgentRunStatusRunning, StartedAt: time.Now(),
+	}, AgentDecisionLedger{
+		TaskType: AgentTaskTypeNewsEventReview, ProviderID: provider.ID,
+		TriggerObjectType: "test", TriggerObjectID: "correct-json",
+	})
+	if err != nil {
+		t.Fatalf("create agent run: %v", err)
+	}
+	taskID, _ := svc.agentTaskPool.createTask(run.TaskType, run.ID, "", time.Minute)
+	requestCount := 0
+	svc.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		body, _ := io.ReadAll(req.Body)
+		var request map[string]any
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatalf("decode API request: %v", err)
+		}
+		if requestCount == 1 {
+			if tools, ok := request["tools"].([]any); !ok || len(tools) != 2 {
+				t.Fatalf("initial lookup tools = %#v; want two", request["tools"])
+			}
+		} else {
+			if _, ok := request["tools"]; ok {
+				t.Fatalf("correction request %d still exposes tools: %s", requestCount, body)
+			}
+			messages, _ := request["messages"].([]any)
+			encodedMessages, _ := json.Marshal(messages)
+			if !strings.Contains(string(encodedMessages), "previous final JSON was rejected") {
+				t.Fatalf("correction request %d lacks validation feedback: %s", requestCount, body)
+			}
+		}
+		content := ""
+		if requestCount == 1 {
+			// This is a submission envelope, but the empty result fails the normal
+			// MCP validation boundary and triggers an in-session correction.
+			content = `{"taskType":"news_event_review","result":{}}`
+		}
+		response, _ := json.Marshal(map[string]any{
+			"choices": []any{map[string]any{
+				"finish_reason": "stop",
+				"message":       map[string]any{"role": "assistant", "content": content},
+			}},
+		})
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(string(response))),
+		}, nil
+	})}
+
+	output, err := newAgentAPIExecutor(svc).executePrompt(
+		ctx, taskID, "return JSON", "deepseek-v4-pro", AgentReasoningEffortMedium,
+		time.Second, agentAPIExecutionOptions{toolNames: []string{
+			mcpToolSemanticSearchNewsThreads,
+			mcpToolGetNewsThread,
+			codexSubmitResultTool,
+		}},
+	)
+	if err == nil {
+		t.Fatal("execute error = nil; want exhausted invalid submission")
+	}
+	if requestCount != agentAPIDeepSeekNewsMaxTurns || output.RequestCount != requestCount {
+		t.Fatalf("request counts = transport %d, output %d; want %d",
+			requestCount, output.RequestCount, agentAPIDeepSeekNewsMaxTurns)
+	}
+	if output.RequestTrace[0].Purpose != "final_json" ||
+		output.RequestTrace[0].Status != "result_rejected" {
+		t.Fatalf("first request trace = %+v", output.RequestTrace[0])
+	}
+}
+
 func TestAgentAPIChatCompletionRecordsHTTPRetry(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

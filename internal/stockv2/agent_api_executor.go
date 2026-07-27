@@ -182,6 +182,7 @@ func (e *agentAPIExecutor) executePrompt(
 	}
 	var transcript strings.Builder
 	lastToolError := ""
+	correctingFinalJSON := false
 
 	for turn := 0; turn < maxTurns; turn++ {
 		body := map[string]any{
@@ -189,7 +190,7 @@ func (e *agentAPIExecutor) executePrompt(
 			"messages": messages,
 			"stream":   false,
 		}
-		if len(tools) > 0 {
+		if len(tools) > 0 && !correctingFinalJSON {
 			body["tools"] = tools
 			body["tool_choice"] = "auto"
 		}
@@ -261,6 +262,11 @@ func (e *agentAPIExecutor) executePrompt(
 					}
 					markLastAgentAPIRequestTrace(output, "result_rejected", lastToolError)
 					if contentSubmission && turn < maxTurns-1 {
+						// ponytail: the model already produced the complete result.
+						// The correction turn needs only the validation error; hiding
+						// lookup tools prevents an unrelated query from consuming the
+						// final bounded turn and restarting the whole batch.
+						correctingFinalJSON = true
 						messages = append(messages, map[string]any{
 							"role": "user",
 							"content": "The previous final JSON was rejected: " + lastToolError +
