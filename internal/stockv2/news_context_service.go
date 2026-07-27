@@ -41,10 +41,11 @@ const (
 	// either only after measured runs show reliable submit_result coverage.
 	newsContextCLIEventBatchSize  = 10
 	newsContextCLIThreadBatchSize = 8
-	// ponytail: production 12-event runs repeatedly emitted invalid 18-25 KB
-	// submit_result JSON, while their automatic 6-event retries completed.
-	// Keep this fixed protocol limit until measured adaptive sizing is needed.
-	newsContextDeepSeekEventBatchSize  = 6
+	// ponytail: production 6-event runs still emitted invalid 12 KB
+	// submit_result JSON about half the time, while observed 3-event retries
+	// completed. Keep this fixed protocol limit until measured adaptive sizing
+	// is needed.
+	newsContextDeepSeekEventBatchSize  = 3
 	newsContextDeepSeekThreadBatchSize = 12
 )
 

@@ -304,8 +304,8 @@ func TestLimitNewsContextBatchForDeepSeekAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("limit batch: %v", err)
 	}
-	if len(limited) != 6 {
-		t.Fatalf("limited items = %d; want production-safe cap 6", len(limited))
+	if len(limited) != 3 {
+		t.Fatalf("limited items = %d; want production-safe cap 3", len(limited))
 	}
 }
 
