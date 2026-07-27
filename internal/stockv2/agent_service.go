@@ -1112,6 +1112,18 @@ func agentRedacted(value string) bool {
 
 // ResolveAgentTask 解析任务到模型:加载 task profile → 解析 primary/fallback model → 建 run(+ledger)。
 func (s *Service) ResolveAgentTask(ctx context.Context, taskType, triggerObjectType, triggerObjectID, requestedBy string) (AgentTaskResolution, error) {
+	return s.resolveAgentTask(ctx, taskType, triggerObjectType, triggerObjectID, requestedBy, false)
+}
+
+func (s *Service) resolveFallbackAgentTask(ctx context.Context, taskType, triggerObjectType, triggerObjectID, requestedBy string) (AgentTaskResolution, error) {
+	return s.resolveAgentTask(ctx, taskType, triggerObjectType, triggerObjectID, requestedBy, true)
+}
+
+func (s *Service) resolveAgentTask(
+	ctx context.Context,
+	taskType, triggerObjectType, triggerObjectID, requestedBy string,
+	fallbackOnly bool,
+) (AgentTaskResolution, error) {
 	if !knownAgentTaskType(taskType) {
 		return AgentTaskResolution{}, ErrInvalidAgentTaskType
 	}
@@ -1122,7 +1134,13 @@ func (s *Service) ResolveAgentTask(ctx context.Context, taskType, triggerObjectT
 	if err != nil {
 		return AgentTaskResolution{}, err
 	}
-	model, err := s.resolveModel(ctx, taskProfile)
+	modelProfile := taskProfile
+	if fallbackOnly {
+		// ponytail: reuse the normal model validation while excluding primary;
+		// runtime failover must honor the explicitly bound fallback only.
+		modelProfile.PrimaryModelID = ""
+	}
+	model, err := s.resolveModel(ctx, modelProfile)
 	if err != nil {
 		return AgentTaskResolution{}, err
 	}

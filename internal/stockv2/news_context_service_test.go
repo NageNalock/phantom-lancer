@@ -476,6 +476,14 @@ func TestRetryableNewsContextBatchFailureRequiresStartedNoSubmitBoundary(t *test
 	if retryableNewsContextBatchFailure(processExit, usageLimitOutput) {
 		t.Fatal("provider usage limit must be terminal even when the process submitted no result")
 	}
+	for _, message := range []string{
+		"API returned HTTP 402: Insufficient Balance",
+		"insufficient quota",
+	} {
+		if !agentProviderUsageLimitFailure(errors.New(message), nil) {
+			t.Fatalf("provider usage limit %q was not recognized", message)
+		}
+	}
 	if retryableNewsContextBatchFailure(processExit, nil) {
 		t.Fatal("failure without executor output must remain terminal")
 	}
@@ -515,6 +523,8 @@ func TestRetryableNewsContextBatchFailureRequiresStartedNoSubmitBoundary(t *test
 type retryNewsContextExecutor struct {
 	pool                    *agentTaskPool
 	sizes                   []int
+	models                  []string
+	usageLimitAttempts      int
 	timeoutAttempts         int
 	processExitAttempts     int
 	invalidCoverageAttempts int
@@ -524,10 +534,18 @@ func (e *retryNewsContextExecutor) ExecuteNewsContextAggregation(
 	_ context.Context,
 	taskID string,
 	pack NewsContextAggregationPack,
-	_ string,
+	modelName string,
 	_ string,
 ) (*AgentExecutorOutput, error) {
 	e.sizes = append(e.sizes, len(pack.InputNewsEvents)+len(pack.InputThreads))
+	e.models = append(e.models, modelName)
+	if len(e.sizes) <= e.usageLimitAttempts {
+		return &AgentExecutorOutput{
+				Command: "POST /chat/completions", ExitCode: -1, RequestCount: 1,
+				StderrTail: "API returned HTTP 402: Insufficient Balance",
+			},
+			errors.New("API returned HTTP 402: Insufficient Balance")
+	}
 	if len(e.sizes) <= e.timeoutAttempts {
 		return &AgentExecutorOutput{TimedOut: true, ExitCode: -1, Duration: newsContextAgentTimeout},
 			fmt.Errorf("execution timed out after %s, no result submitted", newsContextAgentTimeout)
@@ -582,6 +600,124 @@ func TestExecuteNewsContextBatchRetriesWithSmallerPendingSlice(t *testing.T) {
 				t, tt.timeoutAttempts, tt.processExitAttempts, tt.invalidCoverageAttempts,
 			)
 		})
+	}
+}
+
+func TestExecuteNewsContextBatchFallsBackAfterProviderUsageLimit(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	primaryProvider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeCodexCLI, Name: "news-context-primary-limit",
+	})
+	if err != nil {
+		t.Fatalf("create primary provider: %v", err)
+	}
+	fallbackProvider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeCodexCLI, Name: "news-context-fallback",
+	})
+	if err != nil {
+		t.Fatalf("create fallback provider: %v", err)
+	}
+	primary, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID: primaryProvider.ID, ModelName: "primary-limited", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create primary model: %v", err)
+	}
+	fallback, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID: fallbackProvider.ID, ModelName: "fallback-ready", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create fallback model: %v", err)
+	}
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeNewsEventReview, RequestUpdateAgentTaskProfile{
+		PrimaryModelID: &primary.ID, FallbackModelID: &fallback.ID,
+	}); err != nil {
+		t.Fatalf("bind task models: %v", err)
+	}
+	executor := &retryNewsContextExecutor{pool: svc.agentTaskPool, usageLimitAttempts: 1}
+	svc.newsContextExecutor = executor
+
+	now := time.Now().Truncate(time.Second)
+	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowFourHour, TriggerType: NewsContextTriggerManual,
+		Status: NewsContextRunStatusRunning, WindowStart: now.Add(-4 * time.Hour), WindowEnd: now,
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatalf("create context run: %v", err)
+	}
+	event, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source: "test", Title: "额度回退测试", Summary: "无重要市场影响",
+		Content: "用于验证主模型额度不足时切换到已配置回退模型。", EventAt: now.Add(-time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create event: %v", err)
+	}
+	if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
+		RunID: run.ID, ObjectType: NewsContextRunItemNewsEvent,
+		ObjectID: event.ID, Status: NewsContextRunItemPending,
+	}}); err != nil {
+		t.Fatalf("add run item: %v", err)
+	}
+	items, err := svc.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{RunID: run.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("list run items: %v", err)
+	}
+
+	if err := svc.executeNewsContextBatchWithRetry(ctx, &run, defaultNewsContextConfig(), items); err != nil {
+		t.Fatalf("execute fallback batch: %v", err)
+	}
+	if got := fmt.Sprint(executor.models); got != "[primary-limited fallback-ready]" {
+		t.Fatalf("models = %s, want primary then fallback", got)
+	}
+	if got := fmt.Sprint(executor.sizes); got != "[1 1]" {
+		t.Fatalf("batch sizes = %s, want unchanged batch on fallback", got)
+	}
+	pending, err := svc.store.CountNewsContextRunItems(ctx, NewsContextRunItemListFilter{
+		RunID: run.ID, Status: NewsContextRunItemPending,
+	})
+	if err != nil {
+		t.Fatalf("count pending items: %v", err)
+	}
+	completed, err := svc.store.CountNewsContextRunItems(ctx, NewsContextRunItemListFilter{
+		RunID: run.ID, Status: NewsContextRunItemCompleted,
+	})
+	if err != nil {
+		t.Fatalf("count completed items: %v", err)
+	}
+	if pending != 0 || completed != 1 {
+		t.Fatalf("item counts pending=%d completed=%d, want 0 and 1", pending, completed)
+	}
+	runs, err := svc.ListAgentRuns(ctx, AgentRunListFilter{
+		TaskType: AgentTaskTypeNewsEventReview, TriggerObjectID: run.ID, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("list agent runs: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("agent runs = %d, want primary failure and fallback success", len(runs))
+	}
+	statusByModel := map[string]string{}
+	runIDByModel := map[string]string{}
+	for _, agentRun := range runs {
+		statusByModel[agentRun.ModelID] = agentRun.Status
+		runIDByModel[agentRun.ModelID] = agentRun.ID
+	}
+	if statusByModel[primary.ID] != AgentRunStatusFailed ||
+		statusByModel[fallback.ID] != AgentRunStatusCompleted {
+		t.Fatalf("agent run statuses = %#v", statusByModel)
+	}
+	usageLimit := errors.New("API returned HTTP 402: Insufficient Balance")
+	run.CurrentAgentRunID = runIDByModel[primary.ID]
+	if !svc.newsContextRunEligibleForAutoRetry(ctx, run, usageLimit) {
+		t.Fatal("primary usage-limit failure with unused fallback was not auto-retryable")
+	}
+	run.CurrentAgentRunID = runIDByModel[fallback.ID]
+	if svc.newsContextRunEligibleForAutoRetry(ctx, run, usageLimit) {
+		t.Fatal("fallback usage-limit failure was scheduled for another fallback retry")
 	}
 }
 

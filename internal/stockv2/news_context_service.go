@@ -1073,6 +1073,7 @@ func (s *Service) executeNewsContextBatchWithRetry(
 	items []NewsContextRunItem,
 ) error {
 	batch := items
+	fallbackOnly := false
 	for attempt := 0; attempt <= newsContextTimeoutRetryLimit; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1082,7 +1083,12 @@ func (s *Service) executeNewsContextBatchWithRetry(
 			return err
 		}
 		pack.AdditionalResearchPrompt = cfg.AdditionalResearchPrompt
-		resolution, err := s.ResolveAgentTask(ctx, AgentTaskTypeNewsEventReview, "news_context_run", run.ID, "system")
+		var resolution AgentTaskResolution
+		if fallbackOnly {
+			resolution, err = s.resolveFallbackAgentTask(ctx, AgentTaskTypeNewsEventReview, "news_context_run", run.ID, "system")
+		} else {
+			resolution, err = s.ResolveAgentTask(ctx, AgentTaskTypeNewsEventReview, "news_context_run", run.ID, "system")
+		}
 		if err != nil {
 			return err
 		}
@@ -1108,6 +1114,34 @@ func (s *Service) executeNewsContextBatchWithRetry(
 		}
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if !fallbackOnly && agentProviderUsageLimitFailure(attemptErr, output) {
+			taskProfile, profileErr := s.store.GetAgentTaskProfileByType(ctx, AgentTaskTypeNewsEventReview)
+			if profileErr == nil {
+				taskProfile.PrimaryModelID = ""
+				fallbackModel, fallbackErr := s.resolveModel(ctx, taskProfile)
+				if fallbackErr == nil && fallbackModel.ID != resolution.ModelID {
+					if output != nil {
+						if err := ensureExecutorProcessGroupStopped(output.ProcessGroupID); err != nil {
+							return fmt.Errorf("clean failed news context process: %w", err)
+						}
+					}
+					if err := s.store.ResetNewsContextRunItemsForAgent(ctx, run.ID, resolution.Run.ID); err != nil {
+						return err
+					}
+					if s.log != nil {
+						s.log.Warn("falling back news context agent after provider usage limit",
+							"context_run_id", run.ID,
+							"agent_run_id", resolution.Run.ID,
+							"primary_model_id", resolution.ModelID,
+							"fallback_model_id", fallbackModel.ID,
+							"error", safelog.Text(attemptErr.Error(), 240),
+						)
+					}
+					fallbackOnly = true
+					continue
+				}
+			}
 		}
 		if !retryableNewsContextBatchFailure(attemptErr, output) {
 			return attemptErr
@@ -1185,7 +1219,11 @@ func agentProviderUsageLimitFailure(err error, output *AgentExecutorOutput) bool
 		message = err.Error()
 	}
 	message = strings.ToLower(message)
-	return strings.Contains(message, "usage limit") || strings.Contains(message, "purchase more credits")
+	return strings.Contains(message, "usage limit") ||
+		strings.Contains(message, "purchase more credits") ||
+		strings.Contains(message, "insufficient balance") ||
+		strings.Contains(message, "insufficient quota") ||
+		strings.Contains(message, "api returned http 402")
 }
 
 func newsContextAutoRetryDelay(retryCount int) time.Duration {
@@ -1224,7 +1262,14 @@ func retryableNewsContextAttemptFailure(cause error) bool {
 }
 
 func (s *Service) newsContextRunEligibleForAutoRetry(ctx context.Context, run NewsContextRun, cause error) bool {
-	if run.RetryCount >= newsContextTimeoutRetryLimit || !retryableNewsContextAttemptFailure(cause) {
+	if run.RetryCount >= newsContextTimeoutRetryLimit {
+		return false
+	}
+	retryable := retryableNewsContextAttemptFailure(cause)
+	if !retryable && agentProviderUsageLimitFailure(cause, nil) {
+		retryable = s.newsContextRunHasUnusedFallback(ctx, run)
+	}
+	if !retryable {
 		return false
 	}
 	if _, historical, err := s.store.NewsContextBackfillForRun(ctx, run.ID); err != nil || historical {
@@ -1234,6 +1279,23 @@ func (s *Service) newsContextRunEligibleForAutoRetry(ctx context.Context, run Ne
 		return false
 	}
 	return true
+}
+
+func (s *Service) newsContextRunHasUnusedFallback(ctx context.Context, run NewsContextRun) bool {
+	if strings.TrimSpace(run.CurrentAgentRunID) == "" {
+		return false
+	}
+	currentRun, err := s.store.GetAgentRun(ctx, run.CurrentAgentRunID)
+	if err != nil {
+		return false
+	}
+	taskProfile, err := s.store.GetAgentTaskProfileByType(ctx, AgentTaskTypeNewsEventReview)
+	if err != nil {
+		return false
+	}
+	taskProfile.PrimaryModelID = ""
+	fallbackModel, err := s.resolveModel(ctx, taskProfile)
+	return err == nil && fallbackModel.ID != currentRun.ModelID
 }
 
 func (s *Service) scheduleNewsContextAutoRetry(ctx context.Context, run *NewsContextRun, cause error, now time.Time) {
