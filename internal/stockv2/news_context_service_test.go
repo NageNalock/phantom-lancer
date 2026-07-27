@@ -515,6 +515,19 @@ func TestRetryableNewsContextBatchFailureRequiresStartedNoSubmitBoundary(t *test
 	}) {
 		t.Fatal("API request failure without executor deadline must remain terminal")
 	}
+	apiRejectedResult := errors.New(`API model stopped with "stop" without submitting a valid result: stock_agent_submit_result: invalid news context result: invalid or duplicate processed news id`)
+	if !retryableNewsContextBatchFailure(apiRejectedResult, &AgentExecutorOutput{
+		Command:  "POST https://example.com/v1/chat/completions",
+		ExitCode: -1,
+	}) {
+		t.Fatal("API news-context validation rejection before submission must shrink and retry")
+	}
+	if retryableNewsContextBatchFailure(apiRejectedResult, &AgentExecutorOutput{
+		Command:  "codex exec",
+		ExitCode: 1,
+	}) {
+		t.Fatal("non-API validation-looking failure must remain terminal")
+	}
 	if retryableNewsContextBatchFailure(errors.New("store news context result: disk full"), &AgentExecutorOutput{ExitCode: 1}) {
 		t.Fatal("storage failure must remain terminal")
 	}

@@ -1203,6 +1203,14 @@ func retryableNewsContextBatchFailure(err error, output *AgentExecutorOutput) bo
 	}
 	message := strings.ToLower(err.Error())
 	apiRequest := output != nil && strings.HasPrefix(strings.TrimSpace(output.Command), "POST ")
+	if apiRequest &&
+		strings.Contains(message, "without submitting a valid result") &&
+		strings.Contains(message, ErrInvalidNewsContextResult.Error()) {
+		// ponytail: API-mode validation rejected the complete JSON before the
+		// batch could mutate storage. Shrink and retry this exact safe boundary;
+		// do not generalize arbitrary validation or persistence failures.
+		return true
+	}
 	if apiRequest && (strings.Contains(message, "api returned http 502") ||
 		(output.TimedOut && strings.Contains(message, "api request failed") &&
 			strings.Contains(message, "context deadline exceeded"))) {
