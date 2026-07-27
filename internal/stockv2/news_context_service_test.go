@@ -537,6 +537,7 @@ type retryNewsContextExecutor struct {
 	pool                    *agentTaskPool
 	sizes                   []int
 	models                  []string
+	delay                   time.Duration
 	usageLimitAttempts      int
 	timeoutAttempts         int
 	processExitAttempts     int
@@ -544,7 +545,7 @@ type retryNewsContextExecutor struct {
 }
 
 func (e *retryNewsContextExecutor) ExecuteNewsContextAggregation(
-	_ context.Context,
+	ctx context.Context,
 	taskID string,
 	pack NewsContextAggregationPack,
 	modelName string,
@@ -552,6 +553,14 @@ func (e *retryNewsContextExecutor) ExecuteNewsContextAggregation(
 ) (*AgentExecutorOutput, error) {
 	e.sizes = append(e.sizes, len(pack.InputNewsEvents)+len(pack.InputThreads))
 	e.models = append(e.models, modelName)
+	if e.delay > 0 {
+		select {
+		case <-time.After(e.delay):
+		case <-ctx.Done():
+			return &AgentExecutorOutput{TimedOut: true, ExitCode: -1, Duration: e.delay},
+				fmt.Errorf("execution timed out after %s, no result submitted: %w", e.delay, ctx.Err())
+		}
+	}
 	if len(e.sizes) <= e.usageLimitAttempts {
 		return &AgentExecutorOutput{
 				Command: "POST /chat/completions", ExitCode: -1, RequestCount: 1,
@@ -613,6 +622,75 @@ func TestExecuteNewsContextBatchRetriesWithSmallerPendingSlice(t *testing.T) {
 				t, tt.timeoutAttempts, tt.processExitAttempts, tt.invalidCoverageAttempts,
 			)
 		})
+	}
+}
+
+func TestExecuteNewsContextRunAppliesTimeoutPerBatch(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeCodexCLI, Name: "per-batch-timeout",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	model, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID: provider.ID, ModelName: "per-batch-timeout-model", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeNewsEventReview, RequestUpdateAgentTaskProfile{
+		PrimaryModelID: &model.ID,
+	}); err != nil {
+		t.Fatalf("bind task model: %v", err)
+	}
+	svc.newsContextExecutor = &retryNewsContextExecutor{pool: svc.agentTaskPool, delay: 15 * time.Millisecond}
+
+	now := time.Now().Truncate(time.Second)
+	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowFourHour, TriggerType: NewsContextTriggerScheduled,
+		Status: NewsContextRunStatusRunning, Phase: newsContextRunPhaseAggregating,
+		WindowStart: now.Add(-4 * time.Hour), WindowEnd: now,
+		InputCount: 11, PendingCount: 11,
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	items := make([]NewsContextRunItem, 0, 11)
+	for index := 0; index < 11; index++ {
+		event, eventErr := svc.CreateNewsEvent(ctx, NewsEvent{
+			Source: "test", Title: fmt.Sprintf("分批超时测试 %d", index),
+			Content: "验证总执行时间可以超过单批截止线。", EventAt: now.Add(time.Duration(index-20) * time.Minute),
+		})
+		if eventErr != nil {
+			t.Fatalf("create event %d: %v", index, eventErr)
+		}
+		items = append(items, NewsContextRunItem{
+			RunID: run.ID, ObjectType: NewsContextRunItemNewsEvent, ObjectID: event.ID,
+			Status: NewsContextRunItemPending, SourceAt: event.EventAt,
+		})
+	}
+	if err := svc.store.AddNewsContextRunItems(ctx, items); err != nil {
+		t.Fatalf("add run items: %v", err)
+	}
+	if !svc.tryStartNewsContextRun() {
+		t.Fatal("reserve news context execution")
+	}
+	startedAt := time.Now()
+	svc.executeNewsContextRunWithBatchTimeout(ctx, run.ID, 20*time.Millisecond)
+	if elapsed := time.Since(startedAt); elapsed <= 20*time.Millisecond {
+		t.Fatalf("total run duration = %s, want multiple batches beyond one deadline", elapsed)
+	}
+	reloaded, err := svc.store.GetNewsContextRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("reload run: %v", err)
+	}
+	if reloaded.Status != NewsContextRunStatusCompleted ||
+		reloaded.ProcessedCount != 11 || reloaded.PendingCount != 0 || reloaded.RetryCount != 0 {
+		t.Fatalf("completed multi-batch run = %+v", reloaded)
 	}
 }
 
@@ -682,7 +760,7 @@ func TestExecuteNewsContextBatchFallsBackAfterProviderUsageLimit(t *testing.T) {
 
 	fallbackOnly := false
 	if err := svc.executeNewsContextBatchWithRetry(
-		ctx, &run, defaultNewsContextConfig(), items, &fallbackOnly, nil,
+		ctx, &run, defaultNewsContextConfig(), items, &fallbackOnly, nil, newsContextAgentTimeout,
 	); err != nil {
 		t.Fatalf("execute fallback batch: %v", err)
 	}
@@ -712,7 +790,7 @@ func TestExecuteNewsContextBatchFallsBackAfterProviderUsageLimit(t *testing.T) {
 		t.Fatalf("list second run items: %v", err)
 	}
 	if err := svc.executeNewsContextBatchWithRetry(
-		ctx, &run, defaultNewsContextConfig(), secondItems, &fallbackOnly, nil,
+		ctx, &run, defaultNewsContextConfig(), secondItems, &fallbackOnly, nil, newsContextAgentTimeout,
 	); err != nil {
 		t.Fatalf("execute second fallback batch: %v", err)
 	}
@@ -827,7 +905,7 @@ func testExecuteNewsContextBatchRetriesWithSmallerPendingSlice(
 	fallbackOnly := false
 	adaptiveBatchLimit := 0
 	if err := svc.executeNewsContextBatchWithRetry(
-		ctx, &run, defaultNewsContextConfig(), items, &fallbackOnly, &adaptiveBatchLimit,
+		ctx, &run, defaultNewsContextConfig(), items, &fallbackOnly, &adaptiveBatchLimit, newsContextAgentTimeout,
 	); err != nil {
 		t.Fatalf("execute retry batch: %v", err)
 	}
@@ -856,7 +934,7 @@ func testExecuteNewsContextBatchRetriesWithSmallerPendingSlice(
 	}
 	nextItems = limitNewsContextBatchItems(nextItems, adaptiveBatchLimit)
 	if err := svc.executeNewsContextBatchWithRetry(
-		ctx, &run, defaultNewsContextConfig(), nextItems, &fallbackOnly, &adaptiveBatchLimit,
+		ctx, &run, defaultNewsContextConfig(), nextItems, &fallbackOnly, &adaptiveBatchLimit, newsContextAgentTimeout,
 	); err != nil {
 		t.Fatalf("execute adaptive batch: %v", err)
 	}

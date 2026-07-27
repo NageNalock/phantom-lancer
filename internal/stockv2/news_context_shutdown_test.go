@@ -148,7 +148,7 @@ func TestServiceCloseWaitsForNewsContextWorkerBeforeClosingStore(t *testing.T) {
 	}
 }
 
-func TestFourHourNewsContextAttemptTimeoutPersistsAutomaticRetry(t *testing.T) {
+func TestFourHourNewsContextBatchTimeoutPersistsAutomaticRetry(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -202,7 +202,7 @@ func TestFourHourNewsContextAttemptTimeoutPersistsAutomaticRetry(t *testing.T) {
 		t.Fatal("reserve news context execution")
 	}
 	startedAt := time.Now()
-	svc.executeNewsContextRunWithTimeout(ctx, run.ID, 20*time.Millisecond)
+	svc.executeNewsContextRunWithBatchTimeout(ctx, run.ID, 20*time.Millisecond)
 	reloaded, err := svc.store.GetNewsContextRun(ctx, run.ID)
 	if err != nil {
 		t.Fatalf("reload timed out run: %v", err)
@@ -211,5 +211,16 @@ func TestFourHourNewsContextAttemptTimeoutPersistsAutomaticRetry(t *testing.T) {
 		!strings.Contains(reloaded.ErrorMessage, "timed out") ||
 		reloaded.NextRetryAt.Before(startedAt.Add(newsContextAutoRetryBaseDelay)) {
 		t.Fatalf("timed out run = %+v", reloaded)
+	}
+	agentRuns, err := svc.ListAgentRuns(ctx, AgentRunListFilter{
+		TaskType: AgentTaskTypeNewsEventReview, TriggerObjectID: run.ID, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("list timed out agent runs: %v", err)
+	}
+	for _, agentRun := range agentRuns {
+		if agentRun.Status == AgentRunStatusRunning {
+			t.Fatalf("timed out agent run remained running: %+v", agentRun)
+		}
 	}
 }

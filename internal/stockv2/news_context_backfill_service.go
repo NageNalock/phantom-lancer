@@ -1173,7 +1173,9 @@ func (s *Service) executeNewsContextBackfillChunk(ctx context.Context, runID str
 	}
 	batchCfg, _ := s.GetNewsContextConfig(ctx)
 	fallbackOnly := false
-	if err := s.executeNewsContextBatchWithRetry(ctx, &run, batchCfg, items, &fallbackOnly, nil); err != nil {
+	if err := s.executeNewsContextBatchWithRetry(
+		ctx, &run, batchCfg, items, &fallbackOnly, nil, newsContextAgentTimeout,
+	); err != nil {
 		fail(err)
 		return
 	}

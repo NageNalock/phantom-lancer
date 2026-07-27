@@ -19,9 +19,14 @@ const (
 	// turning this internal scheduler cadence into a second owner-tuned queue.
 	newsContextSchedulerInterval = 5 * time.Second
 	// ponytail: news-context aggregation performs mandatory public research and
-	// emits a large audited result. Keep its deadline separate from other agents.
-	newsContextAgentTimeout      = 30 * time.Minute
-	newsContextAgentTaskTTL      = newsContextAgentTimeout + time.Minute
+	// emits a large audited result. This is a per-Agent-attempt deadline: a
+	// progressing four-hour window may contain many batches and must not expire
+	// merely because their combined duration exceeds one model call.
+	newsContextAgentTimeout = 30 * time.Minute
+	newsContextAgentTaskTTL = newsContextAgentTimeout + time.Minute
+	// ponytail: a canceled model request still needs one short, bounded storage
+	// window to finalize its AgentRun and avoid a false concurrent-running row.
+	newsContextFinalizeTimeout   = 30 * time.Second
 	newsContextTimeoutRetryLimit = 2
 	// ponytail: two short exponential waits absorb transient provider failures
 	// without turning one bad window into a hot retry loop.
@@ -817,27 +822,18 @@ func (s *Service) newsContextHistoricalOwnershipCutoff(ctx context.Context) (tim
 }
 
 func (s *Service) executeNewsContextRun(ctx context.Context, runID string) {
-	s.executeNewsContextRunWithTimeout(ctx, runID, newsContextAgentTimeout)
+	s.executeNewsContextRunWithBatchTimeout(ctx, runID, newsContextAgentTimeout)
 }
 
-func (s *Service) executeNewsContextRunWithTimeout(ctx context.Context, runID string, timeout time.Duration) {
+func (s *Service) executeNewsContextRunWithBatchTimeout(ctx context.Context, runID string, batchTimeout time.Duration) {
 	defer s.finishNewsContextRun()
 	run, err := s.store.GetNewsContextRun(ctx, runID)
 	if err != nil {
 		return
 	}
-	if run.WindowType == NewsContextWindowFourHour || run.WindowType == NewsContextWindowDaily {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
 	fail := func(cause error) {
 		if s.newsContextWorkerShutdownCanceled(ctx) {
 			return
-		}
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			cause = fmt.Errorf("%s news context attempt timed out after %s: %w",
-				run.WindowType, timeout, context.DeadlineExceeded)
 		}
 		run.Status = NewsContextRunStatusFailed
 		run.ErrorMessage = safelog.Text(cause.Error(), 500)
@@ -900,7 +896,7 @@ func (s *Service) executeNewsContextRunWithTimeout(ctx context.Context, runID st
 			break
 		}
 		if err := s.executeNewsContextBatchWithRetry(
-			ctx, &run, cfg, items, &fallbackOnly, &adaptiveBatchLimit,
+			ctx, &run, cfg, items, &fallbackOnly, &adaptiveBatchLimit, batchTimeout,
 		); err != nil {
 			fail(err)
 			return
@@ -1081,6 +1077,7 @@ func (s *Service) executeNewsContextBatchWithRetry(
 	items []NewsContextRunItem,
 	fallbackOnly *bool,
 	adaptiveBatchLimit *int,
+	attemptTimeout time.Duration,
 ) error {
 	batch := items
 	for attempt := 0; attempt <= newsContextTimeoutRetryLimit; attempt++ {
@@ -1111,15 +1108,30 @@ func (s *Service) executeNewsContextBatchWithRetry(
 		if *run, err = s.store.UpdateNewsContextRun(ctx, *run); err != nil {
 			return err
 		}
+		attemptCtx := ctx
+		cancelAttempt := func() {}
+		if attemptTimeout > 0 {
+			attemptCtx, cancelAttempt = context.WithTimeout(ctx, attemptTimeout)
+		}
 		finalAgentRun, _, output, execErr := s.executeNewsContextAgentRun(
-			ctx, *resolution.Run, *resolution.DecisionLedger, pack, resolution.ModelName,
+			attemptCtx, *resolution.Run, *resolution.DecisionLedger, pack, resolution.ModelName,
 		)
+		attemptTimedOut := errors.Is(attemptCtx.Err(), context.DeadlineExceeded)
+		cancelAttempt()
+		if finalAgentRun.Status == AgentRunStatusCompleted {
+			// A valid submission persisted at the deadline is authoritative even
+			// if the transport concurrently returned context cancellation.
+			return nil
+		}
 		attemptErr := execErr
-		if attemptErr == nil && finalAgentRun.Status != AgentRunStatusCompleted {
-			attemptErr = errors.New(firstNonEmpty(finalAgentRun.ErrorMessage, "news context agent run failed"))
+		if attemptTimedOut {
+			if attemptErr == nil {
+				attemptErr = context.DeadlineExceeded
+			}
+			attemptErr = fmt.Errorf("news context batch timed out after %s: %w", attemptTimeout, attemptErr)
 		}
 		if attemptErr == nil {
-			return nil
+			attemptErr = errors.New(firstNonEmpty(finalAgentRun.ErrorMessage, "news context agent run failed"))
 		}
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1393,8 +1405,10 @@ func newsContextRunItemGroupKey(item NewsContextRunItem) string {
 func (s *Service) executeNewsContextAgentRun(ctx context.Context, run AgentRun, ledger AgentDecisionLedger, pack NewsContextAggregationPack, modelName string) (AgentRun, AgentDecisionLedger, *AgentExecutorOutput, error) {
 	if s.newsContextExecutor == nil {
 		err := ErrAgentExecutorUnavailable
-		s.finalizeAgentRun(ctx, run.ID, nil, err)
-		finalRun, finalLedger := s.safeGetAgentRunAndLedger(ctx, run.ID, ledger.ID)
+		finalizeCtx, cancelFinalize := newsContextFinalizeContext(ctx)
+		s.finalizeAgentRun(finalizeCtx, run.ID, nil, err)
+		finalRun, finalLedger := s.safeGetAgentRunAndLedger(finalizeCtx, run.ID, ledger.ID)
+		cancelFinalize()
 		return finalRun, finalLedger, nil, err
 	}
 	running := run
@@ -1402,9 +1416,15 @@ func (s *Service) executeNewsContextAgentRun(ctx context.Context, run AgentRun, 
 	_, _ = s.store.UpdateAgentRun(ctx, running)
 	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", newsContextAgentTaskTTL)
 	output, execErr := s.newsContextExecutor.ExecuteNewsContextAggregation(ctx, taskID, pack, modelName, run.ReasoningEffort)
-	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, output, execErr)
-	finalRun, finalLedger := s.safeGetAgentRunAndLedger(ctx, run.ID, ledger.ID)
+	finalizeCtx, cancelFinalize := newsContextFinalizeContext(ctx)
+	s.finalizeAgentRunWithOutput(finalizeCtx, run.ID, ledger.ID, taskID, output, execErr)
+	finalRun, finalLedger := s.safeGetAgentRunAndLedger(finalizeCtx, run.ID, ledger.ID)
+	cancelFinalize()
 	return finalRun, finalLedger, output, execErr
+}
+
+func newsContextFinalizeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), newsContextFinalizeTimeout)
 }
 
 func (s *Service) buildNewsContextAggregationPack(ctx context.Context, run NewsContextRun, items []NewsContextRunItem) (NewsContextAggregationPack, error) {
