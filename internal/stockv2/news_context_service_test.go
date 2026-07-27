@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -765,6 +766,69 @@ func TestProcessNewsContextResultKeepsCommittedBatchWhenIndexRefreshFails(t *tes
 	}
 	if thread.IndexStatus != NewsContextIndexFailed && thread.IndexStatus != NewsContextIndexPending {
 		t.Fatalf("derived index status = %q, want repairable pending/failed", thread.IndexStatus)
+	}
+}
+
+func TestExecuteDailyNewsContextRunKeepsMaterializedResultWhenIndexRefreshFails(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	configureEmbeddingModel(t, svc, "daily-news-context-index-failure")
+	svc.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Status:     "400 Bad Request",
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"invalid_request"}}`)),
+		}, nil
+	})}
+
+	now := time.Now().Truncate(time.Second)
+	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowDaily, TriggerType: NewsContextTriggerScheduled,
+		Status: NewsContextRunStatusRunning, Phase: newsContextRunPhaseMaterialize,
+		WindowStart: now.Add(-24 * time.Hour), WindowEnd: now,
+		InputCount: 1, ProcessedCount: 1,
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatalf("create daily run: %v", err)
+	}
+	thread, err := svc.store.CreateNewsThread(ctx, NewsThread{
+		Title: "日级确定性主题", CoreThesis: "日级版本已经权威落库",
+		Stage: NewsThreadStageSpreading, Status: NewsThreadStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("create daily thread: %v", err)
+	}
+	version, err := svc.store.CreateNewsThreadVersion(ctx, NewsThreadVersion{
+		ThreadID: thread.ID, RunID: run.ID, WindowType: NewsContextWindowDaily,
+		VersionNo: 1, Title: thread.Title, CoreThesis: thread.CoreThesis,
+		Stage: thread.Stage, ReviewStatus: NewsContextReviewNotRequired,
+		IndexStatus: NewsContextIndexPending, EffectiveAt: run.WindowEnd,
+	})
+	if err != nil {
+		t.Fatalf("create daily version: %v", err)
+	}
+
+	if !svc.tryStartNewsContextRun() {
+		t.Fatal("reserve daily news context execution")
+	}
+	svc.executeNewsContextRunWithBatchTimeout(ctx, run.ID, 20*time.Millisecond)
+
+	reloaded, err := svc.store.GetNewsContextRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("reload daily run: %v", err)
+	}
+	if reloaded.Status == NewsContextRunStatusFailed || reloaded.Phase == "failed" ||
+		reloaded.ProcessedCount != 1 || reloaded.PendingCount != 0 {
+		t.Fatalf("daily run after derived index failure = %+v", reloaded)
+	}
+	stored, err := svc.store.GetNewsThreadVersion(ctx, version.ID)
+	if err != nil {
+		t.Fatalf("reload daily version: %v", err)
+	}
+	if stored.IndexStatus != NewsContextIndexFailed && stored.IndexStatus != NewsContextIndexPending {
+		t.Fatalf("daily derived index status = %q, want repairable pending/failed", stored.IndexStatus)
 	}
 }
 

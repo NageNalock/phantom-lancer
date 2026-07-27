@@ -869,14 +869,27 @@ func (s *Service) executeNewsContextRunWithBatchTimeout(ctx context.Context, run
 		}
 		return
 	}
-	if err := s.repairNewsContextRunEmbeddings(ctx, run.ID); err != nil {
-		fail(err)
-		return
-	}
 	if run.WindowType == NewsContextWindowDaily {
+		// ponytail: daily versions are authoritative deterministic snapshots,
+		// while embeddings are repairable derived state. Give the inline refresh
+		// one bounded chance, then leave failed/pending cursors to maintenance;
+		// the backfill final-review path above keeps its explicit full index gate.
+		indexCtx, cancelIndex := context.WithTimeout(ctx, newsContextIndexSyncTimeout)
+		indexErr := s.repairNewsContextRunEmbeddings(indexCtx, run.ID)
+		cancelIndex()
+		if indexErr != nil && s.log != nil {
+			s.log.Warn("news context daily index deferred",
+				"context_run_id", run.ID,
+				"error", safelog.Text(indexErr.Error(), 300),
+			)
+		}
 		if err := s.completeNewsContextRun(ctx, &run, cfg); err != nil {
 			fail(err)
 		}
+		return
+	}
+	if err := s.repairNewsContextRunEmbeddings(ctx, run.ID); err != nil {
+		fail(err)
 		return
 	}
 	// ponytail: once a provider reports an exhausted quota, keep this worker on
