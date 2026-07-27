@@ -668,7 +668,9 @@ func TestExecuteNewsContextBatchFallsBackAfterProviderUsageLimit(t *testing.T) {
 	}
 
 	fallbackOnly := false
-	if err := svc.executeNewsContextBatchWithRetry(ctx, &run, defaultNewsContextConfig(), items, &fallbackOnly); err != nil {
+	if err := svc.executeNewsContextBatchWithRetry(
+		ctx, &run, defaultNewsContextConfig(), items, &fallbackOnly, nil,
+	); err != nil {
 		t.Fatalf("execute fallback batch: %v", err)
 	}
 	if got := fmt.Sprint(executor.models); got != "[primary-limited fallback-ready]" {
@@ -696,7 +698,9 @@ func TestExecuteNewsContextBatchFallsBackAfterProviderUsageLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list second run items: %v", err)
 	}
-	if err := svc.executeNewsContextBatchWithRetry(ctx, &run, defaultNewsContextConfig(), secondItems, &fallbackOnly); err != nil {
+	if err := svc.executeNewsContextBatchWithRetry(
+		ctx, &run, defaultNewsContextConfig(), secondItems, &fallbackOnly, nil,
+	); err != nil {
 		t.Fatalf("execute second fallback batch: %v", err)
 	}
 	if got := fmt.Sprint(executor.models); got != "[primary-limited fallback-ready fallback-ready]" {
@@ -808,11 +812,17 @@ func testExecuteNewsContextBatchRetriesWithSmallerPendingSlice(
 		t.Fatalf("list run items: %v", err)
 	}
 	fallbackOnly := false
-	if err := svc.executeNewsContextBatchWithRetry(ctx, &run, defaultNewsContextConfig(), items, &fallbackOnly); err != nil {
+	adaptiveBatchLimit := 0
+	if err := svc.executeNewsContextBatchWithRetry(
+		ctx, &run, defaultNewsContextConfig(), items, &fallbackOnly, &adaptiveBatchLimit,
+	); err != nil {
 		t.Fatalf("execute retry batch: %v", err)
 	}
 	if got := fmt.Sprint(executor.sizes); got != "[5 3 2]" {
 		t.Fatalf("attempt sizes = %s, want [5 3 2]", got)
+	}
+	if adaptiveBatchLimit != 2 {
+		t.Fatalf("adaptive batch limit = %d, want 2", adaptiveBatchLimit)
 	}
 	pending, err := svc.store.CountNewsContextRunItems(ctx, NewsContextRunItemListFilter{RunID: run.ID, Status: NewsContextRunItemPending})
 	if err != nil {
@@ -824,6 +834,21 @@ func testExecuteNewsContextBatchRetriesWithSmallerPendingSlice(
 	}
 	if pending != 3 || completed != 2 {
 		t.Fatalf("item counts pending=%d completed=%d, want 3 and 2", pending, completed)
+	}
+	nextItems, err := svc.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{
+		RunID: run.ID, Status: NewsContextRunItemPending, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("list next pending items: %v", err)
+	}
+	nextItems = limitNewsContextBatchItems(nextItems, adaptiveBatchLimit)
+	if err := svc.executeNewsContextBatchWithRetry(
+		ctx, &run, defaultNewsContextConfig(), nextItems, &fallbackOnly, &adaptiveBatchLimit,
+	); err != nil {
+		t.Fatalf("execute adaptive batch: %v", err)
+	}
+	if got := fmt.Sprint(executor.sizes); got != "[5 3 2 2]" {
+		t.Fatalf("attempt sizes = %s, want later batch to retain limit: [5 3 2 2]", got)
 	}
 }
 

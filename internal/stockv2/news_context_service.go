@@ -883,6 +883,7 @@ func (s *Service) executeNewsContextRunWithTimeout(ctx context.Context, runID st
 	// the configured fallback instead of paying for the same known failure on
 	// every remaining batch in the run.
 	fallbackOnly := false
+	adaptiveBatchLimit := 0
 	for {
 		items, err := s.nextNewsContextRunItems(ctx, run.ID)
 		if err != nil {
@@ -894,10 +895,13 @@ func (s *Service) executeNewsContextRunWithTimeout(ctx context.Context, runID st
 			fail(err)
 			return
 		}
+		items = limitNewsContextBatchItems(items, adaptiveBatchLimit)
 		if len(items) == 0 {
 			break
 		}
-		if err := s.executeNewsContextBatchWithRetry(ctx, &run, cfg, items, &fallbackOnly); err != nil {
+		if err := s.executeNewsContextBatchWithRetry(
+			ctx, &run, cfg, items, &fallbackOnly, &adaptiveBatchLimit,
+		); err != nil {
 			fail(err)
 			return
 		}
@@ -1076,6 +1080,7 @@ func (s *Service) executeNewsContextBatchWithRetry(
 	cfg NewsContextConfig,
 	items []NewsContextRunItem,
 	fallbackOnly *bool,
+	adaptiveBatchLimit *int,
 ) error {
 	batch := items
 	for attempt := 0; attempt <= newsContextTimeoutRetryLimit; attempt++ {
@@ -1162,6 +1167,13 @@ func (s *Service) executeNewsContextBatchWithRetry(
 			return err
 		}
 		next := shrinkNewsContextRetryBatch(batch)
+		if adaptiveBatchLimit != nil && len(next) < len(batch) &&
+			(*adaptiveBatchLimit == 0 || len(next) < *adaptiveBatchLimit) {
+			// ponytail: the recoverable failure proves this size unsafe for the
+			// current worker. Carry its smaller retry cap forward instead of
+			// repeatedly paying for the same oversized provider failure.
+			*adaptiveBatchLimit = len(next)
+		}
 		if s.log != nil {
 			s.log.Warn("retrying news context batch after recoverable agent failure",
 				"context_run_id", run.ID,
