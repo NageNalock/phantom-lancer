@@ -233,6 +233,16 @@ func (e *agentAPIExecutor) executePrompt(
 					return output, fmt.Errorf("API model stopped with %q without submitting a valid result: %s", choice.FinishReason, lastToolError)
 				}
 			}
+			if deepSeek && run.TaskType == AgentTaskTypeNewsEventReview && turn < maxTurns-1 {
+				// ponytail: DeepSeek documents that JSON Output can occasionally
+				// return empty content. Keep the retry inside this cached
+				// conversation instead of restarting the full news batch.
+				messages = append(messages, map[string]any{
+					"role":    "user",
+					"content": `The previous response did not submit the task result. Continue this same task now and call stock_agent_submit_result with one valid JSON result covering the complete requested batch.`,
+				})
+				continue
+			}
 			output.Duration = time.Since(started)
 			output.RawTranscript = safelog.Text(transcript.String(), transcriptMaxBytes)
 			output.StdoutTail = safelog.Text(choice.Message.Content, stdoutTailMaxBytes)

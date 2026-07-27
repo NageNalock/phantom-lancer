@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -412,5 +414,59 @@ func TestAgentAPIJSONSubmissionContentAcceptsOnlyResultEnvelope(t *testing.T) {
 		if _, ok := agentAPIJSONSubmissionContent(invalid); ok {
 			t.Fatalf("accepted non-submission JSON %q", invalid)
 		}
+	}
+}
+
+func TestDeepSeekNewsExecutionRetriesEmptyJSONResponseInSameConversation(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeOpenAI,
+		Name:         "deepseek-empty-json",
+		BaseURL:      "https://api.deepseek.com",
+		APIKey:       "test-token",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	run, _, err := svc.store.CreateAgentRunWithLedger(ctx, AgentRun{
+		TaskType: AgentTaskTypeNewsEventReview, ExecutionMode: AgentExecutionModeAPI,
+		ProviderID: provider.ID, TriggerObjectType: "test", TriggerObjectID: "empty-json",
+		Status: AgentRunStatusRunning, StartedAt: time.Now(),
+	}, AgentDecisionLedger{
+		TaskType: AgentTaskTypeNewsEventReview, ProviderID: provider.ID,
+		TriggerObjectType: "test", TriggerObjectID: "empty-json",
+	})
+	if err != nil {
+		t.Fatalf("create agent run: %v", err)
+	}
+	taskID, _ := svc.agentTaskPool.createTask(run.TaskType, run.ID, "", time.Minute)
+	requestCount := 0
+	svc.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		body, _ := io.ReadAll(req.Body)
+		if requestCount > 1 && !strings.Contains(string(body), "The previous response did not submit") {
+			t.Fatalf("retry request does not contain the same-conversation submit reminder: %s", body)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body: io.NopCloser(strings.NewReader(
+				`{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"","reasoning_content":"done"}}]}`,
+			)),
+		}, nil
+	})}
+
+	output, err := newAgentAPIExecutor(svc).executePrompt(
+		ctx, taskID, "return JSON", "deepseek-v4-pro", AgentReasoningEffortMedium,
+		time.Second, agentAPIExecutionOptions{toolNames: []string{codexSubmitResultTool}},
+	)
+	if err == nil || !strings.Contains(err.Error(), `stopped with "stop"`) {
+		t.Fatalf("execute error = %v; want exhausted no-submit failure", err)
+	}
+	if requestCount != agentAPIDeepSeekNewsMaxTurns || output.RequestCount != requestCount {
+		t.Fatalf("request counts = transport %d, output %d; want %d",
+			requestCount, output.RequestCount, agentAPIDeepSeekNewsMaxTurns)
 	}
 }
