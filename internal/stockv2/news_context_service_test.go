@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -691,6 +692,79 @@ func TestExecuteNewsContextRunAppliesTimeoutPerBatch(t *testing.T) {
 	if reloaded.Status != NewsContextRunStatusCompleted ||
 		reloaded.ProcessedCount != 11 || reloaded.PendingCount != 0 || reloaded.RetryCount != 0 {
 		t.Fatalf("completed multi-batch run = %+v", reloaded)
+	}
+}
+
+func TestProcessNewsContextResultKeepsCommittedBatchWhenIndexRefreshFails(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	configureEmbeddingModel(t, svc, "news-context-index-failure")
+	svc.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, context.DeadlineExceeded
+	})}
+
+	now := time.Now().Truncate(time.Second)
+	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowFourHour, TriggerType: NewsContextTriggerScheduled,
+		Status: NewsContextRunStatusRunning, Phase: newsContextRunPhaseAggregating,
+		WindowStart: now.Add(-4 * time.Hour), WindowEnd: now,
+		InputCount: 1, PendingCount: 1,
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	event, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source: "test", Title: "产业链订单形成新主题",
+		Summary: "订单扩散", Content: "测试派生索引失败不回滚权威主题结果。",
+		EventAt: now.Add(-time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create event: %v", err)
+	}
+	const agentRunID = "agent-index-failure"
+	if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
+		RunID: run.ID, ObjectType: NewsContextRunItemNewsEvent, ObjectID: event.ID,
+		Status: NewsContextRunItemRunning, AgentRunID: agentRunID, SourceAt: event.EventAt,
+	}}); err != nil {
+		t.Fatalf("add running item: %v", err)
+	}
+	report := newsContextCreateThreadReport(run, event)
+	report.SearchAudit = []NewsContextSearchAudit{{
+		Question: "是否需要额外公开核实", Status: NewsContextResearchCompleted,
+		Sources: []string{"https://example.com/public"}, Supported: []string{"测试证据"},
+	}}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	var resultMap map[string]any
+	if err := json.Unmarshal(raw, &resultMap); err != nil {
+		t.Fatalf("unmarshal report map: %v", err)
+	}
+	applied, err := svc.ProcessNewsContextSubmittedResult(ctx, run.ID, agentRunID, AgentTaskSubmittedResult{
+		OutputType: NewsContextOutputType, ResultSummary: "测试归纳完成",
+		Result: resultMap, Confidence: 1,
+	})
+	if err != nil {
+		t.Fatalf("process result with failed derived index: %v", err)
+	}
+	if len(applied.ChangedThreadIDs) != 1 || len(applied.ChangedVersionIDs) != 1 {
+		t.Fatalf("apply result = %+v", applied)
+	}
+	items, err := svc.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{
+		RunID: run.ID, AgentRunID: agentRunID, Limit: 10,
+	})
+	if err != nil || len(items) != 1 || items[0].Status != NewsContextRunItemCompleted {
+		t.Fatalf("committed items = %+v, err=%v", items, err)
+	}
+	thread, err := svc.store.GetNewsThread(ctx, applied.ChangedThreadIDs[0])
+	if err != nil {
+		t.Fatalf("get committed thread: %v", err)
+	}
+	if thread.IndexStatus != NewsContextIndexFailed && thread.IndexStatus != NewsContextIndexPending {
+		t.Fatalf("derived index status = %q, want repairable pending/failed", thread.IndexStatus)
 	}
 }
 

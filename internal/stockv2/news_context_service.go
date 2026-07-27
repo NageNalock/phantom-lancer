@@ -26,7 +26,11 @@ const (
 	newsContextAgentTaskTTL = newsContextAgentTimeout + time.Minute
 	// ponytail: a canceled model request still needs one short, bounded storage
 	// window to finalize its AgentRun and avoid a false concurrent-running row.
-	newsContextFinalizeTimeout   = 30 * time.Second
+	newsContextFinalizeTimeout = 45 * time.Second
+	// ponytail: embeddings are repairable derived state. Bound the inline
+	// best-effort refresh so it cannot consume the authoritative result
+	// finalizer or fail an otherwise committed aggregation batch.
+	newsContextIndexSyncTimeout  = 30 * time.Second
 	newsContextTimeoutRetryLimit = 2
 	// ponytail: two short exponential waits absorb transient provider failures
 	// without turning one bad window into a hot retry loop.
@@ -1580,9 +1584,6 @@ func (s *Service) ProcessNewsContextSubmittedResult(ctx context.Context, logical
 	if err != nil {
 		return NewsContextBatchApplyResult{}, err
 	}
-	if err := s.SyncNewsContextEmbeddingObjects(ctx, result.ChangedThreadIDs, result.ChangedVersionIDs); err != nil {
-		return result, fmt.Errorf("index news context fragment: %w", err)
-	}
 	_, historicalRun, lookupErr := s.store.NewsContextBackfillForRun(ctx, logicalRunID)
 	if lookupErr != nil {
 		return NewsContextBatchApplyResult{}, lookupErr
@@ -1596,6 +1597,18 @@ func (s *Service) ProcessNewsContextSubmittedResult(ctx context.Context, logical
 		if _, updateErr := s.store.UpdateNewsContextRun(ctx, latest); updateErr != nil {
 			return NewsContextBatchApplyResult{}, updateErr
 		}
+	}
+	indexCtx, cancelIndex := context.WithTimeout(ctx, newsContextIndexSyncTimeout)
+	indexErr := s.SyncNewsContextEmbeddingObjects(indexCtx, result.ChangedThreadIDs, result.ChangedVersionIDs)
+	cancelIndex()
+	if indexErr != nil && s.log != nil {
+		s.log.Warn("news context fragment index deferred",
+			"context_run_id", logicalRunID,
+			"agent_run_id", agentRunID,
+			"thread_count", len(result.ChangedThreadIDs),
+			"version_count", len(result.ChangedVersionIDs),
+			"error", safelog.Text(indexErr.Error(), 300),
+		)
 	}
 	return result, nil
 }
