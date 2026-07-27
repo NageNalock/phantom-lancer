@@ -244,9 +244,6 @@ func (r *PortfolioSentinelReport) UnmarshalJSON(data []byte) error {
 			SchemaVersion    string                             `json:"schema_version"`
 			OverallRiskLevel string                             `json:"overall_risk_level"`
 			RunSummary       string                             `json:"run_summary"`
-			PositiveItems    []map[string]any                   `json:"positive_items,omitempty"`
-			NegativeItems    []map[string]any                   `json:"negative_items,omitempty"`
-			NoiseItems       []map[string]any                   `json:"noise_items,omitempty"`
 			AffectedHoldings []PortfolioSentinelAffectedHolding `json:"affected_holdings,omitempty"`
 			PortfolioActions []PortfolioSentinelAction          `json:"portfolio_actions,omitempty"`
 			ReviewRequests   []PortfolioSentinelReviewRequest   `json:"review_requests,omitempty"`
@@ -258,14 +255,14 @@ func (r *PortfolioSentinelReport) UnmarshalJSON(data []byte) error {
 			SchemaVersion:    relaxed.SchemaVersion,
 			OverallRiskLevel: relaxed.OverallRiskLevel,
 			RunSummary:       relaxed.RunSummary,
-			PositiveItems:    relaxed.PositiveItems,
-			NegativeItems:    relaxed.NegativeItems,
-			NoiseItems:       relaxed.NoiseItems,
 			AffectedHoldings: relaxed.AffectedHoldings,
 			PortfolioActions: relaxed.PortfolioActions,
 			ReviewRequests:   relaxed.ReviewRequests,
 		}
 	}
+	parsed.PositiveItems = agentObjectListFromRaw(raw["positive_items"])
+	parsed.NegativeItems = agentObjectListFromRaw(raw["negative_items"])
+	parsed.NoiseItems = agentObjectListFromRaw(raw["noise_items"])
 	parsed.DataQualityNotes = agentStringListFromRaw(raw["data_quality_notes"])
 	parsed.NextWatchFocus = agentStringListFromRaw(raw["next_watch_focus"])
 	parsed.CheckedNewsThreadVersionIDs = agentStringListFromRaw(raw["checked_news_thread_version_ids"])

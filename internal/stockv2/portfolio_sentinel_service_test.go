@@ -244,6 +244,9 @@ func TestPortfolioSentinelReportNormalizesStringListFields(t *testing.T) {
 		"schema_version":     PortfolioSentinelReportSchemaVersion,
 		"overall_risk_level": PortfolioSentinelRiskMedium,
 		"run_summary":        "数据质量说明为对象数组也应可保存",
+		"positive_items":     []any{map[string]any{"summary": "结构化正面项"}},
+		"negative_items":     map[string]any{"reason": "单对象负面项"},
+		"noise_items":        "无关市场噪音",
 		"data_quality_notes": []any{
 			map[string]any{"type": "freshness", "note": "报价新鲜"},
 			"单条字符串说明",
@@ -265,6 +268,11 @@ func TestPortfolioSentinelReportNormalizesStringListFields(t *testing.T) {
 	}
 	if len(report.NextWatchFocus) != 1 || report.NextWatchFocus[0] != "继续观察 AI 链" {
 		t.Fatalf("next watch focus = %#v, want normalized string list", report.NextWatchFocus)
+	}
+	if len(report.PositiveItems) != 1 || report.PositiveItems[0]["summary"] != "结构化正面项" ||
+		len(report.NegativeItems) != 1 || report.NegativeItems[0]["reason"] != "单对象负面项" ||
+		len(report.NoiseItems) != 1 || report.NoiseItems[0]["summary"] != "无关市场噪音" {
+		t.Fatalf("sentiment items = %#v/%#v/%#v, want normalized object lists", report.PositiveItems, report.NegativeItems, report.NoiseItems)
 	}
 	if len(report.AffectedHoldings) != 1 ||
 		len(report.AffectedHoldings[0].Reasons) != 1 ||
