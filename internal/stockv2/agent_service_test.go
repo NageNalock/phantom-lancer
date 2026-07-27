@@ -1109,11 +1109,21 @@ func TestFinalizeAgentRunFailureIncludesStderrHint(t *testing.T) {
 	taskID, _ := svc.agentTaskPool.createTask(run.TaskType, run.ID, run.TriggerObjectID, time.Minute)
 
 	svc.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, &AgentExecutorOutput{
-		Command:    "codex exec --json <prompt:42 chars>",
-		Prompt:     "stock profile prompt for 300750",
-		ExitCode:   2,
-		Duration:   time.Millisecond,
-		StderrTail: "first line\nunknown model gpt-stderr-hint\n",
+		Command:         "codex exec --json <prompt:42 chars>",
+		Prompt:          "stock profile prompt for 300750",
+		ExitCode:        2,
+		Duration:        time.Millisecond,
+		StderrTail:      "first line\nunknown model gpt-stderr-hint\n",
+		RequestCount:    1,
+		PromptTokens:    25,
+		CachedTokens:    10,
+		CacheMissTokens: 15,
+		OutputTokens:    5,
+		RequestTrace: []AgentAPIRequestTrace{{
+			Sequence: 1, Turn: 1, Attempt: 1,
+			API: "POST /chat/completions", Purpose: "chat_completion", Status: "failed",
+			HTTPStatus: http.StatusBadGateway, DurationMS: 100, Error: "provider unavailable",
+		}},
 	}, errors.New("process exited (code 2) without submitting result"))
 
 	got, err := svc.GetAgentRun(ctx, run.ID)
@@ -1125,6 +1135,17 @@ func TestFinalizeAgentRunFailureIncludesStderrHint(t *testing.T) {
 	}
 	if !strings.Contains(got.ErrorMessage, "process exited (code 2)") || !strings.Contains(got.ErrorMessage, "unknown model gpt-stderr-hint") {
 		t.Fatalf("error message = %q, want exit code and stderr hint", got.ErrorMessage)
+	}
+	requests, ok := got.CostEstimate["requests"].([]any)
+	if !ok || len(requests) != 1 {
+		t.Fatalf("cost estimate requests = %#v, want one durable request trace", got.CostEstimate["requests"])
+	}
+	if got.CostEstimate["requestCount"] != float64(1) ||
+		got.CostEstimate["inputTokens"] != float64(25) ||
+		got.CostEstimate["cachedTokens"] != float64(10) ||
+		got.CostEstimate["cacheMissTokens"] != float64(15) ||
+		got.CostEstimate["outputTokens"] != float64(5) {
+		t.Fatalf("cost estimate = %#v", got.CostEstimate)
 	}
 	detail, err := svc.GetAgentExecutionDetail(ctx, run.ID)
 	if err != nil {

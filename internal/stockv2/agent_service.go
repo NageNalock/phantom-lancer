@@ -1941,10 +1941,12 @@ func (s *Service) finalizeAgentRunWithOutput(
 	if execOutput != nil {
 		if execOutput.RequestCount > 0 {
 			run.CostEstimate = map[string]any{
-				"requestCount": execOutput.RequestCount,
-				"inputTokens":  execOutput.PromptTokens,
-				"cachedTokens": execOutput.CachedTokens,
-				"outputTokens": execOutput.OutputTokens,
+				"requestCount":    execOutput.RequestCount,
+				"inputTokens":     execOutput.PromptTokens,
+				"cachedTokens":    execOutput.CachedTokens,
+				"cacheMissTokens": execOutput.CacheMissTokens,
+				"outputTokens":    execOutput.OutputTokens,
+				"requests":        execOutput.RequestTrace,
 			}
 		}
 		if strings.TrimSpace(execOutput.Prompt) != "" {

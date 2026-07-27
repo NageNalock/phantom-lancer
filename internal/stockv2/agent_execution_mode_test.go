@@ -467,7 +467,7 @@ func TestDeepSeekNewsExecutionRetriesEmptyJSONResponseInSameConversation(t *test
 			StatusCode: http.StatusOK,
 			Status:     "200 OK",
 			Body: io.NopCloser(strings.NewReader(
-				`{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"","reasoning_content":"done"}}]}`,
+				`{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"","reasoning_content":"done"}}],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_cache_hit_tokens":60,"prompt_cache_miss_tokens":40,"total_tokens":120}}`,
 			)),
 		}, nil
 	})}
@@ -486,5 +486,77 @@ func TestDeepSeekNewsExecutionRetriesEmptyJSONResponseInSameConversation(t *test
 	if requestCount != agentAPIDeepSeekNewsMaxTurns || output.RequestCount != requestCount {
 		t.Fatalf("request counts = transport %d, output %d; want %d",
 			requestCount, output.RequestCount, agentAPIDeepSeekNewsMaxTurns)
+	}
+	if len(output.RequestTrace) != requestCount {
+		t.Fatalf("request trace count = %d, want %d", len(output.RequestTrace), requestCount)
+	}
+	for i, trace := range output.RequestTrace {
+		if trace.Sequence != i+1 || trace.Turn != i+1 || trace.Attempt != 1 {
+			t.Fatalf("trace[%d] identity = %+v", i, trace)
+		}
+		if trace.API != "POST /chat/completions" || trace.Purpose != "empty_response" ||
+			trace.Status != "completed" || trace.HTTPStatus != http.StatusOK ||
+			trace.FinishReason != "stop" {
+			t.Fatalf("trace[%d] response metadata = %+v", i, trace)
+		}
+		if trace.InputTokens != 100 || trace.CacheHitTokens != 60 ||
+			trace.CacheMissTokens != 40 || trace.OutputTokens != 20 ||
+			trace.TotalTokens != 120 {
+			t.Fatalf("trace[%d] usage = %+v", i, trace)
+		}
+	}
+	if output.PromptTokens != 400 || output.CachedTokens != 240 ||
+		output.CacheMissTokens != 160 || output.OutputTokens != 80 {
+		t.Fatalf("aggregate usage = input %d, cache hit %d, cache miss %d, output %d",
+			output.PromptTokens, output.CachedTokens, output.CacheMissTokens, output.OutputTokens)
+	}
+}
+
+func TestAgentAPIChatCompletionRecordsHTTPRetry(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+
+	requestCount := 0
+	svc.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		if requestCount == 1 {
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Status:     "500 Internal Server Error",
+				Body:       io.NopCloser(strings.NewReader(`{"error":"temporary provider failure"}`)),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body: io.NopCloser(strings.NewReader(
+				`{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{\"taskType\":\"news_event_review\",\"result\":{}}"}}],"usage":{"prompt_tokens":25,"completion_tokens":5,"total_tokens":30}}`,
+			)),
+		}, nil
+	})}
+
+	_, traces, err := newAgentAPIExecutor(svc).chatCompletion(
+		context.Background(),
+		"https://api.example.com",
+		"test-token",
+		map[string]any{"model": "test-model", "messages": []any{}},
+		3,
+	)
+	if err != nil {
+		t.Fatalf("chat completion: %v", err)
+	}
+	if len(traces) != 2 {
+		t.Fatalf("trace count = %d, want 2", len(traces))
+	}
+	if traces[0].Turn != 3 || traces[0].Attempt != 1 ||
+		traces[0].Status != "retrying" || traces[0].HTTPStatus != http.StatusInternalServerError ||
+		!strings.Contains(traces[0].Error, "temporary provider failure") {
+		t.Fatalf("retry trace = %+v", traces[0])
+	}
+	if traces[1].Turn != 3 || traces[1].Attempt != 2 ||
+		traces[1].Purpose != "final_json" || traces[1].Status != "completed" ||
+		traces[1].InputTokens != 25 || traces[1].OutputTokens != 5 ||
+		traces[1].TotalTokens != 30 {
+		t.Fatalf("success trace = %+v", traces[1])
 	}
 }

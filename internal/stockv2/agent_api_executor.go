@@ -87,9 +87,11 @@ type agentAPIChatResponse struct {
 		} `json:"message"`
 	} `json:"choices"`
 	Usage struct {
-		PromptTokens         int `json:"prompt_tokens"`
-		CompletionTokens     int `json:"completion_tokens"`
-		PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
+		PromptTokens          int `json:"prompt_tokens"`
+		CompletionTokens      int `json:"completion_tokens"`
+		PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens"`
+		PromptCacheMissTokens int `json:"prompt_cache_miss_tokens"`
+		TotalTokens           int `json:"total_tokens"`
 	} `json:"usage"`
 }
 
@@ -201,8 +203,12 @@ func (e *agentAPIExecutor) executePrompt(
 			(options.forceSubmit || turn >= maxTurns-2) {
 			body["tool_choice"] = agentAPIRequiredSubmitToolChoice()
 		}
-		response, requestCount, err := e.chatCompletion(execCtx, baseURL, apiKey, body)
-		output.RequestCount += requestCount
+		response, requestTrace, err := e.chatCompletion(execCtx, baseURL, apiKey, body, turn+1)
+		for i := range requestTrace {
+			requestTrace[i].Sequence = len(output.RequestTrace) + 1
+			output.RequestTrace = append(output.RequestTrace, requestTrace[i])
+		}
+		output.RequestCount = len(output.RequestTrace)
 		if err != nil {
 			output.Duration = time.Since(started)
 			output.StderrTail = safelog.Text(err.Error(), stderrTailMaxBytes)
@@ -212,8 +218,10 @@ func (e *agentAPIExecutor) executePrompt(
 		}
 		output.PromptTokens += response.Usage.PromptTokens
 		output.CachedTokens += response.Usage.PromptCacheHitTokens
+		output.CacheMissTokens += response.Usage.PromptCacheMissTokens
 		output.OutputTokens += response.Usage.CompletionTokens
 		if len(response.Choices) == 0 {
+			markLastAgentAPIRequestTrace(output, "failed", "response has no choices")
 			return output, errors.New("OpenAI-compatible response has no choices")
 		}
 		choice := response.Choices[0]
@@ -251,6 +259,7 @@ func (e *agentAPIExecutor) executePrompt(
 					} else {
 						lastToolError = safelog.Text(agentAPIToolName(codexSubmitResultTool)+": "+paramsErr.Message, stderrTailMaxBytes)
 					}
+					markLastAgentAPIRequestTrace(output, "result_rejected", lastToolError)
 					if contentSubmission && turn < maxTurns-1 {
 						messages = append(messages, map[string]any{
 							"role": "user",
@@ -299,6 +308,7 @@ func (e *agentAPIExecutor) executePrompt(
 			content := ""
 			if toolErr != nil {
 				lastToolError = safelog.Text(call.Function.Name+": "+toolErr.Message, stderrTailMaxBytes)
+				markLastAgentAPIRequestTrace(output, "tool_error", lastToolError)
 				data, _ := json.Marshal(map[string]any{"error": toolErr.Message, "code": toolErr.Code})
 				content = string(data)
 			} else {
@@ -458,50 +468,126 @@ func agentAPIModePrompt(prompt string, contentSubmission bool) string {
 		submissionInstruction + "\n"
 }
 
-func (e *agentAPIExecutor) chatCompletion(ctx context.Context, baseURL, apiKey string, body map[string]any) (agentAPIChatResponse, int, error) {
+func (e *agentAPIExecutor) chatCompletion(
+	ctx context.Context,
+	baseURL, apiKey string,
+	body map[string]any,
+	turn int,
+) (agentAPIChatResponse, []AgentAPIRequestTrace, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return agentAPIChatResponse{}, 0, err
+		return agentAPIChatResponse{}, nil, err
 	}
 	client := *e.service.agentHTTPClient()
 	client.Timeout = 0
 	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
+	traces := make([]AgentAPIRequestTrace, 0, 3)
 	for attempt := 1; attempt <= 3; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 		if err != nil {
-			return agentAPIChatResponse{}, attempt - 1, err
+			return agentAPIChatResponse{}, traces, err
 		}
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
+		started := time.Now()
 		resp, err := client.Do(req)
+		trace := AgentAPIRequestTrace{
+			Turn:    turn,
+			Attempt: attempt,
+			API:     "POST /chat/completions",
+			Purpose: "chat_completion",
+			Status:  "failed",
+		}
 		if err != nil {
+			trace.DurationMS = time.Since(started).Milliseconds()
+			trace.Error = safelog.Text(err.Error(), 240)
 			if attempt < 3 && ctx.Err() == nil {
+				trace.Status = "retrying"
+				traces = append(traces, trace)
 				time.Sleep(time.Duration(attempt) * time.Second)
 				continue
 			}
-			return agentAPIChatResponse{}, attempt, fmt.Errorf("API request failed: %w", err)
+			traces = append(traces, trace)
+			return agentAPIChatResponse{}, traces, fmt.Errorf("API request failed: %w", err)
 		}
+		trace.HTTPStatus = resp.StatusCode
 		data, readErr := io.ReadAll(io.LimitReader(resp.Body, agentAPIResponseSize))
 		_ = resp.Body.Close()
 		if readErr != nil {
-			return agentAPIChatResponse{}, attempt, fmt.Errorf("read API response: %w", readErr)
+			trace.DurationMS = time.Since(started).Milliseconds()
+			trace.Error = safelog.Text(readErr.Error(), 240)
+			traces = append(traces, trace)
+			return agentAPIChatResponse{}, traces, fmt.Errorf("read API response: %w", readErr)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			trace.DurationMS = time.Since(started).Milliseconds()
 			message := safelog.Text(string(data), 1200)
+			trace.Error = safelog.Text(message, 240)
 			if attempt < 3 && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500) && ctx.Err() == nil {
+				trace.Status = "retrying"
+				traces = append(traces, trace)
 				time.Sleep(time.Duration(attempt) * time.Second)
 				continue
 			}
-			return agentAPIChatResponse{}, attempt, fmt.Errorf("API returned HTTP %d: %s", resp.StatusCode, message)
+			traces = append(traces, trace)
+			return agentAPIChatResponse{}, traces, fmt.Errorf("API returned HTTP %d: %s", resp.StatusCode, message)
 		}
 		var response agentAPIChatResponse
 		if err := json.Unmarshal(data, &response); err != nil {
-			return agentAPIChatResponse{}, attempt, fmt.Errorf("decode API response: %w", err)
+			trace.DurationMS = time.Since(started).Milliseconds()
+			trace.Error = safelog.Text(err.Error(), 240)
+			traces = append(traces, trace)
+			return agentAPIChatResponse{}, traces, fmt.Errorf("decode API response: %w", err)
 		}
-		return response, attempt, nil
+		trace.DurationMS = time.Since(started).Milliseconds()
+		trace.Status = "completed"
+		trace.InputTokens = response.Usage.PromptTokens
+		trace.CacheHitTokens = response.Usage.PromptCacheHitTokens
+		trace.CacheMissTokens = response.Usage.PromptCacheMissTokens
+		trace.OutputTokens = response.Usage.CompletionTokens
+		trace.TotalTokens = response.Usage.TotalTokens
+		if len(response.Choices) == 0 {
+			trace.Purpose = "no_choices"
+		} else {
+			choice := response.Choices[0]
+			trace.FinishReason = safelog.Text(choice.FinishReason, 80)
+			switch {
+			case len(choice.Message.ToolCalls) > 0:
+				trace.Purpose = "lookup_tools"
+				for _, call := range choice.Message.ToolCalls {
+					name := call.Function.Name
+					if originalName, ok := agentAPIToolOriginalName(name); ok {
+						name = originalName
+					}
+					trace.ToolNames = append(trace.ToolNames, safelog.Text(name, 120))
+					if name == codexSubmitResultTool {
+						trace.Purpose = "final_tool_submission"
+					}
+				}
+			case strings.TrimSpace(choice.Message.Content) == "":
+				trace.Purpose = "empty_response"
+			default:
+				if _, ok := agentAPIJSONSubmissionContent(choice.Message.Content); ok {
+					trace.Purpose = "final_json"
+				} else {
+					trace.Purpose = "assistant_message"
+				}
+			}
+		}
+		traces = append(traces, trace)
+		return response, traces, nil
 	}
-	return agentAPIChatResponse{}, 3, errors.New("API request retries exhausted")
+	return agentAPIChatResponse{}, traces, errors.New("API request retries exhausted")
+}
+
+func markLastAgentAPIRequestTrace(output *AgentExecutorOutput, status, errSummary string) {
+	if output == nil || len(output.RequestTrace) == 0 {
+		return
+	}
+	trace := &output.RequestTrace[len(output.RequestTrace)-1]
+	trace.Status = status
+	trace.Error = safelog.Text(errSummary, 240)
 }
 
 func agentAPITools(names []string, submitResultSchema map[string]any) []map[string]any {

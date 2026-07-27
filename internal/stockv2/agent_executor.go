@@ -27,19 +27,44 @@ import (
 // 环境变量用 allowlist 转发, 与 codexclient 的策略对齐但不共享代码。
 
 type AgentExecutorOutput struct {
-	Command        string        `json:"command,omitempty"` // redacted, prompt omitted
-	Prompt         string        `json:"-"`
-	StdoutTail     string        `json:"stdoutTail"` // ~4KB
-	StderrTail     string        `json:"stderrTail"` // ~4KB
-	ExitCode       int           `json:"exitCode"`
-	TimedOut       bool          `json:"timedOut"`
-	Duration       time.Duration `json:"duration"`
-	RawTranscript  string        `json:"rawTranscript"` // ~16KB 摘要, 用于 ledger
-	ProcessGroupID int           `json:"-"`
-	PromptTokens   int           `json:"promptTokens,omitempty"`
-	CachedTokens   int           `json:"cachedTokens,omitempty"`
-	OutputTokens   int           `json:"outputTokens,omitempty"`
-	RequestCount   int           `json:"requestCount,omitempty"`
+	Command         string                 `json:"command,omitempty"` // redacted, prompt omitted
+	Prompt          string                 `json:"-"`
+	StdoutTail      string                 `json:"stdoutTail"` // ~4KB
+	StderrTail      string                 `json:"stderrTail"` // ~4KB
+	ExitCode        int                    `json:"exitCode"`
+	TimedOut        bool                   `json:"timedOut"`
+	Duration        time.Duration          `json:"duration"`
+	RawTranscript   string                 `json:"rawTranscript"` // ~16KB 摘要, 用于 ledger
+	ProcessGroupID  int                    `json:"-"`
+	PromptTokens    int                    `json:"promptTokens,omitempty"`
+	CachedTokens    int                    `json:"cachedTokens,omitempty"`
+	CacheMissTokens int                    `json:"cacheMissTokens,omitempty"`
+	OutputTokens    int                    `json:"outputTokens,omitempty"`
+	RequestCount    int                    `json:"requestCount,omitempty"`
+	RequestTrace    []AgentAPIRequestTrace `json:"requestTrace,omitempty"`
+}
+
+// AgentAPIRequestTrace keeps one redacted record per actual API request.
+// ponytail: retain only request metadata needed for diagnosis; prompts, response
+// content, reasoning content, tool arguments, credentials, and provider hosts
+// deliberately remain outside the durable Agent run.
+type AgentAPIRequestTrace struct {
+	Sequence        int      `json:"sequence"`
+	Turn            int      `json:"turn"`
+	Attempt         int      `json:"attempt"`
+	API             string   `json:"api"`
+	Purpose         string   `json:"purpose"`
+	Status          string   `json:"status"`
+	HTTPStatus      int      `json:"httpStatus,omitempty"`
+	DurationMS      int64    `json:"durationMs"`
+	FinishReason    string   `json:"finishReason,omitempty"`
+	ToolNames       []string `json:"toolNames,omitempty"`
+	InputTokens     int      `json:"inputTokens,omitempty"`
+	CacheHitTokens  int      `json:"cacheHitTokens,omitempty"`
+	CacheMissTokens int      `json:"cacheMissTokens,omitempty"`
+	OutputTokens    int      `json:"outputTokens,omitempty"`
+	TotalTokens     int      `json:"totalTokens,omitempty"`
+	Error           string   `json:"error,omitempty"`
 }
 
 type codexCLIExecutor struct {
