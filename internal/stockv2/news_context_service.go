@@ -879,6 +879,10 @@ func (s *Service) executeNewsContextRunWithTimeout(ctx context.Context, runID st
 		}
 		return
 	}
+	// ponytail: once a provider reports an exhausted quota, keep this worker on
+	// the configured fallback instead of paying for the same known failure on
+	// every remaining batch in the run.
+	fallbackOnly := false
 	for {
 		items, err := s.nextNewsContextRunItems(ctx, run.ID)
 		if err != nil {
@@ -893,7 +897,7 @@ func (s *Service) executeNewsContextRunWithTimeout(ctx context.Context, runID st
 		if len(items) == 0 {
 			break
 		}
-		if err := s.executeNewsContextBatchWithRetry(ctx, &run, cfg, items); err != nil {
+		if err := s.executeNewsContextBatchWithRetry(ctx, &run, cfg, items, &fallbackOnly); err != nil {
 			fail(err)
 			return
 		}
@@ -1071,9 +1075,9 @@ func (s *Service) executeNewsContextBatchWithRetry(
 	run *NewsContextRun,
 	cfg NewsContextConfig,
 	items []NewsContextRunItem,
+	fallbackOnly *bool,
 ) error {
 	batch := items
-	fallbackOnly := false
 	for attempt := 0; attempt <= newsContextTimeoutRetryLimit; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1084,7 +1088,7 @@ func (s *Service) executeNewsContextBatchWithRetry(
 		}
 		pack.AdditionalResearchPrompt = cfg.AdditionalResearchPrompt
 		var resolution AgentTaskResolution
-		if fallbackOnly {
+		if *fallbackOnly {
 			resolution, err = s.resolveFallbackAgentTask(ctx, AgentTaskTypeNewsEventReview, "news_context_run", run.ID, "system")
 		} else {
 			resolution, err = s.ResolveAgentTask(ctx, AgentTaskTypeNewsEventReview, "news_context_run", run.ID, "system")
@@ -1115,7 +1119,7 @@ func (s *Service) executeNewsContextBatchWithRetry(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !fallbackOnly && agentProviderUsageLimitFailure(attemptErr, output) {
+		if !*fallbackOnly && agentProviderUsageLimitFailure(attemptErr, output) {
 			taskProfile, profileErr := s.store.GetAgentTaskProfileByType(ctx, AgentTaskTypeNewsEventReview)
 			if profileErr == nil {
 				taskProfile.PrimaryModelID = ""
@@ -1138,7 +1142,7 @@ func (s *Service) executeNewsContextBatchWithRetry(
 							"error", safelog.Text(attemptErr.Error(), 240),
 						)
 					}
-					fallbackOnly = true
+					*fallbackOnly = true
 					continue
 				}
 			}

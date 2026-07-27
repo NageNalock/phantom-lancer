@@ -667,7 +667,8 @@ func TestExecuteNewsContextBatchFallsBackAfterProviderUsageLimit(t *testing.T) {
 		t.Fatalf("list run items: %v", err)
 	}
 
-	if err := svc.executeNewsContextBatchWithRetry(ctx, &run, defaultNewsContextConfig(), items); err != nil {
+	fallbackOnly := false
+	if err := svc.executeNewsContextBatchWithRetry(ctx, &run, defaultNewsContextConfig(), items, &fallbackOnly); err != nil {
 		t.Fatalf("execute fallback batch: %v", err)
 	}
 	if got := fmt.Sprint(executor.models); got != "[primary-limited fallback-ready]" {
@@ -675,6 +676,31 @@ func TestExecuteNewsContextBatchFallsBackAfterProviderUsageLimit(t *testing.T) {
 	}
 	if got := fmt.Sprint(executor.sizes); got != "[1 1]" {
 		t.Fatalf("batch sizes = %s, want unchanged batch on fallback", got)
+	}
+	secondEvent, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source: "test", Title: "额度回退后续批次", Summary: "无重要市场影响",
+		Content: "用于验证后续批次直接沿用回退模型。", EventAt: now.Add(-30 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("create second event: %v", err)
+	}
+	if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
+		RunID: run.ID, ObjectType: NewsContextRunItemNewsEvent,
+		ObjectID: secondEvent.ID, Status: NewsContextRunItemPending,
+	}}); err != nil {
+		t.Fatalf("add second run item: %v", err)
+	}
+	secondItems, err := svc.store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{
+		RunID: run.ID, Status: NewsContextRunItemPending, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("list second run items: %v", err)
+	}
+	if err := svc.executeNewsContextBatchWithRetry(ctx, &run, defaultNewsContextConfig(), secondItems, &fallbackOnly); err != nil {
+		t.Fatalf("execute second fallback batch: %v", err)
+	}
+	if got := fmt.Sprint(executor.models); got != "[primary-limited fallback-ready fallback-ready]" {
+		t.Fatalf("models = %s, want later batch to stay on fallback", got)
 	}
 	pending, err := svc.store.CountNewsContextRunItems(ctx, NewsContextRunItemListFilter{
 		RunID: run.ID, Status: NewsContextRunItemPending,
@@ -688,8 +714,8 @@ func TestExecuteNewsContextBatchFallsBackAfterProviderUsageLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("count completed items: %v", err)
 	}
-	if pending != 0 || completed != 1 {
-		t.Fatalf("item counts pending=%d completed=%d, want 0 and 1", pending, completed)
+	if pending != 0 || completed != 2 {
+		t.Fatalf("item counts pending=%d completed=%d, want 0 and 2", pending, completed)
 	}
 	runs, err := svc.ListAgentRuns(ctx, AgentRunListFilter{
 		TaskType: AgentTaskTypeNewsEventReview, TriggerObjectID: run.ID, Limit: 10,
@@ -697,8 +723,8 @@ func TestExecuteNewsContextBatchFallsBackAfterProviderUsageLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list agent runs: %v", err)
 	}
-	if len(runs) != 2 {
-		t.Fatalf("agent runs = %d, want primary failure and fallback success", len(runs))
+	if len(runs) != 3 {
+		t.Fatalf("agent runs = %d, want one primary failure and two fallback successes", len(runs))
 	}
 	statusByModel := map[string]string{}
 	runIDByModel := map[string]string{}
@@ -781,7 +807,8 @@ func testExecuteNewsContextBatchRetriesWithSmallerPendingSlice(
 	if err != nil {
 		t.Fatalf("list run items: %v", err)
 	}
-	if err := svc.executeNewsContextBatchWithRetry(ctx, &run, defaultNewsContextConfig(), items); err != nil {
+	fallbackOnly := false
+	if err := svc.executeNewsContextBatchWithRetry(ctx, &run, defaultNewsContextConfig(), items, &fallbackOnly); err != nil {
 		t.Fatalf("execute retry batch: %v", err)
 	}
 	if got := fmt.Sprint(executor.sizes); got != "[5 3 2]" {
