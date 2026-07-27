@@ -41,11 +41,10 @@ const (
 	// either only after measured runs show reliable submit_result coverage.
 	newsContextCLIEventBatchSize  = 10
 	newsContextCLIThreadBatchSize = 8
-	// ponytail: DeepSeek tool-call output becomes unreliable on the observed
-	// larger news batches. These fixed protocol safety limits complement the
-	// existing character cap without adding owner-facing tuning knobs. Replace
-	// them with measured adaptive sizing only if another API model needs it.
-	newsContextDeepSeekEventBatchSize  = 12
+	// ponytail: production 12-event runs repeatedly emitted invalid 18-25 KB
+	// submit_result JSON, while their automatic 6-event retries completed.
+	// Keep this fixed protocol limit until measured adaptive sizing is needed.
+	newsContextDeepSeekEventBatchSize  = 6
 	newsContextDeepSeekThreadBatchSize = 12
 )
 
