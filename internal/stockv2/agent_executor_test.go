@@ -242,7 +242,7 @@ func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing
 		"Write every user-facing conclusion in Simplified Chinese",
 		"Keep schema field names, enum values, identifiers, symbols, and source URLs unchanged",
 		"When InputThreads is empty, both arrays must be empty",
-		"Threads discovered only through semantic search are candidates, not batch review inputs",
+		"CandidateThreads and themes discovered through semantic search are candidates, not batch review inputs",
 		"Do not defer merely because an item is low impact",
 		"stock_agent.submit_result",
 	} {
@@ -261,19 +261,23 @@ func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing
 	}
 
 	apiPrompt := buildNewsContextAggregationPrompt("task-news-context", NewsContextAggregationPack{
-		RunID:           "context-run-1",
-		WindowType:      "daily",
-		WindowEnd:       windowEnd,
-		InputNewsEvents: []NewsEvent{{ID: "news-1"}},
-		InputThreads:    []NewsContextPromptThread{{ID: "thread-1", ThemeID: "thread-1"}},
+		RunID:                 "context-run-1",
+		WindowType:            "daily",
+		WindowEnd:             windowEnd,
+		InputNewsEvents:       []NewsEvent{{ID: "news-1"}},
+		InputThreads:          []NewsContextPromptThread{{ID: "thread-1", ThemeID: "thread-1"}},
+		CandidateThreads:      []NewsContextPromptThread{{ID: "candidate-1", ThemeID: "candidate-1", RetrievalScore: 0.8}},
+		CandidateLookupStatus: "ready",
 	}, "")
 	for _, want := range []string{
 		"InputThreads already contains the authoritative point-in-time snapshot",
 		"do not search for or fetch the same themes again",
+		"CandidateThreads contains the service-prefetched point-in-time snapshots",
+		"Candidate lookup completed for this batch",
 		"This API execution has no public search or browsing capability",
 		"search_audit status unavailable",
-		"issue all needed semantic searches together in the first tool response",
-		"fetch the selected candidates together in the next response",
+		"service already performed bounded candidate recall",
+		"do not call stock_agent.submit_result",
 	} {
 		if !strings.Contains(apiPrompt, want) {
 			t.Fatalf("API prompt missing %q: %s", want, apiPrompt)
@@ -281,6 +285,9 @@ func TestBuildNewsContextAggregationPromptEnforcesCoverageAndResearch(t *testing
 	}
 	if strings.Contains(apiPrompt, "Actively use Codex CLI public search/browse") {
 		t.Fatalf("API prompt incorrectly requires Codex CLI browsing: %s", apiPrompt)
+	}
+	if strings.Contains(apiPrompt, "stock_agent.semantic_search_news_threads with asOf") {
+		t.Fatalf("API prompt incorrectly requests runtime theme lookup: %s", apiPrompt)
 	}
 }
 

@@ -116,76 +116,6 @@ func TestAgentAPIToolCallParamsRejectsMalformedArguments(t *testing.T) {
 	}
 }
 
-func TestAgentAPINewsContextToolsAndSchemaAreTaskSpecific(t *testing.T) {
-	pack := NewsContextAggregationPack{
-		RunID:      "run-exact",
-		WindowType: NewsContextWindowDaily,
-		InputNewsEvents: []NewsEvent{
-			{ID: "news-1"},
-			{ID: "news-2"},
-		},
-		InputThreads: []NewsContextPromptThread{{ID: "thread-1", ThemeID: "thread-1"}},
-	}
-	schema := agentAPINewsContextSubmitResultSchema("task-exact", pack)
-	tools := agentAPITools([]string{
-		mcpToolSemanticSearchNewsThreads,
-		mcpToolGetNewsThread,
-		codexSubmitResultTool,
-	}, schema)
-	if len(tools) != 3 {
-		t.Fatalf("news tools = %d; want 3", len(tools))
-	}
-	wantNames := []string{
-		agentAPIToolName(mcpToolSemanticSearchNewsThreads),
-		agentAPIToolName(mcpToolGetNewsThread),
-		agentAPIToolName(codexSubmitResultTool),
-	}
-	for index, tool := range tools {
-		function := tool["function"].(map[string]any)
-		if function["name"] != wantNames[index] {
-			t.Fatalf("tool[%d] name = %v; want %q", index, function["name"], wantNames[index])
-		}
-	}
-	submitFunction := tools[len(tools)-1]["function"].(map[string]any)
-	if !reflect.DeepEqual(submitFunction["parameters"], schema) {
-		t.Fatal("submit tool did not receive the task-specific schema")
-	}
-
-	properties := schema["properties"].(map[string]any)
-	taskIDSchema := properties["taskID"].(map[string]any)
-	if !reflect.DeepEqual(taskIDSchema["enum"], []string{"task-exact"}) {
-		t.Fatalf("task id enum = %#v", taskIDSchema["enum"])
-	}
-	resultProperties := properties["result"].(map[string]any)["properties"].(map[string]any)
-	reportProperties := resultProperties["result"].(map[string]any)["properties"].(map[string]any)
-	processedItems := reportProperties["processed_news_ids"].(map[string]any)["items"].(map[string]any)
-	if !reflect.DeepEqual(processedItems["enum"], []string{"news-1", "news-2"}) {
-		t.Fatalf("processed news enum = %#v", processedItems["enum"])
-	}
-	if schema["additionalProperties"] != false {
-		t.Fatalf("top-level additionalProperties = %#v", schema["additionalProperties"])
-	}
-
-	threadOnlyPack := NewsContextAggregationPack{
-		RunID:        "run-thread-only",
-		WindowType:   NewsContextWindowDaily,
-		InputThreads: []NewsContextPromptThread{{ID: "thread-only-1", ThemeID: "thread-only-1"}},
-	}
-	threadOnlySchema := agentAPINewsContextSubmitResultSchema("task-thread-only", threadOnlyPack)
-	threadOnlyTools := agentAPITools([]string{codexSubmitResultTool}, threadOnlySchema)
-	if len(threadOnlyTools) != 1 {
-		t.Fatalf("thread-only tools = %d; want only submit", len(threadOnlyTools))
-	}
-	threadOnlyProperties := threadOnlySchema["properties"].(map[string]any)
-	threadOnlyResult := threadOnlyProperties["result"].(map[string]any)["properties"].(map[string]any)
-	threadOnlyReport := threadOnlyResult["result"].(map[string]any)["properties"].(map[string]any)
-	changeItems := threadOnlyReport["thread_changes"].(map[string]any)["items"].(map[string]any)
-	changeProperties := changeItems["properties"].(map[string]any)
-	if !reflect.DeepEqual(changeProperties["thread_id"].(map[string]any)["enum"], []string{"", "thread-only-1"}) {
-		t.Fatalf("thread-only change id enum = %#v", changeProperties["thread_id"])
-	}
-}
-
 func TestApplyAgentAPIReasoningMapsDeepSeekThinkingMode(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -417,6 +347,75 @@ func TestAgentAPIJSONSubmissionContentAcceptsOnlyResultEnvelope(t *testing.T) {
 	}
 }
 
+func TestGenericAPINewsExecutionUsesDirectJSONWithoutTools(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeOpenAI,
+		Name:         "generic-direct-json",
+		BaseURL:      "https://api.example.com",
+		APIKey:       "test-token",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	run, _, err := svc.store.CreateAgentRunWithLedger(ctx, AgentRun{
+		TaskType: AgentTaskTypeNewsEventReview, ExecutionMode: AgentExecutionModeAPI,
+		ProviderID: provider.ID, TriggerObjectType: "test", TriggerObjectID: "generic-direct-json",
+		Status: AgentRunStatusRunning, StartedAt: time.Now(),
+	}, AgentDecisionLedger{
+		TaskType: AgentTaskTypeNewsEventReview, ProviderID: provider.ID,
+		TriggerObjectType: "test", TriggerObjectID: "generic-direct-json",
+	})
+	if err != nil {
+		t.Fatalf("create agent run: %v", err)
+	}
+	taskID, _ := svc.agentTaskPool.createTask(run.TaskType, run.ID, "", time.Minute)
+	requestCount := 0
+	svc.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		body, _ := io.ReadAll(req.Body)
+		var request map[string]any
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatalf("decode API request: %v", err)
+		}
+		if _, ok := request["tools"]; ok {
+			t.Fatalf("generic API news request exposed tools: %s", body)
+		}
+		if requestCount > 1 && !strings.Contains(string(body), "previous final JSON was rejected") {
+			t.Fatalf("generic correction request lacks validation feedback: %s", body)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body: io.NopCloser(strings.NewReader(
+				`{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{\"taskType\":\"news_event_review\",\"result\":{}}"}}]}`,
+			)),
+		}, nil
+	})}
+
+	output, err := newAgentAPIExecutor(svc).executePrompt(
+		ctx, taskID, "return JSON", "generic-model", AgentReasoningEffortMedium,
+		time.Second, agentAPIExecutionOptions{toolNames: []string{
+			mcpToolSemanticSearchNewsThreads,
+			mcpToolGetNewsThread,
+			codexSubmitResultTool,
+		}},
+	)
+	if err == nil {
+		t.Fatal("execute error = nil; want invalid submission failure")
+	}
+	if requestCount != agentAPINewsContentMaxTurns || output.RequestCount != requestCount {
+		t.Fatalf("request counts = transport %d, output %d; want %d",
+			requestCount, output.RequestCount, agentAPINewsContentMaxTurns)
+	}
+	if output.RequestTrace[0].Purpose != "final_json" ||
+		output.RequestTrace[0].Status != "result_rejected" {
+		t.Fatalf("first request trace = %+v", output.RequestTrace[0])
+	}
+}
+
 func TestDeepSeekNewsExecutionRetriesEmptyJSONResponseInSameConversation(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
@@ -450,15 +449,8 @@ func TestDeepSeekNewsExecutionRetriesEmptyJSONResponseInSameConversation(t *test
 		if err := json.Unmarshal(body, &request); err != nil {
 			t.Fatalf("decode API request: %v", err)
 		}
-		tools, ok := request["tools"].([]any)
-		if !ok || len(tools) != 2 {
-			t.Fatalf("DeepSeek news lookup tools = %#v; want two lookup tools", request["tools"])
-		}
-		for _, rawTool := range tools {
-			function := rawTool.(map[string]any)["function"].(map[string]any)
-			if function["name"] == agentAPIToolName(codexSubmitResultTool) {
-				t.Fatalf("DeepSeek news content submission exposed the submit tool: %s", body)
-			}
+		if _, ok := request["tools"]; ok {
+			t.Fatalf("DeepSeek news direct JSON request exposed tools: %s", body)
 		}
 		if requestCount > 1 && !strings.Contains(string(body), "The previous response did not submit") {
 			t.Fatalf("retry request does not contain the same-conversation submit reminder: %s", body)
@@ -545,14 +537,10 @@ func TestDeepSeekNewsCorrectionTurnOmitsLookupTools(t *testing.T) {
 		if err := json.Unmarshal(body, &request); err != nil {
 			t.Fatalf("decode API request: %v", err)
 		}
-		if requestCount == 1 {
-			if tools, ok := request["tools"].([]any); !ok || len(tools) != 2 {
-				t.Fatalf("initial lookup tools = %#v; want two", request["tools"])
-			}
-		} else {
-			if _, ok := request["tools"]; ok {
-				t.Fatalf("correction request %d still exposes tools: %s", requestCount, body)
-			}
+		if _, ok := request["tools"]; ok {
+			t.Fatalf("direct JSON request %d exposed tools: %s", requestCount, body)
+		}
+		if requestCount > 1 {
 			messages, _ := request["messages"].([]any)
 			encodedMessages, _ := json.Marshal(messages)
 			if !strings.Contains(string(encodedMessages), "previous final JSON was rejected") {

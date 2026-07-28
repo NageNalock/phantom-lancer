@@ -439,6 +439,8 @@ type RequestUpdateNewsContextConfig struct {
 type NewsContextPromptThread struct {
 	ID                  string               `json:"id"`
 	ThemeID             string               `json:"themeId,omitempty"`
+	RetrievalScore      float64              `json:"retrievalScore,omitempty"`
+	MatchedNewsEventIDs []string             `json:"matchedNewsEventIds,omitempty"`
 	Title               string               `json:"title"`
 	Summary             string               `json:"summary,omitempty"`
 	CoreThesis          string               `json:"coreThesis"`
@@ -476,6 +478,8 @@ type NewsContextAggregationPack struct {
 	HistoricalReconstruction bool                      `json:"historicalReconstruction,omitempty"`
 	InputNewsEvents          []NewsEvent               `json:"inputNewsEvents,omitempty"`
 	InputThreads             []NewsContextPromptThread `json:"inputThreads,omitempty"`
+	CandidateThreads         []NewsContextPromptThread `json:"candidateThreads,omitempty"`
+	CandidateLookupStatus    string                    `json:"candidateLookupStatus,omitempty"`
 	RequiredResearch         bool                      `json:"requiredResearch"`
 	ResearchReasons          []string                  `json:"researchReasons,omitempty"`
 	AdditionalResearchPrompt string                    `json:"additionalResearchPrompt,omitempty"`

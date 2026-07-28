@@ -17,16 +17,14 @@ import (
 
 const (
 	agentAPIMaxTurns             = 16
+	agentAPINewsContentMaxTurns  = 3
 	agentAPIDeepSeekNewsMaxTurns = 4
-	agentAPIDeepSeekSubmitTurns  = 4
 	agentAPIDeepSeekMaxTokens    = 32 << 10
 	agentAPIResponseSize         = 4 << 20
 )
 
 type agentAPIExecutionOptions struct {
-	toolNames          []string
-	submitResultSchema map[string]any
-	forceSubmit        bool
+	toolNames []string
 }
 
 type agentAPIExecutor struct {
@@ -54,17 +52,10 @@ func (e *agentAPIExecutor) ExecuteOpportunityDiscovery(ctx context.Context, task
 }
 
 func (e *agentAPIExecutor) ExecuteNewsContextAggregation(ctx context.Context, taskID string, pack NewsContextAggregationPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
-	toolNames := []string{codexSubmitResultTool}
-	if len(pack.InputNewsEvents) > 0 {
-		toolNames = []string{mcpToolSemanticSearchNewsThreads, mcpToolGetNewsThread, codexSubmitResultTool}
-	}
+	pack = e.prefetchNewsContextCandidates(ctx, pack)
 	return e.executePrompt(
 		ctx, taskID, buildNewsContextAggregationPrompt(taskID, pack, ""), modelName, reasoningEffort,
-		newsContextAgentTimeout, agentAPIExecutionOptions{
-			toolNames:          toolNames,
-			submitResultSchema: agentAPINewsContextSubmitResultSchema(taskID, pack),
-			forceSubmit:        len(toolNames) == 1,
-		},
+		newsContextAgentTimeout, agentAPIExecutionOptions{},
 	)
 }
 
@@ -130,7 +121,7 @@ func (e *agentAPIExecutor) executePrompt(
 		return nil, err
 	}
 	deepSeek := isDeepSeekAPI(baseURL, modelName)
-	contentSubmission := deepSeek && run.TaskType == AgentTaskTypeNewsEventReview
+	contentSubmission := run.TaskType == AgentTaskTypeNewsEventReview
 
 	prompt = agentAPIModePrompt(prompt, contentSubmission)
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -138,10 +129,10 @@ func (e *agentAPIExecutor) executePrompt(
 	started := time.Now()
 	systemPrompt := "You execute one StockV2 analysis task. Use the provided functions for project data and submit the final structured result with stock_agent_submit_result. Do not claim access to Codex CLI browsing in API mode."
 	if contentSubmission {
-		// ponytail: response_format validates normal JSON content, not tool-call
-		// arguments. Keep lookup tools, then pass the final content through the
-		// same submit_result validation and persistence boundary locally.
-		systemPrompt = `You execute one StockV2 news analysis task. Use the provided functions only for project data lookup. Return the final result as exactly one JSON object matching the stock_agent_submit_result arguments, for example {"taskID":"task-id","taskType":"news_event_review","result":{"outputType":"news_context_aggregation","result":{}}}. Do not call stock_agent_submit_result. Do not claim access to Codex CLI browsing in API mode.`
+		// ponytail: API news runs receive pre-fetched candidates and return normal
+		// JSON content. The service still applies the existing submit_result
+		// validation and persistence boundary locally without another model turn.
+		systemPrompt = `You execute one StockV2 news analysis task. Use only the supplied news and pre-fetched theme snapshots. Return the final result as exactly one JSON object matching the stock_agent_submit_result arguments, for example {"taskID":"task-id","taskType":"news_event_review","result":{"outputType":"news_context_result","result":{}}}. Do not call stock_agent_submit_result. Do not claim access to Codex CLI browsing in API mode.`
 	} else if deepSeek {
 		// ponytail: DeepSeek JSON Output requires an explicit JSON instruction and
 		// example. Final persistence still crosses the validated submit tool.
@@ -149,30 +140,24 @@ func (e *agentAPIExecutor) executePrompt(
 	}
 	userSuffix := "\n\nAPI execution mode: call the provided OpenAI functions. Function names use underscores instead of dots; stock_agent_submit_result is the required final submission."
 	if contentSubmission {
-		userSuffix = "\n\nAPI execution mode: use the provided OpenAI functions only for lookup. Return the complete final submission as one valid JSON object in message content; do not call stock_agent_submit_result."
+		userSuffix = "\n\nAPI execution mode: no functions are available or needed. Return the complete final submission as one valid JSON object in message content; do not call stock_agent_submit_result."
 	}
 	messages := []map[string]any{
 		{"role": "system", "content": systemPrompt},
 		{"role": "user", "content": prompt + userSuffix},
 	}
-	toolNames := options.toolNames
-	if contentSubmission {
-		toolNames = make([]string, 0, len(options.toolNames))
-		for _, name := range options.toolNames {
-			if name != codexSubmitResultTool {
-				toolNames = append(toolNames, name)
-			}
-		}
-	}
-	tools := agentAPITools(toolNames, options.submitResultSchema)
-	if contentSubmission && len(toolNames) == 0 {
-		tools = nil
+	var tools []map[string]any
+	if !contentSubmission {
+		tools = agentAPITools(options.toolNames)
 	}
 	maxTurns := agentAPIMaxTurns
-	if deepSeek && run.TaskType == AgentTaskTypeNewsEventReview {
-		maxTurns = agentAPIDeepSeekNewsMaxTurns
-		if options.forceSubmit {
-			maxTurns = agentAPIDeepSeekSubmitTurns
+	if contentSubmission {
+		// ponytail: one normal response plus at most two schema-correction turns
+		// bounds repeated context; DeepSeek keeps its measured four-turn ceiling
+		// for occasional empty JSON-mode responses.
+		maxTurns = agentAPINewsContentMaxTurns
+		if deepSeek {
+			maxTurns = agentAPIDeepSeekNewsMaxTurns
 		}
 	}
 	output := &AgentExecutorOutput{
@@ -197,12 +182,6 @@ func (e *agentAPIExecutor) executePrompt(
 		applyAgentAPIReasoning(body, deepSeek, reasoningEffort)
 		if deepSeek {
 			applyDeepSeekAPICompatibility(body, reasoningEffort)
-		}
-		if deepSeek && run.TaskType == AgentTaskTypeNewsEventReview &&
-			!contentSubmission &&
-			!deepSeekThinkingEnabled(reasoningEffort) &&
-			(options.forceSubmit || turn >= maxTurns-2) {
-			body["tool_choice"] = agentAPIRequiredSubmitToolChoice()
 		}
 		response, requestTrace, err := e.chatCompletion(execCtx, baseURL, apiKey, body, turn+1)
 		for i := range requestTrace {
@@ -242,7 +221,7 @@ func (e *agentAPIExecutor) executePrompt(
 			transcript.WriteByte('\n')
 		}
 		if len(choice.Message.ToolCalls) == 0 {
-			if deepSeek {
+			if contentSubmission {
 				if content, ok := agentAPIJSONSubmissionContent(choice.Message.Content); ok {
 					params, paramsErr := agentAPIToolCallParams(codexSubmitResultTool, content, taskID)
 					if paramsErr == nil {
@@ -281,10 +260,9 @@ func (e *agentAPIExecutor) executePrompt(
 					return output, fmt.Errorf("API model stopped with %q without submitting a valid result: %s", choice.FinishReason, lastToolError)
 				}
 			}
-			if deepSeek && run.TaskType == AgentTaskTypeNewsEventReview && turn < maxTurns-1 {
-				// ponytail: DeepSeek documents that JSON Output can occasionally
-				// return empty content. Keep the retry inside this cached
-				// conversation instead of restarting the full news batch.
+			if contentSubmission && turn < maxTurns-1 {
+				// ponytail: keep malformed or empty content correction inside the
+				// bounded cached conversation instead of restarting the full batch.
 				messages = append(messages, map[string]any{
 					"role":    "user",
 					"content": `The previous response did not submit the task result. Continue this same task and return exactly one complete valid JSON submission object covering the complete requested batch.`,
@@ -452,15 +430,6 @@ func isDeepSeekAPI(baseURL, modelName string) bool {
 	return host == "deepseek.com" || strings.HasSuffix(host, ".deepseek.com")
 }
 
-func agentAPIRequiredSubmitToolChoice() map[string]any {
-	return map[string]any{
-		"type": "function",
-		"function": map[string]string{
-			"name": agentAPIToolName(codexSubmitResultTool),
-		},
-	}
-}
-
 func agentAPIModePrompt(prompt string, contentSubmission bool) string {
 	// The shared task prompts describe the richer CLI surface. This explicit
 	// tail is authoritative for API runs and prevents false browsing claims.
@@ -596,16 +565,13 @@ func markLastAgentAPIRequestTrace(output *AgentExecutorOutput, status, errSummar
 	trace.Error = safelog.Text(errSummary, 240)
 }
 
-func agentAPITools(names []string, submitResultSchema map[string]any) []map[string]any {
+func agentAPITools(names []string) []map[string]any {
 	if len(names) == 0 {
 		names = stockAgentMCPRequiredTools()
 	}
 	tools := make([]map[string]any, 0, len(names))
 	for _, name := range names {
 		parameters := stockAgentMCPToolInputSchema(name)
-		if name == codexSubmitResultTool && submitResultSchema != nil {
-			parameters = submitResultSchema
-		}
 		tools = append(tools, map[string]any{
 			"type": "function",
 			"function": map[string]any{
