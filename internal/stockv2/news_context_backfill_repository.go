@@ -600,7 +600,7 @@ type newsContextBackfillWindowProgress struct {
 
 func (s *Store) NewsContextBackfillWindowProgress(ctx context.Context, backfillID string) (map[string]newsContextBackfillWindowProgress, error) {
 	rows, err := s.db.QueryContext(ctx, `WITH runs AS (
-		SELECT r.* FROM stockv2_news_context_runs r
+		SELECT r.*,b.created_at AS backfill_linked_at FROM stockv2_news_context_runs r
 		JOIN stockv2_news_context_backfill_runs b ON b.run_id=r.id
 		WHERE b.backfill_id=? AND r.trigger_type=?
 	), window_progress AS (
@@ -619,7 +619,7 @@ func (s *Store) NewsContextBackfillWindowProgress(ctx context.Context, backfillI
 			CAST(strftime('%s',COALESCE(a.started_at,a.created_at)) AS INTEGER))),0) AS duration_seconds
 		FROM runs r JOIN stockv2_agent_runs a
 		ON a.trigger_object_type='news_context_run' AND a.trigger_object_id=r.id
-		AND a.task_type=? GROUP BY r.window_type
+		AND a.task_type=? AND a.created_at>=r.backfill_linked_at GROUP BY r.window_type
 	)
 	SELECT w.*,COALESCE(a.attempt_count,0),COALESCE(a.failed_count,0),COALESCE(a.duration_seconds,0)
 	FROM window_progress w LEFT JOIN agent_progress a ON a.window_type=w.window_type`,
@@ -1031,10 +1031,12 @@ func (s *Store) NewsContextBackfillManifestRangeStart(ctx context.Context, backf
 func (s *Store) CountCompletedNewsContextBackfillChunks(ctx context.Context, backfillID string) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_agent_runs a
-		WHERE a.task_type=? AND a.status=? AND a.trigger_object_type='news_context_run'
-		AND a.trigger_object_id IN (
-			SELECT run_id FROM stockv2_news_context_backfill_runs WHERE backfill_id=?
-		)`, AgentTaskTypeNewsEventReview, AgentRunStatusCompleted, strings.TrimSpace(backfillID)).Scan(&count)
+		JOIN stockv2_news_context_runs r ON r.id=a.trigger_object_id
+		JOIN stockv2_news_context_backfill_runs b ON b.run_id=r.id
+		WHERE b.backfill_id=? AND r.trigger_type=? AND a.task_type=? AND a.status=?
+		AND a.trigger_object_type='news_context_run' AND a.created_at>=b.created_at`,
+		strings.TrimSpace(backfillID), NewsContextTriggerBackfill,
+		AgentTaskTypeNewsEventReview, AgentRunStatusCompleted).Scan(&count)
 	return count, wrapError(err, "count completed news context backfill chunks")
 }
 
