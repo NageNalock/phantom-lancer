@@ -527,7 +527,7 @@ func TestNoiseNewsContextCleanupRejectsFailedOrUnreviewedRuns(t *testing.T) {
 	}
 }
 
-func TestNoiseNewsContextCleanupAllowsPartialHistoricalHierarchy(t *testing.T) {
+func TestNoiseNewsContextCleanupAllowsLinkedReusedHistoricalHierarchy(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -541,8 +541,8 @@ func TestNoiseNewsContextCleanupAllowsPartialHistoricalHierarchy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create completed backfill: %v", err)
 	}
-	source := seedNoiseCleanupRun(t, svc, ctx, NewsContextWindowHourly, day.Add(9*time.Hour), cutoff, NewsContextTriggerBackfill, NewsContextRunStatusCompleted, NewsContextReviewNotRequired)
-	fourHour := seedNoiseCleanupRun(t, svc, ctx, NewsContextWindowFourHour, day.Add(8*time.Hour), cutoff, NewsContextTriggerBackfill, NewsContextRunStatusCompleted, NewsContextReviewNotRequired)
+	source := seedNoiseCleanupRun(t, svc, ctx, NewsContextWindowHourly, day.Add(9*time.Hour), cutoff, NewsContextTriggerRetry, NewsContextRunStatusCompleted, NewsContextReviewNotRequired)
+	fourHour := seedNoiseCleanupRun(t, svc, ctx, NewsContextWindowFourHour, day.Add(8*time.Hour), cutoff, NewsContextTriggerScheduled, NewsContextRunStatusCompleted, NewsContextReviewNotRequired)
 	daily := seedNoiseCleanupRun(t, svc, ctx, NewsContextWindowDaily, day, cutoff, NewsContextTriggerBackfill, NewsContextRunStatusCompleted, NewsContextReviewNotRequired)
 	for _, run := range []NewsContextRun{source, fourHour, daily} {
 		if err := svc.store.LinkNewsContextBackfillRun(ctx, backfill.ID, run.ID); err != nil {

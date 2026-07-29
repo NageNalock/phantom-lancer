@@ -452,9 +452,6 @@ func (s *Service) findNewsContextBackfillReviewedDailyVersion(ctx context.Contex
 	if err != nil {
 		return empty, false, err
 	}
-	if source.TriggerType != NewsContextTriggerBackfill {
-		return empty, false, nil
-	}
 	backfill, ready, _, err := s.newsContextCleanupHistoricalBackfill(ctx, source)
 	if err != nil || !ready {
 		return empty, false, err
@@ -529,7 +526,11 @@ func (s *Service) noiseNewsContextCleanupReady(ctx context.Context, candidate Ne
 }
 
 func (s *Service) newsContextCleanupParentRun(ctx context.Context, source, child NewsContextRun, parentType string, reviewRequired bool) (NewsContextRun, bool, string, error) {
-	if source.TriggerType == NewsContextTriggerBackfill {
+	// Completed natural-window runs may be reused and linked into a backfill.
+	// The durable link, rather than the original trigger label, owns lineage.
+	if _, linked, err := s.store.NewsContextBackfillForRun(ctx, source.ID); err != nil {
+		return NewsContextRun{}, false, "", err
+	} else if linked {
 		return s.newsContextCleanupHistoricalParentRun(ctx, source, child, parentType, reviewRequired)
 	}
 	if !newsContextRunUsesNaturalWindow(child) {
@@ -579,7 +580,9 @@ func (s *Service) newsContextCleanupHistoricalParentRun(ctx context.Context, sou
 	}
 	var parent NewsContextRun
 	for _, run := range runs {
-		if run.Status != NewsContextRunStatusCompleted || run.TriggerType != NewsContextTriggerBackfill ||
+		// ponytail: membership in this backfill is already proven by the link
+		// query; reused retry/scheduled checkpoints keep their original trigger.
+		if run.Status != NewsContextRunStatusCompleted ||
 			run.WindowStart.Before(backfill.RangeStartAt) || run.WindowEnd.After(backfill.CutoffAt) ||
 			child.WindowStart.Before(run.WindowStart) || child.WindowEnd.After(run.WindowEnd) {
 			continue
