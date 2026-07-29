@@ -1343,6 +1343,137 @@ func TestNewsContextBackfillPersistsEveryEmptyHierarchyWindow(t *testing.T) {
 	}
 }
 
+func TestNewsContextBackfillReusesCompletedNaturalWindowWithInputs(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	start := time.Date(2026, 7, 23, 0, 0, 0, 0, time.Local)
+	cutoff := start.Add(8 * time.Hour)
+	event, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source: "test", Title: "covered in hourly checkpoint", EventAt: start.Add(5 * time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backfill, err := svc.store.CreateNewsContextBackfillWithManifest(ctx, NewsContextBackfill{
+		Status: NewsContextBackfillStatusRunning, Phase: "four_hour",
+		RangeStartAt: start, CutoffAt: cutoff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowFourHour,
+		start, start.Add(4*time.Hour), NewsContextTriggerRetry, NewsContextRunStatusCompleted)
+	existing.InputCount = 1
+	existing.ProcessedCount = 1
+	existing.FinishedAt = start.Add(-time.Hour)
+	if _, err := svc.store.UpdateNewsContextRun(ctx, existing); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
+		RunID: existing.ID, ObjectType: NewsContextRunItemNewsEvent, ObjectID: "existing-news",
+		Status: NewsContextRunItemCompleted, Disposition: NewsEventContextCovered, SourceAt: start,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	existingDaily := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowDaily,
+		start, cutoff, NewsContextTriggerRetry, NewsContextRunStatusCompleted)
+	existingDaily.InputCount = 1
+	existingDaily.ProcessedCount = 1
+	existingDaily.FinishedAt = start.Add(-time.Hour)
+	if _, err := svc.store.UpdateNewsContextRun(ctx, existingDaily); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
+		RunID: existingDaily.ID, ObjectType: NewsContextRunItemThread, ObjectID: "existing-thread",
+		ThreadID: "existing-thread", Status: NewsContextRunItemCompleted, Disposition: "materialized",
+		SourceAt: start,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	for at := start; at.Before(cutoff); at = at.Add(time.Hour) {
+		child := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowHourly,
+			at, at.Add(time.Hour), NewsContextTriggerBackfill, NewsContextRunStatusCompleted)
+		if err := svc.store.LinkNewsContextBackfillRun(ctx, backfill.ID, child.ID); err != nil {
+			t.Fatal(err)
+		}
+		if at.Equal(start.Add(5 * time.Hour)) {
+			if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
+				RunID: child.ID, ObjectType: NewsContextRunItemNewsEvent, ObjectID: event.ID,
+				Status: NewsContextRunItemCompleted, Disposition: NewsEventContextCovered, SourceAt: event.EventAt,
+			}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	if err := svc.startNextNewsContextBackfillFourHour(ctx, backfill); err != nil {
+		t.Fatalf("reuse existing natural window: %v", err)
+	}
+	linked, err := svc.store.ListNewsContextBackfillRuns(ctx, backfill.ID, NewsContextWindowFourHour)
+	if err != nil || len(linked) != 1 || linked[0].ID != existing.ID {
+		t.Fatalf("linked existing window=%+v err=%v", linked, err)
+	}
+	unchanged, err := svc.store.GetNewsContextRun(ctx, existing.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.TriggerType != NewsContextTriggerRetry || unchanged.InputCount != 1 ||
+		unchanged.ProcessedCount != 1 || !unchanged.FinishedAt.Equal(existing.FinishedAt) {
+		t.Fatalf("existing natural window was mutated: %+v", unchanged)
+	}
+
+	backfill, err = svc.store.GetNewsContextBackfill(ctx, backfill.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.startNextNewsContextBackfillFourHour(ctx, backfill); err != nil {
+		t.Fatalf("advance past reused natural window: %v", err)
+	}
+	linked, err = svc.store.ListNewsContextBackfillRuns(ctx, backfill.ID, NewsContextWindowFourHour)
+	if err != nil || len(linked) != 2 {
+		current, _ := svc.store.GetNewsContextBackfill(ctx, backfill.ID)
+		hourly, _ := svc.store.ListNewsContextBackfillRuns(ctx, backfill.ID, NewsContextWindowHourly)
+		t.Fatalf("four-hour checkpoints after reuse=%+v phase=%s hourly=%d err=%v", linked, current.Phase, len(hourly), err)
+	}
+
+	backfill, err = svc.store.GetNewsContextBackfill(ctx, backfill.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.startNextNewsContextBackfillFourHour(ctx, backfill); err != nil {
+		t.Fatalf("advance to daily phase: %v", err)
+	}
+	backfill, err = svc.store.GetNewsContextBackfill(ctx, backfill.ID)
+	if err != nil || backfill.Phase != "daily" {
+		t.Fatalf("phase before daily reuse=%s err=%v", backfill.Phase, err)
+	}
+	if err := svc.startNextNewsContextBackfillDaily(ctx, backfill); err != nil {
+		t.Fatalf("reuse existing daily window: %v", err)
+	}
+	daily, err := svc.store.ListNewsContextBackfillRuns(ctx, backfill.ID, NewsContextWindowDaily)
+	if err != nil || len(daily) != 1 || daily[0].ID != existingDaily.ID {
+		t.Fatalf("linked existing daily window=%+v err=%v", daily, err)
+	}
+	backfill, err = svc.store.GetNewsContextBackfill(ctx, backfill.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.startNextNewsContextBackfillDaily(ctx, backfill); err != nil {
+		t.Fatalf("advance past reused daily window: %v", err)
+	}
+	backfill, err = svc.store.GetNewsContextBackfill(ctx, backfill.ID)
+	if err != nil || backfill.Phase != "late_scan" {
+		t.Fatalf("phase after daily reuse=%s err=%v", backfill.Phase, err)
+	}
+	unchangedDaily, err := svc.store.GetNewsContextRun(ctx, existingDaily.ID)
+	if err != nil || unchangedDaily.TriggerType != NewsContextTriggerRetry ||
+		unchangedDaily.InputCount != 1 || unchangedDaily.ProcessedCount != 1 ||
+		!unchangedDaily.FinishedAt.Equal(existingDaily.FinishedAt) {
+		t.Fatalf("existing daily window was mutated: %+v err=%v", unchangedDaily, err)
+	}
+}
+
 func TestHistoricalDailyMaterializesOnlyThemesChangedByFourHourChildren(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
