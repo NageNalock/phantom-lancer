@@ -213,20 +213,6 @@ func newsContextBackfillResumePhase(item NewsContextBackfill) string {
 	return "hourly"
 }
 
-func (s *Service) HasBlockingNewsContextBackfill(ctx context.Context) (bool, error) {
-	if _, found, err := s.store.GetBlockingNewsContextBackfill(ctx); err != nil || found {
-		return found, err
-	}
-	// ponytail: source state is the final cleanup authority. This single query
-	// also blocks cleanup before the owner has created a backfill task and when
-	// late historical news arrives after a previously completed task.
-	stats, err := s.store.NewsContextBackfillSourceStats(ctx, newsContextBackfillCutoff(time.Now()))
-	if err != nil {
-		return false, err
-	}
-	return stats.Pending+stats.Deferred+stats.Claimed > 0, nil
-}
-
 func (s *Service) refreshAndSaveNewsContextBackfill(ctx context.Context, item NewsContextBackfill) (NewsContextBackfill, error) {
 	item, err := s.refreshNewsContextBackfillProgress(ctx, item)
 	if err != nil {

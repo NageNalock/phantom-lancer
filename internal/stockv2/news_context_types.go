@@ -571,6 +571,7 @@ type NewsContextRotationSignals struct {
 
 type NewsContextSummary struct {
 	Config                NewsContextConfig      `json:"config"`
+	CleanupGate           NewsContextCleanupGate `json:"cleanupGate"`
 	ThemeCount            int                    `json:"themeCount"`
 	ActiveThemeCount      int                    `json:"activeThemeCount"`
 	ChangedThemeCount     int                    `json:"changedThemeCount"`
@@ -596,6 +597,19 @@ type NewsContextSummary struct {
 	LatestRun             *NewsContextRun        `json:"latestRun,omitempty"`
 	LatestCleanup         *NewsContextCleanupRun `json:"latestCleanup,omitempty"`
 	UpdatedAt             time.Time              `json:"updatedAt"`
+}
+
+type NewsContextCleanupGate struct {
+	Cutoff         time.Time `json:"cutoff"`
+	Blocked        bool      `json:"blocked"`
+	ActiveBackfill bool      `json:"activeBackfill"`
+	BacklogCount   int       `json:"backlogCount"`
+	PendingCount   int       `json:"pendingCount"`
+	DeferredCount  int       `json:"deferredCount"`
+	ClaimedCount   int       `json:"claimedCount"`
+	EarliestAt     time.Time `json:"earliestAt,omitempty"`
+	LatestAt       time.Time `json:"latestAt,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
 }
 
 func validNewsContextWindowType(value string) bool {

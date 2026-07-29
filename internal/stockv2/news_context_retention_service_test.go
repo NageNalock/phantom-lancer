@@ -29,6 +29,70 @@ func TestNewsContextCleanupDoesNotStartDuringAggregation(t *testing.T) {
 	}
 }
 
+func TestNewsContextCleanupGateIgnoresPendingNewsAfterCutoff(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+	if _, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source: "test", Title: "等待期内的新增消息", EventAt: now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("create recent pending event: %v", err)
+	}
+
+	gate, err := svc.newsContextCleanupGate(ctx, now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("read cleanup gate: %v", err)
+	}
+	if gate.Blocked || gate.BacklogCount != 0 || gate.PendingCount != 0 {
+		t.Fatalf("recent pending event blocked old-news cleanup: %+v", gate)
+	}
+}
+
+func TestNewsContextCleanupGateBlocksPendingNewsBeforeCutoff(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+	eventAt := now.Add(-48 * time.Hour)
+	if _, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source: "test", Title: "清理截止点前的未归纳消息", EventAt: eventAt,
+	}); err != nil {
+		t.Fatalf("create old pending event: %v", err)
+	}
+
+	gate, err := svc.newsContextCleanupGate(ctx, now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("read cleanup gate: %v", err)
+	}
+	if !gate.Blocked || gate.BacklogCount != 1 || gate.PendingCount != 1 {
+		t.Fatalf("old pending event did not block cleanup: %+v", gate)
+	}
+	if gate.EarliestAt.IsZero() || gate.LatestAt.IsZero() || gate.Reason == "" {
+		t.Fatalf("cleanup gate lacks observable backlog details: %+v", gate)
+	}
+}
+
+func TestNewsContextCleanupStartsWithPendingNewsInsideGracePeriod(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	configureEmbeddingModel(t, svc, "cleanup-recent-news-embedding")
+	if _, err := svc.CreateNewsEvent(ctx, NewsEvent{
+		Source: "test", Title: "等待期内不阻塞清理的消息", EventAt: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("create recent pending event: %v", err)
+	}
+
+	run, err := svc.StartNewsContextCleanupRun(ctx, RequestStartNewsContextCleanup{RequestedBy: "test"})
+	if err != nil {
+		t.Fatalf("start cleanup with only recent pending news: %v", err)
+	}
+	if run.ID == "" || run.Cutoff.IsZero() {
+		t.Fatalf("cleanup run lacks durable cutoff: %+v", run)
+	}
+}
+
 func TestDueNewsContextCleanupThrottlesBlockedAttempts(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
@@ -68,15 +132,16 @@ func TestNewsContextCleanupStartRejectsMissingSafetyValidation(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 	configureEmbeddingModel(t, svc, "cleanup-start-gate-embedding")
+	now := time.Now()
 	event, err := svc.CreateNewsEvent(ctx, NewsEvent{
-		Source: "test", Title: "缺少每日复核的待清理消息", EventAt: time.Now().Add(-2 * time.Hour),
+		Source: "test", Title: "缺少每日复核的待清理消息", EventAt: now.Add(-48 * time.Hour),
 		LinkStatus: NewsEventLinkStatusNoCandidate,
 	})
 	if err != nil {
 		t.Fatalf("create cleanup event: %v", err)
 	}
 	if err := svc.store.MarkNewsEventContext(ctx, event.ID, NewsEventContextCovered,
-		"missing-review-run", "", time.Now().Add(-time.Hour)); err != nil {
+		"missing-review-run", "", now.Add(-47*time.Hour)); err != nil {
 		t.Fatalf("mark cleanup event covered: %v", err)
 	}
 	if _, err := svc.StartNewsContextCleanupRun(ctx, RequestStartNewsContextCleanup{

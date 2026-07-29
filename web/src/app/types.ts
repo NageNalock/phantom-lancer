@@ -1583,6 +1583,18 @@ export interface StockV2NewsContextConfig {
 
 export interface StockV2NewsContextSummary {
   config?: StockV2NewsContextConfig;
+  cleanupGate?: {
+    cutoff?: string;
+    blocked: boolean;
+    activeBackfill?: boolean;
+    backlogCount?: number;
+    pendingCount?: number;
+    deferredCount?: number;
+    claimedCount?: number;
+    earliestAt?: string;
+    latestAt?: string;
+    reason?: string;
+  };
   themeCount?: number;
   activeThemeCount?: number;
   changedThemeCount?: number;

@@ -195,31 +195,33 @@ func (s *Service) PatchNewsContextConfig(ctx context.Context, req RequestUpdateN
 		}
 	}
 	if req.AutoCleanupEnabled != nil && *req.AutoCleanupEnabled && !wasAutoCleanupEnabled {
-		if err := s.validateNewsContextCleanupPrerequisites(ctx, true); err != nil {
+		cutoff, err := newsContextCleanupCutoff(time.Now(), cfg.CleanupGraceSeconds, "")
+		if err != nil {
+			return NewsContextConfig{}, err
+		}
+		if err := s.validateNewsContextCleanupPrerequisites(ctx, true, cutoff); err != nil {
 			return NewsContextConfig{}, err
 		}
 	}
 	return s.UpdateNewsContextConfig(ctx, cfg)
 }
 
-func (s *Service) validateNewsContextCleanupPrerequisites(ctx context.Context, requireVerifiedMCP bool) error {
-	if blocked, err := s.HasBlockingNewsContextBackfill(ctx); err != nil {
+func (s *Service) validateNewsContextCleanupPrerequisites(ctx context.Context, requireVerifiedMCP bool, cutoff time.Time) error {
+	gate, err := s.newsContextCleanupGate(ctx, cutoff)
+	if err != nil {
 		return err
-	} else if blocked {
-		return fmt.Errorf("%w: historical news backfill is incomplete", ErrNewsContextPrerequisite)
+	}
+	if gate.Blocked {
+		return fmt.Errorf("%w: %s", ErrNewsContextPrerequisite, gate.Reason)
 	}
 	if _, _, err := s.ensureEmbeddingModelReady(ctx); err != nil {
 		return fmt.Errorf("%w: theme embedding is unavailable", ErrNewsContextPrerequisite)
 	}
-	covered, err := s.store.CountNewsEventsByContextStatus(ctx, NewsEventContextCovered)
+	candidates, err := s.store.ListNewsEventsForContextCleanup(ctx, cutoff, "", 1)
 	if err != nil {
 		return err
 	}
-	noise, err := s.store.CountNewsEventsByContextStatus(ctx, NewsEventContextNoise)
-	if err != nil {
-		return err
-	}
-	if covered+noise == 0 {
+	if len(candidates) == 0 {
 		return nil
 	}
 	daily, err := s.store.ListNewsContextRuns(ctx, NewsContextRunListFilter{
@@ -233,22 +235,21 @@ func (s *Service) validateNewsContextCleanupPrerequisites(ctx context.Context, r
 		return fmt.Errorf("%w: no completed daily aggregation and impact review", ErrNewsContextPrerequisite)
 	}
 	if requireVerifiedMCP {
-		return s.validateNewsContextAutoCleanupSafety(ctx, covered+noise)
+		return s.validateNewsContextAutoCleanupSafety(ctx, cutoff)
 	}
 	return nil
 }
 
-func (s *Service) validateNewsContextAutoCleanupSafety(ctx context.Context, expected int) error {
+func (s *Service) validateNewsContextAutoCleanupSafety(ctx context.Context, cutoff time.Time) error {
 	// ponytail: reuse the exact cleanup safety decision instead of maintaining a
 	// second unlock checklist. A fresh per-request cache still forces one real
 	// semantic-search/detail round-trip for every unprotected current theme.
 	ctx = context.WithValue(ctx, newsContextMCPVerificationCacheKey{}, newsContextMCPVerificationCache{})
 	ctx = context.WithValue(ctx, newsContextCleanupBackfillPrecheckedKey{}, true)
 	afterID := ""
-	checked := 0
 	for {
 		candidates, err := s.store.ListNewsEventsForContextCleanup(ctx,
-			time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC), afterID, newsContextCleanupBatchSize)
+			cutoff, afterID, newsContextCleanupBatchSize)
 		if err != nil {
 			return err
 		}
@@ -257,8 +258,7 @@ func (s *Service) validateNewsContextAutoCleanupSafety(ctx context.Context, expe
 		}
 		for _, candidate := range candidates {
 			afterID = candidate.Event.ID
-			checked++
-			_, _, err := s.newsContextCleanupEligibility(ctx, candidate, false)
+			_, _, err := s.newsContextCleanupEligibility(ctx, candidate, cutoff, false)
 			if err == nil {
 				continue
 			}
@@ -272,12 +272,11 @@ func (s *Service) validateNewsContextAutoCleanupSafety(ctx context.Context, expe
 			break
 		}
 	}
-	if checked != expected {
-		return fmt.Errorf("%w: some covered news lacks a valid cleanup checkpoint", ErrNewsContextPrerequisite)
-	}
-	if blocked, err := s.HasBlockingNewsContextBackfill(ctx); err != nil {
+	gate, err := s.newsContextCleanupGate(ctx, cutoff)
+	if err != nil {
 		return err
-	} else if blocked {
+	}
+	if gate.Blocked {
 		return fmt.Errorf("%w: historical news backfill changed during safety validation", ErrNewsContextPrerequisite)
 	}
 	return nil
@@ -2424,6 +2423,14 @@ func (s *Service) GetNewsContextSummary(ctx context.Context) (NewsContextSummary
 		ReleasedBytes:      released,
 		PendingReviewCount: pendingReview + runningReview,
 		UpdatedAt:          now,
+	}
+	cleanupCutoff, err := newsContextCleanupCutoff(now, cfg.CleanupGraceSeconds, "")
+	if err != nil {
+		return NewsContextSummary{}, err
+	}
+	summary.CleanupGate, err = s.newsContextCleanupGate(ctx, cleanupCutoff)
+	if err != nil {
+		return NewsContextSummary{}, err
 	}
 	pendingNews, _ := s.store.CountNewsEventsByContextStatus(ctx, NewsEventContextPending)
 	deferredNews, _ := s.store.CountNewsEventsByContextStatus(ctx, NewsEventContextDeferred)

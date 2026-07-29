@@ -387,6 +387,12 @@ func TestNewsContextAutoCleanupRequiresReviewedDailyAndRealSearchVerification(t 
 func seedNewsContextAutoCleanupSafetyFixture(t *testing.T, svc *Service, ctx context.Context) (newsContextRetentionSeed, NewsThreadVersion) {
 	t.Helper()
 	seed := seedNewsContextRetentionEvent(t, svc, ctx, verifiedRetentionAudit(), nil, nil, "support")
+	oldEventAt := time.Now().Add(-48 * time.Hour)
+	oldCoveredAt := oldEventAt.Add(time.Hour)
+	if _, err := svc.store.marketDB.db.ExecContext(ctx, `UPDATE stockv2_news_events
+		SET event_at=?, context_covered_at=? WHERE id=?`, oldEventAt, oldCoveredAt, seed.event.ID); err != nil {
+		t.Fatalf("age cleanup safety fixture: %v", err)
+	}
 	candidate := retentionCleanupCandidate(t, svc, ctx, seed.event.ID)
 	daily := seedReviewedDailyRetentionVersion(t, svc, ctx, seed.thread, candidate.ContextCoveredAt, nil, nil, NewsContextResearchCompleted)
 	configureRetentionIndexes(t, svc, ctx, seed.thread.ID, daily)
