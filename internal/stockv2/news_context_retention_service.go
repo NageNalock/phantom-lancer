@@ -488,9 +488,9 @@ func (s *Service) noiseNewsContextCleanupReady(ctx context.Context, candidate Ne
 	}
 	if candidate.Event.EventAt.Before(source.WindowStart) || !candidate.Event.EventAt.Before(source.WindowEnd) {
 		// ponytail: deferred news may be claimed by a later retry window. The
-		// completed noise run item is stronger provenance than expanding the
+		// completed noise/duplicate item is stronger provenance than expanding the
 		// natural window and keeps unrelated cross-window references blocked.
-		processed, err := s.store.HasCompletedNoiseNewsContextRunItem(ctx, source.ID, candidate.Event.ID)
+		processed, err := s.store.HasCompletedDiscardedNewsContextRunItem(ctx, source.ID, candidate.Event.ID)
 		if err != nil {
 			return false, "", err
 		}

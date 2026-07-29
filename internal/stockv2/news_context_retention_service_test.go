@@ -461,26 +461,30 @@ func TestNoiseNewsContextCleanupAllowsDirectReviewedDaily(t *testing.T) {
 }
 
 func TestNoiseNewsContextCleanupAllowsPersistedDeferredCrossWindowItem(t *testing.T) {
-	svc, cleanup := newStrategyTestService(t)
-	defer cleanup()
-	ctx := context.Background()
-	day := time.Date(2026, 7, 12, 0, 0, 0, 0, time.Local)
-	source := seedNoiseCleanupRun(t, svc, ctx, NewsContextWindowFourHour, day.Add(8*time.Hour), day.Add(12*time.Hour), NewsContextTriggerRetry, NewsContextRunStatusCompleted, NewsContextReviewNotRequired)
-	seedNoiseCleanupRun(t, svc, ctx, NewsContextWindowDaily, day, day.Add(24*time.Hour), NewsContextTriggerScheduled, NewsContextRunStatusCompleted, NewsContextReviewCompleted)
-	candidate := NewsContextCleanupCandidate{
-		Event:        NewsEvent{ID: "deferred-cross-window-news", EventAt: day.Add(-time.Hour)},
-		ContextRunID: source.ID,
-	}
-	if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
-		RunID: source.ID, ObjectType: NewsContextRunItemNewsEvent, ObjectID: candidate.Event.ID,
-		Status: NewsContextRunItemCompleted, Disposition: NewsEventContextNoise, SourceAt: candidate.Event.EventAt,
-	}}); err != nil {
-		t.Fatalf("save deferred noise item: %v", err)
-	}
+	for _, disposition := range []string{NewsEventContextNoise, "duplicate"} {
+		t.Run(disposition, func(t *testing.T) {
+			svc, cleanup := newStrategyTestService(t)
+			defer cleanup()
+			ctx := context.Background()
+			day := time.Date(2026, 7, 12, 0, 0, 0, 0, time.Local)
+			source := seedNoiseCleanupRun(t, svc, ctx, NewsContextWindowFourHour, day.Add(8*time.Hour), day.Add(12*time.Hour), NewsContextTriggerRetry, NewsContextRunStatusCompleted, NewsContextReviewNotRequired)
+			seedNoiseCleanupRun(t, svc, ctx, NewsContextWindowDaily, day, day.Add(24*time.Hour), NewsContextTriggerScheduled, NewsContextRunStatusCompleted, NewsContextReviewCompleted)
+			candidate := NewsContextCleanupCandidate{
+				Event:        NewsEvent{ID: "deferred-cross-window-news", EventAt: day.Add(-time.Hour)},
+				ContextRunID: source.ID,
+			}
+			if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
+				RunID: source.ID, ObjectType: NewsContextRunItemNewsEvent, ObjectID: candidate.Event.ID,
+				Status: NewsContextRunItemCompleted, Disposition: disposition, SourceAt: candidate.Event.EventAt,
+			}}); err != nil {
+				t.Fatalf("save deferred discarded item: %v", err)
+			}
 
-	ready, reason, err := svc.noiseNewsContextCleanupReady(ctx, candidate)
-	if err != nil || !ready || reason != "" {
-		t.Fatalf("deferred cross-window ready=%v reason=%q err=%v", ready, reason, err)
+			ready, reason, err := svc.noiseNewsContextCleanupReady(ctx, candidate)
+			if err != nil || !ready || reason != "" {
+				t.Fatalf("deferred cross-window ready=%v reason=%q err=%v", ready, reason, err)
+			}
+		})
 	}
 }
 
