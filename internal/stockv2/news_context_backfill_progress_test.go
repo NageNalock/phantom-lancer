@@ -152,3 +152,55 @@ func TestNewsContextBackfillAgentProgressAggregatesModelAttempts(t *testing.T) {
 		t.Fatalf("agent progress=%+v", fourHour)
 	}
 }
+
+func TestNewsContextBackfillAgentProgressExcludesAttemptsBeforeLink(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	start := time.Now().Add(-4 * time.Hour).Truncate(time.Hour)
+	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowFourHour, TriggerType: NewsContextTriggerBackfill,
+		Status: NewsContextRunStatusCompleted, Phase: "completed",
+		WindowStart: start, WindowEnd: start.Add(4 * time.Hour),
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	createAttempt := func(createdAt time.Time) {
+		t.Helper()
+		if _, _, err := svc.store.CreateAgentRunWithLedger(ctx, AgentRun{
+			TaskType: AgentTaskTypeNewsEventReview, TriggerObjectType: "news_context_run",
+			TriggerObjectID: run.ID, Status: AgentRunStatusCompleted, CreatedAt: createdAt,
+		}, AgentDecisionLedger{
+			TaskType: AgentTaskTypeNewsEventReview, TriggerObjectType: "news_context_run",
+			TriggerObjectID: run.ID, CreatedAt: createdAt,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	createAttempt(time.Now().Add(-time.Hour))
+	backfill, err := svc.store.CreateNewsContextBackfill(ctx, NewsContextBackfill{
+		Status: NewsContextBackfillStatusRunning, Phase: "four_hour",
+		RangeStartAt: run.WindowStart, CutoffAt: run.WindowEnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.LinkNewsContextBackfillRun(ctx, backfill.ID, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	createAttempt(time.Now().Add(time.Second))
+
+	chunks, err := svc.store.CountCompletedNewsContextBackfillChunks(ctx, backfill.ID)
+	if err != nil || chunks != 1 {
+		t.Fatalf("owned completed chunks=%d err=%v", chunks, err)
+	}
+	progress, err := svc.store.NewsContextBackfillWindowProgress(ctx, backfill.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := progress[NewsContextWindowFourHour].AgentAttemptCount; got != 1 {
+		t.Fatalf("owned agent attempts=%d want=1", got)
+	}
+}
