@@ -260,6 +260,18 @@ export function NewsContextSettingsDrawer({
               <ReadOnlyRow label="上次归纳" value={formatNewsContextTime(config.lastRunAt)} />
               <ReadOnlyRow label="上次清理" value={formatNewsContextTime(config.lastCleanupAt)} />
               <ReadOnlyRow
+                label="自动清理门禁"
+                value={summary.cleanupGate?.blocked ? "被阻塞" : "可运行"}
+                detail={summary.cleanupGate?.blocked
+                  ? summary.cleanupGate.reason || "清理截止点前仍有未完成归纳的消息"
+                  : "只检查清理截止点以前的归纳欠账，等待期内的新消息不会阻塞清理"}
+              />
+              <ReadOnlyRow
+                label="当前清理截止点"
+                value={formatNewsContextTime(summary.cleanupGate?.cutoff)}
+                detail={`截止点前欠账 ${summary.cleanupGate?.backlogCount ?? 0} 条；待处理 ${summary.cleanupGate?.pendingCount ?? 0}，延后 ${summary.cleanupGate?.deferredCount ?? 0}，处理中 ${summary.cleanupGate?.claimedCount ?? 0}`}
+              />
+              <ReadOnlyRow
                 label="历史待处理"
                 value={prerequisitesLoading ? "加载中" : prerequisites?.backfill ? `${prerequisites.backfill.pendingNewsCount} 条` : "加载失败"}
                 detail={prerequisitesLoading

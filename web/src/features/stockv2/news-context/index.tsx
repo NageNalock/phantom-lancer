@@ -103,6 +103,7 @@ export function StockV2NewsContext({ actions }: { actions: AppActions }) {
           actions={actions}
           kind="aggregation"
           refreshKey={refreshKey}
+          summary={summary}
           onChanged={() => void loadSummary()}
         />
       ) : null}
@@ -111,6 +112,7 @@ export function StockV2NewsContext({ actions }: { actions: AppActions }) {
           actions={actions}
           kind="cleanup"
           refreshKey={refreshKey}
+          summary={summary}
           onChanged={() => void loadSummary()}
         />
       ) : null}
@@ -159,6 +161,7 @@ function SummaryStrip({
         : (summary?.indexReadyCount || 0) > 0
           ? "ready"
           : "missing");
+  const cleanupBlocked = Boolean(summary?.cleanupGate?.blocked);
 
   return (
     <div className="grid gap-3">
@@ -186,7 +189,9 @@ function SummaryStrip({
             </span>
             <span className="inline-flex items-center gap-2">
               自动清理
-              <Pill tone={summary.config?.autoCleanupEnabled ? "warn" : "neutral"}>{summary.config?.autoCleanupEnabled ? "已启用" : "已暂停"}</Pill>
+              <Pill tone={!summary.config?.autoCleanupEnabled ? "neutral" : cleanupBlocked ? "warn" : "good"}>
+                {!summary.config?.autoCleanupEnabled ? "已暂停" : cleanupBlocked ? "被阻塞" : "可运行"}
+              </Pill>
             </span>
             <span className="inline-flex items-center gap-2">
               <Database size={14} className="text-[var(--muted)]" />

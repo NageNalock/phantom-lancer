@@ -47,11 +47,6 @@ func (s *Service) finishNewsContextCleanup() {
 }
 
 func (s *Service) StartNewsContextCleanupRun(ctx context.Context, req RequestStartNewsContextCleanup) (NewsContextCleanupRun, error) {
-	if blocked, err := s.HasBlockingNewsContextBackfill(ctx); err != nil {
-		return NewsContextCleanupRun{}, err
-	} else if blocked {
-		return NewsContextCleanupRun{}, ErrNewsContextReviewIncomplete
-	}
 	if err := s.tryStartNewsContextCleanup(); err != nil {
 		return NewsContextCleanupRun{}, err
 	}
@@ -75,11 +70,18 @@ func (s *Service) StartNewsContextCleanupRun(ctx context.Context, req RequestSta
 	if err != nil {
 		return NewsContextCleanupRun{}, err
 	}
-	if err := s.validateNewsContextCleanupPrerequisites(ctx, false); err != nil {
-		return NewsContextCleanupRun{}, err
-	}
 	cutoff, err := newsContextCleanupCutoff(time.Now(), cfg.CleanupGraceSeconds, req.Before)
 	if err != nil {
+		return NewsContextCleanupRun{}, err
+	}
+	gate, err := s.newsContextCleanupGate(ctx, cutoff)
+	if err != nil {
+		return NewsContextCleanupRun{}, err
+	}
+	if gate.Blocked {
+		return NewsContextCleanupRun{}, fmt.Errorf("%w: %s", ErrNewsContextReviewIncomplete, gate.Reason)
+	}
+	if err := s.validateNewsContextCleanupPrerequisites(ctx, false, cutoff); err != nil {
 		return NewsContextCleanupRun{}, err
 	}
 	run, err := s.store.CreateNewsContextCleanupRun(ctx, NewsContextCleanupRun{
@@ -129,11 +131,13 @@ func (s *Service) executeNewsContextCleanup(ctx context.Context, id string) {
 	// may remain while unrelated, fully verified news is compacted.
 	afterID := ""
 	for {
-		if blocked, err := s.HasBlockingNewsContextBackfill(ctx); err != nil {
+		gate, err := s.newsContextCleanupGate(ctx, run.Cutoff)
+		if err != nil {
 			fail(err)
 			return
-		} else if blocked {
-			fail(ErrNewsContextReviewIncomplete)
+		}
+		if gate.Blocked {
+			fail(fmt.Errorf("%w: %s", ErrNewsContextReviewIncomplete, gate.Reason))
 			return
 		}
 		candidates, err := s.store.ListNewsEventsForContextCleanup(ctx, run.Cutoff, afterID, newsContextCleanupBatchSize)
@@ -152,7 +156,7 @@ func (s *Service) executeNewsContextCleanup(ctx context.Context, id string) {
 		for _, candidate := range candidates {
 			afterID = candidate.Event.ID
 			run.ScannedCount++
-			eligible, reason, err := s.newsContextCleanupEligibility(preflightCtx, candidate, false)
+			eligible, reason, err := s.newsContextCleanupEligibility(preflightCtx, candidate, run.Cutoff, false)
 			if err != nil {
 				run.FailedCount++
 				fail(err)
@@ -189,7 +193,7 @@ func (s *Service) executeNewsContextCleanup(ctx context.Context, id string) {
 		}
 		for _, candidate := range candidates {
 			afterID = candidate.Event.ID
-			released, compacted, _, err := s.compactNewsContextCandidate(ctx, candidate)
+			released, compacted, _, err := s.compactNewsContextCandidateAtCutoff(ctx, candidate, run.Cutoff)
 			if err != nil {
 				run.FailedCount++
 				fail(err)
@@ -230,7 +234,15 @@ func (s *Service) executeNewsContextCleanup(ctx context.Context, id string) {
 }
 
 func (s *Service) newsContextCleanupEligible(ctx context.Context, candidate NewsContextCleanupCandidate) (bool, string, error) {
-	eligible, reason, err := s.newsContextCleanupEligibility(ctx, candidate, false)
+	cfg, err := s.GetNewsContextConfig(ctx)
+	if err != nil {
+		return false, "", err
+	}
+	cutoff, err := newsContextCleanupCutoff(time.Now(), cfg.CleanupGraceSeconds, "")
+	if err != nil {
+		return false, "", err
+	}
+	eligible, reason, err := s.newsContextCleanupEligibility(ctx, candidate, cutoff, false)
 	var gateFailure newsContextCleanupGateFailure
 	if errors.As(err, &gateFailure) {
 		return false, reason, nil
@@ -238,12 +250,14 @@ func (s *Service) newsContextCleanupEligible(ctx context.Context, candidate News
 	return eligible, reason, err
 }
 
-func (s *Service) newsContextCleanupEligibility(ctx context.Context, candidate NewsContextCleanupCandidate, cachedMCPOnly bool) (bool, string, error) {
+func (s *Service) newsContextCleanupEligibility(ctx context.Context, candidate NewsContextCleanupCandidate, cutoff time.Time, cachedMCPOnly bool) (bool, string, error) {
 	if prechecked, _ := ctx.Value(newsContextCleanupBackfillPrecheckedKey{}).(bool); !prechecked {
-		if blocked, err := s.HasBlockingNewsContextBackfill(ctx); err != nil {
+		gate, err := s.newsContextCleanupGate(ctx, cutoff)
+		if err != nil {
 			return false, "", err
-		} else if blocked {
-			return newsContextCleanupBlocked("历史新闻补处理尚未完成")
+		}
+		if gate.Blocked {
+			return newsContextCleanupBlocked(gate.Reason)
 		}
 	}
 	if candidate.ContextStatus != NewsEventContextCovered && candidate.ContextStatus != NewsEventContextNoise {
@@ -618,6 +632,18 @@ func (s *Service) newsContextCleanupHistoricalFinalReview(ctx context.Context, b
 }
 
 func (s *Service) compactNewsContextCandidate(ctx context.Context, candidate NewsContextCleanupCandidate) (int64, bool, string, error) {
+	cfg, err := s.GetNewsContextConfig(ctx)
+	if err != nil {
+		return 0, false, "", err
+	}
+	cutoff, err := newsContextCleanupCutoff(time.Now(), cfg.CleanupGraceSeconds, "")
+	if err != nil {
+		return 0, false, "", err
+	}
+	return s.compactNewsContextCandidateAtCutoff(ctx, candidate, cutoff)
+}
+
+func (s *Service) compactNewsContextCandidateAtCutoff(ctx context.Context, candidate NewsContextCleanupCandidate, cutoff time.Time) (int64, bool, string, error) {
 	protect := func(reason string) (int64, bool, string, error) {
 		if err := s.store.ProtectNewsEventForCleanup(ctx, candidate.Event.ID, reason); err != nil {
 			return 0, false, "", err
@@ -634,7 +660,7 @@ func (s *Service) compactNewsContextCandidate(ctx context.Context, candidate New
 	defer s.endEmbeddingMaintenance()
 	// ponytail: the slow MCP probe ran before this short execution-slot check.
 	// A cache miss means the theme changed, so the next cleanup run verifies it.
-	eligible, reason, err := s.newsContextCleanupEligibility(ctx, candidate, true)
+	eligible, reason, err := s.newsContextCleanupEligibility(ctx, candidate, cutoff, true)
 	if err != nil {
 		var gateFailure newsContextCleanupGateFailure
 		if errors.As(err, &gateFailure) {
@@ -650,6 +676,40 @@ func (s *Service) compactNewsContextCandidate(ctx context.Context, candidate New
 	}
 	released, err := s.compactNewsContextEvent(ctx, candidate.Event)
 	return released, err == nil, "", err
+}
+
+func (s *Service) newsContextCleanupGate(ctx context.Context, cutoff time.Time) (NewsContextCleanupGate, error) {
+	gate := NewsContextCleanupGate{Cutoff: cutoff}
+	if cutoff.IsZero() {
+		return gate, ErrInvalidNewsContextInput
+	}
+	// ponytail: use the cleanup run's immutable cutoff as the only unresolved-news
+	// boundary. New work inside the grace period remains visible but cannot keep
+	// already-reviewed historical candidates locked forever.
+	if _, found, err := s.store.GetBlockingNewsContextBackfill(ctx); err != nil {
+		return gate, err
+	} else if found {
+		gate.ActiveBackfill = true
+	}
+	stats, err := s.store.NewsContextBackfillSourceStats(ctx, cutoff)
+	if err != nil {
+		return gate, err
+	}
+	gate.BacklogCount = stats.Total
+	gate.PendingCount = stats.Pending
+	gate.DeferredCount = stats.Deferred
+	gate.ClaimedCount = stats.Claimed
+	gate.EarliestAt = stats.EarliestAt
+	gate.LatestAt = stats.LatestAt
+	switch {
+	case gate.ActiveBackfill:
+		gate.Blocked = true
+		gate.Reason = "历史新闻补处理正在运行"
+	case gate.BacklogCount > 0:
+		gate.Blocked = true
+		gate.Reason = fmt.Sprintf("清理截止点前仍有 %d 条消息未完成归纳", gate.BacklogCount)
+	}
+	return gate, nil
 }
 
 func newsContextCleanupCutoff(now time.Time, graceSeconds int, requested string) (time.Time, error) {

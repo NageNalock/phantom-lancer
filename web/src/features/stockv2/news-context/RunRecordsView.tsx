@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowClockwise, Broom, CaretLeft, CaretRight, PlayCircle } from "@phosphor-icons/react";
 import type { AppActions } from "../../../app/App";
-import type { StockV2NewsContextRun, StockV2NewsContextRunListResponse } from "../../../app/types";
+import type {
+  StockV2NewsContextRun,
+  StockV2NewsContextRunListResponse,
+  StockV2NewsContextSummary,
+} from "../../../app/types";
 import { friendlyError } from "../../../api/client";
 import { Button, Drawer, EmptyState, Notice, Pill, useDangerConfirm } from "../../../components/ui";
 import {
@@ -27,11 +31,13 @@ export function RunRecordsView({
   actions,
   kind,
   refreshKey,
+  summary,
   onChanged,
 }: {
   actions: AppActions;
   kind: RunKind;
   refreshKey: number;
+  summary: StockV2NewsContextSummary | null;
   onChanged: () => void;
 }) {
   const [items, setItems] = useState<StockV2NewsContextRun[]>([]);
@@ -54,6 +60,8 @@ export function RunRecordsView({
     item.status === "running" || item.status === "pending" || item.status === "queued" ||
     (item.status === "waiting_review" && item.reviewStatus !== "failed") || Boolean(item.nextRetryAt),
   );
+  const cleanupGate = kind === "cleanup" ? summary?.cleanupGate : undefined;
+  const cleanupBlocked = Boolean(cleanupGate?.blocked);
 
   async function load(showLoading = false) {
     if (showLoading && items.length === 0) setLoading(true);
@@ -195,7 +203,7 @@ export function RunRecordsView({
                 </Button>
               </>
             ) : (
-              <Button disabled={busy === "create"} onClick={() => void createCleanupRun()} tone="danger">
+              <Button disabled={busy === "create" || cleanupBlocked} onClick={() => void createCleanupRun()} tone="danger">
                 <Broom size={14} />
                 {busy === "create" ? "触发中" : "执行安全清理"}
               </Button>
@@ -206,6 +214,27 @@ export function RunRecordsView({
             </Button>
           </div>
         </header>
+
+        {kind === "cleanup" && cleanupGate ? (
+          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] px-4 py-3 text-xs">
+            <div className="grid gap-1">
+              <span className="flex items-center gap-2">
+                <Pill tone={cleanupBlocked ? "warn" : "good"}>{cleanupBlocked ? "清理被阻塞" : "清理可运行"}</Pill>
+                <span>{cleanupBlocked
+                  ? cleanupGate.reason || "清理截止点前仍有未完成归纳的消息"
+                  : "清理截止点前没有未归纳消息，可以继续执行逐条安全检查。"}</span>
+              </span>
+              <span className="text-[var(--muted)]">
+                截止时间 <span className="font-mono">{formatNewsContextTime(cleanupGate.cutoff)}</span>
+                {" · "}截止点前欠账 {cleanupGate.backlogCount ?? 0} 条
+                {" · "}待处理 {cleanupGate.pendingCount ?? 0}
+                {" · "}延后 {cleanupGate.deferredCount ?? 0}
+                {" · "}处理中 {cleanupGate.claimedCount ?? 0}
+              </span>
+            </div>
+            {cleanupGate.activeBackfill ? <Pill tone="warn">历史补处理运行中</Pill> : null}
+          </div>
+        ) : null}
 
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] bg-[var(--surface-soft)] px-4 py-2 text-xs">
           <div className="flex flex-wrap items-center gap-3 text-[var(--muted)]">
