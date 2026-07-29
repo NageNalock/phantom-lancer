@@ -617,6 +617,12 @@ func newsContextBackfillParentFresh(runs map[string]NewsContextRun, windowType s
 		(childLatest.IsZero() || !newsContextBackfillRunTime(run).Before(childLatest))
 }
 
+func newsContextBackfillParentHasPersistedInputs(runs map[string]NewsContextRun, windowType string, start time.Time) bool {
+	run, ok := runs[newsContextBackfillWindowKey(windowType, start)]
+	return ok && run.Status == NewsContextRunStatusCompleted &&
+		(run.InputCount > 0 || run.ProcessedCount > 0)
+}
+
 func (s *Service) startNextNewsContextBackfillFourHour(ctx context.Context, item NewsContextBackfill) error {
 	runs, err := s.newsContextBackfillRunMap(ctx, item)
 	if err != nil {
@@ -637,10 +643,14 @@ func (s *Service) startNextNewsContextBackfillFourHour(ctx context.Context, item
 			_, err = s.refreshAndSaveNewsContextBackfill(ctx, item)
 			return err
 		}
-		if pending == 0 && newsContextBackfillParentFresh(runs, NewsContextWindowFourHour, start, childLatest) {
-			continue
-		}
 		if pending == 0 {
+			if newsContextBackfillParentHasPersistedInputs(runs, NewsContextWindowFourHour, start) ||
+				newsContextBackfillParentFresh(runs, NewsContextWindowFourHour, start, childLatest) {
+				// ponytail: a linked completed parent with persisted inputs already
+				// proves this manifest range is covered. Reusing it avoids mutating
+				// the unique historical window merely to refresh its timestamp.
+				continue
+			}
 			run, err := s.completeEmptyNewsContextBackfillWindow(ctx, item, NewsContextWindowFourHour, start, end)
 			if err != nil {
 				return err
@@ -680,6 +690,9 @@ func (s *Service) startNextNewsContextBackfillDaily(ctx context.Context, item Ne
 			return err
 		}
 		if len(snapshot.Versions) == 0 {
+			if newsContextBackfillParentHasPersistedInputs(runs, NewsContextWindowDaily, start) {
+				continue
+			}
 			run, err := s.completeEmptyNewsContextBackfillWindow(ctx, item, NewsContextWindowDaily, start, end)
 			if err != nil {
 				return err
@@ -723,7 +736,18 @@ func (s *Service) completeEmptyNewsContextBackfillWindow(ctx context.Context, it
 		return run, err
 	}
 	if count != 0 {
-		return run, errors.New("empty historical checkpoint has persisted inputs")
+		completed, err := s.store.CountNewsContextRunItems(ctx, NewsContextRunItemListFilter{
+			RunID: run.ID, Status: NewsContextRunItemCompleted,
+		})
+		if err != nil {
+			return run, err
+		}
+		if run.Status != NewsContextRunStatusCompleted || completed != count {
+			return run, errors.New("existing historical checkpoint has incomplete inputs")
+		}
+		// CreateNewsContextRun returns the unique pre-existing natural window.
+		// Its completed inputs are authoritative and must remain unchanged.
+		return run, nil
 	}
 	now := time.Now()
 	run.TriggerType = NewsContextTriggerBackfill
