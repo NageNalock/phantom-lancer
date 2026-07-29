@@ -602,7 +602,7 @@ func (s *Store) NewsContextBackfillWindowProgress(ctx context.Context, backfillI
 	rows, err := s.db.QueryContext(ctx, `WITH runs AS (
 		SELECT r.*,b.created_at AS backfill_linked_at FROM stockv2_news_context_runs r
 		JOIN stockv2_news_context_backfill_runs b ON b.run_id=r.id
-		WHERE b.backfill_id=? AND r.trigger_type=?
+		WHERE b.backfill_id=?
 	), window_progress AS (
 		SELECT r.window_type,
 		COALESCE(SUM(CASE WHEN r.status=? THEN 1 ELSE 0 END),0),
@@ -623,7 +623,7 @@ func (s *Store) NewsContextBackfillWindowProgress(ctx context.Context, backfillI
 	)
 	SELECT w.*,COALESCE(a.attempt_count,0),COALESCE(a.failed_count,0),COALESCE(a.duration_seconds,0)
 	FROM window_progress w LEFT JOIN agent_progress a ON a.window_type=w.window_type`,
-		strings.TrimSpace(backfillID), NewsContextTriggerBackfill,
+		strings.TrimSpace(backfillID),
 		NewsContextRunStatusCompleted, NewsContextRunStatusCompleted,
 		AgentRunStatusFailed, AgentTaskTypeNewsEventReview)
 	if err != nil {

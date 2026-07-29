@@ -191,6 +191,18 @@ func TestNewsContextBackfillAgentProgressExcludesAttemptsBeforeLink(t *testing.T
 		t.Fatal(err)
 	}
 	createAttempt(time.Now().Add(time.Second))
+	reused, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowFourHour, TriggerType: NewsContextTriggerRetry,
+		Status: NewsContextRunStatusCompleted, Phase: "completed",
+		WindowStart: run.WindowEnd, WindowEnd: run.WindowEnd.Add(4 * time.Hour),
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.LinkNewsContextBackfillRun(ctx, backfill.ID, reused.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	chunks, err := svc.store.CountCompletedNewsContextBackfillChunks(ctx, backfill.ID)
 	if err != nil || chunks != 1 {
@@ -200,7 +212,11 @@ func TestNewsContextBackfillAgentProgressExcludesAttemptsBeforeLink(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := progress[NewsContextWindowFourHour].AgentAttemptCount; got != 1 {
+	fourHour := progress[NewsContextWindowFourHour]
+	if fourHour.CompletedWindowCount != 2 {
+		t.Fatalf("completed windows=%d want=2", fourHour.CompletedWindowCount)
+	}
+	if got := fourHour.AgentAttemptCount; got != 1 {
 		t.Fatalf("owned agent attempts=%d want=1", got)
 	}
 }
