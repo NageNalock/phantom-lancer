@@ -877,6 +877,15 @@ func (s *Store) CountNewsContextRunItems(ctx context.Context, filter NewsContext
 	return count, wrapError(err, "count news context run items")
 }
 
+func (s *Store) HasCompletedNoiseNewsContextRunItem(ctx context.Context, runID, newsEventID string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_context_run_items
+		WHERE run_id=? AND object_type=? AND object_id=? AND status=? AND disposition=?`,
+		strings.TrimSpace(runID), NewsContextRunItemNewsEvent, strings.TrimSpace(newsEventID),
+		NewsContextRunItemCompleted, NewsEventContextNoise).Scan(&count)
+	return count > 0, wrapError(err, "check completed noise news context run item")
+}
+
 func (s *Store) ListNewsContextRunOutputVersionIDs(ctx context.Context, runID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT version_id
 		FROM stockv2_news_context_run_items

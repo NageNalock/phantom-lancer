@@ -490,7 +490,16 @@ func (s *Service) noiseNewsContextCleanupReady(ctx context.Context, candidate Ne
 		return false, "噪音消息的直接处理运行尚未完成", nil
 	}
 	if candidate.Event.EventAt.Before(source.WindowStart) || !candidate.Event.EventAt.Before(source.WindowEnd) {
-		return false, "噪音消息不在直接处理运行的时间窗口内", nil
+		// ponytail: deferred news may be claimed by a later retry window. The
+		// completed noise run item is stronger provenance than expanding the
+		// natural window and keeps unrelated cross-window references blocked.
+		processed, err := s.store.HasCompletedNoiseNewsContextRunItem(ctx, source.ID, candidate.Event.ID)
+		if err != nil {
+			return false, "", err
+		}
+		if !processed {
+			return false, "噪音消息不在直接处理运行的时间窗口内", nil
+		}
 	}
 	if source.WindowType == NewsContextWindowDaily {
 		if source.TriggerType == NewsContextTriggerBackfill {

@@ -460,6 +460,46 @@ func TestNoiseNewsContextCleanupAllowsDirectReviewedDaily(t *testing.T) {
 	}
 }
 
+func TestNoiseNewsContextCleanupAllowsPersistedDeferredCrossWindowItem(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	day := time.Date(2026, 7, 12, 0, 0, 0, 0, time.Local)
+	source := seedNoiseCleanupRun(t, svc, ctx, NewsContextWindowFourHour, day.Add(8*time.Hour), day.Add(12*time.Hour), NewsContextTriggerRetry, NewsContextRunStatusCompleted, NewsContextReviewNotRequired)
+	seedNoiseCleanupRun(t, svc, ctx, NewsContextWindowDaily, day, day.Add(24*time.Hour), NewsContextTriggerScheduled, NewsContextRunStatusCompleted, NewsContextReviewCompleted)
+	candidate := NewsContextCleanupCandidate{
+		Event:        NewsEvent{ID: "deferred-cross-window-news", EventAt: day.Add(-time.Hour)},
+		ContextRunID: source.ID,
+	}
+	if err := svc.store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
+		RunID: source.ID, ObjectType: NewsContextRunItemNewsEvent, ObjectID: candidate.Event.ID,
+		Status: NewsContextRunItemCompleted, Disposition: NewsEventContextNoise, SourceAt: candidate.Event.EventAt,
+	}}); err != nil {
+		t.Fatalf("save deferred noise item: %v", err)
+	}
+
+	ready, reason, err := svc.noiseNewsContextCleanupReady(ctx, candidate)
+	if err != nil || !ready || reason != "" {
+		t.Fatalf("deferred cross-window ready=%v reason=%q err=%v", ready, reason, err)
+	}
+}
+
+func TestNoiseNewsContextCleanupRejectsUnprovenCrossWindowItem(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	day := time.Date(2026, 7, 12, 0, 0, 0, 0, time.Local)
+	source := seedNoiseCleanupRun(t, svc, ctx, NewsContextWindowFourHour, day.Add(8*time.Hour), day.Add(12*time.Hour), NewsContextTriggerRetry, NewsContextRunStatusCompleted, NewsContextReviewNotRequired)
+	seedNoiseCleanupRun(t, svc, ctx, NewsContextWindowDaily, day, day.Add(24*time.Hour), NewsContextTriggerScheduled, NewsContextRunStatusCompleted, NewsContextReviewCompleted)
+
+	ready, reason, err := svc.noiseNewsContextCleanupReady(ctx, NewsContextCleanupCandidate{
+		Event: NewsEvent{ID: "unproven-cross-window-news", EventAt: day.Add(-time.Hour)}, ContextRunID: source.ID,
+	})
+	if err != nil || ready || !strings.Contains(reason, "时间窗口") {
+		t.Fatalf("unproven cross-window ready=%v reason=%q err=%v", ready, reason, err)
+	}
+}
+
 func TestNoiseNewsContextCleanupRejectsFailedOrUnreviewedRuns(t *testing.T) {
 	day := time.Date(2026, 7, 12, 0, 0, 0, 0, time.Local)
 	for _, tt := range []struct {
