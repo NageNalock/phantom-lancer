@@ -10,8 +10,11 @@ import (
 )
 
 const (
-	agentDailyBarsInitialDays    = 365
-	agentDailyBarsOverlapDays    = 90
+	agentDailyBarsInitialDays = 365
+	agentDailyBarsOverlapDays = 90
+	// ponytail: Tencent fqkline drops the newest row for some symbols at count=400;
+	// 365 still covers a full calendar year and was verified to retain the close.
+	agentDailyBarsFetchLimit     = 365
 	agentDailyBarsRequestTimeout = 12 * time.Second
 	agentDailyBarsRetryCooldown  = 10 * time.Minute
 	agentDailyBarsRequestSpacing = 500 * time.Millisecond
@@ -145,7 +148,7 @@ func (s *Service) ensureAgentDailyBars(
 	start := now.AddDate(0, 0, -startDays).Format("2006-01-02")
 	market := s.agentDailyBarsMarket(requestCtx, symbol)
 	s.agentDailyBarsLastRequest = time.Now()
-	bars, err := s.dailyBarsSource.FetchDailyBars(requestCtx, symbol, market, start, completedEnd, adjusted, 400)
+	bars, err := s.dailyBarsSource.FetchDailyBars(requestCtx, symbol, market, start, completedEnd, adjusted, agentDailyBarsFetchLimit)
 	if err == nil {
 		bars = completedDailyBarsOnly(bars, completedEnd, now)
 		if len(bars) == 0 {

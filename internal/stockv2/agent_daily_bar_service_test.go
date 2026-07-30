@@ -17,11 +17,13 @@ func TestBuildDailyBarsContextRefreshesCompletedQFQOnceForConcurrentIntradayRead
 	now := time.Date(2026, 7, 30, 10, 30, 0, 0, chinaMarketTZ)
 	var calls atomic.Int32
 	var requestedEnd atomic.Value
+	var requestedCount atomic.Value
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		calls.Add(1)
 		parts := strings.Split(req.URL.Query().Get("param"), ",")
-		if len(parts) >= 4 {
+		if len(parts) >= 5 {
 			requestedEnd.Store(parts[3])
+			requestedCount.Store(parts[4])
 		}
 		return dailyBarsTestResponse(req, `{"code":0,"msg":"","data":{"sz000977":{"qfqday":[
 			["2026-07-28","60","61","62","59","1000"],
@@ -50,6 +52,9 @@ func TestBuildDailyBarsContextRefreshesCompletedQFQOnceForConcurrentIntradayRead
 	}
 	if got, _ := requestedEnd.Load().(string); got != "2026-07-29" {
 		t.Fatalf("requested end = %q, want previous calendar day", got)
+	}
+	if got, _ := requestedCount.Load().(string); got != "365" {
+		t.Fatalf("requested count = %q, want provider-safe yearly limit", got)
 	}
 	for _, got := range results {
 		if got.Adjusted != DailyBarAdjustedQFQ || got.CoverageStatus != dailyBarsCoverageFreshPreviousClose {
