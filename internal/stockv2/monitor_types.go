@@ -174,7 +174,7 @@ func builtinMonitorTaskDefinitions() []MonitorTaskDefinition {
 		{
 			TaskType:     MonitorTaskDataStrategyMonitor,
 			Label:        "数据面策略监控",
-			Description:  "扫描 active 策略的触发规则,结合最新行情/日K产生命中候选",
+			Description:  "扫描 active 策略的触发规则；价格与涨跌幅越线由分钟行情刷新即时复查，其余条件按配置周期扫描",
 			Category:     "strategy",
 			Runnable:     true,
 			Configurable: true,

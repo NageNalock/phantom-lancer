@@ -287,7 +287,14 @@ type PortfolioSentinelActionPlan struct {
 	Confidence    float64                          `json:"confidence,omitempty"`
 	EvidenceRefs  []string                         `json:"evidence_refs,omitempty"`
 	ResearchRefs  []string                         `json:"research_refs,omitempty"`
+	MonitorWindow *PortfolioSentinelMonitorWindow  `json:"monitor_window,omitempty"`
 	ValidUntil    time.Time                        `json:"valid_until,omitempty"`
+}
+
+type PortfolioSentinelMonitorWindow struct {
+	Kind      string    `json:"kind"`
+	StartsAt  time.Time `json:"starts_at"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type PortfolioSentinelPlanCondition struct {

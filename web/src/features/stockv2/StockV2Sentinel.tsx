@@ -17,6 +17,7 @@ import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, Drawer, Field, Notice, Pill } from "../../components/ui";
 import { StockV2AgentRunDetailDrawer } from "./StockV2AgentExecutionLedger";
 import { StockV2ReviewDrawer } from "./StockV2ReviewDrawer";
+import { strategyPrefilterSummary } from "./StockV2StrategyPlaybook";
 import {
   formatDate,
   stockV2AgentRunStatusLabel,
@@ -458,13 +459,7 @@ function SentinelRunRow({ run, onOpen }: { run: StockV2PortfolioSentinelRun; onO
 function ActionPlanRow({ item }: { item: StockV2PortfolioSentinelActionPlanView }) {
   const { plan } = item;
   const actionable = plan.action !== "hold";
-  const conditions = (plan.conditions || []).map((condition) => {
-    const value =
-      condition.type === "price_between"
-        ? `${condition.low ?? "-"}–${condition.high ?? "-"}`
-        : String(condition.threshold ?? "-");
-    return `${condition.type} ${value}`;
-  });
+  const conditions = (plan.conditions || []).map(strategyPrefilterSummary);
   const sizing = plan.sizing
     ? plan.sizing.mode === "target_portfolio_pct"
       ? `目标组合占比 ${plan.sizing.value}%`
@@ -489,11 +484,19 @@ function ActionPlanRow({ item }: { item: StockV2PortfolioSentinelActionPlanView 
         <KeyValue label="仓位结果" value={sizing} />
         <KeyValue label="触发条件" value={conditions.length > 0 ? conditions.join("；") : "无"} mono />
         <KeyValue label="理由" value={plan.reason || "-"} />
-        <KeyValue label="有效期" value={formatDate(plan.valid_until) || "-"} />
+        <KeyValue label="监控窗口" value={actionPlanMonitorWindowSummary(plan)} />
       </div>
       {plan.risk_notes ? <p className="mt-2 border-t border-[var(--line)] pt-2 text-[var(--muted)]">风险边界：{plan.risk_notes}</p> : null}
     </div>
   );
+}
+
+function actionPlanMonitorWindowSummary(plan: StockV2PortfolioSentinelActionPlan): string {
+  const expiresAt = formatDate(plan.monitor_window?.expires_at || plan.valid_until) || "-";
+  if (plan.monitor_window?.kind === "continuous_until_expiry") return `生成后持续检查，至 ${expiresAt}`;
+  if (plan.action === "hold") return `无需数据触发，结论保留至 ${expiresAt}`;
+  if (plan.trigger_mode === "immediate") return `立即生成提案，结论保留至 ${expiresAt}`;
+  return `条件计划保留至 ${expiresAt}`;
 }
 
 function portfolioSentinelActionLabel(action: string): string {

@@ -801,18 +801,30 @@ func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run Monitor
 	alertCount := 0
 
 	for _, action := range actions {
-		if validUntil := firstRuleString(action, "validUntil"); validUntil != "" {
+		sentinelPlan := firstRuleString(action, "portfolioSentinelActionPlan") == "true"
+		if sentinelPlan {
+			incrementMonitorRunMetadata(run.Metadata, "portfolioSentinelPlanCount")
+			switch portfolioSentinelPlanWindowState(action, run.StartedAt) {
+			case "pending":
+				incrementMonitorRunMetadata(run.Metadata, "portfolioSentinelPlanPendingCount")
+				continue
+			case "expired":
+				incrementMonitorRunMetadata(run.Metadata, "portfolioSentinelPlanExpiredCount")
+				continue
+			}
+		} else if validUntil := firstRuleString(action, "validUntil"); validUntil != "" {
 			if deadline, err := time.Parse(time.RFC3339, validUntil); err == nil && !run.StartedAt.Before(deadline) {
 				continue
 			}
 		}
-		if firstRuleString(action, "portfolioSentinelActionPlan") == "true" {
+		if sentinelPlan {
 			alreadyTriggered, err := s.portfolioSentinelPlanAlreadyTriggered(ctx, sw.Strategy.ID, action)
 			if err != nil {
 				failedCount++
 				continue
 			}
 			if alreadyTriggered {
+				incrementMonitorRunMetadata(run.Metadata, "portfolioSentinelPlanTriggeredCount")
 				continue
 			}
 		}
@@ -824,6 +836,9 @@ func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run Monitor
 			continue
 		}
 		hasPrefilters = true
+		if sentinelPlan {
+			incrementMonitorRunMetadata(run.Metadata, "portfolioSentinelPlanEvaluatedCount")
+		}
 		triggerPolicy := firstRuleString(action, "triggerPolicy")
 		if triggerPolicy != WatchTriggerPolicyAny {
 			triggerPolicy = WatchTriggerPolicyAll
@@ -861,8 +876,9 @@ func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run Monitor
 			evidence["matchedThreshold"] = ruleResult.Threshold
 			break
 		}
-		if firstRuleString(action, "portfolioSentinelActionPlan") == "true" {
+		if sentinelPlan {
 			evidence["portfolioSentinelActionPlan"] = action
+			incrementMonitorRunMetadata(run.Metadata, "portfolioSentinelPlanMatchedCount")
 		}
 
 		title := "策略动作候选: " + strategyActionLabel(actionType)
@@ -908,6 +924,33 @@ func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run Monitor
 		matched = true
 	}
 	return hasPrefilters, matched, hitCount, failedCount, reviewCount, alertCount
+}
+
+func portfolioSentinelPlanWindowState(action map[string]any, now time.Time) string {
+	window := mapFromAny(action["monitorWindow"])
+	if startsAt := firstRuleString(window, "startsAt"); startsAt != "" {
+		if start, err := time.Parse(time.RFC3339, startsAt); err == nil && now.Before(start) {
+			return "pending"
+		}
+	}
+	expiresAt := firstRuleString(window, "expiresAt")
+	if expiresAt == "" {
+		expiresAt = firstRuleString(action, "validUntil")
+	}
+	if expiresAt != "" {
+		if deadline, err := time.Parse(time.RFC3339, expiresAt); err == nil && !now.Before(deadline) {
+			return "expired"
+		}
+	}
+	return "active"
+}
+
+func incrementMonitorRunMetadata(metadata map[string]any, key string) {
+	if metadata == nil {
+		return
+	}
+	value, _ := metadata[key].(int)
+	metadata[key] = value + 1
 }
 
 func (s *Service) portfolioSentinelPlanAlreadyTriggered(
@@ -1129,6 +1172,7 @@ func (s *Service) RunLatestQuoteRefreshTask(ctx context.Context, triggerType str
 
 	startedAt := time.Now()
 	symbols := s.collectMonitorSymbols(ctx)
+	previousQuotes, _ := s.store.GetLatestQuotes(ctx, symbols)
 	state := QuoteRefreshTaskState{
 		TaskType:     MonitorTaskLatestQuoteRefresh,
 		Status:       MonitorRunStatusRunning,
@@ -1178,6 +1222,18 @@ func (s *Service) RunLatestQuoteRefreshTask(ctx context.Context, triggerType str
 		}
 		return state, saveErr
 	}
+	if err == nil && result.RefreshedCount > 0 {
+		eventCtx, eventCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer eventCancel()
+		if eventErr := s.runDataStrategyMonitorOnSentinelQuoteCrossing(eventCtx, previousQuotes, result.Items); eventErr != nil &&
+			!errors.Is(eventErr, ErrMonitorTaskAlreadyRunning) && s.log != nil {
+			s.log.Warn("stockv2 sentinel quote crossing monitor failed",
+				"task_type", MonitorTaskDataStrategyMonitor,
+				"trigger_type", MonitorTriggerEvent,
+				"error", safelog.Text(eventErr.Error(), 240),
+			)
+		}
+	}
 	if s.log != nil && (err != nil || result.FailedCount > 0) {
 		errText := ""
 		if err != nil {
@@ -1186,6 +1242,93 @@ func (s *Service) RunLatestQuoteRefreshTask(ctx context.Context, triggerType str
 		s.log.Warn("stockv2 latest quote refresh task finished with errors", "task_type", state.TaskType, "trigger_type", state.TriggerType, "status", state.Status, "scope_summary", state.ScopeSummary, "scanned_count", state.ScannedCount, "success_count", state.SuccessCount, "failed_count", state.FailedCount, "failure_sample", stockV2FailureSample(result.FailedItems, 5), "error", safelog.Text(errText, 300))
 	}
 	return state, err
+}
+
+func (s *Service) runDataStrategyMonitorOnSentinelQuoteCrossing(
+	ctx context.Context,
+	previous []StockV2QuoteLatest,
+	current []StockV2QuoteLatest,
+) error {
+	cfg, err := s.store.GetMonitorTaskConfig(ctx, MonitorTaskDataStrategyMonitor)
+	if errors.Is(err, ErrMonitorTaskNotFound) {
+		return nil
+	}
+	if err != nil || !cfg.Enabled {
+		return err
+	}
+	strategies, err := s.store.ListStrategies(ctx, StrategyListFilter{
+		Kind:   StrategyKindPortfolioMonitor,
+		Status: StrategyStatusActive,
+		Source: StrategySourceAgent,
+		Limit:  500,
+	})
+	if err != nil {
+		return err
+	}
+	previousBySymbol := quoteBySymbol(previous)
+	currentBySymbol := quoteBySymbol(current)
+	now := time.Now()
+	for _, strategy := range strategies {
+		if strategy.ActiveVersion == nil ||
+			stringFromAny(strategy.ActiveVersion.GenerationMeta["template"]) != "portfolio_sentinel_action_plan_v2" {
+			continue
+		}
+		for _, action := range playbookActionMapsFromMeta(strategy.ActiveVersion.GenerationMeta) {
+			if firstRuleString(action, "portfolioSentinelActionPlan") != "true" ||
+				portfolioSentinelPlanWindowState(action, now) != "active" {
+				continue
+			}
+			alreadyTriggered, err := s.portfolioSentinelPlanAlreadyTriggered(ctx, strategy.Strategy.ID, action)
+			if err != nil {
+				return err
+			}
+			if alreadyTriggered {
+				continue
+			}
+			symbol := firstNonEmpty(firstRuleString(action, "symbol"), strategy.Strategy.Symbol)
+			before, beforeOK := previousBySymbol[symbol]
+			after, afterOK := currentBySymbol[symbol]
+			if !beforeOK || !afterOK || after.Status != QuoteStatusFresh {
+				continue
+			}
+			for _, rule := range playbookActionWatchRules(action, symbol, strategy.Strategy.PortfolioID) {
+				if quoteRuleCrossed(rule, before, after) {
+					_, err := s.RunMonitorTask(ctx, MonitorTaskDataStrategyMonitor, MonitorTriggerEvent)
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func quoteBySymbol(quotes []StockV2QuoteLatest) map[string]StockV2QuoteLatest {
+	out := make(map[string]StockV2QuoteLatest, len(quotes))
+	for _, quote := range quotes {
+		if symbol := strings.TrimSpace(quote.Symbol); symbol != "" {
+			out[symbol] = quote
+		}
+	}
+	return out
+}
+
+func quoteRuleCrossed(rule watchRule, before, after StockV2QuoteLatest) bool {
+	switch rule.Type {
+	case WatchRulePriceAbove:
+		return before.LastPrice <= rule.Threshold && after.LastPrice > rule.Threshold
+	case WatchRulePriceBelow:
+		return before.LastPrice >= rule.Threshold && after.LastPrice < rule.Threshold
+	case WatchRulePriceBetween:
+		beforeMatched := before.LastPrice >= rule.Low && before.LastPrice <= rule.High
+		afterMatched := after.LastPrice >= rule.Low && after.LastPrice <= rule.High
+		return !beforeMatched && afterMatched
+	case WatchRulePctChangeAbove:
+		return before.PctChange <= rule.Threshold && after.PctChange > rule.Threshold
+	case WatchRulePctChangeBelow:
+		return before.PctChange >= rule.Threshold && after.PctChange < rule.Threshold
+	default:
+		return false
+	}
 }
 
 func quoteRefreshTaskStateAsMonitorRun(state QuoteRefreshTaskState) MonitorRun {

@@ -2021,6 +2021,12 @@ export interface StockV2StrategyPrefilter {
   topics?: string[];
 }
 
+export interface StockV2StrategyMonitorWindow {
+  kind?: string;
+  startsAt?: string;
+  expiresAt?: string;
+}
+
 export interface StockV2StrategyActionRule {
   id?: string;
   action: StockV2StrategyActionType | string;
@@ -2032,6 +2038,17 @@ export interface StockV2StrategyActionRule {
   dataPrefilters?: StockV2StrategyPrefilter[];
   portfolioPrefilters?: StockV2StrategyPrefilter[];
   newsPrefilters?: StockV2StrategyPrefilter[];
+  symbol?: string;
+  market?: string;
+  portfolioId?: string;
+  triggerPolicy?: "all" | "any" | string;
+  sizing?: { mode: string; value: number };
+  reason?: string;
+  riskNotes?: string;
+  validUntil?: string;
+  monitorWindow?: StockV2StrategyMonitorWindow;
+  portfolioSentinelActionPlan?: boolean | string;
+  portfolioSentinelRunId?: string;
   priority?: number;
 }
 
@@ -2635,6 +2652,11 @@ export interface StockV2PortfolioSentinelActionPlan {
   confidence?: number;
   evidence_refs?: string[];
   research_refs?: string[];
+  monitor_window?: {
+    kind?: string;
+    starts_at?: string;
+    expires_at?: string;
+  };
   valid_until?: string;
 }
 

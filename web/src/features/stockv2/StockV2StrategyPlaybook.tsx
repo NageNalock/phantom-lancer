@@ -1,6 +1,13 @@
 import { Plus, Trash } from "@phosphor-icons/react";
-import type { StockV2StrategyActionRule, StockV2StrategyActionType, StockV2StrategyPlaybook, StockV2StrategyPrefilter } from "../../app/types";
+import type {
+  StockV2MonitorTask,
+  StockV2StrategyActionRule,
+  StockV2StrategyActionType,
+  StockV2StrategyPlaybook,
+  StockV2StrategyPrefilter,
+} from "../../app/types";
 import { Button, CollapsibleSection, Field, Pill } from "../../components/ui";
+import { formatDate, stockV2MonitorRunStatusLabel } from "../../domain/labels";
 
 export const PLAYBOOK_META_KEY = "playbook";
 
@@ -243,15 +250,23 @@ function PrefilterEditor({
   );
 }
 
-export function PlaybookSummary({ playbook }: { playbook?: StockV2StrategyPlaybook }) {
+export function PlaybookSummary({
+  playbook,
+  monitorTask,
+}: {
+  playbook?: StockV2StrategyPlaybook;
+  monitorTask?: StockV2MonitorTask | null;
+}) {
   const rules = playbook?.rules || [];
   if (rules.length === 0) return null;
+  const sentinelPlan = rules.some(isPortfolioSentinelPlan);
   return (
     <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
       <div className="mb-2 flex items-center justify-between gap-2">
         <div className="text-xs font-medium text-[var(--muted-strong)]">操作剧本</div>
         <Pill tone="neutral">{rules.length} 个动作</Pill>
       </div>
+      {sentinelPlan ? <SentinelMonitorStatus task={monitorTask} /> : null}
       <div className="grid gap-2 text-xs">
         {rules.map((rule, index) => (
           <div key={rule.id || `${rule.action}-${index}`} className="grid gap-1 rounded-md border border-[var(--line)] bg-[var(--surface)] p-2">
@@ -261,12 +276,41 @@ export function PlaybookSummary({ playbook }: { playbook?: StockV2StrategyPlaybo
             </div>
             {rule.trigger ? <span className="text-[var(--muted-strong)]">触发: {rule.trigger}</span> : null}
             {rule.preconditions ? <span className="text-[var(--muted-strong)]">前置: {rule.preconditions}</span> : null}
-            {rule.target ? <span className="text-[var(--muted-strong)]">目标: {rule.target}</span> : null}
-            {rule.risk ? <span className="text-[var(--muted-strong)]">风险: {rule.risk}</span> : null}
+            {rule.target || rule.sizing ? <span className="text-[var(--muted-strong)]">目标: {rule.target || playbookSizingSummary(rule)}</span> : null}
+            {rule.reason ? <span className="text-[var(--muted-strong)]">理由: {rule.reason}</span> : null}
+            {rule.risk || rule.riskNotes ? <span className="text-[var(--muted-strong)]">风险: {rule.risk || rule.riskNotes}</span> : null}
             {playbookPrefilterSummary(rule) ? <span className="text-[var(--muted)]">预筛: {playbookPrefilterSummary(rule)}</span> : null}
+            {playbookMonitorWindowSummary(rule) ? <span className="text-[var(--muted)]">监控窗口: {playbookMonitorWindowSummary(rule)}</span> : null}
+            {rule.portfolioSentinelRunId ? (
+              <span className="text-[var(--muted)]">
+                来源: 组合哨兵运行 <span className="font-mono">{shortID(rule.portfolioSentinelRunId)}</span>
+              </span>
+            ) : null}
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function SentinelMonitorStatus({ task }: { task?: StockV2MonitorTask | null }) {
+  const config = task?.config;
+  const latest = task?.latestRun;
+  const hasPlanCounts = typeof latest?.metadata?.portfolioSentinelPlanEvaluatedCount === "number";
+  return (
+    <div className="mb-2 grid gap-1 border-b border-[var(--line)] pb-2 text-xs text-[var(--muted-strong)]">
+      <div className="flex flex-wrap items-center gap-2">
+        <span>绑定数据面策略监控</span>
+        <Pill tone={!task ? "neutral" : config?.enabled ? "good" : "warn"}>
+          {!task ? "状态未加载" : config?.enabled ? "已启用" : "未启用"}
+        </Pill>
+        {config?.intervalSeconds ? <span>扫描周期 {formatCompactInterval(config.intervalSeconds)}</span> : null}
+      </div>
+      <span className="text-[var(--muted)]">价格与涨跌幅越线由分钟行情刷新即时复查；其他条件按完整扫描周期检查。</span>
+      <span className="text-[var(--muted)]">
+        最近扫描: {latest ? `${stockV2MonitorRunStatusLabel(latest.status)}，${formatDate(latest.startedAt) || "-"}` : "暂无记录"}
+        {latest && hasPlanCounts ? `，检查 ${latest.metadata?.portfolioSentinelPlanEvaluatedCount} 条哨兵计划，命中 ${latest.metadata?.portfolioSentinelPlanMatchedCount ?? 0} 条` : ""}
+      </span>
     </div>
   );
 }
@@ -369,6 +413,17 @@ function normalizePlaybookRule(value: unknown, index: number): StockV2StrategyAc
     dataPrefilters: normalizePrefilterList(raw.dataPrefilters),
     portfolioPrefilters: normalizePrefilterList(raw.portfolioPrefilters),
     newsPrefilters: normalizePrefilterList(raw.newsPrefilters),
+    symbol: stringFromUnknown(raw.symbol),
+    market: stringFromUnknown(raw.market),
+    portfolioId: stringFromUnknown(raw.portfolioId),
+    triggerPolicy: stringFromUnknown(raw.triggerPolicy),
+    sizing: normalizeSizing(raw.sizing),
+    reason: stringFromUnknown(raw.reason),
+    riskNotes: stringFromUnknown(raw.riskNotes),
+    validUntil: stringFromUnknown(raw.validUntil),
+    monitorWindow: normalizeMonitorWindow(raw.monitorWindow),
+    portfolioSentinelActionPlan: booleanOrStringFromUnknown(raw.portfolioSentinelActionPlan),
+    portfolioSentinelRunId: stringFromUnknown(raw.portfolioSentinelRunId),
     priority: numberFromUnknown(raw.priority) || index + 1,
   };
   return rule;
@@ -384,6 +439,12 @@ function hasPlaybookRuleContent(rule: StockV2StrategyActionRule): boolean {
     Boolean(rule.dataPrefilters?.length) ||
     Boolean(rule.portfolioPrefilters?.length) ||
     Boolean(rule.newsPrefilters?.length) ||
+    Boolean(rule.sizing) ||
+    Boolean(rule.reason?.trim()) ||
+    Boolean(rule.riskNotes?.trim()) ||
+    Boolean(rule.validUntil) ||
+    Boolean(rule.monitorWindow) ||
+    Boolean(rule.portfolioSentinelActionPlan) ||
     (rule.title?.trim() && rule.title.trim() !== defaultTitle),
   );
 }
@@ -433,12 +494,93 @@ function numOrUndef(value: string): number | undefined {
 
 function playbookPrefilterSummary(rule: StockV2StrategyActionRule): string {
   const items = [...(rule.dataPrefilters || []), ...(rule.portfolioPrefilters || []), ...(rule.newsPrefilters || [])];
-  return items.map((item) => prefilterLabel(item.type)).join(" / ");
+  return items.map(strategyPrefilterSummary).join(" / ");
+}
+
+export function strategyPrefilterSummary(item: StockV2StrategyPrefilter): string {
+  const label = prefilterLabel(item.type);
+  if (item.type === "price_between") {
+    return `${label} ${formatRuleNumber(item.low)} - ${formatRuleNumber(item.high)}`;
+  }
+  if (item.type === "quote_stale") {
+    return `${label}超过 ${formatRuleNumber(item.maxAgeSeconds)} 秒`;
+  }
+  if (item.type === "news_semantic_relevance") {
+    const details = [
+      typeof item.minScore === "number" ? `分数 ${formatRuleNumber(item.minScore)}` : "",
+      item.topics?.length ? `主题 ${item.topics.join("、")}` : "",
+    ].filter(Boolean);
+    return details.length ? `${label} ${details.join("，")}` : label;
+  }
+  const suffix = item.type?.includes("pct_change") || item.type?.includes("weight") ? "%" : "";
+  return typeof item.threshold === "number" ? `${label} ${formatRuleNumber(item.threshold)}${suffix}` : label;
 }
 
 function prefilterLabel(type?: string): string {
   if (type === "news_semantic_relevance") return "消息相关度";
   return PREFILTERS.find((prefilter) => prefilter.value === type)?.label || type || "预筛";
+}
+
+function playbookSizingSummary(rule: StockV2StrategyActionRule): string {
+  const sizing = rule.sizing;
+  if (!sizing) return "";
+  const value = formatRuleNumber(sizing.value);
+  if (sizing.mode === "target_portfolio_pct") return `目标组合占比 ${value}%`;
+  if (sizing.mode === "available_quantity_pct") return `调整届时可用数量的 ${value}%`;
+  return `${sizing.mode} ${value}`;
+}
+
+function playbookMonitorWindowSummary(rule: StockV2StrategyActionRule): string {
+  const window = rule.monitorWindow;
+  const expiresAt = window?.expiresAt || rule.validUntil;
+  if (window?.kind === "continuous_until_expiry") {
+    return `生成后持续检查，至 ${formatDate(expiresAt) || "-"}`;
+  }
+  return expiresAt ? `至 ${formatDate(expiresAt) || "-"}` : "";
+}
+
+function normalizeSizing(value: unknown): StockV2StrategyActionRule["sizing"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const mode = stringFromUnknown(raw.mode);
+  const amount = numberFromUnknown(raw.value);
+  return mode && amount !== undefined ? { mode, value: amount } : undefined;
+}
+
+function normalizeMonitorWindow(value: unknown): StockV2StrategyActionRule["monitorWindow"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const window = {
+    kind: stringFromUnknown(raw.kind),
+    startsAt: stringFromUnknown(raw.startsAt),
+    expiresAt: stringFromUnknown(raw.expiresAt),
+  };
+  return window.kind || window.startsAt || window.expiresAt ? window : undefined;
+}
+
+function booleanOrStringFromUnknown(value: unknown): boolean | string | undefined {
+  if (typeof value === "boolean") return value;
+  return stringFromUnknown(value);
+}
+
+function isPortfolioSentinelPlan(rule: StockV2StrategyActionRule): boolean {
+  return rule.portfolioSentinelActionPlan === true || rule.portfolioSentinelActionPlan === "true";
+}
+
+function formatRuleNumber(value?: number): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 4 }).format(value);
+}
+
+function formatCompactInterval(seconds: number): string {
+  if (seconds < 60) return `${seconds} 秒`;
+  if (seconds % 3600 === 0) return `${seconds / 3600} 小时`;
+  if (seconds % 60 === 0) return `${seconds / 60} 分钟`;
+  return `${seconds} 秒`;
+}
+
+function shortID(value: string): string {
+  return value.length > 12 ? value.slice(-12) : value;
 }
 
 function isPrefilterReady(item: StockV2StrategyPrefilter): boolean {

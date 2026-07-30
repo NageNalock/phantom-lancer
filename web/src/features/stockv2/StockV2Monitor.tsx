@@ -630,6 +630,9 @@ function MonitorTaskRow({
         <div className="mt-1 text-xs text-[var(--muted)]">
           最近运行:{latest ? `${stockV2MonitorRunStatusLabel(latest.status)} · 命中 ${latest.hitCount ?? 0} · ${formatDate(latest.startedAt) || "-"}` : "-"}
         </div>
+        {latest && monitorSentinelPlanSummary(latest) ? (
+          <div className="mt-1 text-xs text-[var(--muted)]">{monitorSentinelPlanSummary(latest)}</div>
+        ) : null}
       </div>
       <div className="flex flex-wrap items-start justify-end gap-1">
         {portfolioSentinel ? (
@@ -829,6 +832,9 @@ function MonitorRunDrawer({
             <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">任务类型</span><span>{stockV2MonitorTaskTypeLabel(run.taskType)}</span></div>
             <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">执行时间</span><span>{formatDate(run.startedAt) || "-"} → {formatDate(run.finishedAt) || (run.status === "running" ? "进行中" : "-")}</span></div>
             <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">结果计数</span><span>成功 {run.successCount ?? 0} / 失败 {run.failedCount ?? 0} / Alert {run.alertCount ?? 0}</span></div>
+            {monitorSentinelPlanSummary(run) ? (
+              <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">哨兵操作计划</span><span>{monitorSentinelPlanSummary(run)}</span></div>
+            ) : null}
             {run.scopeSummary ? <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">扫描范围</span><span>{run.scopeSummary}</span></div> : null}
             {portfolioSentinelRunID(run) ? <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">哨兵运行</span><span className="font-mono">{shortID(portfolioSentinelRunID(run))}</span></div> : null}
             {run.errorMessage ? <div className="break-words text-[var(--danger)]">错误：{run.errorMessage}</div> : null}
@@ -906,6 +912,22 @@ function openPortfolioSentinelPage() {
 function portfolioSentinelRunID(run: StockV2MonitorRun): string {
   const value = run.metadata?.portfolioSentinelRunId;
   return typeof value === "string" ? value : "";
+}
+
+function monitorSentinelPlanSummary(run: StockV2MonitorRun): string {
+  const metadata = run.metadata;
+  const total = metadataNumber(metadata?.portfolioSentinelPlanCount);
+  if (total <= 0) return "";
+  const evaluated = metadataNumber(metadata?.portfolioSentinelPlanEvaluatedCount);
+  const matched = metadataNumber(metadata?.portfolioSentinelPlanMatchedCount);
+  const triggered = metadataNumber(metadata?.portfolioSentinelPlanTriggeredCount);
+  const expired = metadataNumber(metadata?.portfolioSentinelPlanExpiredCount);
+  const pending = metadataNumber(metadata?.portfolioSentinelPlanPendingCount);
+  return `共 ${total} 条，检查 ${evaluated}，命中 ${matched}，已触发 ${triggered}，待生效 ${pending}，已过期 ${expired}`;
+}
+
+function metadataNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function MonitorHitDetail({

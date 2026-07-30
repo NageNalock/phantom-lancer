@@ -633,6 +633,57 @@ func TestRunDataStrategyMonitorUsesPlaybookPrefilters(t *testing.T) {
 	}
 }
 
+func TestPortfolioSentinelPlanWindowState(t *testing.T) {
+	now := time.Date(2026, 7, 30, 10, 0, 0, 0, chinaMarketTZ)
+	action := map[string]any{
+		"validUntil": now.Add(time.Hour).Format(time.RFC3339),
+		"monitorWindow": map[string]any{
+			"startsAt":  now.Add(-time.Minute).Format(time.RFC3339),
+			"expiresAt": now.Add(time.Minute).Format(time.RFC3339),
+		},
+	}
+	if got := portfolioSentinelPlanWindowState(action, now); got != "active" {
+		t.Fatalf("active window state = %q", got)
+	}
+	action["monitorWindow"] = map[string]any{
+		"startsAt":  now.Add(time.Minute).Format(time.RFC3339),
+		"expiresAt": now.Add(time.Hour).Format(time.RFC3339),
+	}
+	if got := portfolioSentinelPlanWindowState(action, now); got != "pending" {
+		t.Fatalf("pending window state = %q", got)
+	}
+	action["monitorWindow"] = map[string]any{
+		"startsAt":  now.Add(-time.Hour).Format(time.RFC3339),
+		"expiresAt": now.Format(time.RFC3339),
+	}
+	if got := portfolioSentinelPlanWindowState(action, now); got != "expired" {
+		t.Fatalf("expired window state = %q", got)
+	}
+}
+
+func TestQuoteRuleCrossed(t *testing.T) {
+	before := StockV2QuoteLatest{LastPrice: 10, PctChange: -1}
+	after := StockV2QuoteLatest{LastPrice: 9, PctChange: -3}
+	tests := []struct {
+		name string
+		rule watchRule
+		want bool
+	}{
+		{name: "price below crossed", rule: watchRule{Type: WatchRulePriceBelow, Threshold: 9.5}, want: true},
+		{name: "price above not crossed", rule: watchRule{Type: WatchRulePriceAbove, Threshold: 10.5}},
+		{name: "pct below crossed", rule: watchRule{Type: WatchRulePctChangeBelow, Threshold: -2}, want: true},
+		{name: "price entered range", rule: watchRule{Type: WatchRulePriceBetween, Low: 8.5, High: 9.5}, want: true},
+		{name: "daily close waits for scheduled scan", rule: watchRule{Type: WatchRuleDailyCloseBelow, Threshold: 9.5}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := quoteRuleCrossed(test.rule, before, after); got != test.want {
+				t.Fatalf("quoteRuleCrossed() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestMonitorAlertDedupeCooldownUpdatesOccurrence(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStrategyTestService(t)

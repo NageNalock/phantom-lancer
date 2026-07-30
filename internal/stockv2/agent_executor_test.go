@@ -399,6 +399,9 @@ func TestBuildPortfolioSentinelPromptRequiresCompleteNewsContextReview(t *testin
 		"opportunity_ids",
 		"strategy_ids",
 		"explicit empty list",
+		"server owns monitor_window and valid_until",
+		"only the next trading window/session",
+		"plan validity period",
 		"invented",
 	} {
 		if !strings.Contains(prompt, want) {

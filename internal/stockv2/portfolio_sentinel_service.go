@@ -1240,6 +1240,7 @@ func (s *Service) preparePortfolioSentinelPlanStrategies(
 				"riskNotes":                   plan.RiskNotes,
 				"evidenceRefs":                plan.EvidenceRefs,
 				"researchRefs":                plan.ResearchRefs,
+				"monitorWindow":               plan.MonitorWindow,
 				"validUntil":                  plan.ValidUntil,
 				"portfolioSentinelActionPlan": "true",
 				"portfolioSentinelRunId":      run.ID,
@@ -1590,6 +1591,13 @@ func (s *Service) validatePortfolioSentinelActionPlans(
 			}
 		}
 		plan.ValidUntil = now.Add(portfolioSentinelPlanValidity)
+		if plan.Action != PortfolioSentinelPlanHold && plan.TriggerMode == PortfolioSentinelTriggerConditional {
+			plan.MonitorWindow = &PortfolioSentinelMonitorWindow{
+				Kind:      "continuous_until_expiry",
+				StartsAt:  now,
+				ExpiresAt: plan.ValidUntil,
+			}
+		}
 		if plan.Action != PortfolioSentinelPlanHold {
 			actionable = true
 			if len(plan.ResearchRefs) == 0 {

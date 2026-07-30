@@ -204,7 +204,10 @@ func TestPortfolioSentinelV2PublishesCurrentConditionalPlanStrategy(t *testing.T
 	if err != nil {
 		t.Fatalf("list current plans: %v", err)
 	}
-	if len(plans) != 1 || plans[0].Plan.ValidUntil.IsZero() || plans[0].Plan.Sizing == nil {
+	if len(plans) != 1 || plans[0].Plan.ValidUntil.IsZero() || plans[0].Plan.Sizing == nil ||
+		plans[0].Plan.MonitorWindow == nil ||
+		plans[0].Plan.MonitorWindow.Kind != "continuous_until_expiry" ||
+		!plans[0].Plan.MonitorWindow.ExpiresAt.Equal(plans[0].Plan.ValidUntil) {
 		t.Fatalf("plans = %+v, want one bounded current plan", plans)
 	}
 	strategies, err := svc.store.ListStrategies(ctx, StrategyListFilter{
@@ -217,14 +220,40 @@ func TestPortfolioSentinelV2PublishesCurrentConditionalPlanStrategy(t *testing.T
 		stringFromAny(strategies[0].ActiveVersion.GenerationMeta["template"]) != "portfolio_sentinel_action_plan_v2" {
 		t.Fatalf("strategies = %+v, want active sentinel plan strategy", strategies)
 	}
+	playbookRules := playbookActionMapsFromMeta(strategies[0].ActiveVersion.GenerationMeta)
+	if len(playbookRules) != 1 ||
+		firstRuleString(mapFromAny(playbookRules[0]["monitorWindow"]), "kind") != "continuous_until_expiry" {
+		t.Fatalf("strategy playbook monitor window = %+v", playbookRules)
+	}
 	monitorConfig, err := svc.store.GetMonitorTaskConfig(ctx, MonitorTaskDataStrategyMonitor)
 	if err != nil || !monitorConfig.Enabled {
 		t.Fatalf("data strategy monitor config = %+v, err=%v; want enabled", monitorConfig, err)
 	}
+	seedWatchQuote(t, svc, "000001", 10.0, 0, QuoteStatusFresh, now.Add(-time.Minute))
+	previousQuotes, err := svc.store.GetLatestQuotes(ctx, []string{"000001"})
+	if err != nil {
+		t.Fatalf("load previous quote: %v", err)
+	}
 	seedWatchQuote(t, svc, "000001", 9.0, -2.0, QuoteStatusFresh, now)
-	firstMonitorRun, err := svc.RunMonitorTask(ctx, MonitorTaskDataStrategyMonitor, MonitorTriggerManual)
-	if err != nil || firstMonitorRun.HitCount != 1 || firstMonitorRun.ReviewCount != 1 {
+	currentQuotes, err := svc.store.GetLatestQuotes(ctx, []string{"000001"})
+	if err != nil {
+		t.Fatalf("load current quote: %v", err)
+	}
+	if err := svc.runDataStrategyMonitorOnSentinelQuoteCrossing(ctx, previousQuotes, currentQuotes); err != nil {
+		t.Fatalf("run quote crossing monitor: %v", err)
+	}
+	firstMonitorRunPtr, err := svc.store.GetLatestMonitorRun(ctx, MonitorTaskDataStrategyMonitor)
+	if err != nil || firstMonitorRunPtr == nil {
+		t.Fatalf("load quote crossing monitor run: %+v, err=%v", firstMonitorRunPtr, err)
+	}
+	firstMonitorRun := *firstMonitorRunPtr
+	if firstMonitorRun.TriggerType != MonitorTriggerEvent ||
+		firstMonitorRun.HitCount != 1 || firstMonitorRun.ReviewCount != 1 {
 		t.Fatalf("first plan monitor run = %+v, err=%v; want one hit and review", firstMonitorRun, err)
+	}
+	if firstRuleNumber(firstMonitorRun.Metadata, "portfolioSentinelPlanEvaluatedCount") != 1 ||
+		firstRuleNumber(firstMonitorRun.Metadata, "portfolioSentinelPlanMatchedCount") != 1 {
+		t.Fatalf("first plan monitor metadata = %+v", firstMonitorRun.Metadata)
 	}
 	reviews, err := svc.store.ListOperationReviews(ctx, OperationReviewListFilter{
 		StrategyID: strategies[0].Strategy.ID,
@@ -242,6 +271,9 @@ func TestPortfolioSentinelV2PublishesCurrentConditionalPlanStrategy(t *testing.T
 	secondMonitorRun, err := svc.RunMonitorTask(ctx, MonitorTaskDataStrategyMonitor, MonitorTriggerManual)
 	if err != nil || secondMonitorRun.HitCount != 0 {
 		t.Fatalf("second plan monitor run = %+v, err=%v; plan must trigger once", secondMonitorRun, err)
+	}
+	if firstRuleNumber(secondMonitorRun.Metadata, "portfolioSentinelPlanTriggeredCount") != 1 {
+		t.Fatalf("second plan monitor metadata = %+v", secondMonitorRun.Metadata)
 	}
 	plans, err = svc.ListPortfolioSentinelActionPlans(ctx, PortfolioSentinelActionPlanListFilter{PortfolioID: portfolio.ID})
 	if err != nil || len(plans) != 1 || plans[0].Status != "triggered" {

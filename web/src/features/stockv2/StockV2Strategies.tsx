@@ -5,6 +5,8 @@ import type { AppActions } from "../../app/App";
 import type {
   AppData,
   StockV2Instrument,
+  StockV2MonitorTask,
+  StockV2MonitorTaskListResponse,
   StockV2Portfolio,
   StockV2Strategy,
   StockV2StrategyActionRule,
@@ -91,6 +93,7 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
   const [drawer, setDrawer] = useState<DrawerState>({ type: "closed" });
   const [versions, setVersions] = useState<StockV2StrategyVersion[]>([]);
   const [versionsLoading, setVersionsLoading] = useState(false);
+  const [dataStrategyMonitor, setDataStrategyMonitor] = useState<StockV2MonitorTask | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [agentRunDetailId, setAgentRunDetailId] = useState<string | null>(null);
 
@@ -135,6 +138,24 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
     void fetchStrategies(page);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, statusFilter, kindFilter, portfolioFilter, keyword]);
+
+  useEffect(() => {
+    let cancelled = false;
+    actions.api<StockV2MonitorTaskListResponse>("/api/stockv2/monitor/tasks")
+      .then((response) => {
+        if (!cancelled) {
+          setDataStrategyMonitor(
+            response.items?.find((item) => item.definition.taskType === "data_strategy_monitor") || null,
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setDataStrategyMonitor(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [actions]);
 
   // 详情 drawer 打开时拉取版本历史;失败静默(版本历史是辅助信息)。
   useEffect(() => {
@@ -392,6 +413,7 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
           portfolios={portfolios}
           versions={versions}
           versionsLoading={versionsLoading}
+          dataStrategyMonitor={dataStrategyMonitor}
           submitting={submitting}
           onClose={() => setDrawer({ type: "closed" })}
           onEdit={() => setDrawer({ type: "edit", strategy: detailStrategy })}
@@ -1040,6 +1062,7 @@ function StrategyDetailDrawer({
   portfolios,
   versions,
   versionsLoading,
+  dataStrategyMonitor,
   submitting,
   onClose,
   onEdit,
@@ -1053,6 +1076,7 @@ function StrategyDetailDrawer({
   portfolios: StockV2Portfolio[];
   versions: StockV2StrategyVersion[];
   versionsLoading: boolean;
+  dataStrategyMonitor: StockV2MonitorTask | null;
   submitting: boolean;
   onClose: () => void;
   onEdit: () => void;
@@ -1130,7 +1154,7 @@ function StrategyDetailDrawer({
           </div>
         ) : null}
 
-        <PlaybookSummary playbook={strategy.playbook} />
+        <PlaybookSummary playbook={strategy.playbook} monitorTask={dataStrategyMonitor} />
 
         <PriceSummary strategy={strategy} />
 
