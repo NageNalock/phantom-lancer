@@ -166,10 +166,12 @@ func (s *Service) strategyGenerationInstrumentContext(ctx context.Context, targe
 	} else {
 		item.DataFreshness["latestQuoteMissing"] = true
 	}
-	rowCount, earliest, latest, source, lastErr, err := s.store.GetDailyBarsStats(ctx, instrument.Symbol, DailyBarAdjustedNone)
+	dailyBars := s.buildDailyBarsContext(ctx, instrument.Symbol)
+	item.DataFreshness["dailyBars"] = dailyBarsFreshnessSummary(dailyBars)
+	rowCount, earliest, latest, source, lastErr, err := s.store.GetDailyBarsStats(ctx, instrument.Symbol, DailyBarAdjustedQFQ)
 	if err == nil {
 		item.DailyBars = &StrategyGenerationBarsSummary{
-			Adjusted:  DailyBarAdjustedNone,
+			Adjusted:  DailyBarAdjustedQFQ,
 			RowCount:  rowCount,
 			Earliest:  earliest,
 			Latest:    latest,

@@ -473,39 +473,6 @@ func reviewResultWithPendingStrategyPatch(result map[string]any) map[string]any 
 	return next
 }
 
-func (s *Service) buildDailyBarsContext(ctx context.Context, symbol string) *DailyBarsContext {
-	bars, err := s.store.GetDailyBars(ctx, symbol, DailyBarAdjustedNone, "", "", 20)
-	if err != nil || len(bars) == 0 {
-		return &DailyBarsContext{Symbol: symbol, Adjusted: DailyBarAdjustedNone}
-	}
-	latest := bars[len(bars)-1]
-	summary := map[string]float64{
-		"latestClose": latest.Close,
-	}
-	high := bars[0].High
-	low := bars[0].Low
-	for _, bar := range bars {
-		if bar.High > high {
-			high = bar.High
-		}
-		if bar.Low < low {
-			low = bar.Low
-		}
-	}
-	summary["rangeHigh"] = high
-	summary["rangeLow"] = low
-	return &DailyBarsContext{
-		Symbol:          symbol,
-		Adjusted:        DailyBarAdjustedNone,
-		Count:           len(bars),
-		LatestTradeDate: latest.TradeDate,
-		LatestClose:     latest.Close,
-		LatestFetchedAt: latest.FetchedAt,
-		Quality:         latest.Quality,
-		Summary:         summary,
-	}
-}
-
 func (s *Service) buildMinuteBarsContext(ctx context.Context, symbol string) *MinuteBarsContext {
 	bars, err := s.store.ListMinuteBars(ctx, symbol, time.Now().AddDate(0, 0, -5), 1200)
 	if err != nil || len(bars) == 0 {
@@ -632,18 +599,37 @@ func quoteFreshnessSummary(quote StockV2QuoteLatest) map[string]any {
 
 func dailyBarsFreshnessSummary(ctx *DailyBarsContext) map[string]any {
 	if ctx == nil || ctx.Count == 0 {
-		return map[string]any{"status": "missing"}
+		out := map[string]any{"status": dailyBarsCoverageMissing}
+		if ctx != nil {
+			out["adjusted"] = ctx.Adjusted
+			out["checkedAt"] = ctx.CheckedAt
+			out["refreshAttempted"] = ctx.RefreshAttempted
+			if ctx.RefreshError != "" {
+				out["refreshError"] = ctx.RefreshError
+			}
+		}
+		return out
 	}
-	status := ctx.Quality
+	status := ctx.CoverageStatus
 	if status == "" {
 		status = "present"
 	}
-	return map[string]any{
-		"status":          status,
-		"latestTradeDate": ctx.LatestTradeDate,
-		"latestFetchedAt": ctx.LatestFetchedAt,
-		"count":           ctx.Count,
+	out := map[string]any{
+		"status":           status,
+		"adjusted":         ctx.Adjusted,
+		"latestTradeDate":  ctx.LatestTradeDate,
+		"latestFetchedAt":  ctx.LatestFetchedAt,
+		"checkedAt":        ctx.CheckedAt,
+		"refreshAttempted": ctx.RefreshAttempted,
+		"count":            ctx.Count,
 	}
+	if ctx.CurrentSessionIncomplete {
+		out["currentSessionIncomplete"] = true
+	}
+	if ctx.RefreshError != "" {
+		out["refreshError"] = ctx.RefreshError
+	}
+	return out
 }
 
 func minuteBarsFreshnessSummary(ctx *MinuteBarsContext) map[string]any {

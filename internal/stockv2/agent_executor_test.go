@@ -452,6 +452,50 @@ func TestBuildPortfolioSentinelPromptKeepsFinalReviewContractWhenContextIsOversi
 	}
 }
 
+func TestBuildPortfolioSentinelPromptKeepsEveryHoldingInUntruncatedCoverage(t *testing.T) {
+	prompt := buildPortfolioSentinelPrompt("task-holding-coverage", PortfolioSentinelContext{
+		RunID: "sentinel-run-holding-coverage",
+		Portfolios: []PortfolioSentinelPortfolioContext{{
+			Portfolio: StockV2Portfolio{ID: "portfolio-1", Name: "测试组合"},
+			Holdings: []PortfolioSentinelHoldingContext{
+				{
+					Holding: StockV2Holding{ID: "holding-large", PortfolioID: "portfolio-1", Symbol: "588940", Market: "SH", Name: "科创50ETF富国"},
+					Profile: &StockProfile{ProfileText: strings.Repeat("超大画像正文", 3000)},
+				},
+				{
+					Holding: StockV2Holding{ID: "holding-second", PortfolioID: "portfolio-1", Symbol: "000977", Market: "SZ", Name: "浪潮信息"},
+				},
+			},
+		}},
+	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
+
+	if len(prompt) > 14000 {
+		t.Fatalf("prompt length = %d, want <= 14000", len(prompt))
+	}
+	if !strings.Contains(prompt, "... [truncated]") {
+		t.Fatal("oversized context was not compacted")
+	}
+	start := strings.Index(prompt, "## Required Holding Coverage (Untruncated)")
+	end := strings.Index(prompt, "## Required Review Workflow")
+	if start < 0 || end <= start {
+		t.Fatalf("holding coverage section missing:\n%s", prompt)
+	}
+	coverage := prompt[start:end]
+	for _, want := range []string{
+		`"portfolio_id": "portfolio-1"`,
+		`"holding_id": "holding-large"`,
+		`"symbol": "588940"`,
+		`"holding_id": "holding-second"`,
+		`"symbol": "000977"`,
+		`"name": "浪潮信息"`,
+		"return `hold`",
+	} {
+		if !strings.Contains(coverage, want) {
+			t.Fatalf("untruncated holding coverage missing %q:\n%s", want, coverage)
+		}
+	}
+}
+
 func TestTruncatePromptUTF8KeepsValidUTF8AtByteBoundary(t *testing.T) {
 	value := strings.Repeat("中", 3000) + strings.Repeat("尾", 1000)
 	got := truncatePromptUTF8(value, 6000, 2000)

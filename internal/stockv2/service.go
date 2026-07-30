@@ -57,6 +57,12 @@ type Service struct {
 	newsContextWorkerClosing bool
 	quotePruneMu             sync.Mutex
 	lastQuotePrune           time.Time
+	// ponytail: Agent daily-bar reads share one process-local gate because the
+	// deployed service has one worker process. This both deduplicates concurrent
+	// requests and protects the public source without adding a scheduler/config.
+	agentDailyBarsMu          sync.Mutex
+	agentDailyBarsLastRequest time.Time
+	agentDailyBarsFailures    map[string]agentDailyBarsFailure
 
 	universeSource  *UniverseDataSource
 	dailyBarsSource *DailyBarsSource
@@ -83,6 +89,7 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 		httpClient:              httpClient,
 		newsContextWorkerCtx:    newsContextWorkerCtx,
 		newsContextWorkerCancel: newsContextWorkerCancel,
+		agentDailyBarsFailures:  map[string]agentDailyBarsFailure{},
 		universeSource:          NewUniverseDataSource(nil, httpClient),
 		dailyBarsSource:         NewDailyBarsSource(nil, httpClient),
 		newsAdapters:            map[string]NewsSourceAdapter{},

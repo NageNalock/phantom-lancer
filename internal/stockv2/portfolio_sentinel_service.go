@@ -264,6 +264,18 @@ func (s *Service) buildPortfolioSentinelContext(ctx context.Context, run Portfol
 		}
 		quoteBySymbol := map[string]StockV2QuoteLatest{}
 		if len(symbols) > 0 {
+			// ponytail: the scheduled 30-second quote task remains the primary
+			// feed; one holding-only refresh here closes the race between its last
+			// poll and an intraday sentinel run without creating another job.
+			if s.httpClient != nil {
+				if refresh, refreshErr := s.RefreshLatestQuotes(ctx, symbols, "portfolio_sentinel"); refreshErr == nil {
+					if valuationErr := s.RefreshPortfoliosFromLatestQuotes(ctx, refresh.Items); valuationErr == nil {
+						if refreshedHoldings, reloadErr := s.store.ListHoldings(ctx, portfolio.ID); reloadErr == nil {
+							holdings = refreshedHoldings
+						}
+					}
+				}
+			}
 			quotes, err := s.store.GetLatestQuotes(ctx, symbols)
 			if err != nil {
 				return PortfolioSentinelContext{}, err
@@ -295,7 +307,9 @@ func (s *Service) buildPortfolioSentinelContext(ctx context.Context, run Portfol
 				hctx.Freshness["quote"] = map[string]any{"status": "missing"}
 			}
 			hctx.DailyBars = s.buildDailyBarsContext(ctx, holding.Symbol)
+			hctx.Freshness["dailyBars"] = dailyBarsFreshnessSummary(hctx.DailyBars)
 			hctx.MinuteBars = s.buildMinuteBarsContext(ctx, holding.Symbol)
+			hctx.Freshness["minuteBars"] = minuteBarsFreshnessSummary(hctx.MinuteBars)
 			if profile, err := s.store.GetStockProfile(ctx, holding.Symbol); err == nil {
 				hctx.Profile = &profile
 			} else if !errors.Is(err, ErrStockProfileNotFound) {
@@ -718,16 +732,23 @@ func (s *Service) executePortfolioSentinelRun(ctx context.Context, run AgentRun,
 	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
 	execOutput, execErr := s.agentExecutor.ExecutePortfolioSentinel(ctx, taskID, pack, modelName, run.ReasoningEffort)
 	submitted := s.consumeAgentTaskSubmittedResult(taskID)
-	if submitted != nil && portfolioSentinelResultHasActionablePlan(submitted.Result) &&
-		(execOutput == nil || !portfolioSentinelHasExternalResearch(execOutput.ResearchAudit)) {
-		// ponytail: one bounded corrective retry is enough to enforce the trust
-		// boundary without creating an open-ended agent loop.
-		pack.Note = strings.TrimSpace(pack.Note + "\nCORRECTIVE RETRY: actionable plans require observed real Codex web_search or a named search/research/browse Agent tool, plus matching research_audit references.")
-		taskID, _ = s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
-		retryOutput, retryErr := s.agentExecutor.ExecutePortfolioSentinel(ctx, taskID, pack, modelName, run.ReasoningEffort)
-		execOutput = mergeAgentExecutorOutputs(execOutput, retryOutput)
-		execErr = retryErr
-		submitted = s.consumeAgentTaskSubmittedResult(taskID)
+	audit := AgentCLIResearchAudit{}
+	if execOutput != nil {
+		audit = execOutput.ResearchAudit
+	}
+	if submitted != nil {
+		_, validationErr := s.validatePortfolioSentinelSubmittedReport(ctx, run.TriggerObjectID, *submitted, audit)
+		if validationErr != nil {
+			// ponytail: one bounded retry feeds the exact server validation failure
+			// back to the agent. More retries would turn a deterministic contract
+			// repair into an unbounded model loop.
+			pack.Note = strings.TrimSpace(pack.Note + "\nCORRECTIVE RETRY: the previous submission failed server validation: " + safelog.Text(validationErr.Error(), 500) + ". Correct the complete result and submit it once.")
+			taskID, _ = s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
+			retryOutput, retryErr := s.agentExecutor.ExecutePortfolioSentinel(ctx, taskID, pack, modelName, run.ReasoningEffort)
+			execOutput = mergeAgentExecutorOutputs(execOutput, retryOutput)
+			execErr = retryErr
+			submitted = s.consumeAgentTaskSubmittedResult(taskID)
+		}
 	}
 	s.restoreAgentTaskSubmittedResult(taskID, run.TaskType, run.ID, submitted)
 	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, execOutput, execErr)
@@ -750,43 +771,18 @@ func (s *Service) ProcessPortfolioSentinelSubmittedResult(
 	} else if existing != nil {
 		return *existing, nil
 	}
-	report, err := portfolioSentinelReportFromResult(submitted.Result)
-	if err != nil {
-		run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
-		return PortfolioSentinelResult{}, err
-	}
 	audit := AgentCLIResearchAudit{}
 	if len(researchAudits) > 0 {
 		audit = researchAudits[0]
 	}
-	// Legacy v1 rows and pre-v2 in-process submissions have no CLI capability
-	// audit. Every real v2 executor enables live search, which makes the stricter
-	// schema and action-plan contract mandatory without rewriting old history.
-	if audit.LiveSearchEnabled && report.SchemaVersion != PortfolioSentinelReportSchemaVersion {
-		err := fmt.Errorf("%w: new CLI runs must use %s", ErrInvalidPortfolioSentinelResult, PortfolioSentinelReportSchemaVersion)
+	report, err := s.validatePortfolioSentinelSubmittedReport(ctx, run.ID, submitted, audit)
+	if err != nil {
 		run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
 		return PortfolioSentinelResult{}, err
 	}
 	if report.SchemaVersion == PortfolioSentinelReportSchemaVersion &&
 		(audit.LiveSearchEnabled || len(report.ActionPlans) > 0) {
-		if err := s.validatePortfolioSentinelActionPlans(ctx, run, report, audit); err != nil {
-			run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
-			return PortfolioSentinelResult{}, err
-		}
 		submitted.Result = portfolioSentinelReportMap(report)
-	}
-	if contextRun, found, lookupErr := s.newsContextRunForPortfolioReview(ctx, run.ID); lookupErr != nil {
-		run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, lookupErr))
-		return PortfolioSentinelResult{}, lookupErr
-	} else if found {
-		if err := s.validatePortfolioSentinelNewsContextCoverage(ctx, contextRun.ID, report.CheckedNewsThreadVersionIDs); err != nil {
-			run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
-			return PortfolioSentinelResult{}, err
-		}
-		if err := s.validatePortfolioSentinelImpactReviewCoverage(ctx, run.ID, report.ImpactReviewCoverage); err != nil {
-			run, _ = s.store.UpdatePortfolioSentinelRun(ctx, markPortfolioSentinelRunFailed(run, err))
-			return PortfolioSentinelResult{}, err
-		}
 	}
 	publication, err := s.preparePortfolioSentinelPublication(ctx, run, report, PortfolioSentinelResult{
 		RunID:         run.ID,
@@ -811,15 +807,45 @@ func (s *Service) ProcessPortfolioSentinelSubmittedResult(
 	return result, nil
 }
 
-func portfolioSentinelResultHasActionablePlan(result map[string]any) bool {
-	rawPlans := arrayFromAny(result["action_plans"])
-	for _, raw := range rawPlans {
-		action := strings.TrimSpace(firstRuleString(mapFromAny(raw), "action"))
-		if action != "" && action != PortfolioSentinelPlanHold {
-			return true
+func (s *Service) validatePortfolioSentinelSubmittedReport(
+	ctx context.Context,
+	runID string,
+	submitted AgentTaskSubmittedResult,
+	audit AgentCLIResearchAudit,
+) (PortfolioSentinelReport, error) {
+	run, err := s.store.GetPortfolioSentinelRun(ctx, runID)
+	if err != nil {
+		return PortfolioSentinelReport{}, err
+	}
+	report, err := portfolioSentinelReportFromResult(submitted.Result)
+	if err != nil {
+		return PortfolioSentinelReport{}, err
+	}
+	// Legacy v1 rows and pre-v2 in-process submissions have no CLI capability
+	// audit. Every real v2 executor enables live search, which makes the stricter
+	// schema and action-plan contract mandatory without rewriting old history.
+	if audit.LiveSearchEnabled && report.SchemaVersion != PortfolioSentinelReportSchemaVersion {
+		return PortfolioSentinelReport{}, fmt.Errorf("%w: new CLI runs must use %s", ErrInvalidPortfolioSentinelResult, PortfolioSentinelReportSchemaVersion)
+	}
+	if report.SchemaVersion == PortfolioSentinelReportSchemaVersion &&
+		(audit.LiveSearchEnabled || len(report.ActionPlans) > 0) {
+		if err := s.validatePortfolioSentinelActionPlans(ctx, run, report, audit); err != nil {
+			return PortfolioSentinelReport{}, err
 		}
 	}
-	return false
+	contextRun, found, err := s.newsContextRunForPortfolioReview(ctx, run.ID)
+	if err != nil {
+		return PortfolioSentinelReport{}, err
+	}
+	if found {
+		if err := s.validatePortfolioSentinelNewsContextCoverage(ctx, contextRun.ID, report.CheckedNewsThreadVersionIDs); err != nil {
+			return PortfolioSentinelReport{}, err
+		}
+		if err := s.validatePortfolioSentinelImpactReviewCoverage(ctx, run.ID, report.ImpactReviewCoverage); err != nil {
+			return PortfolioSentinelReport{}, err
+		}
+	}
+	return report, nil
 }
 
 func mergeAgentExecutorOutputs(first, second *AgentExecutorOutput) *AgentExecutorOutput {

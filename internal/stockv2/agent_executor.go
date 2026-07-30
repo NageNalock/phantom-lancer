@@ -852,6 +852,7 @@ func buildOperationReviewPrompt(taskID string, pack AgentContextPack, mcpURL str
 	b.WriteString("Your job is to audit whether this MonitorHit is real, actionable, stale/degraded, or noise.\n")
 	b.WriteString("Do not place orders, do not modify holdings, and do not update formal strategies.\n")
 	b.WriteString("Use provided context, stock_agent MCP data, and Codex CLI public search/browse for external verification when facts are stale, conflicting, high-impact, or not directly supported. Do not invent market prices, financial data, news, filings, or sources.\n")
+	b.WriteString("Agent daily bars default to qfq and contain completed sessions only; use them for trend continuity. Use the unadjusted latest quote/minute bars for executable price levels. If daily-bar coverage is source_lagging, refresh_failed, or missing, verify the latest close and corporate-action context publicly when possible; otherwise state the unresolved limitation and lower confidence.\n")
 	b.WriteString("Do not implement or request web_search/web_fetch MCP tools from the main program; external public verification is your responsibility inside Codex CLI.\n")
 	b.WriteString("Submit your final result using the stock_agent.submit_result MCP tool.\n\n")
 	b.WriteString("Do not use shell commands or curl to submit the result; use the MCP tool directly.\n\n")
@@ -1307,6 +1308,12 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	b.WriteString(contextPlaceholder)
 	b.WriteString("\n```\n\n")
 
+	b.WriteString("## Required Holding Coverage (Untruncated)\n\n")
+	b.WriteString("This server-generated list is authoritative and is never removed by context compaction. Return exactly one `action_plans` item for every listed `(portfolio_id, symbol)` pair. If detailed context for an item was compacted, return `hold` and state that limitation instead of omitting the item.\n\n```json\n")
+	coverageRaw, _ := json.MarshalIndent(portfolioSentinelRequiredHoldingCoverage(pack), "", "  ")
+	b.Write(coverageRaw)
+	b.WriteString("\n```\n\n")
+
 	b.WriteString("## Required Review Workflow\n\n")
 	if pack.NewsContext != nil {
 		fmt.Fprintf(&b, "0. The newsContext block is mandatory review input. Page through `%s` with runId `%s` until all %d changed threads have been read; do not stop after the first page. Collect every returned non-empty versionId exactly once and return the complete set as `checked_news_thread_version_ids`. After reading all changes, use `stock_agent.semantic_search_news_threads` to inspect adjacent or related threads before judging portfolio impact.\n", pack.NewsContext.RequiredMCPTool, pack.NewsContext.RunID, pack.NewsContext.ChangedThreadCount)
@@ -1314,6 +1321,8 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 		fmt.Fprintf(&b, "0a. This is a complete final impact review. Page through `%s` with sentinel runId `%s` for each objectType `holdings`, `monitors`, `alerts`, `opportunities`, and `strategies` until every page is read. The frozen scope contains respectively %d, %d, %d, %d, and %d identifiers. Review every returned item, including an identifier whose current detail is unavailable, and return each identifier exactly once in the matching `impact_review_coverage` list. An object type with zero items must still be returned as an explicit empty list.\n", pack.NewsContext.ImpactReviewRequiredTool, pack.RunID, scope.HoldingCount, scope.MonitorCount, scope.AlertCount, scope.OpportunityCount, scope.StrategyCount)
 	}
 	b.WriteString("1. Check data freshness for quotes, bars, portfolio snapshots, and news timestamps.\n")
+	b.WriteString("1a. Daily bars are qfq completed-session trend data. During an active session, fresh_previous_close is expected and the current session is represented by the unadjusted quote and minute bars. Never use qfq historical prices as executable trigger prices.\n")
+	b.WriteString("1b. For source_lagging, refresh_failed, or missing daily bars, use public search/browse to verify the latest close and any split, dividend, or ETF unit adjustment. Record successful evidence in research_audit. If still unresolved, add a concrete warning to data_quality_notes and run_summary and lower confidence; do not pretend the data was verified.\n")
 	b.WriteString("2. Separate broad-market moves, overseas/overnight peer moves, sector/theme shocks, company-specific news, stale data, and unrelated noise.\n")
 	b.WriteString("3. Evaluate impact against current holdings and portfolio permissions. Aggressive portfolio risk tolerance does not excuse ignoring material information shocks.\n")
 	b.WriteString("4. Review every holding and the trustedCandidates pool. A non-held symbol may appear only as build_position and only when it is present in trustedCandidates.\n")
@@ -1350,6 +1359,30 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	contextLimit := maxPromptLen - (len(prompt) - len(contextPlaceholder))
 	contextBody := truncatePromptUTF8ToLimit(string(raw), contextLimit)
 	return strings.Replace(prompt, contextPlaceholder, contextBody, 1)
+}
+
+type portfolioSentinelRequiredHolding struct {
+	PortfolioID string `json:"portfolio_id"`
+	HoldingID   string `json:"holding_id"`
+	Symbol      string `json:"symbol"`
+	Market      string `json:"market,omitempty"`
+	Name        string `json:"name,omitempty"`
+}
+
+func portfolioSentinelRequiredHoldingCoverage(pack PortfolioSentinelContext) []portfolioSentinelRequiredHolding {
+	items := make([]portfolioSentinelRequiredHolding, 0)
+	for _, portfolio := range pack.Portfolios {
+		for _, holding := range portfolio.Holdings {
+			items = append(items, portfolioSentinelRequiredHolding{
+				PortfolioID: portfolio.Portfolio.ID,
+				HoldingID:   holding.Holding.ID,
+				Symbol:      holding.Holding.Symbol,
+				Market:      holding.Holding.Market,
+				Name:        holding.Holding.Name,
+			})
+		}
+	}
+	return items
 }
 
 func buildStockProfileSummaryPrompt(taskID string, profile StockProfile, mcpURL string) string {
@@ -1427,6 +1460,7 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 	b.WriteString("- If embedding status is available, call stock_agent.semantic_search_stock_profiles and stock_agent.semantic_search_news_events with the thesis/candidate/news query to find adjacent internal context. Merge these results into evidence_summary and data_quality_notes as appropriate.\n")
 	b.WriteString("- If embedding status is unavailable or assets are not ready, state the degraded reason in data_quality_notes and do not label keyword search as semantic recall.\n")
 	b.WriteString("- Treat internal MCP and Codex CLI external public search/browse as equal-priority evidence channels for material claims. Do not rely only on project data when profile, quote, bar, news, strategy coverage, or portfolio data is stale, missing, or conflicting.\n")
+	b.WriteString("- Daily bars default to qfq completed sessions and are for trend continuity; executable thresholds must use the unadjusted latest quote/minute bars. Treat fresh_previous_close as normal during an active session. For source_lagging, refresh_failed, or missing coverage, verify publicly when possible, otherwise add an explicit data-quality warning and lower confidence.\n")
 	b.WriteString("- Use Serenity-style research for material themes and holdings: rank value-chain/scarce layers before company conclusions, prefer strong/medium evidence over weak leads, and for A-shares check filings, exchange disclosures, interaction platforms, tenders, project approvals, patents/standards, receivables, inventories, contract liabilities, cash flow, margins, refinancing, and customer/supplier cross-checks when relevant.\n")
 	b.WriteString("- When data conflicts, perform conflict verification before drafting: identify each conflicting field, check internal MCP and public sources, state the adopted value or unresolved status, and lower confidence if unresolved.\n")
 	b.WriteString("- Do not implement or request web_search/web_fetch MCP tools from the main program. External public research must be done by Codex CLI's own capabilities and cited conservatively in the draft.\n\n")
@@ -1506,6 +1540,7 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 	b.WriteString("- Treat stock_agent internal search and Codex CLI external public search/browse as equal-priority research channels. For each material target or holding, use both before making material claims unless one channel is unavailable; if unavailable, record the attempted verification and lower confidence.\n")
 	b.WriteString("- Use stock_agent.get_embedding_status to decide whether semantic recall is available. If available, use stock_agent.semantic_search_stock_profiles and stock_agent.semantic_search_news_events for adjacent internal context; if unavailable, state the degraded reason.\n")
 	b.WriteString("- For each material target or holding, prefer checking project profile/search, latest quotes, daily bars, related project news, existing strategies, and portfolio context before drafting or judging.\n")
+	b.WriteString("- Daily bars default to qfq completed sessions and are trend evidence only. Use unadjusted latest quotes/minute bars for current and executable prices; fresh_previous_close is normal intraday. Publicly verify source_lagging, refresh_failed, or missing coverage when possible, otherwise record the unresolved limitation and lower confidence.\n")
 	b.WriteString("- Use Codex CLI public search/browse for recent public news, filings, policy, industry, company context, market quotes, ETF NAV/premium-discount/holdings, and other public sources needed to verify stale or conflicting project data. Cite compact source references in evidence_refs or data_quality_notes.\n")
 	b.WriteString("- Apply Serenity-style source standards for deep work: strong evidence includes filings, exchange announcements, official reports, transcripts, project/regulatory records, patents/standards, contracts/orders/tenders; medium evidence includes reputable media, trade publications, associations, company pages, and cross-company public checks; weak leads must not drive high-confidence conclusions.\n")
 	b.WriteString("- For portfolio diagnosis, use Serenity-style value-chain mapping to understand each holding's real exposure and scarce layer, but do not turn that into executable buy/sell/add/reduce advice when portfolio permissions disallow it.\n")

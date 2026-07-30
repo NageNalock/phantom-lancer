@@ -65,14 +65,19 @@ type AgentContextPack struct {
 }
 
 type DailyBarsContext struct {
-	Symbol          string             `json:"symbol,omitempty"`
-	Adjusted        string             `json:"adjusted,omitempty"`
-	Count           int                `json:"count"`
-	LatestTradeDate string             `json:"latestTradeDate,omitempty"`
-	LatestClose     float64            `json:"latestClose,omitempty"`
-	LatestFetchedAt time.Time          `json:"latestFetchedAt,omitempty"`
-	Quality         string             `json:"quality,omitempty"`
-	Summary         map[string]float64 `json:"summary,omitempty"`
+	Symbol                   string             `json:"symbol,omitempty"`
+	Adjusted                 string             `json:"adjusted,omitempty"`
+	Count                    int                `json:"count"`
+	LatestTradeDate          string             `json:"latestTradeDate,omitempty"`
+	LatestClose              float64            `json:"latestClose,omitempty"`
+	LatestFetchedAt          time.Time          `json:"latestFetchedAt,omitempty"`
+	Quality                  string             `json:"quality,omitempty"`
+	CoverageStatus           string             `json:"coverageStatus,omitempty"`
+	CheckedAt                time.Time          `json:"checkedAt,omitempty"`
+	RefreshAttempted         bool               `json:"refreshAttempted,omitempty"`
+	CurrentSessionIncomplete bool               `json:"currentSessionIncomplete,omitempty"`
+	RefreshError             string             `json:"refreshError,omitempty"`
+	Summary                  map[string]float64 `json:"summary,omitempty"`
 }
 
 type MinuteBarsContext struct {

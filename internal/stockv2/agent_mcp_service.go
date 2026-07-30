@@ -336,16 +336,24 @@ func (s *Service) mcpGetDailyBarsSummary(args json.RawMessage) (any, *mcpError) 
 	if err := json.Unmarshal(args, &p); err != nil || strings.TrimSpace(p.Symbol) == "" {
 		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "symbol is required"}
 	}
-	adjusted := firstNonEmptyOpportunity(p.Adjusted, DailyBarAdjustedNone)
-	count, earliest, latest, source, lastErr, err := s.store.GetDailyBarsStats(contextFromMCP(), p.Symbol, adjusted)
+	ctx := contextFromMCP()
+	adjusted := normalizeAgentDailyBarAdjusted(p.Adjusted)
+	bars := s.buildDailyBarsContextAt(ctx, p.Symbol, adjusted, time.Now())
+	count, earliest, latest, source, lastErr, err := s.store.GetDailyBarsStats(ctx, p.Symbol, adjusted)
 	return mcpResultOrError(map[string]any{
-		"symbol":    p.Symbol,
-		"adjusted":  adjusted,
-		"rowCount":  count,
-		"earliest":  earliest,
-		"latest":    latest,
-		"source":    source,
-		"lastError": lastErr,
+		"symbol":                   p.Symbol,
+		"adjusted":                 adjusted,
+		"rowCount":                 count,
+		"earliest":                 earliest,
+		"latest":                   latest,
+		"source":                   source,
+		"lastError":                lastErr,
+		"coverageStatus":           bars.CoverageStatus,
+		"checkedAt":                bars.CheckedAt,
+		"refreshAttempted":         bars.RefreshAttempted,
+		"currentSessionIncomplete": bars.CurrentSessionIncomplete,
+		"refreshError":             bars.RefreshError,
+		"summary":                  bars.Summary,
 	}, err)
 }
 

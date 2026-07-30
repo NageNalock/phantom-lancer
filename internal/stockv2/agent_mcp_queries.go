@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"phantom-lancer/internal/safelog"
 )
@@ -34,7 +35,7 @@ func (p *agentTaskPool) mcpDataTools() []mcpTool {
 		{Name: "stock_agent.semantic_search_stock_profiles", Description: "Semantic vector search over ready stock profile embeddings. Fails if embedding is not configured or assets are not ready.", InputSchema: simpleSchema(map[string]any{"query": stringProp("Theme or event text."), "limit": limitProp, "minScore": map[string]any{"type": "number"}})},
 		{Name: "stock_agent.get_stock_profile", Description: "Get one StockV2 stock profile by symbol.", InputSchema: simpleSchema(map[string]any{"symbol": stringProp("Instrument symbol.")})},
 		{Name: "stock_agent.get_latest_quotes", Description: "Get latest quotes for symbols.", InputSchema: simpleSchema(map[string]any{"symbols": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 50}})},
-		{Name: "stock_agent.get_daily_bars_summary", Description: "Get a compact daily bar summary for one symbol.", InputSchema: simpleSchema(map[string]any{"symbol": stringProp("Instrument symbol."), "adjusted": stringProp("none, qfq, or hfq."), "limit": limitProp})},
+		{Name: "stock_agent.get_daily_bars_summary", Description: "Refresh and get a compact completed-session daily bar summary for one symbol.", InputSchema: simpleSchema(map[string]any{"symbol": stringProp("Instrument symbol."), "adjusted": stringProp("Optional none, qfq, or hfq; defaults to qfq for Agent trend analysis."), "limit": limitProp})},
 		{Name: "stock_agent.search_news_events", Description: "Keyword search StockV2 normalized news events. This is not semantic vector search.", InputSchema: simpleSchema(map[string]any{"query": stringProp("Keyword."), "source": stringProp("Optional source."), "limit": limitProp})},
 		{Name: "stock_agent.semantic_search_news_events", Description: "Semantic vector search over ready news event embeddings. Fails if embedding is not configured or assets are not ready.", InputSchema: simpleSchema(map[string]any{"query": stringProp("Theme or event text."), "limit": limitProp, "minScore": map[string]any{"type": "number"}})},
 		{Name: mcpToolSemanticSearchNewsThreads, Description: "Semantic vector recall over ready current message-thread embeddings. With asOf, ranking can use the nearest retained historical vector but the result is hydrated to the actual latest snapshot at that cutoff. Similarity is not a factual or causal relationship.", InputSchema: simpleSchema(map[string]any{"query": stringProp("Theme, event, sector, or rotation question."), "limit": limitProp, "minScore": map[string]any{"type": "number"}, "asOf": stringProp("Optional RFC3339 historical cutoff.")})},
@@ -194,10 +195,8 @@ func (p *agentTaskPool) mcpGetDailyBarsSummary(args json.RawMessage) (any, *mcpE
 	if err := json.Unmarshal(args, &argsObj); err != nil {
 		return nil, mcpInvalidArgs(err)
 	}
-	adjusted := strings.TrimSpace(argsObj.Adjusted)
-	if adjusted == "" {
-		adjusted = DailyBarAdjustedNone
-	}
+	adjusted := normalizeAgentDailyBarAdjusted(argsObj.Adjusted)
+	_ = svc.buildDailyBarsContextAt(context.Background(), argsObj.Symbol, adjusted, time.Now())
 	bars, err := svc.GetDailyBars(context.Background(), argsObj.Symbol, mcpLimit(argsObj.Limit, 60, 250), "", "", adjusted)
 	if err != nil {
 		return nil, mcpInternal(err)

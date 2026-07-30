@@ -314,23 +314,30 @@ func seedWatchQuote(t *testing.T, svc *Service, symbol string, price, pct float6
 func seedWatchDailyBar(t *testing.T, svc *Service, symbol string, close float64) {
 	t.Helper()
 	now := time.Now()
-	if err := svc.store.UpsertDailyBars(context.Background(), []StockV2DailyBar{{
-		ID:        "bar-" + symbol,
-		Symbol:    symbol,
-		Market:    inferAStockMarket(symbol),
-		TradeDate: now.In(chinaMarketTZ).Format("2006-01-02"),
-		Open:      close,
-		High:      close,
-		Low:       close,
-		Close:     close,
-		PrevClose: close,
-		Adjusted:  DailyBarAdjustedNone,
-		Source:    "test",
-		FetchedAt: now,
-		Quality:   "ok",
-		CreatedAt: now,
-		UpdatedAt: now,
-	}}); err != nil {
+	bars := make([]StockV2DailyBar, 0, 4)
+	for _, adjusted := range []string{DailyBarAdjustedNone, DailyBarAdjustedQFQ} {
+		for daysAgo := 1; daysAgo >= 0; daysAgo-- {
+			tradeDate := now.In(chinaMarketTZ).AddDate(0, 0, -daysAgo).Format("2006-01-02")
+			bars = append(bars, StockV2DailyBar{
+				ID:        "bar-" + symbol + "-" + adjusted + "-" + tradeDate,
+				Symbol:    symbol,
+				Market:    inferAStockMarket(symbol),
+				TradeDate: tradeDate,
+				Open:      close,
+				High:      close,
+				Low:       close,
+				Close:     close,
+				PrevClose: close,
+				Adjusted:  adjusted,
+				Source:    "test",
+				FetchedAt: now,
+				Quality:   "ok",
+				CreatedAt: now,
+				UpdatedAt: now,
+			})
+		}
+	}
+	if err := svc.store.UpsertDailyBars(context.Background(), bars); err != nil {
 		t.Fatalf("upsert daily bar: %v", err)
 	}
 }
