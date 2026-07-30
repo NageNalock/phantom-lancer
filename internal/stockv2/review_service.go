@@ -446,13 +446,14 @@ func proposedOperationFromReviewResult(result map[string]any, review OperationRe
 		raw = result
 	}
 	op := ProposedOperation{
-		Action:      firstRuleString(raw, "action", "operation", "type"),
-		PortfolioID: firstNonEmpty(firstRuleString(raw, "portfolioId", "portfolioID"), review.PortfolioID),
-		Symbol:      firstNonEmpty(firstRuleString(raw, "symbol"), review.Symbol),
-		Market:      firstNonEmpty(firstRuleString(raw, "market"), review.Market),
-		Quantity:    firstRuleNumber(raw, "quantity", "shares"),
-		Amount:      firstRuleNumber(raw, "amount", "notional"),
-		Price:       firstRuleNumber(raw, "price", "limitPrice", "estimatedPrice"),
+		Action:             firstRuleString(raw, "action", "operation", "type"),
+		PortfolioID:        firstNonEmpty(firstRuleString(raw, "portfolioId", "portfolioID"), review.PortfolioID),
+		Symbol:             firstNonEmpty(firstRuleString(raw, "symbol"), review.Symbol),
+		Market:             firstNonEmpty(firstRuleString(raw, "market"), review.Market),
+		Quantity:           firstRuleNumber(raw, "quantity", "shares"),
+		Amount:             firstRuleNumber(raw, "amount", "notional"),
+		Price:              firstRuleNumber(raw, "price", "limitPrice", "estimatedPrice"),
+		TargetPortfolioPct: firstRuleNumber(raw, "targetPortfolioPct", "targetWeight"),
 	}
 	op = normalizeProposedOperation(op)
 	if op.Action == "" {

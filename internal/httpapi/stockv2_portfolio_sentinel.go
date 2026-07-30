@@ -82,6 +82,31 @@ func (s *Server) handleStockV2GetPortfolioSentinelResult(w http.ResponseWriter, 
 	s.writeJSON(w, result)
 }
 
+func (s *Server) handleStockV2ListPortfolioSentinelActionPlans(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	action := query.Get("action")
+	if action != "" && !stockV2HTTPValueIn(action,
+		stockv2.PortfolioSentinelPlanBuild,
+		stockv2.PortfolioSentinelPlanAdd,
+		stockv2.PortfolioSentinelPlanHold,
+		stockv2.PortfolioSentinelPlanReduce,
+		stockv2.PortfolioSentinelPlanExit,
+	) {
+		writeError(w, http.StatusBadRequest, "invalid_filter", "invalid portfolio sentinel action")
+		return
+	}
+	items, err := s.stockV2.ListPortfolioSentinelActionPlans(r.Context(), stockv2.PortfolioSentinelActionPlanListFilter{
+		PortfolioID:    query.Get("portfolioId"),
+		Action:         action,
+		IncludeExpired: query.Get("includeExpired") == "true",
+	})
+	if err != nil {
+		writeError(w, stockV2PortfolioSentinelHTTPStatus(err), "stockv2_portfolio_sentinel_action_plans_failed", err.Error())
+		return
+	}
+	s.writeJSON(w, map[string]any{"items": items, "total": len(items)})
+}
+
 func stockV2PortfolioSentinelRunFilterFromRequest(r *http.Request) (stockv2.PortfolioSentinelRunListFilter, error) {
 	query := r.URL.Query()
 	limit, err := stockV2PositiveInt(query.Get("limit"), 50)
@@ -129,6 +154,8 @@ func stockV2PortfolioSentinelHTTPStatus(err error) int {
 	case errors.Is(err, stockv2.ErrAgentModelNotAvailable),
 		errors.Is(err, stockv2.ErrAgentTaskProfileNotFound),
 		errors.Is(err, stockv2.ErrAgentTaskNotConfigurable),
+		errors.Is(err, stockv2.ErrAgentTaskRequiresCLI),
+		errors.Is(err, stockv2.ErrAgentExecutionModeModelMismatch),
 		errors.Is(err, stockv2.ErrAgentExecutorUnavailable):
 		return http.StatusServiceUnavailable
 	default:

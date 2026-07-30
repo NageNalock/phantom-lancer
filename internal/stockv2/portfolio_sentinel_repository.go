@@ -470,6 +470,39 @@ func (s *Store) publishPortfolioSentinelResult(ctx context.Context, publication 
 			return wrapError(err, "get portfolio sentinel result before publish")
 		}
 
+		for _, item := range publication.planStrategies {
+			strategy := item.strategy
+			if item.create {
+				activeVersionID := strategy.ActiveVersionID
+				strategy.ActiveVersionID = ""
+				if err := insertStrategyWithTx(ctx, tx, strategy); err != nil {
+					return err
+				}
+				strategy.ActiveVersionID = activeVersionID
+			} else {
+				versionNo, err := nextStrategyVersionNo(ctx, tx, strategy.ID)
+				if err != nil {
+					return err
+				}
+				item.version.VersionNo = versionNo
+			}
+			if err := insertStrategyVersionWithTx(ctx, tx, item.version); err != nil {
+				return err
+			}
+			if err := updateStrategyWithTx(ctx, tx, strategy); err != nil {
+				return err
+			}
+		}
+		if publication.enableDataStrategyMonitor {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE stockv2_monitor_task_configs
+				SET enabled=1, updated_at=?
+				WHERE task_type=?
+			`, time.Now(), MonitorTaskDataStrategyMonitor); err != nil {
+				return wrapError(err, "enable sentinel action plan monitor")
+			}
+		}
+
 		monitorRun := publication.monitorRun
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO stockv2_monitor_runs

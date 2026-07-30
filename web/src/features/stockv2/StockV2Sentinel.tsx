@@ -3,6 +3,9 @@ import { useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../../app/App";
 import type {
   StockV2OperationReview,
+  StockV2PortfolioSentinelActionPlan,
+  StockV2PortfolioSentinelActionPlanListResponse,
+  StockV2PortfolioSentinelActionPlanView,
   StockV2PortfolioSentinelConfig,
   StockV2PortfolioSentinelConfigInput,
   StockV2PortfolioSentinelRun,
@@ -29,8 +32,8 @@ import {
   stockV2SentinelWindowLabel,
 } from "../../domain/labels";
 
-// 组合哨兵:窗口级组合信息面 + 数据面巡检。后台定时或手动触发,Agent 判断
-// 利好/利空/噪音,生成组合级风险结论,必要时 fan-out 到单票 OperationReview。
+// 组合哨兵:窗口级组合信息面 + 数据面巡检。后台定时或手动触发,CLI Agent 判断
+// 利好/利空/噪音并生成完整持仓计划；确定性条件命中后才生成待确认 OperationReview。
 // 遵循 Quiet Agent Workbench 风格:列表为主,drawer 看 detail,弹窗触发。
 
 const RUN_PAGE_SIZE = 10;
@@ -42,6 +45,9 @@ export function StockV2Sentinel({ actions }: { actions: AppActions }) {
   const [savingConfig, setSavingConfig] = useState(false);
 
   const [runs, setRuns] = useState<StockV2PortfolioSentinelRun[]>([]);
+  const [actionPlans, setActionPlans] = useState<StockV2PortfolioSentinelActionPlanView[]>([]);
+  const [actionPlansLoading, setActionPlansLoading] = useState(false);
+  const [actionFilter, setActionFilter] = useState("");
   const [runsTotal, setRunsTotal] = useState(0);
   const [runsPage, setRunsPage] = useState(1);
   const [runsLoading, setRunsLoading] = useState(false);
@@ -113,6 +119,24 @@ export function StockV2Sentinel({ actions }: { actions: AppActions }) {
     }
   }
 
+  async function fetchActionPlans() {
+    setActionPlansLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (actionFilter) params.set("action", actionFilter);
+      const suffix = params.size > 0 ? `?${params}` : "";
+      const response = await actions.api<StockV2PortfolioSentinelActionPlanListResponse>(
+        `/api/stockv2/portfolio-sentinel/action-plans${suffix}`,
+      );
+      setActionPlans(response.items || []);
+    } catch (err) {
+      actions.setToast(`加载持仓操作计划失败:${friendlyError(err)}`, "danger");
+      setActionPlans([]);
+    } finally {
+      setActionPlansLoading(false);
+    }
+  }
+
   async function openDetail(run: StockV2PortfolioSentinelRun) {
     setSelectedDetail({ run });
     setDetailLoading(true);
@@ -134,6 +158,7 @@ export function StockV2Sentinel({ actions }: { actions: AppActions }) {
       actions.setToast("已触发组合哨兵", "good");
       setTriggerOpen(false);
       await fetchRuns(1);
+      void fetchActionPlans();
       void fetchConfig();
     } catch (err) {
       actions.setToast(`触发失败:${friendlyError(err)}`, "danger");
@@ -145,6 +170,7 @@ export function StockV2Sentinel({ actions }: { actions: AppActions }) {
   useEffect(() => {
     void fetchConfig();
     void fetchRuns();
+    void fetchActionPlans();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -181,7 +207,7 @@ export function StockV2Sentinel({ actions }: { actions: AppActions }) {
           ) : null}
         </div>
         <div className="flex items-center gap-2">
-          <Button onClick={() => void fetchRuns()} disabled={runsLoading}>
+          <Button onClick={() => { void fetchRuns(); void fetchActionPlans(); }} disabled={runsLoading || actionPlansLoading}>
             <ArrowsClockwise size={12} className="mr-1" />
             刷新
           </Button>
@@ -191,6 +217,39 @@ export function StockV2Sentinel({ actions }: { actions: AppActions }) {
           </Button>
         </div>
       </div>
+
+      <CollapsibleSection
+        title="当前持仓操作计划"
+        subtitle="每个持仓一条结论；条件满足时按当时可用持仓或组合资产动态计算操作提案，仍需人工确认。"
+        defaultOpen={true}
+      >
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <FilterSelect
+            label="动作"
+            value={actionFilter}
+            onChange={setActionFilter}
+            options={[
+              ["build_position", "建仓"],
+              ["add_position", "加仓"],
+              ["hold", "持有"],
+              ["reduce_position", "减仓"],
+              ["exit_position", "清仓"],
+            ]}
+          />
+          <Button onClick={() => void fetchActionPlans()} disabled={actionPlansLoading}>
+            {actionPlansLoading ? "刷新中…" : "应用筛选"}
+          </Button>
+        </div>
+        {actionPlansLoading ? (
+          <p className="text-sm text-[var(--muted)]">加载操作计划…</p>
+        ) : actionPlans.length === 0 ? (
+          <Notice>暂无有效计划。下一次成功的组合哨兵 v2 运行会在这里完整覆盖当前计划。</Notice>
+        ) : (
+          <div className="grid gap-2">
+            {actionPlans.map((item) => <ActionPlanRow key={`${item.runId}-${item.plan.id}`} item={item} />)}
+          </div>
+        )}
+      </CollapsibleSection>
 
       <CollapsibleSection
         title="哨兵配置"
@@ -249,7 +308,7 @@ export function StockV2Sentinel({ actions }: { actions: AppActions }) {
               </Field>
             </div>
             <p className="text-xs leading-relaxed text-[var(--muted)]">
-              哨兵只做风险摘要与操作提案,不自动下单,不直接修改持仓,不自动接受 OperationReview。
+              哨兵生成持仓操作计划；条件命中后只生成待确认提案，不自动下单、不直接修改持仓。
             </p>
             <div className="flex justify-end gap-2 border-t border-[var(--line)] pt-3">
               <Button tone="primary" disabled={savingConfig} onClick={() => void saveConfig()}>
@@ -396,6 +455,58 @@ function SentinelRunRow({ run, onOpen }: { run: StockV2PortfolioSentinelRun; onO
   );
 }
 
+function ActionPlanRow({ item }: { item: StockV2PortfolioSentinelActionPlanView }) {
+  const { plan } = item;
+  const actionable = plan.action !== "hold";
+  const conditions = (plan.conditions || []).map((condition) => {
+    const value =
+      condition.type === "price_between"
+        ? `${condition.low ?? "-"}–${condition.high ?? "-"}`
+        : String(condition.threshold ?? "-");
+    return `${condition.type} ${value}`;
+  });
+  const sizing = plan.sizing
+    ? plan.sizing.mode === "target_portfolio_pct"
+      ? `目标组合占比 ${plan.sizing.value}%`
+      : `届时可用数量的 ${plan.sizing.value}%`
+    : "不调整";
+  return (
+    <div className="rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3 text-xs">
+      <div className="flex flex-wrap items-center gap-2">
+        <Pill tone={actionable ? (plan.action === "reduce_position" || plan.action === "exit_position" ? "warn" : "good") : "neutral"}>
+          {portfolioSentinelActionLabel(plan.action)}
+        </Pill>
+        <strong className="text-sm">{plan.symbol}{plan.name ? ` · ${plan.name}` : ""}</strong>
+        {plan.market ? <span className="font-mono text-[var(--muted)]">{plan.market}</span> : null}
+        <Pill tone={plan.trigger_mode === "immediate" ? "warn" : "neutral"}>
+          {plan.trigger_mode === "immediate" ? "立即生成提案" : `条件触发 · ${plan.trigger_policy === "any" ? "任一" : "全部"}`}
+        </Pill>
+        <Pill tone={item.status === "triggered" || item.status === "proposed" ? "good" : item.status === "expired" ? "neutral" : "warn"}>
+          {item.status === "triggered" ? "已触发" : item.status === "proposed" ? "已生成提案" : item.status === "expired" ? "已过期" : "监控中"}
+        </Pill>
+      </div>
+      <div className="mt-2 grid gap-1 text-[var(--muted-strong)]">
+        <KeyValue label="仓位结果" value={sizing} />
+        <KeyValue label="触发条件" value={conditions.length > 0 ? conditions.join("；") : "无"} mono />
+        <KeyValue label="理由" value={plan.reason || "-"} />
+        <KeyValue label="有效期" value={formatDate(plan.valid_until) || "-"} />
+      </div>
+      {plan.risk_notes ? <p className="mt-2 border-t border-[var(--line)] pt-2 text-[var(--muted)]">风险边界：{plan.risk_notes}</p> : null}
+    </div>
+  );
+}
+
+function portfolioSentinelActionLabel(action: string): string {
+  switch (action) {
+    case "build_position": return "建仓";
+    case "add_position": return "加仓";
+    case "hold": return "持有";
+    case "reduce_position": return "减仓";
+    case "exit_position": return "清仓";
+    default: return action || "未知动作";
+  }
+}
+
 function SentinelRunDrawer({
   detail,
   loading,
@@ -448,6 +559,26 @@ function SentinelRunDrawer({
           <div>
             <strong className="text-sm">风险摘要</strong>
             <p className="mt-1 text-xs leading-relaxed text-[var(--muted-strong)]">{result?.summary || report.runSummary}</p>
+          </div>
+        ) : null}
+
+        {report.actionPlans.length > 0 ? (
+          <div>
+            <strong className="text-sm">本次持仓操作计划</strong>
+            <div className="mt-2 grid gap-2">
+              {report.actionPlans.map((plan) => (
+                <ActionPlanRow
+                  key={plan.id}
+                  item={{
+                    plan,
+                    runId: run.id,
+                    resultId: result?.id || "",
+                    runFinishedAt: run.finishedAt,
+                    status: plan.valid_until && new Date(plan.valid_until).getTime() <= Date.now() ? "expired" : "active",
+                  }}
+                />
+              ))}
+            </div>
           </div>
         ) : null}
 
@@ -645,7 +776,7 @@ function TriggerDrawer({
           <textarea className="min-h-16" value={note} placeholder="例如:复盘隔夜海外存储链条大跌" onChange={(e) => setNote(e.target.value)} />
         </Field>
         <p className="text-xs leading-relaxed text-[var(--muted)]">
-          触发后创建一次运行,收集窗口内消息面与数据面,由 Agent 给出组合级风险结论;需要操作时 fan-out 到单票 OperationReview,等待人工确认。
+          触发后由 Codex CLI 结合内部数据与实时公开检索生成完整持仓计划；立即动作或后续条件命中只会形成待人工确认的 OperationReview。
         </p>
         <div className="flex justify-end gap-2 border-t border-[var(--line)] pt-3">
           <Button onClick={onClose}>取消</Button>
@@ -749,6 +880,7 @@ interface SentinelReport {
   negativeItems: Array<Record<string, unknown>>;
   noiseItems: Array<Record<string, unknown>>;
   affectedHoldings: Array<Record<string, unknown>>;
+  actionPlans: StockV2PortfolioSentinelActionPlan[];
   portfolioActions: Array<Record<string, unknown>>;
   reviewRequests: Array<Record<string, unknown>>;
   dataQualityNotes: string[];
@@ -764,11 +896,22 @@ function readReport(raw?: Record<string, unknown>): SentinelReport {
     negativeItems: arr(r["negative_items"]),
     noiseItems: arr(r["noise_items"]),
     affectedHoldings: arr(r["affected_holdings"]),
+    actionPlans: typedActionPlans(r["action_plans"]),
     portfolioActions: arr(r["portfolio_actions"]),
     reviewRequests: arr(r["review_requests"]),
     dataQualityNotes: arr(r["data_quality_notes"]).map(str),
     nextWatchFocus: arr(r["next_watch_focus"]).map(str),
   };
+}
+
+function typedActionPlans(value: unknown): StockV2PortfolioSentinelActionPlan[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is StockV2PortfolioSentinelActionPlan => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+        const plan = item as Record<string, unknown>;
+        return typeof plan["id"] === "string" && typeof plan["symbol"] === "string" && typeof plan["action"] === "string";
+      })
+    : [];
 }
 
 function mapFromAny(value: unknown): Record<string, unknown> {

@@ -78,8 +78,8 @@ func (e *agentRoutingExecutor) ExecuteNewsContextAggregation(ctx context.Context
 func (e *agentRoutingExecutor) ExecutePortfolioSentinel(ctx context.Context, taskID string, pack PortfolioSentinelContext, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	if mode, err := e.mode(ctx, taskID); err != nil {
 		return nil, err
-	} else if mode == AgentExecutionModeAPI {
-		return e.api.ExecutePortfolioSentinel(ctx, taskID, pack, modelName, reasoningEffort)
+	} else if mode != AgentExecutionModeCLI {
+		return nil, ErrAgentTaskRequiresCLI
 	}
 	return e.cli.ExecutePortfolioSentinel(ctx, taskID, pack, modelName, reasoningEffort)
 }

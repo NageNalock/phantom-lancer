@@ -46,6 +46,38 @@ func TestBuildCodexExecArgsOmitsEmptyReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestBuildCodexExecArgsPlacesLiveSearchBeforeExec(t *testing.T) {
+	args := buildCodexExecArgs("gpt-5.5", "medium", "prompt", nil, true)
+	if len(args) < 2 || args[0] != "--search" || args[1] != "exec" {
+		t.Fatalf("live search args = %#v, want --search before exec", args)
+	}
+}
+
+func TestCLIResearchAuditCollectorKeepsOnlyBoundedCallMetadata(t *testing.T) {
+	audit := newCLIResearchAudit(true)
+	for _, line := range []string{
+		`{"type":"item.completed","item":{"type":"web_search","query":"must not persist"}}`,
+		`{"type":"item.completed","item":{"type":"mcp_tool_call","server":"stock_agent","tool":"semantic_search_news_threads","arguments":{"secret":"must not persist"}}}`,
+		`{"type":"item.completed","item":{"type":"dynamic_tool_call","name":"research_agent","arguments":"must not persist"}}`,
+	} {
+		audit.record([]byte(line))
+	}
+	got := audit.snapshot()
+	if !got.LiveSearchEnabled || got.WebSearchCount != 1 {
+		t.Fatalf("audit = %+v, want one enabled web search", got)
+	}
+	if got.MCPToolCalls["stock_agent.semantic_search_news_threads"] != 1 || got.AgentToolCalls["research_agent"] != 1 {
+		t.Fatalf("audit calls = %+v / %+v", got.MCPToolCalls, got.AgentToolCalls)
+	}
+	if !portfolioSentinelHasExternalResearch(AgentCLIResearchAudit{AgentToolCalls: map[string]int{"research_agent": 1}}) {
+		t.Fatal("named research agent should satisfy external research audit")
+	}
+	raw := agentExecutorOutputSummary(&AgentExecutorOutput{ResearchAudit: got})
+	if strings.Contains(raw, "must not persist") {
+		t.Fatalf("audit leaked query or arguments: %s", raw)
+	}
+}
+
 func TestPreflightCodexMCPServersChecksSubmitTool(t *testing.T) {
 	pool := newAgentTaskPool(defaultCleanupInterval)
 	defer pool.Close()

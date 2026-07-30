@@ -1350,6 +1350,45 @@ func (s *Store) init(ctx context.Context) error {
 	`, agentProviderCodexCLIDefaultID); err != nil {
 		return fmt.Errorf("repair custom agent provider type: %w", err)
 	}
+	// ponytail: portfolio sentinel depends on Codex-native live search. Repair
+	// the single task binding in place instead of carrying an API compatibility
+	// branch through every execution path.
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_agent_task_profiles
+		SET execution_mode = 'cli',
+		    primary_model_id = CASE
+		        WHEN EXISTS (
+		            SELECT 1
+		            FROM stockv2_agent_model_profiles m
+		            WHERE m.id = stockv2_agent_task_profiles.primary_model_id
+		              AND m.provider_id = ?
+		              AND m.enabled = 1
+		              AND m.status = 'available'
+		              AND CASE
+		                  WHEN json_valid(m.metadata_json) THEN COALESCE(json_extract(m.metadata_json, '$.modelType'), 'chat')
+		                  ELSE 'chat'
+		              END = 'chat'
+		        ) THEN primary_model_id
+		        ELSE COALESCE((
+		            SELECT m.id
+		            FROM stockv2_agent_model_profiles m
+		            WHERE m.provider_id = ?
+		              AND m.enabled = 1
+		              AND m.status = 'available'
+		              AND CASE
+		                  WHEN json_valid(m.metadata_json) THEN COALESCE(json_extract(m.metadata_json, '$.modelType'), 'chat')
+		                  ELSE 'chat'
+		              END = 'chat'
+		            ORDER BY m.updated_at DESC, m.created_at DESC
+		            LIMIT 1
+		        ), '')
+		    END,
+		    fallback_model_id = '',
+		    updated_at = datetime('now')
+		WHERE task_type = 'portfolio_sentinel'
+	`, agentProviderCodexCLIDefaultID, agentProviderCodexCLIDefaultID); err != nil {
+		return fmt.Errorf("repair portfolio sentinel cli binding: %w", err)
+	}
 	if err := s.ensureColumn(ctx, "stockv2_agent_runs", "reasoning_effort", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("add agent run reasoning_effort column: %w", err)
 	}

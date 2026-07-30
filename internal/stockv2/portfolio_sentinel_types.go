@@ -8,7 +8,23 @@ import (
 
 const (
 	PortfolioSentinelOutputType          = AgentTaskTypePortfolioSentinel
-	PortfolioSentinelReportSchemaVersion = "portfolio-sentinel-report/v1"
+	PortfolioSentinelReportSchemaVersion = "portfolio-sentinel-report/v2"
+	portfolioSentinelLegacySchemaVersion = "portfolio-sentinel-report/v1"
+	portfolioSentinelPlanValidity        = 7 * 24 * time.Hour
+)
+
+const (
+	PortfolioSentinelPlanBuild  = "build_position"
+	PortfolioSentinelPlanAdd    = "add_position"
+	PortfolioSentinelPlanHold   = "hold"
+	PortfolioSentinelPlanReduce = "reduce_position"
+	PortfolioSentinelPlanExit   = "exit_position"
+
+	PortfolioSentinelTriggerImmediate   = "immediate"
+	PortfolioSentinelTriggerConditional = "conditional"
+
+	PortfolioSentinelSizingAvailableQuantityPct = "available_quantity_pct"
+	PortfolioSentinelSizingTargetPortfolioPct   = "target_portfolio_pct"
 )
 
 const (
@@ -117,6 +133,20 @@ type PortfolioSentinelRunListFilter struct {
 	Offset      int
 }
 
+type PortfolioSentinelActionPlanListFilter struct {
+	PortfolioID    string
+	Action         string
+	IncludeExpired bool
+}
+
+type PortfolioSentinelActionPlanView struct {
+	Plan          PortfolioSentinelActionPlan `json:"plan"`
+	RunID         string                      `json:"runId"`
+	ResultID      string                      `json:"resultId"`
+	RunFinishedAt time.Time                   `json:"runFinishedAt,omitempty"`
+	Status        string                      `json:"status"`
+}
+
 type RequestRunPortfolioSentinel struct {
 	PortfolioID      string `json:"portfolioId,omitempty"`
 	WindowType       string `json:"windowType,omitempty"`
@@ -151,6 +181,8 @@ type PortfolioSentinelContext struct {
 	RunID         string                              `json:"runId"`
 	Window        PortfolioSentinelWindowContext      `json:"window"`
 	Portfolios    []PortfolioSentinelPortfolioContext `json:"portfolios"`
+	Candidates    []PortfolioSentinelCandidateContext `json:"trustedCandidates,omitempty"`
+	Themes        []PortfolioSentinelThemeContext     `json:"activeThemes,omitempty"`
 	NewsEvents    []NewsEvent                         `json:"newsEvents,omitempty"`
 	RawNews       []StockV2RawNews                    `json:"rawNews,omitempty"`
 	RecentReviews []OperationReview                   `json:"recentReviews,omitempty"`
@@ -159,6 +191,23 @@ type PortfolioSentinelContext struct {
 	ContextStats  map[string]any                      `json:"contextStats,omitempty"`
 	NewsContext   *PortfolioSentinelNewsContext       `json:"newsContext,omitempty"`
 	Note          string                              `json:"note,omitempty"`
+}
+
+type PortfolioSentinelCandidateContext struct {
+	Symbol    string   `json:"symbol"`
+	Market    string   `json:"market,omitempty"`
+	Name      string   `json:"name,omitempty"`
+	Sources   []string `json:"sources"`
+	Rationale string   `json:"rationale,omitempty"`
+}
+
+type PortfolioSentinelThemeContext struct {
+	ID             string   `json:"id"`
+	Title          string   `json:"title"`
+	Stage          string   `json:"stage,omitempty"`
+	Symbols        []string `json:"symbols,omitempty"`
+	LatestChange   string   `json:"latestChange,omitempty"`
+	MaterialChange bool     `json:"materialChange"`
 }
 
 type PortfolioSentinelNewsContext struct {
@@ -213,11 +262,56 @@ type PortfolioSentinelReport struct {
 	NoiseItems                  []map[string]any                       `json:"noise_items,omitempty"`
 	AffectedHoldings            []PortfolioSentinelAffectedHolding     `json:"affected_holdings,omitempty"`
 	PortfolioActions            []PortfolioSentinelAction              `json:"portfolio_actions,omitempty"`
+	ActionPlans                 []PortfolioSentinelActionPlan          `json:"action_plans,omitempty"`
+	ResearchAudit               []PortfolioSentinelResearchRecord      `json:"research_audit,omitempty"`
 	ReviewRequests              []PortfolioSentinelReviewRequest       `json:"review_requests,omitempty"`
 	DataQualityNotes            []string                               `json:"data_quality_notes,omitempty"`
 	NextWatchFocus              []string                               `json:"next_watch_focus,omitempty"`
 	CheckedNewsThreadVersionIDs []string                               `json:"checked_news_thread_version_ids,omitempty"`
 	ImpactReviewCoverage        *PortfolioSentinelImpactReviewCoverage `json:"impact_review_coverage,omitempty"`
+}
+
+type PortfolioSentinelActionPlan struct {
+	ID            string                           `json:"id"`
+	PortfolioID   string                           `json:"portfolio_id"`
+	Symbol        string                           `json:"symbol"`
+	Market        string                           `json:"market,omitempty"`
+	Name          string                           `json:"name,omitempty"`
+	Action        string                           `json:"action"`
+	TriggerMode   string                           `json:"trigger_mode"`
+	TriggerPolicy string                           `json:"trigger_policy,omitempty"`
+	Conditions    []PortfolioSentinelPlanCondition `json:"conditions,omitempty"`
+	Sizing        *PortfolioSentinelPlanSizing     `json:"sizing,omitempty"`
+	Reason        string                           `json:"reason"`
+	RiskNotes     string                           `json:"risk_notes,omitempty"`
+	Confidence    float64                          `json:"confidence,omitempty"`
+	EvidenceRefs  []string                         `json:"evidence_refs,omitempty"`
+	ResearchRefs  []string                         `json:"research_refs,omitempty"`
+	ValidUntil    time.Time                        `json:"valid_until,omitempty"`
+}
+
+type PortfolioSentinelPlanCondition struct {
+	Key       string   `json:"key"`
+	Type      string   `json:"type"`
+	Threshold *float64 `json:"threshold,omitempty"`
+	Low       float64  `json:"low,omitempty"`
+	High      float64  `json:"high,omitempty"`
+}
+
+type PortfolioSentinelPlanSizing struct {
+	Mode  string  `json:"mode"`
+	Value float64 `json:"value"`
+}
+
+type PortfolioSentinelResearchRecord struct {
+	ID          string `json:"id"`
+	Kind        string `json:"kind"`
+	Query       string `json:"query,omitempty"`
+	Source      string `json:"source"`
+	SourceTitle string `json:"source_title,omitempty"`
+	PublishedAt string `json:"published_at,omitempty"`
+	CheckedAt   string `json:"checked_at,omitempty"`
+	Claim       string `json:"claim"`
 }
 
 type PortfolioSentinelImpactReviewCoverage struct {

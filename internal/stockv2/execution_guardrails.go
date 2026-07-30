@@ -16,13 +16,14 @@ const (
 )
 
 type ProposedOperation struct {
-	Action      string  `json:"action"`
-	PortfolioID string  `json:"portfolioId,omitempty"`
-	Symbol      string  `json:"symbol,omitempty"`
-	Market      string  `json:"market,omitempty"`
-	Quantity    float64 `json:"quantity,omitempty"`
-	Amount      float64 `json:"amount,omitempty"`
-	Price       float64 `json:"price,omitempty"`
+	Action             string  `json:"action"`
+	PortfolioID        string  `json:"portfolioId,omitempty"`
+	Symbol             string  `json:"symbol,omitempty"`
+	Market             string  `json:"market,omitempty"`
+	Quantity           float64 `json:"quantity,omitempty"`
+	Amount             float64 `json:"amount,omitempty"`
+	Price              float64 `json:"price,omitempty"`
+	TargetPortfolioPct float64 `json:"targetPortfolioPct,omitempty"`
 }
 
 type ExecutionGuardrailsInput struct {

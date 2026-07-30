@@ -810,6 +810,9 @@ func (s *Service) UpdateAgentTaskProfile(ctx context.Context, taskType string, r
 		}
 		profile.ExecutionMode = mode
 	}
+	if taskType == AgentTaskTypePortfolioSentinel && profile.ExecutionMode != AgentExecutionModeCLI {
+		return AgentTaskProfile{}, ErrAgentTaskRequiresCLI
+	}
 	if req.PrimaryModelID != nil {
 		primaryID := strings.TrimSpace(*req.PrimaryModelID)
 		if primaryID != "" {
@@ -846,6 +849,9 @@ func (s *Service) UpdateAgentTaskProfile(ctx context.Context, taskType string, r
 				}
 			}
 		}
+	}
+	if taskType == AgentTaskTypePortfolioSentinel && profile.ExecutionMode != AgentExecutionModeCLI {
+		return AgentTaskProfile{}, ErrAgentTaskRequiresCLI
 	}
 	if req.ReasoningEffort != nil {
 		reasoningEffort := strings.ToLower(strings.TrimSpace(*req.ReasoningEffort))
@@ -1048,7 +1054,8 @@ func (s *Service) CreateAgentRunRecord(ctx context.Context, params AgentRunRecor
 	if _, err := s.store.GetAgentProviderProfile(ctx, params.ProviderID); err != nil {
 		return AgentRun{}, AgentDecisionLedger{}, err
 	}
-	if _, err := s.ensureAgentTaskModelAllowed(ctx, params.ModelID); err != nil {
+	model, err := s.ensureAgentTaskModelAllowed(ctx, params.ModelID)
+	if err != nil {
 		return AgentRun{}, AgentDecisionLedger{}, err
 	}
 	params.ExecutionMode = strings.ToLower(strings.TrimSpace(params.ExecutionMode))
@@ -1057,6 +1064,13 @@ func (s *Service) CreateAgentRunRecord(ctx context.Context, params AgentRunRecor
 	}
 	if !validAgentExecutionMode(params.ExecutionMode) {
 		return AgentRun{}, AgentDecisionLedger{}, ErrInvalidAgentExecutionMode
+	}
+	if params.TaskType == AgentTaskTypePortfolioSentinel && params.ExecutionMode != AgentExecutionModeCLI {
+		return AgentRun{}, AgentDecisionLedger{}, ErrAgentTaskRequiresCLI
+	}
+	if params.TaskType == AgentTaskTypePortfolioSentinel &&
+		!agentModelSupportsExecutionMode(ctx, s.store, model, params.ExecutionMode) {
+		return AgentRun{}, AgentDecisionLedger{}, ErrAgentExecutionModeModelMismatch
 	}
 	params.ReasoningEffort = strings.ToLower(strings.TrimSpace(params.ReasoningEffort))
 	if !validAgentReasoningEffort(params.ReasoningEffort) {
@@ -1888,6 +1902,14 @@ func agentExecutorOutputSummary(output *AgentExecutorOutput) string {
 	if output.TimedOut {
 		b.WriteString("timed_out: true\n")
 	}
+	fmt.Fprintf(&b, "live_search_enabled: %t\n", output.ResearchAudit.LiveSearchEnabled)
+	fmt.Fprintf(&b, "web_search_count: %d\n", output.ResearchAudit.WebSearchCount)
+	if len(output.ResearchAudit.MCPToolCalls) > 0 {
+		fmt.Fprintf(&b, "mcp_tool_calls: %s\n", compactCountMap(output.ResearchAudit.MCPToolCalls))
+	}
+	if len(output.ResearchAudit.AgentToolCalls) > 0 {
+		fmt.Fprintf(&b, "agent_tool_calls: %s\n", compactCountMap(output.ResearchAudit.AgentToolCalls))
+	}
 	if output.StdoutTail != "" {
 		b.WriteString("stdout_tail:\n")
 		b.WriteString(output.StdoutTail)
@@ -1897,6 +1919,14 @@ func agentExecutorOutputSummary(output *AgentExecutorOutput) string {
 		b.WriteString(output.StderrTail)
 	}
 	return b.String()
+}
+
+func compactCountMap(counts map[string]int) string {
+	raw, err := json.Marshal(counts)
+	if err != nil {
+		return "{}"
+	}
+	return string(raw)
 }
 
 func (s *Service) safeGetAgentRunAndLedger(ctx context.Context, runID, ledgerID string) (AgentRun, AgentDecisionLedger) {
@@ -1957,7 +1987,9 @@ func (s *Service) finalizeAgentRunWithOutput(
 	// 准备 output artifact summary
 	var outputArtifact strings.Builder
 	if execOutput != nil {
-		if execOutput.RequestCount > 0 {
+		if execOutput.RequestCount > 0 || execOutput.ResearchAudit.LiveSearchEnabled ||
+			execOutput.ResearchAudit.WebSearchCount > 0 || len(execOutput.ResearchAudit.MCPToolCalls) > 0 ||
+			len(execOutput.ResearchAudit.AgentToolCalls) > 0 {
 			run.CostEstimate = map[string]any{
 				"requestCount":    execOutput.RequestCount,
 				"inputTokens":     execOutput.PromptTokens,
@@ -1965,6 +1997,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 				"cacheMissTokens": execOutput.CacheMissTokens,
 				"outputTokens":    execOutput.OutputTokens,
 				"requests":        execOutput.RequestTrace,
+				"researchAudit":   execOutput.ResearchAudit,
 			}
 		}
 		if strings.TrimSpace(execOutput.Prompt) != "" {
@@ -1994,6 +2027,14 @@ func (s *Service) finalizeAgentRunWithOutput(
 		fmt.Fprintf(&outputArtifact, "duration: %s\n", execOutput.Duration)
 		if execOutput.TimedOut {
 			outputArtifact.WriteString("timed_out: true\n")
+		}
+		fmt.Fprintf(&outputArtifact, "live_search_enabled: %t\n", execOutput.ResearchAudit.LiveSearchEnabled)
+		fmt.Fprintf(&outputArtifact, "web_search_count: %d\n", execOutput.ResearchAudit.WebSearchCount)
+		if len(execOutput.ResearchAudit.MCPToolCalls) > 0 {
+			fmt.Fprintf(&outputArtifact, "mcp_tool_calls: %s\n", compactCountMap(execOutput.ResearchAudit.MCPToolCalls))
+		}
+		if len(execOutput.ResearchAudit.AgentToolCalls) > 0 {
+			fmt.Fprintf(&outputArtifact, "agent_tool_calls: %s\n", compactCountMap(execOutput.ResearchAudit.AgentToolCalls))
 		}
 		includeEmptyTails := execErr != nil || execOutput.ExitCode != 0 || execOutput.TimedOut
 		retainTails := run.TaskType != AgentTaskTypeNewsEventReview || run.TriggerObjectType != "news_context_run" || includeEmptyTails
@@ -2218,7 +2259,11 @@ func (s *Service) finalizeAgentRunWithOutput(
 		ledger.StructuredOutput["newsContextApplyResult"] = result
 	}
 	if run.TaskType == AgentTaskTypePortfolioSentinel && run.TriggerObjectType == "portfolio_sentinel_run" && run.TriggerObjectID != "" {
-		result, err := s.ProcessPortfolioSentinelSubmittedResult(ctx, run.TriggerObjectID, *submitted)
+		researchAudit := AgentCLIResearchAudit{}
+		if execOutput != nil {
+			researchAudit = execOutput.ResearchAudit
+		}
+		result, err := s.ProcessPortfolioSentinelSubmittedResult(ctx, run.TriggerObjectID, *submitted, researchAudit)
 		if err != nil {
 			run.Status = AgentRunStatusFailed
 			run.ErrorMessage = safelog.Text("save portfolio sentinel result failed: "+err.Error(), 500)

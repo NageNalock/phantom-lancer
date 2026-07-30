@@ -95,6 +95,7 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/portfolio-sentinel/runs", s.handleStockV2ListPortfolioSentinelRuns)
 	mux.HandleFunc("GET /api/stockv2/portfolio-sentinel/runs/{id}", s.handleStockV2GetPortfolioSentinelRun)
 	mux.HandleFunc("GET /api/stockv2/portfolio-sentinel/results/{id}", s.handleStockV2GetPortfolioSentinelResult)
+	mux.HandleFunc("GET /api/stockv2/portfolio-sentinel/action-plans", s.handleStockV2ListPortfolioSentinelActionPlans)
 
 	// Operation Review(从 MonitorHit 进入人工/后续 Agent 审阅)
 	mux.HandleFunc("GET /api/stockv2/reviews", s.handleStockV2ListOperationReviews)

@@ -8,6 +8,18 @@
 >
 > 相关文档：`docs/stock-v2-strategy-generation-design-2026-06-26.md` 定义策略生成和 `OperationReview` 进入路径；`docs/stock-v2-opportunity-discovery-technical-design-2026-06-26.md` 定义 Agent 研究执行、MCP 查询和可观测性模式。
 
+## 2026-07-30 实现更新：持仓操作计划 v2
+
+原 `portfolio-sentinel-report/v1` 仅保存风险结论并按需派生 Review，不能形成可持续监控的持仓处置方案。当前实现升级为以下约束；本文后续 v1 章节保留为历史设计背景：
+
+- 新运行固定使用 `portfolio-sentinel-report/v2`；历史 v1 结果继续只读展示。
+- `portfolio_sentinel` 整条执行链固定为 Codex CLI，不允许 API/DeepSeek 执行或降级。服务以 `codex --search exec` 启用实时公开检索，并在 Agent 账本中只保留搜索、MCP、Agent 工具调用次数与名称，不保存查询参数或响应正文。
+- 每个当前持仓必须有且仅有一条 `action_plans[]`，动作限定为建仓、加仓、持有、减仓、清仓。非持仓建仓只能来自已入选机会候选或 active 单票策略形成的可信候选池。
+- 可操作计划必须引用真实 `web_search` 或命名 search/research/browse Agent 工具对应的 `research_audit`；没有观察到真实公开检索时只允许一次纠正重试，仍不满足则整次运行失败。
+- 条件计划只使用现有 watch evaluator 支持的价格、涨跌幅、日收盘价和组合权重确定性条件。一个成功运行以同一事务替换该组合的哨兵策略版本，最长有效七天。
+- 计划复用 active `portfolio_monitor` 策略和 `data_strategy_monitor`。条件命中后按当时可用数量或当时组合资产动态计算股数/金额，直接生成待 owner 确认的 `proposed_operation`；不再次调用模型，不自动下单。
+- 前端组合哨兵默认展示当前计划及监控中、已触发、已生成提案、已过期状态；Agent 任务绑定页对该任务固定展示 CLI 模式。
+
 ## 1. 背景
 
 2026-07-02，存储相关科技类股票出现普遍大跌，当前组合中的科技/AI 服务器相关持仓发生损失。事后检查运行数据发现：
@@ -709,4 +721,3 @@ StockV2 下新增二级入口：`组合哨兵`。
 - 不要求已有策略必须 active。
 - 空库或无持仓部署必须可用，输出无扫描对象。
 - 缺 embedding 时允许关键词/名称召回降级，但必须在结果中标注语义召回不可用。
-

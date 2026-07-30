@@ -29,8 +29,9 @@ export function StockV2AgentTaskProfileDrawer({
   onSaved?: () => void;
   actions: AppActions;
 }) {
+  const cliOnly = taskType === "portfolio_sentinel";
   const [form, setForm] = useState<StockV2AgentUpdateTaskProfileRequest>({
-    executionMode: profile?.executionMode || "cli",
+    executionMode: cliOnly ? "cli" : profile?.executionMode || "cli",
     primaryModelId: profile?.primaryModelId || "",
     fallbackModelId: profile?.fallbackModelId || "",
     reasoningEffort: profile?.reasoningEffort || "",
@@ -41,16 +42,16 @@ export function StockV2AgentTaskProfileDrawer({
   useEffect(() => {
     if (profile) {
       setForm({
-        executionMode: profile.executionMode || "cli",
+        executionMode: cliOnly ? "cli" : profile.executionMode || "cli",
         primaryModelId: profile.primaryModelId || "",
-        fallbackModelId: profile.fallbackModelId || "",
+        fallbackModelId: cliOnly ? "" : profile.fallbackModelId || "",
         reasoningEffort: profile.reasoningEffort || "",
       });
     }
-  }, [profile]);
+  }, [cliOnly, profile]);
 
   const providerByID = new Map(providers.map((provider) => [provider.id, provider]));
-  const executionMode = form.executionMode === "api" ? "api" : "cli";
+  const executionMode = cliOnly ? "cli" : form.executionMode === "api" ? "api" : "cli";
   const compatibleModels = models.filter((m) => {
     if ((m.modelType || "chat") !== "chat") return false;
     const provider = providerByID.get(m.providerId);
@@ -73,7 +74,7 @@ export function StockV2AgentTaskProfileDrawer({
       const body: StockV2AgentUpdateTaskProfileRequest = {
         executionMode,
         primaryModelId: form.primaryModelId && usableModelIds.has(form.primaryModelId) ? form.primaryModelId : "",
-        fallbackModelId: form.fallbackModelId && usableModelIds.has(form.fallbackModelId) ? form.fallbackModelId : "",
+        fallbackModelId: !cliOnly && form.fallbackModelId && usableModelIds.has(form.fallbackModelId) ? form.fallbackModelId : "",
         reasoningEffort: form.reasoningEffort || "",
       };
       await actions.api(`/api/stockv2/agent/task-profiles/${taskType}`, { method: "PUT", body });
@@ -104,6 +105,11 @@ export function StockV2AgentTaskProfileDrawer({
     >
       <div className="grid gap-3 text-sm">
         {error ? <Notice tone="danger">{error}</Notice> : null}
+        {cliOnly ? (
+          <Notice>
+            组合哨兵持仓必须使用 Codex CLI。任务会启用实时 web search，并可使用 CLI/MCP/Agent 侧检索能力；API Provider 不具备这条能力，因此不参与绑定或降级。
+          </Notice>
+        ) : null}
         {enabledModels.length === 0 ? (
           <Notice tone="warn">当前执行模式下暂无可用对话模型。CLI 仅使用内置 Codex Provider；API 使用 OpenAI-compatible Provider。</Notice>
         ) : null}
@@ -111,14 +117,18 @@ export function StockV2AgentTaskProfileDrawer({
           <p className="m-0 text-xs text-[var(--muted)]">不可用模型保留显示并注明状态，但不能保存为任务绑定。</p>
         ) : null}
 
-        <Field label="执行模式" help="CLI 使用本机 Codex 会话与 MCP；API 直接请求所选 Provider，并在服务内完成函数调用循环">
+        <Field
+          label="执行模式"
+          help={cliOnly ? "组合哨兵持仓固定使用本机 Codex CLI 与实时搜索，不能切换为 API" : "CLI 使用本机 Codex 会话与 MCP；API 直接请求所选 Provider，并在服务内完成函数调用循环"}
+        >
           <select
             value={executionMode}
+            disabled={cliOnly}
             onChange={(e) => setForm({ ...form, executionMode: e.target.value, primaryModelId: "", fallbackModelId: "" })}
             className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
           >
             <option value="cli">CLI · Codex 登录态</option>
-            <option value="api">API · OpenAI-compatible</option>
+            {!cliOnly ? <option value="api">API · OpenAI-compatible</option> : null}
           </select>
         </Field>
 
@@ -137,20 +147,22 @@ export function StockV2AgentTaskProfileDrawer({
           </select>
         </Field>
 
-        <Field label="备模型" help="主模型失败时降级调用">
-          <select
-            value={form.fallbackModelId || ""}
-            onChange={(e) => setForm({ ...form, fallbackModelId: e.target.value })}
-            className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
-          >
-            <option value="">(无)</option>
-            {compatibleModels.map((m) => (
-              <option disabled={!m.enabled || m.status !== "available"} key={m.id} value={m.id}>
-                {modelOptionLabel(m)}
-              </option>
-            ))}
-          </select>
-        </Field>
+        {!cliOnly ? (
+          <Field label="备模型" help="主模型失败时降级调用">
+            <select
+              value={form.fallbackModelId || ""}
+              onChange={(e) => setForm({ ...form, fallbackModelId: e.target.value })}
+              className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
+            >
+              <option value="">(无)</option>
+              {compatibleModels.map((m) => (
+                <option disabled={!m.enabled || m.status !== "available"} key={m.id} value={m.id}>
+                  {modelOptionLabel(m)}
+                </option>
+              ))}
+            </select>
+          </Field>
+        ) : null}
 
         <Field
           label="模型推理强度"

@@ -3,6 +3,8 @@ package stockv2
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -248,6 +250,44 @@ func (s *Service) processCreatedMonitorHit(ctx context.Context, hit MonitorHit, 
 	pipeline["reviewCreated"] = result.ReviewCreated
 	pipeline["reviewStatus"] = review.Status
 
+	if actionPlan := mapFromAny(hit.Evidence["portfolioSentinelActionPlan"]); len(actionPlan) > 0 {
+		operation, parseErr := proposedOperationFromReviewResult(map[string]any{
+			"proposedOperation": hit.Evidence["portfolioSentinelProposedOperation"],
+		}, review)
+		if parseErr != nil {
+			return result, parseErr
+		}
+		completed, saveErr := s.SaveOperationReviewResult(ctx, review.ID, RequestSaveOperationReviewResult{
+			OutputType: OperationReviewOutputProposedOperation,
+			Status:     OperationReviewStatusCompleted,
+			ResultSummary: firstNonEmpty(
+				firstRuleString(actionPlan, "reason"),
+				"组合哨兵条件已满足，生成待确认操作。",
+			),
+			Result: map[string]any{
+				"facts":             []any{"组合哨兵确定性条件已满足"},
+				"inferences":        []any{},
+				"assumptions":       []any{},
+				"proposedOperation": portfolioSentinelProposedOperationMap(operation),
+				"sourceActionPlan":  actionPlan,
+			},
+		})
+		if saveErr != nil {
+			return result, saveErr
+		}
+		pipeline["reviewStatus"] = completed.Status
+		pipeline["agentStatus"] = "not_required"
+		evidence["reviewPipeline"] = pipeline
+		if updateErr := s.store.UpdateMonitorHitEvidence(ctx, hit.ID, evidence, hit.AgentDecisionID); updateErr != nil {
+			return result, updateErr
+		}
+		if updatedHit, getErr := s.store.GetMonitorHit(ctx, hit.ID); getErr == nil {
+			result.AlertID = updatedHit.AlertID
+			result.AlertCreated = updatedHit.AlertID != ""
+		}
+		return result, nil
+	}
+
 	if !cfg.AgentDoublecheckEnabled {
 		pipeline["agentStatus"] = "skipped"
 		pipeline["agentSkippedReason"] = "agent_doublecheck_disabled"
@@ -319,6 +359,75 @@ func (s *Service) processCreatedMonitorHit(ctx context.Context, hit MonitorHit, 
 	result.AlertID = alert.ID
 	result.AlertCreated = created
 	return result, nil
+}
+
+func (s *Service) portfolioSentinelTriggeredOperation(
+	ctx context.Context,
+	hit MonitorHit,
+	actionPlan map[string]any,
+) (ProposedOperation, error) {
+	sizing := mapFromAny(actionPlan["sizing"])
+	mode := firstRuleString(sizing, "mode")
+	value := firstRuleNumber(sizing, "value")
+	operation := ProposedOperation{
+		Action:      firstRuleString(actionPlan, "action"),
+		PortfolioID: hit.PortfolioID,
+		Symbol:      hit.Symbol,
+		Market:      hit.Market,
+	}
+	portfolio, err := s.store.GetPortfolio(ctx, hit.PortfolioID)
+	if err != nil {
+		return operation, err
+	}
+	holdings, err := s.store.ListHoldings(ctx, hit.PortfolioID)
+	if err != nil {
+		return operation, err
+	}
+	holding, hasHolding := findHoldingForOperation(holdings, hit.Symbol)
+	switch operation.Action {
+	case ProposedOperationActionReducePosition, ProposedOperationActionExitPosition:
+		if mode != PortfolioSentinelSizingAvailableQuantityPct || !hasHolding {
+			return operation, fmt.Errorf("%w: sell plan has no available holding", ErrInvalidPortfolioSentinelResult)
+		}
+		available := holding.AvailableQuantity
+		if available <= 0 {
+			available = holding.Quantity
+		}
+		if operation.Action == ProposedOperationActionExitPosition {
+			operation.Quantity = available
+		} else {
+			operation.Quantity = math.Floor(available * value / 100)
+		}
+		if operation.Quantity <= 0 {
+			return operation, fmt.Errorf("%w: sell plan resolved to zero quantity", ErrInvalidPortfolioSentinelResult)
+		}
+	case ProposedOperationActionBuildPosition, ProposedOperationActionAddPosition:
+		if mode != PortfolioSentinelSizingTargetPortfolioPct {
+			return operation, fmt.Errorf("%w: buy plan has invalid sizing mode", ErrInvalidPortfolioSentinelResult)
+		}
+		operation.TargetPortfolioPct = value
+		total := portfolio.Cash
+		currentValue := 0.0
+		for _, item := range holdings {
+			total += item.MarketValue
+			if item.Symbol == hit.Symbol {
+				currentValue = item.MarketValue
+			}
+		}
+		if snapshots, snapshotErr := s.store.GetPortfolioSnapshots(ctx, hit.PortfolioID, 1); snapshotErr == nil && len(snapshots) > 0 && snapshots[0].TotalAssetValue > 0 {
+			total = snapshots[0].TotalAssetValue
+		} else if snapshotErr != nil {
+			return operation, snapshotErr
+		}
+		operation.Amount = math.Max(0, total*value/100-currentValue)
+		operation.Amount = math.Floor(operation.Amount*100) / 100
+		if operation.Amount <= 0 {
+			return operation, fmt.Errorf("%w: target portfolio weight requires no additional capital", ErrInvalidPortfolioSentinelResult)
+		}
+	default:
+		return operation, fmt.Errorf("%w: unsupported triggered action", ErrInvalidPortfolioSentinelResult)
+	}
+	return operation, nil
 }
 
 func (s *Service) upsertMonitorAlert(
@@ -582,12 +691,11 @@ func stringFromAny(value any) string {
 	}
 }
 
-// runDataStrategyMonitor 扫描 active 单票策略,优先用操作剧本里的数据/组合预筛产出动作候选。
+// runDataStrategyMonitor 扫描 active 单票/组合策略,优先用操作剧本里的数据/组合预筛产出动作候选。
 // ponytail: 保留旧 priceTriggers 兜底,兼容已有策略版本,监控判断仍复用 watch evaluator。
 func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cfg MonitorTaskConfig) MonitorRun {
 	run.Metadata["agentDoublecheck"] = monitorAgentDecisionState(cfg)
 	strategies, err := s.store.ListStrategies(ctx, StrategyListFilter{
-		Kind:   StrategyKindSymbolStrategy,
 		Status: StrategyStatusActive,
 		Limit:  500,
 	})
@@ -599,7 +707,7 @@ func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cf
 	}
 	run.ScannedCount = len(strategies)
 	for _, sw := range strategies {
-		if sw.ActiveVersion == nil || sw.Strategy.Symbol == "" {
+		if sw.ActiveVersion == nil {
 			continue
 		}
 		hasPlaybookPrefilters, playbookMatched, playbookHits, playbookFailures, playbookReviews, playbookAlerts := s.runStrategyPlaybookPrefilters(ctx, run, cfg, sw)
@@ -611,6 +719,9 @@ func (s *Service) runDataStrategyMonitor(ctx context.Context, run MonitorRun, cf
 			if playbookMatched {
 				run.SuccessCount++
 			}
+			continue
+		}
+		if sw.Strategy.Kind == StrategyKindPortfolioMonitor || sw.Strategy.Symbol == "" {
 			continue
 		}
 		triggerConfig, err := s.triggerConfigFromStrategy(ctx, sw)
@@ -690,70 +801,137 @@ func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run Monitor
 	alertCount := 0
 
 	for _, action := range actions {
-		rules := playbookActionWatchRules(action, sw.Strategy.Symbol, sw.Strategy.PortfolioID)
+		if validUntil := firstRuleString(action, "validUntil"); validUntil != "" {
+			if deadline, err := time.Parse(time.RFC3339, validUntil); err == nil && !run.StartedAt.Before(deadline) {
+				continue
+			}
+		}
+		if firstRuleString(action, "portfolioSentinelActionPlan") == "true" {
+			alreadyTriggered, err := s.portfolioSentinelPlanAlreadyTriggered(ctx, sw.Strategy.ID, action)
+			if err != nil {
+				failedCount++
+				continue
+			}
+			if alreadyTriggered {
+				continue
+			}
+		}
+		symbol := firstNonEmpty(firstRuleString(action, "symbol"), sw.Strategy.Symbol)
+		market := firstNonEmpty(firstRuleString(action, "market"), sw.Strategy.Market)
+		portfolioID := firstNonEmpty(firstRuleString(action, "portfolioId", "portfolioID"), sw.Strategy.PortfolioID)
+		rules := playbookActionWatchRules(action, symbol, portfolioID)
 		if len(rules) == 0 {
 			continue
 		}
 		hasPrefilters = true
+		triggerPolicy := firstRuleString(action, "triggerPolicy")
+		if triggerPolicy != WatchTriggerPolicyAny {
+			triggerPolicy = WatchTriggerPolicyAll
+		}
 		tempWatch := StockV2Watch{
-			Symbol:        sw.Strategy.Symbol,
-			Market:        sw.Strategy.Market,
-			PortfolioID:   sw.Strategy.PortfolioID,
-			TriggerPolicy: WatchTriggerPolicyAny,
+			Symbol:        symbol,
+			Market:        market,
+			PortfolioID:   portfolioID,
+			TriggerPolicy: triggerPolicy,
 		}
+		results := make([]WatchRuleResult, 0, len(rules))
 		for _, rule := range rules {
-			rr := s.evaluateWatchRule(ctx, tempWatch, rule, run.StartedAt)
-			if rr.Status != WatchRunStatusMatched {
-				continue
-			}
-			evidence := monitorEvidenceWithAgentState(rr.Evidence, cfg)
-			actionID := firstRuleString(action, "id")
-			actionType := firstRuleString(action, "action")
-			actionTitle := firstRuleString(action, "title")
-			evidence["matchedAction"] = actionType
-			evidence["matchedActionLabel"] = strategyActionLabel(actionType)
-			evidence["matchedRuleId"] = actionID
-			evidence["matchedRuleTitle"] = actionTitle
-			evidence["matchedPrefilterKey"] = rr.RuleKey
-			evidence["matchedPrefilterType"] = rr.RuleType
-			evidence["playbookRule"] = action
-
-			title := "策略动作候选: " + strategyActionLabel(actionType)
-			if actionTitle != "" {
-				title += " · " + actionTitle
-			}
-			hit := MonitorHit{
-				RunID:       run.ID,
-				TaskType:    MonitorTaskDataStrategyMonitor,
-				Status:      MonitorHitStatusCandidate,
-				StrategyID:  sw.Strategy.ID,
-				PortfolioID: sw.Strategy.PortfolioID,
-				Symbol:      sw.Strategy.Symbol,
-				Market:      sw.Strategy.Market,
-				Title:       title,
-				Summary:     rr.Reason,
-				Evidence:    evidence,
-			}
-			createdHit, err := s.store.CreateMonitorHit(ctx, hit)
-			if err != nil {
-				failedCount++
-				continue
-			}
-			post, err := s.processCreatedMonitorHit(ctx, createdHit, cfg)
-			if post.ReviewCreated {
-				reviewCount++
-			}
-			if post.AlertID != "" {
-				alertCount++
-			}
-			if err != nil {
-				failedCount++
-			}
-			hitCount++
-			matched = true
+			results = append(results, s.evaluateWatchRule(ctx, tempWatch, rule, run.StartedAt))
 		}
+		status, reason := aggregateWatchRules(triggerPolicy, results)
+		if status != WatchRunStatusMatched {
+			continue
+		}
+		evidence := monitorEvidenceWithAgentState(map[string]any{}, cfg)
+		actionID := firstRuleString(action, "id")
+		actionType := firstRuleString(action, "action")
+		actionTitle := firstRuleString(action, "title")
+		evidence["matchedAction"] = actionType
+		evidence["matchedActionLabel"] = strategyActionLabel(actionType)
+		evidence["matchedRuleId"] = actionID
+		evidence["matchedRuleTitle"] = actionTitle
+		evidence["matchedRuleResults"] = results
+		evidence["playbookRule"] = action
+		for _, ruleResult := range results {
+			if ruleResult.Status != WatchRunStatusMatched {
+				continue
+			}
+			evidence["matchedPrefilterKey"] = ruleResult.RuleKey
+			evidence["matchedPrefilterType"] = ruleResult.RuleType
+			evidence["matchedThreshold"] = ruleResult.Threshold
+			break
+		}
+		if firstRuleString(action, "portfolioSentinelActionPlan") == "true" {
+			evidence["portfolioSentinelActionPlan"] = action
+		}
+
+		title := "策略动作候选: " + strategyActionLabel(actionType)
+		if actionTitle != "" {
+			title += " · " + actionTitle
+		}
+		hit := MonitorHit{
+			RunID:       run.ID,
+			TaskType:    MonitorTaskDataStrategyMonitor,
+			Status:      MonitorHitStatusCandidate,
+			StrategyID:  sw.Strategy.ID,
+			PortfolioID: portfolioID,
+			Symbol:      symbol,
+			Market:      market,
+			Title:       title,
+			Summary:     reason,
+			Evidence:    evidence,
+		}
+		if actionPlan := mapFromAny(evidence["portfolioSentinelActionPlan"]); len(actionPlan) > 0 {
+			operation, operationErr := s.portfolioSentinelTriggeredOperation(ctx, hit, actionPlan)
+			if operationErr != nil {
+				failedCount++
+				continue
+			}
+			hit.Evidence["portfolioSentinelProposedOperation"] = portfolioSentinelProposedOperationMap(operation)
+		}
+		createdHit, err := s.store.CreateMonitorHit(ctx, hit)
+		if err != nil {
+			failedCount++
+			continue
+		}
+		post, err := s.processCreatedMonitorHit(ctx, createdHit, cfg)
+		if post.ReviewCreated {
+			reviewCount++
+		}
+		if post.AlertID != "" {
+			alertCount++
+		}
+		if err != nil {
+			failedCount++
+		}
+		hitCount++
+		matched = true
 	}
 	return hasPrefilters, matched, hitCount, failedCount, reviewCount, alertCount
+}
+
+func (s *Service) portfolioSentinelPlanAlreadyTriggered(
+	ctx context.Context,
+	strategyID string,
+	action map[string]any,
+) (bool, error) {
+	actionID := firstRuleString(action, "id")
+	sentinelRunID := firstRuleString(action, "portfolioSentinelRunId")
+	if actionID == "" || sentinelRunID == "" {
+		return false, nil
+	}
+	hits, err := s.store.ListMonitorHits(ctx, MonitorHitListFilter{StrategyID: strategyID, Limit: 200})
+	if err != nil {
+		return false, err
+	}
+	for _, hit := range hits {
+		rule := mapFromAny(hit.Evidence["playbookRule"])
+		if firstRuleString(rule, "id") == actionID &&
+			firstRuleString(rule, "portfolioSentinelRunId") == sentinelRunID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // runNewsStrategyMonitor 把消息候选接入现有 MonitorHit -> Review 链路。

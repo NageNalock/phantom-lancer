@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +43,17 @@ type AgentExecutorOutput struct {
 	OutputTokens    int                    `json:"outputTokens,omitempty"`
 	RequestCount    int                    `json:"requestCount,omitempty"`
 	RequestTrace    []AgentAPIRequestTrace `json:"requestTrace,omitempty"`
+	ResearchAudit   AgentCLIResearchAudit  `json:"researchAudit,omitempty"`
+}
+
+// AgentCLIResearchAudit records bounded capability evidence from Codex JSONL.
+// Search terms, tool arguments, response bodies and URLs deliberately remain
+// outside service logs and the execution ledger.
+type AgentCLIResearchAudit struct {
+	LiveSearchEnabled bool           `json:"liveSearchEnabled"`
+	WebSearchCount    int            `json:"webSearchCount"`
+	MCPToolCalls      map[string]int `json:"mcpToolCalls,omitempty"`
+	AgentToolCalls    map[string]int `json:"agentToolCalls,omitempty"`
 }
 
 // AgentAPIRequestTrace keeps one redacted record per actual API request.
@@ -191,7 +203,7 @@ func (e *codexCLIExecutor) ExecutePortfolioSentinel(
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
 	prompt := buildPortfolioSentinelPrompt(taskID, pack, e.mcpURL)
-	return e.executePrompt(ctx, taskID, prompt, modelName, reasoningEffort)
+	return e.executePromptWithOptions(ctx, taskID, prompt, modelName, reasoningEffort, execDefaultTimeout, true)
 }
 
 func (e *codexCLIExecutor) ExecuteStockProfileSummary(
@@ -224,6 +236,18 @@ func (e *codexCLIExecutor) executePromptWithTimeout(
 	reasoningEffort string,
 	timeout time.Duration,
 ) (*AgentExecutorOutput, error) {
+	return e.executePromptWithOptions(ctx, taskID, prompt, modelName, reasoningEffort, timeout, false)
+}
+
+func (e *codexCLIExecutor) executePromptWithOptions(
+	ctx context.Context,
+	taskID string,
+	prompt string,
+	modelName string,
+	reasoningEffort string,
+	timeout time.Duration,
+	liveSearch bool,
+) (*AgentExecutorOutput, error) {
 	if timeout <= 0 {
 		timeout = execDefaultTimeout
 	}
@@ -237,7 +261,7 @@ func (e *codexCLIExecutor) executePromptWithTimeout(
 		return nil, err
 	}
 
-	args := buildCodexExecArgs(modelName, reasoningEffort, prompt, mcpServers)
+	args := buildCodexExecArgs(modelName, reasoningEffort, prompt, mcpServers, liveSearch)
 	cmd := exec.CommandContext(execCtx, e.binary, args...)
 	cmd.Env = e.buildEnv()
 	// ponytail: Codex may spawn search or MCP descendants. A dedicated process
@@ -259,6 +283,7 @@ func (e *codexCLIExecutor) executePromptWithTimeout(
 	stdoutBuf.Init(stdoutTailMaxBytes)
 	stderrBuf.Init(stderrTailMaxBytes)
 	transcriptBuf.Init(transcriptMaxBytes)
+	researchAudit := newCLIResearchAudit(liveSearch)
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -281,6 +306,7 @@ func (e *codexCLIExecutor) executePromptWithTimeout(
 		scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 		for scanner.Scan() {
 			line := scanner.Bytes()
+			researchAudit.record(line)
 			stdoutBuf.Write(line)
 			stdoutBuf.Write([]byte("\n"))
 			transcriptBuf.Write(line)
@@ -449,6 +475,7 @@ waitLoop:
 		Duration:       duration,
 		RawTranscript:  transcript,
 		ProcessGroupID: processGroupID,
+		ResearchAudit:  researchAudit.snapshot(),
 	}
 
 	// result 没收到但进程退出了 → 失败
@@ -492,9 +519,14 @@ func executorProcessGroupExists(processGroupID int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-func buildCodexExecArgs(modelName, reasoningEffort, prompt string, mcpServers []codexMCPServerCapability) []string {
+func buildCodexExecArgs(modelName, reasoningEffort, prompt string, mcpServers []codexMCPServerCapability, liveSearch ...bool) []string {
 	// ponytail: StockV2 agent runs are owner-triggered local tasks; isolate user config so unrelated MCPs cannot pollute stderr.
-	args := []string{"exec", "--json", "--ignore-user-config", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "-c", "mcp_servers={}"}
+	args := make([]string, 0, 18)
+	if len(liveSearch) > 0 && liveSearch[0] {
+		// --search is a global Codex flag and must precede the exec subcommand.
+		args = append(args, "--search")
+	}
+	args = append(args, "exec", "--json", "--ignore-user-config", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "-c", "mcp_servers={}")
 	for _, server := range mcpServers {
 		args = append(args, "-c", fmt.Sprintf("mcp_servers.%s.url=%s", server.Name, strconv.Quote(strings.TrimSpace(server.URL))))
 	}
@@ -505,6 +537,84 @@ func buildCodexExecArgs(modelName, reasoningEffort, prompt string, mcpServers []
 		args = append(args, "--model", modelName)
 	}
 	return append(args, prompt)
+}
+
+type cliResearchAuditCollector struct {
+	mu      sync.Mutex
+	enabled bool
+	web     int
+	mcp     map[string]int
+	agent   map[string]int
+}
+
+func newCLIResearchAudit(enabled bool) *cliResearchAuditCollector {
+	return &cliResearchAuditCollector{
+		enabled: enabled,
+		mcp:     map[string]int{},
+		agent:   map[string]int{},
+	}
+}
+
+func (a *cliResearchAuditCollector) record(line []byte) {
+	var event struct {
+		Type string `json:"type"`
+		Item struct {
+			Type   string `json:"type"`
+			Server string `json:"server"`
+			Tool   string `json:"tool"`
+			Name   string `json:"name"`
+		} `json:"item"`
+	}
+	if json.Unmarshal(line, &event) != nil || event.Type != "item.completed" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch event.Item.Type {
+	case "web_search":
+		a.web++
+	case "mcp_tool_call":
+		name := firstNonEmpty(strings.TrimSpace(event.Item.Tool), strings.TrimSpace(event.Item.Name))
+		if server := strings.TrimSpace(event.Item.Server); server != "" && name != "" && !strings.Contains(name, ".") {
+			name = server + "." + name
+		}
+		if name != "" {
+			a.mcp[safelog.Text(name, 160)]++
+		}
+	case "collab_tool_call", "dynamic_tool_call":
+		if name := firstNonEmpty(strings.TrimSpace(event.Item.Tool), strings.TrimSpace(event.Item.Name)); name != "" {
+			a.agent[safelog.Text(name, 160)]++
+		}
+	}
+}
+
+func (a *cliResearchAuditCollector) snapshot() AgentCLIResearchAudit {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return AgentCLIResearchAudit{
+		LiveSearchEnabled: a.enabled,
+		WebSearchCount:    a.web,
+		MCPToolCalls:      sortedPositiveCounts(a.mcp),
+		AgentToolCalls:    sortedPositiveCounts(a.agent),
+	}
+}
+
+func sortedPositiveCounts(input map[string]int) map[string]int {
+	if len(input) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(input))
+	for key, count := range input {
+		if key != "" && count > 0 {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	out := make(map[string]int, len(keys))
+	for _, key := range keys {
+		out[key] = input[key]
+	}
+	return out
 }
 
 func codexCommandSummary(binary string, args []string) string {
@@ -1178,7 +1288,7 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	b.WriteString("System role: you are a StockV2 portfolio sentinel. You are NOT a trading executor.\n")
 	b.WriteString("Your job is to review the provided portfolio holdings, news window, quotes, daily bars, minute bars, profiles, transactions, and recent reviews to identify material positive/negative risks before the next trading decision window.\n")
 	b.WriteString("Use the globally installed `serenity-skill` methodology for material technology/supply-chain themes: map value-chain exposure, scarce constraints, evidence strength, and failure conditions. Keep StockV2 portfolio permissions and guardrails authoritative.\n")
-	b.WriteString("Use provided context, stock_agent MCP data, and Codex CLI public search/browse for external verification when facts are stale, conflicting, high-impact, or not directly supported. Do not invent prices, news, filings, or sources.\n")
+	b.WriteString("Use provided context, stock_agent MCP data, and Codex CLI web_search for external verification. The CLI is started with live search enabled. Do not invent prices, news, filings, searches, or sources.\n")
 	b.WriteString("Do not place orders, do not modify holdings, do not activate strategies, and do not read token/cookie/private config.\n")
 	b.WriteString("You may propose portfolio-bound operations only as pending user-confirmed proposals; the main program will create OperationReview and run guardrails.\n")
 	b.WriteString("Submit your final result using the stock_agent.submit_result MCP tool. Do not use shell commands or curl to submit the result.\n\n")
@@ -1206,29 +1316,32 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	b.WriteString("1. Check data freshness for quotes, bars, portfolio snapshots, and news timestamps.\n")
 	b.WriteString("2. Separate broad-market moves, overseas/overnight peer moves, sector/theme shocks, company-specific news, stale data, and unrelated noise.\n")
 	b.WriteString("3. Evaluate impact against current holdings and portfolio permissions. Aggressive portfolio risk tolerance does not excuse ignoring material information shocks.\n")
-	b.WriteString("4. For high-impact information, verify with MCP and public sources when possible. If verification is unavailable, lower confidence and state exactly what is missing.\n")
-	b.WriteString("5. Output executable but non-executing actions only when action is warranted before the next trading window.\n\n")
+	b.WriteString("4. Review every holding and the trustedCandidates pool. A non-held symbol may appear only as build_position and only when it is present in trustedCandidates.\n")
+	b.WriteString("5. Before emitting any action other than hold, perform real public retrieval using Codex web_search or a named search/research/browse Agent tool, record compact source/claim metadata in research_audit, and reference those IDs from the action. MCP-only internal retrieval is not sufficient for an actionable plan.\n")
+	b.WriteString("6. Output executable but non-executing plans. Use deterministic price/change/daily-close/portfolio-weight conditions; never use prose as a trigger.\n\n")
 
 	b.WriteString("## Output Requirements\n\n")
 	b.WriteString("Submit exactly ONE result. The `outputType` must be `portfolio_sentinel`.\n")
-	b.WriteString("The result object must use schema_version `portfolio-sentinel-report/v1`.\n")
+	fmt.Fprintf(&b, "The result object must use schema_version `%s`.\n", PortfolioSentinelReportSchemaVersion)
 	if pack.NewsContext != nil {
 		b.WriteString("`checked_news_thread_version_ids` is required and must contain exactly the complete, duplicate-free versionId set returned by all pages of `stock_agent.list_news_context_changes` for the newsContext run.\n")
 		b.WriteString("`impact_review_coverage` is required and must explicitly contain `holding_ids`, `monitor_ids`, `alert_ids`, `opportunity_ids`, and `strategy_ids`. Each list must exactly match the duplicate-free frozen identifiers returned from all pages for that object type; omitted, missing, invented, or duplicate identifiers make the review fail.\n")
 	}
 	b.WriteString("Allowed overall_risk_level values: low, medium, high, critical.\n")
-	b.WriteString("Use `portfolio_actions[]` only for concrete follow-up. For a pending operation, set output_type=`proposed_operation` and include proposed_operation with action, portfolioId, symbol, market, and at least one of quantity/amount. Do not use targetWeight; the current execution guardrails do not support it.\n")
-	b.WriteString("For watch-only risk, use output_type=`continue_monitoring` or create review_requests[].\n")
-	b.WriteString("Keep one portfolio_actions item to one symbol. Do not bundle several symbols into one proposed operation.\n\n")
+	b.WriteString("`action_plans` is required. Return exactly one plan for every current holding; additional non-held plans are optional and restricted to trustedCandidates. Do not use legacy `portfolio_actions` for v2.\n")
+	b.WriteString("Allowed actions: build_position, add_position, hold, reduce_position, exit_position. `hold` has no sizing. build/add use sizing `{mode:\"target_portfolio_pct\",value:(0,100]}`; reduce uses `{mode:\"available_quantity_pct\",value:(0,100]}`; exit uses the same mode with value 100.\n")
+	b.WriteString("Actionable trigger_mode is immediate or conditional. conditional requires conditions and trigger_policy all/any. Allowed condition types: price_above, price_below, price_between, pct_change_above, pct_change_below, daily_close_above, daily_close_below, portfolio_symbol_weight_above, portfolio_symbol_weight_below. Each condition needs a stable key and the applicable threshold or low/high values.\n")
+	b.WriteString("The server owns valid_until and always limits plans to seven days; omit or ignore model-selected expiry.\n")
+	b.WriteString("`research_audit` records compact real retrieval evidence with id, kind, query, source, source_title, published_at/checked_at, and claim. Every actionable plan needs non-empty research_refs pointing to these IDs. Never claim a search that was not actually performed.\n\n")
 	b.WriteString("Example submit_result shape:\n")
 	b.WriteString("```json\n")
 	coverageExample := ""
 	if pack.NewsContext != nil {
 		coverageExample = `,"impact_review_coverage":{"holding_ids":[],"monitor_ids":[],"alert_ids":[],"opportunity_ids":[],"strategy_ids":[]}`
 	}
-	fmt.Fprintf(&b, "{\"taskID\":\"%s\",\"taskType\":\"%s\",\"result\":{\"outputType\":\"%s\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"%s\",\"overall_risk_level\":\"high\",\"run_summary\":\"...\",\"negative_items\":[],\"positive_items\":[],\"noise_items\":[],\"affected_holdings\":[{\"symbol\":\"000000\",\"market\":\"SZ\",\"name\":\"示例\",\"risk_level\":\"high\",\"direction\":\"negative\",\"reasons\":[\"...\"]}],\"portfolio_actions\":[{\"symbol\":\"000000\",\"market\":\"SZ\",\"portfolio_id\":\"...\",\"output_type\":\"proposed_operation\",\"result_summary\":\"...\",\"proposed_operation\":{\"action\":\"reduce\",\"symbol\":\"000000\",\"market\":\"SZ\",\"portfolioId\":\"...\",\"quantity\":100},\"reason\":\"...\",\"risk_notes\":\"...\",\"confidence\":0.72}],\"review_requests\":[],\"data_quality_notes\":[],\"next_watch_focus\":[],\"checked_news_thread_version_ids\":[]%s}}}\n", taskID, AgentTaskTypePortfolioSentinel, PortfolioSentinelOutputType, PortfolioSentinelReportSchemaVersion, coverageExample)
+	fmt.Fprintf(&b, "{\"taskID\":\"%s\",\"taskType\":\"%s\",\"result\":{\"outputType\":\"%s\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"%s\",\"overall_risk_level\":\"high\",\"run_summary\":\"...\",\"negative_items\":[],\"positive_items\":[],\"noise_items\":[],\"affected_holdings\":[{\"symbol\":\"000000\",\"market\":\"SZ\",\"name\":\"示例\",\"risk_level\":\"high\",\"direction\":\"negative\",\"reasons\":[\"...\"]}],\"action_plans\":[{\"id\":\"plan-1\",\"portfolio_id\":\"portfolio-id\",\"symbol\":\"000000\",\"market\":\"SZ\",\"name\":\"示例\",\"action\":\"reduce_position\",\"trigger_mode\":\"conditional\",\"trigger_policy\":\"all\",\"conditions\":[{\"key\":\"price-risk\",\"type\":\"price_below\",\"threshold\":10}],\"sizing\":{\"mode\":\"available_quantity_pct\",\"value\":50},\"reason\":\"...\",\"risk_notes\":\"...\",\"confidence\":0.72,\"evidence_refs\":[],\"research_refs\":[\"research-1\"]}],\"research_audit\":[{\"id\":\"research-1\",\"kind\":\"web_search\",\"query\":\"...\",\"source\":\"https://example.com/source\",\"source_title\":\"...\",\"checked_at\":\"RFC3339\",\"claim\":\"...\"}],\"review_requests\":[],\"data_quality_notes\":[],\"next_watch_focus\":[],\"checked_news_thread_version_ids\":[]%s}}}\n", taskID, AgentTaskTypePortfolioSentinel, PortfolioSentinelOutputType, PortfolioSentinelReportSchemaVersion, coverageExample)
 	b.WriteString("```\n\n")
-	b.WriteString("Important: If evidence is insufficient for action, do not force a proposed_operation. Use high/medium risk with review_requests or continue_monitoring instead.\n")
+	b.WriteString("Important: If evidence is insufficient for action, use hold for the affected holding and explain the uncertainty. Do not force an actionable plan.\n")
 
 	// ponytail: keep one fixed prompt-size guard; if model limits change, raise it while
 	// continuing to trim only the replaceable context body, never the review contract.

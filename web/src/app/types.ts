@@ -2612,6 +2612,45 @@ export interface StockV2PortfolioSentinelResult {
   createdAt?: string;
 }
 
+export type StockV2PortfolioSentinelAction =
+  | "build_position"
+  | "add_position"
+  | "hold"
+  | "reduce_position"
+  | "exit_position";
+
+export interface StockV2PortfolioSentinelActionPlan {
+  id: string;
+  portfolio_id: string;
+  symbol: string;
+  market?: string;
+  name?: string;
+  action: StockV2PortfolioSentinelAction | string;
+  trigger_mode: "immediate" | "conditional" | string;
+  trigger_policy?: "all" | "any" | string;
+  conditions?: Array<{ key: string; type: string; threshold?: number; low?: number; high?: number }>;
+  sizing?: { mode: string; value: number };
+  reason: string;
+  risk_notes?: string;
+  confidence?: number;
+  evidence_refs?: string[];
+  research_refs?: string[];
+  valid_until?: string;
+}
+
+export interface StockV2PortfolioSentinelActionPlanView {
+  plan: StockV2PortfolioSentinelActionPlan;
+  runId: string;
+  resultId: string;
+  runFinishedAt?: string;
+  status: "active" | "expired" | "triggered" | "proposed" | string;
+}
+
+export interface StockV2PortfolioSentinelActionPlanListResponse {
+  items: StockV2PortfolioSentinelActionPlanView[];
+  total: number;
+}
+
 export interface StockV2PortfolioSentinelConfig {
   id?: string;
   enabled?: boolean;
