@@ -167,13 +167,19 @@ type RequestUpdatePortfolioSentinelConfig struct {
 }
 
 type PortfolioSentinelRunDetail struct {
-	Run     PortfolioSentinelRun     `json:"run"`
-	Result  *PortfolioSentinelResult `json:"result,omitempty"`
-	Agent   *AgentRun                `json:"agentRun,omitempty"`
-	Ledger  *AgentDecisionLedger     `json:"decisionLedger,omitempty"`
-	Alerts  []StockV2Alert           `json:"alerts,omitempty"`
-	Hits    []MonitorHit             `json:"monitorHits,omitempty"`
-	Reviews []OperationReview        `json:"reviews,omitempty"`
+	Run           PortfolioSentinelRun            `json:"run"`
+	Result        *PortfolioSentinelResult        `json:"result,omitempty"`
+	Agent         *AgentRun                       `json:"agentRun,omitempty"`
+	Ledger        *AgentDecisionLedger            `json:"decisionLedger,omitempty"`
+	AgentAttempts []PortfolioSentinelAgentAttempt `json:"agentAttempts,omitempty"`
+	Alerts        []StockV2Alert                  `json:"alerts,omitempty"`
+	Hits          []MonitorHit                    `json:"monitorHits,omitempty"`
+	Reviews       []OperationReview               `json:"reviews,omitempty"`
+}
+
+type PortfolioSentinelAgentAttempt struct {
+	Run    AgentRun             `json:"run"`
+	Ledger *AgentDecisionLedger `json:"ledger,omitempty"`
 }
 
 type PortfolioSentinelContext struct {

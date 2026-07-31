@@ -44,7 +44,7 @@ export function StockV2AgentTaskProfileDrawer({
       setForm({
         executionMode: cliOnly ? "cli" : profile.executionMode || "cli",
         primaryModelId: profile.primaryModelId || "",
-        fallbackModelId: cliOnly ? "" : profile.fallbackModelId || "",
+        fallbackModelId: profile.fallbackModelId || "",
         reasoningEffort: profile.reasoningEffort || "",
       });
     }
@@ -74,7 +74,7 @@ export function StockV2AgentTaskProfileDrawer({
       const body: StockV2AgentUpdateTaskProfileRequest = {
         executionMode,
         primaryModelId: form.primaryModelId && usableModelIds.has(form.primaryModelId) ? form.primaryModelId : "",
-        fallbackModelId: !cliOnly && form.fallbackModelId && usableModelIds.has(form.fallbackModelId) ? form.fallbackModelId : "",
+        fallbackModelId: form.fallbackModelId && usableModelIds.has(form.fallbackModelId) ? form.fallbackModelId : "",
         reasoningEffort: form.reasoningEffort || "",
       };
       await actions.api(`/api/stockv2/agent/task-profiles/${taskType}`, { method: "PUT", body });
@@ -108,7 +108,7 @@ export function StockV2AgentTaskProfileDrawer({
         {cliOnly ? (
           <Notice>
             组合哨兵持仓必须使用 Codex CLI。内置 Provider 使用原生 web search；自定义 codex_cli Provider 使用任务级搜索
-            MCP。API Provider 不参与绑定或降级。
+            MCP。主备模型都只能选择 codex_cli Provider，API Provider 不参与绑定或降级。
           </Notice>
         ) : null}
         {enabledModels.length === 0 ? (
@@ -142,7 +142,13 @@ export function StockV2AgentTaskProfileDrawer({
         <Field label="主模型" help="优先调用的模型，必须已启用且测试可用">
           <select
             value={form.primaryModelId || ""}
-            onChange={(e) => setForm({ ...form, primaryModelId: e.target.value })}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                primaryModelId: e.target.value,
+                fallbackModelId: form.fallbackModelId === e.target.value ? "" : form.fallbackModelId,
+              })
+            }
             className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
           >
             <option value="">(未绑定)</option>
@@ -154,22 +160,31 @@ export function StockV2AgentTaskProfileDrawer({
           </select>
         </Field>
 
-        {!cliOnly ? (
-          <Field label="备模型" help="主模型失败时降级调用">
-            <select
-              value={form.fallbackModelId || ""}
-              onChange={(e) => setForm({ ...form, fallbackModelId: e.target.value })}
-              className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
-            >
-              <option value="">(无)</option>
-              {compatibleModels.map((m) => (
-                <option disabled={!m.enabled || m.status !== "available"} key={m.id} value={m.id}>
-                  {modelOptionLabel(m)}
-                </option>
-              ))}
-            </select>
-          </Field>
-        ) : null}
+        <Field
+          label="备模型"
+          help={
+            cliOnly
+              ? "主模型运行失败时改用另一个 Codex CLI 模型重试一次；两次执行及 Token、搜索审计都会保留"
+              : "主模型失败时降级调用"
+          }
+        >
+          <select
+            value={form.fallbackModelId || ""}
+            onChange={(e) => setForm({ ...form, fallbackModelId: e.target.value })}
+            className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
+          >
+            <option value="">(无)</option>
+            {compatibleModels.map((m) => (
+              <option
+                disabled={!m.enabled || m.status !== "available" || m.id === form.primaryModelId}
+                key={m.id}
+                value={m.id}
+              >
+                {modelOptionLabel(m)}
+              </option>
+            ))}
+          </select>
+        </Field>
 
         <Field
           label="模型推理强度"

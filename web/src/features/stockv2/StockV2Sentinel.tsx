@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { AppActions } from "../../app/App";
 import type {
   StockV2OperationReview,
+  StockV2PortfolioSentinelAgentAttempt,
   StockV2PortfolioSentinelActionPlan,
   StockV2PortfolioSentinelActionPlanListResponse,
   StockV2PortfolioSentinelActionPlanView,
@@ -558,6 +559,14 @@ function SentinelRunDrawer({
           </div>
         </div>
 
+        {detail.agentAttempts && detail.agentAttempts.length > 0 ? (
+          <AgentAttemptList
+            attempts={detail.agentAttempts}
+            currentRunId={run.agentRunId}
+            onOpenAgentRun={onOpenAgentRun}
+          />
+        ) : null}
+
         {result?.summary || report.runSummary ? (
           <div>
             <strong className="text-sm">风险摘要</strong>
@@ -682,6 +691,54 @@ function SentinelRunDrawer({
         </div>
       </div>
     </Drawer>
+  );
+}
+
+function AgentAttemptList({
+  attempts,
+  currentRunId,
+  onOpenAgentRun,
+}: {
+  attempts: StockV2PortfolioSentinelAgentAttempt[];
+  currentRunId?: string;
+  onOpenAgentRun: (runId: string) => void;
+}) {
+  return (
+    <div>
+      <strong className="text-sm">Agent 执行尝试</strong>
+      <p className="mt-0.5 text-xs text-[var(--muted)]">主模型失败后最多切换一次备模型，每次执行独立保留 Token 与搜索审计。</p>
+      <div className="mt-2 grid gap-2">
+        {attempts.map((attempt, index) => {
+          const run = attempt.run;
+          const cost = run.costEstimate || {};
+          const audit = mapFromAny(cost["researchAudit"]);
+          const inputTokens = numberFromAny(cost["inputTokens"]);
+          const outputTokens = numberFromAny(cost["outputTokens"]);
+          const webSearches = numberFromAny(audit["webSearchCount"]);
+          const mcpCalls = countMapTotal(audit["mcpToolCalls"]);
+          return (
+            <div key={run.id} className="rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <strong>{index === 0 ? "首次尝试" : "备模型重试"}</strong>
+                <Pill tone={stockV2AgentRunStatusTone(run.status)}>{stockV2AgentRunStatusLabel(run.status)}</Pill>
+                {run.id === currentRunId ? <Pill tone="neutral">最终尝试</Pill> : null}
+                <span className="font-mono text-[var(--muted-strong)]">{run.modelId || "未记录模型"}</span>
+              </div>
+              <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[var(--muted)]">
+                <span>输入 Token {inputTokens}</span>
+                <span>输出 Token {outputTokens}</span>
+                <span>Web 搜索 {webSearches}</span>
+                <span>MCP 调用 {mcpCalls}</span>
+              </div>
+              {run.errorMessage ? <p className="mt-1.5 break-words text-[var(--danger)]">{run.errorMessage}</p> : null}
+              <div className="mt-2 flex justify-end">
+                <Button onClick={() => onOpenAgentRun(run.id)}>查看执行</Button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -919,6 +976,15 @@ function typedActionPlans(value: unknown): StockV2PortfolioSentinelActionPlan[] 
 
 function mapFromAny(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function numberFromAny(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function countMapTotal(value: unknown): number {
+  return Object.values(mapFromAny(value)).reduce((total, item) => total + numberFromAny(item), 0);
 }
 
 function arr(value: unknown): Array<Record<string, unknown>> {

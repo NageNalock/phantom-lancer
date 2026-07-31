@@ -847,10 +847,70 @@ func (s *Service) startPortfolioSentinelRunAsync(ctx context.Context, run AgentR
 }
 
 func (s *Service) executePortfolioSentinelRun(ctx context.Context, run AgentRun, ledger AgentDecisionLedger, pack PortfolioSentinelContext, modelName string) (AgentRun, AgentDecisionLedger, error) {
+	finalRun, finalLedger, output, execErr := s.executePortfolioSentinelAgentAttempt(ctx, run, ledger, pack, modelName)
+	if finalRun.Status == AgentRunStatusCompleted ||
+		!portfolioSentinelFallbackEligible(ctx, finalRun, output, execErr) {
+		return finalRun, finalLedger, execErr
+	}
+	fallbackModel, ok := s.portfolioSentinelFallbackModel(ctx, finalRun.ModelID)
+	if !ok {
+		return finalRun, finalLedger, execErr
+	}
+	if output != nil {
+		if err := ensureExecutorProcessGroupStopped(output.ProcessGroupID); err != nil {
+			return finalRun, finalLedger, fmt.Errorf("clean failed portfolio sentinel process: %w", err)
+		}
+	}
+	resolution, err := s.resolveFallbackAgentTask(
+		ctx,
+		AgentTaskTypePortfolioSentinel,
+		"portfolio_sentinel_run",
+		finalRun.TriggerObjectID,
+		"system",
+	)
+	if err != nil {
+		return finalRun, finalLedger, portfolioSentinelAttemptError(execErr, err)
+	}
+	if resolution.Run == nil || resolution.DecisionLedger == nil || resolution.ModelID != fallbackModel.ID {
+		return finalRun, finalLedger, portfolioSentinelAttemptError(execErr, errors.New("no portfolio sentinel fallback agent run created"))
+	}
+	if err := s.linkPortfolioSentinelFallbackAttempt(
+		ctx,
+		finalRun.TriggerObjectID,
+		finalRun,
+		finalLedger,
+		*resolution.Run,
+		*resolution.DecisionLedger,
+	); err != nil {
+		s.finalizeAgentRun(ctx, resolution.Run.ID, nil, err)
+		return finalRun, finalLedger, portfolioSentinelAttemptError(execErr, err)
+	}
+	if s.log != nil {
+		s.log.Warn(
+			"falling back portfolio sentinel agent after recoverable model failure",
+			"sentinel_run_id", finalRun.TriggerObjectID,
+			"primary_agent_run_id", finalRun.ID,
+			"primary_model_id", finalRun.ModelID,
+			"fallback_agent_run_id", resolution.Run.ID,
+			"fallback_model_id", resolution.ModelID,
+			"error", safelog.Text(firstNonEmpty(finalRun.ErrorMessage, portfolioSentinelErrorString(execErr)), 240),
+		)
+	}
+	fallbackRun, fallbackLedger, _, fallbackErr := s.executePortfolioSentinelAgentAttempt(
+		ctx,
+		*resolution.Run,
+		*resolution.DecisionLedger,
+		pack,
+		resolution.ModelName,
+	)
+	return fallbackRun, fallbackLedger, fallbackErr
+}
+
+func (s *Service) executePortfolioSentinelAgentAttempt(ctx context.Context, run AgentRun, ledger AgentDecisionLedger, pack PortfolioSentinelContext, modelName string) (AgentRun, AgentDecisionLedger, *AgentExecutorOutput, error) {
 	if s.agentExecutor == nil {
 		s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("no executor configured"))
 		finalRun, finalLedger := s.safeGetAgentRunAndLedger(ctx, run.ID, ledger.ID)
-		return finalRun, finalLedger, ErrAgentExecutorUnavailable
+		return finalRun, finalLedger, nil, ErrAgentExecutorUnavailable
 	}
 	running := run
 	running.Status = AgentRunStatusRunning
@@ -881,7 +941,119 @@ func (s *Service) executePortfolioSentinelRun(ctx context.Context, run AgentRun,
 	s.restoreAgentTaskSubmittedResult(taskID, run.TaskType, run.ID, submitted)
 	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, execOutput, execErr)
 	finalRun, finalLedger := s.safeGetAgentRunAndLedger(ctx, run.ID, ledger.ID)
-	return finalRun, finalLedger, execErr
+	return finalRun, finalLedger, execOutput, execErr
+}
+
+func (s *Service) portfolioSentinelFallbackModel(ctx context.Context, failedModelID string) (AgentModelProfile, bool) {
+	taskProfile, err := s.store.GetAgentTaskProfileByType(ctx, AgentTaskTypePortfolioSentinel)
+	if err != nil || strings.TrimSpace(taskProfile.FallbackModelID) == "" {
+		return AgentModelProfile{}, false
+	}
+	taskProfile.PrimaryModelID = ""
+	model, err := s.resolveModel(ctx, taskProfile)
+	return model, err == nil && model.ID != failedModelID
+}
+
+func portfolioSentinelFallbackEligible(
+	ctx context.Context,
+	run AgentRun,
+	output *AgentExecutorOutput,
+	execErr error,
+) bool {
+	if ctx.Err() != nil || run.Status != AgentRunStatusFailed {
+		return false
+	}
+	if errors.Is(execErr, ErrAgentExecutorUnavailable) ||
+		errors.Is(execErr, ErrAgentTaskRequiresCLI) ||
+		errors.Is(execErr, ErrAgentExecutionModeModelMismatch) {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(run.ErrorMessage + " " + portfolioSentinelErrorString(execErr)))
+	if strings.Contains(message, "save portfolio sentinel result failed") &&
+		!strings.Contains(message, ErrInvalidPortfolioSentinelResult.Error()) {
+		// ponytail: persistence and publication failures are not model failures.
+		// Retrying them with another paid model cannot safely repair storage.
+		return false
+	}
+	if output != nil {
+		// The attempt reached a model process and still failed before publication.
+		// Portfolio sentinel publication is atomic, so one bounded fallback is safe.
+		return true
+	}
+	return agentProviderUsageLimitFailure(execErr, output) ||
+		strings.Contains(message, "no valid result submitted") ||
+		strings.Contains(message, "without submitting") ||
+		strings.Contains(message, "no result submitted") ||
+		strings.Contains(message, ErrInvalidPortfolioSentinelResult.Error()) ||
+		strings.Contains(message, "execution timed out") ||
+		strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "api request failed") ||
+		strings.Contains(message, "provider") ||
+		strings.Contains(message, "codex")
+}
+
+func (s *Service) linkPortfolioSentinelFallbackAttempt(
+	ctx context.Context,
+	sentinelRunID string,
+	primaryRun AgentRun,
+	primaryLedger AgentDecisionLedger,
+	fallbackRun AgentRun,
+	fallbackLedger AgentDecisionLedger,
+) error {
+	result, err := s.store.GetPortfolioSentinelResultByRunID(ctx, sentinelRunID)
+	if err != nil {
+		return err
+	}
+	if result != nil {
+		return errors.New("portfolio sentinel result already published")
+	}
+	sentinelRun, err := s.store.GetPortfolioSentinelRun(ctx, sentinelRunID)
+	if err != nil {
+		return err
+	}
+	if sentinelRun.Status == PortfolioSentinelStatusCompleted {
+		return errors.New("portfolio sentinel run already completed")
+	}
+	primaryLedger.OutputArtifactSummary = safelog.Text(
+		strings.TrimSpace(primaryLedger.OutputArtifactSummary)+
+			"\nfallback_agent_run_id: "+fallbackRun.ID,
+		16384,
+	)
+	if primaryLedger.RedactionSummary == nil {
+		primaryLedger.RedactionSummary = map[string]any{}
+	}
+	if fallbackLedger.RedactionSummary == nil {
+		fallbackLedger.RedactionSummary = map[string]any{}
+	}
+	primaryLedger.RedactionSummary["fallbackAgentRunId"] = fallbackRun.ID
+	fallbackLedger.RedactionSummary["fallbackFromAgentRunId"] = primaryRun.ID
+	if _, err := s.store.UpdateAgentDecisionLedger(ctx, primaryLedger); err != nil {
+		return err
+	}
+	if _, err := s.store.UpdateAgentDecisionLedger(ctx, fallbackLedger); err != nil {
+		return err
+	}
+	sentinelRun.AgentRunID = fallbackRun.ID
+	sentinelRun.DecisionLedgerID = fallbackLedger.ID
+	sentinelRun.Status = PortfolioSentinelStatusRunning
+	sentinelRun.ErrorMessage = ""
+	sentinelRun.FinishedAt = time.Time{}
+	_, err = s.store.UpdatePortfolioSentinelRun(ctx, sentinelRun)
+	return err
+}
+
+func portfolioSentinelAttemptError(primary, fallback error) error {
+	if primary != nil {
+		return primary
+	}
+	return fallback
+}
+
+func portfolioSentinelErrorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func (s *Service) ProcessPortfolioSentinelSubmittedResult(
@@ -1482,6 +1654,29 @@ func (s *Service) GetPortfolioSentinelRunDetail(ctx context.Context, id string) 
 		} else if !errors.Is(err, ErrAgentDecisionLedgerNotFound) {
 			return PortfolioSentinelRunDetail{}, err
 		}
+	}
+	agentRuns, err := s.store.ListAgentRuns(ctx, AgentRunListFilter{
+		TaskType:          AgentTaskTypePortfolioSentinel,
+		TriggerObjectType: "portfolio_sentinel_run",
+		TriggerObjectID:   run.ID,
+		Limit:             10,
+	})
+	if err != nil {
+		return PortfolioSentinelRunDetail{}, err
+	}
+	// ListAgentRuns is newest-first; attempts read more naturally in execution order.
+	for index := len(agentRuns) - 1; index >= 0; index-- {
+		attempt := PortfolioSentinelAgentAttempt{Run: agentRuns[index]}
+		if ledgerID := strings.TrimSpace(agentRuns[index].DecisionLedgerID); ledgerID != "" {
+			ledger, ledgerErr := s.store.GetAgentDecisionLedger(ctx, ledgerID)
+			if ledgerErr != nil && !errors.Is(ledgerErr, ErrAgentDecisionLedgerNotFound) {
+				return PortfolioSentinelRunDetail{}, ledgerErr
+			}
+			if ledgerErr == nil {
+				attempt.Ledger = &ledger
+			}
+		}
+		detail.AgentAttempts = append(detail.AgentAttempts, attempt)
 	}
 	return detail, nil
 }

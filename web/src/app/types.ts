@@ -2700,9 +2700,15 @@ export interface StockV2PortfolioSentinelRunDetail {
   result?: StockV2PortfolioSentinelResult;
   agentRun?: StockV2AgentRun;
   decisionLedger?: StockV2AgentDecisionLedger;
+  agentAttempts?: StockV2PortfolioSentinelAgentAttempt[];
   alerts?: StockV2Alert[];
   monitorHits?: StockV2MonitorHit[];
   reviews?: StockV2OperationReview[];
+}
+
+export interface StockV2PortfolioSentinelAgentAttempt {
+  run: StockV2AgentRun;
+  ledger?: StockV2AgentDecisionLedger;
 }
 
 export interface StockV2PortfolioSentinelRunListResponse {

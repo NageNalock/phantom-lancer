@@ -153,6 +153,7 @@ var (
 	ErrInvalidAgentReasoningEffort      = errors.New("invalid agent reasoning effort")
 	ErrInvalidAgentExecutionMode        = errors.New("invalid agent execution mode")
 	ErrAgentExecutionModeModelMismatch  = errors.New("agent execution mode does not match model provider")
+	ErrAgentFallbackMatchesPrimary      = errors.New("agent fallback model must differ from primary model")
 	ErrAgentTaskRequiresCLI             = errors.New("agent task requires Codex CLI execution")
 	ErrInvalidAgentTaskType             = errors.New("invalid agent task type")
 	ErrAgentTaskNotConfigurable         = errors.New("agent task is not configurable yet")

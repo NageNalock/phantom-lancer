@@ -872,6 +872,9 @@ func (s *Service) UpdateAgentTaskProfile(ctx context.Context, taskType string, r
 	if profile.ExecutionMode == AgentExecutionModeAPI && profile.ReasoningEffort == AgentReasoningEffortUltra {
 		return AgentTaskProfile{}, ErrInvalidAgentReasoningEffort
 	}
+	if profile.PrimaryModelID != "" && profile.PrimaryModelID == profile.FallbackModelID {
+		return AgentTaskProfile{}, ErrAgentFallbackMatchesPrimary
+	}
 	for _, modelID := range []string{profile.PrimaryModelID, profile.FallbackModelID} {
 		if modelID == "" {
 			continue

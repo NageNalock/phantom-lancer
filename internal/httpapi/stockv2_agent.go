@@ -500,6 +500,7 @@ func stockV2AgentHTTPStatus(err error) int {
 		errors.Is(err, stockv2.ErrInvalidAgentReasoningEffort),
 		errors.Is(err, stockv2.ErrInvalidAgentExecutionMode),
 		errors.Is(err, stockv2.ErrAgentExecutionModeModelMismatch),
+		errors.Is(err, stockv2.ErrAgentFallbackMatchesPrimary),
 		errors.Is(err, stockv2.ErrAgentTaskRequiresCLI),
 		errors.Is(err, stockv2.ErrAgentModelTypeNotAllowed),
 		errors.Is(err, stockv2.ErrInvalidAgentTaskType),
