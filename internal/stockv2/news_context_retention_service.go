@@ -748,7 +748,7 @@ func newsContextVersionProtectionReason(version NewsThreadVersion) string {
 	case NewsContextResearchFailed:
 		return "公开搜索失败，仍需保留原文"
 	case NewsContextResearchUnavailable:
-		return "公开搜索不可用，仍需保留原文"
+		return "该主题版本尚未完成公开资料核实，仍需保留原文"
 	case NewsContextResearchUnresolved:
 		return "公开搜索仍有未解决问题，需保留原文"
 	default:

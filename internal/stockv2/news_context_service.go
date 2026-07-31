@@ -2354,9 +2354,9 @@ func (s *Service) GetNewsThreadDetail(ctx context.Context, id string) (NewsThrea
 		}
 	}
 	if !detail.MCPReadable {
-		detail.ProtectedReasons = append(detail.ProtectedReasons, "CLI 尚不能稳定检索并读取当前主题")
+		detail.ProtectedReasons = append(detail.ProtectedReasons, "本地消息脉络 MCP 尚不能稳定检索并读取当前主题")
 	} else if !detail.MCPVerified {
-		detail.ProtectedReasons = append(detail.ProtectedReasons, "当前主题版本尚未通过真实 CLI 检索验证")
+		detail.ProtectedReasons = append(detail.ProtectedReasons, "当前主题版本尚未通过本地消息脉络 MCP 检索验证")
 	}
 	detail.ProtectedReasons = uniqueNonEmptyStrings(detail.ProtectedReasons)
 	return detail, nil

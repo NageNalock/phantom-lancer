@@ -177,20 +177,43 @@ type PortfolioSentinelRunDetail struct {
 }
 
 type PortfolioSentinelContext struct {
-	SchemaVersion string                              `json:"schemaVersion"`
-	RunID         string                              `json:"runId"`
-	Window        PortfolioSentinelWindowContext      `json:"window"`
-	Portfolios    []PortfolioSentinelPortfolioContext `json:"portfolios"`
-	Candidates    []PortfolioSentinelCandidateContext `json:"trustedCandidates,omitempty"`
-	Themes        []PortfolioSentinelThemeContext     `json:"activeThemes,omitempty"`
-	NewsEvents    []NewsEvent                         `json:"newsEvents,omitempty"`
-	RawNews       []StockV2RawNews                    `json:"rawNews,omitempty"`
-	RecentReviews []OperationReview                   `json:"recentReviews,omitempty"`
-	Transactions  []StockV2Transaction                `json:"recentTransactions,omitempty"`
-	DataFreshness map[string]any                      `json:"dataFreshness,omitempty"`
-	ContextStats  map[string]any                      `json:"contextStats,omitempty"`
-	NewsContext   *PortfolioSentinelNewsContext       `json:"newsContext,omitempty"`
-	Note          string                              `json:"note,omitempty"`
+	SchemaVersion  string                              `json:"schemaVersion"`
+	RunID          string                              `json:"runId"`
+	Window         PortfolioSentinelWindowContext      `json:"window"`
+	Portfolios     []PortfolioSentinelPortfolioContext `json:"portfolios"`
+	Candidates     []PortfolioSentinelCandidateContext `json:"trustedCandidates,omitempty"`
+	Themes         []PortfolioSentinelThemeContext     `json:"activeThemes,omitempty"`
+	PriorJudgments []PortfolioSentinelPriorJudgment    `json:"priorHoldingJudgments,omitempty"`
+	NewsEvents     []NewsEvent                         `json:"newsEvents,omitempty"`
+	RawNews        []StockV2RawNews                    `json:"rawNews,omitempty"`
+	RecentReviews  []OperationReview                   `json:"recentReviews,omitempty"`
+	Transactions   []StockV2Transaction                `json:"recentTransactions,omitempty"`
+	DataFreshness  map[string]any                      `json:"dataFreshness,omitempty"`
+	ContextStats   map[string]any                      `json:"contextStats,omitempty"`
+	NewsContext    *PortfolioSentinelNewsContext       `json:"newsContext,omitempty"`
+	Note           string                              `json:"note,omitempty"`
+}
+
+type PortfolioSentinelPriorJudgment struct {
+	PortfolioID       string                           `json:"portfolioId"`
+	Symbol            string                           `json:"symbol"`
+	Market            string                           `json:"market,omitempty"`
+	Name              string                           `json:"name,omitempty"`
+	Action            string                           `json:"action"`
+	TriggerMode       string                           `json:"triggerMode,omitempty"`
+	TriggerPolicy     string                           `json:"triggerPolicy,omitempty"`
+	Conditions        []PortfolioSentinelPlanCondition `json:"conditions,omitempty"`
+	Sizing            *PortfolioSentinelPlanSizing     `json:"sizing,omitempty"`
+	Reason            string                           `json:"reason"`
+	RiskNotes         string                           `json:"riskNotes,omitempty"`
+	RiskLevel         string                           `json:"riskLevel,omitempty"`
+	AffectedReasons   []string                         `json:"affectedReasons,omitempty"`
+	Confidence        float64                          `json:"confidence,omitempty"`
+	SourceRunID       string                           `json:"sourceRunId"`
+	SourceFinishedAt  time.Time                        `json:"sourceFinishedAt"`
+	SourceWindowEndAt time.Time                        `json:"sourceWindowEndAt,omitempty"`
+	ValidUntil        time.Time                        `json:"validUntil,omitempty"`
+	AdvisoryOnly      bool                             `json:"advisoryOnly"`
 }
 
 type PortfolioSentinelCandidateContext struct {

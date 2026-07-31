@@ -20,6 +20,10 @@ const (
 	portfolioSentinelNewsScanMultiplier         = 4
 	portfolioSentinelNewsScanMin                = 200
 	portfolioSentinelNewsHighScoreThreshold     = 65
+	// ponytail: one latest judgment per current holding is enough for continuity.
+	// Scan 50 completed runs to tolerate portfolio-scoped runs without copying an
+	// unbounded history; add a keyed repository query if real usage exceeds this.
+	portfolioSentinelPriorRunScanLimit = 50
 )
 
 type portfolioSentinelNewsFilterStats struct {
@@ -332,6 +336,10 @@ func (s *Service) buildPortfolioSentinelContext(ctx context.Context, run Portfol
 		}
 		out.RecentReviews = reviews
 	}
+	out.PriorJudgments, err = s.portfolioSentinelPriorHoldingJudgments(ctx, run.ID, out.Portfolios)
+	if err != nil {
+		return PortfolioSentinelContext{}, err
+	}
 	out.Candidates, err = s.portfolioSentinelTrustedCandidates(ctx, allSymbols)
 	if err != nil {
 		return PortfolioSentinelContext{}, err
@@ -359,6 +367,126 @@ func (s *Service) buildPortfolioSentinelContext(ctx context.Context, run Portfol
 	out.ContextStats["newsTruncated"] = newsTruncated
 	portfolioSentinelApplyNewsFilterStats(out.ContextStats, newsFilterStats)
 	return out, nil
+}
+
+func (s *Service) portfolioSentinelPriorHoldingJudgments(
+	ctx context.Context,
+	currentRunID string,
+	portfolios []PortfolioSentinelPortfolioContext,
+) ([]PortfolioSentinelPriorJudgment, error) {
+	targets := make(map[string]StockV2Holding)
+	for _, portfolio := range portfolios {
+		for _, holding := range portfolio.Holdings {
+			key := portfolioSentinelPriorJudgmentKey(portfolio.Portfolio.ID, holding.Holding.Symbol)
+			if key != "" {
+				targets[key] = holding.Holding
+			}
+		}
+	}
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	runs, err := s.store.ListPortfolioSentinelRuns(ctx, PortfolioSentinelRunListFilter{
+		Status: PortfolioSentinelStatusCompleted,
+		Limit:  portfolioSentinelPriorRunScanLimit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	latest := make(map[string]PortfolioSentinelPriorJudgment, len(targets))
+	for _, run := range runs {
+		if run.ID == currentRunID {
+			continue
+		}
+		result, err := s.store.GetPortfolioSentinelResultByRunID(ctx, run.ID)
+		if err != nil {
+			return nil, err
+		}
+		if result == nil {
+			continue
+		}
+		report, err := portfolioSentinelReportFromResult(result.RawResult)
+		if err != nil || report.SchemaVersion != PortfolioSentinelReportSchemaVersion {
+			continue
+		}
+		affected := make(map[string]PortfolioSentinelAffectedHolding, len(report.AffectedHoldings))
+		for _, item := range report.AffectedHoldings {
+			affected[portfolioSentinelPriorJudgmentSymbolKey(item.Symbol, item.Market)] = item
+			if strings.TrimSpace(item.Market) != "" {
+				affected[portfolioSentinelPriorJudgmentSymbolKey(item.Symbol, "")] = item
+			}
+		}
+		for _, plan := range report.ActionPlans {
+			key := portfolioSentinelPriorJudgmentKey(plan.PortfolioID, plan.Symbol)
+			holding, wanted := targets[key]
+			if !wanted {
+				continue
+			}
+			if existing, ok := latest[key]; ok && !run.FinishedAt.After(existing.SourceFinishedAt) {
+				continue
+			}
+			item := PortfolioSentinelPriorJudgment{
+				PortfolioID:       plan.PortfolioID,
+				Symbol:            plan.Symbol,
+				Market:            firstNonEmpty(plan.Market, holding.Market),
+				Name:              firstNonEmpty(plan.Name, holding.Name),
+				Action:            plan.Action,
+				TriggerMode:       plan.TriggerMode,
+				TriggerPolicy:     plan.TriggerPolicy,
+				Conditions:        append([]PortfolioSentinelPlanCondition(nil), plan.Conditions...),
+				Reason:            safelog.Text(strings.TrimSpace(plan.Reason), 1000),
+				RiskNotes:         safelog.Text(strings.TrimSpace(plan.RiskNotes), 1000),
+				Confidence:        plan.Confidence,
+				SourceRunID:       run.ID,
+				SourceFinishedAt:  run.FinishedAt,
+				SourceWindowEndAt: run.WindowEndAt,
+				ValidUntil:        plan.ValidUntil,
+				AdvisoryOnly:      true,
+			}
+			if plan.Sizing != nil {
+				sizing := *plan.Sizing
+				item.Sizing = &sizing
+			}
+			hit, ok := affected[portfolioSentinelPriorJudgmentSymbolKey(plan.Symbol, plan.Market)]
+			if !ok {
+				hit = affected[portfolioSentinelPriorJudgmentSymbolKey(plan.Symbol, "")]
+			}
+			if hit.Symbol != "" {
+				item.RiskLevel = hit.RiskLevel
+				for _, reason := range uniqueNonEmptyStrings(hit.Reasons) {
+					if len(item.AffectedReasons) >= 8 {
+						break
+					}
+					item.AffectedReasons = append(item.AffectedReasons, safelog.Text(reason, 500))
+				}
+			}
+			latest[key] = item
+		}
+	}
+	out := make([]PortfolioSentinelPriorJudgment, 0, len(latest))
+	for _, item := range latest {
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].PortfolioID == out[j].PortfolioID {
+			return strings.ToUpper(out[i].Symbol) < strings.ToUpper(out[j].Symbol)
+		}
+		return out[i].PortfolioID < out[j].PortfolioID
+	})
+	return out, nil
+}
+
+func portfolioSentinelPriorJudgmentKey(portfolioID, symbol string) string {
+	portfolioID = strings.TrimSpace(portfolioID)
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if portfolioID == "" || symbol == "" {
+		return ""
+	}
+	return portfolioID + "\x00" + symbol
+}
+
+func portfolioSentinelPriorJudgmentSymbolKey(symbol, market string) string {
+	return strings.ToUpper(strings.TrimSpace(symbol)) + "\x00" + strings.ToUpper(strings.TrimSpace(market))
 }
 
 func (s *Service) portfolioSentinelTrustedCandidates(ctx context.Context, holdingSymbols []string) ([]PortfolioSentinelCandidateContext, error) {
@@ -832,6 +960,7 @@ func (s *Service) validatePortfolioSentinelSubmittedReport(
 		if err := s.validatePortfolioSentinelActionPlans(ctx, run, report, audit); err != nil {
 			return PortfolioSentinelReport{}, err
 		}
+		normalizePortfolioSentinelResearchLanguage(&report, audit)
 	}
 	contextRun, found, err := s.newsContextRunForPortfolioReview(ctx, run.ID)
 	if err != nil {
@@ -1636,6 +1765,20 @@ func portfolioSentinelHasExternalResearch(audit AgentCLIResearchAudit) bool {
 	if audit.WebSearchCount > 0 {
 		return true
 	}
+	for name, count := range audit.MCPToolCalls {
+		if count <= 0 {
+			continue
+		}
+		normalized := strings.ToLower(strings.TrimSpace(name))
+		if strings.HasPrefix(normalized, "stock_agent.") {
+			continue
+		}
+		for _, marker := range []string{"search", "research", "browse", "fetch"} {
+			if strings.Contains(normalized, marker) {
+				return true
+			}
+		}
+	}
 	for name, count := range audit.AgentToolCalls {
 		if count <= 0 {
 			continue
@@ -1648,6 +1791,38 @@ func portfolioSentinelHasExternalResearch(audit AgentCLIResearchAudit) bool {
 		}
 	}
 	return false
+}
+
+func normalizePortfolioSentinelResearchLanguage(report *PortfolioSentinelReport, audit AgentCLIResearchAudit) {
+	if report == nil || !portfolioSentinelHasExternalResearch(audit) {
+		return
+	}
+	replacement := "外部搜索已执行但未返回可用于该判断的针对性证据"
+	if len(report.ResearchAudit) > 0 {
+		replacement = "已有外部公开资料检索记录，但未取得可用于该判断的针对性证据"
+	}
+	normalize := func(value string) string {
+		replacer := strings.NewReplacer(
+			"外部搜索不可用", replacement,
+			"外部检索不可用", replacement,
+			"无法使用外部搜索", replacement,
+			"无法进行外部搜索", replacement,
+		)
+		return replacer.Replace(value)
+	}
+	report.RunSummary = normalize(report.RunSummary)
+	for index := range report.DataQualityNotes {
+		report.DataQualityNotes[index] = normalize(report.DataQualityNotes[index])
+	}
+	for index := range report.AffectedHoldings {
+		for reasonIndex := range report.AffectedHoldings[index].Reasons {
+			report.AffectedHoldings[index].Reasons[reasonIndex] = normalize(report.AffectedHoldings[index].Reasons[reasonIndex])
+		}
+	}
+	for index := range report.ActionPlans {
+		report.ActionPlans[index].Reason = normalize(report.ActionPlans[index].Reason)
+		report.ActionPlans[index].RiskNotes = normalize(report.ActionPlans[index].RiskNotes)
+	}
 }
 
 func validatePortfolioSentinelPlanShape(plan PortfolioSentinelActionPlan, isHeld bool) error {
@@ -1870,13 +2045,14 @@ func portfolioSentinelContextStats(ctx PortfolioSentinelContext) map[string]any 
 	}
 	quotes, daily, minute := portfolioSentinelDataCounts(ctx)
 	return map[string]any{
-		"portfolioCount":   len(ctx.Portfolios),
-		"holdingCount":     holdings,
-		"newsEventCount":   len(ctx.NewsEvents),
-		"rawNewsCount":     len(ctx.RawNews),
-		"quoteCount":       quotes,
-		"dailyBarSymbols":  daily,
-		"minuteBarSymbols": minute,
+		"portfolioCount":     len(ctx.Portfolios),
+		"holdingCount":       holdings,
+		"priorJudgmentCount": len(ctx.PriorJudgments),
+		"newsEventCount":     len(ctx.NewsEvents),
+		"rawNewsCount":       len(ctx.RawNews),
+		"quoteCount":         quotes,
+		"dailyBarSymbols":    daily,
+		"minuteBarSymbols":   minute,
 	}
 }
 

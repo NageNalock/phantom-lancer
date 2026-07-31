@@ -12,6 +12,13 @@ import (
 	"time"
 )
 
+func TestNewsContextUnavailableProtectionReasonDoesNotClaimGlobalSearchOutage(t *testing.T) {
+	reason := newsContextVersionProtectionReason(NewsThreadVersion{ResearchStatus: NewsContextResearchUnavailable})
+	if reason == "" || strings.Contains(reason, "搜索不可用") || !strings.Contains(reason, "尚未完成公开资料核实") {
+		t.Fatalf("reason = %q", reason)
+	}
+}
+
 func TestNewsContextCleanupDoesNotStartDuringAggregation(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

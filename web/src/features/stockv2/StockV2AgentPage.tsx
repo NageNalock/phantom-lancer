@@ -865,7 +865,7 @@ function AgentCLIDebugDrawer({
   }
 
   return (
-    <Drawer title="验证 CLI" subtitle="运行一次 Codex CLI + MCP submit_result 调试任务" onClose={onClose} width={720}>
+    <Drawer title="验证 CLI" subtitle="运行一次 Codex CLI + 搜索/MCP/结构化回传调试任务" onClose={onClose} width={720}>
       <div className="grid gap-4">
         <Field label="模型">
           <select value={modelId} onChange={(event) => setModelId(event.target.value)}>

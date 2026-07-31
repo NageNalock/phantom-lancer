@@ -107,11 +107,14 @@ export function StockV2AgentTaskProfileDrawer({
         {error ? <Notice tone="danger">{error}</Notice> : null}
         {cliOnly ? (
           <Notice>
-            组合哨兵持仓必须使用 Codex CLI。任务会启用实时 web search，并可使用 CLI/MCP/Agent 侧检索能力；API Provider 不具备这条能力，因此不参与绑定或降级。
+            组合哨兵持仓必须使用 Codex CLI。内置 Provider 使用原生 web search；自定义 codex_cli Provider 使用任务级搜索
+            MCP。API Provider 不参与绑定或降级。
           </Notice>
         ) : null}
         {enabledModels.length === 0 ? (
-          <Notice tone="warn">当前执行模式下暂无可用对话模型。CLI 仅使用内置 Codex Provider；API 使用 OpenAI-compatible Provider。</Notice>
+          <Notice tone="warn">
+            当前执行模式下暂无可用对话模型。CLI 可使用内置或自定义 codex_cli Provider；API 使用 OpenAI-compatible Provider。
+          </Notice>
         ) : null}
         {compatibleModels.length > enabledModels.length ? (
           <p className="m-0 text-xs text-[var(--muted)]">不可用模型保留显示并注明状态，但不能保存为任务绑定。</p>
@@ -119,7 +122,11 @@ export function StockV2AgentTaskProfileDrawer({
 
         <Field
           label="执行模式"
-          help={cliOnly ? "组合哨兵持仓固定使用本机 Codex CLI 与实时搜索，不能切换为 API" : "CLI 使用本机 Codex 会话与 MCP；API 直接请求所选 Provider，并在服务内完成函数调用循环"}
+          help={
+            cliOnly
+              ? "组合哨兵持仓固定使用本机 Codex CLI 与实时搜索，不能切换为 API"
+              : "CLI 使用本机 Codex 与任务绑定的 Provider/MCP；API 直接请求所选 Provider，并在服务内完成函数调用循环"
+          }
         >
           <select
             value={executionMode}
@@ -127,7 +134,7 @@ export function StockV2AgentTaskProfileDrawer({
             onChange={(e) => setForm({ ...form, executionMode: e.target.value, primaryModelId: "", fallbackModelId: "" })}
             className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
           >
-            <option value="cli">CLI · Codex 登录态</option>
+            <option value="cli">CLI · Codex 或自定义 Provider</option>
             {!cliOnly ? <option value="api">API · OpenAI-compatible</option> : null}
           </select>
         </Field>

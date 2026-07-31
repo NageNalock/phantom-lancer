@@ -11,8 +11,9 @@ import (
 
 // 内存 task 池:taskID -> 结果 inbox。
 //
-// 仅内存,重启即失,不持久化。Codex CLI 执行时通过 MCP submit_result 把结果写入
-// 此池,主程序再从中取出做 schema 校验、落库、跑 guardrails。
+// 仅内存,重启即失,不持久化。默认 Codex CLI 通过 MCP submit_result 写入；
+// 自定义 Responses Provider 的最终 JSON 也复用同一校验入口写入此池。
+// 主程序再从中取出做 schema 校验、落库、跑 guardrails。
 //
 // ponytail: 简单 map + mu + resultCh 通知, 不引入额外依赖。
 // taskID 用 crypto/rand 16 字节 hex, 不可猜。

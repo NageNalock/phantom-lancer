@@ -2,7 +2,9 @@ package stockv2
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,7 +23,9 @@ func TestBuildCodexExecArgsUsesFullAccessAndSkipsRepoCheck(t *testing.T) {
 	for _, want := range []string{
 		"exec",
 		"--json",
+		"--ephemeral",
 		"--ignore-user-config",
+		"--ignore-rules",
 		"--dangerously-bypass-approvals-and-sandbox",
 		"--skip-git-repo-check",
 		"-c\x00mcp_servers={}",
@@ -39,6 +43,51 @@ func TestBuildCodexExecArgsUsesFullAccessAndSkipsRepoCheck(t *testing.T) {
 	}
 }
 
+func TestCustomCodexCLIProviderUsesIsolatedHomeAndWorkspace(t *testing.T) {
+	dataDir := t.TempDir()
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	base := newCodexCLIExecutor(
+		nil,
+		"codex",
+		codexHome,
+		"http://127.0.0.1:8080/api/stockv2/agent/mcp",
+		dataDir,
+		newAgentTaskPool(defaultCleanupInterval),
+	)
+	defer base.taskPool.Close()
+	provider := AgentProviderProfile{
+		ID:           "provider-1",
+		ProviderType: AgentProviderTypeCodexCLI,
+		Metadata: mergeAgentProviderRuntimeMetadata(
+			nil,
+			"https://ark.cn-beijing.volces.com/api/coding/v3",
+			"provider-secret",
+		),
+	}
+	custom, err := base.forProvider(provider, "http://127.0.0.1:8080/api/stockv2/agent/codex-proxy/provider-1")
+	if err != nil {
+		t.Fatalf("custom executor: %v", err)
+	}
+	home, workDir, cleanup, err := custom.prepareCodexRunPaths()
+	if err != nil {
+		t.Fatalf("prepare custom run paths: %v", err)
+	}
+	wantRoot := filepath.Join(dataDir, "stockv2", "codex-home")
+	if filepath.Dir(home) != wantRoot || workDir != filepath.Join(home, "workspace") {
+		t.Fatalf("custom paths = home %q, workdir %q", home, workDir)
+	}
+	if info, err := os.Stat(workDir); err != nil || !info.IsDir() {
+		t.Fatalf("custom workspace was not created: %v", err)
+	}
+	cleanup()
+	if _, err := os.Stat(home); !os.IsNotExist(err) {
+		t.Fatalf("custom task home was not removed: %v", err)
+	}
+	if base.codexHome != codexHome || base.provider != nil {
+		t.Fatalf("base executor mutated: %#v", base)
+	}
+}
+
 func TestBuildCodexExecArgsOmitsEmptyReasoningEffort(t *testing.T) {
 	args := buildCodexExecArgs("gpt-5.5", "", "prompt", nil)
 	if got := strings.Join(args, "\x00"); strings.Contains(got, "model_reasoning_effort") {
@@ -47,9 +96,89 @@ func TestBuildCodexExecArgsOmitsEmptyReasoningEffort(t *testing.T) {
 }
 
 func TestBuildCodexExecArgsPlacesLiveSearchBeforeExec(t *testing.T) {
-	args := buildCodexExecArgs("gpt-5.5", "medium", "prompt", nil, true)
+	args := buildCodexExecArgs("gpt-5.5", "medium", "prompt", nil, codexExecOptions{NativeSearch: true})
 	if len(args) < 2 || args[0] != "--search" || args[1] != "exec" {
 		t.Fatalf("live search args = %#v, want --search before exec", args)
+	}
+}
+
+func TestBuildCodexExecArgsUsesTaskProviderAndSearchMCPWithoutNativeSearch(t *testing.T) {
+	args := buildCodexExecArgs(
+		"ark-code-latest",
+		"medium",
+		"prompt",
+		[]codexMCPServerCapability{{
+			Name:                codexSearchMCPName,
+			Command:             "/opt/search/bin/duckduckgo-mcp-server",
+			Args:                []string{"--search-backend", "curl"},
+			DefaultApprovalMode: "approve",
+			RequiredTools:       []string{"search"},
+			DisabledTools:       []string{"unused_tool"},
+		}},
+		codexExecOptions{ModelProvider: &codexCLIProviderRuntime{
+			BaseURL: "http://127.0.0.1:1234/api/stockv2/agent/codex-proxy/provider-1",
+		}},
+	)
+	got := strings.Join(args, "\x00")
+	for _, want := range []string{
+		`mcp_servers.ddg.command="/opt/search/bin/duckduckgo-mcp-server"`,
+		`mcp_servers.ddg.args=["--search-backend","curl"]`,
+		`mcp_servers.ddg.default_tools_approval_mode="approve"`,
+		`mcp_servers.ddg.disabled_tools=["unused_tool"]`,
+		`model_provider="stockv2_task_provider"`,
+		`model_providers.stockv2_task_provider.base_url="http://127.0.0.1:1234/api/stockv2/agent/codex-proxy/provider-1"`,
+		`model_providers.stockv2_task_provider.wire_api="responses"`,
+		`model_providers.stockv2_task_provider.requires_openai_auth=false`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("custom Provider args missing %q: %#v", want, args)
+		}
+	}
+	for _, arg := range args {
+		if arg == "--search" {
+			t.Fatalf("custom Provider args contain native search: %#v", args)
+		}
+	}
+	if strings.Contains(strings.ToLower(got), "api_key") {
+		t.Fatalf("custom Provider args contain a key: %#v", args)
+	}
+}
+
+func TestSubmitCodexDirectResultUsesExistingSubmissionValidation(t *testing.T) {
+	pool := newAgentTaskPool(defaultCleanupInterval)
+	defer pool.Close()
+	taskID, _ := pool.createTask(AgentTaskTypeOperationReview, "run-1", "", time.Minute)
+	body := "```json\n" + `{
+		"taskID":"` + taskID + `",
+		"taskType":"operation_review",
+		"result":{
+			"outputType":"continue_monitoring",
+			"resultSummary":"continue",
+			"result":{"reason":"verified"},
+			"confidence":0.8
+		}
+	}` + "\n```"
+	executor := &codexCLIExecutor{taskPool: pool}
+	result, err := executor.submitCodexDirectResult([]byte(body), taskID, AgentTaskTypeOperationReview)
+	if err != nil {
+		t.Fatalf("submit direct result: %v", err)
+	}
+	if result.OutputType != OperationReviewOutputContinueMonitoring ||
+		result.ResultSummary != "continue" ||
+		result.Result["reason"] != "verified" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestSubmitCodexDirectResultRejectsTaskIdentityMismatch(t *testing.T) {
+	pool := newAgentTaskPool(defaultCleanupInterval)
+	defer pool.Close()
+	taskID, _ := pool.createTask(AgentTaskTypeOperationReview, "run-1", "", time.Minute)
+	body := `{"taskID":"wrong-task","taskType":"operation_review","result":{"outputType":"continue_monitoring","resultSummary":"continue","result":{},"confidence":0.8}}`
+	executor := &codexCLIExecutor{taskPool: pool}
+	if _, err := executor.submitCodexDirectResult([]byte(body), taskID, AgentTaskTypeOperationReview); err == nil ||
+		!strings.Contains(err.Error(), "identity mismatch") {
+		t.Fatalf("err = %v, want identity mismatch", err)
 	}
 }
 
@@ -59,6 +188,7 @@ func TestCLIResearchAuditCollectorKeepsOnlyBoundedCallMetadata(t *testing.T) {
 		`{"type":"item.completed","item":{"type":"web_search","query":"must not persist"}}`,
 		`{"type":"item.completed","item":{"type":"mcp_tool_call","server":"stock_agent","tool":"semantic_search_news_threads","arguments":{"secret":"must not persist"}}}`,
 		`{"type":"item.completed","item":{"type":"dynamic_tool_call","name":"research_agent","arguments":"must not persist"}}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"{\"final\":true}"}}`,
 	} {
 		audit.record([]byte(line))
 	}
@@ -72,9 +202,39 @@ func TestCLIResearchAuditCollectorKeepsOnlyBoundedCallMetadata(t *testing.T) {
 	if !portfolioSentinelHasExternalResearch(AgentCLIResearchAudit{AgentToolCalls: map[string]int{"research_agent": 1}}) {
 		t.Fatal("named research agent should satisfy external research audit")
 	}
+	messages := audit.agentMessages()
+	if len(messages) != 0 {
+		t.Fatalf("non-result-shaped agent message should not be retained: %q", messages)
+	}
 	raw := agentExecutorOutputSummary(&AgentExecutorOutput{ResearchAudit: got})
 	if strings.Contains(raw, "must not persist") {
 		t.Fatalf("audit leaked query or arguments: %s", raw)
+	}
+}
+
+func TestSubmitCodexDirectResultCandidatesUsesLastValidJSONMessage(t *testing.T) {
+	pool := newAgentTaskPool(defaultCleanupInterval)
+	defer pool.Close()
+	taskID, _ := pool.createTask(AgentTaskTypeOperationReview, "run-1", "", time.Minute)
+	valid := fmt.Sprintf(
+		`{"taskID":%q,"taskType":"operation_review","result":{"outputType":"continue_monitoring","resultSummary":"continue","result":{},"confidence":0.8}}`,
+		taskID,
+	)
+	invalid := fmt.Sprintf(`Here is {"taskID":%q,"result":"provider stream appended prose"}`, taskID)
+	audit := newCLIResearchAudit(true)
+	for _, line := range []string{
+		fmt.Sprintf(`{"type":"item.completed","item":{"type":"agent_message","text":%q}}`, valid),
+		fmt.Sprintf(`{"type":"item.completed","item":{"type":"agent_message","text":%q}}`, invalid),
+	} {
+		audit.record([]byte(line))
+	}
+	executor := &codexCLIExecutor{taskPool: pool}
+	result, err := executor.submitCodexDirectResultCandidates(audit.agentMessages(), taskID, AgentTaskTypeOperationReview)
+	if err != nil {
+		t.Fatalf("submit candidates: %v", err)
+	}
+	if result.OutputType != "continue_monitoring" || result.ResultSummary != "continue" {
+		t.Fatalf("result = %+v", result)
 	}
 }
 
@@ -131,7 +291,7 @@ func TestExecutePromptFailsBeforeCodexWhenMCPMissing(t *testing.T) {
 	if output != nil {
 		t.Fatalf("output = %+v, want nil", output)
 	}
-	if err == nil || !strings.Contains(err.Error(), "invalid codex MCP server URL") {
+	if err == nil || !strings.Contains(err.Error(), "must configure exactly one URL or command") {
 		t.Fatalf("err = %v, want MCP preflight URL error", err)
 	}
 }
@@ -402,6 +562,9 @@ func TestBuildPortfolioSentinelPromptRequiresCompleteNewsContextReview(t *testin
 		"server owns monitor_window and valid_until",
 		"only the next trading window/session",
 		"plan validity period",
+		"at most 8 external search/fetch tool calls",
+		"Say external search is unavailable only when the tool cannot be invoked",
+		"do not say external search is unavailable",
 		"invented",
 	} {
 		if !strings.Contains(prompt, want) {

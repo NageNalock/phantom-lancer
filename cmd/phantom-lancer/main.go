@@ -282,6 +282,7 @@ func main() {
 		stockV2CodexBinary(),
 		os.Getenv("CODEX_HOME"),
 		stockV2MCPURL,
+		cfg.DataDir,
 	)
 
 	// M2 split-state recovery: if the DB says TLS should be enabled but the

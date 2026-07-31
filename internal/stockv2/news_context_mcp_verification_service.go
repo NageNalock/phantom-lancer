@@ -132,9 +132,9 @@ func (s *Service) VerifyNewsContextMCP(ctx context.Context, threadIDs []string) 
 	return nil
 }
 
-// VerifyNewsContextMCPProbe proves the real CLI path with one semantic search
-// and one detail read. Static index checks cover the full set separately; doing
-// a top-N search for every theme would be both expensive and semantically wrong.
+// VerifyNewsContextMCPProbe proves the real local MCP path with one semantic
+// search and one detail read. Static index checks cover the full set separately;
+// doing a top-N search for every theme would be both expensive and semantically wrong.
 func (s *Service) VerifyNewsContextMCPProbe(ctx context.Context, representativeThreadID string) error {
 	representative, err := s.store.GetNewsThread(ctx, strings.TrimSpace(representativeThreadID))
 	if err != nil {

@@ -165,12 +165,12 @@ func TestAgentProviderOpenAICompatibleRuntimeConfig(t *testing.T) {
 	}
 }
 
-func TestAgentProviderModelCatalogAndTestUseOpenAICompatibleProtocol(t *testing.T) {
+func TestCustomCodexCLIProviderCatalogAndTestUseResponsesProtocol(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	var modelListCalled, chatCalled bool
+	var modelListCalled, responsesCalled bool
 	svc.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if got, want := req.Header.Get("Authorization"), "Bearer secret-test-token"; got != want {
 			t.Fatalf("authorization header = %q, want %q", got, want)
@@ -183,12 +183,17 @@ func TestAgentProviderModelCatalogAndTestUseOpenAICompatibleProtocol(t *testing.
 				Status:     "200 OK",
 				Body:       io.NopCloser(strings.NewReader(`{"data":[{"id":"gpt-test"},{"id":"gpt-mini"}]}`)),
 			}, nil
-		case "/v1/chat/completions":
-			chatCalled = true
+		case "/v1/responses":
+			responsesCalled = true
+			body, _ := io.ReadAll(req.Body)
+			if !strings.Contains(string(body), `"model":"gpt-test"`) ||
+				!strings.Contains(string(body), `"input":"Reply with OK."`) {
+				t.Fatalf("responses request body = %s", body)
+			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Status:     "200 OK",
-				Body:       io.NopCloser(strings.NewReader(`{"id":"chatcmpl-test","choices":[{"message":{"content":"ok"}}]}`)),
+				Body:       io.NopCloser(strings.NewReader(`{"id":"resp-test","output":[]}`)),
 			}, nil
 		default:
 			t.Fatalf("unexpected provider path: %s", req.URL.Path)
@@ -234,8 +239,8 @@ func TestAgentProviderModelCatalogAndTestUseOpenAICompatibleProtocol(t *testing.
 	if err != nil {
 		t.Fatalf("test model: %v", err)
 	}
-	if !chatCalled {
-		t.Fatal("chat completions endpoint not called")
+	if !responsesCalled {
+		t.Fatal("Responses endpoint not called")
 	}
 	if !result.OK {
 		t.Fatalf("test result = %#v, want ok", result)

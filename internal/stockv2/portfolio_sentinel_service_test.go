@@ -2,8 +2,10 @@ package stockv2
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -100,6 +102,91 @@ func TestBuildPortfolioSentinelContextIncludesHoldingsAndWindowNews(t *testing.T
 	}
 	if len(pack.RawNews) != 0 || len(pack.NewsEvents) != 1 {
 		t.Fatalf("pack raw=%d events=%d, want no raw and one event", len(pack.RawNews), len(pack.NewsEvents))
+	}
+}
+
+func TestBuildPortfolioSentinelContextIncludesLatestPriorJudgmentAsAdvisoryMemory(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	now := time.Now()
+	portfolio := createStrategyTestPortfolio(t, svc.store, "portfolio-sentinel-prior")
+	if err := svc.store.CreateHolding(ctx, StockV2Holding{
+		ID: "holding-prior", PortfolioID: portfolio.ID, Symbol: "588940", Market: "SH",
+		Name: "科创50ETF富国", Quantity: 1000, AvailableQuantity: 1000, CostPrice: 0.896,
+		AcquiredAt: now.AddDate(0, 0, -5), CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("create holding: %v", err)
+	}
+	seedPrior := func(id string, finishedAt time.Time, threshold float64, reason string) {
+		t.Helper()
+		run, err := svc.store.CreatePortfolioSentinelRun(ctx, PortfolioSentinelRun{
+			ID: id, PortfolioID: portfolio.ID, Status: PortfolioSentinelStatusCompleted,
+			TriggerType: PortfolioSentinelTriggerManual, WindowType: PortfolioSentinelWindowManual,
+			WindowStartAt: finishedAt.Add(-time.Hour), WindowEndAt: finishedAt.Add(-time.Minute),
+			StartedAt: finishedAt.Add(-30 * time.Minute), FinishedAt: finishedAt,
+		})
+		if err != nil {
+			t.Fatalf("create prior run: %v", err)
+		}
+		report := PortfolioSentinelReport{
+			SchemaVersion:    PortfolioSentinelReportSchemaVersion,
+			OverallRiskLevel: PortfolioSentinelRiskMedium,
+			RunSummary:       "prior",
+			AffectedHoldings: []PortfolioSentinelAffectedHolding{{
+				Symbol: "588940", Market: "SH", Name: "科创50ETF富国",
+				RiskLevel: PortfolioSentinelRiskMedium, Reasons: []string{"科创板主题波动"},
+			}},
+			ActionPlans: []PortfolioSentinelActionPlan{{
+				ID: "plan-" + id, PortfolioID: portfolio.ID, Symbol: "588940", Market: "SH",
+				Name: "科创50ETF富国", Action: PortfolioSentinelPlanHold,
+				TriggerMode: PortfolioSentinelTriggerImmediate,
+				Conditions: []PortfolioSentinelPlanCondition{{
+					Key: "prior-risk-boundary", Type: WatchRulePriceBelow, Threshold: &threshold,
+				}},
+				Reason: reason, RiskNotes: "跌破该参考线或放量走弱时重新评估",
+				Confidence: 0.72, ValidUntil: finishedAt.Add(portfolioSentinelPlanValidity),
+			}},
+		}
+		if _, err := svc.store.CreatePortfolioSentinelResult(ctx, PortfolioSentinelResult{
+			RunID: run.ID, SchemaVersion: PortfolioSentinelReportSchemaVersion,
+			RawResult: portfolioSentinelReportMap(report),
+		}); err != nil {
+			t.Fatalf("create prior result: %v", err)
+		}
+	}
+	seedPrior("sentinel-prior-old", now.Add(-2*time.Hour), 0.8, "旧判断")
+	seedPrior("sentinel-prior-latest", now.Add(-time.Hour), 0.808, "维持持有并观察")
+
+	pack, err := svc.BuildPortfolioSentinelContext(ctx, PortfolioSentinelRun{
+		ID: "sentinel-current", PortfolioID: portfolio.ID,
+		TriggerType: PortfolioSentinelTriggerManual, WindowType: PortfolioSentinelWindowManual,
+		WindowStartAt: now.Add(-time.Hour), WindowEndAt: now,
+	}, "")
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	if len(pack.PriorJudgments) != 1 {
+		t.Fatalf("prior judgments = %+v, want one latest item", pack.PriorJudgments)
+	}
+	prior := pack.PriorJudgments[0]
+	if prior.SourceRunID != "sentinel-prior-latest" || !prior.AdvisoryOnly ||
+		prior.Reason != "维持持有并观察" || len(prior.Conditions) != 1 ||
+		prior.Conditions[0].Threshold == nil || *prior.Conditions[0].Threshold != 0.808 {
+		t.Fatalf("prior judgment = %+v", prior)
+	}
+	if count, ok := pack.ContextStats["priorJudgmentCount"].(int); !ok || count != 1 {
+		t.Fatalf("prior judgment stats = %#v", pack.ContextStats["priorJudgmentCount"])
+	}
+	prompt := buildPortfolioSentinelPrompt("task-prior", pack, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
+	for _, want := range []string{
+		"priorHoldingJudgments", "latest successful run", "use, revise, or ignore",
+		"not required to mention, preserve, or answer each prior judgment",
+		`"sourceRunId": "sentinel-prior-latest"`, `"advisoryOnly": true`,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q: %s", want, prompt)
+		}
 	}
 }
 
@@ -789,5 +876,37 @@ func TestPortfolioSentinelHasRunningRunGuardsConcurrency(t *testing.T) {
 	_, err := svc.startPortfolioSentinelRun(ctx, PortfolioSentinelTriggerManual, PortfolioSentinelWindowManual, "", now.Add(-time.Hour), now, "", false)
 	if !errors.Is(err, ErrPortfolioSentinelAlreadyRunning) {
 		t.Fatalf("expected ErrPortfolioSentinelAlreadyRunning, got %v", err)
+	}
+}
+
+func TestNormalizePortfolioSentinelResearchLanguageUsesObservedDDGMCP(t *testing.T) {
+	report := PortfolioSentinelReport{
+		RunSummary: "外部搜索不可用，暂不操作",
+		ResearchAudit: []PortfolioSentinelResearchRecord{{
+			ID: "research-1", Source: "https://example.com/source", Claim: "公开资料",
+		}},
+		AffectedHoldings: []PortfolioSentinelAffectedHolding{{
+			Reasons: []string{"无法使用外部搜索，无法确认驱动"},
+		}},
+		ActionPlans: []PortfolioSentinelActionPlan{{
+			Reason:    "外部检索不可用，继续持有",
+			RiskNotes: "无法进行外部搜索",
+		}},
+		DataQualityNotes: []string{"外部搜索不可用"},
+	}
+	audit := AgentCLIResearchAudit{
+		LiveSearchEnabled: true,
+		MCPToolCalls:      map[string]int{"ddg.search": 2, "ddg.fetch_content": 1},
+	}
+	if !portfolioSentinelHasExternalResearch(audit) {
+		t.Fatal("observed ddg MCP calls should count as external research")
+	}
+	normalizePortfolioSentinelResearchLanguage(&report, audit)
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	if strings.Contains(string(raw), "不可用") || !strings.Contains(string(raw), "已有外部公开资料检索记录") {
+		t.Fatalf("research language was not normalized: %s", raw)
 	}
 }

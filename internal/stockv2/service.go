@@ -216,8 +216,8 @@ type NewsContextAgentExecutor interface {
 }
 
 // WithCodexCLIExecutor 注入 Codex CLI 执行器。
-func (s *Service) WithCodexCLIExecutor(binary, codexHome, mcpURL string) *Service {
-	cli := newCodexCLIExecutor(s.log, binary, codexHome, mcpURL, s.agentTaskPool)
+func (s *Service) WithCodexCLIExecutor(binary, codexHome, mcpURL, dataDir string) *Service {
+	cli := newCodexCLIExecutor(s.log, binary, codexHome, mcpURL, dataDir, s.agentTaskPool)
 	executor := &agentRoutingExecutor{service: s, cli: cli, api: newAgentAPIExecutor(s)}
 	s.agentExecutor = executor
 	s.newsContextExecutor = executor
@@ -263,6 +263,7 @@ func (s *Service) StartAgentMCPServer() (string, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/stockv2/agent/mcp", s.handleAgentMCPRequest)
+	mux.HandleFunc("POST /api/stockv2/agent/codex-proxy/{providerID}/responses", s.handleCodexCLIResponsesProxy)
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,

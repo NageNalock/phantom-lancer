@@ -460,6 +460,7 @@ func (s *Service) TestAgentModel(ctx context.Context, req RequestTestAgentModel)
 	if err != nil {
 		return AgentModelTestResult{}, err
 	}
+	endpointPath := "/chat/completions"
 	body := map[string]any{
 		"model": modelName,
 		"messages": []map[string]string{
@@ -467,8 +468,16 @@ func (s *Service) TestAgentModel(ctx context.Context, req RequestTestAgentModel)
 		},
 		"max_tokens": 1,
 	}
+	if profile.ProviderType == AgentProviderTypeCodexCLI {
+		endpointPath = "/responses"
+		body = map[string]any{
+			"model":  modelName,
+			"input":  "Reply with OK.",
+			"stream": false,
+		}
+	}
 	payload, _ := json.Marshal(body)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/chat/completions", bytes.NewReader(payload))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+endpointPath, bytes.NewReader(payload))
 	if err != nil {
 		return AgentModelTestResult{}, err
 	}
@@ -1402,7 +1411,7 @@ func (s *Service) RunAgentCLIDebug(ctx context.Context, req RequestRunAgentCLIDe
 			TaskType: "agent_cli_debug",
 			Status:   MonitorHitStatusCandidate,
 			Title:    "Agent CLI debug self check with Google News search",
-			Summary:  "Verify Codex CLI execution, search/web tool access, stdout capture, and MCP submit_result callback.",
+			Summary:  "Verify Codex CLI execution, search/web tool access, stdout capture, and structured result callback.",
 			Evidence: map[string]any{
 				"debug":                    true,
 				"expectedOutputType":       OperationReviewOutputContinueMonitoring,
@@ -1438,7 +1447,7 @@ func (s *Service) RunAgentCLIDebug(ctx context.Context, req RequestRunAgentCLIDe
 		TriggerObjectType:    "agent_cli_debug",
 		TriggerObjectID:      triggerID,
 		RequestedBy:          req.RequestedBy,
-		InputSummary:         "CLI debug: verify Codex CLI search/web access with today's Google News in Chinese and MCP submit_result callback.",
+		InputSummary:         "CLI debug: verify Codex CLI search/web access with today's Google News in Chinese and structured result callback.",
 		InputArtifactSummary: string(inputArtifact),
 	})
 	if err != nil {

@@ -6,12 +6,15 @@ import { friendlyError } from "../../api/client";
 import { Button, Drawer, Field, Notice } from "../../components/ui";
 
 const providerTypeTip = [
-  "codex_cli: 仅内置 default 使用本机 Codex CLI 登录态。",
+  "codex_cli: 使用本机 Codex CLI。内置 default 走登录态，自定义 Provider 走 Responses API。",
   "openai: OpenAI 或 OpenAI-compatible 云服务。",
   "local: 本机或内网 OpenAI-compatible 服务。",
 ].join("\n");
 
-// Provider 新建 / 编辑 Drawer。遵循 Quiet 风格：只暴露当前可用的 OpenAI-compatible 配置。
+const openAIBaseURL = "https://api.openai.com/v1";
+const volcengineCodingBaseURL = "https://ark.cn-beijing.volces.com/api/coding/v3";
+
+// Provider 新建 / 编辑 Drawer。遵循 Quiet 风格，保持任务所需配置集中可见。
 // 新建模式: provider 为 null；编辑模式: provider 为已有对象。
 export function StockV2AgentProviderDrawer({
   provider,
@@ -28,7 +31,7 @@ export function StockV2AgentProviderDrawer({
   const [form, setForm] = useState<StockV2AgentCreateProviderRequest>({
     providerType: provider?.providerType || "openai",
     displayName: provider?.displayName || "",
-    baseUrl: provider?.baseUrl || "https://api.openai.com/v1",
+    baseUrl: provider?.baseUrl || openAIBaseURL,
   });
   const [apiKey, setApiKey] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -39,7 +42,7 @@ export function StockV2AgentProviderDrawer({
       setForm({
         providerType: provider.providerType,
         displayName: provider.displayName || "",
-        baseUrl: provider.baseUrl || "https://api.openai.com/v1",
+        baseUrl: provider.baseUrl || openAIBaseURL,
       });
       setApiKey("");
     }
@@ -47,6 +50,7 @@ export function StockV2AgentProviderDrawer({
 
   const hasUsableKey = isEdit ? provider?.apiKeySet || !!apiKey.trim() : !!apiKey.trim();
   const canSubmit = !!form.baseUrl?.trim() && hasUsableKey;
+  const isCLIProvider = form.providerType === "codex_cli";
 
   async function handleSubmit() {
     if (!canSubmit) return;
@@ -107,9 +111,19 @@ export function StockV2AgentProviderDrawer({
           <select
             value={form.providerType || "openai"}
             disabled={isEdit}
-            onChange={(e) => setForm({ ...form, providerType: e.target.value })}
+            onChange={(e) => {
+              const providerType = e.target.value;
+              const baseUrl =
+                providerType === "codex_cli" && form.baseUrl === openAIBaseURL
+                  ? volcengineCodingBaseURL
+                  : providerType !== "codex_cli" && form.baseUrl === volcengineCodingBaseURL
+                    ? openAIBaseURL
+                    : form.baseUrl;
+              setForm({ ...form, providerType, baseUrl });
+            }}
             className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm text-[var(--muted-strong)] disabled:bg-[var(--surface-soft)]"
           >
+            <option value="codex_cli">codex_cli</option>
             <option value="openai">openai</option>
             <option value="local">local</option>
           </select>
@@ -119,16 +133,23 @@ export function StockV2AgentProviderDrawer({
           <input
             value={form.displayName || ""}
             onChange={(e) => setForm({ ...form, displayName: e.target.value })}
-            placeholder="例如：OpenAI 主账号"
+            placeholder={isCLIProvider ? "例如：DeepSeek V4 Pro Coding Plan" : "例如：OpenAI 主账号"}
             className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm"
           />
         </Field>
 
-        <Field label="OpenAI Base URL">
+        <Field
+          label={isCLIProvider ? "Responses API Base URL" : "OpenAI Base URL"}
+          help={
+            isCLIProvider
+              ? "用于当前任务的 Codex CLI Provider。服务通过本机兼容代理注入凭据，不修改全局 Codex 配置"
+              : "OpenAI-compatible API 的基础地址"
+          }
+        >
           <input
             value={form.baseUrl || ""}
             onChange={(e) => setForm({ ...form, baseUrl: e.target.value })}
-            placeholder="https://api.openai.com/v1"
+            placeholder={isCLIProvider ? volcengineCodingBaseURL : openAIBaseURL}
             className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 font-mono text-sm"
           />
         </Field>
@@ -145,7 +166,8 @@ export function StockV2AgentProviderDrawer({
         </Field>
 
         <p className="text-xs leading-5 text-[var(--muted)]">
-          内置 default Provider 不在这里编辑。手动新建 Provider 按 OpenAI-compatible 协议调用；Token 只写入本地服务数据库，响应不会回显。
+          内置 default Provider 不在这里编辑。自定义 codex_cli Provider 使用 Responses API，并在需要联网的任务中接入搜索 MCP。Token
+          只写入本地服务数据库，响应不会回显。
         </p>
       </div>
     </Drawer>

@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,7 +24,7 @@ import (
 	"phantom-lancer/internal/safelog"
 )
 
-// Codex CLI executor: 启动 codex exec 子进程, watch 输出, 等待 MCP submit_result 或超时。
+// Codex CLI executor: 启动 codex exec 子进程并等待结构化结果或超时。
 //
 // ponytail: 直接用 os/exec, 不引入 codexclient 依赖, 保持 stockv2 领域边界独立。
 // 环境变量用 allowlist 转发, 与 codexclient 的策略对齐但不共享代码。
@@ -80,11 +82,14 @@ type AgentAPIRequestTrace struct {
 }
 
 type codexCLIExecutor struct {
-	log       *slog.Logger
-	binary    string
-	codexHome string
-	taskPool  *agentTaskPool
-	mcpURL    string // 本地 MCP server 地址, 如 http://127.0.0.1:PORT/api/stockv2/agent/mcp
+	log               *slog.Logger
+	binary            string
+	codexHome         string
+	taskPool          *agentTaskPool
+	mcpURL            string // 本地 MCP server 地址, 如 http://127.0.0.1:PORT/api/stockv2/agent/mcp
+	searchMCPCommand  string
+	isolatedCodexRoot string
+	provider          *codexCLIProviderRuntime
 }
 
 const (
@@ -96,12 +101,32 @@ const (
 	executorTerminateGrace     = 5 * time.Second
 	codexStockAgentMCPName     = "stock_agent"
 	codexSubmitResultTool      = "stock_agent.submit_result"
+	codexSearchMCPName         = "ddg"
+	codexTaskModelProviderName = "stockv2_task_provider"
+	codexDirectResultMaxBytes  = 2 << 20
+	// ponytail: eight recent result-shaped messages cover provider stream
+	// epilogues without retaining an unbounded model transcript. If providers
+	// start splitting one result across messages, upgrade the stream assembler.
+	codexDirectResultCandidateLimit = 8
 )
 
 type codexMCPServerCapability struct {
-	Name          string
-	URL           string
-	RequiredTools []string
+	Name                string
+	URL                 string
+	Command             string
+	Args                []string
+	DefaultApprovalMode string
+	RequiredTools       []string
+	DisabledTools       []string
+}
+
+type codexCLIProviderRuntime struct {
+	BaseURL string
+}
+
+type codexExecOptions struct {
+	NativeSearch  bool
+	ModelProvider *codexCLIProviderRuntime
 }
 
 // 允许转发给子进程的环境变量(与 codexclient 对齐, 但独立维护)
@@ -116,14 +141,42 @@ var secretEnvHints = []string{
 	"COOKIE", "SESSION", "CSRF", "BEARER", "CREDENTIAL",
 }
 
-func newCodexCLIExecutor(log *slog.Logger, binary, codexHome, mcpURL string, pool *agentTaskPool) *codexCLIExecutor {
+func newCodexCLIExecutor(log *slog.Logger, binary, codexHome, mcpURL, dataDir string, pool *agentTaskPool) *codexCLIExecutor {
+	dataDir = strings.TrimSpace(dataDir)
 	return &codexCLIExecutor{
-		log:       log,
-		binary:    binary,
-		codexHome: codexHome,
-		taskPool:  pool,
-		mcpURL:    mcpURL,
+		log:               log,
+		binary:            binary,
+		codexHome:         codexHome,
+		taskPool:          pool,
+		mcpURL:            mcpURL,
+		searchMCPCommand:  filepath.Join(dataDir, "stockv2", "mcp", "duckduckgo", "current", "bin", "python"),
+		isolatedCodexRoot: filepath.Join(dataDir, "stockv2", "codex-home"),
 	}
+}
+
+func (e *codexCLIExecutor) forProvider(profile AgentProviderProfile, proxyBaseURL string) (*codexCLIExecutor, error) {
+	if profile.ProviderType != AgentProviderTypeCodexCLI {
+		return nil, ErrAgentExecutionModeModelMismatch
+	}
+	clone := *e
+	clone.provider = nil
+	if isDefaultCodexCLIProvider(profile) {
+		return &clone, nil
+	}
+	if _, _, err := agentProviderOpenAIConfig(profile); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(clone.isolatedCodexRoot) == "" {
+		return nil, errors.New("custom Codex CLI provider home is not configured")
+	}
+	if err := os.MkdirAll(clone.isolatedCodexRoot, 0o700); err != nil {
+		return nil, fmt.Errorf("prepare custom Codex CLI home root: %w", err)
+	}
+	if strings.TrimSpace(proxyBaseURL) == "" {
+		return nil, errors.New("custom Codex CLI provider proxy is not configured")
+	}
+	clone.provider = &codexCLIProviderRuntime{BaseURL: strings.TrimRight(strings.TrimSpace(proxyBaseURL), "/")}
+	return &clone, nil
 }
 
 func (e *codexCLIExecutor) ExecuteOperationReview(
@@ -138,6 +191,9 @@ func (e *codexCLIExecutor) ExecuteOperationReview(
 
 	// 构建 prompt
 	prompt := buildOperationReviewPrompt(taskID, pack, e.mcpURL)
+	if liveSearch, _ := pack.Evidence["googleNewsSearchRequired"].(bool); liveSearch {
+		return e.executePromptWithOptions(ctx, taskID, prompt, modelName, reasoningEffort, execDefaultTimeout, true)
+	}
 	return e.executePrompt(ctx, taskID, prompt, modelName, reasoningEffort)
 }
 
@@ -256,14 +312,37 @@ func (e *codexCLIExecutor) executePromptWithOptions(
 
 	start := time.Now()
 
-	mcpServers := e.codexMCPServers()
+	mcpServers := e.codexMCPServers(liveSearch)
 	if err := e.preflightCodexMCPServers(mcpServers); err != nil {
 		return nil, err
 	}
 
-	args := buildCodexExecArgs(modelName, reasoningEffort, prompt, mcpServers, liveSearch)
+	taskType := ""
+	if e.provider != nil {
+		entry, ok := e.taskPool.getTask(taskID)
+		if !ok {
+			return nil, ErrTaskNotFound
+		}
+		taskType = entry.taskType
+		prompt = buildCodexDirectResultPrompt(prompt, taskID, taskType)
+	}
+	codexHome, workDir, cleanup, err := e.prepareCodexRunPaths()
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	options := codexExecOptions{
+		NativeSearch:  liveSearch && e.provider == nil,
+		ModelProvider: e.provider,
+	}
+	args := buildCodexExecArgs(modelName, reasoningEffort, prompt, mcpServers, options)
+
 	cmd := exec.CommandContext(execCtx, e.binary, args...)
-	cmd.Env = e.buildEnv()
+	cmd.Env = e.buildEnv(codexHome)
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
 	// ponytail: Codex may spawn search or MCP descendants. A dedicated process
 	// group lets timeout cleanup remove only this task without touching peers.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -440,6 +519,15 @@ waitLoop:
 	// pipes. Clear the task group before returning or starting a retry.
 	_ = syscall.Kill(-processGroupID, syscall.SIGKILL)
 
+	if submittedResult == nil && e.provider != nil && !timedOut {
+		directResult, directErr := e.submitCodexDirectResultCandidates(researchAudit.agentMessages(), taskID, taskType)
+		if directErr == nil {
+			submittedResult = directResult
+		} else if execErr == nil {
+			resultErr = directErr
+		}
+	}
+
 	duration := time.Since(start)
 
 	exitCode := -1
@@ -519,16 +607,47 @@ func executorProcessGroupExists(processGroupID int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-func buildCodexExecArgs(modelName, reasoningEffort, prompt string, mcpServers []codexMCPServerCapability, liveSearch ...bool) []string {
+func buildCodexExecArgs(
+	modelName, reasoningEffort, prompt string,
+	mcpServers []codexMCPServerCapability,
+	options ...codexExecOptions,
+) []string {
 	// ponytail: StockV2 agent runs are owner-triggered local tasks; isolate user config so unrelated MCPs cannot pollute stderr.
-	args := make([]string, 0, 18)
-	if len(liveSearch) > 0 && liveSearch[0] {
+	args := make([]string, 0, 28)
+	var runOptions codexExecOptions
+	if len(options) > 0 {
+		runOptions = options[0]
+	}
+	if runOptions.NativeSearch {
 		// --search is a global Codex flag and must precede the exec subcommand.
 		args = append(args, "--search")
 	}
-	args = append(args, "exec", "--json", "--ignore-user-config", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "-c", "mcp_servers={}")
+	args = append(args, "exec", "--json", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "-c", "mcp_servers={}")
 	for _, server := range mcpServers {
-		args = append(args, "-c", fmt.Sprintf("mcp_servers.%s.url=%s", server.Name, strconv.Quote(strings.TrimSpace(server.URL))))
+		if endpoint := strings.TrimSpace(server.URL); endpoint != "" {
+			args = append(args, "-c", fmt.Sprintf("mcp_servers.%s.url=%s", server.Name, strconv.Quote(endpoint)))
+		} else {
+			args = append(args, "-c", fmt.Sprintf("mcp_servers.%s.command=%s", server.Name, strconv.Quote(strings.TrimSpace(server.Command))))
+			if len(server.Args) > 0 {
+				args = append(args, "-c", fmt.Sprintf("mcp_servers.%s.args=%s", server.Name, codexTOMLStringArray(server.Args)))
+			}
+		}
+		if mode := strings.TrimSpace(server.DefaultApprovalMode); mode != "" {
+			args = append(args, "-c", fmt.Sprintf("mcp_servers.%s.default_tools_approval_mode=%s", server.Name, strconv.Quote(mode)))
+		}
+		if len(server.DisabledTools) > 0 {
+			args = append(args, "-c", fmt.Sprintf("mcp_servers.%s.disabled_tools=%s", server.Name, codexTOMLStringArray(server.DisabledTools)))
+		}
+	}
+	if runOptions.ModelProvider != nil {
+		args = append(
+			args,
+			"-c", "model_provider="+strconv.Quote(codexTaskModelProviderName),
+			"-c", fmt.Sprintf("model_providers.%s.name=%s", codexTaskModelProviderName, strconv.Quote("StockV2 task provider")),
+			"-c", fmt.Sprintf("model_providers.%s.base_url=%s", codexTaskModelProviderName, strconv.Quote(strings.TrimRight(runOptions.ModelProvider.BaseURL, "/"))),
+			"-c", fmt.Sprintf("model_providers.%s.wire_api=%s", codexTaskModelProviderName, strconv.Quote("responses")),
+			"-c", fmt.Sprintf("model_providers.%s.requires_openai_auth=false", codexTaskModelProviderName),
+		)
 	}
 	if effort := strings.TrimSpace(reasoningEffort); effort != "" {
 		args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(effort))
@@ -539,12 +658,21 @@ func buildCodexExecArgs(modelName, reasoningEffort, prompt string, mcpServers []
 	return append(args, prompt)
 }
 
+func codexTOMLStringArray(values []string) string {
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, strconv.Quote(value))
+	}
+	return "[" + strings.Join(quoted, ",") + "]"
+}
+
 type cliResearchAuditCollector struct {
-	mu      sync.Mutex
-	enabled bool
-	web     int
-	mcp     map[string]int
-	agent   map[string]int
+	mu       sync.Mutex
+	enabled  bool
+	web      int
+	mcp      map[string]int
+	agent    map[string]int
+	messages [][]byte
 }
 
 func newCLIResearchAudit(enabled bool) *cliResearchAuditCollector {
@@ -563,6 +691,7 @@ func (a *cliResearchAuditCollector) record(line []byte) {
 			Server string `json:"server"`
 			Tool   string `json:"tool"`
 			Name   string `json:"name"`
+			Text   string `json:"text"`
 		} `json:"item"`
 	}
 	if json.Unmarshal(line, &event) != nil || event.Type != "item.completed" {
@@ -571,6 +700,17 @@ func (a *cliResearchAuditCollector) record(line []byte) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch event.Item.Type {
+	case "agent_message":
+		message := []byte(event.Item.Text)
+		if len(message) > codexDirectResultMaxBytes {
+			message = message[:codexDirectResultMaxBytes+1]
+		}
+		if bytes.Contains(message, []byte(`"taskID"`)) && bytes.Contains(message, []byte(`"result"`)) {
+			a.messages = append(a.messages, append([]byte(nil), message...))
+			if len(a.messages) > codexDirectResultCandidateLimit {
+				a.messages = append(a.messages[:0], a.messages[len(a.messages)-codexDirectResultCandidateLimit:]...)
+			}
+		}
 	case "web_search":
 		a.web++
 	case "mcp_tool_call":
@@ -586,6 +726,16 @@ func (a *cliResearchAuditCollector) record(line []byte) {
 			a.agent[safelog.Text(name, 160)]++
 		}
 	}
+}
+
+func (a *cliResearchAuditCollector) agentMessages() [][]byte {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([][]byte, len(a.messages))
+	for index := range a.messages {
+		out[index] = append([]byte(nil), a.messages[index]...)
+	}
+	return out
 }
 
 func (a *cliResearchAuditCollector) snapshot() AgentCLIResearchAudit {
@@ -709,12 +859,34 @@ func redactCodexConfigArg(value string) string {
 	return value
 }
 
-func (e *codexCLIExecutor) codexMCPServers() []codexMCPServerCapability {
-	return []codexMCPServerCapability{{
-		Name:          codexStockAgentMCPName,
-		URL:           strings.TrimSpace(e.mcpURL),
-		RequiredTools: stockAgentMCPRequiredTools(),
-	}}
+func (e *codexCLIExecutor) codexMCPServers(liveSearch ...bool) []codexMCPServerCapability {
+	stockServer := codexMCPServerCapability{
+		Name:                codexStockAgentMCPName,
+		URL:                 strings.TrimSpace(e.mcpURL),
+		DefaultApprovalMode: "approve",
+		RequiredTools:       stockAgentMCPRequiredTools(),
+	}
+	if e.provider != nil {
+		// Coding Plan frequently emits malformed JSON for a large final MCP
+		// argument. Project-data tools stay available, while the final result is
+		// read from Codex's bounded output-last-message file and validated by the
+		// same submit_result path in-process.
+		stockServer.DisabledTools = []string{codexSubmitResultTool}
+	}
+	servers := []codexMCPServerCapability{stockServer}
+	if len(liveSearch) > 0 && liveSearch[0] && e.provider != nil {
+		// ponytail: Coding Plan ignores the native hosted web_search tool. A
+		// pinned, keyless MCP is used only for CLI tasks that explicitly require
+		// live research; replace the binary during deployment to upgrade it.
+		servers = append(servers, codexMCPServerCapability{
+			Name:                codexSearchMCPName,
+			Command:             strings.TrimSpace(e.searchMCPCommand),
+			Args:                []string{"-m", "duckduckgo_mcp_server.server", "--search-backend", "curl"},
+			DefaultApprovalMode: "approve",
+			RequiredTools:       []string{"search", "fetch_content"},
+		})
+	}
+	return servers
 }
 
 func (e *codexCLIExecutor) preflightCodexMCPServers(servers []codexMCPServerCapability) error {
@@ -739,12 +911,21 @@ func validateCodexMCPServerCapability(server codexMCPServerCapability) error {
 	if name == "" || strings.ContainsAny(name, ". \t\r\n") {
 		return fmt.Errorf("invalid codex MCP server name %q", server.Name)
 	}
-	endpoint, err := url.Parse(strings.TrimSpace(server.URL))
-	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
-		return fmt.Errorf("invalid codex MCP server URL for %s", name)
+	endpointValue := strings.TrimSpace(server.URL)
+	command := strings.TrimSpace(server.Command)
+	if (endpointValue == "") == (command == "") {
+		return fmt.Errorf("codex MCP server %s must configure exactly one URL or command", name)
 	}
-	if endpoint.Scheme != "http" && endpoint.Scheme != "https" {
-		return fmt.Errorf("unsupported codex MCP server URL scheme for %s", name)
+	if endpointValue != "" {
+		endpoint, err := url.Parse(endpointValue)
+		if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
+			return fmt.Errorf("invalid codex MCP server URL for %s", name)
+		}
+		if endpoint.Scheme != "http" && endpoint.Scheme != "https" {
+			return fmt.Errorf("unsupported codex MCP server URL scheme for %s", name)
+		}
+	} else if _, err := exec.LookPath(command); err != nil {
+		return fmt.Errorf("codex MCP server %s command is unavailable: %w", name, err)
 	}
 	if len(server.RequiredTools) == 0 {
 		return fmt.Errorf("codex MCP server %s has no required tools", name)
@@ -793,7 +974,124 @@ func (e *codexCLIExecutor) preflightStockAgentMCPTools(requiredTools []string) e
 	return nil
 }
 
-func (e *codexCLIExecutor) buildEnv() []string {
+func buildCodexDirectResultPrompt(prompt, taskID, taskType string) string {
+	return strings.TrimSpace(prompt) + fmt.Sprintf(`
+
+Custom Provider final result contract (this overrides earlier final-submission instructions):
+- Do not call stock_agent.submit_result; that tool is disabled for this run.
+- After all project-data and search tool calls are complete, make the final assistant message exactly one JSON object with no Markdown fence or surrounding prose.
+- Use this exact outer shape:
+{"taskID":%s,"taskType":%s,"result":{"outputType":"<valid output type for this task>","resultSummary":"<concise summary>","result":{},"confidence":0.0}}
+- Put the complete task-specific structured payload inside result.result. The service applies the same validation and persistence path locally.
+`, strconv.Quote(taskID), strconv.Quote(taskType))
+}
+
+func (e *codexCLIExecutor) submitCodexDirectResult(raw []byte, taskID, taskType string) (*AgentTaskSubmittedResult, error) {
+	raw, err := decodeCodexDirectResult(raw, taskID, taskType)
+	if err != nil {
+		return nil, err
+	}
+	if _, submitErr := e.taskPool.mcpSubmitResult(raw); submitErr != nil {
+		return nil, fmt.Errorf("validate custom Codex CLI final result: %s", submitErr.Message)
+	}
+	entry, ok := e.taskPool.getTask(taskID)
+	if !ok {
+		return nil, ErrTaskNotFound
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.submittedResult == nil {
+		return nil, errors.New("custom Codex CLI final result was not accepted")
+	}
+	result := *entry.submittedResult
+	return &result, nil
+}
+
+func (e *codexCLIExecutor) submitCodexDirectResultCandidates(messages [][]byte, taskID, taskType string) (*AgentTaskSubmittedResult, error) {
+	var lastErr error
+	for index := len(messages) - 1; index >= 0; index-- {
+		raw, err := decodeCodexDirectResult(messages[index], taskID, taskType)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return e.submitCodexDirectResult(raw, taskID, taskType)
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errors.New("custom Codex CLI final result is empty")
+}
+
+func decodeCodexDirectResult(raw []byte, taskID, taskType string) ([]byte, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, errors.New("custom Codex CLI final result is empty")
+	}
+	if len(raw) > codexDirectResultMaxBytes {
+		return nil, errors.New("custom Codex CLI final result is too large")
+	}
+	raw = unwrapCodexDirectResult(raw)
+	var params submitResultParams
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if err := decoder.Decode(&params); err != nil {
+		return nil, fmt.Errorf("decode custom Codex CLI final result: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, errors.New("custom Codex CLI final result must contain exactly one JSON object")
+	}
+	if strings.TrimSpace(params.TaskID) != strings.TrimSpace(taskID) ||
+		strings.TrimSpace(params.TaskType) != strings.TrimSpace(taskType) {
+		return nil, errors.New("custom Codex CLI final result task identity mismatch")
+	}
+	return raw, nil
+}
+
+func unwrapCodexDirectResult(raw []byte) []byte {
+	trimmed := bytes.TrimSpace(raw)
+	if !bytes.HasPrefix(trimmed, []byte("```")) {
+		return trimmed
+	}
+	firstLineEnd := bytes.IndexByte(trimmed, '\n')
+	if firstLineEnd < 0 {
+		return trimmed
+	}
+	trimmed = bytes.TrimSpace(trimmed[firstLineEnd+1:])
+	if bytes.HasSuffix(trimmed, []byte("```")) {
+		trimmed = bytes.TrimSpace(bytes.TrimSuffix(trimmed, []byte("```")))
+	}
+	return trimmed
+}
+
+func (e *codexCLIExecutor) prepareCodexRunPaths() (string, string, func(), error) {
+	if e.provider == nil {
+		return e.codexHome, "", func() {}, nil
+	}
+	root := strings.TrimSpace(e.isolatedCodexRoot)
+	if root == "" {
+		return "", "", nil, errors.New("custom Codex CLI provider home is not configured")
+	}
+	runHome, err := os.MkdirTemp(root, "run-")
+	if err != nil {
+		return "", "", nil, fmt.Errorf("prepare custom Codex CLI task home: %w", err)
+	}
+	cleanup := func() {
+		if err := os.RemoveAll(runHome); err != nil && e.log != nil {
+			e.log.Warn("stockv2 custom Codex CLI task home cleanup failed",
+				"path", safelog.Text(runHome, 160),
+				"error", safelog.Error(err, 240),
+			)
+		}
+	}
+	workDir := filepath.Join(runHome, "workspace")
+	if err := os.Mkdir(workDir, 0o700); err != nil {
+		cleanup()
+		return "", "", nil, fmt.Errorf("prepare custom Codex CLI task workspace: %w", err)
+	}
+	return runHome, workDir, cleanup, nil
+}
+
+func (e *codexCLIExecutor) buildEnv(codexHome string) []string {
 	out := make([]string, 0, len(executorAllowedEnvKeys)+2)
 	for _, key := range executorAllowedEnvKeys {
 		if value, ok := os.LookupEnv(key); ok && value != "" {
@@ -803,8 +1101,8 @@ func (e *codexCLIExecutor) buildEnv() []string {
 			out = append(out, key+"="+value)
 		}
 	}
-	if strings.TrimSpace(e.codexHome) != "" {
-		out = append(out, "CODEX_HOME="+e.codexHome)
+	if strings.TrimSpace(codexHome) != "" {
+		out = append(out, "CODEX_HOME="+codexHome)
 	}
 	return out
 }
@@ -1290,6 +1588,7 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	b.WriteString("Your job is to review the provided portfolio holdings, news window, quotes, daily bars, minute bars, profiles, transactions, and recent reviews to identify material positive/negative risks before the next trading decision window.\n")
 	b.WriteString("Use the globally installed `serenity-skill` methodology for material technology/supply-chain themes: map value-chain exposure, scarce constraints, evidence strength, and failure conditions. Keep StockV2 portfolio permissions and guardrails authoritative.\n")
 	b.WriteString("Use provided context, stock_agent MCP data, and Codex CLI web_search for external verification. The CLI is started with live search enabled. Do not invent prices, news, filings, searches, or sources.\n")
+	b.WriteString("When priorHoldingJudgments is present, treat it only as compact memory from the latest successful run for that holding. You may use, revise, or ignore it based on current evidence. It is not an executable rule or current fact, and you are not required to mention, preserve, or answer each prior judgment.\n")
 	b.WriteString("Do not place orders, do not modify holdings, do not activate strategies, and do not read token/cookie/private config.\n")
 	b.WriteString("You may propose portfolio-bound operations only as pending user-confirmed proposals; the main program will create OperationReview and run guardrails.\n")
 	b.WriteString("Submit your final result using the stock_agent.submit_result MCP tool. Do not use shell commands or curl to submit the result.\n\n")
@@ -1327,6 +1626,8 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	b.WriteString("3. Evaluate impact against current holdings and portfolio permissions. Aggressive portfolio risk tolerance does not excuse ignoring material information shocks.\n")
 	b.WriteString("4. Review every holding and the trustedCandidates pool. A non-held symbol may appear only as build_position and only when it is present in trustedCandidates.\n")
 	b.WriteString("5. Before emitting any action other than hold, perform real public retrieval using Codex web_search or a named search/research/browse Agent tool, record compact source/claim metadata in research_audit, and reference those IDs from the action. MCP-only internal retrieval is not sufficient for an actionable plan.\n")
+	b.WriteString("5a. Keep public retrieval bounded: use at most 8 external search/fetch tool calls for this run, start with one targeted query per holding, fetch only the strongest relevant sources, and never retry the same query. More calls are not a substitute for evidence quality.\n")
+	b.WriteString("5b. Describe retrieval status precisely. Say external search is unavailable only when the tool cannot be invoked. If invocation succeeds but yields no useful result, say the search returned no usable result. If any public URL was fetched or recorded in research_audit, do not say external search is unavailable; say that public material was retrieved but no holding-specific causal evidence was verified when that is the actual limitation.\n")
 	b.WriteString("6. Output executable but non-executing plans. Use deterministic price/change/daily-close/portfolio-weight conditions; never use prose as a trigger.\n\n")
 
 	b.WriteString("## Output Requirements\n\n")

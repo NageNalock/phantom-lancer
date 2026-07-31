@@ -6,11 +6,65 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestStoreReopenPreservesCustomCodexCLIProviderAndSentinelBinding(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "stockv2.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO stockv2_agent_provider_profiles
+			(id, provider_type, name, config_state, auth_state, availability, metadata_json, created_at, updated_at)
+		VALUES
+			('custom-coding', 'codex_cli', 'custom-coding', 'configured', 'authenticated', 'available',
+			 '{"baseUrl":"https://example.test/responses","apiKey":"test-key"}', datetime('now'), datetime('now'));
+		INSERT INTO stockv2_agent_model_profiles
+			(id, provider_id, model_name, enabled, status, metadata_json, created_at, updated_at)
+		VALUES
+			('custom-coding-model', 'custom-coding', 'coding-model', 1, 'available',
+			 '{"modelType":"chat"}', datetime('now'), datetime('now'));
+		UPDATE stockv2_agent_task_profiles
+		SET execution_mode='cli', primary_model_id='custom-coding-model',
+		    fallback_model_id='', reasoning_effort='medium'
+		WHERE task_type='portfolio_sentinel';
+	`); err != nil {
+		_ = store.Close()
+		t.Fatalf("seed custom Coding Plan binding: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	reopened, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer reopened.Close()
+	provider, err := reopened.GetAgentProviderProfile(ctx, "custom-coding")
+	if err != nil {
+		t.Fatalf("get custom provider: %v", err)
+	}
+	if provider.ProviderType != AgentProviderTypeCodexCLI {
+		t.Fatalf("provider type = %q, want codex_cli", provider.ProviderType)
+	}
+	profile, err := reopened.GetAgentTaskProfileByType(ctx, AgentTaskTypePortfolioSentinel)
+	if err != nil {
+		t.Fatalf("get sentinel task profile: %v", err)
+	}
+	if profile.ExecutionMode != AgentExecutionModeCLI ||
+		profile.PrimaryModelID != "custom-coding-model" ||
+		profile.ReasoningEffort != AgentReasoningEffortMedium {
+		t.Fatalf("sentinel profile changed on reopen: %#v", profile)
+	}
+}
 
 func TestAgentTaskExecutionModeValidatesProvider(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
