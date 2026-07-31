@@ -984,7 +984,7 @@ function numberFromAny(value: unknown): number {
 }
 
 function countMapTotal(value: unknown): number {
-  return Object.values(mapFromAny(value)).reduce((total, item) => total + numberFromAny(item), 0);
+  return Object.values(mapFromAny(value)).reduce<number>((total, item) => total + numberFromAny(item), 0);
 }
 
 function arr(value: unknown): Array<Record<string, unknown>> {
