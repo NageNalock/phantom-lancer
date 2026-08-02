@@ -11,7 +11,17 @@ func portfolioSentinelDirectOutputSchema(taskID string) ([]byte, error) {
 		return map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
 	}
 	objectArray := func() map[string]any {
-		return map[string]any{"type": "array", "items": map[string]any{"type": "object"}}
+		return map[string]any{
+			"type": "array",
+			"items": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"required":             []string{"summary"},
+				"properties": map[string]any{
+					"summary": map[string]any{"type": "string"},
+				},
+			},
+		}
 	}
 	condition := map[string]any{
 		"type":                 "object",
@@ -194,10 +204,10 @@ func requireAllSchemaProperties(schema map[string]any) {
 			if !ok {
 				continue
 			}
+			requireAllSchemaProperties(propertySchema)
 			if _, wasRequired := existing[name]; !wasRequired {
 				makeSchemaNullable(propertySchema)
 			}
-			requireAllSchemaProperties(propertySchema)
 			required = append(required, name)
 		}
 		sort.Strings(required)
@@ -206,19 +216,25 @@ func requireAllSchemaProperties(schema map[string]any) {
 	if items, ok := schema["items"].(map[string]any); ok {
 		requireAllSchemaProperties(items)
 	}
+	if variants, ok := schema["anyOf"].([]any); ok {
+		for _, variant := range variants {
+			if variantSchema, ok := variant.(map[string]any); ok {
+				requireAllSchemaProperties(variantSchema)
+			}
+		}
+	}
 }
 
 func makeSchemaNullable(schema map[string]any) {
-	if typeName, ok := schema["type"].(string); ok && typeName != "null" {
-		schema["type"] = []string{typeName, "null"}
+	if schema["type"] == "null" {
+		return
 	}
-	if enumValues, ok := schema["enum"].([]string); ok {
-		values := make([]any, 0, len(enumValues)+1)
-		for _, value := range enumValues {
-			values = append(values, value)
-		}
-		schema["enum"] = append(values, nil)
+	valueSchema := make(map[string]any, len(schema))
+	for key, value := range schema {
+		valueSchema[key] = value
+		delete(schema, key)
 	}
+	schema["anyOf"] = []any{valueSchema, map[string]any{"type": "null"}}
 }
 
 func schemaStringSlice(value any) []string {

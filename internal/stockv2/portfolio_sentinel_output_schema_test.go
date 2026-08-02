@@ -31,9 +31,9 @@ func TestPortfolioSentinelDirectOutputSchemaConstrainsResultCollections(t *testi
 	}
 	assertStrictSchemaRequiresEveryProperty(t, schema, "root")
 	actionPlan := reportProperties["action_plans"].(map[string]any)["items"].(map[string]any)
-	sizingType := actionPlan["properties"].(map[string]any)["sizing"].(map[string]any)["type"]
-	if !schemaTypeIncludes(sizingType, "object") || !schemaTypeIncludes(sizingType, "null") {
-		t.Fatalf("optional sizing type = %#v, want object or null", sizingType)
+	sizingSchema := actionPlan["properties"].(map[string]any)["sizing"].(map[string]any)
+	if !schemaAllowsType(sizingSchema, "object") || !schemaAllowsType(sizingSchema, "null") {
+		t.Fatalf("optional sizing schema = %#v, want object or null", sizingSchema)
 	}
 }
 
@@ -56,15 +56,22 @@ func assertStrictSchemaRequiresEveryProperty(t *testing.T, schema map[string]any
 	if items, ok := schema["items"].(map[string]any); ok {
 		assertStrictSchemaRequiresEveryProperty(t, items, path+"[]")
 	}
+	if variants, ok := schema["anyOf"].([]any); ok {
+		for _, variant := range variants {
+			if child, ok := variant.(map[string]any); ok {
+				assertStrictSchemaRequiresEveryProperty(t, child, path+".anyOf")
+			}
+		}
+	}
 }
 
-func schemaTypeIncludes(value any, want string) bool {
-	switch types := value.(type) {
-	case string:
-		return types == want
-	case []any:
-		for _, item := range types {
-			if item == want {
+func schemaAllowsType(schema map[string]any, want string) bool {
+	if schema["type"] == want {
+		return true
+	}
+	if variants, ok := schema["anyOf"].([]any); ok {
+		for _, variant := range variants {
+			if child, ok := variant.(map[string]any); ok && schemaAllowsType(child, want) {
 				return true
 			}
 		}
