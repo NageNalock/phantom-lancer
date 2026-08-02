@@ -2,7 +2,7 @@ package stockv2
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -115,9 +115,13 @@ func TestBuildCodexExecArgsUsesTaskProviderAndSearchMCPWithoutNativeSearch(t *te
 			RequiredTools:       []string{"search"},
 			DisabledTools:       []string{"unused_tool"},
 		}},
-		codexExecOptions{ModelProvider: &codexCLIProviderRuntime{
-			BaseURL: "http://127.0.0.1:1234/api/stockv2/agent/codex-proxy/provider-1",
-		}},
+		codexExecOptions{
+			ModelProvider: &codexCLIProviderRuntime{
+				BaseURL: "http://127.0.0.1:1234/api/stockv2/agent/codex-proxy/provider-1",
+			},
+			OutputSchemaPath:      "/tmp/output-schema.json",
+			OutputLastMessagePath: "/tmp/last-message.json",
+		},
 	)
 	got := strings.Join(args, "\x00")
 	for _, want := range []string{
@@ -129,6 +133,8 @@ func TestBuildCodexExecArgsUsesTaskProviderAndSearchMCPWithoutNativeSearch(t *te
 		`model_providers.stockv2_task_provider.base_url="http://127.0.0.1:1234/api/stockv2/agent/codex-proxy/provider-1"`,
 		`model_providers.stockv2_task_provider.wire_api="responses"`,
 		`model_providers.stockv2_task_provider.requires_openai_auth=false`,
+		"--output-schema\x00/tmp/output-schema.json",
+		"--output-last-message\x00/tmp/last-message.json",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("custom Provider args missing %q: %#v", want, args)
@@ -202,39 +208,112 @@ func TestCLIResearchAuditCollectorKeepsOnlyBoundedCallMetadata(t *testing.T) {
 	if !portfolioSentinelHasExternalResearch(AgentCLIResearchAudit{AgentToolCalls: map[string]int{"research_agent": 1}}) {
 		t.Fatal("named research agent should satisfy external research audit")
 	}
-	messages := audit.agentMessages()
-	if len(messages) != 0 {
-		t.Fatalf("non-result-shaped agent message should not be retained: %q", messages)
-	}
 	raw := agentExecutorOutputSummary(&AgentExecutorOutput{ResearchAudit: got})
 	if strings.Contains(raw, "must not persist") {
 		t.Fatalf("audit leaked query or arguments: %s", raw)
 	}
 }
 
-func TestSubmitCodexDirectResultCandidatesUsesLastValidJSONMessage(t *testing.T) {
+func TestReadCodexDirectResultFileUsesOnlyBoundedLastMessage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "last-message.json")
+	want := []byte(`{"taskID":"task-1","result":{}}`)
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatalf("write last message: %v", err)
+	}
+	got, err := readCodexDirectResultFile(path)
+	if err != nil {
+		t.Fatalf("read last message: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("last message = %q, want %q", got, want)
+	}
+}
+
+func TestCustomProviderPortfolioSentinelUsesSchemaAndLastMessageFiles(t *testing.T) {
+	root := t.TempDir()
+	resultPath := filepath.Join(root, "result.json")
+	capturedSchema := filepath.Join(root, "captured-schema.json")
+	capturedArgs := filepath.Join(root, "captured-args.txt")
+	script := filepath.Join(root, "fake-codex")
 	pool := newAgentTaskPool(defaultCleanupInterval)
 	defer pool.Close()
-	taskID, _ := pool.createTask(AgentTaskTypeOperationReview, "run-1", "", time.Minute)
-	valid := fmt.Sprintf(
-		`{"taskID":%q,"taskType":"operation_review","result":{"outputType":"continue_monitoring","resultSummary":"continue","result":{},"confidence":0.8}}`,
-		taskID,
-	)
-	invalid := fmt.Sprintf(`Here is {"taskID":%q,"result":"provider stream appended prose"}`, taskID)
-	audit := newCLIResearchAudit(true)
-	for _, line := range []string{
-		fmt.Sprintf(`{"type":"item.completed","item":{"type":"agent_message","text":%q}}`, valid),
-		fmt.Sprintf(`{"type":"item.completed","item":{"type":"agent_message","text":%q}}`, invalid),
-	} {
-		audit.record([]byte(line))
-	}
-	executor := &codexCLIExecutor{taskPool: pool}
-	result, err := executor.submitCodexDirectResultCandidates(audit.agentMessages(), taskID, AgentTaskTypeOperationReview)
+	taskID, _ := pool.createTask(AgentTaskTypePortfolioSentinel, "run-1", "", time.Minute)
+	result, err := json.Marshal(map[string]any{
+		"taskID":   taskID,
+		"taskType": AgentTaskTypePortfolioSentinel,
+		"result": map[string]any{
+			"outputType":    PortfolioSentinelOutputType,
+			"resultSummary": "structured result",
+			"confidence":    0.8,
+			"result": map[string]any{
+				"schema_version":                  PortfolioSentinelReportSchemaVersion,
+				"overall_risk_level":              PortfolioSentinelRiskLow,
+				"run_summary":                     "complete",
+				"positive_items":                  []any{},
+				"negative_items":                  []any{},
+				"noise_items":                     []any{},
+				"affected_holdings":               []any{},
+				"action_plans":                    []any{},
+				"research_audit":                  []any{},
+				"review_requests":                 []any{},
+				"data_quality_notes":              []any{},
+				"next_watch_focus":                []any{},
+				"checked_news_thread_version_ids": []any{},
+			},
+		},
+	})
 	if err != nil {
-		t.Fatalf("submit candidates: %v", err)
+		t.Fatalf("encode result: %v", err)
 	}
-	if result.OutputType != "continue_monitoring" || result.ResultSummary != "continue" {
-		t.Fatalf("result = %+v", result)
+	if err := os.WriteFile(resultPath, result, 0o600); err != nil {
+		t.Fatalf("write result: %v", err)
+	}
+	scriptBody := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$@\" > " + strconv.Quote(capturedArgs) + "\n" +
+		"while [ \"$#\" -gt 0 ]; do\n" +
+		"  case \"$1\" in\n" +
+		"    --output-schema) schema=\"$2\"; shift 2 ;;\n" +
+		"    --output-last-message) last=\"$2\"; shift 2 ;;\n" +
+		"    *) shift ;;\n" +
+		"  esac\n" +
+		"done\n" +
+		"test -s \"$schema\"\n" +
+		"cp \"$schema\" " + strconv.Quote(capturedSchema) + "\n" +
+		"cp " + strconv.Quote(resultPath) + " \"$last\"\n"
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	isolatedRoot := filepath.Join(root, "codex-home")
+	if err := os.MkdirAll(isolatedRoot, 0o700); err != nil {
+		t.Fatalf("prepare isolated root: %v", err)
+	}
+	executor := &codexCLIExecutor{
+		binary:            script,
+		taskPool:          pool,
+		mcpURL:            "http://127.0.0.1:8080/api/stockv2/agent/mcp",
+		searchMCPCommand:  "/bin/true",
+		isolatedCodexRoot: isolatedRoot,
+		provider:          &codexCLIProviderRuntime{BaseURL: "http://127.0.0.1:8080/api/stockv2/agent/codex-proxy/provider-1"},
+	}
+	output, err := executor.ExecutePortfolioSentinel(context.Background(), taskID, PortfolioSentinelContext{}, "deepseek-v4-flash", "medium")
+	if err != nil {
+		t.Fatalf("execute sentinel: %v, output: %+v", err, output)
+	}
+	args, err := os.ReadFile(capturedArgs)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	for _, flag := range []string{"--output-schema", "--output-last-message"} {
+		if !strings.Contains(string(args), flag) {
+			t.Fatalf("args missing %s: %s", flag, args)
+		}
+	}
+	schema, err := os.ReadFile(capturedSchema)
+	if err != nil {
+		t.Fatalf("read captured schema: %v", err)
+	}
+	if !strings.Contains(string(schema), `"const":"`+taskID+`"`) || !strings.Contains(string(schema), `"action_plans"`) {
+		t.Fatalf("captured schema does not bind task and action plans: %s", schema)
 	}
 }
 

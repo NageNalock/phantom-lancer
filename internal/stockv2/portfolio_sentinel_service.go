@@ -1795,7 +1795,7 @@ func portfolioSentinelReportFromResult(result map[string]any) (PortfolioSentinel
 	}
 	var report PortfolioSentinelReport
 	if err := json.Unmarshal(raw, &report); err != nil {
-		return PortfolioSentinelReport{}, err
+		return PortfolioSentinelReport{}, fmt.Errorf("%w: %v", ErrInvalidPortfolioSentinelResult, err)
 	}
 	if report.SchemaVersion != PortfolioSentinelReportSchemaVersion &&
 		report.SchemaVersion != portfolioSentinelLegacySchemaVersion {

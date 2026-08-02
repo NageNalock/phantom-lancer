@@ -368,27 +368,26 @@ func (r *PortfolioSentinelReport) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
+	// ponytail: only the historically free-form list fields are normalized.
+	// Parse every other field through the real report type so compatibility
+	// cannot silently discard action plans, research, or review coverage.
+	strict := make(map[string]json.RawMessage, len(raw))
+	for key, value := range raw {
+		switch key {
+		case "positive_items", "negative_items", "noise_items",
+			"data_quality_notes", "next_watch_focus", "checked_news_thread_version_ids":
+			continue
+		default:
+			strict[key] = value
+		}
+	}
+	strictData, err := json.Marshal(strict)
+	if err != nil {
+		return err
+	}
 	var parsed reportAlias
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		var relaxed struct {
-			SchemaVersion    string                             `json:"schema_version"`
-			OverallRiskLevel string                             `json:"overall_risk_level"`
-			RunSummary       string                             `json:"run_summary"`
-			AffectedHoldings []PortfolioSentinelAffectedHolding `json:"affected_holdings,omitempty"`
-			PortfolioActions []PortfolioSentinelAction          `json:"portfolio_actions,omitempty"`
-			ReviewRequests   []PortfolioSentinelReviewRequest   `json:"review_requests,omitempty"`
-		}
-		if relaxedErr := json.Unmarshal(data, &relaxed); relaxedErr != nil {
-			return err
-		}
-		parsed = reportAlias{
-			SchemaVersion:    relaxed.SchemaVersion,
-			OverallRiskLevel: relaxed.OverallRiskLevel,
-			RunSummary:       relaxed.RunSummary,
-			AffectedHoldings: relaxed.AffectedHoldings,
-			PortfolioActions: relaxed.PortfolioActions,
-			ReviewRequests:   relaxed.ReviewRequests,
-		}
+	if err := json.Unmarshal(strictData, &parsed); err != nil {
+		return err
 	}
 	parsed.PositiveItems = agentObjectListFromRaw(raw["positive_items"])
 	parsed.NegativeItems = agentObjectListFromRaw(raw["negative_items"])
@@ -396,13 +395,6 @@ func (r *PortfolioSentinelReport) UnmarshalJSON(data []byte) error {
 	parsed.DataQualityNotes = agentStringListFromRaw(raw["data_quality_notes"])
 	parsed.NextWatchFocus = agentStringListFromRaw(raw["next_watch_focus"])
 	parsed.CheckedNewsThreadVersionIDs = agentStringListFromRaw(raw["checked_news_thread_version_ids"])
-	if coverageRaw, ok := raw["impact_review_coverage"]; ok && string(coverageRaw) != "null" {
-		var coverage PortfolioSentinelImpactReviewCoverage
-		if err := json.Unmarshal(coverageRaw, &coverage); err != nil {
-			return errors.New("invalid impact review coverage")
-		}
-		parsed.ImpactReviewCoverage = &coverage
-	}
 	*r = PortfolioSentinelReport(parsed)
 	return nil
 }

@@ -135,3 +135,28 @@ func TestAgentMCPStatusReflectsLoopbackServer(t *testing.T) {
 		t.Fatalf("required tools = %+v", after.RequiredTools)
 	}
 }
+
+func TestAgentMCPResourceDiscoveryReturnsEmptyLists(t *testing.T) {
+	svc := NewService(nil, slog.Default(), http.DefaultClient)
+	defer svc.Close()
+	for method, field := range map[string]string{
+		"resources/list":           "resources",
+		"resources/templates/list": "resourceTemplates",
+	} {
+		raw := svc.HandleMCPRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"` + method + `"}`))
+		var response struct {
+			Error  *mcpError      `json:"error"`
+			Result map[string]any `json:"result"`
+		}
+		if err := json.Unmarshal(raw, &response); err != nil {
+			t.Fatalf("%s decode: %v", method, err)
+		}
+		if response.Error != nil {
+			t.Fatalf("%s error: %+v", method, response.Error)
+		}
+		items, ok := response.Result[field].([]any)
+		if !ok || len(items) != 0 {
+			t.Fatalf("%s result = %#v", method, response.Result)
+		}
+	}
+}

@@ -2278,9 +2278,15 @@ func (s *Service) finalizeAgentRunWithOutput(
 		result, err := s.ProcessPortfolioSentinelSubmittedResult(ctx, run.TriggerObjectID, *submitted, researchAudit)
 		if err != nil {
 			run.Status = AgentRunStatusFailed
-			run.ErrorMessage = safelog.Text("save portfolio sentinel result failed: "+err.Error(), 500)
+			failure := "save portfolio sentinel result failed: " + err.Error()
+			logMessage := "finalize: save portfolio sentinel result failed"
+			if errors.Is(err, ErrInvalidPortfolioSentinelResult) {
+				failure = err.Error()
+				logMessage = "finalize: invalid portfolio sentinel result"
+			}
+			run.ErrorMessage = safelog.Text(failure, 500)
 			if s.log != nil {
-				s.log.Warn("finalize: save portfolio sentinel result failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "sentinel_run_id", run.TriggerObjectID, "error", safelog.Text(err.Error(), 300))
+				s.log.Warn(logMessage, "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "sentinel_run_id", run.TriggerObjectID, "error", safelog.Text(err.Error(), 300))
 			}
 			if _, updateErr := s.store.UpdateAgentRun(ctx, run); updateErr != nil && s.log != nil {
 				s.log.Warn("finalize: update run after portfolio sentinel save failed", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "sentinel_run_id", run.TriggerObjectID, "error", safelog.Text(updateErr.Error(), 240))

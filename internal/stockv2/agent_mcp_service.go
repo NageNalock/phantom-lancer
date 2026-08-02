@@ -77,6 +77,10 @@ func (s *Service) HandleMCPRequest(raw []byte) []byte {
 	switch req.Method {
 	case "initialize":
 		result, err = s.mcpInitialize(req.Params)
+	case "resources/list":
+		result = map[string]any{"resources": []any{}}
+	case "resources/templates/list":
+		result = map[string]any{"resourceTemplates": []any{}}
 	case "tools/list":
 		result, err = s.mcpToolsList(req.Params)
 	case "tools/call":

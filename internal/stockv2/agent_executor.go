@@ -104,10 +104,6 @@ const (
 	codexSearchMCPName         = "ddg"
 	codexTaskModelProviderName = "stockv2_task_provider"
 	codexDirectResultMaxBytes  = 2 << 20
-	// ponytail: eight recent result-shaped messages cover provider stream
-	// epilogues without retaining an unbounded model transcript. If providers
-	// start splitting one result across messages, upgrade the stream assembler.
-	codexDirectResultCandidateLimit = 8
 )
 
 type codexMCPServerCapability struct {
@@ -125,8 +121,10 @@ type codexCLIProviderRuntime struct {
 }
 
 type codexExecOptions struct {
-	NativeSearch  bool
-	ModelProvider *codexCLIProviderRuntime
+	NativeSearch          bool
+	ModelProvider         *codexCLIProviderRuntime
+	OutputSchemaPath      string
+	OutputLastMessagePath string
 }
 
 // 允许转发给子进程的环境变量(与 codexclient 对齐, 但独立维护)
@@ -336,6 +334,22 @@ func (e *codexCLIExecutor) executePromptWithOptions(
 		NativeSearch:  liveSearch && e.provider == nil,
 		ModelProvider: e.provider,
 	}
+	if e.provider != nil {
+		options.OutputLastMessagePath = filepath.Join(codexHome, "last-message.json")
+		// ponytail: DeepSeek currently documents Responses JSON Schema only for
+		// deepseek-v4-flash. Other custom CLI providers keep their existing final
+		// text contract until their upstream capability is verified.
+		if taskType == AgentTaskTypePortfolioSentinel && strings.EqualFold(strings.TrimSpace(modelName), "deepseek-v4-flash") {
+			options.OutputSchemaPath = filepath.Join(codexHome, "output-schema.json")
+			rawSchema, schemaErr := portfolioSentinelDirectOutputSchema(taskID)
+			if schemaErr != nil {
+				return nil, schemaErr
+			}
+			if err := os.WriteFile(options.OutputSchemaPath, rawSchema, 0o600); err != nil {
+				return nil, fmt.Errorf("write portfolio sentinel output schema: %w", err)
+			}
+		}
+	}
 	args := buildCodexExecArgs(modelName, reasoningEffort, prompt, mcpServers, options)
 
 	cmd := exec.CommandContext(execCtx, e.binary, args...)
@@ -520,7 +534,12 @@ waitLoop:
 	_ = syscall.Kill(-processGroupID, syscall.SIGKILL)
 
 	if submittedResult == nil && e.provider != nil && !timedOut {
-		directResult, directErr := e.submitCodexDirectResultCandidates(researchAudit.agentMessages(), taskID, taskType)
+		rawResult, readErr := readCodexDirectResultFile(options.OutputLastMessagePath)
+		var directResult *AgentTaskSubmittedResult
+		directErr := readErr
+		if readErr == nil {
+			directResult, directErr = e.submitCodexDirectResult(rawResult, taskID, taskType)
+		}
 		if directErr == nil {
 			submittedResult = directResult
 		} else if execErr == nil {
@@ -649,6 +668,12 @@ func buildCodexExecArgs(
 			"-c", fmt.Sprintf("model_providers.%s.requires_openai_auth=false", codexTaskModelProviderName),
 		)
 	}
+	if path := strings.TrimSpace(runOptions.OutputSchemaPath); path != "" {
+		args = append(args, "--output-schema", path)
+	}
+	if path := strings.TrimSpace(runOptions.OutputLastMessagePath); path != "" {
+		args = append(args, "--output-last-message", path)
+	}
 	if effort := strings.TrimSpace(reasoningEffort); effort != "" {
 		args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(effort))
 	}
@@ -667,12 +692,11 @@ func codexTOMLStringArray(values []string) string {
 }
 
 type cliResearchAuditCollector struct {
-	mu       sync.Mutex
-	enabled  bool
-	web      int
-	mcp      map[string]int
-	agent    map[string]int
-	messages [][]byte
+	mu      sync.Mutex
+	enabled bool
+	web     int
+	mcp     map[string]int
+	agent   map[string]int
 }
 
 func newCLIResearchAudit(enabled bool) *cliResearchAuditCollector {
@@ -691,7 +715,6 @@ func (a *cliResearchAuditCollector) record(line []byte) {
 			Server string `json:"server"`
 			Tool   string `json:"tool"`
 			Name   string `json:"name"`
-			Text   string `json:"text"`
 		} `json:"item"`
 	}
 	if json.Unmarshal(line, &event) != nil || event.Type != "item.completed" {
@@ -700,17 +723,6 @@ func (a *cliResearchAuditCollector) record(line []byte) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch event.Item.Type {
-	case "agent_message":
-		message := []byte(event.Item.Text)
-		if len(message) > codexDirectResultMaxBytes {
-			message = message[:codexDirectResultMaxBytes+1]
-		}
-		if bytes.Contains(message, []byte(`"taskID"`)) && bytes.Contains(message, []byte(`"result"`)) {
-			a.messages = append(a.messages, append([]byte(nil), message...))
-			if len(a.messages) > codexDirectResultCandidateLimit {
-				a.messages = append(a.messages[:0], a.messages[len(a.messages)-codexDirectResultCandidateLimit:]...)
-			}
-		}
 	case "web_search":
 		a.web++
 	case "mcp_tool_call":
@@ -726,16 +738,6 @@ func (a *cliResearchAuditCollector) record(line []byte) {
 			a.agent[safelog.Text(name, 160)]++
 		}
 	}
-}
-
-func (a *cliResearchAuditCollector) agentMessages() [][]byte {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	out := make([][]byte, len(a.messages))
-	for index := range a.messages {
-		out[index] = append([]byte(nil), a.messages[index]...)
-	}
-	return out
 }
 
 func (a *cliResearchAuditCollector) snapshot() AgentCLIResearchAudit {
@@ -1007,20 +1009,20 @@ func (e *codexCLIExecutor) submitCodexDirectResult(raw []byte, taskID, taskType 
 	return &result, nil
 }
 
-func (e *codexCLIExecutor) submitCodexDirectResultCandidates(messages [][]byte, taskID, taskType string) (*AgentTaskSubmittedResult, error) {
-	var lastErr error
-	for index := len(messages) - 1; index >= 0; index-- {
-		raw, err := decodeCodexDirectResult(messages[index], taskID, taskType)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		return e.submitCodexDirectResult(raw, taskID, taskType)
+func readCodexDirectResultFile(path string) ([]byte, error) {
+	file, err := os.Open(strings.TrimSpace(path))
+	if err != nil {
+		return nil, fmt.Errorf("read custom Codex CLI final result: %w", err)
 	}
-	if lastErr != nil {
-		return nil, lastErr
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, codexDirectResultMaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read custom Codex CLI final result: %w", err)
 	}
-	return nil, errors.New("custom Codex CLI final result is empty")
+	if len(raw) > codexDirectResultMaxBytes {
+		return nil, errors.New("custom Codex CLI final result is too large")
+	}
+	return raw, nil
 }
 
 func decodeCodexDirectResult(raw []byte, taskID, taskType string) ([]byte, error) {

@@ -84,6 +84,10 @@ func TestCodexCLIResponsesProxyInjectsProviderKeyAndStreamsRestoredNamespace(t *
 		if tool["type"] != "function" || strings.Contains(string(upstreamBody), `"type":"namespace"`) {
 			t.Fatalf("upstream tools were not flattened: %s", upstreamBody)
 		}
+		textFormat := payload["text"].(map[string]any)["format"].(map[string]any)
+		if textFormat["type"] != "json_schema" || textFormat["name"] != "portfolio_sentinel" {
+			t.Fatalf("upstream output format = %#v", textFormat)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, `data: {"type":"response.output_item.added","item":{"type":"function_call","name":"`+encoded+`","call_id":"call-1","arguments":"{}"}}`+"\n\n")
 	}))
@@ -108,7 +112,7 @@ func TestCodexCLIResponsesProxyInjectsProviderKeyAndStreamsRestoredNamespace(t *
 	if err != nil {
 		t.Fatalf("proxy URL: %v", err)
 	}
-	requestBody := []byte(`{"model":"ark-code-latest","stream":true,"tools":[{"type":"namespace","name":"stock_agent","tools":[{"type":"function","name":"submit_result","parameters":{"type":"object"}}]}],"input":"test"}`)
+	requestBody := []byte(`{"model":"ark-code-latest","stream":true,"text":{"format":{"type":"json_schema","name":"portfolio_sentinel","schema":{"type":"object"}}},"tools":[{"type":"namespace","name":"stock_agent","tools":[{"type":"function","name":"submit_result","parameters":{"type":"object"}}]}],"input":"test"}`)
 	request, err := http.NewRequest(http.MethodPost, proxyBaseURL+"/responses", bytes.NewReader(requestBody))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
