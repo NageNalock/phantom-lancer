@@ -3,6 +3,7 @@ package stockv2
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 )
 
 func portfolioSentinelDirectOutputSchema(taskID string) ([]byte, error) {
@@ -170,9 +171,69 @@ func portfolioSentinelDirectOutputSchema(taskID string) ([]byte, error) {
 			},
 		},
 	}
+	// ponytail: DeepSeek Responses strict schemas require every object property
+	// in `required`. Preserve optional semantics with JSON null instead of
+	// maintaining a second, hand-written provider schema.
+	requireAllSchemaProperties(schema)
 	raw, err := json.Marshal(schema)
 	if err != nil {
 		return nil, fmt.Errorf("encode portfolio sentinel output schema: %w", err)
 	}
 	return raw, nil
+}
+
+func requireAllSchemaProperties(schema map[string]any) {
+	if properties, ok := schema["properties"].(map[string]any); ok {
+		existing := make(map[string]struct{}, len(properties))
+		for _, name := range schemaStringSlice(schema["required"]) {
+			existing[name] = struct{}{}
+		}
+		required := make([]string, 0, len(properties))
+		for name, property := range properties {
+			propertySchema, ok := property.(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, wasRequired := existing[name]; !wasRequired {
+				makeSchemaNullable(propertySchema)
+			}
+			requireAllSchemaProperties(propertySchema)
+			required = append(required, name)
+		}
+		sort.Strings(required)
+		schema["required"] = required
+	}
+	if items, ok := schema["items"].(map[string]any); ok {
+		requireAllSchemaProperties(items)
+	}
+}
+
+func makeSchemaNullable(schema map[string]any) {
+	if typeName, ok := schema["type"].(string); ok && typeName != "null" {
+		schema["type"] = []string{typeName, "null"}
+	}
+	if enumValues, ok := schema["enum"].([]string); ok {
+		values := make([]any, 0, len(enumValues)+1)
+		for _, value := range enumValues {
+			values = append(values, value)
+		}
+		schema["enum"] = append(values, nil)
+	}
+}
+
+func schemaStringSlice(value any) []string {
+	switch items := value.(type) {
+	case []string:
+		return items
+	case []any:
+		result := make([]string, 0, len(items))
+		for _, item := range items {
+			if text, ok := item.(string); ok {
+				result = append(result, text)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
 }
