@@ -270,9 +270,6 @@ CREATE TABLE IF NOT EXISTS stockv2_news_link_candidates (
     score REAL NOT NULL DEFAULT 0,
     reason TEXT,
     matched_terms_json TEXT NOT NULL DEFAULT '[]',
-    monitor_status TEXT NOT NULL DEFAULT 'pending',
-    monitor_hit_id TEXT,
-    monitored_at DATETIME,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     FOREIGN KEY (news_event_id) REFERENCES stockv2_news_events(id) ON DELETE CASCADE,
@@ -1025,14 +1022,9 @@ CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_model ON stockv2_embeddi
 CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_status ON stockv2_embedding_assets(status);
 CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_search
     ON stockv2_embedding_assets(object_type, model_id, status, embedding_dimensions, object_id);
--- 内置监控任务默认配置(全部默认关闭,用户显式开启后才会周期执行)。
+-- 内置监控任务默认配置。分钟行情默认开启，策略扫描由 owner 显式开启。
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('latest_quote_refresh', 1, 30, 'normal', 0, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('data_strategy_monitor', 0, 600, 'normal', 1800, 0, 0, datetime('now'));
-INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('portfolio_risk_monitor', 0, 600, 'normal', 1800, 0, 0, datetime('now'));
-INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('news_strategy_monitor', 0, 600, 'normal', 3600, 0, 0, datetime('now'));
-INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('portfolio_sentinel', 0, 14400, 'normal', 3600, 1, 0, datetime('now'));
-INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('daily_fundamental_monitor', 0, 86400, 'normal', 3600, 0, 0, datetime('now'));
-INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('data_quality_monitor', 0, 3600, 'normal', 3600, 0, 0, datetime('now'));
 DELETE FROM stockv2_monitor_task_configs WHERE task_type IN ('universe_update', 'daily_bars_sync');
 
 -- ===== Agent 治理层:provider/model/task 绑定 + 运行 + 决策账本 =====
@@ -1284,17 +1276,14 @@ INSERT OR IGNORE INTO stockv2_agent_provider_profiles
     (id, provider_type, name, display_name, config_state, auth_state, availability, metadata_json, created_at, updated_at)
 VALUES
     ('agent-provider-codex-cli-default', 'codex_cli', 'default', 'Codex CLI 默认 Provider', 'configured', 'unknown', 'unknown', '{"managed":"system","source":"codex_cli_default"}', datetime('now'), datetime('now'));
--- Agent task profiles 幂等种入。可配置/执行任务由 service 层校验;
--- 其余 task 先作为未来能力展示,后端 service 会拒绝绑定和执行。
+-- Agent task profiles 幂等种入。只保留后端真实支持绑定和执行的任务。
 INSERT OR IGNORE INTO stockv2_agent_task_profiles (id, task_type, primary_model_id, fallback_model_id, max_budget, created_at, updated_at) VALUES
     ('agent-task-operation-review', 'operation_review', '', '', 0, datetime('now'), datetime('now')),
     ('agent-task-strategy-generation', 'strategy_generation', '', '', 0, datetime('now'), datetime('now')),
     ('agent-task-opportunity-discovery', 'opportunity_discovery', '', '', 0, datetime('now'), datetime('now')),
     ('agent-task-portfolio-sentinel', 'portfolio_sentinel', '', '', 0, datetime('now'), datetime('now')),
     ('agent-task-news-event-review', 'news_event_review', '', '', 0, datetime('now'), datetime('now')),
-    ('agent-task-portfolio-risk-review', 'portfolio_risk_review', '', '', 0, datetime('now'), datetime('now')),
-    ('agent-task-stock-profile-summary', 'stock_profile_summary', '', '', 0, datetime('now'), datetime('now')),
-    ('agent-task-bull-bear-debate', 'bull_bear_debate', '', '', 0, datetime('now'), datetime('now'));
+    ('agent-task-stock-profile-summary', 'stock_profile_summary', '', '', 0, datetime('now'), datetime('now'));
 `
 
 // init 初始化 V2 表结构。如果检测到旧 schema（例如时间列是 TEXT 类型），
@@ -1315,6 +1304,9 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, initSchemaSQL); err != nil {
 		return fmt.Errorf("exec init schema: %w", err)
+	}
+	if err := s.migrateRetiredStockV2Features(ctx); err != nil {
+		return fmt.Errorf("remove retired stock v2 features: %w", err)
 	}
 	if err := s.repairDanglingAlertWatchRefs(ctx); err != nil {
 		return fmt.Errorf("repair dangling alert watch references: %w", err)
@@ -1483,10 +1475,7 @@ func (s *Store) init(ctx context.Context) error {
 		return fmt.Errorf("add failed_items column: %w", err)
 	}
 
-	// 增量迁移：legacy 独立日 K 调度开关与最近日 K 维护时间
-	if err := s.ensureColumn(ctx, "stockv2_settings", "daily_bars_auto_enabled", "INTEGER DEFAULT 0"); err != nil {
-		return fmt.Errorf("add daily_bars_auto_enabled column: %w", err)
-	}
+	// 增量迁移：最近日 K 维护时间。
 	if err := s.ensureColumn(ctx, "stockv2_settings", "daily_bars_last_run", "DATETIME"); err != nil {
 		return fmt.Errorf("add daily_bars_last_run column: %w", err)
 	}
@@ -1555,15 +1544,6 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureColumn(ctx, "stockv2_news_link_candidates", "raw_news_id", "TEXT"); err != nil {
 		return fmt.Errorf("add news link candidate raw_news_id column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_news_link_candidates", "monitor_status", "TEXT NOT NULL DEFAULT 'pending'"); err != nil {
-		return fmt.Errorf("add news link candidate monitor_status column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_news_link_candidates", "monitor_hit_id", "TEXT"); err != nil {
-		return fmt.Errorf("add news link candidate monitor_hit_id column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_news_link_candidates", "monitored_at", "DATETIME"); err != nil {
-		return fmt.Errorf("add news link candidate monitored_at column: %w", err)
 	}
 	newsSourceColumns := []struct {
 		name    string
@@ -1645,8 +1625,6 @@ func (s *Store) init(ctx context.Context) error {
 		    ON stockv2_news_events(event_at);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_raw_news
 		    ON stockv2_news_link_candidates(raw_news_id);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_monitor_status
-		    ON stockv2_news_link_candidates(monitor_status);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bar_jobs_running_scope
 		    ON stockv2_daily_bar_jobs(status, mode, symbol, range, adjusted)
 	`); err != nil {
@@ -1699,6 +1677,222 @@ func (s *Store) repairDanglingAlertWatchRefs(ctx context.Context) error {
 		  )
 	`)
 	return err
+}
+
+// DEPRECATED: migration-only tombstone for retired StockV2 feature shells.
+// Remove after every deployed database has started a post-2026-08-03 build.
+func (s *Store) migrateRetiredStockV2Features(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return wrapError(err, "begin retired feature migration")
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, taskType := range []string{
+		"news_strategy_monitor",
+		"portfolio_risk_monitor",
+		"daily_fundamental_monitor",
+		"data_quality_monitor",
+	} {
+		if err := deleteRetiredMonitorTaskArtifacts(ctx, tx, taskType); err != nil {
+			return err
+		}
+	}
+	// ponytail: the real portfolio sentinel owns its own config and history tables;
+	// only its obsolete duplicate row in the generic monitor registry is retired.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_monitor_task_configs WHERE task_type='portfolio_sentinel'`); err != nil {
+		return wrapError(err, "delete duplicate portfolio sentinel monitor config")
+	}
+	if err := deleteRetiredAgentTaskArtifacts(ctx, tx, []string{"portfolio_risk_review", "bull_bear_debate"}); err != nil {
+		return err
+	}
+	if err := migrateLegacyDailyBarsAutoSetting(ctx, tx); err != nil {
+		return err
+	}
+	if err := migrateRetiredNewsStrategyPrefilters(ctx, tx); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS idx_stockv2_news_link_candidates_monitor_status`); err != nil {
+		return wrapError(err, "drop retired candidate status index")
+	}
+	for _, column := range []string{"monitor_status", "monitor_hit_id", "monitored_at"} {
+		exists, err := sqliteColumnExists(ctx, tx, "stockv2_news_link_candidates", column)
+		if err != nil {
+			return wrapError(err, "check retired candidate column")
+		}
+		if !exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE stockv2_news_link_candidates DROP COLUMN "+column); err != nil {
+			return wrapError(err, "drop retired candidate column")
+		}
+	}
+	return wrapError(tx.Commit(), "commit retired feature migration")
+}
+
+func deleteRetiredMonitorTaskArtifacts(ctx context.Context, tx *sql.Tx, taskType string) error {
+	statements := []string{
+		`DELETE FROM stockv2_agent_decision_ledgers WHERE run_id IN (
+			SELECT id FROM stockv2_agent_runs
+			WHERE task_type='operation_review' AND trigger_object_type='operation_review'
+			  AND trigger_object_id IN (
+				SELECT id FROM stockv2_operation_reviews WHERE hit_id IN (
+					SELECT id FROM stockv2_monitor_hits WHERE task_type=?
+				)
+			  )
+		)`,
+		`DELETE FROM stockv2_agent_runs
+		 WHERE task_type='operation_review' AND trigger_object_type='operation_review'
+		   AND trigger_object_id IN (
+			SELECT id FROM stockv2_operation_reviews WHERE hit_id IN (
+				SELECT id FROM stockv2_monitor_hits WHERE task_type=?
+			)
+		   )`,
+		`DELETE FROM stockv2_alerts
+		 WHERE task_type=?
+		    OR monitor_hit_id IN (SELECT id FROM stockv2_monitor_hits WHERE task_type=?)
+		    OR review_id IN (
+			SELECT id FROM stockv2_operation_reviews WHERE hit_id IN (
+				SELECT id FROM stockv2_monitor_hits WHERE task_type=?
+			)
+		   )`,
+		`DELETE FROM stockv2_operation_reviews
+		 WHERE hit_id IN (SELECT id FROM stockv2_monitor_hits WHERE task_type=?)`,
+		`DELETE FROM stockv2_monitor_hits WHERE task_type=?`,
+		`DELETE FROM stockv2_monitor_runs WHERE task_type=?`,
+		`DELETE FROM stockv2_monitor_task_configs WHERE task_type=?`,
+	}
+	for index, statement := range statements {
+		args := []any{taskType}
+		if index == 2 {
+			args = []any{taskType, taskType, taskType}
+		}
+		if _, err := tx.ExecContext(ctx, statement, args...); err != nil {
+			return wrapError(err, "delete retired monitor data")
+		}
+	}
+	return nil
+}
+
+func deleteRetiredAgentTaskArtifacts(ctx context.Context, tx *sql.Tx, taskTypes []string) error {
+	for _, taskType := range taskTypes {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM stockv2_alerts
+			WHERE agent_run_id IN (SELECT id FROM stockv2_agent_runs WHERE task_type=?)
+			   OR decision_ledger_id IN (SELECT id FROM stockv2_agent_decision_ledgers WHERE task_type=?)
+		`, taskType, taskType); err != nil {
+			return wrapError(err, "delete retired agent task alerts")
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_agent_decision_ledgers WHERE task_type=?`, taskType); err != nil {
+			return wrapError(err, "delete retired agent task ledgers")
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_agent_runs WHERE task_type=?`, taskType); err != nil {
+			return wrapError(err, "delete retired agent task runs")
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_agent_task_profiles WHERE task_type=?`, taskType); err != nil {
+			return wrapError(err, "delete retired agent task profile")
+		}
+	}
+	return nil
+}
+
+func migrateLegacyDailyBarsAutoSetting(ctx context.Context, tx *sql.Tx) error {
+	exists, err := sqliteColumnExists(ctx, tx, "stockv2_settings", "daily_bars_auto_enabled")
+	if err != nil {
+		return wrapError(err, "check legacy daily bars setting")
+	}
+	if !exists {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE stockv2_settings
+		SET auto_update_enabled=1
+		WHERE COALESCE(daily_bars_auto_enabled, 0)=1
+	`); err != nil {
+		return wrapError(err, "merge legacy daily bars setting")
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE stockv2_settings DROP COLUMN daily_bars_auto_enabled`); err != nil {
+		return wrapError(err, "drop legacy daily bars setting")
+	}
+	return nil
+}
+
+func sqliteColumnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
+	var count int
+	err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?
+	`, table, column).Scan(&count)
+	return count > 0, err
+}
+
+func migrateRetiredNewsStrategyPrefilters(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, generation_meta_json
+		FROM stockv2_strategy_versions
+		WHERE generation_meta_json LIKE '%"newsPrefilters"%'
+	`)
+	if err != nil {
+		return wrapError(err, "list retired news prefilters")
+	}
+	type update struct {
+		id      string
+		payload string
+	}
+	updates := make([]update, 0)
+	for rows.Next() {
+		var id, payload string
+		if err := rows.Scan(&id, &payload); err != nil {
+			_ = rows.Close()
+			return wrapError(err, "scan retired news prefilters")
+		}
+		var value any
+		if err := json.Unmarshal([]byte(payload), &value); err != nil {
+			continue
+		}
+		if !removeRetiredNewsPrefilters(value) {
+			continue
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			_ = rows.Close()
+			return wrapError(err, "encode strategy without retired news prefilters")
+		}
+		updates = append(updates, update{id: id, payload: string(encoded)})
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return wrapError(err, "iterate retired news prefilters")
+	}
+	if err := rows.Close(); err != nil {
+		return wrapError(err, "close retired news prefilter rows")
+	}
+	for _, item := range updates {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE stockv2_strategy_versions SET generation_meta_json=? WHERE id=?
+		`, item.payload, item.id); err != nil {
+			return wrapError(err, "remove retired news prefilters")
+		}
+	}
+	return nil
+}
+
+func removeRetiredNewsPrefilters(value any) bool {
+	removed := false
+	switch typed := value.(type) {
+	case map[string]any:
+		if _, exists := typed["newsPrefilters"]; exists {
+			delete(typed, "newsPrefilters")
+			removed = true
+		}
+		for _, child := range typed {
+			removed = removeRetiredNewsPrefilters(child) || removed
+		}
+	case []any:
+		for _, child := range typed {
+			removed = removeRetiredNewsPrefilters(child) || removed
+		}
+	}
+	return removed
 }
 
 // ensureColumn 确保指定表有指定列，没有就 ALTER TABLE ADD
@@ -2569,13 +2763,13 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		INSERT OR REPLACE INTO stockv2_settings (
 			id, auto_update_enabled, update_interval_sec, proxy_enabled,
 			proxy_type, proxy_host, proxy_port, last_scheduled_update,
-			daily_bars_auto_enabled, daily_bars_last_run,
+			daily_bars_last_run,
 			financial_juice_enabled, financial_juice_endpoint, financial_juice_cookie, base_profile_auto_maintain_enabled,
 			base_profile_maintain_interval_seconds, base_profile_deep_update_batch_size,
 			base_profile_deep_update_ai_budget, base_profile_deep_update_rate_limit_ms, base_profile_last_maintain_at,
 			base_profile_next_maintain_at, base_profile_last_maintain_result,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	now := time.Now()
@@ -2604,7 +2798,6 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		settings.ProxyHost,
 		settings.ProxyPort,
 		settings.LastScheduledUpdate,
-		settings.DailyBarsAutoEnabled,
 		dailyBarsLastRun,
 		settings.FinancialJuiceEnabled,
 		nullableString(settings.FinancialJuiceEndpoint),
@@ -2677,7 +2870,7 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	query := `
 		SELECT id, auto_update_enabled, update_interval_sec, proxy_enabled,
 		       COALESCE(proxy_type,''), COALESCE(proxy_host,''), COALESCE(proxy_port, 0), last_scheduled_update,
-		       COALESCE(daily_bars_auto_enabled, 0), daily_bars_last_run,
+		       daily_bars_last_run,
 		       COALESCE(financial_juice_enabled, 0), COALESCE(financial_juice_endpoint, ''), COALESCE(financial_juice_cookie, ''),
 		       COALESCE(base_profile_auto_maintain_enabled, 0),
 		       COALESCE(base_profile_maintain_interval_seconds, 86400),
@@ -2707,7 +2900,6 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 		&settings.ProxyHost,
 		&settings.ProxyPort,
 		&lastScheduledUpdate,
-		&settings.DailyBarsAutoEnabled,
 		&dailyBarsLastRun,
 		&settings.FinancialJuiceEnabled,
 		&settings.FinancialJuiceEndpoint,

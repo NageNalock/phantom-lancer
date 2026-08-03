@@ -148,7 +148,6 @@ type StrategyGenerationPlaybookRule struct {
 	Risk                string           `json:"risk,omitempty"`
 	DataPrefilters      []map[string]any `json:"dataPrefilters,omitempty"`
 	PortfolioPrefilters []map[string]any `json:"portfolioPrefilters,omitempty"`
-	NewsPrefilters      []map[string]any `json:"newsPrefilters,omitempty"`
 	Priority            int              `json:"priority,omitempty"`
 }
 

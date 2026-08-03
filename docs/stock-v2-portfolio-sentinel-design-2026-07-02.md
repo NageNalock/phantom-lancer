@@ -26,7 +26,7 @@
 
 - 2026-07-01 晚间已有消息记录显示“美股存储概念股下跌，闪迪、西部数据、美光科技明显下跌”。
 - 当前库里已有持仓、行情、日 K、分钟线、新闻、股票画像和 embedding。
-- 现有 `news_strategy_monitor`、`data_strategy_monitor`、`portfolio_risk_monitor` 没有生成任何 `MonitorHit`、`Alert` 或 `OperationReview`。
+- 现有数据面策略监控没有生成任何 `MonitorHit`、`Alert` 或 `OperationReview`，确定性的报价过期/仓位上限检查也不能替代信息面研判。
 - 当前 `OperationReview` 能承接单次监控命中后的操作复核，但它不是周期性组合巡检能力。
 
 根因不是完全没有数据，而是缺少一个独立能力：
@@ -70,7 +70,7 @@
 
 - `OperationReview`：从一个 `MonitorHit` 进入的操作复核单。
 - `operation_review` Agent task：对单个 `OperationReview` 做 Agent 判断。
-- `news_event_review` / `portfolio_risk_review`：当前只是未来任务类型展示，不能作为已完成能力理解。
+- `news_event_review` 是消息脉络归纳使用的稳定任务 key，不是组合操作复核单。
 
 组合哨兵不是单个命中的复核单，而是周期性组合巡检。为了避免混淆：
 
@@ -84,15 +84,14 @@
 
 组合哨兵不依赖以下监控任务开启：
 
-- `news_strategy_monitor`
 - `data_strategy_monitor`
-- `portfolio_risk_monitor`
 
 原因：
 
-- `news_strategy_monitor` 以 `NewsLinkCandidate` pending 队列为入口，每次只消费少量候选，适合单条消息命中，不适合窗口级组合扫描。
+- 信息面由组合哨兵直接读取窗口内的消息关联候选和主题变化，不经过独立逐条监控任务。
 - `data_strategy_monitor` 依赖 active 策略，不适合没有 active 策略或仅有 draft 策略的持仓。
-- `portfolio_risk_monitor` 当前只检查 stale quote 和单票仓位上限，不解决信息面冲击。
+- 报价过期和单票仓位上限由 Watch 规则与操作 guardrails 做确定性检查，不需要另一项同义的周期监控任务。
+- 组合哨兵有独立配置、调度和历史；它不会在通用监控任务配置中再注册一份重复入口。
 
 组合哨兵可以复用：
 
@@ -122,7 +121,7 @@
 - 不直接激活策略。
 - 不读取 token、cookie、私有配置或本地敏感文件。
 - 不把 embedding / 关键词召回结果当成事实；召回只是候选材料。
-- 不依赖 `NewsLinkCandidate` pending 队列作为主链路。
+- 不依赖消息候选的逐条消费状态作为主链路。
 - 不把多个单票操作塞进一条 `OperationReview`。
 
 ### 4.3 第一版不做
@@ -132,7 +131,6 @@
 - 不新增自动交易执行。
 - 不强制要求所有持仓已有 active 策略。
 - 不删除 `NewsLinkCandidate`。
-- 不重构现有三个 monitor。
 
 ## 5. 触发模式
 
@@ -311,7 +309,7 @@ intradayDirectionSummary
 
 ### 7.4 News context
 
-组合哨兵直接从 `stockv2_news_events` / `stockv2_raw_news` 读取窗口内消息，不等 `NewsLinkCandidate`。
+组合哨兵从 `NewsLinkCandidate` 读取与持仓相关的窗口内消息，并使用标准消息补充标题、来源和时间。
 
 裁剪策略：
 
@@ -671,7 +669,7 @@ StockV2 下新增二级入口：`组合哨兵`。
 
 - 现有 `operation_review` Agent 继续可执行。
 - 现有 `strategy_generation` 继续可执行。
-- `news_strategy_monitor`、`data_strategy_monitor`、`portfolio_risk_monitor` 不受影响。
+- `data_strategy_monitor`、Watch 规则和操作 guardrails 不受影响。
 - Review accept/reject/defer 和交易记录链路不受影响。
 
 ## 15. 开发顺序
@@ -692,7 +690,7 @@ StockV2 下新增二级入口：`组合哨兵`。
 
 本能力确实需要存在，因为现有 monitor 不能覆盖窗口级组合风控：
 
-- 不能只打开 `news_strategy_monitor`：它依赖积压的候选队列，且是单消息单标的。
+- 不能只依赖消息关联候选：候选是召回材料，不负责窗口级组合判断。
 - 不能只激活策略：`data_strategy_monitor` 依赖 active 策略，不覆盖无策略持仓。
 - 不能只调组合阈值：激进组合本身允许高仓位，问题是信息面冲击下的临时风控。
 

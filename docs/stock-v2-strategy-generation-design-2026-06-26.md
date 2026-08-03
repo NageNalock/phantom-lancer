@@ -46,7 +46,7 @@ stockv2_strategies(status=draft, source=agent)
 
 账户绑定策略可以产生账户相关建议，但只有进入 `OperationReview` 并通过 `Guardrails` 后，才允许生成 `proposed_operation`。
 
-后台监控是系统固化行为。策略生效后，系统根据 `generationMeta.playbook.rules` 自动扫描数据面和组合风险条件。消息面第一版只保存 `newsPrefilters` 作为上下文，精细消费后续增强。
+后台监控是系统固化行为。策略生效后，系统根据 `generationMeta.playbook.rules` 自动扫描数据面和组合风险条件。消息面上下文由消息脉络和组合哨兵按窗口读取，不写入策略预筛配置。
 
 第一版不新增独立策略草案表。策略草案复用现有策略对象：`status=draft`、`source=agent`、`generationMeta.source=strategy_generation`。Agent 运行过程复用 `AgentRun` 和 `DecisionLedger`。
 
@@ -190,7 +190,6 @@ Context 必须把“事实”和“Agent 推断”分开，避免 Agent 把未�
             "risk": "风险备注",
             "dataPrefilters": [],
             "portfolioPrefilters": [],
-            "newsPrefilters": [],
             "priority": 1
           }
         ]
@@ -207,7 +206,7 @@ Context 必须把“事实”和“Agent 推断”分开，避免 Agent 把未�
 
 `final_action` 这类单字段不能替代操作剧本。一只股票的策略可以同时包含建仓、加仓、持有、减仓和清仓条件。
 
-`playbook` 必须按当前代码协议写入 `generationMeta.playbook.rules`。字段命名应使用 `action`、`trigger`、`preconditions`、`target`、`risk`、`dataPrefilters`、`portfolioPrefilters`、`newsPrefilters`，动作枚举应使用 `add_position`、`reduce_position`、`exit_position`，不要再引入 `actions/action_type/add/reduce/clear` 第二套协议。
+`playbook` 必须按当前代码协议写入 `generationMeta.playbook.rules`。字段命名应使用 `action`、`trigger`、`preconditions`、`target`、`risk`、`dataPrefilters`、`portfolioPrefilters`，动作枚举应使用 `add_position`、`reduce_position`、`exit_position`，不要再引入 `actions/action_type/add/reduce/clear` 第二套协议。
 
 ## 8. 组合持仓诊断模式
 
@@ -286,7 +285,7 @@ generationMeta.playbook.rules
 -> Alert / TradeSignal / ProposedOperation
 ```
 
-当前已实现的数据面监控消费 `dataPrefilters` 和 `portfolioPrefilters`。`newsPrefilters` 可以先由 Agent 写入并展示，消息面监控第一版仍按消息候选、持仓、活跃策略、重要性和分数触发；后续再让消息面监控精细读取 `newsPrefilters`。
+当前已实现的数据面监控消费 `dataPrefilters` 和 `portfolioPrefilters`。消息关联候选不触发独立逐条监控，由消息脉络和组合哨兵在各自窗口内消费。
 
 StockPulse 里的 `monitoring_task_blueprint` 在当前 V2 中对应 `generationMeta.playbook.rules`，不是用户手动创建的盯盘任务。
 

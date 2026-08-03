@@ -2297,16 +2297,6 @@ func newsEventCleanupProtected(ctx context.Context, queryer newsContextCleanupQu
 	if linkStatus == NewsEventLinkStatusPending || linkStatus == NewsEventLinkStatusFailed {
 		return true, "消息的股票关联尚未完成", nil
 	}
-	var activeCandidates int
-	err = queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_link_candidates
-		WHERE news_event_id=? AND COALESCE(monitor_status,'pending') IN (?, ?)`, eventID,
-		NewsLinkMonitorStatusPending, NewsLinkMonitorStatusFailed).Scan(&activeCandidates)
-	if err != nil {
-		return false, "", wrapError(err, "check news event active candidates")
-	}
-	if activeCandidates > 0 {
-		return true, "消息仍有待处理或失败的股票关联", nil
-	}
 	return false, "", nil
 }
 

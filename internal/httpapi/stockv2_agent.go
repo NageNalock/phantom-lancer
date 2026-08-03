@@ -480,7 +480,6 @@ func stockV2AgentHTTPStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, stockv2.ErrAgentModelNotAvailable),
 		errors.Is(err, stockv2.ErrAgentExecutorUnavailable),
-		errors.Is(err, stockv2.ErrAgentTaskNotConfigurable),
 		errors.Is(err, stockv2.ErrAgentProviderProtected),
 		errors.Is(err, stockv2.ErrEmbeddingModelNotConfigured),
 		errors.Is(err, stockv2.ErrEmbeddingModelUnavailable),

@@ -47,16 +47,6 @@ func (s *Service) linkNewsEventWithSnapshot(ctx context.Context, event NewsEvent
 		if candidates[i].ID == "" {
 			candidates[i].ID = generateID()
 		}
-		if candidates[i].MonitorStatus == "" {
-			_, held := snapshot.heldSymbols[candidates[i].Symbol]
-			_, active := snapshot.strategySymbols[candidates[i].Symbol]
-			if held || active {
-				candidates[i].MonitorStatus = NewsLinkMonitorStatusPending
-			} else {
-				candidates[i].MonitorStatus = NewsLinkMonitorStatusSkipped
-				candidates[i].MonitoredAt = now
-			}
-		}
 		if candidates[i].CreatedAt.IsZero() {
 			candidates[i].CreatedAt = now
 		}

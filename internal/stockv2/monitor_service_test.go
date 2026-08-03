@@ -19,10 +19,9 @@ func TestListMonitorTasksReturnsBuiltin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list monitor tasks: %v", err)
 	}
-	if len(tasks) != 7 {
-		t.Fatalf("task count = %d, want 7", len(tasks))
+	if len(tasks) != 2 {
+		t.Fatalf("task count = %d, want 2", len(tasks))
 	}
-	runnable := make(map[string]bool, len(tasks))
 	enabledTasks := make(map[string]bool)
 	for _, task := range tasks {
 		if task.Definition.TaskType == "universe_update" {
@@ -31,19 +30,12 @@ func TestListMonitorTasksReturnsBuiltin(t *testing.T) {
 		if task.Definition.TaskType == "daily_bars_sync" {
 			t.Fatalf("standalone daily bars task should not be listed")
 		}
-		runnable[task.Definition.TaskType] = task.Definition.Runnable
 		if task.Config.Enabled {
 			enabledTasks[task.Definition.TaskType] = true
 		}
 	}
 	if len(enabledTasks) != 1 || !enabledTasks[MonitorTaskLatestQuoteRefresh] {
 		t.Fatalf("default enabled tasks = %#v, want only latest quote refresh", enabledTasks)
-	}
-	if !runnable[MonitorTaskDataStrategyMonitor] || !runnable[MonitorTaskPortfolioRiskMonitor] || !runnable[MonitorTaskNewsStrategyMonitor] {
-		t.Fatalf("data_strategy / portfolio_risk / news must be runnable")
-	}
-	if runnable[MonitorTaskDailyFundamentalMonitor] || runnable[MonitorTaskDataQualityMonitor] || runnable[MonitorTaskPortfolioSentinel] {
-		t.Fatalf("fundamental / quality / portfolio_sentinel must not be runnable through monitor API")
 	}
 }
 
@@ -747,81 +739,11 @@ func TestMonitorAlertDedupeCooldownUpdatesOccurrence(t *testing.T) {
 	}
 }
 
-func TestRunPortfolioRiskMonitorProducesHit(t *testing.T) {
+func TestRunUnknownMonitorTaskRejected(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 
-	portfolio := StockV2Portfolio{
-		ID:                   "p-risk",
-		Name:                 "风险组合",
-		Cash:                 7000,
-		RiskLevel:            "medium",
-		MaxSinglePositionPct: 20,
-	}
-	if err := svc.store.CreatePortfolio(ctx, portfolio); err != nil {
-		t.Fatalf("create portfolio: %v", err)
-	}
-	if err := svc.store.CreateHolding(ctx, StockV2Holding{
-		ID:                "h-risk",
-		PortfolioID:       "p-risk",
-		Symbol:            "000001",
-		Market:            "SZ",
-		Name:              "持仓A",
-		Quantity:          100,
-		AvailableQuantity: 100,
-		CostPrice:         30,
-		LastPrice:         30,
-		LastPriceAt:       time.Now(),
-		MarketValue:       3000,
-		PositionPct:       30,
-		TradableStatus:    PortfolioValuationStatusFresh,
-	}); err != nil {
-		t.Fatalf("create holding: %v", err)
-	}
-	if err := svc.store.CreatePortfolioSnapshot(ctx, PortfolioSnapshot{
-		ID:                 "s-risk",
-		PortfolioID:        "p-risk",
-		ValuationAt:        time.Now(),
-		Cash:               7000,
-		HoldingMarketValue: 3000,
-		TotalAssetValue:    10000,
-		CashPct:            70,
-		PositionCount:      1,
-		Source:             PortfolioValuationSourceLatestQuote,
-		Status:             PortfolioValuationStatusFresh,
-		CreatedAt:          time.Now(),
-	}); err != nil {
-		t.Fatalf("create snapshot: %v", err)
-	}
-
-	run, err := svc.RunMonitorTask(ctx, MonitorTaskPortfolioRiskMonitor, MonitorTriggerManual)
-	if err != nil {
-		t.Fatalf("run portfolio risk monitor: %v", err)
-	}
-	if run.Status != MonitorRunStatusCompleted {
-		t.Fatalf("run status = %s, want completed", run.Status)
-	}
-	if run.HitCount < 1 {
-		t.Fatalf("hit count = %d, want >= 1 (weight over limit)", run.HitCount)
-	}
-	hits, err := svc.ListMonitorHits(ctx, MonitorHitListFilter{TaskType: MonitorTaskPortfolioRiskMonitor, PortfolioID: "p-risk", Limit: 50})
-	if err != nil {
-		t.Fatalf("list hits: %v", err)
-	}
-	if len(hits) == 0 {
-		t.Fatalf("no portfolio risk hit for p-risk")
-	}
-}
-
-func TestRunDisabledMonitorTaskRejected(t *testing.T) {
-	ctx := context.Background()
-	svc, cleanup := newStrategyTestService(t)
-	defer cleanup()
-
-	if _, err := svc.RunMonitorTask(ctx, MonitorTaskDailyFundamentalMonitor, MonitorTriggerManual); !errors.Is(err, ErrMonitorTaskNotConfigured) {
-		t.Fatalf("err = %v, want ErrMonitorTaskNotConfigured", err)
-	}
 	if _, err := svc.RunMonitorTask(ctx, "unknown_task_type", MonitorTriggerManual); !errors.Is(err, ErrInvalidMonitorTaskType) {
 		t.Fatalf("err = %v, want ErrInvalidMonitorTaskType", err)
 	}

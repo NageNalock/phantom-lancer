@@ -788,7 +788,7 @@ func (s *Service) GetAgentTaskProfile(ctx context.Context, id string) (AgentTask
 }
 
 func (s *Service) GetAgentTaskProfileByType(ctx context.Context, taskType string) (AgentTaskProfile, error) {
-	if !knownAgentTaskType(taskType) {
+	if !supportedAgentTaskType(taskType) {
 		return AgentTaskProfile{}, ErrInvalidAgentTaskType
 	}
 	profile, err := s.store.GetAgentTaskProfileByType(ctx, taskType)
@@ -799,11 +799,8 @@ func (s *Service) GetAgentTaskProfileByType(ctx context.Context, taskType string
 }
 
 func (s *Service) UpdateAgentTaskProfile(ctx context.Context, taskType string, req RequestUpdateAgentTaskProfile) (AgentTaskProfile, error) {
-	if !knownAgentTaskType(taskType) {
+	if !supportedAgentTaskType(taskType) {
 		return AgentTaskProfile{}, ErrInvalidAgentTaskType
-	}
-	if !executableAgentTaskType(taskType) {
-		return AgentTaskProfile{}, ErrAgentTaskNotConfigurable
 	}
 	profile, err := s.store.GetAgentTaskProfileByType(ctx, taskType)
 	if err != nil {
@@ -1057,11 +1054,8 @@ func (s *Service) agentExecutionDetailForRun(ctx context.Context, run AgentRun) 
 // 记录,真实 executor 的 stdout/MCP 结果由后续 finalize 写回。敏感字段经
 // safelog 脱敏裁剪后落库,RedactionSummary 记录脱敏情况。
 func (s *Service) CreateAgentRunRecord(ctx context.Context, params AgentRunRecordParams) (AgentRun, AgentDecisionLedger, error) {
-	if !knownAgentTaskType(params.TaskType) {
+	if !supportedAgentTaskType(params.TaskType) {
 		return AgentRun{}, AgentDecisionLedger{}, ErrInvalidAgentTaskType
-	}
-	if !executableAgentTaskType(params.TaskType) {
-		return AgentRun{}, AgentDecisionLedger{}, ErrAgentTaskNotConfigurable
 	}
 	if _, err := s.store.GetAgentProviderProfile(ctx, params.ProviderID); err != nil {
 		return AgentRun{}, AgentDecisionLedger{}, err
@@ -1150,11 +1144,8 @@ func (s *Service) resolveAgentTask(
 	taskType, triggerObjectType, triggerObjectID, requestedBy string,
 	fallbackOnly bool,
 ) (AgentTaskResolution, error) {
-	if !knownAgentTaskType(taskType) {
+	if !supportedAgentTaskType(taskType) {
 		return AgentTaskResolution{}, ErrInvalidAgentTaskType
-	}
-	if !executableAgentTaskType(taskType) {
-		return AgentTaskResolution{}, ErrAgentTaskNotConfigurable
 	}
 	taskProfile, err := s.store.GetAgentTaskProfileByType(ctx, taskType)
 	if err != nil {

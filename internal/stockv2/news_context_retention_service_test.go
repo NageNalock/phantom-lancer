@@ -345,7 +345,6 @@ func TestCompactNewsEventRollbackKeepsLinkCandidates(t *testing.T) {
 	seed := seedNewsContextRetentionEvent(t, svc, ctx, verifiedRetentionAudit(), nil, nil, "support")
 	candidate, err := svc.store.UpsertNewsLinkCandidate(ctx, NewsLinkCandidate{
 		NewsEventID: seed.event.ID, Symbol: "TEST", MatchMethod: NewsLinkMatchExactSymbol,
-		MonitorStatus: NewsLinkMonitorStatusSkipped,
 	})
 	if err != nil {
 		t.Fatalf("seed completed link candidate: %v", err)

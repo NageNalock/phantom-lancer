@@ -1403,7 +1403,6 @@ export interface StockV2UpdateProgress {
 export interface StockV2Settings {
   id: string;
   autoUpdateEnabled: boolean;
-  dailyBarsAutoEnabled: boolean;
   updateIntervalSec: number;
   proxyEnabled: boolean;
   proxyType: string;
@@ -1537,9 +1536,6 @@ export interface StockV2NewsLinkCandidate {
   score?: number | null;
   reason?: string;
   matchedTerms?: string[] | null;
-  monitorStatus?: string;
-  monitorHitId?: string;
-  monitoredAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -2038,7 +2034,6 @@ export interface StockV2StrategyActionRule {
   risk?: string;
   dataPrefilters?: StockV2StrategyPrefilter[];
   portfolioPrefilters?: StockV2StrategyPrefilter[];
-  newsPrefilters?: StockV2StrategyPrefilter[];
   symbol?: string;
   market?: string;
   portfolioId?: string;
@@ -2373,8 +2368,6 @@ export interface StockV2MonitorTaskDefinition {
   label?: string;
   description?: string;
   category?: string;
-  runnable?: boolean;
-  configurable?: boolean;
   defaultConfig?: StockV2MonitorTaskConfig;
 }
 
@@ -2806,9 +2799,7 @@ export type StockV2AgentTaskType =
   | "opportunity_discovery"
   | "portfolio_sentinel"
   | "news_event_review"
-  | "portfolio_risk_review"
-  | "stock_profile_summary"
-  | "bull_bear_debate";
+  | "stock_profile_summary";
 
 export interface StockV2AgentTaskProfile {
   id: string;

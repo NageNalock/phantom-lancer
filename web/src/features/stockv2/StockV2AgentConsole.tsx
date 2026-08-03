@@ -22,7 +22,6 @@ import {
   stockV2AgentProviderTypeLabel,
   stockV2AgentRunStatusLabel,
   stockV2AgentRunStatusTone,
-  stockV2AgentTaskConfigurable,
   stockV2AgentTaskTypeLabel,
 } from "../../domain/labels";
 
@@ -184,12 +183,9 @@ function AgentTaskProfileSection({ actions }: { actions: AppActions }) {
     <SectionLoader loading={loading} error={error} items={profiles} onRetry={load} onLoad={load}>
       <div className="grid gap-2">
         {(profiles ?? []).map((profile) => (
-          <div key={profile.id} className={`grid gap-1.5 rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs ${stockV2AgentTaskConfigurable(profile.taskType) ? "" : "opacity-60"}`}>
+          <div key={profile.id} className="grid gap-1.5 rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs">
             <div className="flex flex-wrap items-center gap-2">
               <strong className="text-sm">{stockV2AgentTaskTypeLabel(profile.taskType)}</strong>
-              <Pill tone={stockV2AgentTaskConfigurable(profile.taskType) ? "good" : "neutral"}>
-                {stockV2AgentTaskConfigurable(profile.taskType) ? "已开放" : "未开放"}
-              </Pill>
             </div>
             <Row label="执行模式" value={profile.executionMode === "api" ? "API" : "CLI"} />
             <Row label="主模型" value={profile.primaryModelId ? profile.primaryModelId.slice(0, 12) : "(未绑定)"} />

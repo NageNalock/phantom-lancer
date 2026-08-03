@@ -689,10 +689,9 @@ func TestAgentTaskProfilesSeedTasksAndExposeConfigurableTasks(t *testing.T) {
 		AgentTaskTypeOperationReview,
 		AgentTaskTypeStrategyGeneration,
 		AgentTaskTypeOpportunityDiscovery,
+		AgentTaskTypePortfolioSentinel,
 		AgentTaskTypeNewsEventReview,
-		AgentTaskTypePortfolioRiskReview,
 		AgentTaskTypeStockProfileSummary,
-		AgentTaskTypeBullBearDebate,
 	} {
 		if !seen[taskType] {
 			t.Fatalf("seeded task %q not found in %#v", taskType, seen)
@@ -778,17 +777,6 @@ func TestAgentTaskProfilesSeedTasksAndExposeConfigurableTasks(t *testing.T) {
 		t.Fatalf("news context resolution = %+v, want authorized run", newsResolution)
 	}
 
-	for _, taskType := range []string{
-		AgentTaskTypePortfolioRiskReview,
-		AgentTaskTypeBullBearDebate,
-	} {
-		if _, err := svc.UpdateAgentTaskProfile(ctx, taskType, RequestUpdateAgentTaskProfile{}); !errors.Is(err, ErrAgentTaskNotConfigurable) {
-			t.Fatalf("update future task %s error = %v, want ErrAgentTaskNotConfigurable", taskType, err)
-		}
-		if _, err := svc.ResolveAgentTask(ctx, taskType, "manual", "x", "tester"); !errors.Is(err, ErrAgentTaskNotConfigurable) {
-			t.Fatalf("resolve future task %s error = %v, want ErrAgentTaskNotConfigurable", taskType, err)
-		}
-	}
 }
 
 // TestCreateAgentRunRecordRedactsSecrets 验收 4:

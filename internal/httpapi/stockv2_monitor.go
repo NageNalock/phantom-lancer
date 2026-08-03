@@ -187,8 +187,7 @@ func stockV2MonitorHTTPStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, stockv2.ErrMonitorTaskAlreadyRunning):
 		return http.StatusConflict
-	case errors.Is(err, stockv2.ErrMonitorTaskNotConfigured),
-		errors.Is(err, stockv2.ErrInvalidMonitorTaskType):
+	case errors.Is(err, stockv2.ErrInvalidMonitorTaskType):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError

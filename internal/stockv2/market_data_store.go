@@ -316,18 +316,10 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 			score DOUBLE NOT NULL DEFAULT 0,
 			reason VARCHAR,
 			matched_terms_json VARCHAR NOT NULL DEFAULT '[]',
-			monitor_status VARCHAR NOT NULL DEFAULT 'pending',
-			monitor_hit_id VARCHAR,
-			monitored_at TIMESTAMP,
 			created_at TIMESTAMP NOT NULL,
 			updated_at TIMESTAMP NOT NULL,
 			UNIQUE(news_event_id, symbol)
 		);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_event ON stockv2_news_link_candidates(news_event_id);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_raw_news ON stockv2_news_link_candidates(raw_news_id);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_monitor_status ON stockv2_news_link_candidates(monitor_status);
-
 		CREATE TABLE IF NOT EXISTS stockv2_embedding_vectors_v2 (
 			vector_ref VARCHAR PRIMARY KEY,
 			vector_blob BLOB NOT NULL,
@@ -346,6 +338,9 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 	if err := s.migrateDailyBarLogicalQuality(ctx); err != nil {
 		return err
 	}
+	if err := s.migrateRetiredNewsStrategyMonitor(ctx); err != nil {
+		return err
+	}
 	for _, stmt := range []string{
 		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS amplitude DOUBLE DEFAULT 0`,
 		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS turnover_rate DOUBLE DEFAULT 0`,
@@ -362,6 +357,74 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+const retiredNewsStrategyMonitorMarketMigration = "retired-news-strategy-monitor-v1"
+
+func (s *MarketDataStore) migrateRetiredNewsStrategyMonitor(ctx context.Context) error {
+	var applied int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM stockv2_market_schema_migrations WHERE id = ?
+	`, retiredNewsStrategyMonitorMarketMigration).Scan(&applied); err != nil {
+		return wrapError(err, "check retired news monitor market migration")
+	}
+	if applied > 0 {
+		return s.ensureNewsLinkCandidateIndexes(ctx)
+	}
+	// DuckDB keeps table-index dependencies visible until the DDL transaction
+	// commits, so retire all candidate indexes before dropping the old columns.
+	for _, index := range []string{
+		"idx_stockv2_market_news_link_candidates_monitor_status",
+		"idx_stockv2_news_link_candidates_monitor_status",
+		"idx_stockv2_market_news_link_candidates_event",
+		"idx_stockv2_market_news_link_candidates_raw_news",
+		"idx_stockv2_market_news_link_candidates_symbol",
+	} {
+		if _, err := s.db.ExecContext(ctx, "DROP INDEX IF EXISTS "+index); err != nil {
+			return wrapError(err, "drop retired news monitor market index")
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return wrapError(err, "begin retired news monitor market migration")
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, column := range []string{"monitor_status", "monitor_hit_id", "monitored_at"} {
+		var count int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM information_schema.columns
+			WHERE table_name='stockv2_news_link_candidates' AND column_name=?
+		`, column).Scan(&count); err != nil {
+			return wrapError(err, "check retired news monitor market column")
+		}
+		if count == 0 {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE stockv2_news_link_candidates DROP COLUMN "+column); err != nil {
+			return wrapError(err, "drop retired news monitor market column")
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO stockv2_market_schema_migrations (id, applied_at) VALUES (?, ?)
+	`, retiredNewsStrategyMonitorMarketMigration, time.Now()); err != nil {
+		return wrapError(err, "record retired news monitor market migration")
+	}
+	if err := tx.Commit(); err != nil {
+		return wrapError(err, "commit retired news monitor market migration")
+	}
+	return s.ensureNewsLinkCandidateIndexes(ctx)
+}
+
+func (s *MarketDataStore) ensureNewsLinkCandidateIndexes(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_event
+			ON stockv2_news_link_candidates(news_event_id);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_raw_news
+			ON stockv2_news_link_candidates(raw_news_id);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_symbol
+			ON stockv2_news_link_candidates(symbol);
+	`)
+	return wrapError(err, "ensure news link candidate indexes")
 }
 
 const dailyBarLogicalQualityMigration = "daily-bar-logical-quality-v1"

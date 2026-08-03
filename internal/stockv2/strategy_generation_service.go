@@ -518,7 +518,7 @@ func normalizeStrategyGenerationPlaybookPrefilters(raw map[string]any) {
 		playbook := mapFromAny(draft["playbook"])
 		for _, ruleRaw := range sliceFromAny(playbook["rules"]) {
 			rule := mapFromAny(ruleRaw)
-			for _, key := range []string{"dataPrefilters", "portfolioPrefilters", "newsPrefilters"} {
+			for _, key := range []string{"dataPrefilters", "portfolioPrefilters"} {
 				switch value := rule[key].(type) {
 				case nil:
 					continue

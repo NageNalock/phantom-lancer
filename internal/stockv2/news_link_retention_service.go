@@ -38,7 +38,7 @@ func (s *Service) runNewsLinkCandidateRetentionScheduler(ctx context.Context) {
 				continue
 			}
 			if result.DeletedTotal > 0 && s.log != nil {
-				s.log.Info("pruned news link candidates", "deleted_total", result.DeletedTotal, "deleted_skipped_failed", result.DeletedSkippedFailed, "deleted_low_confidence", result.DeletedLowConfidence)
+				s.log.Info("pruned news link candidates", "deleted_total", result.DeletedTotal, "deleted_legacy_matcher", result.DeletedLegacyMatcher, "deleted_low_confidence", result.DeletedLowConfidence)
 			}
 			timer.Reset(newsLinkCandidateRetentionInterval)
 		}

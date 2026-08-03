@@ -149,9 +149,6 @@ func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, candidate NewsLinkC
 	if candidate.ID == "" {
 		candidate.ID = generateID()
 	}
-	if candidate.MonitorStatus == "" {
-		candidate.MonitorStatus = NewsLinkMonitorStatusPending
-	}
 	if candidate.CreatedAt.IsZero() {
 		candidate.CreatedAt = now
 	}
@@ -160,9 +157,8 @@ func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, candidate NewsLinkC
 		result, execErr := s.assetDB().ExecContext(ctx, `
 			INSERT INTO stockv2_news_link_candidates (
 				id, news_event_id, raw_news_id, symbol, market, instrument_name,
-				match_method, score, reason, matched_terms_json, monitor_status,
-				monitor_hit_id, monitored_at, created_at, updated_at
-			) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+				match_method, score, reason, matched_terms_json, created_at, updated_at
+			) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 			  FROM stockv2_news_events
 			  WHERE id=? AND COALESCE(context_status,'pending')<>?
 			ON CONFLICT(news_event_id, symbol) DO UPDATE SET
@@ -176,9 +172,8 @@ func (s *Store) UpsertNewsLinkCandidate(ctx context.Context, candidate NewsLinkC
 				updated_at = excluded.updated_at
 		`, candidate.ID, candidate.NewsEventID, candidate.RawNewsID, candidate.Symbol,
 			candidate.Market, candidate.InstrumentName, candidate.MatchMethod, candidate.Score,
-			candidate.Reason, marshalProfileStrings(candidate.MatchedTerms), candidate.MonitorStatus,
-			nullableString(candidate.MonitorHitID), nullableTime(candidate.MonitoredAt),
-			candidate.CreatedAt, candidate.UpdatedAt, candidate.NewsEventID, NewsEventContextCompacted)
+			candidate.Reason, marshalProfileStrings(candidate.MatchedTerms), candidate.CreatedAt,
+			candidate.UpdatedAt, candidate.NewsEventID, NewsEventContextCompacted)
 		if execErr != nil {
 			return execErr
 		}
@@ -214,27 +209,22 @@ func (s *Store) UpsertNewsLinkCandidates(ctx context.Context, candidates []NewsL
 	statement.WriteString(`
 		INSERT INTO stockv2_news_link_candidates (
 			id, news_event_id, raw_news_id, symbol, market, instrument_name,
-			match_method, score, reason, matched_terms_json, monitor_status,
-			monitor_hit_id, monitored_at, created_at, updated_at
+			match_method, score, reason, matched_terms_json, created_at, updated_at
 		)
 		SELECT incoming.id, incoming.news_event_id, incoming.raw_news_id, incoming.symbol,
 			incoming.market, incoming.instrument_name, incoming.match_method, incoming.score,
-			incoming.reason, incoming.matched_terms_json, incoming.monitor_status,
-			incoming.monitor_hit_id, incoming.monitored_at, incoming.created_at, incoming.updated_at
+			incoming.reason, incoming.matched_terms_json, incoming.created_at, incoming.updated_at
 		FROM (VALUES
 	`)
-	args := make([]any, 0, len(candidates)*15+1)
+	args := make([]any, 0, len(candidates)*12+1)
 	for i := range candidates {
 		if i > 0 {
 			statement.WriteString(",")
 		}
-		statement.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		statement.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		candidate := &candidates[i]
 		if candidate.ID == "" {
 			candidate.ID = generateID()
-		}
-		if candidate.MonitorStatus == "" {
-			candidate.MonitorStatus = NewsLinkMonitorStatusPending
 		}
 		if candidate.CreatedAt.IsZero() {
 			candidate.CreatedAt = now
@@ -242,15 +232,13 @@ func (s *Store) UpsertNewsLinkCandidates(ctx context.Context, candidates []NewsL
 		candidate.UpdatedAt = now
 		args = append(args, candidate.ID, candidate.NewsEventID, candidate.RawNewsID, candidate.Symbol,
 			candidate.Market, candidate.InstrumentName, candidate.MatchMethod, candidate.Score,
-			candidate.Reason, marshalProfileStrings(candidate.MatchedTerms), candidate.MonitorStatus,
-			nullableString(candidate.MonitorHitID), nullableTime(candidate.MonitoredAt),
-			candidate.CreatedAt, candidate.UpdatedAt)
+			candidate.Reason, marshalProfileStrings(candidate.MatchedTerms), candidate.CreatedAt,
+			candidate.UpdatedAt)
 	}
 	statement.WriteString(`
 		) AS incoming (
 			id, news_event_id, raw_news_id, symbol, market, instrument_name,
-			match_method, score, reason, matched_terms_json, monitor_status,
-			monitor_hit_id, monitored_at, created_at, updated_at
+			match_method, score, reason, matched_terms_json, created_at, updated_at
 		)
 		INNER JOIN stockv2_news_events event ON event.id = incoming.news_event_id
 		WHERE COALESCE(event.context_status, 'pending') <> ?
@@ -303,51 +291,6 @@ func (s *Store) GetNewsLinkCandidate(ctx context.Context, id string) (NewsLinkCa
 	return item, nil
 }
 
-func (s *Store) ListPendingNewsLinkCandidates(ctx context.Context, limit int) ([]NewsLinkCandidate, error) {
-	rows, err := s.assetDB().QueryContext(ctx, newsLinkCandidateSelectSQL()+`
-		WHERE COALESCE(c.monitor_status, ?) = ?
-		ORDER BY
-			CASE
-				WHEN c.score >= 80 THEN 0
-				WHEN c.match_method = 'boosted' THEN 1
-				WHEN c.match_method IN ('exact_symbol', 'exact_name', 'alias') THEN 2
-				WHEN c.match_method = 'semantic_profile' AND c.score >= 70 THEN 3
-				WHEN c.match_method = 'keyword' THEN 4
-				ELSE 5
-			END ASC,
-			c.score DESC,
-			c.updated_at ASC,
-			c.symbol ASC
-		LIMIT ?
-	`, NewsLinkMonitorStatusPending, NewsLinkMonitorStatusPending, normalizedPageLimit(limit, 500))
-	if err != nil {
-		return nil, wrapError(err, "list pending news link candidates")
-	}
-	return scanRows(rows, scanNewsLinkCandidate, "scan news link candidate", "iterate news link candidates")
-}
-
-func (s *Store) MarkNewsLinkCandidateMonitorStatus(ctx context.Context, id, status, monitorHitID string, monitoredAt time.Time) error {
-	if monitoredAt.IsZero() {
-		monitoredAt = time.Now()
-	}
-	result, err := s.assetDB().ExecContext(ctx, `
-		UPDATE stockv2_news_link_candidates
-		SET monitor_status = ?, monitor_hit_id = ?, monitored_at = ?, updated_at = ?
-		WHERE id = ?
-	`, status, nullableString(monitorHitID), monitoredAt, monitoredAt, strings.TrimSpace(id))
-	if err != nil {
-		return wrapError(err, "mark news link candidate monitor status")
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return wrapError(err, "check news link candidate affected rows")
-	}
-	if rows == 0 {
-		return ErrNewsLinkCandidateNotFound
-	}
-	return nil
-}
-
 func (s *Store) ListNewsLinkCandidates(ctx context.Context, filter NewsLinkCandidateListFilter) ([]NewsLinkCandidate, error) {
 	where, args := newsLinkCandidateWhere(filter)
 	args = append(args, normalizedPageLimit(filter.Limit, 500), normalizedPageOffset(filter.Offset))
@@ -371,7 +314,7 @@ func (s *Store) CountNewsLinkCandidates(ctx context.Context, filter NewsLinkCand
 }
 
 type NewsLinkCandidateRetentionResult struct {
-	DeletedSkippedFailed int `json:"deletedSkippedFailed"`
+	DeletedLegacyMatcher int `json:"deletedLegacyMatcher"`
 	DeletedLowConfidence int `json:"deletedLowConfidence"`
 	DeletedTotal         int `json:"deletedTotal"`
 }
@@ -382,27 +325,24 @@ func (s *Store) PruneNewsLinkCandidates(ctx context.Context, now time.Time) (New
 	}
 	var result NewsLinkCandidateRetentionResult
 	deleted, err := s.deleteNewsLinkCandidates(ctx, `
-		COALESCE(monitor_status, ?) IN (?, ?)
-		AND COALESCE(updated_at, created_at) < ?
-	`, NewsLinkMonitorStatusPending, NewsLinkMonitorStatusSkipped, NewsLinkMonitorStatusFailed, now.AddDate(0, 0, -14))
+		match_method = ? AND COALESCE(updated_at, created_at) < ?
+	`, NewsLinkMatchProfileKeyword, now.AddDate(0, 0, -14))
 	if err != nil {
 		return result, err
 	}
-	result.DeletedSkippedFailed = deleted
+	result.DeletedLegacyMatcher = deleted
 
 	deleted, err = s.deleteNewsLinkCandidates(ctx, `
-		COALESCE(monitor_status, ?) = ?
-		AND match_method IN (?, ?, ?)
+		match_method IN (?, ?)
 		AND score < ?
 		AND COALESCE(updated_at, created_at) < ?
-	`, NewsLinkMonitorStatusPending, NewsLinkMonitorStatusPending,
-		NewsLinkMatchProfileKeyword, NewsLinkMatchSemanticProfile, NewsLinkMatchKeyword,
+	`, NewsLinkMatchSemanticProfile, NewsLinkMatchKeyword,
 		55.0, now.AddDate(0, 0, -3))
 	if err != nil {
 		return result, err
 	}
 	result.DeletedLowConfidence = deleted
-	result.DeletedTotal = result.DeletedSkippedFailed + result.DeletedLowConfidence
+	result.DeletedTotal = result.DeletedLegacyMatcher + result.DeletedLowConfidence
 	return result, nil
 }
 
@@ -497,7 +437,6 @@ func newsLinkCandidateSelectSQL() string {
 		       c.symbol,
 		       COALESCE(c.market,''), COALESCE(c.instrument_name,''), c.match_method,
 		       c.score, COALESCE(c.reason,''), c.matched_terms_json,
-		       COALESCE(c.monitor_status,''), COALESCE(c.monitor_hit_id,''), c.monitored_at,
 		       c.created_at, c.updated_at
 		FROM stockv2_news_link_candidates c
 		LEFT JOIN stockv2_news_events e ON e.id = c.news_event_id`
@@ -518,7 +457,6 @@ func newsLinkCandidateWhere(filter NewsLinkCandidateListFilter) (string, []any) 
 	add("c.symbol", filter.Symbol)
 	add("c.market", filter.Market)
 	add("c.match_method", filter.MatchMethod)
-	add("c.monitor_status", filter.MonitorStatus)
 	addNewsTimeWindow(&parts, &args, newsLinkCandidateEventTimeSQL, filter.Since, filter.Until)
 	if q := strings.TrimSpace(filter.Query); q != "" {
 		pattern := "%" + strings.ToLower(q) + "%"
@@ -534,7 +472,6 @@ func newsLinkCandidateWhere(filter NewsLinkCandidateListFilter) (string, []any) 
 func scanNewsLinkCandidate(row rowScanner) (NewsLinkCandidate, error) {
 	var item NewsLinkCandidate
 	var matchedTermsJSON string
-	var monitoredAt sql.NullTime
 	var newsEventAt sql.NullTime
 	if err := row.Scan(
 		&item.ID,
@@ -550,18 +487,12 @@ func scanNewsLinkCandidate(row rowScanner) (NewsLinkCandidate, error) {
 		&item.Score,
 		&item.Reason,
 		&matchedTermsJSON,
-		&item.MonitorStatus,
-		&item.MonitorHitID,
-		&monitoredAt,
 		&item.CreatedAt,
 		&item.UpdatedAt,
 	); err != nil {
 		return NewsLinkCandidate{}, err
 	}
 	item.MatchedTerms = unmarshalProfileStrings(matchedTermsJSON)
-	if monitoredAt.Valid {
-		item.MonitoredAt = monitoredAt.Time
-	}
 	if newsEventAt.Valid {
 		item.NewsEventAt = newsEventAt.Time
 	}

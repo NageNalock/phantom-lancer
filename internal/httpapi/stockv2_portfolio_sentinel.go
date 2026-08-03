@@ -153,7 +153,6 @@ func stockV2PortfolioSentinelHTTPStatus(err error) int {
 		return http.StatusBadRequest
 	case errors.Is(err, stockv2.ErrAgentModelNotAvailable),
 		errors.Is(err, stockv2.ErrAgentTaskProfileNotFound),
-		errors.Is(err, stockv2.ErrAgentTaskNotConfigurable),
 		errors.Is(err, stockv2.ErrAgentTaskRequiresCLI),
 		errors.Is(err, stockv2.ErrAgentExecutionModeModelMismatch),
 		errors.Is(err, stockv2.ErrAgentExecutorUnavailable):

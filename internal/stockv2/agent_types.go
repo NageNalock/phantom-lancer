@@ -6,8 +6,8 @@ import (
 )
 
 // Agent 治理层:股票 V2 自己的 Provider/Model 管理、任务绑定、
-// 运行记录与决策留痕。不耦合 Codex 页面。已开放任务会通过 Codex CLI
-// executor 真实执行;暂未开放的任务只展示为未来能力,不可绑定/执行。
+// 运行记录与决策留痕。不耦合 Codex 页面。任务会通过绑定的 CLI/API
+// executor 真实执行。
 // 脱敏单点在 service 层(经 internal/safelog),store 只持久化,
 // HTTP handler 不直接构造敏感字段。
 
@@ -86,19 +86,14 @@ const (
 )
 
 // Agent 任务类型。常量值是 API/DB 稳定 key;前端展示中文名称。
-// operation_review / strategy_generation / opportunity_discovery /
-// portfolio_sentinel / news_event_review / stock_profile_summary 已可配置并执行,
-// 其余任务只作为未来能力展示。news_event_review 当前承载
-// “消息脉络归纳”，保留稳定 key 以复用已有任务绑定。
+// news_event_review 当前承载“消息脉络归纳”，保留稳定 key 以复用已有任务绑定。
 const (
 	AgentTaskTypeOperationReview      = "operation_review"
 	AgentTaskTypeStrategyGeneration   = "strategy_generation"
 	AgentTaskTypeOpportunityDiscovery = "opportunity_discovery"
 	AgentTaskTypePortfolioSentinel    = "portfolio_sentinel"
 	AgentTaskTypeNewsEventReview      = "news_event_review"
-	AgentTaskTypePortfolioRiskReview  = "portfolio_risk_review"
 	AgentTaskTypeStockProfileSummary  = "stock_profile_summary"
-	AgentTaskTypeBullBearDebate       = "bull_bear_debate"
 )
 
 // AgentRun 状态机。CreateAgentRunRecord 先产出 ready;有 executor 时
@@ -125,9 +120,7 @@ const (
 	agentTaskOpportunityDiscoverySeedID = "agent-task-opportunity-discovery"
 	agentTaskPortfolioSentinelSeedID    = "agent-task-portfolio-sentinel"
 	agentTaskNewsEventReviewSeedID      = "agent-task-news-event-review"
-	agentTaskPortfolioRiskReviewSeedID  = "agent-task-portfolio-risk-review"
 	agentTaskStockProfileSummarySeedID  = "agent-task-stock-profile-summary"
-	agentTaskBullBearDebateSeedID       = "agent-task-bull-bear-debate"
 )
 
 var (
@@ -156,7 +149,6 @@ var (
 	ErrAgentFallbackMatchesPrimary      = errors.New("agent fallback model must differ from primary model")
 	ErrAgentTaskRequiresCLI             = errors.New("agent task requires Codex CLI execution")
 	ErrInvalidAgentTaskType             = errors.New("invalid agent task type")
-	ErrAgentTaskNotConfigurable         = errors.New("agent task is not configurable yet")
 	ErrAgentModelTypeNotAllowed         = errors.New("agent model type is not allowed for this task")
 )
 
@@ -505,29 +497,18 @@ func validAgentReasoningEffort(v string) bool {
 	}
 }
 
-func knownAgentTaskType(v string) bool {
+func supportedAgentTaskType(v string) bool {
 	switch v {
 	case AgentTaskTypeOperationReview,
 		AgentTaskTypeStrategyGeneration,
 		AgentTaskTypeOpportunityDiscovery,
 		AgentTaskTypePortfolioSentinel,
 		AgentTaskTypeNewsEventReview,
-		AgentTaskTypePortfolioRiskReview,
-		AgentTaskTypeStockProfileSummary,
-		AgentTaskTypeBullBearDebate:
+		AgentTaskTypeStockProfileSummary:
 		return true
 	default:
 		return false
 	}
-}
-
-func executableAgentTaskType(v string) bool {
-	return v == AgentTaskTypeOperationReview ||
-		v == AgentTaskTypeStrategyGeneration ||
-		v == AgentTaskTypeOpportunityDiscovery ||
-		v == AgentTaskTypePortfolioSentinel ||
-		v == AgentTaskTypeNewsEventReview ||
-		v == AgentTaskTypeStockProfileSummary
 }
 
 func validAgentTaskOutputType(taskType, outputType string) bool {

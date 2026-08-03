@@ -19,7 +19,6 @@ import {
   stockV2AgentAvailabilityTone,
   stockV2AgentModelStatusLabel,
   stockV2AgentModelStatusTone,
-  stockV2AgentTaskConfigurable,
   stockV2AgentTaskTypeLabel,
   stockV2AgentProviderTypeLabel,
   stockV2AgentRunStatusLabel,
@@ -59,7 +58,6 @@ const AGENT_TASKS: AgentTaskDefinition[] = [
   { taskType: "portfolio_sentinel", description: "周期复核组合风险，并消费消息脉络产生的实质变化。" },
   { taskType: "news_event_review", description: "定期归纳新闻、持续完善消息脉络主题并触发影响复核。" },
   { taskType: "stock_profile_summary", description: "生成股票画像与长期跟踪摘要。" },
-  { taskType: "bull_bear_debate", description: "多空视角辩论与证据交叉检查。" },
 ];
 
 type MCPToolInfo = {
@@ -328,7 +326,7 @@ export function StockV2AgentPage({ actions }: { actions: AppActions }) {
 
       <CollapsibleSection
         title="任务绑定"
-        subtitle="已开放任务可绑定主备模型,未开放任务先置灰展示"
+        subtitle="为每项真实执行任务绑定主模型、备模型、执行模式和推理强度"
       >
         <AgentTaskProfileSection
           loading={tLoading || taskProfiles === null}
@@ -742,38 +740,30 @@ function AgentTaskProfileSection({
     <div className="grid gap-2">
       {AGENT_TASKS.map((task) => {
         const profile = profileByType.get(task.taskType);
-        const configurable = stockV2AgentTaskConfigurable(task.taskType);
         return (
           <div
             key={task.taskType}
-            className={`rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs ${
-              configurable ? "" : "opacity-60"
-            }`}
+            className="rounded border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <strong className="text-sm">{stockV2AgentTaskTypeLabel(task.taskType)}</strong>
-                  <Pill tone={configurable ? "good" : "neutral"}>{configurable ? "已开放" : "未开放"}</Pill>
                 </div>
                 <p className="mt-1 text-[var(--muted)]">{task.description}</p>
               </div>
-              {configurable && profile ? (
+              {profile ? (
                 <Button onClick={() => onEdit(profile)}>
                   <Pencil size={12} className="mr-1" /> 编辑绑定
                 </Button>
               ) : null}
             </div>
-            {configurable ? (
-              <div className="mt-2 grid gap-1">
-                <Row label="执行模式" value={profile?.executionMode === "api" ? "API" : "CLI"} />
-                <Row label="主模型" value={bindingLabel(profile?.primaryModelId)} />
-                <Row label="备模型" value={bindingLabel(profile?.fallbackModelId)} />
-                <Row label="推理强度" value={profile?.reasoningEffort || "模型默认（不传）"} />
-              </div>
-            ) : (
-              <p className="mt-2 text-[var(--muted)]">暂不允许选择模型,后续开放时再配置绑定。</p>
-            )}
+            <div className="mt-2 grid gap-1">
+              <Row label="执行模式" value={profile?.executionMode === "api" ? "API" : "CLI"} />
+              <Row label="主模型" value={bindingLabel(profile?.primaryModelId)} />
+              <Row label="备模型" value={bindingLabel(profile?.fallbackModelId)} />
+              <Row label="推理强度" value={profile?.reasoningEffort || "模型默认（不传）"} />
+            </div>
           </div>
         );
       })}

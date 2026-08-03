@@ -1784,13 +1784,13 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 	b.WriteString("run_summary.key_conflicts and run_summary.data_quality_notes MUST be flat arrays of short human-readable strings (one concise sentence per element). Put material data conflicts and verification attempts there as plain strings; include compact external/internal source references in draft evidence_summary or risk_summary. Never put objects or nested arrays inside key_conflicts or data_quality_notes.\n")
 	b.WriteString("Every new strategy draft must use `playbook.rules[]`. Do not write `playbook.actions[]`, `actions`, `action_type`, `add`, `reduce`, or `clear`.\n")
 	b.WriteString("Allowed rule.action values are: observe, build_position, add_position, hold, reduce_position, exit_position.\n")
-	b.WriteString("Rule fields are exactly: id, action, title, trigger, preconditions, target, risk, dataPrefilters, portfolioPrefilters, newsPrefilters, priority.\n")
-	b.WriteString("Rule dataPrefilters, portfolioPrefilters, and newsPrefilters must always be JSON arrays. Use [] when there is no structured prefilter; never use a string.\n")
+	b.WriteString("Rule fields are exactly: id, action, title, trigger, preconditions, target, risk, dataPrefilters, portfolioPrefilters, priority.\n")
+	b.WriteString("Rule dataPrefilters and portfolioPrefilters must always be JSON arrays. Use [] when there is no structured prefilter; never use a string.\n")
 	b.WriteString("Do not output proposed_operation. If a future trade review is needed, use portfolio_aware_suggestion.trade_signal or review_request only.\n\n")
 
 	b.WriteString("Example submit_result shape:\n")
 	b.WriteString("```json\n")
-	b.WriteString("{\"taskID\":\"<TASK_ID>\",\"taskType\":\"strategy_generation\",\"result\":{\"outputType\":\"strategy_generation\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"strategy-generation-report/v1\",\"run_summary\":{\"mode\":\"manual_target\",\"overall_conclusion\":\"...\",\"key_conflicts\":[],\"data_quality_notes\":[]},\"drafts\":[{\"symbol\":\"302132\",\"market\":\"SZ\",\"name\":\"中航成飞\",\"draft_type\":\"new_strategy\",\"strategy_bias\":\"bullish\",\"thesis\":\"...\",\"confidence\":0.72,\"evidence_summary\":[],\"risk_summary\":[],\"invalid_conditions\":[],\"playbook\":{\"version\":\"v1\",\"rules\":[{\"id\":\"observe_1\",\"action\":\"observe\",\"title\":\"观察\",\"trigger\":\"...\",\"preconditions\":\"...\",\"target\":\"...\",\"risk\":\"...\",\"dataPrefilters\":[],\"portfolioPrefilters\":[],\"newsPrefilters\":[],\"priority\":1}]},\"portfolio_aware_suggestion\":{\"trade_signal\":\"observe\",\"target_position_hint\":\"\",\"review_request\":\"\"}}]}}}\n")
+	b.WriteString("{\"taskID\":\"<TASK_ID>\",\"taskType\":\"strategy_generation\",\"result\":{\"outputType\":\"strategy_generation\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"strategy-generation-report/v1\",\"run_summary\":{\"mode\":\"manual_target\",\"overall_conclusion\":\"...\",\"key_conflicts\":[],\"data_quality_notes\":[]},\"drafts\":[{\"symbol\":\"302132\",\"market\":\"SZ\",\"name\":\"中航成飞\",\"draft_type\":\"new_strategy\",\"strategy_bias\":\"bullish\",\"thesis\":\"...\",\"confidence\":0.72,\"evidence_summary\":[],\"risk_summary\":[],\"invalid_conditions\":[],\"playbook\":{\"version\":\"v1\",\"rules\":[{\"id\":\"observe_1\",\"action\":\"observe\",\"title\":\"观察\",\"trigger\":\"...\",\"preconditions\":\"...\",\"target\":\"...\",\"risk\":\"...\",\"dataPrefilters\":[],\"portfolioPrefilters\":[],\"priority\":1}]},\"portfolio_aware_suggestion\":{\"trade_signal\":\"observe\",\"target_position_hint\":\"\",\"review_request\":\"\"}}]}}}\n")
 	b.WriteString("```\n\n")
 
 	b.WriteString("### Important\n\n")
@@ -1867,7 +1867,7 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 	if pack.StepKey == StrategyGenerationStepFormatter {
 		b.WriteString("You are the formatter. Do not introduce new investment claims. Convert the prior results into the final strategy-generation report.\n")
 		b.WriteString("Return result.result as schema_version `strategy-generation-report/v1` with run_summary and drafts[].\n")
-		b.WriteString("Every new_strategy draft must use playbook.rules[]. dataPrefilters, portfolioPrefilters, and newsPrefilters must be arrays. Use [] when no structured prefilter exists.\n")
+		b.WriteString("Every new_strategy draft must use playbook.rules[]. dataPrefilters and portfolioPrefilters must be arrays. Use [] when no structured prefilter exists.\n")
 		b.WriteString("Do not output proposed_operation. Use portfolio_aware_suggestion.review_request when Review is needed.\n\n")
 	} else {
 		b.WriteString("Return result.result as a `strategy-generation-step/v1` object:\n")

@@ -412,7 +412,6 @@ function normalizePlaybookRule(value: unknown, index: number): StockV2StrategyAc
     risk: stringFromUnknown(raw.risk),
     dataPrefilters: normalizePrefilterList(raw.dataPrefilters),
     portfolioPrefilters: normalizePrefilterList(raw.portfolioPrefilters),
-    newsPrefilters: normalizePrefilterList(raw.newsPrefilters),
     symbol: stringFromUnknown(raw.symbol),
     market: stringFromUnknown(raw.market),
     portfolioId: stringFromUnknown(raw.portfolioId),
@@ -438,7 +437,6 @@ function hasPlaybookRuleContent(rule: StockV2StrategyActionRule): boolean {
     rule.risk?.trim() ||
     Boolean(rule.dataPrefilters?.length) ||
     Boolean(rule.portfolioPrefilters?.length) ||
-    Boolean(rule.newsPrefilters?.length) ||
     Boolean(rule.sizing) ||
     Boolean(rule.reason?.trim()) ||
     Boolean(rule.riskNotes?.trim()) ||
@@ -493,7 +491,7 @@ function numOrUndef(value: string): number | undefined {
 }
 
 function playbookPrefilterSummary(rule: StockV2StrategyActionRule): string {
-  const items = [...(rule.dataPrefilters || []), ...(rule.portfolioPrefilters || []), ...(rule.newsPrefilters || [])];
+  const items = [...(rule.dataPrefilters || []), ...(rule.portfolioPrefilters || [])];
   return items.map(strategyPrefilterSummary).join(" / ");
 }
 

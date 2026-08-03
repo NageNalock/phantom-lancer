@@ -143,7 +143,6 @@ func TestStrategyGenerationNormalizesStringPlaybookPrefilters(t *testing.T) {
 	rule := mapFromAny(sliceFromAny(playbook["rules"])[0])
 	rule["dataPrefilters"] = "quote freshness and price observation only"
 	rule["portfolioPrefilters"] = map[string]any{"type": WatchRuleQuoteStale}
-	rule["newsPrefilters"] = "no structured news filter"
 
 	parsed, err := strategyGenerationReportFromResult(report)
 	if err != nil {
@@ -155,9 +154,6 @@ func TestStrategyGenerationNormalizesStringPlaybookPrefilters(t *testing.T) {
 	}
 	if len(got.PortfolioPrefilters) != 1 || got.PortfolioPrefilters[0]["type"] != WatchRuleQuoteStale {
 		t.Fatalf("portfolioPrefilters = %#v, want single object wrapped in array", got.PortfolioPrefilters)
-	}
-	if len(got.NewsPrefilters) != 0 {
-		t.Fatalf("newsPrefilters = %#v, want empty array after string normalization", got.NewsPrefilters)
 	}
 }
 
@@ -436,7 +432,6 @@ func TestStrategyGenerationDraftActivationFeedsDataMonitor(t *testing.T) {
 	rule["title"] = "突破后加仓观察"
 	rule["dataPrefilters"] = []any{map[string]any{"key": "break_200", "type": WatchRulePriceAbove, "threshold": 200.0}}
 	rule["portfolioPrefilters"] = []any{}
-	rule["newsPrefilters"] = []any{map[string]any{"keyword": "动力电池订单", "importance": "high"}}
 
 	taskID, _ := svc.agentTaskPool.createTask(run.TaskType, run.ID, "", time.Minute)
 	if _, err := svc.agentTaskPool.submitResult(taskID, AgentTaskTypeStrategyGeneration, AgentTaskSubmittedResult{
@@ -459,10 +454,6 @@ func TestStrategyGenerationDraftActivationFeedsDataMonitor(t *testing.T) {
 	meta := drafts[0].ActiveVersion.GenerationMeta
 	if meta["source"] != AgentTaskTypeStrategyGeneration {
 		t.Fatalf("generationMeta source = %v, want strategy_generation", meta["source"])
-	}
-	savedRule := mapFromAny(sliceFromAny(mapFromAny(meta["playbook"])["rules"])[0])
-	if len(sliceFromAny(savedRule["newsPrefilters"])) != 1 {
-		t.Fatalf("saved rule = %#v, want persisted newsPrefilters", savedRule)
 	}
 	reviewsBefore, err := svc.ListOperationReviews(ctx, OperationReviewListFilter{Symbol: "300750", Limit: 10})
 	if err != nil {
@@ -498,9 +489,6 @@ func TestStrategyGenerationDraftActivationFeedsDataMonitor(t *testing.T) {
 	}
 	if got := hits[0].Evidence["matchedPrefilterKey"]; got != "break_200" {
 		t.Fatalf("matched prefilter = %v, want break_200", got)
-	}
-	if len(sliceFromAny(mapFromAny(hits[0].Evidence["playbookRule"])["newsPrefilters"])) != 1 {
-		t.Fatalf("hit playbook rule = %#v, want newsPrefilters preserved", hits[0].Evidence["playbookRule"])
 	}
 }
 
@@ -703,7 +691,6 @@ func strategyGenerationReportResult(symbol string) map[string]any {
 							"risk":                "假突破",
 							"dataPrefilters":      []any{map[string]any{"type": "latest_quote", "symbol": symbol}},
 							"portfolioPrefilters": []any{},
-							"newsPrefilters":      []any{},
 							"priority":            1,
 						},
 					},

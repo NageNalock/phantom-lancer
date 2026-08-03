@@ -165,18 +165,17 @@ func newsEventFilterFromRequest(r *http.Request) stockv2.NewsEventListFilter {
 func newsLinkCandidateFilterFromRequest(r *http.Request) stockv2.NewsLinkCandidateListFilter {
 	query := r.URL.Query()
 	return stockv2.NewsLinkCandidateListFilter{
-		NewsEventID:   query.Get("newsEventId"),
-		RawNewsID:     query.Get("rawNewsId"),
-		Source:        query.Get("source"),
-		Symbol:        query.Get("symbol"),
-		Market:        query.Get("market"),
-		MatchMethod:   query.Get("matchMethod"),
-		MonitorStatus: query.Get("monitorStatus"),
-		Query:         query.Get("q"),
-		Since:         parseStockV2NewsTime(query.Get("since")),
-		Until:         parseStockV2NewsTime(query.Get("until")),
-		Limit:         stockV2NewsInt(query.Get("limit"), 50, 200),
-		Offset:        stockV2NewsOffset(query.Get("offset")),
+		NewsEventID: query.Get("newsEventId"),
+		RawNewsID:   query.Get("rawNewsId"),
+		Source:      query.Get("source"),
+		Symbol:      query.Get("symbol"),
+		Market:      query.Get("market"),
+		MatchMethod: query.Get("matchMethod"),
+		Query:       query.Get("q"),
+		Since:       parseStockV2NewsTime(query.Get("since")),
+		Until:       parseStockV2NewsTime(query.Get("until")),
+		Limit:       stockV2NewsInt(query.Get("limit"), 50, 200),
+		Offset:      stockV2NewsOffset(query.Get("offset")),
 	}
 }
 

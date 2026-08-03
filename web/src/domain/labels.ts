@@ -839,10 +839,7 @@ export function stockV2MonitorTaskTypeLabel(taskType?: string): string {
     case "latest_quote_refresh": return "最新行情刷新";
     case "daily_bars_sync": return "旧日K抓取";
     case "data_strategy_monitor": return "数据面策略监控";
-    case "portfolio_risk_monitor": return "组合风险监控";
-    case "news_strategy_monitor": return "消息面策略监控";
-    case "daily_fundamental_monitor": return "每日基本面监控";
-    case "data_quality_monitor": return "数据质量监控";
+    case "portfolio_sentinel": return "组合哨兵";
     default: return taskType || "监控任务";
   }
 }
@@ -1094,15 +1091,9 @@ export function stockV2AgentTaskTypeLabel(taskType?: string): string {
     case "opportunity_discovery": return "机会发现";
     case "portfolio_sentinel": return "组合哨兵";
     case "news_event_review": return "消息面研判";
-    case "portfolio_risk_review": return "组合风险审查";
     case "stock_profile_summary": return "股票画像生成";
-    case "bull_bear_debate": return "多空辩论";
     default: return taskType || "-";
   }
-}
-
-export function stockV2AgentTaskConfigurable(taskType?: string): boolean {
-	return taskType === "operation_review" || taskType === "strategy_generation" || taskType === "opportunity_discovery" || taskType === "portfolio_sentinel" || taskType === "news_event_review" || taskType === "stock_profile_summary";
 }
 
 export function stockV2AgentRunStatusLabel(status?: string): string {

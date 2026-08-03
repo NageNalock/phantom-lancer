@@ -63,8 +63,8 @@ export function StockV2NewsWorkbench({ actions }: { actions: AppActions }) {
       });
       if (sourceFilter) params.set("source", sourceFilter);
       if (query.trim()) params.set("q", query.trim());
-      if (statusFilter) {
-        const key = assetKind === "raw" ? "status" : assetKind === "events" ? "linkStatus" : "monitorStatus";
+      if (statusFilter && assetKind !== "candidates") {
+        const key = assetKind === "raw" ? "status" : "linkStatus";
         params.set(key, statusFilter);
       }
       const path =
@@ -199,12 +199,14 @@ export function StockV2NewsWorkbench({ actions }: { actions: AppActions }) {
               <option key={source} value={source}>{source}</option>
             ))}
           </select>
-          <select className="select h-9 w-40 text-xs" onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}>
-            <option value="">全部状态</option>
-            {statusOptions(assetKind).map((status) => (
-              <option key={status} value={status}>{status}</option>
-            ))}
-          </select>
+          {assetKind !== "candidates" ? (
+            <select className="select h-9 w-40 text-xs" onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}>
+              <option value="">全部状态</option>
+              {statusOptions(assetKind).map((status) => (
+                <option key={status} value={status}>{status}</option>
+              ))}
+            </select>
+          ) : null}
           <input
             className="input h-9 min-w-[260px] flex-1 text-xs"
             onChange={(event) => setQuery(event.target.value)}
@@ -306,7 +308,7 @@ function NewsAssetTable({
             <th className="px-3 py-2 font-medium">时间</th>
             <th className="px-3 py-2 font-medium">Source</th>
             <th className="px-3 py-2 font-medium">标题 / 对象</th>
-            <th className="px-3 py-2 font-medium">状态</th>
+            <th className="px-3 py-2 font-medium">{assetKind === "candidates" ? "匹配分" : "状态"}</th>
             <th className="px-3 py-2 text-right font-medium">操作</th>
           </tr>
         </thead>
@@ -319,7 +321,7 @@ function NewsAssetTable({
                 <div className="truncate font-medium">{rowTitle(assetKind, item)}</div>
                 <div className="truncate text-xs text-[var(--muted)]">{rowSubtitle(assetKind, item)}</div>
               </td>
-              <td className="px-3 py-2"><Pill tone="neutral">{rowStatus(assetKind, item)}</Pill></td>
+              <td className="px-3 py-2"><Pill tone="neutral">{rowState(assetKind, item)}</Pill></td>
               <td className="px-3 py-2 text-right">
                 <Button className="px-2 py-1 text-xs" onClick={() => onOpen(item)}>详情</Button>
               </td>
@@ -543,7 +545,7 @@ function NewsDetailDrawer({ item, onClose }: { item: DetailItem; onClose: () => 
 function statusOptions(kind: NewsAssetKind) {
   if (kind === "raw") return ["new", "processed", "failed", "ignored"];
   if (kind === "events") return ["pending", "linked", "no_candidate", "failed"];
-  return ["pending", "hit", "skipped", "failed"];
+  return [];
 }
 
 function rowSource(kind: NewsAssetKind, item: StockV2RawNews | StockV2NewsEvent | StockV2NewsLinkCandidate) {
@@ -575,14 +577,14 @@ function rowSubtitle(kind: NewsAssetKind, item: StockV2RawNews | StockV2NewsEven
   if (kind === "raw") return (item as StockV2RawNews).snippet || (item as StockV2RawNews).sourceId || "";
   if (kind === "events") return (item as StockV2NewsEvent).summary || (item as StockV2NewsEvent).rawNewsId || "";
   const candidate = item as StockV2NewsLinkCandidate;
-  const score = typeof candidate.score === "number" ? candidate.score.toFixed(1) : "-";
-  return `${candidate.matchMethod || "-"} · ${score} · ${candidate.newsEventTitle || candidate.reason || ""}`;
+  return `${candidate.matchMethod || "-"} · ${candidate.newsEventTitle || candidate.reason || ""}`;
 }
 
-function rowStatus(kind: NewsAssetKind, item: StockV2RawNews | StockV2NewsEvent | StockV2NewsLinkCandidate) {
+function rowState(kind: NewsAssetKind, item: StockV2RawNews | StockV2NewsEvent | StockV2NewsLinkCandidate) {
   if (kind === "raw") return (item as StockV2RawNews).status;
   if (kind === "events") return (item as StockV2NewsEvent).linkStatus;
-  return (item as StockV2NewsLinkCandidate).monitorStatus || "pending";
+  const score = (item as StockV2NewsLinkCandidate).score;
+  return typeof score === "number" ? score.toFixed(1) : "-";
 }
 
 function detailTitle(item: DetailItem) {

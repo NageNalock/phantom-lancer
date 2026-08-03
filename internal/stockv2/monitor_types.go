@@ -7,17 +7,10 @@ import (
 
 // 监控任务是系统固化的后台监控行为,不是用户创建/编辑/删除的业务对象。
 // 用户只能配置开关 / 周期 / 范围 / 敏感度 / 冷却 / Agent doublecheck 开关。
-// 本轮:quote/data_strategy/portfolio_risk/news 可运行;
-// fundamental/data_quality 仅占位(Runnable=false),不假装实现。
 
 const (
-	MonitorTaskLatestQuoteRefresh      = "latest_quote_refresh"
-	MonitorTaskDataStrategyMonitor     = "data_strategy_monitor"
-	MonitorTaskPortfolioRiskMonitor    = "portfolio_risk_monitor"
-	MonitorTaskNewsStrategyMonitor     = "news_strategy_monitor"
-	MonitorTaskPortfolioSentinel       = AgentTaskTypePortfolioSentinel
-	MonitorTaskDailyFundamentalMonitor = "daily_fundamental_monitor"
-	MonitorTaskDataQualityMonitor      = "data_quality_monitor"
+	MonitorTaskLatestQuoteRefresh  = "latest_quote_refresh"
+	MonitorTaskDataStrategyMonitor = "data_strategy_monitor"
 )
 
 const (
@@ -45,7 +38,6 @@ const (
 var (
 	ErrMonitorTaskNotFound       = errors.New("monitor task not found")
 	ErrMonitorHitNotFound        = errors.New("monitor hit not found")
-	ErrMonitorTaskNotConfigured  = errors.New("monitor task not configured")
 	ErrMonitorTaskAlreadyRunning = errors.New("monitor task already running")
 	ErrInvalidMonitorTaskType    = errors.New("invalid monitor task type")
 	ErrInvalidMonitorRunStatus   = errors.New("invalid monitor run status")
@@ -56,9 +48,7 @@ type MonitorTaskDefinition struct {
 	TaskType      string            `json:"taskType"`
 	Label         string            `json:"label"`
 	Description   string            `json:"description,omitempty"`
-	Category      string            `json:"category"` // data | strategy | portfolio | news | fundamental | quality
-	Runnable      bool              `json:"runnable"`
-	Configurable  bool              `json:"configurable"`
+	Category      string            `json:"category"` // data | strategy
 	DefaultConfig MonitorTaskConfig `json:"defaultConfig"`
 }
 
@@ -154,21 +144,8 @@ func builtinMonitorTaskDefinitions() []MonitorTaskDefinition {
 			Label:        "盘中分钟行情",
 			Description:  "持仓与监控标的的分钟级行情快照采集,并驱动组合估值刷新",
 			Category:     "data",
-			Runnable:     true,
-			Configurable: true,
 			DefaultConfig: MonitorTaskConfig{
 				Enabled: true, IntervalSeconds: 30, Sensitivity: "normal",
-			},
-		},
-		{
-			TaskType:     MonitorTaskPortfolioSentinel,
-			Label:        "组合哨兵",
-			Description:  "窗口级扫描组合信息面与数据面,由 Agent 判断风险并派生 Review",
-			Category:     "portfolio",
-			Runnable:     false,
-			Configurable: false,
-			DefaultConfig: MonitorTaskConfig{
-				Enabled: false, IntervalSeconds: 14400, Sensitivity: "normal", CooldownSeconds: 3600, AgentDoublecheckEnabled: true,
 			},
 		},
 		{
@@ -176,54 +153,8 @@ func builtinMonitorTaskDefinitions() []MonitorTaskDefinition {
 			Label:        "数据面策略监控",
 			Description:  "扫描 active 策略的触发规则；价格与涨跌幅越线由分钟行情刷新即时复查，其余条件按配置周期扫描",
 			Category:     "strategy",
-			Runnable:     true,
-			Configurable: true,
 			DefaultConfig: MonitorTaskConfig{
 				Enabled: false, IntervalSeconds: 600, Sensitivity: "normal", CooldownSeconds: 1800,
-			},
-		},
-		{
-			TaskType:     MonitorTaskPortfolioRiskMonitor,
-			Label:        "组合风险监控",
-			Description:  "扫描组合快照与持仓,检查单票权重与数据新鲜度",
-			Category:     "portfolio",
-			Runnable:     true,
-			Configurable: true,
-			DefaultConfig: MonitorTaskConfig{
-				Enabled: false, IntervalSeconds: 600, Sensitivity: "normal", CooldownSeconds: 1800,
-			},
-		},
-		{
-			TaskType:     MonitorTaskNewsStrategyMonitor,
-			Label:        "消息面策略监控",
-			Description:  "扫描 NewsLinkCandidate,对持仓/活跃策略/高分消息生成 MonitorHit",
-			Category:     "news",
-			Runnable:     true,
-			Configurable: true,
-			DefaultConfig: MonitorTaskConfig{
-				Enabled: false, IntervalSeconds: 600, Sensitivity: "normal", CooldownSeconds: 3600,
-			},
-		},
-		{
-			TaskType:     MonitorTaskDailyFundamentalMonitor,
-			Label:        "每日基本面监控",
-			Description:  "基本面变动监控(本轮未实现,仅占位)",
-			Category:     "fundamental",
-			Runnable:     false,
-			Configurable: true,
-			DefaultConfig: MonitorTaskConfig{
-				Enabled: false, IntervalSeconds: 86400, CooldownSeconds: 3600,
-			},
-		},
-		{
-			TaskType:     MonitorTaskDataQualityMonitor,
-			Label:        "数据质量监控",
-			Description:  "数据质量与新鲜度巡检(本轮未实现,仅占位)",
-			Category:     "quality",
-			Runnable:     false,
-			Configurable: true,
-			DefaultConfig: MonitorTaskConfig{
-				Enabled: false, IntervalSeconds: 3600, CooldownSeconds: 3600,
 			},
 		},
 	}

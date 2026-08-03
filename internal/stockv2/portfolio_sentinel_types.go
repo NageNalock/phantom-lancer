@@ -11,6 +11,10 @@ const (
 	PortfolioSentinelReportSchemaVersion = "portfolio-sentinel-report/v2"
 	portfolioSentinelLegacySchemaVersion = "portfolio-sentinel-report/v1"
 	portfolioSentinelPlanValidity        = 7 * 24 * time.Hour
+	// ponytail: sentinel alerts share a one-hour dedupe window so one analysis
+	// cannot fan out duplicate alerts; this is an internal safety invariant, not
+	// another owner-tunable scheduler/config surface.
+	portfolioSentinelAlertCooldownSeconds = 3600
 )
 
 const (

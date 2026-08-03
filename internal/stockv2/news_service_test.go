@@ -405,7 +405,7 @@ func TestNewsLinkCandidateUpsertReturnsStoredID(t *testing.T) {
 	}
 }
 
-func TestNewsLinkCandidateBatchUpsertPreservesMonitorStatus(t *testing.T) {
+func TestNewsLinkCandidateBatchUpsertUpdatesStoredCandidate(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -426,18 +426,14 @@ func TestNewsLinkCandidateBatchUpsertPreservesMonitorStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert first: %v", err)
 	}
-	if err := svc.store.MarkNewsLinkCandidateMonitorStatus(ctx, first.ID, NewsLinkMonitorStatusHit, "hit-1", time.Now()); err != nil {
-		t.Fatalf("mark monitor status: %v", err)
-	}
 	if err := svc.store.UpsertNewsLinkCandidates(ctx, []NewsLinkCandidate{{
-		ID:            "candidate-new",
-		NewsEventID:   event.ID,
-		Symbol:        "688012",
-		Market:        "SH",
-		MatchMethod:   "keyword",
-		Score:         0.9,
-		Reason:        "updated",
-		MonitorStatus: NewsLinkMonitorStatusPending,
+		ID:          "candidate-new",
+		NewsEventID: event.ID,
+		Symbol:      "688012",
+		Market:      "SH",
+		MatchMethod: "keyword",
+		Score:       0.9,
+		Reason:      "updated",
 	}}); err != nil {
 		t.Fatalf("batch upsert: %v", err)
 	}
@@ -447,9 +443,6 @@ func TestNewsLinkCandidateBatchUpsertPreservesMonitorStatus(t *testing.T) {
 	}
 	if reloaded.ID != first.ID || reloaded.Score != 0.9 || reloaded.Reason != "updated" {
 		t.Fatalf("reloaded candidate = %+v, want updated fields on original row", reloaded)
-	}
-	if reloaded.MonitorStatus != NewsLinkMonitorStatusHit || reloaded.MonitorHitID != "hit-1" {
-		t.Fatalf("monitor fields = status %q hit %q, want preserved hit", reloaded.MonitorStatus, reloaded.MonitorHitID)
 	}
 }
 
@@ -478,7 +471,7 @@ func TestNewsLinkCandidateBatchUpsertPersistsLargeBatch(t *testing.T) {
 		t.Fatalf("upsert large batch: %v", err)
 	}
 	for i := range candidates {
-		if candidates[i].ID == "" || candidates[i].MonitorStatus != NewsLinkMonitorStatusPending {
+		if candidates[i].ID == "" {
 			t.Fatalf("candidate %d defaults = %+v", i, candidates[i])
 		}
 	}

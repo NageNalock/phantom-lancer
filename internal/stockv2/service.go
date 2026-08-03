@@ -316,7 +316,6 @@ func (s *Service) Initialize(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("get settings failed: %w", err)
 	}
-	settings = s.normalizeDataAssetMaintenanceSettings(ctx, settings)
 	s.settings = settings
 
 	// 设置数据源的服务引用
@@ -1212,12 +1211,6 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	if req.UpdateIntervalSec != nil {
 		settings.UpdateIntervalSec = *req.UpdateIntervalSec
 	}
-	if req.DailyBarsAutoEnabled != nil {
-		if *req.DailyBarsAutoEnabled {
-			settings.AutoUpdateEnabled = true
-		}
-		settings.DailyBarsAutoEnabled = false
-	}
 	if req.ProxyEnabled != nil {
 		settings.ProxyEnabled = *req.ProxyEnabled
 	}
@@ -1298,28 +1291,7 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 
 // GetSettings 获取配置
 func (s *Service) GetSettings(ctx context.Context) (StockV2Settings, error) {
-	settings, err := s.store.GetSettings(ctx)
-	if err != nil {
-		return StockV2Settings{}, err
-	}
-	return s.normalizeDataAssetMaintenanceSettings(ctx, settings), nil
-}
-
-func (s *Service) normalizeDataAssetMaintenanceSettings(ctx context.Context, settings StockV2Settings) StockV2Settings {
-	if !settings.DailyBarsAutoEnabled {
-		return settings
-	}
-	if !settings.AutoUpdateEnabled {
-		settings.AutoUpdateEnabled = true
-	}
-	// ponytail: one-time compatibility shim for the removed standalone daily-bar scheduler.
-	settings.DailyBarsAutoEnabled = false
-	if s.store != nil {
-		if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil && s.log != nil {
-			s.log.Warn("migrate legacy daily bars auto setting failed", "error", safelog.Text(err.Error(), 240))
-		}
-	}
-	return settings
+	return s.store.GetSettings(ctx)
 }
 
 // GetInstruments 获取标的主数据
@@ -1674,14 +1646,10 @@ func (s *Service) tickScheduledMonitors(ctx context.Context) {
 	}
 	now := time.Now()
 	for taskType, cfg := range configs {
-		if taskType == MonitorTaskPortfolioSentinel {
-			continue
-		}
 		if !cfg.Enabled || cfg.IntervalSeconds <= 0 {
 			continue
 		}
-		def, ok := monitorTaskDefinition(taskType)
-		if !ok || !def.Runnable {
+		if _, ok := monitorTaskDefinition(taskType); !ok {
 			continue
 		}
 		if taskType == MonitorTaskLatestQuoteRefresh {

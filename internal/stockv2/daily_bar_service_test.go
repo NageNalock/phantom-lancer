@@ -28,33 +28,6 @@ func TestDailyBarsNeedsMaintenance(t *testing.T) {
 	}
 }
 
-func TestLegacyDailyBarsAutoMigratesToUnifiedMaintenance(t *testing.T) {
-	svc, cleanup := newStrategyTestService(t)
-	defer cleanup()
-	ctx := context.Background()
-	if err := svc.Initialize(ctx); err != nil {
-		t.Fatalf("initialize: %v", err)
-	}
-
-	settings := svc.settings
-	settings.AutoUpdateEnabled = false
-	settings.DailyBarsAutoEnabled = true
-	if err := svc.store.CreateOrUpdateSettings(ctx, settings); err != nil {
-		t.Fatalf("save legacy settings: %v", err)
-	}
-
-	got, err := svc.GetSettings(ctx)
-	if err != nil {
-		t.Fatalf("get settings: %v", err)
-	}
-	if !got.AutoUpdateEnabled {
-		t.Fatalf("AutoUpdateEnabled = false, want migrated true")
-	}
-	if got.DailyBarsAutoEnabled {
-		t.Fatalf("DailyBarsAutoEnabled = true, want legacy field cleared")
-	}
-}
-
 func TestRecordDailyBarsLastRunUsesPersistedSettingsAsBase(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

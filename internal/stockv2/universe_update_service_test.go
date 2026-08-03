@@ -130,7 +130,7 @@ func TestNewServiceMarksInterruptedScheduledTasksFailed(t *testing.T) {
 	}
 	if _, err := store.CreateMonitorRun(ctx, MonitorRun{
 		ID:          "monitor-interrupted",
-		TaskType:    MonitorTaskPortfolioRiskMonitor,
+		TaskType:    MonitorTaskDataStrategyMonitor,
 		Status:      MonitorRunStatusRunning,
 		TriggerType: MonitorTriggerScheduled,
 		StartedAt:   startedAt,

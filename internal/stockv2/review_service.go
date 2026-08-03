@@ -343,6 +343,9 @@ func operationReviewOutputSuppressesAlert(outputType string) bool {
 }
 
 func (s *Service) monitorAlertTaskConfig(ctx context.Context, taskType string) (MonitorTaskConfig, error) {
+	if taskType == AgentTaskTypePortfolioSentinel {
+		return MonitorTaskConfig{CooldownSeconds: portfolioSentinelAlertCooldownSeconds}, nil
+	}
 	def, ok := monitorTaskDefinition(taskType)
 	if !ok {
 		return MonitorTaskConfig{}, ErrInvalidMonitorTaskType

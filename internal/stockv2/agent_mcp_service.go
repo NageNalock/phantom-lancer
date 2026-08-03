@@ -524,7 +524,6 @@ func (s *Service) portfolioSentinelImpactReviewScopePage(ctx context.Context, ru
 					item["label"] = value.Definition.Label
 					item["description"] = value.Definition.Description
 					item["category"] = value.Definition.Category
-					item["runnable"] = value.Definition.Runnable
 					item["enabled"] = value.Config.Enabled
 					item["intervalSeconds"] = value.Config.IntervalSeconds
 					item["scope"] = value.Config.Scope

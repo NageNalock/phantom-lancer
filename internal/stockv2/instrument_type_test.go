@@ -283,9 +283,6 @@ func TestStoreInitMigratesOldStockV2ColumnsBeforeIndexes(t *testing.T) {
 		{"stockv2_news_events", "link_status"},
 		{"stockv2_news_events", "event_at"},
 		{"stockv2_news_events", "link_processed_at"},
-		{"stockv2_news_link_candidates", "monitor_status"},
-		{"stockv2_news_link_candidates", "monitor_hit_id"},
-		{"stockv2_news_link_candidates", "monitored_at"},
 	} {
 		if !testColumnExists(t, store.db, tc.table, tc.column) {
 			t.Fatalf("%s.%s was not migrated", tc.table, tc.column)

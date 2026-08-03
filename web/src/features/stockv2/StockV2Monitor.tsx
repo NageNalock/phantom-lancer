@@ -279,10 +279,6 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
     }
   }
 
-  function openPortfolioSentinel() {
-    openPortfolioSentinelPage();
-  }
-
   async function changeAlertStatus(alert: StockV2Alert, action: "ack" | "ignore" | "resolve") {
     await actions.api(`/api/stockv2/alerts/${alert.id}/${action}`, { method: "POST" });
   }
@@ -430,7 +426,6 @@ export function StockV2Monitor({ actions }: { actions: AppActions }) {
                 onRun={() => void runTask(task.definition.taskType)}
                 onToggle={() => void toggleTaskEnabled(task)}
                 onEdit={() => setEditTask(task)}
-                onOpenSentinel={openPortfolioSentinel}
               />
             ))}
           </div>
@@ -595,20 +590,16 @@ function MonitorTaskRow({
   onRun,
   onToggle,
   onEdit,
-  onOpenSentinel,
 }: {
   task: StockV2MonitorTask;
   submitting: boolean;
   onRun: () => void;
   onToggle: () => void;
   onEdit: () => void;
-  onOpenSentinel: () => void;
 }) {
   const def = task.definition;
   const cfg = task.config || {};
   const latest = task.latestRun;
-  const runnable = def.runnable;
-  const portfolioSentinel = def.taskType === "portfolio_sentinel";
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
       <div className="min-w-0">
@@ -616,7 +607,6 @@ function MonitorTaskRow({
           <strong className="text-sm">{def.label || def.taskType}</strong>
           <Pill tone="neutral">{stockV2MonitorCategoryLabel(def.category)}</Pill>
           {cfg.enabled ? <Pill tone="good">已启用</Pill> : <Pill tone="neutral">未启用</Pill>}
-          {portfolioSentinel ? <Pill tone="neutral">独立入口</Pill> : !runnable ? <Pill tone="warn">未实现</Pill> : null}
           {cfg.agentDoublecheckEnabled ? <Pill tone="neutral">Agent 复核</Pill> : null}
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--muted-strong)]">
@@ -635,27 +625,18 @@ function MonitorTaskRow({
         ) : null}
       </div>
       <div className="flex flex-wrap items-start justify-end gap-1">
-        {portfolioSentinel ? (
-          <Button onClick={onOpenSentinel} disabled={submitting} title="打开组合哨兵">
-            <ShieldCheck size={12} className="mr-1" />
-            查看哨兵
-          </Button>
-        ) : (
-          <>
-            <Button onClick={onToggle} disabled={submitting || !runnable} title={cfg.enabled ? "暂停" : "启用"}>
-              <Power size={12} className="mr-1" />
-              {cfg.enabled ? "暂停" : "启用"}
-            </Button>
-            <Button onClick={onRun} disabled={submitting || !runnable} title="立即运行">
-              <ArrowsClockwise size={12} className="mr-1" />
-              运行
-            </Button>
-            <Button onClick={onEdit} disabled={submitting || !def.configurable} title="配置">
-              <Pencil size={12} className="mr-1" />
-              配置
-            </Button>
-          </>
-        )}
+        <Button onClick={onToggle} disabled={submitting} title={cfg.enabled ? "暂停" : "启用"}>
+          <Power size={12} className="mr-1" />
+          {cfg.enabled ? "暂停" : "启用"}
+        </Button>
+        <Button onClick={onRun} disabled={submitting} title="立即运行">
+          <ArrowsClockwise size={12} className="mr-1" />
+          运行
+        </Button>
+        <Button onClick={onEdit} disabled={submitting} title="配置">
+          <Pencil size={12} className="mr-1" />
+          配置
+        </Button>
       </div>
     </div>
   );

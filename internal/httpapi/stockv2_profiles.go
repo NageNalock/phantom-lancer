@@ -187,8 +187,7 @@ func stockV2ProfileHTTPStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, stockv2.ErrAgentExecutorUnavailable),
 		errors.Is(err, stockv2.ErrAgentModelNotAvailable),
-		errors.Is(err, stockv2.ErrAgentTaskProfileNotFound),
-		errors.Is(err, stockv2.ErrAgentTaskNotConfigurable):
+		errors.Is(err, stockv2.ErrAgentTaskProfileNotFound):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError
