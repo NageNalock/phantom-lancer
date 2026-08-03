@@ -241,6 +241,9 @@ type PortfolioSentinelThemeContext struct {
 
 type PortfolioSentinelNewsContext struct {
 	RunID                    string                                    `json:"runId"`
+	CoveredRunCount          int                                       `json:"coveredRunCount"`
+	WindowStart              time.Time                                 `json:"windowStart"`
+	WindowEnd                time.Time                                 `json:"windowEnd"`
 	ChangedThreadCount       int                                       `json:"changedThreadCount"`
 	MaterialChangeCount      int                                       `json:"materialChangeCount"`
 	RequiredMCPTool          string                                    `json:"requiredMcpTool"`

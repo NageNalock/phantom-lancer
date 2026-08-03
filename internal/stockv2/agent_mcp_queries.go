@@ -324,7 +324,7 @@ func (p *agentTaskPool) mcpListNewsContextChanges(args json.RawMessage) (any, *m
 	if req.Offset < 0 {
 		req.Offset = 0
 	}
-	items, total, err := svc.ListNewsContextChangedThreads(context.Background(), req.RunID, req.Limit, req.Offset)
+	items, total, err := svc.ListNewsContextReviewChanges(context.Background(), req.RunID, req.Limit, req.Offset)
 	if err != nil {
 		return nil, mcpErrorFromError(err)
 	}

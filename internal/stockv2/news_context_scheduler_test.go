@@ -796,7 +796,7 @@ func TestNewsContextAutomaticRetryStopsAfterLimit(t *testing.T) {
 		Status: NewsContextRunStatusFailed, Phase: "failed",
 		WindowStart: start, WindowEnd: end,
 		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
-		ErrorMessage: "API model stopped without submitting a result",
+		ErrorMessage: "save news context result failed: invalid news context result: duplicate processed news id",
 		RetryCount:   newsContextTimeoutRetryLimit,
 	})
 	if err != nil {

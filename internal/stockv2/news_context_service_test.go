@@ -321,9 +321,9 @@ func TestPortfolioReviewBindsContextBeforeImmediateSubmission(t *testing.T) {
 	if err != nil || storedSentinel.Status != PortfolioSentinelStatusFailed {
 		t.Fatalf("sentinel status=%q error=%q getErr=%v", storedSentinel.Status, storedSentinel.ErrorMessage, err)
 	}
-	linked, found, err := svc.store.FindNewsContextRunByReviewRunID(ctx, sentinel.ID)
-	if err != nil || !found || linked.ID != run.ID || linked.ReviewStatus != NewsContextReviewRunning {
-		t.Fatalf("linked context run=%+v found=%v err=%v", linked, found, err)
+	linked, err := svc.store.ListNewsContextRunsByReviewRunID(ctx, sentinel.ID)
+	if err != nil || len(linked) != 1 || linked[0].ID != run.ID || linked[0].ReviewStatus != NewsContextReviewRunning {
+		t.Fatalf("linked context runs=%+v err=%v", linked, err)
 	}
 }
 
@@ -541,6 +541,7 @@ type retryNewsContextExecutor struct {
 	models                  []string
 	delay                   time.Duration
 	usageLimitAttempts      int
+	upstreamFailureAttempts int
 	timeoutAttempts         int
 	processExitAttempts     int
 	invalidCoverageAttempts int
@@ -569,6 +570,13 @@ func (e *retryNewsContextExecutor) ExecuteNewsContextAggregation(
 				StderrTail: "API returned HTTP 402: Insufficient Balance",
 			},
 			errors.New("API returned HTTP 402: Insufficient Balance")
+	}
+	if len(e.sizes) <= e.usageLimitAttempts+e.upstreamFailureAttempts {
+		return &AgentExecutorOutput{
+				Command: "POST /chat/completions", ExitCode: -1, RequestCount: 1,
+				StderrTail: `API returned HTTP 502: {"error":{"code":"upstream_transport_error"}}`,
+			},
+			errors.New(`API returned HTTP 502: {"error":{"code":"upstream_transport_error"}}`)
 	}
 	if len(e.sizes) <= e.timeoutAttempts {
 		return &AgentExecutorOutput{TimedOut: true, ExitCode: -1, Duration: newsContextAgentTimeout},
@@ -832,7 +840,7 @@ func TestExecuteDailyNewsContextRunKeepsMaterializedResultWhenIndexRefreshFails(
 	}
 }
 
-func TestExecuteNewsContextBatchFallsBackAfterProviderUsageLimit(t *testing.T) {
+func TestExecuteNewsContextBatchFallsBackAfterRecoverableProviderFailure(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -866,7 +874,7 @@ func TestExecuteNewsContextBatchFallsBackAfterProviderUsageLimit(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("bind task models: %v", err)
 	}
-	executor := &retryNewsContextExecutor{pool: svc.agentTaskPool, usageLimitAttempts: 1}
+	executor := &retryNewsContextExecutor{pool: svc.agentTaskPool, upstreamFailureAttempts: 1}
 	svc.newsContextExecutor = executor
 
 	now := time.Now().Truncate(time.Second)
@@ -970,6 +978,9 @@ func TestExecuteNewsContextBatchFallsBackAfterProviderUsageLimit(t *testing.T) {
 		t.Fatalf("agent run statuses = %#v", statusByModel)
 	}
 	usageLimit := errors.New("API returned HTTP 402: Insufficient Balance")
+	if !newsContextFallbackEligible(usageLimit, nil) {
+		t.Fatal("provider usage-limit failure was not eligible for immediate fallback")
+	}
 	run.CurrentAgentRunID = runIDByModel[primary.ID]
 	if !svc.newsContextRunEligibleForAutoRetry(ctx, run, usageLimit) {
 		t.Fatal("primary usage-limit failure with unused fallback was not auto-retryable")
@@ -1119,6 +1130,76 @@ func TestNewsContextReviewFailureSchedulesRetryAndExposesExhaustion(t *testing.T
 	}
 }
 
+func TestNewsContextProviderFailureSchedulesRecoveryAfterRetryLimit(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowFourHour, TriggerType: NewsContextTriggerScheduled,
+		Status: NewsContextRunStatusFailed, Phase: "failed",
+		WindowStart: now.Add(-4 * time.Hour), WindowEnd: now,
+		RetryCount:   newsContextTimeoutRetryLimit,
+		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatalf("create exhausted run: %v", err)
+	}
+	cause := errors.New(`API returned HTTP 502: {"error":{"code":"upstream_transport_error"}}`)
+	svc.scheduleNewsContextAutoRetry(ctx, &run, cause, now)
+	wantRetryAt := now.Add(newsContextRecoveryRetryDelay)
+	if !run.NextRetryAt.Equal(wantRetryAt) {
+		t.Fatalf("provider recovery at = %v, want %v", run.NextRetryAt, wantRetryAt)
+	}
+
+	run.ErrorMessage = cause.Error()
+	run.NextRetryAt = time.Time{}
+	if run, err = svc.store.UpdateNewsContextRun(ctx, run); err != nil {
+		t.Fatalf("save legacy exhausted run: %v", err)
+	}
+	due, err := svc.ensureNewsContextAutoRetryScheduled(ctx, &run, now)
+	if err != nil || !due || !run.NextRetryAt.Equal(now) {
+		t.Fatalf("legacy provider recovery due=%v run=%+v err=%v", due, run, err)
+	}
+}
+
+func TestRetryNewsContextRunKeepsRecoveryCountAndResetsManualBudget(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		automatic bool
+		wantCount int
+	}{
+		{name: "low frequency recovery", automatic: true, wantCount: newsContextTimeoutRetryLimit},
+		{name: "manual fresh cycle", automatic: false, wantCount: 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, cleanup := newStrategyTestService(t)
+			defer cleanup()
+			ctx := context.Background()
+			now := time.Now().Truncate(time.Second)
+			run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+				WindowType: NewsContextWindowFourHour, TriggerType: NewsContextTriggerScheduled,
+				Status: NewsContextRunStatusFailed, Phase: "failed",
+				WindowStart: now.Add(-4 * time.Hour), WindowEnd: now,
+				ErrorMessage: `API returned HTTP 502: {"error":{"code":"upstream_transport_error"}}`,
+				RetryCount:   newsContextTimeoutRetryLimit, NextRetryAt: now.Add(-time.Second),
+				ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
+			})
+			if err != nil {
+				t.Fatalf("create failed run: %v", err)
+			}
+			started, err := svc.retryNewsContextRun(ctx, run.ID, tt.automatic)
+			if err != nil {
+				t.Fatalf("retry failed run: %v", err)
+			}
+			if started.RetryCount != tt.wantCount {
+				t.Fatalf("retry count = %d, want %d", started.RetryCount, tt.wantCount)
+			}
+			waitForNewsContextRunTerminal(t, svc, run.ID)
+		})
+	}
+}
+
 func TestCompleteNewsContextRunResetsRetryBudgetBeforeReview(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
@@ -1166,6 +1247,16 @@ func TestRetryableNewsContextAttemptFailureSeparatesTransientAndQuotaErrors(t *t
 		if retryableNewsContextAttemptFailure(errors.New(message)) {
 			t.Fatalf("terminal failure was retryable: %s", message)
 		}
+	}
+	if retryableNewsContextRecoveryFailure(errors.New(
+		"save news context result failed: disk write timed out",
+	)) {
+		t.Fatal("storage failure was classified as a provider recovery probe")
+	}
+	if !retryableNewsContextRecoveryFailure(errors.New(
+		"interrupted by service restart before completion",
+	)) {
+		t.Fatal("service restart was not classified as safe low-frequency recovery")
 	}
 }
 

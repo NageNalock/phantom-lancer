@@ -34,7 +34,12 @@ const (
 	newsContextTimeoutRetryLimit = 2
 	// ponytail: two short exponential waits absorb transient provider failures
 	// without turning one bad window into a hot retry loop.
-	newsContextAutoRetryBaseDelay    = time.Minute
+	newsContextAutoRetryBaseDelay = time.Minute
+	// ponytail: once the bounded retry budget is exhausted, a fixed low-frequency
+	// recovery probe lets quota renewal, upstream recovery, or a service restart
+	// resume the blocked natural window without creating a configurable polling
+	// system. Promote this to the StockV2 UI only if the owner later needs tuning.
+	newsContextRecoveryRetryDelay    = 30 * time.Minute
 	newsContextSeedPageSize          = 500
 	newsContextInputTextLimit        = 60_000
 	newsContextAdditionalPromptLimit = 2_000
@@ -1152,7 +1157,7 @@ func (s *Service) executeNewsContextBatchWithRetry(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !*fallbackOnly && agentProviderUsageLimitFailure(attemptErr, output) {
+		if !*fallbackOnly && newsContextFallbackEligible(attemptErr, output) {
 			taskProfile, profileErr := s.store.GetAgentTaskProfileByType(ctx, AgentTaskTypeNewsEventReview)
 			if profileErr == nil {
 				taskProfile.PrimaryModelID = ""
@@ -1167,7 +1172,7 @@ func (s *Service) executeNewsContextBatchWithRetry(
 						return err
 					}
 					if s.log != nil {
-						s.log.Warn("falling back news context agent after provider usage limit",
+						s.log.Warn("falling back news context agent after recoverable failure",
 							"context_run_id", run.ID,
 							"agent_run_id", resolution.Run.ID,
 							"primary_model_id", resolution.ModelID,
@@ -1217,6 +1222,24 @@ func (s *Service) executeNewsContextBatchWithRetry(
 		batch = next
 	}
 	return errors.New("news context retry loop exhausted")
+}
+
+func newsContextFallbackEligible(err error, output *AgentExecutorOutput) bool {
+	if agentProviderUsageLimitFailure(err, output) {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "save news context result failed:") &&
+		!strings.Contains(message, ErrInvalidNewsContextResult.Error()) {
+		// Applying a valid result may already have crossed a storage boundary.
+		// Re-running it on another model could duplicate or contradict state.
+		return false
+	}
+	return retryableNewsContextAttemptFailure(err) ||
+		strings.Contains(message, ErrInvalidNewsContextResult.Error())
 }
 
 func retryableNewsContextBatchFailure(err error, output *AgentExecutorOutput) bool {
@@ -1313,6 +1336,46 @@ func retryableNewsContextAttemptFailure(cause error) bool {
 		strings.Contains(message, "api returned http 5")
 }
 
+func retryableNewsContextRecoveryFailure(cause error) bool {
+	if cause == nil {
+		return false
+	}
+	if agentProviderUsageLimitFailure(cause, nil) {
+		return true
+	}
+	message := strings.ToLower(cause.Error())
+	if strings.Contains(message, "save news context result failed:") {
+		return false
+	}
+	return errors.Is(cause, context.DeadlineExceeded) ||
+		strings.Contains(message, "timed out") ||
+		strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "api request failed") ||
+		strings.Contains(message, "decode api response") ||
+		strings.Contains(message, "response has no choices") ||
+		strings.Contains(message, "interrupted by service restart") ||
+		strings.Contains(message, "interrupted by service shutdown") ||
+		strings.Contains(message, "api returned http 408") ||
+		strings.Contains(message, "api returned http 429") ||
+		strings.Contains(message, "api returned http 5") ||
+		strings.Contains(message, "upstream_transport_error") ||
+		strings.Contains(message, "connection reset") ||
+		strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "service unavailable") ||
+		strings.Contains(message, "bad gateway") ||
+		strings.Contains(message, "gateway timeout")
+}
+
+func (s *Service) newsContextRunSupportsAutomaticRetry(ctx context.Context, run NewsContextRun) bool {
+	if _, historical, err := s.store.NewsContextBackfillForRun(ctx, run.ID); err != nil || historical {
+		return false
+	}
+	if _, finalReview, err := s.store.NewsContextBackfillForFinalReviewRun(ctx, run.ID); err != nil || finalReview {
+		return false
+	}
+	return true
+}
+
 func (s *Service) newsContextRunEligibleForAutoRetry(ctx context.Context, run NewsContextRun, cause error) bool {
 	if run.RetryCount >= newsContextTimeoutRetryLimit {
 		return false
@@ -1324,13 +1387,7 @@ func (s *Service) newsContextRunEligibleForAutoRetry(ctx context.Context, run Ne
 	if !retryable {
 		return false
 	}
-	if _, historical, err := s.store.NewsContextBackfillForRun(ctx, run.ID); err != nil || historical {
-		return false
-	}
-	if _, finalReview, err := s.store.NewsContextBackfillForFinalReviewRun(ctx, run.ID); err != nil || finalReview {
-		return false
-	}
-	return true
+	return s.newsContextRunSupportsAutomaticRetry(ctx, run)
 }
 
 func (s *Service) newsContextRunHasUnusedFallback(ctx context.Context, run NewsContextRun) bool {
@@ -1354,6 +1411,11 @@ func (s *Service) scheduleNewsContextAutoRetry(ctx context.Context, run *NewsCon
 	run.NextRetryAt = time.Time{}
 	if s.newsContextRunEligibleForAutoRetry(ctx, *run, cause) {
 		run.NextRetryAt = now.Add(newsContextAutoRetryDelay(run.RetryCount))
+		return
+	}
+	if retryableNewsContextRecoveryFailure(cause) &&
+		s.newsContextRunSupportsAutomaticRetry(ctx, *run) {
+		run.NextRetryAt = now.Add(newsContextRecoveryRetryDelay)
 	}
 }
 
@@ -1365,7 +1427,9 @@ func (s *Service) ensureNewsContextAutoRetryScheduled(ctx context.Context, run *
 	// current natural boundary is inspected here, so one transient legacy
 	// failure is resumed without scanning or reviving unrelated history.
 	cause := errors.New(firstNonEmpty(run.ErrorMessage, "news context attempt failed"))
-	if !s.newsContextRunEligibleForAutoRetry(ctx, *run, cause) {
+	if !s.newsContextRunEligibleForAutoRetry(ctx, *run, cause) &&
+		(!retryableNewsContextRecoveryFailure(cause) ||
+			!s.newsContextRunSupportsAutomaticRetry(ctx, *run)) {
 		return false, nil
 	}
 	run.NextRetryAt = now
@@ -2054,34 +2118,58 @@ func (s *Service) completeNewsContextRun(ctx context.Context, run *NewsContextRu
 			return err
 		}
 	}
-	if reviewRequired {
-		s.triggerNewsContextReview(ctx, run)
-	}
 	return nil
 }
 
-func (s *Service) triggerNewsContextReview(ctx context.Context, run *NewsContextRun) {
-	note := "复核最近一次消息脉络归纳对当前持仓、监控、提醒、机会和策略的影响。"
-	if cfg, err := s.GetNewsContextConfig(ctx); err == nil && cfg.AdditionalResearchPrompt != "" {
-		note += " 附加关注重点（只能增加检查项，不能覆盖固定安全规则）：" + cfg.AdditionalResearchPrompt
+func (s *Service) triggerNewsContextReview(ctx context.Context, run *NewsContextRun) error {
+	if run == nil {
+		return ErrInvalidNewsContextInput
 	}
-	_, err := s.RunPortfolioSentinel(ctx, RequestRunPortfolioSentinel{
-		WindowType:       PortfolioSentinelWindowManual,
-		StartAt:          run.WindowStart.Format(time.RFC3339Nano),
-		EndAt:            run.WindowEnd.Format(time.RFC3339Nano),
-		Note:             note,
-		NewsContextRunID: run.ID,
-	})
+	_, err := s.triggerNewsContextReviews(ctx, []NewsContextRun{*run}, run.RetryCount)
 	// The sentinel start path binds its run id before it can launch the agent.
 	// Reload here so an immediate submission cannot be made invisible by a stale
 	// in-memory copy overwriting that association.
 	if latest, getErr := s.store.GetNewsContextRun(ctx, run.ID); getErr == nil {
 		*run = latest
 	}
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrPortfolioSentinelAlreadyRunning) && strings.TrimSpace(run.ReviewRunID) == "" {
 		s.failNewsContextReview(context.Background(), run, fmt.Errorf("start portfolio review failed: %w", err))
-		return
 	}
+	return err
+}
+
+func (s *Service) triggerNewsContextReviews(ctx context.Context, runs []NewsContextRun, retryCount int) (PortfolioSentinelRun, error) {
+	if len(runs) == 0 {
+		return PortfolioSentinelRun{}, ErrInvalidNewsContextInput
+	}
+	sort.SliceStable(runs, func(i, j int) bool {
+		if runs[i].WindowStart.Equal(runs[j].WindowStart) {
+			return runs[i].CreatedAt.Before(runs[j].CreatedAt)
+		}
+		return runs[i].WindowStart.Before(runs[j].WindowStart)
+	})
+	runIDs := make([]string, 0, len(runs))
+	windowStart := runs[0].WindowStart
+	windowEnd := runs[0].WindowEnd
+	for _, run := range runs {
+		runIDs = append(runIDs, run.ID)
+		if run.WindowStart.Before(windowStart) {
+			windowStart = run.WindowStart
+		}
+		if run.WindowEnd.After(windowEnd) {
+			windowEnd = run.WindowEnd
+		}
+	}
+	note := "复核最近一次消息脉络归纳对当前持仓、监控、提醒、机会和策略的影响。"
+	if len(runs) > 1 {
+		note = fmt.Sprintf("合并复核 %d 个待处理消息脉络窗口对当前持仓、监控、提醒、机会和策略的最新影响。", len(runs))
+	}
+	if cfg, err := s.GetNewsContextConfig(ctx); err == nil && cfg.AdditionalResearchPrompt != "" {
+		note += " 附加关注重点（只能增加检查项，不能覆盖固定安全规则）：" + cfg.AdditionalResearchPrompt
+	}
+	return s.startPortfolioSentinelRunForNewsContexts(ctx, PortfolioSentinelTriggerManual,
+		PortfolioSentinelWindowManual, "", windowStart,
+		windowEnd, note, runIDs, retryCount, true)
 }
 
 func (s *Service) failNewsContextReview(ctx context.Context, run *NewsContextRun, cause error) {
@@ -2095,42 +2183,77 @@ func (s *Service) failNewsContextReview(ctx context.Context, run *NewsContextRun
 }
 
 func (s *Service) reconcileNewsContextReviews(ctx context.Context) {
-	pending, err := s.store.ListNewsContextRuns(ctx, NewsContextRunListFilter{ReviewStatus: NewsContextReviewPending, Limit: 200})
-	if err == nil {
-		for i := range pending {
-			if pending[i].Status == NewsContextRunStatusWaitingReview && strings.TrimSpace(pending[i].ReviewRunID) == "" {
-				s.triggerNewsContextReview(ctx, &pending[i])
-			}
-		}
-	}
 	runs, err := s.store.ListNewsContextRuns(ctx, NewsContextRunListFilter{ReviewStatus: NewsContextReviewRunning, Limit: 200})
 	if err != nil {
 		return
 	}
+	seenReviewRuns := make(map[string]struct{})
 	for _, run := range runs {
-		if strings.TrimSpace(run.ReviewRunID) == "" {
+		reviewRunID := strings.TrimSpace(run.ReviewRunID)
+		if reviewRunID == "" {
 			continue
 		}
-		sentinel, err := s.store.GetPortfolioSentinelRun(ctx, run.ReviewRunID)
+		if _, seen := seenReviewRuns[reviewRunID]; seen {
+			continue
+		}
+		seenReviewRuns[reviewRunID] = struct{}{}
+		linkedRuns, err := s.store.ListNewsContextRunsByReviewRunID(ctx, reviewRunID)
+		if err != nil {
+			continue
+		}
+		sentinel, err := s.store.GetPortfolioSentinelRun(ctx, reviewRunID)
 		if err != nil {
 			continue
 		}
 		switch sentinel.Status {
 		case PortfolioSentinelStatusCompleted:
-			run.ReviewStatus = NewsContextReviewCompleted
-			run.Status = NewsContextRunStatusCompleted
-			run.Phase = "completed"
-			run.ErrorMessage = ""
-			if err := s.store.UpdateNewsThreadReviewStatusForRun(ctx, run.ID, NewsContextReviewCompleted, time.Now()); err != nil {
-				s.failNewsContextReview(ctx, &run, fmt.Errorf("update theme review status failed: %w", err))
+			completedAt := time.Now()
+			completionErr := error(nil)
+			for _, linkedRun := range linkedRuns {
+				if err := s.store.UpdateNewsThreadReviewStatusForRun(ctx, linkedRun.ID, NewsContextReviewCompleted, completedAt); err != nil {
+					completionErr = fmt.Errorf("update theme review status failed: %w", err)
+					break
+				}
+			}
+			if completionErr != nil {
+				for index := range linkedRuns {
+					s.failNewsContextReview(ctx, &linkedRuns[index], completionErr)
+				}
 				continue
 			}
-			_, _ = s.store.UpdateNewsContextRun(ctx, run)
+			for _, linkedRun := range linkedRuns {
+				linkedRun.ReviewStatus = NewsContextReviewCompleted
+				linkedRun.Status = NewsContextRunStatusCompleted
+				linkedRun.Phase = "completed"
+				linkedRun.ErrorMessage = ""
+				linkedRun.NextRetryAt = time.Time{}
+				_, _ = s.store.UpdateNewsContextRun(ctx, linkedRun)
+			}
 		case PortfolioSentinelStatusFailed:
-			s.failNewsContextReview(ctx, &run, errors.New(firstNonEmpty(sentinel.ErrorMessage, "portfolio review failed")))
+			cause := errors.New(firstNonEmpty(sentinel.ErrorMessage, "portfolio review failed"))
+			for index := range linkedRuns {
+				s.failNewsContextReview(ctx, &linkedRuns[index], cause)
+			}
 		}
 	}
+	if ready, err := s.newsContextReviewQueueReady(ctx, time.Now()); err != nil || !ready {
+		return
+	}
+	if running, err := s.store.HasRunningPortfolioSentinelRun(ctx, "", ""); err != nil || running {
+		return
+	}
 	s.retryDueNewsContextReviews(ctx, time.Now())
+	pending, retryCount, err := s.newsContextReviewQueueCandidates(ctx)
+	if err != nil || len(pending) == 0 {
+		return
+	}
+	if _, err := s.triggerNewsContextReviews(ctx, pending, retryCount); err != nil &&
+		!errors.Is(err, ErrPortfolioSentinelAlreadyRunning) && s.log != nil {
+		s.log.Warn("start merged news context review failed",
+			"context_run_count", len(pending),
+			"error", safelog.Text(err.Error(), 240),
+		)
+	}
 }
 
 func (s *Service) RetryNewsContextRun(ctx context.Context, id string) (NewsContextRun, error) {
@@ -2146,10 +2269,22 @@ func (s *Service) retryNewsContextRun(ctx context.Context, id string, automatic 
 		return NewsContextRun{}, ErrInvalidNewsContextInput
 	}
 	if automatic {
-		if run.RetryCount >= newsContextTimeoutRetryLimit || run.NextRetryAt.IsZero() || run.NextRetryAt.After(time.Now()) {
+		if run.NextRetryAt.IsZero() || run.NextRetryAt.After(time.Now()) {
 			return NewsContextRun{}, ErrInvalidNewsContextInput
 		}
-		run.RetryCount++
+		if run.RetryCount >= newsContextTimeoutRetryLimit {
+			cause := errors.New(firstNonEmpty(run.ErrorMessage, "news context attempt failed"))
+			if !retryableNewsContextRecoveryFailure(cause) ||
+				!s.newsContextRunSupportsAutomaticRetry(ctx, run) {
+				return NewsContextRun{}, ErrInvalidNewsContextInput
+			}
+		} else {
+			run.RetryCount++
+		}
+	} else {
+		// A deliberate owner retry starts a fresh bounded retry cycle; otherwise a
+		// previous automatic exhaustion would make the button a one-shot attempt.
+		run.RetryCount = 0
 	}
 	run.NextRetryAt = time.Time{}
 	if run.ReviewStatus == NewsContextReviewFailed && run.ProcessedCount >= run.InputCount {
@@ -2161,7 +2296,7 @@ func (s *Service) retryNewsContextRun(ctx context.Context, id string, automatic 
 		if run, err = s.store.UpdateNewsContextRun(ctx, run); err != nil {
 			return NewsContextRun{}, err
 		}
-		s.triggerNewsContextReview(ctx, &run)
+		_ = s.triggerNewsContextReview(ctx, &run)
 		return run, nil
 	}
 	if !s.tryStartNewsContextRun() {
@@ -2225,23 +2360,156 @@ func (s *Service) retryDueNewsContextReviews(ctx context.Context, now time.Time)
 			return
 		}
 		for index := range failed {
-			due, scheduleErr := s.ensureNewsContextAutoRetryScheduled(ctx, &failed[index], now)
-			if scheduleErr != nil || !due {
+			cause := errors.New(firstNonEmpty(failed[index].ErrorMessage, "portfolio review failed"))
+			legacyQueueConflict := newsContextReviewQueueConflict(cause)
+			due := legacyQueueConflict
+			if !due {
+				var scheduleErr error
+				due, scheduleErr = s.ensureNewsContextAutoRetryScheduled(ctx, &failed[index], now)
+				if scheduleErr != nil || !due {
+					continue
+				}
+			}
+			if !legacyQueueConflict && failed[index].RetryCount >= newsContextTimeoutRetryLimit &&
+				(!retryableNewsContextRecoveryFailure(cause) ||
+					!s.newsContextRunSupportsAutomaticRetry(ctx, failed[index])) {
 				continue
 			}
-			if _, retryErr := s.retryNewsContextRun(ctx, failed[index].ID, true); retryErr != nil && s.log != nil {
-				s.log.Warn("retry failed news context review failed",
-					"context_run_id", failed[index].ID,
-					"error", safelog.Text(retryErr.Error(), 240),
-				)
+			// ponytail: promoting one due member is enough. The queue consumer merges
+			// every related failed record into the same next sentinel instead of
+			// launching one retry per historical window.
+			failed[index].ReviewStatus = NewsContextReviewPending
+			failed[index].ReviewRunID = ""
+			failed[index].Status = NewsContextRunStatusWaitingReview
+			failed[index].Phase = "waiting_review"
+			failed[index].NextRetryAt = time.Time{}
+			if legacyQueueConflict {
+				failed[index].RetryCount = 0
+				failed[index].ErrorMessage = ""
 			}
-			// Portfolio impact reviews are single-flight. Start at most one per tick.
+			if _, err := s.store.UpdateNewsContextRun(ctx, failed[index]); err != nil && s.log != nil {
+				s.log.Warn("queue failed news context review retry",
+					"context_run_id", failed[index].ID,
+					"error", safelog.Text(err.Error(), 240))
+			}
 			return
 		}
 		if len(failed) < 200 {
 			return
 		}
 	}
+}
+
+func newsContextReviewQueueConflict(cause error) bool {
+	return cause != nil && strings.Contains(strings.ToLower(cause.Error()), "portfolio sentinel run already running")
+}
+
+func (s *Service) newsContextReviewQueueReady(ctx context.Context, now time.Time) (bool, error) {
+	cfg, err := s.GetNewsContextConfig(ctx)
+	if err != nil {
+		return false, err
+	}
+	if _, blocking, err := s.store.GetBlockingNewsContextBackfill(ctx); err != nil || blocking {
+		return false, err
+	}
+	if running, err := s.store.HasRunningNewsContextRun(ctx); err != nil || running {
+		return false, err
+	}
+	if !cfg.Enabled {
+		// A manually completed run still owns its pending impact review after the
+		// automatic aggregation schedule is disabled.
+		return true, nil
+	}
+	for _, windowType := range []string{NewsContextWindowHourly, NewsContextWindowFourHour, NewsContextWindowDaily} {
+		if !newsContextWindowEnabled(cfg, windowType) {
+			continue
+		}
+		nextAt := newsContextNextAt(cfg, windowType)
+		if !nextAt.IsZero() && !nextAt.After(now) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (s *Service) newsContextReviewQueueCandidates(ctx context.Context) ([]NewsContextRun, int, error) {
+	pending, err := s.listAutomaticNewsContextReviews(ctx, NewsContextReviewPending)
+	if err != nil || len(pending) == 0 {
+		return pending, 0, err
+	}
+	freshScope := false
+	retryCount := 0
+	for _, run := range pending {
+		if run.RetryCount == 0 && strings.TrimSpace(run.ErrorMessage) == "" {
+			freshScope = true
+		}
+		if run.RetryCount > retryCount {
+			retryCount = run.RetryCount
+		}
+	}
+	failed, err := s.listAutomaticNewsContextReviews(ctx, NewsContextReviewFailed)
+	if err != nil {
+		return nil, 0, err
+	}
+	pending = append(pending, failed...)
+	if freshScope {
+		// A current aggregation supersedes exhausted point-in-time reviews. Give
+		// the consolidated latest-state review one fresh bounded retry cycle.
+		retryCount = 0
+	} else {
+		for _, run := range failed {
+			if run.RetryCount > retryCount {
+				retryCount = run.RetryCount
+			}
+		}
+		if retryCount < newsContextTimeoutRetryLimit {
+			retryCount++
+		}
+	}
+	sort.SliceStable(pending, func(i, j int) bool {
+		if pending[i].WindowStart.Equal(pending[j].WindowStart) {
+			return pending[i].CreatedAt.Before(pending[j].CreatedAt)
+		}
+		return pending[i].WindowStart.Before(pending[j].WindowStart)
+	})
+	return pending, retryCount, nil
+}
+
+func (s *Service) listAutomaticNewsContextReviews(ctx context.Context, reviewStatus string) ([]NewsContextRun, error) {
+	out := make([]NewsContextRun, 0)
+	for offset := 0; ; offset += 200 {
+		page, err := s.store.ListNewsContextRuns(ctx, NewsContextRunListFilter{
+			ReviewStatus: reviewStatus,
+			Limit:        200,
+			Offset:       offset,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, run := range page {
+			if run.Status != NewsContextRunStatusWaitingReview || run.ProcessedCount < run.InputCount {
+				continue
+			}
+			if reviewStatus == NewsContextReviewPending && strings.TrimSpace(run.ReviewRunID) != "" {
+				continue
+			}
+			if _, historical, err := s.store.NewsContextBackfillForRun(ctx, run.ID); err != nil {
+				return nil, err
+			} else if historical {
+				continue
+			}
+			if _, finalReview, err := s.store.NewsContextBackfillForFinalReviewRun(ctx, run.ID); err != nil {
+				return nil, err
+			} else if finalReview {
+				continue
+			}
+			out = append(out, run)
+		}
+		if len(page) < 200 {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (s *Service) GetNewsThread(ctx context.Context, id string) (NewsThread, error) {
@@ -2368,7 +2636,30 @@ func (s *Service) ListNewsContextChangedThreads(ctx context.Context, runID strin
 	if err != nil {
 		return nil, 0, err
 	}
+	for index := range items {
+		items[index].ChangeCount = 1
+	}
 	total, err := s.store.CountNewsThreadVersions(ctx, NewsThreadVersionListFilter{RunID: runID})
+	return items, total, err
+}
+
+func (s *Service) ListNewsContextReviewChanges(ctx context.Context, reviewScopeID string, limit, offset int) ([]NewsThreadChange, int, error) {
+	contextRuns, err := s.store.ListNewsContextRunsByReviewRunID(ctx, strings.TrimSpace(reviewScopeID))
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(contextRuns) == 0 {
+		return s.ListNewsContextChangedThreads(ctx, reviewScopeID, limit, offset)
+	}
+	runIDs := make([]string, 0, len(contextRuns))
+	for _, contextRun := range contextRuns {
+		runIDs = append(runIDs, contextRun.ID)
+	}
+	items, err := s.store.ListNewsContextChangedThreadsForRuns(ctx, runIDs, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, _, err := s.store.NewsContextChangedThreadCountsForRuns(ctx, runIDs)
 	return items, total, err
 }
 
@@ -2502,6 +2793,13 @@ func (s *Service) decorateNewsContextRun(ctx context.Context, run *NewsContextRu
 		return err
 	}
 	run.UnchangedThreadCount = unchanged
+	if strings.TrimSpace(run.ReviewRunID) != "" {
+		linked, err := s.store.ListNewsContextRunsByReviewRunID(ctx, run.ReviewRunID)
+		if err != nil {
+			return err
+		}
+		run.ReviewCoverageCount = len(linked)
+	}
 	if run.ResearchCount > 0 {
 		run.ExternalResearchStatus = "recorded"
 	} else {

@@ -642,11 +642,19 @@ func TestNewsContextBackfillResponseShowsFinalReviewCoverage(t *testing.T) {
 	}
 }
 
-func TestOrdinaryDailyCompletionStillCreatesImpactReviewImmediately(t *testing.T) {
+func TestOrdinaryDailyCompletionQueuesOneImpactReview(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
 	configurePortfolioSentinelModelForTest(t, svc)
+	cfg := defaultNewsContextConfig()
+	cfg.Enabled = true
+	cfg.HourlyEnabled = false
+	cfg.FourHourEnabled = false
+	cfg.DailyEnabled = false
+	if _, err := svc.store.UpsertNewsContextConfig(ctx, cfg); err != nil {
+		t.Fatalf("save review queue config: %v", err)
+	}
 	end := time.Now().Truncate(time.Minute)
 	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
 		WindowType: NewsContextWindowDaily, TriggerType: NewsContextTriggerManual,
@@ -661,6 +669,10 @@ func TestOrdinaryDailyCompletionStillCreatesImpactReviewImmediately(t *testing.T
 	if err := svc.completeNewsContextRun(ctx, &run, defaultNewsContextConfig()); err != nil {
 		t.Fatalf("complete ordinary daily: %v", err)
 	}
+	if count, err := svc.store.CountPortfolioSentinelRuns(ctx, PortfolioSentinelRunListFilter{}); err != nil || count != 0 {
+		t.Fatalf("impact review started before queue reconcile count=%d err=%v", count, err)
+	}
+	svc.reconcileNewsContextReviews(ctx)
 	if count, err := svc.store.CountPortfolioSentinelRuns(ctx, PortfolioSentinelRunListFilter{}); err != nil || count != 1 {
 		t.Fatalf("ordinary daily impact review count=%d err=%v", count, err)
 	}

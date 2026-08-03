@@ -1766,6 +1766,7 @@ export interface StockV2NewsContextRun {
   windowType?: string;
   status?: string;
   reviewStatus?: string;
+  reviewCoverageCount?: number;
   phase?: string;
   coverageStatus?: string;
   progress?: number;

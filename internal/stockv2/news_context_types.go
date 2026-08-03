@@ -225,6 +225,7 @@ type NewsThreadChange struct {
 	Stage          string    `json:"stage"`
 	LatestChange   string    `json:"latestChange,omitempty"`
 	MaterialChange bool      `json:"materialChange"`
+	ChangeCount    int       `json:"changeCount,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
 }
 
@@ -312,6 +313,7 @@ type NewsContextRun struct {
 	CurrentAgentRunID      string    `json:"currentAgentRunId,omitempty"`
 	ReviewStatus           string    `json:"reviewStatus"`
 	ReviewRunID            string    `json:"reviewRunId,omitempty"`
+	ReviewCoverageCount    int       `json:"reviewCoverageCount,omitempty"`
 	CleanupStatus          string    `json:"cleanupStatus"`
 	CleanupRunID           string    `json:"cleanupRunId,omitempty"`
 	InputCount             int       `json:"totalNewsCount"`

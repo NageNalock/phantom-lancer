@@ -412,6 +412,7 @@ function RunRow({
           {run.nextRetryAt ? <span className="text-xs text-[var(--warn)]">下次自动重试：{formatNewsContextTime(run.nextRetryAt)}</span> : null}
           {run.autoRetryExhausted ? <span className="text-xs text-[var(--danger)]">不会再自动重试</span> : null}
           {(run.retryCount ?? 0) > 0 ? <span className="font-mono text-xs text-[var(--muted)]">重试 {run.retryCount} / {run.retryLimit ?? 2}</span> : null}
+          {(run.reviewCoverageCount ?? 0) > 1 ? <span className="text-xs text-[var(--muted-strong)]">合并复核覆盖 {run.reviewCoverageCount} 个窗口</span> : null}
           {run.errorMessage ? <span className="max-w-xl truncate text-xs text-[var(--danger)]">{run.errorMessage}</span> : null}
         </div>
       </div>
@@ -442,6 +443,7 @@ function RunDetailDrawer({ kind, run, onClose }: { kind: RunKind; run: StockV2Ne
   ];
   if (run.nextRetryAt) rows.push(["下次自动重试", formatNewsContextTime(run.nextRetryAt)]);
   if (run.autoRetryExhausted) rows.push(["自动重试状态", "已停止，保留手动重试入口"]);
+  if ((run.reviewCoverageCount ?? 0) > 1) rows.push(["复核覆盖", `本次组合哨兵合并覆盖 ${run.reviewCoverageCount} 个归纳窗口`]);
   if (kind === "aggregation") {
     if (run.windowType === "hourly") {
       rows.push(["处理方式", "确定性检查点，不调用模型"]);

@@ -84,7 +84,11 @@ func (s *Service) RunPortfolioSentinel(ctx context.Context, req RequestRunPortfo
 	if err != nil {
 		return PortfolioSentinelRun{}, err
 	}
-	return s.startPortfolioSentinelRunForNewsContext(ctx, PortfolioSentinelTriggerManual, windowType, strings.TrimSpace(req.PortfolioID), startAt, endAt, strings.TrimSpace(req.Note), strings.TrimSpace(req.NewsContextRunID), true)
+	newsContextRunIDs := []string(nil)
+	if id := strings.TrimSpace(req.NewsContextRunID); id != "" {
+		newsContextRunIDs = []string{id}
+	}
+	return s.startPortfolioSentinelRunForNewsContexts(ctx, PortfolioSentinelTriggerManual, windowType, strings.TrimSpace(req.PortfolioID), startAt, endAt, strings.TrimSpace(req.Note), newsContextRunIDs, 0, true)
 }
 
 func (s *Service) RunScheduledPortfolioSentinel(ctx context.Context, windowType string, now time.Time) (PortfolioSentinelRun, error) {
@@ -103,14 +107,25 @@ func (s *Service) RunScheduledPortfolioSentinel(ctx context.Context, windowType 
 }
 
 func (s *Service) startPortfolioSentinelRun(ctx context.Context, triggerType, windowType, portfolioID string, startAt, endAt time.Time, note string, async bool) (PortfolioSentinelRun, error) {
-	return s.startPortfolioSentinelRunForNewsContext(ctx, triggerType, windowType, portfolioID, startAt, endAt, note, "", async)
+	return s.startPortfolioSentinelRunForNewsContexts(ctx, triggerType, windowType, portfolioID, startAt, endAt, note, nil, 0, async)
 }
 
 func (s *Service) startPortfolioSentinelRunForNewsContext(ctx context.Context, triggerType, windowType, portfolioID string, startAt, endAt time.Time, note, newsContextRunID string, async bool) (PortfolioSentinelRun, error) {
+	return s.startPortfolioSentinelRunForNewsContexts(ctx, triggerType, windowType, portfolioID, startAt, endAt, note, []string{newsContextRunID}, 0, async)
+}
+
+func (s *Service) startPortfolioSentinelRunForNewsContexts(ctx context.Context, triggerType, windowType, portfolioID string, startAt, endAt time.Time, note string, newsContextRunIDs []string, reviewRetryCount int, async bool) (PortfolioSentinelRun, error) {
+	newsContextRunIDs = uniqueNonEmptyStrings(newsContextRunIDs)
 	if !validPortfolioSentinelWindowType(windowType) || startAt.IsZero() || endAt.IsZero() || !endAt.After(startAt) {
 		return PortfolioSentinelRun{}, ErrInvalidPortfolioSentinelInput
 	}
-	if running, err := s.store.HasRunningPortfolioSentinelRun(ctx, portfolioID, windowType); err != nil {
+	busyPortfolioID, busyWindowType := portfolioID, windowType
+	if len(newsContextRunIDs) > 0 {
+		// A news-context review covers every current portfolio and therefore waits
+		// for any sentinel run, not merely another manual-window run.
+		busyPortfolioID, busyWindowType = "", ""
+	}
+	if running, err := s.store.HasRunningPortfolioSentinelRun(ctx, busyPortfolioID, busyWindowType); err != nil {
 		return PortfolioSentinelRun{}, err
 	} else if running {
 		return PortfolioSentinelRun{}, ErrPortfolioSentinelAlreadyRunning
@@ -132,8 +147,8 @@ func (s *Service) startPortfolioSentinelRunForNewsContext(ctx context.Context, t
 	if err != nil {
 		return PortfolioSentinelRun{}, err
 	}
-	if strings.TrimSpace(newsContextRunID) != "" {
-		if _, err := s.store.BeginNewsContextReview(ctx, newsContextRunID, run.ID); err != nil {
+	if len(newsContextRunIDs) > 0 {
+		if _, err := s.store.BeginNewsContextReviews(ctx, newsContextRunIDs, run.ID, reviewRetryCount); err != nil {
 			return s.failPortfolioSentinelRun(ctx, run, err)
 		}
 		if _, err := s.store.FreezePortfolioSentinelImpactReviewScope(ctx, run.ID); err != nil {
@@ -144,7 +159,7 @@ func (s *Service) startPortfolioSentinelRunForNewsContext(ctx context.Context, t
 	if err := s.preparePortfolioSentinelNews(ctx, run); err != nil && s.log != nil {
 		s.log.Warn("portfolio sentinel news refresh skipped", "run_id", run.ID, "error", safelog.Text(err.Error(), 240))
 	}
-	contextPack, err := s.buildPortfolioSentinelContext(ctx, run, note, newsContextRunID)
+	contextPack, err := s.buildPortfolioSentinelContext(ctx, run, note, len(newsContextRunIDs) > 0)
 	if err != nil {
 		return s.failPortfolioSentinelRun(ctx, run, err)
 	}
@@ -182,10 +197,10 @@ func (s *Service) startPortfolioSentinelRunForNewsContext(ctx context.Context, t
 }
 
 func (s *Service) BuildPortfolioSentinelContext(ctx context.Context, run PortfolioSentinelRun, note string) (PortfolioSentinelContext, error) {
-	return s.buildPortfolioSentinelContext(ctx, run, note, "")
+	return s.buildPortfolioSentinelContext(ctx, run, note, false)
 }
 
-func (s *Service) buildPortfolioSentinelContext(ctx context.Context, run PortfolioSentinelRun, note, newsContextRunID string) (PortfolioSentinelContext, error) {
+func (s *Service) buildPortfolioSentinelContext(ctx context.Context, run PortfolioSentinelRun, note string, newsContextReview bool) (PortfolioSentinelContext, error) {
 	cfg, _ := s.GetPortfolioSentinelConfig(ctx)
 	portfolios, err := s.store.ListPortfolios(ctx)
 	if err != nil {
@@ -215,12 +230,27 @@ func (s *Service) buildPortfolioSentinelContext(ctx context.Context, run Portfol
 		ContextStats:  map[string]any{},
 		Note:          note,
 	}
-	if strings.TrimSpace(newsContextRunID) != "" {
-		contextRun, err := s.store.GetNewsContextRun(ctx, newsContextRunID)
+	if newsContextReview {
+		contextRuns, err := s.store.ListNewsContextRunsByReviewRunID(ctx, run.ID)
 		if err != nil {
 			return PortfolioSentinelContext{}, err
 		}
-		_, changedCount, err := s.ListNewsContextChangedThreads(ctx, newsContextRunID, 1, 0)
+		if len(contextRuns) == 0 {
+			return PortfolioSentinelContext{}, ErrInvalidNewsContextInput
+		}
+		contextRunIDs := make([]string, 0, len(contextRuns))
+		windowStart := contextRuns[0].WindowStart
+		windowEnd := contextRuns[0].WindowEnd
+		for _, contextRun := range contextRuns {
+			contextRunIDs = append(contextRunIDs, contextRun.ID)
+			if contextRun.WindowStart.Before(windowStart) {
+				windowStart = contextRun.WindowStart
+			}
+			if contextRun.WindowEnd.After(windowEnd) {
+				windowEnd = contextRun.WindowEnd
+			}
+		}
+		changedCount, materialChangeCount, err := s.store.NewsContextChangedThreadCountsForRuns(ctx, contextRunIDs)
 		if err != nil {
 			return PortfolioSentinelContext{}, err
 		}
@@ -229,9 +259,12 @@ func (s *Service) buildPortfolioSentinelContext(ctx context.Context, run Portfol
 			return PortfolioSentinelContext{}, err
 		}
 		out.NewsContext = &PortfolioSentinelNewsContext{
-			RunID:                    contextRun.ID,
+			RunID:                    run.ID,
+			CoveredRunCount:          len(contextRuns),
+			WindowStart:              windowStart,
+			WindowEnd:                windowEnd,
 			ChangedThreadCount:       changedCount,
-			MaterialChangeCount:      contextRun.MaterialChangeCount,
+			MaterialChangeCount:      materialChangeCount,
 			RequiredMCPTool:          mcpToolListNewsContextChanges,
 			ImpactReviewScope:        impactScope,
 			ImpactReviewRequiredTool: mcpToolListPortfolioSentinelImpactReviewScope,
@@ -1134,12 +1167,12 @@ func (s *Service) validatePortfolioSentinelSubmittedReport(
 		}
 		normalizePortfolioSentinelResearchLanguage(&report, audit)
 	}
-	contextRun, found, err := s.newsContextRunForPortfolioReview(ctx, run.ID)
+	contextRuns, err := s.store.ListNewsContextRunsByReviewRunID(ctx, run.ID)
 	if err != nil {
 		return PortfolioSentinelReport{}, err
 	}
-	if found {
-		if err := s.validatePortfolioSentinelNewsContextCoverage(ctx, contextRun.ID, report.CheckedNewsThreadVersionIDs); err != nil {
+	if len(contextRuns) > 0 {
+		if err := s.validatePortfolioSentinelNewsContextCoverage(ctx, run.ID, report.CheckedNewsThreadVersionIDs); err != nil {
 			return PortfolioSentinelReport{}, err
 		}
 		if err := s.validatePortfolioSentinelImpactReviewCoverage(ctx, run.ID, report.ImpactReviewCoverage); err != nil {
@@ -1179,15 +1212,11 @@ func mergeAgentExecutorOutputs(first, second *AgentExecutorOutput) *AgentExecuto
 	return second
 }
 
-func (s *Service) newsContextRunForPortfolioReview(ctx context.Context, sentinelRunID string) (NewsContextRun, bool, error) {
-	return s.store.FindNewsContextRunByReviewRunID(ctx, sentinelRunID)
-}
-
-func (s *Service) validatePortfolioSentinelNewsContextCoverage(ctx context.Context, contextRunID string, checkedVersionIDs []string) error {
+func (s *Service) validatePortfolioSentinelNewsContextCoverage(ctx context.Context, reviewScopeID string, checkedVersionIDs []string) error {
 	const pageSize = 200
 	expected := map[string]struct{}{}
 	for offset := 0; ; offset += pageSize {
-		changes, _, err := s.ListNewsContextChangedThreads(ctx, contextRunID, pageSize, offset)
+		changes, _, err := s.ListNewsContextReviewChanges(ctx, reviewScopeID, pageSize, offset)
 		if err != nil {
 			return err
 		}

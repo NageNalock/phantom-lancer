@@ -444,7 +444,7 @@ func (s *Service) mcpListNewsContextChanges(args json.RawMessage) (any, *mcpErro
 	}
 	p.Limit = normalizedMCPLimit(p.Limit)
 	p.Offset = normalizedPageOffset(p.Offset)
-	items, total, err := s.ListNewsContextChangedThreads(contextFromMCP(), p.RunID, p.Limit, p.Offset)
+	items, total, err := s.ListNewsContextReviewChanges(contextFromMCP(), p.RunID, p.Limit, p.Offset)
 	if err != nil {
 		return nil, mcpErrorFromError(err)
 	}

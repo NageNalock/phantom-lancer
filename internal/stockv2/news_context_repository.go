@@ -626,39 +626,61 @@ func (s *Store) GetNewsContextRun(ctx context.Context, id string) (NewsContextRu
 }
 
 func (s *Store) BeginNewsContextReview(ctx context.Context, runID, reviewRunID string) (NewsContextRun, error) {
-	runID = strings.TrimSpace(runID)
-	reviewRunID = strings.TrimSpace(reviewRunID)
-	if runID == "" || reviewRunID == "" {
-		return NewsContextRun{}, ErrInvalidNewsContextInput
-	}
-	now := time.Now()
-	result, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_runs
-		SET review_status=?, review_run_id=?, phase=?, error_message=NULL, updated_at=?
-		WHERE id=? AND status=? AND review_status IN (?, ?)`,
-		NewsContextReviewRunning, reviewRunID, "reviewing", now, runID,
-		NewsContextRunStatusWaitingReview, NewsContextReviewPending, NewsContextReviewFailed)
+	runs, err := s.BeginNewsContextReviews(ctx, []string{runID}, reviewRunID, -1)
 	if err != nil {
-		return NewsContextRun{}, wrapError(err, "begin news context review")
+		return NewsContextRun{}, err
 	}
-	if rows, _ := result.RowsAffected(); rows == 0 {
-		if _, err := s.GetNewsContextRun(ctx, runID); err != nil {
-			return NewsContextRun{}, err
-		}
-		return NewsContextRun{}, ErrInvalidNewsContextInput
-	}
-	return s.GetNewsContextRun(ctx, runID)
+	return runs[0], nil
 }
 
-func (s *Store) FindNewsContextRunByReviewRunID(ctx context.Context, reviewRunID string) (NewsContextRun, bool, error) {
+func (s *Store) BeginNewsContextReviews(ctx context.Context, runIDs []string, reviewRunID string, retryCount int) ([]NewsContextRun, error) {
+	reviewRunID = strings.TrimSpace(reviewRunID)
+	uniqueRunIDs := uniqueNonEmptyStrings(runIDs)
+	if len(uniqueRunIDs) == 0 || reviewRunID == "" {
+		return nil, ErrInvalidNewsContextInput
+	}
+	now := time.Now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, wrapError(err, "begin news context review batch")
+	}
+	defer tx.Rollback()
+	for _, runID := range uniqueRunIDs {
+		query := `UPDATE stockv2_news_context_runs
+			SET review_status=?, review_run_id=?, phase=?, error_message=NULL,
+				next_retry_at=NULL, updated_at=?`
+		args := []any{NewsContextReviewRunning, reviewRunID, "reviewing", now}
+		if retryCount >= 0 {
+			query += `, retry_count=?`
+			args = append(args, retryCount)
+		}
+		query += ` WHERE id=? AND status=? AND review_status IN (?, ?)`
+		args = append(args, runID, NewsContextRunStatusWaitingReview, NewsContextReviewPending, NewsContextReviewFailed)
+		result, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			return nil, wrapError(err, "begin news context review batch")
+		}
+		if rows, _ := result.RowsAffected(); rows == 0 {
+			return nil, ErrInvalidNewsContextInput
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, wrapError(err, "commit news context review batch")
+	}
+	return s.ListNewsContextRunsByReviewRunID(ctx, reviewRunID)
+}
+
+func (s *Store) ListNewsContextRunsByReviewRunID(ctx context.Context, reviewRunID string) ([]NewsContextRun, error) {
 	reviewRunID = strings.TrimSpace(reviewRunID)
 	if reviewRunID == "" {
-		return NewsContextRun{}, false, nil
+		return []NewsContextRun{}, nil
 	}
-	item, err := scanNewsContextRun(s.db.QueryRowContext(ctx, newsContextRunSelectSQL+` WHERE review_run_id=?`, reviewRunID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return NewsContextRun{}, false, nil
+	rows, err := s.db.QueryContext(ctx, newsContextRunSelectSQL+`
+		WHERE review_run_id=? ORDER BY window_start ASC, created_at ASC`, reviewRunID)
+	if err != nil {
+		return nil, wrapError(err, "list news context runs by review run id")
 	}
-	return item, err == nil, wrapError(err, "find news context run by review run id")
+	return scanRows(rows, scanNewsContextRun, "scan linked news context run", "iterate linked news context runs")
 }
 
 func (s *Store) UpdateNewsContextRun(ctx context.Context, item NewsContextRun) (NewsContextRun, error) {
@@ -1762,6 +1784,61 @@ func (s *Store) ListNewsContextChangedThreads(ctx context.Context, runID string,
 		out = append(out, item)
 	}
 	return out, wrapError(rows.Err(), "iterate news context changed threads")
+}
+
+func (s *Store) ListNewsContextChangedThreadsForRuns(ctx context.Context, runIDs []string, limit, offset int) ([]NewsThreadChange, error) {
+	runIDs = uniqueNonEmptyStrings(runIDs)
+	if len(runIDs) == 0 {
+		return []NewsThreadChange{}, nil
+	}
+	args := make([]any, 0, len(runIDs)+2)
+	for _, runID := range runIDs {
+		args = append(args, runID)
+	}
+	args = append(args, normalizedPageLimit(limit, 1000), normalizedPageOffset(offset))
+	rows, err := s.marketDB.db.QueryContext(ctx, `WITH ranked AS (
+		SELECT run_id, thread_id, id, title, stage, COALESCE(latest_change,'') AS latest_change,
+			MAX(CASE WHEN material_change THEN 1 ELSE 0 END) OVER (PARTITION BY thread_id) AS material_change,
+			COUNT(*) OVER (PARTITION BY thread_id) AS change_count, created_at,
+			ROW_NUMBER() OVER (PARTITION BY thread_id ORDER BY created_at DESC, id DESC) AS row_no
+		FROM stockv2_news_thread_versions WHERE run_id IN (`+sqlPlaceholders(len(runIDs))+`)
+	)
+	SELECT run_id, thread_id, id, title, stage, latest_change, material_change, change_count, created_at
+	FROM ranked WHERE row_no=1 ORDER BY created_at ASC, thread_id ASC LIMIT ? OFFSET ?`, args...)
+	if err != nil {
+		return nil, wrapError(err, "list merged news context changed threads")
+	}
+	defer rows.Close()
+	out := make([]NewsThreadChange, 0)
+	for rows.Next() {
+		var item NewsThreadChange
+		var material int
+		if err := rows.Scan(&item.RunID, &item.ThreadID, &item.VersionID, &item.Title,
+			&item.Stage, &item.LatestChange, &material, &item.ChangeCount, &item.CreatedAt); err != nil {
+			return nil, wrapError(err, "scan merged news context changed thread")
+		}
+		item.MaterialChange = material != 0
+		out = append(out, item)
+	}
+	return out, wrapError(rows.Err(), "iterate merged news context changed threads")
+}
+
+func (s *Store) NewsContextChangedThreadCountsForRuns(ctx context.Context, runIDs []string) (int, int, error) {
+	runIDs = uniqueNonEmptyStrings(runIDs)
+	if len(runIDs) == 0 {
+		return 0, 0, nil
+	}
+	args := make([]any, 0, len(runIDs))
+	for _, runID := range runIDs {
+		args = append(args, runID)
+	}
+	var changedCount, materialChangeCount int
+	err := s.marketDB.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(material_change),0) FROM (
+		SELECT thread_id, MAX(CASE WHEN material_change THEN 1 ELSE 0 END) AS material_change
+		FROM stockv2_news_thread_versions WHERE run_id IN (`+sqlPlaceholders(len(runIDs))+`)
+		GROUP BY thread_id
+	)`, args...).Scan(&changedCount, &materialChangeCount)
+	return changedCount, materialChangeCount, wrapError(err, "count merged news context changed threads")
 }
 
 func newsContextStableID(prefix string, parts ...string) string {
