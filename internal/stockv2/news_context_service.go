@@ -251,30 +251,32 @@ func (s *Service) validateNewsContextAutoCleanupSafety(ctx context.Context, cuto
 	// semantic-search/detail round-trip for every unprotected current theme.
 	ctx = context.WithValue(ctx, newsContextMCPVerificationCacheKey{}, newsContextMCPVerificationCache{})
 	ctx = context.WithValue(ctx, newsContextCleanupBackfillPrecheckedKey{}, true)
-	afterID := ""
-	for {
-		candidates, err := s.store.ListNewsEventsForContextCleanup(ctx,
-			cutoff, afterID, newsContextCleanupBatchSize)
-		if err != nil {
-			return err
-		}
-		if len(candidates) == 0 {
-			break
-		}
-		for _, candidate := range candidates {
-			afterID = candidate.Event.ID
-			_, _, err := s.newsContextCleanupEligibility(ctx, candidate, cutoff, false)
-			if err == nil {
-				continue
+	for _, verifyMCP := range []bool{false, true} {
+		afterID := ""
+		for {
+			candidates, err := s.store.ListNewsEventsForContextCleanup(ctx,
+				cutoff, afterID, newsContextCleanupBatchSize)
+			if err != nil {
+				return err
 			}
-			var gateFailure newsContextCleanupGateFailure
-			if errors.As(err, &gateFailure) {
-				return fmt.Errorf("%w: %s", ErrNewsContextPrerequisite, gateFailure.Error())
+			if len(candidates) == 0 {
+				break
 			}
-			return err
-		}
-		if len(candidates) < newsContextCleanupBatchSize {
-			break
+			for _, candidate := range candidates {
+				afterID = candidate.Event.ID
+				_, _, err := s.newsContextCleanupEligibilityWithMCP(ctx, candidate, cutoff, false, verifyMCP)
+				if err == nil {
+					continue
+				}
+				var gateFailure newsContextCleanupGateFailure
+				if errors.As(err, &gateFailure) {
+					return fmt.Errorf("%w: %s", ErrNewsContextPrerequisite, gateFailure.Error())
+				}
+				return err
+			}
+			if len(candidates) < newsContextCleanupBatchSize {
+				break
+			}
 		}
 	}
 	gate, err := s.newsContextCleanupGate(ctx, cutoff)

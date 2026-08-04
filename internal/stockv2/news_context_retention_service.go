@@ -129,6 +129,7 @@ func (s *Service) executeNewsContextCleanup(ctx context.Context, id string) {
 	// Check every candidate before deleting any content. A missing daily review,
 	// index, or real MCP read blocks the whole run; deliberately protected news
 	// may remain while unrelated, fully verified news is compacted.
+	run.Phase = "checking_structure"
 	afterID := ""
 	for {
 		gate, err := s.newsContextCleanupGate(ctx, run.Cutoff)
@@ -156,10 +157,45 @@ func (s *Service) executeNewsContextCleanup(ctx context.Context, id string) {
 		for _, candidate := range candidates {
 			afterID = candidate.Event.ID
 			run.ScannedCount++
-			eligible, reason, err := s.newsContextCleanupEligibility(preflightCtx, candidate, run.Cutoff, false)
+			_, _, err := s.newsContextCleanupEligibilityWithMCP(preflightCtx, candidate, run.Cutoff, false, false)
 			if err != nil {
 				run.FailedCount++
-				fail(err)
+				fail(s.recordNewsContextCleanupCandidateFailure(ctx, candidate, err))
+				return
+			}
+		}
+		if _, err := s.store.UpdateNewsContextCleanupRun(ctx, run); err != nil {
+			fail(err)
+			return
+		}
+		if len(candidates) < newsContextCleanupBatchSize {
+			break
+		}
+	}
+
+	// ponytail: finish every deterministic lineage/index check before the first
+	// real semantic-search round trip. One late structural blocker must not make
+	// an hourly cleanup repeat minutes of DuckDB vector work before failing.
+	run.Phase = "verifying_retrieval"
+	run.EligibleCount = 0
+	run.ProtectedCount = 0
+	afterID = ""
+	for {
+		candidates, err := s.store.ListNewsEventsForContextCleanup(ctx, run.Cutoff, afterID, newsContextCleanupBatchSize)
+		if err != nil {
+			fail(err)
+			return
+		}
+		if len(candidates) == 0 {
+			break
+		}
+		preflightCtx := context.WithValue(ctx, newsContextCleanupBackfillPrecheckedKey{}, true)
+		for _, candidate := range candidates {
+			afterID = candidate.Event.ID
+			eligible, reason, err := s.newsContextCleanupEligibilityWithMCP(preflightCtx, candidate, run.Cutoff, false, true)
+			if err != nil {
+				run.FailedCount++
+				fail(s.recordNewsContextCleanupCandidateFailure(ctx, candidate, err))
 				return
 			}
 			if !eligible {
@@ -251,6 +287,16 @@ func (s *Service) newsContextCleanupEligible(ctx context.Context, candidate News
 }
 
 func (s *Service) newsContextCleanupEligibility(ctx context.Context, candidate NewsContextCleanupCandidate, cutoff time.Time, cachedMCPOnly bool) (bool, string, error) {
+	return s.newsContextCleanupEligibilityWithMCP(ctx, candidate, cutoff, cachedMCPOnly, true)
+}
+
+func (s *Service) newsContextCleanupEligibilityWithMCP(
+	ctx context.Context,
+	candidate NewsContextCleanupCandidate,
+	cutoff time.Time,
+	cachedMCPOnly bool,
+	verifyMCP bool,
+) (bool, string, error) {
 	if prechecked, _ := ctx.Value(newsContextCleanupBackfillPrecheckedKey{}).(bool); !prechecked {
 		gate, err := s.newsContextCleanupGate(ctx, cutoff)
 		if err != nil {
@@ -411,6 +457,9 @@ func (s *Service) newsContextCleanupEligibility(ctx context.Context, candidate N
 			return newsContextCleanupBlocked("当前主题向量尚未就绪")
 		}
 	}
+	if !verifyMCP {
+		return true, "", nil
+	}
 	for threadID, thread := range threads {
 		verificationVersionID := thread.CurrentVersionID
 		if thread.Status == NewsThreadStatusMerged || thread.Status == NewsThreadStatusArchived {
@@ -443,6 +492,17 @@ func (s *Service) newsContextCleanupEligibility(ctx context.Context, candidate N
 	return true, "", nil
 }
 
+func (s *Service) recordNewsContextCleanupCandidateFailure(
+	ctx context.Context,
+	candidate NewsContextCleanupCandidate,
+	cause error,
+) error {
+	reason := strings.TrimSpace(cause.Error())
+	_ = s.store.ProtectNewsEventForCleanup(ctx, candidate.Event.ID, reason)
+	return fmt.Errorf("%w (event_id=%s, context_run_id=%s)", cause,
+		strings.TrimSpace(candidate.Event.ID), strings.TrimSpace(candidate.ContextRunID))
+}
+
 func (s *Service) findNewsContextBackfillReviewedDailyVersion(ctx context.Context, candidate NewsContextCleanupCandidate, threadID string) (NewsThreadVersion, bool, error) {
 	var empty NewsThreadVersion
 	source, err := s.store.GetNewsContextRun(ctx, strings.TrimSpace(candidate.ContextRunID))
@@ -452,27 +512,42 @@ func (s *Service) findNewsContextBackfillReviewedDailyVersion(ctx context.Contex
 	if err != nil {
 		return empty, false, err
 	}
-	backfill, ready, _, err := s.newsContextCleanupHistoricalBackfill(ctx, source)
-	if err != nil || !ready {
-		return empty, false, err
-	}
-	ready, _, err = s.newsContextCleanupHistoricalFinalReview(ctx, backfill)
-	if err != nil || !ready {
-		return empty, false, err
-	}
-	association, found, err := s.store.FindNewsContextBackfillReviewedVersion(ctx, backfill.ID,
-		backfill.FinalReviewRunID, threadID, candidate.ContextCoveredAt)
-	if err != nil || !found {
-		return empty, false, err
-	}
-	version, err := s.store.GetNewsThreadVersion(ctx, association.VersionID)
+	backfills, err := s.store.ListNewsContextBackfillsForRun(ctx, source.ID)
 	if err != nil {
 		return empty, false, err
 	}
-	if version.ThreadID != threadID || version.RunID != association.DailyRunID || version.WindowType != NewsContextWindowDaily {
-		return empty, false, nil
+	for _, backfill := range backfills {
+		if backfill.Status != NewsContextBackfillStatusCompleted || backfill.MissingNewsCount != 0 ||
+			backfill.RangeStartAt.IsZero() || source.WindowStart.Before(backfill.RangeStartAt) ||
+			source.WindowEnd.After(backfill.CutoffAt) {
+			continue
+		}
+		ready, _, err := s.newsContextCleanupHistoricalFinalReview(ctx, backfill)
+		if err != nil {
+			return empty, false, err
+		}
+		if !ready {
+			continue
+		}
+		association, found, err := s.store.FindNewsContextBackfillReviewedVersionCoveringRun(ctx,
+			backfill.ID, backfill.FinalReviewRunID, threadID, source.WindowStart, source.WindowEnd)
+		if err != nil {
+			return empty, false, err
+		}
+		if !found {
+			continue
+		}
+		version, err := s.store.GetNewsThreadVersion(ctx, association.VersionID)
+		if err != nil {
+			return empty, false, err
+		}
+		if version.ThreadID != threadID || version.RunID != association.DailyRunID ||
+			version.WindowType != NewsContextWindowDaily {
+			continue
+		}
+		return version, true, nil
 	}
-	return version, true, nil
+	return empty, false, nil
 }
 
 func (s *Service) noiseNewsContextCleanupReady(ctx context.Context, candidate NewsContextCleanupCandidate) (bool, string, error) {

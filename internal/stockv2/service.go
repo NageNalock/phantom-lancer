@@ -1509,7 +1509,7 @@ func (s *Service) checkAndExecuteScheduledUpdateAt(ctx context.Context, now time
 	case scheduledUniverseUpdateSkip, scheduledUniverseUpdateWait:
 		return
 	case scheduledUniverseUpdateConfirm:
-		s.markScheduledUpdateChecked(ctx, now)
+		s.markScheduledUpdateChecked(ctx, slotStart)
 		return
 	}
 
@@ -1533,7 +1533,7 @@ func decideScheduledUniverseUpdate(lastScheduled time.Time, latest StockV2Update
 	if latestOK && latest.Status == "running" {
 		return scheduledUniverseUpdateWait, slotStart
 	}
-	if latestOK && isRecentCompletedUniverseUpdate(latest, now, 24*time.Hour) {
+	if latestOK && isCompletedUniverseUpdateInSlot(latest, slotStart, now) {
 		return scheduledUniverseUpdateConfirm, slotStart
 	}
 	return scheduledUniverseUpdateStart, slotStart
@@ -1576,14 +1576,12 @@ func (s *Service) latestUniverseUpdateJob(ctx context.Context) (StockV2UpdateJob
 	return latest, true
 }
 
-func isRecentCompletedUniverseUpdate(latest StockV2UpdateJob, now time.Time, interval time.Duration) bool {
-	if interval <= 0 {
-		interval = time.Hour
-	}
-	if latest.Status != "completed" {
+func isCompletedUniverseUpdateInSlot(latest StockV2UpdateJob, slotStart, now time.Time) bool {
+	if latest.Status != "completed" || slotStart.IsZero() || latest.EndAt.IsZero() {
 		return false
 	}
-	return !latest.EndAt.IsZero() && now.Sub(latest.EndAt) >= 0 && now.Sub(latest.EndAt) < interval
+	completedAt := latest.EndAt.In(slotStart.Location())
+	return !completedAt.Before(slotStart) && !completedAt.After(now.In(slotStart.Location()))
 }
 
 func shouldRetryFailedUniverseUpdateSlot(latest StockV2UpdateJob, ok bool, slotStart, now time.Time) bool {

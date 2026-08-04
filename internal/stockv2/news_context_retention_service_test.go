@@ -314,6 +314,9 @@ func TestNewsContextCleanupChecksEverySafetyGateBeforeDeletingAnything(t *testin
 	}); err != nil {
 		t.Fatalf("create second cleanup evidence: %v", err)
 	}
+	if err := svc.agentMCPServer.Shutdown(ctx); err != nil {
+		t.Fatalf("stop MCP before structural preflight: %v", err)
+	}
 
 	run, err := svc.store.CreateNewsContextCleanupRun(ctx, NewsContextCleanupRun{
 		Status: NewsContextCleanupRunning, Phase: "checking_gates",
@@ -329,6 +332,11 @@ func TestNewsContextCleanupChecksEverySafetyGateBeforeDeletingAnything(t *testin
 	}
 	if completed.Status != NewsContextCleanupFailed || completed.CompactedCount != 0 || completed.ErrorMessage == "" {
 		t.Fatalf("cleanup run=%+v, want failed preflight without compaction", completed)
+	}
+	if !strings.Contains(completed.ErrorMessage, "历史主题版本向量尚未就绪") ||
+		strings.Contains(completed.ErrorMessage, "CLI 主题语义检索") ||
+		!strings.Contains(completed.ErrorMessage, secondEvent.ID) {
+		t.Fatalf("cleanup error=%q, want identified structural blocker before MCP", completed.ErrorMessage)
 	}
 	for _, eventID := range []string{seed.event.ID, secondEvent.ID} {
 		stored, err := svc.store.GetNewsEvent(ctx, eventID)
@@ -859,6 +867,33 @@ func TestNewsContextCleanupRetiredHistoricalThemeUsesItsBackfillFinalReview(t *t
 	}
 	if ready, err = svc.ensureNewsContextBackfillReviewedDailyOutputs(ctx, backfill, finalReview); err != nil || !ready {
 		t.Fatalf("finish reviewed-output pages ready=%v err=%v", ready, err)
+	}
+
+	// A later overlapping backfill may reuse the source run without owning this
+	// theme's reviewed daily output. Cleanup must search every valid provenance
+	// chain instead of letting the newest link hide the older reviewed output.
+	decoyCutoff := cutoff.Add(2 * time.Hour)
+	decoyFinalReview, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
+		WindowType: NewsContextWindowDaily, TriggerType: NewsContextTriggerManual,
+		Status: NewsContextRunStatusCompleted, WindowStart: decoyCutoff, WindowEnd: decoyCutoff.Add(time.Hour),
+		ReviewStatus: NewsContextReviewCompleted, CleanupStatus: NewsContextCleanupPending,
+	})
+	if err != nil {
+		t.Fatalf("create overlapping final review: %v", err)
+	}
+	decoyBackfill, err := svc.store.CreateNewsContextBackfill(ctx, NewsContextBackfill{
+		Status: NewsContextBackfillStatusCompleted, Phase: "completed",
+		RangeStartAt: source.WindowStart, CutoffAt: decoyCutoff, FinalReviewRunID: decoyFinalReview.ID,
+		StartedAt: time.Now().Add(time.Minute), CompletedAt: time.Now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("create overlapping completed task: %v", err)
+	}
+	if err := svc.store.LinkNewsContextBackfillRun(ctx, decoyBackfill.ID, source.ID); err != nil {
+		t.Fatalf("link source to overlapping task: %v", err)
+	}
+	if selected, found, err := svc.store.NewsContextBackfillForRun(ctx, source.ID); err != nil || !found || selected.ID != decoyBackfill.ID {
+		t.Fatalf("overlapping fixture selected=%+v found=%v err=%v", selected, found, err)
 	}
 
 	thread, err := svc.store.GetNewsThread(ctx, seed.thread.ID)

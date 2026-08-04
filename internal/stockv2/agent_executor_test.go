@@ -317,6 +317,65 @@ func TestCustomProviderPortfolioSentinelUsesSchemaAndLastMessageFiles(t *testing
 	}
 }
 
+func TestCustomProviderUsesBoundedAgentMessageWhenLastMessageIsMalformed(t *testing.T) {
+	root := t.TempDir()
+	eventPath := filepath.Join(root, "final-event.jsonl")
+	script := filepath.Join(root, "fake-codex")
+	pool := newAgentTaskPool(defaultCleanupInterval)
+	defer pool.Close()
+	taskID, _ := pool.createTask(AgentTaskTypeOperationReview, "run-1", "", time.Minute)
+	result := `{"taskID":"` + taskID + `","taskType":"operation_review","result":` +
+		`{"outputType":"continue_monitoring","resultSummary":"continue","result":{"reason":"verified"},"confidence":0.8}}`
+	event, err := json.Marshal(map[string]any{
+		"type": "item.completed",
+		"item": map[string]any{"type": "agent_message", "text": result},
+	})
+	if err != nil {
+		t.Fatalf("encode final event: %v", err)
+	}
+	if err := os.WriteFile(eventPath, append(event, '\n'), 0o600); err != nil {
+		t.Fatalf("write final event: %v", err)
+	}
+	scriptBody := "#!/bin/sh\n" +
+		"while [ \"$#\" -gt 0 ]; do\n" +
+		"  case \"$1\" in\n" +
+		"    --output-last-message) last=\"$2\"; shift 2 ;;\n" +
+		"    *) shift ;;\n" +
+		"  esac\n" +
+		"done\n" +
+		"printf '%s\\n' 'Answer: malformed final wrapper' > \"$last\"\n" +
+		"cat " + strconv.Quote(eventPath) + "\n"
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	isolatedRoot := filepath.Join(root, "codex-home")
+	if err := os.MkdirAll(isolatedRoot, 0o700); err != nil {
+		t.Fatalf("prepare isolated root: %v", err)
+	}
+	executor := &codexCLIExecutor{
+		binary:            script,
+		taskPool:          pool,
+		mcpURL:            "http://127.0.0.1:8080/api/stockv2/agent/mcp",
+		isolatedCodexRoot: isolatedRoot,
+		provider:          &codexCLIProviderRuntime{BaseURL: "http://127.0.0.1:8080/api/stockv2/agent/codex-proxy/provider-1"},
+	}
+	output, err := executor.ExecuteOperationReview(context.Background(), taskID, AgentContextPack{}, "deepseek-v4-flash", "medium")
+	if err != nil {
+		t.Fatalf("execute with JSONL final-message fallback: %v, output=%+v", err, output)
+	}
+	entry, ok := pool.getTask(taskID)
+	if !ok {
+		t.Fatal("submitted task disappeared")
+	}
+	entry.mu.Lock()
+	submitted := entry.submittedResult
+	entry.mu.Unlock()
+	if submitted == nil || submitted.OutputType != OperationReviewOutputContinueMonitoring ||
+		submitted.Result["reason"] != "verified" {
+		t.Fatalf("submitted fallback result = %#v", submitted)
+	}
+}
+
 func TestPreflightCodexMCPServersChecksSubmitTool(t *testing.T) {
 	pool := newAgentTaskPool(defaultCleanupInterval)
 	defer pool.Close()

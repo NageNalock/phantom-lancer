@@ -350,7 +350,7 @@ func TestUniverseMaintenanceFreshSkipRequiresReadyDailyBars(t *testing.T) {
 	}
 }
 
-func TestScheduledUniverseUpdateSkipsWhenRecentJobCompleted(t *testing.T) {
+func TestScheduledUniverseUpdateSkipsWhenCurrentSlotCompleted(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -383,7 +383,6 @@ func TestScheduledUniverseUpdateSkipsWhenRecentJobCompleted(t *testing.T) {
 		t.Fatalf("create completed job: %v", err)
 	}
 
-	before := now.Add(-time.Second)
 	svc.checkAndExecuteScheduledUpdateAt(ctx, now)
 
 	jobs, err := svc.store.ListUpdateJobs(ctx, 10)
@@ -397,8 +396,30 @@ func TestScheduledUniverseUpdateSkipsWhenRecentJobCompleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get settings: %v", err)
 	}
-	if gotSettings.LastScheduledUpdate.Before(before.Add(-time.Second)) {
-		t.Fatalf("last scheduled update = %v, want refreshed after %v", gotSettings.LastScheduledUpdate, before)
+	wantSlot := time.Date(2026, 6, 30, scheduledUniverseUpdateHour, 0, 0, 0, loc)
+	if !gotSettings.LastScheduledUpdate.Equal(wantSlot) {
+		t.Fatalf("last scheduled update = %v, want slot %v", gotSettings.LastScheduledUpdate, wantSlot)
+	}
+}
+
+func TestScheduledUniverseUpdateStartsNextDayWhenPreviousSlotFinishedLessThanDayAgo(t *testing.T) {
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+	now := time.Date(2026, 7, 1, 23, 0, 30, 0, loc)
+	previousSlot := time.Date(2026, 6, 30, scheduledUniverseUpdateHour, 0, 0, 0, loc)
+	latest := StockV2UpdateJob{
+		Status:    "completed",
+		CreatedAt: previousSlot,
+		StartAt:   previousSlot,
+		EndAt:     previousSlot.Add(31 * time.Minute),
+	}
+
+	decision, slotStart := decideScheduledUniverseUpdate(previousSlot, latest, true, now)
+	if decision != scheduledUniverseUpdateStart {
+		t.Fatalf("decision = %s, want start for the next natural slot", decision)
+	}
+	wantSlot := time.Date(2026, 7, 1, scheduledUniverseUpdateHour, 0, 0, 0, loc)
+	if !slotStart.Equal(wantSlot) {
+		t.Fatalf("slot = %v, want %v", slotStart, wantSlot)
 	}
 }
 

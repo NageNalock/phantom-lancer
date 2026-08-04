@@ -576,6 +576,21 @@ func (s *Store) NewsContextBackfillForRun(ctx context.Context, runID string) (Ne
 	return item, err == nil, wrapError(err, "get news context backfill for run")
 }
 
+func (s *Store) ListNewsContextBackfillsForRun(ctx context.Context, runID string) ([]NewsContextBackfill, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil, ErrInvalidNewsContextInput
+	}
+	rows, err := s.db.QueryContext(ctx, newsContextBackfillSelectSQL+`
+		WHERE id IN (SELECT backfill_id FROM stockv2_news_context_backfill_runs WHERE run_id=?)
+		ORDER BY completed_at DESC, started_at DESC, updated_at DESC, id DESC`, runID)
+	if err != nil {
+		return nil, wrapError(err, "list news context backfills for run")
+	}
+	return scanRows(rows, scanNewsContextBackfill,
+		"scan news context backfill for run", "iterate news context backfills for run")
+}
+
 func (s *Store) ListNewsContextBackfillRuns(ctx context.Context, backfillID, windowType string) ([]NewsContextRun, error) {
 	rows, err := s.db.QueryContext(ctx, newsContextRunSelectSQL+`
 		WHERE id IN (SELECT run_id FROM stockv2_news_context_backfill_runs WHERE backfill_id=?)
@@ -843,24 +858,30 @@ func (s *Store) UpsertNewsContextBackfillReviewedVersions(ctx context.Context, b
 	})
 }
 
-func (s *Store) FindNewsContextBackfillReviewedVersion(ctx context.Context, backfillID, finalReviewRunID, threadID string, after time.Time) (newsContextBackfillReviewedVersion, bool, error) {
+func (s *Store) FindNewsContextBackfillReviewedVersionCoveringRun(
+	ctx context.Context,
+	backfillID, finalReviewRunID, threadID string,
+	sourceStart, sourceEnd time.Time,
+) (newsContextBackfillReviewedVersion, bool, error) {
 	var item newsContextBackfillReviewedVersion
-	if strings.TrimSpace(backfillID) == "" || strings.TrimSpace(finalReviewRunID) == "" || strings.TrimSpace(threadID) == "" || after.IsZero() {
+	if strings.TrimSpace(backfillID) == "" || strings.TrimSpace(finalReviewRunID) == "" ||
+		strings.TrimSpace(threadID) == "" || sourceStart.IsZero() || !sourceEnd.After(sourceStart) {
 		return item, false, ErrInvalidNewsContextInput
 	}
 	err := s.db.QueryRowContext(ctx, `SELECT v.daily_run_id,v.thread_id,v.version_id,v.final_review_run_id,v.created_at
 		FROM stockv2_news_context_backfill_reviewed_versions v
 		JOIN stockv2_news_context_runs r ON r.id=v.daily_run_id
 		WHERE v.backfill_id=? AND v.final_review_run_id=? AND v.thread_id=?
-		AND v.created_at>=? AND r.window_type=? AND r.trigger_type=? AND r.status=?
+		AND r.window_start<=? AND r.window_end>=?
+		AND r.window_type=? AND r.trigger_type=? AND r.status=?
 		ORDER BY r.window_end DESC,r.id DESC,v.version_id DESC LIMIT 1`, strings.TrimSpace(backfillID),
-		strings.TrimSpace(finalReviewRunID), strings.TrimSpace(threadID), after,
+		strings.TrimSpace(finalReviewRunID), strings.TrimSpace(threadID), sourceStart, sourceEnd,
 		NewsContextWindowDaily, NewsContextTriggerBackfill, NewsContextRunStatusCompleted).
 		Scan(&item.DailyRunID, &item.ThreadID, &item.VersionID, &item.FinalReviewRunID, &item.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return item, false, nil
 	}
-	return item, err == nil, wrapError(err, "find reviewed historical daily output")
+	return item, err == nil, wrapError(err, "find reviewed historical daily output covering source run")
 }
 
 func (s *Store) ReplaceNewsContextMaterializedThreadItems(ctx context.Context, runID string, versions []NewsThreadVersion) error {

@@ -104,6 +104,10 @@ const (
 	codexSearchMCPName         = "ddg"
 	codexTaskModelProviderName = "stockv2_task_provider"
 	codexDirectResultMaxBytes  = 2 << 20
+	// ponytail: retain only a few result-shaped final assistant messages from the
+	// bounded Codex JSONL event stream. They are a fallback for a malformed or
+	// missing output-last-message file, not a general transcript parser.
+	codexDirectResultCandidateLimit = 8
 )
 
 type codexMCPServerCapability struct {
@@ -540,6 +544,20 @@ waitLoop:
 		if readErr == nil {
 			directResult, directErr = e.submitCodexDirectResult(rawResult, taskID, taskType)
 		}
+		if directErr != nil {
+			for _, candidate := range researchAudit.directResultCandidatesNewestFirst() {
+				if readErr == nil && bytes.Equal(bytes.TrimSpace(candidate), bytes.TrimSpace(rawResult)) {
+					continue
+				}
+				fallback, candidateErr := e.submitCodexDirectResult(candidate, taskID, taskType)
+				if candidateErr != nil {
+					continue
+				}
+				directResult = fallback
+				directErr = nil
+				break
+			}
+		}
 		if directErr == nil {
 			submittedResult = directResult
 		} else if execErr == nil {
@@ -692,11 +710,12 @@ func codexTOMLStringArray(values []string) string {
 }
 
 type cliResearchAuditCollector struct {
-	mu      sync.Mutex
-	enabled bool
-	web     int
-	mcp     map[string]int
-	agent   map[string]int
+	mu             sync.Mutex
+	enabled        bool
+	web            int
+	mcp            map[string]int
+	agent          map[string]int
+	resultMessages [][]byte
 }
 
 func newCLIResearchAudit(enabled bool) *cliResearchAuditCollector {
@@ -715,6 +734,7 @@ func (a *cliResearchAuditCollector) record(line []byte) {
 			Server string `json:"server"`
 			Tool   string `json:"tool"`
 			Name   string `json:"name"`
+			Text   string `json:"text"`
 		} `json:"item"`
 	}
 	if json.Unmarshal(line, &event) != nil || event.Type != "item.completed" {
@@ -723,6 +743,17 @@ func (a *cliResearchAuditCollector) record(line []byte) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch event.Item.Type {
+	case "agent_message":
+		message := []byte(strings.TrimSpace(event.Item.Text))
+		if len(message) == 0 || len(message) > codexDirectResultMaxBytes ||
+			!bytes.Contains(message, []byte(`"taskID"`)) || !bytes.Contains(message, []byte(`"result"`)) {
+			return
+		}
+		a.resultMessages = append(a.resultMessages, append([]byte(nil), message...))
+		if len(a.resultMessages) > codexDirectResultCandidateLimit {
+			a.resultMessages = append(a.resultMessages[:0],
+				a.resultMessages[len(a.resultMessages)-codexDirectResultCandidateLimit:]...)
+		}
 	case "web_search":
 		a.web++
 	case "mcp_tool_call":
@@ -738,6 +769,16 @@ func (a *cliResearchAuditCollector) record(line []byte) {
 			a.agent[safelog.Text(name, 160)]++
 		}
 	}
+}
+
+func (a *cliResearchAuditCollector) directResultCandidatesNewestFirst() [][]byte {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([][]byte, 0, len(a.resultMessages))
+	for index := len(a.resultMessages) - 1; index >= 0; index-- {
+		out = append(out, append([]byte(nil), a.resultMessages[index]...))
+	}
+	return out
 }
 
 func (a *cliResearchAuditCollector) snapshot() AgentCLIResearchAudit {
