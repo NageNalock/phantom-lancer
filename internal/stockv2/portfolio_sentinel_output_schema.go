@@ -1,8 +1,6 @@
 package stockv2
 
 import (
-	"encoding/json"
-	"fmt"
 	"sort"
 )
 
@@ -160,36 +158,7 @@ func portfolioSentinelDirectOutputSchema(taskID string) ([]byte, error) {
 			},
 		},
 	}
-	schema := map[string]any{
-		"$schema":              "https://json-schema.org/draft/2020-12/schema",
-		"type":                 "object",
-		"additionalProperties": false,
-		"required":             []string{"taskID", "taskType", "result"},
-		"properties": map[string]any{
-			"taskID":   map[string]any{"type": "string", "const": taskID},
-			"taskType": map[string]any{"type": "string", "const": AgentTaskTypePortfolioSentinel},
-			"result": map[string]any{
-				"type":                 "object",
-				"additionalProperties": false,
-				"required":             []string{"outputType", "resultSummary", "result", "confidence"},
-				"properties": map[string]any{
-					"outputType":    map[string]any{"type": "string", "const": PortfolioSentinelOutputType},
-					"resultSummary": map[string]any{"type": "string"},
-					"result":        report,
-					"confidence":    map[string]any{"type": "number", "minimum": 0, "maximum": 1},
-				},
-			},
-		},
-	}
-	// ponytail: DeepSeek Responses strict schemas require every object property
-	// in `required`. Preserve optional semantics with JSON null instead of
-	// maintaining a second, hand-written provider schema.
-	requireAllSchemaProperties(schema)
-	raw, err := json.Marshal(schema)
-	if err != nil {
-		return nil, fmt.Errorf("encode portfolio sentinel output schema: %w", err)
-	}
-	return raw, nil
+	return agentDirectOutputSchema(taskID, AgentTaskTypePortfolioSentinel, PortfolioSentinelOutputType, report)
 }
 
 func requireAllSchemaProperties(schema map[string]any) {

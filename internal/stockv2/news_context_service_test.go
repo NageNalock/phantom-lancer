@@ -1258,6 +1258,18 @@ func TestRetryableNewsContextAttemptFailureSeparatesTransientAndQuotaErrors(t *t
 	)) {
 		t.Fatal("service restart was not classified as safe low-frequency recovery")
 	}
+	if !retryableNewsContextRecoveryFailure(errors.New(
+		"process exited (code 0) without submitting result",
+	)) {
+		t.Fatal("no-submit failure was not classified as safe low-frequency recovery")
+	}
+	richer := newsContextAgentAttemptError(
+		AgentRun{ErrorMessage: "usage limit reached; purchase more credits"},
+		errors.New("process exited (code 1) without submitting result"),
+	)
+	if richer == nil || !strings.Contains(richer.Error(), "purchase more credits") {
+		t.Fatalf("agent attempt error = %v, want persisted provider detail", richer)
+	}
 }
 
 func newsContextCreateThreadReport(run NewsContextRun, event NewsEvent) NewsContextReport {

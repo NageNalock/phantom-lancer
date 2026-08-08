@@ -1913,6 +1913,9 @@ func agentExecutorOutputSummary(output *AgentExecutorOutput) string {
 	if len(output.ResearchAudit.AgentToolCalls) > 0 {
 		fmt.Fprintf(&b, "agent_tool_calls: %s\n", compactCountMap(output.ResearchAudit.AgentToolCalls))
 	}
+	if len(output.ResultCandidates) > 0 {
+		fmt.Fprintf(&b, "result_candidates: %s\n", compactResultCandidateDiagnostics(output.ResultCandidates))
+	}
 	if output.StdoutTail != "" {
 		b.WriteString("stdout_tail:\n")
 		b.WriteString(output.StdoutTail)
@@ -1928,6 +1931,14 @@ func compactCountMap(counts map[string]int) string {
 	raw, err := json.Marshal(counts)
 	if err != nil {
 		return "{}"
+	}
+	return string(raw)
+}
+
+func compactResultCandidateDiagnostics(items []AgentResultCandidateDiagnostic) string {
+	raw, err := json.Marshal(items)
+	if err != nil {
+		return "[]"
 	}
 	return string(raw)
 }
@@ -2038,6 +2049,9 @@ func (s *Service) finalizeAgentRunWithOutput(
 		}
 		if len(execOutput.ResearchAudit.AgentToolCalls) > 0 {
 			fmt.Fprintf(&outputArtifact, "agent_tool_calls: %s\n", compactCountMap(execOutput.ResearchAudit.AgentToolCalls))
+		}
+		if len(execOutput.ResultCandidates) > 0 {
+			fmt.Fprintf(&outputArtifact, "result_candidates: %s\n", compactResultCandidateDiagnostics(execOutput.ResultCandidates))
 		}
 		includeEmptyTails := execErr != nil || execOutput.ExitCode != 0 || execOutput.TimedOut
 		retainTails := run.TaskType != AgentTaskTypeNewsEventReview || run.TriggerObjectType != "news_context_run" || includeEmptyTails
@@ -2314,12 +2328,24 @@ func agentRunFailureMessage(base string, execOutput *AgentExecutorOutput) string
 	if strings.TrimSpace(execOutput.StderrTail) == "" {
 		return safelog.Text(message, 500)
 	}
-	stderr := lastNonEmptyLine(execOutput.StderrTail)
+	stderr := lastRelevantCodexStderrLine(execOutput.StderrTail)
 	if stderr == "" {
 		return safelog.Text(message, 500)
 	}
 	// ponytail: Keep the run error compact; full stdout/stderr remains in the ledger detail.
 	return safelog.Text(message+": "+stderr, 500)
+}
+
+func lastRelevantCodexStderrLine(value string) string {
+	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if line == "" || suppressCodexStderrLine([]byte(line)) {
+			continue
+		}
+		return line
+	}
+	return ""
 }
 
 func agentProviderFailureMessage(stdout string) string {

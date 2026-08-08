@@ -97,7 +97,7 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 	var agentLedger AgentDecisionLedger
 	var agentRunModelName string
 	var strictErr error
-	if req.ForceAI || task.BaseInputChanged {
+	if req.ForceAI || task.BaseInputChanged || stockProfileAIRequiresRefresh(task.AIProfileStatus) {
 		run, ledger, modelName, runErr := s.prepareStockProfileSummaryAgentRun(ctx, profile, req.RequestedBy)
 		if runErr != nil {
 			task.AIDecision = stockProfileAIDecisionForError(runErr)
@@ -277,6 +277,11 @@ func (s *Service) runAutomaticDeepStockProfileUpdate(ctx context.Context, trigge
 	seed := now.Format("2006-01-02")
 	// ponytail: 现阶段用“旧任务优先 + 每日稳定 hash”当滚动队列；需要强 SLA 时再加持久化队列表。
 	sort.SliceStable(candidates, func(i, j int) bool {
+		leftRepair := normalizeStockProfileAIStatus(candidates[i].AIProfileStatus) == StockProfileAIStatusFailed
+		rightRepair := normalizeStockProfileAIStatus(candidates[j].AIProfileStatus) == StockProfileAIStatusFailed
+		if leftRepair != rightRepair {
+			return leftRepair
+		}
 		leftBucket := stockProfileDeepUpdateFreshnessBucket(candidates[i].LastTaskAt)
 		rightBucket := stockProfileDeepUpdateFreshnessBucket(candidates[j].LastTaskAt)
 		if leftBucket != rightBucket {
@@ -327,6 +332,15 @@ func (s *Service) runAutomaticDeepStockProfileUpdate(ctx context.Context, trigge
 	}
 	result.UpdatedAt = time.Now()
 	return result, nil
+}
+
+func stockProfileAIRequiresRefresh(status string) bool {
+	switch normalizeStockProfileAIStatus(status) {
+	case StockProfileAIStatusFailed, StockProfileAIStatusMissing:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) runBaseProfileMaintenanceScheduler(ctx context.Context) {
@@ -477,15 +491,30 @@ func (s *Service) RunAgentStockProfileSummary(ctx context.Context, symbol string
 }
 
 func (s *Service) prepareStockProfileSummaryAgentRun(ctx context.Context, profile StockProfile, requestedBy string) (AgentRun, AgentDecisionLedger, string, error) {
+	return s.prepareStockProfileSummaryAgentRunAttempt(ctx, profile, requestedBy, false)
+}
+
+func (s *Service) prepareStockProfileSummaryAgentRunAttempt(
+	ctx context.Context,
+	profile StockProfile,
+	requestedBy string,
+	fallbackOnly bool,
+) (AgentRun, AgentDecisionLedger, string, error) {
 	taskProfile, err := s.store.GetAgentTaskProfileByType(ctx, AgentTaskTypeStockProfileSummary)
 	if err != nil {
 		return AgentRun{}, AgentDecisionLedger{}, "", err
 	}
-	model, err := s.resolveModel(ctx, taskProfile)
+	modelProfile := taskProfile
+	if fallbackOnly {
+		modelProfile.PrimaryModelID = ""
+	}
+	model, err := s.resolveModel(ctx, modelProfile)
 	if err != nil {
-		profile.AIProfileStatus = StockProfileAIStatusNotConfigured
-		profile.AIProfileError = err.Error()
-		_, _ = s.store.UpsertStockProfile(ctx, profile)
+		if !fallbackOnly {
+			profile.AIProfileStatus = StockProfileAIStatusNotConfigured
+			profile.AIProfileError = err.Error()
+			_, _ = s.store.UpsertStockProfile(ctx, profile)
+		}
 		return AgentRun{}, AgentDecisionLedger{}, "", err
 	}
 	if s.agentExecutor == nil {
@@ -497,6 +526,7 @@ func (s *Service) prepareStockProfileSummaryAgentRun(ctx context.Context, profil
 	})
 	run, ledger, err := s.CreateAgentRunRecord(ctx, AgentRunRecordParams{
 		TaskType:             AgentTaskTypeStockProfileSummary,
+		ExecutionMode:        taskProfile.ExecutionMode,
 		ProviderID:           model.ProviderID,
 		ModelID:              model.ID,
 		ReasoningEffort:      taskProfile.ReasoningEffort,
@@ -521,9 +551,76 @@ func (s *Service) startStockProfileAgentRunAsync(ctx context.Context, run AgentR
 			s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("panic: %v", r))
 		}
 	}()
+	if _, _, err := s.executeStockProfileAgentRun(ctx, run, ledger, profile, modelName); err != nil && s.log != nil {
+		s.log.Warn("stock profile agent run finished with error", "run_id", run.ID, "ledger_id", ledger.ID, "symbol", profile.Symbol, "model", modelName, "error", safelog.Text(err.Error(), 300))
+	}
+}
+
+func (s *Service) executeStockProfileAgentRun(
+	ctx context.Context,
+	run AgentRun,
+	ledger AgentDecisionLedger,
+	profile StockProfile,
+	modelName string,
+) (AgentRun, AgentDecisionLedger, error) {
+	finalRun, finalLedger, output, execErr := s.executeStockProfileAgentAttempt(ctx, run, ledger, profile, modelName)
+	if finalRun.Status == AgentRunStatusCompleted ||
+		!stockProfileFallbackEligible(ctx, finalRun, output, execErr) {
+		return finalRun, finalLedger, stockProfileAttemptError(finalRun, execErr)
+	}
+	if output != nil {
+		if err := ensureExecutorProcessGroupStopped(output.ProcessGroupID); err != nil {
+			return finalRun, finalLedger, fmt.Errorf("clean failed stock profile process: %w", err)
+		}
+	}
+	fallbackRun, fallbackLedger, fallbackModelName, err := s.prepareStockProfileSummaryAgentRunAttempt(ctx, profile, "system", true)
+	if err != nil || fallbackRun.ModelID == finalRun.ModelID {
+		return finalRun, finalLedger, stockProfileAttemptError(finalRun, firstNonNil(execErr, err))
+	}
+	if err := s.linkStockProfileFallbackAttempt(ctx, finalRun, finalLedger, fallbackRun, fallbackLedger); err != nil {
+		s.finalizeAgentRun(ctx, fallbackRun.ID, nil, err)
+		return finalRun, finalLedger, stockProfileAttemptError(finalRun, err)
+	}
+	if s.log != nil {
+		s.log.Warn(
+			"falling back stock profile agent after recoverable model failure",
+			"symbol", profile.Symbol,
+			"primary_agent_run_id", finalRun.ID,
+			"primary_model_id", finalRun.ModelID,
+			"fallback_agent_run_id", fallbackRun.ID,
+			"fallback_model_id", fallbackRun.ModelID,
+			"error", safelog.Text(firstNonEmpty(finalRun.ErrorMessage, stockProfileErrorString(execErr)), 240),
+		)
+	}
+	fallbackFinalRun, fallbackFinalLedger, _, fallbackErr := s.executeStockProfileAgentAttempt(
+		ctx, fallbackRun, fallbackLedger, profile, fallbackModelName,
+	)
+	if fallbackFinalRun.Status == AgentRunStatusCompleted {
+		s.markStockProfileUpdateTaskAIResult(ctx, finalRun.ID, StockProfileUpdateStatusCompleted, StockProfileAIStatusReady, "")
+	} else {
+		s.markStockProfileUpdateTaskAIResult(
+			ctx,
+			finalRun.ID,
+			StockProfileUpdateStatusPartial,
+			StockProfileAIStatusFailed,
+			firstNonEmpty(fallbackFinalRun.ErrorMessage, stockProfileErrorString(fallbackErr)),
+		)
+	}
+	return fallbackFinalRun, fallbackFinalLedger, stockProfileAttemptError(fallbackFinalRun, fallbackErr)
+}
+
+func (s *Service) executeStockProfileAgentAttempt(
+	ctx context.Context,
+	run AgentRun,
+	ledger AgentDecisionLedger,
+	profile StockProfile,
+	modelName string,
+) (AgentRun, AgentDecisionLedger, *AgentExecutorOutput, error) {
 	if s.agentExecutor == nil {
-		s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("no executor configured"))
-		return
+		err := ErrAgentExecutorUnavailable
+		s.finalizeAgentRun(ctx, run.ID, nil, err)
+		finalRun, finalLedger := s.safeGetAgentRunAndLedger(ctx, run.ID, ledger.ID)
+		return finalRun, finalLedger, nil, err
 	}
 	running := run
 	running.Status = AgentRunStatusRunning
@@ -533,6 +630,89 @@ func (s *Service) startStockProfileAgentRunAsync(ctx context.Context, run AgentR
 	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
 	execOutput, execErr := s.agentExecutor.ExecuteStockProfileSummary(ctx, taskID, profile, modelName, run.ReasoningEffort)
 	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, execOutput, execErr)
+	finalRun, finalLedger := s.safeGetAgentRunAndLedger(ctx, run.ID, ledger.ID)
+	return finalRun, finalLedger, execOutput, execErr
+}
+
+func stockProfileFallbackEligible(ctx context.Context, run AgentRun, output *AgentExecutorOutput, execErr error) bool {
+	if ctx.Err() != nil || run.Status != AgentRunStatusFailed {
+		return false
+	}
+	if errors.Is(execErr, ErrAgentExecutorUnavailable) ||
+		errors.Is(execErr, ErrAgentTaskRequiresCLI) ||
+		errors.Is(execErr, ErrAgentExecutionModeModelMismatch) {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(run.ErrorMessage + " " + stockProfileErrorString(execErr)))
+	if strings.Contains(message, "save stock profile enhancement failed:") &&
+		!strings.Contains(message, ErrInvalidStockProfileEnhancement.Error()) {
+		// ponytail: persistence may already have crossed a storage boundary; a
+		// second paid model call cannot safely repair it.
+		return false
+	}
+	if output != nil {
+		return true
+	}
+	return agentProviderUsageLimitFailure(execErr, output) ||
+		strings.Contains(message, "no valid result submitted") ||
+		strings.Contains(message, "without submitting") ||
+		strings.Contains(message, "no result submitted") ||
+		strings.Contains(message, ErrInvalidStockProfileEnhancement.Error()) ||
+		strings.Contains(message, "execution timed out") ||
+		strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "api request failed") ||
+		strings.Contains(message, "provider") ||
+		strings.Contains(message, "codex")
+}
+
+func (s *Service) linkStockProfileFallbackAttempt(
+	ctx context.Context,
+	primaryRun AgentRun,
+	primaryLedger AgentDecisionLedger,
+	fallbackRun AgentRun,
+	fallbackLedger AgentDecisionLedger,
+) error {
+	primaryLedger.OutputArtifactSummary = safelog.Text(
+		strings.TrimSpace(primaryLedger.OutputArtifactSummary)+"\nfallback_agent_run_id: "+fallbackRun.ID,
+		16384,
+	)
+	if primaryLedger.RedactionSummary == nil {
+		primaryLedger.RedactionSummary = map[string]any{}
+	}
+	if fallbackLedger.RedactionSummary == nil {
+		fallbackLedger.RedactionSummary = map[string]any{}
+	}
+	primaryLedger.RedactionSummary["fallbackAgentRunId"] = fallbackRun.ID
+	fallbackLedger.RedactionSummary["fallbackFromAgentRunId"] = primaryRun.ID
+	if _, err := s.store.UpdateAgentDecisionLedger(ctx, primaryLedger); err != nil {
+		return err
+	}
+	_, err := s.store.UpdateAgentDecisionLedger(ctx, fallbackLedger)
+	return err
+}
+
+func stockProfileAttemptError(run AgentRun, execErr error) error {
+	if run.Status == AgentRunStatusCompleted {
+		return nil
+	}
+	if strings.TrimSpace(run.ErrorMessage) != "" {
+		return errors.New(run.ErrorMessage)
+	}
+	return execErr
+}
+
+func stockProfileErrorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func firstNonNil(first, second error) error {
+	if first != nil {
+		return first
+	}
+	return second
 }
 
 func (s *Service) applyStockProfileEnhancementResult(ctx context.Context, symbol string, result map[string]any, modelName string, confidence float64) (StockProfile, error) {

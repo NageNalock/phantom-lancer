@@ -1173,6 +1173,16 @@ func TestAgentRunFailureMessagePrefersCodexJSONError(t *testing.T) {
 	}
 }
 
+func TestAgentRunFailureMessageDropsCodexStdinNoticeWithoutProviderError(t *testing.T) {
+	const base = "no result submitted: output_last_message: invalid character 'A'"
+	got := agentRunFailureMessage(base, &AgentExecutorOutput{
+		StderrTail: "Reading additional input from stdin...\n",
+	})
+	if got != base {
+		t.Fatalf("failure message = %q, want %q", got, base)
+	}
+}
+
 type fakeDebugAgentExecutor struct {
 	pool *agentTaskPool
 }

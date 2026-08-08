@@ -318,6 +318,42 @@ func TestUpdateStockProfileCallsAIWhenInputChanges(t *testing.T) {
 	}
 }
 
+func TestUpdateStockProfileRetriesFailedAIWhenInputUnchanged(t *testing.T) {
+	ctx := context.Background()
+	businessLine := "动力电池系统"
+	svc, cleanup := newStockProfileTestServiceWithClient(t, stockProfileF10TestClient(&businessLine))
+	defer cleanup()
+	seedProfileInstrument(t, svc, ctx)
+	configureStockProfileAgent(t, svc, ctx)
+	svc.agentExecutor = fakeOperationReviewExecutor{
+		pool: svc.agentTaskPool, submit: true, summary: "profile enhanced", confidence: 0.8,
+		result: map[string]any{"summaryZh": "AI 增强摘要"},
+	}
+
+	first, err := svc.UpdateStockProfile(ctx, RequestUpdateStockProfile{Symbol: "300750", RequestedBy: "test"})
+	if err != nil || first.AgentRun == nil {
+		t.Fatalf("first profile update = %+v, err=%v", first, err)
+	}
+	_ = waitAgentRunTerminal(t, svc, first.AgentRun.ID)
+	profile, err := svc.GetStockProfile(ctx, "300750")
+	if err != nil {
+		t.Fatalf("get profile: %v", err)
+	}
+	profile.AIProfileStatus = StockProfileAIStatusFailed
+	profile.AIProfileError = "previous malformed model output"
+	if _, err := svc.store.UpsertStockProfile(ctx, profile); err != nil {
+		t.Fatalf("mark profile failed: %v", err)
+	}
+
+	second, err := svc.UpdateStockProfile(ctx, RequestUpdateStockProfile{Symbol: "300750", RequestedBy: "test"})
+	if err != nil {
+		t.Fatalf("retry failed profile: %v", err)
+	}
+	if second.Task.BaseInputChanged || second.Task.AIDecision != StockProfileAIDecisionCalled || second.AgentRun == nil {
+		t.Fatalf("retry result = %+v, want unchanged input with ai called", second)
+	}
+}
+
 func TestStockProfileDedupesAliasesAndTags(t *testing.T) {
 	profile := buildStockProfileFromInstrument(StockV2Instrument{
 		Symbol:         "000001",
@@ -813,6 +849,138 @@ func TestRunAgentStockProfileSummaryMarksProfileFailedOnAgentError(t *testing.T)
 	if len(tasks) != 1 || tasks[0].Status != StockProfileUpdateStatusPartial || tasks[0].AIProfileStatus != StockProfileAIStatusFailed || !strings.Contains(tasks[0].AIProfileError, "code 2") {
 		t.Fatalf("profile update task = %+v, want partial with ai failed", tasks)
 	}
+}
+
+func TestStockProfileAgentFallsBackOnceAfterMissingResult(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	seedProfileInstrument(t, svc, ctx)
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{ProviderType: AgentProviderTypeCodexCLI, Name: "profile-fallback"})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	primary, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{ProviderID: provider.ID, ModelName: "profile-primary", Enabled: true})
+	if err != nil {
+		t.Fatalf("create primary model: %v", err)
+	}
+	fallback, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{ProviderID: provider.ID, ModelName: "profile-fallback", Enabled: true})
+	if err != nil {
+		t.Fatalf("create fallback model: %v", err)
+	}
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeStockProfileSummary, RequestUpdateAgentTaskProfile{
+		PrimaryModelID: &primary.ID, FallbackModelID: &fallback.ID,
+	}); err != nil {
+		t.Fatalf("bind profile fallback: %v", err)
+	}
+	executor := &stockProfileFallbackExecutor{
+		fakeOperationReviewExecutor: fakeOperationReviewExecutor{pool: svc.agentTaskPool},
+		pool:                        svc.agentTaskPool,
+		fallbackModel:               fallback.ModelName,
+	}
+	svc.agentExecutor = executor
+
+	update, err := svc.UpdateStockProfile(ctx, RequestUpdateStockProfile{Symbol: "300750", RequestedBy: "test"})
+	if err != nil || update.AgentRun == nil {
+		t.Fatalf("start profile update = %+v, err=%v", update, err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	var task StockProfileUpdateTask
+	for time.Now().Before(deadline) {
+		tasks, listErr := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Symbol: "300750", Limit: 1})
+		if listErr == nil && len(tasks) == 1 {
+			task = tasks[0]
+			if task.Status == StockProfileUpdateStatusCompleted {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if task.Status != StockProfileUpdateStatusCompleted || task.AIProfileStatus != StockProfileAIStatusReady {
+		t.Fatalf("profile task = %+v, want fallback completion", task)
+	}
+	if len(executor.models) != 2 || executor.models[0] != primary.ModelName || executor.models[1] != fallback.ModelName {
+		t.Fatalf("executor models = %#v, want primary then fallback", executor.models)
+	}
+	runs, err := svc.ListAgentRuns(ctx, AgentRunListFilter{
+		TaskType: AgentTaskTypeStockProfileSummary, TriggerObjectID: "300750", Limit: 10,
+	})
+	if err != nil || len(runs) != 2 {
+		t.Fatalf("profile agent runs = %#v, err=%v", runs, err)
+	}
+	var primaryRun, fallbackRun AgentRun
+	for _, run := range runs {
+		if run.ModelID == primary.ID {
+			primaryRun = run
+		} else if run.ModelID == fallback.ID {
+			fallbackRun = run
+		}
+	}
+	if primaryRun.Status != AgentRunStatusFailed || fallbackRun.Status != AgentRunStatusCompleted {
+		t.Fatalf("primary/fallback runs = %+v / %+v", primaryRun, fallbackRun)
+	}
+	primaryLedger, err := svc.store.GetAgentDecisionLedger(ctx, primaryRun.DecisionLedgerID)
+	if err != nil || !strings.Contains(primaryLedger.OutputArtifactSummary, "fallback_agent_run_id: "+fallbackRun.ID) {
+		t.Fatalf("primary fallback audit = %+v, err=%v", primaryLedger, err)
+	}
+	fallbackLedger, err := svc.store.GetAgentDecisionLedger(ctx, fallbackRun.DecisionLedgerID)
+	if err != nil || fallbackLedger.RedactionSummary["fallbackFromAgentRunId"] != primaryRun.ID {
+		t.Fatalf("fallback source audit = %+v, err=%v", fallbackLedger, err)
+	}
+}
+
+func TestStockProfileFallbackEligibilityRejectsPersistenceFailure(t *testing.T) {
+	run := AgentRun{Status: AgentRunStatusFailed, ErrorMessage: "save stock profile enhancement failed: disk full"}
+	if stockProfileFallbackEligible(context.Background(), run, &AgentExecutorOutput{ExitCode: 0}, nil) {
+		t.Fatal("persistence failure must not spend another model attempt")
+	}
+}
+
+func TestListStockProfileDeepUpdateCandidatesPrioritizesFailedAI(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+	seedProfileInstruments(t, svc, ctx, "300750", "300751")
+	for symbol, status := range map[string]string{"300750": StockProfileAIStatusReady, "300751": StockProfileAIStatusFailed} {
+		instrument, err := svc.store.GetInstrument(ctx, symbol)
+		if err != nil {
+			t.Fatalf("get instrument %s: %v", symbol, err)
+		}
+		profile := buildStockProfileFromInstrument(instrument)
+		profile.AIProfileStatus = status
+		if _, err := svc.store.UpsertStockProfile(ctx, profile); err != nil {
+			t.Fatalf("upsert profile %s: %v", symbol, err)
+		}
+	}
+	candidates, err := svc.store.ListStockProfileDeepUpdateCandidates(ctx, 1)
+	if err != nil || len(candidates) != 1 || candidates[0].Instrument.Symbol != "300751" {
+		t.Fatalf("candidates = %#v, err=%v; want failed profile first", candidates, err)
+	}
+}
+
+type stockProfileFallbackExecutor struct {
+	fakeOperationReviewExecutor
+	pool          *agentTaskPool
+	fallbackModel string
+	models        []string
+}
+
+func (e *stockProfileFallbackExecutor) ExecuteStockProfileSummary(
+	_ context.Context,
+	taskID string,
+	profile StockProfile,
+	modelName, _ string,
+) (*AgentExecutorOutput, error) {
+	e.models = append(e.models, modelName)
+	if modelName == e.fallbackModel {
+		_, _ = e.pool.submitResult(taskID, AgentTaskTypeStockProfileSummary, AgentTaskSubmittedResult{
+			OutputType:    AgentTaskTypeStockProfileSummary,
+			ResultSummary: "fallback profile enhanced",
+			Result:        map[string]any{"summaryZh": profile.Name + "画像"},
+			Confidence:    0.8,
+		})
+	}
+	return &AgentExecutorOutput{ExitCode: 0, Duration: time.Millisecond}, nil
 }
 
 func TestListStockProfilesCanSearchProfileText(t *testing.T) {

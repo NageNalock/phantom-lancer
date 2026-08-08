@@ -298,8 +298,9 @@ func (s *Store) CountStockProfileUpdateTasks(ctx context.Context, filter StockPr
 }
 
 type stockProfileDeepUpdateCandidate struct {
-	Instrument StockV2Instrument
-	LastTaskAt time.Time
+	Instrument      StockV2Instrument
+	LastTaskAt      time.Time
+	AIProfileStatus string
 }
 
 func (s *Store) ListStockProfileDeepUpdateCandidates(ctx context.Context, limit int) ([]stockProfileDeepUpdateCandidate, error) {
@@ -333,13 +334,15 @@ func (s *Store) ListStockProfileDeepUpdateCandidates(ctx context.Context, limit 
 	taskRows.Close()
 
 	rows, err := s.assetDB().QueryContext(ctx, `
-		SELECT id, symbol, market, COALESCE(instrument_type,'stock'),
-		       COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
-		       concepts, COALESCE(list_date,''), COALESCE(delist_date,''),
-		       COALESCE(status,'active'), last_update_at, created_at, updated_at
-		FROM stockv2_instruments
-		WHERE COALESCE(status,'active') = 'active'
-		ORDER BY symbol ASC
+		SELECT i.id, i.symbol, i.market, COALESCE(i.instrument_type,'stock'),
+		       COALESCE(i.name,''), COALESCE(i.industry,''), COALESCE(i.sector,''),
+		       i.concepts, COALESCE(i.list_date,''), COALESCE(i.delist_date,''),
+		       COALESCE(i.status,'active'), i.last_update_at, i.created_at, i.updated_at,
+		       COALESCE(p.ai_profile_status,'missing')
+		FROM stockv2_instruments i
+		LEFT JOIN stockv2_stock_profiles p ON p.symbol = i.symbol
+		WHERE COALESCE(i.status,'active') = 'active'
+		ORDER BY i.symbol ASC
 	`)
 	if err != nil {
 		return nil, wrapError(err, "list stock profile deep update candidates")
@@ -366,6 +369,7 @@ func (s *Store) ListStockProfileDeepUpdateCandidates(ctx context.Context, limit 
 			&lastUpdate,
 			&item.Instrument.CreatedAt,
 			&item.Instrument.UpdatedAt,
+			&item.AIProfileStatus,
 		); err != nil {
 			return nil, wrapError(err, "scan stock profile deep update candidate")
 		}
@@ -383,6 +387,11 @@ func (s *Store) ListStockProfileDeepUpdateCandidates(ctx context.Context, limit 
 		return nil, wrapError(err, "iterate stock profile deep update candidates")
 	}
 	sort.SliceStable(items, func(i, j int) bool {
+		leftRepair := normalizeStockProfileAIStatus(items[i].AIProfileStatus) == StockProfileAIStatusFailed
+		rightRepair := normalizeStockProfileAIStatus(items[j].AIProfileStatus) == StockProfileAIStatusFailed
+		if leftRepair != rightRepair {
+			return leftRepair
+		}
 		leftEmpty := items[i].LastTaskAt.IsZero()
 		rightEmpty := items[j].LastTaskAt.IsZero()
 		if leftEmpty != rightEmpty {

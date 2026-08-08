@@ -1146,7 +1146,7 @@ func (s *Service) executeNewsContextBatchWithRetry(
 			// if the transport concurrently returned context cancellation.
 			return nil
 		}
-		attemptErr := execErr
+		attemptErr := newsContextAgentAttemptError(finalAgentRun, execErr)
 		if attemptTimedOut {
 			if attemptErr == nil {
 				attemptErr = context.DeadlineExceeded
@@ -1154,7 +1154,7 @@ func (s *Service) executeNewsContextBatchWithRetry(
 			attemptErr = fmt.Errorf("news context batch timed out after %s: %w", attemptTimeout, attemptErr)
 		}
 		if attemptErr == nil {
-			attemptErr = errors.New(firstNonEmpty(finalAgentRun.ErrorMessage, "news context agent run failed"))
+			attemptErr = errors.New("news context agent run failed")
 		}
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1242,6 +1242,13 @@ func newsContextFallbackEligible(err error, output *AgentExecutorOutput) bool {
 	}
 	return retryableNewsContextAttemptFailure(err) ||
 		strings.Contains(message, ErrInvalidNewsContextResult.Error())
+}
+
+func newsContextAgentAttemptError(run AgentRun, execErr error) error {
+	if strings.TrimSpace(run.ErrorMessage) != "" {
+		return errors.New(run.ErrorMessage)
+	}
+	return execErr
 }
 
 func retryableNewsContextBatchFailure(err error, output *AgentExecutorOutput) bool {
@@ -1352,6 +1359,8 @@ func retryableNewsContextRecoveryFailure(cause error) bool {
 	return errors.Is(cause, context.DeadlineExceeded) ||
 		strings.Contains(message, "timed out") ||
 		strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "without submitting") ||
+		strings.Contains(message, "no result submitted") ||
 		strings.Contains(message, "api request failed") ||
 		strings.Contains(message, "decode api response") ||
 		strings.Contains(message, "response has no choices") ||

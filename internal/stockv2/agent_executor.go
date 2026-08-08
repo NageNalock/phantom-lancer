@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,22 +31,34 @@ import (
 // 环境变量用 allowlist 转发, 与 codexclient 的策略对齐但不共享代码。
 
 type AgentExecutorOutput struct {
-	Command         string                 `json:"command,omitempty"` // redacted, prompt omitted
-	Prompt          string                 `json:"-"`
-	StdoutTail      string                 `json:"stdoutTail"` // ~4KB
-	StderrTail      string                 `json:"stderrTail"` // ~4KB
-	ExitCode        int                    `json:"exitCode"`
-	TimedOut        bool                   `json:"timedOut"`
-	Duration        time.Duration          `json:"duration"`
-	RawTranscript   string                 `json:"rawTranscript"` // ~16KB 摘要, 用于 ledger
-	ProcessGroupID  int                    `json:"-"`
-	PromptTokens    int                    `json:"promptTokens,omitempty"`
-	CachedTokens    int                    `json:"cachedTokens,omitempty"`
-	CacheMissTokens int                    `json:"cacheMissTokens,omitempty"`
-	OutputTokens    int                    `json:"outputTokens,omitempty"`
-	RequestCount    int                    `json:"requestCount,omitempty"`
-	RequestTrace    []AgentAPIRequestTrace `json:"requestTrace,omitempty"`
-	ResearchAudit   AgentCLIResearchAudit  `json:"researchAudit,omitempty"`
+	Command          string                           `json:"command,omitempty"` // redacted, prompt omitted
+	Prompt           string                           `json:"-"`
+	StdoutTail       string                           `json:"stdoutTail"` // ~4KB
+	StderrTail       string                           `json:"stderrTail"` // ~4KB
+	ExitCode         int                              `json:"exitCode"`
+	TimedOut         bool                             `json:"timedOut"`
+	Duration         time.Duration                    `json:"duration"`
+	RawTranscript    string                           `json:"rawTranscript"` // ~16KB 摘要, 用于 ledger
+	ProcessGroupID   int                              `json:"-"`
+	PromptTokens     int                              `json:"promptTokens,omitempty"`
+	CachedTokens     int                              `json:"cachedTokens,omitempty"`
+	CacheMissTokens  int                              `json:"cacheMissTokens,omitempty"`
+	OutputTokens     int                              `json:"outputTokens,omitempty"`
+	RequestCount     int                              `json:"requestCount,omitempty"`
+	RequestTrace     []AgentAPIRequestTrace           `json:"requestTrace,omitempty"`
+	ResearchAudit    AgentCLIResearchAudit            `json:"researchAudit,omitempty"`
+	ResultCandidates []AgentResultCandidateDiagnostic `json:"resultCandidates,omitempty"`
+}
+
+// AgentResultCandidateDiagnostic records how a bounded final-message candidate
+// was handled without persisting the portfolio content itself.
+type AgentResultCandidateDiagnostic struct {
+	Source       string `json:"source"`
+	Bytes        int    `json:"bytes"`
+	SHA256Prefix string `json:"sha256Prefix,omitempty"`
+	ResultShaped bool   `json:"resultShaped,omitempty"`
+	Status       string `json:"status"`
+	Error        string `json:"error,omitempty"`
 }
 
 // AgentCLIResearchAudit records bounded capability evidence from Codex JSONL.
@@ -194,7 +207,7 @@ func (e *codexCLIExecutor) ExecuteOperationReview(
 	// 构建 prompt
 	prompt := buildOperationReviewPrompt(taskID, pack, e.mcpURL)
 	if liveSearch, _ := pack.Evidence["googleNewsSearchRequired"].(bool); liveSearch {
-		return e.executePromptWithOptions(ctx, taskID, prompt, modelName, reasoningEffort, execDefaultTimeout, true)
+		return e.executePromptWithOptions(ctx, taskID, prompt, modelName, reasoningEffort, execDefaultTimeout, true, nil)
 	}
 	return e.executePrompt(ctx, taskID, prompt, modelName, reasoningEffort)
 }
@@ -248,7 +261,11 @@ func (e *codexCLIExecutor) ExecuteNewsContextAggregation(
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
 	prompt := buildNewsContextAggregationPrompt(taskID, pack, e.mcpURL)
-	return e.executePromptWithTimeout(ctx, taskID, prompt, modelName, reasoningEffort, newsContextAgentTimeout)
+	schema, err := newsContextDirectOutputSchema(taskID, pack.RunID, pack.WindowType)
+	if err != nil {
+		return nil, err
+	}
+	return e.executePromptWithOptions(ctx, taskID, prompt, modelName, reasoningEffort, newsContextAgentTimeout, false, schema)
 }
 
 func (e *codexCLIExecutor) ExecutePortfolioSentinel(
@@ -261,7 +278,11 @@ func (e *codexCLIExecutor) ExecutePortfolioSentinel(
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
 	prompt := buildPortfolioSentinelPrompt(taskID, pack, e.mcpURL)
-	return e.executePromptWithOptions(ctx, taskID, prompt, modelName, reasoningEffort, execDefaultTimeout, true)
+	schema, err := portfolioSentinelDirectOutputSchema(taskID)
+	if err != nil {
+		return nil, err
+	}
+	return e.executePromptWithOptions(ctx, taskID, prompt, modelName, reasoningEffort, execDefaultTimeout, true, schema)
 }
 
 func (e *codexCLIExecutor) ExecuteStockProfileSummary(
@@ -274,7 +295,11 @@ func (e *codexCLIExecutor) ExecuteStockProfileSummary(
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
 	prompt := buildStockProfileSummaryPrompt(taskID, profile, e.mcpURL)
-	return e.executePrompt(ctx, taskID, prompt, modelName, reasoningEffort)
+	schema, err := stockProfileDirectOutputSchema(taskID)
+	if err != nil {
+		return nil, err
+	}
+	return e.executePromptWithOptions(ctx, taskID, prompt, modelName, reasoningEffort, execDefaultTimeout, false, schema)
 }
 
 func (e *codexCLIExecutor) executePrompt(
@@ -294,7 +319,7 @@ func (e *codexCLIExecutor) executePromptWithTimeout(
 	reasoningEffort string,
 	timeout time.Duration,
 ) (*AgentExecutorOutput, error) {
-	return e.executePromptWithOptions(ctx, taskID, prompt, modelName, reasoningEffort, timeout, false)
+	return e.executePromptWithOptions(ctx, taskID, prompt, modelName, reasoningEffort, timeout, false, nil)
 }
 
 func (e *codexCLIExecutor) executePromptWithOptions(
@@ -305,6 +330,7 @@ func (e *codexCLIExecutor) executePromptWithOptions(
 	reasoningEffort string,
 	timeout time.Duration,
 	liveSearch bool,
+	directOutputSchema []byte,
 ) (*AgentExecutorOutput, error) {
 	if timeout <= 0 {
 		timeout = execDefaultTimeout
@@ -343,14 +369,10 @@ func (e *codexCLIExecutor) executePromptWithOptions(
 		// ponytail: DeepSeek currently documents Responses JSON Schema only for
 		// deepseek-v4-flash. Other custom CLI providers keep their existing final
 		// text contract until their upstream capability is verified.
-		if taskType == AgentTaskTypePortfolioSentinel && strings.EqualFold(strings.TrimSpace(modelName), "deepseek-v4-flash") {
+		if len(directOutputSchema) > 0 && strings.EqualFold(strings.TrimSpace(modelName), "deepseek-v4-flash") {
 			options.OutputSchemaPath = filepath.Join(codexHome, "output-schema.json")
-			rawSchema, schemaErr := portfolioSentinelDirectOutputSchema(taskID)
-			if schemaErr != nil {
-				return nil, schemaErr
-			}
-			if err := os.WriteFile(options.OutputSchemaPath, rawSchema, 0o600); err != nil {
-				return nil, fmt.Errorf("write portfolio sentinel output schema: %w", err)
+			if err := os.WriteFile(options.OutputSchemaPath, directOutputSchema, 0o600); err != nil {
+				return nil, fmt.Errorf("write %s output schema: %w", taskType, err)
 			}
 		}
 	}
@@ -442,6 +464,7 @@ func (e *codexCLIExecutor) executePromptWithOptions(
 
 	var submittedResult *AgentTaskSubmittedResult
 	var resultErr error
+	var resultCandidateDiagnostics []AgentResultCandidateDiagnostic
 
 	// 等 result
 	resultCh := make(chan struct {
@@ -539,24 +562,33 @@ waitLoop:
 
 	if submittedResult == nil && e.provider != nil && !timedOut {
 		rawResult, readErr := readCodexDirectResultFile(options.OutputLastMessagePath)
-		var directResult *AgentTaskSubmittedResult
-		directErr := readErr
+		candidates := make([]codexDirectResultCandidate, 0, codexDirectResultCandidateLimit+1)
 		if readErr == nil {
-			directResult, directErr = e.submitCodexDirectResult(rawResult, taskID, taskType)
+			candidates = append(candidates, codexDirectResultCandidate{Source: "output_last_message", Raw: rawResult})
+		} else {
+			resultCandidateDiagnostics = append(resultCandidateDiagnostics, AgentResultCandidateDiagnostic{
+				Source: "output_last_message",
+				Status: "unavailable",
+				Error:  safelog.Text(readErr.Error(), 240),
+			})
 		}
-		if directErr != nil {
-			for _, candidate := range researchAudit.directResultCandidatesNewestFirst() {
-				if readErr == nil && bytes.Equal(bytes.TrimSpace(candidate), bytes.TrimSpace(rawResult)) {
-					continue
-				}
-				fallback, candidateErr := e.submitCodexDirectResult(candidate, taskID, taskType)
-				if candidateErr != nil {
-					continue
-				}
-				directResult = fallback
-				directErr = nil
-				break
+		for index, candidate := range researchAudit.directResultCandidatesNewestFirst() {
+			candidates = append(candidates, codexDirectResultCandidate{
+				Source: fmt.Sprintf("codex_jsonl_agent_message[%d]", index),
+				Raw:    candidate,
+			})
+		}
+		var directResult *AgentTaskSubmittedResult
+		var directErr error
+		if len(candidates) == 0 {
+			directErr = readErr
+			if directErr == nil {
+				directErr = errors.New("custom Codex CLI final result is unavailable")
 			}
+		} else {
+			var diagnostics []AgentResultCandidateDiagnostic
+			directResult, diagnostics, directErr = e.submitCodexDirectResultCandidates(candidates, taskID, taskType)
+			resultCandidateDiagnostics = append(resultCandidateDiagnostics, diagnostics...)
 		}
 		if directErr == nil {
 			submittedResult = directResult
@@ -591,16 +623,17 @@ waitLoop:
 	transcript := safelog.Text(transcriptBuf.String(), transcriptMaxBytes)
 
 	output := &AgentExecutorOutput{
-		Command:        codexCommandSummary(e.binary, args),
-		Prompt:         prompt,
-		StdoutTail:     stdoutTail,
-		StderrTail:     stderrTail,
-		ExitCode:       exitCode,
-		TimedOut:       timedOut,
-		Duration:       duration,
-		RawTranscript:  transcript,
-		ProcessGroupID: processGroupID,
-		ResearchAudit:  researchAudit.snapshot(),
+		Command:          codexCommandSummary(e.binary, args),
+		Prompt:           prompt,
+		StdoutTail:       stdoutTail,
+		StderrTail:       stderrTail,
+		ExitCode:         exitCode,
+		TimedOut:         timedOut,
+		Duration:         duration,
+		RawTranscript:    transcript,
+		ProcessGroupID:   processGroupID,
+		ResearchAudit:    researchAudit.snapshot(),
+		ResultCandidates: resultCandidateDiagnostics,
 	}
 
 	// result 没收到但进程退出了 → 失败
@@ -745,8 +778,7 @@ func (a *cliResearchAuditCollector) record(line []byte) {
 	switch event.Item.Type {
 	case "agent_message":
 		message := []byte(strings.TrimSpace(event.Item.Text))
-		if len(message) == 0 || len(message) > codexDirectResultMaxBytes ||
-			!bytes.Contains(message, []byte(`"taskID"`)) || !bytes.Contains(message, []byte(`"result"`)) {
+		if len(message) == 0 || len(message) > codexDirectResultMaxBytes {
 			return
 		}
 		a.resultMessages = append(a.resultMessages, append([]byte(nil), message...))
@@ -1050,6 +1082,80 @@ func (e *codexCLIExecutor) submitCodexDirectResult(raw []byte, taskID, taskType 
 	return &result, nil
 }
 
+type codexDirectResultCandidate struct {
+	Source string
+	Raw    []byte
+}
+
+func (e *codexCLIExecutor) submitCodexDirectResultCandidates(
+	candidates []codexDirectResultCandidate,
+	taskID, taskType string,
+) (*AgentTaskSubmittedResult, []AgentResultCandidateDiagnostic, error) {
+	diagnostics := make([]AgentResultCandidateDiagnostic, 0, len(candidates))
+	seen := make(map[[sha256.Size]byte]struct{}, len(candidates))
+	var firstErr error
+	var resultShapedErr error
+
+	for _, candidate := range candidates {
+		raw := bytes.TrimSpace(candidate.Raw)
+		digest := sha256.Sum256(raw)
+		diagnostic := AgentResultCandidateDiagnostic{
+			Source:       candidate.Source,
+			Bytes:        len(raw),
+			SHA256Prefix: fmt.Sprintf("%x", digest[:8]),
+			ResultShaped: codexDirectResultLooksLikeEnvelope(raw),
+		}
+		if _, duplicate := seen[digest]; duplicate {
+			diagnostic.Status = "duplicate"
+			diagnostics = append(diagnostics, diagnostic)
+			continue
+		}
+		seen[digest] = struct{}{}
+
+		result, err := e.submitCodexDirectResult(raw, taskID, taskType)
+		if err == nil {
+			diagnostic.Status = "accepted"
+			diagnostics = append(diagnostics, diagnostic)
+			return result, diagnostics, nil
+		}
+		diagnostic.Status = "rejected"
+		diagnostic.Error = safelog.Text(err.Error(), 240)
+		diagnostics = append(diagnostics, diagnostic)
+		wrapped := fmt.Errorf("%s: %w", candidate.Source, err)
+		if firstErr == nil {
+			firstErr = wrapped
+		}
+		if diagnostic.ResultShaped && resultShapedErr == nil {
+			resultShapedErr = wrapped
+		}
+	}
+
+	if resultShapedErr != nil {
+		return nil, diagnostics, resultShapedErr
+	}
+	if firstErr != nil {
+		return nil, diagnostics, firstErr
+	}
+	return nil, diagnostics, errors.New("custom Codex CLI final result is unavailable")
+}
+
+func codexDirectResultLooksLikeEnvelope(raw []byte) bool {
+	raw = unwrapCodexDirectResult(raw)
+	var value map[string]json.RawMessage
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if decoder.Decode(&value) != nil {
+		return false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return false
+	}
+	_, hasTaskID := value["taskID"]
+	_, hasTaskType := value["taskType"]
+	_, hasResult := value["result"]
+	return hasTaskID && hasTaskType && hasResult
+}
+
 func readCodexDirectResultFile(path string) ([]byte, error) {
 	file, err := os.Open(strings.TrimSpace(path))
 	if err != nil {
@@ -1161,8 +1267,9 @@ func isSecretEnvKey(key string) bool {
 }
 
 func suppressCodexStderrLine(line []byte) bool {
-	text := string(line)
-	return strings.Contains(text, "mcp.notion.com") && strings.Contains(text, "AuthRequired")
+	text := strings.TrimSpace(string(line))
+	return strings.Contains(text, "Reading additional input from stdin") ||
+		(strings.Contains(text, "mcp.notion.com") && strings.Contains(text, "AuthRequired"))
 }
 
 func waitForExecutorReaders(doneCh <-chan error, count int, timeout time.Duration) []error {

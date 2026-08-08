@@ -324,8 +324,9 @@ func TestCustomProviderUsesBoundedAgentMessageWhenLastMessageIsMalformed(t *test
 	pool := newAgentTaskPool(defaultCleanupInterval)
 	defer pool.Close()
 	taskID, _ := pool.createTask(AgentTaskTypeOperationReview, "run-1", "", time.Minute)
+	reason := strings.Repeat("verified-", 1024)
 	result := `{"taskID":"` + taskID + `","taskType":"operation_review","result":` +
-		`{"outputType":"continue_monitoring","resultSummary":"continue","result":{"reason":"verified"},"confidence":0.8}}`
+		`{"outputType":"continue_monitoring","resultSummary":"continue","result":{"reason":` + strconv.Quote(reason) + `},"confidence":0.8}}`
 	event, err := json.Marshal(map[string]any{
 		"type": "item.completed",
 		"item": map[string]any{"type": "agent_message", "text": result},
@@ -371,8 +372,40 @@ func TestCustomProviderUsesBoundedAgentMessageWhenLastMessageIsMalformed(t *test
 	submitted := entry.submittedResult
 	entry.mu.Unlock()
 	if submitted == nil || submitted.OutputType != OperationReviewOutputContinueMonitoring ||
-		submitted.Result["reason"] != "verified" {
+		submitted.Result["reason"] != reason {
 		t.Fatalf("submitted fallback result = %#v", submitted)
+	}
+	if len(output.ResultCandidates) != 2 || output.ResultCandidates[0].Status != "rejected" ||
+		output.ResultCandidates[1].Status != "accepted" || output.ResultCandidates[1].Bytes < len(reason) {
+		t.Fatalf("result candidate diagnostics = %#v", output.ResultCandidates)
+	}
+}
+
+func TestCustomProviderResultCandidateErrorPrefersStructuredEnvelope(t *testing.T) {
+	pool := newAgentTaskPool(defaultCleanupInterval)
+	defer pool.Close()
+	taskID, _ := pool.createTask(AgentTaskTypeOperationReview, "run-1", "", time.Minute)
+	executor := &codexCLIExecutor{taskPool: pool}
+	candidates := []codexDirectResultCandidate{
+		{Source: "output_last_message", Raw: []byte("Answer: analysis complete")},
+		{
+			Source: "codex_jsonl_agent_message[0]",
+			Raw: []byte(`{"taskID":"` + taskID + `","taskType":"operation_review","result":` +
+				`{"outputType":"not_a_valid_output","resultSummary":"done","result":{},"confidence":0.8}}`),
+		},
+	}
+
+	result, diagnostics, err := executor.submitCodexDirectResultCandidates(candidates, taskID, AgentTaskTypeOperationReview)
+	if err == nil || result != nil {
+		t.Fatalf("result = %#v, error = %v; want structured candidate rejection", result, err)
+	}
+	if !strings.Contains(err.Error(), "codex_jsonl_agent_message[0]") ||
+		!strings.Contains(err.Error(), "invalid result.outputType") || strings.Contains(err.Error(), "invalid character 'A'") {
+		t.Fatalf("candidate error = %q, want structured validation failure", err)
+	}
+	if len(diagnostics) != 2 || diagnostics[0].ResultShaped || !diagnostics[1].ResultShaped ||
+		diagnostics[1].Status != "rejected" || diagnostics[1].SHA256Prefix == "" {
+		t.Fatalf("candidate diagnostics = %#v", diagnostics)
 	}
 }
 
@@ -811,10 +844,13 @@ func TestTruncatePromptUTF8KeepsValidUTF8AtByteBoundary(t *testing.T) {
 	}
 }
 
-func TestSuppressCodexStderrLineOnlyDropsKnownExternalMCPNoise(t *testing.T) {
+func TestSuppressCodexStderrLineDropsKnownIncidentalNoise(t *testing.T) {
 	notionLine := []byte(`ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { resource_metadata="https://mcp.notion.com/.well-known/oauth-protected-resource/mcp" })`)
 	if !suppressCodexStderrLine(notionLine) {
 		t.Fatal("expected Notion auth worker noise to be suppressed")
+	}
+	if !suppressCodexStderrLine([]byte("Reading additional input from stdin...")) {
+		t.Fatal("expected Codex stdin status notice to be suppressed")
 	}
 	stockLine := []byte(`ERROR codex_core::tools::router: stock_agent submit_result failed`)
 	if suppressCodexStderrLine(stockLine) {
