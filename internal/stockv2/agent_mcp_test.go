@@ -150,6 +150,88 @@ func TestMCP_SubmitResult(t *testing.T) {
 	}
 }
 
+func TestMCP_SubmitStockProfileResultRejectsFlatPayloadBeforeConsumingSlot(t *testing.T) {
+	p := newAgentTaskPool(defaultCleanupInterval)
+	defer p.Close()
+
+	taskID, entry := p.createTask(AgentTaskTypeStockProfileSummary, "run-profile", "", 5*time.Minute)
+	arguments := map[string]any{
+		"taskID":   taskID,
+		"taskType": AgentTaskTypeStockProfileSummary,
+		"result": map[string]any{
+			"outputType":    AgentTaskTypeStockProfileSummary,
+			"resultSummary": "profile ready",
+			"summaryZh":     "错误层级",
+			"confidence":    0.8,
+		},
+	}
+	resp := p.HandleMCPRequest(mustJSON(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      codexSubmitResultTool,
+			"arguments": arguments,
+		},
+	}))
+	var rejected struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &rejected); err != nil {
+		t.Fatalf("unmarshal rejection: %v", err)
+	}
+	if rejected.Error == nil || rejected.Error.Code != mcpErrInvalidParams ||
+		!strings.Contains(rejected.Error.Message, "result.summaryZh") {
+		t.Fatalf("rejection = %+v", rejected.Error)
+	}
+	entry.mu.Lock()
+	if entry.status != agentTaskStatusWaiting || entry.submittedResult != nil {
+		entry.mu.Unlock()
+		t.Fatal("invalid profile result consumed the task result slot")
+	}
+	entry.mu.Unlock()
+
+	arguments["result"] = map[string]any{
+		"outputType":    AgentTaskTypeStockProfileSummary,
+		"resultSummary": "profile ready",
+		"confidence":    0.8,
+		"result": map[string]any{
+			"summaryZh": "中文摘要", "summaryEn": "English summary",
+			"aliasesZh": []string{}, "aliasesEn": []string{}, "keywordsZh": []string{}, "keywordsEn": []string{},
+			"businessLinesZh": []string{}, "businessLinesEn": []string{}, "riskTagsZh": []string{}, "riskTagsEn": []string{},
+			"sourceNotes": []string{},
+		},
+	}
+	resp = p.HandleMCPRequest(mustJSON(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      codexSubmitResultTool,
+			"arguments": arguments,
+		},
+	}))
+	var accepted struct {
+		Error any `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &accepted); err != nil || accepted.Error != nil {
+		t.Fatalf("corrected profile result was not accepted: err=%v response=%s", err, resp)
+	}
+}
+
+func TestSubmitResultToolSchemaRequiresNestedResult(t *testing.T) {
+	schema := stockAgentMCPToolInputSchema(codexSubmitResultTool)
+	properties := schema["properties"].(map[string]any)
+	result := properties["result"].(map[string]any)
+	required := result["required"].([]string)
+	if !stringSliceContains(required, "result") || result["additionalProperties"] != false {
+		t.Fatalf("submit result schema = %#v", result)
+	}
+}
+
 func TestMCP_SubmitNewsContextResult(t *testing.T) {
 	p := newAgentTaskPool(defaultCleanupInterval)
 	defer p.Close()

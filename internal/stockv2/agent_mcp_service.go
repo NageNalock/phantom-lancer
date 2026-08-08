@@ -123,6 +123,24 @@ func stockAgentMCPToolInputSchema(name string) map[string]any {
 	required := []string(nil)
 	additionalProperties := true
 	switch name {
+	case codexSubmitResultTool:
+		properties = map[string]any{
+			"taskID":   map[string]any{"type": "string"},
+			"taskType": map[string]any{"type": "string"},
+			"result": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"required":             []string{"outputType", "resultSummary", "result", "confidence"},
+				"properties": map[string]any{
+					"outputType":    map[string]any{"type": "string"},
+					"resultSummary": map[string]any{"type": "string"},
+					"result":        map[string]any{"type": "object"},
+					"confidence":    map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+				},
+			},
+		}
+		required = []string{"taskID", "taskType", "result"}
+		additionalProperties = false
 	case mcpToolSemanticSearchNewsThreads:
 		properties = map[string]any{
 			"query":    map[string]any{"type": "string", "description": "Theme, event, sector, or rotation question."},

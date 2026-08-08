@@ -438,6 +438,35 @@ func TestDecodeCodexDirectResultRejectsAmbiguousEnvelopes(t *testing.T) {
 	}
 }
 
+func TestDecodeCodexDirectResultRepairsOnlyMissingTerminalDelimiter(t *testing.T) {
+	taskID := "task-missing-terminal-brace"
+	complete := `{"taskID":"` + taskID + `","taskType":"news_event_review","result":` +
+		`{"outputType":"news_context_result","resultSummary":"完整内容","result":{"items":["全部保留"]},"confidence":0.8}}`
+	truncated := []byte("Analysis complete.\n" + complete[:len(complete)-1])
+
+	decoded, err := decodeCodexDirectResult(truncated, taskID, AgentTaskTypeNewsEventReview)
+	if err != nil {
+		t.Fatalf("repair missing terminal brace: %v", err)
+	}
+	if string(decoded) != complete {
+		t.Fatalf("repaired envelope = %s, want %s", decoded, complete)
+	}
+}
+
+func TestDecodeCodexDirectResultDoesNotRepairTruncatedContent(t *testing.T) {
+	taskID := "task-truncated-content"
+	tests := []string{
+		`{"taskID":"` + taskID + `","taskType":"stock_profile_summary","result":{"outputType":"stock_profile_summary","resultSummary":"cut`,
+		`{"taskID":"` + taskID + `","taskType":"stock_profile_summary","result":{"outputType":`,
+		`{"taskID":"` + taskID + `","taskType":"stock_profile_summary","result":{"outputType":"stock_profile_summary",`,
+	}
+	for _, raw := range tests {
+		if _, err := decodeCodexDirectResult([]byte(raw), taskID, AgentTaskTypeStockProfileSummary); err == nil {
+			t.Fatalf("truncated content unexpectedly repaired: %s", raw)
+		}
+	}
+}
+
 func TestPreflightCodexMCPServersChecksSubmitTool(t *testing.T) {
 	pool := newAgentTaskPool(defaultCleanupInterval)
 	defer pool.Close()

@@ -1178,7 +1178,12 @@ func decodeCodexDirectResult(raw []byte, taskID, taskType string) ([]byte, error
 			if !errors.Is(extractErr, errCodexDirectResultEnvelopeNotFound) {
 				return nil, extractErr
 			}
-			raw = original
+			repaired, repairErr := repairCodexDirectResultTerminalDelimiters(original, taskID, taskType)
+			if repairErr == nil {
+				raw = repaired
+			} else {
+				raw = original
+			}
 		} else {
 			raw = extracted
 		}
@@ -1197,6 +1202,100 @@ func decodeCodexDirectResult(raw []byte, taskID, taskType string) ([]byte, error
 		return nil, errors.New("custom Codex CLI final result task identity mismatch")
 	}
 	return raw, nil
+}
+
+func repairCodexDirectResultTerminalDelimiters(raw []byte, taskID, taskType string) ([]byte, error) {
+	trimmed := bytes.TrimSpace(raw)
+	const maxObjectStarts = 512
+	var found []byte
+	searchAt := 0
+	for attempts := 0; searchAt < len(trimmed); attempts++ {
+		if attempts >= maxObjectStarts {
+			return nil, errors.New("custom Codex CLI final result has too many JSON object candidates")
+		}
+		relative := bytes.IndexByte(trimmed[searchAt:], '{')
+		if relative < 0 {
+			break
+		}
+		start := searchAt + relative
+		repaired, ok := appendMissingJSONTerminalDelimiters(trimmed[start:])
+		if ok {
+			var value map[string]json.RawMessage
+			decoder := json.NewDecoder(bytes.NewReader(repaired))
+			decodeErr := decoder.Decode(&value)
+			var trailing any
+			trailingErr := decoder.Decode(&trailing)
+			candidateTaskID, candidateTaskType, envelope := codexDirectResultEnvelopeIdentity(value)
+			identityMatches := candidateTaskID == strings.TrimSpace(taskID) && candidateTaskType == strings.TrimSpace(taskType)
+			if decodeErr == nil && errors.Is(trailingErr, io.EOF) && envelope && identityMatches {
+				if found != nil {
+					return nil, errors.New("custom Codex CLI final result contains multiple repairable JSON envelopes")
+				}
+				found = repaired
+			}
+		}
+		searchAt = start + 1
+	}
+	if found == nil {
+		return nil, errors.New("custom Codex CLI final result has no safely repairable JSON envelope")
+	}
+	return found, nil
+}
+
+func appendMissingJSONTerminalDelimiters(raw []byte) ([]byte, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, false
+	}
+	stack := make([]byte, 0, 16)
+	inString := false
+	escaped := false
+	for _, ch := range trimmed {
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			switch ch {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case '{', '[':
+			stack = append(stack, ch)
+		case '}':
+			if len(stack) == 0 || stack[len(stack)-1] != '{' {
+				return nil, false
+			}
+			stack = stack[:len(stack)-1]
+		case ']':
+			if len(stack) == 0 || stack[len(stack)-1] != '[' {
+				return nil, false
+			}
+			stack = stack[:len(stack)-1]
+		}
+	}
+	if inString || escaped || len(stack) == 0 {
+		return nil, false
+	}
+	// ponytail: only synthesize terminal container delimiters. The strict JSON,
+	// task identity, task schema, and batch-coverage validators still reject a
+	// truncated string, scalar, field, or collection element.
+	repaired := append([]byte(nil), trimmed...)
+	for i := len(stack) - 1; i >= 0; i-- {
+		if stack[i] == '{' {
+			repaired = append(repaired, '}')
+		} else {
+			repaired = append(repaired, ']')
+		}
+	}
+	return repaired, true
 }
 
 var errCodexDirectResultEnvelopeNotFound = errors.New("custom Codex CLI JSON envelope not found")

@@ -219,6 +219,11 @@ func (p *agentTaskPool) mcpSubmitResult(args json.RawMessage) (any, *mcpError) {
 			return nil, &mcpError{Code: mcpErrInvalidParams, Message: message}
 		}
 	}
+	if params.TaskType == AgentTaskTypeStockProfileSummary {
+		if err := validateStockProfileSubmittedResult(params.Result.Result); err != nil {
+			return nil, &mcpError{Code: mcpErrInvalidParams, Message: err.Error()}
+		}
+	}
 
 	result := AgentTaskSubmittedResult{
 		OutputType:    params.Result.OutputType,
@@ -249,6 +254,29 @@ func (p *agentTaskPool) mcpSubmitResult(args json.RawMessage) (any, *mcpError) {
 		},
 		"isError": false,
 	}, nil
+}
+
+func validateStockProfileSubmittedResult(value map[string]any) error {
+	for _, field := range []string{"summaryZh", "summaryEn"} {
+		if _, ok := value[field].(string); !ok {
+			return fmt.Errorf("invalid stock profile result: result.%s must be a string", field)
+		}
+	}
+	for _, field := range []string{
+		"aliasesZh", "aliasesEn", "keywordsZh", "keywordsEn", "businessLinesZh", "businessLinesEn",
+		"riskTagsZh", "riskTagsEn", "sourceNotes",
+	} {
+		items, ok := value[field].([]any)
+		if !ok {
+			return fmt.Errorf("invalid stock profile result: result.%s must be an array of strings", field)
+		}
+		for _, item := range items {
+			if _, ok := item.(string); !ok {
+				return fmt.Errorf("invalid stock profile result: result.%s must contain only strings", field)
+			}
+		}
+	}
+	return nil
 }
 
 func validateNewsContextSubmittedResult(value map[string]any) error {
