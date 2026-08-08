@@ -31,7 +31,7 @@
 每个可执行 Agent 任务绑定同时保存模型和执行模式，并在创建 run 时写入不可变快照：
 
 - `cli`：使用本机 Codex CLI 与 StockV2 MCP，适合需要 Codex 内建搜索、浏览或较长自主执行的任务。
-- `api`：直接调用所选 OpenAI-compatible Provider 的 `/chat/completions`。普通任务由 StockV2 在进程内执行受控 function-call 循环并校验 `stock_agent_submit_result`；消息脉络任务由服务端先完成有界候选主题召回，模型直接返回 JSON content，再复用同一校验和持久化边界，避免为查询和提交反复携带完整上下文。适合 DeepSeek 等单次分析成本更低的模型，也可绑定本机 Codex Gateway 的 `local_codex` 上游。
+- `api`：直接调用所选 OpenAI-compatible Provider 的 `/chat/completions`。普通任务由 StockV2 在进程内执行受控 function-call 循环并校验 `stock_agent_submit_result`；消息脉络任务由服务端先完成有界候选主题召回，画像更新任务只打包确定性主数据/F10 字段，两者都由模型直接返回 JSON content，再复用同一校验和持久化边界，避免为查询和提交反复携带完整上下文。适合 DeepSeek 等单次分析成本更低的模型，也可绑定本机 Codex Gateway 的 `local_codex` 上游。
 
 推理强度允许留空；留空时请求不携带对应字段，保持 Provider/模型默认行为。DeepSeek 思考模式工具调用的 `reasoning_content` 必须逐轮原样回传，API run 记录请求数、输入、缓存命中和输出 token 摘要。
 

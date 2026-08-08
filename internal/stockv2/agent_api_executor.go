@@ -16,11 +16,13 @@ import (
 )
 
 const (
-	agentAPIMaxTurns             = 16
-	agentAPINewsContentMaxTurns  = 3
-	agentAPIDeepSeekNewsMaxTurns = 4
-	agentAPIDeepSeekMaxTokens    = 32 << 10
-	agentAPIResponseSize         = 4 << 20
+	agentAPIMaxTurns                 = 16
+	agentAPINewsContentMaxTurns      = 3
+	agentAPIDeepSeekNewsMaxTurns     = 4
+	agentAPIProfileContentMaxTurns   = 2
+	agentAPIDeepSeekMaxTokens        = 32 << 10
+	agentAPIDeepSeekProfileMaxTokens = 8 << 10
+	agentAPIResponseSize             = 4 << 20
 )
 
 type agentAPIExecutionOptions struct {
@@ -117,18 +119,25 @@ func (e *agentAPIExecutor) executePrompt(
 		return nil, err
 	}
 	deepSeek := isDeepSeekAPI(baseURL, modelName)
-	contentSubmission := run.TaskType == AgentTaskTypeNewsEventReview
+	newsContentSubmission := run.TaskType == AgentTaskTypeNewsEventReview
+	profileContentSubmission := run.TaskType == AgentTaskTypeStockProfileSummary
+	contentSubmission := newsContentSubmission || profileContentSubmission
 
 	prompt = agentAPIModePrompt(prompt, contentSubmission)
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	started := time.Now()
 	systemPrompt := "You execute one StockV2 analysis task. Use the provided functions for project data and submit the final structured result with stock_agent_submit_result. Do not claim access to Codex CLI browsing in API mode."
-	if contentSubmission {
+	if newsContentSubmission {
 		// ponytail: API news runs receive pre-fetched candidates and return normal
 		// JSON content. The service still applies the existing submit_result
 		// validation and persistence boundary locally without another model turn.
 		systemPrompt = `You execute one StockV2 news analysis task. Use only the supplied news and pre-fetched theme snapshots. Return the final result as exactly one JSON object matching the stock_agent_submit_result arguments, for example {"taskID":"task-id","taskType":"news_event_review","result":{"outputType":"news_context_result","result":{}}}. Do not call stock_agent_submit_result. Do not claim access to Codex CLI browsing in API mode.`
+	} else if profileContentSubmission {
+		// ponytail: profile enrichment is a bounded transformation of deterministic
+		// master/F10 fields. Tools and browsing add cost without adding an allowed
+		// evidence source, so the model returns one locally validated JSON object.
+		systemPrompt = `You execute one StockV2 stock profile enrichment task. Use only the supplied deterministic profile fields. Return the final result as exactly one JSON object matching the stock_agent_submit_result arguments, for example {"taskID":"task-id","taskType":"stock_profile_summary","result":{"outputType":"stock_profile_summary","result":{}}}. No functions, browsing, or external research are available or needed. Do not call stock_agent_submit_result.`
 	} else if deepSeek {
 		// ponytail: DeepSeek JSON Output requires an explicit JSON instruction and
 		// example. Final persistence still crosses the validated submit tool.
@@ -151,8 +160,11 @@ func (e *agentAPIExecutor) executePrompt(
 		// ponytail: one normal response plus at most two schema-correction turns
 		// bounds repeated context; DeepSeek keeps its measured four-turn ceiling
 		// for occasional empty JSON-mode responses.
-		maxTurns = agentAPINewsContentMaxTurns
-		if deepSeek {
+		maxTurns = agentAPIProfileContentMaxTurns
+		if newsContentSubmission {
+			maxTurns = agentAPINewsContentMaxTurns
+		}
+		if newsContentSubmission && deepSeek {
 			maxTurns = agentAPIDeepSeekNewsMaxTurns
 		}
 	}
@@ -178,6 +190,12 @@ func (e *agentAPIExecutor) executePrompt(
 		applyAgentAPIReasoning(body, deepSeek, reasoningEffort)
 		if deepSeek {
 			applyDeepSeekAPICompatibility(body, reasoningEffort)
+			if profileContentSubmission {
+				// ponytail: bilingual profile JSON is small and locally validated; an
+				// 8K ceiling prevents a malformed summary from consuming the generic
+				// research-task allowance while leaving ample room for all list fields.
+				body["max_tokens"] = agentAPIDeepSeekProfileMaxTokens
+			}
 		}
 		response, requestTrace, err := e.chatCompletion(execCtx, baseURL, apiKey, body, turn+1)
 		for i := range requestTrace {
@@ -259,9 +277,13 @@ func (e *agentAPIExecutor) executePrompt(
 			if contentSubmission && turn < maxTurns-1 {
 				// ponytail: keep malformed or empty content correction inside the
 				// bounded cached conversation instead of restarting the full batch.
+				correctionTarget := "complete requested batch"
+				if profileContentSubmission {
+					correctionTarget = "requested stock profile"
+				}
 				messages = append(messages, map[string]any{
 					"role":    "user",
-					"content": `The previous response did not submit the task result. Continue this same task and return exactly one complete valid JSON submission object covering the complete requested batch.`,
+					"content": "The previous response did not submit the task result. Continue this same task and return exactly one complete valid JSON submission object covering the " + correctionTarget + ".",
 				})
 				continue
 			}
@@ -430,12 +452,14 @@ func agentAPIModePrompt(prompt string, contentSubmission bool) string {
 	// The shared task prompts describe the richer CLI surface. This explicit
 	// tail is authoritative for API runs and prevents false browsing claims.
 	submissionInstruction := "Call stock_agent_submit_result for the final submission."
+	contextInstruction := "Use only the supplied context and OpenAI functions."
 	if contentSubmission {
 		submissionInstruction = "Return the complete final submission as exactly one JSON object in message content; do not call stock_agent_submit_result."
+		contextInstruction = "Use only the supplied context; no functions are available."
 	}
 	return prompt + "\n\n## API mode capability boundary\n" +
 		"This run has no Codex CLI, shell, browser, web search, or web fetch capability. " +
-		"Use only the supplied context and OpenAI functions. If external verification would be required, record it as unavailable and reduce confidence; never fabricate verification or sources. " +
+		contextInstruction + " If external verification would be required, record it as unavailable and reduce confidence; never fabricate verification or sources. " +
 		submissionInstruction + "\n"
 }
 

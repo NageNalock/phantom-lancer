@@ -98,7 +98,9 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 	var agentRunModelName string
 	var strictErr error
 	if req.ForceAI || task.BaseInputChanged || stockProfileAIRequiresRefresh(task.AIProfileStatus) {
-		run, ledger, modelName, runErr := s.prepareStockProfileSummaryAgentRun(ctx, profile, req.RequestedBy)
+		// ponytail: the model may enrich deterministic master/F10 data, but it must
+		// not summarize its own previously persisted AI fields on every refresh.
+		run, ledger, modelName, runErr := s.prepareStockProfileSummaryAgentRun(ctx, baseProfile, req.RequestedBy)
 		if runErr != nil {
 			task.AIDecision = stockProfileAIDecisionForError(runErr)
 			task.AIProfileStatus = stockProfileAITaskStatusForDecision(task.AIDecision)
@@ -143,7 +145,7 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 		return StockProfileUpdateResult{Profile: profile, Task: createdTask}, strictErr
 	}
 	if agentRun != nil {
-		go s.startStockProfileAgentRunAsync(context.Background(), *agentRun, agentLedger, profile, agentRunModelName)
+		go s.startStockProfileAgentRunAsync(context.Background(), *agentRun, agentLedger, baseProfile, agentRunModelName)
 	}
 	return StockProfileUpdateResult{Profile: profile, Task: createdTask, AgentRun: agentRun}, nil
 }

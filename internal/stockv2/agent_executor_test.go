@@ -605,12 +605,11 @@ func TestExecutePromptTimeoutKillsResidualProcessGroup(t *testing.T) {
 
 func TestBuildStockProfileSummaryPromptTruncatesUTF8Safely(t *testing.T) {
 	profile := StockProfile{
-		Symbol:            "000815",
-		Market:            "SZ",
-		InstrumentType:    InstrumentTypeStock,
-		Name:              "美利云",
-		BusinessSummaryZh: strings.Repeat("中冶美利云产业投资股份有限公司推进云计算数据中心与造纸业务协同。", 180),
-		ProfileTextZh:     strings.Repeat("绿色能源 数据中心 造纸 央企 混改 ", 220),
+		Symbol:          "000815",
+		Market:          "SZ",
+		InstrumentType:  InstrumentTypeStock,
+		Name:            "美利云",
+		BusinessSummary: strings.Repeat("中冶美利云产业投资股份有限公司推进云计算数据中心与造纸业务协同。", 300),
 	}
 
 	prompt := buildStockProfileSummaryPrompt("task-profile", profile, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
@@ -619,6 +618,45 @@ func TestBuildStockProfileSummaryPromptTruncatesUTF8Safely(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "... [truncated]") {
 		t.Fatalf("prompt was not truncated")
+	}
+}
+
+func TestBuildStockProfileSummaryAPIPromptExcludesPreviousAIOutput(t *testing.T) {
+	prompt := buildStockProfileSummaryPrompt("task-profile", StockProfile{
+		Symbol:            "300750",
+		Market:            "SZ",
+		InstrumentType:    InstrumentTypeStock,
+		Name:              "宁德时代",
+		Aliases:           []string{"300750", "宁德时代"},
+		Industry:          "电力设备",
+		Concepts:          []string{"锂电池"},
+		BusinessSummary:   "动力电池与储能系统",
+		BusinessSummaryEn: "PREVIOUS_AI_SUMMARY",
+		KeywordsEn:        []string{"PREVIOUS_AI_KEYWORD"},
+		AIProfileError:    "PREVIOUS_AI_ERROR",
+		ProfileTextEn:     "PREVIOUS_AI_RENDERED_TEXT",
+	}, "")
+
+	for _, unwanted := range []string{
+		"PREVIOUS_AI_SUMMARY",
+		"PREVIOUS_AI_KEYWORD",
+		"PREVIOUS_AI_ERROR",
+		"PREVIOUS_AI_RENDERED_TEXT",
+		"Submit your final result using the stock_agent.submit_result MCP tool",
+	} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("API profile prompt contains excluded value %q", unwanted)
+		}
+	}
+	for _, want := range []string{
+		"Deterministic Profile Input",
+		"动力电池与储能系统",
+		"Return exactly ONE complete submission envelope as JSON content",
+		`"taskType":"stock_profile_summary"`,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("API profile prompt missing %q", want)
+		}
 	}
 }
 

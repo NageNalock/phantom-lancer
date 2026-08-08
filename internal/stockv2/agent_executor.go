@@ -2017,12 +2017,17 @@ func portfolioSentinelRequiredHoldingCoverage(pack PortfolioSentinelContext) []p
 
 func buildStockProfileSummaryPrompt(taskID string, profile StockProfile, mcpURL string) string {
 	var b strings.Builder
+	directContent := strings.TrimSpace(mcpURL) == ""
 	b.WriteString("# Stock Profile Bilingual Enhancement Task\n\n")
 	b.WriteString("System role: you enrich a stock/fund profile for high-recall Chinese and English news matching.\n")
 	b.WriteString("You are NOT making trading recommendations. Do not infer portfolio, position, or user-specific facts.\n")
 	b.WriteString("Use only the provided profile fields. If information is missing, keep the field concise instead of inventing facts.\n")
-	b.WriteString("Submit your final result using the stock_agent.submit_result MCP tool.\n\n")
-	b.WriteString("Do not use shell commands or curl to submit the result; use the MCP tool directly.\n\n")
+	if directContent {
+		b.WriteString("No functions, MCP tools, shell, browsing, or external research are available or needed. Return the final submission directly as one JSON object in assistant message content.\n\n")
+	} else {
+		b.WriteString("Submit your final result using the stock_agent.submit_result MCP tool.\n")
+		b.WriteString("Do not use shell commands or curl to submit the result; use the MCP tool directly.\n\n")
+	}
 
 	b.WriteString("## Task Information\n\n")
 	fmt.Fprintf(&b, "- Task ID: `%s`\n", taskID)
@@ -2033,14 +2038,52 @@ func buildStockProfileSummaryPrompt(taskID string, profile StockProfile, mcpURL 
 	}
 	b.WriteString("\n")
 
-	b.WriteString("## Base Profile\n\n```json\n")
-	raw, _ := json.MarshalIndent(profile, "", "  ")
+	b.WriteString("## Deterministic Profile Input\n\n```json\n")
+	// ponytail: send only master/F10 facts that the model may transform. Previous
+	// AI output, status fields, timestamps, and repeated rendered profile text
+	// are deliberately excluded so refreshes cannot recursively amplify them.
+	input := struct {
+		Symbol          string   `json:"symbol"`
+		Market          string   `json:"market"`
+		InstrumentType  string   `json:"instrumentType"`
+		Name            string   `json:"name"`
+		Aliases         []string `json:"aliases"`
+		Industry        string   `json:"industry,omitempty"`
+		Sectors         []string `json:"sectors"`
+		Concepts        []string `json:"concepts"`
+		Tags            []string `json:"tags"`
+		BusinessSummary string   `json:"businessSummary,omitempty"`
+		FundType        string   `json:"fundType,omitempty"`
+		TrackingIndex   string   `json:"trackingIndex,omitempty"`
+		Theme           string   `json:"theme,omitempty"`
+		ConstituentHint string   `json:"constituentHint,omitempty"`
+	}{
+		Symbol:          strings.TrimSpace(profile.Symbol),
+		Market:          strings.TrimSpace(profile.Market),
+		InstrumentType:  strings.TrimSpace(profile.InstrumentType),
+		Name:            strings.TrimSpace(profile.Name),
+		Aliases:         cleanProfileTerms(profile.Aliases),
+		Industry:        strings.TrimSpace(profile.Industry),
+		Sectors:         cleanProfileTerms(profile.Sectors),
+		Concepts:        cleanProfileTerms(profile.Concepts),
+		Tags:            cleanProfileTerms(profile.Tags),
+		BusinessSummary: strings.TrimSpace(profile.BusinessSummary),
+		FundType:        strings.TrimSpace(profile.FundType),
+		TrackingIndex:   strings.TrimSpace(profile.TrackingIndex),
+		Theme:           strings.TrimSpace(profile.Theme),
+		ConstituentHint: strings.TrimSpace(profile.ConstituentHint),
+	}
+	raw, _ := json.MarshalIndent(input, "", "  ")
 	b.Write(raw)
 	b.WriteString("\n```\n\n")
 
 	b.WriteString("## Output Requirements\n\n")
-	b.WriteString("You must submit exactly ONE result using stock_agent.submit_result.\n")
-	b.WriteString("Use outputType `stock_profile_summary` and return this result object:\n")
+	if directContent {
+		b.WriteString("Return exactly ONE complete submission envelope as JSON content. Do not call stock_agent.submit_result.\n")
+	} else {
+		b.WriteString("You must submit exactly ONE result using stock_agent.submit_result.\n")
+	}
+	b.WriteString("Use outputType `stock_profile_summary`; its inner result object is:\n")
 	b.WriteString("```json\n")
 	b.WriteString("{\"summaryZh\":\"...\",\"summaryEn\":\"...\",\"aliasesZh\":[],\"aliasesEn\":[],\"keywordsZh\":[],\"keywordsEn\":[],\"businessLinesZh\":[],\"businessLinesEn\":[],\"riskTagsZh\":[],\"riskTagsEn\":[],\"sourceNotes\":[]}\n")
 	b.WriteString("```\n")
@@ -2048,7 +2091,7 @@ func buildStockProfileSummaryPrompt(taskID string, profile StockProfile, mcpURL 
 	b.WriteString("- `keywordsEn` should translate industry/concept/theme terms for matching English news.\n")
 	b.WriteString("- Keep every list high-recall but not noisy; prefer 5-20 useful terms per list.\n")
 	b.WriteString("- Put uncertain translation choices in `sourceNotes`; do not pretend they are verified official names.\n\n")
-	b.WriteString("Example submit_result shape:\n")
+	b.WriteString("Complete submission shape:\n")
 	b.WriteString("```json\n")
 	b.WriteString("{\"taskID\":\"<TASK_ID>\",\"taskType\":\"stock_profile_summary\",\"result\":{\"outputType\":\"stock_profile_summary\",\"resultSummary\":\"...\",\"result\":{\"summaryZh\":\"...\",\"summaryEn\":\"...\",\"aliasesZh\":[],\"aliasesEn\":[],\"keywordsZh\":[],\"keywordsEn\":[],\"businessLinesZh\":[],\"businessLinesEn\":[],\"riskTagsZh\":[],\"riskTagsEn\":[],\"sourceNotes\":[]},\"confidence\":0.75}}\n")
 	b.WriteString("```\n")

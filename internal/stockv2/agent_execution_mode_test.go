@@ -470,6 +470,86 @@ func TestGenericAPINewsExecutionUsesDirectJSONWithoutTools(t *testing.T) {
 	}
 }
 
+func TestDeepSeekProfileAPIExecutionReturnsDirectJSONWithoutTools(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeOpenAI,
+		Name:         "deepseek-profile-direct-json",
+		BaseURL:      "https://api.deepseek.com",
+		APIKey:       "test-token",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	run, _, err := svc.store.CreateAgentRunWithLedger(ctx, AgentRun{
+		TaskType: AgentTaskTypeStockProfileSummary, ExecutionMode: AgentExecutionModeAPI,
+		ProviderID: provider.ID, TriggerObjectType: "stock_profile", TriggerObjectID: "300750",
+		Status: AgentRunStatusRunning, StartedAt: time.Now(),
+	}, AgentDecisionLedger{
+		TaskType: AgentTaskTypeStockProfileSummary, ProviderID: provider.ID,
+		TriggerObjectType: "stock_profile", TriggerObjectID: "300750",
+	})
+	if err != nil {
+		t.Fatalf("create profile agent run: %v", err)
+	}
+	taskID, _ := svc.agentTaskPool.createTask(run.TaskType, run.ID, "", time.Minute)
+	requestCount := 0
+	svc.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		body, _ := io.ReadAll(req.Body)
+		var request map[string]any
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatalf("decode profile API request: %v", err)
+		}
+		if _, ok := request["tools"]; ok {
+			t.Fatalf("profile direct JSON request exposed tools: %s", body)
+		}
+		if maxTokens, _ := request["max_tokens"].(float64); int(maxTokens) != agentAPIDeepSeekProfileMaxTokens {
+			t.Fatalf("profile max_tokens = %v, want %d", request["max_tokens"], agentAPIDeepSeekProfileMaxTokens)
+		}
+		thinking, _ := request["thinking"].(map[string]any)
+		if thinking["type"] != "disabled" {
+			t.Fatalf("profile thinking = %#v, want disabled", thinking)
+		}
+		format, _ := request["response_format"].(map[string]any)
+		if format["type"] != "json_object" {
+			t.Fatalf("profile response_format = %#v", format)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body: io.NopCloser(strings.NewReader(`{
+				"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{\"taskType\":\"stock_profile_summary\",\"result\":{\"outputType\":\"stock_profile_summary\",\"resultSummary\":\"画像已增强\",\"result\":{\"summaryZh\":\"动力电池与储能公司\",\"summaryEn\":\"A battery and energy storage company\",\"aliasesZh\":[],\"aliasesEn\":[\"CATL\"],\"keywordsZh\":[\"动力电池\"],\"keywordsEn\":[\"EV battery\"],\"businessLinesZh\":[\"动力电池\"],\"businessLinesEn\":[\"EV batteries\"],\"riskTagsZh\":[],\"riskTagsEn\":[],\"sourceNotes\":[\"仅使用提供的确定性画像字段\"]},\"confidence\":0.82}}"}}],
+				"usage":{"prompt_tokens":900,"completion_tokens":220,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":900,"total_tokens":1120}
+			}`)),
+		}, nil
+	})}
+
+	output, err := newAgentAPIExecutor(svc).ExecuteStockProfileSummary(
+		ctx, taskID, StockProfile{Symbol: "300750", Market: "SZ", Name: "宁德时代"},
+		"deepseek-v4-flash", AgentReasoningEffortLow,
+	)
+	if err != nil {
+		t.Fatalf("execute profile direct JSON: %v", err)
+	}
+	if requestCount != 1 || output.RequestCount != 1 || output.PromptTokens != 900 || output.OutputTokens != 220 {
+		t.Fatalf("profile request/output usage = requests %d/%d, tokens %d/%d",
+			requestCount, output.RequestCount, output.PromptTokens, output.OutputTokens)
+	}
+	if len(output.RequestTrace) != 1 || output.RequestTrace[0].Purpose != "final_json" || output.RequestTrace[0].Status != "completed" {
+		t.Fatalf("profile request trace = %+v", output.RequestTrace)
+	}
+	result, err := svc.agentTaskPool.waitForResult(ctx, taskID)
+	if err != nil {
+		t.Fatalf("wait for profile result: %v", err)
+	}
+	if result.OutputType != AgentTaskTypeStockProfileSummary || result.ResultSummary != "画像已增强" || result.Result["summaryEn"] == "" {
+		t.Fatalf("profile submitted result = %+v", result)
+	}
+}
+
 func TestDeepSeekNewsExecutionRetriesEmptyJSONResponseInSameConversation(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
