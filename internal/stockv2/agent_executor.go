@@ -1141,19 +1141,10 @@ func (e *codexCLIExecutor) submitCodexDirectResultCandidates(
 
 func codexDirectResultLooksLikeEnvelope(raw []byte) bool {
 	raw = unwrapCodexDirectResult(raw)
-	var value map[string]json.RawMessage
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	if decoder.Decode(&value) != nil {
-		return false
+	if extracted, err := extractCodexDirectResultEnvelope(raw, "", ""); err == nil && len(extracted) > 0 {
+		return true
 	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return false
-	}
-	_, hasTaskID := value["taskID"]
-	_, hasTaskType := value["taskType"]
-	_, hasResult := value["result"]
-	return hasTaskID && hasTaskType && hasResult
+	return false
 }
 
 func readCodexDirectResultFile(path string) ([]byte, error) {
@@ -1180,6 +1171,18 @@ func decodeCodexDirectResult(raw []byte, taskID, taskType string) ([]byte, error
 		return nil, errors.New("custom Codex CLI final result is too large")
 	}
 	raw = unwrapCodexDirectResult(raw)
+	original := raw
+	if !codexDirectResultIsSingleJSONObject(raw) {
+		extracted, extractErr := extractCodexDirectResultEnvelope(raw, taskID, taskType)
+		if extractErr != nil {
+			if !errors.Is(extractErr, errCodexDirectResultEnvelopeNotFound) {
+				return nil, extractErr
+			}
+			raw = original
+		} else {
+			raw = extracted
+		}
+	}
 	var params submitResultParams
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	if err := decoder.Decode(&params); err != nil {
@@ -1194,6 +1197,83 @@ func decodeCodexDirectResult(raw []byte, taskID, taskType string) ([]byte, error
 		return nil, errors.New("custom Codex CLI final result task identity mismatch")
 	}
 	return raw, nil
+}
+
+var errCodexDirectResultEnvelopeNotFound = errors.New("custom Codex CLI JSON envelope not found")
+
+func codexDirectResultIsSingleJSONObject(raw []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(bytes.TrimSpace(raw)))
+	var value map[string]json.RawMessage
+	if decoder.Decode(&value) != nil {
+		return false
+	}
+	var trailing any
+	return errors.Is(decoder.Decode(&trailing), io.EOF)
+}
+
+func extractCodexDirectResultEnvelope(raw []byte, taskID, taskType string) ([]byte, error) {
+	trimmed := bytes.TrimSpace(raw)
+	const maxObjectStarts = 512
+	var found []byte
+	foundEnvelope := false
+	searchAt := 0
+	attempts := 0
+	for searchAt < len(trimmed) {
+		relative := bytes.IndexByte(trimmed[searchAt:], '{')
+		if relative < 0 {
+			break
+		}
+		start := searchAt + relative
+		attempts++
+		if attempts > maxObjectStarts {
+			// ponytail: final messages are capped at 64 KiB. Bound malformed
+			// brace scanning here; if a provider legitimately exceeds this shape,
+			// replace it with a linear JSON tokenizer instead of an unbounded scan.
+			return nil, errors.New("custom Codex CLI final result has too many JSON object candidates")
+		}
+		decoder := json.NewDecoder(bytes.NewReader(trimmed[start:]))
+		var value map[string]json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			searchAt = start + 1
+			continue
+		}
+		end := start + int(decoder.InputOffset())
+		candidateTaskID, candidateTaskType, envelope := codexDirectResultEnvelopeIdentity(value)
+		if !envelope {
+			searchAt = start + 1
+			continue
+		}
+		foundEnvelope = true
+		identityMatches := (strings.TrimSpace(taskID) == "" || candidateTaskID == strings.TrimSpace(taskID)) &&
+			(strings.TrimSpace(taskType) == "" || candidateTaskType == strings.TrimSpace(taskType))
+		if identityMatches {
+			if found != nil {
+				return nil, errors.New("custom Codex CLI final result contains multiple JSON envelopes")
+			}
+			found = bytes.TrimSpace(trimmed[start:end])
+		}
+		// Skip the parsed object, including its nested braces, while continuing
+		// to reject a second outer envelope in the remaining prose.
+		searchAt = end
+	}
+	if found != nil {
+		return found, nil
+	}
+	if foundEnvelope {
+		return nil, errors.New("custom Codex CLI final result task identity mismatch")
+	}
+	return nil, errCodexDirectResultEnvelopeNotFound
+}
+
+func codexDirectResultEnvelopeIdentity(value map[string]json.RawMessage) (string, string, bool) {
+	if _, ok := value["result"]; !ok {
+		return "", "", false
+	}
+	var taskID, taskType string
+	if json.Unmarshal(value["taskID"], &taskID) != nil || json.Unmarshal(value["taskType"], &taskType) != nil {
+		return "", "", false
+	}
+	return strings.TrimSpace(taskID), strings.TrimSpace(taskType), true
 }
 
 func unwrapCodexDirectResult(raw []byte) []byte {

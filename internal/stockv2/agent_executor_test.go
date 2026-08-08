@@ -409,6 +409,35 @@ func TestCustomProviderResultCandidateErrorPrefersStructuredEnvelope(t *testing.
 	}
 }
 
+func TestDecodeCodexDirectResultExtractsUniqueEnvelopeFromAnalysisProse(t *testing.T) {
+	taskID := "task-analysis-prefix"
+	result := `{"taskID":"` + taskID + `","taskType":"news_event_review","result":` +
+		`{"outputType":"news_context_result","resultSummary":"完整结果","result":{"facts":["保留全部字段"]},"confidence":0.8}}`
+	raw := []byte("Research completed after three checks.\n" + result + "\nAll requested items were covered.")
+
+	decoded, err := decodeCodexDirectResult(raw, taskID, AgentTaskTypeNewsEventReview)
+	if err != nil {
+		t.Fatalf("decode result with analysis prose: %v", err)
+	}
+	if string(decoded) != result || !codexDirectResultLooksLikeEnvelope(raw) {
+		t.Fatalf("decoded envelope = %s, want exact result %s", decoded, result)
+	}
+}
+
+func TestDecodeCodexDirectResultRejectsAmbiguousEnvelopes(t *testing.T) {
+	taskID := "task-ambiguous"
+	envelope := `{"taskID":"` + taskID + `","taskType":"stock_profile_summary","result":` +
+		`{"outputType":"stock_profile_summary","resultSummary":"one","result":{},"confidence":0.8}}`
+	_, err := decodeCodexDirectResult(
+		[]byte("first\n"+envelope+"\nsecond\n"+envelope),
+		taskID,
+		AgentTaskTypeStockProfileSummary,
+	)
+	if err == nil || !strings.Contains(err.Error(), "multiple JSON envelopes") {
+		t.Fatalf("ambiguous envelope error = %v", err)
+	}
+}
+
 func TestPreflightCodexMCPServersChecksSubmitTool(t *testing.T) {
 	pool := newAgentTaskPool(defaultCleanupInterval)
 	defer pool.Close()
