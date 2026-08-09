@@ -21,7 +21,6 @@ func TestOpportunityServiceSubmitResultValidatesCandidatesAndStrategyEntry(t *te
 		Name:           "宁德时代",
 		Industry:       "电力设备",
 		Sector:         "新能源",
-		Status:         "active",
 	})
 	model := seedOpportunityChatModel(t, svc, ctx)
 	modelID := model.ID
@@ -138,7 +137,6 @@ func TestOpportunityServiceRejectsUnsafeAndMalformedSubmittedResults(t *testing.
 		Market:         "SZ",
 		InstrumentType: InstrumentTypeStock,
 		Name:           "宁德时代",
-		Status:         "active",
 	})
 	model := seedOpportunityChatModel(t, svc, ctx)
 	modelID := model.ID
@@ -244,9 +242,6 @@ func TestOpportunityServiceRejectsUnsafeAndMalformedSubmittedResults(t *testing.
 
 func seedOpportunityInstrument(t *testing.T, svc *Service, inst StockV2Instrument) {
 	t.Helper()
-	if inst.Status == "" {
-		inst.Status = "active"
-	}
 	if err := svc.store.UpsertInstrument(context.Background(), inst); err != nil {
 		t.Fatalf("upsert instrument: %v", err)
 	}

@@ -414,50 +414,6 @@ func (s *Store) GetPortfolioSentinelResultByRunID(ctx context.Context, runID str
 	return &result, nil
 }
 
-func (s *Store) migratePortfolioSentinelPublishedRunState(ctx context.Context) error {
-	// ponytail: the former write order could leave a durable result one update
-	// ahead of its run. An idempotent startup repair is sufficient; the new
-	// publication transaction cannot create this state.
-	type repair struct {
-		runID, riskLevel            string
-		alertIDs, hitIDs, reviewIDs string
-		publishedAt                 time.Time
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT r.id,COALESCE(p.risk_level,''),
-		p.derived_alert_ids_json,p.derived_monitor_hit_ids_json,p.derived_review_ids_json,p.created_at
-		FROM stockv2_portfolio_sentinel_runs r
-		JOIN stockv2_portfolio_sentinel_results p ON p.run_id=r.id
-		WHERE r.status<>?`, PortfolioSentinelStatusCompleted)
-	if err != nil {
-		return wrapError(err, "list published portfolio sentinel run repairs")
-	}
-	repairs, err := scanRows(rows, func(row rowScanner) (repair, error) {
-		var item repair
-		err := row.Scan(&item.runID, &item.riskLevel, &item.alertIDs, &item.hitIDs, &item.reviewIDs, &item.publishedAt)
-		return item, err
-	}, "scan published portfolio sentinel run repair", "iterate published portfolio sentinel run repairs")
-	if err != nil || len(repairs) == 0 {
-		return err
-	}
-	return s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		for _, item := range repairs {
-			if _, err := tx.ExecContext(ctx, `UPDATE stockv2_portfolio_sentinel_runs SET
-				status=?,result_risk_level=?,generated_alert_count=?,generated_hit_count=?,
-				generated_review_count=?,error_message=NULL,finished_at=COALESCE(finished_at,?),updated_at=?
-				WHERE id=? AND status<>?`, PortfolioSentinelStatusCompleted, nullableString(item.riskLevel),
-				len(unmarshalStrings(item.alertIDs)), len(unmarshalStrings(item.hitIDs)), len(unmarshalStrings(item.reviewIDs)),
-				item.publishedAt, time.Now(), item.runID, PortfolioSentinelStatusCompleted); err != nil {
-				return wrapError(err, "repair published portfolio sentinel run")
-			}
-		}
-		return nil
-	})
-}
-
-// publishPortfolioSentinelResult publishes the sentinel result and every
-// derived owner-visible object in one transaction. ponytail: all affected
-// tables already share SQLite, so a durable queue or compensation layer would
-// add failure modes without adding safety.
 func (s *Store) publishPortfolioSentinelResult(ctx context.Context, publication portfolioSentinelPublication) (PortfolioSentinelResult, error) {
 	var published PortfolioSentinelResult
 	err := s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {

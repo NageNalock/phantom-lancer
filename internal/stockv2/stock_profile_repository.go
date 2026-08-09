@@ -336,12 +336,10 @@ func (s *Store) ListStockProfileDeepUpdateCandidates(ctx context.Context, limit 
 	rows, err := s.assetDB().QueryContext(ctx, `
 		SELECT i.id, i.symbol, i.market, COALESCE(i.instrument_type,'stock'),
 		       COALESCE(i.name,''), COALESCE(i.industry,''), COALESCE(i.sector,''),
-		       i.concepts, COALESCE(i.list_date,''), COALESCE(i.delist_date,''),
-		       COALESCE(i.status,'active'), i.last_update_at, i.created_at, i.updated_at,
+		       i.concepts, i.last_update_at, i.created_at, i.updated_at,
 		       COALESCE(p.ai_profile_status,'missing')
 		FROM stockv2_instruments i
 		LEFT JOIN stockv2_stock_profiles p ON p.symbol = i.symbol
-		WHERE COALESCE(i.status,'active') = 'active'
 		ORDER BY i.symbol ASC
 	`)
 	if err != nil {
@@ -363,9 +361,6 @@ func (s *Store) ListStockProfileDeepUpdateCandidates(ctx context.Context, limit 
 			&item.Instrument.Industry,
 			&item.Instrument.Sector,
 			&conceptsJSON,
-			&item.Instrument.ListDate,
-			&item.Instrument.DelistDate,
-			&item.Instrument.Status,
 			&lastUpdate,
 			&item.Instrument.CreatedAt,
 			&item.Instrument.UpdatedAt,
@@ -629,16 +624,6 @@ func normalizeStockProfileDeepUpdateBatchSize(value int) int {
 	}
 	if value > maxStockProfileDeepUpdateBatchSize {
 		return maxStockProfileDeepUpdateBatchSize
-	}
-	return value
-}
-
-func normalizeStockProfileDeepUpdateAIBudget(value int) int {
-	if value <= 0 {
-		return defaultStockProfileDeepUpdateAIBudget
-	}
-	if value > maxStockProfileDeepUpdateAIBudget {
-		return maxStockProfileDeepUpdateAIBudget
 	}
 	return value
 }

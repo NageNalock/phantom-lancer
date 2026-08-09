@@ -198,23 +198,6 @@ func (s *Store) InsertQuoteSnapshot(ctx context.Context, snapshot StockV2QuoteSn
 	return wrapError(err, "insert quote snapshot")
 }
 
-func (s *Store) RebuildRecentMinuteBars(ctx context.Context, symbols []string, since time.Time) error {
-	for _, symbol := range symbols {
-		snapshots, err := s.listQuoteSnapshots(ctx, symbol, since)
-		if err != nil {
-			return err
-		}
-		bars := buildMinuteBarsFromSnapshots(snapshots)
-		if len(bars) == 0 {
-			continue
-		}
-		if err := s.upsertMinuteBars(ctx, bars); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *Store) UpsertMinuteBars(ctx context.Context, bars []StockV2MinuteBar) error {
 	return s.upsertMinuteBars(ctx, bars)
 }

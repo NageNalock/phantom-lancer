@@ -19,7 +19,6 @@ func TestLinkNewsEventMatchesStockName(t *testing.T) {
 		Market:         "SZ",
 		InstrumentType: InstrumentTypeStock,
 		Name:           "宁德时代",
-		Status:         "active",
 	})
 
 	event := createNewsLinkEvent(t, svc, NewsEvent{Source: "test", Title: "宁德时代公告称动力电池订单增长"})
@@ -53,7 +52,6 @@ func TestLinkNewsEventMatchesETFName(t *testing.T) {
 		Market:         "SH",
 		InstrumentType: InstrumentTypeExchangeFund,
 		Name:           "沪深300ETF",
-		Status:         "active",
 	})
 
 	event := createNewsLinkEvent(t, svc, NewsEvent{Source: "test", Title: "沪深300ETF 午后成交额明显放大"})
@@ -77,7 +75,6 @@ func TestLinkNewsEventKeywordRecall(t *testing.T) {
 		InstrumentType: InstrumentTypeStock,
 		Name:           "宁德时代",
 		Concepts:       []string{"锂电池", "储能"},
-		Status:         "active",
 	})
 
 	event := createNewsLinkEvent(t, svc, NewsEvent{Source: "test", Title: "锂电池产业链价格出现回暖迹象"})
@@ -298,9 +295,9 @@ func TestLinkNewsEventBoostsHoldingAndActiveStrategy(t *testing.T) {
 	svc, cleanup := newStockProfileTestService(t)
 	defer cleanup()
 	for _, inst := range []StockV2Instrument{
-		{ID: "inst-300001", Symbol: "300001", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "持仓机器人", Concepts: []string{"机器人"}, Status: "active"},
-		{ID: "inst-300002", Symbol: "300002", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "策略机器人", Concepts: []string{"机器人"}, Status: "active"},
-		{ID: "inst-300003", Symbol: "300003", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "普通机器人", Concepts: []string{"机器人"}, Status: "active"},
+		{ID: "inst-300001", Symbol: "300001", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "持仓机器人", Concepts: []string{"机器人"}},
+		{ID: "inst-300002", Symbol: "300002", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "策略机器人", Concepts: []string{"机器人"}},
+		{ID: "inst-300003", Symbol: "300003", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "普通机器人", Concepts: []string{"机器人"}},
 	} {
 		seedNewsLinkProfile(t, svc, inst)
 	}
@@ -365,7 +362,6 @@ func TestLinkNewsEventMergesMultipleHitsForSameSymbol(t *testing.T) {
 		InstrumentType: InstrumentTypeStock,
 		Name:           "宁德时代",
 		Concepts:       []string{"锂电池"},
-		Status:         "active",
 	})
 
 	event := createNewsLinkEvent(t, svc, NewsEvent{Source: "test", Title: "宁德时代受益于锂电池需求改善"})
@@ -390,7 +386,9 @@ func seedNewsLinkProfile(t *testing.T, svc *Service, instrument StockV2Instrumen
 	if err := svc.store.UpsertInstrument(context.Background(), instrument); err != nil {
 		t.Fatalf("upsert instrument: %v", err)
 	}
-	if _, err := svc.BuildStockProfile(context.Background(), instrument.Symbol); err != nil {
+	if _, err := svc.UpdateStockProfile(context.Background(), RequestUpdateStockProfile{
+		Symbol: instrument.Symbol, TriggerSource: StockProfileUpdateTriggerManual,
+	}); err != nil {
 		t.Fatalf("build profile: %v", err)
 	}
 }

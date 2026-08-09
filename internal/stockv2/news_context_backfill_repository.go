@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -74,133 +73,7 @@ func (s *Store) ensureNewsContextBackfillSchema(ctx context.Context) error {
 	if err != nil {
 		return wrapError(err, "ensure news context backfill schema")
 	}
-	if err := s.removeNewsContextBackfillRunUniqueConstraint(ctx); err != nil {
-		return err
-	}
-	if err := s.ensureColumn(ctx, "stockv2_news_context_backfills", "range_start_at", "DATETIME"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn(ctx, "stockv2_news_context_backfills", "completed_chunk_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn(ctx, "stockv2_news_context_backfills", "final_review_run_id", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn(ctx, "stockv2_news_context_backfills", "owner_revision", "INTEGER NOT NULL DEFAULT 1"); err != nil {
-		return err
-	}
-	if err := s.migrateNewsContextBackfillFinalReviewRunIDs(ctx); err != nil {
-		return err
-	}
-	if err := s.ensureColumn(ctx, "stockv2_news_context_backfill_news", "event_unix_nano", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn(ctx, "stockv2_news_context_backfill_news", "defer_retry_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return err
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT backfill_id,news_event_id,event_at
-		FROM stockv2_news_context_backfill_news WHERE event_unix_nano=0`)
-	if err != nil {
-		return wrapError(err, "list news context backfill manifest time migration")
-	}
-	type manifestTime struct {
-		backfillID, eventID string
-		eventAt             time.Time
-	}
-	times := make([]manifestTime, 0)
-	for rows.Next() {
-		var value manifestTime
-		if err := rows.Scan(&value.backfillID, &value.eventID, &value.eventAt); err != nil {
-			rows.Close()
-			return wrapError(err, "scan news context backfill manifest time migration")
-		}
-		times = append(times, value)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	for _, value := range times {
-		if _, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_backfill_news
-			SET event_unix_nano=? WHERE backfill_id=? AND news_event_id=?`,
-			value.eventAt.UnixNano(), value.backfillID, value.eventID); err != nil {
-			return wrapError(err, "migrate news context backfill manifest time")
-		}
-	}
-	if _, err := s.marketDB.db.ExecContext(ctx, `
-		ALTER TABLE stockv2_news_thread_versions ADD COLUMN IF NOT EXISTS effective_at TIMESTAMP;
-		UPDATE stockv2_news_thread_versions SET effective_at=created_at WHERE effective_at IS NULL;
-		CREATE INDEX IF NOT EXISTS idx_stockv2_news_thread_versions_effective
-			ON stockv2_news_thread_versions(thread_id, effective_at);
-	`); err != nil {
-		return wrapError(err, "ensure news context version effective time")
-	}
 	return nil
-}
-
-func (s *Store) migrateNewsContextBackfillFinalReviewRunIDs(ctx context.Context) error {
-	// ponytail: this is an idempotent data migration, not a runtime compatibility
-	// branch. It can be removed after every deployed database has crossed this
-	// schema version; later migrations should use an explicit migration ledger.
-	if _, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_backfills
-		SET final_review_run_id=current_run_id
-		WHERE TRIM(COALESCE(final_review_run_id,''))=''
-		AND phase='final_review' AND TRIM(COALESCE(current_run_id,''))<>''`); err != nil {
-		return wrapError(err, "migrate active news context backfill final review")
-	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_backfills AS b
-		SET final_review_run_id=(
-			SELECT r.id FROM stockv2_news_context_runs r
-			WHERE r.window_type=? AND r.trigger_type=? AND r.window_start=b.cutoff_at
-			AND r.created_at>=COALESCE(b.started_at,b.updated_at)
-			ORDER BY r.created_at DESC,r.id DESC LIMIT 1
-		)
-		WHERE TRIM(COALESCE(b.final_review_run_id,''))=''
-		AND b.phase IN ('indexing','final_review','finalizing','completed')
-		AND EXISTS (
-			SELECT 1 FROM stockv2_news_context_runs r
-			WHERE r.window_type=? AND r.trigger_type=? AND r.window_start=b.cutoff_at
-			AND r.created_at>=COALESCE(b.started_at,b.updated_at)
-		)`, NewsContextWindowDaily, NewsContextTriggerManual,
-		NewsContextWindowDaily, NewsContextTriggerManual); err != nil {
-		return wrapError(err, "infer news context backfill final review")
-	}
-	return nil
-}
-
-func (s *Store) removeNewsContextBackfillRunUniqueConstraint(ctx context.Context) error {
-	var schema string
-	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(sql,'') FROM sqlite_master
-		WHERE type='table' AND name='stockv2_news_context_backfill_runs'`).Scan(&schema); err != nil {
-		return wrapError(err, "inspect news context backfill run links")
-	}
-	if !strings.Contains(strings.ToUpper(schema), "RUN_ID TEXT NOT NULL UNIQUE") {
-		return nil
-	}
-	return s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `CREATE TABLE stockv2_news_context_backfill_runs_new (
-			backfill_id TEXT NOT NULL,
-			run_id TEXT NOT NULL,
-			created_at DATETIME NOT NULL,
-			PRIMARY KEY (backfill_id,run_id),
-			FOREIGN KEY (backfill_id) REFERENCES stockv2_news_context_backfills(id) ON DELETE CASCADE,
-			FOREIGN KEY (run_id) REFERENCES stockv2_news_context_runs(id) ON DELETE CASCADE
-		)`); err != nil {
-			return wrapError(err, "create migrated news context backfill run links")
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO stockv2_news_context_backfill_runs_new
-			(backfill_id,run_id,created_at) SELECT backfill_id,run_id,created_at
-			FROM stockv2_news_context_backfill_runs`); err != nil {
-			return wrapError(err, "copy news context backfill run links")
-		}
-		if _, err := tx.ExecContext(ctx, `DROP TABLE stockv2_news_context_backfill_runs`); err != nil {
-			return wrapError(err, "drop old news context backfill run links")
-		}
-		if _, err := tx.ExecContext(ctx, `ALTER TABLE stockv2_news_context_backfill_runs_new
-			RENAME TO stockv2_news_context_backfill_runs`); err != nil {
-			return wrapError(err, "rename news context backfill run links")
-		}
-		return nil
-	})
 }
 
 type newsContextBackfillSourceEvent struct {
@@ -538,11 +411,7 @@ func (s *Store) BeginNewsContextBackfillFragment(ctx context.Context, backfillID
 			}
 			return wrapError(err, "read pending news context backfill fragment")
 		}
-		if phase == "converging" {
-			// DEPRECATED: rebuild an interrupted pre-materialization daily run once;
-			// the model convergence path was removed in 2026-07.
-			phase = "collecting"
-		} else if phase != "collecting" && phase != newsContextRunPhaseCheckpoint && phase != newsContextRunPhaseMaterialize {
+		if phase != "collecting" && phase != newsContextRunPhaseCheckpoint && phase != newsContextRunPhaseMaterialize {
 			phase = newsContextRunPhaseAggregating
 		}
 		result, err := tx.ExecContext(ctx, `UPDATE stockv2_news_context_runs SET
@@ -1402,41 +1271,4 @@ func (s *Store) RequeueNewsContextRunEventItems(ctx context.Context, runID strin
 		}
 		return nil
 	})
-}
-
-func (s *Store) ValidateNewsContextFinalReviewEventManifest(ctx context.Context, runID string, eventIDs []string) error {
-	runID = strings.TrimSpace(runID)
-	eventIDs = uniqueNonEmptyStrings(eventIDs)
-	if runID == "" {
-		return ErrInvalidNewsContextInput
-	}
-	if len(eventIDs) == 0 {
-		return nil
-	}
-	args := make([]any, 0, len(eventIDs)+2)
-	args = append(args, NewsEventContextClaimed, runID)
-	for _, id := range eventIDs {
-		args = append(args, id)
-	}
-	var claimed int
-	if err := s.marketDB.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_events
-		WHERE context_status=? AND context_run_id=? AND id IN (`+sqlPlaceholders(len(eventIDs))+`)`, args...).Scan(&claimed); err != nil {
-		return wrapError(err, "verify final review news claims")
-	}
-	itemArgs := make([]any, 0, len(eventIDs)+2)
-	itemArgs = append(itemArgs, runID, NewsContextRunItemNewsEvent)
-	for _, id := range eventIDs {
-		itemArgs = append(itemArgs, id)
-	}
-	var manifested int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT object_id)
-		FROM stockv2_news_context_run_items WHERE run_id=? AND object_type=?
-		AND object_id IN (`+sqlPlaceholders(len(eventIDs))+`)`, itemArgs...).Scan(&manifested); err != nil {
-		return wrapError(err, "verify final review news manifest")
-	}
-	if claimed != len(eventIDs) || manifested != len(eventIDs) {
-		return fmt.Errorf("%w: final review news coverage claimed=%d manifested=%d expected=%d",
-			ErrInvalidNewsContextInput, claimed, manifested, len(eventIDs))
-	}
-	return nil
 }

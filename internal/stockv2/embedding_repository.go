@@ -62,42 +62,7 @@ func (s *Store) ensureEmbeddingSchema(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_stockv2_news_context_mcp_verifications_status
 			ON stockv2_news_context_mcp_verifications(status, checked_at);
 	`)
-	if err != nil {
-		return wrapError(err, "ensure embedding schema")
-	}
-	columns := []struct {
-		name    string
-		colType string
-	}{
-		{"auto_maintain_enabled", "INTEGER NOT NULL DEFAULT 0"},
-		{"maintain_interval_seconds", "INTEGER NOT NULL DEFAULT 600"},
-		{"maintain_batch_size", "INTEGER NOT NULL DEFAULT 50"},
-		{"maintain_rate_limit_ms", "INTEGER NOT NULL DEFAULT 500"},
-		{"last_maintain_at", "DATETIME"},
-		{"next_maintain_at", "DATETIME"},
-		{"last_maintain_result", "TEXT"},
-	}
-	for _, column := range columns {
-		if err := s.ensureColumn(ctx, "stockv2_embedding_config", column.name, column.colType); err != nil {
-			return wrapError(err, "ensure embedding config column "+column.name)
-		}
-	}
-	_, err = s.db.ExecContext(ctx, `
-		UPDATE stockv2_embedding_config
-		SET auto_maintain_enabled = 1,
-			maintain_interval_seconds = CASE WHEN maintain_interval_seconds <= 0 THEN 600 ELSE maintain_interval_seconds END,
-			maintain_batch_size = CASE WHEN maintain_batch_size <= 0 THEN 50 ELSE maintain_batch_size END,
-			maintain_rate_limit_ms = CASE WHEN maintain_rate_limit_ms <= 0 THEN 500 ELSE maintain_rate_limit_ms END,
-			next_maintain_at = COALESCE(next_maintain_at, datetime('now')),
-			updated_at = datetime('now')
-		WHERE enabled = 1
-		  AND COALESCE(embedding_model_id, '') <> ''
-		  AND auto_maintain_enabled = 0
-		  AND last_maintain_at IS NULL
-		  AND next_maintain_at IS NULL
-		  AND COALESCE(last_maintain_result, '') = ''
-	`)
-	return wrapError(err, "migrate embedding maintenance defaults")
+	return wrapError(err, "ensure embedding schema")
 }
 
 func (s *Store) MarkEmbeddingAssetsStaleForModelChange(ctx context.Context, modelID string) error {
@@ -116,32 +81,6 @@ func (s *Store) MarkEmbeddingAssetsStaleForModelChange(ctx context.Context, mode
 		return wrapError(err, "mark news thread version indexes stale for model change")
 	}
 	return nil
-}
-
-func (s *Store) MarkEmbeddingAssetsStaleForObject(ctx context.Context, objectType, objectID string) error {
-	result, err := s.db.ExecContext(ctx, `
-		UPDATE stockv2_embedding_assets
-		SET status = ?, updated_at = ?
-		WHERE object_type = ? AND object_id = ? AND status = ?
-	`, EmbeddingAssetStatusStale, time.Now(), strings.TrimSpace(objectType), strings.TrimSpace(objectID), EmbeddingAssetStatusReady)
-	if err != nil {
-		return wrapError(err, "mark embedding assets stale for object")
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return wrapError(err, "check stale embedding asset rows")
-	}
-	if rows == 0 {
-		return nil
-	}
-	switch strings.TrimSpace(objectType) {
-	case EmbeddingObjectNewsThread:
-		return s.UpdateNewsThreadIndexStatus(ctx, objectID, NewsContextIndexStale, "")
-	case EmbeddingObjectNewsThreadVersion:
-		return s.UpdateNewsThreadVersionIndexStatus(ctx, objectID, NewsContextIndexStale, "")
-	default:
-		return nil
-	}
 }
 
 func (s *Store) MarkEmbeddingAssetsStaleForObjectTextHash(ctx context.Context, objectType, objectID, currentTextHash string) error {

@@ -420,13 +420,9 @@ export function StockV2InstrumentDetail({
               </Pill>
               <Pill tone="neutral">{inst.market || "-"}</Pill>
               <Pill tone="neutral">{stockV2InstrumentTypeLabel(inst.instrumentType)}</Pill>
-              {inst.status && inst.status !== "active" ? (
-                <Pill tone="warn">{inst.status}</Pill>
-              ) : null}
             </div>
             <div className="mt-1.5 flex flex-wrap items-baseline gap-3 text-xs text-[var(--muted-strong)]">
               {inst.sector ? <span>行业：{inst.sector}</span> : null}
-              {inst.listDate ? <span>上市：{inst.listDate}</span> : null}
               {latest ? (
                 <span>
                   <span className="mr-1">最近收盘</span>

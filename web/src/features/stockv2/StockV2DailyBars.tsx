@@ -135,11 +135,10 @@ export function StockV2DailyBarsMaintenance({ actions, data, runAction }: { acti
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasRunning, page]);
 
-  const triggerRun = async (mode: "symbol" | "hot" | "universe_incremental") => {
+  const triggerRun = async (mode: "symbol" | "hot") => {
     const labelMap: Record<string, string> = {
       symbol: `补拉单只 ${symbol}`,
       hot: "拉取持仓热集合日 K",
-      universe_incremental: "全市场最近交易日增量",
     };
     await runAction(labelMap[mode] || mode, async () => {
       const req: StockV2DailyBarsJobRequest = {
@@ -200,7 +199,7 @@ export function StockV2DailyBarsMaintenance({ actions, data, runAction }: { acti
             手动日 K 抓取历史
           </span>
         }
-        subtitle={`手动补拉和临时全市场增量记录 · ${historySubtitle}`}
+        subtitle={`单只与持仓日 K 补拉记录 · ${historySubtitle}`}
         defaultOpen
       >
         <div className="flex flex-wrap justify-end gap-2">
@@ -324,7 +323,7 @@ function DailyBarsTriggerDrawer({
   onClose: () => void;
   onRangeChange: (value: DailyBarRange) => void;
   onSymbolChange: (value: string) => void;
-  onTrigger: (mode: "symbol" | "hot" | "universe_incremental") => void;
+  onTrigger: (mode: "symbol" | "hot") => void;
   range: DailyBarRange;
   unifiedMaintenanceEnabled: boolean;
   symbol: string;
@@ -367,7 +366,7 @@ function DailyBarsTriggerDrawer({
             ) : null}
 
             <div className="grid gap-4 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3">
-              <Field label="标的代码（symbol）" help="单只补拉时必填；持仓热集合和全市场增量会忽略这个输入。">
+              <Field label="标的代码（symbol）" help="单只补拉时必填；持仓热集合会忽略这个输入。">
                 <input
                   autoFocus
                   className="input mono"
@@ -411,10 +410,6 @@ function DailyBarsTriggerDrawer({
                   <RewindCircle size={14} className="mr-1.5" />
                   持仓热集合（{range.toUpperCase()}）
                 </Button>
-                <Button disabled={hasRunning} onClick={() => onTrigger("universe_incremental")}>
-                  <PlayCircle size={14} className="mr-1.5" />
-                  全市场增量（最近约 10 日）
-                </Button>
               </div>
             </div>
 
@@ -429,7 +424,7 @@ function DailyBarsTriggerDrawer({
                 统一维护是维护配置里的每日 23:00 低峰调度：每次刷新标的与最新价后，会逐只检查日 K，缺失、不足 250 根或陈旧时才补拉。
               </p>
               <p className="mt-2 mb-0">
-                手动补拉是立即创建一次日 K 任务，可以选单只、持仓热集合或全市场增量。两者都遵守数据源打散和并发限制。
+                手动补拉是立即创建一次单只或持仓热集合日 K 任务。两者都遵守数据源打散和并发限制。
               </p>
             </div>
           </div>

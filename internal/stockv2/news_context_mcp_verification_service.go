@@ -123,15 +123,6 @@ func (s *Service) verifyNewsThreadMCP(ctx context.Context, thread NewsThread, hi
 	return stored, err
 }
 
-func (s *Service) VerifyNewsContextMCP(ctx context.Context, threadIDs []string) error {
-	for _, threadID := range uniqueNonEmptyStrings(threadIDs) {
-		if _, err := s.VerifyNewsThreadMCP(ctx, threadID); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // VerifyNewsContextMCPProbe proves the real local MCP path with one semantic
 // search and one detail read. Static index checks cover the full set separately;
 // doing a top-N search for every theme would be both expensive and semantically wrong.

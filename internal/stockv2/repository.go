@@ -71,7 +71,7 @@ func DefaultMarketDBPath(dataDir, sqliteDBPath string) string {
 
 // NewStore 创建新的存储实例。stockv2 使用独立的 SQLite 连接（带
 // _parse_time=true 以支持 time.Time 字段扫描），并自动初始化 V2 操作状态表。
-// 日 K 历史行情明细由同一个 Store 持有的 DuckDB marketDB 承载。
+// 市场、画像与新闻资产由同一个 Store 持有的 DuckDB marketDB 承载。
 func NewStore(dbPath string) (*Store, error) {
 	return NewStoreWithMarketDB(dbPath, DefaultMarketDBPath("", dbPath))
 }
@@ -96,13 +96,6 @@ func NewStoreWithMarketDB(dbPath, marketDBPath string) (*Store, error) {
 	}
 
 	s := &Store{db: db, dbPath: dbPath, marketDB: marketDB}
-	// 旧版本曾把日 K 明细写入 SQLite；在任何 schema rebuild 发生前先迁入
-	// DuckDB，避免开发期旧表重建逻辑误删历史行情资产。
-	if err := s.migrateLegacyDailyBars(context.Background()); err != nil {
-		_ = marketDB.Close()
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate legacy daily bars: %w", err)
-	}
 	if err := s.init(context.Background()); err != nil {
 		_ = marketDB.Close()
 		_ = db.Close()
@@ -168,58 +161,6 @@ func (s *Store) assetDB() *sql.DB {
 // initSchemaSQL 初始化 V2 表结构。只创建表、索引和默认配置行，不依赖
 // 触发器/视图（Go 层显式维护 updated_at）。
 const initSchemaSQL = `
-CREATE TABLE IF NOT EXISTS stockv2_instruments (
-    id TEXT PRIMARY KEY,
-    symbol TEXT NOT NULL UNIQUE,
-    market TEXT NOT NULL,
-    instrument_type TEXT NOT NULL DEFAULT 'stock',
-    name TEXT,
-    industry TEXT,
-    sector TEXT,
-    concepts TEXT,
-    list_date TEXT,
-    delist_date TEXT,
-    status TEXT DEFAULT 'active',
-    last_update_at DATETIME,
-    created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL
-);
-CREATE TABLE IF NOT EXISTS stockv2_stock_profiles (
-    symbol TEXT PRIMARY KEY,
-    market TEXT NOT NULL,
-    instrument_type TEXT NOT NULL DEFAULT 'stock',
-    name TEXT NOT NULL,
-    aliases_json TEXT NOT NULL DEFAULT '[]',
-    industry TEXT,
-    sectors_json TEXT NOT NULL DEFAULT '[]',
-    concepts_json TEXT NOT NULL DEFAULT '[]',
-    tags_json TEXT NOT NULL DEFAULT '[]',
-    business_summary TEXT,
-    profile_text TEXT NOT NULL,
-    aliases_zh_json TEXT NOT NULL DEFAULT '[]',
-    aliases_en_json TEXT NOT NULL DEFAULT '[]',
-    keywords_zh_json TEXT NOT NULL DEFAULT '[]',
-    keywords_en_json TEXT NOT NULL DEFAULT '[]',
-    business_summary_zh TEXT,
-    business_summary_en TEXT,
-    business_lines_zh_json TEXT NOT NULL DEFAULT '[]',
-    business_lines_en_json TEXT NOT NULL DEFAULT '[]',
-    risk_tags_zh_json TEXT NOT NULL DEFAULT '[]',
-    risk_tags_en_json TEXT NOT NULL DEFAULT '[]',
-    profile_text_zh TEXT,
-    profile_text_en TEXT,
-    ai_profile_status TEXT NOT NULL DEFAULT 'missing',
-    ai_profile_model TEXT,
-    ai_profile_confidence REAL NOT NULL DEFAULT 0,
-    ai_profile_error TEXT,
-    ai_profile_updated_at DATETIME,
-    fund_type TEXT,
-    tracking_index TEXT,
-    theme TEXT,
-    constituent_hint TEXT,
-    profile_version INTEGER NOT NULL DEFAULT 1,
-    updated_at DATETIME NOT NULL
-);
 CREATE TABLE IF NOT EXISTS stockv2_stock_profile_update_tasks (
     id TEXT PRIMARY KEY,
     symbol TEXT NOT NULL,
@@ -241,39 +182,6 @@ CREATE TABLE IF NOT EXISTS stockv2_stock_profile_update_tasks (
     finished_at DATETIME,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
-);
-CREATE TABLE IF NOT EXISTS stockv2_news_events (
-    id TEXT PRIMARY KEY,
-    raw_news_id TEXT,
-    source TEXT NOT NULL,
-    external_id TEXT,
-    title TEXT NOT NULL,
-    summary TEXT,
-    content TEXT,
-    url TEXT,
-    quality_status TEXT,
-    dedupe_key TEXT,
-    link_status TEXT NOT NULL DEFAULT 'pending',
-    event_at DATETIME NOT NULL,
-    link_processed_at DATETIME,
-    created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL
-);
-CREATE TABLE IF NOT EXISTS stockv2_news_link_candidates (
-    id TEXT PRIMARY KEY,
-    news_event_id TEXT NOT NULL,
-    raw_news_id TEXT,
-    symbol TEXT NOT NULL,
-    market TEXT,
-    instrument_name TEXT,
-    match_method TEXT NOT NULL,
-    score REAL NOT NULL DEFAULT 0,
-    reason TEXT,
-    matched_terms_json TEXT NOT NULL DEFAULT '[]',
-    created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL,
-    FOREIGN KEY (news_event_id) REFERENCES stockv2_news_events(id) ON DELETE CASCADE,
-    UNIQUE(news_event_id, symbol)
 );
 CREATE TABLE IF NOT EXISTS stockv2_portfolios (
     id TEXT PRIMARY KEY,
@@ -579,7 +487,6 @@ CREATE TABLE IF NOT EXISTS stockv2_settings (
     base_profile_auto_maintain_enabled INTEGER DEFAULT 0,
     base_profile_maintain_interval_seconds INTEGER DEFAULT 86400,
     base_profile_deep_update_batch_size INTEGER DEFAULT 12,
-    base_profile_deep_update_ai_budget INTEGER DEFAULT 2,
     base_profile_deep_update_rate_limit_ms INTEGER DEFAULT 1500,
     base_profile_last_maintain_at DATETIME,
     base_profile_next_maintain_at DATETIME,
@@ -587,19 +494,9 @@ CREATE TABLE IF NOT EXISTS stockv2_settings (
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_symbol ON stockv2_instruments(symbol);
-CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_market ON stockv2_instruments(market);
-CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_industry ON stockv2_instruments(industry);
-CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_status ON stockv2_instruments(status);
-CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_created_at ON stockv2_instruments(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_market ON stockv2_stock_profiles(market);
-CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_updated_at ON stockv2_stock_profiles(updated_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_profile_update_tasks_symbol ON stockv2_stock_profile_update_tasks(symbol);
 CREATE INDEX IF NOT EXISTS idx_stockv2_profile_update_tasks_created_at ON stockv2_stock_profile_update_tasks(created_at);
 CREATE INDEX IF NOT EXISTS idx_stockv2_profile_update_tasks_status ON stockv2_stock_profile_update_tasks(status);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_event ON stockv2_news_link_candidates(news_event_id);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_symbol ON stockv2_news_link_candidates(symbol);
-CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_score ON stockv2_news_link_candidates(score);
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolios_name ON stockv2_portfolios(name);
 CREATE INDEX IF NOT EXISTS idx_stockv2_holdings_portfolio_id ON stockv2_holdings(portfolio_id);
 CREATE INDEX IF NOT EXISTS idx_stockv2_holdings_symbol ON stockv2_holdings(symbol);
@@ -816,30 +713,6 @@ CREATE TABLE IF NOT EXISTS stockv2_portfolio_sentinel_results (
 );
 CREATE INDEX IF NOT EXISTS idx_stockv2_portfolio_sentinel_results_risk ON stockv2_portfolio_sentinel_results(risk_level);
 
--- ===== 消息面数据资产:RawNews -> NewsEvent -> NewsLinkCandidate =====
-CREATE TABLE IF NOT EXISTS stockv2_raw_news (
-    id TEXT PRIMARY KEY,
-    source TEXT NOT NULL,
-    source_id TEXT,
-    language TEXT,
-    title TEXT NOT NULL,
-    content TEXT,
-    snippet TEXT,
-    published_at DATETIME,
-    fetched_at DATETIME NOT NULL,
-    url TEXT,
-    raw_payload_json TEXT,
-    content_hash TEXT NOT NULL,
-    dedupe_key TEXT NOT NULL UNIQUE,
-    quality TEXT NOT NULL,
-    status TEXT NOT NULL,
-    created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_stockv2_raw_news_source ON stockv2_raw_news(source);
-CREATE INDEX IF NOT EXISTS idx_stockv2_raw_news_status ON stockv2_raw_news(status);
-CREATE INDEX IF NOT EXISTS idx_stockv2_raw_news_fetched_at ON stockv2_raw_news(fetched_at);
-
 CREATE TABLE IF NOT EXISTS stockv2_news_source_states (
     source TEXT PRIMARY KEY,
     enabled INTEGER NOT NULL DEFAULT 0,
@@ -980,48 +853,6 @@ CREATE TABLE IF NOT EXISTS stockv2_opportunity_results (
     created_at DATETIME NOT NULL,
     FOREIGN KEY (run_id) REFERENCES stockv2_opportunity_discovery_runs(id) ON DELETE CASCADE
 );
-CREATE TABLE IF NOT EXISTS stockv2_embedding_config (
-    id TEXT PRIMARY KEY,
-    embedding_model_id TEXT,
-    enabled INTEGER NOT NULL DEFAULT 0,
-    auto_maintain_enabled INTEGER NOT NULL DEFAULT 0,
-    maintain_interval_seconds INTEGER NOT NULL DEFAULT 600,
-    maintain_batch_size INTEGER NOT NULL DEFAULT 50,
-    maintain_rate_limit_ms INTEGER NOT NULL DEFAULT 500,
-    last_probe_at DATETIME,
-    last_probe_status TEXT,
-    last_error TEXT,
-    last_maintain_at DATETIME,
-    next_maintain_at DATETIME,
-    last_maintain_result TEXT,
-    updated_at DATETIME NOT NULL
-);
-INSERT OR IGNORE INTO stockv2_embedding_config
-    (id, embedding_model_id, enabled, last_probe_status, updated_at)
-VALUES
-    ('stockv2-embedding-config', '', 0, 'embedding_model_not_configured', datetime('now'));
-CREATE TABLE IF NOT EXISTS stockv2_embedding_assets (
-    id TEXT PRIMARY KEY,
-    object_type TEXT NOT NULL,
-    object_id TEXT NOT NULL,
-    text_hash TEXT NOT NULL,
-    text_summary TEXT,
-    model_id TEXT NOT NULL,
-    provider_id TEXT,
-    embedding_protocol TEXT,
-    embedding_dimensions INTEGER NOT NULL DEFAULT 0,
-    vector_ref TEXT,
-    status TEXT NOT NULL,
-    error_message TEXT,
-    created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL,
-    UNIQUE(object_type, object_id, model_id)
-);
-CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_object ON stockv2_embedding_assets(object_type, object_id);
-CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_model ON stockv2_embedding_assets(model_id);
-CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_status ON stockv2_embedding_assets(status);
-CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_search
-    ON stockv2_embedding_assets(object_type, model_id, status, embedding_dimensions, object_id);
 -- 内置监控任务默认配置。分钟行情默认开启，策略扫描由 owner 显式开启。
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('latest_quote_refresh', 1, 30, 'normal', 0, 0, 0, datetime('now'));
 INSERT OR IGNORE INTO stockv2_monitor_task_configs (task_type, enabled, interval_seconds, sensitivity, cooldown_seconds, agent_doublecheck_enabled, agent_budget, updated_at) VALUES ('data_strategy_monitor', 0, 600, 'normal', 1800, 0, 0, datetime('now'));
@@ -1252,25 +1083,6 @@ CREATE TABLE IF NOT EXISTS stockv2_strategy_generation_contexts (
 );
 CREATE INDEX IF NOT EXISTS idx_stockv2_strategy_generation_contexts_run ON stockv2_strategy_generation_contexts(run_id, sequence_no);
 
-CREATE TABLE IF NOT EXISTS stockv2_embedding_config (
-    id TEXT PRIMARY KEY,
-    embedding_model_id TEXT,
-    enabled INTEGER NOT NULL DEFAULT 0,
-    auto_maintain_enabled INTEGER NOT NULL DEFAULT 0,
-    maintain_interval_seconds INTEGER NOT NULL DEFAULT 600,
-    maintain_batch_size INTEGER NOT NULL DEFAULT 50,
-    maintain_rate_limit_ms INTEGER NOT NULL DEFAULT 500,
-    last_probe_at DATETIME,
-    last_probe_status TEXT,
-    last_error TEXT,
-    last_maintain_at DATETIME,
-    next_maintain_at DATETIME,
-    last_maintain_result TEXT,
-    updated_at DATETIME NOT NULL
-);
-INSERT OR IGNORE INTO stockv2_embedding_config
-    (id, embedding_model_id, enabled, updated_at)
-VALUES ('default', '', 0, datetime('now'));
 -- Codex CLI 默认 Provider: 使用当前主机 codex 登录态,不需要第三方 key/base_url。
 INSERT OR IGNORE INTO stockv2_agent_provider_profiles
     (id, provider_type, name, display_name, config_state, auth_state, availability, metadata_json, created_at, updated_at)
@@ -1286,33 +1098,10 @@ INSERT OR IGNORE INTO stockv2_agent_task_profiles (id, task_type, primary_model_
     ('agent-task-stock-profile-summary', 'stock_profile_summary', '', '', 0, datetime('now'), datetime('now'));
 `
 
-// init 初始化 V2 表结构。如果检测到旧 schema（例如时间列是 TEXT 类型），
-// 会先 DROP 所有 V2 表再重建（开发阶段数据无价值，保证 schema 最新）。
+// init 初始化当前 StockV2 操作状态表和独立资产 schema。
 func (s *Store) init(ctx context.Context) error {
-	// 检查是否需要重建（开发阶段，避免 schema 变更后残留旧表）
-	needsRebuild, err := s.needsRebuild(ctx)
-	if err != nil {
-		return fmt.Errorf("check schema: %w", err)
-	}
-	if needsRebuild {
-		if err := s.dropAllV2Tables(ctx); err != nil {
-			return fmt.Errorf("drop old v2 tables: %w", err)
-		}
-	}
-	if _, err := s.db.ExecContext(ctx, "DROP TABLE IF EXISTS stockv2_agent_authorizations"); err != nil {
-		return fmt.Errorf("drop old agent authorization table: %w", err)
-	}
 	if _, err := s.db.ExecContext(ctx, initSchemaSQL); err != nil {
 		return fmt.Errorf("exec init schema: %w", err)
-	}
-	if err := s.migrateRetiredStockV2Features(ctx); err != nil {
-		return fmt.Errorf("remove retired stock v2 features: %w", err)
-	}
-	if err := s.repairDanglingAlertWatchRefs(ctx); err != nil {
-		return fmt.Errorf("repair dangling alert watch references: %w", err)
-	}
-	if err := s.migratePortfolioSentinelPublishedRunState(ctx); err != nil {
-		return fmt.Errorf("migrate portfolio sentinel published runs: %w", err)
 	}
 	if err := s.ensureEmbeddingSchema(ctx); err != nil {
 		return fmt.Errorf("ensure embedding schema: %w", err)
@@ -1322,665 +1111,6 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureNewsContextBackfillSchema(ctx); err != nil {
 		return fmt.Errorf("ensure news context backfill schema: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_agent_task_profiles", "reasoning_effort", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return fmt.Errorf("add agent task profile reasoning_effort column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_agent_task_profiles", "execution_mode", "TEXT NOT NULL DEFAULT 'cli'"); err != nil {
-		return fmt.Errorf("add agent task profile execution_mode column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_agent_runs", "execution_mode", "TEXT NOT NULL DEFAULT 'cli'"); err != nil {
-		return fmt.Errorf("add agent run execution_mode column: %w", err)
-	}
-	// ponytail: repair only historically invalid sentinel bindings. Valid
-	// custom codex_cli bindings are owner configuration and must survive boot.
-	if _, err := s.db.ExecContext(ctx, `
-		UPDATE stockv2_agent_task_profiles
-		SET execution_mode = 'cli',
-		    primary_model_id = CASE
-		        WHEN EXISTS (
-		            SELECT 1
-		            FROM stockv2_agent_model_profiles m
-		            JOIN stockv2_agent_provider_profiles p ON p.id = m.provider_id
-		            WHERE m.id = stockv2_agent_task_profiles.primary_model_id
-		              AND p.provider_type = 'codex_cli'
-		              AND m.enabled = 1
-		              AND m.status = 'available'
-		              AND CASE
-		                  WHEN json_valid(m.metadata_json) THEN COALESCE(json_extract(m.metadata_json, '$.modelType'), 'chat')
-		                  ELSE 'chat'
-		              END = 'chat'
-		        ) THEN primary_model_id
-		        ELSE COALESCE((
-		            SELECT m.id
-		            FROM stockv2_agent_model_profiles m
-		            JOIN stockv2_agent_provider_profiles p ON p.id = m.provider_id
-		            WHERE p.provider_type = 'codex_cli'
-		              AND m.enabled = 1
-		              AND m.status = 'available'
-		              AND CASE
-		                  WHEN json_valid(m.metadata_json) THEN COALESCE(json_extract(m.metadata_json, '$.modelType'), 'chat')
-		                  ELSE 'chat'
-		              END = 'chat'
-		            ORDER BY (p.id = ?) DESC, m.updated_at DESC, m.created_at DESC
-		            LIMIT 1
-		        ), '')
-		    END,
-		    fallback_model_id = '',
-		    updated_at = datetime('now')
-		WHERE task_type = 'portfolio_sentinel'
-		  AND (
-		      execution_mode <> 'cli'
-		      OR NOT EXISTS (
-		          SELECT 1
-		          FROM stockv2_agent_model_profiles m
-		          JOIN stockv2_agent_provider_profiles p ON p.id = m.provider_id
-		          WHERE m.id = stockv2_agent_task_profiles.primary_model_id
-		            AND p.provider_type = 'codex_cli'
-		            AND m.enabled = 1
-		            AND m.status = 'available'
-		            AND CASE
-		                WHEN json_valid(m.metadata_json) THEN COALESCE(json_extract(m.metadata_json, '$.modelType'), 'chat')
-		                ELSE 'chat'
-		            END = 'chat'
-		      )
-		  )
-	`, agentProviderCodexCLIDefaultID); err != nil {
-		return fmt.Errorf("repair invalid portfolio sentinel cli binding: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_agent_runs", "reasoning_effort", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return fmt.Errorf("add agent run reasoning_effort column: %w", err)
-	}
-	if _, err := s.db.ExecContext(ctx, `
-		UPDATE stockv2_monitor_task_configs
-		SET enabled = 1, interval_seconds = 30, updated_at = datetime('now')
-		WHERE task_type = 'latest_quote_refresh' AND enabled = 0 AND interval_seconds = 300
-	`); err != nil {
-		return fmt.Errorf("migrate latest quote monitor default: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_instruments", "instrument_type", "TEXT NOT NULL DEFAULT 'stock'"); err != nil {
-		return fmt.Errorf("add instrument_type column: %w", err)
-	}
-	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stockv2_instruments_type ON stockv2_instruments(instrument_type)`); err != nil {
-		return fmt.Errorf("create instrument type index: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_stock_profiles", "instrument_type", "TEXT NOT NULL DEFAULT 'stock'"); err != nil {
-		return fmt.Errorf("add stock profile instrument_type column: %w", err)
-	}
-	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_stockv2_stock_profiles_type ON stockv2_stock_profiles(instrument_type)`); err != nil {
-		return fmt.Errorf("create stock profile type index: %w", err)
-	}
-	quoteColumns := []struct {
-		name    string
-		colType string
-	}{
-		{"amplitude", "REAL NOT NULL DEFAULT 0"},
-		{"turnover_rate", "REAL NOT NULL DEFAULT 0"},
-		{"volume_ratio", "REAL NOT NULL DEFAULT 0"},
-		{"main_net_inflow", "REAL NOT NULL DEFAULT 0"},
-		{"super_net_inflow", "REAL NOT NULL DEFAULT 0"},
-		{"large_net_inflow", "REAL NOT NULL DEFAULT 0"},
-		{"medium_net_inflow", "REAL NOT NULL DEFAULT 0"},
-		{"small_net_inflow", "REAL NOT NULL DEFAULT 0"},
-		{"main_net_inflow_pct", "REAL NOT NULL DEFAULT 0"},
-	}
-	for _, column := range quoteColumns {
-		if err := s.ensureColumn(ctx, "stockv2_quotes_latest", column.name, column.colType); err != nil {
-			return fmt.Errorf("add latest quote %s column: %w", column.name, err)
-		}
-	}
-	profileColumns := []struct {
-		name    string
-		colType string
-	}{
-		{"aliases_zh_json", "TEXT NOT NULL DEFAULT '[]'"},
-		{"aliases_en_json", "TEXT NOT NULL DEFAULT '[]'"},
-		{"keywords_zh_json", "TEXT NOT NULL DEFAULT '[]'"},
-		{"keywords_en_json", "TEXT NOT NULL DEFAULT '[]'"},
-		{"business_summary_zh", "TEXT"},
-		{"business_summary_en", "TEXT"},
-		{"business_lines_zh_json", "TEXT NOT NULL DEFAULT '[]'"},
-		{"business_lines_en_json", "TEXT NOT NULL DEFAULT '[]'"},
-		{"risk_tags_zh_json", "TEXT NOT NULL DEFAULT '[]'"},
-		{"risk_tags_en_json", "TEXT NOT NULL DEFAULT '[]'"},
-		{"profile_text_zh", "TEXT"},
-		{"profile_text_en", "TEXT"},
-		{"ai_profile_status", "TEXT NOT NULL DEFAULT 'missing'"},
-		{"ai_profile_model", "TEXT"},
-		{"ai_profile_confidence", "REAL NOT NULL DEFAULT 0"},
-		{"ai_profile_error", "TEXT"},
-		{"ai_profile_updated_at", "DATETIME"},
-	}
-	for _, column := range profileColumns {
-		if err := s.ensureColumn(ctx, "stockv2_stock_profiles", column.name, column.colType); err != nil {
-			return fmt.Errorf("add stock profile %s column: %w", column.name, err)
-		}
-	}
-	profileTaskColumns := []struct {
-		name    string
-		colType string
-	}{
-		{"base_profile_status", "TEXT"},
-		{"ai_profile_status", "TEXT"},
-		{"ai_profile_error", "TEXT"},
-	}
-	for _, column := range profileTaskColumns {
-		if err := s.ensureColumn(ctx, "stockv2_stock_profile_update_tasks", column.name, column.colType); err != nil {
-			return fmt.Errorf("add stock profile update task %s column: %w", column.name, err)
-		}
-	}
-
-	// 增量迁移：给 stockv2_update_jobs 加 failed_items 列
-	if err := s.ensureColumn(ctx, "stockv2_update_jobs", "failed_items", "TEXT"); err != nil {
-		return fmt.Errorf("add failed_items column: %w", err)
-	}
-
-	// 增量迁移：最近日 K 维护时间。
-	if err := s.ensureColumn(ctx, "stockv2_settings", "daily_bars_last_run", "DATETIME"); err != nil {
-		return fmt.Errorf("add daily_bars_last_run column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_enabled", "INTEGER DEFAULT 0"); err != nil {
-		return fmt.Errorf("add financial_juice_enabled column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_endpoint", "TEXT"); err != nil {
-		return fmt.Errorf("add financial_juice_endpoint column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "financial_juice_cookie", "TEXT"); err != nil {
-		return fmt.Errorf("add financial_juice_cookie column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_auto_maintain_enabled", "INTEGER DEFAULT 0"); err != nil {
-		return fmt.Errorf("add base_profile_auto_maintain_enabled column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_maintain_interval_seconds", "INTEGER DEFAULT 86400"); err != nil {
-		return fmt.Errorf("add base_profile_maintain_interval_seconds column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_deep_update_batch_size", "INTEGER DEFAULT 12"); err != nil {
-		return fmt.Errorf("add base_profile_deep_update_batch_size column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_deep_update_ai_budget", "INTEGER DEFAULT 2"); err != nil {
-		return fmt.Errorf("add base_profile_deep_update_ai_budget column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_deep_update_rate_limit_ms", "INTEGER DEFAULT 1500"); err != nil {
-		return fmt.Errorf("add base_profile_deep_update_rate_limit_ms column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_last_maintain_at", "DATETIME"); err != nil {
-		return fmt.Errorf("add base_profile_last_maintain_at column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_next_maintain_at", "DATETIME"); err != nil {
-		return fmt.Errorf("add base_profile_next_maintain_at column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_settings", "base_profile_last_maintain_result", "TEXT"); err != nil {
-		return fmt.Errorf("add base_profile_last_maintain_result column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_raw_news", "url", "TEXT"); err != nil {
-		return fmt.Errorf("add raw news url column: %w", err)
-	}
-	newsEventColumns := []struct {
-		name    string
-		colType string
-	}{
-		{"raw_news_id", "TEXT"},
-		{"external_id", "TEXT"},
-		{"summary", "TEXT"},
-		{"content", "TEXT"},
-		{"url", "TEXT"},
-		{"quality_status", "TEXT"},
-		{"dedupe_key", "TEXT"},
-		{"link_status", "TEXT NOT NULL DEFAULT 'pending'"},
-		{"event_at", "DATETIME"},
-		{"link_processed_at", "DATETIME"},
-	}
-	for _, column := range newsEventColumns {
-		if err := s.ensureColumn(ctx, "stockv2_news_events", column.name, column.colType); err != nil {
-			return fmt.Errorf("add news event %s column: %w", column.name, err)
-		}
-	}
-	if _, err := s.db.ExecContext(ctx, `
-		UPDATE stockv2_news_events
-		SET event_at = COALESCE(NULLIF(event_at, ''), created_at, updated_at, datetime('now'))
-		WHERE event_at IS NULL OR event_at = ''
-	`); err != nil {
-		return fmt.Errorf("backfill news event event_at: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_news_link_candidates", "raw_news_id", "TEXT"); err != nil {
-		return fmt.Errorf("add news link candidate raw_news_id column: %w", err)
-	}
-	newsSourceColumns := []struct {
-		name    string
-		colType string
-	}{
-		{"poll_interval_seconds", "INTEGER NOT NULL DEFAULT 600"},
-		{"jitter_seconds", "INTEGER NOT NULL DEFAULT 60"},
-		{"batch_limit", "INTEGER NOT NULL DEFAULT 50"},
-		{"process_limit", "INTEGER NOT NULL DEFAULT 50"},
-		{"backoff_base_seconds", "INTEGER NOT NULL DEFAULT 30"},
-		{"backoff_max_seconds", "INTEGER NOT NULL DEFAULT 900"},
-		{"next_run_at", "DATETIME"},
-		{"last_run_at", "DATETIME"},
-		{"last_run_status", "TEXT"},
-		{"last_run_error", "TEXT"},
-	}
-	for _, column := range newsSourceColumns {
-		if err := s.ensureColumn(ctx, "stockv2_news_source_states", column.name, column.colType); err != nil {
-			return fmt.Errorf("add news source state %s column: %w", column.name, err)
-		}
-	}
-	if err := s.ensureColumn(ctx, "stockv2_daily_bar_jobs", "symbol", "TEXT"); err != nil {
-		return fmt.Errorf("add daily bar job symbol column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_watches", "last_run_status", "TEXT"); err != nil {
-		return fmt.Errorf("add watch last_run_status column: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "stockv2_watches", "last_run_reason", "TEXT"); err != nil {
-		return fmt.Errorf("add watch last_run_reason column: %w", err)
-	}
-
-	// 增量迁移：持仓表加建仓时间
-	if err := s.ensureColumn(ctx, "stockv2_holdings", "acquired_at", "DATETIME"); err != nil {
-		return fmt.Errorf("add acquired_at column: %w", err)
-	}
-	alertColumns := []struct {
-		name    string
-		colType string
-	}{
-		{"monitor_hit_id", "TEXT"},
-		{"monitor_run_id", "TEXT"},
-		{"task_type", "TEXT"},
-		{"strategy_id", "TEXT"},
-		{"portfolio_id", "TEXT"},
-		{"symbol", "TEXT"},
-		{"market", "TEXT"},
-		{"review_id", "TEXT"},
-		{"review_status", "TEXT"},
-		{"agent_run_id", "TEXT"},
-		{"decision_ledger_id", "TEXT"},
-		{"trigger_source", "TEXT"},
-		{"occurrence_count", "INTEGER NOT NULL DEFAULT 1"},
-		{"first_seen_at", "DATETIME"},
-		{"last_seen_at", "DATETIME"},
-	}
-	for _, column := range alertColumns {
-		if err := s.ensureColumn(ctx, "stockv2_alerts", column.name, column.colType); err != nil {
-			return fmt.Errorf("add alert %s column: %w", column.name, err)
-		}
-	}
-	if _, err := s.db.ExecContext(ctx, `
-		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_monitor_hit_id ON stockv2_alerts(monitor_hit_id);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_monitor_run_id ON stockv2_alerts(monitor_run_id);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_task_type ON stockv2_alerts(task_type);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_strategy_id ON stockv2_alerts(strategy_id);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_portfolio_id ON stockv2_alerts(portfolio_id);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_symbol ON stockv2_alerts(symbol);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_monitor_dedupe_key ON stockv2_alerts(dedupe_key);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_alerts_last_seen_at ON stockv2_alerts(last_seen_at);
-	`); err != nil {
-		return fmt.Errorf("create alert monitor indexes: %w", err)
-	}
-	if _, err := s.db.ExecContext(ctx, `
-		CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_raw_news_id
-		    ON stockv2_news_events(raw_news_id);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_link_status
-		    ON stockv2_news_events(link_status);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_event_at
-		    ON stockv2_news_events(event_at);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_news_link_candidates_raw_news
-		    ON stockv2_news_link_candidates(raw_news_id);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bar_jobs_running_scope
-		    ON stockv2_daily_bar_jobs(status, mode, symbol, range, adjusted)
-	`); err != nil {
-		return fmt.Errorf("create stockv2 incremental indexes: %w", err)
-	}
-	if _, err := s.db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS stockv2_quote_refresh_statuses (
-		    symbol TEXT PRIMARY KEY,
-		    market TEXT,
-		    source TEXT,
-		    status TEXT NOT NULL,
-		    last_attempt_at DATETIME NOT NULL,
-		    last_success_at DATETIME,
-		    last_failure_at DATETIME,
-		    error_message TEXT,
-		    consecutive_failures INTEGER NOT NULL DEFAULT 0,
-		    updated_at DATETIME NOT NULL
-		);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_quote_refresh_statuses_status ON stockv2_quote_refresh_statuses(status);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_quote_refresh_statuses_updated_at ON stockv2_quote_refresh_statuses(updated_at);
-		CREATE TABLE IF NOT EXISTS stockv2_quote_refresh_task_state (
-		    task_type TEXT PRIMARY KEY,
-		    status TEXT NOT NULL,
-		    trigger_type TEXT,
-		    started_at DATETIME,
-		    finished_at DATETIME,
-		    scope_summary TEXT,
-		    scanned_count INTEGER NOT NULL DEFAULT 0,
-		    success_count INTEGER NOT NULL DEFAULT 0,
-		    failed_count INTEGER NOT NULL DEFAULT 0,
-		    error_message TEXT,
-		    updated_at DATETIME NOT NULL
-		)
-	`); err != nil {
-		return fmt.Errorf("ensure quote refresh status tables: %w", err)
-	}
-
-	return nil
-}
-
-func (s *Store) repairDanglingAlertWatchRefs(ctx context.Context) error {
-	// ponytail: alerts remain useful audit evidence after a watch is gone, so repair
-	// only the invalid optional reference and let future deletes use ON DELETE SET NULL.
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE stockv2_alerts
-		SET watch_id = NULL
-		WHERE watch_id IS NOT NULL
-		  AND NOT EXISTS (
-			SELECT 1 FROM stockv2_watches WHERE stockv2_watches.id = stockv2_alerts.watch_id
-		  )
-	`)
-	return err
-}
-
-// DEPRECATED: migration-only tombstone for retired StockV2 feature shells.
-// Remove after every deployed database has started a post-2026-08-03 build.
-func (s *Store) migrateRetiredStockV2Features(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return wrapError(err, "begin retired feature migration")
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	for _, taskType := range []string{
-		"news_strategy_monitor",
-		"portfolio_risk_monitor",
-		"daily_fundamental_monitor",
-		"data_quality_monitor",
-	} {
-		if err := deleteRetiredMonitorTaskArtifacts(ctx, tx, taskType); err != nil {
-			return err
-		}
-	}
-	// ponytail: the real portfolio sentinel owns its own config and history tables;
-	// only its obsolete duplicate row in the generic monitor registry is retired.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_monitor_task_configs WHERE task_type='portfolio_sentinel'`); err != nil {
-		return wrapError(err, "delete duplicate portfolio sentinel monitor config")
-	}
-	if err := deleteRetiredAgentTaskArtifacts(ctx, tx, []string{"portfolio_risk_review", "bull_bear_debate"}); err != nil {
-		return err
-	}
-	if err := migrateLegacyDailyBarsAutoSetting(ctx, tx); err != nil {
-		return err
-	}
-	if err := migrateRetiredNewsStrategyPrefilters(ctx, tx); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS idx_stockv2_news_link_candidates_monitor_status`); err != nil {
-		return wrapError(err, "drop retired candidate status index")
-	}
-	for _, column := range []string{"monitor_status", "monitor_hit_id", "monitored_at"} {
-		exists, err := sqliteColumnExists(ctx, tx, "stockv2_news_link_candidates", column)
-		if err != nil {
-			return wrapError(err, "check retired candidate column")
-		}
-		if !exists {
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, "ALTER TABLE stockv2_news_link_candidates DROP COLUMN "+column); err != nil {
-			return wrapError(err, "drop retired candidate column")
-		}
-	}
-	return wrapError(tx.Commit(), "commit retired feature migration")
-}
-
-func deleteRetiredMonitorTaskArtifacts(ctx context.Context, tx *sql.Tx, taskType string) error {
-	statements := []string{
-		`DELETE FROM stockv2_agent_decision_ledgers WHERE run_id IN (
-			SELECT id FROM stockv2_agent_runs
-			WHERE task_type='operation_review' AND trigger_object_type='operation_review'
-			  AND trigger_object_id IN (
-				SELECT id FROM stockv2_operation_reviews WHERE hit_id IN (
-					SELECT id FROM stockv2_monitor_hits WHERE task_type=?
-				)
-			  )
-		)`,
-		`DELETE FROM stockv2_agent_runs
-		 WHERE task_type='operation_review' AND trigger_object_type='operation_review'
-		   AND trigger_object_id IN (
-			SELECT id FROM stockv2_operation_reviews WHERE hit_id IN (
-				SELECT id FROM stockv2_monitor_hits WHERE task_type=?
-			)
-		   )`,
-		`DELETE FROM stockv2_alerts
-		 WHERE task_type=?
-		    OR monitor_hit_id IN (SELECT id FROM stockv2_monitor_hits WHERE task_type=?)
-		    OR review_id IN (
-			SELECT id FROM stockv2_operation_reviews WHERE hit_id IN (
-				SELECT id FROM stockv2_monitor_hits WHERE task_type=?
-			)
-		   )`,
-		`DELETE FROM stockv2_operation_reviews
-		 WHERE hit_id IN (SELECT id FROM stockv2_monitor_hits WHERE task_type=?)`,
-		`DELETE FROM stockv2_monitor_hits WHERE task_type=?`,
-		`DELETE FROM stockv2_monitor_runs WHERE task_type=?`,
-		`DELETE FROM stockv2_monitor_task_configs WHERE task_type=?`,
-	}
-	for index, statement := range statements {
-		args := []any{taskType}
-		if index == 2 {
-			args = []any{taskType, taskType, taskType}
-		}
-		if _, err := tx.ExecContext(ctx, statement, args...); err != nil {
-			return wrapError(err, "delete retired monitor data")
-		}
-	}
-	return nil
-}
-
-func deleteRetiredAgentTaskArtifacts(ctx context.Context, tx *sql.Tx, taskTypes []string) error {
-	for _, taskType := range taskTypes {
-		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM stockv2_alerts
-			WHERE agent_run_id IN (SELECT id FROM stockv2_agent_runs WHERE task_type=?)
-			   OR decision_ledger_id IN (SELECT id FROM stockv2_agent_decision_ledgers WHERE task_type=?)
-		`, taskType, taskType); err != nil {
-			return wrapError(err, "delete retired agent task alerts")
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_agent_decision_ledgers WHERE task_type=?`, taskType); err != nil {
-			return wrapError(err, "delete retired agent task ledgers")
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_agent_runs WHERE task_type=?`, taskType); err != nil {
-			return wrapError(err, "delete retired agent task runs")
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_agent_task_profiles WHERE task_type=?`, taskType); err != nil {
-			return wrapError(err, "delete retired agent task profile")
-		}
-	}
-	return nil
-}
-
-func migrateLegacyDailyBarsAutoSetting(ctx context.Context, tx *sql.Tx) error {
-	exists, err := sqliteColumnExists(ctx, tx, "stockv2_settings", "daily_bars_auto_enabled")
-	if err != nil {
-		return wrapError(err, "check legacy daily bars setting")
-	}
-	if !exists {
-		return nil
-	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE stockv2_settings
-		SET auto_update_enabled=1
-		WHERE COALESCE(daily_bars_auto_enabled, 0)=1
-	`); err != nil {
-		return wrapError(err, "merge legacy daily bars setting")
-	}
-	if _, err := tx.ExecContext(ctx, `ALTER TABLE stockv2_settings DROP COLUMN daily_bars_auto_enabled`); err != nil {
-		return wrapError(err, "drop legacy daily bars setting")
-	}
-	return nil
-}
-
-func sqliteColumnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
-	var count int
-	err := tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?
-	`, table, column).Scan(&count)
-	return count > 0, err
-}
-
-func migrateRetiredNewsStrategyPrefilters(ctx context.Context, tx *sql.Tx) error {
-	rows, err := tx.QueryContext(ctx, `
-		SELECT id, generation_meta_json
-		FROM stockv2_strategy_versions
-		WHERE generation_meta_json LIKE '%"newsPrefilters"%'
-	`)
-	if err != nil {
-		return wrapError(err, "list retired news prefilters")
-	}
-	type update struct {
-		id      string
-		payload string
-	}
-	updates := make([]update, 0)
-	for rows.Next() {
-		var id, payload string
-		if err := rows.Scan(&id, &payload); err != nil {
-			_ = rows.Close()
-			return wrapError(err, "scan retired news prefilters")
-		}
-		var value any
-		if err := json.Unmarshal([]byte(payload), &value); err != nil {
-			continue
-		}
-		if !removeRetiredNewsPrefilters(value) {
-			continue
-		}
-		encoded, err := json.Marshal(value)
-		if err != nil {
-			_ = rows.Close()
-			return wrapError(err, "encode strategy without retired news prefilters")
-		}
-		updates = append(updates, update{id: id, payload: string(encoded)})
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return wrapError(err, "iterate retired news prefilters")
-	}
-	if err := rows.Close(); err != nil {
-		return wrapError(err, "close retired news prefilter rows")
-	}
-	for _, item := range updates {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE stockv2_strategy_versions SET generation_meta_json=? WHERE id=?
-		`, item.payload, item.id); err != nil {
-			return wrapError(err, "remove retired news prefilters")
-		}
-	}
-	return nil
-}
-
-func removeRetiredNewsPrefilters(value any) bool {
-	removed := false
-	switch typed := value.(type) {
-	case map[string]any:
-		if _, exists := typed["newsPrefilters"]; exists {
-			delete(typed, "newsPrefilters")
-			removed = true
-		}
-		for _, child := range typed {
-			removed = removeRetiredNewsPrefilters(child) || removed
-		}
-	case []any:
-		for _, child := range typed {
-			removed = removeRetiredNewsPrefilters(child) || removed
-		}
-	}
-	return removed
-}
-
-// ensureColumn 确保指定表有指定列，没有就 ALTER TABLE ADD
-func (s *Store) ensureColumn(ctx context.Context, table, column, colType string) error {
-	var count int
-	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?
-	`, table, column).Scan(&count)
-	if err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
-	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, colType))
-	return err
-}
-
-// needsRebuild 检测 V2 表是否是旧 schema。
-func (s *Store) needsRebuild(ctx context.Context) (bool, error) {
-	// 检查表是否存在
-	var count int
-	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM sqlite_master
-		WHERE type='table' AND name='stockv2_portfolios'
-	`).Scan(&count)
-	if err != nil {
-		return false, err
-	}
-	if count == 0 {
-		return false, nil // 表不存在，不需要重建，直接新建
-	}
-
-	// 检查 created_at 列的类型
-	var colType string
-	err = s.db.QueryRowContext(ctx, `
-		SELECT type FROM pragma_table_info('stockv2_portfolios')
-		WHERE name='created_at'
-	`).Scan(&colType)
-	if err != nil {
-		return false, err
-	}
-	// 旧 schema 用 TEXT，新 schema 用 DATETIME
-	if colType == "TEXT" {
-		return true, nil
-	}
-	return false, nil
-}
-
-// dropAllV2Tables 删除所有 stockv2_ 前缀的表
-func (s *Store) dropAllV2Tables(ctx context.Context) error {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
-		return err
-	}
-	defer conn.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`)
-	rows, err := conn.QueryContext(ctx, `
-		SELECT name FROM sqlite_master
-		WHERE type='table' AND name LIKE 'stockv2_%'
-	`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	var tables []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return err
-		}
-		tables = append(tables, name)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-
-	for _, t := range tables {
-		if _, err := conn.ExecContext(ctx, "DROP TABLE IF EXISTS "+t); err != nil {
-			return fmt.Errorf("drop %s: %w", t, err)
-		}
 	}
 	return nil
 }
@@ -2285,8 +1415,7 @@ func scanHolding(row rowScanner) (StockV2Holding, error) {
 
 const instrumentSelectSQL = `
 	SELECT id, symbol, market, COALESCE(instrument_type,'stock'), COALESCE(name,''), COALESCE(industry,''), COALESCE(sector,''),
-	       concepts, COALESCE(list_date,''), COALESCE(delist_date,''), COALESCE(status,'active'),
-	       last_update_at, created_at, updated_at
+	       concepts, last_update_at, created_at, updated_at
 	FROM stockv2_instruments
 `
 
@@ -2296,8 +1425,8 @@ func (s *Store) UpsertInstrument(ctx context.Context, instrument StockV2Instrume
 	query := `
 		INSERT INTO stockv2_instruments (
 			id, symbol, market, instrument_type, name, industry, sector, concepts,
-			list_date, delist_date, status, last_update_at, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			last_update_at, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(symbol) DO UPDATE SET
 			market = excluded.market,
 			instrument_type = excluded.instrument_type,
@@ -2305,9 +1434,6 @@ func (s *Store) UpsertInstrument(ctx context.Context, instrument StockV2Instrume
 			industry = excluded.industry,
 			sector = excluded.sector,
 			concepts = excluded.concepts,
-			list_date = excluded.list_date,
-			delist_date = excluded.delist_date,
-			status = excluded.status,
 			last_update_at = excluded.last_update_at,
 			updated_at = excluded.updated_at
 	`
@@ -2332,9 +1458,6 @@ func (s *Store) UpsertInstrument(ctx context.Context, instrument StockV2Instrume
 		instrument.Industry,
 		instrument.Sector,
 		string(conceptsJSON),
-		instrument.ListDate,
-		instrument.DelistDate,
-		instrument.Status,
 		now,
 		instrument.CreatedAt,
 		instrument.UpdatedAt,
@@ -2386,11 +1509,6 @@ func (s *Store) GetInstrumentsFiltered(ctx context.Context, market, instrumentTy
 	return scanRows(rows, scanInstrument, "scan instrument", "iterate instruments")
 }
 
-// SearchInstruments 按代码或名称搜索股票（模糊匹配）
-func (s *Store) SearchInstruments(ctx context.Context, keyword string, limit int) ([]StockV2Instrument, error) {
-	return s.SearchInstrumentsFiltered(ctx, keyword, "", "", "", limit)
-}
-
 func (s *Store) SearchInstrumentsFiltered(ctx context.Context, keyword, market, instrumentType, profileStatus string, limit int) ([]StockV2Instrument, error) {
 	if keyword == "" {
 		return []StockV2Instrument{}, nil
@@ -2417,8 +1535,7 @@ func (s *Store) SearchInstrumentsFiltered(ctx context.Context, keyword, market, 
 func instrumentSelectFilteredSQL(profileStatus string) string {
 	return `
 	SELECT i.id, i.symbol, i.market, COALESCE(i.instrument_type,'stock'), COALESCE(i.name,''), COALESCE(i.industry,''), COALESCE(i.sector,''),
-	       i.concepts, COALESCE(i.list_date,''), COALESCE(i.delist_date,''), COALESCE(i.status,'active'),
-	       i.last_update_at, i.created_at, i.updated_at
+	       i.concepts, i.last_update_at, i.created_at, i.updated_at
 	FROM stockv2_instruments i
 ` + instrumentProfileJoinSQL(profileStatus)
 }
@@ -2476,23 +1593,13 @@ func instrumentProfileStatusSQL(status string) string {
 	}
 }
 
-// GetInstrumentsByMarket 根据市场获取股票列表
-func (s *Store) GetInstrumentsByMarket(ctx context.Context, market string) ([]StockV2Instrument, error) {
-	rows, err := s.assetDB().QueryContext(ctx, instrumentSelectSQL+" WHERE market = ? AND status = 'active' ORDER BY symbol ASC", market)
-	if err != nil {
-		return nil, wrapError(err, "get instruments by market")
-	}
-	return scanRows(rows, scanInstrument, "scan instrument", "iterate instruments")
-}
-
 func scanInstrument(row rowScanner) (StockV2Instrument, error) {
 	var inst StockV2Instrument
 	var conceptsJSON []byte
 	var lastUpdate sql.NullTime
 	err := row.Scan(
 		&inst.ID, &inst.Symbol, &inst.Market, &inst.InstrumentType, &inst.Name,
-		&inst.Industry, &inst.Sector, &conceptsJSON, &inst.ListDate, &inst.DelistDate,
-		&inst.Status, &lastUpdate, &inst.CreatedAt, &inst.UpdatedAt,
+		&inst.Industry, &inst.Sector, &conceptsJSON, &lastUpdate, &inst.CreatedAt, &inst.UpdatedAt,
 	)
 	if lastUpdate.Valid {
 		inst.LastUpdate = lastUpdate.Time
@@ -2502,52 +1609,6 @@ func scanInstrument(row rowScanner) (StockV2Instrument, error) {
 		_ = json.Unmarshal(conceptsJSON, &inst.Concepts)
 	}
 	return inst, err
-}
-
-// UpdateInstrument 更新标的主数据
-func (s *Store) UpdateInstrument(ctx context.Context, instrument StockV2Instrument) error {
-	query := `
-		UPDATE stockv2_instruments
-		SET instrument_type = ?, name = ?, industry = ?, sector = ?, concepts = ?,
-		    list_date = ?, delist_date = ?, status = ?, last_update_at = ?, updated_at = ?
-		WHERE id = ?
-	`
-
-	now := time.Now()
-	instrument.UpdatedAt = now
-	instrument.LastUpdate = now
-	instrument.InstrumentType = normalizeInstrumentType(instrument.InstrumentType)
-
-	conceptsJSON, _ := json.Marshal(instrument.Concepts)
-
-	result, err := s.assetDB().ExecContext(ctx, query,
-		instrument.InstrumentType,
-		instrument.Name,
-		instrument.Industry,
-		instrument.Sector,
-		string(conceptsJSON),
-		instrument.ListDate,
-		instrument.DelistDate,
-		instrument.Status,
-		now,
-		instrument.UpdatedAt,
-		instrument.ID,
-	)
-
-	if err != nil {
-		return wrapError(err, "update instrument")
-	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return wrapError(err, "check affected rows")
-	}
-
-	if rows == 0 {
-		return ErrInstrumentNotFound
-	}
-
-	return nil
 }
 
 func (s *Store) CreateUpdateJob(ctx context.Context, job StockV2UpdateJob) error {
@@ -2763,13 +1824,12 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		INSERT OR REPLACE INTO stockv2_settings (
 			id, auto_update_enabled, update_interval_sec, proxy_enabled,
 			proxy_type, proxy_host, proxy_port, last_scheduled_update,
-			daily_bars_last_run,
 			financial_juice_enabled, financial_juice_endpoint, financial_juice_cookie, base_profile_auto_maintain_enabled,
 			base_profile_maintain_interval_seconds, base_profile_deep_update_batch_size,
-			base_profile_deep_update_ai_budget, base_profile_deep_update_rate_limit_ms, base_profile_last_maintain_at,
+			base_profile_deep_update_rate_limit_ms, base_profile_last_maintain_at,
 			base_profile_next_maintain_at, base_profile_last_maintain_result,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	now := time.Now()
@@ -2778,15 +1838,10 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 	}
 	settings.UpdatedAt = now
 
-	var dailyBarsLastRun any
-	if !settings.DailyBarsLastRun.IsZero() {
-		dailyBarsLastRun = settings.DailyBarsLastRun
-	}
 	if settings.BaseProfileMaintainIntervalSeconds <= 0 {
 		settings.BaseProfileMaintainIntervalSeconds = 86400
 	}
 	settings.BaseProfileDeepUpdateBatchSize = normalizeStockProfileDeepUpdateBatchSize(settings.BaseProfileDeepUpdateBatchSize)
-	settings.BaseProfileDeepUpdateAIBudget = normalizeStockProfileDeepUpdateAIBudget(settings.BaseProfileDeepUpdateAIBudget)
 	settings.BaseProfileDeepUpdateRateLimitMs = normalizeStockProfileDeepUpdateRateLimitMs(settings.BaseProfileDeepUpdateRateLimitMs)
 
 	_, err := s.db.ExecContext(ctx, query,
@@ -2798,14 +1853,12 @@ func (s *Store) CreateOrUpdateSettings(ctx context.Context, settings StockV2Sett
 		settings.ProxyHost,
 		settings.ProxyPort,
 		settings.LastScheduledUpdate,
-		dailyBarsLastRun,
 		settings.FinancialJuiceEnabled,
 		nullableString(settings.FinancialJuiceEndpoint),
 		nullableString(settings.FinancialJuiceCookie),
 		settings.BaseProfileAutoMaintainEnabled,
 		settings.BaseProfileMaintainIntervalSeconds,
 		settings.BaseProfileDeepUpdateBatchSize,
-		settings.BaseProfileDeepUpdateAIBudget,
 		settings.BaseProfileDeepUpdateRateLimitMs,
 		nullableTime(settings.BaseProfileLastMaintainAt),
 		nullableTime(settings.BaseProfileNextMaintainAt),
@@ -2870,12 +1923,10 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	query := `
 		SELECT id, auto_update_enabled, update_interval_sec, proxy_enabled,
 		       COALESCE(proxy_type,''), COALESCE(proxy_host,''), COALESCE(proxy_port, 0), last_scheduled_update,
-		       daily_bars_last_run,
 		       COALESCE(financial_juice_enabled, 0), COALESCE(financial_juice_endpoint, ''), COALESCE(financial_juice_cookie, ''),
 		       COALESCE(base_profile_auto_maintain_enabled, 0),
 		       COALESCE(base_profile_maintain_interval_seconds, 86400),
 		       COALESCE(base_profile_deep_update_batch_size, 12),
-		       COALESCE(base_profile_deep_update_ai_budget, 2),
 		       COALESCE(base_profile_deep_update_rate_limit_ms, 1500),
 		       base_profile_last_maintain_at, base_profile_next_maintain_at,
 		       COALESCE(base_profile_last_maintain_result, ''),
@@ -2888,7 +1939,6 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 
 	var settings StockV2Settings
 	var lastScheduledUpdate sql.NullTime
-	var dailyBarsLastRun sql.NullTime
 	var baseProfileLastMaintainAt sql.NullTime
 	var baseProfileNextMaintainAt sql.NullTime
 	err := row.Scan(
@@ -2900,14 +1950,12 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 		&settings.ProxyHost,
 		&settings.ProxyPort,
 		&lastScheduledUpdate,
-		&dailyBarsLastRun,
 		&settings.FinancialJuiceEnabled,
 		&settings.FinancialJuiceEndpoint,
 		&settings.FinancialJuiceCookie,
 		&settings.BaseProfileAutoMaintainEnabled,
 		&settings.BaseProfileMaintainIntervalSeconds,
 		&settings.BaseProfileDeepUpdateBatchSize,
-		&settings.BaseProfileDeepUpdateAIBudget,
 		&settings.BaseProfileDeepUpdateRateLimitMs,
 		&baseProfileLastMaintainAt,
 		&baseProfileNextMaintainAt,
@@ -2929,7 +1977,6 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 				ProxyPort:                          8080,
 				BaseProfileMaintainIntervalSeconds: 86400,
 				BaseProfileDeepUpdateBatchSize:     defaultStockProfileDeepUpdateBatchSize,
-				BaseProfileDeepUpdateAIBudget:      defaultStockProfileDeepUpdateAIBudget,
 				BaseProfileDeepUpdateRateLimitMs:   defaultStockProfileDeepUpdateRateLimitMs,
 				CreatedAt:                          time.Now(),
 				UpdatedAt:                          time.Now(),
@@ -2939,9 +1986,6 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 	}
 
 	settings.LastScheduledUpdate = nullTimeDefault(lastScheduledUpdate, settings.CreatedAt)
-	if dailyBarsLastRun.Valid {
-		settings.DailyBarsLastRun = dailyBarsLastRun.Time
-	}
 	if baseProfileLastMaintainAt.Valid {
 		settings.BaseProfileLastMaintainAt = baseProfileLastMaintainAt.Time
 	}
@@ -2952,7 +1996,6 @@ func (s *Store) GetSettings(ctx context.Context) (StockV2Settings, error) {
 		settings.BaseProfileMaintainIntervalSeconds = 86400
 	}
 	settings.BaseProfileDeepUpdateBatchSize = normalizeStockProfileDeepUpdateBatchSize(settings.BaseProfileDeepUpdateBatchSize)
-	settings.BaseProfileDeepUpdateAIBudget = normalizeStockProfileDeepUpdateAIBudget(settings.BaseProfileDeepUpdateAIBudget)
 	settings.BaseProfileDeepUpdateRateLimitMs = normalizeStockProfileDeepUpdateRateLimitMs(settings.BaseProfileDeepUpdateRateLimitMs)
 	settings.FinancialJuiceCookieSet = strings.TrimSpace(settings.FinancialJuiceCookie) != "" || financialJuiceEndpointHasCredential(settings.FinancialJuiceEndpoint)
 

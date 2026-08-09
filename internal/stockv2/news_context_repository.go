@@ -119,18 +119,6 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 	`); err != nil {
 		return wrapError(err, "ensure news context sqlite schema")
 	}
-	if err := s.ensureNewsContextConfigColumns(ctx); err != nil {
-		return err
-	}
-	if err := s.ensureColumn(ctx, "stockv2_news_context_runs", "retry_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return wrapError(err, "add news context retry count column")
-	}
-	if err := s.ensureColumn(ctx, "stockv2_news_context_runs", "next_retry_at", "DATETIME"); err != nil {
-		return wrapError(err, "add news context next retry column")
-	}
-	if err := s.ensureColumn(ctx, "stockv2_news_context_run_items", "source_at", "DATETIME"); err != nil {
-		return err
-	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO stockv2_news_context_config
 		(id, enabled, auto_cleanup_enabled, hourly_enabled, four_hour_enabled,
 		 daily_enabled, hourly_interval_seconds, four_hour_interval_seconds,
@@ -139,15 +127,6 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 		NewsContextConfigIDDefault); err != nil {
 		return wrapError(err, "seed news context config")
 	}
-	// ponytail: four-hour aggregation is the sole regular model boundary. Migrate
-	// enabled legacy configurations once so they cannot keep producing hourly
-	// checkpoints without ever consuming their pending news.
-	if _, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_config
-		SET four_hour_enabled=1,updated_at=datetime('now')
-		WHERE enabled=1 AND four_hour_enabled=0`); err != nil {
-		return wrapError(err, "require four-hour news context aggregation")
-	}
-
 	if s.marketDB == nil || s.marketDB.db == nil {
 		return errors.New("stockv2 market database is not configured")
 	}
@@ -222,6 +201,7 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 			review_status VARCHAR NOT NULL,
 			index_status VARCHAR NOT NULL,
 			index_error VARCHAR,
+			effective_at TIMESTAMP,
 			created_at TIMESTAMP NOT NULL,
 			UNIQUE(thread_id, version_no),
 			UNIQUE(thread_id, agent_run_id)
@@ -230,6 +210,8 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 			ON stockv2_news_thread_versions(thread_id, version_no);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_news_thread_versions_run
 			ON stockv2_news_thread_versions(run_id, material_change, created_at);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_news_thread_versions_effective
+			ON stockv2_news_thread_versions(thread_id, effective_at);
 
 		CREATE TABLE IF NOT EXISTS stockv2_news_thread_evidence (
 			id VARCHAR PRIMARY KEY,
@@ -253,135 +235,6 @@ func (s *Store) ensureNewsContextSchema(ctx context.Context) error {
 			ON stockv2_news_thread_evidence(news_event_id);
 	`); err != nil {
 		return wrapError(err, "ensure news context duckdb schema")
-	}
-	for _, stmt := range []string{
-		`ALTER TABLE stockv2_news_events ADD COLUMN IF NOT EXISTS context_status VARCHAR DEFAULT 'pending'`,
-		`ALTER TABLE stockv2_news_events ADD COLUMN IF NOT EXISTS context_run_id VARCHAR`,
-		`ALTER TABLE stockv2_news_events ADD COLUMN IF NOT EXISTS context_covered_at TIMESTAMP`,
-		`ALTER TABLE stockv2_news_events ADD COLUMN IF NOT EXISTS compacted_at TIMESTAMP`,
-		`ALTER TABLE stockv2_news_events ADD COLUMN IF NOT EXISTS compacted_bytes BIGINT DEFAULT 0`,
-		`ALTER TABLE stockv2_news_events ADD COLUMN IF NOT EXISTS protected_reason VARCHAR`,
-		`ALTER TABLE stockv2_news_events ADD COLUMN IF NOT EXISTS context_defer_retry_count INTEGER DEFAULT 0`,
-	} {
-		if _, err := s.marketDB.db.ExecContext(ctx, stmt); err != nil {
-			return wrapError(err, "ensure news event context column")
-		}
-	}
-	if _, err := s.marketDB.db.ExecContext(ctx, `
-		CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_context_status
-			ON stockv2_news_events(context_status, event_at);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_context_run
-			ON stockv2_news_events(context_run_id, context_covered_at);
-	`); err != nil {
-		return wrapError(err, "ensure news event context indexes")
-	}
-	if err := s.migrateLegacyHourlyNewsContextCoverage(ctx); err != nil {
-		return err
-	}
-	return s.migrateLegacyHourlyNewsContextReviews(ctx)
-}
-
-func (s *Store) migrateLegacyHourlyNewsContextCoverage(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT i.id,i.object_id,r.id
-		FROM stockv2_news_context_run_items i
-		JOIN stockv2_news_context_runs r ON r.id=i.run_id
-		WHERE r.window_type=? AND i.object_type=? AND i.status=?
-		AND NOT EXISTS (
-			SELECT 1 FROM stockv2_news_context_run_items parent_item
-			JOIN stockv2_news_context_runs parent_run ON parent_run.id=parent_item.run_id
-			WHERE parent_item.object_id=i.object_id AND parent_item.object_type=?
-			AND parent_item.status=? AND parent_run.window_type=?
-		) ORDER BY r.window_end,i.object_id`, NewsContextWindowHourly,
-		NewsContextRunItemNewsEvent, NewsContextRunItemCompleted,
-		NewsContextRunItemNewsEvent, NewsContextRunItemCompleted, NewsContextWindowFourHour)
-	if err != nil {
-		return wrapError(err, "list legacy hourly news context coverage")
-	}
-	type legacyItem struct{ itemID, eventID, runID string }
-	items := make([]legacyItem, 0)
-	for rows.Next() {
-		var item legacyItem
-		if err := rows.Scan(&item.itemID, &item.eventID, &item.runID); err != nil {
-			rows.Close()
-			return wrapError(err, "scan legacy hourly news context coverage")
-		}
-		items = append(items, item)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if len(items) == 0 {
-		return nil
-	}
-	marketTx, err := s.marketDB.db.BeginTx(ctx, nil)
-	if err != nil {
-		return wrapError(err, "begin legacy hourly news context migration")
-	}
-	defer marketTx.Rollback()
-	migrated := make([]string, 0, len(items))
-	now := time.Now()
-	for _, item := range items {
-		result, err := marketTx.ExecContext(ctx, `UPDATE stockv2_news_events SET
-			context_status=?,context_run_id=NULL,context_covered_at=NULL,protected_reason=NULL,updated_at=?
-			WHERE id=? AND context_run_id=? AND context_status IN (?,?)`,
-			NewsEventContextPending, now, item.eventID, item.runID,
-			NewsEventContextCovered, NewsEventContextNoise)
-		if err != nil {
-			return wrapError(err, "release legacy hourly news context coverage")
-		}
-		if affected, _ := result.RowsAffected(); affected == 1 {
-			migrated = append(migrated, item.itemID)
-		}
-	}
-	if err := marketTx.Commit(); err != nil {
-		return wrapError(err, "commit legacy hourly news context migration")
-	}
-	if len(migrated) == 0 {
-		return nil
-	}
-	return s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		for _, itemID := range migrated {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_news_context_run_items WHERE id=?`, itemID); err != nil {
-				return wrapError(err, "remove migrated hourly news context item")
-			}
-		}
-		return nil
-	})
-}
-
-func (s *Store) migrateLegacyHourlyNewsContextReviews(ctx context.Context) error {
-	// DEPRECATED: releases before 2026-07 could leave a fully processed hourly
-	// model run waiting on a portfolio review. Hourly windows are deterministic
-	// checkpoints now; remove this migration after all deployed databases have
-	// crossed that release boundary.
-	now := time.Now()
-	_, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_runs SET
-		status=?,phase='checkpointed',review_status=?,review_run_id=NULL,
-		current_agent_run_id=NULL,error_message='',finished_at=COALESCE(finished_at,?),updated_at=?
-		WHERE window_type=? AND pending_count=0 AND processed_count>=input_count
-		AND (status=? OR review_status IN (?,?,?))`,
-		NewsContextRunStatusCompleted, NewsContextReviewNotRequired, now, now,
-		NewsContextWindowHourly, NewsContextRunStatusWaitingReview,
-		NewsContextReviewPending, NewsContextReviewRunning, NewsContextReviewFailed)
-	return wrapError(err, "migrate legacy hourly news context reviews")
-}
-
-func (s *Store) ensureNewsContextConfigColumns(ctx context.Context) error {
-	if err := s.ensureColumn(ctx, "stockv2_news_context_config", "additional_research_prompt", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return wrapError(err, "add news context research prompt column")
-	}
-	var legacyBatchSize int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`,
-		"stockv2_news_context_config", "batch_size").Scan(&legacyBatchSize); err != nil {
-		return wrapError(err, "inspect legacy news context batch column")
-	}
-	if legacyBatchSize == 0 {
-		return nil
-	}
-	// ponytail: the old value represented a model-call detail rather than a
-	// product limit. Drop it once so runtime code has no hidden compatibility path.
-	if _, err := s.db.ExecContext(ctx, `ALTER TABLE stockv2_news_context_config DROP COLUMN batch_size`); err != nil {
-		return wrapError(err, "remove legacy news context batch column")
 	}
 	return nil
 }
@@ -738,11 +591,8 @@ func (s *Store) FailRunningNewsContextRuns(ctx context.Context, reason string) (
 		NewsContextBackfillStatusRunning, NewsContextBackfillStatusPaused); err != nil {
 		return 0, wrapError(err, "recover interrupted news context backfill items")
 	}
-	// DEPRECATED: translate the persisted pre-2026-07 convergence phase once;
-	// new runs never write it and resume through the deterministic daily path.
 	recovered, err := s.db.ExecContext(ctx, `UPDATE stockv2_news_context_runs SET
-		status=?, phase=CASE WHEN phase='converging' THEN 'collecting'
-			WHEN phase IN (?,?,?) THEN phase ELSE 'queued' END,
+		status=?, phase=CASE WHEN phase IN (?,?,?) THEN phase ELSE 'queued' END,
 		current_agent_run_id=NULL, error_message=NULL,
 		finished_at=NULL, updated_at=? WHERE status=? AND id IN (
 			SELECT current_run_id FROM stockv2_news_context_backfills
@@ -1755,13 +1605,6 @@ func (s *Store) ListNewsThreadEvidence(ctx context.Context, filter NewsThreadEvi
 	return scanRows(rows, scanNewsThreadEvidence, "scan news thread evidence", "iterate news thread evidence")
 }
 
-func (s *Store) CountNewsThreadEvidence(ctx context.Context, filter NewsThreadEvidenceListFilter) (int, error) {
-	where, args := newsThreadEvidenceWhere(filter)
-	var count int
-	err := s.marketDB.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_news_thread_evidence e WHERE `+where, args...).Scan(&count)
-	return count, wrapError(err, "count news thread evidence")
-}
-
 func (s *Store) ListNewsContextChangedThreads(ctx context.Context, runID string, limit, offset int) ([]NewsThreadChange, error) {
 	rows, err := s.marketDB.db.QueryContext(ctx, `SELECT run_id, thread_id, id, title, stage,
 		COALESCE(latest_change,''), material_change, created_at
@@ -2169,22 +2012,6 @@ func (s *Store) refreshNewsContextRunCounts(ctx context.Context, runID string) e
 	}
 	_, err = s.UpdateNewsContextRun(ctx, run)
 	return err
-}
-
-func (s *Store) ListNewsEventsPendingContext(ctx context.Context, before time.Time, limit, offset int) ([]NewsEvent, error) {
-	args := []any{NewsEventContextPending, NewsEventContextDeferred}
-	where := ` WHERE COALESCE(context_status, 'pending') IN (?, ?)`
-	if !before.IsZero() {
-		where += ` AND event_at < ?`
-		args = append(args, before)
-	}
-	args = append(args, normalizedPageLimit(limit, 1000), normalizedPageOffset(offset))
-	rows, err := s.marketDB.db.QueryContext(ctx, newsEventSelectSQL()+where+`
-		ORDER BY event_at ASC, id ASC LIMIT ? OFFSET ?`, args...)
-	if err != nil {
-		return nil, wrapError(err, "list news events pending context")
-	}
-	return scanRows(rows, scanNewsEvent, "scan pending context news event", "iterate pending context news events")
 }
 
 func (s *Store) MarkNewsEventContext(ctx context.Context, eventID, status, runID, protectedReason string, coveredAt time.Time) error {

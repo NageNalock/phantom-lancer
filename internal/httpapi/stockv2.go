@@ -32,7 +32,6 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 
 	// 股票主数据
 	mux.HandleFunc("GET /api/stockv2/instruments", s.handleListInstruments)
-	mux.HandleFunc("GET /api/stockv2/instruments/market/{market}", s.handleGetInstrumentsByMarket)
 	mux.HandleFunc("GET /api/stockv2/instruments/search", s.handleSearchInstruments)
 	mux.HandleFunc("GET /api/stockv2/profiles", s.handleStockV2ListStockProfiles)
 	mux.HandleFunc("GET /api/stockv2/profiles/summaries", s.handleStockV2ListStockProfileSummaries)
@@ -40,9 +39,6 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/profiles/{symbol}", s.handleStockV2GetStockProfile)
 	mux.HandleFunc("POST /api/stockv2/profiles/{symbol}/update", s.handleStockV2UpdateStockProfile)
 	mux.HandleFunc("GET /api/stockv2/profiles/{symbol}/update-tasks", s.handleStockV2ListStockProfileUpdateTasks)
-	mux.HandleFunc("POST /api/stockv2/profiles/{symbol}/build", s.handleStockV2BuildStockProfile)
-	mux.HandleFunc("POST /api/stockv2/profiles/{symbol}/run-agent", s.handleStockV2RunStockProfileAgent)
-	mux.HandleFunc("POST /api/stockv2/profiles/rebuild", s.handleStockV2RebuildStockProfiles)
 
 	// 最新行情
 	mux.HandleFunc("GET /api/stockv2/quotes/latest", s.handleStockV2GetLatestQuotes)
@@ -463,24 +459,6 @@ func (s *Server) handleSearchInstruments(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// handleGetInstrumentsByMarket 处理按市场获取股票请求
-func (s *Server) handleGetInstrumentsByMarket(w http.ResponseWriter, r *http.Request) {
-	market := r.PathValue("market")
-	if market == "" {
-		http.Error(w, "market is required", http.StatusBadRequest)
-		return
-	}
-
-	ctx := r.Context()
-	instruments, err := s.stockV2.GetInstrumentsByMarket(ctx, market)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	s.writeJSON(w, instruments)
-}
-
 // handleTriggerUpdate 处理触发更新请求
 func (s *Server) handleTriggerUpdate(w http.ResponseWriter, r *http.Request) {
 	var req stockv2.UniverseUpdateRequest
@@ -715,7 +693,7 @@ func (s *Server) handleGetDailyBarsQualities(w http.ResponseWriter, r *http.Requ
 	s.writeJSON(w, map[string]any{"items": qualities})
 }
 
-// handleRunDailyBarsJob 手动触发日 K 批量任务（symbol / hot / universe_incremental）。
+// handleRunDailyBarsJob 手动触发日 K 批量任务（symbol / hot）。
 func (s *Server) handleRunDailyBarsJob(w http.ResponseWriter, r *http.Request) {
 	var req stockv2.DailyBarsJobRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

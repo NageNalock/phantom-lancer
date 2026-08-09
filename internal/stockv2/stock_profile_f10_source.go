@@ -53,24 +53,6 @@ func (s *Service) enrichStockProfileFromPublicSources(ctx context.Context, profi
 	return profile, statuses
 }
 
-func (s *Service) enrichStockProfileFromEastmoney(ctx context.Context, profile *StockProfile) error {
-	code := eastmoneyF10Code(profile.Market, profile.Symbol)
-	if code == "" {
-		return nil
-	}
-	var firstErr error
-	if err := s.enrichStockProfileCompanySurvey(ctx, profile, code); err != nil {
-		firstErr = err
-	}
-	if err := s.enrichStockProfileBusinessAnalysis(ctx, profile, code); err != nil && firstErr == nil {
-		firstErr = err
-	}
-	if err := s.enrichStockProfileCoreConception(ctx, profile, code); err != nil && firstErr == nil {
-		firstErr = err
-	}
-	return firstErr
-}
-
 func (s *Service) enrichStockProfileCompanySurvey(ctx context.Context, profile *StockProfile, code string) error {
 	var payload eastmoneyCompanySurveyResponse
 	if err := s.fetchStockProfileJSON(ctx, "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/CompanySurveyAjax?code="+url.QueryEscape(code), &payload); err != nil {
@@ -142,17 +124,6 @@ func (s *Service) enrichStockProfileCoreConception(ctx context.Context, profile 
 		}
 	}
 	return nil
-}
-
-func (s *Service) enrichFundProfileFromEastmoney(ctx context.Context, profile *StockProfile) error {
-	var firstErr error
-	if err := s.enrichFundProfileBasics(ctx, profile); err != nil {
-		firstErr = err
-	}
-	if err := s.enrichFundProfileHoldings(ctx, profile); err != nil && firstErr == nil {
-		firstErr = err
-	}
-	return firstErr
 }
 
 func (s *Service) enrichFundProfileBasics(ctx context.Context, profile *StockProfile) error {

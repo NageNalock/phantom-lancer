@@ -2,11 +2,9 @@ package stockv2
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -104,131 +102,6 @@ func TestNewsContextRunOmitsZeroNextRetryTimeFromAPI(t *testing.T) {
 	}
 }
 
-func TestNewsContextConfigMigratesLegacyBatchColumnBeforeReadingConfig(t *testing.T) {
-	dir := t.TempDir()
-	sqlitePath := filepath.Join(dir, "stockv2.db")
-	db, err := sql.Open("sqlite3", sqliteDSN(sqlitePath))
-	if err != nil {
-		t.Fatalf("open legacy config database: %v", err)
-	}
-	_, err = db.Exec(`CREATE TABLE stockv2_news_context_config (
-		id TEXT PRIMARY KEY,
-		enabled INTEGER NOT NULL DEFAULT 0,
-		auto_cleanup_enabled INTEGER NOT NULL DEFAULT 0,
-		hourly_enabled INTEGER NOT NULL DEFAULT 1,
-		four_hour_enabled INTEGER NOT NULL DEFAULT 1,
-		daily_enabled INTEGER NOT NULL DEFAULT 1,
-		batch_size INTEGER NOT NULL DEFAULT 25,
-		hourly_interval_seconds INTEGER NOT NULL DEFAULT 3600,
-		four_hour_interval_seconds INTEGER NOT NULL DEFAULT 14400,
-		daily_interval_seconds INTEGER NOT NULL DEFAULT 86400,
-		cleanup_grace_seconds INTEGER NOT NULL DEFAULT 86400,
-		next_hourly_at DATETIME,
-		next_four_hour_at DATETIME,
-		next_daily_at DATETIME,
-		last_run_at DATETIME,
-		last_cleanup_at DATETIME,
-		last_error TEXT,
-		updated_at DATETIME NOT NULL
-	);
-	INSERT INTO stockv2_news_context_config
-		(id, enabled, batch_size, cleanup_grace_seconds, updated_at)
-	VALUES (?, 0, 50, 259200, datetime('now'))`, NewsContextConfigIDDefault)
-	if err != nil {
-		_ = db.Close()
-		t.Fatalf("seed legacy config: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close legacy config database: %v", err)
-	}
-
-	store, err := NewStoreWithMarketDB(sqlitePath, filepath.Join(dir, "stock_market.duckdb"))
-	if err != nil {
-		t.Fatalf("migrate legacy config: %v", err)
-	}
-	defer store.Close()
-	cfg, err := store.GetNewsContextConfig(context.Background())
-	if err != nil {
-		t.Fatalf("read migrated config: %v", err)
-	}
-	if cfg.CleanupGraceSeconds != 3*24*3600 || cfg.AdditionalResearchPrompt != "" {
-		t.Fatalf("migrated config=%+v", cfg)
-	}
-	var legacyColumn int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`,
-		"stockv2_news_context_config", "batch_size").Scan(&legacyColumn); err != nil {
-		t.Fatalf("inspect migrated config: %v", err)
-	}
-	if legacyColumn != 0 {
-		t.Fatal("legacy batch column was not removed")
-	}
-}
-
-func TestNewsContextBackfillMigratesFinalReviewRunID(t *testing.T) {
-	dir := t.TempDir()
-	sqlitePath := filepath.Join(dir, "stockv2.db")
-	marketPath := filepath.Join(dir, "stock_market.duckdb")
-	store, err := NewStoreWithMarketDB(sqlitePath, marketPath)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	ctx := context.Background()
-	now := time.Now().Truncate(time.Second)
-
-	activeRun, err := store.CreateNewsContextRun(ctx, NewsContextRun{
-		WindowType: NewsContextWindowDaily, TriggerType: NewsContextTriggerManual,
-		Status: NewsContextRunStatusRunning, WindowStart: now.Add(-2 * time.Hour), WindowEnd: now.Add(-time.Hour),
-		ReviewStatus: NewsContextReviewPending, CleanupStatus: NewsContextCleanupPending,
-	})
-	if err != nil {
-		store.Close()
-		t.Fatalf("create active final run: %v", err)
-	}
-	active, err := store.CreateNewsContextBackfill(ctx, NewsContextBackfill{
-		Status: NewsContextBackfillStatusRunning, Phase: "final_review",
-		CutoffAt: activeRun.WindowStart, CurrentRunID: activeRun.ID, StartedAt: now.Add(-24 * time.Hour),
-	})
-	if err != nil {
-		store.Close()
-		t.Fatalf("create active backfill: %v", err)
-	}
-
-	finishedRun, err := store.CreateNewsContextRun(ctx, NewsContextRun{
-		WindowType: NewsContextWindowDaily, TriggerType: NewsContextTriggerManual,
-		Status: NewsContextRunStatusCompleted, WindowStart: now.Add(-time.Hour), WindowEnd: now,
-		ReviewStatus: NewsContextReviewCompleted, CleanupStatus: NewsContextCleanupPending,
-	})
-	if err != nil {
-		store.Close()
-		t.Fatalf("create inferred final run: %v", err)
-	}
-	finished, err := store.CreateNewsContextBackfill(ctx, NewsContextBackfill{
-		Status: NewsContextBackfillStatusRunning, Phase: "finalizing",
-		CutoffAt: finishedRun.WindowStart, StartedAt: now.Add(-24 * time.Hour),
-	})
-	if err != nil {
-		store.Close()
-		t.Fatalf("create finalizing backfill: %v", err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
-
-	store, err = NewStoreWithMarketDB(sqlitePath, marketPath)
-	if err != nil {
-		t.Fatalf("reopen migrated store: %v", err)
-	}
-	defer store.Close()
-	migratedActive, err := store.GetNewsContextBackfill(ctx, active.ID)
-	if err != nil || migratedActive.FinalReviewRunID != activeRun.ID {
-		t.Fatalf("active final review migration=%+v err=%v", migratedActive, err)
-	}
-	migratedFinished, err := store.GetNewsContextBackfill(ctx, finished.ID)
-	if err != nil || migratedFinished.FinalReviewRunID != finishedRun.ID {
-		t.Fatalf("inferred final review migration=%+v err=%v", migratedFinished, err)
-	}
-}
-
 func TestNewsContextConfigValidationIsAtomic(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
@@ -267,41 +140,6 @@ func TestNewsContextConfigValidationIsAtomic(t *testing.T) {
 		Enabled: &enabled, FourHourEnabled: &disabled,
 	}); !errors.Is(err, ErrInvalidNewsContextInput) {
 		t.Fatalf("automatic aggregation without four-hour model boundary error=%v", err)
-	}
-}
-
-func TestNewsContextConfigMigratesEnabledLegacyModeToFourHourAggregation(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	sqlitePath := filepath.Join(dir, "stockv2.db")
-	marketPath := filepath.Join(dir, "stockv2-market.duckdb")
-	store, err := NewStoreWithMarketDB(sqlitePath, marketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := store.GetNewsContextConfig(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.Enabled = true
-	cfg.FourHourEnabled = false
-	if _, err := store.UpsertNewsContextConfig(ctx, cfg); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	store, err = NewStoreWithMarketDB(sqlitePath, marketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	migrated, err := store.GetNewsContextConfig(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !migrated.Enabled || !migrated.FourHourEnabled {
-		t.Fatalf("migrated config=%+v", migrated)
 	}
 }
 

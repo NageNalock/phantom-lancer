@@ -1,7 +1,6 @@
 package stockv2
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -23,9 +22,6 @@ type StockV2Instrument struct {
 	Industry       string    `json:"industry"`
 	Sector         string    `json:"sector"`
 	Concepts       []string  `json:"concepts"` // 概念信息数组
-	ListDate       string    `json:"listDate"`
-	DelistDate     string    `json:"delistDate"`
-	Status         string    `json:"status"` // active, delisted, suspended
 	LastUpdate     time.Time `json:"lastUpdate"`
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
@@ -165,7 +161,6 @@ type StockV2Settings struct {
 	ProxyHost                          string    `json:"proxyHost"`
 	ProxyPort                          int       `json:"proxyPort"`
 	LastScheduledUpdate                time.Time `json:"lastScheduledUpdate"`
-	DailyBarsLastRun                   time.Time `json:"dailyBarsLastRun"` // 最近一次统一维护或手动日 K 批任务完成时间
 	FinancialJuiceEnabled              bool      `json:"-"`
 	FinancialJuiceEndpoint             string    `json:"-"`
 	FinancialJuiceCookie               string    `json:"-"`
@@ -173,7 +168,6 @@ type StockV2Settings struct {
 	BaseProfileAutoMaintainEnabled     bool      `json:"baseProfileAutoMaintainEnabled"`
 	BaseProfileMaintainIntervalSeconds int       `json:"baseProfileMaintainIntervalSeconds"`
 	BaseProfileDeepUpdateBatchSize     int       `json:"baseProfileDeepUpdateBatchSize"`
-	BaseProfileDeepUpdateAIBudget      int       `json:"baseProfileDeepUpdateAiBudget"`
 	BaseProfileDeepUpdateRateLimitMs   int       `json:"baseProfileDeepUpdateRateLimitMs"`
 	BaseProfileLastMaintainAt          time.Time `json:"baseProfileLastMaintainAt,omitempty"`
 	BaseProfileNextMaintainAt          time.Time `json:"baseProfileNextMaintainAt,omitempty"`
@@ -181,54 +175,6 @@ type StockV2Settings struct {
 	CreatedAt                          time.Time `json:"createdAt"`
 	UpdatedAt                          time.Time `json:"updatedAt"`
 }
-
-// StockV2SettingsPatch 配置更新补丁
-type StockV2SettingsPatch struct {
-	AutoUpdateEnabled    *bool   `json:"autoUpdateEnabled,omitempty"`
-	UpdateIntervalSec    *int    `json:"updateIntervalSec,omitempty"`
-	ProxyEnabled         *bool   `json:"proxyEnabled,omitempty"`
-	ProxyType            *string `json:"proxyType,omitempty"`
-	ProxyHost            *string `json:"proxyHost,omitempty"`
-	ProxyPort            *int    `json:"proxyPort,omitempty"`
-}
-
-// Repository 接口定义
-type Repository interface {
-	CreatePortfolio(ctx context.Context, portfolio StockV2Portfolio) error
-	GetPortfolio(ctx context.Context, id string) (StockV2Portfolio, error)
-	UpdatePortfolio(ctx context.Context, portfolio StockV2Portfolio) error
-	DeletePortfolio(ctx context.Context, id string) error
-	ListPortfolios(ctx context.Context) ([]StockV2Portfolio, error)
-
-	CreateHolding(ctx context.Context, holding StockV2Holding) error
-	GetHolding(ctx context.Context, id string) (StockV2Holding, error)
-	UpdateHolding(ctx context.Context, holding StockV2Holding) error
-	DeleteHolding(ctx context.Context, id string) error
-	ListHoldings(ctx context.Context, portfolioID string) ([]StockV2Holding, error)
-
-	CreateInstrument(ctx context.Context, instrument StockV2Instrument) error
-	GetInstrument(ctx context.Context, symbol string) (StockV2Instrument, error)
-	GetInstruments(ctx context.Context, limit int, offset int) ([]StockV2Instrument, error)
-	SearchInstruments(ctx context.Context, keyword string, limit int) ([]StockV2Instrument, error)
-	UpdateInstrument(ctx context.Context, instrument StockV2Instrument) error
-	GetInstrumentsByMarket(ctx context.Context, market string) ([]StockV2Instrument, error)
-
-	CreateUpdateJob(ctx context.Context, job StockV2UpdateJob) error
-	GetUpdateJob(ctx context.Context, id string) (StockV2UpdateJob, error)
-	GetLatestUpdateJob(ctx context.Context) (StockV2UpdateJob, error)
-	UpdateUpdateJob(ctx context.Context, job StockV2UpdateJob) error
-	ListUpdateJobs(ctx context.Context, limit int) ([]StockV2UpdateJob, error)
-
-	GetUpdateProgress(ctx context.Context, updateJobID string) (StockV2UpdateProgress, error)
-	UpdateUpdateProgress(ctx context.Context, progress StockV2UpdateProgress) error
-
-	CreateOrUpdateSettings(ctx context.Context, settings StockV2Settings) error
-	GetSettings(ctx context.Context) (StockV2Settings, error)
-}
-
-// Store 数据存储包装器
-
-// API HTTP API 请求响应结构
 
 // PortfolioWithHoldings 带持仓信息的投资组合
 type PortfolioWithHoldings struct {
@@ -327,7 +273,6 @@ type RequestCreateOrUpdateSettings struct {
 	BaseProfileAutoMaintainEnabled     *bool   `json:"baseProfileAutoMaintainEnabled,omitempty"`
 	BaseProfileMaintainIntervalSeconds *int    `json:"baseProfileMaintainIntervalSeconds,omitempty"`
 	BaseProfileDeepUpdateBatchSize     *int    `json:"baseProfileDeepUpdateBatchSize,omitempty"`
-	BaseProfileDeepUpdateAIBudget      *int    `json:"baseProfileDeepUpdateAiBudget,omitempty"`
 	BaseProfileDeepUpdateRateLimitMs   *int    `json:"baseProfileDeepUpdateRateLimitMs,omitempty"`
 }
 

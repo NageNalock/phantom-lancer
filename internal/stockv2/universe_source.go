@@ -18,20 +18,6 @@ import (
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
-// TencentQuoteResponse 腾讯行情响应结构
-type TencentQuoteResponse struct {
-	Symbol    string  `json:"symbol"`
-	Name      string  `json:"name"`
-	LastPrice float64 `json:"lastPrice"`
-	PrevClose float64 `json:"prevClose"`
-	OpenPrice float64 `json:"openPrice"`
-	Volume    float64 `json:"volume"`
-	High      float64 `json:"high"`
-	Low       float64 `json:"low"`
-	Amount    float64 `json:"amount"`
-	Market    string  `json:"market"`
-}
-
 // UniverseDataSource 数据源管理
 type UniverseDataSource struct {
 	service    *Service
@@ -296,7 +282,6 @@ func (uds *UniverseDataSource) parseTencentLine(line string, metaMap map[string]
 		Market:         market,
 		InstrumentType: instrumentType,
 		Name:           name,
-		Status:         "active",
 		LastUpdate:     time.Now(),
 	}
 
@@ -339,7 +324,6 @@ func (uds *UniverseDataSource) MockDataForTest() []StockV2Instrument {
 			Name:           "平安银行",
 			Industry:       "银行",
 			Sector:         "金融",
-			Status:         "active",
 			LastUpdate:     time.Now(),
 		},
 		{
@@ -350,7 +334,6 @@ func (uds *UniverseDataSource) MockDataForTest() []StockV2Instrument {
 			Name:           "万科A",
 			Industry:       "房地产",
 			Sector:         "地产",
-			Status:         "active",
 			LastUpdate:     time.Now(),
 		},
 		{
@@ -361,7 +344,6 @@ func (uds *UniverseDataSource) MockDataForTest() []StockV2Instrument {
 			Name:           "浦发银行",
 			Industry:       "银行",
 			Sector:         "金融",
-			Status:         "active",
 			LastUpdate:     time.Now(),
 		},
 		{
@@ -372,7 +354,6 @@ func (uds *UniverseDataSource) MockDataForTest() []StockV2Instrument {
 			Name:           "招商银行",
 			Industry:       "银行",
 			Sector:         "金融",
-			Status:         "active",
 			LastUpdate:     time.Now(),
 		},
 	}

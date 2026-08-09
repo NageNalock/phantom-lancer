@@ -14,19 +14,6 @@ import (
 	"phantom-lancer/internal/safelog"
 )
 
-func (s *Service) BuildStockProfile(ctx context.Context, symbol string) (StockProfile, error) {
-	result, err := s.UpdateStockProfile(ctx, RequestUpdateStockProfile{
-		Symbol:        symbol,
-		TriggerSource: StockProfileUpdateTriggerManual,
-		TriggerReason: "build_compat",
-		RequestedBy:   "system",
-	})
-	if err != nil {
-		return StockProfile{}, err
-	}
-	return result.Profile, nil
-}
-
 func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStockProfile) (StockProfileUpdateResult, error) {
 	normalizedSymbol, _ := normalizeQuoteSymbolInput(req.Symbol)
 	if normalizedSymbol == "" {
@@ -221,27 +208,13 @@ func stockProfileContentEqual(left, right StockProfile) bool {
 }
 
 type stockProfileDeepUpdateOptions struct {
-	SymbolBudget      int
-	AIRoundsPerSymbol int
-	RateLimit         time.Duration
-	Now               time.Time
-	RequestedBy       string
+	SymbolBudget int
+	RateLimit    time.Duration
+	Now          time.Time
+	RequestedBy  string
 }
 
 var errStockProfileMaintenanceDeferred = errors.New("stock profile maintenance deferred during news context backfill")
-
-func (s *Service) RunAutomaticDeepStockProfileUpdate(ctx context.Context, trigger string) (StockProfileDeepUpdateResult, error) {
-	settings, err := s.GetSettings(ctx)
-	if err != nil {
-		return StockProfileDeepUpdateResult{}, err
-	}
-	return s.runAutomaticDeepStockProfileUpdate(ctx, trigger, stockProfileDeepUpdateOptions{
-		SymbolBudget:      settings.BaseProfileDeepUpdateBatchSize,
-		AIRoundsPerSymbol: settings.BaseProfileDeepUpdateAIBudget,
-		RateLimit:         time.Duration(settings.BaseProfileDeepUpdateRateLimitMs) * time.Millisecond,
-		RequestedBy:       "system",
-	})
-}
 
 func (s *Service) runAutomaticDeepStockProfileUpdate(ctx context.Context, trigger string, opts stockProfileDeepUpdateOptions) (StockProfileDeepUpdateResult, error) {
 	now := opts.Now
@@ -249,7 +222,6 @@ func (s *Service) runAutomaticDeepStockProfileUpdate(ctx context.Context, trigge
 		now = time.Now()
 	}
 	symbolBudget := normalizeStockProfileDeepUpdateBatchSize(opts.SymbolBudget)
-	aiRoundsPerSymbol := normalizeStockProfileDeepUpdateAIBudget(opts.AIRoundsPerSymbol)
 	rateLimit := opts.RateLimit
 	if rateLimit < 0 {
 		rateLimit = 0
@@ -259,11 +231,9 @@ func (s *Service) runAutomaticDeepStockProfileUpdate(ctx context.Context, trigge
 		requestedBy = "system"
 	}
 	result := StockProfileDeepUpdateResult{
-		SymbolBudget:      symbolBudget,
-		AIRoundsPerSymbol: aiRoundsPerSymbol,
-		AIBudget:          aiRoundsPerSymbol,
-		RateLimitMs:       int(rateLimit / time.Millisecond),
-		UpdatedAt:         now,
+		SymbolBudget: symbolBudget,
+		RateLimitMs:  int(rateLimit / time.Millisecond),
+		UpdatedAt:    now,
 	}
 	if s.shouldDeferMaintenanceForNewsContextBackfill(ctx) {
 		return result, errStockProfileMaintenanceDeferred
@@ -402,10 +372,9 @@ func (s *Service) maybeRunBaseProfileMaintenance(ctx context.Context, trigger st
 	var deepErr error
 	if runErr == nil {
 		deepResult, deepErr = s.runAutomaticDeepStockProfileUpdate(ctx, trigger, stockProfileDeepUpdateOptions{
-			SymbolBudget:      settings.BaseProfileDeepUpdateBatchSize,
-			AIRoundsPerSymbol: settings.BaseProfileDeepUpdateAIBudget,
-			RateLimit:         time.Duration(settings.BaseProfileDeepUpdateRateLimitMs) * time.Millisecond,
-			RequestedBy:       "system",
+			SymbolBudget: settings.BaseProfileDeepUpdateBatchSize,
+			RateLimit:    time.Duration(settings.BaseProfileDeepUpdateRateLimitMs) * time.Millisecond,
+			RequestedBy:  "system",
 		})
 	}
 	if errors.Is(deepErr, errStockProfileMaintenanceDeferred) {
@@ -418,7 +387,7 @@ func (s *Service) maybeRunBaseProfileMaintenance(ctx context.Context, trigger st
 	} else if deepErr != nil {
 		settings.BaseProfileLastMaintainResult = fmt.Sprintf("partial trigger=%s total=%d success=%d failed=%d deepError=%s", trigger, result.Total, result.Success, result.Failed, stockProfileSnippet(deepErr.Error(), 180))
 	} else {
-		settings.BaseProfileLastMaintainResult = fmt.Sprintf("completed trigger=%s total=%d success=%d failed=%d deepCandidates=%d deepProcessed=%d deepAI=%d aiRoundsPerSymbol=%d deepFailed=%d", trigger, result.Total, result.Success, result.Failed, deepResult.CandidateCount, deepResult.ProcessedCount, deepResult.AICalledCount, deepResult.AIRoundsPerSymbol, deepResult.FailedCount)
+		settings.BaseProfileLastMaintainResult = fmt.Sprintf("completed trigger=%s total=%d success=%d failed=%d deepCandidates=%d deepProcessed=%d deepAI=%d deepFailed=%d", trigger, result.Total, result.Success, result.Failed, deepResult.CandidateCount, deepResult.ProcessedCount, deepResult.AICalledCount, deepResult.FailedCount)
 	}
 	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil && s.log != nil {
 		s.log.Warn("save base profile maintenance state failed", "trigger", trigger, "error", safelog.Text(err.Error(), 240))
@@ -472,24 +441,6 @@ func (s *Service) ListStockProfileSummaries(ctx context.Context, symbols []strin
 		}
 	}
 	return out, nil
-}
-
-func (s *Service) RunAgentStockProfileSummary(ctx context.Context, symbol string, requestedBy string) (AgentRun, error) {
-	result, err := s.UpdateStockProfile(ctx, RequestUpdateStockProfile{
-		Symbol:        symbol,
-		TriggerSource: StockProfileUpdateTriggerManual,
-		TriggerReason: "legacy_run_agent",
-		RequestedBy:   requestedBy,
-		ForceAI:       true,
-		StrictAI:      true,
-	})
-	if err != nil {
-		return AgentRun{}, err
-	}
-	if result.AgentRun == nil {
-		return AgentRun{}, ErrAgentExecutorUnavailable
-	}
-	return *result.AgentRun, nil
 }
 
 func (s *Service) prepareStockProfileSummaryAgentRun(ctx context.Context, profile StockProfile, requestedBy string) (AgentRun, AgentDecisionLedger, string, error) {

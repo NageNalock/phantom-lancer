@@ -89,12 +89,3 @@ type NewsEventListFilter struct {
 	Limit            int
 	Offset           int
 }
-
-type LinkNewsEventsBatchResult struct {
-	Total       int             `json:"total"`
-	Linked      int             `json:"linked"`
-	NoCandidate int             `json:"noCandidate"`
-	Failed      int             `json:"failed"`
-	Candidates  int             `json:"candidates"`
-	FailedItems []UpdateFailure `json:"failedItems,omitempty"`
-}

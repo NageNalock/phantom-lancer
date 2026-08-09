@@ -1161,9 +1161,6 @@ export interface StockV2Instrument {
   industry: string;
   sector: string;
   concepts: string[];
-  listDate: string;
-  delistDate: string;
-  status: string; // active, delisted, suspended
   lastUpdate: string;
   createdAt: string;
   updatedAt: string;
@@ -1411,13 +1408,11 @@ export interface StockV2Settings {
   baseProfileAutoMaintainEnabled: boolean;
   baseProfileMaintainIntervalSeconds: number;
   baseProfileDeepUpdateBatchSize: number;
-  baseProfileDeepUpdateAiBudget: number;
   baseProfileDeepUpdateRateLimitMs: number;
   baseProfileLastMaintainAt?: string;
   baseProfileNextMaintainAt?: string;
   baseProfileLastMaintainResult?: string;
   lastScheduledUpdate: string;
-  dailyBarsLastRun: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -1947,7 +1942,7 @@ export interface StockV2DailyBarsEnsureResult {
   errorMessage?: string;
 }
 
-export type DailyBarMode = "symbol" | "hot" | "universe_incremental";
+export type DailyBarMode = "symbol" | "hot";
 
 export interface StockV2DailyBarsJobRequest {
   mode?: DailyBarMode | string;
@@ -1961,7 +1956,7 @@ export interface StockV2DailyBarsJobRequest {
 export interface StockV2DailyBarJob {
   id: string;
   jobType: string;      // daily_bars_ensure | daily_bars_incremental
-  mode: string;         // symbol | hot | universe_incremental
+  mode: string;         // symbol | hot
   symbol?: string;
   status: string;       // running | completed | failed | cancelled
   totalCount: number;

@@ -343,17 +343,6 @@ func scanOpportunityStep(row rowScanner) (OpportunityDiscoveryStep, error) {
 	return item, nil
 }
 
-func (s *Store) GetOpportunityDiscoveryStep(ctx context.Context, id string) (OpportunityDiscoveryStep, error) {
-	item, err := scanOpportunityStep(s.db.QueryRowContext(ctx, opportunityStepSelectSQL+" WHERE id = ?", id))
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return OpportunityDiscoveryStep{}, ErrDiscoveryStepNotFound
-		}
-		return OpportunityDiscoveryStep{}, wrapError(err, "get opportunity discovery step")
-	}
-	return item, nil
-}
-
 func (s *Store) GetOpportunityDiscoveryStepByKey(ctx context.Context, runID, stepKey string) (OpportunityDiscoveryStep, error) {
 	item, err := scanOpportunityStep(s.db.QueryRowContext(ctx, opportunityStepSelectSQL+" WHERE run_id = ? AND step_key = ?", runID, stepKey))
 	if err != nil {
@@ -885,33 +874,4 @@ func (s *Store) CountEmbeddingAssets(ctx context.Context, filter EmbeddingAssetL
 	var total int
 	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM stockv2_embedding_assets WHERE %s`, where), args...).Scan(&total)
 	return total, wrapError(err, "count embedding assets")
-}
-
-func (s *Store) CountEmbeddingAssetsByStatus(ctx context.Context, modelID string) (ready, stale, failed int, err error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT status, COUNT(*)
-		FROM stockv2_embedding_assets
-		WHERE model_id = ?
-		GROUP BY status
-	`, modelID)
-	if err != nil {
-		return 0, 0, 0, wrapError(err, "count embedding assets by status")
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var status string
-		var count int
-		if err := rows.Scan(&status, &count); err != nil {
-			return 0, 0, 0, wrapError(err, "scan embedding asset status count")
-		}
-		switch status {
-		case EmbeddingAssetStatusReady:
-			ready = count
-		case EmbeddingAssetStatusStale:
-			stale = count
-		case EmbeddingAssetStatusFailed:
-			failed = count
-		}
-	}
-	return ready, stale, failed, wrapError(rows.Err(), "iterate embedding asset status counts")
 }

@@ -3,7 +3,6 @@ package stockv2
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -140,96 +139,6 @@ func TestFourHourPreparationOwnsRawNewsAfterHourlyCheckpoint(t *testing.T) {
 	}
 	if status != NewsEventContextClaimed || owner != fourHour.ID {
 		t.Fatalf("four-hour claim status=%s owner=%s", status, owner)
-	}
-}
-
-func TestLegacyHourlyCoverageMovesBackToPendingForFourHourAggregation(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	sqlitePath := filepath.Join(dir, "stockv2.db")
-	marketPath := filepath.Join(dir, "stockv2-market.duckdb")
-	store, err := NewStoreWithMarketDB(sqlitePath, marketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	svc := NewService(store, nil, nil)
-	end := time.Now().Truncate(time.Hour)
-	event, err := svc.CreateNewsEvent(ctx, NewsEvent{Source: "test", Title: "旧小时覆盖", EventAt: end.Add(-time.Minute)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, err := store.CreateNewsContextRun(ctx, NewsContextRun{
-		WindowType: NewsContextWindowHourly, TriggerType: NewsContextTriggerScheduled,
-		Status: NewsContextRunStatusCompleted, Phase: "completed",
-		WindowStart: end.Add(-time.Hour), WindowEnd: end,
-		ReviewStatus: NewsContextReviewNotRequired, CleanupStatus: NewsContextCleanupPending,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AddNewsContextRunItems(ctx, []NewsContextRunItem{{
-		RunID: run.ID, ObjectType: NewsContextRunItemNewsEvent, ObjectID: event.ID,
-		Status: NewsContextRunItemCompleted, Disposition: NewsEventContextNoise,
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.marketDB.db.ExecContext(ctx, `UPDATE stockv2_news_events SET
-		context_status=?,context_run_id=?,context_covered_at=? WHERE id=?`,
-		NewsEventContextNoise, run.ID, time.Now(), event.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	store, err = NewStoreWithMarketDB(sqlitePath, marketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	var status, owner string
-	var coveredAt any
-	if err := store.marketDB.db.QueryRowContext(ctx, `SELECT COALESCE(context_status,'pending'),
-		COALESCE(context_run_id,''),context_covered_at FROM stockv2_news_events WHERE id=?`, event.ID).
-		Scan(&status, &owner, &coveredAt); err != nil {
-		t.Fatal(err)
-	}
-	if status != NewsEventContextPending || owner != "" || coveredAt != nil {
-		t.Fatalf("migrated status=%s owner=%s coveredAt=%v", status, owner, coveredAt)
-	}
-	items, err := store.ListNewsContextRunItems(ctx, NewsContextRunItemListFilter{RunID: run.ID, Limit: 10})
-	if err != nil || len(items) != 0 {
-		t.Fatalf("legacy hourly items=%+v err=%v", items, err)
-	}
-}
-
-func TestLegacyHourlyReviewBecomesCompletedCheckpoint(t *testing.T) {
-	svc, cleanup := newStrategyTestService(t)
-	defer cleanup()
-	ctx := context.Background()
-	end := time.Now().Truncate(time.Hour)
-	run, err := svc.store.CreateNewsContextRun(ctx, NewsContextRun{
-		WindowType: NewsContextWindowHourly, TriggerType: NewsContextTriggerScheduled,
-		Status: NewsContextRunStatusWaitingReview, Phase: "review_failed",
-		WindowStart: end.Add(-time.Hour), WindowEnd: end,
-		InputCount: 82, ProcessedCount: 82, PendingCount: 0,
-		ReviewStatus: NewsContextReviewFailed, ReviewRunID: "legacy-review",
-		ErrorMessage:  "legacy model result failed",
-		CleanupStatus: NewsContextCleanupPending,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.store.migrateLegacyHourlyNewsContextReviews(ctx); err != nil {
-		t.Fatal(err)
-	}
-	stored, err := svc.store.GetNewsContextRun(ctx, run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.Status != NewsContextRunStatusCompleted || stored.Phase != "checkpointed" ||
-		stored.ReviewStatus != NewsContextReviewNotRequired || stored.ReviewRunID != "" ||
-		stored.ErrorMessage != "" || stored.ProcessedCount != stored.InputCount {
-		t.Fatalf("migrated hourly review=%+v", stored)
 	}
 }
 

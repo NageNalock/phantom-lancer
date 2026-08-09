@@ -151,106 +151,6 @@ func TestMarketDataStoreSelectsOneCompleteBarPerTradeDate(t *testing.T) {
 		t.Fatalf("logical stats count=%d source=%q, want 1 and 10jqka_kline", count, source)
 	}
 
-	if _, err := store.db.ExecContext(ctx, `
-		UPDATE stockv2_daily_bar_quality
-		SET row_count = 2
-		WHERE symbol = '600276' AND adjusted = 'none'
-	`); err != nil {
-		t.Fatalf("poison legacy quality row: %v", err)
-	}
-	if _, err := store.db.ExecContext(ctx, `
-		DELETE FROM stockv2_market_schema_migrations
-		WHERE id = ?
-	`, dailyBarLogicalQualityMigration); err != nil {
-		t.Fatalf("remove migration marker: %v", err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close store before migration: %v", err)
-	}
-
-	store, err = NewMarketDataStore(path)
-	if err != nil {
-		t.Fatalf("reopen market store: %v", err)
-	}
-	defer store.Close()
-	count, _, _, source, _, err = store.GetDailyBarsStats(ctx, "600276", DailyBarAdjustedNone)
-	if err != nil {
-		t.Fatalf("get migrated stats: %v", err)
-	}
-	if count != 1 || source != "10jqka_kline" {
-		t.Fatalf("migrated logical stats count=%d source=%q, want 1 and 10jqka_kline", count, source)
-	}
-}
-
-func TestNewStoreWithMarketDBMigratesLegacySQLiteDailyBars(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	sqlitePath := filepath.Join(dir, "stockv2.sqlite")
-	marketPath := filepath.Join(dir, "stockv2", "stock_market.duckdb")
-
-	legacyDB, err := sql.Open("sqlite3", sqlitePath)
-	if err != nil {
-		t.Fatalf("open legacy sqlite: %v", err)
-	}
-	if _, err := legacyDB.ExecContext(ctx, `
-		CREATE TABLE stockv2_daily_bars (
-			id TEXT PRIMARY KEY,
-			symbol TEXT NOT NULL,
-			market TEXT,
-			trade_date TEXT NOT NULL,
-			open REAL,
-			high REAL,
-			low REAL,
-			close REAL,
-			prev_close REAL,
-			volume REAL,
-			amount REAL,
-			pct_change REAL,
-			adjusted TEXT NOT NULL DEFAULT 'none',
-			source TEXT,
-			fetched_at DATETIME,
-			quality TEXT,
-			error_message TEXT,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL,
-			UNIQUE(symbol, trade_date, adjusted, source)
-		);
-		INSERT INTO stockv2_daily_bars (
-			id, symbol, market, trade_date, open, high, low, close, prev_close,
-			volume, amount, pct_change, adjusted, source, fetched_at, quality,
-			error_message, created_at, updated_at
-		) VALUES (
-			'legacy-1', '302132', 'SZ', '2026-06-18', 60.10, 60.60, 59.08, 59.33, 60.20,
-			1200, 0, -1.45, 'none', 'legacy_sqlite', '2026-06-18T15:05:00Z', 'ok',
-			'', '2026-06-18T15:05:00Z', '2026-06-18T15:05:00Z'
-		);
-	`); err != nil {
-		legacyDB.Close()
-		t.Fatalf("seed legacy sqlite: %v", err)
-	}
-	if err := legacyDB.Close(); err != nil {
-		t.Fatalf("close legacy sqlite: %v", err)
-	}
-
-	store, err := NewStoreWithMarketDB(sqlitePath, marketPath)
-	if err != nil {
-		t.Fatalf("new stockv2 store: %v", err)
-	}
-	defer store.Close()
-
-	got, err := store.GetDailyBars(ctx, "302132", DailyBarAdjustedNone, "", "", 10)
-	if err != nil {
-		t.Fatalf("get migrated bars: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("len(got) = %d, want 1", len(got))
-	}
-	if got[0].Source != "legacy_sqlite" || got[0].Close != 59.33 {
-		t.Fatalf("unexpected migrated bar: %+v", got[0])
-	}
-	if total, err := store.CountDailyBarJobs(ctx); err != nil || total != 0 {
-		t.Fatalf("daily bar jobs compatibility total=%d err=%v", total, err)
-	}
 }
 
 func TestStoreDataAssetsWriteToDuckDB(t *testing.T) {
@@ -271,7 +171,6 @@ func TestStoreDataAssetsWriteToDuckDB(t *testing.T) {
 		Market:         "SZ",
 		InstrumentType: InstrumentTypeStock,
 		Name:           "中航成飞",
-		Status:         "active",
 	}); err != nil {
 		t.Fatalf("upsert instrument: %v", err)
 	}
@@ -334,16 +233,25 @@ func TestStoreDataAssetsWriteToDuckDB(t *testing.T) {
 		if got := countRowsForTest(t, store.marketDB.db, table); got != 1 {
 			t.Fatalf("duckdb %s count = %d, want 1", table, got)
 		}
-		if got := countRowsForTest(t, store.db, table); got != 0 {
-			t.Fatalf("sqlite %s count = %d, want 0", table, got)
+		if tableExistsForTest(t, store.db, table) {
+			t.Fatalf("sqlite %s should not exist", table)
 		}
 	}
 	if got := countRowsForTest(t, store.db, "stockv2_quotes_latest"); got != 1 {
 		t.Fatalf("sqlite stockv2_quotes_latest count = %d, want 1", got)
 	}
-	if got := countRowsForTest(t, store.marketDB.db, "stockv2_quotes_latest"); got != 0 {
-		t.Fatalf("duckdb stockv2_quotes_latest count = %d, want 0", got)
+	if tableExistsForTest(t, store.marketDB.db, "stockv2_quotes_latest") {
+		t.Fatal("duckdb stockv2_quotes_latest should not exist")
 	}
+}
+
+func tableExistsForTest(t *testing.T, db *sql.DB, table string) bool {
+	t.Helper()
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", table).Scan(&count); err == nil {
+		return count > 0
+	}
+	return db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&count) == nil && count > 0
 }
 
 func countRowsForTest(t *testing.T, db *sql.DB, table string) int {

@@ -281,33 +281,6 @@ func TestPortfolioSentinelV2PublishesCurrentConditionalPlanStrategy(t *testing.T
 	}
 }
 
-func TestPortfolioSentinelPublishedResultMigrationCompletesLegacyRun(t *testing.T) {
-	svc, cleanup := newStrategyTestService(t)
-	defer cleanup()
-	ctx := context.Background()
-	now := time.Now()
-	run := createAtomicPublishSentinelRun(t, svc.store, "sentinel-published-run-migration", now)
-	if _, err := svc.store.CreatePortfolioSentinelResult(ctx, PortfolioSentinelResult{
-		RunID: run.ID, RiskLevel: PortfolioSentinelRiskHigh,
-		DerivedAlertIDs: []string{"alert-1"}, DerivedMonitorHitIDs: []string{"hit-1", "hit-2"},
-		DerivedReviewIDs: []string{"review-1"}, CreatedAt: now,
-	}); err != nil {
-		t.Fatalf("seed legacy published result: %v", err)
-	}
-	if err := svc.store.migratePortfolioSentinelPublishedRunState(ctx); err != nil {
-		t.Fatalf("migrate published run: %v", err)
-	}
-	reloaded, err := svc.store.GetPortfolioSentinelRun(ctx, run.ID)
-	if err != nil {
-		t.Fatalf("get migrated run: %v", err)
-	}
-	if reloaded.Status != PortfolioSentinelStatusCompleted || reloaded.ResultRiskLevel != PortfolioSentinelRiskHigh ||
-		reloaded.GeneratedAlertCount != 1 || reloaded.GeneratedHitCount != 2 || reloaded.GeneratedReviewCount != 1 ||
-		reloaded.FinishedAt.IsZero() {
-		t.Fatalf("migrated run=%+v", reloaded)
-	}
-}
-
 func createAtomicPublishSentinelRun(t *testing.T, store *Store, id string, now time.Time) PortfolioSentinelRun {
 	t.Helper()
 	run, err := store.CreatePortfolioSentinelRun(context.Background(), PortfolioSentinelRun{

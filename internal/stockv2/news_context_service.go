@@ -968,20 +968,6 @@ func (s *Service) limitNewsContextBatchForProvider(ctx context.Context, items []
 	return limitNewsContextBatchItems(items, limit), nil
 }
 
-func (s *Service) yieldNewsContextRunAfterFragment(ctx context.Context, runID string) error {
-	run, err := s.store.GetNewsContextRun(ctx, runID)
-	if err != nil {
-		return err
-	}
-	run.Status = NewsContextRunStatusPending
-	run.CurrentAgentRunID = ""
-	run.ErrorMessage = ""
-	run.FinishedAt = time.Time{}
-	run.Phase = "queued"
-	_, err = s.store.UpdateNewsContextRun(ctx, run)
-	return err
-}
-
 func (s *Service) nextNewsContextRunItems(ctx context.Context, runID string) ([]NewsContextRunItem, error) {
 	items := make([]NewsContextRunItem, 0)
 	inputCharacters := 0
@@ -2372,16 +2358,11 @@ func (s *Service) retryDueNewsContextReviews(ctx context.Context, now time.Time)
 		}
 		for index := range failed {
 			cause := errors.New(firstNonEmpty(failed[index].ErrorMessage, "portfolio review failed"))
-			legacyQueueConflict := newsContextReviewQueueConflict(cause)
-			due := legacyQueueConflict
-			if !due {
-				var scheduleErr error
-				due, scheduleErr = s.ensureNewsContextAutoRetryScheduled(ctx, &failed[index], now)
-				if scheduleErr != nil || !due {
-					continue
-				}
+			due, scheduleErr := s.ensureNewsContextAutoRetryScheduled(ctx, &failed[index], now)
+			if scheduleErr != nil || !due {
+				continue
 			}
-			if !legacyQueueConflict && failed[index].RetryCount >= newsContextTimeoutRetryLimit &&
+			if failed[index].RetryCount >= newsContextTimeoutRetryLimit &&
 				(!retryableNewsContextRecoveryFailure(cause) ||
 					!s.newsContextRunSupportsAutomaticRetry(ctx, failed[index])) {
 				continue
@@ -2394,10 +2375,6 @@ func (s *Service) retryDueNewsContextReviews(ctx context.Context, now time.Time)
 			failed[index].Status = NewsContextRunStatusWaitingReview
 			failed[index].Phase = "waiting_review"
 			failed[index].NextRetryAt = time.Time{}
-			if legacyQueueConflict {
-				failed[index].RetryCount = 0
-				failed[index].ErrorMessage = ""
-			}
 			if _, err := s.store.UpdateNewsContextRun(ctx, failed[index]); err != nil && s.log != nil {
 				s.log.Warn("queue failed news context review retry",
 					"context_run_id", failed[index].ID,
@@ -2409,10 +2386,6 @@ func (s *Service) retryDueNewsContextReviews(ctx context.Context, now time.Time)
 			return
 		}
 	}
-}
-
-func newsContextReviewQueueConflict(cause error) bool {
-	return cause != nil && strings.Contains(strings.ToLower(cause.Error()), "portfolio sentinel run already running")
 }
 
 func (s *Service) newsContextReviewQueueReady(ctx context.Context, now time.Time) (bool, error) {

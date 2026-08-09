@@ -308,7 +308,7 @@ func (s *Service) runEnsureSymbolJob(ctx context.Context, jobID, symbol, market,
 	_ = s.store.PruneDailyBarJobs(ctx, 100)
 }
 
-// RunDailyBarsJob 触发日 K 任务（symbol / hot / universe_incremental）。
+// RunDailyBarsJob 触发日 K 任务（symbol / hot）。
 func (s *Service) RunDailyBarsJob(ctx context.Context, req DailyBarsJobRequest) (StockV2DailyBarJob, error) {
 	mode := req.Mode
 	if mode == "" {
@@ -340,7 +340,7 @@ func (s *Service) RunDailyBarsJob(ctx context.Context, req DailyBarsJobRequest) 
 			return StockV2DailyBarJob{}, err
 		}
 	} else {
-		// 批量模式（hot / universe）全局去重，避免多个大任务同时打数据源。
+		// 批量模式全局去重，避免多个大任务同时打数据源。
 		if running, _ := s.store.HasRunningDailyBarJob(ctx); running {
 			return StockV2DailyBarJob{}, ErrDailyBarJobAlreadyRunning
 		}
@@ -372,7 +372,7 @@ func (s *Service) RunDailyBarsJob(ctx context.Context, req DailyBarsJobRequest) 
 	return job, nil
 }
 
-// runDailyBarsBatchJob 异步执行批量日 K 任务（symbol/hot/universe_incremental）。
+// runDailyBarsBatchJob 异步执行批量日 K 任务（symbol/hot）。
 func (s *Service) runDailyBarsBatchJob(ctx context.Context, jobID string, req DailyBarsJobRequest, mode, rangeCode, adjusted string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -388,19 +388,7 @@ func (s *Service) runDailyBarsBatchJob(ctx context.Context, jobID string, req Da
 		}
 	}()
 
-	// universe_incremental 是收盘后增量，只补最近交易日窗口，忽略请求的大区间
-	var start, end string
-	if mode == DailyBarJobModeUniverseIncremental {
-		loc, err := time.LoadLocation("Asia/Shanghai")
-		if err != nil {
-			loc = time.Local
-		}
-		endT := time.Now().In(loc)
-		startT := endT.AddDate(0, 0, -10) // 最近 ~10 个自然日，覆盖最近几个交易日
-		start, end = startT.Format("2006-01-02"), endT.Format("2006-01-02")
-	} else {
-		start, end = dailyBarRangeStartEnd(rangeCode, time.Now())
-	}
+	start, end := dailyBarRangeStartEnd(rangeCode, time.Now())
 
 	// 收集待处理 symbol
 	var symbols []string
@@ -410,8 +398,6 @@ func (s *Service) runDailyBarsBatchJob(ctx context.Context, jobID string, req Da
 		symbols = []string{req.Symbol}
 	case DailyBarJobModeHot:
 		symbols, collectErr = s.store.ListHoldingSymbols(ctx)
-	case DailyBarJobModeUniverseIncremental:
-		symbols, collectErr = s.store.ListInstrumentSymbols(ctx)
 	default:
 		collectErr = fmt.Errorf("unknown mode %q", mode)
 	}
@@ -489,9 +475,6 @@ func (s *Service) runDailyBarsBatchJob(ctx context.Context, jobID string, req Da
 	if len(failedItems) > 0 && s.log != nil {
 		s.log.Warn("daily bar batch job completed with item failures", "job_id", jobID, "mode", mode, "range_code", rangeCode, "adjusted", adjusted, "trigger_type", req.TriggerType, "trigger_source", req.TriggerSource, "symbol", req.Symbol, "start_date", start, "end_date", end, "total_count", total, "processed_count", processed, "success_count", success, "failed_count", len(failedItems), "failure_sample", stockV2FailureSample(failedItems, 5))
 	}
-	if req.TriggerType == "scheduled" && mode == DailyBarJobModeUniverseIncremental && status == "completed" {
-		s.recordDailyBarsLastRun(ctx, endAt)
-	}
 	_ = s.store.PruneDailyBarJobs(ctx, 100)
 }
 
@@ -510,24 +493,6 @@ func (s *Service) ListRunningDailyBarJobs(ctx context.Context) ([]StockV2DailyBa
 }
 func (s *Service) GetLatestDailyBarJob(ctx context.Context) (StockV2DailyBarJob, error) {
 	return s.store.GetLatestDailyBarJob(ctx)
-}
-
-func (s *Service) recordDailyBarsLastRun(ctx context.Context, when time.Time) {
-	settings, err := s.GetSettings(ctx)
-	if err != nil {
-		if s.log != nil {
-			s.log.Warn("load settings before updating daily bars last run failed", "last_run_at", when.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 240))
-		}
-		return
-	}
-	settings.DailyBarsLastRun = when
-	if err := s.store.CreateOrUpdateSettings(ctx, settings); err != nil {
-		if s.log != nil {
-			s.log.Warn("update daily bars last run failed", "last_run_at", when.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 240))
-		}
-		return
-	}
-	s.settings = settings
 }
 
 func sameDayInLoc(a, b time.Time, loc *time.Location) bool {

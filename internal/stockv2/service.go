@@ -229,11 +229,6 @@ func (s *Service) WithCodexCLIExecutor(binary, codexHome, mcpURL, dataDir string
 	return s
 }
 
-func (s *Service) WithNewsContextAgentExecutor(executor NewsContextAgentExecutor) *Service {
-	s.newsContextExecutor = executor
-	return s
-}
-
 type AgentMCPStatus struct {
 	Enabled       bool     `json:"enabled"`
 	ServerName    string   `json:"serverName"`
@@ -1063,31 +1058,10 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 	if len(failedItems) > 0 && s.log != nil {
 		s.log.Warn("stock data asset maintenance completed with item failures", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "total_count", totalCount, "processed_count", processedCount, "success_count", successCount, "failed_count", len(failedItems), "failure_sample", stockV2FailureSample(failedItems, 5))
 	}
-	s.recordDailyBarsLastRun(ctx, endAt)
-
 	// 清理过期更新历史（保留最近 100 条）
 	if err := s.store.PruneUpdateJobs(ctx, 100); err != nil {
 		s.log.Warn("prune update jobs failed", "retention_count", 100, "error", safelog.Text(err.Error(), 240))
 	}
-}
-
-func (s *Service) maintainDailyBarsForInstrument(ctx context.Context, inst StockV2Instrument) (bool, error) {
-	quality, err := s.GetDailyBarsQuality(ctx, inst.Symbol, DailyBarAdjustedNone)
-	if err != nil {
-		return false, err
-	}
-	return s.maintainDailyBarsForInstrumentWithQuality(ctx, inst, quality, true)
-}
-
-func (s *Service) maintainDailyBarsForInstrumentWithQuality(ctx context.Context, inst StockV2Instrument, quality DailyBarsQuality, hasQuality bool) (bool, error) {
-	fetched, bars, err := s.fetchDailyBarsForInstrumentWithQuality(ctx, inst, quality, hasQuality)
-	if err != nil || !fetched {
-		return fetched, err
-	}
-	if err := s.store.UpsertDailyBars(ctx, bars); err != nil {
-		return true, err
-	}
-	return true, nil
 }
 
 func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, inst StockV2Instrument, quality DailyBarsQuality, hasQuality bool) (bool, []StockV2DailyBar, error) {
@@ -1235,14 +1209,10 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	if req.BaseProfileDeepUpdateBatchSize != nil {
 		settings.BaseProfileDeepUpdateBatchSize = *req.BaseProfileDeepUpdateBatchSize
 	}
-	if req.BaseProfileDeepUpdateAIBudget != nil {
-		settings.BaseProfileDeepUpdateAIBudget = *req.BaseProfileDeepUpdateAIBudget
-	}
 	if req.BaseProfileDeepUpdateRateLimitMs != nil {
 		settings.BaseProfileDeepUpdateRateLimitMs = *req.BaseProfileDeepUpdateRateLimitMs
 	}
 	settings.BaseProfileDeepUpdateBatchSize = normalizeStockProfileDeepUpdateBatchSize(settings.BaseProfileDeepUpdateBatchSize)
-	settings.BaseProfileDeepUpdateAIBudget = normalizeStockProfileDeepUpdateAIBudget(settings.BaseProfileDeepUpdateAIBudget)
 	settings.BaseProfileDeepUpdateRateLimitMs = normalizeStockProfileDeepUpdateRateLimitMs(settings.BaseProfileDeepUpdateRateLimitMs)
 	if settings.BaseProfileAutoMaintainEnabled {
 		interval := time.Duration(settings.BaseProfileMaintainIntervalSeconds) * time.Second
@@ -1310,22 +1280,6 @@ func (s *Service) CountInstruments(ctx context.Context) (int, error) {
 
 func (s *Service) CountInstrumentsFiltered(ctx context.Context, market, instrumentType, profileStatus string) (int, error) {
 	return s.store.CountInstrumentsFiltered(ctx, market, instrumentType, profileStatus)
-}
-
-// GetInstrumentsByMarket 根据市场获取股票列表
-func (s *Service) GetInstrumentsByMarket(ctx context.Context, market string) ([]StockV2Instrument, error) {
-	return s.store.GetInstrumentsByMarket(ctx, market)
-}
-
-// SearchInstruments 搜索股票（按代码或名称模糊匹配）
-func (s *Service) SearchInstruments(ctx context.Context, keyword string, limit int) ([]StockV2Instrument, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-	if limit > 100 {
-		limit = 100
-	}
-	return s.store.SearchInstruments(ctx, keyword, limit)
 }
 
 func (s *Service) SearchInstrumentsFiltered(ctx context.Context, keyword, market, instrumentType, profileStatus string, limit int) ([]StockV2Instrument, error) {

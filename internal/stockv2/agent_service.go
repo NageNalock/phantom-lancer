@@ -1239,10 +1239,6 @@ func (s *Service) recordAgentProviderProbe(ctx context.Context, profile AgentPro
 	}
 }
 
-func (s *Service) markAgentModelStatus(ctx context.Context, providerID, modelName, status string) {
-	s.markAgentModelStatusForType(ctx, providerID, modelName, "", status)
-}
-
 func (s *Service) markAgentModelStatusForType(ctx context.Context, providerID, modelName, modelType, status string) {
 	if !validAgentModelStatus(status) {
 		return

@@ -609,7 +609,6 @@ func seedStrategyGenerationInstrument(t *testing.T, svc *Service, ctx context.Co
 		Industry:       "军工",
 		Sector:         "制造业",
 		Concepts:       []string{"航空装备"},
-		Status:         "active",
 	}); err != nil {
 		t.Fatalf("upsert instrument: %v", err)
 	}

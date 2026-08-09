@@ -44,10 +44,8 @@ const (
 
 const (
 	defaultStockProfileDeepUpdateBatchSize   = 12
-	defaultStockProfileDeepUpdateAIBudget    = 2
 	defaultStockProfileDeepUpdateRateLimitMs = 1500
 	maxStockProfileDeepUpdateBatchSize       = 50
-	maxStockProfileDeepUpdateAIBudget        = 10
 	maxStockProfileDeepUpdateRateLimitMs     = 60000
 )
 
@@ -118,21 +116,18 @@ type RebuildStockProfilesResult struct {
 }
 
 type StockProfileDeepUpdateResult struct {
-	CandidateCount    int             `json:"candidateCount"`
-	SymbolBudget      int             `json:"symbolBudget"`
-	AIRoundsPerSymbol int             `json:"aiRoundsPerSymbol"`
-	AIBudget          int             `json:"aiBudget"` // legacy: same value as aiRoundsPerSymbol
-	RateLimitMs       int             `json:"rateLimitMs"`
-	ProcessedCount    int             `json:"processedCount"`
-	SuccessCount      int             `json:"successCount"`
-	FailedCount       int             `json:"failedCount"`
-	InputChanged      int             `json:"inputChanged"`
-	InputUnchanged    int             `json:"inputUnchanged"`
-	AICalledCount     int             `json:"aiCalledCount"`
-	AISkippedCount    int             `json:"aiSkippedCount"`
-	StoppedByBudget   bool            `json:"stoppedByBudget"`
-	FailedItems       []UpdateFailure `json:"failedItems,omitempty"`
-	UpdatedAt         time.Time       `json:"updatedAt"`
+	CandidateCount int             `json:"candidateCount"`
+	SymbolBudget   int             `json:"symbolBudget"`
+	RateLimitMs    int             `json:"rateLimitMs"`
+	ProcessedCount int             `json:"processedCount"`
+	SuccessCount   int             `json:"successCount"`
+	FailedCount    int             `json:"failedCount"`
+	InputChanged   int             `json:"inputChanged"`
+	InputUnchanged int             `json:"inputUnchanged"`
+	AICalledCount  int             `json:"aiCalledCount"`
+	AISkippedCount int             `json:"aiSkippedCount"`
+	FailedItems    []UpdateFailure `json:"failedItems,omitempty"`
+	UpdatedAt      time.Time       `json:"updatedAt"`
 }
 
 type RequestUpdateStockProfile struct {

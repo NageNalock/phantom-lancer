@@ -5,8 +5,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"phantom-lancer/internal/safelog"
 )
 
 const (
@@ -64,29 +62,6 @@ func (s *Service) linkNewsEventWithSnapshot(ctx context.Context, event NewsEvent
 		return nil, err
 	}
 	return candidates, nil
-}
-
-func (s *Service) LinkPendingNewsEventsBatch(ctx context.Context, limit int) (LinkNewsEventsBatchResult, error) {
-	events, err := s.store.ListPendingNewsEvents(ctx, "", limit)
-	if err != nil {
-		return LinkNewsEventsBatchResult{}, err
-	}
-	result := LinkNewsEventsBatchResult{Total: len(events)}
-	for _, event := range events {
-		candidates, err := s.LinkNewsEvent(ctx, event.ID)
-		if err != nil {
-			result.Failed++
-			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: event.ID, Reason: safelog.Text(err.Error(), 240)})
-			continue
-		}
-		result.Candidates += len(candidates)
-		if len(candidates) == 0 {
-			result.NoCandidate++
-		} else {
-			result.Linked++
-		}
-	}
-	return result, nil
 }
 
 func (s *Service) ListNewsLinkCandidates(ctx context.Context, filter NewsLinkCandidateListFilter) ([]NewsLinkCandidate, error) {

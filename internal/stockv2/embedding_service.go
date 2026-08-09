@@ -888,15 +888,6 @@ func (s *Service) collectEmbeddingWorkSources(ctx context.Context, objectTypes [
 	return out, nil
 }
 
-func (s *Service) countMissingEmbeddingSources(ctx context.Context, objectTypes []string, model AgentModelProfile) (int, error) {
-	objectTypes = normalizeEmbeddingObjectTypes(objectTypes)
-	counts, err := s.store.CountMissingEmbeddingSourcesByType(ctx, objectTypes, model.ID)
-	if err != nil {
-		return 0, err
-	}
-	return sumMissingEmbeddingCounts(counts, objectTypes), nil
-}
-
 func sumMissingEmbeddingCounts(counts map[string]int, objectTypes []string) int {
 	total := 0
 	for _, objectType := range normalizeEmbeddingObjectTypes(objectTypes) {
@@ -995,59 +986,6 @@ func (s *Service) listEmbeddingSourcesPage(ctx context.Context, objectType strin
 	default:
 		return nil, nil
 	}
-}
-
-func (s *Service) collectEmbeddingSources(ctx context.Context, objectTypes []string, limit int) ([]embeddingAssetSource, error) {
-	out := make([]embeddingAssetSource, 0)
-	for _, objectType := range objectTypes {
-		switch objectType {
-		case EmbeddingObjectStockProfile:
-			items, err := s.store.ListStockProfiles(ctx, StockProfileListFilter{Limit: limit})
-			if err != nil {
-				return nil, err
-			}
-			for _, item := range items {
-				out = append(out, embeddingAssetSource{ObjectType: objectType, ObjectID: item.Symbol, Text: stockProfileEmbeddingText(item)})
-			}
-		case EmbeddingObjectNewsEvent:
-			items, err := s.store.ListNewsEvents(ctx, NewsEventListFilter{ExcludeCompacted: true, Limit: limit})
-			if err != nil {
-				return nil, err
-			}
-			for _, item := range items {
-				out = append(out, embeddingAssetSource{ObjectType: objectType, ObjectID: item.ID, Text: newsEventEmbeddingText(item)})
-			}
-		case EmbeddingObjectNewsThread:
-			items, err := s.store.ListNewsThreads(ctx, NewsThreadListFilter{Limit: limit})
-			if err != nil {
-				return nil, err
-			}
-			for _, item := range items {
-				if newsThreadEmbeddingIndexable(item) {
-					out = append(out, embeddingAssetSource{ObjectType: objectType, ObjectID: item.ID, Text: NewsThreadEmbeddingText(item)})
-				}
-			}
-		case EmbeddingObjectNewsThreadVersion:
-			items, err := s.store.ListNewsThreadVersions(ctx, NewsThreadVersionListFilter{Limit: limit})
-			if err != nil {
-				return nil, err
-			}
-			for _, item := range items {
-				if newsThreadVersionEmbeddingIndexable(item) {
-					out = append(out, embeddingAssetSource{ObjectType: objectType, ObjectID: item.ID, Text: NewsThreadVersionEmbeddingText(item)})
-				}
-			}
-		case EmbeddingObjectOpportunity:
-			items, err := s.store.ListOpportunities(ctx, OpportunityListFilter{Limit: limit})
-			if err != nil {
-				return nil, err
-			}
-			for _, item := range items {
-				out = append(out, embeddingAssetSource{ObjectType: objectType, ObjectID: item.ID, Text: item.Title + "\n" + item.UserThesis})
-			}
-		}
-	}
-	return out, nil
 }
 
 func stockProfileEmbeddingText(item StockProfile) string {

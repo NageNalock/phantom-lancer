@@ -569,7 +569,6 @@ export function stockV2DailyBarJobTypeLabel(j?: { jobType?: string; mode?: strin
     }
     case "daily_bars_incremental": {
       if (j.mode === "hot") return "热集合增量";
-      if (j.mode === "universe_incremental") return "全市场增量";
       return "增量";
     }
     default: return j.jobType || "日K任务";

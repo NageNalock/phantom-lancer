@@ -45,84 +45,6 @@ func (s *Store) GetDailyBarsStatsBatch(ctx context.Context, symbols []string, ad
 	return s.marketDB.GetDailyBarsStatsBatch(ctx, symbols, adjusted)
 }
 
-// migrateLegacyDailyBars 把早期写在 SQLite 里的日 K 明细迁入 DuckDB。
-// 任务历史/运行中监控仍在 SQLite，因此只迁移 stockv2_daily_bars 明细表。
-func (s *Store) migrateLegacyDailyBars(ctx context.Context) error {
-	exists, err := s.legacyDailyBarsTableExists(ctx)
-	if err != nil || !exists {
-		return err
-	}
-	if s.marketDB == nil {
-		return fmt.Errorf("market data store is not initialized")
-	}
-	legacyCount, err := s.countLegacyDailyBars(ctx)
-	if err != nil || legacyCount == 0 {
-		return err
-	}
-	marketCount, err := s.marketDB.CountDailyBars(ctx)
-	if err != nil {
-		return err
-	}
-	if marketCount >= legacyCount {
-		return nil
-	}
-
-	const batchSize = 1000
-	offset := 0
-	for {
-		bars, err := s.listLegacyDailyBars(ctx, batchSize, offset)
-		if err != nil {
-			return err
-		}
-		if len(bars) == 0 {
-			return nil
-		}
-		if err := s.marketDB.UpsertDailyBars(ctx, bars); err != nil {
-			return err
-		}
-		offset += len(bars)
-	}
-}
-
-func (s *Store) legacyDailyBarsTableExists(ctx context.Context) (bool, error) {
-	var count int
-	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM sqlite_master
-		WHERE type='table' AND name='stockv2_daily_bars'
-	`).Scan(&count)
-	if err != nil {
-		return false, wrapError(err, "check legacy daily bars table")
-	}
-	return count > 0, nil
-}
-
-func (s *Store) countLegacyDailyBars(ctx context.Context) (int, error) {
-	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_daily_bars`).Scan(&count)
-	if err != nil {
-		return 0, wrapError(err, "count legacy daily bars")
-	}
-	return count, nil
-}
-
-func (s *Store) listLegacyDailyBars(ctx context.Context, limit, offset int) ([]StockV2DailyBar, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, symbol, COALESCE(market,''), trade_date,
-		       COALESCE(open,0), COALESCE(high,0), COALESCE(low,0), COALESCE(close,0),
-		       COALESCE(prev_close,0), COALESCE(volume,0), COALESCE(amount,0), COALESCE(pct_change,0),
-		       adjusted, COALESCE(source,''), fetched_at, COALESCE(quality,''), COALESCE(error_message,''),
-		       created_at, updated_at
-		FROM stockv2_daily_bars
-		ORDER BY symbol, adjusted, trade_date
-		LIMIT ? OFFSET ?
-	`, limit, offset)
-	if err != nil {
-		return nil, wrapError(err, "list legacy daily bars")
-	}
-	defer rows.Close()
-	return scanDailyBarsRows(rows)
-}
-
 // ListHoldingSymbols 返回所有持仓的去重 symbol（日 K 热集合用）。
 func (s *Store) ListHoldingSymbols(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -131,16 +53,6 @@ func (s *Store) ListHoldingSymbols(ctx context.Context) ([]string, error) {
 		return nil, wrapError(err, "list holding symbols")
 	}
 	return scanStrings(rows, "scan holding symbol", "iterate holding symbols")
-}
-
-// ListInstrumentSymbols 返回全部活跃主数据 symbol（日 K 全市场增量用）。
-func (s *Store) ListInstrumentSymbols(ctx context.Context) ([]string, error) {
-	rows, err := s.assetDB().QueryContext(ctx,
-		`SELECT symbol FROM stockv2_instruments WHERE status = 'active' ORDER BY symbol`)
-	if err != nil {
-		return nil, wrapError(err, "list instrument symbols")
-	}
-	return scanStrings(rows, "scan instrument symbol", "iterate instrument symbols")
 }
 
 // CreateDailyBarJob 创建日 K 任务记录

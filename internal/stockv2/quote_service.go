@@ -35,17 +35,6 @@ type quoteSymbol struct {
 	EastmoneyID string
 }
 
-func (s *Service) FetchLatestQuotes(ctx context.Context, symbols []string) ([]StockV2QuoteLatest, error) {
-	specs, failures, err := normalizeQuoteSymbols(symbols)
-	if err != nil {
-		return nil, err
-	}
-	if len(failures) > 0 {
-		return nil, fmt.Errorf("%w: %s", ErrInvalidQuoteSymbol, failures[0].Symbol)
-	}
-	return s.fetchLatestQuotesForSpecs(ctx, specs)
-}
-
 func (s *Service) RefreshLatestQuotes(ctx context.Context, symbols []string, triggerSource string) (QuoteRefreshResult, error) {
 	if triggerSource == "" {
 		triggerSource = "system"
@@ -658,14 +647,6 @@ func (s *Service) ListMinuteBars(ctx context.Context, symbol string, days int, l
 		limit = days * 240
 	}
 	return s.store.ListMinuteBars(ctx, symbol, time.Now().AddDate(0, 0, -days), limit)
-}
-
-func (s *Service) fetchLatestQuotesForSpecs(ctx context.Context, specs []quoteSymbol) ([]StockV2QuoteLatest, error) {
-	quotes, failures := s.fetchLatestQuotesForSpecsWithFailures(ctx, specs)
-	if len(failures) > 0 && len(quotes) == 0 {
-		return nil, errors.New(failures[0].Reason)
-	}
-	return quotes, nil
 }
 
 func (s *Service) fetchLatestQuotesForSpecsWithFailures(ctx context.Context, specs []quoteSymbol) ([]StockV2QuoteLatest, []UpdateFailure) {

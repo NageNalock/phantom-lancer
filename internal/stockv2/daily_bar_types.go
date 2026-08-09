@@ -40,11 +40,10 @@ const (
 // 日 K 任务类型与模式
 const (
 	DailyBarJobTypeEnsure      = "daily_bars_ensure"      // 单只按需补拉
-	DailyBarJobTypeIncremental = "daily_bars_incremental" // 批量增量（hot / universe）
+	DailyBarJobTypeIncremental = "daily_bars_incremental" // 持仓批量增量
 
-	DailyBarJobModeSymbol              = "symbol"               // 单只
-	DailyBarJobModeHot                 = "hot"                  // 热集合（本轮 = 持仓）
-	DailyBarJobModeUniverseIncremental = "universe_incremental" // 全市场最近交易日增量
+	DailyBarJobModeSymbol = "symbol" // 单只
+	DailyBarJobModeHot    = "hot"    // 热集合（本轮 = 持仓）
 )
 
 // StockV2DailyBar 单个交易日的日 K 行情
@@ -102,7 +101,7 @@ type DailyBarsEnsureResult struct {
 
 // DailyBarsJobRequest 触发日 K 任务的请求
 type DailyBarsJobRequest struct {
-	Mode          string `json:"mode"`                    // symbol | hot | universe_incremental
+	Mode          string `json:"mode"`                    // symbol | hot
 	Symbol        string `json:"symbol,omitempty"`        // mode=symbol 时必填
 	RangeCode     string `json:"range,omitempty"`         // 默认 1y
 	Adjusted      string `json:"adjusted,omitempty"`      // 默认 none
@@ -114,7 +113,7 @@ type DailyBarsJobRequest struct {
 type StockV2DailyBarJob struct {
 	ID             string          `json:"id"`
 	JobType        string          `json:"jobType"`          // daily_bars_ensure | daily_bars_incremental
-	Mode           string          `json:"mode"`             // symbol | hot | universe_incremental
+	Mode           string          `json:"mode"`             // symbol | hot
 	Symbol         string          `json:"symbol,omitempty"` // mode=symbol 时的标的代码，用于去重与详情轮询
 	Status         string          `json:"status"`           // running | completed | failed | cancelled
 	TotalCount     int             `json:"totalCount"`

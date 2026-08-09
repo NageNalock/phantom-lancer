@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func TestNewsContextReviewQueueCoalescesPendingAndLegacyFailures(t *testing.T) {
+func TestNewsContextReviewQueueCoalescesPendingWindows(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -25,11 +25,10 @@ func TestNewsContextReviewQueueCoalescesPendingAndLegacyFailures(t *testing.T) {
 		Status: NewsContextRunStatusWaitingReview, ReviewStatus: NewsContextReviewPending,
 		WindowStart: now.Add(-4 * time.Hour), WindowEnd: now,
 	})
-	legacyFailure := createNewsContextReviewQueueRun(t, svc, NewsContextRun{
-		ID: "legacy-busy-review", WindowType: NewsContextWindowFourHour,
-		Status: NewsContextRunStatusWaitingReview, ReviewStatus: NewsContextReviewFailed,
+	secondPending := createNewsContextReviewQueueRun(t, svc, NewsContextRun{
+		ID: "second-review-window", WindowType: NewsContextWindowFourHour,
+		Status: NewsContextRunStatusWaitingReview, ReviewStatus: NewsContextReviewPending,
 		WindowStart: now.Add(-8 * time.Hour), WindowEnd: now.Add(-4 * time.Hour),
-		RetryCount: newsContextTimeoutRetryLimit, ErrorMessage: "portfolio sentinel run already running",
 	})
 	configurePortfolioSentinelModelForTest(t, svc)
 
@@ -39,56 +38,24 @@ func TestNewsContextReviewQueueCoalescesPendingAndLegacyFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload pending review: %v", err)
 	}
-	legacyFailure, err = svc.store.GetNewsContextRun(ctx, legacyFailure.ID)
+	secondPending, err = svc.store.GetNewsContextRun(ctx, secondPending.ID)
 	if err != nil {
 		t.Fatalf("reload legacy review: %v", err)
 	}
 	if pending.ReviewStatus != NewsContextReviewRunning || pending.ReviewRunID == "" {
 		t.Fatalf("pending review = %+v", pending)
 	}
-	if legacyFailure.ReviewStatus != NewsContextReviewRunning || legacyFailure.ReviewRunID != pending.ReviewRunID {
-		t.Fatalf("legacy review = %+v, pending review id = %q", legacyFailure, pending.ReviewRunID)
+	if secondPending.ReviewStatus != NewsContextReviewRunning || secondPending.ReviewRunID != pending.ReviewRunID {
+		t.Fatalf("second review = %+v, pending review id = %q", secondPending, pending.ReviewRunID)
 	}
-	if pending.RetryCount != 0 || legacyFailure.RetryCount != 0 {
-		t.Fatalf("fresh consolidated retry counts = %d/%d, want 0/0", pending.RetryCount, legacyFailure.RetryCount)
+	if pending.RetryCount != 0 || secondPending.RetryCount != 0 {
+		t.Fatalf("fresh consolidated retry counts = %d/%d, want 0/0", pending.RetryCount, secondPending.RetryCount)
 	}
 	if err := svc.decorateNewsContextRun(ctx, &pending); err != nil {
 		t.Fatalf("decorate merged review: %v", err)
 	}
 	if pending.ReviewCoverageCount != 2 {
 		t.Fatalf("review coverage count = %d, want 2", pending.ReviewCoverageCount)
-	}
-}
-
-func TestNewsContextReviewQueueRecoversLegacySingleFlightFailureWithoutRetryCharge(t *testing.T) {
-	svc, cleanup := newStrategyTestService(t)
-	defer cleanup()
-	ctx := context.Background()
-	now := time.Now().Truncate(time.Second)
-	cfg := defaultNewsContextConfig()
-	cfg.Enabled = true
-	cfg.HourlyEnabled = false
-	cfg.FourHourEnabled = false
-	cfg.DailyEnabled = false
-	if _, err := svc.store.UpsertNewsContextConfig(ctx, cfg); err != nil {
-		t.Fatalf("save review queue config: %v", err)
-	}
-	run := createNewsContextReviewQueueRun(t, svc, NewsContextRun{
-		ID: "legacy-single-flight-review", WindowType: NewsContextWindowFourHour,
-		Status: NewsContextRunStatusWaitingReview, ReviewStatus: NewsContextReviewFailed,
-		WindowStart: now.Add(-4 * time.Hour), WindowEnd: now,
-		RetryCount: newsContextTimeoutRetryLimit, ErrorMessage: "start portfolio review failed: portfolio sentinel run already running",
-	})
-	configurePortfolioSentinelModelForTest(t, svc)
-
-	svc.reconcileNewsContextReviews(ctx)
-
-	reloaded, err := svc.store.GetNewsContextRun(ctx, run.ID)
-	if err != nil {
-		t.Fatalf("reload recovered legacy review: %v", err)
-	}
-	if reloaded.ReviewStatus != NewsContextReviewRunning || reloaded.ReviewRunID == "" || reloaded.RetryCount != 0 {
-		t.Fatalf("recovered legacy review = %+v", reloaded)
 	}
 }
 

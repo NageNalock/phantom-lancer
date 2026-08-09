@@ -477,7 +477,6 @@ export function StockV2Universe({ actions, data, runAction }: { actions: AppActi
                     <th className="py-2 pr-4 font-medium">日 K 覆盖</th>
                     <th className="py-2 pr-4 font-medium">画像摘要</th>
                     <th className="py-2 pr-4 font-medium">画像状态</th>
-                    <th className="py-2 pr-4 font-medium">状态</th>
                     <th className="py-2 pr-4 font-medium">更新时间</th>
                     <th className="py-2 pr-2 text-right font-medium">操作</th>
                   </tr>
@@ -750,7 +749,6 @@ function StockRow({
   supplementLoading?: boolean;
 }) {
   const marketLabel = { SH: "沪市", SZ: "深市", BJ: "北市" }[inst.market] || inst.market;
-  const statusTone = inst.status === "active" ? "good" : "neutral";
   const profileTone = profile?.status === "ready" ? "good" : profile?.status === "partial" ? "warn" : "neutral";
   const aiTone = profile?.aiProfileStatus === "ready" ? "good" : profile?.aiProfileStatus === "failed" ? "danger" : "neutral";
   const dailyTone = stockV2DailyBarsQualityTone(dailyQuality);
@@ -796,9 +794,6 @@ function StockRow({
           </Pill>
           <Pill tone={profile ? aiTone : "neutral"}>AI {profile?.aiProfileStatus || (supplementLoading ? "读取中" : "missing")}</Pill>
         </div>
-      </td>
-      <td className="py-2 pr-4">
-        <Pill tone={statusTone}>{inst.status === "active" ? "活跃" : inst.status}</Pill>
       </td>
       <td className="py-2 pr-4 text-xs text-[var(--muted)]">
         {formatCompactTime(inst.lastUpdate)}

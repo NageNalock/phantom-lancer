@@ -15,7 +15,7 @@ import (
 // MarketDataStore owns analytical stock market assets in a local DuckDB file.
 // It is embedded like SQLite: no external database server, endpoint, account,
 // or network connection is required. Operational state stays in SQLite; high
-// volume historical bars live here.
+// volume market, profile, and news assets live here.
 type MarketDataStore struct {
 	db   *sql.DB
 	path string
@@ -96,10 +96,6 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 			ON stockv2_daily_bars(symbol, adjusted, trade_date);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_daily_bars_symbol_adjusted_fetched
 			ON stockv2_daily_bars(symbol, adjusted, fetched_at);
-		CREATE TABLE IF NOT EXISTS stockv2_market_schema_migrations (
-			id VARCHAR PRIMARY KEY,
-			applied_at TIMESTAMP NOT NULL
-		);
 		CREATE TABLE IF NOT EXISTS stockv2_daily_bar_quality (
 			symbol VARCHAR NOT NULL,
 			adjusted VARCHAR NOT NULL,
@@ -121,9 +117,6 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 			industry VARCHAR,
 			sector VARCHAR,
 			concepts VARCHAR,
-			list_date VARCHAR,
-			delist_date VARCHAR,
-			status VARCHAR DEFAULT 'active',
 			last_update_at TIMESTAMP,
 			created_at TIMESTAMP NOT NULL,
 			updated_at TIMESTAMP NOT NULL,
@@ -131,95 +124,8 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_symbol ON stockv2_instruments(symbol);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_market ON stockv2_instruments(market);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_status ON stockv2_instruments(status);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_type ON stockv2_instruments(instrument_type);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_instruments_created_at ON stockv2_instruments(created_at);
-
-		CREATE TABLE IF NOT EXISTS stockv2_quotes_latest (
-			symbol VARCHAR PRIMARY KEY,
-			market VARCHAR NOT NULL,
-			name VARCHAR,
-			last_price DOUBLE NOT NULL DEFAULT 0,
-			prev_close DOUBLE NOT NULL DEFAULT 0,
-			open_price DOUBLE NOT NULL DEFAULT 0,
-			high_price DOUBLE NOT NULL DEFAULT 0,
-			low_price DOUBLE NOT NULL DEFAULT 0,
-			volume DOUBLE NOT NULL DEFAULT 0,
-			amount DOUBLE NOT NULL DEFAULT 0,
-			pct_change DOUBLE NOT NULL DEFAULT 0,
-			amplitude DOUBLE NOT NULL DEFAULT 0,
-			turnover_rate DOUBLE NOT NULL DEFAULT 0,
-			volume_ratio DOUBLE NOT NULL DEFAULT 0,
-			main_net_inflow DOUBLE NOT NULL DEFAULT 0,
-			super_net_inflow DOUBLE NOT NULL DEFAULT 0,
-			large_net_inflow DOUBLE NOT NULL DEFAULT 0,
-			medium_net_inflow DOUBLE NOT NULL DEFAULT 0,
-			small_net_inflow DOUBLE NOT NULL DEFAULT 0,
-			main_net_inflow_pct DOUBLE NOT NULL DEFAULT 0,
-			quote_at TIMESTAMP NOT NULL,
-			fetched_at TIMESTAMP NOT NULL,
-			source VARCHAR NOT NULL,
-			status VARCHAR NOT NULL,
-			error_message VARCHAR,
-			created_at TIMESTAMP NOT NULL,
-			updated_at TIMESTAMP NOT NULL
-		);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_market_quotes_latest_status ON stockv2_quotes_latest(status);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_market_quotes_latest_fetched_at ON stockv2_quotes_latest(fetched_at);
-
-		CREATE TABLE IF NOT EXISTS stockv2_quote_snapshots (
-			id VARCHAR PRIMARY KEY,
-			symbol VARCHAR NOT NULL,
-			market VARCHAR,
-			name VARCHAR,
-			last_price DOUBLE NOT NULL DEFAULT 0,
-			prev_close DOUBLE NOT NULL DEFAULT 0,
-			open_price DOUBLE NOT NULL DEFAULT 0,
-			high_price DOUBLE NOT NULL DEFAULT 0,
-			low_price DOUBLE NOT NULL DEFAULT 0,
-			volume DOUBLE NOT NULL DEFAULT 0,
-			amount DOUBLE NOT NULL DEFAULT 0,
-			pct_change DOUBLE NOT NULL DEFAULT 0,
-			amplitude DOUBLE NOT NULL DEFAULT 0,
-			turnover_rate DOUBLE NOT NULL DEFAULT 0,
-			volume_ratio DOUBLE NOT NULL DEFAULT 0,
-			main_net_inflow DOUBLE NOT NULL DEFAULT 0,
-			super_net_inflow DOUBLE NOT NULL DEFAULT 0,
-			large_net_inflow DOUBLE NOT NULL DEFAULT 0,
-			medium_net_inflow DOUBLE NOT NULL DEFAULT 0,
-			small_net_inflow DOUBLE NOT NULL DEFAULT 0,
-			main_net_inflow_pct DOUBLE NOT NULL DEFAULT 0,
-			quote_at TIMESTAMP NOT NULL,
-			collected_at TIMESTAMP NOT NULL,
-			source VARCHAR NOT NULL,
-			status VARCHAR NOT NULL,
-			error_message VARCHAR,
-			created_at TIMESTAMP NOT NULL
-		);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_quote_snapshots_symbol_collected
-			ON stockv2_quote_snapshots(symbol, collected_at);
-
-		CREATE TABLE IF NOT EXISTS stockv2_minute_bars (
-			symbol VARCHAR NOT NULL,
-			market VARCHAR,
-			minute_at TIMESTAMP NOT NULL,
-			open DOUBLE NOT NULL DEFAULT 0,
-			high DOUBLE NOT NULL DEFAULT 0,
-			low DOUBLE NOT NULL DEFAULT 0,
-			close DOUBLE NOT NULL DEFAULT 0,
-			prev_close DOUBLE NOT NULL DEFAULT 0,
-			volume DOUBLE NOT NULL DEFAULT 0,
-			amount DOUBLE NOT NULL DEFAULT 0,
-			pct_change DOUBLE NOT NULL DEFAULT 0,
-			main_net_inflow DOUBLE NOT NULL DEFAULT 0,
-			snapshot_count INTEGER NOT NULL DEFAULT 0,
-			source VARCHAR,
-			created_at TIMESTAMP NOT NULL,
-			updated_at TIMESTAMP NOT NULL,
-			PRIMARY KEY(symbol, minute_at)
-		);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_minute_bars_symbol_minute
-			ON stockv2_minute_bars(symbol, minute_at);
 
 		CREATE TABLE IF NOT EXISTS stockv2_stock_profiles (
 			symbol VARCHAR PRIMARY KEY,
@@ -298,12 +204,23 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 			link_status VARCHAR NOT NULL DEFAULT 'pending',
 			event_at TIMESTAMP NOT NULL,
 			link_processed_at TIMESTAMP,
+			context_status VARCHAR DEFAULT 'pending',
+			context_run_id VARCHAR,
+			context_covered_at TIMESTAMP,
+			compacted_at TIMESTAMP,
+			compacted_bytes BIGINT DEFAULT 0,
+			protected_reason VARCHAR,
+			context_defer_retry_count INTEGER DEFAULT 0,
 			created_at TIMESTAMP NOT NULL,
 			updated_at TIMESTAMP NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_events_raw_news ON stockv2_news_events(raw_news_id);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_events_link_status ON stockv2_news_events(link_status);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_events_event_at ON stockv2_news_events(event_at);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_context_status
+			ON stockv2_news_events(context_status, event_at);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_news_events_context_run
+			ON stockv2_news_events(context_run_id, context_covered_at);
 
 		CREATE TABLE IF NOT EXISTS stockv2_news_link_candidates (
 			id VARCHAR PRIMARY KEY,
@@ -320,6 +237,12 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 			updated_at TIMESTAMP NOT NULL,
 			UNIQUE(news_event_id, symbol)
 		);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_event
+			ON stockv2_news_link_candidates(news_event_id);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_raw_news
+			ON stockv2_news_link_candidates(raw_news_id);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_symbol
+			ON stockv2_news_link_candidates(symbol);
 		CREATE TABLE IF NOT EXISTS stockv2_embedding_vectors_v2 (
 			vector_ref VARCHAR PRIMARY KEY,
 			vector_blob BLOB NOT NULL,
@@ -334,178 +257,6 @@ func (s *MarketDataStore) init(ctx context.Context) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("init duckdb daily bars schema: %w", err)
-	}
-	if err := s.migrateDailyBarLogicalQuality(ctx); err != nil {
-		return err
-	}
-	if err := s.migrateRetiredNewsStrategyMonitor(ctx); err != nil {
-		return err
-	}
-	for _, stmt := range []string{
-		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS amplitude DOUBLE DEFAULT 0`,
-		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS turnover_rate DOUBLE DEFAULT 0`,
-		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS volume_ratio DOUBLE DEFAULT 0`,
-		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS main_net_inflow DOUBLE DEFAULT 0`,
-		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS super_net_inflow DOUBLE DEFAULT 0`,
-		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS large_net_inflow DOUBLE DEFAULT 0`,
-		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS medium_net_inflow DOUBLE DEFAULT 0`,
-		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS small_net_inflow DOUBLE DEFAULT 0`,
-		`ALTER TABLE stockv2_quotes_latest ADD COLUMN IF NOT EXISTS main_net_inflow_pct DOUBLE DEFAULT 0`,
-	} {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("migrate duckdb latest quote columns: %w", err)
-		}
-	}
-	return nil
-}
-
-const retiredNewsStrategyMonitorMarketMigration = "retired-news-strategy-monitor-v1"
-
-func (s *MarketDataStore) migrateRetiredNewsStrategyMonitor(ctx context.Context) error {
-	var applied int
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM stockv2_market_schema_migrations WHERE id = ?
-	`, retiredNewsStrategyMonitorMarketMigration).Scan(&applied); err != nil {
-		return wrapError(err, "check retired news monitor market migration")
-	}
-	if applied > 0 {
-		return s.ensureNewsLinkCandidateIndexes(ctx)
-	}
-	// DuckDB keeps table-index dependencies visible until the DDL transaction
-	// commits, so retire all candidate indexes before dropping the old columns.
-	for _, index := range []string{
-		"idx_stockv2_market_news_link_candidates_monitor_status",
-		"idx_stockv2_news_link_candidates_monitor_status",
-		"idx_stockv2_market_news_link_candidates_event",
-		"idx_stockv2_market_news_link_candidates_raw_news",
-		"idx_stockv2_market_news_link_candidates_symbol",
-	} {
-		if _, err := s.db.ExecContext(ctx, "DROP INDEX IF EXISTS "+index); err != nil {
-			return wrapError(err, "drop retired news monitor market index")
-		}
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return wrapError(err, "begin retired news monitor market migration")
-	}
-	defer func() { _ = tx.Rollback() }()
-	for _, column := range []string{"monitor_status", "monitor_hit_id", "monitored_at"} {
-		var count int
-		if err := tx.QueryRowContext(ctx, `
-			SELECT COUNT(*) FROM information_schema.columns
-			WHERE table_name='stockv2_news_link_candidates' AND column_name=?
-		`, column).Scan(&count); err != nil {
-			return wrapError(err, "check retired news monitor market column")
-		}
-		if count == 0 {
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, "ALTER TABLE stockv2_news_link_candidates DROP COLUMN "+column); err != nil {
-			return wrapError(err, "drop retired news monitor market column")
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO stockv2_market_schema_migrations (id, applied_at) VALUES (?, ?)
-	`, retiredNewsStrategyMonitorMarketMigration, time.Now()); err != nil {
-		return wrapError(err, "record retired news monitor market migration")
-	}
-	if err := tx.Commit(); err != nil {
-		return wrapError(err, "commit retired news monitor market migration")
-	}
-	return s.ensureNewsLinkCandidateIndexes(ctx)
-}
-
-func (s *MarketDataStore) ensureNewsLinkCandidateIndexes(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `
-		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_event
-			ON stockv2_news_link_candidates(news_event_id);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_raw_news
-			ON stockv2_news_link_candidates(raw_news_id);
-		CREATE INDEX IF NOT EXISTS idx_stockv2_market_news_link_candidates_symbol
-			ON stockv2_news_link_candidates(symbol);
-	`)
-	return wrapError(err, "ensure news link candidate indexes")
-}
-
-const dailyBarLogicalQualityMigration = "daily-bar-logical-quality-v1"
-
-func (s *MarketDataStore) migrateDailyBarLogicalQuality(ctx context.Context) error {
-	var applied int
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM stockv2_market_schema_migrations WHERE id = ?
-	`, dailyBarLogicalQualityMigration).Scan(&applied); err != nil {
-		return wrapError(err, "check duckdb daily bar logical quality migration")
-	}
-	if applied > 0 {
-		return nil
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return wrapError(err, "begin duckdb daily bar logical quality migration")
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM stockv2_daily_bar_quality`); err != nil {
-		return wrapError(err, "clear duckdb daily bar quality")
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO stockv2_daily_bar_quality (
-			symbol, adjusted, row_count, earliest_date, latest_date, source, last_error, updated_at
-		)
-		WITH selected AS (
-			SELECT * EXCLUDE (rn)
-			FROM (
-				SELECT *, ROW_NUMBER() OVER (
-					PARTITION BY symbol, adjusted, trade_date
-					ORDER BY
-						CASE WHEN open > 0 AND high >= greatest(open, close, low)
-							AND low <= least(open, close, high) AND close > 0 AND volume > 0
-							THEN 0 ELSE 1 END,
-						CASE WHEN amount > 0 THEN 0 ELSE 1 END,
-						fetched_at DESC NULLS LAST,
-						updated_at DESC,
-						source ASC
-				) AS rn
-				FROM stockv2_daily_bars
-			)
-			WHERE rn = 1
-		), latest_source AS (
-			SELECT symbol, adjusted, source
-			FROM (
-				SELECT symbol, adjusted, source, ROW_NUMBER() OVER (
-					PARTITION BY symbol, adjusted ORDER BY trade_date DESC, fetched_at DESC NULLS LAST
-				) AS rn
-				FROM selected
-			)
-			WHERE rn = 1
-		), latest_error AS (
-			SELECT symbol, adjusted, error_message
-			FROM (
-				SELECT symbol, adjusted, error_message, ROW_NUMBER() OVER (
-					PARTITION BY symbol, adjusted ORDER BY fetched_at DESC NULLS LAST, updated_at DESC
-				) AS rn
-				FROM stockv2_daily_bars
-				WHERE COALESCE(error_message, '') != ''
-			)
-			WHERE rn = 1
-		)
-		SELECT s.symbol, s.adjusted, COUNT(*),
-			COALESCE(strftime(MIN(s.trade_date), '%Y-%m-%d'), ''),
-			COALESCE(strftime(MAX(s.trade_date), '%Y-%m-%d'), ''),
-			COALESCE(ls.source, ''), COALESCE(le.error_message, ''), ?
-		FROM selected s
-		LEFT JOIN latest_source ls ON ls.symbol = s.symbol AND ls.adjusted = s.adjusted
-		LEFT JOIN latest_error le ON le.symbol = s.symbol AND le.adjusted = s.adjusted
-		GROUP BY s.symbol, s.adjusted, ls.source, le.error_message
-	`, time.Now()); err != nil {
-		return wrapError(err, "rebuild duckdb daily bar logical quality")
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO stockv2_market_schema_migrations (id, applied_at) VALUES (?, ?)
-	`, dailyBarLogicalQualityMigration, time.Now()); err != nil {
-		return wrapError(err, "record duckdb daily bar logical quality migration")
-	}
-	if err := tx.Commit(); err != nil {
-		return wrapError(err, "commit duckdb daily bar logical quality migration")
 	}
 	return nil
 }
@@ -756,17 +507,6 @@ func (s *MarketDataStore) GetDailyBarsStatsBatch(ctx context.Context, symbols []
 		return nil, wrapError(err, "iterate daily bars stats batch")
 	}
 	return out, nil
-}
-
-func (s *MarketDataStore) CountDailyBars(ctx context.Context) (int, error) {
-	if s == nil || s.db == nil {
-		return 0, nil
-	}
-	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_daily_bars`).Scan(&count); err != nil {
-		return 0, wrapError(err, "count duckdb daily bars")
-	}
-	return count, nil
 }
 
 func scanDailyBarsRows(rows *sql.Rows) ([]StockV2DailyBar, error) {

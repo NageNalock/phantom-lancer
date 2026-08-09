@@ -119,7 +119,7 @@ func TestNewServiceMarksInterruptedScheduledTasksFailed(t *testing.T) {
 	if err := store.CreateDailyBarJob(ctx, StockV2DailyBarJob{
 		ID:            "daily-interrupted",
 		JobType:       DailyBarJobTypeIncremental,
-		Mode:          DailyBarJobModeUniverseIncremental,
+		Mode:          DailyBarJobModeHot,
 		Status:        "running",
 		TriggerType:   MonitorTriggerScheduled,
 		TriggerSource: "test",
@@ -307,7 +307,6 @@ func TestUniverseMaintenanceFreshSkipRequiresReadyDailyBars(t *testing.T) {
 		Market:         "SZ",
 		InstrumentType: InstrumentTypeStock,
 		Name:           "平安银行",
-		Status:         "active",
 	}); err != nil {
 		t.Fatalf("upsert fresh instrument: %v", err)
 	}
@@ -333,7 +332,6 @@ func TestUniverseMaintenanceFreshSkipRequiresReadyDailyBars(t *testing.T) {
 		Market:         "SZ",
 		InstrumentType: InstrumentTypeStock,
 		Name:           "万科A",
-		Status:         "active",
 	}); err != nil {
 		t.Fatalf("upsert missing bars instrument: %v", err)
 	}

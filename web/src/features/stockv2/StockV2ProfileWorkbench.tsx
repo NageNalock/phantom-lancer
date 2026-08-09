@@ -14,7 +14,6 @@ function profileSettingsForm(settings: StockV2Settings): Partial<StockV2Settings
     baseProfileAutoMaintainEnabled: settings.baseProfileAutoMaintainEnabled,
     baseProfileMaintainIntervalSeconds: settings.baseProfileMaintainIntervalSeconds,
     baseProfileDeepUpdateBatchSize: settings.baseProfileDeepUpdateBatchSize,
-    baseProfileDeepUpdateAiBudget: settings.baseProfileDeepUpdateAiBudget,
     baseProfileDeepUpdateRateLimitMs: settings.baseProfileDeepUpdateRateLimitMs,
   };
 }
@@ -52,7 +51,6 @@ export function StockV2ProfileSettings({
           baseProfileAutoMaintainEnabled: !!form.baseProfileAutoMaintainEnabled,
           baseProfileMaintainIntervalSeconds: Number(form.baseProfileMaintainIntervalSeconds ?? 86400),
           baseProfileDeepUpdateBatchSize: Number(form.baseProfileDeepUpdateBatchSize ?? 12),
-          baseProfileDeepUpdateAiBudget: Number(form.baseProfileDeepUpdateAiBudget ?? 2),
           baseProfileDeepUpdateRateLimitMs: Number(form.baseProfileDeepUpdateRateLimitMs ?? 1500),
         },
       });
@@ -72,7 +70,7 @@ export function StockV2ProfileSettings({
   return (
     <Panel
       title="画像配置"
-      subtitle="后台按队列、单标的 AI 轮数和限速更新基础输入；输入变化时才启动画像 AI"
+      subtitle="后台按队列和限速更新基础输入；输入变化时才启动画像 AI"
       actions={
         <div className="flex gap-2">
           <Button
@@ -114,7 +112,7 @@ export function StockV2ProfileSettings({
           />
         </Field>
 
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           <Field label="每轮标的数" help="每次自动维护最多处理多少只标的。">
             <input
               min={1}
@@ -123,16 +121,6 @@ export function StockV2ProfileSettings({
               type="number"
               value={form.baseProfileDeepUpdateBatchSize ?? 12}
               onChange={(e) => update("baseProfileDeepUpdateBatchSize", Number(e.target.value))}
-            />
-          </Field>
-          <Field label="每标的 AI 轮数" help="每只标的在一次自动维护中最多允许几轮画像 AI；不会截断整轮队列。">
-            <input
-              min={1}
-              max={10}
-              step={1}
-              type="number"
-              value={form.baseProfileDeepUpdateAiBudget ?? 2}
-              onChange={(e) => update("baseProfileDeepUpdateAiBudget", Number(e.target.value))}
             />
           </Field>
           <Field label="单只间隔 (ms)" help="候选之间的基础等待时间，后台会再做稳定打散。">
@@ -158,7 +146,7 @@ export function StockV2ProfileSettings({
             <span>上次：{formatTime(settings.baseProfileLastMaintainAt)}</span>
             <span>下次：{formatTime(settings.baseProfileNextMaintainAt)}</span>
             <span>
-              队列：每轮 {form.baseProfileDeepUpdateBatchSize ?? 12} 只，每标的 AI {form.baseProfileDeepUpdateAiBudget ?? 2} 轮，间隔 {form.baseProfileDeepUpdateRateLimitMs ?? 1500}ms
+              队列：每轮 {form.baseProfileDeepUpdateBatchSize ?? 12} 只，间隔 {form.baseProfileDeepUpdateRateLimitMs ?? 1500}ms
             </span>
             {settings.baseProfileLastMaintainResult ? <span className="break-words">最近结果：{settings.baseProfileLastMaintainResult}</span> : null}
           </div>

@@ -79,7 +79,7 @@ func (p *agentTaskPool) mcpSearchInstruments(args json.RawMessage) (any, *mcpErr
 		out = append(out, map[string]any{
 			"symbol": item.Symbol, "market": item.Market, "instrumentType": item.InstrumentType,
 			"name": item.Name, "industry": item.Industry, "sector": item.Sector,
-			"concepts": item.Concepts, "status": item.Status,
+			"concepts": item.Concepts,
 		})
 	}
 	return mcpJSONContent(map[string]any{"items": out, "count": len(out)})

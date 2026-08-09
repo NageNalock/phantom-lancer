@@ -28,38 +28,6 @@ func TestDailyBarsNeedsMaintenance(t *testing.T) {
 	}
 }
 
-func TestRecordDailyBarsLastRunUsesPersistedSettingsAsBase(t *testing.T) {
-	svc, cleanup := newStrategyTestService(t)
-	defer cleanup()
-	ctx := context.Background()
-	if err := svc.Initialize(ctx); err != nil {
-		t.Fatalf("initialize: %v", err)
-	}
-
-	settings := svc.settings
-	settings.AutoUpdateEnabled = true
-	settings.UpdateIntervalSec = 7200
-	settings.BaseProfileAutoMaintainEnabled = true
-	if err := svc.store.CreateOrUpdateSettings(ctx, settings); err != nil {
-		t.Fatalf("save persisted settings: %v", err)
-	}
-	svc.settings = StockV2Settings{ID: "1", UpdateIntervalSec: 3600}
-
-	when := time.Now().Add(-time.Minute).Truncate(time.Second)
-	svc.recordDailyBarsLastRun(ctx, when)
-
-	got, err := svc.GetSettings(ctx)
-	if err != nil {
-		t.Fatalf("get settings: %v", err)
-	}
-	if got.DailyBarsLastRun.IsZero() || !got.DailyBarsLastRun.Equal(when) {
-		t.Fatalf("DailyBarsLastRun = %v, want %v", got.DailyBarsLastRun, when)
-	}
-	if !got.AutoUpdateEnabled || got.UpdateIntervalSec != 7200 || !got.BaseProfileAutoMaintainEnabled {
-		t.Fatalf("unrelated persisted settings were overwritten: %+v", got)
-	}
-}
-
 func TestGetDailyBarsQualityBatchReturnsDataAndJobErrors(t *testing.T) {
 	ctx := context.Background()
 	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))
