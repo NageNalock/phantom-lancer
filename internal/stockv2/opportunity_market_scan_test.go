@@ -52,7 +52,7 @@ func TestOpportunityMarketScanMetricsAndCoverage(t *testing.T) {
 				ID: generateID(), Symbol: symbol, Market: market,
 				TradeDate: start.AddDate(0, 0, i).Format("2006-01-02"),
 				Open:      closePrice - .02, High: closePrice + .1, Low: closePrice - .1, Close: closePrice,
-				PrevClose: closePrice - .05, Volume: 1000 + float64(i), Amount: 1_000_000 + float64(i)*1000,
+				PrevClose: closePrice - .05, Volume: 1000 + float64(i), Amount: 0,
 				PctChange: .4, Adjusted: DailyBarAdjustedNone, Source: "unit_test", FetchedAt: time.Now(), Quality: DailyBarQualityOK,
 			})
 		}
@@ -71,6 +71,24 @@ func TestOpportunityMarketScanMetricsAndCoverage(t *testing.T) {
 	scored := scoreOpportunityMarketScanMetrics(raw)
 	if len(scored) != 2 || !isOpportunityMainBoardInstrument(scored[0].Instrument) || math.IsNaN(scored[0].PrefilterScore) {
 		t.Fatalf("scored=%+v, want two finite main-board candidates", scored)
+	}
+	if scored[0].MedianAmount20 <= 0 {
+		t.Fatalf("median amount proxy=%v, want positive value for amount-less Tencent bars", scored[0].MedianAmount20)
+	}
+}
+
+func TestApplyOpportunityQFQMetricsEstimatesAmountWhenMissing(t *testing.T) {
+	bars := make([]StockV2DailyBar, 65)
+	for i := range bars {
+		bars[i] = StockV2DailyBar{
+			TradeDate: time.Date(2026, 1, 1+i, 0, 0, 0, 0, time.Local).Format("2006-01-02"),
+			Close:     10 + float64(i)/100, Volume: 1000 + float64(i),
+		}
+	}
+	var metrics OpportunityMarketScanMetrics
+	applyOpportunityQFQMetrics(&metrics, bars)
+	if !metrics.QFQAvailable || metrics.MedianAmount20 <= 0 {
+		t.Fatalf("metrics=%+v, want QFQ data with positive amount proxy", metrics)
 	}
 }
 

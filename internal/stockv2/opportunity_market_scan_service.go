@@ -231,6 +231,10 @@ func (s *Service) prepareOpportunityMarketScan(ctx context.Context, runID string
 		return
 	}
 	scored := scoreOpportunityMarketScanMetrics(raw)
+	if len(scored) == 0 {
+		s.failOpportunityMarketScan(ctx, run, errors.New("no candidates passed local prefilter"), false)
+		return
+	}
 	if len(scored) > opportunityMarketScanLocalLimit {
 		scored = scored[:opportunityMarketScanLocalLimit]
 	}
@@ -449,7 +453,7 @@ func applyOpportunityQFQMetrics(metrics *OpportunityMarketScanMetrics, bars []St
 			ma20 += bars[i].Close
 			vol20 += bars[i].Volume
 			mean += bars[i].PctChange
-			amounts = append(amounts, bars[i].Amount)
+			amounts = append(amounts, opportunityDailyBarAmount(bars[i]))
 			allVolume += bars[i].Volume
 			if bars[i].PctChange > 0 {
 				upVolume += bars[i].Volume
@@ -469,6 +473,20 @@ func applyOpportunityQFQMetrics(metrics *OpportunityMarketScanMetrics, bars []St
 	metrics.MA20GapPct, metrics.MA60GapPct = pctReturn(bars[last].Close, ma20), pctReturn(bars[last].Close, ma60)
 	metrics.VolumeRatio5To20, metrics.UpVolumeShare20 = safeRatio(vol5/5, vol20/20), safeRatio(upVolume, allVolume)
 	metrics.Volatility20, metrics.MedianAmount20 = math.Sqrt(variance/19), amounts[len(amounts)/2]
+}
+
+func opportunityDailyBarAmount(bar StockV2DailyBar) float64 {
+	if bar.Amount > 0 {
+		return bar.Amount
+	}
+	if bar.Close <= 0 || bar.Volume <= 0 {
+		return 0
+	}
+	// ponytail: the current Tencent K-line source reports volume in hands and no
+	// amount. This local estimate preserves liquidity ranking without another
+	// full-market provider request; add an explicit volume-unit field if a second
+	// amount-less source with different units is introduced.
+	return bar.Close * bar.Volume * 100
 }
 
 type opportunityFundFlowPoint struct{ MainNet, MainRatio float64 }

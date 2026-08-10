@@ -60,7 +60,9 @@ func (s *MarketDataStore) LoadOpportunityMarketScanCoverage(ctx context.Context)
 
 // LoadOpportunityMarketScanMetrics performs one bounded DuckDB pass instead of
 // issuing thousands of per-symbol reads. Duplicate source rows are resolved by
-// the same quality ordering used by GetDailyBars.
+// the same quality ordering used by GetDailyBars. Tencent daily bars expose
+// volume in hands but no amount, so close*volume*100 is the bounded liquidity
+// proxy when a source does not provide actual turnover amount.
 func (s *MarketDataStore) LoadOpportunityMarketScanMetrics(ctx context.Context) ([]opportunityMarketScanRawMetric, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("market data store is not initialized")
@@ -94,7 +96,9 @@ func (s *MarketDataStore) LoadOpportunityMarketScanMetrics(ctx context.Context) 
 				SUM(CASE WHEN rn<=20 AND pct_change>0 THEN volume ELSE 0 END) /
 					NULLIF(SUM(CASE WHEN rn<=20 THEN volume ELSE 0 END),0) up_volume_share_20,
 				STDDEV_SAMP(pct_change) FILTER (WHERE rn<=20) volatility_20,
-				MEDIAN(amount) FILTER (WHERE rn<=20) median_amount_20,
+				MEDIAN(CASE WHEN amount>0 THEN amount
+					WHEN close>0 AND volume>0 THEN close*volume*100
+					ELSE NULL END) FILTER (WHERE rn<=20) median_amount_20,
 				MAX(close) FILTER (WHERE rn<=120) max_close_120
 			FROM ranked WHERE rn<=120 GROUP BY symbol
 		)
