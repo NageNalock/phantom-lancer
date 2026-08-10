@@ -389,7 +389,14 @@ opportunity_discovery
   "schema_version": "opportunity-discovery-report/v1",
   "opportunity_id": "opp_xxx",
   "summary": "本次机会发现摘要",
-  "theme_chain": ["主题链条 1", "主题链条 2"],
+  "theme_chain": [
+    {
+      "layer": "上游稀缺供给",
+      "rank": 1,
+      "representatives": ["600000"],
+      "scarcity": "产能扩张周期长，供给弹性有限"
+    }
+  ],
   "candidates": [
     {
       "symbol": "300000",

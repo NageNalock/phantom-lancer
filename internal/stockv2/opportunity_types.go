@@ -1,7 +1,9 @@
 package stockv2
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -340,13 +342,42 @@ type OpportunityDiscoveryReport struct {
 	SchemaVersion         string                                `json:"schema_version"`
 	OpportunityID         string                                `json:"opportunity_id"`
 	Summary               string                                `json:"summary"`
-	ThemeChain            []string                              `json:"theme_chain,omitempty"`
+	ThemeChain            []OpportunityDiscoveryThemeChainItem  `json:"theme_chain,omitempty"`
 	Candidates            []OpportunityDiscoveryReportCandidate `json:"candidates"`
 	Excluded              []OpportunityDiscoveryReportExclusion `json:"excluded,omitempty"`
 	DataQualityNotes      []string                              `json:"data_quality_notes,omitempty"`
 	ExternalSources       []map[string]any                      `json:"external_sources,omitempty"`
 	Conclusion            string                                `json:"conclusion,omitempty"`
 	RecommendedNextAction string                                `json:"recommended_next_action,omitempty"`
+}
+
+type OpportunityDiscoveryThemeChainItem struct {
+	Layer           string   `json:"layer"`
+	Rank            int      `json:"rank,omitempty"`
+	Representatives []string `json:"representatives,omitempty"`
+	Scarcity        string   `json:"scarcity,omitempty"`
+}
+
+func (i *OpportunityDiscoveryThemeChainItem) UnmarshalJSON(data []byte) error {
+	var layer string
+	if err := json.Unmarshal(data, &layer); err == nil {
+		if strings.TrimSpace(layer) == "" {
+			return errors.New("theme chain layer is required")
+		}
+		*i = OpportunityDiscoveryThemeChainItem{Layer: strings.TrimSpace(layer)}
+		return nil
+	}
+	type themeChainItem OpportunityDiscoveryThemeChainItem
+	var item themeChainItem
+	if err := json.Unmarshal(data, &item); err != nil {
+		return err
+	}
+	item.Layer = strings.TrimSpace(item.Layer)
+	if item.Layer == "" {
+		return errors.New("theme chain layer is required")
+	}
+	*i = OpportunityDiscoveryThemeChainItem(item)
+	return nil
 }
 
 type OpportunityDiscoveryReportCandidate struct {

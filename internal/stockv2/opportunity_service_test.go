@@ -2,10 +2,31 @@ package stockv2
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 )
+
+func TestOpportunityDiscoveryThemeChainAcceptsStructuredAndLegacyItems(t *testing.T) {
+	for _, raw := range []string{
+		`{"theme_chain":[{"layer":"上游稀缺供给","rank":1,"representatives":["600000"],"scarcity":"扩产周期长"}]}`,
+		`{"theme_chain":["上游稀缺供给"]}`,
+	} {
+		var report OpportunityDiscoveryReport
+		if err := json.Unmarshal([]byte(raw), &report); err != nil {
+			t.Fatalf("decode theme chain %s: %v", raw, err)
+		}
+		if len(report.ThemeChain) != 1 || report.ThemeChain[0].Layer != "上游稀缺供给" {
+			t.Fatalf("theme chain=%+v, want one normalized item", report.ThemeChain)
+		}
+	}
+
+	var report OpportunityDiscoveryReport
+	if err := json.Unmarshal([]byte(`{"theme_chain":[{"rank":1}]}`), &report); err == nil {
+		t.Fatal("theme chain without layer should fail")
+	}
+}
 
 func TestOpportunityServiceSubmitResultValidatesCandidatesAndStrategyEntry(t *testing.T) {
 	store := newTestStore(t)

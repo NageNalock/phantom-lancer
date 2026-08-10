@@ -692,7 +692,7 @@ func (s *Service) ProcessOpportunityDiscoverySubmittedResult(ctx context.Context
 
 func (s *Service) opportunityDiscoveryReportFromResult(ctx context.Context, run OpportunityDiscoveryRun, raw map[string]any) (OpportunityDiscoveryReport, map[string]any, error) {
 	if len(raw) == 0 {
-		return OpportunityDiscoveryReport{}, nil, ErrInvalidOpportunityResult
+		return OpportunityDiscoveryReport{}, nil, invalidOpportunityResult("empty result")
 	}
 	if opportunityResultHasForbiddenAction(raw) {
 		return OpportunityDiscoveryReport{}, nil, ErrOpportunityUnsafeResult
@@ -703,12 +703,17 @@ func (s *Service) opportunityDiscoveryReportFromResult(ctx context.Context, run 
 	}
 	var report OpportunityDiscoveryReport
 	if err := json.Unmarshal(payload, &report); err != nil {
-		return OpportunityDiscoveryReport{}, nil, ErrInvalidOpportunityResult
+		return OpportunityDiscoveryReport{}, nil, invalidOpportunityResult("schema decode failed")
 	}
 	if strings.TrimSpace(report.SchemaVersion) != OpportunityDiscoveryReportSchemaVersion ||
 		strings.TrimSpace(report.OpportunityID) != run.OpportunityID ||
 		strings.TrimSpace(report.Summary) == "" {
-		return OpportunityDiscoveryReport{}, nil, ErrInvalidOpportunityResult
+		return OpportunityDiscoveryReport{}, nil, invalidOpportunityResult("required report fields do not match the run")
+	}
+	for _, item := range report.ThemeChain {
+		if strings.TrimSpace(item.Layer) == "" || item.Rank < 0 {
+			return OpportunityDiscoveryReport{}, nil, invalidOpportunityResult("invalid theme chain item")
+		}
 	}
 	allowedMarketScanSymbols := map[string]struct{}{}
 	marketScanBounded := false
@@ -726,7 +731,7 @@ func (s *Service) opportunityDiscoveryReportFromResult(ctx context.Context, run 
 			allowedMarketScanSymbols[item.Symbol] = struct{}{}
 		}
 		if len(allowedMarketScanSymbols) == 0 || len(report.Candidates) > opportunityMarketScanFinalLimit {
-			return OpportunityDiscoveryReport{}, nil, ErrInvalidOpportunityResult
+			return OpportunityDiscoveryReport{}, nil, invalidOpportunityResult("bounded candidate set is empty or final candidate limit exceeded")
 		}
 	} else if !errors.Is(scanErr, ErrOpportunityMarketScanRunNotFound) {
 		return OpportunityDiscoveryReport{}, nil, scanErr
@@ -737,11 +742,11 @@ func (s *Service) opportunityDiscoveryReportFromResult(ctx context.Context, run 
 			!score0To100(candidate.EvidenceScore) ||
 			!score0To100(candidate.MarketRiskScore) ||
 			candidate.Confidence < 0 || candidate.Confidence > 1 {
-			return OpportunityDiscoveryReport{}, nil, ErrInvalidOpportunityResult
+			return OpportunityDiscoveryReport{}, nil, invalidOpportunityResult("invalid candidate fields or scores")
 		}
 		if marketScanBounded {
 			if _, ok := allowedMarketScanSymbols[strings.TrimSpace(candidate.Symbol)]; !ok {
-				return OpportunityDiscoveryReport{}, nil, ErrInvalidOpportunityResult
+				return OpportunityDiscoveryReport{}, nil, invalidOpportunityResult("candidate is outside the bounded research set")
 			}
 		}
 		if _, err := s.store.GetInstrument(ctx, strings.TrimSpace(candidate.Symbol)); err != nil {
@@ -752,9 +757,13 @@ func (s *Service) opportunityDiscoveryReportFromResult(ctx context.Context, run 
 		}
 	}
 	if err := validateSemanticRecallTrace(raw); err != nil {
-		return OpportunityDiscoveryReport{}, nil, err
+		return OpportunityDiscoveryReport{}, nil, invalidOpportunityResult("semantic recall trace is incomplete")
 	}
 	return report, raw, nil
+}
+
+func invalidOpportunityResult(reason string) error {
+	return fmt.Errorf("%w: %s", ErrInvalidOpportunityResult, reason)
 }
 
 func opportunityResultHasForbiddenAction(value any) bool {
