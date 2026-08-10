@@ -116,3 +116,27 @@ func TestVerifyLocalCodexThreadIsolation(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalCodexCapabilitySetEmpty(t *testing.T) {
+	tests := []struct {
+		raw       string
+		wantEmpty bool
+		wantError bool
+	}{
+		{raw: `null`, wantEmpty: true},
+		{raw: `[]`, wantEmpty: true},
+		{raw: `{}`, wantEmpty: true},
+		{raw: `[{"name":"search"}]`},
+		{raw: `{"search":{"enabled":true}}`},
+		{raw: `"unexpected"`, wantError: true},
+	}
+	for _, tt := range tests {
+		empty, err := localCodexCapabilitySetEmpty(json.RawMessage(tt.raw))
+		if (err != nil) != tt.wantError {
+			t.Fatalf("raw %s: expected error=%v, got %v", tt.raw, tt.wantError, err)
+		}
+		if !tt.wantError && empty != tt.wantEmpty {
+			t.Fatalf("raw %s: expected empty=%v, got %v", tt.raw, tt.wantEmpty, empty)
+		}
+	}
+}

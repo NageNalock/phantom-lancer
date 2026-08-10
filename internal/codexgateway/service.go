@@ -304,7 +304,7 @@ func verifyLocalCodexMCPIsolation(ctx context.Context, client *codexclient.AppSe
 		}
 		var page struct {
 			Data []struct {
-				Tools []json.RawMessage `json:"tools"`
+				Tools json.RawMessage `json:"tools"`
 			} `json:"data"`
 			NextCursor *string `json:"nextCursor"`
 		}
@@ -312,7 +312,11 @@ func verifyLocalCodexMCPIsolation(ctx context.Context, client *codexclient.AppSe
 			return fmt.Errorf("decode MCP isolation state: %w", err)
 		}
 		for _, server := range page.Data {
-			if len(server.Tools) > 0 {
+			empty, err := localCodexCapabilitySetEmpty(server.Tools)
+			if err != nil {
+				return fmt.Errorf("decode MCP tool inventory: %w", err)
+			}
+			if !empty {
 				return errors.New("local Codex exposed MCP or App tools to a Gateway request")
 			}
 		}
@@ -324,6 +328,25 @@ func verifyLocalCodexMCPIsolation(ctx context.Context, client *codexclient.AppSe
 			return errors.New("local Codex MCP isolation pagination did not advance")
 		}
 		cursor = next
+	}
+}
+
+func localCodexCapabilitySetEmpty(raw json.RawMessage) (bool, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return true, nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false, err
+	}
+	switch typed := value.(type) {
+	case []any:
+		return len(typed) == 0, nil
+	case map[string]any:
+		return len(typed) == 0, nil
+	default:
+		return false, fmt.Errorf("unexpected inventory type %T", value)
 	}
 }
 
