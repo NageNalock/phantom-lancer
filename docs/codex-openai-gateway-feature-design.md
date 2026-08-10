@@ -19,7 +19,7 @@ Reading this as: 个人服务器控制台里的 Codex API gateway，面向单 ow
 2026-07-20 增补两种兼容上游：
 
 - `accounts`：保持原有导入 OAuth 账号、转发 ChatGPT Responses 后端的路径。
-- `local_codex`：每个公开 API 请求启动临时 Codex app-server 会话，使用当前机器的 Coding Plan 登录态。执行固定为单并发、临时 thread、只读 sandbox、无环境、无审批；任何服务端审批请求一律拒绝。
+- `local_codex`：每个公开 API 请求启动临时 Codex app-server 会话，使用当前机器的 Coding Plan 登录态。执行固定为单并发、临时 thread、无审批；thread 级配置禁用本机 Apps、MCP、skills、hooks、搜索和多 Agent，权限 profile 默认拒绝根文件系统读取且仅保留运行时最小路径与固定空工作目录的只读访问。开始 turn 前必须确认权限 profile 生效、未加载 workspace instructions 且 MCP/App 工具数为零，否则请求失败关闭；任何服务端审批请求一律拒绝。该隔离不写入 owner 的 Codex 全局配置，也不影响正常 Codex CLI 会话。
 
 Chat Completions 的 functions/tools 在本地模式下通过 `outputSchema` 约束成 OpenAI `tool_calls`，Gateway 不替客户端执行工具。公开 API key、请求日志与模型字段保持原协议兼容。
 

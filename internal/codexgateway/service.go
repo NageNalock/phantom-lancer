@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -95,27 +96,36 @@ func (s *Service) RunLocalChat(ctx context.Context, req ChatCompletionRequest, d
 	if err := client.Initialize(ctx); err != nil {
 		return LocalChatResult{}, fmt.Errorf("initialize local Codex app-server: %w", err)
 	}
+	isolationConfig, err := prepareLocalCodexIsolation(ctx, client, s.localCodexDir)
+	if err != nil {
+		return LocalChatResult{}, fmt.Errorf("prepare local Codex isolation: %w", err)
+	}
 
 	threadRaw, err := client.Call(ctx, "thread/start", map[string]any{
 		"cwd":              s.localCodexDir,
 		"approvalPolicy":   "never",
-		"sandbox":          "read-only",
 		"model":            strings.TrimSpace(req.Model),
 		"ephemeral":        true,
 		"baseInstructions": localCodexBaseInstructions(defaultInstructions),
+		"config":           isolationConfig,
 	})
 	if err != nil {
 		return LocalChatResult{}, fmt.Errorf("local Codex thread/start: %w", err)
+	}
+	if err := verifyLocalCodexThreadIsolation(threadRaw); err != nil {
+		return LocalChatResult{}, err
 	}
 	threadID := localCodexObjectID(threadRaw, "thread")
 	if threadID == "" {
 		return LocalChatResult{}, errors.New("local Codex thread/start returned no thread id")
 	}
+	if err := verifyLocalCodexMCPIsolation(ctx, client, threadID); err != nil {
+		return LocalChatResult{}, err
+	}
 	params := map[string]any{
 		"threadId":       threadID,
 		"input":          []map[string]any{{"type": "text", "text": localCodexChatPrompt(req)}},
 		"approvalPolicy": "never",
-		"sandboxPolicy":  map[string]any{"type": "readOnly"},
 		"cwd":            s.localCodexDir,
 		"model":          strings.TrimSpace(req.Model),
 		"outputSchema":   localCodexOutputSchema(req),
@@ -127,6 +137,194 @@ func (s *Service) RunLocalChat(ctx context.Context, req ChatCompletionRequest, d
 		return LocalChatResult{}, fmt.Errorf("local Codex turn/start: %w", err)
 	}
 	return collectLocalCodexChat(ctx, client)
+}
+
+const localCodexPermissionProfile = "phantom-gateway-api"
+
+type localCodexConfigReadResult struct {
+	Config struct {
+		MCPServers            map[string]json.RawMessage `json:"mcp_servers"`
+		SandboxMode           any                        `json:"sandbox_mode"`
+		SandboxWorkspaceWrite any                        `json:"sandbox_workspace_write"`
+	} `json:"config"`
+}
+
+type localCodexSkillsListResult struct {
+	Data []struct {
+		CWD    string `json:"cwd"`
+		Skills []struct {
+			Path string `json:"path"`
+		} `json:"skills"`
+		Errors []json.RawMessage `json:"errors"`
+	} `json:"data"`
+}
+
+// prepareLocalCodexIsolation turns the local app-server into a non-agentic API
+// transport for this ephemeral thread. It reads only capability metadata and
+// never persists changes to the owner's Codex configuration.
+func prepareLocalCodexIsolation(ctx context.Context, client *codexclient.AppServerClient, workDir string) (map[string]any, error) {
+	configRaw, err := client.Call(ctx, "config/read", map[string]any{"cwd": workDir, "includeLayers": false})
+	if err != nil {
+		return nil, fmt.Errorf("read effective config: %w", err)
+	}
+	skillsRaw, err := client.Call(ctx, "skills/list", map[string]any{"cwds": []string{workDir}, "forceReload": true})
+	if err != nil {
+		return nil, fmt.Errorf("list skills: %w", err)
+	}
+	return buildLocalCodexIsolationConfig(configRaw, skillsRaw, workDir)
+}
+
+func buildLocalCodexIsolationConfig(configRaw, skillsRaw json.RawMessage, workDir string) (map[string]any, error) {
+	workDir = strings.TrimSpace(workDir)
+	if !filepath.IsAbs(workDir) {
+		return nil, errors.New("local Codex workdir must be absolute")
+	}
+	var configResult localCodexConfigReadResult
+	if err := json.Unmarshal(configRaw, &configResult); err != nil {
+		return nil, fmt.Errorf("decode effective config: %w", err)
+	}
+	// Permission profiles and legacy sandbox settings do not compose. Failing
+	// closed prevents a future owner CLI setting from silently widening API reads.
+	if configResult.Config.SandboxMode != nil || configResult.Config.SandboxWorkspaceWrite != nil {
+		return nil, errors.New("legacy Codex sandbox settings prevent Gateway permission isolation")
+	}
+	var skillsResult localCodexSkillsListResult
+	if err := json.Unmarshal(skillsRaw, &skillsResult); err != nil {
+		return nil, fmt.Errorf("decode skills list: %w", err)
+	}
+	if len(skillsResult.Data) == 0 {
+		return nil, errors.New("Codex returned no skill inventory for the Gateway workdir")
+	}
+
+	mcpServers := make(map[string]any, len(configResult.Config.MCPServers))
+	for name := range configResult.Config.MCPServers {
+		mcpServers[name] = map[string]any{"enabled": false}
+	}
+	skillPaths := make(map[string]struct{})
+	foundWorkDir := false
+	for _, group := range skillsResult.Data {
+		if filepath.Clean(strings.TrimSpace(group.CWD)) != filepath.Clean(workDir) {
+			continue
+		}
+		foundWorkDir = true
+		if len(group.Errors) > 0 {
+			return nil, errors.New("Codex reported skill discovery errors")
+		}
+		for _, skill := range group.Skills {
+			path := strings.TrimSpace(skill.Path)
+			if path == "" {
+				return nil, errors.New("Codex reported a skill without a path")
+			}
+			skillPaths[path] = struct{}{}
+		}
+	}
+	if !foundWorkDir {
+		return nil, errors.New("Codex returned no matching skill inventory for the Gateway workdir")
+	}
+	paths := make([]string, 0, len(skillPaths))
+	for path := range skillPaths {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	skillConfig := make([]map[string]any, 0, len(paths))
+	for _, path := range paths {
+		skillConfig = append(skillConfig, map[string]any{"path": path, "enabled": false})
+	}
+
+	// ponytail: Gateway API turns never need local agent capabilities. Keep this
+	// immutable and thread-scoped so ordinary Codex CLI sessions retain their MCP,
+	// skills, Apps, hooks, search, and workspace behavior.
+	return map[string]any{
+		"features": map[string]any{
+			"apps":          false,
+			"hooks":         false,
+			"multi_agent":   false,
+			"remote_plugin": false,
+		},
+		"web_search": "disabled",
+		"tools": map[string]any{
+			"view_image": false,
+			"web_search": false,
+		},
+		"mcp_servers":         mcpServers,
+		"skills":              map[string]any{"config": skillConfig},
+		"default_permissions": localCodexPermissionProfile,
+		"permissions": map[string]any{
+			localCodexPermissionProfile: map[string]any{
+				"description": "Phantom Lancer Gateway API isolation",
+				"filesystem": map[string]any{
+					":root":      "deny",
+					":minimal":   "read",
+					":tmpdir":    "deny",
+					":slash_tmp": "deny",
+					workDir:      "read",
+				},
+				"network": map[string]any{"enabled": false},
+			},
+		},
+	}, nil
+}
+
+func verifyLocalCodexThreadIsolation(raw json.RawMessage) error {
+	var result struct {
+		ActivePermissionProfile *struct {
+			ID string `json:"id"`
+		} `json:"activePermissionProfile"`
+		InstructionSources *[]string `json:"instructionSources"`
+		Sandbox            struct {
+			Type          string `json:"type"`
+			NetworkAccess *bool  `json:"networkAccess"`
+		} `json:"sandbox"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return fmt.Errorf("decode local Codex isolation state: %w", err)
+	}
+	if result.ActivePermissionProfile == nil || result.ActivePermissionProfile.ID != localCodexPermissionProfile {
+		return errors.New("local Codex permission isolation is not active")
+	}
+	if result.Sandbox.Type != "readOnly" || result.Sandbox.NetworkAccess == nil || *result.Sandbox.NetworkAccess {
+		return errors.New("local Codex network isolation is not active")
+	}
+	if result.InstructionSources == nil || len(*result.InstructionSources) > 0 {
+		return errors.New("local Codex loaded workspace instructions for a Gateway request")
+	}
+	return nil
+}
+
+func verifyLocalCodexMCPIsolation(ctx context.Context, client *codexclient.AppServerClient, threadID string) error {
+	var cursor string
+	for {
+		params := map[string]any{"threadId": threadID, "detail": "toolsAndAuthOnly", "limit": 100}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		raw, err := client.Call(ctx, "mcpServerStatus/list", params)
+		if err != nil {
+			return fmt.Errorf("verify MCP isolation: %w", err)
+		}
+		var page struct {
+			Data []struct {
+				Tools []json.RawMessage `json:"tools"`
+			} `json:"data"`
+			NextCursor *string `json:"nextCursor"`
+		}
+		if err := json.Unmarshal(raw, &page); err != nil {
+			return fmt.Errorf("decode MCP isolation state: %w", err)
+		}
+		for _, server := range page.Data {
+			if len(server.Tools) > 0 {
+				return errors.New("local Codex exposed MCP or App tools to a Gateway request")
+			}
+		}
+		if page.NextCursor == nil || strings.TrimSpace(*page.NextCursor) == "" {
+			return nil
+		}
+		next := strings.TrimSpace(*page.NextCursor)
+		if next == cursor {
+			return errors.New("local Codex MCP isolation pagination did not advance")
+		}
+		cursor = next
+	}
 }
 
 func localCodexBaseInstructions(fallback string) string {
