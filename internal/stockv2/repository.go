@@ -1112,6 +1112,9 @@ func (s *Store) init(ctx context.Context) error {
 	if err := s.ensureNewsContextBackfillSchema(ctx); err != nil {
 		return fmt.Errorf("ensure news context backfill schema: %w", err)
 	}
+	if err := s.ensureOpportunityMarketScanSchema(ctx); err != nil {
+		return fmt.Errorf("ensure opportunity market scan schema: %w", err)
+	}
 	return nil
 }
 

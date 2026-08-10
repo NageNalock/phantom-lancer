@@ -229,7 +229,7 @@ Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*`
 负责：
 
 - 当前股票模块只保留 StockV2：后端 `internal/stockv2/`，API `/api/stockv2/*`，前端 `web/src/features/stockv2/`。
-- 管理股票标的、日 K / 分钟行情、股票画像、组合、持仓、策略、后台监控、消息、Alert、Review、Agent 治理和留痕。
+- 管理股票标的、日 K / 分钟行情、股票画像、主板市场机会扫描、手工主题研究、组合、持仓、策略、后台监控、消息、Alert、Review、Agent 治理和留痕。
 - StockV1 的 `internal/stock/`、`/api/stock/*` 和旧设计文档已经移除，不再作为实现边界。
 
 详细设计见 [stock-agent-workbench-v2-key-points-2026-06-18.md](./stock-agent-workbench-v2-key-points-2026-06-18.md)。

@@ -107,8 +107,32 @@ func (s *Service) StartOpportunityDiscoveryRun(ctx context.Context, opportunityI
 	if err != nil {
 		return OpportunityDiscoveryRun{}, err
 	}
+	marketScanRunID := strings.TrimSpace(req.MarketScanRunID)
+	var marketScanRun OpportunityMarketScanRun
+	if marketScanRunID != "" {
+		var scanErr error
+		marketScanRun, scanErr = s.store.GetOpportunityMarketScanRun(ctx, marketScanRunID)
+		if scanErr != nil {
+			return OpportunityDiscoveryRun{}, scanErr
+		}
+		marketCandidates, listErr := s.store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{
+			ScanRunID: marketScanRunID,
+			Stage:     OpportunityMarketScanCandidateResearch,
+			Limit:     opportunityMarketScanResearchLimit,
+		})
+		if listErr != nil {
+			return OpportunityDiscoveryRun{}, listErr
+		}
+		if marketScanRun.OpportunityID != opp.ID || len(marketCandidates) == 0 {
+			return OpportunityDiscoveryRun{}, ErrOpportunityMarketScanInvalidState
+		}
+	}
+	artifactContext := s.BuildOpportunityDiscoveryContext(ctx, opp, OpportunityDiscoveryRun{}, nil, marketScanRunID)
 	artifact, _ := json.Marshal(map[string]any{
-		"opportunity": opp,
+		"opportunity":      opp,
+		"mode":             artifactContext.Mode,
+		"marketScanRunId":  marketScanRunID,
+		"marketCandidates": artifactContext.MarketCandidates,
 		"boundary": map[string]any{
 			"externalResearch": "codex_cli_builtin",
 			"mainProgramMCP":   "internal_stock_data_and_trace_only",
@@ -146,30 +170,54 @@ func (s *Service) StartOpportunityDiscoveryRun(ctx context.Context, opportunityI
 	if err != nil {
 		return OpportunityDiscoveryRun{}, err
 	}
+	if marketScanRunID != "" {
+		marketScanRun.DiscoveryRunID = run.ID
+		if _, scanErr := s.store.UpdateOpportunityMarketScanRun(ctx, marketScanRun); scanErr != nil {
+			return OpportunityDiscoveryRun{}, scanErr
+		}
+	}
 	if opp.Status == OpportunityStatusDraft || opp.Status == OpportunityStatusCompleted {
 		opp.Status = OpportunityStatusResearching
 		_, _ = s.store.UpdateOpportunity(ctx, opp)
 	}
 	if s.agentExecutor != nil {
-		discCtx := s.BuildOpportunityDiscoveryContext(ctx, opp, run, steps)
+		discCtx := s.BuildOpportunityDiscoveryContext(ctx, opp, run, steps, marketScanRunID)
 		go s.startOpportunityDiscoveryRunAsync(context.Background(), runRecord, ledger, discCtx, model.ModelName)
 	}
 	return run, nil
 }
 
-func (s *Service) BuildOpportunityDiscoveryContext(ctx context.Context, opp Opportunity, run OpportunityDiscoveryRun, steps []OpportunityDiscoveryStep) OpportunityDiscoveryContext {
+func (s *Service) BuildOpportunityDiscoveryContext(ctx context.Context, opp Opportunity, run OpportunityDiscoveryRun, steps []OpportunityDiscoveryStep, marketScanRunIDs ...string) OpportunityDiscoveryContext {
 	status, _ := s.GetEmbeddingStatus(ctx)
+	mode := OpportunityDiscoveryModeManualTheme
+	marketScanRunID := ""
+	var marketCandidates []OpportunityMarketScanCandidate
+	if len(marketScanRunIDs) > 0 {
+		marketScanRunID = strings.TrimSpace(marketScanRunIDs[0])
+	}
+	if marketScanRunID != "" {
+		mode = OpportunityDiscoveryModeMarketScan
+		marketCandidates, _ = s.store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{
+			ScanRunID: marketScanRunID,
+			Stage:     OpportunityMarketScanCandidateResearch,
+			Limit:     opportunityMarketScanResearchLimit,
+		})
+	}
 	return OpportunityDiscoveryContext{
-		BuiltAt:         time.Now(),
-		Opportunity:     opp,
-		DiscoveryRun:    run,
-		Steps:           steps,
-		EmbeddingStatus: status,
+		BuiltAt:          time.Now(),
+		Mode:             mode,
+		MarketScanRunID:  marketScanRunID,
+		MarketCandidates: marketCandidates,
+		Opportunity:      opp,
+		DiscoveryRun:     run,
+		Steps:            steps,
+		EmbeddingStatus:  status,
 		FreshnessSummary: map[string]any{
-			"builtAt":            time.Now().Format(time.RFC3339),
-			"opportunityStatus":  opp.Status,
-			"embeddingAvailable": status.Available,
-			"embeddingStatus":    status.Status,
+			"builtAt":              time.Now().Format(time.RFC3339),
+			"opportunityStatus":    opp.Status,
+			"embeddingAvailable":   status.Available,
+			"embeddingStatus":      status.Status,
+			"marketCandidateCount": len(marketCandidates),
 		},
 	}
 }
@@ -662,6 +710,27 @@ func (s *Service) opportunityDiscoveryReportFromResult(ctx context.Context, run 
 		strings.TrimSpace(report.Summary) == "" {
 		return OpportunityDiscoveryReport{}, nil, ErrInvalidOpportunityResult
 	}
+	allowedMarketScanSymbols := map[string]struct{}{}
+	marketScanBounded := false
+	if scanRun, scanErr := s.store.GetOpportunityMarketScanRunByDiscoveryRunID(ctx, run.ID); scanErr == nil {
+		marketScanBounded = true
+		items, listErr := s.store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{
+			ScanRunID: scanRun.ID,
+			Stage:     OpportunityMarketScanCandidateResearch,
+			Limit:     opportunityMarketScanResearchLimit,
+		})
+		if listErr != nil {
+			return OpportunityDiscoveryReport{}, nil, listErr
+		}
+		for _, item := range items {
+			allowedMarketScanSymbols[item.Symbol] = struct{}{}
+		}
+		if len(allowedMarketScanSymbols) == 0 || len(report.Candidates) > opportunityMarketScanFinalLimit {
+			return OpportunityDiscoveryReport{}, nil, ErrInvalidOpportunityResult
+		}
+	} else if !errors.Is(scanErr, ErrOpportunityMarketScanRunNotFound) {
+		return OpportunityDiscoveryReport{}, nil, scanErr
+	}
 	for _, candidate := range report.Candidates {
 		if strings.TrimSpace(candidate.Symbol) == "" ||
 			!score0To100(candidate.RelevanceScore) ||
@@ -669,6 +738,11 @@ func (s *Service) opportunityDiscoveryReportFromResult(ctx context.Context, run 
 			!score0To100(candidate.MarketRiskScore) ||
 			candidate.Confidence < 0 || candidate.Confidence > 1 {
 			return OpportunityDiscoveryReport{}, nil, ErrInvalidOpportunityResult
+		}
+		if marketScanBounded {
+			if _, ok := allowedMarketScanSymbols[strings.TrimSpace(candidate.Symbol)]; !ok {
+				return OpportunityDiscoveryReport{}, nil, ErrInvalidOpportunityResult
+			}
 		}
 		if _, err := s.store.GetInstrument(ctx, strings.TrimSpace(candidate.Symbol)); err != nil {
 			if errors.Is(err, ErrInstrumentNotFound) {

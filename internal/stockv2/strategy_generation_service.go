@@ -104,7 +104,7 @@ func (s *Service) fillStrategyGenerationEmbeddingStatus(ctx context.Context, out
 }
 
 func (s *Service) fillStrategyGenerationOpportunityContext(ctx context.Context, input StrategyGenerationInput, out *StrategyGenerationContext) error {
-	if strings.TrimSpace(input.OpportunityID) == "" && strings.TrimSpace(input.CandidateID) == "" {
+	if strings.TrimSpace(input.OpportunityID) == "" && strings.TrimSpace(input.CandidateID) == "" && len(input.CandidateIDs) == 0 {
 		return nil
 	}
 	if strings.TrimSpace(input.OpportunityID) != "" {
@@ -114,29 +114,41 @@ func (s *Service) fillStrategyGenerationOpportunityContext(ctx context.Context, 
 		}
 		out.Opportunity = &opp
 	}
-	if strings.TrimSpace(input.CandidateID) != "" {
-		candidate, err := s.store.GetOpportunityCandidate(ctx, input.CandidateID)
-		if err != nil {
-			return err
-		}
-		out.OpportunityCandidate = &candidate
-		if out.Opportunity == nil {
-			opp, err := s.store.GetOpportunity(ctx, candidate.OpportunityID)
+	candidateIDs := append([]string(nil), input.CandidateIDs...)
+	if len(candidateIDs) == 0 && strings.TrimSpace(input.CandidateID) != "" {
+		candidateIDs = []string{input.CandidateID}
+	}
+	if len(candidateIDs) > 0 {
+		out.OpportunityEvidenceByCandidate = map[string][]OpportunityEvidence{}
+		for _, candidateID := range candidateIDs {
+			candidate, err := s.store.GetOpportunityCandidate(ctx, candidateID)
 			if err != nil {
 				return err
 			}
-			out.Opportunity = &opp
+			if input.OpportunityID != "" && candidate.OpportunityID != input.OpportunityID {
+				return ErrInvalidStrategyGenerationInput
+			}
+			out.OpportunityCandidates = append(out.OpportunityCandidates, candidate)
+			evidence, err := s.store.ListOpportunityEvidence(ctx, OpportunityEvidenceListFilter{
+				RunID: candidate.RunID, CandidateID: candidate.ID, Limit: 100,
+			})
+			if err != nil {
+				return err
+			}
+			out.OpportunityEvidenceByCandidate[candidate.ID] = evidence
+			out.OpportunityEvidence = append(out.OpportunityEvidence, evidence...)
+			if out.Opportunity == nil {
+				opp, err := s.store.GetOpportunity(ctx, candidate.OpportunityID)
+				if err != nil {
+					return err
+				}
+				out.Opportunity = &opp
+			}
 		}
-		evidence, err := s.store.ListOpportunityEvidence(ctx, OpportunityEvidenceListFilter{
-			RunID:       candidate.RunID,
-			CandidateID: candidate.ID,
-			Limit:       100,
-		})
-		if err != nil {
-			return err
-		}
-		out.OpportunityEvidence = evidence
-		out.FreshnessSummary["opportunityEvidenceCount"] = len(evidence)
+		candidate := out.OpportunityCandidates[0]
+		out.OpportunityCandidate = &candidate
+		out.FreshnessSummary["opportunityEvidenceCount"] = len(out.OpportunityEvidence)
+		out.FreshnessSummary["opportunityCandidateCount"] = len(out.OpportunityCandidates)
 	}
 	if out.Opportunity != nil {
 		out.FreshnessSummary["opportunityId"] = out.Opportunity.ID
@@ -407,6 +419,11 @@ func normalizeStrategyGenerationInput(input StrategyGenerationInput) (StrategyGe
 	input.RequestedBy = strings.TrimSpace(input.RequestedBy)
 	input.OpportunityID = strings.TrimSpace(input.OpportunityID)
 	input.CandidateID = strings.TrimSpace(input.CandidateID)
+	candidateIDs := compactStringList(append(input.CandidateIDs, input.CandidateID), opportunityMarketScanStrategyLimit)
+	input.CandidateIDs = candidateIDs
+	if len(candidateIDs) > 0 {
+		input.CandidateID = candidateIDs[0]
+	}
 	input.TimeHorizon = strings.TrimSpace(input.TimeHorizon)
 	if len(input.AllowedActions) == 0 && input.Mode == StrategyGenerationModePortfolio {
 		input.AllowedActions = []string{
@@ -460,7 +477,7 @@ func strategyGenerationTriggerID(input StrategyGenerationInput) string {
 		return fmt.Sprintf("%s:portfolio=%s:symbols=%s", input.Mode, input.PortfolioID, strings.Join(parts, ","))
 	}
 	if input.Mode == StrategyGenerationModeOpportunity && input.OpportunityID != "" {
-		return fmt.Sprintf("%s:opportunity=%s:candidate=%s:symbols=%s", input.Mode, input.OpportunityID, input.CandidateID, strings.Join(parts, ","))
+		return fmt.Sprintf("%s:opportunity=%s:candidates=%s:symbols=%s", input.Mode, input.OpportunityID, strings.Join(input.CandidateIDs, ","), strings.Join(parts, ","))
 	}
 	if input.PortfolioID != "" {
 		return fmt.Sprintf("%s:portfolio=%s:symbols=%s", input.Mode, input.PortfolioID, strings.Join(parts, ","))
@@ -619,6 +636,9 @@ func (s *Service) createDraftStrategiesFromStrategyGeneration(ctx context.Contex
 	if strings.TrimSpace(report.RunSummary.Mode) == StrategyGenerationModePortfolio {
 		return s.createPortfolioStrategyDiagnosisDrafts(ctx, run, submitted, report)
 	}
+	if err := validateStrategyGenerationDraftTargets(run.TriggerObjectID, report.Drafts); err != nil {
+		return nil, err
+	}
 	created := make([]StrategyWithVersion, 0, len(report.Drafts))
 	for _, draft := range report.Drafts {
 		if draft.DraftType != StrategyGenerationDraftTypeNewStrategy {
@@ -635,6 +655,29 @@ func (s *Service) createDraftStrategiesFromStrategyGeneration(ctx context.Contex
 		created = append(created, item)
 	}
 	return created, nil
+}
+
+func validateStrategyGenerationDraftTargets(triggerID string, drafts []StrategyGenerationDraft) error {
+	allowedSymbols := strategyGenerationSymbolsFromTrigger(triggerID)
+	if len(allowedSymbols) == 0 {
+		return nil
+	}
+	allowed := make(map[string]bool, len(allowedSymbols))
+	for _, symbol := range allowedSymbols {
+		allowed[symbol] = true
+	}
+	seen := map[string]bool{}
+	for _, draft := range drafts {
+		if draft.DraftType != StrategyGenerationDraftTypeNewStrategy {
+			continue
+		}
+		symbol := strings.TrimSpace(draft.Symbol)
+		if !allowed[symbol] || seen[symbol] {
+			return ErrInvalidStrategyGenerationResult
+		}
+		seen[symbol] = true
+	}
+	return nil
 }
 
 func (s *Service) strategyCreateRequestFromGenerationDraft(run AgentRun, submitted AgentTaskSubmittedResult, report StrategyGenerationReport, draft StrategyGenerationDraft) (RequestCreateStrategy, error) {
@@ -771,6 +814,53 @@ func strategyGenerationPortfolioIDFromTrigger(triggerID string) string {
 		}
 	}
 	return ""
+}
+
+func strategyGenerationCandidateIDsFromTrigger(triggerID string) []string {
+	for _, part := range strings.Split(triggerID, ":") {
+		if value, ok := strings.CutPrefix(part, "candidates="); ok {
+			return compactStringList(strings.Split(value, ","), opportunityMarketScanStrategyLimit)
+		}
+		// DEPRECATED: remove after 2026-09-10, when runs created before the
+		// batch-candidate release have aged out of the UI history.
+		if value, ok := strings.CutPrefix(part, "candidate="); ok && strings.TrimSpace(value) != "" {
+			return []string{strings.TrimSpace(value)}
+		}
+	}
+	return nil
+}
+
+func strategyGenerationSymbolsFromTrigger(triggerID string) []string {
+	for _, part := range strings.Split(triggerID, ":") {
+		if value, ok := strings.CutPrefix(part, "symbols="); ok {
+			return compactStringList(strings.Split(value, ","), 100)
+		}
+	}
+	return nil
+}
+
+func (s *Service) markStrategyGenerationCandidatesCreated(ctx context.Context, run AgentRun, created []StrategyWithVersion) {
+	bySymbol := make(map[string]string, len(created))
+	for _, item := range created {
+		bySymbol[strings.TrimSpace(item.Strategy.Symbol)] = item.Strategy.ID
+	}
+	for _, candidateID := range strategyGenerationCandidateIDsFromTrigger(run.TriggerObjectID) {
+		candidate, err := s.store.GetOpportunityCandidate(ctx, candidateID)
+		if err != nil {
+			continue
+		}
+		strategyID, ok := bySymbol[candidate.Symbol]
+		if !ok {
+			continue
+		}
+		candidate.Status = OpportunityCandidateStatusStrategyGenerated
+		if candidate.Metadata == nil {
+			candidate.Metadata = map[string]any{}
+		}
+		candidate.Metadata["strategyGenerationRunId"] = run.ID
+		candidate.Metadata["strategyId"] = strategyID
+		_, _ = s.store.UpdateOpportunityCandidate(ctx, candidate)
+	}
 }
 
 func strategyGenerationDraftDirection(draft StrategyGenerationDraft) (string, error) {

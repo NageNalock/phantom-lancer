@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1071,12 +1072,43 @@ func TestBuildOpportunityDiscoveryPromptRequiresEmbeddingSemanticRecall(t *testi
 		"stock_agent.get_embedding_status",
 		"stock_agent.semantic_search_stock_profiles",
 		"stock_agent.semantic_search_news_events",
-		"embedding_status_check",
+		"internal_recall",
+		"candidate_ranking",
 		"Do not silently fall back",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestBuildOpportunityDiscoveryPromptBoundsMarketScanCandidates(t *testing.T) {
+	candidates := make([]OpportunityMarketScanCandidate, 0, opportunityMarketScanResearchLimit)
+	for i := 0; i < opportunityMarketScanResearchLimit; i++ {
+		candidates = append(candidates, OpportunityMarketScanCandidate{
+			Symbol: fmt.Sprintf("600%03d", i), Market: "SH", Name: fmt.Sprintf("候选%d%s", i+1, strings.Repeat("长", 80)),
+			Industry: strings.Repeat("电子", 80), Concepts: []string{strings.Repeat("产业链", 80)},
+			Stage: OpportunityMarketScanCandidateResearch, FinalRank: i + 1,
+			Metrics: OpportunityMarketScanMetrics{
+				TradeDate: "2026-08-10", Return20Pct: float64(i), QFQAvailable: true,
+				ThemeSignals: []string{strings.Repeat("消息脉络", 100)},
+			},
+		})
+	}
+	prompt := buildOpportunityDiscoveryPrompt("task-market-scan", OpportunityDiscoveryContext{
+		Mode:             OpportunityDiscoveryModeMarketScan,
+		MarketScanRunID:  "scan-1",
+		Opportunity:      Opportunity{ID: "opp-1", Title: "主板扫描", UserThesis: "复核预筛候选"},
+		DiscoveryRun:     OpportunityDiscoveryRun{ID: "run-1", OpportunityID: "opp-1"},
+		MarketCandidates: candidates,
+	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
+	for _, want := range []string{"complete allowed universe", "do not rediscover the full market", "600000", "600019", "at most 10"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("market scan prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, promptTruncatedMarker) {
+		t.Fatalf("bounded market scan prompt unexpectedly truncated at %d bytes", len(prompt))
 	}
 }
 

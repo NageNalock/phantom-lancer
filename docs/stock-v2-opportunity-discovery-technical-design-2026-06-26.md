@@ -6,7 +6,7 @@
 >
 > REPLACES：无。本文补充 `stock-agent-workbench-v2-key-points-2026-06-18.md` 中 `Opportunity`、`Theme`、`GeneratedStrategy`、`AgentRun` 和 `DecisionLedger` 的机会发现落地细节。
 >
-> 相关文档：`docs/stock-v2-strategy-generation-design-2026-06-26.md` 定义候选进入策略生成后的 `strategy_generation` 流程。
+> 相关文档：`docs/stock-v2-strategy-generation-design-2026-06-26.md` 定义候选进入策略生成后的 `strategy_generation` 流程；`docs/stock-v2-opportunity-market-scan-design-2026-08-10.md` 定义服务端先做确定性主板预筛、再复用本任务做有界候选复核的自动扫描模式。
 
 ## 1. 目标
 
@@ -38,7 +38,7 @@
 
 ## 2. 核心原则
 
-机会发现由 Codex CLI 作为研究执行者闭环完成，主程序不替 Agent 做完整候选计算。
+手工主题研究由 Codex CLI 作为研究执行者闭环完成，主程序不替 Agent 做完整候选计算。`mode=market_scan` 是明确例外：主程序先按固定预算做确定性全市场预筛，Agent 只在服务端提供的候选子集中完成公开资料验证、风险检查和最终排序。
 
 主程序只负责：
 

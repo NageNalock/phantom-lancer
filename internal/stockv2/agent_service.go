@@ -2222,6 +2222,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 			})
 		}
 		ledger.StructuredOutput["createdStrategies"] = createdSummaries
+		s.markStrategyGenerationCandidatesCreated(ctx, run, created)
 	}
 	if run.TaskType == AgentTaskTypeOpportunityDiscovery {
 		discoveryRun, err := s.store.GetOpportunityDiscoveryRunByAgentRunID(ctx, run.ID)

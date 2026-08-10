@@ -32,8 +32,16 @@ type Service struct {
 	// ponytail: scheduled analytical jobs share one process-local gate so a small
 	// personal server cannot run several full-market scans at once. Replace this
 	// with a persisted lease only if StockV2 gains multiple worker processes.
-	backgroundHeavyMu  sync.Mutex
-	backgroundHeavyRun bool
+	backgroundHeavyMu       sync.Mutex
+	backgroundHeavyRun      bool
+	opportunityScanStartMu  sync.Mutex
+	opportunityScanMu       sync.Mutex
+	opportunityScanRun      bool
+	opportunityScanCtx      context.Context
+	opportunityScanCancel   context.CancelFunc
+	opportunityScanWorkerMu sync.Mutex
+	opportunityScanWg       sync.WaitGroup
+	opportunityScanClosing  bool
 	// ponytail: process-local single-flight is enough for the single deployed Go service;
 	// move to a persisted lease only if multiple StockV2 workers are introduced.
 	newsPipelineMu  sync.Mutex
@@ -83,12 +91,15 @@ type Service struct {
 func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Service {
 	pool := newAgentTaskPool(defaultCleanupInterval)
 	newsContextWorkerCtx, newsContextWorkerCancel := context.WithCancel(context.Background())
+	opportunityScanCtx, opportunityScanCancel := context.WithCancel(context.Background())
 	svc := &Service{
 		store:                   store,
 		log:                     log,
 		httpClient:              httpClient,
 		newsContextWorkerCtx:    newsContextWorkerCtx,
 		newsContextWorkerCancel: newsContextWorkerCancel,
+		opportunityScanCtx:      opportunityScanCtx,
+		opportunityScanCancel:   opportunityScanCancel,
 		agentDailyBarsFailures:  map[string]agentDailyBarsFailure{},
 		universeSource:          NewUniverseDataSource(nil, httpClient),
 		dailyBarsSource:         NewDailyBarsSource(nil, httpClient),
@@ -1241,8 +1252,9 @@ func (s *Service) CreateOrUpdateSettings(ctx context.Context, req RequestCreateO
 	// 任一开关从关→开，或数据资产周期变化时重启后台，以拾取新 ticker。
 	newsBG := s.hasEnabledNewsSources(ctx)
 	embeddingBG := s.hasEmbeddingAutoMaintenanceEnabled(ctx)
-	needBG := settings.AutoUpdateEnabled || settings.BaseProfileAutoMaintainEnabled || newsBG || embeddingBG
-	prevNeedBG := prevAuto || prevBaseProfile || prevNewsBG || embeddingBG
+	marketScanConfig, _ := s.store.GetOpportunityMarketScanConfig(ctx)
+	needBG := settings.AutoUpdateEnabled || settings.BaseProfileAutoMaintainEnabled || newsBG || embeddingBG || marketScanConfig.Enabled
+	prevNeedBG := prevAuto || prevBaseProfile || prevNewsBG || embeddingBG || marketScanConfig.Enabled
 	if needBG {
 		restartBG := !prevNeedBG ||
 			(prevAuto && prevInterval != settings.UpdateIntervalSec) ||
@@ -1399,6 +1411,13 @@ func (s *Service) StartBackground(ctx context.Context) {
 	go func() {
 		defer s.bgWg.Done()
 		s.runPortfolioSentinelScheduler(bgCtx)
+	}()
+
+	// 机会扫描只在每日全市场资产维护完成后启动；运行状态持久化，默认关闭。
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runOpportunityMarketScanScheduler(bgCtx)
 	}()
 }
 
@@ -1724,6 +1743,13 @@ func (s *Service) Close() error {
 		s.bgWg.Wait()
 	}
 	s.bgMu.Unlock()
+	s.opportunityScanWorkerMu.Lock()
+	s.opportunityScanClosing = true
+	if s.opportunityScanCancel != nil {
+		s.opportunityScanCancel()
+	}
+	s.opportunityScanWorkerMu.Unlock()
+	s.opportunityScanWg.Wait()
 	s.stopNewsContextWorkers()
 	if s.store != nil {
 		if _, err := s.store.FailRunningNewsContextRuns(context.Background(), "interrupted by service shutdown before completion"); err != nil && s.log != nil {

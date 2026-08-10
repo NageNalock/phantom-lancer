@@ -28,7 +28,7 @@ const v2Tabs: Array<{ id: StockV2Tab; label: string; icon?: typeof Plus }> = [
   { id: "portfolios", label: "仓位", icon: Wallet },
   { id: "strategies", label: "策略", icon: Crosshair },
   { id: "sentinel", label: "组合哨兵", icon: ShieldCheck },
-  { id: "opportunity", label: "主题机会", icon: Sparkle },
+  { id: "opportunity", label: "机会发现", icon: Sparkle },
   { id: "agent", label: "Agent", icon: Robot },
 ];
 

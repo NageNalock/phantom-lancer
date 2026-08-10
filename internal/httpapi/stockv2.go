@@ -142,6 +142,13 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/stockv2/news-context/backfill/retry", s.handleStockV2RetryNewsContextBackfill)
 
 	// 主题机会发现
+	mux.HandleFunc("GET /api/stockv2/opportunity-market-scan/config", s.handleStockV2GetOpportunityMarketScanConfig)
+	mux.HandleFunc("PATCH /api/stockv2/opportunity-market-scan/config", s.handleStockV2UpdateOpportunityMarketScanConfig)
+	mux.HandleFunc("GET /api/stockv2/opportunity-market-scan/runs", s.handleStockV2ListOpportunityMarketScanRuns)
+	mux.HandleFunc("POST /api/stockv2/opportunity-market-scan/runs", s.handleStockV2StartOpportunityMarketScanRun)
+	mux.HandleFunc("GET /api/stockv2/opportunity-market-scan/runs/{id}", s.handleStockV2GetOpportunityMarketScanRun)
+	mux.HandleFunc("GET /api/stockv2/opportunity-market-scan/runs/{id}/candidates", s.handleStockV2ListOpportunityMarketScanCandidates)
+	mux.HandleFunc("POST /api/stockv2/opportunity-market-scan/runs/{id}/retry", s.handleStockV2RetryOpportunityMarketScanRun)
 	mux.HandleFunc("GET /api/stockv2/opportunities", s.handleStockV2ListOpportunities)
 	mux.HandleFunc("POST /api/stockv2/opportunities", s.handleStockV2CreateOpportunity)
 	mux.HandleFunc("GET /api/stockv2/opportunities/{id}", s.handleStockV2GetOpportunity)

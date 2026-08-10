@@ -38,6 +38,27 @@ func TestStockV2SensitiveWritesRequireCSRF(t *testing.T) {
 			body:   `{"before":"2026-06-24T00:00:00Z"}`,
 			call:   server.handleStockV2TruncateRawNews,
 		},
+		{
+			name:   "opportunity market scan config",
+			method: http.MethodPatch,
+			target: "/api/stockv2/opportunity-market-scan/config",
+			body:   `{"enabled":true}`,
+			call:   server.handleStockV2UpdateOpportunityMarketScanConfig,
+		},
+		{
+			name:   "opportunity market scan start",
+			method: http.MethodPost,
+			target: "/api/stockv2/opportunity-market-scan/runs",
+			body:   `{}`,
+			call:   server.handleStockV2StartOpportunityMarketScanRun,
+		},
+		{
+			name:   "opportunity market scan retry",
+			method: http.MethodPost,
+			target: "/api/stockv2/opportunity-market-scan/runs/run-1/retry",
+			body:   `{}`,
+			call:   server.handleStockV2RetryOpportunityMarketScanRun,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))

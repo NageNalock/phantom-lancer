@@ -1710,6 +1710,9 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 	b.WriteString("Use the stock_agent MCP only for project data queries, process recording, evidence/candidate recording, embedding status, and final submit_result.\n")
 	b.WriteString("Do not place orders, do not modify holdings, do not create proposed_operation, do not activate strategies, and do not read token/cookie/private config.\n")
 	b.WriteString("Every candidate symbol must exist in StockV2 master data. Use stock_agent.search_instruments or stock_agent.search_stock_profiles before recording candidates.\n")
+	if discCtx.Mode == OpportunityDiscoveryModeMarketScan {
+		b.WriteString("This is a bounded market-scan review. MarketCandidates is the complete allowed universe for this run: do not rediscover the full market and do not return any symbol outside it. Review at most 20 supplied main-board stocks, retain at most 10, and use public search only to verify material claims, catalysts, and risks. Missing fund-flow or quote evidence must reduce confidence instead of being invented.\n")
+	}
 	b.WriteString("Do not use shell commands or curl to submit results; use MCP tools directly.\n\n")
 
 	b.WriteString("## Task Information\n\n")
@@ -1724,19 +1727,28 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 	b.WriteString("\n")
 
 	b.WriteString("## Opportunity Context\n\n```json\n")
-	raw, _ := json.MarshalIndent(discCtx, "", "  ")
+	var raw []byte
+	if discCtx.Mode == OpportunityDiscoveryModeMarketScan {
+		// ponytail: the machine-generated bounded candidate pack does not need
+		// indentation; compact JSON keeps all 20 symbols inside the prompt budget.
+		raw, _ = json.Marshal(opportunityDiscoveryPromptContext(discCtx))
+	} else {
+		raw, _ = json.MarshalIndent(opportunityDiscoveryPromptContext(discCtx), "", "  ")
+	}
 	b.Write(raw)
 	b.WriteString("\n```\n\n")
 
 	b.WriteString("## Required Workflow\n\n")
 	b.WriteString("For each research phase, call stock_agent.start_discovery_step before work and stock_agent.finish_discovery_step after work. If a phase cannot be completed, call stock_agent.fail_discovery_step with a concise reason and continue when possible.\n")
-	b.WriteString("Use these step keys in order: `theme_understanding`, `external_search`, `internal_masterdata_search`, `stock_profile_search`, `embedding_status_check`, `candidate_generation`, `evidence_audit`, `final_report`.\n")
-	b.WriteString("In `embedding_status_check`, always call stock_agent.get_embedding_status before candidate generation. If status.available is true, call stock_agent.semantic_search_stock_profiles for related instruments and stock_agent.semantic_search_news_events for related project news; merge those results with deterministic keyword/masterdata candidates. If status.available is false, record the degraded reason in the step output and continue with deterministic search only.\n")
+	b.WriteString("Use these persisted step keys in order: `understand_theme`, `internal_recall`, `external_research`, `theme_chain`, `candidate_merge`, `market_risk_check`, `candidate_ranking`, `final_report`.\n")
+	b.WriteString("During `internal_recall`, always call stock_agent.get_embedding_status before candidate generation. If status.available is true, call stock_agent.semantic_search_stock_profiles for related instruments and stock_agent.semantic_search_news_events for related project news; merge those results with deterministic keyword/masterdata candidates. If status.available is false, record the degraded reason in the step output and continue with deterministic search only.\n")
 	b.WriteString("For every external article/search result you rely on, call stock_agent.record_external_source with title, URL, publisher, publishedAt when available, summary, relatedSymbols, and confidence.\n")
 	b.WriteString("For each material fact or reasoning item, call stock_agent.record_evidence. Link it to a candidate when the candidate exists.\n")
 	b.WriteString("For each candidate, call stock_agent.record_candidate after validating the symbol through StockV2 master data. Use stock_agent.update_candidate when the score, rank, reason, or risk changes.\n")
 	b.WriteString("When using Serenity-style deep research, first rank value-chain layers and scarce constraints before ranking companies. Prefer A-share primary source paths when relevant: annual/interim/quarterly reports, exchange announcements and inquiry letters, Hudongyi/SSE e-interaction, tender wins, project approvals, patents/standards, receivables, inventories, contract liabilities, cash flow, margin, related transactions, refinancing, and customer/supplier cross-checks.\n")
-	b.WriteString("For broad deep scans, build a multi-layer candidate universe before selecting final candidates. If runtime or tools prevent a 20-candidate/25-source Serenity-level scan, label the result as an initial pass and record the remaining verification path.\n")
+	if discCtx.Mode != OpportunityDiscoveryModeMarketScan {
+		b.WriteString("For broad deep scans, build a multi-layer candidate universe before selecting final candidates. If runtime or tools prevent a 20-candidate/25-source Serenity-level scan, label the result as an initial pass and record the remaining verification path.\n")
+	}
 	b.WriteString("When internal MCP data conflicts with public sources or is stale/missing, record the conflict, what you checked externally, the adopted value or unresolved status, and why. Do not leave the conflict only as a future recommendation when it affects candidate ranking or risk.\n")
 	b.WriteString("Do not silently fall back to keyword search and label it semantic.\n\n")
 
@@ -1764,11 +1776,91 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 	b.WriteString("```\n\n")
 	b.WriteString("If external search/browse is unavailable, record the failure through MCP, return an empty candidates array, and explain the limitation in Chinese. Do not fabricate sources or candidates.\n")
 
-	const maxPromptLen = 12000
+	maxPromptLen := 12000
+	if discCtx.Mode == OpportunityDiscoveryModeMarketScan {
+		maxPromptLen = 22000
+	}
 	if b.Len() > maxPromptLen {
-		return truncatePromptUTF8(b.String(), 9000, 3000)
+		return truncatePromptUTF8(b.String(), maxPromptLen-4000, 4000)
 	}
 	return b.String()
+}
+
+func opportunityDiscoveryPromptContext(discCtx OpportunityDiscoveryContext) any {
+	if discCtx.Mode != OpportunityDiscoveryModeMarketScan {
+		return discCtx
+	}
+	type compactMetrics struct {
+		TradeDate          string   `json:"tradeDate,omitempty"`
+		Return5Pct         float64  `json:"return5Pct,omitempty"`
+		Return20Pct        float64  `json:"return20Pct,omitempty"`
+		Return60Pct        float64  `json:"return60Pct,omitempty"`
+		MA20GapPct         float64  `json:"ma20GapPct,omitempty"`
+		VolumeRatio5To20   float64  `json:"volumeRatio5To20,omitempty"`
+		MedianAmount20     float64  `json:"medianAmount20,omitempty"`
+		MainFlowRatio20    float64  `json:"mainFlowRatio20,omitempty"`
+		PositiveFlowDays20 int      `json:"positiveFlowDays20,omitempty"`
+		LatestPrice        float64  `json:"latestPrice,omitempty"`
+		LatestPctChange    float64  `json:"latestPctChange,omitempty"`
+		QFQAvailable       bool     `json:"qfqAvailable"`
+		FundFlowAvailable  bool     `json:"fundFlowAvailable"`
+		QuoteAvailable     bool     `json:"quoteAvailable"`
+		ThemeSignals       []string `json:"themeSignals,omitempty"`
+	}
+	type compactCandidate struct {
+		Symbol         string         `json:"symbol"`
+		Market         string         `json:"market"`
+		Name           string         `json:"name"`
+		Industry       string         `json:"industry,omitempty"`
+		Sector         string         `json:"sector,omitempty"`
+		Concepts       []string       `json:"concepts,omitempty"`
+		PrefilterRank  int            `json:"prefilterRank"`
+		FinalRank      int            `json:"finalRank"`
+		PrefilterScore float64        `json:"prefilterScore"`
+		FinalScore     float64        `json:"finalScore"`
+		FlowScore      float64        `json:"flowScore"`
+		ThemeScore     float64        `json:"themeScore"`
+		RiskPenalty    float64        `json:"riskPenalty"`
+		Metrics        compactMetrics `json:"metrics"`
+	}
+	candidates := make([]compactCandidate, 0, len(discCtx.MarketCandidates))
+	for _, item := range discCtx.MarketCandidates {
+		candidates = append(candidates, compactCandidate{
+			Symbol: item.Symbol, Market: item.Market, Name: safelog.Text(item.Name, 24), Industry: safelog.Text(item.Industry, 16),
+			Sector: safelog.Text(item.Sector, 16), Concepts: opportunityPromptTextList(item.Concepts, 3, 16), PrefilterRank: item.PrefilterRank,
+			FinalRank: item.FinalRank, PrefilterScore: item.PrefilterScore, FinalScore: item.FinalScore,
+			FlowScore: item.FlowScore, ThemeScore: item.ThemeScore, RiskPenalty: item.RiskPenalty,
+			Metrics: compactMetrics{
+				TradeDate: item.Metrics.TradeDate, Return5Pct: item.Metrics.Return5Pct,
+				Return20Pct: item.Metrics.Return20Pct, Return60Pct: item.Metrics.Return60Pct,
+				MA20GapPct: item.Metrics.MA20GapPct, VolumeRatio5To20: item.Metrics.VolumeRatio5To20,
+				MedianAmount20: item.Metrics.MedianAmount20, MainFlowRatio20: item.Metrics.MainFlowRatio20,
+				PositiveFlowDays20: item.Metrics.PositiveFlowDays20, LatestPrice: item.Metrics.LatestPrice,
+				LatestPctChange: item.Metrics.LatestPctChange, QFQAvailable: item.Metrics.QFQAvailable,
+				FundFlowAvailable: item.Metrics.FundFlowAvailable, QuoteAvailable: item.Metrics.QuoteAvailable,
+				ThemeSignals: opportunityPromptTextList(item.Metrics.ThemeSignals, 3, 32),
+			},
+		})
+	}
+	return map[string]any{
+		"builtAt":          discCtx.BuiltAt,
+		"mode":             discCtx.Mode,
+		"marketScanRunId":  discCtx.MarketScanRunID,
+		"marketCandidates": candidates,
+		"opportunity":      discCtx.Opportunity,
+		"discoveryRun":     discCtx.DiscoveryRun,
+		"steps":            discCtx.Steps,
+		"embeddingStatus":  discCtx.EmbeddingStatus,
+		"freshnessSummary": discCtx.FreshnessSummary,
+	}
+}
+
+func opportunityPromptTextList(values []string, limit, maxBytes int) []string {
+	items := compactStringList(values, limit)
+	for i := range items {
+		items[i] = safelog.Text(items[i], maxBytes)
+	}
+	return items
 }
 
 func buildNewsContextAggregationPrompt(taskID string, pack NewsContextAggregationPack, mcpURL string) string {
@@ -2123,7 +2215,13 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 	b.WriteString("\n")
 
 	b.WriteString("## Strategy Generation Context\n\n```json\n")
-	raw, _ := json.MarshalIndent(genCtx, "", "  ")
+	strategyContext := strategyGenerationPromptContext(genCtx)
+	var raw []byte
+	if len(genCtx.OpportunityCandidates) > 1 {
+		raw, _ = json.Marshal(strategyContext)
+	} else {
+		raw, _ = json.MarshalIndent(strategyContext, "", "  ")
+	}
 	b.Write(raw)
 	b.WriteString("\n```\n\n")
 
@@ -2145,6 +2243,12 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 		b.WriteString("- For holdings without strategy coverage, you may output `draft_type: \"new_strategy\"` with a playbook.\n")
 		b.WriteString("- For holdings with active/draft/paused strategy coverage, output `draft_type: \"strategy_patch\"` or `no_change`; do not rewrite the active version.\n")
 		b.WriteString("- If immediate handling is needed, fill `portfolio_aware_suggestion.review_request`; do not create or request a proposed operation.\n\n")
+	}
+	if genCtx.Input.Mode == StrategyGenerationModeOpportunity && len(genCtx.OpportunityCandidates) > 1 {
+		b.WriteString("## Batched Opportunity Requirements\n\n")
+		b.WriteString("- This run contains multiple independently evidenced opportunity candidates. Evaluate every supplied candidate and target in this one response.\n")
+		b.WriteString("- Return at most one draft per target. Use no draft for a candidate that does not justify a monitorable entry plan; explain omissions in run_summary.\n")
+		b.WriteString("- Do not introduce symbols outside input.targetInstruments or input.candidateIds.\n\n")
 	}
 
 	b.WriteString("## Output Requirements\n\n")
@@ -2169,11 +2273,54 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 	b.WriteString("- strategy_patch drafts may be reported, but the main program will not update formal strategies in this version.\n")
 	b.WriteString("- The main program will create draft strategies only; users must activate them explicitly later.\n")
 
-	const maxPromptLen = 10000
+	maxPromptLen := 10000
+	if len(genCtx.OpportunityCandidates) > 1 {
+		maxPromptLen = 18000
+	}
 	if b.Len() > maxPromptLen {
 		return truncatePromptUTF8(b.String(), 7500, 2500)
 	}
 	return b.String()
+}
+
+func strategyGenerationPromptContext(genCtx StrategyGenerationContext) StrategyGenerationContext {
+	if genCtx.Input.Mode != StrategyGenerationModeOpportunity || len(genCtx.OpportunityCandidates) <= 1 {
+		return genCtx
+	}
+	out := genCtx
+	// ponytail: the aggregate evidence slice duplicates the candidate-indexed
+	// evidence below. Three recent records per candidate preserve the handoff while
+	// keeping the three-symbol batch cheaper than three independent prompts.
+	out.OpportunityEvidence = nil
+	out.EmbeddingStatus = nil
+	out.Targets = append([]StrategyGenerationInstrumentContext(nil), genCtx.Targets...)
+	for i := range out.Targets {
+		out.Targets[i].Profile = nil
+		out.Targets[i].ExistingStrategies = nil
+	}
+	out.OpportunityCandidates = append([]OpportunityCandidate(nil), genCtx.OpportunityCandidates...)
+	for i := range out.OpportunityCandidates {
+		out.OpportunityCandidates[i].Reason = safelog.Text(out.OpportunityCandidates[i].Reason, 120)
+		out.OpportunityCandidates[i].RiskSummary = safelog.Text(out.OpportunityCandidates[i].RiskSummary, 100)
+		out.OpportunityCandidates[i].Metadata = nil
+	}
+	out.OpportunityEvidenceByCandidate = make(map[string][]OpportunityEvidence, len(genCtx.OpportunityEvidenceByCandidate))
+	for candidateID, items := range genCtx.OpportunityEvidenceByCandidate {
+		items = append([]OpportunityEvidence(nil), items...)
+		if len(items) > 3 {
+			items = items[:3]
+		}
+		for i := range items {
+			items[i].Title = safelog.Text(items[i].Title, 48)
+			items[i].Summary = safelog.Text(items[i].Summary, 120)
+			items[i].SourceRef = safelog.Text(items[i].SourceRef, 60)
+			items[i].Publisher = safelog.Text(items[i].Publisher, 40)
+			items[i].URL = safelog.URLLabel(items[i].URL)
+			items[i].Metadata = nil
+		}
+		out.OpportunityEvidenceByCandidate[candidateID] = items
+	}
+	return out
 }
 
 func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationStepPack, mcpURL string) string {
@@ -2208,6 +2355,12 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 		}
 		b.WriteString("\n")
 	}
+	if pack.Context.Input.Mode == StrategyGenerationModeOpportunity && len(pack.Context.OpportunityCandidates) > 1 {
+		b.WriteString("## Batched Opportunity Boundary\n\n")
+		b.WriteString("- Evaluate every supplied candidate and target as one bounded batch; do not introduce symbols outside input.targetInstruments or input.candidateIds.\n")
+		b.WriteString("- The formatter may return at most one new_strategy draft per target. Omit candidates that do not justify a monitorable entry plan and explain the omission in run_summary.\n")
+		b.WriteString("- Reuse the supplied discovery evidence, then perform only the missing freshness and conflict checks needed for strategy thresholds.\n\n")
+	}
 
 	b.WriteString("## Required Research Refresh\n\n")
 	b.WriteString("- Treat stock_agent internal search and Codex CLI external public search/browse as equal-priority research channels. For each material target or holding, use both before making material claims unless one channel is unavailable; if unavailable, record the attempted verification and lower confidence.\n")
@@ -2222,7 +2375,13 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 	b.WriteString("- If external search/browse is unavailable, say so explicitly and lower confidence instead of inventing evidence.\n\n")
 
 	b.WriteString("## Strategy Generation Context\n\n```json\n")
-	raw, _ := json.MarshalIndent(pack.Context, "", "  ")
+	strategyContext := strategyGenerationPromptContext(pack.Context)
+	var raw []byte
+	if len(pack.Context.OpportunityCandidates) > 1 {
+		raw, _ = json.Marshal(strategyContext)
+	} else {
+		raw, _ = json.MarshalIndent(strategyContext, "", "  ")
+	}
 	b.Write(raw)
 	b.WriteString("\n```\n\n")
 
@@ -2255,7 +2414,10 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 	b.WriteString("{\"taskID\":\"<TASK_ID>\",\"taskType\":\"strategy_generation\",\"result\":{\"outputType\":\"strategy_generation\",\"resultSummary\":\"short summary\",\"confidence\":0.7,\"result\":{}}}\n")
 	b.WriteString("```\n")
 
-	const maxPromptLen = 12000
+	maxPromptLen := 12000
+	if len(pack.Context.OpportunityCandidates) > 1 {
+		maxPromptLen = 18000
+	}
 	if b.Len() > maxPromptLen {
 		return truncatePromptUTF8(b.String(), 8500, 3500)
 	}

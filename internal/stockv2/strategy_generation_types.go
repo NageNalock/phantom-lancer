@@ -56,6 +56,7 @@ type StrategyGenerationInput struct {
 	RequestedBy       string                               `json:"requestedBy,omitempty"`
 	OpportunityID     string                               `json:"opportunityId,omitempty"`
 	CandidateID       string                               `json:"candidateId,omitempty"`
+	CandidateIDs      []string                             `json:"candidateIds,omitempty"`
 	TimeHorizon       string                               `json:"timeHorizon,omitempty"`
 	AllowedActions    []string                             `json:"allowedActions,omitempty"`
 	EvidenceScope     map[string]bool                      `json:"evidenceScope,omitempty"`
@@ -69,21 +70,23 @@ type StrategyGenerationTargetInstrument struct {
 }
 
 type StrategyGenerationContext struct {
-	BuiltAt              time.Time                             `json:"builtAt"`
-	Input                StrategyGenerationInput               `json:"input"`
-	Mode                 string                                `json:"mode,omitempty"`
-	Targets              []StrategyGenerationInstrumentContext `json:"targets"`
-	FreshnessSummary     map[string]any                        `json:"freshnessSummary,omitempty"`
-	Portfolio            *PortfolioReviewContext               `json:"portfolio,omitempty"`
-	Diagnostics          *StrategyGenerationPortfolioDiagnosis `json:"diagnostics,omitempty"`
-	Holdings             []StrategyGenerationHoldingContext    `json:"holdings,omitempty"`
-	RecentReviews        []OperationReview                     `json:"recentReviews,omitempty"`
-	Transactions         []StockV2Transaction                  `json:"transactions,omitempty"`
-	MissingItems         []string                              `json:"missingItems,omitempty"`
-	Opportunity          *Opportunity                          `json:"opportunity,omitempty"`
-	OpportunityCandidate *OpportunityCandidate                 `json:"opportunityCandidate,omitempty"`
-	OpportunityEvidence  []OpportunityEvidence                 `json:"opportunityEvidence,omitempty"`
-	EmbeddingStatus      *EmbeddingStatus                      `json:"embeddingStatus,omitempty"`
+	BuiltAt                        time.Time                             `json:"builtAt"`
+	Input                          StrategyGenerationInput               `json:"input"`
+	Mode                           string                                `json:"mode,omitempty"`
+	Targets                        []StrategyGenerationInstrumentContext `json:"targets"`
+	FreshnessSummary               map[string]any                        `json:"freshnessSummary,omitempty"`
+	Portfolio                      *PortfolioReviewContext               `json:"portfolio,omitempty"`
+	Diagnostics                    *StrategyGenerationPortfolioDiagnosis `json:"diagnostics,omitempty"`
+	Holdings                       []StrategyGenerationHoldingContext    `json:"holdings,omitempty"`
+	RecentReviews                  []OperationReview                     `json:"recentReviews,omitempty"`
+	Transactions                   []StockV2Transaction                  `json:"transactions,omitempty"`
+	MissingItems                   []string                              `json:"missingItems,omitempty"`
+	Opportunity                    *Opportunity                          `json:"opportunity,omitempty"`
+	OpportunityCandidate           *OpportunityCandidate                 `json:"opportunityCandidate,omitempty"`
+	OpportunityEvidence            []OpportunityEvidence                 `json:"opportunityEvidence,omitempty"`
+	OpportunityCandidates          []OpportunityCandidate                `json:"opportunityCandidates,omitempty"`
+	OpportunityEvidenceByCandidate map[string][]OpportunityEvidence      `json:"opportunityEvidenceByCandidate,omitempty"`
+	EmbeddingStatus                *EmbeddingStatus                      `json:"embeddingStatus,omitempty"`
 }
 
 type StrategyGenerationInstrumentContext struct {

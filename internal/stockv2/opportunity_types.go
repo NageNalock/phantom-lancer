@@ -251,6 +251,8 @@ type RequestUpdateOpportunity struct {
 
 type RequestStartOpportunityDiscoveryRun struct {
 	RequestedBy string `json:"requestedBy,omitempty"`
+	// MarketScanRunID is internal orchestration context and is never accepted from HTTP.
+	MarketScanRunID string `json:"-"`
 }
 
 type RequestUpdateOpportunityCandidate struct {
@@ -369,12 +371,15 @@ type OpportunityDiscoveryReportExclusion struct {
 }
 
 type OpportunityDiscoveryContext struct {
-	BuiltAt          time.Time                  `json:"builtAt"`
-	Opportunity      Opportunity                `json:"opportunity"`
-	DiscoveryRun     OpportunityDiscoveryRun    `json:"discoveryRun"`
-	Steps            []OpportunityDiscoveryStep `json:"steps,omitempty"`
-	EmbeddingStatus  EmbeddingStatus            `json:"embeddingStatus,omitempty"`
-	FreshnessSummary map[string]any             `json:"freshnessSummary,omitempty"`
+	BuiltAt          time.Time                        `json:"builtAt"`
+	Mode             string                           `json:"mode"`
+	MarketScanRunID  string                           `json:"marketScanRunId,omitempty"`
+	MarketCandidates []OpportunityMarketScanCandidate `json:"marketCandidates,omitempty"`
+	Opportunity      Opportunity                      `json:"opportunity"`
+	DiscoveryRun     OpportunityDiscoveryRun          `json:"discoveryRun"`
+	Steps            []OpportunityDiscoveryStep       `json:"steps,omitempty"`
+	EmbeddingStatus  EmbeddingStatus                  `json:"embeddingStatus,omitempty"`
+	FreshnessSummary map[string]any                   `json:"freshnessSummary,omitempty"`
 }
 
 type OpportunityListFilter struct {

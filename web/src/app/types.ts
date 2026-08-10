@@ -3260,3 +3260,101 @@ export interface StockV2EmbeddingRebuildResult {
   failedItems?: Array<{ id?: string; error?: string }>;
   updatedAt?: string;
 }
+
+export type StockV2OpportunityMarketScanStatusValue =
+  | "pending" | "prefiltering" | "enriching" | "researching" | "drafting"
+  | "completed" | "partial" | "failed";
+
+export interface StockV2OpportunityMarketScanConfig {
+  id: string;
+  enabled: boolean;
+  lastScannedTradeDate?: string;
+  lastRunId?: string;
+  lastRunStatus?: string;
+  lastRunAt?: string;
+  lastSuccessAt?: string;
+  lastError?: string;
+  updatedAt: string;
+}
+
+export interface StockV2OpportunityMarketScanRun {
+  id: string;
+  triggerType: "manual" | "scheduled" | string;
+  requestedBy?: string;
+  status: StockV2OpportunityMarketScanStatusValue;
+  tradeDate?: string;
+  discoveryRunId?: string;
+  strategyAgentRunId?: string;
+  universeCount: number;
+  coveredCount: number;
+  prefilterCount: number;
+  enrichedCount: number;
+  researchCount: number;
+  finalCandidateCount: number;
+  strategyRequestedCount: number;
+  strategyCreatedCount: number;
+  retryCount: number;
+  nextRetryAt?: string;
+  errorMessage?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockV2OpportunityMarketScanMetrics {
+  tradeDate?: string;
+  return5Pct?: number;
+  return20Pct?: number;
+  return60Pct?: number;
+  ma20GapPct?: number;
+  volumeRatio5To20?: number;
+  medianAmount20?: number;
+  mainFlowRatio20?: number;
+  positiveFlowDays20?: number;
+  latestPrice?: number;
+  latestPctChange?: number;
+  qfqAvailable: boolean;
+  fundFlowAvailable: boolean;
+  quoteAvailable: boolean;
+  themeSignals?: string[];
+}
+
+export interface StockV2OpportunityMarketScanCandidate {
+  id: string;
+  scanRunId: string;
+  symbol: string;
+  market: string;
+  name: string;
+  industry?: string;
+  stage: string;
+  prefilterRank?: number;
+  finalRank?: number;
+  prefilterScore: number;
+  finalScore: number;
+  flowScore: number;
+  themeScore: number;
+  riskPenalty: number;
+  metrics: StockV2OpportunityMarketScanMetrics;
+  exclusionReason?: string;
+  opportunityCandidateId?: string;
+  strategyStatus?: string;
+  strategyId?: string;
+  updatedAt: string;
+}
+
+export interface StockV2OpportunityMarketScanStatus {
+  config: StockV2OpportunityMarketScanConfig;
+  activeRun?: StockV2OpportunityMarketScanRun;
+  latestRun?: StockV2OpportunityMarketScanRun;
+  latestDataTradeDate?: string;
+  universeCount: number;
+  coveredCount: number;
+  coverageRatio: number;
+  ready: boolean;
+  blockedReason?: string;
+  scheduleDescription: string;
+  maxRetries: number;
+  budgets: Record<string, number>;
+  recommendedModel: string;
+}

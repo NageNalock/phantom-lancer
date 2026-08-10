@@ -1,12 +1,14 @@
 import { useState } from "react";
 import type { AppActions } from "../../app/App";
 import type { StockV2DiscoveryStepKey } from "../../app/types";
-import { EmptyState } from "../../components/ui";
+import { EmptyState, SubTabs } from "../../components/ui";
+import { useQueryParamState } from "../../hooks/useQueryParamState";
 import { StockV2EmbeddingStatusSection } from "./StockV2EmbeddingStatusSection";
 import { StockV2OpportunityList } from "./StockV2OpportunityList";
 import { StockV2OpportunityForm } from "./StockV2OpportunityForm";
 import { StockV2OpportunityDetail } from "./StockV2OpportunityDetail";
 import { StockV2OpportunityRunDrawer } from "./StockV2OpportunityRunDrawer";
+import { StockV2OpportunityMarketScan } from "./StockV2OpportunityMarketScan";
 
 // 固定 8 步顺序，对齐设计文档 §4.3。StepTimeline / RunDrawer 共享。
 export const DISCOVERY_STEP_ORDER: StockV2DiscoveryStepKey[] = [
@@ -20,9 +22,29 @@ export const DISCOVERY_STEP_ORDER: StockV2DiscoveryStepKey[] = [
   "final_report",
 ];
 
-// 「主题机会」Tab 顶层容器：顶部常驻 Embedding 状态区 + 左列表 / 右详情。
-// 管理 selectedId / 创建 / Run Drawer 状态；候选 Drawer 由 Detail 自管。
+const OPPORTUNITY_VIEWS = ["marketScan", "themeResearch"] as const;
+
+// 机会发现按市场扫描与手工主题研究分层，避免全市场任务状态挤占主题工作区。
 export function StockV2OpportunityPage({ actions }: { actions: AppActions }) {
+  const [view, setView, viewHref] = useQueryParamState("stockv2OpportunityView", OPPORTUNITY_VIEWS, "marketScan");
+
+  return (
+    <div className="grid gap-4">
+      <SubTabs
+        activeId={view}
+        ariaLabel="机会发现视图"
+        onChange={(id) => setView(id as typeof view)}
+        tabs={[
+          { id: "marketScan", label: "市场扫描", href: viewHref("marketScan") },
+          { id: "themeResearch", label: "主题研究", href: viewHref("themeResearch") },
+        ]}
+      />
+      {view === "marketScan" ? <StockV2OpportunityMarketScan actions={actions} /> : <StockV2ThemeOpportunityResearch actions={actions} />}
+    </div>
+  );
+}
+
+function StockV2ThemeOpportunityResearch({ actions }: { actions: AppActions }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [runDrawerRunId, setRunDrawerRunId] = useState<string | null>(null);
