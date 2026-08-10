@@ -2,29 +2,60 @@ package stockv2
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestDailyBarsNeedsMaintenance(t *testing.T) {
 	tests := []struct {
-		name string
-		q    DailyBarsQuality
-		want bool
+		name            string
+		q               DailyBarsQuality
+		targetTradeDate string
+		want            bool
 	}{
 		{name: "missing", q: DailyBarsQuality{}, want: true},
 		{name: "partial", q: DailyBarsQuality{HasData: true, RowCount: 120, Meets250: false}, want: true},
 		{name: "stale", q: DailyBarsQuality{HasData: true, RowCount: 260, Meets250: true, Stale: true}, want: true},
-		{name: "ready", q: DailyBarsQuality{HasData: true, RowCount: 260, Meets250: true, Stale: false}, want: false},
+		{name: "ready", q: DailyBarsQuality{HasData: true, RowCount: 260, Meets250: true, LatestDate: "2026-08-07"}, targetTradeDate: "2026-08-07", want: false},
+		{name: "behind published session", q: DailyBarsQuality{HasData: true, RowCount: 260, Meets250: true, LatestDate: "2026-08-05"}, targetTradeDate: "2026-08-07", want: true},
+		{name: "holiday does not refetch", q: DailyBarsQuality{HasData: true, RowCount: 260, Meets250: true, LatestDate: "2026-08-07", Stale: true}, targetTradeDate: "2026-08-07", want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := dailyBarsNeedsMaintenance(tt.q); got != tt.want {
+			if got := dailyBarsNeedsMaintenance(tt.q, tt.targetTradeDate); got != tt.want {
 				t.Fatalf("dailyBarsNeedsMaintenance() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestUniverseDailyBarsTargetTradeDateUsesLatestCompletedSession(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"code":0,"msg":"","data":{"sz000001":{"day":[
+					["2026-08-07","11.2","11.1","11.3","11.0","1000"],
+					["2026-08-10","11.1","11.3","11.4","11.0","1200"]
+				]}}
+			}`)),
+			Request: req,
+		}, nil
+	})}
+	svc := &Service{dailyBarsSource: NewDailyBarsSource(nil, client)}
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+
+	if got := svc.universeDailyBarsTargetTradeDate(context.Background(), time.Date(2026, 8, 10, 14, 0, 0, 0, loc)); got != "2026-08-07" {
+		t.Fatalf("pre-close target = %q, want 2026-08-07", got)
+	}
+	if got := svc.universeDailyBarsTargetTradeDate(context.Background(), time.Date(2026, 8, 10, 16, 0, 0, 0, loc)); got != "2026-08-10" {
+		t.Fatalf("post-close target = %q, want 2026-08-10", got)
 	}
 }
 

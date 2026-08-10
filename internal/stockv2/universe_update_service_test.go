@@ -318,7 +318,8 @@ func TestUniverseMaintenanceFreshSkipRequiresReadyDailyBars(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get daily bar quality: %v", err)
 	}
-	skip, err := svc.shouldSkipFreshUniverseSymbol(ctx, "000001", time.Now(), svc.universeMaintenanceFreshnessWindow(), quality, true)
+	targetTradeDate := quality.LatestDate
+	skip, err := svc.shouldSkipFreshUniverseSymbol(ctx, "000001", time.Now(), svc.universeMaintenanceFreshnessWindow(), targetTradeDate, quality, true)
 	if err != nil {
 		t.Fatalf("fresh skip check: %v", err)
 	}
@@ -339,7 +340,7 @@ func TestUniverseMaintenanceFreshSkipRequiresReadyDailyBars(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get missing daily bar quality: %v", err)
 	}
-	skip, err = svc.shouldSkipFreshUniverseSymbol(ctx, "000002", time.Now(), svc.universeMaintenanceFreshnessWindow(), quality, true)
+	skip, err = svc.shouldSkipFreshUniverseSymbol(ctx, "000002", time.Now(), svc.universeMaintenanceFreshnessWindow(), targetTradeDate, quality, true)
 	if err != nil {
 		t.Fatalf("missing bars skip check: %v", err)
 	}

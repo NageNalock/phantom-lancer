@@ -837,6 +837,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 	successCount := 0
 	processedCount := 0
 	freshnessWindow := s.universeMaintenanceFreshnessWindow()
+	dailyBarsTargetDate := s.universeDailyBarsTargetTradeDate(ctx, time.Now())
 	flushProgress := func(includeFailedItems bool) {
 		progress.ProcessedCount = processedCount
 		progress.SuccessCount = successCount
@@ -906,7 +907,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 			if qualityErr != nil {
 				hasQuality = false
 			}
-			skip, err := s.shouldSkipFreshUniverseSymbol(ctx, sym, batchNow, freshnessWindow, quality, hasQuality)
+			skip, err := s.shouldSkipFreshUniverseSymbol(ctx, sym, batchNow, freshnessWindow, dailyBarsTargetDate, quality, hasQuality)
 			if err != nil {
 				if s.log != nil {
 					s.log.Warn("check stock data asset freshness failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol", sym, "freshness_window", freshnessWindow.String(), "error", safelog.Text(err.Error(), 240))
@@ -1009,7 +1010,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 				var err error
 				var bars []StockV2DailyBar
 				quality, hasQuality := qualityBySymbol[inst.Symbol]
-				fetchedDailyBars, bars, err = s.fetchDailyBarsForInstrumentWithQuality(ctx, inst, quality, hasQuality && qualityErr == nil)
+				fetchedDailyBars, bars, err = s.fetchDailyBarsForInstrumentWithQuality(ctx, inst, dailyBarsTargetDate, quality, hasQuality && qualityErr == nil)
 				if err != nil {
 					if s.log != nil {
 						s.log.Error("stock data asset maintenance daily bars failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol", inst.Symbol, "market", inst.Market, "instrument_type", inst.InstrumentType, "error", safelog.Text(err.Error(), 300))
@@ -1075,7 +1076,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 	}
 }
 
-func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, inst StockV2Instrument, quality DailyBarsQuality, hasQuality bool) (bool, []StockV2DailyBar, error) {
+func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, inst StockV2Instrument, targetTradeDate string, quality DailyBarsQuality, hasQuality bool) (bool, []StockV2DailyBar, error) {
 	if !hasQuality {
 		var err error
 		quality, err = s.GetDailyBarsQuality(ctx, inst.Symbol, DailyBarAdjustedNone)
@@ -1083,12 +1084,12 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 			return false, nil, err
 		}
 	}
-	if !dailyBarsNeedsMaintenance(quality) {
+	if !dailyBarsNeedsMaintenance(quality, targetTradeDate) {
 		return false, nil, nil
 	}
 
 	start, end := dailyBarRangeStartEnd(DailyBarRange1Y, time.Now())
-	if quality.HasData && quality.Meets250 && quality.Stale && quality.LatestDate != "" {
+	if quality.HasData && quality.Meets250 && quality.LatestDate != "" {
 		start = quality.LatestDate
 	}
 	bars, err := s.dailyBarsSource.FetchDailyBars(ctx, inst.Symbol, inst.Market, start, end, DailyBarAdjustedNone, 1800)
@@ -1101,8 +1102,41 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 	return true, bars, nil
 }
 
-func dailyBarsNeedsMaintenance(q DailyBarsQuality) bool {
-	return !q.HasData || !q.Meets250 || q.Stale
+func dailyBarsNeedsMaintenance(q DailyBarsQuality, targetTradeDate string) bool {
+	if !q.HasData || !q.Meets250 {
+		return true
+	}
+	if targetTradeDate != "" {
+		return q.LatestDate < targetTradeDate
+	}
+	return q.Stale
+}
+
+func (s *Service) universeDailyBarsTargetTradeDate(ctx context.Context, now time.Time) string {
+	if s == nil || s.dailyBarsSource == nil {
+		return ""
+	}
+	completedEnd, _ := agentDailyBarsCompletedEnd(now)
+	start := now.In(chinaMarketTZ).AddDate(0, 0, -14).Format("2006-01-02")
+	requestCtx, cancel := context.WithTimeout(ctx, agentDailyBarsRequestTimeout)
+	defer cancel()
+	// ponytail: one liquid main-board reference request gives the public source's
+	// latest completed session without adding a trading-calendar dependency. An
+	// empty result falls back to the existing per-symbol stale flag.
+	bars, err := s.dailyBarsSource.FetchDailyBars(requestCtx, "000001", "SZ", start, completedEnd, DailyBarAdjustedNone, 40)
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("stock data asset maintenance target trade date unavailable", "error", safelog.Text(err.Error(), 240))
+		}
+		return ""
+	}
+	latest := ""
+	for _, bar := range bars {
+		if bar.TradeDate <= completedEnd && bar.TradeDate > latest {
+			latest = bar.TradeDate
+		}
+	}
+	return latest
 }
 
 func (s *Service) universeMaintenanceFreshnessWindow() time.Duration {
@@ -1134,7 +1168,7 @@ func (s *Service) dailyBarsQualityForUniverseBatch(ctx context.Context, symbols 
 	return out, nil
 }
 
-func (s *Service) shouldSkipFreshUniverseSymbol(ctx context.Context, symbol string, now time.Time, freshness time.Duration, quality DailyBarsQuality, hasQuality bool) (bool, error) {
+func (s *Service) shouldSkipFreshUniverseSymbol(ctx context.Context, symbol string, now time.Time, freshness time.Duration, targetTradeDate string, quality DailyBarsQuality, hasQuality bool) (bool, error) {
 	inst, err := s.store.GetInstrument(ctx, symbol)
 	if errors.Is(err, ErrInstrumentNotFound) {
 		return false, nil
@@ -1152,9 +1186,10 @@ func (s *Service) shouldSkipFreshUniverseSymbol(ctx context.Context, symbol stri
 		}
 		quality = loaded
 	}
-	// ponytail: existing updated_at plus daily-bar quality is enough for v1 fast-skip;
-	// split per-source freshness if quote/profile cadences need independent SLAs.
-	return !dailyBarsNeedsMaintenance(quality), nil
+	// ponytail: existing updated_at plus the source-published target session is
+	// enough for the current fast-skip; split per-source freshness only if quote
+	// and profile cadences later need independent SLAs.
+	return !dailyBarsNeedsMaintenance(quality, targetTradeDate), nil
 }
 
 // GetUpdateJob 获取更新任务
