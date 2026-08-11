@@ -750,7 +750,7 @@ export function Drawer({
             <X size={14} />
           </Button>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-5">{children}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-5">{children}</div>
         {footer ? <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--line)] px-5 py-3">{footer}</div> : null}
       </section>
     </div>

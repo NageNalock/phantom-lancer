@@ -3274,6 +3274,9 @@ export interface StockV2OpportunityMarketScanConfig {
   lastRunAt?: string;
   lastSuccessAt?: string;
   lastError?: string;
+  primaryFundFlowConfigured: boolean;
+  backupFundFlowConfigured: boolean;
+  backupFundFlowProxyConfigured: boolean;
   updatedAt: string;
 }
 
@@ -3293,6 +3296,12 @@ export interface StockV2OpportunityMarketScanRun {
   finalCandidateCount: number;
   strategyRequestedCount: number;
   strategyCreatedCount: number;
+  fundFlowRequestedCount: number;
+  fundFlowAvailableCount: number;
+  fundFlowSource?: string;
+  fundFlowUsed: boolean;
+  fundFlowStatus?: string;
+  fundFlowError?: string;
   retryCount: number;
   nextRetryAt?: string;
   errorMessage?: string;
@@ -3316,6 +3325,10 @@ export interface StockV2OpportunityMarketScanMetrics {
   latestPctChange?: number;
   qfqAvailable: boolean;
   fundFlowAvailable: boolean;
+  fundFlowStatus?: string;
+  fundFlowSource?: string;
+  fundFlowAsOf?: string;
+  fundFlowUsed: boolean;
   quoteAvailable: boolean;
   themeSignals?: string[];
 }

@@ -2,15 +2,10 @@ package stockv2
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
-	"net/http"
-	"net/url"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,10 +18,8 @@ const (
 	opportunityMarketScanSchedulerInterval = 30 * time.Second
 	// ponytail: source calls are optional enrichment and must not hold the daily
 	// heavy-work slot indefinitely. Keep fixed with the fixed scan budgets.
-	opportunityMarketScanQFQTimeout       = 20 * time.Second
-	opportunityMarketScanFundFlowTimeout  = 10 * time.Second
-	opportunityMarketScanQFQInterval      = 200 * time.Millisecond
-	opportunityMarketScanFundFlowInterval = 1250 * time.Millisecond
+	opportunityMarketScanQFQTimeout  = 20 * time.Second
+	opportunityMarketScanQFQInterval = 200 * time.Millisecond
 	// ponytail: two delayed attempts bound model cost while covering short provider outages.
 	opportunityMarketScanMaxRetries      = 2
 	opportunityMarketScanFirstRetryDelay = 5 * time.Minute
@@ -51,6 +44,25 @@ func (s *Service) ListOpportunityMarketScanCandidates(ctx context.Context, filte
 
 func (s *Service) CountOpportunityMarketScanCandidates(ctx context.Context, filter OpportunityMarketScanCandidateListFilter) (int, error) {
 	return s.store.CountOpportunityMarketScanCandidates(ctx, filter)
+}
+
+func (s *Service) ProbeOpportunityMarketFundFlow(ctx context.Context) OpportunityMarketFundFlowProbe {
+	started := time.Now()
+	result := OpportunityMarketFundFlowProbe{Status: "failed"}
+	config, err := s.store.GetOpportunityMarketScanConfig(ctx)
+	if err == nil {
+		endDate := time.Now().Format("2006-01-02")
+		var fetched opportunityFundFlowFetchResult
+		fetched, err = s.fetchOpportunityMarketFundFlow(ctx, config, "000001", "SZ", endDate, 5)
+		if err == nil {
+			result.OK, result.Status, result.Source, result.Count = true, "available", fetched.Source, len(fetched.Points)
+		}
+	}
+	if err != nil {
+		result.Error = safelog.Error(err, 200)
+	}
+	result.Duration = time.Since(started).Milliseconds()
+	return result
 }
 
 func (s *Service) GetOpportunityMarketScanStatus(ctx context.Context) (OpportunityMarketScanStatus, error) {
@@ -127,6 +139,27 @@ func (s *Service) UpdateOpportunityMarketScanConfig(ctx context.Context, req Req
 	}
 	if req.Enabled != nil {
 		config.Enabled = *req.Enabled
+	}
+	if value := strings.TrimSpace(req.PrimaryFundFlowAPIKey); value != "" {
+		config.PrimaryFundFlowAPIKey = value
+	}
+	if value := strings.TrimSpace(req.BackupFundFlowAPIKey); value != "" {
+		config.BackupFundFlowAPIKey = value
+	}
+	if value := strings.TrimSpace(req.BackupFundFlowProxy); value != "" {
+		if _, err := opportunityFundFlowBackupClient(value); err != nil {
+			return OpportunityMarketScanStatus{}, err
+		}
+		config.BackupFundFlowProxy = value
+	}
+	if req.ClearPrimaryFundFlowAPIKey {
+		config.PrimaryFundFlowAPIKey = ""
+	}
+	if req.ClearBackupFundFlowAPIKey {
+		config.BackupFundFlowAPIKey = ""
+	}
+	if req.ClearBackupFundFlowProxy {
+		config.BackupFundFlowProxy = ""
 	}
 	if _, err := s.store.SaveOpportunityMarketScanConfig(ctx, config); err != nil {
 		return OpportunityMarketScanStatus{}, err
@@ -257,7 +290,7 @@ func (s *Service) prepareOpportunityMarketScan(ctx context.Context, runID string
 	}
 	run.Status = OpportunityMarketScanStatusEnriching
 	_, _ = s.store.UpdateOpportunityMarketScanRun(ctx, run)
-	candidates = s.enrichOpportunityMarketScan(ctx, run, candidates)
+	candidates = s.enrichOpportunityMarketScan(ctx, &run, candidates)
 	if len(candidates) == 0 {
 		s.failOpportunityMarketScan(ctx, run, errors.New("no candidates survived enrichment"), false)
 		return
@@ -329,7 +362,7 @@ func opportunityMarketMetricsFromRaw(item opportunityMarketScanRawMetric) Opport
 	}
 }
 
-func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run OpportunityMarketScanRun, candidates []OpportunityMarketScanCandidate) []OpportunityMarketScanCandidate {
+func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *OpportunityMarketScanRun, candidates []OpportunityMarketScanCandidate) []OpportunityMarketScanCandidate {
 	qfqLimit := min(len(candidates), opportunityMarketScanQFQLimit)
 	for i := 0; i < qfqLimit; i++ {
 		candidate := &candidates[i]
@@ -377,41 +410,81 @@ func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run Opportuni
 		}
 	}
 	flowLimit := min(len(candidates), opportunityMarketScanFundFlowLimit)
+	run.FundFlowRequestedCount = flowLimit
+	config, configErr := s.store.GetOpportunityMarketScanConfig(ctx)
+	flowCtx, cancelFlow := context.WithTimeout(ctx, opportunityFundFlowStageTimeout)
+	defer cancelFlow()
+	var flowErrors []string
 	for i := 0; i < flowLimit; i++ {
-		flow, err := s.fetchOpportunityMarketFundFlow(ctx, candidates[i].Symbol, candidates[i].Market, 120)
+		if configErr != nil {
+			candidates[i].Metrics.FundFlowStatus = "run_degraded"
+			continue
+		}
+		flow, err := s.fetchOpportunityMarketFundFlow(flowCtx, config, candidates[i].Symbol, candidates[i].Market, run.TradeDate, 120)
 		if err == nil {
-			applyOpportunityFundFlow(&candidates[i].Metrics, flow)
-		}
-		if i+1 < flowLimit {
-			select {
-			case <-ctx.Done():
-				return candidates
-			case <-time.After(opportunityMarketScanFundFlowInterval + time.Duration(i%4)*75*time.Millisecond):
+			applyOpportunityFundFlow(&candidates[i].Metrics, flow.Points, flow.Source)
+			run.FundFlowAvailableCount++
+			if run.FundFlowSource == "" {
+				run.FundFlowSource = flow.Source
+			} else if run.FundFlowSource != flow.Source {
+				run.FundFlowSource = "mixed"
 			}
+			continue
 		}
+		candidates[i].Metrics.FundFlowStatus = opportunityFundFlowFailureStatus(err)
+		if len(flowErrors) < 3 {
+			flowErrors = append(flowErrors, safelog.Error(err, 140))
+		}
+	}
+	for i := flowLimit; i < len(candidates); i++ {
+		candidates[i].Metrics.FundFlowStatus = "not_requested"
+	}
+	run.FundFlowUsed = flowLimit > 0 && float64(run.FundFlowAvailableCount)/float64(flowLimit) >= opportunityMarketScanMinimumCoverage
+	if run.FundFlowUsed {
+		run.FundFlowStatus = "available"
+	} else if configErr != nil || (!config.PrimaryFundFlowConfigured && !config.BackupFundFlowConfigured) {
+		run.FundFlowStatus = "not_configured"
+	} else {
+		run.FundFlowStatus = "run_degraded"
+	}
+	if len(flowErrors) > 0 {
+		run.FundFlowError = strings.Join(flowErrors, "; ")
+	}
+	if run.FundFlowUsed {
+		scoreOpportunityFundFlowPercentiles(candidates[:flowLimit])
 	}
 	threads := s.activeOpportunityMarketScanThreads(ctx)
 	for i := range candidates {
 		candidates[i].ThemeScore, candidates[i].Metrics.ThemeSignals = opportunityMarketThemeScore(candidates[i], threads)
-		flowScore := 50.0
-		if candidates[i].Metrics.FundFlowAvailable {
-			flowScore = clampScore(50 + candidates[i].Metrics.MainFlowRatio20*3 + float64(candidates[i].Metrics.PositiveFlowDays20-10)*2)
-		}
-		candidates[i].FlowScore = flowScore
-		quality := 25.0
+		candidates[i].Metrics.FundFlowUsed = run.FundFlowUsed && candidates[i].Metrics.FundFlowAvailable
+		quality, applicable := 0.0, 0.0
+		applicable += 35
 		if candidates[i].Metrics.QFQAvailable {
 			quality += 35
 		}
+		applicable += 20
 		if candidates[i].Metrics.QuoteAvailable {
 			quality += 20
 		}
-		if candidates[i].Metrics.FundFlowAvailable {
-			quality += 20
+		if run.FundFlowUsed {
+			applicable += 20
+			if candidates[i].Metrics.FundFlowAvailable {
+				quality += 20
+			}
+		}
+		if applicable > 0 {
+			quality = quality / applicable * 100
 		}
 		risk := math.Max(0, candidates[i].Metrics.Return5Pct-18)*1.5 + math.Max(0, candidates[i].Metrics.Return20Pct-35)
 		candidates[i].RiskPenalty = math.Min(risk, 35)
-		candidates[i].FinalScore = clampScore(candidates[i].PrefilterScore*0.45 + flowScore*0.30 +
-			clampScore(50+candidates[i].Metrics.LatestPctChange*2)*0.10 + candidates[i].ThemeScore*0.10 + quality*0.05 - candidates[i].RiskPenalty)
+		quoteScore := clampScore(50 + candidates[i].Metrics.LatestPctChange*2)
+		if run.FundFlowUsed {
+			candidates[i].FinalScore = clampScore(candidates[i].PrefilterScore*0.45 + candidates[i].FlowScore*0.30 + quoteScore*0.10 + candidates[i].ThemeScore*0.10 + quality*0.05 - candidates[i].RiskPenalty)
+		} else {
+			// ponytail: when the source-wide coverage gate fails, renormalize the
+			// proven dimensions instead of inventing a neutral flow score.
+			candidates[i].FinalScore = clampScore((candidates[i].PrefilterScore*0.45+quoteScore*0.10+candidates[i].ThemeScore*0.10+quality*0.05)/0.70 - candidates[i].RiskPenalty)
+		}
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].FinalScore == candidates[j].FinalScore {
@@ -434,6 +507,35 @@ func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run Opportuni
 		}
 	}
 	return candidates
+}
+
+func scoreOpportunityFundFlowPercentiles(candidates []OpportunityMarketScanCandidate) {
+	var available []*OpportunityMarketScanCandidate
+	for i := range candidates {
+		if candidates[i].Metrics.FundFlowAvailable {
+			available = append(available, &candidates[i])
+		}
+	}
+	if len(available) == 0 {
+		return
+	}
+	percentile := func(candidate *OpportunityMarketScanCandidate, value func(*OpportunityMarketScanCandidate) float64) float64 {
+		below := 0
+		for _, other := range available {
+			if value(other) < value(candidate) {
+				below++
+			}
+		}
+		if len(available) == 1 {
+			return 100
+		}
+		return float64(below) / float64(len(available)-1) * 100
+	}
+	for _, candidate := range available {
+		ratio := percentile(candidate, func(item *OpportunityMarketScanCandidate) float64 { return item.Metrics.MainFlowRatio20 })
+		positiveDays := percentile(candidate, func(item *OpportunityMarketScanCandidate) float64 { return float64(item.Metrics.PositiveFlowDays20) })
+		candidate.FlowScore = ratio*0.7 + positiveDays*0.3
+	}
 }
 
 func applyOpportunityQFQMetrics(metrics *OpportunityMarketScanMetrics, bars []StockV2DailyBar) {
@@ -487,81 +589,6 @@ func opportunityDailyBarAmount(bar StockV2DailyBar) float64 {
 	// full-market provider request; add an explicit volume-unit field if a second
 	// amount-less source with different units is introduced.
 	return bar.Close * bar.Volume * 100
-}
-
-type opportunityFundFlowPoint struct{ MainNet, MainRatio float64 }
-
-func (s *Service) fetchOpportunityMarketFundFlow(ctx context.Context, symbol, market string, limit int) ([]opportunityFundFlowPoint, error) {
-	requestCtx, cancel := context.WithTimeout(ctx, opportunityMarketScanFundFlowTimeout)
-	defer cancel()
-	values := url.Values{"lmt": {strconv.Itoa(limit)}, "klt": {"101"}, "secid": {eastmoneySecID(market, symbol)}, "fields1": {"f1,f2,f3,f7"}, "fields2": {"f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63"}}
-	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?"+values.Encode(), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
-	req.Header.Set("Referer", "https://quote.eastmoney.com/")
-	client := s.httpClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("fund flow status %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, err
-	}
-	var payload struct {
-		Data struct {
-			Klines []string `json:"klines"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, err
-	}
-	out := make([]opportunityFundFlowPoint, 0, len(payload.Data.Klines))
-	for _, line := range payload.Data.Klines {
-		parts := strings.Split(line, ",")
-		if len(parts) < 8 {
-			continue
-		}
-		mainNet, err1 := strconv.ParseFloat(parts[1], 64)
-		mainRatio, err2 := strconv.ParseFloat(parts[6], 64)
-		if err1 == nil && err2 == nil {
-			out = append(out, opportunityFundFlowPoint{MainNet: mainNet, MainRatio: mainRatio})
-		}
-	}
-	if len(out) == 0 {
-		return nil, errors.New("empty fund flow history")
-	}
-	return out, nil
-}
-
-func applyOpportunityFundFlow(metrics *OpportunityMarketScanMetrics, points []opportunityFundFlowPoint) {
-	metrics.FundFlowAvailable = len(points) > 0
-	for i := len(points) - 1; i >= 0; i-- {
-		distance := len(points) - i
-		if distance <= 5 {
-			metrics.MainNetInflow5 += points[i].MainNet
-		}
-		if distance <= 20 {
-			metrics.MainNetInflow20 += points[i].MainNet
-			metrics.MainFlowRatio20 += points[i].MainRatio
-			if points[i].MainNet > 0 {
-				metrics.PositiveFlowDays20++
-			}
-		}
-		if distance <= 60 {
-			metrics.MainNetInflow60 += points[i].MainNet
-		}
-	}
-	metrics.MainFlowRatio20 /= float64(min(20, len(points)))
 }
 
 func (s *Service) activeOpportunityMarketScanThreads(ctx context.Context) []NewsThread {
@@ -783,6 +810,14 @@ func (s *Service) advanceOpportunityMarketResearch(ctx context.Context, run Oppo
 		}
 		if candidate.EvidenceScore >= 55 && candidate.Confidence >= .55 {
 			eligible = append(eligible, candidate)
+		}
+	}
+	for i := range scanCandidates {
+		if scanCandidates[i].Stage == OpportunityMarketScanCandidateResearch {
+			scanCandidates[i].Stage = OpportunityMarketScanCandidateReviewedOut
+			if scanCandidates[i].ExclusionReason == "" {
+				scanCandidates[i].ExclusionReason = "Agent 复核未入选"
+			}
 		}
 	}
 	_ = s.store.UpsertOpportunityMarketScanCandidates(ctx, scanCandidates)

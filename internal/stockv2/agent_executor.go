@@ -1805,6 +1805,10 @@ func opportunityDiscoveryPromptContext(discCtx OpportunityDiscoveryContext) any 
 		LatestPctChange    float64  `json:"latestPctChange,omitempty"`
 		QFQAvailable       bool     `json:"qfqAvailable"`
 		FundFlowAvailable  bool     `json:"fundFlowAvailable"`
+		FundFlowStatus     string   `json:"fundFlowStatus,omitempty"`
+		FundFlowSource     string   `json:"fundFlowSource,omitempty"`
+		FundFlowAsOf       string   `json:"fundFlowAsOf,omitempty"`
+		FundFlowUsed       bool     `json:"fundFlowUsed"`
 		QuoteAvailable     bool     `json:"quoteAvailable"`
 		ThemeSignals       []string `json:"themeSignals,omitempty"`
 	}
@@ -1839,6 +1843,8 @@ func opportunityDiscoveryPromptContext(discCtx OpportunityDiscoveryContext) any 
 				PositiveFlowDays20: item.Metrics.PositiveFlowDays20, LatestPrice: item.Metrics.LatestPrice,
 				LatestPctChange: item.Metrics.LatestPctChange, QFQAvailable: item.Metrics.QFQAvailable,
 				FundFlowAvailable: item.Metrics.FundFlowAvailable, QuoteAvailable: item.Metrics.QuoteAvailable,
+				FundFlowStatus: item.Metrics.FundFlowStatus, FundFlowSource: item.Metrics.FundFlowSource,
+				FundFlowAsOf: item.Metrics.FundFlowAsOf, FundFlowUsed: item.Metrics.FundFlowUsed,
 				ThemeSignals: opportunityPromptTextList(item.Metrics.ThemeSignals, 3, 32),
 			},
 		})

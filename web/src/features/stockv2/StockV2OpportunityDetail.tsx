@@ -26,10 +26,12 @@ import { StockV2OpportunityCandidateDrawer } from "./StockV2OpportunityCandidate
 export function StockV2OpportunityDetail({
   actions,
   opportunityId,
+  refreshToken,
   onOpenRun,
 }: {
   actions: AppActions;
   opportunityId: string;
+  refreshToken: number;
   onOpenRun: (runId: string) => void;
 }) {
   const [opp, setOpp] = useState<StockV2Opportunity | null>(null);
@@ -39,9 +41,9 @@ export function StockV2OpportunityDetail({
   const [starting, setStarting] = useState(false);
   const [candidateDrawer, setCandidateDrawer] = useState<StockV2OpportunityCandidate | null>(null);
 
-  async function load() {
-    setLoading(true);
-    setError(null);
+  async function load(showLoading = false) {
+    if (showLoading) setLoading(true);
+    if (showLoading) setError(null);
     try {
       const [o, r] = await Promise.all([
         actions.api<StockV2Opportunity>(`/api/stockv2/opportunities/${encodeURIComponent(opportunityId)}`),
@@ -53,18 +55,31 @@ export function StockV2OpportunityDetail({
       setRuns(r.items || []);
     } catch (err) {
       const status = (err as ApiError).status;
-      setError(status === 404 ? "该能力后端尚未实现（404），Embedding 状态区可正常使用。" : friendlyError(err));
-      setOpp(null);
-      setRuns([]);
+      const message = status === 404 ? "该能力后端尚未实现（404），Embedding 状态区可正常使用。" : friendlyError(err);
+      if (showLoading) {
+        setError(message);
+        setOpp(null);
+        setRuns([]);
+      } else {
+        actions.setToast(`机会详情刷新失败：${message}`, "warn");
+      }
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }
 
   useEffect(() => {
-    void load();
+    void load(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opportunityId]);
+
+  useEffect(() => {
+    if (refreshToken === 0 || opp?.id !== opportunityId) return;
+    void load(false);
+    // Refresh completed run counters without remounting the detail workspace.
+    // Remounting collapses the candidate table and moves the browser scroll anchor.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshToken]);
 
   async function startDiscovery() {
     if (!opp) return;
@@ -140,7 +155,7 @@ export function StockV2OpportunityDetail({
       </div>
 
       {/* 候选池：跟随最近一次 run */}
-      <div className="rounded-lg border border-[var(--line)] bg-[var(--surface)] p-4">
+      <div className="min-w-0 overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--surface)] p-4">
         <div className="mb-3 flex items-center justify-between gap-2">
           <strong className="text-sm">候选池</strong>
           {latestRun ? (

@@ -117,6 +117,26 @@ func TestOpportunityMarketScanRepositoryDefaultsAndCandidates(t *testing.T) {
 	}
 }
 
+func TestOpportunityMarketScanSchemaBackfillsTerminalResearchCandidates(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	run, err := store.CreateOpportunityMarketScanRun(ctx, OpportunityMarketScanRun{TriggerType: OpportunityMarketScanTriggerManual, Status: OpportunityMarketScanStatusCompleted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertOpportunityMarketScanCandidates(ctx, []OpportunityMarketScanCandidate{{ScanRunID: run.ID, Symbol: "600000", Market: "SH", Name: "测试", Stage: OpportunityMarketScanCandidateResearch}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ensureOpportunityMarketScanSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{ScanRunID: run.ID, Stage: OpportunityMarketScanCandidateReviewedOut, Limit: 10})
+	if err != nil || len(items) != 1 || items[0].ExclusionReason == "" {
+		t.Fatalf("items=%+v err=%v", items, err)
+	}
+}
+
 func TestOpportunityMarketScanDiscoveryRejectsSymbolOutsideBoundedSet(t *testing.T) {
 	store := newTestStore(t)
 	svc := NewService(store, nil, nil)

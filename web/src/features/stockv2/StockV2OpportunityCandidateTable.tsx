@@ -144,8 +144,8 @@ export function StockV2OpportunityCandidateTable({
 
   return (
     <>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[860px] border-collapse text-xs">
+      <div className="max-w-full overflow-x-auto overscroll-x-contain" tabIndex={0} aria-label="候选池表格，可横向滚动查看全部列">
+        <table className="w-full min-w-[800px] border-collapse text-xs">
           <thead>
             <tr className="border-b border-[var(--line)] text-left text-[var(--muted)]">
               <Th>#</Th>

@@ -89,7 +89,56 @@ func (s *Store) ensureOpportunityMarketScanSchema(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_stockv2_opportunity_market_scan_candidates_symbol
 			ON stockv2_opportunity_market_scan_candidates(symbol, updated_at DESC);
 	`)
-	return wrapError(err, "ensure opportunity market scan schema")
+	if err != nil {
+		return wrapError(err, "ensure opportunity market scan schema")
+	}
+	columns := []struct{ table, name, definition string }{
+		{"stockv2_opportunity_market_scan_config", "primary_fund_flow_api_key", "TEXT"},
+		{"stockv2_opportunity_market_scan_config", "backup_fund_flow_api_key", "TEXT"},
+		{"stockv2_opportunity_market_scan_config", "backup_fund_flow_proxy", "TEXT"},
+		{"stockv2_opportunity_market_scan_runs", "fund_flow_requested_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"stockv2_opportunity_market_scan_runs", "fund_flow_available_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"stockv2_opportunity_market_scan_runs", "fund_flow_source", "TEXT"},
+		{"stockv2_opportunity_market_scan_runs", "fund_flow_used", "INTEGER NOT NULL DEFAULT 0"},
+		{"stockv2_opportunity_market_scan_runs", "fund_flow_status", "TEXT"},
+		{"stockv2_opportunity_market_scan_runs", "fund_flow_error", "TEXT"},
+	}
+	for _, column := range columns {
+		if err := s.ensureOpportunityMarketScanColumn(ctx, column.table, column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	// Completed historical research rows not selected by the Agent are terminal
+	// review outcomes, not pending work.
+	_, err = s.db.ExecContext(ctx, `UPDATE stockv2_opportunity_market_scan_candidates
+		SET stage=?, exclusion_reason=CASE WHEN COALESCE(exclusion_reason,'')='' THEN 'Agent 复核未入选' ELSE exclusion_reason END
+		WHERE stage=? AND scan_run_id IN (
+			SELECT id FROM stockv2_opportunity_market_scan_runs WHERE status IN (?, ?)
+		)`, OpportunityMarketScanCandidateReviewedOut, OpportunityMarketScanCandidateResearch,
+		OpportunityMarketScanStatusCompleted, OpportunityMarketScanStatusPartial)
+	return wrapError(err, "backfill opportunity market reviewed outcomes")
+}
+
+func (s *Store) ensureOpportunityMarketScanColumn(ctx context.Context, table, name, definition string) error {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return wrapError(err, "inspect opportunity market scan schema")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var columnName, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return wrapError(err, "scan opportunity market scan schema")
+		}
+		if columnName == name {
+			return nil
+		}
+	}
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, name, definition))
+	return wrapError(err, "extend opportunity market scan schema")
 }
 
 func (s *Store) GetOpportunityMarketScanConfig(ctx context.Context) (OpportunityMarketScanConfig, error) {
@@ -97,10 +146,12 @@ func (s *Store) GetOpportunityMarketScanConfig(ctx context.Context) (Opportunity
 	var lastRunAt, lastSuccessAt sql.NullTime
 	err := s.db.QueryRowContext(ctx, `SELECT id, enabled, COALESCE(last_scanned_trade_date,''),
 		COALESCE(last_run_id,''), COALESCE(last_run_status,''), last_run_at, last_success_at,
-		COALESCE(last_error,''), updated_at
+		COALESCE(last_error,''), updated_at, COALESCE(primary_fund_flow_api_key,''),
+		COALESCE(backup_fund_flow_api_key,''), COALESCE(backup_fund_flow_proxy,'')
 		FROM stockv2_opportunity_market_scan_config WHERE id=?`, OpportunityMarketScanConfigID).Scan(
 		&item.ID, &item.Enabled, &item.LastScannedTradeDate, &item.LastRunID,
 		&item.LastRunStatus, &lastRunAt, &lastSuccessAt, &item.LastError, &item.UpdatedAt,
+		&item.PrimaryFundFlowAPIKey, &item.BackupFundFlowAPIKey, &item.BackupFundFlowProxy,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return OpportunityMarketScanConfig{}, ErrOpportunityMarketScanConfigNotFound
@@ -114,6 +165,9 @@ func (s *Store) GetOpportunityMarketScanConfig(ctx context.Context) (Opportunity
 	if lastSuccessAt.Valid {
 		item.LastSuccessAt = lastSuccessAt.Time
 	}
+	item.PrimaryFundFlowConfigured = item.PrimaryFundFlowAPIKey != ""
+	item.BackupFundFlowConfigured = item.BackupFundFlowAPIKey != ""
+	item.BackupFundFlowProxyConfigured = item.BackupFundFlowProxy != ""
 	return item, nil
 }
 
@@ -124,10 +178,12 @@ func (s *Store) SaveOpportunityMarketScanConfig(ctx context.Context, item Opport
 	item.UpdatedAt = time.Now()
 	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO stockv2_opportunity_market_scan_config
 		(id, enabled, last_scanned_trade_date, last_run_id, last_run_status, last_run_at,
-		 last_success_at, last_error, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 last_success_at, last_error, updated_at, primary_fund_flow_api_key,
+		 backup_fund_flow_api_key, backup_fund_flow_proxy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID, item.Enabled, nullableString(item.LastScannedTradeDate), nullableString(item.LastRunID),
 		nullableString(item.LastRunStatus), nullableTime(item.LastRunAt), nullableTime(item.LastSuccessAt),
-		nullableString(item.LastError), item.UpdatedAt)
+		nullableString(item.LastError), item.UpdatedAt, nullableString(item.PrimaryFundFlowAPIKey),
+		nullableString(item.BackupFundFlowAPIKey), nullableString(item.BackupFundFlowProxy))
 	return item, wrapError(err, "save opportunity market scan config")
 }
 
@@ -136,6 +192,8 @@ const opportunityMarketScanRunSelectSQL = `SELECT id, trigger_type, COALESCE(req
 	COALESCE(discovery_run_id,''), COALESCE(strategy_agent_run_id,''), universe_count, covered_count,
 	prefilter_count, enriched_count, research_count, final_candidate_count,
 	strategy_requested_count, strategy_created_count, retry_count, next_retry_at,
+	fund_flow_requested_count, fund_flow_available_count, COALESCE(fund_flow_source,''),
+	fund_flow_used, COALESCE(fund_flow_status,''), COALESCE(fund_flow_error,''),
 	COALESCE(error_message,''), started_at, finished_at, created_at, updated_at
 	FROM stockv2_opportunity_market_scan_runs`
 
@@ -147,7 +205,10 @@ func scanOpportunityMarketScanRun(row rowScanner) (OpportunityMarketScanRun, err
 		&item.StrategyAgentRunID, &item.UniverseCount, &item.CoveredCount, &item.PrefilterCount,
 		&item.EnrichedCount, &item.ResearchCount, &item.FinalCandidateCount,
 		&item.StrategyRequestedCount, &item.StrategyCreatedCount, &item.RetryCount,
-		&nextRetry, &item.ErrorMessage, &started, &finished, &item.CreatedAt, &item.UpdatedAt)
+		&nextRetry,
+		&item.FundFlowRequestedCount, &item.FundFlowAvailableCount, &item.FundFlowSource,
+		&item.FundFlowUsed, &item.FundFlowStatus, &item.FundFlowError,
+		&item.ErrorMessage, &started, &finished, &item.CreatedAt, &item.UpdatedAt)
 	if nextRetry.Valid {
 		item.NextRetryAt = nextRetry.Time
 	}
@@ -175,13 +236,16 @@ func (s *Store) CreateOpportunityMarketScanRun(ctx context.Context, item Opportu
 		 discovery_run_id, strategy_agent_run_id, universe_count, covered_count, prefilter_count,
 		 enriched_count, research_count, final_candidate_count, strategy_requested_count,
 		 strategy_created_count, retry_count, next_retry_at, error_message, started_at, finished_at,
-		 created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 created_at, updated_at, fund_flow_requested_count, fund_flow_available_count, fund_flow_source,
+		 fund_flow_used, fund_flow_status, fund_flow_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID, item.TriggerType, nullableString(item.RequestedBy), item.Status, nullableString(item.TradeDate),
 		nullableString(item.SourceUpdateJobID), nullableString(item.OpportunityID), nullableString(item.DiscoveryRunID),
 		nullableString(item.StrategyAgentRunID), item.UniverseCount, item.CoveredCount, item.PrefilterCount,
 		item.EnrichedCount, item.ResearchCount, item.FinalCandidateCount, item.StrategyRequestedCount,
 		item.StrategyCreatedCount, item.RetryCount, nullableTime(item.NextRetryAt), nullableString(item.ErrorMessage),
-		nullableTime(item.StartedAt), nullableTime(item.FinishedAt), item.CreatedAt, item.UpdatedAt)
+		nullableTime(item.StartedAt), nullableTime(item.FinishedAt), item.CreatedAt, item.UpdatedAt,
+		item.FundFlowRequestedCount, item.FundFlowAvailableCount, nullableString(item.FundFlowSource),
+		item.FundFlowUsed, nullableString(item.FundFlowStatus), nullableString(item.FundFlowError))
 	return item, wrapError(err, "create opportunity market scan run")
 }
 
@@ -192,13 +256,16 @@ func (s *Store) UpdateOpportunityMarketScanRun(ctx context.Context, item Opportu
 		discovery_run_id=?, strategy_agent_run_id=?, universe_count=?, covered_count=?, prefilter_count=?,
 		enriched_count=?, research_count=?, final_candidate_count=?, strategy_requested_count=?,
 		strategy_created_count=?, retry_count=?, next_retry_at=?, error_message=?, started_at=?, finished_at=?,
-		updated_at=? WHERE id=?`, item.TriggerType, nullableString(item.RequestedBy), item.Status,
+		fund_flow_requested_count=?, fund_flow_available_count=?, fund_flow_source=?, fund_flow_used=?,
+		fund_flow_status=?, fund_flow_error=?, updated_at=? WHERE id=?`, item.TriggerType, nullableString(item.RequestedBy), item.Status,
 		nullableString(item.TradeDate), nullableString(item.SourceUpdateJobID), nullableString(item.OpportunityID),
 		nullableString(item.DiscoveryRunID), nullableString(item.StrategyAgentRunID), item.UniverseCount,
 		item.CoveredCount, item.PrefilterCount, item.EnrichedCount, item.ResearchCount,
 		item.FinalCandidateCount, item.StrategyRequestedCount, item.StrategyCreatedCount, item.RetryCount,
 		nullableTime(item.NextRetryAt), nullableString(item.ErrorMessage), nullableTime(item.StartedAt),
-		nullableTime(item.FinishedAt), item.UpdatedAt, item.ID)
+		nullableTime(item.FinishedAt), item.FundFlowRequestedCount, item.FundFlowAvailableCount,
+		nullableString(item.FundFlowSource), item.FundFlowUsed, nullableString(item.FundFlowStatus),
+		nullableString(item.FundFlowError), item.UpdatedAt, item.ID)
 	if err != nil {
 		return OpportunityMarketScanRun{}, wrapError(err, "update opportunity market scan run")
 	}

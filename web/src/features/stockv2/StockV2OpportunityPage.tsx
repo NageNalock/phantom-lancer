@@ -48,25 +48,28 @@ function StockV2ThemeOpportunityResearch({ actions }: { actions: AppActions }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [runDrawerRunId, setRunDrawerRunId] = useState<string | null>(null);
-  const [refreshNonce, setRefreshNonce] = useState(0);
+  const [detailRefreshToken, setDetailRefreshToken] = useState(0);
 
   return (
     <div className="grid gap-4">
       <StockV2EmbeddingStatusSection actions={actions} />
 
-      <div className="grid grid-cols-[320px_minmax(0,1fr)] gap-4 max-xl:grid-cols-1">
+      <div className="grid min-w-0 grid-cols-[minmax(260px,300px)_minmax(0,1fr)] gap-4 max-xl:grid-cols-1">
         <StockV2OpportunityList
           actions={actions}
           selectedId={selectedId}
-          onSelect={setSelectedId}
+          onSelect={(id) => {
+            setSelectedId(id);
+            setDetailRefreshToken(0);
+          }}
           onCreate={() => setShowCreate(true)}
         />
         <div className="min-w-0">
           {selectedId ? (
             <StockV2OpportunityDetail
-              key={`${selectedId}-${refreshNonce}`}
               actions={actions}
               opportunityId={selectedId}
+              refreshToken={detailRefreshToken}
               onOpenRun={(runId) => setRunDrawerRunId(runId)}
             />
           ) : (
@@ -94,7 +97,7 @@ function StockV2ThemeOpportunityResearch({ actions }: { actions: AppActions }) {
           runId={runDrawerRunId}
           onClose={() => {
             setRunDrawerRunId(null);
-            setRefreshNonce((n) => n + 1);
+            setDetailRefreshToken((value) => value + 1);
           }}
         />
       ) : null}

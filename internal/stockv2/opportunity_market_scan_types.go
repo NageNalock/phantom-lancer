@@ -25,6 +25,7 @@ const (
 
 	OpportunityMarketScanCandidatePrefiltered = "prefiltered"
 	OpportunityMarketScanCandidateResearch    = "research_candidate"
+	OpportunityMarketScanCandidateReviewedOut = "reviewed_out"
 	OpportunityMarketScanCandidateFinal       = "final"
 	OpportunityMarketScanCandidateExcluded    = "excluded"
 
@@ -55,19 +56,31 @@ var (
 )
 
 type OpportunityMarketScanConfig struct {
-	ID                   string    `json:"id"`
-	Enabled              bool      `json:"enabled"`
-	LastScannedTradeDate string    `json:"lastScannedTradeDate,omitempty"`
-	LastRunID            string    `json:"lastRunId,omitempty"`
-	LastRunStatus        string    `json:"lastRunStatus,omitempty"`
-	LastRunAt            time.Time `json:"lastRunAt,omitempty"`
-	LastSuccessAt        time.Time `json:"lastSuccessAt,omitempty"`
-	LastError            string    `json:"lastError,omitempty"`
-	UpdatedAt            time.Time `json:"updatedAt"`
+	ID                            string    `json:"id"`
+	Enabled                       bool      `json:"enabled"`
+	LastScannedTradeDate          string    `json:"lastScannedTradeDate,omitempty"`
+	LastRunID                     string    `json:"lastRunId,omitempty"`
+	LastRunStatus                 string    `json:"lastRunStatus,omitempty"`
+	LastRunAt                     time.Time `json:"lastRunAt,omitempty"`
+	LastSuccessAt                 time.Time `json:"lastSuccessAt,omitempty"`
+	LastError                     string    `json:"lastError,omitempty"`
+	UpdatedAt                     time.Time `json:"updatedAt"`
+	PrimaryFundFlowAPIKey         string    `json:"-"`
+	BackupFundFlowAPIKey          string    `json:"-"`
+	BackupFundFlowProxy           string    `json:"-"`
+	PrimaryFundFlowConfigured     bool      `json:"primaryFundFlowConfigured"`
+	BackupFundFlowConfigured      bool      `json:"backupFundFlowConfigured"`
+	BackupFundFlowProxyConfigured bool      `json:"backupFundFlowProxyConfigured"`
 }
 
 type RequestUpdateOpportunityMarketScanConfig struct {
-	Enabled *bool `json:"enabled,omitempty"`
+	Enabled                    *bool  `json:"enabled,omitempty"`
+	PrimaryFundFlowAPIKey      string `json:"primaryFundFlowApiKey,omitempty"`
+	BackupFundFlowAPIKey       string `json:"backupFundFlowApiKey,omitempty"`
+	BackupFundFlowProxy        string `json:"backupFundFlowProxy,omitempty"`
+	ClearPrimaryFundFlowAPIKey bool   `json:"clearPrimaryFundFlowApiKey,omitempty"`
+	ClearBackupFundFlowAPIKey  bool   `json:"clearBackupFundFlowApiKey,omitempty"`
+	ClearBackupFundFlowProxy   bool   `json:"clearBackupFundFlowProxy,omitempty"`
 }
 
 type OpportunityMarketScanRun struct {
@@ -88,6 +101,12 @@ type OpportunityMarketScanRun struct {
 	FinalCandidateCount    int       `json:"finalCandidateCount"`
 	StrategyRequestedCount int       `json:"strategyRequestedCount"`
 	StrategyCreatedCount   int       `json:"strategyCreatedCount"`
+	FundFlowRequestedCount int       `json:"fundFlowRequestedCount"`
+	FundFlowAvailableCount int       `json:"fundFlowAvailableCount"`
+	FundFlowSource         string    `json:"fundFlowSource,omitempty"`
+	FundFlowUsed           bool      `json:"fundFlowUsed"`
+	FundFlowStatus         string    `json:"fundFlowStatus,omitempty"`
+	FundFlowError          string    `json:"fundFlowError,omitempty"`
 	RetryCount             int       `json:"retryCount"`
 	NextRetryAt            time.Time `json:"nextRetryAt,omitempty"`
 	ErrorMessage           string    `json:"errorMessage,omitempty"`
@@ -120,8 +139,21 @@ type OpportunityMarketScanMetrics struct {
 	LatestMainFlowPct  float64  `json:"latestMainFlowPct,omitempty"`
 	QFQAvailable       bool     `json:"qfqAvailable"`
 	FundFlowAvailable  bool     `json:"fundFlowAvailable"`
+	FundFlowStatus     string   `json:"fundFlowStatus,omitempty"`
+	FundFlowSource     string   `json:"fundFlowSource,omitempty"`
+	FundFlowAsOf       string   `json:"fundFlowAsOf,omitempty"`
+	FundFlowUsed       bool     `json:"fundFlowUsed"`
 	QuoteAvailable     bool     `json:"quoteAvailable"`
 	ThemeSignals       []string `json:"themeSignals,omitempty"`
+}
+
+type OpportunityMarketFundFlowProbe struct {
+	OK       bool   `json:"ok"`
+	Source   string `json:"source,omitempty"`
+	Status   string `json:"status"`
+	Count    int    `json:"count"`
+	Duration int64  `json:"durationMs"`
+	Error    string `json:"error,omitempty"`
 }
 
 type OpportunityMarketScanCandidate struct {

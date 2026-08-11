@@ -44,6 +44,13 @@ func (s *Server) handleStockV2UpdateOpportunityMarketScanConfig(w http.ResponseW
 	s.writeJSON(w, status)
 }
 
+func (s *Server) handleStockV2ProbeOpportunityMarketFundFlow(w http.ResponseWriter, r *http.Request) {
+	if session, ok := s.requireAuth(w, r); !ok || !s.requireCSRF(w, r, session.Session) {
+		return
+	}
+	s.writeJSON(w, s.stockV2.ProbeOpportunityMarketFundFlow(r.Context()))
+}
+
 func (s *Server) handleStockV2ListOpportunityMarketScanRuns(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAuth(w, r); !ok {
 		return
