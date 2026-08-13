@@ -222,6 +222,32 @@ func TestStrategyGenerationReportNormalizesFormatterTargetAndActions(t *testing.
 	}
 }
 
+func TestStrategyGenerationReportNormalizesObservedFormatterRuleAliases(t *testing.T) {
+	raw := strategyGenerationReportResult("302132")
+	draft := mapFromAny(sliceFromAny(raw["drafts"])[0])
+	playbook := mapFromAny(draft["playbook"])
+	rule := mapFromAny(sliceFromAny(playbook["rules"])[0])
+	delete(rule, "id")
+	delete(rule, "action")
+	delete(rule, "trigger")
+	delete(rule, "preconditions")
+	delete(rule, "target")
+	rule["rule_id"] = "observe_alias"
+	rule["signal"] = StrategyGenerationRuleActionObserve
+	rule["condition"] = "出现可核验的新证据"
+	rule["on_false"] = "保持观察"
+	rule["on_true"] = "提交人工 Review"
+
+	report, err := strategyGenerationReportFromResult(raw)
+	if err != nil {
+		t.Fatalf("normalize observed formatter aliases: %v", err)
+	}
+	got := report.Drafts[0].Playbook.Rules[0]
+	if got.ID != "observe_alias" || got.Action != StrategyGenerationRuleActionObserve || got.Trigger != "出现可核验的新证据" || got.Preconditions != "保持观察" || got.Target != "提交人工 Review" {
+		t.Fatalf("normalized rule=%+v", got)
+	}
+}
+
 func TestBuildPortfolioStrategyDiagnosisRequiresPortfolioID(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

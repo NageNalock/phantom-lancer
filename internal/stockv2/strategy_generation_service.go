@@ -583,7 +583,12 @@ func normalizeStrategyGenerationReportShape(raw map[string]any) {
 		playbook := mapFromAny(draft["playbook"])
 		for _, ruleRaw := range sliceFromAny(playbook["rules"]) {
 			rule := mapFromAny(ruleRaw)
+			setStringIfEmpty(rule, "id", rule["rule_id"])
+			setStringIfEmpty(rule, "action", rule["signal"])
 			setStringIfEmpty(rule, "title", rule["name"])
+			setStringIfEmpty(rule, "trigger", rule["condition"])
+			setStringIfEmpty(rule, "preconditions", rule["on_false"])
+			setStringIfEmpty(rule, "target", rule["on_true"])
 			if strings.TrimSpace(stringFromAny(rule["action"])) != "" {
 				continue
 			}
@@ -625,25 +630,25 @@ func validateStrategyGenerationReport(report StrategyGenerationReport) error {
 	if len(report.Drafts) == 0 && report.RunSummary.Mode != StrategyGenerationModePortfolio && report.RunSummary.Mode != StrategyGenerationModeOpportunity {
 		return fmt.Errorf("%w: mode %q requires at least one draft", ErrInvalidStrategyGenerationResult, report.RunSummary.Mode)
 	}
-	for _, draft := range report.Drafts {
+	for draftIndex, draft := range report.Drafts {
 		if !validStrategyGenerationDraftType(strings.TrimSpace(draft.DraftType)) {
-			return ErrInvalidStrategyGenerationResult
+			return fmt.Errorf("%w: drafts[%d].draft_type %q is invalid", ErrInvalidStrategyGenerationResult, draftIndex, draft.DraftType)
 		}
 		if draft.DraftType != StrategyGenerationDraftTypeNewStrategy {
 			continue
 		}
 		if strings.TrimSpace(draft.Symbol) == "" || strings.TrimSpace(draft.Thesis) == "" {
-			return ErrInvalidStrategyGenerationResult
+			return fmt.Errorf("%w: drafts[%d] requires symbol and thesis", ErrInvalidStrategyGenerationResult, draftIndex)
 		}
 		if _, err := strategyGenerationDraftDirection(draft); err != nil {
-			return ErrInvalidStrategyGenerationResult
+			return fmt.Errorf("%w: drafts[%d] has invalid strategy_bias", ErrInvalidStrategyGenerationResult, draftIndex)
 		}
 		if len(draft.Playbook.Rules) == 0 {
-			return ErrInvalidStrategyGenerationResult
+			return fmt.Errorf("%w: drafts[%d].playbook.rules is empty", ErrInvalidStrategyGenerationResult, draftIndex)
 		}
-		for _, rule := range draft.Playbook.Rules {
+		for ruleIndex, rule := range draft.Playbook.Rules {
 			if strings.TrimSpace(rule.ID) == "" || !validStrategyGenerationRuleAction(strings.TrimSpace(rule.Action)) {
-				return ErrInvalidStrategyGenerationResult
+				return fmt.Errorf("%w: drafts[%d].playbook.rules[%d] requires id and valid action", ErrInvalidStrategyGenerationResult, draftIndex, ruleIndex)
 			}
 		}
 	}

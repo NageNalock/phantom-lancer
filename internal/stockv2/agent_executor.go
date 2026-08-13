@@ -2413,6 +2413,8 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 		b.WriteString("You are the formatter. Do not introduce new investment claims. Convert the prior results into the final strategy-generation report.\n")
 		b.WriteString("Return result.result as schema_version `strategy-generation-report/v1` with run_summary and drafts[]. run_summary.mode must exactly equal context.input.mode.\n")
 		b.WriteString("Every new_strategy draft must use playbook.rules[]. dataPrefilters and portfolioPrefilters must be arrays. Use [] when no structured prefilter exists.\n")
+		b.WriteString("Every playbook rule must use exactly these canonical fields: id, action, title, trigger, preconditions, target, risk, dataPrefilters, portfolioPrefilters, priority. Never emit rule_id, signal, condition, on_true, or on_false.\n")
+		b.WriteString("Canonical rule example: {\"id\":\"observe_1\",\"action\":\"observe\",\"title\":\"观察\",\"trigger\":\"...\",\"preconditions\":\"...\",\"target\":\"...\",\"risk\":\"...\",\"dataPrefilters\":[],\"portfolioPrefilters\":[],\"priority\":1}.\n")
 		b.WriteString("Do not output proposed_operation. Use portfolio_aware_suggestion.review_request when Review is needed.\n\n")
 	} else {
 		b.WriteString("Return result.result as a `strategy-generation-step/v1` object:\n")
