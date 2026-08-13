@@ -224,7 +224,7 @@ function MarketScanSettings({ actions, status, onClose, onSaved }: { actions: Ap
   async function save() {
     setSaving(true);
     try {
-      await actions.api("/api/stockv2/opportunity-market-scan/config", { method: "PATCH", body: JSON.stringify({ enabled, primaryFundFlowApiKey: primaryKey, backupFundFlowApiKey: backupKey, backupFundFlowProxy: backupProxy, clearPrimaryFundFlowApiKey: clearPrimary, clearBackupFundFlowApiKey: clearBackup, clearBackupFundFlowProxy: clearProxy }) });
+      await actions.api("/api/stockv2/opportunity-market-scan/config", { method: "PATCH", body: { enabled, primaryFundFlowApiKey: primaryKey, backupFundFlowApiKey: backupKey, backupFundFlowProxy: backupProxy, clearPrimaryFundFlowApiKey: clearPrimary, clearBackupFundFlowApiKey: clearBackup, clearBackupFundFlowProxy: clearProxy } });
       actions.setToast("市场扫描配置已保存", "good"); await onSaved(); onClose();
     } catch (cause) { actions.setToast(friendlyError(cause), "danger"); } finally { setSaving(false); }
   }

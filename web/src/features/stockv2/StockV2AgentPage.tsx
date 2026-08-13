@@ -12,7 +12,7 @@ import type {
   StockV2AgentTaskType,
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
-import { Button, CollapsibleSection, Drawer, Field, Notice, Pill, useDangerConfirm } from "../../components/ui";
+import { Button, CollapsibleSection, Drawer, Field, Notice, Pill, SubTabs, useDangerConfirm } from "../../components/ui";
 import {
   formatDate,
   stockV2AgentAvailabilityLabel,
@@ -28,9 +28,10 @@ import { StockV2AgentRunDetailPanel } from "./StockV2AgentExecutionLedger";
 import { StockV2AgentProviderDrawer } from "./StockV2AgentProviderDrawer";
 import { StockV2AgentModelDrawer } from "./StockV2AgentModelDrawer";
 import { StockV2AgentTaskProfileDrawer } from "./StockV2AgentTaskProfileDrawer";
+import { StockV2EmbeddingStatusSection } from "./StockV2EmbeddingStatusSection";
+import { useQueryParamState } from "../../hooks/useQueryParamState";
 
-// Agent 治理独立页。Quiet 风格 + 折叠区 + Drawer 渐进披露。
-// Provider/Model/TaskProfile 支持配置；运行留痕在“行情与监控”的 Agent 执行台账查看。
+// Agent 能力域包含模型与任务治理、语义召回基础设施；运行留痕在“行情与监控”的 Agent 执行台账查看。
 
 type ProviderDrawerState =
   | { type: "closed" }
@@ -93,8 +94,28 @@ const MCP_TOOL_INFO: MCPToolInfo[] = [
 ];
 
 const MCP_TOOL_INFO_BY_NAME = new Map(MCP_TOOL_INFO.map((item) => [item.name, item]));
+const AGENT_VIEWS = ["governance", "semanticRecall"] as const;
 
 export function StockV2AgentPage({ actions }: { actions: AppActions }) {
+  const [view, setView, viewHref] = useQueryParamState("stockv2AgentView", AGENT_VIEWS, "governance");
+
+  return (
+    <div className="grid gap-4">
+      <SubTabs
+        activeId={view}
+        ariaLabel="Agent 管理视图"
+        onChange={(id) => setView(id as typeof view)}
+        tabs={[
+          { id: "governance", label: "模型与任务", href: viewHref("governance") },
+          { id: "semanticRecall", label: "语义召回", href: viewHref("semanticRecall") },
+        ]}
+      />
+      {view === "semanticRecall" ? <StockV2EmbeddingStatusSection actions={actions} /> : <StockV2AgentGovernance actions={actions} />}
+    </div>
+  );
+}
+
+function StockV2AgentGovernance({ actions }: { actions: AppActions }) {
   const [providerDrawer, setProviderDrawer] = useState<ProviderDrawerState>({ type: "closed" });
   const [modelDrawer, setModelDrawer] = useState<ModelDrawerState>({ type: "closed" });
   const [taskProfileDrawer, setTaskProfileDrawer] = useState<TaskProfileDrawerState>({ type: "closed" });

@@ -57,7 +57,7 @@ export function StockV2OpportunityList({
       setItems(nextItems);
     } catch (err) {
       const status = (err as ApiError).status;
-      setError(status === 404 ? "该能力后端尚未实现（404），Embedding 状态区可正常使用。" : friendlyError(err));
+      setError(status === 404 ? "主题研究后端尚未实现（404）。可在 Agent 的语义召回页面独立检查向量能力。" : friendlyError(err));
       setItems([]);
       setTotal(0);
     } finally {

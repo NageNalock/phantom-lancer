@@ -2,7 +2,7 @@ import type { ApiError, AuditEvent, EventRecord } from "../app/types";
 
 interface ApiOptions {
   method?: string;
-  body?: unknown | FormData;
+  body?: object;
   csrf?: string;
 }
 

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { ArrowClockwise, Database, GearSix, Hammer, WarningCircle } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowSquareOut, Database, GearSix, Hammer, WarningCircle } from "@phosphor-icons/react";
 import type { AppActions } from "../../app/App";
 import type { StockV2EmbeddingAsset, StockV2EmbeddingAssetBreakdown, StockV2EmbeddingAssetStatus, StockV2EmbeddingStatus } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, EmptyState, Notice, Pill } from "../../components/ui";
+import { shouldHandleQueryLinkClick } from "../../hooks/useQueryParamState";
 import {
   stockV2EmbeddingAssetStatusLabel,
   stockV2EmbeddingAssetStatusTone,
@@ -22,10 +23,14 @@ function getFreshEmbeddingStatusCache() {
     : null;
 }
 
-// Embedding 状态区（顶部常驻 Panel，独立加载 /embeddings/status）。
-// 它是「主题机会」页语义召回能力的前提状态，与 opportunity 列表解耦：
-// 即便 opportunity 相关后端 404，本区仍展示真实的模型绑定与向量资产状态。
-// 拦截逻辑只读 status.available，不在前端做 embedding 计算。
+async function refreshEmbeddingStatus(actions: AppActions) {
+  const value = await actions.api<StockV2EmbeddingStatus>("/api/stockv2/embeddings/status");
+  const next = { value, fetchedAt: Date.now() };
+  embeddingStatusCache = next;
+  return next;
+}
+
+// Agent 下的语义召回管理区。拦截逻辑只读 status.available，不在前端做 embedding 计算。
 export function StockV2EmbeddingStatusSection({ actions }: { actions: AppActions }) {
   const initialCache = getFreshEmbeddingStatusCache();
   const [status, setStatus] = useState<StockV2EmbeddingStatus | null>(initialCache?.value ?? null);
@@ -50,10 +55,9 @@ export function StockV2EmbeddingStatusSection({ actions }: { actions: AppActions
     }
     setError(null);
     try {
-      const res = await actions.api<StockV2EmbeddingStatus>("/api/stockv2/embeddings/status");
-      embeddingStatusCache = { value: res, fetchedAt: Date.now() };
-      setStatus(res);
-      setLoadedAt(embeddingStatusCache.fetchedAt);
+      const next = await refreshEmbeddingStatus(actions);
+      setStatus(next.value);
+      setLoadedAt(next.fetchedAt);
     } catch (err) {
       setError(friendlyError(err));
       if (!cached && !status) {
@@ -234,6 +238,72 @@ export function StockV2EmbeddingStatusSection({ actions }: { actions: AppActions
         />
       ) : null}
     </>
+  );
+}
+
+export function StockV2EmbeddingAvailabilityNotice({ actions, manageHref }: { actions: AppActions; manageHref: string }) {
+  const initialCache = getFreshEmbeddingStatusCache();
+  const [status, setStatus] = useState<StockV2EmbeddingStatus | null>(initialCache?.value ?? null);
+  const [loading, setLoading] = useState(!initialCache);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void refreshEmbeddingStatus(actions)
+      .then((next) => {
+        if (!active) return;
+        setStatus(next.value);
+        setError(null);
+      })
+      .catch((cause) => {
+        if (active) setError(friendlyError(cause));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [actions]);
+
+  const modelReady = !!status && status.errorCode !== "embedding_model_not_configured" && status.errorCode !== "embedding_model_unavailable";
+  const available = !!status?.available;
+  const label = loading && !status ? "检查中" : available ? "可用" : modelReady ? "待维护" : status ? "不可用" : "状态未知";
+  const statusDetail = error && !status
+    ? `状态读取失败：${error}`
+    : available
+      ? "主题研究会按需使用语义召回补充关键词和实体匹配结果。"
+      : status
+        ? `当前不会执行语义召回：${status.errorMessage || stockV2EmbeddingErrorCodeLabel(status.errorCode)}。`
+        : "正在读取语义召回状态。";
+  const detail = error && status ? `${statusDetail} 状态刷新失败：${error}` : statusDetail;
+
+  return (
+    <div aria-live="polite" className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] px-3 py-2.5">
+      <div className="flex min-w-0 items-start gap-2.5">
+        <Database className="mt-0.5 shrink-0 text-[var(--muted-strong)]" size={16} />
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <strong className="text-sm">语义召回</strong>
+            <Pill tone={available ? "good" : modelReady ? "warn" : status ? "danger" : "neutral"}>{label}</Pill>
+          </div>
+          <p className="mt-1 mb-0 text-xs text-[var(--muted-strong)]">{detail}</p>
+        </div>
+      </div>
+      <a
+        className="button shrink-0 no-underline"
+        href={manageHref}
+        onClick={(event) => {
+          if (!shouldHandleQueryLinkClick(event)) return;
+          event.preventDefault();
+          const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+          if (manageHref === current) return;
+          window.history.pushState(null, "", manageHref);
+          window.dispatchEvent(new PopStateEvent("popstate"));
+        }}
+      >
+        管理语义召回
+        <ArrowSquareOut className="ml-1.5" size={14} />
+      </a>
+    </div>
   );
 }
 

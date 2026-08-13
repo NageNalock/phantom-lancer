@@ -2,8 +2,8 @@ import { useState } from "react";
 import type { AppActions } from "../../app/App";
 import type { StockV2DiscoveryStepKey } from "../../app/types";
 import { EmptyState, SubTabs } from "../../components/ui";
-import { useQueryParamState } from "../../hooks/useQueryParamState";
-import { StockV2EmbeddingStatusSection } from "./StockV2EmbeddingStatusSection";
+import { buildQueryHref, useQueryParamState } from "../../hooks/useQueryParamState";
+import { StockV2EmbeddingAvailabilityNotice } from "./StockV2EmbeddingStatusSection";
 import { StockV2OpportunityList } from "./StockV2OpportunityList";
 import { StockV2OpportunityForm } from "./StockV2OpportunityForm";
 import { StockV2OpportunityDetail } from "./StockV2OpportunityDetail";
@@ -49,10 +49,11 @@ function StockV2ThemeOpportunityResearch({ actions }: { actions: AppActions }) {
   const [showCreate, setShowCreate] = useState(false);
   const [runDrawerRunId, setRunDrawerRunId] = useState<string | null>(null);
   const [detailRefreshToken, setDetailRefreshToken] = useState(0);
+  const semanticRecallHref = buildQueryHref({ tab: "stockv2", stockv2: "agent", stockv2AgentView: "semanticRecall" });
 
   return (
     <div className="grid gap-4">
-      <StockV2EmbeddingStatusSection actions={actions} />
+      <StockV2EmbeddingAvailabilityNotice actions={actions} manageHref={semanticRecallHref} />
 
       <div className="grid min-w-0 grid-cols-[minmax(260px,300px)_minmax(0,1fr)] gap-4 max-xl:grid-cols-1">
         <StockV2OpportunityList
