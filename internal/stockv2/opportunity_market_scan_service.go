@@ -862,6 +862,14 @@ func (s *Service) advanceOpportunityMarketDrafting(ctx context.Context, run Oppo
 		return
 	}
 	if agentRun.Status == AgentRunStatusFailed {
+		recovered, recoverErr := s.recoverInvalidStrategyGenerationRun(ctx, agentRun)
+		if recoverErr != nil {
+			s.failOpportunityMarketScan(ctx, run, recoverErr, true)
+			return
+		}
+		if recovered {
+			return
+		}
 		if !run.NextRetryAt.IsZero() {
 			items, listErr := s.store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{ScanRunID: run.ID, Limit: opportunityMarketScanLocalLimit})
 			if listErr != nil {

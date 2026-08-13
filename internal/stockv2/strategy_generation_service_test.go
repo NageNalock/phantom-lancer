@@ -248,6 +248,96 @@ func TestStrategyGenerationReportNormalizesObservedFormatterRuleAliases(t *testi
 	}
 }
 
+func TestStrategyGenerationReportNormalizesObservedFormatterDraftAliases(t *testing.T) {
+	raw := strategyGenerationReportResult("000831")
+	mapFromAny(raw["run_summary"])["mode"] = StrategyGenerationModeOpportunity
+	draft := mapFromAny(sliceFromAny(raw["drafts"])[0])
+	delete(draft, "symbol")
+	delete(draft, "market")
+	delete(draft, "name")
+	delete(draft, "draft_type")
+	draft["instrument"] = map[string]any{
+		"symbol": "000831",
+		"market": "SZ",
+		"name":   "中国稀土",
+	}
+	draft["type"] = StrategyGenerationDraftTypeNewStrategy
+
+	report, err := strategyGenerationReportFromResultForMode(raw, StrategyGenerationModeOpportunity)
+	if err != nil {
+		t.Fatalf("normalize observed formatter draft aliases: %v", err)
+	}
+	got := report.Drafts[0]
+	if got.Symbol != "000831" || got.Market != "SZ" || got.Name != "中国稀土" || got.DraftType != StrategyGenerationDraftTypeNewStrategy {
+		t.Fatalf("normalized draft=%+v", got)
+	}
+}
+
+func TestRecoverInvalidStrategyGenerationRunReusesPersistedResult(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedStrategyGenerationInstrument(t, svc, ctx, "000831")
+
+	raw := strategyGenerationReportResult("000831")
+	mapFromAny(raw["run_summary"])["mode"] = StrategyGenerationModeOpportunity
+	draft := mapFromAny(sliceFromAny(raw["drafts"])[0])
+	delete(draft, "symbol")
+	delete(draft, "market")
+	delete(draft, "name")
+	delete(draft, "draft_type")
+	draft["instrument"] = map[string]any{"symbol": "000831", "market": "SZ", "name": "中国稀土"}
+	draft["type"] = StrategyGenerationDraftTypeNewStrategy
+
+	triggerID := strategyGenerationTriggerID(StrategyGenerationInput{
+		Mode:              StrategyGenerationModeOpportunity,
+		OpportunityID:     "opportunity-1",
+		CandidateIDs:      []string{"candidate-1"},
+		TargetInstruments: []StrategyGenerationTargetInstrument{{Symbol: "000831", Market: "SZ"}},
+	})
+	run, _, err := svc.store.CreateAgentRunWithLedger(ctx, AgentRun{
+		TaskType:          AgentTaskTypeStrategyGeneration,
+		TriggerObjectType: "strategy_generation",
+		TriggerObjectID:   triggerID,
+		Status:            AgentRunStatusFailed,
+		ErrorMessage:      `invalid strategy generation result: drafts[0].draft_type "" is invalid`,
+	}, AgentDecisionLedger{
+		TaskType:          AgentTaskTypeStrategyGeneration,
+		TriggerObjectType: "strategy_generation",
+		TriggerObjectID:   triggerID,
+		StructuredOutput: map[string]any{
+			"outputType":    AgentTaskTypeStrategyGeneration,
+			"resultSummary": "生成一条机会策略草案",
+			"result":        raw,
+			"confidence":    0.62,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create failed agent run: %v", err)
+	}
+
+	recovered, err := svc.recoverInvalidStrategyGenerationRun(ctx, run)
+	if err != nil || !recovered {
+		t.Fatalf("recover invalid strategy generation run: recovered=%t err=%v", recovered, err)
+	}
+	finalRun, err := svc.store.GetAgentRun(ctx, run.ID)
+	if err != nil || finalRun.Status != AgentRunStatusCompleted || finalRun.ErrorMessage != "" {
+		t.Fatalf("final run=%+v err=%v", finalRun, err)
+	}
+	strategies, err := svc.ListStrategies(ctx, StrategyListFilter{Source: StrategySourceAgent, Symbol: "000831", Limit: 10})
+	if err != nil || len(strategies) != 1 {
+		t.Fatalf("strategies=%+v err=%v, want one persisted draft", strategies, err)
+	}
+	ledger, err := svc.store.GetAgentDecisionLedger(ctx, run.DecisionLedgerID)
+	if err != nil || len(sliceFromAny(ledger.StructuredOutput["createdStrategies"])) != 1 || ledger.StructuredOutput["strategyGenerationRecovered"] != true {
+		t.Fatalf("ledger=%+v err=%v", ledger.StructuredOutput, err)
+	}
+	recovered, err = svc.recoverInvalidStrategyGenerationRun(ctx, finalRun)
+	if err != nil || recovered {
+		t.Fatalf("second recovery: recovered=%t err=%v, want no-op", recovered, err)
+	}
+}
+
 func TestBuildPortfolioStrategyDiagnosisRequiresPortfolioID(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

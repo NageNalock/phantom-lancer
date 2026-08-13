@@ -574,7 +574,12 @@ func normalizeStrategyGenerationPlaybookPrefilters(raw map[string]any) {
 func normalizeStrategyGenerationReportShape(raw map[string]any) {
 	for _, draftRaw := range sliceFromAny(raw["drafts"]) {
 		draft := mapFromAny(draftRaw)
+		instrument := mapFromAny(draft["instrument"])
 		target := mapFromAny(draft["target"])
+		setStringIfEmpty(draft, "draft_type", draft["type"])
+		setStringIfEmpty(draft, "symbol", instrument["symbol"])
+		setStringIfEmpty(draft, "market", instrument["market"])
+		setStringIfEmpty(draft, "name", instrument["name"])
 		setStringIfEmpty(draft, "symbol", target["symbol"])
 		setStringIfEmpty(draft, "market", target["market"])
 		setStringIfEmpty(draft, "name", target["name"])
@@ -678,6 +683,65 @@ func (s *Service) createDraftStrategiesFromStrategyGeneration(ctx context.Contex
 		created = append(created, item)
 	}
 	return created, nil
+}
+
+// recoverInvalidStrategyGenerationRun reapplies a persisted, already-paid model
+// result after deterministic schema normalization has been upgraded. It never
+// retries provider, timeout, or missing-result failures.
+func (s *Service) recoverInvalidStrategyGenerationRun(ctx context.Context, run AgentRun) (bool, error) {
+	if run.TaskType != AgentTaskTypeStrategyGeneration || run.Status != AgentRunStatusFailed ||
+		!strings.HasPrefix(strings.TrimSpace(run.ErrorMessage), ErrInvalidStrategyGenerationResult.Error()) ||
+		strings.TrimSpace(run.DecisionLedgerID) == "" {
+		return false, nil
+	}
+	ledger, err := s.store.GetAgentDecisionLedger(ctx, run.DecisionLedgerID)
+	if err != nil {
+		return false, err
+	}
+	raw := mapFromAny(ledger.StructuredOutput["result"])
+	if len(raw) == 0 {
+		return false, nil
+	}
+	report, err := strategyGenerationReportFromResultForMode(raw, strategyGenerationModeFromTrigger(run.TriggerObjectID))
+	if err != nil {
+		return false, nil
+	}
+	confidence, _ := numberFromAny(ledger.StructuredOutput["confidence"])
+	submitted := AgentTaskSubmittedResult{
+		OutputType:    strings.TrimSpace(stringFromAny(ledger.StructuredOutput["outputType"])),
+		ResultSummary: strings.TrimSpace(stringFromAny(ledger.StructuredOutput["resultSummary"])),
+		Result:        raw,
+		Confidence:    confidence,
+	}
+	if submitted.OutputType == "" {
+		submitted.OutputType = AgentTaskTypeStrategyGeneration
+	}
+	created, err := s.createDraftStrategiesFromStrategyGeneration(ctx, run, submitted, report)
+	if err != nil {
+		return false, err
+	}
+	createdSummaries := make([]map[string]string, 0, len(created))
+	for _, item := range created {
+		createdSummaries = append(createdSummaries, map[string]string{
+			"id":     item.Strategy.ID,
+			"symbol": item.Strategy.Symbol,
+			"status": item.Strategy.Status,
+		})
+	}
+	ledger.StructuredOutput["createdStrategies"] = createdSummaries
+	ledger.StructuredOutput["strategyGenerationRecovered"] = true
+	if _, err := s.store.UpdateAgentDecisionLedger(ctx, ledger); err != nil {
+		return false, err
+	}
+	s.markStrategyGenerationCandidatesCreated(ctx, run, created)
+	run.Status = AgentRunStatusCompleted
+	run.ErrorMessage = ""
+	run.Output = safelog.Text(submitted.ResultSummary, 2000)
+	run.FinishedAt = time.Now()
+	if _, err := s.store.UpdateAgentRun(ctx, run); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func validateStrategyGenerationDraftTargets(triggerID string, drafts []StrategyGenerationDraft) error {
