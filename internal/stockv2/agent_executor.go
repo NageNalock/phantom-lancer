@@ -2251,6 +2251,10 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 		b.WriteString("- For holdings with active/draft/paused strategy coverage, output `draft_type: \"strategy_patch\"` or `no_change`; do not rewrite the active version.\n")
 		b.WriteString("- If immediate handling is needed, fill `portfolio_aware_suggestion.review_request`; do not create or request a proposed operation.\n\n")
 	}
+	if genCtx.Input.Mode == StrategyGenerationModeOpportunity {
+		b.WriteString("## Opportunity Strategy Requirements\n\n")
+		b.WriteString("- Opportunity runs are research-scoped and intentionally may omit portfolioId. Do not call get_portfolio_context or treat an absent portfolioId as missing data. A research-scoped build_position draft does not require portfolio context; use an empty portfolioPrefilters array and leave position sizing for later review.\n\n")
+	}
 	if genCtx.Input.Mode == StrategyGenerationModeOpportunity && len(genCtx.OpportunityCandidates) > 1 {
 		b.WriteString("## Batched Opportunity Requirements\n\n")
 		b.WriteString("- This run contains multiple independently evidenced opportunity candidates. Evaluate every supplied candidate and target in this one response.\n")
@@ -2262,6 +2266,7 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 	b.WriteString("You must submit exactly ONE result using stock_agent.submit_result.\n")
 	b.WriteString("The MCP taskType must be `strategy_generation` and result.outputType must be `strategy_generation`.\n")
 	b.WriteString("Return a strategy-generation report with schema_version `strategy-generation-report/v1`.\n")
+	b.WriteString("run_summary.mode must exactly equal context.input.mode.\n")
 	b.WriteString("run_summary.key_conflicts and run_summary.data_quality_notes MUST be flat arrays of short human-readable strings (one concise sentence per element). Put material data conflicts and verification attempts there as plain strings; include compact external/internal source references in draft evidence_summary or risk_summary. Never put objects or nested arrays inside key_conflicts or data_quality_notes.\n")
 	b.WriteString("Every new strategy draft must use `playbook.rules[]`. Do not write `playbook.actions[]`, `actions`, `action_type`, `add`, `reduce`, or `clear`.\n")
 	b.WriteString("Allowed rule.action values are: observe, build_position, add_position, hold, reduce_position, exit_position.\n")
@@ -2362,6 +2367,10 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 		}
 		b.WriteString("\n")
 	}
+	if pack.Context.Input.Mode == StrategyGenerationModeOpportunity {
+		b.WriteString("## Opportunity Strategy Boundary\n\n")
+		b.WriteString("- Opportunity runs are research-scoped and intentionally may omit portfolioId. Do not call get_portfolio_context or treat an absent portfolioId as missing data. A research-scoped build_position draft does not require portfolio context; use an empty portfolioPrefilters array and leave position sizing for later review.\n\n")
+	}
 	if pack.Context.Input.Mode == StrategyGenerationModeOpportunity && len(pack.Context.OpportunityCandidates) > 1 {
 		b.WriteString("## Batched Opportunity Boundary\n\n")
 		b.WriteString("- Evaluate every supplied candidate and target as one bounded batch; do not introduce symbols outside input.targetInstruments or input.candidateIds.\n")
@@ -2402,7 +2411,7 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 	b.WriteString("## Required Output\n\n")
 	if pack.StepKey == StrategyGenerationStepFormatter {
 		b.WriteString("You are the formatter. Do not introduce new investment claims. Convert the prior results into the final strategy-generation report.\n")
-		b.WriteString("Return result.result as schema_version `strategy-generation-report/v1` with run_summary and drafts[].\n")
+		b.WriteString("Return result.result as schema_version `strategy-generation-report/v1` with run_summary and drafts[]. run_summary.mode must exactly equal context.input.mode.\n")
 		b.WriteString("Every new_strategy draft must use playbook.rules[]. dataPrefilters and portfolioPrefilters must be arrays. Use [] when no structured prefilter exists.\n")
 		b.WriteString("Do not output proposed_operation. Use portfolio_aware_suggestion.review_request when Review is needed.\n\n")
 	} else {

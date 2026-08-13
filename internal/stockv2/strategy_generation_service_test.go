@@ -157,6 +157,32 @@ func TestStrategyGenerationNormalizesStringPlaybookPrefilters(t *testing.T) {
 	}
 }
 
+func TestStrategyGenerationOpportunityAcceptsNoDraftsAndRestoresTaskMode(t *testing.T) {
+	raw := map[string]any{
+		"schema_version": StrategyGenerationReportSchemaVersion,
+		"run_summary": map[string]any{
+			"overall_conclusion": "候选证据不足，本轮不生成策略草案。",
+			"key_conflicts":      []any{},
+			"data_quality_notes": []any{},
+		},
+		"drafts": []any{},
+	}
+	report, err := strategyGenerationReportFromResultForMode(raw, StrategyGenerationModeOpportunity)
+	if err != nil {
+		t.Fatalf("parse valid no-draft opportunity report: %v", err)
+	}
+	if report.RunSummary.Mode != StrategyGenerationModeOpportunity || len(report.Drafts) != 0 {
+		t.Fatalf("report=%+v, want opportunity mode with no drafts", report)
+	}
+}
+
+func TestStrategyGenerationExpectedModeRejectsModelMismatch(t *testing.T) {
+	raw := strategyGenerationReportResult("302132")
+	if _, err := strategyGenerationReportFromResultForMode(raw, StrategyGenerationModeOpportunity); !errors.Is(err, ErrInvalidStrategyGenerationResult) {
+		t.Fatalf("mode mismatch error=%v, want invalid strategy generation result", err)
+	}
+}
+
 func TestStrategyGenerationReportNormalizesFormatterTargetAndActions(t *testing.T) {
 	raw := strategyGenerationPortfolioReportResult([]string{"600276"})
 	draft := mapFromAny(sliceFromAny(raw["drafts"])[0])
@@ -595,6 +621,19 @@ func TestBuildStrategyGenerationPromptRequiresMCPAndRules(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestBuildSingleOpportunityStrategyPromptDoesNotRequirePortfolio(t *testing.T) {
+	prompt := buildStrategyGenerationPrompt("task-opportunity", StrategyGenerationContext{
+		Input: StrategyGenerationInput{
+			Mode:              StrategyGenerationModeOpportunity,
+			TargetInstruments: []StrategyGenerationTargetInstrument{{Symbol: "600000"}},
+		},
+		OpportunityCandidates: []OpportunityCandidate{{ID: "candidate-1", Symbol: "600000"}},
+	}, "http://127.0.0.1:1/mcp")
+	if !strings.Contains(prompt, "intentionally may omit portfolioId") || !strings.Contains(prompt, "does not require portfolio context") {
+		t.Fatalf("single opportunity prompt must not require portfolio context")
 	}
 }
 

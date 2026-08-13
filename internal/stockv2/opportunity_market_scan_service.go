@@ -935,6 +935,7 @@ func (s *Service) startOpportunityMarketStrategyGeneration(ctx context.Context, 
 	if len(candidates) > opportunityMarketScanStrategyLimit {
 		candidates = candidates[:opportunityMarketScanStrategyLimit]
 	}
+	s.refreshOpportunityMarketStrategyQuotes(ctx, candidates)
 	input := StrategyGenerationInput{
 		SchemaVersion: StrategyGenerationInputSchemaVersion,
 		Mode:          StrategyGenerationModeOpportunity,
@@ -954,6 +955,22 @@ func (s *Service) startOpportunityMarketStrategyGeneration(ctx context.Context, 
 		})
 	}
 	return s.RunStrategyGeneration(ctx, input)
+}
+
+func (s *Service) refreshOpportunityMarketStrategyQuotes(ctx context.Context, candidates []OpportunityCandidate) {
+	symbols := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if symbol := strings.TrimSpace(candidate.Symbol); symbol != "" {
+			symbols = append(symbols, symbol)
+		}
+	}
+	if len(symbols) == 0 {
+		return
+	}
+	// ponytail: refresh only the at-most-three strategy targets here. The wider
+	// scan quote batch is scoring evidence and is not a substitute for persisted,
+	// timestamped executable-price context used by strategy generation and MCP.
+	_, _ = s.RefreshLatestQuotes(ctx, symbols, "opportunity-market-scan")
 }
 
 func (s *Service) RetryOpportunityMarketScanRun(ctx context.Context, id, requestedBy string) (OpportunityMarketScanRun, error) {

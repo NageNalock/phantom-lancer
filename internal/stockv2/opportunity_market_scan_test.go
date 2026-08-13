@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -253,6 +254,28 @@ func TestOpportunityMarketScanStrategyBatchKeepsBoundedCandidateContext(t *testi
 	}
 }
 
+func TestOpportunityMarketStrategyRefreshPersistsExecutableQuote(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	svc := NewService(store, nil, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Host, "qt.gtimg.cn") {
+			return stringResponse(http.StatusOK, tencentQuoteLine("sh600000", "浦发银行", "600000", "12.34", "12.00")), nil
+		}
+		return stringResponse(http.StatusBadGateway, "unavailable"), nil
+	})})
+	defer svc.Close()
+
+	svc.refreshOpportunityMarketStrategyQuotes(ctx, []OpportunityCandidate{{Symbol: "600000", Market: "SH", Name: "浦发银行"}})
+	quotes, err := store.GetLatestQuotes(ctx, []string{"600000"})
+	if err != nil {
+		t.Fatalf("get refreshed strategy quote: %v", err)
+	}
+	if len(quotes) != 1 || quotes[0].LastPrice != 12.34 || quotes[0].Status != QuoteStatusFresh {
+		t.Fatalf("quotes=%+v, want persisted fresh executable quote", quotes)
+	}
+}
+
 func TestOpportunityMarketScanStrategyStepPromptKeepsAllBatchTargets(t *testing.T) {
 	genCtx := StrategyGenerationContext{
 		Input:                          StrategyGenerationInput{Mode: StrategyGenerationModeOpportunity},
@@ -280,6 +303,9 @@ func TestOpportunityMarketScanStrategyStepPromptKeepsAllBatchTargets(t *testing.
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("batched strategy prompt missing %q", expected)
 		}
+	}
+	if !strings.Contains(prompt, "intentionally may omit portfolioId") || !strings.Contains(prompt, "run_summary.mode must exactly equal context.input.mode") {
+		t.Fatalf("batched opportunity prompt missing research-scope or result-mode boundary")
 	}
 	if strings.Contains(prompt, promptTruncatedMarker) {
 		t.Fatalf("bounded strategy prompt unexpectedly truncated at %d bytes", len(prompt))

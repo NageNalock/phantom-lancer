@@ -490,6 +490,10 @@ func strategyGenerationInputSummary(input StrategyGenerationInput) string {
 }
 
 func strategyGenerationReportFromResult(raw map[string]any) (StrategyGenerationReport, error) {
+	return strategyGenerationReportFromResultForMode(raw, "")
+}
+
+func strategyGenerationReportFromResultForMode(raw map[string]any, expectedMode string) (StrategyGenerationReport, error) {
 	if len(raw) == 0 {
 		return StrategyGenerationReport{}, ErrInvalidStrategyGenerationResult
 	}
@@ -498,6 +502,17 @@ func strategyGenerationReportFromResult(raw map[string]any) (StrategyGenerationR
 	}
 	normalizeStrategyGenerationPlaybookPrefilters(raw)
 	normalizeStrategyGenerationReportShape(raw)
+	expectedMode = strings.TrimSpace(expectedMode)
+	if expectedMode != "" {
+		if !validStrategyGenerationMode(expectedMode) {
+			return StrategyGenerationReport{}, fmt.Errorf("%w: invalid expected mode %q", ErrInvalidStrategyGenerationResult, expectedMode)
+		}
+		summary := mapFromAny(raw["run_summary"])
+		raw["run_summary"] = summary
+		if strings.TrimSpace(stringFromAny(summary["mode"])) == "" {
+			summary["mode"] = expectedMode
+		}
+	}
 	payload, err := json.Marshal(raw)
 	if err != nil {
 		return StrategyGenerationReport{}, err
@@ -508,6 +523,9 @@ func strategyGenerationReportFromResult(raw map[string]any) (StrategyGenerationR
 	}
 	if err := validateStrategyGenerationReport(report); err != nil {
 		return StrategyGenerationReport{}, err
+	}
+	if expectedMode != "" && report.RunSummary.Mode != expectedMode {
+		return StrategyGenerationReport{}, fmt.Errorf("%w: run_summary.mode %q does not match task mode %q", ErrInvalidStrategyGenerationResult, report.RunSummary.Mode, expectedMode)
 	}
 	return report, nil
 }
@@ -599,13 +617,13 @@ func strategyGenerationRuleActionFromActions(value any) string {
 
 func validateStrategyGenerationReport(report StrategyGenerationReport) error {
 	if strings.TrimSpace(report.SchemaVersion) != StrategyGenerationReportSchemaVersion {
-		return ErrInvalidStrategyGenerationResult
+		return fmt.Errorf("%w: schema_version must be %q", ErrInvalidStrategyGenerationResult, StrategyGenerationReportSchemaVersion)
 	}
 	if !validStrategyGenerationMode(strings.TrimSpace(report.RunSummary.Mode)) {
-		return ErrInvalidStrategyGenerationResult
+		return fmt.Errorf("%w: invalid run_summary.mode %q", ErrInvalidStrategyGenerationResult, report.RunSummary.Mode)
 	}
-	if len(report.Drafts) == 0 && report.RunSummary.Mode != StrategyGenerationModePortfolio {
-		return ErrInvalidStrategyGenerationResult
+	if len(report.Drafts) == 0 && report.RunSummary.Mode != StrategyGenerationModePortfolio && report.RunSummary.Mode != StrategyGenerationModeOpportunity {
+		return fmt.Errorf("%w: mode %q requires at least one draft", ErrInvalidStrategyGenerationResult, report.RunSummary.Mode)
 	}
 	for _, draft := range report.Drafts {
 		if !validStrategyGenerationDraftType(strings.TrimSpace(draft.DraftType)) {
@@ -812,6 +830,14 @@ func strategyGenerationPortfolioIDFromTrigger(triggerID string) string {
 		if value, ok := strings.CutPrefix(part, "portfolio="); ok {
 			return strings.TrimSpace(value)
 		}
+	}
+	return ""
+}
+
+func strategyGenerationModeFromTrigger(triggerID string) string {
+	mode, _, _ := strings.Cut(strings.TrimSpace(triggerID), ":")
+	if validStrategyGenerationMode(mode) {
+		return mode
 	}
 	return ""
 }

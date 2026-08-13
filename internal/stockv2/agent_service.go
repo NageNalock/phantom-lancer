@@ -2183,10 +2183,11 @@ func (s *Service) finalizeAgentRunWithOutput(
 		s.markStockProfileUpdateTaskAIResult(ctx, run.ID, StockProfileUpdateStatusCompleted, StockProfileAIStatusReady, "")
 	}
 	if run.TaskType == AgentTaskTypeStrategyGeneration {
-		report, err := strategyGenerationReportFromResult(submitted.Result)
+		report, err := strategyGenerationReportFromResultForMode(submitted.Result, strategyGenerationModeFromTrigger(run.TriggerObjectID))
 		if err != nil {
+			err = strategyGenerationSaveError(err)
 			run.Status = AgentRunStatusFailed
-			run.ErrorMessage = safelog.Text("invalid strategy generation result: "+err.Error(), 500)
+			run.ErrorMessage = safelog.Text(err.Error(), 500)
 			if s.log != nil {
 				s.log.Warn("finalize: invalid strategy generation result", "run_id", runID, "ledger_id", ledger.ID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(err.Error(), 300))
 			}
