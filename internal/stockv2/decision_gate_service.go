@@ -168,6 +168,10 @@ func (s *Service) buildDecisionGateSnapshot(ctx context.Context, input decisionG
 		financeHealth := DecisionDataHealth{Key: "financial_facts", Label: "财务事实", Required: false, Source: reference.Source, CheckedAt: firstNonZeroTime(reference.CheckedAt, now)}
 		if reference.FinanceOK {
 			financeHealth.Status, financeHealth.Message = DecisionHealthHealthy, "利润表、现金流与财务指标已检查"
+			if reference.Status == DecisionHealthDegraded && reference.Message != "" {
+				financeHealth.Status = DecisionHealthDegraded
+				financeHealth.Message += "；" + reference.Message
+			}
 			if fact, err := s.store.GetLatestDecisionFinancialFact(ctx, input.Symbol, snapshot.TradeDate); err == nil {
 				financeHealth.AsOf = fact.ReportPeriod
 				snapshot.Metrics["financialReportPeriod"] = fact.ReportPeriod

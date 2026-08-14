@@ -1655,7 +1655,7 @@ func (s *Service) executeStrategyGenerationPipeline(
 			Objective:    def.objective,
 			Instructions: def.instructions,
 			Context:      genCtx,
-			PriorResults: prior,
+			PriorResults: strategyGenerationPriorResults(def.key, prior),
 		}
 		execOutput, execErr, taskID := s.executeStrategyGenerationStepWithRetry(ctx, run, step, pack, modelName)
 		step.Prompt = ""
@@ -1699,6 +1699,31 @@ func (s *Service) executeStrategyGenerationPipeline(
 		}
 	}
 	return finalTaskID, finalOutput, nil
+}
+
+func strategyGenerationPriorResults(stepKey string, all map[string]any) map[string]any {
+	// ponytail: each completed step remains persisted in the run record. Only the
+	// immediate evidence needed by the next role is repeated in its prompt so a
+	// ten-candidate batch does not grow quadratically or lose trailing targets to
+	// prompt truncation. Add a dependency here only when a role truly consumes it.
+	dependencies := map[string][]string{
+		StrategyGenerationStepBullResearcher:  {StrategyGenerationStepEvidenceCollector},
+		StrategyGenerationStepBearResearcher:  {StrategyGenerationStepEvidenceCollector},
+		StrategyGenerationStepEvidenceChecker: {StrategyGenerationStepEvidenceCollector, StrategyGenerationStepBullResearcher, StrategyGenerationStepBearResearcher},
+		StrategyGenerationStepPortfolioJudge:  {StrategyGenerationStepBullResearcher, StrategyGenerationStepBearResearcher, StrategyGenerationStepEvidenceChecker},
+		StrategyGenerationStepFormatter:       {StrategyGenerationStepEvidenceChecker, StrategyGenerationStepPortfolioJudge},
+	}
+	keys := dependencies[stepKey]
+	if len(keys) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(keys))
+	for _, key := range keys {
+		if value, ok := all[key]; ok {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 func (s *Service) executeStrategyGenerationStepWithRetry(

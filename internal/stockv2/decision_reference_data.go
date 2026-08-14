@@ -24,6 +24,12 @@ const (
 	decisionReferenceWorkers   = 4
 	decisionReferenceTimeout   = 12 * time.Second
 	decisionReferenceFreshness = 20 * time.Hour
+	// ponytail: three bounded attempts per source absorb brief relay/proxy failures
+	// without adding another owner-facing tuning surface. Successful requests still
+	// stop after the first attempt; replace this with source health scheduling if
+	// provider instability makes repeated full-pool refreshes expensive.
+	decisionReferenceAttempts   = 3
+	decisionReferenceRetryDelay = 400 * time.Millisecond
 	// ponytail: 200 rows keeps each request bounded while covering recent
 	// quarterly disclosures and long dividend histories. If this becomes
 	// insufficient, replace it with provider pagination rather than raising it.
@@ -91,7 +97,7 @@ func (s *Service) refreshDecisionReferenceData(ctx context.Context, config Oppor
 func (s *Service) refreshOneDecisionReference(ctx context.Context, config OpportunityMarketScanConfig, symbol, market string, instrumentTypes ...string) decisionReferenceHealth {
 	now := time.Now()
 	health := decisionReferenceHealth{Symbol: symbol, Status: DecisionHealthBlocked, CheckedAt: now}
-	if cached, err := s.store.GetDecisionReferenceHealth(ctx, symbol); err == nil && cached.EventOK && now.Sub(cached.CheckedAt) < decisionReferenceFreshness {
+	if cached, err := s.store.GetDecisionReferenceHealth(ctx, symbol); err == nil && cached.EventOK && cached.FinanceOK && now.Sub(cached.CheckedAt) < decisionReferenceFreshness {
 		return cached
 	}
 	if !decisionSupportedMarket(market) {
@@ -114,8 +120,18 @@ func (s *Service) refreshOneDecisionReference(ctx context.Context, config Opport
 		params := url.Values{"ts_code": {tsCode}, "limit": {strconv.Itoa(decisionReferenceRowLimit)}}
 		result, err := s.fetchDecisionTushareDataset(ctx, config, dataset, params)
 		if err != nil {
+			if !decisionEventDataset(dataset) {
+				cached, cacheErr := s.store.HasFreshDecisionFinancialDataset(ctx, symbol, dataset, now.Add(-decisionReferenceFreshness))
+				if cacheErr == nil && cached {
+					financeSuccess++
+					if len(messages) < 3 {
+						messages = append(messages, dataset+": 上游刷新失败，使用 20 小时内缓存（"+safelog.Error(err, 240)+"）")
+					}
+					continue
+				}
+			}
 			if len(messages) < 3 {
-				messages = append(messages, dataset+": "+safelog.Error(err, 100))
+				messages = append(messages, dataset+": "+safelog.Error(err, 240))
 			}
 			continue
 		}
@@ -145,8 +161,11 @@ func (s *Service) refreshOneDecisionReference(ctx context.Context, config Opport
 	health.EventOK = eventSuccess == 4
 	health.FinanceOK = financeSuccess == 3
 	switch {
-	case health.EventOK && health.FinanceOK:
+	case health.EventOK && health.FinanceOK && len(messages) == 0:
 		health.Status = DecisionHealthHealthy
+	case health.EventOK && health.FinanceOK:
+		health.Status = DecisionHealthDegraded
+		health.Message = "参考数据已由新鲜缓存补齐"
 	case health.EventOK:
 		health.Status = DecisionHealthDegraded
 		health.Message = "事件日历完整，财务事实源不完整"
@@ -185,13 +204,30 @@ func (s *Service) fetchDecisionTushareDataset(ctx context.Context, config Opport
 	if len(sources) == 0 {
 		return tushareDatasetResult{}, errors.New("reference data credentials are not configured")
 	}
+	return fetchDecisionTushareDatasetSources(ctx, sources, params)
+}
+
+func fetchDecisionTushareDatasetSources(ctx context.Context, sources []opportunityFundFlowSource, params url.Values) (tushareDatasetResult, error) {
 	var failures []string
 	for _, source := range sources {
-		result, err := requestTushareDataset(ctx, source, params)
-		if err == nil {
-			return result, nil
+		var lastErr error
+		for attempt := 1; attempt <= decisionReferenceAttempts; attempt++ {
+			result, err := requestTushareDataset(ctx, source, params)
+			if err == nil {
+				return result, nil
+			}
+			lastErr = err
+			if attempt < decisionReferenceAttempts {
+				timer := time.NewTimer(time.Duration(attempt) * decisionReferenceRetryDelay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return tushareDatasetResult{}, ctx.Err()
+				case <-timer.C:
+				}
+			}
 		}
-		failures = append(failures, source.Name+": "+safelog.Error(err, 100))
+		failures = append(failures, fmt.Sprintf("%s %d 次尝试后仍失败: %s", source.Name, decisionReferenceAttempts, safelog.Error(lastErr, 220)))
 	}
 	return tushareDatasetResult{}, errors.New(strings.Join(failures, "; "))
 }
@@ -208,7 +244,7 @@ func requestTushareDataset(ctx context.Context, source opportunityFundFlowSource
 	req.Header.Set("X-API-Key", source.Key)
 	resp, err := source.Client.Do(req)
 	if err != nil {
-		return tushareDatasetResult{}, errors.New("network request failed")
+		return tushareDatasetResult{}, decisionReferenceTransportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -226,6 +262,24 @@ func requestTushareDataset(ctx context.Context, source opportunityFundFlowSource
 		return tushareDatasetResult{}, fmt.Errorf("provider business code %d: %s", payload.Code, safelog.Text(payload.Msg, 100))
 	}
 	return tushareDatasetResult{Fields: payload.Data.Fields, Items: payload.Data.Items, Source: source.Name}, nil
+}
+
+func decisionReferenceTransportError(err error) error {
+	// ponytail: transport errors may echo credential-bearing proxy URLs. Preserve
+	// only actionable categories for health diagnostics and discard the raw error.
+	message := strings.ToLower(err.Error())
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || strings.Contains(message, "timeout") || strings.Contains(message, "deadline exceeded"):
+		return errors.New("network request timed out")
+	case strings.Contains(message, "407") || strings.Contains(message, "proxy authentication required"):
+		return errors.New("proxy authentication rejected (HTTP 407)")
+	case strings.Contains(message, "no such host") || strings.Contains(message, "server misbehaving"):
+		return errors.New("DNS lookup failed")
+	case strings.Contains(message, "connection reset"):
+		return errors.New("connection reset")
+	default:
+		return errors.New("network request failed")
+	}
 }
 
 func decisionDatasetEndpoint(moneyFlowURL, dataset string) string {

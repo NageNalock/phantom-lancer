@@ -273,6 +273,15 @@ func (s *Store) GetLatestDecisionFinancialFact(ctx context.Context, symbol, asOf
 	return out, rows.Err()
 }
 
+func (s *Store) HasFreshDecisionFinancialDataset(ctx context.Context, symbol, dataset string, fetchedAfter time.Time) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM stockv2_decision_financial_facts
+		WHERE symbol=? AND dataset=? AND fetched_at>=?
+	)`, strings.TrimSpace(symbol), strings.TrimSpace(dataset), fetchedAfter).Scan(&exists)
+	return exists, err
+}
+
 func decisionFactMissing(err error) bool { return errors.Is(err, sql.ErrNoRows) }
 
 func (s *Store) SaveDecisionReferenceHealth(ctx context.Context, item decisionReferenceHealth) error {

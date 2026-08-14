@@ -2340,7 +2340,7 @@ func strategyGenerationPromptContext(genCtx StrategyGenerationContext) StrategyG
 	out := genCtx
 	// ponytail: the aggregate evidence slice duplicates the candidate-indexed
 	// evidence below. Three recent records per candidate preserve the handoff while
-	// keeping the three-symbol batch cheaper than three independent prompts.
+	// keeping the bounded final-candidate batch cheaper than independent prompts.
 	out.OpportunityEvidence = nil
 	out.EmbeddingStatus = nil
 	out.Targets = append([]StrategyGenerationInstrumentContext(nil), genCtx.Targets...)
@@ -2474,10 +2474,10 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 
 	maxPromptLen := 12000
 	if len(pack.Context.OpportunityCandidates) > 1 {
-		maxPromptLen = 18000
+		maxPromptLen = 48000
 	}
 	if b.Len() > maxPromptLen {
-		return truncatePromptUTF8(b.String(), 8500, 3500)
+		return truncatePromptUTF8(b.String(), 36000, 10000)
 	}
 	return b.String()
 }

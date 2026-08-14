@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"strings"
@@ -167,7 +168,7 @@ func TestOpportunityMarketScanDecisionReasonsDistinguishFilterStages(t *testing.
 		"业务与扫描主题没有直接映射",
 		"缺少当期公司级强证据",
 		"未达策略门槛：证据 50/55，置信度 0.60/0.55",
-		"Agent 证据排名未进入策略草拟前 3",
+		fmt.Sprintf("Agent 证据排名未进入策略草拟前 %d", opportunityMarketScanStrategyLimit),
 		"已生成未激活策略草案",
 	}
 	for i := range want {
@@ -332,11 +333,15 @@ func TestOpportunityMarketScanResearchFailureSchedulesDurableRetry(t *testing.T)
 }
 
 func TestOpportunityMarketScanStrategyBatchKeepsBoundedCandidateContext(t *testing.T) {
+	candidateIDs := make([]string, 0, opportunityMarketScanStrategyLimit+2)
+	for i := 0; i < opportunityMarketScanStrategyLimit+2; i++ {
+		candidateIDs = append(candidateIDs, fmt.Sprintf("candidate-%02d", i))
+	}
 	input, err := normalizeStrategyGenerationInput(StrategyGenerationInput{
 		Mode:          StrategyGenerationModeOpportunity,
 		OpportunityID: "opp-1",
-		CandidateID:   "candidate-a",
-		CandidateIDs:  []string{"candidate-a", "candidate-b", "candidate-c", "candidate-d"},
+		CandidateID:   candidateIDs[0],
+		CandidateIDs:  candidateIDs,
 		TargetInstruments: []StrategyGenerationTargetInstrument{
 			{Symbol: "600000", Market: "SH"},
 			{Symbol: "000001", Market: "SZ"},
@@ -346,10 +351,10 @@ func TestOpportunityMarketScanStrategyBatchKeepsBoundedCandidateContext(t *testi
 	if err != nil {
 		t.Fatalf("normalize opportunity strategy batch: %v", err)
 	}
-	if len(input.CandidateIDs) != opportunityMarketScanStrategyLimit || input.CandidateID != "candidate-a" {
+	if len(input.CandidateIDs) != opportunityMarketScanStrategyLimit || input.CandidateID != candidateIDs[0] {
 		t.Fatalf("candidate context=%+v legacy=%q, want bounded batch with stable first candidate", input.CandidateIDs, input.CandidateID)
 	}
-	want := []string{"candidate-a", "candidate-b", "candidate-c"}
+	want := candidateIDs[:opportunityMarketScanStrategyLimit]
 	parsed := strategyGenerationCandidateIDsFromTrigger(strategyGenerationTriggerID(input))
 	if len(parsed) != len(want) {
 		t.Fatalf("parsed candidate ids=%+v, want %+v", parsed, want)
@@ -394,7 +399,8 @@ func TestOpportunityMarketScanStrategyStepPromptKeepsAllBatchTargets(t *testing.
 		Input:                          StrategyGenerationInput{Mode: StrategyGenerationModeOpportunity},
 		OpportunityEvidenceByCandidate: map[string][]OpportunityEvidence{},
 	}
-	for _, symbol := range []string{"600000", "000001", "002230"} {
+	for i := 0; i < opportunityMarketScanStrategyLimit; i++ {
+		symbol := fmt.Sprintf("%06d", 600000+i)
 		candidateID := "candidate-" + symbol
 		genCtx.Input.CandidateIDs = append(genCtx.Input.CandidateIDs, candidateID)
 		genCtx.Input.TargetInstruments = append(genCtx.Input.TargetInstruments, StrategyGenerationTargetInstrument{Symbol: symbol})
@@ -412,7 +418,7 @@ func TestOpportunityMarketScanStrategyStepPromptKeepsAllBatchTargets(t *testing.
 		RunID: "run-1", StepKey: StrategyGenerationStepFormatter, Role: "formatter",
 		Objective: "生成有界策略草案", Context: genCtx,
 	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
-	for _, expected := range []string{"600000", "000001", "002230", "candidate-600000", "candidate-002230"} {
+	for _, expected := range []string{"600000", "600005", "600009", "candidate-600000", "candidate-600009"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("batched strategy prompt missing %q", expected)
 		}
@@ -423,5 +429,26 @@ func TestOpportunityMarketScanStrategyStepPromptKeepsAllBatchTargets(t *testing.
 	}
 	if strings.Contains(prompt, promptTruncatedMarker) {
 		t.Fatalf("bounded strategy prompt unexpectedly truncated at %d bytes", len(prompt))
+	}
+}
+
+func TestStrategyGenerationPriorResultsKeepsOnlyDirectDependencies(t *testing.T) {
+	all := map[string]any{
+		StrategyGenerationStepEvidenceCollector: "evidence",
+		StrategyGenerationStepBullResearcher:    "bull",
+		StrategyGenerationStepBearResearcher:    "bear",
+		StrategyGenerationStepEvidenceChecker:   "checked",
+		StrategyGenerationStepPortfolioJudge:    "judged",
+	}
+	formatter := strategyGenerationPriorResults(StrategyGenerationStepFormatter, all)
+	if len(formatter) != 2 || formatter[StrategyGenerationStepEvidenceChecker] != "checked" || formatter[StrategyGenerationStepPortfolioJudge] != "judged" {
+		t.Fatalf("formatter dependencies=%+v", formatter)
+	}
+	if _, ok := formatter[StrategyGenerationStepEvidenceCollector]; ok {
+		t.Fatalf("formatter prompt repeated non-direct evidence collector output")
+	}
+	checker := strategyGenerationPriorResults(StrategyGenerationStepEvidenceChecker, all)
+	if len(checker) != 3 || checker[StrategyGenerationStepEvidenceCollector] != "evidence" || checker[StrategyGenerationStepBullResearcher] != "bull" || checker[StrategyGenerationStepBearResearcher] != "bear" {
+		t.Fatalf("checker dependencies=%+v", checker)
 	}
 }

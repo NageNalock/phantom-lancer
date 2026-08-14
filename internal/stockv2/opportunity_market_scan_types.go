@@ -36,14 +36,15 @@ const (
 
 const (
 	// ponytail: these fixed budgets make one personal-server scan predictable
-	// without adding a tuning surface. Promote them to the feature settings only
-	// if real runs show that the owner needs to trade quality for cost.
+	// without adding a tuning surface. Every final candidate is now eligible for
+	// strategy drafting; promote the limits to feature settings only if the owner
+	// later needs to trade breadth for cost.
 	opportunityMarketScanLocalLimit      = 200
 	opportunityMarketScanQFQLimit        = 60
 	opportunityMarketScanFundFlowLimit   = 30
 	opportunityMarketScanResearchLimit   = 20
 	opportunityMarketScanFinalLimit      = 10
-	opportunityMarketScanStrategyLimit   = 3
+	opportunityMarketScanStrategyLimit   = opportunityMarketScanFinalLimit
 	opportunityMarketScanMinimumCoverage = 0.80
 )
 
