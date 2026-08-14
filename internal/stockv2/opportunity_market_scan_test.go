@@ -93,6 +93,24 @@ func TestApplyOpportunityQFQMetricsEstimatesAmountWhenMissing(t *testing.T) {
 	}
 }
 
+func TestOpportunityMarketFactorClustersKeepHigherRankedCandidate(t *testing.T) {
+	candidates := []OpportunityMarketScanCandidate{
+		{Symbol: "600001", Name: "高排名", Industry: "有色金属"},
+		{Symbol: "600002", Name: "低排名", Industry: "有色金属"},
+	}
+	bars := map[string][]StockV2DailyBar{"600001": {}, "600002": {}}
+	for i := 0; i < 60; i++ {
+		date := time.Date(2026, 1, 1+i, 0, 0, 0, 0, time.Local).Format("2006-01-02")
+		change := float64((i%7)-3) / 10
+		bars["600001"] = append(bars["600001"], StockV2DailyBar{TradeDate: date, PctChange: change})
+		bars["600002"] = append(bars["600002"], StockV2DailyBar{TradeDate: date, PctChange: change})
+	}
+	clusters, blocked := opportunityMarketFactorClusters(candidates, bars)
+	if clusters["600002"] != "600001" || !strings.Contains(blocked["600002"], "高排名") || blocked["600001"] != "" {
+		t.Fatalf("clusters=%+v blocked=%+v", clusters, blocked)
+	}
+}
+
 func TestOpportunityMarketScanRepositoryDefaultsAndCandidates(t *testing.T) {
 	store := newTestStore(t)
 	defer store.Close()
@@ -108,13 +126,108 @@ func TestOpportunityMarketScanRepositoryDefaultsAndCandidates(t *testing.T) {
 	if err := store.UpsertOpportunityMarketScanCandidates(ctx, []OpportunityMarketScanCandidate{{
 		ID: "candidate-a", ScanRunID: run.ID, Symbol: "600000", Market: "SH", Name: "浦发银行",
 		Stage: OpportunityMarketScanCandidateResearch, PrefilterScore: 70, FinalScore: 75,
-		Metrics: OpportunityMarketScanMetrics{TradeDate: "2026-08-10", QFQAvailable: true},
+		Metrics: OpportunityMarketScanMetrics{TradeDate: "2026-08-10", QFQAvailable: true, DecisionStatus: DecisionHealthDegraded},
 	}}); err != nil {
 		t.Fatalf("upsert candidate: %v", err)
 	}
 	items, err := store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{ScanRunID: run.ID, Limit: 10})
 	if err != nil || len(items) != 1 || !items[0].Metrics.QFQAvailable {
 		t.Fatalf("candidates=%+v err=%v", items, err)
+	}
+	items, err = store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{ScanRunID: run.ID, DecisionStatus: DecisionHealthDegraded, Limit: 10})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("degraded candidates=%+v err=%v", items, err)
+	}
+	items, err = store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{ScanRunID: run.ID, DecisionStatus: DecisionHealthHealthy, Limit: 10})
+	if err != nil || len(items) != 0 {
+		t.Fatalf("healthy candidates=%+v err=%v, want none", items, err)
+	}
+}
+
+func TestOpportunityMarketScanDecisionReasonsDistinguishFilterStages(t *testing.T) {
+	items := []OpportunityMarketScanCandidate{
+		{Symbol: "000001", Stage: OpportunityMarketScanCandidateExcluded, ExclusionReason: "前复权短期涨幅超过风险边界", StrategyStatus: OpportunityMarketScanStrategySkipped, Metrics: OpportunityMarketScanMetrics{Return5Pct: 19.2, Return20Pct: 36.8}},
+		{Symbol: "000002", Stage: OpportunityMarketScanCandidateReviewedOut, StrategyStatus: OpportunityMarketScanStrategySkipped},
+		{Symbol: "000003", Stage: OpportunityMarketScanCandidateFinal, StrategyStatus: OpportunityMarketScanStrategySkipped},
+		{Symbol: "000004", Stage: OpportunityMarketScanCandidateFinal, StrategyStatus: OpportunityMarketScanStrategySkipped},
+		{Symbol: "000005", Stage: OpportunityMarketScanCandidateFinal, StrategyStatus: OpportunityMarketScanStrategySkipped},
+		{Symbol: "000006", Stage: OpportunityMarketScanCandidateFinal, StrategyStatus: OpportunityMarketScanStrategyGenerated},
+	}
+	applyOpportunityMarketScanDecisionReasons(items,
+		map[string]string{"000002": "业务与扫描主题没有直接映射"},
+		map[string]string{"000003": "缺少当期公司级强证据"},
+		map[string]OpportunityCandidate{
+			"000003": {Symbol: "000003", EvidenceScore: 70, Confidence: .7, Status: OpportunityCandidateStatusStrategyRequested},
+			"000004": {Symbol: "000004", EvidenceScore: 50, Confidence: .6, Status: OpportunityCandidateStatusCandidate},
+			"000005": {Symbol: "000005", EvidenceScore: 70, Confidence: .7, Status: OpportunityCandidateStatusCandidate},
+		},
+	)
+	want := []string{
+		"前复权短期涨幅超过风险边界",
+		"业务与扫描主题没有直接映射",
+		"缺少当期公司级强证据",
+		"未达策略门槛：证据 50/55，置信度 0.60/0.55",
+		"Agent 证据排名未进入策略草拟前 3",
+		"已生成未激活策略草案",
+	}
+	for i := range want {
+		if items[i].DecisionReason != want[i] {
+			t.Fatalf("items[%d].decisionReason=%q, want %q", i, items[i].DecisionReason, want[i])
+		}
+	}
+}
+
+func TestListOpportunityMarketScanCandidatesRestoresSavedDecisionReasons(t *testing.T) {
+	store := newTestStore(t)
+	svc := NewService(store, nil, nil)
+	defer svc.Close()
+	ctx := context.Background()
+	opp, err := store.CreateOpportunity(ctx, Opportunity{Title: "市场扫描", UserThesis: "测试筛选原因", Status: OpportunityStatusCompleted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovery, _, err := store.CreateOpportunityDiscoveryRun(ctx, OpportunityDiscoveryRun{OpportunityID: opp.ID, Status: OpportunityDiscoveryRunStatusCompleted}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertOpportunityResult(ctx, OpportunityResult{RunID: discovery.ID, RawResult: map[string]any{
+		"excluded": []any{map[string]any{"symbol": "600001", "reason": "与扫描主题没有直接映射"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	agentRun, _, err := store.CreateAgentRunWithLedger(ctx, AgentRun{
+		TaskType: AgentTaskTypeStrategyGeneration, Status: AgentRunStatusCompleted,
+	}, AgentDecisionLedger{TaskType: AgentTaskTypeStrategyGeneration, StructuredOutput: map[string]any{
+		"result": map[string]any{"run_summary": map[string]any{"omitted_candidates": []any{
+			map[string]any{"symbol": "600002", "reason": "缺少公司级强证据"},
+		}}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.CreateOpportunityMarketScanRun(ctx, OpportunityMarketScanRun{
+		TriggerType: OpportunityMarketScanTriggerManual, Status: OpportunityMarketScanStatusCompleted,
+		OpportunityID: opp.ID, DiscoveryRunID: discovery.ID, StrategyAgentRunID: agentRun.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertOpportunityMarketScanCandidates(ctx, []OpportunityMarketScanCandidate{
+		{ScanRunID: run.ID, Symbol: "600001", Market: "SH", Name: "复核排除", Stage: OpportunityMarketScanCandidateReviewedOut, StrategyStatus: OpportunityMarketScanStrategySkipped},
+		{ScanRunID: run.ID, Symbol: "600002", Market: "SH", Name: "策略省略", Stage: OpportunityMarketScanCandidateFinal, StrategyStatus: OpportunityMarketScanStrategySkipped},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := svc.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{ScanRunID: run.ID, Limit: 10})
+	if err != nil || len(items) != 2 {
+		t.Fatalf("items=%+v err=%v", items, err)
+	}
+	bySymbol := map[string]string{}
+	for _, item := range items {
+		bySymbol[item.Symbol] = item.DecisionReason
+	}
+	if bySymbol["600001"] != "与扫描主题没有直接映射" || bySymbol["600002"] != "缺少公司级强证据" {
+		t.Fatalf("decision reasons=%+v", bySymbol)
 	}
 }
 

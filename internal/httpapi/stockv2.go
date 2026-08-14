@@ -145,6 +145,7 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/stockv2/opportunity-market-scan/config", s.handleStockV2GetOpportunityMarketScanConfig)
 	mux.HandleFunc("PATCH /api/stockv2/opportunity-market-scan/config", s.handleStockV2UpdateOpportunityMarketScanConfig)
 	mux.HandleFunc("POST /api/stockv2/opportunity-market-scan/fund-flow/probe", s.handleStockV2ProbeOpportunityMarketFundFlow)
+	mux.HandleFunc("POST /api/stockv2/opportunity-market-scan/decision-data/probe", s.handleStockV2ProbeOpportunityDecisionData)
 	mux.HandleFunc("GET /api/stockv2/opportunity-market-scan/runs", s.handleStockV2ListOpportunityMarketScanRuns)
 	mux.HandleFunc("POST /api/stockv2/opportunity-market-scan/runs", s.handleStockV2StartOpportunityMarketScanRun)
 	mux.HandleFunc("GET /api/stockv2/opportunity-market-scan/runs/{id}", s.handleStockV2GetOpportunityMarketScanRun)

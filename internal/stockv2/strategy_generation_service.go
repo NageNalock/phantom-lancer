@@ -65,7 +65,14 @@ func (s *Service) BuildStrategyGenerationContext(ctx context.Context, input Stra
 	}
 	s.fillStrategyGenerationEmbeddingStatus(ctx, &out)
 	if normalized.Mode == StrategyGenerationModePortfolio {
-		return s.buildPortfolioStrategyGenerationContext(ctx, normalized, out)
+		out, err = s.buildPortfolioStrategyGenerationContext(ctx, normalized, out)
+		if err != nil {
+			return StrategyGenerationContext{}, err
+		}
+		if err := s.fillStrategyGenerationDecisionGates(ctx, &out); err != nil {
+			return StrategyGenerationContext{}, err
+		}
+		return out, nil
 	}
 	for _, target := range normalized.TargetInstruments {
 		item, err := s.strategyGenerationInstrumentContext(ctx, target)
@@ -75,6 +82,9 @@ func (s *Service) BuildStrategyGenerationContext(ctx context.Context, input Stra
 		out.Targets = append(out.Targets, item)
 	}
 	if err := s.fillStrategyGenerationOpportunityContext(ctx, normalized, &out); err != nil {
+		return StrategyGenerationContext{}, err
+	}
+	if err := s.fillStrategyGenerationDecisionGates(ctx, &out); err != nil {
 		return StrategyGenerationContext{}, err
 	}
 	out.FreshnessSummary["targetCount"] = len(out.Targets)
@@ -661,6 +671,7 @@ func validateStrategyGenerationReport(report StrategyGenerationReport) error {
 }
 
 func (s *Service) createDraftStrategiesFromStrategyGeneration(ctx context.Context, run AgentRun, submitted AgentTaskSubmittedResult, report StrategyGenerationReport) ([]StrategyWithVersion, error) {
+	s.applyDecisionGatesToStrategyReport(ctx, run, &report)
 	if strings.TrimSpace(report.RunSummary.Mode) == StrategyGenerationModePortfolio {
 		return s.createPortfolioStrategyDiagnosisDrafts(ctx, run, submitted, report)
 	}
@@ -825,6 +836,9 @@ func (s *Service) strategyCreateRequestFromGenerationDraft(run AgentRun, submitt
 				"resultSummary":            submitted.ResultSummary,
 				"portfolioAwareSuggestion": draft.PortfolioAwareSuggestion,
 				"runSummary":               report.RunSummary,
+				"decisionBasis":            draft.DecisionBasis,
+				"evidenceRefIds":           draft.EvidenceRefIDs,
+				"gateSnapshotId":           draft.GateSnapshotID,
 			},
 		},
 		CreatedBy: StrategySourceAgent,

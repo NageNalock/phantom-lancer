@@ -1454,6 +1454,28 @@ func (s *Service) StartBackground(ctx context.Context) {
 		defer s.bgWg.Done()
 		s.runOpportunityMarketScanScheduler(bgCtx)
 	}()
+
+	// One bounded pass attaches the new deterministic audit to the latest three
+	// historical scans without rewriting their original ranks or Agent output.
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		// ponytail: startup has several bounded heavy workers. Retry only slot
+		// contention for five minutes; data/provider errors stay visible in the
+		// resulting health snapshot and must not create an unbounded loop.
+		for attempt := 0; attempt < 6; attempt++ {
+			if s.runRecentOpportunityDecisionAudit(bgCtx) {
+				return
+			}
+			timer := time.NewTimer(time.Minute)
+			select {
+			case <-bgCtx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+	}()
 }
 
 // StopBackground 停止后台任务

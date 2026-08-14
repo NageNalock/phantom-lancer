@@ -3312,6 +3312,7 @@ export interface StockV2OpportunityMarketScanRun {
 }
 
 export interface StockV2OpportunityMarketScanMetrics {
+  instrumentType?: string;
   tradeDate?: string;
   return5Pct?: number;
   return20Pct?: number;
@@ -3323,6 +3324,9 @@ export interface StockV2OpportunityMarketScanMetrics {
   positiveFlowDays20?: number;
   latestPrice?: number;
   latestPctChange?: number;
+  atr14?: number;
+  atr14Pct?: number;
+  ma20?: number;
   qfqAvailable: boolean;
   fundFlowAvailable: boolean;
   fundFlowStatus?: string;
@@ -3331,6 +3335,46 @@ export interface StockV2OpportunityMarketScanMetrics {
   fundFlowUsed: boolean;
   quoteAvailable: boolean;
   themeSignals?: string[];
+  catalystSignals?: string[];
+  decisionStatus?: "healthy" | "degraded" | "blocked";
+  marketRegime?: "risk_on" | "neutral" | "risk_off";
+  factorCluster?: string;
+  gateSnapshotId?: string;
+  decisionGates?: StockV2DecisionGateResult[];
+  dataHealth?: StockV2DecisionDataHealth[];
+  decisionOutcomes?: StockV2DecisionGateOutcome[];
+}
+
+export interface StockV2DecisionGateResult {
+  key: string;
+  label: string;
+  status: "pass" | "blocked" | "degraded" | "not_applicable";
+  summary: string;
+  reasons?: string[];
+  metrics?: Record<string, unknown>;
+  evidenceRefs?: string[];
+}
+
+export interface StockV2DecisionDataHealth {
+  key: string;
+  label: string;
+  status: "healthy" | "degraded" | "blocked" | "not_applicable";
+  required: boolean;
+  asOf?: string;
+  source?: string;
+  message?: string;
+  checkedAt?: string;
+}
+
+export interface StockV2DecisionGateOutcome {
+  snapshotId: string;
+  horizon: number;
+  dueTradeDate?: string;
+  observedDate?: string;
+  returnPct?: number;
+  excessReturnPct?: number;
+  status: "pending" | "observed" | "observed_return_only";
+  updatedAt: string;
 }
 
 export interface StockV2OpportunityMarketScanCandidate {
@@ -3350,6 +3394,7 @@ export interface StockV2OpportunityMarketScanCandidate {
   riskPenalty: number;
   metrics: StockV2OpportunityMarketScanMetrics;
   exclusionReason?: string;
+  decisionReason?: string;
   opportunityCandidateId?: string;
   strategyStatus?: string;
   strategyId?: string;

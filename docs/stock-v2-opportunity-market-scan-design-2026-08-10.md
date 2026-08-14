@@ -2,7 +2,7 @@
 
 > 文档日期：2026-08-10
 > 状态：已实现
-> 关联设计：[StockV2 关键点](./stock-agent-workbench-v2-key-points-2026-06-18.md)、[主题机会发现](./stock-v2-opportunity-discovery-technical-design-2026-06-26.md)、[策略生成](./stock-v2-strategy-generation-design-2026-06-26.md)
+> 关联设计：[StockV2 关键点](./stock-agent-workbench-v2-key-points-2026-06-18.md)、[主题机会发现](./stock-v2-opportunity-discovery-technical-design-2026-06-26.md)、[策略生成](./stock-v2-strategy-generation-design-2026-06-26.md)、[确定性决策门](./stock-v2-decision-gates-design-2026-08-14.md)
 
 ## 1. 目标与边界
 
@@ -22,6 +22,7 @@
   → 确定性主板过滤与排序（最多 200）
   → 前复权日线和最新报价补齐（最多 60）
   → 主备 Tushare 兼容源补齐主动资金证据（最多 30）
+  → 基准、事件、财务事实与确定性四道门（研究池最多 20）
   → 活跃消息脉络匹配
   → opportunity_discovery 有界证据复核（最多 20，输出最多 10）
   → strategy_generation 单次批处理（证据达标的前 3）
@@ -78,6 +79,9 @@ SQLite 表：
 - `stockv2_opportunity_market_scan_config`
 - `stockv2_opportunity_market_scan_runs`
 - `stockv2_opportunity_market_scan_candidates`
+- `stockv2_decision_gate_snapshots` / `stockv2_decision_gate_outcomes`
+- `stockv2_decision_market_events` / `stockv2_decision_financial_facts`
+- `stockv2_decision_index_bars`
 
 系统复用一个 `created_by=system:market_scan` 的 Opportunity，避免每日制造孤立机会对象。
 
@@ -85,6 +89,7 @@ HTTP API：
 
 - `GET/PATCH /api/stockv2/opportunity-market-scan/config`
 - `POST /api/stockv2/opportunity-market-scan/fund-flow/probe`
+- `POST /api/stockv2/opportunity-market-scan/decision-data/probe`
 - `GET/POST /api/stockv2/opportunity-market-scan/runs`
 - `GET /api/stockv2/opportunity-market-scan/runs/{id}`
 - `GET /api/stockv2/opportunity-market-scan/runs/{id}/candidates`
@@ -100,5 +105,7 @@ StockV2 一级入口改名为“机会发现”，二级视图为：
 - 主题研究：保留手工主题、研究步骤和候选池，只展示紧凑的语义召回可用性与管理入口。完整的模型绑定、向量维护和资产明细归入“Agent → 语义召回”。
 
 运行中的扫描只展示“当前研究池”。终态扫描按“最终入选 / 复核未入选 / 预筛排除”分组，默认展示最终入选；排除项每页 50 条。历史终态中遗留的 `research_candidate` 会幂等迁移为 `reviewed_out`，避免把已经结束的复核显示为“待复核”。
+
+候选列表以单行省略形式展示筛选结论、四道门通过数和数据健康，完整内容保留在详情抽屉。固定 5 日 18% / 20 日 35% 边界已由 ATR 动态波动门替代；详情同时展示催化定价、因子拥挤、事件保护、来源健康与 1/3/5/10/20 交易日事后验证。历史记录从已保存的发现报告与策略决策账本按需恢复，不重新运行模型，也不伪装成已经通过新门。
 
 界面统一使用“主动资金证据”，并明确它与账户可用资金无关。候选会区分“可用并采用、排名预算外未请求、源不可用或数据无效、覆盖不足导致本轮未采用”，不再笼统显示“资金缺失”。固定预算、模型建议和低频数据源设置进入配置抽屉，保持 Quiet Agent Workbench 的低噪音信息层级。

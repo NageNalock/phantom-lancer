@@ -87,6 +87,7 @@ type StrategyGenerationContext struct {
 	OpportunityCandidates          []OpportunityCandidate                `json:"opportunityCandidates,omitempty"`
 	OpportunityEvidenceByCandidate map[string][]OpportunityEvidence      `json:"opportunityEvidenceByCandidate,omitempty"`
 	EmbeddingStatus                *EmbeddingStatus                      `json:"embeddingStatus,omitempty"`
+	DecisionGates                  map[string]DecisionGateSnapshot       `json:"decisionGates,omitempty"`
 }
 
 type StrategyGenerationInstrumentContext struct {
@@ -132,6 +133,9 @@ type StrategyGenerationDraft struct {
 	EvidenceSummary          []string                                   `json:"evidence_summary,omitempty"`
 	RiskSummary              []string                                   `json:"risk_summary,omitempty"`
 	InvalidConditions        []string                                   `json:"invalid_conditions,omitempty"`
+	DecisionBasis            []string                                   `json:"decision_basis,omitempty"`
+	EvidenceRefIDs           []string                                   `json:"evidence_ref_ids,omitempty"`
+	GateSnapshotID           string                                     `json:"gate_snapshot_id,omitempty"`
 	Playbook                 StrategyGenerationPlaybook                 `json:"playbook"`
 	PortfolioAwareSuggestion StrategyGenerationPortfolioAwareSuggestion `json:"portfolio_aware_suggestion,omitempty"`
 }

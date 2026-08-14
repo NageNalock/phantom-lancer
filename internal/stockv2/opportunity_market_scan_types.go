@@ -117,34 +117,46 @@ type OpportunityMarketScanRun struct {
 }
 
 type OpportunityMarketScanMetrics struct {
-	TradeDate          string   `json:"tradeDate,omitempty"`
-	Return5Pct         float64  `json:"return5Pct,omitempty"`
-	Return20Pct        float64  `json:"return20Pct,omitempty"`
-	Return60Pct        float64  `json:"return60Pct,omitempty"`
-	MA20GapPct         float64  `json:"ma20GapPct,omitempty"`
-	MA60GapPct         float64  `json:"ma60GapPct,omitempty"`
-	VolumeRatio5To20   float64  `json:"volumeRatio5To20,omitempty"`
-	UpVolumeShare20    float64  `json:"upVolumeShare20,omitempty"`
-	Volatility20       float64  `json:"volatility20,omitempty"`
-	MedianAmount20     float64  `json:"medianAmount20,omitempty"`
-	IndustryBreadth20  float64  `json:"industryBreadth20,omitempty"`
-	MainNetInflow5     float64  `json:"mainNetInflow5,omitempty"`
-	MainNetInflow20    float64  `json:"mainNetInflow20,omitempty"`
-	MainNetInflow60    float64  `json:"mainNetInflow60,omitempty"`
-	MainFlowRatio20    float64  `json:"mainFlowRatio20,omitempty"`
-	PositiveFlowDays20 int      `json:"positiveFlowDays20,omitempty"`
-	LatestPrice        float64  `json:"latestPrice,omitempty"`
-	LatestPctChange    float64  `json:"latestPctChange,omitempty"`
-	LatestTurnoverRate float64  `json:"latestTurnoverRate,omitempty"`
-	LatestMainFlowPct  float64  `json:"latestMainFlowPct,omitempty"`
-	QFQAvailable       bool     `json:"qfqAvailable"`
-	FundFlowAvailable  bool     `json:"fundFlowAvailable"`
-	FundFlowStatus     string   `json:"fundFlowStatus,omitempty"`
-	FundFlowSource     string   `json:"fundFlowSource,omitempty"`
-	FundFlowAsOf       string   `json:"fundFlowAsOf,omitempty"`
-	FundFlowUsed       bool     `json:"fundFlowUsed"`
-	QuoteAvailable     bool     `json:"quoteAvailable"`
-	ThemeSignals       []string `json:"themeSignals,omitempty"`
+	InstrumentType     string                `json:"instrumentType,omitempty"`
+	TradeDate          string                `json:"tradeDate,omitempty"`
+	Return5Pct         float64               `json:"return5Pct,omitempty"`
+	Return20Pct        float64               `json:"return20Pct,omitempty"`
+	Return60Pct        float64               `json:"return60Pct,omitempty"`
+	MA20GapPct         float64               `json:"ma20GapPct,omitempty"`
+	MA60GapPct         float64               `json:"ma60GapPct,omitempty"`
+	VolumeRatio5To20   float64               `json:"volumeRatio5To20,omitempty"`
+	UpVolumeShare20    float64               `json:"upVolumeShare20,omitempty"`
+	Volatility20       float64               `json:"volatility20,omitempty"`
+	ATR14              float64               `json:"atr14,omitempty"`
+	ATR14Pct           float64               `json:"atr14Pct,omitempty"`
+	MA20               float64               `json:"ma20,omitempty"`
+	MedianAmount20     float64               `json:"medianAmount20,omitempty"`
+	IndustryBreadth20  float64               `json:"industryBreadth20,omitempty"`
+	MainNetInflow5     float64               `json:"mainNetInflow5,omitempty"`
+	MainNetInflow20    float64               `json:"mainNetInflow20,omitempty"`
+	MainNetInflow60    float64               `json:"mainNetInflow60,omitempty"`
+	MainFlowRatio20    float64               `json:"mainFlowRatio20,omitempty"`
+	PositiveFlowDays20 int                   `json:"positiveFlowDays20,omitempty"`
+	LatestPrice        float64               `json:"latestPrice,omitempty"`
+	LatestPctChange    float64               `json:"latestPctChange,omitempty"`
+	LatestTurnoverRate float64               `json:"latestTurnoverRate,omitempty"`
+	LatestMainFlowPct  float64               `json:"latestMainFlowPct,omitempty"`
+	QFQAvailable       bool                  `json:"qfqAvailable"`
+	FundFlowAvailable  bool                  `json:"fundFlowAvailable"`
+	FundFlowStatus     string                `json:"fundFlowStatus,omitempty"`
+	FundFlowSource     string                `json:"fundFlowSource,omitempty"`
+	FundFlowAsOf       string                `json:"fundFlowAsOf,omitempty"`
+	FundFlowUsed       bool                  `json:"fundFlowUsed"`
+	QuoteAvailable     bool                  `json:"quoteAvailable"`
+	ThemeSignals       []string              `json:"themeSignals,omitempty"`
+	CatalystSignals    []string              `json:"catalystSignals,omitempty"`
+	DecisionStatus     string                `json:"decisionStatus,omitempty"`
+	MarketRegime       string                `json:"marketRegime,omitempty"`
+	FactorCluster      string                `json:"factorCluster,omitempty"`
+	GateSnapshotID     string                `json:"gateSnapshotId,omitempty"`
+	DecisionGates      []DecisionGateResult  `json:"decisionGates,omitempty"`
+	DataHealth         []DecisionDataHealth  `json:"dataHealth,omitempty"`
+	DecisionOutcomes   []DecisionGateOutcome `json:"decisionOutcomes,omitempty"`
 }
 
 type OpportunityMarketFundFlowProbe struct {
@@ -154,6 +166,20 @@ type OpportunityMarketFundFlowProbe struct {
 	Count    int    `json:"count"`
 	Duration int64  `json:"durationMs"`
 	Error    string `json:"error,omitempty"`
+}
+
+type OpportunityDecisionDataProbe struct {
+	OK        bool                                  `json:"ok"`
+	Status    string                                `json:"status"`
+	CheckedAt time.Time                             `json:"checkedAt"`
+	Sources   map[string]OpportunityDataSourceProbe `json:"sources"`
+}
+
+type OpportunityDataSourceProbe struct {
+	Status string `json:"status"`
+	Source string `json:"source,omitempty"`
+	Count  int    `json:"count,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 type OpportunityMarketScanCandidate struct {
@@ -175,6 +201,7 @@ type OpportunityMarketScanCandidate struct {
 	RiskPenalty            float64                      `json:"riskPenalty"`
 	Metrics                OpportunityMarketScanMetrics `json:"metrics"`
 	ExclusionReason        string                       `json:"exclusionReason,omitempty"`
+	DecisionReason         string                       `json:"decisionReason,omitempty"`
 	OpportunityCandidateID string                       `json:"opportunityCandidateId,omitempty"`
 	StrategyStatus         string                       `json:"strategyStatus,omitempty"`
 	StrategyID             string                       `json:"strategyId,omitempty"`
@@ -205,10 +232,11 @@ type OpportunityMarketScanRunListFilter struct {
 }
 
 type OpportunityMarketScanCandidateListFilter struct {
-	ScanRunID string
-	Stage     string
-	Limit     int
-	Offset    int
+	ScanRunID      string
+	Stage          string
+	DecisionStatus string
+	Limit          int
+	Offset         int
 }
 
 func opportunityMarketScanStatusActive(status string) bool {

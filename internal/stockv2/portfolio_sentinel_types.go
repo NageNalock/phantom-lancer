@@ -201,6 +201,7 @@ type PortfolioSentinelContext struct {
 	DataFreshness  map[string]any                      `json:"dataFreshness,omitempty"`
 	ContextStats   map[string]any                      `json:"contextStats,omitempty"`
 	NewsContext    *PortfolioSentinelNewsContext       `json:"newsContext,omitempty"`
+	DecisionGates  map[string]DecisionGateSnapshot     `json:"decisionGates,omitempty"`
 	Note           string                              `json:"note,omitempty"`
 }
 

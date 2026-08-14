@@ -565,6 +565,25 @@ func TestStrategyGenerationDraftActivationFeedsDataMonitor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run strategy generation: %v", err)
 	}
+	// This test covers activation-to-monitor wiring rather than decision data.
+	// Make its gate fixture explicitly healthy so the fail-closed production
+	// boundary does not turn an unrelated integration test into no_change.
+	gates, err := svc.store.ListDecisionGateSnapshots(ctx, "strategy_generation", run.TriggerObjectID)
+	if err != nil || len(gates) != 1 {
+		t.Fatalf("decision gates = %#v, err=%v", gates, err)
+	}
+	gate := gates[0]
+	gate.Status = DecisionHealthHealthy
+	gate.AllowedActions = []string{StrategyGenerationRuleActionAddPosition}
+	for i := range gate.Gates {
+		gate.Gates[i].Status = DecisionGateStatusPass
+	}
+	for i := range gate.DataHealth {
+		gate.DataHealth[i].Status = DecisionHealthHealthy
+	}
+	if _, err := svc.store.SaveDecisionGateSnapshot(ctx, gate); err != nil {
+		t.Fatalf("save healthy decision gate: %v", err)
+	}
 	report := strategyGenerationReportResult("300750")
 	draft := mapFromAny(sliceFromAny(report["drafts"])[0])
 	draft["name"] = "宁德时代"

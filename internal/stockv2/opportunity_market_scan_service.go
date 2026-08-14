@@ -39,11 +39,104 @@ func (s *Service) CountOpportunityMarketScanRuns(ctx context.Context, filter Opp
 }
 
 func (s *Service) ListOpportunityMarketScanCandidates(ctx context.Context, filter OpportunityMarketScanCandidateListFilter) ([]OpportunityMarketScanCandidate, error) {
-	return s.store.ListOpportunityMarketScanCandidates(ctx, filter)
+	items, err := s.store.ListOpportunityMarketScanCandidates(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	s.populateOpportunityMarketScanDecisionReasons(ctx, strings.TrimSpace(filter.ScanRunID), items)
+	for i := range items {
+		s.refreshOpportunityDecisionOutcomes(ctx, &items[i])
+	}
+	return items, nil
 }
 
 func (s *Service) CountOpportunityMarketScanCandidates(ctx context.Context, filter OpportunityMarketScanCandidateListFilter) (int, error) {
 	return s.store.CountOpportunityMarketScanCandidates(ctx, filter)
+}
+
+func (s *Service) populateOpportunityMarketScanDecisionReasons(ctx context.Context, runID string, items []OpportunityMarketScanCandidate) {
+	if runID == "" || len(items) == 0 {
+		return
+	}
+	run, err := s.store.GetOpportunityMarketScanRun(ctx, runID)
+	if err != nil {
+		applyOpportunityMarketScanDecisionReasons(items, nil, nil, nil)
+		return
+	}
+	excluded := map[string]string{}
+	if result, resultErr := s.store.GetOpportunityResultByRunID(ctx, run.DiscoveryRunID); resultErr == nil {
+		for _, raw := range sliceFromAny(result.RawResult["excluded"]) {
+			entry := mapFromAny(raw)
+			symbol := strings.TrimSpace(stringFromAny(entry["symbol"]))
+			reason := strings.TrimSpace(stringFromAny(entry["reason"]))
+			if symbol != "" && reason != "" {
+				excluded[symbol] = safelog.Text(reason, 300)
+			}
+		}
+	}
+	omitted := map[string]string{}
+	if run.StrategyAgentRunID != "" {
+		if agentRun, runErr := s.store.GetAgentRun(ctx, run.StrategyAgentRunID); runErr == nil && agentRun.DecisionLedgerID != "" {
+			if ledger, ledgerErr := s.store.GetAgentDecisionLedger(ctx, agentRun.DecisionLedgerID); ledgerErr == nil {
+				result := mapFromAny(ledger.StructuredOutput["result"])
+				summary := mapFromAny(result["run_summary"])
+				for _, raw := range sliceFromAny(summary["omitted_candidates"]) {
+					entry := mapFromAny(raw)
+					symbol := strings.TrimSpace(stringFromAny(entry["symbol"]))
+					reason := strings.TrimSpace(stringFromAny(entry["reason"]))
+					if symbol != "" && reason != "" {
+						omitted[symbol] = safelog.Text(reason, 300)
+					}
+				}
+			}
+		}
+	}
+	reviews := map[string]OpportunityCandidate{}
+	if run.DiscoveryRunID != "" {
+		if candidates, listErr := s.store.ListOpportunityCandidates(ctx, OpportunityCandidateListFilter{RunID: run.DiscoveryRunID, Limit: opportunityMarketScanFinalLimit}); listErr == nil {
+			for _, candidate := range candidates {
+				reviews[candidate.Symbol] = candidate
+			}
+		}
+	}
+	applyOpportunityMarketScanDecisionReasons(items, excluded, omitted, reviews)
+}
+
+func applyOpportunityMarketScanDecisionReasons(items []OpportunityMarketScanCandidate, excluded, omitted map[string]string, reviews map[string]OpportunityCandidate) {
+	for i := range items {
+		item := &items[i]
+		switch {
+		case item.StrategyStatus == OpportunityMarketScanStrategyGenerated:
+			item.DecisionReason = "已生成未激活策略草案"
+		case item.StrategyStatus == OpportunityMarketScanStrategyPending:
+			item.DecisionReason = "已进入策略草拟，等待结果"
+		case item.Stage == OpportunityMarketScanCandidateExcluded:
+			item.DecisionReason = opportunityMarketScanExclusionDecision(*item)
+		case item.Stage == OpportunityMarketScanCandidateReviewedOut:
+			item.DecisionReason = firstNonEmpty(excluded[item.Symbol], item.ExclusionReason, "Agent 复核未入选")
+		case item.Stage == OpportunityMarketScanCandidateFinal:
+			if reason := strings.TrimSpace(omitted[item.Symbol]); reason != "" {
+				item.DecisionReason = reason
+				break
+			}
+			review, ok := reviews[item.Symbol]
+			if ok && (review.EvidenceScore < 55 || review.Confidence < .55) {
+				item.DecisionReason = fmt.Sprintf("未达策略门槛：证据 %.0f/55，置信度 %.2f/0.55", review.EvidenceScore, review.Confidence)
+			} else if ok && (review.Status == OpportunityCandidateStatusStrategyRequested || review.Status == OpportunityCandidateStatusStrategyGenerated) {
+				item.DecisionReason = "策略草拟后未形成草案"
+			} else if ok && review.EvidenceScore >= 55 && review.Confidence >= .55 {
+				item.DecisionReason = fmt.Sprintf("Agent 证据排名未进入策略草拟前 %d", opportunityMarketScanStrategyLimit)
+			} else {
+				item.DecisionReason = firstNonEmpty(item.ExclusionReason, "最终候选，未生成策略草案")
+			}
+		default:
+			item.DecisionReason = firstNonEmpty(item.ExclusionReason, "等待后续筛选")
+		}
+	}
+}
+
+func opportunityMarketScanExclusionDecision(item OpportunityMarketScanCandidate) string {
+	return firstNonEmpty(item.ExclusionReason, "未通过确定性风险条件")
 }
 
 func (s *Service) ProbeOpportunityMarketFundFlow(ctx context.Context) OpportunityMarketFundFlowProbe {
@@ -308,7 +401,7 @@ func (s *Service) prepareOpportunityMarketScan(ctx context.Context, runID string
 		}
 	}
 	if run.ResearchCount == 0 {
-		s.failOpportunityMarketScan(ctx, run, errors.New("no candidates survived the short-term overheating guard"), false)
+		s.failOpportunityMarketScan(ctx, run, errors.New("no candidates passed the deterministic decision gates; inspect blocked data health in the excluded list"), true)
 		return
 	}
 	opp, err := s.ensureOpportunityMarketScanOpportunity(ctx)
@@ -353,7 +446,8 @@ func (s *Service) finishOpportunityMarketScanWorker() {
 
 func opportunityMarketMetricsFromRaw(item opportunityMarketScanRawMetric) OpportunityMarketScanMetrics {
 	return OpportunityMarketScanMetrics{
-		TradeDate: item.TradeDate, Return5Pct: pctReturn(item.Close, item.Close5),
+		InstrumentType: item.Instrument.InstrumentType,
+		TradeDate:      item.TradeDate, Return5Pct: pctReturn(item.Close, item.Close5),
 		Return20Pct: pctReturn(item.Close, item.Close20), Return60Pct: pctReturn(item.Close, item.Close60),
 		MA20GapPct: pctReturn(item.Close, item.MA20), MA60GapPct: pctReturn(item.Close, item.MA60),
 		VolumeRatio5To20: safeRatio(item.Volume5, item.Volume20), UpVolumeShare20: item.UpVolumeShare20,
@@ -363,6 +457,7 @@ func opportunityMarketMetricsFromRaw(item opportunityMarketScanRawMetric) Opport
 }
 
 func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *OpportunityMarketScanRun, candidates []OpportunityMarketScanCandidate) []OpportunityMarketScanCandidate {
+	barsBySymbol := make(map[string][]StockV2DailyBar)
 	qfqLimit := min(len(candidates), opportunityMarketScanQFQLimit)
 	for i := 0; i < qfqLimit; i++ {
 		candidate := &candidates[i]
@@ -387,6 +482,7 @@ func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *Opportun
 		bars, err := s.store.GetDailyBars(ctx, candidate.Symbol, DailyBarAdjustedQFQ, "", run.TradeDate, 120)
 		if err == nil && len(bars) >= 61 {
 			applyOpportunityQFQMetrics(&candidate.Metrics, bars)
+			barsBySymbol[candidate.Symbol] = bars
 		}
 	}
 	symbols := make([]string, 0, qfqLimit)
@@ -412,6 +508,10 @@ func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *Opportun
 	flowLimit := min(len(candidates), opportunityMarketScanFundFlowLimit)
 	run.FundFlowRequestedCount = flowLimit
 	config, configErr := s.store.GetOpportunityMarketScanConfig(ctx)
+	var tradeCalendar []decisionTradeDay
+	if configErr == nil {
+		tradeCalendar, _ = s.refreshDecisionTradeCalendar(ctx, config, run.TradeDate)
+	}
 	flowCtx, cancelFlow := context.WithTimeout(ctx, opportunityFundFlowStageTimeout)
 	defer cancelFlow()
 	var flowErrors []string
@@ -454,8 +554,9 @@ func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *Opportun
 		scoreOpportunityFundFlowPercentiles(candidates[:flowLimit])
 	}
 	threads := s.activeOpportunityMarketScanThreads(ctx)
+	catalystCutoff := decisionTradingSessionCutoff(tradeCalendar, run.TradeDate, 20)
 	for i := range candidates {
-		candidates[i].ThemeScore, candidates[i].Metrics.ThemeSignals = opportunityMarketThemeScore(candidates[i], threads)
+		candidates[i].ThemeScore, candidates[i].Metrics.ThemeSignals, candidates[i].Metrics.CatalystSignals = opportunityMarketThemeScore(candidates[i], threads, catalystCutoff)
 		candidates[i].Metrics.FundFlowUsed = run.FundFlowUsed && candidates[i].Metrics.FundFlowAvailable
 		quality, applicable := 0.0, 0.0
 		applicable += 35
@@ -475,7 +576,9 @@ func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *Opportun
 		if applicable > 0 {
 			quality = quality / applicable * 100
 		}
-		risk := math.Max(0, candidates[i].Metrics.Return5Pct-18)*1.5 + math.Max(0, candidates[i].Metrics.Return20Pct-35)
+		limit5 := math.Max(12, 4*candidates[i].Metrics.ATR14Pct)
+		limit20 := math.Max(25, 7*candidates[i].Metrics.ATR14Pct)
+		risk := math.Max(0, candidates[i].Metrics.Return5Pct-limit5)*1.5 + math.Max(0, candidates[i].Metrics.Return20Pct-limit20)
 		candidates[i].RiskPenalty = math.Min(risk, 35)
 		quoteScore := clampScore(50 + candidates[i].Metrics.LatestPctChange*2)
 		if run.FundFlowUsed {
@@ -492,18 +595,53 @@ func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *Opportun
 		}
 		return candidates[i].FinalScore > candidates[j].FinalScore
 	})
+	config, _ = s.store.GetOpportunityMarketScanConfig(ctx)
+	benchmarkBars, benchmarkErr := s.refreshDecisionBenchmark(ctx, config, run.TradeDate)
+	benchmarkReturn, benchmarkOK := decisionBenchmarkReturn20(benchmarkBars)
+	marketRegime := opportunityMarketRegime(candidates[:min(len(candidates), opportunityMarketScanQFQLimit)], benchmarkReturn, benchmarkOK)
+	clusters, crowded := opportunityMarketFactorClusters(candidates[:min(len(candidates), opportunityMarketScanResearchLimit)], barsBySymbol)
+	referenceCtx, cancelReference := context.WithTimeout(ctx, 4*time.Minute)
+	referenceHealth := s.refreshDecisionReferenceData(referenceCtx, config, candidates[:min(len(candidates), opportunityMarketScanResearchLimit)])
+	cancelReference()
 	researchCount := 0
 	for i := range candidates {
 		candidates[i].FinalRank = i + 1
-		if candidates[i].Metrics.Return5Pct > 18 || candidates[i].Metrics.Return20Pct > 35 {
-			candidates[i].Stage = OpportunityMarketScanCandidateExcluded
-			candidates[i].ExclusionReason = "前复权短期涨幅超过风险边界"
-		} else if researchCount < opportunityMarketScanResearchLimit {
+		candidates[i].Metrics.MarketRegime = marketRegime
+		candidates[i].Metrics.FactorCluster = clusters[candidates[i].Symbol]
+		if i < opportunityMarketScanResearchLimit {
+			health := referenceHealth[candidates[i].Symbol]
+			snapshot := s.buildDecisionGateSnapshot(ctx, decisionGateBuildInput{
+				ContextType: "opportunity_market_scan_candidate", ContextID: candidates[i].ID,
+				Symbol: candidates[i].Symbol, Market: candidates[i].Market, InstrumentType: candidates[i].Metrics.InstrumentType,
+				TradeDate: run.TradeDate, Bars: barsBySymbol[candidates[i].Symbol], QuoteAvailable: candidates[i].Metrics.QuoteAvailable,
+				ThemeSignals: candidates[i].Metrics.CatalystSignals, FlowAvailable: candidates[i].Metrics.FundFlowAvailable,
+				MainFlowRatio20: candidates[i].Metrics.MainFlowRatio20, FactorCluster: clusters[candidates[i].Symbol],
+				FactorBlocked: crowded[candidates[i].Symbol] != "", FactorReason: crowded[candidates[i].Symbol],
+				MarketRegime: marketRegime, ReferenceHealth: health,
+				BenchmarkAvailable: benchmarkErr == nil && benchmarkOK, BenchmarkReturn20Pct: benchmarkReturn,
+				TradeCalendar: tradeCalendar,
+			})
+			if saved, saveErr := s.store.SaveDecisionGateSnapshot(ctx, snapshot); saveErr == nil {
+				snapshot = saved
+			} else {
+				snapshot.DataHealth = append(snapshot.DataHealth, DecisionDataHealth{Key: "decision_snapshot", Label: "决策快照", Status: DecisionHealthBlocked, Required: true, Message: "决策快照保存失败", CheckedAt: time.Now()})
+				snapshot = finalizeDecisionGateSnapshot(snapshot)
+			}
+			candidates[i].Metrics.DecisionStatus = snapshot.Status
+			candidates[i].Metrics.GateSnapshotID = snapshot.ID
+			candidates[i].Metrics.DecisionGates = snapshot.Gates
+			candidates[i].Metrics.DataHealth = snapshot.DataHealth
+		}
+		if i < opportunityMarketScanResearchLimit && candidates[i].Metrics.DecisionStatus != DecisionHealthBlocked {
 			candidates[i].Stage = OpportunityMarketScanCandidateResearch
 			researchCount++
 		} else {
 			candidates[i].Stage = OpportunityMarketScanCandidateExcluded
-			candidates[i].ExclusionReason = "低于本轮模型复核预算"
+			if i < opportunityMarketScanResearchLimit {
+				candidates[i].ExclusionReason = decisionGateBlockedReason(candidates[i].Metrics.DecisionGates)
+			} else {
+				candidates[i].ExclusionReason = "低于本轮模型复核预算"
+			}
 		}
 	}
 	return candidates
@@ -575,6 +713,103 @@ func applyOpportunityQFQMetrics(metrics *OpportunityMarketScanMetrics, bars []St
 	metrics.MA20GapPct, metrics.MA60GapPct = pctReturn(bars[last].Close, ma20), pctReturn(bars[last].Close, ma60)
 	metrics.VolumeRatio5To20, metrics.UpVolumeShare20 = safeRatio(vol5/5, vol20/20), safeRatio(upVolume, allVolume)
 	metrics.Volatility20, metrics.MedianAmount20 = math.Sqrt(variance/19), amounts[len(amounts)/2]
+	features := calculateDecisionBarFeatures(bars)
+	metrics.ATR14, metrics.ATR14Pct, metrics.MA20 = features.ATR14, features.ATR14Pct, features.MA20
+}
+
+func opportunityMarketRegime(candidates []OpportunityMarketScanCandidate, benchmarkReturn20 float64, benchmarkAvailable bool) string {
+	if len(candidates) == 0 {
+		return "neutral"
+	}
+	strong := 0
+	for _, candidate := range candidates {
+		if candidate.Metrics.LatestPrice >= candidate.Metrics.MA20 && candidate.Metrics.Return20Pct > 0 {
+			strong++
+		}
+	}
+	ratio := float64(strong) / float64(len(candidates))
+	if benchmarkAvailable && benchmarkReturn20 < 0 && ratio < .40 {
+		return "risk_off"
+	}
+	if benchmarkAvailable && benchmarkReturn20 > 0 && ratio > .60 {
+		return "risk_on"
+	}
+	return "neutral"
+}
+
+func opportunityMarketFactorClusters(candidates []OpportunityMarketScanCandidate, bars map[string][]StockV2DailyBar) (map[string]string, map[string]string) {
+	clusters, blocked := map[string]string{}, map[string]string{}
+	for i := range candidates {
+		leader := candidates[i].Symbol
+		for j := 0; j < i; j++ {
+			corr := opportunityBarCorrelation(bars[candidates[i].Symbol], bars[candidates[j].Symbol], 60)
+			industry := strings.TrimSpace(candidates[i].Industry)
+			sameFactor := (industry != "" && strings.EqualFold(industry, strings.TrimSpace(candidates[j].Industry))) ||
+				stringSlicesOverlapFold(candidates[i].Concepts, candidates[j].Concepts)
+			if (sameFactor && corr >= .75) || corr >= .85 {
+				leader = firstNonEmpty(clusters[candidates[j].Symbol], candidates[j].Symbol)
+				blocked[candidates[i].Symbol] = fmt.Sprintf("与更高排名的 %s 同属高相关因子簇（相关系数 %.2f）", firstNonEmpty(candidates[j].Name, candidates[j].Symbol), corr)
+				break
+			}
+		}
+		clusters[candidates[i].Symbol] = leader
+	}
+	return clusters, blocked
+}
+
+func opportunityBarCorrelation(a, b []StockV2DailyBar, limit int) float64 {
+	byDate := make(map[string]float64, len(a))
+	for _, bar := range a {
+		byDate[bar.TradeDate] = bar.PctChange
+	}
+	x, y := make([]float64, 0, limit), make([]float64, 0, limit)
+	for i := len(b) - 1; i >= 0 && len(x) < limit; i-- {
+		if value, ok := byDate[b[i].TradeDate]; ok {
+			x, y = append(x, value), append(y, b[i].PctChange)
+		}
+	}
+	if len(x) < 20 {
+		return 0
+	}
+	var mx, my float64
+	for i := range x {
+		mx += x[i]
+		my += y[i]
+	}
+	mx, my = mx/float64(len(x)), my/float64(len(y))
+	var numerator, vx, vy float64
+	for i := range x {
+		dx, dy := x[i]-mx, y[i]-my
+		numerator, vx, vy = numerator+dx*dy, vx+dx*dx, vy+dy*dy
+	}
+	if vx == 0 || vy == 0 {
+		return 0
+	}
+	return numerator / math.Sqrt(vx*vy)
+}
+
+func stringSlicesOverlapFold(a, b []string) bool {
+	for _, left := range a {
+		for _, right := range b {
+			if strings.TrimSpace(left) != "" && strings.EqualFold(strings.TrimSpace(left), strings.TrimSpace(right)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func decisionGateBlockedReason(gates []DecisionGateResult) string {
+	var reasons []string
+	for _, gate := range gates {
+		if gate.Status == DecisionGateStatusBlocked {
+			reasons = append(reasons, gate.Label+"："+gate.Summary)
+		}
+	}
+	if len(reasons) == 0 {
+		return "关键决策数据不完整"
+	}
+	return strings.Join(reasons, "；")
 }
 
 func opportunityDailyBarAmount(bar StockV2DailyBar) float64 {
@@ -605,9 +840,10 @@ func (s *Service) activeOpportunityMarketScanThreads(ctx context.Context) []News
 	}
 }
 
-func opportunityMarketThemeScore(candidate OpportunityMarketScanCandidate, threads []NewsThread) (float64, []string) {
+func opportunityMarketThemeScore(candidate OpportunityMarketScanCandidate, threads []NewsThread, catalystCutoff time.Time) (float64, []string, []string) {
 	score := 0.0
 	var signals []string
+	var catalysts []string
 	for _, thread := range threads {
 		direct := stringListContains(thread.Symbols, candidate.Symbol) || stringListContains(thread.Leaders, candidate.Symbol) ||
 			stringListContains(thread.Followers, candidate.Symbol) || stringListContains(thread.NextCandidates, candidate.Symbol)
@@ -625,8 +861,11 @@ func opportunityMarketThemeScore(candidate OpportunityMarketScanCandidate, threa
 		if len(signals) < 5 {
 			signals = append(signals, thread.Title)
 		}
+		if !catalystCutoff.IsZero() && !thread.LastChangedAt.IsZero() && !thread.LastChangedAt.Before(catalystCutoff) && len(catalysts) < 5 {
+			catalysts = append(catalysts, thread.Title)
+		}
 	}
-	return score, signals
+	return score, signals, catalysts
 }
 
 func stringListContains(items []string, expected string) bool {
@@ -745,6 +984,88 @@ func (s *Service) tickOpportunityMarketScanScheduler(ctx context.Context) {
 		return
 	}
 	_, _ = s.StartOpportunityMarketScan(ctx, OpportunityMarketScanTriggerScheduled, "system:scheduler")
+}
+
+func (s *Service) runRecentOpportunityDecisionAudit(ctx context.Context) bool {
+	if !s.tryStartBackgroundHeavyWork() {
+		return false
+	}
+	defer s.finishBackgroundHeavyWork()
+	runs, err := s.store.ListOpportunityMarketScanRuns(ctx, OpportunityMarketScanRunListFilter{Limit: 10})
+	if err != nil {
+		return true
+	}
+	config, err := s.store.GetOpportunityMarketScanConfig(ctx)
+	if err != nil {
+		return true
+	}
+	auditedRuns := 0
+	for _, run := range runs {
+		if auditedRuns >= 3 {
+			break
+		}
+		if run.Status != OpportunityMarketScanStatusCompleted && run.Status != OpportunityMarketScanStatusPartial {
+			continue
+		}
+		candidates, err := s.store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{ScanRunID: run.ID, Limit: opportunityMarketScanLocalLimit})
+		if err != nil {
+			continue
+		}
+		targets := make([]OpportunityMarketScanCandidate, 0, opportunityMarketScanStrategyLimit)
+		for _, candidate := range candidates {
+			if candidate.Metrics.GateSnapshotID != "" {
+				continue
+			}
+			if candidate.StrategyStatus == OpportunityMarketScanStrategyGenerated || candidate.Stage == OpportunityMarketScanCandidateFinal {
+				targets = append(targets, candidate)
+				if len(targets) >= opportunityMarketScanStrategyLimit {
+					break
+				}
+			}
+		}
+		auditedRuns++
+		if len(targets) == 0 {
+			continue
+		}
+		benchmarkBars, benchmarkErr := s.refreshDecisionBenchmark(ctx, config, run.TradeDate)
+		benchmarkReturn, benchmarkOK := decisionBenchmarkReturn20(benchmarkBars)
+		tradeCalendar, _ := s.refreshDecisionTradeCalendar(ctx, config, run.TradeDate)
+		reference := s.refreshDecisionReferenceData(ctx, config, targets)
+		barsBySymbol := make(map[string][]StockV2DailyBar, len(targets))
+		for i := range targets {
+			barsBySymbol[targets[i].Symbol], _ = s.store.GetDailyBars(ctx, targets[i].Symbol, DailyBarAdjustedQFQ, "", run.TradeDate, 120)
+			if !targets[i].Metrics.QFQAvailable {
+				applyOpportunityQFQMetrics(&targets[i].Metrics, barsBySymbol[targets[i].Symbol])
+			}
+		}
+		clusters, crowded := opportunityMarketFactorClusters(targets, barsBySymbol)
+		regime := opportunityMarketRegime(targets, benchmarkReturn, benchmarkErr == nil && benchmarkOK)
+		for i := range targets {
+			snapshot := s.buildDecisionGateSnapshot(ctx, decisionGateBuildInput{
+				ContextType: "opportunity_market_scan_candidate", ContextID: targets[i].ID,
+				Symbol: targets[i].Symbol, Market: targets[i].Market, InstrumentType: targets[i].Metrics.InstrumentType,
+				TradeDate: run.TradeDate, Bars: barsBySymbol[targets[i].Symbol], QuoteAvailable: targets[i].Metrics.QuoteAvailable,
+				ThemeSignals: targets[i].Metrics.CatalystSignals, FlowAvailable: targets[i].Metrics.FundFlowAvailable,
+				MainFlowRatio20: targets[i].Metrics.MainFlowRatio20, FactorCluster: clusters[targets[i].Symbol],
+				FactorBlocked: crowded[targets[i].Symbol] != "", FactorReason: crowded[targets[i].Symbol],
+				MarketRegime: regime, ReferenceHealth: reference[targets[i].Symbol],
+				BenchmarkAvailable: benchmarkErr == nil && benchmarkOK, BenchmarkReturn20Pct: benchmarkReturn,
+				TradeCalendar: tradeCalendar,
+			})
+			snapshot, err = s.store.SaveDecisionGateSnapshot(ctx, snapshot)
+			if err != nil {
+				continue
+			}
+			targets[i].Metrics.DecisionStatus = snapshot.Status
+			targets[i].Metrics.MarketRegime = regime
+			targets[i].Metrics.FactorCluster = clusters[targets[i].Symbol]
+			targets[i].Metrics.GateSnapshotID = snapshot.ID
+			targets[i].Metrics.DecisionGates = snapshot.Gates
+			targets[i].Metrics.DataHealth = snapshot.DataHealth
+		}
+		_ = s.store.UpsertOpportunityMarketScanCandidates(ctx, targets)
+	}
+	return true
 }
 
 func (s *Service) advanceOpportunityMarketScan(ctx context.Context, run OpportunityMarketScanRun) {

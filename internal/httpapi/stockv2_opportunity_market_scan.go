@@ -51,6 +51,13 @@ func (s *Server) handleStockV2ProbeOpportunityMarketFundFlow(w http.ResponseWrit
 	s.writeJSON(w, s.stockV2.ProbeOpportunityMarketFundFlow(r.Context()))
 }
 
+func (s *Server) handleStockV2ProbeOpportunityDecisionData(w http.ResponseWriter, r *http.Request) {
+	if session, ok := s.requireAuth(w, r); !ok || !s.requireCSRF(w, r, session.Session) {
+		return
+	}
+	s.writeJSON(w, s.stockV2.ProbeOpportunityDecisionData(r.Context()))
+}
+
 func (s *Server) handleStockV2ListOpportunityMarketScanRuns(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAuth(w, r); !ok {
 		return
@@ -123,7 +130,10 @@ func (s *Server) handleStockV2ListOpportunityMarketScanCandidates(w http.Respons
 		writeError(w, http.StatusBadRequest, "invalid_offset", err.Error())
 		return
 	}
-	filter := stockv2.OpportunityMarketScanCandidateListFilter{ScanRunID: r.PathValue("id"), Stage: strings.TrimSpace(r.URL.Query().Get("stage")), Limit: limit, Offset: offset}
+	filter := stockv2.OpportunityMarketScanCandidateListFilter{
+		ScanRunID: r.PathValue("id"), Stage: strings.TrimSpace(r.URL.Query().Get("stage")),
+		DecisionStatus: strings.TrimSpace(r.URL.Query().Get("decisionStatus")), Limit: limit, Offset: offset,
+	}
 	items, err := s.stockV2.ListOpportunityMarketScanCandidates(r.Context(), filter)
 	if err != nil {
 		writeOpportunityMarketScanError(w, err)

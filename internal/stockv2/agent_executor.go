@@ -1711,7 +1711,7 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 	b.WriteString("Do not place orders, do not modify holdings, do not create proposed_operation, do not activate strategies, and do not read token/cookie/private config.\n")
 	b.WriteString("Every candidate symbol must exist in StockV2 master data. Use stock_agent.search_instruments or stock_agent.search_stock_profiles before recording candidates.\n")
 	if discCtx.Mode == OpportunityDiscoveryModeMarketScan {
-		b.WriteString("This is a bounded market-scan review. MarketCandidates is the complete allowed universe for this run: do not rediscover the full market and do not return any symbol outside it. Review at most 20 supplied main-board stocks, retain at most 10, and use public search only to verify material claims, catalysts, and risks. Missing fund-flow or quote evidence must reduce confidence instead of being invented.\n")
+		b.WriteString("This is a bounded market-scan review. MarketCandidates is the complete allowed universe for this run: do not rediscover the full market and do not return any symbol outside it. Review at most 20 supplied main-board stocks, retain at most 10, and use public search only to verify material claims, catalysts, and risks. Missing fund-flow or quote evidence must reduce confidence instead of being invented. The server-generated decisionStatus, decisionGates, and dataHealth fields are authoritative: never promote a blocked entry candidate and never describe missing evidence as neutral.\n")
 	}
 	b.WriteString("Do not use shell commands or curl to submit results; use MCP tools directly.\n\n")
 
@@ -1792,25 +1792,32 @@ func opportunityDiscoveryPromptContext(discCtx OpportunityDiscoveryContext) any 
 		return discCtx
 	}
 	type compactMetrics struct {
-		TradeDate          string   `json:"tradeDate,omitempty"`
-		Return5Pct         float64  `json:"return5Pct,omitempty"`
-		Return20Pct        float64  `json:"return20Pct,omitempty"`
-		Return60Pct        float64  `json:"return60Pct,omitempty"`
-		MA20GapPct         float64  `json:"ma20GapPct,omitempty"`
-		VolumeRatio5To20   float64  `json:"volumeRatio5To20,omitempty"`
-		MedianAmount20     float64  `json:"medianAmount20,omitempty"`
-		MainFlowRatio20    float64  `json:"mainFlowRatio20,omitempty"`
-		PositiveFlowDays20 int      `json:"positiveFlowDays20,omitempty"`
-		LatestPrice        float64  `json:"latestPrice,omitempty"`
-		LatestPctChange    float64  `json:"latestPctChange,omitempty"`
-		QFQAvailable       bool     `json:"qfqAvailable"`
-		FundFlowAvailable  bool     `json:"fundFlowAvailable"`
-		FundFlowStatus     string   `json:"fundFlowStatus,omitempty"`
-		FundFlowSource     string   `json:"fundFlowSource,omitempty"`
-		FundFlowAsOf       string   `json:"fundFlowAsOf,omitempty"`
-		FundFlowUsed       bool     `json:"fundFlowUsed"`
-		QuoteAvailable     bool     `json:"quoteAvailable"`
-		ThemeSignals       []string `json:"themeSignals,omitempty"`
+		TradeDate          string               `json:"tradeDate,omitempty"`
+		Return5Pct         float64              `json:"return5Pct,omitempty"`
+		Return20Pct        float64              `json:"return20Pct,omitempty"`
+		Return60Pct        float64              `json:"return60Pct,omitempty"`
+		MA20GapPct         float64              `json:"ma20GapPct,omitempty"`
+		VolumeRatio5To20   float64              `json:"volumeRatio5To20,omitempty"`
+		MedianAmount20     float64              `json:"medianAmount20,omitempty"`
+		MainFlowRatio20    float64              `json:"mainFlowRatio20,omitempty"`
+		PositiveFlowDays20 int                  `json:"positiveFlowDays20,omitempty"`
+		LatestPrice        float64              `json:"latestPrice,omitempty"`
+		LatestPctChange    float64              `json:"latestPctChange,omitempty"`
+		QFQAvailable       bool                 `json:"qfqAvailable"`
+		FundFlowAvailable  bool                 `json:"fundFlowAvailable"`
+		FundFlowStatus     string               `json:"fundFlowStatus,omitempty"`
+		FundFlowSource     string               `json:"fundFlowSource,omitempty"`
+		FundFlowAsOf       string               `json:"fundFlowAsOf,omitempty"`
+		FundFlowUsed       bool                 `json:"fundFlowUsed"`
+		QuoteAvailable     bool                 `json:"quoteAvailable"`
+		ThemeSignals       []string             `json:"themeSignals,omitempty"`
+		CatalystSignals    []string             `json:"catalystSignals,omitempty"`
+		ATR14Pct           float64              `json:"atr14Pct,omitempty"`
+		DecisionStatus     string               `json:"decisionStatus,omitempty"`
+		MarketRegime       string               `json:"marketRegime,omitempty"`
+		FactorCluster      string               `json:"factorCluster,omitempty"`
+		DecisionGates      []DecisionGateResult `json:"decisionGates,omitempty"`
+		DataHealth         []DecisionDataHealth `json:"dataHealth,omitempty"`
 	}
 	type compactCandidate struct {
 		Symbol         string         `json:"symbol"`
@@ -1845,7 +1852,12 @@ func opportunityDiscoveryPromptContext(discCtx OpportunityDiscoveryContext) any 
 				FundFlowAvailable: item.Metrics.FundFlowAvailable, QuoteAvailable: item.Metrics.QuoteAvailable,
 				FundFlowStatus: item.Metrics.FundFlowStatus, FundFlowSource: item.Metrics.FundFlowSource,
 				FundFlowAsOf: item.Metrics.FundFlowAsOf, FundFlowUsed: item.Metrics.FundFlowUsed,
-				ThemeSignals: opportunityPromptTextList(item.Metrics.ThemeSignals, 3, 32),
+				ThemeSignals:    opportunityPromptTextList(item.Metrics.ThemeSignals, 3, 32),
+				CatalystSignals: opportunityPromptTextList(item.Metrics.CatalystSignals, 3, 32),
+				ATR14Pct:        item.Metrics.ATR14Pct, DecisionStatus: item.Metrics.DecisionStatus,
+				MarketRegime: item.Metrics.MarketRegime, FactorCluster: item.Metrics.FactorCluster,
+				DecisionGates: compactOpportunityDecisionGates(item.Metrics.DecisionGates),
+				DataHealth:    compactOpportunityDataHealth(item.Metrics.DataHealth),
 			},
 		})
 	}
@@ -1860,6 +1872,30 @@ func opportunityDiscoveryPromptContext(discCtx OpportunityDiscoveryContext) any 
 		"embeddingStatus":  discCtx.EmbeddingStatus,
 		"freshnessSummary": discCtx.FreshnessSummary,
 	}
+}
+
+func compactOpportunityDecisionGates(items []DecisionGateResult) []DecisionGateResult {
+	out := append([]DecisionGateResult(nil), items...)
+	for i := range out {
+		out[i].Summary = safelog.Text(out[i].Summary, 60)
+		out[i].Reasons = opportunityPromptTextList(out[i].Reasons, 1, 60)
+		out[i].Metrics = nil
+		out[i].EvidenceRefs = nil
+	}
+	return out
+}
+
+func compactOpportunityDataHealth(items []DecisionDataHealth) []DecisionDataHealth {
+	out := make([]DecisionDataHealth, 0, len(items))
+	for _, item := range items {
+		if item.Status == DecisionHealthHealthy || item.Status == DecisionHealthNotApplicable {
+			continue
+		}
+		item.Message = safelog.Text(item.Message, 60)
+		item.CheckedAt = time.Time{}
+		out = append(out, item)
+	}
+	return out
 }
 
 func opportunityPromptTextList(values []string, limit, maxBytes int) []string {
@@ -2056,7 +2092,8 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	b.WriteString("5. Before emitting any action other than hold, perform real public retrieval using Codex web_search or a named search/research/browse Agent tool, record compact source/claim metadata in research_audit, and reference those IDs from the action. MCP-only internal retrieval is not sufficient for an actionable plan.\n")
 	b.WriteString("5a. Keep public retrieval bounded: use at most 8 external search/fetch tool calls for this run, start with one targeted query per holding, fetch only the strongest relevant sources, and never retry the same query. More calls are not a substitute for evidence quality.\n")
 	b.WriteString("5b. Describe retrieval status precisely. Say external search is unavailable only when the tool cannot be invoked. If invocation succeeds but yields no useful result, say the search returned no usable result. If any public URL was fetched or recorded in research_audit, do not say external search is unavailable; say that public material was retrieved but no holding-specific causal evidence was verified when that is the actual limitation.\n")
-	b.WriteString("6. Output executable but non-executing plans. Use deterministic price/change/daily-close/portfolio-weight conditions; never use prose as a trigger.\n\n")
+	b.WriteString("6. Output executable but non-executing plans. Use deterministic price/change/daily-close/portfolio-weight conditions; never use prose as a trigger.\n")
+	b.WriteString("7. decisionGates is a server-generated deterministic boundary. Never emit build_position/add_position when that symbol does not list the action in allowedActions. Reduction and exit risk controls remain allowed. The server will downgrade a conflicting buy plan to hold and preserve the reason in the audit result.\n\n")
 
 	b.WriteString("## Output Requirements\n\n")
 	b.WriteString("Submit exactly ONE result. The `outputType` must be `portfolio_sentinel`.\n")
@@ -2272,11 +2309,12 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 	b.WriteString("Allowed rule.action values are: observe, build_position, add_position, hold, reduce_position, exit_position.\n")
 	b.WriteString("Rule fields are exactly: id, action, title, trigger, preconditions, target, risk, dataPrefilters, portfolioPrefilters, priority.\n")
 	b.WriteString("Rule dataPrefilters and portfolioPrefilters must always be JSON arrays. Use [] when there is no structured prefilter; never use a string.\n")
+	b.WriteString("The context decisionGates map is authoritative. A draft must use only actions listed in that symbol's allowedActions. Fill decision_basis with short basis labels (for example price, flow, catalyst, fundamental) and evidence_ref_ids with the exact supplied evidence identifiers used. The server blocks catalyst/fundamental-led entries when point-in-time financial evidence is incomplete and normalizes entry thresholds closer than 0.5 ATR.\n")
 	b.WriteString("Do not output proposed_operation. If a future trade review is needed, use portfolio_aware_suggestion.trade_signal or review_request only.\n\n")
 
 	b.WriteString("Example submit_result shape:\n")
 	b.WriteString("```json\n")
-	b.WriteString("{\"taskID\":\"<TASK_ID>\",\"taskType\":\"strategy_generation\",\"result\":{\"outputType\":\"strategy_generation\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"strategy-generation-report/v1\",\"run_summary\":{\"mode\":\"manual_target\",\"overall_conclusion\":\"...\",\"key_conflicts\":[],\"data_quality_notes\":[]},\"drafts\":[{\"symbol\":\"302132\",\"market\":\"SZ\",\"name\":\"中航成飞\",\"draft_type\":\"new_strategy\",\"strategy_bias\":\"bullish\",\"thesis\":\"...\",\"confidence\":0.72,\"evidence_summary\":[],\"risk_summary\":[],\"invalid_conditions\":[],\"playbook\":{\"version\":\"v1\",\"rules\":[{\"id\":\"observe_1\",\"action\":\"observe\",\"title\":\"观察\",\"trigger\":\"...\",\"preconditions\":\"...\",\"target\":\"...\",\"risk\":\"...\",\"dataPrefilters\":[],\"portfolioPrefilters\":[],\"priority\":1}]},\"portfolio_aware_suggestion\":{\"trade_signal\":\"observe\",\"target_position_hint\":\"\",\"review_request\":\"\"}}]}}}\n")
+	b.WriteString("{\"taskID\":\"<TASK_ID>\",\"taskType\":\"strategy_generation\",\"result\":{\"outputType\":\"strategy_generation\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"strategy-generation-report/v1\",\"run_summary\":{\"mode\":\"manual_target\",\"overall_conclusion\":\"...\",\"key_conflicts\":[],\"data_quality_notes\":[]},\"drafts\":[{\"symbol\":\"302132\",\"market\":\"SZ\",\"name\":\"中航成飞\",\"draft_type\":\"new_strategy\",\"strategy_bias\":\"bullish\",\"thesis\":\"...\",\"confidence\":0.72,\"decision_basis\":[\"price\"],\"evidence_ref_ids\":[],\"evidence_summary\":[],\"risk_summary\":[],\"invalid_conditions\":[],\"playbook\":{\"version\":\"v1\",\"rules\":[{\"id\":\"observe_1\",\"action\":\"observe\",\"title\":\"观察\",\"trigger\":\"...\",\"preconditions\":\"...\",\"target\":\"...\",\"risk\":\"...\",\"dataPrefilters\":[],\"portfolioPrefilters\":[],\"priority\":1}]},\"portfolio_aware_suggestion\":{\"trade_signal\":\"observe\",\"target_position_hint\":\"\",\"review_request\":\"\"}}]}}}\n")
 	b.WriteString("```\n\n")
 
 	b.WriteString("### Important\n\n")

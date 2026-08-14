@@ -92,6 +92,9 @@ func (s *Store) ensureOpportunityMarketScanSchema(ctx context.Context) error {
 	if err != nil {
 		return wrapError(err, "ensure opportunity market scan schema")
 	}
+	if err := s.ensureDecisionGateSchema(ctx); err != nil {
+		return err
+	}
 	columns := []struct{ table, name, definition string }{
 		{"stockv2_opportunity_market_scan_config", "primary_fund_flow_api_key", "TEXT"},
 		{"stockv2_opportunity_market_scan_config", "backup_fund_flow_api_key", "TEXT"},
@@ -408,6 +411,10 @@ func (s *Store) ListOpportunityMarketScanCandidates(ctx context.Context, filter 
 		where = append(where, "stage=?")
 		args = append(args, strings.TrimSpace(filter.Stage))
 	}
+	if strings.TrimSpace(filter.DecisionStatus) != "" {
+		where = append(where, "COALESCE(json_extract(metrics_json,'$.decisionStatus'),'')=?")
+		args = append(args, strings.TrimSpace(filter.DecisionStatus))
+	}
 	args = append(args, normalizedPageLimit(filter.Limit, 200), normalizedPageOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, opportunityMarketScanCandidateSelectSQL+" WHERE "+strings.Join(where, " AND ")+` ORDER BY
 		CASE WHEN final_rank > 0 THEN 0 ELSE 1 END, final_rank ASC, prefilter_rank ASC LIMIT ? OFFSET ?`, args...)
@@ -423,6 +430,10 @@ func (s *Store) CountOpportunityMarketScanCandidates(ctx context.Context, filter
 	if strings.TrimSpace(filter.Stage) != "" {
 		where = append(where, "stage=?")
 		args = append(args, strings.TrimSpace(filter.Stage))
+	}
+	if strings.TrimSpace(filter.DecisionStatus) != "" {
+		where = append(where, "COALESCE(json_extract(metrics_json,'$.decisionStatus'),'')=?")
+		args = append(args, strings.TrimSpace(filter.DecisionStatus))
 	}
 	var count int
 	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM stockv2_opportunity_market_scan_candidates WHERE "+strings.Join(where, " AND "), args...).Scan(&count)

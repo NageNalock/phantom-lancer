@@ -381,6 +381,9 @@ func (s *Service) buildPortfolioSentinelContext(ctx context.Context, run Portfol
 	if err != nil {
 		return PortfolioSentinelContext{}, err
 	}
+	if err := s.fillPortfolioSentinelDecisionGates(ctx, &out); err != nil {
+		return PortfolioSentinelContext{}, err
+	}
 	if out.NewsContext != nil {
 		// The aggregation already persisted compact themes and evidence. Re-copying
 		// raw news bodies into the review ledger would defeat later source cleanup;
@@ -1932,11 +1935,12 @@ func (s *Service) validatePortfolioSentinelActionPlans(
 		}
 		covered[key] = struct{}{}
 		_, isHeld := held[key]
+		gateDowngraded := s.applyDecisionGateToPortfolioPlan(ctx, run.ID, plan)
 		if err := validatePortfolioSentinelPlanShape(*plan, isHeld); err != nil {
 			return err
 		}
 		if !isHeld {
-			if plan.Action != PortfolioSentinelPlanBuild {
+			if plan.Action != PortfolioSentinelPlanBuild && !(gateDowngraded && plan.Action == PortfolioSentinelPlanHold) {
 				return fmt.Errorf("%w: non-held symbol may only use build_position", ErrInvalidPortfolioSentinelResult)
 			}
 			if _, ok := trusted[strings.ToUpper(plan.Symbol)]; !ok {
