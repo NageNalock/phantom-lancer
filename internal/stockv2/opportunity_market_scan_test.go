@@ -417,7 +417,8 @@ func TestOpportunityMarketScanStrategyStepPromptKeepsAllBatchTargets(t *testing.
 			t.Fatalf("batched strategy prompt missing %q", expected)
 		}
 	}
-	if !strings.Contains(prompt, "intentionally may omit portfolioId") || !strings.Contains(prompt, "run_summary.mode must exactly equal context.input.mode") {
+	if !strings.Contains(prompt, "intentionally may omit portfolioId") || !strings.Contains(prompt, "run_summary.mode must exactly equal context.input.mode") ||
+		!strings.Contains(prompt, "decision_basis") || !strings.Contains(prompt, "context.decisionGates[symbol].id") {
 		t.Fatalf("batched opportunity prompt missing research-scope or result-mode boundary")
 	}
 	if strings.Contains(prompt, promptTruncatedMarker) {

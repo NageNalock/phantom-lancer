@@ -163,6 +163,26 @@ func TestDecisionBasisRequiresFinancialFactsForEarningsThesis(t *testing.T) {
 	}
 }
 
+func TestEnsureDecisionGateAuditFieldsKeepsServerEvidence(t *testing.T) {
+	draft := StrategyGenerationDraft{Thesis: "订单和利润改善", DecisionBasis: []string{"catalyst"}}
+	snapshot := DecisionGateSnapshot{
+		ID: "gate-snapshot-1",
+		Gates: []DecisionGateResult{{
+			Key: DecisionGateCatalystPricing, Status: DecisionGateStatusPass,
+		}},
+		DataHealth: []DecisionDataHealth{{Key: "fund_flow", Status: DecisionHealthHealthy}},
+	}
+	ensureDecisionGateAuditFields(&draft, snapshot)
+	for _, want := range []string{"price", "factor", "event_calendar", "catalyst", "flow", "fundamental"} {
+		if !containsString(draft.DecisionBasis, want) {
+			t.Fatalf("decision basis=%v, missing %q", draft.DecisionBasis, want)
+		}
+	}
+	if !containsString(draft.EvidenceRefIDs, snapshot.ID) {
+		t.Fatalf("evidence refs=%v, missing snapshot %q", draft.EvidenceRefIDs, snapshot.ID)
+	}
+}
+
 func decisionTestBars(count int, start, dailyStep float64) []StockV2DailyBar {
 	out := make([]StockV2DailyBar, 0, count)
 	date := time.Date(2026, 6, 1, 0, 0, 0, 0, time.Local)

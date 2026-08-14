@@ -477,6 +477,7 @@ func (s *Service) applyDecisionGatesToStrategyReport(ctx context.Context, run Ag
 			continue
 		}
 		draft.GateSnapshotID = snapshot.ID
+		ensureDecisionGateAuditFields(draft, snapshot)
 		blockedReason := ""
 		for _, rule := range draft.Playbook.Rules {
 			if !decisionActionAllowed(snapshot, rule.Action) {
@@ -533,6 +534,31 @@ func decisionDataHealthStatus(items []DecisionDataHealth, key string) string {
 		}
 	}
 	return ""
+}
+
+func ensureDecisionGateAuditFields(draft *StrategyGenerationDraft, snapshot DecisionGateSnapshot) {
+	if draft == nil {
+		return
+	}
+	basis := append([]string(nil), draft.DecisionBasis...)
+	basis = append(basis, "price", "factor", "event_calendar")
+	for _, gate := range snapshot.Gates {
+		if gate.Key == DecisionGateCatalystPricing && gate.Status != DecisionGateStatusNotApplicable {
+			basis = append(basis, "catalyst")
+			if decisionDataHealthStatus(snapshot.DataHealth, "fund_flow") == DecisionHealthHealthy {
+				basis = append(basis, "flow")
+			}
+			break
+		}
+	}
+	basisText := append(append([]string(nil), draft.Thesis), draft.EvidenceSummary...)
+	if decisionBasisNeedsFinancialFacts(basisText) {
+		basis = append(basis, "fundamental")
+	}
+	draft.DecisionBasis = compactStringList(basis, 12)
+	// The gate snapshot is an exact, persisted evidence identifier supplied to
+	// the Agent and is always part of the server's final authorization decision.
+	draft.EvidenceRefIDs = compactStringList(append(draft.EvidenceRefIDs, snapshot.ID), 50)
 }
 
 func calibrateStrategyRuleThresholds(draft *StrategyGenerationDraft, snapshot DecisionGateSnapshot) {
