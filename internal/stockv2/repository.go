@@ -901,6 +901,8 @@ CREATE TABLE IF NOT EXISTS stockv2_agent_task_profiles (
     fallback_model_id TEXT,
     reasoning_effort TEXT NOT NULL DEFAULT '',
     max_budget INTEGER NOT NULL DEFAULT 0,
+	archive_enabled INTEGER NOT NULL DEFAULT 0,
+	archive_object_storage_profile_id TEXT NOT NULL DEFAULT '',
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL
 );
@@ -1103,6 +1105,9 @@ func (s *Store) init(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, initSchemaSQL); err != nil {
 		return fmt.Errorf("exec init schema: %w", err)
 	}
+	if err := s.ensureAgentTraceTaskProfileSchema(ctx); err != nil {
+		return fmt.Errorf("ensure agent trace task profile schema: %w", err)
+	}
 	if err := s.ensureEmbeddingSchema(ctx); err != nil {
 		return fmt.Errorf("ensure embedding schema: %w", err)
 	}
@@ -1114,6 +1119,44 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureOpportunityMarketScanSchema(ctx); err != nil {
 		return fmt.Errorf("ensure opportunity market scan schema: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ensureAgentTraceTaskProfileSchema(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(stockv2_agent_task_profiles)`)
+	if err != nil {
+		return err
+	}
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		columns[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	additions := []struct {
+		name string
+		sql  string
+	}{
+		{name: "archive_enabled", sql: `ALTER TABLE stockv2_agent_task_profiles ADD COLUMN archive_enabled INTEGER NOT NULL DEFAULT 0`},
+		{name: "archive_object_storage_profile_id", sql: `ALTER TABLE stockv2_agent_task_profiles ADD COLUMN archive_object_storage_profile_id TEXT NOT NULL DEFAULT ''`},
+	}
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, addition.sql); err != nil {
+			return err
+		}
 	}
 	return nil
 }

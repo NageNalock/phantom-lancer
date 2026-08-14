@@ -38,22 +38,27 @@ func newAgentAPIExecutor(service *Service) *agentAPIExecutor {
 }
 
 func (e *agentAPIExecutor) ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
+	e.recordTraceInput(ctx, taskID, "AgentContextPack", pack)
 	return e.executePrompt(ctx, taskID, buildOperationReviewPrompt(taskID, pack, ""), modelName, reasoningEffort, execDefaultTimeout, agentAPIExecutionOptions{})
 }
 
 func (e *agentAPIExecutor) ExecuteStrategyGeneration(ctx context.Context, taskID string, pack StrategyGenerationContext, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
+	e.recordTraceInput(ctx, taskID, "StrategyGenerationContext", pack)
 	return e.executePrompt(ctx, taskID, buildStrategyGenerationPrompt(taskID, pack, ""), modelName, reasoningEffort, execDefaultTimeout, agentAPIExecutionOptions{})
 }
 
 func (e *agentAPIExecutor) ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
+	e.recordTraceInput(ctx, taskID, "StrategyGenerationStepPack", pack)
 	return e.executePrompt(ctx, taskID, buildStrategyGenerationStepPrompt(taskID, pack, ""), modelName, reasoningEffort, execDefaultTimeout, agentAPIExecutionOptions{})
 }
 
 func (e *agentAPIExecutor) ExecuteOpportunityDiscovery(ctx context.Context, taskID string, pack OpportunityDiscoveryContext, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
+	e.recordTraceInput(ctx, taskID, "OpportunityDiscoveryContext", pack)
 	return e.executePrompt(ctx, taskID, buildOpportunityDiscoveryPrompt(taskID, pack, ""), modelName, reasoningEffort, execDefaultTimeout, agentAPIExecutionOptions{})
 }
 
 func (e *agentAPIExecutor) ExecuteNewsContextAggregation(ctx context.Context, taskID string, pack NewsContextAggregationPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
+	e.recordTraceInput(ctx, taskID, "NewsContextAggregationPack", pack)
 	pack = e.prefetchNewsContextCandidates(ctx, pack)
 	return e.executePrompt(
 		ctx, taskID, buildNewsContextAggregationPrompt(taskID, pack, ""), modelName, reasoningEffort,
@@ -62,11 +67,13 @@ func (e *agentAPIExecutor) ExecuteNewsContextAggregation(ctx context.Context, ta
 }
 
 func (e *agentAPIExecutor) ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
+	e.recordTraceInput(ctx, taskID, "StockProfile", profile)
 	return e.executePrompt(ctx, taskID, buildStockProfileSummaryPrompt(taskID, profile, ""), modelName, reasoningEffort, execDefaultTimeout, agentAPIExecutionOptions{})
 }
 
 type agentAPIChatResponse struct {
-	Choices []struct {
+	RawResponse json.RawMessage `json:"raw_response,omitempty"`
+	Choices     []struct {
 		FinishReason string `json:"finish_reason"`
 		Message      struct {
 			Role             string             `json:"role"`
@@ -105,6 +112,10 @@ func (e *agentAPIExecutor) executePrompt(
 	entry, ok := e.service.agentTaskPool.getTask(taskID)
 	if !ok {
 		return nil, ErrTaskNotFound
+	}
+	var trace *agentTraceRecorder
+	if e.service.agentTrace != nil {
+		trace = e.service.agentTrace.ensureRun(ctx, entry.agentRunID)
 	}
 	run, err := e.service.store.GetAgentRun(ctx, entry.agentRunID)
 	if err != nil {
@@ -197,6 +208,14 @@ func (e *agentAPIExecutor) executePrompt(
 				body["max_tokens"] = agentAPIDeepSeekProfileMaxTokens
 			}
 		}
+		if trace != nil {
+			trace.record("model_request", map[string]any{
+				"transport": "openai_compatible_chat_completions",
+				"turn":      turn + 1,
+				"endpoint":  strings.TrimRight(baseURL, "/") + "/chat/completions",
+				"body":      body,
+			})
+		}
 		response, requestTrace, err := e.chatCompletion(execCtx, baseURL, apiKey, body, turn+1)
 		for i := range requestTrace {
 			requestTrace[i].Sequence = len(output.RequestTrace) + 1
@@ -204,11 +223,19 @@ func (e *agentAPIExecutor) executePrompt(
 		}
 		output.RequestCount = len(output.RequestTrace)
 		if err != nil {
+			if trace != nil {
+				trace.record("model_response", map[string]any{"turn": turn + 1, "status": "failed", "requests": requestTrace, "error": err.Error()})
+			}
 			output.Duration = time.Since(started)
 			output.StderrTail = safelog.Text(err.Error(), stderrTailMaxBytes)
 			output.RawTranscript = safelog.Text(transcript.String(), transcriptMaxBytes)
 			output.TimedOut = errors.Is(execCtx.Err(), context.DeadlineExceeded)
 			return output, err
+		}
+		if trace != nil {
+			trace.record("model_response", map[string]any{
+				"turn": turn + 1, "status": "completed", "requests": requestTrace, "rawResponse": response.RawResponse,
+			})
 		}
 		output.PromptTokens += response.Usage.PromptTokens
 		output.CachedTokens += response.Usage.PromptCacheHitTokens
@@ -307,6 +334,11 @@ func (e *agentAPIExecutor) executePrompt(
 					toolResult, toolErr = e.service.mcpToolsCall(params)
 				}
 			}
+			if trace != nil {
+				trace.record("tool_call", map[string]any{
+					"turn": turn + 1, "id": call.ID, "name": call.Function.Name, "arguments": call.Function.Arguments,
+				})
+			}
 			content := ""
 			if toolErr != nil {
 				lastToolError = safelog.Text(call.Function.Name+": "+toolErr.Message, stderrTailMaxBytes)
@@ -322,6 +354,12 @@ func (e *agentAPIExecutor) executePrompt(
 				"tool_call_id": call.ID,
 				"content":      content,
 			})
+			if trace != nil {
+				trace.record("tool_result", map[string]any{
+					"turn": turn + 1, "id": call.ID, "name": call.Function.Name,
+					"content": content, "error": toolErr,
+				})
+			}
 			fmt.Fprintf(&transcript, "tool %s: %s\n", call.Function.Name, safelog.Text(content, 1000))
 			if originalName == codexSubmitResultTool && toolErr == nil {
 				output.ExitCode = 0
@@ -339,6 +377,16 @@ func (e *agentAPIExecutor) executePrompt(
 		return output, fmt.Errorf("API model exceeded %d tool-call turns without submitting a result; last tool error: %s", maxTurns, lastToolError)
 	}
 	return output, fmt.Errorf("API model exceeded %d tool-call turns without submitting a result", maxTurns)
+}
+
+func (e *agentAPIExecutor) recordTraceInput(ctx context.Context, taskID, contextType string, value any) {
+	if e == nil || e.service == nil || e.service.agentTrace == nil {
+		return
+	}
+	e.service.agentTrace.recordTask(ctx, taskID, "input_context", map[string]any{
+		"contextType": contextType,
+		"context":     value,
+	})
 }
 
 func agentAPIJSONSubmissionContent(content string) (string, bool) {
@@ -535,6 +583,7 @@ func (e *agentAPIExecutor) chatCompletion(
 			traces = append(traces, trace)
 			return agentAPIChatResponse{}, traces, fmt.Errorf("decode API response: %w", err)
 		}
+		response.RawResponse = append(json.RawMessage(nil), data...)
 		trace.DurationMS = time.Since(started).Milliseconds()
 		trace.Status = "completed"
 		trace.InputTokens = response.Usage.PromptTokens

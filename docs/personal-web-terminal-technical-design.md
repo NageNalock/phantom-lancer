@@ -230,6 +230,7 @@ Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*`
 
 - 当前股票模块只保留 StockV2：后端 `internal/stockv2/`，API `/api/stockv2/*`，前端 `web/src/features/stockv2/`。
 - 管理股票标的、日 K / 分钟行情、股票画像、主板市场机会扫描、手工主题研究、组合、持仓、策略、后台监控、消息、Alert、Review、Agent 治理和留痕。
+- 受支持的 Agent 任务可以按任务绑定选择性地把完整脱敏上下文直接流式归档到共享对象存储；归档无本地副本、无数据库索引、无读取 API，失败不改变任务结果。
 - StockV1 的 `internal/stock/`、`/api/stock/*` 和旧设计文档已经移除，不再作为实现边界。
 
 详细设计见 [stock-agent-workbench-v2-key-points-2026-06-18.md](./stock-agent-workbench-v2-key-points-2026-06-18.md)。
@@ -257,7 +258,7 @@ Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*`
 | 日志 | JSON structured logging | 方便审计和排查 |
 | 密码哈希 | Argon2id | 适合本地账号密码 |
 | 子进程管理 | `os/exec` | 调用 V2Ray 进程和后续执行器 |
-| 对象存储 | S3 API 兼容 SDK | 用于多媒体图片/视频资产保存。Go 实现可用 AWS SDK for Go v2 S3 client + custom endpoint，但产品不绑定真实 AWS S3 |
+| 对象存储 | S3 API 兼容 SDK | 用于多媒体图片/视频资产保存和可选的 StockV2 Agent 完整上下文旁路归档。Go 实现使用 AWS SDK for Go v2 S3 client + custom endpoint，但产品不绑定真实 AWS S3 |
 
 ### 4.2 前端
 

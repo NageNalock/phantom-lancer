@@ -1,0 +1,7 @@
+interface:
+  display_name: "StockV2 Trace Format"
+  short_description: "Read archived StockV2 Agent trace files"
+  default_prompt: "Use $stockv2-analysis-trace-format to interpret these archived StockV2 Agent traces."
+
+policy:
+  allow_implicit_invocation: false

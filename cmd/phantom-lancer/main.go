@@ -133,7 +133,7 @@ func main() {
 		logger.Error("open stockv2 store failed", "error", err)
 		os.Exit(1)
 	}
-	stockV2Svc := stockv2svc.NewService(stockV2Store, logger, httpClient)
+	stockV2Svc := stockv2svc.NewService(stockV2Store, logger, httpClient).WithAgentTraceObjectStorage(store)
 	defer stockV2Svc.Close()
 	if err := stockV2Svc.Initialize(ctx); err != nil {
 		logger.Error("initialize stock v2 service failed", "error", err)

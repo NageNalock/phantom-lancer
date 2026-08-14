@@ -120,6 +120,39 @@ func (c *Client) PutReader(ctx context.Context, key string, body io.Reader, size
 	return strings.Trim(*out.ETag, `"`), nil
 }
 
+// PutStream uploads an unknown-length stream with a bounded multipart worker.
+// It is intended for producers such as gzip writers that must not spool the
+// complete object locally before upload.
+func (c *Client) PutStream(ctx context.Context, key string, body io.Reader, contentType string, partSize int64) (string, error) {
+	if key = strings.TrimSpace(key); key == "" {
+		return "", errors.New("object key is required")
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	if partSize <= 0 {
+		partSize = 8 << 20
+	}
+	uploader := transfermanager.New(c.client, func(options *transfermanager.Options) {
+		options.PartSizeBytes = partSize
+		options.MultipartUploadThreshold = partSize
+		options.Concurrency = 1
+	})
+	out, err := uploader.UploadObject(ctx, &transfermanager.UploadObjectInput{
+		Bucket:      aws.String(c.profile.Bucket),
+		Key:         aws.String(key),
+		Body:        body,
+		ContentType: aws.String(contentType),
+	})
+	if err != nil {
+		return "", err
+	}
+	if out.ETag == nil {
+		return "", nil
+	}
+	return strings.Trim(*out.ETag, `"`), nil
+}
+
 // Get downloads an object, reading at most maxBytes (a value <= 0 disables the
 // limit). It returns the resolved content type and bytes.
 func (c *Client) Get(ctx context.Context, key string, maxBytes int64) (string, []byte, error) {

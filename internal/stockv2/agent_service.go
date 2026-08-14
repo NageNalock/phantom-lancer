@@ -798,6 +798,10 @@ func (s *Service) GetAgentTaskProfileByType(ctx context.Context, taskType string
 	return profile, nil
 }
 
+func (s *Service) AgentTraceObjectStorageProfileReferenced(ctx context.Context, profileID string) (bool, error) {
+	return s.store.AgentTraceObjectStorageProfileReferenced(ctx, profileID)
+}
+
 func (s *Service) UpdateAgentTaskProfile(ctx context.Context, taskType string, req RequestUpdateAgentTaskProfile) (AgentTaskProfile, error) {
 	if !supportedAgentTaskType(taskType) {
 		return AgentTaskProfile{}, ErrInvalidAgentTaskType
@@ -865,6 +869,24 @@ func (s *Service) UpdateAgentTaskProfile(ctx context.Context, taskType string, r
 			return AgentTaskProfile{}, ErrInvalidAgentReasoningEffort
 		}
 		profile.ReasoningEffort = reasoningEffort
+	}
+	if req.ArchiveObjectStorageProfileID != nil {
+		profile.ArchiveObjectStorageProfileID = strings.TrimSpace(*req.ArchiveObjectStorageProfileID)
+	}
+	if req.ArchiveEnabled != nil {
+		profile.ArchiveEnabled = *req.ArchiveEnabled
+	}
+	if profile.ArchiveEnabled {
+		if !agentTraceSupportedTask(taskType) {
+			return AgentTaskProfile{}, ErrAgentTraceNotSupported
+		}
+		if profile.ArchiveObjectStorageProfileID == "" || s.agentTraceProfiles == nil {
+			return AgentTaskProfile{}, ErrAgentTraceStorageRequired
+		}
+		storageProfile, err := s.agentTraceProfiles.GetObjectStorageProfile(ctx, profile.ArchiveObjectStorageProfileID)
+		if err != nil || !storageProfile.HasCredentials || storageProfile.Bucket == "" || storageProfile.Endpoint == "" {
+			return AgentTaskProfile{}, ErrAgentTraceStorageRequired
+		}
 	}
 	if profile.ExecutionMode == AgentExecutionModeAPI && profile.ReasoningEffort == AgentReasoningEffortUltra {
 		return AgentTaskProfile{}, ErrInvalidAgentReasoningEffort
@@ -1626,6 +1648,12 @@ func (s *Service) executeStrategyGenerationPipeline(
 	genCtx StrategyGenerationContext,
 	modelName string,
 ) (string, *AgentExecutorOutput, error) {
+	if s.agentTrace != nil {
+		s.agentTrace.recordRun(ctx, run.ID, "input_context", map[string]any{
+			"contextType": "StrategyGenerationContext",
+			"context":     genCtx,
+		})
+	}
 	_ = s.addStrategyGenerationContext(ctx, run.ID, "", "context_bundle", "StrategyGenerationContext", map[string]any{"context": genCtx}, "", 1)
 	prior := map[string]any{}
 	var finalTaskID string
@@ -1647,6 +1675,12 @@ func (s *Service) executeStrategyGenerationPipeline(
 		step.Status = StrategyGenerationStepStatusRunning
 		step.StartedAt = time.Now()
 		_, _ = s.store.UpdateStrategyGenerationStep(ctx, step)
+		if s.agentTrace != nil {
+			s.agentTrace.recordRun(ctx, run.ID, "step_started", map[string]any{
+				"stepKey": def.key, "stepName": def.name, "role": def.role,
+				"objective": def.objective, "sequence": idx + 1,
+			})
+		}
 
 		pack := StrategyGenerationStepPack{
 			RunID:        run.ID,
@@ -1669,6 +1703,9 @@ func (s *Service) executeStrategyGenerationPipeline(
 			step.ErrorMessage = agentRunFailureMessage(execErr.Error(), execOutput)
 			step.FinishedAt = time.Now()
 			_, _ = s.store.UpdateStrategyGenerationStep(ctx, step)
+			if s.agentTrace != nil {
+				s.agentTrace.recordRun(ctx, run.ID, "step_failed", map[string]any{"step": step, "error": execErr})
+			}
 			return "", execOutput, execErr
 		}
 		if submitted == nil || submitted.OutputType != StrategyGenerationOutputType {
@@ -1676,6 +1713,9 @@ func (s *Service) executeStrategyGenerationPipeline(
 			step.ErrorMessage = "no valid strategy_generation step result submitted"
 			step.FinishedAt = time.Now()
 			_, _ = s.store.UpdateStrategyGenerationStep(ctx, step)
+			if s.agentTrace != nil {
+				s.agentTrace.recordRun(ctx, run.ID, "step_failed", map[string]any{"step": step, "error": step.ErrorMessage})
+			}
 			return "", execOutput, errors.New(step.ErrorMessage)
 		}
 
@@ -1689,6 +1729,9 @@ func (s *Service) executeStrategyGenerationPipeline(
 		}
 		step.FinishedAt = time.Now()
 		_, _ = s.store.UpdateStrategyGenerationStep(ctx, step)
+		if s.agentTrace != nil {
+			s.agentTrace.recordRun(ctx, run.ID, "step_completed", map[string]any{"step": step})
+		}
 		_ = s.addStrategyGenerationContext(ctx, run.ID, step.ID, "step_result", def.name, submitted.Result, submitted.ResultSummary, idx+2)
 
 		prior[def.key] = submitted.Result
@@ -1738,6 +1781,11 @@ func (s *Service) executeStrategyGenerationStepWithRetry(
 	var lastErr error
 	var taskID string
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if s.agentTrace != nil {
+			s.agentTrace.recordRun(ctx, run.ID, "step_attempt", map[string]any{
+				"stepId": step.ID, "stepKey": step.StepKey, "attempt": attempt, "maxAttempts": maxAttempts,
+			})
+		}
 		taskID, _ = s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
 		output, err := s.agentExecutor.ExecuteStrategyGenerationStep(ctx, taskID, pack, modelName, run.ReasoningEffort)
 		lastOutput = output
@@ -2018,6 +2066,30 @@ func (s *Service) finalizeAgentRunWithOutput(
 			s.log.Warn("finalize: get ledger failed", "run_id", runID, "ledger_id", ledgerID, "task_type", run.TaskType, "trigger_object_type", run.TriggerObjectType, "trigger_object_id", run.TriggerObjectID, "error", safelog.Text(err.Error(), 240))
 		}
 	}
+	var trace *agentTraceRecorder
+	if s.agentTrace != nil {
+		trace = s.agentTrace.ensureRun(ctx, run.ID)
+	}
+	if trace != nil {
+		defer func() {
+			trace.record("postprocess", map[string]any{
+				"stage":    "business_guardrails_and_persistence",
+				"accepted": run.Status == AgentRunStatusCompleted,
+				"error":    run.ErrorMessage,
+			})
+			trace.record("applied_result", map[string]any{
+				"run":            run,
+				"decisionLedger": ledger,
+				"executorError":  agentTraceErrorString(execErr),
+			})
+			trace.finish(run.Status, map[string]any{"run": run, "decisionLedger": ledger})
+		}()
+		trace.record("model_result", map[string]any{
+			"submittedResult": submitted,
+			"executorOutput":  execOutput,
+			"executorError":   agentTraceErrorString(execErr),
+		})
+	}
 
 	// 准备 output artifact summary
 	var outputArtifact strings.Builder
@@ -2093,6 +2165,16 @@ func (s *Service) finalizeAgentRunWithOutput(
 	// 判断成功还是失败
 	hasValidResult := submitted != nil && submitted.OutputType != "" &&
 		validAgentTaskOutputType(run.TaskType, submitted.OutputType)
+	if trace != nil {
+		validation := map[string]any{"stage": "submission_schema", "accepted": hasValidResult}
+		if submitted != nil {
+			validation["outputType"] = submitted.OutputType
+		}
+		if !hasValidResult {
+			validation["error"] = "missing or invalid task output type"
+		}
+		trace.record("validation", validation)
+	}
 
 	if execErr != nil && !hasValidResult {
 		// 失败路径

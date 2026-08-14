@@ -150,6 +150,8 @@ var (
 	ErrAgentTaskRequiresCLI             = errors.New("agent task requires Codex CLI execution")
 	ErrInvalidAgentTaskType             = errors.New("invalid agent task type")
 	ErrAgentModelTypeNotAllowed         = errors.New("agent model type is not allowed for this task")
+	ErrAgentTraceNotSupported           = errors.New("agent trace archive is not supported for this task")
+	ErrAgentTraceStorageRequired        = errors.New("agent trace object storage profile is required")
 )
 
 // AgentProviderProfile 供应商层(openai/codex_cli/local)。
@@ -193,15 +195,17 @@ type AgentModelProfile struct {
 
 // AgentTaskProfile 股票任务到模型的绑定。任务 profile 由 schema 默认种入。
 type AgentTaskProfile struct {
-	ID              string    `json:"id"`
-	TaskType        string    `json:"taskType"`
-	ExecutionMode   string    `json:"executionMode"`
-	PrimaryModelID  string    `json:"primaryModelId,omitempty"`
-	FallbackModelID string    `json:"fallbackModelId,omitempty"`
-	ReasoningEffort string    `json:"reasoningEffort,omitempty"`
-	MaxBudget       int       `json:"maxBudget,omitempty"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	ID                            string    `json:"id"`
+	TaskType                      string    `json:"taskType"`
+	ExecutionMode                 string    `json:"executionMode"`
+	PrimaryModelID                string    `json:"primaryModelId,omitempty"`
+	FallbackModelID               string    `json:"fallbackModelId,omitempty"`
+	ReasoningEffort               string    `json:"reasoningEffort,omitempty"`
+	MaxBudget                     int       `json:"maxBudget,omitempty"`
+	ArchiveEnabled                bool      `json:"archiveEnabled"`
+	ArchiveObjectStorageProfileID string    `json:"archiveObjectStorageProfileId,omitempty"`
+	CreatedAt                     time.Time `json:"createdAt"`
+	UpdatedAt                     time.Time `json:"updatedAt"`
 }
 
 // AgentRun 一次 Agent 任务运行记录。创建后先进入 ready;真实 executor
@@ -334,11 +338,13 @@ type AgentModelTestResult struct {
 }
 
 type RequestUpdateAgentTaskProfile struct {
-	ExecutionMode   *string `json:"executionMode,omitempty"`
-	PrimaryModelID  *string `json:"primaryModelId,omitempty"`
-	FallbackModelID *string `json:"fallbackModelId,omitempty"`
-	ReasoningEffort *string `json:"reasoningEffort,omitempty"`
-	MaxBudget       *int    `json:"maxBudget,omitempty"`
+	ExecutionMode                 *string `json:"executionMode,omitempty"`
+	PrimaryModelID                *string `json:"primaryModelId,omitempty"`
+	FallbackModelID               *string `json:"fallbackModelId,omitempty"`
+	ReasoningEffort               *string `json:"reasoningEffort,omitempty"`
+	MaxBudget                     *int    `json:"maxBudget,omitempty"`
+	ArchiveEnabled                *bool   `json:"archiveEnabled,omitempty"`
+	ArchiveObjectStorageProfileID *string `json:"archiveObjectStorageProfileId,omitempty"`
 }
 
 type RequestResolveAgentTask struct {

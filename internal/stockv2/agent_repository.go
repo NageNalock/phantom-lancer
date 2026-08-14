@@ -432,7 +432,8 @@ func agentModelProfileFilterSQL(filter AgentModelProfileListFilter) (string, []a
 
 const agentTaskProfileSelectSQL = `
     SELECT id, task_type, COALESCE(execution_mode,'cli'), COALESCE(primary_model_id,''), COALESCE(fallback_model_id,''),
-           COALESCE(reasoning_effort,''), max_budget, created_at, updated_at
+	       COALESCE(reasoning_effort,''), max_budget, archive_enabled,
+	       COALESCE(archive_object_storage_profile_id,''), created_at, updated_at
     FROM stockv2_agent_task_profiles
 `
 
@@ -440,7 +441,8 @@ func scanAgentTaskProfile(row rowScanner) (AgentTaskProfile, error) {
 	var t AgentTaskProfile
 	if err := row.Scan(
 		&t.ID, &t.TaskType, &t.ExecutionMode, &t.PrimaryModelID, &t.FallbackModelID,
-		&t.ReasoningEffort, &t.MaxBudget, &t.CreatedAt, &t.UpdatedAt,
+		&t.ReasoningEffort, &t.MaxBudget, &t.ArchiveEnabled,
+		&t.ArchiveObjectStorageProfileID, &t.CreatedAt, &t.UpdatedAt,
 	); err != nil {
 		return t, err
 	}
@@ -498,7 +500,8 @@ func (s *Store) UpdateAgentTaskProfile(ctx context.Context, profile AgentTaskPro
 	profile.UpdatedAt = time.Now()
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE stockv2_agent_task_profiles
-		SET execution_mode = ?, primary_model_id = ?, fallback_model_id = ?, reasoning_effort = ?, max_budget = ?, updated_at = ?
+		SET execution_mode = ?, primary_model_id = ?, fallback_model_id = ?, reasoning_effort = ?, max_budget = ?,
+		    archive_enabled = ?, archive_object_storage_profile_id = ?, updated_at = ?
 		WHERE id = ?
 	`,
 		profile.ExecutionMode,
@@ -506,6 +509,8 @@ func (s *Store) UpdateAgentTaskProfile(ctx context.Context, profile AgentTaskPro
 		nullableString(profile.FallbackModelID),
 		profile.ReasoningEffort,
 		profile.MaxBudget,
+		profile.ArchiveEnabled,
+		profile.ArchiveObjectStorageProfileID,
 		profile.UpdatedAt,
 		profile.ID,
 	)
@@ -516,6 +521,15 @@ func (s *Store) UpdateAgentTaskProfile(ctx context.Context, profile AgentTaskPro
 		return AgentTaskProfile{}, ErrAgentTaskProfileNotFound
 	}
 	return profile, nil
+}
+
+func (s *Store) AgentTraceObjectStorageProfileReferenced(ctx context.Context, profileID string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM stockv2_agent_task_profiles
+		WHERE archive_enabled = 1 AND archive_object_storage_profile_id = ?
+	`, strings.TrimSpace(profileID)).Scan(&count)
+	return count > 0, wrapError(err, "check agent trace object storage profile reference")
 }
 
 func agentTaskProfileFilterSQL(filter AgentTaskProfileListFilter) (string, []any) {

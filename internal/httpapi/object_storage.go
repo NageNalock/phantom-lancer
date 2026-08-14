@@ -170,6 +170,16 @@ func (s *Server) handleObjectStorageProfileSubroutes(w http.ResponseWriter, r *h
 			writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 			return
 		}
+		if s.stockV2 != nil {
+			referenced, referenceErr := s.stockV2.AgentTraceObjectStorageProfileReferenced(r.Context(), id)
+			if referenceErr != nil {
+				writeError(w, http.StatusInternalServerError, "internal_error", referenceErr.Error())
+				return
+			}
+			if referenced {
+				refs = append(refs, "stockv2_agent_traces")
+			}
+		}
 		if len(refs) > 0 {
 			writeError(w, http.StatusConflict, "object_storage_profile_in_use", "profile 仍被以下模块引用："+strings.Join(refs, ", "))
 			return

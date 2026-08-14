@@ -502,6 +502,8 @@ func stockV2AgentHTTPStatus(err error) int {
 		errors.Is(err, stockv2.ErrAgentFallbackMatchesPrimary),
 		errors.Is(err, stockv2.ErrAgentTaskRequiresCLI),
 		errors.Is(err, stockv2.ErrAgentModelTypeNotAllowed),
+		errors.Is(err, stockv2.ErrAgentTraceNotSupported),
+		errors.Is(err, stockv2.ErrAgentTraceStorageRequired),
 		errors.Is(err, stockv2.ErrInvalidAgentTaskType),
 		errors.Is(err, stockv2.ErrInvalidEmbeddingConfig),
 		errors.Is(err, stockv2.ErrInvalidEmbeddingRequest),

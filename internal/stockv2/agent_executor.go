@@ -204,6 +204,7 @@ func (e *codexCLIExecutor) ExecuteOperationReview(
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
 
+	e.recordTraceInput(ctx, taskID, "AgentContextPack", pack)
 	// 构建 prompt
 	prompt := buildOperationReviewPrompt(taskID, pack, e.mcpURL)
 	if liveSearch, _ := pack.Evidence["googleNewsSearchRequired"].(bool); liveSearch {
@@ -221,6 +222,7 @@ func (e *codexCLIExecutor) ExecuteStrategyGeneration(
 	if e.binary == "" {
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
+	e.recordTraceInput(ctx, taskID, "StrategyGenerationContext", pack)
 	prompt := buildStrategyGenerationPrompt(taskID, pack, e.mcpURL)
 	return e.executePrompt(ctx, taskID, prompt, modelName, reasoningEffort)
 }
@@ -234,6 +236,7 @@ func (e *codexCLIExecutor) ExecuteStrategyGenerationStep(
 	if e.binary == "" {
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
+	e.recordTraceInput(ctx, taskID, "StrategyGenerationStepPack", pack)
 	prompt := buildStrategyGenerationStepPrompt(taskID, pack, e.mcpURL)
 	return e.executePrompt(ctx, taskID, prompt, modelName, reasoningEffort)
 }
@@ -247,6 +250,7 @@ func (e *codexCLIExecutor) ExecuteOpportunityDiscovery(
 	if e.binary == "" {
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
+	e.recordTraceInput(ctx, taskID, "OpportunityDiscoveryContext", pack)
 	prompt := buildOpportunityDiscoveryPrompt(taskID, pack, e.mcpURL)
 	return e.executePrompt(ctx, taskID, prompt, modelName, reasoningEffort)
 }
@@ -260,6 +264,7 @@ func (e *codexCLIExecutor) ExecuteNewsContextAggregation(
 	if e.binary == "" {
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
+	e.recordTraceInput(ctx, taskID, "NewsContextAggregationPack", pack)
 	prompt := buildNewsContextAggregationPrompt(taskID, pack, e.mcpURL)
 	schema, err := newsContextDirectOutputSchema(taskID, pack.RunID, pack.WindowType)
 	if err != nil {
@@ -277,6 +282,7 @@ func (e *codexCLIExecutor) ExecutePortfolioSentinel(
 	if e.binary == "" {
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
+	e.recordTraceInput(ctx, taskID, "PortfolioSentinelContext", pack)
 	prompt := buildPortfolioSentinelPrompt(taskID, pack, e.mcpURL)
 	schema, err := portfolioSentinelDirectOutputSchema(taskID)
 	if err != nil {
@@ -294,6 +300,7 @@ func (e *codexCLIExecutor) ExecuteStockProfileSummary(
 	if e.binary == "" {
 		return nil, fmt.Errorf("codex binary path not configured")
 	}
+	e.recordTraceInput(ctx, taskID, "StockProfile", profile)
 	prompt := buildStockProfileSummaryPrompt(taskID, profile, e.mcpURL)
 	schema, err := stockProfileDirectOutputSchema(taskID)
 	if err != nil {
@@ -339,6 +346,10 @@ func (e *codexCLIExecutor) executePromptWithOptions(
 	defer cancel()
 
 	start := time.Now()
+	var trace *agentTraceRecorder
+	if e.taskPool != nil && e.taskPool.service != nil && e.taskPool.service.agentTrace != nil {
+		trace = e.taskPool.service.agentTrace.ensureTask(ctx, taskID)
+	}
 
 	mcpServers := e.codexMCPServers(liveSearch)
 	if err := e.preflightCodexMCPServers(mcpServers); err != nil {
@@ -377,6 +388,17 @@ func (e *codexCLIExecutor) executePromptWithOptions(
 		}
 	}
 	args := buildCodexExecArgs(modelName, reasoningEffort, prompt, mcpServers, options)
+	if trace != nil {
+		trace.record("model_request", map[string]any{
+			"transport":          "codex_cli",
+			"model":              modelName,
+			"reasoningEffort":    reasoningEffort,
+			"prompt":             prompt,
+			"liveSearch":         liveSearch,
+			"mcpServers":         mcpServers,
+			"directOutputSchema": json.RawMessage(directOutputSchema),
+		})
+	}
 
 	cmd := exec.CommandContext(execCtx, e.binary, args...)
 	cmd.Env = e.buildEnv(codexHome)
@@ -425,6 +447,9 @@ func (e *codexCLIExecutor) executePromptWithOptions(
 		scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 		for scanner.Scan() {
 			line := scanner.Bytes()
+			if trace != nil {
+				trace.record("cli_event", map[string]any{"stream": "stdout", "jsonl": string(line)})
+			}
 			researchAudit.record(line)
 			stdoutBuf.Write(line)
 			stdoutBuf.Write([]byte("\n"))
@@ -440,6 +465,9 @@ func (e *codexCLIExecutor) executePromptWithOptions(
 			line := scanner.Bytes()
 			if suppressCodexStderrLine(line) {
 				continue
+			}
+			if trace != nil {
+				trace.record("cli_event", map[string]any{"stream": "stderr", "text": string(line)})
 			}
 			stderrBuf.Write(line)
 			stderrBuf.Write([]byte("\n"))
@@ -635,6 +663,13 @@ waitLoop:
 		ResearchAudit:    researchAudit.snapshot(),
 		ResultCandidates: resultCandidateDiagnostics,
 	}
+	if trace != nil {
+		trace.record("model_response", map[string]any{
+			"transport": "codex_cli", "exitCode": exitCode, "timedOut": timedOut,
+			"duration": duration.String(), "researchAudit": output.ResearchAudit,
+			"resultCandidates": resultCandidateDiagnostics,
+		})
+	}
 
 	// result 没收到但进程退出了 → 失败
 	if submittedResult == nil {
@@ -648,6 +683,16 @@ waitLoop:
 	}
 
 	return output, nil
+}
+
+func (e *codexCLIExecutor) recordTraceInput(ctx context.Context, taskID, contextType string, value any) {
+	if e == nil || e.taskPool == nil || e.taskPool.service == nil || e.taskPool.service.agentTrace == nil {
+		return
+	}
+	e.taskPool.service.agentTrace.recordTask(ctx, taskID, "input_context", map[string]any{
+		"contextType": contextType,
+		"context":     value,
+	})
 }
 
 func ensureExecutorProcessGroupStopped(processGroupID int) error {

@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import type { AppActions } from "../../app/App";
 import type {
+  ObjectStorageProfile,
   StockV2AgentModelProfile,
   StockV2AgentProviderProfile,
   StockV2AgentTaskProfile,
   StockV2AgentUpdateTaskProfileRequest,
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
-import { Button, Drawer, Field, Notice } from "../../components/ui";
+import { Button, CollapsibleSection, Drawer, Field, Notice, Toggle } from "../../components/ui";
 import { stockV2AgentModelStatusLabel } from "../../domain/labels";
 
 export function StockV2AgentTaskProfileDrawer({
@@ -30,12 +31,23 @@ export function StockV2AgentTaskProfileDrawer({
   actions: AppActions;
 }) {
   const cliOnly = taskType === "portfolio_sentinel";
+  const archiveSupported = [
+    "operation_review",
+    "strategy_generation",
+    "opportunity_discovery",
+    "portfolio_sentinel",
+  ].includes(taskType);
   const [form, setForm] = useState<StockV2AgentUpdateTaskProfileRequest>({
     executionMode: cliOnly ? "cli" : profile?.executionMode || "cli",
     primaryModelId: profile?.primaryModelId || "",
     fallbackModelId: profile?.fallbackModelId || "",
     reasoningEffort: profile?.reasoningEffort || "",
+    archiveEnabled: profile?.archiveEnabled || false,
+    archiveObjectStorageProfileId: profile?.archiveObjectStorageProfileId || "",
   });
+  const [storageProfiles, setStorageProfiles] = useState<ObjectStorageProfile[]>([]);
+  const [storageLoading, setStorageLoading] = useState(false);
+  const [storageError, setStorageError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,9 +58,32 @@ export function StockV2AgentTaskProfileDrawer({
         primaryModelId: profile.primaryModelId || "",
         fallbackModelId: profile.fallbackModelId || "",
         reasoningEffort: profile.reasoningEffort || "",
+        archiveEnabled: profile.archiveEnabled || false,
+        archiveObjectStorageProfileId: profile.archiveObjectStorageProfileId || "",
       });
     }
   }, [cliOnly, profile]);
+
+  useEffect(() => {
+    if (!archiveSupported) return;
+    let active = true;
+    setStorageLoading(true);
+    setStorageError(null);
+    void actions
+      .api<{ items?: ObjectStorageProfile[] }>("/api/object-storage/profiles")
+      .then((response) => {
+        if (active) setStorageProfiles(response.items || []);
+      })
+      .catch((err) => {
+        if (active) setStorageError(friendlyError(err));
+      })
+      .finally(() => {
+        if (active) setStorageLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [actions, archiveSupported]);
 
   const providerByID = new Map(providers.map((provider) => [provider.id, provider]));
   const executionMode = cliOnly ? "cli" : form.executionMode === "api" ? "api" : "cli";
@@ -69,6 +104,11 @@ export function StockV2AgentTaskProfileDrawer({
   async function handleSubmit() {
     setSubmitting(true);
     setError(null);
+    if (archiveSupported && form.archiveEnabled && !form.archiveObjectStorageProfileId) {
+      setError("启用完整上下文归档前，请选择对象存储 Profile。");
+      setSubmitting(false);
+      return;
+    }
     try {
       const usableModelIds = new Set(enabledModels.map((model) => model.id));
       const body: StockV2AgentUpdateTaskProfileRequest = {
@@ -76,6 +116,8 @@ export function StockV2AgentTaskProfileDrawer({
         primaryModelId: form.primaryModelId && usableModelIds.has(form.primaryModelId) ? form.primaryModelId : "",
         fallbackModelId: form.fallbackModelId && usableModelIds.has(form.fallbackModelId) ? form.fallbackModelId : "",
         reasoningEffort: form.reasoningEffort || "",
+        archiveEnabled: archiveSupported ? Boolean(form.archiveEnabled) : false,
+        archiveObjectStorageProfileId: archiveSupported ? form.archiveObjectStorageProfileId || "" : "",
       };
       await actions.api(`/api/stockv2/agent/task-profiles/${taskType}`, { method: "PUT", body });
       actions.setToast("任务配置已更新", "good");
@@ -208,6 +250,51 @@ export function StockV2AgentTaskProfileDrawer({
             {executionMode === "cli" ? <option value="ultra">ultra · 最大并自动任务委派</option> : null}
           </select>
         </Field>
+
+        {archiveSupported ? (
+          <CollapsibleSection
+            title="高级设置"
+            subtitle={form.archiveEnabled ? "完整上下文将流式归档到对象存储" : "完整上下文归档默认关闭"}
+          >
+            <div className="grid gap-3">
+              <Toggle
+                checked={Boolean(form.archiveEnabled)}
+                label={
+                  <span>
+                    <strong className="block">归档完整 Agent 上下文</strong>
+                    <span className="mt-0.5 block text-xs text-[var(--muted)]">
+                      保存模型输入、输出、工具调用、校验与最终应用结果。上传失败不影响任务结果。
+                    </span>
+                  </span>
+                }
+                onChange={(checked) => setForm({ ...form, archiveEnabled: checked })}
+              />
+              {storageError ? <Notice tone="warn">对象存储 Profile 加载失败：{storageError}</Notice> : null}
+              <Field
+                label="归档对象存储 Profile"
+                help="请使用私有 Bucket，并在 Bucket 侧启用默认加密和未完成 multipart 生命周期清理。系统不在本地保留副本，也不提供归档浏览入口。"
+              >
+                <select
+                  value={form.archiveObjectStorageProfileId || ""}
+                  disabled={!form.archiveEnabled || storageLoading}
+                  onChange={(e) => setForm({ ...form, archiveObjectStorageProfileId: e.target.value })}
+                  className="w-full rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 text-sm disabled:opacity-60"
+                >
+                  <option value="">{storageLoading ? "加载中…" : "请选择对象存储 Profile"}</option>
+                  {storageProfiles.map((item) => (
+                    <option key={item.id} value={item.id} disabled={!item.hasCredentials}>
+                      {item.name || item.providerLabel} · {item.bucket}
+                      {item.hasCredentials ? "" : " (缺少凭据)"}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Notice tone="warn">
+                归档包含完整业务上下文，可能体积较大。队列溢出、网络中断、服务重启或对象存储异常时，本次归档会被整体放弃，不会阻塞 Agent。
+              </Notice>
+            </div>
+          </CollapsibleSection>
+        ) : null}
       </div>
     </Drawer>
   );

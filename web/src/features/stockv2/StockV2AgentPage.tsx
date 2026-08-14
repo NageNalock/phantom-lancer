@@ -784,6 +784,9 @@ function AgentTaskProfileSection({
               <Row label="主模型" value={bindingLabel(profile?.primaryModelId)} />
               <Row label="备模型" value={bindingLabel(profile?.fallbackModelId)} />
               <Row label="推理强度" value={profile?.reasoningEffort || "模型默认（不传）"} />
+              {profile && ["operation_review", "strategy_generation", "opportunity_discovery", "portfolio_sentinel"].includes(profile.taskType) ? (
+                <Row label="上下文归档" value={profile.archiveEnabled ? "已启用" : "关闭"} />
+              ) : null}
             </div>
           </div>
         );

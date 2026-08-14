@@ -2804,6 +2804,8 @@ export interface StockV2AgentTaskProfile {
   fallbackModelId?: string;
   reasoningEffort?: string;
   maxBudget?: number;
+  archiveEnabled?: boolean;
+  archiveObjectStorageProfileId?: string;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -2964,6 +2966,8 @@ export interface StockV2AgentUpdateTaskProfileRequest {
   fallbackModelId?: string;
   reasoningEffort?: string;
   maxBudget?: number;
+  archiveEnabled?: boolean;
+  archiveObjectStorageProfileId?: string;
 }
 
 export interface StockV2AgentProviderModelCatalogItem {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"phantom-lancer/internal/safelog"
+	"phantom-lancer/internal/storage"
 )
 
 // Service 主业务服务
@@ -85,6 +86,8 @@ type Service struct {
 	agentMCPMu          sync.RWMutex
 	agentMCPServer      *http.Server
 	agentMCPURL         string
+	agentTraceProfiles  agentTraceProfileStore
+	agentTrace          *agentTraceManager
 }
 
 // NewService 创建新的股票V2服务
@@ -105,15 +108,25 @@ func NewService(store *Store, log *slog.Logger, httpClient *http.Client) *Servic
 		dailyBarsSource:         NewDailyBarsSource(nil, httpClient),
 		newsAdapters:            map[string]NewsSourceAdapter{},
 		agentTaskPool:           pool,
+		agentTrace:              newAgentTraceManager(nil, log),
 		agentCodexCommand: func(ctx context.Context, args ...string) ([]byte, error) {
 			return exec.CommandContext(ctx, "codex", args...).CombinedOutput()
 		},
 	}
 	pool.service = svc
+	svc.agentTrace.service = svc
 	svc.newsAdapters[NewsSourceJin10] = jin10NewsSourceAdapter{httpClient: httpClient}
 	svc.newsAdapters[NewsSourceFinancialJuice] = financialJuiceNewsSourceAdapter{service: svc}
 	svc.markInterruptedRunningTasks(context.Background())
 	return svc
+}
+
+// WithAgentTraceObjectStorage enables best-effort Agent trace uploads through
+// the shared object-storage profiles. Trace archival stays disabled per task by
+// default and never changes the Agent task result.
+func (s *Service) WithAgentTraceObjectStorage(store *storage.Store) *Service {
+	s.agentTraceProfiles = store
+	return s
 }
 
 func (s *Service) launchNewsContextWorker(runID string, execute func(context.Context, string)) bool {
@@ -1831,6 +1844,9 @@ func (s *Service) Close() error {
 	// 关闭 agent task pool
 	if s.agentTaskPool != nil {
 		s.agentTaskPool.Close()
+	}
+	if s.agentTrace != nil {
+		s.agentTrace.close()
 	}
 	// 关闭底层 DB 连接
 	if s.store != nil {
