@@ -24,6 +24,10 @@ const (
 	decisionReferenceWorkers   = 4
 	decisionReferenceTimeout   = 12 * time.Second
 	decisionReferenceFreshness = 20 * time.Hour
+	// ponytail: 200 rows keeps each request bounded while covering recent
+	// quarterly disclosures and long dividend histories. If this becomes
+	// insufficient, replace it with provider pagination rather than raising it.
+	decisionReferenceRowLimit = 200
 )
 
 var decisionReferenceDatasets = []string{"disclosure_date", "share_float", "dividend", "forecast", "income", "cashflow", "fina_indicator"}
@@ -107,7 +111,7 @@ func (s *Service) refreshOneDecisionReference(ctx context.Context, config Opport
 	eventSuccess, financeSuccess := 0, 0
 	var messages []string
 	for _, dataset := range decisionReferenceDatasets {
-		params := url.Values{"ts_code": {tsCode}, "limit": {"12"}}
+		params := url.Values{"ts_code": {tsCode}, "limit": {strconv.Itoa(decisionReferenceRowLimit)}}
 		result, err := s.fetchDecisionTushareDataset(ctx, config, dataset, params)
 		if err != nil {
 			if len(messages) < 3 {
@@ -151,7 +155,7 @@ func (s *Service) refreshOneDecisionReference(ctx context.Context, config Opport
 		health.Message = "关键事件日历不完整"
 	}
 	if len(messages) > 0 {
-		health.Message = firstNonEmpty(health.Message, strings.Join(messages, "; "))
+		health.Message = strings.TrimSpace(strings.Join([]string{health.Message, strings.Join(messages, "; ")}, "；"))
 	}
 	_ = s.store.SaveDecisionReferenceHealth(ctx, health)
 	return health
