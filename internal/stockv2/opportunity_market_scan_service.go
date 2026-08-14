@@ -1242,12 +1242,16 @@ func (s *Service) advanceOpportunityMarketDrafting(ctx context.Context, run Oppo
 		item := mapFromAny(raw)
 		createdBySymbol[stringFromAny(item["symbol"])] = stringFromAny(item["id"])
 	}
+	skipReasons := s.strategyGenerationSkipReasons(ctx, agentRun)
 	candidates, _ := s.store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{ScanRunID: run.ID, Limit: opportunityMarketScanLocalLimit})
 	for i := range candidates {
 		if id := createdBySymbol[candidates[i].Symbol]; id != "" {
 			candidates[i].StrategyStatus, candidates[i].StrategyID = OpportunityMarketScanStrategyGenerated, id
 		} else if candidates[i].StrategyStatus == OpportunityMarketScanStrategyPending {
 			candidates[i].StrategyStatus = OpportunityMarketScanStrategySkipped
+			if candidates[i].ExclusionReason == "" {
+				candidates[i].ExclusionReason = firstNonEmpty(skipReasons[candidates[i].Symbol], "Agent 证据复核后未生成策略草案")
+			}
 		}
 	}
 	_ = s.store.UpsertOpportunityMarketScanCandidates(ctx, candidates)

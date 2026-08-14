@@ -172,7 +172,7 @@ func TestEnsureDecisionGateAuditFieldsKeepsServerEvidence(t *testing.T) {
 		}},
 		DataHealth: []DecisionDataHealth{{Key: "fund_flow", Status: DecisionHealthHealthy}},
 	}
-	ensureDecisionGateAuditFields(&draft, snapshot)
+	ensureDecisionGateAuditFields(&draft, snapshot, map[string]bool{"evidence-1": true})
 	for _, want := range []string{"price", "factor", "event_calendar", "catalyst", "flow", "fundamental"} {
 		if !containsString(draft.DecisionBasis, want) {
 			t.Fatalf("decision basis=%v, missing %q", draft.DecisionBasis, want)
@@ -180,6 +180,25 @@ func TestEnsureDecisionGateAuditFieldsKeepsServerEvidence(t *testing.T) {
 	}
 	if !containsString(draft.EvidenceRefIDs, snapshot.ID) {
 		t.Fatalf("evidence refs=%v, missing snapshot %q", draft.EvidenceRefIDs, snapshot.ID)
+	}
+	draft.EvidenceRefIDs = []string{"evidence-1", "other-candidate-evidence"}
+	ensureDecisionGateAuditFields(&draft, snapshot, map[string]bool{"evidence-1": true})
+	if !containsString(draft.EvidenceRefIDs, "evidence-1") || containsString(draft.EvidenceRefIDs, "other-candidate-evidence") {
+		t.Fatalf("cross-candidate evidence was not filtered: %v", draft.EvidenceRefIDs)
+	}
+}
+
+func TestStrategyGenerationDraftSkipReasonExplainsGateAndPatch(t *testing.T) {
+	blocked := StrategyGenerationDraft{
+		DraftType:   StrategyGenerationDraftTypeNoChange,
+		RiskSummary: []string{"确定性门阻断：财务事实不完整"},
+	}
+	if got := strategyGenerationDraftSkipReason(blocked); got != "确定性门阻断：财务事实不完整" {
+		t.Fatalf("blocked reason=%q", got)
+	}
+	patch := StrategyGenerationDraft{DraftType: StrategyGenerationDraftTypeStrategyPatch}
+	if got := strategyGenerationDraftSkipReason(patch); got != "Agent 建议修补已有策略，本轮不新建草案" {
+		t.Fatalf("patch reason=%q", got)
 	}
 }
 

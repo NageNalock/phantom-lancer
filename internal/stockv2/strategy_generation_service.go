@@ -939,6 +939,45 @@ func strategyGenerationCandidateIDsFromTrigger(triggerID string) []string {
 	return nil
 }
 
+func (s *Service) strategyGenerationSkipReasons(ctx context.Context, run AgentRun) map[string]string {
+	out := map[string]string{}
+	if strings.TrimSpace(run.DecisionLedgerID) == "" {
+		return out
+	}
+	ledger, err := s.store.GetAgentDecisionLedger(ctx, run.DecisionLedgerID)
+	if err != nil {
+		return out
+	}
+	raw := mapFromAny(ledger.StructuredOutput["result"])
+	report, err := strategyGenerationReportFromResultForMode(raw, strategyGenerationModeFromTrigger(run.TriggerObjectID))
+	if err != nil {
+		return out
+	}
+	s.applyDecisionGatesToStrategyReport(ctx, run, &report)
+	for _, draft := range report.Drafts {
+		if reason := strategyGenerationDraftSkipReason(draft); reason != "" {
+			out[strings.TrimSpace(draft.Symbol)] = reason
+		}
+	}
+	return out
+}
+
+func strategyGenerationDraftSkipReason(draft StrategyGenerationDraft) string {
+	switch draft.DraftType {
+	case StrategyGenerationDraftTypeStrategyPatch:
+		return "Agent 建议修补已有策略，本轮不新建草案"
+	case StrategyGenerationDraftTypeNoChange:
+		for _, item := range draft.RiskSummary {
+			if reason, ok := strings.CutPrefix(strings.TrimSpace(item), "确定性门阻断："); ok {
+				return "确定性门阻断：" + reason
+			}
+		}
+		return "Agent 判断无需新建策略草案"
+	default:
+		return ""
+	}
+}
+
 func strategyGenerationSymbolsFromTrigger(triggerID string) []string {
 	for _, part := range strings.Split(triggerID, ":") {
 		if value, ok := strings.CutPrefix(part, "symbols="); ok {

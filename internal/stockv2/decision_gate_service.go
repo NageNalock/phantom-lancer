@@ -470,14 +470,16 @@ func (s *Service) applyDecisionGatesToStrategyReport(ctx context.Context, run Ag
 	for _, item := range items {
 		decisionGates[item.Symbol] = item
 	}
+	validEvidenceRefs := s.strategyGenerationValidEvidenceRefs(ctx, run)
 	for i := range report.Drafts {
 		draft := &report.Drafts[i]
-		snapshot, ok := decisionGates[strings.TrimSpace(draft.Symbol)]
+		symbol := strings.TrimSpace(draft.Symbol)
+		snapshot, ok := decisionGates[symbol]
 		if !ok {
 			continue
 		}
 		draft.GateSnapshotID = snapshot.ID
-		ensureDecisionGateAuditFields(draft, snapshot)
+		ensureDecisionGateAuditFields(draft, snapshot, validEvidenceRefs[symbol])
 		blockedReason := ""
 		for _, rule := range draft.Playbook.Rules {
 			if !decisionActionAllowed(snapshot, rule.Action) {
@@ -536,7 +538,7 @@ func decisionDataHealthStatus(items []DecisionDataHealth, key string) string {
 	return ""
 }
 
-func ensureDecisionGateAuditFields(draft *StrategyGenerationDraft, snapshot DecisionGateSnapshot) {
+func ensureDecisionGateAuditFields(draft *StrategyGenerationDraft, snapshot DecisionGateSnapshot, validEvidenceRefs map[string]bool) {
 	if draft == nil {
 		return
 	}
@@ -556,9 +558,51 @@ func ensureDecisionGateAuditFields(draft *StrategyGenerationDraft, snapshot Deci
 		basis = append(basis, "fundamental")
 	}
 	draft.DecisionBasis = compactStringList(basis, 12)
+	refs := draft.EvidenceRefIDs
+	if validEvidenceRefs != nil {
+		filtered := make([]string, 0, len(refs))
+		for _, ref := range refs {
+			if validEvidenceRefs[strings.TrimSpace(ref)] {
+				filtered = append(filtered, ref)
+			}
+		}
+		refs = filtered
+	}
 	// The gate snapshot is an exact, persisted evidence identifier supplied to
 	// the Agent and is always part of the server's final authorization decision.
-	draft.EvidenceRefIDs = compactStringList(append(draft.EvidenceRefIDs, snapshot.ID), 50)
+	draft.EvidenceRefIDs = compactStringList(append(refs, snapshot.ID), 50)
+}
+
+func (s *Service) strategyGenerationValidEvidenceRefs(ctx context.Context, run AgentRun) map[string]map[string]bool {
+	candidateIDs := strategyGenerationCandidateIDsFromTrigger(run.TriggerObjectID)
+	if len(candidateIDs) == 0 {
+		return nil
+	}
+	out := make(map[string]map[string]bool)
+	for _, symbol := range strategyGenerationSymbolsFromTrigger(run.TriggerObjectID) {
+		out[symbol] = map[string]bool{}
+	}
+	for _, candidateID := range candidateIDs {
+		candidate, err := s.store.GetOpportunityCandidate(ctx, candidateID)
+		if err != nil {
+			continue
+		}
+		allowed := out[candidate.Symbol]
+		if allowed == nil {
+			allowed = map[string]bool{}
+			out[candidate.Symbol] = allowed
+		}
+		evidence, err := s.store.ListOpportunityEvidence(ctx, OpportunityEvidenceListFilter{
+			RunID: candidate.RunID, CandidateID: candidate.ID, Limit: 100,
+		})
+		if err != nil {
+			continue
+		}
+		for _, item := range evidence {
+			allowed[item.ID] = true
+		}
+	}
+	return out
 }
 
 func calibrateStrategyRuleThresholds(draft *StrategyGenerationDraft, snapshot DecisionGateSnapshot) {
