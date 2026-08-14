@@ -1305,7 +1305,7 @@ func (s *Service) refreshOpportunityMarketStrategyQuotes(ctx context.Context, ca
 	if len(symbols) == 0 {
 		return
 	}
-	// ponytail: refresh only the at-most-three strategy targets here. The wider
+	// ponytail: refresh only the at-most-ten final strategy targets here. The wider
 	// scan quote batch is scoring evidence and is not a substitute for persisted,
 	// timestamped executable-price context used by strategy generation and MCP.
 	_, _ = s.RefreshLatestQuotes(ctx, symbols, "opportunity-market-scan")

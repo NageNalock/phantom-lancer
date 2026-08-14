@@ -118,7 +118,7 @@ export function StockV2OpportunityMarketScan({ actions }: { actions: AppActions 
       {error ? <Notice tone="danger">{error}</Notice> : null}
       <Panel
         title="A 股主板机会扫描"
-        subtitle="全市场确定性预筛 → 有界数据富集 → Agent 证据复核 → 最多 3 份未激活建仓草案"
+        subtitle="全市场确定性预筛 → 有界数据富集 → Agent 证据复核 → 最多 10 份未激活建仓草案"
         actions={<>
           <Button onClick={() => setSettingsOpen(true)}><GearSix size={14} />配置</Button>
           <Button onClick={() => void load()}><ArrowClockwise size={14} />刷新</Button>
