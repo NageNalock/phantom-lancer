@@ -1150,6 +1150,11 @@ func (s *Service) advanceOpportunityMarketResearch(ctx context.Context, run Oppo
 		return
 	}
 	if len(eligible) > opportunityMarketScanStrategyLimit {
+		for _, candidate := range eligible[opportunityMarketScanStrategyLimit:] {
+			if item := scanBySymbol[candidate.Symbol]; item != nil && item.ExclusionReason == "" {
+				item.ExclusionReason = "低于本轮策略生成预算"
+			}
+		}
 		eligible = eligible[:opportunityMarketScanStrategyLimit]
 	}
 	for _, candidate := range eligible {
