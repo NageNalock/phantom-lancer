@@ -594,6 +594,7 @@ func normalizeStrategyGenerationReportShape(raw map[string]any) {
 		setStringIfEmpty(draft, "market", target["market"])
 		setStringIfEmpty(draft, "name", target["name"])
 		setStringIfEmpty(draft, "strategy_bias", draft["direction"])
+		setStringIfEmpty(draft, "thesis", draft["rationale"])
 
 		playbook := mapFromAny(draft["playbook"])
 		for _, ruleRaw := range sliceFromAny(playbook["rules"]) {

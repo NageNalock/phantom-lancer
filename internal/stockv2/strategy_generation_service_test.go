@@ -256,19 +256,21 @@ func TestStrategyGenerationReportNormalizesObservedFormatterDraftAliases(t *test
 	delete(draft, "market")
 	delete(draft, "name")
 	delete(draft, "draft_type")
+	delete(draft, "thesis")
 	draft["instrument"] = map[string]any{
 		"symbol": "000831",
 		"market": "SZ",
 		"name":   "中国稀土",
 	}
 	draft["type"] = StrategyGenerationDraftTypeNewStrategy
+	draft["rationale"] = "高纯稀土分离能力已验证，但仍需等待公司级盈利传导证据。"
 
 	report, err := strategyGenerationReportFromResultForMode(raw, StrategyGenerationModeOpportunity)
 	if err != nil {
 		t.Fatalf("normalize observed formatter draft aliases: %v", err)
 	}
 	got := report.Drafts[0]
-	if got.Symbol != "000831" || got.Market != "SZ" || got.Name != "中国稀土" || got.DraftType != StrategyGenerationDraftTypeNewStrategy {
+	if got.Symbol != "000831" || got.Market != "SZ" || got.Name != "中国稀土" || got.DraftType != StrategyGenerationDraftTypeNewStrategy || got.Thesis != draft["rationale"] {
 		t.Fatalf("normalized draft=%+v", got)
 	}
 }
