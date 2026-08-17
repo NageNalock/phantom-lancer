@@ -20,6 +20,11 @@ func (s *Store) CreateNewsEvent(ctx context.Context, event NewsEvent) (NewsEvent
 			return NewsEvent{}, err
 		}
 		if found {
+			if strings.TrimSpace(newsEventEmbeddingText(existing)) != "" {
+				if err := s.EnsureEmbeddingWork(ctx, EmbeddingObjectNewsEvent, existing.ID); err != nil {
+					return NewsEvent{}, err
+				}
+			}
 			return existing, nil
 		}
 	}
@@ -43,6 +48,11 @@ func (s *Store) CreateNewsEvent(ctx context.Context, event NewsEvent) (NewsEvent
 		event.CreatedAt, event.UpdatedAt)
 	if err != nil {
 		return NewsEvent{}, wrapError(err, "create news event")
+	}
+	if strings.TrimSpace(newsEventEmbeddingText(event)) != "" {
+		if err := s.EnsureEmbeddingWork(ctx, EmbeddingObjectNewsEvent, event.ID); err != nil {
+			return NewsEvent{}, err
+		}
 	}
 	return event, nil
 }

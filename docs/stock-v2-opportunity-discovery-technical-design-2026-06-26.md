@@ -259,7 +259,24 @@ updated_at
 - 嵌入模型切换后，旧向量不得继续混用；应标记为 `stale` 并提示重建。
 - `stock_profile` 和 `news_event` 是机会发现的第一优先级向量对象。
 
-### 4.8 stockv2_embedding_config
+### 4.8 stockv2_embedding_work_items
+
+表示源对象变更后等待向量同步的持久队列。股票画像、新闻事件、主题、主题版本和机会对象在语义内容发生变化时写入一条工作项；自动维护只点查这些对象，不得为了确认“没有任务”而周期性遍历全部历史源表。
+
+```text
+object_type
+object_id
+revision                    // 同一对象再次变化时递增
+enqueued_at
+```
+
+说明：
+
+- `(object_type, object_id)` 唯一；维护完成时必须按读取到的 `revision` 条件删除，避免处理期间发生的新变化被旧任务覆盖。
+- 主题和主题版本的 `index_status` 同时作为崩溃恢复来源；启动或定时维护可以把非 `ready` ID 补入队列，但只能读取有界 ID 列表。
+- 只有 owner 显式发起的强制重建可以遍历历史源表，并且取满本轮数量上限后必须立即停止扫描。
+
+### 4.9 stockv2_embedding_config
 
 表示 StockV2 向量化能力绑定的嵌入模型。
 

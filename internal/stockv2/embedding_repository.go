@@ -6,6 +6,12 @@ import (
 	"time"
 )
 
+type embeddingWorkItem struct {
+	ObjectType string
+	ObjectID   string
+	Revision   int64
+}
+
 func (s *Store) ensureEmbeddingSchema(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS stockv2_embedding_config (
@@ -50,6 +56,20 @@ func (s *Store) ensureEmbeddingSchema(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_status ON stockv2_embedding_assets(status);
 		CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_assets_search
 			ON stockv2_embedding_assets(object_type, model_id, status, embedding_dimensions, object_id);
+		CREATE TABLE IF NOT EXISTS stockv2_embedding_work_items (
+			object_type TEXT NOT NULL,
+			object_id TEXT NOT NULL,
+			revision INTEGER NOT NULL DEFAULT 1,
+			enqueued_at DATETIME NOT NULL,
+			PRIMARY KEY(object_type, object_id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_embedding_work_items_queue
+			ON stockv2_embedding_work_items(enqueued_at, object_type, object_id);
+		INSERT INTO stockv2_embedding_work_items (object_type, object_id, revision, enqueued_at)
+			SELECT object_type, object_id, 1, updated_at
+			FROM stockv2_embedding_assets
+			WHERE status <> 'ready'
+			ON CONFLICT(object_type, object_id) DO NOTHING;
 		CREATE TABLE IF NOT EXISTS stockv2_news_context_mcp_verifications (
 			thread_id TEXT PRIMARY KEY,
 			version_id TEXT NOT NULL,
@@ -66,6 +86,17 @@ func (s *Store) ensureEmbeddingSchema(ctx context.Context) error {
 }
 
 func (s *Store) MarkEmbeddingAssetsStaleForModelChange(ctx context.Context, modelID string) error {
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO stockv2_embedding_work_items (object_type, object_id, revision, enqueued_at)
+		SELECT object_type, object_id, 1, ?
+		FROM stockv2_embedding_assets
+		WHERE model_id <> ?
+		ON CONFLICT(object_type, object_id) DO UPDATE SET
+			revision = stockv2_embedding_work_items.revision + 1,
+			enqueued_at = excluded.enqueued_at
+	`, time.Now(), strings.TrimSpace(modelID)); err != nil {
+		return wrapError(err, "queue embedding assets for model change")
+	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE stockv2_embedding_assets
 		SET status = ?, updated_at = ?
@@ -93,6 +124,175 @@ func (s *Store) MarkEmbeddingAssetsStaleForObjectTextHash(ctx context.Context, o
 	return wrapError(err, "mark embedding assets stale for changed object text")
 }
 
+func (s *Store) QueueEmbeddingWork(ctx context.Context, objectType, objectID string) error {
+	objectType = strings.TrimSpace(objectType)
+	objectID = strings.TrimSpace(objectID)
+	if objectType == "" || objectID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO stockv2_embedding_work_items (object_type, object_id, revision, enqueued_at)
+		VALUES (?, ?, 1, ?)
+		ON CONFLICT(object_type, object_id) DO UPDATE SET
+			revision = stockv2_embedding_work_items.revision + 1,
+			enqueued_at = excluded.enqueued_at
+	`, objectType, objectID, time.Now())
+	return wrapError(err, "queue embedding work")
+}
+
+func (s *Store) EnsureEmbeddingWork(ctx context.Context, objectType, objectID string) error {
+	objectType = strings.TrimSpace(objectType)
+	objectID = strings.TrimSpace(objectID)
+	if objectType == "" || objectID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO stockv2_embedding_work_items (object_type, object_id, revision, enqueued_at)
+		VALUES (?, ?, 1, ?)
+		ON CONFLICT(object_type, object_id) DO NOTHING
+	`, objectType, objectID, time.Now())
+	return wrapError(err, "ensure embedding work")
+}
+
+func (s *Store) QueueEmbeddingWorkItems(ctx context.Context, items []embeddingWorkItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return wrapError(err, "begin queue embedding work")
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO stockv2_embedding_work_items (object_type, object_id, revision, enqueued_at)
+		VALUES (?, ?, 1, ?)
+		ON CONFLICT(object_type, object_id) DO UPDATE SET
+			revision = stockv2_embedding_work_items.revision + 1,
+			enqueued_at = excluded.enqueued_at
+	`)
+	if err != nil {
+		return wrapError(err, "prepare queue embedding work")
+	}
+	defer stmt.Close()
+	now := time.Now()
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		item.ObjectType = strings.TrimSpace(item.ObjectType)
+		item.ObjectID = strings.TrimSpace(item.ObjectID)
+		if item.ObjectType == "" || item.ObjectID == "" {
+			continue
+		}
+		key := item.ObjectType + "\x00" + item.ObjectID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if _, err := stmt.ExecContext(ctx, item.ObjectType, item.ObjectID, now); err != nil {
+			return wrapError(err, "queue embedding work item")
+		}
+	}
+	return wrapError(tx.Commit(), "commit queued embedding work")
+}
+
+func (s *Store) ListEmbeddingWorkItems(ctx context.Context, objectTypes []string, limit int) ([]embeddingWorkItem, error) {
+	objectTypes = normalizeEmbeddingObjectTypes(objectTypes)
+	if limit <= 0 || len(objectTypes) == 0 {
+		return []embeddingWorkItem{}, nil
+	}
+	placeholders := make([]string, len(objectTypes))
+	args := make([]any, 0, len(objectTypes)+1)
+	for i, objectType := range objectTypes {
+		placeholders[i] = "?"
+		args = append(args, objectType)
+	}
+	args = append(args, normalizedPageLimit(limit, maxEmbeddingMaintainBatchSize))
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT object_type, object_id, revision
+		FROM stockv2_embedding_work_items
+		WHERE object_type IN (`+strings.Join(placeholders, ",")+`)
+		ORDER BY enqueued_at ASC, object_type ASC, object_id ASC
+		LIMIT ?
+	`, args...)
+	if err != nil {
+		return nil, wrapError(err, "list embedding work items")
+	}
+	return scanRows(rows, func(row rowScanner) (embeddingWorkItem, error) {
+		var item embeddingWorkItem
+		err := row.Scan(&item.ObjectType, &item.ObjectID, &item.Revision)
+		return item, err
+	}, "scan embedding work item", "iterate embedding work items")
+}
+
+func (s *Store) CompleteEmbeddingWork(ctx context.Context, item embeddingWorkItem) error {
+	if strings.TrimSpace(item.ObjectType) == "" || strings.TrimSpace(item.ObjectID) == "" {
+		return nil
+	}
+	query := `DELETE FROM stockv2_embedding_work_items WHERE object_type = ? AND object_id = ?`
+	args := []any{strings.TrimSpace(item.ObjectType), strings.TrimSpace(item.ObjectID)}
+	if item.Revision > 0 {
+		query += ` AND revision = ?`
+		args = append(args, item.Revision)
+	}
+	_, err := s.db.ExecContext(ctx, query, args...)
+	return wrapError(err, "complete embedding work")
+}
+
+func (s *Store) ListPendingNewsContextEmbeddingWork(ctx context.Context, limit int) ([]embeddingWorkItem, error) {
+	limit = normalizedPageLimit(limit, maxEmbeddingMaintainBatchSize)
+	out := make([]embeddingWorkItem, 0, limit)
+	threadRows, err := s.marketDB.db.QueryContext(ctx, `
+		SELECT id
+		FROM stockv2_news_threads
+		WHERE index_status <> ? AND status NOT IN (?, ?)
+		ORDER BY updated_at ASC, id ASC
+		LIMIT ?
+	`, NewsContextIndexReady, NewsThreadStatusMerged, NewsThreadStatusArchived, limit)
+	if err != nil {
+		return nil, wrapError(err, "list pending news thread embedding work")
+	}
+	for threadRows.Next() {
+		var id string
+		if err := threadRows.Scan(&id); err != nil {
+			threadRows.Close()
+			return nil, wrapError(err, "scan pending news thread embedding work")
+		}
+		out = append(out, embeddingWorkItem{ObjectType: EmbeddingObjectNewsThread, ObjectID: id})
+	}
+	if err := threadRows.Err(); err != nil {
+		threadRows.Close()
+		return nil, wrapError(err, "iterate pending news thread embedding work")
+	}
+	threadRows.Close()
+	remaining := limit - len(out)
+	if remaining <= 0 {
+		return out, nil
+	}
+	versionRows, err := s.marketDB.db.QueryContext(ctx, `
+		SELECT id
+		FROM stockv2_news_thread_versions
+		WHERE index_status <> ? AND (window_type = ? OR material_change = 1)
+		ORDER BY created_at ASC, id ASC
+		LIMIT ?
+	`, NewsContextIndexReady, NewsContextWindowDaily, remaining)
+	if err != nil {
+		return nil, wrapError(err, "list pending news thread version embedding work")
+	}
+	for versionRows.Next() {
+		var id string
+		if err := versionRows.Scan(&id); err != nil {
+			versionRows.Close()
+			return nil, wrapError(err, "scan pending news thread version embedding work")
+		}
+		out = append(out, embeddingWorkItem{ObjectType: EmbeddingObjectNewsThreadVersion, ObjectID: id})
+	}
+	if err := versionRows.Err(); err != nil {
+		versionRows.Close()
+		return nil, wrapError(err, "iterate pending news thread version embedding work")
+	}
+	versionRows.Close()
+	return out, nil
+}
+
 func (s *Store) CountMissingEmbeddingSourcesByType(ctx context.Context, objectTypes []string, modelID string) (map[string]int, error) {
 	out := map[string]int{}
 	modelID = strings.TrimSpace(modelID)
@@ -101,154 +301,17 @@ func (s *Store) CountMissingEmbeddingSourcesByType(ctx context.Context, objectTy
 	}
 	for _, objectType := range normalizeEmbeddingObjectTypes(objectTypes) {
 		var count int
-		var err error
-		switch objectType {
-		case EmbeddingObjectStockProfile:
-			count, err = s.countMissingEmbeddingSourcesFromAssetDB(ctx, objectType, modelID, `
-				SELECT symbol
-				FROM stockv2_stock_profiles
-				WHERE TRIM(COALESCE(symbol, '')) <> ''
-			`)
-		case EmbeddingObjectNewsEvent:
-			count, err = s.countMissingEmbeddingSourcesFromAssetDB(ctx, objectType, modelID, `
-				SELECT id
-				FROM stockv2_news_events
-				WHERE COALESCE(context_status, 'pending') <> 'compacted'
-				  AND TRIM(COALESCE(source, '') || COALESCE(title, '') || COALESCE(summary, '') || COALESCE(content, '') || COALESCE(quality_status, '')) <> ''
-			`)
-		case EmbeddingObjectNewsThread:
-			var ids []string
-			ids, err = s.listNewsThreadEmbeddingSourceIDs(ctx)
-			if err == nil {
-				count, err = s.countMissingEmbeddingSourcesForIDs(ctx, objectType, modelID, ids)
-			}
-		case EmbeddingObjectNewsThreadVersion:
-			var ids []string
-			ids, err = s.listNewsThreadVersionEmbeddingSourceIDs(ctx)
-			if err == nil {
-				count, err = s.countMissingEmbeddingSourcesForIDs(ctx, objectType, modelID, ids)
-			}
-		case EmbeddingObjectOpportunity:
-			err = s.db.QueryRowContext(ctx, `
-				SELECT COUNT(*)
-				FROM stockv2_opportunities o
-				LEFT JOIN stockv2_embedding_assets a
-				  ON a.object_type = ? AND a.object_id = o.id AND a.model_id = ?
-				WHERE a.id IS NULL
-				  AND TRIM(COALESCE(o.title, '') || COALESCE(o.user_thesis, '')) <> ''
-			`, objectType, modelID).Scan(&count)
-		}
+		err := s.db.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM stockv2_embedding_work_items w
+			LEFT JOIN stockv2_embedding_assets a
+			  ON a.object_type = w.object_type AND a.object_id = w.object_id AND a.model_id = ?
+			WHERE w.object_type = ? AND a.id IS NULL
+		`, modelID, objectType).Scan(&count)
 		if err != nil {
 			return nil, wrapError(err, "count missing embedding sources "+objectType)
 		}
 		out[objectType] = count
 	}
 	return out, nil
-}
-
-func (s *Store) listNewsThreadEmbeddingSourceIDs(ctx context.Context) ([]string, error) {
-	const pageSize = 200
-	ids := make([]string, 0, pageSize)
-	for offset := 0; ; offset += pageSize {
-		items, err := s.ListNewsThreads(ctx, NewsThreadListFilter{Limit: pageSize, Offset: offset})
-		if err != nil {
-			return nil, err
-		}
-		for _, item := range items {
-			if id := strings.TrimSpace(item.ID); id != "" && newsThreadEmbeddingIndexable(item) {
-				ids = append(ids, id)
-			}
-		}
-		if len(items) < pageSize {
-			return ids, nil
-		}
-	}
-}
-
-func (s *Store) listNewsThreadVersionEmbeddingSourceIDs(ctx context.Context) ([]string, error) {
-	const pageSize = 200
-	ids := make([]string, 0, pageSize)
-	for offset := 0; ; offset += pageSize {
-		items, err := s.ListNewsThreadVersions(ctx, NewsThreadVersionListFilter{Limit: pageSize, Offset: offset})
-		if err != nil {
-			return nil, err
-		}
-		for _, item := range items {
-			if id := strings.TrimSpace(item.ID); id != "" && newsThreadVersionEmbeddingIndexable(item) {
-				ids = append(ids, id)
-			}
-		}
-		if len(items) < pageSize {
-			return ids, nil
-		}
-	}
-}
-
-func (s *Store) countMissingEmbeddingSourcesForIDs(ctx context.Context, objectType, modelID string, ids []string) (int, error) {
-	existing, err := s.countEmbeddingAssetsForObjectIDs(ctx, objectType, modelID, ids)
-	if err != nil {
-		return 0, err
-	}
-	return len(ids) - existing, nil
-}
-
-func (s *Store) countMissingEmbeddingSourcesFromAssetDB(ctx context.Context, objectType, modelID, sourceIDSQL string) (int, error) {
-	// ponytail: source rows live in DuckDB and embedding assets live in SQLite; batch IDs here
-	// instead of introducing cross-db attach or a mirrored queue table.
-	rows, err := s.assetDB().QueryContext(ctx, sourceIDSQL)
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
-	ids := make([]string, 0, 256)
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return 0, err
-		}
-		if id = strings.TrimSpace(id); id != "" {
-			ids = append(ids, id)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	existing, err := s.countEmbeddingAssetsForObjectIDs(ctx, objectType, modelID, ids)
-	if err != nil {
-		return 0, err
-	}
-	return len(ids) - existing, nil
-}
-
-func (s *Store) countEmbeddingAssetsForObjectIDs(ctx context.Context, objectType, modelID string, ids []string) (int, error) {
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	const chunkSize = 500
-	total := 0
-	for start := 0; start < len(ids); start += chunkSize {
-		end := start + chunkSize
-		if end > len(ids) {
-			end = len(ids)
-		}
-		chunk := ids[start:end]
-		placeholders := make([]string, len(chunk))
-		args := make([]any, 0, 2+len(chunk))
-		args = append(args, objectType, modelID)
-		for i, id := range chunk {
-			placeholders[i] = "?"
-			args = append(args, id)
-		}
-		var count int
-		err := s.db.QueryRowContext(ctx, `
-			SELECT COUNT(*)
-			FROM stockv2_embedding_assets
-			WHERE object_type = ? AND model_id = ? AND object_id IN (`+strings.Join(placeholders, ",")+`)
-		`, args...).Scan(&count)
-		if err != nil {
-			return 0, err
-		}
-		total += count
-	}
-	return total, nil
 }

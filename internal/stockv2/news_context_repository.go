@@ -1094,7 +1094,16 @@ func (s *Store) CreateNewsThread(ctx context.Context, item NewsThread) (NewsThre
 	if err != nil {
 		return item, wrapError(err, "create news thread")
 	}
-	return s.GetNewsThread(ctx, item.ID)
+	stored, err := s.GetNewsThread(ctx, item.ID)
+	if err != nil {
+		return item, err
+	}
+	if newsThreadEmbeddingIndexable(stored) {
+		if err := s.EnsureEmbeddingWork(ctx, EmbeddingObjectNewsThread, stored.ID); err != nil {
+			return item, err
+		}
+	}
+	return stored, nil
 }
 
 func (s *Store) UpdateNewsThread(ctx context.Context, item NewsThread) (NewsThread, error) {
@@ -1110,7 +1119,16 @@ func (s *Store) UpdateNewsThread(ctx context.Context, item NewsThread) (NewsThre
 	if err := tx.Commit(); err != nil {
 		return item, wrapError(err, "commit update news thread")
 	}
-	return s.GetNewsThread(ctx, item.ID)
+	stored, err := s.GetNewsThread(ctx, item.ID)
+	if err != nil {
+		return item, err
+	}
+	if newsThreadEmbeddingIndexable(stored) {
+		if err := s.QueueEmbeddingWork(ctx, EmbeddingObjectNewsThread, stored.ID); err != nil {
+			return item, err
+		}
+	}
+	return stored, nil
 }
 
 func (s *Store) GetNewsThread(ctx context.Context, id string) (NewsThread, error) {
@@ -1274,12 +1292,23 @@ func (s *Store) CreateNewsThreadVersion(ctx context.Context, item NewsThreadVers
 	if err := tx.Commit(); err != nil {
 		return item, wrapError(err, "commit news thread version")
 	}
+	var stored NewsThreadVersion
 	if item.AgentRunID != "" {
 		row := s.marketDB.db.QueryRowContext(ctx, newsThreadVersionSelectSQL+` WHERE thread_id=? AND agent_run_id=?`, item.ThreadID, item.AgentRunID)
-		return scanNewsThreadVersion(row)
+		stored, err = scanNewsThreadVersion(row)
+	} else {
+		row := s.marketDB.db.QueryRowContext(ctx, newsThreadVersionSelectSQL+` WHERE thread_id=? AND version_no=?`, item.ThreadID, item.VersionNo)
+		stored, err = scanNewsThreadVersion(row)
 	}
-	row := s.marketDB.db.QueryRowContext(ctx, newsThreadVersionSelectSQL+` WHERE thread_id=? AND version_no=?`, item.ThreadID, item.VersionNo)
-	return scanNewsThreadVersion(row)
+	if err != nil {
+		return item, err
+	}
+	if newsThreadVersionEmbeddingIndexable(stored) {
+		if err := s.EnsureEmbeddingWork(ctx, EmbeddingObjectNewsThreadVersion, stored.ID); err != nil {
+			return item, err
+		}
+	}
+	return stored, nil
 }
 
 // MaterializeNewsContextDailyVersions copies one latest changed-theme snapshot
@@ -1363,6 +1392,16 @@ func (s *Store) MaterializeNewsContextDailyVersions(
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, wrapError(err, "commit materialized daily news context versions")
+	}
+	work := make([]embeddingWorkItem, 0, len(materialized)*2)
+	for _, version := range materialized {
+		work = append(work,
+			embeddingWorkItem{ObjectType: EmbeddingObjectNewsThread, ObjectID: version.ThreadID},
+			embeddingWorkItem{ObjectType: EmbeddingObjectNewsThreadVersion, ObjectID: version.ID},
+		)
+	}
+	if err := s.QueueEmbeddingWorkItems(ctx, work); err != nil {
+		return nil, err
 	}
 	sort.Slice(materialized, func(i, j int) bool { return materialized[i].ThreadID < materialized[j].ThreadID })
 	return materialized, nil
@@ -1908,6 +1947,16 @@ func (s *Store) ApplyNewsContextBatch(ctx context.Context, runID, agentRunID, wi
 	}
 	if err := tx.Commit(); err != nil {
 		return result, wrapError(err, "commit news context batch")
+	}
+	work := make([]embeddingWorkItem, 0, len(result.ChangedThreadIDs)+len(result.ChangedVersionIDs))
+	for _, id := range result.ChangedThreadIDs {
+		work = append(work, embeddingWorkItem{ObjectType: EmbeddingObjectNewsThread, ObjectID: id})
+	}
+	for _, id := range result.ChangedVersionIDs {
+		work = append(work, embeddingWorkItem{ObjectType: EmbeddingObjectNewsThreadVersion, ObjectID: id})
+	}
+	if err := s.QueueEmbeddingWorkItems(ctx, work); err != nil {
+		return result, err
 	}
 
 	markChanged := func(threadID, versionID string) error {

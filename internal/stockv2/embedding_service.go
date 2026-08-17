@@ -24,6 +24,7 @@ type embeddingAssetSource struct {
 	ObjectType string
 	ObjectID   string
 	Text       string
+	WorkItem   embeddingWorkItem
 }
 
 const (
@@ -264,13 +265,22 @@ func (s *Service) RunEmbeddingMaintenanceBatch(ctx context.Context, req RequestR
 		text := strings.TrimSpace(source.Text)
 		if text == "" {
 			result.Skipped++
-			s.updateNewsContextEmbeddingStatus(ctx, source, NewsContextIndexFailed, errors.New("embedding source text is empty"))
+			if source.WorkItem.Revision > 0 {
+				_ = s.store.CompleteEmbeddingWork(ctx, source.WorkItem)
+			}
 			continue
 		}
 		if err := s.syncEmbeddingSource(ctx, model, source); err != nil {
 			result.Failed++
 			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: source.ObjectID, Reason: safelog.Text(err.Error(), 240)})
 			continue
+		}
+		if source.WorkItem.Revision > 0 {
+			if err := s.store.CompleteEmbeddingWork(ctx, source.WorkItem); err != nil {
+				result.Failed++
+				result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: source.ObjectID, Reason: safelog.Text(err.Error(), 240)})
+				continue
+			}
 		}
 		result.Succeeded++
 		result.Success++
@@ -826,66 +836,144 @@ func (s *Service) collectEmbeddingWorkSources(ctx context.Context, objectTypes [
 	if limit <= 0 {
 		return nil, nil
 	}
-	var forced []embeddingAssetSource
-	var missing []embeddingAssetSource
-	var stale []embeddingAssetSource
-	var failed []embeddingAssetSource
-	var changed []embeddingAssetSource
-	appendBounded := func(items *[]embeddingAssetSource, source embeddingAssetSource) {
-		if len(*items) < limit {
-			*items = append(*items, source)
-		}
+	if force {
+		return s.collectForcedEmbeddingSources(ctx, objectTypes, limit)
 	}
-	// ponytail: this scans current business rows instead of adding a queue table; upgrade to a
-	// persistent queue only if asset volume or SLA needs strict incremental checkpoints.
-	err := s.forEachEmbeddingSource(ctx, objectTypes, func(source embeddingAssetSource) error {
-		text := strings.TrimSpace(source.Text)
-		if text == "" {
-			return nil
-		}
-		if force {
-			appendBounded(&forced, source)
-			return nil
-		}
-		existing, err := s.store.GetEmbeddingAssetByObject(ctx, source.ObjectType, source.ObjectID, model.ID)
-		if err != nil {
-			if errors.Is(err, ErrEmbeddingAssetNotFound) {
-				appendBounded(&missing, source)
-				return nil
-			}
-			return err
-		}
-		switch existing.Status {
-		case EmbeddingAssetStatusStale:
-			appendBounded(&stale, source)
-		case EmbeddingAssetStatusFailed:
-			appendBounded(&failed, source)
-		case EmbeddingAssetStatusReady:
-			textHash := hashEmbeddingText(text)
-			if existing.TextHash != textHash || (model.EmbeddingDimensions > 0 && existing.EmbeddingDimensions != model.EmbeddingDimensions) {
-				appendBounded(&changed, source)
-			}
-		default:
-			appendBounded(&failed, source)
-		}
-		return nil
-	})
+	// ponytail: the durable work list is the minimal replacement for the former
+	// full source scan. Source mutations enqueue one ID; only explicit force
+	// rebuilds are allowed to walk all historical rows.
+	pending, err := s.store.ListPendingNewsContextEmbeddingWork(ctx, limit)
 	if err != nil {
 		return nil, err
 	}
-	if force {
-		return forced, nil
+	if err := s.store.QueueEmbeddingWorkItems(ctx, pending); err != nil {
+		return nil, err
+	}
+	scanLimit := limit
+	if scanLimit < embeddingMaintenanceScanPageSize {
+		scanLimit = embeddingMaintenanceScanPageSize
 	}
 	out := make([]embeddingAssetSource, 0, limit)
-	for _, group := range [][]embeddingAssetSource{missing, stale, failed, changed} {
-		for _, source := range group {
+	for len(out) < limit {
+		items, err := s.store.ListEmbeddingWorkItems(ctx, objectTypes, scanLimit)
+		if err != nil {
+			return nil, err
+		}
+		if len(items) == 0 {
+			return out, nil
+		}
+		for _, item := range items {
+			source, err := s.loadEmbeddingSource(ctx, item)
+			if err != nil {
+				if embeddingSourceMissing(err) {
+					if completeErr := s.store.CompleteEmbeddingWork(ctx, item); completeErr != nil {
+						return nil, completeErr
+					}
+					continue
+				}
+				return nil, err
+			}
+			text := strings.TrimSpace(source.Text)
+			if text == "" {
+				if err := s.store.CompleteEmbeddingWork(ctx, item); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			existing, err := s.store.GetEmbeddingAssetByObject(ctx, source.ObjectType, source.ObjectID, model.ID)
+			if err == nil && existing.Status == EmbeddingAssetStatusReady &&
+				existing.TextHash == hashEmbeddingText(text) &&
+				(model.EmbeddingDimensions <= 0 || existing.EmbeddingDimensions == model.EmbeddingDimensions) {
+				s.updateNewsContextEmbeddingStatus(ctx, source, NewsContextIndexReady, nil)
+				if err := s.store.CompleteEmbeddingWork(ctx, item); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			if err != nil && !errors.Is(err, ErrEmbeddingAssetNotFound) {
+				return nil, err
+			}
+			source.WorkItem = item
+			out = append(out, source)
 			if len(out) >= limit {
 				return out, nil
 			}
-			out = append(out, source)
+		}
+		// Items selected for actual work stay queued until their provider calls
+		// finish, so another head query would return duplicates.
+		if len(out) > 0 || len(items) < scanLimit {
+			return out, nil
 		}
 	}
 	return out, nil
+}
+
+var errEmbeddingSourceLimitReached = errors.New("embedding source limit reached")
+
+func (s *Service) collectForcedEmbeddingSources(ctx context.Context, objectTypes []string, limit int) ([]embeddingAssetSource, error) {
+	out := make([]embeddingAssetSource, 0, limit)
+	err := s.forEachEmbeddingSource(ctx, objectTypes, func(source embeddingAssetSource) error {
+		if strings.TrimSpace(source.Text) == "" {
+			return nil
+		}
+		out = append(out, source)
+		if len(out) >= limit {
+			return errEmbeddingSourceLimitReached
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errEmbeddingSourceLimitReached) {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Service) loadEmbeddingSource(ctx context.Context, item embeddingWorkItem) (embeddingAssetSource, error) {
+	source := embeddingAssetSource{ObjectType: item.ObjectType, ObjectID: item.ObjectID, WorkItem: item}
+	switch item.ObjectType {
+	case EmbeddingObjectStockProfile:
+		profile, err := s.store.GetStockProfile(ctx, item.ObjectID)
+		if err != nil {
+			return source, err
+		}
+		source.Text = stockProfileEmbeddingText(profile)
+	case EmbeddingObjectNewsEvent:
+		event, err := s.store.GetNewsEvent(ctx, item.ObjectID)
+		if err != nil {
+			return source, err
+		}
+		source.Text = newsEventEmbeddingText(event)
+	case EmbeddingObjectNewsThread:
+		thread, err := s.store.GetNewsThread(ctx, item.ObjectID)
+		if err != nil {
+			return source, err
+		}
+		if newsThreadEmbeddingIndexable(thread) {
+			source.Text = NewsThreadEmbeddingText(thread)
+		}
+	case EmbeddingObjectNewsThreadVersion:
+		version, err := s.store.GetNewsThreadVersion(ctx, item.ObjectID)
+		if err != nil {
+			return source, err
+		}
+		if newsThreadVersionEmbeddingIndexable(version) {
+			source.Text = NewsThreadVersionEmbeddingText(version)
+		}
+	case EmbeddingObjectOpportunity:
+		opportunity, err := s.store.GetOpportunity(ctx, item.ObjectID)
+		if err != nil {
+			return source, err
+		}
+		source.Text = opportunityEmbeddingText(opportunity)
+	}
+	return source, nil
+}
+
+func embeddingSourceMissing(err error) bool {
+	return errors.Is(err, ErrStockProfileNotFound) ||
+		errors.Is(err, ErrNewsEventNotFound) ||
+		errors.Is(err, ErrNewsThreadNotFound) ||
+		errors.Is(err, ErrOpportunityNotFound)
 }
 
 func sumMissingEmbeddingCounts(counts map[string]int, objectTypes []string) int {
@@ -980,7 +1068,7 @@ func (s *Service) listEmbeddingSourcesPage(ctx context.Context, objectType strin
 		}
 		out := make([]embeddingAssetSource, 0, len(items))
 		for _, item := range items {
-			out = append(out, embeddingAssetSource{ObjectType: objectType, ObjectID: item.ID, Text: item.Title + "\n" + item.UserThesis})
+			out = append(out, embeddingAssetSource{ObjectType: objectType, ObjectID: item.ID, Text: opportunityEmbeddingText(item)})
 		}
 		return out, nil
 	default:
@@ -1017,6 +1105,10 @@ func stockProfileEmbeddingText(item StockProfile) string {
 
 func newsEventEmbeddingText(item NewsEvent) string {
 	return strings.Join(nonEmptyStrings([]string{item.Source, item.Title, item.Summary, item.Content, item.QualityStatus}), "\n")
+}
+
+func opportunityEmbeddingText(item Opportunity) string {
+	return strings.Join(nonEmptyStrings([]string{item.Title, item.UserThesis}), "\n")
 }
 
 func NewsThreadEmbeddingText(item NewsThread) string {

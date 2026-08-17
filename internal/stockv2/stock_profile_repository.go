@@ -22,6 +22,12 @@ func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (S
 	if strings.TrimSpace(profile.Name) == "" {
 		profile.Name = profile.Symbol
 	}
+	semanticChanged := true
+	if existing, err := s.GetStockProfile(ctx, profile.Symbol); err == nil {
+		semanticChanged = hashEmbeddingText(stockProfileEmbeddingText(existing)) != hashEmbeddingText(stockProfileEmbeddingText(profile))
+	} else if !errors.Is(err, ErrStockProfileNotFound) {
+		return StockProfile{}, err
+	}
 
 	aliasesJSON := marshalProfileStrings(profile.Aliases)
 	sectorsJSON := marshalProfileStrings(profile.Sectors)
@@ -95,6 +101,11 @@ func (s *Store) UpsertStockProfile(ctx context.Context, profile StockProfile) (S
 	})
 	if err != nil {
 		return StockProfile{}, wrapError(err, "upsert stock profile")
+	}
+	if semanticChanged {
+		if err := s.QueueEmbeddingWork(ctx, EmbeddingObjectStockProfile, profile.Symbol); err != nil {
+			return StockProfile{}, err
+		}
 	}
 	return profile, nil
 }

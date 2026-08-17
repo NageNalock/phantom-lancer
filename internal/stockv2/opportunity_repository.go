@@ -65,7 +65,15 @@ func (s *Store) CreateOpportunity(ctx context.Context, item Opportunity) (Opport
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, item.ID, item.Title, item.UserThesis, item.MarketScope, item.InstrumentScope, item.Status,
 		nullableString(item.CreatedBy), item.CreatedAt, item.UpdatedAt)
-	return item, wrapError(err, "create opportunity")
+	if err != nil {
+		return item, wrapError(err, "create opportunity")
+	}
+	if strings.TrimSpace(opportunityEmbeddingText(item)) != "" {
+		if err := s.EnsureEmbeddingWork(ctx, EmbeddingObjectOpportunity, item.ID); err != nil {
+			return item, err
+		}
+	}
+	return item, nil
 }
 
 func (s *Store) GetOpportunity(ctx context.Context, id string) (Opportunity, error) {
@@ -94,6 +102,11 @@ func (s *Store) UpdateOpportunity(ctx context.Context, item Opportunity) (Opport
 	if rows, _ := result.RowsAffected(); rows == 0 {
 		return Opportunity{}, ErrOpportunityNotFound
 	}
+	if strings.TrimSpace(opportunityEmbeddingText(item)) != "" {
+		if err := s.QueueEmbeddingWork(ctx, EmbeddingObjectOpportunity, item.ID); err != nil {
+			return Opportunity{}, err
+		}
+	}
 	return item, nil
 }
 
@@ -104,6 +117,7 @@ func (s *Store) DeleteOpportunity(ctx context.Context, id string) error {
 	}
 	defer tx.Rollback()
 	for _, stmt := range []string{
+		`DELETE FROM stockv2_embedding_work_items WHERE object_type = 'opportunity' AND object_id = ?`,
 		`DELETE FROM stockv2_opportunity_results WHERE run_id IN (SELECT id FROM stockv2_opportunity_discovery_runs WHERE opportunity_id = ?)`,
 		`DELETE FROM stockv2_opportunity_evidence WHERE run_id IN (SELECT id FROM stockv2_opportunity_discovery_runs WHERE opportunity_id = ?)`,
 		`DELETE FROM stockv2_opportunity_candidates WHERE opportunity_id = ?`,

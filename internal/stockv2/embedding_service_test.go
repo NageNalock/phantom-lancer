@@ -596,7 +596,7 @@ func TestEmbeddingRefreshFailurePreservesLastReadyAsset(t *testing.T) {
 	}
 }
 
-func TestEmbeddingMaintenanceScansPastReadyUnchangedAssets(t *testing.T) {
+func TestEmbeddingMaintenanceProcessesQueuedMissingAssetWithoutFullScan(t *testing.T) {
 	svc, cleanup := newEmbeddingTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -621,7 +621,6 @@ func TestEmbeddingMaintenanceScansPastReadyUnchangedAssets(t *testing.T) {
 	if len(profiles) < 201 {
 		t.Fatalf("profiles=%d, want at least 201", len(profiles))
 	}
-	missingSymbol := profiles[200].Symbol
 	for i := 0; i < 200; i++ {
 		profile := profiles[i]
 		if _, err := svc.store.UpsertEmbeddingAsset(ctx, EmbeddingAsset{
@@ -649,8 +648,51 @@ func TestEmbeddingMaintenanceScansPastReadyUnchangedAssets(t *testing.T) {
 	if result.Total != 1 || result.Success != 1 || result.Skipped != 0 {
 		t.Fatalf("result=%#v, want one missing asset processed after ready unchanged head", result)
 	}
-	if _, err := svc.store.GetEmbeddingAssetByObject(ctx, EmbeddingObjectStockProfile, missingSymbol, model.ID); err != nil {
-		t.Fatalf("missing profile %s was not embedded: %v", missingSymbol, err)
+	ready, err := svc.store.CountEmbeddingAssets(ctx, EmbeddingAssetListFilter{
+		ObjectType: EmbeddingObjectStockProfile,
+		ModelID:    model.ID,
+		Status:     EmbeddingAssetStatusReady,
+	})
+	if err != nil {
+		t.Fatalf("count ready profile assets: %v", err)
+	}
+	if ready != 201 {
+		t.Fatalf("ready profile assets=%d, want 201 after one queued item", ready)
+	}
+}
+
+func TestEmbeddingWorkRevisionPreservesConcurrentSourceChange(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if err := svc.store.QueueEmbeddingWork(ctx, EmbeddingObjectStockProfile, "300750"); err != nil {
+		t.Fatalf("queue first revision: %v", err)
+	}
+	items, err := svc.store.ListEmbeddingWorkItems(ctx, []string{EmbeddingObjectStockProfile}, 1)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("list first revision: items=%+v err=%v", items, err)
+	}
+	first := items[0]
+	if err := svc.store.EnsureEmbeddingWork(ctx, EmbeddingObjectStockProfile, "300750"); err != nil {
+		t.Fatalf("ensure existing revision: %v", err)
+	}
+	items, err = svc.store.ListEmbeddingWorkItems(ctx, []string{EmbeddingObjectStockProfile}, 1)
+	if err != nil || len(items) != 1 || items[0].Revision != first.Revision {
+		t.Fatalf("ensure changed revision: items=%+v err=%v", items, err)
+	}
+	if err := svc.store.QueueEmbeddingWork(ctx, EmbeddingObjectStockProfile, "300750"); err != nil {
+		t.Fatalf("queue concurrent revision: %v", err)
+	}
+	if err := svc.store.CompleteEmbeddingWork(ctx, first); err != nil {
+		t.Fatalf("complete stale revision: %v", err)
+	}
+	items, err = svc.store.ListEmbeddingWorkItems(ctx, []string{EmbeddingObjectStockProfile}, 1)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("new revision was lost: items=%+v err=%v", items, err)
+	}
+	if items[0].Revision <= first.Revision {
+		t.Fatalf("revision=%d, want newer than %d", items[0].Revision, first.Revision)
 	}
 }
 
