@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -233,8 +234,8 @@ func TestUpdateStockProfileSkipsAIWhenInputUnchanged(t *testing.T) {
 	if !first.Task.BaseInputChanged || first.Task.AIDecision != StockProfileAIDecisionCalled || first.AgentRun == nil {
 		t.Fatalf("first result = %+v, want changed and ai called", first)
 	}
-	if first.Task.Status != StockProfileUpdateStatusRunning || first.Task.BaseProfileStatus != StockProfileUpdateBaseStatusReady || first.Task.AIProfileStatus != StockProfileUpdateAIStatusRunning {
-		t.Fatalf("first task status = %+v, want base ready and ai running", first.Task)
+	if first.Task.Status != StockProfileUpdateStatusQueued || first.Task.BaseProfileStatus != StockProfileUpdateBaseStatusReady || first.Task.AIProfileStatus != StockProfileUpdateAIStatusQueued {
+		t.Fatalf("first task status = %+v, want base ready and ai queued", first.Task)
 	}
 	_ = waitAgentRunTerminal(t, svc, first.AgentRun.ID)
 	firstTasks, err := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Symbol: "300750", Limit: 1})
@@ -638,6 +639,58 @@ func TestAutomaticDeepStockProfileUpdateProcessesSymbolBudget(t *testing.T) {
 	}
 	for _, run := range runs {
 		_ = waitAgentRunTerminal(t, svc, run.ID)
+	}
+}
+
+func TestAutomaticDeepStockProfileUpdateStopsAfterSystemicAgentFailure(t *testing.T) {
+	ctx := context.Background()
+	businessLine := "动力电池系统"
+	svc, cleanup := newStockProfileTestServiceWithClient(t, stockProfileF10TestClient(&businessLine))
+	defer cleanup()
+	seedProfileInstruments(t, svc, ctx, "300750", "300751", "300752")
+	configureStockProfileAgent(t, svc, ctx)
+	svc.agentExecutor = fakeOperationReviewExecutor{
+		pool:    svc.agentTaskPool,
+		execErr: context.DeadlineExceeded,
+	}
+
+	result, err := svc.runAutomaticDeepStockProfileUpdate(ctx, "test", stockProfileDeepUpdateOptions{
+		SymbolBudget: 3,
+		RateLimit:    0,
+		Now:          time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC),
+		RequestedBy:  "test",
+	})
+	if !errors.Is(err, errStockProfileSystemicFailure) {
+		t.Fatalf("run error = %v, want systemic failure", err)
+	}
+	if result.ProcessedCount != 1 || result.FailedCount != 1 {
+		t.Fatalf("result = %+v, want batch stopped after first failure", result)
+	}
+	tasks, listErr := svc.ListStockProfileUpdateTasks(ctx, StockProfileUpdateTaskListFilter{Limit: 10})
+	if listErr != nil {
+		t.Fatalf("list profile tasks: %v", listErr)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("profile tasks = %d, want one attempted task", len(tasks))
+	}
+}
+
+func TestStockProfileBatchShouldStop(t *testing.T) {
+	for _, err := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		errors.New("provider returned 429 rate limit"),
+		errors.New("API request failed: connection reset"),
+	} {
+		if !stockProfileBatchShouldStop(err) {
+			t.Fatalf("error %q should stop batch", err)
+		}
+	}
+	if stockProfileBatchShouldStop(fmt.Errorf("%w: missing field", ErrInvalidStockProfileEnhancement)) {
+		t.Fatal("invalid model result should fail one symbol without stopping the batch")
+	}
+	if stockProfileBatchShouldStop(errors.New("invalid model result")) {
+		t.Fatal("ordinary per-symbol failure should not stop the batch")
 	}
 }
 

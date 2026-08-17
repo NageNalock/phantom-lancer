@@ -658,7 +658,7 @@ function StockProfileSection({
   const runTone = agentRun ? stockV2AgentRunStatusTone(agentRun.status) as Tone : "neutral";
   const taskTone =
     updateTask?.status === "failed" ? "danger" :
-    updateTask?.status === "partial" || updateTask?.status === "running" ? "warn" :
+    updateTask?.status === "partial" || updateTask?.status === "queued" || updateTask?.status === "running" ? "warn" :
     updateTask?.status === "completed" ? "good" :
     "neutral";
   return (
@@ -824,6 +824,7 @@ function stockProfileUpdateToast(task: StockV2StockProfileUpdateTask): string {
 }
 
 function stockProfileUpdateStatusLabel(status?: string): string {
+  if (status === "queued") return "排队中";
   if (status === "running") return "运行中";
   if (status === "completed") return "已完成";
   if (status === "partial") return "部分完成";

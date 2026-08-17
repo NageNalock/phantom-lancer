@@ -60,6 +60,15 @@ func TestNewServiceMarksInterruptedStockProfileUpdateTaskPartial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create running profile task: %v", err)
 	}
+	queued, err := store.CreateStockProfileUpdateTask(ctx, StockProfileUpdateTask{
+		ID: "profile-queued", Symbol: "300751", TriggerSource: StockProfileUpdateTriggerAuto,
+		Status: StockProfileUpdateStatusQueued, BaseProfileStatus: StockProfileUpdateBaseStatusReady,
+		AIDecision: StockProfileAIDecisionCalled, AgentRunID: "agent-queued",
+		AIProfileStatus: StockProfileUpdateAIStatusQueued, StartedAt: startedAt, CreatedAt: startedAt,
+	})
+	if err != nil {
+		t.Fatalf("create queued profile task: %v", err)
+	}
 	completedAt := startedAt.Add(time.Minute)
 	completed, err := store.CreateStockProfileUpdateTask(ctx, StockProfileUpdateTask{
 		ID: "profile-completed", Symbol: "000001", TriggerSource: StockProfileUpdateTriggerAuto,
@@ -89,6 +98,13 @@ func TestNewServiceMarksInterruptedStockProfileUpdateTaskPartial(t *testing.T) {
 		!strings.Contains(recovered.ErrorMessage, "service restart") ||
 		!strings.Contains(recovered.AIProfileError, "service restart") {
 		t.Fatalf("recovered profile task = %#v", recovered)
+	}
+	recoveredQueued := byID[queued.ID]
+	if recoveredQueued.Status != StockProfileUpdateStatusPartial ||
+		recoveredQueued.AIProfileStatus != StockProfileAIStatusFailed ||
+		recoveredQueued.FinishedAt.IsZero() ||
+		!strings.Contains(recoveredQueued.ErrorMessage, "service restart") {
+		t.Fatalf("recovered queued profile task = %#v", recoveredQueued)
 	}
 	unchanged := byID[completed.ID]
 	if unchanged.Status != StockProfileUpdateStatusCompleted || !unchanged.FinishedAt.Equal(completedAt) {

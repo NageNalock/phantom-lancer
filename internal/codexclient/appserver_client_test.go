@@ -1,9 +1,25 @@
 package codexclient
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 )
+
+func TestStartAppServerHonorsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	client, err := StartAppServer(ctx, "/bin/sh", "")
+	if client != nil {
+		_ = client.Close()
+		t.Fatal("canceled request unexpectedly started an app-server process")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("start error = %v, want context canceled", err)
+	}
+}
 
 // TestDispatchRoutesMessageKinds verifies the client correctly distinguishes
 // responses, server-initiated requests and notifications per the upstream

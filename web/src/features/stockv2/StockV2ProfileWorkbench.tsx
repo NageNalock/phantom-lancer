@@ -102,7 +102,7 @@ export function StockV2ProfileSettings({
           onChange={(checked) => update("baseProfileAutoMaintainEnabled", checked)}
         />
 
-        <Field label="更新周期 (秒)" help="建议 86400 秒（每天一次）；关闭时不会后台运行。">
+        <Field label="更新周期 (秒)" help="建议 86400 秒（每天一次）；关闭时不会后台运行。系统性模型故障会在 15 分钟后重试。">
           <input
             min={3600}
             step={3600}
@@ -113,7 +113,7 @@ export function StockV2ProfileSettings({
         </Field>
 
         <div className="grid grid-cols-2 gap-3">
-          <Field label="每轮标的数" help="每次自动维护最多处理多少只标的。">
+          <Field label="每轮标的数" help="每次自动维护最多串行处理多少只标的；上一只完成后才会处理下一只。">
             <input
               min={1}
               max={50}
@@ -123,7 +123,7 @@ export function StockV2ProfileSettings({
               onChange={(e) => update("baseProfileDeepUpdateBatchSize", Number(e.target.value))}
             />
           </Field>
-          <Field label="单只间隔 (ms)" help="候选之间的基础等待时间，后台会再做稳定打散。">
+          <Field label="单只间隔 (ms)" help="上一只完成后到下一只开始前的基础等待时间，后台会再做稳定打散。">
             <input
               min={100}
               max={60000}
@@ -330,6 +330,7 @@ function triggerSourceLabel(value: string): string {
 
 function taskStatusLabel(status: string): string {
   const labels: Record<string, string> = {
+    queued: "排队中",
     running: "运行中",
     completed: "完成",
     partial: "部分完成",
@@ -339,7 +340,7 @@ function taskStatusLabel(status: string): string {
 }
 
 function taskStatusTone(status: string): "neutral" | "good" | "warn" | "danger" {
-  if (status === "running") return "warn";
+  if (status === "queued" || status === "running") return "warn";
   if (status === "completed") return "good";
   if (status === "partial") return "warn";
   if (status === "failed") return "danger";
@@ -371,6 +372,7 @@ function baseProfileStatusLabel(status?: string): string {
 }
 
 function aiProfileStatusLabel(status?: string): string {
+  if (status === "queued") return "AI 排队中";
   if (status === "ready") return "AI 生成成功";
   if (status === "running") return "AI 生成中";
   if (status === "failed") return "AI 生成失败";
@@ -381,7 +383,7 @@ function aiProfileStatusLabel(status?: string): string {
 
 function profileResultTone(status?: string): "neutral" | "good" | "warn" | "danger" {
   if (status === "ready") return "good";
-  if (status === "running" || status === "not_configured" || status === "missing") return "warn";
+  if (status === "queued" || status === "running" || status === "not_configured" || status === "missing") return "warn";
   if (status === "failed") return "danger";
   return "neutral";
 }

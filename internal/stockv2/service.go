@@ -72,6 +72,10 @@ type Service struct {
 	agentDailyBarsMu          sync.Mutex
 	agentDailyBarsLastRequest time.Time
 	agentDailyBarsFailures    map[string]agentDailyBarsFailure
+	// ponytail: stock-profile enrichment ultimately shares the single-flight
+	// local Gateway. Serializing here prevents request and app-server fan-out
+	// without adding another queue framework or owner setting.
+	stockProfileAgentMu sync.Mutex
 
 	universeSource  *UniverseDataSource
 	dailyBarsSource *DailyBarsSource

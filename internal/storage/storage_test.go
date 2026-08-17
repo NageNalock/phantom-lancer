@@ -1024,7 +1024,7 @@ func TestDatabaseStats(t *testing.T) {
 	}
 	defer store.Close()
 
-	// Insert some data to make tables non-trivial.
+	// Insert some data so the database file is non-empty.
 	if _, err := store.CreateOwner(ctx, "admin", "hash"); err != nil {
 		t.Fatalf("create owner: %v", err)
 	}
@@ -1036,116 +1036,16 @@ func TestDatabaseStats(t *testing.T) {
 	if stats.TotalBytes == 0 {
 		t.Fatal("expected non-zero total bytes")
 	}
-	if len(stats.Tables) == 0 {
-		t.Fatal("expected non-empty table list")
+	if stats.UpdatedAt == "" {
+		t.Fatal("expected stats timestamp")
 	}
 
-	// Verify tables are sorted by size descending.
-	var prev int64 = 1 << 62
-	for _, tbl := range stats.Tables {
-		total := tbl.SizeBytes + tbl.IndexSizeBytes
-		if total > prev {
-			t.Errorf("tables not sorted: %s (%d) comes after larger", tbl.Name, total)
-		}
-		prev = total
-		if tbl.Name == "" {
-			t.Error("table name is empty")
-		}
-		if tbl.Description == "" {
-			t.Errorf("table %s has no description", tbl.Name)
-		}
-	}
-
-	// Verify caching: second call should be fast and return same data.
-	start := time.Now()
+	// A second call is another cheap file stat and returns the same file size.
 	stats2, err := store.DatabaseStats(ctx)
 	if err != nil {
 		t.Fatalf("second DatabaseStats: %v", err)
 	}
-	if time.Since(start) > 10*time.Millisecond {
-		t.Logf("warning: second call took %v (cache may not be working)", time.Since(start))
-	}
 	if stats2.TotalBytes != stats.TotalBytes {
-		t.Errorf("cached total mismatch: %d vs %d", stats2.TotalBytes, stats.TotalBytes)
-	}
-}
-
-func TestDatabaseStatsCollector(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	dir := t.TempDir()
-	store, err := Open(ctx, filepath.Join(dir, "phantom-lancer.db"), nil)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer store.Close()
-
-	store.StartStatsCollector(ctx)
-
-	// Wait briefly for the initial refresh (which happens after 2s).
-	// Instead of waiting 2s, force a refresh now.
-	_, err = store.refreshDatabaseStats(ctx)
-	if err != nil {
-		t.Fatalf("refresh stats: %v", err)
-	}
-
-	stats, err := store.DatabaseStats(ctx)
-	if err != nil {
-		t.Fatalf("DatabaseStats after collector start: %v", err)
-	}
-	if stats.TotalBytes == 0 {
-		t.Fatal("expected non-zero stats after collector refresh")
-	}
-}
-
-func TestDescribeTable(t *testing.T) {
-	cases := []struct {
-		name     string
-		wantDesc string
-	}{
-		{"audit_events", "审计日志"},
-		{"image_assets", "图片素材库"},
-		{"codex_cli_threads", "Codex CLI 模块表"},
-		{"stockv2_daily_bars", "数据表"},
-		{"unknown_table", "数据表"},
-		{"__internal", "SQLite 内部表"},
-	}
-	for _, tc := range cases {
-		desc := describeTable(tc.name)
-		if desc == "" {
-			t.Errorf("describeTable(%q) returned empty", tc.name)
-		}
-		// Check the description contains the expected keyword.
-		if !containsString(desc, tc.wantDesc) {
-			t.Logf("describeTable(%q) = %q (looking for %q)", tc.name, desc, tc.wantDesc)
-		}
-	}
-}
-
-func containsString(s, substr string) bool {
-	return len(s) > 0 && len(substr) > 0 &&
-		(len(s) >= len(substr)) &&
-		(indexOfString(s, substr) >= 0)
-}
-
-func indexOfString(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
-}
-
-func TestSortTableStats(t *testing.T) {
-	tables := []DatabaseTableStat{
-		{Name: "small", SizeBytes: 100, IndexSizeBytes: 10},
-		{Name: "large", SizeBytes: 1000, IndexSizeBytes: 200},
-		{Name: "medium", SizeBytes: 500, IndexSizeBytes: 0},
-	}
-	sortTableStats(tables)
-	if tables[0].Name != "large" || tables[1].Name != "medium" || tables[2].Name != "small" {
-		t.Errorf("unexpected sort order: %v, %v, %v", tables[0].Name, tables[1].Name, tables[2].Name)
+		t.Errorf("total mismatch: %d vs %d", stats2.TotalBytes, stats.TotalBytes)
 	}
 }

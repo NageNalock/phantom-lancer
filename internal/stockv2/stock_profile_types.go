@@ -21,6 +21,7 @@ const (
 	StockProfileUpdateTriggerManual = "manual"
 	StockProfileUpdateTriggerAuto   = "auto"
 
+	StockProfileUpdateStatusQueued    = "queued"
 	StockProfileUpdateStatusRunning   = "running"
 	StockProfileUpdateStatusCompleted = "completed"
 	StockProfileUpdateStatusPartial   = "partial"
@@ -29,6 +30,7 @@ const (
 	StockProfileUpdateBaseStatusReady  = "ready"
 	StockProfileUpdateBaseStatusFailed = "failed"
 
+	StockProfileUpdateAIStatusQueued  = "queued"
 	StockProfileUpdateAIStatusRunning = "running"
 
 	StockProfileAIDecisionCalled               = "called"

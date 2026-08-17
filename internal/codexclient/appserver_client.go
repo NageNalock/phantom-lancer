@@ -91,7 +91,7 @@ type AppServerClient struct {
 // StartAppServer launches `codex app-server --listen stdio://` with an
 // allowlisted environment and returns a connected client.
 func StartAppServer(ctx context.Context, binary, codexHome string) (*AppServerClient, error) {
-	cmd := exec.Command(binary, "app-server", "--listen", "stdio://")
+	cmd := exec.CommandContext(ctx, binary, "app-server", "--listen", "stdio://")
 	cmd.Env = BuildChildEnv(codexHome)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

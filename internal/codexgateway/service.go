@@ -85,6 +85,12 @@ func (s *Service) RunLocalChat(ctx context.Context, req ChatCompletionRequest, d
 	case <-ctx.Done():
 		return LocalChatResult{}, ctx.Err()
 	}
+	// A canceled waiter and a newly released gate can both be selectable. Check
+	// again before starting a child so timed-out requests cannot create a train
+	// of short-lived app-server processes after the active request finishes.
+	if err := ctx.Err(); err != nil {
+		return LocalChatResult{}, err
+	}
 	if err := os.MkdirAll(s.localCodexDir, 0o700); err != nil {
 		return LocalChatResult{}, fmt.Errorf("prepare local Codex workdir: %w", err)
 	}

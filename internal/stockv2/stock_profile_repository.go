@@ -202,7 +202,8 @@ func (s *Store) CreateStockProfileUpdateTask(ctx context.Context, task StockProf
 	if task.StartedAt.IsZero() {
 		task.StartedAt = now
 	}
-	if task.FinishedAt.IsZero() && task.Status != "" && task.Status != StockProfileUpdateStatusRunning {
+	if task.FinishedAt.IsZero() && task.Status != "" &&
+		task.Status != StockProfileUpdateStatusQueued && task.Status != StockProfileUpdateStatusRunning {
 		task.FinishedAt = now
 	}
 	if task.CreatedAt.IsZero() {
@@ -246,6 +247,21 @@ func (s *Store) CreateStockProfileUpdateTask(ctx context.Context, task StockProf
 	return task, nil
 }
 
+func (s *Store) MarkStockProfileUpdateTaskRunningByAgentRunID(ctx context.Context, agentRunID string) error {
+	agentRunID = strings.TrimSpace(agentRunID)
+	if agentRunID == "" {
+		return nil
+	}
+	now := time.Now()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_stock_profile_update_tasks
+		SET status = ?, ai_profile_status = ?, finished_at = NULL, updated_at = ?
+		WHERE agent_run_id = ? AND status = ?
+	`, StockProfileUpdateStatusRunning, StockProfileUpdateAIStatusRunning, now,
+		agentRunID, StockProfileUpdateStatusQueued)
+	return wrapError(err, "mark stock profile update task running")
+}
+
 func (s *Store) ListStockProfileUpdateTasks(ctx context.Context, filter StockProfileUpdateTaskListFilter) ([]StockProfileUpdateTask, error) {
 	where, args := stockProfileUpdateTaskWhere(filter)
 	args = append(args, normalizedPageLimit(filter.Limit, 500), normalizedPageOffset(filter.Offset))
@@ -280,9 +296,10 @@ func (s *Store) FailRunningStockProfileUpdateTasks(ctx context.Context, reason s
 		UPDATE stockv2_stock_profile_update_tasks
 		SET status = ?, ai_profile_status = ?, ai_profile_error = ?,
 			error_message = ?, finished_at = ?, updated_at = ?
-		WHERE status = ?
+		WHERE status IN (?, ?)
 	`, StockProfileUpdateStatusPartial, StockProfileAIStatusFailed,
-		nullableString(reason), nullableString(reason), now, now, StockProfileUpdateStatusRunning)
+		nullableString(reason), nullableString(reason), now, now,
+		StockProfileUpdateStatusQueued, StockProfileUpdateStatusRunning)
 	if err != nil {
 		return 0, wrapError(err, "fail running stock profile update tasks")
 	}

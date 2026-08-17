@@ -15,6 +15,10 @@ import (
 )
 
 func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStockProfile) (StockProfileUpdateResult, error) {
+	return s.updateStockProfile(ctx, req, false)
+}
+
+func (s *Service) updateStockProfile(ctx context.Context, req RequestUpdateStockProfile, waitForAI bool) (StockProfileUpdateResult, error) {
 	normalizedSymbol, _ := normalizeQuoteSymbolInput(req.Symbol)
 	if normalizedSymbol == "" {
 		normalizedSymbol = strings.TrimSpace(req.Symbol)
@@ -101,10 +105,10 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 				strictErr = runErr
 			}
 		} else {
-			task.Status = StockProfileUpdateStatusRunning
+			task.Status = StockProfileUpdateStatusQueued
 			task.AIDecision = StockProfileAIDecisionCalled
 			task.AgentRunID = run.ID
-			task.AIProfileStatus = StockProfileUpdateAIStatusRunning
+			task.AIProfileStatus = StockProfileUpdateAIStatusQueued
 			agentRun = &run
 			agentLedger = ledger
 			agentRunModelName = modelName
@@ -114,7 +118,7 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 		task.AIProfileStatus = normalizeStockProfileAIStatus(profile.AIProfileStatus)
 	}
 
-	if task.Status != StockProfileUpdateStatusRunning {
+	if task.Status != StockProfileUpdateStatusQueued && task.Status != StockProfileUpdateStatusRunning {
 		task.FinishedAt = time.Now()
 	}
 	createdTask, createErr := s.store.CreateStockProfileUpdateTask(ctx, task)
@@ -132,6 +136,11 @@ func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStock
 		return StockProfileUpdateResult{Profile: profile, Task: createdTask}, strictErr
 	}
 	if agentRun != nil {
+		if waitForAI {
+			finalRun, _, runErr := s.runStockProfileAgent(ctx, *agentRun, agentLedger, baseProfile, agentRunModelName)
+			result := StockProfileUpdateResult{Profile: profile, Task: createdTask, AgentRun: &finalRun}
+			return result, runErr
+		}
 		go s.startStockProfileAgentRunAsync(context.Background(), *agentRun, agentLedger, baseProfile, agentRunModelName)
 	}
 	return StockProfileUpdateResult{Profile: profile, Task: createdTask, AgentRun: agentRun}, nil
@@ -214,7 +223,12 @@ type stockProfileDeepUpdateOptions struct {
 	RequestedBy  string
 }
 
-var errStockProfileMaintenanceDeferred = errors.New("stock profile maintenance deferred during news context backfill")
+var (
+	errStockProfileMaintenanceDeferred = errors.New("stock profile maintenance deferred during news context backfill")
+	errStockProfileSystemicFailure     = errors.New("stock profile model service unavailable")
+)
+
+const stockProfileSystemicRetryDelay = 15 * time.Minute
 
 func (s *Service) runAutomaticDeepStockProfileUpdate(ctx context.Context, trigger string, opts stockProfileDeepUpdateOptions) (StockProfileDeepUpdateResult, error) {
 	now := opts.Now
@@ -278,16 +292,20 @@ func (s *Service) runAutomaticDeepStockProfileUpdate(ctx context.Context, trigge
 				return result, errStockProfileMaintenanceDeferred
 			}
 		}
-		update, err := s.UpdateStockProfile(ctx, RequestUpdateStockProfile{
+		update, err := s.updateStockProfile(ctx, RequestUpdateStockProfile{
 			Symbol:        candidate.Instrument.Symbol,
 			TriggerSource: StockProfileUpdateTriggerAuto,
 			TriggerReason: "auto_deep_queue:" + strings.TrimSpace(trigger),
 			RequestedBy:   requestedBy,
-		})
+		}, true)
 		result.ProcessedCount++
 		if err != nil {
 			result.FailedCount++
 			result.FailedItems = append(result.FailedItems, UpdateFailure{Symbol: candidate.Instrument.Symbol, Reason: stockProfileSnippet(err.Error(), 240)})
+			if stockProfileBatchShouldStop(err) {
+				result.UpdatedAt = time.Now()
+				return result, fmt.Errorf("%w: %v", errStockProfileSystemicFailure, err)
+			}
 			continue
 		}
 		result.SuccessCount++
@@ -313,6 +331,27 @@ func stockProfileAIRequiresRefresh(status string) bool {
 	default:
 		return false
 	}
+}
+
+func stockProfileBatchShouldStop(err error) bool {
+	if err == nil || errors.Is(err, ErrInvalidStockProfileEnhancement) {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"429", "rate limit", "usage limit", "quota", "insufficient",
+		"api request failed", "provider", "gateway", "codex", "local_codex_busy",
+		"timed out", "deadline exceeded", "connection refused", "connection reset",
+		"network is unreachable", "no such host",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) runBaseProfileMaintenanceScheduler(ctx context.Context) {
@@ -381,7 +420,13 @@ func (s *Service) maybeRunBaseProfileMaintenance(ctx context.Context, trigger st
 		return
 	}
 	settings.BaseProfileLastMaintainAt = now
-	settings.BaseProfileNextMaintainAt = now.Add(interval)
+	nextInterval := interval
+	if errors.Is(deepErr, errStockProfileSystemicFailure) && nextInterval > stockProfileSystemicRetryDelay {
+		// ponytail: one fixed retry delay is enough for this single-owner worker;
+		// persistent retry state would duplicate the existing maintenance cursor.
+		nextInterval = stockProfileSystemicRetryDelay
+	}
+	settings.BaseProfileNextMaintainAt = now.Add(nextInterval)
 	if runErr != nil {
 		settings.BaseProfileLastMaintainResult = fmt.Sprintf("failed trigger=%s error=%s", trigger, safelog.Text(runErr.Error(), 180))
 	} else if deepErr != nil {
@@ -504,9 +549,29 @@ func (s *Service) startStockProfileAgentRunAsync(ctx context.Context, run AgentR
 			s.finalizeAgentRun(ctx, run.ID, nil, fmt.Errorf("panic: %v", r))
 		}
 	}()
-	if _, _, err := s.executeStockProfileAgentRun(ctx, run, ledger, profile, modelName); err != nil && s.log != nil {
+	if _, _, err := s.runStockProfileAgent(ctx, run, ledger, profile, modelName); err != nil && s.log != nil {
 		s.log.Warn("stock profile agent run finished with error", "run_id", run.ID, "ledger_id", ledger.ID, "symbol", profile.Symbol, "model", modelName, "error", safelog.Text(err.Error(), 300))
 	}
+}
+
+func (s *Service) runStockProfileAgent(
+	ctx context.Context,
+	run AgentRun,
+	ledger AgentDecisionLedger,
+	profile StockProfile,
+	modelName string,
+) (AgentRun, AgentDecisionLedger, error) {
+	s.stockProfileAgentMu.Lock()
+	defer s.stockProfileAgentMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		s.finalizeAgentRun(ctx, run.ID, nil, err)
+		return run, ledger, err
+	}
+	if err := s.store.MarkStockProfileUpdateTaskRunningByAgentRunID(ctx, run.ID); err != nil {
+		s.finalizeAgentRun(ctx, run.ID, nil, err)
+		return run, ledger, err
+	}
+	return s.executeStockProfileAgentRun(ctx, run, ledger, profile, modelName)
 }
 
 func (s *Service) executeStockProfileAgentRun(

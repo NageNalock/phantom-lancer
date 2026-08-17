@@ -1,10 +1,25 @@
 package codexgateway
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
+
+func TestRunLocalChatDoesNotStartAppServerForCanceledRequest(t *testing.T) {
+	svc := NewService(nil, nil).WithLocalCodex(t.TempDir(), "binary-that-must-not-run", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for i := 0; i < 20; i++ {
+		_, err := svc.RunLocalChat(ctx, ChatCompletionRequest{}, "")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("run %d error = %v, want context canceled before process start", i, err)
+		}
+	}
+}
 
 func TestBuildLocalCodexIsolationConfig(t *testing.T) {
 	configRaw := json.RawMessage(`{"config":{"mcp_servers":{"docs":{},"private":{}},"sandbox_mode":null,"sandbox_workspace_write":null}}`)
