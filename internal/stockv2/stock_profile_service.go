@@ -208,6 +208,38 @@ func (s *Service) RebuildStockProfiles(ctx context.Context) (RebuildStockProfile
 	return result, nil
 }
 
+func (s *Service) repairMissingStockProfiles(ctx context.Context) (RebuildStockProfilesResult, error) {
+	total, err := s.store.CountInstrumentsFiltered(ctx, "", "", "basic_missing")
+	if err != nil {
+		return RebuildStockProfilesResult{}, err
+	}
+	result := RebuildStockProfilesResult{Total: total, UpdatedAt: time.Now()}
+	if total == 0 {
+		return result, nil
+	}
+	// ponytail: normal universe updates already write the matching profile. The
+	// scheduler only repairs missing rows, so fetching this bounded exception set
+	// avoids rereading every complete profile on each maintenance interval.
+	instruments, err := s.store.GetInstrumentsFiltered(ctx, "", "", "basic_missing", total, 0)
+	if err != nil {
+		return result, err
+	}
+	for _, instrument := range instruments {
+		updated, err := s.store.UpsertStockProfile(ctx, buildStockProfileFromInstrument(instrument))
+		if err != nil {
+			result.Failed++
+			result.FailedItems = append(result.FailedItems, UpdateFailure{
+				Symbol: instrument.Symbol,
+				Reason: stockProfileSnippet(err.Error(), 240),
+			})
+			continue
+		}
+		s.markStockProfileEmbeddingStale(ctx, updated)
+		result.Success++
+	}
+	return result, nil
+}
+
 func stockProfileContentEqual(left, right StockProfile) bool {
 	left.UpdatedAt = time.Time{}
 	right.UpdatedAt = time.Time{}
@@ -406,7 +438,7 @@ func (s *Service) maybeRunBaseProfileMaintenance(ctx context.Context, trigger st
 		return
 	}
 
-	result, runErr := s.RebuildStockProfiles(ctx)
+	result, runErr := s.repairMissingStockProfiles(ctx)
 	deepResult := StockProfileDeepUpdateResult{}
 	var deepErr error
 	if runErr == nil {

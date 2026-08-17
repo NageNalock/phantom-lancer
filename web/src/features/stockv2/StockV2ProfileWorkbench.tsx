@@ -70,7 +70,7 @@ export function StockV2ProfileSettings({
   return (
     <Panel
       title="画像配置"
-      subtitle="后台按队列和限速更新基础输入；输入变化时才启动画像 AI"
+      subtitle="标的更新时同步基础画像；后台只修复缺失项，并按限速更新画像 AI"
       actions={
         <div className="flex gap-2">
           <Button
@@ -96,7 +96,7 @@ export function StockV2ProfileSettings({
           label={
             <div>
               <div>启用自动画像更新</div>
-              <div className="muted mt-0.5 text-xs">先修复本地索引，再小批量深度更新；基础输入变化时才尝试 AI。</div>
+              <div className="muted mt-0.5 text-xs">先修复缺失画像，再小批量深度更新；不会周期性重建全部已有画像。</div>
             </div>
           }
           onChange={(checked) => update("baseProfileAutoMaintainEnabled", checked)}

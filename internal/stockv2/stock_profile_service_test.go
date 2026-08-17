@@ -209,6 +209,55 @@ func TestRebuildStockProfilesSkipsUnchangedWithoutCallingPublicF10(t *testing.T)
 	}
 }
 
+func TestRepairMissingStockProfilesDoesNotRebuildExistingProfiles(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+
+	for _, instrument := range []StockV2Instrument{
+		{ID: "inst-300750", Symbol: "300750", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "宁德时代"},
+		{ID: "inst-600519", Symbol: "600519", Market: "SH", InstrumentType: InstrumentTypeStock, Name: "贵州茅台"},
+	} {
+		if err := svc.store.UpsertInstrument(ctx, instrument); err != nil {
+			t.Fatalf("upsert instrument %s: %v", instrument.Symbol, err)
+		}
+	}
+	_, err := svc.store.UpsertStockProfile(ctx, StockProfile{
+		Symbol:          "300750",
+		Market:          "SZ",
+		InstrumentType:  InstrumentTypeStock,
+		Name:            "保留的现有画像",
+		ProfileText:     "已存在的画像内容",
+		ProfileVersion:  2,
+		AIProfileStatus: StockProfileAIStatusReady,
+	})
+	if err != nil {
+		t.Fatalf("upsert existing profile: %v", err)
+	}
+	existing, err := svc.store.GetStockProfile(ctx, "300750")
+	if err != nil {
+		t.Fatalf("get stored existing profile: %v", err)
+	}
+
+	result, err := svc.repairMissingStockProfiles(ctx)
+	if err != nil {
+		t.Fatalf("repair missing profiles: %v", err)
+	}
+	if result.Total != 1 || result.Success != 1 || result.Failed != 0 {
+		t.Fatalf("repair result = %+v, want one missing profile repaired", result)
+	}
+	preserved, err := svc.store.GetStockProfile(ctx, "300750")
+	if err != nil {
+		t.Fatalf("get existing profile: %v", err)
+	}
+	if preserved.Name != existing.Name || !preserved.UpdatedAt.Equal(existing.UpdatedAt) {
+		t.Fatalf("existing profile was rebuilt: before=%+v after=%+v", existing, preserved)
+	}
+	if _, err := svc.store.GetStockProfile(ctx, "600519"); err != nil {
+		t.Fatalf("missing profile was not repaired: %v", err)
+	}
+}
+
 func TestUpdateStockProfileSkipsAIWhenInputUnchanged(t *testing.T) {
 	ctx := context.Background()
 	businessLine := "动力电池系统"
