@@ -106,17 +106,21 @@ type codexCLIExecutor struct {
 }
 
 const (
-	execDefaultTimeout         = 10 * time.Minute
-	stdoutTailMaxBytes         = 4 * 1024
-	stderrTailMaxBytes         = 4 * 1024
-	transcriptMaxBytes         = 16 * 1024
-	executorReaderDrainTimeout = 2 * time.Second
-	executorTerminateGrace     = 5 * time.Second
-	codexStockAgentMCPName     = "stock_agent"
-	codexSubmitResultTool      = "stock_agent.submit_result"
-	codexSearchMCPName         = "ddg"
-	codexTaskModelProviderName = "stockv2_task_provider"
-	codexDirectResultMaxBytes  = 2 << 20
+	execDefaultTimeout = 10 * time.Minute
+	// ponytail: v3 emits three model horizons per holding plus portfolio-level
+	// horizons. Give only this bounded task extra generation time; if portfolios
+	// grow materially, shard the work instead of raising the limit again.
+	portfolioSentinelExecTimeout = 15 * time.Minute
+	stdoutTailMaxBytes           = 4 * 1024
+	stderrTailMaxBytes           = 4 * 1024
+	transcriptMaxBytes           = 16 * 1024
+	executorReaderDrainTimeout   = 2 * time.Second
+	executorTerminateGrace       = 5 * time.Second
+	codexStockAgentMCPName       = "stock_agent"
+	codexSubmitResultTool        = "stock_agent.submit_result"
+	codexSearchMCPName           = "ddg"
+	codexTaskModelProviderName   = "stockv2_task_provider"
+	codexDirectResultMaxBytes    = 2 << 20
 	// ponytail: retain only a few result-shaped final assistant messages from the
 	// bounded Codex JSONL event stream. They are a fallback for a malformed or
 	// missing output-last-message file, not a general transcript parser.
@@ -288,7 +292,7 @@ func (e *codexCLIExecutor) ExecutePortfolioSentinel(
 	if err != nil {
 		return nil, err
 	}
-	return e.executePromptWithOptions(ctx, taskID, prompt, modelName, reasoningEffort, execDefaultTimeout, true, schema)
+	return e.executePromptWithOptions(ctx, taskID, prompt, modelName, reasoningEffort, portfolioSentinelExecTimeout, true, schema)
 }
 
 func (e *codexCLIExecutor) ExecuteStockProfileSummary(
@@ -2142,7 +2146,7 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	b.WriteString("4a. For every holding, make your own conditional short/medium/long price forecast from the full context: short is 5 trading days, medium is 20, and long is 60. The probabilities and prices are analytical model estimates. Do not copy deterministic gate scores into probability fields and do not reduce this to indicator extrapolation. Reconcile trend, flow, market/sector regime, news themes, fundamentals/valuation, catalysts, crowding, conflicting evidence, and freshness.\n")
 	b.WriteString("4b. Also estimate the same three horizons for every portfolio as a whole, including probability of gain, probability of benchmark outperformance, expected return range, and expected maximum drawdown. Account for concentration and correlated holdings rather than summing single-name probabilities.\n")
 	b.WriteString("5. Before emitting any action other than hold, perform real public retrieval using Codex web_search or a named search/research/browse Agent tool, record compact source/claim metadata in research_audit, and reference those IDs from the action. MCP-only internal retrieval is not sufficient for an actionable plan.\n")
-	b.WriteString("5a. Keep public retrieval bounded: use at most 8 external search/fetch tool calls for this run, start with one targeted query per holding, fetch only the strongest relevant sources, and never retry the same query. More calls are not a substitute for evidence quality.\n")
+	b.WriteString("5a. Keep public retrieval bounded: use at most 6 external search/fetch tool calls for this run, start with one targeted query per holding, fetch only the strongest relevant sources, and never retry the same query. More calls are not a substitute for evidence quality.\n")
 	b.WriteString("5b. Describe retrieval status precisely. Say external search is unavailable only when the tool cannot be invoked. If invocation succeeds but yields no useful result, say the search returned no usable result. If any public URL was fetched or recorded in research_audit, do not say external search is unavailable; say that public material was retrieved but no holding-specific causal evidence was verified when that is the actual limitation.\n")
 	b.WriteString("6. Output executable but non-executing plans. Use deterministic price/change/daily-close/portfolio-weight conditions; never use prose as a trigger.\n")
 	b.WriteString("7. decisionGates is a server-generated deterministic boundary. Never emit build_position/add_position when that symbol does not list the action in allowedActions. Reduction and exit risk controls remain allowed. The server will downgrade a conflicting buy plan to hold and preserve the reason in the audit result.\n\n")

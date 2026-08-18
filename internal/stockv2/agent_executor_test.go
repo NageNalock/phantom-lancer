@@ -830,7 +830,7 @@ func TestBuildPortfolioSentinelPromptRequiresCompleteNewsContextReview(t *testin
 		"server owns monitor_window and valid_until",
 		"only the next trading window/session",
 		"plan validity period",
-		"at most 8 external search/fetch tool calls",
+		"at most 6 external search/fetch tool calls",
 		"Do not re-fetch quotes, daily bars, profiles, portfolio context, news, or links that are already present and usable",
 		"use at most 8 discretionary MCP retrieval calls in total",
 		"final stock_agent.submit_result call is not part of this retrieval budget",
