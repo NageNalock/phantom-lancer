@@ -827,6 +827,8 @@ func TestBuildPortfolioSentinelPromptRequiresCompleteNewsContextReview(t *testin
 		"opportunity_ids",
 		"strategy_ids",
 		"explicit empty list",
+		"`affected_holdings` must be an array of objects, never strings",
+		`"affected_holdings":[{"direction":"neutral"`,
 		"server owns monitor_window and valid_until",
 		"only the next trading window/session",
 		"plan validity period",

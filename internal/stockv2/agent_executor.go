@@ -2160,6 +2160,7 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	}
 	b.WriteString("Allowed overall_risk_level values: low, medium, high, critical.\n")
 	b.WriteString("`action_plans` is required. Return exactly one plan for every current holding; additional non-held plans are optional and restricted to trustedCandidates. Do not use legacy `portfolio_actions` for v3.\n")
+	b.WriteString("`affected_holdings` must be an array of objects, never strings. Each object uses symbol, optional market/name, risk_level, direction, reasons, and evidence_refs.\n")
 	b.WriteString("Every action plan must contain exactly three `horizon_outlooks` items: short/5, medium/20, and long/60 trading days. Each item contains horizon, tradingDays, asOfPrice, direction, probabilityUp, probabilityOutperform, expectedPrice, expectedReturnPct, rangeLow, rangeHigh, targetPrice, targetProbability for touching that target during the horizon, downsideRiskPct, confidence, thesis, invalidConditions, uncertainties, and dataQuality.\n")
 	b.WriteString("`portfolio_outlooks` is required and must contain exactly one item for every reviewed portfolio. Each portfolio item contains portfolio_id, portfolio_name, and three horizon_outlooks with horizon, tradingDays, direction, probabilityGain, probabilityOutperform, expectedReturnPct, rangeLowReturnPct, rangeHighReturnPct, expectedMaxDrawdownPct, confidence, summary, invalidConditions, uncertainties, and dataQuality.\n")
 	b.WriteString("Model forecast probabilities are distinct from action-plan confidence. If input data is stale, missing, or conflicting, still provide the best conditional estimate, mark dataQuality degraded/insufficient, list the uncertainty, and reduce forecast confidence. Use the cross-horizon pattern to decide one coherent action plan; do not mechanically create conflicting actions for each horizon.\n")
@@ -2221,7 +2222,10 @@ func portfolioSentinelPromptExample(taskID string, includeCoverage bool) map[str
 	report := map[string]any{
 		"schema_version": PortfolioSentinelReportSchemaVersion, "overall_risk_level": PortfolioSentinelRiskMedium,
 		"run_summary": "...", "positive_items": []any{}, "negative_items": []any{}, "noise_items": []any{},
-		"affected_holdings": []any{},
+		"affected_holdings": []any{map[string]any{
+			"symbol": "600000", "market": "SH", "name": "示例股票", "risk_level": PortfolioSentinelRiskMedium,
+			"direction": "neutral", "reasons": []string{"..."}, "evidence_refs": []string{},
+		}},
 		"action_plans": []any{map[string]any{
 			"id": "plan-1", "portfolio_id": "portfolio-id", "symbol": "600000", "market": "SH", "name": "示例股票",
 			"action": PortfolioSentinelPlanHold, "trigger_mode": PortfolioSentinelTriggerImmediate, "trigger_policy": nil, "conditions": nil, "sizing": nil,

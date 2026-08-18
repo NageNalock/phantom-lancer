@@ -953,7 +953,9 @@ func (s *Service) executePortfolioSentinelAgentAttempt(ctx context.Context, run 
 	if _, err := s.store.UpdateAgentRun(ctx, running); err != nil && s.log != nil {
 		s.log.Warn("update portfolio sentinel run to running failed", "run_id", run.ID, "error", safelog.Text(err.Error(), 240))
 	}
-	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
+	// ponytail: keep the MCP submission slot alive slightly longer than the CLI
+	// process so a result produced at the execution deadline cannot race expiry.
+	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", portfolioSentinelExecTimeout+30*time.Second)
 	execOutput, execErr := s.agentExecutor.ExecutePortfolioSentinel(ctx, taskID, pack, modelName, run.ReasoningEffort)
 	submitted := s.consumeAgentTaskSubmittedResult(taskID)
 	audit := AgentCLIResearchAudit{}
@@ -967,7 +969,7 @@ func (s *Service) executePortfolioSentinelAgentAttempt(ctx context.Context, run 
 			// back to the agent. More retries would turn a deterministic contract
 			// repair into an unbounded model loop.
 			pack.Note = strings.TrimSpace(pack.Note + "\nCORRECTIVE RETRY: the previous submission failed server validation: " + safelog.Text(validationErr.Error(), 500) + ". Correct the complete result and submit it once.")
-			taskID, _ = s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
+			taskID, _ = s.agentTaskPool.createTask(run.TaskType, run.ID, "", portfolioSentinelExecTimeout+30*time.Second)
 			retryOutput, retryErr := s.agentExecutor.ExecutePortfolioSentinel(ctx, taskID, pack, modelName, run.ReasoningEffort)
 			execOutput = mergeAgentExecutorOutputs(execOutput, retryOutput)
 			execErr = retryErr
