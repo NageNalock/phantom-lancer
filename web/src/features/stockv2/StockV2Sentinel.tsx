@@ -7,6 +7,7 @@ import type {
   StockV2PortfolioSentinelActionPlan,
   StockV2PortfolioSentinelActionPlanListResponse,
   StockV2PortfolioSentinelActionPlanView,
+  StockV2PortfolioSentinelPortfolioOutlook,
   StockV2PortfolioSentinelConfig,
   StockV2PortfolioSentinelConfigInput,
   StockV2PortfolioSentinelRun,
@@ -19,6 +20,7 @@ import { Button, CollapsibleSection, Drawer, Field, Notice, Pill } from "../../c
 import { StockV2AgentRunDetailDrawer } from "./StockV2AgentExecutionLedger";
 import { StockV2ReviewDrawer } from "./StockV2ReviewDrawer";
 import { strategyPrefilterSummary } from "./StockV2StrategyPlaybook";
+import { ModelHorizonOutlookPanel, ModelPortfolioOutlookPanel } from "./StockV2ModelOutlook";
 import {
   formatDate,
   stockV2AgentRunStatusLabel,
@@ -474,8 +476,8 @@ function ActionPlanRow({ item }: { item: StockV2PortfolioSentinelActionPlanView 
         </Pill>
         <strong className="text-sm">{plan.symbol}{plan.name ? ` · ${plan.name}` : ""}</strong>
         {plan.market ? <span className="font-mono text-[var(--muted)]">{plan.market}</span> : null}
-        <Pill tone={plan.trigger_mode === "immediate" ? "warn" : "neutral"}>
-          {plan.trigger_mode === "immediate" ? "立即生成提案" : `条件触发 · ${plan.trigger_policy === "any" ? "任一" : "全部"}`}
+        <Pill tone={plan.action === "hold" ? "neutral" : plan.trigger_mode === "immediate" ? "warn" : "neutral"}>
+          {plan.action === "hold" ? "无需条件" : plan.trigger_mode === "immediate" ? "立即生成提案" : `条件触发 · ${plan.trigger_policy === "any" ? "任一" : "全部"}`}
         </Pill>
         <Pill tone={item.status === "triggered" || item.status === "proposed" ? "good" : item.status === "expired" ? "neutral" : "warn"}>
           {item.status === "triggered" ? "已触发" : item.status === "proposed" ? "已生成提案" : item.status === "expired" ? "已过期" : "监控中"}
@@ -487,6 +489,11 @@ function ActionPlanRow({ item }: { item: StockV2PortfolioSentinelActionPlanView 
         <KeyValue label="理由" value={plan.reason || "-"} />
         <KeyValue label="监控窗口" value={actionPlanMonitorWindowSummary(plan)} />
       </div>
+      {plan.horizon_outlooks?.length ? (
+        <CollapsibleSection title="5 / 20 / 60 日模型预期" subtitle="查看概率、价格区间、失效条件与数据质量">
+          <ModelHorizonOutlookPanel items={plan.horizon_outlooks} title="持仓周期预期" />
+        </CollapsibleSection>
+      ) : null}
       {plan.risk_notes ? <p className="mt-2 border-t border-[var(--line)] pt-2 text-[var(--muted)]">风险边界：{plan.risk_notes}</p> : null}
     </div>
   );
@@ -573,6 +580,14 @@ function SentinelRunDrawer({
             <p className="mt-1 text-xs leading-relaxed text-[var(--muted-strong)]">{result?.summary || report.runSummary}</p>
           </div>
         ) : null}
+
+        {report.portfolioOutlooks.map((item) => (
+          <ModelPortfolioOutlookPanel
+            items={item.horizon_outlooks}
+            key={item.portfolio_id}
+            title={`${item.portfolio_name || "组合"} · 周期预期`}
+          />
+        ))}
 
         {report.actionPlans.length > 0 ? (
           <div>
@@ -941,6 +956,7 @@ interface SentinelReport {
   noiseItems: Array<Record<string, unknown>>;
   affectedHoldings: Array<Record<string, unknown>>;
   actionPlans: StockV2PortfolioSentinelActionPlan[];
+  portfolioOutlooks: StockV2PortfolioSentinelPortfolioOutlook[];
   portfolioActions: Array<Record<string, unknown>>;
   reviewRequests: Array<Record<string, unknown>>;
   dataQualityNotes: string[];
@@ -957,11 +973,22 @@ function readReport(raw?: Record<string, unknown>): SentinelReport {
     noiseItems: arr(r["noise_items"]),
     affectedHoldings: arr(r["affected_holdings"]),
     actionPlans: typedActionPlans(r["action_plans"]),
+    portfolioOutlooks: typedPortfolioOutlooks(r["portfolio_outlooks"]),
     portfolioActions: arr(r["portfolio_actions"]),
     reviewRequests: arr(r["review_requests"]),
     dataQualityNotes: arr(r["data_quality_notes"]).map(str),
     nextWatchFocus: arr(r["next_watch_focus"]).map(str),
   };
+}
+
+function typedPortfolioOutlooks(value: unknown): StockV2PortfolioSentinelPortfolioOutlook[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is StockV2PortfolioSentinelPortfolioOutlook => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+        const outlook = item as Record<string, unknown>;
+        return typeof outlook["portfolio_id"] === "string" && Array.isArray(outlook["horizon_outlooks"]);
+      })
+    : [];
 }
 
 function typedActionPlans(value: unknown): StockV2PortfolioSentinelActionPlan[] {

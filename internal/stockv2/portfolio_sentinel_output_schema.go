@@ -41,7 +41,7 @@ func portfolioSentinelDirectOutputSchema(taskID string) ([]byte, error) {
 	actionPlan := map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
-		"required":             []string{"id", "portfolio_id", "symbol", "action", "trigger_mode", "reason"},
+		"required":             []string{"id", "portfolio_id", "symbol", "action", "trigger_mode", "reason", "horizon_outlooks"},
 		"properties": map[string]any{
 			"id":           map[string]any{"type": "string"},
 			"portfolio_id": map[string]any{"type": "string"},
@@ -64,11 +64,12 @@ func portfolioSentinelDirectOutputSchema(taskID string) ([]byte, error) {
 					"value": map[string]any{"type": "number", "exclusiveMinimum": 0, "maximum": 100},
 				},
 			},
-			"reason":        map[string]any{"type": "string"},
-			"risk_notes":    map[string]any{"type": "string"},
-			"confidence":    map[string]any{"type": "number", "minimum": 0, "maximum": 1},
-			"evidence_refs": stringArray(),
-			"research_refs": stringArray(),
+			"reason":           map[string]any{"type": "string"},
+			"risk_notes":       map[string]any{"type": "string"},
+			"confidence":       map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"horizon_outlooks": map[string]any{"type": "array", "minItems": 3, "maxItems": 3, "items": modelHorizonOutlookSchema()},
+			"evidence_refs":    stringArray(),
+			"research_refs":    stringArray(),
 		},
 	}
 	report := map[string]any{
@@ -77,7 +78,7 @@ func portfolioSentinelDirectOutputSchema(taskID string) ([]byte, error) {
 		"required": []string{
 			"schema_version", "overall_risk_level", "run_summary",
 			"positive_items", "negative_items", "noise_items", "affected_holdings",
-			"action_plans", "research_audit", "review_requests", "data_quality_notes",
+			"action_plans", "portfolio_outlooks", "research_audit", "review_requests", "data_quality_notes",
 			"next_watch_focus", "checked_news_thread_version_ids",
 		},
 		"properties": map[string]any{
@@ -105,6 +106,19 @@ func portfolioSentinelDirectOutputSchema(taskID string) ([]byte, error) {
 				},
 			},
 			"action_plans": map[string]any{"type": "array", "items": actionPlan},
+			"portfolio_outlooks": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []string{"portfolio_id", "horizon_outlooks"},
+					"properties": map[string]any{
+						"portfolio_id":     map[string]any{"type": "string"},
+						"portfolio_name":   map[string]any{"type": "string"},
+						"horizon_outlooks": map[string]any{"type": "array", "minItems": 3, "maxItems": 3, "items": modelPortfolioHorizonOutlookSchema()},
+					},
+				},
+			},
 			"research_audit": map[string]any{
 				"type":     "array",
 				"maxItems": 100,
@@ -159,6 +173,69 @@ func portfolioSentinelDirectOutputSchema(taskID string) ([]byte, error) {
 		},
 	}
 	return agentDirectOutputSchema(taskID, AgentTaskTypePortfolioSentinel, PortfolioSentinelOutputType, report)
+}
+
+func modelHorizonOutlookSchema() map[string]any {
+	properties := map[string]any{
+		"horizon":               map[string]any{"type": "string", "enum": []string{ModelHorizonShort, ModelHorizonMedium, ModelHorizonLong}},
+		"tradingDays":           map[string]any{"type": "integer", "enum": []int{5, 20, 60}},
+		"asOfPrice":             map[string]any{"type": "number", "exclusiveMinimum": 0},
+		"direction":             map[string]any{"type": "string", "enum": []string{ModelOutlookBullish, ModelOutlookNeutral, ModelOutlookBearish}},
+		"probabilityUp":         map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+		"probabilityOutperform": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+		"expectedPrice":         map[string]any{"type": "number", "exclusiveMinimum": 0},
+		"expectedReturnPct":     map[string]any{"type": "number"},
+		"rangeLow":              map[string]any{"type": "number", "exclusiveMinimum": 0},
+		"rangeHigh":             map[string]any{"type": "number", "exclusiveMinimum": 0},
+		"targetPrice":           map[string]any{"type": "number", "exclusiveMinimum": 0},
+		"targetProbability":     map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+		"downsideRiskPct":       map[string]any{"type": "number", "minimum": 0, "maximum": 100},
+		"confidence":            map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+		"thesis":                map[string]any{"type": "string"},
+		"invalidConditions":     map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "string"}},
+		"uncertainties":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"dataQuality":           map[string]any{"type": "string", "enum": []string{ModelOutlookDataHealthy, ModelOutlookDataDegraded, ModelOutlookDataInsufficient}},
+	}
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             schemaPropertyNames(properties),
+		"properties":           properties,
+	}
+}
+
+func modelPortfolioHorizonOutlookSchema() map[string]any {
+	properties := map[string]any{
+		"horizon":                map[string]any{"type": "string", "enum": []string{ModelHorizonShort, ModelHorizonMedium, ModelHorizonLong}},
+		"tradingDays":            map[string]any{"type": "integer", "enum": []int{5, 20, 60}},
+		"direction":              map[string]any{"type": "string", "enum": []string{ModelOutlookBullish, ModelOutlookNeutral, ModelOutlookBearish}},
+		"probabilityGain":        map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+		"probabilityOutperform":  map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+		"expectedReturnPct":      map[string]any{"type": "number"},
+		"rangeLowReturnPct":      map[string]any{"type": "number"},
+		"rangeHighReturnPct":     map[string]any{"type": "number"},
+		"expectedMaxDrawdownPct": map[string]any{"type": "number", "minimum": 0, "maximum": 100},
+		"confidence":             map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+		"summary":                map[string]any{"type": "string"},
+		"invalidConditions":      map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "string"}},
+		"uncertainties":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"dataQuality":            map[string]any{"type": "string", "enum": []string{ModelOutlookDataHealthy, ModelOutlookDataDegraded, ModelOutlookDataInsufficient}},
+	}
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             schemaPropertyNames(properties),
+		"properties":           properties,
+	}
+}
+
+func schemaPropertyNames(properties map[string]any) []string {
+	items := make([]string, 0, len(properties))
+	for name := range properties {
+		items = append(items, name)
+	}
+	sort.Strings(items)
+	return items
 }
 
 func requireAllSchemaProperties(schema map[string]any) {

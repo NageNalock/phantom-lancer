@@ -98,6 +98,7 @@ func TestOpportunityServiceSubmitResultValidatesCandidatesAndStrategyEntry(t *te
 					"reason":             "battery and energy storage exposure",
 					"risk_summary":       "theme may be indirect",
 					"suggested_strategy": "watch pullbacks",
+					"horizon_outlooks":   testModelHorizonOutlooks(200),
 				},
 			},
 		},
@@ -112,7 +113,7 @@ func TestOpportunityServiceSubmitResultValidatesCandidatesAndStrategyEntry(t *te
 	if err != nil {
 		t.Fatalf("list candidates: %v", err)
 	}
-	if len(candidates) != 1 || candidates[0].Symbol != "300750" || candidates[0].Name != "宁德时代" {
+	if len(candidates) != 1 || candidates[0].Symbol != "300750" || candidates[0].Name != "宁德时代" || len(candidates[0].HorizonOutlooks) != 3 {
 		t.Fatalf("candidates=%+v, want validated master-data candidate", candidates)
 	}
 	finalRun, err := svc.GetOpportunityDiscoveryRun(ctx, run.ID)
@@ -246,6 +247,7 @@ func TestOpportunityServiceRejectsUnsafeAndMalformedSubmittedResults(t *testing.
 					"evidence_score":    80,
 					"market_risk_score": 30,
 					"confidence":        0.8,
+					"horizon_outlooks":  testModelHorizonOutlooks(10),
 				},
 			},
 		},

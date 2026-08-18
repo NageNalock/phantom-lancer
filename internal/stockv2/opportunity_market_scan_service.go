@@ -105,6 +105,9 @@ func (s *Service) populateOpportunityMarketScanDecisionReasons(ctx context.Conte
 func applyOpportunityMarketScanDecisionReasons(items []OpportunityMarketScanCandidate, excluded, omitted map[string]string, reviews map[string]OpportunityCandidate) {
 	for i := range items {
 		item := &items[i]
+		if review, ok := reviews[item.Symbol]; ok {
+			item.HorizonOutlooks = review.HorizonOutlooks
+		}
 		switch {
 		case item.StrategyStatus == OpportunityMarketScanStrategyGenerated:
 			item.DecisionReason = "已生成未激活策略草案"

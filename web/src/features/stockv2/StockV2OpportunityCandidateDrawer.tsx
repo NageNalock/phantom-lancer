@@ -21,6 +21,7 @@ import {
   stockV2EmbeddingErrorCodeLabel,
 } from "../../domain/labels";
 import { StockV2AgentRunDetailDrawer } from "./StockV2AgentExecutionLedger";
+import { ModelHorizonOutlookPanel } from "./StockV2ModelOutlook";
 
 const EVIDENCE_GROUP_ORDER: StockV2OpportunityEvidenceSourceType[] = [
   "internal_profile",
@@ -157,6 +158,8 @@ export function StockV2OpportunityCandidateDrawer({
           ) : null}
 
           {error ? <Notice tone="danger">{error}</Notice> : null}
+
+          <ModelHorizonOutlookPanel items={candidate.horizonOutlooks} />
 
           {/* 相关原因 */}
           {candidate.reason ? <Block title="为什么相关" value={candidate.reason} /> : null}

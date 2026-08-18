@@ -856,8 +856,8 @@ func TestBuildPortfolioSentinelPromptKeepsFinalReviewContractWhenContextIsOversi
 		Note: strings.Repeat("这是可裁剪的超大上下文正文。", 3000),
 	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
 
-	if len(prompt) > 14000 {
-		t.Fatalf("prompt length = %d, want <= 14000", len(prompt))
+	if len(prompt) > 22000 {
+		t.Fatalf("prompt length = %d, want <= 22000", len(prompt))
 	}
 	if !utf8.ValidString(prompt) {
 		t.Fatal("prompt is invalid utf8")
@@ -878,7 +878,7 @@ func TestBuildPortfolioSentinelPromptKeepsFinalReviewContractWhenContextIsOversi
 		"complete, duplicate-free versionId set returned by all pages",
 		"`impact_review_coverage` is required",
 		"Each list must exactly match the duplicate-free frozen identifiers returned from all pages",
-		`"holding_ids":[],"monitor_ids":[],"alert_ids":[],"opportunity_ids":[],"strategy_ids":[]`,
+		`"impact_review_coverage":{`,
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("oversized prompt missing %q:\n%s", want, prompt)
@@ -903,8 +903,8 @@ func TestBuildPortfolioSentinelPromptKeepsEveryHoldingInUntruncatedCoverage(t *t
 		}},
 	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
 
-	if len(prompt) > 14000 {
-		t.Fatalf("prompt length = %d, want <= 14000", len(prompt))
+	if len(prompt) > 22000 {
+		t.Fatalf("prompt length = %d, want <= 22000", len(prompt))
 	}
 	if !strings.Contains(prompt, "... [truncated]") {
 		t.Fatal("oversized context was not compacted")

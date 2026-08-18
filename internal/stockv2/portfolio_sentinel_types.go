@@ -7,10 +7,11 @@ import (
 )
 
 const (
-	PortfolioSentinelOutputType          = AgentTaskTypePortfolioSentinel
-	PortfolioSentinelReportSchemaVersion = "portfolio-sentinel-report/v2"
-	portfolioSentinelLegacySchemaVersion = "portfolio-sentinel-report/v1"
-	portfolioSentinelPlanValidity        = 7 * 24 * time.Hour
+	PortfolioSentinelOutputType            = AgentTaskTypePortfolioSentinel
+	PortfolioSentinelReportSchemaVersion   = "portfolio-sentinel-report/v3"
+	portfolioSentinelLegacySchemaVersionV2 = "portfolio-sentinel-report/v2"
+	portfolioSentinelLegacySchemaVersionV1 = "portfolio-sentinel-report/v1"
+	portfolioSentinelPlanValidity          = 7 * 24 * time.Hour
 	// ponytail: sentinel alerts share a one-hour dedupe window so one analysis
 	// cannot fan out duplicate alerts; this is an internal safety invariant, not
 	// another owner-tunable scheduler/config surface.
@@ -300,6 +301,7 @@ type PortfolioSentinelReport struct {
 	AffectedHoldings            []PortfolioSentinelAffectedHolding     `json:"affected_holdings,omitempty"`
 	PortfolioActions            []PortfolioSentinelAction              `json:"portfolio_actions,omitempty"`
 	ActionPlans                 []PortfolioSentinelActionPlan          `json:"action_plans,omitempty"`
+	PortfolioOutlooks           []PortfolioSentinelPortfolioOutlook    `json:"portfolio_outlooks"`
 	ResearchAudit               []PortfolioSentinelResearchRecord      `json:"research_audit,omitempty"`
 	ReviewRequests              []PortfolioSentinelReviewRequest       `json:"review_requests,omitempty"`
 	DataQualityNotes            []string                               `json:"data_quality_notes,omitempty"`
@@ -309,23 +311,30 @@ type PortfolioSentinelReport struct {
 }
 
 type PortfolioSentinelActionPlan struct {
-	ID            string                           `json:"id"`
-	PortfolioID   string                           `json:"portfolio_id"`
-	Symbol        string                           `json:"symbol"`
-	Market        string                           `json:"market,omitempty"`
-	Name          string                           `json:"name,omitempty"`
-	Action        string                           `json:"action"`
-	TriggerMode   string                           `json:"trigger_mode"`
-	TriggerPolicy string                           `json:"trigger_policy,omitempty"`
-	Conditions    []PortfolioSentinelPlanCondition `json:"conditions,omitempty"`
-	Sizing        *PortfolioSentinelPlanSizing     `json:"sizing,omitempty"`
-	Reason        string                           `json:"reason"`
-	RiskNotes     string                           `json:"risk_notes,omitempty"`
-	Confidence    float64                          `json:"confidence,omitempty"`
-	EvidenceRefs  []string                         `json:"evidence_refs,omitempty"`
-	ResearchRefs  []string                         `json:"research_refs,omitempty"`
-	MonitorWindow *PortfolioSentinelMonitorWindow  `json:"monitor_window,omitempty"`
-	ValidUntil    time.Time                        `json:"valid_until,omitempty"`
+	ID              string                           `json:"id"`
+	PortfolioID     string                           `json:"portfolio_id"`
+	Symbol          string                           `json:"symbol"`
+	Market          string                           `json:"market,omitempty"`
+	Name            string                           `json:"name,omitempty"`
+	Action          string                           `json:"action"`
+	TriggerMode     string                           `json:"trigger_mode"`
+	TriggerPolicy   string                           `json:"trigger_policy,omitempty"`
+	Conditions      []PortfolioSentinelPlanCondition `json:"conditions,omitempty"`
+	Sizing          *PortfolioSentinelPlanSizing     `json:"sizing,omitempty"`
+	Reason          string                           `json:"reason"`
+	RiskNotes       string                           `json:"risk_notes,omitempty"`
+	Confidence      float64                          `json:"confidence,omitempty"`
+	HorizonOutlooks []ModelHorizonOutlook            `json:"horizon_outlooks"`
+	EvidenceRefs    []string                         `json:"evidence_refs,omitempty"`
+	ResearchRefs    []string                         `json:"research_refs,omitempty"`
+	MonitorWindow   *PortfolioSentinelMonitorWindow  `json:"monitor_window,omitempty"`
+	ValidUntil      time.Time                        `json:"valid_until,omitempty"`
+}
+
+type PortfolioSentinelPortfolioOutlook struct {
+	PortfolioID     string                         `json:"portfolio_id"`
+	PortfolioName   string                         `json:"portfolio_name,omitempty"`
+	HorizonOutlooks []ModelPortfolioHorizonOutlook `json:"horizon_outlooks"`
 }
 
 type PortfolioSentinelMonitorWindow struct {

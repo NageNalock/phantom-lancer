@@ -266,24 +266,26 @@ func (e *correctivePortfolioSentinelExecutor) ExecutePortfolioSentinel(
 	e.notes = append(e.notes, pack.Note)
 	plans := []any{
 		map[string]any{
-			"id":           "plan-etf-hold",
-			"portfolio_id": e.portfolioID,
-			"symbol":       "588940",
-			"market":       "SH",
-			"name":         "科创50ETF富国",
-			"action":       PortfolioSentinelPlanHold,
-			"reason":       "证据不足，继续观察。",
+			"id":               "plan-etf-hold",
+			"portfolio_id":     e.portfolioID,
+			"symbol":           "588940",
+			"market":           "SH",
+			"name":             "科创50ETF富国",
+			"action":           PortfolioSentinelPlanHold,
+			"reason":           "证据不足，继续观察。",
+			"horizon_outlooks": testModelHorizonOutlooks(1),
 		},
 	}
 	if e.calls > 1 {
 		plans = append(plans, map[string]any{
-			"id":           "plan-server-hold",
-			"portfolio_id": e.portfolioID,
-			"symbol":       "000977",
-			"market":       "SZ",
-			"name":         "浪潮信息",
-			"action":       PortfolioSentinelPlanHold,
-			"reason":       "纠正覆盖缺失，继续观察。",
+			"id":               "plan-server-hold",
+			"portfolio_id":     e.portfolioID,
+			"symbol":           "000977",
+			"market":           "SZ",
+			"name":             "浪潮信息",
+			"action":           PortfolioSentinelPlanHold,
+			"reason":           "纠正覆盖缺失，继续观察。",
+			"horizon_outlooks": testModelHorizonOutlooks(50),
 		})
 	}
 	_, _ = e.pool.submitResult(taskID, AgentTaskTypePortfolioSentinel, AgentTaskSubmittedResult{
@@ -294,6 +296,9 @@ func (e *correctivePortfolioSentinelExecutor) ExecutePortfolioSentinel(
 			"overall_risk_level": PortfolioSentinelRiskLow,
 			"run_summary":        "测试组合哨兵持仓覆盖纠错。",
 			"action_plans":       plans,
+			"portfolio_outlooks": []any{map[string]any{
+				"portfolio_id": e.portfolioID, "horizon_outlooks": testModelPortfolioHorizonOutlooks(),
+			}},
 		},
 		Confidence: 0.8,
 	})

@@ -6,7 +6,7 @@
 >
 > REPLACES：无。本文补充 `stock-agent-workbench-v2-key-points-2026-06-18.md` 中 `GeneratedStrategy`、`StrategyObj`、`StrategyPlaybook`、`StrategyPatch` 的策略生成细节。
 >
-> 参考来源：当前 StockV2 对象网络；StockPulse 的持仓操作策略 workflow 思路。本文只吸收流程思想，不沿用 StockPulse 旧表、旧 API 或旧页面结构。
+> 参考来源：当前 StockV2 对象网络；`docs/stock-v2-model-horizon-outlook-design-2026-08-18.md` 的模型多周期预期；StockPulse 的持仓操作策略 workflow 思路。本文只吸收流程思想，不沿用 StockPulse 旧表、旧 API 或旧页面结构。
 
 ## 1. 目标
 
@@ -91,7 +91,7 @@ Agent 在一次输出中给出多头理由、空头理由、关键分歧、组�
 
 ## 5. 输入模型
 
-建议输入对象为 `StrategyGenerationInput`。当前 HTTP API 为 `POST /api/stockv2/agent/strategy-generation/run`，请求体按 Go/TypeScript API 约定使用 camelCase；Agent MCP 回填的 `strategy-generation-report/v1` 仍使用下文定义的 snake_case report schema。
+建议输入对象为 `StrategyGenerationInput`。当前 HTTP API 为 `POST /api/stockv2/agent/strategy-generation/run`，请求体按 Go/TypeScript API 约定使用 camelCase；Agent MCP 回填使用 `strategy-generation-report/v2`。
 
 ```json
 {
@@ -154,11 +154,11 @@ Context 必须把“事实”和“Agent 推断”分开，避免 Agent 把未�
 
 ## 7. Agent 输出
 
-建议输出对象为 `strategy-generation-report/v1`。
+建议输出对象为 `strategy-generation-report/v2`。
 
 ```json
 {
-  "schema_version": "strategy-generation-report/v1",
+  "schema_version": "strategy-generation-report/v2",
   "run_summary": {
     "mode": "portfolio_strategy_diagnosis",
     "overall_conclusion": "组合层面的总体结论",
@@ -177,6 +177,28 @@ Context 必须把“事实”和“Agent 推断”分开，避免 Agent 把未�
       "evidence_summary": ["关键证据"],
       "risk_summary": ["关键风险"],
       "invalid_conditions": ["使策略失效的条件"],
+      "horizon_outlooks": [
+        {
+          "horizon": "short",
+          "tradingDays": 5,
+          "asOfPrice": 68.5,
+          "direction": "bullish",
+          "probabilityUp": 0.63,
+          "probabilityOutperform": 0.57,
+          "expectedPrice": 71.2,
+          "expectedReturnPct": 3.94,
+          "rangeLow": 64,
+          "rangeHigh": 75,
+          "targetPrice": 73,
+          "targetProbability": 0.38,
+          "downsideRiskPct": 7,
+          "confidence": 0.65,
+          "thesis": "模型综合行情、资金、基本面、消息和市场状态后的条件判断",
+          "invalidConditions": ["放量跌破关键风险位"],
+          "uncertainties": [],
+          "dataQuality": "healthy"
+        }
+      ],
       "playbook": {
         "version": "v1",
         "rules": [
@@ -188,6 +210,8 @@ Context 必须把“事实”和“Agent 推断”分开，避免 Agent 把未�
             "preconditions": "前置条件",
             "target": "触发后希望达到的状态",
             "risk": "风险备注",
+            "horizon": "short|medium|long|cross_horizon",
+            "forecast_basis": "该动作与三周期预测的对应依据",
             "dataPrefilters": [],
             "portfolioPrefilters": [],
             "priority": 1
@@ -204,9 +228,13 @@ Context 必须把“事实”和“Agent 推断”分开，避免 Agent 把未�
 }
 ```
 
+上例为避免重复只展开 short 项；真实 v2 draft 必须同时给出同结构的 medium/20 和 long/60 项。
+
 `final_action` 这类单字段不能替代操作剧本。一只股票的策略可以同时包含建仓、加仓、持有、减仓和清仓条件。
 
-`playbook` 必须按当前代码协议写入 `generationMeta.playbook.rules`。字段命名应使用 `action`、`trigger`、`preconditions`、`target`、`risk`、`dataPrefilters`、`portfolioPrefilters`，动作枚举应使用 `add_position`、`reduce_position`、`exit_position`，不要再引入 `actions/action_type/add/reduce/clear` 第二套协议。
+每个 draft 都必须包含 short/5、medium/20、long/60 三个模型预测。组合评审步骤负责形成预测，最终格式化步骤原样传递；不能把候选评分、技术指标或确定性门分数直接换算成概率。策略规则必须用 `horizon` 和 `forecast_basis` 说明其对应的预测周期，跨周期冲突应形成一组协调动作，而不是三个互相矛盾的结论。
+
+`playbook` 必须按当前代码协议写入 `generationMeta.playbook.rules`。字段命名应使用 `action`、`trigger`、`preconditions`、`target`、`risk`、`horizon`、`forecast_basis`、`dataPrefilters`、`portfolioPrefilters`，动作枚举应使用 `add_position`、`reduce_position`、`exit_position`，不要再引入 `actions/action_type/add/reduce/clear` 第二套协议。
 
 ## 8. 组合持仓诊断模式
 

@@ -2018,6 +2018,8 @@ export interface StockV2StrategyActionRule {
   preconditions?: string;
   target?: string;
   risk?: string;
+  horizon?: "short" | "medium" | "long" | "cross_horizon" | string;
+  forecastBasis?: string;
   dataPrefilters?: StockV2StrategyPrefilter[];
   portfolioPrefilters?: StockV2StrategyPrefilter[];
   symbol?: string;
@@ -2616,6 +2618,54 @@ export type StockV2PortfolioSentinelAction =
   | "reduce_position"
   | "exit_position";
 
+export type StockV2ModelHorizon = "short" | "medium" | "long";
+export type StockV2ModelOutlookDirection = "bullish" | "neutral" | "bearish";
+export type StockV2ModelOutlookDataQuality = "healthy" | "degraded" | "insufficient";
+
+export interface StockV2ModelHorizonOutlook {
+  horizon: StockV2ModelHorizon | string;
+  tradingDays: number;
+  asOfPrice: number;
+  direction: StockV2ModelOutlookDirection | string;
+  probabilityUp: number;
+  probabilityOutperform: number;
+  expectedPrice: number;
+  expectedReturnPct: number;
+  rangeLow: number;
+  rangeHigh: number;
+  targetPrice: number;
+  targetProbability: number;
+  downsideRiskPct: number;
+  confidence: number;
+  thesis: string;
+  invalidConditions: string[];
+  uncertainties: string[];
+  dataQuality: StockV2ModelOutlookDataQuality | string;
+}
+
+export interface StockV2ModelPortfolioHorizonOutlook {
+  horizon: StockV2ModelHorizon | string;
+  tradingDays: number;
+  direction: StockV2ModelOutlookDirection | string;
+  probabilityGain: number;
+  probabilityOutperform: number;
+  expectedReturnPct: number;
+  rangeLowReturnPct: number;
+  rangeHighReturnPct: number;
+  expectedMaxDrawdownPct: number;
+  confidence: number;
+  summary: string;
+  invalidConditions: string[];
+  uncertainties: string[];
+  dataQuality: StockV2ModelOutlookDataQuality | string;
+}
+
+export interface StockV2PortfolioSentinelPortfolioOutlook {
+  portfolio_id: string;
+  portfolio_name?: string;
+  horizon_outlooks: StockV2ModelPortfolioHorizonOutlook[];
+}
+
 export interface StockV2PortfolioSentinelActionPlan {
   id: string;
   portfolio_id: string;
@@ -2630,6 +2680,7 @@ export interface StockV2PortfolioSentinelActionPlan {
   reason: string;
   risk_notes?: string;
   confidence?: number;
+  horizon_outlooks?: StockV2ModelHorizonOutlook[];
   evidence_refs?: string[];
   research_refs?: string[];
   monitor_window?: {
@@ -3124,6 +3175,7 @@ export interface StockV2OpportunityCandidate {
   reason?: string;
   riskSummary?: string;
   evidenceCount?: number;
+  horizonOutlooks?: StockV2ModelHorizonOutlook[];
   metadata?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -3393,6 +3445,7 @@ export interface StockV2OpportunityMarketScanCandidate {
   opportunityCandidateId?: string;
   strategyStatus?: string;
   strategyId?: string;
+  horizonOutlooks?: StockV2ModelHorizonOutlook[];
   updatedAt: string;
 }
 

@@ -959,6 +959,7 @@ func strategyGenerationReportResult(symbol string) map[string]any {
 				"evidence_summary":   []any{"主数据、最新行情、日 K 摘要、画像均可用"},
 				"risk_summary":       []any{"回撤和消息不确定性仍需监控"},
 				"invalid_conditions": []any{"跌破关键观察位"},
+				"horizon_outlooks":   testModelHorizonOutlooks(68.5),
 				"playbook": map[string]any{
 					"version": "v1",
 					"rules": []any{
@@ -970,6 +971,8 @@ func strategyGenerationReportResult(symbol string) map[string]any {
 							"preconditions":       "行情数据新鲜",
 							"target":              "进入 Review",
 							"risk":                "假突破",
+							"horizon":             ModelHorizonShort,
+							"forecast_basis":      "短期上涨概率与目标价同时改善",
 							"dataPrefilters":      []any{map[string]any{"type": "latest_quote", "symbol": symbol}},
 							"portfolioPrefilters": []any{},
 							"priority":            1,

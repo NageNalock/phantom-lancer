@@ -1812,19 +1812,22 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 	b.WriteString("## Output Requirements\n\n")
 	b.WriteString("You must submit exactly ONE final result using stock_agent.submit_result.\n")
 	b.WriteString("The MCP taskType must be `opportunity_discovery` and result.outputType must be `opportunity_discovery`.\n")
-	b.WriteString("Return a report with schema_version `opportunity-discovery-report/v1` and opportunity_id matching this prompt.\n")
+	b.WriteString("Return a report with schema_version `opportunity-discovery-report/v2` and opportunity_id matching this prompt.\n")
 	b.WriteString("Each theme_chain item must be an object with a non-empty `layer`; optional fields are `rank`, `representatives`, and `scarcity`. Do not return arbitrary objects or prose in this array.\n")
 	b.WriteString("Candidate scores `relevance_score`, `evidence_score`, and `market_risk_score` must be 0-100. `confidence` must be 0-1.\n")
+	b.WriteString("Every candidate must include exactly three `horizon_outlooks` items: short/5 trading days, medium/20 trading days, and long/60 trading days. These are your model-estimated conditional forecasts, not deterministic scores. Synthesize price/volume, flow, market regime, theme stage, valuation/fundamentals, catalysts, crowding, conflicting evidence, and data freshness. Do not merely extrapolate the latest return.\n")
+	b.WriteString("Each horizon outlook must contain horizon, tradingDays, asOfPrice, direction (bullish/neutral/bearish), probabilityUp, probabilityOutperform, expectedPrice, expectedReturnPct, rangeLow, rangeHigh, targetPrice, targetProbability (probability of touching target during the horizon), downsideRiskPct, confidence, thesis, invalidConditions, uncertainties, and dataQuality (healthy/degraded/insufficient). Probabilities and confidence are 0-1. Use comparable unadjusted current-price units for all displayed prices.\n")
+	b.WriteString("Model probability is distinct from candidate confidence. When data is missing or conflicting, still make the best conditional estimate from available evidence, mark dataQuality degraded/insufficient, list the uncertainty, and lower horizon confidence. Never hide degraded evidence behind a precise probability.\n")
 	b.WriteString("Do not include instructions to buy/sell, change holdings, create OperationReview, or activate strategy. You may include `suggested_strategy_intent` for a later strategy_generation task.\n")
 	b.WriteString("Final result shape:\n")
 	b.WriteString("```json\n")
-	fmt.Fprintf(&b, "{\"taskID\":\"%s\",\"taskType\":\"opportunity_discovery\",\"result\":{\"outputType\":\"opportunity_discovery\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"opportunity-discovery-report/v1\",\"opportunity_id\":\"%s\",\"summary\":\"...\",\"theme_chain\":[{\"layer\":\"上游稀缺供给\",\"rank\":1,\"representatives\":[\"600000\"],\"scarcity\":\"...\"}],\"candidates\":[{\"symbol\":\"600000\",\"market\":\"SH\",\"name\":\"示例股票\",\"instrument_type\":\"stock\",\"relation_type\":\"supply_chain\",\"rank\":1,\"relevance_score\":82,\"evidence_score\":70,\"market_risk_score\":45,\"confidence\":0.72,\"reason\":\"...\",\"risk_summary\":\"...\",\"suggested_strategy_intent\":\"...\"}],\"excluded\":[],\"data_quality_notes\":[],\"external_sources\":[]}}}\n", taskID, discCtx.Opportunity.ID)
+	fmt.Fprintf(&b, "{\"taskID\":\"%s\",\"taskType\":\"opportunity_discovery\",\"result\":{\"outputType\":\"opportunity_discovery\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"opportunity-discovery-report/v2\",\"opportunity_id\":\"%s\",\"summary\":\"...\",\"theme_chain\":[{\"layer\":\"上游稀缺供给\",\"rank\":1,\"representatives\":[\"600000\"],\"scarcity\":\"...\"}],\"candidates\":[{\"symbol\":\"600000\",\"market\":\"SH\",\"name\":\"示例股票\",\"instrument_type\":\"stock\",\"relation_type\":\"supply_chain\",\"rank\":1,\"relevance_score\":82,\"evidence_score\":70,\"market_risk_score\":45,\"confidence\":0.72,\"reason\":\"...\",\"risk_summary\":\"...\",\"suggested_strategy_intent\":\"...\",\"horizon_outlooks\":[{\"horizon\":\"short\",\"tradingDays\":5,\"asOfPrice\":10,\"direction\":\"bullish\",\"probabilityUp\":0.68,\"probabilityOutperform\":0.61,\"expectedPrice\":10.5,\"expectedReturnPct\":5,\"rangeLow\":9.5,\"rangeHigh\":11.2,\"targetPrice\":11,\"targetProbability\":0.42,\"downsideRiskPct\":6,\"confidence\":0.7,\"thesis\":\"...\",\"invalidConditions\":[\"...\"],\"uncertainties\":[],\"dataQuality\":\"healthy\"},{\"horizon\":\"medium\",\"tradingDays\":20,\"asOfPrice\":10,\"direction\":\"bullish\",\"probabilityUp\":0.64,\"probabilityOutperform\":0.58,\"expectedPrice\":10.8,\"expectedReturnPct\":8,\"rangeLow\":9,\"rangeHigh\":12,\"targetPrice\":11.5,\"targetProbability\":0.45,\"downsideRiskPct\":10,\"confidence\":0.66,\"thesis\":\"...\",\"invalidConditions\":[\"...\"],\"uncertainties\":[],\"dataQuality\":\"healthy\"},{\"horizon\":\"long\",\"tradingDays\":60,\"asOfPrice\":10,\"direction\":\"neutral\",\"probabilityUp\":0.55,\"probabilityOutperform\":0.51,\"expectedPrice\":10.6,\"expectedReturnPct\":6,\"rangeLow\":8.5,\"rangeHigh\":13,\"targetPrice\":12,\"targetProbability\":0.4,\"downsideRiskPct\":15,\"confidence\":0.58,\"thesis\":\"...\",\"invalidConditions\":[\"...\"],\"uncertainties\":[\"...\"],\"dataQuality\":\"degraded\"}]}],\"excluded\":[],\"data_quality_notes\":[],\"external_sources\":[]}}}\n", taskID, discCtx.Opportunity.ID)
 	b.WriteString("```\n\n")
 	b.WriteString("If external search/browse is unavailable, record the failure through MCP, return an empty candidates array, and explain the limitation in Chinese. Do not fabricate sources or candidates.\n")
 
 	maxPromptLen := 12000
 	if discCtx.Mode == OpportunityDiscoveryModeMarketScan {
-		maxPromptLen = 22000
+		maxPromptLen = 26000
 	}
 	if b.Len() > maxPromptLen {
 		return truncatePromptUTF8(b.String(), maxPromptLen-4000, 4000)
@@ -2134,6 +2137,8 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	b.WriteString("2. Separate broad-market moves, overseas/overnight peer moves, sector/theme shocks, company-specific news, stale data, and unrelated noise.\n")
 	b.WriteString("3. Evaluate impact against current holdings and portfolio permissions. Aggressive portfolio risk tolerance does not excuse ignoring material information shocks.\n")
 	b.WriteString("4. Review every holding and the trustedCandidates pool. A non-held symbol may appear only as build_position and only when it is present in trustedCandidates.\n")
+	b.WriteString("4a. For every holding, make your own conditional short/medium/long price forecast from the full context: short is 5 trading days, medium is 20, and long is 60. The probabilities and prices are analytical model estimates. Do not copy deterministic gate scores into probability fields and do not reduce this to indicator extrapolation. Reconcile trend, flow, market/sector regime, news themes, fundamentals/valuation, catalysts, crowding, conflicting evidence, and freshness.\n")
+	b.WriteString("4b. Also estimate the same three horizons for every portfolio as a whole, including probability of gain, probability of benchmark outperformance, expected return range, and expected maximum drawdown. Account for concentration and correlated holdings rather than summing single-name probabilities.\n")
 	b.WriteString("5. Before emitting any action other than hold, perform real public retrieval using Codex web_search or a named search/research/browse Agent tool, record compact source/claim metadata in research_audit, and reference those IDs from the action. MCP-only internal retrieval is not sufficient for an actionable plan.\n")
 	b.WriteString("5a. Keep public retrieval bounded: use at most 8 external search/fetch tool calls for this run, start with one targeted query per holding, fetch only the strongest relevant sources, and never retry the same query. More calls are not a substitute for evidence quality.\n")
 	b.WriteString("5b. Describe retrieval status precisely. Say external search is unavailable only when the tool cannot be invoked. If invocation succeeds but yields no useful result, say the search returned no usable result. If any public URL was fetched or recorded in research_audit, do not say external search is unavailable; say that public material was retrieved but no holding-specific causal evidence was verified when that is the actual limitation.\n")
@@ -2148,7 +2153,10 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 		b.WriteString("`impact_review_coverage` is required and must explicitly contain `holding_ids`, `monitor_ids`, `alert_ids`, `opportunity_ids`, and `strategy_ids`. Each list must exactly match the duplicate-free frozen identifiers returned from all pages for that object type; omitted, missing, invented, or duplicate identifiers make the review fail.\n")
 	}
 	b.WriteString("Allowed overall_risk_level values: low, medium, high, critical.\n")
-	b.WriteString("`action_plans` is required. Return exactly one plan for every current holding; additional non-held plans are optional and restricted to trustedCandidates. Do not use legacy `portfolio_actions` for v2.\n")
+	b.WriteString("`action_plans` is required. Return exactly one plan for every current holding; additional non-held plans are optional and restricted to trustedCandidates. Do not use legacy `portfolio_actions` for v3.\n")
+	b.WriteString("Every action plan must contain exactly three `horizon_outlooks` items: short/5, medium/20, and long/60 trading days. Each item contains horizon, tradingDays, asOfPrice, direction, probabilityUp, probabilityOutperform, expectedPrice, expectedReturnPct, rangeLow, rangeHigh, targetPrice, targetProbability for touching that target during the horizon, downsideRiskPct, confidence, thesis, invalidConditions, uncertainties, and dataQuality.\n")
+	b.WriteString("`portfolio_outlooks` is required and must contain exactly one item for every reviewed portfolio. Each portfolio item contains portfolio_id, portfolio_name, and three horizon_outlooks with horizon, tradingDays, direction, probabilityGain, probabilityOutperform, expectedReturnPct, rangeLowReturnPct, rangeHighReturnPct, expectedMaxDrawdownPct, confidence, summary, invalidConditions, uncertainties, and dataQuality.\n")
+	b.WriteString("Model forecast probabilities are distinct from action-plan confidence. If input data is stale, missing, or conflicting, still provide the best conditional estimate, mark dataQuality degraded/insufficient, list the uncertainty, and reduce forecast confidence. Use the cross-horizon pattern to decide one coherent action plan; do not mechanically create conflicting actions for each horizon.\n")
 	b.WriteString("Allowed actions: build_position, add_position, hold, reduce_position, exit_position. `hold` has no sizing. build/add use sizing `{mode:\"target_portfolio_pct\",value:(0,100]}`; reduce uses `{mode:\"available_quantity_pct\",value:(0,100]}`; exit uses the same mode with value 100.\n")
 	b.WriteString("Actionable trigger_mode is immediate or conditional. conditional requires conditions and trigger_policy all/any. Allowed condition types: price_above, price_below, price_between, pct_change_above, pct_change_below, daily_close_above, daily_close_below, portfolio_symbol_weight_above, portfolio_symbol_weight_below. Each condition needs a stable key and the applicable threshold or low/high values.\n")
 	b.WriteString("The server owns monitor_window and valid_until. Every conditional actionable plan is periodically monitored from publication until the server-set seven-day expiry; omit or ignore model-selected timing fields. Do not claim a narrower temporal scope such as 'only the next trading window/session' in reason or risk_notes because that scope is not an executable condition. Describe the trigger as applying during the plan validity period.\n")
@@ -2159,17 +2167,75 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	if pack.NewsContext != nil {
 		coverageExample = `,"impact_review_coverage":{"holding_ids":[],"monitor_ids":[],"alert_ids":[],"opportunity_ids":[],"strategy_ids":[]}`
 	}
-	fmt.Fprintf(&b, "{\"taskID\":\"%s\",\"taskType\":\"%s\",\"result\":{\"outputType\":\"%s\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"%s\",\"overall_risk_level\":\"high\",\"run_summary\":\"...\",\"negative_items\":[],\"positive_items\":[],\"noise_items\":[],\"affected_holdings\":[{\"symbol\":\"000000\",\"market\":\"SZ\",\"name\":\"示例\",\"risk_level\":\"high\",\"direction\":\"negative\",\"reasons\":[\"...\"]}],\"action_plans\":[{\"id\":\"plan-1\",\"portfolio_id\":\"portfolio-id\",\"symbol\":\"000000\",\"market\":\"SZ\",\"name\":\"示例\",\"action\":\"reduce_position\",\"trigger_mode\":\"conditional\",\"trigger_policy\":\"all\",\"conditions\":[{\"key\":\"price-risk\",\"type\":\"price_below\",\"threshold\":10}],\"sizing\":{\"mode\":\"available_quantity_pct\",\"value\":50},\"reason\":\"...\",\"risk_notes\":\"...\",\"confidence\":0.72,\"evidence_refs\":[],\"research_refs\":[\"research-1\"]}],\"research_audit\":[{\"id\":\"research-1\",\"kind\":\"web_search\",\"query\":\"...\",\"source\":\"https://example.com/source\",\"source_title\":\"...\",\"checked_at\":\"RFC3339\",\"claim\":\"...\"}],\"review_requests\":[],\"data_quality_notes\":[],\"next_watch_focus\":[],\"checked_news_thread_version_ids\":[]%s}}}\n", taskID, AgentTaskTypePortfolioSentinel, PortfolioSentinelOutputType, PortfolioSentinelReportSchemaVersion, coverageExample)
+	example := portfolioSentinelPromptExample(taskID, coverageExample != "")
+	exampleRaw, _ := json.Marshal(example)
+	b.Write(exampleRaw)
+	b.WriteString("\n")
 	b.WriteString("```\n\n")
 	b.WriteString("Important: If evidence is insufficient for action, use hold for the affected holding and explain the uncertainty. Do not force an actionable plan.\n")
 
 	// ponytail: keep one fixed prompt-size guard; if model limits change, raise it while
 	// continuing to trim only the replaceable context body, never the review contract.
-	const maxPromptLen = 14000
+	const maxPromptLen = 22000
 	prompt := b.String()
 	contextLimit := maxPromptLen - (len(prompt) - len(contextPlaceholder))
 	contextBody := truncatePromptUTF8ToLimit(string(raw), contextLimit)
 	return strings.Replace(prompt, contextPlaceholder, contextBody, 1)
+}
+
+func portfolioSentinelPromptExample(taskID string, includeCoverage bool) map[string]any {
+	priceOutlooks := []map[string]any{
+		{
+			"horizon": ModelHorizonShort, "tradingDays": 5, "asOfPrice": 10.0,
+			"direction": ModelOutlookBullish, "probabilityUp": 0.68, "probabilityOutperform": 0.61,
+			"expectedPrice": 10.5, "expectedReturnPct": 5.0, "rangeLow": 9.5, "rangeHigh": 11.2,
+			"targetPrice": 11.0, "targetProbability": 0.42, "downsideRiskPct": 6.0, "confidence": 0.70,
+			"thesis": "...", "invalidConditions": []string{"..."}, "uncertainties": []string{}, "dataQuality": ModelOutlookDataHealthy,
+		},
+		{
+			"horizon": ModelHorizonMedium, "tradingDays": 20, "asOfPrice": 10.0,
+			"direction": ModelOutlookBullish, "probabilityUp": 0.64, "probabilityOutperform": 0.58,
+			"expectedPrice": 10.8, "expectedReturnPct": 8.0, "rangeLow": 9.0, "rangeHigh": 12.0,
+			"targetPrice": 11.5, "targetProbability": 0.45, "downsideRiskPct": 10.0, "confidence": 0.66,
+			"thesis": "...", "invalidConditions": []string{"..."}, "uncertainties": []string{}, "dataQuality": ModelOutlookDataHealthy,
+		},
+		{
+			"horizon": ModelHorizonLong, "tradingDays": 60, "asOfPrice": 10.0,
+			"direction": ModelOutlookNeutral, "probabilityUp": 0.55, "probabilityOutperform": 0.51,
+			"expectedPrice": 10.6, "expectedReturnPct": 6.0, "rangeLow": 8.5, "rangeHigh": 13.0,
+			"targetPrice": 12.0, "targetProbability": 0.40, "downsideRiskPct": 15.0, "confidence": 0.58,
+			"thesis": "...", "invalidConditions": []string{"..."}, "uncertainties": []string{"..."}, "dataQuality": ModelOutlookDataDegraded,
+		},
+	}
+	portfolioOutlooks := []map[string]any{
+		{"horizon": ModelHorizonShort, "tradingDays": 5, "direction": ModelOutlookBullish, "probabilityGain": 0.64, "probabilityOutperform": 0.57, "expectedReturnPct": 2.5, "rangeLowReturnPct": -3.0, "rangeHighReturnPct": 7.0, "expectedMaxDrawdownPct": 5.0, "confidence": 0.68, "summary": "...", "invalidConditions": []string{"..."}, "uncertainties": []string{}, "dataQuality": ModelOutlookDataHealthy},
+		{"horizon": ModelHorizonMedium, "tradingDays": 20, "direction": ModelOutlookNeutral, "probabilityGain": 0.58, "probabilityOutperform": 0.52, "expectedReturnPct": 3.5, "rangeLowReturnPct": -7.0, "rangeHighReturnPct": 12.0, "expectedMaxDrawdownPct": 9.0, "confidence": 0.62, "summary": "...", "invalidConditions": []string{"..."}, "uncertainties": []string{}, "dataQuality": ModelOutlookDataHealthy},
+		{"horizon": ModelHorizonLong, "tradingDays": 60, "direction": ModelOutlookNeutral, "probabilityGain": 0.55, "probabilityOutperform": 0.50, "expectedReturnPct": 5.0, "rangeLowReturnPct": -12.0, "rangeHighReturnPct": 18.0, "expectedMaxDrawdownPct": 15.0, "confidence": 0.55, "summary": "...", "invalidConditions": []string{"..."}, "uncertainties": []string{"..."}, "dataQuality": ModelOutlookDataDegraded},
+	}
+	report := map[string]any{
+		"schema_version": PortfolioSentinelReportSchemaVersion, "overall_risk_level": PortfolioSentinelRiskMedium,
+		"run_summary": "...", "positive_items": []any{}, "negative_items": []any{}, "noise_items": []any{},
+		"affected_holdings": []any{},
+		"action_plans": []any{map[string]any{
+			"id": "plan-1", "portfolio_id": "portfolio-id", "symbol": "600000", "market": "SH", "name": "示例股票",
+			"action": PortfolioSentinelPlanHold, "trigger_mode": PortfolioSentinelTriggerImmediate, "trigger_policy": nil, "conditions": nil, "sizing": nil,
+			"reason": "...", "risk_notes": "...", "confidence": 0.66, "horizon_outlooks": priceOutlooks,
+			"evidence_refs": []string{}, "research_refs": []string{},
+		}},
+		"portfolio_outlooks": []any{map[string]any{"portfolio_id": "portfolio-id", "portfolio_name": "示例组合", "horizon_outlooks": portfolioOutlooks}},
+		"research_audit":     []any{}, "review_requests": []any{}, "data_quality_notes": []string{},
+		"next_watch_focus": []string{"..."}, "checked_news_thread_version_ids": []string{}, "impact_review_coverage": nil,
+	}
+	if includeCoverage {
+		report["impact_review_coverage"] = map[string]any{
+			"holding_ids": []string{}, "monitor_ids": []string{}, "alert_ids": []string{},
+			"opportunity_ids": []string{}, "strategy_ids": []string{},
+		}
+	}
+	return map[string]any{
+		"taskID": taskID, "taskType": AgentTaskTypePortfolioSentinel,
+		"result": map[string]any{"outputType": PortfolioSentinelOutputType, "resultSummary": "...", "confidence": 0.66, "result": report},
+	}
 }
 
 type portfolioSentinelRequiredHolding struct {
@@ -2347,19 +2413,21 @@ func buildStrategyGenerationPrompt(taskID string, genCtx StrategyGenerationConte
 	b.WriteString("## Output Requirements\n\n")
 	b.WriteString("You must submit exactly ONE result using stock_agent.submit_result.\n")
 	b.WriteString("The MCP taskType must be `strategy_generation` and result.outputType must be `strategy_generation`.\n")
-	b.WriteString("Return a strategy-generation report with schema_version `strategy-generation-report/v1`.\n")
+	b.WriteString("Return a strategy-generation report with schema_version `strategy-generation-report/v2`.\n")
 	b.WriteString("run_summary.mode must exactly equal context.input.mode.\n")
 	b.WriteString("run_summary.key_conflicts and run_summary.data_quality_notes MUST be flat arrays of short human-readable strings (one concise sentence per element). Put material data conflicts and verification attempts there as plain strings; include compact external/internal source references in draft evidence_summary or risk_summary. Never put objects or nested arrays inside key_conflicts or data_quality_notes.\n")
 	b.WriteString("Every new strategy draft must use `playbook.rules[]`. Do not write `playbook.actions[]`, `actions`, `action_type`, `add`, `reduce`, or `clear`.\n")
 	b.WriteString("Allowed rule.action values are: observe, build_position, add_position, hold, reduce_position, exit_position.\n")
-	b.WriteString("Rule fields are exactly: id, action, title, trigger, preconditions, target, risk, dataPrefilters, portfolioPrefilters, priority.\n")
+	b.WriteString("Rule fields are exactly: id, action, title, trigger, preconditions, target, risk, horizon, forecast_basis, dataPrefilters, portfolioPrefilters, priority.\n")
 	b.WriteString("Rule dataPrefilters and portfolioPrefilters must always be JSON arrays. Use [] when there is no structured prefilter; never use a string.\n")
+	b.WriteString("Every draft, including strategy_patch and no_change, must include exactly three horizon_outlooks: short/5 trading days, medium/20, and long/60. The model must estimate probabilityUp, probabilityOutperform, expectedPrice/return, price range, one targetPrice with its during-horizon targetProbability, downsideRiskPct, confidence, thesis, invalidConditions, uncertainties, and dataQuality. Use the opportunity candidate's supplied outlooks as evidence when present, but independently revise them when fresher verified facts justify a change.\n")
+	b.WriteString("Every playbook rule must state horizon as short, medium, long, or cross_horizon and a concise forecast_basis explaining which horizon forecast or cross-horizon conflict supports the rule. Generate coordinated scenario branches rather than three contradictory standalone strategies.\n")
 	b.WriteString("The context decisionGates map is authoritative. A draft must use only actions listed in that symbol's allowedActions. Fill decision_basis with short basis labels (for example price, flow, catalyst, fundamental) and evidence_ref_ids with the exact supplied evidence identifiers used. The server blocks catalyst/fundamental-led entries when point-in-time financial evidence is incomplete and normalizes entry thresholds closer than 0.5 ATR.\n")
 	b.WriteString("Do not output proposed_operation. If a future trade review is needed, use portfolio_aware_suggestion.trade_signal or review_request only.\n\n")
 
 	b.WriteString("Example submit_result shape:\n")
 	b.WriteString("```json\n")
-	b.WriteString("{\"taskID\":\"<TASK_ID>\",\"taskType\":\"strategy_generation\",\"result\":{\"outputType\":\"strategy_generation\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"strategy-generation-report/v1\",\"run_summary\":{\"mode\":\"manual_target\",\"overall_conclusion\":\"...\",\"key_conflicts\":[],\"data_quality_notes\":[]},\"drafts\":[{\"symbol\":\"302132\",\"market\":\"SZ\",\"name\":\"中航成飞\",\"draft_type\":\"new_strategy\",\"strategy_bias\":\"bullish\",\"thesis\":\"...\",\"confidence\":0.72,\"decision_basis\":[\"price\"],\"evidence_ref_ids\":[],\"evidence_summary\":[],\"risk_summary\":[],\"invalid_conditions\":[],\"playbook\":{\"version\":\"v1\",\"rules\":[{\"id\":\"observe_1\",\"action\":\"observe\",\"title\":\"观察\",\"trigger\":\"...\",\"preconditions\":\"...\",\"target\":\"...\",\"risk\":\"...\",\"dataPrefilters\":[],\"portfolioPrefilters\":[],\"priority\":1}]},\"portfolio_aware_suggestion\":{\"trade_signal\":\"observe\",\"target_position_hint\":\"\",\"review_request\":\"\"}}]}}}\n")
+	b.WriteString("{\"taskID\":\"<TASK_ID>\",\"taskType\":\"strategy_generation\",\"result\":{\"outputType\":\"strategy_generation\",\"resultSummary\":\"...\",\"confidence\":0.7,\"result\":{\"schema_version\":\"strategy-generation-report/v2\",\"run_summary\":{\"mode\":\"manual_target\",\"overall_conclusion\":\"...\",\"key_conflicts\":[],\"data_quality_notes\":[]},\"drafts\":[{\"symbol\":\"302132\",\"market\":\"SZ\",\"name\":\"中航成飞\",\"draft_type\":\"new_strategy\",\"strategy_bias\":\"bullish\",\"thesis\":\"...\",\"confidence\":0.72,\"decision_basis\":[\"price\"],\"evidence_ref_ids\":[],\"evidence_summary\":[],\"risk_summary\":[],\"invalid_conditions\":[],\"horizon_outlooks\":[{\"horizon\":\"short\",\"tradingDays\":5,\"asOfPrice\":10,\"direction\":\"bullish\",\"probabilityUp\":0.68,\"probabilityOutperform\":0.61,\"expectedPrice\":10.5,\"expectedReturnPct\":5,\"rangeLow\":9.5,\"rangeHigh\":11.2,\"targetPrice\":11,\"targetProbability\":0.42,\"downsideRiskPct\":6,\"confidence\":0.7,\"thesis\":\"...\",\"invalidConditions\":[\"...\"],\"uncertainties\":[],\"dataQuality\":\"healthy\"},{\"horizon\":\"medium\",\"tradingDays\":20,\"asOfPrice\":10,\"direction\":\"bullish\",\"probabilityUp\":0.64,\"probabilityOutperform\":0.58,\"expectedPrice\":10.8,\"expectedReturnPct\":8,\"rangeLow\":9,\"rangeHigh\":12,\"targetPrice\":11.5,\"targetProbability\":0.45,\"downsideRiskPct\":10,\"confidence\":0.66,\"thesis\":\"...\",\"invalidConditions\":[\"...\"],\"uncertainties\":[],\"dataQuality\":\"healthy\"},{\"horizon\":\"long\",\"tradingDays\":60,\"asOfPrice\":10,\"direction\":\"neutral\",\"probabilityUp\":0.55,\"probabilityOutperform\":0.51,\"expectedPrice\":10.6,\"expectedReturnPct\":6,\"rangeLow\":8.5,\"rangeHigh\":13,\"targetPrice\":12,\"targetProbability\":0.4,\"downsideRiskPct\":15,\"confidence\":0.58,\"thesis\":\"...\",\"invalidConditions\":[\"...\"],\"uncertainties\":[\"...\"],\"dataQuality\":\"degraded\"}],\"playbook\":{\"version\":\"v1\",\"rules\":[{\"id\":\"observe_1\",\"action\":\"observe\",\"title\":\"观察\",\"trigger\":\"...\",\"preconditions\":\"...\",\"target\":\"...\",\"risk\":\"...\",\"horizon\":\"cross_horizon\",\"forecast_basis\":\"短中期偏多但长期不确定\",\"dataPrefilters\":[],\"portfolioPrefilters\":[],\"priority\":1}]},\"portfolio_aware_suggestion\":{\"trade_signal\":\"observe\",\"target_position_hint\":\"\",\"review_request\":\"\"}}]}}}\n")
 	b.WriteString("```\n\n")
 
 	b.WriteString("### Important\n\n")
@@ -2494,15 +2562,16 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 	b.WriteString("## Required Output\n\n")
 	if pack.StepKey == StrategyGenerationStepFormatter {
 		b.WriteString("You are the formatter. Do not introduce new investment claims. Convert the prior results into the final strategy-generation report.\n")
-		b.WriteString("Return result.result as schema_version `strategy-generation-report/v1` with run_summary and drafts[]. run_summary.mode must exactly equal context.input.mode.\n")
+		b.WriteString("Return result.result as schema_version `strategy-generation-report/v2` with run_summary and drafts[]. run_summary.mode must exactly equal context.input.mode.\n")
 		b.WriteString("Every draft must use exactly these top-level identity fields: symbol, market, name, draft_type. draft_type must be new_strategy, strategy_patch, or no_change. Never replace them with instrument, target, type, or direction.\n")
 		b.WriteString("Every new_strategy draft must include a non-empty thesis. Use the canonical thesis field; never replace it with rationale.\n")
 		b.WriteString("Every new_strategy draft must include its own numeric confidence greater than 0 and at most 1. Do not omit it even when the outer result already has confidence.\n")
 		b.WriteString("Every draft must preserve decision_basis as short basis labels and evidence_ref_ids as the exact supplied identifiers used. Include the authoritative context.decisionGates[symbol].id in evidence_ref_ids; never invent an identifier.\n")
+		b.WriteString("Every draft must copy exactly three horizon_outlooks from the portfolio judge: short/5 trading days, medium/20, and long/60. Do not add, remove, or recalculate forecast probabilities in the formatter.\n")
 		b.WriteString("Every new_strategy draft must use playbook.rules[]. dataPrefilters and portfolioPrefilters must be arrays. Use [] when no structured prefilter exists.\n")
-		b.WriteString("Every playbook rule must use exactly these canonical fields: id, action, title, trigger, preconditions, target, risk, dataPrefilters, portfolioPrefilters, priority. Never emit rule_id, signal, condition, on_true, or on_false.\n")
-		b.WriteString("Canonical draft fields include: {\"symbol\":\"600000\",\"market\":\"SH\",\"name\":\"示例股票\",\"draft_type\":\"new_strategy\",\"thesis\":\"...\",\"confidence\":0.7,\"playbook\":{\"rules\":[]}}.\n")
-		b.WriteString("Canonical rule example: {\"id\":\"observe_1\",\"action\":\"observe\",\"title\":\"观察\",\"trigger\":\"...\",\"preconditions\":\"...\",\"target\":\"...\",\"risk\":\"...\",\"dataPrefilters\":[],\"portfolioPrefilters\":[],\"priority\":1}.\n")
+		b.WriteString("Every playbook rule must use exactly these canonical fields: id, action, title, trigger, preconditions, target, risk, horizon, forecast_basis, dataPrefilters, portfolioPrefilters, priority. horizon must be short, medium, long, or cross_horizon. Never emit rule_id, signal, condition, on_true, or on_false.\n")
+		b.WriteString("Canonical draft fields are symbol, market, name, draft_type, thesis, confidence, horizon_outlooks, and playbook. The horizon_outlooks value must be the portfolio judge's complete three-item array.\n")
+		b.WriteString("Canonical rule example: {\"id\":\"observe_1\",\"action\":\"observe\",\"title\":\"观察\",\"trigger\":\"...\",\"preconditions\":\"...\",\"target\":\"...\",\"risk\":\"...\",\"horizon\":\"cross_horizon\",\"forecast_basis\":\"短期过热但中期仍偏多\",\"dataPrefilters\":[],\"portfolioPrefilters\":[],\"priority\":1}.\n")
 		b.WriteString("Do not output proposed_operation. Use portfolio_aware_suggestion.review_request when Review is needed.\n\n")
 	} else {
 		b.WriteString("Return result.result as a `strategy-generation-step/v1` object:\n")

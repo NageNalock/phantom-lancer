@@ -412,7 +412,7 @@ func (f fakeOperationReviewExecutor) ExecuteStrategyGeneration(ctx context.Conte
 	if result == nil {
 		mode := firstNonEmpty(pack.Input.Mode, pack.Mode, StrategyGenerationModePortfolio)
 		result = map[string]any{
-			"schema_version": "strategy-generation-report/v1",
+			"schema_version": StrategyGenerationReportSchemaVersion,
 			"run_summary":    map[string]any{"mode": mode},
 			"drafts":         []any{},
 		}

@@ -1238,7 +1238,7 @@ func (f fakeDebugAgentExecutor) ExecuteStrategyGeneration(ctx context.Context, t
 		OutputType:    AgentTaskTypeStrategyGeneration,
 		ResultSummary: "strategy generation ok",
 		Result: map[string]any{
-			"schema_version": "strategy-generation-report/v1",
+			"schema_version": StrategyGenerationReportSchemaVersion,
 			"run_summary":    map[string]any{"mode": mode},
 			"drafts":         []any{},
 		},

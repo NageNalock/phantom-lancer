@@ -692,6 +692,9 @@ func validateStrategyGenerationReport(report StrategyGenerationReport) error {
 		if !validStrategyGenerationDraftType(strings.TrimSpace(draft.DraftType)) {
 			return fmt.Errorf("%w: drafts[%d].draft_type %q is invalid", ErrInvalidStrategyGenerationResult, draftIndex, draft.DraftType)
 		}
+		if err := validateModelHorizonOutlooks(draft.HorizonOutlooks); err != nil {
+			return fmt.Errorf("%w: drafts[%d].horizon_outlooks are incomplete or invalid", ErrInvalidStrategyGenerationResult, draftIndex)
+		}
 		if draft.DraftType != StrategyGenerationDraftTypeNewStrategy {
 			continue
 		}
@@ -708,8 +711,9 @@ func validateStrategyGenerationReport(report StrategyGenerationReport) error {
 			return fmt.Errorf("%w: drafts[%d].playbook.rules is empty", ErrInvalidStrategyGenerationResult, draftIndex)
 		}
 		for ruleIndex, rule := range draft.Playbook.Rules {
-			if strings.TrimSpace(rule.ID) == "" || !validStrategyGenerationRuleAction(strings.TrimSpace(rule.Action)) {
-				return fmt.Errorf("%w: drafts[%d].playbook.rules[%d] requires id and valid action", ErrInvalidStrategyGenerationResult, draftIndex, ruleIndex)
+			if strings.TrimSpace(rule.ID) == "" || !validStrategyGenerationRuleAction(strings.TrimSpace(rule.Action)) ||
+				!validStrategyGenerationRuleHorizon(rule.Horizon) || strings.TrimSpace(rule.ForecastBasis) == "" {
+				return fmt.Errorf("%w: drafts[%d].playbook.rules[%d] requires id, action, horizon, and forecast_basis", ErrInvalidStrategyGenerationResult, draftIndex, ruleIndex)
 			}
 		}
 	}
@@ -886,6 +890,7 @@ func (s *Service) strategyCreateRequestFromGenerationDraft(run AgentRun, submitt
 				"decisionBasis":            draft.DecisionBasis,
 				"evidenceRefIds":           draft.EvidenceRefIDs,
 				"gateSnapshotId":           draft.GateSnapshotID,
+				"horizonOutlooks":          sanitizeModelHorizonOutlooks(draft.HorizonOutlooks),
 			},
 		},
 		CreatedBy: StrategySourceAgent,
@@ -1068,6 +1073,15 @@ func strategyGenerationDraftDirection(draft StrategyGenerationDraft) (string, er
 		return "", err
 	}
 	return direction, nil
+}
+
+func validStrategyGenerationRuleHorizon(value string) bool {
+	switch strings.TrimSpace(value) {
+	case ModelHorizonShort, ModelHorizonMedium, ModelHorizonLong, "cross_horizon":
+		return true
+	default:
+		return false
+	}
 }
 
 func strategyGenerationEntryConditions(playbook StrategyGenerationPlaybook) []string {

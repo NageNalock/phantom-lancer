@@ -436,6 +436,7 @@ func scanOpportunityCandidate(row rowScanner) (OpportunityCandidate, error) {
 		return OpportunityCandidate{}, err
 	}
 	item.Metadata = unmarshalMap(metadataJSON)
+	item.HorizonOutlooks = modelHorizonOutlooksFromMetadata(item.Metadata)
 	return item, nil
 }
 
@@ -448,9 +449,7 @@ func (s *Store) UpsertOpportunityCandidate(ctx context.Context, item Opportunity
 		item.CreatedAt = now
 	}
 	item.UpdatedAt = now
-	if item.Metadata == nil {
-		item.Metadata = map[string]any{}
-	}
+	item.Metadata = opportunityCandidateMetadataWithHorizonOutlooks(item.Metadata, item.HorizonOutlooks)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO stockv2_opportunity_candidates
 			(id, opportunity_id, run_id, symbol, market, instrument_type, name, relation_type,
@@ -506,9 +505,7 @@ func (s *Store) GetOpportunityCandidateByRunSymbol(ctx context.Context, runID, s
 }
 
 func (s *Store) UpdateOpportunityCandidate(ctx context.Context, item OpportunityCandidate) (OpportunityCandidate, error) {
-	if item.Metadata == nil {
-		item.Metadata = map[string]any{}
-	}
+	item.Metadata = opportunityCandidateMetadataWithHorizonOutlooks(item.Metadata, item.HorizonOutlooks)
 	item.UpdatedAt = time.Now()
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE stockv2_opportunity_candidates

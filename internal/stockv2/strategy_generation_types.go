@@ -14,7 +14,7 @@ const (
 	StrategyGenerationModePortfolio        = "portfolio_strategy_diagnosis"
 
 	StrategyGenerationInputSchemaVersion  = "strategy-generation-input/v1"
-	StrategyGenerationReportSchemaVersion = "strategy-generation-report/v1"
+	StrategyGenerationReportSchemaVersion = "strategy-generation-report/v2"
 	StrategyGenerationOutputType          = AgentTaskTypeStrategyGeneration
 
 	StrategyGenerationDraftTypeNewStrategy   = "new_strategy"
@@ -139,6 +139,7 @@ type StrategyGenerationDraft struct {
 	DecisionBasis            []string                                   `json:"decision_basis,omitempty"`
 	EvidenceRefIDs           []string                                   `json:"evidence_ref_ids,omitempty"`
 	GateSnapshotID           string                                     `json:"gate_snapshot_id,omitempty"`
+	HorizonOutlooks          []ModelHorizonOutlook                      `json:"horizon_outlooks"`
 	Playbook                 StrategyGenerationPlaybook                 `json:"playbook"`
 	PortfolioAwareSuggestion StrategyGenerationPortfolioAwareSuggestion `json:"portfolio_aware_suggestion,omitempty"`
 }
@@ -156,6 +157,8 @@ type StrategyGenerationPlaybookRule struct {
 	Preconditions       string           `json:"preconditions,omitempty"`
 	Target              string           `json:"target,omitempty"`
 	Risk                string           `json:"risk,omitempty"`
+	Horizon             string           `json:"horizon,omitempty"`
+	ForecastBasis       string           `json:"forecast_basis,omitempty"`
 	DataPrefilters      []map[string]any `json:"dataPrefilters,omitempty"`
 	PortfolioPrefilters []map[string]any `json:"portfolioPrefilters,omitempty"`
 	Priority            int              `json:"priority,omitempty"`

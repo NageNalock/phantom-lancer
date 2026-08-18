@@ -23,7 +23,7 @@ func TestPortfolioSentinelDirectOutputSchemaConstrainsResultCollections(t *testi
 	}
 	result := properties["result"].(map[string]any)["properties"].(map[string]any)["result"].(map[string]any)
 	reportProperties := result["properties"].(map[string]any)
-	for _, field := range []string{"negative_items", "review_requests", "action_plans"} {
+	for _, field := range []string{"negative_items", "review_requests", "action_plans", "portfolio_outlooks"} {
 		fieldSchema := reportProperties[field].(map[string]any)
 		if fieldSchema["type"] != "array" || fieldSchema["items"].(map[string]any)["type"] != "object" {
 			t.Fatalf("%s schema = %#v", field, fieldSchema)
@@ -31,6 +31,10 @@ func TestPortfolioSentinelDirectOutputSchemaConstrainsResultCollections(t *testi
 	}
 	assertStrictSchemaRequiresEveryProperty(t, schema, "root")
 	actionPlan := reportProperties["action_plans"].(map[string]any)["items"].(map[string]any)
+	horizonOutlooks := actionPlan["properties"].(map[string]any)["horizon_outlooks"].(map[string]any)
+	if horizonOutlooks["minItems"] != float64(3) || horizonOutlooks["maxItems"] != float64(3) {
+		t.Fatalf("horizon outlook schema = %#v, want exactly three items", horizonOutlooks)
+	}
 	sizingSchema := actionPlan["properties"].(map[string]any)["sizing"].(map[string]any)
 	if !schemaAllowsType(sizingSchema, "object") || !schemaAllowsType(sizingSchema, "null") {
 		t.Fatalf("optional sizing schema = %#v, want object or null", sizingSchema)

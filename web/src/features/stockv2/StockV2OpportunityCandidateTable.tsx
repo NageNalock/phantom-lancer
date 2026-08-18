@@ -18,6 +18,7 @@ import {
 } from "../../domain/labels";
 import { StockV2AgentRunDetailDrawer } from "./StockV2AgentExecutionLedger";
 import { SimplePager } from "./StockV2EmbeddingStatusSection";
+import { ModelHorizonOutlookCompact } from "./StockV2ModelOutlook";
 
 const PAGE_SIZE = 10;
 
@@ -145,7 +146,7 @@ export function StockV2OpportunityCandidateTable({
   return (
     <>
       <div className="max-w-full overflow-x-auto overscroll-x-contain" tabIndex={0} aria-label="候选池表格，可横向滚动查看全部列">
-        <table className="w-full min-w-[800px] border-collapse text-xs">
+        <table className="w-full min-w-[940px] border-collapse text-xs">
           <thead>
             <tr className="border-b border-[var(--line)] text-left text-[var(--muted)]">
               <Th>#</Th>
@@ -155,6 +156,7 @@ export function StockV2OpportunityCandidateTable({
               <Th>证据强度</Th>
               <Th>市场风险</Th>
               <Th>置信度</Th>
+              <Th>5 日模型预期</Th>
               <Th>证据数</Th>
               <Th>状态</Th>
               <Th>操作</Th>
@@ -193,6 +195,7 @@ export function StockV2OpportunityCandidateTable({
                       {typeof c.confidence === "number" ? `${Math.round(c.confidence * 100)}%` : "-"}
                     </span>
                   </Td>
+                  <Td><ModelHorizonOutlookCompact items={c.horizonOutlooks} /></Td>
                   <Td><span className="text-[var(--muted-strong)]">{c.evidenceCount ?? "-"}</span></Td>
                   <Td>
                     <Pill tone={stockV2CandidateStatusTone(c.status)}>{stockV2CandidateStatusLabel(c.status)}</Pill>

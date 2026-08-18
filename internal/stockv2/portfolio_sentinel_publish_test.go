@@ -176,9 +176,14 @@ func TestPortfolioSentinelV2PublishesCurrentConditionalPlanStrategy(t *testing.T
 				"conditions": []any{map[string]any{
 					"key": "risk-price", "type": WatchRulePriceBelow, "threshold": 9.5,
 				}},
-				"sizing":        map[string]any{"mode": PortfolioSentinelSizingAvailableQuantityPct, "value": 50},
-				"reason":        "价格跌破已验证风险位",
-				"research_refs": []any{"research-1"},
+				"sizing":           map[string]any{"mode": PortfolioSentinelSizingAvailableQuantityPct, "value": 50},
+				"reason":           "价格跌破已验证风险位",
+				"research_refs":    []any{"research-1"},
+				"horizon_outlooks": testModelHorizonOutlooks(10),
+			}},
+			"portfolio_outlooks": []any{map[string]any{
+				"portfolio_id": portfolio.ID, "portfolio_name": portfolio.Name,
+				"horizon_outlooks": testModelPortfolioHorizonOutlooks(),
 			}},
 			"research_audit": []any{map[string]any{
 				"id": "research-1", "kind": "web_search", "source": "https://example.com/public?utm_source=test#fragment",

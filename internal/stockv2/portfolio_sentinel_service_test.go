@@ -129,7 +129,7 @@ func TestBuildPortfolioSentinelContextIncludesLatestPriorJudgmentAsAdvisoryMemor
 			t.Fatalf("create prior run: %v", err)
 		}
 		report := PortfolioSentinelReport{
-			SchemaVersion:    PortfolioSentinelReportSchemaVersion,
+			SchemaVersion:    portfolioSentinelLegacySchemaVersionV2,
 			OverallRiskLevel: PortfolioSentinelRiskMedium,
 			RunSummary:       "prior",
 			AffectedHoldings: []PortfolioSentinelAffectedHolding{{
@@ -148,7 +148,7 @@ func TestBuildPortfolioSentinelContextIncludesLatestPriorJudgmentAsAdvisoryMemor
 			}},
 		}
 		if _, err := svc.store.CreatePortfolioSentinelResult(ctx, PortfolioSentinelResult{
-			RunID: run.ID, SchemaVersion: PortfolioSentinelReportSchemaVersion,
+			RunID: run.ID, SchemaVersion: portfolioSentinelLegacySchemaVersionV2,
 			RawResult: portfolioSentinelReportMap(report),
 		}); err != nil {
 			t.Fatalf("create prior result: %v", err)

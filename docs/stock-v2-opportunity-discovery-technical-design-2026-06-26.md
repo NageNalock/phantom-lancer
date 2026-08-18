@@ -6,7 +6,7 @@
 >
 > REPLACES：无。本文补充 `stock-agent-workbench-v2-key-points-2026-06-18.md` 中 `Opportunity`、`Theme`、`GeneratedStrategy`、`AgentRun` 和 `DecisionLedger` 的机会发现落地细节。
 >
-> 相关文档：`docs/stock-v2-strategy-generation-design-2026-06-26.md` 定义候选进入策略生成后的 `strategy_generation` 流程；`docs/stock-v2-opportunity-market-scan-design-2026-08-10.md` 定义服务端先做确定性主板预筛、再复用本任务做有界候选复核的自动扫描模式。
+> 相关文档：`docs/stock-v2-strategy-generation-design-2026-06-26.md` 定义候选进入策略生成后的 `strategy_generation` 流程；`docs/stock-v2-model-horizon-outlook-design-2026-08-18.md` 定义模型多周期预期；`docs/stock-v2-opportunity-market-scan-design-2026-08-10.md` 定义服务端先做确定性主板预筛、再复用本任务做有界候选复核的自动扫描模式。
 
 ## 1. 目标
 
@@ -403,7 +403,7 @@ opportunity_discovery
 
 ```json
 {
-  "schema_version": "opportunity-discovery-report/v1",
+  "schema_version": "opportunity-discovery-report/v2",
   "opportunity_id": "opp_xxx",
   "summary": "本次机会发现摘要",
   "theme_chain": [
@@ -428,7 +428,29 @@ opportunity_discovery
       "confidence": 0.72,
       "reason": "相关原因",
       "risk_summary": "主要风险",
-      "suggested_strategy_intent": "建议后续策略生成关注点"
+      "suggested_strategy_intent": "建议后续策略生成关注点",
+      "horizon_outlooks": [
+        {
+          "horizon": "short",
+          "tradingDays": 5,
+          "asOfPrice": 10,
+          "direction": "bullish",
+          "probabilityUp": 0.68,
+          "probabilityOutperform": 0.61,
+          "expectedPrice": 10.5,
+          "expectedReturnPct": 5,
+          "rangeLow": 9.5,
+          "rangeHigh": 11.2,
+          "targetPrice": 11,
+          "targetProbability": 0.42,
+          "downsideRiskPct": 6,
+          "confidence": 0.7,
+          "thesis": "模型综合证据后的条件判断",
+          "invalidConditions": ["关键催化或趋势条件失效"],
+          "uncertainties": [],
+          "dataQuality": "healthy"
+        }
+      ]
     }
   ],
   "excluded": [
@@ -442,13 +464,16 @@ opportunity_discovery
 }
 ```
 
+上例为避免重复只展开 short 项；真实 v2 输出必须同时给出同结构的 medium/20 和 long/60 项。
+
 主程序校验规则：
 
-- `schema_version` 必须为 `opportunity-discovery-report/v1`。
+- 新运行的 `schema_version` 必须为 `opportunity-discovery-report/v2`。
 - `opportunity_id` 必须匹配当前 run。
 - 候选 `symbol` 必须存在于 StockV2 主数据。
 - 分数必须在 0 到 100 之间。
 - `confidence` 必须在 0 到 1 之间。
+- 每个候选必须包含 short/5、medium/20、long/60 三个模型条件预测；概率、预期价和区间由模型分析生成，服务端只校验字段范围、周期完整性和区间一致性。
 - 不允许包含操作单、持仓修改或策略激活指令。
 - 如果候选声称来自语义向量召回，必须能追溯到对应 embedding model、向量资产和 evidence 记录。
 

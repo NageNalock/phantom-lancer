@@ -52,7 +52,7 @@ const (
 	OpportunityRelationCompetitor  = "competitor"
 	OpportunityRelationWeak        = "weak"
 
-	OpportunityDiscoveryReportSchemaVersion = "opportunity-discovery-report/v1"
+	OpportunityDiscoveryReportSchemaVersion = "opportunity-discovery-report/v2"
 	OpportunityDiscoveryOutputType          = "opportunity_discovery"
 
 	EmbeddingConfigIDDefault = "stockv2-embedding-config"
@@ -170,25 +170,26 @@ type OpportunityEvidence struct {
 }
 
 type OpportunityCandidate struct {
-	ID              string         `json:"id"`
-	OpportunityID   string         `json:"opportunityId"`
-	RunID           string         `json:"runId"`
-	Symbol          string         `json:"symbol"`
-	Market          string         `json:"market"`
-	InstrumentType  string         `json:"instrumentType"`
-	Name            string         `json:"name"`
-	RelationType    string         `json:"relationType"`
-	RelevanceScore  float64        `json:"relevanceScore"`
-	EvidenceScore   float64        `json:"evidenceScore"`
-	MarketRiskScore float64        `json:"marketRiskScore"`
-	Confidence      float64        `json:"confidence"`
-	Rank            int            `json:"rank"`
-	Status          string         `json:"status"`
-	Reason          string         `json:"reason,omitempty"`
-	RiskSummary     string         `json:"riskSummary,omitempty"`
-	Metadata        map[string]any `json:"metadata,omitempty"`
-	CreatedAt       time.Time      `json:"createdAt"`
-	UpdatedAt       time.Time      `json:"updatedAt"`
+	ID              string                `json:"id"`
+	OpportunityID   string                `json:"opportunityId"`
+	RunID           string                `json:"runId"`
+	Symbol          string                `json:"symbol"`
+	Market          string                `json:"market"`
+	InstrumentType  string                `json:"instrumentType"`
+	Name            string                `json:"name"`
+	RelationType    string                `json:"relationType"`
+	RelevanceScore  float64               `json:"relevanceScore"`
+	EvidenceScore   float64               `json:"evidenceScore"`
+	MarketRiskScore float64               `json:"marketRiskScore"`
+	Confidence      float64               `json:"confidence"`
+	Rank            int                   `json:"rank"`
+	Status          string                `json:"status"`
+	Reason          string                `json:"reason,omitempty"`
+	RiskSummary     string                `json:"riskSummary,omitempty"`
+	HorizonOutlooks []ModelHorizonOutlook `json:"horizonOutlooks,omitempty"`
+	Metadata        map[string]any        `json:"metadata,omitempty"`
+	CreatedAt       time.Time             `json:"createdAt"`
+	UpdatedAt       time.Time             `json:"updatedAt"`
 }
 
 type OpportunityResult struct {
@@ -381,19 +382,20 @@ func (i *OpportunityDiscoveryThemeChainItem) UnmarshalJSON(data []byte) error {
 }
 
 type OpportunityDiscoveryReportCandidate struct {
-	Symbol                  string  `json:"symbol"`
-	Market                  string  `json:"market,omitempty"`
-	Name                    string  `json:"name,omitempty"`
-	InstrumentType          string  `json:"instrument_type,omitempty"`
-	RelationType            string  `json:"relation_type,omitempty"`
-	Rank                    int     `json:"rank,omitempty"`
-	RelevanceScore          float64 `json:"relevance_score"`
-	EvidenceScore           float64 `json:"evidence_score"`
-	MarketRiskScore         float64 `json:"market_risk_score"`
-	Confidence              float64 `json:"confidence"`
-	Reason                  string  `json:"reason,omitempty"`
-	RiskSummary             string  `json:"risk_summary,omitempty"`
-	SuggestedStrategyIntent string  `json:"suggested_strategy_intent,omitempty"`
+	Symbol                  string                `json:"symbol"`
+	Market                  string                `json:"market,omitempty"`
+	Name                    string                `json:"name,omitempty"`
+	InstrumentType          string                `json:"instrument_type,omitempty"`
+	RelationType            string                `json:"relation_type,omitempty"`
+	Rank                    int                   `json:"rank,omitempty"`
+	RelevanceScore          float64               `json:"relevance_score"`
+	EvidenceScore           float64               `json:"evidence_score"`
+	MarketRiskScore         float64               `json:"market_risk_score"`
+	Confidence              float64               `json:"confidence"`
+	Reason                  string                `json:"reason,omitempty"`
+	RiskSummary             string                `json:"risk_summary,omitempty"`
+	SuggestedStrategyIntent string                `json:"suggested_strategy_intent,omitempty"`
+	HorizonOutlooks         []ModelHorizonOutlook `json:"horizon_outlooks"`
 }
 
 type OpportunityDiscoveryReportExclusion struct {

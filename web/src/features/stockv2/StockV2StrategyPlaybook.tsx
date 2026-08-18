@@ -33,6 +33,14 @@ const PREFILTERS: Array<{ value: string; label: string; bucket: "dataPrefilters"
   { value: "portfolio_symbol_weight_below", label: "仓位低于", bucket: "portfolioPrefilters" },
 ];
 
+const HORIZONS = [
+  { value: "", label: "未指定" },
+  { value: "short", label: "短期 / 5 日" },
+  { value: "medium", label: "中期 / 20 日" },
+  { value: "long", label: "长期 / 60 日" },
+  { value: "cross_horizon", label: "跨周期" },
+];
+
 export function PlaybookEditor({
   rules,
   onChange,
@@ -99,6 +107,19 @@ export function PlaybookEditor({
               </Button>
             </div>
             <div className="grid grid-cols-2 gap-2">
+              <Field label="对应周期">
+                <select value={rule.horizon || ""} onChange={(event) => updateRule(index, { horizon: event.target.value || undefined })}>
+                  {HORIZONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                </select>
+              </Field>
+              <Field label="预测依据">
+                <textarea
+                  rows={2}
+                  value={rule.forecastBasis || ""}
+                  placeholder="说明该动作如何对应短、中、长期模型预期"
+                  onChange={(event) => updateRule(index, { forecastBasis: event.target.value })}
+                />
+              </Field>
               <Field label="触发条件">
                 <textarea
                   rows={2}
@@ -272,8 +293,10 @@ export function PlaybookSummary({
           <div key={rule.id || `${rule.action}-${index}`} className="grid gap-1 rounded-md border border-[var(--line)] bg-[var(--surface)] p-2">
             <div className="flex flex-wrap items-center gap-2">
               <Pill tone="neutral">{playbookActionLabel(rule.action)}</Pill>
+              {rule.horizon ? <Pill tone="neutral">{playbookHorizonLabel(rule.horizon)}</Pill> : null}
               {rule.title ? <strong className="text-[var(--text)]">{rule.title}</strong> : null}
             </div>
+            {rule.forecastBasis ? <span className="text-[var(--muted-strong)]">预测依据: {rule.forecastBasis}</span> : null}
             {rule.trigger ? <span className="text-[var(--muted-strong)]">触发: {rule.trigger}</span> : null}
             {rule.preconditions ? <span className="text-[var(--muted-strong)]">前置: {rule.preconditions}</span> : null}
             {rule.target || rule.sizing ? <span className="text-[var(--muted-strong)]">目标: {rule.target || playbookSizingSummary(rule)}</span> : null}
@@ -410,6 +433,8 @@ function normalizePlaybookRule(value: unknown, index: number): StockV2StrategyAc
     preconditions: stringFromUnknown(raw.preconditions),
     target: stringFromUnknown(raw.target),
     risk: stringFromUnknown(raw.risk),
+    horizon: stringFromUnknown(raw.horizon),
+    forecastBasis: stringFromUnknown(raw.forecastBasis) || stringFromUnknown(raw.forecast_basis),
     dataPrefilters: normalizePrefilterList(raw.dataPrefilters),
     portfolioPrefilters: normalizePrefilterList(raw.portfolioPrefilters),
     symbol: stringFromUnknown(raw.symbol),
@@ -435,6 +460,8 @@ function hasPlaybookRuleContent(rule: StockV2StrategyActionRule): boolean {
     rule.preconditions?.trim() ||
     rule.target?.trim() ||
     rule.risk?.trim() ||
+    rule.horizon?.trim() ||
+    rule.forecastBasis?.trim() ||
     Boolean(rule.dataPrefilters?.length) ||
     Boolean(rule.portfolioPrefilters?.length) ||
     Boolean(rule.sizing) ||
@@ -517,6 +544,10 @@ export function strategyPrefilterSummary(item: StockV2StrategyPrefilter): string
 function prefilterLabel(type?: string): string {
   if (type === "news_semantic_relevance") return "消息相关度";
   return PREFILTERS.find((prefilter) => prefilter.value === type)?.label || type || "预筛";
+}
+
+function playbookHorizonLabel(value?: string): string {
+  return HORIZONS.find((item) => item.value === value)?.label || value || "未指定";
 }
 
 function playbookSizingSummary(rule: StockV2StrategyActionRule): string {

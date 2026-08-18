@@ -558,6 +558,11 @@ func validateOpportunityCandidate(item OpportunityCandidate) error {
 		item.Confidence < 0 || item.Confidence > 1 {
 		return ErrInvalidOpportunityCandidate
 	}
+	if len(item.HorizonOutlooks) > 0 {
+		if err := validateModelHorizonOutlooks(item.HorizonOutlooks); err != nil {
+			return ErrInvalidOpportunityCandidate
+		}
+	}
 	return nil
 }
 
@@ -652,6 +657,7 @@ func (s *Service) ProcessOpportunityDiscoverySubmittedResult(ctx context.Context
 			Status:          OpportunityCandidateStatusCandidate,
 			Reason:          safelog.Text(candidate.Reason, 3000),
 			RiskSummary:     safelog.Text(candidate.RiskSummary, 3000),
+			HorizonOutlooks: sanitizeModelHorizonOutlooks(candidate.HorizonOutlooks),
 			Metadata: map[string]any{
 				"suggestedStrategyIntent": safelog.Text(candidate.SuggestedStrategyIntent, 1000),
 				"source":                  "submit_result",
@@ -743,6 +749,9 @@ func (s *Service) opportunityDiscoveryReportFromResult(ctx context.Context, run 
 			!score0To100(candidate.MarketRiskScore) ||
 			candidate.Confidence < 0 || candidate.Confidence > 1 {
 			return OpportunityDiscoveryReport{}, nil, invalidOpportunityResult("invalid candidate fields or scores")
+		}
+		if err := validateModelHorizonOutlooks(candidate.HorizonOutlooks); err != nil {
+			return OpportunityDiscoveryReport{}, nil, invalidOpportunityResult("candidate horizon outlooks are incomplete or invalid")
 		}
 		if marketScanBounded {
 			if _, ok := allowedMarketScanSymbols[strings.TrimSpace(candidate.Symbol)]; !ok {

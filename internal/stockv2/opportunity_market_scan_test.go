@@ -160,7 +160,7 @@ func TestOpportunityMarketScanDecisionReasonsDistinguishFilterStages(t *testing.
 		map[string]OpportunityCandidate{
 			"000003": {Symbol: "000003", EvidenceScore: 70, Confidence: .7, Status: OpportunityCandidateStatusStrategyRequested},
 			"000004": {Symbol: "000004", EvidenceScore: 50, Confidence: .6, Status: OpportunityCandidateStatusCandidate},
-			"000005": {Symbol: "000005", EvidenceScore: 70, Confidence: .7, Status: OpportunityCandidateStatusCandidate},
+			"000005": {Symbol: "000005", EvidenceScore: 70, Confidence: .7, Status: OpportunityCandidateStatusCandidate, HorizonOutlooks: testModelHorizonOutlooks(10)},
 		},
 	)
 	want := []string{
@@ -175,6 +175,9 @@ func TestOpportunityMarketScanDecisionReasonsDistinguishFilterStages(t *testing.
 		if items[i].DecisionReason != want[i] {
 			t.Fatalf("items[%d].decisionReason=%q, want %q", i, items[i].DecisionReason, want[i])
 		}
+	}
+	if len(items[4].HorizonOutlooks) != 3 {
+		t.Fatalf("final candidate horizon outlooks = %#v, want hydrated model forecast", items[4].HorizonOutlooks)
 	}
 }
 
@@ -292,7 +295,7 @@ func TestOpportunityMarketScanDiscoveryRejectsSymbolOutsideBoundedSet(t *testing
 		"summary":        "越界测试",
 		"candidates": []any{map[string]any{
 			"symbol": "000001", "relevance_score": 80.0, "evidence_score": 70.0,
-			"market_risk_score": 30.0, "confidence": .7,
+			"market_risk_score": 30.0, "confidence": .7, "horizon_outlooks": testModelHorizonOutlooks(10),
 		}},
 	})
 	if !errors.Is(err, ErrInvalidOpportunityResult) {

@@ -442,7 +442,7 @@ func (s *Service) portfolioSentinelPriorHoldingJudgments(
 			continue
 		}
 		report, err := portfolioSentinelReportFromResult(result.RawResult)
-		if err != nil || report.SchemaVersion != PortfolioSentinelReportSchemaVersion {
+		if err != nil || !portfolioSentinelActionPlanSchema(report.SchemaVersion) {
 			continue
 		}
 		affected := make(map[string]PortfolioSentinelAffectedHolding, len(report.AffectedHoldings))
@@ -1752,7 +1752,7 @@ func (s *Service) ListPortfolioSentinelActionPlans(
 		if err != nil {
 			return nil, err
 		}
-		if result == nil || result.SchemaVersion != PortfolioSentinelReportSchemaVersion {
+		if result == nil || !portfolioSentinelActionPlanSchema(result.SchemaVersion) {
 			continue
 		}
 		report, err := portfolioSentinelReportFromResult(result.RawResult)
@@ -1830,7 +1830,8 @@ func portfolioSentinelReportFromResult(result map[string]any) (PortfolioSentinel
 		return PortfolioSentinelReport{}, fmt.Errorf("%w: %v", ErrInvalidPortfolioSentinelResult, err)
 	}
 	if report.SchemaVersion != PortfolioSentinelReportSchemaVersion &&
-		report.SchemaVersion != portfolioSentinelLegacySchemaVersion {
+		report.SchemaVersion != portfolioSentinelLegacySchemaVersionV2 &&
+		report.SchemaVersion != portfolioSentinelLegacySchemaVersionV1 {
 		return PortfolioSentinelReport{}, ErrInvalidPortfolioSentinelResult
 	}
 	report.OverallRiskLevel = normalizePortfolioSentinelRiskLevel(report.OverallRiskLevel)
@@ -1838,6 +1839,10 @@ func portfolioSentinelReportFromResult(result map[string]any) (PortfolioSentinel
 		return PortfolioSentinelReport{}, ErrInvalidPortfolioSentinelResult
 	}
 	return report, nil
+}
+
+func portfolioSentinelActionPlanSchema(version string) bool {
+	return version == PortfolioSentinelReportSchemaVersion || version == portfolioSentinelLegacySchemaVersionV2
 }
 
 func (s *Service) validatePortfolioSentinelActionPlans(
@@ -1872,6 +1877,28 @@ func (s *Service) validatePortfolioSentinelActionPlans(
 	trusted := map[string]struct{}{}
 	for _, candidate := range candidates {
 		trusted[strings.ToUpper(strings.TrimSpace(candidate.Symbol))] = struct{}{}
+	}
+	portfolioOutlookIDs := make(map[string]struct{}, len(report.PortfolioOutlooks))
+	for index := range report.PortfolioOutlooks {
+		outlook := &report.PortfolioOutlooks[index]
+		outlook.PortfolioID = strings.TrimSpace(outlook.PortfolioID)
+		outlook.PortfolioName = safelog.Text(outlook.PortfolioName, 200)
+		if _, ok := portfolioIDs[outlook.PortfolioID]; !ok {
+			return fmt.Errorf("%w: portfolio outlook references an unknown portfolio", ErrInvalidPortfolioSentinelResult)
+		}
+		if _, duplicate := portfolioOutlookIDs[outlook.PortfolioID]; duplicate {
+			return fmt.Errorf("%w: duplicate portfolio outlook", ErrInvalidPortfolioSentinelResult)
+		}
+		if err := validateModelPortfolioHorizonOutlooks(outlook.HorizonOutlooks); err != nil {
+			return fmt.Errorf("%w: portfolio %s: %v", ErrInvalidPortfolioSentinelResult, outlook.PortfolioID, err)
+		}
+		outlook.HorizonOutlooks = sanitizeModelPortfolioHorizonOutlooks(outlook.HorizonOutlooks)
+		portfolioOutlookIDs[outlook.PortfolioID] = struct{}{}
+	}
+	for portfolioID := range portfolioIDs {
+		if _, ok := portfolioOutlookIDs[portfolioID]; !ok {
+			return fmt.Errorf("%w: every reviewed portfolio requires exactly one portfolio outlook", ErrInvalidPortfolioSentinelResult)
+		}
 	}
 	researchIDs := map[string]struct{}{}
 	if len(report.ResearchAudit) > 100 {
@@ -1926,6 +1953,10 @@ func (s *Service) validatePortfolioSentinelActionPlans(
 		if plan.ID == "" || plan.PortfolioID == "" || plan.Symbol == "" || strings.TrimSpace(plan.Reason) == "" {
 			return fmt.Errorf("%w: incomplete action plan", ErrInvalidPortfolioSentinelResult)
 		}
+		if err := validateModelHorizonOutlooks(plan.HorizonOutlooks); err != nil {
+			return fmt.Errorf("%w: action plan %s: %v", ErrInvalidPortfolioSentinelResult, plan.ID, err)
+		}
+		plan.HorizonOutlooks = sanitizeModelHorizonOutlooks(plan.HorizonOutlooks)
 		if _, ok := portfolioIDs[plan.PortfolioID]; !ok {
 			return fmt.Errorf("%w: action plan references an unknown portfolio", ErrInvalidPortfolioSentinelResult)
 		}

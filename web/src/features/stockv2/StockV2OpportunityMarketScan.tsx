@@ -11,6 +11,7 @@ import type {
 import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, Drawer, EmptyState, Notice, Panel, Pill, Toggle } from "../../components/ui";
 import { formatMeaningfulDateTime } from "./time";
+import { ModelHorizonOutlookCompact, ModelHorizonOutlookPanel } from "./StockV2ModelOutlook";
 
 const ACTIVE_STATUSES = new Set(["pending", "prefiltering", "enriching", "researching", "drafting"]);
 const STAGES = ["prefiltering", "enriching", "researching", "drafting"] as const;
@@ -164,8 +165,8 @@ export function StockV2OpportunityMarketScan({ actions }: { actions: AppActions 
           {selectedRun?.fundFlowRequestedCount ? <div className="mb-3 mt-3 flex flex-wrap items-center gap-2 text-xs"><span className="muted">主动资金证据</span><Pill tone={selectedRun.fundFlowUsed ? "good" : "warn"}>{fundFlowRunLabel(selectedRun)}</Pill>{selectedRun.fundFlowSource ? <span className="font-mono">{selectedRun.fundFlowSource}</span> : null}</div> : null}
           {candidates.length === 0 ? <EmptyState title="当前分组暂无记录" body={selectedRun && ACTIVE_STATUSES.has(selectedRun.status) ? "扫描仍在执行，研究池会随阶段持续落盘。" : "本轮在这个结果分组中没有记录。"} /> : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1020px] table-fixed text-left text-xs">
-                <thead className="text-[var(--muted)]"><tr className="border-b border-[var(--line)]"><th className="w-12 px-2 py-2">排名</th><th className="w-44 px-2 py-2">标的</th><th className="w-24 px-2 py-2">行业</th><th className="w-14 px-2 py-2">综合</th><th className="w-14 px-2 py-2">20日</th><th className="w-24 px-2 py-2">主动资金证据</th><th className="w-14 px-2 py-2">主题</th><th className="w-24 px-2 py-2">四道门</th><th className="px-2 py-2">筛选结论</th><th className="w-20 px-2 py-2">策略</th></tr></thead>
+              <table className="w-full min-w-[1160px] table-fixed text-left text-xs">
+                <thead className="text-[var(--muted)]"><tr className="border-b border-[var(--line)]"><th className="w-12 px-2 py-2">排名</th><th className="w-44 px-2 py-2">标的</th><th className="w-24 px-2 py-2">行业</th><th className="w-14 px-2 py-2">综合</th><th className="w-14 px-2 py-2">20日</th><th className="w-36 px-2 py-2">5 日模型预期</th><th className="w-24 px-2 py-2">主动资金证据</th><th className="w-14 px-2 py-2">主题</th><th className="w-24 px-2 py-2">四道门</th><th className="px-2 py-2">筛选结论</th><th className="w-20 px-2 py-2">策略</th></tr></thead>
                 <tbody>{candidates.map((candidate) => <CandidateRow candidate={candidate} key={candidate.id} onSelect={() => setSelectedCandidate(candidate)} />)}</tbody>
               </table>
             </div>
@@ -208,6 +209,7 @@ function CandidateRow({ candidate, onSelect }: { candidate: StockV2OpportunityMa
     <td className="px-2 py-2"><span className="block truncate" title={candidate.industry || undefined}>{candidate.industry || "-"}</span></td>
     <td className="px-2 py-2 font-mono">{candidate.finalScore.toFixed(1)}</td>
     <td className="px-2 py-2 font-mono">{formatPct(candidate.metrics.return20Pct)}</td>
+    <td className="px-2 py-2"><ModelHorizonOutlookCompact items={candidate.horizonOutlooks} /></td>
     <td className="px-2 py-2"><span className="font-mono">{candidate.metrics.fundFlowUsed ? candidate.flowScore.toFixed(0) : fundFlowCandidateLabel(candidate)}</span>{candidate.metrics.fundFlowSource ? <span className="muted mt-1 block text-[10px]">{candidate.metrics.fundFlowSource}</span> : null}</td>
     <td className="px-2 py-2 font-mono">{candidate.themeScore.toFixed(0)}</td>
     <td className="px-2 py-2"><Pill tone={decisionHealthTone(candidate.metrics.decisionStatus)}>{decisionHealthLabel(candidate.metrics.decisionStatus)}</Pill><span className="muted mt-1 block font-mono text-[10px]">{decisionGateCount(candidate)} / 4</span></td>
@@ -287,6 +289,7 @@ function CandidateDrawer({ actions, candidate, discoveryRunId, onClose }: { acti
     <div className="grid gap-4 text-sm">
       {metrics.decisionStatus === "blocked" ? <Notice tone="danger">关键数据或确定性门未通过：不会生成建仓/加仓动作。减仓与退出风险控制仍可继续。</Notice> : metrics.decisionStatus === "degraded" ? <Notice>部分可选数据缺失，结论已降级并在下方逐项标注。</Notice> : null}
       <div className="grid grid-cols-3 gap-2"><ScanMetric label="综合评分" value={candidate.finalScore.toFixed(1)} /><ScanMetric label="主动资金证据" value={metrics.fundFlowUsed ? candidate.flowScore.toFixed(1) : fundFlowCandidateLabel(candidate)} /><ScanMetric label="主题评分" value={candidate.themeScore.toFixed(1)} /></div>
+      <ModelHorizonOutlookPanel items={candidate.horizonOutlooks || review?.horizonOutlooks} />
       <Panel title="行情与质量"><dl className="grid grid-cols-2 gap-3 text-xs"><MetricItem label="最新价" value={metrics.latestPrice?.toFixed(3) || "-"} /><MetricItem label="当日涨跌" value={formatPct(metrics.latestPctChange)} /><MetricItem label="5 日收益" value={formatPct(metrics.return5Pct)} /><MetricItem label="20 日收益" value={formatPct(metrics.return20Pct)} /><MetricItem label="ATR(14)" value={metrics.atr14 ? `${metrics.atr14.toFixed(3)} / ${metrics.atr14Pct?.toFixed(2)}%` : "-"} /><MetricItem label="市场状态" value={marketRegimeLabel(metrics.marketRegime)} /><MetricItem label="量比 5/20" value={metrics.volumeRatio5To20?.toFixed(2) || "-"} /><MetricItem label="主动资金证据" value={metrics.fundFlowAvailable ? `20 日净额占主动成交 ${metrics.mainFlowRatio20?.toFixed(2)}% · ${metrics.fundFlowAsOf || "日期未知"}` : fundFlowCandidateLabel(candidate)} /></dl></Panel>
       <Panel title="确定性四道门">{metrics.decisionGates?.length ? <div className="grid gap-2">{metrics.decisionGates.map((gate) => <div className="rounded-md border border-[var(--line)] p-3" key={gate.key}><div className="flex items-center justify-between gap-3"><strong className="text-xs">{gate.label}</strong><Pill tone={decisionGateTone(gate.status)}>{decisionGateStatusLabel(gate.status)}</Pill></div><p className="muted mt-1 mb-0 text-xs">{gate.summary}</p>{gate.reasons?.length ? <ul className="mt-2 mb-0 pl-5 text-xs">{gate.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul> : null}</div>)}</div> : <p className="muted m-0 text-xs">这条历史记录生成时尚未运行确定性四道门。</p>}</Panel>
       <CollapsibleSection title="数据健康" subtitle="关键项缺失会阻断新增风险，可选项缺失只降级">{metrics.dataHealth?.length ? <div className="grid gap-2">{metrics.dataHealth.map((item) => <div className="flex items-start justify-between gap-4 border-b border-[var(--line)] pb-2 text-xs last:border-0 last:pb-0" key={item.key}><div><strong>{item.label}</strong><span className="muted mt-1 block">{item.message || item.asOf || "已检查"}{item.source ? ` · ${item.source}` : ""}</span></div><Pill tone={decisionHealthTone(item.status)}>{decisionHealthLabel(item.status)}</Pill></div>)}</div> : <p className="muted m-0 text-xs">无健康快照。</p>}</CollapsibleSection>

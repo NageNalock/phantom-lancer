@@ -203,6 +203,7 @@ type OpportunityMarketScanCandidate struct {
 	Metrics                OpportunityMarketScanMetrics `json:"metrics"`
 	ExclusionReason        string                       `json:"exclusionReason,omitempty"`
 	DecisionReason         string                       `json:"decisionReason,omitempty"`
+	HorizonOutlooks        []ModelHorizonOutlook        `json:"horizonOutlooks,omitempty"`
 	OpportunityCandidateID string                       `json:"opportunityCandidateId,omitempty"`
 	StrategyStatus         string                       `json:"strategyStatus,omitempty"`
 	StrategyID             string                       `json:"strategyId,omitempty"`

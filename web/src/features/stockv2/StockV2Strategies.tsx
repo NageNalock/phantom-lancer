@@ -5,6 +5,7 @@ import type { AppActions } from "../../app/App";
 import type {
   AppData,
   StockV2Instrument,
+  StockV2ModelHorizonOutlook,
   StockV2MonitorTask,
   StockV2MonitorTaskListResponse,
   StockV2Portfolio,
@@ -42,6 +43,7 @@ import {
 import { SymbolPicker, SymbolRef } from "./StockV2SymbolPicker";
 import { StrategyGenerationDrawer } from "./StockV2StrategyGenerationDrawer";
 import { StockV2AgentRunDetailDrawer } from "./StockV2AgentExecutionLedger";
+import { ModelHorizonOutlookPanel } from "./StockV2ModelOutlook";
 
 // 策略是长期判断依据,由系统内置监控任务扫描并产生命中候选。
 // 本页只做 Strategy 对象的 CRUD 与版本展示;不让用户创建单独价格提醒。
@@ -1224,6 +1226,7 @@ interface AgentGenerationMetaView {
   overallConclusion?: string;
   keyConflicts?: string[];
   dataQualityNotes?: string[];
+  horizonOutlooks?: StockV2ModelHorizonOutlook[];
 }
 
 // 从 generationMeta 安全读取 Agent 策略生成留痕字段（agentRunId / 置信度 / runSummary）。
@@ -1246,7 +1249,14 @@ function readAgentGenerationMeta(meta?: Record<string, unknown>): AgentGeneratio
   const dataQualityNotes = Array.isArray(rs.data_quality_notes)
     ? rs.data_quality_notes.filter((x): x is string => typeof x === "string")
     : undefined;
-  return { agentRunId, confidence, confidenceSource, overallConclusion, keyConflicts, dataQualityNotes };
+  const horizonOutlooks = Array.isArray(sg.horizonOutlooks)
+    ? sg.horizonOutlooks.filter((item): item is StockV2ModelHorizonOutlook => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+        const outlook = item as Record<string, unknown>;
+        return typeof outlook.horizon === "string" && typeof outlook.tradingDays === "number";
+      })
+    : undefined;
+  return { agentRunId, confidence, confidenceSource, overallConclusion, keyConflicts, dataQualityNotes, horizonOutlooks };
 }
 
 // Agent 生成草案的留痕区：常驻置信度 + 查看 Agent 运行详情入口；
@@ -1292,6 +1302,8 @@ function AgentGenerationSection({
           <span className="text-xs text-[var(--warn)]">未提供有效置信度</span>
         )}
       </div>
+
+      <ModelHorizonOutlookPanel items={gen.horizonOutlooks} title="策略周期预期" />
 
       {hasFoldDetail ? (
         <CollapsibleSection title="生成结论与证据">
