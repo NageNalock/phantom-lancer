@@ -1120,6 +1120,9 @@ func (s *Store) init(ctx context.Context) error {
 	if err := s.ensureOpportunityMarketScanSchema(ctx); err != nil {
 		return fmt.Errorf("ensure opportunity market scan schema: %w", err)
 	}
+	if err := s.backfillStrategyGenerationConfidence(ctx); err != nil {
+		return fmt.Errorf("backfill strategy generation confidence: %w", err)
+	}
 	return nil
 }
 

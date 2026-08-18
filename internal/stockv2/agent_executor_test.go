@@ -1146,6 +1146,23 @@ func TestBuildStrategyGenerationStepPromptEncouragesInternalAndExternalSearch(t 
 	}
 }
 
+func TestBuildStrategyGenerationFormatterPromptRequiresPerDraftConfidence(t *testing.T) {
+	prompt := buildStrategyGenerationStepPrompt("task-strategy-formatter", StrategyGenerationStepPack{
+		RunID:     "run-1",
+		StepKey:   StrategyGenerationStepFormatter,
+		Role:      StrategyGenerationStepFormatter,
+		Objective: "Format final strategy report",
+		Context: StrategyGenerationContext{Input: StrategyGenerationInput{
+			Mode: StrategyGenerationModeManualTarget,
+		}},
+	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
+	for _, want := range []string{"Every new_strategy draft must include its own numeric confidence", `"confidence":0.7`} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("formatter prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestBuildOperationReviewPromptIncludesDebugGoogleNewsSearchCheck(t *testing.T) {
 	prompt := buildOperationReviewPrompt("task-debug", AgentContextPack{
 		Hit: MonitorHit{

@@ -2497,9 +2497,11 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 		b.WriteString("Return result.result as schema_version `strategy-generation-report/v1` with run_summary and drafts[]. run_summary.mode must exactly equal context.input.mode.\n")
 		b.WriteString("Every draft must use exactly these top-level identity fields: symbol, market, name, draft_type. draft_type must be new_strategy, strategy_patch, or no_change. Never replace them with instrument, target, type, or direction.\n")
 		b.WriteString("Every new_strategy draft must include a non-empty thesis. Use the canonical thesis field; never replace it with rationale.\n")
+		b.WriteString("Every new_strategy draft must include its own numeric confidence greater than 0 and at most 1. Do not omit it even when the outer result already has confidence.\n")
 		b.WriteString("Every draft must preserve decision_basis as short basis labels and evidence_ref_ids as the exact supplied identifiers used. Include the authoritative context.decisionGates[symbol].id in evidence_ref_ids; never invent an identifier.\n")
 		b.WriteString("Every new_strategy draft must use playbook.rules[]. dataPrefilters and portfolioPrefilters must be arrays. Use [] when no structured prefilter exists.\n")
 		b.WriteString("Every playbook rule must use exactly these canonical fields: id, action, title, trigger, preconditions, target, risk, dataPrefilters, portfolioPrefilters, priority. Never emit rule_id, signal, condition, on_true, or on_false.\n")
+		b.WriteString("Canonical draft fields include: {\"symbol\":\"600000\",\"market\":\"SH\",\"name\":\"示例股票\",\"draft_type\":\"new_strategy\",\"thesis\":\"...\",\"confidence\":0.7,\"playbook\":{\"rules\":[]}}.\n")
 		b.WriteString("Canonical rule example: {\"id\":\"observe_1\",\"action\":\"observe\",\"title\":\"观察\",\"trigger\":\"...\",\"preconditions\":\"...\",\"target\":\"...\",\"risk\":\"...\",\"dataPrefilters\":[],\"portfolioPrefilters\":[],\"priority\":1}.\n")
 		b.WriteString("Do not output proposed_operation. Use portfolio_aware_suggestion.review_request when Review is needed.\n\n")
 	} else {

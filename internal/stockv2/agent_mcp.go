@@ -66,7 +66,7 @@ type submitResultParamsInner struct {
 	OutputType    string         `json:"outputType"`
 	ResultSummary string         `json:"resultSummary"`
 	Result        map[string]any `json:"result"`
-	Confidence    float64        `json:"confidence"`
+	Confidence    *float64       `json:"confidence"`
 }
 
 func (p *agentTaskPool) HandleMCPRequest(raw []byte) []byte {
@@ -206,6 +206,10 @@ func (p *agentTaskPool) mcpSubmitResult(args json.RawMessage) (any, *mcpError) {
 	if !validAgentTaskOutputType(params.TaskType, params.Result.OutputType) {
 		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "invalid result.outputType"}
 	}
+	if params.TaskType == AgentTaskTypeStrategyGeneration &&
+		(params.Result.Confidence == nil || !validStrategyGenerationConfidence(*params.Result.Confidence)) {
+		return nil, &mcpError{Code: mcpErrInvalidParams, Message: "result.confidence must be greater than 0 and at most 1"}
+	}
 	if params.TaskType == AgentTaskTypeNewsEventReview {
 		report, err := decodeNewsContextSubmittedResult(params.Result.Result)
 		if err == nil && p.service != nil && p.service.store != nil {
@@ -225,11 +229,15 @@ func (p *agentTaskPool) mcpSubmitResult(args json.RawMessage) (any, *mcpError) {
 		}
 	}
 
+	confidence := 0.0
+	if params.Result.Confidence != nil {
+		confidence = *params.Result.Confidence
+	}
 	result := AgentTaskSubmittedResult{
 		OutputType:    params.Result.OutputType,
 		ResultSummary: params.Result.ResultSummary,
 		Result:        params.Result.Result,
-		Confidence:    params.Result.Confidence,
+		Confidence:    confidence,
 	}
 
 	status, err := p.submitResult(params.TaskID, params.TaskType, result)

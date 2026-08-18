@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -504,6 +505,14 @@ func strategyGenerationReportFromResult(raw map[string]any) (StrategyGenerationR
 }
 
 func strategyGenerationReportFromResultForMode(raw map[string]any, expectedMode string) (StrategyGenerationReport, error) {
+	return strategyGenerationReportFromResultWithFallback(raw, expectedMode, nil)
+}
+
+func strategyGenerationReportFromSubmittedResult(raw map[string]any, expectedMode string, runConfidence float64) (StrategyGenerationReport, error) {
+	return strategyGenerationReportFromResultWithFallback(raw, expectedMode, &runConfidence)
+}
+
+func strategyGenerationReportFromResultWithFallback(raw map[string]any, expectedMode string, runConfidence *float64) (StrategyGenerationReport, error) {
 	if len(raw) == 0 {
 		return StrategyGenerationReport{}, ErrInvalidStrategyGenerationResult
 	}
@@ -512,6 +521,9 @@ func strategyGenerationReportFromResultForMode(raw map[string]any, expectedMode 
 	}
 	normalizeStrategyGenerationPlaybookPrefilters(raw)
 	normalizeStrategyGenerationReportShape(raw)
+	if err := normalizeStrategyGenerationDraftConfidences(raw, runConfidence); err != nil {
+		return StrategyGenerationReport{}, err
+	}
 	expectedMode = strings.TrimSpace(expectedMode)
 	if expectedMode != "" {
 		if !validStrategyGenerationMode(expectedMode) {
@@ -538,6 +550,36 @@ func strategyGenerationReportFromResultForMode(raw map[string]any, expectedMode 
 		return StrategyGenerationReport{}, fmt.Errorf("%w: run_summary.mode %q does not match task mode %q", ErrInvalidStrategyGenerationResult, report.RunSummary.Mode, expectedMode)
 	}
 	return report, nil
+}
+
+func normalizeStrategyGenerationDraftConfidences(raw map[string]any, runConfidence *float64) error {
+	for draftIndex, draftRaw := range sliceFromAny(raw["drafts"]) {
+		draft := mapFromAny(draftRaw)
+		if strings.TrimSpace(stringFromAny(draft["draft_type"])) != StrategyGenerationDraftTypeNewStrategy {
+			continue
+		}
+		if value, exists := draft["confidence"]; exists {
+			confidence, ok := numberFromAny(value)
+			if !ok || !validStrategyGenerationConfidence(confidence) {
+				return fmt.Errorf("%w: drafts[%d].confidence must be greater than 0 and at most 1", ErrInvalidStrategyGenerationResult, draftIndex)
+			}
+			draft["confidence"] = confidence
+			draft["confidence_source"] = StrategyGenerationConfidenceSourceDraft
+			continue
+		}
+		if runConfidence == nil || !validStrategyGenerationConfidence(*runConfidence) {
+			return fmt.Errorf("%w: drafts[%d].confidence is required", ErrInvalidStrategyGenerationResult, draftIndex)
+		}
+		// ponytail: the already-submitted run confidence is the only lossless,
+		// paid-result fallback when a formatter omits the per-draft field.
+		draft["confidence"] = *runConfidence
+		draft["confidence_source"] = StrategyGenerationConfidenceSourceRun
+	}
+	return nil
+}
+
+func validStrategyGenerationConfidence(confidence float64) bool {
+	return confidence > 0 && confidence <= 1 && !math.IsNaN(confidence) && !math.IsInf(confidence, 0)
 }
 
 func rejectLegacyStrategyGenerationPlaybookShape(raw map[string]any) error {
@@ -656,6 +698,9 @@ func validateStrategyGenerationReport(report StrategyGenerationReport) error {
 		if strings.TrimSpace(draft.Symbol) == "" || strings.TrimSpace(draft.Thesis) == "" {
 			return fmt.Errorf("%w: drafts[%d] requires symbol and thesis", ErrInvalidStrategyGenerationResult, draftIndex)
 		}
+		if !validStrategyGenerationConfidence(draft.Confidence) {
+			return fmt.Errorf("%w: drafts[%d].confidence must be greater than 0 and at most 1", ErrInvalidStrategyGenerationResult, draftIndex)
+		}
 		if _, err := strategyGenerationDraftDirection(draft); err != nil {
 			return fmt.Errorf("%w: drafts[%d] has invalid strategy_bias", ErrInvalidStrategyGenerationResult, draftIndex)
 		}
@@ -714,11 +759,11 @@ func (s *Service) recoverInvalidStrategyGenerationRun(ctx context.Context, run A
 	if len(raw) == 0 {
 		return false, nil
 	}
-	report, err := strategyGenerationReportFromResultForMode(raw, strategyGenerationModeFromTrigger(run.TriggerObjectID))
+	confidence, _ := numberFromAny(ledger.StructuredOutput["confidence"])
+	report, err := strategyGenerationReportFromSubmittedResult(raw, strategyGenerationModeFromTrigger(run.TriggerObjectID), confidence)
 	if err != nil {
 		return false, nil
 	}
-	confidence, _ := numberFromAny(ledger.StructuredOutput["confidence"])
 	submitted := AgentTaskSubmittedResult{
 		OutputType:    strings.TrimSpace(stringFromAny(ledger.StructuredOutput["outputType"])),
 		ResultSummary: strings.TrimSpace(stringFromAny(ledger.StructuredOutput["resultSummary"])),
@@ -834,6 +879,7 @@ func (s *Service) strategyCreateRequestFromGenerationDraft(run AgentRun, submitt
 				"mode":                     report.RunSummary.Mode,
 				"draftType":                draft.DraftType,
 				"confidence":               draft.Confidence,
+				"confidenceSource":         draft.ConfidenceSource,
 				"resultSummary":            submitted.ResultSummary,
 				"portfolioAwareSuggestion": draft.PortfolioAwareSuggestion,
 				"runSummary":               report.RunSummary,
@@ -950,7 +996,8 @@ func (s *Service) strategyGenerationSkipReasons(ctx context.Context, run AgentRu
 		return out
 	}
 	raw := mapFromAny(ledger.StructuredOutput["result"])
-	report, err := strategyGenerationReportFromResultForMode(raw, strategyGenerationModeFromTrigger(run.TriggerObjectID))
+	confidence, _ := numberFromAny(ledger.StructuredOutput["confidence"])
+	report, err := strategyGenerationReportFromSubmittedResult(raw, strategyGenerationModeFromTrigger(run.TriggerObjectID), confidence)
 	if err != nil {
 		return out
 	}

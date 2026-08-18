@@ -20,6 +20,8 @@ const (
 	StrategyGenerationDraftTypeNewStrategy   = "new_strategy"
 	StrategyGenerationDraftTypeStrategyPatch = "strategy_patch"
 	StrategyGenerationDraftTypeNoChange      = "no_change"
+	StrategyGenerationConfidenceSourceDraft  = "draft"
+	StrategyGenerationConfidenceSourceRun    = "run_fallback"
 
 	StrategyGenerationDraftNewStrategy = StrategyGenerationDraftTypeNewStrategy
 	StrategyGenerationDraftPatch       = StrategyGenerationDraftTypeStrategyPatch
@@ -130,6 +132,7 @@ type StrategyGenerationDraft struct {
 	StrategyBias             string                                     `json:"strategy_bias,omitempty"`
 	Thesis                   string                                     `json:"thesis,omitempty"`
 	Confidence               float64                                    `json:"confidence,omitempty"`
+	ConfidenceSource         string                                     `json:"confidence_source,omitempty"`
 	EvidenceSummary          []string                                   `json:"evidence_summary,omitempty"`
 	RiskSummary              []string                                   `json:"risk_summary,omitempty"`
 	InvalidConditions        []string                                   `json:"invalid_conditions,omitempty"`

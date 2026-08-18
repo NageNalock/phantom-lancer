@@ -709,6 +709,46 @@ func TestMCP_SubmitResult_StrategyGenerationAccepted(t *testing.T) {
 	}
 }
 
+func TestMCP_SubmitResult_StrategyGenerationRequiresRunConfidence(t *testing.T) {
+	p := newAgentTaskPool(defaultCleanupInterval)
+	defer p.Close()
+
+	taskID, entry := p.createTask(AgentTaskTypeStrategyGeneration, "run-1", "", 5*time.Minute)
+	resp := p.HandleMCPRequest(mustJSON(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "stock_agent.submit_result",
+			"arguments": map[string]any{
+				"taskID":   taskID,
+				"taskType": AgentTaskTypeStrategyGeneration,
+				"result": map[string]any{
+					"outputType":    AgentTaskTypeStrategyGeneration,
+					"resultSummary": "missing confidence",
+					"result":        map[string]any{},
+				},
+			},
+		},
+	}))
+	var result struct {
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v\nresp: %s", err, string(resp))
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Message, "result.confidence") {
+		t.Fatalf("error = %+v, want result.confidence validation", result.Error)
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.status != agentTaskStatusWaiting {
+		t.Fatalf("status = %s, want waiting", entry.status)
+	}
+}
+
 func TestMCP_SubmitResult_StrategyGenerationRejectsIllegalOutputType(t *testing.T) {
 	p := newAgentTaskPool(defaultCleanupInterval)
 	defer p.Close()
@@ -844,6 +884,7 @@ func TestMCP_SubmitResult_DuplicateSubmitKeepsFirstResult(t *testing.T) {
 					"outputType":    AgentTaskTypeStrategyGeneration,
 					"resultSummary": "second result",
 					"result":        map[string]any{"schema_version": StrategyGenerationReportSchemaVersion},
+					"confidence":    0.6,
 				},
 			},
 		},

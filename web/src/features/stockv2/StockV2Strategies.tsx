@@ -1220,6 +1220,7 @@ function BulletField({ label, items }: { label: string; items: string[] }) {
 interface AgentGenerationMetaView {
   agentRunId?: string;
   confidence?: number;
+  confidenceSource?: string;
   overallConclusion?: string;
   keyConflicts?: string[];
   dataQualityNotes?: string[];
@@ -1232,7 +1233,10 @@ function readAgentGenerationMeta(meta?: Record<string, unknown>): AgentGeneratio
   const agentRunId = typeof meta.agentRunId === "string" ? meta.agentRunId : undefined;
   const sgRaw = meta.strategyGeneration;
   const sg = sgRaw && typeof sgRaw === "object" ? (sgRaw as Record<string, unknown>) : {};
-  const confidence = typeof sg.confidence === "number" ? sg.confidence : undefined;
+  const confidence = typeof sg.confidence === "number" && sg.confidence > 0 && sg.confidence <= 1
+    ? sg.confidence
+    : undefined;
+  const confidenceSource = typeof sg.confidenceSource === "string" ? sg.confidenceSource : undefined;
   const rsRaw = sg.runSummary;
   const rs = rsRaw && typeof rsRaw === "object" ? (rsRaw as Record<string, unknown>) : {};
   const overallConclusion = typeof rs.overall_conclusion === "string" ? rs.overall_conclusion : undefined;
@@ -1242,7 +1246,7 @@ function readAgentGenerationMeta(meta?: Record<string, unknown>): AgentGeneratio
   const dataQualityNotes = Array.isArray(rs.data_quality_notes)
     ? rs.data_quality_notes.filter((x): x is string => typeof x === "string")
     : undefined;
-  return { agentRunId, confidence, overallConclusion, keyConflicts, dataQualityNotes };
+  return { agentRunId, confidence, confidenceSource, overallConclusion, keyConflicts, dataQualityNotes };
 }
 
 // Agent 生成草案的留痕区：常驻置信度 + 查看 Agent 运行详情入口；
@@ -1275,12 +1279,19 @@ function AgentGenerationSection({
         ) : null}
       </div>
 
-      {gen.confidence !== undefined ? (
-        <div className="grid gap-0.5">
-          <span className="text-xs text-[var(--muted)]">置信度</span>
-          <span className="font-mono text-sm text-[var(--text)]">{(gen.confidence * 100).toFixed(0)}%</span>
-        </div>
-      ) : null}
+      <div className="grid gap-0.5">
+        <span className="text-xs text-[var(--muted)]">置信度</span>
+        {gen.confidence !== undefined ? (
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            <span className="font-mono text-sm text-[var(--text)]">{(gen.confidence * 100).toFixed(0)}%</span>
+            {gen.confidenceSource === "run_fallback" ? (
+              <span className="text-xs text-[var(--muted)]">使用本次 Agent 运行总体置信度</span>
+            ) : null}
+          </div>
+        ) : (
+          <span className="text-xs text-[var(--warn)]">未提供有效置信度</span>
+        )}
+      </div>
 
       {hasFoldDetail ? (
         <CollapsibleSection title="生成结论与证据">

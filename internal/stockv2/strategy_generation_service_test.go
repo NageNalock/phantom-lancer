@@ -136,6 +136,33 @@ func TestStrategyGenerationRejectsLegacyPlaybookActions(t *testing.T) {
 	}
 }
 
+func TestStrategyGenerationUsesRunConfidenceWhenDraftConfidenceIsMissing(t *testing.T) {
+	raw := strategyGenerationReportResult("302132")
+	draft := mapFromAny(sliceFromAny(raw["drafts"])[0])
+	delete(draft, "confidence")
+
+	if _, err := strategyGenerationReportFromResult(raw); !errors.Is(err, ErrInvalidStrategyGenerationResult) {
+		t.Fatalf("missing draft confidence error = %v, want invalid strategy generation result", err)
+	}
+	report, err := strategyGenerationReportFromSubmittedResult(raw, StrategyGenerationModeManualTarget, 0.76)
+	if err != nil {
+		t.Fatalf("parse report with run confidence fallback: %v", err)
+	}
+	if report.Drafts[0].Confidence != 0.76 || report.Drafts[0].ConfidenceSource != StrategyGenerationConfidenceSourceRun {
+		t.Fatalf("draft confidence = %v/%q, want 0.76/%q", report.Drafts[0].Confidence, report.Drafts[0].ConfidenceSource, StrategyGenerationConfidenceSourceRun)
+	}
+}
+
+func TestStrategyGenerationRejectsExplicitZeroDraftConfidence(t *testing.T) {
+	raw := strategyGenerationReportResult("302132")
+	draft := mapFromAny(sliceFromAny(raw["drafts"])[0])
+	draft["confidence"] = 0.0
+
+	if _, err := strategyGenerationReportFromSubmittedResult(raw, StrategyGenerationModeManualTarget, 0.76); !errors.Is(err, ErrInvalidStrategyGenerationResult) {
+		t.Fatalf("zero draft confidence error = %v, want invalid strategy generation result", err)
+	}
+}
+
 func TestStrategyGenerationNormalizesStringPlaybookPrefilters(t *testing.T) {
 	report := strategyGenerationReportResult("302132")
 	draft := mapFromAny(sliceFromAny(report["drafts"])[0])
@@ -518,6 +545,85 @@ func TestStrategyGenerationReportAcceptsStructuredReviewRequests(t *testing.T) {
 	if !strings.Contains(got, "[high/data_validation] Validate 600276 cost basis") ||
 		!strings.Contains(got, "[medium/account_permission] Portfolio flags disable") {
 		t.Fatalf("review request = %q, want normalized structured requests", got)
+	}
+}
+
+func TestBackfillStrategyGenerationConfidenceRepairsOnlyOmittedDraftValue(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedStrategyGenerationInstrument(t, svc, ctx, "600000")
+	seedStrategyGenerationInstrument(t, svc, ctx, "600001")
+
+	run, _, err := svc.store.CreateAgentRunWithLedger(ctx, AgentRun{
+		TaskType:          AgentTaskTypeStrategyGeneration,
+		TriggerObjectType: "strategy_generation",
+		TriggerObjectID:   StrategyGenerationModeManualTarget + ":symbols=600000,600001",
+		Status:            AgentRunStatusCompleted,
+	}, AgentDecisionLedger{
+		TaskType:          AgentTaskTypeStrategyGeneration,
+		TriggerObjectType: "strategy_generation",
+		TriggerObjectID:   StrategyGenerationModeManualTarget + ":symbols=600000,600001",
+		StructuredOutput: map[string]any{
+			"confidence": 0.68,
+			"result": map[string]any{
+				"drafts": []any{
+					map[string]any{"symbol": "600000"},
+					map[string]any{"symbol": "600001", "confidence": 0.0},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create historical run: %v", err)
+	}
+	for _, symbol := range []string{"600000", "600001"} {
+		if _, err := svc.CreateStrategy(ctx, RequestCreateStrategy{
+			Name:      "Agent策略草案 - " + symbol,
+			Kind:      StrategyKindSymbolStrategy,
+			Scope:     StrategyScopeResearch,
+			Source:    StrategySourceAgent,
+			Status:    StrategyStatusDraft,
+			Symbol:    symbol,
+			Market:    "SH",
+			Direction: StrategyDirectionWatch,
+			Thesis:    "历史置信度迁移测试",
+			GenerationMeta: map[string]any{
+				"source":     AgentTaskTypeStrategyGeneration,
+				"agentRunId": run.ID,
+				"strategyGeneration": map[string]any{
+					"confidence": 0.0,
+				},
+			},
+			CreatedBy: StrategySourceAgent,
+		}); err != nil {
+			t.Fatalf("create historical strategy %s: %v", symbol, err)
+		}
+	}
+
+	if err := svc.store.backfillStrategyGenerationConfidence(ctx); err != nil {
+		t.Fatalf("backfill confidence: %v", err)
+	}
+	if err := svc.store.backfillStrategyGenerationConfidence(ctx); err != nil {
+		t.Fatalf("repeat backfill confidence: %v", err)
+	}
+	for _, tc := range []struct {
+		symbol     string
+		confidence float64
+		source     string
+	}{
+		{symbol: "600000", confidence: 0.68, source: StrategyGenerationConfidenceSourceRun},
+		{symbol: "600001", confidence: 0, source: ""},
+	} {
+		items, err := svc.ListStrategies(ctx, StrategyListFilter{Source: StrategySourceAgent, Symbol: tc.symbol, Limit: 10})
+		if err != nil || len(items) != 1 || items[0].ActiveVersion == nil {
+			t.Fatalf("list strategy %s: items=%+v err=%v", tc.symbol, items, err)
+		}
+		generation := mapFromAny(items[0].ActiveVersion.GenerationMeta["strategyGeneration"])
+		confidence, _ := numberFromAny(generation["confidence"])
+		if confidence != tc.confidence || stringFromAny(generation["confidenceSource"]) != tc.source {
+			t.Fatalf("strategy %s confidence = %v/%q, want %v/%q", tc.symbol, confidence, stringFromAny(generation["confidenceSource"]), tc.confidence, tc.source)
+		}
 	}
 }
 

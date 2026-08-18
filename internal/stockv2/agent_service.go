@@ -2290,7 +2290,7 @@ func (s *Service) finalizeAgentRunWithOutput(
 		s.markStockProfileUpdateTaskAIResult(ctx, run.ID, StockProfileUpdateStatusCompleted, StockProfileAIStatusReady, "")
 	}
 	if run.TaskType == AgentTaskTypeStrategyGeneration {
-		report, err := strategyGenerationReportFromResultForMode(submitted.Result, strategyGenerationModeFromTrigger(run.TriggerObjectID))
+		report, err := strategyGenerationReportFromSubmittedResult(submitted.Result, strategyGenerationModeFromTrigger(run.TriggerObjectID), submitted.Confidence)
 		if err != nil {
 			err = strategyGenerationSaveError(err)
 			run.Status = AgentRunStatusFailed
