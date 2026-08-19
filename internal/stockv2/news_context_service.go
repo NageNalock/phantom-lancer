@@ -43,10 +43,9 @@ const (
 	newsContextSeedPageSize          = 500
 	newsContextInputTextLimit        = 60_000
 	newsContextAdditionalPromptLimit = 2_000
-	// ponytail: normal scheduled aggregation owns a rolling one-day safety
-	// window. Re-reading only pending or first-deferred rows is cheap, closes
-	// ingestion/window-boundary races, and leaves older history to the explicit
-	// backfill workflow instead of silently starting an unbounded catch-up.
+	// ponytail: before a durable historical ownership boundary exists, normal
+	// scheduled aggregation owns only a rolling one-day safety window. Once a
+	// backfill watermark exists, that watermark is the exact lower bound instead.
 	newsContextRealtimeCatchupLookback = 24 * time.Hour
 	// ponytail: Codex CLI exited without submitting a 20-item result even when
 	// its prompt was smaller than a successful batch; the automatic 10-item
@@ -780,7 +779,12 @@ func (s *Service) claimRealtimeNewsContextEvents(ctx context.Context, run NewsCo
 		claim := s.store.ClaimNewsContextEvents
 		if run.TriggerType == NewsContextTriggerScheduled {
 			catchupStart := run.WindowStart.Add(-newsContextRealtimeCatchupLookback)
-			if found && catchupStart.Before(cutoff) {
+			if found {
+				// ponytail: every unresolved event at or after the durable
+				// watermark belongs to the realtime pipeline, even when a source
+				// delivers it more than one day late. The indexed status query only
+				// returns unresolved rows, so this closes permanent cleanup gaps
+				// without re-reading completed history.
 				catchupStart = cutoff
 			}
 			if catchupStart.Before(startAt) {

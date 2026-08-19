@@ -644,7 +644,7 @@ func TestSeedRealtimeNewsContextRunHonorsCompletedBackfillWatermark(t *testing.T
 	}
 }
 
-func TestScheduledFourHourRunSweepsRecentPendingAndRetriesDeferralOnce(t *testing.T) {
+func TestScheduledFourHourRunSweepsRealtimeOwnedPendingAndRetriesDeferralOnce(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -681,7 +681,7 @@ func TestScheduledFourHourRunSweepsRecentPendingAndRetriesDeferralOnce(t *testin
 	}
 
 	run := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowFourHour,
-		cutoff.Add(time.Hour), cutoff.Add(2*time.Hour), NewsContextTriggerScheduled, NewsContextRunStatusPending)
+		cutoff.Add(48*time.Hour), cutoff.Add(52*time.Hour), NewsContextTriggerScheduled, NewsContextRunStatusPending)
 	if err := svc.seedNewsContextRunItems(ctx, &run); err != nil {
 		t.Fatalf("seed catch-up run: %v", err)
 	}
@@ -713,7 +713,7 @@ func TestScheduledFourHourRunSweepsRecentPendingAndRetriesDeferralOnce(t *testin
 		t.Fatalf("mark second deferral: %v", err)
 	}
 	next := createCompletedNewsContextTestWindow(t, svc, NewsContextWindowFourHour,
-		cutoff.Add(2*time.Hour), cutoff.Add(3*time.Hour), NewsContextTriggerScheduled, NewsContextRunStatusPending)
+		cutoff.Add(52*time.Hour), cutoff.Add(56*time.Hour), NewsContextTriggerScheduled, NewsContextRunStatusPending)
 	if err := svc.seedNewsContextRunItems(ctx, &next); err != nil {
 		t.Fatalf("seed post-retry run: %v", err)
 	}
