@@ -23,6 +23,13 @@ func TestMarketDataStoreUsesOneDuckDBWorker(t *testing.T) {
 	if threads != marketDataDuckDBThreads {
 		t.Fatalf("DuckDB threads = %d, want %d", threads, marketDataDuckDBThreads)
 	}
+	var memoryLimit string
+	if err := store.db.QueryRow(`SELECT current_setting('memory_limit')`).Scan(&memoryLimit); err != nil {
+		t.Fatalf("read DuckDB memory setting: %v", err)
+	}
+	if memoryLimit != "768.0 MiB" {
+		t.Fatalf("DuckDB memory_limit = %q, want 768.0 MiB", memoryLimit)
+	}
 }
 
 func TestEmbeddingVectorSearchHandlesAllowedIDsAcrossBatches(t *testing.T) {

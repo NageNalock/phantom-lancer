@@ -21,10 +21,16 @@ type MarketDataStore struct {
 	path string
 }
 
-// ponytail: one DuckDB worker leaves a CPU core available for the owner-facing
-// service on the current small personal server; raise this constant if the
-// deployment moves to hardware where analytical throughput is the priority.
-const marketDataDuckDBThreads = 1
+const (
+	// ponytail: one DuckDB worker leaves a CPU core available for the owner-facing
+	// service on the current small personal server; raise this constant if the
+	// deployment moves to hardware where analytical throughput is the priority.
+	marketDataDuckDBThreads = 1
+	// ponytail: DuckDB otherwise reserves most host memory. A fixed embedded-store
+	// ceiling prevents background scans from swapping the owner-facing service;
+	// larger installations can raise this alongside the worker constant.
+	marketDataDuckDBMemoryLimit = "768MiB"
+)
 
 func NewMarketDataStore(path string) (*MarketDataStore, error) {
 	if path == "" {
@@ -35,7 +41,7 @@ func NewMarketDataStore(path string) (*MarketDataStore, error) {
 			return nil, fmt.Errorf("create market db dir: %w", err)
 		}
 	}
-	db, err := sql.Open("duckdb", fmt.Sprintf("%s?threads=%d", path, marketDataDuckDBThreads))
+	db, err := sql.Open("duckdb", fmt.Sprintf("%s?threads=%d&memory_limit=%s", path, marketDataDuckDBThreads, marketDataDuckDBMemoryLimit))
 	if err != nil {
 		return nil, fmt.Errorf("open duckdb: %w", err)
 	}
