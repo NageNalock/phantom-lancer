@@ -1015,6 +1015,11 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 					Symbol: sym,
 					Reason: "no data from source",
 				})
+			} else if inst.sourceInactive {
+				// ponytail: Tencent marks retired instruments with status D. Keep
+				// historical rows intact, but do not retry their permanently empty
+				// daily-bar endpoints during every universe maintenance run.
+				successCount++
 			} else if err := s.upsertInstrumentWithProfile(ctx, inst); err != nil {
 				if s.log != nil {
 					s.log.Error("stock data asset maintenance save instrument failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol", inst.Symbol, "market", inst.Market, "instrument_type", inst.InstrumentType, "error", safelog.Text(err.Error(), 300))

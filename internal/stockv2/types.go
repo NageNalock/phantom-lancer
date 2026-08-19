@@ -25,6 +25,10 @@ type StockV2Instrument struct {
 	LastUpdate     time.Time `json:"lastUpdate"`
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
+	// ponytail: sourceInactive is transient source metadata used only by the
+	// universe maintenance pass; retired symbols must not become a public or
+	// persisted instrument state without a complete lifecycle design.
+	sourceInactive bool
 }
 
 // StockV2Portfolio 投资组合/仓位

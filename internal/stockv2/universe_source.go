@@ -269,9 +269,11 @@ func (uds *UniverseDataSource) parseTencentLine(line string, metaMap map[string]
 	// 解析价格信息
 	lastPrice := parseFloatTencent(fields[3])
 	prevClose := parseFloatTencent(fields[4])
+	sourceInactive := len(fields) > 40 && strings.EqualFold(strings.TrimSpace(fields[40]), "D")
 
-	// 如果价格无效，跳过
-	if lastPrice <= 0 || prevClose <= 0 {
+	// 如果价格无效，跳过；退市标的通常已无有效报价，但仍需把来源状态
+	// 传回维护任务，避免被误记为数据源漏项。
+	if !sourceInactive && (lastPrice <= 0 || prevClose <= 0) {
 		return nil, nil
 	}
 
@@ -283,6 +285,7 @@ func (uds *UniverseDataSource) parseTencentLine(line string, metaMap map[string]
 		InstrumentType: instrumentType,
 		Name:           name,
 		LastUpdate:     time.Now(),
+		sourceInactive: sourceInactive,
 	}
 
 	return &instrument, nil

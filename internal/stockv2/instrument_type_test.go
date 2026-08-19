@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -43,6 +44,22 @@ func TestParseTencentLineMarksExchangeFund(t *testing.T) {
 	}
 	if inst.Symbol != "510300" || inst.Market != "SH" || inst.InstrumentType != InstrumentTypeExchangeFund {
 		t.Fatalf("instrument = %+v, want 510300 SH exchange_fund", inst)
+	}
+}
+
+func TestParseTencentLineMarksRetiredInstrumentInactive(t *testing.T) {
+	uds := &UniverseDataSource{}
+	fields := make([]string, 41)
+	fields[1] = "已终止基金"
+	fields[2] = "501023"
+	fields[40] = "D"
+
+	inst, err := uds.parseTencentLine(`v_sh501023="`+strings.Join(fields, "~")+`"`, nil)
+	if err != nil {
+		t.Fatalf("parse retired Tencent instrument: %v", err)
+	}
+	if inst == nil || !inst.sourceInactive {
+		t.Fatalf("instrument = %+v, want transient inactive marker", inst)
 	}
 }
 
