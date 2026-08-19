@@ -2578,6 +2578,7 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 		b.WriteString("Every new_strategy draft must include its own numeric confidence greater than 0 and at most 1. Do not omit it even when the outer result already has confidence.\n")
 		b.WriteString("Every draft must preserve decision_basis as short basis labels and evidence_ref_ids as the exact supplied identifiers used. Include the authoritative context.decisionGates[symbol].id in evidence_ref_ids; never invent an identifier.\n")
 		b.WriteString("Every draft must copy exactly three horizon_outlooks from the portfolio judge: short/5 trading days, medium/20, and long/60. Do not add, remove, or recalculate forecast probabilities in the formatter.\n")
+		b.WriteString("Each copied item must be the canonical flat shape with every field present: horizon, tradingDays, asOfPrice, direction, probabilityUp, probabilityOutperform, expectedPrice, expectedReturnPct, rangeLow, rangeHigh, targetPrice, targetProbability, downsideRiskPct, confidence, thesis, invalidConditions, uncertainties, and dataQuality. Direction is only bullish, neutral, or bearish. Degraded data never permits null or omitted numeric fields.\n")
 		b.WriteString("Every new_strategy draft must use playbook.rules[]. dataPrefilters and portfolioPrefilters must be arrays. Use [] when no structured prefilter exists.\n")
 		b.WriteString("Every playbook rule must use exactly these canonical fields: id, action, title, trigger, preconditions, target, risk, horizon, forecast_basis, dataPrefilters, portfolioPrefilters, priority. horizon must be short, medium, long, or cross_horizon. Never emit rule_id, signal, condition, on_true, or on_false.\n")
 		b.WriteString("Canonical draft fields are symbol, market, name, draft_type, thesis, confidence, horizon_outlooks, and playbook. The horizon_outlooks value must be the portfolio judge's complete three-item array.\n")
@@ -2593,6 +2594,9 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 		b.WriteString("\",\"summary\":\"...\",\"findings\":[],\"claims\":[],\"evidence_refs\":[],\"conflict_resolution\":[],\"research_log\":[],\"data_quality_notes\":[],\"next_inputs\":{}}\n")
 		b.WriteString("```\n")
 		b.WriteString("For claims, include fields when possible: claim, stance, symbol, support_level, evidence_refs, data_freshness, uncertainty.\n\n")
+		if pack.StepKey == StrategyGenerationStepPortfolioJudge {
+			b.WriteString("For next_inputs.decision_by_target[].horizon_outlooks, return exactly three canonical flat objects. Do not use priceDistribution, touchTarget, downsideRisk objects, invalidation, uncertainty, or hybrid direction labels. Canonical short example: {\"horizon\":\"short\",\"tradingDays\":5,\"asOfPrice\":10,\"direction\":\"neutral\",\"probabilityUp\":0.52,\"probabilityOutperform\":0.5,\"expectedPrice\":10.1,\"expectedReturnPct\":1,\"rangeLow\":9.2,\"rangeHigh\":11,\"targetPrice\":10.8,\"targetProbability\":0.35,\"downsideRiskPct\":8,\"confidence\":0.55,\"thesis\":\"...\",\"invalidConditions\":[\"...\"],\"uncertainties\":[],\"dataQuality\":\"degraded\"}.\n\n")
+		}
 	}
 	b.WriteString("MCP submit_result shape:\n")
 	b.WriteString("```json\n")
@@ -2604,6 +2608,9 @@ func buildStrategyGenerationStepPrompt(taskID string, pack StrategyGenerationSte
 		maxPromptLen = 48000
 	}
 	if b.Len() > maxPromptLen {
+		if pack.StepKey == StrategyGenerationStepFormatter && len(pack.Context.OpportunityCandidates) <= 1 {
+			return truncatePromptUTF8(b.String(), 12000, 14000)
+		}
 		return truncatePromptUTF8(b.String(), 36000, 10000)
 	}
 	return b.String()

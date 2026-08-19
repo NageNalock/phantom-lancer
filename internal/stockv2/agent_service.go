@@ -1698,7 +1698,7 @@ func (s *Service) executeStrategyGenerationPipeline(
 			step.OutputArtifactSummary = safelog.Text(agentExecutorOutputSummary(execOutput), 16384)
 		}
 		submitted := s.consumeAgentTaskSubmittedResult(taskID)
-		if execErr != nil && submitted == nil {
+		if execErr != nil {
 			step.Status = StrategyGenerationStepStatusFailed
 			step.ErrorMessage = agentRunFailureMessage(execErr.Error(), execOutput)
 			step.FinishedAt = time.Now()
@@ -1786,18 +1786,63 @@ func (s *Service) executeStrategyGenerationStepWithRetry(
 				"stepId": step.ID, "stepKey": step.StepKey, "attempt": attempt, "maxAttempts": maxAttempts,
 			})
 		}
-		taskID, _ = s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
+		taskID, _ = s.agentTaskPool.createTask(run.TaskType, run.ID, "", execDefaultTimeout+30*time.Second)
 		output, err := s.agentExecutor.ExecuteStrategyGenerationStep(ctx, taskID, pack, modelName, run.ReasoningEffort)
-		lastOutput = output
+		lastOutput = mergeAgentExecutorOutputs(lastOutput, output)
 		lastErr = err
-		if err == nil || !retryableNoSubmitTimeout(err, output) || attempt == maxAttempts {
-			return output, err, taskID
+		formatterInvalid := false
+		if err == nil && step.StepKey == StrategyGenerationStepFormatter {
+			if submitted := s.peekAgentTaskSubmittedResult(taskID); submitted != nil {
+				err = validateStrategyGenerationFormatterSubmission(run, pack.Context, *submitted)
+				lastErr = err
+				formatterInvalid = err != nil
+			}
+		}
+		if err == nil {
+			return lastOutput, nil, taskID
+		}
+		retryTimeout := retryableNoSubmitTimeout(err, output)
+		retryStructure := formatterInvalid
+		if (!retryTimeout && !retryStructure) || attempt == maxAttempts {
+			return lastOutput, err, taskID
+		}
+		if retryStructure {
+			s.consumeAgentTaskSubmittedResult(taskID)
+			pack.Instructions = append(pack.Instructions,
+				"CORRECTIVE FORMATTER RETRY: the previous final report failed server validation: "+safelog.Text(err.Error(), 900)+". Rebuild the complete report from the portfolio judge output. Do not omit mandatory horizon fields even when data is degraded.",
+			)
 		}
 		if s.log != nil {
-			s.log.Warn("retrying strategy generation step after timeout without submission", "run_id", run.ID, "step_id", step.ID, "step_key", step.StepKey, "attempt", attempt, "max_attempts", maxAttempts, "duration", outputDurationString(output), "error", safelog.Text(err.Error(), 240))
+			reason := "timeout"
+			if retryStructure {
+				reason = "invalid_structure"
+			}
+			s.log.Warn("retrying strategy generation step", "run_id", run.ID, "step_id", step.ID, "step_key", step.StepKey, "attempt", attempt, "max_attempts", maxAttempts, "duration", outputDurationString(output), "reason", reason, "error", safelog.Text(err.Error(), 500))
 		}
 	}
 	return lastOutput, lastErr, taskID
+}
+
+func (s *Service) peekAgentTaskSubmittedResult(taskID string) *AgentTaskSubmittedResult {
+	entry, ok := s.agentTaskPool.getTask(taskID)
+	if !ok {
+		return nil
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	return entry.submittedResult
+}
+
+func validateStrategyGenerationFormatterSubmission(run AgentRun, genCtx StrategyGenerationContext, submitted AgentTaskSubmittedResult) error {
+	if submitted.OutputType != StrategyGenerationOutputType {
+		return fmt.Errorf("%w: formatter outputType must be %q", ErrInvalidStrategyGenerationResult, StrategyGenerationOutputType)
+	}
+	mode := firstNonEmpty(genCtx.Input.Mode, genCtx.Mode)
+	report, err := strategyGenerationReportFromSubmittedResult(submitted.Result, mode, submitted.Confidence)
+	if err != nil {
+		return err
+	}
+	return validateStrategyGenerationDraftTargets(run.TriggerObjectID, report.Drafts)
 }
 
 func retryableNoSubmitTimeout(err error, output *AgentExecutorOutput) bool {
@@ -1890,7 +1935,8 @@ func strategyGenerationPipelineSteps() []strategyGenerationPipelineStepDef {
 				"Do not base draft type or action-space decisions on unresolved conflicting data without explicitly stating the degraded assumption.",
 				"Decide new_strategy, strategy_patch, or no_change for each holding or target.",
 				"For every target you judge, synthesize exactly three model-estimated conditional horizon outlooks: short/5 trading days, medium/20, and long/60. Use the supplied opportunity outlook as an input when present, but revise it when fresher verified evidence changes the estimate.",
-				"Each horizon outlook must include price distribution, upside and benchmark-outperformance probabilities, one explicit touch target and probability, downside risk, confidence, thesis, invalidation, uncertainty, and data quality. These are analytical model estimates, not deterministic gate scores.",
+				"Each horizon_outlooks item must use the canonical flat fields exactly: horizon, tradingDays, asOfPrice, direction, probabilityUp, probabilityOutperform, expectedPrice, expectedReturnPct, rangeLow, rangeHigh, targetPrice, targetProbability, downsideRiskPct, confidence, thesis, invalidConditions, uncertainties, and dataQuality. Never nest priceDistribution, touchTarget, or downsideRisk; never rename invalidConditions/uncertainties; never omit numeric estimates.",
+				"Direction must be exactly bullish, neutral, or bearish. DataQuality must be healthy, degraded, or insufficient. Even with degraded/insufficient data, provide the model's best conditional numeric estimate and at least one invalidConditions entry.",
 				"Use review_request when immediate account-bound handling is needed; do not create proposed_operation.",
 			},
 		},
@@ -1904,6 +1950,7 @@ func strategyGenerationPipelineSteps() []strategyGenerationPipelineStepDef {
 				"Carry forward unresolved conflicts, research_log summaries, and data_quality_notes into the final report instead of dropping them.",
 				"Carry forward serenity-skill scarce-layer/evidence-strength/failure-condition summaries when prior steps produced them.",
 				"Copy the portfolio judge's three horizon_outlooks for every draft without inventing or recalculating probabilities.",
+				"If the judge used a noncanonical nested shape despite its contract, normalize the judge's own model values into the required flat fields; preserve its probabilities and thesis, derive expectedReturnPct only from its asOfPrice/expectedPrice, express downsideRiskPct as a positive magnitude, and choose only bullish, neutral, or bearish for direction. Never drop a numeric field because data is degraded.",
 				"Generate playbook.rules[] using the StockV2 protocol.",
 				"Give each playbook rule a horizon and forecast_basis so its relationship to the model outlook is explicit.",
 				"Use empty arrays for unstructured prefilters.",

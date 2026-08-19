@@ -1014,6 +1014,34 @@ func TestStrategyGenerationStepDoesNotRetryNonTimeoutError(t *testing.T) {
 	}
 }
 
+func TestStrategyGenerationFormatterRetriesInvalidStructure(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	executor := &retryStrategyGenerationStepExecutor{
+		fakeDebugAgentExecutor: fakeDebugAgentExecutor{pool: svc.agentTaskPool},
+		invalidFormatterFirst:  true,
+		attempts:               map[string]int{},
+	}
+	svc.agentExecutor = executor
+
+	_, _, err := svc.executeStrategyGenerationPipeline(context.Background(), AgentRun{
+		ID: "run-strategy-retry-formatter", TaskType: AgentTaskTypeStrategyGeneration,
+		TriggerObjectID: "portfolio_strategy_diagnosis:portfolio=test",
+	}, StrategyGenerationContext{
+		Mode:  StrategyGenerationModePortfolio,
+		Input: StrategyGenerationInput{Mode: StrategyGenerationModePortfolio},
+	}, "gpt-retry")
+	if err != nil {
+		t.Fatalf("execute strategy generation pipeline: %v", err)
+	}
+	if got := executor.attempts[StrategyGenerationStepFormatter]; got != 2 {
+		t.Fatalf("formatter attempts = %d, want 2", got)
+	}
+	if !executor.formatterRetryHadCorrection {
+		t.Fatal("formatter retry did not receive the validation correction")
+	}
+}
+
 func TestFinalizeAgentRunFailsWhenReviewSaveFails(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
@@ -1189,9 +1217,11 @@ type fakeDebugAgentExecutor struct {
 
 type retryStrategyGenerationStepExecutor struct {
 	fakeDebugAgentExecutor
-	failStep string
-	nonRetry bool
-	attempts map[string]int
+	failStep                    string
+	nonRetry                    bool
+	invalidFormatterFirst       bool
+	formatterRetryHadCorrection bool
+	attempts                    map[string]int
 }
 
 func (f fakeDebugAgentExecutor) ExecuteOperationReview(ctx context.Context, taskID string, pack AgentContextPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
@@ -1289,11 +1319,32 @@ func (f fakeDebugAgentExecutor) ExecuteStrategyGenerationStep(ctx context.Contex
 
 func (f *retryStrategyGenerationStepExecutor) ExecuteStrategyGenerationStep(ctx context.Context, taskID string, pack StrategyGenerationStepPack, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	f.attempts[pack.StepKey]++
+	if pack.StepKey == StrategyGenerationStepFormatter && f.attempts[pack.StepKey] > 1 {
+		for _, instruction := range pack.Instructions {
+			if strings.Contains(instruction, "CORRECTIVE FORMATTER RETRY") {
+				f.formatterRetryHadCorrection = true
+			}
+		}
+	}
 	if pack.StepKey == f.failStep && f.attempts[pack.StepKey] == 1 {
 		if f.nonRetry {
 			return &AgentExecutorOutput{ExitCode: 2, Duration: time.Second, StderrTail: "invalid model"}, errors.New("process exited (code 2) without submitting result")
 		}
 		return &AgentExecutorOutput{TimedOut: true, ExitCode: -1, Duration: execDefaultTimeout, StderrTail: "Reading additional input from stdin..."}, fmt.Errorf("execution timed out after %s, no result submitted", execDefaultTimeout)
+	}
+	if pack.StepKey == StrategyGenerationStepFormatter && f.invalidFormatterFirst && f.attempts[pack.StepKey] == 1 {
+		_, err := f.pool.submitResult(taskID, AgentTaskTypeStrategyGeneration, AgentTaskSubmittedResult{
+			OutputType: StrategyGenerationOutputType, ResultSummary: "invalid formatter result", Confidence: 0.7,
+			Result: map[string]any{
+				"schema_version": StrategyGenerationReportSchemaVersion,
+				"run_summary":    map[string]any{"mode": StrategyGenerationModePortfolio},
+				"drafts": []any{map[string]any{
+					"symbol": "002837", "draft_type": StrategyGenerationDraftTypeNewStrategy,
+					"thesis": "test", "confidence": 0.7, "horizon_outlooks": []any{},
+				}},
+			},
+		})
+		return &AgentExecutorOutput{ExitCode: 0, Duration: time.Millisecond}, err
 	}
 	return f.fakeDebugAgentExecutor.ExecuteStrategyGenerationStep(ctx, taskID, pack, modelName, reasoningEffort)
 }
