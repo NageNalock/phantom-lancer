@@ -295,6 +295,47 @@ func TestLimitNewsContextBatchForDeepSeekAPI(t *testing.T) {
 	}
 }
 
+func TestLimitNewsContextBatchForGenericAPI(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	provider, err := svc.CreateAgentProviderProfile(ctx, RequestCreateAgentProviderProfile{
+		ProviderType: AgentProviderTypeOpenAI,
+		Name:         "generic-api",
+		BaseURL:      "https://api.example.com/v1",
+		APIKey:       "test-token",
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	model, err := svc.CreateAgentModelProfile(ctx, RequestCreateAgentModelProfile{
+		ProviderID: provider.ID,
+		ModelName:  "general-model",
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	mode := AgentExecutionModeAPI
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeNewsEventReview, RequestUpdateAgentTaskProfile{
+		ExecutionMode:  &mode,
+		PrimaryModelID: &model.ID,
+	}); err != nil {
+		t.Fatalf("bind model: %v", err)
+	}
+	items := make([]NewsContextRunItem, newsContextAPIEventBatchSize+1)
+	for index := range items {
+		items[index] = NewsContextRunItem{ObjectType: NewsContextRunItemNewsEvent, ObjectID: generateID()}
+	}
+	limited, err := svc.limitNewsContextBatchForProvider(ctx, items)
+	if err != nil {
+		t.Fatalf("limit batch: %v", err)
+	}
+	if len(limited) != newsContextAPIEventBatchSize {
+		t.Fatalf("limited items = %d; want %d", len(limited), newsContextAPIEventBatchSize)
+	}
+}
+
 func TestLimitNewsContextBatchForCodexCLI(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()

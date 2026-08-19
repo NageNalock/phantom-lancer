@@ -54,6 +54,12 @@ const (
 	// either only after measured runs show reliable submit_result coverage.
 	newsContextCLIEventBatchSize  = 10
 	newsContextCLIThreadBatchSize = 8
+	// ponytail: a measured 74-event Luna API batch spent two large responses
+	// and exhausted its 30-minute correction budget; the automatic 37-event
+	// retry established the safe scale. Keep a small margin without adding an
+	// owner-tunable protocol knob; promote it only if multiple models need
+	// distinct measured limits.
+	newsContextAPIEventBatchSize = 40
 	// ponytail: production 6-event runs still emitted invalid 12 KB
 	// submit_result JSON about half the time, while observed 3-event retries
 	// completed. Keep this fixed protocol limit until measured adaptive sizing
@@ -963,6 +969,9 @@ func (s *Service) limitNewsContextBatchForProvider(ctx context.Context, items []
 		return nil, err
 	}
 	if !isDeepSeekAPI(agentProviderBaseURL(provider), model.ModelName) {
+		if items[0].ObjectType == NewsContextRunItemNewsEvent {
+			return limitNewsContextBatchItems(items, newsContextAPIEventBatchSize), nil
+		}
 		return items, nil
 	}
 	limit := newsContextDeepSeekEventBatchSize
