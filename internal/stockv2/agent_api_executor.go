@@ -68,7 +68,7 @@ func (e *agentAPIExecutor) ExecuteNewsContextAggregation(ctx context.Context, ta
 
 func (e *agentAPIExecutor) ExecuteStockProfileSummary(ctx context.Context, taskID string, profile StockProfile, modelName, reasoningEffort string) (*AgentExecutorOutput, error) {
 	e.recordTraceInput(ctx, taskID, "StockProfile", profile)
-	return e.executePrompt(ctx, taskID, buildStockProfileSummaryPrompt(taskID, profile, ""), modelName, reasoningEffort, execDefaultTimeout, agentAPIExecutionOptions{})
+	return e.executePrompt(ctx, taskID, buildStockProfileSummaryPrompt(taskID, profile, ""), modelName, reasoningEffort, stockProfileAgentTimeout, agentAPIExecutionOptions{})
 }
 
 type agentAPIChatResponse struct {

@@ -14,6 +14,8 @@ import (
 	"phantom-lancer/internal/safelog"
 )
 
+const stockProfileAgentTimeout = 20 * time.Minute // ponytail: one serialized Gateway wait plus one bounded profile turn; internal coordination budget, not an owner-tunable model setting.
+
 func (s *Service) UpdateStockProfile(ctx context.Context, req RequestUpdateStockProfile) (StockProfileUpdateResult, error) {
 	return s.updateStockProfile(ctx, req, false)
 }
@@ -677,7 +679,7 @@ func (s *Service) executeStockProfileAgentAttempt(
 	if _, err := s.store.UpdateAgentRun(ctx, running); err != nil && s.log != nil {
 		s.log.Warn("update stock profile agent run to running failed", "run_id", run.ID, "ledger_id", ledger.ID, "symbol", profile.Symbol, "market", profile.Market, "model", modelName, "error", safelog.Text(err.Error(), 240))
 	}
-	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", 10*time.Minute)
+	taskID, _ := s.agentTaskPool.createTask(run.TaskType, run.ID, "", stockProfileAgentTimeout)
 	execOutput, execErr := s.agentExecutor.ExecuteStockProfileSummary(ctx, taskID, profile, modelName, run.ReasoningEffort)
 	s.finalizeAgentRunWithOutput(ctx, run.ID, ledger.ID, taskID, execOutput, execErr)
 	finalRun, finalLedger := s.safeGetAgentRunAndLedger(ctx, run.ID, ledger.ID)
