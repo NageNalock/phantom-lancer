@@ -136,6 +136,23 @@ func TestStrategyGenerationRejectsLegacyPlaybookActions(t *testing.T) {
 	}
 }
 
+func TestStrategyGenerationRejectsCustomRuleActionWithAllowedValues(t *testing.T) {
+	report := strategyGenerationReportResult("302132")
+	draft := mapFromAny(sliceFromAny(report["drafts"])[0])
+	rule := mapFromAny(sliceFromAny(mapFromAny(draft["playbook"])["rules"])[0])
+	rule["action"] = "refresh_quote"
+
+	_, err := strategyGenerationReportFromResult(report)
+	if err == nil {
+		t.Fatal("custom rule action accepted")
+	}
+	for _, want := range []string{`action "refresh_quote" is invalid`, "allowed actions are observe"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
+	}
+}
+
 func TestStrategyGenerationUsesRunConfidenceWhenDraftConfidenceIsMissing(t *testing.T) {
 	raw := strategyGenerationReportResult("302132")
 	draft := mapFromAny(sliceFromAny(raw["drafts"])[0])

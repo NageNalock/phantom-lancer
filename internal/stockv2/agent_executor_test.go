@@ -1161,7 +1161,7 @@ func TestBuildStrategyGenerationFormatterPromptRequiresPerDraftConfidence(t *tes
 			Mode: StrategyGenerationModeManualTarget,
 		}},
 	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
-	for _, want := range []string{"Every new_strategy draft must include its own numeric confidence", `"confidence":0.7`, "canonical flat shape", "Degraded data never permits null or omitted numeric fields"} {
+	for _, want := range []string{"Every new_strategy draft must include its own numeric confidence", `"confidence":0.7`, "canonical flat shape", "Degraded data never permits null or omitted numeric fields", "Quote refresh, report review, filing monitoring", "never invent a custom action enum"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("formatter prompt missing %q:\n%s", want, prompt)
 		}

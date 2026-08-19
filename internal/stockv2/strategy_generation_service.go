@@ -711,9 +711,17 @@ func validateStrategyGenerationReport(report StrategyGenerationReport) error {
 			return fmt.Errorf("%w: drafts[%d].playbook.rules is empty", ErrInvalidStrategyGenerationResult, draftIndex)
 		}
 		for ruleIndex, rule := range draft.Playbook.Rules {
-			if strings.TrimSpace(rule.ID) == "" || !validStrategyGenerationRuleAction(strings.TrimSpace(rule.Action)) ||
-				!validStrategyGenerationRuleHorizon(rule.Horizon) || strings.TrimSpace(rule.ForecastBasis) == "" {
-				return fmt.Errorf("%w: drafts[%d].playbook.rules[%d] requires id, action, horizon, and forecast_basis", ErrInvalidStrategyGenerationResult, draftIndex, ruleIndex)
+			if strings.TrimSpace(rule.ID) == "" {
+				return fmt.Errorf("%w: drafts[%d].playbook.rules[%d].id is required", ErrInvalidStrategyGenerationResult, draftIndex, ruleIndex)
+			}
+			if !validStrategyGenerationRuleAction(strings.TrimSpace(rule.Action)) {
+				return fmt.Errorf("%w: drafts[%d].playbook.rules[%d].action %q is invalid; allowed actions are observe, build_position, add_position, hold, reduce_position, and exit_position", ErrInvalidStrategyGenerationResult, draftIndex, ruleIndex, rule.Action)
+			}
+			if !validStrategyGenerationRuleHorizon(rule.Horizon) {
+				return fmt.Errorf("%w: drafts[%d].playbook.rules[%d].horizon %q is invalid; allowed horizons are short, medium, long, and cross_horizon", ErrInvalidStrategyGenerationResult, draftIndex, ruleIndex, rule.Horizon)
+			}
+			if strings.TrimSpace(rule.ForecastBasis) == "" {
+				return fmt.Errorf("%w: drafts[%d].playbook.rules[%d].forecast_basis is required", ErrInvalidStrategyGenerationResult, draftIndex, ruleIndex)
 			}
 		}
 	}
