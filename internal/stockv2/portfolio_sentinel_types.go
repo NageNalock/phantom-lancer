@@ -3,6 +3,7 @@ package stockv2
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -392,7 +393,7 @@ func (r *PortfolioSentinelReport) UnmarshalJSON(data []byte) error {
 	for key, value := range raw {
 		switch key {
 		case "positive_items", "negative_items", "noise_items",
-			"data_quality_notes", "next_watch_focus", "checked_news_thread_version_ids":
+			"review_requests", "data_quality_notes", "next_watch_focus", "checked_news_thread_version_ids":
 			continue
 		default:
 			strict[key] = value
@@ -409,11 +410,47 @@ func (r *PortfolioSentinelReport) UnmarshalJSON(data []byte) error {
 	parsed.PositiveItems = agentObjectListFromRaw(raw["positive_items"])
 	parsed.NegativeItems = agentObjectListFromRaw(raw["negative_items"])
 	parsed.NoiseItems = agentObjectListFromRaw(raw["noise_items"])
+	parsed.ReviewRequests, err = portfolioSentinelReviewRequestsFromRaw(raw["review_requests"])
+	if err != nil {
+		return err
+	}
 	parsed.DataQualityNotes = agentStringListFromRaw(raw["data_quality_notes"])
 	parsed.NextWatchFocus = agentStringListFromRaw(raw["next_watch_focus"])
 	parsed.CheckedNewsThreadVersionIDs = agentStringListFromRaw(raw["checked_news_thread_version_ids"])
 	*r = PortfolioSentinelReport(parsed)
 	return nil
+}
+
+func portfolioSentinelReviewRequestsFromRaw(raw json.RawMessage) ([]PortfolioSentinelReviewRequest, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, err
+	}
+	requests := make([]PortfolioSentinelReviewRequest, 0, len(items))
+	for _, item := range items {
+		var text string
+		if err := json.Unmarshal(item, &text); err == nil {
+			if text = strings.TrimSpace(text); text != "" {
+				// ponytail: a CLI model can collapse a portfolio-level review request to
+				// prose. Preserve the paid analysis as an untargeted summary; do not invent
+				// a holding symbol or silently discard the rest of the sentinel report.
+				requests = append(requests, PortfolioSentinelReviewRequest{Summary: text})
+			}
+			continue
+		}
+		var request PortfolioSentinelReviewRequest
+		if err := json.Unmarshal(item, &request); err != nil {
+			return nil, err
+		}
+		requests = append(requests, request)
+	}
+	if len(requests) == 0 {
+		return nil, nil
+	}
+	return requests, nil
 }
 
 type PortfolioSentinelAffectedHolding struct {

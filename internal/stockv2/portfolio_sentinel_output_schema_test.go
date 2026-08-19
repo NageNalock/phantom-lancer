@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 )
 
@@ -107,7 +106,7 @@ func TestPortfolioSentinelReportKeepsPlansWhenFreeFormItemsAreStrings(t *testing
 	}
 }
 
-func TestPortfolioSentinelReportRejectsStringReviewRequest(t *testing.T) {
+func TestPortfolioSentinelReportPreservesStringReviewRequest(t *testing.T) {
 	raw := []byte(`{
 		"schema_version":"portfolio-sentinel-report/v2",
 		"overall_risk_level":"medium",
@@ -115,9 +114,11 @@ func TestPortfolioSentinelReportRejectsStringReviewRequest(t *testing.T) {
 		"review_requests":["review later"]
 	}`)
 	var report PortfolioSentinelReport
-	err := json.Unmarshal(raw, &report)
-	if err == nil || !strings.Contains(err.Error(), "cannot unmarshal string") {
-		t.Fatalf("err = %v, want typed review request failure", err)
+	if err := json.Unmarshal(raw, &report); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	if len(report.ReviewRequests) != 1 || report.ReviewRequests[0].Summary != "review later" || report.ReviewRequests[0].Symbol != "" {
+		t.Fatalf("review requests = %#v, want preserved untargeted summary", report.ReviewRequests)
 	}
 }
 
@@ -126,7 +127,7 @@ func TestPortfolioSentinelDecodeFailureIsARecoverableModelResult(t *testing.T) {
 		"schema_version":     PortfolioSentinelReportSchemaVersion,
 		"overall_risk_level": PortfolioSentinelRiskMedium,
 		"run_summary":        "complete",
-		"review_requests":    []any{"review later"},
+		"review_requests":    42,
 	})
 	if !errors.Is(err, ErrInvalidPortfolioSentinelResult) {
 		t.Fatalf("err = %v, want ErrInvalidPortfolioSentinelResult", err)
