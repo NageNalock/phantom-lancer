@@ -522,22 +522,30 @@ func localCodexCompletedMessage(raw json.RawMessage) string {
 	return ""
 }
 
+type localCodexEnvelope struct {
+	Kind      string `json:"kind"`
+	Content   string `json:"content"`
+	ToolCalls []struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"tool_calls"`
+}
+
 func parseLocalCodexEnvelope(raw string, usage Usage) (LocalChatResult, error) {
 	raw = strings.TrimSpace(raw)
 	raw = strings.TrimPrefix(raw, "```json")
 	raw = strings.TrimPrefix(raw, "```")
 	raw = strings.TrimSuffix(raw, "```")
-	var envelope struct {
-		Kind      string `json:"kind"`
-		Content   string `json:"content"`
-		ToolCalls []struct {
-			ID        string `json:"id"`
-			Name      string `json:"name"`
-			Arguments string `json:"arguments"`
-		} `json:"tool_calls"`
-	}
+	var envelope localCodexEnvelope
 	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &envelope); err != nil {
-		return LocalChatResult{}, fmt.Errorf("decode local Codex result: %w", err)
+		extracted, extractErr := extractLocalCodexEnvelope(raw)
+		if extractErr != nil {
+			return LocalChatResult{}, fmt.Errorf("decode local Codex result: %w", err)
+		}
+		if err := json.Unmarshal([]byte(extracted), &envelope); err != nil {
+			return LocalChatResult{}, fmt.Errorf("decode local Codex result: %w", err)
+		}
 	}
 	result := LocalChatResult{Content: envelope.Content, Usage: usage}
 	if envelope.Kind == "tool_calls" && len(envelope.ToolCalls) > 0 {
@@ -560,6 +568,38 @@ func parseLocalCodexEnvelope(raw string, usage Usage) (LocalChatResult, error) {
 		result.ToolCalls, _ = json.Marshal(calls)
 	}
 	return result, nil
+}
+
+func extractLocalCodexEnvelope(raw string) (string, error) {
+	// ponytail: app-server may emit a brief agent message beside the schema-bound
+	// final answer. Recover one unambiguous envelope instead of adding another
+	// response protocol or discarding an already-paid model result.
+	const maxObjectStarts = 512
+	var found string
+	searchAt := 0
+	for attempts := 0; searchAt < len(raw) && attempts < maxObjectStarts; attempts++ {
+		relative := strings.IndexByte(raw[searchAt:], '{')
+		if relative < 0 {
+			break
+		}
+		start := searchAt + relative
+		decoder := json.NewDecoder(strings.NewReader(raw[start:]))
+		var candidate localCodexEnvelope
+		if err := decoder.Decode(&candidate); err == nil &&
+			(candidate.Kind == "message" || candidate.Kind == "tool_calls") {
+			end := start + int(decoder.InputOffset())
+			value := strings.TrimSpace(raw[start:end])
+			if found != "" && found != value {
+				return "", errors.New("local Codex result contains multiple JSON envelopes")
+			}
+			found = value
+		}
+		searchAt = start + 1
+	}
+	if found == "" {
+		return "", errors.New("local Codex result contains no JSON envelope")
+	}
+	return found, nil
 }
 
 func updateLocalCodexUsage(raw json.RawMessage, usage *Usage) {

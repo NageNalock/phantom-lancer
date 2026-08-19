@@ -109,3 +109,26 @@ func TestParseLocalCodexEnvelopeBuildsOpenAIToolCalls(t *testing.T) {
 		t.Fatalf("function = %#v", function)
 	}
 }
+
+func TestParseLocalCodexEnvelopeRecoversUniqueEnvelopeFromAgentMessages(t *testing.T) {
+	result, err := parseLocalCodexEnvelope(`分析已经完成。
+{"kind":"message","content":"final answer","tool_calls":[]}
+Reading additional input from stdin...`, Usage{})
+	if err != nil {
+		t.Fatalf("parseLocalCodexEnvelope: %v", err)
+	}
+	if result.Content != "final answer" {
+		t.Fatalf("content = %q, want final answer", result.Content)
+	}
+}
+
+func TestParseLocalCodexEnvelopeRejectsMultipleEnvelopes(t *testing.T) {
+	_, err := parseLocalCodexEnvelope(
+		`{"kind":"message","content":"first","tool_calls":[]} `+
+			`{"kind":"message","content":"second","tool_calls":[]}`,
+		Usage{},
+	)
+	if err == nil {
+		t.Fatal("expected ambiguous envelope error")
+	}
+}
