@@ -68,6 +68,16 @@ func (s *Store) SearchEmbeddingVectorsForObjects(ctx context.Context, modelID, o
 	return s.marketDB.searchEmbeddingVectors(ctx, modelID, objectType, objectIDs, query, limit)
 }
 
+func (s *Store) SearchEmbeddingVectorsForObjectsBatch(ctx context.Context, modelID, objectType string, objectIDs map[string]struct{}, queries [][]float64, limit int) ([][]EmbeddingVectorSearchHit, error) {
+	if len(queries) == 0 || len(objectIDs) == 0 {
+		return nil, ErrEmbeddingAssetNotReady
+	}
+	if s == nil || s.marketDB == nil || s.marketDB.db == nil {
+		return nil, ErrEmbeddingAssetNotReady
+	}
+	return s.marketDB.searchEmbeddingVectorsBatch(ctx, modelID, objectType, objectIDs, queries, limit)
+}
+
 func (s *MarketDataStore) UpsertEmbeddingVector(ctx context.Context, asset EmbeddingAsset, vector []float64) error {
 	if s == nil || s.db == nil {
 		return ErrEmbeddingAssetNotReady
@@ -169,6 +179,64 @@ func (s *MarketDataStore) searchEmbeddingVectors(ctx context.Context, modelID, o
 	return hits, nil
 }
 
+func (s *MarketDataStore) searchEmbeddingVectorsBatch(ctx context.Context, modelID, objectType string, objectIDs map[string]struct{}, queries [][]float64, limit int) ([][]EmbeddingVectorSearchHit, error) {
+	if s == nil || s.db == nil || len(queries) == 0 || len(objectIDs) == 0 {
+		return nil, ErrEmbeddingAssetNotReady
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	queryNorms := make([]float64, len(queries))
+	for index, query := range queries {
+		queryNorms[index] = vectorNorm(query)
+		if len(query) == 0 || queryNorms[index] == 0 {
+			return nil, ErrEmbeddingAssetNotReady
+		}
+	}
+	where := `WHERE model_id = ?`
+	args := []any{modelID}
+	if objectType != "" {
+		where += ` AND object_type = ?`
+		args = append(args, objectType)
+	}
+	hits := make([][]EmbeddingVectorSearchHit, len(queries))
+	ids := make([]string, 0, len(objectIDs))
+	for id := range objectIDs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	const batchSize = 500
+	for start := 0; start < len(ids); start += batchSize {
+		end := start + batchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batchArgs := append([]any(nil), args...)
+		for _, id := range ids[start:end] {
+			batchArgs = append(batchArgs, id)
+		}
+		batchWhere := where + ` AND object_id IN (` + sqlPlaceholders(end-start) + `)`
+		if err := s.appendEmbeddingVectorBatchHits(ctx, batchWhere, batchArgs, queries, queryNorms, hits); err != nil {
+			return nil, err
+		}
+	}
+	for index := range hits {
+		sort.Slice(hits[index], func(i, j int) bool {
+			if hits[index][i].Score == hits[index][j].Score {
+				return hits[index][i].VectorRef < hits[index][j].VectorRef
+			}
+			return hits[index][i].Score > hits[index][j].Score
+		})
+		if len(hits[index]) > limit {
+			hits[index] = hits[index][:limit]
+		}
+	}
+	return hits, nil
+}
+
 func (s *MarketDataStore) appendEmbeddingVectorHits(ctx context.Context, where string, args []any, query []float64, queryNorm float64, hits *[]EmbeddingVectorSearchHit) error {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT vector_ref, vector_blob, dimensions, object_type, object_id
@@ -206,6 +274,46 @@ func (s *MarketDataStore) appendEmbeddingVectorHits(ctx context.Context, where s
 	return nil
 }
 
+func (s *MarketDataStore) appendEmbeddingVectorBatchHits(ctx context.Context, where string, args []any, queries [][]float64, queryNorms []float64, hits [][]EmbeddingVectorSearchHit) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT vector_ref, vector_blob, dimensions, object_type, object_id
+		FROM stockv2_embedding_vectors_v2
+		`+where, args...)
+	if err != nil {
+		return wrapError(err, "search embedding vectors v2 batch")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var vectorRef, hitObjectType, objectID string
+		var blob []byte
+		var dimensions int
+		if err := rows.Scan(&vectorRef, &blob, &dimensions, &hitObjectType, &objectID); err != nil {
+			return wrapError(err, "scan embedding vector v2 batch")
+		}
+		vector, err := decodeEmbeddingVector(blob, dimensions)
+		if err != nil {
+			return err
+		}
+		candidateNorm := vectorNorm(vector)
+		if candidateNorm == 0 {
+			continue
+		}
+		for index, query := range queries {
+			score := cosineScoreWithNorms(query, queryNorms[index], vector, candidateNorm)
+			if score == 0 {
+				continue
+			}
+			hits[index] = append(hits[index], EmbeddingVectorSearchHit{
+				VectorRef: vectorRef, ObjectType: hitObjectType, ObjectID: objectID, Score: score,
+			})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return wrapError(err, "iterate embedding vectors v2 batch")
+	}
+	return nil
+}
+
 func encodeEmbeddingVector(vector []float64) []byte {
 	blob := make([]byte, len(vector)*8)
 	for i, value := range vector {
@@ -235,6 +343,10 @@ func vectorNorm(vector []float64) float64 {
 
 func cosineScore(query []float64, queryNorm float64, vector []float64) float64 {
 	vectorNorm := vectorNorm(vector)
+	return cosineScoreWithNorms(query, queryNorm, vector, vectorNorm)
+}
+
+func cosineScoreWithNorms(query []float64, queryNorm float64, vector []float64, vectorNorm float64) float64 {
 	if queryNorm == 0 || vectorNorm == 0 {
 		return 0
 	}

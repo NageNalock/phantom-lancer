@@ -131,4 +131,28 @@ func TestOpportunityRepositoryPersistsDiscoveryObjectsAndEmbeddingAssets(t *test
 	if len(hits) != 1 || hits[0].VectorRef != "vector-300750" {
 		t.Fatalf("hits=%+v, want vector-300750", hits)
 	}
+	secondAsset, err := store.UpsertEmbeddingAsset(ctx, EmbeddingAsset{
+		ObjectType:          EmbeddingObjectStockProfile,
+		ObjectID:            "600519",
+		TextHash:            "hash-2",
+		ModelID:             "embedding-model-1",
+		EmbeddingDimensions: 3,
+		VectorRef:           "vector-600519",
+		Status:              EmbeddingAssetStatusReady,
+	})
+	if err != nil {
+		t.Fatalf("upsert second embedding asset: %v", err)
+	}
+	if err := store.UpsertEmbeddingVector(ctx, secondAsset, []float64{0.3, 0.2, 0.1}); err != nil {
+		t.Fatalf("upsert second embedding vector: %v", err)
+	}
+	batchHits, err := store.SearchEmbeddingVectorsForObjectsBatch(ctx, "embedding-model-1", EmbeddingObjectStockProfile,
+		map[string]struct{}{"300750": {}, "600519": {}}, [][]float64{{0.1, 0.2, 0.3}, {0.3, 0.2, 0.1}}, 1)
+	if err != nil {
+		t.Fatalf("batch search embedding vectors: %v", err)
+	}
+	if len(batchHits) != 2 || len(batchHits[0]) != 1 || len(batchHits[1]) != 1 ||
+		batchHits[0][0].VectorRef != "vector-300750" || batchHits[1][0].VectorRef != "vector-600519" {
+		t.Fatalf("batch hits=%+v, want each matching vector", batchHits)
+	}
 }

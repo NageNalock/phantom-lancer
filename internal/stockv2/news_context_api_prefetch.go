@@ -41,20 +41,28 @@ func (e *agentAPIExecutor) prefetchNewsContextCandidates(
 
 	candidates := make(map[string]NewsContextPromptThread)
 	asOf := pack.WindowEnd.Format(time.RFC3339Nano)
+	requests := make([]SemanticSearchRequest, 0, len(pack.InputNewsEvents))
+	eventIDs := make([]string, 0, len(pack.InputNewsEvents))
 	for _, event := range pack.InputNewsEvents {
 		query := newsContextCandidateQuery(event)
 		if query == "" {
 			continue
 		}
-		hits, searchErr := e.service.SemanticSearchNewsThreads(ctx, SemanticSearchRequest{
+		requests = append(requests, SemanticSearchRequest{
 			Query: query,
 			Limit: newsContextCandidateLimitPerEvent,
 			AsOf:  asOf,
 		})
+		eventIDs = append(eventIDs, event.ID)
+	}
+	if len(requests) > 0 {
+		results, searchErr := e.service.semanticSearchNewsThreadsAtBatch(ctx, requests)
 		if searchErr != nil {
 			return newsContextCandidateLookupUnavailable(pack)
 		}
-		mergeNewsContextCandidates(candidates, event.ID, hits)
+		for index, hits := range results {
+			mergeNewsContextCandidates(candidates, eventIDs[index], hits)
+		}
 	}
 	for _, thread := range pack.InputThreads {
 		delete(candidates, firstNonEmpty(thread.ID, thread.ThemeID))

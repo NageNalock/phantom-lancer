@@ -259,6 +259,18 @@ func TestSemanticSearchNewsThreadsAsOfReturnsLatestEligibleHistoricalVersion(t *
 	if len(items) != 1 || items[0].Version == nil || items[0].Version.ID != first.ID || items[0].Thread.CurrentVersionID != first.ID {
 		t.Fatalf("historical items=%+v, want first version only", items)
 	}
+	batch, err := svc.semanticSearchNewsThreadsAtBatch(ctx, []SemanticSearchRequest{
+		{Query: "动力电池", Limit: 5, AsOf: cutoff},
+		{Query: "battery expansion", Limit: 5, AsOf: cutoff},
+	})
+	if err != nil {
+		t.Fatalf("batch historical semantic search: %v", err)
+	}
+	if len(batch) != 2 || len(batch[0]) != 1 || len(batch[1]) != 1 ||
+		batch[0][0].Version == nil || batch[0][0].Version.ID != first.ID ||
+		batch[1][0].Version == nil || batch[1][0].Version.ID != first.ID {
+		t.Fatalf("batch historical items=%+v, want first version for both queries", batch)
+	}
 	if _, err := svc.SemanticSearchNewsThreads(ctx, SemanticSearchRequest{Query: "动力电池", AsOf: "invalid"}); !errors.Is(err, ErrInvalidEmbeddingRequest) {
 		t.Fatalf("invalid asOf error=%v, want invalid request", err)
 	}
