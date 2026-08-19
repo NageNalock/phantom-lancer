@@ -1,6 +1,9 @@
 package stockv2
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestValidateModelHorizonOutlooks(t *testing.T) {
 	valid := testModelHorizonOutlooks(10)
@@ -19,6 +22,22 @@ func TestValidateModelHorizonOutlooks(t *testing.T) {
 	invalidRange[0].ExpectedPrice = invalidRange[0].RangeHigh + 1
 	if err := validateModelHorizonOutlooks(invalidRange); err == nil {
 		t.Fatal("expected price outside range accepted")
+	}
+
+	incomplete := append([]ModelHorizonOutlook(nil), valid...)
+	incomplete[0].Direction = "neutral_to_bullish"
+	incomplete[0].ExpectedPrice = 0
+	incomplete[0].RangeLow = 0
+	incomplete[0].TargetPrice = 0
+	incomplete[0].InvalidConditions = nil
+	err := validateModelHorizonOutlooks(incomplete)
+	if err == nil {
+		t.Fatal("incomplete outlook accepted")
+	}
+	for _, want := range []string{"direction (must be bullish, neutral, or bearish)", "expectedPrice", "rangeLow", "targetPrice", "invalidConditions"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("validation error %q missing %q", err, want)
+		}
 	}
 }
 

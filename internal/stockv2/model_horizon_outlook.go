@@ -92,20 +92,55 @@ func validateModelHorizonOutlooks(items []ModelHorizonOutlook) error {
 			return fmt.Errorf("%w: item %d has an invalid or duplicate horizon", errInvalidModelHorizonOutlooks, index)
 		}
 		seen[item.Horizon] = true
-		if !validModelOutlookDirection(item.Direction) || !validModelOutlookDataQuality(item.DataQuality) ||
-			!validProbability(item.ProbabilityUp) || !validProbability(item.ProbabilityOutperform) ||
-			!validProbability(item.TargetProbability) || !validProbability(item.Confidence) {
-			return fmt.Errorf("%w: item %d has invalid categorical or probability fields", errInvalidModelHorizonOutlooks, index)
-		}
-		if !finitePositive(item.AsOfPrice) || !finitePositive(item.ExpectedPrice) ||
-			!finitePositive(item.RangeLow) || !finitePositive(item.RangeHigh) || !finitePositive(item.TargetPrice) ||
-			item.RangeLow > item.ExpectedPrice || item.ExpectedPrice > item.RangeHigh ||
-			!finiteNumber(item.ExpectedReturnPct) || !finitePercentage(item.DownsideRiskPct) ||
-			strings.TrimSpace(item.Thesis) == "" || len(compactStrings(item.InvalidConditions)) == 0 {
-			return fmt.Errorf("%w: item %d has invalid prices, range, thesis, or invalidation", errInvalidModelHorizonOutlooks, index)
+		invalidFields := invalidModelHorizonOutlookFields(item)
+		if len(invalidFields) > 0 {
+			return fmt.Errorf("%w: item %d (%s/%d) invalid fields: %s", errInvalidModelHorizonOutlooks, index, item.Horizon, item.TradingDays, strings.Join(invalidFields, ", "))
 		}
 	}
 	return nil
+}
+
+func invalidModelHorizonOutlookFields(item ModelHorizonOutlook) []string {
+	fields := make([]string, 0, 16)
+	if !validModelOutlookDirection(item.Direction) {
+		fields = append(fields, "direction (must be bullish, neutral, or bearish)")
+	}
+	if !validModelOutlookDataQuality(item.DataQuality) {
+		fields = append(fields, "dataQuality (must be healthy, degraded, or insufficient)")
+	}
+	for name, value := range map[string]float64{
+		"probabilityUp": item.ProbabilityUp, "probabilityOutperform": item.ProbabilityOutperform,
+		"targetProbability": item.TargetProbability, "confidence": item.Confidence,
+	} {
+		if !validProbability(value) {
+			fields = append(fields, name+" (must be 0..1)")
+		}
+	}
+	for name, value := range map[string]float64{
+		"asOfPrice": item.AsOfPrice, "expectedPrice": item.ExpectedPrice, "rangeLow": item.RangeLow,
+		"rangeHigh": item.RangeHigh, "targetPrice": item.TargetPrice,
+	} {
+		if !finitePositive(value) {
+			fields = append(fields, name+" (must be > 0 and cannot be omitted)")
+		}
+	}
+	if finitePositive(item.RangeLow) && finitePositive(item.ExpectedPrice) && finitePositive(item.RangeHigh) &&
+		(item.RangeLow > item.ExpectedPrice || item.ExpectedPrice > item.RangeHigh) {
+		fields = append(fields, "rangeLow <= expectedPrice <= rangeHigh")
+	}
+	if !finiteNumber(item.ExpectedReturnPct) {
+		fields = append(fields, "expectedReturnPct (must be numeric)")
+	}
+	if !finitePercentage(item.DownsideRiskPct) {
+		fields = append(fields, "downsideRiskPct (must be 0..100)")
+	}
+	if strings.TrimSpace(item.Thesis) == "" {
+		fields = append(fields, "thesis (required)")
+	}
+	if len(compactStrings(item.InvalidConditions)) == 0 {
+		fields = append(fields, "invalidConditions (at least one item required)")
+	}
+	return fields
 }
 
 func validateModelPortfolioHorizonOutlooks(items []ModelPortfolioHorizonOutlook) error {

@@ -693,7 +693,7 @@ func validateStrategyGenerationReport(report StrategyGenerationReport) error {
 			return fmt.Errorf("%w: drafts[%d].draft_type %q is invalid", ErrInvalidStrategyGenerationResult, draftIndex, draft.DraftType)
 		}
 		if err := validateModelHorizonOutlooks(draft.HorizonOutlooks); err != nil {
-			return fmt.Errorf("%w: drafts[%d].horizon_outlooks are incomplete or invalid", ErrInvalidStrategyGenerationResult, draftIndex)
+			return fmt.Errorf("%w: drafts[%d].horizon_outlooks: %v", ErrInvalidStrategyGenerationResult, draftIndex, err)
 		}
 		if draft.DraftType != StrategyGenerationDraftTypeNewStrategy {
 			continue
