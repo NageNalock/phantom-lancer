@@ -25,6 +25,77 @@ var defaultOpportunityDiscoverySteps = []opportunityStepDefinition{
 	{Key: "final_report", Title: "最终报告"},
 }
 
+func (s *Store) ensureOpportunityDiscoveryScopeSchema(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS stockv2_opportunity_discovery_config (
+			id TEXT PRIMARY KEY,
+			exclude_chi_next_and_star_market INTEGER NOT NULL DEFAULT 0,
+			updated_at DATETIME NOT NULL
+		);
+		INSERT OR IGNORE INTO stockv2_opportunity_discovery_config
+			(id, exclude_chi_next_and_star_market, updated_at)
+		VALUES ('default', 0, datetime('now'));
+	`); err != nil {
+		return wrapError(err, "ensure opportunity discovery config schema")
+	}
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(stockv2_opportunity_discovery_runs)`)
+	if err != nil {
+		return wrapError(err, "inspect opportunity discovery run schema")
+	}
+	hasScopeColumn := false
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return wrapError(err, "scan opportunity discovery run schema")
+		}
+		if name == "exclude_chi_next_and_star_market" {
+			hasScopeColumn = true
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return wrapError(err, "iterate opportunity discovery run schema")
+	}
+	if err := rows.Close(); err != nil {
+		return wrapError(err, "close opportunity discovery run schema")
+	}
+	if hasScopeColumn {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE stockv2_opportunity_discovery_runs
+		ADD COLUMN exclude_chi_next_and_star_market INTEGER NOT NULL DEFAULT 0`)
+	return wrapError(err, "extend opportunity discovery run scope schema")
+}
+
+func (s *Store) GetOpportunityDiscoveryConfig(ctx context.Context) (OpportunityDiscoveryConfig, error) {
+	var item OpportunityDiscoveryConfig
+	err := s.db.QueryRowContext(ctx, `SELECT id, exclude_chi_next_and_star_market, updated_at
+		FROM stockv2_opportunity_discovery_config WHERE id = ?`, OpportunityDiscoveryConfigIDDefault).Scan(
+		&item.ID, &item.ExcludeChiNextAndStarMarket, &item.UpdatedAt,
+	)
+	if err != nil {
+		return OpportunityDiscoveryConfig{}, wrapError(err, "get opportunity discovery config")
+	}
+	return item, nil
+}
+
+func (s *Store) SaveOpportunityDiscoveryConfig(ctx context.Context, item OpportunityDiscoveryConfig) (OpportunityDiscoveryConfig, error) {
+	item.ID = OpportunityDiscoveryConfigIDDefault
+	item.UpdatedAt = time.Now()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO stockv2_opportunity_discovery_config
+		(id, exclude_chi_next_and_star_market, updated_at) VALUES (?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			exclude_chi_next_and_star_market = excluded.exclude_chi_next_and_star_market,
+			updated_at = excluded.updated_at`,
+		item.ID, item.ExcludeChiNextAndStarMarket, item.UpdatedAt)
+	return item, wrapError(err, "save opportunity discovery config")
+}
+
 func opportunityFilterAdd(where *[]string, args *[]any, column, value string) {
 	if strings.TrimSpace(value) == "" {
 		return
@@ -172,6 +243,7 @@ func (s *Store) CountOpportunities(ctx context.Context, filter OpportunityListFi
 const opportunityRunSelectSQL = `
 	SELECT id, opportunity_id, COALESCE(agent_run_id,''), status, COALESCE(current_step_id,''),
 	       step_total, step_completed, candidate_count, evidence_count, external_source_count,
+	       exclude_chi_next_and_star_market,
 	       started_at, finished_at, COALESCE(error_message,''), created_at, updated_at
 	FROM stockv2_opportunity_discovery_runs
 `
@@ -182,7 +254,7 @@ func scanOpportunityRun(row rowScanner) (OpportunityDiscoveryRun, error) {
 	if err := row.Scan(
 		&item.ID, &item.OpportunityID, &item.AgentRunID, &item.Status, &item.CurrentStepID,
 		&item.StepTotal, &item.StepCompleted, &item.CandidateCount, &item.EvidenceCount,
-		&item.ExternalSourceCount, &started, &finished, &item.ErrorMessage,
+		&item.ExternalSourceCount, &item.ExcludeChiNextAndStarMarket, &started, &finished, &item.ErrorMessage,
 		&item.CreatedAt, &item.UpdatedAt,
 	); err != nil {
 		return OpportunityDiscoveryRun{}, err
@@ -217,12 +289,12 @@ func (s *Store) CreateOpportunityDiscoveryRun(ctx context.Context, run Opportuni
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO stockv2_opportunity_discovery_runs
 			(id, opportunity_id, agent_run_id, status, current_step_id, step_total, step_completed,
-			 candidate_count, evidence_count, external_source_count, started_at, finished_at,
+			 candidate_count, evidence_count, external_source_count, exclude_chi_next_and_star_market, started_at, finished_at,
 			 error_message, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, run.ID, run.OpportunityID, nullableString(run.AgentRunID), run.Status,
 		nullableString(run.CurrentStepID), run.StepTotal, run.StepCompleted,
-		run.CandidateCount, run.EvidenceCount, run.ExternalSourceCount,
+		run.CandidateCount, run.EvidenceCount, run.ExternalSourceCount, run.ExcludeChiNextAndStarMarket,
 		nullableTime(run.StartedAt), nullableTime(run.FinishedAt),
 		nullableString(run.ErrorMessage), run.CreatedAt, run.UpdatedAt); err != nil {
 		return OpportunityDiscoveryRun{}, nil, wrapError(err, "insert opportunity discovery run")

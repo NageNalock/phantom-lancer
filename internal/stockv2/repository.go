@@ -766,6 +766,7 @@ CREATE TABLE IF NOT EXISTS stockv2_opportunity_discovery_runs (
     candidate_count INTEGER NOT NULL DEFAULT 0,
     evidence_count INTEGER NOT NULL DEFAULT 0,
     external_source_count INTEGER NOT NULL DEFAULT 0,
+	exclude_chi_next_and_star_market INTEGER NOT NULL DEFAULT 0,
     started_at DATETIME,
     finished_at DATETIME,
     error_message TEXT,
@@ -973,6 +974,7 @@ CREATE TABLE IF NOT EXISTS stockv2_opportunity_discovery_runs (
     candidate_count INTEGER NOT NULL DEFAULT 0,
     evidence_count INTEGER NOT NULL DEFAULT 0,
     external_source_count INTEGER NOT NULL DEFAULT 0,
+	exclude_chi_next_and_star_market INTEGER NOT NULL DEFAULT 0,
     started_at DATETIME,
     finished_at DATETIME,
     error_message TEXT,
@@ -1116,6 +1118,9 @@ func (s *Store) init(ctx context.Context) error {
 	}
 	if err := s.ensureNewsContextBackfillSchema(ctx); err != nil {
 		return fmt.Errorf("ensure news context backfill schema: %w", err)
+	}
+	if err := s.ensureOpportunityDiscoveryScopeSchema(ctx); err != nil {
+		return fmt.Errorf("ensure opportunity discovery scope schema: %w", err)
 	}
 	if err := s.ensureOpportunityMarketScanSchema(ctx); err != nil {
 		return fmt.Errorf("ensure opportunity market scan schema: %w", err)

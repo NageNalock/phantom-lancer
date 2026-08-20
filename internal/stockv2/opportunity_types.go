@@ -54,6 +54,7 @@ const (
 
 	OpportunityDiscoveryReportSchemaVersion = "opportunity-discovery-report/v2"
 	OpportunityDiscoveryOutputType          = "opportunity_discovery"
+	OpportunityDiscoveryConfigIDDefault     = "default"
 
 	EmbeddingConfigIDDefault = "stockv2-embedding-config"
 
@@ -84,15 +85,16 @@ var (
 	ErrOpportunityCandidateNotFound = errors.New("opportunity candidate not found")
 	ErrOpportunityResultNotFound    = errors.New("opportunity result not found")
 
-	ErrInvalidOpportunityInput     = errors.New("invalid opportunity input")
-	ErrInvalidOpportunityStatus    = errors.New("invalid opportunity status")
-	ErrInvalidDiscoveryRunStatus   = errors.New("invalid opportunity discovery run status")
-	ErrInvalidDiscoveryStepStatus  = errors.New("invalid opportunity discovery step status")
-	ErrInvalidOpportunityCandidate = errors.New("invalid opportunity candidate")
-	ErrInvalidOpportunityResult    = errors.New("invalid opportunity discovery result")
-	ErrOpportunityUnsafeResult     = errors.New("opportunity discovery result contains forbidden trading or portfolio action")
-	ErrOpportunitySymbolNotFound   = errors.New("opportunity candidate symbol not found in StockV2 master data")
-	ErrOpportunityTaskMismatch     = errors.New("opportunity discovery task does not match run")
+	ErrInvalidOpportunityInput        = errors.New("invalid opportunity input")
+	ErrInvalidOpportunityStatus       = errors.New("invalid opportunity status")
+	ErrInvalidDiscoveryRunStatus      = errors.New("invalid opportunity discovery run status")
+	ErrInvalidDiscoveryStepStatus     = errors.New("invalid opportunity discovery step status")
+	ErrInvalidOpportunityCandidate    = errors.New("invalid opportunity candidate")
+	ErrInvalidOpportunityResult       = errors.New("invalid opportunity discovery result")
+	ErrOpportunityUnsafeResult        = errors.New("opportunity discovery result contains forbidden trading or portfolio action")
+	ErrOpportunitySymbolNotFound      = errors.New("opportunity candidate symbol not found in StockV2 master data")
+	ErrOpportunityTaskMismatch        = errors.New("opportunity discovery task does not match run")
+	ErrOpportunityCandidateOutOfScope = errors.New("opportunity candidate is outside the configured discovery scope")
 
 	ErrEmbeddingConfigNotFound        = errors.New("embedding config not found")
 	ErrEmbeddingAssetNotFound         = errors.New("embedding asset not found")
@@ -120,21 +122,28 @@ type Opportunity struct {
 }
 
 type OpportunityDiscoveryRun struct {
-	ID                  string    `json:"id"`
-	OpportunityID       string    `json:"opportunityId"`
-	AgentRunID          string    `json:"agentRunId,omitempty"`
-	Status              string    `json:"status"`
-	CurrentStepID       string    `json:"currentStepId,omitempty"`
-	StepTotal           int       `json:"stepTotal"`
-	StepCompleted       int       `json:"stepCompleted"`
-	CandidateCount      int       `json:"candidateCount"`
-	EvidenceCount       int       `json:"evidenceCount"`
-	ExternalSourceCount int       `json:"externalSourceCount"`
-	StartedAt           time.Time `json:"startedAt,omitempty"`
-	FinishedAt          time.Time `json:"finishedAt,omitempty"`
-	ErrorMessage        string    `json:"errorMessage,omitempty"`
-	CreatedAt           time.Time `json:"createdAt"`
-	UpdatedAt           time.Time `json:"updatedAt"`
+	ID                          string    `json:"id"`
+	OpportunityID               string    `json:"opportunityId"`
+	AgentRunID                  string    `json:"agentRunId,omitempty"`
+	Status                      string    `json:"status"`
+	CurrentStepID               string    `json:"currentStepId,omitempty"`
+	StepTotal                   int       `json:"stepTotal"`
+	StepCompleted               int       `json:"stepCompleted"`
+	CandidateCount              int       `json:"candidateCount"`
+	EvidenceCount               int       `json:"evidenceCount"`
+	ExternalSourceCount         int       `json:"externalSourceCount"`
+	ExcludeChiNextAndStarMarket bool      `json:"excludeChiNextAndStarMarket"`
+	StartedAt                   time.Time `json:"startedAt,omitempty"`
+	FinishedAt                  time.Time `json:"finishedAt,omitempty"`
+	ErrorMessage                string    `json:"errorMessage,omitempty"`
+	CreatedAt                   time.Time `json:"createdAt"`
+	UpdatedAt                   time.Time `json:"updatedAt"`
+}
+
+type OpportunityDiscoveryConfig struct {
+	ID                          string    `json:"id"`
+	ExcludeChiNextAndStarMarket bool      `json:"excludeChiNextAndStarMarket"`
+	UpdatedAt                   time.Time `json:"updatedAt"`
 }
 
 type OpportunityDiscoveryStep struct {
@@ -256,6 +265,10 @@ type RequestStartOpportunityDiscoveryRun struct {
 	RequestedBy string `json:"requestedBy,omitempty"`
 	// MarketScanRunID is internal orchestration context and is never accepted from HTTP.
 	MarketScanRunID string `json:"-"`
+}
+
+type RequestUpdateOpportunityDiscoveryConfig struct {
+	ExcludeChiNextAndStarMarket *bool `json:"excludeChiNextAndStarMarket,omitempty"`
 }
 
 type RequestUpdateOpportunityCandidate struct {

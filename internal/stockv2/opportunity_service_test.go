@@ -285,6 +285,106 @@ func TestOpportunityServiceRejectsUnsafeAndMalformedSubmittedResults(t *testing.
 	}
 }
 
+func TestOpportunityDiscoveryScopeExcludesChiNextAndStarStocksAcrossRunAndStrategy(t *testing.T) {
+	store := newTestStore(t)
+	svc := NewService(store, nil, nil)
+	defer svc.Close()
+	ctx := context.Background()
+
+	for _, inst := range []StockV2Instrument{
+		{ID: "main", Symbol: "600000", Market: "SH", InstrumentType: InstrumentTypeStock, Name: "主板股票"},
+		{ID: "chinext", Symbol: "300750", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "创业板股票"},
+		{ID: "star", Symbol: "688981", Market: "SH", InstrumentType: InstrumentTypeStock, Name: "科创板股票"},
+		{ID: "etf", Symbol: "159915", Market: "SZ", InstrumentType: InstrumentTypeExchangeFund, Name: "创业板ETF"},
+	} {
+		seedOpportunityInstrument(t, svc, inst)
+	}
+	model := seedOpportunityChatModel(t, svc, ctx)
+	modelID := model.ID
+	if _, err := svc.UpdateAgentTaskProfile(ctx, AgentTaskTypeOpportunityDiscovery, RequestUpdateAgentTaskProfile{PrimaryModelID: &modelID}); err != nil {
+		t.Fatalf("bind opportunity model: %v", err)
+	}
+	opp, err := svc.CreateOpportunity(ctx, RequestCreateOpportunity{
+		Title: "A 股主题", UserThesis: "验证机会范围", MarketScope: OpportunityMarketScopeAShare, InstrumentScope: OpportunityInstrumentScopeBoth,
+	})
+	if err != nil {
+		t.Fatalf("create opportunity: %v", err)
+	}
+
+	legacyRun, err := svc.StartOpportunityDiscoveryRun(ctx, opp.ID, RequestStartOpportunityDiscoveryRun{})
+	if err != nil {
+		t.Fatalf("start legacy-scope run: %v", err)
+	}
+	legacyCandidate, err := svc.RecordOpportunityCandidate(ctx, validOpportunityCandidateForTest(legacyRun.ID, "300750"))
+	if err != nil {
+		t.Fatalf("record candidate while exclusion is disabled: %v", err)
+	}
+	exclude := true
+	if _, err := svc.UpdateOpportunityDiscoveryConfig(ctx, RequestUpdateOpportunityDiscoveryConfig{ExcludeChiNextAndStarMarket: &exclude}); err != nil {
+		t.Fatalf("enable opportunity scope exclusion: %v", err)
+	}
+	run, err := svc.StartOpportunityDiscoveryRun(ctx, opp.ID, RequestStartOpportunityDiscoveryRun{})
+	if err != nil {
+		t.Fatalf("start excluded-scope run: %v", err)
+	}
+	if !run.ExcludeChiNextAndStarMarket {
+		t.Fatalf("run=%+v, want exclusion snapshot", run)
+	}
+	if _, err := svc.RecordOpportunityCandidate(ctx, validOpportunityCandidateForTest(run.ID, "688981")); !errors.Is(err, ErrOpportunityCandidateOutOfScope) {
+		t.Fatalf("record STAR candidate error=%v, want out of scope", err)
+	}
+	if _, err := svc.RecordOpportunityCandidate(ctx, validOpportunityCandidateForTest(run.ID, "600000")); err != nil {
+		t.Fatalf("record main-board candidate: %v", err)
+	}
+	if _, err := svc.RecordOpportunityCandidate(ctx, validOpportunityCandidateForTest(run.ID, "159915")); err != nil {
+		t.Fatalf("record ETF candidate: %v", err)
+	}
+	if _, err := svc.GenerateStrategyFromOpportunityCandidate(ctx, legacyCandidate.ID, RequestGenerateStrategyFromOpportunityCandidate{}); !errors.Is(err, ErrOpportunityCandidateOutOfScope) {
+		t.Fatalf("generate strategy from excluded historical candidate error=%v, want out of scope", err)
+	}
+
+	_, _, err = svc.opportunityDiscoveryReportFromResult(ctx, run, map[string]any{
+		"schema_version": OpportunityDiscoveryReportSchemaVersion,
+		"opportunity_id": opp.ID,
+		"summary":        "不应接受双创候选",
+		"candidates": []any{map[string]any{
+			"symbol": "300750", "relation_type": OpportunityRelationDirect,
+			"relevance_score": 80, "evidence_score": 70, "market_risk_score": 40,
+			"confidence": 0.7, "horizon_outlooks": testModelHorizonOutlooks(100),
+		}},
+	})
+	if !errors.Is(err, ErrInvalidOpportunityResult) || !strings.Contains(err.Error(), "outside the configured discovery scope") {
+		t.Fatalf("final report error=%v, want out-of-scope invalid result", err)
+	}
+}
+
+func TestIsChiNextOrStarMarketStock(t *testing.T) {
+	tests := []struct {
+		inst StockV2Instrument
+		want bool
+	}{
+		{StockV2Instrument{Symbol: "300750", Market: "SZ", InstrumentType: InstrumentTypeStock}, true},
+		{StockV2Instrument{Symbol: "301230", Market: "SZ", InstrumentType: InstrumentTypeStock}, true},
+		{StockV2Instrument{Symbol: "688981", Market: "SH", InstrumentType: InstrumentTypeStock}, true},
+		{StockV2Instrument{Symbol: "689009", Market: "SH", InstrumentType: InstrumentTypeStock}, true},
+		{StockV2Instrument{Symbol: "600000", Market: "SH", InstrumentType: InstrumentTypeStock}, false},
+		{StockV2Instrument{Symbol: "159915", Market: "SZ", InstrumentType: InstrumentTypeExchangeFund}, false},
+		{StockV2Instrument{Symbol: "300750", Market: "HK", InstrumentType: InstrumentTypeStock}, false},
+	}
+	for _, tt := range tests {
+		if got := isChiNextOrStarMarketStock(tt.inst); got != tt.want {
+			t.Fatalf("isChiNextOrStarMarketStock(%+v)=%v, want %v", tt.inst, got, tt.want)
+		}
+	}
+}
+
+func validOpportunityCandidateForTest(runID, symbol string) OpportunityCandidate {
+	return OpportunityCandidate{
+		RunID: runID, Symbol: symbol, RelationType: OpportunityRelationDirect,
+		RelevanceScore: 80, EvidenceScore: 70, MarketRiskScore: 40, Confidence: 0.7,
+	}
+}
+
 func seedOpportunityInstrument(t *testing.T, svc *Service, inst StockV2Instrument) {
 	t.Helper()
 	if err := svc.store.UpsertInstrument(context.Background(), inst); err != nil {

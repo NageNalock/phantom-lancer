@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { AppActions } from "../../app/App";
-import type { StockV2DiscoveryStepKey } from "../../app/types";
+import type { StockV2DiscoveryStepKey, StockV2OpportunityDiscoveryConfig } from "../../app/types";
+import { friendlyError } from "../../api/client";
 import { EmptyState, SubTabs } from "../../components/ui";
 import { buildQueryHref, useQueryParamState } from "../../hooks/useQueryParamState";
 import { StockV2EmbeddingAvailabilityNotice } from "./StockV2EmbeddingStatusSection";
@@ -9,6 +10,7 @@ import { StockV2OpportunityForm } from "./StockV2OpportunityForm";
 import { StockV2OpportunityDetail } from "./StockV2OpportunityDetail";
 import { StockV2OpportunityRunDrawer } from "./StockV2OpportunityRunDrawer";
 import { StockV2OpportunityMarketScan } from "./StockV2OpportunityMarketScan";
+import { StockV2OpportunityScopeControl } from "./StockV2OpportunityScopeControl";
 
 // 固定 8 步顺序，对齐设计文档 §4.3。StepTimeline / RunDrawer 共享。
 export const DISCOVERY_STEP_ORDER: StockV2DiscoveryStepKey[] = [
@@ -27,6 +29,27 @@ const OPPORTUNITY_VIEWS = ["marketScan", "themeResearch"] as const;
 // 机会发现按市场扫描与手工主题研究分层，避免全市场任务状态挤占主题工作区。
 export function StockV2OpportunityPage({ actions }: { actions: AppActions }) {
   const [view, setView, viewHref] = useQueryParamState("stockv2OpportunityView", OPPORTUNITY_VIEWS, "marketScan");
+  const [scopeConfig, setScopeConfig] = useState<StockV2OpportunityDiscoveryConfig | null>(null);
+  const [scopeLoading, setScopeLoading] = useState(true);
+  const [scopeError, setScopeError] = useState<string | null>(null);
+  const { api } = actions;
+
+  async function loadScopeConfig() {
+    setScopeLoading(true);
+    try {
+      setScopeConfig(await api<StockV2OpportunityDiscoveryConfig>("/api/stockv2/opportunity-discovery/config"));
+      setScopeError(null);
+    } catch (cause) {
+      setScopeError(friendlyError(cause));
+    } finally {
+      setScopeLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadScopeConfig();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api]);
 
   return (
     <div className="grid gap-4">
@@ -39,12 +62,33 @@ export function StockV2OpportunityPage({ actions }: { actions: AppActions }) {
           { id: "themeResearch", label: "主题研究", href: viewHref("themeResearch") },
         ]}
       />
-      {view === "marketScan" ? <StockV2OpportunityMarketScan actions={actions} /> : <StockV2ThemeOpportunityResearch actions={actions} />}
+      <StockV2OpportunityScopeControl
+        actions={actions}
+        config={scopeConfig}
+        error={scopeError}
+        loading={scopeLoading}
+        onChange={setScopeConfig}
+        onRetry={() => void loadScopeConfig()}
+      />
+      {view === "marketScan" ? (
+        <StockV2OpportunityMarketScan actions={actions} />
+      ) : (
+        <StockV2ThemeOpportunityResearch
+          actions={actions}
+          excludeChiNextAndStarMarket={scopeConfig?.excludeChiNextAndStarMarket ?? false}
+        />
+      )}
     </div>
   );
 }
 
-function StockV2ThemeOpportunityResearch({ actions }: { actions: AppActions }) {
+function StockV2ThemeOpportunityResearch({
+  actions,
+  excludeChiNextAndStarMarket,
+}: {
+  actions: AppActions;
+  excludeChiNextAndStarMarket: boolean;
+}) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [runDrawerRunId, setRunDrawerRunId] = useState<string | null>(null);
@@ -71,6 +115,7 @@ function StockV2ThemeOpportunityResearch({ actions }: { actions: AppActions }) {
               actions={actions}
               opportunityId={selectedId}
               refreshToken={detailRefreshToken}
+              excludeChiNextAndStarMarket={excludeChiNextAndStarMarket}
               onOpenRun={(runId) => setRunDrawerRunId(runId)}
             />
           ) : (

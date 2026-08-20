@@ -27,11 +27,13 @@ export function StockV2OpportunityDetail({
   actions,
   opportunityId,
   refreshToken,
+  excludeChiNextAndStarMarket,
   onOpenRun,
 }: {
   actions: AppActions;
   opportunityId: string;
   refreshToken: number;
+  excludeChiNextAndStarMarket: boolean;
   onOpenRun: (runId: string) => void;
 }) {
   const [opp, setOpp] = useState<StockV2Opportunity | null>(null);
@@ -173,6 +175,7 @@ export function StockV2OpportunityDetail({
           <StockV2OpportunityCandidateTable
             actions={actions}
             runId={candidateRunId}
+            excludeChiNextAndStarMarket={excludeChiNextAndStarMarket}
             onOpenCandidate={(c) => setCandidateDrawer(c)}
           />
         ) : (
@@ -199,6 +202,7 @@ export function StockV2OpportunityDetail({
                   <span className="text-[var(--muted-strong)]">
                     {run.stepCompleted ?? 0}/{run.stepTotal ?? 8} 步 · 候选 {run.candidateCount ?? 0} · 证据 {run.evidenceCount ?? 0} · 外部 {run.externalSourceCount ?? 0}
                   </span>
+                  {run.excludeChiNextAndStarMarket ? <Pill tone="neutral">已排除双创个股</Pill> : null}
                 </div>
                 <span className="text-[var(--muted)]">{formatDate(run.startedAt || run.createdAt) || "-"}</span>
               </button>

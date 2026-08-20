@@ -2,12 +2,75 @@ package stockv2
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"testing"
 )
+
+func TestOpportunityDiscoveryScopeSchemaMigratesExistingRunTable(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "stockv2.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	_, err = db.Exec(`CREATE TABLE stockv2_opportunity_discovery_runs (
+		id TEXT PRIMARY KEY, opportunity_id TEXT NOT NULL, agent_run_id TEXT, status TEXT NOT NULL,
+		current_step_id TEXT, step_total INTEGER NOT NULL DEFAULT 0, step_completed INTEGER NOT NULL DEFAULT 0,
+		candidate_count INTEGER NOT NULL DEFAULT 0, evidence_count INTEGER NOT NULL DEFAULT 0,
+		external_source_count INTEGER NOT NULL DEFAULT 0, started_at DATETIME, finished_at DATETIME,
+		error_message TEXT, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL
+	)`)
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("create legacy discovery run table: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	store, err := NewStoreWithMarketDB(dbPath, filepath.Join(dir, "market.duckdb"))
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	defer store.Close()
+	rows, err := store.db.Query(`PRAGMA table_info(stockv2_opportunity_discovery_runs)`)
+	if err != nil {
+		t.Fatalf("inspect migrated run table: %v", err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatalf("scan migrated run table: %v", err)
+		}
+		found = found || name == "exclude_chi_next_and_star_market"
+	}
+	if !found {
+		t.Fatal("migrated discovery run table is missing scope snapshot column")
+	}
+	config, err := store.GetOpportunityDiscoveryConfig(context.Background())
+	if err != nil || config.ExcludeChiNextAndStarMarket {
+		t.Fatalf("migrated config=%+v err=%v, want disabled default", config, err)
+	}
+}
 
 func TestOpportunityRepositoryPersistsDiscoveryObjectsAndEmbeddingAssets(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
+	config, err := store.GetOpportunityDiscoveryConfig(ctx)
+	if err != nil || config.ExcludeChiNextAndStarMarket {
+		t.Fatalf("default opportunity discovery config=%+v err=%v, want exclusion disabled", config, err)
+	}
+	config.ExcludeChiNextAndStarMarket = true
+	config, err = store.SaveOpportunityDiscoveryConfig(ctx, config)
+	if err != nil || !config.ExcludeChiNextAndStarMarket {
+		t.Fatalf("saved opportunity discovery config=%+v err=%v, want exclusion enabled", config, err)
+	}
 
 	opp, err := store.CreateOpportunity(ctx, Opportunity{
 		Title:           "AI model release",
@@ -25,9 +88,10 @@ func TestOpportunityRepositoryPersistsDiscoveryObjectsAndEmbeddingAssets(t *test
 	}
 
 	run, steps, err := store.CreateOpportunityDiscoveryRun(ctx, OpportunityDiscoveryRun{
-		OpportunityID: opp.ID,
-		AgentRunID:    "agent-run-1",
-		Status:        OpportunityDiscoveryRunStatusPending,
+		OpportunityID:               opp.ID,
+		AgentRunID:                  "agent-run-1",
+		Status:                      OpportunityDiscoveryRunStatusPending,
+		ExcludeChiNextAndStarMarket: true,
 	}, []OpportunityDiscoveryStep{{
 		StepKey:    "scope",
 		StepTitle:  "Scope theme",
@@ -39,6 +103,10 @@ func TestOpportunityRepositoryPersistsDiscoveryObjectsAndEmbeddingAssets(t *test
 	}
 	if run.ID == "" || run.StepTotal != 1 || len(steps) != 1 {
 		t.Fatalf("run=%+v steps=%+v, want one seeded step", run, steps)
+	}
+	persistedRun, err := store.GetOpportunityDiscoveryRun(ctx, run.ID)
+	if err != nil || !persistedRun.ExcludeChiNextAndStarMarket {
+		t.Fatalf("persisted run=%+v err=%v, want exclusion snapshot", persistedRun, err)
 	}
 
 	candidate, err := store.UpsertOpportunityCandidate(ctx, OpportunityCandidate{

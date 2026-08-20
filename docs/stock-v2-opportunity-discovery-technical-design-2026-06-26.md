@@ -114,6 +114,7 @@ step_completed
 candidate_count
 evidence_count
 external_source_count
+exclude_chi_next_and_star_market // 本次运行的范围快照
 started_at
 finished_at
 error_message
@@ -126,6 +127,21 @@ updated_at
 - 一个 Opportunity 可以有多次 discovery run。
 - `agent_run_id` 关联现有 AgentRun / DecisionLedger。
 - `current_step_id` 用于前端展示当前进度。
+- `exclude_chi_next_and_star_market` 在运行创建时从机会发现配置复制；运行期间修改全局开关不会改变已启动任务的边界。市场扫描运行始终为 `true`，因为其上游候选集固定为沪深主板。
+
+### 4.2.1 stockv2_opportunity_discovery_config
+
+机会发现功能域的单例运行时配置：
+
+```text
+id                              // default
+exclude_chi_next_and_star_market
+updated_at
+```
+
+`exclude_chi_next_and_star_market=true` 时，只排除深圳 `300/301`、上海 `688/689` 开头的个股；场内 ETF 不按代码前缀排除。该配置不修改组合持仓、组合哨兵和历史结果，也不放宽始终固定主板的市场扫描范围。
+
+配置迁移默认关闭，避免升级时改变已部署实例的研究边界；owner 可在机会发现页面一键开启。生产发布若明确要求立即采用该范围，应通过同一配置写入启用状态，不在代码中改写默认值。
 
 ### 4.3 stockv2_opportunity_discovery_steps
 
@@ -476,12 +492,16 @@ opportunity_discovery
 - 每个候选必须包含 short/5、medium/20、long/60 三个模型条件预测；概率、预期价和区间由模型分析生成，服务端只校验字段范围、周期完整性和区间一致性。
 - 不允许包含操作单、持仓修改或策略激活指令。
 - 如果候选声称来自语义向量召回，必须能追溯到对应 embedding model、向量资产和 evidence 记录。
+- 候选必须符合 Opportunity 的 `market_scope`、`instrument_scope` 和本次运行的双创排除快照。该规则同时应用于 MCP `record_candidate` 与最终 `submit_result`，不能只依赖 Prompt。
+- 从历史候选启动新的策略生成时，按当前全局双创排除配置重新校验；范围外候选保留可见，但不得创建新的策略草案。
 
 ## 8. 后端 API
 
 API：
 
 ```text
+GET    /api/stockv2/opportunity-discovery/config
+PATCH  /api/stockv2/opportunity-discovery/config
 GET    /api/stockv2/opportunities
 POST   /api/stockv2/opportunities
 GET    /api/stockv2/opportunities/{id}
@@ -556,6 +576,7 @@ OpportunityEvidence[]
 主界面：
 
 ```text
+顶部：机会发现范围开关（排除创业板和科创板个股）
 左侧：Opportunity 列表
 中间：机会详情、候选池
 右侧：最近运行状态 inspector
@@ -565,7 +586,7 @@ OpportunityEvidence[]
 
 ```text
 顶部状态条：
-状态、当前步骤、进度、候选数、证据数、外部来源数、耗时。
+状态、当前步骤、进度、候选数、证据数、外部来源数、标的范围、耗时。
 
 中部 Step Timeline：
 ✓ 主题理解
@@ -594,6 +615,8 @@ Rank
 证据数
 操作：生成策略 / 标记排除 / 查看证据
 ```
+
+当全局双创排除已开启，历史候选中的范围外个股保留展示并标记“当前范围外”，生成策略按钮禁用；历史研究结论不删除、不改写。
 
 候选详情 Drawer：
 

@@ -19,6 +19,7 @@ import {
 import { StockV2AgentRunDetailDrawer } from "./StockV2AgentExecutionLedger";
 import { SimplePager } from "./StockV2EmbeddingStatusSection";
 import { ModelHorizonOutlookCompact } from "./StockV2ModelOutlook";
+import { isOpportunityCandidateExcludedByBoard } from "./opportunityScope";
 
 const PAGE_SIZE = 10;
 
@@ -27,10 +28,12 @@ const PAGE_SIZE = 10;
 export function StockV2OpportunityCandidateTable({
   actions,
   runId,
+  excludeChiNextAndStarMarket,
   onOpenCandidate,
 }: {
   actions: AppActions;
   runId: string;
+  excludeChiNextAndStarMarket: boolean;
   onOpenCandidate: (candidate: StockV2OpportunityCandidate) => void;
 }) {
   const [items, setItems] = useState<StockV2OpportunityCandidate[]>([]);
@@ -165,6 +168,7 @@ export function StockV2OpportunityCandidateTable({
           <tbody>
             {items.map((c) => {
               const strategyStarted = c.status === "strategy_requested" || c.status === "strategy_generated";
+              const boardExcluded = isOpportunityCandidateExcludedByBoard(c, excludeChiNextAndStarMarket);
               const strategyRunId = candidateStrategyRunIds[c.id] || "";
               const busy = updatingId === c.id;
               return (
@@ -180,6 +184,7 @@ export function StockV2OpportunityCandidateTable({
                       <span className="font-mono font-medium text-[var(--text)]">{c.symbol}</span>
                       {c.name ? <span className="ml-1.5 text-[var(--muted-strong)]">{c.name}</span> : null}
                       {c.market ? <span className="ml-1.5 text-[var(--muted)]">{c.market}</span> : null}
+                      {boardExcluded ? <Pill tone="warn">当前范围外</Pill> : null}
                     </button>
                   </Td>
                   <Td>
@@ -204,8 +209,8 @@ export function StockV2OpportunityCandidateTable({
                     <div className="flex items-center gap-1">
                       <Button
                         tone={strategyStarted ? "neutral" : "primary"}
-                        disabled={busy || (strategyStarted && !strategyRunId)}
-                        title={strategyStarted ? (strategyRunId ? "查看策略生成运行" : "已请求策略生成") : "从该候选生成策略草案"}
+                        disabled={busy || boardExcluded || (strategyStarted && !strategyRunId)}
+                        title={boardExcluded ? "当前已排除创业板和科创板个股，不能生成新策略" : strategyStarted ? (strategyRunId ? "查看策略生成运行" : "已请求策略生成") : "从该候选生成策略草案"}
                         onClick={() => {
                           if (strategyStarted) {
                             if (strategyRunId) setAgentRunDrawerId(strategyRunId);
@@ -215,7 +220,7 @@ export function StockV2OpportunityCandidateTable({
                         }}
                       >
                         <Sparkle size={12} className="mr-1" />
-                        {strategyStarted ? (strategyRunId ? "查看运行" : "已请求") : "策略"}
+                        {boardExcluded ? "范围外" : strategyStarted ? (strategyRunId ? "查看运行" : "已请求") : "策略"}
                       </Button>
                       <Button disabled={busy || c.status === "rejected"} title="查看证据" onClick={() => onOpenCandidate(c)}>
                         <Eye size={12} />

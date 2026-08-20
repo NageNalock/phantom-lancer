@@ -84,6 +84,21 @@ func (s *Service) DeleteOpportunity(ctx context.Context, id string) error {
 	return s.store.DeleteOpportunity(ctx, strings.TrimSpace(id))
 }
 
+func (s *Service) GetOpportunityDiscoveryConfig(ctx context.Context) (OpportunityDiscoveryConfig, error) {
+	return s.store.GetOpportunityDiscoveryConfig(ctx)
+}
+
+func (s *Service) UpdateOpportunityDiscoveryConfig(ctx context.Context, req RequestUpdateOpportunityDiscoveryConfig) (OpportunityDiscoveryConfig, error) {
+	item, err := s.store.GetOpportunityDiscoveryConfig(ctx)
+	if err != nil {
+		return OpportunityDiscoveryConfig{}, err
+	}
+	if req.ExcludeChiNextAndStarMarket != nil {
+		item.ExcludeChiNextAndStarMarket = *req.ExcludeChiNextAndStarMarket
+	}
+	return s.store.SaveOpportunityDiscoveryConfig(ctx, item)
+}
+
 func normalizeOpportunityListFilter(filter OpportunityListFilter) OpportunityListFilter {
 	filter.Status = strings.TrimSpace(filter.Status)
 	filter.MarketScope = strings.TrimSpace(filter.MarketScope)
@@ -127,15 +142,23 @@ func (s *Service) StartOpportunityDiscoveryRun(ctx context.Context, opportunityI
 			return OpportunityDiscoveryRun{}, ErrOpportunityMarketScanInvalidState
 		}
 	}
-	artifactContext := s.BuildOpportunityDiscoveryContext(ctx, opp, OpportunityDiscoveryRun{}, nil, marketScanRunID)
+	discoveryConfig, err := s.store.GetOpportunityDiscoveryConfig(ctx)
+	if err != nil {
+		return OpportunityDiscoveryRun{}, err
+	}
+	excludeChiNextAndStarMarket := discoveryConfig.ExcludeChiNextAndStarMarket || marketScanRunID != ""
+	artifactContext := s.BuildOpportunityDiscoveryContext(ctx, opp, OpportunityDiscoveryRun{
+		ExcludeChiNextAndStarMarket: excludeChiNextAndStarMarket,
+	}, nil, marketScanRunID)
 	artifact, _ := json.Marshal(map[string]any{
 		"opportunity":      opp,
 		"mode":             artifactContext.Mode,
 		"marketScanRunId":  marketScanRunID,
 		"marketCandidates": artifactContext.MarketCandidates,
 		"boundary": map[string]any{
-			"externalResearch": "codex_cli_builtin",
-			"mainProgramMCP":   "internal_stock_data_and_trace_only",
+			"externalResearch":            "codex_cli_builtin",
+			"mainProgramMCP":              "internal_stock_data_and_trace_only",
+			"excludeChiNextAndStarMarket": excludeChiNextAndStarMarket,
 		},
 	})
 	runRecord, ledger, err := s.CreateAgentRunRecord(ctx, AgentRunRecordParams{
@@ -163,9 +186,10 @@ func (s *Service) StartOpportunityDiscoveryRun(ctx context.Context, opportunityI
 		})
 	}
 	run, _, err := s.store.CreateOpportunityDiscoveryRun(ctx, OpportunityDiscoveryRun{
-		OpportunityID: opp.ID,
-		AgentRunID:    runRecord.ID,
-		Status:        OpportunityDiscoveryRunStatusPending,
+		OpportunityID:               opp.ID,
+		AgentRunID:                  runRecord.ID,
+		Status:                      OpportunityDiscoveryRunStatusPending,
+		ExcludeChiNextAndStarMarket: excludeChiNextAndStarMarket,
 	}, steps)
 	if err != nil {
 		return OpportunityDiscoveryRun{}, err
@@ -298,9 +322,14 @@ func (s *Service) runOpportunityDiscoveryCLIDebug(ctx context.Context, req Reque
 			Metadata:   map[string]any{},
 		})
 	}
+	discoveryConfig, err := s.store.GetOpportunityDiscoveryConfig(ctx)
+	if err != nil {
+		return AgentExecutionDetail{}, err
+	}
 	run, steps, err := s.store.CreateOpportunityDiscoveryRun(ctx, OpportunityDiscoveryRun{
-		OpportunityID: opp.ID,
-		Status:        OpportunityDiscoveryRunStatusPending,
+		OpportunityID:               opp.ID,
+		Status:                      OpportunityDiscoveryRunStatusPending,
+		ExcludeChiNextAndStarMarket: discoveryConfig.ExcludeChiNextAndStarMarket,
 	}, steps)
 	if err != nil {
 		return AgentExecutionDetail{}, err
@@ -533,6 +562,13 @@ func (s *Service) RecordOpportunityCandidate(ctx context.Context, item Opportuni
 		}
 		return OpportunityCandidate{}, err
 	}
+	opp, err := s.store.GetOpportunity(ctx, run.OpportunityID)
+	if err != nil {
+		return OpportunityCandidate{}, err
+	}
+	if err := validateOpportunityInstrumentScope(opp, inst, run.ExcludeChiNextAndStarMarket); err != nil {
+		return OpportunityCandidate{}, err
+	}
 	item.OpportunityID = run.OpportunityID
 	item.RunID = run.ID
 	item.Symbol = inst.Symbol
@@ -727,6 +763,10 @@ func (s *Service) opportunityDiscoveryReportFromResult(ctx context.Context, run 
 		strings.TrimSpace(report.Summary) == "" {
 		return OpportunityDiscoveryReport{}, nil, invalidOpportunityResult("required report fields do not match the run")
 	}
+	opp, err := s.store.GetOpportunity(ctx, run.OpportunityID)
+	if err != nil {
+		return OpportunityDiscoveryReport{}, nil, err
+	}
 	for _, item := range report.ThemeChain {
 		if strings.TrimSpace(item.Layer) == "" || item.Rank < 0 {
 			return OpportunityDiscoveryReport{}, nil, invalidOpportunityResult("invalid theme chain item")
@@ -769,11 +809,15 @@ func (s *Service) opportunityDiscoveryReportFromResult(ctx context.Context, run 
 				return OpportunityDiscoveryReport{}, nil, invalidOpportunityResult("candidate is outside the bounded research set")
 			}
 		}
-		if _, err := s.store.GetInstrument(ctx, strings.TrimSpace(candidate.Symbol)); err != nil {
+		inst, err := s.store.GetInstrument(ctx, strings.TrimSpace(candidate.Symbol))
+		if err != nil {
 			if errors.Is(err, ErrInstrumentNotFound) {
 				return OpportunityDiscoveryReport{}, nil, ErrOpportunitySymbolNotFound
 			}
 			return OpportunityDiscoveryReport{}, nil, err
+		}
+		if err := validateOpportunityInstrumentScope(opp, inst, run.ExcludeChiNextAndStarMarket); err != nil {
+			return OpportunityDiscoveryReport{}, nil, invalidOpportunityResult(err.Error())
 		}
 	}
 	if err := validateSemanticRecallTrace(raw); err != nil {
@@ -853,6 +897,21 @@ func sliceStringsFromAny(value any) []string {
 func (s *Service) GenerateStrategyFromOpportunityCandidate(ctx context.Context, candidateID string, req RequestGenerateStrategyFromOpportunityCandidate) (AgentRun, error) {
 	candidate, err := s.store.GetOpportunityCandidate(ctx, strings.TrimSpace(candidateID))
 	if err != nil {
+		return AgentRun{}, err
+	}
+	opp, err := s.store.GetOpportunity(ctx, candidate.OpportunityID)
+	if err != nil {
+		return AgentRun{}, err
+	}
+	inst, err := s.store.GetInstrument(ctx, candidate.Symbol)
+	if err != nil {
+		return AgentRun{}, err
+	}
+	discoveryConfig, err := s.store.GetOpportunityDiscoveryConfig(ctx)
+	if err != nil {
+		return AgentRun{}, err
+	}
+	if err := validateOpportunityInstrumentScope(opp, inst, discoveryConfig.ExcludeChiNextAndStarMarket); err != nil {
 		return AgentRun{}, err
 	}
 	goal := strings.TrimSpace(req.UserGoal)
@@ -936,4 +995,38 @@ func firstNonEmptyOpportunity(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func validateOpportunityInstrumentScope(opp Opportunity, inst StockV2Instrument, excludeChiNextAndStarMarket bool) error {
+	market := strings.ToUpper(strings.TrimSpace(inst.Market))
+	instrumentType := normalizeInstrumentType(inst.InstrumentType)
+	marketAllowed := opp.MarketScope == OpportunityMarketScopeAll ||
+		(opp.MarketScope == OpportunityMarketScopeAShare && (market == "SH" || market == "SZ" || market == "BJ")) ||
+		(opp.MarketScope == OpportunityMarketScopeHK && market == "HK") ||
+		(opp.MarketScope == OpportunityMarketScopeUS && market == "US")
+	instrumentAllowed := opp.InstrumentScope == OpportunityInstrumentScopeBoth ||
+		(opp.InstrumentScope == OpportunityInstrumentScopeStock && instrumentType == InstrumentTypeStock) ||
+		(opp.InstrumentScope == OpportunityInstrumentScopeExchangeFund && instrumentType == InstrumentTypeExchangeFund)
+	if !marketAllowed || !instrumentAllowed {
+		return fmt.Errorf("%w: %s does not match marketScope=%s instrumentScope=%s", ErrOpportunityCandidateOutOfScope, inst.Symbol, opp.MarketScope, opp.InstrumentScope)
+	}
+	if excludeChiNextAndStarMarket && isChiNextOrStarMarketStock(inst) {
+		return fmt.Errorf("%w: %s is a ChiNext or STAR Market stock", ErrOpportunityCandidateOutOfScope, inst.Symbol)
+	}
+	return nil
+}
+
+func isChiNextOrStarMarketStock(inst StockV2Instrument) bool {
+	if normalizeInstrumentType(inst.InstrumentType) != InstrumentTypeStock {
+		return false
+	}
+	symbol := strings.TrimSpace(inst.Symbol)
+	switch strings.ToUpper(strings.TrimSpace(inst.Market)) {
+	case "SZ":
+		return strings.HasPrefix(symbol, "300") || strings.HasPrefix(symbol, "301")
+	case "SH":
+		return strings.HasPrefix(symbol, "688") || strings.HasPrefix(symbol, "689")
+	default:
+		return false
+	}
 }

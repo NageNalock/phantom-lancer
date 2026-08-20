@@ -1090,6 +1090,20 @@ func TestBuildOpportunityDiscoveryPromptRequiresEmbeddingSemanticRecall(t *testi
 	}
 }
 
+func TestBuildOpportunityDiscoveryPromptIncludesBoardExclusionSnapshot(t *testing.T) {
+	prompt := buildOpportunityDiscoveryPrompt("task-opp", OpportunityDiscoveryContext{
+		Opportunity: Opportunity{ID: "opp-1", Title: "主板主题", UserThesis: "只研究主板"},
+		DiscoveryRun: OpportunityDiscoveryRun{
+			ID: "run-1", OpportunityID: "opp-1", ExcludeChiNextAndStarMarket: true,
+		},
+	}, "")
+	for _, want := range []string{"excludes ChiNext and STAR Market", "SZ 300/301", "SH 688/689", "Exchange-traded funds remain allowed"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestBuildOpportunityDiscoveryPromptBoundsMarketScanCandidates(t *testing.T) {
 	candidates := make([]OpportunityMarketScanCandidate, 0, opportunityMarketScanResearchLimit)
 	for i := 0; i < opportunityMarketScanResearchLimit; i++ {

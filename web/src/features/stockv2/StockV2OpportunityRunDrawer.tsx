@@ -173,10 +173,11 @@ function RunStatusBar({
     ["候选", run.candidateCount ?? 0],
     ["证据", run.evidenceCount ?? 0],
     ["外部来源", run.externalSourceCount ?? 0],
+    ["标的范围", run.excludeChiNextAndStarMarket ? "排除双创个股" : "按主题范围"],
     ["耗时", formatDuration(run)],
   ];
   return (
-    <div className="grid grid-cols-2 gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs sm:grid-cols-4 lg:grid-cols-7">
+    <div className="grid grid-cols-2 gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-3 text-xs sm:grid-cols-4 lg:grid-cols-8">
       {cells.map(([label, value]) => (
         <div key={label} className="min-w-0">
           <div className="text-[var(--muted)]">{label}</div>

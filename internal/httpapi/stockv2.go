@@ -142,6 +142,8 @@ func (s *Server) RegisterStockV2Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/stockv2/news-context/backfill/retry", s.handleStockV2RetryNewsContextBackfill)
 
 	// 主题机会发现
+	mux.HandleFunc("GET /api/stockv2/opportunity-discovery/config", s.handleStockV2GetOpportunityDiscoveryConfig)
+	mux.HandleFunc("PATCH /api/stockv2/opportunity-discovery/config", s.handleStockV2UpdateOpportunityDiscoveryConfig)
 	mux.HandleFunc("GET /api/stockv2/opportunity-market-scan/config", s.handleStockV2GetOpportunityMarketScanConfig)
 	mux.HandleFunc("PATCH /api/stockv2/opportunity-market-scan/config", s.handleStockV2UpdateOpportunityMarketScanConfig)
 	mux.HandleFunc("POST /api/stockv2/opportunity-market-scan/fund-flow/probe", s.handleStockV2ProbeOpportunityMarketFundFlow)

@@ -1762,6 +1762,9 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 	if discCtx.Mode == OpportunityDiscoveryModeMarketScan {
 		b.WriteString("This is a bounded market-scan review. MarketCandidates is the complete allowed universe for this run: do not rediscover the full market and do not return any symbol outside it. Review at most 20 supplied main-board stocks, retain at most 10, and use public search only to verify material claims, catalysts, and risks. Missing fund-flow or quote evidence must reduce confidence instead of being invented. The server-generated decisionStatus, decisionGates, and dataHealth fields are authoritative: never promote a blocked entry candidate and never describe missing evidence as neutral.\n")
 	}
+	if discCtx.DiscoveryRun.ExcludeChiNextAndStarMarket {
+		b.WriteString("This run excludes ChiNext and STAR Market individual stocks. Do not research, record, or return SZ 300/301 or SH 688/689 stocks. Exchange-traded funds remain allowed when the opportunity instrument scope permits them.\n")
+	}
 	b.WriteString("Do not use shell commands or curl to submit results; use MCP tools directly.\n\n")
 
 	b.WriteString("## Task Information\n\n")

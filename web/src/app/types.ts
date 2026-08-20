@@ -3059,6 +3059,12 @@ export interface StockV2OpportunityInput {
   instrumentScope?: StockV2OpportunityInstrumentScope;
 }
 
+export interface StockV2OpportunityDiscoveryConfig {
+  id: string;
+  excludeChiNextAndStarMarket: boolean;
+  updatedAt: string;
+}
+
 // --- Discovery Run ---
 export type StockV2DiscoveryRunStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
@@ -3073,6 +3079,7 @@ export interface StockV2OpportunityDiscoveryRun {
   candidateCount?: number;
   evidenceCount?: number;
   externalSourceCount?: number;
+  excludeChiNextAndStarMarket: boolean;
   startedAt?: string;
   finishedAt?: string;
   errorMessage?: string;

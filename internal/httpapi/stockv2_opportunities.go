@@ -7,7 +7,50 @@ import (
 	"net/http"
 
 	"phantom-lancer/internal/stockv2"
+	"phantom-lancer/internal/storage"
 )
+
+func (s *Server) handleStockV2GetOpportunityDiscoveryConfig(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAuth(w, r); !ok {
+		return
+	}
+	item, err := s.stockV2.GetOpportunityDiscoveryConfig(r.Context())
+	if err != nil {
+		writeError(w, stockV2OpportunityHTTPStatus(err), "opportunity_discovery_config_failed", err.Error())
+		return
+	}
+	s.writeJSON(w, item)
+}
+
+func (s *Server) handleStockV2UpdateOpportunityDiscoveryConfig(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requireAuth(w, r)
+	if !ok || !s.requireCSRF(w, r, session.Session) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
+	var req stockv2.RequestUpdateOpportunityDiscoveryConfig
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_body", "invalid request body")
+		return
+	}
+	item, err := s.stockV2.UpdateOpportunityDiscoveryConfig(r.Context(), req)
+	if err != nil {
+		writeError(w, stockV2OpportunityHTTPStatus(err), "opportunity_discovery_config_failed", err.Error())
+		return
+	}
+	_, _ = s.store.AddAudit(r.Context(), storage.AuditEvent{
+		EventType: "stockv2_opportunity_discovery_config_updated",
+		RiskLevel: "medium",
+		Summary:   "更新机会发现标的范围",
+		Payload: map[string]any{
+			"ownerId":                     session.Session.OwnerID,
+			"excludeChiNextAndStarMarket": item.ExcludeChiNextAndStarMarket,
+		},
+	})
+	s.writeJSON(w, item)
+}
 
 func (s *Server) handleStockV2ListOpportunities(w http.ResponseWriter, r *http.Request) {
 	filter, err := stockV2OpportunityFilterFromRequest(r)
@@ -335,7 +378,8 @@ func stockV2OpportunityHTTPStatus(err error) int {
 		errors.Is(err, stockv2.ErrEmbeddingDisabled),
 		errors.Is(err, stockv2.ErrEmbeddingModelNotConfigured),
 		errors.Is(err, stockv2.ErrEmbeddingModelUnavailable),
-		errors.Is(err, stockv2.ErrEmbeddingAssetNotReady):
+		errors.Is(err, stockv2.ErrEmbeddingAssetNotReady),
+		errors.Is(err, stockv2.ErrOpportunityCandidateOutOfScope):
 		return http.StatusConflict
 	case errors.Is(err, stockv2.ErrInvalidOpportunityInput),
 		errors.Is(err, stockv2.ErrInvalidOpportunityStatus),
