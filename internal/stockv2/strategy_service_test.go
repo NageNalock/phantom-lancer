@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestCreateSymbolResearchStrategy(t *testing.T) {
@@ -298,6 +299,93 @@ func TestListGetAndCountStrategies(t *testing.T) {
 	if count != 3 {
 		t.Fatalf("count = %d, want 3", count)
 	}
+}
+
+func TestArchiveInactiveStrategies(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+
+	now := time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC)
+	oldDraft := createStrategyForArchiveTest(t, svc, "过期草稿", StrategyStatusDraft)
+	oldPaused := createStrategyForArchiveTest(t, svc, "过期暂停", StrategyStatusPaused)
+	oldActive := createStrategyForArchiveTest(t, svc, "生效策略", StrategyStatusActive)
+	recentDraft := createStrategyForArchiveTest(t, svc, "近期草稿", StrategyStatusDraft)
+	boundaryDraft := createStrategyForArchiveTest(t, svc, "边界草稿", StrategyStatusDraft)
+
+	for id, updatedAt := range map[string]time.Time{
+		oldDraft.Strategy.ID:      now.Add(-strategyAutoArchiveAfter - time.Second),
+		oldPaused.Strategy.ID:     now.Add(-strategyAutoArchiveAfter - time.Hour),
+		oldActive.Strategy.ID:     now.Add(-strategyAutoArchiveAfter - time.Hour),
+		recentDraft.Strategy.ID:   now.Add(-strategyAutoArchiveAfter + time.Second),
+		boundaryDraft.Strategy.ID: now.Add(-strategyAutoArchiveAfter),
+	} {
+		if _, err := svc.store.db.ExecContext(ctx, `UPDATE stockv2_strategies SET updated_at = ? WHERE id = ?`, updatedAt, id); err != nil {
+			t.Fatalf("set strategy updated_at: %v", err)
+		}
+	}
+
+	count, err := svc.archiveInactiveStrategies(ctx, now)
+	if err != nil {
+		t.Fatalf("archive inactive strategies: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("archived count = %d, want 2", count)
+	}
+
+	for _, tc := range []struct {
+		id         string
+		wantStatus string
+	}{
+		{oldDraft.Strategy.ID, StrategyStatusArchived},
+		{oldPaused.Strategy.ID, StrategyStatusArchived},
+		{oldActive.Strategy.ID, StrategyStatusActive},
+		{recentDraft.Strategy.ID, StrategyStatusDraft},
+		{boundaryDraft.Strategy.ID, StrategyStatusDraft},
+	} {
+		got, err := svc.GetStrategy(ctx, tc.id)
+		if err != nil {
+			t.Fatalf("get strategy %s: %v", tc.id, err)
+		}
+		if got.Strategy.Status != tc.wantStatus {
+			t.Errorf("strategy %s status = %q, want %q", tc.id, got.Strategy.Status, tc.wantStatus)
+		}
+		if tc.wantStatus == StrategyStatusArchived && !got.Strategy.ArchivedAt.Equal(now) {
+			t.Errorf("strategy %s archivedAt = %v, want %v", tc.id, got.Strategy.ArchivedAt, now)
+		}
+	}
+
+	visible, err := svc.ListStrategies(ctx, StrategyListFilter{ExcludeArchived: true, Limit: 20})
+	if err != nil {
+		t.Fatalf("list current strategies: %v", err)
+	}
+	if len(visible) != 3 {
+		t.Fatalf("current strategy count = %d, want 3", len(visible))
+	}
+	archived, err := svc.ListStrategies(ctx, StrategyListFilter{Status: StrategyStatusArchived, ExcludeArchived: true, Limit: 20})
+	if err != nil {
+		t.Fatalf("list archived strategies: %v", err)
+	}
+	if len(archived) != 2 {
+		t.Fatalf("archived strategy count = %d, want 2", len(archived))
+	}
+}
+
+func createStrategyForArchiveTest(t *testing.T, svc *Service, name, status string) StrategyWithVersion {
+	t.Helper()
+	created, err := svc.CreateStrategy(context.Background(), RequestCreateStrategy{
+		Name:      name,
+		Kind:      StrategyKindSymbolStrategy,
+		Scope:     StrategyScopeResearch,
+		Source:    StrategySourceManual,
+		Status:    status,
+		Symbol:    "600000",
+		Direction: StrategyDirectionWatch,
+	})
+	if err != nil {
+		t.Fatalf("create strategy %q: %v", name, err)
+	}
+	return created
 }
 
 func newStrategyTestService(t *testing.T) (*Service, func()) {

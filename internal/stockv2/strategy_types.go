@@ -127,13 +127,14 @@ type RequestCreatePortfolioMonitorStrategy struct {
 }
 
 type StrategyListFilter struct {
-	Kind        string
-	Scope       string
-	Source      string
-	Status      string
-	Symbol      string
-	PortfolioID string
-	Keyword     string
-	Limit       int
-	Offset      int
+	Kind            string
+	Scope           string
+	Source          string
+	Status          string
+	Symbol          string
+	PortfolioID     string
+	Keyword         string
+	ExcludeArchived bool
+	Limit           int
+	Offset          int
 }

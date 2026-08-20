@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"phantom-lancer/internal/stockv2"
 )
@@ -149,15 +150,24 @@ func stockV2StrategyFilterFromRequest(r *http.Request) (stockv2.StrategyListFilt
 	if err != nil {
 		return stockv2.StrategyListFilter{}, errors.New("invalid offset")
 	}
+	includeArchived := true
+	if query.Has("includeArchived") {
+		includeArchived, err = strconv.ParseBool(query.Get("includeArchived"))
+		if err != nil {
+			return stockv2.StrategyListFilter{}, errors.New("invalid includeArchived")
+		}
+	}
+	status := query.Get("status")
 	return stockv2.StrategyListFilter{
-		Status:      query.Get("status"),
-		Kind:        query.Get("kind"),
-		Scope:       query.Get("scope"),
-		PortfolioID: query.Get("portfolioId"),
-		Symbol:      query.Get("symbol"),
-		Keyword:     firstNonEmptyStrategyQuery(query.Get("q"), query.Get("keyword")),
-		Limit:       limit,
-		Offset:      offset,
+		Status:          status,
+		Kind:            query.Get("kind"),
+		Scope:           query.Get("scope"),
+		PortfolioID:     query.Get("portfolioId"),
+		Symbol:          query.Get("symbol"),
+		Keyword:         firstNonEmptyStrategyQuery(query.Get("q"), query.Get("keyword")),
+		ExcludeArchived: status == "" && !includeArchived,
+		Limit:           limit,
+		Offset:          offset,
 	}, nil
 }
 

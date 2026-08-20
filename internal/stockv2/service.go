@@ -1477,6 +1477,13 @@ func (s *Service) StartBackground(ctx context.Context) {
 		s.runOpportunityMarketScanScheduler(bgCtx)
 	}()
 
+	// 未应用策略按固定产品规则归档，避免草稿与暂停策略长期堆积。
+	s.bgWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		s.runStrategyArchiveScheduler(bgCtx)
+	}()
+
 	// One bounded pass attaches the new deterministic audit to the latest three
 	// historical scans without rewriting their original ranks or Agent output.
 	s.bgWg.Add(1)

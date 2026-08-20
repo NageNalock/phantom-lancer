@@ -87,7 +87,7 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<string>("current");
   const [kindFilter, setKindFilter] = useState<string>("all");
   const [portfolioFilter, setPortfolioFilter] = useState<string>("all");
   const [keyword, setKeyword] = useState("");
@@ -111,7 +111,9 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
         limit: String(STRATEGY_PAGE_SIZE),
         offset: String(offset),
       });
-      if (statusFilter !== "all") params.set("status", statusFilter);
+      if (statusFilter === "current") params.set("includeArchived", "false");
+      else if (statusFilter === "all") params.set("includeArchived", "true");
+      else params.set("status", statusFilter);
       if (kindFilter !== "all") params.set("kind", kindFilter);
       if (portfolioFilter !== "all") params.set("portfolioId", portfolioFilter);
       if (keyword.trim()) params.set("q", keyword.trim());
@@ -184,7 +186,7 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
 
   const totalPages = Math.max(1, Math.ceil(strategyTotal / STRATEGY_PAGE_SIZE));
   const pageNumbers = useMemo(() => paginationWindow(page, totalPages), [page, totalPages]);
-  const hasActiveFilter = statusFilter !== "all" || kindFilter !== "all" || portfolioFilter !== "all" || keyword.trim().length > 0;
+  const hasActiveFilter = statusFilter !== "current" || kindFilter !== "all" || portfolioFilter !== "all" || keyword.trim().length > 0;
 
   const detailStrategy =
     drawer.type === "detail" ? strategies.find((s) => s.id === drawer.id) || null : null;
@@ -271,14 +273,13 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
     return runStrategyAction("归档策略", () => changeStatus(strategy, "archive"));
   }
 
-  const hasAny = strategyTotal > 0 || strategies.length > 0;
   const subtitleCount = hasActiveFilter ? `筛选 ${strategyTotal} 个` : `${strategyTotal} 个`;
 
   return (
     <div className="grid gap-4">
       <Panel
         title="策略"
-        subtitle={`${subtitleCount} · 长期判断依据,编辑生效策略会生成新版本`}
+        subtitle={`${subtitleCount} · 编辑生效策略会生成新版本,草稿或暂停超过 3 天自动归档`}
         actions={
           <>
             <Button onClick={() => void fetchStrategies()} disabled={loading}>
@@ -298,40 +299,35 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
           </div>
         ) : null}
 
-        {hasAny ? (
+        <StrategyToolbar
+          statusFilter={statusFilter}
+          kindFilter={kindFilter}
+          portfolioFilter={portfolioFilter}
+          keyword={keyword}
+          portfolios={portfolios}
+          onStatus={setStatusAndReset}
+          onKind={setKindAndReset}
+          onPortfolio={setPortfolioAndReset}
+          onKeyword={setKeywordAndReset}
+        />
+
+        {strategies.length > 0 ? (
           <>
-            <StrategyToolbar
-              statusFilter={statusFilter}
-              kindFilter={kindFilter}
-              portfolioFilter={portfolioFilter}
-              keyword={keyword}
-              portfolios={portfolios}
-              onStatus={setStatusAndReset}
-              onKind={setKindAndReset}
-              onPortfolio={setPortfolioAndReset}
-              onKeyword={setKeywordAndReset}
-            />
-
-            {strategies.length === 0 ? (
-              <p className="py-6 text-center text-sm text-[var(--muted)]">没有匹配的策略,调整筛选条件试试。</p>
-            ) : (
-              <div className="mt-3 grid gap-2">
-                {strategies.map((s) => (
-                  <StrategyRow
-                    key={s.id}
-                    strategy={s}
-                    portfolios={portfolios}
-                    onSelect={() => setDrawer({ type: "detail", id: s.id })}
-                    onEdit={() => setDrawer({ type: "edit", strategy: s })}
-                    onActivate={() => void requestActivateStrategy(s)}
-                    onPause={() => void requestPauseStrategy(s)}
-                    onArchive={() => void requestArchiveStrategy(s)}
-                    onOpenMonitor={openStockV2MonitorTab}
-                  />
-                ))}
-              </div>
-            )}
-
+            <div className="mt-3 grid gap-2">
+              {strategies.map((s) => (
+                <StrategyRow
+                  key={s.id}
+                  strategy={s}
+                  portfolios={portfolios}
+                  onSelect={() => setDrawer({ type: "detail", id: s.id })}
+                  onEdit={() => setDrawer({ type: "edit", strategy: s })}
+                  onActivate={() => void requestActivateStrategy(s)}
+                  onPause={() => void requestPauseStrategy(s)}
+                  onArchive={() => void requestArchiveStrategy(s)}
+                  onOpenMonitor={openStockV2MonitorTab}
+                />
+              ))}
+            </div>
             <StrategyPagination
               loading={loading}
               page={page}
@@ -342,31 +338,16 @@ export function StockV2Strategies({ actions, data }: { actions: AppActions; data
               onPage={setPage}
             />
           </>
-        ) : loading && !hasActiveFilter ? (
+        ) : loading ? (
           <p className="py-6 text-center text-sm text-[var(--muted)]">加载策略…</p>
-        ) : hasActiveFilter ? (
-          <>
-            <StrategyToolbar
-              statusFilter={statusFilter}
-              kindFilter={kindFilter}
-              portfolioFilter={portfolioFilter}
-              keyword={keyword}
-              portfolios={portfolios}
-              onStatus={setStatusAndReset}
-              onKind={setKindAndReset}
-              onPortfolio={setPortfolioAndReset}
-              onKeyword={setKeywordAndReset}
-            />
-            <p className="py-6 text-center text-sm text-[var(--muted)]">
-              {loading ? "加载策略…" : "没有匹配的策略,调整筛选条件试试。"}
-            </p>
-          </>
-        ) : (
+        ) : strategyTotal === 0 && !hasActiveFilter ? (
           <StrategyEmptyState
             hasPortfolio={portfolios.length > 0}
             onCreateSymbol={() => setDrawer({ type: "create" })}
             onCreateMonitor={() => setDrawer({ type: "create", initialKind: "portfolio_monitor" })}
           />
+        ) : (
+          <p className="py-6 text-center text-sm text-[var(--muted)]">没有匹配的策略,调整筛选条件试试。</p>
         )}
 
         <div className="mt-4 border-t border-[var(--line)] pt-3">
@@ -479,6 +460,7 @@ function StrategyToolbar({
       <label className="field">
         <span>状态</span>
         <select value={statusFilter} onChange={(e) => onStatus(e.target.value)}>
+          <option value="current">当前策略</option>
           <option value="all">全部状态</option>
           <option value="draft">草稿</option>
           <option value="active">生效中</option>

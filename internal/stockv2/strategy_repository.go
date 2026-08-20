@@ -144,6 +144,30 @@ func (s *Store) CountStrategies(ctx context.Context, filter StrategyListFilter) 
 	return count, nil
 }
 
+func (s *Store) ArchiveInactiveStrategies(ctx context.Context, cutoff, archivedAt time.Time) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE stockv2_strategies
+		SET status = ?, archived_at = ?, updated_at = ?
+		WHERE status IN (?, ?)
+		  AND updated_at < ?
+	`,
+		StrategyStatusArchived,
+		archivedAt,
+		archivedAt,
+		StrategyStatusDraft,
+		StrategyStatusPaused,
+		cutoff,
+	)
+	if err != nil {
+		return 0, wrapError(err, "archive inactive strategies")
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, wrapError(err, "count archived inactive strategies")
+	}
+	return count, nil
+}
+
 func (s *Store) UpdateStrategyWithVersion(ctx context.Context, strategy StockV2Strategy, version *StockV2StrategyVersion) (StrategyWithVersion, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -410,6 +434,10 @@ func strategyFilterSQL(filter StrategyListFilter) (string, []any) {
 	add("scope", filter.Scope)
 	add("source", filter.Source)
 	add("status", filter.Status)
+	if filter.ExcludeArchived && strings.TrimSpace(filter.Status) == "" {
+		where = append(where, "status <> ?")
+		args = append(args, StrategyStatusArchived)
+	}
 	add("symbol", filter.Symbol)
 	add("portfolio_id", filter.PortfolioID)
 	if keyword := strings.ToLower(strings.TrimSpace(filter.Keyword)); keyword != "" {
