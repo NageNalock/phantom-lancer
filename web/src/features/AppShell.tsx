@@ -1,31 +1,41 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { Component, lazy, Suspense, useEffect, useId, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { AppActions } from "../app/App";
 import type { AppData, MainTab, V2RayExport } from "../app/types";
 import { Button, Pill } from "../components/ui";
 import { NAV_ITEMS, stockV2StatusLabel, v2rayStateLabel } from "../domain/labels";
 import { shouldHandleQueryLinkClick } from "../hooks/useQueryParamState";
-import { CodexGatewayView } from "./CodexGatewayView";
-import { CodexView } from "./CodexView";
 import { DashboardView } from "./DashboardView";
-import { DockerView } from "./DockerView";
-import { ImagesView } from "./ImagesView";
-import { LogsView } from "./LogsView";
-import { SettingsView } from "./SettingsView";
-import { StockV2View } from "./stockv2/StockV2View";
-import { V2RayView } from "./V2RayView";
+
+// ponytail: capability-level chunks remove unrelated pages from first paint;
+// add finer vendor splitting only when bundle measurements justify the extra graph.
+const CodexGatewayView = lazy(() => import("./CodexGatewayView").then((module) => ({ default: module.CodexGatewayView })));
+const CodexView = lazy(() => import("./CodexView").then((module) => ({ default: module.CodexView })));
+const DockerView = lazy(() => import("./DockerView").then((module) => ({ default: module.DockerView })));
+const ImagesView = lazy(() => import("./ImagesView").then((module) => ({ default: module.ImagesView })));
+const LogsView = lazy(() => import("./LogsView").then((module) => ({ default: module.LogsView })));
+const SettingsView = lazy(() => import("./SettingsView").then((module) => ({ default: module.SettingsView })));
+const StockV2View = lazy(() => import("./stockv2/StockV2View").then((module) => ({ default: module.StockV2View })));
+const V2RayView = lazy(() => import("./V2RayView").then((module) => ({ default: module.V2RayView })));
 
 export function AppShell({
   actions,
   activeTab,
   data,
+  dataLoadError,
+  dataLoading,
   logout,
+  retryActiveData,
   v2rayExport,
   v2rayExportOpen,
 }: {
   actions: AppActions;
   activeTab: MainTab;
   data: AppData;
+  dataLoadError: string;
+  dataLoading: boolean;
   logout: () => Promise<void>;
+  retryActiveData: () => Promise<void>;
   v2rayExport: unknown;
   v2rayExportOpen: boolean;
 }) {
@@ -60,6 +70,17 @@ export function AppShell({
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [statusButtonId, statusOpen]);
+
+  let activeView: ReactNode = null;
+  if (activeTab === "dashboard") activeView = <DashboardView actions={actions} data={data} />;
+  if (activeTab === "codex") activeView = <CodexView actions={actions} data={data} />;
+  if (activeTab === "codex-gateway") activeView = <CodexGatewayView actions={actions} data={data} />;
+  if (activeTab === "logs") activeView = <LogsView actions={actions} />;
+  if (activeTab === "images") activeView = <ImagesView actions={actions} data={data} />;
+  if (activeTab === "docker") activeView = <DockerView actions={actions} />;
+  if (activeTab === "stockv2") activeView = <StockV2View actions={actions} data={data} />;
+  if (activeTab === "v2ray") activeView = <V2RayView actions={actions} data={data} exportOpen={v2rayExportOpen} exported={v2rayExport as V2RayExport | null} />;
+  if (activeTab === "settings") activeView = <SettingsView actions={actions} data={data} />;
 
   return (
     <div className="grid min-h-dvh grid-cols-[232px_minmax(0,1fr)] gap-3 p-3 max-lg:grid-cols-1">
@@ -126,17 +147,63 @@ export function AppShell({
           </div>
         </header>
 
-        {activeTab === "dashboard" ? <DashboardView actions={actions} data={data} /> : null}
-        {activeTab === "codex" ? <CodexView actions={actions} data={data} /> : null}
-        {activeTab === "codex-gateway" ? <CodexGatewayView actions={actions} data={data} /> : null}
-        {activeTab === "logs" ? <LogsView actions={actions} /> : null}
-        {activeTab === "images" ? <ImagesView actions={actions} data={data} /> : null}
-        {activeTab === "docker" ? <DockerView actions={actions} /> : null}
-        {activeTab === "stockv2" ? <StockV2View actions={actions} data={data} /> : null}
-        {activeTab === "v2ray" ? <V2RayView actions={actions} data={data} exportOpen={v2rayExportOpen} exported={v2rayExport as V2RayExport | null} /> : null}
-        {activeTab === "settings" ? <SettingsView actions={actions} data={data} /> : null}
+        <ModuleErrorBoundary key={activeTab}>
+          <Suspense fallback={<ModuleLoading label="正在加载功能模块…" />}>
+            {dataLoadError ? (
+              <ModuleDataError error={dataLoadError} retry={retryActiveData} />
+            ) : dataLoading ? (
+              <ModuleLoading label="正在加载当前页面数据…" />
+            ) : activeView}
+          </Suspense>
+        </ModuleErrorBoundary>
       </main>
     </div>
+  );
+}
+
+class ModuleErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <section className="grid min-h-[320px] place-items-center p-6" role="alert">
+          <div className="max-w-md rounded-lg border border-[rgba(207,31,50,0.22)] bg-[var(--danger-soft)] p-4 text-sm">
+            <strong className="block">功能模块加载失败</strong>
+            <p className="muted mt-1 mb-3 text-xs">可能是部署后浏览器仍引用旧资源，重新加载页面即可获取当前版本。</p>
+            <Button onClick={() => window.location.reload()}>重新加载页面</Button>
+          </div>
+        </section>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function ModuleLoading({ label }: { label: string }) {
+  return (
+    <section aria-busy="true" aria-live="polite" className="grid min-h-[320px] place-items-center p-6" role="status">
+      <div className="w-full max-w-md rounded-lg border border-[var(--line)] bg-[var(--surface-soft)] p-4">
+        <strong className="block text-sm">{label}</strong>
+        <span className="muted mt-1 block text-xs">工作台已就绪，此区域会在数据到达后自动显示。</span>
+      </div>
+    </section>
+  );
+}
+
+function ModuleDataError({ error, retry }: { error: string; retry: () => Promise<void> }) {
+  return (
+    <section className="grid min-h-[320px] place-items-center p-6" role="alert">
+      <div className="w-full max-w-md rounded-lg border border-[rgba(207,31,50,0.22)] bg-[var(--danger-soft)] p-4 text-sm">
+        <strong className="block">当前页面数据加载失败</strong>
+        <p className="muted mt-1 mb-3 break-words text-xs">{error}</p>
+        <Button onClick={() => void retry().catch(() => undefined)}>重试当前页面</Button>
+      </div>
+    </section>
   );
 }
 

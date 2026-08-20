@@ -17,8 +17,26 @@ import { AuthView } from "../features/AuthView";
 import { AppShell } from "../features/AppShell";
 
 type AuthMode = "checking" | "bootstrap" | "login" | "ready" | "failed";
+type DataScope = "dashboard" | "codex-gateway" | "images" | "stockv2" | "v2ray" | "settings";
+type LoadStatus = "idle" | "loading" | "ready" | "error";
 const MAIN_TAB_IDS: MainTab[] = ["dashboard", "codex", "codex-gateway", "logs", "images", "docker", "stockv2", "v2ray", "settings"];
 const MAIN_TAB_CHILD_KEYS = ["codex", "codexInbox", "codexRuntime", "codexSidebar", "gateway", "images", "docker", "stockv2", "settings", "drv", "drrepo", "drtag", "dcreate", "dcform", "dselc", "dseli"];
+const INITIAL_SCOPE_STATUS: Record<DataScope, LoadStatus> = {
+  dashboard: "idle",
+  "codex-gateway": "idle",
+  images: "idle",
+  stockv2: "idle",
+  v2ray: "idle",
+  settings: "idle",
+};
+const INITIAL_SCOPE_ERRORS: Record<DataScope, string> = {
+  dashboard: "",
+  "codex-gateway": "",
+  images: "",
+  stockv2: "",
+  v2ray: "",
+  settings: "",
+};
 
 export interface AppActions {
   api: typeof api;
@@ -55,6 +73,8 @@ export function App() {
   const [toast, setToastState] = useState<{ message: string; tone: Tone } | null>(null);
   const [v2rayExport, setV2RayExport] = useState<unknown>(null);
   const [v2rayExportOpen, setV2RayExportOpen] = useState(false);
+  const [scopeStatus, setScopeStatus] = useState<Record<DataScope, LoadStatus>>(INITIAL_SCOPE_STATUS);
+  const [scopeErrors, setScopeErrors] = useState<Record<DataScope, string>>(INITIAL_SCOPE_ERRORS);
 
   const setToast = useCallback((message: string, tone: Tone = "warn") => {
     setToastState({ message, tone });
@@ -98,62 +118,100 @@ export function App() {
     };
   }, []);
 
-  const loadCoreData = useCallback(async () => {
-    const [dashboard, audit, codexGateway, settings, v2ray] = await Promise.all([
-      api<AppData["dashboard"]>("/api/dashboard/summary"),
-      api<{ items?: AppData["audit"] }>("/api/audit/events"),
-      loadCodexGatewayData(),
-      api<SettingsPayload>("/api/settings"),
-      api<V2RayPayload>("/api/v2ray/settings"),
-    ]);
+  const runScopedLoad = useCallback(async (scope: DataScope, load: () => Promise<void>) => {
+    setScopeStatus((current) => ({ ...current, [scope]: "loading" }));
+    setScopeErrors((current) => ({ ...current, [scope]: "" }));
+    try {
+      await load();
+      setScopeStatus((current) => ({ ...current, [scope]: "ready" }));
+    } catch (error) {
+      setScopeErrors((current) => ({ ...current, [scope]: friendlyError(error) }));
+      setScopeStatus((current) => ({ ...current, [scope]: "error" }));
+      throw error;
+    }
+  }, []);
 
+  const refreshDashboardData = useCallback(() => runScopedLoad("dashboard", async () => {
+    const dashboard = await api<AppData["dashboard"]>("/api/dashboard/summary");
+    setData((current) => ({ ...current, dashboard }));
+  }), [runScopedLoad]);
+
+  const loadAuditData = useCallback(async () => {
+    const audit = await api<{ items?: AppData["audit"] }>("/api/audit/events");
+    setData((current) => ({ ...current, audit: audit.items || [] }));
+  }, []);
+
+  const refreshSettingsData = useCallback(() => runScopedLoad("settings", async () => {
+    const settings = await api<SettingsPayload>("/api/settings");
+    setData((current) => ({ ...current, settings }));
+  }), [runScopedLoad]);
+
+  const refreshCodexGatewayData = useCallback(() => runScopedLoad("codex-gateway", async () => {
+    const codexGateway = await loadCodexGatewayData();
     setData((current) => ({
       ...current,
-      dashboard,
-      audit: audit.items || [],
       codexGateway,
-      settings,
-      v2ray,
+      dashboard: { ...current.dashboard, codexGateway: codexGateway.status },
     }));
-  }, [loadCodexGatewayData]);
+  }), [loadCodexGatewayData, runScopedLoad]);
+
+  const refreshV2RayData = useCallback(() => runScopedLoad("v2ray", async () => {
+    const v2ray = await api<V2RayPayload>("/api/v2ray/settings");
+    setData((current) => ({ ...current, v2ray, dashboard: { ...current.dashboard, v2ray: v2ray.status } }));
+  }), [runScopedLoad]);
+
+  const refreshImagesData = useCallback(() => runScopedLoad("images", async () => {
+    const images = await loadImagesData();
+    setData((current) => ({
+      ...current,
+      images,
+      dashboard: { ...current.dashboard, images: images.status },
+    }));
+  }), [loadImagesData, runScopedLoad]);
+
+  const refreshStockV2Data = useCallback(() => runScopedLoad("stockv2", async () => {
+    const stockv2 = await api<StockV2Payload>("/api/stockv2/snapshot");
+    setData((current) => ({ ...current, stockv2 }));
+  }), [runScopedLoad]);
+
+  const loadScopeData = useCallback((scope: DataScope): Promise<void> => {
+    switch (scope) {
+      case "dashboard":
+        return refreshDashboardData();
+      case "codex-gateway":
+        return refreshCodexGatewayData();
+      case "images":
+        return refreshImagesData();
+      case "stockv2":
+        return refreshStockV2Data();
+      case "v2ray":
+        return refreshV2RayData();
+      case "settings":
+        return refreshSettingsData();
+    }
+  }, [refreshCodexGatewayData, refreshDashboardData, refreshImagesData, refreshSettingsData, refreshStockV2Data, refreshV2RayData]);
+
+  const loadBaseData = useCallback(async () => {
+    await Promise.allSettled([
+      refreshDashboardData(),
+      loadAuditData(),
+      refreshSettingsData(),
+    ]);
+  }, [loadAuditData, refreshDashboardData, refreshSettingsData]);
 
   const loadAppData = useCallback(async () => {
-    const [dashboard, audit, codexGateway, settings, v2ray, stockv2, images] = await Promise.all([
-      api<AppData["dashboard"]>("/api/dashboard/summary"),
-      api<{ items?: AppData["audit"] }>("/api/audit/events"),
-      loadCodexGatewayData(),
-      api<SettingsPayload>("/api/settings"),
-      api<V2RayPayload>("/api/v2ray/settings"),
-      api<StockV2Payload>("/api/stockv2/snapshot"),
-      loadImagesData(),
+    const results = await Promise.allSettled([
+      refreshDashboardData(),
+      loadAuditData(),
+      refreshSettingsData(),
+      refreshCodexGatewayData(),
+      refreshV2RayData(),
+      refreshStockV2Data(),
+      refreshImagesData(),
     ]);
-
-    setData({
-      dashboard,
-      audit: audit.items || [],
-      codexGateway,
-      settings,
-      v2ray,
-      stockv2,
-      images,
-    });
-  }, [loadCodexGatewayData, loadImagesData]);
-
-  const loadDeferredData = useCallback(async () => {
-    const [stockv2, images] = await Promise.allSettled([
-      api<StockV2Payload>("/api/stockv2/snapshot"),
-      loadImagesData(),
-    ]);
-    setData((current) => ({
-      ...current,
-      stockv2: stockv2.status === "fulfilled" ? stockv2.value : current.stockv2,
-      images: images.status === "fulfilled" ? images.value : current.images,
-      dashboard: {
-        ...current.dashboard,
-        images: images.status === "fulfilled" ? images.value.status : current.dashboard.images,
-      },
-    }));
-  }, [loadImagesData]);
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  }, [loadAuditData, refreshCodexGatewayData, refreshDashboardData, refreshImagesData, refreshSettingsData, refreshStockV2Data, refreshV2RayData]);
 
   useEffect(() => {
     let active = true;
@@ -169,11 +227,7 @@ export function App() {
           const me = await api<{ session: AuthSession }>("/api/auth/me");
           if (!active) return;
           setSession(me.session);
-          await loadCoreData();
-          if (active) {
-            setAuthMode("ready");
-            void loadDeferredData();
-          }
+          setAuthMode("ready");
         } catch {
           if (active) setAuthMode("login");
         }
@@ -188,41 +242,51 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [loadCoreData, loadDeferredData]);
+  }, []);
+
+  useEffect(() => {
+    if (authMode !== "ready") return;
+    void loadBaseData();
+  }, [authMode, loadBaseData]);
+
+  const activeDataScope = dataScopeForTab(activeTab);
+
+  useEffect(() => {
+    if (authMode !== "ready" || !activeDataScope) return;
+    if (activeDataScope === "dashboard" || activeDataScope === "settings") return;
+    if (scopeStatus[activeDataScope] !== "idle") return;
+    void loadScopeData(activeDataScope).catch(() => undefined);
+  }, [activeDataScope, authMode, loadScopeData, scopeStatus]);
 
   const actions = useMemo<AppActions>(
     () => ({
       api,
       csrf,
       setToast,
-      reloadData: loadAppData,
+      reloadData: async () => {
+        try {
+          await loadAppData();
+          setToast("已刷新全部数据", "good");
+        } catch (error) {
+          setToast(`刷新失败：${friendlyError(error)}`, "danger");
+        }
+      },
       setMainTab: setActiveTab,
       mainTabHref,
-      refreshCodexGateway: async () => {
-        const codexGateway = await loadCodexGatewayData();
-        setData((current) => ({ ...current, codexGateway, dashboard: { ...current.dashboard, codexGateway: codexGateway.status } }));
-      },
-      refreshV2Ray: async () => {
-        const next = await api<V2RayPayload>("/api/v2ray/settings");
-        setData((current) => ({ ...current, v2ray: next, dashboard: { ...current.dashboard, v2ray: next.status } }));
-      },
-      refreshImages: async () => {
-        const next = await loadImagesData();
-        setData((current) => ({
-          ...current,
-          images: next,
-          dashboard: { ...current.dashboard, images: next.status },
-        }));
-      },
-      refreshStockV2: async () => {
-        const stockv2 = await api<StockV2Payload>("/api/stockv2/snapshot");
-        setData((current) => ({ ...current, stockv2 }));
-      },
+      refreshCodexGateway: refreshCodexGatewayData,
+      refreshV2Ray: refreshV2RayData,
+      refreshImages: refreshImagesData,
+      refreshStockV2: refreshStockV2Data,
       setV2RayExportOpen,
       setV2RayExport,
     }),
-    [csrf, loadAppData, loadCodexGatewayData, loadImagesData, mainTabHref, setActiveTab, setToast],
+    [csrf, loadAppData, mainTabHref, refreshCodexGatewayData, refreshImagesData, refreshStockV2Data, refreshV2RayData, setActiveTab, setToast],
   );
+
+  const retryActiveData = useCallback(async () => {
+    if (!activeDataScope) return;
+    await loadScopeData(activeDataScope);
+  }, [activeDataScope, loadScopeData]);
 
   async function handleAuth(mode: "bootstrap" | "login", username: string, password: string) {
     const result = await api<{ csrfToken?: string; session: AuthSession }>(mode === "bootstrap" ? "/api/auth/bootstrap" : "/api/auth/login", {
@@ -231,15 +295,16 @@ export function App() {
     });
     setCsrf(result.csrfToken || readCookie("pl_csrf"));
     setSession(result.session);
-    await loadCoreData();
     setAuthMode("ready");
-    void loadDeferredData();
   }
 
   async function logout() {
     await api<{ ok: boolean }>("/api/auth/logout", { method: "POST", csrf });
     setSession(null);
     setCsrf("");
+    setData(emptyData);
+    setScopeStatus(INITIAL_SCOPE_STATUS);
+    setScopeErrors(INITIAL_SCOPE_ERRORS);
     setAuthMode("login");
   }
 
@@ -261,11 +326,30 @@ export function App() {
         actions={actions}
         activeTab={activeTab}
         data={data}
+        dataLoadError={activeDataScope && scopeStatus[activeDataScope] === "error" ? scopeErrors[activeDataScope] : ""}
+        dataLoading={Boolean(activeDataScope && (scopeStatus[activeDataScope] === "idle" || scopeStatus[activeDataScope] === "loading"))}
         logout={logout}
+        retryActiveData={retryActiveData}
         v2rayExport={v2rayExport}
         v2rayExportOpen={v2rayExportOpen}
       />
       {toast ? <Toast message={toast.message} tone={toast.tone} /> : null}
     </>
   );
+}
+
+function dataScopeForTab(tab: MainTab): DataScope | undefined {
+  switch (tab) {
+    case "dashboard":
+    case "codex-gateway":
+    case "images":
+    case "stockv2":
+    case "v2ray":
+    case "settings":
+      return tab;
+    case "codex":
+    case "logs":
+    case "docker":
+      return undefined;
+  }
 }

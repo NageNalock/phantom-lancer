@@ -2400,21 +2400,95 @@ func (s *Server) staticHandler() http.Handler {
 		if name == "." || name == "" {
 			name = "index.html"
 		}
-		data, err := fs.ReadFile(s.staticFS, name)
-		if err != nil {
+		if info, err := fs.Stat(s.staticFS, name); err != nil || info.IsDir() {
 			name = "index.html"
-			data, err = fs.ReadFile(s.staticFS, name)
-			if err != nil {
+			if _, err = fs.Stat(s.staticFS, name); err != nil {
 				writeError(w, http.StatusInternalServerError, "static_missing", "前端资源缺失")
 				return
 			}
 		}
+		contentName, contentEncoding := selectPrecompressedStatic(s.staticFS, name, r.Header.Get("Accept-Encoding"))
+		data, err := fs.ReadFile(s.staticFS, contentName)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "static_missing", "前端资源缺失")
+			return
+		}
 		if contentType := mime.TypeByExtension(path.Ext(name)); contentType != "" {
 			w.Header().Set("Content-Type", contentType)
+		}
+		w.Header().Add("Vary", "Accept-Encoding")
+		if contentEncoding != "" {
+			w.Header().Set("Content-Encoding", contentEncoding)
 		}
 		setStaticCacheControl(w, name)
 		http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(data))
 	})
+}
+
+func selectPrecompressedStatic(staticFS fs.FS, name, acceptEncoding string) (string, string) {
+	// ponytail: the frontend build owns compression; serving only embedded sidecars
+	// keeps request handling allocation-light and deterministic.
+	type candidate struct {
+		encoding string
+		suffix   string
+	}
+	candidates := []candidate{{encoding: "br", suffix: ".br"}, {encoding: "gzip", suffix: ".gz"}}
+	bestQuality := 0.0
+	selectedName := name
+	selectedEncoding := ""
+	for _, item := range candidates {
+		quality := acceptedEncodingQuality(acceptEncoding, item.encoding)
+		if quality <= bestQuality {
+			continue
+		}
+		compressedName := name + item.suffix
+		if info, err := fs.Stat(staticFS, compressedName); err != nil || info.IsDir() {
+			continue
+		}
+		bestQuality = quality
+		selectedName = compressedName
+		selectedEncoding = item.encoding
+	}
+	return selectedName, selectedEncoding
+}
+
+func acceptedEncodingQuality(header, wanted string) float64 {
+	wanted = strings.ToLower(strings.TrimSpace(wanted))
+	wildcard := -1.0
+	specific := -1.0
+	for _, raw := range strings.Split(header, ",") {
+		parts := strings.Split(raw, ";")
+		name := strings.ToLower(strings.TrimSpace(parts[0]))
+		if name == "" {
+			continue
+		}
+		quality := 1.0
+		for _, parameter := range parts[1:] {
+			key, value, ok := strings.Cut(strings.TrimSpace(parameter), "=")
+			if !ok || !strings.EqualFold(strings.TrimSpace(key), "q") {
+				continue
+			}
+			parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+			if err != nil || parsed < 0 || parsed > 1 {
+				quality = 0
+			} else {
+				quality = parsed
+			}
+		}
+		if name == wanted && quality > specific {
+			specific = quality
+		}
+		if name == "*" && quality > wildcard {
+			wildcard = quality
+		}
+	}
+	if specific >= 0 {
+		return specific
+	}
+	if wildcard >= 0 {
+		return wildcard
+	}
+	return 0
 }
 
 func setStaticCacheControl(w http.ResponseWriter, name string) {

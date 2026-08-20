@@ -271,6 +271,8 @@ Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*`
 | 状态管理 | Zustand 或 React Query | 轻量管理接口状态和 UI 状态 |
 | 图标 | 单一图标库 | 保持视觉一致 |
 
+前端首屏只同步加载工作台壳和 Dashboard，其他一级能力域使用 Vite 动态 chunk 按访问加载。认证成功后先显示工作台，再独立加载 Dashboard 基础摘要和当前能力域数据；非当前能力域的配置与大列表不阻塞首屏。生产构建同时生成 Brotli 和 gzip 静态旁路文件，由 Go 服务根据 `Accept-Encoding` 协商返回。
+
 ### 4.3 Codex CLI 集成
 
 | 场景 | 方式 | 说明 |
@@ -306,6 +308,7 @@ Codex CLI Client 不负责安装 CLI、不托管 Codex token、不暴露 `/v1/*`
 
 - Go 服务直接监听配置端口，例如 `0.0.0.0:8080` 或内网 IP。
 - 前端构建产物由 Go embed 打进 binary，避免单独部署静态站点。
+- 带内容哈希的静态资源使用长期 immutable 缓存；Go 服务直接返回构建阶段生成的 Brotli/gzip 旁路文件，不在请求路径实时压缩。
 - API、SSE、静态资源由同一个 Go 进程提供。
 - Codex CLI 由 owner 预先安装在部署机，Phantom Lancer 只通过配置的 binary path 或 PATH 探测使用。
 - HTTPS 不作为 MVP 默认要求；公网暴露时优先采用 Go 内置闭环 TLS，详见 [closed-loop-tls-feature-design.md](./closed-loop-tls-feature-design.md)。VPN 或反向代理仍可作为部署侧可选方案。
