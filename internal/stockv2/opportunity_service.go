@@ -465,6 +465,9 @@ func (s *Service) RecordOpportunityEvidence(ctx context.Context, item Opportunit
 	if item.Title == "" || item.SourceType == "" || item.Confidence < 0 || item.Confidence > 1 {
 		return OpportunityEvidence{}, ErrInvalidOpportunityInput
 	}
+	if item.SourceType == OpportunityEvidenceSourceExternal && !validExternalOpportunityURL(item.URL) {
+		return OpportunityEvidence{}, fmt.Errorf("%w: external source URL must be a complete HTTP(S) URL without ellipsis", ErrInvalidOpportunityInput)
+	}
 	if item.CandidateID != "" {
 		candidate, err := s.store.GetOpportunityCandidate(ctx, item.CandidateID)
 		if err != nil {
@@ -494,6 +497,14 @@ func sanitizeOpportunityURL(raw string) string {
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 	return safelog.Text(parsed.String(), 500)
+}
+
+func validExternalOpportunityURL(raw string) bool {
+	if strings.Contains(raw, "...") || strings.ContainsRune(raw, '…') {
+		return false
+	}
+	parsed, err := url.ParseRequestURI(raw)
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
 func (s *Service) ListOpportunityCandidates(ctx context.Context, filter OpportunityCandidateListFilter) ([]OpportunityCandidate, error) {

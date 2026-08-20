@@ -28,6 +28,28 @@ func TestOpportunityDiscoveryThemeChainAcceptsStructuredAndLegacyItems(t *testin
 	}
 }
 
+func TestValidExternalOpportunityURLRejectsTruncatedOrNonHTTPURLs(t *testing.T) {
+	for _, raw := range []string{
+		"https://disc.static.szse.cn/finalpage/report.PDF",
+		"http://example.com/report.pdf",
+	} {
+		if !validExternalOpportunityURL(raw) {
+			t.Fatalf("validExternalOpportunityURL(%q) = false, want true", raw)
+		}
+	}
+	for _, raw := range []string{
+		"https://disc.static.szse.cn/finalpage/cad9...4cdc.PDF",
+		"https://example.com/report…pdf",
+		"ftp://example.com/report.pdf",
+		"/relative/report.pdf",
+		"",
+	} {
+		if validExternalOpportunityURL(raw) {
+			t.Fatalf("validExternalOpportunityURL(%q) = true, want false", raw)
+		}
+	}
+}
+
 func TestOpportunityServiceSubmitResultValidatesCandidatesAndStrategyEntry(t *testing.T) {
 	store := newTestStore(t)
 	svc := NewService(store, nil, nil)
