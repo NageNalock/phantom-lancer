@@ -174,6 +174,21 @@ func stockAgentMCPToolInputSchema(name string) map[string]any {
 		}
 		required = []string{"runId", "objectType"}
 		additionalProperties = false
+	case mcpToolRecordExternalSource:
+		properties = map[string]any{
+			"taskID":      map[string]any{"type": "string"},
+			"runId":       map[string]any{"type": "string"},
+			"stepId":      map[string]any{"type": "string"},
+			"title":       map[string]any{"type": "string"},
+			"url":         map[string]any{"type": "string"},
+			"publisher":   map[string]any{"type": "string"},
+			"publishedAt": map[string]any{"type": "string", "description": "Source publication time in RFC3339 form when available."},
+			"summary":     map[string]any{"type": "string"},
+			"confidence":  map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"metadata":    map[string]any{"type": "object"},
+		}
+		required = []string{"taskID", "runId", "title", "url", "summary", "confidence"}
+		additionalProperties = false
 	}
 	schema := map[string]any{
 		"type":                 "object",

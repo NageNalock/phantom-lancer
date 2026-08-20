@@ -84,6 +84,31 @@ func TestMCP_ToolsList(t *testing.T) {
 	}
 }
 
+func TestMCPRecordExternalSourceSchemaRequiresAuditableEvidence(t *testing.T) {
+	schema := stockAgentMCPToolInputSchema(mcpToolRecordExternalSource)
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties = %#v", schema["properties"])
+	}
+	for _, key := range []string{"taskID", "runId", "title", "url", "summary", "confidence", "publisher", "publishedAt"} {
+		if _, exists := properties[key]; !exists {
+			t.Fatalf("external source schema missing property %q", key)
+		}
+	}
+	required, ok := schema["required"].([]string)
+	if !ok {
+		t.Fatalf("required = %#v", schema["required"])
+	}
+	for _, key := range []string{"taskID", "runId", "title", "url", "summary", "confidence"} {
+		if !containsString(required, key) {
+			t.Fatalf("external source schema does not require %q: %#v", key, required)
+		}
+	}
+	if schema["additionalProperties"] != false {
+		t.Fatalf("additionalProperties = %#v, want false", schema["additionalProperties"])
+	}
+}
+
 func TestMCP_SubmitResult(t *testing.T) {
 	p := newAgentTaskPool(defaultCleanupInterval)
 	defer p.Close()

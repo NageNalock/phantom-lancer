@@ -1080,6 +1080,9 @@ func TestBuildOpportunityDiscoveryPromptRequiresEmbeddingSemanticRecall(t *testi
 		"internal_recall",
 		"candidate_ranking",
 		"Do not silently fall back",
+		"latest available periodic report",
+		"Older reports may be used only as historical comparison",
+		"evidence freshness degraded",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
