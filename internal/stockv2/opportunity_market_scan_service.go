@@ -196,12 +196,13 @@ func (s *Service) GetOpportunityMarketScanStatus(ctx context.Context) (Opportuni
 	return OpportunityMarketScanStatus{
 		Config: config, ActiveRun: active, LatestRun: latest, LatestDataTradeDate: tradeDate,
 		UniverseCount: universe, CoveredCount: covered, CoverageRatio: ratio, Ready: ready,
-		BlockedReason: blocked, ScheduleDescription: "每个新交易日完成全市场数据维护后运行一次",
+		BlockedReason: blocked, ScheduleDescription: "每个新交易日完成全市场数据维护后运行一次；扫描后出现重要新主题时最多补扫一次",
 		MaxRetries: opportunityMarketScanMaxRetries,
 		Budgets: map[string]int{
 			"localPrefilter": opportunityMarketScanLocalLimit, "qfqAndQuote": opportunityMarketScanQFQLimit,
 			"fundFlow": opportunityMarketScanFundFlowLimit, "agentResearch": opportunityMarketScanResearchLimit,
 			"finalCandidates": opportunityMarketScanFinalLimit, "strategyDrafts": opportunityMarketScanStrategyLimit,
+			"messageAdmission": opportunityMarketScanMessageLocalReserve, "messageResearch": opportunityMarketScanMessageResearchReserve,
 		},
 		RecommendedModel: "GPT-5.6-Terra / Codex CLI / medium",
 	}, nil
@@ -299,7 +300,7 @@ func (s *Service) StartOpportunityMarketScan(ctx context.Context, trigger, reque
 	if !status.Ready {
 		return OpportunityMarketScanRun{}, ErrOpportunityMarketScanDataNotReady
 	}
-	if trigger != OpportunityMarketScanTriggerScheduled {
+	if trigger != OpportunityMarketScanTriggerScheduled && trigger != OpportunityMarketScanTriggerThemeRefresh {
 		trigger = OpportunityMarketScanTriggerManual
 	}
 	sourceUpdateJobID := ""
@@ -359,26 +360,43 @@ func (s *Service) prepareOpportunityMarketScan(ctx context.Context, runID string
 		s.failOpportunityMarketScan(ctx, run, ErrOpportunityMarketScanDataNotReady, false)
 		return
 	}
+	profiles, profileErr := s.hydrateOpportunityMarketScanProfiles(ctx, raw)
 	scored := scoreOpportunityMarketScanMetrics(raw)
 	if len(scored) == 0 {
 		s.failOpportunityMarketScan(ctx, run, errors.New("no candidates passed local prefilter"), false)
 		return
 	}
-	if len(scored) > opportunityMarketScanLocalLimit {
-		scored = scored[:opportunityMarketScanLocalLimit]
+	themeMatches, themeSnapshot := s.loadOpportunityMarketThemeMatches(ctx, profiles, scored, time.Now())
+	if profileErr != nil {
+		themeSnapshot.Status = DecisionHealthDegraded
+		profileMessage := "股票画像读取失败：" + safelog.Error(profileErr, 120)
+		if themeSnapshot.Message == "" {
+			themeSnapshot.Message = profileMessage
+		} else {
+			themeSnapshot.Message += "；" + profileMessage
+		}
 	}
-	run.TradeDate, run.UniverseCount, run.CoveredCount, run.PrefilterCount = tradeDate, universe, covered, len(scored)
+	selected, rankBySymbol := selectOpportunityMarketPrefilter(scored, themeMatches)
+	run.TradeDate, run.UniverseCount, run.CoveredCount, run.PrefilterCount = tradeDate, universe, covered, len(selected)
+	run.ThemeSnapshot = themeSnapshot
 	_ = s.store.DeleteOpportunityMarketScanCandidates(ctx, run.ID)
-	candidates := make([]OpportunityMarketScanCandidate, 0, len(scored))
-	for i, item := range scored {
+	candidates := make([]OpportunityMarketScanCandidate, 0, len(selected))
+	for _, item := range selected {
 		metrics := opportunityMarketMetricsFromRaw(item)
+		metrics.ThemeMatches = themeMatches[item.Instrument.Symbol]
+		metrics.SourceLane = opportunityMarketSourceLane(rankBySymbol[item.Instrument.Symbol], metrics.ThemeMatches)
 		candidates = append(candidates, OpportunityMarketScanCandidate{
 			ID: generateID(), ScanRunID: run.ID, Symbol: item.Instrument.Symbol, Market: item.Instrument.Market,
 			Name: item.Instrument.Name, Industry: item.Instrument.Industry, Sector: item.Instrument.Sector,
 			Concepts: item.Instrument.Concepts, Stage: OpportunityMarketScanCandidatePrefiltered,
-			PrefilterRank: i + 1, PrefilterScore: item.PrefilterScore, FinalScore: item.PrefilterScore,
+			PrefilterRank: rankBySymbol[item.Instrument.Symbol], PrefilterScore: item.PrefilterScore, FinalScore: item.PrefilterScore,
 			Metrics: metrics, StrategyStatus: OpportunityMarketScanStrategySkipped,
 		})
+	}
+	for _, candidate := range candidates {
+		if len(candidate.Metrics.ThemeMatches) > 0 {
+			run.ThemeSnapshot.MessageCandidateCount++
+		}
 	}
 	if err := s.store.UpsertOpportunityMarketScanCandidates(ctx, candidates); err != nil {
 		s.failOpportunityMarketScan(ctx, run, err, false)
@@ -510,6 +528,10 @@ func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *Opportun
 	}
 	flowLimit := min(len(candidates), opportunityMarketScanFundFlowLimit)
 	run.FundFlowRequestedCount = flowLimit
+	cachedMetrics := map[string]OpportunityMarketScanMetrics{}
+	if run.TriggerType == OpportunityMarketScanTriggerThemeRefresh {
+		cachedMetrics = s.opportunityMarketScanCachedMetrics(ctx, *run)
+	}
 	config, configErr := s.store.GetOpportunityMarketScanConfig(ctx)
 	var tradeCalendar []decisionTradeDay
 	if configErr == nil {
@@ -519,6 +541,16 @@ func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *Opportun
 	defer cancelFlow()
 	var flowErrors []string
 	for i := 0; i < flowLimit; i++ {
+		if cached, ok := cachedMetrics[candidates[i].Symbol]; ok && cached.FundFlowAvailable && cached.FundFlowAsOf >= run.TradeDate {
+			copyOpportunityFundFlowMetrics(&candidates[i].Metrics, cached)
+			run.FundFlowAvailableCount++
+			if run.FundFlowSource == "" {
+				run.FundFlowSource = cached.FundFlowSource
+			} else if run.FundFlowSource != cached.FundFlowSource {
+				run.FundFlowSource = "mixed"
+			}
+			continue
+		}
 		if configErr != nil {
 			candidates[i].Metrics.FundFlowStatus = "run_degraded"
 			continue
@@ -556,10 +588,9 @@ func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *Opportun
 	if run.FundFlowUsed {
 		scoreOpportunityFundFlowPercentiles(candidates[:flowLimit])
 	}
-	threads := s.activeOpportunityMarketScanThreads(ctx)
 	catalystCutoff := decisionTradingSessionCutoff(tradeCalendar, run.TradeDate, 20)
 	for i := range candidates {
-		candidates[i].ThemeScore, candidates[i].Metrics.ThemeSignals, candidates[i].Metrics.CatalystSignals = opportunityMarketThemeScore(candidates[i], threads, catalystCutoff)
+		candidates[i].ThemeScore, candidates[i].Metrics.ThemeSignals, candidates[i].Metrics.CatalystSignals = opportunityMarketThemeScoreFromMatches(candidates[i].Metrics.ThemeMatches, catalystCutoff)
 		candidates[i].Metrics.FundFlowUsed = run.FundFlowUsed && candidates[i].Metrics.FundFlowAvailable
 		quality, applicable := 0.0, 0.0
 		applicable += 35
@@ -598,6 +629,7 @@ func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *Opportun
 		}
 		return candidates[i].FinalScore > candidates[j].FinalScore
 	})
+	candidates = reserveOpportunityMarketMessageResearch(candidates)
 	config, _ = s.store.GetOpportunityMarketScanConfig(ctx)
 	benchmarkBars, benchmarkErr := s.refreshDecisionBenchmark(ctx, config, run.TradeDate)
 	benchmarkReturn, benchmarkOK := decisionBenchmarkReturn20(benchmarkBars)
@@ -624,6 +656,13 @@ func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *Opportun
 				BenchmarkAvailable: benchmarkErr == nil && benchmarkOK, BenchmarkReturn20Pct: benchmarkReturn,
 				TradeCalendar: tradeCalendar,
 			})
+			if themeHealth := opportunityMarketThemeDataHealth(candidates[i].Metrics.ThemeMatches, time.Now()); themeHealth != nil {
+				snapshot.DataHealth = append(snapshot.DataHealth, *themeHealth)
+			}
+			if profileHealth := opportunityMarketProfileDataHealth(candidates[i], time.Now()); profileHealth != nil {
+				snapshot.DataHealth = append(snapshot.DataHealth, *profileHealth)
+			}
+			snapshot = finalizeDecisionGateSnapshot(snapshot)
 			if saved, saveErr := s.store.SaveDecisionGateSnapshot(ctx, snapshot); saveErr == nil {
 				snapshot = saved
 			} else {
@@ -843,43 +882,6 @@ func (s *Service) activeOpportunityMarketScanThreads(ctx context.Context) []News
 	}
 }
 
-func opportunityMarketThemeScore(candidate OpportunityMarketScanCandidate, threads []NewsThread, catalystCutoff time.Time) (float64, []string, []string) {
-	score := 0.0
-	var signals []string
-	var catalysts []string
-	for _, thread := range threads {
-		direct := stringListContains(thread.Symbols, candidate.Symbol) || stringListContains(thread.Leaders, candidate.Symbol) ||
-			stringListContains(thread.Followers, candidate.Symbol) || stringListContains(thread.NextCandidates, candidate.Symbol)
-		related := stringListContainsFold(thread.Industries, candidate.Industry) || stringListContainsFold(thread.Industries, candidate.Sector)
-		for _, concept := range candidate.Concepts {
-			related = related || stringListContainsFold(thread.Industries, concept)
-		}
-		if direct {
-			score = math.Max(score, 100)
-		} else if related {
-			score = math.Max(score, 55)
-		} else {
-			continue
-		}
-		if len(signals) < 5 {
-			signals = append(signals, thread.Title)
-		}
-		if !catalystCutoff.IsZero() && !thread.LastChangedAt.IsZero() && !thread.LastChangedAt.Before(catalystCutoff) && len(catalysts) < 5 {
-			catalysts = append(catalysts, thread.Title)
-		}
-	}
-	return score, signals, catalysts
-}
-
-func stringListContains(items []string, expected string) bool {
-	for _, item := range items {
-		if strings.TrimSpace(item) == strings.TrimSpace(expected) {
-			return true
-		}
-	}
-	return false
-}
-
 func stringListContainsFold(items []string, expected string) bool {
 	expected = strings.TrimSpace(expected)
 	if expected == "" {
@@ -983,10 +985,16 @@ func (s *Service) tickOpportunityMarketScanScheduler(ctx context.Context) {
 		return
 	}
 	status, err := s.GetOpportunityMarketScanStatus(ctx)
-	if err != nil || !status.Ready || status.LatestDataTradeDate == config.LastScannedTradeDate {
+	if err != nil || !status.Ready {
 		return
 	}
-	_, _ = s.StartOpportunityMarketScan(ctx, OpportunityMarketScanTriggerScheduled, "system:scheduler")
+	if status.LatestDataTradeDate != config.LastScannedTradeDate {
+		_, _ = s.StartOpportunityMarketScan(ctx, OpportunityMarketScanTriggerScheduled, "system:scheduler")
+		return
+	}
+	if s.shouldStartOpportunityMarketThemeRefresh(ctx, status.LatestDataTradeDate, time.Now()) {
+		_, _ = s.StartOpportunityMarketScan(ctx, OpportunityMarketScanTriggerThemeRefresh, "system:theme_refresh")
+	}
 }
 
 func (s *Service) runRecentOpportunityDecisionAudit(ctx context.Context) bool {

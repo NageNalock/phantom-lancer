@@ -31,6 +31,158 @@ func TestOpportunityMarketScanMainBoardBoundary(t *testing.T) {
 	}
 }
 
+func TestOpportunityMarketThemeSemanticRecallAdmitsMainBoardCandidate(t *testing.T) {
+	svc, cleanup := newEmbeddingTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+	configureEmbeddingModel(t, svc, "embed-market-theme")
+
+	for _, profile := range []StockProfile{
+		{Symbol: "600196", Market: "SH", InstrumentType: InstrumentTypeStock, Name: "复星医药", ProfileText: "疫苗研发与医药产业服务"},
+		{Symbol: "300122", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "智飞生物", ProfileText: "疫苗研发与医药产业服务"},
+	} {
+		if _, err := svc.store.UpsertStockProfile(ctx, profile); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := svc.RebuildEmbeddingAssets(ctx, RequestRebuildEmbeddingAssets{ObjectTypes: []string{EmbeddingObjectStockProfile}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	thread, err := svc.store.CreateNewsThread(ctx, NewsThread{
+		Title: "Moderna 与默沙东癌症疫苗三期达标", CoreThesis: "个性化 mRNA 癌症疫苗出现关键临床进展",
+		Stage: NewsThreadStageAccelerating, Status: NewsThreadStatusActive, Confidence: .72, LastChangedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := svc.store.CreateNewsThreadVersion(ctx, NewsThreadVersion{
+		ThreadID: thread.ID, RunID: "run-mrna", WindowType: NewsContextWindowFourHour, VersionNo: 1,
+		Title: thread.Title, CoreThesis: thread.CoreThesis, Stage: thread.Stage, Confidence: thread.Confidence,
+		MaterialChange: true, Symbols: []string{"MRNA.O", "MRK.N"}, Industries: []string{"肿瘤疫苗", "mRNA平台"},
+		ReviewStatus: NewsContextReviewNotRequired, EffectiveAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scored := []opportunityMarketScanRawMetric{{
+		Instrument:     StockV2Instrument{Symbol: "600196", Market: "SH", InstrumentType: InstrumentTypeStock, Name: "复星医药"},
+		PrefilterScore: 20,
+	}}
+	matches, snapshot := svc.loadOpportunityMarketThemeMatches(ctx, map[string]StockProfile{
+		"600196": {Symbol: "600196", Market: "SH", InstrumentType: InstrumentTypeStock, Name: "复星医药", ProfileText: "疫苗研发与医药产业服务"},
+	}, scored, now.Add(time.Second))
+	if snapshot.Status != DecisionHealthHealthy || snapshot.VersionCount != 1 || snapshot.SemanticQueryCount != 1 {
+		t.Fatalf("theme snapshot=%#v", snapshot)
+	}
+	if len(matches["600196"]) != 1 || matches["600196"][0].VersionID != version.ID ||
+		matches["600196"][0].MatchKind != OpportunityMarketThemeMatchSemantic || !matches["600196"][0].RequiresCausalVerification {
+		t.Fatalf("semantic theme matches=%#v", matches)
+	}
+	if score, _, _ := opportunityMarketThemeScoreFromMatches(matches["600196"], time.Time{}); score != 0 {
+		t.Fatalf("semantic-only match score=%v, want no unverified theme boost", score)
+	}
+	if _, ok := matches["300122"]; ok {
+		t.Fatalf("ChiNext candidate escaped the bounded main-board universe: %#v", matches["300122"])
+	}
+	thread.Stage = NewsThreadStageRetreating
+	if _, err := svc.store.UpdateNewsThread(ctx, thread); err != nil {
+		t.Fatal(err)
+	}
+	matches, snapshot = svc.loadOpportunityMarketThemeMatches(ctx, map[string]StockProfile{
+		"600196": {Symbol: "600196", Market: "SH", InstrumentType: InstrumentTypeStock, Name: "复星医药", ProfileText: "疫苗研发与医药产业服务"},
+	}, scored, now.Add(2*time.Second))
+	if snapshot.VersionCount != 0 || len(matches) != 0 {
+		t.Fatalf("retreating current theme was still recalled: snapshot=%#v matches=%#v", snapshot, matches)
+	}
+}
+
+func TestOpportunityMarketPrefilterReservesMessageCandidateBeyondPriceCutoff(t *testing.T) {
+	scored := make([]opportunityMarketScanRawMetric, opportunityMarketScanLocalLimit+1)
+	for i := range scored {
+		symbol := fmt.Sprintf("%06d", i+1)
+		scored[i] = opportunityMarketScanRawMetric{
+			Instrument:     StockV2Instrument{Symbol: symbol, Market: "SZ", InstrumentType: InstrumentTypeStock, Name: symbol},
+			PrefilterScore: float64(len(scored) - i),
+		}
+	}
+	target := scored[len(scored)-1].Instrument.Symbol
+	matches := map[string][]OpportunityMarketThemeMatch{target: {{
+		ThreadID: "thread-mrna", VersionID: "version-mrna", Title: "癌症疫苗进展",
+		MatchKind: OpportunityMarketThemeMatchSemantic, RequiresCausalVerification: true,
+	}}}
+	selected, ranks := selectOpportunityMarketPrefilter(scored, matches)
+	if len(selected) != opportunityMarketScanLocalLimit || selected[0].Instrument.Symbol != target || ranks[target] != opportunityMarketScanLocalLimit+1 {
+		t.Fatalf("selected first=%s len=%d rank=%d", selected[0].Instrument.Symbol, len(selected), ranks[target])
+	}
+	if lane := opportunityMarketSourceLane(ranks[target], matches[target]); lane != OpportunityMarketScanSourceMessage {
+		t.Fatalf("source lane=%q, want message", lane)
+	}
+}
+
+func TestOpportunityMarketThemeStructuredMatchKeepsExactProvenance(t *testing.T) {
+	now := time.Now()
+	version := NewsThreadVersion{
+		ID: "version-mrna", ThreadID: "thread-mrna", Title: "癌症疫苗三期达标",
+		CoreThesis: "mRNA 肿瘤疫苗取得关键临床进展", Stage: NewsThreadStageAccelerating,
+		Confidence: .7, MaterialChange: true, EffectiveAt: now, Symbols: []string{"MRNA.O"}, Industries: []string{"肿瘤疫苗"},
+	}
+	match, ok := deterministicOpportunityMarketThemeMatch(version, StockProfile{
+		Symbol: "600196", Name: "复星医药", Concepts: []string{"mRNA"}, KeywordsZh: []string{"癌症疫苗"},
+	})
+	if !ok || match.ThreadID != version.ThreadID || match.VersionID != version.ID ||
+		match.MatchKind != OpportunityMarketThemeMatchStructured || !match.RequiresCausalVerification {
+		t.Fatalf("structured match=%#v ok=%v", match, ok)
+	}
+}
+
+func TestOpportunityMarketThemeRefreshRunsOnceForLateMaterialTheme(t *testing.T) {
+	store := newTestStore(t)
+	svc := NewService(store, nil, nil)
+	defer svc.Close()
+	ctx := context.Background()
+	now := time.Now()
+	capturedAt := now.Add(-time.Hour)
+	base, err := store.CreateOpportunityMarketScanRun(ctx, OpportunityMarketScanRun{
+		TriggerType: OpportunityMarketScanTriggerScheduled, Status: OpportunityMarketScanStatusCompleted,
+		TradeDate: "2026-08-20", ThemeSnapshot: OpportunityMarketThemeSnapshot{CapturedAt: capturedAt, Status: DecisionHealthHealthy},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.FinishedAt = capturedAt.Add(20 * time.Minute)
+	if _, err := store.UpdateOpportunityMarketScanRun(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+	thread, err := store.CreateNewsThread(ctx, NewsThread{
+		Title: "盘后创新药催化", CoreThesis: "临床结果出现实质变化", Stage: NewsThreadStageEmerging,
+		Status: NewsThreadStatusActive, Confidence: .7, LastChangedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateNewsThreadVersion(ctx, NewsThreadVersion{
+		ThreadID: thread.ID, RunID: "late-theme-run", WindowType: NewsContextWindowFourHour,
+		VersionNo: 1, Title: thread.Title, CoreThesis: thread.CoreThesis, Stage: thread.Stage,
+		Confidence: thread.Confidence, MaterialChange: true, EffectiveAt: now.Add(-10 * time.Minute),
+		ReviewStatus: NewsContextReviewNotRequired,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !svc.shouldStartOpportunityMarketThemeRefresh(ctx, base.TradeDate, now) {
+		t.Fatal("late material theme did not request one bounded refresh")
+	}
+	if _, err := store.CreateOpportunityMarketScanRun(ctx, OpportunityMarketScanRun{
+		TriggerType: OpportunityMarketScanTriggerThemeRefresh, Status: OpportunityMarketScanStatusFailed,
+		TradeDate: base.TradeDate,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if svc.shouldStartOpportunityMarketThemeRefresh(ctx, base.TradeDate, now) {
+		t.Fatal("theme refresh was scheduled more than once for the same trading date")
+	}
+}
+
 func TestOpportunityMarketScanMetricsAndCoverage(t *testing.T) {
 	store := newTestStore(t)
 	defer store.Close()
@@ -120,14 +272,21 @@ func TestOpportunityMarketScanRepositoryDefaultsAndCandidates(t *testing.T) {
 	if err != nil || config.Enabled {
 		t.Fatalf("default config=%+v err=%v, want disabled", config, err)
 	}
-	run, err := store.CreateOpportunityMarketScanRun(ctx, OpportunityMarketScanRun{TriggerType: OpportunityMarketScanTriggerManual})
+	run, err := store.CreateOpportunityMarketScanRun(ctx, OpportunityMarketScanRun{
+		TriggerType:   OpportunityMarketScanTriggerManual,
+		ThemeSnapshot: OpportunityMarketThemeSnapshot{Status: DecisionHealthDegraded, VersionIDs: []string{"theme-version-1"}, VersionCount: 1},
+	})
 	if err != nil {
 		t.Fatalf("create scan run: %v", err)
+	}
+	storedRun, err := store.GetOpportunityMarketScanRun(ctx, run.ID)
+	if err != nil || storedRun.ThemeSnapshot.VersionCount != 1 || len(storedRun.ThemeSnapshot.VersionIDs) != 1 {
+		t.Fatalf("stored theme snapshot=%#v err=%v", storedRun.ThemeSnapshot, err)
 	}
 	if err := store.UpsertOpportunityMarketScanCandidates(ctx, []OpportunityMarketScanCandidate{{
 		ID: "candidate-a", ScanRunID: run.ID, Symbol: "600000", Market: "SH", Name: "浦发银行",
 		Stage: OpportunityMarketScanCandidateResearch, PrefilterScore: 70, FinalScore: 75,
-		Metrics: OpportunityMarketScanMetrics{TradeDate: "2026-08-10", QFQAvailable: true, DecisionStatus: DecisionHealthDegraded},
+		Metrics: OpportunityMarketScanMetrics{TradeDate: "2026-08-10", QFQAvailable: true, DecisionStatus: DecisionHealthDegraded, SourceLane: OpportunityMarketScanSourceMessage},
 	}}); err != nil {
 		t.Fatalf("upsert candidate: %v", err)
 	}
@@ -142,6 +301,20 @@ func TestOpportunityMarketScanRepositoryDefaultsAndCandidates(t *testing.T) {
 	items, err = store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{ScanRunID: run.ID, DecisionStatus: DecisionHealthHealthy, Limit: 10})
 	if err != nil || len(items) != 0 {
 		t.Fatalf("healthy candidates=%+v err=%v, want none", items, err)
+	}
+	items, err = store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{ScanRunID: run.ID, SourceLane: OpportunityMarketScanSourceMessage, Limit: 10})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("message candidates=%+v err=%v", items, err)
+	}
+	if err := store.UpsertOpportunityMarketScanCandidates(ctx, []OpportunityMarketScanCandidate{{
+		ID: "candidate-legacy", ScanRunID: run.ID, Symbol: "600001", Market: "SH", Name: "历史候选",
+		Stage: OpportunityMarketScanCandidateResearch, Metrics: OpportunityMarketScanMetrics{TradeDate: "2026-08-10"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	items, err = store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{ScanRunID: run.ID, SourceLane: OpportunityMarketScanSourcePrice, Limit: 10})
+	if err != nil || len(items) != 1 || items[0].Symbol != "600001" {
+		t.Fatalf("legacy price candidates=%+v err=%v", items, err)
 	}
 }
 

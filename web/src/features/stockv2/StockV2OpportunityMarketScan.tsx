@@ -17,6 +17,7 @@ const ACTIVE_STATUSES = new Set(["pending", "prefiltering", "enriching", "resear
 const STAGES = ["prefiltering", "enriching", "researching", "drafting"] as const;
 type ResultStage = "final" | "research_candidate" | "reviewed_out" | "excluded";
 type DecisionHealthFilter = "all" | "healthy" | "degraded" | "blocked";
+type CandidateSourceFilter = "all" | "message_related" | "price";
 
 export function StockV2OpportunityMarketScan({ actions }: { actions: AppActions }) {
   const [status, setStatus] = useState<StockV2OpportunityMarketScanStatus | null>(null);
@@ -27,6 +28,7 @@ export function StockV2OpportunityMarketScan({ actions }: { actions: AppActions 
   const [resultStage, setResultStage] = useState<ResultStage>("final");
   const [candidateOffset, setCandidateOffset] = useState(0);
   const [decisionHealth, setDecisionHealth] = useState<DecisionHealthFilter>("all");
+  const [candidateSource, setCandidateSource] = useState<CandidateSourceFilter>("all");
   const [selectedCandidate, setSelectedCandidate] = useState<StockV2OpportunityMarketScanCandidate | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -51,13 +53,13 @@ export function StockV2OpportunityMarketScan({ actions }: { actions: AppActions 
     }
   }
 
-  async function loadCandidates(runId: string, stage = resultStage, offset = candidateOffset, health = decisionHealth) {
+  async function loadCandidates(runId: string, stage = resultStage, offset = candidateOffset, health = decisionHealth, source = candidateSource) {
     if (!runId) { setCandidates([]); return; }
     const requestID = ++candidateRequest.current;
     try {
       const limit = stage === "excluded" ? 50 : 50;
       const result = await actions.api<{ items: StockV2OpportunityMarketScanCandidate[]; total: number }>(
-        `/api/stockv2/opportunity-market-scan/runs/${encodeURIComponent(runId)}/candidates?stage=${encodeURIComponent(stage)}&decisionStatus=${health === "all" ? "" : encodeURIComponent(health)}&limit=${limit}&offset=${offset}`,
+        `/api/stockv2/opportunity-market-scan/runs/${encodeURIComponent(runId)}/candidates?stage=${encodeURIComponent(stage)}&decisionStatus=${health === "all" ? "" : encodeURIComponent(health)}&sourceLane=${source === "all" ? "" : encodeURIComponent(source)}&limit=${limit}&offset=${offset}`,
       );
       if (requestID === candidateRequest.current) {
         setCandidates(result.items || []);
@@ -78,12 +80,12 @@ export function StockV2OpportunityMarketScan({ actions }: { actions: AppActions 
     setCandidateOffset(0);
     void loadCandidates(selectedRunId, nextStage, 0);
   }, [selectedRunId]);
-  useEffect(() => { void loadCandidates(selectedRunId, resultStage, candidateOffset, decisionHealth); }, [resultStage, candidateOffset, decisionHealth]);
+  useEffect(() => { void loadCandidates(selectedRunId, resultStage, candidateOffset, decisionHealth, candidateSource); }, [resultStage, candidateOffset, decisionHealth, candidateSource]);
   useEffect(() => {
     if (!status?.activeRun) return;
-    const timer = window.setInterval(() => { void load(); void loadCandidates(selectedRunId, resultStage, candidateOffset, decisionHealth); }, 15_000);
+    const timer = window.setInterval(() => { void load(); void loadCandidates(selectedRunId, resultStage, candidateOffset, decisionHealth, candidateSource); }, 15_000);
     return () => window.clearInterval(timer);
-  }, [candidateOffset, decisionHealth, resultStage, selectedRunId, status?.activeRun?.id]);
+  }, [candidateOffset, candidateSource, decisionHealth, resultStage, selectedRunId, status?.activeRun?.id]);
 
   const selectedRun = useMemo(
     () => runs.find((item) => item.id === selectedRunId) || (status?.activeRun?.id === selectedRunId ? status.activeRun : undefined),
@@ -148,7 +150,7 @@ export function StockV2OpportunityMarketScan({ actions }: { actions: AppActions 
                 key={run.id} onClick={() => setSelectedRunId(run.id)} type="button"
               >
                 <span className="flex items-center justify-between gap-2 text-xs"><strong>{run.tradeDate || "待确定"}</strong><Pill tone={scanStatusTone(run.status)}>{scanStatusLabel(run.status)}</Pill></span>
-                <span className="muted mt-1 block text-xs">{run.triggerType === "scheduled" ? "自动" : "手动"} · {formatMeaningfulDateTime(run.createdAt)}</span>
+                <span className="muted mt-1 block text-xs">{scanTriggerLabel(run.triggerType)} · {formatMeaningfulDateTime(run.createdAt)}</span>
               </button>
             ))}
           </div>
@@ -156,17 +158,18 @@ export function StockV2OpportunityMarketScan({ actions }: { actions: AppActions 
 
         <Panel
           title={selectedRun ? `${selectedRun.tradeDate || "扫描"} · 扫描结果` : "扫描结果"}
-          subtitle={selectedRun ? `预筛 ${selectedRun.prefilterCount} · 复核 ${selectedRun.researchCount} · 最终 ${selectedRun.finalCandidateCount} · 草案 ${selectedRun.strategyCreatedCount}` : "选择一条扫描记录"}
+          subtitle={selectedRun ? `预筛 ${selectedRun.prefilterCount} · 消息候选 ${selectedRun.themeSnapshot?.messageCandidateCount || 0} · 复核 ${selectedRun.researchCount} · 最终 ${selectedRun.finalCandidateCount} · 草案 ${selectedRun.strategyCreatedCount}` : "选择一条扫描记录"}
           actions={selectedRun && (selectedRun.status === "failed" || selectedRun.status === "partial") ? <Button disabled={runningAction || !!status?.activeRun} onClick={() => void retry(selectedRun)}><Repeat size={14} />重试</Button> : undefined}
         >
           {selectedRun?.errorMessage ? <div className="mb-3"><Notice tone={selectedRun.status === "failed" ? "danger" : "warn"}>{selectedRun.errorMessage}</Notice></div> : null}
           {selectedRun ? <ResultTabs run={selectedRun} stage={resultStage} onChange={(next) => { setResultStage(next); setCandidateOffset(0); }} /> : null}
-          {selectedRun ? <div className="my-3 flex items-center justify-between gap-3 text-xs"><span className="muted">确定性四道门会阻断新增风险，不阻断减仓/退出。</span><label className="flex items-center gap-2"><span className="muted">数据健康</span><select aria-label="按数据健康过滤" className="rounded-md border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 outline-none focus:border-[var(--accent)]" onChange={(event) => { setDecisionHealth(event.target.value as DecisionHealthFilter); setCandidateOffset(0); }} value={decisionHealth}><option value="all">全部</option><option value="healthy">健康</option><option value="degraded">降级</option><option value="blocked">阻断</option></select></label></div> : null}
+          {selectedRun ? <div className="my-3 flex flex-wrap items-center justify-between gap-3 text-xs"><span className="muted">确定性四道门会阻断新增风险，不阻断减仓/退出。</span><div className="flex flex-wrap items-center gap-3"><label className="flex items-center gap-2"><span className="muted">候选来源</span><select aria-label="按候选来源过滤" className="rounded-md border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 outline-none focus:border-[var(--accent)]" onChange={(event) => { setCandidateSource(event.target.value as CandidateSourceFilter); setCandidateOffset(0); }} value={candidateSource}><option value="all">全部</option><option value="message_related">消息相关</option><option value="price">仅行情</option></select></label><label className="flex items-center gap-2"><span className="muted">数据健康</span><select aria-label="按数据健康过滤" className="rounded-md border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5 outline-none focus:border-[var(--accent)]" onChange={(event) => { setDecisionHealth(event.target.value as DecisionHealthFilter); setCandidateOffset(0); }} value={decisionHealth}><option value="all">全部</option><option value="healthy">健康</option><option value="degraded">降级</option><option value="blocked">阻断</option></select></label></div></div> : null}
           {selectedRun?.fundFlowRequestedCount ? <div className="mb-3 mt-3 flex flex-wrap items-center gap-2 text-xs"><span className="muted">主动资金证据</span><Pill tone={selectedRun.fundFlowUsed ? "good" : "warn"}>{fundFlowRunLabel(selectedRun)}</Pill>{selectedRun.fundFlowSource ? <span className="font-mono">{selectedRun.fundFlowSource}</span> : null}</div> : null}
+          {selectedRun?.themeSnapshot?.versionCount ? <div className="mb-3 flex flex-wrap items-center gap-2 text-xs"><span className="muted">消息主题召回</span><Pill tone={decisionHealthTone(selectedRun.themeSnapshot.status)}>{selectedRun.themeSnapshot.versionCount} 个实质变化主题</Pill><span className="muted">命中 {selectedRun.themeSnapshot.matchedCandidateCount}，入池 {selectedRun.themeSnapshot.messageCandidateCount}</span>{selectedRun.themeSnapshot.status === "degraded" ? <span className="text-[var(--warn)]">{selectedRun.themeSnapshot.message}</span> : null}</div> : null}
           {candidates.length === 0 ? <EmptyState title="当前分组暂无记录" body={selectedRun && ACTIVE_STATUSES.has(selectedRun.status) ? "扫描仍在执行，研究池会随阶段持续落盘。" : "本轮在这个结果分组中没有记录。"} /> : (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[1160px] table-fixed text-left text-xs">
-                <thead className="text-[var(--muted)]"><tr className="border-b border-[var(--line)]"><th className="w-12 px-2 py-2">排名</th><th className="w-44 px-2 py-2">标的</th><th className="w-24 px-2 py-2">行业</th><th className="w-14 px-2 py-2">综合</th><th className="w-14 px-2 py-2">20日</th><th className="w-36 px-2 py-2">5 日模型预期</th><th className="w-24 px-2 py-2">主动资金证据</th><th className="w-14 px-2 py-2">主题</th><th className="w-24 px-2 py-2">四道门</th><th className="px-2 py-2">筛选结论</th><th className="w-20 px-2 py-2">策略</th></tr></thead>
+                <thead className="text-[var(--muted)]"><tr className="border-b border-[var(--line)]"><th className="w-12 px-2 py-2">排名</th><th className="w-44 px-2 py-2">标的</th><th className="w-24 px-2 py-2">行业</th><th className="w-14 px-2 py-2">综合</th><th className="w-14 px-2 py-2">20日</th><th className="w-36 px-2 py-2">5 日模型预期</th><th className="w-24 px-2 py-2">主动资金证据</th><th className="w-24 px-2 py-2">主题</th><th className="w-24 px-2 py-2">四道门</th><th className="px-2 py-2">筛选结论</th><th className="w-20 px-2 py-2">策略</th></tr></thead>
                 <tbody>{candidates.map((candidate) => <CandidateRow candidate={candidate} key={candidate.id} onSelect={() => setSelectedCandidate(candidate)} />)}</tbody>
               </table>
             </div>
@@ -211,7 +214,7 @@ function CandidateRow({ candidate, onSelect }: { candidate: StockV2OpportunityMa
     <td className="px-2 py-2 font-mono">{formatPct(candidate.metrics.return20Pct)}</td>
     <td className="px-2 py-2"><ModelHorizonOutlookCompact items={candidate.horizonOutlooks} /></td>
     <td className="px-2 py-2"><span className="font-mono">{candidate.metrics.fundFlowUsed ? candidate.flowScore.toFixed(0) : fundFlowCandidateLabel(candidate)}</span>{candidate.metrics.fundFlowSource ? <span className="muted mt-1 block text-[10px]">{candidate.metrics.fundFlowSource}</span> : null}</td>
-    <td className="px-2 py-2 font-mono">{candidate.themeScore.toFixed(0)}</td>
+    <td className="px-2 py-2"><span className="font-mono">{candidate.themeScore.toFixed(0)}</span><span className="mt-1 block"><Pill tone={candidate.metrics.themeMatches?.some((item) => item.requiresCausalVerification) ? "warn" : "neutral"}>{candidateSourceLaneLabel(candidate.metrics.sourceLane)}</Pill></span></td>
     <td className="px-2 py-2"><Pill tone={decisionHealthTone(candidate.metrics.decisionStatus)}>{decisionHealthLabel(candidate.metrics.decisionStatus)}</Pill><span className="muted mt-1 block font-mono text-[10px]">{decisionGateCount(candidate)} / 4</span></td>
     <td className="px-2 py-2"><span className="muted block truncate text-[11px]" title={candidate.decisionReason || candidate.exclusionReason || "等待后续筛选"}>{candidate.decisionReason || candidate.exclusionReason || "等待后续筛选"}</span></td>
     <td className="px-2 py-2"><Pill tone={candidate.strategyStatus === "generated" ? "good" : "neutral"}>{strategyStatusLabel(candidate.strategyStatus)}</Pill></td>
@@ -293,6 +296,7 @@ function CandidateDrawer({ actions, candidate, discoveryRunId, onClose }: { acti
       <Panel title="行情与质量"><dl className="grid grid-cols-2 gap-3 text-xs"><MetricItem label="最新价" value={metrics.latestPrice?.toFixed(3) || "-"} /><MetricItem label="当日涨跌" value={formatPct(metrics.latestPctChange)} /><MetricItem label="5 日收益" value={formatPct(metrics.return5Pct)} /><MetricItem label="20 日收益" value={formatPct(metrics.return20Pct)} /><MetricItem label="ATR(14)" value={metrics.atr14 ? `${metrics.atr14.toFixed(3)} / ${metrics.atr14Pct?.toFixed(2)}%` : "-"} /><MetricItem label="市场状态" value={marketRegimeLabel(metrics.marketRegime)} /><MetricItem label="量比 5/20" value={metrics.volumeRatio5To20?.toFixed(2) || "-"} /><MetricItem label="主动资金证据" value={metrics.fundFlowAvailable ? `20 日净额占主动成交 ${metrics.mainFlowRatio20?.toFixed(2)}% · ${metrics.fundFlowAsOf || "日期未知"}` : fundFlowCandidateLabel(candidate)} /></dl></Panel>
       <Panel title="确定性四道门">{metrics.decisionGates?.length ? <div className="grid gap-2">{metrics.decisionGates.map((gate) => <div className="rounded-md border border-[var(--line)] p-3" key={gate.key}><div className="flex items-center justify-between gap-3"><strong className="text-xs">{gate.label}</strong><Pill tone={decisionGateTone(gate.status)}>{decisionGateStatusLabel(gate.status)}</Pill></div><p className="muted mt-1 mb-0 text-xs">{gate.summary}</p>{gate.reasons?.length ? <ul className="mt-2 mb-0 pl-5 text-xs">{gate.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul> : null}</div>)}</div> : <p className="muted m-0 text-xs">这条历史记录生成时尚未运行确定性四道门。</p>}</Panel>
       <CollapsibleSection title="数据健康" subtitle="关键项缺失会阻断新增风险，可选项缺失只降级">{metrics.dataHealth?.length ? <div className="grid gap-2">{metrics.dataHealth.map((item) => <div className="flex items-start justify-between gap-4 border-b border-[var(--line)] pb-2 text-xs last:border-0 last:pb-0" key={item.key}><div><strong>{item.label}</strong><span className="muted mt-1 block">{item.message || item.asOf || "已检查"}{item.source ? ` · ${item.source}` : ""}</span></div><Pill tone={decisionHealthTone(item.status)}>{decisionHealthLabel(item.status)}</Pill></div>)}</div> : <p className="muted m-0 text-xs">无健康快照。</p>}</CollapsibleSection>
+      {metrics.themeMatches?.length ? <Panel title="消息驱动来源"><div className="grid gap-3">{metrics.themeMatches.map((match) => <div className="border-b border-[var(--line)] pb-3 text-xs last:border-0 last:pb-0" key={match.versionId}><div className="flex items-start justify-between gap-3"><div><strong>{match.title}</strong><span className="muted mt-1 block">{formatMeaningfulDateTime(match.effectiveAt)} · 主题置信度 {((match.confidence || 0) * 100).toFixed(0)}%</span></div><Pill tone={match.requiresCausalVerification ? "warn" : "good"}>{themeMatchKindLabel(match.matchKind)}</Pill></div>{match.matchedTerms?.length ? <span className="muted mt-2 block">命中：{match.matchedTerms.join("、")}</span> : null}<code className="muted mt-2 block break-all">{match.threadId} / {match.versionId}</code>{match.requiresCausalVerification ? <p className="mt-2 mb-0 text-[var(--warn)]">仅获得研究席位，Agent 必须核验业务暴露、传导路径和定价状态。</p> : null}</div>)}</div></Panel> : null}
       {metrics.decisionOutcomes?.length ? <CollapsibleSection title="事后验证" subtitle="按 1/3/5/10/20 个交易日持续记录，不回写历史结论"><dl className="grid grid-cols-5 gap-2 text-xs">{metrics.decisionOutcomes.map((item) => <MetricItem key={item.horizon} label={`${item.horizon} 日`} value={item.status === "pending" ? "待观察" : item.status === "observed" ? `${formatPct(item.returnPct)} / 超额 ${formatPct(item.excessReturnPct)}` : `${formatPct(item.returnPct)} / 基准缺失`} />)}</dl></CollapsibleSection> : null}
       <Panel title="消息脉络信号">{metrics.themeSignals?.length ? <ul className="m-0 grid gap-2 pl-5 text-xs">{metrics.themeSignals.map((item) => <li key={item}>{item}</li>)}</ul> : <p className="muted m-0 text-xs">未匹配到活跃消息脉络，主题评分不加分。</p>}</Panel>
       {review ? <Panel title="Agent 复核"><dl className="grid grid-cols-2 gap-3 text-xs"><MetricItem label="证据评分" value={review.evidenceScore?.toFixed(1) || "-"} /><MetricItem label="置信度" value={review.confidence?.toFixed(2) || "-"} /></dl><p className="mt-3 mb-0 text-xs">{review.reason || "未提供候选理由"}</p>{review.riskSummary ? <p className="muted mt-2 mb-0 text-xs">风险：{review.riskSummary}</p> : null}</Panel> : null}
@@ -306,12 +310,15 @@ function CandidateDrawer({ actions, candidate, discoveryRunId, onClose }: { acti
 function MetricItem({ label, value }: { label: string; value: string }) { return <div><dt className="muted">{label}</dt><dd className="m-0 mt-1 font-mono">{value}</dd></div>; }
 function formatPct(value?: number) { return value === undefined ? "-" : `${value > 0 ? "+" : ""}${value.toFixed(2)}%`; }
 function scanStatusLabel(status?: string) { return ({ pending: "等待", prefiltering: "本地预筛", enriching: "数据富集", researching: "证据复核", drafting: "策略草案", completed: "完成", partial: "部分完成", failed: "失败" } as Record<string, string>)[status || ""] || "未运行"; }
+function scanTriggerLabel(trigger?: string) { return ({ scheduled: "自动", manual: "手动", theme_refresh: "主题补扫" } as Record<string, string>)[trigger || ""] || trigger || "未知"; }
 function scanStatusTone(status?: string): "neutral" | "good" | "warn" | "danger" { if (status === "completed") return "good"; if (status === "failed") return "danger"; if (status === "partial") return "warn"; return "neutral"; }
 function strategyStatusLabel(status?: string) { return ({ pending: "生成中", generated: "已生成", skipped: "未生成" } as Record<string, string>)[status || ""] || "-"; }
 function candidateStageLabel(stage?: string) { return ({ prefiltered: "预筛", research_candidate: "研究池", reviewed_out: "复核未入选", final: "最终候选", excluded: "预筛排除" } as Record<string, string>)[stage || ""] || stage || "-"; }
+function candidateSourceLaneLabel(source?: string) { return ({ message: "消息驱动", mixed: "行情+消息", price: "行情预筛" } as Record<string, string>)[source || ""] || "行情预筛"; }
+function themeMatchKindLabel(kind?: string) { return ({ direct_symbol: "明确提及", structured_term: "画像结构匹配", profile_keyword: "画像关键词", semantic_recall: "语义召回" } as Record<string, string>)[kind || ""] || "待核验"; }
 function fundFlowCandidateLabel(candidate: StockV2OpportunityMarketScanCandidate) { return ({ not_requested: "未请求", source_unavailable: "源不可用", invalid_data: "数据无效", run_degraded: "本轮未采用", available: candidate.metrics.fundFlowUsed ? candidate.flowScore.toFixed(0) : "本轮未采用" } as Record<string, string>)[candidate.metrics.fundFlowStatus || ""] || "未取得"; }
 function fundFlowRunLabel(run: StockV2OpportunityMarketScanRun) { if (run.fundFlowUsed) return `${run.fundFlowAvailableCount}/${run.fundFlowRequestedCount} 已用于评分`; if (run.fundFlowStatus === "not_configured") return "未配置数据源"; return `${run.fundFlowAvailableCount}/${run.fundFlowRequestedCount} 覆盖不足，本轮未采用`; }
-function budgetLabel(key: string) { return ({ localPrefilter: "本地预筛", qfqAndQuote: "前复权与报价", fundFlow: "资金流", agentResearch: "Agent 复核", finalCandidates: "最终候选", strategyDrafts: "策略草案" } as Record<string, string>)[key] || key; }
+function budgetLabel(key: string) { return ({ localPrefilter: "本地预筛", qfqAndQuote: "前复权与报价", fundFlow: "资金流", agentResearch: "Agent 复核", finalCandidates: "最终候选", strategyDrafts: "策略草案", messageAdmission: "消息候选准入", messageResearch: "消息候选复核保留" } as Record<string, string>)[key] || key; }
 function decisionGateCount(candidate: StockV2OpportunityMarketScanCandidate) { return candidate.metrics.decisionGates?.filter((item) => item.status === "pass" || item.status === "not_applicable").length || 0; }
 function decisionHealthLabel(status?: string) { return ({ healthy: "健康", degraded: "降级", blocked: "阻断", not_applicable: "不适用" } as Record<string, string>)[status || ""] || "未检查"; }
 function decisionHealthTone(status?: string): "neutral" | "good" | "warn" | "danger" { if (status === "healthy") return "good"; if (status === "blocked") return "danger"; if (status === "degraded") return "warn"; return "neutral"; }

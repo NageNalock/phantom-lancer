@@ -20,8 +20,18 @@ const (
 	OpportunityMarketScanStatusPartial      = "partial"
 	OpportunityMarketScanStatusFailed       = "failed"
 
-	OpportunityMarketScanTriggerManual    = "manual"
-	OpportunityMarketScanTriggerScheduled = "scheduled"
+	OpportunityMarketScanTriggerManual       = "manual"
+	OpportunityMarketScanTriggerScheduled    = "scheduled"
+	OpportunityMarketScanTriggerThemeRefresh = "theme_refresh"
+
+	OpportunityMarketScanSourcePrice   = "price"
+	OpportunityMarketScanSourceMessage = "message"
+	OpportunityMarketScanSourceMixed   = "mixed"
+
+	OpportunityMarketThemeMatchDirect     = "direct_symbol"
+	OpportunityMarketThemeMatchStructured = "structured_term"
+	OpportunityMarketThemeMatchKeyword    = "profile_keyword"
+	OpportunityMarketThemeMatchSemantic   = "semantic_recall"
 
 	OpportunityMarketScanCandidatePrefiltered = "prefiltered"
 	OpportunityMarketScanCandidateResearch    = "research_candidate"
@@ -46,6 +56,12 @@ const (
 	opportunityMarketScanFinalLimit      = 10
 	opportunityMarketScanStrategyLimit   = opportunityMarketScanFinalLimit
 	opportunityMarketScanMinimumCoverage = 0.80
+	// ponytail: reserve existing bounded slots for fresh material message themes;
+	// this changes candidate composition without increasing quote, provider, or model budgets.
+	opportunityMarketScanMessageLocalReserve    = 8
+	opportunityMarketScanMessageResearchReserve = 6
+	opportunityMarketScanThemeVersionLimit      = 6
+	opportunityMarketScanThemeSemanticLimit     = 12
 )
 
 var (
@@ -85,79 +101,110 @@ type RequestUpdateOpportunityMarketScanConfig struct {
 }
 
 type OpportunityMarketScanRun struct {
-	ID                     string    `json:"id"`
-	TriggerType            string    `json:"triggerType"`
-	RequestedBy            string    `json:"requestedBy,omitempty"`
-	Status                 string    `json:"status"`
-	TradeDate              string    `json:"tradeDate,omitempty"`
-	SourceUpdateJobID      string    `json:"sourceUpdateJobId,omitempty"`
-	OpportunityID          string    `json:"opportunityId,omitempty"`
-	DiscoveryRunID         string    `json:"discoveryRunId,omitempty"`
-	StrategyAgentRunID     string    `json:"strategyAgentRunId,omitempty"`
-	UniverseCount          int       `json:"universeCount"`
-	CoveredCount           int       `json:"coveredCount"`
-	PrefilterCount         int       `json:"prefilterCount"`
-	EnrichedCount          int       `json:"enrichedCount"`
-	ResearchCount          int       `json:"researchCount"`
-	FinalCandidateCount    int       `json:"finalCandidateCount"`
-	StrategyRequestedCount int       `json:"strategyRequestedCount"`
-	StrategyCreatedCount   int       `json:"strategyCreatedCount"`
-	FundFlowRequestedCount int       `json:"fundFlowRequestedCount"`
-	FundFlowAvailableCount int       `json:"fundFlowAvailableCount"`
-	FundFlowSource         string    `json:"fundFlowSource,omitempty"`
-	FundFlowUsed           bool      `json:"fundFlowUsed"`
-	FundFlowStatus         string    `json:"fundFlowStatus,omitempty"`
-	FundFlowError          string    `json:"fundFlowError,omitempty"`
-	RetryCount             int       `json:"retryCount"`
-	NextRetryAt            time.Time `json:"nextRetryAt,omitempty"`
-	ErrorMessage           string    `json:"errorMessage,omitempty"`
-	StartedAt              time.Time `json:"startedAt,omitempty"`
-	FinishedAt             time.Time `json:"finishedAt,omitempty"`
-	CreatedAt              time.Time `json:"createdAt"`
-	UpdatedAt              time.Time `json:"updatedAt"`
+	ID                     string                         `json:"id"`
+	TriggerType            string                         `json:"triggerType"`
+	RequestedBy            string                         `json:"requestedBy,omitempty"`
+	Status                 string                         `json:"status"`
+	TradeDate              string                         `json:"tradeDate,omitempty"`
+	SourceUpdateJobID      string                         `json:"sourceUpdateJobId,omitempty"`
+	OpportunityID          string                         `json:"opportunityId,omitempty"`
+	DiscoveryRunID         string                         `json:"discoveryRunId,omitempty"`
+	StrategyAgentRunID     string                         `json:"strategyAgentRunId,omitempty"`
+	UniverseCount          int                            `json:"universeCount"`
+	CoveredCount           int                            `json:"coveredCount"`
+	PrefilterCount         int                            `json:"prefilterCount"`
+	EnrichedCount          int                            `json:"enrichedCount"`
+	ResearchCount          int                            `json:"researchCount"`
+	FinalCandidateCount    int                            `json:"finalCandidateCount"`
+	StrategyRequestedCount int                            `json:"strategyRequestedCount"`
+	StrategyCreatedCount   int                            `json:"strategyCreatedCount"`
+	FundFlowRequestedCount int                            `json:"fundFlowRequestedCount"`
+	FundFlowAvailableCount int                            `json:"fundFlowAvailableCount"`
+	FundFlowSource         string                         `json:"fundFlowSource,omitempty"`
+	FundFlowUsed           bool                           `json:"fundFlowUsed"`
+	FundFlowStatus         string                         `json:"fundFlowStatus,omitempty"`
+	FundFlowError          string                         `json:"fundFlowError,omitempty"`
+	ThemeSnapshot          OpportunityMarketThemeSnapshot `json:"themeSnapshot"`
+	RetryCount             int                            `json:"retryCount"`
+	NextRetryAt            time.Time                      `json:"nextRetryAt,omitempty"`
+	ErrorMessage           string                         `json:"errorMessage,omitempty"`
+	StartedAt              time.Time                      `json:"startedAt,omitempty"`
+	FinishedAt             time.Time                      `json:"finishedAt,omitempty"`
+	CreatedAt              time.Time                      `json:"createdAt"`
+	UpdatedAt              time.Time                      `json:"updatedAt"`
+}
+
+type OpportunityMarketThemeSnapshot struct {
+	CapturedAt            time.Time `json:"capturedAt,omitempty"`
+	Since                 time.Time `json:"since,omitempty"`
+	Status                string    `json:"status,omitempty"`
+	VersionIDs            []string  `json:"versionIds,omitempty"`
+	VersionCount          int       `json:"versionCount"`
+	MatchedCandidateCount int       `json:"matchedCandidateCount"`
+	MessageCandidateCount int       `json:"messageCandidateCount"`
+	SemanticAvailable     bool      `json:"semanticAvailable"`
+	SemanticQueryCount    int       `json:"semanticQueryCount"`
+	SemanticFailureCount  int       `json:"semanticFailureCount"`
+	Message               string    `json:"message,omitempty"`
+}
+
+type OpportunityMarketThemeMatch struct {
+	ThreadID                   string    `json:"threadId"`
+	VersionID                  string    `json:"versionId"`
+	Title                      string    `json:"title"`
+	Stage                      string    `json:"stage,omitempty"`
+	Confidence                 float64   `json:"confidence,omitempty"`
+	MaterialChange             bool      `json:"materialChange"`
+	EffectiveAt                time.Time `json:"effectiveAt,omitempty"`
+	MatchKind                  string    `json:"matchKind"`
+	MatchedTerms               []string  `json:"matchedTerms,omitempty"`
+	SemanticScore              float64   `json:"semanticScore,omitempty"`
+	RequiresCausalVerification bool      `json:"requiresCausalVerification"`
 }
 
 type OpportunityMarketScanMetrics struct {
-	InstrumentType     string                `json:"instrumentType,omitempty"`
-	TradeDate          string                `json:"tradeDate,omitempty"`
-	Return5Pct         float64               `json:"return5Pct,omitempty"`
-	Return20Pct        float64               `json:"return20Pct,omitempty"`
-	Return60Pct        float64               `json:"return60Pct,omitempty"`
-	MA20GapPct         float64               `json:"ma20GapPct,omitempty"`
-	MA60GapPct         float64               `json:"ma60GapPct,omitempty"`
-	VolumeRatio5To20   float64               `json:"volumeRatio5To20,omitempty"`
-	UpVolumeShare20    float64               `json:"upVolumeShare20,omitempty"`
-	Volatility20       float64               `json:"volatility20,omitempty"`
-	ATR14              float64               `json:"atr14,omitempty"`
-	ATR14Pct           float64               `json:"atr14Pct,omitempty"`
-	MA20               float64               `json:"ma20,omitempty"`
-	MedianAmount20     float64               `json:"medianAmount20,omitempty"`
-	IndustryBreadth20  float64               `json:"industryBreadth20,omitempty"`
-	MainNetInflow5     float64               `json:"mainNetInflow5,omitempty"`
-	MainNetInflow20    float64               `json:"mainNetInflow20,omitempty"`
-	MainNetInflow60    float64               `json:"mainNetInflow60,omitempty"`
-	MainFlowRatio20    float64               `json:"mainFlowRatio20,omitempty"`
-	PositiveFlowDays20 int                   `json:"positiveFlowDays20,omitempty"`
-	LatestPrice        float64               `json:"latestPrice,omitempty"`
-	LatestPctChange    float64               `json:"latestPctChange,omitempty"`
-	LatestTurnoverRate float64               `json:"latestTurnoverRate,omitempty"`
-	LatestMainFlowPct  float64               `json:"latestMainFlowPct,omitempty"`
-	QFQAvailable       bool                  `json:"qfqAvailable"`
-	FundFlowAvailable  bool                  `json:"fundFlowAvailable"`
-	FundFlowStatus     string                `json:"fundFlowStatus,omitempty"`
-	FundFlowSource     string                `json:"fundFlowSource,omitempty"`
-	FundFlowAsOf       string                `json:"fundFlowAsOf,omitempty"`
-	FundFlowUsed       bool                  `json:"fundFlowUsed"`
-	QuoteAvailable     bool                  `json:"quoteAvailable"`
-	ThemeSignals       []string              `json:"themeSignals,omitempty"`
-	CatalystSignals    []string              `json:"catalystSignals,omitempty"`
-	DecisionStatus     string                `json:"decisionStatus,omitempty"`
-	MarketRegime       string                `json:"marketRegime,omitempty"`
-	FactorCluster      string                `json:"factorCluster,omitempty"`
-	GateSnapshotID     string                `json:"gateSnapshotId,omitempty"`
-	DecisionGates      []DecisionGateResult  `json:"decisionGates,omitempty"`
-	DataHealth         []DecisionDataHealth  `json:"dataHealth,omitempty"`
-	DecisionOutcomes   []DecisionGateOutcome `json:"decisionOutcomes,omitempty"`
+	InstrumentType     string                        `json:"instrumentType,omitempty"`
+	TradeDate          string                        `json:"tradeDate,omitempty"`
+	Return5Pct         float64                       `json:"return5Pct,omitempty"`
+	Return20Pct        float64                       `json:"return20Pct,omitempty"`
+	Return60Pct        float64                       `json:"return60Pct,omitempty"`
+	MA20GapPct         float64                       `json:"ma20GapPct,omitempty"`
+	MA60GapPct         float64                       `json:"ma60GapPct,omitempty"`
+	VolumeRatio5To20   float64                       `json:"volumeRatio5To20,omitempty"`
+	UpVolumeShare20    float64                       `json:"upVolumeShare20,omitempty"`
+	Volatility20       float64                       `json:"volatility20,omitempty"`
+	ATR14              float64                       `json:"atr14,omitempty"`
+	ATR14Pct           float64                       `json:"atr14Pct,omitempty"`
+	MA20               float64                       `json:"ma20,omitempty"`
+	MedianAmount20     float64                       `json:"medianAmount20,omitempty"`
+	IndustryBreadth20  float64                       `json:"industryBreadth20,omitempty"`
+	MainNetInflow5     float64                       `json:"mainNetInflow5,omitempty"`
+	MainNetInflow20    float64                       `json:"mainNetInflow20,omitempty"`
+	MainNetInflow60    float64                       `json:"mainNetInflow60,omitempty"`
+	MainFlowRatio20    float64                       `json:"mainFlowRatio20,omitempty"`
+	PositiveFlowDays20 int                           `json:"positiveFlowDays20,omitempty"`
+	LatestPrice        float64                       `json:"latestPrice,omitempty"`
+	LatestPctChange    float64                       `json:"latestPctChange,omitempty"`
+	LatestTurnoverRate float64                       `json:"latestTurnoverRate,omitempty"`
+	LatestMainFlowPct  float64                       `json:"latestMainFlowPct,omitempty"`
+	QFQAvailable       bool                          `json:"qfqAvailable"`
+	FundFlowAvailable  bool                          `json:"fundFlowAvailable"`
+	FundFlowStatus     string                        `json:"fundFlowStatus,omitempty"`
+	FundFlowSource     string                        `json:"fundFlowSource,omitempty"`
+	FundFlowAsOf       string                        `json:"fundFlowAsOf,omitempty"`
+	FundFlowUsed       bool                          `json:"fundFlowUsed"`
+	QuoteAvailable     bool                          `json:"quoteAvailable"`
+	ThemeSignals       []string                      `json:"themeSignals,omitempty"`
+	CatalystSignals    []string                      `json:"catalystSignals,omitempty"`
+	SourceLane         string                        `json:"sourceLane,omitempty"`
+	ThemeMatches       []OpportunityMarketThemeMatch `json:"themeMatches,omitempty"`
+	DecisionStatus     string                        `json:"decisionStatus,omitempty"`
+	MarketRegime       string                        `json:"marketRegime,omitempty"`
+	FactorCluster      string                        `json:"factorCluster,omitempty"`
+	GateSnapshotID     string                        `json:"gateSnapshotId,omitempty"`
+	DecisionGates      []DecisionGateResult          `json:"decisionGates,omitempty"`
+	DataHealth         []DecisionDataHealth          `json:"dataHealth,omitempty"`
+	DecisionOutcomes   []DecisionGateOutcome         `json:"decisionOutcomes,omitempty"`
 }
 
 type OpportunityMarketFundFlowProbe struct {
@@ -237,6 +284,7 @@ type OpportunityMarketScanCandidateListFilter struct {
 	ScanRunID      string
 	Stage          string
 	DecisionStatus string
+	SourceLane     string
 	Limit          int
 	Offset         int
 }

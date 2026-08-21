@@ -46,6 +46,52 @@ func TestBuildStockProfileForStock(t *testing.T) {
 	}
 }
 
+func TestUniverseRefreshPreservesExistingInstrumentSemantics(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newStockProfileTestService(t)
+	defer cleanup()
+
+	original := StockV2Instrument{
+		ID: "inst-600196", Symbol: "600196", Market: "SH", InstrumentType: InstrumentTypeStock,
+		Name: "复星医药", Industry: "医药生物", Sector: "创新药", Concepts: []string{"疫苗", "mRNA"},
+	}
+	if err := svc.store.UpsertInstrument(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.UpsertInstrument(ctx, StockV2Instrument{
+		ID: original.ID, Symbol: original.Symbol, Market: original.Market,
+		InstrumentType: original.InstrumentType,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := svc.store.GetInstrument(ctx, original.Symbol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Name != original.Name || stored.Industry != original.Industry || stored.Sector != original.Sector ||
+		!profileContainsString(stored.Concepts, "疫苗") || !profileContainsString(stored.Concepts, "mRNA") {
+		t.Fatalf("instrument semantics were erased: %#v", stored)
+	}
+}
+
+func TestMergeStockProfilePreservesExistingSemanticMetadata(t *testing.T) {
+	base := buildStockProfileFromInstrument(StockV2Instrument{
+		Symbol: "600196", Market: "SH", InstrumentType: InstrumentTypeStock, Name: "复星医药",
+	})
+	existing := StockProfile{
+		Symbol: "600196", Market: "SH", InstrumentType: InstrumentTypeStock, Name: "复星医药",
+		Industry: "医药生物", Sectors: []string{"创新药"}, Concepts: []string{"疫苗", "mRNA"},
+		Tags: []string{"肿瘤治疗"}, KeywordsZh: []string{"癌症疫苗"}, BusinessLinesZh: []string{"疫苗研发"},
+		AIProfileStatus: StockProfileAIStatusReady,
+	}
+	merged := mergeStockProfileExistingFields(base, existing)
+	for _, want := range []string{"医药生物", "创新药", "疫苗", "mRNA", "肿瘤治疗", "癌症疫苗", "疫苗研发"} {
+		if !strings.Contains(merged.ProfileText, want) {
+			t.Fatalf("merged profile text %q missing %q", merged.ProfileText, want)
+		}
+	}
+}
+
 func TestBuildStockProfileForExchangeFund(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStockProfileTestService(t)
@@ -178,7 +224,7 @@ func TestRebuildStockProfilesSkipsUnchangedWithoutCallingPublicF10(t *testing.T)
 	if err != nil {
 		t.Fatalf("get first profile: %v", err)
 	}
-	expectedUnchanged := mergeStockProfileAIFields(buildStockProfileFromInstrument(instrument), first)
+	expectedUnchanged := mergeStockProfileExistingFields(buildStockProfileFromInstrument(instrument), first)
 	if !stockProfileContentEqual(first, expectedUnchanged) {
 		t.Fatalf("stored profile differs before unchanged rebuild:\nstored=%#v\nexpected=%#v", first, expectedUnchanged)
 	}

@@ -3356,6 +3356,7 @@ export interface StockV2OpportunityMarketScanRun {
   fundFlowUsed: boolean;
   fundFlowStatus?: string;
   fundFlowError?: string;
+  themeSnapshot: StockV2OpportunityMarketThemeSnapshot;
   retryCount: number;
   nextRetryAt?: string;
   errorMessage?: string;
@@ -3363,6 +3364,34 @@ export interface StockV2OpportunityMarketScanRun {
   finishedAt?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface StockV2OpportunityMarketThemeSnapshot {
+  capturedAt?: string;
+  since?: string;
+  status?: "healthy" | "degraded" | "not_applicable";
+  versionIds?: string[];
+  versionCount: number;
+  matchedCandidateCount: number;
+  messageCandidateCount: number;
+  semanticAvailable: boolean;
+  semanticQueryCount: number;
+  semanticFailureCount: number;
+  message?: string;
+}
+
+export interface StockV2OpportunityMarketThemeMatch {
+  threadId: string;
+  versionId: string;
+  title: string;
+  stage?: string;
+  confidence?: number;
+  materialChange: boolean;
+  effectiveAt?: string;
+  matchKind: "direct_symbol" | "structured_term" | "profile_keyword" | "semantic_recall" | string;
+  matchedTerms?: string[];
+  semanticScore?: number;
+  requiresCausalVerification: boolean;
 }
 
 export interface StockV2OpportunityMarketScanMetrics {
@@ -3390,6 +3419,8 @@ export interface StockV2OpportunityMarketScanMetrics {
   quoteAvailable: boolean;
   themeSignals?: string[];
   catalystSignals?: string[];
+  sourceLane?: "price" | "message" | "mixed";
+  themeMatches?: StockV2OpportunityMarketThemeMatch[];
   decisionStatus?: "healthy" | "degraded" | "blocked";
   marketRegime?: "risk_on" | "neutral" | "risk_off";
   factorCluster?: string;

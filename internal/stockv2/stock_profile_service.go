@@ -178,7 +178,7 @@ func (s *Service) RebuildStockProfiles(ctx context.Context) (RebuildStockProfile
 			existing, getErr := s.store.GetStockProfile(ctx, instrument.Symbol)
 			switch {
 			case getErr == nil:
-				profile = mergeStockProfileAIFields(profile, existing)
+				profile = mergeStockProfileExistingFields(profile, existing)
 				// ponytail: hourly rebuilds usually see unchanged master data; skip the
 				// DuckDB write instead of adding a separate profile-diff subsystem.
 				if stockProfileContentEqual(existing, profile) {
@@ -929,8 +929,9 @@ func (s *Service) mergeStockProfileExisting(ctx context.Context, base StockProfi
 	if err != nil {
 		return base
 	}
-	// ponytail: profile_update_tasks 保存基础输入 hash;这里仅合并既有 AI 增强与兼容字段。
-	return mergeStockProfileAIFields(base, existing)
+	// ponytail: lightweight universe sources intentionally omit F10 metadata;
+	// preserve the last known semantic fields until a public-source refresh replaces them.
+	return mergeStockProfileExistingFields(base, existing)
 }
 
 func buildStockProfileFromInstrument(instrument StockV2Instrument) StockProfile {
@@ -976,7 +977,13 @@ func buildStockProfileFromInstrument(instrument StockV2Instrument) StockProfile 
 	return profile
 }
 
-func mergeStockProfileAIFields(base, existing StockProfile) StockProfile {
+func mergeStockProfileExistingFields(base, existing StockProfile) StockProfile {
+	if base.Industry == "" {
+		base.Industry = existing.Industry
+	}
+	base.Sectors = appendProfileTerms(base.Sectors, existing.Sectors...)
+	base.Concepts = appendProfileTerms(base.Concepts, existing.Concepts...)
+	base.Tags = appendProfileTerms(base.Tags, existing.Tags...)
 	base.BusinessSummaryEn = existing.BusinessSummaryEn
 	base.BusinessLinesZh = appendProfileTerms(base.BusinessLinesZh, existing.BusinessLinesZh...)
 	base.BusinessLinesEn = appendProfileTerms(base.BusinessLinesEn, existing.BusinessLinesEn...)

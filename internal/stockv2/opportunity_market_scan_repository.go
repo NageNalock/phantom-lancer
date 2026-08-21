@@ -105,6 +105,7 @@ func (s *Store) ensureOpportunityMarketScanSchema(ctx context.Context) error {
 		{"stockv2_opportunity_market_scan_runs", "fund_flow_used", "INTEGER NOT NULL DEFAULT 0"},
 		{"stockv2_opportunity_market_scan_runs", "fund_flow_status", "TEXT"},
 		{"stockv2_opportunity_market_scan_runs", "fund_flow_error", "TEXT"},
+		{"stockv2_opportunity_market_scan_runs", "theme_snapshot_json", "TEXT NOT NULL DEFAULT '{}'"},
 	}
 	for _, column := range columns {
 		if err := s.ensureOpportunityMarketScanColumn(ctx, column.table, column.name, column.definition); err != nil {
@@ -197,12 +198,13 @@ const opportunityMarketScanRunSelectSQL = `SELECT id, trigger_type, COALESCE(req
 	strategy_requested_count, strategy_created_count, retry_count, next_retry_at,
 	fund_flow_requested_count, fund_flow_available_count, COALESCE(fund_flow_source,''),
 	fund_flow_used, COALESCE(fund_flow_status,''), COALESCE(fund_flow_error,''),
-	COALESCE(error_message,''), started_at, finished_at, created_at, updated_at
+	COALESCE(theme_snapshot_json,'{}'), COALESCE(error_message,''), started_at, finished_at, created_at, updated_at
 	FROM stockv2_opportunity_market_scan_runs`
 
 func scanOpportunityMarketScanRun(row rowScanner) (OpportunityMarketScanRun, error) {
 	var item OpportunityMarketScanRun
 	var nextRetry, started, finished sql.NullTime
+	var themeSnapshotJSON string
 	err := row.Scan(&item.ID, &item.TriggerType, &item.RequestedBy, &item.Status,
 		&item.TradeDate, &item.SourceUpdateJobID, &item.OpportunityID, &item.DiscoveryRunID,
 		&item.StrategyAgentRunID, &item.UniverseCount, &item.CoveredCount, &item.PrefilterCount,
@@ -211,7 +213,10 @@ func scanOpportunityMarketScanRun(row rowScanner) (OpportunityMarketScanRun, err
 		&nextRetry,
 		&item.FundFlowRequestedCount, &item.FundFlowAvailableCount, &item.FundFlowSource,
 		&item.FundFlowUsed, &item.FundFlowStatus, &item.FundFlowError,
-		&item.ErrorMessage, &started, &finished, &item.CreatedAt, &item.UpdatedAt)
+		&themeSnapshotJSON, &item.ErrorMessage, &started, &finished, &item.CreatedAt, &item.UpdatedAt)
+	if err == nil {
+		_ = json.Unmarshal([]byte(themeSnapshotJSON), &item.ThemeSnapshot)
+	}
 	if nextRetry.Valid {
 		item.NextRetryAt = nextRetry.Time
 	}
@@ -234,13 +239,14 @@ func (s *Store) CreateOpportunityMarketScanRun(ctx context.Context, item Opportu
 	}
 	item.CreatedAt = now
 	item.UpdatedAt = now
+	themeSnapshot, _ := json.Marshal(item.ThemeSnapshot)
 	_, err := s.db.ExecContext(ctx, `INSERT INTO stockv2_opportunity_market_scan_runs
 		(id, trigger_type, requested_by, status, trade_date, source_update_job_id, opportunity_id,
 		 discovery_run_id, strategy_agent_run_id, universe_count, covered_count, prefilter_count,
 		 enriched_count, research_count, final_candidate_count, strategy_requested_count,
 		 strategy_created_count, retry_count, next_retry_at, error_message, started_at, finished_at,
 		 created_at, updated_at, fund_flow_requested_count, fund_flow_available_count, fund_flow_source,
-		 fund_flow_used, fund_flow_status, fund_flow_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 fund_flow_used, fund_flow_status, fund_flow_error, theme_snapshot_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID, item.TriggerType, nullableString(item.RequestedBy), item.Status, nullableString(item.TradeDate),
 		nullableString(item.SourceUpdateJobID), nullableString(item.OpportunityID), nullableString(item.DiscoveryRunID),
 		nullableString(item.StrategyAgentRunID), item.UniverseCount, item.CoveredCount, item.PrefilterCount,
@@ -248,19 +254,20 @@ func (s *Store) CreateOpportunityMarketScanRun(ctx context.Context, item Opportu
 		item.StrategyCreatedCount, item.RetryCount, nullableTime(item.NextRetryAt), nullableString(item.ErrorMessage),
 		nullableTime(item.StartedAt), nullableTime(item.FinishedAt), item.CreatedAt, item.UpdatedAt,
 		item.FundFlowRequestedCount, item.FundFlowAvailableCount, nullableString(item.FundFlowSource),
-		item.FundFlowUsed, nullableString(item.FundFlowStatus), nullableString(item.FundFlowError))
+		item.FundFlowUsed, nullableString(item.FundFlowStatus), nullableString(item.FundFlowError), string(themeSnapshot))
 	return item, wrapError(err, "create opportunity market scan run")
 }
 
 func (s *Store) UpdateOpportunityMarketScanRun(ctx context.Context, item OpportunityMarketScanRun) (OpportunityMarketScanRun, error) {
 	item.UpdatedAt = time.Now()
+	themeSnapshot, _ := json.Marshal(item.ThemeSnapshot)
 	result, err := s.db.ExecContext(ctx, `UPDATE stockv2_opportunity_market_scan_runs SET
 		trigger_type=?, requested_by=?, status=?, trade_date=?, source_update_job_id=?, opportunity_id=?,
 		discovery_run_id=?, strategy_agent_run_id=?, universe_count=?, covered_count=?, prefilter_count=?,
 		enriched_count=?, research_count=?, final_candidate_count=?, strategy_requested_count=?,
 		strategy_created_count=?, retry_count=?, next_retry_at=?, error_message=?, started_at=?, finished_at=?,
 		fund_flow_requested_count=?, fund_flow_available_count=?, fund_flow_source=?, fund_flow_used=?,
-		fund_flow_status=?, fund_flow_error=?, updated_at=? WHERE id=?`, item.TriggerType, nullableString(item.RequestedBy), item.Status,
+		fund_flow_status=?, fund_flow_error=?, theme_snapshot_json=?, updated_at=? WHERE id=?`, item.TriggerType, nullableString(item.RequestedBy), item.Status,
 		nullableString(item.TradeDate), nullableString(item.SourceUpdateJobID), nullableString(item.OpportunityID),
 		nullableString(item.DiscoveryRunID), nullableString(item.StrategyAgentRunID), item.UniverseCount,
 		item.CoveredCount, item.PrefilterCount, item.EnrichedCount, item.ResearchCount,
@@ -268,7 +275,7 @@ func (s *Store) UpdateOpportunityMarketScanRun(ctx context.Context, item Opportu
 		nullableTime(item.NextRetryAt), nullableString(item.ErrorMessage), nullableTime(item.StartedAt),
 		nullableTime(item.FinishedAt), item.FundFlowRequestedCount, item.FundFlowAvailableCount,
 		nullableString(item.FundFlowSource), item.FundFlowUsed, nullableString(item.FundFlowStatus),
-		nullableString(item.FundFlowError), item.UpdatedAt, item.ID)
+		nullableString(item.FundFlowError), string(themeSnapshot), item.UpdatedAt, item.ID)
 	if err != nil {
 		return OpportunityMarketScanRun{}, wrapError(err, "update opportunity market scan run")
 	}
@@ -415,6 +422,20 @@ func (s *Store) ListOpportunityMarketScanCandidates(ctx context.Context, filter 
 		where = append(where, "COALESCE(json_extract(metrics_json,'$.decisionStatus'),'')=?")
 		args = append(args, strings.TrimSpace(filter.DecisionStatus))
 	}
+	if strings.TrimSpace(filter.SourceLane) != "" {
+		switch strings.TrimSpace(filter.SourceLane) {
+		case "message_related":
+			where = append(where, "COALESCE(json_extract(metrics_json,'$.sourceLane'),'') IN (?,?)")
+			args = append(args, OpportunityMarketScanSourceMessage, OpportunityMarketScanSourceMixed)
+		case OpportunityMarketScanSourcePrice:
+			// ponytail: runs created before source-lane provenance are price-only scans.
+			where = append(where, "COALESCE(json_extract(metrics_json,'$.sourceLane'),'') IN ('',?)")
+			args = append(args, OpportunityMarketScanSourcePrice)
+		default:
+			where = append(where, "COALESCE(json_extract(metrics_json,'$.sourceLane'),'')=?")
+			args = append(args, strings.TrimSpace(filter.SourceLane))
+		}
+	}
 	args = append(args, normalizedPageLimit(filter.Limit, 200), normalizedPageOffset(filter.Offset))
 	rows, err := s.db.QueryContext(ctx, opportunityMarketScanCandidateSelectSQL+" WHERE "+strings.Join(where, " AND ")+` ORDER BY
 		CASE WHEN final_rank > 0 THEN 0 ELSE 1 END, final_rank ASC, prefilter_rank ASC LIMIT ? OFFSET ?`, args...)
@@ -434,6 +455,19 @@ func (s *Store) CountOpportunityMarketScanCandidates(ctx context.Context, filter
 	if strings.TrimSpace(filter.DecisionStatus) != "" {
 		where = append(where, "COALESCE(json_extract(metrics_json,'$.decisionStatus'),'')=?")
 		args = append(args, strings.TrimSpace(filter.DecisionStatus))
+	}
+	if strings.TrimSpace(filter.SourceLane) != "" {
+		switch strings.TrimSpace(filter.SourceLane) {
+		case "message_related":
+			where = append(where, "COALESCE(json_extract(metrics_json,'$.sourceLane'),'') IN (?,?)")
+			args = append(args, OpportunityMarketScanSourceMessage, OpportunityMarketScanSourceMixed)
+		case OpportunityMarketScanSourcePrice:
+			where = append(where, "COALESCE(json_extract(metrics_json,'$.sourceLane'),'') IN ('',?)")
+			args = append(args, OpportunityMarketScanSourcePrice)
+		default:
+			where = append(where, "COALESCE(json_extract(metrics_json,'$.sourceLane'),'')=?")
+			args = append(args, strings.TrimSpace(filter.SourceLane))
+		}
 	}
 	var count int
 	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM stockv2_opportunity_market_scan_candidates WHERE "+strings.Join(where, " AND "), args...).Scan(&count)

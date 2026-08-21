@@ -1484,10 +1484,10 @@ func (s *Store) UpsertInstrument(ctx context.Context, instrument StockV2Instrume
 		ON CONFLICT(symbol) DO UPDATE SET
 			market = excluded.market,
 			instrument_type = excluded.instrument_type,
-			name = excluded.name,
-			industry = excluded.industry,
-			sector = excluded.sector,
-			concepts = excluded.concepts,
+			name = CASE WHEN TRIM(excluded.name)<>'' THEN excluded.name ELSE stockv2_instruments.name END,
+			industry = CASE WHEN TRIM(excluded.industry)<>'' THEN excluded.industry ELSE stockv2_instruments.industry END,
+			sector = CASE WHEN TRIM(excluded.sector)<>'' THEN excluded.sector ELSE stockv2_instruments.sector END,
+			concepts = CASE WHEN excluded.concepts NOT IN ('', '[]', 'null') THEN excluded.concepts ELSE stockv2_instruments.concepts END,
 			last_update_at = excluded.last_update_at,
 			updated_at = excluded.updated_at
 	`

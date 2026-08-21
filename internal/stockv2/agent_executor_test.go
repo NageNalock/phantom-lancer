@@ -1114,6 +1114,11 @@ func TestBuildOpportunityDiscoveryPromptBoundsMarketScanCandidates(t *testing.T)
 			Metrics: OpportunityMarketScanMetrics{
 				TradeDate: "2026-08-10", Return20Pct: float64(i), QFQAvailable: true,
 				ThemeSignals: []string{strings.Repeat("消息脉络", 100)},
+				SourceLane:   OpportunityMarketScanSourceMessage,
+				ThemeMatches: []OpportunityMarketThemeMatch{{
+					ThreadID: "thread-mrna", VersionID: "version-mrna", Title: "癌症疫苗临床进展",
+					MatchKind: OpportunityMarketThemeMatchSemantic, RequiresCausalVerification: true,
+				}},
 			},
 		})
 	}
@@ -1124,7 +1129,7 @@ func TestBuildOpportunityDiscoveryPromptBoundsMarketScanCandidates(t *testing.T)
 		DiscoveryRun:     OpportunityDiscoveryRun{ID: "run-1", OpportunityID: "opp-1"},
 		MarketCandidates: candidates,
 	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
-	for _, want := range []string{"complete allowed universe", "do not rediscover the full market", "600000", "600019", "at most 10"} {
+	for _, want := range []string{"complete allowed universe", "do not rediscover the full market", "600000", "600019", "at most 10", "thread-mrna", "version-mrna", "get_news_thread", "only grants a research slot"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("market scan prompt missing %q:\n%s", want, prompt)
 		}

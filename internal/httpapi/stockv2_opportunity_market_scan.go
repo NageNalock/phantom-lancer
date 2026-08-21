@@ -132,7 +132,8 @@ func (s *Server) handleStockV2ListOpportunityMarketScanCandidates(w http.Respons
 	}
 	filter := stockv2.OpportunityMarketScanCandidateListFilter{
 		ScanRunID: r.PathValue("id"), Stage: strings.TrimSpace(r.URL.Query().Get("stage")),
-		DecisionStatus: strings.TrimSpace(r.URL.Query().Get("decisionStatus")), Limit: limit, Offset: offset,
+		DecisionStatus: strings.TrimSpace(r.URL.Query().Get("decisionStatus")),
+		SourceLane:     strings.TrimSpace(r.URL.Query().Get("sourceLane")), Limit: limit, Offset: offset,
 	}
 	items, err := s.stockV2.ListOpportunityMarketScanCandidates(r.Context(), filter)
 	if err != nil {

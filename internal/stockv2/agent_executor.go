@@ -1760,7 +1760,7 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 	b.WriteString("Do not place orders, do not modify holdings, do not create proposed_operation, do not activate strategies, and do not read token/cookie/private config.\n")
 	b.WriteString("Every candidate symbol must exist in StockV2 master data. Use stock_agent.search_instruments or stock_agent.search_stock_profiles before recording candidates.\n")
 	if discCtx.Mode == OpportunityDiscoveryModeMarketScan {
-		b.WriteString("This is a bounded market-scan review. MarketCandidates is the complete allowed universe for this run: do not rediscover the full market and do not return any symbol outside it. Review at most 20 supplied main-board stocks, retain at most 10, and use public search only to verify material claims, catalysts, and risks. Missing fund-flow or quote evidence must reduce confidence instead of being invented. The server-generated decisionStatus, decisionGates, and dataHealth fields are authoritative: never promote a blocked entry candidate and never describe missing evidence as neutral.\n")
+		b.WriteString("This is a bounded market-scan review. MarketCandidates is the complete allowed universe for this run: do not rediscover the full market and do not return any symbol outside it. Review at most 20 supplied main-board stocks, retain at most 10, and use public search only to verify material claims, catalysts, and risks. Missing fund-flow or quote evidence must reduce confidence instead of being invented. The server-generated decisionStatus, decisionGates, and dataHealth fields are authoritative: never promote a blocked entry candidate and never describe missing evidence as neutral. For each unique metrics.themeMatches threadId, call stock_agent.get_news_thread once and verify versionId. A semantic_recall or requiresCausalVerification match only grants a research slot; retain it only after verifying business exposure, transmission, pricing, and invalidation.\n")
 	}
 	if discCtx.DiscoveryRun.ExcludeChiNextAndStarMarket {
 		b.WriteString("This run excludes ChiNext and STAR Market individual stocks. Do not research, record, or return SZ 300/301 or SH 688/689 stocks. Exchange-traded funds remain allowed when the opportunity instrument scope permits them.\n")
@@ -1793,7 +1793,11 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 	b.WriteString("## Required Workflow\n\n")
 	b.WriteString("For each research phase, call stock_agent.start_discovery_step before work and stock_agent.finish_discovery_step after work. If a phase cannot be completed, call stock_agent.fail_discovery_step with a concise reason and continue when possible.\n")
 	b.WriteString("Use these persisted step keys in order: `understand_theme`, `internal_recall`, `external_research`, `theme_chain`, `candidate_merge`, `market_risk_check`, `candidate_ranking`, `final_report`.\n")
-	b.WriteString("During `internal_recall`, always call stock_agent.get_embedding_status before candidate generation. If status.available is true, call stock_agent.semantic_search_stock_profiles for related instruments and stock_agent.semantic_search_news_events for related project news; merge those results with deterministic keyword/masterdata candidates. If status.available is false, record the degraded reason in the step output and continue with deterministic search only.\n")
+	if discCtx.Mode == OpportunityDiscoveryModeMarketScan {
+		b.WriteString("During `internal_recall`, read the supplied themeMatches with stock_agent.get_news_thread and inspect each candidate with stock_agent.get_stock_profile. Candidate generation and semantic admission were already completed by the bounded server pipeline; do not expand the universe.\n")
+	} else {
+		b.WriteString("During `internal_recall`, always call stock_agent.get_embedding_status before candidate generation. If status.available is true, call stock_agent.semantic_search_stock_profiles for related instruments and stock_agent.semantic_search_news_events for related project news; merge those results with deterministic keyword/masterdata candidates. If status.available is false, record the degraded reason in the step output and continue with deterministic search only.\n")
+	}
 	b.WriteString("For every external article/search result you rely on, call stock_agent.record_external_source with title, URL, publisher, publishedAt when available, summary, relatedSymbols, and confidence.\n")
 	b.WriteString("For each material fact or reasoning item, call stock_agent.record_evidence. Link it to a candidate when the candidate exists.\n")
 	b.WriteString("For each candidate, call stock_agent.record_candidate after validating the symbol through StockV2 master data. Use stock_agent.update_candidate when the score, rank, reason, or risk changes.\n")
@@ -1810,6 +1814,7 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 	b.WriteString("- stock_agent.search_stock_profiles and stock_agent.get_stock_profile: project stock profile lookup.\n")
 	b.WriteString("- stock_agent.semantic_search_stock_profiles: vector recall over StockV2 stock profiles when embedding is available.\n")
 	b.WriteString("- stock_agent.search_news_events and stock_agent.semantic_search_news_events: project news lookup and vector recall when embedding is available.\n")
+	b.WriteString("- stock_agent.get_news_thread: read the exact message-thread version and evidence referenced by a market candidate.\n")
 	b.WriteString("- stock_agent.get_latest_quotes and stock_agent.get_daily_bars_summary: local quote/bars freshness context.\n")
 	b.WriteString("- stock_agent.list_existing_strategies: check whether a candidate already has strategies.\n")
 	b.WriteString("- stock_agent.get_embedding_status: embedding model binding and availability check.\n")
@@ -1847,6 +1852,14 @@ func opportunityDiscoveryPromptContext(discCtx OpportunityDiscoveryContext) any 
 	if discCtx.Mode != OpportunityDiscoveryModeMarketScan {
 		return discCtx
 	}
+	type compactThemeMatch struct {
+		ThreadID                   string   `json:"threadId"`
+		VersionID                  string   `json:"versionId"`
+		MatchKind                  string   `json:"matchKind"`
+		MatchedTerms               []string `json:"matchedTerms,omitempty"`
+		SemanticScore              float64  `json:"semanticScore,omitempty"`
+		RequiresCausalVerification bool     `json:"requiresCausalVerification,omitempty"`
+	}
 	type compactMetrics struct {
 		TradeDate          string               `json:"tradeDate,omitempty"`
 		Return5Pct         float64              `json:"return5Pct,omitempty"`
@@ -1868,6 +1881,8 @@ func opportunityDiscoveryPromptContext(discCtx OpportunityDiscoveryContext) any 
 		QuoteAvailable     bool                 `json:"quoteAvailable"`
 		ThemeSignals       []string             `json:"themeSignals,omitempty"`
 		CatalystSignals    []string             `json:"catalystSignals,omitempty"`
+		SourceLane         string               `json:"sourceLane,omitempty"`
+		ThemeMatches       []compactThemeMatch  `json:"themeMatches,omitempty"`
 		ATR14Pct           float64              `json:"atr14Pct,omitempty"`
 		DecisionStatus     string               `json:"decisionStatus,omitempty"`
 		MarketRegime       string               `json:"marketRegime,omitempty"`
@@ -1893,6 +1908,21 @@ func opportunityDiscoveryPromptContext(discCtx OpportunityDiscoveryContext) any 
 	}
 	candidates := make([]compactCandidate, 0, len(discCtx.MarketCandidates))
 	for _, item := range discCtx.MarketCandidates {
+		matches := item.Metrics.ThemeMatches[:min(len(item.Metrics.ThemeMatches), 3)]
+		compactMatches := make([]compactThemeMatch, 0, len(matches))
+		for _, match := range matches {
+			compactMatches = append(compactMatches, compactThemeMatch{
+				ThreadID: match.ThreadID, VersionID: match.VersionID, MatchKind: match.MatchKind,
+				MatchedTerms: opportunityPromptTextList(match.MatchedTerms, 3, 16), SemanticScore: match.SemanticScore,
+				RequiresCausalVerification: match.RequiresCausalVerification,
+			})
+		}
+		themeSignals := item.Metrics.ThemeSignals
+		if len(compactMatches) > 0 {
+			// ponytail: the exact thread version replaces the repeated display title;
+			// the agent must load that version before treating the match as evidence.
+			themeSignals = nil
+		}
 		candidates = append(candidates, compactCandidate{
 			Symbol: item.Symbol, Market: item.Market, Name: safelog.Text(item.Name, 24), Industry: safelog.Text(item.Industry, 16),
 			Sector: safelog.Text(item.Sector, 16), Concepts: opportunityPromptTextList(item.Concepts, 3, 16), PrefilterRank: item.PrefilterRank,
@@ -1908,8 +1938,10 @@ func opportunityDiscoveryPromptContext(discCtx OpportunityDiscoveryContext) any 
 				FundFlowAvailable: item.Metrics.FundFlowAvailable, QuoteAvailable: item.Metrics.QuoteAvailable,
 				FundFlowStatus: item.Metrics.FundFlowStatus, FundFlowSource: item.Metrics.FundFlowSource,
 				FundFlowAsOf: item.Metrics.FundFlowAsOf, FundFlowUsed: item.Metrics.FundFlowUsed,
-				ThemeSignals:    opportunityPromptTextList(item.Metrics.ThemeSignals, 3, 32),
+				ThemeSignals:    opportunityPromptTextList(themeSignals, 3, 32),
 				CatalystSignals: opportunityPromptTextList(item.Metrics.CatalystSignals, 3, 32),
+				SourceLane:      item.Metrics.SourceLane,
+				ThemeMatches:    compactMatches,
 				ATR14Pct:        item.Metrics.ATR14Pct, DecisionStatus: item.Metrics.DecisionStatus,
 				MarketRegime: item.Metrics.MarketRegime, FactorCluster: item.Metrics.FactorCluster,
 				DecisionGates: compactOpportunityDecisionGates(item.Metrics.DecisionGates),
