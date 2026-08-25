@@ -901,7 +901,6 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 		}
 	}
 
-universeBatches:
 	for batch := 0; batch < totalBatches; batch++ {
 		select {
 		case <-ctx.Done():
@@ -1050,9 +1049,15 @@ universeBatches:
 				var err error
 				var bars []StockV2DailyBar
 				quality, hasQuality := qualityBySymbol[inst.Symbol]
-				fetchedDailyBars, bars, err = s.fetchDailyBarsForInstrumentWithQuality(ctx, inst, dailyBarsTargetDate, quality, hasQuality && qualityErr == nil)
+				qualityKnown := hasQuality && qualityErr == nil
+				backfillCircuitSkipped := terminalErr != nil && dailyBarsNeedsHistoricalBackfill(quality, qualityKnown)
+				if backfillCircuitSkipped {
+					err = terminalErr
+				} else {
+					fetchedDailyBars, bars, err = s.fetchDailyBarsForInstrumentWithQuality(ctx, inst, dailyBarsTargetDate, quality, qualityKnown)
+				}
 				if err != nil {
-					if s.log != nil {
+					if s.log != nil && !backfillCircuitSkipped {
 						s.log.Error("stock data asset maintenance daily bars failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "symbol", inst.Symbol, "market", inst.Market, "instrument_type", inst.InstrumentType, "error", safelog.Text(err.Error(), 300))
 					}
 					failedItems = append(failedItems, UpdateFailure{
@@ -1079,11 +1084,6 @@ universeBatches:
 			batchProcessed++
 			progress.CurrentBatchProgress = batchProcessed
 			flushProgress(len(failedItems) != failedBefore)
-			if terminalErr != nil {
-				_ = flushPendingDailyBars()
-				flushProgress(true)
-				break universeBatches
-			}
 
 			if fetchedDailyBars {
 				if err := sleepJitter(ctx, 80*time.Millisecond, 60*time.Millisecond); err != nil {
@@ -1125,6 +1125,10 @@ universeBatches:
 	if err := s.store.PruneUpdateJobs(ctx, 100); err != nil {
 		s.log.Warn("prune update jobs failed", "retention_count", 100, "error", safelog.Text(err.Error(), 240))
 	}
+}
+
+func dailyBarsNeedsHistoricalBackfill(quality DailyBarsQuality, hasQuality bool) bool {
+	return !hasQuality || !quality.HasData || !quality.Meets250
 }
 
 func universeUpdateTerminalResult(totalCount, successCount, failedCount int, terminalErr error) (string, string) {

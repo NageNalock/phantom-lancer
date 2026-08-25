@@ -505,6 +505,18 @@ func TestUniverseUpdateTerminalResultRejectsLowCoverage(t *testing.T) {
 	}
 }
 
+func TestDailyBarsNeedsHistoricalBackfill(t *testing.T) {
+	if !dailyBarsNeedsHistoricalBackfill(DailyBarsQuality{}, false) {
+		t.Fatal("unknown quality must require history backfill")
+	}
+	if !dailyBarsNeedsHistoricalBackfill(DailyBarsQuality{HasData: true, Meets250: false}, true) {
+		t.Fatal("short history must require backfill")
+	}
+	if dailyBarsNeedsHistoricalBackfill(DailyBarsQuality{HasData: true, Meets250: true}, true) {
+		t.Fatal("complete history must not require backfill")
+	}
+}
+
 func TestScheduledUniverseUpdateOnlyRunsInNightWindow(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
