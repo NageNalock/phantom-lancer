@@ -853,8 +853,25 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 	var failedItems []UpdateFailure
 	successCount := 0
 	processedCount := 0
+	var terminalErr error
 	freshnessWindow := s.universeMaintenanceFreshnessWindow()
-	dailyBarsTargetDate := s.universeDailyBarsTargetTradeDate(ctx, time.Now())
+	marketScanConfig, configErr := s.store.GetOpportunityMarketScanConfig(ctx)
+	if configErr != nil && s.log != nil {
+		s.log.Warn("stock data asset maintenance market data credentials unavailable", "job_id", jobID, "error", safelog.Text(configErr.Error(), 240))
+	}
+	dailyBarsTargetDate := s.universeDailyBarsTargetTradeDateWithConfig(ctx, marketScanConfig, time.Now())
+	if dailyBarsTargetDate != "" && configErr == nil && (marketScanConfig.PrimaryFundFlowAPIKey != "" || marketScanConfig.BackupFundFlowAPIKey != "") {
+		bars, err := s.fetchUniverseDailyBars(ctx, marketScanConfig, dailyBarsTargetDate)
+		if err != nil {
+			if s.log != nil {
+				s.log.Warn("stock data asset maintenance bulk daily bars unavailable", "job_id", jobID, "trade_date", dailyBarsTargetDate, "error", safelog.Text(err.Error(), 300))
+			}
+		} else if err := s.store.UpsertDailyBars(ctx, bars); err != nil {
+			if s.log != nil {
+				s.log.Warn("stock data asset maintenance bulk daily bars save failed", "job_id", jobID, "trade_date", dailyBarsTargetDate, "bar_count", len(bars), "error", safelog.Text(err.Error(), 300))
+			}
+		}
+	}
 	flushProgress := func(includeFailedItems bool) {
 		progress.ProcessedCount = processedCount
 		progress.SuccessCount = successCount
@@ -884,6 +901,7 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 		}
 	}
 
+universeBatches:
 	for batch := 0; batch < totalBatches; batch++ {
 		select {
 		case <-ctx.Done():
@@ -1041,6 +1059,9 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 						Symbol: sym,
 						Reason: safelog.Text("daily bars: "+truncateDailyBarErr(err.Error()), 240),
 					})
+					if errors.Is(err, ErrDailyBarsSourceCircuitOpen) {
+						terminalErr = err
+					}
 				} else if fetchedDailyBars {
 					pendingDailyBars = append(pendingDailyBars, pendingUniverseDailyBars{
 						Instrument: inst,
@@ -1058,6 +1079,11 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 			batchProcessed++
 			progress.CurrentBatchProgress = batchProcessed
 			flushProgress(len(failedItems) != failedBefore)
+			if terminalErr != nil {
+				_ = flushPendingDailyBars()
+				flushProgress(true)
+				break universeBatches
+			}
 
 			if fetchedDailyBars {
 				if err := sleepJitter(ctx, 80*time.Millisecond, 60*time.Millisecond); err != nil {
@@ -1078,24 +1104,37 @@ func (s *Service) runUniverseUpdate(ctx context.Context, job StockV2UpdateJob) {
 	}
 
 	endAt := time.Now()
-	// 完成更新
+	status, errorMessage := universeUpdateTerminalResult(totalCount, successCount, len(failedItems), terminalErr)
 	s.store.UpdateUpdateJob(ctx, StockV2UpdateJob{
 		ID:             jobID,
-		Status:         "completed",
+		Status:         status,
 		TotalCount:     totalCount,
 		ProcessedCount: processedCount,
 		SuccessCount:   successCount,
 		FailedCount:    len(failedItems),
 		EndAt:          endAt,
+		ErrorMessage:   errorMessage,
 		FailedItems:    failedItems,
 	})
-	if len(failedItems) > 0 && s.log != nil {
+	if status == "failed" && s.log != nil {
+		s.log.Error("stock data asset maintenance failed", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "total_count", totalCount, "processed_count", processedCount, "success_count", successCount, "failed_count", len(failedItems), "error", safelog.Text(errorMessage, 300), "failure_sample", stockV2FailureSample(failedItems, 5))
+	} else if len(failedItems) > 0 && s.log != nil {
 		s.log.Warn("stock data asset maintenance completed with item failures", "job_id", jobID, "trigger_type", job.TriggerType, "trigger_source", job.TriggerSource, "total_count", totalCount, "processed_count", processedCount, "success_count", successCount, "failed_count", len(failedItems), "failure_sample", stockV2FailureSample(failedItems, 5))
 	}
 	// 清理过期更新历史（保留最近 100 条）
 	if err := s.store.PruneUpdateJobs(ctx, 100); err != nil {
 		s.log.Warn("prune update jobs failed", "retention_count", 100, "error", safelog.Text(err.Error(), 240))
 	}
+}
+
+func universeUpdateTerminalResult(totalCount, successCount, failedCount int, terminalErr error) (string, string) {
+	if terminalErr != nil {
+		return "failed", safelog.Error(terminalErr, 240)
+	}
+	if totalCount > 0 && float64(successCount)/float64(totalCount) < opportunityMarketScanMinimumCoverage {
+		return "failed", fmt.Sprintf("data asset maintenance coverage %.1f%% is below %.0f%% (%d succeeded, %d failed)", float64(successCount)*100/float64(totalCount), opportunityMarketScanMinimumCoverage*100, successCount, failedCount)
+	}
+	return "completed", ""
 }
 
 func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, inst StockV2Instrument, targetTradeDate string, quality DailyBarsQuality, hasQuality bool) (bool, []StockV2DailyBar, error) {
@@ -1109,11 +1148,19 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 	if !dailyBarsNeedsMaintenance(quality, targetTradeDate) {
 		return false, nil, nil
 	}
+	if quality.HasData && quality.Meets250 {
+		if bar := inst.sourceDailyBar; bar != nil && bar.TradeDate > quality.LatestDate && (targetTradeDate == "" || bar.TradeDate == targetTradeDate) {
+			copyBar := *bar
+			copyBar.Symbol = inst.Symbol
+			return true, []StockV2DailyBar{copyBar}, nil
+		}
+		// A current-session row can be absent for a suspended instrument. A stock
+		// with a complete historical series is therefore not a per-symbol backfill
+		// candidate merely because the market traded today.
+		return false, nil, nil
+	}
 
 	start, end := dailyBarRangeStartEnd(DailyBarRange1Y, time.Now())
-	if quality.HasData && quality.Meets250 && quality.LatestDate != "" {
-		start = quality.LatestDate
-	}
 	bars, err := s.dailyBarsSource.FetchDailyBars(ctx, inst.Symbol, inst.Market, start, end, DailyBarAdjustedNone, 1800)
 	if err != nil {
 		return true, nil, err
@@ -1135,16 +1182,34 @@ func dailyBarsNeedsMaintenance(q DailyBarsQuality, targetTradeDate string) bool 
 }
 
 func (s *Service) universeDailyBarsTargetTradeDate(ctx context.Context, now time.Time) string {
+	var config OpportunityMarketScanConfig
+	if s != nil && s.store != nil {
+		config, _ = s.store.GetOpportunityMarketScanConfig(ctx)
+	}
+	return s.universeDailyBarsTargetTradeDateWithConfig(ctx, config, now)
+}
+
+func (s *Service) universeDailyBarsTargetTradeDateWithConfig(ctx context.Context, config OpportunityMarketScanConfig, now time.Time) string {
 	if s == nil || s.dailyBarsSource == nil {
 		return ""
 	}
 	completedEnd, _ := agentDailyBarsCompletedEnd(now)
+	if config.PrimaryFundFlowAPIKey != "" || config.BackupFundFlowAPIKey != "" {
+		if calendar, err := s.refreshDecisionTradeCalendar(ctx, config, completedEnd); err == nil {
+			for i := len(calendar) - 1; i >= 0; i-- {
+				if calendar[i].Open && calendar[i].Date <= completedEnd {
+					return calendar[i].Date
+				}
+			}
+		} else if s.log != nil {
+			s.log.Warn("stock data asset maintenance trade calendar unavailable", "error", safelog.Text(err.Error(), 240))
+		}
+	}
 	start := now.In(chinaMarketTZ).AddDate(0, 0, -14).Format("2006-01-02")
 	requestCtx, cancel := context.WithTimeout(ctx, agentDailyBarsRequestTimeout)
 	defer cancel()
-	// ponytail: one liquid main-board reference request gives the public source's
-	// latest completed session without adding a trading-calendar dependency. An
-	// empty result falls back to the existing per-symbol stale flag.
+	// ponytail: one liquid main-board reference request is the credential-free
+	// fallback when the configured trading calendar is unavailable.
 	bars, err := s.dailyBarsSource.FetchDailyBars(requestCtx, "000001", "SZ", start, completedEnd, DailyBarAdjustedNone, 40)
 	if err != nil {
 		if s.log != nil {
@@ -1525,6 +1590,11 @@ const (
 	scheduledUniverseUpdateWindowEnd = 6
 	scheduledUpdaterPollInterval     = time.Minute
 	universeDailyBarsFlushSymbols    = 50
+	// ponytail: three attempts with a fixed cooldown absorb transient provider
+	// failures without turning the one-minute scheduler tick into a retry storm.
+	// Promote this to owner-facing settings only if deployments need distinct SLAs.
+	scheduledUniverseUpdateRetryDelay  = 15 * time.Minute
+	scheduledUniverseUpdateMaxAttempts = 3
 )
 
 // runScheduledUpdater 运行数据资产定时维护器
@@ -1571,6 +1641,13 @@ func (s *Service) checkAndExecuteScheduledUpdateAt(ctx context.Context, now time
 		s.markScheduledUpdateChecked(ctx, slotStart)
 		return
 	}
+	if latestOK && latest.Status == "failed" && latest.TriggerType == "scheduled" && universeUpdateJobInSlot(latest, slotStart, now) && s.scheduledUniverseUpdateAttemptCount(ctx, slotStart, now) >= scheduledUniverseUpdateMaxAttempts {
+		if s.log != nil {
+			s.log.Error("scheduled stock data asset maintenance exhausted retry budget", "schedule", "daily_23:00", "slot_start", slotStart.Format(time.RFC3339Nano), "max_attempts", scheduledUniverseUpdateMaxAttempts, "last_error", safelog.Text(latest.ErrorMessage, 240))
+		}
+		s.markScheduledUpdateChecked(ctx, slotStart)
+		return
+	}
 
 	// 执行维护
 	if s.log != nil {
@@ -1586,14 +1663,20 @@ func (s *Service) checkAndExecuteScheduledUpdateAt(ctx context.Context, now time
 
 func decideScheduledUniverseUpdate(lastScheduled time.Time, latest StockV2UpdateJob, latestOK bool, now time.Time) (scheduledUniverseUpdateDecision, time.Time) {
 	due, slotStart := shouldRunDailyUniverseUpdate(lastScheduled, now)
-	if !due && !shouldRetryFailedUniverseUpdateSlot(latest, latestOK, slotStart, now) {
-		return scheduledUniverseUpdateSkip, slotStart
-	}
 	if latestOK && latest.Status == "running" {
 		return scheduledUniverseUpdateWait, slotStart
 	}
 	if latestOK && isCompletedUniverseUpdateInSlot(latest, slotStart, now) {
 		return scheduledUniverseUpdateConfirm, slotStart
+	}
+	if latestOK && latest.Status == "failed" && latest.TriggerType == "scheduled" && universeUpdateJobInSlot(latest, slotStart, now) {
+		if shouldRetryFailedUniverseUpdateSlot(latest, latestOK, slotStart, now) {
+			return scheduledUniverseUpdateStart, slotStart
+		}
+		return scheduledUniverseUpdateWait, slotStart
+	}
+	if !due {
+		return scheduledUniverseUpdateSkip, slotStart
 	}
 	return scheduledUniverseUpdateStart, slotStart
 }
@@ -1644,11 +1727,39 @@ func isCompletedUniverseUpdateInSlot(latest StockV2UpdateJob, slotStart, now tim
 }
 
 func shouldRetryFailedUniverseUpdateSlot(latest StockV2UpdateJob, ok bool, slotStart, now time.Time) bool {
-	if !ok || latest.Status != "failed" || slotStart.IsZero() {
+	if !ok || latest.Status != "failed" || latest.TriggerType != "scheduled" || !universeUpdateJobInSlot(latest, slotStart, now) {
 		return false
 	}
-	createdAt := latest.CreatedAt.In(slotStart.Location())
+	failedAt := latest.EndAt
+	if failedAt.IsZero() {
+		failedAt = latest.CreatedAt
+	}
+	return !now.Before(failedAt.Add(scheduledUniverseUpdateRetryDelay))
+}
+
+func universeUpdateJobInSlot(job StockV2UpdateJob, slotStart, now time.Time) bool {
+	if slotStart.IsZero() || job.CreatedAt.IsZero() {
+		return false
+	}
+	createdAt := job.CreatedAt.In(slotStart.Location())
 	return !createdAt.Before(slotStart) && !createdAt.After(now.In(slotStart.Location()))
+}
+
+func (s *Service) scheduledUniverseUpdateAttemptCount(ctx context.Context, slotStart, now time.Time) int {
+	jobs, err := s.store.ListUpdateJobs(ctx, 100)
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("count scheduled stock maintenance attempts failed", "slot_start", slotStart.Format(time.RFC3339Nano), "error", safelog.Text(err.Error(), 240))
+		}
+		return 0
+	}
+	count := 0
+	for _, job := range jobs {
+		if job.TriggerType == "scheduled" && universeUpdateJobInSlot(job, slotStart, now) {
+			count++
+		}
+	}
+	return count
 }
 
 func (s *Service) markScheduledUpdateChecked(ctx context.Context, at time.Time) {

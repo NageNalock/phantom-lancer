@@ -231,6 +231,48 @@ func TestOpportunityMarketScanMetricsAndCoverage(t *testing.T) {
 	}
 }
 
+func TestOpportunityMarketScanStatusBlocksOnFailedUniverseMaintenance(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	for _, instrument := range []StockV2Instrument{
+		{ID: "main-a", Symbol: "600000", Market: "SH", InstrumentType: InstrumentTypeStock, Name: "主板甲"},
+		{ID: "main-b", Symbol: "000001", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "主板乙"},
+	} {
+		if err := store.UpsertInstrument(ctx, instrument); err != nil {
+			t.Fatal(err)
+		}
+		bars := make([]StockV2DailyBar, 65)
+		for i := range bars {
+			bars[i] = StockV2DailyBar{
+				Symbol: instrument.Symbol, Market: instrument.Market,
+				TradeDate: time.Date(2026, 6, 21, 0, 0, 0, 0, time.Local).AddDate(0, 0, i).Format("2006-01-02"),
+				Open:      10, High: 11, Low: 9, Close: 10.5, PrevClose: 10, Volume: 1000, Amount: 100000,
+				Adjusted: DailyBarAdjustedNone, Source: "unit_test", FetchedAt: time.Now(), Quality: DailyBarQualityOK,
+			}
+		}
+		if err := store.UpsertDailyBars(ctx, bars); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.CreateUpdateJob(ctx, StockV2UpdateJob{
+		ID: "failed-maintenance", TriggerType: "scheduled", TriggerSource: "test", Status: "failed",
+		TotalCount: 100, ProcessedCount: 20, SuccessCount: 10, FailedCount: 3,
+		ErrorMessage: "daily bars source circuit is open", StartAt: time.Now().Add(-time.Minute), EndAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(store, nil, nil)
+	defer svc.StopBackground()
+	status, err := svc.GetOpportunityMarketScanStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Ready || status.CoverageRatio != 1 || !strings.Contains(status.BlockedReason, "最近全市场数据维护失败") || !strings.Contains(status.BlockedReason, "10 / 共 100") {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
 func TestApplyOpportunityQFQMetricsEstimatesAmountWhenMissing(t *testing.T) {
 	bars := make([]StockV2DailyBar, 65)
 	for i := range bars {

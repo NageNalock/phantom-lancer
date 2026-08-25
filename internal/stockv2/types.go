@@ -29,6 +29,10 @@ type StockV2Instrument struct {
 	// universe maintenance pass; retired symbols must not become a public or
 	// persisted instrument state without a complete lifecycle design.
 	sourceInactive bool
+	// ponytail: the same Tencent batch response already carries the completed
+	// session OHLCV. Keeping it transient lets nightly maintenance reuse that
+	// response without widening the public instrument or persistence contract.
+	sourceDailyBar *StockV2DailyBar
 }
 
 // StockV2Portfolio 投资组合/仓位

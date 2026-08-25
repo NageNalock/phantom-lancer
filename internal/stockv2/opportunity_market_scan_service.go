@@ -188,11 +188,37 @@ func (s *Service) GetOpportunityMarketScanStatus(ctx context.Context) (Opportuni
 	if universe > 0 {
 		ratio = float64(covered) / float64(universe)
 	}
-	ready := tradeDate != "" && ratio >= opportunityMarketScanMinimumCoverage
-	blocked := ""
-	if !ready {
-		blocked = fmt.Sprintf("主板未复权日线覆盖率 %.1f%%，至少需要 %.0f%%", ratio*100, opportunityMarketScanMinimumCoverage*100)
+	blockedReasons := make([]string, 0, 2)
+	coverageReady := tradeDate != "" && ratio >= opportunityMarketScanMinimumCoverage
+	if !coverageReady {
+		blockedReasons = append(blockedReasons, fmt.Sprintf("%s 主板未复权日线覆盖率 %.1f%%（%d / %d），至少需要 %.0f%%", firstNonEmpty(tradeDate, "当前交易日"), ratio*100, covered, universe, opportunityMarketScanMinimumCoverage*100))
 	}
+	maintenanceReady := true
+	latestMaintenance, maintenanceErr := s.store.GetLatestUpdateJob(ctx)
+	if maintenanceErr != nil && !errors.Is(maintenanceErr, ErrUpdateJobNotFound) {
+		return OpportunityMarketScanStatus{}, maintenanceErr
+	}
+	if maintenanceErr == nil && latestMaintenance.Status != "completed" {
+		maintenanceReady = false
+		switch latestMaintenance.Status {
+		case "running":
+			blockedReasons = append(blockedReasons, fmt.Sprintf("全市场数据维护正在运行（%d / %d）", latestMaintenance.ProcessedCount, latestMaintenance.TotalCount))
+		case "failed":
+			reason := latestMaintenance.ErrorMessage
+			if reason == "" && len(latestMaintenance.FailedItems) > 0 {
+				reason = latestMaintenance.FailedItems[0].Reason
+			}
+			message := fmt.Sprintf("最近全市场数据维护失败（成功 %d / 共 %d，失败 %d）", latestMaintenance.SuccessCount, latestMaintenance.TotalCount, latestMaintenance.FailedCount)
+			if reason != "" {
+				message += "：" + safelog.Error(errors.New(reason), 180)
+			}
+			blockedReasons = append(blockedReasons, message)
+		default:
+			blockedReasons = append(blockedReasons, "最近全市场数据维护未完成，状态 "+latestMaintenance.Status)
+		}
+	}
+	ready := coverageReady && maintenanceReady
+	blocked := strings.Join(blockedReasons, "；")
 	return OpportunityMarketScanStatus{
 		Config: config, ActiveRun: active, LatestRun: latest, LatestDataTradeDate: tradeDate,
 		UniverseCount: universe, CoveredCount: covered, CoverageRatio: ratio, Ready: ready,

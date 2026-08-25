@@ -287,7 +287,7 @@ func decisionDatasetEndpoint(moneyFlowURL, dataset string) string {
 }
 
 func decisionDatasetAllowed(dataset string) bool {
-	if dataset == "index_daily" || dataset == "trade_cal" {
+	if dataset == "daily" || dataset == "index_daily" || dataset == "trade_cal" {
 		return true
 	}
 	for _, item := range decisionReferenceDatasets {

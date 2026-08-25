@@ -287,8 +287,42 @@ func (uds *UniverseDataSource) parseTencentLine(line string, metaMap map[string]
 		LastUpdate:     time.Now(),
 		sourceInactive: sourceInactive,
 	}
+	instrument.sourceDailyBar = tencentBatchDailyBar(fields, symbol, market, time.Now())
 
 	return &instrument, nil
+}
+
+func tencentBatchDailyBar(fields []string, symbol, market string, fetchedAt time.Time) *StockV2DailyBar {
+	if len(fields) <= 37 {
+		return nil
+	}
+	timestamp := strings.TrimSpace(fields[30])
+	if len(timestamp) < 8 {
+		return nil
+	}
+	tradeDate := timestamp[:4] + "-" + timestamp[4:6] + "-" + timestamp[6:8]
+	if _, err := time.Parse("2006-01-02", tradeDate); err != nil {
+		return nil
+	}
+	open := parseFloatTencent(fields[5])
+	closePrice := parseFloatTencent(fields[3])
+	high := parseFloatTencent(fields[33])
+	low := parseFloatTencent(fields[34])
+	if open <= 0 || closePrice <= 0 || high < max(open, closePrice) || low <= 0 || low > min(open, closePrice) {
+		return nil
+	}
+	return &StockV2DailyBar{
+		ID: generateID(), Symbol: symbol, Market: market, TradeDate: tradeDate,
+		Open: open, High: high, Low: low, Close: closePrice,
+		PrevClose: parseFloatTencent(fields[4]),
+		Volume:    parseFloatTencent(fields[6]),
+		Amount:    parseFloatTencent(fields[37]) * 10000,
+		PctChange: parseFloatTencent(fields[32]),
+		Adjusted:  DailyBarAdjustedNone,
+		Source:    "tencent_batch_quote",
+		FetchedAt: fetchedAt,
+		Quality:   DailyBarQualityOK,
+	}
 }
 
 // parseFloatTencent 解析腾讯价格字段

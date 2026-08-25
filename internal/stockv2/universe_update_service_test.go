@@ -464,14 +464,42 @@ func TestScheduledUniverseUpdateDecisionRetriesFailedCurrentSlot(t *testing.T) {
 	slotStart := time.Date(2026, 6, 30, 23, 0, 0, 0, loc)
 	now := slotStart.Add(48 * time.Minute)
 	latest := StockV2UpdateJob{
-		Status:    "failed",
-		CreatedAt: slotStart.Add(30 * time.Second),
-		EndAt:     now.Add(-time.Minute),
+		TriggerType: "scheduled",
+		Status:      "failed",
+		CreatedAt:   slotStart.Add(30 * time.Second),
+		EndAt:       now.Add(-scheduledUniverseUpdateRetryDelay - time.Minute),
 	}
 
 	decision, _ := decideScheduledUniverseUpdate(slotStart.Add(30*time.Second), latest, true, now)
 	if decision != scheduledUniverseUpdateStart {
 		t.Fatalf("decision = %s, want start", decision)
+	}
+}
+
+func TestScheduledUniverseUpdateDecisionWaitsForFailureCooldown(t *testing.T) {
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+	slotStart := time.Date(2026, 6, 30, 23, 0, 0, 0, loc)
+	now := slotStart.Add(10 * time.Minute)
+	latest := StockV2UpdateJob{
+		TriggerType: "scheduled",
+		Status:      "failed",
+		CreatedAt:   slotStart.Add(time.Minute),
+		EndAt:       now.Add(-time.Minute),
+	}
+	decision, _ := decideScheduledUniverseUpdate(slotStart.Add(-time.Hour), latest, true, now)
+	if decision != scheduledUniverseUpdateWait {
+		t.Fatalf("decision = %s, want cooldown wait", decision)
+	}
+}
+
+func TestUniverseUpdateTerminalResultRejectsLowCoverage(t *testing.T) {
+	status, message := universeUpdateTerminalResult(100, 79, 21, nil)
+	if status != "failed" || !strings.Contains(message, "79.0%") {
+		t.Fatalf("terminal result = %q %q", status, message)
+	}
+	status, message = universeUpdateTerminalResult(100, 80, 20, nil)
+	if status != "completed" || message != "" {
+		t.Fatalf("terminal result = %q %q, want completed", status, message)
 	}
 }
 

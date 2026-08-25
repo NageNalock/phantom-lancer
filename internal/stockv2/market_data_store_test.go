@@ -126,6 +126,41 @@ func TestMarketDataStoreUpsertQueryStats(t *testing.T) {
 	}
 }
 
+func TestMarketDataStoreBulkDailyBarQualityRefresh(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewMarketDataStore(filepath.Join(t.TempDir(), "stock_market.duckdb"))
+	if err != nil {
+		t.Fatalf("new market store: %v", err)
+	}
+	defer store.Close()
+
+	bars := make([]StockV2DailyBar, 5500)
+	for i := range bars {
+		bars[i] = StockV2DailyBar{
+			Symbol: fmt.Sprintf("%06d", i), Market: "SZ", TradeDate: "2026-08-24",
+			Open: 10, High: 11, Low: 9, Close: 10.5, PrevClose: 10,
+			Volume: 1000, Amount: 100000, Adjusted: DailyBarAdjustedNone,
+			Source: "bulk_test", FetchedAt: time.Now(), Quality: DailyBarQualityOK,
+		}
+	}
+	started := time.Now()
+	if err := store.UpsertDailyBars(ctx, bars); err != nil {
+		t.Fatalf("bulk upsert daily bars: %v", err)
+	}
+	var qualityRows int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM stockv2_daily_bar_quality`).Scan(&qualityRows); err != nil {
+		t.Fatalf("count quality rows: %v", err)
+	}
+	if qualityRows != len(bars) {
+		t.Fatalf("quality rows = %d, want %d", qualityRows, len(bars))
+	}
+	count, _, latest, source, _, err := store.GetDailyBarsStats(ctx, "005499", DailyBarAdjustedNone)
+	if err != nil || count != 1 || latest != "2026-08-24" || source != "bulk_test" {
+		t.Fatalf("bulk quality count=%d latest=%q source=%q err=%v", count, latest, source, err)
+	}
+	t.Logf("5500-row bulk upsert completed in %s", time.Since(started))
+}
+
 func TestMarketDataStoreSelectsOneCompleteBarPerTradeDate(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "stock_market.duckdb")

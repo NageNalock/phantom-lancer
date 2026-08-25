@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -11,7 +12,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+)
+
+var ErrDailyBarsSourceCircuitOpen = errors.New("daily bars source circuit is open")
+
+const (
+	dailyBarsSourceCircuitThreshold = 3
+	dailyBarsSourceCircuitCooldown  = 15 * time.Minute
 )
 
 // DailyBarsSource 日 K 历史行情数据源（腾讯 fqkline 公开端点）。
@@ -28,6 +37,10 @@ import (
 type DailyBarsSource struct {
 	service    *Service
 	httpClient *http.Client
+	circuitMu  sync.Mutex
+	failures   int
+	lastStatus int
+	blockedAt  time.Time
 }
 
 // NewDailyBarsSource 创建日 K 数据源
@@ -73,6 +86,9 @@ func adjustedToFQ(adjusted string) (fqParam, dataKey string) {
 // FetchDailyBars 抓取指定区间日 K。count 为请求条数上限（按区间档位给，
 // 经验证 ≤1800 稳定返回 object；过大会触发端点异常返回 list）。
 func (d *DailyBarsSource) FetchDailyBars(ctx context.Context, symbol, market, startDate, endDate, adjusted string, count int) ([]StockV2DailyBar, error) {
+	if retryAt, blocked := d.circuitRetryAt(time.Now()); blocked {
+		return nil, fmt.Errorf("%w until %s", ErrDailyBarsSourceCircuitOpen, retryAt.Format(time.RFC3339))
+	}
 	symbol, explicitMarket := normalizeQuoteSymbolInput(symbol)
 	if symbol == "" {
 		return nil, fmt.Errorf("symbol is required")
@@ -105,13 +121,20 @@ func (d *DailyBarsSource) FetchDailyBars(ctx context.Context, symbol, market, st
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		if d.recordCircuitFailure(0, time.Now()) {
+			return nil, fmt.Errorf("%w after repeated network failures", ErrDailyBarsSourceCircuitOpen)
+		}
 		return nil, fmt.Errorf("fqkline request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if d.recordCircuitFailure(resp.StatusCode, time.Now()) {
+			return nil, fmt.Errorf("%w after repeated HTTP %d responses", ErrDailyBarsSourceCircuitOpen, resp.StatusCode)
+		}
 		return nil, fmt.Errorf("fqkline http error: %d", resp.StatusCode)
 	}
+	d.resetCircuit()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
 	if err != nil {
@@ -131,6 +154,50 @@ func (d *DailyBarsSource) FetchDailyBars(ctx context.Context, symbol, market, st
 		return nil, fmt.Errorf("fqkline returned 0 bars for %s", symbol)
 	}
 	return bars, nil
+}
+
+func (d *DailyBarsSource) circuitRetryAt(now time.Time) (time.Time, bool) {
+	if d == nil {
+		return time.Time{}, false
+	}
+	d.circuitMu.Lock()
+	defer d.circuitMu.Unlock()
+	if d.blockedAt.IsZero() {
+		return time.Time{}, false
+	}
+	retryAt := d.blockedAt.Add(dailyBarsSourceCircuitCooldown)
+	if !now.Before(retryAt) {
+		d.failures, d.lastStatus, d.blockedAt = 0, 0, time.Time{}
+		return time.Time{}, false
+	}
+	return retryAt, true
+}
+
+func (d *DailyBarsSource) recordCircuitFailure(status int, now time.Time) bool {
+	if d == nil {
+		return false
+	}
+	d.circuitMu.Lock()
+	defer d.circuitMu.Unlock()
+	if d.lastStatus != status {
+		d.failures = 0
+	}
+	d.lastStatus = status
+	d.failures++
+	if d.failures < dailyBarsSourceCircuitThreshold {
+		return false
+	}
+	d.blockedAt = now
+	return true
+}
+
+func (d *DailyBarsSource) resetCircuit() {
+	if d == nil {
+		return
+	}
+	d.circuitMu.Lock()
+	d.failures, d.lastStatus, d.blockedAt = 0, 0, time.Time{}
+	d.circuitMu.Unlock()
 }
 
 func isFundNAVFallbackCandidate(symbol, adjusted string) bool {

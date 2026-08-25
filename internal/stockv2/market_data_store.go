@@ -307,7 +307,6 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 	defer stmt.Close()
 
 	now := time.Now()
-	affected := map[string]StockV2DailyBar{}
 	for i := range bars {
 		b := bars[i]
 		if b.ID == "" {
@@ -330,7 +329,6 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 		); err != nil {
 			return wrapError(err, fmt.Sprintf("stage duckdb daily bar %s %s", b.Symbol, b.TradeDate))
 		}
-		affected[b.Symbol+"\x00"+b.Adjusted] = b
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -340,10 +338,8 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 		return wrapError(err, "merge duckdb daily bar stage")
 	}
 
-	for _, b := range affected {
-		if err := refreshDailyBarQualityWithTx(ctx, tx, b.Symbol, b.Adjusted, now); err != nil {
-			return err
-		}
+	if err := refreshDailyBarQualitiesWithTx(ctx, tx, now); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -352,46 +348,68 @@ func (s *MarketDataStore) UpsertDailyBars(ctx context.Context, bars []StockV2Dai
 	return nil
 }
 
-func refreshDailyBarQualityWithTx(ctx context.Context, tx *sql.Tx, symbol, adjusted string, updatedAt time.Time) error {
+func refreshDailyBarQualitiesWithTx(ctx context.Context, tx *sql.Tx, updatedAt time.Time) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT OR REPLACE INTO stockv2_daily_bar_quality (
 			symbol, adjusted, row_count, earliest_date, latest_date, source, last_error, updated_at
 		)
-		WITH selected AS (
+		WITH affected AS (
+			SELECT DISTINCT symbol, adjusted FROM stockv2_daily_bars_stage
+		), ranked AS (
+			SELECT b.*, ROW_NUMBER() OVER (
+				PARTITION BY b.symbol, b.adjusted, b.trade_date
+				ORDER BY
+					CASE WHEN b.open > 0 AND b.high >= greatest(b.open, b.close, b.low)
+						AND b.low <= least(b.open, b.close, b.high) AND b.close > 0 AND b.volume > 0
+					THEN 0 ELSE 1 END,
+					CASE WHEN b.amount > 0 THEN 0 ELSE 1 END,
+					b.fetched_at DESC NULLS LAST,
+					b.updated_at DESC,
+					b.source ASC
+			) AS rn
+			FROM stockv2_daily_bars b
+			JOIN affected a ON a.symbol = b.symbol AND a.adjusted = b.adjusted
+		), selected AS (
 			SELECT * EXCLUDE (rn)
-			FROM (
-				SELECT *, ROW_NUMBER() OVER (
-					PARTITION BY symbol, adjusted, trade_date
-					ORDER BY
-						CASE WHEN open > 0 AND high >= greatest(open, close, low)
-							AND low <= least(open, close, high) AND close > 0 AND volume > 0
-							THEN 0 ELSE 1 END,
-						CASE WHEN amount > 0 THEN 0 ELSE 1 END,
-						fetched_at DESC NULLS LAST,
-						updated_at DESC,
-						source ASC
-				) AS rn
-				FROM stockv2_daily_bars
-				WHERE symbol = ? AND adjusted = ?
-			)
-			WHERE rn = 1
+			FROM ranked WHERE rn = 1
+		), summary AS (
+			SELECT symbol, adjusted, COUNT(*) AS row_count,
+				COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'), '') AS earliest_date,
+				COALESCE(strftime(MAX(trade_date), '%Y-%m-%d'), '') AS latest_date
+			FROM selected GROUP BY symbol, adjusted
+		), latest AS (
+			SELECT symbol, adjusted, COALESCE(source, '') AS source
+			FROM selected
+			QUALIFY ROW_NUMBER() OVER (
+				PARTITION BY symbol, adjusted
+				ORDER BY trade_date DESC, fetched_at DESC NULLS LAST, updated_at DESC
+			) = 1
+		), latest_errors AS (
+			SELECT b.symbol, b.adjusted, b.error_message
+			FROM stockv2_daily_bars b
+			JOIN affected a ON a.symbol = b.symbol AND a.adjusted = b.adjusted
+			WHERE COALESCE(b.error_message, '') != ''
+			QUALIFY ROW_NUMBER() OVER (
+				PARTITION BY b.symbol, b.adjusted
+				ORDER BY b.fetched_at DESC NULLS LAST, b.updated_at DESC
+			) = 1
 		)
 		SELECT
-			?,
-			?,
-			COUNT(*),
-			COALESCE(strftime(MIN(trade_date), '%Y-%m-%d'), ''),
-			COALESCE(strftime(MAX(trade_date), '%Y-%m-%d'), ''),
-			COALESCE((SELECT source FROM selected
-			          ORDER BY trade_date DESC, fetched_at DESC NULLS LAST LIMIT 1), ''),
-			COALESCE((SELECT error_message FROM stockv2_daily_bars
-			          WHERE symbol = ? AND adjusted = ? AND COALESCE(error_message, '') != ''
-			          ORDER BY fetched_at DESC NULLS LAST, updated_at DESC LIMIT 1), ''),
+			a.symbol,
+			a.adjusted,
+			COALESCE(s.row_count, 0),
+			COALESCE(s.earliest_date, ''),
+			COALESCE(s.latest_date, ''),
+			COALESCE(l.source, ''),
+			COALESCE(e.error_message, ''),
 			?
-		FROM selected
-	`, symbol, adjusted, symbol, adjusted, symbol, adjusted, updatedAt)
+		FROM affected a
+		LEFT JOIN summary s ON s.symbol = a.symbol AND s.adjusted = a.adjusted
+		LEFT JOIN latest l ON l.symbol = a.symbol AND l.adjusted = a.adjusted
+		LEFT JOIN latest_errors e ON e.symbol = a.symbol AND e.adjusted = a.adjusted
+	`, updatedAt)
 	if err != nil {
-		return wrapError(err, fmt.Sprintf("refresh duckdb daily bar quality %s %s", symbol, adjusted))
+		return wrapError(err, "refresh duckdb daily bar quality")
 	}
 	return nil
 }
