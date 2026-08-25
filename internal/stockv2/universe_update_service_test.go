@@ -2,6 +2,7 @@ package stockv2
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -493,11 +494,12 @@ func TestScheduledUniverseUpdateDecisionWaitsForFailureCooldown(t *testing.T) {
 }
 
 func TestUniverseUpdateTerminalResultRejectsLowCoverage(t *testing.T) {
-	status, message := universeUpdateTerminalResult(100, 79, 21, nil)
-	if status != "failed" || !strings.Contains(message, "79.0%") {
+	circuitErr := fmt.Errorf("%w after repeated HTTP 501 responses", ErrDailyBarsSourceCircuitOpen)
+	status, message := universeUpdateTerminalResult(100, 79, 21, circuitErr)
+	if status != "failed" || !strings.Contains(message, "79.0%") || !strings.Contains(message, "circuit") {
 		t.Fatalf("terminal result = %q %q", status, message)
 	}
-	status, message = universeUpdateTerminalResult(100, 80, 20, nil)
+	status, message = universeUpdateTerminalResult(100, 80, 20, circuitErr)
 	if status != "completed" || message != "" {
 		t.Fatalf("terminal result = %q %q, want completed", status, message)
 	}

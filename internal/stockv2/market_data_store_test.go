@@ -161,6 +161,34 @@ func TestMarketDataStoreBulkDailyBarQualityRefresh(t *testing.T) {
 	t.Logf("5500-row bulk upsert completed in %s", time.Since(started))
 }
 
+func TestMarketDataStoreRefreshesQualityForInteriorHistoryGap(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewMarketDataStore(filepath.Join(t.TempDir(), "stock_market.duckdb"))
+	if err != nil {
+		t.Fatalf("new market store: %v", err)
+	}
+	defer store.Close()
+
+	bar := func(day string) StockV2DailyBar {
+		return StockV2DailyBar{
+			Symbol: "600000", Market: "SH", TradeDate: day,
+			Open: 10, High: 11, Low: 9, Close: 10.5, Volume: 1000,
+			Adjusted: DailyBarAdjustedNone, Source: "gap_test",
+			FetchedAt: time.Now(), Quality: DailyBarQualityOK,
+		}
+	}
+	if err := store.UpsertDailyBars(ctx, []StockV2DailyBar{bar("2026-08-20"), bar("2026-08-22")}); err != nil {
+		t.Fatalf("seed bars around gap: %v", err)
+	}
+	if err := store.UpsertDailyBars(ctx, []StockV2DailyBar{bar("2026-08-21")}); err != nil {
+		t.Fatalf("fill history gap: %v", err)
+	}
+	count, earliest, latest, _, _, err := store.GetDailyBarsStats(ctx, "600000", DailyBarAdjustedNone)
+	if err != nil || count != 3 || earliest != "2026-08-20" || latest != "2026-08-22" {
+		t.Fatalf("gap quality count=%d earliest=%q latest=%q err=%v", count, earliest, latest, err)
+	}
+}
+
 func TestMarketDataStoreSelectsOneCompleteBarPerTradeDate(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "stock_market.duckdb")

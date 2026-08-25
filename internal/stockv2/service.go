@@ -1128,12 +1128,16 @@ universeBatches:
 }
 
 func universeUpdateTerminalResult(totalCount, successCount, failedCount int, terminalErr error) (string, string) {
-	if terminalErr != nil {
-		return "failed", safelog.Error(terminalErr, 240)
-	}
 	if totalCount > 0 && float64(successCount)/float64(totalCount) < opportunityMarketScanMinimumCoverage {
-		return "failed", fmt.Sprintf("data asset maintenance coverage %.1f%% is below %.0f%% (%d succeeded, %d failed)", float64(successCount)*100/float64(totalCount), opportunityMarketScanMinimumCoverage*100, successCount, failedCount)
+		message := fmt.Sprintf("data asset maintenance coverage %.1f%% is below %.0f%% (%d succeeded, %d failed)", float64(successCount)*100/float64(totalCount), opportunityMarketScanMinimumCoverage*100, successCount, failedCount)
+		if terminalErr != nil {
+			message += ": " + safelog.Error(terminalErr, 180)
+		}
+		return "failed", message
 	}
+	// A source circuit aborts the remaining optional history enrichment, but a
+	// maintenance run that has already crossed the owner-visible 80% coverage
+	// gate remains usable. Failed symbols stay on the job for diagnosis.
 	return "completed", ""
 }
 
