@@ -214,7 +214,7 @@ func TestOpportunityMarketScanMetricsAndCoverage(t *testing.T) {
 	if err := store.UpsertDailyBars(ctx, bars); err != nil {
 		t.Fatalf("upsert daily bars: %v", err)
 	}
-	raw, err := store.marketDB.LoadOpportunityMarketScanMetrics(ctx)
+	raw, err := store.marketDB.LoadOpportunityMarketScanMetrics(ctx, "")
 	if err != nil {
 		t.Fatalf("load scan metrics: %v", err)
 	}
@@ -228,6 +228,22 @@ func TestOpportunityMarketScanMetricsAndCoverage(t *testing.T) {
 	}
 	if scored[0].MedianAmount20 <= 0 {
 		t.Fatalf("median amount proxy=%v, want positive value for amount-less Tencent bars", scored[0].MedianAmount20)
+	}
+}
+
+func TestOpportunityMarketScanCoverageIgnoresOpenSessionDailyRow(t *testing.T) {
+	raw := []opportunityMarketScanRawMetric{
+		{Instrument: StockV2Instrument{Symbol: "600000", Market: "SH", InstrumentType: InstrumentTypeStock, Name: "主板甲"}, TradeDate: "2026-08-25", RowCount: 61},
+		{Instrument: StockV2Instrument{Symbol: "000001", Market: "SZ", InstrumentType: InstrumentTypeStock, Name: "主板乙"}, TradeDate: "2026-08-24", RowCount: 60},
+	}
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+	tradeDate, universe, covered := opportunityMarketScanCoverageAt(raw, time.Date(2026, 8, 25, 12, 0, 0, 0, loc))
+	if tradeDate != "2026-08-24" || universe != 2 || covered != 2 {
+		t.Fatalf("pre-close coverage=%s %d/%d, want 2026-08-24 2/2", tradeDate, covered, universe)
+	}
+	tradeDate, universe, covered = opportunityMarketScanCoverageAt(raw, time.Date(2026, 8, 25, 16, 0, 0, 0, loc))
+	if tradeDate != "2026-08-25" || universe != 2 || covered != 1 {
+		t.Fatalf("post-close coverage=%s %d/%d, want 2026-08-25 1/2", tradeDate, covered, universe)
 	}
 }
 

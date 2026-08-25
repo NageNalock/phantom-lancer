@@ -59,6 +59,41 @@ func TestUniverseDailyBarsTargetTradeDateUsesLatestCompletedSession(t *testing.T
 	}
 }
 
+func TestUniverseDailyBarsTargetTradeDateFallsBackToCompletedCalendarDate(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusNotImplemented,
+			Body:       io.NopCloser(strings.NewReader("unavailable")),
+			Request:    req,
+		}, nil
+	})}
+	svc := &Service{dailyBarsSource: NewDailyBarsSource(nil, client)}
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+	got := svc.universeDailyBarsTargetTradeDate(context.Background(), time.Date(2026, 8, 25, 12, 0, 0, 0, loc))
+	if got != "2026-08-24" {
+		t.Fatalf("fallback target = %q, want completed calendar date", got)
+	}
+}
+
+func TestUniverseHistoryBackfillStopsAtCompletedTradeDate(t *testing.T) {
+	requestedParam := ""
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestedParam = req.URL.Query().Get("param")
+		return &http.Response{
+			StatusCode: http.StatusNotImplemented,
+			Body:       io.NopCloser(strings.NewReader("unavailable")),
+			Request:    req,
+		}, nil
+	})}
+	svc := &Service{dailyBarsSource: NewDailyBarsSource(nil, client)}
+	_, _, _ = svc.fetchDailyBarsForInstrumentWithQuality(context.Background(), StockV2Instrument{
+		Symbol: "600000", Market: "SH", InstrumentType: InstrumentTypeStock,
+	}, "2026-08-24", DailyBarsQuality{HasData: true, Meets250: false}, true)
+	if !strings.Contains(requestedParam, ",2026-08-24,") {
+		t.Fatalf("fqkline param = %q, want completed trade date end", requestedParam)
+	}
+}
+
 func TestGetDailyBarsQualityBatchReturnsDataAndJobErrors(t *testing.T) {
 	ctx := context.Background()
 	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))

@@ -1169,6 +1169,9 @@ func (s *Service) fetchDailyBarsForInstrumentWithQuality(ctx context.Context, in
 	}
 
 	start, end := dailyBarRangeStartEnd(DailyBarRange1Y, time.Now())
+	if targetTradeDate != "" {
+		end = targetTradeDate
+	}
 	bars, err := s.dailyBarsSource.FetchDailyBars(ctx, inst.Symbol, inst.Market, start, end, DailyBarAdjustedNone, 1800)
 	if err != nil {
 		return true, nil, err
@@ -1223,7 +1226,7 @@ func (s *Service) universeDailyBarsTargetTradeDateWithConfig(ctx context.Context
 		if s.log != nil {
 			s.log.Warn("stock data asset maintenance target trade date unavailable", "error", safelog.Text(err.Error(), 240))
 		}
-		return ""
+		return completedEnd
 	}
 	latest := ""
 	for _, bar := range bars {
@@ -1231,7 +1234,7 @@ func (s *Service) universeDailyBarsTargetTradeDateWithConfig(ctx context.Context
 			latest = bar.TradeDate
 		}
 	}
-	return latest
+	return firstNonEmpty(latest, completedEnd)
 }
 
 func (s *Service) universeMaintenanceFreshnessWindow() time.Duration {

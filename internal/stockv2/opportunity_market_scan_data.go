@@ -63,9 +63,12 @@ func (s *MarketDataStore) LoadOpportunityMarketScanCoverage(ctx context.Context)
 // the same quality ordering used by GetDailyBars. Tencent daily bars expose
 // volume in hands but no amount, so close*volume*100 is the bounded liquidity
 // proxy when a source does not provide actual turnover amount.
-func (s *MarketDataStore) LoadOpportunityMarketScanMetrics(ctx context.Context) ([]opportunityMarketScanRawMetric, error) {
+func (s *MarketDataStore) LoadOpportunityMarketScanMetrics(ctx context.Context, completedThrough string) ([]opportunityMarketScanRawMetric, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("market data store is not initialized")
+	}
+	if completedThrough == "" {
+		completedThrough = "9999-12-31"
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		WITH selected AS (
@@ -76,7 +79,8 @@ func (s *MarketDataStore) LoadOpportunityMarketScanMetrics(ctx context.Context) 
 						CASE WHEN b.amount > 0 THEN 0 ELSE 1 END,
 						b.fetched_at DESC NULLS LAST, b.updated_at DESC, b.source ASC
 				) source_rank
-				FROM stockv2_daily_bars b WHERE b.adjusted='none'
+				FROM stockv2_daily_bars b
+				WHERE b.adjusted='none' AND b.trade_date <= CAST(? AS DATE)
 			) WHERE source_rank=1
 		), ranked AS (
 			SELECT s.*, ROW_NUMBER() OVER (PARTITION BY s.symbol ORDER BY s.trade_date DESC) rn
@@ -113,7 +117,7 @@ func (s *MarketDataStore) LoadOpportunityMarketScanMetrics(ctx context.Context) 
 			COALESCE(a.max_close_120,0)
 		FROM stockv2_instruments i LEFT JOIN aggregated a ON a.symbol=i.symbol
 		WHERE i.instrument_type='stock'
-	`)
+	`, completedThrough)
 	if err != nil {
 		return nil, wrapError(err, "load opportunity market scan metrics")
 	}

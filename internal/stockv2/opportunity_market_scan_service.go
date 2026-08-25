@@ -235,6 +235,11 @@ func (s *Service) GetOpportunityMarketScanStatus(ctx context.Context) (Opportuni
 }
 
 func opportunityMarketScanCoverage(raw []opportunityMarketScanRawMetric) (string, int, int) {
+	return opportunityMarketScanCoverageAt(raw, time.Now())
+}
+
+func opportunityMarketScanCoverageAt(raw []opportunityMarketScanRawMetric, now time.Time) (string, int, int) {
+	completedThrough, _ := agentDailyBarsCompletedEnd(now)
 	latest := ""
 	universe := 0
 	for _, item := range raw {
@@ -242,13 +247,25 @@ func opportunityMarketScanCoverage(raw []opportunityMarketScanRawMetric) (string
 			continue
 		}
 		universe++
-		if item.TradeDate > latest {
+		if item.TradeDate <= completedThrough && item.TradeDate > latest {
 			latest = item.TradeDate
 		}
 	}
+	if latest == "" {
+		return "", universe, 0
+	}
 	covered := 0
 	for _, item := range raw {
-		if isOpportunityMainBoardInstrument(item.Instrument) && item.RowCount >= 60 && item.TradeDate == latest {
+		tradeDate := item.TradeDate
+		rowCount := item.RowCount
+		if tradeDate > completedThrough {
+			// A public K-line source can expose the still-open session as a daily
+			// row. Clamp that row to the latest observed completed session and do
+			// not count it toward the 60-session history gate.
+			tradeDate = latest
+			rowCount--
+		}
+		if isOpportunityMainBoardInstrument(item.Instrument) && rowCount >= 60 && tradeDate == latest {
 			covered++
 		}
 	}
@@ -376,7 +393,7 @@ func (s *Service) prepareOpportunityMarketScan(ctx context.Context, runID string
 	run.NextRetryAt = time.Time{}
 	run.ErrorMessage = ""
 	_, _ = s.store.UpdateOpportunityMarketScanRun(ctx, run)
-	raw, err := s.store.marketDB.LoadOpportunityMarketScanMetrics(ctx)
+	raw, err := s.store.marketDB.LoadOpportunityMarketScanMetrics(ctx, run.TradeDate)
 	if err != nil {
 		s.failOpportunityMarketScan(ctx, run, err, false)
 		return
