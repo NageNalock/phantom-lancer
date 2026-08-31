@@ -106,9 +106,6 @@ func compactPortfolioSentinelPromptContext(pack PortfolioSentinelContext, level 
 			if level >= 1 {
 				newsLimit = 1
 			}
-			if level >= 2 {
-				newsLimit = 0
-			}
 			holdingOut.News = compactPortfolioSentinelNews(holding.News, newsLimit)
 			if level == 0 {
 				holdingOut.NewsLinks = compactPortfolioSentinelNewsLinks(holding.NewsLinks, newsLimit)
@@ -126,9 +123,6 @@ func compactPortfolioSentinelPromptContext(pack PortfolioSentinelContext, level 
 	}
 	if level >= 2 {
 		themeLimit, transactionLimit = 3, 0
-	}
-	if level >= 3 {
-		themeLimit = 0
 	}
 	out.Themes = append([]PortfolioSentinelThemeContext(nil), pack.Themes[:min(len(pack.Themes), themeLimit)]...)
 	out.Transactions = append([]StockV2Transaction(nil), pack.Transactions[:min(len(pack.Transactions), transactionLimit)]...)

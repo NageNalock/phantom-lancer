@@ -44,6 +44,23 @@ func TestBuildCodexExecArgsUsesFullAccessAndSkipsRepoCheck(t *testing.T) {
 	}
 }
 
+func TestPortfolioSentinelExecutionOptionsDisableFinalReviewToolsForOrdinaryRun(t *testing.T) {
+	options := portfolioSentinelPromptExecutionOptions(PortfolioSentinelContext{})
+	servers := applyAgentPromptExecutionOptions([]codexMCPServerCapability{
+		{Name: codexStockAgentMCPName, DisabledTools: []string{codexSubmitResultTool}},
+		{Name: codexSearchMCPName},
+	}, options)
+	got := strings.Join(servers[0].DisabledTools, ",")
+	for _, want := range []string{codexSubmitResultTool, mcpToolListNewsContextChanges, mcpToolListPortfolioSentinelImpactReviewScope} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ordinary sentinel disabled tools %q missing %q", got, want)
+		}
+	}
+	if gotOptions := portfolioSentinelPromptExecutionOptions(PortfolioSentinelContext{NewsContext: &PortfolioSentinelNewsContext{}}); len(gotOptions.DisabledStockTools) != 0 {
+		t.Fatalf("news-context final review lost mandatory tools: %+v", gotOptions.DisabledStockTools)
+	}
+}
+
 func TestCustomCodexCLIProviderUsesIsolatedHomeAndWorkspace(t *testing.T) {
 	dataDir := t.TempDir()
 	codexHome := filepath.Join(t.TempDir(), "codex-home")
@@ -951,6 +968,11 @@ func TestMarshalPortfolioSentinelPromptContextPreservesAllDecisionInputs(t *test
 			Portfolio: StockV2Portfolio{ID: "portfolio-1", Name: "测试组合"},
 		}},
 		DecisionGates: map[string]DecisionGateSnapshot{},
+		Themes: []PortfolioSentinelThemeContext{
+			{ID: "theme-1", Title: "主题一", MaterialChange: true},
+			{ID: "theme-2", Title: "主题二", MaterialChange: true},
+			{ID: "theme-3", Title: "主题三", MaterialChange: true},
+		},
 	}
 	for index, symbol := range []string{"000001", "000002", "000003", "000004"} {
 		pack.Portfolios[0].Holdings = append(pack.Portfolios[0].Holdings, PortfolioSentinelHoldingContext{
@@ -982,8 +1004,8 @@ func TestMarshalPortfolioSentinelPromptContextPreservesAllDecisionInputs(t *test
 		}
 	}
 
-	raw := marshalPortfolioSentinelPromptContext(pack, 30000)
-	if len(raw) > 30000 || !json.Valid(raw) {
+	raw := marshalPortfolioSentinelPromptContext(pack, 32000)
+	if len(raw) > 32000 || !json.Valid(raw) {
 		t.Fatalf("compact context bytes=%d valid=%t", len(raw), json.Valid(raw))
 	}
 	var got PortfolioSentinelContext
@@ -1002,12 +1024,17 @@ func TestMarshalPortfolioSentinelPromptContextPreservesAllDecisionInputs(t *test
 		}
 	}
 	overTargetRaw := marshalPortfolioSentinelPromptContext(pack, 1000)
-	var overTarget map[string]any
+	var overTarget PortfolioSentinelContext
 	if err := json.Unmarshal(overTargetRaw, &overTarget); err != nil {
 		t.Fatalf("decode over-target compact context: %v", err)
 	}
-	if overTarget["contextTruncated"] == true {
+	if len(overTarget.Portfolios) != 1 || len(overTarget.Portfolios[0].Holdings) != 4 || len(overTarget.Themes) != 3 {
 		t.Fatalf("routine target incorrectly removed decision context: %s", overTargetRaw)
+	}
+	for _, holding := range overTarget.Portfolios[0].Holdings {
+		if len(holding.News) != 1 {
+			t.Fatalf("level-three context lost compact holding news: %+v", holding)
+		}
 	}
 }
 

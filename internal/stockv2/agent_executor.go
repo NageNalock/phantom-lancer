@@ -107,10 +107,11 @@ type codexCLIExecutor struct {
 
 const (
 	execDefaultTimeout = 10 * time.Minute
-	// ponytail: v3 emits three model horizons per holding plus portfolio-level
-	// horizons. Give only this bounded task extra generation time; if portfolios
-	// grow materially, shard the work instead of raising the limit again.
-	portfolioSentinelExecTimeout = 15 * time.Minute
+	// ponytail: the fallback CLI may spend roughly two minutes per bounded public
+	// lookup while v3 also emits three horizons per holding and portfolio. Twenty
+	// minutes leaves a final JSON turn after four lookups; shard materially larger
+	// portfolios instead of raising this internal coordination limit again.
+	portfolioSentinelExecTimeout = 20 * time.Minute
 	stdoutTailMaxBytes           = 4 * 1024
 	stderrTailMaxBytes           = 4 * 1024
 	transcriptMaxBytes           = 16 * 1024
@@ -146,6 +147,10 @@ type codexExecOptions struct {
 	ModelProvider         *codexCLIProviderRuntime
 	OutputSchemaPath      string
 	OutputLastMessagePath string
+}
+
+type agentPromptExecutionOptions struct {
+	DisabledStockTools []string
 }
 
 // 允许转发给子进程的环境变量(与 codexclient 对齐, 但独立维护)
@@ -292,7 +297,20 @@ func (e *codexCLIExecutor) ExecutePortfolioSentinel(
 	if err != nil {
 		return nil, err
 	}
-	return e.executePromptWithOptions(ctx, taskID, prompt, modelName, reasoningEffort, portfolioSentinelExecTimeout, true, schema)
+	return e.executePromptWithOptions(
+		ctx, taskID, prompt, modelName, reasoningEffort, portfolioSentinelExecTimeout, true, schema,
+		portfolioSentinelPromptExecutionOptions(pack),
+	)
+}
+
+func portfolioSentinelPromptExecutionOptions(pack PortfolioSentinelContext) agentPromptExecutionOptions {
+	if pack.NewsContext != nil {
+		return agentPromptExecutionOptions{}
+	}
+	return agentPromptExecutionOptions{DisabledStockTools: []string{
+		mcpToolListNewsContextChanges,
+		mcpToolListPortfolioSentinelImpactReviewScope,
+	}}
 }
 
 func (e *codexCLIExecutor) ExecuteStockProfileSummary(
@@ -342,6 +360,7 @@ func (e *codexCLIExecutor) executePromptWithOptions(
 	timeout time.Duration,
 	liveSearch bool,
 	directOutputSchema []byte,
+	promptOptions ...agentPromptExecutionOptions,
 ) (*AgentExecutorOutput, error) {
 	if timeout <= 0 {
 		timeout = execDefaultTimeout
@@ -356,6 +375,9 @@ func (e *codexCLIExecutor) executePromptWithOptions(
 	}
 
 	mcpServers := e.codexMCPServers(liveSearch)
+	if len(promptOptions) > 0 {
+		mcpServers = applyAgentPromptExecutionOptions(mcpServers, promptOptions[0])
+	}
 	if err := e.preflightCodexMCPServers(mcpServers); err != nil {
 		return nil, err
 	}
@@ -687,6 +709,22 @@ waitLoop:
 	}
 
 	return output, nil
+}
+
+func applyAgentPromptExecutionOptions(
+	servers []codexMCPServerCapability,
+	options agentPromptExecutionOptions,
+) []codexMCPServerCapability {
+	for index := range servers {
+		if servers[index].Name != codexStockAgentMCPName {
+			continue
+		}
+		servers[index].DisabledTools = uniqueNonEmptyStrings(append(
+			servers[index].DisabledTools,
+			options.DisabledStockTools...,
+		))
+	}
+	return servers
 }
 
 func (e *codexCLIExecutor) recordTraceInput(ctx context.Context, taskID, contextType string, value any) {
