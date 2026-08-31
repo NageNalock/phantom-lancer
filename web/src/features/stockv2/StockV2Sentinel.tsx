@@ -461,7 +461,8 @@ function SentinelRunRow({ run, onOpen }: { run: StockV2PortfolioSentinelRun; onO
 
 function ActionPlanRow({ item }: { item: StockV2PortfolioSentinelActionPlanView }) {
   const { plan } = item;
-  const actionable = plan.action !== "hold";
+  const currentAction = item.currentAction || (plan.trigger_mode === "conditional" && item.status === "active" ? "hold" : plan.action);
+  const actionable = currentAction !== "hold";
   const conditions = (plan.conditions || []).map(strategyPrefilterSummary);
   const sizing = plan.sizing
     ? plan.sizing.mode === "target_portfolio_pct"
@@ -472,23 +473,28 @@ function ActionPlanRow({ item }: { item: StockV2PortfolioSentinelActionPlanView 
     <div className="rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3 text-xs">
       <div className="flex flex-wrap items-center gap-2">
         <Pill tone={actionable ? (plan.action === "reduce_position" || plan.action === "exit_position" ? "warn" : "good") : "neutral"}>
-          {portfolioSentinelActionLabel(plan.action)}
+          当前 · {portfolioSentinelActionLabel(currentAction)}
         </Pill>
         <strong className="text-sm">{plan.symbol}{plan.name ? ` · ${plan.name}` : ""}</strong>
         {plan.market ? <span className="font-mono text-[var(--muted)]">{plan.market}</span> : null}
-        <Pill tone={plan.action === "hold" ? "neutral" : plan.trigger_mode === "immediate" ? "warn" : "neutral"}>
-          {plan.action === "hold" ? "无需条件" : plan.trigger_mode === "immediate" ? "立即生成提案" : `条件触发 · ${plan.trigger_policy === "any" ? "任一" : "全部"}`}
-        </Pill>
+        {item.contingencyAction ? (
+          <Pill tone="warn">条件风控 · {portfolioSentinelActionLabel(item.contingencyAction)}</Pill>
+        ) : (
+          <Pill tone={plan.action === "hold" ? "neutral" : plan.trigger_mode === "immediate" ? "warn" : "neutral"}>
+            {plan.action === "hold" ? "无需条件" : "立即生成提案"}
+          </Pill>
+        )}
         <Pill tone={item.status === "triggered" || item.status === "proposed" ? "good" : item.status === "expired" ? "neutral" : "warn"}>
           {item.status === "triggered" ? "已触发" : item.status === "proposed" ? "已生成提案" : item.status === "expired" ? "已过期" : "监控中"}
         </Pill>
       </div>
       <div className="mt-2 grid gap-1 text-[var(--muted-strong)]">
         <KeyValue label="仓位结果" value={sizing} />
-        <KeyValue label="触发条件" value={conditions.length > 0 ? conditions.join("；") : "无"} mono />
+        <KeyValue label="未来触发条件" value={conditions.length > 0 ? conditions.join("；") : "无"} mono />
         <KeyValue label="理由" value={plan.reason || "-"} />
         <KeyValue label="监控窗口" value={actionPlanMonitorWindowSummary(plan)} />
       </div>
+      {item.decisionGate ? <ActionPlanDataHealth gate={item.decisionGate} /> : null}
       {plan.horizon_outlooks?.length ? (
         <CollapsibleSection title="5 / 20 / 60 日模型预期" subtitle="查看概率、价格区间、失效条件与数据质量">
           <ModelHorizonOutlookPanel items={plan.horizon_outlooks} title="持仓周期预期" />
@@ -499,12 +505,36 @@ function ActionPlanRow({ item }: { item: StockV2PortfolioSentinelActionPlanView 
   );
 }
 
+function ActionPlanDataHealth({ gate }: { gate: NonNullable<StockV2PortfolioSentinelActionPlanView["decisionGate"]> }) {
+  const health = new Map(gate.dataHealth.map((item) => [item.key, item]));
+  const labels = [
+    ["latest_quote", "报价"],
+    ["daily_bars", "日线"],
+    ["financial_facts", "财务"],
+    ["fund_flow", "资金"],
+  ] as const;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-[var(--line)] pt-2" aria-label="决策数据健康">
+      {labels.map(([key, label]) => {
+        const item = health.get(key);
+        if (!item) return null;
+        const value = item.asOf ? formatDate(item.asOf) : item.status === "healthy" ? "可用" : "缺失";
+        return (
+          <Pill key={key} tone={item.status === "healthy" ? "good" : item.status === "blocked" ? "danger" : "warn"}>
+            {label} {value}
+          </Pill>
+        );
+      })}
+    </div>
+  );
+}
+
 function actionPlanMonitorWindowSummary(plan: StockV2PortfolioSentinelActionPlan): string {
   const expiresAt = formatDate(plan.monitor_window?.expires_at || plan.valid_until) || "-";
   if (plan.monitor_window?.kind === "continuous_until_expiry") return `生成后持续检查，至 ${expiresAt}`;
   if (plan.action === "hold") return `无需数据触发，结论保留至 ${expiresAt}`;
   if (plan.trigger_mode === "immediate") return `立即生成提案，结论保留至 ${expiresAt}`;
-  return `条件计划保留至 ${expiresAt}`;
+  return `仅检查生成后的新数据，至 ${expiresAt}`;
 }
 
 function portfolioSentinelActionLabel(action: string): string {

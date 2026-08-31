@@ -81,14 +81,31 @@ type DailyBarsContext struct {
 }
 
 type MinuteBarsContext struct {
-	Symbol          string             `json:"symbol,omitempty"`
-	Count           int                `json:"count"`
-	LatestMinuteAt  time.Time          `json:"latestMinuteAt,omitempty"`
-	LatestClose     float64            `json:"latestClose,omitempty"`
-	LatestVolume    float64            `json:"latestVolume,omitempty"`
-	LatestNetInflow float64            `json:"latestNetInflow,omitempty"`
-	Source          string             `json:"source,omitempty"`
-	Summary         map[string]float64 `json:"summary,omitempty"`
+	Symbol                string             `json:"symbol,omitempty"`
+	Count                 int                `json:"count"`
+	SessionDate           string             `json:"sessionDate,omitempty"`
+	LatestMinuteAt        time.Time          `json:"latestMinuteAt,omitempty"`
+	LatestClose           float64            `json:"latestClose,omitempty"`
+	LatestVolume          float64            `json:"latestVolume,omitempty"`
+	LatestNetInflow       float64            `json:"latestNetInflow,omitempty"`
+	SessionOpen           float64            `json:"sessionOpen,omitempty"`
+	SessionHigh           float64            `json:"sessionHigh,omitempty"`
+	SessionLow            float64            `json:"sessionLow,omitempty"`
+	PrevClose             float64            `json:"prevClose,omitempty"`
+	SessionPctChange      float64            `json:"sessionPctChange,omitempty"`
+	ReturnFromOpenPct     float64            `json:"returnFromOpenPct,omitempty"`
+	Momentum5Pct          float64            `json:"momentum5Pct,omitempty"`
+	Momentum15Pct         float64            `json:"momentum15Pct,omitempty"`
+	SessionVolume         float64            `json:"sessionVolume,omitempty"`
+	SessionAmount         float64            `json:"sessionAmount,omitempty"`
+	First15MinuteAmount   float64            `json:"first15MinuteAmount,omitempty"`
+	SameMinuteAmountRatio float64            `json:"sameMinuteAmountRatio,omitempty"`
+	VWAP                  float64            `json:"vwap,omitempty"`
+	RangePositionPct      float64            `json:"rangePositionPct,omitempty"`
+	FlowAvailable         bool               `json:"flowAvailable"`
+	SessionMainNetInflow  float64            `json:"sessionMainNetInflow,omitempty"`
+	Source                string             `json:"source,omitempty"`
+	Summary               map[string]float64 `json:"summary,omitempty"`
 }
 
 type PortfolioReviewContext struct {

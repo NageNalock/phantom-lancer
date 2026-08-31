@@ -496,3 +496,30 @@ func copyOpportunityFundFlowMetrics(target *OpportunityMarketScanMetrics, source
 	target.FundFlowSource = source.FundFlowSource
 	target.FundFlowAsOf = source.FundFlowAsOf
 }
+
+func (s *Service) latestOpportunityDecisionEvidence(ctx context.Context, decisionDate string) map[string]OpportunityMarketScanMetrics {
+	coverage, coverageErr := s.store.marketDB.LoadOpportunityMarketScanCoverage(ctx)
+	latestTradeDate, _, _ := opportunityMarketScanCoverage(coverage)
+	runs, err := s.store.ListOpportunityMarketScanRuns(ctx, OpportunityMarketScanRunListFilter{Limit: 30})
+	if err != nil || coverageErr != nil || latestTradeDate == "" {
+		return nil
+	}
+	for _, run := range runs {
+		if (run.Status != OpportunityMarketScanStatusCompleted && run.Status != OpportunityMarketScanStatusPartial) ||
+			run.TradeDate != latestTradeDate || run.TradeDate > decisionDate {
+			continue
+		}
+		items, listErr := s.store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{
+			ScanRunID: run.ID, Limit: opportunityMarketScanLocalLimit,
+		})
+		if listErr != nil {
+			return nil
+		}
+		out := make(map[string]OpportunityMarketScanMetrics, len(items))
+		for _, item := range items {
+			out[item.Symbol] = item.Metrics
+		}
+		return out
+	}
+	return nil
+}

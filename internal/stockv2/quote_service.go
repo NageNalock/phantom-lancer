@@ -413,13 +413,17 @@ func parseTencentMinuteQueryResponse(body []byte, spec quoteSymbol) ([]StockV2Mi
 		return nil, "", fmt.Errorf("tencent minute data missing symbol %s", spec.Symbol)
 	}
 	name := ""
+	prevClose := 0.0
 	if qt := item.QT[code]; len(qt) > 1 {
 		name = strings.TrimSpace(qt[1])
+		if len(qt) > 4 {
+			prevClose = parseFloatTencent(qt[4])
+		}
 	}
 	bars := make([]StockV2MinuteBar, 0, len(item.Data.Rows))
 	var prevPrice, prevVolume, prevAmount float64
 	for _, row := range item.Data.Rows {
-		bar, ok := parseTencentMinuteRow(row, item.Data.Date, spec, prevPrice, prevVolume, prevAmount)
+		bar, ok := parseTencentMinuteRow(row, item.Data.Date, spec, prevClose, prevPrice, prevVolume, prevAmount)
 		if !ok {
 			continue
 		}
@@ -432,7 +436,7 @@ func parseTencentMinuteQueryResponse(body []byte, spec quoteSymbol) ([]StockV2Mi
 	return bars, name, nil
 }
 
-func parseTencentMinuteRow(row, tradeDate string, spec quoteSymbol, prevPrice, prevVolume, prevAmount float64) (StockV2MinuteBar, bool) {
+func parseTencentMinuteRow(row, tradeDate string, spec quoteSymbol, prevClose, prevPrice, prevVolume, prevAmount float64) (StockV2MinuteBar, bool) {
 	fields := strings.Fields(strings.TrimSpace(row))
 	if len(fields) < 4 || len(tradeDate) != 8 {
 		return StockV2MinuteBar{}, false
@@ -465,6 +469,10 @@ func parseTencentMinuteRow(row, tradeDate string, spec quoteSymbol, prevPrice, p
 	if prevAmount > 0 {
 		amount = nonNegativeDelta(prevAmount, cumulativeAmount)
 	}
+	pctChange := 0.0
+	if prevClose > 0 {
+		pctChange = (price - prevClose) / prevClose * 100
+	}
 	return StockV2MinuteBar{
 		Symbol:        spec.Symbol,
 		Market:        spec.Market,
@@ -473,8 +481,10 @@ func parseTencentMinuteRow(row, tradeDate string, spec quoteSymbol, prevPrice, p
 		High:          high,
 		Low:           low,
 		Close:         price,
+		PrevClose:     prevClose,
 		Volume:        volume,
 		Amount:        amount,
+		PctChange:     pctChange,
 		SnapshotCount: 1,
 		Source:        QuoteSourceTencentMinute,
 	}, true

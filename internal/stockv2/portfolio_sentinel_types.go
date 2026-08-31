@@ -48,8 +48,9 @@ const (
 )
 
 const (
-	PortfolioSentinelTriggerManual    = "manual"
-	PortfolioSentinelTriggerScheduled = "scheduled"
+	PortfolioSentinelTriggerManual       = "manual"
+	PortfolioSentinelTriggerScheduled    = "scheduled"
+	PortfolioSentinelTriggerMarketSignal = "market_signal"
 )
 
 const (
@@ -146,11 +147,14 @@ type PortfolioSentinelActionPlanListFilter struct {
 }
 
 type PortfolioSentinelActionPlanView struct {
-	Plan          PortfolioSentinelActionPlan `json:"plan"`
-	RunID         string                      `json:"runId"`
-	ResultID      string                      `json:"resultId"`
-	RunFinishedAt time.Time                   `json:"runFinishedAt,omitempty"`
-	Status        string                      `json:"status"`
+	Plan              PortfolioSentinelActionPlan `json:"plan"`
+	RunID             string                      `json:"runId"`
+	ResultID          string                      `json:"resultId"`
+	RunFinishedAt     time.Time                   `json:"runFinishedAt,omitempty"`
+	Status            string                      `json:"status"`
+	CurrentAction     string                      `json:"currentAction"`
+	ContingencyAction string                      `json:"contingencyAction,omitempty"`
+	DecisionGate      *DecisionGateSnapshot       `json:"decisionGate,omitempty"`
 }
 
 type RequestRunPortfolioSentinel struct {
@@ -227,6 +231,7 @@ type PortfolioSentinelPriorJudgment struct {
 	SourceWindowEndAt time.Time                        `json:"sourceWindowEndAt,omitempty"`
 	ValidUntil        time.Time                        `json:"validUntil,omitempty"`
 	AdvisoryOnly      bool                             `json:"advisoryOnly"`
+	EvidenceClass     string                           `json:"evidenceClass"`
 }
 
 type PortfolioSentinelCandidateContext struct {

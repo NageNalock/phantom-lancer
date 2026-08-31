@@ -16,8 +16,10 @@ type decisionGateBuildInput struct {
 	Market               string
 	InstrumentType       string
 	TradeDate            string
+	DecisionDate         string
 	Bars                 []StockV2DailyBar
-	QuoteAvailable       bool
+	CompletedRawBar      *StockV2DailyBar
+	Quote                *StockV2QuoteLatest
 	ThemeSignals         []string
 	FlowAvailable        bool
 	MainFlowRatio20      float64
@@ -47,6 +49,10 @@ func (s *Service) buildDecisionGateSnapshot(ctx context.Context, input decisionG
 			StrategyGenerationRuleActionReduce, StrategyGenerationRuleActionExit},
 		Metrics: map[string]any{}, CreatedAt: now,
 	}
+	if input.DecisionDate == "" {
+		input.DecisionDate = now.In(chinaMarketTZ).Format("2006-01-02")
+	}
+	snapshot.DecisionDate = input.DecisionDate
 	if !decisionSupportedMarket(input.Market) || (input.InstrumentType != InstrumentTypeStock && input.InstrumentType != InstrumentTypeExchangeFund) {
 		snapshot.DataHealth = append(snapshot.DataHealth, DecisionDataHealth{Key: "market_support", Label: "市场支持", Status: DecisionHealthBlocked, Required: true, Message: "当前仅支持沪深股票与场内基金", CheckedAt: now})
 		snapshot.Gates = defaultBlockedDecisionGates("当前市场或品种不在确定性校验范围")
@@ -59,7 +65,8 @@ func (s *Service) buildDecisionGateSnapshot(ctx context.Context, input decisionG
 	if snapshot.TradeDate == "" {
 		snapshot.TradeDate = features.TradeDate
 	}
-	snapshot.Metrics["latestPrice"] = features.Close
+	snapshot.Metrics["trendCloseQFQ"] = features.Close
+	snapshot.Metrics["latestCompletedTradeDate"] = features.TradeDate
 	snapshot.Metrics["return5Pct"] = features.Return5Pct
 	snapshot.Metrics["return20Pct"] = features.Return20Pct
 	snapshot.Metrics["atr14"] = features.ATR14
@@ -75,9 +82,27 @@ func (s *Service) buildDecisionGateSnapshot(ctx context.Context, input decisionG
 		barHealth.Status = DecisionHealthHealthy
 	}
 	snapshot.DataHealth = append(snapshot.DataHealth, barHealth)
+	if input.CompletedRawBar != nil && input.CompletedRawBar.Close > 0 {
+		snapshot.Metrics["lastCompletedCloseRaw"] = input.CompletedRawBar.Close
+		snapshot.Metrics["lastCompletedCloseRawDate"] = input.CompletedRawBar.TradeDate
+		snapshot.Metrics["lastCompletedCloseRawSource"] = input.CompletedRawBar.Source
+	}
 	quoteHealth := DecisionDataHealth{Key: "latest_quote", Label: "最新可交易价格", Required: true, CheckedAt: now}
-	if input.QuoteAvailable {
-		quoteHealth.Status, quoteHealth.Message = DecisionHealthHealthy, "已取得最新价格"
+	if decisionQuoteUsable(input.Quote) {
+		quote := *input.Quote
+		quoteAt := decisionQuoteTime(quote)
+		quoteHealth.Status, quoteHealth.Message = DecisionHealthHealthy, "已取得带时点的最新可交易价格"
+		quoteHealth.AsOf, quoteHealth.Source = quoteAt.In(chinaMarketTZ).Format(time.RFC3339), quote.Source
+		snapshot.Metrics["latestTradablePrice"] = quote.LastPrice
+		snapshot.Metrics["latestTradablePriceAt"] = quoteAt
+		snapshot.Metrics["latestTradablePriceSource"] = quote.Source
+		snapshot.Metrics["latestTradablePrevClose"] = quote.PrevClose
+		snapshot.Metrics["latestTradableOpen"] = quote.OpenPrice
+		snapshot.Metrics["latestTradableHigh"] = quote.HighPrice
+		snapshot.Metrics["latestTradableLow"] = quote.LowPrice
+		snapshot.Metrics["latestTradablePctChange"] = quote.PctChange
+		snapshot.Metrics["latestTradableAmount"] = quote.Amount
+		snapshot.Metrics["latestTradableVolumeRatio"] = quote.VolumeRatio
 	} else {
 		quoteHealth.Status, quoteHealth.Message = DecisionHealthDegraded, "缺少最新报价；仅允许用日收盘条件表达新增风险"
 	}
@@ -144,7 +169,7 @@ func (s *Service) buildDecisionGateSnapshot(ctx context.Context, input decisionG
 	} else {
 		reference := input.ReferenceHealth
 		eventHealth := DecisionDataHealth{Key: "event_calendar", Label: "公司事件日历", Required: true, Source: reference.Source, CheckedAt: firstNonZeroTime(reference.CheckedAt, now)}
-		calendarOK := decisionTradeCalendarCovers(input.TradeCalendar, snapshot.TradeDate)
+		calendarOK := decisionTradeCalendarCovers(input.TradeCalendar, snapshot.DecisionDate)
 		if !reference.EventOK || !calendarOK {
 			eventHealth.Status, eventHealth.Message = DecisionHealthBlocked, firstNonEmpty(reference.Message, "关键事件数据源未完成校验")
 			if reference.EventOK && !calendarOK {
@@ -153,15 +178,19 @@ func (s *Service) buildDecisionGateSnapshot(ctx context.Context, input decisionG
 			eventGate.Status, eventGate.Summary = DecisionGateStatusBlocked, "事件日历不可验证，禁止建仓与加仓"
 		} else {
 			eventHealth.Status, eventHealth.Message = DecisionHealthHealthy, "财报、解禁、分红、业绩预告及交易日历已检查"
-			start, end := decisionEventQueryRange(snapshot.TradeDate)
-			events, err := s.store.ListDecisionMarketEvents(ctx, input.Symbol, start, end, snapshot.TradeDate)
+			start, end := decisionEventQueryRange(snapshot.DecisionDate)
+			events, err := s.store.ListDecisionMarketEvents(ctx, input.Symbol, start, end, snapshot.DecisionDate)
 			if err != nil {
 				eventHealth.Status, eventGate.Status = DecisionHealthBlocked, DecisionGateStatusBlocked
 				eventHealth.Message, eventGate.Summary = "事件缓存读取失败", "事件日历不可验证，禁止建仓与加仓"
-			} else if event := protectedDecisionEvent(snapshot.TradeDate, events, input.TradeCalendar); event != nil {
-				eventGate.Status = DecisionGateStatusBlocked
-				eventGate.Summary = fmt.Sprintf("%s %s 位于 -2 至 +1 个交易日保护窗口", event.EventDate, event.Title)
+			} else if event := protectedDecisionEvent(snapshot.DecisionDate, events, input.TradeCalendar); event != nil {
 				eventGate.EvidenceRefs = []string{event.EventType + ":" + event.EventDate}
+				if decisionPostDisclosureConfirmed(*event, snapshot.DecisionDate, input.Quote) {
+					eventGate.Summary = fmt.Sprintf("%s 定期报告披露后，盘中价格已形成正向确认，允许继续机会评估", event.EventDate)
+				} else {
+					eventGate.Status = DecisionGateStatusBlocked
+					eventGate.Summary = fmt.Sprintf("%s %s 位于 -2 至 +1 个交易日保护窗口", event.EventDate, event.Title)
+				}
 			}
 		}
 		snapshot.DataHealth = append(snapshot.DataHealth, eventHealth)
@@ -172,7 +201,7 @@ func (s *Service) buildDecisionGateSnapshot(ctx context.Context, input decisionG
 				financeHealth.Status = DecisionHealthDegraded
 				financeHealth.Message += "；" + reference.Message
 			}
-			if fact, err := s.store.GetLatestDecisionFinancialFact(ctx, input.Symbol, snapshot.TradeDate); err == nil {
+			if fact, err := s.store.GetLatestDecisionFinancialFact(ctx, input.Symbol, snapshot.DecisionDate); err == nil {
 				financeHealth.AsOf = fact.ReportPeriod
 				snapshot.Metrics["financialReportPeriod"] = fact.ReportPeriod
 				snapshot.Metrics["operatingCashFlow"] = fact.OperatingCashFlow
@@ -356,6 +385,65 @@ func firstNonZeroTime(values ...time.Time) time.Time {
 	return time.Time{}
 }
 
+func decisionQuoteTime(quote StockV2QuoteLatest) time.Time {
+	if !quote.QuoteAt.IsZero() {
+		return quote.QuoteAt
+	}
+	return quote.FetchedAt
+}
+
+func decisionQuoteUsable(quote *StockV2QuoteLatest) bool {
+	return quote != nil && quote.Status == QuoteStatusFresh && quote.LastPrice > 0 && !decisionQuoteTime(*quote).IsZero()
+}
+
+func decisionPostDisclosureConfirmed(event decisionMarketEvent, decisionDate string, quote *StockV2QuoteLatest) bool {
+	if event.EventType != "disclosure_date" || event.EventDate > decisionDate || !decisionQuoteUsable(quote) {
+		return false
+	}
+	quoteDate := decisionQuoteTime(*quote).In(chinaMarketTZ).Format("2006-01-02")
+	return quoteDate >= event.EventDate && quoteDate == decisionDate && quote.PctChange >= 2 &&
+		quote.OpenPrice > 0 && quote.LastPrice >= quote.OpenPrice
+}
+
+func latestCompletedRawBar(items []StockV2DailyBar) *StockV2DailyBar {
+	if len(items) == 0 {
+		return nil
+	}
+	latest := items[0]
+	for _, item := range items[1:] {
+		if item.TradeDate > latest.TradeDate {
+			latest = item
+		}
+	}
+	if latest.Close <= 0 {
+		return nil
+	}
+	return &latest
+}
+
+func (s *Service) decisionLatestRawBar(ctx context.Context, symbol, endDate string) *StockV2DailyBar {
+	items, err := s.store.GetDailyBars(ctx, symbol, DailyBarAdjustedNone, "", endDate, 1)
+	if err != nil {
+		return nil
+	}
+	return latestCompletedRawBar(items)
+}
+
+func opportunityMarketQuote(candidate OpportunityMarketScanCandidate) *StockV2QuoteLatest {
+	metrics := candidate.Metrics
+	if !metrics.QuoteAvailable || metrics.LatestPrice <= 0 || metrics.LatestQuoteAt.IsZero() {
+		return nil
+	}
+	return &StockV2QuoteLatest{
+		Symbol: candidate.Symbol, Market: candidate.Market, Name: candidate.Name,
+		LastPrice: metrics.LatestPrice, PrevClose: metrics.LatestPrevClose, OpenPrice: metrics.LatestOpenPrice,
+		HighPrice: metrics.LatestHighPrice, LowPrice: metrics.LatestLowPrice, Amount: metrics.LatestAmount,
+		PctChange: metrics.LatestPctChange, TurnoverRate: metrics.LatestTurnoverRate, VolumeRatio: metrics.LatestVolumeRatio,
+		MainNetInflowPct: metrics.LatestMainFlowPct, QuoteAt: metrics.LatestQuoteAt, FetchedAt: metrics.LatestQuoteAt,
+		Source: metrics.LatestQuoteSource, Status: QuoteStatusFresh,
+	}
+}
+
 func decisionActionAllowed(snapshot DecisionGateSnapshot, action string) bool {
 	action = strings.TrimSpace(action)
 	for _, allowed := range snapshot.AllowedActions {
@@ -381,8 +469,10 @@ func (s *Service) fillStrategyGenerationDecisionGates(ctx context.Context, out *
 	items := make([]OpportunityMarketScanCandidate, 0)
 	type targetMeta struct {
 		symbol, market, instrumentType string
-		quoteAvailable                 bool
+		quote                          *StockV2QuoteLatest
 		themeSignals                   []string
+		flowAvailable                  bool
+		mainFlowRatio20                float64
 		industry                       string
 		concepts                       []string
 	}
@@ -399,16 +489,26 @@ func (s *Service) fillStrategyGenerationDecisionGates(ctx context.Context, out *
 			if instrument, err := s.store.GetInstrument(ctx, holding.Symbol); err == nil {
 				industry, concepts = instrument.Industry, instrument.Concepts
 			}
-			metas = append(metas, targetMeta{holding.Symbol, holding.Market, instrumentType, holding.Quote != nil && holding.Quote.LastPrice > 0, nil, industry, concepts})
+			metas = append(metas, targetMeta{symbol: holding.Symbol, market: holding.Market, instrumentType: instrumentType,
+				quote: holding.Quote, industry: industry, concepts: concepts})
 		}
 	} else {
 		for _, target := range out.Targets {
 			if target.Instrument == nil {
 				continue
 			}
-			metas = append(metas, targetMeta{target.Instrument.Symbol, target.Instrument.Market, target.Instrument.InstrumentType,
-				target.LatestQuote != nil && target.LatestQuote.LastPrice > 0, strategyOpportunityThemeSignals(*out, target.Instrument.Symbol, catalystCutoff),
-				target.Instrument.Industry, target.Instrument.Concepts})
+			metas = append(metas, targetMeta{symbol: target.Instrument.Symbol, market: target.Instrument.Market,
+				instrumentType: target.Instrument.InstrumentType, quote: target.LatestQuote,
+				themeSignals: strategyOpportunityThemeSignals(*out, target.Instrument.Symbol, catalystCutoff),
+				industry:     target.Instrument.Industry, concepts: target.Instrument.Concepts})
+		}
+	}
+	cachedEvidence := s.latestOpportunityDecisionEvidence(ctx, decisionDate)
+	for i := range metas {
+		if cached, ok := cachedEvidence[metas[i].symbol]; ok {
+			metas[i].themeSignals = compactStringList(append(metas[i].themeSignals, cached.CatalystSignals...), 5)
+			metas[i].flowAvailable = cached.FundFlowAvailable
+			metas[i].mainFlowRatio20 = cached.MainFlowRatio20
 		}
 	}
 	for _, meta := range metas {
@@ -432,8 +532,10 @@ func (s *Service) fillStrategyGenerationDecisionGates(ctx context.Context, out *
 		bars := barsBySymbol[meta.symbol]
 		snapshot := s.buildDecisionGateSnapshot(ctx, decisionGateBuildInput{
 			ContextType: "strategy_generation", ContextID: triggerID, Symbol: meta.symbol, Market: meta.market,
-			InstrumentType: meta.instrumentType, Bars: bars, QuoteAvailable: meta.quoteAvailable,
-			ThemeSignals: meta.themeSignals, MarketRegime: marketRegime, ReferenceHealth: reference[meta.symbol],
+			InstrumentType: meta.instrumentType, DecisionDate: decisionDate, Bars: bars,
+			CompletedRawBar: s.decisionLatestRawBar(ctx, meta.symbol, decisionDate), Quote: meta.quote,
+			ThemeSignals: meta.themeSignals, FlowAvailable: meta.flowAvailable, MainFlowRatio20: meta.mainFlowRatio20,
+			MarketRegime: marketRegime, ReferenceHealth: reference[meta.symbol],
 			BenchmarkAvailable: benchmarkOK, BenchmarkReturn20Pct: benchmarkReturn,
 			FactorCluster: clusters[meta.symbol], FactorBlocked: crowded[meta.symbol] != "", FactorReason: crowded[meta.symbol],
 			TradeCalendar: tradeCalendar,
@@ -610,12 +712,10 @@ func (s *Service) strategyGenerationValidEvidenceRefs(ctx context.Context, run A
 }
 
 func calibrateStrategyRuleThresholds(draft *StrategyGenerationDraft, snapshot DecisionGateSnapshot) {
-	price, _ := numberFromAny(snapshot.Metrics["latestPrice"])
-	atr, _ := numberFromAny(snapshot.Metrics["atr14"])
-	if price <= 0 || atr <= 0 {
+	atrPct, _ := numberFromAny(snapshot.Metrics["atr14Pct"])
+	if atrPct <= 0 {
 		return
 	}
-	minimumDistance := .5 * atr
 	for ruleIndex := range draft.Playbook.Rules {
 		rule := &draft.Playbook.Rules[ruleIndex]
 		if rule.Action != StrategyGenerationRuleActionBuildPosition && rule.Action != StrategyGenerationRuleActionAddPosition {
@@ -624,8 +724,10 @@ func calibrateStrategyRuleThresholds(draft *StrategyGenerationDraft, snapshot De
 		for filterIndex := range rule.DataPrefilters {
 			filter := rule.DataPrefilters[filterIndex]
 			typeName := normalizeWatchRuleType(stringFromAny(filter["type"]))
+			price := decisionRuleReferencePrice(snapshot, typeName)
 			threshold, ok := numberFromAny(filter["threshold"])
-			if !ok || math.Abs(threshold-price) >= minimumDistance {
+			minimumDistance := price * atrPct / 200
+			if price <= 0 || !ok || math.Abs(threshold-price) >= minimumDistance {
 				continue
 			}
 			switch typeName {
@@ -638,13 +740,25 @@ func calibrateStrategyRuleThresholds(draft *StrategyGenerationDraft, snapshot De
 	}
 }
 
+func decisionRuleReferencePrice(snapshot DecisionGateSnapshot, ruleType string) float64 {
+	key := "latestTradablePrice"
+	if ruleType == WatchRuleDailyCloseAbove || ruleType == WatchRuleDailyCloseBelow {
+		key = "lastCompletedCloseRaw"
+	}
+	price, _ := numberFromAny(snapshot.Metrics[key])
+	return price
+}
+
 func (s *Service) fillPortfolioSentinelDecisionGates(ctx context.Context, out *PortfolioSentinelContext) error {
 	if out == nil {
 		return nil
 	}
 	type meta struct {
 		symbol, market, instrumentType string
-		quoteAvailable                 bool
+		quote                          *StockV2QuoteLatest
+		themeSignals                   []string
+		flowAvailable                  bool
+		mainFlowRatio20                float64
 		industry                       string
 		concepts                       []string
 	}
@@ -661,8 +775,8 @@ func (s *Service) fillPortfolioSentinelDecisionGates(ctx context.Context, out *P
 			if instrument, err := s.store.GetInstrument(ctx, holding.Holding.Symbol); err == nil {
 				industry, concepts = instrument.Industry, instrument.Concepts
 			}
-			bySymbol[holding.Holding.Symbol] = meta{holding.Holding.Symbol, holding.Holding.Market, instrumentType,
-				holding.Quote != nil && holding.Quote.LastPrice > 0, industry, concepts}
+			bySymbol[holding.Holding.Symbol] = meta{symbol: holding.Holding.Symbol, market: holding.Holding.Market,
+				instrumentType: instrumentType, quote: holding.Quote, industry: industry, concepts: concepts}
 		}
 	}
 	for _, candidate := range out.Candidates {
@@ -673,11 +787,13 @@ func (s *Service) fillPortfolioSentinelDecisionGates(ctx context.Context, out *P
 		if err != nil {
 			continue
 		}
-		quoteAvailable := false
+		var quote *StockV2QuoteLatest
 		if quotes, err := s.store.GetLatestQuotes(ctx, []string{candidate.Symbol}); err == nil && len(quotes) > 0 {
-			quoteAvailable = quotes[0].LastPrice > 0
+			item := quotes[0]
+			quote = &item
 		}
-		bySymbol[candidate.Symbol] = meta{candidate.Symbol, firstNonEmpty(candidate.Market, instrument.Market), instrument.InstrumentType, quoteAvailable, instrument.Industry, instrument.Concepts}
+		bySymbol[candidate.Symbol] = meta{symbol: candidate.Symbol, market: firstNonEmpty(candidate.Market, instrument.Market),
+			instrumentType: instrument.InstrumentType, quote: quote, industry: instrument.Industry, concepts: instrument.Concepts}
 	}
 	items := make([]OpportunityMarketScanCandidate, 0, len(bySymbol))
 	for _, item := range bySymbol {
@@ -691,6 +807,22 @@ func (s *Service) fillPortfolioSentinelDecisionGates(ctx context.Context, out *P
 	}
 	reference := s.refreshDecisionReferenceData(ctx, config, items)
 	decisionDate := time.Now().Format("2006-01-02")
+	cachedEvidence := s.latestOpportunityDecisionEvidence(ctx, decisionDate)
+	for symbol, item := range bySymbol {
+		if cached, ok := cachedEvidence[symbol]; ok {
+			item.themeSignals = compactStringList(append(item.themeSignals, cached.CatalystSignals...), 5)
+			item.flowAvailable = cached.FundFlowAvailable
+			item.mainFlowRatio20 = cached.MainFlowRatio20
+		}
+		for _, theme := range out.Themes {
+			for _, themeSymbol := range theme.Symbols {
+				if strings.EqualFold(strings.TrimSpace(themeSymbol), symbol) {
+					item.themeSignals = compactStringList(append(item.themeSignals, firstNonEmpty(theme.LatestChange, theme.Title)), 5)
+				}
+			}
+		}
+		bySymbol[symbol] = item
+	}
 	tradeCalendar, _ := s.refreshDecisionTradeCalendar(ctx, config, decisionDate)
 	benchmarkBars, benchmarkErr := s.refreshDecisionBenchmark(ctx, config, decisionDate)
 	benchmarkReturn, benchmarkOK := decisionBenchmarkReturn20(benchmarkBars)
@@ -708,7 +840,9 @@ func (s *Service) fillPortfolioSentinelDecisionGates(ctx context.Context, out *P
 		bars := barsBySymbol[item.symbol]
 		snapshot := s.buildDecisionGateSnapshot(ctx, decisionGateBuildInput{
 			ContextType: "portfolio_sentinel", ContextID: out.RunID, Symbol: item.symbol, Market: item.market,
-			InstrumentType: item.instrumentType, Bars: bars, QuoteAvailable: item.quoteAvailable,
+			InstrumentType: item.instrumentType, DecisionDate: decisionDate, Bars: bars,
+			CompletedRawBar: s.decisionLatestRawBar(ctx, item.symbol, decisionDate), Quote: item.quote,
+			ThemeSignals: item.themeSignals, FlowAvailable: item.flowAvailable, MainFlowRatio20: item.mainFlowRatio20,
 			MarketRegime: marketRegime, ReferenceHealth: reference[item.symbol],
 			BenchmarkAvailable: benchmarkOK, BenchmarkReturn20Pct: benchmarkReturn,
 			FactorCluster: clusters[item.symbol], FactorBlocked: crowded[item.symbol] != "", FactorReason: crowded[item.symbol],
@@ -833,18 +967,19 @@ func (s *Service) applyDecisionGateToPortfolioPlan(ctx context.Context, runID st
 		plan.Reason = firstNonEmpty(plan.Reason, "维持持有") + "；确定性门阻断新增风险：" + reason
 		return true
 	}
-	price, _ := numberFromAny(snapshot.Metrics["latestPrice"])
-	atr, _ := numberFromAny(snapshot.Metrics["atr14"])
-	if price <= 0 || atr <= 0 {
+	atrPct, _ := numberFromAny(snapshot.Metrics["atr14Pct"])
+	if atrPct <= 0 {
 		return false
 	}
-	minimumDistance := .5 * atr
 	for i := range plan.Conditions {
 		condition := &plan.Conditions[i]
-		if condition.Threshold == nil || math.Abs(*condition.Threshold-price) >= minimumDistance {
+		typeName := normalizeWatchRuleType(condition.Type)
+		price := decisionRuleReferencePrice(snapshot, typeName)
+		minimumDistance := price * atrPct / 200
+		if price <= 0 || condition.Threshold == nil || math.Abs(*condition.Threshold-price) >= minimumDistance {
 			continue
 		}
-		switch normalizeWatchRuleType(condition.Type) {
+		switch typeName {
 		case WatchRulePriceAbove, WatchRuleDailyCloseAbove:
 			value := price + minimumDistance
 			condition.Threshold = &value

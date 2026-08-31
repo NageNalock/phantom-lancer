@@ -26,6 +26,12 @@ const (
 	WatchRulePortfolioSymbolWeightBelow = "portfolio_symbol_weight_below"
 )
 
+const (
+	watchObservationCurrentState = "current_state"
+	watchObservationFutureCross  = "future_cross"
+	watchObservationFutureClose  = "future_close"
+)
+
 type WatchRunResult struct {
 	WatchID     string            `json:"watchId"`
 	Status      string            `json:"status"`
@@ -47,14 +53,16 @@ type WatchRuleResult struct {
 }
 
 type watchRule struct {
-	Key           string
-	Type          string
-	Symbol        string
-	PortfolioID   string
-	Threshold     float64
-	Low           float64
-	High          float64
-	MaxAgeSeconds int
+	Key             string
+	Type            string
+	Symbol          string
+	PortfolioID     string
+	Threshold       float64
+	Low             float64
+	High            float64
+	MaxAgeSeconds   int
+	ObservationMode string
+	ActiveAfter     time.Time
 }
 
 func (s *Service) RunWatch(ctx context.Context, id string) (WatchRunResult, error) {
@@ -158,14 +166,18 @@ func watchRulesFromConfig(watch StockV2Watch) []watchRule {
 			key = ruleType
 		}
 		rule := watchRule{
-			Key:           key,
-			Type:          ruleType,
-			Symbol:        firstNonEmpty(firstRuleString(m, "symbol"), watch.Symbol),
-			PortfolioID:   firstNonEmpty(firstRuleString(m, "portfolioId"), watch.PortfolioID),
-			Threshold:     firstRuleNumber(m, "threshold", "value"),
-			Low:           firstRuleNumber(m, "low", "lower", "min"),
-			High:          firstRuleNumber(m, "high", "upper", "max"),
-			MaxAgeSeconds: int(firstRuleNumber(m, "maxAgeSeconds")),
+			Key:             key,
+			Type:            ruleType,
+			Symbol:          firstNonEmpty(firstRuleString(m, "symbol"), watch.Symbol),
+			PortfolioID:     firstNonEmpty(firstRuleString(m, "portfolioId"), watch.PortfolioID),
+			Threshold:       firstRuleNumber(m, "threshold", "value"),
+			Low:             firstRuleNumber(m, "low", "lower", "min"),
+			High:            firstRuleNumber(m, "high", "upper", "max"),
+			MaxAgeSeconds:   int(firstRuleNumber(m, "maxAgeSeconds")),
+			ObservationMode: firstRuleString(m, "observationMode"),
+		}
+		if activeAfter := firstRuleString(m, "activeAfter"); activeAfter != "" {
+			rule.ActiveAfter, _ = time.Parse(time.RFC3339, activeAfter)
 		}
 		if rule.Key == "" {
 			rule.Key = fmt.Sprintf("rule_%d", i+1)
@@ -214,6 +226,9 @@ func (s *Service) evaluateQuoteRule(ctx context.Context, rule watchRule, now tim
 	if quote.Status != QuoteStatusFresh || quote.LastPrice <= 0 {
 		return ruleResult(rule, WatchRunStatusDegraded, "latest quote is not fresh", quote.LastPrice, rule.Threshold, quoteEvidence(quote), dataTime)
 	}
+	if rule.ObservationMode == watchObservationFutureCross && !rule.ActiveAfter.IsZero() {
+		return s.evaluateFutureQuoteCross(ctx, rule, quote)
+	}
 
 	switch rule.Type {
 	case WatchRulePriceAbove:
@@ -231,6 +246,54 @@ func (s *Service) evaluateQuoteRule(ctx context.Context, rule watchRule, now tim
 	return ruleResult(rule, WatchRunStatusDegraded, "unsupported quote rule", 0, rule.Threshold, quoteEvidence(quote), dataTime)
 }
 
+func (s *Service) evaluateFutureQuoteCross(ctx context.Context, rule watchRule, latest StockV2QuoteLatest) WatchRuleResult {
+	snapshots, err := s.store.listQuoteSnapshots(ctx, rule.Symbol, rule.ActiveAfter)
+	if err != nil {
+		return ruleResult(rule, WatchRunStatusDegraded, "quote history is unavailable", 0, rule.Threshold, quoteEvidence(latest), decisionQuoteTime(latest))
+	}
+	var baseline *StockV2QuoteLatest
+	for i := range snapshots {
+		item := snapshots[i].StockV2QuoteLatest
+		observedAt := decisionQuoteTime(item)
+		if item.Status != QuoteStatusFresh || item.LastPrice <= 0 || observedAt.IsZero() {
+			continue
+		}
+		if !snapshots[i].CollectedAt.After(rule.ActiveAfter) {
+			copy := item
+			baseline = &copy
+			continue
+		}
+		if baseline == nil {
+			copy := item
+			baseline = &copy
+			continue
+		}
+		if quoteRuleCrossed(rule, *baseline, item) {
+			evidence := quoteEvidence(item)
+			evidence["activeAfter"] = rule.ActiveAfter
+			evidence["crossedFromPrice"] = baseline.LastPrice
+			evidence["crossedFromPctChange"] = baseline.PctChange
+			evidence["observationMode"] = rule.ObservationMode
+			return boolRuleResult(rule, true, quoteRuleObservedValue(rule, item), rule.Threshold,
+				"threshold crossed after the plan became active", evidence, observedAt)
+		}
+		copy := item
+		baseline = &copy
+	}
+	evidence := quoteEvidence(latest)
+	evidence["activeAfter"] = rule.ActiveAfter
+	evidence["observationMode"] = rule.ObservationMode
+	return boolRuleResult(rule, false, quoteRuleObservedValue(rule, latest), rule.Threshold,
+		"waiting for a post-plan threshold crossing", evidence, decisionQuoteTime(latest))
+}
+
+func quoteRuleObservedValue(rule watchRule, quote StockV2QuoteLatest) float64 {
+	if rule.Type == WatchRulePctChangeAbove || rule.Type == WatchRulePctChangeBelow {
+		return quote.PctChange
+	}
+	return quote.LastPrice
+}
+
 func (s *Service) evaluateDailyCloseRule(ctx context.Context, rule watchRule) WatchRuleResult {
 	if rule.Symbol == "" {
 		return ruleResult(rule, WatchRunStatusDegraded, "symbol is required", 0, rule.Threshold, nil, time.Time{})
@@ -241,6 +304,13 @@ func (s *Service) evaluateDailyCloseRule(ctx context.Context, rule watchRule) Wa
 	}
 	bar := bars[len(bars)-1]
 	dataTime := dailyBarDataTime(bar)
+	if rule.ObservationMode == watchObservationFutureClose && !rule.ActiveAfter.IsZero() &&
+		!dailyCloseObservedAfterActivation(bar, rule.ActiveAfter) {
+		evidence := dailyBarEvidence(bar)
+		evidence["activeAfter"] = rule.ActiveAfter
+		evidence["observationMode"] = rule.ObservationMode
+		return boolRuleResult(rule, false, bar.Close, rule.Threshold, "waiting for a daily close formed after plan activation", evidence, dataTime)
+	}
 	if bar.Quality == "failed" || bar.Quality == "empty" || isDailyBarsStale(bar.TradeDate, time.Now()) {
 		return ruleResult(rule, WatchRunStatusDegraded, "daily bar quality is not usable", bar.Close, rule.Threshold, dailyBarEvidence(bar), dataTime)
 	}
@@ -248,6 +318,29 @@ func (s *Service) evaluateDailyCloseRule(ctx context.Context, rule watchRule) Wa
 		return boolRuleResult(rule, bar.Close > rule.Threshold, bar.Close, rule.Threshold, fmt.Sprintf("daily close %.2f > %.2f", bar.Close, rule.Threshold), dailyBarEvidence(bar), dataTime)
 	}
 	return boolRuleResult(rule, bar.Close < rule.Threshold, bar.Close, rule.Threshold, fmt.Sprintf("daily close %.2f < %.2f", bar.Close, rule.Threshold), dailyBarEvidence(bar), dataTime)
+}
+
+func dailyCloseObservedAfterActivation(bar StockV2DailyBar, activeAfter time.Time) bool {
+	if bar.TradeDate == "" || activeAfter.IsZero() {
+		return false
+	}
+	active := activeAfter.In(chinaMarketTZ)
+	activeDate := active.Format("2006-01-02")
+	if bar.TradeDate > activeDate {
+		return true
+	}
+	if bar.TradeDate < activeDate || active.Hour()*60+active.Minute() >= 15*60 {
+		return false
+	}
+	closeAt, err := time.ParseInLocation("2006-01-02 15:04", bar.TradeDate+" 15:00", chinaMarketTZ)
+	if err != nil {
+		return false
+	}
+	return !dataTimeBefore(bar.FetchedAt, closeAt) && bar.FetchedAt.After(activeAfter)
+}
+
+func dataTimeBefore(value, minimum time.Time) bool {
+	return value.IsZero() || value.Before(minimum)
 }
 
 func (s *Service) evaluatePortfolioWeightRule(ctx context.Context, watch StockV2Watch, rule watchRule) WatchRuleResult {

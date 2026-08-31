@@ -184,9 +184,17 @@ type OpportunityMarketScanMetrics struct {
 	MainFlowRatio20    float64                       `json:"mainFlowRatio20,omitempty"`
 	PositiveFlowDays20 int                           `json:"positiveFlowDays20,omitempty"`
 	LatestPrice        float64                       `json:"latestPrice,omitempty"`
+	LatestPrevClose    float64                       `json:"latestPrevClose,omitempty"`
+	LatestOpenPrice    float64                       `json:"latestOpenPrice,omitempty"`
+	LatestHighPrice    float64                       `json:"latestHighPrice,omitempty"`
+	LatestLowPrice     float64                       `json:"latestLowPrice,omitempty"`
+	LatestAmount       float64                       `json:"latestAmount,omitempty"`
 	LatestPctChange    float64                       `json:"latestPctChange,omitempty"`
 	LatestTurnoverRate float64                       `json:"latestTurnoverRate,omitempty"`
+	LatestVolumeRatio  float64                       `json:"latestVolumeRatio,omitempty"`
 	LatestMainFlowPct  float64                       `json:"latestMainFlowPct,omitempty"`
+	LatestQuoteAt      time.Time                     `json:"latestQuoteAt,omitempty"`
+	LatestQuoteSource  string                        `json:"latestQuoteSource,omitempty"`
 	QFQAvailable       bool                          `json:"qfqAvailable"`
 	FundFlowAvailable  bool                          `json:"fundFlowAvailable"`
 	FundFlowStatus     string                        `json:"fundFlowStatus,omitempty"`

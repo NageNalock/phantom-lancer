@@ -923,6 +923,7 @@ export function stockV2SentinelTriggerLabel(trigger?: string): string {
   switch (trigger) {
     case "manual": return "手动触发";
     case "scheduled": return "定时触发";
+    case "market_signal": return "盘中趋势信号";
     default: return trigger || "-";
   }
 }

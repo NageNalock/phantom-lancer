@@ -916,12 +916,12 @@ func (s *Service) runStrategyPlaybookPrefilters(ctx context.Context, run Monitor
 
 func portfolioSentinelPlanWindowState(action map[string]any, now time.Time) string {
 	window := mapFromAny(action["monitorWindow"])
-	if startsAt := firstRuleString(window, "startsAt"); startsAt != "" {
+	if startsAt := firstRuleString(window, "startsAt", "starts_at"); startsAt != "" {
 		if start, err := time.Parse(time.RFC3339, startsAt); err == nil && now.Before(start) {
 			return "pending"
 		}
 	}
-	expiresAt := firstRuleString(window, "expiresAt")
+	expiresAt := firstRuleString(window, "expiresAt", "expires_at")
 	if expiresAt == "" {
 		expiresAt = firstRuleString(action, "validUntil")
 	}
@@ -1027,7 +1027,6 @@ func (s *Service) RunLatestQuoteRefreshTask(ctx context.Context, triggerType str
 	}
 	if err == nil && result.RefreshedCount > 0 {
 		eventCtx, eventCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer eventCancel()
 		if eventErr := s.runDataStrategyMonitorOnSentinelQuoteCrossing(eventCtx, previousQuotes, result.Items); eventErr != nil &&
 			!errors.Is(eventErr, ErrMonitorTaskAlreadyRunning) && s.log != nil {
 			s.log.Warn("stockv2 sentinel quote crossing monitor failed",
@@ -1036,6 +1035,16 @@ func (s *Service) RunLatestQuoteRefreshTask(ctx context.Context, triggerType str
 				"error", safelog.Text(eventErr.Error(), 240),
 			)
 		}
+		eventCancel()
+		signalCtx, signalCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		if eventErr := s.maybeStartPortfolioSentinelOnMaterialQuoteSignal(signalCtx, previousQuotes, result.Items); eventErr != nil &&
+			!errors.Is(eventErr, ErrPortfolioSentinelAlreadyRunning) && s.log != nil {
+			s.log.Warn("stockv2 market signal sentinel trigger failed",
+				"trigger_type", PortfolioSentinelTriggerMarketSignal,
+				"error", safelog.Text(eventErr.Error(), 240),
+			)
+		}
+		signalCancel()
 	}
 	if s.log != nil && (err != nil || result.FailedCount > 0) {
 		errText := ""
@@ -1045,6 +1054,94 @@ func (s *Service) RunLatestQuoteRefreshTask(ctx context.Context, triggerType str
 		s.log.Warn("stockv2 latest quote refresh task finished with errors", "task_type", state.TaskType, "trigger_type", state.TriggerType, "status", state.Status, "scope_summary", state.ScopeSummary, "scanned_count", state.ScannedCount, "success_count", state.SuccessCount, "failed_count", state.FailedCount, "failure_sample", stockV2FailureSample(result.FailedItems, 5), "error", safelog.Text(errText, 300))
 	}
 	return state, err
+}
+
+type portfolioSentinelQuoteSignal struct {
+	Symbol      string
+	PctChange   float64
+	PreviousPct float64
+	Direction   string
+}
+
+func (s *Service) maybeStartPortfolioSentinelOnMaterialQuoteSignal(
+	ctx context.Context,
+	previous, current []StockV2QuoteLatest,
+) error {
+	cfg, err := s.GetPortfolioSentinelConfig(ctx)
+	if err != nil || !cfg.Enabled {
+		return err
+	}
+	held := make(map[string]struct{})
+	portfolios, err := s.store.ListPortfolios(ctx)
+	if err != nil {
+		return err
+	}
+	for _, portfolio := range portfolios {
+		holdings, listErr := s.store.ListHoldings(ctx, portfolio.ID)
+		if listErr != nil {
+			return listErr
+		}
+		for _, holding := range holdings {
+			held[holding.Symbol] = struct{}{}
+		}
+	}
+	eligible := make([]StockV2QuoteLatest, 0, len(current))
+	for _, quote := range current {
+		if _, ok := held[quote.Symbol]; ok {
+			eligible = append(eligible, quote)
+		}
+	}
+	signal, ok := materialPortfolioQuoteSignal(previous, eligible)
+	if !ok {
+		return nil
+	}
+	// ponytail: one market-signal sentinel per 30 minutes bounds model cost while
+	// preserving the first meaningful intraday regime change. Promote this to UI
+	// only if the owner later needs different cooldowns by portfolio.
+	const cooldown = 30 * time.Minute
+	runs, err := s.store.ListPortfolioSentinelRuns(ctx, PortfolioSentinelRunListFilter{
+		TriggerType: PortfolioSentinelTriggerMarketSignal, Limit: 1,
+	})
+	if err != nil {
+		return err
+	}
+	if len(runs) > 0 && time.Since(runs[0].StartedAt) < cooldown {
+		return nil
+	}
+	now := time.Now()
+	note := fmt.Sprintf("盘中趋势信号：%s 涨跌幅由 %.2f%% 变化至 %.2f%%，方向=%s；请结合当前分钟趋势、资金与主题证据独立重评。",
+		signal.Symbol, signal.PreviousPct, signal.PctChange, signal.Direction)
+	_, err = s.startPortfolioSentinelRun(ctx, PortfolioSentinelTriggerMarketSignal, PortfolioSentinelWindowManual,
+		"", now.Add(-12*time.Hour), now, note, true)
+	return err
+}
+
+func materialPortfolioQuoteSignal(previous, current []StockV2QuoteLatest) (portfolioSentinelQuoteSignal, bool) {
+	previousBySymbol := quoteBySymbol(previous)
+	best := portfolioSentinelQuoteSignal{}
+	found := false
+	// ponytail: ±3% is an event boundary, not a forecast. It starts one bounded
+	// holding review and never creates an operation by itself.
+	const boundary = 3.0
+	for _, after := range current {
+		before, ok := previousBySymbol[after.Symbol]
+		if !ok || after.Status != QuoteStatusFresh || after.LastPrice <= 0 || after.OpenPrice <= 0 {
+			continue
+		}
+		candidate := portfolioSentinelQuoteSignal{Symbol: after.Symbol, PctChange: after.PctChange, PreviousPct: before.PctChange}
+		switch {
+		case before.PctChange < boundary && after.PctChange >= boundary && after.LastPrice >= after.OpenPrice:
+			candidate.Direction = "up"
+		case before.PctChange > -boundary && after.PctChange <= -boundary && after.LastPrice <= after.OpenPrice:
+			candidate.Direction = "down"
+		default:
+			continue
+		}
+		if !found || math.Abs(candidate.PctChange) > math.Abs(best.PctChange) {
+			best, found = candidate, true
+		}
+	}
+	return best, found
 }
 
 func (s *Service) runDataStrategyMonitorOnSentinelQuoteCrossing(
@@ -1228,10 +1325,17 @@ func playbookActionWatchRules(action map[string]any, symbol, portfolioID string)
 		return nil
 	}
 	filtered := make([]any, 0, len(rawRules))
+	window := mapFromAny(action["monitorWindow"])
+	activeAfter := firstRuleString(window, "startsAt", "starts_at")
 	for _, raw := range rawRules {
 		prefilter := mapFromAny(raw)
 		if playbookPrefilterReady(prefilter) {
-			filtered = append(filtered, prefilter)
+			next := copyStringAnyMap(prefilter)
+			if firstRuleString(action, "portfolioSentinelActionPlan") == "true" && activeAfter != "" {
+				next["activeAfter"] = activeAfter
+				next["observationMode"] = portfolioSentinelObservationMode(normalizeWatchRuleType(firstRuleString(next, "type", "ruleType")))
+			}
+			filtered = append(filtered, next)
 		}
 	}
 	if len(filtered) == 0 {

@@ -69,3 +69,12 @@ func TestHasFreshDecisionFinancialDataset(t *testing.T) {
 		t.Fatalf("stale=%v err=%v, want no fresh dataset", stale, err)
 	}
 }
+
+func TestDecisionDisclosureExpectedPeriod(t *testing.T) {
+	if got := decisionDisclosureExpectedPeriod(decisionMarketEvent{EventDate: "2026-08-29", Title: "定期报告披露"}); got != "2026-06-30" {
+		t.Fatalf("expected period=%q", got)
+	}
+	if got := decisionDisclosureExpectedPeriod(decisionMarketEvent{EventDate: "2026-08-29", Title: "定期报告披露（period=2026-03-31）"}); got != "2026-03-31" {
+		t.Fatalf("explicit expected period=%q", got)
+	}
+}

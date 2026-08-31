@@ -30,6 +30,10 @@ const (
 	// provider instability makes repeated full-pool refreshes expensive.
 	decisionReferenceAttempts   = 3
 	decisionReferenceRetryDelay = 400 * time.Millisecond
+	// ponytail: a recent disclosure/fact mismatch may bypass the normal cache at
+	// most once per 30 minutes. This is a correctness retry guard, not a tuning
+	// surface; replace it with provider-aware backoff if reference volume grows.
+	decisionReferenceDisclosureRetry = 30 * time.Minute
 	// ponytail: 200 rows keeps each request bounded while covering recent
 	// quarterly disclosures and long dividend histories. If this becomes
 	// insufficient, replace it with provider pagination rather than raising it.
@@ -98,7 +102,10 @@ func (s *Service) refreshOneDecisionReference(ctx context.Context, config Opport
 	now := time.Now()
 	health := decisionReferenceHealth{Symbol: symbol, Status: DecisionHealthBlocked, CheckedAt: now}
 	if cached, err := s.store.GetDecisionReferenceHealth(ctx, symbol); err == nil && cached.EventOK && cached.FinanceOK && now.Sub(cached.CheckedAt) < decisionReferenceFreshness {
-		return cached
+		needsFinanceRefresh := s.decisionReferenceNeedsFinancialRefresh(ctx, symbol, now.In(chinaMarketTZ).Format("2006-01-02"))
+		if !needsFinanceRefresh || now.Sub(cached.CheckedAt) < decisionReferenceDisclosureRetry {
+			return cached
+		}
 	}
 	if !decisionSupportedMarket(market) {
 		health.Message = "当前仅支持沪深股票与场内基金"
@@ -160,6 +167,10 @@ func (s *Service) refreshOneDecisionReference(ctx context.Context, config Opport
 	}
 	health.EventOK = eventSuccess == 4
 	health.FinanceOK = financeSuccess == 3
+	if health.FinanceOK && s.decisionReferenceNeedsFinancialRefresh(ctx, symbol, now.In(chinaMarketTZ).Format("2006-01-02")) {
+		health.FinanceOK = false
+		messages = append(messages, "财务事实尚未追上最近定期报告披露期")
+	}
 	switch {
 	case health.EventOK && health.FinanceOK && len(messages) == 0:
 		health.Status = DecisionHealthHealthy
@@ -178,6 +189,62 @@ func (s *Service) refreshOneDecisionReference(ctx context.Context, config Opport
 	}
 	_ = s.store.SaveDecisionReferenceHealth(ctx, health)
 	return health
+}
+
+func (s *Service) decisionReferenceNeedsFinancialRefresh(ctx context.Context, symbol, decisionDate string) bool {
+	decisionAt, err := time.Parse("2006-01-02", decisionDate)
+	if err != nil {
+		return false
+	}
+	events, err := s.store.ListDecisionMarketEvents(ctx, symbol,
+		decisionAt.AddDate(-1, 0, 0).Format("2006-01-02"), decisionDate, decisionDate)
+	if err != nil {
+		return false
+	}
+	expected := ""
+	for _, event := range events {
+		if event.EventType != "disclosure_date" || event.EventDate > decisionDate {
+			continue
+		}
+		period := decisionDisclosureExpectedPeriod(event)
+		if period > expected {
+			expected = period
+		}
+	}
+	if expected == "" {
+		return false
+	}
+	fact, err := s.store.GetLatestDecisionFinancialFact(ctx, symbol, decisionDate)
+	return err != nil || fact.ReportPeriod < expected
+}
+
+func decisionDisclosureExpectedPeriod(event decisionMarketEvent) string {
+	if marker := strings.LastIndex(event.Title, "period="); marker >= 0 {
+		period := event.Title[marker+len("period="):]
+		if len(period) >= 10 {
+			period = period[:10]
+		}
+		if len(period) == 10 {
+			return period
+		}
+	}
+	date, err := time.Parse("2006-01-02", event.EventDate)
+	if err != nil {
+		return ""
+	}
+	year := date.Year()
+	switch date.Month() {
+	case time.January, time.February, time.March:
+		return fmt.Sprintf("%04d-09-30", year-1)
+	case time.April, time.May:
+		return fmt.Sprintf("%04d-03-31", year)
+	case time.June, time.July, time.August:
+		return fmt.Sprintf("%04d-06-30", year)
+	case time.September, time.October:
+		return fmt.Sprintf("%04d-09-30", year)
+	default:
+		return fmt.Sprintf("%04d-09-30", year)
+	}
 }
 
 func (s *Service) fetchDecisionTushareDataset(ctx context.Context, config OpportunityMarketScanConfig, dataset string, params url.Values) (tushareDatasetResult, error) {
@@ -483,6 +550,9 @@ func parseDecisionEvents(symbol, dataset string, result tushareDatasetResult, fe
 		case "disclosure_date":
 			eventDate = firstNonEmpty(decisionDateValue(row, index, "actual_date"), decisionDateValue(row, index, "pre_date"))
 			title = "定期报告披露"
+			if period := decisionDateValue(row, index, "end_date"); period != "" {
+				title += "（period=" + period + "）"
+			}
 		case "share_float":
 			eventDate, title = decisionDateValue(row, index, "float_date"), "限售股份解禁"
 		case "dividend":

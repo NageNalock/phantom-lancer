@@ -2697,6 +2697,16 @@ export interface StockV2PortfolioSentinelActionPlanView {
   resultId: string;
   runFinishedAt?: string;
   status: "active" | "expired" | "triggered" | "proposed" | string;
+  currentAction?: StockV2PortfolioSentinelAction | string;
+  contingencyAction?: StockV2PortfolioSentinelAction | string;
+  decisionGate?: {
+    id?: string;
+    tradeDate?: string;
+    decisionDate?: string;
+    status: "healthy" | "degraded" | "blocked";
+    dataHealth: StockV2DecisionDataHealth[];
+    metrics?: Record<string, unknown>;
+  };
 }
 
 export interface StockV2PortfolioSentinelActionPlanListResponse {

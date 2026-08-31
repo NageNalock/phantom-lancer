@@ -562,9 +562,17 @@ func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *Opportun
 		for i := 0; i < qfqLimit; i++ {
 			if quote, ok := bySymbol[candidates[i].Symbol]; ok {
 				candidates[i].Metrics.LatestPrice = quote.LastPrice
+				candidates[i].Metrics.LatestPrevClose = quote.PrevClose
+				candidates[i].Metrics.LatestOpenPrice = quote.OpenPrice
+				candidates[i].Metrics.LatestHighPrice = quote.HighPrice
+				candidates[i].Metrics.LatestLowPrice = quote.LowPrice
+				candidates[i].Metrics.LatestAmount = quote.Amount
 				candidates[i].Metrics.LatestPctChange = quote.PctChange
 				candidates[i].Metrics.LatestTurnoverRate = quote.TurnoverRate
+				candidates[i].Metrics.LatestVolumeRatio = quote.VolumeRatio
 				candidates[i].Metrics.LatestMainFlowPct = quote.MainNetInflowPct
+				candidates[i].Metrics.LatestQuoteAt = decisionQuoteTime(quote)
+				candidates[i].Metrics.LatestQuoteSource = quote.Source
 				candidates[i].Metrics.QuoteAvailable = quote.LastPrice > 0
 			}
 		}
@@ -691,7 +699,8 @@ func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *Opportun
 			snapshot := s.buildDecisionGateSnapshot(ctx, decisionGateBuildInput{
 				ContextType: "opportunity_market_scan_candidate", ContextID: candidates[i].ID,
 				Symbol: candidates[i].Symbol, Market: candidates[i].Market, InstrumentType: candidates[i].Metrics.InstrumentType,
-				TradeDate: run.TradeDate, Bars: barsBySymbol[candidates[i].Symbol], QuoteAvailable: candidates[i].Metrics.QuoteAvailable,
+				TradeDate: run.TradeDate, DecisionDate: time.Now().In(chinaMarketTZ).Format("2006-01-02"), Bars: barsBySymbol[candidates[i].Symbol],
+				CompletedRawBar: s.decisionLatestRawBar(ctx, candidates[i].Symbol, run.TradeDate), Quote: opportunityMarketQuote(candidates[i]),
 				ThemeSignals: candidates[i].Metrics.CatalystSignals, FlowAvailable: candidates[i].Metrics.FundFlowAvailable,
 				MainFlowRatio20: candidates[i].Metrics.MainFlowRatio20, FactorCluster: clusters[candidates[i].Symbol],
 				FactorBlocked: crowded[candidates[i].Symbol] != "", FactorReason: crowded[candidates[i].Symbol],
@@ -1098,7 +1107,8 @@ func (s *Service) runRecentOpportunityDecisionAudit(ctx context.Context) bool {
 			snapshot := s.buildDecisionGateSnapshot(ctx, decisionGateBuildInput{
 				ContextType: "opportunity_market_scan_candidate", ContextID: targets[i].ID,
 				Symbol: targets[i].Symbol, Market: targets[i].Market, InstrumentType: targets[i].Metrics.InstrumentType,
-				TradeDate: run.TradeDate, Bars: barsBySymbol[targets[i].Symbol], QuoteAvailable: targets[i].Metrics.QuoteAvailable,
+				TradeDate: run.TradeDate, DecisionDate: time.Now().In(chinaMarketTZ).Format("2006-01-02"), Bars: barsBySymbol[targets[i].Symbol],
+				CompletedRawBar: s.decisionLatestRawBar(ctx, targets[i].Symbol, run.TradeDate), Quote: opportunityMarketQuote(targets[i]),
 				ThemeSignals: targets[i].Metrics.CatalystSignals, FlowAvailable: targets[i].Metrics.FundFlowAvailable,
 				MainFlowRatio20: targets[i].Metrics.MainFlowRatio20, FactorCluster: clusters[targets[i].Symbol],
 				FactorBlocked: crowded[targets[i].Symbol] != "", FactorReason: crowded[targets[i].Symbol],

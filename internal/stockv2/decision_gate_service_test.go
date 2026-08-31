@@ -16,7 +16,8 @@ func TestDecisionGateBlocksOverheatedEntryButKeepsReduction(t *testing.T) {
 	snapshot := svc.buildDecisionGateSnapshot(context.Background(), decisionGateBuildInput{
 		ContextType: "test", ContextID: "gate", Symbol: "600000", Market: "SH",
 		InstrumentType: InstrumentTypeStock, TradeDate: bars[len(bars)-1].TradeDate, Bars: bars,
-		QuoteAvailable: true, BenchmarkAvailable: true, ReferenceHealth: decisionReferenceHealth{
+		DecisionDate: bars[len(bars)-1].TradeDate, Quote: decisionTestQuote("600000", bars[len(bars)-1].Close),
+		BenchmarkAvailable: true, ReferenceHealth: decisionReferenceHealth{
 			EventOK: true, FinanceOK: true, Status: DecisionHealthHealthy, CheckedAt: time.Now(),
 		},
 		TradeCalendar: decisionTestTradeCalendar(bars[len(bars)-1].TradeDate),
@@ -50,7 +51,8 @@ func TestDecisionGateEventProtectionUsesPointInTimeEvent(t *testing.T) {
 	}
 	snapshot := svc.buildDecisionGateSnapshot(ctx, decisionGateBuildInput{
 		ContextType: "test", ContextID: "event", Symbol: "600000", Market: "SH",
-		InstrumentType: InstrumentTypeStock, TradeDate: tradeDate, Bars: bars, QuoteAvailable: true,
+		InstrumentType: InstrumentTypeStock, TradeDate: tradeDate, DecisionDate: tradeDate, Bars: bars,
+		Quote:              decisionTestQuote("600000", bars[len(bars)-1].Close),
 		BenchmarkAvailable: true, ReferenceHealth: decisionReferenceHealth{
 			EventOK: true, FinanceOK: true, Status: DecisionHealthHealthy, CheckedAt: time.Now(),
 		},
@@ -58,6 +60,19 @@ func TestDecisionGateEventProtectionUsesPointInTimeEvent(t *testing.T) {
 	})
 	if gateStatus(snapshot.Gates, DecisionGateEventCalendar) != DecisionGateStatusBlocked {
 		t.Fatalf("event gate=%+v, want blocked", snapshot.Gates)
+	}
+}
+
+func TestDecisionPostDisclosurePriceConfirmationAllowsOpportunityReview(t *testing.T) {
+	event := decisionMarketEvent{EventType: "disclosure_date", EventDate: "2026-08-31"}
+	quoteAt := time.Date(2026, 8, 31, 10, 30, 0, 0, chinaMarketTZ)
+	quote := StockV2QuoteLatest{LastPrice: 10.6, OpenPrice: 10.2, PctChange: 4, QuoteAt: quoteAt, Status: QuoteStatusFresh}
+	if !decisionPostDisclosureConfirmed(event, "2026-08-31", &quote) {
+		t.Fatal("positive post-disclosure price confirmation should permit opportunity evaluation")
+	}
+	quote.PctChange = -2
+	if decisionPostDisclosureConfirmed(event, "2026-08-31", &quote) {
+		t.Fatal("negative price action must remain inside the event guardrail")
 	}
 }
 
@@ -222,6 +237,12 @@ func decisionTestBars(count int, start, dailyStep float64) []StockV2DailyBar {
 		date = date.AddDate(0, 0, 1)
 	}
 	return out
+}
+
+func decisionTestQuote(symbol string, price float64) *StockV2QuoteLatest {
+	now := time.Now()
+	return &StockV2QuoteLatest{Symbol: symbol, Market: inferAStockMarket(symbol), LastPrice: price,
+		OpenPrice: price, PrevClose: price, QuoteAt: now, FetchedAt: now, Source: "test", Status: QuoteStatusFresh}
 }
 
 func decisionTestTradeCalendar(centerDate string) []decisionTradeDay {

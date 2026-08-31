@@ -39,6 +39,18 @@ func TestListMonitorTasksReturnsBuiltin(t *testing.T) {
 	}
 }
 
+func TestMaterialPortfolioQuoteSignalDetectsFirstIntradayRegimeCross(t *testing.T) {
+	previous := []StockV2QuoteLatest{{Symbol: "000977", LastPrice: 80, OpenPrice: 80, PctChange: 2.8, Status: QuoteStatusFresh}}
+	current := []StockV2QuoteLatest{{Symbol: "000977", LastPrice: 83, OpenPrice: 80, PctChange: 3.2, Status: QuoteStatusFresh}}
+	signal, ok := materialPortfolioQuoteSignal(previous, current)
+	if !ok || signal.Symbol != "000977" || signal.Direction != "up" {
+		t.Fatalf("signal=%+v ok=%t", signal, ok)
+	}
+	if _, duplicate := materialPortfolioQuoteSignal(current, current); duplicate {
+		t.Fatal("already-above-boundary quote must not retrigger")
+	}
+}
+
 func TestRemovedDataAssetMonitorTasks(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newStrategyTestService(t)

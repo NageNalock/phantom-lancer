@@ -482,11 +482,28 @@ func (s *Service) buildMinuteBarsContext(ctx context.Context, symbol string) *Mi
 		return &MinuteBarsContext{Symbol: symbol}
 	}
 	latest := bars[len(bars)-1]
-	high := bars[0].High
-	low := bars[0].Low
-	totalVolume := 0.0
-	totalNetInflow := 0.0
+	sessionDate := latest.MinuteAt.In(chinaMarketTZ).Format("2006-01-02")
+	session := make([]StockV2MinuteBar, 0, len(bars))
+	priorAmounts := map[string]float64{}
+	latestClock := latest.MinuteAt.In(chinaMarketTZ).Hour()*60 + latest.MinuteAt.In(chinaMarketTZ).Minute()
 	for _, bar := range bars {
+		local := bar.MinuteAt.In(chinaMarketTZ)
+		date := local.Format("2006-01-02")
+		if date == sessionDate {
+			session = append(session, bar)
+			continue
+		}
+		if local.Hour()*60+local.Minute() <= latestClock {
+			priorAmounts[date] += bar.Amount
+		}
+	}
+	if len(session) == 0 {
+		return &MinuteBarsContext{Symbol: symbol}
+	}
+	high, low := session[0].High, session[0].Low
+	totalVolume, totalAmount, totalNetInflow, first15Amount := 0.0, 0.0, 0.0, 0.0
+	flowAvailable := false
+	for _, bar := range session {
 		if bar.High > high {
 			high = bar.High
 		}
@@ -494,24 +511,94 @@ func (s *Service) buildMinuteBarsContext(ctx context.Context, symbol string) *Mi
 			low = bar.Low
 		}
 		totalVolume += bar.Volume
+		totalAmount += bar.Amount
 		totalNetInflow += bar.MainNetInflow
+		flowAvailable = flowAvailable || bar.MainNetInflow != 0
+		local := bar.MinuteAt.In(chinaMarketTZ)
+		if local.Hour() == 9 && local.Minute() <= 44 {
+			first15Amount += bar.Amount
+		}
+	}
+	open := session[0].Open
+	prevClose := latest.PrevClose
+	if prevClose <= 0 {
+		prevClose = session[0].PrevClose
+	}
+	pctChange := latest.PctChange
+	if prevClose > 0 {
+		pctChange = (latest.Close - prevClose) / prevClose * 100
+	}
+	fromOpen := 0.0
+	if open > 0 {
+		fromOpen = (latest.Close - open) / open * 100
+	}
+	momentum := func(minutes int) float64 {
+		index := len(session) - 1 - minutes
+		if index < 0 {
+			index = 0
+		}
+		if session[index].Close <= 0 {
+			return 0
+		}
+		return (latest.Close - session[index].Close) / session[index].Close * 100
+	}
+	averagePriorAmount := 0.0
+	for _, amount := range priorAmounts {
+		averagePriorAmount += amount
+	}
+	if len(priorAmounts) > 0 {
+		averagePriorAmount /= float64(len(priorAmounts))
+	}
+	amountRatio := 0.0
+	if averagePriorAmount > 0 {
+		amountRatio = totalAmount / averagePriorAmount
+	}
+	vwap := minuteSessionVWAP(totalAmount, totalVolume, latest.Close)
+	rangePosition := 0.0
+	if high > low {
+		rangePosition = (latest.Close - low) / (high - low) * 100
 	}
 	return &MinuteBarsContext{
 		Symbol:          symbol,
-		Count:           len(bars),
+		Count:           len(session),
+		SessionDate:     sessionDate,
 		LatestMinuteAt:  latest.MinuteAt,
 		LatestClose:     latest.Close,
 		LatestVolume:    latest.Volume,
 		LatestNetInflow: latest.MainNetInflow,
-		Source:          latest.Source,
+		SessionOpen:     open, SessionHigh: high, SessionLow: low, PrevClose: prevClose,
+		SessionPctChange: pctChange, ReturnFromOpenPct: fromOpen,
+		Momentum5Pct: momentum(5), Momentum15Pct: momentum(15),
+		SessionVolume: totalVolume, SessionAmount: totalAmount, First15MinuteAmount: first15Amount,
+		SameMinuteAmountRatio: amountRatio, VWAP: vwap, RangePositionPct: rangePosition,
+		FlowAvailable: flowAvailable, SessionMainNetInflow: totalNetInflow,
+		Source: latest.Source,
 		Summary: map[string]float64{
-			"rangeHigh":       high,
-			"rangeLow":        low,
-			"totalVolume":     totalVolume,
-			"totalNetInflow":  totalNetInflow,
-			"latestPctChange": latest.PctChange,
+			"rangeHigh":             high,
+			"rangeLow":              low,
+			"totalVolume":           totalVolume,
+			"totalAmount":           totalAmount,
+			"totalNetInflow":        totalNetInflow,
+			"latestPctChange":       pctChange,
+			"returnFromOpenPct":     fromOpen,
+			"sameMinuteAmountRatio": amountRatio,
 		},
 	}
+}
+
+func minuteSessionVWAP(amount, volume, fallback float64) float64 {
+	if amount <= 0 || volume <= 0 {
+		return fallback
+	}
+	direct := amount / volume
+	if fallback > 0 && direct >= fallback*.2 && direct <= fallback*5 {
+		return direct
+	}
+	perHand := direct / 100
+	if fallback > 0 && perHand >= fallback*.2 && perHand <= fallback*5 {
+		return perHand
+	}
+	return fallback
 }
 
 func (s *Service) buildPortfolioReviewContext(ctx context.Context, portfolioID string) (*PortfolioReviewContext, map[string]any, error) {

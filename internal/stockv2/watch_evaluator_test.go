@@ -169,6 +169,42 @@ func TestRunWatchAnyAllAggregationWithDailyBar(t *testing.T) {
 	}
 }
 
+func TestFutureQuoteRuleRequiresPostActivationCrossing(t *testing.T) {
+	ctx := context.Background()
+	svc, cleanup := newWatchTestService(t)
+	defer cleanup()
+	activeAfter := time.Now()
+	seedWatchQuote(t, svc, "000001", 9, -1, QuoteStatusFresh, activeAfter.Add(-time.Minute))
+	rule := watchRule{Key: "future-below", Type: WatchRulePriceBelow, Symbol: "000001", Threshold: 9.5,
+		ObservationMode: watchObservationFutureCross, ActiveAfter: activeAfter}
+	result := svc.evaluateWatchRule(ctx, StockV2Watch{Symbol: "000001"}, rule, activeAfter.Add(time.Second))
+	if result.Status != WatchRunStatusNotMatched {
+		t.Fatalf("historical threshold state = %+v, want not_matched", result)
+	}
+	seedWatchQuote(t, svc, "000001", 10, 1, QuoteStatusFresh, activeAfter.Add(time.Minute))
+	seedWatchQuote(t, svc, "000001", 9, -1, QuoteStatusFresh, activeAfter.Add(2*time.Minute))
+	result = svc.evaluateWatchRule(ctx, StockV2Watch{Symbol: "000001"}, rule, activeAfter.Add(2*time.Minute))
+	if result.Status != WatchRunStatusMatched {
+		t.Fatalf("post-activation crossing = %+v, want matched", result)
+	}
+}
+
+func TestDailyCloseMustBeFormedAfterActivation(t *testing.T) {
+	activeBeforeClose := time.Date(2026, 8, 31, 12, 0, 0, 0, chinaMarketTZ)
+	bar := StockV2DailyBar{TradeDate: "2026-08-28", FetchedAt: time.Date(2026, 8, 28, 15, 5, 0, 0, chinaMarketTZ)}
+	if dailyCloseObservedAfterActivation(bar, activeBeforeClose) {
+		t.Fatal("pre-plan close must not satisfy a future close rule")
+	}
+	bar.TradeDate = "2026-08-31"
+	bar.FetchedAt = time.Date(2026, 8, 31, 15, 5, 0, 0, chinaMarketTZ)
+	if !dailyCloseObservedAfterActivation(bar, activeBeforeClose) {
+		t.Fatal("same-session close formed after a noon plan should be observable")
+	}
+	if dailyCloseObservedAfterActivation(bar, time.Date(2026, 8, 31, 15, 30, 0, 0, chinaMarketTZ)) {
+		t.Fatal("same-session close predating an after-close plan must not be observable")
+	}
+}
+
 func TestRunWatchPortfolioSymbolWeightAbove(t *testing.T) {
 	ctx := context.Background()
 	svc, cleanup := newWatchTestService(t)
@@ -295,7 +331,7 @@ func TestRunWatchPortfolioSymbolWeightBelow(t *testing.T) {
 
 func seedWatchQuote(t *testing.T, svc *Service, symbol string, price, pct float64, status string, fetchedAt time.Time) {
 	t.Helper()
-	if err := svc.store.UpsertLatestQuote(context.Background(), StockV2QuoteLatest{
+	quote := StockV2QuoteLatest{
 		Symbol:    symbol,
 		Market:    inferAStockMarket(symbol),
 		Name:      symbol,
@@ -306,8 +342,12 @@ func seedWatchQuote(t *testing.T, svc *Service, symbol string, price, pct float6
 		FetchedAt: fetchedAt,
 		Source:    QuoteSourceTencent,
 		Status:    status,
-	}); err != nil {
+	}
+	if err := svc.store.UpsertLatestQuote(context.Background(), quote); err != nil {
 		t.Fatalf("upsert quote: %v", err)
+	}
+	if err := svc.store.InsertQuoteSnapshot(context.Background(), StockV2QuoteSnapshot{StockV2QuoteLatest: quote, CollectedAt: fetchedAt}); err != nil {
+		t.Fatalf("insert quote snapshot: %v", err)
 	}
 }
 

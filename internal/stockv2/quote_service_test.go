@@ -3,6 +3,7 @@ package stockv2
 import (
 	"context"
 	"io"
+	"math"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -305,6 +306,17 @@ func TestRefreshLatestQuotesFallsBackToTencentMinuteBars(t *testing.T) {
 	}
 	if len(bars) != 2 || bars[1].Volume != 200 || bars[1].Source != QuoteSourceTencentMinute {
 		t.Fatalf("minute bars = %+v", bars)
+	}
+}
+
+func TestTencentMinuteParserCarriesPreviousCloseAndPctChange(t *testing.T) {
+	body := []byte(`{"code":0,"data":{"sz000001":{"data":{"data":["0930 10.20 1000 10200"],"date":"20260831"},"qt":{"sz000001":["1","平安银行","","","10.00"]}}}}`)
+	bars, _, err := parseTencentMinuteQueryResponse(body, quoteSymbol{Symbol: "000001", Market: "SZ", TencentCode: "sz000001"})
+	if err != nil || len(bars) != 1 {
+		t.Fatalf("parse bars=%+v err=%v", bars, err)
+	}
+	if bars[0].PrevClose != 10 || math.Abs(bars[0].PctChange-2) > 1e-9 {
+		t.Fatalf("bar=%+v, want prev close 10 and pct change 2", bars[0])
 	}
 }
 

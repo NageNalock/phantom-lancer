@@ -478,6 +478,7 @@ func (s *Service) portfolioSentinelPriorHoldingJudgments(
 				SourceWindowEndAt: run.WindowEndAt,
 				ValidUntil:        plan.ValidUntil,
 				AdvisoryOnly:      true,
+				EvidenceClass:     "derived_state",
 			}
 			if plan.Sizing != nil {
 				sizing := *plan.Sizing
@@ -1546,9 +1547,14 @@ func (s *Service) preparePortfolioSentinelPlanStrategies(
 			}
 			prefilters := make([]map[string]any, 0, len(plan.Conditions))
 			for _, condition := range plan.Conditions {
+				ruleType := normalizeWatchRuleType(condition.Type)
 				prefilter := map[string]any{
 					"key":  condition.Key,
-					"type": normalizeWatchRuleType(condition.Type),
+					"type": ruleType,
+				}
+				if plan.MonitorWindow != nil && !plan.MonitorWindow.StartsAt.IsZero() {
+					prefilter["activeAfter"] = plan.MonitorWindow.StartsAt.Format(time.RFC3339)
+					prefilter["observationMode"] = portfolioSentinelObservationMode(ruleType)
 				}
 				if condition.Threshold != nil {
 					prefilter["threshold"] = *condition.Threshold
@@ -1626,6 +1632,18 @@ func (s *Service) preparePortfolioSentinelPlanStrategies(
 		out = append(out, portfolioSentinelPlanStrategyPublication{strategy: strategy, version: version, create: create})
 	}
 	return out, nil
+}
+
+func portfolioSentinelObservationMode(ruleType string) string {
+	switch ruleType {
+	case WatchRulePriceAbove, WatchRulePriceBelow, WatchRulePriceBetween,
+		WatchRulePctChangeAbove, WatchRulePctChangeBelow:
+		return watchObservationFutureCross
+	case WatchRuleDailyCloseAbove, WatchRuleDailyCloseBelow:
+		return watchObservationFutureClose
+	default:
+		return watchObservationCurrentState
+	}
 }
 
 func (s *Service) findPortfolioSentinelPlanStrategy(ctx context.Context, portfolioID string) (*StrategyWithVersion, error) {
@@ -1807,12 +1825,27 @@ func (s *Service) ListPortfolioSentinelActionPlans(
 			if status == "expired" && !filter.IncludeExpired {
 				continue
 			}
+			currentAction := plan.Action
+			contingencyAction := ""
+			if status == "expired" || (plan.TriggerMode == PortfolioSentinelTriggerConditional && status == "active") {
+				currentAction = PortfolioSentinelPlanHold
+			}
+			if plan.TriggerMode == PortfolioSentinelTriggerConditional && (status == "active" || status == "expired") {
+				contingencyAction = plan.Action
+			}
+			var gate *DecisionGateSnapshot
+			if snapshot, gateErr := s.store.GetLatestDecisionGateSnapshot(ctx, "portfolio_sentinel", run.ID, plan.Symbol); gateErr == nil {
+				gate = &snapshot
+			}
 			out = append(out, PortfolioSentinelActionPlanView{
-				Plan:          plan,
-				RunID:         run.ID,
-				ResultID:      result.ID,
-				RunFinishedAt: run.FinishedAt,
-				Status:        status,
+				Plan:              plan,
+				RunID:             run.ID,
+				ResultID:          result.ID,
+				RunFinishedAt:     run.FinishedAt,
+				Status:            status,
+				CurrentAction:     currentAction,
+				ContingencyAction: contingencyAction,
+				DecisionGate:      gate,
 			})
 		}
 		for portfolioID := range touched {

@@ -52,6 +52,7 @@ type DecisionGateSnapshot struct {
 	Market         string               `json:"market,omitempty"`
 	InstrumentType string               `json:"instrumentType,omitempty"`
 	TradeDate      string               `json:"tradeDate,omitempty"`
+	DecisionDate   string               `json:"decisionDate,omitempty"`
 	Status         string               `json:"status"`
 	MarketRegime   string               `json:"marketRegime,omitempty"`
 	AllowedActions []string             `json:"allowedActions,omitempty"`

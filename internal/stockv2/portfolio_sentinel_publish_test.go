@@ -234,12 +234,12 @@ func TestPortfolioSentinelV2PublishesCurrentConditionalPlanStrategy(t *testing.T
 	if err != nil || !monitorConfig.Enabled {
 		t.Fatalf("data strategy monitor config = %+v, err=%v; want enabled", monitorConfig, err)
 	}
-	seedWatchQuote(t, svc, "000001", 10.0, 0, QuoteStatusFresh, now.Add(-time.Minute))
+	seedWatchQuote(t, svc, "000001", 10.0, 0, QuoteStatusFresh, time.Now().Add(time.Second))
 	previousQuotes, err := svc.store.GetLatestQuotes(ctx, []string{"000001"})
 	if err != nil {
 		t.Fatalf("load previous quote: %v", err)
 	}
-	seedWatchQuote(t, svc, "000001", 9.0, -2.0, QuoteStatusFresh, now)
+	seedWatchQuote(t, svc, "000001", 9.0, -2.0, QuoteStatusFresh, time.Now().Add(2*time.Second))
 	currentQuotes, err := svc.store.GetLatestQuotes(ctx, []string{"000001"})
 	if err != nil {
 		t.Fatalf("load current quote: %v", err)
