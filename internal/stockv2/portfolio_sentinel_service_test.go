@@ -228,7 +228,7 @@ func TestBuildPortfolioSentinelContextIncludesLatestPriorJudgmentAsAdvisoryMemor
 	for _, want := range []string{
 		"priorHoldingJudgments", "latest successful run", "use, revise, or ignore",
 		"not required to mention, preserve, or answer each prior judgment",
-		`"sourceRunId": "sentinel-prior-latest"`, `"advisoryOnly": true`,
+		`"sourceRunId":"sentinel-prior-latest"`, `"advisoryOnly":true`,
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q: %s", want, prompt)

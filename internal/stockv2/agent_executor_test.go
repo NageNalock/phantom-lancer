@@ -832,9 +832,9 @@ func TestBuildPortfolioSentinelPromptRequiresCompleteNewsContextReview(t *testin
 		"server owns monitor_window and valid_until",
 		"only the next trading window/session",
 		"plan validity period",
-		"at most 6 external search/fetch tool calls",
+		"at most 4 external search/fetch tool calls",
 		"Do not re-fetch quotes, daily bars, profiles, portfolio context, news, or links that are already present and usable",
-		"use at most 8 discretionary MCP retrieval calls in total",
+		"use at most 4 discretionary MCP retrieval calls in total",
 		"final stock_agent.submit_result call is not part of this retrieval budget",
 		"Say external search is unavailable only when the tool cannot be invoked",
 		"do not say external search is unavailable",
@@ -861,14 +861,15 @@ func TestBuildPortfolioSentinelPromptKeepsFinalReviewContractWhenContextIsOversi
 		Note: strings.Repeat("这是可裁剪的超大上下文正文。", 3000),
 	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
 
-	if len(prompt) > 22000 {
-		t.Fatalf("prompt length = %d, want <= 22000", len(prompt))
+	if len(prompt) > 48000 {
+		t.Fatalf("prompt length = %d, want <= 48000", len(prompt))
 	}
 	if !utf8.ValidString(prompt) {
 		t.Fatal("prompt is invalid utf8")
 	}
-	if !strings.Contains(prompt, "... [truncated]") {
-		t.Fatal("oversized context was not truncated")
+	contextValue := portfolioSentinelPromptContextValue(t, prompt)
+	if contextValue["note"] == strings.Repeat("这是可裁剪的超大上下文正文。", 3000) {
+		t.Fatal("oversized note was not compacted")
 	}
 	for _, want := range []string{
 		"task-oversized",
@@ -908,11 +909,18 @@ func TestBuildPortfolioSentinelPromptKeepsEveryHoldingInUntruncatedCoverage(t *t
 		}},
 	}, "http://127.0.0.1:8080/api/stockv2/agent/mcp")
 
-	if len(prompt) > 22000 {
-		t.Fatalf("prompt length = %d, want <= 22000", len(prompt))
+	if len(prompt) > 48000 {
+		t.Fatalf("prompt length = %d, want <= 48000", len(prompt))
 	}
-	if !strings.Contains(prompt, "... [truncated]") {
-		t.Fatal("oversized context was not compacted")
+	contextValue := portfolioSentinelPromptContextValue(t, prompt)
+	contextJSON, _ := json.Marshal(contextValue)
+	for _, want := range []string{`"symbol":"588940"`, `"symbol":"000977"`} {
+		if !strings.Contains(string(contextJSON), want) {
+			t.Fatalf("compacted context missing detailed holding %s: %s", want, contextJSON)
+		}
+	}
+	if strings.Contains(string(contextJSON), "超大画像正文") {
+		t.Fatal("full profile text leaked into compact prompt context")
 	}
 	start := strings.Index(prompt, "## Required Holding Coverage (Untruncated)")
 	end := strings.Index(prompt, "## Required Review Workflow")
@@ -933,6 +941,78 @@ func TestBuildPortfolioSentinelPromptKeepsEveryHoldingInUntruncatedCoverage(t *t
 			t.Fatalf("untruncated holding coverage missing %q:\n%s", want, coverage)
 		}
 	}
+}
+
+func TestMarshalPortfolioSentinelPromptContextPreservesAllDecisionInputs(t *testing.T) {
+	pack := PortfolioSentinelContext{
+		SchemaVersion: PortfolioSentinelReportSchemaVersion,
+		RunID:         "sentinel-compact-context",
+		Portfolios: []PortfolioSentinelPortfolioContext{{
+			Portfolio: StockV2Portfolio{ID: "portfolio-1", Name: "测试组合"},
+		}},
+		DecisionGates: map[string]DecisionGateSnapshot{},
+	}
+	for index, symbol := range []string{"000001", "000002", "000003", "000004"} {
+		pack.Portfolios[0].Holdings = append(pack.Portfolios[0].Holdings, PortfolioSentinelHoldingContext{
+			Holding: StockV2Holding{ID: "holding-" + symbol, PortfolioID: "portfolio-1", Symbol: symbol, Name: "持仓" + symbol},
+			Quote:   &StockV2QuoteLatest{Symbol: symbol, LastPrice: float64(index + 10), QuoteAt: time.Now()},
+			DailyBars: &DailyBarsContext{Symbol: symbol, Count: 120, LatestTradeDate: "2026-08-31",
+				LatestClose: float64(index + 10), Summary: map[string]float64{"ma20": 9.5}},
+			MinuteBars: &MinuteBarsContext{Symbol: symbol, Count: 242, SessionDate: "2026-08-31",
+				LatestClose: float64(index + 10), Momentum5Pct: 1.2, SameMinuteAmountRatio: 1.6},
+			Profile: &StockProfile{Symbol: symbol, Name: "持仓" + symbol, ProfileText: strings.Repeat("不应进入 Prompt 的完整画像", 1000)},
+			News:    []NewsEvent{{ID: "news-" + symbol, Title: "近期信号", Content: strings.Repeat("完整新闻正文", 1000)}},
+		})
+		pack.Candidates = append(pack.Candidates, PortfolioSentinelCandidateContext{Symbol: "60000" + strconv.Itoa(index), Sources: []string{"opportunity:strategy_generated"}})
+		for _, gateSymbol := range []string{symbol, "60000" + strconv.Itoa(index)} {
+			pack.DecisionGates[gateSymbol] = DecisionGateSnapshot{
+				Symbol: gateSymbol, DecisionDate: "2026-08-31", Status: DecisionHealthHealthy,
+				AllowedActions: []string{PortfolioSentinelPlanHold, PortfolioSentinelPlanBuild},
+				Gates:          []DecisionGateResult{{Key: DecisionGateVolatility, Status: DecisionGateStatusPass, Summary: "波动可控"}},
+				Metrics:        map[string]any{"trendCloseQFQ": 10.2, "latestTradablePrice": 10.3, "lastCompletedCloseRaw": 10.1},
+			}
+		}
+	}
+
+	raw := marshalPortfolioSentinelPromptContext(pack, 30000)
+	if len(raw) > 30000 || !json.Valid(raw) {
+		t.Fatalf("compact context bytes=%d valid=%t", len(raw), json.Valid(raw))
+	}
+	var got PortfolioSentinelContext
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode compact context: %v", err)
+	}
+	if len(got.Portfolios) != 1 || len(got.Portfolios[0].Holdings) != 4 || len(got.Candidates) != 4 || len(got.DecisionGates) != 8 {
+		t.Fatalf("compact coverage holdings=%d candidates=%d gates=%d", len(got.Portfolios[0].Holdings), len(got.Candidates), len(got.DecisionGates))
+	}
+	for _, holding := range got.Portfolios[0].Holdings {
+		if holding.Quote == nil || holding.DailyBars == nil || holding.MinuteBars == nil {
+			t.Fatalf("holding decision inputs were dropped: %+v", holding)
+		}
+		if holding.Profile == nil || holding.Profile.ProfileText != "" {
+			t.Fatalf("holding profile was not compacted: %+v", holding.Profile)
+		}
+	}
+}
+
+func portfolioSentinelPromptContextValue(t *testing.T, prompt string) map[string]any {
+	t.Helper()
+	const startMarker = "## Portfolio Sentinel Context\n\n```json\n"
+	const endMarker = "\n```\n\n## Required Holding Coverage"
+	start := strings.Index(prompt, startMarker)
+	if start < 0 {
+		t.Fatalf("portfolio sentinel context start missing:\n%s", prompt)
+	}
+	start += len(startMarker)
+	end := strings.Index(prompt[start:], endMarker)
+	if end < 0 {
+		t.Fatalf("portfolio sentinel context end missing:\n%s", prompt)
+	}
+	var value map[string]any
+	if err := json.Unmarshal([]byte(prompt[start:start+end]), &value); err != nil {
+		t.Fatalf("portfolio sentinel context is not valid JSON: %v\n%s", err, prompt[start:start+end])
+	}
+	return value
 }
 
 func TestTruncatePromptUTF8KeepsValidUTF8AtByteBoundary(t *testing.T) {

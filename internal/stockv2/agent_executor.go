@@ -2141,7 +2141,7 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	b.WriteString("Use the globally installed `serenity-skill` methodology for material technology/supply-chain themes: map value-chain exposure, scarce constraints, evidence strength, and failure conditions. Keep StockV2 portfolio permissions and guardrails authoritative.\n")
 	b.WriteString("Use provided context, stock_agent MCP data, and Codex CLI web_search for external verification. The CLI is started with live search enabled. Do not invent prices, news, filings, searches, or sources.\n")
 	b.WriteString("The supplied context is the primary evidence pack. Do not re-fetch quotes, daily bars, profiles, portfolio context, news, or links that are already present and usable. Use MCP only for mandatory pagination or a specific missing/conflicting fact; batch symbols in one call whenever a tool supports it.\n")
-	b.WriteString("Finish mandatory review-scope pagination first. After that, use at most 8 discretionary MCP retrieval calls in total, never repeat an equivalent query, and submit the best conditional result promptly instead of extending research for marginal evidence. The final stock_agent.submit_result call is not part of this retrieval budget.\n")
+	b.WriteString("Finish mandatory review-scope pagination first. After that, use at most 4 discretionary MCP retrieval calls in total, never repeat an equivalent query, and submit the best conditional result promptly instead of extending research for marginal evidence. The final stock_agent.submit_result call is not part of this retrieval budget.\n")
 	b.WriteString("When priorHoldingJudgments is present, it is derived_state memory from the latest successful run, not independent evidence. You may use, revise, or ignore it, but a prior warning, action, threshold, or confidence must never increase current confidence or justify a new action without new quote, price/volume, filing, financial, theme, or news evidence since that run. Explicitly distinguish new evidence from inherited memory. You are not required to mention, preserve, or answer each prior judgment.\n")
 	b.WriteString("Do not place orders, do not modify holdings, do not activate strategies, and do not read token/cookie/private config.\n")
 	b.WriteString("You may propose portfolio-bound operations only as pending user-confirmed proposals; the main program will create OperationReview and run guardrails.\n")
@@ -2157,7 +2157,6 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	b.WriteString("\n")
 
 	b.WriteString("## Portfolio Sentinel Context\n\n```json\n")
-	raw, _ := json.MarshalIndent(pack, "", "  ")
 	b.WriteString(contextPlaceholder)
 	b.WriteString("\n```\n\n")
 
@@ -2182,7 +2181,7 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 	b.WriteString("4a. For every holding, make your own conditional short/medium/long price forecast from the full context: short is 5 trading days, medium is 20, and long is 60. The probabilities and prices are analytical model estimates. Do not copy deterministic gate scores into probability fields and do not reduce this to indicator extrapolation. Reconcile trend, flow, market/sector regime, news themes, fundamentals/valuation, catalysts, crowding, conflicting evidence, and freshness.\n")
 	b.WriteString("4b. Also estimate the same three horizons for every portfolio as a whole, including probability of gain, probability of benchmark outperformance, expected return range, and expected maximum drawdown. Account for concentration and correlated holdings rather than summing single-name probabilities.\n")
 	b.WriteString("5. Before emitting any action other than hold, perform real public retrieval using Codex web_search or a named search/research/browse Agent tool, record compact source/claim metadata in research_audit, and reference those IDs from the action. MCP-only internal retrieval is not sufficient for an actionable plan.\n")
-	b.WriteString("5a. Keep public retrieval bounded: use at most 6 external search/fetch tool calls for this run, start with one targeted query per holding, fetch only the strongest relevant sources, and never retry the same query. More calls are not a substitute for evidence quality.\n")
+	b.WriteString("5a. Keep public retrieval bounded: use at most 4 external search/fetch tool calls for this run. Prefer one targeted search per holding and treat any fetch as part of the same four-call budget; never retry an equivalent query. More calls are not a substitute for evidence quality.\n")
 	b.WriteString("5b. Describe retrieval status precisely. Say external search is unavailable only when the tool cannot be invoked. If invocation succeeds but yields no useful result, say the search returned no usable result. If any public URL was fetched or recorded in research_audit, do not say external search is unavailable; say that public material was retrieved but no holding-specific causal evidence was verified when that is the actual limitation.\n")
 	b.WriteString("6. Output executable but non-executing plans. Use deterministic price/change/daily-close/portfolio-weight conditions; never use prose as a trigger.\n")
 	b.WriteString("7. decisionGates is a server-generated deterministic boundary. Never emit build_position/add_position when that symbol does not list the action in allowedActions. Reduction and exit risk controls remain allowed. The server will downgrade a conflicting buy plan to hold and preserve the reason in the audit result.\n\n")
@@ -2219,11 +2218,11 @@ func buildPortfolioSentinelPrompt(taskID string, pack PortfolioSentinelContext, 
 
 	// ponytail: keep one fixed prompt-size guard; if model limits change, raise it while
 	// continuing to trim only the replaceable context body, never the review contract.
-	const maxPromptLen = 22000
+	const maxPromptLen = 48000
 	prompt := b.String()
 	contextLimit := maxPromptLen - (len(prompt) - len(contextPlaceholder))
-	contextBody := truncatePromptUTF8ToLimit(string(raw), contextLimit)
-	return strings.Replace(prompt, contextPlaceholder, contextBody, 1)
+	contextBody := marshalPortfolioSentinelPromptContext(pack, contextLimit)
+	return strings.Replace(prompt, contextPlaceholder, string(contextBody), 1)
 }
 
 func portfolioSentinelPromptExample(taskID string, includeCoverage bool) map[string]any {
