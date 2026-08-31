@@ -1001,6 +1001,14 @@ func TestMarshalPortfolioSentinelPromptContextPreservesAllDecisionInputs(t *test
 			t.Fatalf("holding profile was not compacted: %+v", holding.Profile)
 		}
 	}
+	overTargetRaw := marshalPortfolioSentinelPromptContext(pack, 1000)
+	var overTarget map[string]any
+	if err := json.Unmarshal(overTargetRaw, &overTarget); err != nil {
+		t.Fatalf("decode over-target compact context: %v", err)
+	}
+	if overTarget["contextTruncated"] == true {
+		t.Fatalf("routine target incorrectly removed decision context: %s", overTargetRaw)
+	}
 }
 
 func portfolioSentinelPromptContextValue(t *testing.T, prompt string) map[string]any {

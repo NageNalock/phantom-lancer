@@ -55,12 +55,21 @@ type portfolioSentinelPromptDecisionDataHealth struct {
 }
 
 func marshalPortfolioSentinelPromptContext(pack PortfolioSentinelContext, limit int) []byte {
+	var smallest []byte
 	for level := 0; level <= 3; level++ {
 		compact := compactPortfolioSentinelPromptContext(pack, level)
 		raw, _ := json.Marshal(compact)
+		smallest = raw
 		if limit <= 0 || len(raw) <= limit {
 			return raw
 		}
+	}
+	// ponytail: the 48 KiB prompt target controls routine cost, not model
+	// compatibility. Preserve a complete four-holding decision pack above that
+	// target; only an abnormal post-compaction payload may fall back to coverage.
+	const hardContextLimit = 96 * 1024
+	if len(smallest) <= hardContextLimit {
+		return smallest
 	}
 	// ponytail: an exceptionally large portfolio must still receive valid JSON.
 	// RequiredHoldingCoverage remains outside this block, so the Agent can return
