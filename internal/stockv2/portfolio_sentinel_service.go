@@ -24,6 +24,12 @@ const (
 	// Scan 50 completed runs to tolerate portfolio-scoped runs without copying an
 	// unbounded history; add a keyed repository query if real usage exceeds this.
 	portfolioSentinelPriorRunScanLimit = 50
+	// ponytail: opportunity discovery owns the broad market universe. The sentinel
+	// only receives a small recent handoff so it can still propose a new position
+	// without turning every holding review into another full-market research run.
+	// Raise this bound only after batching candidate research independently.
+	portfolioSentinelTrustedCandidateLimit   = 4
+	portfolioSentinelOpportunitySignalMaxAge = 96 * time.Hour
 )
 
 type portfolioSentinelNewsFilterStats struct {
@@ -33,6 +39,15 @@ type portfolioSentinelNewsFilterStats struct {
 	SuppressedLowPriorityCount   int
 	SuppressedLowPriorityTerms   map[string]int
 	SuppressedLowPrioritySymbols map[string]int
+}
+
+type portfolioSentinelCandidateSignal struct {
+	Item       PortfolioSentinelCandidateContext
+	Source     string
+	UpdatedAt  time.Time
+	Priority   int
+	Confidence float64
+	Rank       int
 }
 
 func (s *Service) GetPortfolioSentinelConfig(ctx context.Context) (PortfolioSentinelConfig, error) {
@@ -527,51 +542,30 @@ func portfolioSentinelPriorJudgmentSymbolKey(symbol, market string) string {
 }
 
 func (s *Service) portfolioSentinelTrustedCandidates(ctx context.Context, holdingSymbols []string) ([]PortfolioSentinelCandidateContext, error) {
-	held := make(map[string]struct{}, len(holdingSymbols))
-	for _, symbol := range holdingSymbols {
-		held[strings.ToUpper(strings.TrimSpace(symbol))] = struct{}{}
-	}
-	type candidateState struct {
-		item    PortfolioSentinelCandidateContext
-		sources map[string]struct{}
-	}
-	bySymbol := map[string]*candidateState{}
-	add := func(symbol, market, name, rationale, source string) {
-		key := strings.ToUpper(strings.TrimSpace(symbol))
-		if key == "" {
-			return
-		}
-		if _, exists := held[key]; exists {
-			return
-		}
-		state := bySymbol[key]
-		if state == nil {
-			state = &candidateState{
-				item: PortfolioSentinelCandidateContext{
-					Symbol:    strings.TrimSpace(symbol),
-					Market:    strings.TrimSpace(market),
-					Name:      strings.TrimSpace(name),
-					Rationale: safelog.Text(strings.TrimSpace(rationale), 500),
-				},
-				sources: map[string]struct{}{},
-			}
-			bySymbol[key] = state
-		}
-		if source != "" {
-			state.sources[source] = struct{}{}
-		}
-	}
+	signals := make([]portfolioSentinelCandidateSignal, 0, 32)
 	for _, status := range []string{
 		OpportunityCandidateStatusShortlisted,
 		OpportunityCandidateStatusStrategyRequested,
 		OpportunityCandidateStatusStrategyGenerated,
 	} {
-		items, err := s.store.ListOpportunityCandidates(ctx, OpportunityCandidateListFilter{Status: status, Limit: 100})
+		items, err := s.store.ListOpportunityCandidates(ctx, OpportunityCandidateListFilter{Status: status, Limit: 200})
 		if err != nil {
 			return nil, err
 		}
+		priority := 1
+		if status == OpportunityCandidateStatusStrategyRequested {
+			priority = 2
+		} else if status == OpportunityCandidateStatusStrategyGenerated {
+			priority = 3
+		}
 		for _, item := range items {
-			add(item.Symbol, item.Market, item.Name, item.Reason, "opportunity:"+status)
+			signals = append(signals, portfolioSentinelCandidateSignal{
+				Item: PortfolioSentinelCandidateContext{
+					Symbol: item.Symbol, Market: item.Market, Name: item.Name, Rationale: item.Reason,
+				},
+				Source: "opportunity:" + status, UpdatedAt: item.UpdatedAt,
+				Priority: priority, Confidence: item.Confidence, Rank: item.Rank,
+			})
 		}
 	}
 	strategies, err := s.store.ListStrategies(ctx, StrategyListFilter{Status: StrategyStatusActive, Limit: 200})
@@ -586,26 +580,122 @@ func (s *Service) portfolioSentinelTrustedCandidates(ctx context.Context, holdin
 		if item.ActiveVersion != nil {
 			rationale = item.ActiveVersion.Thesis
 		}
-		add(item.Strategy.Symbol, item.Strategy.Market, item.Strategy.Name, rationale, "active_strategy")
+		signals = append(signals, portfolioSentinelCandidateSignal{
+			Item: PortfolioSentinelCandidateContext{
+				Symbol: item.Strategy.Symbol, Market: item.Strategy.Market,
+				Name: item.Strategy.Name, Rationale: rationale,
+			},
+			Source: "active_strategy", UpdatedAt: item.Strategy.UpdatedAt, Priority: 4,
+		})
 	}
-	keys := make([]string, 0, len(bySymbol))
-	for key := range bySymbol {
-		keys = append(keys, key)
+	return selectPortfolioSentinelTrustedCandidates(signals, holdingSymbols, time.Now()), nil
+}
+
+func selectPortfolioSentinelTrustedCandidates(
+	signals []portfolioSentinelCandidateSignal,
+	holdingSymbols []string,
+	now time.Time,
+) []PortfolioSentinelCandidateContext {
+	type candidateState struct {
+		item       PortfolioSentinelCandidateContext
+		sources    map[string]struct{}
+		updatedAt  time.Time
+		priority   int
+		confidence float64
+		rank       int
 	}
-	sort.Strings(keys)
-	if len(keys) > 50 {
-		keys = keys[:50]
+	better := func(priority int, updatedAt time.Time, confidence float64, rank int, current *candidateState) bool {
+		if current == nil || priority != current.priority {
+			return current == nil || priority > current.priority
+		}
+		if !updatedAt.Equal(current.updatedAt) {
+			return updatedAt.After(current.updatedAt)
+		}
+		if confidence != current.confidence {
+			return confidence > current.confidence
+		}
+		if rank <= 0 {
+			rank = int(^uint(0) >> 1)
+		}
+		currentRank := current.rank
+		if currentRank <= 0 {
+			currentRank = int(^uint(0) >> 1)
+		}
+		return rank < currentRank
 	}
-	out := make([]PortfolioSentinelCandidateContext, 0, len(keys))
-	for _, key := range keys {
+	bySymbol := make(map[string]*candidateState, len(signals))
+	for _, signal := range signals {
+		key := strings.ToUpper(strings.TrimSpace(signal.Item.Symbol))
+		if key == "" || strings.TrimSpace(signal.Source) == "" {
+			continue
+		}
+		if signal.Source != "active_strategy" &&
+			(signal.UpdatedAt.IsZero() || now.Sub(signal.UpdatedAt) > portfolioSentinelOpportunitySignalMaxAge) {
+			continue
+		}
 		state := bySymbol[key]
+		if state == nil {
+			state = &candidateState{sources: map[string]struct{}{}}
+			bySymbol[key] = state
+		}
+		state.sources[signal.Source] = struct{}{}
+		if !better(signal.Priority, signal.UpdatedAt, signal.Confidence, signal.Rank, state) {
+			continue
+		}
+		state.item = PortfolioSentinelCandidateContext{
+			Symbol: strings.TrimSpace(signal.Item.Symbol), Market: strings.TrimSpace(signal.Item.Market),
+			Name: strings.TrimSpace(signal.Item.Name), Rationale: safelog.Text(strings.TrimSpace(signal.Item.Rationale), 500),
+		}
+		state.updatedAt = signal.UpdatedAt
+		state.priority = signal.Priority
+		state.confidence = signal.Confidence
+		state.rank = signal.Rank
+	}
+	states := make([]*candidateState, 0, len(bySymbol))
+	for _, state := range bySymbol {
+		states = append(states, state)
+	}
+	sort.Slice(states, func(i, j int) bool {
+		if states[i].priority != states[j].priority {
+			return states[i].priority > states[j].priority
+		}
+		if !states[i].updatedAt.Equal(states[j].updatedAt) {
+			return states[i].updatedAt.After(states[j].updatedAt)
+		}
+		if states[i].confidence != states[j].confidence {
+			return states[i].confidence > states[j].confidence
+		}
+		iRank, jRank := states[i].rank, states[j].rank
+		if iRank <= 0 {
+			iRank = int(^uint(0) >> 1)
+		}
+		if jRank <= 0 {
+			jRank = int(^uint(0) >> 1)
+		}
+		if iRank != jRank {
+			return iRank < jRank
+		}
+		return strings.ToUpper(states[i].item.Symbol) < strings.ToUpper(states[j].item.Symbol)
+	})
+	if len(states) > portfolioSentinelTrustedCandidateLimit {
+		states = states[:portfolioSentinelTrustedCandidateLimit]
+	}
+	held := make(map[string]struct{}, len(holdingSymbols))
+	for _, symbol := range holdingSymbols {
+		held[strings.ToUpper(strings.TrimSpace(symbol))] = struct{}{}
+	}
+	out := make([]PortfolioSentinelCandidateContext, 0, len(states))
+	for _, state := range states {
+		if _, exists := held[strings.ToUpper(strings.TrimSpace(state.item.Symbol))]; exists {
+			continue
+		}
 		for source := range state.sources {
 			state.item.Sources = append(state.item.Sources, source)
 		}
 		sort.Strings(state.item.Sources)
 		out = append(out, state.item)
 	}
-	return out, nil
+	return out
 }
 
 func (s *Service) portfolioSentinelActiveThemes(
@@ -2339,14 +2429,15 @@ func portfolioSentinelContextStats(ctx PortfolioSentinelContext) map[string]any 
 	}
 	quotes, daily, minute := portfolioSentinelDataCounts(ctx)
 	return map[string]any{
-		"portfolioCount":     len(ctx.Portfolios),
-		"holdingCount":       holdings,
-		"priorJudgmentCount": len(ctx.PriorJudgments),
-		"newsEventCount":     len(ctx.NewsEvents),
-		"rawNewsCount":       len(ctx.RawNews),
-		"quoteCount":         quotes,
-		"dailyBarSymbols":    daily,
-		"minuteBarSymbols":   minute,
+		"portfolioCount":        len(ctx.Portfolios),
+		"holdingCount":          holdings,
+		"trustedCandidateCount": len(ctx.Candidates),
+		"priorJudgmentCount":    len(ctx.PriorJudgments),
+		"newsEventCount":        len(ctx.NewsEvents),
+		"rawNewsCount":          len(ctx.RawNews),
+		"quoteCount":            quotes,
+		"dailyBarSymbols":       daily,
+		"minuteBarSymbols":      minute,
 	}
 }
 

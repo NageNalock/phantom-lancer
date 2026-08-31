@@ -104,6 +104,53 @@ func TestBuildPortfolioSentinelContextIncludesHoldingsAndWindowNews(t *testing.T
 	}
 }
 
+func TestSelectPortfolioSentinelTrustedCandidatesKeepsRecentBoundedHandoff(t *testing.T) {
+	now := time.Date(2026, 8, 31, 22, 0, 0, 0, time.Local)
+	signal := func(symbol, source string, age time.Duration, priority int, confidence float64, rank int) portfolioSentinelCandidateSignal {
+		return portfolioSentinelCandidateSignal{
+			Item: PortfolioSentinelCandidateContext{
+				Symbol: symbol, Market: "SH", Name: "候选" + symbol, Rationale: source + " rationale",
+			},
+			Source: source, UpdatedAt: now.Add(-age), Priority: priority, Confidence: confidence, Rank: rank,
+		}
+	}
+	signals := []portfolioSentinelCandidateSignal{
+		signal("600001", "active_strategy", 10*24*time.Hour, 4, 0, 0),
+		signal("600002", "opportunity:strategy_generated", time.Hour, 3, 0.75, 2),
+		// A newer request for the same symbol must remain auditable, while the
+		// generated strategy stays the authoritative rationale.
+		signal("600002", "opportunity:strategy_requested", 30*time.Minute, 2, 0.8, 1),
+		signal("600003", "opportunity:strategy_generated", 2*time.Hour, 3, 0.72, 1),
+		signal("600004", "opportunity:strategy_generated", 3*time.Hour, 3, 0.70, 3),
+		signal("600005", "opportunity:strategy_generated", 4*time.Hour, 3, 0.90, 1),
+		signal("600006", "opportunity:strategy_generated", 5*24*time.Hour, 3, 0.99, 1),
+	}
+
+	all := selectPortfolioSentinelTrustedCandidates(signals, nil, now)
+	if len(all) != portfolioSentinelTrustedCandidateLimit {
+		t.Fatalf("candidate count = %d, want %d", len(all), portfolioSentinelTrustedCandidateLimit)
+	}
+	want := []string{"600001", "600002", "600003", "600004"}
+	for i := range want {
+		if all[i].Symbol != want[i] {
+			t.Fatalf("candidate[%d] = %s, want %s; all=%+v", i, all[i].Symbol, want[i], all)
+		}
+	}
+	if len(all[1].Sources) != 2 || all[1].Rationale != "opportunity:strategy_generated rationale" {
+		t.Fatalf("deduplicated candidate = %+v", all[1])
+	}
+	for _, item := range all {
+		if item.Symbol == "600006" {
+			t.Fatalf("stale opportunity leaked into sentinel handoff: %+v", item)
+		}
+	}
+
+	withoutHeld := selectPortfolioSentinelTrustedCandidates(signals, []string{"600001"}, now)
+	if len(withoutHeld) != 3 || withoutHeld[0].Symbol != "600002" {
+		t.Fatalf("held filtering changed the trusted validator pool: %+v", withoutHeld)
+	}
+}
+
 func TestBuildPortfolioSentinelContextIncludesLatestPriorJudgmentAsAdvisoryMemory(t *testing.T) {
 	svc, cleanup := newStrategyTestService(t)
 	defer cleanup()
