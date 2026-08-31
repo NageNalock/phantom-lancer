@@ -2,10 +2,57 @@ package stockv2
 
 import (
 	"encoding/json"
-	"time"
 
 	"phantom-lancer/internal/safelog"
 )
+
+type portfolioSentinelPromptContextView struct {
+	SchemaVersion  string                                         `json:"schemaVersion"`
+	RunID          string                                         `json:"runId"`
+	Window         PortfolioSentinelWindowContext                 `json:"window"`
+	Portfolios     []PortfolioSentinelPortfolioContext            `json:"portfolios"`
+	Candidates     []PortfolioSentinelCandidateContext            `json:"trustedCandidates,omitempty"`
+	Themes         []PortfolioSentinelThemeContext                `json:"activeThemes,omitempty"`
+	PriorJudgments []PortfolioSentinelPriorJudgment               `json:"priorHoldingJudgments,omitempty"`
+	Transactions   []StockV2Transaction                           `json:"recentTransactions,omitempty"`
+	DataFreshness  map[string]any                                 `json:"dataFreshness,omitempty"`
+	ContextStats   map[string]any                                 `json:"contextStats,omitempty"`
+	NewsContext    *PortfolioSentinelNewsContext                  `json:"newsContext,omitempty"`
+	DecisionGates  map[string]portfolioSentinelPromptDecisionGate `json:"decisionGates,omitempty"`
+	Note           string                                         `json:"note,omitempty"`
+}
+
+type portfolioSentinelPromptDecisionGate struct {
+	Symbol         string                                      `json:"symbol"`
+	Market         string                                      `json:"market,omitempty"`
+	InstrumentType string                                      `json:"instrumentType,omitempty"`
+	TradeDate      string                                      `json:"tradeDate,omitempty"`
+	DecisionDate   string                                      `json:"decisionDate,omitempty"`
+	Status         string                                      `json:"status"`
+	MarketRegime   string                                      `json:"marketRegime,omitempty"`
+	AllowedActions []string                                    `json:"allowedActions,omitempty"`
+	Gates          []portfolioSentinelPromptGateResult         `json:"gates"`
+	DataHealth     []portfolioSentinelPromptDecisionDataHealth `json:"dataHealth"`
+	Metrics        map[string]any                              `json:"metrics,omitempty"`
+}
+
+type portfolioSentinelPromptGateResult struct {
+	Key          string         `json:"key"`
+	Status       string         `json:"status"`
+	Summary      string         `json:"summary"`
+	Reasons      []string       `json:"reasons,omitempty"`
+	Metrics      map[string]any `json:"metrics,omitempty"`
+	EvidenceRefs []string       `json:"evidenceRefs,omitempty"`
+}
+
+type portfolioSentinelPromptDecisionDataHealth struct {
+	Key      string `json:"key"`
+	Status   string `json:"status"`
+	Required bool   `json:"required"`
+	AsOf     string `json:"asOf,omitempty"`
+	Source   string `json:"source,omitempty"`
+	Message  string `json:"message,omitempty"`
+}
 
 func marshalPortfolioSentinelPromptContext(pack PortfolioSentinelContext, limit int) []byte {
 	for level := 0; level <= 3; level++ {
@@ -32,7 +79,7 @@ func marshalPortfolioSentinelPromptContext(pack PortfolioSentinelContext, limit 
 	return raw
 }
 
-func compactPortfolioSentinelPromptContext(pack PortfolioSentinelContext, level int) PortfolioSentinelContext {
+func compactPortfolioSentinelPromptContext(pack PortfolioSentinelContext, level int) portfolioSentinelPromptContextView {
 	out := pack
 	out.Note = safelog.Text(pack.Note, 500)
 	out.NewsEvents = nil // Holding-scoped compact news already preserves relevance.
@@ -76,13 +123,19 @@ func compactPortfolioSentinelPromptContext(pack PortfolioSentinelContext, level 
 	}
 	out.Themes = append([]PortfolioSentinelThemeContext(nil), pack.Themes[:min(len(pack.Themes), themeLimit)]...)
 	out.Transactions = append([]StockV2Transaction(nil), pack.Transactions[:min(len(pack.Transactions), transactionLimit)]...)
-	out.DecisionGates = compactPortfolioSentinelDecisionGates(pack.DecisionGates, level)
 	out.ContextStats = make(map[string]any, len(pack.ContextStats)+1)
 	for key, value := range pack.ContextStats {
 		out.ContextStats[key] = value
 	}
 	out.ContextStats["promptCompactionLevel"] = level
-	return out
+	return portfolioSentinelPromptContextView{
+		SchemaVersion: out.SchemaVersion, RunID: out.RunID, Window: out.Window,
+		Portfolios: out.Portfolios, Candidates: out.Candidates, Themes: out.Themes,
+		PriorJudgments: out.PriorJudgments, Transactions: out.Transactions,
+		DataFreshness: out.DataFreshness, ContextStats: out.ContextStats,
+		NewsContext: out.NewsContext, DecisionGates: compactPortfolioSentinelDecisionGates(pack.DecisionGates, level),
+		Note: out.Note,
+	}
 }
 
 func compactPortfolioSentinelProfile(profile *StockProfile, level int) *StockProfile {
@@ -103,6 +156,19 @@ func compactPortfolioSentinelProfile(profile *StockProfile, level int) *StockPro
 	out.BusinessLinesEn = nil
 	out.AIProfileError = safelog.Text(out.AIProfileError, 160)
 	out.ConstituentHint = safelog.Text(out.ConstituentHint, 400)
+	if level >= 3 {
+		return &StockProfile{
+			Symbol: profile.Symbol, Market: profile.Market, InstrumentType: profile.InstrumentType,
+			Name: profile.Name, Industry: profile.Industry,
+			Sectors: compactStringList(profile.Sectors, 3), Concepts: compactStringList(profile.Concepts, 4),
+			Tags: compactStringList(profile.Tags, 3), BusinessSummary: safelog.Text(out.BusinessSummary, 240),
+			BusinessLinesZh: compactStringList(profile.BusinessLinesZh, 3), RiskTagsZh: compactStringList(profile.RiskTagsZh, 3),
+			AIProfileStatus: profile.AIProfileStatus, AIProfileConfidence: profile.AIProfileConfidence,
+			FundType: profile.FundType, TrackingIndex: profile.TrackingIndex, Theme: profile.Theme,
+			ConstituentHint: safelog.Text(profile.ConstituentHint, 240), ProfileVersion: profile.ProfileVersion,
+			UpdatedAt: profile.UpdatedAt,
+		}
+	}
 	if level >= 2 {
 		out.Aliases = compactStringList(out.Aliases, 2)
 		out.Sectors = compactStringList(out.Sectors, 3)
@@ -151,36 +217,39 @@ func compactPortfolioSentinelNewsLinks(items []NewsLinkCandidate, limit int) []N
 	return out
 }
 
-func compactPortfolioSentinelDecisionGates(items map[string]DecisionGateSnapshot, level int) map[string]DecisionGateSnapshot {
+func compactPortfolioSentinelDecisionGates(items map[string]DecisionGateSnapshot, level int) map[string]portfolioSentinelPromptDecisionGate {
 	if len(items) == 0 {
 		return nil
 	}
-	out := make(map[string]DecisionGateSnapshot, len(items))
+	out := make(map[string]portfolioSentinelPromptDecisionGate, len(items))
 	for symbol, item := range items {
-		item.ID = ""
-		item.ContextType = ""
-		item.ContextID = ""
-		item.CreatedAt = time.Time{}
-		item.Metrics = compactPortfolioSentinelGateMetrics(item.Metrics)
-		gates := make([]DecisionGateResult, 0, len(item.Gates))
-		for _, gate := range item.Gates {
-			gate.Summary = safelog.Text(gate.Summary, 240)
-			gate.Reasons = compactStringList(gate.Reasons, 2)
-			gate.EvidenceRefs = compactStringList(gate.EvidenceRefs, 3)
-			gates = append(gates, gate)
+		gateOut := portfolioSentinelPromptDecisionGate{
+			Symbol: item.Symbol, Market: item.Market, InstrumentType: item.InstrumentType,
+			TradeDate: item.TradeDate, DecisionDate: item.DecisionDate, Status: item.Status,
+			MarketRegime: item.MarketRegime, AllowedActions: item.AllowedActions,
+			Metrics: compactPortfolioSentinelGateMetrics(item.Metrics),
 		}
-		item.Gates = gates
-		health := make([]DecisionDataHealth, 0, len(item.DataHealth))
+		gates := make([]portfolioSentinelPromptGateResult, 0, len(item.Gates))
+		for _, gate := range item.Gates {
+			gates = append(gates, portfolioSentinelPromptGateResult{
+				Key: gate.Key, Status: gate.Status, Summary: safelog.Text(gate.Summary, 180),
+				Reasons: compactStringList(gate.Reasons, 2), Metrics: gate.Metrics,
+				EvidenceRefs: compactStringList(gate.EvidenceRefs, 3),
+			})
+		}
+		gateOut.Gates = gates
+		health := make([]portfolioSentinelPromptDecisionDataHealth, 0, len(item.DataHealth))
 		for _, status := range item.DataHealth {
-			status.CheckedAt = time.Time{}
-			status.Message = safelog.Text(status.Message, 180)
 			if level >= 3 && status.Status == DecisionHealthHealthy && !status.Required {
 				continue
 			}
-			health = append(health, status)
+			health = append(health, portfolioSentinelPromptDecisionDataHealth{
+				Key: status.Key, Status: status.Status, Required: status.Required,
+				AsOf: status.AsOf, Source: status.Source, Message: safelog.Text(status.Message, 120),
+			})
 		}
-		item.DataHealth = health
-		out[symbol] = item
+		gateOut.DataHealth = health
+		out[symbol] = gateOut
 	}
 	return out
 }

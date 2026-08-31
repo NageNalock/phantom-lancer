@@ -969,7 +969,15 @@ func TestMarshalPortfolioSentinelPromptContextPreservesAllDecisionInputs(t *test
 				Symbol: gateSymbol, DecisionDate: "2026-08-31", Status: DecisionHealthHealthy,
 				AllowedActions: []string{PortfolioSentinelPlanHold, PortfolioSentinelPlanBuild},
 				Gates:          []DecisionGateResult{{Key: DecisionGateVolatility, Status: DecisionGateStatusPass, Summary: "波动可控"}},
-				Metrics:        map[string]any{"trendCloseQFQ": 10.2, "latestTradablePrice": 10.3, "lastCompletedCloseRaw": 10.1},
+				DataHealth: []DecisionDataHealth{
+					{Key: "daily_bars", Status: DecisionHealthHealthy, Required: true, Message: strings.Repeat("日线状态说明", 30)},
+					{Key: "latest_quote", Status: DecisionHealthHealthy, Required: true, Message: strings.Repeat("报价状态说明", 30)},
+					{Key: "market_benchmark", Status: DecisionHealthHealthy, Required: true, Message: strings.Repeat("基准状态说明", 30)},
+					{Key: "event_calendar", Status: DecisionHealthDegraded, Required: true, Message: strings.Repeat("事件状态说明", 30)},
+					{Key: "financial_facts", Status: DecisionHealthDegraded, Message: strings.Repeat("财务状态说明", 30)},
+					{Key: "fund_flow", Status: DecisionHealthDegraded, Message: strings.Repeat("资金状态说明", 30)},
+				},
+				Metrics: map[string]any{"trendCloseQFQ": 10.2, "latestTradablePrice": 10.3, "lastCompletedCloseRaw": 10.1},
 			}
 		}
 	}
