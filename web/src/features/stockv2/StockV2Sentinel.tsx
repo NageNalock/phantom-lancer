@@ -14,6 +14,7 @@ import type {
   StockV2PortfolioSentinelRunDetail,
   StockV2PortfolioSentinelRunListResponse,
   StockV2RequestRunPortfolioSentinel,
+  StockV2DecisionDataHealth,
 } from "../../app/types";
 import { friendlyError } from "../../api/client";
 import { Button, CollapsibleSection, Drawer, Field, Notice, Pill } from "../../components/ui";
@@ -518,15 +519,34 @@ function ActionPlanDataHealth({ gate }: { gate: NonNullable<StockV2PortfolioSent
       {labels.map(([key, label]) => {
         const item = health.get(key);
         if (!item) return null;
-        const value = item.asOf ? formatDate(item.asOf) : item.status === "healthy" ? "可用" : "缺失";
         return (
-          <Pill key={key} tone={item.status === "healthy" ? "good" : item.status === "blocked" ? "danger" : "warn"}>
-            {label} {value}
-          </Pill>
+          <span key={key} title={decisionHealthTitle(item)}>
+            <Pill tone={decisionHealthTone(item.status)}>{label} {decisionHealthValue(item)}</Pill>
+          </span>
         );
       })}
     </div>
   );
+}
+
+function decisionHealthValue(item: StockV2DecisionDataHealth): string {
+  if (item.status === "not_applicable") return "不适用";
+  if (item.status === "blocked") return item.asOf ? `阻断 ${formatDate(item.asOf)}` : "阻断";
+  if (item.status === "degraded") return item.asOf ? `降级 ${formatDate(item.asOf)}` : "降级";
+  return item.asOf ? formatDate(item.asOf) : "可用";
+}
+
+function decisionHealthTone(status: StockV2DecisionDataHealth["status"]): "neutral" | "good" | "warn" | "danger" {
+  if (status === "healthy") return "good";
+  if (status === "blocked") return "danger";
+  if (status === "degraded") return "warn";
+  return "neutral";
+}
+
+function decisionHealthTitle(item: StockV2DecisionDataHealth): string {
+  return [item.message, item.asOf ? `数据日期 ${formatDate(item.asOf)}` : "", item.source ? `来源 ${item.source}` : ""]
+    .filter(Boolean)
+    .join("；");
 }
 
 function actionPlanMonitorWindowSummary(plan: StockV2PortfolioSentinelActionPlan): string {

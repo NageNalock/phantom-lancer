@@ -1798,7 +1798,7 @@ func buildOpportunityDiscoveryPrompt(taskID string, discCtx OpportunityDiscovery
 	b.WriteString("Do not place orders, do not modify holdings, do not create proposed_operation, do not activate strategies, and do not read token/cookie/private config.\n")
 	b.WriteString("Every candidate symbol must exist in StockV2 master data. Use stock_agent.search_instruments or stock_agent.search_stock_profiles before recording candidates.\n")
 	if discCtx.Mode == OpportunityDiscoveryModeMarketScan {
-		b.WriteString("This is a bounded market-scan review. MarketCandidates is the complete allowed universe for this run: do not rediscover the full market and do not return any symbol outside it. Review at most 20 supplied main-board stocks, retain at most 10, and use public search only to verify material claims, catalysts, and risks. Missing fund-flow or quote evidence must reduce confidence instead of being invented. The server-generated decisionStatus, decisionGates, and dataHealth fields are authoritative: never promote a blocked entry candidate and never describe missing evidence as neutral. For each unique metrics.themeMatches threadId, call stock_agent.get_news_thread once and verify versionId. A semantic_recall or requiresCausalVerification match only grants a research slot; retain it only after verifying business exposure, transmission, pricing, and invalidation.\n")
+		b.WriteString("This is a bounded market-scan review. First assess SectorSnapshot as a cross-sectional rotation package: distinguish emerging, confirmed, overheated, fading, and invalidated groups, then compare supplied representatives inside the viable groups. MarketCandidates is the complete allowed universe for this run: do not rediscover the full market and do not return any symbol outside it. Review at most 20 supplied main-board stocks, retain at most 10, and use public search only to verify material claims, catalysts, and risks. Sector state grants research priority, not permission to bypass entry gates. Missing fund-flow or quote evidence must reduce confidence instead of being invented. The server-generated decisionStatus, decisionGates, and dataHealth fields are authoritative: never promote a blocked entry candidate and never describe missing evidence as neutral. For each unique metrics.themeMatches threadId, call stock_agent.get_news_thread once and verify versionId. A semantic_recall or requiresCausalVerification match only grants a research slot; retain it only after verifying business exposure, transmission, pricing, and invalidation.\n")
 	}
 	if discCtx.DiscoveryRun.ExcludeChiNextAndStarMarket {
 		b.WriteString("This run excludes ChiNext and STAR Market individual stocks. Do not research, record, or return SZ 300/301 or SH 688/689 stocks. Exchange-traded funds remain allowed when the opportunity instrument scope permits them.\n")
@@ -1899,34 +1899,36 @@ func opportunityDiscoveryPromptContext(discCtx OpportunityDiscoveryContext) any 
 		RequiresCausalVerification bool     `json:"requiresCausalVerification,omitempty"`
 	}
 	type compactMetrics struct {
-		TradeDate          string               `json:"tradeDate,omitempty"`
-		Return5Pct         float64              `json:"return5Pct,omitempty"`
-		Return20Pct        float64              `json:"return20Pct,omitempty"`
-		Return60Pct        float64              `json:"return60Pct,omitempty"`
-		MA20GapPct         float64              `json:"ma20GapPct,omitempty"`
-		VolumeRatio5To20   float64              `json:"volumeRatio5To20,omitempty"`
-		MedianAmount20     float64              `json:"medianAmount20,omitempty"`
-		MainFlowRatio20    float64              `json:"mainFlowRatio20,omitempty"`
-		PositiveFlowDays20 int                  `json:"positiveFlowDays20,omitempty"`
-		LatestPrice        float64              `json:"latestPrice,omitempty"`
-		LatestPctChange    float64              `json:"latestPctChange,omitempty"`
-		QFQAvailable       bool                 `json:"qfqAvailable"`
-		FundFlowAvailable  bool                 `json:"fundFlowAvailable"`
-		FundFlowStatus     string               `json:"fundFlowStatus,omitempty"`
-		FundFlowSource     string               `json:"fundFlowSource,omitempty"`
-		FundFlowAsOf       string               `json:"fundFlowAsOf,omitempty"`
-		FundFlowUsed       bool                 `json:"fundFlowUsed"`
-		QuoteAvailable     bool                 `json:"quoteAvailable"`
-		ThemeSignals       []string             `json:"themeSignals,omitempty"`
-		CatalystSignals    []string             `json:"catalystSignals,omitempty"`
-		SourceLane         string               `json:"sourceLane,omitempty"`
-		ThemeMatches       []compactThemeMatch  `json:"themeMatches,omitempty"`
-		ATR14Pct           float64              `json:"atr14Pct,omitempty"`
-		DecisionStatus     string               `json:"decisionStatus,omitempty"`
-		MarketRegime       string               `json:"marketRegime,omitempty"`
-		FactorCluster      string               `json:"factorCluster,omitempty"`
-		DecisionGates      []DecisionGateResult `json:"decisionGates,omitempty"`
-		DataHealth         []DecisionDataHealth `json:"dataHealth,omitempty"`
+		TradeDate          string                          `json:"tradeDate,omitempty"`
+		Return5Pct         float64                         `json:"return5Pct,omitempty"`
+		Return20Pct        float64                         `json:"return20Pct,omitempty"`
+		Return60Pct        float64                         `json:"return60Pct,omitempty"`
+		MA20GapPct         float64                         `json:"ma20GapPct,omitempty"`
+		VolumeRatio5To20   float64                         `json:"volumeRatio5To20,omitempty"`
+		MedianAmount20     float64                         `json:"medianAmount20,omitempty"`
+		MainFlowRatio20    float64                         `json:"mainFlowRatio20,omitempty"`
+		PositiveFlowDays20 int                             `json:"positiveFlowDays20,omitempty"`
+		LatestPrice        float64                         `json:"latestPrice,omitempty"`
+		LatestPctChange    float64                         `json:"latestPctChange,omitempty"`
+		QFQAvailable       bool                            `json:"qfqAvailable"`
+		FundFlowAvailable  bool                            `json:"fundFlowAvailable"`
+		FundFlowStatus     string                          `json:"fundFlowStatus,omitempty"`
+		FundFlowSource     string                          `json:"fundFlowSource,omitempty"`
+		FundFlowAsOf       string                          `json:"fundFlowAsOf,omitempty"`
+		FundFlowUsed       bool                            `json:"fundFlowUsed"`
+		QuoteAvailable     bool                            `json:"quoteAvailable"`
+		ThemeSignals       []string                        `json:"themeSignals,omitempty"`
+		CatalystSignals    []string                        `json:"catalystSignals,omitempty"`
+		SourceLane         string                          `json:"sourceLane,omitempty"`
+		AdmissionReasons   []string                        `json:"admissionReasons,omitempty"`
+		SectorSignals      []OpportunityMarketSectorSignal `json:"sectorSignals,omitempty"`
+		ThemeMatches       []compactThemeMatch             `json:"themeMatches,omitempty"`
+		ATR14Pct           float64                         `json:"atr14Pct,omitempty"`
+		DecisionStatus     string                          `json:"decisionStatus,omitempty"`
+		MarketRegime       string                          `json:"marketRegime,omitempty"`
+		FactorCluster      string                          `json:"factorCluster,omitempty"`
+		DecisionGates      []DecisionGateResult            `json:"decisionGates,omitempty"`
+		DataHealth         []DecisionDataHealth            `json:"dataHealth,omitempty"`
 	}
 	type compactCandidate struct {
 		Symbol         string         `json:"symbol"`
@@ -1976,11 +1978,13 @@ func opportunityDiscoveryPromptContext(discCtx OpportunityDiscoveryContext) any 
 				FundFlowAvailable: item.Metrics.FundFlowAvailable, QuoteAvailable: item.Metrics.QuoteAvailable,
 				FundFlowStatus: item.Metrics.FundFlowStatus, FundFlowSource: item.Metrics.FundFlowSource,
 				FundFlowAsOf: item.Metrics.FundFlowAsOf, FundFlowUsed: item.Metrics.FundFlowUsed,
-				ThemeSignals:    opportunityPromptTextList(themeSignals, 3, 32),
-				CatalystSignals: opportunityPromptTextList(item.Metrics.CatalystSignals, 3, 32),
-				SourceLane:      item.Metrics.SourceLane,
-				ThemeMatches:    compactMatches,
-				ATR14Pct:        item.Metrics.ATR14Pct, DecisionStatus: item.Metrics.DecisionStatus,
+				ThemeSignals:     opportunityPromptTextList(themeSignals, 3, 32),
+				CatalystSignals:  opportunityPromptTextList(item.Metrics.CatalystSignals, 3, 32),
+				SourceLane:       item.Metrics.SourceLane,
+				AdmissionReasons: item.Metrics.AdmissionReasons,
+				SectorSignals:    item.Metrics.SectorSignals,
+				ThemeMatches:     compactMatches,
+				ATR14Pct:         item.Metrics.ATR14Pct, DecisionStatus: item.Metrics.DecisionStatus,
 				MarketRegime: item.Metrics.MarketRegime, FactorCluster: item.Metrics.FactorCluster,
 				DecisionGates: compactOpportunityDecisionGates(item.Metrics.DecisionGates),
 				DataHealth:    compactOpportunityDataHealth(item.Metrics.DataHealth),
@@ -1992,6 +1996,7 @@ func opportunityDiscoveryPromptContext(discCtx OpportunityDiscoveryContext) any 
 		"mode":             discCtx.Mode,
 		"marketScanRunId":  discCtx.MarketScanRunID,
 		"marketCandidates": candidates,
+		"sectorSnapshot":   discCtx.SectorSnapshot,
 		"opportunity":      discCtx.Opportunity,
 		"discoveryRun":     discCtx.DiscoveryRun,
 		"steps":            discCtx.Steps,

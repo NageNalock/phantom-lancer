@@ -93,8 +93,44 @@ func (s *Store) ensureDecisionGateSchema(ctx context.Context) error {
 			source TEXT NOT NULL,
 			fetched_at DATETIME NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS stockv2_decision_fund_flow_cache (
+			symbol TEXT PRIMARY KEY,
+			market TEXT,
+			as_of TEXT NOT NULL,
+			main_net_inflow_5 REAL NOT NULL DEFAULT 0,
+			main_net_inflow_20 REAL NOT NULL DEFAULT 0,
+			main_net_inflow_60 REAL NOT NULL DEFAULT 0,
+			main_flow_ratio_20 REAL NOT NULL DEFAULT 0,
+			positive_flow_days_20 INTEGER NOT NULL DEFAULT 0,
+			source TEXT NOT NULL,
+			fetched_at DATETIME NOT NULL
+		);
 	`)
 	return wrapError(err, "ensure decision gate schema")
+}
+
+func (s *Store) UpsertDecisionFundFlowEvidence(ctx context.Context, item decisionFundFlowEvidence) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO stockv2_decision_fund_flow_cache
+		(symbol,market,as_of,main_net_inflow_5,main_net_inflow_20,main_net_inflow_60,
+		 main_flow_ratio_20,positive_flow_days_20,source,fetched_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(symbol) DO UPDATE SET
+		market=excluded.market,as_of=excluded.as_of,main_net_inflow_5=excluded.main_net_inflow_5,
+		main_net_inflow_20=excluded.main_net_inflow_20,main_net_inflow_60=excluded.main_net_inflow_60,
+		main_flow_ratio_20=excluded.main_flow_ratio_20,positive_flow_days_20=excluded.positive_flow_days_20,
+		source=excluded.source,fetched_at=excluded.fetched_at`, item.Symbol, nullableString(item.Market), item.AsOf,
+		item.MainNetInflow5, item.MainNetInflow20, item.MainNetInflow60, item.MainFlowRatio20,
+		item.PositiveFlowDays20, item.Source, item.FetchedAt)
+	return wrapError(err, "upsert decision fund flow evidence")
+}
+
+func (s *Store) GetDecisionFundFlowEvidence(ctx context.Context, symbol string) (decisionFundFlowEvidence, error) {
+	var item decisionFundFlowEvidence
+	err := s.db.QueryRowContext(ctx, `SELECT symbol,COALESCE(market,''),as_of,main_net_inflow_5,
+		main_net_inflow_20,main_net_inflow_60,main_flow_ratio_20,positive_flow_days_20,source,fetched_at
+		FROM stockv2_decision_fund_flow_cache WHERE symbol=?`, strings.TrimSpace(symbol)).Scan(
+		&item.Symbol, &item.Market, &item.AsOf, &item.MainNetInflow5, &item.MainNetInflow20,
+		&item.MainNetInflow60, &item.MainFlowRatio20, &item.PositiveFlowDays20, &item.Source, &item.FetchedAt)
+	return item, err
 }
 
 func (s *Store) SaveDecisionGateSnapshot(ctx context.Context, item DecisionGateSnapshot) (DecisionGateSnapshot, error) {

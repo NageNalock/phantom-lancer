@@ -3367,6 +3367,7 @@ export interface StockV2OpportunityMarketScanRun {
   fundFlowStatus?: string;
   fundFlowError?: string;
   themeSnapshot: StockV2OpportunityMarketThemeSnapshot;
+  sectorSnapshot: StockV2OpportunityMarketSectorSnapshot;
   retryCount: number;
   nextRetryAt?: string;
   errorMessage?: string;
@@ -3374,6 +3375,48 @@ export interface StockV2OpportunityMarketScanRun {
   finishedAt?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface StockV2OpportunityMarketSectorSnapshot {
+  capturedAt?: string;
+  tradeDate?: string;
+  status?: "healthy" | "degraded" | "blocked";
+  eligibleCount: number;
+  classifiedCount: number;
+  coverageRatio: number;
+  trackedSectorCount: number;
+  trends?: StockV2OpportunityMarketSectorTrend[];
+  message?: string;
+}
+
+export interface StockV2OpportunityMarketSectorTrend {
+  key: string;
+  name: string;
+  state: "emerging" | "confirmed" | "overheated" | "fading" | "invalidated" | string;
+  previousState?: string;
+  score: number;
+  memberCount: number;
+  aboveMa20Ratio: number;
+  aboveMa20Delta3: number;
+  positive5DayRatio: number;
+  medianReturn3Pct: number;
+  medianReturn5Pct: number;
+  medianReturn20Pct: number;
+  volumeExpansionRatio: number;
+  top200Count: number;
+  firstSeenTradeDate?: string;
+  streak: number;
+  representativeSymbols?: string[];
+  representativeNames?: string[];
+}
+
+export interface StockV2OpportunityMarketSectorSignal {
+  key: string;
+  name: string;
+  state: string;
+  score: number;
+  firstSeenTradeDate?: string;
+  streak: number;
 }
 
 export interface StockV2OpportunityMarketThemeSnapshot {
@@ -3429,7 +3472,9 @@ export interface StockV2OpportunityMarketScanMetrics {
   quoteAvailable: boolean;
   themeSignals?: string[];
   catalystSignals?: string[];
-  sourceLane?: "price" | "message" | "mixed";
+  sourceLane?: "price" | "sector" | "message" | "mixed";
+  admissionReasons?: Array<"price" | "sector" | "message" | string>;
+  sectorSignals?: StockV2OpportunityMarketSectorSignal[];
   themeMatches?: StockV2OpportunityMarketThemeMatch[];
   decisionStatus?: "healthy" | "degraded" | "blocked";
   marketRegime?: "risk_on" | "neutral" | "risk_off";

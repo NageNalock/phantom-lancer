@@ -203,6 +203,76 @@ func TestEnsureDecisionGateAuditFieldsKeepsServerEvidence(t *testing.T) {
 	}
 }
 
+func TestPortfolioSentinelFundFlowPreflightReusesEvidenceAndSkipsETF(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+	svc := NewService(store, nil, nil)
+	defer svc.Close()
+	resolutions, err := svc.preparePortfolioSentinelFundFlow(context.Background(), OpportunityMarketScanConfig{},
+		[]portfolioSentinelFundFlowTarget{
+			{Symbol: "600000", Market: "SH", InstrumentType: InstrumentTypeStock, RequiredAsOf: "2026-08-31"},
+			{Symbol: "510300", Market: "SH", InstrumentType: InstrumentTypeExchangeFund, RequiredAsOf: "2026-08-31"},
+		}, map[string]OpportunityMarketScanMetrics{
+			"600000": {FundFlowAvailable: true, FundFlowAsOf: "2026-08-31", FundFlowSource: "test", MainFlowRatio20: 1.25},
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolutions["600000"].Available || resolutions["600000"].Evidence.MainFlowRatio20 != 1.25 {
+		t.Fatalf("stock resolution=%+v", resolutions["600000"])
+	}
+	if !resolutions["510300"].NotApplicable || resolutions["510300"].Available {
+		t.Fatalf("ETF resolution=%+v", resolutions["510300"])
+	}
+}
+
+func TestDecisionFundFlowCacheRoundTripAndFreshness(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	want := decisionFundFlowEvidence{Symbol: "600000", Market: "SH", AsOf: "2026-08-31",
+		MainNetInflow5: 10, MainNetInflow20: 20, MainNetInflow60: 30, MainFlowRatio20: 1.5,
+		PositiveFlowDays20: 12, Source: "test", FetchedAt: time.Now()}
+	if err := store.UpsertDecisionFundFlowEvidence(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetDecisionFundFlowEvidence(ctx, want.Symbol)
+	if err != nil || got.AsOf != want.AsOf || got.MainFlowRatio20 != want.MainFlowRatio20 || got.Source != want.Source {
+		t.Fatalf("evidence=%+v err=%v", got, err)
+	}
+	if !decisionFundFlowAsOfUsable(got.AsOf, "2026-08-31") || decisionFundFlowAsOfUsable(got.AsOf, "2026-09-01") {
+		t.Fatalf("unexpected freshness for %+v", got)
+	}
+}
+
+func TestDecisionGateMarksStockFundFlowHealthyAndETFNotApplicable(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+	svc := NewService(store, nil, nil)
+	defer svc.Close()
+	bars := decisionTestBars(40, 10, .05)
+	tradeDate := bars[len(bars)-1].TradeDate
+	base := decisionGateBuildInput{ContextType: "test", ContextID: "flow", Market: "SH", TradeDate: tradeDate,
+		DecisionDate: tradeDate, Bars: bars, BenchmarkAvailable: true,
+		ReferenceHealth: decisionReferenceHealth{EventOK: true, FinanceOK: true, Status: DecisionHealthHealthy, CheckedAt: time.Now()},
+		TradeCalendar:   decisionTestTradeCalendar(tradeDate)}
+	stock := base
+	stock.Symbol, stock.InstrumentType, stock.Quote = "600000", InstrumentTypeStock, decisionTestQuote("600000", bars[len(bars)-1].Close)
+	stock.FlowAvailable, stock.FlowAsOf, stock.FlowSource, stock.MainFlowRatio20 = true, tradeDate, "test", 1.2
+	stockSnapshot := svc.buildDecisionGateSnapshot(context.Background(), stock)
+	stockFlow := decisionDataHealth(stockSnapshot.DataHealth, "fund_flow")
+	if stockFlow.Status != DecisionHealthHealthy || stockFlow.AsOf != tradeDate || stockFlow.Source != "test" {
+		t.Fatalf("stock flow health=%+v", stockFlow)
+	}
+	etf := base
+	etf.Symbol, etf.InstrumentType, etf.Quote = "510300", InstrumentTypeExchangeFund, decisionTestQuote("510300", bars[len(bars)-1].Close)
+	etf.FlowNotApplicable = true
+	etfSnapshot := svc.buildDecisionGateSnapshot(context.Background(), etf)
+	if got := decisionDataHealth(etfSnapshot.DataHealth, "fund_flow"); got.Status != DecisionHealthNotApplicable {
+		t.Fatalf("ETF flow health=%+v", got)
+	}
+}
+
 func TestStrategyGenerationDraftSkipReasonExplainsGateAndPatch(t *testing.T) {
 	blocked := StrategyGenerationDraft{
 		DraftType:   StrategyGenerationDraftTypeNoChange,
@@ -215,6 +285,15 @@ func TestStrategyGenerationDraftSkipReasonExplainsGateAndPatch(t *testing.T) {
 	if got := strategyGenerationDraftSkipReason(patch); got != "Agent 建议修补已有策略，本轮不新建草案" {
 		t.Fatalf("patch reason=%q", got)
 	}
+}
+
+func decisionDataHealth(items []DecisionDataHealth, key string) DecisionDataHealth {
+	for _, item := range items {
+		if item.Key == key {
+			return item
+		}
+	}
+	return DecisionDataHealth{}
 }
 
 func decisionTestBars(count int, start, dailyStep float64) []StockV2DailyBar {

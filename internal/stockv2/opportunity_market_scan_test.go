@@ -111,12 +111,62 @@ func TestOpportunityMarketPrefilterReservesMessageCandidateBeyondPriceCutoff(t *
 		ThreadID: "thread-mrna", VersionID: "version-mrna", Title: "癌症疫苗进展",
 		MatchKind: OpportunityMarketThemeMatchSemantic, RequiresCausalVerification: true,
 	}}}
-	selected, ranks := selectOpportunityMarketPrefilter(scored, matches)
+	selected, ranks, admissions := selectOpportunityMarketPrefilter(scored, matches, OpportunityMarketSectorSnapshot{})
 	if len(selected) != opportunityMarketScanLocalLimit || selected[0].Instrument.Symbol != target || ranks[target] != opportunityMarketScanLocalLimit+1 {
 		t.Fatalf("selected first=%s len=%d rank=%d", selected[0].Instrument.Symbol, len(selected), ranks[target])
 	}
-	if lane := opportunityMarketSourceLane(ranks[target], matches[target]); lane != OpportunityMarketScanSourceMessage {
+	if lane := opportunityMarketSourceLane(admissions[target]); lane != OpportunityMarketScanSourceMessage {
 		t.Fatalf("source lane=%q, want message", lane)
+	}
+}
+
+func TestOpportunityMarketSectorSnapshotDetectsEmergenceAndPersistsConfirmation(t *testing.T) {
+	scored := make([]opportunityMarketScanRawMetric, 0, 6)
+	for i := 0; i < 6; i++ {
+		scored = append(scored, opportunityMarketScanRawMetric{
+			Instrument: StockV2Instrument{Symbol: fmt.Sprintf("600%03d", i), Market: "SH", InstrumentType: InstrumentTypeStock, Name: fmt.Sprintf("农业%d", i), Industry: "种植业", Sector: "农林牧渔"},
+			Close:      10.8 + float64(i)/10, Close3: 10.4, Close5: 10.5, Close20: 9.8,
+			MA20: 10.6, MA20Prev3: 10.9, Volume5: 1200, Volume20: 1000,
+			PrefilterScore: 90 - float64(i),
+		})
+	}
+	first, signals := buildOpportunityMarketSectorSnapshot(scored, OpportunityMarketSectorSnapshot{}, "2026-08-10", time.Now())
+	if first.Status != DecisionHealthHealthy || first.CoverageRatio != 1 || len(first.Trends) != 2 {
+		t.Fatalf("first sector snapshot=%+v", first)
+	}
+	for _, trend := range first.Trends {
+		if trend.State != OpportunityMarketSectorStateEmerging || trend.FirstSeenTradeDate != "2026-08-10" || trend.Streak != 1 {
+			t.Fatalf("emerging trend=%+v", trend)
+		}
+	}
+	if len(signals["600000"]) != 2 {
+		t.Fatalf("sector signals=%+v", signals["600000"])
+	}
+	second, _ := buildOpportunityMarketSectorSnapshot(scored, first, "2026-08-11", time.Now())
+	for _, trend := range second.Trends {
+		if trend.State != OpportunityMarketSectorStateConfirmed || trend.FirstSeenTradeDate != "2026-08-10" || trend.Streak != 2 {
+			t.Fatalf("confirmed trend=%+v", trend)
+		}
+	}
+}
+
+func TestOpportunityMarketSectorAdmissionReservesRepresentativeBeyondPriceLane(t *testing.T) {
+	scored := make([]opportunityMarketScanRawMetric, opportunityMarketScanLocalLimit+1)
+	for i := range scored {
+		symbol := fmt.Sprintf("%06d", i+1)
+		scored[i] = opportunityMarketScanRawMetric{Instrument: StockV2Instrument{Symbol: symbol}, PrefilterScore: float64(len(scored) - i)}
+	}
+	target := scored[len(scored)-1].Instrument.Symbol
+	snapshot := OpportunityMarketSectorSnapshot{Trends: []OpportunityMarketSectorTrend{{
+		Key: "industry:种植业", Name: "种植业", State: OpportunityMarketSectorStateEmerging,
+		RepresentativeSymbols: []string{target},
+	}}}
+	selected, _, admissions := selectOpportunityMarketPrefilter(scored, nil, snapshot)
+	if selected[0].Instrument.Symbol != target || !admissions[target].sector || admissions[target].price {
+		t.Fatalf("first=%s admission=%+v", selected[0].Instrument.Symbol, admissions[target])
+	}
+	if lane := opportunityMarketSourceLane(admissions[target]); lane != OpportunityMarketScanSourceSector {
+		t.Fatalf("source lane=%q, want sector", lane)
 	}
 }
 
@@ -333,18 +383,25 @@ func TestOpportunityMarketScanRepositoryDefaultsAndCandidates(t *testing.T) {
 	run, err := store.CreateOpportunityMarketScanRun(ctx, OpportunityMarketScanRun{
 		TriggerType:   OpportunityMarketScanTriggerManual,
 		ThemeSnapshot: OpportunityMarketThemeSnapshot{Status: DecisionHealthDegraded, VersionIDs: []string{"theme-version-1"}, VersionCount: 1},
+		SectorSnapshot: OpportunityMarketSectorSnapshot{
+			Status: DecisionHealthHealthy, TradeDate: "2026-08-10",
+			Trends: []OpportunityMarketSectorTrend{{
+				Key: "industry:种植业", Name: "种植业", State: OpportunityMarketSectorStateEmerging, FirstSeenTradeDate: "2026-08-10", Streak: 1,
+			}},
+		},
 	})
 	if err != nil {
 		t.Fatalf("create scan run: %v", err)
 	}
 	storedRun, err := store.GetOpportunityMarketScanRun(ctx, run.ID)
-	if err != nil || storedRun.ThemeSnapshot.VersionCount != 1 || len(storedRun.ThemeSnapshot.VersionIDs) != 1 {
+	if err != nil || storedRun.ThemeSnapshot.VersionCount != 1 || len(storedRun.ThemeSnapshot.VersionIDs) != 1 ||
+		len(storedRun.SectorSnapshot.Trends) != 1 || storedRun.SectorSnapshot.Trends[0].State != OpportunityMarketSectorStateEmerging {
 		t.Fatalf("stored theme snapshot=%#v err=%v", storedRun.ThemeSnapshot, err)
 	}
 	if err := store.UpsertOpportunityMarketScanCandidates(ctx, []OpportunityMarketScanCandidate{{
 		ID: "candidate-a", ScanRunID: run.ID, Symbol: "600000", Market: "SH", Name: "浦发银行",
 		Stage: OpportunityMarketScanCandidateResearch, PrefilterScore: 70, FinalScore: 75,
-		Metrics: OpportunityMarketScanMetrics{TradeDate: "2026-08-10", QFQAvailable: true, DecisionStatus: DecisionHealthDegraded, SourceLane: OpportunityMarketScanSourceMessage},
+		Metrics: OpportunityMarketScanMetrics{TradeDate: "2026-08-10", QFQAvailable: true, DecisionStatus: DecisionHealthDegraded, SourceLane: OpportunityMarketScanSourceMessage, AdmissionReasons: []string{OpportunityMarketScanSourceSector, OpportunityMarketScanSourceMessage}},
 	}}); err != nil {
 		t.Fatalf("upsert candidate: %v", err)
 	}
@@ -363,6 +420,10 @@ func TestOpportunityMarketScanRepositoryDefaultsAndCandidates(t *testing.T) {
 	items, err = store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{ScanRunID: run.ID, SourceLane: OpportunityMarketScanSourceMessage, Limit: 10})
 	if err != nil || len(items) != 1 {
 		t.Fatalf("message candidates=%+v err=%v", items, err)
+	}
+	items, err = store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{ScanRunID: run.ID, SourceLane: "sector_related", Limit: 10})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("sector candidates=%+v err=%v", items, err)
 	}
 	if err := store.UpsertOpportunityMarketScanCandidates(ctx, []OpportunityMarketScanCandidate{{
 		ID: "candidate-legacy", ScanRunID: run.ID, Symbol: "600001", Market: "SH", Name: "历史候选",

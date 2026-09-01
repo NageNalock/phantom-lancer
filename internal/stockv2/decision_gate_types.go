@@ -96,3 +96,19 @@ type decisionFinancialFact struct {
 	Source            string
 	FetchedAt         time.Time
 }
+
+// decisionFundFlowEvidence is the holding-scoped cache populated before a
+// portfolio sentinel builds its decision gates. It is separate from market
+// scan candidates because a current holding need not rank into that universe.
+type decisionFundFlowEvidence struct {
+	Symbol             string
+	Market             string
+	AsOf               string
+	MainNetInflow5     float64
+	MainNetInflow20    float64
+	MainNetInflow60    float64
+	MainFlowRatio20    float64
+	PositiveFlowDays20 int
+	Source             string
+	FetchedAt          time.Time
+}

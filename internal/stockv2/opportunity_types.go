@@ -421,6 +421,7 @@ type OpportunityDiscoveryContext struct {
 	Mode             string                           `json:"mode"`
 	MarketScanRunID  string                           `json:"marketScanRunId,omitempty"`
 	MarketCandidates []OpportunityMarketScanCandidate `json:"marketCandidates,omitempty"`
+	SectorSnapshot   OpportunityMarketSectorSnapshot  `json:"sectorSnapshot,omitempty"`
 	Opportunity      Opportunity                      `json:"opportunity"`
 	DiscoveryRun     OpportunityDiscoveryRun          `json:"discoveryRun"`
 	Steps            []OpportunityDiscoveryStep       `json:"steps,omitempty"`

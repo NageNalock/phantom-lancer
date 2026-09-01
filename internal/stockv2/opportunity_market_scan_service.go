@@ -228,7 +228,10 @@ func (s *Service) GetOpportunityMarketScanStatus(ctx context.Context) (Opportuni
 			"localPrefilter": opportunityMarketScanLocalLimit, "qfqAndQuote": opportunityMarketScanQFQLimit,
 			"fundFlow": opportunityMarketScanFundFlowLimit, "agentResearch": opportunityMarketScanResearchLimit,
 			"finalCandidates": opportunityMarketScanFinalLimit, "strategyDrafts": opportunityMarketScanStrategyLimit,
+			"priceAdmission": opportunityMarketScanPriceLocalReserve, "sectorAdmission": opportunityMarketScanSectorLocalReserve,
+			"sectorResearch":   opportunityMarketScanSectorResearchReserve,
 			"messageAdmission": opportunityMarketScanMessageLocalReserve, "messageResearch": opportunityMarketScanMessageResearchReserve,
+			"sectorCoverageMinimumPct": int(opportunityMarketScanMinimumSectorCoverage * 100),
 		},
 		RecommendedModel: "GPT-5.6-Terra / Codex CLI / medium",
 	}, nil
@@ -409,7 +412,17 @@ func (s *Service) prepareOpportunityMarketScan(ctx context.Context, runID string
 		s.failOpportunityMarketScan(ctx, run, errors.New("no candidates passed local prefilter"), false)
 		return
 	}
-	themeMatches, themeSnapshot := s.loadOpportunityMarketThemeMatches(ctx, profiles, scored, time.Now())
+	now := time.Now()
+	previousSectorSnapshot := s.previousOpportunityMarketSectorSnapshot(ctx, run)
+	sectorSnapshot, sectorSignals := buildOpportunityMarketSectorSnapshot(scored, previousSectorSnapshot, tradeDate, now)
+	run.TradeDate, run.UniverseCount, run.CoveredCount = tradeDate, universe, covered
+	run.SectorSnapshot = sectorSnapshot
+	if sectorSnapshot.Status == DecisionHealthBlocked {
+		_, _ = s.store.UpdateOpportunityMarketScanRun(ctx, run)
+		s.failOpportunityMarketScan(ctx, run, fmt.Errorf("板块分类数据健康阻断：已分类 %.1f%%，最低要求 %.0f%%", sectorSnapshot.CoverageRatio*100, opportunityMarketScanMinimumSectorCoverage*100), false)
+		return
+	}
+	themeMatches, themeSnapshot := s.loadOpportunityMarketThemeMatches(ctx, profiles, scored, now)
 	if profileErr != nil {
 		themeSnapshot.Status = DecisionHealthDegraded
 		profileMessage := "股票画像读取失败：" + safelog.Error(profileErr, 120)
@@ -419,7 +432,7 @@ func (s *Service) prepareOpportunityMarketScan(ctx context.Context, runID string
 			themeSnapshot.Message += "；" + profileMessage
 		}
 	}
-	selected, rankBySymbol := selectOpportunityMarketPrefilter(scored, themeMatches)
+	selected, rankBySymbol, admissions := selectOpportunityMarketPrefilter(scored, themeMatches, sectorSnapshot)
 	run.TradeDate, run.UniverseCount, run.CoveredCount, run.PrefilterCount = tradeDate, universe, covered, len(selected)
 	run.ThemeSnapshot = themeSnapshot
 	_ = s.store.DeleteOpportunityMarketScanCandidates(ctx, run.ID)
@@ -427,7 +440,9 @@ func (s *Service) prepareOpportunityMarketScan(ctx context.Context, runID string
 	for _, item := range selected {
 		metrics := opportunityMarketMetricsFromRaw(item)
 		metrics.ThemeMatches = themeMatches[item.Instrument.Symbol]
-		metrics.SourceLane = opportunityMarketSourceLane(rankBySymbol[item.Instrument.Symbol], metrics.ThemeMatches)
+		metrics.SectorSignals = sectorSignals[item.Instrument.Symbol]
+		metrics.AdmissionReasons = opportunityMarketAdmissionReasons(admissions[item.Instrument.Symbol])
+		metrics.SourceLane = opportunityMarketSourceLane(admissions[item.Instrument.Symbol])
 		candidates = append(candidates, OpportunityMarketScanCandidate{
 			ID: generateID(), ScanRunID: run.ID, Symbol: item.Instrument.Symbol, Market: item.Instrument.Market,
 			Name: item.Instrument.Name, Industry: item.Instrument.Industry, Sector: item.Instrument.Sector,
@@ -518,6 +533,20 @@ func opportunityMarketMetricsFromRaw(item opportunityMarketScanRawMetric) Opport
 		Volatility20: item.Volatility20, MedianAmount20: item.MedianAmount20,
 		IndustryBreadth20: item.IndustryBreadth, LatestPrice: item.Close,
 	}
+}
+
+func (s *Service) previousOpportunityMarketSectorSnapshot(ctx context.Context, current OpportunityMarketScanRun) OpportunityMarketSectorSnapshot {
+	runs, err := s.store.ListOpportunityMarketScanRuns(ctx, OpportunityMarketScanRunListFilter{Limit: 30})
+	if err != nil {
+		return OpportunityMarketSectorSnapshot{}
+	}
+	for _, run := range runs {
+		if run.ID == current.ID || len(run.SectorSnapshot.Trends) == 0 || run.TradeDate > current.TradeDate {
+			continue
+		}
+		return run.SectorSnapshot
+	}
+	return OpportunityMarketSectorSnapshot{}
 }
 
 func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *OpportunityMarketScanRun, candidates []OpportunityMarketScanCandidate) []OpportunityMarketScanCandidate {
@@ -680,7 +709,7 @@ func (s *Service) enrichOpportunityMarketScan(ctx context.Context, run *Opportun
 		}
 		return candidates[i].FinalScore > candidates[j].FinalScore
 	})
-	candidates = reserveOpportunityMarketMessageResearch(candidates)
+	candidates = reserveOpportunityMarketResearch(candidates)
 	config, _ = s.store.GetOpportunityMarketScanConfig(ctx)
 	benchmarkBars, benchmarkErr := s.refreshDecisionBenchmark(ctx, config, run.TradeDate)
 	benchmarkReturn, benchmarkOK := decisionBenchmarkReturn20(benchmarkBars)

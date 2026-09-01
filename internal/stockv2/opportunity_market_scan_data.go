@@ -15,10 +15,12 @@ type opportunityMarketScanRawMetric struct {
 	TradeDate       string
 	RowCount        int
 	Close           float64
+	Close3          float64
 	Close5          float64
 	Close20         float64
 	Close60         float64
 	MA20            float64
+	MA20Prev3       float64
 	MA60            float64
 	Volume5         float64
 	Volume20        float64
@@ -90,10 +92,12 @@ func (s *MarketDataStore) LoadOpportunityMarketScanMetrics(ctx context.Context, 
 				MAX(CASE WHEN rn=1 THEN strftime(trade_date, '%Y-%m-%d') END) trade_date,
 				COUNT(*) FILTER (WHERE rn<=120) row_count,
 				MAX(CASE WHEN rn=1 THEN close END) close_now,
+				MAX(CASE WHEN rn=4 THEN close END) close_3,
 				MAX(CASE WHEN rn=6 THEN close END) close_5,
 				MAX(CASE WHEN rn=21 THEN close END) close_20,
 				MAX(CASE WHEN rn=61 THEN close END) close_60,
 				AVG(close) FILTER (WHERE rn<=20) ma_20,
+				AVG(close) FILTER (WHERE rn>=4 AND rn<=23) ma_20_prev_3,
 				AVG(close) FILTER (WHERE rn<=60) ma_60,
 				AVG(volume) FILTER (WHERE rn<=5) volume_5,
 				AVG(volume) FILTER (WHERE rn<=20) volume_20,
@@ -110,8 +114,8 @@ func (s *MarketDataStore) LoadOpportunityMarketScanMetrics(ctx context.Context, 
 			COALESCE(i.industry,''), COALESCE(i.sector,''), COALESCE(i.concepts,'[]'),
 			i.last_update_at, i.created_at, i.updated_at,
 			COALESCE(a.trade_date,''), COALESCE(a.row_count,0), COALESCE(a.close_now,0),
-			COALESCE(a.close_5,0), COALESCE(a.close_20,0), COALESCE(a.close_60,0),
-			COALESCE(a.ma_20,0), COALESCE(a.ma_60,0), COALESCE(a.volume_5,0),
+			COALESCE(a.close_3,0), COALESCE(a.close_5,0), COALESCE(a.close_20,0), COALESCE(a.close_60,0),
+			COALESCE(a.ma_20,0), COALESCE(a.ma_20_prev_3,0), COALESCE(a.ma_60,0), COALESCE(a.volume_5,0),
 			COALESCE(a.volume_20,0), COALESCE(a.up_volume_share_20,0),
 			COALESCE(a.volatility_20,0), COALESCE(a.median_amount_20,0),
 			COALESCE(a.max_close_120,0)
@@ -131,7 +135,7 @@ func (s *MarketDataStore) LoadOpportunityMarketScanMetrics(ctx context.Context, 
 			&item.Instrument.InstrumentType, &item.Instrument.Name, &item.Instrument.Industry,
 			&item.Instrument.Sector, &conceptsJSON, &lastUpdate, &item.Instrument.CreatedAt,
 			&item.Instrument.UpdatedAt, &item.TradeDate, &item.RowCount, &item.Close,
-			&item.Close5, &item.Close20, &item.Close60, &item.MA20, &item.MA60,
+			&item.Close3, &item.Close5, &item.Close20, &item.Close60, &item.MA20, &item.MA20Prev3, &item.MA60,
 			&item.Volume5, &item.Volume20, &item.UpVolumeShare20, &item.Volatility20,
 			&item.MedianAmount20, &item.MaxClose120); err != nil {
 			return nil, wrapError(err, "scan opportunity market metric")

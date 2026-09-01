@@ -260,7 +260,8 @@ func opportunityMarketThemeQuery(version NewsThreadVersion) string {
 func selectOpportunityMarketPrefilter(
 	scored []opportunityMarketScanRawMetric,
 	matches map[string][]OpportunityMarketThemeMatch,
-) ([]opportunityMarketScanRawMetric, map[string]int) {
+	sectorSnapshot OpportunityMarketSectorSnapshot,
+) ([]opportunityMarketScanRawMetric, map[string]int, map[string]opportunityMarketAdmission) {
 	rankBySymbol := make(map[string]int, len(scored))
 	bySymbol := make(map[string]opportunityMarketScanRawMetric, len(scored))
 	messageSymbols := make([]string, 0, len(matches))
@@ -279,23 +280,68 @@ func selectOpportunityMarketPrefilter(
 		}
 		return rankBySymbol[messageSymbols[i]] < rankBySymbol[messageSymbols[j]]
 	})
+	messageAdmission := make(map[string]struct{}, opportunityMarketScanMessageLocalReserve)
+	for _, symbol := range messageSymbols[:min(len(messageSymbols), opportunityMarketScanMessageLocalReserve)] {
+		messageAdmission[symbol] = struct{}{}
+	}
+	sectorAdmission := opportunityMarketSectorAdmissionSymbols(sectorSnapshot)
+	sectorSymbols := make([]string, 0, len(sectorAdmission))
+	for _, trend := range sectorSnapshot.Trends {
+		for _, symbol := range trend.RepresentativeSymbols {
+			if _, ok := sectorAdmission[symbol]; !ok || bySymbol[symbol].Instrument.Symbol == "" || stringListContainsFold(sectorSymbols, symbol) {
+				continue
+			}
+			sectorSymbols = append(sectorSymbols, symbol)
+		}
+	}
 	selected := make([]opportunityMarketScanRawMetric, 0, min(len(scored), opportunityMarketScanLocalLimit))
 	seen := make(map[string]struct{}, opportunityMarketScanLocalLimit)
-	for _, symbol := range messageSymbols[:min(len(messageSymbols), opportunityMarketScanMessageLocalReserve)] {
-		selected = append(selected, bySymbol[symbol])
+	admissions := make(map[string]opportunityMarketAdmission, opportunityMarketScanLocalLimit)
+	appendSymbol := func(symbol string) {
+		if len(selected) >= opportunityMarketScanLocalLimit {
+			return
+		}
+		item, ok := bySymbol[symbol]
+		if !ok {
+			return
+		}
+		admission := admissions[symbol]
+		if rankBySymbol[symbol] <= opportunityMarketScanPriceLocalReserve {
+			admission.price = true
+		}
+		if _, ok := sectorAdmission[symbol]; ok {
+			admission.sector = true
+		}
+		if _, ok := messageAdmission[symbol]; ok {
+			admission.message = true
+		}
+		admissions[symbol] = admission
+		if _, ok := seen[symbol]; ok {
+			return
+		}
+		selected = append(selected, item)
 		seen[symbol] = struct{}{}
+	}
+	for _, symbol := range sectorSymbols {
+		appendSymbol(symbol)
+	}
+	for _, symbol := range messageSymbols[:min(len(messageSymbols), opportunityMarketScanMessageLocalReserve)] {
+		appendSymbol(symbol)
+	}
+	for _, item := range scored[:min(len(scored), opportunityMarketScanPriceLocalReserve)] {
+		appendSymbol(item.Instrument.Symbol)
 	}
 	for _, item := range scored {
 		if len(selected) >= opportunityMarketScanLocalLimit {
 			break
 		}
-		if _, ok := seen[item.Instrument.Symbol]; ok {
-			continue
-		}
-		selected = append(selected, item)
-		seen[item.Instrument.Symbol] = struct{}{}
+		symbol := item.Instrument.Symbol
+		appendSymbol(symbol)
+		admission := admissions[symbol]
+		admission.price = true
+		admissions[symbol] = admission
 	}
-	return selected, rankBySymbol
+	return selected, rankBySymbol, admissions
 }
 
 func opportunityMarketThemeMatchesPriority(matches []OpportunityMarketThemeMatch) int {
@@ -306,27 +352,30 @@ func opportunityMarketThemeMatchesPriority(matches []OpportunityMarketThemeMatch
 	return priority
 }
 
-func opportunityMarketSourceLane(prefilterRank int, matches []OpportunityMarketThemeMatch) string {
-	if len(matches) == 0 {
-		return OpportunityMarketScanSourcePrice
-	}
-	if prefilterRank > opportunityMarketScanLocalLimit {
-		return OpportunityMarketScanSourceMessage
-	}
-	return OpportunityMarketScanSourceMixed
-}
-
-func reserveOpportunityMarketMessageResearch(candidates []OpportunityMarketScanCandidate) []OpportunityMarketScanCandidate {
+func reserveOpportunityMarketResearch(candidates []OpportunityMarketScanCandidate) []OpportunityMarketScanCandidate {
 	if len(candidates) <= opportunityMarketScanResearchLimit {
 		return candidates
 	}
 	selected := make(map[string]struct{}, opportunityMarketScanResearchLimit)
+	sectorCount := 0
+	for _, candidate := range candidates {
+		if !stringListContainsFold(candidate.Metrics.AdmissionReasons, OpportunityMarketScanSourceSector) {
+			continue
+		}
+		selected[candidate.Symbol] = struct{}{}
+		sectorCount++
+		if sectorCount >= opportunityMarketScanSectorResearchReserve {
+			break
+		}
+	}
+	messageCount := 0
 	for _, candidate := range candidates {
 		if len(candidate.Metrics.ThemeMatches) == 0 {
 			continue
 		}
 		selected[candidate.Symbol] = struct{}{}
-		if len(selected) >= opportunityMarketScanMessageResearchReserve {
+		messageCount++
+		if messageCount >= opportunityMarketScanMessageResearchReserve {
 			break
 		}
 	}

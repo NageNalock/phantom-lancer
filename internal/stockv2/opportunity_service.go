@@ -155,6 +155,7 @@ func (s *Service) StartOpportunityDiscoveryRun(ctx context.Context, opportunityI
 		"mode":             artifactContext.Mode,
 		"marketScanRunId":  marketScanRunID,
 		"marketCandidates": artifactContext.MarketCandidates,
+		"sectorSnapshot":   artifactContext.SectorSnapshot,
 		"boundary": map[string]any{
 			"externalResearch":            "codex_cli_builtin",
 			"mainProgramMCP":              "internal_stock_data_and_trace_only",
@@ -216,11 +217,15 @@ func (s *Service) BuildOpportunityDiscoveryContext(ctx context.Context, opp Oppo
 	mode := OpportunityDiscoveryModeManualTheme
 	marketScanRunID := ""
 	var marketCandidates []OpportunityMarketScanCandidate
+	var sectorSnapshot OpportunityMarketSectorSnapshot
 	if len(marketScanRunIDs) > 0 {
 		marketScanRunID = strings.TrimSpace(marketScanRunIDs[0])
 	}
 	if marketScanRunID != "" {
 		mode = OpportunityDiscoveryModeMarketScan
+		if scanRun, scanErr := s.store.GetOpportunityMarketScanRun(ctx, marketScanRunID); scanErr == nil {
+			sectorSnapshot = scanRun.SectorSnapshot
+		}
 		marketCandidates, _ = s.store.ListOpportunityMarketScanCandidates(ctx, OpportunityMarketScanCandidateListFilter{
 			ScanRunID: marketScanRunID,
 			Stage:     OpportunityMarketScanCandidateResearch,
@@ -232,6 +237,7 @@ func (s *Service) BuildOpportunityDiscoveryContext(ctx context.Context, opp Oppo
 		Mode:             mode,
 		MarketScanRunID:  marketScanRunID,
 		MarketCandidates: marketCandidates,
+		SectorSnapshot:   sectorSnapshot,
 		Opportunity:      opp,
 		DiscoveryRun:     run,
 		Steps:            steps,

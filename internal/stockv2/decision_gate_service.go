@@ -22,7 +22,11 @@ type decisionGateBuildInput struct {
 	Quote                *StockV2QuoteLatest
 	ThemeSignals         []string
 	FlowAvailable        bool
+	FlowNotApplicable    bool
 	MainFlowRatio20      float64
+	FlowAsOf             string
+	FlowSource           string
+	FlowMessage          string
 	FactorCluster        string
 	FactorBlocked        bool
 	FactorReason         string
@@ -149,7 +153,8 @@ func (s *Service) buildDecisionGateSnapshot(ctx context.Context, input decisionG
 		pricedThreshold := math.Max(8, 2*features.ATR14Pct)
 		excessReturn := features.Return20Pct - input.BenchmarkReturn20Pct
 		catalyst.Metrics = map[string]any{"return20Pct": features.Return20Pct, "excessReturn20Pct": excessReturn, "pricedThresholdPct": pricedThreshold, "mainFlowRatio20": input.MainFlowRatio20}
-		if features.Valid && input.BenchmarkAvailable && excessReturn > pricedThreshold && (!input.FlowAvailable || input.MainFlowRatio20 <= 0) {
+		if features.Valid && input.BenchmarkAvailable && excessReturn > pricedThreshold &&
+			!input.FlowNotApplicable && (!input.FlowAvailable || input.MainFlowRatio20 <= 0) {
 			catalyst.Status = DecisionGateStatusBlocked
 			catalyst.Summary = "主题催化后的涨幅已超过 2 ATR / 8% 且缺少资金确认"
 		}
@@ -217,11 +222,18 @@ func (s *Service) buildDecisionGateSnapshot(ctx context.Context, input decisionG
 	}
 	snapshot.Gates = append(snapshot.Gates, eventGate)
 
-	flowHealth := DecisionDataHealth{Key: "fund_flow", Label: "主动资金证据", Required: false, CheckedAt: now}
-	if input.FlowAvailable {
+	flowHealth := DecisionDataHealth{Key: "fund_flow", Label: "主动资金证据", Required: false,
+		AsOf: input.FlowAsOf, Source: input.FlowSource, CheckedAt: now}
+	switch {
+	case input.FlowNotApplicable:
+		flowHealth.Status, flowHealth.Message = DecisionHealthNotApplicable, "场内基金不适用个股主动资金流接口"
+	case input.FlowAvailable:
 		flowHealth.Status, flowHealth.Message = DecisionHealthHealthy, "资金流可用于交叉验证"
-	} else {
-		flowHealth.Status, flowHealth.Message = DecisionHealthDegraded, "资金流缺失，不作为中性分参与评分"
+		snapshot.Metrics["mainFlowRatio20"] = input.MainFlowRatio20
+		snapshot.Metrics["fundFlowAsOf"] = input.FlowAsOf
+	default:
+		flowHealth.Status, flowHealth.Message = DecisionHealthDegraded,
+			firstNonEmpty(input.FlowMessage, "资金流尚未取得，不作为中性分参与评分")
 	}
 	snapshot.DataHealth = append(snapshot.DataHealth, flowHealth)
 	return finalizeDecisionGateSnapshot(snapshot)
@@ -757,8 +769,12 @@ func (s *Service) fillPortfolioSentinelDecisionGates(ctx context.Context, out *P
 		symbol, market, instrumentType string
 		quote                          *StockV2QuoteLatest
 		themeSignals                   []string
+		held                           bool
 		flowAvailable                  bool
+		flowNotApplicable              bool
 		mainFlowRatio20                float64
+		flowAsOf, flowSource           string
+		flowMessage                    string
 		industry                       string
 		concepts                       []string
 	}
@@ -776,7 +792,7 @@ func (s *Service) fillPortfolioSentinelDecisionGates(ctx context.Context, out *P
 				industry, concepts = instrument.Industry, instrument.Concepts
 			}
 			bySymbol[holding.Holding.Symbol] = meta{symbol: holding.Holding.Symbol, market: holding.Holding.Market,
-				instrumentType: instrumentType, quote: holding.Quote, industry: industry, concepts: concepts}
+				instrumentType: instrumentType, quote: holding.Quote, held: true, industry: industry, concepts: concepts}
 		}
 	}
 	for _, candidate := range out.Candidates {
@@ -805,14 +821,25 @@ func (s *Service) fillPortfolioSentinelDecisionGates(ctx context.Context, out *P
 	if err != nil {
 		return err
 	}
-	reference := s.refreshDecisionReferenceData(ctx, config, items)
 	decisionDate := time.Now().Format("2006-01-02")
 	cachedEvidence := s.latestOpportunityDecisionEvidence(ctx, decisionDate)
+	flowTargets := make([]portfolioSentinelFundFlowTarget, 0, len(bySymbol))
 	for symbol, item := range bySymbol {
-		if cached, ok := cachedEvidence[symbol]; ok {
+		cached, hasCached := cachedEvidence[symbol]
+		if hasCached {
 			item.themeSignals = compactStringList(append(item.themeSignals, cached.CatalystSignals...), 5)
+		}
+		if item.held {
+			requiredAsOf := ""
+			if raw := s.decisionLatestRawBar(ctx, symbol, decisionDate); raw != nil {
+				requiredAsOf = raw.TradeDate
+			}
+			flowTargets = append(flowTargets, portfolioSentinelFundFlowTarget{Symbol: symbol, Market: item.market,
+				InstrumentType: item.instrumentType, RequiredAsOf: requiredAsOf, EndDate: decisionDate})
+		} else if hasCached {
 			item.flowAvailable = cached.FundFlowAvailable
 			item.mainFlowRatio20 = cached.MainFlowRatio20
+			item.flowAsOf, item.flowSource = cached.FundFlowAsOf, cached.FundFlowSource
 		}
 		for _, theme := range out.Themes {
 			for _, themeSymbol := range theme.Symbols {
@@ -823,6 +850,20 @@ func (s *Service) fillPortfolioSentinelDecisionGates(ctx context.Context, out *P
 		}
 		bySymbol[symbol] = item
 	}
+	flowEvidence, err := s.preparePortfolioSentinelFundFlow(ctx, config, flowTargets, cachedEvidence)
+	if err != nil {
+		return err
+	}
+	for symbol, resolution := range flowEvidence {
+		item := bySymbol[symbol]
+		item.flowAvailable = resolution.Available
+		item.flowNotApplicable = resolution.NotApplicable
+		item.mainFlowRatio20 = resolution.Evidence.MainFlowRatio20
+		item.flowAsOf, item.flowSource = resolution.Evidence.AsOf, resolution.Evidence.Source
+		item.flowMessage = resolution.Message
+		bySymbol[symbol] = item
+	}
+	reference := s.refreshDecisionReferenceData(ctx, config, items)
 	tradeCalendar, _ := s.refreshDecisionTradeCalendar(ctx, config, decisionDate)
 	benchmarkBars, benchmarkErr := s.refreshDecisionBenchmark(ctx, config, decisionDate)
 	benchmarkReturn, benchmarkOK := decisionBenchmarkReturn20(benchmarkBars)
@@ -842,7 +883,8 @@ func (s *Service) fillPortfolioSentinelDecisionGates(ctx context.Context, out *P
 			ContextType: "portfolio_sentinel", ContextID: out.RunID, Symbol: item.symbol, Market: item.market,
 			InstrumentType: item.instrumentType, DecisionDate: decisionDate, Bars: bars,
 			CompletedRawBar: s.decisionLatestRawBar(ctx, item.symbol, decisionDate), Quote: item.quote,
-			ThemeSignals: item.themeSignals, FlowAvailable: item.flowAvailable, MainFlowRatio20: item.mainFlowRatio20,
+			ThemeSignals: item.themeSignals, FlowAvailable: item.flowAvailable, FlowNotApplicable: item.flowNotApplicable,
+			MainFlowRatio20: item.mainFlowRatio20, FlowAsOf: item.flowAsOf, FlowSource: item.flowSource, FlowMessage: item.flowMessage,
 			MarketRegime: marketRegime, ReferenceHealth: reference[item.symbol],
 			BenchmarkAvailable: benchmarkOK, BenchmarkReturn20Pct: benchmarkReturn,
 			FactorCluster: clusters[item.symbol], FactorBlocked: crowded[item.symbol] != "", FactorReason: crowded[item.symbol],
