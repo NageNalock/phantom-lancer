@@ -150,6 +150,27 @@ func TestOpportunityMarketSectorSnapshotDetectsEmergenceAndPersistsConfirmation(
 	}
 }
 
+func TestOpportunityMarketSectorSnapshotSeparatesDegradedAndBlockedCoverage(t *testing.T) {
+	items := make([]opportunityMarketScanRawMetric, 10)
+	for i := range items {
+		items[i].Instrument.Symbol = fmt.Sprintf("600%03d", i)
+		if i < 9 {
+			items[i].Instrument.Industry = "测试行业"
+		}
+	}
+	degraded, _ := buildOpportunityMarketSectorSnapshot(items, OpportunityMarketSectorSnapshot{}, "2026-08-10", time.Now())
+	if degraded.Status != DecisionHealthDegraded || math.Abs(degraded.CoverageRatio-.9) > .0001 {
+		t.Fatalf("degraded snapshot=%+v", degraded)
+	}
+	for i := 7; i < 9; i++ {
+		items[i].Instrument.Industry = ""
+	}
+	blocked, _ := buildOpportunityMarketSectorSnapshot(items, OpportunityMarketSectorSnapshot{}, "2026-08-10", time.Now())
+	if blocked.Status != DecisionHealthBlocked || math.Abs(blocked.CoverageRatio-.7) > .0001 {
+		t.Fatalf("blocked snapshot=%+v", blocked)
+	}
+}
+
 func TestOpportunityMarketSectorAdmissionReservesRepresentativeBeyondPriceLane(t *testing.T) {
 	scored := make([]opportunityMarketScanRawMetric, opportunityMarketScanLocalLimit+1)
 	for i := range scored {

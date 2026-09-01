@@ -49,6 +49,9 @@ func buildOpportunityMarketSectorSnapshot(
 	if snapshot.CoverageRatio < opportunityMarketScanMinimumSectorCoverage {
 		snapshot.Status = DecisionHealthBlocked
 		snapshot.Message = "行业分类覆盖不足，板块轮动结论不可用"
+	} else if snapshot.CoverageRatio < opportunityMarketScanHealthySectorCoverage {
+		snapshot.Status = DecisionHealthDegraded
+		snapshot.Message = "部分标的缺少行业分类，板块轮动仅基于已分类样本"
 	} else {
 		snapshot.Message = "行业与板块已完成横截面聚合和连续状态判断"
 	}

@@ -195,14 +195,17 @@ function SectorTrendSnapshot({ run }: { run: StockV2OpportunityMarketScanRun }) 
     title={`板块轮动 · ${trends.length} 个状态`}
     subtitle={`分类覆盖 ${snapshot.classifiedCount}/${snapshot.eligibleCount} (${(snapshot.coverageRatio * 100).toFixed(1)}%)；首次发现与连续天数按历史扫描快照延续`}
   >
-    {snapshot.status === "blocked" ? <Notice tone="danger">{snapshot.message || "行业分类覆盖不足，本轮不可生成板块结论。"}</Notice> : trends.length === 0 ? <p className="muted m-0 text-xs">本轮没有达到涌现、确认、过热、退潮或失效阈值的板块。</p> : (
+    {snapshot.status === "blocked" ? <Notice tone="danger">{snapshot.message || "行业分类覆盖不足，本轮不可生成板块结论。"}</Notice> : <>
+      {snapshot.status === "degraded" ? <div className="mb-3"><Notice>{snapshot.message || "部分标的缺少行业分类，本轮板块状态已降级。"}</Notice></div> : null}
+      {trends.length === 0 ? <p className="muted m-0 text-xs">本轮没有达到涌现、确认、过热、退潮或失效阈值的板块。</p> : (
       <div className="overflow-x-auto">
         <table className="w-full min-w-[900px] table-fixed text-left text-xs">
           <thead className="text-[var(--muted)]"><tr className="border-b border-[var(--line)]"><th className="w-36 px-2 py-2">板块</th><th className="w-20 px-2 py-2">状态</th><th className="w-28 px-2 py-2">首次 / 连续</th><th className="w-24 px-2 py-2">站上 MA20</th><th className="w-20 px-2 py-2">3日扩散</th><th className="w-24 px-2 py-2">5日中位</th><th className="w-20 px-2 py-2">放量占比</th><th className="px-2 py-2">代表股</th></tr></thead>
           <tbody>{trends.map((trend) => <tr className="border-b border-[var(--line)] last:border-0" key={trend.key}><td className="px-2 py-2"><strong>{trend.name}</strong><span className="muted ml-2 font-mono">{trend.score.toFixed(0)}</span></td><td className="px-2 py-2"><Pill tone={sectorStateTone(trend.state)}>{sectorStateLabel(trend.state)}</Pill></td><td className="px-2 py-2 font-mono">{trend.firstSeenTradeDate || "-"}<span className="muted ml-2">{trend.streak} 日</span></td><td className="px-2 py-2 font-mono">{formatRatioPct(trend.aboveMa20Ratio)}<span className="muted ml-1">{trend.memberCount}只</span></td><td className={`px-2 py-2 font-mono ${trend.aboveMa20Delta3 < 0 ? "text-[var(--danger)]" : ""}`}>{formatRatioPct(trend.aboveMa20Delta3)}</td><td className="px-2 py-2 font-mono">{formatPct(trend.medianReturn5Pct)}</td><td className="px-2 py-2 font-mono">{formatRatioPct(trend.volumeExpansionRatio)}</td><td className="px-2 py-2"><span className="block truncate" title={(trend.representativeNames || []).join("、")}>{(trend.representativeNames || trend.representativeSymbols || []).join("、") || "-"}</span></td></tr>)}</tbody>
         </table>
       </div>
-    )}
+      )}
+    </>}
   </CollapsibleSection>;
 }
 
@@ -344,7 +347,7 @@ function sectorStateTone(state?: string): "neutral" | "good" | "warn" | "danger"
 function themeMatchKindLabel(kind?: string) { return ({ direct_symbol: "明确提及", structured_term: "画像结构匹配", profile_keyword: "画像关键词", semantic_recall: "语义召回" } as Record<string, string>)[kind || ""] || "待核验"; }
 function fundFlowCandidateLabel(candidate: StockV2OpportunityMarketScanCandidate) { return ({ not_requested: "未请求", source_unavailable: "源不可用", invalid_data: "数据无效", run_degraded: "本轮未采用", available: candidate.metrics.fundFlowUsed ? candidate.flowScore.toFixed(0) : "本轮未采用" } as Record<string, string>)[candidate.metrics.fundFlowStatus || ""] || "未取得"; }
 function fundFlowRunLabel(run: StockV2OpportunityMarketScanRun) { if (run.fundFlowUsed) return `${run.fundFlowAvailableCount}/${run.fundFlowRequestedCount} 已用于评分`; if (run.fundFlowStatus === "not_configured") return "未配置数据源"; return `${run.fundFlowAvailableCount}/${run.fundFlowRequestedCount} 覆盖不足，本轮未采用`; }
-function budgetLabel(key: string) { return ({ localPrefilter: "本地预筛", priceAdmission: "行情基础准入", sectorAdmission: "板块代表准入", sectorResearch: "板块候选复核保留", qfqAndQuote: "前复权与报价", fundFlow: "资金流", agentResearch: "Agent 复核", finalCandidates: "最终候选", strategyDrafts: "策略草案", messageAdmission: "消息候选准入", messageResearch: "消息候选复核保留", sectorCoverageMinimumPct: "板块分类最低覆盖率 (%)" } as Record<string, string>)[key] || key; }
+function budgetLabel(key: string) { return ({ localPrefilter: "本地预筛", priceAdmission: "行情基础准入", sectorAdmission: "板块代表准入", sectorResearch: "板块候选复核保留", qfqAndQuote: "前复权与报价", fundFlow: "资金流", agentResearch: "Agent 复核", finalCandidates: "最终候选", strategyDrafts: "策略草案", messageAdmission: "消息候选准入", messageResearch: "消息候选复核保留", sectorCoverageHealthyPct: "板块分类健康覆盖率 (%)", sectorCoverageMinimumPct: "板块分类阻断覆盖率 (%)" } as Record<string, string>)[key] || key; }
 function decisionGateCount(candidate: StockV2OpportunityMarketScanCandidate) { return candidate.metrics.decisionGates?.filter((item) => item.status === "pass" || item.status === "not_applicable").length || 0; }
 function decisionHealthLabel(status?: string) { return ({ healthy: "健康", degraded: "降级", blocked: "阻断", not_applicable: "不适用" } as Record<string, string>)[status || ""] || "未检查"; }
 function decisionHealthTone(status?: string): "neutral" | "good" | "warn" | "danger" { if (status === "healthy") return "good"; if (status === "blocked") return "danger"; if (status === "degraded") return "warn"; return "neutral"; }

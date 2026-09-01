@@ -75,9 +75,10 @@ const (
 	opportunityMarketScanThemeVersionLimit         = 6
 	opportunityMarketScanThemeSemanticLimit        = 12
 	// ponytail: sector rotation becomes misleading when too much of the eligible
-	// universe has no industry label. Keep the hard quality boundary fixed until
-	// the owner has a reason to trade correctness for scan availability.
-	opportunityMarketScanMinimumSectorCoverage = 0.95
+	// universe has no industry label. Keep the fixed degraded/blocking boundaries
+	// visible in the UI instead of adding a low-value tuning surface.
+	opportunityMarketScanHealthySectorCoverage = 0.95
+	opportunityMarketScanMinimumSectorCoverage = 0.80
 )
 
 var (

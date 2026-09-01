@@ -231,6 +231,7 @@ func (s *Service) GetOpportunityMarketScanStatus(ctx context.Context) (Opportuni
 			"priceAdmission": opportunityMarketScanPriceLocalReserve, "sectorAdmission": opportunityMarketScanSectorLocalReserve,
 			"sectorResearch":   opportunityMarketScanSectorResearchReserve,
 			"messageAdmission": opportunityMarketScanMessageLocalReserve, "messageResearch": opportunityMarketScanMessageResearchReserve,
+			"sectorCoverageHealthyPct": int(opportunityMarketScanHealthySectorCoverage * 100),
 			"sectorCoverageMinimumPct": int(opportunityMarketScanMinimumSectorCoverage * 100),
 		},
 		RecommendedModel: "GPT-5.6-Terra / Codex CLI / medium",
