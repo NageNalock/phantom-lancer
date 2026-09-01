@@ -737,6 +737,34 @@ func TestAutomaticDeepStockProfileUpdateProcessesSymbolBudget(t *testing.T) {
 	}
 }
 
+func TestAutomaticDeepStockProfileUpdateYieldsToPendingMarketScan(t *testing.T) {
+	ctx := context.Background()
+	businessLine := "动力电池系统"
+	svc, cleanup := newStockProfileTestServiceWithClient(t, stockProfileF10TestClient(&businessLine))
+	defer cleanup()
+	seedProfileInstruments(t, svc, ctx, "300750", "300751", "300752")
+	configureStockProfileAgent(t, svc, ctx)
+	svc.agentExecutor = fakeOperationReviewExecutor{
+		pool: svc.agentTaskPool, submit: true, summary: "profile enhanced", confidence: .8,
+		result: map[string]any{"summaryZh": "AI 增强摘要"},
+	}
+	if _, err := svc.store.CreateOpportunityMarketScanRun(ctx, OpportunityMarketScanRun{
+		TriggerType: OpportunityMarketScanTriggerManual, Status: OpportunityMarketScanStatusPending,
+	}); err != nil {
+		t.Fatalf("create pending market scan: %v", err)
+	}
+
+	result, err := svc.runAutomaticDeepStockProfileUpdate(ctx, "test", stockProfileDeepUpdateOptions{
+		SymbolBudget: 3, Now: time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC), RequestedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("run automatic deep profile update: %v", err)
+	}
+	if result.CandidateCount != 3 || result.ProcessedCount != 1 {
+		t.Fatalf("result = %+v, want one completed symbol before yielding", result)
+	}
+}
+
 func TestAutomaticDeepStockProfileUpdateStopsAfterSystemicAgentFailure(t *testing.T) {
 	ctx := context.Background()
 	businessLine := "动力电池系统"

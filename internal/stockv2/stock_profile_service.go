@@ -319,6 +319,13 @@ func (s *Service) runAutomaticDeepStockProfileUpdate(ctx context.Context, trigge
 			return result, errStockProfileMaintenanceDeferred
 		}
 		if i > 0 {
+			// ponytail: automatic profile enrichment is best-effort maintenance.
+			// Yield after the current symbol when an owner-visible market scan is
+			// queued, so a large profile batch cannot monopolize the single heavy slot.
+			if s.shouldYieldProfileMaintenanceToOpportunityScan(ctx) {
+				result.UpdatedAt = time.Now()
+				return result, nil
+			}
 			if err := sleepStockProfileDeepUpdate(ctx, stockProfileDeepUpdateDelay(candidate.Instrument.Symbol, rateLimit, seed)); err != nil {
 				return result, err
 			}
@@ -356,6 +363,11 @@ func (s *Service) runAutomaticDeepStockProfileUpdate(ctx context.Context, trigge
 	}
 	result.UpdatedAt = time.Now()
 	return result, nil
+}
+
+func (s *Service) shouldYieldProfileMaintenanceToOpportunityScan(ctx context.Context) bool {
+	run, err := s.store.GetActiveOpportunityMarketScanRun(ctx)
+	return err == nil && run != nil && run.Status == OpportunityMarketScanStatusPending
 }
 
 func stockProfileAIRequiresRefresh(status string) bool {
