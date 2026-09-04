@@ -147,7 +147,7 @@ func (s *Service) mcpGetFundFlowHistory(args json.RawMessage) (any, *mcpError) {
 		config, configErr := s.store.GetOpportunityMarketScanConfig(ctx)
 		if configErr != nil {
 			refreshError = safelog.Error(configErr, 240)
-		} else if fetched, fetchErr := s.fetchOpportunityMarketFundFlow(ctx, config, p.Symbol, p.Market, endDate, limit); fetchErr != nil {
+		} else if fetched, fetchErr := s.fetchOpportunityMarketFundFlow(ctx, config, p.Symbol, p.Market, endDate, mcpFundFlowFetchLimit(limit)); fetchErr != nil {
 			refreshError = safelog.Error(fetchErr, 240)
 		} else {
 			fetchedAt := time.Now()
@@ -286,6 +286,12 @@ func mcpBoundedLimit(value, fallback, maximum int) int {
 		return fallback
 	}
 	return min(value, maximum)
+}
+
+func mcpFundFlowFetchLimit(responseLimit int) int {
+	// ponytail: callers may request a short response, but 20/60-day aggregate
+	// fields must never be recomputed from that truncated response window.
+	return max(responseLimit, 60)
 }
 
 func decisionFundFlowEvidenceMap(item decisionFundFlowEvidence) map[string]any {
