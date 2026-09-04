@@ -286,6 +286,33 @@ func TestPortfolioSentinelV2PublishesCurrentConditionalPlanStrategy(t *testing.T
 	}
 }
 
+func TestPortfolioSentinelCarriesUnexpiredDistinctProtectionRules(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	now := time.Now()
+	rule := func(id, ruleType string, expires time.Time) map[string]any {
+		return map[string]any{
+			"id": id, "symbol": "000977", "portfolioId": "portfolio-1",
+			"portfolioSentinelActionPlan": "true", "portfolioSentinelRunId": "old-run",
+			"validUntil":     expires.Format(time.RFC3339),
+			"dataPrefilters": []any{map[string]any{"key": id, "type": ruleType, "threshold": -6.0}},
+		}
+	}
+	previous := []map[string]any{
+		rule("old-pct", WatchRulePctChangeBelow, now.Add(time.Hour)),
+		rule("old-price", WatchRulePriceBelow, now.Add(time.Hour)),
+		rule("expired", WatchRuleDailyCloseBelow, now.Add(-time.Minute)),
+	}
+	current := []map[string]any{rule("new-price", WatchRulePriceBelow, now.Add(time.Hour))}
+	carried, err := svc.carryForwardPortfolioSentinelRules(context.Background(), "strategy-1", previous, current, "new-run", now)
+	if err != nil {
+		t.Fatalf("carry rules: %v", err)
+	}
+	if len(carried) != 1 || firstRuleString(carried[0], "id") != "old-pct" || carried[0]["carriedForward"] != true {
+		t.Fatalf("carried = %+v, want only distinct active pct-change protection", carried)
+	}
+}
+
 func createAtomicPublishSentinelRun(t *testing.T, store *Store, id string, now time.Time) PortfolioSentinelRun {
 	t.Helper()
 	run, err := store.CreatePortfolioSentinelRun(context.Background(), PortfolioSentinelRun{

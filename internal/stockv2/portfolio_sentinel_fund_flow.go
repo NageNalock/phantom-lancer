@@ -80,6 +80,7 @@ func (s *Service) preparePortfolioSentinelFundFlow(
 	type fetchResult struct {
 		target   portfolioSentinelFundFlowTarget
 		evidence decisionFundFlowEvidence
+		points   []opportunityFundFlowPoint
 		err      error
 	}
 	jobs := make(chan portfolioSentinelFundFlowTarget)
@@ -104,7 +105,8 @@ func (s *Service) preparePortfolioSentinelFundFlow(
 					continue
 				}
 				results <- fetchResult{target: target,
-					evidence: decisionFundFlowEvidenceFromMetrics(target.Symbol, target.Market, metrics)}
+					evidence: decisionFundFlowEvidenceFromMetrics(target.Symbol, target.Market, metrics),
+					points:   fetched.Points}
 			}
 		}()
 	}
@@ -131,6 +133,10 @@ func (s *Service) preparePortfolioSentinelFundFlow(
 			continue
 		}
 		if err := s.store.UpsertDecisionFundFlowEvidence(ctx, result.evidence); err != nil {
+			return nil, err
+		}
+		if err := s.store.UpsertDecisionFundFlowPoints(ctx, result.target.Symbol, result.target.Market,
+			result.evidence.Source, result.points, result.evidence.FetchedAt); err != nil {
 			return nil, err
 		}
 		out[result.target.Symbol] = portfolioSentinelFundFlowResolution{Evidence: result.evidence, Available: true}

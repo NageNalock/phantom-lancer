@@ -193,6 +193,45 @@ func TestMCPDailyBarsSummaryDefaultsToQFQAndReturnsCoverage(t *testing.T) {
 	}
 }
 
+func TestMCPDailyBarsReturnsBoundedRawPriceVolumeEvidence(t *testing.T) {
+	svc, cleanup := newAgentDailyBarsTestService(t, nil)
+	defer cleanup()
+	now := time.Now().In(chinaMarketTZ)
+	bars := make([]StockV2DailyBar, 25)
+	for i := range bars {
+		closePrice := 10 + float64(i)/10
+		bars[i] = StockV2DailyBar{
+			Symbol: "000977", Market: "SZ", TradeDate: now.AddDate(0, 0, i-30).Format("2006-01-02"),
+			Open: closePrice - .1, High: closePrice + .2, Low: closePrice - .2, Close: closePrice,
+			PrevClose: closePrice - .1, Volume: float64(1000 + i), Amount: float64(10000 + i),
+			PctChange: .5, Adjusted: DailyBarAdjustedQFQ, Source: "fixture", FetchedAt: now, Quality: DailyBarQualityOK,
+		}
+	}
+	if err := svc.store.UpsertDailyBars(context.Background(), bars); err != nil {
+		t.Fatalf("upsert bars: %v", err)
+	}
+	result, mcpErr := svc.mcpGetDailyBars(json.RawMessage(`{"symbol":"000977","adjusted":"qfq","limit":3}`))
+	if mcpErr != nil {
+		t.Fatalf("mcp get daily bars: %v", mcpErr)
+	}
+	content := result.(map[string]any)["content"].([]map[string]any)
+	var body map[string]any
+	if err := json.Unmarshal([]byte(content[0]["text"].(string)), &body); err != nil {
+		t.Fatalf("decode MCP content: %v", err)
+	}
+	items, _ := body["bars"].([]any)
+	if len(items) != 3 || body["priceSemantics"] == "" {
+		t.Fatalf("body = %+v, want three raw evidence rows and price semantics", body)
+	}
+	latest := items[2].(map[string]any)
+	if latest["volume"].(float64) <= 0 || latest["amount"].(float64) <= 0 {
+		t.Fatalf("latest row = %+v, want OHLCV and amount", latest)
+	}
+	if _, leaked := latest["id"]; leaked {
+		t.Fatalf("latest row leaks internal id: %+v", latest)
+	}
+}
+
 func newAgentDailyBarsTestService(t *testing.T, client *http.Client) (*Service, func()) {
 	t.Helper()
 	store, err := NewStore(filepath.Join(t.TempDir(), "stockv2.db"))

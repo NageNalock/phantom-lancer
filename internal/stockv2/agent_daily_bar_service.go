@@ -18,6 +18,8 @@ const (
 	agentDailyBarsRequestTimeout = 12 * time.Second
 	agentDailyBarsRetryCooldown  = 10 * time.Minute
 	agentDailyBarsRequestSpacing = 500 * time.Millisecond
+	agentDailyBarsContextLimit   = 60
+	agentDailyBarsRecentLimit    = 8
 )
 
 const (
@@ -54,7 +56,7 @@ func (s *Service) buildDailyBarsContextAt(ctx context.Context, symbol, adjusted 
 	currentSession := quote != nil && sameChinaMarketDate(quote.QuoteAt, now)
 
 	refresh := s.ensureAgentDailyBars(ctx, symbol, adjusted, completedEnd, currentSession, postClose, now)
-	bars, err := s.store.GetDailyBars(ctx, symbol, adjusted, "", completedEnd, 20)
+	bars, err := s.store.GetDailyBars(ctx, symbol, adjusted, "", completedEnd, agentDailyBarsContextLimit)
 	if err != nil {
 		if refresh.Error == "" {
 			refresh.Error = safelog.Error(err, 240)
@@ -82,6 +84,12 @@ func (s *Service) buildDailyBarsContextAt(ctx context.Context, symbol, adjusted 
 	out.LatestFetchedAt = latest.FetchedAt
 	out.Quality = latest.Quality
 	out.Summary = dailyBarsContextSummary(bars)
+	out.RecentBars = dailyBarEvidencePoints(bars, agentDailyBarsRecentLimit)
+	features := calculateDecisionBarFeatures(bars)
+	if features.Valid {
+		structure := marketStructureEvidence(features)
+		out.MarketStructure = &structure
+	}
 	out.CoverageStatus = agentDailyBarsCoverageStatus(latest.TradeDate, refresh.Error, refresh.SourceLagging, currentSession, postClose, now)
 	return out
 }
@@ -334,9 +342,35 @@ func dailyBarsContextSummary(bars []StockV2DailyBar) map[string]float64 {
 			low = bar.Low
 		}
 	}
-	return map[string]float64{
+	out := map[string]float64{
 		"latestClose": latest.Close,
 		"rangeHigh":   high,
 		"rangeLow":    low,
 	}
+	features := calculateDecisionBarFeatures(bars)
+	if features.Valid {
+		out["return3Pct"] = features.Return3Pct
+		out["return5Pct"] = features.Return5Pct
+		out["return20Pct"] = features.Return20Pct
+		out["volumeRatio3ToPrior"] = features.VolumeRatio3ToPrior
+		out["latestCloseLocationPct"] = features.LatestCloseLocationPct
+		out["lowCloseDays3"] = float64(features.LowCloseDays3)
+	}
+	return out
+}
+
+func dailyBarEvidencePoints(bars []StockV2DailyBar, limit int) []DailyBarEvidencePoint {
+	if limit <= 0 || len(bars) == 0 {
+		return nil
+	}
+	start := max(0, len(bars)-limit)
+	out := make([]DailyBarEvidencePoint, 0, len(bars)-start)
+	for _, bar := range bars[start:] {
+		out = append(out, DailyBarEvidencePoint{
+			TradeDate: bar.TradeDate, Open: bar.Open, High: bar.High, Low: bar.Low,
+			Close: bar.Close, PrevClose: bar.PrevClose, Volume: bar.Volume,
+			Amount: bar.Amount, PctChange: bar.PctChange,
+		})
+	}
+	return out
 }

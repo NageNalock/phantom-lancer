@@ -1464,6 +1464,14 @@ func (s *Service) preparePortfolioSentinelPublication(ctx context.Context, run P
 			break
 		}
 	}
+	if !publication.enableDataStrategyMonitor {
+		for _, item := range publication.planStrategies {
+			if len(playbookActionMapsFromMeta(item.version.GenerationMeta)) > 0 {
+				publication.enableDataStrategyMonitor = true
+				break
+			}
+		}
+	}
 	actions := report.PortfolioActions
 	for _, plan := range report.ActionPlans {
 		if plan.Action == PortfolioSentinelPlanHold || plan.TriggerMode != PortfolioSentinelTriggerImmediate {
@@ -1671,11 +1679,23 @@ func (s *Service) preparePortfolioSentinelPlanStrategies(
 				"riskNotes":                   plan.RiskNotes,
 				"evidenceRefs":                plan.EvidenceRefs,
 				"researchRefs":                plan.ResearchRefs,
+				"horizonOutlooks":             plan.HorizonOutlooks,
 				"monitorWindow":               plan.MonitorWindow,
 				"validUntil":                  plan.ValidUntil,
 				"portfolioSentinelActionPlan": "true",
 				"portfolioSentinelRunId":      run.ID,
 			})
+		}
+		if existing != nil && existing.ActiveVersion != nil {
+			carried, carryErr := s.carryForwardPortfolioSentinelRules(ctx, existing.Strategy.ID,
+				playbookActionMapsFromMeta(existing.ActiveVersion.GenerationMeta), rules, run.ID, now)
+			if carryErr != nil {
+				return nil, carryErr
+			}
+			for _, rule := range carried {
+				evidenceRefs = append(evidenceRefs, agentStringListFromAny(rule["evidenceRefs"])...)
+			}
+			rules = append(rules, carried...)
 		}
 		strategy := StockV2Strategy{
 			ID:          generateID(),
@@ -1722,6 +1742,74 @@ func (s *Service) preparePortfolioSentinelPlanStrategies(
 		out = append(out, portfolioSentinelPlanStrategyPublication{strategy: strategy, version: version, create: create})
 	}
 	return out, nil
+}
+
+func (s *Service) carryForwardPortfolioSentinelRules(
+	ctx context.Context,
+	strategyID string,
+	previous, current []map[string]any,
+	currentRunID string,
+	now time.Time,
+) ([]map[string]any, error) {
+	currentSignatures := make(map[string]struct{}, len(current))
+	for _, rule := range current {
+		currentSignatures[portfolioSentinelRuleProtectionSignature(rule)] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(previous))
+	out := make([]map[string]any, 0, len(previous))
+	for _, rule := range previous {
+		if firstRuleString(rule, "portfolioSentinelActionPlan") != "true" ||
+			portfolioSentinelPlanWindowState(rule, now) != "active" {
+			continue
+		}
+		triggered, err := s.portfolioSentinelPlanAlreadyTriggered(ctx, strategyID, rule)
+		if err != nil {
+			return nil, err
+		}
+		if triggered {
+			continue
+		}
+		signature := portfolioSentinelRuleProtectionSignature(rule)
+		if signature == "" {
+			continue
+		}
+		if _, replaced := currentSignatures[signature]; replaced {
+			continue
+		}
+		if _, duplicate := seen[signature]; duplicate {
+			continue
+		}
+		seen[signature] = struct{}{}
+		carried := copyStringAnyMap(rule)
+		carried["carriedForward"] = true
+		carried["carriedForwardByRunId"] = currentRunID
+		out = append(out, carried)
+	}
+	return out, nil
+}
+
+func portfolioSentinelRuleProtectionSignature(rule map[string]any) string {
+	symbol := strings.ToUpper(strings.TrimSpace(firstRuleString(rule, "symbol")))
+	portfolioID := strings.TrimSpace(firstRuleString(rule, "portfolioId", "portfolioID"))
+	if symbol == "" || portfolioID == "" {
+		return ""
+	}
+	types := make([]string, 0)
+	for _, raw := range arrayFromAny(rule["dataPrefilters"]) {
+		if typeName := normalizeWatchRuleType(firstRuleString(mapFromAny(raw), "type")); typeName != "" {
+			types = append(types, typeName)
+		}
+	}
+	for _, raw := range arrayFromAny(rule["portfolioPrefilters"]) {
+		if typeName := normalizeWatchRuleType(firstRuleString(mapFromAny(raw), "type")); typeName != "" {
+			types = append(types, typeName)
+		}
+	}
+	if len(types) == 0 {
+		return ""
+	}
+	sort.Strings(types)
+	return portfolioID + "\x00" + symbol + "\x00" + strings.Join(types, "+")
 }
 
 func portfolioSentinelObservationMode(ruleType string) string {
@@ -2051,7 +2139,7 @@ func (s *Service) validatePortfolioSentinelActionPlans(
 		item.Claim = safelog.Text(item.Claim, 1000)
 	}
 	covered := map[string]struct{}{}
-	actionable := false
+	externalResearchRequired := false
 	now := time.Now()
 	for index := range report.ActionPlans {
 		plan := &report.ActionPlans[index]
@@ -2112,10 +2200,17 @@ func (s *Service) validatePortfolioSentinelActionPlans(
 			}
 		}
 		if plan.Action != PortfolioSentinelPlanHold {
-			actionable = true
-			if len(plan.ResearchRefs) == 0 {
-				return fmt.Errorf("%w: actionable plan is missing research_refs", ErrInvalidPortfolioSentinelResult)
+			requiresExternal := plan.Action == PortfolioSentinelPlanBuild || plan.Action == PortfolioSentinelPlanAdd
+			if len(plan.ResearchRefs) == 0 && !requiresExternal {
+				snapshot, snapshotErr := s.store.GetLatestDecisionGateSnapshot(ctx, "portfolio_sentinel", run.ID, plan.Symbol)
+				if snapshotErr != nil || !containsTrimmedString(plan.EvidenceRefs, snapshot.ID) {
+					return fmt.Errorf("%w: defensive plan without research_refs must reference its decision gate snapshot", ErrInvalidPortfolioSentinelResult)
+				}
 			}
+			if requiresExternal && len(plan.ResearchRefs) == 0 {
+				return fmt.Errorf("%w: build/add plan is missing research_refs", ErrInvalidPortfolioSentinelResult)
+			}
+			externalResearchRequired = externalResearchRequired || len(plan.ResearchRefs) > 0 || requiresExternal
 			for _, ref := range plan.ResearchRefs {
 				if _, ok := researchIDs[strings.TrimSpace(ref)]; !ok {
 					return fmt.Errorf("%w: actionable plan references unknown research evidence", ErrInvalidPortfolioSentinelResult)
@@ -2128,10 +2223,20 @@ func (s *Service) validatePortfolioSentinelActionPlans(
 			return fmt.Errorf("%w: every holding requires exactly one action plan", ErrInvalidPortfolioSentinelResult)
 		}
 	}
-	if actionable && !portfolioSentinelHasExternalResearch(audit) {
-		return fmt.Errorf("%w: actionable plans require observed public search or research Agent retrieval", ErrInvalidPortfolioSentinelResult)
+	if externalResearchRequired && !portfolioSentinelHasExternalResearch(audit) {
+		return fmt.Errorf("%w: research-backed plans require observed public search or research Agent retrieval", ErrInvalidPortfolioSentinelResult)
 	}
 	return nil
+}
+
+func containsTrimmedString(items []string, target string) bool {
+	target = strings.TrimSpace(target)
+	for _, item := range items {
+		if strings.TrimSpace(item) == target && target != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func portfolioSentinelPublicSource(raw string) (string, bool) {

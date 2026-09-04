@@ -352,6 +352,7 @@ type OpportunityMarketScanRunListFilter struct {
 
 type OpportunityMarketScanCandidateListFilter struct {
 	ScanRunID      string
+	Symbol         string
 	Stage          string
 	DecisionStatus string
 	SourceLane     string

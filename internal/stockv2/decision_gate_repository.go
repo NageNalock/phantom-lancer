@@ -105,6 +105,18 @@ func (s *Store) ensureDecisionGateSchema(ctx context.Context) error {
 			source TEXT NOT NULL,
 			fetched_at DATETIME NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS stockv2_decision_fund_flow_points (
+			symbol TEXT NOT NULL,
+			market TEXT,
+			trade_date TEXT NOT NULL,
+			main_net REAL NOT NULL DEFAULT 0,
+			turnover REAL NOT NULL DEFAULT 0,
+			source TEXT NOT NULL,
+			fetched_at DATETIME NOT NULL,
+			PRIMARY KEY(symbol, trade_date)
+		);
+		CREATE INDEX IF NOT EXISTS idx_stockv2_decision_flow_symbol_date
+			ON stockv2_decision_fund_flow_points(symbol, trade_date DESC);
 	`)
 	return wrapError(err, "ensure decision gate schema")
 }
@@ -131,6 +143,69 @@ func (s *Store) GetDecisionFundFlowEvidence(ctx context.Context, symbol string) 
 		&item.Symbol, &item.Market, &item.AsOf, &item.MainNetInflow5, &item.MainNetInflow20,
 		&item.MainNetInflow60, &item.MainFlowRatio20, &item.PositiveFlowDays20, &item.Source, &item.FetchedAt)
 	return item, err
+}
+
+func (s *Store) UpsertDecisionFundFlowPoints(ctx context.Context, symbol, market, source string, points []opportunityFundFlowPoint, fetchedAt time.Time) error {
+	symbol = strings.TrimSpace(symbol)
+	if symbol == "" || len(points) == 0 {
+		return nil
+	}
+	if fetchedAt.IsZero() {
+		fetchedAt = time.Now()
+	}
+	return s.runTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		for _, point := range points {
+			if strings.TrimSpace(point.TradeDate) == "" {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO stockv2_decision_fund_flow_points
+				(symbol,market,trade_date,main_net,turnover,source,fetched_at) VALUES (?,?,?,?,?,?,?)
+				ON CONFLICT(symbol,trade_date) DO UPDATE SET market=excluded.market,
+				main_net=excluded.main_net,turnover=excluded.turnover,source=excluded.source,fetched_at=excluded.fetched_at`,
+				symbol, nullableString(market), point.TradeDate, point.MainNet, point.Turnover, source, fetchedAt); err != nil {
+				return wrapError(err, "upsert decision fund flow point")
+			}
+		}
+		return nil
+	})
+}
+
+func (s *Store) ListDecisionFundFlowPoints(ctx context.Context, symbol, startDate, endDate string, limit int) ([]DecisionFundFlowPoint, error) {
+	symbol = strings.TrimSpace(symbol)
+	if symbol == "" {
+		return []DecisionFundFlowPoint{}, nil
+	}
+	if limit <= 0 || limit > 250 {
+		limit = 120
+	}
+	where := []string{"symbol=?"}
+	args := []any{symbol}
+	if startDate = strings.TrimSpace(startDate); startDate != "" {
+		where = append(where, "trade_date>=?")
+		args = append(args, startDate)
+	}
+	if endDate = strings.TrimSpace(endDate); endDate != "" {
+		where = append(where, "trade_date<=?")
+		args = append(args, endDate)
+	}
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT symbol,COALESCE(market,''),trade_date,main_net,turnover,source,fetched_at
+		FROM (SELECT symbol,market,trade_date,main_net,turnover,source,fetched_at
+		FROM stockv2_decision_fund_flow_points WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY trade_date DESC LIMIT ?) ORDER BY trade_date ASC`, args...)
+	if err != nil {
+		return nil, wrapError(err, "list decision fund flow points")
+	}
+	defer rows.Close()
+	out := make([]DecisionFundFlowPoint, 0, limit)
+	for rows.Next() {
+		var item DecisionFundFlowPoint
+		if err := rows.Scan(&item.Symbol, &item.Market, &item.TradeDate, &item.MainNet, &item.Turnover, &item.Source, &item.FetchedAt); err != nil {
+			return nil, wrapError(err, "scan decision fund flow point")
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) SaveDecisionGateSnapshot(ctx context.Context, item DecisionGateSnapshot) (DecisionGateSnapshot, error) {
@@ -201,6 +276,20 @@ func (s *Store) ListDecisionGateSnapshots(ctx context.Context, contextType, cont
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) GetLatestDecisionGateSnapshotForSymbol(ctx context.Context, symbol string) (DecisionGateSnapshot, error) {
+	var payload string
+	err := s.db.QueryRowContext(ctx, `SELECT payload_json FROM stockv2_decision_gate_snapshots
+		WHERE symbol=? ORDER BY created_at DESC LIMIT 1`, strings.TrimSpace(symbol)).Scan(&payload)
+	if err != nil {
+		return DecisionGateSnapshot{}, err
+	}
+	var item DecisionGateSnapshot
+	if err := json.Unmarshal([]byte(payload), &item); err != nil {
+		return DecisionGateSnapshot{}, err
+	}
+	return item, nil
 }
 
 func (s *Store) UpsertDecisionMarketEvents(ctx context.Context, items []decisionMarketEvent) error {
@@ -305,6 +394,32 @@ func (s *Store) GetLatestDecisionFinancialFact(ctx context.Context, symbol, asOf
 		if item.FetchedAt.After(out.FetchedAt) {
 			out.FetchedAt = item.FetchedAt
 		}
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListDecisionFinancialFacts(ctx context.Context, symbol, asOf string, limit int) ([]decisionFinancialFact, error) {
+	if limit <= 0 || limit > 30 {
+		limit = 12
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT symbol,report_period,dataset,announced_at,revenue,net_profit,
+		operating_cash_flow,roe,gross_margin,source,fetched_at FROM stockv2_decision_financial_facts
+		WHERE symbol=? AND (announced_at='' OR announced_at<=?)
+		ORDER BY report_period DESC,dataset,announced_at DESC,fetched_at DESC LIMIT ?`,
+		strings.TrimSpace(symbol), strings.TrimSpace(asOf), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]decisionFinancialFact, 0, limit)
+	for rows.Next() {
+		var item decisionFinancialFact
+		if err := rows.Scan(&item.Symbol, &item.ReportPeriod, &item.Dataset, &item.AnnouncedAt,
+			&item.Revenue, &item.NetProfit, &item.OperatingCashFlow, &item.ROE,
+			&item.GrossMargin, &item.Source, &item.FetchedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
 	}
 	return out, rows.Err()
 }

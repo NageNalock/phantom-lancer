@@ -653,6 +653,48 @@ func (s *Store) listQuoteSnapshots(ctx context.Context, symbol string, since tim
 	return out, nil
 }
 
+func (s *Store) ListRecentQuoteSnapshots(ctx context.Context, symbol string, since time.Time, limit int) ([]StockV2QuoteSnapshot, error) {
+	symbol = strings.TrimSpace(symbol)
+	if symbol == "" {
+		return []StockV2QuoteSnapshot{}, nil
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 240
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT symbol,market,name,last_price,prev_close,open_price,high_price,low_price,
+		       volume,amount,pct_change,amplitude,turnover_rate,volume_ratio,main_net_inflow,
+		       super_net_inflow,large_net_inflow,medium_net_inflow,small_net_inflow,
+		       main_net_inflow_pct,quote_at,collected_at,source,status,error_message
+		FROM (SELECT symbol,COALESCE(market,'') market,COALESCE(name,'') name,last_price,prev_close,
+		             open_price,high_price,low_price,volume,amount,pct_change,amplitude,
+		             turnover_rate,volume_ratio,main_net_inflow,super_net_inflow,large_net_inflow,
+		             medium_net_inflow,small_net_inflow,main_net_inflow_pct,quote_at,collected_at,
+		             source,status,COALESCE(error_message,'') error_message
+		      FROM stockv2_quote_snapshots WHERE symbol=? AND collected_at>=?
+		      ORDER BY collected_at DESC LIMIT ?)
+		ORDER BY collected_at ASC`, symbol, since, limit)
+	if err != nil {
+		return nil, wrapError(err, "list recent quote snapshots")
+	}
+	defer rows.Close()
+	out := make([]StockV2QuoteSnapshot, 0, limit)
+	for rows.Next() {
+		var item StockV2QuoteSnapshot
+		if err := rows.Scan(&item.Symbol, &item.Market, &item.Name, &item.LastPrice, &item.PrevClose,
+			&item.OpenPrice, &item.HighPrice, &item.LowPrice, &item.Volume, &item.Amount, &item.PctChange,
+			&item.Amplitude, &item.TurnoverRate, &item.VolumeRatio, &item.MainNetInflow,
+			&item.SuperNetInflow, &item.LargeNetInflow, &item.MediumNetInflow, &item.SmallNetInflow,
+			&item.MainNetInflowPct, &item.QuoteAt, &item.CollectedAt, &item.Source, &item.Status,
+			&item.ErrorMessage); err != nil {
+			return nil, wrapError(err, "scan recent quote snapshot")
+		}
+		item.FetchedAt = item.CollectedAt
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) upsertMinuteBars(ctx context.Context, bars []StockV2MinuteBar) error {
 	now := time.Now()
 	for _, bar := range bars {

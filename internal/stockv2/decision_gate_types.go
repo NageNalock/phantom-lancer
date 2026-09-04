@@ -16,6 +16,7 @@ const (
 	DecisionGateCatalystPricing = "catalyst_pricing"
 	DecisionGateFactorCrowding  = "factor_crowding"
 	DecisionGateVolatility      = "volatility_calibration"
+	DecisionGateMarketStructure = "market_structure"
 	DecisionGateEventCalendar   = "event_calendar"
 )
 
@@ -111,4 +112,16 @@ type decisionFundFlowEvidence struct {
 	PositiveFlowDays20 int
 	Source             string
 	FetchedAt          time.Time
+}
+
+// DecisionFundFlowPoint is persisted market evidence. Credentials and provider
+// endpoints are deliberately absent from this Agent-facing record.
+type DecisionFundFlowPoint struct {
+	Symbol    string    `json:"symbol"`
+	Market    string    `json:"market,omitempty"`
+	TradeDate string    `json:"tradeDate"`
+	MainNet   float64   `json:"mainNet"`
+	Turnover  float64   `json:"turnover"`
+	Source    string    `json:"source"`
+	FetchedAt time.Time `json:"fetchedAt"`
 }

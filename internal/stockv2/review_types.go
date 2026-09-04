@@ -65,19 +65,49 @@ type AgentContextPack struct {
 }
 
 type DailyBarsContext struct {
-	Symbol                   string             `json:"symbol,omitempty"`
-	Adjusted                 string             `json:"adjusted,omitempty"`
-	Count                    int                `json:"count"`
-	LatestTradeDate          string             `json:"latestTradeDate,omitempty"`
-	LatestClose              float64            `json:"latestClose,omitempty"`
-	LatestFetchedAt          time.Time          `json:"latestFetchedAt,omitempty"`
-	Quality                  string             `json:"quality,omitempty"`
-	CoverageStatus           string             `json:"coverageStatus,omitempty"`
-	CheckedAt                time.Time          `json:"checkedAt,omitempty"`
-	RefreshAttempted         bool               `json:"refreshAttempted,omitempty"`
-	CurrentSessionIncomplete bool               `json:"currentSessionIncomplete,omitempty"`
-	RefreshError             string             `json:"refreshError,omitempty"`
-	Summary                  map[string]float64 `json:"summary,omitempty"`
+	Symbol                   string                   `json:"symbol,omitempty"`
+	Adjusted                 string                   `json:"adjusted,omitempty"`
+	Count                    int                      `json:"count"`
+	LatestTradeDate          string                   `json:"latestTradeDate,omitempty"`
+	LatestClose              float64                  `json:"latestClose,omitempty"`
+	LatestFetchedAt          time.Time                `json:"latestFetchedAt,omitempty"`
+	Quality                  string                   `json:"quality,omitempty"`
+	CoverageStatus           string                   `json:"coverageStatus,omitempty"`
+	CheckedAt                time.Time                `json:"checkedAt,omitempty"`
+	RefreshAttempted         bool                     `json:"refreshAttempted,omitempty"`
+	CurrentSessionIncomplete bool                     `json:"currentSessionIncomplete,omitempty"`
+	RefreshError             string                   `json:"refreshError,omitempty"`
+	Summary                  map[string]float64       `json:"summary,omitempty"`
+	RecentBars               []DailyBarEvidencePoint  `json:"recentBars,omitempty"`
+	MarketStructure          *MarketStructureEvidence `json:"marketStructure,omitempty"`
+}
+
+// DailyBarEvidencePoint is the bounded, identifier-free price/volume shape
+// supplied to an Agent. QFQ points are trend evidence, never executable prices.
+type DailyBarEvidencePoint struct {
+	TradeDate string  `json:"tradeDate"`
+	Open      float64 `json:"open"`
+	High      float64 `json:"high"`
+	Low       float64 `json:"low"`
+	Close     float64 `json:"close"`
+	PrevClose float64 `json:"prevClose,omitempty"`
+	Volume    float64 `json:"volume,omitempty"`
+	Amount    float64 `json:"amount,omitempty"`
+	PctChange float64 `json:"pctChange"`
+}
+
+type MarketStructureEvidence struct {
+	WindowTradingDays        int     `json:"windowTradingDays"`
+	Return3Pct               float64 `json:"return3Pct"`
+	VolumeRatio3ToPrior      float64 `json:"volumeRatio3ToPrior,omitempty"`
+	AmountRatio3ToPrior      float64 `json:"amountRatio3ToPrior,omitempty"`
+	LatestCloseLocationPct   float64 `json:"latestCloseLocationPct"`
+	LowCloseDays3            int     `json:"lowCloseDays3"`
+	PriorBreakoutTradeDate   string  `json:"priorBreakoutTradeDate,omitempty"`
+	PriorBreakoutReturnPct   float64 `json:"priorBreakoutReturnPct,omitempty"`
+	HighVolumeStall          bool    `json:"highVolumeStall"`
+	PostBreakoutDistribution bool    `json:"postBreakoutDistribution"`
+	PotentialSupplyPressure  bool    `json:"potentialSupplyPressure"`
 }
 
 type MinuteBarsContext struct {

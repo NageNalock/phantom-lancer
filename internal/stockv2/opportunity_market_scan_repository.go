@@ -418,6 +418,10 @@ func scanOpportunityMarketScanCandidate(row rowScanner) (OpportunityMarketScanCa
 func (s *Store) ListOpportunityMarketScanCandidates(ctx context.Context, filter OpportunityMarketScanCandidateListFilter) ([]OpportunityMarketScanCandidate, error) {
 	where := []string{"scan_run_id=?"}
 	args := []any{strings.TrimSpace(filter.ScanRunID)}
+	if strings.TrimSpace(filter.Symbol) != "" {
+		where = append(where, "symbol=?")
+		args = append(args, strings.TrimSpace(filter.Symbol))
+	}
 	if strings.TrimSpace(filter.Stage) != "" {
 		where = append(where, "stage=?")
 		args = append(args, strings.TrimSpace(filter.Stage))
@@ -455,6 +459,10 @@ func (s *Store) ListOpportunityMarketScanCandidates(ctx context.Context, filter 
 func (s *Store) CountOpportunityMarketScanCandidates(ctx context.Context, filter OpportunityMarketScanCandidateListFilter) (int, error) {
 	where := []string{"scan_run_id=?"}
 	args := []any{strings.TrimSpace(filter.ScanRunID)}
+	if strings.TrimSpace(filter.Symbol) != "" {
+		where = append(where, "symbol=?")
+		args = append(args, strings.TrimSpace(filter.Symbol))
+	}
 	if strings.TrimSpace(filter.Stage) != "" {
 		where = append(where, "stage=?")
 		args = append(args, strings.TrimSpace(filter.Stage))

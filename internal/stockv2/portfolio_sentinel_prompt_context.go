@@ -23,6 +23,7 @@ type portfolioSentinelPromptContextView struct {
 }
 
 type portfolioSentinelPromptDecisionGate struct {
+	ID             string                                      `json:"id,omitempty"`
 	Symbol         string                                      `json:"symbol"`
 	Market         string                                      `json:"market,omitempty"`
 	InstrumentType string                                      `json:"instrumentType,omitempty"`
@@ -100,6 +101,15 @@ func compactPortfolioSentinelPromptContext(pack PortfolioSentinelContext, level 
 		portfolioOut.Holdings = make([]PortfolioSentinelHoldingContext, 0, len(portfolio.Holdings))
 		for _, holding := range portfolio.Holdings {
 			holdingOut := holding
+			if holding.DailyBars != nil {
+				dailyBars := *holding.DailyBars
+				if level >= 2 {
+					dailyBars.RecentBars = nil
+				} else if level == 1 && len(dailyBars.RecentBars) > 4 {
+					dailyBars.RecentBars = append([]DailyBarEvidencePoint(nil), dailyBars.RecentBars[len(dailyBars.RecentBars)-4:]...)
+				}
+				holdingOut.DailyBars = &dailyBars
+			}
 			holdingOut.RawNews = nil
 			holdingOut.Profile = compactPortfolioSentinelProfile(holding.Profile, level)
 			newsLimit := 3
@@ -227,7 +237,7 @@ func compactPortfolioSentinelDecisionGates(items map[string]DecisionGateSnapshot
 	out := make(map[string]portfolioSentinelPromptDecisionGate, len(items))
 	for symbol, item := range items {
 		gateOut := portfolioSentinelPromptDecisionGate{
-			Symbol: item.Symbol, Market: item.Market, InstrumentType: item.InstrumentType,
+			ID: item.ID, Symbol: item.Symbol, Market: item.Market, InstrumentType: item.InstrumentType,
 			TradeDate: item.TradeDate, DecisionDate: item.DecisionDate, Status: item.Status,
 			MarketRegime: item.MarketRegime, AllowedActions: item.AllowedActions,
 			Metrics: compactPortfolioSentinelGateMetrics(item.Metrics),
@@ -263,14 +273,18 @@ func compactPortfolioSentinelGateMetrics(metrics map[string]any) map[string]any 
 	}
 	allowed := map[string]struct{}{
 		"atr14": {}, "atr14Pct": {}, "benchmarkReturn20Pct": {}, "factorCluster": {},
+		"amountRatio3ToPrior": {}, "highVolumeStall": {}, "latestCloseLocationPct": {}, "lowCloseDays3": {},
 		"financialReportPeriod": {}, "lastCompletedCloseRaw": {}, "lastCompletedCloseRawDate": {},
 		"lastCompletedCloseRawSource": {}, "latestCompletedTradeDate": {}, "latestTradableAmount": {},
 		"latestTradableHigh": {}, "latestTradableLow": {}, "latestTradableOpen": {},
 		"latestTradablePctChange": {}, "latestTradablePrevClose": {}, "latestTradablePrice": {},
 		"latestTradablePriceAt": {}, "latestTradablePriceSource": {}, "latestTradableVolumeRatio": {},
-		"ma20": {}, "mainFlowRatio20": {}, "netProfit": {}, "operatingCashFlow": {},
-		"return20Pct": {}, "return5Pct": {}, "revenue": {}, "roe": {}, "grossMargin": {},
-		"trendCloseQFQ": {},
+		"ma20": {}, "mainFlowRatio20": {}, "mainNetInflow5": {}, "mainNetInflow20": {}, "mainNetInflow60": {},
+		"positiveFlowDays20": {}, "netProfit": {}, "operatingCashFlow": {}, "postBreakoutDistribution": {},
+		"potentialSupplyPressure": {}, "priceFlowDivergence": {}, "priorBreakoutReturnPct": {}, "priorBreakoutTradeDate": {},
+		"return20Pct": {}, "return5Pct": {}, "return3Pct": {}, "revenue": {}, "roe": {}, "grossMargin": {},
+		"trendCloseQFQ":       {},
+		"volumeRatio3ToPrior": {},
 	}
 	out := make(map[string]any, len(metrics))
 	for key, value := range metrics {

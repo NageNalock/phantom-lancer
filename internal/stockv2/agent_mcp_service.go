@@ -16,6 +16,12 @@ const (
 	mcpToolGetStockProfile                        = "stock_agent.get_stock_profile"
 	mcpToolGetLatestQuotes                        = "stock_agent.get_latest_quotes"
 	mcpToolGetDailyBarsSummary                    = "stock_agent.get_daily_bars_summary"
+	mcpToolGetDailyBars                           = "stock_agent.get_daily_bars"
+	mcpToolGetMinuteBars                          = "stock_agent.get_minute_bars"
+	mcpToolGetQuoteHistory                        = "stock_agent.get_quote_history"
+	mcpToolGetFundFlowHistory                     = "stock_agent.get_fund_flow_history"
+	mcpToolGetDecisionEvidence                    = "stock_agent.get_decision_evidence"
+	mcpToolGetMarketScanCandidates                = "stock_agent.get_market_scan_candidates"
 	mcpToolSearchNewsEvents                       = "stock_agent.search_news_events"
 	mcpToolSemanticSearchNewsEvents               = "stock_agent.semantic_search_news_events"
 	mcpToolSemanticSearchNewsThreads              = "stock_agent.semantic_search_news_threads"
@@ -44,6 +50,12 @@ func stockAgentMCPRequiredTools() []string {
 		mcpToolGetStockProfile,
 		mcpToolGetLatestQuotes,
 		mcpToolGetDailyBarsSummary,
+		mcpToolGetDailyBars,
+		mcpToolGetMinuteBars,
+		mcpToolGetQuoteHistory,
+		mcpToolGetFundFlowHistory,
+		mcpToolGetDecisionEvidence,
+		mcpToolGetMarketScanCandidates,
 		mcpToolSearchNewsEvents,
 		mcpToolSemanticSearchNewsEvents,
 		mcpToolSemanticSearchNewsThreads,
@@ -150,6 +162,62 @@ func stockAgentMCPToolInputSchema(name string) map[string]any {
 		}
 		required = []string{"query"}
 		additionalProperties = false
+	case mcpToolGetDailyBars:
+		properties = map[string]any{
+			"symbol":    map[string]any{"type": "string", "description": "Six-digit instrument symbol."},
+			"adjusted":  map[string]any{"type": "string", "enum": []string{DailyBarAdjustedNone, DailyBarAdjustedQFQ, DailyBarAdjustedHFQ}},
+			"startDate": map[string]any{"type": "string", "description": "Optional YYYY-MM-DD inclusive start."},
+			"endDate":   map[string]any{"type": "string", "description": "Optional YYYY-MM-DD inclusive end."},
+			"limit":     map[string]any{"type": "integer", "minimum": 1, "maximum": 250},
+		}
+		required = []string{"symbol"}
+		additionalProperties = false
+	case mcpToolGetMinuteBars:
+		properties = map[string]any{
+			"symbol": map[string]any{"type": "string", "description": "Six-digit instrument symbol."},
+			"days":   map[string]any{"type": "integer", "minimum": 1, "maximum": 5},
+			"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 1200},
+		}
+		required = []string{"symbol"}
+		additionalProperties = false
+	case mcpToolGetQuoteHistory:
+		properties = map[string]any{
+			"symbol": map[string]any{"type": "string", "description": "Six-digit instrument symbol."},
+			"hours":  map[string]any{"type": "integer", "minimum": 1, "maximum": 120},
+			"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 500},
+		}
+		required = []string{"symbol"}
+		additionalProperties = false
+	case mcpToolGetFundFlowHistory:
+		properties = map[string]any{
+			"symbol":    map[string]any{"type": "string", "description": "Six-digit A-share symbol."},
+			"market":    map[string]any{"type": "string", "enum": []string{"SH", "SZ"}},
+			"startDate": map[string]any{"type": "string", "description": "Optional YYYY-MM-DD inclusive start."},
+			"endDate":   map[string]any{"type": "string", "description": "Optional YYYY-MM-DD inclusive end."},
+			"limit":     map[string]any{"type": "integer", "minimum": 1, "maximum": 120},
+			"refresh":   map[string]any{"type": "boolean", "description": "Force one bounded refresh through configured primary/backup sources."},
+		}
+		required = []string{"symbol"}
+		additionalProperties = false
+	case mcpToolGetDecisionEvidence:
+		properties = map[string]any{
+			"symbol":         map[string]any{"type": "string", "description": "Six-digit instrument symbol."},
+			"asOf":           map[string]any{"type": "string", "description": "Optional YYYY-MM-DD point-in-time cutoff."},
+			"contextType":    map[string]any{"type": "string", "description": "Optional decision snapshot context type."},
+			"contextId":      map[string]any{"type": "string", "description": "Optional decision snapshot context id; requires contextType."},
+			"financialLimit": map[string]any{"type": "integer", "minimum": 1, "maximum": 30},
+			"eventLimit":     map[string]any{"type": "integer", "minimum": 1, "maximum": 50},
+		}
+		required = []string{"symbol"}
+		additionalProperties = false
+	case mcpToolGetMarketScanCandidates:
+		properties = map[string]any{
+			"runId":  map[string]any{"type": "string", "description": "Optional scan run id; latest run is used when omitted."},
+			"symbol": map[string]any{"type": "string", "description": "Optional exact symbol."},
+			"stage":  map[string]any{"type": "string", "description": "Optional candidate stage."},
+			"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
+		}
+		additionalProperties = false
 	case mcpToolGetNewsThread:
 		properties = map[string]any{
 			"threadId": map[string]any{"type": "string", "description": "Stable message-thread id."},
@@ -213,12 +281,24 @@ func stockAgentMCPToolDescription(name string) string {
 		return "Page through every message-thread change produced by one aggregation run. Use this for complete review coverage; semantic search cannot replace it."
 	case mcpToolListPortfolioSentinelImpactReviewScope:
 		return "Page through the immutable identifiers in one final impact-review scope. Read all five object types and report every identifier exactly once."
+	case mcpToolGetDailyBars:
+		return "Read bounded raw OHLCV daily bars. QFQ/HFQ rows are trend evidence only; use none for completed-session executable close levels."
+	case mcpToolGetMinuteBars:
+		return "Read bounded recent minute OHLCV and intraday main-flow bars collected by StockV2."
+	case mcpToolGetQuoteHistory:
+		return "Read bounded intraday quote snapshots including turnover, volume ratio, and size-bucket fund-flow fields."
+	case mcpToolGetFundFlowHistory:
+		return "Read bounded daily main-net-flow and turnover history; refreshes through configured sources only when needed and never exposes credentials."
+	case mcpToolGetDecisionEvidence:
+		return "Read deterministic decision gates, cached financial facts, corporate-event calendar, reference health, and aggregate fund-flow evidence for one symbol."
+	case mcpToolGetMarketScanCandidates:
+		return "Read bounded candidates and deterministic metrics from a market-scan run, including exclusion and decision reasons."
 	case mcpToolRecordExternalSource:
 		return "Record an external public source summary for the current opportunity discovery run. URL query and fragment are stripped."
 	case mcpToolRecordEvidence, mcpToolRecordCandidate, mcpToolUpdateCandidate:
 		return "Record or update opportunity discovery evidence/candidates for the current run."
 	default:
-		return "Query StockV2 internal project data for opportunity discovery."
+		return "Query bounded StockV2 internal project data for stock analysis."
 	}
 }
 
@@ -245,6 +325,18 @@ func (s *Service) mcpToolsCall(params json.RawMessage) (any, *mcpError) {
 		return s.mcpGetLatestQuotes(callParams.Arguments)
 	case mcpToolGetDailyBarsSummary:
 		return s.mcpGetDailyBarsSummary(callParams.Arguments)
+	case mcpToolGetDailyBars:
+		return s.mcpGetDailyBars(callParams.Arguments)
+	case mcpToolGetMinuteBars:
+		return s.mcpGetMinuteBars(callParams.Arguments)
+	case mcpToolGetQuoteHistory:
+		return s.mcpGetQuoteHistory(callParams.Arguments)
+	case mcpToolGetFundFlowHistory:
+		return s.mcpGetFundFlowHistory(callParams.Arguments)
+	case mcpToolGetDecisionEvidence:
+		return s.mcpGetDecisionEvidence(callParams.Arguments)
+	case mcpToolGetMarketScanCandidates:
+		return s.mcpGetMarketScanCandidates(callParams.Arguments)
 	case mcpToolSearchNewsEvents:
 		return s.mcpSearchNewsEvents(callParams.Arguments)
 	case mcpToolSemanticSearchNewsEvents:

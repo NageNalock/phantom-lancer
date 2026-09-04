@@ -57,6 +57,12 @@ func TestAgentMCPServerUsesLoopbackHTTP(t *testing.T) {
 		mcpToolSemanticSearchNewsThreads,
 		mcpToolGetNewsThread,
 		mcpToolListNewsContextChanges,
+		mcpToolGetDailyBars,
+		mcpToolGetMinuteBars,
+		mcpToolGetQuoteHistory,
+		mcpToolGetFundFlowHistory,
+		mcpToolGetDecisionEvidence,
+		mcpToolGetMarketScanCandidates,
 	} {
 		if !toolNames[want] {
 			t.Fatalf("tools = %+v, missing %s", decoded.Result.Tools, want)
@@ -66,6 +72,11 @@ func TestAgentMCPServerUsesLoopbackHTTP(t *testing.T) {
 		mcpToolSemanticSearchNewsThreads: "query",
 		mcpToolGetNewsThread:             "threadId",
 		mcpToolListNewsContextChanges:    "runId",
+		mcpToolGetDailyBars:              "symbol",
+		mcpToolGetMinuteBars:             "symbol",
+		mcpToolGetQuoteHistory:           "symbol",
+		mcpToolGetFundFlowHistory:        "symbol",
+		mcpToolGetDecisionEvidence:       "symbol",
 	} {
 		required, _ := toolSchemas[name]["required"].([]any)
 		if len(required) != 1 || required[0] != requiredField {

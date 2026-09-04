@@ -161,6 +161,26 @@ func (p *agentTaskPool) mcpToolsCall(params json.RawMessage) (any, *mcpError) {
 		return p.mcpGetLatestQuotes(callParams.Arguments)
 	case "stock_agent.get_daily_bars_summary":
 		return p.mcpGetDailyBarsSummary(callParams.Arguments)
+	case mcpToolGetDailyBars, mcpToolGetMinuteBars, mcpToolGetQuoteHistory,
+		mcpToolGetFundFlowHistory, mcpToolGetDecisionEvidence, mcpToolGetMarketScanCandidates:
+		svc, errResp := p.mcpService()
+		if errResp != nil {
+			return nil, errResp
+		}
+		switch callParams.Name {
+		case mcpToolGetDailyBars:
+			return svc.mcpGetDailyBars(callParams.Arguments)
+		case mcpToolGetMinuteBars:
+			return svc.mcpGetMinuteBars(callParams.Arguments)
+		case mcpToolGetQuoteHistory:
+			return svc.mcpGetQuoteHistory(callParams.Arguments)
+		case mcpToolGetFundFlowHistory:
+			return svc.mcpGetFundFlowHistory(callParams.Arguments)
+		case mcpToolGetDecisionEvidence:
+			return svc.mcpGetDecisionEvidence(callParams.Arguments)
+		default:
+			return svc.mcpGetMarketScanCandidates(callParams.Arguments)
+		}
 	case "stock_agent.search_news_events":
 		return p.mcpSearchNewsEvents(callParams.Arguments)
 	case "stock_agent.semantic_search_news_events":

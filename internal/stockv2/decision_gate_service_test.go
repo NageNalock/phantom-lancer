@@ -245,6 +245,29 @@ func TestDecisionFundFlowCacheRoundTripAndFreshness(t *testing.T) {
 	}
 }
 
+func TestDecisionFundFlowPointsRoundTripNewestBounded(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	store := svc.store
+	ctx := context.Background()
+	now := time.Now()
+	points := []opportunityFundFlowPoint{
+		{TradeDate: "2026-08-31", MainNet: 10, Turnover: 100},
+		{TradeDate: "2026-09-01", MainNet: -20, Turnover: 200},
+		{TradeDate: "2026-09-02", MainNet: -30, Turnover: 300},
+	}
+	if err := store.UpsertDecisionFundFlowPoints(ctx, "000977", "SZ", "fixture", points, now); err != nil {
+		t.Fatalf("upsert fund-flow points: %v", err)
+	}
+	items, err := store.ListDecisionFundFlowPoints(ctx, "000977", "", "", 2)
+	if err != nil {
+		t.Fatalf("list fund-flow points: %v", err)
+	}
+	if len(items) != 2 || items[0].TradeDate != "2026-09-01" || items[1].MainNet != -30 || items[1].Source != "fixture" {
+		t.Fatalf("items = %+v, want newest two in ascending order", items)
+	}
+}
+
 func TestDecisionGateMarksStockFundFlowHealthyAndETFNotApplicable(t *testing.T) {
 	store := newTestStore(t)
 	defer store.Close()
@@ -270,6 +293,78 @@ func TestDecisionGateMarksStockFundFlowHealthyAndETFNotApplicable(t *testing.T) 
 	etfSnapshot := svc.buildDecisionGateSnapshot(context.Background(), etf)
 	if got := decisionDataHealth(etfSnapshot.DataHealth, "fund_flow"); got.Status != DecisionHealthNotApplicable {
 		t.Fatalf("ETF flow health=%+v", got)
+	}
+}
+
+func TestDecisionBarFeaturesDetectPostBreakoutDistribution(t *testing.T) {
+	bars := make([]StockV2DailyBar, 40)
+	start := time.Date(2026, 7, 1, 0, 0, 0, 0, time.Local)
+	for i := range bars {
+		bars[i] = StockV2DailyBar{
+			Symbol: "000977", TradeDate: start.AddDate(0, 0, i).Format("2006-01-02"),
+			Open: 100, High: 102, Low: 99, Close: 101, PrevClose: 101,
+			Volume: 100, Amount: 1000, Source: "fixture", Adjusted: DailyBarAdjustedQFQ,
+		}
+	}
+	for i := 1; i < 36; i++ {
+		bars[i].PrevClose = bars[i-1].Close
+	}
+	bars[36].Open, bars[36].High, bars[36].Low, bars[36].Close = 102, 111, 102, 111
+	bars[36].PrevClose, bars[36].PctChange, bars[36].Volume, bars[36].Amount = 101, 9.9, 300, 3000
+	bars[37].Open, bars[37].High, bars[37].Low, bars[37].Close = 112, 113, 110, 111
+	bars[37].PrevClose, bars[37].PctChange, bars[37].Volume, bars[37].Amount = 111, 0, 220, 2200
+	bars[38].Open, bars[38].High, bars[38].Low, bars[38].Close = 113, 114, 111, 112
+	bars[38].PrevClose, bars[38].PctChange, bars[38].Volume, bars[38].Amount = 111, 0.9, 230, 2300
+	bars[39].Open, bars[39].High, bars[39].Low, bars[39].Close = 113, 114, 111, 111.5
+	bars[39].PrevClose, bars[39].PctChange, bars[39].Volume, bars[39].Amount = 112, -0.45, 240, 2400
+
+	features := calculateDecisionBarFeatures(bars)
+	if !features.Valid || !features.PostBreakoutDistribution || !features.PotentialSupplyPressure {
+		t.Fatalf("features = %+v, want post-breakout supply pressure", features)
+	}
+	if features.LowCloseDays3 != 3 || features.Return3Pct <= 0 || features.Return3Pct >= 1 || features.VolumeRatio3ToPrior <= 1.5 {
+		t.Fatalf("features = %+v, want bounded high-volume stall metrics", features)
+	}
+
+	for i := 36; i < len(bars); i++ {
+		bars[i].Open, bars[i].High, bars[i].Low, bars[i].Close = 101, 104, 100, 103.5
+		bars[i].PrevClose, bars[i].PctChange, bars[i].Volume, bars[i].Amount = 101, 2.4, 100, 1000
+	}
+	normal := calculateDecisionBarFeatures(bars)
+	if normal.PotentialSupplyPressure || normal.PostBreakoutDistribution || normal.HighVolumeStall {
+		t.Fatalf("normal features = %+v, want no supply-pressure flag", normal)
+	}
+}
+
+func TestDecisionGateBlocksNewRiskOnMarketStructurePressure(t *testing.T) {
+	svc, cleanup := newStrategyTestService(t)
+	defer cleanup()
+	bars := make([]StockV2DailyBar, 40)
+	start := time.Date(2026, 7, 1, 0, 0, 0, 0, time.Local)
+	for i := range bars {
+		bars[i] = StockV2DailyBar{Symbol: "000977", TradeDate: start.AddDate(0, 0, i).Format("2006-01-02"),
+			Open: 100, High: 102, Low: 99, Close: 101, PrevClose: 101, Volume: 100, Source: "fixture"}
+	}
+	bars[36] = StockV2DailyBar{Symbol: "000977", TradeDate: bars[36].TradeDate, Open: 102, High: 111, Low: 102, Close: 111, PrevClose: 101, PctChange: 9.9, Volume: 300, Source: "fixture"}
+	bars[37] = StockV2DailyBar{Symbol: "000977", TradeDate: bars[37].TradeDate, Open: 112, High: 113, Low: 110, Close: 111, PrevClose: 111, Volume: 220, Source: "fixture"}
+	bars[38] = StockV2DailyBar{Symbol: "000977", TradeDate: bars[38].TradeDate, Open: 113, High: 114, Low: 111, Close: 112, PrevClose: 111, PctChange: .9, Volume: 230, Source: "fixture"}
+	bars[39] = StockV2DailyBar{Symbol: "000977", TradeDate: bars[39].TradeDate, Open: 113, High: 114, Low: 111, Close: 111.5, PrevClose: 112, PctChange: -.45, Volume: 240, Source: "fixture"}
+
+	snapshot := svc.buildDecisionGateSnapshot(context.Background(), decisionGateBuildInput{
+		Symbol: "000977", Market: "SZ", Bars: bars, InstrumentType: InstrumentTypeExchangeFund,
+		BenchmarkAvailable: true, MarketRegime: "neutral",
+	})
+	if decisionActionAllowed(snapshot, StrategyGenerationRuleActionAddPosition) {
+		t.Fatalf("snapshot = %+v, want add_position blocked", snapshot)
+	}
+	found := false
+	for _, gate := range snapshot.Gates {
+		if gate.Key == DecisionGateMarketStructure {
+			found = gate.Status == DecisionGateStatusBlocked && len(gate.Reasons) > 0
+		}
+	}
+	if !found {
+		t.Fatalf("snapshot = %+v, want blocked market-structure gate", snapshot)
 	}
 }
 

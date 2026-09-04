@@ -23,7 +23,11 @@ type decisionGateBuildInput struct {
 	ThemeSignals         []string
 	FlowAvailable        bool
 	FlowNotApplicable    bool
+	MainNetInflow5       float64
+	MainNetInflow20      float64
+	MainNetInflow60      float64
 	MainFlowRatio20      float64
+	PositiveFlowDays20   int
 	FlowAsOf             string
 	FlowSource           string
 	FlowMessage          string
@@ -73,10 +77,20 @@ func (s *Service) buildDecisionGateSnapshot(ctx context.Context, input decisionG
 	snapshot.Metrics["latestCompletedTradeDate"] = features.TradeDate
 	snapshot.Metrics["return5Pct"] = features.Return5Pct
 	snapshot.Metrics["return20Pct"] = features.Return20Pct
+	snapshot.Metrics["return3Pct"] = features.Return3Pct
 	snapshot.Metrics["atr14"] = features.ATR14
 	snapshot.Metrics["atr14Pct"] = features.ATR14Pct
 	snapshot.Metrics["ma20"] = features.MA20
 	snapshot.Metrics["factorCluster"] = input.FactorCluster
+	snapshot.Metrics["volumeRatio3ToPrior"] = features.VolumeRatio3ToPrior
+	snapshot.Metrics["amountRatio3ToPrior"] = features.AmountRatio3ToPrior
+	snapshot.Metrics["latestCloseLocationPct"] = features.LatestCloseLocationPct
+	snapshot.Metrics["lowCloseDays3"] = features.LowCloseDays3
+	snapshot.Metrics["priorBreakoutTradeDate"] = features.PriorBreakoutTradeDate
+	snapshot.Metrics["priorBreakoutReturnPct"] = features.PriorBreakoutReturnPct
+	snapshot.Metrics["highVolumeStall"] = features.HighVolumeStall
+	snapshot.Metrics["postBreakoutDistribution"] = features.PostBreakoutDistribution
+	snapshot.Metrics["potentialSupplyPressure"] = features.PotentialSupplyPressure
 	barHealth := DecisionDataHealth{Key: "daily_bars", Label: "前复权日线", Required: true, AsOf: features.TradeDate, Source: features.Source, CheckedAt: now}
 	if !features.Valid {
 		barHealth.Status, barHealth.Message = DecisionHealthBlocked, "至少需要 21 根完整前复权日线计算 ATR 与趋势"
@@ -144,6 +158,32 @@ func (s *Service) buildDecisionGateSnapshot(ctx context.Context, input decisionG
 		}
 	}
 	snapshot.Gates = append(snapshot.Gates, volatility)
+
+	structure := DecisionGateResult{Key: DecisionGateMarketStructure, Label: "量价结构", Status: DecisionGateStatusPass,
+		Summary: "近期量价结构未触发承接转弱边界", Metrics: map[string]any{
+			"return3Pct": features.Return3Pct, "volumeRatio3ToPrior": features.VolumeRatio3ToPrior,
+			"amountRatio3ToPrior": features.AmountRatio3ToPrior, "latestCloseLocationPct": features.LatestCloseLocationPct,
+			"lowCloseDays3": features.LowCloseDays3, "priorBreakoutTradeDate": features.PriorBreakoutTradeDate,
+			"priorBreakoutReturnPct": features.PriorBreakoutReturnPct,
+			"highVolumeStall":        features.HighVolumeStall, "postBreakoutDistribution": features.PostBreakoutDistribution,
+		}}
+	if !features.Valid {
+		structure.Status, structure.Summary = DecisionGateStatusBlocked, "日线不足，无法验证近期量价结构"
+	} else if features.PotentialSupplyPressure {
+		structure.Status = DecisionGateStatusBlocked
+		structure.Summary = "近期出现放量滞涨、低位收盘或突破后承接转弱，禁止新增风险并复核减仓条件"
+		structure.Reasons = decisionMarketStructureReasons(features)
+	}
+	flowDivergence := input.FlowAvailable && input.MainNetInflow5 < 0 && features.Return3Pct >= 0
+	if flowDivergence {
+		structure.Metrics["priceFlowDivergence"] = true
+		structure.Reasons = append(structure.Reasons, fmt.Sprintf("近5日主力净流出 %.2f 亿元而3日价格未明显下跌", input.MainNetInflow5/1e8))
+		if structure.Status == DecisionGateStatusPass {
+			structure.Status = DecisionGateStatusDegraded
+			structure.Summary = "价格与近5日主动资金方向背离，需要原始序列复核"
+		}
+	}
+	snapshot.Gates = append(snapshot.Gates, structure)
 
 	catalyst := DecisionGateResult{Key: DecisionGateCatalystPricing, Label: "催化剂定价", Status: DecisionGateStatusNotApplicable, Summary: "没有把主题催化作为本次必要前提"}
 	if len(input.ThemeSignals) > 0 {
@@ -229,7 +269,11 @@ func (s *Service) buildDecisionGateSnapshot(ctx context.Context, input decisionG
 		flowHealth.Status, flowHealth.Message = DecisionHealthNotApplicable, "场内基金不适用个股主动资金流接口"
 	case input.FlowAvailable:
 		flowHealth.Status, flowHealth.Message = DecisionHealthHealthy, "资金流可用于交叉验证"
+		snapshot.Metrics["mainNetInflow5"] = input.MainNetInflow5
+		snapshot.Metrics["mainNetInflow20"] = input.MainNetInflow20
+		snapshot.Metrics["mainNetInflow60"] = input.MainNetInflow60
 		snapshot.Metrics["mainFlowRatio20"] = input.MainFlowRatio20
+		snapshot.Metrics["positiveFlowDays20"] = input.PositiveFlowDays20
 		snapshot.Metrics["fundFlowAsOf"] = input.FlowAsOf
 	default:
 		flowHealth.Status, flowHealth.Message = DecisionHealthDegraded,
@@ -266,16 +310,27 @@ func defaultBlockedDecisionGates(reason string) []DecisionGateResult {
 		{Key: DecisionGateCatalystPricing, Label: "催化剂定价", Status: DecisionGateStatusBlocked, Summary: reason},
 		{Key: DecisionGateFactorCrowding, Label: "因子拥挤", Status: DecisionGateStatusBlocked, Summary: reason},
 		{Key: DecisionGateVolatility, Label: "波动与 ATR 校准", Status: DecisionGateStatusBlocked, Summary: reason},
+		{Key: DecisionGateMarketStructure, Label: "量价结构", Status: DecisionGateStatusBlocked, Summary: reason},
 		{Key: DecisionGateEventCalendar, Label: "事件日历保护", Status: DecisionGateStatusBlocked, Summary: reason},
 	}
 }
 
 type decisionBarFeatures struct {
-	Valid                bool
-	TradeDate, Source    string
-	Close, MA20, ATR14   float64
-	ATR14Pct, Return5Pct float64
-	Return20Pct          float64
+	Valid                    bool
+	TradeDate, Source        string
+	Close, MA20, ATR14       float64
+	ATR14Pct, Return5Pct     float64
+	Return20Pct              float64
+	Return3Pct               float64
+	VolumeRatio3ToPrior      float64
+	AmountRatio3ToPrior      float64
+	LatestCloseLocationPct   float64
+	LowCloseDays3            int
+	PriorBreakoutTradeDate   string
+	PriorBreakoutReturnPct   float64
+	HighVolumeStall          bool
+	PostBreakoutDistribution bool
+	PotentialSupplyPressure  bool
 }
 
 func calculateDecisionBarFeatures(bars []StockV2DailyBar) decisionBarFeatures {
@@ -304,7 +359,76 @@ func calculateDecisionBarFeatures(bars []StockV2DailyBar) decisionBarFeatures {
 	}
 	features.ATR14 /= 14
 	features.ATR14Pct = features.ATR14 / close * 100
+	features.Return3Pct = pctReturn(close, bars[last-3].Close)
+	features.LatestCloseLocationPct = decisionCloseLocationPct(bars[last])
+	var recentVolume, priorVolume, recentAmount, priorAmount float64
+	for i := last - 2; i <= last; i++ {
+		recentVolume += bars[i].Volume
+		recentAmount += bars[i].Amount
+		if decisionCloseLocationPct(bars[i]) <= 35 {
+			features.LowCloseDays3++
+		}
+	}
+	for i := last - 19; i <= last-3; i++ {
+		priorVolume += bars[i].Volume
+		priorAmount += bars[i].Amount
+	}
+	features.VolumeRatio3ToPrior = decisionAverageRatio(recentVolume, 3, priorVolume, 17)
+	features.AmountRatio3ToPrior = decisionAverageRatio(recentAmount, 3, priorAmount, 17)
+	breakout := bars[last-3]
+	features.PriorBreakoutTradeDate = breakout.TradeDate
+	features.PriorBreakoutReturnPct = breakout.PctChange
+	// ponytail: these thresholds define a versioned evidence feature, not an
+	// owner tuning knob. Change them only with fixtures/backtests, not runtime config.
+	stallReturnLimit := math.Max(3, 0.75*features.ATR14Pct)
+	breakoutLimit := math.Max(7, 1.5*features.ATR14Pct)
+	features.HighVolumeStall = math.Abs(features.Return3Pct) <= stallReturnLimit &&
+		features.VolumeRatio3ToPrior >= 1.15 && features.LowCloseDays3 >= 2
+	features.PostBreakoutDistribution = breakout.PctChange >= breakoutLimit &&
+		features.Return3Pct <= stallReturnLimit && features.VolumeRatio3ToPrior >= 1 && features.LowCloseDays3 >= 2
+	features.PotentialSupplyPressure = features.HighVolumeStall || features.PostBreakoutDistribution
 	return features
+}
+
+func decisionAverageRatio(recentTotal float64, recentCount int, priorTotal float64, priorCount int) float64 {
+	if recentTotal <= 0 || priorTotal <= 0 || recentCount <= 0 || priorCount <= 0 {
+		return 0
+	}
+	return (recentTotal / float64(recentCount)) / (priorTotal / float64(priorCount))
+}
+
+func decisionCloseLocationPct(bar StockV2DailyBar) float64 {
+	if bar.High <= bar.Low {
+		return 50
+	}
+	return (bar.Close - bar.Low) / (bar.High - bar.Low) * 100
+}
+
+func marketStructureEvidence(features decisionBarFeatures) MarketStructureEvidence {
+	return MarketStructureEvidence{
+		WindowTradingDays: 3, Return3Pct: features.Return3Pct,
+		VolumeRatio3ToPrior: features.VolumeRatio3ToPrior, AmountRatio3ToPrior: features.AmountRatio3ToPrior,
+		LatestCloseLocationPct: features.LatestCloseLocationPct, LowCloseDays3: features.LowCloseDays3,
+		PriorBreakoutTradeDate: features.PriorBreakoutTradeDate, PriorBreakoutReturnPct: features.PriorBreakoutReturnPct,
+		HighVolumeStall: features.HighVolumeStall, PostBreakoutDistribution: features.PostBreakoutDistribution,
+		PotentialSupplyPressure: features.PotentialSupplyPressure,
+	}
+}
+
+func decisionMarketStructureReasons(features decisionBarFeatures) []string {
+	out := make([]string, 0, 3)
+	if features.PostBreakoutDistribution {
+		out = append(out, fmt.Sprintf("%s 上涨 %.1f%% 后3日仅 %.1f%%，且%d日收于日内区间下35%%",
+			features.PriorBreakoutTradeDate, features.PriorBreakoutReturnPct, features.Return3Pct, features.LowCloseDays3))
+	}
+	if features.HighVolumeStall {
+		out = append(out, fmt.Sprintf("近3日平均成交量为此前17日 %.2f 倍，但区间涨跌仅 %.1f%%",
+			features.VolumeRatio3ToPrior, features.Return3Pct))
+	}
+	if features.LatestCloseLocationPct <= 35 {
+		out = append(out, fmt.Sprintf("最近收盘位于当日振幅区间 %.1f%% 位置", features.LatestCloseLocationPct))
+	}
+	return out
 }
 
 func decisionVolatilityReasons(features decisionBarFeatures, limit5, limit20, upperBand float64) []string {
@@ -661,7 +785,7 @@ func ensureDecisionGateAuditFields(draft *StrategyGenerationDraft, snapshot Deci
 		return
 	}
 	basis := append([]string(nil), draft.DecisionBasis...)
-	basis = append(basis, "price", "factor", "event_calendar")
+	basis = append(basis, "price", "market_structure", "factor", "event_calendar")
 	for _, gate := range snapshot.Gates {
 		if gate.Key == DecisionGateCatalystPricing && gate.Status != DecisionGateStatusNotApplicable {
 			basis = append(basis, "catalyst")
@@ -772,7 +896,11 @@ func (s *Service) fillPortfolioSentinelDecisionGates(ctx context.Context, out *P
 		held                           bool
 		flowAvailable                  bool
 		flowNotApplicable              bool
+		mainNetInflow5                 float64
+		mainNetInflow20                float64
+		mainNetInflow60                float64
 		mainFlowRatio20                float64
+		positiveFlowDays20             int
 		flowAsOf, flowSource           string
 		flowMessage                    string
 		industry                       string
@@ -838,7 +966,11 @@ func (s *Service) fillPortfolioSentinelDecisionGates(ctx context.Context, out *P
 				InstrumentType: item.instrumentType, RequiredAsOf: requiredAsOf, EndDate: decisionDate})
 		} else if hasCached {
 			item.flowAvailable = cached.FundFlowAvailable
+			item.mainNetInflow5 = cached.MainNetInflow5
+			item.mainNetInflow20 = cached.MainNetInflow20
+			item.mainNetInflow60 = cached.MainNetInflow60
 			item.mainFlowRatio20 = cached.MainFlowRatio20
+			item.positiveFlowDays20 = cached.PositiveFlowDays20
 			item.flowAsOf, item.flowSource = cached.FundFlowAsOf, cached.FundFlowSource
 		}
 		for _, theme := range out.Themes {
@@ -858,7 +990,11 @@ func (s *Service) fillPortfolioSentinelDecisionGates(ctx context.Context, out *P
 		item := bySymbol[symbol]
 		item.flowAvailable = resolution.Available
 		item.flowNotApplicable = resolution.NotApplicable
+		item.mainNetInflow5 = resolution.Evidence.MainNetInflow5
+		item.mainNetInflow20 = resolution.Evidence.MainNetInflow20
+		item.mainNetInflow60 = resolution.Evidence.MainNetInflow60
 		item.mainFlowRatio20 = resolution.Evidence.MainFlowRatio20
+		item.positiveFlowDays20 = resolution.Evidence.PositiveFlowDays20
 		item.flowAsOf, item.flowSource = resolution.Evidence.AsOf, resolution.Evidence.Source
 		item.flowMessage = resolution.Message
 		bySymbol[symbol] = item
@@ -884,7 +1020,10 @@ func (s *Service) fillPortfolioSentinelDecisionGates(ctx context.Context, out *P
 			InstrumentType: item.instrumentType, DecisionDate: decisionDate, Bars: bars,
 			CompletedRawBar: s.decisionLatestRawBar(ctx, item.symbol, decisionDate), Quote: item.quote,
 			ThemeSignals: item.themeSignals, FlowAvailable: item.flowAvailable, FlowNotApplicable: item.flowNotApplicable,
-			MainFlowRatio20: item.mainFlowRatio20, FlowAsOf: item.flowAsOf, FlowSource: item.flowSource, FlowMessage: item.flowMessage,
+			MainNetInflow5: item.mainNetInflow5, MainNetInflow20: item.mainNetInflow20,
+			MainNetInflow60: item.mainNetInflow60, MainFlowRatio20: item.mainFlowRatio20,
+			PositiveFlowDays20: item.positiveFlowDays20, FlowAsOf: item.flowAsOf,
+			FlowSource: item.flowSource, FlowMessage: item.flowMessage,
 			MarketRegime: marketRegime, ReferenceHealth: reference[item.symbol],
 			BenchmarkAvailable: benchmarkOK, BenchmarkReturn20Pct: benchmarkReturn,
 			FactorCluster: clusters[item.symbol], FactorBlocked: crowded[item.symbol] != "", FactorReason: crowded[item.symbol],
